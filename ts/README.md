@@ -26,6 +26,18 @@ ts/
 └── docs/                memory-framework.md
 ```
 
+## 端点
+
+| 端点 | 用途 |
+|---|---|
+| `POST /api/v1/agent/chat` | 自有协议：SSE 事件 + 服务端下发 `conversationId` |
+| `POST /api/v1/llm/chat/completions` | **OpenAI 兼容**，给现有手机 App 用（零改动接入） |
+| `GET /healthz` | 健康检查（含当前是 mock 还是真实上游） |
+
+兼容端点内部走的还是 agent 路径（记忆、工具都在），不是无状态透传。
+会话 id 从请求内容推导：同一段对话首条用户消息相同 → 映射到同一个会话；
+要精确控制可以带 `X-Conversation-Id` 头。
+
 ## 跑起来
 
 ```bash

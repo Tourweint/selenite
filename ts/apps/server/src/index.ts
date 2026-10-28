@@ -15,6 +15,7 @@ import {
 } from "@lifediary/shared";
 import { createAuthMiddleware } from "./auth.ts";
 import { debugPage } from "./debug-page.js";
+import { mountOpenAiCompat } from "./openai-compat.ts";
 import { readLlmConfig, sessionExists, streamChat } from "./provider.js";
 
 // Node 20.12+ 自带 .env 加载；文件不存在时静默跳过，不让本地启动被环境文件卡住。
@@ -66,6 +67,9 @@ app.use(
 
 // 鉴权只作用于 API；调试页是静态 UI，真正的数据都要过 /api/v1
 app.use("/api/v1/*", createAuthMiddleware(process.env.AGENT_TOKEN?.trim() || null));
+
+// OpenAI 兼容端点：手机 App 已经在按这个协议说话，服务端适配比改客户端便宜
+mountOpenAiCompat(app, { memory });
 
 app.get("/", (c) => c.html(debugPage));
 
