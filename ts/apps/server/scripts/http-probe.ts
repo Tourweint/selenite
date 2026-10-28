@@ -28,7 +28,7 @@ function check(ok: boolean, label: string, detail = ""): void {
 	}
 }
 
-function startServer(): ChildProcess {
+function startServer(extraEnv: NodeJS.ProcessEnv = {}): ChildProcess {
 	const child = spawn(process.execPath, ["../../node_modules/tsx/dist/cli.mjs", "src/index.ts"], {
 		cwd: import.meta.dirname ? `${import.meta.dirname}/..` : ".",
 		env: {
@@ -40,6 +40,7 @@ function startServer(): ChildProcess {
 			AGENT_DB_PATH: DB,
 			MEMORY_DB_PATH: MEMORY_DB,
 			NODE_OPTIONS: "",
+			...extraEnv,
 		},
 		stdio: ["ignore", "pipe", "pipe"],
 	});
@@ -68,6 +69,8 @@ interface ChatResult {
 	text: string;
 	events: string[];
 	done: boolean;
+	/** SSE 里 error 事件的文本（撞工具上限走这条） */
+	error?: string;
 }
 
 async function chat(body: unknown): Promise<{ status: number; result: ChatResult }> {
@@ -85,11 +88,13 @@ async function chat(body: unknown): Promise<{ status: number; result: ChatResult
 		const payload = JSON.parse(line.slice(5).trim()) as {
 			type: string;
 			text?: string;
+			message?: string;
 			conversationId?: string;
 		};
 		result.events.push(payload.type);
 		if (payload.type === "start") result.conversationId = payload.conversationId;
 		if (payload.type === "delta") result.text += payload.text ?? "";
+		if (payload.type === "error") result.error = payload.message;
 		if (payload.type === "done") result.done = true;
 	}
 	return { status: response.status, result };
@@ -243,6 +248,27 @@ try {
 	});
 	check(resumed.status === 200, "重启后同一 conversationId 仍可用", String(resumed.status));
 	check(resumed.result.conversationId === externalId, "id 一致");
+
+	// ── 10. 工具回合上限 ──────────────────────────────
+	// 换一个"只会调工具、永远不收尾"的假模型，上限压到 3 轮，
+	// 验证撞上限之后既不无限跑，又能给出人话提示。
+	console.log("\n· 10. 工具调用撞上限");
+	server.kill();
+	await sleep(800);
+	server = startServer({ LLM_FAUX_TOOL: "recall", AGENT_MAX_TURNS: "3" });
+	await waitForReady();
+
+	const startedAt = Date.now();
+	const limited = await chat({ messages: [{ role: "user", content: "一直调工具试试" }] });
+	const costMs = Date.now() - startedAt;
+
+	check(limited.result.done, "流正常收尾（没有挂死）", `${costMs}ms`);
+	check(
+		limited.result.error === "工具调用已达到上限，请重新发送请求。",
+		"给出了约定的提示",
+		limited.result.error ?? "(没有 error 事件)",
+	);
+	check(costMs < 15_000, "没有无限跑下去", `${costMs}ms`);
 } finally {
 	server.kill();
 	await sleep(300);
