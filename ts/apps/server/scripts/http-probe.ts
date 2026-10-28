@@ -109,6 +109,7 @@ try {
 	const externalId = first.result.conversationId;
 	check(first.status === 200, "HTTP 200", String(first.status));
 	check(Boolean(externalId), "服务端下发了 conversationId", externalId);
+	if (!externalId) throw new Error("首轮对话没拿到 conversationId，后面的检查没法做");
 	check(first.result.done, "收到 done 事件");
 	check(first.result.text.includes("链路已通"), "拿到模型输出", first.result.text.slice(0, 20));
 
@@ -158,8 +159,79 @@ try {
 	};
 	check(afterFire.reminders.length === 0, "到点后不再挂在待触发里");
 
-	// ── 6. 重启后会话还在 ─────────────────────────────
-	console.log("\n· 6. 重启进程，历史还在");
+	// ── 6. 客户端跑掉，那一轮还得跑完 ─────────────────
+	console.log("\n· 6. 客户端中途断开，服务端继续跑完并落库");
+
+	const readMessages = async (id: string) =>
+		(
+			(await (await fetch(`${BASE}/api/v1/agent/chat/${id}/messages`)).json()) as {
+				messages: { role: string; text: string }[];
+			}
+		).messages;
+
+	const before = await readMessages(externalId);
+
+	const runaway = new AbortController();
+	const dropped = fetch(`${BASE}/api/v1/agent/chat`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({
+			conversationId: externalId,
+			messages: [{ role: "user", content: "关掉界面也别停" }],
+		}),
+		signal: runaway.signal,
+	}).then((response) => response.text());
+	await sleep(40);
+	runaway.abort();
+	await dropped.catch(() => undefined);
+
+	// 断线时对话还没生成完。接下来不给任何"继续"的指令，只是读——
+	// 如果服务端跟着 socket 一起 abort 了，这里永远等不到新的回答。
+	let after = before;
+	for (let attempt = 0; attempt < 40; attempt += 1) {
+		await sleep(100);
+		after = await readMessages(externalId);
+		if (after.length > before.length) break;
+	}
+	check(
+		after.length === before.length + 2,
+		"客户端断开后，服务端仍把这一轮跑完并入库",
+		`${before.length} → ${after.length} 条`,
+	);
+	check(
+		after.at(-1)?.role === "assistant",
+		"补上了那条回答",
+		after.at(-1)?.text.slice(0, 12),
+	);
+
+	// ── 7. 手动停止 ───────────────────────────────────
+	console.log("\n· 7. 手动停止（这是人的意图，不是断线的副作用）");
+	const stopped = await fetch(`${BASE}/api/v1/agent/chat/${externalId}/stop`, { method: "POST" });
+	check(stopped.status === 200, "停止接口可用", String(stopped.status));
+
+	const afterStop = await chat({
+		conversationId: externalId,
+		messages: [{ role: "user", content: "停完再聊一句" }],
+	});
+	check(afterStop.status === 200, "停完之后还能开新一轮", String(afterStop.status));
+
+	// ── 8. 读历史 ─────────────────────────────────────
+	console.log("\n· 8. 读历史接口");
+	const transcript = (await (
+		await fetch(`${BASE}/api/v1/agent/chat/${externalId}/messages`)
+	).json()) as { messages: { role: string; text: string }[] };
+	check(
+		transcript.messages.length >= 6,
+		"历史条数对得上（3 问 3 答）",
+		String(transcript.messages.length),
+	);
+	check(
+		transcript.messages.some((message) => message.role === "assistant" && message.text.length > 0),
+		"有模型回答",
+	);
+
+	// ── 9. 重启后会话还在 ─────────────────────────────
+	console.log("\n· 9. 重启进程，历史还在");
 	server.kill();
 	await sleep(800);
 	server = startServer();
