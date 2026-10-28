@@ -154,7 +154,9 @@ export async function* harnessStream(
 	input: StreamOptionsInput,
 ): AsyncGenerator<string, void, unknown> {
 	const systemPrompt = [
-		"你是一个私人日记助手。对方在记录自己的生活，回答要简短、自然、有温度，不要客套和说教。",
+		"你是一个个人助手，和一个具体的人长期相处。记录生活是你们最常一起做的事，" +
+			"但对方提出别的要求（查东西、整理、动手做事）时也要正常帮忙。" +
+			"回答简短、自然、有温度，不要客套和说教。",
 		input.systemContext,
 		...input.messages.filter((m) => m.role === "system").map((m) => m.content),
 	]

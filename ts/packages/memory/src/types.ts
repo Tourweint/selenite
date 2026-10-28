@@ -15,7 +15,7 @@
 export type MemoryScope =
 	/** 跨时间稳定的：用户是谁、偏好、长期目标 */
 	| { type: "global" }
-	/** 某一天：日记的核心单位，每天自然收敛 */
+	/** 某一天：记录类内容的基本单位，每天自然收敛 */
 	| { type: "day"; date: string } // YYYY-MM-DD
 	/** 某个主题：健康、工作、某个人 */
 	| { type: "topic"; name: string }

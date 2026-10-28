@@ -80,7 +80,7 @@ app.post("/api/v1/agent/chat", async (c) => {
   }
   const request = parsed.data;
 
-  // 记忆作用域：本会话 + 全局画像。日记场景以后会再加 day:<date>。
+  // 记忆作用域：本会话 + 全局画像。记录类内容以后会再按 day:<date> 归并。
   const conversationId = request.conversationId ?? "default";
   const scope: MemoryScope = { type: "session", id: conversationId };
   const lastUserText =
