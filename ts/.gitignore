@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.env
+.env.local
+*.log
+.expo/
+
+# 运行时数据：记忆库、会话 jsonl、探测脚本产物
+.data/

@@ -1,0 +1,19 @@
+{
+  "name": "lifediary-ts",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.26.1",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @lifediary/server dev",
+    "typecheck": "node node_modules/typescript/bin/tsc --noEmit",
+    "smoke": "pnpm --filter @lifediary/server smoke",
+    "probe": "pnpm --filter @lifediary/server probe",
+    "memtest": "pnpm --filter @lifediary/memory selftest"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"]
+  }
+}
