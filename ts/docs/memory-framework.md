@@ -16,30 +16,24 @@
 关键认知：**L2 是唯一真正的分歧点，L1 和 L3 各家方向都一致。** 所以下面四层流水线
 覆盖的是 L2，加上一小部分 L3（用 store 里的记忆当检索源，而不是翻原始消息）。
 
-### L1：已接（阈值触发），缺 overflow 兜底
+### L1：已接（交给 pi-durable，含 overflow 兜底）
 
-一个重要的结构性事实：**pi 的代码分两层，压缩的判断不在内核里。**
+2026-10-28 之后这一段不再自己写。以前是 vendored 一份 `pi-agent-core`，
+再照 `pi-coding-agent` 的 `_checkCompaction()` 抄一段"什么时候压"的策略
+（`maybeCompact()`），overflow 兜底一直空着。
 
-| 层 | 有什么 |
-|---|---|
-| core（`pi-ai` + `pi-agent-core`） | `compact()`、`shouldCompact()`、`calculateContextTokens()` —— 都是**工具** |
-| 应用层（`pi-coding-agent`） | `AgentSession._checkCompaction()` —— **什么时候用这些工具的策略** |
+现在整套在 `pi-durable` 里，`Harness.open(..., settings.compaction)` 直接就位：
 
-我们 vendored 的是 core，所以工具齐全但没有策略。这段策略是照 `_checkCompaction` 抄的，
-落在 `apps/server/src/provider.ts` 的 `maybeCompact()` 里：
+- 阈值触发（`reserveTokens` / `keepRecentTokens`）
+- **overflow 兜底**：provider 报超窗 → 压缩 → 自动重试一次
+- 后台预压（`backgroundTokens`），不卡住当前轮
+- 按模型覆盖（`modelOverrides`），32k 和 1M 窗口能共用一套配置
 
-```ts
-const tokens = calculateContextTokens(assistantMessage.usage);
-if (shouldCompact(tokens, model.contextWindow, DEFAULT_COMPACTION_SETTINGS)) {
-  await harness.waitForIdle();
-  await harness.compact();
-}
-```
+压缩作为一等的 durable 任务存在，进程挂了也能接着做；
+进展在 `pi.live.compactions`，失败记 `compactionFailure`。
 
-压缩在回复结束后异步执行，不阻塞用户；失败只记日志，不影响本轮对话。
-
-**还没抄的部分**：`overflow` 兜底 —— 请求超窗报错后，把错误消息从上下文里摘掉、
-压缩、自动重试一次。需要错误分类，等接真实模型拿到实际报错再做。
+**我们还需要自己做的**：按百炼各模型的实际窗口调 `modelOverrides`，
+以及决定"压缩摘要要不要进记忆库"—— 现在是纯上下文压缩，摘要不落 L2。
 
 ## 一句话
 
