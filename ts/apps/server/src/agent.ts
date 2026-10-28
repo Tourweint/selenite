@@ -1,0 +1,457 @@
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { contentText } from "@earendil-works/pi-ai";
+import {
+	createRegistry,
+	defineDoc,
+	defineExtension,
+	GenerationTask,
+	Harness,
+	hook,
+	ToolTask,
+	type Conversation,
+	type ConversationView,
+	type LiveState,
+	type SettledSubmissionRecord,
+	type ToolHookCall,
+} from "@earendil-works/pi-durable";
+import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
+import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
+import { CodingTools } from "@earendil-works/pi-durable/tools";
+import {
+	createMemoryEngine,
+	scopeKey,
+	type MemoryEngine,
+	type MemoryScope,
+} from "@lifediary/memory";
+import { readLlmConfig } from "./provider.ts";
+import { ReminderTask } from "./reminder.ts";
+import { createTools } from "./tools.ts";
+
+/**
+ * Agent 装配。
+ *
+ * 这里是整个服务端的重心，换到 durable 之后职责很清晰：
+ *
+ *   Harness           一个进程一个，持有一份 SQLite 存储
+ *   Conversation      一次聊天，历史/压缩/中断恢复都归它
+ *   Extension         工具 + 提示词 + 钩子 + 自定义任务的打包单位
+ *   watch()           唯一的数据出口 —— SSE 只是把它转成文本增量
+ *
+ * 我们**不自己维护 transcript、不自己拼消息、不自己做压缩**。
+ * 上一版这些全是手写的，还抄了 pi coding-agent 的阈值判断；
+ * 现在这些都在 durable 里，而且带 overflow 兜底和崩溃恢复。
+ *
+ * 跟 pi 的默认行为不一样的两处，都在这里显式写明：
+ *   - 工具闸门（beforeTool）：pi 没有权限系统，我们自己挂
+ *   - 记忆注入（beforeRequest）+ 记住/回忆/提醒三个工具
+ */
+
+const CTX = BACKGROUND_CONTEXT;
+
+const DB_PATH = process.env.AGENT_DB_PATH?.trim() || ".data/agent.sqlite";
+/** 工具读写文件的基准目录。默认是服务进程的工作目录 */
+const WORKDIR = process.env.AGENT_WORKDIR?.trim() || process.cwd();
+
+/** full = 全部放行；read-only = 只允许读（写文件/跑命令一律拦住） */
+const TOOL_POLICY = (process.env.AGENT_TOOL_POLICY?.trim() || "full").toLowerCase();
+/** 额外拉黑名单，逗号分隔，例如 "bash,powershell" */
+const BLOCKED_TOOLS = new Set(
+	(process.env.AGENT_BLOCKED_TOOLS ?? "")
+		.split(",")
+		.map((name) => name.trim())
+		.filter(Boolean),
+);
+
+const WRITE_TOOLS = new Set(["write", "edit", "bash", "powershell"]);
+
+const PERSONA = [
+	"你是一个个人助手，和一个具体的人长期相处。记录生活是你们最常一起做的事，",
+	"但对方提出别的要求（查东西、整理、动手做事）时也要正常帮忙。",
+	"回答简短、自然、有温度，不要客套和说教。",
+	"需要长期记住的事用 remember；想不起对方说过什么用 recall；要定时提醒用 set_reminder。",
+].join("");
+
+// ── 记忆 ─────────────────────────────────────────────────
+export const memoryEngine: MemoryEngine | null = (() => {
+	if (process.env.MEMORY_ENABLED === "false") return null;
+	try {
+		return createMemoryEngine({ dbPath: process.env.MEMORY_DB_PATH });
+	} catch (error) {
+		const detail = error instanceof Error ? error.message : String(error);
+		console.warn(`记忆库初始化失败，本次以无记忆运行: ${detail}`);
+		return null;
+	}
+})();
+
+/**
+ * 记忆作用域跟着**内部会话 id** 走。
+ *
+ * 它是存储自己发的、重开进程也不变，所以作用域稳定。
+ * 对外暴露的 conversationId 是另一个东西（下面 Chats 里的 uuid），
+ * 用它会把"客户端标识"和"存储主键"绑在一起，以后换实现就麻烦了。
+ */
+function scopeOf(conversationId: number): MemoryScope {
+	return { type: "session", id: String(conversationId) };
+}
+
+/** 召回失败绝不能让对话失败，所以一律吞掉并降级为空上下文。 */
+function recallContext(conversationId: number, text: string): string {
+	if (!memoryEngine || !text.trim()) return "";
+	try {
+		return memoryEngine.buildContext({
+			text,
+			scopes: ["global", scopeKey(scopeOf(conversationId))],
+		});
+	} catch (error) {
+		const detail = error instanceof Error ? error.message : String(error);
+		console.warn(`记忆召回失败，本轮不使用记忆: ${detail}`);
+		return "";
+	}
+}
+
+// ── 对外会话 id ↔ 内部会话 id ────────────────────────────
+/**
+ * durable 的会话 id 是存储自增的整数，猜得到。
+ * 所以对外的 id 仍是服务端生成的 uuid，存在这个 session 文档里做映射 ——
+ * "id 不可猜"这条性质必须保住，否则谁都能编一个数字去读别人的历史。
+ */
+const Chats = defineDoc<{ byExternal: Record<string, number> }>({
+	kind: "lifediary.chats",
+	version: 1,
+	scope: "session",
+	initial: () => ({ byExternal: {} }),
+	checkpointWhen: () => false,
+});
+
+// ── 装配 ─────────────────────────────────────────────────
+let opening: Promise<Harness> | null = null;
+
+export function getHarness(): Promise<Harness> {
+	opening ??= openHarness();
+	return opening;
+}
+
+async function openHarness(): Promise<Harness> {
+	const config = readLlmConfig();
+	if (!config) throw new Error("LLM 未配置：设 LLM_API_KEY 之后再启动");
+
+	mkdirSync(dirname(DB_PATH), { recursive: true });
+	const storage = await openNodeSqliteStorage(DB_PATH);
+
+	const registry = createRegistry();
+	// pi 自带的那套读写改跑命令：走执行环境，比我们自己写的完整
+	registry.install(CodingTools);
+	registry.install(
+		defineExtension({
+			name: "lifediary",
+			tools: createTools({ memory: memoryEngine, scopeOf }),
+			sections: [{ key: "persona", render: () => PERSONA }],
+			hooks: [
+				// 权限闸门：pi 本身不带，这是唯一能拦下工具调用的地方
+				hook(ToolTask, {
+					beforeTool: (call: ToolHookCall) => {
+						if (BLOCKED_TOOLS.has(call.name)) {
+							return { block: `工具 ${call.name} 已被配置禁用` };
+						}
+						if (TOOL_POLICY === "read-only" && WRITE_TOOLS.has(call.name)) {
+							return { block: "当前是只读模式（AGENT_TOOL_POLICY=read-only）" };
+						}
+						return undefined;
+					},
+				}),
+				// 记忆注入：放在每次请求前，才拿得到"这一轮用户说了什么"
+				hook(GenerationTask, {
+					beforeRequest: (request, api) => {
+						const lastUser = [...request.messages].reverse().find((m) => m.role === "user");
+						const query = lastUser ? contentText(lastUser.content) : "";
+						const context = recallContext(api.conversationId, query);
+						if (!context) return undefined;
+						return {
+							messages: [
+								{ role: "system" as const, content: context, timestamp: Date.now() },
+								...request.messages,
+							],
+						};
+					},
+				}),
+			],
+			tasks: [ReminderTask],
+		}),
+	);
+
+	const harness = await Harness.open(
+		storage,
+		{
+			models: config.models,
+			registry,
+			// 每个会话的执行环境：cwd 跟着会话走，以后要多目录也改这里
+			env: ({ cwd }) => new NodeExecutionEnv({ cwd: cwd ?? WORKDIR }),
+			onReport: (error, info) => {
+				const detail = error instanceof Error ? error.message : String(error);
+				console.warn(`[agent] ${info.type}: ${detail}`);
+			},
+		},
+		CTX,
+	);
+
+	// 上次进程没跑完的活（包括睡着的提醒）接着跑
+	harness.resume();
+	return harness;
+}
+
+export interface ResolvedChat {
+	conversation: Conversation;
+	/** 对外 id，客户端存的是这个 */
+	externalId: string;
+	/** 存储内部 id，记忆作用域用它（稳定，且不对客户端暴露） */
+	internalId: number;
+}
+
+/**
+ * 解析会话。`externalId` 为空表示新建。
+ * 返回 null 表示"这个 id 我没发过" —— 调用方据此回 404，而不是偷偷建一个新的。
+ */
+export async function openChat(externalId: string | undefined): Promise<ResolvedChat | null> {
+	const harness = await getHarness();
+	const config = readLlmConfig();
+	if (!config) return null;
+
+	if (!externalId) {
+		const id = crypto.randomUUID();
+		const conversation = await harness.createConversation(
+			{
+				ownership: { kind: "ownerless" },
+				agent: { model: config.model },
+				// 建会话和写映射在同一个提交里，不会出现"会话建好了但映射没写上"
+				init: async (tx, conversationId) => {
+					const chats = await tx.doc(Chats);
+					chats.byExternal[id] = Number(conversationId);
+				},
+			},
+			CTX,
+		);
+		return { conversation, externalId: id, internalId: Number(conversation.id) };
+	}
+
+	const chats = await harness.snapshot(Chats, CTX);
+	const internalId = chats?.byExternal?.[externalId];
+	if (internalId === undefined) return null;
+
+	const conversation = await harness.conversation(internalId as never, CTX);
+	return conversation ? { conversation, externalId, internalId } : null;
+}
+
+/**
+ * 有就打开，没有就用这个 id 新建。
+ *
+ * 只给 OpenAI 兼容端点用：那边的会话 id 是从首条用户消息哈希出来的，
+ * 客户端从没收到过服务端发 id，所以只能"第一次自动建"。
+ * `/api/v1/agent/chat` 不走这条，它必须严格要求 id 是发出去的。
+ */
+export async function openOrCreateChat(externalId: string): Promise<ResolvedChat> {
+	const existing = await openChat(externalId);
+	if (existing) return existing;
+
+	const harness = await getHarness();
+	const config = readLlmConfig();
+	if (!config) throw new Error("LLM 未配置");
+
+	const conversation = await harness.createConversation(
+		{
+			ownership: { kind: "ownerless" },
+			agent: { model: config.model },
+			init: async (tx, conversationId) => {
+				const chats = await tx.doc(Chats);
+				chats.byExternal[externalId] = Number(conversationId);
+			},
+		},
+		CTX,
+	);
+	return { conversation, externalId, internalId: Number(conversation.id) };
+}
+
+// ── 对话流 ───────────────────────────────────────────────
+export interface ChatStreamInput {
+	conversation: Conversation;
+	text: string;
+	/** 客户端重试时带同一个 requestId，就不会重复扣 token、重复写记忆 */
+	requestId?: string;
+	signal: AbortSignal;
+}
+
+/**
+ * 把一轮对话变成一段文本流。
+ *
+ * 数据源是 `watch()`：durable 把"正在生成的那半句话"作为已提交状态的一部分发布出来，
+ * 所以我们不需要订阅事件流、也不需要自己做节流重连 —— 断线重连拿到的就是当前状态。
+ */
+export async function* chatStream(input: ChatStreamInput): AsyncGenerator<string, void, unknown> {
+	const watch = await input.conversation.watch(CTX);
+
+	const queue: string[] = [];
+	let emitted = "";
+	let wake: (() => void) | null = null;
+
+	const notify = () => {
+		const resume = wake;
+		wake = null;
+		resume?.();
+	};
+
+	/** 只在"新文本是在旧文本后面续上"时才吐增量，避免重试/回退导致重复输出 */
+	const offer = (candidate: string) => {
+		if (!candidate || candidate.length <= emitted.length) return;
+		if (!candidate.startsWith(emitted)) return;
+		queue.push(candidate.slice(emitted.length));
+		emitted = candidate;
+		notify();
+	};
+
+	const partialOf = (value: ConversationView): string => {
+		const live = value.docs["pi.live"] as LiveState | undefined;
+		const message = live?.generation?.message as { content?: unknown } | undefined;
+		if (!message?.content) return "";
+		return contentText(message.content as Parameters<typeof contentText>[0]);
+	};
+
+	const abortRun = () => {
+		void input.conversation.abort(CTX).catch(() => undefined);
+	};
+	input.signal.addEventListener("abort", abortRun, { once: true });
+
+	// 用对象包着：闭包里赋值，TS 的收窄判断看不到
+	const outcome: { record?: SettledSubmissionRecord; error?: Error } = {};
+	let finished = false;
+
+	try {
+		watch.start(async (value) => {
+			offer(partialOf(value));
+		});
+		offer(partialOf(watch.value));
+
+		const submission = await input.conversation.submit(
+			{ type: "input", content: input.text, requestId: input.requestId },
+			CTX,
+		);
+
+		void submission
+			.wait(CTX)
+			.then((record) => {
+				outcome.record = record;
+			})
+			.catch((error: unknown) => {
+				outcome.error = error instanceof Error ? error : new Error(String(error));
+			})
+			.finally(() => {
+				finished = true;
+				notify();
+			});
+
+		while (!finished || queue.length > 0) {
+			if (queue.length === 0) {
+				await new Promise<void>((resolve) => {
+					wake = resolve;
+				});
+				continue;
+			}
+			const delta = queue.shift();
+			if (delta) yield delta;
+		}
+
+		if (outcome.error) throw outcome.error;
+
+		// 收尾：流式增量可能停在半句（节流或直接给了完整 answer），把尾巴补齐
+		if (outcome.record?.status === "done") {
+			offer(await answerText(input.conversation));
+			while (queue.length > 0) {
+				const delta = queue.shift();
+				if (delta) yield delta;
+			}
+		}
+	} finally {
+		input.signal.removeEventListener("abort", abortRun);
+		await watch.stop().catch(() => undefined);
+	}
+}
+
+/** 最后一轮模型回答的纯文本（用于补齐流式没吐完的部分） */
+async function answerText(conversation: Conversation): Promise<string> {
+	const view = await conversation.context(CTX);
+	for (let index = view.entries.length - 1; index >= 0; index -= 1) {
+		const entry = view.entries[index];
+		if (!entry || entry.kind !== "pi.assistant") continue;
+		const message = entry.model?.[0];
+		if (message) return contentText(message.content);
+	}
+	return "";
+}
+
+// ── 会话旁路能力 ─────────────────────────────────────────
+export interface UsageSummary {
+	models: {
+		model: string;
+		inputTokens: number;
+		outputTokens: number;
+		totalTokens: number;
+	}[];
+}
+
+export async function usageSummary(): Promise<UsageSummary> {
+	const harness = await getHarness();
+	const state = await harness.usage(CTX);
+	return {
+		models: Object.entries(state.models).map(([model, usage]) => ({
+			model,
+			inputTokens: usage.input ?? 0,
+			outputTokens: usage.output ?? 0,
+			totalTokens: usage.totalTokens ?? 0,
+		})),
+	};
+}
+
+export interface ReminderSummary {
+	id: number;
+	status: "pending" | "running" | "waiting" | "sleeping" | "completing" | "terminal";
+	text: string;
+	at: number;
+	until?: number;
+	conversationId: number;
+}
+
+/** 还没响的提醒（直接读 durable 的任务图，不另存一份） */
+export async function listReminders(): Promise<ReminderSummary[]> {
+	const harness = await getHarness();
+	const inspection = await harness.inspect(CTX);
+	return inspection.tasks
+		.filter((task) => task.record.kind === ReminderTask.definition.name)
+		.map((task) => {
+			const record = task.record as unknown as {
+				id: number;
+				input: { text: string; at: number };
+				conversationId: number;
+			};
+			return {
+				id: record.id,
+				status: task.state.kind === "sleeping" ? "sleeping" : task.state.kind === "blocked" ? "terminal" : "pending",
+				text: record.input.text,
+				at: record.input.at,
+				...(task.state.kind === "sleeping" ? { until: task.state.until } : {}),
+				conversationId: record.conversationId,
+			};
+		});
+}
+
+/** 主动加一个提醒（HTTP 端调用；Agent 自己加走 set_reminder 工具） */
+export async function addReminder(
+	chat: ResolvedChat,
+	input: { text: string; at: number },
+): Promise<number> {
+	const id = await chat.conversation.commit(
+		(tx) =>
+			tx.createTask(ReminderTask, input, { ownership: { kind: "conversation" } }),
+		CTX,
+	);
+	return Number(id);
+}

@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import { streamSSE } from "hono/streaming";
 import type { Hono } from "hono";
-import type { MemoryEngine } from "@lifediary/memory";
 import type { ChatMessage } from "@lifediary/shared";
-import { streamChat } from "./provider.ts";
+import { chatStream, openOrCreateChat } from "./agent.ts";
+import { readLlmConfig } from "./provider.ts";
 
 /**
  * OpenAI 兼容端点：`POST /api/v1/llm/chat/completions`
@@ -62,7 +62,7 @@ function conversationIdFor(rawHeader: string | undefined, messages: ChatMessage[
 	return `oa-${digest}`;
 }
 
-export function mountOpenAiCompat(app: Hono, deps: { memory: MemoryEngine | null }): void {
+export function mountOpenAiCompat(app: Hono): void {
 	app.post("/api/v1/llm/chat/completions", async (c) => {
 		const body = (await c.req.json().catch(() => null)) as OpenAiChatRequest | null;
 		if (!body || !Array.isArray(body.messages) || body.messages.length === 0) {
@@ -87,18 +87,29 @@ export function mountOpenAiCompat(app: Hono, deps: { memory: MemoryEngine | null
 			);
 		}
 
+		if (!readLlmConfig()) {
+			return c.json(
+				{ error: { message: "服务端未配置 LLM_API_KEY", type: "invalid_request_error" } },
+				503,
+			);
+		}
+
 		const conversationId = conversationIdFor(c.req.header("X-Conversation-Id"), messages);
 		const abort = new AbortController();
-		const systemContext = messages
-			.filter((m) => m.role === "system")
-			.map((m) => m.content)
-			.join("\n\n");
+		// OpenAI 协议是无状态的：每次带全量 messages，但我们只把最后一条用户消息交给会话。
+		// 更早的历史已经在服务端的 transcript 里了，重复塞进去反而会打架。
+		const lastUser = [...messages].reverse().find((message) => message.role === "user");
+		if (!lastUser) {
+			return c.json(
+				{ error: { message: "没有用户消息", type: "invalid_request_error" } },
+				400,
+			);
+		}
 
+		const chat = await openOrCreateChat(conversationId);
 		const input = {
-			messages,
-			conversationId,
-			systemContext: systemContext || undefined,
-			memory: deps.memory,
+			conversation: chat.conversation,
+			text: lastUser.content,
 			signal: abort.signal,
 		};
 
@@ -106,7 +117,7 @@ export function mountOpenAiCompat(app: Hono, deps: { memory: MemoryEngine | null
 		if (body.stream !== true) {
 			let text = "";
 			try {
-				for await (const delta of streamChat(input)) text += delta;
+				for await (const delta of chatStream(input)) text += delta;
 			} catch (error) {
 				const detail = error instanceof Error ? error.message : String(error);
 				return c.json({ error: { message: detail, type: "upstream_error" } }, 502);
@@ -129,7 +140,7 @@ export function mountOpenAiCompat(app: Hono, deps: { memory: MemoryEngine | null
 		return streamSSE(c, async (stream) => {
 			stream.onAbort(() => abort.abort());
 			try {
-				for await (const delta of streamChat(input)) {
+				for await (const delta of chatStream(input)) {
 					await stream.writeSSE({
 						data: JSON.stringify({
 							id: conversationId,
