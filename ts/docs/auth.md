@@ -82,10 +82,24 @@ App  ──Bearer <自己设的 AGENT_TOKEN>──▶  harness ──▶ 模型
 | 接 Telegram / IM 网关 | 第一档 + 网关侧自己的鉴权 |
 | 部署到 VPS、多用户、多设备 | 第二档 |
 
-## 和记忆绑定的一件事
+## 会话归属：拆成两层，做了第一层
 
-会话是**按 `conversationId` 落盘**的（`.data/sessions/*.jsonl`），而 `conversationId`
-目前由客户端传。**没有鉴权的现在，拿到 id 就能读到别人的历史。**
+会话按 `conversationId` 落盘（`.data/sessions/*.jsonl`）。如果 id 由客户端自己编，
+那"有令牌 + 猜得到 id"就能读别人的历史。所以分两层处理：
 
-接入第一档后，要么把 `conversationId` 和令牌绑定（一个令牌对应一个人），
-要么改用服务端生成的 id + 令牌校验归属。这件事要在做鉴权时一并做掉，别分开做。
+### 第一层：不可猜（✅ 已做）
+
+- **不带 `conversationId` = 新建会话**，服务端生成 UUID，通过 SSE 的 `start` 事件下发；
+- 带了 id 就必须是服务端发过的，否则 **404 `unknown_conversation`**；
+- 客户端之后一直带着这个 id 续话。
+
+这样 id 是随机的、不可推测，持有令牌也拿不到别人的 id。
+
+### 第二层：按身份归属（❌ 未做，属第二档）
+
+会话元数据里记 `ownerId`，请求时校验 `session.owner === 当前身份`。
+
+第一档里只有"是不是主人"这一个身份，**没有区分度** —— 校验 `owner === "self"`
+永远成立，做了等于没做。所以这层必须等身份里出现 `userId`（第二档 JWT 的 `subject`）。
+
+升级时要改的只有两处：`getSession()` 里写 owner，中间件里比对。协议不用动。

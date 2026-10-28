@@ -116,6 +116,20 @@ async function getSession(
 	return entry;
 }
 
+/**
+ * 会话是否存在（内存里的活会话，或磁盘上的 jsonl）。
+ *
+ * 用来挡住"客户端自己编一个 conversationId"：id 只能由服务端发出去，
+ * 别人猜不到，也就读不到别人的历史。这是会话归属的**第一层**。
+ *
+ * 第二层（多用户时校验 owner）要等身份里有 userId 才做得了。
+ */
+export async function sessionExists(conversationId: string): Promise<boolean> {
+	if (liveSessions.has(conversationId)) return true;
+	const metas = await repo.list({ cwd: CWD });
+	return metas.some((meta) => meta.id === conversationId);
+}
+
 export interface StreamOptionsInput {
 	messages: ChatMessage[];
 	conversationId: string;

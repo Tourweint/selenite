@@ -15,7 +15,7 @@ import {
 } from "@lifediary/shared";
 import { createAuthMiddleware } from "./auth.ts";
 import { debugPage } from "./debug-page.js";
-import { readLlmConfig, streamChat } from "./provider.js";
+import { readLlmConfig, sessionExists, streamChat } from "./provider.js";
 
 // Node 20.12+ 自带 .env 加载；文件不存在时静默跳过，不让本地启动被环境文件卡住。
 try {
@@ -84,8 +84,17 @@ app.post("/api/v1/agent/chat", async (c) => {
   }
   const request = parsed.data;
 
+  // 会话 id 只能由服务端发出去：不带 = 新建，带了就必须是发过的那个。
+  // 这样 id 不可猜，别人编不出来，也就读不到别人的历史。
+  // mock 模式不落盘会话，跳过存在性校验（否则第二轮必 404）。
+  const requestedId = request.conversationId;
+  const persisted = Boolean(readLlmConfig());
+  if (requestedId && persisted && !(await sessionExists(requestedId))) {
+    return c.json({ error: "unknown_conversation", message: "会话不存在，请不带 conversationId 新建" }, 404);
+  }
+  const conversationId = requestedId ?? crypto.randomUUID();
+
   // 记忆作用域：本会话 + 全局画像。记录类内容以后会再按 day:<date> 归并。
-  const conversationId = request.conversationId ?? "default";
   const scope: MemoryScope = { type: "session", id: conversationId };
   const lastUserText =
     [...request.messages].reverse().find((m) => m.role === "user")?.content ?? "";
@@ -103,7 +112,7 @@ app.post("/api/v1/agent/chat", async (c) => {
     let chars = 0;
     let finishReason: FinishReason = "stop";
 
-    await send({ type: "start", id });
+    await send({ type: "start", id, conversationId });
 
     try {
       for await (const text of streamChat({

@@ -89,6 +89,8 @@ export const debugPage = String.raw`<!doctype html>
   var history = [];
   // 令牌从 URL 带进来：http://127.0.0.1:8082/?token=xxx
   var token = new URLSearchParams(location.search).get('token') || '';
+  // 会话 id 由服务端在首轮返回，之后一直带着它续话
+  var conversationId = '';
 
   function addMessage(role, text) {
     var row = document.createElement('div');
@@ -126,7 +128,10 @@ export const debugPage = String.raw`<!doctype html>
           'Content-Type': 'application/json',
           'Authorization': 'Bearer ' + token
         },
-        body: JSON.stringify({ messages: history })
+        body: JSON.stringify({
+          conversationId: conversationId || undefined,
+          messages: history
+        })
       });
       if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + (await res.text()));
 
@@ -150,7 +155,9 @@ export const debugPage = String.raw`<!doctype html>
           if (!data) continue;
 
           var ev = JSON.parse(data);
-          if (ev.type === 'delta') {
+          if (ev.type === 'start') {
+            conversationId = ev.conversationId;
+          } else if (ev.type === 'delta') {
             acc += ev.text;
             bubble.textContent = acc;
             bubble.appendChild(caret);

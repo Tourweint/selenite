@@ -16,12 +16,17 @@ export type ChatMessage = z.infer<typeof ChatMessageSchema>;
 
 /**
  * 上行请求。这里**故意**没有 userId：身份走鉴权头，不信任客户端自报。
- * 也没有任何服务端状态句柄——上下文由客户端每轮带来（与 Java 版 D3 一致，
- * M1 落库时会明确改掉这一条）。
+ *
+ * `conversationId` 的语义：**不带 = 新建会话**，服务端生成并在 `start` 事件里返回；
+ * 带了就必须是服务端发过的 id，否则 404。这样做是为了让 id 不可猜 ——
+ * 否则谁都能编一个 id 去续别人的会话。
+ *
+ * 历史由服务端持有（pi 的 JsonlSessionRepo），客户端只发新消息。
+ * `messages` 保留是为了兼容旧客户端，实际只取最后一条 user。
  */
 export const ChatRequestSchema = z.object({
-  conversationId: z.string().min(1).max(128).optional(),
-  messages: z.array(ChatMessageSchema).min(1).max(200),
+	conversationId: z.string().min(1).max(128).optional(),
+	messages: z.array(ChatMessageSchema).min(1).max(200),
 });
 export type ChatRequest = z.infer<typeof ChatRequestSchema>;
 
@@ -33,7 +38,8 @@ export type FinishReason = z.infer<typeof FinishReasonSchema>;
  * 服务端加减字段时另一端会被编译器当场指出来——这就是共用一份定义的意义。
  */
 export type ChatEvent =
-  | { type: "start"; id: string }
+	/** conversationId 只在首轮有意义：新建会话时由服务端生成，客户端要存下来 */
+	| { type: "start"; id: string; conversationId: string }
   | { type: "delta"; text: string }
   | { type: "done"; id: string; finishReason: FinishReason }
   | { type: "error"; message: string };

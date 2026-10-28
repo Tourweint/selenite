@@ -25,6 +25,7 @@ async function chat(payload: ChatRequest): Promise<{
   events: ChatEvent[];
   text: string;
   elapsedMs: number;
+  conversationId: string;
 }> {
   const startedAt = Date.now();
   const response = await fetch(`${baseUrl}/api/v1/agent/chat`, {
@@ -50,16 +51,24 @@ async function chat(payload: ChatRequest): Promise<{
     }
   }
 
-  return { events, text, elapsedMs: Date.now() - startedAt };
+  const startEvent = events.find((event) => event.type === "start");
+  return {
+    events,
+    text,
+    elapsedMs: Date.now() - startedAt,
+    conversationId: startEvent?.type === "start" ? startEvent.conversationId : "",
+  };
 }
 
 async function main() {
   const health = await fetch(`${baseUrl}/healthz`)
     .then((r) => r.json())
     .catch(() => fail(`连不上 ${baseUrl}，先跑 pnpm dev`));
-  console.log(`· 服务在线，模式=${(health as { llm: string }).llm}`);
+  const llmMode = (health as { llm: string }).llm;
+  const persisted = llmMode === "upstream";
+  console.log(`· 服务在线，模式=${llmMode}`);
 
-  const { events, text, elapsedMs } = await chat({
+  const { events, text, elapsedMs, conversationId } = await chat({
     messages: [{ role: "user", content: "你好，测试一下链路" }],
   });
 
@@ -82,6 +91,33 @@ async function main() {
     `✓ start → ${deltas.length} deltas → done(stop) · ${elapsedMs}ms · ${text.length} 字`,
   );
   console.log(`  正文: ${text.slice(0, 80)}${text.length > 80 ? "…" : ""}`);
+
+  // 会话归属：id 只能由服务端发出去
+  if (!conversationId) fail("start 事件没有返回 conversationId");
+  console.log(`✓ 服务端下发会话 id：${conversationId.slice(0, 8)}…`);
+
+  const second = await chat({
+    conversationId,
+    messages: [{ role: "user", content: "还记得我刚才说什么吗" }],
+  });
+  if (!second.text.trim()) fail("带着会话 id 续话没有返回正文");
+  if (second.conversationId !== conversationId) fail("续话时会话 id 变了");
+  console.log(`✓ 带着会话 id 续话成功（${second.text.length} 字）`);
+
+  if (persisted) {
+    const bogus = await fetch(`${baseUrl}/api/v1/agent/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders },
+      body: JSON.stringify({
+        conversationId: "made-up-id",
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    });
+    if (bogus.status !== 404) fail(`编造的会话 id 应返回 404，实际 ${bogus.status}`);
+    console.log("✓ 编造的会话 id 被拒绝（404）");
+  } else {
+    console.log("· mock 模式不落盘会话，跳过 id 校验用例");
+  }
 
   // 校验 400 分支：空 messages 必须被契约挡在门外。
   const bad = await fetch(`${baseUrl}/api/v1/agent/chat`, {
