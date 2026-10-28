@@ -269,6 +269,18 @@ try {
 		limited.result.error ?? "(没有 error 事件)",
 	);
 	check(costMs < 15_000, "没有无限跑下去", `${costMs}ms`);
+
+	// 撞上限不是死路：再发一句就是新一轮，预算重新算
+	const afterLimit = await chat({
+		conversationId: limited.result.conversationId,
+		messages: [{ role: "user", content: "再来一轮" }],
+	});
+	check(afterLimit.status === 200, "撞上限之后还能继续发", String(afterLimit.status));
+	check(
+		afterLimit.result.done && afterLimit.result.events.includes("start"),
+		"新一轮拿到了新预算（不是直接被拒）",
+		afterLimit.result.events.join(","),
+	);
 } finally {
 	server.kill();
 	await sleep(300);

@@ -68,7 +68,12 @@ const BLOCKED_TOOLS = new Set(
 const WRITE_TOOLS = new Set(["write", "edit", "bash", "powershell"]);
 
 /**
- * 一轮对话最多几个工具回合。
+ * 一轮对话最多几个工具回合。默认 100（实测 30 偏紧，hermes 那类给到 300）。
+ *
+ * 定 100 的取舍：这个数字是"一次提问里，模型最多能来回几次"。
+ * 日常记录、查资料用不到 10 轮；真要做"整理一整个目录"这种活，
+ * 30 会半路截断，100 基本够；再高就要开始担心一次对话跑十几分钟没人管。
+ * 撞到上限不是死路——用户再发一句就是新一轮、预算重算。
  *
  * 为什么要有：客户端断开之后那一轮还在跑（见 chatStream），
  * 没人看着的时候如果模型陷进"读文件 → 又读文件"的循环，它会一直烧 token，
@@ -88,8 +93,8 @@ const WRITE_TOOLS = new Set(["write", "edit", "bash", "powershell"]);
  * 换句话说：这不是一个要长期维护的机制，是一次性的补丁。
  */
 const MAX_TURNS = (() => {
-	const raw = Number(process.env.AGENT_MAX_TURNS ?? 30);
-	if (!Number.isFinite(raw) || raw < 0) return 30;
+	const raw = Number(process.env.AGENT_MAX_TURNS ?? 100);
+	if (!Number.isFinite(raw) || raw < 0) return 100;
 	return Math.floor(raw);
 })();
 
