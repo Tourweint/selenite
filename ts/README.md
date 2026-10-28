@@ -28,7 +28,7 @@
 |---|---|---|
 | 会话存储 | 自己维护 jsonl | SQLite（`node:sqlite`，零三方 DB 依赖） |
 | 崩溃恢复 | 无 | 每个任务原子提交，重开进程接着跑 |
-| 流式出口 | 订阅事件流自己桥 | `watch()` 拿已提交状态，断线重连不丢 |
+| 流式出口 | 订阅事件流自己桥，断线即中止 | `watch()` 拿已提交状态；断线只是没人看，活跑完才落库 |
 | 客户端重试 | 会重复扣 token | `requestId` 幂等 |
 | 压缩 | 抄来的阈值判断，overflow 没做 | 阈值 + overflow 兜底 + 后台预压 |
 | 定时任务 | 无 | `sleepUntil()`，睡眠状态落库 |
@@ -58,10 +58,26 @@ ts/
 | 端点 | 用途 |
 |---|---|
 | `POST /api/v1/agent/chat` | 自有协议：SSE 事件 + 服务端下发 `conversationId` |
+| `GET /api/v1/agent/chat/:id/messages` | 读历史（客户端关掉界面回来后靠它补） |
+| `POST /api/v1/agent/chat/:id/stop` | 手动停止这一轮 |
 | `POST /api/v1/llm/chat/completions` | **OpenAI 兼容**，给现有手机 App 用（零改动接入） |
 | `GET /api/v1/agent/usage` | 按模型累计的 token |
 | `GET/POST /api/v1/agent/reminders` | 待触发的提醒 / 直接加一个提醒 |
 | `GET /healthz` | 健康检查（含当前是 mock 还是真实上游） |
+
+### 关掉界面，活照样跑完
+
+这不是一句口号，是三条具体的实现约定（都在 `src/agent.ts` / `src/index.ts`）：
+
+1. **客户端断开不 abort。** 以前是 `stream.onAbort(() => conversation.abort())`，
+   等于把"网线断了"当成"用户要取消"，一个跑了一半的 `bash` 就被掐掉。
+   durable 的语义本来就是对的（取消等待 ≠ 取消工作），那根线是我们自己多接的。
+2. **记忆抽取挂在轮次上，不挂在连接上。** `chatStream` 的 `onSettled` 回调触发抽取，
+   所以关掉界面之后跑完的那一轮，记忆照样写。
+3. **想真停要显式停。** `POST .../stop` 才走 `abort()`。
+
+`http-probe` 的第 6 项专门验这件事：发一半就掐掉连接，然后只读不催，
+历史里必须多出"一问一答"。
 
 兼容端点内部走的还是 agent 路径（记忆、工具都在），不是无状态透传。
 会话 id 从请求内容推导：同一段对话首条用户消息相同 → 映射到同一个会话；
