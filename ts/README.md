@@ -50,9 +50,20 @@ cp apps/server/.env.example apps/server/.env
 ```bash
 pnpm typecheck    # 全部包一次过（含 vendored pi）
 pnpm probe        # 内核可用：Agent 循环 + 事件桥接 + 压缩阈值（无需 key）
+pnpm tools-probe  # 工具链路：模型调用 → 执行 → 结果回灌（无需 key）
 pnpm memtest      # 记忆四层串跑：抽取→巩固→召回→注入
 pnpm smoke        # 端到端 SSE（需先 pnpm dev）
 ```
+
+## 工具
+
+`apps/server/src/tools.ts`，6 个：`read_file` / `list_dir` / `write_file` /
+`run_command` / `remember` / `recall`。
+
+接口照 pi 的 `AgentTool`，但**实现是自己的** —— pi 那套 `coding-agent/core/tools/`
+和 TUI 深度耦合（连主题和按键提示都 import 了），搬不过来。
+
+**没有权限闸门**，和 pi 一致：以当前用户权限运行。风险见根 README「工具与信任」。
 
 ## 当前边界
 
@@ -60,12 +71,11 @@ pnpm smoke        # 端到端 SSE（需先 pnpm dev）
   **暴露到局域网或公网前必须补** —— 否则拿到 `conversationId` 就能读别人的历史。
 - **会话落盘**：历史存在 `.data/sessions/*.jsonl`，重启可恢复。
 - **压缩只有阈值触发**：overflow 兜底（超窗报错 → 压缩 → 重试）还没做。
-- **没有工具**：这是有意的，见根 README「工具与信任」——先有闸门再给能力。
 - **记忆只有框架**：四层流水线通了，但抽取是规则版、巩固只做去重、召回是加权打分。
 - **日志不含对话内容**：只记条数 / 字数 / 耗时。
 
 ## 下一步
 
 1. 会话管理：列出 / 重命名 / 删除（照 `coding-agent` 的 `session-manager`）
-2. 工具层：注册 + 权限闸门，先只给只读工具
-3. 记忆的召回质量：FTS5 + 中文分词（现在是 `LIKE`，中文近乎失效）
+2. 记忆的召回质量：FTS5 + 中文分词（现在是 `LIKE`，中文近乎失效）
+3. 工具自检：`run_command` 的输出裁剪、`write_file` 的 diff 展示
