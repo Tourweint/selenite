@@ -27,8 +27,33 @@ export type ChatMessage = z.infer<typeof ChatMessageSchema>;
 export const ChatRequestSchema = z.object({
 	conversationId: z.string().min(1).max(128).optional(),
 	messages: z.array(ChatMessageSchema).min(1).max(200),
+	/**
+	 * 重试标识：同一条用户消息重发时带同一个值，服务端会认成同一轮，
+	 * 不会重复扣 token、也不会把同一段话记两遍记忆。弱网下很有用。
+	 */
+	requestId: z.string().min(1).max(128).optional(),
 });
 export type ChatRequest = z.infer<typeof ChatRequestSchema>;
+
+/**
+ * 读历史接口的一条记录。
+ *
+ * 为什么需要它：一轮对话现在**可以在客户端关掉之后继续跑完**，
+ * 所以客户端重新打开时必须能把结果拉回来，而不能只依赖自己收到过什么。
+ */
+export const TranscriptMessageSchema = z.object({
+  role: z.enum(["user", "assistant"]),
+  text: z.string(),
+  /** epoch 毫秒 */
+  at: z.number(),
+});
+export type TranscriptMessage = z.infer<typeof TranscriptMessageSchema>;
+
+export const ChatTranscriptSchema = z.object({
+  conversationId: z.string(),
+  messages: z.array(TranscriptMessageSchema),
+});
+export type ChatTranscript = z.infer<typeof ChatTranscriptSchema>;
 
 export const FinishReasonSchema = z.enum(["stop", "length", "aborted", "error"]);
 export type FinishReason = z.infer<typeof FinishReasonSchema>;

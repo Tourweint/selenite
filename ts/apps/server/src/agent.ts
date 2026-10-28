@@ -278,14 +278,26 @@ export interface ChatStreamInput {
 	text: string;
 	/** 客户端重试时带同一个 requestId，就不会重复扣 token、重复写记忆 */
 	requestId?: string;
-	signal: AbortSignal;
+	/**
+	 * 这一轮**真正结束**时回调（不是"这条连接结束"）。
+	 *
+	 * 关键区别：客户端关掉界面 / 断网，只是没人看这条流了，
+	 * 那一轮还在服务端跑；它跑完才该触发记忆抽取、才该算数。
+	 * 挂在这个回调上，就不会因为"用户关了个窗口"而漏记一轮对话。
+	 */
+	onSettled?: (record: SettledSubmissionRecord) => void;
 }
 
 /**
  * 把一轮对话变成一段文本流。
  *
- * 数据源是 `watch()`：durable 把"正在生成的那半句话"作为已提交状态的一部分发布出来，
- * 所以我们不需要订阅事件流、也不需要自己做节流重连 —— 断线重连拿到的就是当前状态。
+ * 数据源是 `watch()`：durable 把"正在生成的那半句话"作为已提交状态的一部分发布出来。
+ *
+ * 这里**故意不接客户端的中断信号**。以前的写法是"socket 一断就 abort()"，
+ * 那是把"传输断了"翻译成"用户要取消"，于是一个跑了一半的工具调用会被掐掉。
+ * durable 的语义本来是对的（取消等待 ≠ 取消工作），是我们多接了一根线。
+ *
+ * 真要停，走 `stopChat()`：那是人的明确意图，不是 socket 的副作用。
  */
 export async function* chatStream(input: ChatStreamInput): AsyncGenerator<string, void, unknown> {
 	const watch = await input.conversation.watch(CTX);
@@ -316,11 +328,6 @@ export async function* chatStream(input: ChatStreamInput): AsyncGenerator<string
 		return contentText(message.content as Parameters<typeof contentText>[0]);
 	};
 
-	const abortRun = () => {
-		void input.conversation.abort(CTX).catch(() => undefined);
-	};
-	input.signal.addEventListener("abort", abortRun, { once: true });
-
 	// 用对象包着：闭包里赋值，TS 的收窄判断看不到
 	const outcome: { record?: SettledSubmissionRecord; error?: Error } = {};
 	let finished = false;
@@ -340,6 +347,14 @@ export async function* chatStream(input: ChatStreamInput): AsyncGenerator<string
 			.wait(CTX)
 			.then((record) => {
 				outcome.record = record;
+				// 这一轮尘埃落定：即便上面的流早被客户端关掉了，这里照样会跑
+				try {
+					input.onSettled?.(record);
+				} catch (error) {
+					console.warn(
+						`[agent] onSettled 回调失败: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				}
 			})
 			.catch((error: unknown) => {
 				outcome.error = error instanceof Error ? error : new Error(String(error));
@@ -371,9 +386,56 @@ export async function* chatStream(input: ChatStreamInput): AsyncGenerator<string
 			}
 		}
 	} finally {
-		input.signal.removeEventListener("abort", abortRun);
+		// 只关掉"看"这件事，不碰正在跑的那一轮
 		await watch.stop().catch(() => undefined);
 	}
+}
+
+/**
+ * 手动停止当前这一轮。
+ *
+ * 跟"客户端断开"是两件事：这是人的明确意图，所以走 `abort()`，
+ * 排队的输入会撤回、当前的任务会被撤销。之后再说一句话就是新一轮。
+ */
+export async function stopChat(chat: ResolvedChat): Promise<void> {
+	await chat.conversation.abort(CTX);
+}
+
+export interface TranscriptMessage {
+	role: "user" | "assistant";
+	text: string;
+	/** 消息时间，epoch 毫秒 */
+	at: number;
+}
+
+/**
+ * 读会话已有的对话记录。
+ *
+ * 存在的理由：一轮对话现在可以在**没有客户端看着**的情况下跑完（见 chatStream），
+ * 所以客户端下次打开必须能把结果拉回来，否则"关掉界面它照样跑完"对用户没有意义。
+ * 只取模型看得见的那部分（用户说了什么、模型答了什么），工具调用细节不在这里。
+ */
+export async function readTranscript(
+	chat: ResolvedChat,
+	limit = 50,
+): Promise<TranscriptMessage[]> {
+	const view = await chat.conversation.context(CTX);
+	const messages: TranscriptMessage[] = [];
+
+	for (const entry of view.entries) {
+		if (entry.kind !== "pi.user" && entry.kind !== "pi.assistant") continue;
+		const message = entry.model?.[0];
+		if (!message) continue;
+		const text = contentText(message.content).trim();
+		if (!text) continue;
+		messages.push({
+			role: entry.kind === "pi.user" ? "user" : "assistant",
+			text,
+			at: typeof message.timestamp === "number" ? message.timestamp : 0,
+		});
+	}
+
+	return limit > 0 ? messages.slice(-limit) : messages;
 }
 
 /** 最后一轮模型回答的纯文本（用于补齐流式没吐完的部分） */

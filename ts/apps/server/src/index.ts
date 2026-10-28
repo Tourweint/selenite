@@ -14,6 +14,8 @@ import {
   listReminders,
   memoryEngine,
   openChat,
+  readTranscript,
+  stopChat,
   usageSummary,
 } from "./agent.ts";
 import { createAuthMiddleware } from "./auth.ts";
@@ -86,15 +88,14 @@ app.post("/api/v1/agent/chat", async (c) => {
 
   return streamSSE(c, async (stream) => {
     const id = crypto.randomUUID();
-    const abort = new AbortController();
-    stream.onAbort(() => abort.abort());
 
     const send = (event: ChatEvent) =>
       stream.writeSSE({ data: JSON.stringify(event) });
 
     const startedAt = Date.now();
     let chars = 0;
-    let finishReason: FinishReason = "stop";
+    // 这里只说"这条流怎么结束的"，不代表那一轮怎么结束的
+    let streamEnd: FinishReason = "stop";
 
     await send({ type: "start", id, conversationId: chat.externalId });
 
@@ -102,17 +103,38 @@ app.post("/api/v1/agent/chat", async (c) => {
       for await (const text of chatStream({
         conversation: chat.conversation,
         text: lastUserText,
-        signal: abort.signal,
+        requestId: request.requestId,
+        // 记忆挂在"这一轮真的结束"上，不挂在"这条流结束"上：
+        // 用户关掉界面之后它还会跑完，那一轮的记忆照样得写。
+        onSettled: (record) => {
+          if (!memoryEngine || record.status !== "done") return;
+          // 刻意不 await —— 记忆写慢了不该拖慢任何东西
+          void memoryEngine
+            .ingestTurn(request.messages, scope)
+            .then((result) => {
+              if (result.added.length > 0 || result.reinforced.length > 0) {
+                console.log(
+                  `[chat ${id}] memory +${result.added.length} ~${result.reinforced.length}`,
+                );
+              }
+            })
+            .catch((error: unknown) => {
+              const detail = error instanceof Error ? error.message : String(error);
+              console.error(`[chat ${id}] 记忆写入失败: ${detail}`);
+            });
+        },
       })) {
-        if (abort.signal.aborted) {
-          finishReason = "aborted";
+        // 客户端走了：只停止推送。那一轮还在服务端跑完并落库，
+        // 下次打开用 GET .../messages 拿回来。
+        if (stream.aborted) {
+          streamEnd = "aborted";
           break;
         }
         chars += text.length;
         await send({ type: "delta", text });
       }
     } catch (error) {
-      finishReason = "error";
+      streamEnd = "error";
       const detail = error instanceof Error ? error.message : String(error);
       // 原始错误只进服务端日志：里面可能带上游地址甚至 key 片段。
       console.error(`[chat ${id}] 生成失败: ${detail}`);
@@ -121,31 +143,46 @@ app.post("/api/v1/agent/chat", async (c) => {
       );
     }
 
-    // 客户端先断开时这里会抛，属正常路径，吞掉。
-    await send({ type: "done", id, finishReason }).catch(() => undefined);
-
-    // 一轮结束：抽取 + 巩固。刻意不 await —— 记忆写慢了不该让回复变慢。
-    if (memoryEngine && finishReason !== "aborted") {
-      void memoryEngine
-        .ingestTurn(request.messages, scope)
-        .then((result) => {
-          if (result.added.length > 0 || result.reinforced.length > 0) {
-            console.log(
-              `[chat ${id}] memory +${result.added.length} ~${result.reinforced.length}`,
-            );
-          }
-        })
-        .catch((error: unknown) => {
-          const detail = error instanceof Error ? error.message : String(error);
-          console.error(`[chat ${id}] 记忆写入失败: ${detail}`);
-        });
-    }
+    // 客户端已断开时这里会抛，属正常路径，吞掉。
+    await send({ type: "done", id, finishReason: streamEnd }).catch(() => undefined);
 
     // 只记行数/字数/耗时 —— 日志里绝不出现对话内容。
     console.log(
-      `[chat ${id}] finish=${finishReason} chars=${chars} ms=${Date.now() - startedAt}`,
+      `[chat ${id}] stream=${streamEnd} chars=${chars} ms=${Date.now() - startedAt}`,
     );
   });
+});
+
+/**
+ * 读会话历史。
+ *
+ * 一轮对话现在可以在没有客户端看着的情况下跑完，所以客户端下次打开必须能把结果拉回来 ——
+ * 否则"关掉界面它照样跑完"对用户没有意义。
+ */
+app.get("/api/v1/agent/chat/:conversationId/messages", async (c) => {
+  if (!readLlmConfig()) return c.json({ messages: [] });
+
+  const chat = await openChat(c.req.param("conversationId"));
+  if (!chat) return c.json({ error: "unknown_conversation" }, 404);
+
+  const limit = Number(c.req.query("limit") ?? 50);
+  const messages = await readTranscript(chat, Number.isFinite(limit) ? limit : 50);
+  return c.json({ conversationId: chat.externalId, messages });
+});
+
+/**
+ * 手动停止当前这一轮。
+ *
+ * 跟"客户端断开"是两件事：这是人的明确意图。停了之后再说一句话就是新一轮。
+ */
+app.post("/api/v1/agent/chat/:conversationId/stop", async (c) => {
+  if (!readLlmConfig()) return c.json({ ok: false, reason: "llm_not_configured" }, 503);
+
+  const chat = await openChat(c.req.param("conversationId"));
+  if (!chat) return c.json({ error: "unknown_conversation" }, 404);
+
+  await stopChat(chat);
+  return c.json({ ok: true, conversationId: chat.externalId });
 });
 
 /** 用量与花费：按模型累计，来自 durable 自己维护的 pi.usage */
