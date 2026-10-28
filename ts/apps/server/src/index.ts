@@ -13,6 +13,7 @@ import {
   type ChatEvent,
   type FinishReason,
 } from "@lifediary/shared";
+import { createAuthMiddleware } from "./auth.ts";
 import { debugPage } from "./debug-page.js";
 import { readLlmConfig, streamChat } from "./provider.js";
 
@@ -62,6 +63,9 @@ app.use(
     allowHeaders: ["Content-Type", "Authorization"],
   }),
 );
+
+// 鉴权只作用于 API；调试页是静态 UI，真正的数据都要过 /api/v1
+app.use("/api/v1/*", createAuthMiddleware(process.env.AGENT_TOKEN?.trim() || null));
 
 app.get("/", (c) => c.html(debugPage));
 
@@ -157,7 +161,11 @@ const port = Number(process.env.PORT ?? 8082);
 
 serve({ fetch: app.fetch, port }, (info) => {
   const mode = readLlmConfig() ? "真实上游" : "mock（未配置 LLM_API_KEY）";
+  const auth = process.env.AGENT_TOKEN?.trim()
+    ? "令牌校验开启"
+    : "未配 AGENT_TOKEN —— 仅本机可访问";
   console.log(`lifediary-ts server → http://127.0.0.1:${info.port}`);
   console.log(`  调试页: http://127.0.0.1:${info.port}/`);
   console.log(`  模式  : ${mode}`);
+  console.log(`  鉴权  : ${auth}`);
 });

@@ -87,6 +87,8 @@ export const debugPage = String.raw`<!doctype html>
   var input = document.getElementById('input');
   var send = document.getElementById('send');
   var history = [];
+  // 令牌从 URL 带进来：http://127.0.0.1:8082/?token=xxx
+  var token = new URLSearchParams(location.search).get('token') || '';
 
   function addMessage(role, text) {
     var row = document.createElement('div');
@@ -120,7 +122,10 @@ export const debugPage = String.raw`<!doctype html>
     try {
       var res = await fetch('/api/v1/agent/chat', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ' + token
+        },
         body: JSON.stringify({ messages: history })
       });
       if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + (await res.text()));

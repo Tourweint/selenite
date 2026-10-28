@@ -11,6 +11,10 @@ import {
 } from "@lifediary/shared";
 
 const baseUrl = process.env.SMOKE_BASE_URL ?? "http://127.0.0.1:8082";
+/** 配了 AGENT_TOKEN 的服务端，冒烟也要带令牌 */
+const authHeaders: Record<string, string> = process.env.AGENT_TOKEN?.trim()
+	? { Authorization: `Bearer ${process.env.AGENT_TOKEN.trim()}` }
+	: {};
 
 function fail(message: string): never {
   console.error(`✗ ${message}`);
@@ -25,7 +29,7 @@ async function chat(payload: ChatRequest): Promise<{
   const startedAt = Date.now();
   const response = await fetch(`${baseUrl}/api/v1/agent/chat`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders },
     body: JSON.stringify(payload),
   });
 
@@ -82,7 +86,7 @@ async function main() {
   // 校验 400 分支：空 messages 必须被契约挡在门外。
   const bad = await fetch(`${baseUrl}/api/v1/agent/chat`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders },
     body: JSON.stringify({ messages: [] }),
   });
   if (bad.status !== 400) fail(`空 messages 应返回 400，实际 ${bad.status}`);
