@@ -77,6 +77,15 @@ const WRITE_TOOLS = new Set(["write", "edit", "bash", "powershell"]);
  * 为什么是自己实现：pi-durable 1.4.0 **没有** `maxTurns`（那是上游 main 里的东西，
  * 还没发版）。所以这里用"数一数这个 run 请求了几次模型"来做等价限制 ——
  * 一次请求 = 一个工具回合。设 0 表示不限。
+ *
+ * TODO(pi-durable)：等用的版本带上 `maxTurns` 之后，这一整套可以整段删掉。
+ * 要删的地方一共四处：
+ *   1. MAX_TURNS / TURN_LIMIT_* / runTurns / limitHits / toolsBlocked / aborting 这些常量和状态
+ *   2. beforeTool 里开头那个 `toolsBlocked.has(...)` 分支
+ *   3. beforeRequest 里"数回合 + 撞上限"那段（记忆注入要留着）
+ *   4. chatStream 结尾那个 `limitHits` 比较 + `turnLimit` 事件
+ * 然后把 `agent: { model }` 改成 `agent: { model, maxTurns: 30 }` 即可。
+ * 换句话说：这不是一个要长期维护的机制，是一次性的补丁。
  */
 const MAX_TURNS = (() => {
 	const raw = Number(process.env.AGENT_MAX_TURNS ?? 30);
