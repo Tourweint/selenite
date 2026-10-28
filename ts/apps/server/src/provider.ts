@@ -4,6 +4,7 @@ import {
 	envApiKeyAuth,
 	fauxAssistantMessage,
 	fauxProvider,
+	fauxToolCall,
 	type Model,
 	type Models,
 } from "@earendil-works/pi-ai";
@@ -48,10 +49,17 @@ export function readLlmConfig(): LlmConfig | null {
 		const faux = fauxProvider({ models: [{ id: "faux" }], tokensPerSecond: 120 });
 		const models = createModels();
 		models.setProvider(faux.provider);
-		// 每次模型请求消耗一条；给足量，省得探针里还要续队列
-		faux.setResponses(
-			Array.from({ length: 500 }, () => () => fauxAssistantMessage("（faux 模型）链路已通。")),
-		);
+		// 每次模型请求消耗一条；给足量，省得探针里还要续队列。
+		// LLM_FAUX_TOOL 让它"只会调工具、永远不收尾"，专门用来验工具回合上限。
+		const toolName = process.env.LLM_FAUX_TOOL?.trim();
+		const respond = () =>
+			toolName
+				? fauxAssistantMessage(
+						[fauxToolCall(toolName, toolName === "recall" ? { query: "faux" } : {})],
+						{ stopReason: "toolUse" },
+					)
+				: fauxAssistantMessage("（faux 模型）链路已通。");
+		faux.setResponses(Array.from({ length: 500 }, () => respond));
 		const model = faux.getModel();
 		cached = { models, model: { provider: model.provider, modelId: model.id } };
 		return cached;

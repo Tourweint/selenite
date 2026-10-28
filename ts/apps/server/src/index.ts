@@ -100,7 +100,7 @@ app.post("/api/v1/agent/chat", async (c) => {
     await send({ type: "start", id, conversationId: chat.externalId });
 
     try {
-      for await (const text of chatStream({
+      for await (const event of chatStream({
         conversation: chat.conversation,
         text: lastUserText,
         requestId: request.requestId,
@@ -130,8 +130,14 @@ app.post("/api/v1/agent/chat", async (c) => {
           streamEnd = "aborted";
           break;
         }
-        chars += text.length;
-        await send({ type: "delta", text });
+        if (event.type === "delta") {
+          chars += event.text.length;
+          await send({ type: "delta", text: event.text });
+          continue;
+        }
+        // 工具调用撞上限：这一轮没有回答，但已经做过的工具结果都保留
+        streamEnd = "error";
+        await send({ type: "error", message: event.message }).catch(() => undefined);
       }
     } catch (error) {
       streamEnd = "error";

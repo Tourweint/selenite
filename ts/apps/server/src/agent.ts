@@ -12,6 +12,7 @@ import {
 	ToolTask,
 	type Conversation,
 	type ConversationView,
+	LiveDoc,
 	type LiveState,
 	type SettledSubmissionRecord,
 	type ToolHookCall,
@@ -65,6 +66,59 @@ const BLOCKED_TOOLS = new Set(
 );
 
 const WRITE_TOOLS = new Set(["write", "edit", "bash", "powershell"]);
+
+/**
+ * 一轮对话最多几个工具回合。
+ *
+ * 为什么要有：客户端断开之后那一轮还在跑（见 chatStream），
+ * 没人看着的时候如果模型陷进"读文件 → 又读文件"的循环，它会一直烧 token，
+ * 而没有任何人在场能按下停止。上限是唯一不需要人盯着的兜底。
+ *
+ * 为什么是自己实现：pi-durable 1.4.0 **没有** `maxTurns`（那是上游 main 里的东西，
+ * 还没发版）。所以这里用"数一数这个 run 请求了几次模型"来做等价限制 ——
+ * 一次请求 = 一个工具回合。设 0 表示不限。
+ */
+const MAX_TURNS = (() => {
+	const raw = Number(process.env.AGENT_MAX_TURNS ?? 30);
+	if (!Number.isFinite(raw) || raw < 0) return 30;
+	return Math.floor(raw);
+})();
+
+/** 撞上限时给用户看的话 */
+export const TURN_LIMIT_MESSAGE = "工具调用已达到上限，请重新发送请求。";
+
+/** 撞上限之后告诉模型的：别再动手了，用人话收尾 */
+const TURN_LIMIT_INSTRUCTION =
+	`本轮的可用工具调用次数已经用完（上限 ${MAX_TURNS} 次）。` +
+	"不要再调用任何工具，直接用已经拿到的信息回答；" +
+	"如果信息确实不够，就照实说明缺什么，并请对方重新发送请求。";
+
+/** 每个 run 已经用掉的回合数。key = `会话id:run任务id`，进程内有效 */
+const runTurns = new Map<string, number>();
+/** 撞过上限的会话 → 自增序号（聊天流靠它判断"这一轮是不是撞了"） */
+const limitHits = new Map<number, number>();
+/** 撞上限后暂时封掉工具的会话 */
+const toolsBlocked = new Set<number>();
+/**
+ * 撞上限之后还赖着不走的，再给几次机会就硬停。
+ *
+ * 正常模型收到"别再调工具了"就会收尾；但万一它不听（或者 provider 抽风），
+ * 光是"工具被拦住"还不够——它仍然会一轮一轮地请求模型，照样烧钱。
+ * 所以这里必须有一条不依赖模型自觉的出路。
+ */
+const HARD_STOP_GRACE = 3;
+const aborting = new Set<string>();
+
+async function abortRun(conversationId: number): Promise<void> {
+	try {
+		const harness = await getHarness();
+		const conversation = await harness.conversation(conversationId as never, CTX);
+		await conversation?.abort(CTX);
+	} catch (error) {
+		const detail = error instanceof Error ? error.message : String(error);
+		console.warn(`[agent] 硬停会话 ${conversationId} 失败: ${detail}`);
+	}
+}
 
 const PERSONA = [
 	"你是一个个人助手，和一个具体的人长期相处。记录生活是你们最常一起做的事，",
@@ -151,7 +205,10 @@ async function openHarness(): Promise<Harness> {
 			hooks: [
 				// 权限闸门：pi 本身不带，这是唯一能拦下工具调用的地方
 				hook(ToolTask, {
-					beforeTool: (call: ToolHookCall) => {
+					beforeTool: (call: ToolHookCall, api) => {
+						if (toolsBlocked.has(api.conversationId)) {
+							return { block: "本轮工具调用已达上限，请直接用已有信息回答" };
+						}
 						if (BLOCKED_TOOLS.has(call.name)) {
 							return { block: `工具 ${call.name} 已被配置禁用` };
 						}
@@ -161,19 +218,54 @@ async function openHarness(): Promise<Harness> {
 						return undefined;
 					},
 				}),
-				// 记忆注入：放在每次请求前，才拿得到"这一轮用户说了什么"
+				// 每次请求前：注入记忆 + 数这是本轮的第几个工具回合
 				hook(GenerationTask, {
-					beforeRequest: (request, api) => {
+					beforeRequest: async (request, api, ctx) => {
+						const extra: { role: "system"; content: string; timestamp: number }[] = [];
+
 						const lastUser = [...request.messages].reverse().find((m) => m.role === "user");
-						const query = lastUser ? contentText(lastUser.content) : "";
-						const context = recallContext(api.conversationId, query);
-						if (!context) return undefined;
-						return {
-							messages: [
-								{ role: "system" as const, content: context, timestamp: Date.now() },
-								...request.messages,
-							],
-						};
+						const memory = recallContext(
+							api.conversationId,
+							lastUser ? contentText(lastUser.content) : "",
+						);
+						if (memory) {
+							extra.push({ role: "system", content: memory, timestamp: Date.now() });
+						}
+
+						// 一次模型请求 = 一个工具回合。run 一换，预算就重新算。
+						//
+						// 拿 `run.inputs[0]` 当 run 身份：run.taskId 每一轮都会变
+						// （每一轮是一个新的 generation 任务），用它计数永远归零，
+						// 上限就形同虚设 —— 这个坑是实测踩出来的。
+						const live = await api.snapshot(LiveDoc, api.conversationId, ctx);
+						const runId = live?.run?.inputs?.[0] ?? live?.run?.taskId;
+						const key = `${api.conversationId}:${String(runId ?? "none")}`;
+						const used = (runTurns.get(key) ?? 0) + 1;
+						runTurns.set(key, used);
+
+						if (MAX_TURNS > 0 && used > MAX_TURNS) {
+							toolsBlocked.add(api.conversationId);
+							limitHits.set(api.conversationId, (limitHits.get(api.conversationId) ?? 0) + 1);
+							extra.push({
+								role: "system",
+								content: TURN_LIMIT_INSTRUCTION,
+								timestamp: Date.now(),
+							});
+							console.warn(
+								`[agent] 会话 ${api.conversationId}（run ${String(live?.run?.taskId)}）工具回合达上限 ${MAX_TURNS}`,
+							);
+							if (used > MAX_TURNS + HARD_STOP_GRACE && !aborting.has(key)) {
+								aborting.add(key);
+								console.warn(`[agent] 会话 ${api.conversationId} 无视上限，硬停这一轮`);
+								void abortRun(api.conversationId);
+							}
+						} else if (used === 1) {
+							// 新的一轮，把上一轮封掉的工具放开
+							toolsBlocked.delete(api.conversationId);
+						}
+
+						if (extra.length === 0) return undefined;
+						return { messages: [...extra, ...request.messages] };
 					},
 				}),
 			],
@@ -273,6 +365,14 @@ export async function openOrCreateChat(externalId: string): Promise<ResolvedChat
 }
 
 // ── 对话流 ───────────────────────────────────────────────
+/**
+ * 流里除了文本，还会有"这一轮没给出回答"的通知。
+ * 现在只有一种：工具调用撞上限。以后要是加别的终止原因，往这里加成员。
+ */
+export type ChatStreamEvent =
+	| { type: "delta"; text: string }
+	| { type: "turnLimit"; message: string };
+
 export interface ChatStreamInput {
 	conversation: Conversation;
 	text: string;
@@ -299,7 +399,9 @@ export interface ChatStreamInput {
  *
  * 真要停，走 `stopChat()`：那是人的明确意图，不是 socket 的副作用。
  */
-export async function* chatStream(input: ChatStreamInput): AsyncGenerator<string, void, unknown> {
+export async function* chatStream(
+	input: ChatStreamInput,
+): AsyncGenerator<ChatStreamEvent, void, unknown> {
 	const watch = await input.conversation.watch(CTX);
 
 	const queue: string[] = [];
@@ -331,6 +433,9 @@ export async function* chatStream(input: ChatStreamInput): AsyncGenerator<string
 	// 用对象包着：闭包里赋值，TS 的收窄判断看不到
 	const outcome: { record?: SettledSubmissionRecord; error?: Error } = {};
 	let finished = false;
+	// 这一轮开始前记一次；跑完对比，就知道期间有没有撞工具上限
+	const conversationId = Number(input.conversation.id);
+	const limitSeqBefore = limitHits.get(conversationId) ?? 0;
 
 	try {
 		watch.start(async (value) => {
@@ -372,7 +477,7 @@ export async function* chatStream(input: ChatStreamInput): AsyncGenerator<string
 				continue;
 			}
 			const delta = queue.shift();
-			if (delta) yield delta;
+			if (delta) yield { type: "delta", text: delta };
 		}
 
 		if (outcome.error) throw outcome.error;
@@ -382,8 +487,18 @@ export async function* chatStream(input: ChatStreamInput): AsyncGenerator<string
 			offer(await answerText(input.conversation));
 			while (queue.length > 0) {
 				const delta = queue.shift();
-				if (delta) yield delta;
+				if (delta) yield { type: "delta", text: delta };
 			}
+		} else if (outcome.record?.status === "unanswered") {
+			console.warn(
+				`[agent] 本轮未回答: ${outcome.record.reason} ${JSON.stringify(outcome.record.detail ?? null)}`,
+			);
+		}
+
+		// 撞了工具上限：不管模型最后有没有收尾，这句提示都由我们补，
+		// 保证用户看到的措辞跟配置一致，而不是模型自己发挥的版本。
+		if ((limitHits.get(conversationId) ?? 0) > limitSeqBefore) {
+			yield { type: "turnLimit", message: TURN_LIMIT_MESSAGE };
 		}
 	} finally {
 		// 只关掉"看"这件事，不碰正在跑的那一轮

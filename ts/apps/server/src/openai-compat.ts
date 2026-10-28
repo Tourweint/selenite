@@ -95,7 +95,6 @@ export function mountOpenAiCompat(app: Hono): void {
 		}
 
 		const conversationId = conversationIdFor(c.req.header("X-Conversation-Id"), messages);
-		const abort = new AbortController();
 		// OpenAI 协议是无状态的：每次带全量 messages，但我们只把最后一条用户消息交给会话。
 		// 更早的历史已经在服务端的 transcript 里了，重复塞进去反而会打架。
 		const lastUser = [...messages].reverse().find((message) => message.role === "user");
@@ -110,14 +109,15 @@ export function mountOpenAiCompat(app: Hono): void {
 		const input = {
 			conversation: chat.conversation,
 			text: lastUser.content,
-			signal: abort.signal,
 		};
 
 		// ── 非流式：聚合后一次性返回 ──────────────────
 		if (body.stream !== true) {
 			let text = "";
 			try {
-				for await (const delta of chatStream(input)) text += delta;
+				for await (const event of chatStream(input)) {
+					text += event.type === "delta" ? event.text : event.message;
+				}
 			} catch (error) {
 				const detail = error instanceof Error ? error.message : String(error);
 				return c.json({ error: { message: detail, type: "upstream_error" } }, 502);
@@ -138,15 +138,17 @@ export function mountOpenAiCompat(app: Hono): void {
 
 		// ── 流式：逐块转成 OpenAI 的 chunk 形状 ────────
 		return streamSSE(c, async (stream) => {
-			stream.onAbort(() => abort.abort());
 			try {
-				for await (const delta of chatStream(input)) {
+				for await (const event of chatStream(input)) {
+					// 断线不中止那一轮（跟自有端点一致），这里只是没人读了
+					if (stream.aborted) break;
+					const content = event.type === "delta" ? event.text : event.message;
 					await stream.writeSSE({
 						data: JSON.stringify({
 							id: conversationId,
 							object: "chat.completion.chunk",
 							model: body.model ?? "lifediary",
-							choices: [{ index: 0, delta: { content: delta }, finish_reason: null }],
+							choices: [{ index: 0, delta: { content }, finish_reason: null }],
 						}),
 					});
 				}
