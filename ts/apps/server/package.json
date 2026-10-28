@@ -9,6 +9,7 @@
     "smoke": "tsx scripts/smoke.ts",
     "probe": "tsx scripts/pi-probe.ts",
     "harness": "tsx scripts/harness-probe.ts",
+    "tools": "tsx scripts/tools-probe.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

@@ -11,6 +11,7 @@
     "typecheck": "node node_modules/typescript/bin/tsc --noEmit",
     "smoke": "pnpm --filter @lifediary/server smoke",
     "probe": "pnpm --filter @lifediary/server probe",
+    "tools-probe": "pnpm --filter @lifediary/server tools",
     "memtest": "pnpm --filter @lifediary/memory selftest"
   },
   "pnpm": {

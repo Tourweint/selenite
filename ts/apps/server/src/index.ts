@@ -106,6 +106,7 @@ app.post("/api/v1/agent/chat", async (c) => {
         messages: request.messages,
         conversationId,
         systemContext: memoryContext,
+        memory,
         signal: abort.signal,
       })) {
         if (abort.signal.aborted) {

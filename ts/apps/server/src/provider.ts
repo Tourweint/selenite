@@ -7,7 +7,9 @@ import {
 	shouldCompact,
 } from "@earendil-works/pi-agent-core/node";
 import type { AssistantMessage, Model } from "@earendil-works/pi-ai";
+import type { MemoryEngine } from "@lifediary/memory";
 import type { ChatMessage } from "@lifediary/shared";
+import { createTools } from "./tools.ts";
 
 /**
  * 对话跑在 **pi 自己的会话流程** 上：
@@ -80,6 +82,7 @@ const liveSessions = new Map<string, SessionEntry>();
 async function getSession(
 	conversationId: string,
 	runtime: LlmRuntime,
+	memory: MemoryEngine | null,
 ): Promise<SessionEntry> {
 	const cached = liveSessions.get(conversationId);
 	if (cached) return cached;
@@ -97,6 +100,7 @@ async function getSession(
 		env,
 		session,
 		model: runtime.model,
+		tools: createTools({ cwd: CWD, memory }),
 		// 传函数而不是字符串：每轮开始时重新求值，记忆变化能立刻生效
 		systemPrompt: () => holder.systemPrompt,
 		getApiKeyAndHeaders: async () => ({ apiKey: runtime.apiKey }),
@@ -117,6 +121,8 @@ export interface StreamOptionsInput {
 	conversationId: string;
 	/** 记忆等外部注入的上下文，拼进 systemPrompt 最前面 */
 	systemContext?: string;
+	/** remember / recall 两个工具要用；为 null 时那两个工具会报错 */
+	memory?: MemoryEngine | null;
 	signal: AbortSignal;
 }
 
@@ -157,6 +163,8 @@ export async function* harnessStream(
 		"你是一个个人助手，和一个具体的人长期相处。记录生活是你们最常一起做的事，" +
 			"但对方提出别的要求（查东西、整理、动手做事）时也要正常帮忙。" +
 			"回答简短、自然、有温度，不要客套和说教。",
+		"你可以使用工具读文件、列目录、写文件、执行命令，也可以主动 remember 值得长期记住的事、" +
+			"recall 过去记下的内容。需要时直接调用，不必先征求同意。",
 		input.systemContext,
 		...input.messages.filter((m) => m.role === "system").map((m) => m.content),
 	]
@@ -166,7 +174,7 @@ export async function* harnessStream(
 	const lastUser = [...input.messages].reverse().find((m) => m.role === "user");
 	if (!lastUser) return;
 
-	const entry = await getSession(input.conversationId, runtime);
+	const entry = await getSession(input.conversationId, runtime, input.memory ?? null);
 	entry.setSystemPrompt(systemPrompt);
 
 	const abortOnSignal = () => void entry.harness.abort();
