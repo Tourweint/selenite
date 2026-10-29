@@ -1,7 +1,10 @@
+import { getConnInfo } from "@hono/node-server/conninfo";
 import { serve } from "@hono/node-server";
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
 import { streamSSE } from "hono/streaming";
+import { hostname } from "node:os";
+import QRCode from "qrcode";
 import type { MemoryScope } from "@lifediary/memory";
 import {
   ChatRequestSchema,
@@ -11,6 +14,7 @@ import {
 import {
   addReminder,
   chatStream,
+  listChats,
   listReminders,
   memoryEngine,
   openChat,
@@ -20,7 +24,10 @@ import {
 } from "./agent.ts";
 import { createAuthMiddleware } from "./auth.ts";
 import { debugPage } from "./debug-page.js";
+import { mountDiary } from "./diary.ts";
 import { mountOpenAiCompat } from "./openai-compat.ts";
+import { PairingStore, buildPairUrl, resolvePairBase } from "./pairing.ts";
+import { pairPage } from "./pair-page.ts";
 import { readLlmConfig } from "./provider.ts";
 
 // Node 20.12+ 自带 .env 加载；文件不存在时静默跳过，不让本地启动被环境文件卡住。
@@ -39,17 +46,126 @@ app.use(
   cors({
     origin: "*",
     allowMethods: ["GET", "POST", "OPTIONS"],
-    allowHeaders: ["Content-Type", "Authorization"],
+    // X-Conversation-Id 是兼容层的会话绑定头（原生客户端不发预检，但浏览器/WebView 会）
+    allowHeaders: ["Content-Type", "Authorization", "X-Conversation-Id", "Accept"],
   }),
 );
 
 // 鉴权只作用于 API；调试页是静态 UI，真正的数据都要过 /api/v1
-app.use("/api/v1/*", createAuthMiddleware(process.env.AGENT_TOKEN?.trim() || null));
+//
+// 凭据两档（2026-10-29 配对）：共享令牌 `AGENT_TOKEN`（命令行/调试）+ 扫码换来的设备凭据。
+// **配对的两个端点必须免鉴权**——手机在配对之前手里还没有任何凭据。
+const pairing = new PairingStore();
+const auth = createAuthMiddleware(process.env.AGENT_TOKEN?.trim() || null, {
+  verifyDeviceToken: (token) => pairing.verifyDeviceToken(token),
+});
+const PAIR_OPEN_PATHS = new Set(["/api/v1/pair/info", "/api/v1/pair/redeem"]);
+app.use("/api/v1/*", async (c, next) => {
+  if (PAIR_OPEN_PATHS.has(c.req.path)) return next();
+  return auth(c, next);
+});
+
+// redeem 限流：每 IP 每分钟 10 次（防有人对着 6 位码暴力枚举）
+const redeemHits = new Map<string, { count: number; resetAt: number }>();
+const REDEEM_PER_MINUTE = 10;
+function redeemRateLimited(ip: string, now = Date.now()): boolean {
+  const hit = redeemHits.get(ip);
+  if (!hit || hit.resetAt <= now) {
+    redeemHits.set(ip, { count: 1, resetAt: now + 60_000 });
+    return false;
+  }
+  hit.count += 1;
+  return hit.count > REDEEM_PER_MINUTE;
+}
 
 // OpenAI 兼容端点：手机 App 已经在按这个协议说话，服务端适配比改客户端便宜
 mountOpenAiCompat(app);
 
+// 日记成稿镜像（2026-10-29）：独立库 .data/diary.sqlite，只收手机的推送，没有"在这里改日记"的入口
+mountDiary(app);
+
 app.get("/", (c) => c.html(debugPage));
+
+// ── 配对（2026-10-29）：手机扫这一屏换设备凭据 ────────────────
+const SERVER_VERSION = "0.1.0";
+
+function currentPort(): number {
+  return Number(process.env.PORT ?? 8082);
+}
+
+/** 配对页每次打开都换一枚新码（旧码立即作废，符合"一次性"语义） */
+app.get("/pair", async (c) => {
+  const { code, expiresAt } = pairing.issueCode();
+  const url = buildPairUrl(resolvePairBase(currentPort()), code);
+  const dataUrl = await QRCode.toDataURL(url, { margin: 1, width: 320 });
+  c.header("Cache-Control", "no-store");
+  return c.html(
+    pairPage({
+      url,
+      dataUrl,
+      machineName: hostname(),
+      expiresInSeconds: Math.max(1, Math.round((expiresAt - Date.now()) / 1000)),
+    }),
+  );
+});
+
+/** 探活：手机在兑换前先确认"这台机器在不在"（不含任何密钥） */
+app.get("/api/v1/pair/info", (c) =>
+  c.json({ name: hostname(), version: SERVER_VERSION, pairing: true }),
+);
+
+/** 出一枚新码（命令行/别的客户端用；调试页走 /pair 页面） */
+app.post("/api/v1/pair/code", (c) => {
+  const { code, expiresAt } = pairing.issueCode();
+  return c.json({ code, expiresAt, url: buildPairUrl(resolvePairBase(currentPort()), code) });
+});
+
+/** 用码换设备凭据（免鉴权：手机此刻还没有任何凭据） */
+app.post("/api/v1/pair/redeem", async (c) => {
+  const ip = (() => {
+    try {
+      return getConnInfo(c).remote.address ?? "local";
+    } catch {
+      return "local";
+    }
+  })();
+  if (redeemRateLimited(ip)) return c.json({ error: "too_many_attempts" }, 429);
+
+  const body = (await c.req.json().catch(() => null)) as
+    | { code?: string; deviceName?: string }
+    | null;
+  const code = body?.code?.trim();
+  if (!code) return c.json({ error: "bad_request" }, 400);
+
+  const result = pairing.redeem(code, body?.deviceName?.trim() || "手机");
+  if (typeof result === "string") {
+    const status =
+      result === "unknown_code"
+        ? 404
+        : result === "code_used"
+          ? 409
+          : result === "code_expired"
+            ? 410
+            : 429;
+    return c.json({ error: result }, status);
+  }
+  console.log(`[pair] 新设备已配对（${ip}），当前共 ${pairing.listDevices().length} 台`);
+  return c.json({ deviceToken: result.deviceToken, name: hostname(), version: SERVER_VERSION });
+});
+
+app.get("/api/v1/pair/devices", (c) => c.json(pairing.listDevices()));
+
+app.post("/api/v1/pair/devices/:id/revoke", (c) =>
+  pairing.revokeDevice(c.req.param("id"))
+    ? c.json({ ok: true })
+    : c.json({ error: "unknown_device" }, 404),
+);
+
+/** 会话索引（只元数据，供手机重装后重建历史列表） */
+app.get("/api/v1/agent/chats", async (c) => {
+  const limit = Number(c.req.query("limit") ?? 50);
+  return c.json({ chats: await listChats(Number.isFinite(limit) ? limit : 50) });
+});
 
 app.get("/healthz", (c) =>
   c.json({
@@ -129,6 +245,10 @@ app.post("/api/v1/agent/chat", async (c) => {
         if (stream.aborted) {
           streamEnd = "aborted";
           break;
+        }
+        if (event.type === "progress") {
+          // 阶段变化只对兼容层的客户端有意义；自有 SSE 协议不加新事件，避免破坏老客户端
+          continue;
         }
         if (event.type === "delta") {
           chars += event.text.length;
@@ -232,13 +352,14 @@ const port = Number(process.env.PORT ?? 8082);
 
 serve({ fetch: app.fetch, port }, (info) => {
   const mode = readLlmConfig() ? "真实上游" : "mock（未配置 LLM_API_KEY）";
-  const auth = process.env.AGENT_TOKEN?.trim()
-    ? "令牌校验开启"
-    : "未配 AGENT_TOKEN —— 仅本机可访问";
+  const authLabel = process.env.AGENT_TOKEN?.trim()
+    ? "共享令牌 + 配对设备凭据"
+    : "未配 AGENT_TOKEN —— 仅本机 / 已配对设备可访问";
   console.log(`lifediary-ts server → http://127.0.0.1:${info.port}`);
   console.log(`  调试页: http://127.0.0.1:${info.port}/`);
+  console.log(`  配对  : http://127.0.0.1:${info.port}/pair   ← 手机扫这一屏`);
   console.log(`  模式  : ${mode}`);
-  console.log(`  鉴权  : ${auth}`);
+  console.log(`  鉴权  : ${authLabel}`);
 });
 
 export { app };

@@ -37,20 +37,34 @@ function safeEqual(a: string, b: string): boolean {
 	return timingSafeEqual(bufferA, bufferB);
 }
 
-export function createAuthMiddleware(expectedToken: string | null) {
+export interface AuthOptions {
+	/**
+	 * 设备凭据校验（2026-10-29 配对）：`Bearer` 里也可能是扫码换来的 deviceToken。
+	 * 不传 = 只认共享令牌。
+	 */
+	verifyDeviceToken?: (token: string) => boolean;
+}
+
+export function createAuthMiddleware(expectedToken: string | null, options: AuthOptions = {}) {
 	return async (c: Context, next: Next) => {
-		// 没配令牌：只让本机访问。这样开发时不用配，但也不会裸奔到局域网。
+		// 没配共享令牌：只让本机访问（但**扫码配对的设备**仍可从局域网进来）。
 		if (!expectedToken) {
 			if (isLoopback(c)) return next();
+			const provided = bearerOf(c);
+			if (provided && options.verifyDeviceToken?.(provided)) return next();
 			return c.body(null, 403);
 		}
 
-		const header = c.req.header("Authorization") ?? "";
-		const provided = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
-
-		if (provided && safeEqual(provided, expectedToken)) {
-			return next();
+		const provided = bearerOf(c);
+		if (provided) {
+			if (safeEqual(provided, expectedToken)) return next();
+			if (options.verifyDeviceToken?.(provided)) return next();
 		}
 		return c.body(null, 403);
 	};
+}
+
+function bearerOf(c: Context): string {
+	const header = c.req.header("Authorization") ?? "";
+	return header.startsWith("Bearer ") ? header.slice(7).trim() : "";
 }

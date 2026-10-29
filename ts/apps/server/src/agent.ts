@@ -1,5 +1,6 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import type { Context } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { contentText } from "@earendil-works/pi-ai";
 import {
@@ -12,6 +13,7 @@ import {
 	ToolTask,
 	type Conversation,
 	type ConversationView,
+	type HookApi,
 	LiveDoc,
 	type LiveState,
 	type SettledSubmissionRecord,
@@ -138,6 +140,11 @@ const PERSONA = [
 	"你是一个个人助手，和一个具体的人长期相处。记录生活是你们最常一起做的事，",
 	"但对方提出别的要求（查东西、整理、动手做事）时也要正常帮忙。",
 	"回答简短、自然、有温度，不要客套和说教。",
+	// 2026-10-29 需求方定的硬约束：这条同时是"该动手时一定动手"的兜底 ——
+	// 快档模型若为了省事直接编，用户会拿到假信息，比慢一点更糟。
+	"凡是涉及真实文件、真实数据、真实日程或当前时间的事，必须先用工具去看，不许凭印象回答或编造；",
+	"看不到就说看不到，并说明缺什么。闲聊和感受不需要调工具。",
+	"记忆只在确有必要时检索（对方提到过去的事、需要接上以前的话），别每句都查。",
 	"需要长期记住的事用 remember；想不起对方说过什么用 recall；要定时提醒用 set_reminder。",
 ].join("");
 
@@ -219,7 +226,7 @@ async function openHarness(): Promise<Harness> {
 			hooks: [
 				// 权限闸门：pi 本身不带，这是唯一能拦下工具调用的地方
 				hook(ToolTask, {
-					beforeTool: (call: ToolHookCall, api) => {
+					beforeTool: async (call: ToolHookCall, api, context) => {
 						if (toolsBlocked.has(api.conversationId)) {
 							return { block: "本轮工具调用已达上限，请直接用已有信息回答" };
 						}
@@ -229,6 +236,15 @@ async function openHarness(): Promise<Harness> {
 						if (TOOL_POLICY === "read-only" && WRITE_TOOLS.has(call.name)) {
 							return { block: "当前是只读模式（AGENT_TOOL_POLICY=read-only）" };
 						}
+						// 告诉客户端"现在开始动手了"（工具可能跑几十秒，界面上不能一直空白）
+						emitPhase(api.conversationId, "working");
+						// 一旦真的要动手，就把这个会话升级到深档（快档负责闲聊，深档负责干活）
+						await upgradeOnTool(api, context);
+						return undefined;
+					},
+					// 工具跑完、把结果交回模型 → 又回到"在思考"
+					afterTool: (_call: ToolHookCall, _result, api) => {
+						emitPhase(api.conversationId, "thinking");
 						return undefined;
 					},
 				}),
@@ -315,11 +331,114 @@ export interface ResolvedChat {
 	internalId: number;
 }
 
+export type ChatMode = "fast" | "deep";
+
+/**
+ * 本轮用快档还是深档（2026-10-29）。
+ *
+ * durable 的 `Conversation.configure({ model })` 支持**会话中途换模型**，
+ * 所以"开局判死"这个限制不存在：每轮提交前改一次即可，下一轮立刻生效。
+ */
+export async function applyChatMode(chat: ResolvedChat, mode: ChatMode): Promise<void> {
+	const config = readLlmConfig();
+	if (!config) return;
+	const target = mode === "deep" ? config.model : config.fastModel;
+	const agent = await chat.conversation.agent(CTX);
+	if (agent.model?.modelId === target.modelId) return;
+	await chat.conversation.configure({ model: target }, CTX);
+	console.log(
+		`[agent] 会话 ${chat.internalId} 切档 → ${mode}（${target.modelId}）`,
+	);
+}
+
+/** 调过工具的会话：下一轮默认继续走深档（深活儿往往连着几轮，别来回抖） */
+const toolTouched = new Set<number>();
+/** 已经升级到深档的会话（避免每次工具调用都去读/写 agent 文档） */
+const upgradedToDeep = new Set<number>();
+
+export function toolWasUsed(internalId: number): boolean {
+	return toolTouched.has(internalId);
+}
+
+/** 一轮里的两个可见阶段：在想 / 在动手（工具执行中） */
+export type TurnPhase = "thinking" | "working";
+
+/** 每个会话的"当前阶段"订阅者（由 chatStream 注册，工具钩子往里推） */
+const phaseSinks = new Map<number, Set<(phase: TurnPhase) => void>>();
+
+export function watchPhase(
+	conversationId: number,
+	sink: (phase: TurnPhase) => void,
+): () => void {
+	let set = phaseSinks.get(conversationId);
+	if (!set) {
+		set = new Set();
+		phaseSinks.set(conversationId, set);
+	}
+	set.add(sink);
+	return () => {
+		set.delete(sink);
+		if (set.size === 0) phaseSinks.delete(conversationId);
+	};
+}
+
+function emitPhase(conversationId: number, phase: TurnPhase): void {
+	const set = phaseSinks.get(conversationId);
+	if (!set) return;
+	for (const sink of set) {
+		try {
+			sink(phase);
+		} catch {
+			/* 订阅方异常不该影响工具执行 */
+		}
+	}
+}
+
+/**
+ * 工具第一次被调用时把该会话升级到深档。
+ *
+ * 为什么在**工具钩子**里升级而不是开局预判：预判要额外一次判定（慢且可能判错），
+ * 而"模型自己决定调工具"本身就是最准的信号。工具结果回来后那一次生成就用深档，
+ * 本轮的工具使用与后续推理都拿到了强模型。
+ */
+async function upgradeOnTool(api: HookApi, context: Context): Promise<void> {
+	toolTouched.add(api.conversationId);
+	// 已经升过一次就不再碰库（每次工具调用都去 configure 会白白多几次快照读）
+	if (upgradedToDeep.has(api.conversationId)) return;
+	if ((process.env.AGENT_TOOL_UPGRADE ?? "on").trim().toLowerCase() === "off") return;
+
+	const config = readLlmConfig();
+	if (!config) return;
+	if (config.model.modelId === config.fastModel.modelId) return;
+
+	try {
+		const harness = await getHarness();
+		const conversation = await harness.conversation(api.conversationId as never, context);
+		if (!conversation) return;
+		const agent = await conversation.agent(context);
+		if (agent.model?.modelId === config.model.modelId) {
+			upgradedToDeep.add(api.conversationId);
+			return;
+		}
+		await conversation.configure({ model: config.model }, context);
+		upgradedToDeep.add(api.conversationId);
+		console.log(`[agent] 会话 ${api.conversationId} 首次工具调用 → 升级深档 ${config.model.modelId}`);
+	} catch (error) {
+		// 升级失败不影响这一轮：大不了这轮继续用快档
+		console.warn(
+			`[agent] 会话 ${api.conversationId} 升级深档失败: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+}
+
 /**
  * 解析会话。`externalId` 为空表示新建。
  * 返回 null 表示"这个 id 我没发过" —— 调用方据此回 404，而不是偷偷建一个新的。
  */
-export async function openChat(externalId: string | undefined): Promise<ResolvedChat | null> {
+export async function openChat(
+	externalId: string | undefined,
+	modelRef?: { provider: string; modelId: string },
+): Promise<ResolvedChat | null> {
 	const harness = await getHarness();
 	const config = readLlmConfig();
 	if (!config) return null;
@@ -329,7 +448,7 @@ export async function openChat(externalId: string | undefined): Promise<Resolved
 		const conversation = await harness.createConversation(
 			{
 				ownership: { kind: "ownerless" },
-				agent: { model: config.model },
+				agent: { model: modelRef ?? config.model },
 				// 建会话和写映射在同一个提交里，不会出现"会话建好了但映射没写上"
 				init: async (tx, conversationId) => {
 					const chats = await tx.doc(Chats);
@@ -356,7 +475,10 @@ export async function openChat(externalId: string | undefined): Promise<Resolved
  * 客户端从没收到过服务端发 id，所以只能"第一次自动建"。
  * `/api/v1/agent/chat` 不走这条，它必须严格要求 id 是发出去的。
  */
-export async function openOrCreateChat(externalId: string): Promise<ResolvedChat> {
+export async function openOrCreateChat(
+	externalId: string,
+	modelRef?: { provider: string; modelId: string },
+): Promise<ResolvedChat> {
 	const existing = await openChat(externalId);
 	if (existing) return existing;
 
@@ -367,7 +489,7 @@ export async function openOrCreateChat(externalId: string): Promise<ResolvedChat
 	const conversation = await harness.createConversation(
 		{
 			ownership: { kind: "ownerless" },
-			agent: { model: config.model },
+			agent: { model: modelRef ?? config.model },
 			init: async (tx, conversationId) => {
 				const chats = await tx.doc(Chats);
 				chats.byExternal[externalId] = Number(conversationId);
@@ -385,7 +507,22 @@ export async function openOrCreateChat(externalId: string): Promise<ResolvedChat
  */
 export type ChatStreamEvent =
 	| { type: "delta"; text: string }
-	| { type: "turnLimit"; message: string };
+	/**
+	 * 这一轮此刻在干什么（2026-10-29）。
+	 *
+	 * 存在的理由：工具回合可能几十秒没有任何 token，客户端只看到"空白"，
+	 * 用户不知道是卡死了还是在干活。这里把"思考 / 动手"这一层状态单独告诉客户端，
+	 * 让它能显示"正在思考…"「正在读文件…」而不是干等。
+	 */
+	| { type: "progress"; phase: TurnPhase }
+	| { type: "turnLimit"; message: string }
+	/**
+	 * 这一轮跑完了但没有回答（模型报错、被策略拦下等）。
+	 *
+	 * 必须显式吐出来：否则客户端只看到"空内容 + 正常结束"，等于给用户一个空气泡，
+	 * 而且分不清是"模型没话说"还是"上游挂了"（实测：key 无效时就是这样）。
+	 */
+	| { type: "unanswered"; message: string };
 
 export interface ChatStreamInput {
 	conversation: Conversation;
@@ -419,6 +556,8 @@ export async function* chatStream(
 	const watch = await input.conversation.watch(CTX);
 
 	const queue: string[] = [];
+	/** 待推送的阶段变化（工具钩子写进来，本流取出去） */
+	const phases: TurnPhase[] = [];
 	let emitted = "";
 	let wake: (() => void) | null = null;
 
@@ -450,6 +589,11 @@ export async function* chatStream(
 	// 这一轮开始前记一次；跑完对比，就知道期间有没有撞工具上限
 	const conversationId = Number(input.conversation.id);
 	const limitSeqBefore = limitHits.get(conversationId) ?? 0;
+	// 订阅本会话的阶段变化：工具一开始执行就能立刻告诉客户端，不用等第一个 token
+	const unwatchPhase = watchPhase(conversationId, (phase) => {
+		phases.push(phase);
+		notify();
+	});
 
 	try {
 		watch.start(async (value) => {
@@ -483,8 +627,13 @@ export async function* chatStream(
 				notify();
 			});
 
-		while (!finished || queue.length > 0) {
+		while (!finished || queue.length > 0 || phases.length > 0) {
 			if (queue.length === 0) {
+				const phase = phases.shift();
+				if (phase) {
+					yield { type: "progress", phase };
+					continue;
+				}
 				await new Promise<void>((resolve) => {
 					wake = resolve;
 				});
@@ -504,9 +653,12 @@ export async function* chatStream(
 				if (delta) yield { type: "delta", text: delta };
 			}
 		} else if (outcome.record?.status === "unanswered") {
+			// 细节只进日志：里面可能带上游原文（含 key 片段）
 			console.warn(
 				`[agent] 本轮未回答: ${outcome.record.reason} ${JSON.stringify(outcome.record.detail ?? null)}`,
 			);
+			// 但用户得看到一句话，不能只收到"空回复"
+			yield { type: "unanswered", message: "这次没能生成回复，请再试一次。" };
 		}
 
 		// 撞了工具上限：不管模型最后有没有收尾，这句提示都由我们补，
@@ -515,6 +667,7 @@ export async function* chatStream(
 			yield { type: "turnLimit", message: TURN_LIMIT_MESSAGE };
 		}
 	} finally {
+		unwatchPhase();
 		// 只关掉"看"这件事，不碰正在跑的那一轮
 		await watch.stop().catch(() => undefined);
 	}
@@ -645,4 +798,64 @@ export async function addReminder(
 		CTX,
 	);
 	return Number(id);
+}
+
+// ── 会话索引（2026-10-29 配对配套）────────────────────────
+/**
+ * 会话索引：**只返回元数据，不含正文**。
+ *
+ * 为什么需要：手机本地存会话清单，但重装/换机后清单会丢；这里给一份可恢复的索引，
+ * 手机配对后拉一次就能把历史列表重建出来，正文仍按 id 现取（`GET .../messages`）。
+ *
+ * 为什么不做"列全部会话内容"：会话一多，一次性把所有正文吐出来太重。
+ * 代价（如实登记）：这里为了拿首句与时间，会逐个打开会话读一遍 context，
+ * **会话数量大时会变慢**；真到那时应改用 durable 的 entries 分页 + 单独维护索引表。
+ */
+export interface ChatIndexEntry {
+	conversationId: string;
+	createdAt: number;
+	lastAt: number;
+	firstText: string;
+	turns: number;
+}
+
+export async function listChats(limit = 50): Promise<ChatIndexEntry[]> {
+	if (!readLlmConfig()) return [];
+	const harness = await getHarness();
+	const chats = await harness.snapshot(Chats, CTX);
+	const pairs = Object.entries(chats?.byExternal ?? {}).slice(-limit);
+	const entries: ChatIndexEntry[] = [];
+
+	for (const [conversationId, internalId] of pairs) {
+		try {
+			const conversation = await harness.conversation(internalId as never, CTX);
+			if (!conversation) continue;
+			const view = await conversation.context(CTX);
+			let firstText = "";
+			let turns = 0;
+			let createdAt = 0;
+			let lastAt = 0;
+			for (const entry of view.entries) {
+				if (entry.kind !== "pi.user" && entry.kind !== "pi.assistant") continue;
+				const message = entry.model?.[0];
+				if (!message) continue;
+				const at = typeof message.timestamp === "number" ? message.timestamp : 0;
+				if (entry.kind === "pi.user") {
+					turns += 1;
+					if (!firstText) firstText = contentText(message.content).trim().slice(0, 40);
+				}
+				if (!createdAt && at) createdAt = at;
+				if (at > lastAt) lastAt = at;
+			}
+			if (turns === 0) continue;
+			entries.push({ conversationId, createdAt, lastAt, firstText, turns });
+		} catch (error) {
+			// 单个会话读失败不该让整张索引失败（重装场景下可能是残留的空会话）
+			console.warn(
+				`[chats] 读取会话 ${conversationId} 失败: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+
+	return entries.sort((a, b) => b.lastAt - a.lastAt);
 }

@@ -134,6 +134,7 @@ cp apps/server/.env.example apps/server/.env
 pnpm typecheck    # 全部包一次过
 pnpm probe        # 内核语义：提交 / 流式 / 闸门 / 睡眠 / 重启续跑（faux，无需 key）
 pnpm --filter @lifediary/server http   # 端到端：真起服务，走 HTTP 验全部接口
+pnpm --filter @lifediary/server diary  # 日记镜像：上行/下行/软删/8KB 截断（真起服务，独立库）
 pnpm memtest      # 记忆四层串跑：抽取→巩固→召回→注入
 pnpm smoke        # 端到端 SSE（需先 pnpm dev）
 ```

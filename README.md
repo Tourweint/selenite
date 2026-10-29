@@ -82,4 +82,5 @@ ts/
 - **vendored `pi-agent-core@0.78.1`**：2026-10-28 移除，改用 npm 上的 `pi-durable@1.4.0`。
   上游 1.0.0 把 `AgentHarness` / `JsonlSessionRepo` 整体删了，vendored 的那份已经跑不通。
 
-`docs/` 下是 Java 版归档文档，**不再维护**，其中「无状态、不建库」等约束随实现一并作废。
+`docs/基线文档/` 已于 **2026-10-29 按 TS 实现重写**（`接口文档.md` 是现行契约、`系统架构.md` 是现行架构）；
+`docs/变更记录/` 里 2026-10-25 ~ 27 的三篇是 Java 版迁移期记录，其中的「无状态 / JWT 同 backend / 先扣额 / signal 四问」口径**均已作废**，仅作历史。

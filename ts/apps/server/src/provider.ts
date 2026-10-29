@@ -26,8 +26,16 @@ const PROVIDER_ID = "bailian";
 export interface LlmConfig {
 	/** 传给 Harness 的模型集合 */
 	models: Models;
-	/** 会话里存的模型引用 */
+	/** 会话里存的模型引用（深档：会思考，用于成稿/复杂任务） */
 	model: { provider: string; modelId: string };
+	/**
+	 * 快档引用（2026-10-29）：**不思考**的模型，用于日常聊天。
+	 *
+	 * 实测同一收敛任务：`qwen-flash` 1.47s / 157 tokens，`deepseek-v4.1-flash` 10.17s / 1591 tokens，
+	 * 质量差距远小于 7 倍的时间差 —— 所以聊天默认走快档，成稿类仍走深档。
+	 * 用 `LLM_MODEL_FAST` 换（默认 `qwen-flash`）；设为空串则快档 = 深档（退回单模型）。
+	 */
+	fastModel: { provider: string; modelId: string };
 }
 
 let cached: LlmConfig | null | undefined;
@@ -61,7 +69,8 @@ export function readLlmConfig(): LlmConfig | null {
 				: fauxAssistantMessage("（faux 模型）链路已通。");
 		faux.setResponses(Array.from({ length: 500 }, () => respond));
 		const model = faux.getModel();
-		cached = { models, model: { provider: model.provider, modelId: model.id } };
+		const ref = { provider: model.provider, modelId: model.id };
+		cached = { models, model: ref, fastModel: ref };
 		return cached;
 	}
 
@@ -77,9 +86,12 @@ export function readLlmConfig(): LlmConfig | null {
 		"https://dashscope.aliyuncs.com/compatible-mode/v1"
 	).replace(/\/+$/, "");
 
-	const model: Model<"openai-completions"> = {
-		id: modelId,
-		name: modelId,
+	// 快档：同 provider 下再挂一个模型 id（不思考的那类）。留空 = 退回单模型
+	const fastModelId = process.env.LLM_MODEL_FAST?.trim() || "qwen-flash";
+
+	const buildModel = (id: string): Model<"openai-completions"> => ({
+		id,
+		name: id,
 		api: "openai-completions",
 		provider: PROVIDER_ID,
 		baseUrl,
@@ -89,7 +101,11 @@ export function readLlmConfig(): LlmConfig | null {
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 131_072,
 		maxTokens: 4096,
-	};
+	});
+
+	const model = buildModel(modelId);
+	const fastModel = buildModel(fastModelId);
+	const declared = fastModelId === modelId ? [model] : [model, fastModel];
 
 	const provider = createProvider({
 		id: PROVIDER_ID,
@@ -97,13 +113,17 @@ export function readLlmConfig(): LlmConfig | null {
 		baseUrl,
 		// 存的凭据优先，其次读 LLM_API_KEY；两者都没有时 provider 就是「未配置」
 		auth: { apiKey: envApiKeyAuth("百炼 API key", ["LLM_API_KEY"]) },
-		models: [model],
+		models: declared,
 		api: openAICompletionsApi(),
 	});
 
 	const models = createModels();
 	models.setProvider(provider);
 
-	cached = { models, model: { provider: PROVIDER_ID, modelId } };
+	cached = {
+		models,
+		model: { provider: PROVIDER_ID, modelId },
+		fastModel: { provider: PROVIDER_ID, modelId: fastModelId },
+	};
 	return cached;
 }
