@@ -13,6 +13,7 @@ import {
 	ToolTask,
 	type Conversation,
 	type ConversationView,
+	type Extension,
 	type HookApi,
 	LiveDoc,
 	type LiveState,
@@ -203,6 +204,14 @@ const Chats = defineDoc<{ byExternal: Record<string, number> }>({
 // ── 装配 ─────────────────────────────────────────────────
 let opening: Promise<Harness> | null = null;
 
+/**
+ * 我们自己的扩展（人格 + 工具 + 钩子）。
+ *
+ * 提到模块作用域是为了**任务会话能把它摘掉**：日记任务（收敛/周报/分段…）不需要人格、
+ * 不需要记忆注入、也不该有工具（它只产出文本），见 `configureTaskChat`。
+ */
+let lifediaryExt: Extension | null = null;
+
 export function getHarness(): Promise<Harness> {
 	opening ??= openHarness();
 	return opening;
@@ -219,7 +228,7 @@ async function openHarness(): Promise<Harness> {
 	// pi 自带的那套读写改跑命令：走执行环境，比我们自己写的完整
 	registry.install(CodingTools);
 	registry.install(
-		defineExtension({
+		(lifediaryExt = defineExtension({
 			name: "lifediary",
 			tools: createTools({ memory: memoryEngine, scopeOf }),
 			sections: [{ key: "persona", render: () => PERSONA }],
@@ -300,7 +309,7 @@ async function openHarness(): Promise<Harness> {
 				}),
 			],
 			tasks: [ReminderTask],
-		}),
+		})),
 	);
 
 	const harness = await Harness.open(
@@ -348,6 +357,35 @@ export async function applyChatMode(chat: ResolvedChat, mode: ChatMode): Promise
 	await chat.conversation.configure({ model: target }, CTX);
 	console.log(
 		`[agent] 会话 ${chat.internalId} 切档 → ${mode}（${target.modelId}）`,
+	);
+}
+
+/**
+ * 把会话配成**任务会话**（2026-10-30，模板上移）。
+ *
+ * 三件事，缺一件输出就跑偏：
+ * 1. `instructions` = 服务端渲染好的任务模板。它是 system 段（排在扩展段之后），
+ *    durable 会持久化它 —— 进程重启后任务会话照样拿着同一份 prompt；
+ * 2. `extensions.remove` 摘掉我们自己的扩展：任务不需要人格、不该注入记忆
+ *    （收敛把记忆当事实写进草稿是真出过的事故，见日记收敛与记忆 §4），也不需要提醒工具；
+ * 3. `tools: []` 关掉 pi 自带的读写改跑：任务只产出文本，让它能改文件是纯粹的意外来源。
+ *
+ * `model` 传派生模型引用（带 temperature / max_tokens / response_format），
+ * 不传就沿用会话原档（快档）。
+ */
+export async function configureTaskChat(
+	chat: ResolvedChat,
+	prompt: string,
+	model?: { provider: string; modelId: string },
+): Promise<void> {
+	await chat.conversation.configure(
+		{
+			instructions: prompt,
+			tools: [],
+			...(lifediaryExt ? { extensions: { remove: [lifediaryExt] } } : {}),
+			...(model ? { model } : {}),
+		},
+		CTX,
 	);
 }
 

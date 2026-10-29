@@ -46,8 +46,8 @@ app.use(
   cors({
     origin: "*",
     allowMethods: ["GET", "POST", "OPTIONS"],
-    // X-Conversation-Id 是兼容层的会话绑定头（原生客户端不发预检，但浏览器/WebView 会）
-    allowHeaders: ["Content-Type", "Authorization", "X-Conversation-Id", "Accept"],
+    // X-Conversation-Id 是兼容层的会话绑定头，X-Task 是任务通道的任务名（原生客户端不发预检，但浏览器/WebView 会）
+    allowHeaders: ["Content-Type", "Authorization", "X-Conversation-Id", "X-Task", "Accept"],
   }),
 );
 

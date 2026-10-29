@@ -2,8 +2,16 @@ import { createHash } from "node:crypto";
 import { streamSSE } from "hono/streaming";
 import type { Context, Hono } from "hono";
 import type { ChatMessage } from "@lifediary/shared";
-import { applyChatMode, chatStream, openChat, openOrCreateChat, toolWasUsed } from "./agent.ts";
-import { readLlmConfig } from "./provider.ts";
+import {
+	applyChatMode,
+	chatStream,
+	configureTaskChat,
+	openChat,
+	openOrCreateChat,
+	toolWasUsed,
+} from "./agent.ts";
+import { readLlmConfig, taskModelRef } from "./provider.ts";
+import { renderTask, resolveTask, taskLabel, taskNames, TaskRenderError } from "./tasks.ts";
 import { classifyTurn, jevMode } from "./typesafe.ts";
 
 /**
@@ -36,6 +44,14 @@ interface OpenAiChatRequest {
 	model?: string;
 	messages?: OpenAiMessage[];
 	stream?: boolean;
+	/**
+	 * 任务模板变量（仅 `X-Task` 通道）。
+	 *
+	 * 为什么变量走请求体而不是头/URL：日记原文动辄几 KB，头放不下；
+	 * 也刻意不让客户端再发一份渲染好的 `system`（那就是"模板没上移"）。
+	 * 形状 = `{ "user_messages": "- 今天…", "entry_types": "…" }`，值必须是字符串。
+	 */
+	task_vars?: Record<string, unknown>;
 	/** 以下四个只在直通路径生效；Agent 路径由服务端配置决定（接口文档 §2.4.1） */
 	temperature?: number;
 	max_tokens?: number;
@@ -148,8 +164,46 @@ export function mountOpenAiCompat(app: Hono): void {
 			);
 		}
 
-		// 分流点：有 system = 客户端自己带完整 prompt 的"无头任务"，直通上游；
-		// 没有 system = 真对话，交给 Agent（历史/记忆/工具都在那边）。
+		// 分流点（三路，2026-10-30 起）：
+		// A. 带 `X-Task` → 任务通道：按任务名在**服务端**渲染模板，走 Agent 会话（建会话、落库、可回读）；
+		// B. 带非空 `system` → 直通上游（不建会话，老客户端/纯 OpenAI 端点仍走这条）；
+		// C. 都没有 → 通用聊天 Agent。
+		const rawTask = c.req.header("X-Task")?.trim().toLowerCase();
+		if (rawTask) {
+			const task = resolveTask(rawTask);
+			if (!task) {
+				return c.json(
+					{
+						error: {
+							code: "unknown_task",
+							message: `未知任务 ${rawTask}；可用：${taskNames().join(" / ")}`,
+							type: "invalid_request_error",
+						},
+					},
+					400,
+				);
+			}
+			// 先渲染再开会话：模板炸了就回 500，绝不留半条空会话（写库前失败才干净）
+			let prompt: string;
+			try {
+				prompt = renderTask(task, body.task_vars ?? {});
+			} catch (error) {
+				const detail = error instanceof TaskRenderError ? error.reason : String(error);
+				console.error(`[compat task ${rawTask}] 渲染失败: ${detail}`);
+				return c.json(
+					{
+						error: {
+							code: "task_render_failed",
+							message: `任务 ${rawTask} 渲染失败`,
+							type: "server_error",
+						},
+					},
+					500,
+				);
+			}
+			return agentChat(c, body, messages, { label: taskLabel(task), prompt });
+		}
+
 		const hasSystem = messages.some((m) => m.role === "system");
 		if (hasSystem) {
 			return passthrough(c, body, messages);
@@ -380,7 +434,20 @@ function observeRoute(conversationId: string, messages: ChatMessage[]): void {
 	});
 }
 
-/** Agent 路径：会话制、有记忆与工具（手机聊天走这条） */async function agentChat(c: Context, body: OpenAiChatRequest, messages: ChatMessage[]) {
+/** 任务通道的上下文：模板已渲染好，参数已从请求里取出来 */
+interface TaskContext {
+	/** 日志/留痕用：`converge@diary_convergence_v2` */
+	label: string;
+	/** 渲染完成的整份 prompt（作为 system 段持久化到会话） */
+	prompt: string;
+}
+
+/** Agent 路径：会话制、有记忆与工具（手机聊天走这条） */async function agentChat(
+	c: Context,
+	body: OpenAiChatRequest,
+	messages: ChatMessage[],
+	task?: TaskContext,
+) {
 	const conversationId = conversationIdFor(c.req.header("X-Conversation-Id"), messages);
 	// OpenAI 协议是无状态的：每次带全量 messages，但我们只把最后一条用户消息交给会话。
 	// 更早的历史已经在服务端的 transcript 里了，重复塞进去反而会打架。
@@ -398,15 +465,41 @@ function observeRoute(conversationId: string, messages: ChatMessage[]): void {
 		(await openChat(conversationId)) ??
 		(await openOrCreateChat(conversationId, readLlmConfig()?.fastModel));
 
-	const mode = await decideMode(c.req.header("X-Mode"), conversationId, chat.internalId, messages);
-	await applyChatMode(chat, mode);
+	if (task) {
+		// 任务通道：不判快/深档（任务一律用深档 + 客户端给的采样参数），
+		// 先把渲染好的模板和参数配进会话，再提交那一句输入。
+		try {
+			await configureTaskChat(chat, task.prompt, taskModelRef({
+				temperature: body.temperature,
+				maxTokens: body.max_tokens,
+				responseFormat: body.response_format,
+			}));
+		} catch (error) {
+			const detail = error instanceof Error ? error.message : String(error);
+			console.error(`[compat task ${task.label}] 会话配置失败: ${detail}`);
+			return c.json(
+				{ error: { code: "task_config_failed", message: "任务通道配置失败", type: "server_error" } },
+				500,
+			);
+		}
+		console.log(
+			`[compat task ${task.label}] 会话 ${conversationId}（内部 ${chat.internalId}）` +
+				` 参数 t=${body.temperature ?? "-"} max=${body.max_tokens ?? "-"}` +
+				` rf=${body.response_format ? "on" : "-"}`,
+		);
+	} else {
+		const mode = await decideMode(c.req.header("X-Mode"), conversationId, chat.internalId, messages);
+		await applyChatMode(chat, mode);
+	}
 
 	const input = {
 		conversation: chat.conversation,
+		// 任务会话的输入是那句固定指令（"请整理成稿"），不是整份 prompt ——
+		// 整份 prompt 在 instructions 里，写进 transcript 只会让回读变成一堵墙。
 		text: lastUser.content,
 	};
 
-	observeRoute(conversationId, messages);
+	if (!task) observeRoute(conversationId, messages);
 
 	// ── 非流式：聚合后一次性返回 ──────────────────
 	if (body.stream !== true) {

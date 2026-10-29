@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
 	createModels,
 	createProvider,
@@ -39,6 +40,72 @@ export interface LlmConfig {
 }
 
 let cached: LlmConfig | null | undefined;
+
+/**
+ * 任务通道的**派生模型**（2026-10-30）。
+ *
+ * 为什么需要它：pi-durable 的 `configure()` 只认 `ModelRef`（provider + modelId），
+ * 没有"这一轮传 temperature"的口子；而 pi-ai 会把 `model.samplingParams` 的键
+ * **原样合并进上游请求体**，且最后写入（`openai-completions.js:752`）。
+ * 所以"参数透传"的做法是：按参数派生一个模型 id，把参数挂在它的 `samplingParams` 上，
+ * 再把这个 id 配给会话；会话存的是引用，重启后照样按 id 找回来（id 由参数确定性生成）。
+ *
+ * 只在**任务通道**用：通用聊天仍走 `LLM_MODEL` / `LLM_MODEL_FAST`，行为一个字都不变。
+ */
+export interface TaskSampling {
+	temperature?: number;
+	maxTokens?: number;
+	responseFormat?: unknown;
+}
+
+const taskVariants = new Map<string, Model<"openai-completions">>();
+/** 重新发布 provider（新增派生模型后调用），由 readLlmConfig 装配时挂上 */
+let publishProvider: (() => void) | null = null;
+
+function isFaux(): boolean {
+	return (process.env.LLM_PROVIDER ?? "").trim().toLowerCase() === "faux";
+}
+
+/** 参数 → 稳定后缀。同参数复用同一个派生模型，避免每次请求都往目录里塞新模型 */
+function variantKey(params: TaskSampling): string {
+	const temperature = typeof params.temperature === "number" ? params.temperature : "-";
+	const maxTokens = typeof params.maxTokens === "number" ? params.maxTokens : "-";
+	const format = params.responseFormat ? String(JSON.stringify(params.responseFormat)) : "-";
+	// 只取哈希的前 8 位：够区分，也不会把整段 JSON 塞进模型 id
+	const digest = createHash("sha256").update(format).digest("hex").slice(0, 8);
+	return `t${temperature}m${maxTokens}r${format === "-" ? "-" : digest}`;
+}
+
+/**
+ * 任务通道要用哪个模型引用：在深档模型上挂参数派生一份。
+ *
+ * - faux 模式只有一个模型、上游请求体也不存在 → 直接返回深档引用（参数无处生效，探针用假上游验）；
+ * - 未配置 LLM → 抛错（调用方已经先判过 `readLlmConfig()`，走到这里说明配置被中途清空）。
+ */
+export function taskModelRef(params: TaskSampling): { provider: string; modelId: string } {
+	const config = readLlmConfig();
+	if (!config) throw new Error("LLM 未配置");
+	if (isFaux()) return config.model;
+
+	const id = `${config.model.modelId}#${variantKey(params)}`;
+	if (!taskVariants.has(id)) {
+		const base = config.models.getModel(config.model.provider, config.model.modelId);
+		if (!base) throw new Error("深档模型不在目录里，无法派生任务模型");
+		const samplingParams: Record<string, unknown> = {};
+		if (typeof params.temperature === "number") samplingParams.temperature = params.temperature;
+		// max_tokens 也走 samplingParams：它最后写入，能盖掉模型自身的默认上限
+		if (typeof params.maxTokens === "number") samplingParams.max_tokens = params.maxTokens;
+		if (params.responseFormat) samplingParams.response_format = params.responseFormat;
+		taskVariants.set(id, {
+			...(base as Model<"openai-completions">),
+			id,
+			name: id,
+			samplingParams,
+		});
+		publishProvider?.();
+	}
+	return { provider: config.model.provider, modelId: id };
+}
 
 /**
  * 密钥只从环境变量来，绝不进代码、不进库、不下发给 App。
@@ -107,18 +174,24 @@ export function readLlmConfig(): LlmConfig | null {
 	const fastModel = buildModel(fastModelId);
 	const declared = fastModelId === modelId ? [model] : [model, fastModel];
 
-	const provider = createProvider({
-		id: PROVIDER_ID,
-		name: "百炼（OpenAI 兼容）",
-		baseUrl,
-		// 存的凭据优先，其次读 LLM_API_KEY；两者都没有时 provider 就是「未配置」
-		auth: { apiKey: envApiKeyAuth("百炼 API key", ["LLM_API_KEY"]) },
-		models: declared,
-		api: openAICompletionsApi(),
-	});
-
 	const models = createModels();
-	models.setProvider(provider);
+	// provider 是可替换的：任务通道要往里加"带采样参数的派生模型"，
+	// 每次加完重发一次（Models 被 durable 代理着读，写进去下一轮就生效）
+	const publish = (): void => {
+		models.setProvider(
+			createProvider({
+				id: PROVIDER_ID,
+				name: "百炼（OpenAI 兼容）",
+				baseUrl,
+				// 存的凭据优先，其次读 LLM_API_KEY；两者都没有时 provider 就是「未配置」
+				auth: { apiKey: envApiKeyAuth("百炼 API key", ["LLM_API_KEY"]) },
+				models: [...declared, ...taskVariants.values()],
+				api: openAICompletionsApi(),
+			}),
+		);
+	};
+	publish();
+	publishProvider = publish;
 
 	cached = {
 		models,

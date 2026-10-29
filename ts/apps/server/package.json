@@ -10,6 +10,7 @@
     "durable": "tsx scripts/durable-probe.ts",
     "http": "tsx scripts/http-probe.ts",
     "diary": "tsx scripts/diary-probe.ts",
+    "tasks": "tsx scripts/task-probe.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
