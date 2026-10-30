@@ -278,9 +278,12 @@ try {
 			}
 			const tools = sent.tools as unknown[] | undefined;
 			check(!tools || tools.length === 0, `${name} 没有给模型工具`, `${tools?.length ?? 0} 个`);
+			// 必须是**真实模型名**、一个字符都不能多：派生 id（`fake-deep#t0.4m4000r-`）
+			// 只活在 harness 目录里，漏到请求体上游就 404（2026-10-30 真实模型联调踩到，
+			// 当时写的是 startsWith，假上游把带后缀的 id 也放过了 —— 改成全等）。
 			check(
-				String(sent.model ?? "").startsWith("fake-deep"),
-				`${name} 走深档派生模型`,
+				String(sent.model ?? "") === "fake-deep",
+				`${name} 走深档模型且上游拿到的是真实模型名`,
 				String(sent.model),
 			);
 		}

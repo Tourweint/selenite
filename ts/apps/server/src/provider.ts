@@ -91,7 +91,13 @@ export function taskModelRef(params: TaskSampling): { provider: string; modelId:
 	if (!taskVariants.has(id)) {
 		const base = config.models.getModel(config.model.provider, config.model.modelId);
 		if (!base) throw new Error("深档模型不在目录里，无法派生任务模型");
-		const samplingParams: Record<string, unknown> = {};
+		const samplingParams: Record<string, unknown> = {
+			// 关键：派生模型只活在 harness 的模型目录里，**上游必须收到真实模型名**。
+			// 2026-10-30 真机联调抓到：不盖这一行，上游收到 `qwen-plus#t0.4m4000r-` → 404
+			// `model_not_found` → Agent 空轮 → 界面只有"这次没能生成回复"。
+			// 能盖是因为 pi-ai 把 `samplingParams` **最后** `Object.assign` 进请求体（openai-completions.js:752）。
+			model: config.model.modelId,
+		};
 		if (typeof params.temperature === "number") samplingParams.temperature = params.temperature;
 		// max_tokens 也走 samplingParams：它最后写入，能盖掉模型自身的默认上限
 		if (typeof params.maxTokens === "number") samplingParams.max_tokens = params.maxTokens;
