@@ -374,6 +374,26 @@ try {
 	} else {
 		check(false, "重启前没拿到 converge 的会话 id");
 	}
+
+	// ── 7. 每次调用一个会话；任务会话不进"历史对话" ──────────
+	console.log("\n· 7. 任务会话：一次调用一条、不进列表");
+	const first = await callTask("converge", VARS.converge, "请整理成稿", PARAMS.converge);
+	const second = await callTask("converge", VARS.converge, "请整理成稿", PARAMS.converge);
+	const firstId = String(first.json.id ?? "");
+	const secondId = String(second.json.id ?? "");
+	check(firstId !== secondId, "同样的任务调两次 → 两条不同会话", `${firstId} / ${secondId}`);
+	check(
+		firstId.startsWith("task-") && secondId.startsWith("task-"),
+		"任务会话 id 带 task- 前缀（列表据此过滤）",
+		`${firstId} / ${secondId}`,
+	);
+	const listed = (await (await fetch(`${BASE}/api/v1/agent/chats`)).json()) as {
+		chats?: { conversationId?: string }[];
+	};
+	const leaked = (listed.chats ?? []).filter((chat) => (chat.conversationId ?? "").startsWith("task-"));
+	check(leaked.length === 0, "历史对话列表里没有任务会话", `${leaked.length} 条混进来`);
+	const fresh = await readMessages(firstId);
+	check(fresh.length >= 2, "任务会话本身仍可按 id 回读", `${fresh.length} 条`);
 } finally {
 	server.kill();
 	await sleep(300);

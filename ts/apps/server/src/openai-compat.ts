@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { streamSSE } from "hono/streaming";
 import type { Context, Hono } from "hono";
 import type { ChatMessage } from "@lifediary/shared";
@@ -8,6 +8,7 @@ import {
 	configureTaskChat,
 	openChat,
 	openOrCreateChat,
+	TASK_CONVERSATION_PREFIX,
 	toolWasUsed,
 } from "./agent.ts";
 import { readLlmConfig, taskModelRef } from "./provider.ts";
@@ -87,8 +88,18 @@ function textOf(content: unknown): string {
  *
  * 想精确控制的话可以带 `X-Conversation-Id` 头，优先于推导值。
  */
-function conversationIdFor(rawHeader: string | undefined, messages: ChatMessage[]): string {
+function conversationIdFor(
+	rawHeader: string | undefined,
+	messages: ChatMessage[],
+	options?: { freshPrefixedWith?: string },
+): string {
 	if (rawHeader?.trim()) return rawHeader.trim();
+	// 任务通道：**一次调用一个会话**。任务之间没有对话关系，复用同一个 id 只会把
+	// 同一个任务的多次调用挤成一条（实测：三次收敛滚进 186099d，token 越滚越长、
+	// 回读也分不清哪次是哪次）。要续跑就显式带 X-Conversation-Id。
+	if (options?.freshPrefixedWith) {
+		return `${options.freshPrefixedWith}${randomUUID()}`;
+	}
 	const firstUser = messages.find((message) => message.role === "user")?.content ?? "";
 	const digest = createHash("sha256").update(firstUser).digest("hex").slice(0, 32);
 	return `oa-${digest}`;
@@ -448,7 +459,11 @@ interface TaskContext {
 	messages: ChatMessage[],
 	task?: TaskContext,
 ) {
-	const conversationId = conversationIdFor(c.req.header("X-Conversation-Id"), messages);
+	const conversationId = task
+		? conversationIdFor(c.req.header("X-Conversation-Id"), messages, {
+				freshPrefixedWith: TASK_CONVERSATION_PREFIX,
+			})
+		: conversationIdFor(c.req.header("X-Conversation-Id"), messages);
 	// OpenAI 协议是无状态的：每次带全量 messages，但我们只把最后一条用户消息交给会话。
 	// 更早的历史已经在服务端的 transcript 里了，重复塞进去反而会打架。
 	const lastUser = [...messages].reverse().find((message) => message.role === "user");

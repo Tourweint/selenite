@@ -193,6 +193,15 @@ function recallContext(conversationId: number, text: string): string {
  * 所以对外的 id 仍是服务端生成的 uuid，存在这个 session 文档里做映射 ——
  * "id 不可猜"这条性质必须保住，否则谁都能编一个数字去读别人的历史。
  */
+/**
+ * 任务会话的 id 前缀（2026-10-31，与 `openai-compat.ts` 的 `X-Task` 通道约定）。
+ *
+ * 定义在这里是因为 `listChats` 要用它过滤——任务会话不该出现在"历史对话"列表里：
+ * 它们的首句是"请整理成稿"这种**指令**，不是用户说过的话，混进列表只会让人莫名其妙。
+ * 正文照旧能按 id 回读（`GET /api/v1/agent/chat/:id/messages`），只是不露头。
+ */
+export const TASK_CONVERSATION_PREFIX = "task-";
+
 const Chats = defineDoc<{ byExternal: Record<string, number> }>({
 	kind: "lifediary.chats",
 	version: 1,
@@ -861,7 +870,11 @@ export async function listChats(limit = 50): Promise<ChatIndexEntry[]> {
 	if (!readLlmConfig()) return [];
 	const harness = await getHarness();
 	const chats = await harness.snapshot(Chats, CTX);
-	const pairs = Object.entries(chats?.byExternal ?? {}).slice(-limit);
+	// 任务会话（`X-Task` 通道产生）不进"历史对话"：它们的首句是"请整理成稿"这类指令，
+	// 不是用户说过的话（2026-10-31）。正文仍可按 id 回读，只是不在列表里露头。
+	const pairs = Object.entries(chats?.byExternal ?? {})
+		.filter(([conversationId]) => !conversationId.startsWith(TASK_CONVERSATION_PREFIX))
+		.slice(-limit);
 	const entries: ChatIndexEntry[] = [];
 
 	for (const [conversationId, internalId] of pairs) {
