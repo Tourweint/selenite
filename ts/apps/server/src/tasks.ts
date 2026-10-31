@@ -75,6 +75,38 @@ const SPECS: readonly TaskSpec[] = [
 		vars: ["tone", "question_length", "depth"],
 		input: "请按上面的语气与规范，生成今天的一个问题。",
 	},
+	// ── 2026-10-31 方案 §6 步骤 3 批次（App 补齐剩余任务）──────────────
+	// 变量名跟模板资产走（方案 §5 表里的 entry_text 等是示意，实际以资产占位符为准）。
+	{
+		name: "entry_view_polish",
+		asset: "entry_view_polish_v1.md",
+		vars: ["original_text"],
+		input: "请照上面的格式输出",
+	},
+	{
+		name: "entry_view_digest",
+		asset: "entry_view_digest_v1.md",
+		vars: ["original_text"],
+		input: "请照上面的格式输出",
+	},
+	{
+		name: "emotion_deep_dive",
+		asset: "emotion_deep_dive_v1.md",
+		vars: ["recent_messages", "style_constraints"],
+		input: "给我一个往下走一层的问题",
+	},
+	{
+		name: "memory_curation",
+		asset: "memory_curation_v2.md",
+		vars: ["entry_text", "current_memory"],
+		input: "请按 Default Deny 维护记忆",
+	},
+	{
+		name: "memory_merge",
+		asset: "memory_merge_v2.md",
+		vars: ["blocks_json", "new_facts", "word_limit"],
+		input: "请合并画像",
+	},
 ];
 
 /** 渲染失败（缺变量 / 资产缺失）：调用方据此回 500，且**不落半条会话** */
