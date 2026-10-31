@@ -192,14 +192,17 @@ export function readLlmConfig(): LlmConfig | null {
 		return null;
 	}
 
-	const modelId = process.env.LLM_MODEL?.trim() || "qwen-plus";
+	// 2026-10-31 方案 D1：**一个模型**（快=深同款）。换模型会把上游缓存清零，
+	// 快慢一律交给 `enable_thinking` 变体（`chatModelRef`）。默认值改成 deepseek-v4.1-flash：
+	// 实测同一句话 qwen-flash ~1.0s，deepseek-v4.1-flash 关思考 0.77–0.93s，质量更好。
+	// `LLM_MODEL_FAST` 保留为**部署别名**（语义已不再是"小模型"），留空则跟随 `LLM_MODEL`。
+	const modelId = process.env.LLM_MODEL?.trim() || "deepseek-v4.1-flash";
 	const baseUrl = (
 		process.env.LLM_BASE_URL?.trim() ||
 		"https://dashscope.aliyuncs.com/compatible-mode/v1"
 	).replace(/\/+$/, "");
 
-	// 快档：同 provider 下再挂一个模型 id（不思考的那类）。留空 = 退回单模型
-	const fastModelId = process.env.LLM_MODEL_FAST?.trim() || "qwen-flash";
+	const fastModelId = process.env.LLM_MODEL_FAST?.trim() || modelId;
 
 	const buildModel = (id: string): Model<"openai-completions"> => ({
 		id,
