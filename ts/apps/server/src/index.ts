@@ -28,6 +28,7 @@ import { mountDiary } from "./diary.ts";
 import { mountOpenAiCompat } from "./openai-compat.ts";
 import { PairingStore, buildPairUrl, resolvePairBase } from "./pairing.ts";
 import { pairPage } from "./pair-page.ts";
+import { syncDiaryToMemory } from "./memory-ingest.ts";
 import { readLlmConfig } from "./provider.ts";
 
 // Node 20.12+ 自带 .env 加载；文件不存在时静默跳过，不让本地启动被环境文件卡住。
@@ -352,6 +353,15 @@ const port = Number(process.env.PORT ?? 8082);
 
 serve({ fetch: app.fetch, port }, (info) => {
   const mode = readLlmConfig() ? "真实上游" : "mock（未配置 LLM_API_KEY）";
+  // 2026-10-31：启动即把日记镜像里的近况摄入记忆（幂等 upsert）。
+  // 目的不是"启动时干活"，而是让记忆库**一开始就有东西**——之前它是空的，
+  // 注入点接好了也注入不出内容（记忆方案 §0 记的就是这个坑）。
+  try {
+    const ingested = syncDiaryToMemory(3, { force: true });
+    if (ingested > 0) console.log(`[memory] 启动摄入日记 ${ingested} 条`);
+  } catch (error) {
+    console.warn(`[memory] 启动摄入失败（不影响服务）: ${error instanceof Error ? error.message : error}`);
+  }
   const authLabel = process.env.AGENT_TOKEN?.trim()
     ? "共享令牌 + 配对设备凭据"
     : "未配 AGENT_TOKEN —— 仅本机 / 已配对设备可访问";

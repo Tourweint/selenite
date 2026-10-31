@@ -31,6 +31,7 @@ import {
 	type MemoryScope,
 } from "@lifediary/memory";
 import { diaryStore } from "./diary.ts";
+import { recentDiaryMemories, syncDiaryToMemory } from "./memory-ingest.ts";
 import { chatModelRef, readLlmConfig } from "./provider.ts";
 import { ReminderTask } from "./reminder.ts";
 import { createSkillStore, type SkillStore } from "./skills.ts";
@@ -217,16 +218,24 @@ function recallContext(conversationId: number, text: string): string {
  */
 export function taskMemoryBlock(days = 3, limit = 12): string {
 	try {
-		const since = new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
-		const entries = diaryStore().recent(since, limit);
-		if (entries.length === 0) return "";
-		const lines = entries
-			.filter((entry) => (entry.finalText ?? "").trim().length > 0)
-			.map((entry) => {
-				const text = String(entry.finalText).replace(/\s+/g, " ").trim().slice(0, 120);
-				return `- ${entry.entryDate ?? "（无日期）"}：${text}`;
-			});
-		if (lines.length === 0) return "";
+		// 2026-10-31 二次收口：**先把镜像里的成稿摄入记忆，再从记忆取**。
+		// 之前这里直接读 diary.sqlite，等于在记忆系统旁边开了条捷径——聊天走记忆、任务读镜像，
+		// 两套并存，才会出现"记忆库是空的"这种怪事。现在两边同一个源。
+		syncDiaryToMemory(days);
+		let items = recentDiaryMemories(days, limit);
+		if (items.length === 0) {
+			// 兜底：记忆库还没就绪（例如 MEMORY_ENABLED=false）时，至少别让提问瞎问
+			const since = new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
+			items = diaryStore()
+				.recent(since, limit)
+				.filter((entry) => (entry.finalText ?? "").trim().length > 0)
+				.map((entry) => ({
+					date: entry.entryDate ?? "",
+					text: String(entry.finalText).replace(/\s+/g, " ").trim(),
+				}));
+		}
+		if (items.length === 0) return "";
+		const lines = items.map((item) => `- ${item.date || "（无日期）"}：${item.text.slice(0, 120)}`);
 		return [
 			"<memory>",
 			`最近 ${days} 天你自己记下的（只作参考：可以呼应，不要逐条复述，也不要评价记多记少）：`,
@@ -234,7 +243,7 @@ export function taskMemoryBlock(days = 3, limit = 12): string {
 			"</memory>",
 		].join("\n");
 	} catch (error) {
-		// 记忆读失败绝不能让任务失败（日记镜像可能还没建库）
+		// 记忆读失败绝不能让任务失败（镜像/记忆库可能都还没建）
 		const detail = error instanceof Error ? error.message : String(error);
 		console.warn(`[memory] 近况读取失败，本次不注入: ${detail}`);
 		return "";

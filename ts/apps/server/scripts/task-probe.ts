@@ -1,3 +1,4 @@
+import { DatabaseSync } from "node:sqlite";
 /**
  * 任务通道（`X-Task`）端到端探针 —— 2026-10-30。
  *
@@ -453,6 +454,24 @@ try {
 	check(leaked.length === 0, "历史对话列表里没有任务会话", `${leaked.length} 条混进来`);
 	const fresh = await readMessages(firstId);
 	check(fresh.length >= 2, "任务会话本身仍可按 id 回读", `${fresh.length} 条`);
+
+	// 记忆里确实有"日记来源"的记录：B 路摄入器真的写了库，而不是只在读镜像
+	try {
+		const mem = new DatabaseSync(MEMORY_DB);
+		const rows = mem.prepare("SELECT id, content FROM memories WHERE id LIKE 'diary:%'").all() as {
+			id: string;
+			content: string;
+		}[];
+		check(rows.length >= 3, "日记已摄入记忆（id 前缀 diary:）", `${rows.length} 条`);
+		check(
+			rows.some((row) => row.content.includes(fixtureText.slice(0, 12))),
+			"记忆内容含 fixture 的成稿",
+			rows[0]?.content.slice(0, 40) ?? "",
+		);
+		mem.close();
+	} catch (error) {
+		check(false, "读取记忆库失败", error instanceof Error ? error.message : String(error));
+	}
 } finally {
 	server.kill();
 	await sleep(300);
