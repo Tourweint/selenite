@@ -1,5 +1,6 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Context } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { contentText } from "@earendil-works/pi-ai";
@@ -31,6 +32,7 @@ import {
 } from "@lifediary/memory";
 import { chatModelRef, readLlmConfig } from "./provider.ts";
 import { ReminderTask } from "./reminder.ts";
+import { createSkillStore, type SkillStore } from "./skills.ts";
 import { createTools } from "./tools.ts";
 
 /**
@@ -161,6 +163,21 @@ export const memoryEngine: MemoryEngine | null = (() => {
 	}
 })();
 
+// ── 技能 ─────────────────────────────────────────────────
+/** 技能目录：默认跟着代码走（apps/server/skills/），可用 AGENT_SKILLS_DIR 换 */
+const SKILLS_DIR =
+	process.env.AGENT_SKILLS_DIR?.trim() || fileURLToPath(new URL("../skills", import.meta.url));
+
+export const skillStore: SkillStore | null = (() => {
+	try {
+		return createSkillStore(SKILLS_DIR);
+	} catch (error) {
+		const detail = error instanceof Error ? error.message : String(error);
+		console.warn(`技能目录加载失败，本次无技能可用: ${detail}`);
+		return null;
+	}
+})();
+
 /**
  * 记忆作用域跟着**内部会话 id** 走。
  *
@@ -214,10 +231,10 @@ const Chats = defineDoc<{ byExternal: Record<string, number> }>({
 let opening: Promise<Harness> | null = null;
 
 /**
- * 我们自己的扩展（人格 + 工具 + 钩子）。
+ * 我们自己的扩展（人格 + 技能索引 + 工具 + 钩子）。
  *
  * 提到模块作用域是为了**任务会话能把它摘掉**：日记任务（收敛/周报/分段…）不需要人格、
- * 不需要记忆注入、也不该有工具（它只产出文本），见 `configureTaskChat`。
+ * 不需要技能、不需要记忆注入、也不该有工具（它只产出文本），见 `configureTaskChat`。
  */
 let lifediaryExt: Extension | null = null;
 
@@ -239,8 +256,17 @@ async function openHarness(): Promise<Harness> {
 	registry.install(
 		(lifediaryExt = defineExtension({
 			name: "lifediary",
-			tools: createTools({ memory: memoryEngine, scopeOf }),
-			sections: [{ key: "persona", render: () => PERSONA }],
+			tools: createTools({ memory: memoryEngine, scopeOf, skills: skillStore }),
+			sections: [
+				{ key: "persona", render: () => PERSONA },
+				// L1 技能索引（2026-10-31 方案 D5）：排在 persona 后（"会话后部"），按会话冻结——
+				// 首轮渲染后技能目录再变也不改写本会话，否则 durable 会追加新 pi.system、缓存前缀整段作废。
+				// 没有技能时 render 返回 undefined，整个 section 省略。
+				{
+					key: "skills",
+					render: (input) => skillStore?.indexFor(Number(input.conversationId)),
+				},
+			],
 			hooks: [
 				// 权限闸门：pi 本身不带，这是唯一能拦下工具调用的地方
 				hook(ToolTask, {

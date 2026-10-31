@@ -2,6 +2,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineTool } from "@earendil-works/pi-durable";
 import { scopeKey, type MemoryEngine, type MemoryKind, type MemoryScope } from "@lifediary/memory";
 import { ReminderTask } from "./reminder.ts";
+import type { SkillStore } from "./skills.ts";
 
 /**
  * 我们自己的工具。
@@ -10,8 +11,8 @@ import { ReminderTask } from "./reminder.ts";
  * 更完整的（走执行环境、输出分页、图片处理、edit 的差异化写入），
  * 而且它的路径语义跟沙箱/远程环境是一致的。自己重写只会更差。
  *
- * 所以这里只剩三件事：**记住**、**回忆**、**提醒**。
- * 这三件事是"个人 Agent"区别于编码 Agent 的地方，必须自己实现。
+ * 所以这里是：**记住**、**回忆**、**提醒**（个人 Agent 区别于编码 Agent 的部分）
+ * 加一个 **skill**（2026-10-31 方案 D5：技能正文按需取，不进 system）。
  */
 
 const MEMORY_KINDS: MemoryKind[] = ["fact", "episode", "preference", "entity"];
@@ -21,6 +22,8 @@ export interface ToolDeps {
 	memory: MemoryEngine | null;
 	/** 内部会话 id → 记忆作用域 */
 	scopeOf: (conversationId: number) => MemoryScope;
+	/** 技能库；为 null 时 skill 工具不上（技能目录不存在/为空，索引也不会渲染） */
+	skills?: SkillStore | null;
 }
 
 function text(value: string) {
@@ -121,5 +124,27 @@ export function createTools(deps: ToolDeps) {
 		},
 	});
 
-	return [remember, recall, remind];
+	if (!deps.skills) return [remember, recall, remind];
+	const skills = deps.skills;
+
+	const skill = defineTool({
+		name: "skill",
+		description:
+			"取一份技能手册（完整流程）。会话的 skills 索引里列出了可用技能；" +
+			"要按某个流程引导对方时，先调它拿到手册，再照着做。",
+		parameters: Type.Object({
+			name: Type.String({ description: "技能名，必须是索引里列出的名字" }),
+		}),
+		execute: async (args) => {
+			const manual = skills.manual(args.name);
+			if (!manual) {
+				return text(
+					`没有叫「${args.name}」的技能。可用：${skills.names().join("、") || "（无）"}`,
+				);
+			}
+			return text(manual);
+		},
+	});
+
+	return [remember, recall, remind, skill];
 }
