@@ -31,6 +31,8 @@ const UPSTREAM_PORT = PORT + 1;
 const BASE = `http://127.0.0.1:${PORT}`;
 const DB = ".data/probe-task.sqlite";
 const MEMORY_DB = ".data/probe-task-memory.db";
+/** 日记镜像（记忆 B 路的数据源；探针用独立库，不碰生产 mirror） */
+const DIARY_DB = ".data/probe-task-diary.sqlite";
 
 /** App 仓库的 prompt 资产目录（黄金用例的对照源；跨仓只读） */
 const APP_PROMPTS_DIR = "<lifediary 手机仓>/core/ai/src/main/assets/prompts";
@@ -127,6 +129,7 @@ function startServer(): ChildProcess {
 			AGENT_TOKEN: "",
 			AGENT_DB_PATH: DB,
 			MEMORY_DB_PATH: MEMORY_DB,
+			DIARY_DB_PATH: DIARY_DB,
 			JEV_ROUTE: "off",
 			NODE_OPTIONS: "",
 		},
@@ -220,12 +223,31 @@ function systemMessageOf(body: Record<string, unknown>): string {
 
 rmSync(DB, { force: true });
 rmSync(MEMORY_DB, { force: true });
+rmSync(DIARY_DB, { force: true });
 
 await new Promise<void>((resolve) => upstream.listen(UPSTREAM_PORT, "127.0.0.1", resolve));
 let server = startServer();
 
 try {
 	await waitForReady();
+
+	// ── 0. 记忆 B 路的 fixture（方案 §3/§7.1）：先往镜像库推三天成稿 ──────
+	console.log("\n· 0. 日记镜像 fixture（记忆 B 路的数据源）");
+	const today = new Date();
+	const dayStr = (offset: number) => new Date(today.getTime() - offset * 86_400_000).toISOString().slice(0, 10);
+	const fixtureText = "和同事把一个拖了两周的问题定下来了，方案改成两步走";
+	const syncRes = await fetch(`${BASE}/api/v1/diary/sync`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({
+			entries: [
+				{ id: "probe-f1", entryDate: dayStr(3), finalText: "今天把评审的边界问题补清楚了。", status: "CONFIRMED", types: ["WORK_STUDY"] },
+				{ id: "probe-f2", entryDate: dayStr(2), finalText: "晚上在江边跑了七公里，风很大。", status: "CONFIRMED", types: ["BODY"] },
+				{ id: "probe-f3", entryDate: dayStr(1), finalText: fixtureText, status: "CONFIRMED", types: ["WORK_STUDY"] },
+			],
+		}),
+	});
+	check(syncRes.status === 200, "fixture 推进镜像库", String(syncRes.status));
 
 	// ── 1. 四个任务：各自一条会话、可回读、参数透传 ──────────
 	console.log("\n· 1. 四个任务各跑一遍（X-Task → Agent 会话 → 落库 → 回读）");
@@ -392,6 +414,26 @@ try {
 		check(false, "重启前没拿到 converge 的会话 id");
 	}
 
+	// ── 6b. 记忆注入：只有声明了 memory 的任务才带 <memory>（方案 §4 例外表）──
+	console.log("\n· 6b. 近况记忆注入（question 有、converge 没有）");
+	{
+		const before = recorded.length;
+		const ask = await callTask("question", VARS.question, "请按上面的语气与规范，生成今天的一个问题。", PARAMS.question);
+		check(ask.status === 200, "question 返回 200", String(ask.status));
+		const sent = recorded[before]?.body;
+		if (sent) {
+			const system = systemMessageOf(sent);
+			check(system.includes("<memory>"), "question 的 system 里带了近况记忆块");
+			check(system.includes(fixtureText.slice(0, 12)), "记忆块里含 fixture 的成稿内容");
+		}
+		const beforeConverge = recorded.length;
+		await callTask("converge", VARS.converge, "请整理成稿", PARAMS.converge);
+		const convergeBody = recorded[beforeConverge]?.body;
+		if (convergeBody) {
+			check(!systemMessageOf(convergeBody).includes("<memory>"), "converge 不注入记忆（成稿类）");
+		}
+	}
+
 	// ── 7. 每次调用一个会话；任务会话不进"历史对话" ──────────
 	console.log("\n· 7. 任务会话：一次调用一条、不进列表");
 	const first = await callTask("converge", VARS.converge, "请整理成稿", PARAMS.converge);
@@ -419,6 +461,7 @@ try {
 	rmSync(`${DB}-wal`, { force: true });
 	rmSync(`${DB}-shm`, { force: true });
 	rmSync(MEMORY_DB, { force: true });
+	rmSync(DIARY_DB, { force: true });
 }
 
 /** 逐字节对照：harness 的资产必须与 App 的同一份资产完全一样（允许 App 用 CRLF） */

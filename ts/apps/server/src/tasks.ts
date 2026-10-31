@@ -36,6 +36,14 @@ export interface TaskSpec {
 	 * 写进 transcript 会让回读出来的历史变成一大段规则，用户看不懂。
 	 */
 	input: string;
+	/**
+	 * 要不要注入「近况记忆」（2026-10-31，记忆方案 §4 注入例外）。
+	 *
+	 * `"diary"` = 从日记镜像读近 N 天已确认成稿，拼在 instructions 尾部注入。
+	 * 只给「需要知道最近记了什么」的任务：提问、日记回顾。
+	 * 成稿类（收敛/成章/周报/视角/分段）一律不注入——收敛曾把记忆当事实写进草稿。
+	 */
+	memory?: "diary";
 }
 
 const SPECS: readonly TaskSpec[] = [
@@ -74,6 +82,7 @@ const SPECS: readonly TaskSpec[] = [
 		asset: "question_generation_v1.md",
 		vars: ["tone", "question_length", "depth"],
 		input: "请按上面的语气与规范，生成今天的一个问题。",
+		memory: "diary",
 	},
 	// ── 2026-10-31 方案 §6 步骤 3 批次（App 补齐剩余任务）──────────────
 	// 变量名跟模板资产走（方案 §5 表里的 entry_text 等是示意，实际以资产占位符为准）。
@@ -114,6 +123,7 @@ const SPECS: readonly TaskSpec[] = [
 		asset: "diary_review_v1.md",
 		vars: ["recent_entries"],
 		input: "请做这次回顾",
+		memory: "diary",
 	},
 ];
 

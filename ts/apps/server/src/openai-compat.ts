@@ -10,6 +10,7 @@ import {
 	openChat,
 	openOrCreateChat,
 	TASK_CONVERSATION_PREFIX,
+	taskMemoryBlock,
 } from "./agent.ts";
 import { chatModelRef, readLlmConfig, taskModelRef } from "./provider.ts";
 import { renderTask, resolveTask, taskLabel, taskNames, TaskRenderError } from "./tasks.ts";
@@ -212,7 +213,14 @@ export function mountOpenAiCompat(app: Hono): void {
 					500,
 				);
 			}
-			return agentChat(c, body, messages, { label: taskLabel(task), prompt });
+			// 近况记忆（2026-10-31，记忆方案 §4）：只有声明了 `memory` 的任务才注入，
+			// 且**拼在 instructions 尾部**——模板前缀不变，缓存照旧命中（方案 §2.3 实测）。
+			const memory = task.memory === "diary" ? taskMemoryBlock() : "";
+			const promptWithMemory = memory ? `${prompt}\n\n${memory}` : prompt;
+			if (memory) {
+				console.log(`[compat task ${taskLabel(task)}] 注入近况记忆 ${memory.length} 字符`);
+			}
+			return agentChat(c, body, messages, { label: taskLabel(task), prompt: promptWithMemory });
 		}
 
 		const hasSystem = messages.some((m) => m.role === "system");

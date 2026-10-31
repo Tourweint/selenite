@@ -236,6 +236,26 @@ export class DiaryStore {
 	}
 
 	/**
+	 * 最近若干天的**已确认成稿**（2026-10-31，方案 §3 的 B 路：记忆的近况数据源）。
+	 *
+	 * 只读、只给"已确认 + 未删除"，按日期倒序。用于给 `question` / `diary_review`
+	 * 这类"需要知道最近记了什么"的任务注入上下文——它们不该由 App 在 prompt 里拼，
+	 * 那是两处真相（见记忆方案 §4）。
+	 *
+	 * 用 `entry_date`（本地日历日字符串）比较，不用 updated_at：用户可能今天补记前天的。
+	 */
+	recent(sinceDate: string, limit = 20): DiaryEntryWire[] {
+		const rows = this.db
+			.prepare(
+				"SELECT * FROM diary_entries WHERE deleted = 0 AND status = 'CONFIRMED' " +
+					"AND entry_date IS NOT NULL AND entry_date >= ? " +
+					"ORDER BY entry_date DESC, updated_at DESC LIMIT ?",
+			)
+			.all(sinceDate, limit) as Row[];
+		return rows.map((row) => toWire(rowToEntry(row)));
+	}
+
+	/**
 	 * 一次请求完成「上行增量 + 下行增量」。
 	 *
 	 * `since` 是**闭区间**（`updated_at >= since`）：同一毫秒写入的行宁可重复下发，

@@ -30,6 +30,7 @@ import {
 	type MemoryEngine,
 	type MemoryScope,
 } from "@lifediary/memory";
+import { diaryStore } from "./diary.ts";
 import { chatModelRef, readLlmConfig } from "./provider.ts";
 import { ReminderTask } from "./reminder.ts";
 import { createSkillStore, type SkillStore } from "./skills.ts";
@@ -200,6 +201,42 @@ function recallContext(conversationId: number, text: string): string {
 	} catch (error) {
 		const detail = error instanceof Error ? error.message : String(error);
 		console.warn(`记忆召回失败，本轮不使用记忆: ${detail}`);
+		return "";
+	}
+}
+
+/**
+ * 任务会话的"近况记忆"块（2026-10-31，记忆方案 §3 的 B 路 + §4 注入例外）。
+ *
+ * 给**需要知道最近记了什么**的任务用（目前只有 `question` / `diary_review`）：
+ * 数据源是日记镜像（`diary.sqlite` 近 N 天 `CONFIRMED`），不经过 App——
+ * App 不再拼画像/近况（它是两处真相的源头，见方案 D7）。
+ *
+ * 位置：**拼在 instructions 的尾部**。这样模板那一大段前缀不变，缓存照旧命中，
+ * 只有"近况"这一小段是新的（§2.3 实测：尾部追加不破坏前缀）。
+ */
+export function taskMemoryBlock(days = 3, limit = 12): string {
+	try {
+		const since = new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
+		const entries = diaryStore().recent(since, limit);
+		if (entries.length === 0) return "";
+		const lines = entries
+			.filter((entry) => (entry.finalText ?? "").trim().length > 0)
+			.map((entry) => {
+				const text = String(entry.finalText).replace(/\s+/g, " ").trim().slice(0, 120);
+				return `- ${entry.entryDate ?? "（无日期）"}：${text}`;
+			});
+		if (lines.length === 0) return "";
+		return [
+			"<memory>",
+			`最近 ${days} 天你自己记下的（只作参考：可以呼应，不要逐条复述，也不要评价记多记少）：`,
+			...lines,
+			"</memory>",
+		].join("\n");
+	} catch (error) {
+		// 记忆读失败绝不能让任务失败（日记镜像可能还没建库）
+		const detail = error instanceof Error ? error.message : String(error);
+		console.warn(`[memory] 近况读取失败，本次不注入: ${detail}`);
 		return "";
 	}
 }
