@@ -23,18 +23,19 @@ import { classifyTurn, jevMode } from "./typesafe.ts";
  * 手机 App（Kotlin）的设计是"LLM 唯一通道 = 内置服务"，请求路径固定为
  * `{baseUrl}/chat/completions`，SSE 解析固定读 `choices[0].delta.content` 和 `[DONE]`。
  *
- * 两条路径（2026-10-29 实测后分流，见 docs/基线文档/接口文档.md §2.4.1）：
+ * **只剩两条路（2026-10-31，方案 D10 步骤 5 删掉了"直通"）**，见 `接口文档.md` §2.4.1：
  *
- * **A. 直通（请求里带非空 `system`）** —— 原样转给上游模型，不建会话、无工具、无记忆。
- *    App 的模板类任务（收敛 / 周报 / 分段 / 记忆策展 / 题目 / 深挖 / 回忆开场白）都属于这一类：
- *    它们的整份 prompt 在 `system` 里，交给 Agent 会被丢掉（只喂最后一条 user 的"请整理成稿"），
- *    实测那次请求跑了 129 秒、产出为空。直通模式把 `temperature` / `max_tokens` /
- *    `response_format` / `reasoning_effort` 一并转给上游，客户端的预算因此真正生效。
+ * **A. 任务通道（`X-Task` / body `task`）** —— 服务端按任务名渲染模板，走 durable 会话（建会话、落库、可回读）；
+ *    无人格、无工具，`question` / `diary_review` 额外注入 `<memory>` 近况块。
+ *    这类请求的 `temperature` / `max_tokens` / `response_format` 仍然生效（派生模型透传）。
  *
- * **B. Agent（没有 `system`）** —— 对话走 durable 会话：历史在服务端、有记忆、有工具。
- *    App 的聊天就是这条，客户端每次带全量 messages 也只取最后一条 user。
+ * **B. 聊天（不带 task）** —— durable 会话：有历史、有记忆、有工具、有技能。
+ *    客户端每次带全量 messages，但只取最后一条 user。
  *
- * 代价（如实登记）：A 路径没有会话概念，因此**不认 `X-Conversation-Id`**，也不落库、不写记忆。
+ * **带 `system` 的请求一律 400（`system_prompt_not_supported`）。**
+ * 原因：直通分支（"整套 system 原样转发、不建会话"）已于 2026-10-31 删除——生产端 12 个任务
+ * 全部改走任务通道、聊天从不带 system，它已无调用方。留一个"带 system 就静默降级"的后门
+ * 比报错更危险：模板会被当普通消息丢掉，产出看着成功、其实是残废。
  */
 
 interface OpenAiMessage {
@@ -54,7 +55,7 @@ interface OpenAiChatRequest {
 	 * 形状 = `{ "user_messages": "- 今天…", "entry_types": "…" }`，值必须是字符串。
 	 */
 	task_vars?: Record<string, unknown>;
-	/** 以下四个只在直通路径生效；Agent 路径由服务端配置决定（接口文档 §2.4.1） */
+	/** 采样参数：任务通道会透传（派生模型）；聊天路径由服务端配置决定（接口文档 §2.4.1） */
 	temperature?: number;
 	max_tokens?: number;
 	response_format?: unknown;
@@ -223,182 +224,28 @@ export function mountOpenAiCompat(app: Hono): void {
 			return agentChat(c, body, messages, { label: taskLabel(task), prompt: promptWithMemory });
 		}
 
-		const hasSystem = messages.some((m) => m.role === "system");
-		if (hasSystem) {
-			return passthrough(c, body, messages);
-		}
-
-		return agentChat(c, body, messages);
-	});
-}
-
-/**
- * 直通上游：整套 messages（含 system）原样转发，参数照抄。
- *
- * 不建会话、不落库、不写记忆 —— 这些任务（收敛/周报/分段…）本来就不该进对话历史，
- * 更不该被 Agent 的人格和工具污染。
- *
- * **deprecated（2026-10-31 方案 D10）**：日记类任务已全部迁到 `X-Task` 任务通道，
- * 直通只剩 `question`（等记忆块/画像数据源落地后切 v2）和未知的旧客户端。
- * 每次直通都打一行告警——观察期（方案 §6 步骤 4）结束后删除本分支。
- */
-let passthroughWarned = 0;
-async function passthrough(c: Context, body: OpenAiChatRequest, messages: ChatMessage[]) {
-	const stream = body.stream === true;
-	passthroughWarned += 1;
-	console.warn(
-		`[compat passthrough] DEPRECATED 直通调用 #${passthroughWarned}（stream=${stream}）` +
-			` system=${(messages.find((m) => m.role === "system")?.content ?? "").length} 字` +
-			` —— 任务请改走 X-Task 通道；迁移完成后本分支将删除（方案 D10）`,
-	);
-
-	// faux 模式没有真实上游：给一句固定回复，保证链路形状能验
-	if (isFaux()) {
-		if (!stream) {
-			return c.json({
-				object: "chat.completion",
-				model: "faux",
-				choices: [
-					{
-						index: 0,
-						message: { role: "assistant", content: "（faux 模型）链路已通。" },
-						finish_reason: "stop",
-					},
-				],
-			});
-		}
-		return streamSSE(c, async (s) => {
-			await s
-				.writeSSE({
-					data: JSON.stringify({
-						object: "chat.completion.chunk",
-						choices: [
-							{ index: 0, delta: { content: "（faux 模型）链路已通。" }, finish_reason: null },
-						],
-					}),
-				})
-				.catch(() => undefined);
-			await s.writeSSE({ data: "[DONE]" }).catch(() => undefined);
-		});
-	}
-
-	const config = upstreamConfig();
-	if (!config) {
+	// 2026-10-31（方案 D10 步骤 5）：**直通分支已删除**。
+	// 生产端已无调用方（12 个任务全走 X-Task，聊天从不带 system）。
+	// 带 system 一律 400：宁可让旧客户端立刻报错，也不要静默降级成"聊天轨迹"——
+	// 那样它的模板会被当普通消息丢掉，产出看着像成功、其实是残废（比报错更糟）。
+	if (messages.some((m) => m.role === "system")) {
 		return c.json(
-			{ error: { message: "服务端未配置 LLM_API_KEY", type: "invalid_request_error" } },
-			503,
+			{
+				error: {
+					type: "invalid_request_error",
+					code: "system_prompt_not_supported",
+					message: "不再接受 system 提示词：任务请用 X-Task + task_vars（模板在服务端），聊天不要带 system。",
+				},
+			},
+			400,
 		);
 	}
 
-	const payload: Record<string, unknown> = {
-		model: config.model,
-		messages: messages.map((m) => ({ role: m.role, content: m.content })),
-		stream,
-	};
-	if (typeof body.temperature === "number") payload.temperature = body.temperature;
-	if (typeof body.max_tokens === "number") payload.max_tokens = body.max_tokens;
-	if (body.response_format) payload.response_format = body.response_format;
-	if (body.reasoning_effort) payload.reasoning_effort = body.reasoning_effort;
-
-	const callUpstream = () =>
-		fetch(config.url, {
-			method: "POST",
-			headers: {
-				"Content-Type": "application/json",
-				Authorization: `Bearer ${config.apiKey}`,
-			},
-			body: JSON.stringify(payload),
-		});
-
-	if (!stream) {
-		try {
-			const response = await callUpstream();
-			if (!response.ok) {
-				// 上游错误原文只进日志：可能带上模型名/限额细节
-				console.error(`[compat passthrough] 上游 ${response.status}: ${await response.text()}`);
-				return c.json({ error: { message: UPSTREAM_ERROR_TEXT, type: "upstream_error" } }, 502);
-			}
-			return c.json((await response.json()) as unknown);
-		} catch (error) {
-			const detail = error instanceof Error ? error.message : String(error);
-			console.error(`[compat passthrough] 请求失败: ${detail}`);
-			return c.json({ error: { message: UPSTREAM_ERROR_TEXT, type: "upstream_error" } }, 502);
-		}
-	}
-
-	return streamSSE(c, async (s) => {
-		const chunk = (content: string) => ({
-			object: "chat.completion.chunk",
-			// 刻意不带 id：直通路径没有会话 uuid，给了会被客户端当成 conversationId 存下来
-			choices: [{ index: 0, delta: { content }, finish_reason: null }],
-		});
-		const finish = {
-			object: "chat.completion.chunk",
-			choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
-		};
-
-		try {
-			const response = await callUpstream();
-			if (!response.ok || !response.body) {
-				console.error(`[compat passthrough] 上游流式失败: ${response.status}`);
-				await s.writeSSE({ data: JSON.stringify(chunk(UPSTREAM_ERROR_TEXT)) }).catch(() => undefined);
-				await s.writeSSE({ data: JSON.stringify(finish) }).catch(() => undefined);
-				await s.writeSSE({ data: "[DONE]" }).catch(() => undefined);
-				return;
-			}
-
-			const reader = response.body.getReader();
-			const decoder = new TextDecoder();
-			let buffer = "";
-			let emitted = false;
-			while (true) {
-				if (s.aborted) break;
-				const { value, done } = await reader.read();
-				if (done) break;
-				buffer += decoder.decode(value, { stream: true });
-				let index = buffer.indexOf("\n");
-				while (index >= 0) {
-					const line = buffer.slice(0, index).trim();
-					buffer = buffer.slice(index + 1);
-					index = buffer.indexOf("\n");
-					if (!line.startsWith("data:")) continue;
-					const data = line.slice(5).trim();
-					if (!data || data === "[DONE]") continue;
-					const content = contentOfChunk(data);
-					if (content) {
-						emitted = true;
-						await s.writeSSE({ data: JSON.stringify(chunk(content)) });
-					}
-				}
-			}
-			// 一个字都没吐（典型原因：max_tokens 被思考吃光）→ 明说一句，别给客户端一个空气泡
-			if (!emitted) {
-				await s.writeSSE({ data: JSON.stringify(chunk(UPSTREAM_ERROR_TEXT)) }).catch(() => undefined);
-			}
-			await s.writeSSE({ data: JSON.stringify(finish) }).catch(() => undefined);
-		} catch (error) {
-			const detail = error instanceof Error ? error.message : String(error);
-			console.error(`[compat passthrough] 流式异常: ${detail}`);
-			await s.writeSSE({ data: JSON.stringify(chunk(UPSTREAM_ERROR_TEXT)) }).catch(() => undefined);
-			await s.writeSSE({ data: JSON.stringify(finish) }).catch(() => undefined);
-		}
-		// 客户端把 [DONE] 当作正常结束的标记，缺了会被判成断流
-		await s.writeSSE({ data: "[DONE]" }).catch(() => undefined);
+	// 剩下的都是聊天轨迹（无 task、无 system）
+	return agentChat(c, body, messages);
 	});
 }
 
-/**
- * 给**新会话**选档：`fast`（思考关）还是 `deep`（思考开）。
- *
- * 2026-10-31 方案 D1/D2 起：快/深是**同一个模型**，区别只剩 `enable_thinking`
- * （applyChatMode 负责落到思考变体上）。判定顺序：
- * 1. 客户端显式 `X-Mode: fast|deep` —— 说了就听；
- * 2. 已按 D3 切过思考开的会话 → 保持 deep（切一次就保持，别抖回去）；
- * 3. `JEV_ROUTE=gate` —— 建会话前问一次 Jev（同步，约 1–2.7s，只付这一次）；
- *    `needs_tools` / `deep_think` → 深档；`reply_direct` → 快档；
- *    **confidence < 0.6 一律保守走深档**（判不准时宁可慢一点，别给错答案）；
- * 4. 都没有 → 默认 `fast`（日常聊天；要工具它照样能调，D3 会在首次调工具时切一次思考档）。
- */
 async function decideMode(
 	header: string | undefined,
 	conversationId: string,
