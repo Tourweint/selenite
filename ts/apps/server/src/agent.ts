@@ -516,7 +516,12 @@ async function lastTurnInputTokens(
 async function switchThinkingOnTool(api: HookApi, context: Context): Promise<void> {
 	// 已经切过/已判定不切的，不再碰库（每次工具调用都去 configure/读上下文是白付的）
 	if (thinkingSwitched.has(api.conversationId) || thinkingRefused.has(api.conversationId)) return;
-	if ((process.env.AGENT_TOOL_UPGRADE ?? "on").trim().toLowerCase() === "off") return;
+	// 2026-10-31 命名整改（方案 D11）：这个名字以前叫 AGENT_TOOL_UPGRADE，
+	// 语义是"升级到更贵的模型"，会把读代码的人（包括我自己）带偏成"换模型"；
+	// 现在快深同款，它做的是"把思考打开"。旧名保留为兼容回退，下一轮删。
+	if (((process.env.AGENT_THINK_ON_TOOL ?? process.env.AGENT_TOOL_UPGRADE) ?? "on").trim().toLowerCase() === "off") {
+		return;
+	}
 
 	const config = readLlmConfig();
 	if (!config) return;
