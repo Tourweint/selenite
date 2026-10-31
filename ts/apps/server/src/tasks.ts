@@ -107,6 +107,14 @@ const SPECS: readonly TaskSpec[] = [
 		vars: ["blocks_json", "new_facts", "word_limit"],
 		input: "请合并画像",
 	},
+	{
+		// 2026-10-31 方案 §10（v1.2）：日记回顾小模式。模板生在 harness（App 侧没有旧资产），
+		// 黄金用例走内容断言而非字节对照（probe 的 harnessOnly 分支）。
+		name: "diary_review",
+		asset: "diary_review_v1.md",
+		vars: ["recent_entries"],
+		input: "请做这次回顾",
+	},
 ];
 
 /** 渲染失败（缺变量 / 资产缺失）：调用方据此回 500，且**不落半条会话** */

@@ -425,7 +425,15 @@ try {
 function checkAssetMatchesApp(spec: TaskSpec): void {
 	const appPath = join(APP_PROMPTS_DIR, spec.asset);
 	if (!existsSync(appPath)) {
-		check(false, `${spec.asset} 在 App 侧存在`, appPath);
+		// harness-only 模板（2026-10-31 方案 §10：diary_review 生在 harness，App 侧没有旧资产）：
+		// 黄金用例改为内容断言——声明变量齐全、钩子规则在场。
+		const ours = templateOf(spec);
+		const missingVars = spec.vars.filter((key) => !ours.includes(`{{${key}}}`));
+		check(
+			missingVars.length === 0 && ours.includes("▶"),
+			`${spec.asset}（harness-only）变量齐全且含钩子规则（${spec.name}）`,
+			missingVars.length > 0 ? `缺占位符 ${missingVars.join(",")}` : `${ours.length} 字符`,
+		);
 		return;
 	}
 	const normalize = (text: string) => text.replace(/\r\n/g, "\n");
