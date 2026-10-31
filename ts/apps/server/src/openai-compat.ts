@@ -229,9 +229,20 @@ export function mountOpenAiCompat(app: Hono): void {
  *
  * 不建会话、不落库、不写记忆 —— 这些任务（收敛/周报/分段…）本来就不该进对话历史，
  * 更不该被 Agent 的人格和工具污染。
+ *
+ * **deprecated（2026-10-31 方案 D10）**：日记类任务已全部迁到 `X-Task` 任务通道，
+ * 直通只剩 `question`（等记忆块/画像数据源落地后切 v2）和未知的旧客户端。
+ * 每次直通都打一行告警——观察期（方案 §6 步骤 4）结束后删除本分支。
  */
+let passthroughWarned = 0;
 async function passthrough(c: Context, body: OpenAiChatRequest, messages: ChatMessage[]) {
 	const stream = body.stream === true;
+	passthroughWarned += 1;
+	console.warn(
+		`[compat passthrough] DEPRECATED 直通调用 #${passthroughWarned}（stream=${stream}）` +
+			` system=${(messages.find((m) => m.role === "system")?.content ?? "").length} 字` +
+			` —— 任务请改走 X-Task 通道；迁移完成后本分支将删除（方案 D10）`,
+	);
 
 	// faux 模式没有真实上游：给一句固定回复，保证链路形状能验
 	if (isFaux()) {
