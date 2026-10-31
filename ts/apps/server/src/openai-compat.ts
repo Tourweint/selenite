@@ -6,12 +6,12 @@ import {
 	applyChatMode,
 	chatStream,
 	configureTaskChat,
+	isThinkingOn,
 	openChat,
 	openOrCreateChat,
 	TASK_CONVERSATION_PREFIX,
-	toolWasUsed,
 } from "./agent.ts";
-import { readLlmConfig, taskModelRef } from "./provider.ts";
+import { chatModelRef, readLlmConfig, taskModelRef } from "./provider.ts";
 import { renderTask, resolveTask, taskLabel, taskNames, TaskRenderError } from "./tasks.ts";
 import { classifyTurn, jevMode } from "./typesafe.ts";
 
@@ -369,17 +369,16 @@ async function passthrough(c: Context, body: OpenAiChatRequest, messages: ChatMe
 }
 
 /**
- * 给**新会话**选档：`fast`（不思考的快模型）还是 `deep`（会思考、成稿用）。
+ * 给**新会话**选档：`fast`（思考关）还是 `deep`（思考开）。
  *
- * 判定顺序：
+ * 2026-10-31 方案 D1/D2 起：快/深是**同一个模型**，区别只剩 `enable_thinking`
+ * （applyChatMode 负责落到思考变体上）。判定顺序：
  * 1. 客户端显式 `X-Mode: fast|deep` —— 说了就听；
- * 2. `JEV_ROUTE=gate` —— 建会话前问一次 Jev（同步，约 1–2.7s，只付这一次）；
+ * 2. 已按 D3 切过思考开的会话 → 保持 deep（切一次就保持，别抖回去）；
+ * 3. `JEV_ROUTE=gate` —— 建会话前问一次 Jev（同步，约 1–2.7s，只付这一次）；
  *    `needs_tools` / `deep_think` → 深档；`reply_direct` → 快档；
  *    **confidence < 0.6 一律保守走深档**（判不准时宁可慢一点，别给错答案）；
- * 3. 都没有 → 默认 `fast`（日常聊天；要工具它照样能调，工具是会话级的，不跟模型绑定）。
- *
- * 注意：这是"回答之前"的判定，不是事后补救 —— 会话模型在建会话那一刻就绑定了，
- * 事后判出来也换不了档。
+ * 4. 都没有 → 默认 `fast`（日常聊天；要工具它照样能调，D3 会在首次调工具时切一次思考档）。
  */
 async function decideMode(
 	header: string | undefined,
@@ -389,8 +388,8 @@ async function decideMode(
 ): Promise<"fast" | "deep"> {
 	const requested = header?.trim().toLowerCase();
 	if (requested === "fast" || requested === "deep") return requested;
-	// 这条会话动过手（调过工具）→ 继续深档，别在深活儿中间抖回快档
-	if (toolWasUsed(internalId)) return "deep";
+	// 这条会话已切到思考开（D3 切过）→ 保持，别在思考中间抖回快档
+	if (isThinkingOn(internalId)) return "deep";
 	if (jevMode() !== "gate") return "fast";
 
 	const recent = messages
@@ -474,11 +473,12 @@ interface TaskContext {
 		);
 	}
 
-	// 新会话先按快档建（最便宜），档位随后每轮再定 —— durable 的 `configure()` 支持
-	// **会话中途换模型**，所以"开局判死、后面换不了"这个问题不存在（2026-10-29 实读 API 确认）。
+	// 新会话先按思考军建（最便宜），档位随后每轮再定 —— durable 的 `configure()` 支持
+	// 会话中途换模型/换思考变体，"开局判死、后面换不了"的问题不存在（2026-10-29 实读 API 确认）。
+	// 2026-10-31 方案 D2：默认档 = 思考关变体（不再用 fastModel 装配，那是部署别名了）。
 	const chat =
 		(await openChat(conversationId)) ??
-		(await openOrCreateChat(conversationId, readLlmConfig()?.fastModel));
+		(await openOrCreateChat(conversationId, readLlmConfig() ? chatModelRef(false) : undefined));
 
 	if (task) {
 		// 任务通道：不判快/深档（任务一律用深档 + 客户端给的采样参数），

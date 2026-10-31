@@ -11,7 +11,7 @@
  *   2. 参数透传生效（假上游看到的 body 里就有）；
  *   3. system 段 = 服务端渲染的模板（不是客户端给的、也不是人格）；
  *   4. 任务会话没有工具（`tools` 为空或缺失）；
- *   5. 通用聊天（无 `X-Task`）行为没变：人格在、模型仍是快档、没有 response_format；
+ *   5. 通用聊天（无 `X-Task`）行为没变：人格在、走思考关变体（2026-10-31 方案 D2）、没有 response_format；
  *   6. 未知 `X-Task` → 400 `unknown_task`；
  *   7. 模板变量缺失 → 500 `task_render_failed`，且**不留半条会话**；
  *   8. 黄金用例：模板与 App 侧资产逐字节一致（App 目录不在时明确跳过，不算通过也不算失败）。
@@ -347,7 +347,11 @@ try {
 			systemMessageOf(generalBody).includes("你是一个个人助手"),
 			"通用聊天仍有人格",
 		);
-		check(generalBody.model === "fake-fast", "通用聊天仍走快档", String(generalBody.model));
+		check(
+			generalBody.model === "fake-deep" && generalBody.enable_thinking === false,
+			"通用聊天走思考关变体（真实模型名 + enable_thinking=false）",
+			`model=${String(generalBody.model)} enable_thinking=${String(generalBody.enable_thinking)}`,
+		);
 		check(generalBody.response_format === undefined, "通用聊天没被塞 response_format");
 	}
 

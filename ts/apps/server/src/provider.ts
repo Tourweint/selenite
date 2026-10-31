@@ -35,6 +35,9 @@ export interface LlmConfig {
 	 * 实测同一收敛任务：`qwen-flash` 1.47s / 157 tokens，`deepseek-v4.1-flash` 10.17s / 1591 tokens，
 	 * 质量差距远小于 7 倍的时间差 —— 所以聊天默认走快档，成稿类仍走深档。
 	 * 用 `LLM_MODEL_FAST` 换（默认 `qwen-flash`）；设为空串则快档 = 深档（退回单模型）。
+	 *
+	 * 2026-10-31 方案 D1 起：快/深**同模型**，档位走 `chatModelRef()` 的思考变体；
+	 * 这个字段退化为部署别名（`LLM_MODEL_FAST` 不再承载快慢语义），保留只为兼容存量装配。
 	 */
 	fastModel: { provider: string; modelId: string };
 }
@@ -62,6 +65,37 @@ const taskVariants = new Map<string, Model<"openai-completions">>();
 /** 重新发布 provider（新增派生模型后调用），由 readLlmConfig 装配时挂上 */
 let publishProvider: (() => void) | null = null;
 
+/**
+ * 聊天档位的**思考变体**（2026-10-31，方案 D1/D2）。
+ *
+ * 快档与深档是**同一个模型**（换模型 = 上游缓存清零，方案 §2.2 实测），
+ * 区别只剩 `enable_thinking`。透传手段与任务派生模型同款：
+ * `samplingParams` 的键原样合并进上游请求体、且最后写入。
+ * 两条变体链的头块不同（方案 §2.3：25 token 差在头部），缓存互不命中 —— 所以这是刻意的两条链，
+ * id 里显式带上 think 标志，别让两条链共用一个派生 id。
+ */
+export function chatModelRef(thinking: boolean): { provider: string; modelId: string } {
+	const config = readLlmConfig();
+	if (!config) throw new Error("LLM 未配置");
+	if (isFaux()) return config.model;
+
+	const id = `${config.model.modelId}#think-${thinking ? "on" : "off"}`;
+	if (!taskVariants.has(id)) {
+		const base = config.models.getModel(config.model.provider, config.model.modelId);
+		if (!base) throw new Error("聊天模型不在目录里，无法派生思考变体");
+		taskVariants.set(id, {
+			...(base as Model<"openai-completions">),
+			id,
+			name: id,
+			// `model` 盖回真实模型名（理由同 taskModelRef：派生 id 不能漏到上游，否则 404）；
+			// `enable_thinking` 显式声明档位，不赌上游默认值
+			samplingParams: { model: config.model.modelId, enable_thinking: thinking },
+		});
+		publishProvider?.();
+	}
+	return { provider: config.model.provider, modelId: id };
+}
+
 function isFaux(): boolean {
 	return (process.env.LLM_PROVIDER ?? "").trim().toLowerCase() === "faux";
 }
@@ -73,7 +107,10 @@ function variantKey(params: TaskSampling): string {
 	const format = params.responseFormat ? String(JSON.stringify(params.responseFormat)) : "-";
 	// 只取哈希的前 8 位：够区分，也不会把整段 JSON 塞进模型 id
 	const digest = createHash("sha256").update(format).digest("hex").slice(0, 8);
-	return `t${temperature}m${maxTokens}r${format === "-" ? "-" : digest}`;
+	// 任务一律思考开（2026-10-31 方案 D 表）：把思考标志编进 id，
+	// 避免同参数两种思考档共用一个派生 id 互相覆盖。id 变了 = 旧任务会话的存量引用失配；
+	// 任务是一次性会话，跑完即弃，可接受（2026-10-31）。
+	return `t${temperature}m${maxTokens}r${format === "-" ? "-" : digest}th1`;
 }
 
 /**
@@ -97,6 +134,8 @@ export function taskModelRef(params: TaskSampling): { provider: string; modelId:
 			// `model_not_found` → Agent 空轮 → 界面只有"这次没能生成回复"。
 			// 能盖是因为 pi-ai 把 `samplingParams` **最后** `Object.assign` 进请求体（openai-completions.js:752）。
 			model: config.model.modelId,
+			// 任务一律思考开（2026-10-31 方案 D 表）：一次性会话无历史包袱，质量优先
+			enable_thinking: true,
 		};
 		if (typeof params.temperature === "number") samplingParams.temperature = params.temperature;
 		// max_tokens 也走 samplingParams：它最后写入，能盖掉模型自身的默认上限

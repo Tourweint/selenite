@@ -29,7 +29,7 @@ import {
 	type MemoryEngine,
 	type MemoryScope,
 } from "@lifediary/memory";
-import { readLlmConfig } from "./provider.ts";
+import { chatModelRef, readLlmConfig } from "./provider.ts";
 import { ReminderTask } from "./reminder.ts";
 import { createTools } from "./tools.ts";
 
@@ -256,8 +256,8 @@ async function openHarness(): Promise<Harness> {
 						}
 						// 告诉客户端"现在开始动手了"（工具可能跑几十秒，界面上不能一直空白）
 						emitPhase(api.conversationId, "working");
-						// 一旦真的要动手，就把这个会话升级到深档（快档负责闲聊，深档负责干活）
-						await upgradeOnTool(api, context);
+						// 首次动工具时按 D3 切一次思考档（短会话才切，切了就保持）
+						await switchThinkingOnTool(api, context);
 						return undefined;
 					},
 					// 工具跑完、把结果交回模型 → 又回到"在思考"
@@ -352,20 +352,24 @@ export interface ResolvedChat {
 export type ChatMode = "fast" | "deep";
 
 /**
- * 本轮用快档还是深档（2026-10-29）。
+ * 本轮的思考档（2026-10-31，方案 D1/D2）。
  *
- * durable 的 `Conversation.configure({ model })` 支持**会话中途换模型**，
- * 所以"开局判死"这个限制不存在：每轮提交前改一次即可，下一轮立刻生效。
+ * 快档与深档是**同一个模型**（换模型 = 上游缓存清零，方案 §2.2 实测），
+ * 区别只剩 `enable_thinking`：fast = 思考关（首字 0.8~0.9s），deep = 思考开。
+ * 切档 = 请求头块变化 = 当前前缀整段重算（方案 §2.3），所以默认**按会话定档、中途不切**；
+ * 唯一例外是 D3 的"短会话首次调工具切一次"，在工具钩子里做（见 switchThinkingOnTool）。
  */
 export async function applyChatMode(chat: ResolvedChat, mode: ChatMode): Promise<void> {
 	const config = readLlmConfig();
 	if (!config) return;
-	const target = mode === "deep" ? config.model : config.fastModel;
+	// 切过思考开的会话不再回快档：D3 允许"切一次"，切了就保持（不然下一条消息又抖回去）
+	if (mode === "fast" && thinkingSwitched.has(chat.internalId)) return;
+	const target = chatModelRef(mode === "deep");
 	const agent = await chat.conversation.agent(CTX);
 	if (agent.model?.modelId === target.modelId) return;
 	await chat.conversation.configure({ model: target }, CTX);
 	console.log(
-		`[agent] 会话 ${chat.internalId} 切档 → ${mode}（${target.modelId}）`,
+		`[agent] 会话 ${chat.internalId} 档位 → ${mode === "deep" ? "思考开" : "思考关"}（${target.modelId}）`,
 	);
 }
 
@@ -398,13 +402,19 @@ export async function configureTaskChat(
 	);
 }
 
-/** 调过工具的会话：下一轮默认继续走深档（深活儿往往连着几轮，别来回抖） */
-const toolTouched = new Set<number>();
-/** 已经升级到深档的会话（避免每次工具调用都去读/写 agent 文档） */
-const upgradedToDeep = new Set<number>();
+/**
+ * 已切到思考开的会话（2026-10-31，方案 D3：切一次就保持）。
+ *
+ * 进程内状态；重启后按"还没切"处理 —— 长会话重启后照样会被阈值拒绝，
+ * 短会话重启后多付一次重算，可接受（与旧升级链路的进程内记账同款取舍）。
+ */
+const thinkingSwitched = new Set<number>();
+/** 已判定"不切"的长会话：别每次工具调用都重读 usage */
+const thinkingRefused = new Set<number>();
 
-export function toolWasUsed(internalId: number): boolean {
-	return toolTouched.has(internalId);
+/** 这个会话现在是否思考开（openai-compat 的档位粘性用） */
+export function isThinkingOn(internalId: number): boolean {
+	return thinkingSwitched.has(internalId);
 }
 
 /** 一轮里的两个可见阶段：在想 / 在动手（工具执行中） */
@@ -441,39 +451,78 @@ function emitPhase(conversationId: number, phase: TurnPhase): void {
 	}
 }
 
+/** 短会话阈值（方案 D3 定 4000；风险表留了 4k→8k 的放宽口子，用环境变量调，不改代码） */
+function thinkingTokenLimit(): number {
+	const raw = Number(process.env.AGENT_THINK_TOKEN_LIMIT);
+	return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 4000;
+}
+
 /**
- * 工具第一次被调用时把该会话升级到深档。
+ * 该会话上一轮的 prompt 规模（方案 D3a 的测量口径）。
  *
- * 为什么在**工具钩子**里升级而不是开局预判：预判要额外一次判定（慢且可能判错），
- * 而"模型自己决定调工具"本身就是最准的信号。工具结果回来后那一次生成就用深档，
- * 本轮的工具使用与后续推理都拿到了强模型。
+ * AssistantMessage.usage.input 就是那一轮的真实重算量（≈当前前缀大小）；
+ * 没有任何带 usage 的 assistant 条目（首轮还没跑完过）→ 返回 null，按 D3a 视为短会话。
  */
-async function upgradeOnTool(api: HookApi, context: Context): Promise<void> {
-	toolTouched.add(api.conversationId);
-	// 已经升过一次就不再碰库（每次工具调用都去 configure 会白白多几次快照读）
-	if (upgradedToDeep.has(api.conversationId)) return;
+async function lastTurnInputTokens(
+	conversation: Conversation,
+	context: Context,
+): Promise<number | null> {
+	const view = await conversation.context(context);
+	for (let index = view.entries.length - 1; index >= 0; index -= 1) {
+		const entry = view.entries[index];
+		if (!entry || entry.kind !== "pi.assistant") continue;
+		const message = entry.model?.[0] as { usage?: { input?: number } } | undefined;
+		if (message && typeof message.usage?.input === "number") return message.usage.input;
+	}
+	return null;
+}
+
+/**
+ * 工具第一次被调用时把该会话切到思考开（2026-10-31，方案 D2/D3）。
+ *
+ * 与旧"换模型升级"链路的差别：模型**不换**（D1），只切 `enable_thinking`；
+ * 长会话（上一轮 prompt ≥ 阈值）**不切** —— 切一次就是整段前缀重算，长会话付不起；
+ * 短会话也只切一次（thinkingSwitched 记账），切了就保持。
+ * 为什么在**工具钩子**里切而不是开局预判：预判要额外一次判定（慢且可能判错），
+ * 而"模型自己决定调工具"本身就是最准的信号。切换发生在工具结果回来之前，
+ * 所以本轮的后续推理就用上了思考档；代价 = 当前前缀重算一次（D3 明码标价）。
+ */
+async function switchThinkingOnTool(api: HookApi, context: Context): Promise<void> {
+	// 已经切过/已判定不切的，不再碰库（每次工具调用都去 configure/读上下文是白付的）
+	if (thinkingSwitched.has(api.conversationId) || thinkingRefused.has(api.conversationId)) return;
 	if ((process.env.AGENT_TOOL_UPGRADE ?? "on").trim().toLowerCase() === "off") return;
 
 	const config = readLlmConfig();
 	if (!config) return;
-	if (config.model.modelId === config.fastModel.modelId) return;
 
 	try {
 		const harness = await getHarness();
 		const conversation = await harness.conversation(api.conversationId as never, context);
 		if (!conversation) return;
-		const agent = await conversation.agent(context);
-		if (agent.model?.modelId === config.model.modelId) {
-			upgradedToDeep.add(api.conversationId);
+		const lastInput = await lastTurnInputTokens(conversation, context);
+		const limit = thinkingTokenLimit();
+		if (lastInput !== null && lastInput >= limit) {
+			thinkingRefused.add(api.conversationId);
+			console.log(
+				`[agent] 会话 ${api.conversationId} 首次工具调用时 prompt≈${lastInput} ≥ ${limit}，保持思考关（长会话不切，方案 D3）`,
+			);
 			return;
 		}
-		await conversation.configure({ model: config.model }, context);
-		upgradedToDeep.add(api.conversationId);
-		console.log(`[agent] 会话 ${api.conversationId} 首次工具调用 → 升级深档 ${config.model.modelId}`);
+		const target = chatModelRef(true);
+		const agent = await conversation.agent(context);
+		if (agent.model?.modelId === target.modelId) {
+			thinkingSwitched.add(api.conversationId);
+			return;
+		}
+		await conversation.configure({ model: target }, context);
+		thinkingSwitched.add(api.conversationId);
+		console.log(
+			`[agent] 会话 ${api.conversationId} 首次工具调用 → 思考开（prompt≈${lastInput ?? "首轮"} < ${limit}；本次前缀重算约 ${lastInput ?? "?"} token）`,
+		);
 	} catch (error) {
-		// 升级失败不影响这一轮：大不了这轮继续用快档
+		// 切档失败不影响这一轮：大不了这轮继续不思考
 		console.warn(
-			`[agent] 会话 ${api.conversationId} 升级深档失败: ${error instanceof Error ? error.message : String(error)}`,
+			`[agent] 会话 ${api.conversationId} 切思考档失败: ${error instanceof Error ? error.message : String(error)}`,
 		);
 	}
 }
@@ -495,7 +544,8 @@ export async function openChat(
 		const conversation = await harness.createConversation(
 			{
 				ownership: { kind: "ownerless" },
-				agent: { model: modelRef ?? config.model },
+				// 新会话默认思考关（2026-10-31 方案 D2：聊天一律不思考，首字 0.8~0.9s）
+				agent: { model: modelRef ?? chatModelRef(false) },
 				// 建会话和写映射在同一个提交里，不会出现"会话建好了但映射没写上"
 				init: async (tx, conversationId) => {
 					const chats = await tx.doc(Chats);
@@ -536,7 +586,7 @@ export async function openOrCreateChat(
 	const conversation = await harness.createConversation(
 		{
 			ownership: { kind: "ownerless" },
-			agent: { model: modelRef ?? config.model },
+			agent: { model: modelRef ?? chatModelRef(false) },
 			init: async (tx, conversationId) => {
 				const chats = await tx.doc(Chats);
 				chats.byExternal[externalId] = Number(conversationId);
@@ -665,6 +715,8 @@ export async function* chatStream(
 						`[agent] onSettled 回调失败: ${error instanceof Error ? error.message : String(error)}`,
 					);
 				}
+				// 每轮的 usage/cacheRead 验收数据（方案 §6 步骤 1 / §7）
+				void logTurnUsage(input.conversation, conversationId);
 			})
 			.catch((error: unknown) => {
 				outcome.error = error instanceof Error ? error : new Error(String(error));
@@ -779,12 +831,47 @@ async function answerText(conversation: Conversation): Promise<string> {
 	return "";
 }
 
+/**
+ * 每轮打一行 usage 日志（2026-10-31 方案 §6 步骤 1 的"日志打 cacheRead"）。
+ *
+ * 验收指标（方案 §7）全靠这行：`cacheRead > 0 且 ≥ 首轮 prompt 的 60%`、
+ * `工具链每轮增量 < 600 token`，都得从日志里捞。挂在 settle 回调里，
+ * 客户端断流也照样打 —— 那一轮在服务端照样跑完。取的是本轮最后一次
+ * 模型请求的 usage（多工具回合时，中间回合的增量已被它累计在前缀里）。
+ */
+async function logTurnUsage(conversation: Conversation, internalId: number): Promise<void> {
+	try {
+		const view = await conversation.context(CTX);
+		for (let index = view.entries.length - 1; index >= 0; index -= 1) {
+			const entry = view.entries[index];
+			if (!entry || entry.kind !== "pi.assistant") continue;
+			const message = entry.model?.[0] as
+				| { usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number } }
+				| undefined;
+			const usage = message?.usage;
+			if (usage) {
+				console.log(
+					`[usage] 会话 ${internalId} input=${usage.input ?? "-"} cacheRead=${usage.cacheRead ?? "-"} ` +
+						`cacheWrite=${usage.cacheWrite ?? "-"} output=${usage.output ?? "-"}`,
+				);
+				return;
+			}
+		}
+	} catch (error) {
+		console.warn(`[usage] 读取失败: ${error instanceof Error ? error.message : String(error)}`);
+	}
+}
+
 // ── 会话旁路能力 ─────────────────────────────────────────
 export interface UsageSummary {
 	models: {
 		model: string;
 		inputTokens: number;
 		outputTokens: number;
+		/** 缓存命中 token（2026-10-31 方案 §7 验收指标用） */
+		cacheReadTokens: number;
+		/** 缓存写入 token */
+		cacheWriteTokens: number;
 		totalTokens: number;
 	}[];
 }
@@ -797,6 +884,8 @@ export async function usageSummary(): Promise<UsageSummary> {
 			model,
 			inputTokens: usage.input ?? 0,
 			outputTokens: usage.output ?? 0,
+			cacheReadTokens: usage.cacheRead ?? 0,
+			cacheWriteTokens: usage.cacheWrite ?? 0,
 			totalTokens: usage.totalTokens ?? 0,
 		})),
 	};
