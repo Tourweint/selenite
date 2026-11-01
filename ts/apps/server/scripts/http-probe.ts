@@ -220,6 +220,43 @@ try {
 	});
 	check(afterStop.status === 200, "停完之后还能开新一轮", String(afterStop.status));
 
+	// ── 7.5 让助手说一句（回顾页钩子，2026-11-01）───────
+	console.log("\n· 7.5 让助手主动说一句（不调模型）");
+	const sayText = "新版本装好之后的回读，结果跟预期一样吗？";
+	const said = await fetch(`${BASE}/api/v1/agent/chat/${externalId}/say`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ text: sayText }),
+	});
+	check(said.status === 201, "/say 写入成功", String(said.status));
+	const afterSay = await readMessages(externalId);
+	check(
+		afterSay.at(-1)?.role === "assistant" && afterSay.at(-1)?.text === sayText,
+		"回读能看到这条 assistant 消息",
+		afterSay.at(-1)?.text.slice(0, 12),
+	);
+	const sayBad = await fetch(`${BASE}/api/v1/agent/chat/${externalId}/say`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ text: "   " }),
+	});
+	check(sayBad.status === 400, "空文本 → 400", String(sayBad.status));
+
+	// 新对话开一句（回顾页钩子的现行口径）
+	const newSay = await fetch(`${BASE}/api/v1/agent/say`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ text: "这个新对话的第一句" }),
+	});
+	check(newSay.status === 201, "/say 新建会话成功", String(newSay.status));
+	const newId = ((await newSay.json()) as { conversationId?: string }).conversationId ?? "";
+	const newMessages = await readMessages(newId);
+	check(
+		newMessages.length === 1 && newMessages[0]?.role === "assistant",
+		"新会话里只有助手这一句",
+		`${newMessages.length} 条 / ${newMessages[0]?.role}`,
+	);
+
 	// ── 8. 读历史 ─────────────────────────────────────
 	console.log("\n· 8. 读历史接口");
 	const transcript = (await (

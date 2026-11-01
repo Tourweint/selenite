@@ -197,7 +197,11 @@ async function chatIndexCount(): Promise<number> {
 /** 变量样例：每个任务一套，值里带标记串，便于在 system 里定位"渲染进去了" */
 const VARS: Record<string, Record<string, string>> = {
 	converge: { user_messages: "- 今天把方案重写了一遍", entry_types: "（待用户确认）" },
-	weekly: { positive_facts: "- 本周聊了 5 天", profile_markdown: "（画像占位）" },
+	weekly: {
+		positive_facts: "- 本周聊了 5 天",
+		profile_markdown: "（画像占位）",
+		previous_week_context: "上周回顾：把方案重写了一遍。",
+	},
 	segment: { entry_text: "今天把方案重写了一遍。" },
 	interview: { last_session_digest: "", recent_messages: "" },
 	chapter: { user_messages: "- 那年夏天" },

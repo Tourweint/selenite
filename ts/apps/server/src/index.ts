@@ -19,6 +19,7 @@ import {
   memoryEngine,
   openChat,
   readTranscript,
+  sayInChat,
   stopChat,
   usageSummary,
 } from "./agent.ts";
@@ -310,6 +311,46 @@ app.post("/api/v1/agent/chat/:conversationId/stop", async (c) => {
 
   await stopChat(chat);
   return c.json({ ok: true, conversationId: chat.externalId });
+});
+
+/**
+ * 让助手**在新会话里**主动说一句（2026-11-01，回顾页钩子：「每次尽量都出一个新对话」）。
+ *
+ * 与下面 `:id/say` 的区别：这里不带会话 id，服务端**新建**一个会话再把话说进去，
+ * 返回新会话的 id 给客户端绑定。用户没接话的话，客户端会把这段空对话清掉。
+ */
+app.post("/api/v1/agent/say", async (c) => {
+  if (!readLlmConfig()) return c.json({ ok: false, reason: "llm_not_configured" }, 503);
+
+  const body = (await c.req.json().catch(() => null)) as { text?: string } | null;
+  const text = body?.text?.trim();
+  if (!text) return c.json({ error: "bad_request", message: "需要 text" }, 400);
+
+  const chat = await openChat(undefined);
+  if (!chat) return c.json({ ok: false, reason: "conversation_not_created" }, 503);
+
+  await sayInChat(chat, text);
+  return c.json({ ok: true, conversationId: chat.externalId }, 201);
+});
+
+/**
+ * 让助手主动说一句话（2026-11-01，手机端回顾页钩子）。
+ *
+ * 与 `/chat` 的区别：**不调模型、不产生用户消息**，只把这句话以 assistant 身份写进会话，
+ * 之后的回读/后续对话都能看到。手机端点回顾页的钩子卡片就走这里。
+ */
+app.post("/api/v1/agent/chat/:conversationId/say", async (c) => {
+  if (!readLlmConfig()) return c.json({ ok: false, reason: "llm_not_configured" }, 503);
+
+  const chat = await openChat(c.req.param("conversationId"));
+  if (!chat) return c.json({ error: "unknown_conversation" }, 404);
+
+  const body = (await c.req.json().catch(() => null)) as { text?: string } | null;
+  const text = body?.text?.trim();
+  if (!text) return c.json({ error: "bad_request", message: "需要 text" }, 400);
+
+  await sayInChat(chat, text);
+  return c.json({ ok: true, conversationId: chat.externalId }, 201);
 });
 
 /** 用量与花费：按模型累计，来自 durable 自己维护的 pi.usage */

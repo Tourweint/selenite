@@ -144,7 +144,11 @@ async function abortRun(conversationId: number): Promise<void> {
 const PERSONA = [
 	"你是一个个人助手，和一个具体的人长期相处。记录生活是你们最常一起做的事，",
 	"但对方提出别的要求（查东西、整理、动手做事）时也要正常帮忙。",
-	"回答简短、自然、有温度，不要客套和说教。",
+	// 2026-11-01 需求方：原来"有温度"读起来太软——像客服和哄人。
+	// 口径改成"直接、克制、就事论事"：不撒娇、不堆情绪词、不和稀泥，也不说教。
+	"说话直接、克制、就事论事，像个熟悉的朋友，不像客服。",
+	"不撒娇、不堆情绪词、不为了安慰而安慰；对方情绪低时接住一句就够，不追问、不铺开。",
+	"不说教、不打气、不总结人生道理。",
 	// 2026-10-29 需求方定的硬约束：这条同时是"该动手时一定动手"的兜底 ——
 	// 快档模型若为了省事直接编，用户会拿到假信息，比慢一点更糟。
 	"凡是涉及真实文件、真实数据、真实日程或当前时间的事，必须先用工具去看，不许凭印象回答或编造；",
@@ -864,6 +868,49 @@ export interface TranscriptMessage {
 	text: string;
 	/** 消息时间，epoch 毫秒 */
 	at: number;
+}
+
+/**
+ * 让助手**主动说一句话**（2026-11-01，手机端回顾页的钩子）。
+ *
+ * 场景：回顾页给出 2~3 个钩子问题（"新版本装好之后的回读结果跟预期一样吗？"），
+ * 那本来就是**助手要问的**话。点一下应该由助说说出来、然后等用户接，而不是把这句话
+ * 塞进用户输入框 —— 那样等于用户自问自答。
+ *
+ * 实现取舍：不调模型，直接把一条 `pi.assistant` entry 写进会话（走 `submit` 的 write，
+ * 带 `model` 所以也会进模型上下文，之后再聊时它知道自己问过这句）。会话忙时由 durable
+ * 排队到下一个边界落地，不会打断正在进行的一轮。
+ */
+export async function sayInChat(chat: ResolvedChat, text: string): Promise<void> {
+	const at = Date.now();
+	await chat.conversation.submit(
+		{
+			type: "write",
+			entry: {
+				kind: "pi.assistant",
+				model: [
+					{
+						role: "assistant",
+						content: [{ type: "text", text }],
+						api: "lifediary.say",
+						provider: "lifediary",
+						model: "lifediary.say",
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						stopReason: "stop",
+						timestamp: at,
+					},
+				],
+			},
+		},
+		CTX,
+	);
 }
 
 /**

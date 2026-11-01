@@ -54,9 +54,11 @@ const SPECS: readonly TaskSpec[] = [
 		input: "请整理成稿",
 	},
 	{
+		// 2026-11-01 v3：周报串联（把上周那一整段回顾当背景喂进来，并要求末尾输出 ▶ 话头），
+		// 回顾页因此只剩一个区块——正文 + 可点的下一句话，不再有独立的「最近 7 天」动作。
 		name: "weekly",
-		asset: "weekly_report_v2.md",
-		vars: ["positive_facts", "profile_markdown"],
+		asset: "weekly_report_v3.md",
+		vars: ["positive_facts", "profile_markdown", "previous_week_context"],
 		input: "请按上面的约束写这一周的回顾",
 	},
 	{
