@@ -7,3 +7,8 @@ dist/
 
 # 运行时数据：记忆库、会话 jsonl、探测脚本产物
 .data/
+
+# delegate 派活的产物与索引：chancellor 默认按**调用方 cwd** 落盘，
+# 在服务里派活就会落到 apps/server/ 下。这是运行时数据，不入库。
+apps/server/runs/
+apps/server/data/

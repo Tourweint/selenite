@@ -86,15 +86,41 @@ harness 的主 agent 一直是"我让它干什么它就干什么"——它会自
 
 只有 delegate 那一条断言失败，其余全过——说明开关只摘掉了这一个工具，没动别的。
 
+## 补记（2026-11-02 01:40，真模型整链路）
+
+拿到 `DASHSCOPE_API_KEY` 之后补跑真模型（`deepseek-v4.1-flash`），新增 `scripts/delegate-chain-probe.ts`
+（`pnpm --filter @lifediary/server chain`，没有 key 时打印跳过、不假装跑过）。四次结果：
+
+| 次 | 任务 | 结果 |
+|---|---|---|
+| 1 | 数 `src` 下 .ts 个数写文件 | 主 agent **自己用 bash 干了**（4.5s，数对了 20=20），没派活——**这是对的行为**，一条命令能答的事不该派 |
+| 2 | 读 6 份方案提炼踩坑清单 | 43.9s，只回"我先查看一下这个目录"就结束，**一句话都没动手** |
+| 3 | 明确要求派活 | ✓ **调了 delegate**。worker 因要写任务目录外的绝对路径被路径钩子拦住，如实上报 |
+| 4 | 单步派活写 summary.md | ✓ 调了 delegate。worker 的 REPORT 写 `done` 但**没有 summary.md**，验收判 `fail` |
+
+第 3、4 次证明了三件事：**链路通**（主 agent → delegate → chancellor → worker → 一句话回来）、
+**隔离生效**（目录外写入被拦）、**防谎报生效**（REPORT 说 done 但无产物 → fail）。
+
+同时暴露两个结构问题（另立 v0.5 修，见 chancellor 仓库
+`docs/设计方案/2026-11-02-v0.5-链式任务与自检.md`）：
+
+1. **依赖注入只传 REPORT 文本，不传产物文件**——产物在各自的隔离目录里，下游读不到，
+   所以"读→写"链式任务走不通。
+2. **flash 模型有时只说不做**——叙述"我写好了"，实际没调 `write`。
+
+本轮顺带改的：
+- `delegate` 的 description 补两句：工人只能在自己任务目录里写文件，**需求里要用相对路径**；
+  产物最后落在 `runs/<ticket>/` 下，不在调用方指定的绝对位置。
+- `ts/.gitignore` 加 `apps/server/runs/`、`apps/server/data/`——chancellor 按调用方 cwd 落盘，
+  在服务里派活会落到 `apps/server/` 下，那是运行时数据。
+
 ## 没验证到的
 
-1. **真机派活**：本机 `.env` 没有 `LLM_API_KEY`，harness 跑的是 mock 模式，主 agent 不会真的调工具。
-   所以"主 agent 会不会自己想到调 delegate"这条**没验**——那是 description 写得好不好的问题，得真机看。
-2. **`/stop` 传到 worker 子进程**：`context.abortSignal` 已经传进去了，但没做"派活中途按停止、
-   确认 qodercli 进程消失"的端到端验证（需要真模型跑一个长任务）。
-3. **真实 worker 产出**：同上，没 key 跑不了原生 worker；雇佣兵（qoder）能跑但这次没在 harness 里驱动。
-4. **存量会话的缓存成本**：工具清单 8→9 会给存量会话追加一条 `pi.system` 补丁，一次性重算
+1. **`/stop` 传到 worker 子进程**：`context.abortSignal` 已经传进去了，但没做"派活中途按停止、
+   确认 qodercli 进程消失"的端到端验证。
+2. **存量会话的缓存成本**：工具清单 8→9 会给存量会话追加一条 `pi.system` 补丁，一次性重算
    （同 2026-10-31 技能通道那次）。没有实测耗时。
+3. **链式任务**：真模型下仍未跑通，属 v0.5 范围。
 
 ## 回滚建议
 

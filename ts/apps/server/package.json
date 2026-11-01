@@ -12,7 +12,8 @@
     "diary": "tsx scripts/diary-probe.ts",
     "tasks": "tsx scripts/task-probe.ts",
     "typecheck": "tsc --noEmit",
-    "gate": "tsx scripts/delegate-gate-probe.ts"
+    "gate": "tsx scripts/delegate-gate-probe.ts",
+    "chain": "tsx scripts/delegate-chain-probe.ts"
   },
   "dependencies": {
     "@earendil-works/chord": "1.4.0",
