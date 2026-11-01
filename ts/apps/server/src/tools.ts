@@ -1,6 +1,11 @@
 import { Type } from "@earendil-works/pi-ai";
-import { defineTool } from "@earendil-works/pi-durable";
+import { defineTool, type ToolRegistration } from "@earendil-works/pi-durable";
 import { scopeKey, type MemoryEngine, type MemoryKind, type MemoryScope } from "@lifediary/memory";
+// 派活能力（chancellor）。相对路径是刻意的：chancellor 是独立仓库，
+// 跑的是 .ts 源码，装进 node_modules 后 node 不会给里面的 .ts 剥类型
+// （ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING），所以不能走 file: 依赖。
+// 只有这一处引用它，挪仓库时改这一行。
+import { runChancellor } from "../../../../../chancellor/src/index.ts";
 import { ReminderTask } from "./reminder.ts";
 import type { SkillStore } from "./skills.ts";
 
@@ -24,6 +29,13 @@ export interface ToolDeps {
 	scopeOf: (conversationId: number) => MemoryScope;
 	/** 技能库；为 null 时 skill 工具不上（技能目录不存在/为空，索引也不会渲染） */
 	skills?: SkillStore | null;
+	/**
+	 * 派活能力；为 false 时 delegate 工具不上。
+	 *
+	 * 2026-11-02：默认开。装上 chancellor 之后主 agent 才有"把活派出去"的手。
+	 * 关掉它（`CHANCELLOR_ENABLED=false`）时工具清单回到 8 个，行为与改动前完全一致。
+	 */
+	delegate?: boolean;
 }
 
 function text(value: string) {
@@ -124,27 +136,57 @@ export function createTools(deps: ToolDeps) {
 		},
 	});
 
-	if (!deps.skills) return [remember, recall, remind];
-	const skills = deps.skills;
-
-	const skill = defineTool({
-		name: "skill",
+	// 派活（2026-11-02）：主 agent 的"手"。它自己不动手，把活交给外面的工人，
+	// 只拿回一句话。工具的 description 里"不适合"那半句比"适合"更重要——
+	// 写宽了，主 agent 会把一次 read 就能答的事也派出去，每次都起 worker，比不用还贵。
+	const delegate = defineTool({
+		name: "delegate",
 		description:
-			"取一份技能手册（完整流程）。会话的 skills 索引里列出了可用技能；" +
-			"要按某个流程引导对方时，先调它拿到手册，再照着做。",
+			"把一件需要多步动手的活派给外面的工人去做，你只拿回一句话结论。" +
+			"适合：要改多个文件、要跑命令、要查证之后再动手的任务。" +
+			"不适合：回答问题、闲聊、一次 read 就能答的事、需要边做边问对方的事。" +
+			"派出去之后你看不到过程，中途也不能追问；它干完或卡住，都只回你一句话。",
 		parameters: Type.Object({
-			name: Type.String({ description: "技能名，必须是索引里列出的名字" }),
+			requirement: Type.String({
+				description: "要做的事，一句话说清，并且带上「怎么算做完了」",
+			}),
 		}),
-		execute: async (args) => {
-			const manual = skills.manual(args.name);
-			if (!manual) {
-				return text(
-					`没有叫「${args.name}」的技能。可用：${skills.names().join("、") || "（无）"}`,
-				);
-			}
-			return text(manual);
+		execute: async (args, _api, context) => {
+			const result = await runChancellor(
+				{ requirement: args.requirement },
+				{ signal: context.abortSignal },
+			);
+			return text(result.line ?? "派出去的活没有返回结论。");
 		},
 	});
 
-	return [remember, recall, remind, skill];
+	const tools: ToolRegistration[] = [remember, recall, remind];
+
+	if (deps.skills) {
+		const skills = deps.skills;
+		tools.push(
+			defineTool({
+				name: "skill",
+				description:
+					"取一份技能手册（完整流程）。会话的 skills 索引里列出了可用技能；" +
+					"要按某个流程引导对方时，先调它拿到手册，再照着做。",
+				parameters: Type.Object({
+					name: Type.String({ description: "技能名，必须是索引里列出的名字" }),
+				}),
+				execute: async (args) => {
+					const manual = skills.manual(args.name);
+					if (!manual) {
+						return text(
+							`没有叫「${args.name}」的技能。可用：${skills.names().join("、") || "（无）"}`,
+						);
+					}
+					return text(manual);
+				},
+			}),
+		);
+	}
+
+	if (deps.delegate !== false) tools.push(delegate);
+
+	return tools;
 }

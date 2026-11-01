@@ -13,6 +13,7 @@ import { DatabaseSync } from "node:sqlite";
  *   3. system 段 = 服务端渲染的模板（不是客户端给的、也不是人格）；
  *   4. 任务会话没有工具（`tools` 为空或缺失）；
  *   5. 通用聊天（无 `X-Task`）行为没变：人格在、带 L1 技能索引与 skill 工具（方案步骤 2）、
+ *      带 delegate 工具（2026-11-02 派活能力）、
  *      走思考关变体（2026-10-31 方案 D2）、没有 response_format；
  *   6. 未知 `X-Task` → 400 `unknown_task`；
  *   7. 模板变量缺失 → 500 `task_render_failed`，且**不留半条会话**；
@@ -386,6 +387,13 @@ try {
 			generalTools.some((tool) => tool?.function?.name === "skill"),
 			"skill 工具在工具清单里",
 			generalTools.map((tool) => tool?.function?.name).join("、"),
+		);
+		// 2026-11-02 派活能力：delegate 必须在通用聊天的工具清单里。
+		// 它只在通用聊天出现——任务会话整段摘掉扩展，所以上面 §4 的「0 个工具」仍然成立。
+		check(
+			generalTools.some((tool) => tool?.function?.name === "delegate"),
+			"delegate 工具在工具清单里（派活能力）",
+			`${generalTools.length} 个：${generalTools.map((tool) => tool?.function?.name).join("、")}`,
 		);
 		check(
 			generalBody.model === "fake-deep" && generalBody.enable_thinking === false,

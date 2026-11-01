@@ -72,7 +72,35 @@ const BLOCKED_TOOLS = new Set(
 		.filter(Boolean),
 );
 
-const WRITE_TOOLS = new Set(["write", "edit", "bash", "powershell"]);
+const WRITE_TOOLS = new Set(["write", "edit", "bash", "powershell", "delegate"]);
+
+/**
+ * 派活能力（chancellor）是否装。
+ *
+ * 默认装。关掉（`CHANCELLOR_ENABLED=false`）时工具清单回到 8 个，行为与改动前完全一致
+ * ——这是回滚开关，不是功能开关：出问题时不用改代码，改一行环境变量就退回去。
+ */
+const CHANCELLOR_ENABLED = (process.env.CHANCELLOR_ENABLED?.trim() || "true").toLowerCase() !== "false";
+
+/**
+ * 只读模式下该不该拦这个工具。
+ *
+ * 提成独立函数是为了**能测**：安全规则埋在 hook 里只能靠起服务、驱动一次工具调用才能验，
+ * 而 faux 给的工具参数是空对象，`delegate` 这种带必填参数的工具根本走不到执行那一步
+ * （`provider.ts` 里只给 `recall` 特判了参数）。提取出来之后 `delegate-gate-probe.ts`
+ * 可以直接断言，不用绕。
+ *
+ * 注意 `delegate` 在 `WRITE_TOOLS` 里：它本身不写文件，但它会起 worker 去写。
+ * 不拦它，`AGENT_TOOL_POLICY=read-only` 就是个谎。
+ */
+export function readOnlyBlockReason(name: string): string | undefined {
+	if (TOOL_POLICY === "read-only" && WRITE_TOOLS.has(name)) {
+		return "当前是只读模式（AGENT_TOOL_POLICY=read-only）";
+	}
+	return undefined;
+}
+
+
 
 /**
  * 一轮对话最多几个工具回合。默认 100（实测 30 偏紧，hermes 那类给到 300）。
@@ -306,7 +334,12 @@ async function openHarness(): Promise<Harness> {
 	registry.install(
 		(lifediaryExt = defineExtension({
 			name: "lifediary",
-			tools: createTools({ memory: memoryEngine, scopeOf, skills: skillStore }),
+			tools: createTools({
+				memory: memoryEngine,
+				scopeOf,
+				skills: skillStore,
+				delegate: CHANCELLOR_ENABLED,
+			}),
 			sections: [
 				{ key: "persona", render: () => PERSONA },
 				// L1 技能索引（2026-10-31 方案 D5）：排在 persona 后（"会话后部"），按会话冻结——
@@ -327,8 +360,9 @@ async function openHarness(): Promise<Harness> {
 						if (BLOCKED_TOOLS.has(call.name)) {
 							return { block: `工具 ${call.name} 已被配置禁用` };
 						}
-						if (TOOL_POLICY === "read-only" && WRITE_TOOLS.has(call.name)) {
-							return { block: "当前是只读模式（AGENT_TOOL_POLICY=read-only）" };
+						const readOnly = readOnlyBlockReason(call.name);
+						if (readOnly) {
+							return { block: readOnly };
 						}
 						// 告诉客户端"现在开始动手了"（工具可能跑几十秒，界面上不能一直空白）
 						emitPhase(api.conversationId, "working");

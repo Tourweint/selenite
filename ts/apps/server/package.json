@@ -11,7 +11,8 @@
     "http": "tsx scripts/http-probe.ts",
     "diary": "tsx scripts/diary-probe.ts",
     "tasks": "tsx scripts/task-probe.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "gate": "tsx scripts/delegate-gate-probe.ts"
   },
   "dependencies": {
     "@earendil-works/chord": "1.4.0",
