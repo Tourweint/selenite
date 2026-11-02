@@ -5,7 +5,11 @@ import { scopeKey, type MemoryEngine, type MemoryKind, type MemoryScope } from "
 // 跑的是 .ts 源码，装进 node_modules 后 node 不会给里面的 .ts 剥类型
 // （ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING），所以不能走 file: 依赖。
 // 只有这一处引用它，挪仓库时改这一行。
-import { runChancellor } from "../../../../../chancellor/src/index.ts";
+import {
+	runChancellor,
+	type ChancellorRequest,
+	type TicketResult,
+} from "../../../../../chancellor/src/index.ts";
 import { emitDelegation } from "./delegation.ts";
 import { ReminderTask } from "./reminder.ts";
 import type { SkillStore } from "./skills.ts";
@@ -37,6 +41,8 @@ export interface ToolDeps {
 	 * 关掉它（`CHANCELLOR_ENABLED=false`）时工具清单回到 8 个，行为与改动前完全一致。
 	 */
 	delegate?: boolean;
+	/** 测试用：替换真正跑 chancellor 的入口；生产不传，直接用 runChancellor。 */
+	delegateRun?: typeof runChancellor;
 }
 
 function text(value: string) {
@@ -137,6 +143,11 @@ export function createTools(deps: ToolDeps) {
 		},
 	});
 
+	// 按会话记最后一张单：resume 只可能发生在同一轮对话里。
+	// 不落库——进程重启后会话已断，老单本来也接不上，落库只会多出迁移/过期/清理的常态成本。
+	const lastTicketByConversation = new Map<number, string>();
+	const run = deps.delegateRun ?? runChancellor;
+
 	// 派活（2026-11-02）：主 agent 的"手"。它自己不动手，把活交给外面的工人，
 	// 只拿回一句话。工具的 description 里"不适合"那半句比"适合"更重要——
 	// 写宽了，主 agent 会把一次 read 就能答的事也派出去，每次都起 worker，比不用还贵。
@@ -147,14 +158,25 @@ export function createTools(deps: ToolDeps) {
 			"适合：要改多个文件、要跑命令、要查证之后再动手的任务。" +
 			"不适合：回答问题、闲聊、一次 read 就能答的事、需要边做边问对方的事。" +
 			"派出去之后你看不到过程，中途也不能追问；它干完或卡住，都只回你一句话。" +
+			"如果上一轮派出去的活卡住了、你问了用户一个问题、用户刚回答了你，用 `resume: true` 接着原单跑：" +
+			"`requirement` 里只写用户的那句回答（比如「验证码 1234」），不要重述整个任务，" +
+			"**更不要重新派**——重派会让对方从头再做一遍。" +
+			"会话里没有可续的单时会按新活派，并在结果里告诉你。" +
 			"**注意**：工人只能在自己的任务目录里写文件，所以需求里要用相对路径（如 `summary.md`），" +
 			"不要指定工作目录之外的绝对路径；产物最后落在 chancellor 的 runs/<ticket>/ 下，不在你指定的绝对位置。",
 		parameters: Type.Object({
 			requirement: Type.String({
 				description:
 					"要做的事，一句话说清，并且带上「怎么算做完了」。" +
+					"resume 时只写用户的那句回答，不要重述任务。" +
 					"要写文件时给相对路径；要读的文件给绝对路径没问题。",
 			}),
+			resume: Type.Optional(
+				Type.Boolean({
+					description:
+						"接着上一张单跑（上次派出去的活卡住了、你问了用户、用户刚回答时用）。不填 = 新派一件。",
+				}),
+			),
 		}),
 		execute: async (args, api, context) => {
 			// 派活的进度和「需要你」要能实时到客户端，否则那几分钟界面是死的。
@@ -162,9 +184,8 @@ export function createTools(deps: ToolDeps) {
 			const conversationId = Number(api.conversationId);
 			let total = 0;
 			let done = 0;
-			const result = await runChancellor(
-				{ requirement: args.requirement },
-				{
+			const dispatch = (request: ChancellorRequest): Promise<TicketResult> =>
+				run(request, {
 					signal: context.abortSignal,
 					onEvent: (event) => {
 						switch (event.type) {
@@ -206,8 +227,30 @@ export function createTools(deps: ToolDeps) {
 								break;
 						}
 					},
-				},
-			);
+				});
+
+			let noTicket = false;
+			let result: TicketResult;
+			if (args.resume === true) {
+				const lastTicketId = lastTicketByConversation.get(conversationId);
+				if (lastTicketId) {
+					try {
+						result = await dispatch({ resumeTicketId: lastTicketId, answer: args.requirement });
+					} catch {
+						// 续跑在派活之前就被 chancellor 拒了（单子已完成/找不到）：没有可续的单。
+						// 拒跑不会动 worker，所以这里按新活派不会和原单抢同一个屏幕。
+						noTicket = true;
+						result = await dispatch({ requirement: args.requirement });
+					}
+				} else {
+					noTicket = true;
+					result = await dispatch({ requirement: args.requirement });
+				}
+			} else {
+				result = await dispatch({ requirement: args.requirement });
+			}
+			lastTicketByConversation.set(conversationId, result.ticketId);
+
 			// 卡住且给了具体问题时，单独发一条：客户端据此出卡片，不用从结论那句话里猜。
 			if (result.attention) {
 				emitDelegation(conversationId, {
@@ -216,7 +259,8 @@ export function createTools(deps: ToolDeps) {
 					question: result.attention.question,
 				});
 			}
-			return text(result.line ?? "派出去的活没有返回结论。");
+			const line = result.line ?? "派出去的活没有返回结论。";
+			return text(noTicket ? `${line}\n（没有可续的单，已按新活派）` : line);
 		},
 	});
 
