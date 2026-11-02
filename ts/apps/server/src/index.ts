@@ -30,6 +30,7 @@ import { mountOpenAiCompat } from "./openai-compat.ts";
 import { PairingStore, buildPairUrl, resolvePairBase } from "./pairing.ts";
 import { pairPage } from "./pair-page.ts";
 import { mountPhoneWorker } from "./phone-worker.ts";
+import { mountWorkerShell } from "./worker-shell.ts";
 import { syncDiaryToMemory } from "./memory-ingest.ts";
 import { readLlmConfig } from "./provider.ts";
 
@@ -89,6 +90,9 @@ mountDiary(app);
 
 // 手机 worker 通道（2026-11-02）：poll / model / result，鉴权沿用上面的 /api/v1/* 中间件
 mountPhoneWorker(app);
+
+// 受限 shell（2026-11-02 第四个接口）：只放行虚拟屏需要的那几种 adb shell 形状
+mountWorkerShell(app);
 
 app.get("/", (c) => c.html(debugPage));
 

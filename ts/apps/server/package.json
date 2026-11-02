@@ -12,6 +12,7 @@
     "diary": "tsx scripts/diary-probe.ts",
     "tasks": "tsx scripts/task-probe.ts",
     "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/worker-shell.test.ts",
     "gate": "tsx scripts/delegate-gate-probe.ts",
     "resume": "tsx scripts/delegate-resume-probe.ts",
     "chain": "tsx scripts/delegate-chain-probe.ts",
