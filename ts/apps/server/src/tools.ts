@@ -6,6 +6,7 @@ import { scopeKey, type MemoryEngine, type MemoryKind, type MemoryScope } from "
 // （ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING），所以不能走 file: 依赖。
 // 只有这一处引用它，挪仓库时改这一行。
 import { runChancellor } from "../../../../../chancellor/src/index.ts";
+import { emitDelegation } from "./delegation.ts";
 import { ReminderTask } from "./reminder.ts";
 import type { SkillStore } from "./skills.ts";
 
@@ -155,11 +156,66 @@ export function createTools(deps: ToolDeps) {
 					"要写文件时给相对路径；要读的文件给绝对路径没问题。",
 			}),
 		}),
-		execute: async (args, _api, context) => {
+		execute: async (args, api, context) => {
+			// 派活的进度和「需要你」要能实时到客户端，否则那几分钟界面是死的。
+			// 这里把 chancellor 的事件翻译成两种：正在办第几件、需要你回答什么。
+			const conversationId = Number(api.conversationId);
+			let total = 0;
+			let done = 0;
 			const result = await runChancellor(
 				{ requirement: args.requirement },
-				{ signal: context.abortSignal },
+				{
+					signal: context.abortSignal,
+					onEvent: (event) => {
+						switch (event.type) {
+							case "planned":
+								total = event.total ?? 0;
+								emitDelegation(conversationId, {
+									type: "delegate",
+									done: 0,
+									total,
+									current: "拆好了，开始派",
+								});
+								break;
+							case "task-start":
+								emitDelegation(conversationId, {
+									type: "delegate",
+									done,
+									total,
+									current: event.slug ?? "",
+								});
+								break;
+							case "task-done":
+								done += 1;
+								emitDelegation(conversationId, {
+									type: "delegate",
+									done,
+									total,
+									current: event.slug ?? "",
+								});
+								break;
+							case "reviewing":
+								emitDelegation(conversationId, {
+									type: "delegate",
+									done,
+									total,
+									current: "核对",
+								});
+								break;
+							default:
+								break;
+						}
+					},
+				},
 			);
+			// 卡住且给了具体问题时，单独发一条：客户端据此出卡片，不用从结论那句话里猜。
+			if (result.attention) {
+				emitDelegation(conversationId, {
+					type: "attention",
+					kind: result.attention.kind,
+					question: result.attention.question,
+				});
+			}
 			return text(result.line ?? "派出去的活没有返回结论。");
 		},
 	});

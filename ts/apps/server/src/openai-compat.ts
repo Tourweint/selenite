@@ -387,7 +387,9 @@ interface TaskContext {
 		let text = "";
 		try {
 			for await (const event of chatStream(input)) {
-				if (event.type === "progress") continue;
+				if (event.type === "progress" || event.type === "delegate" || event.type === "attention") {
+					continue;
+				}
 				text += event.type === "delta" ? event.text : event.message;
 			}
 		} catch (error) {
@@ -421,6 +423,30 @@ interface TaskContext {
 						data: JSON.stringify({
 							object: "chat.completion.chunk",
 							lifediary_progress: event.phase,
+						}),
+					});
+					continue;
+				}
+				// 派活进度：跟 progress 一样走非标准字段，客户端解析器会忽略未知字段
+				if (event.type === "delegate") {
+					await stream.writeSSE({
+						data: JSON.stringify({
+							object: "chat.completion.chunk",
+							lifediary_delegate: {
+								done: event.done,
+								total: event.total,
+								current: event.current,
+							},
+						}),
+					});
+					continue;
+				}
+				// 需要人回答：把问题原文给客户端，让它出卡片而不是猜
+				if (event.type === "attention") {
+					await stream.writeSSE({
+						data: JSON.stringify({
+							object: "chat.completion.chunk",
+							lifediary_attention: { kind: event.kind, question: event.question },
 						}),
 					});
 					continue;

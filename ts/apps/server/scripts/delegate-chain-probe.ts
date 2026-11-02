@@ -79,10 +79,13 @@ const PROMPT =
 try {
 	await waitForReady();
 	const started = Date.now();
-	const response = await fetch(`${BASE}/api/v1/agent/chat`, {
+	// 走兼容层而不是自有端点：App 用的是这个，派活进度/需要人这两帧也只在这里出现。
+	const response = await fetch(`${BASE}/api/v1/llm/chat/completions`, {
 		method: "POST",
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify({
+			model: "lifediary",
+			stream: true,
 			messages: [{ role: "user", content: PROMPT }],
 		}),
 	});
@@ -93,22 +96,45 @@ try {
 	let text = "";
 	let error: string | undefined;
 	const eventTypes: string[] = [];
+	const delegateFrames: string[] = [];
+	const attentionFrames: string[] = [];
 	for (const line of raw.split("\n")) {
 		if (!line.startsWith("data:")) continue;
-		const payload = JSON.parse(line.slice(5).trim()) as {
-			type: string;
-			text?: string;
-			message?: string;
-			conversationId?: string;
+		const body = line.slice(5).trim();
+		if (body === "[DONE]") continue;
+		const payload = JSON.parse(body) as {
+			id?: string;
+			choices?: Array<{ delta?: { content?: string } }>;
+			lifediary_progress?: string;
+			lifediary_delegate?: { done: number; total: number; current: string };
+			lifediary_attention?: { kind: string; question: string };
 		};
-		eventTypes.push(payload.type);
-		if (payload.type === "start") conversationId = payload.conversationId;
-		if (payload.type === "delta") text += payload.text ?? "";
-		if (payload.type === "error") error = payload.message;
+		if (payload.id) conversationId = payload.id;
+		const content = payload.choices?.[0]?.delta?.content;
+		if (content) {
+			text += content;
+			eventTypes.push("delta");
+		}
+		if (payload.lifediary_progress) eventTypes.push(`progress:${payload.lifediary_progress}`);
+		if (payload.lifediary_delegate) {
+			const d = payload.lifediary_delegate;
+			delegateFrames.push(`${d.done}/${d.total} ${d.current}`);
+			eventTypes.push("delegate");
+		}
+		if (payload.lifediary_attention) {
+			attentionFrames.push(`${payload.lifediary_attention.kind}：${payload.lifediary_attention.question}`);
+			eventTypes.push("attention");
+		}
 	}
 
 	console.log(`\n耗时 ${seconds}s，conversation=${conversationId ?? "（无）"}`);
 	console.log(`事件流：${eventTypes.join(" → ")}`);
+	if (delegateFrames.length > 0) {
+		console.log(`派活进度帧（${delegateFrames.length}）：${delegateFrames.join(" | ")}`);
+	}
+	if (attentionFrames.length > 0) {
+		console.log(`需要你帧（${attentionFrames.length}）：${attentionFrames.join(" | ")}`);
+	}
 	console.log(`回复：${text.trim() || "（空）"}`);
 	if (error) console.log(`error 事件：${error}`);
 
@@ -116,15 +142,11 @@ try {
 		console.log("\n✗ 没拿到 conversationId");
 		process.exitCode = 1;
 	} else {
-		// 从会话回读里找 delegate 的痕迹：tool 调用名会落在 entries 里
-		const messages = await (
-			await fetch(`${BASE}/api/v1/agent/chat/${conversationId}/messages`)
-		).text();
-		const calledDelegate = messages.includes("delegate");
+		const calledDelegate = delegateFrames.length > 0 || attentionFrames.length > 0;
 		console.log(
 			calledDelegate
-				? "✓ 会话里出现了 delegate —— 主 agent 真的把活派出去了"
-				: "⚠ 会话里没看到 delegate —— 主 agent 可能自己干了，也可能判断不需要派",
+				? "✓ 客户端收到了派活帧 —— 手机上能看到「正在办 2/3」了"
+				: "⚠ 没收到派活帧 —— 主 agent 可能自己干了，也可能判断不需要派",
 		);
 	}
 } finally {

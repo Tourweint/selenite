@@ -36,6 +36,7 @@ import { chatModelRef, readLlmConfig } from "./provider.ts";
 import { ReminderTask } from "./reminder.ts";
 import { createSkillStore, type SkillStore } from "./skills.ts";
 import { createTools } from "./tools.ts";
+import { watchDelegation, type DelegationEvent } from "./delegation.ts";
 
 /**
  * Agent 装配。
@@ -727,6 +728,19 @@ export type ChatStreamEvent =
 	 * 让它能显示"正在思考…"「正在读文件…」而不是干等。
 	 */
 	| { type: "progress"; phase: TurnPhase }
+	/**
+	 * 派活的进度（2026-11-02）。
+	 *
+	 * 存在的理由跟 progress 一样：派活可能跑几分钟，客户端只看到空白。
+	 * 但 progress 只有"在想/在动手"，说不出"第 2 件 / 共 3 件 / 写测试"。
+	 */
+	| { type: "delegate"; done: number; total: number; current: string }
+	/**
+	 * 需要人回答（2026-11-02）。
+	 *
+	 * 一句话：「它在等你什么」。客户端据此出卡片，而不是让用户从结论那句里猜。
+	 */
+	| { type: "attention"; kind: "need_input" | "need_decision" | "need_action"; question: string }
 	| { type: "turnLimit"; message: string }
 	/**
 	 * 这一轮跑完了但没有回答（模型报错、被策略拦下等）。
@@ -770,6 +784,8 @@ export async function* chatStream(
 	const queue: string[] = [];
 	/** 待推送的阶段变化（工具钩子写进来，本流取出去） */
 	const phases: TurnPhase[] = [];
+	/** 待推送的派活事件（delegate 工具写进来，本流取出去） */
+	const delegations: DelegationEvent[] = [];
 	let emitted = "";
 	let wake: (() => void) | null = null;
 
@@ -804,6 +820,10 @@ export async function* chatStream(
 	// 订阅本会话的阶段变化：工具一开始执行就能立刻告诉客户端，不用等第一个 token
 	const unwatchPhase = watchPhase(conversationId, (phase) => {
 		phases.push(phase);
+		notify();
+	});
+	const unwatchDelegation = watchDelegation(conversationId, (event) => {
+		delegations.push(event);
 		notify();
 	});
 
@@ -841,8 +861,24 @@ export async function* chatStream(
 				notify();
 			});
 
-		while (!finished || queue.length > 0 || phases.length > 0) {
+		while (!finished || queue.length > 0 || phases.length > 0 || delegations.length > 0) {
 			if (queue.length === 0) {
+				const delegation = delegations.shift();
+				if (delegation) {
+					yield delegation.type === "delegate"
+						? {
+								type: "delegate",
+								done: delegation.done,
+								total: delegation.total,
+								current: delegation.current,
+							}
+						: {
+								type: "attention",
+								kind: delegation.kind,
+								question: delegation.question,
+							};
+					continue;
+				}
 				const phase = phases.shift();
 				if (phase) {
 					yield { type: "progress", phase };
@@ -882,6 +918,7 @@ export async function* chatStream(
 		}
 	} finally {
 		unwatchPhase();
+		unwatchDelegation();
 		// 只关掉"看"这件事，不碰正在跑的那一轮
 		await watch.stop().catch(() => undefined);
 	}

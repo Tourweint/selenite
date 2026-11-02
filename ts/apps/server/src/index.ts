@@ -248,8 +248,9 @@ app.post("/api/v1/agent/chat", async (c) => {
           streamEnd = "aborted";
           break;
         }
-        if (event.type === "progress") {
-          // 阶段变化只对兼容层的客户端有意义；自有 SSE 协议不加新事件，避免破坏老客户端
+        if (event.type === "progress" || event.type === "delegate" || event.type === "attention") {
+          // 阶段/派活/需要人这三种只对兼容层的客户端有意义；
+          // 自有 SSE 协议不加新事件，避免破坏老客户端（App 走的是兼容层，见 openai-compat.ts）
           continue;
         }
         if (event.type === "delta") {
