@@ -12,3 +12,7 @@ dist/
 # 在服务里派活就会落到 apps/server/ 下。这是运行时数据，不入库。
 apps/server/runs/
 apps/server/data/
+
+# 从 ts/ 根目录跑探针时 chancellor 落在 cwd，同样不入库
+runs/
+data/
