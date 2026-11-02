@@ -29,6 +29,7 @@ import { mountDiary } from "./diary.ts";
 import { mountOpenAiCompat } from "./openai-compat.ts";
 import { PairingStore, buildPairUrl, resolvePairBase } from "./pairing.ts";
 import { pairPage } from "./pair-page.ts";
+import { mountPhoneWorker } from "./phone-worker.ts";
 import { syncDiaryToMemory } from "./memory-ingest.ts";
 import { readLlmConfig } from "./provider.ts";
 
@@ -85,6 +86,9 @@ mountOpenAiCompat(app);
 
 // 日记成稿镜像（2026-10-29）：独立库 .data/diary.sqlite，只收手机的推送，没有"在这里改日记"的入口
 mountDiary(app);
+
+// 手机 worker 通道（2026-11-02）：poll / model / result，鉴权沿用上面的 /api/v1/* 中间件
+mountPhoneWorker(app);
 
 app.get("/", (c) => c.html(debugPage));
 

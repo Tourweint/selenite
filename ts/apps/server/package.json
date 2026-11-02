@@ -14,7 +14,8 @@
     "typecheck": "tsc --noEmit",
     "gate": "tsx scripts/delegate-gate-probe.ts",
     "resume": "tsx scripts/delegate-resume-probe.ts",
-    "chain": "tsx scripts/delegate-chain-probe.ts"
+    "chain": "tsx scripts/delegate-chain-probe.ts",
+    "phone": "tsx scripts/phone-worker-probe.ts"
   },
   "dependencies": {
     "@earendil-works/chord": "1.4.0",
