@@ -163,6 +163,8 @@ export function createTools(deps: ToolDeps) {
 			"如果上一轮派出去的活卡住了、你问了用户一个问题、用户刚回答了你，用 `resume: true` 接着原单跑：" +
 			"`requirement` 里只写用户的那句回答（比如「验证码 1234」），不要重述整个任务，" +
 			"**更不要重新派**——重派会让对方从头再做一遍。" +
+			"对方在回答你上一轮的问题时，他这句话本身就是要交回去的内容：直接拿它调 resume，" +
+			"不要再反问一遍，也不要自己替它把剩下的事做完。" +
 			"会话里没有可续的单时会按新活派，并在结果里告诉你。" +
 			"**注意（只讲文件路径，不是能力限制）**：工人写文件时用相对路径（如 `summary.md`），" +
 			"不要指定工作目录之外的绝对路径；产物最后落在 chancellor 的 runs/<ticket>/ 下，不在你指定的绝对位置。" +
@@ -237,6 +239,10 @@ export function createTools(deps: ToolDeps) {
 			let result: TicketResult;
 			if (args.resume === true) {
 				const lastTicketId = lastTicketByConversation.get(conversationId);
+				console.log(
+					`[delegate resume] 会话 ${conversationId} 续跑 ${lastTicketId ?? "(无)"}` +
+						`，回答=${JSON.stringify(args.requirement.slice(0, 120))}`,
+				);
 				if (lastTicketId) {
 					try {
 						result = await dispatch({ resumeTicketId: lastTicketId, answer: args.requirement });
@@ -264,7 +270,11 @@ export function createTools(deps: ToolDeps) {
 				});
 			}
 			const line = result.line ?? "派出去的活没有返回结论。";
-			return text(noTicket ? `${line}\n（没有可续的单，已按新活派）` : line);
+			if (noTicket) return text(`${line}\n（没有可续的单，已按新活派）`);
+			if (args.resume === true) {
+				return text(`${line}\n（已把用户的回答交回原单，它在接着做。）`);
+			}
+			return text(line);
 		},
 	});
 
