@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Context } from "@earendil-works/chord";
@@ -32,11 +32,13 @@ import {
 } from "@lifediary/memory";
 import { diaryStore } from "./diary.ts";
 import { recentDiaryMemories, syncDiaryToMemory } from "./memory-ingest.ts";
-import { chatModelRef, readLlmConfig } from "./provider.ts";
+import { projectsStore } from "./projects.ts";
+import { chatModelRef, isFaux, readLlmConfig } from "./provider.ts";
 import { ReminderTask } from "./reminder.ts";
 import { createSkillStore, type SkillStore } from "./skills.ts";
 import { createTools } from "./tools.ts";
-import { watchDelegation, type DelegationEvent } from "./delegation.ts";
+import type { DelegationPhase, TurnUsage } from "@lifediary/shared";
+import { watchDelegation, type DelegationEvent, type DelegationReport } from "./delegation.ts";
 
 /**
  * Agent 装配。
@@ -64,16 +66,78 @@ const DB_PATH = process.env.AGENT_DB_PATH?.trim() || ".data/agent.sqlite";
 const WORKDIR = process.env.AGENT_WORKDIR?.trim() || process.cwd();
 
 /** full = 全部放行；read-only = 只允许读（写文件/跑命令一律拦住） */
-const TOOL_POLICY = (process.env.AGENT_TOOL_POLICY?.trim() || "full").toLowerCase();
-/** 额外拉黑名单，逗号分隔，例如 "bash,powershell" */
-const BLOCKED_TOOLS = new Set(
-	(process.env.AGENT_BLOCKED_TOOLS ?? "")
-		.split(",")
-		.map((name) => name.trim())
-		.filter(Boolean),
-);
+/**
+ * 访问档位（2026-11-03 改成运行时可切）。
+ *
+ * 以前只认环境变量，改一次要重启服务——那不是"权限管理"，是"部署配置"。
+ * 现在 env 只是初值，界面上的选择会写到 `.data/policy.json`，下次启动沿用。
+ */
+export type ToolAccess = "full" | "read-only" | "no-shell";
 
-const WRITE_TOOLS = new Set(["write", "edit", "bash", "powershell", "delegate"]);
+interface PolicyState {
+	access: ToolAccess;
+	blocked: string[];
+}
+
+const POLICY_PATH = process.env.AGENT_POLICY_PATH?.trim() || ".data/policy.json";
+
+const ACCESS_LABEL: Record<ToolAccess, string> = {
+	full: "完全访问",
+	"read-only": "只读",
+	"no-shell": "不跑命令",
+};
+
+function initialPolicy(): PolicyState {
+	const access = (process.env.AGENT_TOOL_POLICY?.trim() || "full").toLowerCase();
+	return {
+		access: access === "read-only" || access === "no-shell" ? access : "full",
+		blocked: (process.env.AGENT_BLOCKED_TOOLS ?? "")
+			.split(",")
+			.map((name) => name.trim())
+			.filter(Boolean),
+	};
+}
+
+function loadPolicy(): PolicyState {
+	const base = initialPolicy();
+	try {
+		const parsed = JSON.parse(readFileSync(POLICY_PATH, "utf8")) as Partial<PolicyState>;
+		const access =
+			parsed.access === "read-only" || parsed.access === "no-shell" || parsed.access === "full"
+				? parsed.access
+				: base.access;
+		return {
+			access,
+			blocked: Array.isArray(parsed.blocked) ? parsed.blocked : base.blocked,
+		};
+	} catch {
+		return base;
+	}
+}
+
+let policy: PolicyState = loadPolicy();
+
+export function getPolicy(): PolicyState & { label: string } {
+	return { ...policy, label: ACCESS_LABEL[policy.access] };
+}
+
+export function setPolicy(next: { access?: ToolAccess; blocked?: string[] }): PolicyState {
+	if (next.access) policy.access = next.access;
+	if (Array.isArray(next.blocked)) policy.blocked = next.blocked.filter(Boolean);
+	try {
+		mkdirSync(dirname(POLICY_PATH), { recursive: true });
+		writeFileSync(POLICY_PATH, JSON.stringify(policy, null, 2));
+	} catch (error) {
+		console.warn(
+			`[policy] 写 ${POLICY_PATH} 失败（本次仍然生效）: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+	return policy;
+}
+
+// `propose_project` 本身只写 proposal 行，但它会引出"建目录/登记项目"，和 delegate 同档拦。
+const WRITE_TOOLS = new Set(["write", "edit", "bash", "powershell", "delegate", "propose_project"]);
+const SHELL_TOOLS = new Set(["bash", "powershell"]);
 
 /**
  * 派活能力（chancellor）是否装。
@@ -95,8 +159,12 @@ const CHANCELLOR_ENABLED = (process.env.CHANCELLOR_ENABLED?.trim() || "true").to
  * 不拦它，`AGENT_TOOL_POLICY=read-only` 就是个谎。
  */
 export function readOnlyBlockReason(name: string): string | undefined {
-	if (TOOL_POLICY === "read-only" && WRITE_TOOLS.has(name)) {
-		return "当前是只读模式（AGENT_TOOL_POLICY=read-only）";
+	if (policy.blocked.includes(name)) return `工具 ${name} 已被禁用`;
+	if (policy.access === "read-only" && WRITE_TOOLS.has(name)) {
+		return `当前是「${ACCESS_LABEL["read-only"]}」模式，这个工具被拦下了。需要的话在设置里换档。`;
+	}
+	if (policy.access === "no-shell" && SHELL_TOOLS.has(name)) {
+		return `当前是「${ACCESS_LABEL["no-shell"]}」模式，不能执行命令。需要的话在设置里换档。`;
 	}
 	return undefined;
 }
@@ -340,6 +408,13 @@ async function openHarness(): Promise<Harness> {
 				scopeOf,
 				skills: skillStore,
 				delegate: CHANCELLOR_ENABLED,
+				// 项目前置（2026-11-03 方案 §5.5）：派新活前先过登记表。
+				projects: projectsStore(),
+				// 任务单跑完回灌会话：空闲就自动出现一轮汇报，正忙则由 durable
+				// 排到本轮结束（见 sayInChat 的取舍说明）。
+				reportDelegation: (conversationId, report) => {
+					void reportDelegationResult(conversationId, report);
+				},
 			}),
 			sections: [
 				{ key: "persona", render: () => PERSONA },
@@ -358,22 +433,31 @@ async function openHarness(): Promise<Harness> {
 						if (toolsBlocked.has(api.conversationId)) {
 							return { block: "本轮工具调用已达上限，请直接用已有信息回答" };
 						}
-						if (BLOCKED_TOOLS.has(call.name)) {
-							return { block: `工具 ${call.name} 已被配置禁用` };
-						}
 						const readOnly = readOnlyBlockReason(call.name);
 						if (readOnly) {
 							return { block: readOnly };
 						}
 						// 告诉客户端"现在开始动手了"（工具可能跑几十秒，界面上不能一直空白）
 						emitPhase(api.conversationId, "working");
+						emitTool(api.conversationId, {
+							name: call.name,
+							status: "start",
+							label: toolLabel(call.arguments),
+							...toolArgs(call.arguments),
+						});
 						// 首次动工具时按 D3 切一次思考档（短会话才切，切了就保持）
 						await switchThinkingOnTool(api, context);
 						return undefined;
 					},
 					// 工具跑完、把结果交回模型 → 又回到"在思考"
-					afterTool: (_call: ToolHookCall, _result, api) => {
+					afterTool: (call: ToolHookCall, result, api) => {
 						emitPhase(api.conversationId, "thinking");
+						emitTool(api.conversationId, {
+							name: call.name,
+							status: "end",
+							ok: !result.isError,
+							...toolOutput(result),
+						});
 						return undefined;
 					},
 				}),
@@ -528,6 +612,39 @@ export function isThinkingOn(internalId: number): boolean {
 	return thinkingSwitched.has(internalId);
 }
 
+/**
+ * 运行时切模型后的会话对齐（2026-11-04，接口文档 §2.8）。
+ *
+ * durable 的会话存的是**模型引用**；设置页切换改的是全局默认（provider.ts 的覆盖值）。
+ * 新建会话自然用新模型；已有会话在每轮开跑前对一次，还停在旧模型上就重配过去，
+ * 思考档（引用里的 `#think-on/off`）保持原样。机制同 D3 的思考切换。
+ * 只挂在聊天流上：任务会话短命（跑完即弃），不值得追。
+ */
+async function syncConversationModel(
+	conversation: Conversation,
+	internalId: number,
+): Promise<void> {
+	const config = readLlmConfig();
+	if (!config || isFaux()) return;
+	try {
+		const agent = await conversation.agent(CTX);
+		const currentId = agent.model?.modelId ?? "";
+		const base = currentId.split("#")[0];
+		// 没有引用（不该发生）或已经是当前模型：不用动
+		if (!base || base === config.model.modelId) return;
+		const thinking = currentId.includes("#think-on") || isThinkingOn(internalId);
+		const target = chatModelRef(thinking);
+		if (agent.model?.modelId === target.modelId) return;
+		await conversation.configure({ model: target }, CTX);
+		console.log(`[model] 会话 ${internalId} 对齐到 ${config.model.modelId}`);
+	} catch (error) {
+		// 对不齐这一轮就还用旧模型跑，不拦对话
+		console.warn(
+			`[model] 会话模型对齐失败: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+}
+
 /** 一轮里的两个可见阶段：在想 / 在动手（工具执行中） */
 export type TurnPhase = "thinking" | "working";
 
@@ -560,6 +677,119 @@ function emitPhase(conversationId: number, phase: TurnPhase): void {
 			/* 订阅方异常不该影响工具执行 */
 		}
 	}
+}
+
+/** 一次工具调用的起止（由 beforeTool / afterTool 钩子推，chatStream 取出去） */
+export interface ToolEvent {
+	name: string;
+	status: "start" | "end";
+	label?: string;
+	ok?: boolean;
+	output?: string;
+	args?: string;
+}
+
+/** 参数也截断：`write` 的 content 可能是整个文件，塞进事件里会把流撑爆 */
+const TOOL_ARGS_LIMIT = 1200;
+
+function toolArgs(args: unknown): { args?: string } {
+	if (!args || typeof args !== "object") return {};
+	const trimmed: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(args as Record<string, unknown>)) {
+		if (typeof value === "string" && value.length > 200) {
+			trimmed[key] = `${value.slice(0, 200)}…（共 ${value.length} 字符）`;
+		} else {
+			trimmed[key] = value;
+		}
+	}
+	let text: string;
+	try {
+		text = JSON.stringify(trimmed, null, 2);
+	} catch {
+		return {};
+	}
+	if (text.length > TOOL_ARGS_LIMIT) {
+		text = `${text.slice(0, TOOL_ARGS_LIMIT)}\n…`;
+	}
+	return { args: text };
+}
+
+/**
+ * 工具结果的截断上限。
+ *
+ * 2000 字符 ≈ 一屏多一点，够看清「命令输出了什么 / 文件头长什么样」；
+ * 再长就该去磁盘上看了，塞进事件里只会把流撑大。
+ */
+const TOOL_OUTPUT_LIMIT = 2000;
+
+function toolOutput(result: { output?: unknown }): { output?: string } {
+	// output 是 (TextContent | ImageContent)[]，只取文字；图片不进状态条
+	const text = contentText((result.output ?? []) as never).trim();
+	if (!text) return {};
+	return {
+		output:
+			text.length > TOOL_OUTPUT_LIMIT
+				? `${text.slice(0, TOOL_OUTPUT_LIMIT)}\n…（还有 ${text.length - TOOL_OUTPUT_LIMIT} 字符）`
+				: text,
+	};
+}
+
+const toolSinks = new Map<number, Set<(event: ToolEvent) => void>>();
+
+export function watchTool(conversationId: number, sink: (event: ToolEvent) => void): () => void {
+	let set = toolSinks.get(conversationId);
+	if (!set) {
+		set = new Set();
+		toolSinks.set(conversationId, set);
+	}
+	set.add(sink);
+	return () => {
+		set.delete(sink);
+		if (set.size === 0) toolSinks.delete(conversationId);
+	};
+}
+
+function emitTool(conversationId: number, event: ToolEvent): void {
+	const set = toolSinks.get(conversationId);
+	if (!set) return;
+	for (const sink of set) {
+		try {
+			sink(event);
+		} catch {
+			/* 订阅方异常不该影响工具执行 */
+		}
+	}
+}
+
+/**
+ * 从工具参数里挑一个最能说明"在干什么"的值。
+ *
+ * 刻意不 dump 整个 arguments：里面有正文（remember 的记忆文本、write 的文件内容），
+ * 界面上一行放不下，也不该把用户正文塞进状态条。挑不到就返回 undefined，
+ * 客户端退回只显示工具名。
+ */
+function toolLabel(args: unknown): string | undefined {
+	if (!args || typeof args !== "object") return undefined;
+	const values = args as Record<string, unknown>;
+	const keys = [
+		"path",
+		"file_path",
+		"filePath",
+		"command",
+		"query",
+		"pattern",
+		"requirement",
+		"text",
+		"url",
+		"name",
+	];
+	for (const key of keys) {
+		const value = values[key];
+		if (typeof value !== "string") continue;
+		const one = value.replace(/\s+/g, " ").trim();
+		if (one) return one.length > 72 ? `${one.slice(0, 72)}…` : one;
+	}
+	return undefined;
 }
 
 /** 短会话阈值（方案 D3 定 4000；风险表留了 4k→8k 的放宽口子，用环境变量调，不改代码） */
@@ -721,6 +951,13 @@ export async function openOrCreateChat(
 export type ChatStreamEvent =
 	| { type: "delta"; text: string }
 	/**
+	 * 思考正文增量（2026-11-04 批次一）。
+	 *
+	 * `progress.phase=thinking` 只说"在想"，这个给"想了什么"：deep 档模型的
+	 * thinking 块随生成流出，原样增量透传。快档不发这个事件。
+	 */
+	| { type: "thinking"; text: string }
+	/**
 	 * 这一轮此刻在干什么（2026-10-29）。
 	 *
 	 * 存在的理由：工具回合可能几十秒没有任何 token，客户端只看到"空白"，
@@ -729,18 +966,58 @@ export type ChatStreamEvent =
 	 */
 	| { type: "progress"; phase: TurnPhase }
 	/**
-	 * 派活的进度（2026-11-02）。
+	 * 一次工具调用（2026-11-03）。
+	 *
+	 * 为什么 progress 不够：它只会说"在动手"，说不出动的是哪只手。
+	 * 「正在读 agent.ts」和「正在跑 pnpm test」在界面上是两回事，出错时也完全
+	 * 不同地处置。start / end 成对出现，中间可能夹着别的工具，客户端按 name 归并。
+	 */
+	| {
+			type: "tool";
+			name: string;
+			status: "start" | "end";
+			label?: string;
+			ok?: boolean;
+			/** 工具吐出来的文字（截断过），只在 end 上有 */
+			output?: string;
+			/** 调用参数（JSON，截断过），只在 start 上有 */
+			args?: string;
+	  }
+	/**
+	 * 派活的进度（2026-11-02；2026-11-03 补任务单字段）。
 	 *
 	 * 存在的理由跟 progress 一样：派活可能跑几分钟，客户端只看到空白。
 	 * 但 progress 只有"在想/在动手"，说不出"第 2 件 / 共 3 件 / 写测试"。
+	 *
+	 * `ticketId` / `domain` / `phase` 是 2026-11-03 加的：前端要靠它们把多张单
+	 * 分开归并、显示领域和阶段；没有单号时事件根本发不出来（见 `startDelegation`）。
 	 */
-	| { type: "delegate"; done: number; total: number; current: string }
+	| {
+			type: "delegate";
+			ticketId: string;
+			domain: string;
+			phase: DelegationPhase;
+			done: number;
+			total: number;
+			current: string;
+			message?: string;
+			project?: string;
+			lastAction?: string;
+			lastHeartbeat?: string;
+			waitingOn?: string;
+	  }
 	/**
 	 * 需要人回答（2026-11-02）。
 	 *
 	 * 一句话：「它在等你什么」。客户端据此出卡片，而不是让用户从结论那句里猜。
 	 */
-	| { type: "attention"; kind: "need_input" | "need_decision" | "need_action"; question: string }
+	| {
+			type: "attention";
+			ticketId: string;
+			domain: string;
+			kind: "need_input" | "need_decision" | "need_action";
+			question: string;
+	  }
 	| { type: "turnLimit"; message: string }
 	/**
 	 * 这一轮跑完了但没有回答（模型报错、被策略拦下等）。
@@ -748,7 +1025,12 @@ export type ChatStreamEvent =
 	 * 必须显式吐出来：否则客户端只看到"空内容 + 正常结束"，等于给用户一个空气泡，
 	 * 而且分不清是"模型没话说"还是"上游挂了"（实测：key 无效时就是这样）。
 	 */
-	| { type: "unanswered"; message: string };
+	| { type: "unanswered"; message: string }
+	/**
+	 * 本轮 token 用量（2026-11-04 批次一）。**内部事件**：index.ts 捕获后挂到
+	 * `done.usage` 上，不单独对外发帧——对外契约只加字段，不加类型。
+	 */
+	| { type: "usage"; usage: TurnUsage };
 
 export interface ChatStreamInput {
 	conversation: Conversation;
@@ -782,11 +1064,14 @@ export async function* chatStream(
 	const watch = await input.conversation.watch(CTX);
 
 	const queue: string[] = [];
+	/** 待推送的思考增量（2026-11-04 批次一） */
+	const thinkings: string[] = [];
 	/** 待推送的阶段变化（工具钩子写进来，本流取出去） */
 	const phases: TurnPhase[] = [];
 	/** 待推送的派活事件（delegate 工具写进来，本流取出去） */
 	const delegations: DelegationEvent[] = [];
 	let emitted = "";
+	let emittedThinking = "";
 	let wake: (() => void) | null = null;
 
 	const notify = () => {
@@ -804,11 +1089,34 @@ export async function* chatStream(
 		notify();
 	};
 
+	/** 思考增量同款守卫；thinking 不在尾部补齐，流中能推多少推多少 */
+	const offerThinking = (candidate: string) => {
+		if (!candidate || candidate.length <= emittedThinking.length) return;
+		if (!candidate.startsWith(emittedThinking)) return;
+		thinkings.push(candidate.slice(emittedThinking.length));
+		emittedThinking = candidate;
+		notify();
+	};
+
 	const partialOf = (value: ConversationView): string => {
 		const live = value.docs["pi.live"] as LiveState | undefined;
 		const message = live?.generation?.message as { content?: unknown } | undefined;
 		if (!message?.content) return "";
 		return contentText(message.content as Parameters<typeof contentText>[0]);
+	};
+
+	/** 生成中的 thinking 块正文（2026-11-04 批次一；pi-ai 的块形状是 {type:"thinking", thinking}） */
+	const thinkingOf = (value: ConversationView): string => {
+		const live = value.docs["pi.live"] as LiveState | undefined;
+		const message = live?.generation?.message as { content?: unknown } | undefined;
+		if (!message?.content) return "";
+		const parts: string[] = [];
+		for (const block of message.content as Array<{ type?: string; thinking?: string }>) {
+			if (block && block.type === "thinking" && typeof block.thinking === "string") {
+				parts.push(block.thinking);
+			}
+		}
+		return parts.join("");
 	};
 
 	// 用对象包着：闭包里赋值，TS 的收窄判断看不到
@@ -826,12 +1134,22 @@ export async function* chatStream(
 		delegations.push(event);
 		notify();
 	});
+	/** 待推送的工具起止 */
+	const tools: ToolEvent[] = [];
+	const unwatchTool = watchTool(conversationId, (event) => {
+		tools.push(event);
+		notify();
+	});
 
 	try {
+		// 运行时切模型后，还停在旧模型上的会话在这轮开跑前对齐过去（接口文档 §2.8）
+		await syncConversationModel(input.conversation, conversationId);
 		watch.start(async (value) => {
 			offer(partialOf(value));
+			offerThinking(thinkingOf(value));
 		});
 		offer(partialOf(watch.value));
+		offerThinking(thinkingOf(watch.value));
 
 		const submission = await input.conversation.submit(
 			{ type: "input", content: input.text, requestId: input.requestId },
@@ -861,19 +1179,49 @@ export async function* chatStream(
 				notify();
 			});
 
-		while (!finished || queue.length > 0 || phases.length > 0 || delegations.length > 0) {
-			if (queue.length === 0) {
+		while (
+			!finished ||
+			queue.length > 0 ||
+			thinkings.length > 0 ||
+			phases.length > 0 ||
+			delegations.length > 0 ||
+			tools.length > 0
+		) {
+			if (queue.length === 0 && thinkings.length === 0) {
+				const tool = tools.shift();
+				if (tool) {
+					yield {
+						type: "tool",
+						name: tool.name,
+						status: tool.status,
+						label: tool.label,
+						ok: tool.ok,
+						output: tool.output,
+						args: tool.args,
+					};
+					continue;
+				}
 				const delegation = delegations.shift();
 				if (delegation) {
 					yield delegation.type === "delegate"
 						? {
 								type: "delegate",
+								ticketId: delegation.ticketId,
+								domain: delegation.domain,
+								phase: delegation.phase,
 								done: delegation.done,
 								total: delegation.total,
 								current: delegation.current,
+								message: delegation.message,
+								project: delegation.project,
+								lastAction: delegation.lastAction,
+								lastHeartbeat: delegation.lastHeartbeat,
+								waitingOn: delegation.waitingOn,
 							}
 						: {
 								type: "attention",
+								ticketId: delegation.ticketId,
+								domain: delegation.domain,
 								kind: delegation.kind,
 								question: delegation.question,
 							};
@@ -889,6 +1237,8 @@ export async function* chatStream(
 				});
 				continue;
 			}
+			const thinkDelta = thinkings.shift();
+			if (thinkDelta) yield { type: "thinking", text: thinkDelta };
 			const delta = queue.shift();
 			if (delta) yield { type: "delta", text: delta };
 		}
@@ -916,9 +1266,14 @@ export async function* chatStream(
 		if ((limitHits.get(conversationId) ?? 0) > limitSeqBefore) {
 			yield { type: "turnLimit", message: TURN_LIMIT_MESSAGE };
 		}
+
+		// 本轮 token 用量（内部事件；index.ts 捕获后挂到 done.usage）。读不到就算了
+		const usage = await readLastTurnUsage(input.conversation);
+		if (usage) yield { type: "usage", usage };
 	} finally {
 		unwatchPhase();
 		unwatchDelegation();
+		unwatchTool();
 		// 只关掉"看"这件事，不碰正在跑的那一轮
 		await watch.stop().catch(() => undefined);
 	}
@@ -939,6 +1294,33 @@ export interface TranscriptMessage {
 	text: string;
 	/** 消息时间，epoch 毫秒 */
 	at: number;
+}
+
+/**
+ * 任务单跑完后回灌会话（2026-11-03）。
+ *
+ * 为什么走 `sayInChat`：它就是"助手主动说一句话"的现成入口——写一条 `pi.assistant`
+ * 进会话。会话空着时这句就是下一轮汇报的起点；会话正忙时 durable 会把它排到
+ * 本轮结束，不打断当前对话。不额外调模型，也不碰上下文压缩。
+ *
+ * 失败只记日志、不抛：活已经跑完，汇报写不进去不该把工具或流拖下水。
+ */
+async function reportDelegationResult(
+	conversationId: number,
+	report: DelegationReport,
+): Promise<void> {
+	try {
+		const harness = await getHarness();
+		const conversation = await harness.conversation(conversationId as never, CTX);
+		if (!conversation) {
+			console.warn(`[agent] 任务 ${report.ticketId} 的会话 ${conversationId} 已不存在，跳过汇报`);
+			return;
+		}
+		await sayInChat({ conversation, externalId: "", internalId: conversationId }, report.text);
+	} catch (error) {
+		const detail = error instanceof Error ? error.message : String(error);
+		console.warn(`[agent] 任务 ${report.ticketId} 写回会话失败: ${detail}`);
+	}
 }
 
 /**
@@ -1027,14 +1409,15 @@ async function answerText(conversation: Conversation): Promise<string> {
 }
 
 /**
- * 每轮打一行 usage 日志（2026-10-31 方案 §6 步骤 1 的"日志打 cacheRead"）。
+ * 读本轮最后一条 assistant 消息的 token 用量（2026-11-04 批次一）。
  *
- * 验收指标（方案 §7）全靠这行：`cacheRead > 0 且 ≥ 首轮 prompt 的 60%`、
- * `工具链每轮增量 < 600 token`，都得从日志里捞。挂在 settle 回调里，
- * 客户端断流也照样打 —— 那一轮在服务端照样跑完。取的是本轮最后一次
- * 模型请求的 usage（多工具回合时，中间回合的增量已被它累计在前缀里）。
+ * 挂在 settle 回调与 chatStream 收尾两处用。客户端断流也照样能读 ——
+ * 那一轮在服务端照样跑完。取的是本轮最后一次模型请求的 usage
+ * （多工具回合时，中间回合的增量已被它累计在前缀里）。
+ * 验收指标（2026-10-31 方案 §7）：`cacheRead > 0 且 ≥ 首轮 prompt 的 60%`、
+ * `工具链每轮增量 < 600 token`，都从 logTurnUsage 那行日志里捞。
  */
-async function logTurnUsage(conversation: Conversation, internalId: number): Promise<void> {
+async function readLastTurnUsage(conversation: Conversation): Promise<TurnUsage | null> {
 	try {
 		const view = await conversation.context(CTX);
 		for (let index = view.entries.length - 1; index >= 0; index -= 1) {
@@ -1045,16 +1428,47 @@ async function logTurnUsage(conversation: Conversation, internalId: number): Pro
 				| undefined;
 			const usage = message?.usage;
 			if (usage) {
-				console.log(
-					`[usage] 会话 ${internalId} input=${usage.input ?? "-"} cacheRead=${usage.cacheRead ?? "-"} ` +
-						`cacheWrite=${usage.cacheWrite ?? "-"} output=${usage.output ?? "-"}`,
-				);
-				return;
+				return {
+					input: usage.input ?? 0,
+					output: usage.output ?? 0,
+					cacheRead: usage.cacheRead ?? 0,
+				};
 			}
 		}
-	} catch (error) {
-		console.warn(`[usage] 读取失败: ${error instanceof Error ? error.message : String(error)}`);
+	} catch {
+		// 读不到就算了：用量是锦上添花，不该让它影响对话
 	}
+	return null;
+}
+
+async function logTurnUsage(conversation: Conversation, internalId: number): Promise<void> {
+	const usage = await readLastTurnUsage(conversation);
+	if (usage) {
+		console.log(
+			`[usage] 会话 ${internalId} input=${usage.input} cacheRead=${usage.cacheRead} output=${usage.output}`,
+		);
+	}
+}
+
+/**
+ * 上下文占用（2026-11-04 批次二，给标题栏「已用/窗口」徽标用）。
+ *
+ * used 不自己数 token——直接取本轮最后一次请求的 `usage.input`，那是上游真实测量的
+ * prompt 大小（压缩/截断后的效果都体现在里面），比拿 ContextView 自算准。
+ * window 取模型目录的 contextWindow；读不到就给 null，前端隐藏徽标。
+ */
+export async function contextUsageOf(
+	conversation: Conversation,
+): Promise<{ used: number | null; window: number | null }> {
+	const usage = await readLastTurnUsage(conversation);
+	if (!usage || usage.input <= 0) return { used: null, window: null };
+	const config = readLlmConfig();
+	let window: number | null = null;
+	if (config) {
+		const model = config.models.getModel(config.model.provider, config.model.modelId);
+		window = (model as { contextWindow?: number } | undefined)?.contextWindow ?? null;
+	}
+	return { used: usage.input, window };
 }
 
 // ── 会话旁路能力 ─────────────────────────────────────────
@@ -1148,6 +1562,84 @@ export interface ChatIndexEntry {
 	lastAt: number;
 	firstText: string;
 	turns: number;
+	/** 用户改过的名字；没有就用 firstText */
+	title?: string;
+	/** 是否置顶（2026-11-04 批次一）；置顶的排前面由客户端处理 */
+	pinned?: boolean;
+}
+
+// ── 会话标题 / 从列表移除 ───────────────────────────────
+/**
+ * durable 里没有「标题」这个概念（Conversation 只有 id / owner / model 这些），
+ * 也没有删除接口。所以标题、以及我们自己的「从列表移除」都记在这份小文件里，
+ * 不往内核的表结构里塞东西 —— 那是升级时最容易痛的地方。
+ */
+interface ChatMeta {
+	titles: Record<string, string>;
+	hidden: string[];
+	/** 置顶的会话 id，按置顶先后排（2026-11-04 批次一） */
+	pins: string[];
+}
+
+const CHAT_META_PATH =
+	process.env.AGENT_CHAT_META_PATH?.trim() || ".data/chat-meta.json";
+
+function readChatMeta(): ChatMeta {
+	try {
+		const parsed = JSON.parse(readFileSync(CHAT_META_PATH, "utf8")) as Partial<ChatMeta>;
+		return {
+			titles:
+				parsed.titles && typeof parsed.titles === "object" ? parsed.titles : {},
+			hidden: Array.isArray(parsed.hidden) ? parsed.hidden : [],
+			pins: Array.isArray(parsed.pins) ? parsed.pins : [],
+		};
+	} catch {
+		// 文件不存在或坏了：当作没改过名、没移除过，不影响会话本身
+		return { titles: {}, hidden: [], pins: [] };
+	}
+}
+
+function writeChatMeta(meta: ChatMeta): void {
+	mkdirSync(dirname(CHAT_META_PATH), { recursive: true });
+	writeFileSync(CHAT_META_PATH, JSON.stringify(meta, null, 2));
+}
+
+export function renameChat(conversationId: string, title: string): { title?: string } {
+	const meta = readChatMeta();
+	const clean = title.trim().slice(0, 80);
+	if (clean) meta.titles[conversationId] = clean;
+	else delete meta.titles[conversationId];
+	writeChatMeta(meta);
+	return { title: clean || undefined };
+}
+
+/** 「移除」只是从列表里拿掉，会话本身和记忆都还在（没有删除接口） */
+export function hideChat(conversationId: string): void {
+	const meta = readChatMeta();
+	if (!meta.hidden.includes(conversationId)) meta.hidden.push(conversationId);
+	writeChatMeta(meta);
+}
+
+/** 置顶 / 取消置顶（2026-11-04 批次一）。只影响列表展示顺序，不碰会话本身 */
+export function pinChat(conversationId: string, pinned: boolean): boolean {
+	const meta = readChatMeta();
+	const index = meta.pins.indexOf(conversationId);
+	if (pinned && index === -1) meta.pins.push(conversationId);
+	if (!pinned && index !== -1) meta.pins.splice(index, 1);
+	if (index !== -1 || pinned) writeChatMeta(meta);
+	return pinned && meta.pins.includes(conversationId);
+}
+
+export function restoreChats(): number {
+	const meta = readChatMeta();
+	const count = meta.hidden.length;
+	meta.hidden = [];
+	writeChatMeta(meta);
+	return count;
+}
+
+export function chatMetaSummary(): { hidden: number } {
+	return { hidden: readChatMeta().hidden.length };
 }
 
 export async function listChats(limit = 50): Promise<ChatIndexEntry[]> {
@@ -1156,8 +1648,11 @@ export async function listChats(limit = 50): Promise<ChatIndexEntry[]> {
 	const chats = await harness.snapshot(Chats, CTX);
 	// 任务会话（`X-Task` 通道产生）不进"历史对话"：它们的首句是"请整理成稿"这类指令，
 	// 不是用户说过的话（2026-10-31）。正文仍可按 id 回读，只是不在列表里露头。
+	const meta = readChatMeta();
+	const hidden = new Set(meta.hidden);
 	const pairs = Object.entries(chats?.byExternal ?? {})
 		.filter(([conversationId]) => !conversationId.startsWith(TASK_CONVERSATION_PREFIX))
+		.filter(([conversationId]) => !hidden.has(conversationId))
 		.slice(-limit);
 	const entries: ChatIndexEntry[] = [];
 
@@ -1183,7 +1678,15 @@ export async function listChats(limit = 50): Promise<ChatIndexEntry[]> {
 				if (at > lastAt) lastAt = at;
 			}
 			if (turns === 0) continue;
-			entries.push({ conversationId, createdAt, lastAt, firstText, turns });
+			entries.push({
+				conversationId,
+				createdAt,
+				lastAt,
+				firstText,
+				turns,
+				...(meta.titles[conversationId] ? { title: meta.titles[conversationId] } : {}),
+				...(meta.pins.includes(conversationId) ? { pinned: true } : {}),
+			});
 		} catch (error) {
 			// 单个会话读失败不该让整张索引失败（重装场景下可能是残留的空会话）
 			console.warn(
@@ -1193,4 +1696,52 @@ export async function listChats(limit = 50): Promise<ChatIndexEntry[]> {
 	}
 
 	return entries.sort((a, b) => b.lastAt - a.lastAt);
+}
+
+// ── 内容级搜索（2026-11-04 批次二）────────────────────────
+export interface SearchHit {
+	conversationId: string;
+	/** 会话标题（没有就用首句），展示用 */
+	title: string;
+	role: "user" | "assistant";
+	at: number;
+	/** 命中处附近 ±40/80 字的片段，前端做高亮 */
+	text: string;
+}
+
+/**
+ * 跨会话搜正文：逐会话读 transcript 做 LIKE 过滤。
+ * 代价与 `listChats` 同口径（逐会话打开，会话多时慢）——搜索是显式动作，慢一点可接受；
+ * FTS5 等真变慢了再立项（记忆层召回的中文 LIKE 失效是每轮隐式动作，那边必须快，这边不必）。
+ */
+export async function searchTranscripts(q: string, limit = 20): Promise<SearchHit[]> {
+	const needle = q.trim().toLowerCase();
+	if (needle.length < 2) return [];
+	const chats = await listChats(200);
+	const hits: SearchHit[] = [];
+	for (const chat of chats) {
+		try {
+			const resolved = await openChat(chat.conversationId);
+			if (!resolved) continue;
+			const messages = await readTranscript(resolved, 200);
+			for (const message of messages) {
+				const index = message.text.toLowerCase().indexOf(needle);
+				if (index === -1) continue;
+				hits.push({
+					conversationId: chat.conversationId,
+					title: chat.title || chat.firstText,
+					role: message.role,
+					at: message.at,
+					text: message.text.slice(Math.max(0, index - 40), index + needle.length + 80),
+				});
+				if (hits.length >= limit) return hits;
+			}
+		} catch (error) {
+			// 单会话读失败不挡整查
+			console.warn(
+				`[search] 会话 ${chat.conversationId} 读取失败: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+	return hits;
 }

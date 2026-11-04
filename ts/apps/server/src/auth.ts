@@ -1,5 +1,6 @@
-import { timingSafeEqual } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import type { Context, Next } from "hono";
+import { getCookie, setCookie } from "hono/cookie";
 import { getConnInfo } from "@hono/node-server/conninfo";
 
 /**
@@ -19,7 +20,18 @@ const LOCAL_ADDRESSES = new Set([
 	"::ffff:127.0.0.1",
 ]);
 
-function isLoopback(c: Context): boolean {
+/**
+ * 本机页面凭据（2026-11-03）：服务启动时随机生成一枚“本机 cookie”。
+ *
+ * 目的：桌面壳 / 本机浏览器打开 `/` 时自动连上，不再手填 AGENT_TOKEN。
+ * 只在 loopback 请求且带这枚 cookie 时直通；curl、探针、别的本地脚本没有
+ * 这枚 cookie，仍走令牌校验 —— 没有把“本机”变成无条件的后门。
+ * HttpOnly：页面 JS 读不到；SameSite=Strict：别的网站发起的请求带不上。
+ */
+const LOCAL_COOKIE = "lifediary_local";
+const LOCAL_SECRET = randomBytes(24).toString("hex");
+
+export function isLoopback(c: Context): boolean {
 	try {
 		const address = getConnInfo(c).remote.address;
 		return address ? LOCAL_ADDRESSES.has(address) : false;
@@ -45,6 +57,22 @@ export interface AuthOptions {
 	verifyDeviceToken?: (token: string) => boolean;
 }
 
+/** 本机页面加载时发一枚进程内凭据；非本机请求不发光，避免把 cookie 扩散出去。 */
+export function attachLocalCredential(c: Context): void {
+	if (!isLoopback(c)) return;
+	setCookie(c, LOCAL_COOKIE, LOCAL_SECRET, {
+		path: "/",
+		httpOnly: true,
+		sameSite: "Strict",
+	});
+}
+
+function hasLocalCredential(c: Context): boolean {
+	if (!isLoopback(c)) return false;
+	const provided = getCookie(c, LOCAL_COOKIE);
+	return typeof provided === "string" && safeEqual(provided, LOCAL_SECRET);
+}
+
 export function createAuthMiddleware(expectedToken: string | null, options: AuthOptions = {}) {
 	return async (c: Context, next: Next) => {
 		// 没配共享令牌：只让本机访问（但**扫码配对的设备**仍可从局域网进来）。
@@ -54,6 +82,9 @@ export function createAuthMiddleware(expectedToken: string | null, options: Auth
 			if (provided && options.verifyDeviceToken?.(provided)) return next();
 			return c.body(null, 403);
 		}
+
+		// 本机页面（桌面壳 / 本机浏览器）由 `/` 下发的 cookie 自动放行。
+		if (hasLocalCredential(c)) return next();
 
 		const provided = bearerOf(c);
 		if (provided) {

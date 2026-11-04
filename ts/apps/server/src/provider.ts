@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import {
 	createModels,
 	createProvider,
@@ -23,6 +25,9 @@ import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completio
  */
 
 const PROVIDER_ID = "bailian";
+
+const DEFAULT_MODEL = "deepseek-v4.1-flash";
+const DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1";
 
 export interface LlmConfig {
 	/** 传给 Harness 的模型集合 */
@@ -65,6 +70,27 @@ const taskVariants = new Map<string, Model<"openai-completions">>();
 /** 重新发布 provider（新增派生模型后调用），由 readLlmConfig 装配时挂上 */
 let publishProvider: (() => void) | null = null;
 
+/** 上游目录里的静态模型（LLM_MODEL / LLM_MODEL_FAST / 运行时切换补进来的）；派生模型在 taskVariants */
+let declaredModels: Model<"openai-completions">[] = [];
+/** 当前上游 baseUrl（applyModelId 补模型时要用；env 静态，进程内不变） */
+let upstreamBaseUrl = DEFAULT_BASE_URL;
+
+function buildModel(id: string): Model<"openai-completions"> {
+	return {
+		id,
+		name: id,
+		api: "openai-completions",
+		provider: PROVIDER_ID,
+		baseUrl: upstreamBaseUrl,
+		reasoning: false,
+		input: ["text"],
+		// 单价填 0：用量按 token 计数，不假装知道人民币价格
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 131_072,
+		maxTokens: 4096,
+	};
+}
+
 /**
  * 聊天档位的**思考变体**（2026-10-31，方案 D1/D2）。
  *
@@ -98,6 +124,137 @@ export function chatModelRef(thinking: boolean): { provider: string; modelId: st
 
 function isFaux(): boolean {
 	return (process.env.LLM_PROVIDER ?? "").trim().toLowerCase() === "faux";
+}
+export { isFaux };
+
+/** ── 模型运行时覆盖（2026-11-04，界面第三轮方案 §四）──────────────────────────
+ *
+ * 密钥与上游地址永远只走环境变量（仓库硬约束），这里能动的**只有模型名**。
+ * env `LLM_MODEL` 是出厂默认；设置页切模型 = 写运行时覆盖（`.data/runtime.json`，
+ * 只存模型 id），`readLlmConfig` 返回的引用跟着变，下一轮对话生效。
+ * `MODEL_RUNTIME_OVERRIDE=false` 一行回滚：接口拒绝、启动忽略已存覆盖值。
+ */
+
+/** env 清单：`LLM_MODELS` 逗号分隔；没配 = 只有当前模型（选择器退化成只读行） */
+function declaredModelIds(envId: string): string[] {
+	const list = (process.env.LLM_MODELS ?? "")
+		.split(",")
+		.map((entry) => entry.trim())
+		.filter(Boolean);
+	return list.includes(envId) ? list : [envId, ...list];
+}
+
+const runtimeStatePath = (): string =>
+	process.env.MODEL_RUNTIME_PATH?.trim() || ".data/runtime.json";
+
+/** 回滚开关：`MODEL_RUNTIME_OVERRIDE=false` = 关闭运行时切模型（接口拒绝 + 启动忽略覆盖值） */
+export function modelOverrideEnabled(): boolean {
+	return (process.env.MODEL_RUNTIME_OVERRIDE ?? "").trim().toLowerCase() !== "false";
+}
+
+function readStoredModel(): string | null {
+	try {
+		const parsed = JSON.parse(readFileSync(runtimeStatePath(), "utf8")) as {
+			model?: unknown;
+		};
+		return typeof parsed.model === "string" && parsed.model.trim()
+			? parsed.model.trim()
+			: null;
+	} catch {
+		return null; // 没有覆盖值 / 坏了都当没有，env 默认接管
+	}
+}
+
+function writeStoredModel(id: string): void {
+	const path = runtimeStatePath();
+	try {
+		mkdirSync(dirname(path), { recursive: true });
+		writeFileSync(path, `${JSON.stringify({ model: id, at: new Date().toISOString() })}\n`);
+	} catch (error) {
+		// 覆盖值写不进去只影响"重启后是否记得"，本轮已经生效，不当致命错误
+		console.warn(
+			`[model] 覆盖值写不进 ${path}: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+}
+
+export interface RuntimeModelInfo {
+	/** 当前生效的模型 id；未配置（mock 流）时是 null */
+	model: string | null;
+	/** 可切清单；faux / mock / 清单只有一项 / 覆盖被关 时是 []（前端据此退化成只读行） */
+	models: string[];
+}
+
+/** /healthz 的模型段：一次调用拿全"现在是什么、能切什么" */
+export function runtimeModelInfo(): RuntimeModelInfo {
+	if (isFaux()) return { model: "faux", models: [] };
+	const config = readLlmConfig();
+	if (!config) return { model: null, models: [] };
+	const current = config.model.modelId;
+	if (!modelOverrideEnabled()) return { model: current, models: [] };
+	const list = declaredModelIds(envModelId());
+	return { model: current, models: list.includes(current) ? list : [current, ...list] };
+}
+
+export type SetModelResult =
+	| { ok: true; model: string; models: string[] }
+	| {
+			ok: false;
+			reason: "override_disabled" | "faux" | "llm_not_configured" | "unknown_model";
+			message: string;
+	  };
+
+/** 设置页切模型（接口文档 §2.8）。校验、生效、持久化都在这一处。 */
+export function setRuntimeModel(id: string): SetModelResult {
+	if (!modelOverrideEnabled()) {
+		return {
+			ok: false,
+			reason: "override_disabled",
+			message: "模型切换被 MODEL_RUNTIME_OVERRIDE=false 关闭",
+		};
+	}
+	if (isFaux()) {
+		return { ok: false, reason: "faux", message: "faux 是假模型，没有可切换的真实模型" };
+	}
+	const config = readLlmConfig();
+	if (!config) {
+		return { ok: false, reason: "llm_not_configured", message: "未配置 LLM_API_KEY（mock 流），没有模型可切" };
+	}
+	const target = id.trim();
+	if (!declaredModelIds(envModelId()).includes(target)) {
+		return { ok: false, reason: "unknown_model", message: `模型不在清单里：${target}` };
+	}
+	applyModelId(target);
+	writeStoredModel(target);
+	return { ok: true, model: target, models: runtimeModelInfo().models };
+}
+
+/** 直通路径（openai-compat）跟随运行时覆盖；faux/mock 返回 null（直通路径在那两种模式下本来就不可用） */
+export function upstreamModelId(): string | null {
+	if (isFaux()) return null;
+	return readLlmConfig()?.model.modelId ?? null;
+}
+
+function envModelId(): string {
+	return process.env.LLM_MODEL?.trim() || DEFAULT_MODEL;
+}
+
+/** 把 cached 的引用指向新模型；目录里没有就补一份再重发 provider */
+function applyModelId(id: string): void {
+	if (!cached || cached.models.getModel(PROVIDER_ID, id)) {
+		// 目录里已有（首次启动恢复场景），只需把引用指过去
+		if (cached) {
+			cached.model = { provider: PROVIDER_ID, modelId: id };
+			cached.fastModel = cached.model;
+		}
+		return;
+	}
+	declaredModels.push(buildModel(id));
+	publishProvider?.();
+	if (cached) {
+		cached.model = { provider: PROVIDER_ID, modelId: id };
+		cached.fastModel = cached.model;
+	}
 }
 
 /** 参数 → 稳定后缀。同参数复用同一个派生模型，避免每次请求都往目录里塞新模型 */
@@ -196,31 +353,17 @@ export function readLlmConfig(): LlmConfig | null {
 	// 快慢一律交给 `enable_thinking` 变体（`chatModelRef`）。默认值改成 deepseek-v4.1-flash：
 	// 实测同一句话 qwen-flash ~1.0s，deepseek-v4.1-flash 关思考 0.77–0.93s，质量更好。
 	// `LLM_MODEL_FAST` 保留为**部署别名**（语义已不再是"小模型"），留空则跟随 `LLM_MODEL`。
-	const modelId = process.env.LLM_MODEL?.trim() || "deepseek-v4.1-flash";
-	const baseUrl = (
-		process.env.LLM_BASE_URL?.trim() ||
-		"https://dashscope.aliyuncs.com/compatible-mode/v1"
+	const modelId = envModelId();
+	upstreamBaseUrl = (
+		process.env.LLM_BASE_URL?.trim() || DEFAULT_BASE_URL
 	).replace(/\/+$/, "");
 
 	const fastModelId = process.env.LLM_MODEL_FAST?.trim() || modelId;
 
-	const buildModel = (id: string): Model<"openai-completions"> => ({
-		id,
-		name: id,
-		api: "openai-completions",
-		provider: PROVIDER_ID,
-		baseUrl,
-		reasoning: false,
-		input: ["text"],
-		// 单价填 0：用量按 token 计数，不假装知道人民币价格
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 131_072,
-		maxTokens: 4096,
-	});
-
-	const model = buildModel(modelId);
-	const fastModel = buildModel(fastModelId);
-	const declared = fastModelId === modelId ? [model] : [model, fastModel];
+	declaredModels =
+		fastModelId === modelId
+			? [buildModel(modelId)]
+			: [buildModel(modelId), buildModel(fastModelId)];
 
 	const models = createModels();
 	// provider 是可替换的：任务通道要往里加"带采样参数的派生模型"，
@@ -230,10 +373,10 @@ export function readLlmConfig(): LlmConfig | null {
 			createProvider({
 				id: PROVIDER_ID,
 				name: "百炼（OpenAI 兼容）",
-				baseUrl,
+				baseUrl: upstreamBaseUrl,
 				// 存的凭据优先，其次读 LLM_API_KEY；两者都没有时 provider 就是「未配置」
 				auth: { apiKey: envApiKeyAuth("百炼 API key", ["LLM_API_KEY"]) },
-				models: [...declared, ...taskVariants.values()],
+				models: [...declaredModels, ...taskVariants.values()],
 				api: openAICompletionsApi(),
 			}),
 		);
@@ -246,5 +389,14 @@ export function readLlmConfig(): LlmConfig | null {
 		model: { provider: PROVIDER_ID, modelId },
 		fastModel: { provider: PROVIDER_ID, modelId: fastModelId },
 	};
+
+	// 启动时恢复上一次的运行时选择（2026-11-04）：只在清单内才认，
+	// env 换了、清单删了旧模型，就自然回默认，不报错。
+	if (modelOverrideEnabled()) {
+		const stored = readStoredModel();
+		if (stored && stored !== modelId && declaredModelIds(modelId).includes(stored)) {
+			applyModelId(stored);
+		}
+	}
 	return cached;
 }

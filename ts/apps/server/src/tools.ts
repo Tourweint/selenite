@@ -5,12 +5,24 @@ import { scopeKey, type MemoryEngine, type MemoryKind, type MemoryScope } from "
 // 跑的是 .ts 源码，装进 node_modules 后 node 不会给里面的 .ts 剥类型
 // （ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING），所以不能走 file: 依赖。
 // 只有这一处引用它，挪仓库时改这一行。
+import { runChancellor } from "../../../../../chancellor/src/index.ts";
 import {
-	runChancellor,
-	type ChancellorRequest,
-	type TicketResult,
-} from "../../../../../chancellor/src/index.ts";
-import { emitDelegation } from "./delegation.ts";
+	chancellorWorkRoot,
+	emitDelegation,
+	startDelegation,
+	type DelegationReport,
+} from "./delegation.ts";
+import {
+	autoRequestId,
+	DelegationReceipts,
+	requestFingerprint,
+} from "./delegation-receipts.ts";
+import {
+	ProjectError,
+	resolveDelegationProject,
+	type ProjectRef,
+	type ProjectsStore,
+} from "./projects.ts";
 import { ReminderTask } from "./reminder.ts";
 import type { SkillStore } from "./skills.ts";
 
@@ -43,6 +55,36 @@ export interface ToolDeps {
 	delegate?: boolean;
 	/** 测试用：替换真正跑 chancellor 的入口；生产不传，直接用 runChancellor。 */
 	delegateRun?: typeof runChancellor;
+	/**
+	 * 任务单跑完后回灌会话（2026-11-03）。
+	 *
+	 * 工具不直接碰会话对象：由 `agent.ts` 传入，内部走 `sayInChat`。
+	 * 会话忙时 durable 会把这条写入排到本轮结束，不打断当前对话。
+	 */
+	reportDelegation?: (conversationId: number, report: DelegationReport) => void;
+	/**
+	 * 项目/工作区登记表（2026-11-03 方案 §5.5）。
+	 * 派新活必须先过这里：没有已登记且仍在工作区内的项目一律返回 `needs_project`，
+	 * 不建目录、不写文件、不建任务单。
+	 */
+	projects?: ProjectsStore | null;
+	/** 派单回执表；不传用默认 `.data/delegations.sqlite`。测试可注入临时库。 */
+	receipts?: DelegationReceipts | null;
+}
+
+let sharedReceipts: DelegationReceipts | null = null;
+
+function receiptsOf(deps: ToolDeps): DelegationReceipts {
+	if (deps.receipts) return deps.receipts;
+	if (!sharedReceipts) sharedReceipts = new DelegationReceipts();
+	return sharedReceipts;
+}
+
+/** 读布尔 env；只有明确写 false/0 才关，避免拼错一个值把功能误关掉。 */
+function envFlag(name: string, fallback: boolean): boolean {
+	const raw = process.env[name]?.trim().toLowerCase();
+	if (!raw) return fallback;
+	return raw !== "false" && raw !== "0";
 }
 
 function text(value: string) {
@@ -146,7 +188,50 @@ export function createTools(deps: ToolDeps) {
 	// 按会话记最后一张单：resume 只可能发生在同一轮对话里。
 	// 不落库——进程重启后会话已断，老单本来也接不上，落库只会多出迁移/过期/清理的常态成本。
 	const lastTicketByConversation = new Map<number, string>();
+	// 续跑被拒时可能改派新单：记住这轮用的项目，改派后仍然落在同一个项目里。
+	const lastProjectByConversation = new Map<number, ProjectRef>();
 	const run = deps.delegateRun ?? runChancellor;
+	/** 回滚开关：`DELEGATION_PROJECT_REQUIRED=false` 回到 2026-11-02 的无项目行为。 */
+	const projectRequired = envFlag("DELEGATION_PROJECT_REQUIRED", true);
+
+	const proposeProject = defineTool({
+		name: "propose_project",
+		description:
+			"在用户已选定工作区的前提下，提出新建一个项目根目录。" +
+			"它只提交待用户确认的请求，**不会创建目录、也不会登记项目**；用户在项目设置里确认后才真正建目录。" +
+			"只有用户明确要新建一个项目（新的根目录）时才调用；项目内部的子目录不需要、也不应该新建项目。",
+		parameters: Type.Object({
+			name: Type.String({ description: "项目名，给用户看的短名，例如 手机端 / 桌面壳 / 文档站" }),
+			path: Type.String({
+				description: "工作区内的相对路径，例如 projects/新的小工具；不要写绝对路径，不要包含 ..",
+			}),
+		}),
+		execute: async (args) => {
+			if (!deps.projects) {
+				return text(
+					JSON.stringify({ ok: false, error: "needs_project", message: "项目登记表不可用" }),
+				);
+			}
+			try {
+				const proposal = deps.projects.proposeProject(args.name, args.path);
+				return text(
+					JSON.stringify({
+						ok: true,
+						proposalId: proposal.id,
+						name: proposal.name,
+						path: proposal.relativePath,
+						message:
+							"已提交待确认：用户在工作区设置里确认后才会创建目录并登记。" +
+							"确认之前不要派工到它，也不要自己建这个目录。",
+					}),
+				);
+			} catch (error) {
+				const code = error instanceof ProjectError ? error.code : "failed";
+				const message = error instanceof Error ? error.message : String(error);
+				return text(JSON.stringify({ ok: false, error: code, message }));
+			}
+		},
+	});
 
 	// 派活（2026-11-02）：主 agent 的"手"。它自己不动手，把活交给外面的工人，
 	// 只拿回一句话。工具的 description 里"不适合"那半句比"适合"更重要——
@@ -154,12 +239,17 @@ export function createTools(deps: ToolDeps) {
 	const delegate = defineTool({
 		name: "delegate",
 		description:
-			"把一件需要多步动手的活派给外面的工人去做，你只拿回一句话结论。" +
+			"把一件需要多步动手的活派给外面的工人（领域负责人/执行者）去做。" +
 			"适合：要改多个文件、要跑命令、要查证之后再动手的任务；" +
 			"**以及在手机上操作 App**——打开某个 App、点按钮、输入文字、翻页、看屏幕上显示了什么。" +
-			"工人是跑在用户手机上的，它能自己看屏、自己判断、自己点，不需要你告诉它点哪个坐标。" +
 			"不适合：回答问题、闲聊、一次 read 就能答的事、需要边做边问对方的事。" +
-			"派出去之后你看不到过程，中途也不能追问；它干完或卡住，都只回你一句话。" +
+			"**派出去后会立即返回任务单号，不会占住这一轮对话；后台跑完会有一条汇报写进会话。**" +
+			"所以返回后直接告诉用户「已派发，完成后会汇报」即可，不要等结果、不要反复查询、不要重复派。" +
+			"填 `domain` 把活交给对应领域的负责人（比如 前端 / 桌面壳 / 文档 / 数据）；" +
+			"不填则按旧路径直接派 worker。" +
+			"**派新活时必须带 `project`（已登记的项目名或 id）**；没有可用项目时会返回 " +
+			"`{\"error\":\"needs_project\"}` 并列出已有项目——先问用户要建哪个项目，" +
+			"用 `propose_project` 提交、等用户在设置里确认，再派。" +
 			"如果上一轮派出去的活卡住了、你问了用户一个问题、用户刚回答了你，用 `resume: true` 接着原单跑：" +
 			"`requirement` 里只写用户的那句回答（比如「验证码 1234」），不要重述整个任务，" +
 			"**更不要重新派**——重派会让对方从头再做一遍。" +
@@ -177,10 +267,31 @@ export function createTools(deps: ToolDeps) {
 					"resume 时只写用户的那句回答，不要重述任务。" +
 					"要写文件时给相对路径；要读的文件给绝对路径没问题。",
 			}),
+			project: Type.Optional(
+				Type.String({
+					description:
+						"已登记的项目名或 id。派新活时必填；续跑（resume）时可以省略，沿用原单的项目。" +
+						"不知道有哪些项目时，先不带，工具会返回 needs_project 和项目清单。",
+				}),
+			),
+			domain: Type.Optional(
+				Type.String({
+					description:
+						"领域负责人的领域名，比如 前端 / 桌面壳 / 文档 / 数据。" +
+						"填了就把活交给该领域负责人；不填则直接派 worker（兼容旧行为）。",
+				}),
+			),
 			resume: Type.Optional(
 				Type.Boolean({
 					description:
 						"接着上一张单跑（上次派出去的活卡住了、你问了用户、用户刚回答时用）。不填 = 新派一件。",
+				}),
+			),
+			requestId: Type.Optional(
+				Type.String({
+					description:
+						"幂等键。同一次派活在重试/重启后要用同一个 id，工具会返回原任务单号，" +
+						"不会重复起一张单。不填时服务端按会话 + 需求自动生成。",
 				}),
 			),
 		}),
@@ -188,93 +299,159 @@ export function createTools(deps: ToolDeps) {
 			// 派活的进度和「需要你」要能实时到客户端，否则那几分钟界面是死的。
 			// 这里把 chancellor 的事件翻译成两种：正在办第几件、需要你回答什么。
 			const conversationId = Number(api.conversationId);
-			let total = 0;
-			let done = 0;
-			const dispatch = (request: ChancellorRequest): Promise<TicketResult> =>
-				run(request, {
-					signal: context.abortSignal,
-					onEvent: (event) => {
-						switch (event.type) {
-							case "planned":
-								total = event.total ?? 0;
-								emitDelegation(conversationId, {
-									type: "delegate",
-									done: 0,
-									total,
-									current: "拆好了，开始派",
-								});
-								break;
-							case "task-start":
-								emitDelegation(conversationId, {
-									type: "delegate",
-									done,
-									total,
-									current: event.slug ?? "",
-								});
-								break;
-							case "task-done":
-								done += 1;
-								emitDelegation(conversationId, {
-									type: "delegate",
-									done,
-									total,
-									current: event.slug ?? "",
-								});
-								break;
-							case "reviewing":
-								emitDelegation(conversationId, {
-									type: "delegate",
-									done,
-									total,
-									current: "核对",
-								});
-								break;
-							default:
-								break;
-						}
-					},
-				});
-
-			let noTicket = false;
-			let result: TicketResult;
+			const domain = (args.domain ?? "").trim();
+			const asyncMode = envFlag("DELEGATION_ASYNC", true);
+			const autoReport = asyncMode && envFlag("DELEGATION_AUTO_REPORT", true);
+			const resumeTicketId =
+				args.resume === true ? lastTicketByConversation.get(conversationId) : undefined;
 			if (args.resume === true) {
-				const lastTicketId = lastTicketByConversation.get(conversationId);
 				console.log(
-					`[delegate resume] 会话 ${conversationId} 续跑 ${lastTicketId ?? "(无)"}` +
+					`[delegate resume] 会话 ${conversationId} 续跑 ${resumeTicketId ?? "(无)"}` +
 						`，回答=${JSON.stringify(args.requirement.slice(0, 120))}`,
 				);
-				if (lastTicketId) {
-					try {
-						result = await dispatch({ resumeTicketId: lastTicketId, answer: args.requirement });
-					} catch {
-						// 续跑在派活之前就被 chancellor 拒了（单子已完成/找不到）：没有可续的单。
-						// 拒跑不会动 worker，所以这里按新活派不会和原单抢同一个屏幕。
-						noTicket = true;
-						result = await dispatch({ requirement: args.requirement });
-					}
-				} else {
-					noTicket = true;
-					result = await dispatch({ requirement: args.requirement });
-				}
-			} else {
-				result = await dispatch({ requirement: args.requirement });
 			}
-			lastTicketByConversation.set(conversationId, result.ticketId);
 
-			// 卡住且给了具体问题时，单独发一条：客户端据此出卡片，不用从结论那句话里猜。
-			if (result.attention) {
-				emitDelegation(conversationId, {
-					type: "attention",
-					kind: result.attention.kind,
-					question: result.attention.question,
+			// 项目前置（方案 §5.5）：派新活必须过登记表；续跑沿用原单 / 上一轮的项目。
+			// 没有项目时**不建单、不建目录、不写文件**，只把清单交回给模型。
+			let project: ProjectRef | undefined;
+			if (projectRequired) {
+				if (args.project?.trim()) {
+					const gate = resolveDelegationProject(args.project, deps.projects ?? null);
+					if (!gate.ok) return text(gate.text);
+					project = gate.project;
+				} else if (resumeTicketId === undefined) {
+					const gate = resolveDelegationProject(undefined, deps.projects ?? null);
+					if (!gate.ok) return text(gate.text);
+					project = gate.project;
+				} else {
+					// 老会话重启后可能记不住项目；续跑本身不需要新项目。
+					project = lastProjectByConversation.get(conversationId);
+				}
+			}
+
+			// 幂等回执（方案 §5.1）：新派先落回执再入队；续跑沿用原单，不建新回执。
+			const receipts = resumeTicketId === undefined ? receiptsOf(deps) : null;
+			const explicitRequestId = (args.requestId ?? "").trim();
+			const requestId = receipts
+				? explicitRequestId || autoRequestId(conversationId, args.requirement)
+				: "";
+			const fingerprint = requestId
+				? requestFingerprint({
+						conversationId,
+						requirement: args.requirement,
+						domain,
+						projectId: project?.id ?? "",
+					})
+				: "";
+			if (receipts && requestId) {
+				const begun = receipts.begin(requestId, fingerprint, {
+					explicit: Boolean(explicitRequestId),
+					workRoot: chancellorWorkRoot(),
 				});
+				if (begun.kind === "conflict") {
+					return text(
+						JSON.stringify({
+							ok: false,
+							error: "request_conflict",
+							message:
+								"这个 requestId 已经用于另一件内容不同的派活。换一个 id，或先把原单处理完。",
+							ticketId: begun.receipt?.ticketId ?? "",
+						}),
+					);
+				}
+				if (begun.kind === "uncertain") {
+					return text(
+						JSON.stringify({
+							ok: false,
+							error: "uncertain",
+							ticketId: begun.receipt?.ticketId ?? "",
+							message:
+								"这张单在受理时中断过，结果未知。先确认它是否已经在跑，不要盲目重派。",
+						}),
+					);
+				}
+				if (begun.kind === "existing") {
+					const existing = begun.receipt?.ticketId ?? "";
+					if (existing) lastTicketByConversation.set(conversationId, existing);
+					return text(
+						`这次派活已经受理过，沿用原任务单 ${existing || "(受理中)"}，没有重复派。` +
+							"后台跑完会汇报。",
+					);
+				}
 			}
-			const line = result.line ?? "派出去的活没有返回结论。";
-			if (noTicket) return text(`${line}\n（没有可续的单，已按新活派）`);
-			if (args.resume === true) {
-				return text(`${line}\n（已把用户的回答交回原单，它在接着做。）`);
+
+			// 立即受理：同步拿到任务单号，后台跑完再发事件/回灌。
+			const { ticketId, outcome, fellBack } = startDelegation(
+				{
+					conversationId,
+					domain,
+					requirement: args.requirement,
+					resumeTicketId,
+					project,
+					...(requestId ? { requestId } : {}),
+				},
+				{
+					run: (request, options) =>
+						run(
+							{ ...request, workRoot: chancellorWorkRoot() },
+							{
+								...options,
+								// 后台执行不能挂本轮对话的 abortSignal：用户这一轮结束不该杀掉任务。
+								...(asyncMode ? {} : { signal: context.abortSignal }),
+							},
+						),
+					emit: emitDelegation,
+					report: deps.reportDelegation,
+					autoReport,
+					log: (line) => console.warn(line),
+				},
+			);
+			if (ticketId) lastTicketByConversation.set(conversationId, ticketId);
+			if (project) lastProjectByConversation.set(conversationId, project);
+			if (receipts && requestId) {
+				if (ticketId) receipts.accept(requestId, ticketId);
+				// 失败时回执要跟着落：拿到单号记 failed，没拿到记 uncertain（不自动重派）。
+				void outcome
+					.then((result) => {
+						if (result.ticketId) receipts.accept(requestId, result.ticketId);
+					})
+					.catch(() => receipts.markFailed(requestId));
 			}
-			return text(line);
+
+			// 想续跑但没有老单（空会话 / 重启后），也算走了"没单可续"。
+			const noTicket = fellBack || (args.resume === true && resumeTicketId === undefined);
+
+			// 回滚路径（DELEGATION_ASYNC=false）：保持 2026-11-02 的同步行为。
+			if (!asyncMode) {
+				try {
+					const result = await outcome;
+					lastTicketByConversation.set(conversationId, result.ticketId);
+					const line = result.line || "派出去的活没有返回结论。";
+					if (noTicket) return text(`${line}\n（没有可续的单，已按新活派）`);
+					if (resumeTicketId) {
+						return text(`${line}\n（已把用户的回答交回原单，它在接着做。）`);
+					}
+					return text(line);
+				} catch {
+					return text("派单失败，请稍后再试。");
+				}
+			}
+
+			if (noTicket) {
+				return text(
+					`已按新活派：任务单 ${ticketId || "(受理中)"}` +
+						`${domain ? `（领域：${domain}）` : ""}。它在后台执行，完成后我会汇报。`,
+				);
+			}
+			if (resumeTicketId) {
+				return text(
+					`已把回答交回原单 ${ticketId}，它继续在后台跑，完成后我会汇报。`,
+				);
+			}
+			return text(
+				`已受理：任务单 ${ticketId || "(受理中)"}${domain ? `（领域：${domain}）` : ""}。` +
+					"它在后台执行，完成后我会汇报；不要等，也不要重复派。",
+			);
 		},
 	});
 
@@ -304,7 +481,7 @@ export function createTools(deps: ToolDeps) {
 		);
 	}
 
-	if (deps.delegate !== false) tools.push(delegate);
+	if (deps.delegate !== false) tools.push(delegate, proposeProject);
 
 	return tools;
 }

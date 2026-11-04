@@ -12,7 +12,7 @@ import {
 	TASK_CONVERSATION_PREFIX,
 	taskMemoryBlock,
 } from "./agent.ts";
-import { chatModelRef, readLlmConfig, taskModelRef } from "./provider.ts";
+import { chatModelRef, readLlmConfig, taskModelRef, upstreamModelId } from "./provider.ts";
 import { renderTask, resolveTask, taskLabel, taskNames, TaskRenderError } from "./tasks.ts";
 import { classifyTurn, jevMode } from "./typesafe.ts";
 
@@ -128,7 +128,9 @@ function upstreamConfig(): UpstreamConfig | null {
 	return {
 		url: `${baseUrl}/chat/completions`,
 		apiKey,
-		model: process.env.LLM_MODEL?.trim() || "qwen-plus",
+		// 跟随运行时覆盖（设置页切模型，2026-11-04）；faux/mock 下是 null，
+		// 直通路径在那两种模式下本来就不可用，回落到 env 只是为了保住旧默认值语义
+		model: upstreamModelId() ?? (process.env.LLM_MODEL?.trim() || "qwen-plus"),
 	};
 }
 
@@ -387,7 +389,15 @@ interface TaskContext {
 		let text = "";
 		try {
 			for await (const event of chatStream(input)) {
-				if (event.type === "progress" || event.type === "delegate" || event.type === "attention") {
+				if (
+					event.type === "progress" ||
+					event.type === "tool" ||
+					event.type === "delegate" ||
+					event.type === "attention" ||
+					// 思考增量 / 内部用量事件（2026-11-04 批次一）：OpenAI 协议没有对应位，跳过
+					event.type === "thinking" ||
+					event.type === "usage"
+				) {
 					continue;
 				}
 				text += event.type === "delta" ? event.text : event.message;
@@ -433,9 +443,38 @@ interface TaskContext {
 						data: JSON.stringify({
 							object: "chat.completion.chunk",
 							lifediary_delegate: {
+								// 2026-11-03：补任务单字段，App 才能把多张单分开、显示领域与阶段
+								ticketId: event.ticketId,
+								domain: event.domain,
+								phase: event.phase,
 								done: event.done,
 								total: event.total,
 								current: event.current,
+								message: event.message ?? null,
+								// 2026-11-04：任务中心需要的字段；缺省为 null，客户端不用判 undefined。
+								project: event.project ?? null,
+								lastAction: event.lastAction ?? null,
+								lastHeartbeat: event.lastHeartbeat ?? null,
+								waitingOn: event.waitingOn ?? null,
+							},
+						}),
+					});
+					continue;
+				}
+				// 思考增量 / 内部用量事件（2026-11-04 批次一）：OpenAI 协议没有对应位，跳过
+				if (event.type === "thinking" || event.type === "usage") continue;
+				// 工具起止：同样走非标准字段，让兼容层的客户端也能画"正在读 xxx"
+				if (event.type === "tool") {
+					await stream.writeSSE({
+						data: JSON.stringify({
+							object: "chat.completion.chunk",
+							lifediary_tool: {
+								name: event.name,
+								status: event.status,
+								label: event.label ?? null,
+								ok: event.ok ?? null,
+								output: event.output ?? null,
+								args: event.args ?? null,
 							},
 						}),
 					});
@@ -446,7 +485,12 @@ interface TaskContext {
 					await stream.writeSSE({
 						data: JSON.stringify({
 							object: "chat.completion.chunk",
-							lifediary_attention: { kind: event.kind, question: event.question },
+							lifediary_attention: {
+								ticketId: event.ticketId,
+								domain: event.domain,
+								kind: event.kind,
+								question: event.question,
+							},
 						}),
 					});
 					continue;
