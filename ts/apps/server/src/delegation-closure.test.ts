@@ -45,6 +45,18 @@ test("父单：有子单 needs_you 时同样不得进 done", () => {
 	assert.match(result.line, /0 个变更/);
 });
 
+test("父单：有子单 aborted 时同样不得进 done，并点名「已中止」和原因", () => {
+	const result = enforceChildClosure(
+		done,
+		[child("T-child-6", "aborted", "用户中止：不要再跑")],
+		"T-parent",
+	);
+	assert.equal(result.status, "needs_you");
+	assert.match(result.line, /T-child-6/);
+	assert.match(result.line, /已中止/);
+	assert.match(result.line, /用户中止/);
+});
+
 test("父单：只有未终态子单时沿用 idle，不提前汇报", () => {
 	const result = enforceChildClosure(
 		done,
@@ -56,10 +68,10 @@ test("父单：只有未终态子单时沿用 idle，不提前汇报", () => {
 	assert.match(result.line, /T-child-4:planning/);
 });
 
-test("父单：子单全终态且没有失败时保持 done", () => {
+test("父单：子单全终态且没有失败/中止时保持 done", () => {
 	const result = enforceChildClosure(
 		done,
-		[child("T-child-5", "done"), child("T-child-6", "aborted")],
+		[child("T-child-5", "done"), child("T-child-8", "idle")],
 		"T-parent",
 	);
 	assert.equal(result.status, "done");

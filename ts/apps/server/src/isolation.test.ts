@@ -6,6 +6,7 @@ import {
 	mkdtempSync,
 	readFileSync,
 	rmSync,
+	unlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -13,9 +14,14 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { LeaseManager } from "../../../../../chancellor/src/lease.ts";
 import {
+	changedDeclaredPaths,
 	collectTaskChanges,
 	mergeTaskChanges,
 	prepareTaskWorktree,
+	readPathSnapshot,
+	snapshotDeclaredPaths,
+	snapshotFileFor,
+	writePathSnapshot,
 } from "../../../../../chancellor/src/isolation.ts";
 import { coveredByAny } from "../../../../../chancellor/src/paths.ts";
 import { runScheduledTasks } from "../../../../../chancellor/src/scheduler.ts";
@@ -436,6 +442,153 @@ test("验收：direct 模式靠执行前后快照识别真实写入", async () =
 
 	rmSync(root, { recursive: true, force: true });
 	rmSync(repo.root, { recursive: true, force: true });
+});
+
+test("worktree：未声明路径的删除仍按越权写入判失败", async () => {
+	const repo = gitRepo();
+	const data = temp("del-hack-data");
+	const root = temp("del-hack-runs");
+	const store = new Store(root);
+	const project: ProjectRef = {
+		id: "p-del-hack",
+		name: "demo",
+		rootPath: repo.root,
+		vcs: "git",
+		head: repo.head,
+		dataDir: data,
+	};
+	const ticket = makeTicket("T-del-hack", root, project);
+	store.saveTicket(ticket);
+	const task = planned(1, "del-hack", ["ok.txt"]);
+	const row = taskRow(ticket.id, join(store.ticketDir(ticket.id), taskDirName(1, task.slug)), 1, task.slug);
+	store.saveTask(row);
+
+	const { runs } = await runScheduledTasks({
+		ticket,
+		store,
+		tasks: [task],
+		rows: [row],
+		project,
+		employeeKind: "mercenary",
+		emit: () => {},
+		isolation: "worktree",
+		maxParallel: 1,
+		runner: (async (_ticket: Ticket, task: PlannedTask, seq: number, ticketDir: string, _signal: unknown, _deps: unknown, options: { workDir?: string }) => {
+			const workDir = options.workDir ?? repo.root;
+			unlinkSync(join(workDir, "base.txt"));
+			writeFileSync(join(workDir, "ok.txt"), "ok\n");
+			return makeRun(ticket, task, seq, ticketDir, workDir);
+		}) as never,
+	});
+
+	assert.match(runs[0]!.failure ?? "", /越权/);
+	assert.equal(existsSync(join(repo.root, "base.txt")), true, "越权删除不得合并进项目");
+	assert.equal(existsSync(join(repo.root, "ok.txt")), false, "有越权项时整批都不合并");
+
+	rmSync(data, { recursive: true, force: true });
+	rmSync(root, { recursive: true, force: true });
+	rmSync(repo.root, { recursive: true, force: true });
+});
+
+test("验收：只删掉声明文件也算完成（删除是真实变更）", async () => {
+	const repo = gitRepo();
+	const root = temp("delete-runs");
+	const store = new Store(root);
+	const project: ProjectRef = {
+		id: "p-delete",
+		name: "demo",
+		rootPath: repo.root,
+		vcs: "git",
+		head: repo.head,
+	};
+	const ticket = makeTicket("T-delete", root, project);
+	store.saveTicket(ticket);
+	const task = planned(1, "remove", ["base.txt"]);
+	const row = taskRow(ticket.id, join(store.ticketDir(ticket.id), taskDirName(1, task.slug)), 1, task.slug);
+	store.saveTask(row);
+
+	const { runs } = await runScheduledTasks({
+		ticket,
+		store,
+		tasks: [task],
+		rows: [row],
+		project,
+		employeeKind: "mercenary",
+		emit: () => {},
+		isolation: "direct",
+		maxParallel: 1,
+		runner: (async (_ticket: Ticket, task: PlannedTask, seq: number, ticketDir: string, _signal: unknown, _deps: unknown, options: { workDir?: string }) => {
+			const workDir = options.workDir ?? repo.root;
+			unlinkSync(join(workDir, "base.txt"));
+			return makeRun(ticket, task, seq, ticketDir, workDir);
+		}) as never,
+	});
+
+	const run = runs[0]!;
+	assert.deepEqual(run.changedPaths, ["base.txt"], "删除声明文件必须记成变更");
+	const review = await reviewTask(run, ticket);
+	assert.equal(review.verdict, "pass");
+
+	rmSync(root, { recursive: true, force: true });
+	rmSync(repo.root, { recursive: true, force: true });
+});
+
+test("快照：落盘后按 ticketId/seq 读回，删除仍能做严格前后对比", () => {
+	const repo = gitRepo();
+	const runDir = temp("snapshot-run");
+	try {
+		const before = snapshotDeclaredPaths(repo.root, ["base.txt"]);
+		assert.equal(typeof before.entries["base.txt"]?.hash, "string");
+		writePathSnapshot(snapshotFileFor(runDir), {
+			ticketId: "T-snap",
+			seq: 1,
+			createdAt: new Date().toISOString(),
+			coarse: before.coarse,
+			entries: before.entries,
+		});
+
+		const restored = readPathSnapshot(snapshotFileFor(runDir), { ticketId: "T-snap", seq: 1 });
+		assert.ok(restored, "执行前快照必须能读回");
+		// 走一遍崩溃恢复的真实路径：包被杀掉后文件已经不在，读回旧快照再比对。
+		unlinkSync(join(repo.root, "base.txt"));
+		const after = snapshotDeclaredPaths(repo.root, ["base.txt"]);
+		assert.deepEqual(changedDeclaredPaths(restored.entries, after.entries), ["base.txt"]);
+
+		// 别人家的 ticket 读不走这张快照。
+		assert.equal(
+			readPathSnapshot(snapshotFileFor(runDir), { ticketId: "T-other", seq: 1 }),
+			null,
+		);
+	} finally {
+		rmSync(runDir, { recursive: true, force: true });
+		rmSync(repo.root, { recursive: true, force: true });
+	}
+});
+
+test("快照：目录文件数超阈值退化粗判，验收记一条 warning", async () => {
+	const repo = gitRepo();
+	const root = temp("coarse-runs");
+	const ticket = makeTicket("T-coarse", root);
+	const task = planned(1, "coarse", ["many/**"]);
+	try {
+		mkdirSync(join(repo.root, "many"));
+		writeFileSync(join(repo.root, "many", "a.txt"), "a");
+		writeFileSync(join(repo.root, "many", "b.txt"), "b");
+		const snapshot = snapshotDeclaredPaths(repo.root, ["many/**"], { coarseLimit: 1 });
+		assert.equal(snapshot.coarse, true, "超过阈值必须标记粗判");
+		assert.equal(snapshot.entries["many/a.txt"]?.hash, undefined, "粗判不读内容");
+
+		const run = makeRun(ticket, task, 1, root, repo.root);
+		run.snapshotBefore = snapshot.entries;
+		run.snapshotCoarse = true;
+		run.changedPaths = ["many/a.txt"];
+		const review = await reviewTask(run, ticket);
+		assert.equal(review.verdict, "pass");
+		assert.match((review.warnings ?? []).join("\n"), /目录过大，使用粗粒度比对/);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+		rmSync(repo.root, { recursive: true, force: true });
+	}
 });
 
 test("验收：artifacts 缺失不判失败，清单对不上只记 warning", async () => {
