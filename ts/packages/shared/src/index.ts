@@ -58,16 +58,100 @@ export type ChatTranscript = z.infer<typeof ChatTranscriptSchema>;
 export const FinishReasonSchema = z.enum(["stop", "length", "aborted", "error"]);
 export type FinishReason = z.infer<typeof FinishReasonSchema>;
 
+/** 一轮的 token 用量（2026-11-04 批次一）：来自本轮最后一条 assistant 消息的 pi.usage */
+export interface TurnUsage {
+	input: number;
+	output: number;
+	/** 缓存命中（只读，不另收"写缓存"的账） */
+	cacheRead: number;
+}
+
+/**
+ * 一轮里"此刻在干什么"。工具回合可能几十秒没有 token，
+ * 只靠 delta 的话客户端看到的是一段空白。
+ */
+export type TurnPhase = "thinking" | "working";
+
 /**
  * SSE 下行事件。客户端只依赖这一个联合类型，
  * 服务端加减字段时另一端会被编译器当场指出来——这就是共用一份定义的意义。
+ *
+ * 判据：**加的成员必须能被"不认识的客户端"安全忽略**。分发一律看 `type`，
+ * 老客户端遇到新类型直接跳过即可，所以 `progress` / `tool` 是纯增量（2026-11-03）。
  */
 export type ChatEvent =
 	/** conversationId 只在首轮有意义：新建会话时由服务端生成，客户端要存下来 */
 	| { type: "start"; id: string; conversationId: string }
   | { type: "delta"; text: string }
-  | { type: "done"; id: string; finishReason: FinishReason }
-  | { type: "error"; message: string };
+	/**
+	 * 思考正文增量（2026-11-04 批次一）。
+	 *
+	 * 与 `progress.phase=thinking` 的分工：那个只说"在想"，这个给"想了什么"。
+	 * deep 档才有内容；快档不发。客户端累计成段折叠展示，老客户端按 type 忽略。
+	 */
+	| { type: "thinking"; text: string }
+	/** 在想 / 在动手。只有两次之间才有意义，客户端当状态用 */
+	| { type: "progress"; phase: TurnPhase }
+	/**
+	 * 一次工具调用的起止。start 与 end 成对，`name` 相同；
+	 * `label` 是能说明"在干什么"的那一个参数（路径 / 命令 / 查询），可能没有。
+	 */
+	| {
+			type: "tool";
+			name: string;
+			status: "start" | "end";
+			label?: string;
+			ok?: boolean;
+			/** 工具吐出来的文字（服务端截断到 2000 字符） */
+			output?: string;
+			/** 调用参数（JSON，服务端截断到 1200 字符） */
+			args?: string;
+	  }
+  | { type: "done"; id: string; finishReason: FinishReason; /** 本轮 token 用量（2026-11-04 批次一）；读不到就不带 */ usage?: TurnUsage }
+  | { type: "error"; message: string }
+	/**
+	 * 派单进度（2026-11-03）。
+	 *
+	 * `ticketId` 是任务单号，`domain` 是负责这块分工的领域负责人，`phase` 是
+	 * "在等谁"这一层对外状态。老客户端按 `type` 分发，认不出就忽略。
+	 */
+	| {
+			type: "delegate";
+			ticketId: string;
+			domain: string;
+			phase: DelegationPhase;
+			done: number;
+			total: number;
+			current: string;
+			message?: string;
+			/** 项目名（2026-11-04 方案 §5.9）；老链路没有 */
+			project?: string;
+			/** 最近一次动作，与 current 同源 */
+			lastAction?: string;
+			/** 事件心跳（ISO 时间），客户端判断「还活着」 */
+			lastHeartbeat?: string;
+			/** 等文件租约时卡在哪个路径 */
+			waitingOn?: string;
+	  }
+	/** 需要人回答：一条问题，不是一句"出错了"（2026-11-03） */
+	| {
+			type: "attention";
+			ticketId: string;
+			domain: string;
+			kind: "need_input" | "need_decision" | "need_action";
+			question: string;
+	  };
+
+/** 任务单对外的阶段：按"在等谁"分，不按内部进度。 */
+export type DelegationPhase =
+	| "accepted"
+	| "planning"
+	| "running"
+	| "reviewing"
+	| "done"
+	| "needs_you"
+	| "failed"
+	| "aborted";
 
 /**
  * 编码成 SSE 帧。只写 data 行：帧类型以 JSON 的 type 字段为准，
