@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Selenite</title>
+<link rel="stylesheet" href="/assets/style.css" />
+<script>
+  // 在样式表应用之前定主题，避免深色用户看到一帧白闪
+  (function () {
+    var stored = localStorage.getItem("lifediary.theme") || "system";
+    var dark = stored === "dark" || (stored === "system" && matchMedia("(prefers-color-scheme: dark)").matches);
+    document.documentElement.dataset.theme = dark ? "dark" : "light";
+    document.documentElement.dataset.accent = localStorage.getItem("lifediary.accent") || "indigo";
+    if (localStorage.getItem("lifediary.sidebar") === "closed") {
+      document.documentElement.dataset.sidebar = "closed";
+    }
+  })();
+</script>
+</head>
+<body>
+<!-- 自绘窗口标题栏：全局唯一，横贯侧栏与主区之上。
+     空白区可拖动/双击最大化；按钮区必须 no-drag，否则点击会被吞掉。
+     窗口三键只在 MyGo 壳里渲染，普通浏览器不显示。 -->
+<header class="titlebar" id="titlebar">
+  <div class="titlebar-brand">Selenite</div>
+
+  <!-- 顶部 chrome：侧栏开关（仅聊天页显示）+ 功能菜单 -->
+  <div class="chrome">
+    <button class="icon-btn" id="toggle-sidebar" type="button" aria-label="切换侧栏" title="切换侧栏 (Ctrl+B)">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+        <rect x="2" y="3" width="12" height="10" rx="2"/>
+        <path d="M6.2 3v10" stroke-linecap="round"/>
+      </svg>
+    </button>
+
+    <div class="menu-wrap">
+      <button class="icon-btn" id="menu-btn" type="button" aria-label="功能菜单" aria-haspopup="menu" aria-expanded="false">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+          <path d="M2 4h12M2 8h12M2 12h12" stroke-linecap="round"/>
+        </svg>
+      </button>
+      <div class="menu-pop" id="menu-pop" role="menu" hidden>
+        <button type="button" role="menuitem" data-action="new">新对话</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="titlebar-drag" aria-hidden="true"></div>
+
+  <div class="window-controls" id="window-controls" hidden>
+    <button class="window-btn" id="win-min" type="button" aria-label="最小化窗口" title="最小化">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">
+        <path d="M3.5 8h9" stroke-linecap="round"/>
+      </svg>
+    </button>
+    <button class="window-btn" id="win-max" type="button" aria-label="最大化窗口" title="最大化">
+      <svg class="ico-max" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">
+        <rect x="3" y="3" width="10" height="10" rx="1.5"/>
+      </svg>
+      <svg class="ico-restore" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true" hidden>
+        <path d="M5.5 5.5V3.5h7v7h-2"/>
+        <rect x="3.5" y="5.5" width="7" height="7" rx="1.2"/>
+      </svg>
+    </button>
+    <button class="window-btn close" id="win-close" type="button" aria-label="关闭窗口" title="关闭">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">
+        <path d="M4 4l8 8M12 4 4 12" stroke-linecap="round"/>
+      </svg>
+    </button>
+  </div>
+</header>
+
+<div class="app">
+  <aside class="sidebar">
+    <!-- 收起轨道（2026-11-04）：侧栏收起不再是 0 宽整栏消失，留一条 60px 图标轨。
+         「+ 新对话」和设置是真功能；任务中心 / 领域负责人 / 群组是占位——
+         禁用态 + tooltip 写明，不装能点（同「mock 不许空转」的纪律）。 -->
+    <div class="side-rail" id="side-rail">
+      <button class="rail-btn" id="rail-new" type="button" title="新对话 (Ctrl+K)" aria-label="新对话">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M8 3.2v9.6M3.2 8h9.6"/></svg>
+      </button>
+      <div class="rail-sep" aria-hidden="true"></div>
+      <button class="rail-btn" id="rail-tasks" type="button" title="任务中心" aria-label="任务中心">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="2.6" width="10" height="11.4" rx="1.6"/><path d="M5.8 2.6V5h4.4V2.6M5.6 8h4.8M5.6 10.8h3.2"/></svg>
+      </button>
+      <button class="rail-btn" type="button" title="领域负责人（占位）" aria-label="领域负责人" disabled>
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.2 9.4 5l3 .4-2.2 2.1.5 3-2.7-1.4-2.7 1.4.5-3L3.6 5.4l3-.4Z"/></svg>
+      </button>
+      <button class="rail-btn" type="button" title="群组（占位）" aria-label="群组" disabled>
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5.6" cy="6" r="2.2"/><path d="M2.2 13c.4-2.2 1.7-3.4 3.4-3.4S8.6 10.8 9 13"/><circle cx="11" cy="6.6" r="1.8"/><path d="M10.6 9.9c1.8.1 2.9 1.1 3.3 2.7"/></svg>
+      </button>
+      <div class="rail-flex" aria-hidden="true"></div>
+      <button class="rail-btn" id="rail-settings" type="button" title="设置" aria-label="设置">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+          <circle cx="8" cy="8" r="2.2"/>
+          <path d="M8 1.6v1.6M8 12.8v1.6M1.6 8h1.6M12.8 8h1.6M3.5 3.5l1.1 1.1M11.4 11.4l1.1 1.1M12.5 3.5l-1.1 1.1M4.6 11.4l-1.1 1.1" stroke-linecap="round"/>
+        </svg>
+      </button>
+      <div class="rail-status" id="rail-status" data-state="waiting" aria-hidden="true"><i></i></div>
+    </div>
+
+    <div class="sidebar-inner">
+      <div class="sidebar-head">对话</div>
+
+      <button class="new" id="new-chat" type="button">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.2v9.6M3.2 8h9.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+        新对话
+      </button>
+
+      <nav class="chats" id="chats" aria-label="历史对话"></nav>
+
+      <div class="side-foot">
+        <!-- 任务中心与设置同区常驻；侧栏收起后由 .side-rail 的 rail-tasks 兜底可达 -->
+        <button class="side-item" id="open-tasks" type="button" aria-label="任务中心" title="任务中心">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="3" y="2.6" width="10" height="11.4" rx="1.6"/>
+            <path d="M5.8 2.6V5h4.4V2.6M5.6 8h4.8M5.6 10.8h3.2"/>
+          </svg>
+          任务中心
+          <span class="side-count" id="tasks-badge" hidden></span>
+        </button>
+        <!-- 设置入口常驻侧栏底部：设置页会隐藏侧栏，所以设置页自带返回按钮 -->
+        <button class="side-item" id="open-settings" type="button" aria-label="设置" title="设置">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+            <circle cx="8" cy="8" r="2.2"/>
+            <path d="M8 1.6v1.6M8 12.8v1.6M1.6 8h1.6M12.8 8h1.6M3.5 3.5l1.1 1.1M11.4 11.4l1.1 1.1M12.5 3.5l-1.1 1.1M4.6 11.4l-1.1 1.1" stroke-linecap="round"/>
+          </svg>
+          设置
+        </button>
+        <span class="status" id="status" data-state="waiting">
+          <i aria-hidden="true"></i><span id="status-text">连接中</span>
+        </span>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main" id="view-chat">
+    <header class="top">
+      <h1 id="title">新对话</h1>
+      <div class="top-actions">
+        <!-- 上下文占用徽标（2026-11-04 批次二）：done 后刷新，window 读不到就隐藏 -->
+        <span class="ctx-meter" id="ctx-meter" hidden></span>
+        <!-- 导出对话 Markdown（2026-11-04 批次一）：只在有会话时出现 -->
+        <button class="ghost" id="export-chat" type="button" hidden title="导出当前对话为 Markdown">导出</button>
+        <div class="segmented tiny" id="mode-switch" role="radiogroup" aria-label="思考档">
+          <button type="button" data-mode="fast" aria-checked="true" title="快速：不思考，先出字">快</button>
+          <button type="button" data-mode="deep" aria-checked="false" title="深度：开思考，慢一点但更稳">深</button>
+        </div>
+        <!-- 停止挪进了输入框（发送/停止同槽，2026-11-04），顶栏不再有第二个停止入口 -->
+      </div>
+    </header>
+
+    <div class="scroll" id="scroll">
+      <div class="thread" id="thread">
+        <div class="empty" id="empty">
+          <div class="empty-mark" aria-hidden="true"></div>
+          <p>今天想记点什么？</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- 输入框是一个容器卡（2026-11-04 对齐 cindy ComposerCard）：
+         边框/卡底在容器上，textarea 透明无框，发送钮住进右下角；
+         流式时同槽换成停止（.send.streaming），没有第二个停止入口。 -->
+    <form class="composer" id="composer" autocomplete="off">
+      <textarea id="input" rows="1" placeholder="说点什么…" aria-label="输入消息"></textarea>
+      <div class="composer-foot">
+        <button class="send" id="send" type="submit" aria-label="发送" disabled>
+          <svg class="ico-send" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 12.8V3.6M3.9 7.5 8 3.4l4.1 4.1" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
+          <svg class="ico-stop" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.6" y="4.6" width="6.8" height="6.8" rx="1.6" fill="currentColor"/></svg>
+        </button>
+      </div>
+    </form>
+  </main>
+
+  <!-- 设置页（2026-11-03 对齐 cindy 的分层结构）：
+       左栏是「返回行 + 分区导航」，右列是滚动内容区，一次只渲染当前分区。
+       导航切换走 hash 子路由（#/settings/外观），浏览器前进后退可用。 -->
+  <main class="main settings" id="view-settings" hidden>
+    <aside class="set-side">
+      <div class="set-head">
+        <button class="set-back" id="close-settings" type="button" aria-label="返回" title="返回 (Esc)">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+            <path d="M9.8 3.4 5.2 8l4.6 4.6" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+        <h1>设置</h1>
+      </div>
+      <nav class="set-nav" id="settings-nav" aria-label="设置分区"></nav>
+    </aside>
+    <div class="set-scroll" id="settings-scroll">
+      <div class="set-page" id="settings-inner"></div>
+    </div>
+  </main>
+
+  <!-- 任务中心（2026-11-04）：独立整页，与设置同级；侧栏保留，入口在侧栏底部
+       与收起轨道里。只读：不做改派、不做手动停止。
+       详情走 hash 子路由 #/tasks?ticket=<id>，浏览器后退可用。 -->
+  <main class="main tasks" id="view-tasks" hidden>
+    <header class="tasks-top">
+      <div class="tasks-title">
+        <button class="set-back" id="tasks-back" type="button" aria-label="返回任务看板" title="返回任务看板 (Esc)" hidden>
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+            <path d="M9.8 3.4 5.2 8l4.6 4.6" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+        <h1>
+          <span id="tasks-title-text">任务中心</span>
+          <span class="tasks-title-sub" id="tasks-title-sub"></span>
+        </h1>
+      </div>
+      <div class="tasks-actions">
+        <div class="tasks-filters" id="tasks-filters">
+          <select class="tasks-select" id="tasks-domain" aria-label="按领域筛选">
+            <option value="">全部领域</option>
+          </select>
+          <select class="tasks-select" id="tasks-project" aria-label="按项目筛选">
+            <option value="">全部项目</option>
+          </select>
+          <select class="tasks-select" id="tasks-sort" aria-label="排序">
+            <option value="recent">最近更新</option>
+            <option value="status">按状态</option>
+          </select>
+        </div>
+        <button class="ghost" id="tasks-refresh" type="button">刷新</button>
+      </div>
+    </header>
+    <div class="tasks-scroll" id="tasks-scroll">
+      <div class="tasks-state" id="tasks-state" hidden></div>
+      <div class="tasks-body" id="tasks-body">
+        <div class="tasks-stats" id="tasks-stats"></div>
+        <div class="tasks-board" id="tasks-board"></div>
+        <div class="task-detail" id="task-detail" hidden></div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="gate" id="gate" hidden>
+  <form class="gate-box" id="gate-form">
+    <h2>需要访问令牌</h2>
+    <p>当前页面不是从本机打开的。令牌就是你启动服务时设置的 <code>AGENT_TOKEN</code> 环境变量；本机打开不需要它。</p>
+    <input id="gate-input" type="password" placeholder="AGENT_TOKEN" autocomplete="off" spellcheck="false" required />
+    <div class="gate-row">
+      <button type="submit">保存并继续</button>
+    </div>
+    <p class="gate-err" id="gate-err" hidden></p>
+  </form>
+</div>
+
+<script type="module" src="/assets/app.js"></script>
+</body>
+</html>
