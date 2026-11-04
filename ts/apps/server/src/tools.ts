@@ -7,6 +7,11 @@ import { scopeKey, type MemoryEngine, type MemoryKind, type MemoryScope } from "
 // 只有这一处引用它，挪仓库时改这一行。
 import { runChancellor } from "../../../../../chancellor/src/index.ts";
 import {
+	DOMAIN_PATTERN,
+	listManagers,
+	validateDomain,
+} from "../../../../../chancellor/src/manager/registry.ts";
+import {
 	chancellorWorkRoot,
 	emitDelegation,
 	startDelegation,
@@ -236,6 +241,16 @@ export function createTools(deps: ToolDeps) {
 	// 派活（2026-11-02）：主 agent 的"手"。它自己不动手，把活交给外面的工人，
 	// 只拿回一句话。工具的 description 里"不适合"那半句比"适合"更重要——
 	// 写宽了，主 agent 会把一次 read 就能答的事也派出去，每次都起 worker，比不用还贵。
+	const domainList = (): string => {
+		try {
+			const domains = listManagers(chancellorWorkRoot())
+				.map((entry) => entry.domain)
+				.filter((domain) => DOMAIN_PATTERN.test(domain));
+			return domains.length > 0 ? domains.join(" / ") : "（暂无，可用小写英文新建）";
+		} catch {
+			return "（当前领域清单不可读）";
+		}
+	};
 	const delegate = defineTool({
 		name: "delegate",
 		description:
@@ -245,8 +260,8 @@ export function createTools(deps: ToolDeps) {
 			"不适合：回答问题、闲聊、一次 read 就能答的事、需要边做边问对方的事。" +
 			"**派出去后会立即返回任务单号，不会占住这一轮对话；后台跑完会有一条汇报写进会话。**" +
 			"所以返回后直接告诉用户「已派发，完成后会汇报」即可，不要等结果、不要反复查询、不要重复派。" +
-			"填 `domain` 把活交给对应领域的负责人（比如 前端 / 桌面壳 / 文档 / 数据）；" +
-			"不填则按旧路径直接派 worker。" +
+			"填 `domain` 把活交给对应领域的负责人。**领域名必须是小写 ASCII**（小写字母、数字、连字符，如 `frontend` / `desktop-shell`）；" +
+			`当前已有领域：${domainList()}。不填则按旧路径直接派 worker。` +
 			"**派新活时必须带 `project`（已登记的项目名或 id）**；没有可用项目时会返回 " +
 			"`{\"error\":\"needs_project\"}` 并列出已有项目——先问用户要建哪个项目，" +
 			"用 `propose_project` 提交、等用户在设置里确认，再派。" +
@@ -277,7 +292,8 @@ export function createTools(deps: ToolDeps) {
 			domain: Type.Optional(
 				Type.String({
 					description:
-						"领域负责人的领域名，比如 前端 / 桌面壳 / 文档 / 数据。" +
+						"领域负责人的领域名，**必须是小写 ASCII**（小写字母、数字、连字符，如 `frontend` / `desktop-shell`）。" +
+						`当前已有领域：${domainList()}。` +
 						"填了就把活交给该领域负责人；不填则直接派 worker（兼容旧行为）。",
 				}),
 			),
@@ -300,6 +316,14 @@ export function createTools(deps: ToolDeps) {
 			// 这里把 chancellor 的事件翻译成两种：正在办第几件、需要你回答什么。
 			const conversationId = Number(api.conversationId);
 			const domain = (args.domain ?? "").trim();
+			// 非法领域名（尤其是中文）直接回可用清单，不建单、不让模型猜。
+			if (domain) {
+				try {
+					validateDomain(domain, chancellorWorkRoot());
+				} catch (error) {
+					return text(error instanceof Error ? error.message : String(error));
+				}
+			}
 			const asyncMode = envFlag("DELEGATION_ASYNC", true);
 			const autoReport = asyncMode && envFlag("DELEGATION_AUTO_REPORT", true);
 			const resumeTicketId =
@@ -349,14 +373,12 @@ export function createTools(deps: ToolDeps) {
 					workRoot: chancellorWorkRoot(),
 				});
 				if (begun.kind === "conflict") {
+					// 同一 requestId 但内容不同：不报冲突、不让模型换号重派，直接把原单交回。
+					const existing = begun.receipt?.ticketId ?? "";
+					if (existing) lastTicketByConversation.set(conversationId, existing);
 					return text(
-						JSON.stringify({
-							ok: false,
-							error: "request_conflict",
-							message:
-								"这个 requestId 已经用于另一件内容不同的派活。换一个 id，或先把原单处理完。",
-							ticketId: begun.receipt?.ticketId ?? "",
-						}),
+						`该请求号已受理过，返回原单${existing ? ` ${existing}` : "（原单还在受理中）"}，没有重复派。` +
+							"后台跑完会汇报。",
 					);
 				}
 				if (begun.kind === "uncertain") {

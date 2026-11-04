@@ -1,0 +1,73 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { enforceChildClosure } from "../../../../../chancellor/src/stage.ts";
+import type { Ticket } from "../../../../../chancellor/src/types.ts";
+
+function child(id: string, status: Ticket["status"], error: string | null = null): Ticket {
+	return {
+		id,
+		prompt: "子任务",
+		status,
+		created_at: new Date().toISOString(),
+		updated_at: new Date().toISOString(),
+		options: { dry: true, maxTasks: 8, workRoot: "." },
+		error,
+	} as Ticket;
+}
+
+const done = {
+	status: "done" as const,
+	stage: "done" as const,
+	line: "✅ 完成",
+	error: null,
+};
+
+test("父单：有子单 failed 时强制 needs_you，并点名子单和原因", () => {
+	const result = enforceChildClosure(
+		done,
+		[child("T-child-1", "failed", "越权写入：src/secret.ts")],
+		"T-parent",
+	);
+	assert.equal(result.status, "needs_you");
+	assert.match(result.line, /T-child-1/);
+	assert.match(result.line, /越权写入/);
+	assert.match(result.line, /先处理这些子单/);
+});
+
+test("父单：有子单 needs_you 时同样不得进 done", () => {
+	const result = enforceChildClosure(
+		done,
+		[child("T-child-2", "needs_you", "声明了 1 个路径，实际 0 个变更")],
+		"T-parent",
+	);
+	assert.equal(result.status, "needs_you");
+	assert.match(result.line, /T-child-2/);
+	assert.match(result.line, /0 个变更/);
+});
+
+test("父单：只有未终态子单时沿用 idle，不提前汇报", () => {
+	const result = enforceChildClosure(
+		done,
+		[child("T-child-3", "dispatching"), child("T-child-4", "planning")],
+		"T-parent",
+	);
+	assert.equal(result.status, "idle");
+	assert.match(result.line, /T-child-3:dispatching/);
+	assert.match(result.line, /T-child-4:planning/);
+});
+
+test("父单：子单全终态且没有失败时保持 done", () => {
+	const result = enforceChildClosure(
+		done,
+		[child("T-child-5", "done"), child("T-child-6", "aborted")],
+		"T-parent",
+	);
+	assert.equal(result.status, "done");
+	assert.equal(result.line, done.line);
+});
+
+test("父单：自身已经 failed 时不被子单覆盖", () => {
+	const failedParent = { ...done, status: "failed" as const, stage: "failed" as const };
+	const result = enforceChildClosure(failedParent, [child("T-child-7", "failed")], "T-parent");
+	assert.equal(result.status, "failed");
+});

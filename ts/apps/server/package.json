@@ -12,7 +12,7 @@
     "diary": "tsx scripts/diary-probe.ts",
     "tasks": "tsx scripts/task-probe.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/worker-shell.test.ts src/delegation.test.ts src/delegation-receipts.test.ts src/delegation-api.test.ts src/isolation.test.ts src/recovery.test.ts src/codebuddy.test.ts src/qoder.test.ts src/projects.test.ts",
+    "test": "tsx --test src/worker-shell.test.ts src/delegation.test.ts src/delegation-receipts.test.ts src/delegation-api.test.ts src/isolation.test.ts src/delegation-closure.test.ts src/recovery.test.ts src/codebuddy.test.ts src/qoder.test.ts src/projects.test.ts",
     "gate": "tsx scripts/delegate-gate-probe.ts",
     "resume": "tsx scripts/delegate-resume-probe.ts",
     "chain": "tsx scripts/delegate-chain-probe.ts",

@@ -19,6 +19,7 @@ import {
 } from "../../../../../chancellor/src/isolation.ts";
 import { coveredByAny } from "../../../../../chancellor/src/paths.ts";
 import { runScheduledTasks } from "../../../../../chancellor/src/scheduler.ts";
+import { reviewTask } from "../../../../../chancellor/src/review.ts";
 import { taskDirName } from "../../../../../chancellor/src/dispatch.ts";
 import { Store } from "../../../../../chancellor/src/store.ts";
 import type {
@@ -335,6 +336,129 @@ test("调度：同一路径并发写入 → 后来者等待文件，前序释放
 	assert.equal(readFileSync(join(repo.root, "same.txt"), "utf8"), "second\n");
 	assert.equal(runs.length, 2);
 	rmSync(data, { recursive: true, force: true });
+	rmSync(root, { recursive: true, force: true });
+	rmSync(repo.root, { recursive: true, force: true });
+});
+
+test("验收：worktree 下文件真的写了 → pass；声明了没写 → fail", async () => {
+	const repo = gitRepo();
+	const data = temp("accept-data");
+	const root = temp("accept-runs");
+	const store = new Store(root);
+	const project: ProjectRef = {
+		id: "p-accept",
+		name: "demo",
+		rootPath: repo.root,
+		vcs: "git",
+		head: repo.head,
+		dataDir: data,
+	};
+	const ticket = makeTicket("T-accept", root, project);
+	store.saveTicket(ticket);
+	const tasks = [planned(1, "written", ["written.txt"]), planned(2, "missing", ["missing.txt"])];
+	const rows = tasks.map((task, index) =>
+		taskRow(ticket.id, join(store.ticketDir(ticket.id), taskDirName(index + 1, task.slug)), index + 1, task.slug),
+	);
+	for (const row of rows) store.saveTask(row);
+
+	const { runs } = await runScheduledTasks({
+		ticket,
+		store,
+		tasks,
+		rows,
+		project,
+		employeeKind: "mercenary",
+		emit: () => {},
+		isolation: "worktree",
+		maxParallel: 2,
+		runner: (async (_ticket: Ticket, task: PlannedTask, seq: number, ticketDir: string, _signal: unknown, _deps: unknown, options: { workDir?: string }) => {
+			const workDir = options.workDir ?? repo.root;
+			if (task.slug === "written") {
+				writeFileSync(join(workDir, "written.txt"), "really written\n");
+			}
+			return makeRun(ticket, task, seq, ticketDir, workDir);
+		}) as never,
+	});
+
+	const bySlug = new Map(runs.map((run) => [run.task.slug, run]));
+	const written = await reviewTask(bySlug.get("written")!, ticket);
+	assert.equal(written.verdict, "pass");
+	assert.deepEqual(bySlug.get("written")?.changedPaths, ["written.txt"]);
+
+	const missing = await reviewTask(bySlug.get("missing")!, ticket);
+	assert.equal(missing.verdict, "fail");
+	assert.match(missing.reason, /声明了 1 个路径，实际 0 个变更/);
+	assert.equal(existsSync(join(repo.root, "written.txt")), true, "写过的文件必须已合并进项目");
+
+	rmSync(data, { recursive: true, force: true });
+	rmSync(root, { recursive: true, force: true });
+	rmSync(repo.root, { recursive: true, force: true });
+});
+
+test("验收：direct 模式靠执行前后快照识别真实写入", async () => {
+	const repo = gitRepo();
+	const root = temp("direct-runs");
+	const store = new Store(root);
+	const project: ProjectRef = {
+		id: "p-direct",
+		name: "demo",
+		rootPath: repo.root,
+		vcs: "git",
+		head: repo.head,
+	};
+	const ticket = makeTicket("T-direct", root, project);
+	store.saveTicket(ticket);
+	const task = planned(1, "direct", ["direct.txt"]);
+	const row = taskRow(ticket.id, join(store.ticketDir(ticket.id), taskDirName(1, task.slug)), 1, task.slug);
+	store.saveTask(row);
+
+	const { runs } = await runScheduledTasks({
+		ticket,
+		store,
+		tasks: [task],
+		rows: [row],
+		project,
+		employeeKind: "mercenary",
+		emit: () => {},
+		isolation: "direct",
+		maxParallel: 1,
+		runner: (async (_ticket: Ticket, task: PlannedTask, seq: number, ticketDir: string, _signal: unknown, _deps: unknown, options: { workDir?: string }) => {
+			const workDir = options.workDir ?? repo.root;
+			writeFileSync(join(workDir, "direct.txt"), "direct\n");
+			return makeRun(ticket, task, seq, ticketDir, workDir);
+		}) as never,
+	});
+
+	const run = runs[0]!;
+	assert.deepEqual(run.changedPaths, ["direct.txt"]);
+	const review = await reviewTask(run, ticket);
+	assert.equal(review.verdict, "pass");
+
+	rmSync(root, { recursive: true, force: true });
+	rmSync(repo.root, { recursive: true, force: true });
+});
+
+test("验收：artifacts 缺失不判失败，清单对不上只记 warning", async () => {
+	const repo = gitRepo();
+	const root = temp("artifact-runs");
+	const store = new Store(root);
+	const ticket = makeTicket("T-artifact", root);
+	const task = planned(1, "artifact", ["out.txt"]);
+	const run = makeRun(ticket, task, 1, store.ticketDir(ticket.id), repo.root);
+	run.changedPaths = ["out.txt"];
+
+	// 没有 artifacts：文件真变了就该 pass。
+	const empty = await reviewTask(run, ticket);
+	assert.equal(empty.verdict, "pass");
+	assert.equal(empty.warnings, undefined);
+
+	// artifacts 列了不存在的产物：仍 pass，但要有 warning。
+	run.report = { status: "ready", summary: "完成", artifacts: ["ghost.txt"], raw: "READY" };
+	run.report.artifacts = ["ghost.txt"];
+	const withGhost = await reviewTask(run, ticket);
+	assert.equal(withGhost.verdict, "pass");
+	assert.match((withGhost.warnings ?? []).join("\n"), /产物不存在：ghost\.txt/);
+
 	rmSync(root, { recursive: true, force: true });
 	rmSync(repo.root, { recursive: true, force: true });
 });

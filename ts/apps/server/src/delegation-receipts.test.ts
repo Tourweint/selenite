@@ -108,6 +108,48 @@ test("delegate 工具：同一 requestId 只起一张单", async () => {
 	}
 });
 
+test("delegate 工具：非法领域名直接回可用领域清单，不建单", async () => {
+	const { createTools } = await import("./tools.ts");
+	const root = tempRoot();
+	mkdirSync(join(root, "managers", "frontend"), { recursive: true });
+	const receipts = new DelegationReceipts(join(root, "delegations.sqlite"));
+	const previousRequired = process.env.DELEGATION_PROJECT_REQUIRED;
+	const previousRoot = process.env.CHANCELLOR_WORK_ROOT;
+	process.env.DELEGATION_PROJECT_REQUIRED = "false";
+	process.env.CHANCELLOR_WORK_ROOT = join(root, "runs");
+	let calls = 0;
+	try {
+		const tools = createTools({
+			memory: null,
+			scopeOf: (id) => ({ type: "session", id: String(id) }) as never,
+			projects: null,
+			receipts,
+			delegateRun: (async () => {
+				calls += 1;
+				return { ticketId: "T-X", status: "done", line: "完成", tasks: [] };
+			}) as never,
+		});
+		const delegate = tools.find((tool) => tool.name === "delegate");
+		assert.ok(delegate);
+		const result = await delegate.execute(
+			{ requirement: "写个文档", domain: "文档", requestId: "req-cn" } as never,
+			{ conversationId: 7102 } as never,
+			{} as never,
+		);
+		const text = textOf(result);
+		assert.match(text, /必须是小写 ASCII/);
+		assert.match(text, /可用领域：frontend/);
+		assert.equal(calls, 0, "非法领域名不应起单");
+	} finally {
+		receipts.close();
+		if (previousRequired === undefined) delete process.env.DELEGATION_PROJECT_REQUIRED;
+		else process.env.DELEGATION_PROJECT_REQUIRED = previousRequired;
+		if (previousRoot === undefined) delete process.env.CHANCELLOR_WORK_ROOT;
+		else process.env.CHANCELLOR_WORK_ROOT = previousRoot;
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 function textOf(result: { output?: Array<{ type: string; text?: string }> }): string {
 	return (result.output ?? [])
 		.map((item) => (item.type === "text" ? item.text ?? "" : ""))
