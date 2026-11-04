@@ -20,7 +20,14 @@ export type MemoryScope =
 	/** 某个主题：健康、工作、某个人 */
 	| { type: "topic"; name: string }
 	/** 某次会话：原始对话，最易过期 */
-	| { type: "session"; id: string };
+	| { type: "session"; id: string }
+	/**
+	 * 某个伙伴的独立键空间（2026-11-05 批次B B1）。
+	 *
+	 * 伙伴记忆与主人的记忆**键空间完全隔离**：同一套存储/索引/召回，key 不同互不可见。
+	 * id 是伙伴对外 uuid（partners 表主键），encode 是防 uuid 里的字符捣乱（现 uuid 安全，防御性保留）。
+	 */
+	| { type: "partner"; id: string };
 
 export function scopeKey(scope: MemoryScope): string {
 	switch (scope.type) {
@@ -32,6 +39,8 @@ export function scopeKey(scope: MemoryScope): string {
 			return `topic:${scope.name}`;
 		case "session":
 			return `session:${scope.id}`;
+		case "partner":
+			return `partner:${encodeURIComponent(scope.id)}`;
 	}
 }
 

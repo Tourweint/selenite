@@ -87,3 +87,75 @@ export async function reportRecoveredTickets(
 
 	return sent;
 }
+
+// ── 迟到子单死信（2026-11-05 批次A A2）──────────────────────
+/** 子单的最小形状（chancellor Store.childrenOf 的投影，收窄方便注入测试）。 */
+export interface DeadLetterChild {
+	id: string;
+	status: string;
+}
+
+export interface DeadLetterRecord {
+	parentTicketId: string;
+	childTicketId: string;
+	childStatus: string;
+	note: string;
+}
+
+export interface DeadLetterDeps {
+	/** 父单的子单查询（含分管 runs_dir 的聚合），由调用方注入；没有返回空数组。 */
+	childrenOf: (parentTicketId: string) => DeadLetterChild[];
+	/** 死信落库；返回 false = 重复（主键幂等撞了），不计入新增数。 */
+	record: (entry: DeadLetterRecord) => boolean;
+	log?: (line: string) => void;
+}
+
+const CHILD_TERMINAL = new Set(["done", "needs_you", "failed", "idle", "aborted"]);
+
+/**
+ * 扫"父单已终态、子单结果无处并入"的死信（2026-11-05 批次A A2）。
+ *
+ * 背景：父单收口那一刻 `enforceChildClosure` 只读一次子单；父单被中止后子单才跑完的，
+ * 结果没人看（A2 细化 §4.2 已核实的洞）。死信只记账不处置——不自动重派、不自动并入，
+ * 与"中断不自动重放"同一原则。
+ *
+ * v1 判定（对每个**已终态**父单）：
+ *   - 子单仍未终态 → 死信（父单不在收了，它跑完也没人要）；
+ *   - 父单 aborted 且子单已终态 → 死信（结果有，但中止路径没有并入通道）。
+ * 父单非 aborted 且子单已终态：正常收口路径，enforceChildClosure 已覆盖，不记。
+ * 时间戳比较（"子单晚于父单落终态"）做不了：RecoveredTicket 没带 updated_at，
+ * 如实登记为 v1 限制，不硬造。
+ */
+export function collectDeadLetters(
+	entries: RecoveredTicket[],
+	deps: DeadLetterDeps,
+): number {
+	if (!recoverReportEnabled()) return 0;
+	const log = deps.log ?? (() => {});
+	let recorded = 0;
+
+	for (const entry of entries) {
+		if (!entry.ticketId || !TERMINAL_STATUSES.has(entry.status)) continue;
+		const children = deps.childrenOf(entry.ticketId);
+		for (const child of children) {
+			const note = !CHILD_TERMINAL.has(child.status)
+				? `父单已终态（${entry.status}），子单仍未终态`
+				: entry.status === "aborted"
+					? `父单已中止，子单结果无处并入`
+					: "";
+			if (!note) continue;
+			const inserted = deps.record({
+				parentTicketId: entry.ticketId,
+				childTicketId: child.id,
+				childStatus: child.status,
+				note,
+			});
+			if (inserted) {
+				recorded += 1;
+				log(`[恢复死信] 父单 ${entry.ticketId} 的子单 ${child.id}（${child.status}）入死信：${note}`);
+			}
+		}
+	}
+
+	return recorded;
+}

@@ -13,7 +13,16 @@
  * `delegate` 本身不写文件，但它会起 worker 去写；`propose_project` 只写 proposal 行，
  * 但会引出"建目录/登记项目"，与 delegate 同档。
  */
-export const WRITE_TOOLS = new Set(["write", "edit", "bash", "powershell", "delegate", "propose_project"]);
+// partner_skill_write（2026-11-05 批次B B2）：写伙伴的技能文件——写盘即进闸门，这是硬约束。
+export const WRITE_TOOLS = new Set([
+	"write",
+	"edit",
+	"bash",
+	"powershell",
+	"delegate",
+	"propose_project",
+	"partner_skill_write",
+]);
 
 export interface ApprovalPolicy {
 	confirmWrites: boolean;

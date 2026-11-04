@@ -6,6 +6,7 @@ import type { TicketRow } from "../../../../../chancellor/src/store.ts";
 import type { Ticket } from "../../../../../chancellor/src/types.ts";
 import { listManagers } from "../../../../../chancellor/src/manager/registry.ts";
 import { chancellorWorkRoot } from "./delegation.ts";
+import { DelegationReceipts } from "./delegation-receipts.ts";
 
 /**
  * 只读任务中心接口（2026-11-03 方案 §5.9）。
@@ -24,6 +25,16 @@ interface TicketLocation {
 	ticket: Ticket;
 	store: Store;
 	domain: string | null;
+}
+
+/**
+ * 死信投影用的懒建单例（2026-11-05 批次A A2）。与 tools.ts 里的回执实例是两个连接，
+ * 同一 SQLite 文件多连接同进程打开没有问题；探针隔离靠 DELEGATIONS_DB_PATH env。
+ */
+let deadLetterStoreInstance: DelegationReceipts | null = null;
+function deadLetterStore(): DelegationReceipts {
+	deadLetterStoreInstance ??= new DelegationReceipts();
+	return deadLetterStoreInstance;
 }
 
 /** 看板列表行：只给界面需要的字段，不带 workRoot 绝对路径与 prompt 全文。 */
@@ -149,6 +160,15 @@ export function mountDelegationApi(app: Hono, opts: { workRoot?: string } = {}):
 					parentTicketId: child.parentTicketId ?? found.ticket.id,
 					updated_at: child.updated_at,
 				})),
+				// 迟到子单死信（2026-11-05 批次A A2）：父单已终态后子单结果无处并入的记账。
+				// 只读投影：库打不开时给空数组，明细接口不能因为记账库挂了就 500。
+				deadLetters: (() => {
+					try {
+						return deadLetterStore().listDeadLetters(found.ticket.id);
+					} catch {
+						return [];
+					}
+				})(),
 			});
 		} finally {
 			found.store.close();

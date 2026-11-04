@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -11,9 +11,18 @@ import { DatabaseSync } from "node:sqlite";
  * 终态后允许用户再提同样的需求。
  *
  * 存独立 SQLite（`.data/delegations.sqlite`）：和 projects 一样，不混进会话库。
+ *
+ * 2026-11-05 批次A A2 补差（DS-Bot requests.js 的教训）：
+ *   - 回执行带 `boot_id`（进程代号）：**上个进程留下的 accepting 一律按 uncertain 处理**——
+ *     本进程无法确认那次受理到底发没发出去，宁可让人重提，不可自动重派造成重复副作用；
+ *   - 同库新增 `delegation_dead_letters` 死信表：父单已终态后子单结果无处并入时记账
+ *     （不丢、不自动并入、可查），写入方在恢复扫描（recovery-report.ts 的调用方）。
  */
 
 const DEFAULT_DB_PATH = ".data/delegations.sqlite";
+
+/** 进程代号：模块加载期定一次。重启即换新，用于判定"回执是不是本进程落的"。 */
+const BOOT_ID = randomUUID();
 
 export type ReceiptOutcome = "accepting" | "accepted" | "uncertain" | "failed";
 
@@ -24,9 +33,20 @@ export interface DelegationReceipt {
 	ticketId: string;
 	/** 受理时的内部会话 id（A3a）。旧行没有这条信息，永远是 null。 */
 	conversationId: number | null;
+	/** 落这行状态时的进程代号（A2 补差）。旧行/NULL 一律视为"别的进程落的"。 */
+	bootId: string | null;
 	outcome: ReceiptOutcome;
 	createdAt: string;
 	updatedAt: string;
+}
+
+/** 迟到子单的死信记录（A2 补差）：只增不改，主键幂等。 */
+export interface DelegationDeadLetter {
+	parentTicketId: string;
+	childTicketId: string;
+	childStatus: string;
+	note: string;
+	createdAt: string;
 }
 
 export interface ReceiptBegin {
@@ -61,7 +81,7 @@ export class DelegationReceipts {
 		this.migrate();
 	}
 
-	/** 旧库补 `conversation_id` 列（A3a）：旧行永远是 NULL，A3b 无法回填。 */
+	/** 旧库补列（A3a 会话映射、A2 boot 代号）：旧行补不上信息，永远按 NULL 处理。 */
 	private migrate(): void {
 		const columns = this.db.prepare("PRAGMA table_info(delegation_receipts)").all() as Array<{
 			name?: unknown;
@@ -69,9 +89,22 @@ export class DelegationReceipts {
 		if (!columns.some((column) => column.name === "conversation_id")) {
 			this.db.exec("ALTER TABLE delegation_receipts ADD COLUMN conversation_id INTEGER");
 		}
+		if (!columns.some((column) => column.name === "boot_id")) {
+			this.db.exec("ALTER TABLE delegation_receipts ADD COLUMN boot_id TEXT");
+		}
 		this.db.exec(
 			"CREATE INDEX IF NOT EXISTS idx_delegation_receipts_ticket ON delegation_receipts(ticket_id);",
 		);
+		this.db.exec(`
+			CREATE TABLE IF NOT EXISTS delegation_dead_letters (
+				parent_ticket_id TEXT NOT NULL,
+				child_ticket_id TEXT NOT NULL,
+				child_status TEXT NOT NULL,
+				note TEXT NOT NULL DEFAULT '',
+				created_at TEXT NOT NULL,
+				PRIMARY KEY (parent_ticket_id, child_ticket_id)
+			);
+		`);
 	}
 
 	close(): void {
@@ -120,8 +153,12 @@ export class DelegationReceipts {
 		if (existing.outcome === "uncertain") {
 			return { kind: "uncertain", receipt: existing };
 		}
-		if (existing.outcome === "accepting" && existing.ticketId === "") {
-			// 发送中就崩了：单号未知，按方案归到 uncertain，不自动重派。
+		if (
+			existing.outcome === "accepting" &&
+			(existing.ticketId === "" || existing.bootId !== BOOT_ID)
+		) {
+			// 发送中就崩了：单号未知，或这行 accepting 是**别的进程**落的（boot 代号对不上）——
+			// 本进程都无法确认那次受理是否真的发出去了，按方案归 uncertain，不自动重派。
 			this.setOutcome(requestId, "uncertain");
 			return { kind: "uncertain", receipt: { ...existing, outcome: "uncertain" } };
 		}
@@ -149,16 +186,16 @@ export class DelegationReceipts {
 		if (conversationId !== undefined && mapPersistEnabled()) {
 			this.db
 				.prepare(
-					"UPDATE delegation_receipts SET ticket_id = ?, outcome = 'accepted', conversation_id = ?, updated_at = ? WHERE request_id = ?",
+					"UPDATE delegation_receipts SET ticket_id = ?, outcome = 'accepted', conversation_id = ?, boot_id = ?, updated_at = ? WHERE request_id = ?",
 				)
-				.run(ticketId, conversationId, now, requestId);
+				.run(ticketId, conversationId, BOOT_ID, now, requestId);
 			return;
 		}
 		this.db
 			.prepare(
-				"UPDATE delegation_receipts SET ticket_id = ?, outcome = 'accepted', updated_at = ? WHERE request_id = ?",
+				"UPDATE delegation_receipts SET ticket_id = ?, outcome = 'accepted', boot_id = ?, updated_at = ? WHERE request_id = ?",
 			)
-			.run(ticketId, now, requestId);
+			.run(ticketId, BOOT_ID, now, requestId);
 	}
 
 	/** 失败且没拿到单号 → uncertain；拿到单号 → failed（显式 id 仍返回原单）。 */
@@ -178,18 +215,55 @@ export class DelegationReceipts {
 		const now = new Date().toISOString();
 		this.db
 			.prepare(
-				"INSERT INTO delegation_receipts (request_id, ticket_id, fingerprint, outcome, created_at, updated_at) VALUES (?, '', ?, 'accepting', ?, ?)",
+				"INSERT INTO delegation_receipts (request_id, ticket_id, fingerprint, outcome, boot_id, created_at, updated_at) VALUES (?, '', ?, 'accepting', ?, ?, ?)",
 			)
-			.run(requestId, fingerprint, now, now);
+			.run(requestId, fingerprint, BOOT_ID, now, now);
 	}
 
 	private reinsert(requestId: string, fingerprint: string): void {
 		const now = new Date().toISOString();
 		this.db
 			.prepare(
-				"UPDATE delegation_receipts SET ticket_id = '', fingerprint = ?, outcome = 'accepting', updated_at = ? WHERE request_id = ?",
+				"UPDATE delegation_receipts SET ticket_id = '', fingerprint = ?, outcome = 'accepting', boot_id = ?, updated_at = ? WHERE request_id = ?",
 			)
-			.run(fingerprint, now, requestId);
+			.run(fingerprint, BOOT_ID, now, requestId);
+	}
+
+	// ── 死信（A2 补差）────────────────────────────────────
+	/**
+	 * 记一条迟到子单死信。主键幂等：重复扫描同一条只落一次，返回是否真的新插入。
+	 * 死信**只增不改**：它记的是"结果无处可去"这个事实，怎么处置是人看完再定的事。
+	 */
+	recordDeadLetter(
+		entry: { parentTicketId: string; childTicketId: string; childStatus: string; note: string },
+	): boolean {
+		const result = this.db
+			.prepare(
+				"INSERT OR IGNORE INTO delegation_dead_letters (parent_ticket_id, child_ticket_id, child_status, note, created_at) VALUES (?, ?, ?, ?, ?)",
+			)
+			.run(
+				entry.parentTicketId,
+				entry.childTicketId,
+				entry.childStatus,
+				entry.note,
+				new Date().toISOString(),
+			);
+		return Number(result.changes) > 0;
+	}
+
+	listDeadLetters(parentTicketId: string): DelegationDeadLetter[] {
+		const rows = this.db
+			.prepare(
+				"SELECT * FROM delegation_dead_letters WHERE parent_ticket_id = ? ORDER BY created_at",
+			)
+			.all(parentTicketId) as Array<Record<string, unknown>>;
+		return rows.map((row) => ({
+			parentTicketId: text(row.parent_ticket_id),
+			childTicketId: text(row.child_ticket_id),
+			childStatus: text(row.child_status),
+			note: text(row.note),
+			createdAt: text(row.created_at),
+		}));
 	}
 }
 
@@ -202,6 +276,7 @@ function toReceipt(row: Record<string, unknown>): DelegationReceipt {
 			row.conversation_id === null || row.conversation_id === undefined
 				? null
 				: Number(row.conversation_id),
+		bootId: row.boot_id === null || row.boot_id === undefined ? null : text(row.boot_id) || null,
 		outcome: (text(row.outcome) as ReceiptOutcome) || "accepting",
 		createdAt: text(row.created_at),
 		updatedAt: text(row.updated_at),

@@ -40,6 +40,7 @@ import {
 } from "./approval-policy.ts";
 import { recentDiaryMemories, syncDiaryToMemory } from "./memory-ingest.ts";
 import { pathGuardBlockReason } from "./path-guard.ts";
+import { COMPANIONS_ENABLED, partnersStore } from "./partners.ts";
 import { currentProjectEnabled, projectsStore, workspaceRootReal } from "./projects.ts";
 import { chatModelRef, clampThinkingLevel, currentModels, currentThinkingLevels, isFaux, levelFromModelId, readLlmConfig } from "./provider.ts";
 import {
@@ -47,6 +48,10 @@ import {
 	buildHarnessSettings,
 	reliabilitySummary,
 } from "./reliability.ts";
+import { loopGuardEnabled, loopGuardFor, resetLoopGuard } from "./loop-guard.ts";
+import { RoutineTask } from "./routines.ts";
+import { isAutonomyTurn } from "./autonomy-state.ts";
+import { autonomyRiskVerdict } from "./autonomy-risk.ts";
 import { ReminderTask } from "./reminder.ts";
 import { createSkillStore, type SkillStore } from "./skills.ts";
 import { createTools } from "./tools.ts";
@@ -315,6 +320,17 @@ const toolsBlocked = new Set<number>();
 const HARD_STOP_GRACE = 3;
 const aborting = new Set<string>();
 
+/**
+ * 防打转守卫的铁证拦截话术（2026-11-05 批次A A1）。
+ *
+ * 与回合上限正交（那边管总量、这边管同质重复），措辞对齐 TURN_LIMIT_INSTRUCTION：
+ * 别再动手，用已有信息收尾。疑似（未到铁证）只进日志不发帧——客户端没有消费场景，
+ * 要放行时按"纯增量事件"口径加（批次A细化 §3.2）。
+ */
+const LOOP_GUARD_BLOCK_MESSAGE =
+	"已连续重复完全相同的工具调用且没有任何进展，工具被暂停。" +
+	"请直接用已经拿到的信息回答；确实缺信息就照实说明，不要继续重复同一个调用。";
+
 async function abortRun(conversationId: number): Promise<void> {
 	try {
 		const harness = await getHarness();
@@ -394,17 +410,39 @@ export const skillStore: SkillStore | null = (() => {
  * 对外暴露的 conversationId 是另一个东西（下面 Chats 里的 uuid），
  * 用它会把"客户端标识"和"存储主键"绑在一起，以后换实现就麻烦了。
  */
+/**
+ * 伙伴会话的伙伴 scope（批次B B1/B2）：会话挂在链接表上 → 它属于某个伙伴，
+ * 记忆读写落到 `partner:<uuid>` 键空间（与主人记忆隔离）。查失败一律当普通会话，
+ * 记忆永远不能把对话卡住。
+ */
+function partnerScopeOf(conversationId: number): MemoryScope | null {
+	if (!COMPANIONS_ENABLED) return null;
+	try {
+		const partnerId = partnersStore().partnerIdOfSession(conversationId);
+		return partnerId ? { type: "partner", id: partnerId } : null;
+	} catch {
+		return null;
+	}
+}
+
 function scopeOf(conversationId: number): MemoryScope {
-	return { type: "session", id: String(conversationId) };
+	return partnerScopeOf(conversationId) ?? { type: "session", id: String(conversationId) };
 }
 
 /** 召回失败绝不能让对话失败，所以一律吞掉并降级为空上下文。 */
 function recallContext(conversationId: number, text: string): string {
 	if (!memoryEngine || !text.trim()) return "";
 	try {
+		// 伙伴会话（批次B B1）：global + 伙伴键空间 + 本会话三条都进候选；
+		// 键空间过滤是 store 的硬过滤（scope IN），伙伴键空间外的记录不会被召回。
+		const partner = partnerScopeOf(conversationId);
 		return memoryEngine.buildContext({
 			text,
-			scopes: ["global", scopeKey(scopeOf(conversationId))],
+			scopes: [
+				"global",
+				...(partner ? [scopeKey(partner)] : []),
+				scopeKey({ type: "session", id: String(conversationId) }),
+			],
 		});
 	} catch (error) {
 		const detail = error instanceof Error ? error.message : String(error);
@@ -555,7 +593,13 @@ async function openHarness(): Promise<Harness> {
 							return { block: "本轮工具调用已达上限，请直接用已有信息回答" };
 						}
 						const readOnly = readOnlyBlockReason(call.name);
-						const verdict = needsApproval(policy, call.name, readOnly);
+						// 自主轮高危审批（批次C C2）：例行轮（autonomyTurns 事实源）里
+						// RISK_TOOLS 一律强制 ask——普通轮行为完全不变（D6 口径不动）。
+						const autonomous = isAutonomyTurn(api.conversationId);
+						const risk = autonomyRiskVerdict(call.name, autonomous);
+						const verdict = risk.forceAsk
+							? ({ kind: "ask" } as const)
+							: needsApproval(policy, call.name, readOnly);
 						if (verdict.kind === "block") {
 							return { block: verdict.reason };
 						}
@@ -569,6 +613,18 @@ async function openHarness(): Promise<Harness> {
 							cwd: sessionCwd(),
 						});
 						if (pathBlock) return { block: pathBlock };
+						// 防打转守卫（2026-11-05 批次A A1）：放在闸门之后——被拦的调用没执行，
+						// 不喂守卫；铁证在执行前拦下，省掉一次注定无意义的执行。
+						// 只统计顶层调用（嵌套不喂，防放大误判）；≥30s 节奏轮询在守卫内豁免。
+						if (loopGuardEnabled() && call.parent === undefined) {
+							const guardHit = loopGuardFor(api.conversationId).before(call.name, call.arguments);
+							if (guardHit !== "ok") {
+								console.warn(
+									`[loop-guard] 会话 ${api.conversationId} 铁证中断 pattern=${guardHit.pattern} count=${guardHit.count} tool=${call.name}`,
+								);
+								return { block: LOOP_GUARD_BLOCK_MESSAGE };
+							}
+						}
 						// bash 默认超时（2026-11-04 批次一 A4）：只补模型没传的 timeout。
 						// 内核会拿返回的 arguments 重新校验（types.d.ts 的 ToolHooks.beforeTool）；
 						// `timeout=0` 绝不能注入 —— 内核 validateTimeout 对 <=0 直接抛错。
@@ -579,7 +635,8 @@ async function openHarness(): Promise<Harness> {
 						}
 						// 审批（2026-11-04 批次二）：写类工具在真正动手前挂起等人答复。
 						// 本会话记住过的工具直接放行（进程内，重启失效）。
-						if (verdict.kind === "ask" && !approvalStore().isRemembered(api.conversationId, call.name)) {
+						// 自主轮禁"记住"绕过（批次C C2）：例行轮的每次写/派都必须真人答复
+						if (verdict.kind === "ask" && (autonomous || !approvalStore().isRemembered(api.conversationId, call.name))) {
 							const timeoutS = approvalTimeoutSeconds(process.env);
 							const pending = approvalStore().create({
 								callId: call.id,
@@ -588,6 +645,7 @@ async function openHarness(): Promise<Harness> {
 								// 与 tool 事件同一口径截断；这份摘要会落盘（有意），永不进日志
 								args: toolArgs(call.arguments).args ?? "",
 								timeoutMs: timeoutS * 1000,
+								...(autonomous ? { origin: "autonomous" as const } : {}),
 							});
 							// 借派活通道发给对话流（见 delegation.ts 模块头注释）
 							emitDelegation(api.conversationId, {
@@ -596,6 +654,7 @@ async function openHarness(): Promise<Harness> {
 								tool: pending.record.tool,
 								args: pending.record.args,
 								deadlineAt: pending.record.deadlineAt,
+								...(autonomous ? { origin: "autonomous" as const } : {}),
 							});
 							const status = await waitForApproval(pending, timeoutS, context.abortSignal);
 							if (status !== "approved") {
@@ -627,6 +686,19 @@ async function openHarness(): Promise<Harness> {
 					},
 					// 工具跑完、把结果交回模型 → 又回到"在思考"
 					afterTool: (call: ToolHookCall, result, api) => {
+						// 防打转守卫记账（批次A A1）：铁证已由 beforeTool 拦下，这里只出疑似告警。
+						// 被闸门拦下的调用走不到这里（beforeTool 提前 return），天然不喂守卫。
+						if (loopGuardEnabled() && call.parent === undefined) {
+							const warned = loopGuardFor(api.conversationId).after(call.name, call.arguments, {
+								isError: result.isError,
+								output: result.output,
+							});
+							if (warned !== "ok") {
+								console.warn(
+									`[loop-guard] 会话 ${api.conversationId} 疑似打转 pattern=${warned.pattern} count=${warned.count} tool=${call.name}`,
+								);
+							}
+						}
 						emitPhase(api.conversationId, "thinking");
 						emitTool(api.conversationId, {
 							name: call.name,
@@ -681,6 +753,8 @@ async function openHarness(): Promise<Harness> {
 						} else if (used === 1) {
 							// 新的一轮，把上一轮封掉的工具放开
 							toolsBlocked.delete(api.conversationId);
+							// 防打转守卫同步清零（批次A A1）：判据按轮计，不跨轮累计
+							resetLoopGuard(api.conversationId);
 						}
 
 						if (extra.length === 0) return undefined;
@@ -688,7 +762,7 @@ async function openHarness(): Promise<Harness> {
 					},
 				}),
 			],
-			tasks: [ReminderTask],
+			tasks: [ReminderTask, RoutineTask],
 		})),
 	);
 
@@ -914,7 +988,34 @@ export function watchPhase(
 	};
 }
 
+// ── 全局事件口（2026-11-05 批次B B3）：例行任务引擎的触发源之一 ──
+export interface GlobalAgentEvent {
+	conversationId: number;
+	kind: "phase" | "tool";
+	phase?: TurnPhase;
+	tool?: ToolEvent;
+}
+const globalEventSinks = new Set<(event: GlobalAgentEvent) => void>();
+
+export function watchAllEvents(sink: (event: GlobalAgentEvent) => void): () => void {
+	globalEventSinks.add(sink);
+	return () => {
+		globalEventSinks.delete(sink);
+	};
+}
+
+function emitGlobalAgent(event: GlobalAgentEvent): void {
+	for (const sink of globalEventSinks) {
+		try {
+			sink(event);
+		} catch {
+			/* 观察方异常不影响主链路 */
+		}
+	}
+}
+
 function emitPhase(conversationId: number, phase: TurnPhase): void {
+	emitGlobalAgent({ conversationId, kind: "phase", phase });
 	const set = phaseSinks.get(conversationId);
 	if (!set) return;
 	for (const sink of set) {
@@ -997,6 +1098,7 @@ export function watchTool(conversationId: number, sink: (event: ToolEvent) => vo
 }
 
 function emitTool(conversationId: number, event: ToolEvent): void {
+	emitGlobalAgent({ conversationId, kind: "tool", tool: event });
 	const set = toolSinks.get(conversationId);
 	if (!set) return;
 	for (const sink of set) {
@@ -1305,7 +1407,15 @@ export type ChatStreamEvent =
 	 * 与 attention 的分工：那个是任务单的问题，这个是权限确认；答复走 HTTP 审批端点，
 	 * 不占用对话输入。`args` 已按 tool 事件口径截断。
 	 */
-	| { type: "approval"; callId: string; tool: string; args: string; deadlineAt: string }
+	| {
+			type: "approval";
+			callId: string;
+			tool: string;
+			args: string;
+			deadlineAt: string;
+			/** 自主轮标记（批次C C2）：例行轮的审批卡；对外契约见 shared ChatEvent（纯增量） */
+			origin?: "autonomous";
+	  }
 	| { type: "turnLimit"; message: string }
 	/**
 	 * 这一轮跑完了但没有回答（模型报错、被策略拦下等）。

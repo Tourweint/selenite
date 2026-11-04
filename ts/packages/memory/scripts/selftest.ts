@@ -13,6 +13,7 @@ import {
 	InMemoryStore,
 	MemoryEngine,
 	SqliteMemoryStore,
+	scopeKey,
 	type ExtractMessage,
 	type MemoryRecord,
 	type MemoryScope,
@@ -302,6 +303,46 @@ try {
 	console.log("✓ 迁移对账：旧库补建、坏镜像重建");
 } finally {
 	rmSync(tempDir, { recursive: true, force: true });
+}
+
+// ── 9. partner 作用域隔离（2026-11-05 批次B B1）──────────────
+// 伙伴记忆与主人记忆键空间完全隔离：同一套存储/召回，scope key 不同互不可见。
+// 写入走 remember()（它内部用 scopeKey 换算，等价于生产链路）。
+{
+	const partnerEngine = new MemoryEngine({ store: new InMemoryStore() });
+	const partnerA: MemoryScope = { type: "partner", id: "11111111-1111-4111-8111-111111111111" };
+	const partnerB: MemoryScope = { type: "partner", id: "22222222-2222-4222-8222-222222222222" };
+
+	partnerEngine.remember({ kind: "preference", scope: partnerA, content: "伙伴A记的：主人喜欢简洁的汇报" });
+	partnerEngine.remember({ kind: "fact", scope: partnerB, content: "伙伴B记的：主人在筹备搬家" });
+	partnerEngine.remember({ kind: "fact", scope: { type: "global" }, content: "全局记忆：主人名字写在配置里" });
+
+	const keyA = scopeKey(partnerA);
+	const keyB = scopeKey(partnerB);
+
+	const hitsA = partnerEngine.recall({ text: "汇报 搬家 简洁", scopes: [keyA], limit: 10 });
+	assert(hitsA.every((hit) => hit.record.scope === keyA), "partner A 的召回不得跨出自己键空间");
+	assert(hitsA.some((hit) => hit.record.content.includes("简洁")), "partner A 应召回自己的记录");
+	assert(!hitsA.some((hit) => hit.record.content.includes("搬家")), "partner A 不得召回 partner B 的记录");
+
+	// recall 语义是"给上下文挑相关记忆"（近因+重要度打分），不是文本搜索：
+	// A 键空间查"搬家"可以带回 A 自己的近条目，但**绝不允许出现别的键空间的记录**——
+	// 这才是隔离性质（键空间过滤在 store.search 的 scope IN 上，硬过滤）。
+	const crossSearch = partnerEngine.recall({ text: "搬家", scopes: [keyA], limit: 10 });
+	assert(
+		crossSearch.every((hit) => hit.record.scope === keyA),
+		"partner A 键空间查「搬家」绝不带出 partner B / global 的记录",
+	);
+	const ownB = partnerEngine.recall({ text: "搬家", scopes: [keyB], limit: 10 });
+	assert(
+		ownB.some((hit) => hit.record.content.includes("搬家")) && ownB.every((hit) => hit.record.scope === keyB),
+		"partner B 键空间内能召回自己的，且不带别人的",
+	);
+
+	// 全局与 partner 互不串（伙伴能读 global 是 server 注入口的取舍，存储层不做特判）
+	const globalOnly = partnerEngine.recall({ text: "配置", scopes: ["global"], limit: 10 });
+	assert(globalOnly.length === 1, "global 键空间照常可用");
+	console.log(`✓ partner 作用域：键空间隔离成立（key=${keyA.slice(0, 16)}…）`);
 }
 
 console.log("✓ 记忆框架自测通过");

@@ -1,4 +1,4 @@
-import type { MemoryCandidate, MemoryScope } from "./types.ts";
+import { scopeKey, type MemoryCandidate, type MemoryScope } from "./types.ts";
 
 /**
  * 抽取层：把一段对话变成"值得记的候选"。
@@ -37,7 +37,7 @@ const SENTENCE_SPLIT = /[。！？!?\n]+/;
 export class HeuristicExtractor implements Extractor {
 	async extract(input: ExtractInput): Promise<MemoryCandidate[]> {
 		const candidates: MemoryCandidate[] = [];
-		const scope = scopeToKey(input.scope);
+		const scope = scopeKey(input.scope);
 
 		for (const message of input.messages) {
 			if (message.role !== "user") continue;
@@ -72,15 +72,6 @@ export class NoopExtractor implements Extractor {
 	}
 }
 
-function scopeToKey(scope: MemoryScope): string {
-	switch (scope.type) {
-		case "global":
-			return "global";
-		case "day":
-			return `day:${scope.date}`;
-		case "topic":
-			return `topic:${scope.name}`;
-		case "session":
-			return `session:${scope.id}`;
-	}
-}
+// scope→key 的换算统一用 types.ts 的 scopeKey（2026-11-05 批次B B1）：
+// 这里原来有一份逐分支相同的私有复制，新增 scope 类型时必须改两处——
+// partner 就是这样差点漏掉，所以删私有版收口成一处。

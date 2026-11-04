@@ -56,6 +56,8 @@ export type DelegationEvent =
 			tool: string;
 			args: string;
 			deadlineAt: string;
+			/** 自主轮标记（批次C C2）：例行轮的审批卡，纯增量字段 */
+			origin?: "autonomous";
 	  };
 
 export interface DelegationReport {
@@ -119,7 +121,25 @@ export function watchDelegation(conversationId: number, sink: Sink): () => void 
 	};
 }
 
+// ── 全局事件口（2026-11-05 批次B B3）：例行任务引擎的触发源 ──
+// 跨会话广播，不落盘、不重放；订阅方（routines/观察层）异常绝不影响派活主链路。
+const delegationSinks = new Set<(event: DelegationEvent, conversationId: number) => void>();
+
+export function watchAllDelegationEvents(
+	sink: (event: DelegationEvent, conversationId: number) => void,
+): () => void {
+	delegationSinks.add(sink);
+	return () => delegationSinks.delete(sink);
+}
+
 export function emitDelegation(conversationId: number, event: DelegationEvent): void {
+	for (const sink of delegationSinks) {
+		try {
+			sink(event, conversationId);
+		} catch {
+			/* 订阅方异常不该影响派活 */
+		}
+	}
 	const set = sinks.get(conversationId);
 	if (!set) return;
 	for (const sink of set) {

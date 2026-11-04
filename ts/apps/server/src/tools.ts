@@ -1,4 +1,6 @@
 import { Type } from "@earendil-works/pi-ai";
+import { join } from "node:path";
+import { partnersStore } from "./partners.ts";
 import { defineTool, type ToolRegistration } from "@earendil-works/pi-durable";
 import { scopeKey, type MemoryEngine, type MemoryKind, type MemoryScope } from "@lifediary/memory";
 // 派活能力（chancellor）。相对路径是刻意的：chancellor 是独立仓库，
@@ -28,6 +30,11 @@ import {
 	type ProjectRef,
 	type ProjectsStore,
 } from "./projects.ts";
+// 设备矩阵（2026-11-05 阶段二）：远程分支晚绑定取中继客户端。
+// relay-matrix → agent → tools 的环是运行期安全的（agent 绑定只在函数体内解引用）。
+import { currentRelayClient, deviceMatrixEnabled } from "./relay-config.ts";
+import { RelayInvokeError } from "./relay-client.ts";
+import { dispatchRemoteDelegation } from "./relay-matrix.ts";
 import { ReminderTask } from "./reminder.ts";
 import type { SkillStore } from "./skills.ts";
 
@@ -73,6 +80,11 @@ export interface ToolDeps {
 	 * 不建目录、不写文件、不建任务单。
 	 */
 	projects?: ProjectsStore | null;
+	/**
+	 * 伙伴能力（2026-11-05 批次B B2）：为 true 时 `partner_skill_write` 上架。
+	 * agent.ts 传 `COMPANIONS_ENABLED`——开关关掉时工具不注册，行为与改动前一致（回滚开关）。
+	 */
+	partners?: boolean;
 	/** 派单回执表；不传用默认 `.data/delegations.sqlite`。测试可注入临时库。 */
 	receipts?: DelegationReceipts | null;
 }
@@ -297,6 +309,14 @@ export function createTools(deps: ToolDeps) {
 						"填了就把活交给该领域负责人；不填则直接派 worker（兼容旧行为）。",
 				}),
 			),
+			targetDevice: Type.Optional(
+				Type.String({
+					description:
+						"把活派给**另一台电脑**的 harness 执行（设备矩阵）。填中结名册里的设备 id。" +
+						"填了就走远程分支：本机的项目登记表不参与，`project` 由目标机判；" +
+						"目标离线会直接失败（不排队）。不填 = 本机执行（现状）。",
+				}),
+			),
 			resume: Type.Optional(
 				Type.Boolean({
 					description:
@@ -316,6 +336,35 @@ export function createTools(deps: ToolDeps) {
 			// 这里把 chancellor 的事件翻译成两种：正在办第几件、需要你回答什么。
 			const conversationId = Number(api.conversationId);
 			const domain = (args.domain ?? "").trim();
+			// 远程分支（2026-11-05 阶段二）：点名另一台电脑执行。
+			// 本机的项目前置不参与（project 语义归目标机）；离线直接失败不排队。
+			const targetDevice = (args.targetDevice ?? "").trim();
+			if (targetDevice) {
+				const client = currentRelayClient();
+				if (!deviceMatrixEnabled() || !client) {
+					return text("设备矩阵未开启（DEVICE_MATRIX_ENABLED=off 或中继未连接），targetDevice 不可用。");
+				}
+				if (args.resume === true) {
+					return text("远端单的续跑（resume）暂不支持：请直接重派一张新单到该设备。");
+				}
+				try {
+					const result = dispatchRemoteDelegation(client, {
+						targetDeviceId: targetDevice,
+						requirement: args.requirement,
+						project: args.project?.trim() || undefined,
+						domain: domain || undefined,
+						originInternalId: conversationId,
+					});
+					return text(
+						`已交由设备「${result.deviceName}」执行（远端请求 ${result.requestId.slice(0, 8)}）。` +
+							"它在后台跑，完成后我会把汇报写进本会话。不要重复派、不要轮询。",
+					);
+				} catch (error) {
+					const code = error instanceof RelayInvokeError ? error.code : "internal";
+					const message = error instanceof Error ? error.message.slice(0, 200) : "派发失败";
+					return text(JSON.stringify({ ok: false, error: code, message }));
+				}
+			}
 			// 非法领域名（尤其是中文）直接回可用清单，不建单、不让模型猜。
 			if (domain) {
 				try {
@@ -504,6 +553,48 @@ export function createTools(deps: ToolDeps) {
 	}
 
 	if (deps.delegate !== false) tools.push(delegate, proposeProject);
+
+	// 伙伴技能写入（2026-11-05 批次B B2）：只对"伙伴会话"有意义的写工具。
+	// 写的是 partner-homes/<id>/skills/<slug>.md（64KB 上限、原子写都在 partners.ts）；
+	// 主人会话里调它直接报错——主人自己的技能不归模型管。
+	if (deps.partners) {
+		tools.push(
+			defineTool({
+				name: "partner_skill_write",
+				description:
+					"把一份技能手册写进当前伙伴的技能库（skills/<slug>.md，首行 = 索引用的一句话摘要）。" +
+					"只在伙伴会话里可用；写盘即生效，下一轮进身份提示词的技能索引。",
+				parameters: Type.Object({
+					slug: Type.String({
+						description: "技能名，小写字母/数字/短横线，1-64 字符，如 daily-brief",
+					}),
+					content: Type.String({ description: "技能手册全文（Markdown）；第一行是索引用摘要" }),
+				}),
+				execute: async (args, context) => {
+					const partnerId = partnersStore().partnerIdOfSession(Number(context.conversationId));
+					if (!partnerId) {
+						return text("这个会话不属于任何伙伴，不能写伙伴技能。");
+					}
+					if (!/^[a-z0-9][a-z0-9-_]{0,63}$/.test(args.slug)) {
+						return text("slug 只能是小写字母/数字/短横线，1-64 字符。");
+					}
+					if (!args.content.trim() || !args.content.trim().split("\n")[0]?.trim()) {
+						return text("技能手册第一行是索引摘要，不能为空。");
+					}
+					try {
+						partnersStore().atomicWrite(
+							join(partnersStore().skillsDirOf(partnerId), `${args.slug}.md`),
+							args.content,
+						);
+						return text(`技能 ${args.slug} 已写入伙伴技能库，下一轮进索引。`);
+					} catch (error) {
+						const detail = error instanceof Error ? error.message : String(error);
+						return text(`写入失败：${detail}`);
+					}
+				},
+			}),
+		);
+	}
 
 	return tools;
 }

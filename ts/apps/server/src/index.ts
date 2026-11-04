@@ -20,6 +20,7 @@ import {
   chatMetaSummary,
   chatStream,
   contextUsageOf,
+  externalChatIds,
   getPolicy,
   hideChat,
   listChats,
@@ -46,10 +47,22 @@ import { pairPage } from "./pair-page.ts";
 import { mountPhoneWorker } from "./phone-worker.ts";
 import { mountProjects } from "./projects.ts";
 import { mountDelegationApi } from "./delegation-api.ts";
+import { mountCompanions } from "./companion-api.ts";
+import { COMPANIONS_ENABLED } from "./partners.ts";
+import { routineEngine } from "./routines.ts";
+import { watchAllEvents } from "./agent.ts";
+import { autonomyObserver } from "./autonomy.ts";
 import { mountApprovalApi } from "./approval-api.ts";
 import { mountWeb } from "./web.ts";
 import { mountWorkerShell } from "./worker-shell.ts";
 import { syncDiaryToMemory } from "./memory-ingest.ts";
+import { RelayClient } from "./relay-client.ts";
+import { RelayChannelHub, type RelayChannelDeps } from "./relay-channels.ts";
+import { relayEnabled, relaySettings, deviceMatrixEnabled, companionHomeEnabled } from "./relay-config.ts";
+import { companionHomeController, type CompanionHomeController } from "./relay-home.ts";
+import { createMatrixChannels, dispatchRemoteDelegation, listRemoteDelegations } from "./relay-matrix.ts";
+import { RelayInvokeError } from "./relay-client.ts";
+import { approvalStore } from "./approvals.ts";
 import {
   currentThinkingLevels,
   modelCatalog,
@@ -65,8 +78,15 @@ import {
 import { injectProviderKeys } from "./provider-secrets.ts";
 import { chancellorWorkRoot } from "./delegation.ts";
 import { DelegationReceipts } from "./delegation-receipts.ts";
-import { recoverReportEnabled, reportRecoveredTickets } from "./recovery-report.ts";
+import {
+	collectDeadLetters,
+	recoverReportEnabled,
+	reportRecoveredTickets,
+	type DeadLetterChild,
+} from "./recovery-report.ts";
 import { recoverDelegations, type RecoveredTicket } from "../../../../../chancellor/src/index.ts";
+import { Store } from "../../../../../chancellor/src/store.ts";
+import { listManagers } from "../../../../../chancellor/src/manager/registry.ts";
 
 // Node 20.12+ 自带 .env 加载；文件不存在时静默跳过，不让本地启动被环境文件卡住。
 try {
@@ -147,6 +167,9 @@ mountProjects(app);
 
 // 任务中心只读接口（2026-11-03 方案 §5.9）：领域列表 + 单 ticket 明细。
 mountDelegationApi(app);
+
+// 伙伴管理（2026-11-05 批次B B2）：档案 CRUD + 手动跑一轮。开关关着一个路由都不挂（404 = 未启用）。
+mountCompanions(app);
 
 // 审批答复（2026-11-04 批次二）：待批列表 + 幂等答复。开关关着时列表恒为空。
 mountApprovalApi(app);
@@ -543,6 +566,12 @@ app.post("/api/v1/agent/chat", async (c) => {
         // 记忆挂在"这一轮真的结束"上，不挂在"这条流结束"上：
         // 用户关掉界面之后它还会跑完，那一轮的记忆照样得写。
         onSettled: (record) => {
+          // 观察层的 errored/usage-limit 事件源（批次C C1）；开关关着时内部直接返回
+          autonomyObserver().onTurnSettled(
+            Number(chat.internalId),
+            record.status,
+            record.status === "unanswered" ? record.reason : "",
+          );
           if (!memoryEngine || record.status !== "done") return;
           // 刻意不 await —— 记忆写慢了不该拖慢任何东西
           void memoryEngine
@@ -760,6 +789,167 @@ app.post("/api/v1/agent/reminders", async (c) => {
   return c.json({ ok: true, taskId, conversationId: chat.externalId }, 201);
 });
 
+// ── 中继（2026-11-05 多端同步方案块1，阶段一）──────────────────────
+// RELAY_ENABLED=off（默认）→ 完全不装，回局域网直连形态。
+// harness 以设备身份出站长连中继；通道白名单在 relay-channels.ts（默认拒绝）。
+let relayClient: RelayClient | null = null;
+let relayChannels: RelayChannelHub | null = null;
+let homeController: CompanionHomeController | null = null;
+if (relayEnabled()) {
+  const settings = relaySettings();
+  if (!settings) {
+    console.error("[relay] RELAY_ENABLED 已开但 RELAY_URL / RELAY_TOKEN 未配齐，中继不启动");
+  } else {
+    const deps: RelayChannelDeps = {
+      version: SERVER_VERSION,
+      listChats,
+      resolveInternalId: async (conversationId) => {
+        for (const [internal, external] of await externalChatIds()) {
+          if (external === conversationId) return internal;
+        }
+        return null;
+      },
+      externalOf: async (internalId) => (await externalChatIds()).get(internalId) ?? null,
+      sayInConversation,
+      eventStore: chatEventStoreOf() ?? null,
+      approvals: () => approvalStore(),
+      // 阶段三：降级伙伴的专线会话拒绝经这台设备代发（fail-closed）
+      chatSendGuard: async (conversationId) => (await homeController?.chatSendGuard(conversationId)) ?? null,
+    };
+    relayChannels = new RelayChannelHub(
+      deps,
+      (dst, channel, payload) => {
+        relayClient?.pushTo(dst, channel, payload);
+      },
+      deviceMatrixEnabled() ? createMatrixChannels() : undefined,
+    );
+    relayClient = new RelayClient({
+      url: settings.url,
+      token: settings.token,
+      deviceName: settings.deviceName,
+      platform: process.platform,
+      version: SERVER_VERSION,
+      capabilities: settings.capabilities,
+      onInvoke: (src, channel, payload) => {
+        if (!relayChannels) throw new Error("中继通道未装配");
+        return relayChannels.handle(src, channel, payload);
+      },
+      onReconnected: () => {
+        void homeController?.ensureDemotion().catch(() => {});
+      },
+      log: (line) => console.log(line),
+    });
+    relayClient.start();
+    if (companionHomeEnabled()) {
+      homeController = companionHomeController(relayClient);
+      homeController.startPeriodicCheck();
+    }
+  }
+}
+
+// 中继状态（只暴露连接面，不暴露令牌与地址里的凭据）
+app.get("/api/v1/relay/status", (c) => {
+  return c.json({
+    enabled: relayEnabled(),
+    connected: relayClient?.connected ?? false,
+    deviceId: relayClient?.selfDeviceId ?? null,
+    subscriptionCount: relayChannels?.subscriptionCount ?? 0,
+    onlineDevices: relayClient?.devices.length ?? 0,
+  });
+});
+
+// ── 设备矩阵派活（2026-11-05 阶段二）────────────────────────────
+// HTTP 入口给探针/界面用，与 delegate 工具的 targetDevice 分支同一条
+// dispatchRemoteDelegation。DEVICE_MATRIX_ENABLED=off 时端点 404。
+app.post("/api/v1/relay/matrix/delegate", async (c) => {
+  if (!deviceMatrixEnabled() || !relayClient) return c.json({ error: "not_available" }, 404);
+  const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+  const targetDeviceId = typeof body?.targetDeviceId === "string" ? body.targetDeviceId : "";
+  const requirement = typeof body?.requirement === "string" ? body.requirement : "";
+  const conversationId = typeof body?.conversationId === "string" ? body.conversationId : "";
+  const project = typeof body?.project === "string" ? body.project : undefined;
+  const domain = typeof body?.domain === "string" ? body.domain : undefined;
+  if (!targetDeviceId || !requirement.trim() || !conversationId) {
+    return c.json({ error: "bad_request", message: "需要 targetDeviceId / requirement / conversationId" }, 400);
+  }
+  let originInternalId: number | null = null;
+  for (const [internal, external] of await externalChatIds()) {
+    if (external === conversationId) originInternalId = internal;
+  }
+  if (originInternalId === null) return c.json({ error: "unknown_conversation" }, 404);
+  try {
+    const result = dispatchRemoteDelegation(relayClient, {
+      targetDeviceId,
+      requirement,
+      project,
+      domain,
+      originInternalId,
+    });
+    return c.json({ ok: true, requestId: result.requestId, deviceName: result.deviceName }, 202);
+  } catch (error) {
+    const code = error instanceof RelayInvokeError ? error.code : "internal";
+    const message = error instanceof Error ? error.message : "派发失败";
+    return c.json({ error: code, message }, 502);
+  }
+});
+
+app.get("/api/v1/relay/matrix/status", (c) => {
+  if (!deviceMatrixEnabled()) return c.json({ error: "not_available" }, 404);
+  const requestId = c.req.query("requestId");
+  const rows = listRemoteDelegations();
+  const filtered = requestId ? rows.filter((row) => row.requestId === requestId) : rows;
+  return c.json({ delegations: filtered });
+});
+
+// ── 伙伴认主机（2026-11-05 阶段三底座；档案/记忆归批次B）──────────
+app.get("/api/v1/relay/home/status", (c) => {
+  if (!companionHomeEnabled() || !homeController) return c.json({ error: "not_available" }, 404);
+  return c.json(homeController.status());
+});
+
+app.post("/api/v1/relay/home/actors", async (c) => {
+  if (!companionHomeEnabled() || !homeController) return c.json({ error: "not_available" }, 404);
+  const body = (await c.req.json().catch(() => null)) as { name?: unknown } | null;
+  const name = typeof body?.name === "string" ? body.name.trim() : "";
+  if (!name) return c.json({ error: "bad_request", message: "需要 name" }, 400);
+  try {
+    return c.json(await homeController.create(name), 201);
+  } catch (error) {
+    const code = error instanceof RelayInvokeError ? error.code : "internal";
+    return c.json({ error: code, message: error instanceof Error ? error.message : "创建失败" }, 502);
+  }
+});
+
+app.post("/api/v1/relay/home/actors/:id/takeover", async (c) => {
+  if (!companionHomeEnabled() || !homeController) return c.json({ error: "not_available" }, 404);
+  try {
+    return c.json(await homeController.takeover(c.req.param("id")));
+  } catch (error) {
+    const code = error instanceof RelayInvokeError ? error.code : "internal";
+    return c.json({ error: code, message: error instanceof Error ? error.message : "换家失败" }, 409);
+  }
+});
+
+// 立即与中继路由表对齐降级位（平时周期 60s；界面/探针用）
+app.post("/api/v1/relay/home/check", async (c) => {
+  if (!companionHomeEnabled() || !homeController) return c.json({ error: "not_available" }, 404);
+  await homeController.ensureDemotion();
+  return c.json(await homeController.status());
+});
+
+app.post("/api/v1/relay/home/actors/:id/messages", async (c) => {
+  if (!companionHomeEnabled() || !homeController) return c.json({ error: "not_available" }, 404);
+  const body = (await c.req.json().catch(() => null)) as { text?: unknown } | null;
+  const text = typeof body?.text === "string" ? body.text.trim() : "";
+  if (!text) return c.json({ error: "bad_request", message: "需要 text" }, 400);
+  try {
+    return c.json(await homeController.sendMessage(c.req.param("id"), text));
+  } catch (error) {
+    const code = error instanceof RelayInvokeError ? error.code : "internal";
+    return c.json({ error: code, message: error instanceof Error ? error.message : "发送失败" }, 502);
+  }
+});
+
 const port = Number(process.env.PORT ?? 39847);
 
 serve({ fetch: app.fetch, port }, (info) => {
@@ -790,12 +980,21 @@ serve({ fetch: app.fetch, port }, (info) => {
         );
       }
       await reportRecoveries(recovered);
+      await recordDeadLetters(recovered);
     })
     .catch((error: unknown) => {
       console.warn(
         `[恢复] 启动恢复失败（不影响服务）: ${error instanceof Error ? error.message : error}`,
       );
     });
+  // 例行任务引擎（2026-11-05 批次B B3）：接全局事件口 + 结算遗留 running。
+  // phase/tool 的全局口在 agent.ts，这里喂给引擎；delegation 口引擎自己订。
+  if (COMPANIONS_ENABLED) {
+    routineEngine().subscribe();
+    watchAllEvents((event) => routineEngine().onAgentEvent(event));
+  }
+  // 任务观察层（2026-11-05 批次C C1）：AUTONOMY_ENABLED=false 时 subscribe 内部直接返回（零行为）
+  autonomyObserver().subscribe();
   const authLabel = process.env.AGENT_TOKEN?.trim()
     ? "共享令牌 + 配对设备凭据"
     : "未配 AGENT_TOKEN —— 仅本机 / 已配对设备可访问";
@@ -834,6 +1033,61 @@ async function reportRecoveries(entries: RecoveredTicket[]): Promise<void> {
   } finally {
     receipts.close();
   }
+}
+
+/**
+ * 迟到子单死信扫描（2026-11-05 批次A A2）。
+ *
+ * 父单收口那一刻 chancellor 只读一次子单；父单中止后子单才跑完的，结果没人看。
+ * 这里只记账（delegations.sqlite 的死信表）：不丢、不自动并入、可查。
+ * 与回灌不同，死信是纯记账，不依赖 LLM 配置。
+ */
+async function recordDeadLetters(entries: RecoveredTicket[]): Promise<void> {
+  if (entries.length === 0 || !recoverReportEnabled()) return;
+  const receipts = new DelegationReceipts();
+  try {
+    const recorded = collectDeadLetters(entries, {
+      childrenOf: childrenLookup(chancellorWorkRoot()),
+      record: (entry) => receipts.recordDeadLetter(entry),
+      log: (line) => console.log(line),
+    });
+    if (recorded > 0) console.log(`[恢复] 迟到子单死信 ${recorded} 条`);
+  } catch (error) {
+    console.warn(
+      `[恢复] 死信扫描失败（不影响服务）: ${error instanceof Error ? error.message : error}`,
+    );
+  } finally {
+    receipts.close();
+  }
+}
+
+/** 父单的子单查询：顶层 runs_dir + 各分管自己的 runs_dir 都要翻（子单记 parentTicketId）。 */
+function childrenLookup(workRoot: string): (parentTicketId: string) => DeadLetterChild[] {
+  const dirs = new Set<string>([workRoot]);
+  try {
+    for (const entry of listManagers(workRoot)) {
+      const runsDir = entry.meta?.runs_dir;
+      if (runsDir) dirs.add(runsDir);
+    }
+  } catch {
+    // 列不出分管就用顶层目录：查不到子单顶多漏记，不能让恢复失败
+  }
+  return (parentTicketId) => {
+    const out: DeadLetterChild[] = [];
+    for (const dir of dirs) {
+      const store = new Store(dir);
+      try {
+        for (const child of store.childrenOf(parentTicketId)) {
+          out.push({ id: child.id, status: child.status });
+        }
+      } catch {
+        // 单目录读失败不挡别的目录
+      } finally {
+        store.close();
+      }
+    }
+    return out;
+  };
 }
 
 /**

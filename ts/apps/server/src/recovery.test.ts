@@ -15,7 +15,12 @@ import { prepareTaskWorktree, removeWorktree } from "../../../../../chancellor/s
 import { recoverDelegations, type RecoveredTicket } from "../../../../../chancellor/src/index.ts";
 import { readJson, Store } from "../../../../../chancellor/src/store.ts";
 import type { ProjectRef, Ticket } from "../../../../../chancellor/src/types.ts";
-import { formatRecoveryLine, reportRecoveredTickets } from "./recovery-report.ts";
+import {
+	collectDeadLetters,
+	formatRecoveryLine,
+	reportRecoveredTickets,
+	type DeadLetterRecord,
+} from "./recovery-report.ts";
 
 function temp(prefix: string): string {
 	return mkdtempSync(join(tmpdir(), `lifediary-${prefix}-`));
@@ -401,5 +406,89 @@ test("worktree：复用副本能接住崩溃前的半成品", () => {
 		removeWorktree(repo, worktreePath);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("恢复死信：父单 aborted + 子单已终态 → 记账；父单 done + 子单终态 → 不记", () => {
+	const recorded: DeadLetterRecord[] = [];
+	let calls = 0;
+	const recordedCount = collectDeadLetters(
+		[entryOf("T-P1", "aborted"), entryOf("T-P2", "done")],
+		{
+			childrenOf: (parentTicketId) => {
+				calls += 1;
+				if (parentTicketId === "T-P1") {
+					return [{ id: "T-C1", status: "done" }];
+				}
+				if (parentTicketId === "T-P2") {
+					return [{ id: "T-C2", status: "done" }];
+				}
+				return [];
+			},
+			record: (entry) => {
+				recorded.push(entry);
+				return true;
+			},
+		},
+	);
+	assert.equal(calls, 2, "两个终态父单都要扫子单");
+	assert.equal(recordedCount, 1);
+	assert.equal(recorded.length, 1);
+	assert.equal(recorded[0]?.parentTicketId, "T-P1");
+	assert.equal(recorded[0]?.childTicketId, "T-C1");
+	assert.match(recorded[0]?.note ?? "", /已中止/);
+});
+
+test("恢复死信：父单终态 + 子单未终态 → 记账；重复扫描幂等不重复计", () => {
+	const seen = new Set<string>();
+	const recordedCount = collectDeadLetters(
+		[entryOf("T-P3", "needs_you"), entryOf("T-P3", "needs_you")],
+		{
+			childrenOf: () => [
+				{ id: "T-C3", status: "running" },
+				// failed 子单 + 非 aborted 父单 = 正常收口路径（enforceChildClosure 已覆盖），不记死信
+				{ id: "T-C4", status: "planning" },
+			],
+			record: (entry) => {
+				const key = `${entry.parentTicketId}/${entry.childTicketId}`;
+				if (seen.has(key)) return false;
+				seen.add(key);
+				return true;
+			},
+		},
+	);
+	// 两轮扫描 × 两个未终态子单，幂等后只算 2 条；failed 子单 + 非 aborted 父单不记
+	assert.equal(recordedCount, 2);
+});
+
+test("恢复死信：非终态父单不扫、开关关掉不扫", () => {
+	let calls = 0;
+	let records = 0;
+	const previous = process.env.DELEGATION_RECOVER_REPORT;
+	try {
+		collectDeadLetters([entryOf("T-P4", "still_running")], {
+			childrenOf: () => {
+				calls += 1;
+				return [{ id: "T-C5", status: "running" }];
+			},
+			record: () => {
+				records += 1;
+				return true;
+			},
+		});
+		assert.equal(calls, 0, "非终态父单不该进入死信扫描");
+		process.env.DELEGATION_RECOVER_REPORT = "false";
+		const count = collectDeadLetters([entryOf("T-P5", "aborted")], {
+			childrenOf: () => [{ id: "T-C6", status: "done" }],
+			record: () => {
+				records += 1;
+				return true;
+			},
+		});
+		assert.equal(count, 0);
+		assert.equal(records, 0, "开关关掉时 record 一次都不该被调");
+	} finally {
+		if (previous === undefined) delete process.env.DELEGATION_RECOVER_REPORT;
+		else process.env.DELEGATION_RECOVER_REPORT = previous;
 	}
 });

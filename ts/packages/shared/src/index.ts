@@ -173,6 +173,8 @@ export type ChatEvent =
 			tool: string;
 			args: string;
 			deadlineAt: string;
+			/** 自主轮标记（2026-11-05 批次C C2）：例行任务轮的审批卡；纯增量，老客户端忽略 */
+			origin?: "autonomous";
 			seq?: number;
 	  };
 
@@ -189,16 +191,7 @@ export interface ReplayEvent {
 	event: ChatEvent;
 }
 
-/** 任务单对外的阶段：按"在等谁"分，不按内部进度。 */
-export type DelegationPhase =
-	| "accepted"
-	| "planning"
-	| "running"
-	| "reviewing"
-	| "done"
-	| "needs_you"
-	| "failed"
-	| "aborted";
+/** 任务单对外的阶段：按"在等谁"分，不按内部进度。schema 见文末矩阵段（DelegationPhaseSchema）。 */
 
 /**
  * 编码成 SSE 帧。只写 data 行：帧类型以 JSON 的 type 字段为准，
@@ -250,3 +243,262 @@ export function createSseDecoder(): { push: (chunk: string) => ChatEvent[] } {
     },
   };
 }
+
+// ── 中继信封（2026-11-05 多端同步方案 §四，协议 v1）────────────────────────
+//
+// 设计取舍（对齐 cindy device-link-protocol 的核心思想）：
+// - 中继只按 dst 转发、覆写 src，channel/payload 对中继不透明——中继被攻破
+//   也只能丢消息，不能伪造业务语义；
+// - 语义校验全部在被控端（通道白名单默认拒绝），`channel_not_allowed` 兼作
+//   能力探测信号（旧端 fail-visible）；
+// - result 与 deliver 走同一路由形状（dst = 发起端），中继不存每消息状态。
+
+export const RELAY_PROTOCOL_VERSION = 1;
+/** 单帧字节上限。中继在解析前按长度拒收，不解析内容。 */
+export const RELAY_MAX_FRAME_BYTES = 2 * 1024 * 1024;
+
+export const RelayErrorCodeSchema = z.enum([
+	"bad_request",
+	"unauthorized",
+	"version_mismatch",
+	"unknown_device",
+	"device_offline",
+	"payload_too_large",
+	"timeout",
+	"channel_not_allowed",
+	"remote_disabled",
+	"internal",
+]);
+export type RelayErrorCode = z.infer<typeof RelayErrorCodeSchema>;
+
+/** 设备上线第一帧（15 秒内必须发），token = 中继签发的 deviceToken。 */
+export const RelayHelloSchema = z.object({
+	kind: z.literal("hello"),
+	v: z.literal(1),
+	token: z.string().min(1).max(128),
+	deviceName: z.string().min(1).max(40),
+	platform: z.string().min(1).max(20),
+	version: z.string().max(20).optional(),
+	capabilities: z.array(z.string().min(1).max(40)).max(16).default([]),
+});
+export type RelayHello = z.infer<typeof RelayHelloSchema>;
+
+export const RelayDeviceViewSchema = z.object({
+	id: z.string().min(1),
+	name: z.string(),
+	platform: z.string(),
+	online: z.boolean(),
+	lastSeenAt: z.number().optional(),
+	capabilities: z.array(z.string()).default([]),
+});
+export type RelayDeviceView = z.infer<typeof RelayDeviceViewSchema>;
+
+/** 中继回执：确认身份并带全量设备快照（控制端冷启动靠它建名册）。 */
+export const RelayWelcomeSchema = z.object({
+	kind: z.literal("welcome"),
+	deviceId: z.string().min(1),
+	devices: z.array(RelayDeviceViewSchema),
+});
+export type RelayWelcome = z.infer<typeof RelayWelcomeSchema>;
+
+/** 发起端 → 中继：转交给 dst。被控端回程 result 的 dst = 发起端 deviceId。 */
+export const RelayDeliverSchema = z.object({
+	kind: z.literal("deliver"),
+	id: z.string().min(1).max(64),
+	dst: z.string().min(1).max(64),
+	channel: z.string().min(1).max(80),
+	payload: z.unknown(),
+});
+export type RelayDeliver = z.infer<typeof RelayDeliverSchema>;
+
+/** 中继 → 目标：盖章帧（src 由中继覆写，连接自报无效）。 */
+export const RelayRoutedSchema = z.object({
+	kind: z.literal("routed"),
+	id: z.string().min(1).max(64),
+	src: z.string().min(1).max(64),
+	channel: z.string().min(1).max(80),
+	payload: z.unknown(),
+});
+export type RelayRouted = z.infer<typeof RelayRoutedSchema>;
+
+/** 被控端 → 中继：invoke 结果（中继按 dst 原路送回发起端）。 */
+export const RelayResultSchema = z.object({
+	kind: z.literal("result"),
+	id: z.string().min(1).max(64),
+	dst: z.string().min(1).max(64),
+	ok: z.boolean(),
+	result: z.unknown().optional(),
+	error: z
+		.object({ code: RelayErrorCodeSchema, message: z.string().max(300) })
+		.optional(),
+});
+export type RelayResult = z.infer<typeof RelayResultSchema>;
+
+/** 中继 → 连接：同步拒绝帧（对 deliver/result 的 immediate 拒收）。 */
+export const RelayErrorFrameSchema = z.object({
+	kind: z.literal("error"),
+	id: z.string().max(64).optional(),
+	code: RelayErrorCodeSchema,
+	message: z.string().max(300),
+});
+export type RelayErrorFrame = z.infer<typeof RelayErrorFrameSchema>;
+
+export const RelayPingSchema = z.object({ kind: z.literal("ping"), at: z.number() });
+export const RelayPongSchema = z.object({ kind: z.literal("pong"), at: z.number() });
+
+/** 通道名约定：主动推送以 "push/" 开头（是否可推仍由被控端白名单决定）。 */
+export const RELAY_PUSH_CHANNEL_PREFIX = "push/";
+
+// ── 设备矩阵派活（2026-11-05 多端同步方案块2，阶段二）──────────────────
+// 语义（方案 §四阶段二）：发起端生成 requestId（全局幂等）；目标机受理后
+// 用"本地锚点会话"承载 chancellor 单（复用既有回执/恢复机制）；发起端
+// 轮询 status，相位变化写回发起会话。目标离线直接失败不排队。
+
+/** 与 chancellor TicketStatus 的映射：received→accepted，planned/dispatching→running，idle→needs_you。 */
+export const DelegationPhaseSchema = z.enum([
+	"accepted",
+	"planning",
+	"running",
+	"reviewing",
+	"done",
+	"needs_you",
+	"failed",
+	"aborted",
+]);
+export type DelegationPhase = z.infer<typeof DelegationPhaseSchema>;
+
+export const RemoteDelegationAcceptSchema = z.object({
+	requestId: z.string().min(8).max(64),
+	prompt: z.string().min(1).max(20_000),
+	project: z.string().max(120).optional(),
+	domain: z.string().max(60).optional(),
+	originDeviceId: z.string().min(1).max(64),
+	createdAt: z.number(),
+});
+export type RemoteDelegationAccept = z.infer<typeof RemoteDelegationAcceptSchema>;
+
+export const RemoteDelegationStatusSchema = z.object({
+	requestId: z.string(),
+	ticketId: z.string(),
+	phase: DelegationPhaseSchema,
+	report: z.string().max(4000).optional(),
+	updatedAt: z.number(),
+});
+export type RemoteDelegationStatus = z.infer<typeof RemoteDelegationStatusSchema>;
+
+// ── 伙伴认主机路由（2026-11-05 多端同步方案块3，阶段三）────────────────
+// 中继持有"伙伴 → 主机设备"路由表并做 CAS 仲裁——这是路由元数据不是业务数据
+// （方案 §四阶段三、§六备选）。信封新增 meta 帧：中继自答不转发。
+// CAS 口径照抄 cindy：expected 不符时**带回实际值**，调用方重读再决定。
+
+export const RelayMetaActionSchema = z.enum(["actors", "actor-home", "actor-claim", "actor-release"]);
+export type RelayMetaAction = z.infer<typeof RelayMetaActionSchema>;
+
+export const RelayMetaRequestSchema = z.object({
+	kind: z.literal("meta"),
+	id: z.string().min(1).max(64),
+	action: RelayMetaActionSchema,
+	payload: z.unknown(),
+});
+export type RelayMetaRequest = z.infer<typeof RelayMetaRequestSchema>;
+
+export interface RelayActorMeta {
+	actorId: string;
+	name: string;
+	homeDeviceId: string | null;
+	updatedAt: number;
+}
+
+export const RelayActorClaimResultSchema = z.discriminatedUnion("ok", [
+	z.object({
+		ok: z.literal(true),
+		actorId: z.string(),
+		name: z.string(),
+		homeDeviceId: z.string(),
+	}),
+	z.object({
+		ok: z.literal(false),
+		code: z.literal("home_conflict"),
+		actorId: z.string(),
+		/** 当前实际主机（调用方据此重读重判，绝不盲抢） */
+		homeDeviceId: z.string().nullable(),
+	}),
+]);
+export type RelayActorClaimResult = z.infer<typeof RelayActorClaimResultSchema>;
+
+// ── 伙伴与例行任务（2026-11-05 批次B，REST 投影形状）──
+// 现阶段前端不消费（桌面/手机都还没接）；这里先立形状，端点以服务端代码为准
+// （接口文档 §2.11/§2.12 与本节同步维护）。无新 SSE 事件。
+
+export const PartnerStatusSchema = z.enum(["active", "paused", "archived"]);
+export type PartnerStatus = z.infer<typeof PartnerStatusSchema>;
+
+/** 模型候选链项：keyEnv 只允许存 env 变量名（密钥纪律），任何值形状都会被服务端 400 */
+export const ModelChainItemSchema = z.object({
+	providerId: z.string(),
+	modelId: z.string(),
+	keyEnv: z.string(),
+	thinkingLevel: z.enum(["off", "low", "medium", "high"]).optional(),
+});
+export type ModelChainItem = z.infer<typeof ModelChainItemSchema>;
+
+export const PartnerProfileSchema = z.object({
+	id: z.string().uuid(),
+	name: z.string(),
+	status: PartnerStatusSchema,
+	/** 当前生效的身份快照版本号；改 SOUL 下一轮生效（版本化在服务端） */
+	soulVersion: z.number().nullable(),
+	createdAt: z.string(),
+	updatedAt: z.string(),
+});
+export type PartnerProfile = z.infer<typeof PartnerProfileSchema>;
+
+export const RoutineTriggerSchema = z.discriminatedUnion("type", [
+	z.object({ type: z.literal("cron"), expr: z.string() }),
+	z.object({ type: z.literal("interval"), seconds: z.number() }),
+	z.object({ type: z.literal("once"), at: z.string() }),
+	z.object({
+		type: z.literal("event"),
+		kind: z.enum(["delegation", "tool", "phase"]),
+		match: z.record(z.string()).optional(),
+	}),
+]);
+export type RoutineTrigger = z.infer<typeof RoutineTriggerSchema>;
+
+export const RoutineDefSchema = z.object({
+	id: z.string().uuid(),
+	partnerId: z.string().uuid(),
+	name: z.string(),
+	prompt: z.string(),
+	triggers: z.array(RoutineTriggerSchema).min(1),
+	/** persistent=复用主会话（保上下文）；fresh=每次全新专线（防污染） */
+	sessionMode: z.enum(["persistent", "fresh"]),
+	enabled: z.boolean(),
+	/** 每次修改 +1：在飞的 durable 任务醒来对不上号就作废 */
+	revision: z.number(),
+	createdAt: z.string(),
+	updatedAt: z.string(),
+});
+export type RoutineDef = z.infer<typeof RoutineDefSchema>;
+
+export const RoutineRunStatusSchema = z.enum([
+	"running",
+	"success",
+	"failed",
+	"interrupted",
+	"skipped",
+]);
+export type RoutineRunStatus = z.infer<typeof RoutineRunStatusSchema>;
+
+export const RoutineRunRecordSchema = z.object({
+	id: z.string(),
+	routineId: z.string(),
+	partnerId: z.string(),
+	status: RoutineRunStatusSchema,
+	trigger: z.string(),
+	startedAt: z.string(),
+	endedAt: z.string().optional(),
+	summary: z.string().optional(),
+	error: z.string().optional(),
+});
+export type RoutineRunRecord = z.infer<typeof RoutineRunRecordSchema>;

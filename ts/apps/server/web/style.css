@@ -1488,10 +1488,12 @@ html[data-route="settings"] .sidebar { display: none; }
   border-radius: var(--r-sm);
   background: var(--accent-container);
   opacity: 0;
+  /* 动画换本仓弹簧（用户拍板：形状 CINDY、动画用主题滑块那档回弹）；
+     300ms 让 1.56 的过冲读得出来，200ms 内回弹看不清。 */
   transition:
-    transform var(--dur-base) var(--ease-standard),
-    width var(--dur-base) var(--ease-standard),
-    height var(--dur-base) var(--ease-standard);
+    transform var(--dur-enter) var(--ease-emphasized),
+    width var(--dur-enter) var(--ease-emphasized),
+    height var(--dur-enter) var(--ease-emphasized);
 }
 .segmented[data-plate="ready"] > .segmented-plate { opacity: 1; }
 /* 有滑行胶囊时，选中态只剩文字色，底色/描边交给胶囊，避免两层叠色 */

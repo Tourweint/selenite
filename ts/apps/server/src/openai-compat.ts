@@ -511,6 +511,7 @@ interface TaskContext {
 								tool: event.tool,
 								args: event.args,
 								deadlineAt: event.deadlineAt,
+								...(event.origin ? { origin: event.origin } : {}),
 							},
 						}),
 					});

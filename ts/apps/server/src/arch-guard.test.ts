@@ -114,7 +114,7 @@ test("闸门完整性：基础三件是纯读，都不在 WRITE_TOOLS 里", () =
 });
 
 test("闸门完整性：实际注册全集 = WRITE_TOOLS ∪ READ_TOOLS", () => {
-	const full = createTools(makeDeps({ delegate: true, skills: MOCK_SKILLS }));
+	const full = createTools(makeDeps({ delegate: true, skills: MOCK_SKILLS, partners: true }));
 	const registered = new Set(full.map((t) => t.name));
 	for (const name of KERNEL_TOOLS) registered.add(name);
 	const covered = new Set<string>([...WRITE_TOOLS, ...READ_TOOLS]);

@@ -1,0 +1,408 @@
+import { readFileSync, renameSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { dirname } from "node:path";
+import {
+	RemoteDelegationAcceptSchema,
+	type DelegationPhase,
+	type RemoteDelegationStatus,
+} from "@lifediary/shared";
+import type { Ticket } from "../../../../../chancellor/src/types.ts";
+import { runChancellor } from "../../../../../chancellor/src/index.ts";
+// agent.ts 经 tools.ts → 本文件被静态可达（arch-guard 等测试要先设 env 再加载 agent），
+// 因此这里只做函数内懒加载，不建立模块级依赖（依赖方向纪律）。
+import type { ResolvedChat } from "./agent.ts";
+import {
+	autoRequestId,
+	DelegationReceipts,
+	requestFingerprint,
+} from "./delegation-receipts.ts";
+import {
+	chancellorWorkRoot,
+	emitDelegation,
+	startDelegation,
+	type DelegationEvent,
+} from "./delegation.ts";
+import { projectsStore, resolveDelegationProject, type ProjectRef } from "./projects.ts";
+import { RelayInvokeError, type RelayClient } from "./relay-client.ts";
+import { deviceMatrixEnabled } from "./relay-config.ts";
+
+/**
+ * 设备矩阵派活（2026-11-05 多端同步方案块2，阶段二）。
+ *
+ * 两条腿都在这个文件里：
+ * - **发起端** `dispatchRemoteDelegation`：经中继把活交给目标 harness，
+ *   轮询回报，相位变化 emit 进发起会话，终态把一句话汇报写回会话；
+ * - **被控端** `createMatrixChannels`：`delegation/accept`（受理，锚点会话
+ *   + 回执先落再入队，全走本地 delegate 同款机制）与 `delegation/status`
+ *   （从回执 + ticket.json 投影相位）。
+ *
+ * 回滚开关：DEVICE_MATRIX_ENABLED=false（默认）→ 两个通道不装、工具参数
+ * 无效、HTTP 端点 404，回本机 chancellor 形态。离线语义：目标不在线直接
+ * 失败不排队（回执不落），排队只存在于发送端（方案 §四阶段二）。
+ */
+
+const POLL_FAST_MS = 2_000;
+const POLL_SLOW_MS = 15_000;
+const POLL_FAST_ROUNDS = 5;
+const STORE_PATH =
+	process.env.REMOTE_DELEGATIONS_PATH?.trim() || ".data/remote-delegations.json";
+
+interface RemoteRow {
+	requestId: string;
+	targetDeviceId: string;
+	targetDeviceName: string;
+	targetTicketId: string;
+	domain: string;
+	originInternalId: number;
+	/** 发起端视角的相位；终态后轮询停 */
+	phase: DelegationPhase;
+	report?: string;
+	updatedAt: number;
+	/** 终态单保留多久后从 JSON 清掉（状态查询仍可问目标机） */
+	finishedAt?: number;
+}
+
+class RemoteDelegationStore {
+	private rows = new Map<string, RemoteRow>();
+	private loaded = false;
+
+	private load(): void {
+		if (this.loaded) return;
+		this.loaded = true;
+		try {
+			if (!existsSync(STORE_PATH)) return;
+			const parsed = JSON.parse(readFileSync(STORE_PATH, "utf8")) as { rows?: RemoteRow[] };
+			for (const row of parsed.rows ?? []) this.rows.set(row.requestId, row);
+		} catch {
+			// 坏文件当空表：发起端轮询丢了可以重派（requestId 幂等兜底在目标机）
+		}
+	}
+
+	private save(): void {
+		mkdirSync(dirname(STORE_PATH), { recursive: true });
+		const tmp = `${STORE_PATH}.tmp`;
+		writeFileSync(tmp, JSON.stringify({ rows: [...this.rows.values()] }, null, 2), "utf8");
+		renameSync(tmp, STORE_PATH);
+	}
+
+	get(requestId: string): RemoteRow | null {
+		this.load();
+		return this.rows.get(requestId) ?? null;
+	}
+
+	put(row: RemoteRow): void {
+		this.load();
+		this.rows.set(row.requestId, row);
+		this.save();
+	}
+
+	list(): RemoteRow[] {
+		this.load();
+		return [...this.rows.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+	}
+}
+
+const store = new RemoteDelegationStore();
+let sharedReceipts: DelegationReceipts | null = null;
+function receiptsOf(): DelegationReceipts {
+	sharedReceipts ??= new DelegationReceipts();
+	return sharedReceipts;
+}
+
+// ── 发起端 ─────────────────────────────────────────────────────
+
+export interface RemoteDispatchInput {
+	targetDeviceId: string;
+	requirement: string;
+	project?: string;
+	domain?: string;
+	/** 发起会话（进度事件与终态汇报写回这里） */
+	originInternalId: number;
+}
+
+export interface RemoteDispatchResult {
+	requestId: string;
+	ticketId: string;
+	deviceName: string;
+}
+
+/** 相位变化如何露出到发起会话：进度走 SSE 事件，终态追加一句话汇报。 */
+type Reporter = (event: DelegationEvent) => void;
+
+export function dispatchRemoteDelegation(
+	client: RelayClient,
+	input: RemoteDispatchInput,
+	report: Reporter = (event) => emitDelegation(input.originInternalId, event),
+): RemoteDispatchResult {
+	if (!deviceMatrixEnabled()) {
+		throw new RelayInvokeError("remote_disabled", "设备矩阵未开启（DEVICE_MATRIX_ENABLED）");
+	}
+	const target = client.devices.find((device) => device.id === input.targetDeviceId);
+	if (!target) {
+		throw new RelayInvokeError("unknown_device", "目标设备不在中结名册里");
+	}
+	// 在场快照说离线就直接失败（fail-fast，不排队）；快照说在线但实际掉了，
+	// 由 invoke 超时/错误帧兜住，走下面的异步"没有受理"汇报。
+	if (!target.online) {
+		throw new RelayInvokeError("device_offline", "目标设备当前离线");
+	}
+	if (!target.capabilities.includes("matrix")) {
+		throw new RelayInvokeError("remote_disabled", "目标设备没有开通矩阵派活能力");
+	}
+	const requestId = autoRequestId(input.originInternalId, input.requirement);
+	void (async () => {
+		try {
+			const accepted = (await client.invoke(
+				input.targetDeviceId,
+				"delegation/accept",
+				{
+					requestId,
+					prompt: input.requirement,
+					...(input.project ? { project: input.project } : {}),
+					...(input.domain ? { domain: input.domain } : {}),
+					originDeviceId: client.selfDeviceId ?? "",
+					createdAt: Date.now(),
+				},
+				90_000,
+			)) as { ticketId?: string };
+			const ticketId = accepted.ticketId ?? "";
+			store.put({
+				requestId,
+				targetDeviceId: input.targetDeviceId,
+				targetDeviceName: target.name,
+				targetTicketId: ticketId,
+				domain: input.domain ?? "",
+				originInternalId: input.originInternalId,
+				phase: "accepted",
+				updatedAt: Date.now(),
+			});
+			report({
+				type: "delegate",
+				ticketId,
+				domain: input.domain ?? "remote",
+				phase: "accepted",
+				done: 0,
+				total: 0,
+				current: "",
+				lastAction: `远端单已交由设备「${target.name}」受理`,
+				lastHeartbeat: new Date().toISOString(),
+				...(input.project ? { project: input.project } : {}),
+			});
+			schedulePoll(client, requestId, 0, report);
+		} catch (error) {
+			// 受理失败 = 没有单、没有回执：把原因直接告诉会话，不排队不重试。
+			const message = error instanceof Error ? error.message.slice(0, 200) : "受理失败";
+			await (await import("./agent.ts")).sayInConversation(input.originInternalId, `远端派活没有受理（设备「${target.name}」）：${message}。目标在线后再派。`).catch(
+				() => {},
+			);
+		}
+	})();
+	return { requestId, ticketId: "", deviceName: target.name };
+}
+
+function schedulePoll(client: RelayClient, requestId: string, round: number, report: Reporter): void {
+	const delay = round < POLL_FAST_ROUNDS ? POLL_FAST_MS : POLL_SLOW_MS;
+	const timer = setTimeout(() => void pollOnce(client, requestId, round, report), delay);
+	timer.unref?.();
+}
+
+async function pollOnce(client: RelayClient, requestId: string, round: number, report: Reporter): Promise<void> {
+	const row = store.get(requestId);
+	if (!row) return;
+	if (isTerminal(row.phase)) return;
+	let status: RemoteDelegationStatus | null = null;
+	try {
+		status = (await client.invoke(row.targetDeviceId, "delegation/status", { requestId }, 20_000)) as RemoteDelegationStatus | null;
+	} catch {
+		// 目标离线：保留最后相位继续轮（不判失败——恢复语义归目标机的回执机制）
+		schedulePoll(client, requestId, round + 1, report);
+		return;
+	}
+	if (status && status.phase !== row.phase) {
+		row.phase = status.phase;
+		row.updatedAt = Date.now();
+		if (status.report) row.report = status.report;
+		if (status.ticketId && !row.targetTicketId) row.targetTicketId = status.ticketId;
+		store.put(row);
+		report({
+			type: "delegate",
+			ticketId: row.targetTicketId,
+			domain: row.domain || "remote",
+			phase: row.phase,
+			done: 0,
+			total: 0,
+			current: "",
+			lastAction: `远端：${phaseLabel(row.phase)}${status.report ? ` — ${status.report.slice(0, 80)}` : ""}`,
+			lastHeartbeat: new Date().toISOString(),
+		});
+		if (isTerminal(row.phase)) {
+			row.finishedAt = Date.now();
+			store.put(row);
+			const line = `远端单 ${row.targetTicketId || requestId.slice(0, 8)}（设备「${row.targetDeviceName}」）${phaseLabel(row.phase)}${row.report ? `：${row.report}` : ""}`;
+			await (await import("./agent.ts")).sayInConversation(row.originInternalId, line).catch(() => {});
+			return;
+		}
+	}
+	schedulePoll(client, requestId, round + 1, report);
+}
+
+/** 状态查询（HTTP/界面用）：发起端视角的远端单列表。 */
+export function listRemoteDelegations(): Array<Omit<RemoteRow, never>> {
+	return store.list();
+}
+
+function isTerminal(phase: DelegationPhase): boolean {
+	return phase === "done" || phase === "needs_you" || phase === "failed" || phase === "aborted";
+}
+
+function phaseLabel(phase: DelegationPhase): string {
+	const labels: Record<DelegationPhase, string> = {
+		accepted: "已受理",
+		planning: "规划中",
+		running: "执行中",
+		reviewing: "核对中",
+		done: "完成",
+		needs_you: "需要你",
+		failed: "失败",
+		aborted: "已中止",
+	};
+	return labels[phase];
+}
+
+// ── 被控端 ─────────────────────────────────────────────────────
+
+export interface MatrixChannels {
+	accept: (payload: unknown) => Promise<{ ticketId: string; conversationId: string }>;
+	status: (payload: unknown) => Promise<RemoteDelegationStatus | null>;
+}
+
+/** chancellor TicketStatus → 对外 8 相（DelegationPhase）。 */
+function phaseOfTicket(ticket: Ticket | null, receiptOutcome: string): DelegationPhase {
+	if (receiptOutcome === "failed") return "failed";
+	const status = ticket?.status;
+	switch (status) {
+		case "received":
+			return "accepted";
+		case "planning":
+			return "planning";
+		case "planned":
+		case "dispatching":
+			return "running";
+		case "reviewing":
+			return "reviewing";
+		case "done":
+			return "done";
+		case "needs_you":
+			return "needs_you";
+		case "failed":
+			return "failed";
+		case "aborted":
+			return "aborted";
+		case "idle":
+			return "needs_you";
+		default:
+			return "accepted";
+	}
+}
+
+function readTicket(runsDir: string, ticketId: string): Ticket | null {
+	if (!ticketId) return null;
+	try {
+		return JSON.parse(readFileSync(`${runsDir}/${ticketId}/ticket.json`, "utf8")) as Ticket;
+	} catch {
+		return null;
+	}
+}
+
+export function createMatrixChannels(): MatrixChannels {
+	return {
+		/** 受理：锚点会话 + 回执先落再入队（与本地 delegate 同款机制）。 */
+		async accept(payload) {
+			const parsed = RemoteDelegationAcceptSchema.safeParse(payload);
+			if (!parsed.success) {
+				throw new RelayInvokeError("bad_request", "accept 载荷不符合契约");
+			}
+			const input = parsed.data;
+			if (process.env.CHANCELLOR_ENABLED?.trim().toLowerCase() === "false") {
+				throw new RelayInvokeError("remote_disabled", "本机未启用派活（CHANCELLOR_ENABLED=false）");
+			}
+			// 锚点会话：远端单在本机也要有一个家——恢复/看板/汇报机制才能原样工作。
+			const agent = await import("./agent.ts");
+			const chat = await agent.openChat(undefined);
+			if (!chat) throw new RelayInvokeError("internal", "本机没有可用的模型配置，不能受理远端单");
+			void agent.renameChat(chat.externalId, `远端单 ${input.requestId.slice(0, 8)}`);
+			// 锚点里落一行受理回执：空会话不进 durable 的列表快照，写一条才有 firstText，
+			// 本机会话索引与镜像端才能看到这张单（探针实测踩过）。
+			await agent.sayInChat(chat as ResolvedChat, `远端单 ${input.requestId.slice(0, 8)} 已受理（来自设备 ${input.originDeviceId.slice(0, 8)}）：${input.prompt.slice(0, 120)}`);
+
+			let project: ProjectRef | undefined;
+			if (input.project?.trim()) {
+				const gate = resolveDelegationProject(input.project, projectsStore());
+				if (!gate.ok) {
+					throw new RelayInvokeError("bad_request", `目标机项目前置未过：${gate.text.slice(0, 160)}`);
+				}
+				project = gate.project;
+			}
+
+			const receipts = receiptsOf();
+			const begun = receipts.begin(input.requestId, requestFingerprint({
+				conversationId: chat.internalId,
+				requirement: input.prompt,
+				domain: input.domain ?? "",
+				projectId: project?.id ?? "",
+			}), { explicit: true, workRoot: chancellorWorkRoot() });
+			if (begun.kind === "conflict") {
+				throw new RelayInvokeError("bad_request", "同 requestId 但内容不同（冲突），拒绝受理");
+			}
+			if (begun.kind === "uncertain") {
+				throw new RelayInvokeError("internal", "同 requestId 的旧单受理中断过，结果未知；请人工确认后换号重派");
+			}
+
+			const { ticketId, outcome } = startDelegation(
+				{
+					conversationId: chat.internalId,
+					domain: input.domain ?? "",
+					requirement: input.prompt,
+					project,
+					requestId: input.requestId,
+				},
+				{
+					run: (request, options) =>
+						runChancellor({ ...request, workRoot: chancellorWorkRoot() }, options),
+					// 锚点会话里也发事件（本机任务中心可见）；不写锚点汇报——
+					// 汇报经 status 轮询回发起端（方案 §四阶段二）。
+					emit: emitDelegation,
+					autoReport: false,
+					log: (line) => console.warn(line),
+				},
+			);
+			receipts.accept(input.requestId, ticketId, chat.internalId);
+			void outcome
+				.then((result) => receipts.accept(input.requestId, result.ticketId || ticketId, chat.internalId))
+				.catch(() => receipts.markFailed(input.requestId));
+			return { ticketId, conversationId: chat.externalId };
+		},
+
+		/** 相位投影：回执（受理态）+ ticket.json（运行态）。 */
+		async status(payload) {
+			const requestId = (payload as { requestId?: unknown } | null)?.requestId;
+			if (typeof requestId !== "string" || !requestId) {
+				throw new RelayInvokeError("bad_request", "需要 requestId");
+			}
+			const receipt = receiptsOf().lookup(requestId);
+			if (!receipt) return null;
+			const ticket = readTicket(chancellorWorkRoot(), receipt.ticketId);
+			const phase = phaseOfTicket(ticket, receipt.outcome);
+			return {
+				requestId,
+				ticketId: receipt.ticketId,
+				phase,
+				...(phase === "done" || phase === "failed" || phase === "needs_you"
+					? {
+							report: (ticket?.error ?? ticket?.lastAction ?? "").slice(0, 4000),
+						}
+					: {}),
+				updatedAt: Date.now(),
+			};
+		},
+	};
+}

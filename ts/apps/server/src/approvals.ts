@@ -34,6 +34,11 @@ export interface ApprovalRecord {
 	deadlineAt: string;
 	status: ApprovalStatus;
 	decidedAt?: number;
+	/**
+	 * 自主轮标记（2026-11-05 批次C C2）：例行任务/事件唤醒的轮次产生的审批。
+	 * 客户端据此把卡片标注为「例行任务」；纯增量字段，老客户端忽略。
+	 */
+	origin?: "autonomous";
 }
 
 export interface ApprovalCreateInput {
@@ -42,6 +47,8 @@ export interface ApprovalCreateInput {
 	tool: string;
 	args: string;
 	timeoutMs: number;
+	/** 自主轮标记（批次C C2）：例行轮的审批卡带 origin，纯增量字段 */
+	origin?: "autonomous";
 }
 
 export interface PendingApproval {
@@ -127,6 +134,12 @@ export class ApprovalStore {
 		if (changed) this.persist();
 	}
 
+	/** 当前全部 pending（C1 观察层的 waiting 事件源；含自主轮标记）。 */
+	pendingRecords(): ApprovalRecord[] {
+		this.ensureLoaded();
+		return [...this.records.values()].filter((record) => record.status === "pending");
+	}
+
 	create(input: ApprovalCreateInput): PendingApproval {
 		this.ensureLoaded();
 		// 同 callId 的旧记录覆盖重置：内核对中断的工具会重放同一个 callId。
@@ -145,6 +158,7 @@ export class ApprovalStore {
 			createdAt: Date.now(),
 			deadlineAt: new Date(Date.now() + input.timeoutMs).toISOString(),
 			status: "pending",
+			...(input.origin ? { origin: input.origin } : {}),
 		};
 		this.records.set(record.callId, record);
 		this.waiters.set(record.callId, resolve);

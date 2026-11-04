@@ -234,3 +234,88 @@ function textOf(result: { output?: Array<{ type: string; text?: string }> }): st
 		.map((item) => (item.type === "text" ? item.text ?? "" : ""))
 		.join("");
 }
+
+test("回执：跨进程的 accepting 一律 uncertain（boot 代号对不上 / 旧行 NULL）", () => {
+	const root = tempRoot();
+	const file = join(root, "delegations.sqlite");
+	const first = new DelegationReceipts(file);
+	try {
+		// 两条 accepting：一条留本进程代号，一条伪造旧进程代号
+		assert.equal(first.begin("rb-old", "fp-a", { explicit: true, workRoot: root }).kind, "new");
+		assert.equal(first.begin("rb-null", "fp-b", { explicit: true, workRoot: root }).kind, "new");
+		const raw = new DatabaseSync(file);
+		raw.prepare("UPDATE delegation_receipts SET boot_id = 'boot-old' WHERE request_id = 'rb-old'").run();
+		// rb-null 保持 boot_id —— 同进程实例共享代号，先写成当前值再置 NULL 模拟"没有该列的旧行"
+		raw.prepare("UPDATE delegation_receipts SET boot_id = NULL WHERE request_id = 'rb-null'").run();
+		raw.close();
+	} finally {
+		first.close();
+	}
+
+	// 新实例 = 同进程共享 boot 代号；两条 accepting 都因 boot 对不上被判 uncertain
+	const second = new DelegationReceipts(file);
+	try {
+		assert.equal(second.begin("rb-old", "fp-a", { explicit: true, workRoot: root }).kind, "uncertain");
+		assert.equal(second.lookup("rb-old")?.outcome, "uncertain");
+		assert.equal(second.begin("rb-null", "fp-b", { explicit: true, workRoot: root }).kind, "uncertain");
+		assert.equal(second.lookup("rb-null")?.outcome, "uncertain");
+	} finally {
+		second.close();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("回执：本进程的 accepting（boot 匹配）带空单号仍按 uncertain（原语义保留）", () => {
+	const root = tempRoot();
+	const receipts = new DelegationReceipts(join(root, "delegations.sqlite"));
+	try {
+		assert.equal(receipts.begin("rb-same", "fp-a", { explicit: true, workRoot: root }).kind, "new");
+		// 同进程、未 accept：boot 匹配但单号为空 → 原有的惰性 uncertain 判定保留
+		assert.equal(receipts.begin("rb-same", "fp-a", { explicit: true, workRoot: root }).kind, "uncertain");
+	} finally {
+		receipts.close();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("死信：主键幂等，重复记账只落一次，按父单可查", () => {
+	const root = tempRoot();
+	const receipts = new DelegationReceipts(join(root, "delegations.sqlite"));
+	try {
+		assert.equal(
+			receipts.recordDeadLetter({
+				parentTicketId: "T-P",
+				childTicketId: "T-C1",
+				childStatus: "running",
+				note: "父单已终态（aborted），子单仍未终态",
+			}),
+			true,
+		);
+		assert.equal(
+			receipts.recordDeadLetter({
+				parentTicketId: "T-P",
+				childTicketId: "T-C1",
+				childStatus: "running",
+				note: "父单已终态（aborted），子单仍未终态",
+			}),
+			false,
+			"重复扫描同一条必须幂等",
+		);
+		assert.equal(
+			receipts.recordDeadLetter({
+				parentTicketId: "T-P",
+				childTicketId: "T-C2",
+				childStatus: "done",
+				note: "父单已中止，子单结果无处并入",
+			}),
+			true,
+		);
+		const letters = receipts.listDeadLetters("T-P");
+		assert.equal(letters.length, 2);
+		assert.equal(letters[0]?.childTicketId, "T-C1");
+		assert.equal(receipts.listDeadLetters("T-NONE").length, 0);
+	} finally {
+		receipts.close();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
