@@ -49,7 +49,8 @@ ts/
 │   ├── src/agent.ts     ★ 从这里看：Harness / 会话 / 流 / 提醒
 │   ├── src/provider.ts  模型接入（百炼 OpenAI 兼容 / faux）
 │   ├── src/tools.ts     remember / recall / set_reminder
-│   └── src/reminder.ts  定时提醒任务（sleepUntil）
+│   ├── src/reminder.ts  定时提醒任务（sleepUntil）
+│   └── web/             界面：HTML/CSS/JS，服务同源发出，无构建步骤
 └── docs/                memory-framework.md
 ```
 
@@ -113,7 +114,7 @@ hermes 那类给到 300，但它不替你付 token 钱。
 ```bash
 cd ts
 pnpm install
-pnpm dev        # 服务端 :8082，调试页在 http://127.0.0.1:8082/
+pnpm dev        # 服务端 :8082，界面在 http://127.0.0.1:8082/
 ```
 
 ### 配不配 key 都能跑

@@ -41,6 +41,9 @@ function startServer(): ChildProcess {
 			NODE_OPTIONS: "",
 			CHANCELLOR_ENABLED: "true",
 			CHANCELLOR_EMPLOYEE: process.env.CHANCELLOR_EMPLOYEE?.trim() || "native",
+			// 这个探针只验「主 agent 会不会派、 chancellor 能不能干完」；
+			// 项目前置由 src/projects.test.ts 单独覆盖，这里不铺工作区。
+			DELEGATION_PROJECT_REQUIRED: "false",
 		},
 		stdio: ["ignore", "pipe", "pipe"],
 	});

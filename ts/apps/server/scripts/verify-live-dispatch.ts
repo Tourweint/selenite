@@ -27,6 +27,8 @@ process.env.MEMORY_DB_PATH = join(DIR, ".data/verify-live-memory.db");
 process.env.CHANCELLOR_ENABLED = "true";
 process.env.CHANCELLOR_EMPLOYEE = "phone";
 process.env.CHANCELLOR_PHONE_TASK_BUDGET_MS = "180000";
+// 手机操作没有磁盘落点，这个探针也不铺工作区；项目前置由 src/projects.test.ts 覆盖。
+process.env.DELEGATION_PROJECT_REQUIRED = "false";
 
 await import("../src/index.ts");
 const { createTools } = await import("../src/tools.ts");

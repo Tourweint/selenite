@@ -25,7 +25,7 @@ process.env.MEMORY_DB_PATH = process.env.MEMORY_DB_PATH ?? ".data/gate-probe-mem
 const { readOnlyBlockReason } = await import("../src/agent.ts");
 
 /** 必须被拦：会写文件，或会起 worker 去写 */
-const MUST_BLOCK = ["write", "edit", "bash", "powershell", "delegate"];
+const MUST_BLOCK = ["write", "edit", "bash", "powershell", "delegate", "propose_project"];
 /** 不该被拦：只读，或只写记忆 */
 const MUST_PASS = ["read", "remember", "recall", "set_reminder", "skill"];
 

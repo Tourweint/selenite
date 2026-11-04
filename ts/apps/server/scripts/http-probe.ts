@@ -318,6 +318,123 @@ try {
 		"新一轮拿到了新预算（不是直接被拒）",
 		afterLimit.result.events.join(","),
 	);
+
+	// ── 11. 运行时切模型（2026-11-04，接口文档 §2.8）──
+	// faux / mock 没有可切的真实模型 → 400；真实配置下可切、可持久、可一键回滚。
+	console.log("\n· 11. 运行时切模型");
+	const fauxHealth = (await (await fetch(`${BASE}/healthz`)).json()) as {
+		llm: string;
+		model: string | null;
+		models: string[];
+	};
+	check(fauxHealth.model === "faux", "faux 下 healthz 报 faux", JSON.stringify(fauxHealth));
+	check(fauxHealth.models.length === 0, "faux 没有可切清单");
+
+	const fauxSwitch = await fetch(`${BASE}/api/v1/agent/model`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ model: "whatever" }),
+	});
+	check(fauxSwitch.status === 400, "faux 下切换被拒", String(fauxSwitch.status));
+
+	const modelState = ".data/probe-http-model.json";
+	const modelEnv = {
+		LLM_PROVIDER: "",
+		LLM_API_KEY: "dummy-key-for-model-probe",
+		LLM_MODEL: "probe-default",
+		LLM_MODELS: "probe-a,probe-b",
+		MODEL_RUNTIME_PATH: modelState,
+	};
+	rmSync(modelState, { force: true });
+	server.kill();
+	await sleep(800);
+	server = startServer(modelEnv);
+	await waitForReady();
+
+	interface ModelHealth {
+		llm: string;
+		model: string | null;
+		models: string[];
+	}
+	const health2 = (await (await fetch(`${BASE}/healthz`)).json()) as ModelHealth;
+	check(health2.model === "probe-default", "默认模型来自 env", String(health2.model));
+	check(
+		JSON.stringify([...health2.models].sort()) ===
+			JSON.stringify(["probe-a", "probe-b", "probe-default"]),
+		"清单 = LLM_MODELS ∪ 当前模型",
+		JSON.stringify(health2.models),
+	);
+
+	const switched = await fetch(`${BASE}/api/v1/agent/model`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ model: "probe-b" }),
+	});
+	check(switched.status === 200, "切换成功", String(switched.status));
+	const health3 = (await (await fetch(`${BASE}/healthz`)).json()) as ModelHealth;
+	check(health3.model === "probe-b", "healthz 跟着变", String(health3.model));
+
+	const unknown = await fetch(`${BASE}/api/v1/agent/model`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ model: "not-in-list" }),
+	});
+	check(unknown.status === 400, "不在清单里 → 400", String(unknown.status));
+
+	// 重启后覆盖值还在（文件里只存模型 id，无密钥）
+	server.kill();
+	await sleep(800);
+	server = startServer(modelEnv);
+	await waitForReady();
+	const health4 = (await (await fetch(`${BASE}/healthz`)).json()) as ModelHealth;
+	check(health4.model === "probe-b", "重启后覆盖值还在", String(health4.model));
+
+	// 回滚开关：MODEL_RUNTIME_OVERRIDE=false 时启动忽略覆盖值、接口一律拒绝
+	server.kill();
+	await sleep(800);
+	server = startServer({ ...modelEnv, MODEL_RUNTIME_OVERRIDE: "false" });
+	await waitForReady();
+	const health5 = (await (await fetch(`${BASE}/healthz`)).json()) as ModelHealth;
+	check(health5.model === "probe-default", "开关关掉时回到 env 默认", String(health5.model));
+	check(health5.models.length === 0, "开关关掉时清单为空");
+	const denied = await fetch(`${BASE}/api/v1/agent/model`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ model: "probe-a" }),
+	});
+	check(denied.status === 400, "开关关掉时切换被拒", String(denied.status));
+	rmSync(modelState, { force: true });
+
+	// ── 12. 上下文占用与内容搜索（批次二）──
+	console.log("\n· 12. 上下文占用与内容搜索");
+	// faux 也给 usage（前面日志口径），所以 used 应该是真实测量值
+	const ctxResponse = await fetch(`${BASE}/api/v1/agent/chat/${externalId}/context`);
+	check(ctxResponse.status === 200, "context 端点可用", String(ctxResponse.status));
+	const ctx = (await ctxResponse.json()) as { used: number | null; window: number | null };
+	check(typeof ctx.used === "number" && ctx.used > 0, "used 来自最后一次请求的 usage", JSON.stringify(ctx));
+	check(
+		typeof ctx.window === "number" && ctx.window > 0,
+		"window 来自模型目录",
+		String(ctx.window),
+	);
+	const ctxMissing = await fetch(
+		`${BASE}/api/v1/agent/chat/00000000-0000-4000-8000-000000000000/context`,
+	);
+	check(ctxMissing.status === 404, "未知会话 → 404", String(ctxMissing.status));
+
+	const searchResponse = await fetch(`${BASE}/api/v1/agent/search?q=${encodeURIComponent("团子")}`);
+	check(searchResponse.status === 200, "search 端点可用", String(searchResponse.status));
+	const search = (await searchResponse.json()) as {
+		hits: { conversationId: string; text: string }[];
+	};
+	check(
+		search.hits.some((hit) => hit.conversationId === externalId),
+		"搜到首轮那句「团子」",
+		JSON.stringify(search.hits[0] ?? null).slice(0, 90),
+	);
+	const searchShort = await fetch(`${BASE}/api/v1/agent/search?q=${encodeURIComponent("团")}`);
+	const shortBody = (await searchShort.json()) as { hits: unknown[] };
+	check(shortBody.hits.length === 0, "单字符 → 空结果（防全表扫）");
 } finally {
 	server.kill();
 	await sleep(300);
@@ -326,6 +443,7 @@ try {
 	rmSync(`${DB}-wal`, { force: true });
 	rmSync(`${DB}-shm`, { force: true });
 	rmSync(MEMORY_DB, { force: true });
+	rmSync(".data/probe-http-model.json", { force: true });
 }
 
 console.log(failures === 0 ? "\n✓ 端到端全部通过" : `\n✗ 有 ${failures} 项没通过`);

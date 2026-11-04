@@ -12,6 +12,12 @@ import type {
 import { watchDelegation, type DelegationEvent } from "../src/delegation.ts";
 import { createTools } from "../src/tools.ts";
 
+// 这个探针验的是路由（resume / 新派 / 会话隔离），要同步拿结论；
+// 异步受理与后台回灌由 `src/delegation.test.ts` 覆盖。
+process.env.DELEGATION_ASYNC = "false";
+// 项目前置由 `src/projects.test.ts` 覆盖；这里只验路由，不注入项目登记表。
+process.env.DELEGATION_PROJECT_REQUIRED = "false";
+
 type Runner = (req: ChancellorRequest, opts?: ChancellorOptions) => Promise<TicketResult>;
 
 let failures = 0;
@@ -31,13 +37,14 @@ function makeFake(options: { resumeThrows?: boolean } = {}) {
 
 	const run: Runner = async (req, opts) => {
 		calls.push(req);
+		// 与 chancellor 一致：单子已完成/找不到时，续跑在派活前就抛错，不发任何事件。
+		if (req.resumeTicketId && resumeThrows) throw new Error("这单没有在等回答的任务");
+
 		opts?.onEvent?.({ type: "planned", ticketId: "fake", total: 1 });
 		opts?.onEvent?.({ type: "task-start", ticketId: "fake", slug: "do-it" });
 		opts?.onEvent?.({ type: "task-done", ticketId: "fake", slug: "do-it" });
 
 		if (req.resumeTicketId) {
-			// 与 chancellor 一致：单子已完成/找不到时，续跑在派活前就抛错。
-			if (resumeThrows) throw new Error("这单没有在等回答的任务");
 			return {
 				ticketId: req.resumeTicketId,
 				status: "done",
@@ -117,7 +124,11 @@ function watch(conversationId: number): { events: DelegationEvent[]; stop: () =>
 	check(fake.newTickets === 1, "resume 后 ticket 数不变", `新单数=${fake.newTickets}`);
 	check(fake.calls[1]?.resumeTicketId === "t1", "resume 带上原单 id");
 	check(fake.calls[1]?.answer === "验证码 1234", "answer 就是用户那句回答");
-	check(second === "续上了：验证码 1234", "返回原单结论，不带兜底说明");
+	check(
+		second.includes("续上了：验证码 1234") && !second.includes("没有可续的单"),
+		"返回原单结论，不带兜底说明",
+		second.replace(/\n/g, " / "),
+	);
 	check(
 		events.some((event) => event.type === "delegate"),
 		"进度帧照旧要发",
