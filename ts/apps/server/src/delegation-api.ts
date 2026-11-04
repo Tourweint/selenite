@@ -39,6 +39,9 @@ interface TicketSummary {
 	updated_at: string;
 	error: string | null;
 	parentTicketId: string | null;
+	lastAction: string | null;
+	lastHeartbeat: string | null;
+	waitingOn: string | null;
 }
 
 function summarizeTickets(
@@ -62,6 +65,10 @@ function summarizeTickets(
 				updated_at: ticket?.updated_at ?? ticket?.created_at ?? "",
 				error: ticket?.error ?? null,
 				parentTicketId: ticket?.parentTicketId ?? null,
+				// 2026-11-04：近况字段落盘在 ticket.json，列表与详情都必须能直接看到。
+				lastAction: ticket?.lastAction ?? null,
+				lastHeartbeat: ticket?.lastHeartbeat ?? null,
+				waitingOn: ticket?.waitingOn ?? null,
 			};
 		});
 	} catch {

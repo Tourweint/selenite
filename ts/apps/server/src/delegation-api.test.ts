@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -127,6 +127,106 @@ test("只读接口：按单号读 ticket、任务与子单，区分根目录与�
 
 		rootStore.close();
 		managerStore.close();
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("只读接口：列表与详情带回最近动作/心跳/等待文件", async () => {
+	const root = temp("api-progress");
+	try {
+		const workRoot = join(root, "runs");
+		const store = new Store(workRoot);
+		const now = new Date().toISOString();
+		store.saveTicket(
+			makeTicket("T-progress", workRoot, {
+				lastAction: "派活到 01-write",
+				lastHeartbeat: now,
+				waitingOn: "src/a.ts",
+			}),
+		);
+		store.close();
+
+		const app = new Hono();
+		mountDelegationApi(app, { workRoot });
+
+		const list = await app.request("/api/v1/tickets");
+		assert.equal(list.status, 200);
+		const listBody = (await list.json()) as {
+			tickets: Array<{
+				id: string;
+				lastAction: string | null;
+				lastHeartbeat: string | null;
+				waitingOn: string | null;
+			}>;
+		};
+		const row = listBody.tickets.find((item) => item.id === "T-progress");
+		assert.equal(row?.lastAction, "派活到 01-write");
+		assert.equal(row?.lastHeartbeat, now);
+		assert.equal(row?.waitingOn, "src/a.ts");
+
+		const detail = await app.request("/api/v1/tickets/T-progress");
+		assert.equal(detail.status, 200);
+		const detailBody = (await detail.json()) as {
+			ticket: { lastAction?: string; lastHeartbeat?: string; waitingOn?: string };
+		};
+		assert.equal(detailBody.ticket.lastAction, "派活到 01-write");
+		assert.equal(detailBody.ticket.lastHeartbeat, now);
+		assert.equal(detailBody.ticket.waitingOn, "src/a.ts");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("进度落盘：动作变化立刻写，纯心跳被节流且新进程能读回", () => {
+	const root = temp("api-progress-write");
+	try {
+		const workRoot = join(root, "runs");
+		const store = new Store(workRoot);
+		const ticket = makeTicket("T-touch", workRoot);
+		store.saveTicket(ticket);
+		const file = join(workRoot, "T-touch", "ticket.json");
+
+		const first = "2026-11-04T00:00:00.000Z";
+		store.saveTicketProgress(ticket, { action: "第一步", heartbeat: first });
+		const afterFirst = JSON.parse(readFileSync(file, "utf8")) as {
+			lastAction?: string;
+			lastHeartbeat?: string;
+		};
+		assert.equal(afterFirst.lastAction, "第一步");
+		assert.equal(afterFirst.lastHeartbeat, first);
+
+		// 同一个动作、只换心跳：10 秒内不写盘，文件里的心跳保持第一次的值。
+		store.saveTicketProgress(ticket, {
+			action: "第一步",
+			heartbeat: "2026-11-04T00:00:01.000Z",
+		});
+		const afterThrottled = JSON.parse(readFileSync(file, "utf8")) as {
+			lastHeartbeat?: string;
+		};
+		assert.equal(afterThrottled.lastHeartbeat, first);
+
+		// 动作变了就必须写。
+		store.saveTicketProgress(ticket, {
+			action: "等待文件：src/a.ts",
+			waitingOn: "src/a.ts",
+			heartbeat: "2026-11-04T00:00:02.000Z",
+		});
+		const afterChange = JSON.parse(readFileSync(file, "utf8")) as {
+			lastAction?: string;
+			lastHeartbeat?: string;
+			waitingOn?: string;
+		};
+		assert.equal(afterChange.lastAction, "等待文件：src/a.ts");
+		assert.equal(afterChange.lastHeartbeat, "2026-11-04T00:00:02.000Z");
+		assert.equal(afterChange.waitingOn, "src/a.ts");
+		store.close();
+
+		// 模拟崩溃重启：新 Store 从明文读回同一张单。
+		const reopened = new Store(workRoot);
+		const readBack = reopened.listTickets(10).find((item) => item.id === "T-touch");
+		assert.ok(readBack);
+		reopened.close();
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
