@@ -1,21 +1,18 @@
 // lifediary 桌面壳。
 //
 // 它只做两件事：把服务活着、把服务给的界面显示出来。
-// Agent、记忆、会话全在 @lifediary/server 里（Node，:8082），壳不碰业务。
+// Agent、记忆、会话全在 @lifediary/server 里（Node，:39847），壳不碰业务。
 //
 //	go run .
 //
-// 为什么加载 http://127.0.0.1:8082/ 而不是内嵌前端：P0 就是要验证
+// 为什么加载 http://127.0.0.1:39847/ 而不是内嵌前端：P0 就是要验证
 // 「WebView2 里能不能跑通 SSE」。内嵌前端是 P1 之后的事（见
 // docs/设计方案/2026-11-03-桌面壳（MyGo）.md）。
 package main
 
 import (
-	"bytes"
+	_ "embed"
 	"fmt"
-	"image"
-	"image/color"
-	"image/png"
 	"log"
 	"net/http"
 	"net/url"
@@ -28,8 +25,14 @@ import (
 	"github.com/egoist/mygo"
 )
 
+// trayIconPNG 是托盘图标：64x64 透石膏晶体，透明底。
+// 旧版是代码里画的一个蓝圆（占位），现在换成正式品牌图标。
+//
+//go:embed assets/icon-tray.png
+var trayIconPNG []byte
+
 const (
-	defaultBaseURL = "http://127.0.0.1:8082"
+	defaultBaseURL = "http://127.0.0.1:39847"
 	probeTimeout   = 3 * time.Second
 	probeInterval  = 250 * time.Millisecond
 )
@@ -55,7 +58,7 @@ func baseURL() string {
 // serviceOrigin 把 baseURL 归一成 origin（scheme://host[:port]）。
 //
 // MyGo 的信任校验按 origin 比对（scheme 与 host 都转小写），端口来自
-// LIFEDIARY_BASE_URL 或默认值，所以这里跟着 baseURL 算，不写死 8082。
+// LIFEDIARY_BASE_URL 或默认值，所以这里跟着 baseURL 算，不写死端口。
 // 页面是自绘标题栏，三键走 window.mygo.window，生产构建下必须显式授信。
 func serviceOrigin(base string) string {
 	u, err := url.Parse(base)
@@ -149,8 +152,38 @@ func ensureService(base string) {
 	log.Printf("service: 已在后台启动（%s）", dir)
 }
 
-// loadService 把窗口指向服务。窗口里那个页面不是「自家页面」，
-// 所以拿不到 mygo.Bind —— P0 不需要，前端直接说 HTTP。
+// Shell 是暴露给页面的一小组原生能力（window.mygo.call）。
+//
+// 服务页面不是 MyGo 的「自家页面」，但它的 origin 在 WindowOptions.Page.TrustedOrigins
+// 里，所以可以调这些方法；业务仍全部走 HTTP，这里只补浏览器办不到的事。
+type Shell struct{}
+
+// SelectDirectory 弹系统目录选择器，返回选中的绝对路径。
+// 用户取消时返回空串（前端按这个约定退化：保留输入框原值）。
+func (Shell) SelectDirectory() (string, error) {
+	paths, err := mygo.Dialog.Open(mygo.OpenDialogOptions{
+		Parent:            win,
+		Title:             "选择目录",
+		Directory:         true,
+		CreateDirectories: true,
+	})
+	if err != nil {
+		return "", err
+	}
+	if len(paths) == 0 {
+		return "", nil
+	}
+	return paths[0], nil
+}
+
+// shellBindingsEnabled 是 F3.5 的回滚开关：设为 off 就不挂 Shell，
+// 前端调用会失败并退化成手输路径（和浏览器里一样）。
+func shellBindingsEnabled() bool {
+	return !strings.EqualFold(strings.TrimSpace(os.Getenv("LIFEDIARY_SHELL_BINDINGS")), "off")
+}
+
+// loadService 把窗口指向服务。业务全走 HTTP，桥接只用来补原生能力
+// （见 Shell，绑定在 main 里 App.Run 之前完成）。
 func loadService(w *mygo.Window) {
 	base := baseURL()
 	w.Page().LoadHTML(connectingPage(base), "")
@@ -237,6 +270,12 @@ func toggleWindow() {
 
 func showWindow() {
 	if win != nil && !win.IsDestroyed() {
+		// 最小化时 Show() 的 SW_SHOW 不会还原窗口（只把窗口摆到前台），
+		// 所以先 Restore（SW_RESTORE）再 Show。窗口已在前台时这两步都是
+		// 空操作，托盘连点不会闪。
+		if win.IsMinimized() {
+			win.Restore()
+		}
 		win.Show()
 		win.Focus()
 		return
@@ -304,22 +343,9 @@ func showWindow() {
 	scheduleWindowStateSave(w)
 }
 
-// trayIcon 画一个 32x32 的圆，用项目里的强调色。
+// trayIcon 返回托盘图标字节（assets/icon-tray.png，64x64 透明底）。
 func trayIcon() []byte {
-	img := image.NewNRGBA(image.Rect(0, 0, 32, 32))
-	accent := color.NRGBA{R: 0x6e, G: 0xa8, B: 0xfe, A: 0xff}
-	for y := range 32 {
-		for x := range 32 {
-			if dx, dy := x-16, y-16; dx*dx+dy*dy <= 13*13 {
-				img.Set(x, y, accent)
-			}
-		}
-	}
-	var b bytes.Buffer
-	if err := png.Encode(&b, img); err != nil {
-		return nil
-	}
-	return b.Bytes()
+	return trayIconPNG
 }
 
 // watchService：运行期守护（批次二）。
@@ -377,7 +403,7 @@ func main() {
 
 	app.WhenReady(func() {
 		// 刻意不设菜单栏：单窗口应用里 Edit/View/Window 只是占一行。
-		// 要调试直接在浏览器打开 http://127.0.0.1:8082/ ，不需要窗口里的 DevTools 菜单。
+		// 要调试直接在浏览器打开 http://127.0.0.1:39847/ ，不需要窗口里的 DevTools 菜单。
 
 		if t, err := mygo.NewTray(mygo.TrayOptions{
 			Icon:    trayIcon(),
@@ -399,6 +425,13 @@ func main() {
 			log.Println("tray:", err)
 		} else {
 			tray = t
+			// 左键单击 = 显示并前置主窗口（最小化则还原）。
+			//
+			// mygo 的 OnClick 文档写的是「图标没有菜单时」才回调，但那句
+			// 说的是 macOS / Linux：Windows 后端在 WM_LBUTTONUP 上无条件
+			// 回调（internal/windows/tray.go 的 trayMessage），菜单只挂
+			// WM_RBUTTONUP，所以这里不会抢走右键菜单。
+			t.OnClick(showWindow)
 		}
 
 		showWindow()
@@ -408,6 +441,12 @@ func main() {
 
 	// 关掉窗口不退出：托盘还在，服务还在。
 	app.OnWindowAllClosed(func() {})
+
+	// MyGo 的服务注册是全局的（按类型名 → "Shell.SelectDirectory"），
+	// 文档要求在建窗口、App.Run 之前调用；它只登记方法表，不分窗口。
+	if shellBindingsEnabled() {
+		mygo.Bind(Shell{})
+	}
 
 	if err := app.Run(); err != nil {
 		log.Fatal(err)
