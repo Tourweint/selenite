@@ -1,0 +1,5 @@
+build/
+.mygo/
+dist/
+*.exe
+*.exe~
