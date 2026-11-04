@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>原型 01 · 会话内轻量卡片</title>
+<style>
+  :root{
+    --bg:#f5f4f1; --card:#ffffff; --ink:#22221f; --muted:#6f6f69;
+    --line:#e6e3dd; --soft:#faf9f6; --green:#2c6b55; --green-soft:#e7f1ec;
+    --amber:#9a6a12; --amber-soft:#fbf1dc; --red:#a33a2f; --red-soft:#f9eae7;
+    --blue:#335f8c; --blue-soft:#e8eff7;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:14px/1.65 "PingFang SC","Microsoft YaHei",-apple-system,"Segoe UI",sans-serif;}
+  .note{max-width:860px;margin:0 auto;padding:14px 22px;color:#57574f;font-size:12.5px;
+    border-bottom:1px solid var(--line);background:#efece5}
+  .note b{color:#22221f}
+  .page{max-width:860px;margin:0 auto;padding:30px 22px 70px}
+  .topbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:26px;color:var(--muted);font-size:12.5px}
+  .topbar .name{font-weight:600;color:#3b3b36;letter-spacing:.02em}
+  .thread{display:flex;flex-direction:column;gap:16px}
+  .row{display:flex;gap:10px;align-items:flex-start}
+  .row.me{justify-content:flex-end}
+  .avatar{width:26px;height:26px;border-radius:50%;background:#ded9cf;
+    display:flex;align-items:center;justify-content:center;font-size:11px;color:#6b665c;flex:0 0 auto}
+  .bubble{max-width:620px;background:var(--card);border:1px solid var(--line);border-radius:14px;
+    padding:12px 14px;box-shadow:0 1px 2px rgba(34,34,31,.04)}
+  .me .bubble{background:#eeece6;border-color:#e3dfd6}
+  .bubble p{margin:0 0 6px}
+  .bubble p:last-child{margin:0}
+  .ghost{color:var(--muted);font-size:12.5px}
+
+  .ticket{background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:hidden;
+    box-shadow:0 2px 10px rgba(34,34,31,.05);margin-left:36px;max-width:660px}
+  .t-head{display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid var(--line);background:var(--soft)}
+  .domain{font-weight:600;font-size:13px;color:#3d3a33}
+  .domain::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--green);margin-right:7px;vertical-align:1px}
+  .badge{font-size:11px;padding:2px 7px;border-radius:999px;border:1px solid var(--line);color:var(--muted);background:#fff;white-space:nowrap}
+  .badge.run{color:var(--blue);background:var(--blue-soft);border-color:#d5e2ef}
+  .spacer{flex:1}
+  .t-meta{padding:10px 14px 8px;color:var(--muted);font-size:12px;display:flex;gap:14px;flex-wrap:wrap}
+  .t-meta b{color:#45453f;font-weight:600}
+  .bar{height:4px;background:#eeebe5;border-radius:4px;margin:4px 14px 12px;overflow:hidden}
+  .bar i{display:block;height:100%;width:64%;background:var(--green);border-radius:4px}
+  .tasks{padding:0 14px}
+  .task{display:grid;grid-template-columns:16px 1fr auto;gap:8px;align-items:start;
+    padding:8px 0;border-top:1px dashed #eeebe5}
+  .task:first-child{border-top:none}
+  .dot{width:8px;height:8px;border-radius:50%;margin-top:7px;background:#cdc9c0}
+  .dot.done{background:var(--green)}
+  .dot.run{background:var(--blue);box-shadow:0 0 0 3px var(--blue-soft)}
+  .dot.wait{background:var(--amber);box-shadow:0 0 0 3px var(--amber-soft)}
+  .dot.fail{background:var(--red);box-shadow:0 0 0 3px var(--red-soft)}
+  .tname{font-size:13px}
+  .tname small{display:block;color:var(--muted);font-size:11.5px;margin-top:1px}
+  .state{font-size:11.5px;color:var(--muted);text-align:right;white-space:nowrap}
+  .state.run{color:var(--blue)}
+  .state.wait{color:var(--amber)}
+  .state.fail{color:var(--red)}
+
+  .alert{display:flex;gap:8px;margin:10px 14px;padding:8px 10px;border-radius:9px;
+    background:var(--amber-soft);color:#6f4c0c;font-size:12px;border:1px solid #f0e0bd}
+  .alert.red{background:var(--red-soft);color:#7c2a22;border-color:#efd2cc}
+  .ask{margin:10px 14px 12px;padding:10px 12px;border-radius:10px;background:#f4f2ec;border:1px solid var(--line)}
+  .ask h4{margin:0 0 7px;font-size:12px;color:#55534c;letter-spacing:.03em;font-weight:600}
+  .ask .q{font-size:13px;margin-bottom:8px}
+  .ask .reply{display:flex;gap:8px}
+  .ask input{flex:1;border:1px solid #ddd8ce;background:#fff;border-radius:8px;padding:7px 9px;font:inherit;font-size:12.5px;color:var(--ink)}
+  .ask button{border:1px solid #2c6b55;background:#2c6b55;color:#fff;border-radius:8px;padding:7px 12px;font:inherit;font-size:12.5px;cursor:pointer}
+  .t-foot{display:flex;align-items:center;gap:10px;padding:9px 14px;border-top:1px solid var(--line);
+    background:var(--soft);color:var(--muted);font-size:12px}
+  .t-foot .minus{color:#45453f}
+  details{border-top:1px solid var(--line)}
+  summary{cursor:pointer;padding:8px 14px;font-size:12px;color:var(--muted);background:var(--soft);list-style:none}
+  summary::after{content:"展开";float:right;color:#8a877e}
+  details[open] summary::after{content:"收起"}
+  .detail{padding:10px 14px 12px;font-size:12px;color:var(--muted);background:#fff}
+  .detail table{width:100%;border-collapse:collapse}
+  .detail th,.detail td{text-align:left;padding:5px 6px;border-bottom:1px solid #f0ede7;font-weight:400}
+  .detail th{color:#8a877e;font-size:11px;letter-spacing:.03em}
+  .mono{font-family:Consolas,"Cascadia Mono",monospace;font-size:11.5px;color:#48463f}
+</style>
+</head>
+<body>
+<div class="note"><b>原型 01 · 会话内轻量卡片</b>　设计取向：派单只作为对话中的一张折叠卡片出现，默认低信息密度，不新增面板；适合"安静、不打扰"的路线。展开后才看执行者与文件占用。</div>
+
+<div class="page">
+  <div class="topbar"><span class="name">月话</span><span>与助理的对话</span></div>
+
+  <div class="thread">
+    <div class="row">
+      <div class="avatar">助</div>
+      <div class="bubble">
+        <p>好，我已经把「接入登录接口」派给应用后端负责人了。任务单已受理，这一轮不用等它。</p>
+        <p class="ghost">有结果或需要你补充时，我会在这里说一声。</p>
+      </div>
+    </div>
+
+    <div class="ticket">
+      <div class="t-head">
+        <span class="domain">应用后端</span>
+        <span class="badge">项目 · 月话</span>
+        <span class="badge">任务单 T-2048</span>
+        <span class="spacer"></span>
+        <span class="badge run">执行中 3/5</span>
+      </div>
+
+      <div class="t-meta">
+        <span>已用时 <b>04:12</b></span>
+        <span>并行执行者 <b>3</b></span>
+        <span>等待文件 <b>1</b></span>
+      </div>
+      <div class="bar"><i></i></div>
+
+      <div class="tasks">
+        <div class="task">
+          <span class="dot done"></span>
+          <div class="tname">读取现有路由与鉴权中间件<small>本机执行 · 00:42 完成</small></div>
+          <div class="state">完成</div>
+        </div>
+        <div class="task">
+          <span class="dot run"></span>
+          <div class="tname">新增登录接口与令牌签发<small>外部执行 · Qoder 国际版 · src/routes/auth.ts</small></div>
+          <div class="state run">62%</div>
+        </div>
+        <div class="task">
+          <span class="dot wait"></span>
+          <div class="tname">数据库迁移<small>等待文件 · src/db/schema.ts 被任务 2 占用</small></div>
+          <div class="state wait">等待</div>
+        </div>
+        <div class="task">
+          <span class="dot run"></span>
+          <div class="tname">登录接口单元测试<small>本机执行 · tests/auth.test.ts</small></div>
+          <div class="state run">41%</div>
+        </div>
+        <div class="task">
+          <span class="dot"></span>
+          <div class="tname">更新接口文档<small>排队 · 等待前两项释放文件</small></div>
+          <div class="state">排队</div>
+        </div>
+      </div>
+
+      <div class="alert red">
+        <span>!</span><span>执行者 CodeBuddy 登录态失效，本单已改用 Qoder 国际版；不影响进度。</span>
+      </div>
+
+      <div class="ask">
+        <h4>待你处理</h4>
+        <div class="q">测试环境用哪个账号跑登录用例？</div>
+        <div class="reply">
+          <input placeholder="在对话里回复即可…" disabled>
+          <button type="button">回复</button>
+        </div>
+      </div>
+
+      <details>
+        <summary>文件占用与执行者明细</summary>
+        <div class="detail">
+          <table>
+            <tr><th>路径</th><th>持有任务</th><th>执行者</th><th>到期</th></tr>
+            <tr><td class="mono">src/routes/auth.ts</td><td>任务 2</td><td>外部执行 · Qoder 国际版</td><td>19:42</td></tr>
+            <tr><td class="mono">tests/auth.test.ts</td><td>任务 4</td><td>本机执行</td><td>19:38</td></tr>
+            <tr><td class="mono">src/db/schema.ts</td><td>等待任务 2 释放</td><td>—</td><td>—</td></tr>
+          </table>
+          <p style="margin:10px 0 0">写入只发生在隔离副本，按租约合并回项目；越权写入会直接判失败，不会污染项目。</p>
+        </div>
+      </details>
+
+      <div class="t-foot">
+        <span class="minus">一行结论：</span>
+        <span>进行中，尚无结论</span>
+        <span class="spacer" style="flex:1"></span>
+        <a href="#" style="color:#8a877e;text-decoration:none">取消任务单</a>
+      </div>
+    </div>
+
+    <div class="row me">
+      <div class="bubble">那我先看别的。好了叫我。</div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

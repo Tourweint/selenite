@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>原型 02 · 侧边抽屉面板</title>
+<style>
+  :root{
+    --bg:#f2f1ed; --panel:#ffffff; --ink:#211f1b; --muted:#6d6a62;
+    --line:#e4e0d8; --soft:#f8f6f1; --green:#2b6450; --green-soft:#e5f0ea;
+    --amber:#9a6a12; --amber-soft:#fbf1da; --red:#a2382d; --red-soft:#f8e9e6;
+    --blue:#315b85; --blue-soft:#e6eef6;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:14px/1.6 "PingFang SC","Microsoft YaHei",-apple-system,"Segoe UI",sans-serif}
+  .note{padding:12px 22px;background:#ece9e1;border-bottom:1px solid var(--line);color:#57544c;font-size:12.5px}
+  .note b{color:#211f1b}
+  .app{display:grid;grid-template-columns:1fr 432px;min-height:calc(100vh - 46px)}
+  /* 左侧对话 */
+  .chat{padding:26px 26px 60px;max-width:720px;margin:0 auto;width:100%}
+  .chat h1{font-size:13px;font-weight:600;color:#4a473f;margin:0 0 22px;letter-spacing:.04em}
+  .msg{display:flex;gap:10px;margin-bottom:16px;align-items:flex-start}
+  .msg.me{justify-content:flex-end}
+  .av{width:26px;height:26px;border-radius:50%;background:#ddd7cc;color:#6b665b;font-size:11px;
+    display:flex;align-items:center;justify-content:center;flex:0 0 auto}
+  .b{max-width:520px;background:#fff;border:1px solid var(--line);border-radius:13px;padding:11px 13px}
+  .me .b{background:#eae7df}
+  .b p{margin:0 0 5px}.b p:last-child{margin:0}
+  .b .sub{color:var(--muted);font-size:12.5px}
+  .composer{margin-top:26px;border:1px solid var(--line);background:#fff;border-radius:12px;padding:12px 14px;color:#a4a097;font-size:13px}
+  /* 抽屉 */
+  .drawer{background:var(--panel);border-left:1px solid var(--line);display:flex;flex-direction:column;
+    box-shadow:-8px 0 24px rgba(33,31,27,.04)}
+  .d-head{padding:16px 18px 12px;border-bottom:1px solid var(--line)}
+  .d-title{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+  .d-title .domain{font-weight:600;font-size:14px}
+  .d-title .dot{width:7px;height:7px;border-radius:50%;background:var(--blue);box-shadow:0 0 0 3px var(--blue-soft)}
+  .chip{font-size:11px;padding:2px 7px;border-radius:999px;border:1px solid var(--line);color:var(--muted);background:#fff}
+  .chip.run{color:var(--blue);background:var(--blue-soft);border-color:#d4e2f0}
+  .chip.ask{color:var(--amber);background:var(--amber-soft);border-color:#efdfbd}
+  .chip.fail{color:var(--red);background:var(--red-soft);border-color:#efd1ca}
+  .d-meta{display:flex;gap:14px;color:var(--muted);font-size:12px;flex-wrap:wrap}
+  .d-meta b{color:#3f3c35;font-weight:600}
+  .x{margin-left:auto;color:#a29d92;text-decoration:none;font-size:16px}
+  .progress{margin:12px 18px}
+  .bar{height:5px;background:#eeeae2;border-radius:5px;overflow:hidden}
+  .bar i{display:block;height:100%;width:64%;background:var(--green)}
+  .progress .cap{display:flex;justify-content:space-between;font-size:11.5px;color:var(--muted);margin-top:6px}
+  /* tabs */
+  .tabs{display:flex;gap:2px;padding:0 18px;border-bottom:1px solid var(--line)}
+  .tabs input{display:none}
+  .tabs label{cursor:pointer;padding:9px 10px 8px;font-size:12.5px;color:var(--muted);border-bottom:2px solid transparent}
+  #t1:checked ~ .tabs label[for="t1"],#t2:checked ~ .tabs label[for="t2"],#t3:checked ~ .tabs label[for="t3"]{color:#211f1b;border-bottom-color:var(--green);font-weight:600}
+  #t1:checked ~ .pane.a,#t2:checked ~ .pane.b,#t3:checked ~ .pane.c{display:block}
+  .pane{display:none;padding:14px 18px;overflow:auto;flex:1}
+  .stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px}
+  .stat{border:1px solid var(--line);border-radius:10px;padding:9px 10px;background:var(--soft)}
+  .stat b{display:block;font-size:17px;line-height:1.2}
+  .stat span{font-size:11.5px;color:var(--muted)}
+  .stat.warn b{color:var(--amber)}
+  .alert{display:flex;gap:8px;padding:9px 10px;border-radius:9px;font-size:12px;margin-bottom:10px;border:1px solid #efd1ca;background:var(--red-soft);color:#7b2a21}
+  .alert.ok{background:var(--green-soft);border-color:#cfe3d8;color:#285c49}
+  .alert.warn{background:var(--amber-soft);border-color:#efdfbd;color:#6f4c0c}
+  .sec{font-size:11.5px;color:#8d897f;letter-spacing:.04em;margin:12px 0 6px;font-weight:600}
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  th{text-align:left;color:#8d897f;font-weight:500;font-size:11px;padding:6px 4px;border-bottom:1px solid var(--line)}
+  td{padding:7px 4px;border-bottom:1px solid #f1eee7;vertical-align:top}
+  .mono{font-family:Consolas,"Cascadia Mono",monospace;font-size:11px;color:#46443d}
+  .tag{display:inline-block;font-size:10.5px;padding:1px 5px;border-radius:4px;background:#f0ede6;color:#6d6a62}
+  .tag.blue{background:var(--blue-soft);color:var(--blue)}
+  .tag.amber{background:var(--amber-soft);color:var(--amber)}
+  .rowtask{display:flex;gap:8px;align-items:flex-start;padding:8px 0;border-bottom:1px solid #f1eee7}
+  .tdot{width:7px;height:7px;border-radius:50%;margin-top:6px;background:#cdc8be;flex:0 0 auto}
+  .tdot.run{background:var(--blue)}.tdot.wait{background:var(--amber)}.tdot.done{background:var(--green)}.tdot.fail{background:var(--red)}
+  .rowtask .main{flex:1;font-size:12.5px}
+  .rowtask .main small{display:block;color:var(--muted);font-size:11px}
+  .rowtask .right{font-size:11px;color:var(--muted);text-align:right}
+  .askbox{border:1px solid #e9dfc4;background:var(--amber-soft);border-radius:10px;padding:10px 11px;margin-top:12px}
+  .askbox h4{margin:0 0 5px;font-size:11.5px;color:#6f4c0c;letter-spacing:.04em}
+  .askbox p{margin:0 0 8px;font-size:12.5px}
+  .askbox .row{display:flex;gap:6px}
+  .askbox input{flex:1;border:1px solid #ddcfae;border-radius:7px;background:#fff;padding:6px 8px;font:inherit;font-size:12px}
+  .askbox button{border:1px solid #2b6450;background:#2b6450;color:#fff;border-radius:7px;padding:6px 10px;font:inherit;font-size:12px;cursor:pointer}
+  .d-foot{border-top:1px solid var(--line);padding:11px 18px;display:flex;align-items:center;gap:10px;background:var(--soft)}
+  .d-foot .concl{flex:1;font-size:12px;color:var(--muted)}
+  .d-foot .concl b{color:#3f3c35}
+  .btn{border:1px solid #d9d4c9;background:#fff;color:#57544c;border-radius:8px;padding:6px 10px;font:inherit;font-size:12px;cursor:pointer}
+  .btn.danger{color:var(--red);border-color:#e8c9c2}
+  @media (max-width:1100px){.app{grid-template-columns:1fr}.drawer{display:none}}
+</style>
+</head>
+<body>
+<div class="note"><b>原型 02 · 侧边抽屉面板</b>　设计取向：对话照常进行，右侧抽屉承载一张任务单的完整状态；中等信息密度，适合"边聊边盯进度"。抽屉按需打开，不占对话宽度。</div>
+
+<div class="app">
+  <div class="chat">
+    <h1>与助理的对话</h1>
+    <div class="msg"><div class="av">助</div><div class="b">
+      <p>派给应用后端负责人了，任务单已受理。你在旁边抽屉里能看到并行进度。</p>
+      <p class="sub">有结论或需要你补充时，我会在这里提醒。</p>
+    </div></div>
+    <div class="msg me"><div class="b">这个登录接口别动现有的会话中间件。</div></div>
+    <div class="msg"><div class="av">助</div><div class="b">
+      <p>记下了，已把这条约束补进任务单说明，负责人会按这个拆。</p>
+    </div></div>
+    <div class="composer">继续聊别的…</div>
+  </div>
+
+  <aside class="drawer">
+    <div class="d-head">
+      <div class="d-title">
+        <span class="dot"></span><span class="domain">应用后端</span>
+        <span class="chip run">执行中</span>
+        <a class="x" href="#">×</a>
+      </div>
+      <div class="d-meta">
+        <span>项目 <b>月话</b></span><span>任务单 <b>T-2048</b></span><span>已用 <b>04:12</b></span>
+      </div>
+    </div>
+
+    <input type="radio" name="tab" id="t1" checked>
+    <input type="radio" name="tab" id="t2">
+    <input type="radio" name="tab" id="t3">
+    <div class="tabs">
+      <label for="t1">概览</label>
+      <label for="t2">任务 5</label>
+      <label for="t3">文件占用 3</label>
+    </div>
+
+    <div class="pane a">
+      <div class="progress">
+        <div class="bar"><i></i></div>
+        <div class="cap"><span>3 个执行者并行</span><span>64%</span></div>
+      </div>
+      <div class="stat-grid">
+        <div class="stat"><b>3</b><span>执行中</span></div>
+        <div class="stat warn"><b>1</b><span>等待文件</span></div>
+        <div class="stat"><b>1</b><span>已完成</span></div>
+        <div class="stat warn"><b>1</b><span>待你处理</span></div>
+      </div>
+      <div class="alert">CodeBuddy 登录态失效，本单已切到 Qoder 国际版；同一任务没有并行两档。</div>
+      <div class="sec">最近动态</div>
+      <div class="rowtask"><span class="tdot done"></span><div class="main">读取路由与鉴权中间件<small>本机执行 · 00:42</small></div><div class="right">完成</div></div>
+      <div class="rowtask"><span class="tdot run"></span><div class="main">新增登录接口与令牌签发<small>外部执行 · Qoder 国际版 · 62%</small></div><div class="right">62%</div></div>
+      <div class="rowtask"><span class="tdot wait"></span><div class="main">数据库迁移<small>等待 src/db/schema.ts 释放</small></div><div class="right">等待</div></div>
+      <div class="rowtask"><span class="tdot run"></span><div class="main">登录接口单元测试<small>本机执行 · 41%</small></div><div class="right">41%</div></div>
+      <div class="askbox">
+        <h4>待你处理</h4>
+        <p>测试环境用哪个账号跑登录用例？</p>
+        <div class="row"><input placeholder="回复后交回原任务单"><button>回复</button></div>
+      </div>
+    </div>
+
+    <div class="pane b">
+      <div class="alert warn">任务 3 在等任务 2 释放 <span class="mono">src/db/schema.ts</span>，调度器不会让两者同时写。</div>
+      <table>
+        <tr><th>任务</th><th>执行者</th><th>文件</th><th>状态</th></tr>
+        <tr><td>1 读取路由</td><td><span class="tag">本机</span></td><td class="mono">src/routes/*</td><td>完成</td></tr>
+        <tr><td>2 登录接口</td><td><span class="tag blue">Qoder 国际版</span></td><td class="mono">src/routes/auth.ts</td><td>62%</td></tr>
+        <tr><td>3 数据库迁移</td><td><span class="tag">本机</span></td><td class="mono">src/db/schema.ts</td><td><span class="tag amber">等待文件</span></td></tr>
+        <tr><td>4 单元测试</td><td><span class="tag">本机</span></td><td class="mono">tests/auth.test.ts</td><td>41%</td></tr>
+        <tr><td>5 接口文档</td><td><span class="tag">外部</span></td><td class="mono">docs/api.md</td><td>排队</td></tr>
+      </table>
+      <div class="sec">拆分依据</div>
+      <div style="font-size:12px;color:var(--muted)">按"路由 / 迁移 / 测试 / 文档"拆；迁移与接口共用 schema，因此迁移必须等接口释放后再合并。</div>
+    </div>
+
+    <div class="pane c">
+      <div class="sec">独占租约（按相对路径）</div>
+      <table>
+        <tr><th>路径</th><th>持有任务</th><th>到期</th></tr>
+        <tr><td class="mono">src/routes/auth.ts</td><td>任务 2 · Qoder 国际版</td><td>19:42</td></tr>
+        <tr><td class="mono">tests/auth.test.ts</td><td>任务 4 · 本机执行</td><td>19:38</td></tr>
+        <tr><td class="mono">docs/api.md</td><td>任务 5 · 排队中</td><td>—</td></tr>
+      </table>
+      <div class="sec">冲突处理</div>
+      <div class="alert warn">任务 3 申请 <span class="mono">src/db/schema.ts</span>，当前被任务 2 持有；负责人选择"等释放"，没有并行写。</div>
+      <div class="sec">越权写入</div>
+      <div class="alert ok">本单尚未发现未声明的路径写入；一旦发现，拒绝合并并判失败。</div>
+      <div class="sec">隔离方式</div>
+      <div style="font-size:12px;color:var(--muted)">每个执行者在独立工作副本里写，完成后按租约合并回项目目录；项目里不会出现两个执行者同时改同一文件。</div>
+    </div>
+
+    <div class="d-foot">
+      <div class="concl">一行结论：<b>进行中，尚无结论</b></div>
+      <button class="btn">在对话中回复</button>
+      <button class="btn danger">取消任务单</button>
+    </div>
+  </aside>
+</div>
+</body>
+</html>

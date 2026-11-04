@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>原型 03 · 独立任务看板</title>
+<style>
+  :root{
+    --bg:#efeee9; --panel:#fff; --ink:#201f1b; --muted:#6c6961;
+    --line:#e2ded5; --soft:#f7f5f0; --green:#2a6350; --green-soft:#e4efe9;
+    --amber:#97670f; --amber-soft:#faf0d8; --red:#9f372c; --red-soft:#f8e8e5;
+    --blue:#305a84; --blue-soft:#e5edf6; --violet:#5a4b82; --violet-soft:#eeeafa;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:13px/1.55 "PingFang SC","Microsoft YaHei",-apple-system,"Segoe UI",sans-serif}
+  .note{padding:12px 22px;background:#e8e5dd;border-bottom:1px solid var(--line);color:#55524a;font-size:12.5px}
+  .note b{color:#201f1b}
+  .shell{display:grid;grid-template-columns:210px 1fr;min-height:calc(100vh - 45px)}
+  /* 侧栏 */
+  .side{background:#f6f4ee;border-right:1px solid var(--line);padding:18px 14px}
+  .brand{font-weight:700;font-size:14px;letter-spacing:.04em;margin-bottom:18px;color:#3b3830}
+  .nav{font-size:12.5px;color:var(--muted)}
+  .nav .item{padding:7px 9px;border-radius:8px;margin-bottom:2px;display:flex;align-items:center;gap:8px}
+  .nav .item.on{background:#e9e5db;color:#35322b;font-weight:600}
+  .nav .dot{width:6px;height:6px;border-radius:50%;background:#b9b4a8}
+  .nav .item.on .dot{background:var(--green)}
+  .side .label{font-size:10.5px;letter-spacing:.08em;color:#a09b90;margin:18px 4px 6px}
+  .project{display:flex;align-items:center;gap:7px;padding:6px 8px;font-size:12px;color:#4b4840}
+  .project .pdot{width:6px;height:6px;border-radius:2px;background:#c3bdb0}
+  .project.on .pdot{background:var(--green)}
+  /* 主区 */
+  .main{padding:18px 22px 40px;min-width:0}
+  .bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+  .bar h1{font-size:15px;margin:0;letter-spacing:.02em}
+  .sel{border:1px solid var(--line);background:#fff;border-radius:8px;padding:5px 9px;font-size:12px;color:#4b4840}
+  .chip{font-size:11px;padding:2px 7px;border-radius:999px;border:1px solid var(--line);background:#fff;color:var(--muted)}
+  .chip.run{color:var(--blue);background:var(--blue-soft);border-color:#d3e1ef}
+  .chip.ask{color:var(--amber);background:var(--amber-soft);border-color:#eddcb9}
+  .chip.fail{color:var(--red);background:var(--red-soft);border-color:#eccfc8}
+  .spacer{flex:1}
+  .stats{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+  .stat{background:#fff;border:1px solid var(--line);border-radius:10px;padding:8px 11px;min-width:104px}
+  .stat b{display:block;font-size:18px;line-height:1.2}
+  .stat span{font-size:11px;color:var(--muted)}
+  .stat.warn b{color:var(--amber)}
+  .stat.bad b{color:var(--red)}
+  .locks{display:flex;gap:6px;flex-wrap:wrap;align-items:center;background:#f6f4ee;border:1px solid var(--line);
+    border-radius:9px;padding:7px 10px;margin-bottom:16px;font-size:11.5px;color:var(--muted)}
+  .locks .lk{font-family:Consolas,"Cascadia Mono",monospace;font-size:10.5px;background:#fff;
+    border:1px solid var(--line);border-radius:5px;padding:2px 6px;color:#4a473f}
+  .board{display:grid;grid-template-columns:repeat(4,minmax(220px,1fr));gap:12px;align-items:start}
+    .col{background:#f7f5f0;border:1px solid var(--line);border-radius:11px;padding:9px;min-height:420px}
+  .col-head{display:flex;align-items:center;gap:7px;padding:2px 3px 9px;font-size:12px;font-weight:600;color:#4b4840}
+  .col-head .n{font-weight:400;color:#a09b90;font-size:11px}
+  .col-head .mark{width:7px;height:7px;border-radius:50%;background:#c3bdb0}
+  .col.run .mark{background:var(--blue)}.col.wait .mark{background:var(--amber)}.col.done .mark{background:var(--green)}
+  .card{background:#fff;border:1px solid var(--line);border-radius:10px;padding:9px 10px;margin-bottom:8px;
+    box-shadow:0 1px 2px rgba(32,31,27,.04)}
+  .card .top{display:flex;align-items:center;gap:6px;color:#a09b90;font-size:10.5px;margin-bottom:4px}
+  .card .top .ticket{margin-left:auto;font-family:Consolas,"Cascadia Mono",monospace}
+  .card h4{margin:0 0 4px;font-size:12.5px;font-weight:600;line-height:1.45}
+  .card .sub{color:var(--muted);font-size:11px;line-height:1.5}
+  .card .foot{display:flex;align-items:center;gap:6px;margin-top:7px}
+  .tag{font-size:10px;padding:1px 5px;border-radius:4px;background:#f0ede6;color:#68655d}
+  .tag.blue{background:var(--blue-soft);color:var(--blue)}
+  .tag.violet{background:var(--violet-soft);color:var(--violet)}
+  .tag.green{background:var(--green-soft);color:var(--green)}
+  .tag.amber{background:var(--amber-soft);color:var(--amber)}
+  .tag.red{background:var(--red-soft);color:var(--red)}
+  .mini{height:3px;background:#eeebe4;border-radius:3px;overflow:hidden;margin-top:7px}
+  .mini i{display:block;height:100%;background:var(--blue)}
+  .card .warnline{display:flex;gap:5px;margin-top:7px;padding:5px 6px;border-radius:6px;
+    background:var(--amber-soft);color:#6f4c0c;font-size:10.5px;line-height:1.45}
+  .card .badline{display:flex;gap:5px;margin-top:7px;padding:5px 6px;border-radius:6px;
+    background:var(--red-soft);color:#7b2a21;font-size:10.5px;line-height:1.45}
+  .card .path{font-family:Consolas,"Cascadia Mono",monospace;font-size:10.5px;color:#46443d}
+  .empty{color:#b1aca0;font-size:11.5px;text-align:center;padding:16px 0}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:16px;color:#8d897f;font-size:11px}
+  @media (max-width:1180px){.board{grid-template-columns:repeat(4,260px);overflow-x:auto;padding-bottom:8px}}
+  @media (max-width:820px){.shell{grid-template-columns:1fr}.side{display:none}}
+</style>
+</head>
+<body>
+<div class="note"><b>原型 03 · 独立任务看板</b>　设计取向：把派单从对话里抽出来，按状态分列成看板；最高信息密度，适合同时盯多张任务单、多个项目的阶段。对话只负责发起，看板负责管理。对话内的任务卡片与固定提示句见原型 04；点击卡片进入本页 `#/tasks?ticket=`。</div>
+
+<div class="shell">
+  <aside class="side">
+    <div class="brand">月话</div>
+    <div class="nav">
+      <div class="item">对话</div>
+      <div class="item on"><span class="dot"></span>任务看板</div>
+      <div class="item">项目</div>
+      <div class="item">设置</div>
+    </div>
+    <div class="label">项目</div>
+    <div class="project on"><span class="pdot"></span>月话</div>
+    <div class="project"><span class="pdot"></span>工作笔记</div>
+    <div class="label">领域</div>
+    <div class="project on"><span class="pdot"></span>应用后端</div>
+    <div class="project on"><span class="pdot"></span>内容整理</div>
+    <div class="project"><span class="pdot"></span>桌面端</div>
+  </aside>
+
+  <main class="main">
+    <div class="bar">
+      <h1>任务看板</h1>
+      <span class="chip">项目 · 月话</span>
+      <span class="chip run">2 张任务单在跑</span>
+      <span class="spacer"></span>
+      <span class="sel">全部领域</span>
+      <span class="sel">按更新时间</span>
+    </div>
+
+    <div class="stats">
+      <div class="stat"><b>2</b><span>进行中任务单</span></div>
+      <div class="stat"><b>4</b><span>并行执行者</span></div>
+      <div class="stat warn"><b>1</b><span>等待文件</span></div>
+      <div class="stat warn"><b>2</b><span>待你处理</span></div>
+      <div class="stat bad"><b>1</b><span>失败待看</span></div>
+    </div>
+
+    <div class="locks">
+      <span>当前文件占用：</span>
+      <span class="lk">src/routes/auth.ts · T-2048/2</span>
+      <span class="lk">tests/auth.test.ts · T-2048/4</span>
+      <span class="lk">notes/summary.md · T-2049/3</span>
+      <span>其余路径未被租约占用</span>
+    </div>
+
+    <div class="board">
+      <section class="col wait">
+        <div class="col-head"><span class="mark"></span>排队 / 等文件 <span class="n">2</span></div>
+        <article class="card">
+          <div class="top"><span>应用后端</span><span class="ticket">T-2048</span></div>
+          <h4>更新接口文档</h4>
+          <div class="sub">任务 5 · 外部执行 · 等待任务 2 释放后合并</div>
+          <div class="warnline"><span>!</span><span>正在等 <span class="path">src/routes/auth.ts</span></span></div>
+          <div class="foot"><span class="tag">排队 06:31</span></div>
+        </article>
+        <article class="card">
+          <div class="top"><span>内容整理</span><span class="ticket">T-2049</span></div>
+          <h4>回归测试与样例校对</h4>
+          <div class="sub">任务 2 · 本机执行 · 负责人控制并发，暂不启动</div>
+          <div class="foot"><span class="tag">并发上限 3</span><span class="tag">未占用文件</span></div>
+        </article>
+      </section>
+
+      <section class="col run">
+        <div class="col-head"><span class="mark"></span>执行中 <span class="n">4</span></div>
+        <article class="card">
+          <div class="top"><span>应用后端</span><span class="ticket">T-2048</span></div>
+          <h4>新增登录接口与令牌签发</h4>
+          <div class="sub">任务 2 · 外部执行 · Qoder 国际版 · 已用 03:18</div>
+          <div class="mini"><i style="width:62%"></i></div>
+          <div class="foot"><span class="tag blue">62%</span><span class="path">src/routes/auth.ts</span></div>
+          <div class="warnline"><span>!</span><span>持有该路径的独占租约，到期 19:42</span></div>
+        </article>
+        <article class="card">
+          <div class="top"><span>应用后端</span><span class="ticket">T-2048</span></div>
+          <h4>登录接口单元测试</h4>
+          <div class="sub">任务 4 · 本机执行 · 已用 01:56</div>
+          <div class="mini"><i style="width:41%"></i></div>
+          <div class="foot"><span class="tag blue">41%</span><span class="path">tests/auth.test.ts</span></div>
+        </article>
+        <article class="card">
+          <div class="top"><span>应用后端</span><span class="ticket">T-2048</span></div>
+          <h4>数据库迁移</h4>
+          <div class="sub">任务 3 · 本机执行 · 已完成改动，等合并</div>
+          <div class="warnline"><span>!</span><span><span class="path">src/db/schema.ts</span> 被任务 2 占用</span></div>
+        </article>
+        <article class="card">
+          <div class="top"><span>内容整理</span><span class="ticket">T-2049</span></div>
+          <h4>生成周报摘要</h4>
+          <div class="sub">任务 3 · 外部执行 · Qoder CN · 首次调用较慢</div>
+          <div class="mini"><i style="width:55%;background:var(--violet)"></i></div>
+          <div class="foot"><span class="tag violet">55%</span><span class="path">notes/summary.md</span></div>
+        </article>
+      </section>
+
+      <section class="col">
+        <div class="col-head"><span class="mark"></span>待你处理 <span class="n">2</span></div>
+        <article class="card">
+          <div class="top"><span>应用后端</span><span class="ticket">T-2048</span></div>
+          <h4>补一个测试账号</h4>
+          <div class="sub">登录用例缺账号，任务 4 已暂停，其余任务不受影响。</div>
+          <div class="foot"><span class="tag amber">等人回复</span><span class="tag">已等 06:12</span></div>
+        </article>
+        <article class="card">
+          <div class="top"><span>内容整理</span><span class="ticket">T-2049</span></div>
+          <h4>合并冲突：摘要与原文引用</h4>
+          <div class="sub">任务 4 与任务 3 同时改了引用段落；改动留在隔离副本，未合并。</div>
+          <div class="badline"><span>!</span><span>冲突文件 <span class="path">notes/source.md</span></span></div>
+          <div class="foot"><span class="tag red">失败待看</span><span class="tag">副本保留</span></div>
+        </article>
+      </section>
+
+      <section class="col done">
+        <div class="col-head"><span class="mark"></span>已完成 <span class="n">4</span></div>
+        <article class="card">
+          <div class="top"><span>应用后端</span><span class="ticket">T-2048</span></div>
+          <h4>读取现有路由与鉴权中间件</h4>
+          <div class="sub">任务 1 · 本机执行 · 00:42</div>
+          <div class="foot"><span class="tag green">完成</span><span class="tag">无写入</span></div>
+        </article>
+        <article class="card">
+          <div class="top"><span>应用后端</span><span class="ticket">T-2048</span></div>
+          <h4>更新本地配置样例</h4>
+          <div class="sub">任务 6 · 外部执行 · 已按租约合并</div>
+          <div class="foot"><span class="tag green">完成</span><span class="path">config/example.env</span></div>
+        </article>
+        <article class="card">
+          <div class="top"><span>内容整理</span><span class="ticket">T-2049</span></div>
+          <h4>素材归类与去重</h4>
+          <div class="sub">任务 1 · 本机执行 · 01:10</div>
+          <div class="foot"><span class="tag green">完成</span><span class="tag">32 条</span></div>
+        </article>
+        <article class="card">
+          <div class="top"><span>内容整理</span><span class="ticket">T-2049</span></div>
+          <h4>摘要初稿</h4>
+          <div class="sub">任务 5 · 外部执行 · CodeBuddy · 已合并</div>
+          <div class="foot"><span class="tag green">完成</span><span class="path">notes/draft.md</span></div>
+        </article>
+      </section>
+    </div>
+
+    <div class="legend">
+      <span>执行者标签：本机执行 / 外部执行 / 手机执行 / 工具执行</span>
+      <span>租约按项目内相对路径独占；越权写入直接判失败</span>
+      <span>一个领域同时只跑一张任务单，单内可并行多个执行者</span>
+    </div>
+  </main>
+</div>
+</body>
+</html>

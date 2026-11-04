@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>原型 04 · 对话卡片与跳转示意</title>
+<style>
+  :root{
+    --bg:#efeee9; --panel:#fff; --ink:#201f1b; --muted:#6c6961;
+    --line:#e2ded5; --soft:#f7f5f0; --green:#2a6350; --green-soft:#e4efe9;
+    --amber:#97670f; --amber-soft:#faf0d8; --red:#9f372c; --red-soft:#f8e8e5;
+    --blue:#305a84; --blue-soft:#e5edf6; --violet:#5a4b82; --violet-soft:#eeeafa;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:13px/1.6 "PingFang SC","Microsoft YaHei",-apple-system,"Segoe UI",sans-serif}
+  .note{padding:11px 22px;background:#e8e5dd;border-bottom:1px solid var(--line);color:#55524a;font-size:12.5px}
+  .note b{color:#201f1b}
+  .shell{display:grid;grid-template-columns:206px 1fr;min-height:calc(100vh - 44px)}
+  .side{background:#f6f4ee;border-right:1px solid var(--line);padding:18px 14px}
+  .brand{font-weight:700;font-size:14px;letter-spacing:.04em;margin-bottom:16px;color:#3b3830}
+  .nav .item{display:flex;align-items:center;gap:8px;padding:8px 9px;border-radius:8px;font-size:12.5px;
+    color:var(--muted);margin-bottom:2px;cursor:pointer}
+  .nav .item.on{background:#e9e5db;color:#35322b;font-weight:600}
+  .nav .dot{width:6px;height:6px;border-radius:50%;background:#b9b4a8}
+  .nav .item.on .dot{background:var(--green)}
+  .badge-n{margin-left:auto;background:#dcd6c9;color:#5c584f;border-radius:999px;font-size:10.5px;padding:1px 6px}
+  .nav .item.on .badge-n{background:#c9c2b3;color:#3b3830}
+  .side .label{font-size:10.5px;letter-spacing:.08em;color:#a09b90;margin:18px 4px 6px}
+
+  .main{padding:0;display:flex;flex-direction:column;min-width:0}
+  .top{display:flex;align-items:center;gap:10px;padding:12px 22px;border-bottom:1px solid var(--line);background:#f9f7f2}
+  .top h1{font-size:13px;margin:0;font-weight:600}
+  .hash{font-family:Consolas,"Cascadia Mono",monospace;font-size:11px;color:#8d897f;background:#fff;
+    border:1px solid var(--line);border-radius:5px;padding:2px 7px}
+  .spacer{flex:1}
+  .back{border:1px solid #d9d4c9;background:#fff;border-radius:7px;padding:5px 9px;font:inherit;font-size:12px;cursor:pointer;color:#57544c}
+
+  .view{padding:24px 22px 60px;overflow:auto}
+  .hidden{display:none}
+  .chat{max-width:700px;margin:0 auto}
+  .msg{display:flex;gap:10px;margin-bottom:14px;align-items:flex-start}
+  .msg.me{justify-content:flex-end}
+  .av{width:26px;height:26px;border-radius:50%;background:#ddd7cc;color:#6b665b;font-size:11px;
+    display:flex;align-items:center;justify-content:center;flex:0 0 auto}
+  .b{max-width:540px;background:#fff;border:1px solid var(--line);border-radius:13px;padding:11px 13px}
+  .me .b{background:#eae7df}
+  .b p{margin:0 0 6px}.b p:last-child{margin:0}
+  .hint{color:#4a473f;font-size:12.5px}
+  .hint a{color:#25634d;font-weight:600;text-decoration:underline;text-decoration-thickness:1.5px;text-underline-offset:3px;cursor:pointer}
+  code{font-family:Consolas,"Cascadia Mono",monospace;font-size:10.5px;background:#f1eee7;border-radius:4px;padding:1px 4px;color:#57544c}
+  .composer{margin-top:22px;border:1px solid var(--line);background:#fff;border-radius:11px;padding:12px 14px;color:#a4a097;font-size:13px}
+  .control{max-width:700px;margin:22px auto 0;border:1px dashed #d8d2c6;background:#f4f1ea;border-radius:9px;
+    padding:9px 11px;font-size:11.5px;color:#7c786e;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+  .control b{color:#4a473f;font-weight:600}
+  .control button{border:1px solid #d9d4c9;background:#fff;border-radius:6px;padding:4px 8px;font:inherit;font-size:11.5px;cursor:pointer;color:#57544c}
+  .control button.on{border-color:#2a6350;color:#2a6350;background:#eef4f0}
+
+  /* 对话里的任务卡片 */
+  .tcard{max-width:540px;margin:8px 0 0 36px;background:#fff;border:1px solid var(--line);border-radius:12px;
+    padding:10px 12px;box-shadow:0 1px 3px rgba(32,31,27,.05);cursor:pointer;transition:border-color .15s}
+  .tcard:hover{border-color:#c9c2b3}
+  .tc-top{display:flex;align-items:center;gap:7px;margin-bottom:5px;flex-wrap:wrap}
+  .tc-domain{font-size:12.5px;font-weight:600;color:#3d3a33}
+  .tc-domain::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--green);margin-right:6px;vertical-align:1px}
+  .tid{font-family:Consolas,"Cascadia Mono",monospace;font-size:10.5px;color:#8d897f}
+  .chip{font-size:10.5px;padding:1px 6px;border-radius:999px;border:1px solid var(--line);color:var(--muted);background:#fff}
+  .chip.run{color:var(--blue);background:var(--blue-soft);border-color:#d3e1ef}
+  .chip.done{color:var(--green);background:var(--green-soft);border-color:#cfe3d8}
+  .chip.ask{color:var(--amber);background:var(--amber-soft);border-color:#eddcb9}
+  .chip.fail{color:var(--red);background:var(--red-soft);border-color:#eccfc8}
+  .tc-line{display:flex;align-items:center;gap:10px;font-size:11.5px;color:var(--muted);flex-wrap:wrap}
+  .tc-line b{color:#45423b;font-weight:600}
+  .tc-bar{flex:1;min-width:90px;height:3px;background:#eeebe4;border-radius:3px;overflow:hidden}
+  .tc-bar i{display:block;height:100%;width:64%;background:var(--green)}
+  .tc-btn{border:1px solid #2a6350;background:#2a6350;color:#fff;border-radius:7px;padding:4px 10px;
+    font:inherit;font-size:11.5px;cursor:pointer;white-space:nowrap}
+  .tc-question{display:none;margin-top:7px;padding:6px 8px;border-radius:7px;background:var(--amber-soft);
+    color:#6f4c0c;font-size:11px}
+  .tcard.is-ask .tc-question{display:block}
+
+  /* 跳转后的任务中心 */
+  .board-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+  .board-head h2{font-size:15px;margin:0}
+  .focus{font-size:11.5px;color:#6f4c0c;background:var(--amber-soft);border:1px solid #eddcb9;border-radius:7px;padding:4px 8px}
+  .cols{display:grid;grid-template-columns:repeat(3,1fr);gap:11px;align-items:start}
+  .col{background:#f7f5f0;border:1px solid var(--line);border-radius:10px;padding:9px;min-height:330px}
+  .col h3{font-size:12px;margin:0 0 8px;color:#4b4840;display:flex;align-items:center;gap:6px}
+  .col h3 .m{width:7px;height:7px;border-radius:50%;background:#c3bdb0}
+  .col.run h3 .m{background:var(--blue)}.col.ask h3 .m{background:var(--amber)}.col.done h3 .m{background:var(--green)}
+  .kcard{background:#fff;border:1px solid var(--line);border-radius:9px;padding:8px 9px;margin-bottom:7px;
+    box-shadow:0 1px 2px rgba(32,31,27,.04)}
+  .kcard .k-top{display:flex;gap:6px;color:#a09b90;font-size:10.5px;margin-bottom:3px}
+  .kcard .k-top .t{margin-left:auto;font-family:Consolas,"Cascadia Mono",monospace}
+  .kcard h4{margin:0 0 3px;font-size:12px;font-weight:600}
+  .kcard .sub{font-size:10.5px;color:var(--muted)}
+  .tag{display:inline-block;font-size:10px;padding:1px 5px;border-radius:4px;background:#f0ede6;color:#68655d;margin-top:6px}
+  .tag.blue{background:var(--blue-soft);color:var(--blue)}
+  .tag.amber{background:var(--amber-soft);color:var(--amber)}
+  .tag.green{background:var(--green-soft);color:var(--green)}
+  .hl{border:2px solid #b08a3a;box-shadow:0 0 0 4px #faf0d8}
+  .callout{margin:14px 0 0;font-size:11.5px;color:#7c786e}
+</style>
+</head>
+<body>
+<div class="note"><b>原型 04 · 对话卡片与跳转示意</b>　设计取向：演示对话里的任务卡片与助理固定提示句，以及点击「查看」后进入任务中心（<code>#/tasks?ticket=T-2048</code>）的落点。可与 03 配合：03 是任务中心整页，本文件补对话内入口。</div>
+
+<div class="shell">
+  <aside class="side">
+    <div class="brand">月话</div>
+    <div class="nav">
+      <div class="item on" id="navChat" onclick="openChat()"><span class="dot"></span>对话</div>
+      <div class="item" id="navTasks" onclick="openTasks(null)"><span class="dot"></span>任务中心<span class="badge-n">3</span></div>
+      <div class="item"><span class="dot"></span>项目</div>
+      <div class="item"><span class="dot"></span>设置</div>
+    </div>
+    <div class="label">说明</div>
+    <div style="font-size:11px;color:#8d897f;line-height:1.6;padding:0 4px">
+      侧栏的「任务中心」是常驻入口；对话里的卡片是直接入口。两处都进同一个 <code>#/tasks</code>。
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="top">
+      <h1 id="pageTitle">与助理的对话</h1>
+      <span class="hash" id="hash">#/chat</span>
+      <span class="spacer"></span>
+      <button class="back hidden" id="backBtn" onclick="openChat()">← 返回对话</button>
+    </div>
+
+    <!-- 对话视图 -->
+    <section class="view" id="viewChat">
+      <div class="chat">
+        <div class="msg me"><div class="b">帮我把登录接口接了，注意别动现有的会话中间件。</div></div>
+        <div class="msg"><div class="av">助</div><div class="b">
+          <p>好，已经派给应用后端负责人。这条约束也写进任务单说明了。</p>
+          <p class="hint" id="hint"></p>
+        </div></div>
+
+        <div class="tcard" id="tcard" onclick="openTasks('T-2048')">
+          <div class="tc-top">
+            <span class="tc-domain">应用后端</span>
+            <span class="tid">T-2048</span>
+            <span class="chip run" id="badge">执行中 3/5</span>
+            <span class="spacer" style="flex:1"></span>
+            <span class="tc-btn" id="cardBtn">查看</span>
+          </div>
+          <div class="tc-line">
+            <span>执行者 <b>3</b></span>
+            <span>已用 <b>04:12</b></span>
+            <span class="tc-bar"><i id="cardBar"></i></span>
+            <span id="pct"><b>64%</b></span>
+          </div>
+          <div class="tc-question">测试环境用哪个账号跑登录用例？</div>
+        </div>
+
+        <div class="composer">继续聊别的…</div>
+
+        <div class="control">
+          <b>原型示意 · 切换卡片状态：</b>
+          <button class="on" data-s="run" onclick="setState('run', this)">派发时</button>
+          <button data-s="done" onclick="setState('done', this)">完成后</button>
+          <button data-s="ask" onclick="setState('ask', this)">待你处理</button>
+          <button data-s="fail" onclick="setState('fail', this)">失败 / 中断</button>
+          <span>点卡片任意位置或「查看」→ 跳任务中心并定位 T-2048</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- 任务中心视图 -->
+    <section class="view hidden" id="viewTasks">
+      <div class="board-head">
+        <span class="chip">项目 · 月话</span>
+        <span class="focus" id="focus">从对话卡片进入 · 已定位 T-2048</span>
+        <span class="spacer"></span>
+        <span class="chip">全部领域</span>
+        <span class="chip">按最近更新</span>
+      </div>
+
+      <div class="cols">
+        <section class="col run">
+          <h3><span class="m"></span>执行中</h3>
+          <article class="kcard hl">
+            <div class="k-top"><span>应用后端</span><span class="t">T-2048</span></div>
+            <h4>新增登录接口与令牌签发</h4>
+            <div class="sub">任务 2 · 外部执行 · Qoder 国际版</div>
+            <span class="tag blue">62% · 租约 src/routes/auth.ts</span>
+          </article>
+          <article class="kcard">
+            <div class="k-top"><span>应用后端</span><span class="t">T-2048</span></div>
+            <h4>登录接口单元测试</h4>
+            <div class="sub">任务 4 · 本机执行</div>
+            <span class="tag blue">41%</span>
+          </article>
+          <article class="kcard">
+            <div class="k-top"><span>应用后端</span><span class="t">T-2048</span></div>
+            <h4>数据库迁移</h4>
+            <div class="sub">任务 3 · 本机执行，等合并</div>
+            <span class="tag amber">等待文件 src/db/schema.ts</span>
+          </article>
+        </section>
+
+        <section class="col ask">
+          <h3><span class="m"></span>待你处理</h3>
+          <article class="kcard">
+            <div class="k-top"><span>应用后端</span><span class="t">T-2048</span></div>
+            <h4>补一个测试账号</h4>
+            <div class="sub">登录用例缺账号；其余任务不受影响。</div>
+            <span class="tag amber">等人回复</span>
+          </article>
+        </section>
+
+        <section class="col done">
+          <h3><span class="m"></span>已完成</h3>
+          <article class="kcard">
+            <div class="k-top"><span>应用后端</span><span class="t">T-2048</span></div>
+            <h4>读取现有路由与鉴权中间件</h4>
+            <div class="sub">任务 1 · 本机执行 · 00:42</div>
+            <span class="tag green">完成</span>
+          </article>
+        </section>
+      </div>
+
+      <div class="callout">深链格式：<code>#/tasks?ticket=T-2048</code>。打开后定位并高亮该任务单；任务单不存在时显示"任务单不存在"，不静默跳列表。</div>
+    </section>
+  </main>
+</div>
+
+<script>
+  var states = {
+    run:  { badge:"执行中 3/5", cls:"chip run",  hint:"任务已派发，去{任务中心}查看。", btn:"查看",     pct:64,  ask:false },
+    done: { badge:"已完成",     cls:"chip done", hint:"任务已完成，去{任务中心}查看结果。", btn:"查看结果", pct:100, ask:false },
+    ask:  { badge:"待你处理",   cls:"chip ask",  hint:"有一项需要你处理，去{任务中心}回复。", btn:"去处理",   pct:80,  ask:true  },
+    fail: { badge:"未完成",     cls:"chip fail", hint:"任务未完成，去{任务中心}查看原因。", btn:"查看详情", pct:40,  ask:false }
+  };
+  var current = "run";
+
+  function renderHint(text){
+    var link = '<a onclick="openTasks(\'T-2048\');return false;" href="#/tasks?ticket=T-2048">任务中心</a>';
+    document.getElementById("hint").innerHTML = text.replace("{任务中心}", link);
+  }
+
+  function setState(name, btn){
+    current = name;
+    var s = states[name];
+    document.getElementById("badge").className = s.cls;
+    document.getElementById("badge").textContent = s.badge;
+    document.getElementById("cardBtn").textContent = s.btn;
+    document.getElementById("cardBar").style.width = s.pct + "%";
+    document.getElementById("pct").innerHTML = "<b>" + s.pct + "%</b>";
+    document.getElementById("tcard").className = "tcard" + (s.ask ? " is-ask" : "");
+    renderHint(s.hint);
+    var bs = document.querySelectorAll(".control button");
+    for (var i=0;i<bs.length;i++) bs[i].className = "";
+    if (btn) btn.className = "on";
+  }
+
+  function openChat(){
+    document.getElementById("viewChat").className = "view";
+    document.getElementById("viewTasks").className = "view hidden";
+    document.getElementById("pageTitle").textContent = "与助理的对话";
+    document.getElementById("hash").textContent = "#/chat";
+    document.getElementById("backBtn").className = "back hidden";
+    document.getElementById("navChat").className = "item on";
+    document.getElementById("navTasks").className = "item";
+  }
+
+  function openTasks(ticket){
+    document.getElementById("viewChat").className = "view hidden";
+    document.getElementById("viewTasks").className = "view";
+    document.getElementById("pageTitle").textContent = "任务中心";
+    document.getElementById("hash").textContent = ticket ? "#/tasks?ticket=" + ticket : "#/tasks";
+    document.getElementById("backBtn").className = "back";
+    document.getElementById("focus").textContent = ticket
+      ? "从对话卡片进入 · 已定位 " + ticket
+      : "从侧栏进入 · 显示全部任务单";
+    document.getElementById("navChat").className = "item";
+    document.getElementById("navTasks").className = "item on";
+    return false;
+  }
+
+  renderHint(states.run.hint);
+
+  // 支持直接打开深链（真实实现由前端路由接管）
+  (function routeFromHash(){
+    var h = location.hash || "";
+    if (h.indexOf("#/tasks") === 0) {
+      var m = h.match(/[?&]ticket=([^&]+)/);
+      openTasks(m ? decodeURIComponent(m[1]) : null);
+    } else {
+      openChat();
+    }
+  })();
+</script>
+</body>
+</html>
