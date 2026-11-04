@@ -17,7 +17,9 @@ import { DatabaseSync } from "node:sqlite";
  *      走思考关变体（2026-10-31 方案 D2）、没有 response_format；
  *   6. 未知 `X-Task` → 400 `unknown_task`；
  *   7. 模板变量缺失 → 500 `task_render_failed`，且**不留半条会话**；
- *   8. 黄金用例：模板与 App 侧资产逐字节一致（App 目录不在时明确跳过，不算通过也不算失败）。
+ *   8. 黄金用例：模板与 App 侧资产逐字节一致（App 目录不在时明确跳过，不算通过也不算失败）；
+ *   9. 思考档（2026-11-04）：`/mode {thinking:low}` 后上游 body = `reasoning_effort:low`
+ *      且**无** `enable_thinking`、model 名干净；未声明档位 `medium` → 400（默认域 off/low/high）。
  *
  *   pnpm --filter @lifediary/server tasks
  */
@@ -35,6 +37,8 @@ const DB = ".data/probe-task.sqlite";
 const MEMORY_DB = ".data/probe-task-memory.db";
 /** 日记镜像（记忆 B 路的数据源；探针用独立库，不碰生产 mirror） */
 const DIARY_DB = ".data/probe-task-diary.sqlite";
+/** 供应商配置探针独立文件（播种会写它） */
+const PROVIDERS_DB = ".data/probe-task-providers.json";
 
 /** App 仓库的 prompt 资产目录（黄金用例的对照源；跨仓只读） */
 const APP_PROMPTS_DIR = "<lifediary 手机仓>/core/ai/src/main/assets/prompts";
@@ -132,6 +136,8 @@ function startServer(): ChildProcess {
 			AGENT_DB_PATH: DB,
 			MEMORY_DB_PATH: MEMORY_DB,
 			DIARY_DB_PATH: DIARY_DB,
+			// 播种会写 providers.json；探针必须隔离，别碰真实 .data
+			PROVIDERS_PATH: PROVIDERS_DB,
 			JEV_ROUTE: "off",
 			NODE_OPTIONS: "",
 		},
@@ -230,6 +236,7 @@ function systemMessageOf(body: Record<string, unknown>): string {
 rmSync(DB, { force: true });
 rmSync(MEMORY_DB, { force: true });
 rmSync(DIARY_DB, { force: true });
+rmSync(PROVIDERS_DB, { force: true });
 
 await new Promise<void>((resolve) => upstream.listen(UPSTREAM_PORT, "127.0.0.1", resolve));
 let server = startServer();
@@ -403,6 +410,76 @@ try {
 		check(generalBody.response_format === undefined, "通用聊天没被塞 response_format");
 	}
 
+	// ── 4b. 思考档（2026-11-04 档位方案）：/mode low → 上游 body 带 reasoning_effort ──
+	console.log("\n· 4b. 思考档：/mode 改档真的落到上游 body");
+	const modeChat = await fetch(`${BASE}/api/v1/llm/chat/completions`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ messages: [{ role: "user", content: "明天想早点起" }] }),
+	});
+	const modeChatJson = (await modeChat.json()) as Record<string, unknown>;
+	const modeConversation = String(modeChatJson.id ?? "");
+	check(modeChat.status === 200 && modeConversation.length > 0, "档位用例建了一条会话", modeConversation);
+
+	const setLow = await fetch(`${BASE}/api/v1/agent/chat/${modeConversation}/mode`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ thinking: "low" }),
+	});
+	const setLowJson = (await setLow.json().catch(() => ({}))) as Record<string, unknown>;
+	check(
+		setLow.status === 200 && setLowJson.thinking === "low",
+		"POST /mode {thinking:low} → ok + thinking=low",
+		`${setLow.status} ${JSON.stringify(setLowJson)}`,
+	);
+
+	const beforeModeTurn = recorded.length;
+	const modeTurn = await fetch(`${BASE}/api/v1/llm/chat/completions`, {
+		method: "POST",
+		headers: { "content-type": "application/json", "X-Conversation-Id": modeConversation },
+		body: JSON.stringify({ messages: [{ role: "user", content: "那就七点吧" }] }),
+	});
+	check(modeTurn.status === 200, "改档后这一轮返回 200", String(modeTurn.status));
+	const modeBody = recorded[beforeModeTurn]?.body;
+	if (modeBody) {
+		check(
+			modeBody.reasoning_effort === "low",
+			"低档上游 body 带 reasoning_effort=low",
+			String(modeBody.reasoning_effort),
+		);
+		check(
+			modeBody.enable_thinking === undefined,
+			"低档不再发 enable_thinking（两档形状互斥）",
+			String(modeBody.enable_thinking),
+		);
+		check(
+			String(modeBody.model ?? "") === "fake-deep",
+			"低档上游仍是真实模型名（没有 #think 后缀）",
+			String(modeBody.model),
+		);
+	} else {
+		check(false, "改档后没有打到上游");
+	}
+
+	// 默认模型没声明 medium（缺省域 off/low/high）：传它必须 400，而不是发出去让上游炸
+	const rejectMedium = await fetch(`${BASE}/api/v1/agent/chat/${modeConversation}/mode`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ thinking: "medium" }),
+	});
+	const rejectJson = (await rejectMedium.json().catch(() => ({}))) as Record<string, unknown>;
+	check(
+		rejectMedium.status === 400 && rejectJson.error === "bad_request",
+		"未声明档位 medium → 400 bad_request",
+		`${rejectMedium.status} ${JSON.stringify(rejectJson)}`,
+	);
+	const rejectMessage = String(rejectJson.message ?? "");
+	check(
+		rejectMessage.includes("medium") && rejectMessage.includes("low"),
+		"400 的 message 说清档位与支持域",
+		rejectMessage,
+	);
+
 	// ── 5. 黄金用例：模板与 App 侧资产逐字节一致 ─────────────
 	console.log("\n· 5. 黄金用例（模板 ↔ App 现版资产）");
 	if (!existsSync(APP_PROMPTS_DIR)) {
@@ -493,6 +570,7 @@ try {
 	rmSync(`${DB}-shm`, { force: true });
 	rmSync(MEMORY_DB, { force: true });
 	rmSync(DIARY_DB, { force: true });
+	rmSync(PROVIDERS_DB, { force: true });
 }
 
 /** 逐字节对照：harness 的资产必须与 App 的同一份资产完全一样（允许 App 用 CRLF） */

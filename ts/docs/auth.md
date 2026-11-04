@@ -57,7 +57,7 @@ backend
 App  ──Bearer <自己设的 AGENT_TOKEN>──▶  harness ──▶ 模型
 ```
 
-- `AGENT_TOKEN` 走环境变量，App 里配一次；调试页用 `http://127.0.0.1:8082/?token=xxx` 打开；
+- `AGENT_TOKEN` 走环境变量，App 里配一次；调试页用 `http://127.0.0.1:39847/?token=xxx` 打开；
 - 校验失败 → **403 空响应体**（口径和上面保持一致，将来换 JWT 时 App 不用改错误处理）；
 - 比较用 `timingSafeEqual`，不把令牌长度泄露给计时攻击；
 - **没配 `AGENT_TOKEN` 时不裸奔**：只放行本机回环地址（`127.0.0.1` / `::1`），

@@ -10,7 +10,7 @@ import {
   type ChatRequest,
 } from "@lifediary/shared";
 
-const baseUrl = process.env.SMOKE_BASE_URL ?? "http://127.0.0.1:8082";
+const baseUrl = process.env.SMOKE_BASE_URL ?? "http://127.0.0.1:39847";
 /** 配了 AGENT_TOKEN 的服务端，冒烟也要带令牌 */
 const authHeaders: Record<string, string> = process.env.AGENT_TOKEN?.trim()
 	? { Authorization: `Bearer ${process.env.AGENT_TOKEN.trim()}` }

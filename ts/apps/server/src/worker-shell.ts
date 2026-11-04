@@ -9,8 +9,18 @@ import { spawn, type ChildProcess } from "node:child_process";
  * 否则在碰 adb 之前就拒绝。执行时直接 spawn(argv 数组)，绝不拼字符串。
  */
 
-const DEFAULT_ADB_PATH =
-  "C:/Users/<user>/AppData/Local/Android/Sdk/platform-tools/adb.exe";
+/**
+ * adb 兜底路径（`ADB_PATH` 未设时）：win32 猜 Android Studio 默认安装位
+ * （%LOCALAPPDATA%，不写死用户名），POSIX 交给 PATH 上的 `adb`。
+ * 找不到时 spawn 失败 → adb_unavailable，worker 不跑（见 executeAdbShell 的 ShellSetupError）。
+ */
+function defaultAdbPath(env: NodeJS.ProcessEnv): string {
+  if (process.platform === "win32") {
+    const localAppData = env.LOCALAPPDATA?.trim();
+    if (localAppData) return `${localAppData}/Android/Sdk/platform-tools/adb.exe`;
+  }
+  return "adb";
+}
 const DEFAULT_TIMEOUT_MS = 10_000;
 const MAX_ARGV = 16;
 const MAX_ARG_LENGTH = 256;
@@ -205,7 +215,7 @@ export async function executeAdbShell(
   const env = options.env ?? process.env;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const spawnFn = options.spawnFn ?? defaultSpawn;
-  const adbPath = env.ADB_PATH?.trim() || DEFAULT_ADB_PATH;
+  const adbPath = env.ADB_PATH?.trim() || defaultAdbPath(env);
 
   let serial: string;
   try {

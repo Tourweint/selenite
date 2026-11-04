@@ -8,6 +8,16 @@ import { z } from "zod";
 export const RoleSchema = z.enum(["system", "user", "assistant"]);
 export type Role = z.infer<typeof RoleSchema>;
 
+/**
+ * 思考强度档（2026-11-04 思考档位方案 D1）。
+ *
+ * 刻意只做内核档位集的一个子集：`minimal/xhigh/max` 上游没有实证、UI 也没有需求，
+ * 多一个值就等于多一条要验的上游路径。`off` 仍是"关思考变体"，其余三档走
+ * `reasoning_effort`（见 `接口文档.md` §2.4.1）。
+ */
+export const ThinkingLevelSchema = z.enum(["off", "low", "medium", "high"]);
+export type ThinkingLevel = z.infer<typeof ThinkingLevelSchema>;
+
 export const ChatMessageSchema = z.object({
   role: RoleSchema,
   content: z.string().min(1),
@@ -78,20 +88,25 @@ export type TurnPhase = "thinking" | "working";
  *
  * 判据：**加的成员必须能被"不认识的客户端"安全忽略**。分发一律看 `type`，
  * 老客户端遇到新类型直接跳过即可，所以 `progress` / `tool` 是纯增量（2026-11-03）。
+ *
+ * `seq`（2026-11-04，SSE seq 与断点重放方案）：**会话内**单调递增的事件序号，
+ * 从 1 起，每个成员都可以带。服务端先落库再外发；客户端重连时带 `sinceSeq`
+ * 到 `GET .../messages` 精确补缺帧。可选 = 老客户端与回滚开关（AGENT_SSE_SEQ=off）
+ * 两个场景都零感知。
  */
 export type ChatEvent =
 	/** conversationId 只在首轮有意义：新建会话时由服务端生成，客户端要存下来 */
-	| { type: "start"; id: string; conversationId: string }
-  | { type: "delta"; text: string }
+	| { type: "start"; id: string; conversationId: string; seq?: number }
+	| { type: "delta"; text: string; seq?: number }
 	/**
 	 * 思考正文增量（2026-11-04 批次一）。
 	 *
 	 * 与 `progress.phase=thinking` 的分工：那个只说"在想"，这个给"想了什么"。
 	 * deep 档才有内容；快档不发。客户端累计成段折叠展示，老客户端按 type 忽略。
 	 */
-	| { type: "thinking"; text: string }
+	| { type: "thinking"; text: string; seq?: number }
 	/** 在想 / 在动手。只有两次之间才有意义，客户端当状态用 */
-	| { type: "progress"; phase: TurnPhase }
+	| { type: "progress"; phase: TurnPhase; seq?: number }
 	/**
 	 * 一次工具调用的起止。start 与 end 成对，`name` 相同；
 	 * `label` 是能说明"在干什么"的那一个参数（路径 / 命令 / 查询），可能没有。
@@ -106,9 +121,10 @@ export type ChatEvent =
 			output?: string;
 			/** 调用参数（JSON，服务端截断到 1200 字符） */
 			args?: string;
+			seq?: number;
 	  }
-  | { type: "done"; id: string; finishReason: FinishReason; /** 本轮 token 用量（2026-11-04 批次一）；读不到就不带 */ usage?: TurnUsage }
-  | { type: "error"; message: string }
+  | { type: "done"; id: string; finishReason: FinishReason; /** 本轮 token 用量（2026-11-04 批次一）；读不到就不带 */ usage?: TurnUsage; seq?: number }
+  | { type: "error"; message: string; seq?: number }
 	/**
 	 * 派单进度（2026-11-03）。
 	 *
@@ -132,6 +148,7 @@ export type ChatEvent =
 			lastHeartbeat?: string;
 			/** 等文件租约时卡在哪个路径 */
 			waitingOn?: string;
+			seq?: number;
 	  }
 	/** 需要人回答：一条问题，不是一句"出错了"（2026-11-03） */
 	| {
@@ -140,7 +157,37 @@ export type ChatEvent =
 			domain: string;
 			kind: "need_input" | "need_decision" | "need_action";
 			question: string;
+			seq?: number;
+	  }
+	/**
+	 * 审批请求（2026-11-04 批次二）：写类工具执行前挂起，等客户端答复。
+	 *
+	 * `callId` 是答复端点（`POST /api/v1/agent/approvals/:callId`）的主键；
+	 * `args` 是工具参数 JSON（按 `tool` 事件口径截断到 1200 字符）；
+	 * `deadlineAt` 是 ISO 时间，过了就按拒绝处理（fail-closed）。
+	 * 手机走 OpenAI 兼容层、没有答复通道：不答复就是等到超时被拒。
+	 */
+	| {
+			type: "approval";
+			callId: string;
+			tool: string;
+			args: string;
+			deadlineAt: string;
+			seq?: number;
 	  };
+
+/**
+ * 会话事件重放响应里的事件行（2026-11-04，SSE seq 与断点重放方案）。
+ *
+ * 重放路径是 `GET .../messages` 的 `events` 字段：从客户端报的 `sinceSeq`
+ * 之后取已落库的事件。落库窗口有限（每会话只留最近 N 条），所以带
+ * `fromSeq`——重放的第一条的真实序号。客户端拿它发现"窗口已经滑过去了"
+ * （`fromSeq > sinceSeq + 1`），此时该全量重建，不能只补。
+ */
+export interface ReplayEvent {
+	/** 完整事件帧（含 seq）。 */
+	event: ChatEvent;
+}
 
 /** 任务单对外的阶段：按"在等谁"分，不按内部进度。 */
 export type DelegationPhase =

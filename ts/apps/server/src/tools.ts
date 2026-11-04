@@ -226,7 +226,7 @@ export function createTools(deps: ToolDeps) {
 						name: proposal.name,
 						path: proposal.relativePath,
 						message:
-							"已提交待确认：用户在工作区设置里确认后才会创建目录并登记。" +
+							"已提交待确认：用户在项目设置里确认后才会创建目录并登记。" +
 							"确认之前不要派工到它，也不要自己建这个目录。",
 					}),
 				);
@@ -431,11 +431,11 @@ export function createTools(deps: ToolDeps) {
 			if (ticketId) lastTicketByConversation.set(conversationId, ticketId);
 			if (project) lastProjectByConversation.set(conversationId, project);
 			if (receipts && requestId) {
-				if (ticketId) receipts.accept(requestId, ticketId);
+				if (ticketId) receipts.accept(requestId, ticketId, conversationId);
 				// 失败时回执要跟着落：拿到单号记 failed，没拿到记 uncertain（不自动重派）。
 				void outcome
 					.then((result) => {
-						if (result.ticketId) receipts.accept(requestId, result.ticketId);
+						if (result.ticketId) receipts.accept(requestId, result.ticketId, conversationId);
 					})
 					.catch(() => receipts.markFailed(requestId));
 			}

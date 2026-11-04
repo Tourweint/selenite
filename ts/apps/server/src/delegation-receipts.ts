@@ -22,6 +22,8 @@ export interface DelegationReceipt {
 	fingerprint: string;
 	/** accepting 时可能还是空串：回执先落，单号随受理补上。 */
 	ticketId: string;
+	/** 受理时的内部会话 id（A3a）。旧行没有这条信息，永远是 null。 */
+	conversationId: number | null;
 	outcome: ReceiptOutcome;
 	createdAt: string;
 	updatedAt: string;
@@ -56,6 +58,20 @@ export class DelegationReceipts {
 				updated_at TEXT NOT NULL
 			);
 		`);
+		this.migrate();
+	}
+
+	/** 旧库补 `conversation_id` 列（A3a）：旧行永远是 NULL，A3b 无法回填。 */
+	private migrate(): void {
+		const columns = this.db.prepare("PRAGMA table_info(delegation_receipts)").all() as Array<{
+			name?: unknown;
+		}>;
+		if (!columns.some((column) => column.name === "conversation_id")) {
+			this.db.exec("ALTER TABLE delegation_receipts ADD COLUMN conversation_id INTEGER");
+		}
+		this.db.exec(
+			"CREATE INDEX IF NOT EXISTS idx_delegation_receipts_ticket ON delegation_receipts(ticket_id);",
+		);
 	}
 
 	close(): void {
@@ -66,6 +82,21 @@ export class DelegationReceipts {
 		const row = this.db
 			.prepare("SELECT * FROM delegation_receipts WHERE request_id = ?")
 			.get(requestId) as Record<string, unknown> | undefined;
+		return row ? toReceipt(row) : null;
+	}
+
+	/**
+	 * 按任务单号反查受理回执（A3a 存下的 ticketId → 会话映射）。
+	 *
+	 * @internal A3b（恢复回灌）专用，当前无生产调用方。
+	 */
+	lookupByTicket(ticketId: string): DelegationReceipt | null {
+		// 同一单号被重新受理时取最后写入的那条（同毫秒并列看 rowid）
+		const row = this.db
+			.prepare(
+				"SELECT * FROM delegation_receipts WHERE ticket_id = ? ORDER BY updated_at DESC, rowid DESC LIMIT 1",
+			)
+			.get(ticketId) as Record<string, unknown> | undefined;
 		return row ? toReceipt(row) : null;
 	}
 
@@ -106,12 +137,28 @@ export class DelegationReceipts {
 		return { kind: "new", receipt: existing };
 	}
 
-	accept(requestId: string, ticketId: string): void {
+	/**
+	 * 受理成功：单号与（可选的）会话映射一起落库。
+	 *
+	 * `DELEGATION_MAP_PERSIST=false` 时不写 `conversation_id`（A3a 回滚开关）。
+	 * 每次调用都读 env，不在构造函数里缓存 —— 这样单测能在同一进程里切开关。
+	 */
+	accept(requestId: string, ticketId: string, conversationId?: number): void {
+		const now = new Date().toISOString();
+		// 判 `undefined` 而不是 truthy：会话 id 是自增整数，0 也是合法值
+		if (conversationId !== undefined && mapPersistEnabled()) {
+			this.db
+				.prepare(
+					"UPDATE delegation_receipts SET ticket_id = ?, outcome = 'accepted', conversation_id = ?, updated_at = ? WHERE request_id = ?",
+				)
+				.run(ticketId, conversationId, now, requestId);
+			return;
+		}
 		this.db
 			.prepare(
 				"UPDATE delegation_receipts SET ticket_id = ?, outcome = 'accepted', updated_at = ? WHERE request_id = ?",
 			)
-			.run(ticketId, new Date().toISOString(), requestId);
+			.run(ticketId, now, requestId);
 	}
 
 	/** 失败且没拿到单号 → uncertain；拿到单号 → failed（显式 id 仍返回原单）。 */
@@ -151,10 +198,19 @@ function toReceipt(row: Record<string, unknown>): DelegationReceipt {
 		requestId: text(row.request_id),
 		ticketId: text(row.ticket_id),
 		fingerprint: text(row.fingerprint),
+		conversationId:
+			row.conversation_id === null || row.conversation_id === undefined
+				? null
+				: Number(row.conversation_id),
 		outcome: (text(row.outcome) as ReceiptOutcome) || "accepting",
 		createdAt: text(row.created_at),
 		updatedAt: text(row.updated_at),
 	};
+}
+
+/** A3a 回滚开关：只有显式 "false" 才关；不配 = 落库。 */
+function mapPersistEnabled(): boolean {
+	return (process.env.DELEGATION_MAP_PERSIST?.trim() || "true").toLowerCase() !== "false";
 }
 
 function text(value: unknown): string {

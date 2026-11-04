@@ -19,6 +19,7 @@ const CONTENT_TYPES: Record<string, string> = {
 	".js": "text/javascript; charset=utf-8",
 	".css": "text/css; charset=utf-8",
 	".svg": "image/svg+xml",
+	".png": "image/png",
 };
 
 export function mountWeb(app: Hono): void {
@@ -38,7 +39,8 @@ export function mountWeb(app: Hono): void {
 		const type = CONTENT_TYPES[ext];
 		if (!type) return c.notFound();
 		try {
-			const body = await readFile(new URL(name, WEB_DIR), "utf8");
+			// 二进制读：.png 这类资源不能按 utf8 解码；文本资源发原始 UTF-8 字节也一样
+			const body = await readFile(new URL(name, WEB_DIR));
 			return c.body(body, 200, { "content-type": type, "cache-control": "no-store" });
 		} catch {
 			return c.notFound();

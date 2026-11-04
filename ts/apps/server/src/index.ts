@@ -8,8 +8,10 @@ import QRCode from "qrcode";
 import type { MemoryScope } from "@lifediary/memory";
 import {
   ChatRequestSchema,
+  ThinkingLevelSchema,
   type ChatEvent,
   type FinishReason,
+  type ThinkingLevel,
   type TurnUsage,
 } from "@lifediary/shared";
 import {
@@ -29,12 +31,14 @@ import {
   renameChat,
   restoreChats,
   sayInChat,
+  sayInConversation,
   searchTranscripts,
   setPolicy,
   stopChat,
   usageSummary,
 } from "./agent.ts";
 import { createAuthMiddleware } from "./auth.ts";
+import { ChatEventStore, sseSeqEnabled } from "./chat-events.ts";
 import { mountDiary } from "./diary.ts";
 import { mountOpenAiCompat } from "./openai-compat.ts";
 import { PairingStore, buildPairUrl, resolvePairBase } from "./pairing.ts";
@@ -42,12 +46,27 @@ import { pairPage } from "./pair-page.ts";
 import { mountPhoneWorker } from "./phone-worker.ts";
 import { mountProjects } from "./projects.ts";
 import { mountDelegationApi } from "./delegation-api.ts";
+import { mountApprovalApi } from "./approval-api.ts";
 import { mountWeb } from "./web.ts";
 import { mountWorkerShell } from "./worker-shell.ts";
 import { syncDiaryToMemory } from "./memory-ingest.ts";
-import { readLlmConfig, runtimeModelInfo, setRuntimeModel } from "./provider.ts";
+import {
+  currentThinkingLevels,
+  modelCatalog,
+  providerCatalog,
+  readLlmConfig,
+  removeProvider,
+  runtimeModelInfo,
+  saveProvider,
+  scheduleThinkingProbe,
+  setProviderSecret,
+  setRuntimeModel,
+} from "./provider.ts";
+import { injectProviderKeys } from "./provider-secrets.ts";
 import { chancellorWorkRoot } from "./delegation.ts";
-import { recoverDelegations } from "../../../../../chancellor/src/index.ts";
+import { DelegationReceipts } from "./delegation-receipts.ts";
+import { recoverReportEnabled, reportRecoveredTickets } from "./recovery-report.ts";
+import { recoverDelegations, type RecoveredTicket } from "../../../../../chancellor/src/index.ts";
 
 // Node 20.12+ 自带 .env 加载；文件不存在时静默跳过，不让本地启动被环境文件卡住。
 try {
@@ -55,6 +74,10 @@ try {
 } catch {
   /* no .env, that's fine */
 }
+
+// 2026-11-05 密钥直填：启动时把 .data/provider-keys.json 注入进程 env。
+// 必须放在 loadEnvFile 之后、任何模型配置读取之前——手写 .env / 部署 env 的已有值优先。
+injectProviderKeys();
 
 const app = new Hono();
 
@@ -64,7 +87,7 @@ app.use(
   "*",
   cors({
     origin: "*",
-    allowMethods: ["GET", "POST", "OPTIONS"],
+    allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     // X-Conversation-Id 是兼容层的会话绑定头，X-Task 是任务通道的任务名（原生客户端不发预检，但浏览器/WebView 会）
     allowHeaders: ["Content-Type", "Authorization", "X-Conversation-Id", "X-Task", "Accept"],
   }),
@@ -78,6 +101,15 @@ const pairing = new PairingStore();
 const auth = createAuthMiddleware(process.env.AGENT_TOKEN?.trim() || null, {
   verifyDeviceToken: (token) => pairing.verifyDeviceToken(token),
 });
+
+// SSE 事件重放库（2026-11-04 seq 方案）。惰性建：回滚开关关着就永远不建库。
+// 库路径可用 AGENT_SSE_SEQ_DB_PATH 覆盖（探针用），默认 .data/chat-events.sqlite。
+let chatEventStore: ChatEventStore | undefined;
+const chatEventStoreOf = (): ChatEventStore | undefined => {
+  if (!sseSeqEnabled()) return undefined;
+  chatEventStore ??= new ChatEventStore();
+  return chatEventStore;
+};
 const PAIR_OPEN_PATHS = new Set(["/api/v1/pair/info", "/api/v1/pair/redeem"]);
 app.use("/api/v1/*", async (c, next) => {
   if (PAIR_OPEN_PATHS.has(c.req.path)) return next();
@@ -116,6 +148,9 @@ mountProjects(app);
 // 任务中心只读接口（2026-11-03 方案 §5.9）：领域列表 + 单 ticket 明细。
 mountDelegationApi(app);
 
+// 审批答复（2026-11-04 批次二）：待批列表 + 幂等答复。开关关着时列表恒为空。
+mountApprovalApi(app);
+
 // 界面（2026-11-03）：原来那张 M0 调试页换成了真界面，仍然是同源静态文件。
 // 桌面壳和浏览器打开的都是这个 `/`。
 mountWeb(app);
@@ -124,7 +159,7 @@ mountWeb(app);
 const SERVER_VERSION = "0.1.0";
 
 function currentPort(): number {
-  return Number(process.env.PORT ?? 8082);
+  return Number(process.env.PORT ?? 39847);
 }
 
 /**
@@ -271,36 +306,80 @@ app.get("/api/v1/agent/policy", (c) => c.json(getPolicy()));
 
 app.post("/api/v1/agent/policy", async (c) => {
   const body = (await c.req.json().catch(() => null)) as
-    | { access?: string; blocked?: string[] }
+    | { access?: string; blocked?: string[]; confirmWrites?: unknown }
     | null;
   const access = body?.access;
   if (access && access !== "full" && access !== "read-only" && access !== "no-shell") {
     return c.json({ error: "bad_request", message: "access 只能是 full / read-only / no-shell" }, 400);
   }
+  if (body && "confirmWrites" in body && typeof body.confirmWrites !== "boolean") {
+    return c.json({ error: "bad_request", message: "confirmWrites 只能是布尔值" }, 400);
+  }
   const next = setPolicy({
     ...(access ? { access: access as "full" | "read-only" | "no-shell" } : {}),
     ...(Array.isArray(body?.blocked) ? { blocked: body!.blocked! } : {}),
+    ...(typeof body?.confirmWrites === "boolean" ? { confirmWrites: body.confirmWrites } : {}),
   });
   return c.json({ ok: true, ...next });
 });
 
-/** 快档 / 深档（同一个模型，区别只在思考开关） */
+/**
+ * 思考强度档（2026-11-04 思考档位方案 D4）：同一个模型的四条思考变体，不换模型。
+ *
+ * body：`{ thinking: "off"|"low"|"medium"|"high" }`；旧 `{ mode: "fast"|"deep" }` 兼容映射
+ * （fast→off、deep→high）。按**当前模型支持域**校验：未知值或未声明档位 → 400。
+ * 写入即 configure 持久化到 durable 会话（重启保留）；faux 下 chatModelRef 原样返回，空操作 ok。
+ */
 app.post("/api/v1/agent/chat/:conversationId/mode", async (c) => {
   if (!readLlmConfig()) return c.json({ ok: false, reason: "llm_not_configured" }, 503);
-  const body = (await c.req.json().catch(() => null)) as { mode?: string } | null;
-  const mode = body?.mode === "deep" ? "deep" : body?.mode === "fast" ? "fast" : null;
-  if (!mode) return c.json({ error: "bad_request", message: "mode 只能是 fast / deep" }, 400);
+  const body = (await c.req.json().catch(() => null)) as
+    | { thinking?: unknown; mode?: unknown }
+    | null;
+  const level = parseThinkingLevel(body);
+  if (!level) {
+    return c.json(
+      {
+        error: "bad_request",
+        message: "thinking 只能是 off / low / medium / high（旧 mode 兼容 fast / deep）",
+      },
+      400,
+    );
+  }
+  // 支持域不在 = 上游大概率 400（medium 对 glm-5.3 实测如此）；在入口说清楚，别让它变成一次失败的生成
+  const supported = currentThinkingLevels();
+  if (!supported.includes(level)) {
+    return c.json(
+      {
+        error: "bad_request",
+        message: `当前模型不支持思考档 ${level}；支持：${supported.join(" / ")}`,
+      },
+      400,
+    );
+  }
 
   const chat = await openChat(c.req.param("conversationId"));
   if (!chat) return c.json({ error: "unknown_conversation" }, 404);
-  await applyChatMode(chat, mode);
-  return c.json({ ok: true, mode });
+  await applyChatMode(chat, level);
+  return c.json({ ok: true, thinking: level });
 });
+
+/** 新体 `{thinking}` 优先；没有就按旧体 `{mode}` 映射（2026-11-04 思考档位 D4） */
+function parseThinkingLevel(body: { thinking?: unknown; mode?: unknown } | null): ThinkingLevel | null {
+  if (typeof body?.thinking === "string") {
+    const parsed = ThinkingLevelSchema.safeParse(body.thinking.trim().toLowerCase());
+    return parsed.success ? parsed.data : null;
+  }
+  const legacy = typeof body?.mode === "string" ? body.mode.trim().toLowerCase() : "";
+  if (legacy === "fast") return "off";
+  if (legacy === "deep") return "high";
+  return null;
+}
 
 
 app.get("/healthz", (c) => {
-  // model/models 是给设置页「服务」分区的（2026-11-04）：当前模型 + 可切清单。
-  // mock 时 model=null；faux 时 model="faux"、清单为空——两种都不可切。
+  // model/models 给"这台机器现在用什么模型"一个扁平答案（2026-11-04 批次五）：
+  // models 语义收窄为**默认供应商的清单**；要分组 / 要 key 状态请走 /agent/model 与 /agent/providers。
+  // mock 时 model=null；faux 时 model="faux"、清单为空。
   const info = runtimeModelInfo();
   return c.json({
     ok: true,
@@ -311,22 +390,93 @@ app.get("/healthz", (c) => {
 });
 
 /**
- * 运行时切换模型（2026-11-04，接口文档 §2.8）：改的是覆盖值，env 是出厂默认；
+ * composer 投影（2026-11-04 批次五，接口文档 §2.8）：当前选择 + 可选供应商。
+ * 刻意不含 baseUrl / keyEnv：那是设置页的投影，composer 不需要上游地址。
+ */
+app.get("/api/v1/agent/model", (c) => c.json(modelCatalog()));
+
+/**
+ * 运行时切换模型（2026-11-04，接口文档 §2.8）：改的是选择，env / 文件是默认；
  * 下一轮对话生效，校验与持久化都在 provider.ts 的 setRuntimeModel 里。
  */
 app.post("/api/v1/agent/model", async (c) => {
-  const body = (await c.req.json().catch(() => null)) as { model?: string } | null;
-  const model = body?.model?.trim();
-  if (!model) return c.json({ error: "bad_request", message: "需要 model" }, 400);
+  const body = (await c.req.json().catch(() => null)) as
+    | { model?: unknown; modelId?: unknown; providerId?: unknown }
+    | null;
+  // 兼容旧形状 `{model}`：不区分供应商时按默认供应商解析
+  const legacy = typeof body?.model === "string" ? body.model.trim() : "";
+  const modelId = typeof body?.modelId === "string" ? body.modelId.trim() : legacy;
+  const providerId = typeof body?.providerId === "string" ? body.providerId.trim() : undefined;
+  if (!modelId) return c.json({ error: "bad_request", message: "需要 modelId（或旧的 model）" }, 400);
 
-  const result = setRuntimeModel(model);
+  const result = setRuntimeModel({ modelId, ...(providerId ? { providerId } : {}) });
   if (!result.ok) {
     const status = result.reason === "llm_not_configured" ? 503 : 400;
     return c.json({ error: result.reason, message: result.message }, status);
   }
-  // 模型 id 不是对话内容，可以进日志
-  console.log(`[model] 运行时切换 → ${result.model}`);
-  return c.json({ ok: true, model: result.model, models: result.models });
+  // 模型 id / 供应商 id 不是对话内容，可以进日志
+  console.log(`[model] 运行时切换 → ${result.provider}/${result.model}`);
+  // 2026-11-04 D1：从没声明过档位的模型，切过去后后台探一遍（不阻塞本响应、不进响应体）。
+  // 已声明 / faux / MODEL_PROBE_LEVELS=false 都在 provider.ts 内部直接挡掉。
+  scheduleThinkingProbe(result.provider, result.model);
+  // model / models 是旧字段（现有 web 与兼容层依赖），provider 是新增
+  return c.json({ ok: true, provider: result.provider, model: result.model, models: result.models });
+});
+
+/** 设置页投影（接口文档 §2.10）：比 composer 多 baseUrl / keyEnv / isDefault，仍无密钥值 */
+app.get("/api/v1/agent/providers", (c) => c.json(providerCatalog()));
+
+/** 新增 / 更新供应商；`test:true` 不写文件。密钥只出现在 env 里，请求只带变量名。 */
+app.post("/api/v1/agent/providers", async (c) => {
+  const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+  if (!body || typeof body !== "object") {
+    return c.json({ error: "bad_request", message: "需要 JSON 请求体" }, 400);
+  }
+  // 显式拒收密钥值字段（不是静默忽略）：这里只接受环境变量名
+  for (const field of ["apiKey", "key", "headers"]) {
+    if (field in body) {
+      return c.json(
+        { error: "secret_field_forbidden", message: `${field} 不允许出现：只填 keyEnv 变量名，值放 .env` },
+        400,
+      );
+    }
+  }
+  const text = (value: unknown) => (typeof value === "string" ? value : undefined);
+  const result = await saveProvider({
+    id: text(body.id),
+    previousId: text(body.previousId),
+    name: text(body.name),
+    baseUrl: text(body.baseUrl),
+    keyEnv: text(body.keyEnv),
+    models: body.models,
+    modelsUrl: text(body.modelsUrl),
+    test: body.test === true,
+  });
+  if (!result.ok) return c.json({ error: result.error, message: result.message }, result.status);
+  return c.json({
+    ok: true,
+    provider: result.provider,
+    ...(result.message ? { message: result.message } : {}),
+  });
+});
+
+/**
+ * 密钥直填（2026-11-05，接口文档 §2.10）：界面填的 API Key 落服务端密钥文件并热注入 env。
+ * 响应只回变量名，**绝不回显密钥值**；providers.json 仍然只存 keyEnv。
+ */
+app.put("/api/v1/agent/providers/:id/secret", async (c) => {
+  const body = (await c.req.json().catch(() => null)) as { apiKey?: unknown } | null;
+  const apiKey = typeof body?.apiKey === "string" ? body.apiKey : "";
+  const result = setProviderSecret(c.req.param("id"), apiKey);
+  if (!result.ok) return c.json({ error: result.error, message: result.message }, result.status);
+  return c.json({ ok: true, keyEnv: result.keyEnv });
+});
+
+/** 删除供应商：默认 / 当前选中的一律 400（接口文档 §2.10 的不变量） */
+app.delete("/api/v1/agent/providers/:id", (c) => {
+  const result = removeProvider(c.req.param("id"));
+  if (!result.ok) return c.json({ error: result.error, message: result.message }, result.status);
+  return c.json({ ok: true });
 });
 
 app.post("/api/v1/agent/chat", async (c) => {
@@ -360,8 +510,21 @@ app.post("/api/v1/agent/chat", async (c) => {
   return streamSSE(c, async (stream) => {
     const id = crypto.randomUUID();
 
-    const send = (event: ChatEvent) =>
-      stream.writeSSE({ data: JSON.stringify(event) });
+    // seq 链（2026-11-04 seq 方案）：先落库再外发。落库失败的帧不外发——
+    // 宁可客户端重拉，也不发"承诺过却补不回来"的帧。开关关着时 store 为空，退回直发。
+    // 注意落库的是**带 seq 的帧**：重放出来必须和实发的一模一样（http 探针 §13 实测踩过）。
+    const eventStore = chatEventStoreOf();
+    const nextSeq = eventStore ? () => eventStore.nextSeq(chat.internalId) : null;
+    const send = async (event: ChatEvent) => {
+      if (eventStore && nextSeq) {
+        const seq = nextSeq();
+        const stamped = { ...event, seq } as ChatEvent;
+        await eventStore.append(chat.internalId, seq, stamped);
+        await stream.writeSSE({ data: JSON.stringify(stamped) });
+        return;
+      }
+      await stream.writeSSE({ data: JSON.stringify(event) });
+    };
 
     const startedAt = Date.now();
     let chars = 0;
@@ -410,6 +573,8 @@ app.post("/api/v1/agent/chat", async (c) => {
           // 把多张单分开归并；老客户端按 type 分发，认不出的类型直接忽略。
           event.type === "delegate" ||
           event.type === "attention" ||
+          // 审批（2026-11-04 批次二）：写类工具等客户端答复，属纯增量事件
+          event.type === "approval" ||
           // 思考正文增量（2026-11-04 批次一），同属纯增量事件
           event.type === "thinking"
         ) {
@@ -460,6 +625,10 @@ app.post("/api/v1/agent/chat", async (c) => {
  *
  * 一轮对话现在可以在没有客户端看着的情况下跑完，所以客户端下次打开必须能把结果拉回来 ——
  * 否则"关掉界面它照样跑完"对用户没有意义。
+ *
+ * `sinceSeq`（2026-11-04 seq 方案）：带上后响应多 `fromSeq` + `events`（seq > sinceSeq 的
+ * 已落库帧），断线重连的客户端据此补帧。`fromSeq > sinceSeq + 1` = 窗口滑过，须全量重建。
+ * 不带时响应形状与改动前完全一致；回滚开关关着时同样忽略。
  */
 app.get("/api/v1/agent/chat/:conversationId/messages", async (c) => {
   if (!readLlmConfig()) return c.json({ messages: [] });
@@ -469,7 +638,18 @@ app.get("/api/v1/agent/chat/:conversationId/messages", async (c) => {
 
   const limit = Number(c.req.query("limit") ?? 50);
   const messages = await readTranscript(chat, Number.isFinite(limit) ? limit : 50);
-  return c.json({ conversationId: chat.externalId, messages });
+
+  const sinceRaw = c.req.query("sinceSeq");
+  const eventStore = chatEventStoreOf();
+  if (sinceRaw === undefined || sinceRaw === "" || !eventStore) {
+    return c.json({ conversationId: chat.externalId, messages });
+  }
+  const sinceSeq = Number(sinceRaw);
+  if (!Number.isFinite(sinceSeq) || sinceSeq < 0) {
+    return c.json({ error: "bad_request", message: "sinceSeq 必须是非负整数" }, 400);
+  }
+  const { from, events } = eventStore.replaySince(chat.internalId, Math.floor(sinceSeq));
+  return c.json({ conversationId: chat.externalId, messages, fromSeq: from, events });
 });
 
 /**
@@ -580,7 +760,7 @@ app.post("/api/v1/agent/reminders", async (c) => {
   return c.json({ ok: true, taskId, conversationId: chat.externalId }, 201);
 });
 
-const port = Number(process.env.PORT ?? 8082);
+const port = Number(process.env.PORT ?? 39847);
 
 serve({ fetch: app.fetch, port }, (info) => {
   const mode = readLlmConfig() ? "真实上游" : "mock（未配置 LLM_API_KEY）";
@@ -595,13 +775,21 @@ serve({ fetch: app.fetch, port }, (info) => {
   }
   // 2026-11-04：派单崩溃恢复。只结算上一进程留下的 inflight 单：
   // 没跨合并点的自动续一次，跨过的转「待你处理」。只记计数，不记内容。
-  void recoverDelegations(chancellorWorkRoot(), { log: (line) => console.log(line) })
-    .then((summary) => {
+  // 批次四（A3b）：逐单收结果，结算完把终态单写回原对话（一行状态，不是结果正文）。
+  const recovered: RecoveredTicket[] = [];
+  void recoverDelegations(chancellorWorkRoot(), {
+    log: (line) => console.log(line),
+    onTicket: (entry) => {
+      recovered.push(entry);
+    },
+  })
+    .then(async (summary) => {
       if (summary.scanned > 0) {
         console.log(
           `[恢复] 扫描 ${summary.scanned}：仍在跑 ${summary.stillRunning}，已终态 ${summary.finished}，自动续跑 ${summary.resumed}，转待你处理 ${summary.needsYou}，未知 ${summary.unknown}`,
         );
       }
+      await reportRecoveries(recovered);
     })
     .catch((error: unknown) => {
       console.warn(
@@ -620,11 +808,42 @@ serve({ fetch: app.fetch, port }, (info) => {
 
 export { app };
 
-/** 未配置 key 时的回显流：证明 SSE 通路、首字节时机、中止行为都正常。 */
+/**
+ * 把启动恢复的逐单结算结果回灌原对话（2026-11-04 批次四 A3b）。
+ *
+ * 只写一行状态：恢复手里没有任务结果正文。失败只 warn —— 汇总已经进日志，
+ * 回灌不是启动的必要条件。开关关或没有模型配置时连回执库都不打开。
+ */
+async function reportRecoveries(entries: RecoveredTicket[]): Promise<void> {
+  if (entries.length === 0 || !recoverReportEnabled() || !readLlmConfig()) return;
+
+  const receipts = new DelegationReceipts();
+  try {
+    const sent = await reportRecoveredTickets(entries, {
+      receipts,
+      say: async (conversationId, text) => {
+        await sayInConversation(conversationId, text);
+      },
+      log: (line) => console.warn(line),
+    });
+    if (sent > 0) console.log(`[恢复] 已回灌 ${sent} 条状态行`);
+  } catch (error) {
+    console.warn(
+      `[恢复] 回灌失败（不影响服务）: ${error instanceof Error ? error.message : error}`,
+    );
+  } finally {
+    receipts.close();
+  }
+}
+
+/**
+ * 未配置 key 时的回显流：证明 SSE 通路、首字节时机、中止行为都正常。
+ * mock **不建会话、不写库**，所以也没有事件可落——seq 方案下同样直发不带 seq
+ * （接口文档 §2.1"未配置模型"口径：这条流从来不是重放通道）。
+ */
 function streamMock(c: Context, messages: { role: string; content: string }[]) {
   const conversationId = crypto.randomUUID();
-  const last = messages.at(-1)?.content ?? "";
-  // 回复里带代码块 + 表格：界面渲染（高亮/复制按钮/markdown/表格）在无 key 环境也有得验
+  const last = messages.at(-1)?.content ?? "";  // 回复里带代码块 + 表格：界面渲染（高亮/复制按钮/markdown/表格）在无 key 环境也有得验
   const codeExample = [
     "",
     "顺便验证代码块的渲染与复制：",

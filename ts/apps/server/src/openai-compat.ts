@@ -1,18 +1,19 @@
 import { createHash, randomUUID } from "node:crypto";
 import { streamSSE } from "hono/streaming";
 import type { Context, Hono } from "hono";
-import type { ChatMessage } from "@lifediary/shared";
+import type { ChatMessage, ThinkingLevel } from "@lifediary/shared";
 import {
 	applyChatMode,
 	chatStream,
 	configureTaskChat,
-	isThinkingOn,
+	conversationThinkingLevel,
 	openChat,
 	openOrCreateChat,
+	stickyThinkingLevel,
 	TASK_CONVERSATION_PREFIX,
 	taskMemoryBlock,
 } from "./agent.ts";
-import { chatModelRef, readLlmConfig, taskModelRef, upstreamModelId } from "./provider.ts";
+import { chatModelRef, readLlmConfig, taskModelRef } from "./provider.ts";
 import { renderTask, resolveTask, taskLabel, taskNames, TaskRenderError } from "./tasks.ts";
 import { classifyTurn, jevMode } from "./typesafe.ts";
 
@@ -105,33 +106,6 @@ function conversationIdFor(
 	const firstUser = messages.find((message) => message.role === "user")?.content ?? "";
 	const digest = createHash("sha256").update(firstUser).digest("hex").slice(0, 32);
 	return `oa-${digest}`;
-}
-
-function isFaux(): boolean {
-	return (process.env.LLM_PROVIDER ?? "").trim().toLowerCase() === "faux";
-}
-
-interface UpstreamConfig {
-	url: string;
-	apiKey: string;
-	model: string;
-}
-
-/** 直通路径要的上游三要素；没配 key 时返回 null（与 Agent 路径同口径：503） */
-function upstreamConfig(): UpstreamConfig | null {
-	const apiKey = process.env.LLM_API_KEY?.trim();
-	if (!apiKey) return null;
-	const baseUrl = (
-		process.env.LLM_BASE_URL?.trim() ||
-		"https://dashscope.aliyuncs.com/compatible-mode/v1"
-	).replace(/\/+$/, "");
-	return {
-		url: `${baseUrl}/chat/completions`,
-		apiKey,
-		// 跟随运行时覆盖（设置页切模型，2026-11-04）；faux/mock 下是 null，
-		// 直通路径在那两种模式下本来就不可用，回落到 env 只是为了保住旧默认值语义
-		model: upstreamModelId() ?? (process.env.LLM_MODEL?.trim() || "qwen-plus"),
-	};
 }
 
 /** 取一个 OpenAI chunk 里的增量文本（上游也按这个协议回，解析失败一律当无内容） */
@@ -248,37 +222,59 @@ export function mountOpenAiCompat(app: Hono): void {
 	});
 }
 
+/**
+ * 本轮档位（2026-11-04 思考档位方案 D4）。
+ *
+ * 优先级（`接口文档.md` §2.4.1）：`X-Mode` > 会话已是非 off 档 > Jev gate > 默认 off。
+ * "会话已是非 off"读的是 durable 模型引用里的 `#think-<档>`，所以 D3 切过、
+ * `/mode` 设过、进程重启过都认得（旧的 `#think-on` 按 high 解释）。
+ * 越界档位由 applyChatMode 按支持域落回，这里只管"想要哪一档"。
+ */
 async function decideMode(
 	header: string | undefined,
 	conversationId: string,
 	internalId: number,
+	current: ThinkingLevel | null,
 	messages: ChatMessage[],
-): Promise<"fast" | "deep"> {
-	const requested = header?.trim().toLowerCase();
-	if (requested === "fast" || requested === "deep") return requested;
-	// 这条会话已切到思考开（D3 切过）→ 保持，别在思考中间抖回快档
-	if (isThinkingOn(internalId)) return "deep";
-	if (jevMode() !== "gate") return "fast";
+): Promise<ThinkingLevel> {
+	const requested = levelFromHeader(header);
+	if (requested) return requested;
+	// 这条会话已经不在 off（D3 切过 / /mode 设过）→ 保持，别在思考中间抖回关
+	if (current && current !== "off") return current;
+	const sticky = stickyThinkingLevel(internalId);
+	if (sticky) return sticky;
+	if (jevMode() !== "gate") return "off";
 
 	const recent = messages
 		.filter((m) => m.role === "user" || m.role === "assistant")
 		.slice(-3)
 		.map((m) => ({ role: m.role as "user" | "assistant", text: m.content }));
 	// 超时兜底：Jev 经代理的实测延迟在 0.9–2.8s 之间抖，卡太久等于把"新会话第一句"拖慢。
-	// 超过 JEV_TIMEOUT_MS（默认 1200）就当没判出来 → 直接走快档，宁可快也不要等。
+	// 超过 JEV_TIMEOUT_MS（默认 1200）就当没判出来 → 直接 off，宁可快也不要等。
 	const timeoutMs = Number(process.env.JEV_TIMEOUT_MS ?? 1200);
 	const verdict = await classifyTurn(
 		{ recent, today: new Date().toISOString().slice(0, 10), turnCount: messages.length },
 		Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 1200,
 	);
-	if (!verdict) return "fast";
+	if (!verdict) return "off";
 
-	const deep = verdict.choice !== "reply_direct" || verdict.confidence < 0.6;
+	// deep_think → high；reply_direct（且够自信）→ off；其余/低置信 = 保守 → high
+	const confidentDirect = verdict.choice === "reply_direct" && verdict.confidence >= 0.6;
+	const level: ThinkingLevel = confidentDirect ? "off" : "high";
 	console.log(
-		`[jev ${conversationId}] 新会话选档=${deep ? "deep" : "fast"} route=${verdict.choice} ` +
+		`[jev ${conversationId}] 新会话选档=${level} route=${verdict.choice} ` +
 			`conf=${verdict.confidence.toFixed(2)} ms=${verdict.ms}`,
 	);
-	return deep ? "deep" : "fast";
+	return level;
+}
+
+/** `X-Mode` 解析：新值四档 + 旧别名 fast→off、deep→high；不认识当没给 */
+function levelFromHeader(header: string | undefined): ThinkingLevel | null {
+	const value = header?.trim().toLowerCase();
+	if (value === "off" || value === "low" || value === "medium" || value === "high") return value;
+	if (value === "fast") return "off";
+	if (value === "deep") return "high";
+	return null;
 }
 
 /**
@@ -346,7 +342,7 @@ interface TaskContext {
 	// 2026-10-31 方案 D2：默认档 = 思考关变体（不再用 fastModel 装配，那是部署别名了）。
 	const chat =
 		(await openChat(conversationId)) ??
-		(await openOrCreateChat(conversationId, readLlmConfig() ? chatModelRef(false) : undefined));
+		(await openOrCreateChat(conversationId, readLlmConfig() ? chatModelRef("off") : undefined));
 
 	if (task) {
 		// 任务通道：不判快/深档（任务一律用深档 + 客户端给的采样参数），
@@ -371,8 +367,14 @@ interface TaskContext {
 				` rf=${body.response_format ? "on" : "-"}`,
 		);
 	} else {
-		const mode = await decideMode(c.req.header("X-Mode"), conversationId, chat.internalId, messages);
-		await applyChatMode(chat, mode);
+		const level = await decideMode(
+			c.req.header("X-Mode"),
+			conversationId,
+			chat.internalId,
+			await conversationThinkingLevel(chat),
+			messages,
+		);
+		await applyChatMode(chat, level);
 	}
 
 	const input = {
@@ -396,7 +398,10 @@ interface TaskContext {
 					event.type === "attention" ||
 					// 思考增量 / 内部用量事件（2026-11-04 批次一）：OpenAI 协议没有对应位，跳过
 					event.type === "thinking" ||
-					event.type === "usage"
+					event.type === "usage" ||
+					// 审批（2026-11-04 批次二）：手机不进聊天流，审批走全局待办轮询
+					// （GET /agent/approvals 不带 conversationId），非流式响应不注入审批正文。
+					event.type === "approval"
 				) {
 					continue;
 				}
@@ -490,6 +495,22 @@ interface TaskContext {
 								domain: event.domain,
 								kind: event.kind,
 								question: event.question,
+							},
+						}),
+					});
+					continue;
+				}
+				// 审批（2026-11-04 批次二）：照 lifediary_attention 的惯例透传非标字段。
+				// 手机不进聊天流，审批改走全局待办轮询；这个字段保留只为兼容，手机不再依赖。
+				if (event.type === "approval") {
+					await stream.writeSSE({
+						data: JSON.stringify({
+							object: "chat.completion.chunk",
+							lifediary_approval: {
+								callId: event.callId,
+								tool: event.tool,
+								args: event.args,
+								deadlineAt: event.deadlineAt,
 							},
 						}),
 					});

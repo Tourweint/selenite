@@ -8,7 +8,7 @@ import type { MemoryStore } from "./store.ts";
  * 以后加向量、加图召回，只要把新路数并进 score 即可，接口不变。
  *
  * TODO(细节):
- *   - 语义召回（embedding 或 FTS5；当前是子串匹配）
+ *   - 语义召回（embedding；FTS5 trigram 已用于候选集，2026-11-04 批次三）
  *   - MMR 去冗余（mnemopi 有实现，召回 10 条里有 8 条说同一件事很浪费预算）
  *   - 时间感知（"上周说的"这类相对时间）
  */
@@ -22,15 +22,47 @@ const DAY_MS = 86_400_000;
 /** 记忆的"保鲜期"：超过这个天数，新近度几乎归零 */
 const RECENCY_HALFLIFE_DAYS = 21;
 
+/**
+ * 候选窗口下限的默认值（2026-11-04 批次一 A2-S）。
+ *
+ * 200 是 **global + 当前会话合并后**的总窗口：近期会话记忆多时，
+ * 老 global 记忆仍可能被挤出窗口（真修复是文本检索入口，批次三）。
+ */
+const DEFAULT_CANDIDATE_FLOOR = 200;
+
+export interface WeightedRetrieverOptions {
+	/** 候选窗口下限；50 = A2-S 之前的旧行为。 */
+	candidateFloor?: number;
+}
+
 export class WeightedRetriever implements Retriever {
+	private readonly candidateFloor: number;
+
+	constructor(options: WeightedRetrieverOptions = {}) {
+		this.candidateFloor = options.candidateFloor ?? DEFAULT_CANDIDATE_FLOOR;
+	}
+
 	recall(query: RecallQuery, store: MemoryStore, now: Date = new Date()): RecallHit[] {
 		const limit = query.limit ?? 8;
-		const candidates = store.search({
+		// 多取一些再排序，避免 SQL 的 LIMIT 提前把高分项切掉
+		const windowLimit = Math.max(limit * 5, this.candidateFloor);
+		const text = query.text?.trim() ? query.text : undefined;
+
+		// text 只是候选集来源提示（2026-11-04 批次三）：store 自己决定用不用，
+		// 短查询 / 没有 FTS 时它会忽略 text 走原窗口 SQL。
+		const baseSearch = {
 			scopes: query.scopes,
 			since: query.since,
-			// 多取一些再排序，避免 SQL 的 LIMIT 提前把高分项切掉
-			limit: Math.max(limit * 5, 50),
-		});
+			limit: windowLimit,
+		};
+		// 候选集 = 文本命中 ∪ 最近窗口（2026-11-04 验收修订）：FTS 捞回相关的老条目，
+		// 窗口保住"最近的上下文"，两者都要——只用文本命中时，命中 1 条候选池就从 200 缩到 1。
+		const byId = new Map<string, MemoryRecord>();
+		if (text) {
+			for (const record of store.search({ ...baseSearch, text })) byId.set(record.id, record);
+		}
+		for (const record of store.search(baseSearch)) byId.set(record.id, record);
+		const candidates = [...byId.values()];
 
 		const keywords = extractKeywords(query.text);
 		const hits: RecallHit[] = [];

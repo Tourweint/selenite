@@ -24,6 +24,17 @@ import type { Context, Hono } from "hono";
  */
 
 const DEFAULT_DB_PATH = ".data/projects.sqlite";
+/** project_state 里存"当前项目"的键 */
+const CURRENT_PROJECT_KEY = "current_project_id";
+
+/**
+ * 回滚开关：`CURRENT_PROJECT=false` 时"当前项目"整体旁路
+ * （PUT 一律 400 `current_project_disabled`，GET 恒 null，cwd / 系统提示不注入）。
+ * 缺省开；每次现读 env，探针与单测可以随时切换。
+ */
+export function currentProjectEnabled(): boolean {
+	return (process.env.CURRENT_PROJECT?.trim() || "true").toLowerCase() !== "false";
+}
 
 export type Vcs = "git" | "none";
 
@@ -112,6 +123,10 @@ CREATE TABLE IF NOT EXISTS project_proposals (
 	decided_at    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_proposals_status ON project_proposals(status);
+CREATE TABLE IF NOT EXISTS project_state (
+	key   TEXT PRIMARY KEY,
+	value TEXT
+);
 `;
 
 type Row = Record<string, unknown>;
@@ -315,6 +330,8 @@ export class ProjectsStore {
 		const current = this.getWorkspace();
 		if (current && samePath(current.rootPath, real)) return current;
 		this.db.prepare("DELETE FROM workspaces").run();
+		// 当前项目与工作区同生命周期：换根即回主工作区（旧项目可能已不在新根内）。
+		this.writeCurrentProjectId(null);
 		const workspace: Workspace = { id: randomUUID(), rootPath: real, createdAt: now };
 		this.db
 			.prepare("INSERT INTO workspaces (id, root_path, created_at) VALUES (?, ?, ?)")
@@ -344,6 +361,83 @@ export class ProjectsStore {
 		return byName ? projectFromRow(byName) : null;
 	}
 
+	/** 当前项目 id（原始值，可能指向已删/已归档/已移出工作区的项目）。 */
+	getCurrentProjectId(): string | null {
+		const row = this.db
+			.prepare("SELECT value FROM project_state WHERE key = ?")
+			.get(CURRENT_PROJECT_KEY) as Row | undefined;
+		const id = row ? text(row.value) : "";
+		return id || null;
+	}
+
+	private writeCurrentProjectId(id: string | null): void {
+		if (id === null) {
+			this.db.prepare("DELETE FROM project_state WHERE key = ?").run(CURRENT_PROJECT_KEY);
+			return;
+		}
+		this.db
+			.prepare(
+				"INSERT INTO project_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+			)
+			.run(CURRENT_PROJECT_KEY, id);
+	}
+
+	/**
+	 * 当前项目（每轮现读，不缓存陈旧值）。
+	 * 目录不存在、已归档、或已不在工作区内时返回 null —— 与"切了下轮才生效"同口径：
+	 * 不在读取时把过期状态带进 cwd / 系统提示。
+	 */
+	getCurrentProject(): Project | null {
+		if (!currentProjectEnabled()) return null;
+		const id = this.getCurrentProjectId();
+		if (!id) return null;
+		const row = this.db.prepare("SELECT * FROM projects WHERE id = ?").get(id) as Row | undefined;
+		if (!row) return null;
+		const project = projectFromRow(row);
+		if (project.archived) return null;
+		// 目录没了就不算"当前项目"：cwd 与系统提示回主工作区，别把失效路径带进下一轮。
+		if (!existsSync(project.rootPath)) return null;
+		const workspace = this.getWorkspace();
+		if (!workspace) return null;
+		const realWorkspace = realpathOr(workspace.rootPath);
+		const realRoot = realpathOr(project.rootPath);
+		if (!realRoot || !isInside(realWorkspace, realRoot)) return null;
+		return { ...project, rootPath: realRoot };
+	}
+
+	/**
+	 * 切换当前项目（`null` = 回主工作区）。
+	 * 校验顺序按接口文档 §2.7：未登记/已归档 → unknown_project；目录不存在 → project_missing；
+	 * 在工作区外 → outside_workspace。成功返回落库的 id。
+	 */
+	setCurrentProject(projectId: string | null): string | null {
+		if (!currentProjectEnabled()) {
+			throw new ProjectError("current_project_disabled", "当前项目功能已关闭（CURRENT_PROJECT=false）");
+		}
+		if (projectId === null) {
+			this.writeCurrentProjectId(null);
+			return null;
+		}
+		const value = projectId.trim();
+		const row = value
+			? (this.db.prepare("SELECT * FROM projects WHERE id = ?").get(value) as Row | undefined)
+			: undefined;
+		if (!row) throw new ProjectError("unknown_project", "没有这个已登记项目");
+		const project = projectFromRow(row);
+		if (project.archived) throw new ProjectError("unknown_project", "这个项目已归档");
+		if (!existsSync(project.rootPath)) {
+			throw new ProjectError("project_missing", `项目「${project.name}」的目录不存在了`);
+		}
+		const workspace = this.getWorkspace();
+		const realWorkspace = workspace ? realpathOr(workspace.rootPath) : null;
+		const realRoot = realpathOr(project.rootPath);
+		if (!realWorkspace || !isInside(realWorkspace, realRoot)) {
+			throw new ProjectError("outside_workspace", `项目「${project.name}」不在当前工作区内`);
+		}
+		this.writeCurrentProjectId(project.id);
+		return project.id;
+	}
+
 	/**
 	 * 派单前复核：项目存在、目录还在、仍在当前工作区内（realpath）。
 	 * 返回的 `rootPath` 是 realpath，调度器可以直接拿它当 cwd / 租约根。
@@ -362,7 +456,7 @@ export class ProjectsStore {
 		}
 		const workspace = this.getWorkspace();
 		if (!workspace) {
-			return { ok: false, message: "还没有选定工作区，先在工作区设置里选一个根目录" };
+			return { ok: false, message: "还没有选定工作区，先在项目设置里选一个根目录" };
 		}
 		let realWorkspace: string;
 		let realRoot: string;
@@ -611,6 +705,17 @@ export function projectsStore(): ProjectsStore {
 	return store;
 }
 
+/** 最大工作区根的 realpath；未设工作区或根目录已不可达 → null（守卫据此旁路）。 */
+export function workspaceRootReal(store: ProjectsStore = projectsStore()): string | null {
+	const workspace = store.getWorkspace();
+	if (!workspace) return null;
+	try {
+		return realpathSync(workspace.rootPath);
+	} catch {
+		return null;
+	}
+}
+
 function projectError(c: Context, error: unknown) {
 	if (error instanceof ProjectError) {
 		return c.json({ error: error.code, message: error.message }, error.status);
@@ -622,10 +727,35 @@ function projectError(c: Context, error: unknown) {
 }
 
 export function mountProjects(app: Hono): void {
-	/** 当前工作区（未选时 workspace=null） */
+	/** 当前工作区（未选时 workspace=null）+ 当前项目（null = 主工作区 / 杂事态） */
 	app.get("/api/v1/workspaces", (c) => {
 		try {
-			return c.json({ workspace: projectsStore().getWorkspace() });
+			const store = projectsStore();
+			return c.json({
+				workspace: store.getWorkspace(),
+				currentProjectId: currentProjectEnabled() ? store.getCurrentProjectId() : null,
+			});
+		} catch (error) {
+			return projectError(c, error);
+		}
+	});
+
+	/**
+	 * 切换当前项目（侧边栏高频操作，2026-11-04 方案）。
+	 * `{projectId:null}` = 回主工作区；校验失败一律业务 400（鉴权失败仍是 403 空体）。
+	 */
+	app.put("/api/v1/workspaces/current-project", async (c) => {
+		const body = (await c.req.json().catch(() => null)) as { projectId?: unknown } | null;
+		if (
+			!body ||
+			!("projectId" in body) ||
+			(body.projectId !== null && typeof body.projectId !== "string")
+		) {
+			return c.json({ error: "bad_request", message: "projectId 必须是字符串或 null" }, 400);
+		}
+		try {
+			const projectId = projectsStore().setCurrentProject(body.projectId);
+			return c.json({ ok: true, projectId });
 		} catch (error) {
 			return projectError(c, error);
 		}

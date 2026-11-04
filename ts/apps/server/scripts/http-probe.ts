@@ -10,13 +10,17 @@
  *   pnpm --filter @lifediary/server http
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
 const PORT = Number(process.env.PROBE_PORT ?? 8098);
 const BASE = `http://127.0.0.1:${PORT}`;
 const DB = ".data/probe-http.sqlite";
 const MEMORY_DB = ".data/probe-http-memory.db";
+/** 项目登记表必须隔离：本探针会建工作区/项目，绝不能碰真实 .data/projects.sqlite */
+const PROJECTS_DB = ".data/probe-http-projects.sqlite";
 
 let failures = 0;
 function check(ok: boolean, label: string, detail = ""): void {
@@ -39,6 +43,11 @@ function startServer(extraEnv: NodeJS.ProcessEnv = {}): ChildProcess {
 			AGENT_TOKEN: "",
 			AGENT_DB_PATH: DB,
 			MEMORY_DB_PATH: MEMORY_DB,
+			PROJECTS_DB_PATH: PROJECTS_DB,
+			// 显式清空：别让开发机上的 env 混进探针（§15 会单独打开 false）
+			CURRENT_PROJECT: "",
+			// 播种会写 providers.json；探针必须隔离，别碰真实 .data
+			PROVIDERS_PATH: ".data/probe-http-providers.json",
 			NODE_OPTIONS: "",
 			...extraEnv,
 		},
@@ -73,6 +82,34 @@ interface ChatResult {
 	error?: string;
 }
 
+/** 收一条完整 SSE 流的全部帧（含 seq 与原始 JSON），给 seq 探针段用。 */
+async function chatRaw(body: unknown): Promise<{
+	status: number;
+	frames: { type: string; seq?: number; raw: Record<string, unknown> }[];
+	conversationId?: string;
+}> {
+	const response = await fetch(`${BASE}/api/v1/agent/chat`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify(body),
+	});
+	if (response.status !== 200) return { status: response.status, frames: [] };
+	const raw = await response.text();
+	const frames: { type: string; seq?: number; raw: Record<string, unknown> }[] = [];
+	let conversationId: string | undefined;
+	for (const line of raw.split("\n")) {
+		if (!line.startsWith("data:")) continue;
+		const parsed = JSON.parse(line.slice(5).trim()) as Record<string, unknown> & {
+			type: string;
+			seq?: number;
+			conversationId?: string;
+		};
+		frames.push({ type: parsed.type, seq: parsed.seq, raw: parsed });
+		if (parsed.type === "start") conversationId = parsed.conversationId;
+	}
+	return { status: response.status, frames, conversationId };
+}
+
 async function chat(body: unknown): Promise<{ status: number; result: ChatResult }> {
 	const response = await fetch(`${BASE}/api/v1/agent/chat`, {
 		method: "POST",
@@ -102,8 +139,155 @@ async function chat(body: unknown): Promise<{ status: number; result: ChatResult
 
 rmSync(DB, { force: true });
 rmSync(MEMORY_DB, { force: true });
+rmSync(PROJECTS_DB, { force: true });
+// seq 事件库也走探针路径，别污染真实 .data/chat-events.sqlite
+const SEQ_DB = ".data/probe-http-chat-events.sqlite";
+rmSync(SEQ_DB, { force: true });
 
-let server = startServer();
+// ── 当前项目 / 路径守卫用的假上游 ─────────────────────────
+// faux 发不出带参数的 write 调用（LLM_FAUX_TOOL 只会给空对象），所以这里起一个
+// 真 HTTP 假上游：第一轮回一个 write 工具调用（路径由 gateWritePath 控制），
+// 工具结果回来后的第二轮回文本。路径守卫是真装配、真工具、真 SSE 验的。
+const UPSTREAM_PORT = PORT + 1;
+const UPSTREAM_BASE = `http://127.0.0.1:${UPSTREAM_PORT}`;
+const WORKSPACE_A = resolve(".data/probe-http-workspace-a");
+const WORKSPACE_B = resolve(".data/probe-http-workspace-b");
+const GATE_PROJECT_NAME = "探针项目";
+const GATE_PROJECT_REL = "demo";
+const GATE_PROJECT_DIR = join(WORKSPACE_A, GATE_PROJECT_REL);
+const GATE_INSIDE_REL = "inside-guard.txt";
+const GATE_OUTSIDE_DIR = resolve(".data/probe-http-outside");
+const GATE_OUTSIDE_FILE = join(GATE_OUTSIDE_DIR, "escape.txt");
+
+interface GateRequest {
+	body: Record<string, unknown>;
+	at: number;
+}
+const gateRequests: GateRequest[] = [];
+/** 假上游收到的 GET /models 的 Authorization 头（§16 密钥热注入验证） */
+const gateModelsAuth: string[] = [];
+/** 假上游下一轮 write 要写哪（空字符串 = 只回文本） */
+let gateWritePath = "";
+
+function readRequestBody(request: IncomingMessage): Promise<string> {
+	return new Promise((done) => {
+		let raw = "";
+		request.on("data", (chunk: Buffer) => {
+			raw += chunk.toString();
+		});
+		request.on("end", () => done(raw));
+	});
+}
+
+function sseChunk(response: ServerResponse, payload: unknown): void {
+	response.write(`data: ${JSON.stringify(payload)}\n\n`);
+}
+
+function contentTextOf(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return content
+		.map((part) => {
+			if (!part || typeof part !== "object") return "";
+			const text = (part as { text?: unknown }).text;
+			return typeof text === "string" ? text : "";
+		})
+		.filter(Boolean)
+		.join("\n");
+}
+
+function messagesOf(body: Record<string, unknown>): Record<string, unknown>[] {
+	return Array.isArray(body.messages) ? (body.messages as Record<string, unknown>[]) : [];
+}
+
+const gateUpstream: Server = createServer(async (request, response) => {
+	if (request.method === "GET") {
+		// §16 密钥探针：modelsUrl 代拉清单。这里只关心 Authorization 是否等于刚填的 key。
+		if (request.url?.endsWith("/models")) {
+			gateModelsAuth.push(request.headers.authorization ?? "");
+			response.writeHead(200, { "content-type": "application/json" });
+			response.end(JSON.stringify({ data: [{ id: "probe-secret-model" }] }));
+			return;
+		}
+		response.writeHead(404).end();
+		return;
+	}
+	if (request.method !== "POST") {
+		response.writeHead(404).end();
+		return;
+	}
+	const raw = await readRequestBody(request);
+	let body: Record<string, unknown> = {};
+	try {
+		body = JSON.parse(raw) as Record<string, unknown>;
+	} catch {
+		/* 记空对象，断言自然会挂 */
+	}
+	gateRequests.push({ body, at: Date.now() });
+
+	const messages = messagesOf(body);
+	// 已经有工具结果 → 这是同一轮的第二跳，回文本收尾（否则会一直调工具到上限）
+	const hasToolResult = messages.some((message) => message.role === "tool");
+	const base = {
+		id: "chatcmpl-gate",
+		object: "chat.completion.chunk",
+		created: Math.floor(Date.now() / 1000),
+		model: String(body.model ?? "probe-gate"),
+	};
+	response.writeHead(200, {
+		"content-type": "text/event-stream",
+		"cache-control": "no-cache",
+		connection: "keep-alive",
+	});
+	if (!hasToolResult && gateWritePath) {
+		sseChunk(response, {
+			...base,
+			choices: [
+				{
+					index: 0,
+					delta: {
+						role: "assistant",
+						tool_calls: [
+							{
+								index: 0,
+								id: "call_gate_1",
+								type: "function",
+								function: {
+									name: "write",
+									arguments: JSON.stringify({ path: gateWritePath, content: "probe" }),
+								},
+							},
+						],
+					},
+					finish_reason: null,
+				},
+			],
+		});
+		sseChunk(response, {
+			...base,
+			choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+			usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+		});
+	} else {
+		sseChunk(response, {
+			...base,
+			choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }],
+		});
+		sseChunk(response, {
+			...base,
+			choices: [{ index: 0, delta: { content: "（假上游）已处理。" }, finish_reason: null }],
+		});
+		sseChunk(response, {
+			...base,
+			choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+			usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+		});
+	}
+	response.write("data: [DONE]\n\n");
+	response.end();
+});
+
+let server = startServer({ AGENT_SSE_SEQ_DB_PATH: SEQ_DB });
 
 try {
 	await waitForReady();
@@ -276,7 +460,7 @@ try {
 	console.log("\n· 9. 重启进程，历史还在");
 	server.kill();
 	await sleep(800);
-	server = startServer();
+	server = startServer({ AGENT_SSE_SEQ_DB_PATH: SEQ_DB });
 	await waitForReady();
 
 	const resumed = await chat({
@@ -292,7 +476,7 @@ try {
 	console.log("\n· 10. 工具调用撞上限");
 	server.kill();
 	await sleep(800);
-	server = startServer({ LLM_FAUX_TOOL: "recall", AGENT_MAX_TURNS: "3" });
+	server = startServer({ LLM_FAUX_TOOL: "recall", AGENT_MAX_TURNS: "3", AGENT_SSE_SEQ_DB_PATH: SEQ_DB });
 	await waitForReady();
 
 	const startedAt = Date.now();
@@ -330,6 +514,22 @@ try {
 	check(fauxHealth.model === "faux", "faux 下 healthz 报 faux", JSON.stringify(fauxHealth));
 	check(fauxHealth.models.length === 0, "faux 没有可切清单");
 
+	// faux 下 /mode 是空操作但仍返回 ok（chatModelRef 原样返回，不派生思考变体）
+	const fauxMode = await fetch(
+		`${BASE}/api/v1/agent/chat/${limited.result.conversationId}/mode`,
+		{
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ thinking: "high" }),
+		},
+	);
+	const fauxModeJson = (await fauxMode.json().catch(() => ({}))) as Record<string, unknown>;
+	check(
+		fauxMode.status === 200 && fauxModeJson.ok === true && fauxModeJson.thinking === "high",
+		"faux 下 /mode 空操作仍 ok",
+		`${fauxMode.status} ${JSON.stringify(fauxModeJson)}`,
+	);
+
 	const fauxSwitch = await fetch(`${BASE}/api/v1/agent/model`, {
 		method: "POST",
 		headers: { "content-type": "application/json" },
@@ -344,6 +544,9 @@ try {
 		LLM_MODEL: "probe-default",
 		LLM_MODELS: "probe-a,probe-b",
 		MODEL_RUNTIME_PATH: modelState,
+		// 后面 §13 的 seq 探针还在这批重启出来的服务上跑：seq 库路径必须一路带下去，
+		// 否则回落默认路径，§13 的 seq 会从其他段落留下的帧接着数（实测踩过）。
+		AGENT_SSE_SEQ_DB_PATH: SEQ_DB,
 	};
 	rmSync(modelState, { force: true });
 	server.kill();
@@ -365,12 +568,34 @@ try {
 		JSON.stringify(health2.models),
 	);
 
+	// 2026-11-04 思考档位：composer 的 models 行升级为对象；POST 响应保持扁平字符串（旧字段兼容）
+	const catalog = (await (await fetch(`${BASE}/api/v1/agent/model`)).json()) as {
+		providers?: { models?: { id?: string; thinkingLevels?: string[] }[] }[];
+	};
+	const catalogModels = catalog.providers?.[0]?.models ?? [];
+	check(
+		catalogModels.length > 0 && catalogModels.every((row) => Array.isArray(row?.thinkingLevels)),
+		"GET /agent/model 的 models 是 {id, thinkingLevels} 对象行",
+		JSON.stringify(catalogModels[0]),
+	);
+	check(
+		JSON.stringify(catalogModels[0]?.thinkingLevels) === JSON.stringify(["off", "low", "high"]),
+		"没声明 modelThinkingLevels 的模型缺省域 = off/low/high",
+		JSON.stringify(catalogModels[0]?.thinkingLevels),
+	);
+
 	const switched = await fetch(`${BASE}/api/v1/agent/model`, {
 		method: "POST",
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify({ model: "probe-b" }),
 	});
 	check(switched.status === 200, "切换成功", String(switched.status));
+	const switchedJson = (await switched.json().catch(() => ({}))) as { models?: unknown };
+	check(
+		Array.isArray(switchedJson.models) && switchedJson.models.every((row) => typeof row === "string"),
+		"POST /agent/model 的 models 仍是扁平字符串（旧字段兼容）",
+		JSON.stringify(switchedJson.models),
+	);
 	const health3 = (await (await fetch(`${BASE}/healthz`)).json()) as ModelHealth;
 	check(health3.model === "probe-b", "healthz 跟着变", String(health3.model));
 
@@ -435,15 +660,532 @@ try {
 	const searchShort = await fetch(`${BASE}/api/v1/agent/search?q=${encodeURIComponent("团")}`);
 	const shortBody = (await searchShort.json()) as { hits: unknown[] };
 	check(shortBody.hits.length === 0, "单字符 → 空结果（防全表扫）");
+
+	// ── 13. SSE seq 与断点重放（2026-11-04，接口文档 §2.1/§2.2）──
+	console.log("\n· 13. SSE seq 与断点重放");
+	// 13.1 新会话跑一轮，帧带 seq 且从 1 单调递增
+	const seqRound = await chatRaw({
+		messages: [{ role: "user", content: "seq 探针第一轮" }],
+	});
+	check(seqRound.status === 200, "seq 轮建流成功", String(seqRound.status));
+	const seqs = seqRound.frames.map((frame) => frame.seq);
+	check(
+		seqs.every((value) => typeof value === "number"),
+		"每一帧都带 seq",
+		JSON.stringify(seqs),
+	);
+	const monotonic = seqs.every(
+		(value, index) => index === 0 || (typeof value === "number" && typeof seqs[index - 1] === "number" && value === (seqs[index - 1] as number) + 1),
+	);
+	check(monotonic, "seq 严格连续 +1（会话内单调）", `${seqs[0]}..${seqs.at(-1)}`);
+	check(seqs[0] === 1, "从 1 起");
+	const seqConversationId = seqRound.conversationId ?? "";
+
+	// 13.2 sinceSeq 补帧：sinceSeq=0 → 全量重放，fromSeq=1
+	const fullReplay = await fetch(
+		`${BASE}/api/v1/agent/chat/${seqConversationId}/messages?sinceSeq=0`,
+	);
+	check(fullReplay.status === 200, "带 sinceSeq 回读成功", String(fullReplay.status));
+	const fullBody = (await fullReplay.json()) as {
+		messages: unknown[];
+		fromSeq: number;
+		events: { event: { type: string; seq?: number } }[];
+	};
+	check(Array.isArray(fullBody.messages), "messages 字段还在（不破坏老形状；faux 上游报错时可为空）");
+	check(fullBody.fromSeq === 1, "fromSeq=1（无缺口）", String(fullBody.fromSeq));
+	check(
+		fullBody.events.length === seqs.length,
+		"重放帧数与实发一致",
+		`${fullBody.events.length} vs ${seqs.length}`,
+	);
+	check(
+		fullBody.events.every((item, index) => item.event.seq === seqs[index]),
+		"重放 seq 与实发一一对应",
+	);
+	// 13.3 从中段补：sinceSeq=3 → 只剩 4..N
+	const midReplay = (await (
+		await fetch(`${BASE}/api/v1/agent/chat/${seqConversationId}/messages?sinceSeq=3`)
+	).json()) as { fromSeq: number; events: { event: { seq?: number } }[] };
+	check(midReplay.fromSeq === 4, "中段重放 fromSeq=4", String(midReplay.fromSeq));
+	check(
+		midReplay.events.length === Math.max(0, seqs.length - 3),
+		"中段重放只取缺帧",
+		String(midReplay.events.length),
+	);
+	// 13.4 不带 sinceSeq → 响应没有 events 字段（老形状）
+	const plain = (await (
+		await fetch(`${BASE}/api/v1/agent/chat/${seqConversationId}/messages`)
+	).json()) as { events?: unknown };
+	check(!("events" in plain), "不带 sinceSeq 无 events 字段（老客户端零感知）");
+
+	// 13.5 非法 sinceSeq → 400
+	const badReplay = await fetch(
+		`${BASE}/api/v1/agent/chat/${seqConversationId}/messages?sinceSeq=-1`,
+	);
+	check(badReplay.status === 400, "非法 sinceSeq → 400", String(badReplay.status));
+
+	// ── 14. 当前项目（2026-11-04 侧边栏方案，接口文档 §2.7）──
+	console.log("\n· 14. 当前项目：切换 / 校验 / 系统提示 / 路径守卫");
+	rmSync(WORKSPACE_A, { recursive: true, force: true });
+	rmSync(WORKSPACE_B, { recursive: true, force: true });
+	rmSync(GATE_OUTSIDE_DIR, { recursive: true, force: true });
+	mkdirSync(WORKSPACE_A, { recursive: true });
+	mkdirSync(WORKSPACE_B, { recursive: true });
+	mkdirSync(GATE_OUTSIDE_DIR, { recursive: true });
+	rmSync(".data/probe-http-gate-providers.json", { force: true });
+	rmSync(".data/probe-http-gate-runtime.json", { force: true });
+	await new Promise<void>((done) => gateUpstream.listen(UPSTREAM_PORT, "127.0.0.1", () => done()));
+
+	// 真供应商 + 假上游：能发带 path 参数的 write 调用
+	const gateEnv: NodeJS.ProcessEnv = {
+		LLM_PROVIDER: "",
+		LLM_API_KEY: "probe-gate-key",
+		LLM_BASE_URL: `${UPSTREAM_BASE}/v1`,
+		LLM_MODEL: "probe-gate",
+		LLM_MODELS: "",
+		LLM_MODEL_FAST: "",
+		PROVIDERS_PATH: ".data/probe-http-gate-providers.json",
+		MODEL_RUNTIME_PATH: ".data/probe-http-gate-runtime.json",
+		MEMORY_ENABLED: "false",
+		CHANCELLOR_ENABLED: "false",
+		AGENT_CONFIRM_WRITES: "",
+		AGENT_SSE_SEQ_DB_PATH: SEQ_DB,
+	};
+	server.kill();
+	await sleep(800);
+	server = startServer(gateEnv);
+	await waitForReady();
+
+	const putCurrentProject = (projectId: string | null) =>
+		fetch(`${BASE}/api/v1/workspaces/current-project`, {
+			method: "PUT",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ projectId }),
+		});
+	const readWorkspaceState = async () =>
+		(await (await fetch(`${BASE}/api/v1/workspaces`)).json()) as {
+			workspace: { rootPath: string } | null;
+			currentProjectId: string | null;
+		};
+	const setWorkspace = (rootPath: string) =>
+		fetch(`${BASE}/api/v1/workspaces`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ rootPath }),
+		});
+	const toolMessagesOf = (body: Record<string, unknown>) =>
+		messagesOf(body)
+			.filter((message) => message.role === "tool")
+			.map((message) => contentTextOf(message.content))
+			.join("\n");
+	const systemMessagesOf = (body: Record<string, unknown>) =>
+		messagesOf(body)
+			.filter((message) => message.role === "system")
+			.map((message) => contentTextOf(message.content))
+			.join("\n");
+
+	// 14.1 建工作区 → 登记项目
+	const workspaceSet = await setWorkspace(WORKSPACE_A);
+	check(workspaceSet.status === 200, "设置工作区 A", String(workspaceSet.status));
+	const proposalResponse = await fetch(`${BASE}/api/v1/projects`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ name: GATE_PROJECT_NAME, path: GATE_PROJECT_REL }),
+	});
+	const proposalJson = (await proposalResponse.json()) as { proposal?: { id?: string } };
+	const proposalId = proposalJson.proposal?.id ?? "";
+	check(
+		proposalResponse.status === 202 && Boolean(proposalId),
+		"提交项目 proposal",
+		`${proposalResponse.status} ${proposalId}`,
+	);
+	const confirmResponse = await fetch(`${BASE}/api/v1/projects/${proposalId}/confirm`, {
+		method: "POST",
+	});
+	const confirmJson = (await confirmResponse.json()) as { project?: { id?: string } };
+	const projectId = confirmJson.project?.id ?? "";
+	check(
+		confirmResponse.status === 200 && Boolean(projectId),
+		"确认后登记项目",
+		projectId,
+	);
+	check(existsSync(GATE_PROJECT_DIR), "项目目录已建在工作区内");
+
+	// 14.2 切换成功 + 回读 + null 回主工作区
+	const initial = await readWorkspaceState();
+	check(initial.currentProjectId === null, "初始 currentProjectId=null（主工作区）");
+	const projectSwitched = await putCurrentProject(projectId);
+	const projectSwitchedJson = (await projectSwitched.json()) as {
+		ok?: boolean;
+		projectId?: string | null;
+	};
+	check(
+		projectSwitched.status === 200 &&
+			projectSwitchedJson.ok === true &&
+			projectSwitchedJson.projectId === projectId,
+		"PUT 切换当前项目成功",
+		`${projectSwitched.status} ${JSON.stringify(projectSwitchedJson)}`,
+	);
+	check(
+		(await readWorkspaceState()).currentProjectId === projectId,
+		"GET /workspaces 回读 currentProjectId 正确",
+	);
+	const cleared = await putCurrentProject(null);
+	const clearedJson = (await cleared.json()) as { ok?: boolean; projectId?: string | null };
+	check(
+		cleared.status === 200 && clearedJson.ok === true && clearedJson.projectId === null,
+		"projectId=null 回主工作区",
+	);
+
+	// 14.3 校验错误码（逐条按契约）
+	const unknownResponse = await putCurrentProject("00000000-0000-4000-8000-000000000001");
+	const unknownJson = (await unknownResponse.json()) as { error?: string };
+	check(
+		unknownResponse.status === 400 && unknownJson.error === "unknown_project",
+		"未登记项目 → 400 unknown_project",
+		`${unknownResponse.status} ${unknownJson.error}`,
+	);
+
+	rmSync(GATE_PROJECT_DIR, { recursive: true, force: true });
+	const missingResponse = await putCurrentProject(projectId);
+	const missingJson = (await missingResponse.json()) as { error?: string };
+	check(
+		missingResponse.status === 400 && missingJson.error === "project_missing",
+		"目录不存在 → 400 project_missing",
+		`${missingResponse.status} ${missingJson.error}`,
+	);
+	mkdirSync(GATE_PROJECT_DIR, { recursive: true });
+
+	const workspaceBSet = await setWorkspace(WORKSPACE_B);
+	check(workspaceBSet.status === 200, "换工作区 B（旧项目落在新根外）");
+	const outsideResponse = await putCurrentProject(projectId);
+	const outsideJson = (await outsideResponse.json()) as { error?: string };
+	check(
+		outsideResponse.status === 400 && outsideJson.error === "outside_workspace",
+		"工作区外 → 400 outside_workspace",
+		`${outsideResponse.status} ${outsideJson.error}`,
+	);
+	const backToA = await setWorkspace(WORKSPACE_A);
+	check(backToA.status === 200, "切回工作区 A");
+	const reselected = await putCurrentProject(projectId);
+	check(reselected.status === 200, "切回工作区后可再次选中", String(reselected.status));
+
+	// 14.4 系统提示注入 + 工作区内写入放行（相对路径按项目根解析）
+	gateWritePath = GATE_INSIDE_REL;
+	gateRequests.length = 0;
+	const insideRun = await chat({ messages: [{ role: "user", content: "在项目里写个文件" }] });
+	check(
+		insideRun.status === 200 && insideRun.result.done,
+		"假上游 + 当前项目链路跑完",
+		insideRun.result.events.join(","),
+	);
+	check(
+		existsSync(join(GATE_PROJECT_DIR, GATE_INSIDE_REL)),
+		"工作区内相对路径放行（落在当前项目根）",
+		join(GATE_PROJECT_DIR, GATE_INSIDE_REL),
+	);
+	const insideBody = gateRequests.at(-1)?.body ?? {};
+	check(
+		!toolMessagesOf(insideBody).includes("最大工作区"),
+		"放行时没有越界提示",
+	);
+	const insideSystem = systemMessagesOf(insideBody);
+	check(
+		insideSystem.includes(`当前项目：${GATE_PROJECT_NAME}`),
+		"系统提示注入了当前项目（项目名）",
+		insideSystem.includes("当前项目") ? "含当前项目节" : "缺当前项目节",
+	);
+	check(insideSystem.includes("根路径："), "系统提示带项目根路径");
+
+	// 14.5 路径守卫：越界写被拒（真工具，不是 mock）
+	gateWritePath = GATE_OUTSIDE_FILE;
+	gateRequests.length = 0;
+	const outsideRun = await chat({ messages: [{ role: "user", content: "写到工作区外面去" }] });
+	check(
+		outsideRun.status === 200 && outsideRun.result.done,
+		"越界调用不会挂死这一轮",
+		outsideRun.result.events.join(","),
+	);
+	check(!existsSync(GATE_OUTSIDE_FILE), "越界写入没有落盘", GATE_OUTSIDE_FILE);
+	const outsideToolText = toolMessagesOf(gateRequests.at(-1)?.body ?? {});
+	check(
+		outsideToolText.includes("路径越出最大工作区"),
+		"模型收到的工具结果含「路径越出最大工作区」",
+		outsideToolText.slice(0, 120),
+	);
+
+	// ── 15. CURRENT_PROJECT=false 回滚（接口文档 §2.7）──
+	console.log("\n· 15. CURRENT_PROJECT=false 回滚");
+	server.kill();
+	await sleep(800);
+	server = startServer({ ...gateEnv, CURRENT_PROJECT: "false" });
+	await waitForReady();
+	check(
+		(await readWorkspaceState()).currentProjectId === null,
+		"回滚时 GET 的 currentProjectId 恒 null（库里的值不外露）",
+	);
+	const disabledResponse = await putCurrentProject(projectId);
+	const disabledJson = (await disabledResponse.json()) as { error?: string };
+	check(
+		disabledResponse.status === 400 && disabledJson.error === "current_project_disabled",
+		"回滚时 PUT 一律 400 current_project_disabled",
+		`${disabledResponse.status} ${disabledJson.error}`,
+	);
+	gateWritePath = "";
+	gateRequests.length = 0;
+	await chat({ messages: [{ role: "user", content: "回滚形态还能正常聊" }] });
+	check(
+		!systemMessagesOf(gateRequests.at(-1)?.body ?? {}).includes("当前项目："),
+		"回滚时系统提示不注入当前项目节",
+	);
+	// ── 16. 密钥直填（2026-11-05 H2，接口文档 §2.10）──
+	console.log("\n· 16. 密钥直填：PUT secret → 密钥文件 + 热注入");
+	const SECRET_KEY = "probe-plain-secret-9f3a7c";
+	const SECRET_PROVIDERS = ".data/probe-http-secret-providers.json";
+	const SECRET_KEYS = ".data/probe-http-provider-keys.json";
+	const SECRET_RUNTIME = ".data/probe-http-secret-runtime.json";
+	rmSync(SECRET_PROVIDERS, { force: true });
+	rmSync(SECRET_KEYS, { force: true });
+	rmSync(SECRET_RUNTIME, { force: true });
+	const secretEnv: NodeJS.ProcessEnv = {
+		LLM_PROVIDER: "",
+		LLM_API_KEY: "probe-seed-key",
+		LLM_BASE_URL: `${UPSTREAM_BASE}/v1/seed`,
+		LLM_MODEL: "probe-secret-default",
+		LLM_MODELS: "",
+		LLM_MODEL_FAST: "",
+		PROVIDERS_CONFIG: "true",
+		PROVIDER_SECRETS: "true",
+		PROVIDERS_PATH: SECRET_PROVIDERS,
+		PROVIDER_KEYS_PATH: SECRET_KEYS,
+		MODEL_RUNTIME_PATH: SECRET_RUNTIME,
+		MEMORY_ENABLED: "false",
+		CHANCELLOR_ENABLED: "false",
+		AGENT_SSE_SEQ_DB_PATH: SEQ_DB,
+		// 父进程若碰巧有同名变量会遮住密钥文件；先清空，保证断言验的是热注入
+		LIFEDIARY_KEY_SECRET_PROBE: "",
+		LIFEDIARY_KEY_ALIAS_PROBE: "",
+	};
+	server.kill();
+	await sleep(800);
+	server = startServer(secretEnv);
+	await waitForReady();
+
+	const putSecret = (id: string, apiKey: unknown) =>
+		fetch(`${BASE}/api/v1/agent/providers/${id}/secret`, {
+			method: "PUT",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ apiKey }),
+		});
+	const readProviders = async () =>
+		(await (await fetch(`${BASE}/api/v1/agent/providers`)).json()) as {
+			providers: { id: string; keyEnv: string; hasKey: boolean }[];
+		};
+
+	// 16.1 准备一个 keyEnv 还没值的供应商
+	const createdSecret = await fetch(`${BASE}/api/v1/agent/providers`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({
+			id: "secret-probe",
+			name: "密钥探针",
+			baseUrl: `${UPSTREAM_BASE}/v1/secret`,
+			keyEnv: "PROBE_SECRET_PLACEHOLDER",
+			models: ["probe-secret-model"],
+		}),
+	});
+	check(createdSecret.status === 200, "新建待填密钥的供应商", String(createdSecret.status));
+	const beforeSecret = await readProviders();
+	check(
+		beforeSecret.providers.find((provider) => provider.id === "secret-probe")?.hasKey === false,
+		"填之前 hasKey=false",
+	);
+
+	// 16.2 校验错误码
+	const unknownSecret = await putSecret("no-such-provider", SECRET_KEY);
+	const unknownSecretJson = (await unknownSecret.json()) as { error?: string };
+	check(
+		unknownSecret.status === 404 && unknownSecretJson.error === "unknown_provider",
+		"未知供应商 → 404 unknown_provider",
+		`${unknownSecret.status} ${unknownSecretJson.error}`,
+	);
+	const emptySecret = await putSecret("secret-probe", "   ");
+	check(emptySecret.status === 400, "空密钥 → 400", String(emptySecret.status));
+	const longSecret = await putSecret("secret-probe", "k".repeat(513));
+	check(longSecret.status === 400, "超过 512 字符 → 400", String(longSecret.status));
+
+	// 16.3 成功：只回 keyEnv，不回密钥；三处落点都对
+	const okSecret = await putSecret("secret-probe", `  ${SECRET_KEY}  `);
+	const okSecretText = await okSecret.text();
+	const okSecretJson = JSON.parse(okSecretText) as { ok?: boolean; keyEnv?: string };
+	check(okSecret.status === 200 && okSecretJson.ok === true, "PUT secret 成功", String(okSecret.status));
+	check(
+		okSecretJson.keyEnv === "LIFEDIARY_KEY_SECRET_PROBE",
+		"绑定 keyEnv = LIFEDIARY_KEY_<ID大写>",
+		String(okSecretJson.keyEnv),
+	);
+	check(!okSecretText.includes(SECRET_KEY), "PUT 响应不含密钥值（trim 后落盘）");
+
+	const providersResponse = await fetch(`${BASE}/api/v1/agent/providers`);
+	const providersRaw = await providersResponse.text();
+	const providersJson = JSON.parse(providersRaw) as {
+		providers: { id: string; keyEnv: string; hasKey: boolean }[];
+	};
+	check(
+		providersJson.providers.find((provider) => provider.id === "secret-probe")?.hasKey === true,
+		"GET /agent/providers 的 hasKey 变 true",
+	);
+	check(
+		providersJson.providers.find((provider) => provider.id === "secret-probe")?.keyEnv ===
+			"LIFEDIARY_KEY_SECRET_PROBE",
+		"provider 的 keyEnv 已同步",
+	);
+	check(!providersRaw.includes(SECRET_KEY), "GET /agent/providers 全文无密钥明文");
+
+	const providersFileText = readFileSync(SECRET_PROVIDERS, "utf8");
+	check(!providersFileText.includes(SECRET_KEY), "providers.json 全文无密钥明文");
+	check(
+		providersFileText.includes("LIFEDIARY_KEY_SECRET_PROBE"),
+		"providers.json 仍只存变量名",
+	);
+	check(existsSync(SECRET_KEYS), "密钥文件已生成", SECRET_KEYS);
+	const keyFile = JSON.parse(readFileSync(SECRET_KEYS, "utf8")) as Record<string, string>;
+	check(
+		keyFile.LIFEDIARY_KEY_SECRET_PROBE === SECRET_KEY,
+		"密钥文件含该条目（keyEnv → 明文）",
+		"LIFEDIARY_KEY_SECRET_PROBE",
+	);
+
+	// 16.4 热注入生效：modelsUrl 代拉清单时，假上游收到刚填的 key
+	gateModelsAuth.length = 0;
+	const secretTest = await fetch(`${BASE}/api/v1/agent/providers`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({
+			id: "secret-probe",
+			name: "密钥探针",
+			baseUrl: `${UPSTREAM_BASE}/v1/secret`,
+			keyEnv: "LIFEDIARY_KEY_SECRET_PROBE",
+			modelsUrl: "1",
+			test: true,
+		}),
+	});
+	check(secretTest.status === 200, "test:true 用热注入的 key 拉到上游", String(secretTest.status));
+	check(
+		gateModelsAuth.at(-1) === `Bearer ${SECRET_KEY}`,
+		"假上游收到 Authorization: Bearer <刚填的key>",
+		gateModelsAuth.length > 0 ? "Bearer <redacted>" : "假上游没收到请求",
+	);
+
+	// 16.5 空清单放行（2026-11-05 H2.1）：带 modelsUrl 时代拉，不带仍拒
+	const emptyWithUrl = await fetch(`${BASE}/api/v1/agent/providers`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({
+			id: "empty-models-probe",
+			name: "空清单代拉探针",
+			baseUrl: `${UPSTREAM_BASE}/v1/secret`,
+			keyEnv: "LIFEDIARY_KEY_SECRET_PROBE",
+			models: [],
+			modelsUrl: "1",
+		}),
+	});
+	const emptyWithUrlJson = (await emptyWithUrl.json()) as {
+		ok?: boolean;
+		provider?: { models?: string[] };
+	};
+	check(
+		emptyWithUrl.status === 200 &&
+			emptyWithUrlJson.provider?.models?.join(",") === "probe-secret-model",
+		"空清单 + modelsUrl + 已存 Key → 200 且用上游清单建档",
+		`${emptyWithUrl.status} ${JSON.stringify(emptyWithUrlJson.provider?.models ?? null)}`,
+	);
+	const emptyWithoutUrl = await fetch(`${BASE}/api/v1/agent/providers`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({
+			id: "empty-models-reject",
+			name: "空清单拒绝探针",
+			baseUrl: `${UPSTREAM_BASE}/v1/secret`,
+			keyEnv: "LIFEDIARY_KEY_SECRET_PROBE",
+			models: [],
+		}),
+	});
+	const emptyWithoutUrlJson = (await emptyWithoutUrl.json()) as { error?: string };
+	check(
+		emptyWithoutUrl.status === 400 && emptyWithoutUrlJson.error === "bad_models",
+		"空清单且没有 modelsUrl → 仍 400 bad_models",
+		`${emptyWithoutUrl.status} ${emptyWithoutUrlJson.error}`,
+	);
+
+	// 16.6 删除联动：providers.json 删掉，密钥文件条目也清掉
+	const deleteSecret = await fetch(`${BASE}/api/v1/agent/providers/secret-probe`, {
+		method: "DELETE",
+	});
+	check(deleteSecret.status === 200, "删除供应商成功", String(deleteSecret.status));
+	const afterDeleteKeys = JSON.parse(readFileSync(SECRET_KEYS, "utf8")) as Record<string, string>;
+	check(
+		!("LIFEDIARY_KEY_SECRET_PROBE" in afterDeleteKeys),
+		"密钥文件条目已被联动清除",
+	);
+
+	// 16.7 回滚开关：端点 400，但启动注入照旧
+	const createdAlias = await fetch(`${BASE}/api/v1/agent/providers`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({
+			id: "alias-probe",
+			name: "别名探针",
+			baseUrl: `${UPSTREAM_BASE}/v1/alias`,
+			keyEnv: "LIFEDIARY_KEY_ALIAS_PROBE",
+			models: ["probe-secret-model"],
+		}),
+	});
+	check(createdAlias.status === 200, "新建回滚探针供应商", String(createdAlias.status));
+
+	server.kill();
+	await sleep(800);
+	// 手工放一条密钥进文件：重启后即使端点关着，启动注入也必须生效
+	writeFileSync(
+		SECRET_KEYS,
+		`${JSON.stringify({ LIFEDIARY_KEY_ALIAS_PROBE: SECRET_KEY }, null, 2)}\n`,
+	);
+	server = startServer({ ...secretEnv, PROVIDER_SECRETS: "false" });
+	await waitForReady();
+	const aliasProviders = await readProviders();
+	check(
+		aliasProviders.providers.find((provider) => provider.id === "alias-probe")?.hasKey === true,
+		"PROVIDER_SECRETS=false 时启动注入仍执行（文件里的 key 生效）",
+	);
+	const disabledSecret = await putSecret("alias-probe", "another-key");
+	const disabledSecretJson = (await disabledSecret.json()) as { error?: string };
+	check(
+		disabledSecret.status === 400 && disabledSecretJson.error === "secrets_disabled",
+		"回滚时 PUT secret → 400 secrets_disabled",
+		`${disabledSecret.status} ${disabledSecretJson.error}`,
+	);
 } finally {
 	server.kill();
 	await sleep(300);
+	gateUpstream.close();
 	// 探针产物不留
 	rmSync(DB, { force: true });
 	rmSync(`${DB}-wal`, { force: true });
 	rmSync(`${DB}-shm`, { force: true });
 	rmSync(MEMORY_DB, { force: true });
-	rmSync(".data/probe-http-model.json", { force: true });
+	rmSync(PROJECTS_DB, { force: true });
+	rmSync(`${PROJECTS_DB}-wal`, { force: true });
+	rmSync(`${PROJECTS_DB}-shm`, { force: true });
+	rmSync(WORKSPACE_A, { recursive: true, force: true });
+	rmSync(WORKSPACE_B, { recursive: true, force: true });
+	rmSync(GATE_OUTSIDE_DIR, { recursive: true, force: true });
+	rmSync(".data/probe-http-gate-providers.json", { force: true });
+	rmSync(".data/probe-http-gate-runtime.json", { force: true });
+	rmSync(".data/probe-http-chat-events.sqlite", { force: true });
+	rmSync(".data/probe-http-providers.json", { force: true });
+	rmSync(".data/probe-http-secret-providers.json", { force: true });
+	rmSync(".data/probe-http-provider-keys.json", { force: true });
+	rmSync(".data/probe-http-secret-runtime.json", { force: true });
 }
 
 console.log(failures === 0 ? "\n✓ 端到端全部通过" : `\n✗ 有 ${failures} 项没通过`);

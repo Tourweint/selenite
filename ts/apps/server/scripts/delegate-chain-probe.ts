@@ -38,6 +38,8 @@ function startServer(): ChildProcess {
 			AGENT_TOKEN: "",
 			AGENT_DB_PATH: DB,
 			MEMORY_DB_PATH: MEMORY_DB,
+			// 播种会写 providers.json；探针必须隔离，别碰真实 .data
+			PROVIDERS_PATH: ".data/chain-probe-providers.json",
 			NODE_OPTIONS: "",
 			CHANCELLOR_ENABLED: "true",
 			CHANCELLOR_EMPLOYEE: process.env.CHANCELLOR_EMPLOYEE?.trim() || "native",
@@ -157,4 +159,5 @@ try {
 	await sleep(500);
 	rmSync(DB, { force: true });
 	rmSync(MEMORY_DB, { force: true });
+	rmSync(".data/chain-probe-providers.json", { force: true });
 }

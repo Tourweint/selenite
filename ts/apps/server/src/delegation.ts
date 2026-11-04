@@ -7,6 +7,9 @@
  *
  * 2026-11-03：派单改成"立即受理、后台执行"。`startDelegation` 是这一段的最小骨架：
  * 同步返回任务单号，后台跑完再发事件 / 写汇报。真正的进程管理仍然在 chancellor 里。
+ *
+ * 2026-11-04：审批事件**借道本通道**（`type: "approval"`），因为它与派活同样是
+ * "工具钩子写、对话流读"的一对多通道。只是借传输，与派活语义无关。
  */
 
 import path from "node:path";
@@ -45,6 +48,14 @@ export type DelegationEvent =
 			domain: string;
 			kind: "need_input" | "need_decision" | "need_action";
 			question: string;
+	  }
+	/** 写类工具要人确认（2026-11-04 批次二）；借本通道传输，与派活无关 */
+	| {
+			type: "approval";
+			callId: string;
+			tool: string;
+			args: string;
+			deadlineAt: string;
 	  };
 
 export interface DelegationReport {
@@ -120,7 +131,8 @@ export function emitDelegation(conversationId: number, event: DelegationEvent): 
 	}
 }
 
-function truncate(text: string, max: number): string {
+/** 压成一行再按字数截断；派活汇报与恢复回灌共用（2026-11-04）。 */
+export function truncate(text: string, max: number): string {
 	const oneLine = text.replace(/\s+/g, " ").trim();
 	return oneLine.length <= max ? oneLine : `${oneLine.slice(0, max - 1)}…`;
 }

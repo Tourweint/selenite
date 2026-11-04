@@ -17,7 +17,9 @@ const PORT = 8193;
 const BASE = `http://127.0.0.1:${PORT}`;
 const TOKEN = "phone-probe-token";
 const DIR = join(import.meta.dirname, "..");
-const RUNS = join(DIR, "runs");
+/** 隔离任务单目录：chancellor 的 sqlite 落在 dirname(workRoot)/data，
+ *  所以把 work 放到 .data/phone-probe/ 下，连库一起隔离，别混进真实 runs/ */
+const RUNS = join(DIR, ".data/phone-probe/work");
 
 process.chdir(DIR);
 
@@ -37,9 +39,20 @@ process.env.LLM_BASE_URL =
   process.env.LLM_BASE_URL?.trim() || "https://dashscope.aliyuncs.com/compatible-mode/v1";
 process.env.AGENT_DB_PATH = join(DIR, ".data/phone-probe-agent.sqlite");
 process.env.MEMORY_DB_PATH = join(DIR, ".data/phone-probe-memory.db");
+// 播种会写 providers.json；探针必须隔离，别碰真实 .data
+process.env.PROVIDERS_PATH = join(DIR, ".data/phone-probe-providers.json");
+// 受理回执必须隔离：requestId 是幂等的，复用真实回执库会让第二次跑直接返回上一轮的单
+process.env.DELEGATIONS_DB_PATH = join(DIR, ".data/phone-probe-delegations.sqlite");
 process.env.CHANCELLOR_ENABLED = "true";
 process.env.CHANCELLOR_EMPLOYEE = "phone";
 process.env.CHANCELLOR_PHONE_TASK_BUDGET_MS = String(budgetMs);
+process.env.CHANCELLOR_WORK_ROOT = RUNS;
+// 本项目只验手机 worker 通道；项目前置由 src/projects.test.ts 覆盖，
+// 这里不铺工作区，否则 delegate 会先被 needs_project 拦下（同 delegate-chain-probe）
+process.env.DELEGATION_PROJECT_REQUIRED = "false";
+// 必须同步派单：探针要拿 delegate 的**结论**（ready / needs_you / idle），
+// 并在失败前断言 plan.json / REPORT；异步模式只回"已受理"，plan 也要等后台拆单。
+process.env.DELEGATION_ASYNC = "false";
 
 // 必须先设环境变量再 import：chancellor 的 EMPLOYEE 是模块加载时读的。
 await import("../src/index.ts");
@@ -140,6 +153,10 @@ function ticketIds(): string[] {
 interface TicketSnapshot {
   id: string;
   status: string;
+  /** 每个 task 在 plan.json 里声明的 writes（2026-11-04 批次八：手机单必须恒空）。 */
+  planWrites: string[][];
+  /** review.json 里每个 review 的 warnings（批次八：手机单要记「按汇报验收」）。 */
+  reviewWarnings: string[][];
   reports: Array<{ dir: string; status: string | null; attention: unknown; raw: string }>;
   resultFiles: Array<{ path: string; text: string }>;
 }
@@ -150,10 +167,19 @@ function snapshotTicket(id: string): TicketSnapshot {
     status: string;
   };
   const plan = JSON.parse(readFileSync(join(dir, "plan.json"), "utf8")) as {
-    tasks?: Array<{ slug: string }>;
+    tasks?: Array<{ slug: string; writes?: string[] }>;
   };
   const reports: TicketSnapshot["reports"] = [];
   const resultFiles: TicketSnapshot["resultFiles"] = [];
+  const planWrites = (plan.tasks ?? []).map((task) =>
+    Array.isArray(task.writes) ? task.writes : [],
+  );
+  const reviewFile = JSON.parse(readFileSync(join(dir, "review.json"), "utf8")) as {
+    reviews?: Array<{ warnings?: string[] }>;
+  };
+  const reviewWarnings = (reviewFile.reviews ?? []).map((review) =>
+    Array.isArray(review.warnings) ? review.warnings : [],
+  );
   for (const [index, task] of (plan.tasks ?? []).entries()) {
     const taskDir = join(dir, `${String(index + 1).padStart(2, "0")}-${task.slug}`);
     let raw = "";
@@ -178,7 +204,7 @@ function snapshotTicket(id: string): TicketSnapshot {
       /* 没有 result.md 也正常：blocked / idle 不写 */
     }
   }
-  return { id, status: ticket.status, reports, resultFiles };
+  return { id, status: ticket.status, planWrites, reviewWarnings, reports, resultFiles };
 }
 
 const delegate = createTools({
@@ -207,11 +233,18 @@ async function answerAsPhone(
   const controller = new AbortController();
   const tasks: PhoneTask[] = [];
   let settled = false;
-  const textPromise = ticket.then((text) => {
-    settled = true;
-    controller.abort();
-    return text;
-  });
+  const textPromise = ticket
+    .then((text) => {
+      settled = true;
+      controller.abort();
+      return text;
+    })
+    .catch((error: unknown) => {
+      // 派活失败也要让循环退出，否则会一直空转到 withTimeout
+      settled = true;
+      controller.abort();
+      throw error;
+    });
 
   while (!settled) {
     let task: PhoneTask | null;
@@ -265,7 +298,7 @@ async function runCase(
   const created = ticketIds().filter((id) => !before.has(id));
   const id = created.at(-1);
   if (!id) {
-    check(false, "delegate 产生了一张新 ticket");
+    check(false, "delegate 产生了一张新 ticket", text.slice(0, 120));
     return;
   }
   check(true, "delegate 产生了新 ticket", id);
@@ -273,6 +306,8 @@ async function runCase(
   inspect(snapshot, text, tasks);
 }
 
+rmSync(join(DIR, ".data/phone-probe"), { recursive: true, force: true });
+rmSync(join(DIR, ".data/phone-probe-delegations.sqlite"), { force: true });
 mkdirSync(RUNS, { recursive: true });
 
 try {
@@ -378,6 +413,18 @@ try {
     (snapshot, text, tasks) => {
       check(tasks.length > 0, "假客户端 poll 到了任务", tasks[0]?.taskId ?? "");
       check(tasks[0]?.goal.includes("Android") === true, "任务里只有 goal/doneWhen/budgetMs");
+      check(
+        snapshot.planWrites.length > 0 && snapshot.planWrites.every((writes) => writes.length === 0),
+        "手机单 plan.json writes 为空",
+        JSON.stringify(snapshot.planWrites),
+      );
+      check(
+        snapshot.reviewWarnings.some((warnings) =>
+          warnings.some((warning) => warning.includes("按汇报验收")),
+        ),
+        "review.json 记「按汇报验收」warning",
+        JSON.stringify(snapshot.reviewWarnings),
+      );
       check(snapshot.status === "done", "整单状态 done", snapshot.status);
       const report = snapshot.reports[0];
       check(report?.status === "ready", "REPORT 是 ready", report?.status ?? "缺失");
@@ -436,13 +483,17 @@ try {
     check(status === 404, "超时后再交结果 → 404", `status=${status}`);
   }
 
-  console.log(
-    failures === 0
-      ? "\n✓ 手机 worker 全链路通过"
-      : `\n✗ 手机 worker 有 ${failures} 项不对`,
-  );
+} catch (error) {
+  // 异常不能被 finally 的 exit 吞掉：先记成一条失败，再把真实原因打出来
+  failures += 1;
+  console.error("[fatal]", error instanceof Error ? error.stack ?? error.message : String(error));
 } finally {
-  for (const path of [process.env.AGENT_DB_PATH, process.env.MEMORY_DB_PATH]) {
+  for (const path of [
+    process.env.AGENT_DB_PATH,
+    process.env.MEMORY_DB_PATH,
+    process.env.PROVIDERS_PATH,
+    process.env.DELEGATIONS_DB_PATH,
+  ]) {
     if (!path) continue;
     try {
       rmSync(path, { force: true });
@@ -450,5 +501,16 @@ try {
       /* sqlite 句柄还开着时删不掉；探针目录本来就在 .data/ 下 */
     }
   }
-  process.exit(failures === 0 ? 0 : 1);
+  try {
+    rmSync(join(DIR, ".data/phone-probe"), { recursive: true, force: true });
+  } catch {
+    /* 服务进程可能还开着文件句柄；探针目录在 .data/ 下，留着无害 */
+  }
 }
+
+console.log(
+  failures === 0
+    ? "\n✓ 手机 worker 全链路通过"
+    : `\n✗ 手机 worker 有 ${failures} 项不对`,
+);
+process.exit(failures === 0 ? 0 : 1);

@@ -4,13 +4,20 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>Selenite</title>
+<link rel="icon" type="image/png" sizes="48x48" href="/assets/favicon.png" />
 <link rel="stylesheet" href="/assets/style.css" />
 <script>
-  // 在样式表应用之前定主题，避免深色用户看到一帧白闪
+  // 在样式表应用之前定主题，避免深色用户看到一帧白闪。
+  // 四套：paper（米黄）/ white（纯白）/ indigo（靛蓝夜）/ black（纯黑）。
+  // 旧值迁移：dark → indigo，light / system / 缺失 → paper（2026-11-05 定稿）。
   (function () {
-    var stored = localStorage.getItem("lifediary.theme") || "system";
-    var dark = stored === "dark" || (stored === "system" && matchMedia("(prefers-color-scheme: dark)").matches);
-    document.documentElement.dataset.theme = dark ? "dark" : "light";
+    var themes = ["paper", "white", "indigo", "black"];
+    var stored = localStorage.getItem("lifediary.theme");
+    var theme = themes.indexOf(stored) >= 0
+      ? stored
+      : (stored === "dark" ? "indigo" : "paper");
+    if (stored !== theme) localStorage.setItem("lifediary.theme", theme);
+    document.documentElement.dataset.theme = theme;
     document.documentElement.dataset.accent = localStorage.getItem("lifediary.accent") || "indigo";
     if (localStorage.getItem("lifediary.sidebar") === "closed") {
       document.documentElement.dataset.sidebar = "closed";
@@ -73,25 +80,34 @@
 
 <div class="app">
   <aside class="sidebar">
-    <!-- 收起轨道（2026-11-04）：侧栏收起不再是 0 宽整栏消失，留一条 60px 图标轨。
-         「+ 新对话」和设置是真功能；任务中心 / 领域负责人 / 群组是占位——
-         禁用态 + tooltip 写明，不装能点（同「mock 不许空转」的纪律）。 -->
+    <!-- 收起轨道（2026-11-05 F1）：对齐 CINDY 几何，72px 轨 + 36×36 圆钮。
+         顺序：新对话 → 任务中心 → 项目 → 分隔线 → 占位 → 设置 + 状态点。
+         项目按钮与展开态 pill 共用同一个弹层（#proj-menu）。 -->
     <div class="side-rail" id="side-rail">
-      <button class="rail-btn" id="rail-new" type="button" title="新对话 (Ctrl+K)" aria-label="新对话">
+      <button class="rail-btn" id="rail-new" type="button" data-tip="新对话 (Ctrl+K)" aria-label="新对话">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M8 3.2v9.6M3.2 8h9.6"/></svg>
       </button>
-      <div class="rail-sep" aria-hidden="true"></div>
-      <button class="rail-btn" id="rail-tasks" type="button" title="任务中心" aria-label="任务中心">
+      <button class="rail-btn" id="rail-tasks" type="button" data-tip="任务中心" aria-label="任务中心">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="2.6" width="10" height="11.4" rx="1.6"/><path d="M5.8 2.6V5h4.4V2.6M5.6 8h4.8M5.6 10.8h3.2"/></svg>
       </button>
-      <button class="rail-btn" type="button" title="领域负责人（占位）" aria-label="领域负责人" disabled>
+      <!-- 轨道态项目按钮：主工作区显示通用图标，选了项目就换成项目名首字。 -->
+      <button class="rail-btn rail-proj" id="rail-proj" type="button" data-tip="切换项目"
+              aria-label="切换项目" aria-haspopup="menu" aria-expanded="false" hidden>
+        <svg class="proj-rail-ico" id="rail-proj-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+             stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M2.6 3.6h4l1.2 1.6h5.6v7H2.6zM2.6 6.4h10.8"/>
+        </svg>
+        <span class="proj-rail-mark" id="rail-proj-mark" hidden></span>
+      </button>
+      <div class="rail-sep" aria-hidden="true"></div>
+      <button class="rail-btn" type="button" title="领域负责人（占位）" data-tip="领域负责人（占位）" aria-label="领域负责人" disabled>
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.2 9.4 5l3 .4-2.2 2.1.5 3-2.7-1.4-2.7 1.4.5-3L3.6 5.4l3-.4Z"/></svg>
       </button>
-      <button class="rail-btn" type="button" title="群组（占位）" aria-label="群组" disabled>
+      <button class="rail-btn" type="button" title="群组（占位）" data-tip="群组（占位）" aria-label="群组" disabled>
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5.6" cy="6" r="2.2"/><path d="M2.2 13c.4-2.2 1.7-3.4 3.4-3.4S8.6 10.8 9 13"/><circle cx="11" cy="6.6" r="1.8"/><path d="M10.6 9.9c1.8.1 2.9 1.1 3.3 2.7"/></svg>
       </button>
       <div class="rail-flex" aria-hidden="true"></div>
-      <button class="rail-btn" id="rail-settings" type="button" title="设置" aria-label="设置">
+      <button class="rail-btn" id="rail-settings" type="button" data-tip="设置" aria-label="设置">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
           <circle cx="8" cy="8" r="2.2"/>
           <path d="M8 1.6v1.6M8 12.8v1.6M1.6 8h1.6M12.8 8h1.6M3.5 3.5l1.1 1.1M11.4 11.4l1.1 1.1M12.5 3.5l-1.1 1.1M4.6 11.4l-1.1 1.1" stroke-linecap="round"/>
@@ -101,28 +117,41 @@
     </div>
 
     <div class="sidebar-inner">
-      <div class="sidebar-head">对话</div>
+      <!-- 顶部主导航（2026-11-05 F1）：新对话 / 任务中心 / 项目，统一 32px 胶囊行、2px 行距 -->
+      <div class="side-top">
+        <button class="new" id="new-chat" type="button">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.2v9.6M3.2 8h9.6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+          新对话
+        </button>
 
-      <button class="new" id="new-chat" type="button">
-        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.2v9.6M3.2 8h9.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
-        新对话
-      </button>
-
-      <nav class="chats" id="chats" aria-label="历史对话"></nav>
-
-      <div class="side-foot">
-        <!-- 任务中心与设置同区常驻；侧栏收起后由 .side-rail 的 rail-tasks 兜底可达 -->
         <button class="side-item" id="open-tasks" type="button" aria-label="任务中心" title="任务中心">
-          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <rect x="3" y="2.6" width="10" height="11.4" rx="1.6"/>
             <path d="M5.8 2.6V5h4.4V2.6M5.6 8h4.8M5.6 10.8h3.2"/>
           </svg>
           任务中心
           <span class="side-count" id="tasks-badge" hidden></span>
         </button>
+
+        <!-- 项目区（2026-11-04，F1 起无工作区也显示）：当前项目 pill，点开是切换弹层。
+             没有工作区时作为「添加主项目」入口，不再整块隐藏。 -->
+        <div class="side-proj" id="side-proj" hidden>
+          <button class="composer-pill proj-pill" id="proj-pill" type="button"
+                  aria-haspopup="menu" aria-expanded="false" title="切换项目">
+            <span class="proj-pill-label" id="proj-pill-label">杂事 · 主工作区</span>
+            <svg class="chev" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4.8 6.4 8 9.6l3.2-3.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="sidebar-head">对话</div>
+      <nav class="chats" id="chats" aria-label="历史对话"></nav>
+
+      <!-- 底部只留设置 + 连接状态，mt-auto 钉在侧栏底边 -->
+      <div class="side-foot">
         <!-- 设置入口常驻侧栏底部：设置页会隐藏侧栏，所以设置页自带返回按钮 -->
         <button class="side-item" id="open-settings" type="button" aria-label="设置" title="设置">
-          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
             <circle cx="8" cy="8" r="2.2"/>
             <path d="M8 1.6v1.6M8 12.8v1.6M1.6 8h1.6M12.8 8h1.6M3.5 3.5l1.1 1.1M11.4 11.4l1.1 1.1M12.5 3.5l-1.1 1.1M4.6 11.4l-1.1 1.1" stroke-linecap="round"/>
           </svg>
@@ -139,37 +168,66 @@
     <header class="top">
       <h1 id="title">新对话</h1>
       <div class="top-actions">
-        <!-- 上下文占用徽标（2026-11-04 批次二）：done 后刷新，window 读不到就隐藏 -->
-        <span class="ctx-meter" id="ctx-meter" hidden></span>
         <!-- 导出对话 Markdown（2026-11-04 批次一）：只在有会话时出现 -->
         <button class="ghost" id="export-chat" type="button" hidden title="导出当前对话为 Markdown">导出</button>
-        <div class="segmented tiny" id="mode-switch" role="radiogroup" aria-label="思考档">
-          <button type="button" data-mode="fast" aria-checked="true" title="快速：不思考，先出字">快</button>
-          <button type="button" data-mode="deep" aria-checked="false" title="深度：开思考，慢一点但更稳">深</button>
-        </div>
-        <!-- 停止挪进了输入框（发送/停止同槽，2026-11-04），顶栏不再有第二个停止入口 -->
+        <!-- 上下文环搬进了 composer 底部工具行（2026-11-04），思考强度在模型菜单里；
+             顶栏只留导出。
+             停止也在输入框里（发送/停止同槽），顶栏不再有第二个停止入口。 -->
       </div>
     </header>
 
     <div class="scroll" id="scroll">
       <div class="thread" id="thread">
         <div class="empty" id="empty">
-          <div class="empty-mark" aria-hidden="true"></div>
-          <p>今天想记点什么？</p>
+          <!-- 首页标识：项目水晶（2026-11-04，无背景框，光晕由 CSS 滤镜给） -->
+          <img class="empty-mark" src="/assets/crystal.png" alt="" aria-hidden="true">
+          <p>说吧，我在。</p>
         </div>
       </div>
     </div>
 
     <!-- 输入框是一个容器卡（2026-11-04 对齐 cindy ComposerCard）：
-         边框/卡底在容器上，textarea 透明无框，发送钮住进右下角；
-         流式时同槽换成停止（.send.streaming），没有第二个停止入口。 -->
+         边框/卡底在容器上，textarea 透明无框；底部工具行左：附件占位，
+         右：模型 + 上下文环 + 发送（模型紧挨发送，CINDY / ZCode 同款，D2 挪的）。
+         思考强度收进模型菜单的行内分段。流式时发送同槽换成停止，没有第二个停止入口。 -->
     <form class="composer" id="composer" autocomplete="off">
       <textarea id="input" rows="1" placeholder="说点什么…" aria-label="输入消息"></textarea>
       <div class="composer-foot">
-        <button class="send" id="send" type="submit" aria-label="发送" disabled>
-          <svg class="ico-send" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 12.8V3.6M3.9 7.5 8 3.4l4.1 4.1" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
-          <svg class="ico-stop" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.6" y="4.6" width="6.8" height="6.8" rx="1.6" fill="currentColor"/></svg>
-        </button>
+        <div class="composer-tools">
+          <!-- 附件占位（2026-11-04）：只弹 toast，不上传、不发请求 -->
+          <button class="composer-add" id="composer-add" type="button"
+                  aria-label="添加附件（未接入）" title="添加附件（未接入）">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M8 3.2v9.6M3.2 8h9.6" stroke-linecap="round"/></svg>
+          </button>
+        </div>
+
+        <div class="composer-meta">
+          <!-- 模型快捷切换（2026-11-04 批次五）：每次打开现拉，一次只看一家供应商。
+               2026-11-04 界面 v2：思考强度并入每行（原来独立的思考档 pill 已删）。
+               D2：pill 挪进右组，菜单仍由包裹层定位（贴着 pill 右上角往上弹）。 -->
+          <div class="composer-wrap">
+            <button class="composer-pill model-pill" id="model-pill" type="button" aria-haspopup="menu" aria-expanded="false"
+                    title="切换模型（下一轮生效）">
+              <span id="model-pill-label">模型</span>
+              <span class="model-think" id="model-think" hidden></span>
+              <svg class="chev" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4.8 6.4 8 9.6l3.2-3.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+            <div class="model-menu composer-pop" id="model-menu" role="menu" hidden></div>
+          </div>
+
+          <!-- 上下文环（2026-11-04 从顶栏搬进 composer 右下）：20×20 进度环 + 百分比 -->
+          <span class="ctx-ring" id="ctx-ring" hidden>
+            <svg viewBox="0 0 20 20" aria-hidden="true">
+              <circle class="ctx-track" cx="10" cy="10" r="8.25"/>
+              <circle class="ctx-fill" id="ctx-fill" cx="10" cy="10" r="8.25"/>
+            </svg>
+            <span class="ctx-pct" id="ctx-pct"></span>
+          </span>
+          <button class="send" id="send" type="submit" aria-label="发送" disabled>
+            <svg class="ico-send" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 12.8V3.6M3.9 7.5 8 3.4l4.1 4.1" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
+            <svg class="ico-stop" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.6" y="4.6" width="6.8" height="6.8" rx="1.6" fill="currentColor"/></svg>
+          </button>
+        </div>
       </div>
     </form>
   </main>
@@ -235,6 +293,33 @@
       </div>
     </div>
   </main>
+</div>
+
+<!-- 项目切换弹层（2026-11-04）：展开态 pill 与收起轨道按钮共用这一份。
+     放在 body 下而不是 .sidebar 里：侧栏收起动画要靠 overflow:hidden 裁内容，
+     弹层放进去会被一起裁掉。位置由 JS 按触发元素实测写入，动效沿用 .composer-pop。 -->
+<div class="proj-pop composer-pop" id="proj-menu" role="menu" aria-label="切换项目" hidden></div>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<!-- 轨道 tooltip（2026-11-05 F1）：挂在 body 下，避免被 .sidebar 的 overflow:hidden 裁掉。 -->
+<div class="rail-tip" id="rail-tip" role="tooltip" hidden></div>
+
+<!-- 通用模态弹窗（2026-11-05 F1，ZCode 规格）：纯手写，与 composer morph 弹层并存。
+     内容由 openModal(title, bodyBuilder) 每次重建；Esc / 点遮罩 / 右上 X 关闭。 -->
+<div class="modal" id="modal" hidden>
+  <div class="modal-mask" id="modal-mask"></div>
+  <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal-head">
+      <h2 class="modal-title" id="modal-title"></h2>
+      <button class="modal-x" id="modal-close" type="button" aria-label="关闭" title="关闭 (Esc)">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+          <path d="M4 4l8 8M12 4 4 12" stroke-linecap="round"/>
+        </svg>
+      </button>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+  </div>
 </div>
 
 <div class="gate" id="gate" hidden>

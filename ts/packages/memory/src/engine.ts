@@ -34,6 +34,8 @@ export interface MemoryEngineOptions {
 	extractor?: Extractor;
 	consolidator?: Consolidator;
 	retriever?: Retriever;
+	/** 召回候选窗口下限（2026-11-04 批次一 A2-S）；不传 = WeightedRetriever 的默认 200。 */
+	candidateFloor?: number;
 	now?: () => Date;
 }
 
@@ -48,7 +50,8 @@ export class MemoryEngine {
 		this.store = options.store;
 		this.extractor = options.extractor ?? new HeuristicExtractor();
 		this.consolidator = options.consolidator ?? new BasicConsolidator();
-		this.retriever = options.retriever ?? new WeightedRetriever();
+		this.retriever =
+			options.retriever ?? new WeightedRetriever({ candidateFloor: options.candidateFloor });
 		this.now = options.now ?? (() => new Date());
 	}
 

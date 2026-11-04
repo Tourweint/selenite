@@ -31,14 +31,27 @@ import {
 	type MemoryScope,
 } from "@lifediary/memory";
 import { diaryStore } from "./diary.ts";
+import { approvalStore, type ApprovalOutcome, type PendingApproval } from "./approvals.ts";
+import {
+	approvalTimeoutSeconds,
+	denialReason,
+	needsApproval,
+	WRITE_TOOLS,
+} from "./approval-policy.ts";
 import { recentDiaryMemories, syncDiaryToMemory } from "./memory-ingest.ts";
-import { projectsStore } from "./projects.ts";
-import { chatModelRef, isFaux, readLlmConfig } from "./provider.ts";
+import { pathGuardBlockReason } from "./path-guard.ts";
+import { currentProjectEnabled, projectsStore, workspaceRootReal } from "./projects.ts";
+import { chatModelRef, clampThinkingLevel, currentModels, currentThinkingLevels, isFaux, levelFromModelId, readLlmConfig } from "./provider.ts";
+import {
+	bashTimeoutSeconds,
+	buildHarnessSettings,
+	reliabilitySummary,
+} from "./reliability.ts";
 import { ReminderTask } from "./reminder.ts";
 import { createSkillStore, type SkillStore } from "./skills.ts";
 import { createTools } from "./tools.ts";
-import type { DelegationPhase, TurnUsage } from "@lifediary/shared";
-import { watchDelegation, type DelegationEvent, type DelegationReport } from "./delegation.ts";
+import type { DelegationPhase, ThinkingLevel, TurnUsage } from "@lifediary/shared";
+import { watchDelegation, emitDelegation, type DelegationEvent, type DelegationReport } from "./delegation.ts";
 
 /**
  * Agent 装配。
@@ -65,6 +78,26 @@ const DB_PATH = process.env.AGENT_DB_PATH?.trim() || ".data/agent.sqlite";
 /** 工具读写文件的基准目录。默认是服务进程的工作目录 */
 const WORKDIR = process.env.AGENT_WORKDIR?.trim() || process.cwd();
 
+/**
+ * 当前项目（2026-11-04 侧边栏方案 §2.2/§2.3）：**每轮现读 store，不缓存**。
+ * 切换后下一轮自然生效；目录没了/移出工作区时 getCurrentProject() 返回 null，
+ * cwd 与系统提示回到主工作区形态。`CURRENT_PROJECT=false` 时整体旁路。
+ */
+function currentProject(): { name: string; rootPath: string } | null {
+	if (!currentProjectEnabled()) return null;
+	try {
+		return projectsStore().getCurrentProject();
+	} catch {
+		// 项目存储坏了不该让对话失败：退回主工作区
+		return null;
+	}
+}
+
+/** 本轮会话执行环境的 cwd（当前项目根优先，否则 WORKDIR） */
+function sessionCwd(): string {
+	return currentProject()?.rootPath ?? WORKDIR;
+}
+
 /** full = 全部放行；read-only = 只允许读（写文件/跑命令一律拦住） */
 /**
  * 访问档位（2026-11-03 改成运行时可切）。
@@ -77,6 +110,11 @@ export type ToolAccess = "full" | "read-only" | "no-shell";
 interface PolicyState {
 	access: ToolAccess;
 	blocked: string[];
+	/**
+	 * 写类工具执行前是否要人确认（2026-11-04 批次二，独立轴）。
+	 * 默认关 = 与改动前完全一致；`AGENT_CONFIRM_WRITES=1` 打开。
+	 */
+	confirmWrites: boolean;
 }
 
 const POLICY_PATH = process.env.AGENT_POLICY_PATH?.trim() || ".data/policy.json";
@@ -89,12 +127,14 @@ const ACCESS_LABEL: Record<ToolAccess, string> = {
 
 function initialPolicy(): PolicyState {
 	const access = (process.env.AGENT_TOOL_POLICY?.trim() || "full").toLowerCase();
+	const confirm = (process.env.AGENT_CONFIRM_WRITES?.trim() || "").toLowerCase();
 	return {
 		access: access === "read-only" || access === "no-shell" ? access : "full",
 		blocked: (process.env.AGENT_BLOCKED_TOOLS ?? "")
 			.split(",")
 			.map((name) => name.trim())
 			.filter(Boolean),
+		confirmWrites: confirm === "1" || confirm === "true",
 	};
 }
 
@@ -109,6 +149,9 @@ function loadPolicy(): PolicyState {
 		return {
 			access,
 			blocked: Array.isArray(parsed.blocked) ? parsed.blocked : base.blocked,
+			// 老安装的 policy.json 里没有这个字段：回落 env 初值，别写死 false
+			confirmWrites:
+				typeof parsed.confirmWrites === "boolean" ? parsed.confirmWrites : base.confirmWrites,
 		};
 	} catch {
 		return base;
@@ -121,9 +164,14 @@ export function getPolicy(): PolicyState & { label: string } {
 	return { ...policy, label: ACCESS_LABEL[policy.access] };
 }
 
-export function setPolicy(next: { access?: ToolAccess; blocked?: string[] }): PolicyState {
+export function setPolicy(next: {
+	access?: ToolAccess;
+	blocked?: string[];
+	confirmWrites?: boolean;
+}): PolicyState {
 	if (next.access) policy.access = next.access;
 	if (Array.isArray(next.blocked)) policy.blocked = next.blocked.filter(Boolean);
+	if (typeof next.confirmWrites === "boolean") policy.confirmWrites = next.confirmWrites;
 	try {
 		mkdirSync(dirname(POLICY_PATH), { recursive: true });
 		writeFileSync(POLICY_PATH, JSON.stringify(policy, null, 2));
@@ -135,9 +183,16 @@ export function setPolicy(next: { access?: ToolAccess; blocked?: string[] }): Po
 	return policy;
 }
 
-// `propose_project` 本身只写 proposal 行，但它会引出"建目录/登记项目"，和 delegate 同档拦。
-const WRITE_TOOLS = new Set(["write", "edit", "bash", "powershell", "delegate", "propose_project"]);
+// `WRITE_TOOLS` 在 approval-policy.ts —— 审批判定与只读闸门必须用同一份清单
 const SHELL_TOOLS = new Set(["bash", "powershell"]);
+
+/**
+ * bash 工具默认超时（秒，2026-11-04 批次一 A4）。
+ *
+ * 模型没传 `timeout` 时由 beforeTool 注入；`AGENT_BASH_TIMEOUT_S=0`（或非法值）
+ * = 不注入，回到内核的"no default timeout"。
+ */
+const BASH_TIMEOUT_S = bashTimeoutSeconds(process.env);
 
 /**
  * 派活能力（chancellor）是否装。
@@ -152,7 +207,7 @@ const CHANCELLOR_ENABLED = (process.env.CHANCELLOR_ENABLED?.trim() || "true").to
  *
  * 提成独立函数是为了**能测**：安全规则埋在 hook 里只能靠起服务、驱动一次工具调用才能验，
  * 而 faux 给的工具参数是空对象，`delegate` 这种带必填参数的工具根本走不到执行那一步
- * （`provider.ts` 里只给 `recall` 特判了参数）。提取出来之后 `delegate-gate-probe.ts`
+ * （`provider.ts` 里只给 `recall` / `bash` 特判了参数）。提取出来之后 `delegate-gate-probe.ts`
  * 可以直接断言，不用绕。
  *
  * 注意 `delegate` 在 `WRITE_TOOLS` 里：它本身不写文件，但它会起 worker 去写。
@@ -169,7 +224,40 @@ export function readOnlyBlockReason(name: string): string | undefined {
 	return undefined;
 }
 
-
+/**
+ * 等一次审批：答复 / 超时 / 本轮中止，谁先到算谁。
+ *
+ * 超时与中止都要落终态（fail-closed）——否则状态文件里会留下一条"看起来还能批"的 pending，
+ * 刷新页面又把它挂出来。`promise` 由 store 在 decide / expire 时结算，这里只补超时与 abort 两路。
+ */
+function waitForApproval(
+	pending: PendingApproval,
+	timeoutS: number,
+	signal: AbortSignal | undefined,
+): Promise<ApprovalOutcome> {
+	return new Promise<ApprovalOutcome>((resolve) => {
+		let done = false;
+		const finish = (status: ApprovalOutcome) => {
+			if (done) return;
+			done = true;
+			clearTimeout(timer);
+			signal?.removeEventListener("abort", onAbort);
+			resolve(status);
+		};
+		const onAbort = () => {
+			approvalStore().expire(pending.record.callId, "aborted");
+			finish("aborted");
+		};
+		const timer = setTimeout(() => {
+			approvalStore().expire(pending.record.callId, "timeout");
+			finish("timeout");
+		}, timeoutS * 1000);
+		void pending.promise.then(finish);
+		// abortSignal 可能在挂上之前就已经 aborted（/stop 与钩子同刻发生）
+		if (signal?.aborted) onAbort();
+		else signal?.addEventListener("abort", onAbort, { once: true });
+	});
+}
 
 /**
  * 一轮对话最多几个工具回合。默认 100（实测 30 偏紧，hermes 那类给到 300）。
@@ -255,10 +343,28 @@ const PERSONA = [
 ].join("");
 
 // ── 记忆 ─────────────────────────────────────────────────
+/** 召回候选窗口下限（2026-11-04 批次一 A2-S）：不配 = 200；设 50 = 旧行为。 */
+function memoryCandidateFloor(): number | undefined {
+	const raw = Number(process.env.MEMORY_CANDIDATE_FLOOR);
+	return Number.isInteger(raw) && raw > 0 ? raw : undefined;
+}
+
+/**
+ * 召回检索器（2026-11-04 批次三 A2-F）：`auto`（默认，FTS5 trigram 候选集） / `js`（批次一窗口路径）。
+ * 只在装配处读 env —— memory 包本身不碰环境变量。
+ */
+function memoryFtsEnabled(): boolean {
+	return (process.env.MEMORY_RETRIEVER ?? "").trim().toLowerCase() !== "js";
+}
+
 export const memoryEngine: MemoryEngine | null = (() => {
 	if (process.env.MEMORY_ENABLED === "false") return null;
 	try {
-		return createMemoryEngine({ dbPath: process.env.MEMORY_DB_PATH });
+		return createMemoryEngine({
+			dbPath: process.env.MEMORY_DB_PATH,
+			candidateFloor: memoryCandidateFloor(),
+			fts: memoryFtsEnabled(),
+		});
 	} catch (error) {
 		const detail = error instanceof Error ? error.message : String(error);
 		console.warn(`记忆库初始化失败，本次以无记忆运行: ${detail}`);
@@ -418,6 +524,21 @@ async function openHarness(): Promise<Harness> {
 			}),
 			sections: [
 				{ key: "persona", render: () => PERSONA },
+				// 当前项目（2026-11-04 方案 §2.3）：每轮现渲染，不写进对话历史。
+				// 切换项目后 durable 会按 section 差异追加新的 pi.system，下一轮即生效。
+				{
+					key: "current_project",
+					render: () => {
+						if (!currentProjectEnabled()) return undefined;
+						const project = currentProject();
+						if (!project) return "当前无特定项目（杂事模式）。文件操作默认在主工作区。";
+						return [
+							`当前项目：${project.name}`,
+							`根路径：${project.rootPath}`,
+							"文件操作默认在此项目内。",
+						].join("\n");
+					},
+				},
 				// L1 技能索引（2026-10-31 方案 D5）：排在 persona 后（"会话后部"），按会话冻结——
 				// 首轮渲染后技能目录再变也不改写本会话，否则 durable 会追加新 pi.system、缓存前缀整段作废。
 				// 没有技能时 render 返回 undefined，整个 section 省略。
@@ -434,8 +555,62 @@ async function openHarness(): Promise<Harness> {
 							return { block: "本轮工具调用已达上限，请直接用已有信息回答" };
 						}
 						const readOnly = readOnlyBlockReason(call.name);
-						if (readOnly) {
-							return { block: readOnly };
+						const verdict = needsApproval(policy, call.name, readOnly);
+						if (verdict.kind === "block") {
+							return { block: verdict.reason };
+						}
+						// 最大工作区物理边界（2026-11-04 方案 §2.4）：write/edit 的目标路径
+						// 解析后必须落在工作区根内。未设工作区时旁路（不把没配的人锁死）。
+						// 放在审批之前：越界是硬拒绝，没有"确认后就能写"的说法。
+						const pathBlock = pathGuardBlockReason({
+							tool: call.name,
+							args: call.arguments,
+							workspaceRoot: workspaceRootReal(),
+							cwd: sessionCwd(),
+						});
+						if (pathBlock) return { block: pathBlock };
+						// bash 默认超时（2026-11-04 批次一 A4）：只补模型没传的 timeout。
+						// 内核会拿返回的 arguments 重新校验（types.d.ts 的 ToolHooks.beforeTool）；
+						// `timeout=0` 绝不能注入 —— 内核 validateTimeout 对 <=0 直接抛错。
+						let injected: { timeout?: number } | undefined;
+						if (call.name === "bash" && BASH_TIMEOUT_S > 0) {
+							const a = call.arguments as { timeout?: number };
+							if (a.timeout === undefined) injected = { ...a, timeout: BASH_TIMEOUT_S };
+						}
+						// 审批（2026-11-04 批次二）：写类工具在真正动手前挂起等人答复。
+						// 本会话记住过的工具直接放行（进程内，重启失效）。
+						if (verdict.kind === "ask" && !approvalStore().isRemembered(api.conversationId, call.name)) {
+							const timeoutS = approvalTimeoutSeconds(process.env);
+							const pending = approvalStore().create({
+								callId: call.id,
+								conversationId: api.conversationId,
+								tool: call.name,
+								// 与 tool 事件同一口径截断；这份摘要会落盘（有意），永不进日志
+								args: toolArgs(call.arguments).args ?? "",
+								timeoutMs: timeoutS * 1000,
+							});
+							// 借派活通道发给对话流（见 delegation.ts 模块头注释）
+							emitDelegation(api.conversationId, {
+								type: "approval",
+								callId: pending.record.callId,
+								tool: pending.record.tool,
+								args: pending.record.args,
+								deadlineAt: pending.record.deadlineAt,
+							});
+							const status = await waitForApproval(pending, timeoutS, context.abortSignal);
+							if (status !== "approved") {
+								return { block: denialReason(status, call.name, timeoutS) };
+							}
+							// 批准后复判：等待期间可能被切到只读 / 拉黑 / 换工作区
+							const recheck = readOnlyBlockReason(call.name);
+							if (recheck) return { block: recheck };
+							const recheckPath = pathGuardBlockReason({
+								tool: call.name,
+								args: call.arguments,
+								workspaceRoot: workspaceRootReal(),
+								cwd: sessionCwd(),
+							});
+							if (recheckPath) return { block: recheckPath };
 						}
 						// 告诉客户端"现在开始动手了"（工具可能跑几十秒，界面上不能一直空白）
 						emitPhase(api.conversationId, "working");
@@ -447,7 +622,8 @@ async function openHarness(): Promise<Harness> {
 						});
 						// 首次动工具时按 D3 切一次思考档（短会话才切，切了就保持）
 						await switchThinkingOnTool(api, context);
-						return undefined;
+						// 唯一出口：批准后也走这里，保住上面算好的 bash 超时注入
+						return injected ? { arguments: injected } : undefined;
 					},
 					// 工具跑完、把结果交回模型 → 又回到"在思考"
 					afterTool: (call: ToolHookCall, result, api) => {
@@ -516,13 +692,26 @@ async function openHarness(): Promise<Harness> {
 		})),
 	);
 
+	// 可靠性旋钮（2026-11-04 批次一 A4）：全空时 settings 为 undefined，就是"不传"。
+	const settings = buildHarnessSettings(process.env);
+	const reliability = reliabilitySummary(process.env);
+	console.log(
+		`[可靠性] bash默认超时=${reliability.bashTimeoutS > 0 ? `${reliability.bashTimeoutS}s` : "禁用"} ` +
+			`stream.timeoutMs=${reliability.streamTimeoutMs ?? "未设(SDK默认10min)"} ` +
+			`afterFailedRun=${reliability.afterFailedRun ?? "未设"}`,
+	);
+
 	const harness = await Harness.open(
 		storage,
 		{
-			models: config.models,
+			// 传访问器而不是快照：配置换了（CRUD / 外部改文件）下一个使用点就拿到新目录，
+			// 不用重开 Harness，也不会每请求重建（审查 S2）
+			models: currentModels,
 			registry,
-			// 每个会话的执行环境：cwd 跟着会话走，以后要多目录也改这里
-			env: ({ cwd }) => new NodeExecutionEnv({ cwd: cwd ?? WORKDIR }),
+			// 每个会话的执行环境：cwd 跟着会话走；当前项目非空时用项目根（每轮现读）。
+			// 会话显式配了 cwd 仍以它优先，保持"会话自己的设置不被全局状态覆盖"。
+			env: ({ cwd }) => new NodeExecutionEnv({ cwd: cwd ?? sessionCwd() }),
+			...(settings ? { settings } : {}),
 			onReport: (error, info) => {
 				const detail = error instanceof Error ? error.message : String(error);
 				console.warn(`[agent] ${info.type}: ${detail}`);
@@ -530,6 +719,10 @@ async function openHarness(): Promise<Harness> {
 		},
 		CTX,
 	);
+
+	// 审批状态先加载：遗留 pending 会在这里按 timeout 结算（fail-closed）。
+	// 必须早于 resume()——恢复重走 beforeTool 时会生成新的审批。
+	approvalStore().load();
 
 	// 上次进程没跑完的活（包括睡着的提醒）接着跑
 	harness.resume();
@@ -544,28 +737,44 @@ export interface ResolvedChat {
 	internalId: number;
 }
 
-export type ChatMode = "fast" | "deep";
-
 /**
- * 本轮的思考档（2026-10-31，方案 D1/D2）。
+ * 本轮思考档（2026-11-04 思考档位方案 D1/D3，替代快/深两档）。
  *
- * 快档与深档是**同一个模型**（换模型 = 上游缓存清零，方案 §2.2 实测），
- * 区别只剩 `enable_thinking`：fast = 思考关（首字 0.8~0.9s），deep = 思考开。
+ * 档位是**同一个模型的四条思考变体**（换模型 = 上游缓存清零）：
+ * `off` 思考关，`low/medium/high` 走 `reasoning_effort`。
  * 切档 = 请求头块变化 = 当前前缀整段重算（方案 §2.3），所以默认**按会话定档、中途不切**；
- * 唯一例外是 D3 的"短会话首次调工具切一次"，在工具钩子里做（见 switchThinkingOnTool）。
+ * 例外是 D3 的"短会话首次调工具切一次"，在工具钩子里做（见 switchThinkingOnTool）。
+ *
+ * 越界档位（例如新模型不支持 medium）在这里落回支持域内的最高可用档——
+ * 显式 `/mode` 走端点校验并 400，这里兜的是 X-Mode / D3 这类"服务端自己定的档"。
  */
-export async function applyChatMode(chat: ResolvedChat, mode: ChatMode): Promise<void> {
+export async function applyChatMode(chat: ResolvedChat, level: ThinkingLevel): Promise<void> {
 	const config = readLlmConfig();
 	if (!config) return;
-	// 切过思考开的会话不再回快档：D3 允许"切一次"，切了就保持（不然下一条消息又抖回去）
-	if (mode === "fast" && thinkingSwitched.has(chat.internalId)) return;
-	const target = chatModelRef(mode === "deep");
+	const target0 = clampThinkingLevel(level, currentThinkingLevels());
+	if (target0 !== level) {
+		console.log(
+			`[agent] 会话 ${chat.internalId} 档位 ${level} 不在当前模型支持域，落回 ${target0}`,
+		);
+	}
+	const target = chatModelRef(target0);
 	const agent = await chat.conversation.agent(CTX);
-	if (agent.model?.modelId === target.modelId) return;
+	// 供应商与模型都要比：同名模型跨供应商是另一个上游，不能算"没变"（审查 S1）
+	if (agent.model?.provider === target.provider && agent.model?.modelId === target.modelId) return;
 	await chat.conversation.configure({ model: target }, CTX);
+	rememberLevel(chat.internalId, target0);
 	console.log(
-		`[agent] 会话 ${chat.internalId} 档位 → ${mode === "deep" ? "思考开" : "思考关"}（${target.modelId}）`,
+		`[agent] 会话 ${chat.internalId} 档位 → ${target0}（${target.provider}/${target.modelId}）`,
 	);
+}
+
+/**
+ * 会话当前的档位（从 durable 里的模型引用读，重启后照样准）。
+ * 没跑过的新会话返回 null；更早的会话可能没有 `#think-` 后缀，也返回 null。
+ */
+export async function conversationThinkingLevel(chat: ResolvedChat): Promise<ThinkingLevel | null> {
+	const agent = await chat.conversation.agent(CTX).catch(() => null);
+	return agent?.model ? levelFromModelId(agent.model.modelId) : null;
 }
 
 /**
@@ -598,26 +807,34 @@ export async function configureTaskChat(
 }
 
 /**
- * 已切到思考开的会话（2026-10-31，方案 D3：切一次就保持）。
+ * 会话被切到过的非 off 档（2026-11-04 档位化：原来的 `thinkingSwitched: Set<number>`）。
  *
- * 进程内状态；重启后按"还没切"处理 —— 长会话重启后照样会被阈值拒绝，
- * 短会话重启后多付一次重算，可接受（与旧升级链路的进程内记账同款取舍）。
+ * 进程内状态，但**不是唯一事实源**：会话的 durable 模型引用里就写着档位，
+ * 所以重启后照样能读出"这会话是 low/high"，见 conversationThinkingLevel()。
+ * 这个 Map 只是让"切过非 off 就保持"在引用还没读到时也有个依据。
  */
-const thinkingSwitched = new Set<number>();
+const stickyLevels = new Map<number, ThinkingLevel>();
 /** 已判定"不切"的长会话：别每次工具调用都重读 usage */
 const thinkingRefused = new Set<number>();
 
-/** 这个会话现在是否思考开（openai-compat 的档位粘性用） */
-export function isThinkingOn(internalId: number): boolean {
-	return thinkingSwitched.has(internalId);
+/** 这个会话的粘性档位（非 off 才有；openai-compat 的档位优先级用） */
+export function stickyThinkingLevel(internalId: number): ThinkingLevel | null {
+	return stickyLevels.get(internalId) ?? null;
+}
+
+/** 记一笔"切到过这个档"：off 等于清粘性（用户可以显式降回关） */
+function rememberLevel(internalId: number, level: ThinkingLevel): void {
+	if (level === "off") stickyLevels.delete(internalId);
+	else stickyLevels.set(internalId, level);
 }
 
 /**
  * 运行时切模型后的会话对齐（2026-11-04，接口文档 §2.8）。
  *
  * durable 的会话存的是**模型引用**；设置页切换改的是全局默认（provider.ts 的覆盖值）。
- * 新建会话自然用新模型；已有会话在每轮开跑前对一次，还停在旧模型上就重配过去，
- * 思考档（引用里的 `#think-on/off`）保持原样。机制同 D3 的思考切换。
+ * 新建会话自然用新模型；已有会话在每轮开跑前对一次，还停在旧模型上就重配过去。
+ * 思考档保持原样；当前档不在新模型支持域 → 落回支持域内 ≤ 当前档的最高档（`off` 兜底，
+ * 2026-11-04 思考档位 D8）。机制同 D3 的思考切换。
  * 只挂在聊天流上：任务会话短命（跑完即弃），不值得追。
  */
 async function syncConversationModel(
@@ -626,22 +843,52 @@ async function syncConversationModel(
 ): Promise<void> {
 	const config = readLlmConfig();
 	if (!config || isFaux()) return;
+	const current = await conversation
+		.agent(CTX)
+		.then((agent) => agent.model ?? null)
+		.catch(() => null);
+	// 档位来源：引用里的后缀（含旧 `#think-on` = high）> 进程内粘性 > 默认 off
+	const previous =
+		(current ? levelFromModelId(current.modelId) : null) ??
+		stickyThinkingLevel(internalId) ??
+		"off";
+	const level = clampThinkingLevel(previous, currentThinkingLevels());
 	try {
-		const agent = await conversation.agent(CTX);
-		const currentId = agent.model?.modelId ?? "";
-		const base = currentId.split("#")[0];
-		// 没有引用（不该发生）或已经是当前模型：不用动
-		if (!base || base === config.model.modelId) return;
-		const thinking = currentId.includes("#think-on") || isThinkingOn(internalId);
-		const target = chatModelRef(thinking);
-		if (agent.model?.modelId === target.modelId) return;
+		// 已经是当前供应商 + 当前模型：不用动。只比 modelId 会把
+		// "同名模型换供应商"当成没变，切换就成了空操作（审查 S1）
+		if (current?.provider === config.model.provider && current.modelId.split("#")[0] === config.model.modelId) {
+			return;
+		}
+		const target = chatModelRef(level);
+		if (current?.provider === target.provider && current?.modelId === target.modelId) return;
 		await conversation.configure({ model: target }, CTX);
-		console.log(`[model] 会话 ${internalId} 对齐到 ${config.model.modelId}`);
-	} catch (error) {
-		// 对不齐这一轮就还用旧模型跑，不拦对话
-		console.warn(
-			`[model] 会话模型对齐失败: ${error instanceof Error ? error.message : String(error)}`,
+		if (level !== previous) {
+			console.log(
+				`[model] 会话 ${internalId} 的档位 ${previous} 不在新模型支持域，落回 ${level}`,
+			);
+		}
+		console.log(
+			`[model] 会话 ${internalId} 对齐到 ${config.model.provider}/${config.model.modelId}（档位 ${level}）`,
 		);
+	} catch (error) {
+		// 旧会话引用的供应商可能已被删：**真回退默认供应商**，不能继续拿旧引用打 404（审查 S4）
+		console.warn(
+			`[model] 会话 ${internalId} 对齐失败，回退默认供应商: ${error instanceof Error ? error.message : String(error)}`,
+		);
+		try {
+			const fallback = {
+				provider: config.model.provider,
+				modelId: config.model.modelId,
+			};
+			await conversation.configure({ model: fallback }, CTX);
+			console.log(`[model] 会话 ${internalId} 已回退到 ${fallback.provider}/${fallback.modelId}`);
+		} catch (fallbackError) {
+			console.warn(
+				`[model] 会话 ${internalId} 回退默认供应商也失败: ${
+					fallbackError instanceof Error ? fallbackError.message : String(fallbackError)
+				}`,
+			);
+		}
 	}
 }
 
@@ -819,27 +1066,30 @@ async function lastTurnInputTokens(
 }
 
 /**
- * 工具第一次被调用时把该会话切到思考开（2026-10-31，方案 D2/D3）。
+ * 工具第一次被调用时把该会话切到目标档（2026-10-31 方案 D2/D3；2026-11-04 档位化）。
  *
- * 与旧"换模型升级"链路的差别：模型**不换**（D1），只切 `enable_thinking`；
- * 长会话（上一轮 prompt ≥ 阈值）**不切** —— 切一次就是整段前缀重算，长会话付不起；
- * 短会话也只切一次（thinkingSwitched 记账），切了就保持。
+ * 目标档 = `AGENT_THINK_TOOL_LEVEL`（默认 `low`，非法值回退 low；旧语义是固定 deep/high）。
+ * 模型**不换**（D1），只换思考变体；长会话（上一轮 prompt ≥ 阈值）**不切** ——
+ * 切一次就是整段前缀重算，长会话付不起；短会话也只切一次（粘性记账），切了就保持。
  * 为什么在**工具钩子**里切而不是开局预判：预判要额外一次判定（慢且可能判错），
  * 而"模型自己决定调工具"本身就是最准的信号。切换发生在工具结果回来之前，
  * 所以本轮的后续推理就用上了思考档；代价 = 当前前缀重算一次（D3 明码标价）。
  */
 async function switchThinkingOnTool(api: HookApi, context: Context): Promise<void> {
 	// 已经切过/已判定不切的，不再碰库（每次工具调用都去 configure/读上下文是白付的）
-	if (thinkingSwitched.has(api.conversationId) || thinkingRefused.has(api.conversationId)) return;
+	if (stickyThinkingLevel(api.conversationId) || thinkingRefused.has(api.conversationId)) return;
 	// 2026-10-31 命名整改（方案 D11）：这个名字以前叫 AGENT_TOOL_UPGRADE，
 	// 语义是"升级到更贵的模型"，会把读代码的人（包括我自己）带偏成"换模型"；
-	// 现在快深同款，它做的是"把思考打开"。旧名保留为兼容回退，下一轮删。
+	// 现在它做的是"把思考档切上去"。旧名保留为兼容回退，下一轮删。
 	if (((process.env.AGENT_THINK_ON_TOOL ?? process.env.AGENT_TOOL_UPGRADE) ?? "on").trim().toLowerCase() === "off") {
 		return;
 	}
 
 	const config = readLlmConfig();
 	if (!config) return;
+	// 目标档：非法值回退 low；off = "不切"，与总开关关掉同义（切一次只为了多思考）
+	const wanted = thinkingToolLevel();
+	if (wanted === "off") return;
 
 	try {
 		const harness = await getHarness();
@@ -850,27 +1100,41 @@ async function switchThinkingOnTool(api: HookApi, context: Context): Promise<voi
 		if (lastInput !== null && lastInput >= limit) {
 			thinkingRefused.add(api.conversationId);
 			console.log(
-				`[agent] 会话 ${api.conversationId} 首次工具调用时 prompt≈${lastInput} ≥ ${limit}，保持思考关（长会话不切，方案 D3）`,
+				`[agent] 会话 ${api.conversationId} 首次工具调用时 prompt≈${lastInput} ≥ ${limit}，保持当前档（长会话不切，方案 D3）`,
 			);
 			return;
 		}
-		const target = chatModelRef(true);
+		// 目标档可能不在当前模型支持域（例如默认模型没有 medium）→ 按序落回
+		const level = clampThinkingLevel(wanted, currentThinkingLevels());
+		const target = chatModelRef(level);
 		const agent = await conversation.agent(context);
-		if (agent.model?.modelId === target.modelId) {
-			thinkingSwitched.add(api.conversationId);
+		// 成对比较：同名模型换了供应商也要重配（审查 S1）
+		if (agent.model?.provider === target.provider && agent.model?.modelId === target.modelId) {
+			rememberLevel(api.conversationId, level);
 			return;
 		}
 		await conversation.configure({ model: target }, context);
-		thinkingSwitched.add(api.conversationId);
+		rememberLevel(api.conversationId, level);
 		console.log(
-			`[agent] 会话 ${api.conversationId} 首次工具调用 → 思考开（prompt≈${lastInput ?? "首轮"} < ${limit}；本次前缀重算约 ${lastInput ?? "?"} token）`,
+			`[agent] 会话 ${api.conversationId} 首次工具调用 → 档位 ${level}${
+				level !== wanted ? `（${wanted} 不在支持域）` : ""
+			}（prompt≈${lastInput ?? "首轮"} < ${limit}；本次前缀重算约 ${lastInput ?? "?"} token）`,
 		);
 	} catch (error) {
-		// 切档失败不影响这一轮：大不了这轮继续不思考
+		// 切档失败不影响这一轮：大不了这轮继续按原来的档跑
 		console.warn(
 			`[agent] 会话 ${api.conversationId} 切思考档失败: ${error instanceof Error ? error.message : String(error)}`,
 		);
 	}
+}
+
+/** D3 目标档：`AGENT_THINK_TOOL_LEVEL`（默认 low）；不认的值一律回退 low，不让拼错静默关掉能力 */
+function thinkingToolLevel(): ThinkingLevel {
+	const raw = (process.env.AGENT_THINK_TOOL_LEVEL ?? "").trim().toLowerCase();
+	if (!raw) return "low";
+	if (raw === "off" || raw === "low" || raw === "medium" || raw === "high") return raw;
+	console.warn(`[agent] AGENT_THINK_TOOL_LEVEL=${raw} 不是合法档位，按 low 处理`);
+	return "low";
 }
 
 /**
@@ -891,7 +1155,7 @@ export async function openChat(
 			{
 				ownership: { kind: "ownerless" },
 				// 新会话默认思考关（2026-10-31 方案 D2：聊天一律不思考，首字 0.8~0.9s）
-				agent: { model: modelRef ?? chatModelRef(false) },
+				agent: { model: modelRef ?? chatModelRef("off") },
 				// 建会话和写映射在同一个提交里，不会出现"会话建好了但映射没写上"
 				init: async (tx, conversationId) => {
 					const chats = await tx.doc(Chats);
@@ -932,7 +1196,7 @@ export async function openOrCreateChat(
 	const conversation = await harness.createConversation(
 		{
 			ownership: { kind: "ownerless" },
-			agent: { model: modelRef ?? chatModelRef(false) },
+			agent: { model: modelRef ?? chatModelRef("off") },
 			init: async (tx, conversationId) => {
 				const chats = await tx.doc(Chats);
 				chats.byExternal[externalId] = Number(conversationId);
@@ -941,6 +1205,23 @@ export async function openOrCreateChat(
 		CTX,
 	);
 	return { conversation, externalId, internalId: Number(conversation.id) };
+}
+
+/**
+ * 内部 id → 对外 uuid（2026-11-04 批次六）。
+ *
+ * 审批 store 的 key 是 durable 内部自增 id，全局待办要对外只能给 uuid。
+ * `Chats.byExternal` 是 external→internal，这里只反向读一次快照，不逐会话 openChat。
+ */
+export async function externalChatIds(): Promise<Map<number, string>> {
+	const harness = await getHarness();
+	const chats = await harness.snapshot(Chats, CTX);
+	const map = new Map<number, string>();
+	for (const [externalId, internalId] of Object.entries(chats?.byExternal ?? {})) {
+		const id = Number(internalId);
+		if (Number.isFinite(id)) map.set(id, externalId);
+	}
+	return map;
 }
 
 // ── 对话流 ───────────────────────────────────────────────
@@ -1018,6 +1299,13 @@ export type ChatStreamEvent =
 			kind: "need_input" | "need_decision" | "need_action";
 			question: string;
 	  }
+	/**
+	 * 写类工具要人确认（2026-11-04 批次二）。
+	 *
+	 * 与 attention 的分工：那个是任务单的问题，这个是权限确认；答复走 HTTP 审批端点，
+	 * 不占用对话输入。`args` 已按 tool 事件口径截断。
+	 */
+	| { type: "approval"; callId: string; tool: string; args: string; deadlineAt: string }
 	| { type: "turnLimit"; message: string }
 	/**
 	 * 这一轮跑完了但没有回答（模型报错、被策略拦下等）。
@@ -1203,28 +1491,39 @@ export async function* chatStream(
 				}
 				const delegation = delegations.shift();
 				if (delegation) {
-					yield delegation.type === "delegate"
-						? {
-								type: "delegate",
-								ticketId: delegation.ticketId,
-								domain: delegation.domain,
-								phase: delegation.phase,
-								done: delegation.done,
-								total: delegation.total,
-								current: delegation.current,
-								message: delegation.message,
-								project: delegation.project,
-								lastAction: delegation.lastAction,
-								lastHeartbeat: delegation.lastHeartbeat,
-								waitingOn: delegation.waitingOn,
-							}
-						: {
-								type: "attention",
-								ticketId: delegation.ticketId,
-								domain: delegation.domain,
-								kind: delegation.kind,
-								question: delegation.question,
-							};
+					// 按 type 分发：approval 借这条通道，形状和 attention 不同（三元会把它发成空单号）
+					if (delegation.type === "delegate") {
+						yield {
+							type: "delegate",
+							ticketId: delegation.ticketId,
+							domain: delegation.domain,
+							phase: delegation.phase,
+							done: delegation.done,
+							total: delegation.total,
+							current: delegation.current,
+							message: delegation.message,
+							project: delegation.project,
+							lastAction: delegation.lastAction,
+							lastHeartbeat: delegation.lastHeartbeat,
+							waitingOn: delegation.waitingOn,
+						};
+					} else if (delegation.type === "attention") {
+						yield {
+							type: "attention",
+							ticketId: delegation.ticketId,
+							domain: delegation.domain,
+							kind: delegation.kind,
+							question: delegation.question,
+						};
+					} else {
+						yield {
+							type: "approval",
+							callId: delegation.callId,
+							tool: delegation.tool,
+							args: delegation.args,
+							deadlineAt: delegation.deadlineAt,
+						};
+					}
 					continue;
 				}
 				const phase = phases.shift();
@@ -1286,6 +1585,9 @@ export async function* chatStream(
  * 排队的输入会撤回、当前的任务会被撤销。之后再说一句话就是新一轮。
  */
 export async function stopChat(chat: ResolvedChat): Promise<void> {
+	// 先把挂着的审批按 aborted 结算：否则钩子里的 await 要等 abortSignal 才醒，
+	// 客户端也还会看到一条永远批不掉的卡片（2026-11-04 批次二）
+	approvalStore().expireAll(chat.internalId, "aborted");
 	await chat.conversation.abort(CTX);
 }
 
@@ -1294,6 +1596,23 @@ export interface TranscriptMessage {
 	text: string;
 	/** 消息时间，epoch 毫秒 */
 	at: number;
+}
+
+/**
+ * 内部会话 id → 往这个会话里以助手身份写一句话（2026-11-04 批次四抽出）。
+ *
+ * 派活完成的汇报与启动恢复的状态行都走这一条；返回 false = 会话已不存在。
+ * 这里只负责"找到会话 + 写进去"，错误留给调用方记日志（两边措辞不同）。
+ */
+export async function sayInConversation(
+	conversationId: number,
+	text: string,
+): Promise<boolean> {
+	const harness = await getHarness();
+	const conversation = await harness.conversation(conversationId as never, CTX);
+	if (!conversation) return false;
+	await sayInChat({ conversation, externalId: "", internalId: conversationId }, text);
+	return true;
 }
 
 /**
@@ -1310,13 +1629,10 @@ async function reportDelegationResult(
 	report: DelegationReport,
 ): Promise<void> {
 	try {
-		const harness = await getHarness();
-		const conversation = await harness.conversation(conversationId as never, CTX);
-		if (!conversation) {
+		const delivered = await sayInConversation(conversationId, report.text);
+		if (!delivered) {
 			console.warn(`[agent] 任务 ${report.ticketId} 的会话 ${conversationId} 已不存在，跳过汇报`);
-			return;
 		}
-		await sayInChat({ conversation, externalId: "", internalId: conversationId }, report.text);
 	} catch (error) {
 		const detail = error instanceof Error ? error.message : String(error);
 		console.warn(`[agent] 任务 ${report.ticketId} 写回会话失败: ${detail}`);
@@ -1465,7 +1781,7 @@ export async function contextUsageOf(
 	const config = readLlmConfig();
 	let window: number | null = null;
 	if (config) {
-		const model = config.models.getModel(config.model.provider, config.model.modelId);
+		const model = currentModels().getModel(config.model.provider, config.model.modelId);
 		window = (model as { contextWindow?: number } | undefined)?.contextWindow ?? null;
 	}
 	return { used: usage.input, window };
@@ -1640,6 +1956,14 @@ export function restoreChats(): number {
 
 export function chatMetaSummary(): { hidden: number } {
 	return { hidden: readChatMeta().hidden.length };
+}
+
+/**
+ * 改名表快照（2026-11-04 批次六）：全局审批列表要显示"哪个会话在等"。
+ * 只读 chat-meta.json 的 `titles`——它不返回标题以外的任何东西，也不逐会话打开。
+ */
+export function chatTitles(): Record<string, string> {
+	return { ...readChatMeta().titles };
 }
 
 export async function listChats(limit = 50): Promise<ChatIndexEntry[]> {

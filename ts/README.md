@@ -114,7 +114,7 @@ hermes 那类给到 300，但它不替你付 token 钱。
 ```bash
 cd ts
 pnpm install
-pnpm dev        # 服务端 :8082，界面在 http://127.0.0.1:8082/
+pnpm dev        # 服务端 :39847，界面在 http://127.0.0.1:39847/
 ```
 
 ### 配不配 key 都能跑
