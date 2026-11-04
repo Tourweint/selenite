@@ -6,7 +6,7 @@
 ## 开工前
 
 1. `README.md` —— 定位、现状表、已退役的东西。
-2. `docs/基线文档/系统架构.md` —— 模块边界、关键决策 D1–D8、已知边界。
+2. `docs/基线文档/系统架构.md` —— 模块边界、关键决策 D1–D12、已知边界。
 3. `docs/基线文档/接口文档.md` §7 —— 契约改动的顺序；§6 是环境变量表。
 4. 动某块之前，先在 `git log` / `docs/变更记录/` / `docs/设计方案/` 里找**当初为什么这么做**。
 
@@ -47,8 +47,9 @@ docs/                   基线文档（现行口径）/ 设计方案（设计期
 
 - **契约只有一份。** 改字段先改 `ts/packages/shared/src/index.ts` + `docs/基线文档/接口文档.md`，再改两端实现；
   两边必须一致。不允许"先在服务端临时加个字段"。
-- **密钥只走环境变量。** `LLM_API_KEY` / `AGENT_TOKEN` / `TYPESAFE_API_KEY` 不入库、不下发客户端、不进日志；
-  文档与示例只写变量名。配对码与设备令牌只存 sha256。
+- **密钥不进 git、不进日志、不下发客户端。** `LLM_API_KEY` / `AGENT_TOKEN` / `TYPESAFE_API_KEY` 不入库、不进日志；
+  密钥落点=环境变量（手写 .env，或 2026-11-05 起界面直填：服务端写 `.data/provider-keys.json` 并热注入进程 env，
+  providers.json 与文档仍只写变量名）。文档与示例只写变量名。配对码与设备令牌只存 sha256。
 - **日志不含对话内容。** 只记条数 / 字数 / 耗时 / 枚举；原始错误只进服务端日志（可能含上游地址）。
 - **对外 id 一律 uuid。** durable 内部自增整数不外泄 —— 猜得到就能读别人的历史。
 - **mock 不许空转。** 没有 key 走 mock 流；`LLM_PROVIDER=faux` 是"真实 durable 链路 + 假模型"。
@@ -70,6 +71,7 @@ docs/                   基线文档（现行口径）/ 设计方案（设计期
 | 任意 TS | `pnpm typecheck` |
 | 内核语义（提交 / 流式 / 闸门 / 睡眠 / 重启续跑） | `pnpm probe` |
 | HTTP 与契约 | `pnpm --filter @lifediary/server http` |
+| 供应商配置 / 切模型 | `pnpm --filter @lifediary/server providers` |
 | 日记镜像 / 任务 / 手机 worker | `... diary` / `... tasks` / `... phone` |
 | 记忆四层 | `pnpm memtest` |
 | 单元测试 | `pnpm --filter @lifediary/server test` |
@@ -83,6 +85,6 @@ docs/                   基线文档（现行口径）/ 设计方案（设计期
 
 ## 本文刻意不写的
 
-- **文件行数硬上限。** 按职责拆，不按行数拆（`agent.ts` 现在 1500 行，它该按"Harness / 会话 / 闸门 / 派活"拆，
+- **文件行数硬上限。** 按职责拆，不按行数拆（`agent.ts` 该按"Harness / 会话 / 闸门 / 派活"拆，
   不是按 500 行砍）。要拆单独立方案。
 - **会变的清单。** 工具数量、端点表、env 表、包内文件列表都放基线文档，本文只留规矩。
