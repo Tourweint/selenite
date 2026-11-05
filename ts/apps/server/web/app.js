@@ -50,6 +50,24 @@ const el = {
   viewSettings: document.getElementById("view-settings"),
   viewTasks: document.getElementById("view-tasks"),
   viewDomains: document.getElementById("view-domains"),
+  viewGroups: document.getElementById("view-groups"),
+  groupsBack: document.getElementById("groups-back"),
+  groupsState: document.getElementById("groups-state"),
+  groupsBody: document.getElementById("groups-body"),
+  groupsTitleText: document.getElementById("groups-title-text"),
+  groupsTitleSub: document.getElementById("groups-title-sub"),
+  groupCreate: document.getElementById("group-create"),
+  groupSettingsBtn: document.getElementById("group-settings-btn"),
+  groupChat: document.getElementById("group-chat"),
+  groupNotice: document.getElementById("group-notice"),
+  groupThread: document.getElementById("group-thread"),
+  groupInput: document.getElementById("group-input"),
+  groupSend: document.getElementById("group-send"),
+  groupStop: document.getElementById("group-stop"),
+  groupAtpop: document.getElementById("group-atpop"),
+  sideGroup: document.getElementById("side-group"),
+  railGroups: document.getElementById("rail-groups"),
+  groupList: document.getElementById("group-list"),
   openTasks: document.getElementById("open-tasks"),
   railTasks: document.getElementById("rail-tasks"),
   domainsBack: document.getElementById("domains-back"),
@@ -288,7 +306,16 @@ function currentRoute() {
   if (hash.startsWith("/settings")) return "settings";
   if (hash.startsWith("/tasks")) return "tasks";
   if (hash.startsWith("/domains")) return "domains";
+  // 群组两条路由（2026-11-06 群组方案批二）：#/groups 列表、#/group/<id> 会话视图
+  if (hash === "/groups" || hash.startsWith("/group/")) return "group";
   return "chat";
+}
+
+/** #/group/<id> 里的群 id；不在群会话路由时返回空 */
+function groupRouteId() {
+  const hash = location.hash.replace(/^#/, "");
+  const match = /^\/group\/([A-Za-z0-9-]+)/.exec(hash);
+  return match ? match[1] : "";
 }
 
 /** 任务页的查询参数（ticket / domain / project / sort），路由与筛选共用一份 */
@@ -340,6 +367,8 @@ function go(route, page) {
     location.hash = tasksHash();
   } else if (route === "domains") {
     location.hash = "#/domains";
+  } else if (route === "groups") {
+    location.hash = "#/groups";
   } else {
     location.hash = "#/";
   }
@@ -357,6 +386,7 @@ function applyRoute() {
   el.viewSettings.hidden = route !== "settings";
   el.viewTasks.hidden = route !== "tasks";
   el.viewDomains.hidden = route !== "domains";
+  el.viewGroups.hidden = route !== "group";
   el.toggleSidebar.hidden = route === "settings";
   el.openSettings.setAttribute("aria-current", String(route === "settings"));
   el.openTasks.setAttribute("aria-current", String(route === "tasks"));
@@ -364,6 +394,7 @@ function applyRoute() {
   if (route === "settings") void renderSettings();
   else if (route === "tasks") openTasks();
   else if (route === "domains") openDomains();
+  else if (route === "group") void openGroupsView();
   else el.input.focus();
 }
 
@@ -1907,7 +1938,10 @@ function renderChats() {
     el.chats.append(hint);
   }
   // 置顶的排前面（2026-11-04 批次一），段内保持原有顺序（旧→新）；标记走标题前缀，不另起分组栏
+  // partner- 前缀（执事专线 / 群成员会话，2026-11-06 群组方案 §2.2）不进最近会话：
+  // 执事的对话从花名册进，群从群组节进——这里漏过滤会把执事会话当主人会话摆出来（实测踩过）。
   const ordered = [...visible]
+    .filter((chat) => !String(chat.conversationId || "").startsWith("partner-"))
     .reverse()
     .sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)));
   // 原「对话」列表整块移入最近会话折叠块，只展示前 RECENTS_LIMIT 条；
@@ -7909,6 +7943,955 @@ function openRunPartnerModal(partnerId, partnerName) {
   });
 }
 
+/* ── 群组（2026-11-06 群组方案批二）────────────────────────
+ * #/groups 列表 + #/group/:id 会话视图；时间线四形态 + @picker + 建群/群设置。
+ * 数据面：GET /groups、GET /groups/:id/messages、POST /groups/:id/chat（SSE）、
+ * POST /groups/:id/stop。发言顺序服务端定（@点名 > @所有人 > 值日），前端只渲染。
+ * 端点未启用（404）= 按钮回占位态，一切入口保持禁用。 */
+
+const groups = {
+  available: null, // null = 还没探测过
+  list: [],
+  current: null, // 当前打开的群（含 members）
+  messages: [],
+  lastSeq: 0,
+  sending: false,
+  streamSender: null, // 正在流式的那位（start 帧的 sender）
+  streamBubble: null, // 正在流式的气泡 DOM
+  streamText: "",
+  picked: [], // 建群弹窗里勾中的成员 id（弹窗期间的状态）
+};
+
+/** 探测群组可用性 + 侧栏「群组」节首帧。404 = 未启用，一切入口回占位。 */
+async function initGroups() {
+  try {
+    const response = await request("/api/v1/groups", { cache: "no-store" });
+    if (!response.ok) {
+      groups.available = false;
+    } else {
+      const data = await response.json().catch(() => ({}));
+      groups.available = true;
+      groups.list = Array.isArray(data.groups) ? data.groups : [];
+    }
+  } catch {
+    groups.available = false;
+  }
+  applyGroupsAvailability();
+  renderGroupSidebar();
+}
+
+function applyGroupsAvailability() {
+  const on = groups.available === true;
+  for (const button of [el.railGroups, el.sideGroup]) {
+    if (!button) continue;
+    button.disabled = !on;
+    button.title = on ? "群组" : "群组未启用";
+  }
+  if (el.groupList) el.groupList.hidden = !on;
+  if (el.groupCreate) el.groupCreate.hidden = !on;
+}
+
+/** 侧栏「群组」节：群名 + 成员数；点击进会话视图。 */
+function renderGroupSidebar() {
+  if (!el.groupList || groups.available !== true) return;
+  el.groupList.replaceChildren();
+  if (!groups.list.length) {
+    const empty = document.createElement("div");
+    empty.className = "roster-empty";
+    empty.textContent = "还没有群组。点「群组」新建一个。";
+    el.groupList.append(empty);
+    return;
+  }
+  for (const group of groups.list) {
+    const row = document.createElement("div");
+    row.className = "side-item group-row";
+    row.tabIndex = 0;
+    row.setAttribute("role", "button");
+    row.title = `${group.name} · ${group.members.length} 名成员`;
+    row.dataset.groupId = group.id;
+
+    const avatar = document.createElement("span");
+    avatar.className = "pt-avatar";
+    avatar.setAttribute("aria-hidden", "true");
+    avatar.textContent = group.name.slice(0, 1);
+
+    const label = document.createElement("span");
+    label.className = "roster-name";
+    label.textContent = group.name;
+
+    const count = document.createElement("span");
+    count.className = "roster-idle";
+    count.textContent = `${group.members.length}人`;
+
+    row.append(avatar, label, count);
+    const open = () => {
+      location.hash = `#/group/${group.id}`;
+    };
+    row.addEventListener("click", open);
+    row.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        open();
+      }
+    });
+    el.groupList.append(row);
+  }
+}
+
+/** 群组路由入口：#/groups 列表态，#/group/:id 会话态。 */
+async function openGroupsView() {
+  if (groups.available === null) await initGroups();
+  closeGroupAtPop();
+  const id = groupRouteId();
+  if (!id) {
+    el.groupsTitleText.textContent = "群组";
+    el.groupsTitleSub.textContent = "";
+    el.groupSettingsBtn.hidden = true;
+    el.groupCreate.hidden = groups.available !== true;
+    el.groupChat.hidden = true;
+    el.groupsBody.hidden = false;
+    await renderGroupsListPage();
+    return;
+  }
+  el.groupCreate.hidden = true;
+  el.groupsBody.hidden = true;
+  el.groupChat.hidden = false;
+  await openGroupChat(id);
+}
+
+async function renderGroupsListPage() {
+  if (groups.available !== true) {
+    el.groupsBody.replaceChildren();
+    const empty = document.createElement("div");
+    empty.className = "tasks-empty";
+    empty.textContent = "群组未启用（GROUPS_ENABLED / COMPANIONS_ENABLED）。";
+    el.groupsBody.append(empty);
+    return;
+  }
+  // 现拉一次：建群/删群回来列表要新
+  const response = await request("/api/v1/groups", { cache: "no-store" }).catch(() => null);
+  if (response?.ok) {
+    const data = await response.json().catch(() => ({}));
+    groups.list = Array.isArray(data.groups) ? data.groups : [];
+    renderGroupSidebar();
+  }
+
+  el.groupsBody.replaceChildren();
+  if (!groups.list.length) {
+    const empty = document.createElement("div");
+    empty.className = "tasks-empty";
+    empty.innerHTML = [
+      "<h2>还没有群组</h2>",
+      "<p>把 2–6 名执事拉进同一条会话：@点名谁发言，不 @ 就发给值日执事。</p>",
+    ].join("");
+    el.groupsBody.append(empty);
+    return;
+  }
+  const grid = document.createElement("div");
+  grid.className = "group-grid";
+  for (const group of groups.list) {
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = "group-card";
+    card.dataset.groupId = group.id;
+
+    const head = document.createElement("div");
+    head.className = "group-card-head";
+    const avatar = document.createElement("span");
+    avatar.className = "pt-avatar group-card-avatar";
+    avatar.textContent = group.name.slice(0, 1);
+    const name = document.createElement("span");
+    name.className = "group-card-name";
+    name.textContent = group.name;
+    head.append(avatar, name);
+
+    const meta = document.createElement("div");
+    meta.className = "group-card-meta";
+    const duty = group.members.find((m) => m.partnerId === group.responderPartnerId);
+    meta.textContent = `${group.members.length} 名成员${duty ? ` · 值日 ${duty.name}` : ""}${
+      group.responderKind === "everyone" ? " · 不 @ 全员回" : group.responderKind === "mentions" ? " · 只回点名" : ""
+    }`;
+
+    const memberLine = document.createElement("div");
+    memberLine.className = "group-card-members";
+    memberLine.textContent = group.members.map((m) => m.name).join("、");
+
+    card.append(head, meta, memberLine);
+    card.addEventListener("click", () => {
+      location.hash = `#/group/${group.id}`;
+    });
+    grid.append(card);
+  }
+  el.groupsBody.append(grid);
+}
+
+/** 打开群会话视图：群资料 + 时间线，composer 就绪。 */
+async function openGroupChat(groupId) {
+  const response = await request(`/api/v1/groups/${encodeURIComponent(groupId)}`, { cache: "no-store" }).catch(() => null);
+  if (!response || !response.ok) {
+    toast("这个群不存在或已被删除");
+    location.hash = "#/groups";
+    return;
+  }
+  const data = await response.json().catch(() => ({}));
+  groups.current = data.group ?? null;
+  groups.messages = [];
+  groups.streamSender = null;
+  groups.streamBubble = null;
+
+  if (!groups.current) {
+    toast("这个群不存在或已被删除");
+    location.hash = "#/groups";
+    return;
+  }
+  el.groupsTitleText.textContent = groups.current.name;
+  const duty = groups.current.members.find((m) => m.partnerId === groups.current.responderPartnerId);
+  el.groupsTitleSub.textContent = duty
+    ? ` · 值日 ${duty.name}`
+    : groups.current.responderKind === "everyone"
+      ? " · 不 @ 全员回"
+      : groups.current.responderKind === "mentions"
+        ? " · 只回点名"
+        : "";
+  el.groupSettingsBtn.hidden = false;
+  el.groupNotice.hidden = !groups.current.notice?.trim();
+  el.groupNotice.textContent = groups.current.notice?.trim() ? `公告：${groups.current.notice.trim()}` : "";
+
+  el.groupThread.replaceChildren();
+  const msgResponse = await request(`/api/v1/groups/${encodeURIComponent(groupId)}/messages?limit=200`, { cache: "no-store" }).catch(() => null);
+  if (msgResponse?.ok) {
+    const msgData = await msgResponse.json().catch(() => ({}));
+    groups.messages = Array.isArray(msgData.messages) ? msgData.messages : [];
+    groups.lastSeq = Number(msgData.lastSeq ?? 0);
+    renderGroupTimeline();
+  }
+  el.groupInput.value = "";
+  resizeGroupInput();
+  updateGroupSendState();
+  el.groupInput.focus();
+}
+
+/* ── 时间线渲染：四形态 ──────────────────────────────────
+ * 主人右对齐气泡 / 成员左对齐（头像+名字+时间）/ 系统行居中发丝线 /
+ * 5 分钟内同作者合并（名字行只画一次）+ 跨天分割线。 */
+
+const GROUP_MERGE_MS = 5 * 60 * 1000;
+
+function renderGroupTimeline() {
+  el.groupThread.replaceChildren();
+  let lastRendered = null; // { key, day }
+  for (const message of groups.messages) {
+    appendGroupMessageToThread(message, lastRendered);
+    lastRendered = {
+      key: groupAuthorKey(message),
+      day: groupDayOf(message),
+    };
+  }
+  el.groupThread.scrollIntoView({ block: "end" });
+}
+
+function groupAuthorKey(message) {
+  return message.kind === "system" ? `system:${message.id}` : `${message.authorKind}:${message.authorId ?? message.authorName}`;
+}
+
+function groupDayOf(message) {
+  // 跨天分割按**本地**日历日算：at 是 ISO UTC 串，直接 slice(0,10) 在凌晨时段会标错天（实测踩过）
+  const value = Date.parse(message.at || "");
+  if (!Number.isFinite(value)) return String(message.at || "").slice(0, 10);
+  const d = new Date(value);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function appendGroupMessageToThread(message, lastRendered) {
+  const day = groupDayOf(message);
+  if (!lastRendered || lastRendered.day !== day) {
+    const divider = document.createElement("div");
+    divider.className = "group-day";
+    divider.textContent = day;
+    el.groupThread.append(divider);
+  }
+  const at = Date.parse(message.at || "") || 0;
+  const merge =
+    lastRendered &&
+    lastRendered.key === groupAuthorKey(message) &&
+    message.kind === "message" &&
+    at - (message._prevAt || 0) < GROUP_MERGE_MS;
+
+  if (message.kind === "system") {
+    const line = document.createElement("div");
+    line.className = "group-sys";
+    line.textContent = message.content;
+    el.groupThread.append(line);
+    return;
+  }
+
+  const mine = message.authorKind === "user";
+  const bubble = document.createElement("div");
+  bubble.className = `gmsg ${mine ? "me" : "them"}`;
+  bubble.dataset.msgId = message.id;
+
+  if (!mine) {
+    const avatar = document.createElement("span");
+    avatar.className = "pt-avatar gmsg-avatar";
+    avatar.textContent = (message.authorName || "?").slice(0, 1);
+    bubble.append(avatar);
+  }
+  const stack = document.createElement("div");
+  stack.className = "gmsg-stack";
+  if (!merge) {
+    const head = document.createElement("div");
+    head.className = "gmsg-head";
+    const who = document.createElement("span");
+    who.className = "gmsg-who";
+    who.textContent = mine ? "主人" : message.authorName || "执事";
+    const when = document.createElement("span");
+    when.className = "gmsg-at";
+    when.textContent = formatGroupTime(message.at);
+    head.append(who, when);
+    stack.append(head);
+  }
+  const body = document.createElement("div");
+  body.className = "gmsg-body";
+  body.textContent = message.content;
+  stack.append(body);
+  bubble.append(stack);
+  el.groupThread.append(bubble);
+}
+
+function formatGroupTime(at) {
+  const value = Date.parse(at || "");
+  if (!Number.isFinite(value)) return "";
+  const d = new Date(value);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+/* ── 群 composer：发送（SSE 回合）─────────────────────── */
+
+function resizeGroupInput() {
+  if (!el.groupInput) return;
+  el.groupInput.style.height = "auto";
+  el.groupInput.style.height = `${Math.min(el.groupInput.scrollHeight, 160)}px`;
+}
+
+function updateGroupSendState() {
+  if (!el.groupInput || !el.groupSend) return;
+  el.groupSend.disabled = groups.sending || !el.groupInput.value.trim();
+  el.groupStop.hidden = !groups.sending;
+  el.groupSend.hidden = groups.sending;
+}
+
+async function sendGroupMessage() {
+  const text = el.groupInput.value.trim();
+  if (!text || groups.sending || !groups.current) return;
+  el.groupInput.value = "";
+  resizeGroupInput();
+  closeGroupAtPop();
+
+  // 乐观落自己的气泡（主人右对齐）；回读时会以服务端为准再刷一遍
+  const localMessage = {
+    id: `local-${Date.now()}`,
+    groupId: groups.current.id,
+    seq: groups.lastSeq + 1,
+    kind: "message",
+    authorKind: "user",
+    authorId: null,
+    authorName: "主人",
+    content: text,
+    at: new Date().toISOString(),
+  };
+  groups.messages.push(localMessage);
+  appendGroupMessageToThread(localMessage, lastRenderedMeta());
+  groups.lastSeq = localMessage.seq;
+  scrollGroupThread();
+
+  groups.sending = true;
+  updateGroupSendState();
+
+  try {
+    const response = await request(`/api/v1/groups/${encodeURIComponent(groups.current.id)}/chat`, {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    });
+    if (response.status === 409) {
+      toast("这个群上一轮还在跑，等它说完（或点停止）");
+      rollbackLocalMessage(localMessage.id, text);
+      return;
+    }
+    if (response.status === 400) {
+      const data = await response.json().catch(() => ({}));
+      toast(data.message || "发不出去");
+      rollbackLocalMessage(localMessage.id, text);
+      return;
+    }
+    if (!response.ok || !response.body) {
+      toast(`请求失败：HTTP ${response.status}`);
+      rollbackLocalMessage(localMessage.id, text);
+      return;
+    }
+
+    const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+    let buffer = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += value;
+      let index;
+      while ((index = buffer.indexOf("\n\n")) >= 0) {
+        const chunk = buffer.slice(0, index);
+        buffer = buffer.slice(index + 2);
+        for (const line of chunk.split("\n")) {
+          if (!line.startsWith("data:")) continue;
+          let event;
+          try {
+            event = JSON.parse(line.slice(5).trim());
+          } catch {
+            continue;
+          }
+          handleGroupStreamEvent(event);
+        }
+      }
+    }
+    // 流收尾：以服务端时间线为准对齐一遍（拿到各成员终稿的 seq/at）
+    await refreshGroupTimeline();
+  } catch {
+    toast("连接断了，稍后重试");
+  } finally {
+    groups.sending = false;
+    groups.streamSender = null;
+    groups.streamBubble = null;
+    updateGroupSendState();
+    void refreshGroupSidebarQuiet();
+  }
+}
+
+function lastRenderedMeta() {
+  for (let i = groups.messages.length - 2; i >= 0; i -= 1) {
+    const message = groups.messages[i];
+    return { key: groupAuthorKey(message), day: groupDayOf(message) };
+  }
+  return null;
+}
+
+function rollbackLocalMessage(localId, text) {
+  groups.messages = groups.messages.filter((m) => m.id !== localId);
+  const bubble = el.groupThread.querySelector(`[data-msg-id="${localId}"]`);
+  bubble?.remove();
+  el.groupInput.value = text;
+  resizeGroupInput();
+  updateGroupSendState();
+}
+
+/** 流式帧渲染：start 换发言者、delta 追加、notice 落系统行、done 收尾。 */
+function handleGroupStreamEvent(event) {
+  if (event.type === "start") {
+    groups.streamSender = event.sender || null;
+    groups.streamText = "";
+    // 开一个正在发言的气泡（同 renderGroupTimeline 的左对齐形态）
+    const bubble = document.createElement("div");
+    bubble.className = "gmsg them streaming";
+    const avatar = document.createElement("span");
+    avatar.className = "pt-avatar gmsg-avatar";
+    avatar.textContent = (event.sender?.name || "?").slice(0, 1);
+    const stack = document.createElement("div");
+    stack.className = "gmsg-stack";
+    const head = document.createElement("div");
+    head.className = "gmsg-head";
+    const who = document.createElement("span");
+    who.className = "gmsg-who";
+    who.textContent = event.sender?.name || "执事";
+    const when = document.createElement("span");
+    when.className = "gmsg-at gmsg-live";
+    when.textContent = "正在发言…";
+    head.append(who, when);
+    const body = document.createElement("div");
+    body.className = "gmsg-body";
+    stack.append(head, body);
+    bubble.append(avatar, stack);
+    el.groupThread.append(bubble);
+    groups.streamBubble = { root: bubble, body, when };
+    scrollGroupThread();
+  } else if (event.type === "delta") {
+    if (groups.streamBubble) {
+      groups.streamText += event.text || "";
+      groups.streamBubble.body.textContent = groups.streamText;
+      scrollGroupThread();
+    }
+  } else if (event.type === "progress") {
+    if (groups.streamBubble) {
+      groups.streamBubble.when.textContent = event.phase === "working" ? "正在动手…" : "正在思考…";
+    }
+  } else if (event.type === "notice") {
+    const line = document.createElement("div");
+    line.className = "group-sys";
+    line.textContent = event.text || "";
+    el.groupThread.append(line);
+    scrollGroupThread();
+  } else if (event.type === "done") {
+    if (groups.streamBubble) {
+      groups.streamBubble.root.classList.remove("streaming");
+      if (groups.streamBubble.when) groups.streamBubble.when.textContent = formatGroupTime(new Date().toISOString());
+    }
+    groups.streamSender = null;
+    groups.streamBubble = null;
+  }
+}
+
+/** 流结束后以服务端时间线为准（终稿 seq/at/被停的半截话都对上） */
+async function refreshGroupTimeline() {
+  if (!groups.current) return;
+  const response = await request(`/api/v1/groups/${encodeURIComponent(groups.current.id)}/messages?limit=200`, { cache: "no-store" }).catch(() => null);
+  if (!response?.ok) return;
+  const data = await response.json().catch(() => ({}));
+  groups.messages = Array.isArray(data.messages) ? data.messages : [];
+  groups.lastSeq = Number(data.lastSeq ?? 0);
+  renderGroupTimeline();
+}
+
+async function refreshGroupSidebarQuiet() {
+  const response = await request("/api/v1/groups", { cache: "no-store" }).catch(() => null);
+  if (!response?.ok) return;
+  const data = await response.json().catch(() => ({}));
+  groups.list = Array.isArray(data.groups) ? data.groups : groups.list;
+  renderGroupSidebar();
+}
+
+function scrollGroupThread() {
+  const scroll = document.getElementById("groups-scroll");
+  if (scroll) scroll.scrollTop = scroll.scrollHeight;
+}
+
+async function stopGroupRoundWeb() {
+  if (!groups.current) return;
+  await request(`/api/v1/groups/${encodeURIComponent(groups.current.id)}/stop`, { method: "POST" }).catch(() => undefined);
+}
+
+/* ── @picker（cindy 同款：纯文本 + 发送时服务端重解析）────── */
+
+const groupAt = { open: false, items: [], index: 0, from: -1 };
+
+function closeGroupAtPop() {
+  groupAt.open = false;
+  if (el.groupAtpop) el.groupAtpop.hidden = true;
+}
+
+function updateGroupAtPop() {
+  if (!el.groupInput || !el.groupAtpop || !groups.current) return;
+  const caret = el.groupInput.selectionStart ?? el.groupInput.value.length;
+  const before = el.groupInput.value.slice(0, caret);
+  const match = /(^|\s)@([^\s@]*)$/.exec(before);
+  if (!match) {
+    closeGroupAtPop();
+    return;
+  }
+  const typed = match[2].toLowerCase();
+  const candidates = [];
+  if (!typed || "所有人".startsWith(typed)) candidates.push({ label: "所有人", insert: "@所有人 " });
+  for (const member of groups.current.members) {
+    if (!typed || member.name.toLowerCase().includes(typed)) {
+      candidates.push({ label: member.name, insert: `@${member.name} ` });
+    }
+  }
+  if (!candidates.length) {
+    closeGroupAtPop();
+    return;
+  }
+  groupAt.open = true;
+  groupAt.items = candidates.slice(0, 8);
+  groupAt.index = 0;
+  groupAt.from = caret - match[2].length - 1;
+  el.groupAtpop.replaceChildren(
+    ...groupAt.items.map((item, i) => {
+      const row = document.createElement("div");
+      row.className = `group-at-item${i === groupAt.index ? " current" : ""}`;
+      row.setAttribute("role", "option");
+      row.textContent = item.label;
+      row.addEventListener("mousedown", (mouseEvent) => {
+        mouseEvent.preventDefault();
+        pickGroupAt(i);
+      });
+      return row;
+    }),
+  );
+  el.groupAtpop.hidden = false;
+}
+
+function pickGroupAt(index) {
+  const item = groupAt.items[index];
+  if (!item || !el.groupInput) {
+    closeGroupAtPop();
+    return;
+  }
+  const value = el.groupInput.value;
+  el.groupInput.value = value.slice(0, groupAt.from) + item.insert + value.slice(el.groupInput.selectionStart ?? value.length);
+  const caret = groupAt.from + item.insert.length;
+  el.groupInput.setSelectionRange(caret, caret);
+  closeGroupAtPop();
+  resizeGroupInput();
+  updateGroupSendState();
+  el.groupInput.focus();
+}
+
+/* ── 建群 / 群设置弹窗 ─────────────────────────────────── */
+
+async function openCreateGroupModal() {
+  const partners = await fetchPartnerOptions();
+  if (!partners) return;
+  if (partners.length < 2) {
+    toast("至少要有 2 名执事才能建群，先去侧栏「执事」新建。");
+    return;
+  }
+  groups.picked = [];
+  openModal("新建群组", (body) => {
+    const nameInput = document.createElement("input");
+    nameInput.className = "text-input";
+    nameInput.placeholder = "群名（≤40 字）";
+    nameInput.maxLength = 40;
+
+    const hint = document.createElement("p");
+    hint.className = "set-hint";
+    hint.textContent = "勾 2–6 名执事。不 @ 就发给值日执事；@点名按正文顺序串行回。";
+
+    const memberBox = document.createElement("div");
+    memberBox.className = "group-pick";
+    const checkboxes = new Map();
+    for (const partner of partners) {
+      const label = document.createElement("label");
+      label.className = "group-pick-item";
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.value = partner.id;
+      const name = document.createElement("span");
+      name.textContent = partner.name;
+      label.append(box, name);
+      box.addEventListener("change", () => {
+        if (box.checked) groups.picked.push(partner.id);
+        else groups.picked = groups.picked.filter((id) => id !== partner.id);
+        renderDutyChoices();
+        validatePick();
+      });
+      checkboxes.set(partner.id, box);
+      memberBox.append(label);
+    }
+
+    const dutyLabel = document.createElement("div");
+    dutyLabel.className = "set-hint";
+    dutyLabel.textContent = "值日执事（不 @ 时谁回）";
+    const dutyBox = document.createElement("div");
+    dutyBox.className = "group-pick";
+    let dutyChoice = "";
+    const renderDutyChoices = () => {
+      dutyBox.replaceChildren();
+      dutyChoice = "";
+      for (const id of groups.picked) {
+        const partner = partners.find((p) => p.id === id);
+        if (!partner) continue;
+        const pill = document.createElement("button");
+        pill.type = "button";
+        pill.className = "group-duty-item";
+        pill.textContent = partner.name;
+        pill.addEventListener("click", () => {
+          dutyChoice = id;
+          for (const child of dutyBox.children) child.classList.remove("current");
+          pill.classList.add("current");
+        });
+        dutyBox.append(pill);
+      }
+    };
+    const validatePick = () => {
+      submit.disabled = groups.picked.length < 2 || groups.picked.length > 6;
+    };
+
+    const noticeInput = document.createElement("textarea");
+    noticeInput.className = "text-input";
+    noticeInput.placeholder = "群公告（可选，≤500 字）";
+    noticeInput.maxLength = 500;
+
+    const row = document.createElement("div");
+    row.className = "modal-actions";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "ghost";
+    cancel.textContent = "取消";
+    cancel.addEventListener("click", closeModal);
+    const submit = document.createElement("button");
+    submit.type = "button";
+    submit.className = "btn-primary";
+    submit.textContent = "建群";
+    submit.disabled = true;
+    submit.addEventListener("click", async () => {
+      const name = nameInput.value.trim();
+      if (!name) return;
+      if (groups.picked.length < 2 || groups.picked.length > 6) {
+        toast("成员要 2–6 名执事");
+        return;
+      }
+      if (!dutyChoice) {
+        toast("选一个值日执事（不 @ 就发给谁）");
+        return;
+      }
+      const response = await request("/api/v1/groups", {
+        method: "POST",
+        body: JSON.stringify({
+          name,
+          memberIds: groups.picked,
+          responderKind: "member",
+          responderPartnerId: dutyChoice,
+          notice: noticeInput.value.trim(),
+        }),
+      }).catch(() => null);
+      const data = await response?.json().catch(() => ({}));
+      if (!response?.ok) {
+        toast(data?.message || "建群失败");
+        return;
+      }
+      closeModal();
+      toast("群组建好了");
+      await initGroups();
+      location.hash = `#/group/${data.group.id}`;
+    });
+    row.append(cancel, submit);
+    body.append(nameInput, hint, memberBox, dutyLabel, dutyBox, noticeInput, row);
+    nameInput.focus();
+  });
+}
+
+async function openGroupSettingsModal() {
+  if (!groups.current) return;
+  const current = groups.current;
+  const partners = await fetchPartnerOptions();
+  if (!partners) return;
+  openModal(`群设置 · ${current.name}`, (body) => {
+    const nameInput = document.createElement("input");
+    nameInput.className = "text-input";
+    nameInput.value = current.name;
+    nameInput.maxLength = 40;
+
+    const noticeInput = document.createElement("textarea");
+    noticeInput.className = "text-input";
+    noticeInput.value = current.notice || "";
+    noticeInput.placeholder = "群公告（≤500 字）";
+    noticeInput.maxLength = 500;
+
+    const dutyLabel = document.createElement("div");
+    dutyLabel.className = "set-hint";
+    dutyLabel.textContent = "值日执事（不 @ 时谁回）";
+    const dutyBox = document.createElement("div");
+    dutyBox.className = "group-pick";
+    let dutyChoice = current.responderPartnerId;
+    for (const member of current.members) {
+      const pill = document.createElement("button");
+      pill.type = "button";
+      pill.className = `group-duty-item${member.partnerId === dutyChoice ? " current" : ""}`;
+      pill.textContent = member.name;
+      pill.addEventListener("click", () => {
+        dutyChoice = member.partnerId;
+        for (const child of dutyBox.children) child.classList.remove("current");
+        pill.classList.add("current");
+      });
+      dutyBox.append(pill);
+    }
+
+    const memberLabel = document.createElement("div");
+    memberLabel.className = "set-hint";
+    memberLabel.textContent = "成员（点一下移出 / 在下面点选加回，保持 2–6 人）";
+    const memberBox = document.createElement("div");
+    memberBox.className = "group-pick";
+    const memberSet = () => new Set(current.members.map((m) => m.partnerId));
+    let removeIds = [];
+    let addIds = [];
+    const renderMemberBox = () => {
+      memberBox.replaceChildren();
+      const inGroup = memberSet();
+      for (const member of current.members) {
+        if (removeIds.includes(member.partnerId)) continue;
+        const pill = document.createElement("button");
+        pill.type = "button";
+        pill.className = "group-duty-item";
+        pill.title = "点一下移出";
+        pill.textContent = member.name;
+        pill.addEventListener("click", () => {
+          removeIds.push(member.partnerId);
+          renderMemberBox();
+        });
+        memberBox.append(pill);
+      }
+      for (const partner of partners) {
+        if (inGroup.has(partner.id) || removeIds.includes(partner.id) || !addIds.includes(partner.id)) continue;
+        const pill = document.createElement("button");
+        pill.type = "button";
+        pill.className = "group-duty-item group-duty-add";
+        pill.title = "点一下加回";
+        pill.textContent = `＋${partner.name}`;
+        pill.addEventListener("click", () => {
+          addIds.push(partner.id);
+          renderMemberBox();
+        });
+        memberBox.append(pill);
+      }
+      // 已移出但还没保存的，给一个「撤销移出」的入口
+      for (const id of removeIds) {
+        const partner = partners.find((p) => p.id === id) ?? current.members.find((m) => m.partnerId === id);
+        if (!partner) continue;
+        const pill = document.createElement("button");
+        pill.type = "button";
+        pill.className = "group-duty-item group-duty-add";
+        pill.textContent = `＋${partner.name ?? id}`;
+        pill.addEventListener("click", () => {
+          removeIds = removeIds.filter((x) => x !== id);
+          renderMemberBox();
+        });
+        memberBox.append(pill);
+      }
+    };
+    // 候选加人列表：不在群里的执事
+    for (const partner of partners) {
+      if (memberSet().has(partner.id)) continue;
+      const pill = document.createElement("button");
+      pill.type = "button";
+      pill.className = "group-duty-item group-duty-add";
+      pill.textContent = `＋${partner.name}`;
+      pill.addEventListener("click", () => {
+        if (addIds.includes(partner.id)) return;
+        addIds.push(partner.id);
+        renderMemberBox();
+      });
+      memberBox.append(pill);
+    }
+    renderMemberBox();
+
+    const row = document.createElement("div");
+    row.className = "modal-actions";
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "ghost danger";
+    del.textContent = "删除群组";
+    del.addEventListener("click", async () => {
+      if (!window.confirm(`删群「${current.name}」？消息和成员关系一起删，不可恢复。`)) return;
+      const response = await request(`/api/v1/groups/${encodeURIComponent(current.id)}`, { method: "DELETE" }).catch(() => null);
+      if (!response?.ok) {
+        toast("删群失败");
+        return;
+      }
+      closeModal();
+      toast("群已删除");
+      await initGroups();
+      location.hash = "#/groups";
+    });
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "ghost";
+    cancel.textContent = "取消";
+    cancel.addEventListener("click", closeModal);
+    const save = document.createElement("button");
+    save.type = "button";
+    save.className = "btn-primary";
+    save.textContent = "保存";
+    save.addEventListener("click", async () => {
+      const finalCount = current.members.length + addIds.length - removeIds.length;
+      if (finalCount < 2 || finalCount > 6) {
+        toast("成员要保持在 2–6 名");
+        return;
+      }
+      const payload = {
+        name: nameInput.value.trim() || current.name,
+        notice: noticeInput.value,
+        responderPartnerId: dutyChoice,
+        ...(removeIds.length ? { removeMemberIds: removeIds } : {}),
+        ...(addIds.length ? { addMemberIds: addIds } : {}),
+      };
+      const response = await request(`/api/v1/groups/${encodeURIComponent(current.id)}`, {
+        method: "PATCH",
+        body: JSON.stringify(payload),
+      }).catch(() => null);
+      const data = await response?.json().catch(() => ({}));
+      if (!response?.ok) {
+        toast(data?.message || "保存失败");
+        return;
+      }
+      closeModal();
+      toast("群设置已保存");
+      await initGroups();
+      await openGroupChat(current.id);
+    });
+    row.append(del, cancel, save);
+    body.append(nameInput, noticeInput, dutyLabel, dutyBox, memberLabel, memberBox, row);
+  });
+}
+
+/** 执事选项（建群/加人用）；拿不到返回 null（弹窗里 toast 提示） */
+async function fetchPartnerOptions() {
+  try {
+    const response = await request("/api/v1/partners", { cache: "no-store" });
+    if (!response.ok) return null;
+    const data = await response.json().catch(() => ({}));
+    const list = (Array.isArray(data.partners) ? data.partners : []).filter(
+      (p) => p.status === "active" && p.id !== "chief",
+    );
+    // 重名在群里是 @ 歧义源：建群入口就拦（服务端同样校验）
+    const seen = new Set();
+    for (const partner of list) {
+      if (seen.has(partner.name)) {
+        toast(`有重名执事「${partner.name}」，先改名再建群`);
+        return null;
+      }
+      seen.add(partner.name);
+    }
+    return list;
+  } catch {
+    return null;
+  }
+}
+
+/* 群组事件接线 */
+el.groupsBack?.addEventListener("click", () => {
+  location.hash = groupRouteId() ? "#/groups" : "#/";
+});
+el.groupCreate?.addEventListener("click", () => void openCreateGroupModal());
+el.groupSettingsBtn?.addEventListener("click", () => void openGroupSettingsModal());
+el.groupSend?.addEventListener("click", () => void sendGroupMessage());
+el.groupStop?.addEventListener("click", () => void stopGroupRoundWeb());
+el.groupInput?.addEventListener("input", () => {
+  resizeGroupInput();
+  updateGroupSendState();
+  updateGroupAtPop();
+});
+el.groupInput?.addEventListener("keydown", (event) => {
+  if (groupAt.open) {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      groupAt.index = (groupAt.index + 1) % groupAt.items.length;
+      updateGroupAtPop();
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      groupAt.index = (groupAt.index - 1 + groupAt.items.length) % groupAt.items.length;
+      updateGroupAtPop();
+      return;
+    }
+    if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.isComposing) {
+      event.preventDefault();
+      pickGroupAt(groupAt.index);
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeGroupAtPop();
+      return;
+    }
+  }
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+    event.preventDefault();
+    void sendGroupMessage();
+  }
+});
+el.railGroups?.addEventListener("click", () => {
+  go("groups");
+});
+el.sideGroup?.addEventListener("click", () => {
+  go("groups");
+});
+
 /* ── 启动 ─────────────────────────────────────────────── */
 
 void (async () => {
@@ -7942,6 +8925,7 @@ void (async () => {
   await checkHealth();
   await loadChats();
   void loadRoster(); // E4：执事花名册首帧
+  void initGroups(); // 群组（2026-11-06 批二）：可用性探测 + 侧栏节首帧
   void refreshModelPill();
   // 侧栏项目区：拿不到工作区就保持隐藏（没根目录谈何项目）
   void refreshProjectPill();

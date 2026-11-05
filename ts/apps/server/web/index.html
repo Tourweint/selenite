@@ -112,7 +112,7 @@
       <button class="rail-btn rail-partners-hint" id="rail-partners" type="button" title="执事（展开侧栏查看）" data-tip="执事（展开侧栏查看）" aria-label="执事">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
       </button>
-      <button class="rail-btn" type="button" title="群组（占位）" data-tip="群组（占位）" aria-label="群组" disabled>
+      <button class="rail-btn" id="rail-groups" type="button" title="群组" data-tip="群组" aria-label="群组" disabled>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/><path d="M8 12h.01"/><path d="M12 12h.01"/><path d="M16 12h.01"/></svg>
       </button>
       <div class="rail-flex" aria-hidden="true"></div>
@@ -198,13 +198,14 @@
         <div class="roster" id="partner-roster" aria-label="执事花名册"></div>
       </div>
 
-      <!-- 群组占位（E5）：与收起轨道同款 disabled + tooltip，先占位不做真功能。
-           位置紧跟执事花名册，和轨道里「执事 → 群组」的顺序一致。 -->
+      <!-- 群组（2026-11-06 群组方案批二）：点击进 #/groups（列表），
+           侧栏「群组」节列出已建的群；没有开关时按钮回占位（app.js 按 GROUPS 可用性启用） -->
       <button class="side-item" id="side-group" type="button" disabled
-              aria-label="群组" title="群组（占位）">
+              aria-label="群组" title="群组">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/><path d="M8 12h.01"/><path d="M12 12h.01"/><path d="M16 12h.01"/></svg>
         群组
       </button>
+      <div class="roster" id="group-list" aria-label="群组列表" hidden></div>
 
       <!-- 底部只留设置 + 连接状态，mt-auto 钉在侧栏底边 -->
       <div class="side-foot">
@@ -380,6 +381,47 @@
     <div class="tasks-scroll" id="domains-scroll">
       <div class="tasks-state" id="domains-state" hidden></div>
       <div class="tasks-body" id="domains-body"></div>
+    </div>
+  </main>
+
+  <!-- 群组（2026-11-06 群组方案批二）：#/groups 列表 + #/group/:id 会话视图共用一个容器。
+       时间线四形态（主人右/成员左/系统行居中/同作者合并）见 style.css 群组段。 -->
+  <main class="main tasks" id="view-groups" hidden>
+    <header class="tasks-top">
+      <div class="tasks-title">
+        <button class="set-back" id="groups-back" type="button" aria-label="返回对话" title="返回对话 (Esc)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="m12 19-7-7 7-7"/>
+            <path d="M19 12H5"/>
+          </svg>
+        </button>
+        <h1><span id="groups-title-text">群组</span><span class="tasks-title-sub" id="groups-title-sub"></span></h1>
+      </div>
+      <div class="tasks-actions">
+        <button class="ghost" id="group-settings-btn" type="button" hidden>群设置</button>
+        <button class="btn-primary" id="group-create" type="button">新建群组</button>
+      </div>
+    </header>
+    <div class="tasks-scroll" id="groups-scroll">
+      <div class="tasks-state" id="groups-state" hidden></div>
+      <!-- 列表态 -->
+      <div class="tasks-body" id="groups-body"></div>
+      <!-- 会话态：时间线 + composer（复用主对话 composer 的样式骨架，独立一份 DOM） -->
+      <div class="group-chat" id="group-chat" hidden>
+        <div class="group-notice" id="group-notice" hidden></div>
+        <div class="group-thread" id="group-thread"></div>
+        <div class="group-composer">
+          <div class="group-atpop" id="group-atpop" role="listbox" aria-label="点名候选" hidden></div>
+          <textarea class="group-input" id="group-input" rows="1"
+                    placeholder="@点名、@所有人，或不 @ 发给值日执事…"></textarea>
+          <button class="group-send" id="group-send" type="button" aria-label="发送" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 14 0"/><path d="m13 6 6 6-6 6"/></svg>
+          </button>
+          <button class="group-send group-stop" id="group-stop" type="button" aria-label="停止" hidden>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+          </button>
+        </div>
+      </div>
     </div>
   </main>
 </div>

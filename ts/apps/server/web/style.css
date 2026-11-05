@@ -3246,3 +3246,162 @@ button.tk-archive-bar:focus-visible { outline: 2px solid var(--accent-line); out
   max-height: 220px; overflow-y: auto;
 }
 .pt-result.is-error { color: var(--c-error); }
+
+/* ── 群组（2026-11-06 群组方案批二）────────────────────────
+ * 列表态卡片 + 会话态时间线四形态 + @picker。只吃主题 token，四套色板自动适配。
+ * 时间线形态：主人右对齐 / 成员左对齐（头像 28px + 名字行 + 时间）/ 系统行居中发丝线 /
+ * 5 分钟同作者合并（.gmsg-head 不画）+ 跨天 .group-day 分割。 */
+
+/* 侧栏「群组」节与列表卡片 */
+.group-row { gap: 8px; }
+.group-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+  max-width: 920px;
+}
+.group-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+  text-align: left;
+  padding: 14px 16px;
+  border: 1px solid var(--composer-border);
+  border-radius: 14px;
+  background: var(--card);
+  transition: background-color .15s ease, border-color .15s ease;
+}
+.group-card:hover { background: var(--card-high); border-color: var(--outline); }
+.group-card-head { display: flex; align-items: center; gap: 10px; }
+.group-card-avatar { background: var(--accent); color: var(--on-accent); }
+.group-card-name { font-weight: 600; }
+.group-card-meta { font-size: 12.5px; color: var(--text-2); }
+.group-card-members {
+  font-size: 12.5px; color: var(--text-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%;
+}
+
+/* 会话态 */
+.group-chat {
+  display: flex; flex-direction: column;
+  max-width: var(--thread); margin: 0 auto;
+  height: 100%; padding: 0 24px 16px;
+}
+.group-notice {
+  flex: none;
+  margin: 4px 0 8px;
+  padding: 6px 12px;
+  border-radius: 10px;
+  background: var(--surface-low);
+  color: var(--text-2);
+  font-size: 12.5px;
+  border: 1px dashed var(--outline);
+}
+.group-thread { flex: 1; overflow-y: auto; padding: 8px 2px; }
+.group-day {
+  text-align: center; font-size: 12px; color: var(--text-3);
+  margin: 14px 0 8px;
+  display: flex; align-items: center; gap: 12px;
+}
+.group-day::before, .group-day::after {
+  content: ""; flex: 1; height: 1px; background: var(--divider);
+}
+.group-sys {
+  text-align: center; font-size: 12.5px; color: var(--text-3);
+  margin: 6px 0;
+  display: flex; align-items: center; gap: 12px;
+}
+.group-sys::before, .group-sys::after {
+  content: ""; flex: 1; height: 1px; background: var(--divider);
+}
+
+/* 气泡两形态 */
+.gmsg { display: flex; gap: 8px; margin: 4px 0; max-width: 78%; }
+.gmsg.me { margin-left: auto; flex-direction: row-reverse; }
+.gmsg-avatar { width: 28px; height: 28px; font-size: 13px; flex: none; margin-top: 20px; }
+.gmsg-stack { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.gmsg.me .gmsg-stack { align-items: flex-end; }
+.gmsg-head { display: flex; align-items: baseline; gap: 8px; padding: 0 4px; }
+.gmsg-who { font-size: 12.5px; font-weight: 600; color: var(--text-2); }
+.gmsg-at { font-size: 11.5px; color: var(--text-3); }
+.gmsg-live { color: var(--accent); }
+.gmsg-body {
+  padding: 8px 12px;
+  border-radius: 14px;
+  background: var(--card);
+  white-space: pre-wrap; word-break: break-word;
+  border: 1px solid var(--composer-border);
+}
+.gmsg.me .gmsg-body { background: var(--accent); color: var(--on-accent); border-color: transparent; }
+.gmsg.streaming .gmsg-body { opacity: .85; }
+
+/* composer（独立一份 DOM，样式骨架与主对话同拍） */
+.group-composer {
+  position: relative;
+  flex: none;
+  display: flex; align-items: flex-end; gap: 8px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--composer-border);
+  border-radius: 16px;
+  background: var(--surface);
+}
+.group-input {
+  flex: 1; resize: none;
+  border: 0; outline: 0; background: transparent;
+  max-height: 160px; padding: 4px 2px;
+}
+.group-send {
+  flex: none;
+  width: 32px; height: 32px;
+  display: flex; align-items: center; justify-content: center;
+  border: 0; border-radius: 10px;
+  background: var(--accent); color: var(--on-accent);
+}
+.group-send:disabled { opacity: .45; cursor: default; }
+.group-send.group-stop { background: var(--card-high); color: var(--text); }
+
+/* @picker 浮层 */
+.group-atpop {
+  position: absolute;
+  bottom: calc(100% + 6px); left: 10px;
+  min-width: 180px;
+  padding: 4px;
+  border-radius: 12px;
+  border: 1px solid var(--composer-border);
+  background: var(--surface);
+  box-shadow: var(--shadow-menu);
+  z-index: 30;
+}
+.group-atitem {
+  padding: 6px 10px; border-radius: 8px;
+  font-size: 13px; cursor: pointer;
+}
+.group-atitem.current { background: var(--composer-pill-bg); }
+.group-atitem:hover { background: var(--composer-pill-bg); }
+
+/* 建群 / 群设置弹窗里的选择件 */
+.group-pick { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 10px; }
+.group-pick-item {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--composer-border);
+  border-radius: 10px;
+  cursor: pointer;
+}
+.group-pick-item:has(input:checked) { border-color: var(--accent); background: var(--composer-pill-bg); }
+.group-duty-item {
+  padding: 6px 12px;
+  border: 1px solid var(--composer-border);
+  border-radius: 10px;
+  background: transparent;
+}
+.group-duty-item.current { border-color: var(--accent); background: var(--composer-pill-bg); color: var(--accent); }
+.group-duty-add { border-style: dashed; color: var(--text-2); }
+.ghost.danger { color: var(--c-error); }
+
+/* 空状态（群组列表用；此前 tasks 段在用但一直没有样式，顺手补上） */
+.tasks-empty { padding: 40px 16px; text-align: center; color: var(--text-2); }
+.tasks-empty h2 { margin: 0 0 6px; font-size: 15px; color: var(--text); }
+.tasks-empty p { margin: 0 auto; max-width: 420px; font-size: 12.5px; line-height: 1.7; }
