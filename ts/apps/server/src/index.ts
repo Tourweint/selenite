@@ -49,6 +49,7 @@ import { mountPhoneWorker } from "./phone-worker.ts";
 import { mountProjects } from "./projects.ts";
 import { mountDelegationApi } from "./delegation-api.ts";
 import { mountCompanions } from "./companion-api.ts";
+import { mountGroups } from "./group-api.ts";
 import { COMPANIONS_ENABLED } from "./partners.ts";
 import { routineEngine } from "./routines.ts";
 import { watchAllEvents } from "./agent.ts";
@@ -179,6 +180,10 @@ mountDelegationApi(app);
 
 // 执事管理（2026-11-05 批次B B2）：档案 CRUD + 手动跑一轮。开关关着一个路由都不挂（404 = 未启用）。
 mountCompanions(app);
+
+// 群组（2026-11-06 群组方案）：执事群聊 + 共享时间线 + 确定性调度。
+// GROUPS_ENABLED / COMPANIONS_ENABLED 任一关着一个路由都不挂（404 = 未启用）。
+mountGroups(app);
 
 // 审批答复（2026-11-04 批次二）：待批列表 + 幂等答复。开关关着时列表恒为空。
 mountApprovalApi(app);

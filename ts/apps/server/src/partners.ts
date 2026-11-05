@@ -90,8 +90,11 @@ export interface PartnerVersionRow {
 
 export interface PartnerSessionLinkRow {
 	partnerId: string;
-	/** `delegation` = 执事的领域路由（批次D D2）；这类链接没有宿主会话，sessionId 为占位 0。 */
-	role: "canonical" | "routine" | "topic" | "delegation";
+	/**
+	 * `delegation` = 执事的领域路由（批次D D2），这类链接没有宿主会话，sessionId 为占位 0；
+	 * `group` = 执事在某群的成员会话（2026-11-06 群组方案），routeKey = `group:<群id>`。
+	 */
+	role: "canonical" | "routine" | "topic" | "delegation" | "group";
 	routeKey: string | null;
 	/** durable 内部自增会话 id（不外泄） */
 	sessionId: number;
@@ -129,6 +132,39 @@ export interface RoutineDef {
 	revision: number;
 	createdAt: string;
 	updatedAt: string;
+}
+
+// ── 群组行类型（2026-11-06 群组方案）────────────────────────
+
+export type GroupResponderKind = "member" | "everyone" | "mentions";
+
+export interface GroupRow {
+	id: string;
+	name: string;
+	/** 群公告（≤500 字），随每轮输入注入成员会话 */
+	notice: string;
+	responderKind: GroupResponderKind;
+	/** kind=member 时的值日执事；必须是群成员 */
+	responderPartnerId: string | null;
+	/** 成员按 position 升序；只存引用，人格 = 各自 SOUL */
+	members: Array<{ partnerId: string; name: string; position: number; status: PartnerStatus }>;
+	createdAt: string;
+	updatedAt: string;
+}
+
+export interface GroupMessageRow {
+	id: string;
+	groupId: string;
+	/** 群内单调序号（从 1 起），回读分页用 beforeSeq */
+	seq: number;
+	kind: "message" | "system";
+	authorKind: "user" | "partner" | "system";
+	authorId: string | null;
+	/** 作者名快照：不 join 成员表，改名/离群后历史不变（cindy 四件套） */
+	authorName: string;
+	content: string;
+	at: string;
+	roundId: string | null;
 }
 
 export class PartnersStore {
@@ -181,6 +217,39 @@ export class PartnersStore {
 				created_at   TEXT NOT NULL,
 				updated_at   TEXT NOT NULL
 			);
+			/* ── 群组（2026-11-06 群组方案 §2.1）────────────────
+			 * 群 = 共享时间线 + 成员表；成员各自独立上下文。
+			 * 消息作者落快照（改名/离群/删档后历史不烂）；成员表只存引用不复制人格。
+			 * 硬删口径：删群 = 群 + 成员关系 + 消息一起没（方案 §六登记，不可恢复）。 */
+			CREATE TABLE IF NOT EXISTS groups (
+				id                   TEXT PRIMARY KEY,
+				name                 TEXT NOT NULL,
+				notice               TEXT NOT NULL DEFAULT '',
+				responder_kind       TEXT NOT NULL DEFAULT 'member',
+				responder_partner_id TEXT,
+				created_at           TEXT NOT NULL,
+				updated_at           TEXT NOT NULL
+			);
+			CREATE TABLE IF NOT EXISTS group_members (
+				group_id   TEXT NOT NULL,
+				partner_id TEXT NOT NULL,
+				position   INTEGER NOT NULL,
+				joined_at  TEXT NOT NULL,
+				PRIMARY KEY (group_id, partner_id)
+			);
+			CREATE TABLE IF NOT EXISTS group_messages (
+				id          TEXT PRIMARY KEY,
+				group_id    TEXT NOT NULL,
+				seq         INTEGER NOT NULL,
+				kind        TEXT NOT NULL,
+				author_kind TEXT NOT NULL,
+				author_id   TEXT,
+				author_name TEXT NOT NULL,
+				content     TEXT NOT NULL,
+				at          TEXT NOT NULL,
+				round_id    TEXT
+			);
+			CREATE INDEX IF NOT EXISTS idx_group_messages_group_seq ON group_messages (group_id, seq);
 		`);
 		this.migrate();
 	}
@@ -290,6 +359,9 @@ export class PartnersStore {
 		this.db.prepare("DELETE FROM partner_session_links WHERE partner_id = ?").run(id);
 		// 例行任务定义跟着走：不清理会留孤儿（任务醒来 runPartnerTurn 报"执事不存在"）
 		this.db.prepare("DELETE FROM routines WHERE partner_id = ?").run(id);
+		// 群成员关系级联清（群组方案 §2.1）：群历史靠作者快照照常渲染，
+		// 正在跑的该执事发言由回合编排器跳过并落 system 行。
+		this.db.prepare("DELETE FROM group_members WHERE partner_id = ?").run(id);
 		try {
 			rmSync(this.homeOf(id), { recursive: true, force: true });
 		} catch {
@@ -611,6 +683,256 @@ export class PartnersStore {
 		const result = this.db.prepare("DELETE FROM routines WHERE id = ?").run(id);
 		return Number(result.changes) > 0;
 	}
+
+	// ── 群组（2026-11-06 群组方案 §2.1）────────────────────
+	/** 建群。成员 2–6、值日必须是成员的校验在端点层；这里只管落库。 */
+	createGroup(input: {
+		name: string;
+		notice?: string;
+		responderKind?: "member" | "everyone" | "mentions";
+		responderPartnerId?: string | null;
+		memberIds: string[];
+	}): GroupRow {
+		const id = randomUUID();
+		const now = new Date().toISOString();
+		this.db
+			.prepare(
+				"INSERT INTO groups (id, name, notice, responder_kind, responder_partner_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+			)
+			.run(
+				id,
+				input.name,
+				input.notice ?? "",
+				input.responderKind ?? "member",
+				input.responderPartnerId ?? null,
+				now,
+				now,
+			);
+		input.memberIds.forEach((partnerId, index) => {
+			this.db
+				.prepare(
+					"INSERT INTO group_members (group_id, partner_id, position, joined_at) VALUES (?, ?, ?, ?)",
+				)
+				.run(id, partnerId, index, now);
+		});
+		return this.getGroup(id) as GroupRow;
+	}
+
+	getGroup(id: string): GroupRow | null {
+		const row = this.db.prepare("SELECT * FROM groups WHERE id = ?").get(id) as
+			| Record<string, unknown>
+			| undefined;
+		return row ? toGroup(row, this.membersOf(id)) : null;
+	}
+
+	listGroups(): GroupRow[] {
+		const rows = this.db
+			.prepare("SELECT * FROM groups ORDER BY updated_at")
+			.all() as Array<Record<string, unknown>>;
+		return rows.map((row) => toGroup(row, this.membersOf(String(row.id))));
+	}
+
+	/** 群成员（position 升序）。名字/状态实时 join 档案表；档案没了给占位（渲染靠消息快照）。 */
+	membersOf(groupId: string): GroupRow["members"] {
+		const rows = this.db
+			.prepare(
+				`SELECT m.partner_id, m.position, p.name, p.status
+				 FROM group_members m LEFT JOIN partners p ON p.id = m.partner_id
+				 WHERE m.group_id = ? ORDER BY m.position`,
+			)
+			.all(groupId) as Array<Record<string, unknown>>;
+		return rows.map((m) => ({
+			partnerId: String(m.partner_id),
+			name: m.name === null || m.name === undefined ? "（已离开）" : String(m.name),
+			position: Number(m.position),
+			status: (m.status === null || m.status === undefined
+				? "archived"
+				: String(m.status)) as PartnerStatus,
+		}));
+	}
+
+	/** 改群：名称/公告/应答口径/值日 + 增删成员。人数 2–6 的校验在端点层（改前改后都要满足）。 */
+	updateGroup(
+		id: string,
+		patch: {
+			name?: string;
+			notice?: string;
+			responderKind?: "member" | "everyone" | "mentions";
+			responderPartnerId?: string | null;
+			addMemberIds?: string[];
+			removeMemberIds?: string[];
+		},
+	): GroupRow | null {
+		const existing = this.getGroup(id);
+		if (!existing) return null;
+		const now = new Date().toISOString();
+		if (patch.name !== undefined && patch.name.trim()) {
+			this.db.prepare("UPDATE groups SET name = ? WHERE id = ?").run(patch.name.trim(), id);
+		}
+		if (patch.notice !== undefined) {
+			this.db.prepare("UPDATE groups SET notice = ? WHERE id = ?").run(patch.notice, id);
+		}
+		if (patch.responderKind !== undefined) {
+			this.db
+				.prepare("UPDATE groups SET responder_kind = ? WHERE id = ?")
+				.run(patch.responderKind, id);
+		}
+		if (patch.responderPartnerId !== undefined) {
+			this.db
+				.prepare("UPDATE groups SET responder_partner_id = ? WHERE id = ?")
+				.run(patch.responderPartnerId, id);
+		}
+		for (const partnerId of patch.removeMemberIds ?? []) {
+			this.db
+				.prepare("DELETE FROM group_members WHERE group_id = ? AND partner_id = ?")
+				.run(id, partnerId);
+		}
+		if (patch.addMemberIds?.length) {
+			const max = this.db
+				.prepare("SELECT COALESCE(MAX(position), -1) AS p FROM group_members WHERE group_id = ?")
+				.get(id) as { p?: unknown };
+			let position = Number(max?.p ?? -1);
+			for (const partnerId of patch.addMemberIds) {
+				position += 1;
+				this.db
+					.prepare(
+						"INSERT OR IGNORE INTO group_members (group_id, partner_id, position, joined_at) VALUES (?, ?, ?, ?)",
+					)
+					.run(id, partnerId, position, now);
+			}
+		}
+		this.db.prepare("UPDATE groups SET updated_at = ? WHERE id = ?").run(now, id);
+		return this.getGroup(id);
+	}
+
+	/** 硬删：群 + 成员关系 + 消息一起没（方案 §六：删群可恢复刻意不做）。 */
+	deleteGroup(id: string): boolean {
+		const existing = this.getGroup(id);
+		if (!existing) return false;
+		this.db.prepare("DELETE FROM group_members WHERE group_id = ?").run(id);
+		this.db.prepare("DELETE FROM group_messages WHERE group_id = ?").run(id);
+		this.db.prepare("DELETE FROM groups WHERE id = ?").run(id);
+		return true;
+	}
+
+	/** 群时间线追加一条，seq = 群内当前最大值 + 1（从 1 起，单调）。 */
+	appendGroupMessage(input: {
+		groupId: string;
+		kind: "message" | "system";
+		authorKind: "user" | "partner" | "system";
+		authorId: string | null;
+		authorName: string;
+		content: string;
+		roundId?: string;
+	}): GroupMessageRow {
+		const maxRow = this.db
+			.prepare("SELECT COALESCE(MAX(seq), 0) AS s FROM group_messages WHERE group_id = ?")
+			.get(input.groupId) as { s?: unknown };
+		const seq = Number(maxRow?.s ?? 0) + 1;
+		const id = randomUUID();
+		const at = new Date().toISOString();
+		this.db
+			.prepare(
+				"INSERT INTO group_messages (id, group_id, seq, kind, author_kind, author_id, author_name, content, at, round_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			)
+			.run(
+				id,
+				input.groupId,
+				seq,
+				input.kind,
+				input.authorKind,
+				input.authorId,
+				input.authorName,
+				input.content,
+				at,
+				input.roundId ?? null,
+			);
+		this.db.prepare("UPDATE groups SET updated_at = ? WHERE id = ?").run(at, input.groupId);
+		return {
+			id,
+			groupId: input.groupId,
+			seq,
+			kind: input.kind,
+			authorKind: input.authorKind,
+			authorId: input.authorId,
+			authorName: input.authorName,
+			content: input.content,
+			at,
+			roundId: input.roundId ?? null,
+		};
+	}
+
+	/**
+	 * 时间线查询。升序返回。
+	 * - `afterSeq`：只取该序号**之后**的（增量投递用，DS-Bot seen 游标）；
+	 * - `beforeSeq`：只取该序号**之前**的（回读分页）；
+	 * - 都不带：取最后 limit 条。
+	 */
+	listGroupMessages(
+		groupId: string,
+		opts?: { afterSeq?: number; beforeSeq?: number; limit?: number },
+	): GroupMessageRow[] {
+		const limit = Math.min(Math.max(opts?.limit ?? 100, 1), 500);
+		let rows: Array<Record<string, unknown>>;
+		if (opts?.afterSeq !== undefined) {
+			rows = this.db
+				.prepare(
+					"SELECT * FROM group_messages WHERE group_id = ? AND seq > ? ORDER BY seq LIMIT ?",
+				)
+				.all(groupId, opts.afterSeq, limit) as Array<Record<string, unknown>>;
+			return rows.map(toGroupMessage);
+		}
+		if (opts?.beforeSeq !== undefined) {
+			rows = this.db
+				.prepare(
+					"SELECT * FROM group_messages WHERE group_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?",
+				)
+				.all(groupId, opts.beforeSeq, limit) as Array<Record<string, unknown>>;
+		} else {
+			rows = this.db
+				.prepare("SELECT * FROM group_messages WHERE group_id = ? ORDER BY seq DESC LIMIT ?")
+				.all(groupId, limit) as Array<Record<string, unknown>>;
+		}
+		return rows.map(toGroupMessage).reverse();
+	}
+
+	lastGroupSeq(groupId: string): number {
+		const row = this.db
+			.prepare("SELECT COALESCE(MAX(seq), 0) AS s FROM group_messages WHERE group_id = ?")
+			.get(groupId) as { s?: unknown };
+		return Number(row?.s ?? 0);
+	}
+
+	/**
+	 * 该成员上次发言的 seq（增量投递游标，DS-Bot seen 思想）。
+	 * 从没发过言 = 0（首建走最近 30 条窗口）。
+	 */
+	lastSpokenSeq(groupId: string, partnerId: string): number {
+		const row = this.db
+			.prepare(
+				"SELECT COALESCE(MAX(seq), 0) AS s FROM group_messages WHERE group_id = ? AND author_kind = 'partner' AND author_id = ?",
+			)
+			.get(groupId, partnerId) as { s?: unknown };
+		return Number(row?.s ?? 0);
+	}
+
+	/**
+	 * 这条内部会话是不是某群的成员会话（role='group' 链接行存在）。
+	 * 群会话不参与记忆引擎的判定就靠它（群组方案 §2.2）——查失败当普通会话，记忆永不卡对话。
+	 */
+	isGroupSession(sessionId: number): boolean {
+		if (sessionId <= 0) return false;
+		try {
+			const row = this.db
+				.prepare(
+					"SELECT 1 FROM partner_session_links WHERE session_id = ? AND role = 'group' LIMIT 1",
+				)
+				.get(sessionId);
+			return row !== undefined;
+		} catch {
+			return false;
+		}
+	}
 }
 
 // ── 懒建单例（projects.ts 同款纪律：进程启动不碰磁盘）────────
@@ -724,6 +1046,44 @@ function toLink(row: Record<string, unknown>): PartnerSessionLinkRow {
 				? null
 				: Number(row.applied_version),
 		createdAt: String(row.created_at ?? ""),
+	};
+}
+
+function toGroup(
+	row: Record<string, unknown>,
+	members: GroupRow["members"],
+): GroupRow {
+	const kind = String(row.responder_kind ?? "member") as GroupResponderKind;
+	return {
+		id: String(row.id),
+		name: String(row.name),
+		notice: String(row.notice ?? ""),
+		responderKind: kind === "everyone" || kind === "mentions" ? kind : "member",
+		responderPartnerId:
+			row.responder_partner_id === null || row.responder_partner_id === undefined
+				? null
+				: String(row.responder_partner_id),
+		members,
+		createdAt: String(row.created_at ?? ""),
+		updatedAt: String(row.updated_at ?? ""),
+	};
+}
+
+function toGroupMessage(row: Record<string, unknown>): GroupMessageRow {
+	return {
+		id: String(row.id),
+		groupId: String(row.group_id),
+		seq: Number(row.seq),
+		kind: String(row.kind) === "system" ? "system" : "message",
+		authorKind: ((): "user" | "partner" | "system" => {
+			const raw = String(row.author_kind ?? "system");
+			return raw === "user" || raw === "partner" ? raw : "system";
+		})(),
+		authorId: row.author_id === null || row.author_id === undefined ? null : String(row.author_id),
+		authorName: String(row.author_name ?? ""),
+		content: String(row.content ?? ""),
+		at: String(row.at ?? ""),
+		roundId: row.round_id === null || row.round_id === undefined ? null : String(row.round_id),
 	};
 }
 

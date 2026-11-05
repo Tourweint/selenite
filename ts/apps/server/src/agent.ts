@@ -466,6 +466,9 @@ function scopeOf(conversationId: number): MemoryScope {
 function recallContext(conversationId: number, text: string): string {
 	if (!memoryEngine || !text.trim()) return "";
 	try {
+		// 群会话不参与记忆引擎（2026-11-06 群组方案 §2.2）：召回整个跳过，
+		// 群聊不写不读个人记忆防串台；群内连续性靠会话历史 + 群时间线本身。
+		if (partnersStore().isGroupSession(conversationId)) return "";
 		// 执事会话（批次B B1）：global + 执事键空间 + 本会话三条都进候选；
 		// 键空间过滤是 store 的硬过滤（scope IN），执事键空间外的记录不会被召回。
 		const partner = partnerScopeOf(conversationId);

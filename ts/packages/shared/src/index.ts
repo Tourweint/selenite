@@ -65,6 +65,76 @@ export const ChatTranscriptSchema = z.object({
 });
 export type ChatTranscript = z.infer<typeof ChatTranscriptSchema>;
 
+// ── 群组（2026-11-06 群组方案，接口文档 §2.14）──────────────
+//
+// 群 = 主人 + 2–6 名执事在同一条共享时间线里聊；谁发言由宿主按确定性规则编排
+// （@点名 > @所有人 > 值日执事）。每个执事仍是独立 agent（自己的会话、SOUL、模型链、
+// 闸门），群里只有一条共享时间线。手机端 v1 零改动：下面的 schema 只被 web 端与服务端用，
+// SSE 侧的增量（start.sender / notice）老客户端可忽略。
+
+/** 群聊 SSE 帧的发言者快照。落时间线的是快照，改名/离群后历史照常渲染（cindy 四件套）。 */
+export interface GroupSender {
+	kind: "partner" | "user";
+	/** kind=partner 时是执事 uuid */
+	id?: string;
+	/** 展示名（快照）；user 固定「主人」 */
+	name?: string;
+}
+
+/** 无 @ 时的默认应答者口径。member = 值日执事（用户拍板的默认）；everyone = 全员；mentions = 只有点名才回。 */
+export const GroupResponderKindSchema = z.enum(["member", "everyone", "mentions"]);
+export type GroupResponderKind = z.infer<typeof GroupResponderKindSchema>;
+
+export const GROUP_MEMBER_MIN = 2;
+export const GROUP_MEMBER_MAX = 6;
+/** 单条群消息正文上限（与方案 §2.1 一致） */
+export const GROUP_MESSAGE_LIMIT = 8000;
+
+export const GroupMemberSchema = z.object({
+	partnerId: z.string(),
+	/** 成员表只存展示名快照，不复制人格（lobehub 教训）；人格 = 各自 SOUL */
+	name: z.string(),
+	position: z.number().int().min(0),
+});
+export type GroupMember = z.infer<typeof GroupMemberSchema>;
+
+export const GroupMetaSchema = z.object({
+	id: z.string(),
+	name: z.string(),
+	/** 群公告（≤500 字），随每轮输入注入成员会话 */
+	notice: z.string(),
+	responderKind: GroupResponderKindSchema,
+	/** kind=member 时的值日执事；必须是群成员 */
+	responderPartnerId: z.string().nullable(),
+	members: z.array(GroupMemberSchema),
+	createdAt: z.string(),
+	updatedAt: z.string(),
+});
+export type GroupMeta = z.infer<typeof GroupMetaSchema>;
+
+export const GroupMessageSchema = z.object({
+	id: z.string(),
+	groupId: z.string(),
+	/** 群内单调序号（从 1 起），回读分页用 beforeSeq */
+	seq: z.number().int().min(1),
+	kind: z.enum(["message", "system"]),
+	authorKind: z.enum(["user", "partner", "system"]),
+	authorId: z.string().nullable(),
+	/** 作者名快照：不 join 成员表，改名/离群后历史不变 */
+	authorName: z.string(),
+	content: z.string(),
+	at: z.string(),
+	/** 同一回合同名（用于将来合并/追溯），v1 落 uuid */
+	roundId: z.string(),
+});
+export type GroupMessage = z.infer<typeof GroupMessageSchema>;
+
+/** POST /groups/:id/chat 的上行。历史在服务端（群时间线 + 各成员会话），客户端只发新消息。 */
+export const GroupChatRequestSchema = z.object({
+	text: z.string().min(1).max(GROUP_MESSAGE_LIMIT),
+});
+export type GroupChatRequest = z.infer<typeof GroupChatRequestSchema>;
+
 export const FinishReasonSchema = z.enum(["stop", "length", "aborted", "error"]);
 export type FinishReason = z.infer<typeof FinishReasonSchema>;
 
@@ -96,7 +166,18 @@ export type TurnPhase = "thinking" | "working";
  */
 export type ChatEvent =
 	/** conversationId 只在首轮有意义：新建会话时由服务端生成，客户端要存下来 */
-	| { type: "start"; id: string; conversationId: string; seq?: number }
+	| {
+			type: "start";
+			id: string;
+			conversationId: string;
+			/**
+			 * 群聊发言者归属（2026-11-06 群组方案 §2.5，纯增量）：一轮一个 start，
+			 * 整轮的 delta/thinking/progress/tool/done 都归属这个 sender。
+			 * 主对话不带这个字段（老客户端与旧链路零感知）。
+			 */
+			sender?: GroupSender;
+			seq?: number;
+		  }
 	| { type: "delta"; text: string; seq?: number }
 	/**
 	 * 思考正文增量（2026-11-04 批次一）。
@@ -125,6 +206,14 @@ export type ChatEvent =
 	  }
   | { type: "done"; id: string; finishReason: FinishReason; /** 本轮 token 用量（2026-11-04 批次一）；读不到就不带 */ usage?: TurnUsage; seq?: number }
   | { type: "error"; message: string; seq?: number }
+	/**
+	 * 群时间线系统行（2026-11-06 群组方案 §2.5，纯增量）。
+	 *
+	 * 成员被跳过 / mentions 无人回 / 回合被停这类"不是谁说的话"的时刻，
+	 * 用这一帧告诉客户端；同一行会落 `group_messages(kind='system')`，
+	 * 回读可复现。老客户端按 `type` 分发，认不出就忽略。
+	 */
+	| { type: "notice"; text: string; seq?: number }
 	/**
 	 * 派单进度（2026-11-03）。
 	 *

@@ -174,6 +174,11 @@ export function createTools(deps: ToolDeps) {
 		}),
 		execute: async (args, api) => {
 			const engine = requireMemory();
+			// 群会话不进个人记忆（2026-11-06 群组方案 §2.2）：群里听到的事写进执事私人记忆
+			// 就是串台。模型侧明说原因，别让它对着一个会失败的接口反复重试。
+			if (partnersStore().isGroupSession(api.conversationId)) {
+				return text("群聊里的内容不进个人记忆；需要记住的事请主人在私聊里说。");
+			}
 			const record = engine.remember({
 				kind: args.kind ?? "fact",
 				scope: scopeOf(api.conversationId),
@@ -198,6 +203,10 @@ export function createTools(deps: ToolDeps) {
 		}),
 		execute: async (args, api) => {
 			const engine = requireMemory();
+			// 群会话不参与记忆引擎（群组方案 §2.2，v1 最简形态）：群聊查记忆也跳过
+			if (partnersStore().isGroupSession(api.conversationId)) {
+				return text("群聊不走个人记忆；答案以群里的聊天记录为准。");
+			}
 			const hits = engine.recall({
 				text: args.query,
 				scopes: ["global", scopeKey(scopeOf(api.conversationId))],
