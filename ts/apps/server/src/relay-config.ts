@@ -29,6 +29,21 @@ export function deviceMatrixEnabled(env: NodeJS.ProcessEnv = process.env): boole
 	return raw === "1" || raw === "true" || raw === "on";
 }
 
+/**
+ * 自动挑机（2026-11-05 自动分发方案）：delegate 的 targetDevice="auto"。
+ * 默认 **关**——关时 "auto" 按非法参数拒绝，回到纯点名/本机两态。
+ */
+export function deviceAutoDispatchEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = (env.DEVICE_AUTO_DISPATCH ?? "").trim().toLowerCase();
+	return raw === "1" || raw === "true" || raw === "on";
+}
+
+/** 自动挑机的单机满载阈值；非法值（含 0 / 负数 / 非数字）回落默认 3。 */
+export function deviceMaxActivePerDevice(env: NodeJS.ProcessEnv = process.env): number {
+	const raw = Number((env.DEVICE_MAX_ACTIVE_PER_DEVICE ?? "").trim());
+	return Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : 3;
+}
+
 /** 伙伴认主机（阶段三）：harness 注册/领取伙伴归属。依赖中继。 */
 export function companionHomeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
 	const raw = (env.COMPANION_HOME_ENABLED ?? "").trim().toLowerCase();

@@ -9,7 +9,7 @@ import {
 	companionHomeController,
 	type CompanionHomeController,
 } from "./relay-home.ts";
-import { companionHomeEnabled, deviceMatrixEnabled } from "./relay-config.ts";
+import { companionHomeEnabled, deviceAutoDispatchEnabled, deviceMatrixEnabled } from "./relay-config.ts";
 import { externalChatIds, sayInConversation } from "./agent.ts";
 import type { ChatIndexEntry } from "./agent.ts";
 
@@ -83,6 +83,10 @@ export function mountRelayMobileProxy(app: Hono, deps: RelayMobileProxyDeps): vo
 		if (!targetDeviceId || !requirement || !conversationId) {
 			return c.json({ error: "bad_request", message: "需要 targetDeviceId / requirement / conversationId" }, 400);
 		}
+		// "auto" 第三态（2026-11-05 自动分发）：开关关着按非法参数拒绝。
+		if (targetDeviceId === "auto" && !deviceAutoDispatchEnabled()) {
+			return c.json({ error: "auto_disabled", message: "自动挑机未开启（DEVICE_AUTO_DISPATCH）" }, 400);
+		}
 		let originInternalId: number | null = null;
 		for (const [internal, external] of await externalChatIds()) {
 			if (external === conversationId) originInternalId = internal;
@@ -96,6 +100,10 @@ export function mountRelayMobileProxy(app: Hono, deps: RelayMobileProxyDeps): vo
 				domain,
 				originInternalId,
 			});
+			// 挑不出不是失败：202 + 决策结果（手机侧据此决定是否本机执行）。
+			if ("fallbackToLocal" in result) {
+				return c.json({ ok: true, fallbackToLocal: true, reason: result.reason }, 202);
+			}
 			return c.json({ ok: true, requestId: result.requestId, deviceName: result.deviceName }, 202);
 		} catch (error) {
 			const code = error instanceof RelayInvokeError ? error.code : "internal";

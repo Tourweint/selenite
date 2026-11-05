@@ -1,6 +1,20 @@
 import { Type } from "@earendil-works/pi-ai";
 import { join } from "node:path";
-import { partnersStore } from "./partners.ts";
+import {
+	CHIEF_PARTNER_ID,
+	COMPANIONS_ENABLED,
+	effectivePartnerIdOfSession,
+	partnerIdentityForDomain,
+	partnersStore,
+} from "./partners.ts";
+// 手下伙伴的建/停/列核心（批次D D3）：与 companion-api 端点共用，工具只做校验与文案包装。
+import {
+	createMinisterPartner,
+	defaultMinisterContext,
+	listMinisterPartners,
+	stopMinisterPartner,
+	type MinisterContext,
+} from "./partner-manage.ts";
 import { defineTool, type ToolRegistration } from "@earendil-works/pi-durable";
 import { scopeKey, type MemoryEngine, type MemoryKind, type MemoryScope } from "@lifediary/memory";
 // 派活能力（chancellor）。相对路径是刻意的：chancellor 是独立仓库，
@@ -32,7 +46,11 @@ import {
 } from "./projects.ts";
 // 设备矩阵（2026-11-05 阶段二）：远程分支晚绑定取中继客户端。
 // relay-matrix → agent → tools 的环是运行期安全的（agent 绑定只在函数体内解引用）。
-import { currentRelayClient, deviceMatrixEnabled } from "./relay-config.ts";
+import {
+	currentRelayClient,
+	deviceAutoDispatchEnabled,
+	deviceMatrixEnabled,
+} from "./relay-config.ts";
 import { RelayInvokeError } from "./relay-client.ts";
 import { dispatchRemoteDelegation } from "./relay-matrix.ts";
 import { ReminderTask } from "./reminder.ts";
@@ -50,6 +68,20 @@ import type { SkillStore } from "./skills.ts";
  */
 
 const MEMORY_KINDS: MemoryKind[] = ["fact", "episode", "preference", "entity"];
+
+/**
+ * 本机 delegate 才反查手下伙伴身份（批次D D2）。
+ * 伙伴能力关闭 / 伙伴库不可用时返回 null —— 请求不带身份，兼容旧领域，不让派单因查库失败而挂掉。
+ * 远程锚点会话（relay-matrix）不装配这个缝，因此「不做跨电脑手下」在装配层就成立。
+ */
+function localIdentityHit(domain: string): { name: string; soul: string } | null {
+	if (!COMPANIONS_ENABLED) return null;
+	try {
+		return partnerIdentityForDomain(partnersStore(), domain);
+	} catch {
+		return null;
+	}
+}
 
 export interface ToolDeps {
 	/** 记忆引擎；为 null 时 remember / recall 会明确报错而不是静默失败 */
@@ -85,6 +117,11 @@ export interface ToolDeps {
 	 * agent.ts 传 `COMPANIONS_ENABLED`——开关关掉时工具不注册，行为与改动前一致（回滚开关）。
 	 */
 	partners?: boolean;
+	/**
+	 * 手下管理工具的存储 / chancellor 工作根（批次D D3）。测试注入临时目录，
+	 * 不碰真实 .data/；不传用全局 partnersStore() + chancellorWorkRoot()。
+	 */
+	ministerContext?: () => MinisterContext;
 	/** 派单回执表；不传用默认 `.data/delegations.sqlite`。测试可注入临时库。 */
 	receipts?: DelegationReceipts | null;
 }
@@ -313,8 +350,10 @@ export function createTools(deps: ToolDeps) {
 				Type.String({
 					description:
 						"把活派给**另一台电脑**的 harness 执行（设备矩阵）。填中结名册里的设备 id。" +
-						"填了就走远程分支：本机的项目登记表不参与，`project` 由目标机判；" +
-						"目标离线会直接失败（不排队）。不填 = 本机执行（现状）。",
+						"`\"auto\"` = 电脑自己挑一台（DEVICE_AUTO_DISPATCH 开启时）：按在线、能力位与忙碌度选，" +
+						"挑不出就在本机执行并说明原因；不填仍是本机执行。" +
+						"填了就跑远程分支：本机的项目登记表不参与，`project` 由目标机判；" +
+						"目标离线会直接失败（不排队）。",
 				}),
 			),
 			resume: Type.Optional(
@@ -339,7 +378,19 @@ export function createTools(deps: ToolDeps) {
 			// 远程分支（2026-11-05 阶段二）：点名另一台电脑执行。
 			// 本机的项目前置不参与（project 语义归目标机）；离线直接失败不排队。
 			const targetDevice = (args.targetDevice ?? "").trim();
+			// 自动挑机落回本机时，给最终的派活回话加一行前缀（方案 §2.4：挑不出必须可见）
+			let fallbackNotice = "";
 			if (targetDevice) {
+				// "auto" 是第三态：开关关着就按非法参数拒绝，不让它悄悄降级成本机
+				if (targetDevice === "auto" && !deviceAutoDispatchEnabled()) {
+					return text(
+						JSON.stringify({
+							ok: false,
+							error: "auto_disabled",
+							message: "自动挑机未开启（DEVICE_AUTO_DISPATCH）",
+						}),
+					);
+				}
 				const client = currentRelayClient();
 				if (!deviceMatrixEnabled() || !client) {
 					return text("设备矩阵未开启（DEVICE_MATRIX_ENABLED=off 或中继未连接），targetDevice 不可用。");
@@ -355,10 +406,15 @@ export function createTools(deps: ToolDeps) {
 						domain: domain || undefined,
 						originInternalId: conversationId,
 					});
-					return text(
-						`已交由设备「${result.deviceName}」执行（远端请求 ${result.requestId.slice(0, 8)}）。` +
-							"它在后台跑，完成后我会把汇报写进本会话。不要重复派、不要轮询。",
-					);
+					if ("fallbackToLocal" in result) {
+						// 挑不出不是失败：本机照常走下面的本地派活路径，只把原因带到回话里。
+						fallbackNotice = `自动挑机未成（${result.reason}），已在本机执行。\n`;
+					} else {
+						return text(
+							`已交由设备「${result.deviceName}」执行（远端请求 ${result.requestId.slice(0, 8)}）。` +
+								"它在后台跑，完成后我会把汇报写进本会话。不要重复派、不要轮询。",
+						);
+					}
 				} catch (error) {
 					const code = error instanceof RelayInvokeError ? error.code : "internal";
 					const message = error instanceof Error ? error.message.slice(0, 200) : "派发失败";
@@ -474,6 +530,8 @@ export function createTools(deps: ToolDeps) {
 					emit: emitDelegation,
 					report: deps.reportDelegation,
 					autoReport,
+					// 只有本机 delegate 按 domain 反查手下伙伴身份；远程锚点会话不装配这个缝。
+					identityHitFor: localIdentityHit,
 					log: (line) => console.warn(line),
 				},
 			);
@@ -498,29 +556,29 @@ export function createTools(deps: ToolDeps) {
 					const result = await outcome;
 					lastTicketByConversation.set(conversationId, result.ticketId);
 					const line = result.line || "派出去的活没有返回结论。";
-					if (noTicket) return text(`${line}\n（没有可续的单，已按新活派）`);
+					if (noTicket) return text(`${fallbackNotice}${line}\n（没有可续的单，已按新活派）`);
 					if (resumeTicketId) {
-						return text(`${line}\n（已把用户的回答交回原单，它在接着做。）`);
+						return text(`${fallbackNotice}${line}\n（已把用户的回答交回原单，它在接着做。）`);
 					}
-					return text(line);
+					return text(fallbackNotice + line);
 				} catch {
-					return text("派单失败，请稍后再试。");
+					return text(`${fallbackNotice}派单失败，请稍后再试。`);
 				}
 			}
 
 			if (noTicket) {
 				return text(
-					`已按新活派：任务单 ${ticketId || "(受理中)"}` +
+					`${fallbackNotice}已按新活派：任务单 ${ticketId || "(受理中)"}` +
 						`${domain ? `（领域：${domain}）` : ""}。它在后台执行，完成后我会汇报。`,
 				);
 			}
 			if (resumeTicketId) {
 				return text(
-					`已把回答交回原单 ${ticketId}，它继续在后台跑，完成后我会汇报。`,
+					`${fallbackNotice}已把回答交回原单 ${ticketId}，它继续在后台跑，完成后我会汇报。`,
 				);
 			}
 			return text(
-				`已受理：任务单 ${ticketId || "(受理中)"}${domain ? `（领域：${domain}）` : ""}。` +
+				`${fallbackNotice}已受理：任务单 ${ticketId || "(受理中)"}${domain ? `（领域：${domain}）` : ""}。` +
 					"它在后台执行，完成后我会汇报；不要等，也不要重复派。",
 			);
 		},
@@ -554,16 +612,23 @@ export function createTools(deps: ToolDeps) {
 
 	if (deps.delegate !== false) tools.push(delegate, proposeProject);
 
-	// 伙伴技能写入（2026-11-05 批次B B2）：只对"伙伴会话"有意义的写工具。
-	// 写的是 partner-homes/<id>/skills/<slug>.md（64KB 上限、原子写都在 partners.ts）；
-	// 主人会话里调它直接报错——主人自己的技能不归模型管。
-	if (deps.partners) {
+	// 伙伴技能写入（2026-11-05 批次B B2；批次D D1 扩到主对话=总管）。
+	// 写的是 partner-homes/<id>/skills/<slug>.md（64KB 上限、原子写都在 partners.ts）。
+	// 伙伴会话写该伙伴的技能；主对话（owner 会话）解析为 chief → 写总管技能库；
+	// CHIEF_PARTNER=false 时 owner 会话照旧返回"不属于任何伙伴"（回滚到改动前）。
+	//
+	// 手下管理 partner_manage（批次D D3）与 partner_skill_write 一起挂在伙伴能力开时。
+	// deps.partners 缺省回落 COMPANIONS_ENABLED：agent.ts 装配时不显式传 partners，
+	// 主对话（总管）也能用；COMPANIONS_ENABLED=false 两件都不注册 = 一行回滚。
+	const partnersOn = deps.partners ?? COMPANIONS_ENABLED;
+	const ministerContext = deps.ministerContext ?? defaultMinisterContext;
+	if (partnersOn) {
 		tools.push(
 			defineTool({
 				name: "partner_skill_write",
 				description:
 					"把一份技能手册写进当前伙伴的技能库（skills/<slug>.md，首行 = 索引用的一句话摘要）。" +
-					"只在伙伴会话里可用；写盘即生效，下一轮进身份提示词的技能索引。",
+					"伙伴会话写各自的技能库，主对话写总管技能库；写盘即生效，下一轮进身份提示词的技能索引。",
 				parameters: Type.Object({
 					slug: Type.String({
 						description: "技能名，小写字母/数字/短横线，1-64 字符，如 daily-brief",
@@ -571,7 +636,13 @@ export function createTools(deps: ToolDeps) {
 					content: Type.String({ description: "技能手册全文（Markdown）；第一行是索引用摘要" }),
 				}),
 				execute: async (args, context) => {
-					const partnerId = partnersStore().partnerIdOfSession(Number(context.conversationId));
+					// effectivePartnerIdOfSession：伙伴会话 → 真实 uuid；主对话 → "chief"（CHIEF 开时）。
+					// 用 chief 感知的解析而非裸 partnerIdOfSession，是为了让主对话也能写总管技能；
+					// 裸函数仍被 autonomy/routines 当"是否主人会话"用，语义不能改。
+					const partnerId = effectivePartnerIdOfSession(
+						partnersStore(),
+						Number(context.conversationId),
+					);
 					if (!partnerId) {
 						return text("这个会话不属于任何伙伴，不能写伙伴技能。");
 					}
@@ -591,6 +662,82 @@ export function createTools(deps: ToolDeps) {
 						const detail = error instanceof Error ? error.message : String(error);
 						return text(`写入失败：${detail}`);
 					}
+				},
+			}),
+		);
+	}
+
+	// 手下管理（批次D D3）：总管建 / 停 / 列手下。核心逻辑在 partner-manage.ts，
+	// 与 companion-api 端点共用；这里只做参数校验、权限闸与模型友好的文案包装。
+	if (partnersOn) {
+		tools.push(
+			defineTool({
+				name: "partner_manage",
+				description:
+					"总管管理手下伙伴（chancellor 分管宰相）：create 建一个、stop 停一个、list 列出全部。" +
+					"只有总管 / 主对话能用；手下自己的伙伴会话不能管理手下。" +
+					"create 的 domain 是之后派活用的领域名，必须是小写 ASCII（小写字母、数字、连字符，如 frontend / desktop-shell），" +
+					"name 是展示名（中文随意）。建好后用 delegate(domain=<domain>) 把活派给它。",
+				parameters: Type.Object({
+					action: Type.Unsafe<"create" | "stop" | "list">({
+						type: "string",
+						enum: ["create", "stop", "list"],
+						description: "create=建手下 / stop=停手下 / list=列出手下",
+					}),
+					name: Type.Optional(Type.String({ description: "create 必填，展示名，≤40 字" })),
+					domain: Type.Optional(
+						Type.String({ description: "create 必填，小写 ASCII 领域名（之后派活路由用）" }),
+					),
+					soul: Type.Optional(Type.String({ description: "create 可选，一句话身份；缺省用默认播种" })),
+					partnerId: Type.Optional(
+						Type.String({ description: "stop 必填（手下 id）；list 可选按 id 过滤" }),
+					),
+				}),
+				execute: async (args, api) => {
+					const ctx = ministerContext();
+					const conversationId = Number(api.conversationId);
+					// 只有总管 / 主对话能管理手下：effectivePartnerIdOfSession 落到非 chief 的真实
+					// uuid（某伙伴的专线会话）一律拒；owner 会话解析为 chief / null，放行。
+					const effective = effectivePartnerIdOfSession(ctx.store, conversationId);
+					if (effective !== null && effective !== CHIEF_PARTNER_ID) {
+						return text("只有总管可以管理手下");
+					}
+					if (args.action === "create") {
+						const name = (args.name ?? "").trim();
+						const domain = (args.domain ?? "").trim();
+						if (!name) return text("name 必填且不超过 40 字");
+						if (!domain) return text("domain 必填：小写 ASCII 领域名，之后派活用");
+						if (args.soul && args.soul.length > 4000) {
+							return text("soul 太长，一句话身份即可");
+						}
+						const result = createMinisterPartner({ name, domain, soul: args.soul }, ctx);
+						if (!result.ok) return text(result.error);
+						return text(
+							`手下 ${result.value.name} 已就位，domain=${result.value.domain}，之后派活用 domain`,
+						);
+					}
+					if (args.action === "stop") {
+						const partnerId = (args.partnerId ?? "").trim();
+						if (!partnerId) return text("stop 需要 partnerId（手下 id）");
+						if (partnerId === CHIEF_PARTNER_ID) {
+							return text("不能停总管自己：总管是主对话本体，不在可停用的手下里。");
+						}
+						const partner = ctx.store.get(partnerId);
+						if (!partner || !partner.domain) {
+							return text(`找不到 id 为 ${partnerId} 的手下（只能停带 domain 的手下）。`);
+						}
+						const result = stopMinisterPartner(partnerId, ctx);
+						if (!result.ok) return text("手下不存在或已被停用。");
+						return text(
+							`手下 ${partner.name}（domain=${partner.domain}）已停用并归档，之后派活不要再指向它。`,
+						);
+					}
+					if (args.action === "list") {
+						const rows = listMinisterPartners(ctx, (args.partnerId ?? "").trim() || undefined);
+						if (rows.length === 0) return text("（暂无手下；用 create 建一个）");
+						return text(rows.map((row) => `${row.name} · ${row.domain} · ${row.status}`).join("\n"));
+					}
+					return text("action 只能是 create / stop / list");
 				},
 			}),
 		);

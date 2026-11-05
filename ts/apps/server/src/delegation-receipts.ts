@@ -119,6 +119,22 @@ export class DelegationReceipts {
 	}
 
 	/**
+	 * 在跑单数（自动挑机的忙碌位，2026-11-05）。
+	 *
+	 * 口径：outcome 是 `accepting` / `accepted` 即算在跑；不额外按 boot 代号过滤——
+	 * 旧进程留下的 accepting 本进程还没法判定，按"可能还在跑"算更保守，
+	 * 真实归属等 `begin` 遇到时再按 uncertain 处理。
+	 */
+	countActive(): number {
+		const row = this.db
+			.prepare(
+				"SELECT COUNT(*) AS n FROM delegation_receipts WHERE outcome IN ('accepting', 'accepted')",
+			)
+			.get() as { n?: unknown } | undefined;
+		return Number(row?.n ?? 0);
+	}
+
+	/**
 	 * 按任务单号反查受理回执（A3a 存下的 ticketId → 会话映射）。
 	 *
 	 * @internal A3b（恢复回灌）专用，当前无生产调用方。

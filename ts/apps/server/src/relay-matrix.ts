@@ -23,7 +23,12 @@ import {
 } from "./delegation.ts";
 import { projectsStore, resolveDelegationProject, type ProjectRef } from "./projects.ts";
 import { RelayInvokeError, type RelayClient } from "./relay-client.ts";
-import { deviceMatrixEnabled } from "./relay-config.ts";
+import { autoCandidates, queryBusyMap, selectAutoDevice } from "./relay-auto.ts";
+import {
+	deviceAutoDispatchEnabled,
+	deviceMatrixEnabled,
+	deviceMaxActivePerDevice,
+} from "./relay-config.ts";
 
 /**
  * 设备矩阵派活（2026-11-05 多端同步方案块2，阶段二）。
@@ -57,6 +62,10 @@ interface RemoteRow {
 	phase: DelegationPhase;
 	report?: string;
 	updatedAt: number;
+	/** 这台机器是点名来的还是自动挑的（2026-11-05）。旧台账行没有这个字段。 */
+	pickedBy?: "explicit" | "auto";
+	/** 自动挑机的决策依据（如 busy=1）；点名派活为空。 */
+	pickReason?: string;
 	/** 终态单保留多久后从 JSON 清掉（状态查询仍可问目标机） */
 	finishedAt?: number;
 }
@@ -123,7 +132,21 @@ export interface RemoteDispatchResult {
 	requestId: string;
 	ticketId: string;
 	deviceName: string;
+	/** explicit = 点名；auto = 决策器挑的（写进台账，事后能看出活为什么去了那台） */
+	pickedBy?: "explicit" | "auto";
+	pickReason?: string;
 }
+
+/**
+ * 自动挑机的"挑不出"结果：**不是错误**，调用方据此落本机。
+ * reason 与 selectAutoDevice 共用同一套枚举，HTTP 与工具文案直接透传。
+ */
+export interface RemoteDispatchFallback {
+	fallbackToLocal: true;
+	reason: "no_candidate" | "all_busy";
+}
+
+export type RemoteDispatchOutcome = RemoteDispatchResult | RemoteDispatchFallback;
 
 /** 相位变化如何露出到发起会话：进度走 SSE 事件，终态追加一句话汇报。 */
 type Reporter = (event: DelegationEvent) => void;
@@ -132,13 +155,41 @@ export async function dispatchRemoteDelegation(
 	client: RelayClient,
 	input: RemoteDispatchInput,
 	report: Reporter = (event) => emitDelegation(input.originInternalId, event),
-): Promise<RemoteDispatchResult> {
+): Promise<RemoteDispatchOutcome> {
 	if (!deviceMatrixEnabled()) {
 		throw new RelayInvokeError("remote_disabled", "设备矩阵未开启（DEVICE_MATRIX_ENABLED）");
 	}
 	// 名册先拉新：welcome 快照只反映连上那一刻，中间上线的设备不刷就"不存在"
 	await client.refreshDevices();
-	const target = client.devices.find((device) => device.id === input.targetDeviceId);
+	let targetDeviceId = input.targetDeviceId;
+	let pickedBy: "explicit" | "auto" = "explicit";
+	let pickReason: string | undefined;
+	if (targetDeviceId === "auto") {
+		// 双保险：HTTP/工具层已经挡过一次，直接调本函数也不能绕过开关。
+		if (!deviceAutoDispatchEnabled()) {
+			throw new RelayInvokeError("auto_disabled", "自动挑机未开启（DEVICE_AUTO_DISPATCH）");
+		}
+		// 决策在发起端：候选机的在跑单数先并发问一遍，中继保持哑（方案 §2.2）。
+		const selfDeviceId = client.selfDeviceId ?? "";
+		// 没有自身 id 就分不清"本机"，宁可不挑，也不能把活派回自己。
+		if (!selfDeviceId) return { fallbackToLocal: true, reason: "no_candidate" };
+		const candidates = autoCandidates(client.devices, selfDeviceId);
+		const busyMap = await queryBusyMap(client, candidates);
+		const picked = selectAutoDevice({
+			devices: client.devices,
+			selfDeviceId,
+			busyMap,
+			maxActivePerDevice: deviceMaxActivePerDevice(),
+		});
+		if ("fallback" in picked) {
+			// 挑不出必须可见：原因原样交回调用方（工具落本机、HTTP 返回决策结果）。
+			return { fallbackToLocal: true, reason: picked.reason };
+		}
+		targetDeviceId = picked.picked;
+		pickedBy = "auto";
+		pickReason = `busy=${picked.busy}`;
+	}
+	const target = client.devices.find((device) => device.id === targetDeviceId);
 	if (!target) {
 		throw new RelayInvokeError("unknown_device", "目标设备不在中结名册里");
 	}
@@ -154,7 +205,7 @@ export async function dispatchRemoteDelegation(
 	void (async () => {
 		try {
 			const accepted = (await client.invoke(
-				input.targetDeviceId,
+				targetDeviceId,
 				"delegation/accept",
 				{
 					requestId,
@@ -169,13 +220,15 @@ export async function dispatchRemoteDelegation(
 			const ticketId = accepted.ticketId ?? "";
 			store.put({
 				requestId,
-				targetDeviceId: input.targetDeviceId,
+				targetDeviceId,
 				targetDeviceName: target.name,
 				targetTicketId: ticketId,
 				domain: input.domain ?? "",
 				originInternalId: input.originInternalId,
 				phase: "accepted",
 				updatedAt: Date.now(),
+				pickedBy,
+				...(pickReason ? { pickReason } : {}),
 			});
 			report({
 				type: "delegate",
@@ -198,7 +251,13 @@ export async function dispatchRemoteDelegation(
 			);
 		}
 	})();
-	return { requestId, ticketId: "", deviceName: target.name };
+	return {
+		requestId,
+		ticketId: "",
+		deviceName: target.name,
+		pickedBy,
+		...(pickReason ? { pickReason } : {}),
+	};
 }
 
 function schedulePoll(client: RelayClient, requestId: string, round: number, report: Reporter): void {
@@ -275,6 +334,8 @@ function phaseLabel(phase: DelegationPhase): string {
 export interface MatrixChannels {
 	accept: (payload: unknown) => Promise<{ ticketId: string; conversationId: string }>;
 	status: (payload: unknown) => Promise<RemoteDelegationStatus | null>;
+	/** 自动挑机的忙碌位：本机回执库里非终态单的数量。 */
+	busy: () => Promise<{ active: number }>;
 }
 
 /** chancellor TicketStatus → 对外 8 相（DelegationPhase）。 */
@@ -382,6 +443,11 @@ export function createMatrixChannels(): MatrixChannels {
 				.then((result) => receipts.accept(input.requestId, result.ticketId || ticketId, chat.internalId))
 				.catch(() => receipts.markFailed(input.requestId));
 			return { ticketId, conversationId: chat.externalId };
+		},
+
+		/** 忙碌位：读本机回执库，返回非终态（accepting/accepted）单数。 */
+		async busy() {
+			return { active: receiptsOf().countActive() };
 		},
 
 		/** 相位投影：回执（受理态）+ ticket.json（运行态）。 */

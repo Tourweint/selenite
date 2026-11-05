@@ -28,7 +28,12 @@ export const RELAY_INVOKE_CHANNELS = [
 ] as const;
 
 /** 阶段二（设备矩阵）通道：仅 DEVICE_MATRIX_ENABLED 时进白名单。 */
-export const RELAY_MATRIX_CHANNELS = ["delegation/accept", "delegation/status"] as const;
+export const RELAY_MATRIX_CHANNELS = [
+	"delegation/accept",
+	"delegation/status",
+	// 自动挑机的忙碌位查询（2026-11-05）：发起端问目标机"你在跑几单"
+	"delegation/busy",
+] as const;
 
 const SUB_POLL_INTERVAL_MS = 250;
 
@@ -75,6 +80,7 @@ export class RelayChannelHub {
 		}
 		if (matrixChannel && this.matrix) {
 			if (channel === "delegation/accept") return this.matrix.accept(payload);
+			if (channel === "delegation/busy") return this.matrix.busy();
 			return this.matrix.status(payload);
 		}
 		switch (channel) {

@@ -350,6 +350,8 @@ export const RelayPongSchema = z.object({ kind: z.literal("pong"), at: z.number(
 export const RELAY_PUSH_CHANNEL_PREFIX = "push/";
 
 // ── 设备矩阵派活（2026-11-05 多端同步方案块2，阶段二）──────────────────
+// 新增通道 `delegation/busy`（2026-11-05 自动分发）：目标机返回 {active} 在跑单数；
+// 决策在发起端（relay-auto.ts），中继保持哑。
 // 语义（方案 §四阶段二）：发起端生成 requestId（全局幂等）；目标机受理后
 // 用"本地锚点会话"承载 chancellor 单（复用既有回执/恢复机制）；发起端
 // 轮询 status，相位变化写回发起会话。目标离线直接失败不排队。
@@ -450,6 +452,12 @@ export const PartnerProfileSchema = z.object({
 	soulVersion: z.number().nullable(),
 	createdAt: z.string(),
 	updatedAt: z.string(),
+	/**
+	 * 手下伙伴的唯一领域名（批次D D2，纯增量可选字段）：小写 ASCII，
+	 * 正则同 chancellor `DOMAIN_PATTERN`。普通伙伴 / 老客户端不带这个字段。
+	 * App 零改动：认不出的客户端按「忽略未知字段」处理即可。
+	 */
+	domain: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).optional(),
 });
 export type PartnerProfile = z.infer<typeof PartnerProfileSchema>;
 

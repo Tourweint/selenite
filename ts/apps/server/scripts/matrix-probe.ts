@@ -21,9 +21,11 @@ import { setTimeout as sleep } from "node:timers/promises";
 const RELAY_PORT = Number(process.env.PROBE_RELAY_PORT ?? 8097);
 const PORT_A = Number(process.env.PROBE_PORT_A ?? 8095);
 const PORT_B = Number(process.env.PROBE_PORT_B ?? 8096);
+const PORT_C = Number(process.env.PROBE_PORT_C ?? 8094);
 const RELAY_BASE = `http://127.0.0.1:${RELAY_PORT}`;
 const BASE_A = `http://127.0.0.1:${PORT_A}`;
 const BASE_B = `http://127.0.0.1:${PORT_B}`;
+const BASE_C = `http://127.0.0.1:${PORT_C}`;
 const TMP = join(".data", `probe-matrix-${randomUUID().slice(0, 8)}`);
 
 let failures = 0;
@@ -35,7 +37,12 @@ function check(ok: boolean, label: string, detail = ""): void {
 	}
 }
 
-function harnessEnv(port: number, relayToken: string, tag: string): NodeJS.ProcessEnv {
+function harnessEnv(
+	port: number,
+	relayToken: string,
+	tag: string,
+	overrides: NodeJS.ProcessEnv = {},
+): NodeJS.ProcessEnv {
 	return {
 		...process.env,
 		PORT: String(port),
@@ -59,17 +66,24 @@ function harnessEnv(port: number, relayToken: string, tag: string): NodeJS.Proce
 		DELEGATION_PROJECT_REQUIRED: "false",
 		RELAY_ENABLED: "1",
 		DEVICE_MATRIX_ENABLED: "1",
+		DEVICE_AUTO_DISPATCH: "1",
 		RELAY_URL: `ws://127.0.0.1:${RELAY_PORT}`,
 		RELAY_TOKEN: relayToken,
-		RELAY_DEVICE_NAME: tag === "a" ? "甲机" : "乙机",
+		RELAY_DEVICE_NAME: tag === "a" ? "甲机" : tag === "b" ? "乙机" : "丙机",
 		NODE_OPTIONS: "",
+		...overrides,
 	};
 }
 
-function startHarness(port: number, relayToken: string, tag: string): ChildProcess {
+function startHarness(
+	port: number,
+	relayToken: string,
+	tag: string,
+	overrides: NodeJS.ProcessEnv = {},
+): ChildProcess {
 	const child = spawn(process.execPath, ["../../node_modules/tsx/dist/cli.mjs", "src/index.ts"], {
 		cwd: `${import.meta.dirname}/..`,
-		env: harnessEnv(port, relayToken, tag),
+		env: harnessEnv(port, relayToken, tag, overrides),
 		stdio: ["ignore", "pipe", "pipe"],
 	});
 	harnesses.push(child);
@@ -247,6 +261,99 @@ async function main(): Promise<void> {
 		if (!reported) await sleep(1000);
 	}
 	check(reported, "终态汇报写回 A 的发起会话");
+
+	// ── 自动挑机（2026-11-05）────────────────────────────────
+	// 场景一：两台在线（甲机发起、乙机可执行），A 用 "auto" 派 → 挑乙机并记账。
+	const autoRes = await fetch(`${BASE_A}/api/v1/relay/matrix/delegate`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({
+			targetDeviceId: "auto",
+			requirement: "自动挑机场景：在 2.txt 里写一行「自动挑机到此一游」，写完就算完成。",
+			conversationId,
+		}),
+	});
+	const autoBody = (await autoRes.json()) as {
+		ok?: boolean;
+		requestId?: string;
+		deviceName?: string;
+		fallbackToLocal?: boolean;
+		reason?: string;
+	};
+	check(
+		autoRes.status === 202 && autoBody.ok === true && autoBody.fallbackToLocal !== true,
+		"A 用 auto 自动挑机派活（202）",
+		autoBody.deviceName,
+	);
+	let autoRow: { requestId: string; pickedBy?: string; pickReason?: string } | null = null;
+	for (let attempt = 0; attempt < 40; attempt += 1) {
+		const rows = (await (await fetch(`${BASE_A}/api/v1/relay/matrix/status`)).json()) as {
+			delegations: Array<{ requestId: string; pickedBy?: string; pickReason?: string }>;
+		};
+		autoRow = rows.delegations.find((r) => r.requestId === autoBody.requestId) ?? null;
+		if (autoRow) break;
+		await sleep(250);
+	}
+	check(
+		autoRow?.pickedBy === "auto" && /^busy=\d+$/.test(autoRow?.pickReason ?? ""),
+		"自动挑机的台账记录 pickedBy=auto 与 busy 依据",
+		`${autoRow?.pickedBy}/${autoRow?.pickReason}`,
+	);
+
+	// 场景二：杀掉乙机、只剩本机 → auto 不报错，返回 fallback 决策结果。
+	b.kill();
+	let bOffline = false;
+	for (let attempt = 0; attempt < 60; attempt += 1) {
+		const overview = (await (await fetch(`${BASE_A}/api/v1/relay/overview`)).json()) as {
+			devices: Array<{ id: string; online: boolean }>;
+		};
+		const view = overview.devices.find((d) => d.id === idB);
+		if (!view || view.online === false) {
+			bOffline = true;
+			break;
+		}
+		await sleep(250);
+	}
+	check(bOffline, "乙机下线后名册确认其不再在线");
+	const fallbackRes = await fetch(`${BASE_A}/api/v1/relay/matrix/delegate`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({
+			targetDeviceId: "auto",
+			requirement: "自动挑机回退场景：本机写一行即可。",
+			conversationId,
+		}),
+	});
+	const fallbackBody = (await fallbackRes.json()) as { fallbackToLocal?: boolean; reason?: string };
+	check(
+		fallbackRes.status === 202 &&
+			fallbackBody.fallbackToLocal === true &&
+			fallbackBody.reason === "no_candidate",
+		"无可用远端 → fallback 本机（202，reason=no_candidate）",
+		fallbackBody.reason,
+	);
+
+	// 场景三：新起一台未开 DEVICE_AUTO_DISPATCH 的丙机 → "auto" 按非法参数拒绝。
+	const tokenC = await pairHarness("丙机");
+	startHarness(PORT_C, tokenC, "c", { DEVICE_AUTO_DISPATCH: "" });
+	await waitReady(BASE_C);
+	await waitConnected(BASE_C);
+	const conversationC = await chatOnce(BASE_C, "自动分发开关关闭场景");
+	const disabledRes = await fetch(`${BASE_C}/api/v1/relay/matrix/delegate`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({
+			targetDeviceId: "auto",
+			requirement: "开关关着时不该被受理。",
+			conversationId: conversationC,
+		}),
+	});
+	const disabledBody = (await disabledRes.json()) as { error?: string };
+	check(
+		disabledRes.status === 400 && disabledBody.error === "auto_disabled",
+		"DEVICE_AUTO_DISPATCH 未设 → auto_disabled（400）",
+		disabledBody.error,
+	);
 
 	console.log(failures === 0 ? "\n✓ 设备矩阵全通过" : `\n✗ ${failures} 项未过`);
 	process.exitCode = failures === 0 ? 0 : 1;
