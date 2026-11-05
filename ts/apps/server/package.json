@@ -16,7 +16,7 @@
 		"diary": "tsx scripts/diary-probe.ts",
 		"tasks": "tsx scripts/task-probe.ts",
 		"typecheck": "tsc --noEmit",
-		"test": "tsx --test src/worker-shell.test.ts src/loop-guard.test.ts src/autonomy-core.test.ts src/autonomy-risk.test.ts src/cron.test.ts src/model-chain.test.ts src/partners.test.ts src/delegation.test.ts src/delegation-receipts.test.ts src/delegation-api.test.ts src/isolation.test.ts src/delegation-closure.test.ts src/recovery.test.ts src/codebuddy.test.ts src/qoder.test.ts src/projects.test.ts src/reliability.test.ts src/approval-policy.test.ts src/approvals.test.ts src/provider.test.ts src/arch-guard.test.ts src/chat-events.test.ts ../../packages/shared/src/snapshot.test.ts",
+		"test": "tsx --test src/relay-mobile-proxy.test.ts src/worker-shell.test.ts src/loop-guard.test.ts src/autonomy-core.test.ts src/autonomy-risk.test.ts src/cron.test.ts src/model-chain.test.ts src/partners.test.ts src/delegation.test.ts src/delegation-receipts.test.ts src/delegation-api.test.ts src/isolation.test.ts src/delegation-closure.test.ts src/recovery.test.ts src/codebuddy.test.ts src/qoder.test.ts src/projects.test.ts src/reliability.test.ts src/approval-policy.test.ts src/approvals.test.ts src/provider.test.ts src/arch-guard.test.ts src/chat-events.test.ts ../../packages/shared/src/snapshot.test.ts",
 		"gate": "tsx scripts/delegate-gate-probe.ts",
 		"resume": "tsx scripts/delegate-resume-probe.ts",
 		"chain": "tsx scripts/delegate-chain-probe.ts",

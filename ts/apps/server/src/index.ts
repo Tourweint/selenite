@@ -60,6 +60,7 @@ import { RelayClient } from "./relay-client.ts";
 import { RelayChannelHub, type RelayChannelDeps } from "./relay-channels.ts";
 import { relayEnabled, relaySettings, deviceMatrixEnabled, companionHomeEnabled } from "./relay-config.ts";
 import { companionHomeController, type CompanionHomeController } from "./relay-home.ts";
+import { mountRelayMobileProxy } from "./relay-mobile-proxy.ts";
 import { createMatrixChannels, dispatchRemoteDelegation, listRemoteDelegations } from "./relay-matrix.ts";
 import { RelayInvokeError } from "./relay-client.ts";
 import { approvalStore } from "./approvals.ts";
@@ -847,6 +848,14 @@ if (relayEnabled()) {
   }
 }
 
+// 中继的手机代理面（2026-11-05 手机端对接）：名册/远端单/跨机派活/伙伴归属，
+// 走 /api/v1 既有鉴权；手机零新协议（见 relay-mobile-proxy.ts 头注）
+mountRelayMobileProxy(app, {
+  relayClient: () => relayClient,
+  home: () => homeController,
+  listChats,
+});
+
 // 中继状态（只暴露连接面，不暴露令牌与地址里的凭据）
 app.get("/api/v1/relay/status", (c) => {
   return c.json({
@@ -878,7 +887,7 @@ app.post("/api/v1/relay/matrix/delegate", async (c) => {
   }
   if (originInternalId === null) return c.json({ error: "unknown_conversation" }, 404);
   try {
-    const result = dispatchRemoteDelegation(relayClient, {
+    const result = await dispatchRemoteDelegation(relayClient, {
       targetDeviceId,
       requirement,
       project,

@@ -86,6 +86,17 @@ export class RelayClient {
 		return this.onlineDevices;
 	}
 
+	/** 向中继要一次实时名册（welcome 快照只反映连上那一刻；新上线设备靠它拉新）。 */
+	async refreshDevices(): Promise<void> {
+		if (!this.connected) return;
+		try {
+			const result = (await this.meta("devices", {})) as { devices?: RelayWelcome["devices"] };
+			if (result.devices) this.onlineDevices = result.devices;
+		} catch {
+			/* 拉不到就用旧快照 */
+		}
+	}
+
 	get uptimeMs(): number {
 		return Date.now() - this.startedAt;
 	}
@@ -140,7 +151,11 @@ export class RelayClient {
 	}
 
 	/** 中继元数据操作（伙伴路由表仲裁等）：meta 帧，中继自答。 */
-	meta(action: "actors" | "actor-home" | "actor-claim" | "actor-release", payload: unknown, timeoutMs = 10_000): Promise<unknown> {
+	meta(
+		action: "actors" | "actor-home" | "actor-claim" | "actor-release" | "devices",
+		payload: unknown,
+		timeoutMs = 10_000,
+	): Promise<unknown> {
 		if (!this.connected) {
 			return Promise.reject(new RelayInvokeError("device_offline", "中继未连接"));
 		}

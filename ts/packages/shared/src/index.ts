@@ -391,7 +391,7 @@ export type RemoteDelegationStatus = z.infer<typeof RemoteDelegationStatusSchema
 // （方案 §四阶段三、§六备选）。信封新增 meta 帧：中继自答不转发。
 // CAS 口径照抄 cindy：expected 不符时**带回实际值**，调用方重读再决定。
 
-export const RelayMetaActionSchema = z.enum(["actors", "actor-home", "actor-claim", "actor-release"]);
+export const RelayMetaActionSchema = z.enum(["actors", "actor-home", "actor-claim", "actor-release", "devices"]);
 export type RelayMetaAction = z.infer<typeof RelayMetaActionSchema>;
 
 export const RelayMetaRequestSchema = z.object({

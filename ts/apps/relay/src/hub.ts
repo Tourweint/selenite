@@ -237,6 +237,11 @@ export class RelayHub {
 				case "actors":
 					reply(true, { actors: this.store.listActors() });
 					return;
+				case "devices":
+					// 名册实时快照（连接期间的 welcome 只反映连上那一刻；
+					// 中间上线的设备靠这里拉新——v1 无 presence 广播的补位）
+					reply(true, { devices: this.store.listDevices(Date.now(), this.onlineIds) });
+					return;
 				case "actor-home": {
 					const actorId = (meta.payload as { actorId?: unknown } | null)?.actorId;
 					if (typeof actorId !== "string" || !actorId) {

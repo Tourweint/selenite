@@ -128,14 +128,16 @@ export interface RemoteDispatchResult {
 /** 相位变化如何露出到发起会话：进度走 SSE 事件，终态追加一句话汇报。 */
 type Reporter = (event: DelegationEvent) => void;
 
-export function dispatchRemoteDelegation(
+export async function dispatchRemoteDelegation(
 	client: RelayClient,
 	input: RemoteDispatchInput,
 	report: Reporter = (event) => emitDelegation(input.originInternalId, event),
-): RemoteDispatchResult {
+): Promise<RemoteDispatchResult> {
 	if (!deviceMatrixEnabled()) {
 		throw new RelayInvokeError("remote_disabled", "设备矩阵未开启（DEVICE_MATRIX_ENABLED）");
 	}
+	// 名册先拉新：welcome 快照只反映连上那一刻，中间上线的设备不刷就"不存在"
+	await client.refreshDevices();
 	const target = client.devices.find((device) => device.id === input.targetDeviceId);
 	if (!target) {
 		throw new RelayInvokeError("unknown_device", "目标设备不在中结名册里");

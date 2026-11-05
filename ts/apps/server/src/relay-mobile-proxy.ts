@@ -1,0 +1,134 @@
+import type { Hono } from "hono";
+import type { RelayClient } from "./relay-client.ts";
+import {
+	listRemoteDelegations,
+	dispatchRemoteDelegation,
+} from "./relay-matrix.ts";
+import { RelayInvokeError } from "./relay-client.ts";
+import {
+	companionHomeController,
+	type CompanionHomeController,
+} from "./relay-home.ts";
+import { companionHomeEnabled, deviceMatrixEnabled } from "./relay-config.ts";
+import { externalChatIds, sayInConversation } from "./agent.ts";
+import type { ChatIndexEntry } from "./agent.ts";
+
+/**
+ * 中继的手机代理面（2026-11-05 手机端对接，方案 §四阶段一/二客户端）。
+ *
+ * 取舍：v1 手机**不直接连中继 WS**——Kotlin 侧信封/重连/顶替是一整套新链路，
+ * 而手机与自家 harness 之间已有走稳的 HTTP+Bearer 通道。所以跨设备信息
+ * （名册 / 中继状态 / 远端单 / 伙伴归属）由 harness 经本文件代理成普通
+ * REST（复用 `/api/v1` 鉴权与 403 口径），手机零新协议。WS 直连中继是
+ * 手机端后续演进项，不是缺口。
+ *
+ * 派活入口也在这里：`/relay/matrix/agent-delegate` 用手机发来的
+ * `conversationId` 当发起会话（电脑替手机派活，进度事件/终态汇报自然
+ * 回到该会话，手机回读 transcript 就能看到）。
+ */
+
+export interface RelayMobileProxyDeps {
+	relayClient: () => RelayClient | null;
+	home: () => CompanionHomeController | null;
+	listChats: (limit?: number) => Promise<ChatIndexEntry[]>;
+}
+
+export function mountRelayMobileProxy(app: Hono, deps: RelayMobileProxyDeps): void {
+	// 中继连接状态（与 /relay/status 同源，但加设备名册明细）
+	app.get("/api/v1/relay/overview", async (c) => {
+		const client = deps.relayClient();
+		if (!client) return c.json({ enabled: false, connected: false, devices: [] });
+		// 设置页每次打开都看到当下：实时拉名册（welcome 快照会过期）；
+		// refreshDevices 是客户端实例方法，替身/老实现没有时静默跳过用旧快照
+		if (typeof client.refreshDevices === "function") {
+			await client.refreshDevices().catch(() => {});
+		}
+		return c.json({
+			enabled: true,
+			connected: client.connected,
+			selfDeviceId: client.selfDeviceId,
+			devices: client.devices,
+			matrixEnabled: deviceMatrixEnabled(),
+			homeEnabled: companionHomeEnabled(),
+		});
+	});
+
+	// 远端单列表（发起端视角；手机任务中心/设置页用）
+	app.get("/api/v1/relay/matrix/remote", (c) => {
+		if (!deviceMatrixEnabled()) return c.json({ error: "not_available" }, 404);
+		const rows = listRemoteDelegations();
+		return c.json({
+			delegations: rows.map((row) => ({
+				requestId: row.requestId,
+				deviceName: row.targetDeviceName,
+				ticketId: row.targetTicketId,
+				phase: row.phase,
+				report: row.report ?? null,
+				updatedAt: row.updatedAt,
+			})),
+		});
+	});
+
+	// 手机跨机派活：手机给出自己会话的 uuid，电脑替它点名远端设备；
+	// 进度事件与终态汇报写进该会话（手机回读 transcript 即见）。
+	app.post("/api/v1/relay/matrix/agent-delegate", async (c) => {
+		const client = deps.relayClient();
+		if (!client || !deviceMatrixEnabled()) return c.json({ error: "not_available" }, 404);
+		const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+		const targetDeviceId = typeof body?.targetDeviceId === "string" ? body.targetDeviceId : "";
+		const requirement = typeof body?.requirement === "string" ? body.requirement.trim() : "";
+		const conversationId = typeof body?.conversationId === "string" ? body.conversationId : "";
+		const project = typeof body?.project === "string" ? body.project : undefined;
+		const domain = typeof body?.domain === "string" ? body.domain : undefined;
+		if (!targetDeviceId || !requirement || !conversationId) {
+			return c.json({ error: "bad_request", message: "需要 targetDeviceId / requirement / conversationId" }, 400);
+		}
+		let originInternalId: number | null = null;
+		for (const [internal, external] of await externalChatIds()) {
+			if (external === conversationId) originInternalId = internal;
+		}
+		if (originInternalId === null) return c.json({ error: "unknown_conversation" }, 404);
+		try {
+			const result = await dispatchRemoteDelegation(client, {
+				targetDeviceId,
+				requirement,
+				project,
+				domain,
+				originInternalId,
+			});
+			return c.json({ ok: true, requestId: result.requestId, deviceName: result.deviceName }, 202);
+		} catch (error) {
+			const code = error instanceof RelayInvokeError ? error.code : "internal";
+			const message = error instanceof Error ? error.message : "派发失败";
+			return c.json({ error: code, message }, 502);
+		}
+	});
+
+	// 会话列表透传（手机现有 GET /agent/chats 的同形状；不经此端点也能用）
+	app.get("/api/v1/relay/mirror/chats", async (c) => {
+		const client = deps.relayClient();
+		if (!client) return c.json({ enabled: false, chats: [] });
+		const target = c.req.query("deviceId");
+		const limitRaw = Number(c.req.query("limit") ?? 50);
+		const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.floor(limitRaw), 1), 200) : 50;
+		if (!target || !client.connected) return c.json({ enabled: client.connected, chats: [] });
+		try {
+			const result = (await client.invoke(target, "sessions/list", { limit }, 15_000)) as {
+				chats?: ChatIndexEntry[];
+			};
+			return c.json({ enabled: true, chats: result.chats ?? [] });
+		} catch (error) {
+			const code = error instanceof RelayInvokeError ? error.code : "internal";
+			return c.json({ error: code, message: error instanceof Error ? error.message : "拉取失败" }, 502);
+		}
+	});
+
+	// 伙伴归属状态（阶段三；手机设置页的"伙伴在哪台电脑"）
+	app.get("/api/v1/relay/home/overview", async (c) => {
+		const home = deps.home();
+		if (!companionHomeEnabled() || !home) return c.json({ error: "not_available" }, 404);
+		return c.json(await home.status());
+	});
+
+	void sayInConversation; // 保留导入面（sayInConversation 由 matrix 代理内部链路使用）
+}

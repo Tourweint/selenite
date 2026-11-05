@@ -348,7 +348,7 @@ export function createTools(deps: ToolDeps) {
 					return text("远端单的续跑（resume）暂不支持：请直接重派一张新单到该设备。");
 				}
 				try {
-					const result = dispatchRemoteDelegation(client, {
+					const result = await dispatchRemoteDelegation(client, {
 						targetDeviceId: targetDevice,
 						requirement: args.requirement,
 						project: args.project?.trim() || undefined,
