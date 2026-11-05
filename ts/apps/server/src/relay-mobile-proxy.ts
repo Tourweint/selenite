@@ -138,5 +138,52 @@ export function mountRelayMobileProxy(app: Hono, deps: RelayMobileProxyDeps): vo
 		return c.json(await home.status());
 	});
 
+	// ── 任务主机位 / 设备描述（2026-11-05 主机优先制）──────────────
+	// 手机设置页由此设主机与描述：本机只是透传，真正落盘在中继名册
+	// （中继没连上就没法改，502 而不是悄悄存本地——否则两端会各说各话）。
+
+	app.post("/api/v1/relay/home-device", async (c) => {
+		const client = deps.relayClient();
+		if (!client || !client.connected) {
+			return c.json({ error: "relay_unavailable", message: "中继未连接，暂时改不了设备设置" }, 502);
+		}
+		const body = (await c.req.json().catch(() => null)) as { deviceId?: unknown } | null;
+		const deviceId = body?.deviceId;
+		// null = 清除主机位；字符串 = 设成这台
+		if (deviceId !== null && typeof deviceId !== "string") {
+			return c.json({ error: "bad_request", message: "deviceId 需要字符串或 null" }, 400);
+		}
+		try {
+			const result = await client.meta("set-home", { deviceId });
+			return c.json(result);
+		} catch (error) {
+			const code = error instanceof RelayInvokeError ? error.code : "internal";
+			const message = error instanceof Error ? error.message : "设置主机失败";
+			return c.json({ error: code, message }, 502);
+		}
+	});
+
+	app.post("/api/v1/relay/devices/:id/description", async (c) => {
+		const client = deps.relayClient();
+		if (!client || !client.connected) {
+			return c.json({ error: "relay_unavailable", message: "中继未连接，暂时改不了设备设置" }, 502);
+		}
+		const body = (await c.req.json().catch(() => null)) as { description?: unknown } | null;
+		if (typeof body?.description !== "string") {
+			return c.json({ error: "bad_request", message: "需要 description 字符串" }, 400);
+		}
+		try {
+			const result = await client.meta("set-description", {
+				deviceId: c.req.param("id"),
+				description: body.description,
+			});
+			return c.json(result);
+		} catch (error) {
+			const code = error instanceof RelayInvokeError ? error.code : "internal";
+			const message = error instanceof Error ? error.message : "设置描述失败";
+			return c.json({ error: code, message }, 502);
+		}
+	});
+
 	void sayInConversation; // 保留导入面（sayInConversation 由 matrix 代理内部链路使用）
 }

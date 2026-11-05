@@ -6,6 +6,7 @@ import {
 	type RelayErrorFrame,
 	type RelayErrorCode,
 	type RelayHello,
+	type RelayMetaAction,
 	type RelayResult,
 	type RelayRouted,
 	type RelayWelcome,
@@ -150,12 +151,8 @@ export class RelayClient {
 		});
 	}
 
-	/** 中继元数据操作（伙伴路由表仲裁等）：meta 帧，中继自答。 */
-	meta(
-		action: "actors" | "actor-home" | "actor-claim" | "actor-release" | "devices",
-		payload: unknown,
-		timeoutMs = 10_000,
-	): Promise<unknown> {
+	/** 中继元数据操作（伙伴路由表仲裁、名册快照、主机位/描述等）：meta 帧，中继自答。 */
+	meta(action: RelayMetaAction, payload: unknown, timeoutMs = 10_000): Promise<unknown> {
 		if (!this.connected) {
 			return Promise.reject(new RelayInvokeError("device_offline", "中继未连接"));
 		}

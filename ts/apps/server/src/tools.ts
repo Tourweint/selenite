@@ -350,8 +350,9 @@ export function createTools(deps: ToolDeps) {
 				Type.String({
 					description:
 						"把活派给**另一台电脑**的 harness 执行（设备矩阵）。填中结名册里的设备 id。" +
-						"`\"auto\"` = 电脑自己挑一台（DEVICE_AUTO_DISPATCH 开启时）：按在线、能力位与忙碌度选，" +
-						"挑不出就在本机执行并说明原因；不填仍是本机执行。" +
+						"`\"auto\"` = 电脑自己挑一台（DEVICE_AUTO_DISPATCH 开启时）：**优先主机**（用户在设置里指定的那台），" +
+						"主机满载或离线才按忙碌度外流到别的机器；挑不出就在本机执行并说明原因；不填仍是本机执行。" +
+						"设备描述（如「存储机」）与主机位可在 /relay/overview 看到，供点名参考，不参与自动挑选。" +
 						"填了就跑远程分支：本机的项目登记表不参与，`project` 由目标机判；" +
 						"目标离线会直接失败（不排队）。",
 				}),
@@ -410,8 +411,14 @@ export function createTools(deps: ToolDeps) {
 						// 挑不出不是失败：本机照常走下面的本地派活路径，只把原因带到回话里。
 						fallbackNotice = `自动挑机未成（${result.reason}），已在本机执行。\n`;
 					} else {
+						// 主机位与设备描述是"点名参考"：给模型/用户看活去了哪台、那台是干什么的
+						// （描述只给人看，决策器不读——2026-11-05 主机优先制）。
+						const tags = [
+							result.pickedHome ? "主机" : "",
+							result.deviceDescription ?? "",
+						].filter(Boolean);
 						return text(
-							`已交由设备「${result.deviceName}」执行（远端请求 ${result.requestId.slice(0, 8)}）。` +
+							`已交由设备「${result.deviceName}」${tags.length > 0 ? `（${tags.join("，")}）` : ""}执行（远端请求 ${result.requestId.slice(0, 8)}）。` +
 								"它在后台跑，完成后我会把汇报写进本会话。不要重复派、不要轮询。",
 						);
 					}

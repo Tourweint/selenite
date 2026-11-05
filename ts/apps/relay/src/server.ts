@@ -5,7 +5,7 @@ import { getRequestListener } from "@hono/node-server";
 import { RELAY_PROTOCOL_VERSION } from "@lifediary/shared";
 import { WebSocketServer, type WebSocket } from "ws";
 import { RelayHub } from "./hub.ts";
-import { MAX_DEVICES, RelayStore, type RedeemError } from "./store.ts";
+import { MAX_DEVICES, MAX_DESCRIPTION_LENGTH, RelayStore, type RedeemError } from "./store.ts";
 
 /**
  * 中继服务装配（2026-11-05 多端同步方案块0）：HTTP(S) 同端口承载
@@ -144,6 +144,45 @@ export function createRelayApp(store: RelayStore, hub: RelayHub): Hono {
 		const ok = store.revokeDevice(id);
 		hub.disconnectDevice(id);
 		return c.json({ ok });
+	});
+
+	// ── 任务主机位 / 设备描述（2026-11-05 主机优先制）──────────────
+	// 鉴权口径与名册一致：owner 或任一已配对设备令牌（管理面 / 手机设置页都能设）。
+	// 非法 id 是业务拒绝（400 带说明），不混进 403（403 只给鉴权失败）。
+	const allowOwnerOrDevice = (c: Parameters<typeof isOwner>[0]): boolean => {
+		if (isOwner(c)) return true;
+		return deviceIdOf(c.req.header("authorization")) !== null;
+	};
+
+	app.post("/api/relay/home-device", async (c) => {
+		if (!allowOwnerOrDevice(c)) return c.body(null, 403);
+		const body = (await c.req.json().catch(() => null)) as { deviceId?: unknown } | null;
+		const raw = body?.deviceId;
+		// null = 清除；字符串 = 设成这台。缺字段/类型不对按坏请求拒。
+		if (raw !== null && typeof raw !== "string") {
+			return c.json({ error: "bad_request", message: "deviceId 需要字符串或 null" }, 400);
+		}
+		if (!store.setHomeDevice(raw)) {
+			return c.json({ error: "unknown_device", message: "deviceId 不在名册里" }, 400);
+		}
+		return c.json({ ok: true, homeDeviceId: store.homeDeviceId() });
+	});
+
+	app.post("/api/relay/devices/:id/description", async (c) => {
+		if (!allowOwnerOrDevice(c)) return c.body(null, 403);
+		const body = (await c.req.json().catch(() => null)) as { description?: unknown } | null;
+		if (typeof body?.description !== "string") {
+			return c.json({ error: "bad_request", message: "需要 description 字符串" }, 400);
+		}
+		const text = body.description.trim();
+		if (text.length > MAX_DESCRIPTION_LENGTH) {
+			return c.json({ error: "bad_request", message: `描述最多 ${MAX_DESCRIPTION_LENGTH} 字` }, 400);
+		}
+		const id = c.req.param("id");
+		if (!store.setDescription(id, text)) {
+			return c.json({ error: "unknown_device", message: "deviceId 不在名册里" }, 400);
+		}
+		return c.json({ ok: true, deviceId: id, description: text });
 	});
 
 	return app;

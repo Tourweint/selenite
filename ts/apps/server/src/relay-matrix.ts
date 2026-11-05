@@ -66,6 +66,11 @@ interface RemoteRow {
 	pickedBy?: "explicit" | "auto";
 	/** 自动挑机的决策依据（如 busy=1）；点名派活为空。 */
 	pickReason?: string;
+	/**
+	 * 自动挑机是否挑中了主机位（2026-11-05 主机优先制）：主机满载/离线外流时为 false。
+	 * 只对 `pickedBy=auto` 的行有意义；旧台账行没有这个字段。
+	 */
+	pickedHome?: boolean;
 	/** 终态单保留多久后从 JSON 清掉（状态查询仍可问目标机） */
 	finishedAt?: number;
 }
@@ -135,6 +140,10 @@ export interface RemoteDispatchResult {
 	/** explicit = 点名；auto = 决策器挑的（写进台账，事后能看出活为什么去了那台） */
 	pickedBy?: "explicit" | "auto";
 	pickReason?: string;
+	/** 自动挑机挑中的是不是主机位（2026-11-05 主机优先制；点名派活不带） */
+	pickedHome?: boolean;
+	/** 目标设备描述（≤200 字，只给人看）：delegate 回话里作点名参考 */
+	deviceDescription?: string;
 }
 
 /**
@@ -164,6 +173,8 @@ export async function dispatchRemoteDelegation(
 	let targetDeviceId = input.targetDeviceId;
 	let pickedBy: "explicit" | "auto" = "explicit";
 	let pickReason: string | undefined;
+	// 只有自动挑机才有值：台账里 false 也要落（外流场景要能和"没设主机"区分开）
+	let pickedHome: boolean | undefined;
 	if (targetDeviceId === "auto") {
 		// 双保险：HTTP/工具层已经挡过一次，直接调本函数也不能绕过开关。
 		if (!deviceAutoDispatchEnabled()) {
@@ -173,6 +184,9 @@ export async function dispatchRemoteDelegation(
 		const selfDeviceId = client.selfDeviceId ?? "";
 		// 没有自身 id 就分不清"本机"，宁可不挑，也不能把活派回自己。
 		if (!selfDeviceId) return { fallbackToLocal: true, reason: "no_candidate" };
+		// 主机位从现成的名册快照取（refreshDevices 刚拉过，devices 带 isHome），
+		// 不为它单开一条通道：中继仍只当名册的持有者。
+		const homeDeviceId = client.devices.find((device) => device.isHome === true)?.id ?? null;
 		const candidates = autoCandidates(client.devices, selfDeviceId);
 		const busyMap = await queryBusyMap(client, candidates);
 		const picked = selectAutoDevice({
@@ -180,6 +194,7 @@ export async function dispatchRemoteDelegation(
 			selfDeviceId,
 			busyMap,
 			maxActivePerDevice: deviceMaxActivePerDevice(),
+			homeDeviceId,
 		});
 		if ("fallback" in picked) {
 			// 挑不出必须可见：原因原样交回调用方（工具落本机、HTTP 返回决策结果）。
@@ -187,6 +202,8 @@ export async function dispatchRemoteDelegation(
 		}
 		targetDeviceId = picked.picked;
 		pickedBy = "auto";
+		pickedHome = picked.pickedHome;
+		// 依据保持 v1 形状（busy=N），主机位另用 pickedHome 记——探针两处都断言
 		pickReason = `busy=${picked.busy}`;
 	}
 	const target = client.devices.find((device) => device.id === targetDeviceId);
@@ -229,6 +246,7 @@ export async function dispatchRemoteDelegation(
 				updatedAt: Date.now(),
 				pickedBy,
 				...(pickReason ? { pickReason } : {}),
+				...(pickedHome === undefined ? {} : { pickedHome }),
 			});
 			report({
 				type: "delegate",
@@ -257,6 +275,8 @@ export async function dispatchRemoteDelegation(
 		deviceName: target.name,
 		pickedBy,
 		...(pickReason ? { pickReason } : {}),
+		...(pickedHome === undefined ? {} : { pickedHome }),
+		...(target.description ? { deviceDescription: target.description } : {}),
 	};
 }
 

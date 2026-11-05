@@ -9,6 +9,9 @@
  *   → 终态（有无 key 皆可：无 key 时 native 雇员失败，也是终态）
  *   → 汇报写回 A 的发起会话
  *   → 离线目标 fail-fast：502 device_offline；未开矩阵：404
+ *   → auto 挑机（自动分发 v1）：挑最闲
+ *   → 主机优先制（2026-11-05）：设主机 → auto 永选主机；杀主机 → 外流；
+ *     overview 透传 isHome / description
  *
  *   pnpm --filter @lifediary/server matrix
  */
@@ -60,6 +63,9 @@ function harnessEnv(
 		MODEL_RUNTIME_PATH: join(TMP, `${tag}-runtime.json`),
 		DELEGATIONS_DB_PATH: join(TMP, `${tag}-delegations.sqlite`),
 		REMOTE_DELEGATIONS_PATH: join(TMP, `${tag}-remote.json`),
+		// 探针里单机的 busy 会随历史单累积（回执口径：accepted 不转终态），
+		// 阈值抬高免得"主机优先"场景被误判成满载；满载分支由单测覆盖。
+		DEVICE_MAX_ACTIVE_PER_DEVICE: "50",
 		CURRENT_PROJECT: "",
 		CHANCELLOR_ENABLED: "true",
 		CHANCELLOR_EMPLOYEE: process.env.CHANCELLOR_EMPLOYEE?.trim() || "native",
@@ -186,6 +192,7 @@ async function main(): Promise<void> {
 
 	const tokenA = await pairHarness("甲机");
 	const tokenB = await pairHarness("乙机");
+	const tokenC = await pairHarness("丙机");
 	// 幽灵设备：配了对但从不上线（验 fail-fast）
 	const tokenGhost = await pairHarness("幽灵机");
 	const ghostId = await (async () => {
@@ -285,10 +292,10 @@ async function main(): Promise<void> {
 		"A 用 auto 自动挑机派活（202）",
 		autoBody.deviceName,
 	);
-	let autoRow: { requestId: string; pickedBy?: string; pickReason?: string } | null = null;
+	let autoRow: { requestId: string; pickedBy?: string; pickReason?: string; pickedHome?: boolean } | null = null;
 	for (let attempt = 0; attempt < 40; attempt += 1) {
 		const rows = (await (await fetch(`${BASE_A}/api/v1/relay/matrix/status`)).json()) as {
-			delegations: Array<{ requestId: string; pickedBy?: string; pickReason?: string }>;
+			delegations: Array<{ requestId: string; pickedBy?: string; pickReason?: string; pickedHome?: boolean }>;
 		};
 		autoRow = rows.delegations.find((r) => r.requestId === autoBody.requestId) ?? null;
 		if (autoRow) break;
@@ -299,8 +306,76 @@ async function main(): Promise<void> {
 		"自动挑机的台账记录 pickedBy=auto 与 busy 依据",
 		`${autoRow?.pickedBy}/${autoRow?.pickReason}`,
 	);
+	// 回归红线：没设主机时决策结果与 v1 一致（pickedHome 落 false）
+	check(autoRow?.pickedHome === false, "未设主机 → 台账 pickedHome=false（v1 回归）", String(autoRow?.pickedHome));
 
-	// 场景二：杀掉乙机、只剩本机 → auto 不报错，返回 fallback 决策结果。
+	// ── 主机优先制（2026-11-05）────────────────────────────────
+	// 设乙机为主机 + 写描述（中继 loopback 免 owner），再从 A 侧看 overview 透传。
+	const homeRes = await fetch(`${RELAY_BASE}/api/relay/home-device`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ deviceId: idB }),
+	});
+	const homeBody = (await homeRes.json()) as { ok?: boolean; homeDeviceId?: string | null };
+	check(
+		homeRes.status === 200 && homeBody.homeDeviceId === idB,
+		"中继设乙机为主机（POST /api/relay/home-device）",
+		String(homeBody.homeDeviceId?.slice(0, 8)),
+	);
+	const descRes = await fetch(`${RELAY_BASE}/api/relay/devices/${idB}/description`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ description: "存储机" }),
+	});
+	check(descRes.status === 200, "中继写乙机描述（POST …/description）");
+
+	const overviewHome = (await (await fetch(`${BASE_A}/api/v1/relay/overview`)).json()) as {
+		devices: Array<{ id: string; name: string; isHome?: boolean; description?: string }>;
+	};
+	const homeView = overviewHome.devices.find((d) => d.id === idB);
+	check(
+		homeView?.isHome === true && homeView?.description === "存储机",
+		"overview 透传 isHome 与 description",
+		`isHome=${String(homeView?.isHome)}/desc=${String(homeView?.description)}`,
+	);
+
+	// 场景一：有主机 → auto 永远选主机（不管别的机器多闲，这里乙机反而更忙）。
+	const homePickRes = await fetch(`${BASE_A}/api/v1/relay/matrix/delegate`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({
+			targetDeviceId: "auto",
+			requirement: "主机优先场景：在 3.txt 里写一行「主机优先到此一游」，写完就算完成。",
+			conversationId,
+		}),
+	});
+	const homePickBody = (await homePickRes.json()) as {
+		ok?: boolean;
+		requestId?: string;
+		deviceName?: string;
+		fallbackToLocal?: boolean;
+	};
+	check(
+		homePickRes.status === 202 && homePickBody.ok === true && homePickBody.deviceName === "乙机",
+		"设了主机 → auto 永选主机（202）",
+		homePickBody.deviceName,
+	);
+	let homeRow: { requestId: string; pickedBy?: string; pickedHome?: boolean } | null = null;
+	for (let attempt = 0; attempt < 40; attempt += 1) {
+		const rows = (await (await fetch(`${BASE_A}/api/v1/relay/matrix/status`)).json()) as {
+			delegations: Array<{ requestId: string; pickedBy?: string; pickedHome?: boolean }>;
+		};
+		homeRow = rows.delegations.find((r) => r.requestId === homePickBody.requestId) ?? null;
+		if (homeRow) break;
+		await sleep(250);
+	}
+	check(
+		homeRow?.pickedBy === "auto" && homeRow?.pickedHome === true,
+		"主机优先的台账记录 pickedHome=true",
+		`${homeRow?.pickedBy}/${String(homeRow?.pickedHome)}`,
+	);
+
+	// 场景二：杀掉主机（乙机）→ auto 外流到另一台（起丙机当这台"另一台"）。
 	b.kill();
 	let bOffline = false;
 	for (let attempt = 0; attempt < 60; attempt += 1) {
@@ -315,6 +390,78 @@ async function main(): Promise<void> {
 		await sleep(250);
 	}
 	check(bOffline, "乙机下线后名册确认其不再在线");
+
+	const c = startHarness(PORT_C, tokenC, "c", { DEVICE_AUTO_DISPATCH: "" });
+	await waitReady(BASE_C);
+	const idC = await waitConnected(BASE_C);
+	const spillRes = await fetch(`${BASE_A}/api/v1/relay/matrix/delegate`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({
+			targetDeviceId: "auto",
+			requirement: "主机离线外流场景：在 4.txt 里写一行「外流到此一游」，写完就算完成。",
+			conversationId,
+		}),
+	});
+	const spillBody = (await spillRes.json()) as {
+		ok?: boolean;
+		requestId?: string;
+		deviceName?: string;
+		fallbackToLocal?: boolean;
+	};
+	check(
+		spillRes.status === 202 && spillBody.ok === true && spillBody.deviceName === "丙机",
+		"主机离线 → auto 外流到丙机（202）",
+		spillBody.deviceName,
+	);
+	let spillRow: { requestId: string; pickedBy?: string; pickedHome?: boolean } | null = null;
+	for (let attempt = 0; attempt < 40; attempt += 1) {
+		const rows = (await (await fetch(`${BASE_A}/api/v1/relay/matrix/status`)).json()) as {
+			delegations: Array<{ requestId: string; pickedBy?: string; pickedHome?: boolean }>;
+		};
+		spillRow = rows.delegations.find((r) => r.requestId === spillBody.requestId) ?? null;
+		if (spillRow) break;
+		await sleep(250);
+	}
+	check(
+		spillRow?.pickedBy === "auto" && spillRow?.pickedHome === false,
+		"外流的台账记录 pickedHome=false",
+		`${spillRow?.pickedBy}/${String(spillRow?.pickedHome)}`,
+	);
+
+	// 场景三：丙机（这台没开 DEVICE_AUTO_DISPATCH）→ 它自己的 "auto" 按非法参数拒绝。
+	const conversationC = await chatOnce(BASE_C, "自动分发开关关闭场景");
+	const disabledRes = await fetch(`${BASE_C}/api/v1/relay/matrix/delegate`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({
+			targetDeviceId: "auto",
+			requirement: "开关关着时不该被受理。",
+			conversationId: conversationC,
+		}),
+	});
+	const disabledBody = (await disabledRes.json()) as { error?: string };
+	check(
+		disabledRes.status === 400 && disabledBody.error === "auto_disabled",
+		"DEVICE_AUTO_DISPATCH 未设 → auto_disabled（400）",
+		disabledBody.error,
+	);
+
+	// 场景四：把丙机也杀掉 → 无可用远端，auto 回退本机（no_candidate）。
+	c.kill();
+	let cOffline = false;
+	for (let attempt = 0; attempt < 60; attempt += 1) {
+		const overview = (await (await fetch(`${BASE_A}/api/v1/relay/overview`)).json()) as {
+			devices: Array<{ id: string; online: boolean }>;
+		};
+		const view = overview.devices.find((d) => d.id === idC);
+		if (!view || view.online === false) {
+			cOffline = true;
+			break;
+		}
+		await sleep(250);
+	}
+	check(cOffline, "丙机下线后名册确认其不再在线");
 	const fallbackRes = await fetch(`${BASE_A}/api/v1/relay/matrix/delegate`, {
 		method: "POST",
 		headers: { "content-type": "application/json" },
@@ -331,28 +478,6 @@ async function main(): Promise<void> {
 			fallbackBody.reason === "no_candidate",
 		"无可用远端 → fallback 本机（202，reason=no_candidate）",
 		fallbackBody.reason,
-	);
-
-	// 场景三：新起一台未开 DEVICE_AUTO_DISPATCH 的丙机 → "auto" 按非法参数拒绝。
-	const tokenC = await pairHarness("丙机");
-	startHarness(PORT_C, tokenC, "c", { DEVICE_AUTO_DISPATCH: "" });
-	await waitReady(BASE_C);
-	await waitConnected(BASE_C);
-	const conversationC = await chatOnce(BASE_C, "自动分发开关关闭场景");
-	const disabledRes = await fetch(`${BASE_C}/api/v1/relay/matrix/delegate`, {
-		method: "POST",
-		headers: { "content-type": "application/json" },
-		body: JSON.stringify({
-			targetDeviceId: "auto",
-			requirement: "开关关着时不该被受理。",
-			conversationId: conversationC,
-		}),
-	});
-	const disabledBody = (await disabledRes.json()) as { error?: string };
-	check(
-		disabledRes.status === 400 && disabledBody.error === "auto_disabled",
-		"DEVICE_AUTO_DISPATCH 未设 → auto_disabled（400）",
-		disabledBody.error,
 	);
 
 	console.log(failures === 0 ? "\n✓ 设备矩阵全通过" : `\n✗ ${failures} 项未过`);

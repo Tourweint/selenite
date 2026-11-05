@@ -8,7 +8,7 @@ import {
 	type RelayResult,
 } from "@lifediary/shared";
 import type { WebSocket } from "ws";
-import type { RelayStore } from "./store.ts";
+import { MAX_DESCRIPTION_LENGTH, type RelayStore } from "./store.ts";
 
 /**
  * 中继枢纽（2026-11-05 多端同步方案块0）。
@@ -239,9 +239,49 @@ export class RelayHub {
 					return;
 				case "devices":
 					// 名册实时快照（连接期间的 welcome 只反映连上那一刻；
-					// 中间上线的设备靠这里拉新——v1 无 presence 广播的补位）
+					// 中间上线的设备靠这里拉新——v1 无 presence 广播的补位）。
+					// isHome / description 由 store.listDevices 投影带出（2026-11-05）。
 					reply(true, { devices: this.store.listDevices(Date.now(), this.onlineIds) });
 					return;
+				case "set-home": {
+					// 设 / 清任务主机位（2026-11-05 主机优先制）：payload {deviceId: string | null}
+					const raw = (meta.payload as { deviceId?: unknown } | null)?.deviceId;
+					if (raw !== null && raw !== undefined && typeof raw !== "string") {
+						reply(false, undefined, "deviceId 需要字符串或 null");
+						return;
+					}
+					// 传了 null（或省略）就是清除；不能把 undefined 当"设成空串"
+					const target = typeof raw === "string" ? raw : null;
+					if (!this.store.setHomeDevice(target)) {
+						reply(false, undefined, "deviceId 不在名册里");
+						return;
+					}
+					reply(true, { ok: true, homeDeviceId: this.store.homeDeviceId() });
+					return;
+				}
+				case "set-description": {
+					// 设备描述（只给人看）：payload {deviceId, description}
+					const body = meta.payload as { deviceId?: unknown; description?: unknown } | null;
+					if (typeof body?.deviceId !== "string" || !body.deviceId) {
+						reply(false, undefined, "需要 deviceId");
+						return;
+					}
+					if (typeof body.description !== "string") {
+						reply(false, undefined, "需要 description 字符串");
+						return;
+					}
+					const text = body.description.trim();
+					if (text.length > MAX_DESCRIPTION_LENGTH) {
+						reply(false, undefined, `描述最多 ${MAX_DESCRIPTION_LENGTH} 字`);
+						return;
+					}
+					if (!this.store.setDescription(body.deviceId, text)) {
+						reply(false, undefined, "deviceId 不在名册里");
+						return;
+					}
+					reply(true, { ok: true, deviceId: body.deviceId, description: text });
+					return;
+				}
 				case "actor-home": {
 					const actorId = (meta.payload as { actorId?: unknown } | null)?.actorId;
 					if (typeof actorId !== "string" || !actorId) {

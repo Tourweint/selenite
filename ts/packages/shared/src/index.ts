@@ -290,6 +290,17 @@ export const RelayDeviceViewSchema = z.object({
 	online: z.boolean(),
 	lastSeenAt: z.number().optional(),
 	capabilities: z.array(z.string()).default([]),
+	/**
+	 * 主机位（2026-11-05 主机优先制）：中继名册里同一时刻只有一台 `isHome=true`。
+	 * 只读投影；设/清走 `POST /api/relay/home-device`（owner 或设备令牌）。
+	 */
+	isHome: z.boolean().optional(),
+	/**
+	 * 设备描述（≤200 字，如"存储机"/"计算用"）。
+	 * **只给人看**：名册/overview/delegate 回话里供人点名参考，
+	 * 自动挑机决策器（`relay-auto.ts`）**不读这个字段**（产品口径：描述不参与挑选）。
+	 */
+	description: z.string().max(200).optional(),
 });
 export type RelayDeviceView = z.infer<typeof RelayDeviceViewSchema>;
 
@@ -393,7 +404,22 @@ export type RemoteDelegationStatus = z.infer<typeof RemoteDelegationStatusSchema
 // （方案 §四阶段三、§六备选）。信封新增 meta 帧：中继自答不转发。
 // CAS 口径照抄 cindy：expected 不符时**带回实际值**，调用方重读再决定。
 
-export const RelayMetaActionSchema = z.enum(["actors", "actor-home", "actor-claim", "actor-release", "devices"]);
+/**
+ * meta 动作（2026-11-05 主机优先制加 `set-home` / `set-description`）：
+ * - `devices` 快照带 `isHome` / `description`；
+ * - `set-home` payload `{deviceId: string | null}`（null = 清除）；
+ * - `set-description` payload `{deviceId, description}`（≤200 字，空串 = 清除）。
+ * 两者都是路由元数据，中继自答、不转发——与设备名册同层。
+ */
+export const RelayMetaActionSchema = z.enum([
+	"actors",
+	"actor-home",
+	"actor-claim",
+	"actor-release",
+	"devices",
+	"set-home",
+	"set-description",
+]);
 export type RelayMetaAction = z.infer<typeof RelayMetaActionSchema>;
 
 export const RelayMetaRequestSchema = z.object({

@@ -20,6 +20,9 @@ export const MAX_DEVICES = Number(process.env.RELAY_MAX_DEVICES ?? 32);
 export const STORE_PATH =
 	process.env.RELAY_STORE_PATH?.trim() || ".data/relay-state.json";
 
+/** 设备描述上限（2026-11-05 主机优先制方案 §1.3）。 */
+export const MAX_DESCRIPTION_LENGTH = 200;
+
 export interface StoredDevice {
 	id: string;
 	name: string;
@@ -30,6 +33,11 @@ export interface StoredDevice {
 	capabilities: string[];
 	lastSeenAt?: number;
 	revokedAt?: number;
+	/**
+	 * 设备描述（≤200 字，如"存储机"）。**只给人看**，
+	 * 自动挑机决策器不读它（2026-11-05 主机优先制方案 §1.3）。
+	 */
+	description?: string;
 }
 
 export interface StoredCode {
@@ -51,6 +59,12 @@ export interface Store {
 	devices: StoredDevice[];
 	/** 伙伴 → 主机路由表（阶段三）：路由元数据，中继仲裁的唯一状态 */
 	actors?: StoredActor[];
+	/**
+	 * 任务主机位（2026-11-05 主机优先制）：**全矩阵唯一**，同刻只有一台。
+	 * 与上面的伙伴归属 `actors[].homeDeviceId` 是**两个概念**（任务主机位 vs 伙伴归属），
+	 * 刻意不合并；未设 = null / 缺省。
+	 */
+	homeDeviceId?: string | null;
 }
 
 export type RedeemError =
@@ -93,6 +107,8 @@ export class RelayStore {
 			return {
 				code: parsed.code,
 				devices: Array.isArray(parsed.devices) ? parsed.devices : [],
+				// 主机位必须随盘走：重启后名册还在、主机位却丢了，等于用户静默被改配置
+				homeDeviceId: typeof parsed.homeDeviceId === "string" ? parsed.homeDeviceId : null,
 			};
 		} catch (error) {
 			console.warn(
@@ -191,8 +207,9 @@ export class RelayStore {
 		this.save();
 	}
 
-	/** 全量名册投影（不含 tokenHash）。 */
+	/** 全量名册投影（不含 tokenHash）。isHome / description 随投影带出（2026-11-05）。 */
 	listDevices(now = Date.now(), onlineIds: ReadonlySet<string> = new Set()): RelayDeviceView[] {
+		const homeId = this.homeDeviceId();
 		return this.data.devices
 			.filter((item) => !item.revokedAt)
 			.map((item) => ({
@@ -202,6 +219,8 @@ export class RelayStore {
 				online: onlineIds.has(item.id),
 				...(item.lastSeenAt ? { lastSeenAt: item.lastSeenAt } : {}),
 				capabilities: item.capabilities,
+				isHome: item.id === homeId,
+				...(item.description ? { description: item.description } : {}),
 			}));
 	}
 
@@ -209,6 +228,49 @@ export class RelayStore {
 		const device = this.data.devices.find((item) => item.id === id && !item.revokedAt);
 		if (!device) return false;
 		device.revokedAt = now;
+		this.save();
+		return true;
+	}
+
+	// ── 任务主机位 / 设备描述（2026-11-05 主机优先制）──────────────
+
+	/**
+	 * 设 / 清任务主机位（唯一主机位）。
+	 * `null` = 清除；其余必须落在有效名册里（未知或已撤销返回 false，现状不变）。
+	 * 不做自动抢占：主机位只能由用户显式指定（方案 §三）。
+	 */
+	setHomeDevice(deviceId: string | null): boolean {
+		if (deviceId === null) {
+			this.data.homeDeviceId = null;
+			this.save();
+			return true;
+		}
+		const device = this.data.devices.find((item) => item.id === deviceId && !item.revokedAt);
+		if (!device) return false;
+		this.data.homeDeviceId = deviceId;
+		this.save();
+		return true;
+	}
+
+	/** 当前任务主机 id；存的是已撤销 / 已不在名册的旧值时按"没设"处理。 */
+	homeDeviceId(): string | null {
+		const id = this.data.homeDeviceId ?? null;
+		if (!id) return null;
+		const alive = this.data.devices.some((item) => item.id === id && !item.revokedAt);
+		return alive ? id : null;
+	}
+
+	/**
+	 * 写设备描述。超长按 200 字截断（描述只给人看，不是契约校验面；
+	 * 调用方 REST/meta 会先拒超长，这里兜底保证落盘形状稳定）。
+	 * 空串 = 清除描述。设备不在有效名册返回 false。
+	 */
+	setDescription(deviceId: string, text: string): boolean {
+		const device = this.data.devices.find((item) => item.id === deviceId && !item.revokedAt);
+		if (!device) return false;
+		const trimmed = text.trim().slice(0, MAX_DESCRIPTION_LENGTH);
+		if (trimmed) device.description = trimmed;
+		else delete device.description;
 		this.save();
 		return true;
 	}

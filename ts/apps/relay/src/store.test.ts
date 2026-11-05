@@ -80,3 +80,87 @@ describe("RelayStore 配对与名册", () => {
 		assert.equal("tokenHash" in view, false);
 	});
 });
+
+describe("RelayStore 任务主机位与描述（2026-11-05 主机优先制）", () => {
+	/** 配一台设备并返回 id。 */
+	function pair(store: RelayStore, name: string): string {
+		const { code } = store.issueCode();
+		const outcome = store.redeem(code, name, "linux", ["matrix"]);
+		assert.ok(typeof outcome === "object");
+		return outcome.deviceId;
+	}
+
+	it("setHomeDevice：设 / 清 / 非法 id 不动现状", () => {
+		const store = freshStore();
+		const a = pair(store, "甲机");
+		const b = pair(store, "乙机");
+
+		assert.equal(store.homeDeviceId(), null);
+		assert.equal(store.setHomeDevice(b), true);
+		// 唯一主机位：再设一台就顶替，不是并列
+		assert.equal(store.setHomeDevice(a), true);
+		assert.equal(store.homeDeviceId(), a);
+
+		// 非法 id 返回 false 且不把现状改坏
+		assert.equal(store.setHomeDevice("no-such-device"), false);
+		assert.equal(store.homeDeviceId(), a);
+
+		// null = 清除
+		assert.equal(store.setHomeDevice(null), true);
+		assert.equal(store.homeDeviceId(), null);
+	});
+
+	it("名册投影带 isHome（同刻只有一台）与 description", () => {
+		const store = freshStore();
+		const a = pair(store, "甲机");
+		const b = pair(store, "乙机");
+		store.setHomeDevice(a);
+		assert.equal(store.setDescription(b, "存储机"), true);
+
+		const views = store.listDevices();
+		const viewA = views.find((view) => view.id === a)!;
+		const viewB = views.find((view) => view.id === b)!;
+		assert.equal(viewA.isHome, true);
+		assert.equal(viewA.description, undefined);
+		assert.equal(viewB.isHome, false);
+		assert.equal(viewB.description, "存储机");
+	});
+
+	it("setDescription：≤200 字截断、空串清除、未知设备 false", () => {
+		const store = freshStore();
+		const id = pair(store, "机");
+		const long = "存".repeat(250);
+
+		assert.equal(store.setDescription(id, long), true);
+		assert.equal(store.listDevices()[0]?.description?.length, 200);
+
+		// 空串（含纯空白）= 清除
+		assert.equal(store.setDescription(id, "   "), true);
+		assert.equal(store.listDevices()[0]?.description, undefined);
+
+		assert.equal(store.setDescription("no-such-device", "x"), false);
+	});
+
+	it("主机位与描述落盘：重启后仍在（load 不丢字段）", () => {
+		const path = join(mkdtempSync(join(tmpdir(), "relay-store-")), `${randomUUID()}.json`);
+		const first = new RelayStore(path);
+		const id = pair(first, "持久机");
+		first.setHomeDevice(id);
+		first.setDescription(id, "计算用");
+
+		const second = new RelayStore(path);
+		assert.equal(second.homeDeviceId(), id);
+		assert.equal(second.listDevices()[0]?.description, "计算用");
+		assert.equal(second.listDevices()[0]?.isHome, true);
+	});
+
+	it("主机设备被撤销后按'没设'处理（不吐幽灵 id）", () => {
+		const store = freshStore();
+		const id = pair(store, "待撤主机");
+		store.setHomeDevice(id);
+		store.revokeDevice(id);
+		assert.equal(store.homeDeviceId(), null);
+		// 撤销设备本身也不在名册投影里了
+		assert.equal(store.listDevices().length, 0);
+	});
+});

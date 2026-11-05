@@ -11,10 +11,13 @@ import {
 } from "./relay-auto.ts";
 
 /**
- * 自动挑机决策器（2026-11-05 自动分发方案 §2.5）。
+ * 自动挑机决策器（2026-11-05 自动分发方案 §2.5；同日 v2 主机优先制）。
  *
  * 决策是纯函数，这组测试不碰网络：忙碌度直接喂表；只有 queryBusyMap
  * 用替身客户端验"一半成功一半超时"的容错口径。
+ *
+ * v1 用例全部保留（没设主机时的输出必须一字不变——回归红线），
+ * 另加"主机优先 / 满溢外流 / 主机离线 / 描述不参与"一组。
  */
 
 function device(
@@ -40,6 +43,7 @@ describe("selectAutoDevice：候选过滤", () => {
 			selfDeviceId: SELF,
 			busyMap: {},
 			maxActivePerDevice: 3,
+			homeDeviceId: null,
 		});
 		assert.deepEqual(result, { fallback: "local", reason: "no_candidate" });
 	});
@@ -56,6 +60,7 @@ describe("selectAutoDevice：候选过滤", () => {
 			selfDeviceId: SELF,
 			busyMap: {},
 			maxActivePerDevice: 3,
+			homeDeviceId: null,
 		});
 		assert.deepEqual(result, { fallback: "local", reason: "no_candidate" });
 	});
@@ -66,20 +71,22 @@ describe("selectAutoDevice：候选过滤", () => {
 			selfDeviceId: SELF,
 			busyMap: {},
 			maxActivePerDevice: 3,
+			homeDeviceId: null,
 		});
 		assert.equal("picked" in result && result.picked, "mac");
 	});
 });
 
-describe("selectAutoDevice：排序与满载", () => {
-	test("busy 升序：挑最闲的一台，并把 busy 带回去", () => {
+describe("selectAutoDevice：排序与满载（v1 回归，未设主机）", () => {
+	test("busy 升序：挑最闲的一台，并把 busy 带回去；没设主机时 pickedHome=false", () => {
 		const result = selectAutoDevice({
 			devices: [device("busy-2"), device("busy-0"), device("busy-1")],
 			selfDeviceId: SELF,
 			busyMap: { "busy-2": 2, "busy-0": 0, "busy-1": 1 },
 			maxActivePerDevice: 3,
+			homeDeviceId: null,
 		});
-		assert.deepEqual(result, { picked: "busy-0", busy: 0 });
+		assert.deepEqual(result, { picked: "busy-0", busy: 0, pickedHome: false });
 	});
 
 	test("busy 并列：lastSeenAt 新者优先；undefined 当 0", () => {
@@ -93,6 +100,7 @@ describe("selectAutoDevice：排序与满载", () => {
 			selfDeviceId: SELF,
 			busyMap: {},
 			maxActivePerDevice: 3,
+			homeDeviceId: null,
 		});
 		assert.equal("picked" in result && result.picked, "new");
 	});
@@ -103,6 +111,7 @@ describe("selectAutoDevice：排序与满载", () => {
 			selfDeviceId: SELF,
 			busyMap: {},
 			maxActivePerDevice: 3,
+			homeDeviceId: null,
 		};
 		const first = selectAutoDevice(input);
 		assert.equal("picked" in first && first.picked, "a-dev");
@@ -118,8 +127,9 @@ describe("selectAutoDevice：排序与满载", () => {
 			selfDeviceId: SELF,
 			busyMap: { full: 3, idle: 2 },
 			maxActivePerDevice: 3,
+			homeDeviceId: null,
 		});
-		assert.deepEqual(result, { picked: "idle", busy: 2 });
+		assert.deepEqual(result, { picked: "idle", busy: 2, pickedHome: false });
 	});
 
 	test("全部满载 → all_busy", () => {
@@ -128,6 +138,7 @@ describe("selectAutoDevice：排序与满载", () => {
 			selfDeviceId: SELF,
 			busyMap: { a: 3, b: 5 },
 			maxActivePerDevice: 3,
+			homeDeviceId: null,
 		});
 		assert.deepEqual(result, { fallback: "local", reason: "all_busy" });
 	});
@@ -138,8 +149,105 @@ describe("selectAutoDevice：排序与满载", () => {
 			selfDeviceId: SELF,
 			busyMap: { b: 1 },
 			maxActivePerDevice: 3,
+			homeDeviceId: null,
 		});
-		assert.deepEqual(result, { picked: "a", busy: 0 });
+		assert.deepEqual(result, { picked: "a", busy: 0, pickedHome: false });
+	});
+});
+
+describe("selectAutoDevice：主机优先（v2）", () => {
+	test("主机未满载 → 永远选主机，哪怕别的机器更闲、更近", () => {
+		const result = selectAutoDevice({
+			devices: [
+				device("home", { lastSeenAt: 1 }),
+				device("idle-new", { lastSeenAt: 9_999 }),
+			],
+			selfDeviceId: SELF,
+			// 主机忙 2，另一台完全空闲：产品口径仍选主机
+			busyMap: { home: 2, "idle-new": 0 },
+			maxActivePerDevice: 3,
+			homeDeviceId: "home",
+		});
+		assert.deepEqual(result, { picked: "home", busy: 2, pickedHome: true });
+	});
+
+	test("主机满载 → 外流：按 busy 升序挑其余最闲，pickedHome=false", () => {
+		const result = selectAutoDevice({
+			devices: [device("home"), device("busy-2"), device("busy-1")],
+			selfDeviceId: SELF,
+			busyMap: { home: 3, "busy-2": 2, "busy-1": 1 },
+			maxActivePerDevice: 3,
+			homeDeviceId: "home",
+		});
+		assert.deepEqual(result, { picked: "busy-1", busy: 1, pickedHome: false });
+	});
+
+	test("主机满载且其余也满载 → all_busy（不硬塞回主机）", () => {
+		const result = selectAutoDevice({
+			devices: [device("home"), device("other")],
+			selfDeviceId: SELF,
+			busyMap: { home: 3, other: 4 },
+			maxActivePerDevice: 3,
+			homeDeviceId: "home",
+		});
+		assert.deepEqual(result, { fallback: "local", reason: "all_busy" });
+	});
+
+	test("主机离线（不在候选）→ 按其余最闲挑，pickedHome=false", () => {
+		const result = selectAutoDevice({
+			devices: [device("home", { online: false }), device("b"), device("c")],
+			selfDeviceId: SELF,
+			busyMap: { home: 0, b: 2, c: 1 },
+			maxActivePerDevice: 3,
+			homeDeviceId: "home",
+		});
+		assert.deepEqual(result, { picked: "c", busy: 1, pickedHome: false });
+	});
+
+	test("主机没有 matrix 能力（不在候选）→ 同样外流", () => {
+		const result = selectAutoDevice({
+			devices: [device("home", { capabilities: ["mirror"] }), device("worker")],
+			selfDeviceId: SELF,
+			busyMap: { home: 0, worker: 1 },
+			maxActivePerDevice: 3,
+			homeDeviceId: "home",
+		});
+		assert.deepEqual(result, { picked: "worker", busy: 1, pickedHome: false });
+	});
+
+	test("主机位指向已不在名册的 id / 空串 → 与 v1 完全一致", () => {
+		const base = {
+			devices: [device("x"), device("y")],
+			selfDeviceId: SELF,
+			busyMap: { x: 2, y: 1 },
+			maxActivePerDevice: 3,
+		};
+		const v1 = selectAutoDevice({ ...base, homeDeviceId: null });
+		const stale = selectAutoDevice({ ...base, homeDeviceId: "ghost-device" });
+		const blank = selectAutoDevice({ ...base, homeDeviceId: "" });
+		assert.deepEqual(stale, v1);
+		assert.deepEqual(blank, v1);
+		assert.deepEqual(v1, { picked: "y", busy: 1, pickedHome: false });
+	});
+
+	test("描述字段不参与决策（同一名册只加 description，结果不变）", () => {
+		const input = {
+			devices: [device("home"), device("other")],
+			selfDeviceId: SELF,
+			busyMap: { home: 1, other: 0 },
+			maxActivePerDevice: 3,
+			homeDeviceId: "home",
+		};
+		const plain = selectAutoDevice(input);
+		const described = selectAutoDevice({
+			...input,
+			devices: [
+				device("home", { description: "存储机" }),
+				device("other", { description: "计算用" }),
+			],
+		});
+		assert.deepEqual(described, plain);
+		assert.deepEqual(plain, { picked: "home", busy: 1, pickedHome: true });
 	});
 });
 
@@ -200,7 +308,7 @@ describe("queryBusyMap：容错", () => {
 	});
 });
 
-test("relay-matrix 台账：旧行没有 pickedBy / pickReason 仍可读", async () => {
+test("relay-matrix 台账：旧行没有 pickedBy / pickReason / pickedHome 仍可读", async () => {
 	const dir = mkdtempSync(join(tmpdir(), "lifediary-matrix-"));
 	const file = join(dir, "remote.json");
 	writeFileSync(
@@ -232,6 +340,7 @@ test("relay-matrix 台账：旧行没有 pickedBy / pickReason 仍可读", async
 		assert.equal(rows[0]?.requestId, "r-old");
 		assert.equal(rows[0]?.pickedBy, undefined);
 		assert.equal(rows[0]?.pickReason, undefined);
+		assert.equal(rows[0]?.pickedHome, undefined);
 	} finally {
 		delete process.env.REMOTE_DELEGATIONS_PATH;
 		rmSync(dir, { recursive: true, force: true });
