@@ -241,6 +241,16 @@ export class RelayStore {
 			}));
 	}
 
+	/** 改设备名（≤40 字）。设备不存在/已撤销 → false。UTF-8 安全：名字来自 JSON 解析后的字符串。 */
+	renameDevice(id: string, name: string, now = Date.now()): boolean {
+		const device = this.data.devices.find((item) => item.id === id && !item.revokedAt);
+		if (!device) return false;
+		const clean = name.trim().slice(0, 40);
+		if (clean) device.name = clean;
+		this.save();
+		return true;
+	}
+
 	revokeDevice(id: string, now = Date.now()): boolean {
 		const device = this.data.devices.find((item) => item.id === id && !item.revokedAt);
 		if (!device) return false;

@@ -137,6 +137,18 @@ export function createRelayApp(store: RelayStore, hub: RelayHub): Hono {
 		return c.json({ devices: store.listDevices(Date.now(), hub.onlineIds) });
 	});
 
+	// 改名：owner 或该设备自己（改名自己的名字）。UTF-8 由 JSON 解析保证，GBA 终端直发中文会坏是客户端的坑
+	app.post("/api/relay/devices/:id/name", async (c) => {
+		const asOwner = isOwner(c);
+		const selfId = asOwner ? null : deviceIdOf(c.req.header("authorization"));
+		const id = c.req.param("id");
+		if (!asOwner && selfId !== id) return c.body(null, 403);
+		const body = (await c.req.json().catch(() => null)) as { name?: unknown } | null;
+		const name = typeof body?.name === "string" ? body.name : "";
+		if (!name.trim()) return c.json({ error: "bad_request", message: "需要 name" }, 400);
+		return c.json({ ok: store.renameDevice(id, name) });
+	});
+
 	// 撤销：owner only；撤销后该设备令牌立即失效且在线连接被踢
 	app.post("/api/relay/devices/:id/revoke", (c) => {
 		if (!isOwner(c)) return c.body(null, 403);
