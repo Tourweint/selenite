@@ -122,7 +122,24 @@ export class RelayStore {
 		mkdirSync(dirname(this.path), { recursive: true });
 		const tmp = `${this.path}.tmp`;
 		writeFileSync(tmp, JSON.stringify(this.data, null, 2), "utf8");
-		renameSync(tmp, this.path);
+		// Windows 上 rename 撞文件锁（杀毒/索引/并发读写）会抛 EPERM——不接住的话，
+		// 异常会沿 WS 消息回调把整个中继进程干掉（2026-11-05 真机联调实测崩过）。
+		// 重试仍失败就放弃这次落盘：内存态照常工作，丢的只是 lastSeenAt 级别的更新，
+		// 下一次 save 会把完整状态补上。崩溃的代价远大于丢一次写盘。
+		for (let attempt = 0; attempt < 3; attempt += 1) {
+			try {
+				renameSync(tmp, this.path);
+				return;
+			} catch (error) {
+				if (attempt === 2) {
+					console.warn(
+						`[relay] 落盘失败（内存态继续）: ${error instanceof Error ? error.message : String(error)}`,
+					);
+					return;
+				}
+				Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+			}
+		}
 	}
 
 	/** 管理员身份（签发配对码 / 看名册 / 撤销设备）。空 = 只放行 loopback。 */
