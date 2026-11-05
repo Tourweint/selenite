@@ -2010,6 +2010,8 @@ function startRename(row, chat) {
   };
 
   input.addEventListener("keydown", (event) => {
+    // 按键不能冒泡到会话行：行的 Enter 处理是 openChat，会把刚改的标题又覆盖回首条消息
+    event.stopPropagation();
     if (event.key === "Enter") {
       event.preventDefault();
       void commit(true);
@@ -2782,8 +2784,11 @@ async function openChat(conversationId) {
     if (!messages.length) {
       el.title.textContent = "新对话";
     } else {
+      // 改过名的会话用存储标题（GET /chats 已带 title）；没改过名才从首句派生。
+      // 不然 openChat 每次都把改名冲掉（顶栏永远是首句前 40 字）。
+      const known = state.chats.find((chat) => chat.conversationId === conversationId)?.title;
       const first = messages.find((message) => message.role === "user");
-      el.title.textContent = first ? first.text.slice(0, 40) : "对话";
+      el.title.textContent = known || (first ? first.text.slice(0, 40) : "对话");
     }
     state.stick = true;
     scrollToEnd();
