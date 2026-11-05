@@ -6,16 +6,16 @@ import { RelayInvokeError, type RelayClient } from "./relay-client.ts";
 import { companionHomeEnabled } from "./relay-config.ts";
 
 /**
- * 伙伴认主机底座（2026-11-05 多端同步方案块3，阶段三）。
+ * 执事认主机底座（2026-11-05 多端同步方案块3，阶段三）。
  *
- * 这是**归属与路由的底座**，不是伙伴本身——伙伴的档案/记忆/例行任务是
+ * 这是**归属与路由的底座**，不是执事本身——执事的档案/记忆/例行任务是
  * 施工蓝图批次B 的事；B 落地后把 partners.actorId 对到这里的路由表即可。
  *
  * 职责（照抄 cindy 的 CAS + 降级纪律，方案 §四阶段三）：
  * - 认主机：CAS 抢占（expected 不符时中继带回实际值，绝不盲抢）；
  * - 降级：不是主机的副本不发送、不领取（ demoted 标记 + 发送守卫）；
  * - 换家顺序：先写中继路由表 → 再动本机；失败保持降级；
- * - 凭证不随行：伙伴在本机跑就用本机 env 的 key，档案/记忆的迁移归批次B。
+ * - 凭证不随行：执事在本机跑就用本机 env 的 key，档案/记忆的迁移归批次B。
  *
  * 回滚开关：COMPANION_HOME_ENABLED=false（默认）→ 端点 404、不校准、不占位。
  */
@@ -107,7 +107,7 @@ export function companionHomeController(client: RelayClient) {
 			if (isHome === row.demoted) {
 				store.put({ ...row, demoted: !isHome, updatedAt: Date.now() });
 				if (!isHome) {
-					console.log(`[home] 伙伴 ${row.name} 的主机不在这台设备，本地副本已降级`);
+					console.log(`[home] 执事 ${row.name} 的主机不在这台设备，本地副本已降级`);
 				}
 			}
 		}
@@ -137,10 +137,10 @@ export function companionHomeController(client: RelayClient) {
 			};
 		},
 
-		/** 新建伙伴并抢占主机位（expected=null，先到先得）。 */
+		/** 新建执事并抢占主机位（expected=null，先到先得）。 */
 		async create(name: string): Promise<{ actorId: string; homeDeviceId: string }> {
 			if (!client.connected || !client.selfDeviceId) {
-				throw new RelayInvokeError("device_offline", "中继未连接，不能创建伙伴");
+				throw new RelayInvokeError("device_offline", "中继未连接，不能创建执事");
 			}
 			const actorId = randomUUID();
 			const claim = (await client.meta("actor-claim", {
@@ -148,10 +148,10 @@ export function companionHomeController(client: RelayClient) {
 				name,
 				expectedHomeDeviceId: null,
 			})) as { ok: boolean; homeDeviceId?: string; code?: string };
-			if (!claim.ok) throw new RelayInvokeError("internal", "新建伙伴的空位抢占失败（理论上不可能）");
+			if (!claim.ok) throw new RelayInvokeError("internal", "新建执事的空位抢占失败（理论上不可能）");
 			store.put({
 				actorId,
-				name: name.trim().slice(0, 40) || "伙伴",
+				name: name.trim().slice(0, 40) || "执事",
 				conversationId: null,
 				demoted: false,
 				updatedAt: Date.now(),
@@ -171,7 +171,7 @@ export function companionHomeController(client: RelayClient) {
 				name?: string | null;
 			};
 			if (!home.name && !store.get(actorId)) {
-				throw new RelayInvokeError("bad_request", "这个伙伴不存在（中继路由表里没有）");
+				throw new RelayInvokeError("bad_request", "这个执事不存在（中继路由表里没有）");
 			}
 			const claim = (await client.meta("actor-claim", {
 				actorId,
@@ -188,7 +188,7 @@ export function companionHomeController(client: RelayClient) {
 			const existing = store.get(actorId);
 			store.put({
 				actorId,
-				name: existing?.name ?? (home.name ?? "伙伴").slice(0, 40),
+				name: existing?.name ?? (home.name ?? "执事").slice(0, 40),
 				conversationId: existing?.conversationId ?? null,
 				demoted: false,
 				updatedAt: Date.now(),
@@ -196,12 +196,12 @@ export function companionHomeController(client: RelayClient) {
 			return { homeDeviceId: claim.homeDeviceId! };
 		},
 
-		/** 给伙伴的专线会话说话。降级/非主机一律拒绝（fail-closed）。 */
+		/** 给执事的专线会话说话。降级/非主机一律拒绝（fail-closed）。 */
 		async sendMessage(actorId: string, text: string): Promise<{ accepted: boolean; conversationId: string }> {
 			const row = store.get(actorId);
-			if (!row) throw new RelayInvokeError("bad_request", "本机没有这个伙伴");
+			if (!row) throw new RelayInvokeError("bad_request", "本机没有这个执事");
 			if (row.demoted) {
-				throw new RelayInvokeError("remote_disabled", "这台设备不是该伙伴的主机（已降级），去主机上发");
+				throw new RelayInvokeError("remote_disabled", "这台设备不是该执事的主机（已降级），去主机上发");
 			}
 			if (!client.connected || !client.selfDeviceId) {
 				throw new RelayInvokeError("device_offline", "中继未连接");
@@ -210,14 +210,14 @@ export function companionHomeController(client: RelayClient) {
 			const home = (await client.meta("actor-home", { actorId })) as { homeDeviceId: string | null };
 			if (home.homeDeviceId !== client.selfDeviceId) {
 				store.put({ ...row, demoted: true, updatedAt: Date.now() });
-				throw new RelayInvokeError("remote_disabled", "这台设备不是该伙伴的主机（以中继为准），去主机上发");
+				throw new RelayInvokeError("remote_disabled", "这台设备不是该执事的主机（以中继为准），去主机上发");
 			}
 			let conversationId = row.conversationId;
 			if (!conversationId) {
 				const chat = await openChat(undefined);
 				if (!chat) throw new RelayInvokeError("internal", "本机没有可用的模型配置");
 				conversationId = chat.externalId;
-				void renameChat(conversationId, `伙伴 ${row.name}`);
+				void renameChat(conversationId, `执事 ${row.name}`);
 				store.put({ ...row, conversationId, updatedAt: Date.now() });
 			}
 			// sayInConversation 吃内部自增 id；uuid → 内部 id 反查
@@ -231,11 +231,11 @@ export function companionHomeController(client: RelayClient) {
 			return { accepted: true, conversationId };
 		},
 
-		/** chat/send 通道守卫：会话若是**已降级伙伴**的专线，拒绝代发。 */
+		/** chat/send 通道守卫：会话若是**已降级执事**的专线，拒绝代发。 */
 		async chatSendGuard(conversationId: string): Promise<string | null> {
 			for (const row of store.list()) {
 				if (row.conversationId === conversationId && row.demoted) {
-					return `会话属于伙伴「${row.name}」，但它的主机不在这台设备（已降级）`;
+					return `会话属于执事「${row.name}」，但它的主机不在这台设备（已降级）`;
 				}
 			}
 			return null;

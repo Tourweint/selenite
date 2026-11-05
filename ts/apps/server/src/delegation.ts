@@ -79,8 +79,14 @@ export interface DelegationRuntime {
 	report?: (conversationId: number, report: DelegationReport) => void;
 	/** `DELEGATION_AUTO_REPORT`，默认 true */
 		autoReport: boolean;
+		/**
+		 * 装配/测试缝（批次D D2）：按 domain 反查执事身份。不传 = 不注入身份
+		 * （旧领域、远程锚点会话、以及单元测试都走这条）。只有**本机** delegate 工具装配它，
+		 * 这样「不做跨电脑执事」由装配层保证，内核不查执事库、不在禁用执事时建库。
+		 */
+		identityHitFor?: (domain: string) => { name: string; soul: string } | null;
 		log?: (line: string) => void;
-}
+	}
 
 export interface DelegationKickoff {
 	conversationId: number;
@@ -157,6 +163,31 @@ export function truncate(text: string, max: number): string {
 	return oneLine.length <= max ? oneLine : `${oneLine.slice(0, max - 1)}…`;
 }
 
+/** 注入给 chancellor 的宰相身份正文上限（批次D D2）：宿主侧按 UTF-8 字节截断，chancellor 只透传。 */
+export const MANAGER_SOUL_LIMIT_BYTES = 4 * 1024;
+
+/**
+ * 纯函数：把按 domain 命中的执事组装成 ChancellorRequest.managerIdentity。
+ * 没命中（旧领域 / 执事库不可用）返回 undefined —— 请求不带身份，行为与改动前一致。
+ * soul 取调用方给的**当前版本快照正文**（不读磁盘当前值），按字节截到 ≤4KB、不切坏多字节字符。
+ * 抽成导出的纯函数是为了单测能直接断言组装结果，不必起服务。
+ */
+export function buildManagerIdentity(
+	hit: { name: string; soul: string } | null | undefined,
+): { name: string; soul: string } | undefined {
+	if (!hit) return undefined;
+	return { name: hit.name, soul: truncateUtf8(hit.soul, MANAGER_SOUL_LIMIT_BYTES) };
+}
+
+function truncateUtf8(text: string, maxBytes: number): string {
+	const buf = Buffer.from(text, "utf8");
+	if (buf.length <= maxBytes) return text;
+	let end = maxBytes;
+	// 回退到不切断 UTF-8 多字节序列的边界（续字节 10xxxxxx 一律往回让）。
+	while (end > 0 && ((buf[end] ?? 0) & 0xc0) === 0x80) end -= 1;
+	return buf.subarray(0, end).toString("utf8");
+}
+
 /** 结论怎么写成会话里那一行。80 字上限是方案里定的。 */
 export function formatReport(
 	result: TicketResult,
@@ -210,6 +241,11 @@ export function startDelegation(
 	let settled = false;
 
 	const projectName = kick.project?.name || kick.project?.id;
+	// 身份在派单开始时取一次快照，两次 launch（含续跑失败回退）共用同一个值：
+	// 单次派单内不变，不与「改 SOUL 下一轮生效」的版本化语义打架。
+	const managerIdentity = kick.domain
+		? buildManagerIdentity(runtime.identityHitFor?.(kick.domain) ?? null)
+		: undefined;
 	const emitProgress = (phase: DelegationPhase, next?: string, waitingOn?: string): void => {
 		if (next !== undefined) current = next;
 		// 单号还没出来时先不发：前端要靠 ticketId 归并，发空号只会多一条噪声。
@@ -339,11 +375,15 @@ export function startDelegation(
 		kick.resumeTicketId
 			? { resumeTicketId: kick.resumeTicketId, answer: kick.requirement }
 			: {
-					requirement: kick.requirement,
-					...(kick.domain ? { domain: kick.domain } : {}),
-					...projectField,
-					...idempotency,
-				},
+				requirement: kick.requirement,
+				...(kick.domain ? { domain: kick.domain } : {}),
+				...(managerIdentity ? { managerIdentity } : {}),
+				...projectField,
+				...idempotency,
+				// 来源对话只透传（2026-11-05 跨仓契约）：chancellor 落 ticket.json，
+				// 子单从父单继承；这里给内部会话 id 的字符串形式，接口层再换对外 uuid。
+				originConversationId: String(kick.conversationId),
+			},
 	);
 	let accepted = first;
 	let fellBack = false;
@@ -355,8 +395,10 @@ export function startDelegation(
 		accepted = launch({
 			requirement: kick.requirement,
 			...(kick.domain ? { domain: kick.domain } : {}),
+			...(managerIdentity ? { managerIdentity } : {}),
 			...projectField,
 			...idempotency,
+			originConversationId: String(kick.conversationId),
 		});
 	}
 

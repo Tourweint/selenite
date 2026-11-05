@@ -11,6 +11,16 @@ const KEY_CONV = "lifediary.conversationId";
 
 const el = {
   chats: document.getElementById("chats"),
+  // E4 侧栏：总管区 / 最近会话折叠 / 执事花名册
+  chiefEntry: document.getElementById("chief-entry"),
+  chiefDot: document.getElementById("chief-dot"),
+  chiefCount: document.getElementById("chief-count"),
+  recents: document.getElementById("recents"),
+  recentsToggle: document.getElementById("recents-toggle"),
+  recentsBody: document.getElementById("recents-body"),
+  recentsAll: document.getElementById("recents-all"),
+  partnerAddSide: document.getElementById("partner-add-side"),
+  partnerRoster: document.getElementById("partner-roster"),
   settingsNav: document.getElementById("settings-nav"),
   newChat: document.getElementById("new-chat"),
   sideProj: document.getElementById("side-proj"),
@@ -27,11 +37,11 @@ const el = {
   status: document.getElementById("status"),
   statusText: document.getElementById("status-text"),
   railNew: document.getElementById("rail-new"),
+  railChief: document.getElementById("rail-chief"),
+  railPartners: document.getElementById("rail-partners"),
   railSettings: document.getElementById("rail-settings"),
   railStatus: document.getElementById("rail-status"),
   railProj: document.getElementById("rail-proj"),
-  railProjIcon: document.getElementById("rail-proj-icon"),
-  railProjMark: document.getElementById("rail-proj-mark"),
   gate: document.getElementById("gate"),
   gateForm: document.getElementById("gate-form"),
   gateInput: document.getElementById("gate-input"),
@@ -39,8 +49,14 @@ const el = {
   viewChat: document.getElementById("view-chat"),
   viewSettings: document.getElementById("view-settings"),
   viewTasks: document.getElementById("view-tasks"),
+  viewDomains: document.getElementById("view-domains"),
   openTasks: document.getElementById("open-tasks"),
   railTasks: document.getElementById("rail-tasks"),
+  domainsBack: document.getElementById("domains-back"),
+  domainsRefresh: document.getElementById("domains-refresh"),
+  domainsState: document.getElementById("domains-state"),
+  domainsBody: document.getElementById("domains-body"),
+  domainsTitleSub: document.getElementById("domains-title-sub"),
   tasksBadge: document.getElementById("tasks-badge"),
   tasksBack: document.getElementById("tasks-back"),
   tasksRefresh: document.getElementById("tasks-refresh"),
@@ -52,7 +68,12 @@ const el = {
   tasksState: document.getElementById("tasks-state"),
   tasksBody: document.getElementById("tasks-body"),
   tasksStats: document.getElementById("tasks-stats"),
+  // 外部打手区（L3）：四张固定小卡，数据全部由 tickets 列表按 employee 现算
+  tasksHitters: document.getElementById("tasks-hitters"),
   tasksBoard: document.getElementById("tasks-board"),
+  tasksArchive: document.getElementById("tasks-archive"),
+  // 「更早的直派」折叠组（L3）：没有 conversationId 的旧单走这里，不占三列
+  tasksDirect: document.getElementById("tasks-direct"),
   tasksDetail: document.getElementById("task-detail"),
   tasksTitleText: document.getElementById("tasks-title-text"),
   tasksTitleSub: document.getElementById("tasks-title-sub"),
@@ -75,7 +96,6 @@ const el = {
   modalClose: document.getElementById("modal-close"),
   modalTitle: document.getElementById("modal-title"),
   modalBody: document.getElementById("modal-body"),
-  exportChat: document.getElementById("export-chat"),
   ctxRing: document.getElementById("ctx-ring"),
   ctxFill: document.getElementById("ctx-fill"),
   ctxPct: document.getElementById("ctx-pct"),
@@ -267,6 +287,7 @@ function currentRoute() {
   const hash = location.hash.replace(/^#/, "");
   if (hash.startsWith("/settings")) return "settings";
   if (hash.startsWith("/tasks")) return "tasks";
+  if (hash.startsWith("/domains")) return "domains";
   return "chat";
 }
 
@@ -306,6 +327,9 @@ function writeTasksHash(ticket = currentTicketId()) {
 /** 设置子页：#/settings/外观 → "appearance"；缺省落「外观」（同 cindy 的 ?tab=） */
 function currentSettingsPage() {
   const part = location.hash.replace(/^#\/settings\/?/, "").split(/[?#]/)[0];
+  // E4「全部会话 →」用的 #/settings/sessions 落到「会话」分区（该分区已有搜索）。
+  // 分区 id 其实是 chats；这里做一层别名，不改现有分区与路由体系。
+  if (part === "sessions") return "chats";
   return SETTINGS_SECTIONS.some((section) => section.id === part) ? part : "appearance";
 }
 
@@ -314,6 +338,8 @@ function go(route, page) {
     location.hash = page ? `#/settings/${page}` : "#/settings";
   } else if (route === "tasks") {
     location.hash = tasksHash();
+  } else if (route === "domains") {
+    location.hash = "#/domains";
   } else {
     location.hash = "#/";
   }
@@ -330,12 +356,14 @@ function applyRoute() {
   el.viewChat.hidden = route !== "chat";
   el.viewSettings.hidden = route !== "settings";
   el.viewTasks.hidden = route !== "tasks";
+  el.viewDomains.hidden = route !== "domains";
   el.toggleSidebar.hidden = route === "settings";
   el.openSettings.setAttribute("aria-current", String(route === "settings"));
   el.openTasks.setAttribute("aria-current", String(route === "tasks"));
   el.railTasks.setAttribute("aria-current", String(route === "tasks"));
   if (route === "settings") void renderSettings();
   else if (route === "tasks") openTasks();
+  else if (route === "domains") openDomains();
   else el.input.focus();
 }
 
@@ -355,6 +383,14 @@ const state = {
   domainFilter: "",
   projectFilter: "",
   sort: "recent",
+  // 「已完结」折叠区是否展开：只记会话内存，刷新即回到收合态
+  tasksArchiveOpen: false,
+  // 「更早的直派」折叠组是否展开（L3）：同样只记会话内存，默认收起
+  tasksDirectOpen: false,
+  // 派活行内「子单 N」展开态：Set of 派活行（父单）id，同样只记会话内存
+  tasksChildrenOpen: new Set(),
+  // 外部打手过滤（L3）：空 = 不过滤；等于某个 employee 时只留含该执行者的对话卡
+  tasksEmployeeFilter: "",
   // 项目筛选的选项来自 GET /api/v1/projects；接口不在时用任务单里的项目名兜底
   projects: [],
   projectsFetchedAt: 0,
@@ -372,21 +408,27 @@ const state = {
   providerView: { mode: "empty", providerId: "", templateId: "" },
   // 密钥填写形态：api=界面直填（PUT /secret）；env=后端没有该接口时退回变量名手输
   providerSecretMode: "api",
-  // 侧栏项目切换器（2026-11-04）：工作区与当前项目只做展示与门控；
+  // 供应商表单里的模型草稿（2026-11-05）：{ id, contextWindow, maxTokens, thinkingLevels }
+  // 只在前端编辑，点「保存」才随供应商一起落盘。
+  providerModels: [],
+  // 侧栏项目面板（2026-11-06 起是总览，不再切「当前项目」）：
   // 项目列表每次打开现拉（同模型菜单口径），不在这里缓存。
-  switcher: { workspace: null, currentId: null, currentName: "", disabled: false },
+  switcher: { workspace: null, subCount: 0, unavailable: false },
 };
 
 /* ── 任务中心（2026-11-04） ────────────────────────────────
  * 只读看板。数据：GET /api/v1/tickets（列表）与 GET /api/v1/tickets/:id（详情）。
  * 列按「在等谁」分；界面词只有 助理 / 负责人 / 执行者 / 任务单 / 待你处理。
+ * 主视图只留「要管的」：done 收进底部的「已完结」折叠区，
+ * 不再与进行中的列抢位置（K1，2026-11-05）。
+ * L3（2026-11-05）起粒度是「一张卡 = 一条来源对话」：卡头是对话，卡身是这条对话
+ * 派出去的每次活（一行一单），子单收在那一行内部；三列喂的是对话卡的聚合灯。
  * 这一版不做改派、不做手动停止，也没有悬浮面板。 */
 
 const TASK_COLUMNS = [
-  { id: "queued", label: "排队 / 等文件", statuses: ["received", "planning", "planned", "idle"] },
-  { id: "running", label: "执行中", statuses: ["dispatching", "reviewing"] },
-  { id: "ask", label: "待你处理", statuses: ["needs_you", "failed", "aborted"] },
-  { id: "done", label: "已完成", statuses: ["done"] },
+  { id: "ask", label: "待你处理", lamp: "ask" },
+  { id: "fail", label: "出错", lamp: "fail" },
+  { id: "run", label: "进行中", lamp: "run" },
 ];
 
 /** [文案, 语气]；语气决定颜色，文案只用人话 */
@@ -420,17 +462,40 @@ const VERDICT_LABEL = {
   blocked: ["受阻", "ask"],
 };
 
-/** 雇员对外只说「执行者」，类型作为后缀 */
+/** 雇员对外只说「执行者」，类型作为后缀（L3 补齐 qoder 国际/国内、原生、总管） */
 const EMPLOYEE_LABEL = {
   "pi-durable": "本机执行者",
   qoder: "Qoder",
+  "qoder-intl": "Qoder 国际",
+  "qoder-cn": "Qoder 国内",
   codebuddy: "CodeBuddy",
   mcp: "MCP",
   phone: "手机",
-  manager: "负责人",
+  native: "原生",
+  manager: "总管",
 };
 
-const TASK_TERMINAL = new Set(["done", "failed", "aborted"]);
+/** 外部打手区固定四张（L3）：id 就是 ticket.employee 的字面值 */
+const TASK_HITTERS = [
+  { id: "codebuddy", label: "CodeBuddy" },
+  { id: "qoder-intl", label: "Qoder 国际" },
+  { id: "qoder-cn", label: "Qoder 国内" },
+  { id: "phone", label: "手机" },
+];
+
+/**
+ * 侧栏徽标口径：还在流程里的单（received/planning/planned/idle/dispatching/
+ * reviewing/needs_you）——failed / done / aborted 都不算「正在跑的活」。
+ */
+const TASK_BADGE_STATUSES = new Set([
+  "received",
+  "planning",
+  "planned",
+  "idle",
+  "dispatching",
+  "reviewing",
+  "needs_you",
+]);
 
 /** SSE 的「在等谁」映射成列表里的 status，用来做增量更新 */
 const PHASE_STATUS = {
@@ -444,7 +509,7 @@ const PHASE_STATUS = {
   aborted: "aborted",
 };
 
-/** 「按状态」排序：先处理需要人的，再看跑着的，最后是完成的 */
+/** 「按状态」排序：先处理需要人的，再看跑着的，最后是完成的（done/aborted 只在折叠区里参与排序） */
 const STATUS_ORDER = [
   "needs_you",
   "failed",
@@ -463,11 +528,11 @@ const BADGE_POLL_MS = 60000;
 
 const STATE_ICON = {
   loading:
-    '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="3" y="2.6" width="10" height="11.4" rx="1.6"/><path d="M5.6 8h4.8M5.6 10.8h3.2"/></svg>',
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></svg>',
   empty:
-    '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="3" y="2.6" width="10" height="11.4" rx="1.6"/><path d="M5.8 2.6V5h4.4V2.6M5.6 8h4.8M5.6 10.8h3.2"/></svg>',
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="8" height="4" x="8" y="2" rx="1" ry="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M12 11h4"/><path d="M12 16h4"/><path d="M8 11h.01"/><path d="M8 16h.01"/></svg>',
   error:
-    '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M8 2.4 14 13.2H2Z" stroke-linejoin="round"/><path d="M8 6.2v3.2M8 11.4v.1" stroke-linecap="round"/></svg>',
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>',
 };
 
 function statusError(status) {
@@ -495,6 +560,133 @@ function relativeTime(iso) {
   return new Date(iso).toLocaleDateString("zh-CN");
 }
 
+/* ── 一张卡 = 一条对话（L3，2026-11-05） ───────────────────
+ * 三层粒度：对话卡 → 派活行（父单）→ 子单。
+ * - 卡头是对话本身（标题 / 总管 / 区域 / 聚合灯 / 最近时间），点它回原对话；
+ * - 卡身每个父单一行（摘要 / 状态 / 执行者 / 时间），子单只收进那一行的展开区；
+ * - 没有 conversationId 的旧直派单不进三列，统一收进底部「更早的直派」折叠组。
+ * 灯 / 时间 / 计数全是渲染时从列表现算的派生值，不写回任何单的状态。 */
+
+/** 子单按父单号就地分组：列表里已经有全量字段，不再逐张拉详情 */
+function childTicketsOf(parentId) {
+  return state.tickets.filter((ticket) => ticket.parentTicketId === parentId);
+}
+
+/** 来源对话（L1 新字段）：缺失 / null / 非字符串一律当「无来源对话」 */
+function ticketConversationId(ticket) {
+  const value = ticket && ticket.conversationId;
+  return typeof value === "string" ? value.trim() : "";
+}
+
+/** L1 新字段的取值口：不是非空字符串就当没有——老服务端不带字段也照常渲染 */
+function ticketText(ticket, key) {
+  const value = ticket ? ticket[key] : null;
+  return typeof value === "string" ? value.trim() : "";
+}
+
+/* 聚合灯（照 CINDY resolveSessionRightStatus 的优先级）：
+ * 红「有单出错」→ 蓝「等你处理」→ 灰「执行中」→ 全 done 无灯。 */
+const LAMP_TEXT = { fail: "有单出错", ask: "等你处理", run: "执行中", done: "已完成" };
+const LAMP_ORDER = ["fail", "ask", "run", "done"];
+
+/** 单灯：failed/aborted 红；needs_you 蓝；done 无灯；其余（排队/派发/验收/等文件）灰 */
+function ticketLamp(ticket) {
+  const status = ticket ? ticket.status : "";
+  if (status === "failed" || status === "aborted") return "fail";
+  if (status === "needs_you") return "ask";
+  if (status === "done") return "done";
+  return "run";
+}
+
+/** 卡灯：卡内任一单/子单取最高优先级 */
+function conversationLamp(tickets) {
+  let lamp = "done";
+  for (const ticket of tickets) {
+    const next = ticketLamp(ticket);
+    if (LAMP_ORDER.indexOf(next) < LAMP_ORDER.indexOf(lamp)) lamp = next;
+  }
+  return lamp;
+}
+
+function lampHtml(lamp) {
+  const text = LAMP_TEXT[lamp];
+  if (!lamp || !text) return "";
+  return `<span class="tk-lamp" data-lamp="${attr(lamp)}"><i aria-hidden="true"></i>${esc(text)}</span>`;
+}
+
+/** 卡内全部单（父 + 子）：子单一般继承 conversationId，缺了也要算进聚合 */
+function conversationTickets(card) {
+  const seen = new Map();
+  for (const ticket of card.tickets) seen.set(ticket.id, ticket);
+  for (const ticket of card.tickets) {
+    for (const child of childTicketsOf(ticket.id)) seen.set(child.id, child);
+  }
+  return [...seen.values()];
+}
+
+/**
+ * 派活行 = 卡内的父单。父单不在列表里（被 limit 截断）时，孤儿子单自己顶一行，
+ * 别让一张已经派出去的单凭空消失。
+ */
+function workRowsOf(card) {
+  const known = new Set(state.tickets.map((ticket) => ticket.id));
+  return card.tickets.filter(
+    (ticket) => !ticket.parentTicketId || !known.has(ticket.parentTicketId),
+  );
+}
+
+/**
+ * 分组：有 conversationId 的进对话卡（一对话一卡），没有的进直派组。
+ * 卡头三个字段各自取卡内第一个非空值——L1 每张单都会带，取谁结果都一样。
+ */
+function groupByConversation(tickets) {
+  const cards = new Map();
+  const direct = [];
+  for (const ticket of tickets) {
+    const conversationId = ticketConversationId(ticket);
+    if (!conversationId) {
+      direct.push(ticket);
+      continue;
+    }
+    let card = cards.get(conversationId);
+    if (!card) {
+      card = {
+        conversationId,
+        tickets: [],
+        title: "",
+        chiefName: "",
+        project: "",
+        updated_at: "",
+        lamp: "done",
+      };
+      cards.set(conversationId, card);
+    }
+    card.tickets.push(ticket);
+  }
+
+  const list = [...cards.values()];
+  for (const card of list) {
+    // 卡内顺序 = 派活行顺序 = 最近更新在前
+    card.tickets.sort((a, b) =>
+      String(b.updated_at || "").localeCompare(String(a.updated_at || "")),
+    );
+    for (const ticket of card.tickets) {
+      if (!card.title) card.title = ticketText(ticket, "conversationTitle");
+      if (!card.chiefName) card.chiefName = ticketText(ticket, "chiefName");
+      if (!card.project) card.project = ticketText(ticket, "project");
+    }
+    card.updated_at = card.tickets.length ? card.tickets[0].updated_at || "" : "";
+    card.lamp = conversationLamp(conversationTickets(card));
+  }
+
+  // 直派组只留「派活行」：子单如果父单也在，就别单列一行（和对话卡同一个口径）
+  const known = new Set(state.tickets.map((ticket) => ticket.id));
+  const directRows = direct.filter(
+    (ticket) => !ticket.parentTicketId || !known.has(ticket.parentTicketId),
+  );
+  return { cards: list, direct: sortTickets(directRows) };
+}
+
 function sortTickets(list) {
   const rows = [...list];
   const byRecent = (a, b) =>
@@ -511,18 +703,65 @@ function sortTickets(list) {
   return rows;
 }
 
-function filteredTickets() {
-  let list = state.tickets;
+/** 对话卡排序：卡头时间（recent）或灯优先级（status），与三列顺序同源 */
+function sortCards(cards) {
+  const rows = [...cards];
+  const byRecent = (a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || ""));
+  if (state.sort === "status") {
+    const rank = (card) => {
+      const index = LAMP_ORDER.indexOf(card.lamp);
+      return index < 0 ? LAMP_ORDER.length : index;
+    };
+    rows.sort((a, b) => (rank(a) === rank(b) ? byRecent(a, b) : rank(a) - rank(b)));
+  } else {
+    rows.sort(byRecent);
+  }
+  return rows;
+}
+
+/** 领域 / 项目 / 执行者筛选：卡内任一单命中就整卡留下（卡内行不裁，避免半张卡） */
+function cardMatchesFilters(card) {
+  const tickets = conversationTickets(card);
   if (state.domainFilter) {
-    list =
+    const hit =
       state.domainFilter === "__none__"
-        ? list.filter((ticket) => !ticket.domain)
-        : list.filter((ticket) => ticket.domain === state.domainFilter);
+        ? tickets.some((ticket) => !ticket.domain)
+        : tickets.some((ticket) => ticket.domain === state.domainFilter);
+    if (!hit) return false;
   }
-  if (state.projectFilter) {
-    list = list.filter((ticket) => (ticket.project || "") === state.projectFilter);
+  if (
+    state.projectFilter &&
+    !tickets.some((ticket) => (ticket.project || "") === state.projectFilter)
+  ) {
+    return false;
   }
-  return sortTickets(list);
+  if (
+    state.tasksEmployeeFilter &&
+    !tickets.some((ticket) => ticket.employee === state.tasksEmployeeFilter)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/** 直派单只吃领域/项目筛选：它们本来就没有对话可筛 */
+function directMatchesFilters(ticket) {
+  if (state.domainFilter) {
+    if (state.domainFilter === "__none__") {
+      if (ticket.domain) return false;
+    } else if (ticket.domain !== state.domainFilter) {
+      return false;
+    }
+  }
+  if (state.projectFilter && (ticket.project || "") !== state.projectFilter) return false;
+  return true;
+}
+
+/** 执行者名：空 → 「默认」，未知类型原样显示，别把新雇员藏起来 */
+function employeeName(kind) {
+  const key = String(kind || "").trim();
+  if (!key) return "默认";
+  return EMPLOYEE_LABEL[key] || key;
 }
 
 /** 三种状态共用一个容器：加载/空/失败都不许白屏 */
@@ -555,9 +794,73 @@ function hideTasksState() {
 }
 
 function syncTasksBadge() {
-  const active = state.tickets.filter((ticket) => !TASK_TERMINAL.has(ticket.status)).length;
+  // 徽标口径跟看板一致：数「还有活在跑/在等」的对话卡；直派单没有卡，自己算一个。
+  // 注意 alive 收的是**单张票**：direct.filter(alive) 直接可用；卡内用 .some(alive)。
+  // （E5 实测：原来 alive 写成收数组，遇到直派单会抛错，把后面的总管计数一起带掉。）
+  const { cards, direct } = groupByConversation(state.tickets);
+  const alive = (ticket) => TASK_BADGE_STATUSES.has(ticket.status);
+  const active =
+    cards.filter((card) => conversationTickets(card).some(alive)).length + direct.filter(alive).length;
   el.tasksBadge.hidden = active === 0;
   el.tasksBadge.textContent = active > 99 ? "99+" : String(active);
+
+  // E5：无 domain 的活跃单 = 总管直接派给无主工人的活，挂在总管条目右侧。
+  // 不可点击（总管没有 domain 筛选入口），为 0 时不显示。
+  if (el.chiefCount) {
+    const chiefActive = state.tickets.filter(
+      (ticket) => !ticket.domain && TASK_BADGE_STATUSES.has(ticket.status),
+    ).length;
+    el.chiefCount.hidden = chiefActive === 0;
+    el.chiefCount.textContent = chiefActive > 99 ? "99+ 单" : `${chiefActive} 单`;
+  }
+}
+
+/**
+ * 外部打手小卡（L3）：只读聚合，四张固定，数据全部来自现有 tickets 列表。
+ * 「未完结」= 还没 done / aborted 的单（failed 也算没完，得有人看）。
+ */
+function hitterCards() {
+  const open = state.tickets.filter(
+    (ticket) => ticket.status !== "done" && ticket.status !== "aborted",
+  );
+  return TASK_HITTERS.map(({ id, label }) => {
+    const mine = open
+      .filter((ticket) => ticket.employee === id)
+      .sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")));
+    return { id, label, count: mine.length, latest: mine[0] || null };
+  });
+}
+
+function renderHitters() {
+  el.tasksHitters.replaceChildren();
+  el.tasksHitters.hidden = false;
+  for (const hitter of hitterCards()) {
+    const active = state.tasksEmployeeFilter === hitter.id;
+    const latest = hitter.latest;
+    const brief = latest ? String(latest.prompt || "").replace(/\s+/g, " ").trim() : "";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "tk-hitter";
+    button.dataset.employee = hitter.id;
+    button.dataset.active = active ? "1" : "0";
+    button.setAttribute("aria-pressed", String(active));
+    button.title = hitter.count
+      ? `只看「${hitter.label}」派出去的活（再点一次取消）`
+      : `${hitter.label} 当前空闲`;
+    button.innerHTML = `
+      <span class="tk-hitter-head">
+        <span class="tk-hitter-name">${esc(hitter.label)}</span>
+        ${hitter.count ? `<span class="tk-hitter-count">${hitter.count}</span>` : ""}
+      </span>
+      ${
+        hitter.count
+          ? `<span class="tk-hitter-brief">${esc(brief.slice(0, 40) || "（没有说明）")}</span>
+             <span class="tk-hitter-foot">${lampHtml(ticketLamp(latest))}<span class="tk-hitter-time">${esc(relativeTime(latest.updated_at))}</span></span>`
+          : `<span class="tk-hitter-idle">空闲</span>`
+      }
+    `;
+    el.tasksHitters.append(button);
+  }
 }
 
 function syncDomainOptions() {
@@ -566,7 +869,8 @@ function syncDomainOptions() {
   el.tasksDomain.replaceChildren(new Option("全部领域", ""));
   for (const domain of domains) el.tasksDomain.append(new Option(domain, domain));
   if (state.tickets.some((ticket) => !ticket.domain)) {
-    el.tasksDomain.append(new Option("未分领域", "__none__"));
+    // E5 口径：无 domain 的单 = 总管直接派发给无主工人的活，不叫「未分领域」。
+    el.tasksDomain.append(new Option("总管（未分配）", "__none__"));
   }
   const values = new Set([...el.tasksDomain.options].map((option) => option.value));
   el.tasksDomain.value = values.has(previous) ? previous : "";
@@ -613,59 +917,90 @@ async function loadProjects({ force = false } = {}) {
   }
 }
 
-function taskCard(ticket) {
+/** 派活行：一单一行。摘要 / 状态 / 执行者 / 时间 + 「子单 N」展开区（两层收拢） */
+function workRow(ticket) {
+  const children = childTicketsOf(ticket.id);
   const [label, tone] = TASK_STATUS[ticket.status] || [ticket.status || "未知", "idle"];
-  const total = Number(ticket.total) || 0;
-  const passed = Number(ticket.passed) || 0;
-  const percent = total > 0 ? Math.min(100, Math.round((passed / total) * 100)) : 0;
-  const prompt = String(ticket.prompt || "").replace(/\s+/g, " ").trim().slice(0, 240);
-  const employee = employeeText(ticket.employee);
-  const error = ticket.error ? String(ticket.error).trim() : "";
-  const showError = error && (ticket.status === "failed" || ticket.status === "aborted");
-  // 这三项由接口逐步带回来（2026-11-04 后端落盘中）：没有就不渲染，不占位也不报错
-  const lastAction = ticket.lastAction ? String(ticket.lastAction).trim().slice(0, 120) : "";
-  const waitingOn = ticket.waitingOn ? String(ticket.waitingOn).trim().slice(0, 120) : "";
+  const prompt = String(ticket.prompt || "").replace(/\s+/g, " ").trim();
+  const brief = prompt ? (prompt.length > 60 ? `${prompt.slice(0, 60)}…` : prompt) : "（没有说明）";
+  const childrenOpen = state.tasksChildrenOpen.has(ticket.id);
 
-  const card = document.createElement("button");
-  card.type = "button";
-  card.className = "tk-card";
-  card.dataset.ticket = ticket.id;
-  card.dataset.status = ticket.status;
-  if (ticket.status === "needs_you") card.dataset.attn = "1";
-  card.innerHTML = `
-    <div class="tk-card-top">
-      <span class="tk-domain">${esc(ticket.domain || "未分领域")}</span>
-      <span class="tk-id">${esc(ticket.id)}</span>
-    </div>
-    <p class="tk-prompt">${esc(prompt || "（没有说明）")}</p>
-    <div class="tk-meta">
-      <span>任务 <b>${passed}/${total}</b></span>
-      ${employee ? `<span>执行者 <b>${esc(employee)}</b></span>` : ""}
-    </div>
-    ${total > 0 ? `<div class="tk-bar"><i style="width:${percent}%"></i></div>` : ""}
-    ${showError ? `<p class="tk-err">${esc(error.slice(0, 120))}</p>` : ""}
-    ${lastAction ? `<p class="tk-live">最近 ${esc(lastAction)}</p>` : ""}
-    ${waitingOn ? `<p class="tk-wait">等文件 ${esc(waitingOn)}</p>` : ""}
-    <div class="tk-foot">
+  const childRows = children
+    .map((child) => {
+      const [childLabel, childTone] = TASK_STATUS[child.status] || [child.status || "未知", "idle"];
+      return `<a class="tk-child-row" href="#/tasks?ticket=${encodeURIComponent(child.id)}">
+        <span class="tk-child-id">${esc(child.id)}</span>
+        <span class="tk-chip" data-tone="${childTone}">${esc(childLabel)}</span>
+        <span class="tk-child-time">${esc(relativeTime(child.updated_at))}</span>
+      </a>`;
+    })
+    .join("");
+
+  // 行根是 div[role=button]：行内还要放「子单 N」按钮，按钮里嵌按钮是非法 HTML。
+  // 键盘行为由 tasksBody 上的 keydown 补齐。展开态 key = 派活行（父单）id。
+  const row = document.createElement("div");
+  row.className = "tk-row";
+  row.setAttribute("role", "button");
+  row.tabIndex = 0;
+  row.dataset.ticket = ticket.id;
+  row.dataset.lamp = ticketLamp(ticket);
+  row.innerHTML = `
+    <div class="tk-row-top">
+      <span class="tk-row-prompt">${esc(brief)}</span>
       <span class="tk-chip" data-tone="${tone}">${esc(label)}</span>
-      <span class="tk-time">${esc(relativeTime(ticket.updated_at))}</span>
     </div>
+    <div class="tk-row-meta">
+      <span class="tk-row-who">${esc(employeeName(ticket.employee))}</span>
+      <span class="tk-row-time">${esc(relativeTime(ticket.updated_at))}</span>
+    </div>
+    ${
+      children.length
+        ? `<button class="tk-children-toggle" type="button" data-ticket="${attr(ticket.id)}" aria-expanded="${childrenOpen ? "true" : "false"}">
+            <span>子单 ${children.length}</span><span class="tk-child-caret" aria-hidden="true">▸</span>
+          </button>
+          <div class="tk-children"${childrenOpen ? "" : " hidden"}>${childRows}</div>`
+        : ""
+    }
   `;
-  return card;
+  return row;
 }
 
-function renderStats(list) {
-  const active = list.filter((ticket) => !TASK_TERMINAL.has(ticket.status)).length;
-  const ask = list.filter((ticket) => ticket.status === "needs_you").length;
-  const failed = list.filter((ticket) => ticket.status === "failed" || ticket.status === "aborted").length;
-  const done = list.filter((ticket) => ticket.status === "done").length;
-  const domains = new Set(list.map((ticket) => ticket.domain || "未分领域")).size;
+/** 对话卡：卡头 = 对话（可点回原对话），卡身 = 这条对话派出去的每次活 */
+function conversationCard(card) {
+  const badges = [
+    card.chiefName ? `<span class="tk-badge">总管 ${esc(card.chiefName)}</span>` : "",
+    card.project ? `<span class="tk-badge">区域 ${esc(card.project)}</span>` : "",
+  ].join("");
+  const element = document.createElement("article");
+  element.className = "tk-card";
+  element.dataset.lamp = card.lamp;
+  // 全 done 的卡不进主视图；万一进来也不挂灯，只留时间（灯只在有话要说时才亮）
+  const lamp = card.lamp === "done" ? "" : lampHtml(card.lamp);
+  element.innerHTML = `
+    <button class="tk-conv-head" type="button" data-conv="${attr(card.conversationId)}" title="回到这条对话">
+      <span class="tk-conv-title">${esc(card.title || "未命名对话")}</span>
+      <span class="tk-conv-badges">${badges}</span>
+      <span class="tk-conv-tail">${lamp}<span class="tk-conv-time">${esc(relativeTime(card.updated_at))}</span></span>
+    </button>
+    <div class="tk-rows"></div>
+  `;
+  const rows = element.querySelector(".tk-rows");
+  for (const ticket of workRowsOf(card)) rows.append(workRow(ticket));
+  return element;
+}
+
+function renderStats(cards, direct) {
+  const count = (lamp) => cards.filter((card) => card.lamp === lamp).length;
+  // 「派活」数的是派活行（父单），子单不算一次派活
+  const dispatched =
+    cards.reduce((sum, card) => sum + workRowsOf(card).length, 0) +
+    direct.filter((ticket) => !ticket.parentTicketId).length;
   const stats = [
-    ["进行中", active, "run"],
-    ["待你处理", ask, "ask"],
-    ["失败待看", failed, "fail"],
-    ["已完成", done, ""],
-    ["领域", domains, ""],
+    ["进行中", count("run"), "run"],
+    ["等你处理", count("ask"), "ask"],
+    ["有单出错", count("fail"), "fail"],
+    ["已完成", count("done"), ""],
+    ["派活", dispatched, ""],
   ];
   el.tasksStats.replaceChildren();
   for (const [label, value, tone] of stats) {
@@ -677,6 +1012,161 @@ function renderStats(list) {
   }
 }
 
+/** 旧行式简卡（直派单用）：单号 + prompt 截断 + 状态徽章 + 相对时间；不带进度条与错误详情 */
+function archiveRow(ticket) {
+  const [label, tone] = TASK_STATUS[ticket.status] || [ticket.status || "未知", "idle"];
+  const prompt = String(ticket.prompt || "").replace(/\s+/g, " ").trim().slice(0, 120);
+  const row = document.createElement("button");
+  row.type = "button";
+  row.className = "tk-arch-row";
+  row.dataset.ticket = ticket.id;
+  row.dataset.status = ticket.status;
+  row.innerHTML = `
+    <span class="tk-arch-id">${esc(ticket.id)}</span>
+    <span class="tk-arch-prompt">${esc(prompt || "（没有说明）")}</span>
+    <span class="tk-chip" data-tone="${tone}">${esc(label)}</span>
+    <span class="tk-arch-time">${esc(relativeTime(ticket.updated_at))}</span>
+  `;
+  return row;
+}
+
+/** 已完结简卡：对话卡样式（标题 + 聚合灯 + 时间），点它回原对话 */
+function archiveCard(card) {
+  const row = document.createElement("button");
+  row.type = "button";
+  row.className = "tk-arch-conv";
+  row.dataset.conv = card.conversationId;
+  row.title = "回到这条对话";
+  row.innerHTML = `
+    <span class="tk-arch-title">${esc(card.title || "未命名对话")}</span>
+    <span class="tk-arch-count">${workRowsOf(card).length} 次派活</span>
+    ${lampHtml("done")}
+    <span class="tk-arch-time">${esc(relativeTime(card.updated_at))}</span>
+  `;
+  return row;
+}
+
+/**
+ * 折叠条：已完结区与「更早的直派」共用一套外观，但各自记展开态。
+ * 结构 = 一条横条 + 一段列表；横条点一下就地收放，不重绘整板。
+ */
+function foldSection({ count, label, emptyText, open, onToggle, renderRow }) {
+  if (!count) {
+    const bar = document.createElement("div");
+    bar.className = "tk-archive-bar is-empty";
+    bar.textContent = emptyText;
+    return bar;
+  }
+  const items = document.createElement("div");
+  items.className = "tk-arch-list";
+  items.hidden = !open;
+  for (const item of renderRow()) items.append(item);
+
+  const bar = document.createElement("button");
+  bar.type = "button";
+  bar.className = "tk-archive-bar";
+  bar.setAttribute("aria-expanded", String(open));
+  bar.innerHTML = `<span>${esc(label)}</span><span class="tk-arch-caret" aria-hidden="true">▸</span>`;
+  bar.addEventListener("click", () => {
+    const next = !items.hidden;
+    items.hidden = !next;
+    bar.setAttribute("aria-expanded", String(next));
+    onToggle(next);
+  });
+  // 容器本身是 .tk-archive（flex 列 + gap），这里只交出「横条 + 列表」两段
+  const fragment = document.createDocumentFragment();
+  fragment.append(bar, items);
+  return fragment;
+}
+
+/**
+ * 已完结折叠区（K1/L3）：全 done 的对话卡从三列退场，只留底部一条低调横条。
+ * 放在看板网格外（见 index.html），窄屏不必横向滚到最右才点得到。
+ * 展开态记 state.tasksArchiveOpen —— 会话内存，刷新回到收合。
+ */
+function renderArchive(cards) {
+  el.tasksArchive.replaceChildren();
+  el.tasksArchive.hidden = false;
+  el.tasksArchive.append(
+    foldSection({
+      count: cards.length,
+      label: `已完结 ${cards.length} 个对话（已完成）`,
+      emptyText: "已完结 0 个对话（已完成）",
+      open: state.tasksArchiveOpen,
+      onToggle: (next) => {
+        state.tasksArchiveOpen = next;
+      },
+      renderRow: () => cards.map(archiveCard),
+    }),
+  );
+}
+
+/**
+ * 「更早的直派」（L3）：没有 conversationId 的旧单/探针单不进三列，
+ * 沿用已完结的折叠样式摆在最下面，默认收起。清库后正常情况下这里是空的。
+ */
+function renderDirect(rows) {
+  el.tasksDirect.replaceChildren();
+  if (!rows.length) {
+    el.tasksDirect.hidden = true;
+    return;
+  }
+  el.tasksDirect.hidden = false;
+  el.tasksDirect.append(
+    foldSection({
+      count: rows.length,
+      label: `更早的直派 ${rows.length} 单（没有来源对话）`,
+      emptyText: "",
+      open: state.tasksDirectOpen,
+      onToggle: (next) => {
+        state.tasksDirectOpen = next;
+      },
+      renderRow: () => rows.map(archiveRow),
+    }),
+  );
+}
+
+function boardEmptyNote(hasTickets) {
+  const note = document.createElement("div");
+  note.className = "tk-board-empty";
+  note.innerHTML = hasTickets
+    ? `<h2>没有正在跑的活</h2>
+       <p>派出去后按对话收成一张卡；已经完结的在下方「已完结」里</p>`
+    : `<h2>还没有派出去的活</h2>
+       <p>在对话里派活后，这里会按对话收成一张卡，卡身是每次派活</p>`;
+  return note;
+}
+
+/** 清除筛选：领域 / 项目 / 执行者 / 排序一起回到默认，并同步 hash 与下拉框 */
+function clearTaskFilters() {
+  state.domainFilter = "";
+  state.projectFilter = "";
+  state.tasksEmployeeFilter = "";
+  state.sort = "recent";
+  el.tasksDomain.value = "";
+  el.tasksProject.value = "";
+  el.tasksSort.value = "recent";
+  writeTasksHash("");
+  renderBoard();
+}
+
+/** 筛选筛空：就地提示 + 一键清除；打手四卡留在上方，点错执行者也能自己点回来 */
+function filterEmptyNote() {
+  const note = document.createElement("div");
+  note.className = "tk-board-empty";
+  const heading = document.createElement("h2");
+  heading.textContent = "没有符合筛选的任务单";
+  const text = document.createElement("p");
+  text.textContent = "换个领域、项目或执行者，或者清除筛选看看全部任务。";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "ghost";
+  button.textContent = "清除筛选";
+  button.addEventListener("click", clearTaskFilters);
+  note.append(heading, text, button);
+  return note;
+}
+
 function renderBoard() {
   // 自动刷新会反复走这里：先记下滚动位置，重排后再放回去，别让看板自己跳回顶部/最左。
   const scrollTop = el.tasksScroll.scrollTop;
@@ -684,71 +1174,81 @@ function renderBoard() {
 
   hideTasksState();
   el.tasksDetail.hidden = true;
+  el.tasksHitters.hidden = false;
   el.tasksBoard.hidden = false;
   el.tasksStats.hidden = false;
   el.tasksFilters.hidden = false;
   el.tasksBack.hidden = true;
   el.tasksTitleText.textContent = "任务中心";
-  el.tasksTitleSub.textContent = state.tickets.length ? `共 ${state.tickets.length} 张任务单` : "";
 
-  if (!state.tickets.length) {
-    showTasksState(
-      "empty",
-      "还没有任务单",
-      "在对话里让助理派个活，任务单会出现在这里；派出去的活会按状态分列，需要你处理的会亮起来。",
-      { label: "回到对话", run: () => go("chat") },
-    );
-    return;
+  const { cards, direct } = groupByConversation(state.tickets);
+  const totalTickets = state.tickets.length;
+  const hasTickets = totalTickets > 0;
+  el.tasksTitleSub.textContent = "";
+
+  if (hasTickets) {
+    syncDomainOptions();
+    syncProjectOptions();
   }
-
-  syncDomainOptions();
-  syncProjectOptions();
   el.tasksSort.value = state.sort;
-  const list = filteredTickets();
-  if (!list.length) {
-    const clear = () => {
-      state.domainFilter = "";
-      state.projectFilter = "";
-      state.sort = "recent";
-      el.tasksDomain.value = "";
-      el.tasksProject.value = "";
-      el.tasksSort.value = "recent";
-      writeTasksHash("");
-      renderBoard();
-    };
-    showTasksState(
-      "empty",
-      "没有符合筛选的任务单",
-      "换个领域或项目，或者清除筛选看看全部任务。",
-      { label: "清除筛选", run: clear },
-    );
-    return;
-  }
-  el.tasksTitleSub.textContent =
-    list.length === state.tickets.length
-      ? `共 ${state.tickets.length} 张任务单`
-      : `筛选 ${list.length} / 共 ${state.tickets.length} 张任务单`;
 
-  renderStats(list);
+  const visibleCards = sortCards(cards.filter(cardMatchesFilters));
+  const visibleDirect = direct.filter(directMatchesFilters);
+  // 有单但筛不出来：就地给「清除筛选」，不进全屏空状态——
+  // 打手四卡必须还看得见，否则点错了执行者就再也点不回来。
+  const noneVisible = !visibleCards.length && !visibleDirect.length && hasTickets;
+
+  if (hasTickets) {
+    const filtered = visibleCards.length !== cards.length || Boolean(state.tasksEmployeeFilter);
+    // 只有直派单时「0 个对话」很怪，直接说清楚这一屏是什么
+    el.tasksTitleSub.textContent = !cards.length
+      ? `共 ${totalTickets} 次直派（没有来源对话）`
+      : filtered
+        ? `筛选 ${visibleCards.length} / 共 ${cards.length} 个对话`
+        : `共 ${cards.length} 个对话 · ${totalTickets} 次派活`;
+  }
+
+  // 一张任务单都没有时，统计和筛选没有信息量，让位给空状态说明；打手四卡仍要露脸
+  el.tasksStats.hidden = !hasTickets;
+  el.tasksFilters.hidden = !hasTickets;
+  renderHitters();
+  renderStats(visibleCards, visibleDirect);
   el.tasksBoard.replaceChildren();
-  for (const column of TASK_COLUMNS) {
-    const items = list.filter((ticket) => column.statuses.includes(ticket.status));
-    const section = document.createElement("section");
-    section.className = "tk-col";
-    section.dataset.column = column.id;
-    const head = document.createElement("div");
-    head.className = "tk-col-head";
-    head.innerHTML = `<h2>${esc(column.label)}</h2><span class="tk-col-count">${items.length}</span>`;
-    section.append(head);
-    if (!items.length) {
-      const blank = document.createElement("div");
-      blank.className = "tk-col-empty";
-      blank.textContent = column.id === "ask" ? "没有需要你处理的事" : "空";
-      section.append(blank);
-    } else {
-      for (const ticket of items) section.append(taskCard(ticket));
+
+  const archive = visibleCards.filter((card) => card.lamp === "done");
+  const main = visibleCards.filter((card) => card.lamp !== "done");
+  if (noneVisible) {
+    el.tasksBoard.append(filterEmptyNote());
+  } else if (!main.length) {
+    // 全空（含从没派过活）：不摆三列空架子，直接说清楚「这里将来会出现什么」
+    el.tasksBoard.append(boardEmptyNote(hasTickets));
+  } else {
+    for (const column of TASK_COLUMNS) {
+      const items = main.filter((card) => card.lamp === column.lamp);
+      const section = document.createElement("section");
+      section.className = "tk-col";
+      section.dataset.column = column.id;
+      const head = document.createElement("div");
+      head.className = "tk-col-head";
+      head.innerHTML = `<h2>${esc(column.label)}</h2><span class="tk-col-count">${items.length}</span>`;
+      section.append(head);
+      if (!items.length) {
+        const blank = document.createElement("div");
+        blank.className = "tk-col-empty";
+        blank.textContent = "无";
+        section.append(blank);
+      } else {
+        for (const card of items) section.append(conversationCard(card));
+      }
+      el.tasksBoard.append(section);
     }
-    el.tasksBoard.append(section);
+  }
+  if (noneVisible) {
+    el.tasksArchive.hidden = true;
+    el.tasksDirect.hidden = true;
+  } else {
+    renderArchive(archive);
+    renderDirect(visibleDirect);
   }
 
   el.tasksScroll.scrollTop = scrollTop;
@@ -797,6 +1297,8 @@ function openTasks() {
   state.domainFilter = params.get("domain") || "";
   state.projectFilter = params.get("project") || "";
   state.sort = params.get("sort") === "status" ? "status" : "recent";
+  // 外部打手过滤只记会话内存：每次进任务中心都从「全部」开始，避免上次的过滤把看板筛空
+  state.tasksEmployeeFilter = "";
   el.tasksSort.value = state.sort;
   void loadProjects();
 
@@ -812,6 +1314,9 @@ function openTasks() {
 async function showTicketDetail(ticketId) {
   hideTasksState();
   el.tasksBoard.hidden = true;
+  el.tasksArchive.hidden = true;
+  el.tasksDirect.hidden = true;
+  el.tasksHitters.hidden = true;
   el.tasksStats.hidden = true;
   el.tasksFilters.hidden = true;
   el.tasksDetail.hidden = false;
@@ -927,11 +1432,34 @@ function renderTicketDetail(data, fallbackId) {
       </section>`
     : "";
 
+  // 迟到的回报（E2 #2）：父单终态后才回来的子单结果，只读记账，不自动并入。
+  // 空数组整节不渲染；每行照 reviewRows 的写法：子单 id · 状态 pill · note · 时间。
+  const deadLetters = Array.isArray(data.deadLetters) ? data.deadLetters : [];
+  const deadLetterRows = deadLetters.length
+    ? `<section class="td-section">
+        <h3>迟到的回报<span>${deadLetters.length}</span></h3>
+        <p class="td-sec-hint">父单已终态后子单才回的结果，记账在此，不会自动并入。</p>
+        ${deadLetters
+          .map((letter) => {
+            const [label, tone] = TASK_STATUS[letter.childStatus] || [letter.childStatus || "未知", "idle"];
+            return `<div class="td-review">
+              <div class="td-review-top">
+                <span class="td-deadletter-id">${esc(letter.childTicketId || "")}</span>
+                <span class="tk-chip" data-tone="${tone}">${esc(label)}</span>
+                <span class="td-stage" title="${esc(letter.createdAt || "")}">${esc(relativeTime(letter.createdAt))}</span>
+              </div>
+              <p>${esc(letter.note || "（没有说明）")}</p>
+            </div>`;
+          })
+          .join("")}
+      </section>`
+    : "";
+
   el.tasksDetail.innerHTML = `
     <div class="td-card"${ticket.status === "needs_you" ? ' data-attn="1"' : ""}>
       <div class="td-head">
         <span class="tk-chip" data-tone="${statusTone}">${esc(statusLabel)}</span>
-        <span class="td-domain">${esc(data.domain || ticket.options?.domain || "未分领域")}</span>
+        <span class="td-domain">${esc(data.domain || ticket.options?.domain || "总管（未分配）")}</span>
         ${project ? `<span class="td-proj">项目 ${esc(project)}</span>` : ""}
         <span class="td-time">${esc(relativeTime(ticket.updated_at))}</span>
       </div>
@@ -953,6 +1481,7 @@ function renderTicketDetail(data, fallbackId) {
     </section>
     ${childRows}
     ${reviewRows}
+    ${deadLetterRows}
   `;
 }
 
@@ -989,7 +1518,9 @@ function applyTicketEvent(event) {
   const now = new Date().toISOString();
   let ticket = state.tickets.find((item) => item.id === ticketId);
   if (!ticket) {
-    // 新单：先放一张临时卡，紧接着的一次静默刷新会补上完整字段
+    // 新单：先放一张临时单，紧接着的一次静默刷新会补上完整字段。
+    // 事件帧不带 conversationId（L3），所以它这一刻可能暂时落在「更早的直派」里，
+    // 刷新回来后按真实 conversationId 归到对应对话卡——不为此另开一条猜测逻辑。
     ticket = {
       id: ticketId,
       prompt: event.message || "刚派出去的任务单",
@@ -1002,6 +1533,7 @@ function applyTicketEvent(event) {
       updated_at: now,
       error: null,
       parentTicketId: null,
+      conversationId: event.conversationId || null,
     };
     state.tickets.unshift(ticket);
   }
@@ -1013,10 +1545,17 @@ function applyTicketEvent(event) {
   if (event.lastAction) ticket.lastAction = event.lastAction;
   if (event.lastHeartbeat) ticket.lastHeartbeat = event.lastHeartbeat;
   if (event.waitingOn) ticket.waitingOn = event.waitingOn;
+  if (event.conversationId) ticket.conversationId = event.conversationId;
   ticket.updated_at = event.lastHeartbeat || now;
+  // L3：子单/父单事件 → 它所属的那张对话卡。灯、计数、卡头时间都是渲染时从列表现算的，
+  // 所以整板重绘会连同那张卡一起更新（不写回任何单的状态）。
+  // 找不到父单（列表被 limit 截断 / 还没拉回来）时提前补一次列表，别让聚合值长期停在旧值。
+  const ownerMissing =
+    Boolean(ticket.parentTicketId) &&
+    !state.tickets.some((item) => item.id === ticket.parentTicketId);
   syncTasksBadge();
   scheduleTasksRender();
-  scheduleTicketsSync();
+  scheduleTicketsSync(ownerMissing ? 400 : 900);
 }
 
 function autoSyncTick() {
@@ -1032,6 +1571,8 @@ function autoSyncTick() {
     force: true,
     render: route === "tasks" && !currentTicketId(),
   });
+  // E4：花名册的 activeTickets 来自 domains（派生自任务单），低频一并刷新
+  void loadRoster();
 }
 
 /* 任务中心的固定入口与交互（只读，不提供改派/停止） */
@@ -1062,10 +1603,163 @@ el.tasksSort.addEventListener("change", () => {
   writeTasksHash("");
   renderBoard();
 });
-el.tasksBoard.addEventListener("click", (event) => {
-  const card = event.target.closest(".tk-card");
-  if (!card || !card.dataset.ticket) return;
-  location.hash = tasksHash({ ticket: card.dataset.ticket });
+/**
+ * 任务中心的点击代理（L3）：看板、已完结区、直派折叠组都在 tasksBody 里，一处接管。
+ * - .tk-conv-head / .tk-arch-conv（卡头、已完结简卡）→ 回原对话（复用搜索结果的跳转写法：先切路由，再 openChat）
+ * - .tk-children-toggle → 就地展开/收起那一行的子单，展开态记 state.tasksChildrenOpen
+ * - .tk-row / .tk-arch-row → 打开该单详情
+ * 子单行是 <a>，自己的 href 会导航；派活行是 div[role=button]，键盘行为在下面补。
+ */
+el.tasksBody.addEventListener("click", (event) => {
+  const head = event.target.closest(".tk-conv-head, .tk-arch-conv");
+  if (head) {
+    const conversationId = head.dataset.conv || "";
+    if (conversationId) {
+      go("chat");
+      void openChat(conversationId);
+    }
+    return;
+  }
+
+  const toggle = event.target.closest(".tk-children-toggle");
+  if (toggle) {
+    const ticketId = toggle.dataset.ticket || "";
+    if (!ticketId) return;
+    const open = !state.tasksChildrenOpen.has(ticketId);
+    if (open) state.tasksChildrenOpen.add(ticketId);
+    else state.tasksChildrenOpen.delete(ticketId);
+    toggle.setAttribute("aria-expanded", String(open));
+    const row = toggle.closest(".tk-row");
+    const list = row ? row.querySelector(".tk-children") : null;
+    if (list) list.hidden = !open;
+    return;
+  }
+
+  // 子单行自己导航到子单详情，不能再落回派活行
+  if (event.target.closest(".tk-child-row")) return;
+
+  const row = event.target.closest(".tk-row, .tk-arch-row");
+  if (!row || !row.dataset.ticket) return;
+  location.hash = tasksHash({ ticket: row.dataset.ticket });
+});
+// div[role=button] 的键盘等价行为：Enter / 空格进详情（行内按钮自己处理事件）
+el.tasksBody.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  const row = event.target.closest(".tk-row");
+  if (!row || event.target !== row || !row.dataset.ticket) return;
+  event.preventDefault();
+  location.hash = tasksHash({ ticket: row.dataset.ticket });
+});
+
+/** 外部打手小卡：点一下过滤主视图，再点一下取消（只改会话内存，不写 hash） */
+el.tasksHitters.addEventListener("click", (event) => {
+  const card = event.target.closest(".tk-hitter");
+  if (!card) return;
+  const employee = card.dataset.employee || "";
+  state.tasksEmployeeFilter = state.tasksEmployeeFilter === employee ? "" : employee;
+  renderBoard();
+});
+
+/* ── 领域概览（E2 #3）───────────────────────────────────────
+ * 侧栏「领域负责人」占位点亮为 #/domains。只读：GET /api/v1/domains。
+ * 每行 领域 · 活跃单数(activeTickets) · 状态；error 行标红并给出错误文案；
+ * 行点击跳 #/tasks?domain=<domain>（任务中心已有 domain 筛选）。 */
+
+function showDomainsState(kind, title, text, action) {
+  el.domainsState.hidden = false;
+  el.domainsState.dataset.kind = kind;
+  el.domainsState.replaceChildren();
+  const icon = document.createElement("div");
+  icon.className = "tasks-state-icon";
+  icon.innerHTML = STATE_ICON[kind] || STATE_ICON.empty;
+  const heading = document.createElement("h2");
+  heading.textContent = title;
+  const body = document.createElement("p");
+  body.textContent = text;
+  el.domainsState.append(icon, heading, body);
+  if (action) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "ghost";
+    button.textContent = action.label;
+    button.addEventListener("click", action.run);
+    el.domainsState.append(button);
+  }
+  el.domainsBody.hidden = true;
+}
+
+function hideDomainsState() {
+  el.domainsState.hidden = true;
+  el.domainsBody.hidden = false;
+}
+
+function renderDomains(rows) {
+  el.domainsTitleSub.textContent = rows.length ? `${rows.length} 个领域` : "";
+  if (!rows.length) {
+    showDomainsState("empty", "还没有领域", "派活给某个领域后，这里会列出各领域的活跃单数与状态。");
+    return;
+  }
+  hideDomainsState();
+  const card = document.createElement("div");
+  card.className = "card td-dom-list";
+  card.innerHTML = rows
+    .map((row, index) => {
+      const domain = String(row.domain || "").trim();
+      const error = String(row.error || "").trim();
+      const active = Number(row.activeTickets) || 0;
+      return `${index ? '<div class="divider"></div>' : ""}
+        <div class="row td-dom-row" data-domain="${esc(domain)}"${error ? ' data-tone="fail"' : ""}
+             role="link" tabindex="0" title="看「${esc(domain)}」的任务单">
+          <div class="row-main">
+            <div class="row-label">${esc(domain || "未命名领域")}</div>
+            <div class="row-hint">${error ? esc(error) : `活跃 ${active} 单`}</div>
+          </div>
+          <div class="row-control">
+            <span class="kv">活跃 ${active}</span>
+            <span class="pill-tag ${error ? "warn" : "ok"}">${error ? "异常" : "正常"}</span>
+          </div>
+        </div>`;
+    })
+    .join("");
+  el.domainsBody.replaceChildren(card);
+}
+
+async function loadDomains() {
+  showDomainsState("loading", "读取中…", "正在读取领域清单");
+  try {
+    const response = await request("/api/v1/domains", { cache: "no-store" });
+    if (!response.ok) throw statusError(response.status);
+    const data = await response.json();
+    renderDomains(Array.isArray(data.domains) ? data.domains : []);
+  } catch (error) {
+    // 照「当前项目 pill」的降级先例：读不到不白屏、不把错误吞掉，给一句说明 + 手动重试。
+    showDomainsState(
+      "error",
+      "领域清单读不出来",
+      `服务可能还没就绪，或接口暂时不可达（${error.message || ""}）。`,
+      { label: "重试", run: () => void loadDomains() },
+    );
+  }
+}
+
+function openDomains() {
+  void loadDomains();
+}
+
+el.domainsBack.addEventListener("click", () => go("chat"));
+el.domainsRefresh.addEventListener("click", () => void loadDomains());
+el.domainsBody.addEventListener("click", (event) => {
+  const row = event.target.closest(".td-dom-row");
+  if (!row || !row.dataset.domain) return;
+  // 直接落 #/tasks?domain=<domain>：openTasks 会从 hash 恢复筛选，衔接任务中心既有 domain 筛选。
+  location.hash = `#/tasks?domain=${encodeURIComponent(row.dataset.domain)}`;
+});
+el.domainsBody.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  const row = event.target.closest(".td-dom-row");
+  if (!row || !row.dataset.domain) return;
+  event.preventDefault();
+  location.hash = `#/tasks?domain=${encodeURIComponent(row.dataset.domain)}`;
 });
 
 document.addEventListener("visibilitychange", () => {
@@ -1183,6 +1877,9 @@ async function checkHealth() {
 
 /* ── 会话列表 ─────────────────────────────────────────── */
 
+// E4：侧栏「最近会话」折叠块只列前 5 条，其余去设置→会话搜索（#/settings/sessions）。
+const RECENTS_LIMIT = 5;
+
 async function loadChats() {
   try {
     const response = await request("/api/v1/agent/chats?limit=50", { cache: "no-store" });
@@ -1213,7 +1910,9 @@ function renderChats() {
   const ordered = [...visible]
     .reverse()
     .sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)));
-  for (const chat of ordered) {
+  // 原「对话」列表整块移入最近会话折叠块，只展示前 RECENTS_LIMIT 条；
+  // 5 条之外由块尾「全部会话 →」进设置→会话搜索，不在侧栏铺开。
+  for (const chat of ordered.slice(0, RECENTS_LIMIT)) {
     const row = document.createElement("div");
     row.className = "chat";
     row.tabIndex = 0;
@@ -1321,6 +2020,214 @@ function startRename(row, chat) {
   });
   input.addEventListener("blur", () => void commit(true));
 }
+
+/* ── 侧栏按「人」重排（E4）：总管区 / 执事花名册 ───────────
+ * 纯前端：数据只从既有端点 GET（partners / domains / chat messages），
+ * 不新增、不改后端契约。执事 canonical 会话对外 id = partner-<partnerId>
+ * （partner-runtime.ts 的 partnerCanonicalExternalId）。 */
+
+const KEY_RECENTS = "lifediary.chief.recents";
+const PARTNER_NO_CHAT_HINT = "这个执事还没有对话，先去设置→执事试跑或派个活";
+
+/* 最近会话折叠：默认展开，折叠态存 localStorage（刷新后仍折叠）。 */
+function applyRecents() {
+  const collapsed = localStorage.getItem(KEY_RECENTS) === "closed";
+  el.recents.classList.toggle("is-collapsed", collapsed);
+  el.recentsToggle.setAttribute("aria-expanded", String(!collapsed));
+}
+
+function toggleRecents() {
+  const collapsed = localStorage.getItem(KEY_RECENTS) === "closed";
+  localStorage.setItem(KEY_RECENTS, collapsed ? "open" : "closed");
+  applyRecents();
+}
+
+el.recentsToggle.addEventListener("click", toggleRecents);
+// 5 条之外：进设置→会话搜索。分区 id 是 chats，#/settings/sessions 由
+// currentSettingsPage() 做别名落到同一分区（会话分区已有搜索）。
+el.recentsAll.addEventListener("click", () => go("settings", "sessions"));
+
+/* 总管状态点：有进行中的轮（正在流式）就亮，否则灰。复用 .status-dot。 */
+function syncChiefDot() {
+  if (!el.chiefDot) return;
+  el.chiefDot.classList.toggle("ok", state.sending);
+  el.chiefDot.classList.toggle("idle", !state.sending);
+}
+
+/**
+ * 总管固定条目 = 打开总管主对话。
+ * 实现取方案 A 的 a：总管条目点击 = 打开最近一条「总管」会话，没有就新开一轮。
+ * 行为不变：仍走既有 go("chat") + openChat / startNewChat 流程，历史列表仍能恢复。
+ * 这里排除 partner-* 的执事 canonical 会话，避免把执事会话当成总管主对话。
+ */
+function openChiefChat() {
+  const ordered = state.chats
+    .filter((chat) => !String(chat.conversationId || "").startsWith("partner-"))
+    .reverse()
+    .sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)));
+  const recent = ordered[0];
+  go("chat");
+  if (recent) void openChat(recent.conversationId);
+  else startNewChat();
+}
+
+el.chiefEntry.addEventListener("click", openChiefChat);
+el.chiefEntry.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    openChiefChat();
+  }
+});
+
+/* 执事花名册：GET /api/v1/partners（过滤 chief + archived）
+   + GET /api/v1/domains（domain → activeTickets）。两个端点各自容错，
+   一个读不到不拖累另一个；403 交给令牌门，不把花名册刷成空。 */
+async function loadRoster() {
+  const box = el.partnerRoster;
+  if (!box) return;
+  let partners = [];
+  let domains = [];
+  try {
+    const response = await request("/api/v1/partners", { cache: "no-store" });
+    if (response.ok) partners = (await response.json().catch(() => ({}))).partners || [];
+  } catch (error) {
+    if (error.message === "forbidden") return;
+  }
+  try {
+    const response = await request("/api/v1/domains", { cache: "no-store" });
+    if (response.ok) domains = (await response.json().catch(() => ({}))).domains || [];
+  } catch (error) {
+    if (error.message === "forbidden") return;
+  }
+  renderRoster(
+    Array.isArray(partners) ? partners : [],
+    Array.isArray(domains) ? domains : [],
+  );
+}
+
+function renderRoster(partners, domainRows) {
+  const box = el.partnerRoster;
+  box.replaceChildren();
+
+  const activeByDomain = new Map();
+  for (const row of domainRows) {
+    const key = String(row.domain || "").trim();
+    if (key) activeByDomain.set(key, Number(row.activeTickets) || 0);
+  }
+
+  // 数据源返回全部（含 chief）；过滤掉 chief 与已归档的
+  const roster = partners.filter(
+    (partner) => partner && partner.id !== "chief" && partner.status !== "archived",
+  );
+
+  if (!roster.length) {
+    const hint = document.createElement("div");
+    hint.className = "roster-empty";
+    hint.textContent = "还没有执事。让总管建一个，或在设置→执事里新建。";
+    box.append(hint);
+    return;
+  }
+
+  for (const partner of roster) {
+    const id = String(partner.id || "");
+    const name = String(partner.name || "执事").trim() || "执事";
+    const domain = String(partner.domain || "").trim();
+    const active = domain ? activeByDomain.get(domain) || 0 : 0;
+    const lit = partner.status === "active";
+
+    const row = document.createElement("div");
+    row.className = "side-item roster-row";
+    row.dataset.partnerId = id;
+    row.setAttribute("role", "button");
+    row.tabIndex = 0;
+    row.title = `${name}${domain ? " · " + domain : ""}`;
+
+    const dot = document.createElement("i");
+    dot.className = `status-dot ${lit ? "ok" : "idle"}`;
+    dot.setAttribute("aria-hidden", "true");
+
+    // 无图用名字首字圆形，别加新图片资源
+    const avatar = document.createElement("span");
+    avatar.className = "pt-avatar";
+    avatar.setAttribute("aria-hidden", "true");
+    avatar.textContent = name.slice(0, 1);
+
+    const label = document.createElement("span");
+    label.className = "roster-name";
+    label.textContent = name;
+
+    row.append(dot, avatar, label);
+
+    if (domain) {
+      const tag = document.createElement("span");
+      tag.className = "pill-tag roster-domain";
+      tag.textContent = domain;
+      row.append(tag);
+    }
+
+    if (active > 0) {
+      // 数字可点 → 任务中心按 domain 筛选（.side-count 与任务中心徽章同款）
+      const count = document.createElement("button");
+      count.type = "button";
+      count.className = "side-count roster-count";
+      count.textContent = `${active} 单`;
+      count.title = `看「${domain}」的任务单`;
+      count.addEventListener("click", (event) => {
+        event.stopPropagation();
+        location.hash = `#/tasks?domain=${encodeURIComponent(domain)}`;
+      });
+      row.append(count);
+    } else {
+      const idle = document.createElement("span");
+      idle.className = "roster-idle";
+      idle.textContent = "空闲";
+      row.append(idle);
+    }
+
+    const open = () => void openPartnerChat(id);
+    row.addEventListener("click", open);
+    row.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        open();
+      }
+    });
+    box.append(row);
+  }
+}
+
+/**
+ * 行点击 = 打开该执事的 canonical 对话。
+ * 任务书写 go("#/chat/" + "partner-" + id)：本仓库 chat 会话 id 不在 hash 里，
+ * 且「不改路由体系」不允许新增 #/chat/<id> 路由，故沿用既有跳转写法
+ * （搜索结果 / 任务来源链接同款）：go("chat") 切路由，再 openChat(convId)。
+ * 会话还没建过（404/空）→ 回退提示，不发请求建会话，不绕过 canonical 建立流程。
+ */
+async function openPartnerChat(partnerId) {
+  const convId = `partner-${partnerId}`;
+  try {
+    const response = await request(
+      `/api/v1/agent/chat/${encodeURIComponent(convId)}/messages?limit=200`,
+      { cache: "no-store" },
+    );
+    if (response.status === 404 || !response.ok) {
+      toast(PARTNER_NO_CHAT_HINT);
+      return;
+    }
+    const data = await response.json().catch(() => ({}));
+    if (!Array.isArray(data.messages) || !data.messages.length) {
+      toast(PARTNER_NO_CHAT_HINT);
+      return;
+    }
+    go("chat");
+    void openChat(convId);
+  } catch (error) {
+    if (error.message !== "forbidden") toast(PARTNER_NO_CHAT_HINT);
+  }
+}
+
+// 分区标题右侧 ＋：复用 E1「新建执事」模态，不重写
+el.partnerAddSide.addEventListener("click", () => openCreatePartnerModal());
 
 /* ── 消息渲染 ─────────────────────────────────────────── */
 
@@ -1862,7 +2769,15 @@ async function openChat(conversationId) {
     clearThread();
     const messages = data.messages || [];
     for (const message of messages) {
-      addMessage(message.role === "user" ? "user" : "assistant", message.text, message.at);
+      const shown = addMessage(message.role === "user" ? "user" : "assistant", message.text, message.at);
+      // E2 #7：助手正文里以「【需要你】」开头的行加 .attention（只改渲染判断，不改内容）。
+      if (message.role !== "user") {
+        for (const block of shown.body.children) {
+          if (block.textContent.split("\n").some((line) => line.trimStart().startsWith("【需要你】"))) {
+            block.classList.add("attention");
+          }
+        }
+      }
     }
     if (!messages.length) {
       el.title.textContent = "新对话";
@@ -1879,7 +2794,6 @@ async function openChat(conversationId) {
       addError(`读历史失败：${error.message}`);
     }
   }
-  syncExport();
   void syncCtxMeter();
 }
 
@@ -1890,7 +2804,6 @@ function startNewChat() {
   renderChats();
   clearThread();
   el.title.textContent = "新对话";
-  syncExport();
   el.ctxRing.hidden = true;
   el.input.focus();
 }
@@ -1904,6 +2817,8 @@ function setSending(value) {
   el.send.setAttribute("aria-label", value ? "停止" : "发送");
   el.send.title = value ? "停止" : "";
   syncSendEnabled();
+  // E4：总管状态点随「进行中的轮」亮/灰
+  syncChiefDot();
 }
 
 function syncSendEnabled() {
@@ -1984,7 +2899,15 @@ function renderApprovalCard(event) {
 
   const title = document.createElement("p");
   title.className = "attention-text";
-  title.textContent = `要执行 ${event.tool || "工具"}，需要你确认`;
+  title.append(document.createTextNode(`要执行 ${event.tool || "工具"}`));
+  // 自主轮（例行任务）的审批：工具名旁挂一枚徽章（批次C C2，纯增量）
+  if (event.origin === "autonomous") {
+    const routineTag = document.createElement("span");
+    routineTag.className = "pill-tag";
+    routineTag.textContent = "例行任务";
+    title.append(routineTag);
+  }
+  title.append(document.createTextNode("，需要你确认"));
   card.append(title);
 
   const args = document.createElement("pre");
@@ -2205,6 +3128,8 @@ async function send(text) {
 
   let answer = "";
   let frame = 0;
+  // 这一轮已经用后端给的具体文案解释过「没有回复」时，结尾就不再补兜底的"模型没有返回内容。"
+  let noReplyExplained = false;
   const paint = () => {
     frame = 0;
     if (!body.isConnected) return;
@@ -2309,7 +3234,6 @@ async function send(text) {
             streamConv = event.conversationId;
             localStorage.setItem(KEY_CONV, event.conversationId);
             renderChats();
-            syncExport();
             // 新会话（或重启后的旧会话）要立刻出现在侧栏里——
             // 以前只靠页面加载时拉一次，新建会话要等到重载才可见，置顶/重命名都够不着
             void loadChats();
@@ -2367,14 +3291,23 @@ async function send(text) {
           } else if (event.type === "done") {
             sawDone = true;
             if (event.finishReason === "error" && !answer) {
-              addError("这一轮出错了。", { retryable: true });
+              if (!noReplyExplained) addError("这一轮出错了。", { retryable: true });
               maybeNotify("这一轮没答上来", el.title.textContent || "对话", streamConv);
             } else {
               maybeNotify("Selenite 回复完成", el.title.textContent || "对话", streamConv);
             }
             if (event.usage) attachUsage(turn.root, event.usage, Date.now() - turnStartMs);
             void syncCtxMeter();
+          } else if (event.type === "unanswered") {
+            // 后端明确说「这次没能生成回复」：用它的文案，别让结尾兜底再补一句笼统的"模型没有返回内容。"
+            noReplyExplained = true;
+            addError(event.message);
+            maybeNotify("这一轮没答上来", el.title.textContent || "对话", streamConv);
+            if (state.stick) scrollToEnd();
           } else if (event.type === "error") {
+            // 后端把 unanswered 透成 error 帧时（index.ts 收尾兜底），文案就是那句具体提示，
+            // 同样记下，避免结尾再叠一条"模型没有返回内容。"
+            noReplyExplained = true;
             addError(event.message || "出错了", { retryable: true });
             maybeNotify("Selenite 出错了", event.message || "", streamConv);
           }
@@ -2383,7 +3316,7 @@ async function send(text) {
     }
     caret.remove();
     paint();
-    if (!answer.trim()) {
+    if (!answer.trim() && !noReplyExplained) {
       addError("模型没有返回内容。", { retryable: true });
     }
   } catch (error) {
@@ -2652,9 +3585,40 @@ function modelLabel(catalog) {
   return `${provider ? provider.name : current.providerId} · ${current.modelId}`;
 }
 
+/** pill 文字滚动（2026-11-05，ZCode RollingToolbarLabel 同拍 200ms）：
+ *  换模型时旧字向上滚出淡去、新字从下方滚入。外层 span 是裁切罩
+ *  （沿用 .composer-pill > span 的 overflow），真正动的是内层 .pill-label-text。
+ *  文字没变（例行刷新）不播。 */
+function setModelPillLabel(text) {
+  const wrap = el.modelPillLabel;
+  if (!wrap) return;
+  const current = wrap.querySelector(".pill-label-text");
+  if ((current ? current.textContent : wrap.textContent) === text) return;
+  const enter = document.createElement("span");
+  enter.className = "pill-label-text";
+  enter.textContent = text;
+  if (!current || matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    wrap.replaceChildren(enter);
+    return;
+  }
+  const exit = document.createElement("span");
+  exit.className = "pill-label-text pill-label-exit";
+  exit.setAttribute("aria-hidden", "true");
+  exit.textContent = current.textContent;
+  enter.classList.add("pill-label-enter");
+  wrap.replaceChildren(enter, exit);
+  // 播完归位：enter 摘掉动画类，exit 拆走；定时器兜底 animationend 丢失
+  const clean = () => {
+    enter.classList.remove("pill-label-enter");
+    exit.remove();
+  };
+  enter.addEventListener("animationend", clean, { once: true });
+  setTimeout(() => { if (exit.isConnected) clean(); }, 300);
+}
+
 function updateModelPill(catalog = state.modelCatalog) {
   if (!el.modelPillLabel) return;
-  el.modelPillLabel.textContent = modelLabel(catalog);
+  setModelPillLabel(modelLabel(catalog));
   syncThinkingPill(catalog);
   if (el.modelPill) {
     el.modelPill.title = catalog && catalog.current
@@ -2679,11 +3643,18 @@ function closeModelMenu() {
 
 /** 模型行兼容两种形状：新的 `{id, thinkingLevels}` 与旧的裸字符串（后端未上线时兜底） */
 function normalizeModelRow(row) {
-  if (typeof row === "string") return { id: row, thinkingLevels: ["off", "low", "high"] };
+  if (typeof row === "string") {
+    return { id: row, thinkingLevels: ["off", "low", "high"], contextWindow: null, maxTokens: null };
+  }
   if (!row || typeof row.id !== "string") return null;
   const declared = Array.isArray(row.thinkingLevels) ? row.thinkingLevels : [];
   const levels = THINKING_LEVELS.filter((level) => declared.includes(level));
-  return { id: row.id, thinkingLevels: levels.length ? levels : ["off", "low", "high"] };
+  return {
+    id: row.id,
+    thinkingLevels: levels.length ? levels : ["off", "low", "high"],
+    contextWindow: Number.isFinite(row.contextWindow) ? row.contextWindow : null,
+    maxTokens: Number.isFinite(row.maxTokens) ? row.maxTokens : null,
+  };
 }
 
 /** 菜单里能上分段行的供应商：凡有模型的都上（2026-11-05）。
@@ -2757,7 +3728,9 @@ function renderModelMenu(catalog, preferredProviderId) {
     // 行 = 模型名（可点，选中行 ✓）；只有当前行额外挂档位分段（2026-11-05）
     const row = document.createElement("div");
     row.className = "model-row";
-    row.dataset.current = String(selected);
+    // 统一写 "1"/"0"：CSS 当前行样式与 syncThinkingSegments / 焦点回位选择器都按 "1" 找
+    // （原来写 "true"/"false"，那两处从来没命中过）
+    row.dataset.current = selected ? "1" : "0";
     row.setAttribute("role", "none");
 
     const item = document.createElement("button");
@@ -2765,18 +3738,20 @@ function renderModelMenu(catalog, preferredProviderId) {
     item.className = "model-item";
     item.setAttribute("role", "menuitemradio");
     item.setAttribute("aria-checked", String(Boolean(selected)));
-    item.title = `${active.name || active.id} · ${model.id}`;
+    const contextText = model.contextWindow ? formatTokenCount(model.contextWindow) : "";
+    item.title = `${active.name || active.id} · ${model.id}${contextText ? ` · ${contextText} 上下文` : ""}`;
     const name = document.createElement("span");
     name.className = "model-name";
     name.textContent = model.id;
     item.append(name);
-    if (selected) {
-      const check = document.createElement("span");
-      check.className = "model-check";
-      check.setAttribute("aria-hidden", "true");
-      check.textContent = "✓";
-      item.append(check);
+    if (contextText) {
+      const meta = document.createElement("span");
+      meta.className = "model-meta";
+      meta.textContent = `上下文 ${contextText}`;
+      item.append(meta);
     }
+    // 选中行不放 ✓（2026-11-05 用户口径，同 cindy UnifiedModelRow 的裁决）：
+    // 选中态已有强调色 + 加粗 + 档位分段，再挂勾是重复信号
     // 选中后菜单不关：重渲染出档位分段，接着选强度（D2 的「先选模型再选强度」）
     item.addEventListener("click", () => {
       void chooseModel(active, model.id, model.thinkingLevels, { keepOpen: true });
@@ -2873,69 +3848,48 @@ async function chooseCurrentThinking(level) {
   await setThinkingLevel(level);
 }
 
-/* ── 侧栏项目切换器（2026-11-04）──────────────────────────
+/* ── 侧栏项目面板（2026-11-04 建，2026-11-06 改为总览）────
  * 展开态 pill 与收起轨道按钮是同一份弹层、同一个渲染函数。
+ * pill = 主项目（工作区根）；展开是「主项目 + 子项目」总览，**不再切「当前项目」**
+ * ——没人在意固定在哪个目录干活，派活时才指定项目（resolveDelegationProject）。
  * 列表每次打开现拉（同模型菜单口径）：项目可能在设置页刚建/归档，也可能是
- * 另一台设备改的。契约见接口文档 §工作区；currentProjectId 是后加字段，
- * 老后端读不到时按 null（主工作区）处理，不报错。 */
+ * 另一台设备改的。契约见接口文档 §工作区。 */
 
-const PROJECT_HOME_LABEL = "杂事 · 主工作区";
-const PROJECT_SWITCH_ERROR = {
-  unknown_project: "这个项目已经不在登记表里了",
-  project_missing: "项目目录不在了，先修好目录再切",
-  outside_workspace: "这个项目不在当前工作区里",
-  current_project_disabled: "当前项目功能已关闭",
-};
+const PROJECT_UNAVAILABLE_HINT = "读不到项目接口，重启服务后再试";
 
 let projectAnchor = null;
 let projectLoading = false;
 // 打开序号：慢网下点了外面，等在路上的现拉结果回来也不许自己弹出来
 let projectOpenToken = 0;
 
-function projectSwitchErrorText(data, status) {
-  return PROJECT_SWITCH_ERROR[data?.error] || data?.message || `没切成：HTTP ${status}`;
-}
-
-/** 项目名首字：Array.from 取，emoji / 代理对不会被切成半个字符 */
-function firstChar(text) {
-  return Array.from(String(text || "").trim())[0] || "";
-}
-
-/** 两个接口都拿全了才返回；任一失败返回 null，调用方保持原状（不抛） */
+/** 拿全了才返回；失败返回 null，调用方保持原状（不抛）。
+ *  GET /api/v1/projects 本身就带 workspace，不用再打一发 /workspaces。 */
 async function fetchProjectSwitchData() {
-  const [workspaceResponse, projectsResponse] = await Promise.all([
-    request("/api/v1/workspaces", { cache: "no-store" }),
-    request("/api/v1/projects", { cache: "no-store" }),
-  ]);
-  if (!workspaceResponse.ok || !projectsResponse.ok) return null;
-  const workspaceData = await workspaceResponse.json().catch(() => ({}));
-  const projectsData = await projectsResponse.json().catch(() => ({}));
-  const workspace = workspaceData.workspace || projectsData.workspace || null;
-  const projects = Array.isArray(projectsData.projects) ? projectsData.projects : [];
+  const response = await request("/api/v1/projects", { cache: "no-store" });
+  if (!response.ok) return null;
+  const data = await response.json().catch(() => ({}));
+  const workspace = data.workspace || null;
+  const projects = Array.isArray(data.projects) ? data.projects : [];
   const items = projects
     .filter((project) => project && typeof project.id === "string")
-    // 归档 / 目录已消失的不进列表：切过去也跑不起来。
-    // exists 缺省时按「还在」处理——老后端不带这个字段，全藏起来反而像功能坏了。
-    .filter((project) => !project.archived && project.exists !== false)
+    // 归档的不进列表（去设置页看）；目录丢了 / 跑出工作区的照常显示、行尾标注——
+    // 总览就该都能看见，藏起来反而像「凭空少了项目」。
+    .filter((project) => !project.archived)
     .map((project) => ({
       id: project.id,
       name: project.name || project.id,
       rootPath: project.rootPath || "",
+      missing: project.exists === false,
       outside: project.insideWorkspace === false,
     }));
-  return {
-    workspace,
-    items,
-    currentId: typeof workspaceData.currentProjectId === "string" ? workspaceData.currentProjectId : null,
-  };
+  return { workspace, items };
 }
 
 function applyProjectData(data) {
   const switcher = state.switcher;
   switcher.workspace = data.workspace;
-  switcher.currentId = data.currentId;
-  const current = data.items.find((item) => item.id === data.currentId);
-  switcher.currentName = current ? current.name : "";
+  switcher.subCount = data.items.length;
+  switcher.unavailable = false;
   syncProjectPill();
 }
 
@@ -2943,80 +3897,63 @@ function applyProjectData(data) {
 function syncProjectPill() {
   const switcher = state.switcher;
   const hasWorkspace = Boolean(switcher.workspace);
-  const active = Boolean(switcher.currentId);
+  // E5：接口读不到（旧后端 404 / 临时 5xx）时**不能把入口藏起来**——藏起来就是
+  // 用户看到的"项目凭空没了"。降级成可见的「项目不可用」pill，点一下给 toast 并重试；
+  // 下次 hashchange / 启动 / 点击仍会自动恢复。只有 403（令牌门）才保持隐藏。
+  const unavailable = Boolean(switcher.unavailable);
   // F1：没有工作区也显示 pill —— 它同时是「添加主项目」的入口，
   // 否则侧栏没有任何地方能打开添加主项目弹窗。
-  const label = hasWorkspace
-    ? active
-      ? switcher.currentName || "项目不可用"
-      : PROJECT_HOME_LABEL
-    : "添加主项目";
-  const off = switcher.disabled;
+  const label = unavailable
+    ? "项目不可用"
+    : hasWorkspace
+      ? baseNameOf(switcher.workspace?.rootPath) || "主项目"
+      : "添加主项目";
+  const tip = unavailable
+    ? PROJECT_UNAVAILABLE_HINT
+    : hasWorkspace
+      ? `主项目：${switcher.workspace?.rootPath || ""} · ${switcher.subCount} 个子项目`
+      : "添加主项目";
 
   if (el.sideProj) el.sideProj.hidden = false;
   if (el.railProj) el.railProj.hidden = false;
 
   if (el.projectPillLabel) el.projectPillLabel.textContent = label;
   if (el.projectPill) {
-    el.projectPill.setAttribute("aria-disabled", String(off));
-    el.projectPill.title = off
-      ? "当前项目功能已关闭（CURRENT_PROJECT=false）"
-      : hasWorkspace
-        ? `当前：${label}（点击切换项目）`
-        : "还没有主工作区，点这里添加";
+    el.projectPill.classList.toggle("is-unavailable", unavailable);
+    el.projectPill.title = tip;
+    el.projectPill.setAttribute("aria-label", unavailable ? "项目不可用" : `项目：${label}`);
   }
 
   if (el.railProj) {
-    el.railProj.setAttribute("aria-disabled", String(off));
-    el.railProj.dataset.active = String(active);
+    el.railProj.classList.toggle("is-unavailable", unavailable);
     // 轨道 tooltip 走 data-tip（自绘右侧气泡），不再用原生 title
     el.railProj.removeAttribute("title");
-    el.railProj.dataset.tip = off
-      ? "当前项目功能已关闭（CURRENT_PROJECT=false）"
-      : hasWorkspace
-        ? `切换项目（当前：${label}）`
-        : "添加主项目";
-    el.railProj.setAttribute(
-      "aria-label",
-      hasWorkspace ? `切换项目，当前：${label}` : "添加主项目",
-    );
-  }
-  if (el.railProjIcon) el.railProjIcon.hidden = active;
-  if (el.railProjMark) {
-    el.railProjMark.hidden = !active;
-    el.railProjMark.textContent = active ? firstChar(switcher.currentName) || "项" : "";
+    el.railProj.dataset.tip = tip;
+    el.railProj.setAttribute("aria-label", "项目");
   }
 }
 
-function projectCheck() {
-  const check = document.createElement("span");
-  check.className = "proj-check";
-  check.setAttribute("aria-hidden", "true");
-  check.textContent = "✓";
-  return check;
-}
-
-/** 弹层内容：主工作区 / 已登记项目 / 底部「添加子项目 · 添加主项目 · 管理项目」 */
-function renderProjectMenu(items, currentId) {
+/** 弹层内容：主项目（带标注）+ 子项目总览 + 底部「添加子项目 · 添加主项目 · 管理项目」。
+ *  只读总览，行不可点——不在侧栏切项目，派活时由助手按登记名指定。 */
+function renderProjectMenu(items) {
   const menu = el.projectMenu;
   if (!menu) return;
   menu.replaceChildren();
-  const hasWorkspace = Boolean(state.switcher.workspace?.rootPath);
+  const workspace = state.switcher.workspace;
+  const hasWorkspace = Boolean(workspace?.rootPath);
 
   if (hasWorkspace) {
-    const home = document.createElement("button");
-    home.type = "button";
-    home.className = "proj-item";
-    home.setAttribute("role", "menuitemradio");
-    home.setAttribute("aria-checked", String(currentId === null));
-    home.title = "主工作区：没有特定项目，跑杂事";
-    const homeName = document.createElement("span");
-    homeName.className = "proj-item-name";
-    homeName.textContent = PROJECT_HOME_LABEL;
-    home.append(homeName);
-    if (currentId === null) home.append(projectCheck());
-    home.addEventListener("click", () => void switchProject(null, PROJECT_HOME_LABEL));
-    menu.append(home);
+    const main = document.createElement("div");
+    main.className = "proj-item is-static";
+    main.title = workspace.rootPath;
+    const mainName = document.createElement("span");
+    mainName.className = "proj-item-name";
+    mainName.textContent = baseNameOf(workspace.rootPath) || "主项目";
+    const mainTag = document.createElement("span");
+    mainTag.className = "proj-tag";
+    mainTag.textContent = "主项目";
+    main.append(mainName, mainTag);
+    menu.append(main);
   } else {
     const empty = document.createElement("div");
     empty.className = "proj-empty";
@@ -3033,22 +3970,28 @@ function renderProjectMenu(items, currentId) {
 
   for (const project of items) {
     if (!hasWorkspace) break;
-    const selected = project.id === currentId;
-    const row = document.createElement("button");
-    row.type = "button";
-    row.className = "proj-item";
-    row.setAttribute("role", "menuitemradio");
-    row.setAttribute("aria-checked", String(selected));
-    row.title = project.outside
-      ? `${project.rootPath || project.name}（不在当前工作区）`
-      : project.rootPath || project.name;
+    const row = document.createElement("div");
+    row.className = "proj-item is-static";
+    row.title = project.rootPath || project.name;
     const name = document.createElement("span");
     name.className = "proj-item-name";
     name.textContent = project.name;
     row.append(name);
-    if (selected) row.append(projectCheck());
-    row.addEventListener("click", () => void switchProject(project.id, project.name));
+    // 行尾标注异常：目录丢了（黄）优先于跑出工作区（灰）
+    if (project.missing || project.outside) {
+      const tag = document.createElement("span");
+      tag.className = `proj-tag ${project.missing ? "is-warn" : "is-idle"}`;
+      tag.textContent = project.missing ? "目录不在了" : "不在工作区";
+      row.append(tag);
+    }
     menu.append(row);
+  }
+
+  if (hasWorkspace && !items.length) {
+    const empty = document.createElement("div");
+    empty.className = "proj-empty";
+    empty.textContent = "还没有子项目。";
+    menu.append(empty);
   }
 
   const foot = document.createElement("div");
@@ -3371,44 +4314,6 @@ function openAddSubprojectModal(explicitRoot) {
   });
 }
 
-/** 切换即 PUT；失败把错误码翻成人话，回滚开关命中后本会话不再发请求 */
-async function switchProject(nextId, label) {
-  const switcher = state.switcher;
-  if (nextId === switcher.currentId) {
-    closeProjectMenu();
-    return;
-  }
-  if (projectLoading) return;
-  projectLoading = true;
-  try {
-    const response = await request("/api/v1/workspaces/current-project", {
-      method: "PUT",
-      body: JSON.stringify({ projectId: nextId }),
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      // 回滚开关：记住这一次，pill 直接降级，不让人反复点出同一个错
-      if (data.error === "current_project_disabled") {
-        switcher.disabled = true;
-        syncProjectPill();
-        closeProjectMenu();
-      }
-      toast(projectSwitchErrorText(data, response.status));
-      return;
-    }
-    switcher.currentId =
-      typeof data.projectId === "string" || data.projectId === null ? data.projectId : nextId;
-    switcher.currentName = nextId ? label : "";
-    syncProjectPill();
-    closeProjectMenu();
-    toast(`已切到 ${label}`);
-  } catch (error) {
-    if (error.message !== "forbidden") toast(`没切成：${error.message}`);
-  } finally {
-    projectLoading = false;
-  }
-}
-
 function closeProjectMenu() {
   projectOpenToken += 1;
   if (!el.projectMenu) return;
@@ -3456,7 +4361,15 @@ async function toggleProjectMenu(trigger) {
     closeProjectMenu();
     return;
   }
-  if (state.switcher.disabled || projectLoading) return;
+  if (projectLoading) return;
+  // 上次接口读不到（旧后端 / 临时故障）：点一下先重试，仍不行再给明确提示。
+  if (state.switcher.unavailable) {
+    await refreshProjectPill();
+    if (state.switcher.unavailable) {
+      toast(PROJECT_UNAVAILABLE_HINT);
+      return;
+    }
+  }
   projectLoading = true;
   const token = ++projectOpenToken;
   try {
@@ -3465,30 +4378,46 @@ async function toggleProjectMenu(trigger) {
     // 现拉期间点过外面 / 换了路由：这次结果作废，别把弹层补出来
     if (token !== projectOpenToken) return;
     if (!data) {
-      toast("拿不到项目列表");
+      state.switcher.unavailable = true;
+      syncProjectPill();
+      toast(PROJECT_UNAVAILABLE_HINT);
       return;
     }
     applyProjectData(data);
     // 没有工作区也照常打开：里面还有「添加主项目」，是首次使用的唯一入口
-    renderProjectMenu(data.items, data.currentId);
+    renderProjectMenu(data.items);
     projectAnchor = trigger;
     openPopover(el.projectMenu, trigger);
     // openPopover 会清掉 left/right，落点必须在它之后写
     placeProjectMenu(trigger);
   } catch (error) {
-    if (error.message !== "forbidden") toast("拿不到项目列表");
+    if (error.message !== "forbidden") {
+      state.switcher.unavailable = true;
+      syncProjectPill();
+      toast("读不到项目列表");
+    }
   } finally {
     projectLoading = false;
   }
 }
 
-/** 启动 / 回到对话页时补一次 pill 文案：读不到就保持隐藏，不留点了会报错的空壳 */
+/** 启动 / 回到对话页时补一次 pill 文案：读不到就保持现状，下次打开弹层会再试 */
 async function refreshProjectPill() {
   try {
     const data = await fetchProjectSwitchData();
-    if (data) applyProjectData(data);
-  } catch {
-    /* 离线或接口未上线：保持现状，下次打开弹层会再试 */
+    if (data) {
+      applyProjectData(data);
+      return;
+    }
+    // 接口在但没给数据（404/5xx）：降级成可见的「项目不可用」，
+    // 不能让 pill 保持初始 hidden——那正是"项目凭空消失"的观感来源。
+    state.switcher.unavailable = true;
+    syncProjectPill();
+  } catch (error) {
+    // 403 交给令牌门；其它错误同样降级显示，下一次刷新会自动重试。
+    if (error.message === "forbidden") return;
+    state.switcher.unavailable = true;
+    syncProjectPill();
   }
 }
 
@@ -3570,6 +4499,7 @@ document.addEventListener("keydown", (event) => {
       if (modalOpen()) return;
       if (!el.menuPop.hidden) closeMenu();
       else if (currentRoute() === "settings") go("chat");
+      else if (currentRoute() === "domains") go("chat");
       else if (currentRoute() === "tasks") {
         // 详情先退回看板，再按一次才回对话；跟设置页的返回逻辑一致
         if (currentTicketId()) go("tasks");
@@ -3636,57 +4566,48 @@ el.thread.addEventListener("click", async (event) => {
   }, 1500);
 });
 
-/* ── 导出对话 Markdown（批次一）──────────────────────────
-   正文从 /messages 现取（不解析屏幕上的 HTML），标题用当前会话标题。 */
-async function exportConversation() {
-  if (!state.conversationId) return;
+/* ── 全部数据导出（2026-11-05 J1）──────────────────────
+   单对话导出退役，入口挪到设置 → 会话。走 request() 拿 blob（带凭据，
+   403 时能 toast），不裸跳转——裸跳转拿不到错误响应。 */
+async function exportAllData() {
   try {
-    const response = await request(
-      `/api/v1/agent/chat/${encodeURIComponent(state.conversationId)}/messages?limit=500`,
-      { cache: "no-store" },
-    );
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const data = await response.json();
-    const title = el.title.textContent || "对话";
-    const lines = [
-      `# ${title}`,
-      "",
-      `> 导出自 Selenite · ${new Date().toLocaleString("zh-CN")}`,
-      "",
-    ];
-    for (const message of data.messages || []) {
-      const who = message.role === "user" ? "我" : "Selenite";
-      const at = message.at ? new Date(message.at).toLocaleString("zh-CN") : "";
-      lines.push(`**${who}**${at ? ` · ${at}` : ""}:`, "", message.text || "", "");
+    const response = await request("/api/v1/agent/export", { cache: "no-store" });
+    if (!response.ok) {
+      const detail = await response.json().catch(() => null);
+      throw new Error(detail?.message || `HTTP ${response.status}`);
     }
-    const blob = new Blob([lines.join("\n")], { type: "text/markdown;charset=utf-8" });
+    const blob = await response.blob();
+    const disposition = response.headers.get("content-disposition") || "";
+    const match = disposition.match(/filename="?([^";]+)"?/i);
+    const name =
+      match?.[1] || `selenite-export-${new Date().toISOString().slice(0, 10)}.json`;
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
-    const name = title.replace(/[\\/:*?"<>|]/g, "_").slice(0, 40) || "对话";
-    link.download = `${name}-${new Date().toISOString().slice(0, 10)}.md`;
     link.href = url;
+    link.download = name;
     link.click();
     URL.revokeObjectURL(url);
+    toast("已导出");
   } catch (error) {
-    if (error.message !== "forbidden") addError(`导出失败：${error.message}`);
+    toast(error.message === "forbidden" ? "导出失败：没有访问权限" : `导出失败：${error.message}`);
   }
 }
 
-/** 导出入口只在有会话时出现（新对话没有可导的东西） */
-function syncExport() {
-  el.exportChat.hidden = !state.conversationId;
-}
-el.exportChat.addEventListener("click", () => void exportConversation());
-
-/* ── 收起轨道（2026-11-05 F1）──────────────────────────
-   收起不再是整栏消失：72px 图标轨上「新对话 / 任务中心 / 项目 / 设置」是真功能，
-   领域负责人 / 群组是禁用占位（HTML 里 disabled + tooltip 写明）。 */
+/* ── 收起轨道（2026-11-05 F1 / E4 重排）──────────────────
+   收起不再是整栏消失：72px 图标轨上「总管 / 新对话 / 任务中心 / 项目 / 设置」是真功能；
+   执事占位与群组占位都保留（群组仍 disabled），执事不在轨道展开，悬停提示去展开侧栏。
+   领域负责人占位移除：领域概览并入执事花名册，#/domains 独立页与路由原样保留。 */
 el.railNew.addEventListener("click", () => {
   if (!sidebarOpen()) toggleSidebar();
   go("chat");
   startNewChat();
 });
 el.railSettings.addEventListener("click", () => go("settings"));
+// 总管首字圆钮 → 打开主对话；执事占位 → 展开侧栏看花名册
+el.railChief.addEventListener("click", openChiefChat);
+el.railPartners.addEventListener("click", () => {
+  if (!sidebarOpen()) toggleSidebar();
+});
 
 for (const hint of document.querySelectorAll("[data-hint]")) {
   hint.addEventListener("click", () => {
@@ -3707,14 +4628,45 @@ const ACCENTS = [
 
 let pairTimer = 0;
 
+// 每项 icon 是 Lucide 0.468 官方图标的内部图元（24 视框，外层 svg 统一给属性），
+// 不再只存一条 path：Lucide 里 bells/server 等多图元图标拼不出来。
 const SETTINGS_SECTIONS = [
-  { id: "appearance", label: "外观", path: "M8 4.6a3.4 3.4 0 1 0 0 6.8 3.4 3.4 0 0 0 0-6.8Z" },
-  { id: "chats", label: "会话", path: "M3 4.2h10v6.6H7.2L4.4 13V4.2H3Z" },
-  { id: "projects", label: "项目", path: "M2.6 3.6h4l1.2 1.6h5.6v7H2.6zM2.6 6.4h10.8" },
-  { id: "reminders", label: "提醒", path: "M8 2.6a3 3 0 0 1 3 3v2.1l1 2.2H4l1-2.2V5.6a3 3 0 0 1 3-3Zm-1.4 9.4h2.8a1.4 1.4 0 0 1-2.8 0Z" },
-  { id: "connect", label: "连接", path: "M6 2.6h4v10.8H6zM7.2 11.6h1.6" },
-  { id: "service", label: "服务", path: "M3 3.4h10v3.2H3zM3 9.4h10v3.2H3z" },
-  { id: "about", label: "关于", path: "M8 2.6a5.4 5.4 0 1 0 0 10.8A5.4 5.4 0 0 0 8 2.6Zm-.8 2.2h1.6v1.6H7.2Zm0 2.6h1.6v4H7.2Z" },
+  {
+    id: "appearance",
+    label: "外观",
+    icon: '<circle cx="13.5" cy="6.5" r=".5" fill="currentColor"/><circle cx="17.5" cy="10.5" r=".5" fill="currentColor"/><circle cx="8.5" cy="7.5" r=".5" fill="currentColor"/><circle cx="6.5" cy="12.5" r=".5" fill="currentColor"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/>',
+  },
+  { id: "chats", label: "会话", icon: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>' },
+  {
+    id: "projects",
+    label: "项目",
+    icon: '<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>',
+  },
+  {
+    id: "reminders",
+    label: "提醒",
+    icon: '<path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/>',
+  },
+  {
+    id: "connect",
+    label: "连接",
+    icon: '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
+  },
+  {
+    id: "service",
+    label: "服务",
+    icon: '<rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/>',
+  },
+  {
+    id: "partners",
+    label: "执事",
+    icon: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+  },
+  {
+    id: "about",
+    label: "关于",
+    icon: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
+  },
 ];
 
 /**
@@ -3733,7 +4685,7 @@ function renderSettingsNav(page) {
     button.setAttribute("role", "tab");
     button.setAttribute("aria-selected", String(section.id === page));
     button.setAttribute("aria-controls", "settings-inner");
-    button.innerHTML = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${section.path}"/></svg><span>${section.label}</span>`;
+    button.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${section.icon}</svg><span>${section.label}</span>`;
     button.addEventListener("click", () => {
       // 同页再点不重渲染（cindy 同款早退）；跨页改 hash，applyRoute 接手渲染
       if (section.id !== page) go("settings", section.id);
@@ -4023,6 +4975,12 @@ async function renderSettings() {
                )}`
             : ""
         }
+        <div class="divider"></div>
+        ${rowMarkup(
+          "导出全部数据",
+          "会话、消息、供应商配置（不含密钥）打包成 JSON，自己存档或复制",
+          `<button class="ghost" type="button" id="settings-export-all">导出</button>`,
+        )}
       </div>`,
     )}
     ${sectionMarkup(
@@ -4045,6 +5003,12 @@ async function renderSettings() {
             label: "写操作逐次确认",
             attrs: 'id="policy-confirm-writes" data-confirm-writes',
           }),
+        )}
+        <div class="divider"></div>
+        ${rowMarkup(
+          "自主轮（观察与审批）",
+          "环境变量 AUTONOMY_ENABLED 控制；页面只读显示开 / 关，不在这里改。",
+          `<span class="kv" id="policy-autonomy">…</span>`,
         )}
         <div class="divider"></div>
         ${rowMarkup(
@@ -4077,7 +5041,11 @@ async function renderSettings() {
       await loadChats();
       void renderSettings();
     });
+    document
+      .getElementById("settings-export-all")
+      ?.addEventListener("click", () => void exportAllData());
     void loadPolicy();
+    void loadAutonomySwitch();
     void loadPendingApprovalList();
   } else if (page === "projects") {
     // 2026-11-05 G1：卡片补内衬（p-4 / sm:p-6），主项目/子项目/待确认三段分开；
@@ -4100,7 +5068,7 @@ async function renderSettings() {
               <div class="set-hint">派活时从这里选；目录丢了、或跑出当前工作区，会标出来。</div>
             </div>
             <button class="btn-primary" type="button" id="project-add">
-              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M8 3.2v9.6M3.2 8h9.6"/></svg>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
               添加子项目
             </button>
           </div>
@@ -4121,12 +5089,73 @@ async function renderSettings() {
     document.getElementById("project-add")?.addEventListener("click", () => openAddSubprojectModal());
     void loadProjectsSettings();
   } else if (page === "reminders") {
-    el.settingsInner.innerHTML = sectionMarkup(
+    // E2 #4：只读列表顶部加「加一条」行，直接 POST /agent/reminders（不经过模型）。
+    // 骨架建一次；loadReminders 只重填 #reminder-card，输入值不会被重建冲掉。
+    el.settingsInner.innerHTML = `${sectionMarkup(
       "提醒",
+      `<div class="card" id="reminder-add-card">
+        <div class="row">
+          <div class="row-main">
+            <div class="row-label">加一条</div>
+            <div class="row-hint">不经过模型，直接定个时间提醒；到点会出现在对话里。</div>
+          </div>
+        </div>
+        <div class="divider"></div>
+        <div class="row">
+          <div class="tk-remind-form">
+            <input class="set-input" id="reminder-text" type="text" maxlength="200"
+                   placeholder="提醒我…" aria-label="提醒内容" />
+            <input class="set-input tk-remind-at" id="reminder-at" type="datetime-local" aria-label="提醒时间" />
+            <button class="btn-primary" type="button" id="reminder-add">添加</button>
+          </div>
+        </div>
+        <p class="tk-remind-hint" id="reminder-add-hint"></p>
+      </div>`,
+    )}
+    ${sectionMarkup(
+      "待触发",
       `<div class="card" id="reminder-card">
         <div class="row"><div class="row-main"><div class="row-hint">读取中…</div></div></div>
       </div>`,
-    );
+    )}`;
+    const addText = document.getElementById("reminder-text");
+    const addAt = document.getElementById("reminder-at");
+    const addBtn = document.getElementById("reminder-add");
+    const addHint = document.getElementById("reminder-add-hint");
+    const submitReminder = async () => {
+      if (addBtn.disabled) return;
+      const text = addText.value.trim();
+      const at = addAt.value ? new Date(addAt.value).getTime() : NaN;
+      if (!text) { addHint.textContent = "先写点提醒内容。"; addText.focus(); return; }
+      if (!Number.isFinite(at)) { addHint.textContent = "选个时间。"; addAt.focus(); return; }
+      if (at <= Date.now()) { addHint.textContent = "这个时间已经过去了。"; return; }
+      addBtn.disabled = true;
+      addHint.textContent = "添加中…";
+      try {
+        const response = await request("/api/v1/agent/reminders", {
+          method: "POST",
+          body: JSON.stringify({ text, at }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          addHint.textContent = data.message || `没加上：HTTP ${response.status}`;
+          return;
+        }
+        addText.value = "";
+        addAt.value = "";
+        addHint.textContent = "";
+        toast("提醒已添加");
+        void loadReminders();
+      } catch (error) {
+        if (error.message !== "forbidden") addHint.textContent = `没加上：${error.message}`;
+      } finally {
+        addBtn.disabled = false;
+      }
+    };
+    addBtn?.addEventListener("click", () => void submitReminder());
+    addText?.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") { event.preventDefault(); void submitReminder(); }
+    });
     void loadReminders();
   } else if (page === "connect") {
     el.settingsInner.innerHTML = `${sectionMarkup(
@@ -4185,6 +5214,13 @@ async function renderSettings() {
         ${rowMarkup("鉴权", "", `<span class="kv" id="svc-auth">…</span>`)}
         <div class="divider"></div>
         ${rowMarkup("累计 token", "", `<span class="kv" id="svc-usage">…</span>`)}
+        <div class="divider"></div>
+        <details class="td-usage-detail" id="svc-usage-detail">
+          <summary>按模型明细</summary>
+          <div class="td-usage-body" id="svc-usage-models">
+            <div class="row-hint">读取中…</div>
+          </div>
+        </details>
       </div>`,
     )}
     ${sectionMarkup(
@@ -4194,7 +5230,7 @@ async function renderSettings() {
           <div class="set-hint" id="svc-provider-hint">填 API Key 就能用：Key 只存在本机服务端，不进 git、不进日志、不下发手机。保存后下一轮对话生效。</div>
         </div>
         <button class="btn-primary" type="button" id="provider-add">
-          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M8 3.2v9.6M3.2 8h9.6"/></svg>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
           新建供应商
         </button>
       </div>
@@ -4235,6 +5271,25 @@ async function renderSettings() {
     });
     document.getElementById("provider-add")?.addEventListener("click", () => showProviderTemplates());
     void loadServiceInfo();
+  } else if (page === "partners") {
+    el.settingsInner.innerHTML = sectionMarkup(
+      "执事",
+      `<div class="pt-head">
+        <div class="row-main">
+          <div class="set-card-title">总管与执事</div>
+          <div class="set-hint">总管照常列出。SOUL 版本、模型候选链、例行任务都在「编辑」里。</div>
+        </div>
+        <button class="btn-primary" type="button" id="partner-add">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+          新建执事
+        </button>
+      </div>
+      <div class="pt-list" id="partner-list">
+        <div class="set-hint">读取中…</div>
+      </div>`,
+    );
+    document.getElementById("partner-add")?.addEventListener("click", () => openCreatePartnerModal());
+    void loadPartners();
   } else {
     el.settingsInner.innerHTML = sectionMarkup(
       "关于",
@@ -4522,7 +5577,7 @@ async function loadPendingApprovalList() {
         return `${index ? '<div class="divider"></div>' : ""}
         <div class="row">
           <div class="row-main">
-            <div class="row-label">${esc(item.chatTitle || "未命名会话")} · ${esc(item.tool || "工具")}</div>
+            <div class="row-label">${esc(item.chatTitle || "未命名会话")} · ${esc(item.tool || "工具")}${item.origin === "autonomous" ? '<span class="pill-tag">例行任务</span>' : ""}</div>
             <div class="row-hint">${esc((item.args || "").slice(0, 160))}</div>
             ${remain ? `<div class="row-hint">${remain}</div>` : ""}
           </div>
@@ -4745,6 +5800,23 @@ async function loadPolicy() {
   }
 }
 
+/** 自主轮总开关（E2 #6）：只读显示开/关。/healthz 只露这一个布尔，不露任何会话/内容信息。 */
+async function loadAutonomySwitch() {
+  const node = document.getElementById("policy-autonomy");
+  if (!node) return;
+  try {
+    const response = await request("/healthz", { cache: "no-store" });
+    if (!response.ok) throw new Error(String(response.status));
+    const info = await response.json();
+    node.textContent = info.autonomy ? "开（环境变量）" : "关（环境变量）";
+    node.title = info.autonomy
+      ? "AUTONOMY_ENABLED 已开启（观察与审批生效）"
+      : "AUTONOMY_ENABLED 未开启（默认关）";
+  } catch {
+    node.textContent = "读不到";
+  }
+}
+
 /**
  * 默认模型行（2026-11-04 批次五，接口文档 §2.8）：数据源 GET /agent/model，
  * 选项按供应商分组；只有一个可选项时退化成只读行。
@@ -4866,14 +5938,41 @@ async function loadServiceInfo() {
     if (hint) hint.textContent = "";
   }
 
+  const renderUsageModels = (models) => {
+    const box = document.getElementById("svc-usage-models");
+    if (!box) return;
+    if (!models.length) {
+      box.innerHTML = `<div class="row-hint">还没有按模型的用量。</div>`;
+      return;
+    }
+    box.innerHTML = `<table class="td-usage-table">
+      <thead><tr><th>模型</th><th>input</th><th>output</th><th>cacheRead</th><th>total</th></tr></thead>
+      <tbody>${models
+        .map(
+          (item) => `<tr>
+            <td>${esc(String(item.model ?? ""))}</td>
+            <td>${(item.inputTokens || 0).toLocaleString()}</td>
+            <td>${(item.outputTokens || 0).toLocaleString()}</td>
+            <td>${(item.cacheReadTokens || 0).toLocaleString()}</td>
+            <td>${(item.totalTokens || 0).toLocaleString()}</td>
+          </tr>`,
+        )
+        .join("")}</tbody>
+    </table>`;
+  };
+
   try {
     const response = await request("/api/v1/agent/usage", { cache: "no-store" });
     const data = await response.json();
     const models = data.models || [];
     const total = models.reduce((sum, item) => sum + (item.totalTokens || 0), 0);
     set("svc-usage", total ? `${total.toLocaleString()} tokens` : "还没有用量");
+    // E2 #5：总数下面可点开的按模型小表，取同一份 models[]（模型/input/output/cacheRead/total）。
+    renderUsageModels(models);
   } catch {
     set("svc-usage", "读取失败");
+    const box = document.getElementById("svc-usage-models");
+    if (box) box.innerHTML = `<div class="row-hint">读不到用量明细</div>`;
   }
 
   await loadProviders();
@@ -4885,6 +5984,19 @@ async function loadServiceInfo() {
 
 /* 预置模板（G1）：只给 baseUrl / 常见模型 id，不含任何密钥值。
    keyEnv 不再写进模板：H1 起由前端按 LIFEDIARY_KEY_<ID大写> 自动生成，界面不出现。 */
+/* 模型元数据默认值（与服务端 provider.ts 保持一致；只用于显示"没填时的生效值"） */
+const DEFAULT_CONTEXT_WINDOW = 131072;
+const DEFAULT_MAX_TOKENS = 4096;
+
+/** 128K / 1M 这类短写；不精确到个位，免得表单里一长串数字 */
+function formatTokenCount(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return "—";
+  if (number >= 1000000) return `${Number((number / 1000000).toFixed(2))}M`;
+  if (number >= 1000) return `${Math.round(number / 1000)}K`;
+  return String(number);
+}
+
 const PROVIDER_TEMPLATES = [
   {
     id: "bailian",
@@ -4921,7 +6033,9 @@ const PROVIDER_ERROR_TEXT = {
   bad_key_env: "环境变量名只能是大写字母、数字、下划线，且不以数字开头（如 DASHSCOPE_API_KEY）。",
   bad_base_url: "Base URL 要写完整地址（http:// 或 https://），不带 /chat/completions。",
   bad_provider_name: "名称需要 1–80 个字符。",
-  bad_models: "模型清单不能为空：填一个模型 id，或勾上「自动拉取模型清单」再保存。",
+  bad_models: "模型清单不能为空：点「添加模型」填一个模型 id 再保存。",
+  bad_model_meta: "模型的上下文 / 最大输出只能是正整数。",
+  bad_thinking_levels: "思考档格式不对，刷新页面再试。",
   bad_provider_id: "id 只能是小写字母、数字、连字符。",
   secret_field_forbidden: "界面不收密钥值：只填环境变量名，值放 .env。",
   models_fetch_failed: "拉不到清单：检查 Key 和地址，或手填。",
@@ -5109,8 +6223,9 @@ function providerTemplatesMarkup() {
   return `<div class="svc-expand is-open"><div>
     <div class="svc-tpl-head">
       <button class="svc-back" type="button" id="provider-tpl-back" aria-label="返回" title="返回">
-        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
-          <path d="M9.8 3.4 5.2 8l4.6 4.6" stroke-linecap="round" stroke-linejoin="round"/>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="m12 19-7-7 7-7"/>
+          <path d="M19 12H5"/>
         </svg>
       </button>
       <h2 class="svc-tpl-title">选择供应商模板</h2>
@@ -5123,8 +6238,8 @@ function providerTemplatesMarkup() {
             <span class="svc-tpl-name">${esc(template.name)}</span>
             <span class="svc-tpl-desc">${esc(template.desc)}</span>
           </span>
-          <svg class="chev" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-            <path d="M6.4 4.8 9.6 8l-3.2 3.2" stroke-linecap="round" stroke-linejoin="round"/>
+          <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="m9 18 6-6-6-6"/>
           </svg>
         </button>`,
       ).join("")}
@@ -5193,8 +6308,9 @@ function providerFormMarkup() {
   return `<div class="svc-form">
     <div class="svc-form-head">
       <button class="svc-back" type="button" id="pv-back" aria-label="返回模板选择" title="返回模板选择" hidden>
-        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
-          <path d="M9.8 3.4 5.2 8l4.6 4.6" stroke-linecap="round" stroke-linejoin="round"/>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="m12 19-7-7 7-7"/>
+          <path d="M19 12H5"/>
         </svg>
       </button>
       <div class="row-main">
@@ -5215,14 +6331,15 @@ function providerFormMarkup() {
         <input id="pv-apikey" type="password" autocomplete="new-password" spellcheck="false"
                aria-label="API Key" placeholder="sk-…" />
         <button class="secret-eye" type="button" id="pv-eye" aria-label="显示密钥" title="显示密钥" aria-pressed="false">
-          <svg class="eye-show" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">
-            <path d="M1.6 8s2.4-4 6.4-4 6.4 4 6.4 4-2.4 4-6.4 4S1.6 8 1.6 8Z" stroke-linejoin="round"/>
-            <circle cx="8" cy="8" r="1.9"/>
+          <svg class="eye-show" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/>
+            <circle cx="12" cy="12" r="3"/>
           </svg>
-          <svg class="eye-hide" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true" hidden>
-            <path d="M1.6 8s2.4-4 6.4-4 6.4 4 6.4 4-2.4 4-6.4 4S1.6 8 1.6 8Z" stroke-linejoin="round"/>
-            <circle cx="8" cy="8" r="1.9"/>
-            <path d="M2.6 2.6l10.8 10.8" stroke-linecap="round"/>
+          <svg class="eye-hide" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" hidden>
+            <path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49"/>
+            <path d="M14.084 14.158a3 3 0 0 1-4.242-4.242"/>
+            <path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143"/>
+            <path d="m2 2 20 20"/>
           </svg>
         </button>
       </div>
@@ -5232,14 +6349,21 @@ function providerFormMarkup() {
       <input id="pv-keyenv" class="is-mono" type="text" spellcheck="false" placeholder="DASHSCOPE_API_KEY" />
       <span class="field-hint">这版服务端还没开放密钥直填：变量名填这里，值写进 .env。</span>
     </label>
-    <label class="field"><span>模型清单（一行一个）</span>
-      <textarea id="pv-models" rows="5" spellcheck="false" placeholder="qwen3-max"></textarea>
-      <span class="field-hint">勾了自动拉取就不用填；拉不到再手填。</span>
-    </label>
-    <label class="field-check"><input type="checkbox" id="pv-autofetch" checked /> 自动拉取模型清单（会覆盖手填）</label>
+    <div class="field">
+      <span>模型</span>
+      <div class="svc-models">
+        <div class="svc-models-head">
+          <span class="set-hint">每个模型单独配置上下文与思考档；保存供应商时一起写入。</span>
+          <button class="ghost svc-model-add" type="button" id="pv-add-model">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+            添加模型
+          </button>
+        </div>
+        <div class="svc-model-list" id="pv-model-list"></div>
+      </div>
+    </div>
     <div class="svc-form-actions">
       <span class="set-hint" id="pv-hint"></span>
-      <button class="ghost" type="button" id="pv-fetch">保存并拉取清单</button>
       <button class="btn-primary" type="button" id="pv-save">保存</button>
       <button class="ghost" type="button" id="pv-cancel">取消</button>
     </div>
@@ -5256,11 +6380,6 @@ function fillProviderForm(host, provider, template) {
   const isEdit = Boolean(provider);
   const name = provider ? provider.name : isTemplate ? template.name : "";
   const baseUrl = provider ? provider.baseUrl : isTemplate ? template.baseUrl : "";
-  const modelsText = provider
-    ? (provider.models || []).join("\n")
-    : isTemplate
-      ? template.models
-      : "";
   const id = provider ? provider.id : nextProviderId(name || "provider");
   const q = (selector) => host.querySelector(selector);
   const setValue = (selector, value) => {
@@ -5289,8 +6408,12 @@ function fillProviderForm(host, provider, template) {
 
   setValue("#pv-name", name);
   setValue("#pv-base", baseUrl);
-  setValue("#pv-models", modelsText);
   setValue("#pv-keyenv", provider ? provider.keyEnv || providerKeyEnv(id) : providerKeyEnv(id));
+  // 换了一家 / 换模板才重建模型草稿；同一家刷新只重绘，不丢正在编辑的列表
+  const nextFormFor = isEdit ? `form:${id}` : `new:${isTemplate ? template.id : "custom"}`;
+  if (host.dataset.formFor !== nextFormFor) hydrateProviderModels(provider, template);
+  host.dataset.formFor = nextFormFor;
+  renderProviderModelList(host);
 
   // 明文永不跨供应商保留：每次填表都把 Key 输入框清空，只留占位提示
   const api = q("#pv-apikey");
@@ -5310,13 +6433,8 @@ function fillProviderForm(host, provider, template) {
     if (hideIcon) hideIcon.hidden = true;
   }
 
-  // 自动拉取默认开（用户口径：不再手填清单）；只在“换了一家/换了一个模板”时复位，
-  // 避免用户手动取消后被一次刷新又勾回去
-  const nextFormFor = isEdit ? `form:${id}` : `new:${isTemplate ? template.id : "custom"}`;
-  const auto = q("#pv-autofetch");
-  const switched = host.dataset.formFor !== nextFormFor;
-  host.dataset.formFor = nextFormFor;
-  if (auto && switched) auto.checked = true;
+  // 表单换人时重建模型草稿；同一个人只做原位填值，不动正在编辑的列表
+  host.dataset.formFor = isEdit ? `form:${id}` : `new:${isTemplate ? template.id : "custom"}`;
 
   const danger = q("#pv-danger");
   if (danger) danger.hidden = !isEdit;
@@ -5333,6 +6451,256 @@ function fillProviderForm(host, provider, template) {
 
   applyProviderSecretMode(host);
   setProviderHint(host, "", false);
+}
+
+/** 从服务端投影 / 模板重建模型草稿（上下文与档位缺省 = 服务端缺省） */
+function hydrateProviderModels(provider, template) {
+  const ids = provider
+    ? [...(provider.models || [])]
+    : template && template.models
+      ? parseModelText(template.models)
+      : [];
+  state.providerModels = ids.map((id) => {
+    const meta = (provider && provider.modelMeta && provider.modelMeta[id]) || {};
+    const levels =
+      provider && provider.modelThinkingLevels ? provider.modelThinkingLevels[id] : null;
+    return {
+      id,
+      contextWindow: Number.isFinite(meta.contextWindow) ? meta.contextWindow : null,
+      maxTokens: Number.isFinite(meta.maxTokens) ? meta.maxTokens : null,
+      thinkingLevels: Array.isArray(levels) && levels.length ? [...levels] : null,
+    };
+  });
+}
+
+/** 没声明过档位 = 服务端缺省域（off/low/high，刻意不含 medium） */
+function effectiveThinkingLevels(model) {
+  return model && Array.isArray(model.thinkingLevels) && model.thinkingLevels.length
+    ? model.thinkingLevels
+    : ["off", "low", "high"];
+}
+
+function renderProviderModelList(host) {
+  const box = host && host.querySelector("#pv-model-list");
+  if (!box) return;
+  const list = state.providerModels || [];
+  box.replaceChildren();
+  if (!list.length) {
+    const empty = document.createElement("div");
+    empty.className = "svc-model-empty";
+    empty.textContent = "还没有模型。点右上「添加模型」，填 ID 后可自动检测。";
+    box.append(empty);
+    return;
+  }
+  const icon = (path) =>
+    `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${path}</svg>`;
+  list.forEach((model, index) => {
+    const row = document.createElement("div");
+    row.className = "svc-model-row";
+
+    const main = document.createElement("div");
+    main.className = "svc-model-main";
+    const idLine = document.createElement("div");
+    idLine.className = "svc-model-id";
+    idLine.textContent = model.id;
+    const metaLine = document.createElement("div");
+    metaLine.className = "svc-model-meta";
+    metaLine.textContent = [
+      `上下文 ${formatTokenCount(model.contextWindow ?? DEFAULT_CONTEXT_WINDOW)}`,
+      `输出 ${formatTokenCount(model.maxTokens ?? DEFAULT_MAX_TOKENS)}`,
+      `思考 ${effectiveThinkingLevels(model)
+        .map((level) => THINKING_LABELS[level] || level)
+        .join("/")}`,
+    ].join(" · ");
+    main.append(idLine, metaLine);
+
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "svc-model-act";
+    edit.title = `编辑 ${model.id}`;
+    edit.setAttribute("aria-label", `编辑 ${model.id}`);
+    edit.innerHTML = icon('<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>');
+    edit.addEventListener("click", () => openProviderModelDialog(host, index));
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "svc-model-act is-danger";
+    remove.title = `移除 ${model.id}`;
+    remove.setAttribute("aria-label", `移除 ${model.id}`);
+    remove.innerHTML = icon('<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>');
+    remove.addEventListener("click", () => {
+      state.providerModels.splice(index, 1);
+      renderProviderModelList(host);
+      setProviderHint(host, "模型列表已修改，点「保存」写回", false);
+    });
+
+    row.append(main, edit, remove);
+    box.append(row);
+  });
+}
+
+/** 空 / 非正整数 → null；有值但不是正整数 → NaN（保存时拦下） */
+function parseTokenField(value) {
+  const text = String(value || "").trim();
+  if (!text) return null;
+  const number = Number(text);
+  return Number.isInteger(number) && number > 0 ? number : Number.NaN;
+}
+
+/**
+ * 添加 / 编辑模型的弹窗（2026-11-05）：
+ * 只填 ID → 点「检测」真打一次上游，回填上下文 / 最大输出 / 思考档 → 用户确认后进草稿。
+ * 未保存的新供应商不能检测（端点按 provider id 找 key），提示先保存。
+ */
+function openProviderModelDialog(host, index) {
+  const editing = Number.isInteger(index) && index >= 0;
+  const model = editing
+    ? { ...state.providerModels[index] }
+    : { id: "", contextWindow: null, maxTokens: null, thinkingLevels: null };
+  const { provider } = currentProviderFormTarget();
+  const levelsFor = effectiveThinkingLevels(model);
+
+  openModal(editing ? "编辑模型" : "添加模型", (body) => {
+    body.innerHTML = `
+      <div class="modal-field">
+        <span>模型 ID</span>
+        <div class="modal-row">
+          <input class="modal-input is-mono" id="pm-id" type="text" spellcheck="false"
+                 placeholder="例如 deepseek-v4.1-flash" value="${attr(model.id)}" />
+          <button class="ghost" type="button" id="pm-detect"${provider ? "" : " disabled"}>检测</button>
+        </div>
+        <p class="modal-hint" id="pm-detect-hint">${
+          provider
+            ? "填模型 ID 后点「检测」：会真打一次上游，顺便拉上下文与思考档"
+            : "先保存供应商基础信息，再回来检测；现在可以先手填"
+        }</p>
+      </div>
+      <div class="modal-field">
+        <span>上下文窗口（tokens）</span>
+        <input class="modal-input" id="pm-ctx" type="text" inputmode="numeric" spellcheck="false"
+               placeholder="${DEFAULT_CONTEXT_WINDOW}" value="${model.contextWindow ?? ""}" />
+      </div>
+      <div class="modal-field">
+        <span>最大输出（tokens）</span>
+        <input class="modal-input" id="pm-max" type="text" inputmode="numeric" spellcheck="false"
+               placeholder="${DEFAULT_MAX_TOKENS}" value="${model.maxTokens ?? ""}" />
+      </div>
+      <div class="modal-field">
+        <span>思考强度</span>
+        <div class="pm-levels">
+          ${THINKING_LEVELS.map(
+            (level) => `<label class="pm-level-opt">
+              <input class="pm-level" type="checkbox" value="${level}"${levelsFor.includes(level) ? " checked" : ""} />
+              <span>${THINKING_LABELS[level]}</span>
+            </label>`,
+          ).join("")}
+        </div>
+      </div>
+      <p class="modal-hint" id="pm-hint"></p>
+      <div class="modal-actions">
+        <button class="ghost" type="button" data-modal-cancel>取消</button>
+        <button class="modal-primary" type="button" id="pm-save">保存</button>
+      </div>`;
+
+    const hint = body.querySelector("#pm-hint");
+    const detectHint = body.querySelector("#pm-detect-hint");
+    const idInput = body.querySelector("#pm-id");
+    const ctxInput = body.querySelector("#pm-ctx");
+    const maxInput = body.querySelector("#pm-max");
+    const levelBoxes = [...body.querySelectorAll(".pm-level")];
+    const detect = body.querySelector("#pm-detect");
+    const save = body.querySelector("#pm-save");
+
+    body.querySelector("[data-modal-cancel]")?.addEventListener("click", closeModal);
+
+    detect?.addEventListener("click", async () => {
+      const modelId = idInput.value.trim();
+      if (!modelId) {
+        setModalHint(hint, "先填模型 ID");
+        idInput.focus();
+        return;
+      }
+      if (!provider) return;
+      detect.disabled = true;
+      save.disabled = true;
+      setModalHint(hint, "检测中：会真打一次上游…", false);
+      try {
+        const response = await request(
+          `/api/v1/agent/providers/${encodeURIComponent(provider.id)}/models/detect`,
+          { method: "POST", body: JSON.stringify({ modelId }) },
+        );
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          setModalHint(hint, providerErrorText(data, response.status));
+          return;
+        }
+        const detection = data.detection || {};
+        if (Number.isFinite(detection.contextWindow)) ctxInput.value = String(detection.contextWindow);
+        if (Number.isFinite(detection.maxTokens)) maxInput.value = String(detection.maxTokens);
+        if (Array.isArray(detection.thinkingLevels)) {
+          for (const box of levelBoxes) box.checked = detection.thinkingLevels.includes(box.value);
+        }
+        if (!detection.reachable) {
+          setModalHint(hint, detection.message || "没连上");
+          return;
+        }
+        const latency = Number.isFinite(detection.latencyMs) ? `（${detection.latencyMs}ms）` : "";
+        const contextText = Number.isFinite(detection.contextWindow)
+          ? `上下文 ${formatTokenCount(detection.contextWindow)}`
+          : "上游没给上下文，请手填";
+        const unknown = Object.entries(detection.levels || {})
+          .filter(([, verdict]) => verdict === "unknown")
+          .map(([level]) => THINKING_LABELS[level] || level);
+        setModalHint(
+          hint,
+          `已连通${latency}；${contextText}${unknown.length ? `；${unknown.join("/")} 档未确认` : ""}`,
+          false,
+        );
+        if (detectHint) {
+          detectHint.textContent = detection.message || "检测完成，确认下面的值后保存";
+        }
+      } catch (error) {
+        if (error.message === "forbidden") {
+          closeModal();
+          return;
+        }
+        setModalHint(hint, `检测失败：${error.message}`);
+      } finally {
+        detect.disabled = false;
+        save.disabled = false;
+      }
+    });
+
+    save?.addEventListener("click", () => {
+      const modelId = idInput.value.trim();
+      if (!modelId) {
+        setModalHint(hint, "模型 ID 不能为空");
+        idInput.focus();
+        return;
+      }
+      if ((state.providerModels || []).some((item, itemIndex) => item.id === modelId && itemIndex !== index)) {
+        setModalHint(hint, "这个模型已经在列表里");
+        return;
+      }
+      const contextWindow = parseTokenField(ctxInput.value);
+      const maxTokens = parseTokenField(maxInput.value);
+      if (Number.isNaN(contextWindow) || Number.isNaN(maxTokens)) {
+        setModalHint(hint, "上下文 / 最大输出只能是正整数（留空 = 用默认值）");
+        return;
+      }
+      const thinkingLevels = levelBoxes.filter((box) => box.checked).map((box) => box.value);
+      if (!thinkingLevels.length) {
+        setModalHint(hint, "至少选一个思考档（不想思考就只留「关」）");
+        return;
+      }
+      const next = { id: modelId, contextWindow, maxTokens, thinkingLevels };
+      if (editing) state.providerModels[index] = next;
+      else state.providerModels.push(next);
+      renderProviderModelList(host);
+      setProviderHint(host, "模型列表已修改，点「保存」写回", false);
+      closeModal();
+    });
+  });
 }
 
 function setProviderHint(host, text, isError = true) {
@@ -5388,14 +6756,16 @@ function wireProviderForm(host) {
     const { provider } = currentProviderFormTarget();
     if (provider) {
       // 编辑态取消 = 丢掉未保存输入，回到磁盘上的那份（原位填回，不重建）
+      hydrateProviderModels(provider, null);
       fillProviderForm(host, provider, null);
+      renderProviderModelList(host);
       return;
     }
     showProviderTemplates();
   });
 
-  host.querySelector("#pv-fetch")?.addEventListener("click", () => void saveProviderFlow({ withModels: true }));
-  host.querySelector("#pv-save")?.addEventListener("click", () => void saveProviderFlow({ withModels: false }));
+  host.querySelector("#pv-add-model")?.addEventListener("click", () => openProviderModelDialog(host, -1));
+  host.querySelector("#pv-save")?.addEventListener("click", () => void saveProviderFlow());
 
   host.querySelector("#pv-delete")?.addEventListener("click", () => {
     const { provider } = currentProviderFormTarget();
@@ -5404,47 +6774,34 @@ function wireProviderForm(host) {
 }
 
 /**
- * 保存编排（2026-11-05 H1）：
- *   ① POST /agent/providers            基本信息（含前端生成的 id/keyEnv）
+ * 保存编排（2026-11-05）：
+ *   ① POST /agent/providers            基本信息 + 逐模型元数据（含前端生成的 id/keyEnv）
  *   ② PUT  /agent/providers/:id/secret 密钥（Key 框留空 = 不改）
- *   ③ POST /agent/providers {modelsUrl} 代拉清单并回填多行框（勾了自动 / 点了“保存并拉取清单”）
+ * 模型清单就是表单里那张卡片列表；不再有第二段「保存并拉取清单」。
  * ②失败但服务端没有该接口（404 / secrets_disabled）时，退回“只填变量名”的老形态。
  */
-async function saveProviderFlow({ withModels }) {
+async function saveProviderFlow() {
   const host = document.getElementById("provider-detail");
   if (!host) return;
-  const saveButton = host.querySelector(withModels ? "#pv-fetch" : "#pv-save");
-  const otherButton = host.querySelector(withModels ? "#pv-save" : "#pv-fetch");
+  const saveButton = host.querySelector("#pv-save");
   if (saveButton?.disabled) return;
 
   const { provider } = currentProviderFormTarget();
-  const autoFetch = host.querySelector("#pv-autofetch")?.checked !== false;
-  const shouldFetch = withModels || autoFetch;
   const apiKey = (host.querySelector("#pv-apikey")?.value || "").trim();
   const values = providerFormValues(provider ? provider.id : "");
-  const problem = providerFormError(values, { autoFetch: shouldFetch });
+  const problem = providerFormError(values);
   if (problem) {
     setProviderHint(host, problem);
     return;
   }
 
   if (saveButton) saveButton.disabled = true;
-  if (otherButton) otherButton.disabled = true;
-  setProviderHint(host, withModels ? "保存并拉取中…" : "保存中…", false);
+  setProviderHint(host, "保存中…", false);
   try {
-    // ① 基本信息
+    // ① 基本信息（允许空清单：先建档，再逐个添加模型）
     const created = await postProvider(values);
     if (!created.response.ok) {
-      // 老服务端建新供应商仍要求非空 models：把“先填一个再拉”说清楚，别只丢一句通用错误
-      const denied = created.data || {};
-      if (denied.error === "bad_models" && shouldFetch && !provider) {
-        setProviderHint(
-          host,
-          "这版服务端还不允许空清单建档：先手填一个模型 id 保存，之后点「保存并拉取清单」覆盖成上游清单。",
-        );
-        return;
-      }
-      setProviderHint(host, providerErrorText(denied, created.response.status));
+      setProviderHint(host, providerErrorText(created.data || {}, created.response.status));
       return;
     }
     const saved = created.data.provider || {};
@@ -5462,9 +6819,6 @@ async function saveProviderFlow({ withModels }) {
     ];
     renderProviderNav();
     fillProviderForm(host, { ...saved, id: providerId }, null);
-    // 填表会把勾选重置成编辑态默认（关）：把用户刚才的选择放回去
-    const autoNode = host.querySelector("#pv-autofetch");
-    if (autoNode) autoNode.checked = autoFetch;
     if (apiKey) {
       const input = host.querySelector("#pv-apikey");
       if (input) input.value = apiKey;
@@ -5505,63 +6859,28 @@ async function saveProviderFlow({ withModels }) {
       }
     }
 
-    // ③ 代拉模型清单（models 传空 + modelsUrl，服务端拉到什么就存什么）
-    if (shouldFetch) {
-      setProviderHint(host, "已保存，正在拉取模型清单…", false);
-      const body = {
-        ...values,
-        id: providerId,
-        keyEnv,
-        models: [],
-        modelsUrl: `${values.baseUrl.replace(/\/+$/, "")}/models`,
-        test: false,
-      };
-      if (provider) body.previousId = providerId;
-      else delete body.previousId;
-      const fetched = await postProvider(body);
-      if (!fetched.response.ok) {
-        await reloadAfterProviderChange();
-        setProviderHint(host, providerErrorText(fetched.data, fetched.response.status));
-        return;
-      }
-      const models = (fetched.data.provider && fetched.data.provider.models) || [];
-      const textarea = host.querySelector("#pv-models");
-      if (textarea && models.length) textarea.value = models.join("\n");
-      // 拉到就先把勾去掉：接下来手改再保存不会被下一次拉取覆盖
-      const autoBox = host.querySelector("#pv-autofetch");
-      if (autoBox) autoBox.checked = false;
-      toast(provider ? `已保存 ${values.name}` : `已添加 ${values.name}`);
-      await reloadAfterProviderChange();
-      setProviderHint(
-        host,
-        models.length
-          ? `已保存，拉到 ${models.length} 个模型；要手改就改完再保存（自动拉取已取消勾选）`
-          : "已保存；上游没返回模型，请手填",
-        false,
-      );
-      return;
-    }
-
     toast(provider ? `已保存 ${values.name}` : `已添加 ${values.name}`);
     await reloadAfterProviderChange();
-    setProviderHint(host, "已保存", false);
+    setProviderHint(
+      host,
+      values.models.length
+        ? "已保存"
+        : "已保存。现在可以点「添加模型」并检测",
+      false,
+    );
   } finally {
     if (saveButton) saveButton.disabled = false;
-    if (otherButton) otherButton.disabled = false;
   }
 }
 
 /** 表单校验（服务端仍会再拦一遍；这里只把明显问题挡在请求前） */
-function providerFormError(values, { autoFetch = false } = {}) {
+function providerFormError(values) {
   if (!values.name) return "给供应商起个名字。";
   if (!/^https?:\/\/\S+$/i.test(values.baseUrl)) {
     return "Base URL 要写完整地址（http:// 或 https://）。";
   }
   if (!/^[A-Z_][A-Z0-9_]*$/.test(values.keyEnv)) {
     return "变量名只能是大写字母、数字、下划线，且不以数字开头（如 DASHSCOPE_API_KEY）。";
-  }
-  if (!values.models.length && !autoFetch) {
-    return "模型清单不能为空：一行一个模型 id，或勾上「自动拉取模型清单」。";
   }
   return "";
 }
@@ -5573,11 +6892,34 @@ function parseModelText(text) {
     .filter(Boolean);
 }
 
+/** 草稿列表 → 接口字段；没配的元数据不下发（服务端按默认值解释） */
+function providerModelPayload(models) {
+  const ids = [];
+  const modelMeta = {};
+  const modelThinkingLevels = {};
+  for (const model of models || []) {
+    if (!model.id) continue;
+    ids.push(model.id);
+    if (Number.isInteger(model.contextWindow) || Number.isInteger(model.maxTokens)) {
+      const meta = {};
+      if (Number.isInteger(model.contextWindow)) meta.contextWindow = model.contextWindow;
+      if (Number.isInteger(model.maxTokens)) meta.maxTokens = model.maxTokens;
+      modelMeta[model.id] = meta;
+    }
+    if (Array.isArray(model.thinkingLevels) && model.thinkingLevels.length) {
+      modelThinkingLevels[model.id] = [...model.thinkingLevels];
+    }
+  }
+  return { models: ids, modelMeta, modelThinkingLevels };
+}
+
 function providerFormValues(editingId) {
   const name = (document.getElementById("pv-name")?.value || "").trim();
   const baseUrl = (document.getElementById("pv-base")?.value || "").trim();
-  const models = parseModelText(document.getElementById("pv-models")?.value);
+  const { models, modelMeta, modelThinkingLevels } = providerModelPayload(state.providerModels);
   const keyEnvInput = (document.getElementById("pv-keyenv")?.value || "").trim();
+  // 空清单显式允许：先建档（拿 key），再逐个添加并检测模型
+  const base = { name, baseUrl, models, modelMeta, modelThinkingLevels, allowEmptyModels: true };
   if (editingId) {
     const provider = providerById(editingId);
     // 编辑时 keyEnv 默认沿用磁盘上的那个；只有退回 env 形态才读手输框
@@ -5586,13 +6928,13 @@ function providerFormValues(editingId) {
         ? keyEnvInput || provider?.keyEnv || ""
         : provider?.keyEnv || providerKeyEnv(editingId);
     // id 不能改：编辑时把原 id 一并带上，服务端会拒绝 previousId ≠ id
-    return { id: editingId, previousId: editingId, name, baseUrl, keyEnv, models };
+    return { ...base, id: editingId, previousId: editingId, keyEnv };
   }
   // 新建：id/keyEnv 前端先定下来（服务端同一套 slug 规则），② 才有 id 可用
   const id = nextProviderId(name || "provider");
   const keyEnv =
     (state.providerSecretMode === "env" && keyEnvInput) || providerKeyEnv(id);
-  return { id, name, baseUrl, keyEnv, models };
+  return { ...base, id, keyEnv };
 }
 
 /** 删除确认（复用 .modal，确认钮走 destructive 色；不用 window.confirm） */
@@ -5777,6 +7119,791 @@ document.addEventListener("click", (event) => {
   if (!event.target.closest(".menu-wrap")) closeMenu();
 });
 
+/* ── 执事与例行任务（E1，2026-11-05；纯前端，后端零改动）────
+   端点形状以 companion-api.ts / routines.ts 为准：
+   执事投影 {id,name,status,soulVersion,domain?}；详情多 soul / soulVersion / modelChain；
+   例行任务投影 {id,name,triggers,sessionMode,enabled,…}；runs {status,trigger,summary,startedAt,…}。
+   网络只走 request()，反馈只走 toast()，确认只走 openModal()，动态值一律 esc()/attr()。 */
+
+const PT_STATUS = {
+  active: { text: "运行中", cls: "ok" },
+  paused: { text: "已暂停", cls: "warn" },
+  archived: { text: "已归档", cls: "" },
+};
+const PT_RUN_STATUS = {
+  success: { text: "成功", cls: "ok" },
+  failed: { text: "失败", cls: "warn" },
+  interrupted: { text: "中断", cls: "warn" },
+  running: { text: "运行中", cls: "" },
+  skipped: { text: "跳过", cls: "" },
+};
+
+function ptStatusPill(status) {
+  const info = PT_STATUS[status] || { text: status || "未知", cls: "" };
+  return `<span class="pill-tag ${info.cls}">${esc(info.text)}</span>`;
+}
+
+function ptStatusDot(status) {
+  const cls = status === "active" ? "ok" : status === "paused" ? "warn" : "idle";
+  return `<span class="status-dot ${cls}" aria-hidden="true"></span>`;
+}
+
+/** 触发器人话化：cron 给原文 + 一句人话，其余给一句人话。返回值已转义，直接塞进模板。 */
+function ptHumanizeTrigger(trigger) {
+  if (!trigger) return "—";
+  if (trigger.type === "cron") {
+    const raw = String(trigger.expr || "");
+    const parts = raw.trim().split(/\s+/);
+    let human = "按 cron 定时";
+    if (parts.length === 5) {
+      const [mi, hr, dom, mon, dow] = parts;
+      const pad = (v) => (v === "*" ? "*" : String(v).padStart(2, "0"));
+      const clock = `${pad(hr)}:${pad(mi)}`;
+      if (hr !== "*" && mi !== "*" && dom === "*" && mon === "*" && dow === "*") human = `每天 ${clock}`;
+      else if (hr === "*" && mi !== "*" && dom === "*" && mon === "*" && dow === "*") human = `每小时第 ${mi} 分`;
+      else if (hr === "*" && mi === "*") human = "每分钟";
+      else if (dom !== "*") human = `每月 ${dom} 日 ${clock}`;
+      else if (dow !== "*") human = `每周 ${dow} ${clock}`;
+    }
+    return `<span class="kv">${esc(raw)}</span> <span class="pt-human">${esc(human)}</span>`;
+  }
+  if (trigger.type === "interval") {
+    const secs = Number(trigger.seconds) || 0;
+    const mins = secs / 60;
+    const human = Number.isInteger(mins) && mins > 0 ? `每 ${mins} 分钟` : `每 ${secs} 秒`;
+    return esc(human);
+  }
+  if (trigger.type === "once") {
+    const at = trigger.at ? new Date(trigger.at) : null;
+    const shown = at && !Number.isNaN(at.getTime()) ? at.toLocaleString("zh-CN") : String(trigger.at || "");
+    return `一次性 · ${esc(shown)}`;
+  }
+  if (trigger.type === "event") {
+    const kind = String(trigger.kind || "");
+    const matchText = trigger.match && Object.keys(trigger.match).length
+      ? Object.entries(trigger.match).map(([k, v]) => `${k}=${v}`).join(", ")
+      : "";
+    return `事件 · ${esc(kind)}${matchText ? ` <span class="kv">${esc(matchText)}</span>` : ""}`;
+  }
+  return "—";
+}
+
+/* ── 执事列表（设置页 #/settings/partners）────────────── */
+
+async function loadPartners() {
+  const box = document.getElementById("partner-list");
+  if (!box) return;
+  try {
+    const response = await request("/api/v1/partners", { cache: "no-store" });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(String(response.status));
+    renderPartnerList(box, data.partners || []);
+  } catch (error) {
+    if (error.message === "forbidden") return;
+    box.innerHTML = `<div class="set-hint is-error">读不到执事：${esc(error.message)}</div>`;
+  }
+}
+
+function renderPartnerList(box, partners) {
+  box.replaceChildren();
+  if (!partners.length) {
+    const empty = document.createElement("div");
+    empty.className = "card pt-empty";
+    empty.innerHTML = `<p class="set-hint">还没有执事。新建一个，或给总管配个执事。</p>
+      <button class="btn-primary" type="button" id="partner-empty-add">新建执事</button>`;
+    box.append(empty);
+    empty.querySelector("#partner-empty-add")?.addEventListener("click", () => openCreatePartnerModal());
+    return;
+  }
+  for (const partner of partners) {
+    const card = document.createElement("div");
+    card.className = "card pt-card";
+    const isChief = partner.id === "chief";
+    const archived = partner.status === "archived";
+    const nextStatus = partner.status === "active" ? "paused" : "active";
+    card.innerHTML = `
+      <div class="pt-card-head">
+        ${ptStatusDot(partner.status)}
+        <span class="row-label pt-name">${esc(partner.name || "")}</span>
+        ${isChief ? '<span class="pill-tag">总管</span>' : ""}
+        ${ptStatusPill(partner.status)}
+      </div>
+      <div class="pt-meta">
+        <span class="kv">SOUL v${esc(String(partner.soulVersion ?? "—"))}</span>
+        ${partner.domain ? `<span class="pt-domain kv">领域 · ${esc(String(partner.domain))}</span>` : ""}
+      </div>
+      <div class="pt-actions">
+        <button class="ghost" type="button" data-pt-edit="${attr(partner.id)}">编辑</button>
+        <button class="ghost" type="button" data-pt-run="${attr(partner.id)}" data-pt-run-name="${attr(partner.name || "")}">试跑</button>
+        ${archived ? "" : `<button class="ghost" type="button" data-pt-toggle="${attr(partner.id)}" data-pt-next="${attr(nextStatus)}">${partner.status === "active" ? "暂停" : "恢复"}</button>`}
+      </div>`;
+    box.append(card);
+
+    card.querySelector("[data-pt-edit]")?.addEventListener("click", () => void openEditPartnerModal(partner.id));
+    card.querySelector("[data-pt-run]")?.addEventListener("click", () =>
+      openRunPartnerModal(partner.id, partner.name || ""),
+    );
+    if (!archived) {
+      card.querySelector("[data-pt-toggle]")?.addEventListener("click", () => {
+        const button = card.querySelector("[data-pt-toggle]");
+        void ptTogglePartner(partner.id, button.dataset.ptNext, button);
+      });
+    }
+  }
+}
+
+async function ptTogglePartner(id, nextStatus, button) {
+  if (button) button.disabled = true;
+  try {
+    const response = await request(`/api/v1/partners/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status: nextStatus }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) toast(`没切成：${data.message || data.error || response.status}`);
+  } catch (error) {
+    if (error.message !== "forbidden") toast(`没切成：${error.message}`);
+  } finally {
+    if (button) button.disabled = false;
+    void loadPartners();
+    void loadRoster(); // E4：侧栏花名册同步刷新
+  }
+}
+
+/* ── 新建执事模态 ────────────────────────────────────── */
+
+function openCreatePartnerModal() {
+  openModal("新建执事", (body) => {
+    body.innerHTML = `
+      <p class="modal-desc">给执事起个名字。填了领域就是总管执事的分管宰相，建好之后领域不可改。</p>
+      <div class="modal-field">
+        <span>名字（≤40 字）</span>
+        <input class="modal-input" id="pt-new-name" type="text" maxlength="40" placeholder="例如：小助手" />
+      </div>
+      <div class="modal-field">
+        <span>领域（可选）</span>
+        <input class="modal-input is-mono" id="pt-new-domain" type="text" spellcheck="false"
+               placeholder="小写 ASCII 领域名，建了就是总管执事" />
+      </div>
+      <div class="modal-field">
+        <span>一句话身份（可选）</span>
+        <textarea class="pt-ta" id="pt-new-identity" rows="2" spellcheck="false"
+                  placeholder="例如：你是替我整理资料的安静助手"></textarea>
+      </div>
+      <p class="modal-hint" id="pt-new-hint"></p>
+      <div class="modal-actions">
+        <button class="ghost" type="button" data-modal-cancel>取消</button>
+        <button class="modal-primary" id="pt-new-go" type="button">新建</button>
+      </div>`;
+
+    const nameInput = body.querySelector("#pt-new-name");
+    const domainInput = body.querySelector("#pt-new-domain");
+    const identityInput = body.querySelector("#pt-new-identity");
+    const hint = body.querySelector("#pt-new-hint");
+    const go = body.querySelector("#pt-new-go");
+    body.querySelector("[data-modal-cancel]")?.addEventListener("click", closeModal);
+
+    const submit = async () => {
+      if (go.disabled) return;
+      const name = nameInput.value.trim();
+      if (!name) { setModalHint(hint, "先起个名字。"); nameInput.focus(); return; }
+      const domain = domainInput.value.trim();
+      const identity = identityInput.value.trim();
+      go.disabled = true;
+      setModalHint(hint, "创建中…", false);
+      try {
+        const response = await request("/api/v1/partners", {
+          method: "POST",
+          // E2 #0：soul 随建档一次提交（后端 bumpSoul 落成 v2 自定义版本），
+          // 收敛掉 E1「建完补 PATCH」的两段式；不带 identity 时请求形状与旧版一致。
+          body: JSON.stringify({
+            name,
+            ...(domain ? { domain } : {}),
+            ...(identity ? { soul: identity } : {}),
+          }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          setModalHint(hint, data.message || data.error || `没建成：HTTP ${response.status}`);
+          return;
+        }
+        closeModal();
+        toast("执事已新建");
+        void loadPartners();
+        void loadRoster(); // E4：侧栏花名册同步刷新
+      } catch (error) {
+        if (error.message === "forbidden") { closeModal(); return; }
+        setModalHint(hint, `没建成：${error.message}`);
+      } finally {
+        go.disabled = false;
+      }
+    };
+    go.addEventListener("click", () => void submit());
+    nameInput.addEventListener("input", () => clearModalHint(hint));
+    nameInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") { event.preventDefault(); void submit(); }
+    });
+  });
+}
+
+/* ── 编辑执事模态（三段：SOUL / 模型候选链 / 例行任务）── */
+
+async function openEditPartnerModal(partnerId) {
+  let detail;
+  try {
+    const response = await request(`/api/v1/partners/${encodeURIComponent(partnerId)}`, { cache: "no-store" });
+    detail = await response.json().catch(() => ({}));
+    if (!response.ok || !detail.ok) { toast("读不到执事详情"); return; }
+  } catch (error) {
+    if (error.message !== "forbidden") toast(`读不到执事详情：${error.message}`);
+    return;
+  }
+  openModal("编辑执事", (body) => ptBuildEditModal(body, partnerId, detail));
+}
+
+function ptBuildEditModal(body, partnerId, detail) {
+  const partner = detail.partner || {};
+  const soul = String(detail.soul ?? "");
+  const chain = Array.isArray(detail.modelChain) ? detail.modelChain : [];
+  const chainText = chain.map((item) => `${item.providerId}|${item.modelId}|${item.keyEnv}`).join("\n");
+  body.innerHTML = `
+    <div class="pt-edit">
+      <div class="pt-seg pt-basic">
+        <label class="modal-field">
+          <span>名字</span>
+          <div class="modal-row">
+            <input class="modal-input" id="pt-name" type="text" maxlength="40" value="${attr(partner.name || "")}" />
+            <button class="ghost" id="pt-name-save" type="button">改名</button>
+          </div>
+        </label>
+        <label class="modal-field">
+          <span>领域（建后不可改）</span>
+          <input class="modal-input is-mono" id="pt-domain" type="text" value="${attr(partner.domain || "")}"
+                 placeholder="普通执事没有领域" readonly />
+        </label>
+      </div>
+
+      <div class="pt-seg">
+        <div class="pt-seg-head">
+          <span class="pt-seg-title">SOUL · 身份</span>
+          <span class="kv" id="pt-soul-version">当前 v${esc(String(detail.soulVersion ?? "—"))}</span>
+        </div>
+        <textarea class="pt-ta is-soul" id="pt-soul" rows="12" spellcheck="false">${esc(soul)}</textarea>
+        <p class="modal-hint" id="pt-soul-hint"></p>
+        <div class="pt-actions">
+          <button class="btn-primary" id="pt-soul-save" type="button">保存 SOUL</button>
+        </div>
+      </div>
+
+      <div class="pt-seg">
+        <div class="pt-seg-title">模型候选链</div>
+        <p class="set-hint">每行一条 <span class="kv">providerId|modelId|KEY_ENV_NAME</span>；空行与 # 注释跳过，最多 5 行；留空保存即清空链。只填环境变量名，不要填密钥值。</p>
+        <textarea class="pt-ta" id="pt-chain" rows="6" spellcheck="false">${esc(chainText)}</textarea>
+        <p class="modal-hint" id="pt-chain-hint"></p>
+        <div class="pt-actions">
+          <button class="btn-primary" id="pt-chain-save" type="button">保存候选链</button>
+        </div>
+      </div>
+
+      <div class="pt-seg">
+        <div class="pt-seg-head">
+          <span class="pt-seg-title">例行任务</span>
+          <button class="ghost" id="pt-routine-refresh" type="button">刷新</button>
+        </div>
+        <div class="pt-routine-list" id="pt-routine-list"><div class="set-hint">读取中…</div></div>
+        ${ptRoutineFormMarkup()}
+      </div>
+    </div>`;
+
+  const nameInput = body.querySelector("#pt-name");
+  body.querySelector("#pt-name-save")?.addEventListener("click", () => void ptSaveName(partnerId, nameInput));
+
+  const soulArea = body.querySelector("#pt-soul");
+  const soulHint = body.querySelector("#pt-soul-hint");
+  body.querySelector("#pt-soul-save")?.addEventListener("click", () => void ptSaveSoul(partnerId, soulArea, soulHint, body));
+  soulArea.addEventListener("input", () => clearModalHint(soulHint));
+
+  const chainArea = body.querySelector("#pt-chain");
+  const chainHint = body.querySelector("#pt-chain-hint");
+  body.querySelector("#pt-chain-save")?.addEventListener("click", () => void ptSaveChain(partnerId, chainArea, chainHint, body));
+  chainArea.addEventListener("input", () => clearModalHint(chainHint));
+
+  const listBox = body.querySelector("#pt-routine-list");
+  body.querySelector("#pt-routine-refresh")?.addEventListener("click", () => void ptRenderRoutineList(listBox, partnerId));
+  ptWireRoutineForm(body, partnerId, listBox);
+  void ptRenderRoutineList(listBox, partnerId);
+}
+
+async function ptSaveName(partnerId, input) {
+  const name = input.value.trim();
+  if (!name) { toast("名字不能为空"); return; }
+  try {
+    const response = await request(`/api/v1/partners/${encodeURIComponent(partnerId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ name }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) { toast(`没改名：${data.message || data.error || response.status}`); return; }
+    toast("名字已保存");
+    void loadPartners();
+  } catch (error) {
+    if (error.message !== "forbidden") toast(`没改名：${error.message}`);
+  }
+}
+
+async function ptSaveSoul(partnerId, area, hint, host) {
+  const soul = area.value;
+  if (!soul.trim()) { setModalHint(hint, "SOUL 不能为空"); return; }
+  const button = host.querySelector("#pt-soul-save");
+  if (button) button.disabled = true;
+  setModalHint(hint, "保存中…", false);
+  try {
+    const response = await request(`/api/v1/partners/${encodeURIComponent(partnerId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ soul }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) { setModalHint(hint, data.message || data.error || `没存成：HTTP ${response.status}`); return; }
+    setModalHint(hint, "", false);
+    toast("已保存为新版本，下一轮生效");
+    if (data.soulVersion != null) {
+      const version = host.querySelector("#pt-soul-version");
+      if (version) version.textContent = `当前 v${data.soulVersion}`;
+    }
+    void loadPartners();
+  } catch (error) {
+    if (error.message === "forbidden") { closeModal(); return; }
+    setModalHint(hint, `没存成：${error.message}`);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+/** 把按行编辑的文本解析成候选链数组；前端先拦行数 / 结构 / keyEnv 形状。 */
+function ptParseChain(text) {
+  const lines = String(text)
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"));
+  if (lines.length > 5) return { error: "候选链最多 5 行，先删掉多余的" };
+  const items = [];
+  for (const line of lines) {
+    const parts = line.split("|").map((part) => part.trim());
+    // 密钥值优先拦：第三段不是合法 env 名（或混进了 sk- 之类的值）就给密钥纪律提示
+    if (parts.length >= 3 && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(parts[2])) {
+      return { error: "只填环境变量名，不要填密钥值" };
+    }
+    if (parts.length !== 3 || !parts[0] || !parts[1]) {
+      return { error: "每行格式：providerId|modelId|KEY_ENV_NAME" };
+    }
+    items.push({ providerId: parts[0], modelId: parts[1], keyEnv: parts[2] });
+  }
+  return { items };
+}
+
+async function ptSaveChain(partnerId, area, hint, host) {
+  const parsed = ptParseChain(area.value);
+  if (parsed.error) { setModalHint(hint, parsed.error); return; }
+  const button = host.querySelector("#pt-chain-save");
+  if (button) button.disabled = true;
+  setModalHint(hint, "保存中…", false);
+  try {
+    const response = await request(`/api/v1/partners/${encodeURIComponent(partnerId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ modelChain: parsed.items }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) { setModalHint(hint, data.message || data.error || `没存成：HTTP ${response.status}`); return; }
+    setModalHint(hint, "", false);
+    toast(parsed.items.length ? `候选链已保存（${parsed.items.length} 项）` : "候选链已清空");
+    if (data.soulVersion != null) {
+      const version = host.querySelector("#pt-soul-version");
+      if (version) version.textContent = `当前 v${data.soulVersion}`;
+    }
+  } catch (error) {
+    if (error.message === "forbidden") { closeModal(); return; }
+    setModalHint(hint, `没存成：${error.message}`);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+/* ── 例行任务（编辑模态第三段）───────────────────────── */
+
+function ptRoutineFormMarkup() {
+  return `
+    <div class="pt-new">
+      <div class="pt-seg-title">新建例行任务</div>
+      <label class="modal-field">
+        <span>名称（≤40 字）</span>
+        <input class="modal-input" id="pt-r-name" type="text" maxlength="40" placeholder="例如：每晚整理" />
+      </label>
+      <label class="modal-field">
+        <span>指令 prompt</span>
+        <textarea class="pt-ta" id="pt-r-prompt" rows="3" spellcheck="false" placeholder="到点要它做什么"></textarea>
+      </label>
+      <div class="modal-field">
+        <span>触发器类型</span>
+        <div class="segmented slide" id="pt-r-trigger" role="radiogroup" aria-label="触发器类型">
+          <button type="button" data-trigger="cron" aria-checked="true">cron</button>
+          <button type="button" data-trigger="interval" aria-checked="false">interval</button>
+          <button type="button" data-trigger="once" aria-checked="false">once</button>
+          <button type="button" data-trigger="event" aria-checked="false">event</button>
+        </div>
+      </div>
+      <div class="modal-field pt-trigger-input" data-trigger-input="cron">
+        <span>cron 原文（5 段：分 时 日 月 周）</span>
+        <input class="modal-input is-mono" id="pt-r-cron" type="text" spellcheck="false" placeholder="30 21 * * *" />
+      </div>
+      <div class="modal-field pt-trigger-input" data-trigger-input="interval" hidden>
+        <span>间隔秒数（≥60）</span>
+        <input class="modal-input is-mono" id="pt-r-interval" type="number" min="60" placeholder="3600" />
+      </div>
+      <div class="modal-field pt-trigger-input" data-trigger-input="once" hidden>
+        <span>一次性时间</span>
+        <input class="modal-input" id="pt-r-once" type="datetime-local" />
+      </div>
+      <div class="modal-field pt-trigger-input" data-trigger-input="event" hidden>
+        <span>事件 kind</span>
+        <select class="modal-input" id="pt-r-kind">
+          <option value="delegation">delegation</option>
+          <option value="tool">tool</option>
+          <option value="phase">phase</option>
+        </select>
+        <span>match（可选，单行 k=v，多组用逗号）</span>
+        <input class="modal-input is-mono" id="pt-r-match" type="text" spellcheck="false" placeholder="phase=done" />
+      </div>
+      <div class="pt-mode-row">
+        <span class="set-hint">会话方式</span>
+        <button class="switch" id="pt-r-mode" type="button" role="switch" aria-checked="false" aria-label="每次新开">
+          <span class="switch-thumb" aria-hidden="true"></span>
+        </button>
+        <span class="set-hint" id="pt-r-mode-label">接着聊</span>
+      </div>
+      <div class="pt-actions">
+        <button class="btn-primary" id="pt-r-create" type="button">新建例行任务</button>
+      </div>
+      <p class="modal-hint" id="pt-r-hint"></p>
+    </div>`;
+}
+
+function ptWireRoutineForm(body, partnerId, listBox) {
+  const seg = body.querySelector("#pt-r-trigger");
+  if (seg) mountSegmented(seg);
+  const showTrigger = (type) => {
+    for (const node of body.querySelectorAll("[data-trigger-input]")) {
+      node.hidden = node.dataset.triggerInput !== type;
+    }
+  };
+  showTrigger("cron");
+  for (const button of seg ? seg.querySelectorAll("[data-trigger]") : []) {
+    button.addEventListener("click", () => {
+      for (const other of seg.querySelectorAll("[data-trigger]")) {
+        other.setAttribute("aria-checked", String(other === button));
+      }
+      syncSegmented(seg);
+      showTrigger(button.dataset.trigger);
+    });
+  }
+
+  const mode = body.querySelector("#pt-r-mode");
+  const modeLabel = body.querySelector("#pt-r-mode-label");
+  mode?.addEventListener("click", () => {
+    const next = mode.getAttribute("aria-checked") !== "true";
+    mode.setAttribute("aria-checked", String(next));
+    if (modeLabel) modeLabel.textContent = next ? "每次新开" : "接着聊";
+  });
+
+  const hint = body.querySelector("#pt-r-hint");
+  body.querySelector("#pt-r-create")?.addEventListener("click", () =>
+    void ptCreateRoutine(body, partnerId, listBox, hint),
+  );
+  body.querySelector("#pt-r-name")?.addEventListener("input", () => clearModalHint(hint));
+}
+
+async function ptCreateRoutine(body, partnerId, listBox, hint) {
+  const name = body.querySelector("#pt-r-name")?.value.trim() || "";
+  const prompt = body.querySelector("#pt-r-prompt")?.value || "";
+  const type = body.querySelector("#pt-r-trigger [data-trigger][aria-checked='true']")?.dataset.trigger || "cron";
+  const fresh = body.querySelector("#pt-r-mode")?.getAttribute("aria-checked") === "true";
+  const sessionMode = fresh ? "fresh" : "persistent";
+
+  if (!name) { setModalHint(hint, "先给例行任务起个名字。"); return; }
+  if (!prompt.trim()) { setModalHint(hint, "指令 prompt 不能为空。"); return; }
+
+  let trigger;
+  if (type === "cron") {
+    const expr = (body.querySelector("#pt-r-cron")?.value || "").trim();
+    if (expr.split(/\s+/).length !== 5) { setModalHint(hint, "cron 要 5 段：分 时 日 月 周"); return; }
+    trigger = { type: "cron", expr };
+  } else if (type === "interval") {
+    const seconds = Number(body.querySelector("#pt-r-interval")?.value);
+    if (!Number.isFinite(seconds) || seconds < 60) { setModalHint(hint, "间隔秒数至少 60"); return; }
+    trigger = { type: "interval", seconds };
+  } else if (type === "once") {
+    const raw = body.querySelector("#pt-r-once")?.value || "";
+    const at = new Date(raw);
+    if (!raw || Number.isNaN(at.getTime())) { setModalHint(hint, "选一个合法时间"); return; }
+    trigger = { type: "once", at: at.toISOString() };
+  } else {
+    const kind = body.querySelector("#pt-r-kind")?.value || "delegation";
+    const matchText = (body.querySelector("#pt-r-match")?.value || "").trim();
+    trigger = { type: "event", kind };
+    if (matchText) {
+      const match = {};
+      for (const pair of matchText.split(",")) {
+        const index = pair.indexOf("=");
+        if (index > 0) match[pair.slice(0, index).trim()] = pair.slice(index + 1).trim();
+      }
+      if (Object.keys(match).length) trigger.match = match;
+    }
+  }
+
+  const button = body.querySelector("#pt-r-create");
+  if (button) button.disabled = true;
+  setModalHint(hint, "新建中…", false);
+  try {
+    const response = await request("/api/v1/routines", {
+      method: "POST",
+      body: JSON.stringify({ partnerId, name, prompt, triggers: [trigger], sessionMode }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) { setModalHint(hint, data.message || data.error || `没建成：HTTP ${response.status}`); return; }
+    setModalHint(hint, "", false);
+    toast("例行任务已新建");
+    const nameNode = body.querySelector("#pt-r-name");
+    const promptNode = body.querySelector("#pt-r-prompt");
+    if (nameNode) nameNode.value = "";
+    if (promptNode) promptNode.value = "";
+    void ptRenderRoutineList(listBox, partnerId);
+  } catch (error) {
+    if (error.message === "forbidden") { closeModal(); return; }
+    setModalHint(hint, `没建成：${error.message}`);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function ptRenderRoutineList(box, partnerId) {
+  if (!box) return;
+  try {
+    const response = await request(`/api/v1/routines?partnerId=${encodeURIComponent(partnerId)}`, { cache: "no-store" });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(String(response.status));
+    const routines = data.routines || [];
+    box.replaceChildren();
+    if (!routines.length) {
+      box.innerHTML = `<div class="set-hint">还没有例行任务，用下面的表单加一条。</div>`;
+      return;
+    }
+    for (const routine of routines) {
+      const row = document.createElement("div");
+      row.className = "pt-routine";
+      const triggers = Array.isArray(routine.triggers) ? routine.triggers : [];
+      row.innerHTML = `
+        <div class="pt-routine-head">
+          <span class="row-label">${esc(routine.name || "")}</span>
+          <div class="pt-routine-actions">
+            <button class="switch" type="button" role="switch" aria-label="启用"
+                    aria-checked="${routine.enabled ? "true" : "false"}" data-pt-enabled="${attr(routine.id)}">
+              <span class="switch-thumb" aria-hidden="true"></span>
+            </button>
+            <button class="ghost" type="button" data-pt-run-now="${attr(routine.id)}">立即跑</button>
+            <button class="ghost" type="button" data-pt-history="${attr(routine.id)}">展开历史</button>
+            <button class="ghost" type="button" data-pt-del-routine="${attr(routine.id)}" data-pt-del-name="${attr(routine.name || "")}">删除</button>
+          </div>
+        </div>
+        <div class="row-hint pt-trigger">${triggers.length ? triggers.map(ptHumanizeTrigger).join("；") : "—"}</div>
+        <div class="pt-runs" data-pt-runs-for="${attr(routine.id)}" hidden></div>`;
+      box.append(row);
+
+      row.querySelector("[data-pt-enabled]")?.addEventListener("click", () => {
+        const sw = row.querySelector("[data-pt-enabled]");
+        void ptToggleRoutine(routine.id, sw);
+      });
+      row.querySelector("[data-pt-run-now]")?.addEventListener("click", () => {
+        const runButton = row.querySelector("[data-pt-run-now]");
+        void ptRunNow(routine.id, runButton, row.querySelector("[data-pt-runs-for]"));
+      });
+      row.querySelector("[data-pt-history]")?.addEventListener("click", () => {
+        const historyButton = row.querySelector("[data-pt-history]");
+        void ptToggleHistory(routine.id, historyButton, row.querySelector("[data-pt-runs-for]"));
+      });
+      row.querySelector("[data-pt-del-routine]")?.addEventListener("click", () =>
+        ptConfirmDeleteRoutine(partnerId, routine.id, routine.name || ""),
+      );
+    }
+  } catch (error) {
+    if (error.message === "forbidden") return;
+    box.innerHTML = `<div class="set-hint is-error">读不到例行任务：${esc(error.message)}</div>`;
+  }
+}
+
+async function ptToggleRoutine(id, sw) {
+  const next = sw.getAttribute("aria-checked") !== "true";
+  sw.disabled = true;
+  try {
+    const response = await request(`/api/v1/routines/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ enabled: next }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) { toast(`没切换：${data.message || data.error || response.status}`); return; }
+    sw.setAttribute("aria-checked", String(next));
+  } catch (error) {
+    if (error.message !== "forbidden") toast(`没切换：${error.message}`);
+  } finally {
+    sw.disabled = false;
+  }
+}
+
+async function ptRunNow(id, button, runsBox) {
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = "跑中…";
+  try {
+    const response = await request(`/api/v1/routines/${encodeURIComponent(id)}/run_now`, { method: "POST" });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok) {
+      toast(`没跑成：${data.error || data.message || response.status}`);
+    } else {
+      toast("已跑完一轮");
+      if (runsBox) await ptLoadRuns(id, runsBox, true);
+    }
+  } catch (error) {
+    if (error.message !== "forbidden") toast(`没跑成：${error.message}`);
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
+}
+
+async function ptToggleHistory(id, button, runsBox) {
+  if (!runsBox) return;
+  if (!runsBox.hidden) {
+    runsBox.hidden = true;
+    button.textContent = "展开历史";
+    return;
+  }
+  button.textContent = "收起";
+  await ptLoadRuns(id, runsBox, true);
+}
+
+async function ptLoadRuns(id, box, show) {
+  if (show) box.hidden = false;
+  box.innerHTML = `<div class="set-hint">读取中…</div>`;
+  try {
+    const response = await request(`/api/v1/routines/${encodeURIComponent(id)}/runs`, { cache: "no-store" });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(String(response.status));
+    const runs = (data.runs || []).slice(0, 10);
+    if (!runs.length) { box.innerHTML = `<div class="set-hint">还没有执行记录。</div>`; return; }
+    box.innerHTML = runs
+      .map((run) => {
+        const info = PT_RUN_STATUS[run.status] || { text: run.status || "未知", cls: "" };
+        const summary = String(run.summary || run.error || "").slice(0, 80);
+        const at = run.endedAt || run.startedAt;
+        const time = at ? new Date(at).toLocaleString("zh-CN") : "";
+        return `<div class="pt-run">
+          <span class="pill-tag ${info.cls}">${esc(info.text)}</span>
+          <span class="pt-run-trigger">${esc(String(run.trigger || ""))}</span>
+          <span class="pt-run-summary">${esc(summary)}</span>
+          <span class="pt-run-time">${esc(time)}</span>
+        </div>`;
+      })
+      .join("");
+  } catch (error) {
+    if (error.message === "forbidden") return;
+    box.innerHTML = `<div class="set-hint is-error">读不到历史：${esc(error.message)}</div>`;
+  }
+}
+
+function ptConfirmDeleteRoutine(partnerId, routineId, name) {
+  // 单一 modal 宿主：确认弹层会替换编辑模态，答复后重新打开编辑模态（刷新一次详情）
+  openModal("删除例行任务", (body) => {
+    body.innerHTML = `
+      <p class="modal-desc">确定删除「${esc(name)}」？在飞的任务会自动作废（没有取消 API，不残留）。</p>
+      <div class="modal-actions">
+        <button class="ghost" type="button" data-modal-cancel>取消</button>
+        <button class="modal-danger" type="button" id="pt-del-go">删除</button>
+      </div>`;
+    body.querySelector("[data-modal-cancel]")?.addEventListener("click", () => void openEditPartnerModal(partnerId));
+    body.querySelector("#pt-del-go")?.addEventListener("click", async (event) => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      try {
+        const response = await request(`/api/v1/routines/${encodeURIComponent(routineId)}`, { method: "DELETE" });
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          toast(`没删成：${data.message || data.error || response.status}`);
+          button.disabled = false;
+          return;
+        }
+        toast("已删除");
+        void openEditPartnerModal(partnerId);
+      } catch (error) {
+        if (error.message === "forbidden") { closeModal(); return; }
+        toast(`没删成：${error.message}`);
+        button.disabled = false;
+      }
+    });
+  });
+}
+
+/* ── 试跑（执事卡动作 #3）───────────────────────────── */
+
+function openRunPartnerModal(partnerId, partnerName) {
+  openModal(`试跑 · ${partnerName || "执事"}`, (body) => {
+    body.innerHTML = `
+      <p class="modal-desc">给这个执事发一句话，走完整链路跑一轮；faux 下会拿到假模型应答。</p>
+      <div class="modal-field">
+        <span>说一句</span>
+        <input class="modal-input" id="pt-run-text" type="text" placeholder="例如：帮我记一句今天的事" />
+      </div>
+      <pre class="pt-result" id="pt-run-result" hidden></pre>
+      <p class="modal-hint" id="pt-run-hint"></p>
+      <div class="modal-actions">
+        <button class="ghost" type="button" data-modal-cancel>关闭</button>
+        <button class="modal-primary" id="pt-run-go" type="button">运行</button>
+      </div>`;
+    const textInput = body.querySelector("#pt-run-text");
+    const result = body.querySelector("#pt-run-result");
+    const hint = body.querySelector("#pt-run-hint");
+    const go = body.querySelector("#pt-run-go");
+    body.querySelector("[data-modal-cancel]")?.addEventListener("click", closeModal);
+    const submit = async () => {
+      if (go.disabled) return;
+      const text = textInput.value.trim();
+      if (!text) { setModalHint(hint, "先写一句话。"); return; }
+      go.disabled = true; // 防重复点击
+      result.hidden = true;
+      setModalHint(hint, "跑中…", false);
+      try {
+        const response = await request(`/api/v1/partners/${encodeURIComponent(partnerId)}/run`, {
+          method: "POST",
+          body: JSON.stringify({ text }),
+        });
+        const data = await response.json().catch(() => ({}));
+        const shown = data.ok ? (data.text || "（没有正文）") : (data.error || data.text || "这一轮没跑完");
+        result.textContent = shown;
+        result.classList.toggle("is-error", !data.ok);
+        result.hidden = false;
+        setModalHint(hint, "", false);
+      } catch (error) {
+        if (error.message === "forbidden") { closeModal(); return; }
+        setModalHint(hint, `没跑成：${error.message}`);
+      } finally {
+        go.disabled = false;
+      }
+    };
+    go.addEventListener("click", () => void submit());
+    textInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") { event.preventDefault(); void submit(); }
+    });
+    textInput.addEventListener("input", () => clearModalHint(hint));
+  });
+}
+
 /* ── 启动 ─────────────────────────────────────────────── */
 
 void (async () => {
@@ -5785,6 +7912,9 @@ void (async () => {
   applyTheme(currentThemeChoice());
   applyActPref();
   syncThinkingPill();
+  // E4：最近会话折叠态（localStorage）、总管状态点初值
+  applyRecents();
+  syncChiefDot();
 
   // 深链：`?view=settings`（或 `?view=settings/连接页 id`）落设置页，
   // `?view=new` 开一个新对话（壳的托盘/快捷方式用得上）
@@ -5806,6 +7936,7 @@ void (async () => {
 
   await checkHealth();
   await loadChats();
+  void loadRoster(); // E4：执事花名册首帧
   void refreshModelPill();
   // 侧栏项目区：拿不到工作区就保持隐藏（没根目录谈何项目）
   void refreshProjectPill();

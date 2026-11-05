@@ -35,16 +35,18 @@
   <!-- 顶部 chrome：侧栏开关（仅聊天页显示）+ 功能菜单 -->
   <div class="chrome">
     <button class="icon-btn" id="toggle-sidebar" type="button" aria-label="切换侧栏" title="切换侧栏 (Ctrl+B)">
-      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-        <rect x="2" y="3" width="12" height="10" rx="2"/>
-        <path d="M6.2 3v10" stroke-linecap="round"/>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect width="18" height="18" x="3" y="3" rx="2"/>
+        <path d="M9 3v18"/>
       </svg>
     </button>
 
     <div class="menu-wrap">
       <button class="icon-btn" id="menu-btn" type="button" aria-label="功能菜单" aria-haspopup="menu" aria-expanded="false">
-        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-          <path d="M2 4h12M2 8h12M2 12h12" stroke-linecap="round"/>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <line x1="4" x2="20" y1="12" y2="12"/>
+          <line x1="4" x2="20" y1="6" y2="6"/>
+          <line x1="4" x2="20" y1="18" y2="18"/>
         </svg>
       </button>
       <div class="menu-pop" id="menu-pop" role="menu" hidden>
@@ -57,22 +59,23 @@
 
   <div class="window-controls" id="window-controls" hidden>
     <button class="window-btn" id="win-min" type="button" aria-label="最小化窗口" title="最小化">
-      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">
-        <path d="M3.5 8h9" stroke-linecap="round"/>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M5 12h14"/>
       </svg>
     </button>
     <button class="window-btn" id="win-max" type="button" aria-label="最大化窗口" title="最大化">
-      <svg class="ico-max" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">
-        <rect x="3" y="3" width="10" height="10" rx="1.5"/>
+      <svg class="ico-max" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect width="18" height="18" x="3" y="3" rx="2"/>
       </svg>
-      <svg class="ico-restore" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true" hidden>
-        <path d="M5.5 5.5V3.5h7v7h-2"/>
-        <rect x="3.5" y="5.5" width="7" height="7" rx="1.2"/>
+      <svg class="ico-restore" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" hidden>
+        <rect width="14" height="14" x="8" y="8" rx="2" ry="2"/>
+        <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>
       </svg>
     </button>
     <button class="window-btn close" id="win-close" type="button" aria-label="关闭窗口" title="关闭">
-      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">
-        <path d="M4 4l8 8M12 4 4 12" stroke-linecap="round"/>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M18 6 6 18"/>
+        <path d="m6 6 12 12"/>
       </svg>
     </button>
   </div>
@@ -80,80 +83,136 @@
 
 <div class="app">
   <aside class="sidebar">
-    <!-- 收起轨道（2026-11-05 F1）：对齐 CINDY 几何，72px 轨 + 36×36 圆钮。
-         顺序：新对话 → 任务中心 → 项目 → 分隔线 → 占位 → 设置 + 状态点。
+    <!-- 收起轨道（2026-11-05 F1 / E4 重排 / E5 对齐）：对齐 CINDY 几何，72px 轨 + 36×36 圆钮。
+         顺序 = 总管（首字圆钮，点开主对话）→ 跟总管说话（＋）→ 任务中心 → 项目 → 分隔线 →
+         执事占位（不展开，悬停提示去看展开侧栏）→ 群组占位 → 设置 + 状态点。
+         展开态 E5 起按同一顺序排：总管区 → 任务中心/项目 → 执事花名册 → 群组 → 设置。
          项目按钮与展开态 pill 共用同一个弹层（#proj-menu）。 -->
     <div class="side-rail" id="side-rail">
-      <button class="rail-btn" id="rail-new" type="button" data-tip="新对话 (Ctrl+K)" aria-label="新对话">
-        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M8 3.2v9.6M3.2 8h9.6"/></svg>
+      <button class="rail-btn rail-chief" id="rail-chief" type="button" data-tip="总管 · 打开主对话" aria-label="总管 · 打开主对话">
+        <span class="pt-avatar" aria-hidden="true">总</span>
+      </button>
+      <button class="rail-btn" id="rail-new" type="button" data-tip="跟总管说话 (Ctrl+K)" aria-label="跟总管说话">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
       </button>
       <button class="rail-btn" id="rail-tasks" type="button" data-tip="任务中心" aria-label="任务中心">
-        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="2.6" width="10" height="11.4" rx="1.6"/><path d="M5.8 2.6V5h4.4V2.6M5.6 8h4.8M5.6 10.8h3.2"/></svg>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="8" height="4" x="8" y="2" rx="1" ry="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M12 11h4"/><path d="M12 16h4"/><path d="M8 11h.01"/><path d="M8 16h.01"/></svg>
       </button>
-      <!-- 轨道态项目按钮：主工作区显示通用图标，选了项目就换成项目名首字。 -->
-      <button class="rail-btn rail-proj" id="rail-proj" type="button" data-tip="切换项目"
-              aria-label="切换项目" aria-haspopup="menu" aria-expanded="false" hidden>
-        <svg class="proj-rail-ico" id="rail-proj-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor"
-             stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M2.6 3.6h4l1.2 1.6h5.6v7H2.6zM2.6 6.4h10.8"/>
+      <!-- 轨道态项目按钮：点开是「主项目 + 子项目」总览弹层（与展开态 pill 同一份）。 -->
+      <button class="rail-btn rail-proj" id="rail-proj" type="button" data-tip="项目"
+              aria-label="项目" aria-haspopup="menu" aria-expanded="false" hidden>
+        <svg class="proj-rail-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>
         </svg>
-        <span class="proj-rail-mark" id="rail-proj-mark" hidden></span>
       </button>
       <div class="rail-sep" aria-hidden="true"></div>
-      <button class="rail-btn" type="button" title="领域负责人（占位）" data-tip="领域负责人（占位）" aria-label="领域负责人" disabled>
-        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.2 9.4 5l3 .4-2.2 2.1.5 3-2.7-1.4-2.7 1.4.5-3L3.6 5.4l3-.4Z"/></svg>
+      <!-- 执事占位（E4）：人多了轨道放不下，不在轨道展开；悬停提示去展开侧栏看花名册。
+           原「领域负责人」占位移除——领域概览已并入执事区（行点击进任务中心）。 -->
+      <button class="rail-btn rail-partners-hint" id="rail-partners" type="button" title="执事（展开侧栏查看）" data-tip="执事（展开侧栏查看）" aria-label="执事">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
       </button>
       <button class="rail-btn" type="button" title="群组（占位）" data-tip="群组（占位）" aria-label="群组" disabled>
-        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5.6" cy="6" r="2.2"/><path d="M2.2 13c.4-2.2 1.7-3.4 3.4-3.4S8.6 10.8 9 13"/><circle cx="11" cy="6.6" r="1.8"/><path d="M10.6 9.9c1.8.1 2.9 1.1 3.3 2.7"/></svg>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/><path d="M8 12h.01"/><path d="M12 12h.01"/><path d="M16 12h.01"/></svg>
       </button>
       <div class="rail-flex" aria-hidden="true"></div>
       <button class="rail-btn" id="rail-settings" type="button" data-tip="设置" aria-label="设置">
-        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-          <circle cx="8" cy="8" r="2.2"/>
-          <path d="M8 1.6v1.6M8 12.8v1.6M1.6 8h1.6M12.8 8h1.6M3.5 3.5l1.1 1.1M11.4 11.4l1.1 1.1M12.5 3.5l-1.1 1.1M4.6 11.4l-1.1 1.1" stroke-linecap="round"/>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/>
+          <circle cx="12" cy="12" r="3"/>
         </svg>
       </button>
       <div class="rail-status" id="rail-status" data-state="waiting" aria-hidden="true"><i></i></div>
     </div>
 
     <div class="sidebar-inner">
-      <!-- 顶部主导航（2026-11-05 F1）：新对话 / 任务中心 / 项目，统一 32px 胶囊行、2px 行距 -->
-      <div class="side-top">
-        <button class="new" id="new-chat" type="button">
-          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.2v9.6M3.2 8h9.6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-          新对话
+      <!-- 总管区（E4）：＋跟总管说话 / 总管固定条目（状态点＋首字头像＋名字＋pill）/
+           最近会话折叠（原「对话」列表整块移入这里，默认展开，折叠态存 localStorage）。 -->
+      <div class="side-chief">
+        <button class="new" id="new-chat" type="button"
+                aria-label="跟总管说话" title="跟总管说话 (Ctrl+K)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+          跟总管说话
         </button>
 
+        <div class="side-item chief-entry" id="chief-entry" role="button" tabindex="0"
+             aria-label="总管 · 打开主对话" title="总管 · 打开主对话">
+          <i class="status-dot idle" id="chief-dot" aria-hidden="true"></i>
+          <span class="pt-avatar" aria-hidden="true">总</span>
+          <span class="roster-name">总管</span>
+          <span class="pill-tag">总管</span>
+          <!-- E5：无 domain 的活跃单归总管；只显示不点击（总管的单没有 domain 筛选入口） -->
+          <span class="side-count chief-count" id="chief-count" hidden></span>
+        </div>
+
+        <div class="recents" id="recents">
+          <button class="recents-head" id="recents-toggle" type="button" aria-expanded="true">
+            <span>最近会话</span>
+            <svg class="recents-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+          </button>
+          <div class="recents-body" id="recents-body">
+            <nav class="chats" id="chats" aria-label="最近会话"></nav>
+            <button class="recents-all" id="recents-all" type="button">全部会话 <span aria-hidden="true">→</span></button>
+          </div>
+        </div>
+      </div>
+
+      <div class="rail-sep side-sep" aria-hidden="true"></div>
+
+      <!-- 工具区（E5 上移）：顺序与收起轨道一一对应——总管 → 新对话 → 任务中心 → 项目
+           → 执事 → 群组 → 设置。工具区放在执事之前，两边从上到下一致。 -->
+      <div class="side-top">
         <button class="side-item" id="open-tasks" type="button" aria-label="任务中心" title="任务中心">
-          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <rect x="3" y="2.6" width="10" height="11.4" rx="1.6"/>
-            <path d="M5.8 2.6V5h4.4V2.6M5.6 8h4.8M5.6 10.8h3.2"/>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect width="8" height="4" x="8" y="2" rx="1" ry="1"/>
+            <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>
+            <path d="M12 11h4"/>
+            <path d="M12 16h4"/>
+            <path d="M8 11h.01"/>
+            <path d="M8 16h.01"/>
           </svg>
           任务中心
           <span class="side-count" id="tasks-badge" hidden></span>
         </button>
 
-        <!-- 项目区（2026-11-04，F1 起无工作区也显示）：当前项目 pill，点开是切换弹层。
+        <!-- 项目区（2026-11-04，F1 起无工作区也显示）：主项目 pill，点开是「主项目 + 子项目」总览。
              没有工作区时作为「添加主项目」入口，不再整块隐藏。 -->
         <div class="side-proj" id="side-proj" hidden>
           <button class="composer-pill proj-pill" id="proj-pill" type="button"
-                  aria-haspopup="menu" aria-expanded="false" title="切换项目">
-            <span class="proj-pill-label" id="proj-pill-label">杂事 · 主工作区</span>
-            <svg class="chev" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4.8 6.4 8 9.6l3.2-3.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  aria-haspopup="menu" aria-expanded="false" aria-label="项目" title="项目">
+            <span class="proj-pill-label" id="proj-pill-label">项目</span>
+            <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
           </button>
         </div>
       </div>
 
-      <div class="sidebar-head">对话</div>
-      <nav class="chats" id="chats" aria-label="历史对话"></nav>
+      <div class="rail-sep side-sep" aria-hidden="true"></div>
+
+      <!-- 执事花名册（E4）：数据源 GET /api/v1/partners + /api/v1/domains；
+           分区标题右侧 ＋ 复用 E1「新建执事」模态；行点击进执事 canonical 会话。 -->
+      <div class="side-partners">
+        <div class="sidebar-head partners-head" title="执事" aria-label="执事">
+          执事
+          <button class="roster-add" id="partner-add-side" type="button" aria-label="新建执事" title="新建执事">＋</button>
+        </div>
+        <div class="roster" id="partner-roster" aria-label="执事花名册"></div>
+      </div>
+
+      <!-- 群组占位（E5）：与收起轨道同款 disabled + tooltip，先占位不做真功能。
+           位置紧跟执事花名册，和轨道里「执事 → 群组」的顺序一致。 -->
+      <button class="side-item" id="side-group" type="button" disabled
+              aria-label="群组" title="群组（占位）">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/><path d="M8 12h.01"/><path d="M12 12h.01"/><path d="M16 12h.01"/></svg>
+        群组
+      </button>
 
       <!-- 底部只留设置 + 连接状态，mt-auto 钉在侧栏底边 -->
       <div class="side-foot">
         <!-- 设置入口常驻侧栏底部：设置页会隐藏侧栏，所以设置页自带返回按钮 -->
         <button class="side-item" id="open-settings" type="button" aria-label="设置" title="设置">
-          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
-            <circle cx="8" cy="8" r="2.2"/>
-            <path d="M8 1.6v1.6M8 12.8v1.6M1.6 8h1.6M12.8 8h1.6M3.5 3.5l1.1 1.1M11.4 11.4l1.1 1.1M12.5 3.5l-1.1 1.1M4.6 11.4l-1.1 1.1" stroke-linecap="round"/>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/>
+            <circle cx="12" cy="12" r="3"/>
           </svg>
           设置
         </button>
@@ -167,13 +226,6 @@
   <main class="main" id="view-chat">
     <header class="top">
       <h1 id="title">新对话</h1>
-      <div class="top-actions">
-        <!-- 导出对话 Markdown（2026-11-04 批次一）：只在有会话时出现 -->
-        <button class="ghost" id="export-chat" type="button" hidden title="导出当前对话为 Markdown">导出</button>
-        <!-- 上下文环搬进了 composer 底部工具行（2026-11-04），思考强度在模型菜单里；
-             顶栏只留导出。
-             停止也在输入框里（发送/停止同槽），顶栏不再有第二个停止入口。 -->
-      </div>
     </header>
 
     <div class="scroll" id="scroll">
@@ -189,7 +241,7 @@
     <!-- 输入框是一个容器卡（2026-11-04 对齐 cindy ComposerCard）：
          边框/卡底在容器上，textarea 透明无框；底部工具行左：附件占位，
          右：模型 + 上下文环 + 发送（模型紧挨发送，CINDY / ZCode 同款，D2 挪的）。
-         思考强度收进模型菜单的行内分段。流式时发送同槽换成停止，没有第二个停止入口。 -->
+         思考强度收进模型菜单，挂在当前模型名下方一行。流式时发送同槽换成停止，没有第二个停止入口。 -->
     <form class="composer" id="composer" autocomplete="off">
       <textarea id="input" rows="1" placeholder="说点什么…" aria-label="输入消息"></textarea>
       <div class="composer-foot">
@@ -197,7 +249,7 @@
           <!-- 附件占位（2026-11-04）：只弹 toast，不上传、不发请求 -->
           <button class="composer-add" id="composer-add" type="button"
                   aria-label="添加附件（未接入）" title="添加附件（未接入）">
-            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M8 3.2v9.6M3.2 8h9.6" stroke-linecap="round"/></svg>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
           </button>
         </div>
 
@@ -210,7 +262,7 @@
                     title="切换模型（下一轮生效）">
               <span id="model-pill-label">模型</span>
               <span class="model-think" id="model-think" hidden></span>
-              <svg class="chev" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4.8 6.4 8 9.6l3.2-3.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
             </button>
             <div class="model-menu composer-pop" id="model-menu" role="menu" hidden></div>
           </div>
@@ -224,8 +276,10 @@
             <span class="ctx-pct" id="ctx-pct"></span>
           </span>
           <button class="send" id="send" type="submit" aria-label="发送" disabled>
-            <svg class="ico-send" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 12.8V3.6M3.9 7.5 8 3.4l4.1 4.1" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
-            <svg class="ico-stop" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.6" y="4.6" width="6.8" height="6.8" rx="1.6" fill="currentColor"/></svg>
+            <svg class="ico-send" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 7-7 7 7"/><path d="M12 19V5"/></svg>
+            <!-- 停止方块按 CINDY SendButton 规格：10×10 圆角 1.5（24 视框里 rect 9x9 @ 7.5,7.5）
+                 —— 官方 square 占视框 75% 太大，发送钮里它就该是小小一枚 -->
+            <svg class="ico-stop" viewBox="0 0 24 24" aria-hidden="true"><rect width="9" height="9" x="7.5" y="7.5" rx="1.5" fill="currentColor"/></svg>
           </button>
         </div>
       </div>
@@ -239,8 +293,9 @@
     <aside class="set-side">
       <div class="set-head">
         <button class="set-back" id="close-settings" type="button" aria-label="返回" title="返回 (Esc)">
-          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
-            <path d="M9.8 3.4 5.2 8l4.6 4.6" stroke-linecap="round" stroke-linejoin="round"/>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="m12 19-7-7 7-7"/>
+            <path d="M19 12H5"/>
           </svg>
         </button>
         <h1>设置</h1>
@@ -259,8 +314,9 @@
     <header class="tasks-top">
       <div class="tasks-title">
         <button class="set-back" id="tasks-back" type="button" aria-label="返回任务看板" title="返回任务看板 (Esc)" hidden>
-          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
-            <path d="M9.8 3.4 5.2 8l4.6 4.6" stroke-linecap="round" stroke-linejoin="round"/>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="m12 19-7-7 7-7"/>
+            <path d="M19 12H5"/>
           </svg>
         </button>
         <h1>
@@ -287,10 +343,43 @@
     <div class="tasks-scroll" id="tasks-scroll">
       <div class="tasks-state" id="tasks-state" hidden></div>
       <div class="tasks-body" id="tasks-body">
+        <!-- 外部打手区（L3）：按执行者聚合的四张小卡，点一下过滤主视图；
+             数据全部来自 tickets 列表的 employee 字段，不新增接口 -->
+        <div class="tk-hitters" id="tasks-hitters" hidden></div>
         <div class="tasks-stats" id="tasks-stats"></div>
+        <!-- 三列喂的是对话卡的聚合灯：待你处理 / 出错 / 进行中 -->
         <div class="tasks-board" id="tasks-board"></div>
+        <!-- 已完结折叠区（K1/L3）：全 done 的对话卡，放在看板网格外，窄屏不必横滚 -->
+        <div class="tk-archive" id="tasks-archive" hidden></div>
+        <!-- 「更早的直派」（L3）：没有 conversationId 的旧单，沿用折叠样式摆最下面 -->
+        <div class="tk-archive" id="tasks-direct" hidden></div>
         <div class="task-detail" id="task-detail" hidden></div>
       </div>
+    </div>
+  </main>
+
+  <!-- 领域概览（E2 #3，E4 保留）：独立页 #/domains 路由与视图原样保留，仅移除侧栏
+       「领域负责人」占位——领域概览已并入执事花名册（行点击/单数进任务中心）。
+       只读：GET /api/v1/domains，每行 领域 · 活跃单数 · 状态；error 行标红 + 错误文案。
+       行点击跳 #/tasks?domain=<domain>（任务中心的 domain 筛选，任务中心里仍有入口）。 -->
+  <main class="main tasks" id="view-domains" hidden>
+    <header class="tasks-top">
+      <div class="tasks-title">
+        <button class="set-back" id="domains-back" type="button" aria-label="返回对话" title="返回对话 (Esc)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="m12 19-7-7 7-7"/>
+            <path d="M19 12H5"/>
+          </svg>
+        </button>
+        <h1>领域负责人<span class="tasks-title-sub" id="domains-title-sub"></span></h1>
+      </div>
+      <div class="tasks-actions">
+        <button class="ghost" id="domains-refresh" type="button">刷新</button>
+      </div>
+    </header>
+    <div class="tasks-scroll" id="domains-scroll">
+      <div class="tasks-state" id="domains-state" hidden></div>
+      <div class="tasks-body" id="domains-body"></div>
     </div>
   </main>
 </div>
@@ -298,7 +387,7 @@
 <!-- 项目切换弹层（2026-11-04）：展开态 pill 与收起轨道按钮共用这一份。
      放在 body 下而不是 .sidebar 里：侧栏收起动画要靠 overflow:hidden 裁内容，
      弹层放进去会被一起裁掉。位置由 JS 按触发元素实测写入，动效沿用 .composer-pop。 -->
-<div class="proj-pop composer-pop" id="proj-menu" role="menu" aria-label="切换项目" hidden></div>
+<div class="proj-pop composer-pop" id="proj-menu" role="menu" aria-label="项目" hidden></div>
 
 <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 
@@ -313,8 +402,9 @@
     <div class="modal-head">
       <h2 class="modal-title" id="modal-title"></h2>
       <button class="modal-x" id="modal-close" type="button" aria-label="关闭" title="关闭 (Esc)">
-        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-          <path d="M4 4l8 8M12 4 4 12" stroke-linecap="round"/>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M18 6 6 18"/>
+          <path d="m6 6 12 12"/>
         </svg>
       </button>
     </div>

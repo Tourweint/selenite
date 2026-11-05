@@ -40,7 +40,15 @@ import {
 } from "./approval-policy.ts";
 import { recentDiaryMemories, syncDiaryToMemory } from "./memory-ingest.ts";
 import { pathGuardBlockReason } from "./path-guard.ts";
-import { COMPANIONS_ENABLED, partnersStore } from "./partners.ts";
+import {
+	COMPANIONS_ENABLED,
+	chiefPartnerEnabled,
+	chiefSkillsDir,
+	ensureChiefPartner,
+	partnersStore,
+	resolvePartnerScope,
+	resolvePersona,
+} from "./partners.ts";
 import { currentProjectEnabled, projectsStore, workspaceRootReal } from "./projects.ts";
 import { chatModelRef, clampThinkingLevel, currentModels, currentThinkingLevels, isFaux, levelFromModelId, readLlmConfig } from "./provider.ts";
 import {
@@ -394,6 +402,16 @@ const SKILLS_DIR =
 	process.env.AGENT_SKILLS_DIR?.trim() || fileURLToPath(new URL("../skills", import.meta.url));
 
 export const skillStore: SkillStore | null = (() => {
+	// 主对话（总管）技能（批次D D1）：总管技能目录优先、全局 skills/ 兜底，同名时总管覆盖全局
+	// （createSkillStore 对目录数组按先到先得合并）。CHIEF_PARTNER=false 时只留全局目录 = 改动前。
+	if (chiefPartnerEnabled()) {
+		try {
+			return createSkillStore([chiefSkillsDir(), SKILLS_DIR]);
+		} catch (error) {
+			const detail = error instanceof Error ? error.message : String(error);
+			console.warn(`总管技能目录加载失败，回落全局技能: ${detail}`);
+		}
+	}
 	try {
 		return createSkillStore(SKILLS_DIR);
 	} catch (error) {
@@ -404,6 +422,19 @@ export const skillStore: SkillStore | null = (() => {
 })();
 
 /**
+ * 总管播种（服务启动时调一次）。CHIEF_PARTNER=false / 执事能力关闭时 ensureChiefPartner 内部旁路。
+ * 播种失败只 warn：主对话的 persona 会回落 PERSONA 常量，绝不会被弄哑。
+ */
+export function seedChiefPartner(): void {
+	try {
+		ensureChiefPartner(PERSONA);
+	} catch (error) {
+		const detail = error instanceof Error ? error.message : String(error);
+		console.warn(`[chief] 总管播种失败（主对话回落 PERSONA）: ${detail}`);
+	}
+}
+
+/**
  * 记忆作用域跟着**内部会话 id** 走。
  *
  * 它是存储自己发的、重开进程也不变，所以作用域稳定。
@@ -411,15 +442,17 @@ export const skillStore: SkillStore | null = (() => {
  * 用它会把"客户端标识"和"存储主键"绑在一起，以后换实现就麻烦了。
  */
 /**
- * 伙伴会话的伙伴 scope（批次B B1/B2）：会话挂在链接表上 → 它属于某个伙伴，
+ * 执事会话的执事 scope（批次B B1/B2）：会话挂在链接表上 → 它属于某个执事，
  * 记忆读写落到 `partner:<uuid>` 键空间（与主人记忆隔离）。查失败一律当普通会话，
  * 记忆永远不能把对话卡住。
  */
 function partnerScopeOf(conversationId: number): MemoryScope | null {
 	if (!COMPANIONS_ENABLED) return null;
 	try {
-		const partnerId = partnersStore().partnerIdOfSession(conversationId);
-		return partnerId ? { type: "partner", id: partnerId } : null;
+		// D15 刻意差异：主对话就是总管，他继续读写 global + session，不吃 partner: 键空间。
+		// partnerId === "chief" → null 的判定在 partners.ts 的 resolvePartnerScope（同名纯函数也供单测），
+		// 别把它"修"成和普通执事一致；除总管外的执事会话行为完全不变。
+		return resolvePartnerScope(partnersStore(), conversationId);
 	} catch {
 		return null;
 	}
@@ -433,8 +466,8 @@ function scopeOf(conversationId: number): MemoryScope {
 function recallContext(conversationId: number, text: string): string {
 	if (!memoryEngine || !text.trim()) return "";
 	try {
-		// 伙伴会话（批次B B1）：global + 伙伴键空间 + 本会话三条都进候选；
-		// 键空间过滤是 store 的硬过滤（scope IN），伙伴键空间外的记录不会被召回。
+		// 执事会话（批次B B1）：global + 执事键空间 + 本会话三条都进候选；
+		// 键空间过滤是 store 的硬过滤（scope IN），执事键空间外的记录不会被召回。
 		const partner = partnerScopeOf(conversationId);
 		return memoryEngine.buildContext({
 			text,
@@ -561,7 +594,9 @@ async function openHarness(): Promise<Harness> {
 				},
 			}),
 			sections: [
-				{ key: "persona", render: () => PERSONA },
+				// 总管身份（批次D D1）：总管存在且 SOUL 可读时用 SOUL 当前版本快照，否则回落原 PERSONA
+				// 常量（兜底：执事库初始化失败不能把主对话弄哑）。首启 SOUL = PERSONA 原文 → 行为零变化。
+				{ key: "persona", render: () => resolvePersona(partnersStore, PERSONA) },
 				// 当前项目（2026-11-04 方案 §2.3）：每轮现渲染，不写进对话历史。
 				// 切换项目后 durable 会按 section 差异追加新的 pi.system，下一轮即生效。
 				{

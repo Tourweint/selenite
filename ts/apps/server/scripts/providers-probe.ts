@@ -88,7 +88,15 @@ function startUpstream(port: number, label: string): Promise<FakeUpstream> {
 		// 供「测试钥匙 / 拉取清单」用（本轮不强制断言，但真实链路要用得到）
 		if (request.method === "GET" && request.url?.includes("/models")) {
 			response.writeHead(200, { "content-type": "application/json" });
-			response.end(JSON.stringify({ data: [{ id: MODEL }] }));
+			// 带上下文字段：检测端点要从上游 /models 抽 contextWindow / maxTokens
+			response.end(
+				JSON.stringify({
+					data: [
+						{ id: MODEL, context_length: 200000, max_output_tokens: 8192 },
+						{ id: "b-only", max_model_len: 32768, max_completion_tokens: 4096 },
+					],
+				}),
+			);
 			return;
 		}
 		if (request.method !== "POST") {
@@ -325,6 +333,98 @@ try {
 	check(String(bFirst?.body.model ?? "") === MODEL, "B 收到的仍是真实模型名", String(bFirst?.body.model));
 	check((upstreamA.received.length ?? 0) === 1, "这一轮没有回落到 A", String(upstreamA.received.length));
 
+	// ── 2b. 逐模型元数据 + 检测（2026-11-05）────────────────
+	console.log("\n· 2b. 逐模型元数据 / 空清单建档 / 检测端点");
+	const metaSaved = await postJson("/api/v1/agent/providers", {
+		id: "b",
+		previousId: "b",
+		name: "B 供应商",
+		baseUrl: `http://127.0.0.1:${B_PORT}/v1`,
+		keyEnv: "B_KEY",
+		models: [MODEL, "b-only"],
+		modelMeta: { [MODEL]: { contextWindow: 262144, maxTokens: 16384 } },
+		modelThinkingLevels: { [MODEL]: ["off", "low", "high"] },
+	});
+	const metaEntry = (metaSaved.json.provider ?? {}) as {
+		modelMeta?: Record<string, { contextWindow?: number; maxTokens?: number }>;
+		modelThinkingLevels?: Record<string, string[]>;
+	};
+	check(metaSaved.status === 200, "带着 modelMeta 保存供应商", String(metaSaved.status));
+	check(metaEntry.modelMeta?.[MODEL]?.contextWindow === 262144, "modelMeta 回读上下文", JSON.stringify(metaEntry.modelMeta?.[MODEL]));
+	check(metaEntry.modelMeta?.[MODEL]?.maxTokens === 16384, "modelMeta 回读最大输出");
+	check(
+		JSON.stringify(metaEntry.modelThinkingLevels?.[MODEL]) === JSON.stringify(["off", "low", "high"]),
+		"modelThinkingLevels 回读",
+		JSON.stringify(metaEntry.modelThinkingLevels?.[MODEL]),
+	);
+	const catalogMeta = await getJson("/api/v1/agent/model");
+	const catalogRow = ((catalogMeta.json.providers ?? []) as { id: string; models: unknown[] }[])
+		.find((item) => item.id === "b")
+		?.models.find((row) => (row as { id?: string }).id === MODEL) as
+		| { contextWindow?: number; maxTokens?: number }
+		| undefined;
+	check(catalogRow?.contextWindow === 262144 && catalogRow?.maxTokens === 16384, "composer 投影带上下文/输出", JSON.stringify(catalogRow));
+
+	const detected = await postJson("/api/v1/agent/providers/b/models/detect", { modelId: "b-only" });
+	const detection = (detected.json.detection ?? {}) as {
+		reachable?: boolean;
+		contextWindow?: number | null;
+		maxTokens?: number | null;
+		thinkingLevels?: string[];
+	};
+	check(detected.status === 200 && detection.reachable === true, "检测端点真打上游", JSON.stringify(detection));
+	check(detection.contextWindow === 32768, "从 max_model_len 抽到上下文", String(detection.contextWindow));
+	check(detection.maxTokens === 4096, "从 max_completion_tokens 抽到输出上限", String(detection.maxTokens));
+	check(Boolean(detection.thinkingLevels?.includes("high")), "探出思考档", JSON.stringify(detection.thinkingLevels));
+	const detectUnknown = await postJson("/api/v1/agent/providers/nope/models/detect", { modelId: MODEL });
+	check(detectUnknown.status === 404 && detectUnknown.json.error === "unknown_provider", "未知供应商 404", JSON.stringify(detectUnknown.json));
+	const detectEmpty = await postJson("/api/v1/agent/providers/b/models/detect", { modelId: "" });
+	check(detectEmpty.status === 400 && detectEmpty.json.error === "bad_request", "空模型 id 400", JSON.stringify(detectEmpty.json));
+
+	const emptyCreate = await postJson("/api/v1/agent/providers", {
+		id: "e",
+		name: "E 空清单",
+		baseUrl: `http://127.0.0.1:${B_PORT}/v1`,
+		keyEnv: "B_KEY",
+		models: [],
+		allowEmptyModels: true,
+	});
+	check(emptyCreate.status === 200, "allowEmptyModels 允许先建空清单", String(emptyCreate.status));
+	const emptyReject = await postJson("/api/v1/agent/providers", {
+		id: "e2",
+		name: "E2",
+		baseUrl: `http://127.0.0.1:${B_PORT}/v1`,
+		keyEnv: "B_KEY",
+		models: [],
+	});
+	check(emptyReject.status === 400 && emptyReject.json.error === "bad_models", "不带开关时仍拒绝空清单（老语义）", JSON.stringify(emptyReject.json));
+	// 非法数值丢弃（与思考档同口径），非对象形状才 400
+	const badValueMeta = await postJson("/api/v1/agent/providers", {
+		id: "b",
+		previousId: "b",
+		name: "B 供应商",
+		baseUrl: `http://127.0.0.1:${B_PORT}/v1`,
+		keyEnv: "B_KEY",
+		models: [MODEL, "b-only"],
+		modelMeta: { [MODEL]: { contextWindow: -1 } },
+	});
+	const badValueEntry = (badValueMeta.json.provider ?? {}) as { modelMeta?: Record<string, unknown> };
+	check(
+		badValueMeta.status === 200 && !badValueEntry.modelMeta?.[MODEL],
+		"非法数值的 modelMeta 被丢弃",
+		JSON.stringify(badValueEntry.modelMeta),
+	);
+	const badShapeMeta = await postJson("/api/v1/agent/providers", {
+		id: "b",
+		previousId: "b",
+		name: "B 供应商",
+		baseUrl: `http://127.0.0.1:${B_PORT}/v1`,
+		keyEnv: "B_KEY",
+		models: [MODEL, "b-only"],
+		modelMeta: "nope",
+	});
+	check(badShapeMeta.status === 400 && badShapeMeta.json.error === "bad_model_meta", "非对象 modelMeta 400", JSON.stringify(badShapeMeta.json));
+
 	// ── 3. 旧会话切同名模型（S1）────────────────────────────
 	console.log("\n· 3. A 上建的会话切到 B 的同名模型");
 	const bBefore = upstreamB.received.length;
@@ -412,8 +512,16 @@ try {
 	const aBeforeFallback = upstreamA.received.length;
 	const cBeforeFallback = upstreamC.received.length;
 	const fallback = await chat(BASE, conv2);
+	// 排除后台思考档探活的噪音（max_tokens 小、单条消息、无 tools），只看真正的对话请求
+	const fallbackChats = upstreamA.received
+		.slice(aBeforeFallback)
+		.filter((item) => Array.isArray(item.body.tools));
 	check(fallback.status === 200 && fallback.done, "旧会话这一轮完成", fallback.events.join(","));
-	check(upstreamA.received.length === aBeforeFallback + 1, "旧会话回退到默认供应商 A");
+	check(
+		fallbackChats.length === 1,
+		"旧会话回退到默认供应商 A",
+		`A 对话请求 ${aBeforeFallback} → ${aBeforeFallback + fallbackChats.length}`,
+	);
 	check(upstreamC.received.length === cBeforeFallback, "没有再拿旧引用打已删地址");
 
 	// ── 8. 旧形状兼容 ─────────────────────────────────────
@@ -493,6 +601,12 @@ try {
 		models: [MODEL],
 	});
 	check(disabledWrite.status === 400 && disabledWrite.json.error === "providers_disabled", "关闭时 CRUD 一律 400", JSON.stringify(disabledWrite.json));
+	const disabledDetect = await postJson("/api/v1/agent/providers/bailian/models/detect", { modelId: MODEL });
+	check(
+		disabledDetect.status === 400 && disabledDetect.json.error === "providers_disabled",
+		"关闭时检测端点也 400",
+		JSON.stringify(disabledDetect.json),
+	);
 
 	// 请求体里带密钥字段也要显式拒收（不是静默忽略）
 	const secretBody = await postJson("/api/v1/agent/providers", {

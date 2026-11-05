@@ -24,8 +24,8 @@ import { partnersStore } from "./partners.ts";
  * 提醒 = `sayInConversation` 写会话行（桌面/手机拉 transcript 可见），**不经模型**；
  * 文案枚举化（≤140 字），不含对话内容与工具参数（D8：上游原文可能带 key 片段）。
  *
- * 防自叫醒（cindy 的头号坑）：**伙伴会话（含例行专线）一律不是观察对象**——
- * 伙伴出错再提醒伙伴就是自己叫醒自己。v1 没有跟进者，观察对象只剩主人会话。
+ * 防自叫醒（cindy 的头号坑）：**执事会话（含例行专线）一律不是观察对象**——
+ * 执事出错再提醒执事就是自己叫醒自己。v1 没有跟进者，观察对象只剩主人会话。
  *
  * 总开关 `AUTONOMY_ENABLED` 默认 false：false 时 observe() 不订阅、账本不建、
  * sweep 定时器不启、自主轮标记不生效——全部行为为零。
@@ -207,7 +207,7 @@ class AutonomyObserver {
 		});
 	}
 
-	/** 防自叫醒：伙伴会话不是观察对象；观察层 v1 只盯主人会话。 */
+	/** 防自叫醒：执事会话不是观察对象；观察层 v1 只盯主人会话。 */
 	private excluded(conversationId: number): boolean {
 		try {
 			return partnersStore().partnerIdOfSession(conversationId) !== null;

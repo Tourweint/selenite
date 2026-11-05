@@ -47,7 +47,7 @@ export interface RelayChannelDeps {
 	sayInConversation: (internalId: number, text: string) => Promise<boolean>;
 	eventStore: ChatEventStore | null;
 	approvals: () => ApprovalStore;
-	/** 阶段三：chat/send 前的伙伴降级守卫；返回非空字符串 = 拒绝原因 */
+	/** 阶段三：chat/send 前的执事降级守卫；返回非空字符串 = 拒绝原因 */
 	chatSendGuard?: (conversationId: string) => Promise<string | null>;
 }
 

@@ -33,6 +33,7 @@ import {
   restoreChats,
   sayInChat,
   sayInConversation,
+  seedChiefPartner,
   searchTranscripts,
   setPolicy,
   stopChat,
@@ -51,14 +52,20 @@ import { mountCompanions } from "./companion-api.ts";
 import { COMPANIONS_ENABLED } from "./partners.ts";
 import { routineEngine } from "./routines.ts";
 import { watchAllEvents } from "./agent.ts";
-import { autonomyObserver } from "./autonomy.ts";
+import { autonomyEnabled, autonomyObserver } from "./autonomy.ts";
 import { mountApprovalApi } from "./approval-api.ts";
 import { mountWeb } from "./web.ts";
 import { mountWorkerShell } from "./worker-shell.ts";
 import { syncDiaryToMemory } from "./memory-ingest.ts";
 import { RelayClient } from "./relay-client.ts";
 import { RelayChannelHub, type RelayChannelDeps } from "./relay-channels.ts";
-import { relayEnabled, relaySettings, deviceMatrixEnabled, companionHomeEnabled } from "./relay-config.ts";
+import {
+  relayEnabled,
+  relaySettings,
+  deviceMatrixEnabled,
+  deviceAutoDispatchEnabled,
+  companionHomeEnabled,
+} from "./relay-config.ts";
 import { companionHomeController, type CompanionHomeController } from "./relay-home.ts";
 import { mountRelayMobileProxy } from "./relay-mobile-proxy.ts";
 import { createMatrixChannels, dispatchRemoteDelegation, listRemoteDelegations } from "./relay-matrix.ts";
@@ -66,6 +73,7 @@ import { RelayInvokeError } from "./relay-client.ts";
 import { approvalStore } from "./approvals.ts";
 import {
   currentThinkingLevels,
+  detectProviderModel,
   modelCatalog,
   providerCatalog,
   readLlmConfig,
@@ -169,7 +177,7 @@ mountProjects(app);
 // 任务中心只读接口（2026-11-03 方案 §5.9）：领域列表 + 单 ticket 明细。
 mountDelegationApi(app);
 
-// 伙伴管理（2026-11-05 批次B B2）：档案 CRUD + 手动跑一轮。开关关着一个路由都不挂（404 = 未启用）。
+// 执事管理（2026-11-05 批次B B2）：档案 CRUD + 手动跑一轮。开关关着一个路由都不挂（404 = 未启用）。
 mountCompanions(app);
 
 // 审批答复（2026-11-04 批次二）：待批列表 + 幂等答复。开关关着时列表恒为空。
@@ -410,6 +418,9 @@ app.get("/healthz", (c) => {
     llm: info.model ? "upstream" : "mock",
     model: info.model,
     models: info.models,
+    // E2 #6：只露「自主轮总开关」这一个布尔，不露任何会话/内容信息；
+    // 前端权限卡据此显示开/关（环境变量），读不到 env 的页面也能看状态。
+    autonomy: autonomyEnabled(),
   });
 });
 
@@ -475,6 +486,9 @@ app.post("/api/v1/agent/providers", async (c) => {
     models: body.models,
     modelsUrl: text(body.modelsUrl),
     test: body.test === true,
+    modelMeta: body.modelMeta,
+    modelThinkingLevels: body.modelThinkingLevels,
+    allowEmptyModels: body.allowEmptyModels === true,
   });
   if (!result.ok) return c.json({ error: result.error, message: result.message }, result.status);
   return c.json({
@@ -501,6 +515,18 @@ app.delete("/api/v1/agent/providers/:id", (c) => {
   const result = removeProvider(c.req.param("id"));
   if (!result.ok) return c.json({ error: result.error, message: result.message }, result.status);
   return c.json({ ok: true });
+});
+
+/**
+ * 单模型检测（2026-11-05 模型元数据方案）：只读，不写配置、不动密钥。
+ * 允许检测尚未加入 models[] 的模型 id——添加流程本来就是先检测再添加。
+ */
+app.post("/api/v1/agent/providers/:id/models/detect", async (c) => {
+  const body = (await c.req.json().catch(() => null)) as { modelId?: unknown } | null;
+  const modelId = typeof body?.modelId === "string" ? body.modelId : "";
+  const result = await detectProviderModel(c.req.param("id"), modelId);
+  if (!result.ok) return c.json({ error: result.error, message: result.message }, result.status);
+  return c.json(result);
 });
 
 app.post("/api/v1/agent/chat", async (c) => {
@@ -743,6 +769,63 @@ app.get("/api/v1/agent/usage", async (c) => {
   return c.json(await usageSummary());
 });
 
+/**
+ * 全部数据导出（2026-11-05 J1，接口文档 §2.5）。
+ *
+ * 用户拍板：导出进设置页，单对话导出退役。这里只聚合「可见数据」——
+ * 会话清单复用 listChats（已排除 hide / task-），消息走 §2.2 同一条读取路径，
+ * providers 用 modelCatalog 投影（无 keyEnv，密钥永不出内）。
+ * 任何一步失败就整体 503，不出半份。
+ */
+const EXPORT_CHAT_LIMIT = 5000;
+const EXPORT_MESSAGE_LIMIT = 500;
+
+app.get("/api/v1/agent/export", async (c) => {
+  try {
+    const catalog = modelCatalog();
+    const chats = await listChats(EXPORT_CHAT_LIMIT);
+    const conversations: {
+      id: string;
+      title: string;
+      pinned: boolean;
+      messages: { role: string; at: number; text: string }[];
+    }[] = [];
+    let messageCount = 0;
+
+    for (const chat of chats) {
+      const resolved = await openChat(chat.conversationId);
+      if (!resolved) throw new Error(`会话 ${chat.conversationId} 打不开`);
+      const messages = await readTranscript(resolved, EXPORT_MESSAGE_LIMIT);
+      messageCount += messages.length;
+      conversations.push({
+        id: chat.conversationId,
+        title: chat.title || chat.firstText,
+        pinned: Boolean(chat.pinned),
+        messages: messages.map(({ role, at, text }) => ({ role, at, text })),
+      });
+    }
+
+    const usage = readLlmConfig() ? await usageSummary() : { models: [] };
+    const exportedAt = new Date().toISOString();
+    const stamp = exportedAt.slice(0, 10);
+
+    // 只记条数，不含任何对话内容
+    console.log(`[export] ${conversations.length} conversations / ${messageCount} messages`);
+    c.header("Content-Disposition", `attachment; filename="selenite-export-${stamp}.json"`);
+    return c.json({
+      exportedAt,
+      conversations,
+      providers: catalog.providers,
+      modelSelection: catalog.current,
+      usage,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[export] 失败: ${message}`);
+    return c.json({ error: "export_failed", message }, 503);
+  }
+});
+
 /** 上下文占用（批次二）：给标题栏「已用/窗口」徽标用；mock 下两者皆 null */
 app.get("/api/v1/agent/chat/:conversationId/context", async (c) => {
   if (!readLlmConfig()) return c.json({ used: null, window: null });
@@ -814,7 +897,7 @@ if (relayEnabled()) {
       sayInConversation,
       eventStore: chatEventStoreOf() ?? null,
       approvals: () => approvalStore(),
-      // 阶段三：降级伙伴的专线会话拒绝经这台设备代发（fail-closed）
+      // 阶段三：降级执事的专线会话拒绝经这台设备代发（fail-closed）
       chatSendGuard: async (conversationId) => (await homeController?.chatSendGuard(conversationId)) ?? null,
     };
     relayChannels = new RelayChannelHub(
@@ -848,7 +931,7 @@ if (relayEnabled()) {
   }
 }
 
-// 中继的手机代理面（2026-11-05 手机端对接）：名册/远端单/跨机派活/伙伴归属，
+// 中继的手机代理面（2026-11-05 手机端对接）：名册/远端单/跨机派活/执事归属，
 // 走 /api/v1 既有鉴权；手机零新协议（见 relay-mobile-proxy.ts 头注）
 mountRelayMobileProxy(app, {
   relayClient: () => relayClient,
@@ -881,6 +964,10 @@ app.post("/api/v1/relay/matrix/delegate", async (c) => {
   if (!targetDeviceId || !requirement.trim() || !conversationId) {
     return c.json({ error: "bad_request", message: "需要 targetDeviceId / requirement / conversationId" }, 400);
   }
+  // "auto" 第三态（2026-11-05 自动分发）：开关关着按非法参数拒绝，不悄悄降级。
+  if (targetDeviceId === "auto" && !deviceAutoDispatchEnabled()) {
+    return c.json({ error: "auto_disabled", message: "自动挑机未开启（DEVICE_AUTO_DISPATCH）" }, 400);
+  }
   let originInternalId: number | null = null;
   for (const [internal, external] of await externalChatIds()) {
     if (external === conversationId) originInternalId = internal;
@@ -894,6 +981,10 @@ app.post("/api/v1/relay/matrix/delegate", async (c) => {
       domain,
       originInternalId,
     });
+    // 挑不出不是失败：202 + 决策结果，由调用方决定是否本机执行（不返回 502）。
+    if ("fallbackToLocal" in result) {
+      return c.json({ ok: true, fallbackToLocal: true, reason: result.reason }, 202);
+    }
     return c.json({ ok: true, requestId: result.requestId, deviceName: result.deviceName }, 202);
   } catch (error) {
     const code = error instanceof RelayInvokeError ? error.code : "internal";
@@ -910,7 +1001,7 @@ app.get("/api/v1/relay/matrix/status", (c) => {
   return c.json({ delegations: filtered });
 });
 
-// ── 伙伴认主机（2026-11-05 阶段三底座；档案/记忆归批次B）──────────
+// ── 执事认主机（2026-11-05 阶段三底座；档案/记忆归批次B）──────────
 app.get("/api/v1/relay/home/status", (c) => {
   if (!companionHomeEnabled() || !homeController) return c.json({ error: "not_available" }, 404);
   return c.json(homeController.status());
@@ -963,6 +1054,9 @@ const port = Number(process.env.PORT ?? 39847);
 
 serve({ fetch: app.fetch, port }, (info) => {
   const mode = readLlmConfig() ? "真实上游" : "mock（未配置 LLM_API_KEY）";
+  // 批次D D1：首次启动播种总管（固定 id "chief"，SOUL.md = 旧 PERSONA 原文，幂等）。
+  // CHIEF_PARTNER=false / 执事能力关闭时内部旁路；播种失败只 warn，主对话回落 PERSONA。
+  seedChiefPartner();
   // 2026-10-31：启动即把日记镜像里的近况摄入记忆（幂等 upsert）。
   // 目的不是"启动时干活"，而是让记忆库**一开始就有东西**——之前它是空的，
   // 注入点接好了也注入不出内容（记忆方案 §0 记的就是这个坑）。

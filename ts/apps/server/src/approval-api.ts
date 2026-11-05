@@ -43,6 +43,8 @@ export function mountApprovalApi(app: Hono): void {
 					args: record.args,
 					deadlineAt: record.deadlineAt,
 					createdAt: record.createdAt,
+					// 自主轮标记纯增量透出（E2 #0）：undefined 不带键，老客户端忽略。
+					...(record.origin ? { origin: record.origin } : {}),
 				});
 			}
 			return c.json({ ok: true, approvals, limit });
@@ -60,6 +62,8 @@ export function mountApprovalApi(app: Hono): void {
 				args: record.args,
 				deadlineAt: record.deadlineAt,
 				createdAt: record.createdAt,
+				// 自主轮标记纯增量透出（E2 #0）：undefined 不带键，老客户端忽略。
+				...(record.origin ? { origin: record.origin } : {}),
 			}));
 		return c.json({ ok: true, approvals });
 	});

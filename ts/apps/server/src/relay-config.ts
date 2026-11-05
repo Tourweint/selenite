@@ -44,7 +44,7 @@ export function deviceMaxActivePerDevice(env: NodeJS.ProcessEnv = process.env): 
 	return Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : 3;
 }
 
-/** 伙伴认主机（阶段三）：harness 注册/领取伙伴归属。依赖中继。 */
+/** 执事认主机（阶段三）：harness 注册/领取执事归属。依赖中继。 */
 export function companionHomeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
 	const raw = (env.COMPANION_HOME_ENABLED ?? "").trim().toLowerCase();
 	return raw === "1" || raw === "true" || raw === "on";

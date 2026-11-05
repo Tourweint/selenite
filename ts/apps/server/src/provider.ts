@@ -37,9 +37,11 @@ const DEFAULT_PROVIDER_ID = "bailian";
 const DEFAULT_MODEL = "deepseek-v4.1-flash";
 const DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1";
 
-/** 自定义供应商暂不区分窗口：沿用现状硬编码值（接口文档 §2.10） */
+/** 逐模型元数据的缺省值：沿用现状硬编码（接口文档 §2.10，2026-11-05 起可被 modelMeta 覆盖） */
 const CUSTOM_CONTEXT_WINDOW = 131_072;
 const CUSTOM_MAX_TOKENS = 4096;
+/** 元数据上限：挡住手滑多写几个 0，也挡住把窗口写成天文数字 */
+const MODEL_META_MAX = 10_000_000;
 
 const PROVIDER_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
 const RESERVED_PROVIDER_IDS = new Set(["faux", "mock"]);
@@ -79,12 +81,20 @@ export interface LlmConfig {
 	fastModel: ModelRef;
 }
 
+/** 逐模型的上下文 / 输出上限（2026-11-05）。缺省走 CUSTOM_*，不写进文件 */
+export interface ModelMeta {
+	contextWindow?: number;
+	maxTokens?: number;
+}
+
 export interface ProviderEntry {
 	id: string;
 	name: string;
 	baseUrl: string;
 	keyEnv: string;
 	models: string[];
+	/** 每模型上下文 / 输出上限（键 = modelId）。可选：旧文件没有就是缺省值 */
+	modelMeta?: Record<string, ModelMeta>;
 	/**
 	 * 每模型支持的思考档（键 = modelId）。可选：旧文件没有就是缺省域。
 	 * 用供应商级 record 而不是改 `models[]` 的形状，对 `.strict()` 侵入最小（方案 D9）。
@@ -111,12 +121,18 @@ export interface ProviderDetail extends ProviderSummary {
 	baseUrl: string;
 	keyEnv: string;
 	isDefault: boolean;
+	/** 稀疏：只含用户显式设置过的模型（缺省值不落盘，也不在这里展开） */
+	modelMeta: Record<string, ModelMeta>;
+	/** 每模型**生效**的思考档（含缺省域），UI 直接渲染，不用再猜默认 */
+	modelThinkingLevels: Record<string, ThinkingLevel[]>;
 }
 
-/** composer 投影的模型行（2026-11-04 思考档位方案 D9）：UI 要逐模型支持域才能渲染选择器 */
+/** composer 投影的模型行（2026-11-04 思考档位方案 D9；2026-11-05 补上下文 / 输出） */
 export interface CatalogModel {
 	id: string;
 	thinkingLevels: ThinkingLevel[];
+	contextWindow: number;
+	maxTokens: number;
 }
 
 export interface CatalogProvider {
@@ -151,7 +167,11 @@ const ProviderEntrySchema = z
 			.max(500)
 			.refine((value) => validBaseUrl(value), "baseUrl 需要 http/https 绝对地址"),
 		keyEnv: z.string().regex(KEY_ENV_PATTERN),
-		models: z.array(z.string().trim().min(1).max(200)).min(1),
+		// 允许空清单：新 UI 先建供应商、再逐个添加模型（2026-11-05 模型元数据方案）
+		models: z.array(z.string().trim().min(1).max(200)),
+		// 内容是逐模型对象，具体字段在 parseProvidersFile 里过滤：
+		// 一个脏字段不该让整份配置读不了（与思考档同口径）
+		modelMeta: z.record(z.string(), z.unknown()).optional(),
 		// 只校验"是字符串数组"，具体档位在 parseProvidersFile 里过滤：
 		// 一个拼错的档位名不该让整份配置读不了（旧文件兼容，方案 D2）
 		modelThinkingLevels: z.record(z.string(), z.array(z.string())).optional(),
@@ -189,13 +209,14 @@ function parseProvidersFile(text: string): ProvidersDocument {
 	}
 	const document: ProvidersDocument = {
 		schemaVersion: 1,
-		providers: parsed.data.providers.map(({ modelThinkingLevels, ...entry }) => {
-			const levels = modelThinkingLevels
-				? normalizeThinkingLevels(modelThinkingLevels, entry.models)
-				: {};
+		providers: parsed.data.providers.map(({ modelMeta, modelThinkingLevels, ...entry }) => {
+			const models = dedupe(entry.models);
+			const levels = modelThinkingLevels ? normalizeThinkingLevels(modelThinkingLevels, models) : {};
+			const meta = modelMeta ? normalizeModelMeta(modelMeta, models) : {};
 			return {
 				...entry,
-				models: dedupe(entry.models),
+				models,
+				...(Object.keys(meta).length > 0 ? { modelMeta: meta } : {}),
 				...(Object.keys(levels).length > 0 ? { modelThinkingLevels: levels } : {}),
 			};
 		}),
@@ -268,6 +289,69 @@ function normalizeThinkingLevels(
 		if (ordered.length > 0) normalized[modelId] = ordered;
 	}
 	return normalized;
+}
+
+/** 正整数（数字或数字字符串），越界 / 小数 / NaN 一律当没填 */
+function positiveInt(value: unknown): number | undefined {
+	const parsed =
+		typeof value === "number" || typeof value === "string" ? Number(value) : Number.NaN;
+	if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed <= 0 || parsed > MODEL_META_MAX) {
+		return undefined;
+	}
+	return parsed;
+}
+
+/** 只保留仍在清单里的模型；空对象不写进文件（缺省值不落盘，方案 §二） */
+function normalizeModelMeta(
+	raw: Record<string, unknown>,
+	models: string[],
+): Record<string, ModelMeta> {
+	const normalized: Record<string, ModelMeta> = {};
+	for (const modelId of models) {
+		const candidate = raw[modelId];
+		if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+		const record = candidate as { contextWindow?: unknown; maxTokens?: unknown };
+		const contextWindow = positiveInt(record.contextWindow);
+		const maxTokens = positiveInt(record.maxTokens);
+		if (contextWindow === undefined && maxTokens === undefined) continue;
+		normalized[modelId] = {
+			...(contextWindow !== undefined ? { contextWindow } : {}),
+			...(maxTokens !== undefined ? { maxTokens } : {}),
+		};
+	}
+	return normalized;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+/** 请求里的思考档：undefined = 不改；不是对象 = 400；值里的拼错档位过滤掉 */
+function modelThinkingLevelsInput(
+	raw: unknown,
+	models: string[],
+): Record<string, ThinkingLevel[]> | null | undefined {
+	if (raw === undefined) return undefined;
+	if (!isPlainRecord(raw)) return null;
+	const record: Record<string, string[]> = {};
+	for (const [modelId, levels] of Object.entries(raw)) {
+		if (!Array.isArray(levels)) return null;
+		record[modelId] = levels.filter((value): value is string => typeof value === "string");
+	}
+	return normalizeThinkingLevels(record, models);
+}
+
+/** 请求里的逐模型元数据：undefined = 不改；不是对象 = 400；非法数值丢弃 */
+function modelMetaInput(
+	raw: unknown,
+	models: string[],
+): Record<string, ModelMeta> | null | undefined {
+	if (raw === undefined) return undefined;
+	if (!isPlainRecord(raw)) return null;
+	for (const value of Object.values(raw)) {
+		if (!isPlainRecord(value)) return null;
+	}
+	return normalizeModelMeta(raw, models);
 }
 
 function errorText(error: unknown): string {
@@ -391,6 +475,7 @@ function rebuild(): void {
 }
 
 function buildModel(entry: ProviderEntry, modelId: string): Model<"openai-completions"> {
+	const meta = entry.modelMeta?.[modelId];
 	return {
 		id: modelId,
 		name: modelId,
@@ -401,8 +486,8 @@ function buildModel(entry: ProviderEntry, modelId: string): Model<"openai-comple
 		input: ["text"],
 		// 单价填 0：用量按 token 计数，不假装知道人民币价格
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: CUSTOM_CONTEXT_WINDOW,
-		maxTokens: CUSTOM_MAX_TOKENS,
+		contextWindow: meta?.contextWindow ?? CUSTOM_CONTEXT_WINDOW,
+		maxTokens: meta?.maxTokens ?? CUSTOM_MAX_TOKENS,
 	};
 }
 
@@ -691,9 +776,9 @@ const PROBE_MAX_CONCURRENT = 2;
 const PROBE_REJECT_PATTERN = /reasoning|effort|thinking|invalidparameter|invalid/i;
 
 type ProbeVerdict =
-	| { kind: "ok" }
+	| { kind: "ok"; status: number }
 	| { kind: "rejected"; status: number; reason: string }
-	| { kind: "unknown"; cause: string };
+	| { kind: "unknown"; cause: string; status?: number };
 
 /** 回滚开关：false = 完全不探不写（UI 走缺省域） */
 export function thinkingProbeEnabled(): boolean {
@@ -742,7 +827,7 @@ async function probeLevel(
 		if (response.ok) {
 			// 只要状态码；正文丢弃（最多是个 pong，不记内容）
 			await response.text().catch(() => "");
-			return { kind: "ok" };
+			return { kind: "ok", status: response.status };
 		}
 		// 错误体最多读 2KB：只用来匹配枚举词，绝不写进日志
 		const body = (await response.text().catch(() => "")).slice(0, 2_000);
@@ -750,7 +835,7 @@ async function probeLevel(
 			const reason = probeReasonOf(body);
 			if (reason) return { kind: "rejected", status: response.status, reason };
 		}
-		return { kind: "unknown", cause: `http_${response.status}` };
+		return { kind: "unknown", cause: `http_${response.status}`, status: response.status };
 	} catch {
 		return { kind: "unknown", cause: controller.signal.aborted ? "timeout" : "network" };
 	} finally {
@@ -878,6 +963,268 @@ export function scheduleThinkingProbe(providerId: string, modelId: string): void
 	probeTasks.set(key, task);
 }
 
+// ── 单模型检测（2026-11-05 模型元数据方案 §三）────────────
+
+const DETECT_PING_TIMEOUT_MS = 6_000;
+const DETECT_META_TIMEOUT_MS = 5_000;
+/** 上游 /models 里常见的上下文 / 输出上限字段（大小写不敏感，扫一层嵌套） */
+const CONTEXT_KEYS = [
+	"context_length",
+	"contextwindow",
+	"context_window",
+	"max_context_length",
+	"max_model_len",
+	"max_input_tokens",
+	"input_token_limit",
+	"inputtokenlimit",
+];
+const OUTPUT_KEYS = [
+	"max_output_tokens",
+	"max_completion_tokens",
+	"output_token_limit",
+	"outputtokenlimit",
+	"max_output_length",
+];
+
+export interface ModelDetection {
+	providerId: string;
+	modelId: string;
+	/** 拿到过任何 HTTP 响应 = 端点可达（不代表 2xx） */
+	reachable: boolean;
+	/** ping 的状态码；网络失败为 null */
+	status: number | null;
+	latencyMs: number | null;
+	contextWindow: number | null;
+	maxTokens: number | null;
+	/** 推断出的支持域（off + 探测为 ok 的档）；无法确认的档不写入 */
+	thinkingLevels: ThinkingLevel[];
+	/** 逐档结论：ok / rejected / unknown（UI 用来解释"为什么没勾上"） */
+	levels: Record<string, "ok" | "rejected" | "unknown">;
+	message: string;
+}
+
+export type DetectModelResult =
+	| { ok: true; detection: ModelDetection }
+	| { ok: false; status: 400 | 404 | 503; error: string; message: string };
+
+function authHeaders(entry: ProviderEntry): Record<string, string> {
+	const key = process.env[entry.keyEnv]?.trim();
+	return {
+		"content-type": "application/json",
+		...(key ? { authorization: `Bearer ${key}` } : {}),
+	};
+}
+
+interface PingOutcome {
+	reached: boolean;
+	status: number | null;
+	latencyMs: number | null;
+	cause?: string;
+}
+
+async function pingModel(entry: ProviderEntry, modelId: string): Promise<PingOutcome> {
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(), DETECT_PING_TIMEOUT_MS);
+	const started = Date.now();
+	try {
+		const response = await fetch(`${entry.baseUrl.replace(/\/+$/, "")}/chat/completions`, {
+			method: "POST",
+			headers: authHeaders(entry),
+			body: JSON.stringify({
+				model: modelId,
+				messages: [{ role: "user", content: "ping" }],
+				max_tokens: 8,
+				stream: false,
+			}),
+			signal: controller.signal,
+		});
+		// 只要状态码与耗时；正文丢弃（可能含上游回显，不进日志）
+		await response.text().catch(() => "");
+		return { reached: true, status: response.status, latencyMs: Date.now() - started };
+	} catch {
+		return {
+			reached: false,
+			status: null,
+			latencyMs: null,
+			cause: controller.signal.aborted ? "timeout" : "network",
+		};
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+function numberField(record: Record<string, unknown>, keys: string[]): number | undefined {
+	for (const [rawKey, value] of Object.entries(record)) {
+		if (!keys.includes(rawKey.toLowerCase())) continue;
+		const parsed = positiveInt(value);
+		if (parsed !== undefined) return parsed;
+	}
+	return undefined;
+}
+
+/** 从模型记录里抽上下文 / 输出上限；再看一层嵌套（如 OpenRouter 的 top_provider） */
+function limitsFromRecord(record: Record<string, unknown>): {
+	contextWindow: number | null;
+	maxTokens: number | null;
+} {
+	let contextWindow = numberField(record, CONTEXT_KEYS) ?? null;
+	let maxTokens = numberField(record, OUTPUT_KEYS) ?? null;
+	if (contextWindow === null || maxTokens === null) {
+		for (const value of Object.values(record)) {
+			if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+			const nested = value as Record<string, unknown>;
+			contextWindow ??= numberField(nested, CONTEXT_KEYS) ?? null;
+			maxTokens ??= numberField(nested, OUTPUT_KEYS) ?? null;
+		}
+	}
+	return { contextWindow, maxTokens };
+}
+
+function modelRecordFrom(payload: unknown, modelId: string): Record<string, unknown> | null {
+	const bucket = payload as { data?: unknown; models?: unknown } | null;
+	const candidates = [payload, bucket?.data, bucket?.models];
+	for (const candidate of candidates) {
+		if (!Array.isArray(candidate)) {
+			if (candidate && typeof candidate === "object" && candidate !== bucket) {
+				const record = candidate as { id?: unknown; model?: unknown; name?: unknown };
+				if (record.id === modelId || record.model === modelId || record.name === modelId) {
+					return candidate as Record<string, unknown>;
+				}
+			}
+			continue;
+		}
+		for (const item of candidate) {
+			if (!item || typeof item !== "object") continue;
+			const record = item as { id?: unknown; model?: unknown; name?: unknown };
+			if (record.id === modelId || record.model === modelId || record.name === modelId) {
+				return item as Record<string, unknown>;
+			}
+		}
+	}
+	return null;
+}
+
+/** 先看 /models 列表，再退到单模型端点；拿不到就 null（不猜） */
+async function fetchModelLimits(
+	entry: ProviderEntry,
+	modelId: string,
+): Promise<{ contextWindow: number | null; maxTokens: number | null }> {
+	const base = entry.baseUrl.replace(/\/+$/, "");
+	const headers: Record<string, string> = {};
+	const key = process.env[entry.keyEnv]?.trim();
+	if (key) headers.authorization = `Bearer ${key}`;
+	const readJson = async (url: string): Promise<unknown> => {
+		try {
+			const response = await fetch(url, {
+				headers,
+				signal: AbortSignal.timeout(DETECT_META_TIMEOUT_MS),
+			});
+			if (!response.ok) return null;
+			const text = await response.text();
+			if (text.length > 1_000_000) return null;
+			return JSON.parse(text) as unknown;
+		} catch {
+			return null;
+		}
+	};
+
+	const list = await readJson(`${base}/models`);
+	const found = list ? modelRecordFrom(list, modelId) : null;
+	if (found) {
+		const limits = limitsFromRecord(found);
+		if (limits.contextWindow !== null || limits.maxTokens !== null) return limits;
+	}
+	const single = await readJson(`${base}/models/${encodeURIComponent(modelId)}`);
+	const singleRecord =
+		single && typeof single === "object" && !Array.isArray(single)
+			? ((single as { data?: unknown }).data && typeof (single as { data?: unknown }).data === "object"
+				? ((single as { data: Record<string, unknown> }).data)
+				: (single as Record<string, unknown>))
+			: null;
+	return singleRecord ? limitsFromRecord(singleRecord) : { contextWindow: null, maxTokens: null };
+}
+
+/**
+ * 检测一个模型（只读，不写配置）：
+ *   - 真打一次 /chat/completions 看连通；
+ *   - 从 /models 找上下文 / 输出上限；
+ *   - 并行探 low/medium/high 思考档（off 视为兼容基线）。
+ * 允许检测尚未加入 models[] 的 ID——添加模型本来就是"先检测再添加"。
+ */
+export async function detectProviderModel(
+	providerId: string,
+	rawModelId: string,
+): Promise<DetectModelResult> {
+	if (!providersConfigEnabled()) {
+		return {
+			ok: false,
+			status: 400,
+			error: "providers_disabled",
+			message: "PROVIDERS_CONFIG=false：供应商配置文件已停用",
+		};
+	}
+	ensureDocument();
+	const entry = document?.providers.find((provider) => provider.id === providerId);
+	if (!entry) {
+		return { ok: false, status: 404, error: "unknown_provider", message: `没有这个供应商：${providerId}` };
+	}
+	const modelId = rawModelId.trim();
+	if (!modelId) {
+		return { ok: false, status: 400, error: "bad_request", message: "需要 modelId" };
+	}
+
+	// 四路并行：ping / 元数据 / 三个思考档；任何一路慢都不拖住其它
+	const levelProbes = Promise.all(PROBE_LEVELS.map((level) => probeLevel(entry, modelId, level)));
+	const [ping, limits] = await Promise.all([
+		pingModel(entry, modelId),
+		fetchModelLimits(entry, modelId),
+	]);
+	const verdicts = await levelProbes;
+
+	const levels: Record<string, "ok" | "rejected" | "unknown"> = {};
+	PROBE_LEVELS.forEach((level, index) => {
+		const verdict = verdicts[index];
+		levels[level] = verdict?.kind === "ok" ? "ok" : verdict?.kind === "rejected" ? "rejected" : "unknown";
+	});
+	const thinkingLevels: ThinkingLevel[] = [
+		"off",
+		...PROBE_LEVELS.filter((level) => levels[level] === "ok"),
+	];
+	const reachable =
+		ping.reached || verdicts.some((verdict) => verdict.kind !== "unknown" || verdict.status !== undefined);
+
+	const okStatus = ping.status !== null && ping.status >= 200 && ping.status < 300;
+	const message = !reachable
+		? `没连上（${ping.cause ?? "network"}）`
+		: okStatus
+			? limits.contextWindow !== null
+				? "模型可用，已拿到上下文"
+				: "模型可用；上游没给上下文，请手填"
+			: `端点可达，但请求被拒（HTTP ${ping.status}）`;
+
+	// 只记枚举与耗时；不记上游错误正文
+	console.log(
+		`[detect] ${providerId}/${modelId} reachable=${reachable} status=${ping.status ?? "none"} ` +
+			`ctx=${limits.contextWindow ?? "none"} levels=${JSON.stringify(levels)}`,
+	);
+
+	return {
+		ok: true,
+		detection: {
+			providerId,
+			modelId,
+			reachable,
+			status: ping.status,
+			latencyMs: ping.latencyMs,
+			contextWindow: limits.contextWindow,
+			maxTokens: limits.maxTokens,
+			thinkingLevels,
+			levels,
+			message,
+		},
+	};
+}
+
 /**
  * 从会话里存的模型引用读档位（`<模型>#think-<档>`）。
  *
@@ -954,13 +1301,27 @@ function fauxConfig(): LlmConfig {
 	// 每次模型请求消耗一条；给足量，省得探针里还要续队列。
 	// LLM_FAUX_TOOL 让它"只会调工具、永远不收尾"，专门用来验工具回合上限。
 	// bash 要给一份合法参数：默认空对象过不了内核校验，审批探针根本走不到 beforeTool。
+	// LLM_FAUX_ARGS（JSON 对象）让探针给 faux 工具调用塞任意参数；不配时行为与改动前
+	// 逐字一致（recall / bash 的合法参数、其余空对象）。仅测试用，不碰真实供应商。
 	const toolName = process.env.LLM_FAUX_TOOL?.trim();
-	const fauxArgs: Record<string, string> =
-		toolName === "recall"
+	const fauxArgs: Record<string, string> = (() => {
+		const raw = process.env.LLM_FAUX_ARGS?.trim();
+		if (raw) {
+			try {
+				const parsed = JSON.parse(raw) as unknown;
+				if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+					return parsed as Record<string, string>;
+				}
+			} catch {
+				// 非法 JSON 回落默认，别让探针的拼写错误把服务启动挂掉
+			}
+		}
+		return toolName === "recall"
 			? { query: "faux" }
 			: toolName === "bash"
 				? { command: "sleep 2" }
 				: {};
+	})();
 	const respond = () =>
 		toolName
 			? fauxAssistantMessage([fauxToolCall(toolName, fauxArgs)], { stopReason: "toolUse" })
@@ -1010,6 +1371,8 @@ function catalogOf(entry: ProviderEntry): CatalogProvider {
 		models: entry.models.map((modelId) => ({
 			id: modelId,
 			thinkingLevels: thinkingLevelsFor(entry.id, modelId),
+			contextWindow: entry.modelMeta?.[modelId]?.contextWindow ?? CUSTOM_CONTEXT_WINDOW,
+			maxTokens: entry.modelMeta?.[modelId]?.maxTokens ?? CUSTOM_MAX_TOKENS,
 		})),
 		hasKey: hasKey(entry),
 	};
@@ -1027,12 +1390,7 @@ export function providerCatalog(): {
 	ensureDocument();
 	const defaultId = document?.defaultSelection?.providerId ?? null;
 	return {
-		providers: (document?.providers ?? []).map((entry) => ({
-			...summaryOf(entry),
-			baseUrl: entry.baseUrl,
-			keyEnv: entry.keyEnv,
-			isDefault: entry.id === defaultId,
-		})),
+		providers: (document?.providers ?? []).map((entry) => detailOf(entry, defaultId)),
 		defaultSelection: document?.defaultSelection ?? null,
 	};
 }
@@ -1121,6 +1479,12 @@ export interface ProviderInput {
 	models?: unknown;
 	modelsUrl?: string;
 	test?: boolean;
+	/** 逐模型上下文 / 输出上限（键 = modelId；不传 = 保留旧值） */
+	modelMeta?: unknown;
+	/** 每模型思考档（不传 = 保留旧值） */
+	modelThinkingLevels?: unknown;
+	/** 允许空模型清单（新 UI 先建供应商、再逐个加模型；旧客户端不传 = 维持原校验） */
+	allowEmptyModels?: boolean;
 }
 
 export type ProviderResult =
@@ -1133,6 +1497,10 @@ function detailOf(entry: ProviderEntry, defaultId: string | null): ProviderDetai
 		baseUrl: entry.baseUrl,
 		keyEnv: entry.keyEnv,
 		isDefault: entry.id === defaultId,
+		modelMeta: { ...(entry.modelMeta ?? {}) },
+		modelThinkingLevels: Object.fromEntries(
+			entry.models.map((modelId) => [modelId, thinkingLevelsFor(entry.id, modelId)]),
+		),
 	};
 }
 
@@ -1360,6 +1728,7 @@ export async function saveProvider(input: ProviderInput): Promise<ProviderResult
 		}
 		const fetched = await fetchModelList(baseUrl, keyEnv);
 		if (!fetched.ok) return bad(fetched.error, fetched.message);
+		const testModels = models.length > 0 ? models : fetched.models;
 		return {
 			ok: true,
 			provider: {
@@ -1367,9 +1736,13 @@ export async function saveProvider(input: ProviderInput): Promise<ProviderResult
 				name,
 				baseUrl,
 				keyEnv,
-				models: models.length > 0 ? models : fetched.models,
+				models: testModels,
 				hasKey: true,
 				isDefault: doc.defaultSelection?.providerId === id,
+				modelMeta: {},
+				modelThinkingLevels: Object.fromEntries(
+					testModels.map((modelId) => [modelId, [...DEFAULT_THINKING_LEVELS]]),
+				),
 			},
 			message: "钥匙已就位（变量有值且模型清单可访问；不代表模型一定可用）",
 		};
@@ -1387,8 +1760,10 @@ export async function saveProvider(input: ProviderInput): Promise<ProviderResult
 		}
 	}
 	// 编辑既有供应商且没填新清单时，沿用原清单（避免清空后选中的模型悬空）
-	if (models.length === 0 && existing) models = [...existing.models];
-	if (models.length === 0) {
+	// allowEmptyModels 是新 UI 的显式语义：先建空供应商，再逐个添加模型。
+	const allowEmptyModels = input.allowEmptyModels === true;
+	if (models.length === 0 && existing && !allowEmptyModels) models = [...existing.models];
+	if (models.length === 0 && !allowEmptyModels) {
 		return bad("bad_models", "模型清单不能为空：填几个模型 id，或先存 Key 后拉取清单");
 	}
 
@@ -1403,30 +1778,48 @@ export async function saveProvider(input: ProviderInput): Promise<ProviderResult
 		}
 	}
 
-	// 思考档声明不在表单里编辑（settings 页不收集它），但编辑供应商不能把它悄悄抹掉：
-	// 只保留仍在模型清单里的键（2026-11-04 思考档位）
-	const keptLevels = Object.fromEntries(
-		Object.entries(existing?.modelThinkingLevels ?? {}).filter(([modelId]) => models.includes(modelId)),
-	);
+	// 思考档 / 元数据：传了就以请求为准（UI 逐模型编辑），没传就保留旧值并随清单裁剪。
+	const levels = modelThinkingLevelsInput(input.modelThinkingLevels, models);
+	if (levels === null) {
+		return bad("bad_thinking_levels", "modelThinkingLevels 必须是 { modelId: 档位数组 }");
+	}
+	const meta = modelMetaInput(input.modelMeta, models);
+	if (meta === null) {
+		return bad("bad_model_meta", "modelMeta 必须是 { modelId: { contextWindow, maxTokens } }");
+	}
+	const keptLevels =
+		levels ??
+		Object.fromEntries(
+			Object.entries(existing?.modelThinkingLevels ?? {}).filter(([modelId]) => models.includes(modelId)),
+		);
+	const keptMeta =
+		meta ??
+		Object.fromEntries(
+			Object.entries(existing?.modelMeta ?? {}).filter(([modelId]) => models.includes(modelId)),
+		);
 	const entry: ProviderEntry = {
 		id,
 		name,
 		baseUrl,
 		keyEnv,
 		models,
+		...(Object.keys(keptMeta).length > 0 ? { modelMeta: keptMeta } : {}),
 		...(Object.keys(keptLevels).length > 0 ? { modelThinkingLevels: keptLevels } : {}),
 		createdAt: existing?.createdAt ?? new Date().toISOString(),
 	};
 	const providers = existing
 		? doc.providers.map((item) => (item.id === id ? entry : item))
 		: [...doc.providers, entry];
-	const defaultSelection =
+	const keptDefault =
 		doc.defaultSelection && providers.some((item) => item.id === doc.defaultSelection?.providerId)
 			? doc.defaultSelection
-			: { providerId: id, modelId: models[0] };
+			: null;
+	// 空清单供应商不能当默认；等第一次加模型时再落默认（上面已保留别家的默认）
+	const defaultSelection =
+		keptDefault ?? (models.length > 0 ? { providerId: id, modelId: models[0] } : null);
 
 	persistDocument({ schemaVersion: 1, providers, defaultSelection });
-	return { ok: true, provider: detailOf(entry, defaultSelection.providerId) };
+	return { ok: true, provider: detailOf(entry, defaultSelection?.providerId ?? null) };
 }
 
 export function removeProvider(id: string): ProviderResult {

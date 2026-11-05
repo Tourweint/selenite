@@ -48,8 +48,9 @@ docs/                   基线文档（现行口径）/ 设计方案（设计期
 - **契约只有一份。** 改字段先改 `ts/packages/shared/src/index.ts` + `docs/基线文档/接口文档.md`，再改两端实现；
   两边必须一致。不允许"先在服务端临时加个字段"。
 - **密钥不进 git、不进日志、不下发客户端。** `LLM_API_KEY` / `AGENT_TOKEN` / `TYPESAFE_API_KEY` 不入库、不进日志；
-  密钥落点=环境变量（手写 .env，或 2026-11-05 起界面直填：服务端写 `.data/provider-keys.json` 并热注入进程 env，
-  providers.json 与文档仍只写变量名）。文档与示例只写变量名。配对码与设备令牌只存 sha256。
+  密钥落点=环境变量（手写 .env 即可写值——`loadEnvFile` 启动首行加载、宰相子进程经 process.env 继承，
+  2026-11-06 起这是主落点；界面直填走服务端 `.data/provider-keys.json` 热注入，两路共存），
+  providers.json 与文档仍只写变量名。文档与示例只写变量名。配对码与设备令牌只存 sha256。
 - **日志不含对话内容。** 只记条数 / 字数 / 耗时 / 枚举；原始错误只进服务端日志（可能含上游地址）。
 - **对外 id 一律 uuid。** durable 内部自增整数不外泄 —— 猜得到就能读别人的历史。
 - **mock 不许空转。** 没有 key 走 mock 流；`LLM_PROVIDER=faux` 是"真实 durable 链路 + 假模型"。

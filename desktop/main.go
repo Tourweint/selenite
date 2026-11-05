@@ -134,8 +134,8 @@ func ensureService(base string) {
 	cmd := exec.Command("node", "--import", "tsx", "src/index.ts")
 	cmd.Dir = dir
 	env := os.Environ()
-	// .env 里不写密钥（那条约定还在）。用户环境变量里的是 DASHSCOPE_API_KEY，
-	// 服务读的是 LLM_API_KEY，壳在中间补这一次映射。
+	// 密钥主落点是 .env（2026-11-06 起，服务端 loadEnvFile 首行加载，宰相子进程继承），
+	// 这里只是兼容旧部署的兜底映射：用户环境变量 DASHSCOPE_API_KEY → LLM_API_KEY。
 	if strings.TrimSpace(os.Getenv("LLM_API_KEY")) == "" {
 		if key := strings.TrimSpace(os.Getenv("DASHSCOPE_API_KEY")); key != "" {
 			env = append(env, "LLM_API_KEY="+key)

@@ -1,5 +1,5 @@
 /**
- * 伙伴认主机探针（2026-11-05 多端同步方案块3，阶段三底座）。
+ * 执事认主机探针（2026-11-05 多端同步方案块3，阶段三底座）。
  *
  * 真起三个进程：中继 + 甲乙两台 harness（COMPANION_HOME_ENABLED=1）。
  * 验证：创建抢占 → CAS 冲突带回实际值 → 换家（先读后写）→ 旧主机降级
@@ -190,14 +190,14 @@ async function main(): Promise<void> {
 	const idB = await waitConnected(BASE_B);
 	check(idA !== idB, "两台 harness 上线");
 
-	// 甲机创建伙伴并抢占主机位
+	// 甲机创建执事并抢占主机位
 	const createRes = await fetch(`${BASE_A}/api/v1/relay/home/actors`, {
 		method: "POST",
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify({ name: "小明" }),
 	});
 	const created = (await createRes.json()) as { actorId: string; homeDeviceId: string };
-	check(createRes.status === 201 && created.homeDeviceId === idA, "甲机创建伙伴「小明」并成为主机", created.actorId.slice(0, 8));
+	check(createRes.status === 201 && created.homeDeviceId === idA, "甲机创建执事「小明」并成为主机", created.actorId.slice(0, 8));
 
 	// 裸信封验 CAS：乙机用 expected=null 抢占 → 冲突并带回实际值（甲机）
 	const referee = new RawClient(RELAY_BASE, tokenRef);
@@ -241,7 +241,7 @@ async function main(): Promise<void> {
 	check(sendB.status === 200, "乙机（新主机）发送成功");
 	// 专线会话在列表索引的可见性是已知边界（同矩阵探针的锚点会话，durable
 	// 快照对非 HTTP 上下文创建的会话收录时机未定）；发送成功已在上一步断言。
-	check(sendB.status === 200, "乙机出现「伙伴 小明」专线会话（可见性见已知边界）");
+	check(sendB.status === 200, "乙机出现「执事 小明」专线会话（可见性见已知边界）");
 
 	// 双方 isHome 互补（凭证不随行的架构断言：各机只用自己的 env key，配置文件彼此独立）
 	const statusB = (await (await fetch(`${BASE_B}/api/v1/relay/home/check`, { method: "POST" })).json()) as {
@@ -250,7 +250,7 @@ async function main(): Promise<void> {
 	check(statusB.actors[0]?.isHome === true && statusB.actors[0]?.demoted === false, "乙机自视主机且未降级");
 
 	referee.close();
-	console.log(failures === 0 ? "\n✓ 伙伴认主机全通过" : `\n✗ ${failures} 项未过`);
+	console.log(failures === 0 ? "\n✓ 执事认主机全通过" : `\n✗ ${failures} 项未过`);
 	process.exitCode = failures === 0 ? 0 : 1;
 }
 

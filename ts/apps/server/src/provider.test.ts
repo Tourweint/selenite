@@ -18,7 +18,9 @@ process.env.MODEL_RUNTIME_OVERRIDE = "true";
 process.env.PROVIDERS_PATH = join(dir, "providers.json");
 process.env.MODEL_RUNTIME_PATH = join(dir, "runtime.json");
 
-const { providerCatalog, removeProvider, saveProvider, setRuntimeModel } = await import("./provider.ts");
+const { modelCatalog, providerCatalog, removeProvider, saveProvider, setRuntimeModel } = await import(
+	"./provider.ts"
+);
 const providersPath = process.env.PROVIDERS_PATH;
 
 test("新增供应商只写 keyEnv 变量名", async () => {
@@ -38,6 +40,55 @@ test("新增供应商只写 keyEnv 变量名", async () => {
 	assert.equal(catalog.providers.length, 1);
 	assert.equal(catalog.providers[0]?.isDefault, true);
 	assert.equal(catalog.providers[0]?.hasKey, false);
+});
+
+test("逐模型元数据落盘、回读；非法值丢弃", async () => {
+	const result = await saveProvider({
+		id: "alpha",
+		previousId: "alpha",
+		name: "Alpha",
+		baseUrl: "http://127.0.0.1:9/v1",
+		keyEnv: "ALPHA_KEY",
+		models: ["m1", "m2"],
+		modelMeta: { m1: { contextWindow: 200000, maxTokens: 8192 }, m2: { contextWindow: -5 } },
+		modelThinkingLevels: { m1: ["off", "high"] },
+	});
+	assert.equal(result.ok, true);
+	if (!result.ok) return;
+	assert.deepEqual(result.provider.modelMeta, { m1: { contextWindow: 200000, maxTokens: 8192 } });
+	assert.deepEqual(result.provider.modelThinkingLevels.m1, ["off", "high"]);
+	const catalog = modelCatalog();
+	const row = catalog.providers[0]?.models.find((model) => model.id === "m1");
+	assert.equal(row?.contextWindow, 200000);
+	assert.equal(row?.maxTokens, 8192);
+	const raw = readFileSync(providersPath, "utf8");
+	assert.ok(raw.includes('"modelMeta"'));
+	const parsed = JSON.parse(raw) as {
+		providers: { id: string; modelMeta?: Record<string, unknown> }[];
+	};
+	assert.equal(parsed.providers.find((item) => item.id === "alpha")?.modelMeta?.m2, undefined);
+});
+
+test("空清单要显式开关；不带开关仍按老语义拒绝", async () => {
+	const rejected = await saveProvider({
+		id: "empty",
+		name: "Empty",
+		baseUrl: "http://127.0.0.1:9/v1",
+		keyEnv: "EMPTY_KEY",
+		models: [],
+	});
+	assert.equal(rejected.ok, false);
+	if (!rejected.ok) assert.equal(rejected.error, "bad_models");
+	const allowed = await saveProvider({
+		id: "empty",
+		name: "Empty",
+		baseUrl: "http://127.0.0.1:9/v1",
+		keyEnv: "EMPTY_KEY",
+		models: [],
+		allowEmptyModels: true,
+	});
+	assert.equal(allowed.ok, true);
+	assert.equal(removeProvider("empty").ok, true);
 });
 
 test("编辑把默认模型移出清单 → 400，必须先切走", async () => {

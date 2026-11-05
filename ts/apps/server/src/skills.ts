@@ -29,23 +29,35 @@ export interface SkillStore {
 	indexFor(conversationId: number): string | undefined;
 }
 
-export function createSkillStore(dir: string): SkillStore | null {
-	if (!existsSync(dir)) return null;
+/**
+ * dir 可为单目录，或**按优先级从高到低排列的目录数组**（批次D D1 的总管技能合并）。
+ * 数组形态：先到的目录拥有同名技能（同名时总管技能覆盖全局 skills/ 兜底）；
+ * 每个名字只认第一个出现它的目录，含格式不对的文件也占位，防全局兜底顶掉总管占位。
+ * 单目录形态行为与改动前完全一致。
+ */
+export function createSkillStore(dirOrDirs: string | string[]): SkillStore | null {
+	const dirs = Array.isArray(dirOrDirs) ? dirOrDirs : [dirOrDirs];
 
 	const skills = new Map<string, { summary: string; manual: string }>();
-	for (const file of readdirSync(dir).sort()) {
-		if (!file.endsWith(".md")) continue;
-		const name = file.slice(0, -3);
-		const raw = readFileSync(join(dir, file), "utf8").trim();
-		const [first, ...rest] = raw.split("\n");
-		const summary = (first ?? "").trim();
-		const manual = rest.join("\n").trim();
-		// 格式不对的文件宁可不上索引：渲染半份手册比没有手册更糟
-		if (!summary || !manual) {
-			console.warn(`[skills] 跳过格式不对的技能文件（第 1 行应是摘要）：${file}`);
-			continue;
+	const claimed = new Set<string>();
+	for (const dir of dirs) {
+		if (!existsSync(dir)) continue;
+		for (const file of readdirSync(dir).sort()) {
+			if (!file.endsWith(".md")) continue;
+			const name = file.slice(0, -3);
+			if (claimed.has(name)) continue; // 先到的目录优先
+			claimed.add(name);
+			const raw = readFileSync(join(dir, file), "utf8").trim();
+			const [first, ...rest] = raw.split("\n");
+			const summary = (first ?? "").trim();
+			const manual = rest.join("\n").trim();
+			// 格式不对的文件宁可不上索引：渲染半份手册比没有手册更糟
+			if (!summary || !manual) {
+				console.warn(`[skills] 跳过格式不对的技能文件（第 1 行应是摘要）：${file}`);
+				continue;
+			}
+			skills.set(name, { summary, manual });
 		}
-		skills.set(name, { summary, manual });
 	}
 	if (skills.size === 0) return null;
 

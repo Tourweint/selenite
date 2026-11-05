@@ -10,7 +10,7 @@ function tempRoot(): { root: string; db: string; homes: string } {
 	return { root, db: join(root, "partners.sqlite"), homes: join(root, "homes") };
 }
 
-test("伙伴：创建即建家 + 首个身份版本；SOUL 播种最后写（家建好的标志）", () => {
+test("执事：创建即建家 + 首个身份版本；SOUL 播种最后写（家建好的标志）", () => {
 	const { root, db, homes } = tempRoot();
 	const store = new PartnersStore(db, homes);
 	try {
@@ -35,7 +35,7 @@ test("伙伴：创建即建家 + 首个身份版本；SOUL 播种最后写（家
 	}
 });
 
-test("伙伴：bumpSoul 落新版本快照（旧版本保留），能力随版本延续", () => {
+test("执事：bumpSoul 落新版本快照（旧版本保留），能力随版本延续", () => {
 	const { root, db, homes } = tempRoot();
 	const store = new PartnersStore(db, homes);
 	try {
@@ -58,7 +58,7 @@ test("伙伴：bumpSoul 落新版本快照（旧版本保留），能力随版�
 	}
 });
 
-test("伙伴：64KB 槽位护栏 + 原子写不留临时文件", () => {
+test("执事：64KB 槽位护栏 + 原子写不留临时文件", () => {
 	const { root, db, homes } = tempRoot();
 	const store = new PartnersStore(db, homes);
 	try {
@@ -77,12 +77,12 @@ test("伙伴：64KB 槽位护栏 + 原子写不留临时文件", () => {
 	}
 });
 
-test("伙伴：会话链接与反向查询（scopeOf 的数据源）", () => {
+test("执事：会话链接与反向查询（scopeOf 的数据源）", () => {
 	const { root, db, homes } = tempRoot();
 	const store = new PartnersStore(db, homes);
 	try {
 		const partner = store.create("南南");
-		assert.equal(store.partnerIdOfSession(4242), null, "没链接的会话不属于任何伙伴");
+		assert.equal(store.partnerIdOfSession(4242), null, "没链接的会话不属于任何执事");
 		store.linkSession({
 			partnerId: partner.id,
 			role: "canonical",
@@ -107,7 +107,7 @@ test("伙伴：会话链接与反向查询（scopeOf 的数据源）", () => {
 	}
 });
 
-test("伙伴：删除连家目录一起清；例行任务 revision 自增", () => {
+test("执事：删除连家目录一起清；例行任务 revision 自增", () => {
 	const { root, db, homes } = tempRoot();
 	const store = new PartnersStore(db, homes);
 	try {

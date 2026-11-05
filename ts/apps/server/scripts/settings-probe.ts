@@ -237,6 +237,8 @@ interface GlobalApproval {
 	args: string;
 	deadlineAt: string;
 	createdAt: number;
+	/** E2 #0：自主轮标记纯增量透出，普通轮不带键 */
+	origin?: "autonomous";
 }
 
 async function globalApprovals(): Promise<{ status: number; approvals: GlobalApproval[]; limit?: number }> {
@@ -458,6 +460,12 @@ try {
 		global.approvals.every((item) => !item.conversationId.startsWith("task-")),
 		"任务会话不出现在待办（天然无工具）",
 	);
+	// E2 #0：普通轮（非自主轮）的投影不带 origin 键 —— "undefined 不带键"
+	check(
+		global.approvals.every((item) => !("origin" in item)),
+		"普通轮全局待办不带 origin 键",
+		JSON.stringify(global.approvals.map((item) => item.origin)),
+	);
 
 	// ── B3. 空串按全局；带参是原语义；未知 uuid 404 ──
 	const emptyParam = await apiJson("/api/v1/agent/approvals?conversationId=");
@@ -475,8 +483,9 @@ try {
 	check(
 		perChat[0] &&
 			!("conversationId" in perChat[0]) &&
-			!("chatTitle" in perChat[0]),
-		"带参 GET 不塞全局字段（形状不变）",
+			!("chatTitle" in perChat[0]) &&
+			!("origin" in perChat[0]),
+		"带参 GET 不塞全局字段、普通轮不带 origin（形状不变）",
 		JSON.stringify(perChat[0]),
 	);
 	const unknown = await apiJson("/api/v1/agent/approvals?conversationId=00000000-0000-4000-8000-000000000000");

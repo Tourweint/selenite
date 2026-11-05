@@ -16,7 +16,7 @@ import { chatStream, openOrCreateChat, type ResolvedChat } from "./agent.ts";
 const CTX = BACKGROUND_CONTEXT;
 
 /**
- * 伙伴的**会话运行时**（2026-11-05 批次B B2）。
+ * 执事的**会话运行时**（2026-11-05 批次B B2）。
  *
  * 单独成文件的原因：它要 import agent.ts（openOrCreateChat / chatStream），
  * 而 agent.ts 不能反向 import 它（装配方向 partners ← agent ← partner-runtime，
@@ -28,12 +28,12 @@ const CTX = BACKGROUND_CONTEXT;
  *   开跑前 configure 一次。**改完 SOUL 下一轮生效**，这是设计出来的不一致。
  */
 
-/** 伙伴主会话的对外 id 约定。它是一条真会话：历史可回读、出现在会话列表里。 */
+/** 执事主会话的对外 id 约定。它是一条真会话：历史可回读、出现在会话列表里。 */
 export function partnerCanonicalExternalId(partnerId: string): string {
 	return `partner-${partnerId}`;
 }
 
-/** 伙伴身份提示词：SOUL 快照（认版本号）+ USER.md 摘要 + 技能索引。 */
+/** 执事身份提示词：SOUL 快照（认版本号）+ USER.md 摘要 + 技能索引。 */
 export function renderPartnerIdentity(partner: PartnerRow, soulSource: string): string {
 	const store = partnersStore();
 	const sections: string[] = [soulSource.trim()];
@@ -58,7 +58,7 @@ export function renderPartnerIdentity(partner: PartnerRow, soulSource: string): 
 	return sections.join("\n\n");
 }
 
-/** 伙伴技能索引：目录约定与全局 skills/ 相同（*.md，第 1 行 = 索引摘要）。 */
+/** 执事技能索引：目录约定与全局 skills/ 相同（*.md，第 1 行 = 索引摘要）。 */
 function partnerSkillsIndex(partnerId: string): string | undefined {
 	const dir = partnersStore().skillsDirOf(partnerId);
 	if (!existsSync(dir)) return undefined;
@@ -77,8 +77,8 @@ function partnerSkillsIndex(partnerId: string): string | undefined {
 }
 
 /**
- * 取/建伙伴主会话，并把身份对齐到当前版本。
- * 返回 null = 伙伴不存在或已暂停/归档（调用方回 404 / 409）。
+ * 取/建执事主会话，并把身份对齐到当前版本。
+ * 返回 null = 执事不存在或已暂停/归档（调用方回 404 / 409）。
  */
 export async function ensurePartnerSession(partnerId: string): Promise<ResolvedChat | null> {
 	if (!COMPANIONS_ENABLED) return null;
@@ -124,15 +124,15 @@ export interface PartnerTurnResult {
 	ok: boolean;
 	/** 模型这一轮说的话（聚合 delta） */
 	text: string;
-	/** 失败原因（伙伴不存在 / 未启用 / 模型未配置等），大白话给调用方 */
+	/** 失败原因（执事不存在 / 未启用 / 模型未配置等），大白话给调用方 */
 	error?: string;
 }
 
 /**
- * 跑伙伴的一轮（run 端点与例行任务引擎共用这个入口）。
+ * 跑执事的一轮（run 端点与例行任务引擎共用这个入口）。
  *
  * 走的就是聊天主链路 chatStream：闸门、审批、工作区边界、防打转全部原样生效——
- * 伙伴不是第二套权限系统，就是一条带身份提示词的真会话。
+ * 执事不是第二套权限系统，就是一条带身份提示词的真会话。
  */
 export async function runPartnerTurn(
 	partnerId: string,
@@ -140,20 +140,20 @@ export async function runPartnerTurn(
 	opts: PartnerTurnOptions = {},
 ): Promise<PartnerTurnResult> {
 	if (!COMPANIONS_ENABLED) {
-		return { ok: false, text: "", error: "伙伴能力未启用（COMPANIONS_ENABLED=false）" };
+		return { ok: false, text: "", error: "执事能力未启用（COMPANIONS_ENABLED=false）" };
 	}
 	if (!text.trim()) return { ok: false, text: "", error: "跑一轮需要正文" };
 	const partner = partnersStore().get(partnerId);
-	if (!partner) return { ok: false, text: "", error: "伙伴不存在" };
+	if (!partner) return { ok: false, text: "", error: "执事不存在" };
 	if (partner.status !== "active") {
-		return { ok: false, text: "", error: `伙伴当前是「${partner.status}」，先恢复再跑` };
+		return { ok: false, text: "", error: `执事当前是「${partner.status}」，先恢复再跑` };
 	}
 
 	const chat =
 		opts.sessionMode === "fresh"
 			? await ensureFreshPartnerSession(partnerId)
 			: await ensurePartnerSession(partnerId);
-	if (!chat) return { ok: false, text: "", error: "伙伴会话取不到（未启用或未配置模型）" };
+	if (!chat) return { ok: false, text: "", error: "执事会话取不到（未启用或未配置模型）" };
 
 	const authority = opts.authority ?? "entrusted";
 	// 文本头（透明性）：模型知道这一轮是谁发起的；判定事实源在 autonomy-state.ts

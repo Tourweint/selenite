@@ -140,6 +140,40 @@ test("pendingAll：跨会话、只回 pending、按 createdAt 升序", () => {
 	}
 });
 
+// E2 #0：投影从 ApprovalRecord.origin 透出，这里先把「事实源的字段」钉死。
+test("origin：自主轮标记从 create 透到 pendingOf / pendingAll；普通轮不带键", () => {
+	const { store, cleanup } = tempStore();
+	try {
+		const plain = create(store, "plain", 1);
+		assert.equal(plain.record.origin, undefined, "普通轮记录不带 origin");
+
+		const autonomous = store.create({
+			callId: "auto-1",
+			conversationId: 1,
+			tool: "bash",
+			args: "{}",
+			timeoutMs: 60_000,
+			origin: "autonomous",
+		});
+		assert.equal(autonomous.record.origin, "autonomous");
+		assert.equal(
+			store.pendingOf(1).find((record) => record.callId === "auto-1")?.origin,
+			"autonomous",
+		);
+		assert.equal(
+			store.pendingAll().find((record) => record.callId === "auto-1")?.origin,
+			"autonomous",
+		);
+		// 同一会话里普通轮仍是 undefined，投影据此「undefined 不带键」
+		assert.equal(
+			store.pendingOf(1).find((record) => record.callId === "plain")?.origin,
+			undefined,
+		);
+	} finally {
+		cleanup();
+	}
+});
+
 test("remember：只在批准时记入本会话；拒绝不记", () => {
 	const { store, cleanup } = tempStore();
 	try {

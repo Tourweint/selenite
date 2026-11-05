@@ -1,4 +1,6 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import type { Context, Next } from "hono";
 import { getCookie, setCookie } from "hono/cookie";
 import { getConnInfo } from "@hono/node-server/conninfo";
@@ -27,9 +29,58 @@ const LOCAL_ADDRESSES = new Set([
  * 只在 loopback 请求且带这枚 cookie 时直通；curl、探针、别的本地脚本没有
  * 这枚 cookie，仍走令牌校验 —— 没有把“本机”变成无条件的后门。
  * HttpOnly：页面 JS 读不到；SameSite=Strict：别的网站发起的请求带不上。
+ *
+ * 落盘保底（2026-11-05）：密钥原本只在进程里，后端一重启就换，一直开着的
+ * 页面立刻 403、被踢回令牌框。现在首用时落盘 `.data/local-secret`
+ * （`AGENT_LOCAL_SECRET_PATH` 可改），重启复用同一枚。安全边界没变宽：
+ * 能读这个文件的本机进程本来就读得到 .env 里的 AGENT_TOKEN。
  */
 const LOCAL_COOKIE = "lifediary_local";
-const LOCAL_SECRET = randomBytes(24).toString("hex");
+
+let localSecretCache: string | null = null;
+
+/** 只认 48 位 hex（24 字节，与 randomBytes(24) 同形）；缺失或损坏都当没有 */
+function readLocalSecretFile(path: string): string | null {
+	try {
+		const value = readFileSync(path, "utf8").trim();
+		return /^[0-9a-f]{48}$/.test(value) ? value : null;
+	} catch {
+		return null;
+	}
+}
+
+/** 惰性解析：模块加载零副作用（单测红线：不碰 .data/），首个请求才落盘。 */
+function localSecret(): string {
+	if (localSecretCache) return localSecretCache;
+	const path = process.env.AGENT_LOCAL_SECRET_PATH?.trim() || ".data/local-secret";
+	const existing = readLocalSecretFile(path);
+	if (existing) return (localSecretCache = existing);
+	const fresh = randomBytes(24).toString("hex");
+	localSecretCache = fresh;
+	try {
+		mkdirSync(dirname(path), { recursive: true });
+		// wx = 别覆盖并发实例刚写好的那枚；EEXIST 时读回来对齐
+		writeFileSync(path, `${fresh}\n`, { flag: "wx", mode: 0o600 });
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+			const raced = readLocalSecretFile(path);
+			if (raced) {
+				// 并发实例抢先落了盘：跟它对齐，别各持一枚互相踢
+				localSecretCache = raced;
+			} else {
+				// 盘上是坏文件：覆盖它才算自愈（到这里没有可对齐的好值）
+				try {
+					writeFileSync(path, `${fresh}\n`, { mode: 0o600 });
+				} catch {
+					/* 写不回去：退回进程内随机（旧口径），下次启动再试 */
+				}
+			}
+		}
+		// 其余失败（只读盘等）：缓存住 fresh，同进程内始终一致 ——
+		// 等价旧口径（进程内随机，重启后要重填令牌），下次启动再试落盘
+	}
+	return localSecretCache;
+}
 
 export function isLoopback(c: Context): boolean {
 	try {
@@ -60,7 +111,7 @@ export interface AuthOptions {
 /** 本机页面加载时发一枚进程内凭据；非本机请求不发光，避免把 cookie 扩散出去。 */
 export function attachLocalCredential(c: Context): void {
 	if (!isLoopback(c)) return;
-	setCookie(c, LOCAL_COOKIE, LOCAL_SECRET, {
+	setCookie(c, LOCAL_COOKIE, localSecret(), {
 		path: "/",
 		httpOnly: true,
 		sameSite: "Strict",
@@ -70,7 +121,7 @@ export function attachLocalCredential(c: Context): void {
 function hasLocalCredential(c: Context): boolean {
 	if (!isLoopback(c)) return false;
 	const provided = getCookie(c, LOCAL_COOKIE);
-	return typeof provided === "string" && safeEqual(provided, LOCAL_SECRET);
+	return typeof provided === "string" && safeEqual(provided, localSecret());
 }
 
 export function createAuthMiddleware(expectedToken: string | null, options: AuthOptions = {}) {

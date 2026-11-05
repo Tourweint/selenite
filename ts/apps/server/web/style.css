@@ -75,7 +75,8 @@
   --sidebar: 232px;
   /* 收起轨道（2026-11-05 F1）：对齐 CINDY，72px 轨 + 36×36 圆钮 */
   --rail: 72px;
-  --thread: 700px;
+  /* 对话流宽度 = 与 composer（920px）一般宽（2026-11-05 用户拍板：700 太窄，不做可调） */
+  --thread: 920px;
   --titlebar-h: 40px;
 
   /* 模态遮罩（2026-11-05 F1）：浅色主题 .6，暗色 .7（见各主题覆盖） */
@@ -349,6 +350,8 @@ html[data-sidebar="closed"] .sidebar {
   display: flex; flex-direction: column; gap: 10px;
   width: var(--sidebar);
   height: 100%;
+  /* E4：会话列表移进折叠块后不再 flex:1 抢高，短窗口时整栏自己滚 */
+  overflow-y: auto;
   /* 标题栏已经独占顶部 40px，侧栏从这里开始，不再让给固定按钮 */
   padding: 14px 10px 10px;
   transition: opacity 220ms cubic-bezier(.165, .84, .44, 1) 80ms;
@@ -555,6 +558,9 @@ html[data-sidebar="closed"] .side-rail {
   box-shadow: inset 0 0 0 1px var(--accent-line);
 }
 .side-item svg { width: 15px; height: 15px; }
+/* 群组占位（E5）：和收起轨道的 disabled 占位同款，点了没反应要看得出来 */
+.side-item:disabled { opacity: .42; cursor: default; }
+.side-item:disabled:hover { background: transparent; color: var(--text-3); }
 
 .side-foot .status { padding: 0 12px 2px; }
 
@@ -566,6 +572,101 @@ html[data-sidebar="closed"] .side-rail {
 .status[data-state="off"] i { background: var(--c-error); }
 .status[data-state="waiting"] i { background: var(--text-3); animation: breathe 1.6s ease-in-out infinite; }
 @keyframes breathe { 50% { opacity: .25; } }
+
+/* ── 侧栏按「人」重排（E4）：总管区 / 最近会话折叠 / 执事花名册 ──
+   只用 --* 令牌，四套主题自动跟随；复用 .status-dot / .pill-tag / .side-count / .side-item。 */
+
+/* 展开态分隔线：沿用 .rail-sep 的「1px + divider 令牌」样式，宽度铺满侧栏 */
+.side-sep.rail-sep { width: 100%; }
+
+/* 首字圆形头像（无图时用，别加新图片资源） */
+.pt-avatar {
+  flex: none;
+  width: 21px; height: 21px;
+  display: grid; place-content: center;
+  border-radius: var(--r-full);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11px; font-weight: 600; line-height: 1;
+}
+
+.side-chief {
+  flex: none;
+  display: flex; flex-direction: column; gap: 2px;
+}
+
+/* 总管固定条目：状态点 + 首字头像 + 名字 + pill；永在最上 */
+.chief-entry { gap: 6px; cursor: pointer; }
+.chief-entry .roster-name { font-weight: 500; }
+.chief-entry .pill-tag { margin-left: auto; }
+/* E5：无 domain 的活跃单计数（不可点）；.side-count 默认 margin-left:auto，
+   这里要贴着 pill 右侧，不能再抢一份自动外边距。 */
+.chief-count { margin-left: 0; flex: none; }
+
+/* 最近会话折叠块 */
+.recents { display: flex; flex-direction: column; gap: 2px; }
+.recents-head {
+  display: flex; align-items: center; gap: 6px;
+  width: 100%; height: 26px; padding: 0 12px;
+  border: 0; border-radius: var(--r-md);
+  background: transparent; color: var(--text-3);
+  font-size: 12px; font-weight: 500;
+  cursor: pointer;
+}
+.recents-head:hover { background: var(--card); color: var(--text-2); }
+.recents-chev { width: 12px; height: 12px; margin-left: auto; transition: transform .18s ease; }
+.recents.is-collapsed .recents-chev { transform: rotate(-90deg); }
+.recents.is-collapsed .recents-body { display: none; }
+.recents-body { display: block; }
+/* 折叠块内的会话列表不再抢剩余高度（原来 .chats 是 flex:1 自己滚） */
+.recents-body .chats { flex: none; max-height: 200px; overflow-y: auto; }
+
+.recents-all {
+  display: flex; align-items: center; gap: 4px;
+  width: 100%; height: 28px; padding: 0 12px;
+  border: 0; border-radius: var(--r-md);
+  background: transparent; color: var(--text-3);
+  font-size: 12px; cursor: pointer;
+}
+.recents-all:hover { background: var(--card); color: var(--accent); }
+
+/* 执事花名册 */
+.side-partners {
+  flex: none;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.partners-head { justify-content: space-between; }
+.roster-add {
+  width: 20px; height: 20px; padding: 0;
+  display: grid; place-content: center;
+  border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--text-3);
+  font-size: 15px; line-height: 1; cursor: pointer;
+}
+.roster-add:hover { background: var(--card-high); color: var(--accent); }
+.roster {
+  display: flex; flex-direction: column; gap: 2px;
+  max-height: 220px; overflow-y: auto;
+}
+.roster-row { gap: 6px; cursor: pointer; }
+.roster-row .roster-name {
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.roster-row .pill-tag { margin-left: 0; flex: none; }
+.roster-domain { font-size: 10px; }
+.roster-count { margin-left: auto; flex: none; border: 0; cursor: pointer; }
+.roster-idle {
+  margin-left: auto; flex: none;
+  font-size: 11px; color: var(--text-3);
+}
+.roster-empty {
+  padding: 6px 12px;
+  font-size: 12px; line-height: 1.5; color: var(--text-3);
+}
+
+/* 收起轨道：总管首字圆钮（36px 按钮内 26px 圆） */
+.rail-chief .pt-avatar { width: 26px; height: 26px; font-size: 13px; }
 
 .icon-btn {
   display: grid; place-content: center;
@@ -691,8 +792,6 @@ html[data-sidebar="closed"] .side-rail {
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   flex: 1; min-width: 0;
 }
-
-.top-actions { display: flex; align-items: center; gap: 8px; flex: none; }
 
 .ghost {
   height: 28px; padding: 0 12px;
@@ -1108,7 +1207,7 @@ details.acts > .acts { padding-top: 2px; }
   left: 50%;
   transform: translateX(-50%);
   bottom: 14px;
-  /* 比消息栏（--thread: 700px）宽一档，左右各留 16px 就够；
+  /* 与消息栏（--thread: 920px）同宽（2026-11-05 用户拍板），左右各留 16px；
      取值同参考实现 deepseek-harness 的 --dsh-chat-content-width: min(100% - 32px, 920px) */
   width: min(920px, calc(100% - 32px));
   /* 2026-11-04 容器卡（对齐 cindy ComposerCard）：边框/卡底在容器上，textarea 透明无框；
@@ -1449,31 +1548,33 @@ html[data-route="settings"] .sidebar { display: none; }
 
 /* 分段控件 */
 .segmented {
-  /* relative 是滑行高亮层的定位基准；不写死在某个 id 上，任何 .segmented.slide 都能用 */
+  /* relative 是滑行高亮层的定位基准；不写死在某个 id 上，任何 .segmented.slide 都能用。
+     2026-11-05 形状对齐 CINDY segmented-control.css 原版：整条圆胶囊轨道（radius-full，
+     无描边）、选项完全圆、高亮胶囊 border-radius: inherit + 阴影。 */
   position: relative;
   display: inline-flex; gap: 2px; padding: 2px;
   background: var(--surface-low);
-  border: 1px solid var(--outline);
-  border-radius: var(--r-md);
+  border: 0;
+  border-radius: var(--r-full);
   /* 权限 / 发送键 / 工具活动三处分段控件共用：切主题时底色和描边跟着走 */
   transition: background-color .18s ease, border-color .18s ease;
 }
 .segmented button {
   position: relative; z-index: 1;
-  height: 28px; padding: 0 12px;
-  border: 0; border-radius: var(--r-sm);
+  height: 26px; padding: 0 12px;
+  border: 0; border-radius: var(--r-full);
   background: transparent; color: var(--text-2);
-  font-size: 12.5px;
+  font-size: 12px; font-weight: 500; line-height: 1;
   transition: background-color .18s ease, color .18s ease;
 }
 .segmented button:hover { color: var(--text); }
 .segmented button[aria-checked="true"] {
-  background: var(--accent-container);
-  color: var(--on-accent-container);
+  background: transparent;
+  color: var(--text);
   font-weight: 500;
-  outline: 1px solid var(--accent-line);
-  outline-offset: -1px;
+  outline: none;
 }
+.segmented button:not([aria-checked="true"]):hover { background: var(--card-high); }
 
 /* 共享滑行高亮层：照 CINDY components/ui/segmented-control 的实现抄——
    一个 absolute 小胶囊（.segmented-plate），width/height/transform 由 JS 按选中按钮实测写入，
@@ -1484,9 +1585,11 @@ html[data-route="settings"] .sidebar { display: none; }
   box-sizing: border-box;
   position: absolute; top: 0; left: 0; z-index: 0;
   pointer-events: none;
-  border: 1px solid var(--accent-line);
-  border-radius: var(--r-sm);
-  background: var(--accent-container);
+  /* CINDY 原版：radius 继承容器（完全圆）、选中底 + 阴影，无描边 */
+  border: 0;
+  border-radius: inherit;
+  background: var(--card-high);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .12), inset 0 0 0 1px var(--card-border);
   opacity: 0;
   /* 动画换本仓弹簧（用户拍板：形状 CINDY、动画用主题滑块那档回弹）；
      300ms 让 1.56 的过冲读得出来，200ms 内回弹看不清。 */
@@ -1581,7 +1684,7 @@ html[data-route="settings"] .sidebar { display: none; }
 .gate-err { margin: 12px 0 0; color: var(--c-error); font-size: 12.5px; }
 
 /* ── 任务中心（2026-11-04） ───────────────────────────────
-   视觉依据 docs/设计方案/原型/03-独立任务看板.html：四列看板 + 顶部统计。
+   视觉依据 docs/设计方案/原型/03-独立任务看板.html；K1 起主视图三列 + 已完结折叠区 + 顶部统计。
    颜色只取现有 token（accent / tertiary / error / card / divider），不新造色板；
    深色、主题色、圆角和 0.18s 颜色过渡都跟全局一起走。 */
 
@@ -1671,10 +1774,10 @@ html[data-route="settings"] .sidebar { display: none; }
 .tk-stat[data-tone="fail"] .tk-stat-value { color: var(--c-error); }
 .tk-stat[data-tone="run"] .tk-stat-value { color: var(--accent); }
 
-/* 四列看板：可用宽度不够就横向滚动，卡片不被挤成一条 */
+/* 三列看板：主视图只留要管的；折叠区在网格外单独占一条（K1） */
 .tasks-board {
   display: grid;
-  grid-template-columns: repeat(4, minmax(232px, 1fr));
+  grid-template-columns: repeat(3, minmax(232px, 1fr));
   gap: 12px;
   align-items: start;
 }
@@ -1691,46 +1794,244 @@ html[data-route="settings"] .sidebar { display: none; }
   font-size: 12px; color: var(--text-3); text-align: center;
 }
 
+/* 主视图全空（含从没派过活）：居中说明，不摆三列空架子 */
+.tk-board-empty {
+  grid-column: 1 / -1;
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  padding: 48px 16px 28px;
+  text-align: center;
+}
+.tk-board-empty h2 { margin: 0; font-size: 15px; font-weight: 600; color: var(--text-2); }
+.tk-board-empty p { margin: 0; font-size: 12.5px; line-height: 1.6; color: var(--text-3); }
+.tk-board-empty .ghost { margin-top: 4px; }
+
+/* 已完结折叠区（K1）：看板网格外的一整条，小字弱描边，和「要管的」卡片明显分开 */
+.tk-archive {
+  display: flex; flex-direction: column; gap: 4px;
+  margin-top: 12px;
+}
+.tk-archive-bar {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; padding: 7px 10px;
+  border: 1px solid var(--divider); border-radius: var(--r-md);
+  background: transparent;
+  color: var(--text-3);
+  font-size: 11.5px; line-height: 1.5; text-align: left;
+}
+button.tk-archive-bar {
+  cursor: pointer;
+  transition: background-color .18s ease, border-color .18s ease, color .18s ease;
+}
+button.tk-archive-bar:hover {
+  border-color: var(--outline); color: var(--text-2);
+  background: color-mix(in srgb, var(--text) 3%, transparent);
+}
+button.tk-archive-bar:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 1px; }
+.tk-arch-caret {
+  margin-left: auto;
+  font-size: 10px; line-height: 1;
+  transition: transform .18s ease;
+}
+.tk-archive-bar[aria-expanded="true"] .tk-arch-caret { transform: rotate(90deg); }
+
+/* 已完结简卡：行式、弱化；hover 才回到正常对比度 */
+.tk-arch-list { display: flex; flex-direction: column; gap: 2px; }
+.tk-arch-row {
+  display: flex; align-items: center; gap: 10px;
+  width: 100%; padding: 6px 10px;
+  border: 1px solid transparent; border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-3);
+  font-size: 12px; text-align: left;
+  opacity: .78;
+  transition: opacity .18s ease, background-color .18s ease, border-color .18s ease;
+}
+.tk-arch-row:hover {
+  opacity: 1; border-color: var(--divider);
+  background: color-mix(in srgb, var(--text) 3%, transparent);
+}
+.tk-arch-row:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 1px; }
+.tk-arch-id {
+  flex: none;
+  font-family: var(--mono); font-size: 10.5px; color: var(--text-3);
+}
+.tk-arch-prompt {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tk-arch-row .tk-chip { flex: none; }
+.tk-arch-time {
+  flex: none;
+  font-size: 10.5px; color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 已完结简卡（L3）：对话卡样式 —— 标题 + N 次派活 + 灯 + 时间，点它回原对话 */
+.tk-arch-conv {
+  display: flex; align-items: center; gap: 10px;
+  width: 100%; padding: 6px 10px;
+  border: 1px solid transparent; border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-3);
+  font-size: 12px; text-align: left;
+  opacity: .78;
+  transition: opacity .18s ease, background-color .18s ease, border-color .18s ease;
+}
+.tk-arch-conv:hover {
+  opacity: 1; border-color: var(--divider);
+  background: color-mix(in srgb, var(--text) 3%, transparent);
+}
+.tk-arch-conv:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 1px; }
+.tk-arch-title {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--text-2);
+}
+.tk-arch-count { flex: none; font-size: 10.5px; color: var(--text-3); }
+.tk-arch-conv .tk-lamp { flex: none; }
+
+/* ── 外部打手四卡（L3）────────────────────────────────────
+ * 主视图上方一排小卡：执行者名 + 未完结单数 + 最新一单摘要 + 状态灯。
+ * 点击 = 过滤主视图（data-active=1 时高亮），再点一次取消。 */
+.tk-hitters {
+  display: flex; gap: 10px; margin-bottom: 14px;
+  overflow-x: auto;
+}
+.tk-hitter {
+  flex: 1 1 0; min-width: 168px;
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 9px 11px;
+  border: 1px solid var(--card-border); border-radius: var(--r-md);
+  background: var(--surface-low);
+  box-shadow: var(--card-glow);
+  color: var(--text);
+  text-align: left;
+  transition: background-color .18s ease, border-color .18s ease, transform .15s ease;
+}
+.tk-hitter:hover { transform: translateY(-1px); background: var(--card-high); }
+.tk-hitter:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 1px; }
+.tk-hitter[data-active="1"] {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--outline));
+  background: var(--accent-soft);
+}
+.tk-hitter-head { display: flex; align-items: center; gap: 6px; }
+.tk-hitter-name {
+  min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 12px; font-weight: 600; color: var(--text-2);
+}
+.tk-hitter-count {
+  flex: none; margin-left: auto;
+  padding: 0 6px;
+  border-radius: var(--r-full);
+  background: var(--accent-soft); color: var(--accent);
+  font-size: 10.5px; line-height: 1.7;
+  font-variant-numeric: tabular-nums;
+}
+.tk-hitter-brief {
+  font-size: 11.5px; line-height: 1.5; color: var(--text-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tk-hitter-idle { font-size: 11.5px; line-height: 1.5; color: var(--text-3); }
+.tk-hitter-foot { display: flex; align-items: center; gap: 8px; }
+.tk-hitter-time {
+  margin-left: auto;
+  font-size: 10.5px; color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── 聚合灯（L3）────────────────────────────────────────
+ * 红「有单出错」/ 蓝「等你处理」/ 灰「执行中」；全 done 不渲染灯，只留时间。
+ * 蓝色固定走 --c-primary（四套主题里都是靛蓝），不跟着强调色变，免得「等你」变金。 */
+.tk-lamp {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 10.5px; line-height: 1.6; white-space: nowrap;
+  color: var(--text-3);
+}
+.tk-lamp i {
+  width: 6px; height: 6px; flex: none;
+  border-radius: var(--r-full);
+  background: currentColor;
+}
+.tk-lamp[data-lamp="fail"] { color: var(--c-error); }
+.tk-lamp[data-lamp="ask"] { color: var(--c-primary); }
+.tk-lamp[data-lamp="run"] { color: var(--text-3); }
+.tk-lamp[data-lamp="done"] { color: var(--text-3); }
+
+/* ── 对话卡（L3）────────────────────────────────────────
+ * 整卡不是按钮：只有卡头（回对话）和派活行（进详情）可点，子单按钮不会落在按钮里。 */
 .tk-card {
-  display: block; width: 100%; padding: 11px 12px;
+  width: 100%;
   border: 1px solid var(--card-border);
   border-radius: var(--r-md);
   background: var(--card);
   color: var(--text);
   box-shadow: var(--card-glow);
-  text-align: left;
-  transition: background-color .18s ease, border-color .18s ease, color .18s ease,
-              transform .15s ease;
+  overflow: hidden;
+  transition: background-color .18s ease, border-color .18s ease;
 }
-.tk-card:hover { transform: translateY(-1px); background: var(--card-high); }
-.tk-card:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 1px; }
-/* 待你处理：整卡片给一圈琥珀边，扫一眼就能找到 */
-.tk-card[data-attn="1"] {
-  border-color: color-mix(in srgb, var(--c-tertiary) 55%, var(--outline));
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--c-tertiary) 22%, transparent);
+/* 有单出错 / 等你处理：给一圈同色描边，扫一眼就能找到 */
+.tk-card[data-lamp="fail"] {
+  border-color: color-mix(in srgb, var(--c-error) 45%, var(--outline));
 }
-.tk-card[data-attn="1"]:hover { background: color-mix(in srgb, var(--c-tertiary) 8%, var(--card)); }
+.tk-card[data-lamp="ask"] {
+  border-color: color-mix(in srgb, var(--c-primary) 42%, var(--outline));
+}
 
-.tk-card-top { display: flex; align-items: center; gap: 6px; }
-.tk-domain {
-  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-size: 11.5px; font-weight: 600; color: var(--accent);
+.tk-conv-head {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  width: 100%; padding: 9px 11px;
+  border: 0; background: transparent;
+  color: var(--text); text-align: left;
+  transition: background-color .18s ease;
 }
-.tk-id {
-  flex: none; margin-left: auto;
-  font-family: var(--mono); font-size: 10.5px; color: var(--text-3);
+.tk-conv-head:hover { background: color-mix(in srgb, var(--text) 4%, transparent); }
+.tk-conv-head:focus-visible { outline: 2px solid var(--accent-line); outline-offset: -2px; }
+.tk-conv-title {
+  flex: 1 1 120px; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 12.5px; font-weight: 600; color: var(--text);
 }
-.tk-prompt {
-  margin: 6px 0 0;
-  font-size: 13px; line-height: 1.5; color: var(--text);
+.tk-conv-badges { display: flex; align-items: center; gap: 4px; flex: none; }
+.tk-badge {
+  padding: 0 6px;
+  border: 1px solid var(--divider); border-radius: var(--r-full);
+  color: var(--text-3);
+  font-size: 10.5px; line-height: 1.7;
+  white-space: nowrap;
+}
+.tk-conv-tail { display: flex; align-items: center; gap: 8px; flex: none; }
+.tk-conv-time {
+  font-size: 10.5px; color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 派活行：一单一行；两层收拢 = 对话卡 → 派活行 → 子单 */
+.tk-rows { display: flex; flex-direction: column; }
+.tk-row {
+  display: block;
+  padding: 8px 11px;
+  border-top: 1px solid var(--divider);
+  cursor: pointer;
+  transition: background-color .18s ease;
+}
+.tk-row:hover { background: var(--card-high); }
+.tk-row:focus-visible { outline: 2px solid var(--accent-line); outline-offset: -2px; }
+.tk-row-top { display: flex; align-items: flex-start; gap: 8px; }
+.tk-row-prompt {
+  flex: 1 1 auto; min-width: 0;
+  font-size: 12.5px; line-height: 1.55; color: var(--text);
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
-.tk-meta {
-  margin-top: 7px;
-  font-size: 11.5px; color: var(--text-2);
-  display: flex; gap: 8px; flex-wrap: wrap;
+.tk-row-top .tk-chip { flex: none; }
+.tk-row-meta {
+  display: flex; align-items: center; gap: 8px;
+  margin-top: 3px;
+  font-size: 10.5px; color: var(--text-3);
 }
-.tk-meta b { font-weight: 500; color: var(--text); }
+.tk-row-meta .tk-row-who { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tk-row-time { margin-left: auto; flex: none; font-variant-numeric: tabular-nums; }
+
 .tk-bar {
   height: 3px; margin-top: 8px;
   border-radius: var(--r-full); background: var(--divider); overflow: hidden;
@@ -1740,28 +2041,43 @@ html[data-route="settings"] .sidebar { display: none; }
   border-radius: inherit;
   background: var(--accent);
 }
-.tk-card[data-attn="1"] .tk-bar i { background: var(--c-tertiary); }
-.tk-foot {
-  display: flex; align-items: center; gap: 8px; margin-top: 9px;
-  font-size: 11px; color: var(--text-3);
+
+/* 派活行内的「子单 N」折叠：靠右一条细线，和行本身区分开 */
+.tk-children-toggle {
+  display: flex; align-items: center; gap: 6px;
+  width: 100%; margin-top: 4px; padding: 2px 0;
+  border: 0; background: none;
+  color: var(--text-3); font-size: 11px; line-height: 1.6; text-align: left;
+  cursor: pointer;
+  transition: color .18s ease;
 }
-.tk-foot .tk-time { margin-left: auto; font-variant-numeric: tabular-nums; }
-.tk-err {
-  margin: 8px 0 0; padding: 6px 8px;
+.tk-children-toggle:hover { color: var(--text-2); }
+.tk-children-toggle:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 2px; border-radius: var(--r-sm); }
+.tk-child-caret {
+  font-size: 9px; line-height: 1;
+  transition: transform .18s ease;
+}
+.tk-children-toggle[aria-expanded="true"] .tk-child-caret { transform: rotate(90deg); }
+
+/* 子单行：单号 + 状态 + 相对时间，弱化到卡内的次级信息 */
+.tk-children { display: flex; flex-direction: column; gap: 1px; margin-top: 2px; }
+.tk-child-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 3px 4px;
   border-radius: var(--r-sm);
-  background: color-mix(in srgb, var(--c-error) 10%, transparent);
-  color: var(--c-error);
-  font-size: 11.5px; line-height: 1.5;
-  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  color: var(--text-3); text-decoration: none;
+  font-size: 11px; line-height: 1.6;
+  transition: background-color .18s ease, color .18s ease;
 }
-/* 接口带回 lastAction / waitingOn 后才出现；没有就整行不渲染 */
-.tk-live,
-.tk-wait {
-  margin: 6px 0 0;
-  font-size: 11.5px; line-height: 1.5; color: var(--text-3);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+.tk-child-row:hover { background: var(--card-high); color: var(--text-2); }
+.tk-child-row:focus-visible { outline: 2px solid var(--accent-line); outline-offset: -1px; }
+.tk-child-id {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--mono); font-size: 10.5px;
 }
-.tk-wait { color: color-mix(in srgb, var(--c-tertiary) 72%, var(--text)); }
+.tk-child-row .tk-chip { flex: none; }
+.tk-child-time { flex: none; font-variant-numeric: tabular-nums; }
 
 /* 状态小片：四种语气，颜色全部推导自现有 token */
 .tk-chip {
@@ -1872,6 +2188,42 @@ html[data-route="settings"] .sidebar { display: none; }
 .td-review .td-stage { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); }
 .td-review p { margin: 4px 0 0; line-height: 1.6; color: var(--text-2); }
 
+/* 迟到的回报（E2 #2）：节副注 + 行里的子单 id（等宽，和验收记录同一层） */
+.td-sec-hint { margin: -2px 4px 0; font-size: 11.5px; line-height: 1.5; color: var(--text-3); }
+.td-review .td-deadletter-id {
+  font-family: var(--mono); font-size: 11px; color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+/* 领域概览（E2 #3）：行整体可点；error 行标红 + 错误文案（只令牌，不写死色值） */
+.td-dom-row { cursor: pointer; transition: background-color .18s ease; }
+.td-dom-row:hover { background: var(--card-high); }
+.td-dom-row:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
+.td-dom-row[data-tone="fail"] .row-label,
+.td-dom-row[data-tone="fail"] .row-hint { color: var(--c-error); }
+.td-dom-row[data-tone="fail"] .pill-tag {
+  color: var(--c-error);
+  border-color: color-mix(in srgb, var(--c-error) 38%, transparent);
+}
+
+/* usage 按模型明细（E2 #5）：<details> 折叠，小表右对齐数字 */
+.td-usage-detail { padding: 10px 16px 14px; }
+.td-usage-detail > summary {
+  cursor: pointer; user-select: none; font-size: 12px; color: var(--text-3);
+  transition: color .15s ease;
+}
+.td-usage-detail > summary:hover { color: var(--text-2); }
+.td-usage-body { margin-top: 10px; overflow-x: auto; }
+.td-usage-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.td-usage-table th, .td-usage-table td {
+  border-bottom: 1px solid var(--divider); padding: 6px 8px; text-align: right;
+  white-space: nowrap; font-variant-numeric: tabular-nums;
+}
+.td-usage-table th { color: var(--text-3); font-weight: 500; }
+.td-usage-table th:first-child, .td-usage-table td:first-child {
+  text-align: left; white-space: normal; overflow-wrap: anywhere;
+}
+
 /* 对话里的派单提示：一句话 + 一条真链接（不是纯文本） */
 .delegate-hint {
   margin-top: 8px;
@@ -1897,7 +2249,7 @@ html[data-route="settings"] .sidebar { display: none; }
 }
 
 @media (max-width: 1100px) {
-  .tasks-board { grid-template-columns: repeat(4, 248px); }
+  .tasks-board { grid-template-columns: repeat(3, 248px); }
 }
 
 /* ── 滚动条 ───────────────────────────────────────────── */
@@ -1945,7 +2297,7 @@ html[data-route="settings"] .sidebar { display: none; }
   .set-page { padding: 12px 0 64px; }
   .row { flex-wrap: wrap; }
 
-  /* 任务中心窄窗：顶栏允许折成两行，筛选与刷新不挤出屏幕；看板保持四列横滚 */
+  /* 任务中心窄窗：顶栏允许折成两行，筛选与刷新不挤出屏幕；看板保持三列横滚 */
   .tasks-top {
     flex-wrap: wrap; row-gap: 8px;
     padding: 8px 12px;
@@ -1956,10 +2308,13 @@ html[data-route="settings"] .sidebar { display: none; }
   .tasks-scroll { padding: 12px 12px 20px; }
   .tasks-stats { gap: 8px; margin-bottom: 10px; }
   .tk-stat { min-width: 104px; padding: 8px 10px; }
+  /* 打手四卡在窄窗保留一排横滚，别折成四行把看板推下去 */
+  .tk-hitters { gap: 8px; margin-bottom: 10px; }
+  .tk-hitter { min-width: 148px; padding: 8px 10px; }
   .tasks-state { margin-top: 28px; padding: 0 8px; }
 }
 
-/* 手机宽度（375 / 390）：三个下拉按可用宽度折行，不把顶栏撑破；四列仍是固定宽度，靠横滚 */
+/* 手机宽度（375 / 390）：三个下拉按可用宽度折行，不把顶栏撑破；三列仍是固定宽度，靠横滚 */
 @media (max-width: 560px) {
   .tasks-filters { width: 100%; }
   .tasks-select { flex: 1 1 108px; min-width: 0; }
@@ -1974,7 +2329,9 @@ html[data-route="settings"] .sidebar { display: none; }
   .side-item { height: 44px; }
   .tasks-select { height: 40px; font-size: 13px; }
   .tasks-actions .ghost { min-height: 40px; }
-  .tk-card { padding: 12px 13px; }
+  .tk-conv-head,
+  .tk-row { padding: 11px 13px; }
+  .tk-hitter { min-height: 56px; }
 }
 
 /* ── composer 底部工具行：pill / 弹出层（2026-11-04 对齐 cindy）──
@@ -2017,6 +2374,33 @@ html[data-route="settings"] .sidebar { display: none; }
   font-size: 12px; color: var(--text-3);
 }
 
+/* pill 文字滚动（2026-11-05，ZCode RollingToolbarLabel 同拍）：换模型时
+   旧字向上滚出淡去、新字从下方滚入，200ms。外层 #model-pill-label 是裁切罩
+   （overflow 来自 .composer-pill > span），动的是内层；absolute 的 exit 盖在
+   原位向上走。文字没变不播（JS 侧也拦了一道）。 */
+#model-pill-label { position: relative; }
+.pill-label-text {
+  display: inline-block; max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+@keyframes pillLabelIn {
+  from { opacity: 0; transform: translateY(0.75em); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes pillLabelOut {
+  from { opacity: 1; transform: translateY(0); }
+  to { opacity: 0; transform: translateY(-0.75em); }
+}
+.pill-label-enter { animation: pillLabelIn 200ms cubic-bezier(.4, 0, .2, 1) both; }
+.pill-label-exit {
+  position: absolute; left: 0; top: 0;
+  animation: pillLabelOut 200ms cubic-bezier(.4, 0, .2, 1) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .pill-label-enter,
+  .pill-label-exit { animation: none; }
+}
+
 /*
  * morph 弹出层（抄 cindy morph-popover）：打开时从 pill 位置向上浮 6px 淡入，
  * 关闭反向缩回，220ms。圆角起点用 15px（= 30px pill 高的一半）而不是 9999px ——
@@ -2047,11 +2431,26 @@ html[data-route="settings"] .sidebar { display: none; }
 @media (prefers-reduced-motion: reduce) {
   .composer-pop.pop-open,
   .composer-pop.pop-closing { animation: none; }
+  .think-seg { animation: none; }
 }
 
 .model-menu {
-  /* 模型名 + 档位分段：窄窗靠 min-width 兜住，模型名自己省略号截断 */
-  min-width: 240px; max-width: min(380px, 88vw); max-height: 320px; overflow: auto;
+  /* 宽度钉死，不跟内容走（2026-11-05）：切供应商只换内容不改框。
+     320 容得下当前最长模型名（13px 实测 ~297 含内边距），更长的名字照旧省略号截断。
+     锚定改右缘（2026-11-05 第二轮，同 cindy MorphPopover align="end"）：
+     pill 右缘挨着发送键是稳定的，换模型 pill 只往左伸缩，弹层就定得住；
+     贴左缘的话 pill 一变宽弹层就被拖着跑。窄屏（≤560px）改贴整张 composer 卡，见下方断点。 */
+  left: auto; right: 0;
+  width: min(320px, 88vw); max-height: 320px; overflow: auto;
+}
+
+/* 窄屏断点必须排在本节定义之后：同权重时后者赢，放前面会被上面的
+   position:relative / width 顶掉（2026-11-05 实测踩过）。
+   固定 320px 贴 pill 左缘会探出视口：composer-wrap 让出定位，弹层改锚
+   整张 composer 卡（.composer 是定位祖先），宽度按卡收。 */
+@media (max-width: 560px) {
+  .composer-wrap { position: static; }
+  .model-menu { width: min(320px, 100%); }
 }
 
 /* 供应商切换行（D2）：一次只看一家，点段即筛，不留「全部」。
@@ -2095,6 +2494,14 @@ html[data-route="settings"] .sidebar { display: none; }
   transition: background-color .15s ease;
 }
 .model-row:hover { background: var(--surface-low); }
+/* 当前行（2026-11-05）：档位分段从名字右边挪到下面一行——行宽只由模型名决定，
+   切模型 / 切供应商时行内左右间距不再跳，长名字也不会被分段压出省略号。
+   交互口径不变（D2：分段只属于当前模型行，先选模型再选强度）。 */
+.model-row[data-current="1"] {
+  flex-direction: column; align-items: stretch; gap: 3px;
+  padding: 3px 4px 6px 10px;
+}
+.model-row[data-current="1"] .model-item { flex: none; }
 .model-item {
   display: flex; align-items: center; gap: 6px;
   flex: 1; min-width: 0;
@@ -2104,18 +2511,26 @@ html[data-route="settings"] .sidebar { display: none; }
   font-size: 13px; text-align: left;
 }
 .model-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-meta { flex: none; margin-left: auto; font-size: 11px; color: var(--text-3); }
 .model-item[aria-checked="true"] { color: var(--accent); font-weight: 600; }
-.model-check { flex: none; font-size: 11px; }
+.model-item[aria-checked="true"] .model-meta { color: var(--accent); }
 
-/* 行内思考档：只渲染该模型 thinkingLevels 里有的档（关 / 低 / 中 / 高）。
-   没有已选模型时整段 hidden：先选模型，才谈强度（D2）。 */
+/* 行内思考档：只渲染该模型 thinkingLevels 里有的档（关 / 低 / 中 / 高），
+   落在当前模型名下方一行。没有已选模型时整段 hidden：先选模型，才谈强度（D2）。 */
 .think-seg {
-  flex: none;
+  flex: none; align-self: flex-start;
   display: inline-flex; align-items: center; gap: 1px;
   padding: 1px;
   border: 1px solid var(--composer-border);
   border-radius: var(--r-sm);
   background: var(--surface-low);
+  /* 菜单重渲染会重建分段：出现时轻落 2px 淡入，60ms 后起、与弹层 220ms 同拍收；
+     换档位只改选中态不重建节点，不会反复播 */
+  animation: thinkSegIn 160ms cubic-bezier(.3, .9, .25, 1) 60ms backwards;
+}
+@keyframes thinkSegIn {
+  from { opacity: 0; transform: translateY(-2px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 .think-seg[hidden] { display: none; }
 .think-opt {
@@ -2151,22 +2566,10 @@ html[data-route="settings"] .sidebar { display: none; }
 }
 .proj-pill .proj-pill-label { flex: 1; min-width: 0; text-align: left; }
 
-/* 回滚开关命中后降级：整颗 pill 不可点（aria-disabled 而非 disabled，
-   这样 title 还能 hover 出来说明原因），也不再打无效请求 */
-.proj-pill[aria-disabled="true"],
-.proj-pill[aria-disabled="true"]:hover,
-.proj-pill[aria-disabled="true"]:focus-visible {
-  opacity: .5; cursor: default;
-  color: var(--text-2);
-  background: transparent;
-  border-color: transparent;
-}
-
-/* 轨道态：主工作区给通用图标，选了项目就换成项目名首字（accent 提示在用某个项目） */
-.rail-proj[aria-disabled="true"] { opacity: .38; cursor: default; }
-.rail-proj[data-active="1"] { color: var(--accent); }
-.rail-proj[data-active="1"]:hover:not(:disabled) { color: var(--accent); }
-.proj-rail-mark { font-size: 14px; font-weight: 600; line-height: 1.4; }
+/* E5：接口读不到（旧后端 / 临时 5xx）时降级显示——仍可点，点一下就是重试 */
+.proj-pill.is-unavailable { opacity: .55; }
+.proj-pill.is-unavailable:hover { opacity: .78; }
+.rail-proj.is-unavailable { opacity: .5; }
 
 /* 弹层：left/top 由 JS 写；z-index 压在门/提示之下（gate 10、toast 60），
    宽度高度都收住，长项目名自己省略号截断 */
@@ -2186,12 +2589,23 @@ html[data-route="settings"] .sidebar { display: none; }
   background: transparent; color: var(--text);
   font-size: 13px; text-align: left;
 }
-.proj-item:hover { background: var(--surface-low); }
-.proj-item[aria-checked="true"] { color: var(--accent); font-weight: 600; }
+/* 2026-11-06 总览化：行是只读信息（.is-static），只有底部入口行还保留 hover 反馈 */
+.proj-item.is-static { cursor: default; }
+.proj-item:not(.is-static):hover { background: var(--surface-low); }
 .proj-item-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.proj-check { flex: none; font-size: 11px; }
+/* 行尾标注：主项目；异常态（目录不在了=黄、跑出工作区=灰）。tk-badge 同款皮 */
+.proj-tag {
+  flex: none;
+  padding: 0 6px;
+  border: 1px solid var(--divider); border-radius: var(--r-full);
+  color: var(--text-3);
+  font-size: 10.5px; line-height: 1.7;
+  white-space: nowrap;
+}
+.proj-tag.is-warn { color: var(--warn); border-color: var(--warn); }
+.proj-tag.is-idle { color: var(--text-3); }
 
-/* 「杂事 · 主工作区」与真实项目之间的分隔线：两件事不是同一类选项 */
+/* 主项目与子项目之间的分隔线：两段不是同一类信息 */
 .proj-sep { height: 1px; margin: 4px 6px; background: var(--composer-border); }
 
 /* 底部入口（2026-11-05 F1）：添加子项目 / 添加主项目 / 管理项目（设置页） */
@@ -2421,6 +2835,13 @@ html[data-route="settings"] .sidebar { display: none; }
 .set-input.is-mono { font-family: var(--mono); font-size: 12.5px; }
 .set-path-row .ghost, .set-path-row .btn-primary { height: 34px; }
 
+/* 手动加提醒（E2 #4）：一行 text + datetime-local + 按钮，窄了自动换行 */
+.tk-remind-form { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; width: 100%; }
+.tk-remind-form .set-input { flex: 1 1 180px; }
+.tk-remind-form .set-input.tk-remind-at { flex: 0 1 220px; }
+.tk-remind-form .btn-primary { height: 34px; }
+.tk-remind-hint { margin: 0; padding: 0 16px 12px; font-size: 12px; line-height: 1.5; color: var(--text-3); }
+
 /* 子项目卡片：ZCode 的 rounded-lg border + hover 描边 + 状态点 */
 .proj-list { display: flex; flex-direction: column; gap: 8px; }
 .proj-card {
@@ -2649,13 +3070,61 @@ html[data-route="settings"] .sidebar { display: none; }
 .secret-eye:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .secret-eye svg { width: 15px; height: 15px; }
 
-/* 自动拉取清单勾选行 */
-.field-check {
-  display: flex; align-items: center; gap: 8px;
-  font-size: 12px; color: var(--text-2);
-  cursor: pointer;
+/* 模型卡片列表（2026-11-05）：右上「添加模型」，每行 ID + 上下文/输出/思考档摘要 */
+.svc-models { display: flex; flex-direction: column; gap: 8px; }
+.svc-models-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
 }
-.field-check input { accent-color: var(--accent); }
+.svc-models-head .set-hint { min-width: 0; }
+.svc-model-add {
+  flex: none;
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 28px; padding: 0 10px;
+  font-size: 12px; border-radius: var(--r-sm);
+}
+.svc-model-add svg { width: 14px; height: 14px; }
+.svc-model-list { display: flex; flex-direction: column; gap: 6px; }
+.svc-model-row {
+  display: flex; align-items: center; gap: 6px;
+  min-width: 0; padding: 8px 8px 8px 12px;
+  border: 1px solid var(--composer-border); border-radius: var(--r-sm);
+  background: var(--surface);
+}
+.svc-model-main { flex: 1; min-width: 0; }
+.svc-model-id {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--mono); font-size: 12.5px; color: var(--text);
+}
+.svc-model-meta {
+  margin-top: 2px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 11.5px; color: var(--text-3);
+}
+.svc-model-act {
+  flex: none;
+  display: grid; place-content: center;
+  width: 28px; height: 28px; padding: 0;
+  border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--text-3); cursor: pointer;
+  transition: background-color .15s ease, color .15s ease;
+}
+.svc-model-act:hover { background: var(--surface-low); color: var(--text); }
+.svc-model-act.is-danger:hover { color: var(--c-error); }
+.svc-model-act:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.svc-model-act svg { width: 14px; height: 14px; }
+.svc-model-empty {
+  padding: 12px;
+  border: 1px dashed var(--outline); border-radius: var(--r-sm);
+  font-size: 12px; line-height: 1.5; color: var(--text-3);
+}
+
+/* 模型弹窗的思考档多选 */
+.pm-levels { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+.pm-level-opt {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12.5px; color: var(--text-2); cursor: pointer;
+}
+.pm-level-opt input { accent-color: var(--accent); }
 
 .svc-form-actions {
   display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px;
@@ -2690,3 +3159,90 @@ html[data-route="settings"] .sidebar { display: none; }
 }
 .modal-danger:hover { filter: brightness(1.05); }
 .modal-danger:disabled { opacity: .5; cursor: default; filter: none; }
+
+/* ── 执事与例行任务（E1，2026-11-05）──────────────────────
+   只吃现有令牌：--card / --surface-low / --divider / --outline / --text-* /
+   --mono / --accent / --c-error / --r-*。所有颜色随四套主题走，不硬编码色值。 */
+
+.pt-head {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+  margin-bottom: 14px;
+}
+.pt-list { display: flex; flex-direction: column; gap: 12px; }
+
+.pt-card { padding: 14px 16px; gap: 10px; }
+.pt-card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pt-name { min-width: 0; overflow-wrap: anywhere; }
+.pt-meta { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.pt-domain { color: var(--text-3); }
+.pt-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+.pt-empty { padding: 20px; gap: 12px; align-items: flex-start; }
+
+/* 编辑模态内容很长：给面板一个对视口确定的高度上限，.modal-body 才真的能滚动，
+   否则底部（例行任务表单）落在视口外点不到。:has 只作用于执事编辑模态，不动别的模态。 */
+.modal-panel:has(.pt-edit) { max-height: calc(100vh - 2rem); }
+
+/* 编辑模态：一个 .pt-edit 包三段，段间用细分隔线 */
+.pt-edit { display: flex; flex-direction: column; gap: 14px; }
+.pt-seg {
+  display: flex; flex-direction: column; gap: 10px;
+  padding-top: 14px; border-top: 1px solid var(--divider);
+}
+.pt-edit > .pt-seg:first-child { border-top: 0; padding-top: 0; }
+.pt-seg-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.pt-seg-title { font-size: 13px; font-weight: 600; color: var(--text); }
+.pt-basic { gap: 12px; }
+
+.pt-ta {
+  width: 100%; padding: 8px 10px;
+  border: 1px solid var(--outline); border-radius: var(--r-md);
+  background: var(--card); color: var(--text);
+  font-family: var(--mono); font-size: 12.5px; line-height: 1.5;
+  outline: none; resize: vertical;
+  transition: border-color .15s ease;
+}
+.pt-ta:focus { border-color: var(--accent); }
+.pt-ta.is-soul { min-height: 180px; }
+
+.pt-human { color: var(--text-2); }
+.pt-mode-row { display: flex; align-items: center; gap: 8px; }
+
+.pt-new {
+  display: flex; flex-direction: column; gap: 10px;
+  margin-top: 2px; padding: 12px;
+  border: 1px solid var(--divider); border-radius: var(--r-md);
+}
+
+.pt-routine-list { display: flex; flex-direction: column; gap: 8px; }
+.pt-routine {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--divider); border-radius: var(--r-md);
+  background: var(--surface-low);
+}
+.pt-routine-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.pt-routine-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.pt-routine-actions .ghost { padding: 0 10px; }
+.pt-trigger { line-height: 1.6; }
+
+.pt-runs { display: flex; flex-direction: column; gap: 6px; padding-top: 4px; }
+.pt-run {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 6px 8px;
+  border: 1px solid var(--divider); border-radius: var(--r-sm);
+  font-size: 11.5px;
+}
+.pt-run .pill-tag { margin-left: 0; }
+.pt-run-trigger { color: var(--text-3); }
+.pt-run-summary { flex: 1 1 160px; min-width: 0; color: var(--text-2); overflow-wrap: anywhere; }
+.pt-run-time { flex: none; font-family: var(--mono); font-size: 10.5px; color: var(--text-3); }
+
+.pt-result {
+  margin: 0; padding: 10px 12px;
+  border: 1px solid var(--divider); border-radius: var(--r-md);
+  background: var(--surface-low); color: var(--text);
+  font-size: 12.5px; line-height: 1.5;
+  white-space: pre-wrap; word-break: break-word;
+  max-height: 220px; overflow-y: auto;
+}
+.pt-result.is-error { color: var(--c-error); }

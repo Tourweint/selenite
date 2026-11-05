@@ -7,7 +7,7 @@ import {
 	partnerIdentityForDomain,
 	partnersStore,
 } from "./partners.ts";
-// 手下伙伴的建/停/列核心（批次D D3）：与 companion-api 端点共用，工具只做校验与文案包装。
+// 执事的建/停/列核心（批次D D3）：与 companion-api 端点共用，工具只做校验与文案包装。
 import {
 	createMinisterPartner,
 	defaultMinisterContext,
@@ -70,9 +70,9 @@ import type { SkillStore } from "./skills.ts";
 const MEMORY_KINDS: MemoryKind[] = ["fact", "episode", "preference", "entity"];
 
 /**
- * 本机 delegate 才反查手下伙伴身份（批次D D2）。
- * 伙伴能力关闭 / 伙伴库不可用时返回 null —— 请求不带身份，兼容旧领域，不让派单因查库失败而挂掉。
- * 远程锚点会话（relay-matrix）不装配这个缝，因此「不做跨电脑手下」在装配层就成立。
+ * 本机 delegate 才反查执事身份（批次D D2）。
+ * 执事能力关闭 / 执事库不可用时返回 null —— 请求不带身份，兼容旧领域，不让派单因查库失败而挂掉。
+ * 远程锚点会话（relay-matrix）不装配这个缝，因此「不做跨电脑执事」在装配层就成立。
  */
 function localIdentityHit(domain: string): { name: string; soul: string } | null {
 	if (!COMPANIONS_ENABLED) return null;
@@ -113,12 +113,12 @@ export interface ToolDeps {
 	 */
 	projects?: ProjectsStore | null;
 	/**
-	 * 伙伴能力（2026-11-05 批次B B2）：为 true 时 `partner_skill_write` 上架。
+	 * 执事能力（2026-11-05 批次B B2）：为 true 时 `partner_skill_write` 上架。
 	 * agent.ts 传 `COMPANIONS_ENABLED`——开关关掉时工具不注册，行为与改动前一致（回滚开关）。
 	 */
 	partners?: boolean;
 	/**
-	 * 手下管理工具的存储 / chancellor 工作根（批次D D3）。测试注入临时目录，
+	 * 执事管理工具的存储 / chancellor 工作根（批次D D3）。测试注入临时目录，
 	 * 不碰真实 .data/；不传用全局 partnersStore() + chancellorWorkRoot()。
 	 */
 	ministerContext?: () => MinisterContext;
@@ -537,7 +537,7 @@ export function createTools(deps: ToolDeps) {
 					emit: emitDelegation,
 					report: deps.reportDelegation,
 					autoReport,
-					// 只有本机 delegate 按 domain 反查手下伙伴身份；远程锚点会话不装配这个缝。
+					// 只有本机 delegate 按 domain 反查执事身份；远程锚点会话不装配这个缝。
 					identityHitFor: localIdentityHit,
 					log: (line) => console.warn(line),
 				},
@@ -619,12 +619,12 @@ export function createTools(deps: ToolDeps) {
 
 	if (deps.delegate !== false) tools.push(delegate, proposeProject);
 
-	// 伙伴技能写入（2026-11-05 批次B B2；批次D D1 扩到主对话=总管）。
+	// 执事技能写入（2026-11-05 批次B B2；批次D D1 扩到主对话=总管）。
 	// 写的是 partner-homes/<id>/skills/<slug>.md（64KB 上限、原子写都在 partners.ts）。
-	// 伙伴会话写该伙伴的技能；主对话（owner 会话）解析为 chief → 写总管技能库；
-	// CHIEF_PARTNER=false 时 owner 会话照旧返回"不属于任何伙伴"（回滚到改动前）。
+	// 执事会话写该执事的技能；主对话（owner 会话）解析为 chief → 写总管技能库；
+	// CHIEF_PARTNER=false 时 owner 会话照旧返回"不属于任何执事"（回滚到改动前）。
 	//
-	// 手下管理 partner_manage（批次D D3）与 partner_skill_write 一起挂在伙伴能力开时。
+	// 执事管理 partner_manage（批次D D3）与 partner_skill_write 一起挂在执事能力开时。
 	// deps.partners 缺省回落 COMPANIONS_ENABLED：agent.ts 装配时不显式传 partners，
 	// 主对话（总管）也能用；COMPANIONS_ENABLED=false 两件都不注册 = 一行回滚。
 	const partnersOn = deps.partners ?? COMPANIONS_ENABLED;
@@ -634,8 +634,8 @@ export function createTools(deps: ToolDeps) {
 			defineTool({
 				name: "partner_skill_write",
 				description:
-					"把一份技能手册写进当前伙伴的技能库（skills/<slug>.md，首行 = 索引用的一句话摘要）。" +
-					"伙伴会话写各自的技能库，主对话写总管技能库；写盘即生效，下一轮进身份提示词的技能索引。",
+					"把一份技能手册写进当前执事的技能库（skills/<slug>.md，首行 = 索引用的一句话摘要）。" +
+					"执事会话写各自的技能库，主对话写总管技能库；写盘即生效，下一轮进身份提示词的技能索引。",
 				parameters: Type.Object({
 					slug: Type.String({
 						description: "技能名，小写字母/数字/短横线，1-64 字符，如 daily-brief",
@@ -643,7 +643,7 @@ export function createTools(deps: ToolDeps) {
 					content: Type.String({ description: "技能手册全文（Markdown）；第一行是索引用摘要" }),
 				}),
 				execute: async (args, context) => {
-					// effectivePartnerIdOfSession：伙伴会话 → 真实 uuid；主对话 → "chief"（CHIEF 开时）。
+					// effectivePartnerIdOfSession：执事会话 → 真实 uuid；主对话 → "chief"（CHIEF 开时）。
 					// 用 chief 感知的解析而非裸 partnerIdOfSession，是为了让主对话也能写总管技能；
 					// 裸函数仍被 autonomy/routines 当"是否主人会话"用，语义不能改。
 					const partnerId = effectivePartnerIdOfSession(
@@ -651,7 +651,7 @@ export function createTools(deps: ToolDeps) {
 						Number(context.conversationId),
 					);
 					if (!partnerId) {
-						return text("这个会话不属于任何伙伴，不能写伙伴技能。");
+						return text("这个会话不属于任何执事，不能写执事技能。");
 					}
 					if (!/^[a-z0-9][a-z0-9-_]{0,63}$/.test(args.slug)) {
 						return text("slug 只能是小写字母/数字/短横线，1-64 字符。");
@@ -664,7 +664,7 @@ export function createTools(deps: ToolDeps) {
 							join(partnersStore().skillsDirOf(partnerId), `${args.slug}.md`),
 							args.content,
 						);
-						return text(`技能 ${args.slug} 已写入伙伴技能库，下一轮进索引。`);
+						return text(`技能 ${args.slug} 已写入执事技能库，下一轮进索引。`);
 					} catch (error) {
 						const detail = error instanceof Error ? error.message : String(error);
 						return text(`写入失败：${detail}`);
@@ -674,22 +674,22 @@ export function createTools(deps: ToolDeps) {
 		);
 	}
 
-	// 手下管理（批次D D3）：总管建 / 停 / 列手下。核心逻辑在 partner-manage.ts，
+	// 执事管理（批次D D3）：总管建 / 停 / 列执事。核心逻辑在 partner-manage.ts，
 	// 与 companion-api 端点共用；这里只做参数校验、权限闸与模型友好的文案包装。
 	if (partnersOn) {
 		tools.push(
 			defineTool({
 				name: "partner_manage",
 				description:
-					"总管管理手下伙伴（chancellor 分管宰相）：create 建一个、stop 停一个、list 列出全部。" +
-					"只有总管 / 主对话能用；手下自己的伙伴会话不能管理手下。" +
+					"总管管理执事（chancellor 分管宰相）：create 建一个、stop 停一个、list 列出全部。" +
+					"只有总管 / 主对话能用；执事自己的执事会话不能管理执事。" +
 					"create 的 domain 是之后派活用的领域名，必须是小写 ASCII（小写字母、数字、连字符，如 frontend / desktop-shell），" +
 					"name 是展示名（中文随意）。建好后用 delegate(domain=<domain>) 把活派给它。",
 				parameters: Type.Object({
 					action: Type.Unsafe<"create" | "stop" | "list">({
 						type: "string",
 						enum: ["create", "stop", "list"],
-						description: "create=建手下 / stop=停手下 / list=列出手下",
+						description: "create=建执事 / stop=停执事 / list=列出执事",
 					}),
 					name: Type.Optional(Type.String({ description: "create 必填，展示名，≤40 字" })),
 					domain: Type.Optional(
@@ -697,17 +697,17 @@ export function createTools(deps: ToolDeps) {
 					),
 					soul: Type.Optional(Type.String({ description: "create 可选，一句话身份；缺省用默认播种" })),
 					partnerId: Type.Optional(
-						Type.String({ description: "stop 必填（手下 id）；list 可选按 id 过滤" }),
+						Type.String({ description: "stop 必填（执事 id）；list 可选按 id 过滤" }),
 					),
 				}),
 				execute: async (args, api) => {
 					const ctx = ministerContext();
 					const conversationId = Number(api.conversationId);
-					// 只有总管 / 主对话能管理手下：effectivePartnerIdOfSession 落到非 chief 的真实
-					// uuid（某伙伴的专线会话）一律拒；owner 会话解析为 chief / null，放行。
+					// 只有总管 / 主对话能管理执事：effectivePartnerIdOfSession 落到非 chief 的真实
+					// uuid（某执事的专线会话）一律拒；owner 会话解析为 chief / null，放行。
 					const effective = effectivePartnerIdOfSession(ctx.store, conversationId);
 					if (effective !== null && effective !== CHIEF_PARTNER_ID) {
-						return text("只有总管可以管理手下");
+						return text("只有总管可以管理执事");
 					}
 					if (args.action === "create") {
 						const name = (args.name ?? "").trim();
@@ -720,28 +720,28 @@ export function createTools(deps: ToolDeps) {
 						const result = createMinisterPartner({ name, domain, soul: args.soul }, ctx);
 						if (!result.ok) return text(result.error);
 						return text(
-							`手下 ${result.value.name} 已就位，domain=${result.value.domain}，之后派活用 domain`,
+							`执事 ${result.value.name} 已就位，domain=${result.value.domain}，之后派活用 domain`,
 						);
 					}
 					if (args.action === "stop") {
 						const partnerId = (args.partnerId ?? "").trim();
-						if (!partnerId) return text("stop 需要 partnerId（手下 id）");
+						if (!partnerId) return text("stop 需要 partnerId（执事 id）");
 						if (partnerId === CHIEF_PARTNER_ID) {
-							return text("不能停总管自己：总管是主对话本体，不在可停用的手下里。");
+							return text("不能停总管自己：总管是主对话本体，不在可停用的执事里。");
 						}
 						const partner = ctx.store.get(partnerId);
 						if (!partner || !partner.domain) {
-							return text(`找不到 id 为 ${partnerId} 的手下（只能停带 domain 的手下）。`);
+							return text(`找不到 id 为 ${partnerId} 的执事（只能停带 domain 的执事）。`);
 						}
 						const result = stopMinisterPartner(partnerId, ctx);
-						if (!result.ok) return text("手下不存在或已被停用。");
+						if (!result.ok) return text("执事不存在或已被停用。");
 						return text(
-							`手下 ${partner.name}（domain=${partner.domain}）已停用并归档，之后派活不要再指向它。`,
+							`执事 ${partner.name}（domain=${partner.domain}）已停用并归档，之后派活不要再指向它。`,
 						);
 					}
 					if (args.action === "list") {
 						const rows = listMinisterPartners(ctx, (args.partnerId ?? "").trim() || undefined);
-						if (rows.length === 0) return text("（暂无手下；用 create 建一个）");
+						if (rows.length === 0) return text("（暂无执事；用 create 建一个）");
 						return text(rows.map((row) => `${row.name} · ${row.domain} · ${row.status}`).join("\n"));
 					}
 					return text("action 只能是 create / stop / list");

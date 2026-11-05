@@ -4,12 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 /**
- * 伙伴与例行任务探针（2026-11-05 批次B/C）：真起服务 + 真 HTTP。
+ * 执事与例行任务探针（2026-11-05 批次B/C）：真起服务 + 真 HTTP。
  *
  * 覆盖：
- *   1. `COMPANIONS_ENABLED` 不配（默认开）+ faux 模型：建伙伴 → 详情（身份版本）→ 跑一轮（faux 应答）
+ *   1. `COMPANIONS_ENABLED` 不配（默认开）+ faux 模型：建执事 → 详情（身份版本）→ 跑一轮（faux 应答）
  *      → 改 SOUL（版本 +1，下一轮生效语义）→ 建例行任务（once）→ run_now → 执行历史
- *   2. `COMPANIONS_ENABLED=false`：伙伴端点 404、`partner_skill_write` 不上架（工具面回到改动前）
+ *   2. `COMPANIONS_ENABLED=false`：执事端点 404、`partner_skill_write` 不上架（工具面回到改动前）
  *
  *   pnpm --filter @lifediary/server companion
  */
@@ -29,7 +29,7 @@ async function main(): Promise<void> {
 		const res = await fetch(`http://127.0.0.1:${PORT}/api/v1/partners`, {
 			headers: authHeaders(),
 		});
-		check("开关关闭：伙伴端点 404（未启用语义，不是 403/400）", res.status === 404, `status=${res.status}`);
+		check("开关关闭：执事端点 404（未启用语义，不是 403/400）", res.status === 404, `status=${res.status}`);
 	} finally {
 		await stopServer(off);
 	}
@@ -37,8 +37,8 @@ async function main(): Promise<void> {
 	// ── 阶段二：开关开启 + faux 全链路 ──
 	const server = await startServer({ COMPANIONS_ENABLED: "true", LLM_PROVIDER: "faux" });
 	try {
-		const created = await api("POST", "/api/v1/partners", { name: "探针伙伴" });
-		check("建伙伴：201 且返回 uuid 档案", created.status === 201 && !!created.body.partner?.id);
+		const created = await api("POST", "/api/v1/partners", { name: "探针执事" });
+		check("建执事：201 且返回 uuid 档案", created.status === 201 && !!created.body.partner?.id);
 		const partnerId = created.body.partner?.id as string;
 
 		const detail1 = await api("GET", `/api/v1/partners/${partnerId}`, null);
@@ -46,7 +46,7 @@ async function main(): Promise<void> {
 			"详情：身份版本 = 1，SOUL 有播种正文",
 			detail1.status === 200 &&
 				detail1.body.soulVersion === 1 &&
-				String(detail1.body.soul ?? "").includes("探针伙伴"),
+				String(detail1.body.soul ?? "").includes("探针执事"),
 			`soulVersion=${detail1.body.soulVersion}`,
 		);
 
@@ -60,7 +60,7 @@ async function main(): Promise<void> {
 
 		// 改 SOUL：版本推进（磁盘当前值 + 新快照）
 		const patched = await api("PATCH", `/api/v1/partners/${partnerId}`, {
-			soul: `你是探针伙伴，改过的身份。`,
+			soul: `你是探针执事，改过的身份。`,
 		});
 		check("改 SOUL：版本推进到 2", patched.status === 200 && patched.body.soulVersion === 2);
 		const detail2 = await api("GET", `/api/v1/partners/${partnerId}`, null);
@@ -103,11 +103,11 @@ async function main(): Promise<void> {
 			`status=${runs.body.runs?.[0]?.status}`,
 		);
 
-		// 删除伙伴：例行任务定义一起没（孤儿清理）
+		// 删除执事：例行任务定义一起没（孤儿清理）
 		const removed = await api("DELETE", `/api/v1/partners/${partnerId}`, null);
 		const routinesAfter = await api("GET", `/api/v1/routines?partnerId=${partnerId}`, null);
 		check(
-			"删伙伴：例行任务定义一起清",
+			"删执事：例行任务定义一起清",
 			removed.status === 200 && (routinesAfter.body.routines ?? []).length === 0,
 		);
 	} finally {

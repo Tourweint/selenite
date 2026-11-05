@@ -18,7 +18,7 @@ import type { ChatIndexEntry } from "./agent.ts";
  *
  * 取舍：v1 手机**不直接连中继 WS**——Kotlin 侧信封/重连/顶替是一整套新链路，
  * 而手机与自家 harness 之间已有走稳的 HTTP+Bearer 通道。所以跨设备信息
- * （名册 / 中继状态 / 远端单 / 伙伴归属）由 harness 经本文件代理成普通
+ * （名册 / 中继状态 / 远端单 / 执事归属）由 harness 经本文件代理成普通
  * REST（复用 `/api/v1` 鉴权与 403 口径），手机零新协议。WS 直连中继是
  * 手机端后续演进项，不是缺口。
  *
@@ -131,7 +131,7 @@ export function mountRelayMobileProxy(app: Hono, deps: RelayMobileProxyDeps): vo
 		}
 	});
 
-	// 伙伴归属状态（阶段三；手机设置页的"伙伴在哪台电脑"）
+	// 执事归属状态（阶段三；手机设置页的"执事在哪台电脑"）
 	app.get("/api/v1/relay/home/overview", async (c) => {
 		const home = deps.home();
 		if (!companionHomeEnabled() || !home) return c.json({ error: "not_available" }, 404);

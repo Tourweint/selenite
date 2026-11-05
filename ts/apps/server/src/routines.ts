@@ -25,8 +25,8 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
  *   - 响完在 deliver 的同一个事务里排下一个任务，链就续上了。
  *
  * 事件触发走进程内全局事件口（watchAllEvents / watchAllDelegationEvents）：
- * 24h 回执去重 + `originRoutineId` 防自环（v1 实现：**伙伴自己会话发出的事件一律不触发**——
- * 伙伴事件只可能来自自主轮，让它再唤醒例行任务是自环的根）。
+ * 24h 回执去重 + `originRoutineId` 防自环（v1 实现：**执事自己会话发出的事件一律不触发**——
+ * 执事事件只可能来自自主轮，让它再唤醒例行任务是自环的根）。
  *
  * 可靠性铁律（照抄 cindy 踩坑产物）：
  *   - 同一规则串行（上一次没跑完，下一次标 deferred 等待）；
@@ -38,7 +38,7 @@ const DEFAULT_STATE_PATH = ".data/routines.json";
 const PROMPT_LIMIT = 100_000;
 /** 执行历史最多留多少条（状态文件有界） */
 const RUN_HISTORY_LIMIT = 50;
-/** deferred 重试间隔（伙伴忙/上一轮没跑完） */
+/** deferred 重试间隔（执事忙/上一轮没跑完） */
 const DEFERRED_RETRY_MS = 30_000;
 /** 回执去重窗口 */
 const RECEIPT_TTL_MS = 24 * 60 * 60_000;
@@ -237,14 +237,14 @@ class RoutineEngine {
 			: { phase: event.phase ?? "" });
 	}
 
-	/** 事件触发：防自环（伙伴会话的事件一律不触发）+ 回执去重 + 匹配规则。 */
+	/** 事件触发：防自环（执事会话的事件一律不触发）+ 回执去重 + 匹配规则。 */
 	private onExternalEvent(
 		conversationId: number,
 		kind: "delegation" | "tool" | "phase",
 		fields: Record<string, string>,
 	): void {
 		if (!COMPANIONS_ENABLED || !this.subscribed) return;
-		// 防自环：伙伴会话（含例行专线）发出的事件不再触发例行任务
+		// 防自环：执事会话（含例行专线）发出的事件不再触发例行任务
 		if (partnersStore().partnerIdOfSession(conversationId) !== null) return;
 
 		for (const routine of partnersStore().listRoutines()) {
@@ -287,7 +287,7 @@ class RoutineEngine {
 	}
 
 	/**
-	 * 给规则排定时任务（启用/创建/改期时调用）。挂在伙伴主会话的任务图上——
+	 * 给规则排定时任务（启用/创建/改期时调用）。挂在执事主会话的任务图上——
 	 * 例行任务跟着会话走，会话在任务就在。
 	 */
 	async ensureScheduled(routineId: string): Promise<void> {
@@ -297,7 +297,7 @@ class RoutineEngine {
 		const next = await this.nextFireFrom(routine);
 		if (!next) return;
 		const chat = await ensurePartnerSession(routine.partnerId);
-		if (!chat) throw new Error("伙伴会话取不到，例行任务排不上");
+		if (!chat) throw new Error("执事会话取不到，例行任务排不上");
 		await chat.conversation.commit(
 			(tx) =>
 				tx.createTask(

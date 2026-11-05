@@ -10,10 +10,12 @@
  *   pnpm --filter @lifediary/server http
  */
 import { spawn, type ChildProcess } from "node:child_process";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import type { Ticket } from "../../../../../chancellor/src/types.ts";
 
 const PORT = Number(process.env.PROBE_PORT ?? 8098);
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -48,6 +50,13 @@ function startServer(extraEnv: NodeJS.ProcessEnv = {}): ChildProcess {
 			CURRENT_PROJECT: "",
 			// 播种会写 providers.json；探针必须隔离，别碰真实 .data
 			PROVIDERS_PATH: ".data/probe-http-providers.json",
+			// 执事库 / 家目录隔离：§18 会播种一个带 domain 的执事，绝不能碰真实 .data/partners.sqlite
+			PARTNERS_DB_PATH: ".data/probe-http-partners.sqlite",
+			PARTNER_HOMES_ROOT: ".data/probe-http-partner-homes",
+			// 本机开发实例可能把权限档切成 read-only（.data/policy.json）；探针要验写工具链路，必须隔离
+			AGENT_POLICY_PATH: ".data/probe-http-policy.json",
+			// 本机 cookie 密钥（auth.ts 落盘保底）：探针起停多次服务，别碰真实 .data/local-secret
+			AGENT_LOCAL_SECRET_PATH: ".data/probe-http-local-secret",
 			NODE_OPTIONS: "",
 			...extraEnv,
 		},
@@ -1164,6 +1173,308 @@ try {
 		"回滚时 PUT secret → 400 secrets_disabled",
 		`${disabledSecret.status} ${disabledSecretJson.error}`,
 	);
+
+	// ── 17. 全部数据导出（2026-11-05 J1，接口文档 §2.5）──
+	console.log("\n· 17. 全部数据导出");
+	const exportA = await chat({ messages: [{ role: "user", content: "导出探针甲：今天整理书架" }] });
+	const exportB = await chat({ messages: [{ role: "user", content: "导出探针乙：明天去跑步" }] });
+	const exportHidden = await chat({ messages: [{ role: "user", content: "导出探针丙：这条要被移除" }] });
+	check(
+		exportA.status === 200 && Boolean(exportA.result.conversationId),
+		"导出探针甲建会话",
+		String(exportA.status),
+	);
+	check(
+		exportB.status === 200 && Boolean(exportB.result.conversationId),
+		"导出探针乙建会话",
+		String(exportB.status),
+	);
+	const hiddenId = exportHidden.result.conversationId;
+	check(
+		exportHidden.status === 200 && Boolean(hiddenId),
+		"导出探针丙建会话（随后 hide）",
+		String(exportHidden.status),
+	);
+	if (hiddenId) {
+		const hideResponse = await fetch(`${BASE}/api/v1/agent/chat/${hiddenId}/hide`, {
+			method: "POST",
+		});
+		check(hideResponse.status === 200, "hide 探针丙", String(hideResponse.status));
+	}
+
+	const exportResponse = await fetch(`${BASE}/api/v1/agent/export`);
+	const exportRaw = await exportResponse.text();
+	check(exportResponse.status === 200, "GET /agent/export → 200", String(exportResponse.status));
+	check(
+		(exportResponse.headers.get("content-type") ?? "").includes("application/json"),
+		"响应是 JSON",
+		exportResponse.headers.get("content-type") ?? "",
+	);
+	const disposition = exportResponse.headers.get("content-disposition") ?? "";
+	check(
+		/attachment/.test(disposition) &&
+			/selenite-export-\d{4}-\d{2}-\d{2}\.json/.test(disposition),
+		"Content-Disposition = attachment + 日期文件名",
+		disposition,
+	);
+
+	type ExportMessage = { role: string; at: number; text: string };
+	type ExportConversation = {
+		id: string;
+		title: string;
+		pinned: boolean;
+		messages: ExportMessage[];
+	};
+	const exported = JSON.parse(exportRaw) as {
+		exportedAt?: string;
+		conversations?: ExportConversation[];
+		providers?: { id?: string; hasKey?: boolean; keyEnv?: string }[];
+		modelSelection?: { providerId?: string; modelId?: string } | null;
+		usage?: { models?: unknown[] };
+	};
+	const conversations = exported.conversations ?? [];
+	check(
+		typeof exported.exportedAt === "string" && !Number.isNaN(Date.parse(exported.exportedAt)),
+		"exportedAt 是 ISO 时间",
+		String(exported.exportedAt),
+	);
+	check(conversations.length >= 2, "conversations 数组非空", String(conversations.length));
+	check(
+		conversations.every(
+			(conversation) =>
+				typeof conversation.id === "string" &&
+				typeof conversation.title === "string" &&
+				typeof conversation.pinned === "boolean" &&
+				Array.isArray(conversation.messages) &&
+				conversation.messages.every(
+					(message) =>
+						typeof message.role === "string" &&
+						typeof message.at === "number" &&
+						typeof message.text === "string",
+				),
+		),
+		"每条会话结构齐（id/title/pinned/messages）",
+	);
+
+	const sameMessages = (a: ExportMessage[], b: ExportMessage[]): boolean =>
+		a.length === b.length &&
+		a.every(
+			(message, index) =>
+				message.role === b[index]?.role &&
+				message.at === b[index]?.at &&
+				message.text === b[index]?.text,
+		);
+	for (const [label, probe] of [
+		["甲", exportA],
+		["乙", exportB],
+	] as const) {
+		const id = probe.result.conversationId;
+		if (!id) continue;
+		const exportedChat = conversations.find((conversation) => conversation.id === id);
+		check(Boolean(exportedChat), `探针${label}在导出里`, id);
+		const history = (await (
+			await fetch(`${BASE}/api/v1/agent/chat/${id}/messages?limit=500`)
+		).json()) as { messages?: ExportMessage[] };
+		check(
+			Boolean(exportedChat) && sameMessages(exportedChat!.messages, history.messages ?? []),
+			`探针${label}的 messages 与建库一致`,
+			`${exportedChat?.messages.length ?? 0} vs ${history.messages?.length ?? 0}`,
+		);
+	}
+	check(
+		hiddenId ? !conversations.some((conversation) => conversation.id === hiddenId) : false,
+		"被 hide 的会话不在导出里",
+		hiddenId ?? "",
+	);
+
+	const providerList = exported.providers ?? [];
+	check(providerList.length > 0, "providers 非空", String(providerList.length));
+	check(
+		providerList.every((provider) => typeof provider.hasKey === "boolean"),
+		"providers 带 hasKey",
+	);
+	check(!exportRaw.includes("keyEnv"), "providers 投影无 keyEnv 字样");
+	check(!exportRaw.includes(SECRET_KEY), "导出全文无密钥明文");
+	check(
+		exported.modelSelection === null ||
+			(typeof exported.modelSelection?.providerId === "string" &&
+				typeof exported.modelSelection?.modelId === "string"),
+		"modelSelection 形状正确",
+		JSON.stringify(exported.modelSelection?.["providerId"] ?? null),
+	);
+	check(Array.isArray(exported.usage?.models), "usage 原样带 models");
+
+	// ── 18. 任务单来源对话（L1，2026-11-05，接口文档 §2.9）──
+	console.log("\n· 18. 任务单来源对话（conversationId）");
+	const TICKETS_BASE = resolve(".data/probe-http-tickets");
+	// workRoot 的 managers/ 在同级：必须把工作根再下沉一层，别碰到真实的 .data/managers。
+	const TICKETS_ROOT = join(TICKETS_BASE, "runs");
+	const TICKETS_DB = resolve(".data/probe-http-delegations.sqlite");
+	const PARTNER_DB = resolve(".data/probe-http-partners.sqlite");
+	const PARTNER_HOMES = resolve(".data/probe-http-partner-homes");
+	rmSync(TICKETS_BASE, { recursive: true, force: true });
+	rmSync(TICKETS_DB, { force: true });
+	server.kill();
+	await sleep(800);
+	// 执事库要等旧进程完全退出再删：Windows 上打开着的 sqlite 删不掉。
+	rmSync(PARTNER_DB, { force: true });
+	rmSync(`${PARTNER_DB}-wal`, { force: true });
+	rmSync(`${PARTNER_DB}-shm`, { force: true });
+	rmSync(PARTNER_HOMES, { recursive: true, force: true });
+	server = startServer({
+		...secretEnv,
+		CHANCELLOR_ENABLED: "false",
+		CHANCELLOR_WORK_ROOT: TICKETS_ROOT,
+		DELEGATIONS_DB_PATH: TICKETS_DB,
+	});
+	await waitForReady();
+
+	// 一张真实会话：它是所有来源对话断言的对照物。
+	const sourceChat = await chat({ messages: [{ role: "user", content: "来源对话探针" }] });
+	const sourceConversationId = sourceChat.result.conversationId ?? "";
+	check(Boolean(sourceConversationId), "建一条来源对话", sourceConversationId);
+
+	// ticket.json / 回执里存的是宿主内部会话 id；用同一份 durable 库拿到内→外映射。
+	process.env.AGENT_DB_PATH = resolve(DB);
+	process.env.MEMORY_DB_PATH = resolve(MEMORY_DB);
+	process.env.MEMORY_ENABLED = "false";
+	process.env.LLM_PROVIDER = "faux";
+	process.env.PROVIDERS_PATH = resolve(".data/probe-http-providers.json");
+	process.env.PARTNERS_DB_PATH = resolve(".data/probe-http-partners.sqlite");
+	process.env.COMPANIONS_ENABLED = "false";
+	process.env.CHANCELLOR_ENABLED = "false";
+	const { externalChatIds, getHarness } = await import("../src/agent.ts");
+	const idMap = await externalChatIds();
+	const internalId = [...idMap.entries()].find(
+		([, external]) => external === sourceConversationId,
+	)?.[0];
+	check(internalId !== undefined, "拿到会话的内外 id 映射", `${internalId} -> ${sourceConversationId}`);
+	// 探针只借一次映射；不关掉的话 Windows 上 finally 删不掉服务端库（句柄还在）。
+	await (await getHarness()).close(BACKGROUND_CONTEXT);
+
+	const { Store } = await import("../../../../../chancellor/src/store.ts");
+	const { DelegationReceipts } = await import("../src/delegation-receipts.ts");
+	const nowIso = new Date().toISOString();
+	const fixture = (id: string, extra: Record<string, unknown> = {}) =>
+		({
+			id,
+			prompt: `来源对话夹具 ${id}`,
+			status: "dispatching",
+			created_at: nowIso,
+			updated_at: nowIso,
+			options: { dry: true, maxTasks: 8, workRoot: TICKETS_ROOT },
+			...extra,
+		}) as Ticket;
+	const store = new Store(TICKETS_ROOT);
+	// 新单：宿主派单时写进来的内部 id（子单继承同值）。
+	store.saveTicket(fixture("T-source", { originConversationId: String(internalId) }));
+	store.saveTicket(
+		fixture("T-child", {
+			parentTicketId: "T-source",
+			originConversationId: String(internalId),
+		}),
+	);
+	// 历史单：ticket.json 没有字段，靠派单回执反查；以及一张既没字段也没回执的（→ null）。
+	store.saveTicket(fixture("T-legacy"));
+	store.saveTicket(fixture("T-orphan"));
+	store.close();
+	const receipts = new DelegationReceipts(TICKETS_DB);
+	receipts.begin("probe-legacy", "probe-fingerprint", { explicit: true });
+	receipts.accept("probe-legacy", "T-legacy", internalId);
+	receipts.close();
+
+	// 领域单：chiefName 按 ticket.options.domain 反查 partners 表的执事名（L1 §2.2）。
+	const { ensureManager } = await import("../../../../../chancellor/src/manager/registry.ts");
+	const { PartnersStore } = await import("../src/partners.ts");
+	const domainRunsDir = ensureManager(TICKETS_ROOT, "probe-domain").runs_dir;
+	const domainStore = new Store(domainRunsDir);
+	domainStore.saveTicket(
+		fixture("T-domain", {
+			options: { dry: true, maxTasks: 8, workRoot: TICKETS_ROOT, domain: "probe-domain" },
+		}),
+	);
+	domainStore.close();
+	const seededChiefName = "探针总管";
+	const partnerStore = new PartnersStore(PARTNER_DB, PARTNER_HOMES);
+	partnerStore.create(seededChiefName, {
+		domain: "probe-domain",
+		soulSeed: "探针播种的领域执事",
+	});
+	partnerStore.close();
+
+	const ticketsJson = (await (await fetch(`${BASE}/api/v1/tickets?limit=100`)).json()) as {
+		tickets: Array<{
+			id: string;
+			conversationId: string | null;
+			conversationTitle: string | null;
+			chiefName: string | null;
+		}>;
+	};
+	const ticketRows = new Map(ticketsJson.tickets.map((ticket) => [ticket.id, ticket]));
+	check(
+		ticketRows.get("T-source")?.conversationId === sourceConversationId,
+		"首层单的 conversationId = 发起对话 uuid",
+		String(ticketRows.get("T-source")?.conversationId),
+	);
+	check(
+		ticketRows.get("T-child")?.conversationId === sourceConversationId,
+		"子单继承父单的来源对话",
+		String(ticketRows.get("T-child")?.conversationId),
+	);
+	check(
+		ticketRows.get("T-legacy")?.conversationId === sourceConversationId,
+		"历史单回查回执兜底",
+		String(ticketRows.get("T-legacy")?.conversationId),
+	);
+	const childDetail = (await (await fetch(`${BASE}/api/v1/tickets/T-child`)).json()) as {
+		conversationId?: string | null;
+		ticket?: Record<string, unknown>;
+	};
+	check(childDetail.conversationId === sourceConversationId, "详情接口也给来源对话");
+	check(
+		childDetail.ticket !== undefined && !("originConversationId" in childDetail.ticket),
+		"详情不下发内部 id 原文",
+	);
+	check(
+		ticketRows.get("T-orphan")?.conversationId === null,
+		"无映射的历史单为 null",
+		String(ticketRows.get("T-orphan")?.conversationId),
+	);
+	// 对话标题：没改过名时取首句（listChats 的 firstText 截 40 字）。
+	check(
+		ticketRows.get("T-source")?.conversationTitle === "来源对话探针",
+		"列表行 conversationTitle = 来源对话首句",
+		String(ticketRows.get("T-source")?.conversationTitle),
+	);
+	check(
+		ticketRows.get("T-orphan")?.conversationTitle === null,
+		"无来源对话的单 conversationTitle 为 null",
+		String(ticketRows.get("T-orphan")?.conversationTitle),
+	);
+	// 总管名：domain 单取该领域执事名，直派单（options.domain 空）为 null。
+	check(
+		ticketRows.get("T-domain")?.chiefName === seededChiefName,
+		"domain 单的 chiefName = 该领域执事名",
+		String(ticketRows.get("T-domain")?.chiefName),
+	);
+	check(
+		ticketRows.get("T-source")?.chiefName === null,
+		"直派单（无 domain）chiefName 为 null",
+		String(ticketRows.get("T-source")?.chiefName),
+	);
+	const domainDetail = (await (await fetch(`${BASE}/api/v1/tickets/T-domain`)).json()) as {
+		conversationTitle?: string | null;
+		chiefName?: string | null;
+	};
+	check(domainDetail.chiefName === seededChiefName, "详情接口也给总管名", String(domainDetail.chiefName));
+	const childTitleDetail = (await (await fetch(`${BASE}/api/v1/tickets/T-child`)).json()) as {
+		conversationTitle?: string | null;
+	};
+	check(
+		childTitleDetail.conversationTitle === "来源对话探针",
+		"详情接口也给对话标题",
+		String(childTitleDetail.conversationTitle),
+	);
 } finally {
 	server.kill();
 	await sleep(300);
@@ -1183,9 +1494,16 @@ try {
 	rmSync(".data/probe-http-gate-runtime.json", { force: true });
 	rmSync(".data/probe-http-chat-events.sqlite", { force: true });
 	rmSync(".data/probe-http-providers.json", { force: true });
+	rmSync(".data/probe-http-policy.json", { force: true });
 	rmSync(".data/probe-http-secret-providers.json", { force: true });
 	rmSync(".data/probe-http-provider-keys.json", { force: true });
 	rmSync(".data/probe-http-secret-runtime.json", { force: true });
+	rmSync(".data/probe-http-tickets", { recursive: true, force: true });
+	rmSync(".data/probe-http-delegations.sqlite", { force: true });
+	rmSync(".data/probe-http-partners.sqlite", { force: true });
+	rmSync(".data/probe-http-partners.sqlite-wal", { force: true });
+	rmSync(".data/probe-http-partners.sqlite-shm", { force: true });
+	rmSync(".data/probe-http-partner-homes", { recursive: true, force: true });
 }
 
 console.log(failures === 0 ? "\n✓ 端到端全部通过" : `\n✗ 有 ${failures} 项没通过`);

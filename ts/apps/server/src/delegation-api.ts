@@ -7,6 +7,7 @@ import type { Ticket } from "../../../../../chancellor/src/types.ts";
 import { listManagers } from "../../../../../chancellor/src/manager/registry.ts";
 import { chancellorWorkRoot } from "./delegation.ts";
 import { DelegationReceipts } from "./delegation-receipts.ts";
+import { partnersStore } from "./partners.ts";
 
 /**
  * 只读任务中心接口（2026-11-03 方案 §5.9）。
@@ -53,18 +54,155 @@ interface TicketSummary {
 	lastAction: string | null;
 	lastHeartbeat: string | null;
 	waitingOn: string | null;
+	/** 发起这张单的宿主对话（对外 uuid）；子单继承父单。查不到 → null。 */
+	conversationId: string | null;
+	/** 来源对话的显示标题：改过名用 chat-meta，否则首句 40 字。无来源/查不到 → null。 */
+	conversationTitle: string | null;
+	/** 负责这张单的总管名：ticket.options.domain → partners 表 name。直派/查不到 → null。 */
+	chiefName: string | null;
 }
 
-function summarizeTickets(
+/**
+ * 内部自增会话 id → 对外 uuid（2026-11-05）。
+ *
+ * ticket.json / 回执里存的是 durable 内部 id；接口对外只能给 uuid（对外 id 一律 uuid）。
+ * 这里懒加载 agent，避免只读接口在启动/单测被导入时拉起整个运行时。
+ */
+function externalChatIdsLoader(): () => Promise<Map<number, string>> {
+	let pending: Promise<Map<number, string>> | null = null;
+	return () => {
+		pending ??= import("./agent.ts")
+			.then((module) => module.externalChatIds())
+			.catch(() => new Map<number, string>());
+		return pending;
+	};
+}
+
+/**
+ * 把 ticket.json / 回执里的来源会话值收敛成对外 uuid。
+ * 非数字原样当 uuid（新单透传的就是宿主对话 id）；数字是内部 id，查映射；
+ * 查不到（会话已不存在 / 旧进程没落映射）→ null，前端按"无来源对话"处理。
+ */
+async function resolveConversationId(
+	raw: string | number | null | undefined,
+	loadExternal: () => Promise<Map<number, string>>,
+): Promise<string | null> {
+	if (raw === null || raw === undefined) return null;
+	const text = String(raw).trim();
+	if (!text) return null;
+	if (!/^\d+$/.test(text)) return text;
+	return (await loadExternal()).get(Number(text)) ?? null;
+}
+
+/**
+ * 来源对话取值顺序（2026-11-05）：新单看 ticket.json 的 originConversationId（含子单继承），
+ * 历史单回查派单回执（receipts 只覆盖第一层，子单永远没有回执）。
+ */
+async function conversationIdOf(
+	ticket: Ticket,
+	loadExternal: () => Promise<Map<number, string>>,
+): Promise<string | null> {
+	let raw: string | number | null | undefined = ticket.originConversationId;
+	if (raw === null || raw === undefined || raw === "") {
+		try {
+			raw = deadLetterStore().lookupByTicket(ticket.id)?.conversationId ?? null;
+		} catch {
+			raw = null;
+		}
+	}
+	return resolveConversationId(raw, loadExternal);
+}
+
+/**
+ * 对外 uuid → 显示标题（2026-11-05 L1）。
+ *
+ * 标题口径与手机端会话列表一致：`chat-meta` 里改过名的优先，否则用 `listChats` 的
+ * firstText（首句前 40 字）。listChats 要逐会话 open，所以每次请求只建一次缓存；
+ * 只有 chat-meta 没覆盖到的 id 才会触发它。
+ */
+function conversationTitlesLoader(
+	maxChats: number,
+): (conversationIds: Array<string | null>) => Promise<Map<string, string>> {
+	let pendingNamed: Promise<Record<string, string>> | null = null;
+	let pendingFirstText: Promise<Map<string, string>> | null = null;
+	const namedOf = (): Promise<Record<string, string>> => {
+		pendingNamed ??= import("./agent.ts")
+			.then((module) => module.chatTitles())
+			.catch(() => ({}));
+		return pendingNamed;
+	};
+	const firstTextOf = (): Promise<Map<string, string>> => {
+		pendingFirstText ??= import("./agent.ts")
+			.then(async (module) => {
+				const map = new Map<string, string>();
+				for (const entry of await module.listChats(maxChats)) {
+					const text = (entry.title ?? entry.firstText).trim();
+					if (text) map.set(entry.conversationId, text);
+				}
+				return map;
+			})
+			.catch(() => new Map<string, string>());
+		return pendingFirstText;
+	};
+	return async (conversationIds) => {
+		const wanted = [...new Set(conversationIds.filter((id): id is string => Boolean(id)))];
+		const found = new Map<string, string>();
+		if (!wanted.length) return found;
+		const named = await namedOf();
+		for (const id of wanted) {
+			const title = named[id]?.trim();
+			if (title) found.set(id, title);
+		}
+		if (found.size === wanted.length) return found;
+		const firstText = await firstTextOf();
+		for (const id of wanted) {
+			const text = found.get(id) ?? firstText.get(id);
+			if (text) found.set(id, text);
+		}
+		return found;
+	};
+}
+
+/**
+ * domain → 总管名（2026-11-05 L1）。单次请求内按 domain 记忆，避免逐行开库；
+ * 库打不开 / 领域没有对应执事都按 null（旧单、直派单照常展示）。
+ */
+function chiefNamesLoader(): (domain: string | null | undefined) => string | null {
+	const cache = new Map<string, string | null>();
+	return (domain) => {
+		const key = (domain ?? "").trim();
+		if (!key) return null;
+		const cached = cache.get(key);
+		if (cached !== undefined) return cached;
+		let name: string | null = null;
+		try {
+			const store = partnersStore();
+			const partnerId = store.partnerIdByDomain(key);
+			name = partnerId ? store.get(partnerId)?.name ?? null : null;
+		} catch {
+			name = null;
+		}
+		cache.set(key, name);
+		return name;
+	};
+}
+
+async function summarizeTickets(
 	runsDir: string,
 	domain: string | null,
 	limit: number,
-): TicketSummary[] {
+	loadExternal: () => Promise<Map<number, string>>,
+	loadTitles: (conversationIds: Array<string | null>) => Promise<Map<string, string>>,
+	chiefNameOf: (domain: string | null | undefined) => string | null,
+): Promise<TicketSummary[]> {
 	const store = new Store(runsDir);
 	try {
-		return store.listTickets(limit).map((row: TicketRow) => {
-			const ticket = readTicketJson(runsDir, row.id);
-			return {
+		const rows = store.listTickets(limit).map((row: TicketRow) => ({
+			row,
+			ticket: readTicketJson(runsDir, row.id),
+		}));
+		const summaries = await Promise.all(
+			rows.map(async ({ row, ticket }) => ({
 				id: row.id,
 				prompt: row.prompt,
 				status: row.status,
@@ -80,8 +218,18 @@ function summarizeTickets(
 				lastAction: ticket?.lastAction ?? null,
 				lastHeartbeat: ticket?.lastHeartbeat ?? null,
 				waitingOn: ticket?.waitingOn ?? null,
-			};
-		});
+				conversationId: ticket ? await conversationIdOf(ticket, loadExternal) : null,
+				chiefName: chiefNameOf(ticket?.options.domain),
+			})),
+		);
+		// 标题只用本请求出现过的 conversationId 批量查一次（listChats 逐会话 open，不能逐行调）。
+		const titles = await loadTitles(summaries.map((summary) => summary.conversationId));
+		return summaries.map((summary) => ({
+			...summary,
+			conversationTitle: summary.conversationId
+				? titles.get(summary.conversationId) ?? null
+				: null,
+		}));
 	} catch {
 		return [];
 	} finally {
@@ -121,18 +269,32 @@ export function mountDelegationApi(app: Hono, opts: { workRoot?: string } = {}):
 		return c.json({ workRoot, domains: managers });
 	});
 
-	app.get("/api/v1/tickets", (c) => {
+	app.get("/api/v1/tickets", async (c) => {
 		const workRoot = workRootOf();
 		const domainFilter = (c.req.query("domain") ?? "").trim();
 		const limit = Math.min(Math.max(Number(c.req.query("limit")) || 100, 1), 300);
 		const rows: TicketSummary[] = [];
+		const loadExternal = externalChatIdsLoader();
+		const loadTitles = conversationTitlesLoader(300);
+		const chiefNameOf = chiefNamesLoader();
 
 		// 顶层 workRoot：不分管的老单（domain = null）
-		rows.push(...summarizeTickets(workRoot, null, limit));
+		rows.push(
+			...(await summarizeTickets(workRoot, null, limit, loadExternal, loadTitles, chiefNameOf)),
+		);
 		for (const entry of listManagers(workRoot)) {
 			const runsDir = entry.meta?.runs_dir;
 			if (!runsDir || !fs.existsSync(runsDir)) continue;
-			rows.push(...summarizeTickets(runsDir, entry.domain, limit));
+			rows.push(
+				...(await summarizeTickets(
+					runsDir,
+					entry.domain,
+					limit,
+					loadExternal,
+					loadTitles,
+					chiefNameOf,
+				)),
+			);
 		}
 
 		const filtered = domainFilter
@@ -142,14 +304,24 @@ export function mountDelegationApi(app: Hono, opts: { workRoot?: string } = {}):
 		return c.json({ ok: true, tickets: filtered.slice(0, limit) });
 	});
 
-	app.get("/api/v1/tickets/:id", (c) => {
+	app.get("/api/v1/tickets/:id", async (c) => {
 		const found = findTicket(workRootOf(), c.req.param("id"));
 		if (!found) return c.json({ ok: false, error: "not_found" }, 404);
 		try {
+			// 对外的来源对话给 uuid；ticket 原文里的内部 id 不下发（对外 id 一律 uuid）。
+			const conversationId = await conversationIdOf(found.ticket, externalChatIdsLoader());
+			const titles = await conversationTitlesLoader(300)(
+				conversationId ? [conversationId] : [],
+			);
+			const ticketView = { ...found.ticket };
+			delete ticketView.originConversationId;
 			return c.json({
 				ok: true,
-				ticket: found.ticket,
+				ticket: ticketView,
 				domain: found.domain,
+				conversationId,
+				conversationTitle: conversationId ? titles.get(conversationId) ?? null : null,
+				chiefName: chiefNamesLoader()(found.ticket.options.domain),
 				// 路径只给相对项目信息，不把 workRoot 绝对路径下发给客户端。
 				project: found.ticket.options.project ?? null,
 				tasks: found.store.tasksOf(found.ticket.id),

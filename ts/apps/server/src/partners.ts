@@ -9,13 +9,22 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import type { MemoryScope } from "@lifediary/memory";
 
 /**
- * 伙伴档案：DB 只存索引与版本快照，磁盘才是内容的家（2026-11-05 批次B B2）。
+ * 固定 id 例外（2026-11-05 批次D D1）：总管的 partnerId 是固定字面量 `"chief"`，**不是 uuid**。
+ * 理由：总管是每台一个的主对话本体，是 SOUL 版本 / 家目录 / 记忆键空间 / 技能落点的内部锚点，
+ * 不是一条可枚举的执事记录，因此不需要（也不该）随机化。这个 id 只在本仓内部使用；
+ * **聊天/会话身份对外仍用会话 uuid**，总管不新增对外端点、不把 "chief" 当会话 id 用
+ * （`GET /api/v1/partners` 只是既有管理端点里自然多出一行，不是新身份入口）。
+ * 这是 AGENTS.md「对外 id 一律 uuid」的一处刻意例外，登记在此防止后来者当成疏漏去"改回 uuid"。
+ */
+/**
+ * 执事档案：DB 只存索引与版本快照，磁盘才是内容的家（2026-11-05 批次B B2）。
  *
  * 参考 cindy 的"文件=当前值、DB 版本行=冻结快照"双层契约：
  *   - `SOUL.md` 在磁盘上是**当前值**，谁都能改（设置页 / 宿主）；
- *   - `partner_versions` 是**冻结快照**：伙伴轮次启动认版本号，整轮身份不变；
+ *   - `partner_versions` 是**冻结快照**：执事轮次启动认版本号，整轮身份不变；
  *     改完 SOUL 不当场变身，下一轮生效——这是设计出来的不一致，别"修"成即时生效。
  *
  * 家目录 `.data/partner-homes/<uuid>/`：
@@ -24,7 +33,7 @@ import { DatabaseSync } from "node:sqlite";
  * 单槽 64KB 上限；全部原子写（临时文件 + rename）。
  *
  * 权限边界：模型的原始文件工具只挂 workspace/（agent.ts 的 pathGuard 指过来）；
- * memories/skills 的写只能走宿主类型化接口（remember 落伙伴 scope / partner_skill_write）。
+ * memories/skills 的写只能走宿主类型化接口（remember 落执事 scope / partner_skill_write）。
  * 本模块**只做存储**，不 import agent.ts——装配方向 partners ← agent，防循环。
  */
 
@@ -37,6 +46,24 @@ const DEFAULT_HOMES_ROOT = ".data/partner-homes";
 /** 单槽上限（SOUL.md / USER.md / 技能文件同口径，cindy 同款） */
 export const PARTNER_SLOT_LIMIT = 64 * 1024;
 
+// ── 总管（批次D D1）─────────────────────────────────────
+/** 总管固定 partnerId。内部字面量、非 uuid；例外理由见文件头注释。 */
+export const CHIEF_PARTNER_ID = "chief";
+const CHIEF_PARTNER_NAME = "总管";
+
+/** 总管身份化总开关：false/0 = 不播种、persona 常量直读，回到改动前形态（D1 回滚开关）。 */
+export function chiefPartnerEnabled(): boolean {
+	const raw = process.env.CHIEF_PARTNER?.trim().toLowerCase();
+	if (!raw) return true;
+	return raw !== "false" && raw !== "0";
+}
+
+/** 总管技能目录（纯路径，不打开 DB）；与 store.skillsDirOf("chief") 同址。 */
+export function chiefSkillsDir(): string {
+	const homesRoot = process.env.PARTNER_HOMES_ROOT?.trim() || DEFAULT_HOMES_ROOT;
+	return join(homesRoot, CHIEF_PARTNER_ID, "skills");
+}
+
 export type PartnerStatus = "active" | "paused" | "archived";
 
 export interface PartnerRow {
@@ -47,6 +74,8 @@ export interface PartnerRow {
 	currentVersion: number | null;
 	createdAt: string;
 	updatedAt: string;
+	/** 执事的领域名（批次D D2）；普通执事为 null。小写 ASCII，同 chancellor DOMAIN_PATTERN。 */
+	domain: string | null;
 }
 
 export interface PartnerVersionRow {
@@ -61,7 +90,8 @@ export interface PartnerVersionRow {
 
 export interface PartnerSessionLinkRow {
 	partnerId: string;
-	role: "canonical" | "routine" | "topic";
+	/** `delegation` = 执事的领域路由（批次D D2）；这类链接没有宿主会话，sessionId 为占位 0。 */
+	role: "canonical" | "routine" | "topic" | "delegation";
 	routeKey: string | null;
 	/** durable 内部自增会话 id（不外泄） */
 	sessionId: number;
@@ -119,7 +149,8 @@ export class PartnersStore {
 				status          TEXT NOT NULL DEFAULT 'active',
 				current_version INTEGER,
 				created_at      TEXT NOT NULL,
-				updated_at      TEXT NOT NULL
+				updated_at      TEXT NOT NULL,
+				domain          TEXT
 			);
 			CREATE TABLE IF NOT EXISTS partner_versions (
 				partner_id   TEXT NOT NULL,
@@ -151,6 +182,17 @@ export class PartnersStore {
 				updated_at   TEXT NOT NULL
 			);
 		`);
+		this.migrate();
+	}
+
+	/** 旧库补列（批次D D2）：沿用 delegation-receipts.ts 的 PRAGMA + ALTER TABLE 惯例。 */
+	private migrate(): void {
+		const columns = this.db.prepare("PRAGMA table_info(partners)").all() as Array<{
+			name?: unknown;
+		}>;
+		if (!columns.some((column) => column.name === "domain")) {
+			this.db.exec("ALTER TABLE partners ADD COLUMN domain TEXT");
+		}
 	}
 
 	close(): void {
@@ -158,20 +200,50 @@ export class PartnersStore {
 	}
 
 	// ── 档案 CRUD ─────────────────────────────────────────
-	create(name: string): PartnerRow {
+	create(name: string, opts?: { domain?: string; soulSeed?: string }): PartnerRow {
 		const id = randomUUID();
 		const now = new Date().toISOString();
+		const domain = opts?.domain ?? null;
 		this.db
 			.prepare(
-				"INSERT INTO partners (id, name, status, current_version, created_at, updated_at) VALUES (?, ?, 'active', NULL, ?, ?)",
+				"INSERT INTO partners (id, name, status, current_version, created_at, updated_at, domain) VALUES (?, ?, 'active', NULL, ?, ?, ?)",
 			)
-			.run(id, name, now, now);
-		// 建档案即建家 + 首个身份版本：伙伴生下来就有身份
-		this.ensureHome(id, name);
+			.run(id, name, now, now, domain);
+		// 建档案即建家 + 首个身份版本：执事生下来就有身份。
+		// 执事用「一句话版本」SOUL 播种（批次D D2），普通执事用默认模板。
+		this.ensureHome(id, name, opts?.soulSeed);
 		const soul = this.readSoulFromHome(id) ?? defaultSoul(name);
 		this.pushVersion(id, soul, null);
-		this.ensureHome(id, name);
+		this.ensureHome(id, name, opts?.soulSeed);
+		// 执事：在链接表登记领域路由（role 枚举扩一型 'delegation'）。
+		// 既有 UNIQUE (partner_id, role, route_key) 已覆盖这个组合，无需改约束。
+		if (domain) this.linkDelegation(id, domain);
 		return this.get(id) as PartnerRow;
+	}
+
+	/**
+	 * 总管专用播种（批次D D1）：固定 id `"chief"`，首次启动建档案 + 家 + v1 身份快照。
+	 * **幂等**：档案 / SOUL.md / 版本任一已存在都不动——二次启动绝不覆盖用户改过的 SOUL
+	 * （含通过 PATCH/bumpSoul 推进过的新版本）。
+	 * 播种正文 = 传入的 PERSONA 原文（运行时值），保证首启 persona 与改动前逐字一致。
+	 */
+	ensureChief(seedSoul: string): void {
+		if (!this.get(CHIEF_PARTNER_ID)) {
+			const now = new Date().toISOString();
+			this.db
+				.prepare(
+					"INSERT INTO partners (id, name, status, current_version, created_at, updated_at) VALUES (?, ?, 'active', NULL, ?, ?)",
+				)
+				.run(CHIEF_PARTNER_ID, CHIEF_PARTNER_NAME, now, now);
+		}
+		this.ensureHome(CHIEF_PARTNER_ID, CHIEF_PARTNER_NAME, seedSoul);
+		if (!this.currentVersion(CHIEF_PARTNER_ID)) {
+			this.pushVersion(
+				CHIEF_PARTNER_ID,
+				this.readSoulFromHome(CHIEF_PARTNER_ID) ?? seedSoul,
+				null,
+			);
+		}
 	}
 
 	get(id: string): PartnerRow | null {
@@ -216,7 +288,7 @@ export class PartnersStore {
 		this.db.prepare("DELETE FROM partners WHERE id = ?").run(id);
 		this.db.prepare("DELETE FROM partner_versions WHERE partner_id = ?").run(id);
 		this.db.prepare("DELETE FROM partner_session_links WHERE partner_id = ?").run(id);
-		// 例行任务定义跟着走：不清理会留孤儿（任务醒来 runPartnerTurn 报"伙伴不存在"）
+		// 例行任务定义跟着走：不清理会留孤儿（任务醒来 runPartnerTurn 报"执事不存在"）
 		this.db.prepare("DELETE FROM routines WHERE partner_id = ?").run(id);
 		try {
 			rmSync(this.homeOf(id), { recursive: true, force: true });
@@ -230,7 +302,7 @@ export class PartnersStore {
 	/** 新增一个身份版本（冻结快照），current_version 指过去。 */
 	pushVersion(partnerId: string, soulSource: string, capabilities: string | null): number {
 		const partner = this.get(partnerId);
-		if (!partner) throw new Error(`伙伴不存在：${partnerId}`);
+		if (!partner) throw new Error(`执事不存在：${partnerId}`);
 		const version = (partner.currentVersion ?? 0) + 1;
 		const now = new Date().toISOString();
 		this.db
@@ -284,7 +356,7 @@ export class PartnersStore {
 	 * 播种家目录（幂等）：缺什么补什么，已有内容绝不覆盖。
 	 * SOUL.md **最后写**——它的存在代表"家已建好"（cindy 同款约定）。
 	 */
-	ensureHome(partnerId: string, name: string): void {
+	ensureHome(partnerId: string, name: string, soulSeed?: string): void {
 		const home = this.homeOf(partnerId);
 		for (const dir of [
 			home,
@@ -296,11 +368,11 @@ export class PartnersStore {
 		}
 		const userMd = join(home, "memories", "USER.md");
 		if (!existsSync(userMd)) {
-			this.atomicWrite(userMd, `# 主人画像\n\n（伙伴相处中自行补充；只记事实，不记猜测。）\n`);
+			this.atomicWrite(userMd, `# 主人画像\n\n（执事相处中自行补充；只记事实，不记猜测。）\n`);
 		}
 		const soulMd = join(home, "SOUL.md");
 		if (!existsSync(soulMd)) {
-			this.atomicWrite(soulMd, defaultSoul(name));
+			this.atomicWrite(soulMd, soulSeed ?? defaultSoul(name));
 		}
 	}
 
@@ -344,7 +416,7 @@ export class PartnersStore {
 
 	/** 改 SOUL.md（磁盘当前值）+ 落新版本快照，返回新版本号。能力（候选链）随版本延续，不被冲掉。 */
 	bumpSoul(partnerId: string, soulSource: string): number {
-		if (!this.get(partnerId)) throw new Error(`伙伴不存在：${partnerId}`);
+		if (!this.get(partnerId)) throw new Error(`执事不存在：${partnerId}`);
 		this.atomicWrite(join(this.homeOf(partnerId), "SOUL.md"), soulSource);
 		return this.pushVersion(partnerId, soulSource, this.currentVersion(partnerId)?.capabilities ?? null);
 	}
@@ -367,7 +439,7 @@ export class PartnersStore {
 
 	// ── 会话链接 ─────────────────────────────────────────
 	/**
-	 * 找伙伴的专线会话链接；没有就返回 null（调用方建好会话后 linkSession 补记）。
+	 * 找执事的专线会话链接；没有就返回 null（调用方建好会话后 linkSession 补记）。
 	 * routeKey 例：canonical 用固定 "canonical"，例行专线用 `routine:<id>`。
 	 */
 	findSessionLink(
@@ -404,6 +476,27 @@ export class PartnersStore {
 			);
 	}
 
+	/**
+	 * 执事的领域路由链接（批次D D2）：`role='delegation', routeKey=domain`。
+	 * 宰相的会话在 chancellor 自己的库里，宿主没有对应 durable 会话，
+	 * 所以 `session_id` 用占位 0（不是真实会话 id，见 partnerIdOfSession 的过滤）。
+	 */
+	linkDelegation(partnerId: string, domain: string): void {
+		this.db
+			.prepare(
+				"INSERT OR IGNORE INTO partner_session_links (partner_id, role, route_key, session_id, applied_version, created_at) VALUES (?, 'delegation', ?, 0, NULL, ?)",
+			)
+			.run(partnerId, domain, new Date().toISOString());
+	}
+
+	/** 按领域名反查执事 id；查不到返回 null（兼容旧领域，派单照旧不带身份）。 */
+	partnerIdByDomain(domain: string): string | null {
+		const row = this.db
+			.prepare("SELECT id FROM partners WHERE domain = ? LIMIT 1")
+			.get(domain) as { id?: unknown } | undefined;
+		return row?.id ? String(row.id) : null;
+	}
+
 	/** 记账位：这条会话最近一次应用的身份版本（下一轮生效契约靠它判断要不要重配）。 */
 	appliedVersionOf(partnerId: string, sessionId: number): number | null {
 		const row = this.db
@@ -424,11 +517,13 @@ export class PartnersStore {
 			.run(version, partnerId, sessionId);
 	}
 
-	/** 内部会话 id → 拥有它的伙伴（反向查链接表）。没链接 = null（普通主人会话）。 */
+	/** 内部会话 id → 拥有它的执事（反向查链接表）。没链接 = null（普通主人会话）。 */
 	partnerIdOfSession(sessionId: number): string | null {
+		// `session_id > 0` 滤掉执事的 delegation 占位行（session_id=0）：
+		// 它登记的是领域路由，不是任何真实会话，不能让 0 号会话被误认成执事专线。
 		const row = this.db
 			.prepare(
-				"SELECT partner_id FROM partner_session_links WHERE session_id = ? ORDER BY created_at LIMIT 1",
+				"SELECT partner_id FROM partner_session_links WHERE session_id = ? AND session_id > 0 ORDER BY created_at LIMIT 1",
 			)
 			.get(sessionId) as { partner_id?: unknown } | undefined;
 		return row?.partner_id ? String(row.partner_id) : null;
@@ -443,7 +538,7 @@ export class PartnersStore {
 		sessionMode: "persistent" | "fresh";
 		enabled: boolean;
 	}): RoutineDef {
-		if (!this.get(input.partnerId)) throw new Error(`伙伴不存在：${input.partnerId}`);
+		if (!this.get(input.partnerId)) throw new Error(`执事不存在：${input.partnerId}`);
 		const id = randomUUID();
 		const now = new Date().toISOString();
 		this.db
@@ -526,6 +621,61 @@ export function partnersStore(): PartnersStore {
 	return store;
 }
 
+// ── 总管（D1）解析与播种 ─────────────────────────────────
+
+/**
+ * 进程启动时调一次：CHIEF_PARTNER=false 或执事能力整体关闭时不播种
+ * （两处旁路都 = 回到改动前形态，不在执事体系关掉时偷偷建库）。
+ */
+export function ensureChiefPartner(seedSoul: string): void {
+	if (!chiefPartnerEnabled() || !COMPANIONS_ENABLED) return;
+	partnersStore().ensureChief(seedSoul);
+}
+
+/** 总管 SOUL 当前身份正文：当前版本快照优先（版本冻结口径），磁盘当前值兜底；不可读返回 null。 */
+export function chiefSoul(store: PartnersStore): string | null {
+	if (!store.get(CHIEF_PARTNER_ID)) return null;
+	const snapshot = store.currentVersion(CHIEF_PARTNER_ID)?.soulSource;
+	const soul = snapshot?.trim() ? snapshot : store.readSoulFromHome(CHIEF_PARTNER_ID);
+	return soul?.trim() ? soul : null;
+}
+
+/**
+ * persona 正文：总管存在且 SOUL 可读时用 SOUL 当前版本快照，否则回落 fallback(=PERSONA)。
+ * 兜底存在的原因：执事库初始化失败 / 查询抛错时**主对话不能哑**，必须还有人格。
+ */
+export function resolvePersona(getStore: () => PartnersStore, fallback: string): string {
+	if (!chiefPartnerEnabled()) return fallback;
+	try {
+		return chiefSoul(getStore()) ?? fallback;
+	} catch {
+		return fallback;
+	}
+}
+
+/**
+ * 会话 → 有效执事 id（含总管）。
+ * 行为零变化要点：**不复用 / 不修改 partnerIdOfSession**——autonomy / routines 靠
+ * "partnerIdOfSession === null 就是主人会话" 做防自环，它们继续用原始函数。
+ * CHIEF 开时，没挂链接表的主人会话解析为固定 id `"chief"`；执事会话返回真实 uuid。
+ */
+export function effectivePartnerIdOfSession(store: PartnersStore, sessionId: number): string | null {
+	const linked = store.partnerIdOfSession(sessionId);
+	if (linked !== null) return linked;
+	return chiefPartnerEnabled() ? CHIEF_PARTNER_ID : null;
+}
+
+/**
+ * 执事记忆 scope：总管（chief）刻意返回 null —— 他继续读写 `global + session`，
+ * 不吃 `partner:<id>` 键空间（系统架构将记 D15）。其余执事照旧返回 partner scope。
+ * 这是与普通执事的**刻意差异**，别"修"成一致。
+ */
+export function resolvePartnerScope(store: PartnersStore, sessionId: number): MemoryScope | null {
+	const id = effectivePartnerIdOfSession(store, sessionId);
+	if (id === CHIEF_PARTNER_ID) return null;
+	return id ? { type: "partner", id } : null;
+}
+
 function toPartner(row: Record<string, unknown>): PartnerRow {
 	return {
 		id: String(row.id),
@@ -537,6 +687,7 @@ function toPartner(row: Record<string, unknown>): PartnerRow {
 				: Number(row.current_version),
 		createdAt: String(row.created_at ?? ""),
 		updatedAt: String(row.updated_at ?? ""),
+		domain: row.domain === null || row.domain === undefined ? null : String(row.domain),
 	};
 }
 
@@ -580,11 +731,37 @@ function defaultSoul(name: string): string {
 	return [
 		`# ${name}`,
 		"",
-		"<!-- SOUL.md：这个伙伴是谁。改这里的正文，下一轮生效（版本快照在 partners.sqlite）。",
+		"<!-- SOUL.md：这个执事是谁。改这里的正文，下一轮生效（版本快照在 partners.sqlite）。",
 		"     写什么：性格、说话方式、在意的边界、长期在做的事。单文件 64KB 上限。 -->",
 		"",
-		`你是${name}，一个和一个具体的人长期相处的伙伴。`,
+		`你是${name}，一个和一个具体的人长期相处的执事。`,
 		"说话直接、克制、就事论事；不堆情绪词，不说教。",
 		"涉及真实文件、数据、日程的事先用工具去看，不许凭印象编造。",
 	].join("\n");
+}
+
+/**
+ * 执事的 SOUL 播种（批次D D2）：一句话版本，不是普通执事的多行模板。
+ * 宰相的「性格」由 chancellor 分管提示词给，这里只交代它是谁、管哪块。
+ */
+export function delegationSoulSeed(name: string, domain: string): string {
+	return `你是${name}，${domain} 领域的负责人；总管把这一领域的事交给你，你带工人把活办完，只回一行结论。\n`;
+}
+
+/**
+ * 按 domain 反查执事的派单身份（批次D D2）。
+ * soul **取当前版本快照正文，不读磁盘当前值**——版本化语义：单次派单内不变，
+ * 改了 SOUL 下一轮才生效。没命中 / 没有快照都返回 null（兼容旧领域）。
+ */
+export function partnerIdentityForDomain(
+	store: PartnersStore,
+	domain: string,
+): { name: string; soul: string } | null {
+	const id = store.partnerIdByDomain(domain);
+	if (!id) return null;
+	const partner = store.get(id);
+	if (!partner) return null;
+	const soul = store.currentVersion(id)?.soulSource;
+	if (!soul?.trim()) return null;
+	return { name: partner.name, soul };
 }
