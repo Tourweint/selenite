@@ -4516,6 +4516,8 @@ async function refreshCsPolicy() {
     if (response.ok) {
       csPolicy = await response.json();
       if (csPage === "home" && drawerOpen()) renderCsHome();
+      // 写失败回滚：重渲染权限档页，用服务端真值覆盖乐观切档
+      else if (csPage === "policy" && drawerOpen()) renderCsPolicyPage();
     }
   } catch {
     /* 拉不到就显示 —，不拦抽屉 */
@@ -4773,10 +4775,16 @@ function renderCsPolicyPage() {
         }
         syncSegmented(box);
         if (csPolicy) csPolicy.access = button.dataset.policy;
-        await request("/api/v1/agent/policy", {
-          method: "POST",
-          body: JSON.stringify({ access: button.dataset.policy }),
-        }).catch(() => undefined);
+        try {
+          await request("/api/v1/agent/policy", {
+            method: "POST",
+            body: JSON.stringify({ access: button.dataset.policy }),
+          });
+        } catch {
+          // 写失败：回读服务端真值，撤销乐观切档，避免用户误以为已保存
+          toast("权限档保存失败，请重试");
+          void refreshCsPolicy();
+        }
       });
     }
   }
@@ -4786,10 +4794,15 @@ function renderCsPolicyPage() {
     const next = confirm.getAttribute("aria-checked") !== "true";
     confirm.setAttribute("aria-checked", String(next));
     if (csPolicy) csPolicy.confirmWrites = next;
-    await request("/api/v1/agent/policy", {
-      method: "POST",
-      body: JSON.stringify({ confirmWrites: next }),
-    }).catch(() => undefined);
+    try {
+      await request("/api/v1/agent/policy", {
+        method: "POST",
+        body: JSON.stringify({ confirmWrites: next }),
+      });
+    } catch {
+      toast("写确认开关保存失败，请重试");
+      void refreshCsPolicy();
+    }
   });
 
   // 审批计数：GET /agent/approvals 不带 conversationId = 全局 pending
@@ -4856,7 +4869,6 @@ function renderCsNotifyPage() {
     if (!want) {
       localStorage.setItem(KEY_NOTIFY, "0");
       notifySwitch.setAttribute("aria-checked", "false");
-      renderCsHome();
       return;
     }
     if (!("Notification" in window)) {
@@ -4872,7 +4884,6 @@ function renderCsNotifyPage() {
     }
     localStorage.setItem(KEY_NOTIFY, "1");
     notifySwitch.setAttribute("aria-checked", "true");
-    renderCsHome();
   });
 
   for (const row of body.querySelectorAll("[data-timing]")) {
@@ -4882,7 +4893,6 @@ function renderCsNotifyPage() {
         other.setAttribute("aria-checked", String(other === row));
         other.querySelector("[data-check]").hidden = other !== row;
       }
-      renderCsHome();
     });
   }
 }
