@@ -2421,6 +2421,36 @@ function renderRoster(partners, domainRows) {
       tag.className = "pill-tag roster-domain";
       tag.textContent = domain;
       row.append(tag);
+
+      // 派发权拨杆（2026-11-06 执事派发权开关）：亮 = 有权接单；关 = 派单等同无分管领域。
+      const dispatch = document.createElement("button");
+      dispatch.type = "button";
+      dispatch.className = `pill-tag roster-dispatch${partner.dispatchAuthority ? " on" : " off"}`;
+      dispatch.textContent = partner.dispatchAuthority ? "派·开" : "派·关";
+      dispatch.title = partner.dispatchAuthority
+        ? "派发权：开（点击关闭）"
+        : "派发权已关：派单不经过该执事（点击打开）";
+      dispatch.setAttribute("aria-label", `${name}的派发权开关`);
+      dispatch.addEventListener("click", async (event) => {
+        event.stopPropagation();
+        const next = !partner.dispatchAuthority;
+        dispatch.disabled = true;
+        try {
+          const response = await request(`/api/v1/partners/${encodeURIComponent(id)}`, {
+            method: "PATCH",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ dispatchAuthority: next }),
+          });
+          if (response.ok) {
+            partner.dispatchAuthority = next;
+            renderRoster(state.partners, domainRows);
+            return;
+          }
+        } catch { /* 落到下面的提示 */ }
+        dispatch.disabled = false;
+        dispatch.title = "切换失败，稍后再试";
+      });
+      row.append(dispatch);
     }
 
     if (active > 0) {

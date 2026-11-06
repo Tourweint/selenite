@@ -701,6 +701,16 @@ html[data-sidebar="closed"] .side-rail {
 /* 执事状态点同样固定在行尾，与总管一致 */
 .roster-row .status-dot { margin-left: 2px; }
 .roster-domain { font-size: 10px; }
+/* 派发权拨杆（2026-11-06）：小 pill 按钮，亮/灰两态；用 --ok/--muted 令牌，四套主题自动跟随 */
+.roster-dispatch {
+  font-size: 10px;
+  margin-left: 0; flex: none;
+  cursor: pointer;
+  background: none;
+}
+.roster-dispatch.on { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 38%, transparent); }
+.roster-dispatch.off { color: var(--muted); opacity: 0.7; }
+.roster-dispatch:disabled { cursor: wait; opacity: 0.5; }
 .roster-count { margin-left: auto; flex: none; border: 0; cursor: pointer; }
 .roster-idle {
   margin-left: auto; flex: none;
