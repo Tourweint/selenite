@@ -4467,6 +4467,10 @@ const PROJECT_ICONS = {
   main:
     '<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>',
   sub: '<path d="M4 4v6a4 4 0 0 0 4 4h12"/><path d="m15 9 5 5-5 5"/>',
+  explorer:
+    '<path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/><path d="m14 13 2 2-2 2"/><path d="M8 15h4"/>',
+  browse:
+    '<path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/>',
 };
 
 function projectIcon(kind) {
@@ -4487,8 +4491,175 @@ function projectIcon(kind) {
   return slot;
 }
 
+/** 行尾小动作钮（2026-11-06 文件浏览入口）：在资源管理器中打开 / 浏览文件。 */
+function projActionButton(icon, label, tip, onClick) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "proj-act";
+  button.title = tip;
+  button.setAttribute("aria-label", `${label}：${tip}`);
+  const slot = document.createElement("span");
+  slot.className = "proj-act-ico";
+  slot.setAttribute("aria-hidden", "true");
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "2");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  // 只写入本文件里的常量图元，不拼接任何用户数据
+  svg.innerHTML = PROJECT_ICONS[icon] || "";
+  slot.append(svg);
+  button.append(slot);
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    onClick();
+  });
+  return button;
+}
+
+/** 让服务端对本机目录起系统资源管理器（projectId 缺省 = 工作区根）。 */
+async function openExplorerInOs(projectId) {
+  try {
+    const response = await request("/api/v1/workspaces/open-explorer", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(projectId ? { projectId } : {}),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      toast(`打不开资源管理器：${data.message || data.error || `HTTP ${response.status}`}`);
+      return;
+    }
+    closeProjectMenu();
+  } catch (error) {
+    if (error.message !== "forbidden") toast("打不开资源管理器，重启服务后再试");
+  }
+}
+
+/** 侧栏文件浏览器（只读）：列目录 + 看文本，路径锁在工作区内。 */
+function openFileBrowser(projectName, startRel) {
+  const browser = { name: projectName, rel: startRel || "" };
+  openModal(`文件 · ${projectName}`, (body) => {
+    body.classList.add("file-browser");
+    const bar = document.createElement("div");
+    bar.className = "fb-bar";
+    const up = document.createElement("button");
+    up.type = "button";
+    up.className = "ghost fb-up";
+    up.textContent = "上一级";
+    const crumb = document.createElement("span");
+    crumb.className = "fb-crumb";
+    bar.append(up, crumb);
+    const list = document.createElement("div");
+    list.className = "fb-list";
+    const viewer = document.createElement("pre");
+    viewer.className = "fb-view";
+    viewer.hidden = true;
+    body.append(bar, list, viewer);
+
+    const parentOf = (rel) => {
+      const idx = rel.lastIndexOf("/");
+      return idx === -1 ? "" : rel.slice(0, idx);
+    };
+
+    up.addEventListener("click", () => {
+      if (viewer.hidden) {
+        if (browser.rel) load(parentOf(browser.rel));
+      } else {
+        viewer.hidden = true;
+        list.hidden = false;
+      }
+    });
+
+    const entryPath = (name) => (browser.rel ? `${browser.rel}/${name}` : name);
+
+    async function load(rel) {
+      browser.rel = rel;
+      viewer.hidden = true;
+      list.hidden = false;
+      crumb.textContent = rel ? `${projectName}/${rel}` : `${projectName}/`;
+      up.disabled = !rel;
+      list.replaceChildren();
+      const loading = document.createElement("div");
+      loading.className = "fb-empty";
+      loading.textContent = "读取中…";
+      list.append(loading);
+      try {
+        const response = await request(`/api/v1/files?path=${encodeURIComponent(rel)}`, {
+          cache: "no-store",
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.ok) {
+          loading.textContent = data.message || `读不到（HTTP ${response.status}）`;
+          return;
+        }
+        list.replaceChildren();
+        if (!data.entries.length) {
+          const empty = document.createElement("div");
+          empty.className = "fb-empty";
+          empty.textContent = "空目录";
+          list.append(empty);
+          return;
+        }
+        for (const entry of data.entries) {
+          const row = document.createElement("button");
+          row.type = "button";
+          row.className = `fb-row is-${entry.type}`;
+          const name = document.createElement("span");
+          name.className = "fb-name";
+          name.textContent = entry.type === "dir" ? `${entry.name}/` : entry.name;
+          const meta = document.createElement("span");
+          meta.className = "fb-meta";
+          meta.textContent = entry.type === "dir" ? "目录" : `${entry.size} 字节`;
+          row.append(name, meta);
+          row.addEventListener("click", () => {
+            if (entry.type === "dir") load(entryPath(entry.name));
+            else view(entryPath(entry.name), entry.size);
+          });
+          list.append(row);
+        }
+      } catch (error) {
+        loading.textContent =
+          error.message === "forbidden" ? "没有权限" : "读不到文件列表，重启服务后再试";
+      }
+    }
+
+    async function view(path, size) {
+      list.hidden = true;
+      viewer.hidden = false;
+      viewer.textContent = "读取中…";
+      crumb.textContent = `${projectName}/${path}`;
+      try {
+        const response = await request(`/api/v1/files/content?path=${encodeURIComponent(path)}`, {
+          cache: "no-store",
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.ok) {
+          viewer.textContent = data.message || `读不到（HTTP ${response.status}）`;
+          return;
+        }
+        if (data.content === null) {
+          viewer.textContent =
+            data.truncated && data.size > 524288
+              ? `文件过大（${data.size} 字节），不预览正文`
+              : "二进制文件，不预览正文";
+          return;
+        }
+        viewer.textContent = data.content;
+      } catch (error) {
+        viewer.textContent = error.message === "forbidden" ? "没有权限" : "读不到文件内容";
+      }
+    }
+
+    load(browser.rel);
+  });
+}
+
 /** 弹层内容：主项目（带标注）+ 子项目总览 + 底部「添加子项目 · 设置主项目 · 管理项目」。
- *  只读总览，行不可点——不在侧栏切项目，派活时由助手按登记名指定。 */
+ *  行本身仍只读总览；行尾两颗小钮是文件入口（2026-11-06 文件浏览入口）：
+ *  资源管理器按项目直达自己的根（用户诉求：多个工作区不知道打开哪个），文件浏览器只读看文本。 */
 function renderProjectMenu(items) {
   const menu = el.projectMenu;
   if (!menu) return;
@@ -4507,6 +4678,11 @@ function renderProjectMenu(items) {
     mainTag.className = "proj-tag";
     mainTag.textContent = "主项目";
     main.append(projectIcon("main"), mainName, mainTag);
+    // 文件入口：主项目行尾「在资源管理器中打开」+「浏览文件」（相对路径 = 工作区根）
+    main.append(
+      projActionButton("browse", "浏览文件", "在界面里看这个目录的文件", () => openFileBrowser(baseNameOf(workspace.rootPath) || "主项目", "")),
+      projActionButton("explorer", "在资源管理器中打开", "在系统的文件资源管理器里打开这个目录", () => openExplorerInOs("")),
+    );
     menu.append(main);
   } else {
     const empty = document.createElement("div");
@@ -4537,6 +4713,17 @@ function renderProjectMenu(items) {
       tag.className = `proj-tag ${project.missing ? "is-warn" : "is-idle"}`;
       tag.textContent = project.missing ? "目录不在了" : "不在工作区";
       row.append(tag);
+    } else {
+      // 目录健康才有文件入口：起点 = 项目自己在工作区内的相对路径，按项目直达
+      const startRel = relativeWithinWorkspace(workspace.rootPath, project.rootPath);
+      row.append(
+        projActionButton("browse", "浏览文件", `在界面里看「${project.name}」的文件`, () =>
+          openFileBrowser(project.name, startRel || ""),
+        ),
+        projActionButton("explorer", "在资源管理器中打开", `在系统的文件资源管理器里打开「${project.name}」`, () =>
+          openExplorerInOs(project.id),
+        ),
+      );
     }
     menu.append(row);
   }
