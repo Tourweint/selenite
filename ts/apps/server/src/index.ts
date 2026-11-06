@@ -49,6 +49,7 @@ import { PairingStore, buildPairUrl, resolvePairBase } from "./pairing.ts";
 import { pairPage } from "./pair-page.ts";
 import { mountPhoneWorker } from "./phone-worker.ts";
 import { mountProjects } from "./projects.ts";
+import { mountFiles } from "./files.ts";
 import { mountDelegationApi } from "./delegation-api.ts";
 import { mountCompanions } from "./companion-api.ts";
 import { mountGroups } from "./group-api.ts";
@@ -177,6 +178,10 @@ mountWorkerShell(app);
 // 项目与工作区（2026-11-03 方案 §5.5）：派单前置。新建项目根目录只提交待确认请求，
 // 用户在设置页确认后才建目录、登记。界面上线前用 HTTP 也能完成同一流程。
 mountProjects(app);
+
+// 文件浏览入口（2026-11-06）：open-explorer + files 只读浏览。回滚开关
+// EXPLORER_OPEN=false / FILE_BROWSE=false（方案：docs/设计方案/2026-11-06-文件浏览入口（桌面资源管理器与手机端）.md）。
+mountFiles(app);
 
 // 任务中心只读接口（2026-11-03 方案 §5.9）：领域列表 + 单 ticket 明细。
 mountDelegationApi(app);

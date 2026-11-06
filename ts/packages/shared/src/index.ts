@@ -882,3 +882,46 @@ export const RoutineRunRecordSchema = z.object({
 	error: z.string().optional(),
 });
 export type RoutineRunRecord = z.infer<typeof RoutineRunRecordSchema>;
+
+/* ── 文件浏览入口（2026-11-06，方案见 docs/设计方案/2026-11-06-文件浏览入口（桌面资源管理器与手机端）.md）──
+ * 三个只读端点：打开资源管理器（桌面）、列目录、看文本（手机兜底）。
+ * 安全口径：只收工作区内相对路径；realpath 复核与 path-guard.ts 同口径；根层屏蔽 .data；正文 ≤512KB UTF-8。 */
+
+/** POST /api/v1/workspaces/open-explorer 请求体：缺省 projectId = 打开工作区根 */
+export const OpenExplorerRequestSchema = z.object({
+	projectId: z.string().min(1).optional(),
+});
+export type OpenExplorerRequest = z.infer<typeof OpenExplorerRequestSchema>;
+
+/** GET /api/v1/files 的单个目录项 */
+export const FileEntrySchema = z.object({
+	name: z.string(),
+	type: z.enum(["file", "dir"]),
+	/** 字节数；目录恒为 0 */
+	size: z.number(),
+	/** ISO 时间 */
+	updatedAt: z.string(),
+});
+export type FileEntry = z.infer<typeof FileEntrySchema>;
+
+/** GET /api/v1/files?path=<工作区内相对路径> 响应；path 缺省 = 工作区根 */
+export const FileListResponseSchema = z.object({
+	ok: z.literal(true),
+	/** 归一后的相对路径（"" = 工作区根） */
+	path: z.string(),
+	entries: z.array(FileEntrySchema),
+});
+export type FileListResponse = z.infer<typeof FileListResponseSchema>;
+
+/**
+ * GET /api/v1/files/content?path=… 响应。
+ * 正文只回 UTF-8 可解码且 ≤512KB 的文本；二进制 / 超大文件 content=null、truncated=true。
+ */
+export const FileContentResponseSchema = z.object({
+	ok: z.literal(true),
+	path: z.string(),
+	size: z.number(),
+	truncated: z.boolean(),
+	content: z.string().nullable(),
+});
+export type FileContentResponse = z.infer<typeof FileContentResponseSchema>;
