@@ -110,6 +110,8 @@ const el = {
   modelPillLabel: document.getElementById("model-pill-label"),
   modelThink: document.getElementById("model-think"),
   modelMenu: document.getElementById("model-menu"),
+  chatSettingsBtn: document.getElementById("chat-settings-btn"),
+  chatSettingsMenu: document.getElementById("chat-settings-menu"),
   toast: document.getElementById("toast"),
   railTip: document.getElementById("rail-tip"),
   modal: document.getElementById("modal"),
@@ -4228,8 +4230,9 @@ function resolveMenuProvider(catalog, providers, preferredId) {
   return providers.find((provider) => provider.id === wanted) || providers[0];
 }
 
-function renderModelMenu(catalog, preferredProviderId) {
-  el.modelMenu.replaceChildren();
+function renderModelMenu(catalog, preferredProviderId, menu = el.modelMenu) {
+  if (!menu) return;
+  menu.replaceChildren();
   const current = catalog.current || null;
   const level = currentThinking();
   const providers = menuProviders(catalog);
@@ -4237,7 +4240,7 @@ function renderModelMenu(catalog, preferredProviderId) {
     const row = document.createElement("div");
     row.className = "model-menu-empty";
     row.textContent = "还没有可选模型：到设置 → 服务里添加供应商";
-    el.modelMenu.append(row);
+    menu.append(row);
     return;
   }
   const active = resolveMenuProvider(catalog, providers, preferredProviderId);
@@ -4266,13 +4269,15 @@ function renderModelMenu(catalog, preferredProviderId) {
     opt.addEventListener("click", () => {
       if (provider.id === active.id) return;
       localStorage.setItem(KEY_MODEL_PROVIDER, provider.id);
-      renderModelMenu(catalog, provider.id);
+      renderModelMenu(catalog, provider.id, menu);
       // 重渲染换掉了刚点的按钮：焦点跟到新段上，键盘 Tab 还能继续走
-      el.modelMenu.querySelector('.provider-opt[aria-pressed="true"]')?.focus();
+      menu.querySelector('.provider-opt[aria-pressed="true"]')?.focus();
+      // 宿主（对话快捷设置面板）靠这个事件同步「加到：某家」标签；模型菜单无人监听，无害
+      menu.dispatchEvent(new CustomEvent("providerchange", { bubbles: true }));
     });
     rail.append(opt);
   }
-  el.modelMenu.append(rail);
+  menu.append(rail);
 
   // 只列这一家的模型：分组头省了，段上已经写明是哪家
   for (const raw of active.models) {
@@ -4309,7 +4314,7 @@ function renderModelMenu(catalog, preferredProviderId) {
     // 选中态已有强调色 + 加粗 + 档位分段，再挂勾是重复信号
     // 选中后菜单不关：重渲染出档位分段，接着选强度（D2 的「先选模型再选强度」）
     item.addEventListener("click", () => {
-      void chooseModel(active, model.id, model.thinkingLevels, { keepOpen: true });
+      void chooseModel(active, model.id, model.thinkingLevels, { keepOpen: true, menu });
     });
     row.append(item);
 
@@ -4334,7 +4339,7 @@ function renderModelMenu(catalog, preferredProviderId) {
       }
       row.append(seg);
     }
-    el.modelMenu.append(row);
+    menu.append(row);
   }
 }
 
@@ -4359,7 +4364,7 @@ async function toggleModelMenu() {
   }
 }
 
-async function chooseModel(provider, modelId, levels, { keepOpen = false } = {}) {
+async function chooseModel(provider, modelId, levels, { keepOpen = false, menu = null } = {}) {
   if (!keepOpen) closeModelMenu();
   try {
     const response = await request("/api/v1/agent/model", {
@@ -4380,10 +4385,11 @@ async function chooseModel(provider, modelId, levels, { keepOpen = false } = {})
     localStorage.setItem(KEY_THINKING, clampThinking(currentThinking(), levels));
     updateModelPill();
     // 菜单没关就就地重渲染：✓ 挪到新行、档位分段出现（D2：先选模型再选强度）
-    if (keepOpen && el.modelMenu) {
-      renderModelMenu(state.modelCatalog, providerId);
+    const host = menu || el.modelMenu;
+    if (keepOpen && host) {
+      renderModelMenu(state.modelCatalog, providerId, host);
       // 重渲染把刚点的按钮换掉了：焦点跟到新行，键盘 Tab 能直接进档位
-      el.modelMenu.querySelector('.model-row[data-current="1"] .model-item')?.focus();
+      host.querySelector('.model-row[data-current="1"] .model-item')?.focus();
     }
     toast(
       provider.hasKey === false
@@ -4401,6 +4407,188 @@ async function chooseModel(provider, modelId, levels, { keepOpen = false } = {})
 async function chooseCurrentThinking(level) {
   if (level === currentThinking()) return;
   await setThinkingLevel(level);
+}
+
+/* ── 对话右上角快捷设置（2026-11-07）──────────────────
+ * 每个对话顶栏右侧齿轮，下弹面板：上半是模型切换（复用 renderModelMenu），
+ * 下半是「一行一个模型」批量添加——针对用户痛点「不能一行填一个模型，还得自己挑」。
+ * 批量不走新端点：GET /agent/providers 拿全量记录（模型菜单的投影不含
+ * baseUrl/keyEnv/元数据，回写必须原样带上），合并清单后 POST /agent/providers 原样回写，
+ * 服务端校验不变（模型 id 非空、≤200 字符）。非法行明确报错并整批拦下，不静默丢弃；
+ * 已存在的模型跳过并在结果里说明。
+ * 批量动的是「全局默认清单」，不是单个会话的模型（切换才是会话粒度）。 */
+
+// 面板里上次看的供应商（仅定位视图，同 KEY_MODEL_PROVIDER 的口径，不等于切模型）
+let chatSettingsPreferred = "";
+
+function closeChatSettings() {
+  if (!el.chatSettingsMenu) return;
+  closePopover(el.chatSettingsMenu, el.chatSettingsBtn);
+}
+
+async function toggleChatSettings() {
+  if (!el.chatSettingsMenu) return;
+  if (popoverOpen(el.chatSettingsMenu)) {
+    closeChatSettings();
+    return;
+  }
+  el.chatSettingsBtn.disabled = true;
+  try {
+    // 每次打开都现拉：不缓存陈旧目录（同模型菜单口径）
+    const catalog = await fetchModelCatalog();
+    state.modelCatalog = catalog;
+    updateModelPill();
+    renderChatSettings(catalog);
+    openPopover(el.chatSettingsMenu, el.chatSettingsBtn);
+  } catch (error) {
+    if (error.message !== "forbidden") toast("拿不到模型清单");
+  } finally {
+    el.chatSettingsBtn.disabled = false;
+  }
+}
+
+function renderChatSettings(catalog) {
+  const menu = el.chatSettingsMenu;
+  if (!menu) return;
+  menu.replaceChildren();
+
+  // 上半：模型切换（与 composer 模型菜单同一份渲染；切模型/换档逻辑全部复用）
+  const modelPart = document.createElement("div");
+  modelPart.className = "chat-settings-models";
+  menu.append(modelPart);
+  renderModelMenu(catalog, chatSettingsPreferred, modelPart);
+
+  // 下半：一行一个模型批量添加（加到模型区当前选中的供应商）
+  const batch = document.createElement("div");
+  batch.className = "chat-settings-batch";
+  batch.innerHTML = `
+    <div class="batch-head">
+      <span>批量添加模型</span>
+      <span class="batch-target" id="batch-target"></span>
+    </div>
+    <textarea class="batch-input is-mono" id="batch-models" rows="4" spellcheck="false"
+      aria-label="一行一个模型 ID" placeholder="一行一个模型 ID，例如：\nqwen3-max\nqwen-plus"></textarea>
+    <div class="batch-actions">
+      <span class="set-hint batch-hint" id="batch-hint"></span>
+      <button class="ghost" type="button" id="batch-import">导入</button>
+    </div>`;
+  menu.append(batch);
+  syncChatSettingsTarget();
+
+  batch.querySelector("#batch-import")?.addEventListener("click", () => {
+    const providerId = chatSettingsPreferred || catalog.current?.providerId || "";
+    void importBatchModels(
+      providerId,
+      batch.querySelector("#batch-models")?.value || "",
+      batch.querySelector("#batch-hint"),
+      batch,
+    );
+  });
+}
+
+/** 批量区的「加到」标签跟着模型区当前供应商走（供应商段点击会 dispatch providerchange） */
+function syncChatSettingsTarget() {
+  if (!el.chatSettingsMenu) return;
+  const active = el.chatSettingsMenu.querySelector('.provider-opt[aria-pressed="true"]');
+  const node = el.chatSettingsMenu.querySelector("#batch-target");
+  if (active) chatSettingsPreferred = active.dataset.provider;
+  if (node) {
+    node.textContent = active ? `加到：${active.title || active.textContent}` : "";
+    node.title = node.textContent;
+  }
+}
+
+/** 逐行校验：非法行（超长）整批拦下并列明行号；合法行去重后与既有清单合并回写 */
+async function importBatchModels(providerId, text, hintNode, batchBox) {
+  const setHint = (msg, isError = true) => {
+    if (!hintNode) return;
+    hintNode.textContent = msg;
+    hintNode.classList.toggle("is-error", isError);
+  };
+  if (!providerId) {
+    setHint("还没有供应商：先到设置 → 服务里添加");
+    return;
+  }
+  const invalid = [];
+  const ids = [];
+  const seen = new Set();
+  String(text).split(/\r?\n/).forEach((line, index) => {
+    const value = line.trim();
+    if (!value) return;
+    if (value.length > 200) {
+      invalid.push(`第 ${index + 1} 行超长（模型 ID 最多 200 字符）`);
+      return;
+    }
+    if (seen.has(value)) return; // 同一次输入里的重复行只取一个
+    seen.add(value);
+    ids.push(value);
+  });
+  if (invalid.length) {
+    setHint(`这些行没法用，先改掉再导入：${invalid.join("；")}`);
+    return;
+  }
+  if (!ids.length) {
+    setHint("先填至少一行模型 ID");
+    return;
+  }
+  const button = batchBox?.querySelector("#batch-import");
+  if (button?.disabled) return;
+  if (button) button.disabled = true;
+  setHint("保存中…", false);
+  try {
+    // 拿全量记录：模型菜单的投影（/agent/model）不含 baseUrl/keyEnv/元数据，回写必须原样带上
+    const listResponse = await request("/api/v1/agent/providers", { cache: "no-store" });
+    if (!listResponse.ok) {
+      setHint(`读不到供应商配置：HTTP ${listResponse.status}`);
+      return;
+    }
+    const listData = await listResponse.json().catch(() => ({}));
+    const provider = (listData.providers || []).find((item) => item.id === providerId);
+    if (!provider) {
+      setHint("找不到这家供应商，刷新后再试");
+      return;
+    }
+    const existing = new Set(provider.models || []);
+    const fresh = ids.filter((id) => !existing.has(id));
+    const duplicated = ids.filter((id) => existing.has(id));
+    if (!fresh.length) {
+      setHint(`都已在清单里（${duplicated.join("、")}），没有新增`, false);
+      return;
+    }
+    // 只增不改：既有模型的元数据/档位原样保留；不删任何模型（避开 selected_model_missing）
+    const saved = await postProvider({
+      id: provider.id,
+      previousId: provider.id,
+      name: provider.name || provider.id,
+      baseUrl: provider.baseUrl || "",
+      keyEnv: provider.keyEnv || "",
+      models: [...(provider.models || []), ...fresh],
+      modelMeta: provider.modelMeta || {},
+      modelThinkingLevels: provider.modelThinkingLevels || {},
+      allowEmptyModels: true,
+    });
+    if (!saved.response.ok) {
+      setHint(providerErrorText(saved.data || {}, saved.response.status));
+      return;
+    }
+    const listed = (state.providers || []).find((item) => item.id === providerId);
+    if (listed) listed.models = [...(listed.models || []), ...fresh];
+    await refreshModelPill().catch(() => undefined);
+    const textarea = batchBox?.querySelector("#batch-models");
+    if (textarea) textarea.value = "";
+    setHint(
+      `已加入 ${fresh.length} 个模型，下一轮生效${duplicated.length ? `；${duplicated.length} 个已存在，跳过：${duplicated.join("、")}` : ""}`,
+      false,
+    );
+  } catch (error) {
+    if (error.message === "forbidden") {
+      closeChatSettings();
+      return;
+    }
+    setHint(`没存上：${error.message}`);
+  } finally {
+    if (button) button.disabled = false;
+  }
 }
 
 /* ── 侧栏项目面板（2026-11-04 建，2026-11-06 改为总览）────
@@ -5199,12 +5387,18 @@ el.modelPill?.addEventListener("click", () => void toggleModelMenu());
 // 菜单里的点击不冒泡到「点外面就关」的判定：点供应商段会就地重渲染，
 // 被替换掉的旧按钮已经脱离文档，冒泡到 document 时会被当成外部点击误关。
 el.modelMenu?.addEventListener("click", (event) => event.stopPropagation());
+
+// 对话右上角快捷设置（2026-11-07）：同套点外关/Esc 关；供应商段切换时同步批量区「加到」标签
+el.chatSettingsBtn?.addEventListener("click", () => void toggleChatSettings());
+el.chatSettingsMenu?.addEventListener("click", (event) => event.stopPropagation());
+el.chatSettingsMenu?.addEventListener("providerchange", () => syncChatSettingsTarget());
 // 附件按钮只弹占位提示，不发请求
 el.composerAdd?.addEventListener("click", () => toast("附件还没接上，先占个位"));
 
 // pill 在右组（D2），不能再用 .composer-tools 判内外：按触发 pill 和菜单自己判
 document.addEventListener("click", (event) => {
   if (!event.target.closest("#model-pill") && !event.target.closest("#model-menu")) closeModelMenu();
+  if (!event.target.closest("#chat-settings-btn") && !event.target.closest("#chat-settings-menu")) closeChatSettings();
   // 项目弹层有两个触发点（展开态 pill / 轨道按钮），菜单自己也算里面
   if (
     !event.target.closest("#proj-pill") &&
@@ -5225,6 +5419,7 @@ document.addEventListener("keydown", (event) => {
     return;
   }
   closeModelMenu();
+  closeChatSettings();
   closeProjectMenu();
 });
 

@@ -2514,6 +2514,67 @@ button.tk-archive-bar:focus-visible { outline: 2px solid var(--accent-line); out
   .model-menu { width: min(320px, 100%); }
 }
 
+/* ── 对话右上角快捷设置（2026-11-07）──────
+ * 顶栏齿轮 + 下弹面板。composer-pop 默认向上弹（bottom: 100%），
+ * 顶栏这份改成向下（top: 100%），入场动画也反向（从 -6px 落下）。 */
+.top-wrap { position: relative; flex: none; }
+.top-gear {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px;
+  border-radius: var(--r-md);
+  background: transparent; color: var(--text-3);
+  transition: background .15s ease, color .15s ease;
+}
+.top-gear:hover { background: var(--card); color: var(--text); }
+.top-gear:disabled { color: var(--text-3); cursor: default; }
+.top-gear svg { width: 16px; height: 16px; }
+.top-wrap .composer-pop.drop-down { bottom: auto; top: calc(100% + 8px); transform-origin: 50% 0; }
+@keyframes composerPopInDown {
+  from { opacity: 0; transform: translateY(-6px); border-radius: 15px; }
+  to { opacity: 1; transform: translateY(0); border-radius: 12px; }
+}
+@keyframes composerPopOutDown {
+  from { opacity: 1; transform: translateY(0); border-radius: 12px; }
+  to { opacity: 0; transform: translateY(-6px); border-radius: 15px; }
+}
+.top-wrap .composer-pop.drop-down.pop-open { animation-name: composerPopInDown; }
+.top-wrap .composer-pop.drop-down.pop-closing { animation-name: composerPopOutDown; }
+@media (prefers-reduced-motion: reduce) {
+  .top-wrap .composer-pop.drop-down.pop-open,
+  .top-wrap .composer-pop.drop-down.pop-closing { animation: none; }
+}
+.chat-settings-menu {
+  left: auto; right: 0;
+  width: min(320px, 88vw);
+  max-height: min(480px, 72vh);
+  overflow: auto;
+}
+
+/* 面板下半：一行一个模型批量添加；上边线与模型区隔开，负边距抵消 pop 内边距贴边 */
+.chat-settings-batch {
+  margin: 6px -6px -6px;
+  padding: 8px 6px 6px;
+  border-top: 1px solid var(--composer-border);
+}
+.batch-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+  padding: 0 2px 6px;
+  font-size: 12px; font-weight: 500; color: var(--text-2);
+}
+.batch-target { font-size: 11px; font-weight: 400; color: var(--text-3); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.batch-input {
+  display: block; box-sizing: border-box; width: 100%;
+  min-height: 64px; max-height: 160px; resize: vertical;
+  padding: 7px 9px;
+  font-family: var(--mono); font-size: 12px; line-height: 1.5;
+  color: var(--text); background: transparent;
+  border: 1px solid var(--outline); border-radius: 8px;
+}
+.batch-input:focus { outline: none; border-color: var(--accent-line); }
+.batch-input::placeholder { color: var(--text-3); }
+.batch-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-top: 6px; }
+.batch-hint { flex: 1; min-width: 0; min-height: 17px; text-align: left; overflow-wrap: anywhere; }
+
 /* 供应商切换行（D2）：一次只看一家，点段即筛，不留「全部」。
    pill 右对齐弹出，菜单可能比 pill 窄，所以分段行要能横滚而不撑破菜单。 */
 .provider-seg {
