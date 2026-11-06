@@ -2514,41 +2514,92 @@ button.tk-archive-bar:focus-visible { outline: 2px solid var(--accent-line); out
   .model-menu { width: min(320px, 100%); }
 }
 
-/* ── 对话右上角快捷设置（2026-11-07）──────
- * 顶栏齿轮 + 下弹面板。composer-pop 默认向上弹（bottom: 100%），
- * 顶栏这份改成向下（top: 100%），入场动画也反向（从 -6px 落下）。 */
-.top-wrap { position: relative; flex: none; }
+/* ── 对话右上角快捷设置（2026-11-07 抽屉改造）──────
+ * 右上角图标按钮 + 右侧全高抽屉（替换下弹面板）。
+ * 抽屉 fixed 贴右、左缘 1px 分割线，无圆角无悬浮阴影；遮罩实色压暗、
+ * 不用 backdrop-filter（WebView2 下会渲染成黑块）。 */
+.top-wrap { flex: none; }
 .top-gear {
   display: inline-flex; align-items: center; justify-content: center;
-  width: 30px; height: 30px;
+  width: 28px; height: 28px;
   border-radius: var(--r-md);
   background: transparent; color: var(--text-3);
   transition: background .15s ease, color .15s ease;
 }
 .top-gear:hover { background: var(--card); color: var(--text); }
 .top-gear:disabled { color: var(--text-3); cursor: default; }
-.top-gear svg { width: 16px; height: 16px; }
-.top-wrap .composer-pop.drop-down { bottom: auto; top: calc(100% + 8px); transform-origin: 50% 0; }
-@keyframes composerPopInDown {
-  from { opacity: 0; transform: translateY(-6px); border-radius: 15px; }
-  to { opacity: 1; transform: translateY(0); border-radius: 12px; }
+.top-gear svg { width: 15px; height: 15px; }
+
+#chat-settings-overlay {
+  position: fixed; inset: 0; z-index: 45;
+  background: rgba(0, 0, 0, 0.45);
 }
-@keyframes composerPopOutDown {
-  from { opacity: 1; transform: translateY(0); border-radius: 12px; }
-  to { opacity: 0; transform: translateY(-6px); border-radius: 15px; }
+#chat-settings-overlay.pop-closing { opacity: 0; transition: opacity .25s ease-out; }
+#chat-settings-overlay.pop-open { animation: csFadeIn .25s ease-out; }
+@keyframes csFadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+#chat-settings-drawer {
+  position: fixed; inset: 0 0 0 auto; z-index: 46;
+  width: 100%; max-width: 448px;
+  display: flex; flex-direction: column;
+  background: var(--surface);
+  border-left: 1px solid var(--composer-border);
+  overflow: hidden;
 }
-.top-wrap .composer-pop.drop-down.pop-open { animation-name: composerPopInDown; }
-.top-wrap .composer-pop.drop-down.pop-closing { animation-name: composerPopOutDown; }
+@keyframes csDrawerIn { from { transform: translateX(100%); } to { transform: translateX(0); } }
+@keyframes csDrawerOut { from { transform: translateX(0); } to { transform: translateX(100%); } }
+#chat-settings-drawer.pop-open { animation: csDrawerIn .25s ease-out; }
+#chat-settings-drawer.pop-closing { animation: csDrawerOut .25s ease-out; }
 @media (prefers-reduced-motion: reduce) {
-  .top-wrap .composer-pop.drop-down.pop-open,
-  .top-wrap .composer-pop.drop-down.pop-closing { animation: none; }
+  #chat-settings-overlay.pop-open,
+  #chat-settings-overlay.pop-closing,
+  #chat-settings-drawer.pop-open,
+  #chat-settings-drawer.pop-closing { animation: none; }
 }
-.chat-settings-menu {
-  left: auto; right: 0;
-  width: min(320px, 88vw);
-  max-height: min(480px, 72vh);
-  overflow: auto;
+
+/* 抽屉头部：返回箭头（二级页才显示）+ 标题 + X */
+.cs-head {
+  flex: none;
+  display: flex; align-items: center; gap: 8px;
+  height: 56px; padding: 0 12px 0 16px;
+  border-bottom: 1px solid var(--composer-border);
 }
+.cs-head-title { flex: 1; min-width: 0; font-size: 15px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cs-icon-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 36px; height: 36px; flex: none;
+  border-radius: var(--r-md);
+  background: transparent; color: var(--text-3);
+  transition: background .15s ease, color .15s ease;
+}
+.cs-icon-btn:hover { background: var(--card); color: var(--text); }
+.cs-icon-btn svg { width: 17px; height: 17px; }
+
+/* 抽屉内容区 */
+.cs-body { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 0 16px; }
+
+/* 首页四行：图标 + 标题/副文本 + 右侧 chevron */
+.cs-row {
+  display: flex; align-items: center; gap: 12px;
+  width: 100%; min-height: 48px;
+  padding: 8px 16px;
+  border: 0; border-radius: 0;
+  background: transparent; color: var(--text);
+  text-align: left; cursor: pointer;
+  transition: background .15s ease;
+}
+.cs-row:hover { background: var(--card); }
+.cs-row-icon { flex: none; display: inline-flex; color: var(--text-3); }
+.cs-row-icon svg { width: 18px; height: 18px; }
+.cs-row-main { flex: 1; min-width: 0; }
+.cs-row-title { font-size: 14px; font-weight: 500; color: var(--text); }
+.cs-row-sub { margin-top: 1px; font-size: 12px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cs-row-chevron { flex: none; display: inline-flex; color: var(--text-3); }
+.cs-row-chevron svg { width: 16px; height: 16px; }
+
+/* 二级页内的分组卡片（权限/通知复用设置页 rowMarkup 的行结构，只补容器间距） */
+.cs-section { padding: 8px 16px; }
+.cs-section .set-hint { margin-bottom: 8px; }
 
 /* 面板下半：一行一个模型批量添加；上边线与模型区隔开，负边距抵消 pop 内边距贴边 */
 .chat-settings-batch {

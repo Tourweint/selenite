@@ -111,7 +111,8 @@ const el = {
   modelThink: document.getElementById("model-think"),
   modelMenu: document.getElementById("model-menu"),
   chatSettingsBtn: document.getElementById("chat-settings-btn"),
-  chatSettingsMenu: document.getElementById("chat-settings-menu"),
+  chatSettingsDrawer: document.getElementById("chat-settings-drawer"),
+  chatSettingsOverlay: document.getElementById("chat-settings-overlay"),
   toast: document.getElementById("toast"),
   railTip: document.getElementById("rail-tip"),
   modal: document.getElementById("modal"),
@@ -3376,11 +3377,18 @@ function syncSendEnabled() {
 
 /* ── 桌面通知（批次二，三时机：完成 / 出错 / 待你处理）──────
    静默判定是前置条件不是优化：窗口可见且正看着这个会话 → 不打扰
-   （cindy notificationService 的口径）。开关在设置-服务分区，默认关。 */
+   （cindy notificationService 的口径）。开关在设置-服务分区，默认关。
+   三时机过滤（2026-11-07 抽屉改造）：纯前端 localStorage，
+   KEY_NOTIFY_TIMING = all | error | attention，默认 all（= 现行为）。
+   maybeNotify 带 kind：all 放行全部；error 放行 error+attention；attention 只放行 attention。 */
 const KEY_NOTIFY = "lifediary.notify";
+const KEY_NOTIFY_TIMING = "lifediary.notify.timing";
 
-function maybeNotify(title, body, convId) {
+function maybeNotify(title, body, convId, kind = "done") {
   if (localStorage.getItem(KEY_NOTIFY) !== "1") return;
+  const timing = localStorage.getItem(KEY_NOTIFY_TIMING) || "all";
+  if (timing === "attention" && kind !== "attention") return;
+  if (timing === "error" && kind !== "error" && kind !== "attention") return;
   if (!("Notification" in window) || Notification.permission !== "granted") return;
   if (
     document.visibilityState === "visible" &&
@@ -3723,11 +3731,11 @@ async function send(text) {
         // 与主流分发同一套消费逻辑的子集：跨轮还在跑的活，只补"要人管"的帧。
         if (event.type === "attention") {
           applyTicketEvent({ ...event, phase: "needs_you" });
-          maybeNotify("有任务单需要你处理", event.question || "", state.conversationId);
+          maybeNotify("有任务单需要你处理", event.question || "", state.conversationId, "attention");
         } else if (event.type === "approval") {
           const card = renderApprovalCard(event);
           if (card && !card.isConnected) turn.root.before(card);
-          maybeNotify("有写操作需要你确认", event.tool || "", state.conversationId);
+          maybeNotify("有写操作需要你确认", event.tool || "", state.conversationId, "attention");
         } else if (event.type === "done") {
           if (event.usage) attachUsage(turn.root, event.usage, Date.now() - turnStartMs);
         } else if (event.type === "delegate") {
@@ -3837,21 +3845,21 @@ async function send(text) {
               card.append(link);
             }
             body.before(card);
-            maybeNotify("有任务单需要你处理", event.question || "", streamConv);
+            maybeNotify("有任务单需要你处理", event.question || "", streamConv, "attention");
             if (state.stick) scrollToEnd();
           } else if (event.type === "approval") {
             // 写类工具要确认（批次二）：卡片挂在回答气泡上方，和 attention 同一套视觉
             const card = renderApprovalCard(event);
             if (card && !card.isConnected) body.before(card);
-            maybeNotify("有写操作需要你确认", event.tool || "", streamConv);
+            maybeNotify("有写操作需要你确认", event.tool || "", streamConv, "attention");
             if (state.stick) scrollToEnd();
           } else if (event.type === "done") {
             sawDone = true;
             if (event.finishReason === "error" && !answer) {
               if (!noReplyExplained) addError("这一轮出错了。", { retryable: true });
-              maybeNotify("这一轮没答上来", el.title.textContent || "对话", streamConv);
+              maybeNotify("这一轮没答上来", el.title.textContent || "对话", streamConv, "error");
             } else {
-              maybeNotify("Selenite 回复完成", el.title.textContent || "对话", streamConv);
+              maybeNotify("Selenite 回复完成", el.title.textContent || "对话", streamConv, "done");
             }
             if (event.usage) attachUsage(turn.root, event.usage, Date.now() - turnStartMs);
             void syncCtxMeter();
@@ -3859,14 +3867,14 @@ async function send(text) {
             // 后端明确说「这次没能生成回复」：用它的文案，别让结尾兜底再补一句笼统的"模型没有返回内容。"
             noReplyExplained = true;
             addError(event.message);
-            maybeNotify("这一轮没答上来", el.title.textContent || "对话", streamConv);
+            maybeNotify("这一轮没答上来", el.title.textContent || "对话", streamConv, "error");
             if (state.stick) scrollToEnd();
           } else if (event.type === "error") {
             // 后端把 unanswered 透成 error 帧时（index.ts 收尾兜底），文案就是那句具体提示，
             // 同样记下，避免结尾再叠一条"模型没有返回内容。"
             noReplyExplained = true;
             addError(event.message || "出错了", { retryable: true });
-            maybeNotify("Selenite 出错了", event.message || "", streamConv);
+            maybeNotify("Selenite 出错了", event.message || "", streamConv, "error");
           }
         }
       }
@@ -4409,37 +4417,92 @@ async function chooseCurrentThinking(level) {
   await setThinkingLevel(level);
 }
 
-/* ── 对话右上角快捷设置（2026-11-07）──────────────────
- * 每个对话顶栏右侧齿轮，下弹面板：上半是模型切换（复用 renderModelMenu），
- * 下半是「一行一个模型」批量添加——针对用户痛点「不能一行填一个模型，还得自己挑」。
- * 批量不走新端点：GET /agent/providers 拿全量记录（模型菜单的投影不含
- * baseUrl/keyEnv/元数据，回写必须原样带上），合并清单后 POST /agent/providers 原样回写，
- * 服务端校验不变（模型 id 非空、≤200 字符）。非法行明确报错并整批拦下，不静默丢弃；
- * 已存在的模型跳过并在结果里说明。
- * 批量动的是「全局默认清单」，不是单个会话的模型（切换才是会话粒度）。 */
+/* ── 对话右上角快捷设置（2026-11-07 抽屉改造，替换同日下弹面板）──
+ * 右上角图标按钮 → 右侧全高抽屉：首页四行（模型 / 权限档 / 通知 / 全部设置），
+ * 控件全在二级页。底层聊天不卸载只挂浮层，滚动位置与输入内容天然保持。
+ * 关闭三通道：Esc（输入法豁免）/ X / 点遮罩；关闭动画播完再卸载（照 popTimers 模式）。
+ * 模型二级页整体搬入原下弹面板的模型菜单 + 批量加模型，渲染零语义改动。 */
 
+const DRAWER_MS = 250;
 // 面板里上次看的供应商（仅定位视图，同 KEY_MODEL_PROVIDER 的口径，不等于切模型）
 let chatSettingsPreferred = "";
+let csPage = "home"; // home | model | policy | notify
+let csTimer = 0;
+let csCatalog = null; // 打开抽屉时现拉的模型目录（同原「每次打开现拉」口径）
+let csPolicy = null;  // 打开抽屉时顺带拉的权限档；失败保持 null（副文本显示 —）
+
+const CS_TIMING_LABEL = { all: "全部", error: "仅出错", attention: "仅待你处理" };
+const CS_POLICY_LABEL = { full: "完全访问", "read-only": "只读", "no-shell": "不跑命令" };
+
+function drawerOpen() {
+  return Boolean(el.chatSettingsDrawer) && !el.chatSettingsDrawer.hidden &&
+    !el.chatSettingsDrawer.classList.contains("pop-closing");
+}
+
+function openDrawer() {
+  const drawer = el.chatSettingsDrawer;
+  const overlay = el.chatSettingsOverlay;
+  if (!drawer || !overlay) return;
+  clearTimeout(csTimer);
+  drawer.classList.remove("pop-closing");
+  overlay.classList.remove("pop-closing");
+  drawer.hidden = false;
+  overlay.hidden = false;
+  el.chatSettingsBtn.setAttribute("aria-expanded", "true");
+  if (noMotion.matches) return;
+  // 先摘 class 并强制重排，连续开关时动画才会重放（同 openPopover）
+  drawer.classList.remove("pop-open");
+  overlay.classList.remove("pop-open");
+  void drawer.offsetWidth;
+  drawer.classList.add("pop-open");
+  overlay.classList.add("pop-open");
+}
+
+function closeDrawer() {
+  const drawer = el.chatSettingsDrawer;
+  const overlay = el.chatSettingsOverlay;
+  if (!drawer || drawer.hidden) return;
+  el.chatSettingsBtn.setAttribute("aria-expanded", "false");
+  clearTimeout(csTimer);
+  const finish = () => {
+    drawer.hidden = true;
+    overlay.hidden = true;
+    drawer.classList.remove("pop-open", "pop-closing");
+    overlay.classList.remove("pop-open", "pop-closing");
+    csPage = "home";
+  };
+  if (noMotion.matches) {
+    finish();
+    return;
+  }
+  drawer.classList.remove("pop-open");
+  overlay.classList.remove("pop-open");
+  void drawer.offsetWidth;
+  drawer.classList.add("pop-closing");
+  overlay.classList.add("pop-closing");
+  csTimer = setTimeout(finish, DRAWER_MS);
+}
 
 function closeChatSettings() {
-  if (!el.chatSettingsMenu) return;
-  closePopover(el.chatSettingsMenu, el.chatSettingsBtn);
+  closeDrawer();
 }
 
 async function toggleChatSettings() {
-  if (!el.chatSettingsMenu) return;
-  if (popoverOpen(el.chatSettingsMenu)) {
+  if (drawerOpen()) {
     closeChatSettings();
     return;
   }
   el.chatSettingsBtn.disabled = true;
   try {
     // 每次打开都现拉：不缓存陈旧目录（同模型菜单口径）
-    const catalog = await fetchModelCatalog();
-    state.modelCatalog = catalog;
+    csCatalog = await fetchModelCatalog();
+    state.modelCatalog = csCatalog;
     updateModelPill();
-    renderChatSettings(catalog);
-    openPopover(el.chatSettingsMenu, el.chatSettingsBtn);
+    csPage = "home";
+    renderCsPage();
+    openDrawer();
+    // 权限档副文本顺带拉，回来若还停在首页就重渲染补上
+    void refreshCsPolicy();
   } catch (error) {
     if (error.message !== "forbidden") toast("拿不到模型清单");
   } finally {
@@ -4447,15 +4510,175 @@ async function toggleChatSettings() {
   }
 }
 
-function renderChatSettings(catalog) {
-  const menu = el.chatSettingsMenu;
-  if (!menu) return;
-  menu.replaceChildren();
+async function refreshCsPolicy() {
+  try {
+    const response = await request("/api/v1/agent/policy", { cache: "no-store" });
+    if (response.ok) {
+      csPolicy = await response.json();
+      if (csPage === "home" && drawerOpen()) renderCsHome();
+    }
+  } catch {
+    /* 拉不到就显示 —，不拦抽屉 */
+  }
+}
+
+function csSvg(paths) {
+  const span = document.createElement("span");
+  span.innerHTML =
+    `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ` +
+    `stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
+  return span;
+}
+const CS_ICONS = {
+  cpu: '<rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M15 2v2"/><path d="M15 20v2"/><path d="M2 15h2"/><path d="M2 9h2"/><path d="M20 15h2"/><path d="M20 9h2"/><path d="M9 2v2"/><path d="M9 20v2"/>',
+  shield: '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/>',
+  bell: '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
+  settings: '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/>',
+  chevron: '<path d="m9 18 6-6-6-6"/>',
+  back: '<path d="m12 19-7-7 7-7"/><path d="M19 12H5"/>',
+  x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+};
+
+function csHead(title, { back = false } = {}) {
+  const head = document.createElement("div");
+  head.className = "cs-head";
+  if (back) {
+    const backBtn = document.createElement("button");
+    backBtn.type = "button";
+    backBtn.className = "cs-icon-btn";
+    backBtn.setAttribute("aria-label", "返回");
+    backBtn.title = "返回";
+    backBtn.append(csSvg(CS_ICONS.back));
+    backBtn.addEventListener("click", () => {
+      csPage = "home";
+      renderCsPage();
+    });
+    head.append(backBtn);
+  }
+  const titleNode = document.createElement("div");
+  titleNode.className = "cs-head-title";
+  titleNode.textContent = title;
+  head.append(titleNode);
+  const closeBtn = document.createElement("button");
+  closeBtn.type = "button";
+  closeBtn.className = "cs-icon-btn";
+  closeBtn.setAttribute("aria-label", "关闭");
+  closeBtn.title = "关闭 (Esc)";
+  closeBtn.append(csSvg(CS_ICONS.x));
+  closeBtn.addEventListener("click", () => closeChatSettings());
+  head.append(closeBtn);
+  return head;
+}
+
+function csRow({ icon, title, sub, onClick }) {
+  const row = document.createElement("button");
+  row.type = "button";
+  row.className = "cs-row";
+  if (icon) {
+    const iconNode = document.createElement("span");
+    iconNode.className = "cs-row-icon";
+    iconNode.append(csSvg(CS_ICONS[icon] || ""));
+    row.append(iconNode);
+  }
+  const main = document.createElement("span");
+  main.className = "cs-row-main";
+  const titleNode = document.createElement("span");
+  titleNode.className = "cs-row-title";
+  titleNode.textContent = title;
+  main.append(titleNode);
+  if (sub) {
+    const subNode = document.createElement("span");
+    subNode.className = "cs-row-sub";
+    subNode.textContent = sub;
+    main.append(subNode);
+  }
+  row.append(main);
+  const chevron = document.createElement("span");
+  chevron.className = "cs-row-chevron";
+  chevron.append(csSvg(CS_ICONS.chevron));
+  row.append(chevron);
+  row.addEventListener("click", onClick);
+  return row;
+}
+
+/** 抽屉页面壳：换页只换内容，壳不卸载（抽屉开着时底层聊天与滚动不受影响） */
+function renderCsPage() {
+  const drawer = el.chatSettingsDrawer;
+  if (!drawer) return;
+  if (csPage === "model") renderCsModelPage();
+  else if (csPage === "policy") renderCsPolicyPage();
+  else if (csPage === "notify") renderCsNotifyPage();
+  else renderCsHome();
+}
+
+function renderCsHome() {
+  const drawer = el.chatSettingsDrawer;
+  if (!drawer) return;
+  drawer.replaceChildren(csHead("对话设置"));
+  const body = document.createElement("div");
+  body.className = "cs-body";
+
+  const catalog = csCatalog;
+  const current = catalog && catalog.current;
+  const timing = localStorage.getItem(KEY_NOTIFY_TIMING) || "all";
+  const notifyOn = localStorage.getItem(KEY_NOTIFY) === "1";
+
+  body.append(
+    csRow({
+      icon: "cpu",
+      title: "模型",
+      sub: current ? modelLabel(catalog) || current.modelId : "还没有可用模型",
+      onClick: () => {
+        csPage = "model";
+        renderCsPage();
+      },
+    }),
+    csRow({
+      icon: "shield",
+      title: "权限档",
+      sub: csPolicy && csPolicy.access ? CS_POLICY_LABEL[csPolicy.access] || csPolicy.access : "—",
+      onClick: () => {
+        csPage = "policy";
+        renderCsPage();
+      },
+    }),
+    csRow({
+      icon: "bell",
+      title: "通知",
+      sub: notifyOn ? `开 · ${CS_TIMING_LABEL[timing] || timing}` : "关",
+      onClick: () => {
+        csPage = "notify";
+        renderCsPage();
+      },
+    }),
+    csRow({
+      icon: "settings",
+      title: "全部设置",
+      sub: "",
+      onClick: () => {
+        closeChatSettings();
+        location.hash = "#/settings";
+      },
+    }),
+  );
+  drawer.append(body);
+}
+
+/* ── 二级页 · 模型：原下弹面板整体搬入（渲染函数零语义改动，只换宿主）── */
+function renderCsModelPage() {
+  const drawer = el.chatSettingsDrawer;
+  const catalog = csCatalog;
+  if (!drawer || !catalog) return;
+  drawer.replaceChildren(csHead("模型", { back: true }));
+  const body = document.createElement("div");
+  body.className = "cs-body";
+  body.style.padding = "6px";
+  drawer.append(body);
 
   // 上半：模型切换（与 composer 模型菜单同一份渲染；切模型/换档逻辑全部复用）
   const modelPart = document.createElement("div");
   modelPart.className = "chat-settings-models";
-  menu.append(modelPart);
+  body.append(modelPart);
   renderModelMenu(catalog, chatSettingsPreferred, modelPart);
 
   // 下半：一行一个模型批量添加（加到模型区当前选中的供应商）
@@ -4472,7 +4695,7 @@ function renderChatSettings(catalog) {
       <span class="set-hint batch-hint" id="batch-hint"></span>
       <button class="ghost" type="button" id="batch-import">导入</button>
     </div>`;
-  menu.append(batch);
+  body.append(batch);
   syncChatSettingsTarget();
 
   batch.querySelector("#batch-import")?.addEventListener("click", () => {
@@ -4488,13 +4711,179 @@ function renderChatSettings(catalog) {
 
 /** 批量区的「加到」标签跟着模型区当前供应商走（供应商段点击会 dispatch providerchange） */
 function syncChatSettingsTarget() {
-  if (!el.chatSettingsMenu) return;
-  const active = el.chatSettingsMenu.querySelector('.provider-opt[aria-pressed="true"]');
-  const node = el.chatSettingsMenu.querySelector("#batch-target");
+  if (!el.chatSettingsDrawer) return;
+  const active = el.chatSettingsDrawer.querySelector('.provider-opt[aria-pressed="true"]');
+  const node = el.chatSettingsDrawer.querySelector("#batch-target");
   if (active) chatSettingsPreferred = active.dataset.provider;
   if (node) {
     node.textContent = active ? `加到：${active.title || active.textContent}` : "";
     node.title = node.textContent;
+  }
+}
+
+/* ── 二级页 · 权限档：三档分段 + 写确认开关 + 审批入口 ──
+   轻量重实现，不复用 loadPolicy（那是 getElementById 硬编码 #policy-switch，
+   与全屏设置页双绑会打架）；GET /agent/policy 读档、POST 回写（2026-11-07 定论）。 */
+function renderCsPolicyPage() {
+  const drawer = el.chatSettingsDrawer;
+  if (!drawer) return;
+  drawer.replaceChildren(csHead("权限档", { back: true }));
+  const body = document.createElement("div");
+  body.className = "cs-body";
+  body.innerHTML = `
+    <div class="cs-section">
+      <div class="segmented slide" role="radiogroup" aria-label="权限" id="cs-policy-switch">
+        <button type="button" data-policy="full" aria-checked="false">完全访问</button>
+        <button type="button" data-policy="read-only" aria-checked="false">只读</button>
+        <button type="button" data-policy="no-shell" aria-checked="false">不跑命令</button>
+      </div>
+      <div class="set-hint">决定它能替你动到什么程度：完全访问 = 能改文件、能跑命令。改完立刻生效。</div>
+      <div class="divider"></div>
+      <div class="cs-row" style="cursor:default">
+        <span class="cs-row-main">
+          <span class="cs-row-title">写操作逐次确认</span>
+          <span class="cs-row-sub">开启后，改文件 / 跑命令 / 派活前先问你一句</span>
+        </span>
+        ${switchMarkup(csPolicy?.confirmWrites === true, { label: "写操作逐次确认", attrs: 'id="cs-policy-confirm-writes"' })}
+      </div>
+      <div class="divider"></div>
+      <button class="cs-row" type="button" id="cs-approval-entry">
+        <span class="cs-row-main">
+          <span class="cs-row-title">待处理审批</span>
+          <span class="cs-row-sub" id="cs-approval-count">读取中…</span>
+        </span>
+        <span class="cs-row-chevron">${csSvg(CS_ICONS.chevron).innerHTML}</span>
+      </button>
+      <div class="set-hint">去全部设置 → 权限里批准 / 拒绝。</div>
+    </div>`;
+  drawer.append(body);
+
+  // 三档分段：mountSegmented/syncSegmented 复用，事件只绑抽屉这一份
+  const box = body.querySelector("#cs-policy-switch");
+  if (box) {
+    mountSegmented(box);
+    for (const button of box.querySelectorAll("[data-policy]")) {
+      button.setAttribute("aria-checked", String(button.dataset.policy === csPolicy?.access));
+    }
+    syncSegmented(box);
+    for (const button of box.querySelectorAll("[data-policy]")) {
+      button.addEventListener("click", async () => {
+        for (const other of box.querySelectorAll("[data-policy]")) {
+          other.setAttribute("aria-checked", String(other === button));
+        }
+        syncSegmented(box);
+        if (csPolicy) csPolicy.access = button.dataset.policy;
+        await request("/api/v1/agent/policy", {
+          method: "POST",
+          body: JSON.stringify({ access: button.dataset.policy }),
+        }).catch(() => undefined);
+      });
+    }
+  }
+
+  const confirm = body.querySelector("#cs-policy-confirm-writes");
+  confirm?.addEventListener("click", async () => {
+    const next = confirm.getAttribute("aria-checked") !== "true";
+    confirm.setAttribute("aria-checked", String(next));
+    if (csPolicy) csPolicy.confirmWrites = next;
+    await request("/api/v1/agent/policy", {
+      method: "POST",
+      body: JSON.stringify({ confirmWrites: next }),
+    }).catch(() => undefined);
+  });
+
+  // 审批计数：GET /agent/approvals 不带 conversationId = 全局 pending
+  void (async () => {
+    const node = body.querySelector("#cs-approval-count");
+    if (!node) return;
+    try {
+      const response = await request("/api/v1/agent/approvals", { cache: "no-store" });
+      const data = await response.json();
+      const count = Array.isArray(data) ? data.length : Array.isArray(data.approvals) ? data.approvals.length : 0;
+      node.textContent = count > 0 ? `${count} 条待处理` : "没有待处理";
+    } catch {
+      node.textContent = "—";
+    }
+  })();
+  body.querySelector("#cs-approval-entry")?.addEventListener("click", () => {
+    closeChatSettings();
+    location.hash = "#/settings";
+  });
+}
+
+/* ── 二级页 · 通知：主开关（KEY_NOTIFY，含权限申请）+ 三时机过滤 ──
+   三时机是纯前端 localStorage 过滤：all 放行全部 / error 放行出错+待处理 /
+   attention 只放行待你处理；SSE 帧的 kind 已经够用，不加端点。 */
+function renderCsNotifyPage() {
+  const drawer = el.chatSettingsDrawer;
+  if (!drawer) return;
+  drawer.replaceChildren(csHead("通知", { back: true }));
+  const body = document.createElement("div");
+  body.className = "cs-body";
+  const notifyOn = localStorage.getItem(KEY_NOTIFY) === "1";
+  const timing = localStorage.getItem(KEY_NOTIFY_TIMING) || "all";
+  const timingRow = (key, sub) => `
+        <button class="cs-row" type="button" data-timing="${key}" role="radio" aria-checked="${key === timing}">
+          <span class="cs-row-main">
+            <span class="cs-row-title">${CS_TIMING_LABEL[key]}</span>
+            <span class="cs-row-sub">${sub}</span>
+          </span>
+          <span class="cs-row-chevron" data-check ${key === timing ? "" : "hidden"}>✓</span>
+        </button>`;
+  body.innerHTML = `
+    <div class="cs-section">
+      <div class="cs-row" style="cursor:default">
+        <span class="cs-row-main">
+          <span class="cs-row-title">桌面通知</span>
+          <span class="cs-row-sub">回复完成 / 出错 / 待你处理时提醒；窗口正看着这个会话就不打扰</span>
+        </span>
+        ${switchMarkup(notifyOn, { label: "桌面通知", attrs: 'id="cs-notify-switch"' })}
+      </div>
+      <div class="divider"></div>
+      <div class="set-hint">提醒哪些时机</div>
+      <div id="cs-notify-timing" role="radiogroup" aria-label="提醒时机">
+        ${timingRow("all", "完成、出错、待你处理都提醒")}
+        ${timingRow("error", "出错与待你处理时提醒，完成不打扰")}
+        ${timingRow("attention", "只有等你处理时才提醒")}
+      </div>
+    </div>`;
+  drawer.append(body);
+
+  const notifySwitch = body.querySelector("#cs-notify-switch");
+  // 主开关口径抄全屏设置页（设置-服务分区）：开的时候才请求系统权限；被拒就退回关闭
+  notifySwitch?.addEventListener("click", async () => {
+    const want = notifySwitch.getAttribute("aria-checked") !== "true";
+    if (!want) {
+      localStorage.setItem(KEY_NOTIFY, "0");
+      notifySwitch.setAttribute("aria-checked", "false");
+      renderCsHome();
+      return;
+    }
+    if (!("Notification" in window)) {
+      toast("这个环境不支持通知");
+      return;
+    }
+    if (Notification.permission !== "granted") {
+      const permission = await Notification.requestPermission();
+      if (permission !== "granted") {
+        toast("通知权限被拒了，去系统设置里开");
+        return;
+      }
+    }
+    localStorage.setItem(KEY_NOTIFY, "1");
+    notifySwitch.setAttribute("aria-checked", "true");
+    renderCsHome();
+  });
+
+  for (const row of body.querySelectorAll("[data-timing]")) {
+    row.addEventListener("click", () => {
+      localStorage.setItem(KEY_NOTIFY_TIMING, row.dataset.timing);
+      for (const other of body.querySelectorAll("[data-timing]")) {
+        other.setAttribute("aria-checked", String(other === row));
+        other.querySelector("[data-check]").hidden = other !== row;
+      }
+      renderCsHome();
+    });
   }
 }
 
@@ -5388,17 +5777,16 @@ el.modelPill?.addEventListener("click", () => void toggleModelMenu());
 // 被替换掉的旧按钮已经脱离文档，冒泡到 document 时会被当成外部点击误关。
 el.modelMenu?.addEventListener("click", (event) => event.stopPropagation());
 
-// 对话右上角快捷设置（2026-11-07）：同套点外关/Esc 关；供应商段切换时同步批量区「加到」标签
+// 对话右上角快捷设置（2026-11-07 抽屉改造）：三通道关闭 = Esc / X / 点遮罩；供应商段切换时同步批量区「加到」标签
 el.chatSettingsBtn?.addEventListener("click", () => void toggleChatSettings());
-el.chatSettingsMenu?.addEventListener("click", (event) => event.stopPropagation());
-el.chatSettingsMenu?.addEventListener("providerchange", () => syncChatSettingsTarget());
+el.chatSettingsOverlay?.addEventListener("click", () => closeChatSettings());
+el.chatSettingsDrawer?.addEventListener("providerchange", () => syncChatSettingsTarget());
 // 附件按钮只弹占位提示，不发请求
 el.composerAdd?.addEventListener("click", () => toast("附件还没接上，先占个位"));
 
 // pill 在右组（D2），不能再用 .composer-tools 判内外：按触发 pill 和菜单自己判
 document.addEventListener("click", (event) => {
   if (!event.target.closest("#model-pill") && !event.target.closest("#model-menu")) closeModelMenu();
-  if (!event.target.closest("#chat-settings-btn") && !event.target.closest("#chat-settings-menu")) closeChatSettings();
   // 项目弹层有两个触发点（展开态 pill / 轨道按钮），菜单自己也算里面
   if (
     !event.target.closest("#proj-pill") &&
@@ -5410,6 +5798,8 @@ document.addEventListener("click", (event) => {
 });
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
+  // 输入法豁免： composing 中 / keyCode 229（安卓输入法）的 Esc 不当关闭用
+  if (event.isComposing || event.keyCode === 229) return;
   // 模态在最上层：先关它，别同时把下面的弹层/路由也收掉。
   // stopImmediatePropagation 是给 reduced-motion 的：没有动画时 modalOpen()
   // 立刻变 false，第二个全局 Esc 监听会以为是普通返回。
