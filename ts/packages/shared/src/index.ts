@@ -830,6 +830,12 @@ export const PartnerProfileSchema = z.object({
 	 * 只在 `GET /api/v1/partners/:id` 的投影里出现；旧客户端忽略未知字段即可。
 	 */
 	avatar: PartnerAvatarSchema.nullable(),
+	/**
+	 * 派发权（2026-11-06 执事派发权开关，纯增量可选）：带 domain 的执事是否作为
+	 * 分管负责人接单。默认关；投影只对带 domain 的执事给，普通执事不带。
+	 * 旧客户端按「忽略未知字段」处理即可。
+	 */
+	dispatchAuthority: z.boolean().optional(),
 });
 export type PartnerProfile = z.infer<typeof PartnerProfileSchema>;
 

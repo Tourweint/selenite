@@ -81,6 +81,11 @@ export interface PartnerRow {
 	 * 只供 `<img>` 渲染；服务端不存路径、不收外部 URL、不收 SVG（理由见 shared 的 PartnerAvatarSchema）。
 	 */
 	avatar: string | null;
+	/**
+	 * 派发权（2026-11-06 执事派发权开关）：带 domain 的执事是否作为分管负责人接单。
+	 * 默认关。只对带 domain 的执事有意义。
+	 */
+	dispatchAuthority: boolean;
 }
 
 export interface PartnerVersionRow {
@@ -192,7 +197,8 @@ export class PartnersStore {
 				created_at      TEXT NOT NULL,
 				updated_at      TEXT NOT NULL,
 				domain          TEXT,
-				avatar          TEXT
+				avatar          TEXT,
+			dispatch_authority INTEGER NOT NULL DEFAULT 0
 			);
 			CREATE TABLE IF NOT EXISTS partner_versions (
 				partner_id   TEXT NOT NULL,
@@ -271,6 +277,10 @@ export class PartnersStore {
 		// 头像列（2026-11-06 侧栏调整 B1）：旧库补 nullable 列，旧记录读出来是 null（前端首字兜底）。
 		if (!columns.some((column) => column.name === "avatar")) {
 			this.db.exec("ALTER TABLE partners ADD COLUMN avatar TEXT");
+		}
+		// 派发权列（2026-11-06 执事派发权开关）：旧库补列，旧记录读出来是 false（默认关）。
+		if (!columns.some((column) => column.name === "dispatch_authority")) {
+			this.db.exec("ALTER TABLE partners ADD COLUMN dispatch_authority INTEGER NOT NULL DEFAULT 0");
 		}
 	}
 
@@ -370,6 +380,18 @@ export class PartnersStore {
 		this.db
 			.prepare("UPDATE partners SET avatar = ?, updated_at = ? WHERE id = ?")
 			.run(avatar, new Date().toISOString(), id);
+		return this.get(id);
+	}
+
+	/**
+	 * 设置派发权（2026-11-06 执事派发权开关）：一条 UPDATE 原子落地。
+	 * 只写 dispatch_authority（与 updated_at）；不存在返回 null，由调用方映射 404。
+	 */
+	setDispatchAuthority(id: string, enabled: boolean): PartnerRow | null {
+		if (!this.get(id)) return null;
+		this.db
+			.prepare("UPDATE partners SET dispatch_authority = ?, updated_at = ? WHERE id = ?")
+			.run(enabled ? 1 : 0, new Date().toISOString(), id);
 		return this.get(id);
 	}
 
@@ -1034,6 +1056,7 @@ function toPartner(row: Record<string, unknown>): PartnerRow {
 		updatedAt: String(row.updated_at ?? ""),
 		domain: row.domain === null || row.domain === undefined ? null : String(row.domain),
 		avatar: row.avatar === null || row.avatar === undefined ? null : String(row.avatar),
+		dispatchAuthority: Number(row.dispatch_authority ?? 0) !== 0,
 	};
 }
 
@@ -1148,4 +1171,27 @@ export function partnerIdentityForDomain(
 	const soul = store.currentVersion(id)?.soulSource;
 	if (!soul?.trim()) return null;
 	return { name: partner.name, soul };
+}
+
+/**
+ * 派发权总闸（2026-11-06 执事派发权开关）：只有明确写 false/0 才关，避免拼错一个值
+ * 把功能误关掉（与 CHANCELLOR_ENABLED 同读法）。关 = 所有执事一律视为无派发权，
+ * 一行 env 回到本改动前形态（回滚开关）。
+ */
+export function ministerDispatchMasterEnabled(): boolean {
+	const raw = process.env.MINISTER_DISPATCH_AUTHORITY?.trim().toLowerCase();
+	return raw !== "false" && raw !== "0";
+}
+
+/**
+ * 按 domain 判定派发权是否放行（2026-11-06 执事派发权开关）。
+ * 总闸关 / 查无执事 / 该执事开关关 → false。派单装配层（tools.ts 的 localIdentityHit）
+ * 先过这道闸，再查身份——关着时返回 null，请求不带 managerIdentity，
+ * chancellor 以默认路径（总管直派）办完这张单，行为等同旧领域。
+ */
+export function ministerDispatchAllowed(store: PartnersStore, domain: string): boolean {
+	if (!ministerDispatchMasterEnabled()) return false;
+	const id = store.partnerIdByDomain(domain);
+	if (!id) return false;
+	return store.get(id)?.dispatchAuthority === true;
 }

@@ -103,11 +103,13 @@ export function stopMinisterPartner(
 	return { ok: true };
 }
 
-/** 对外投影：只给名字 / domain / 状态；不带内部会话 id，也不回显执事 uuid。 */
+/** 对外投影：只给名字 / domain / 状态 / 派发权；不带内部会话 id，也不回显执事 uuid。 */
 export interface MinisterProjection {
 	name: string;
 	domain: string;
 	status: string;
+	/** 派发权（2026-11-06）：是否作为分管负责人接单。 */
+	dispatchAuthority: boolean;
 }
 
 /**
@@ -126,5 +128,25 @@ export function listMinisterPartners(
 			name: partner.name,
 			domain: partner.domain as string,
 			status: partner.status,
+			dispatchAuthority: partner.dispatchAuthority,
 		}));
+}
+
+/**
+ * 切换执事派发权（2026-11-06 执事派发权开关）。核心实现：HTTP 端点（PATCH body）与
+ * partner_manage 工具（set_dispatch）共用。只对带 domain 的执事有意义；
+ * 普通执事返回可映射成 400 的 error。立即生效：派单时实时查库，无缓存。
+ */
+export function setMinisterDispatchAuthority(
+	partnerId: string,
+	enabled: boolean,
+	ctx: MinisterContext = defaultMinisterContext(),
+): MinisterResult<PartnerRow> {
+	const partner = ctx.store.get(partnerId);
+	if (!partner || !partner.domain) {
+		return { ok: false, error: "找不到该执事（只能切带 domain 的执事的派发权）" };
+	}
+	const updated = ctx.store.setDispatchAuthority(partnerId, enabled);
+	if (!updated) return { ok: false, error: "找不到该执事" };
+	return { ok: true, value: updated };
 }

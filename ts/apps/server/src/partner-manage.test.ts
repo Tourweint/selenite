@@ -209,7 +209,7 @@ test("list：只投影名字/domain/状态，一行一个，不带内部会话 i
 		assert.equal(out.includes(finance), false, "不回显执事 uuid");
 		assert.equal(out.includes(desktop), false, "不回显执事 uuid");
 		for (const line of lines) {
-			assert.equal(line.split(" · ").length, 3, `每行应是 名字 · domain · 状态：${line}`);
+			assert.equal(line.split(" · ").length, 4, `每行应是 名字 · domain · 状态 · 派发权：${line}`);
 		}
 
 		// partnerId 可选过滤

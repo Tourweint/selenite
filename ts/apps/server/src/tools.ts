@@ -4,6 +4,8 @@ import {
 	CHIEF_PARTNER_ID,
 	COMPANIONS_ENABLED,
 	effectivePartnerIdOfSession,
+	/** 派发权闸（2026-11-06）：开关关 → 不注入执事身份，派单等同旧领域。 */
+	ministerDispatchAllowed,
 	partnerIdentityForDomain,
 	partnersStore,
 } from "./partners.ts";
@@ -12,6 +14,7 @@ import {
 	createMinisterPartner,
 	defaultMinisterContext,
 	listMinisterPartners,
+	setMinisterDispatchAuthority,
 	stopMinisterPartner,
 	type MinisterContext,
 } from "./partner-manage.ts";
@@ -77,6 +80,9 @@ const MEMORY_KINDS: MemoryKind[] = ["fact", "episode", "preference", "entity"];
 function localIdentityHit(domain: string): { name: string; soul: string } | null {
 	if (!COMPANIONS_ENABLED) return null;
 	try {
+		// 派发权闸（2026-11-06）：开关关（或 env 总闸关）时不命中，请求不带 managerIdentity，
+		// chancellor 以默认路径（总管直派）办单——等同旧领域，不拒单。
+		if (!ministerDispatchAllowed(partnersStore(), domain)) return null;
 		return partnerIdentityForDomain(partnersStore(), domain);
 	} catch {
 		return null;
@@ -690,23 +696,26 @@ export function createTools(deps: ToolDeps) {
 			defineTool({
 				name: "partner_manage",
 				description:
-					"总管管理执事（chancellor 分管宰相）：create 建一个、stop 停一个、list 列出全部。" +
+					"总管管理执事（chancellor 分管宰相）：create 建一个、stop 停一个、list 列出全部、set_dispatch 切某个执事的派发权（是否作为分管负责人接单，默认关）。" +
 					"只有总管 / 主对话能用；执事自己的执事会话不能管理执事。" +
 					"create 的 domain 是之后派活用的领域名，必须是小写 ASCII（小写字母、数字、连字符，如 frontend / desktop-shell），" +
 					"name 是展示名（中文随意）。建好后用 delegate(domain=<domain>) 把活派给它。",
 				parameters: Type.Object({
-					action: Type.Unsafe<"create" | "stop" | "list">({
+					action: Type.Unsafe<"create" | "stop" | "list" | "set_dispatch">({
 						type: "string",
-						enum: ["create", "stop", "list"],
-						description: "create=建执事 / stop=停执事 / list=列出执事",
+						enum: ["create", "stop", "list", "set_dispatch"],
+						description: "create=建执事 / stop=停执事 / list=列出执事 / set_dispatch=切派发权",
 					}),
 					name: Type.Optional(Type.String({ description: "create 必填，展示名，≤40 字" })),
 					domain: Type.Optional(
 						Type.String({ description: "create 必填，小写 ASCII 领域名（之后派活路由用）" }),
 					),
 					soul: Type.Optional(Type.String({ description: "create 可选，一句话身份；缺省用默认播种" })),
+				enabled: Type.Optional(
+					Type.Boolean({ description: "set_dispatch 必填：true=开派发权 / false=关" }),
+				),
 					partnerId: Type.Optional(
-						Type.String({ description: "stop 必填（执事 id）；list 可选按 id 过滤" }),
+						Type.String({ description: "stop/set_dispatch 必填（执事 id）；list 可选按 id 过滤" }),
 					),
 				}),
 				execute: async (args, api) => {
@@ -751,9 +760,26 @@ export function createTools(deps: ToolDeps) {
 					if (args.action === "list") {
 						const rows = listMinisterPartners(ctx, (args.partnerId ?? "").trim() || undefined);
 						if (rows.length === 0) return text("（暂无执事；用 create 建一个）");
-						return text(rows.map((row) => `${row.name} · ${row.domain} · ${row.status}`).join("\n"));
+						return text(
+							rows.map(
+								(row) =>
+									`${row.name} · ${row.domain} · ${row.status} · 派发权${row.dispatchAuthority ? "开" : "关"}`,
+							).join("\n"),
+						);
 					}
-					return text("action 只能是 create / stop / list");
+					if (args.action === "set_dispatch") {
+						const dispatchId = (args.partnerId ?? "").trim();
+						if (!dispatchId) return text("set_dispatch 需要 partnerId（执事 id）");
+						if (typeof args.enabled !== "boolean") {
+							return text("set_dispatch 需要 enabled（true=开 / false=关）");
+						}
+						const result = setMinisterDispatchAuthority(dispatchId, args.enabled, ctx);
+						if (!result.ok) return text(result.error);
+						return text(
+							`执事 ${result.value.name}（domain=${result.value.domain}）的派发权已${args.enabled ? "打开：之后 delegate(domain=…) 会以它的名义派分管" : "关闭：之后 delegate(domain=…) 不再经过它，等同无分管领域"}。`,
+						);
+					}
+					return text("action 只能是 create / stop / list / set_dispatch");
 				},
 			}),
 		);

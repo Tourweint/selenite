@@ -113,6 +113,7 @@ export function mountCompanions(app: Hono): void {
 					modelChain?: unknown;
 					domain?: unknown;
 					avatar?: unknown;
+					dispatchAuthority?: unknown;
 			  }
 			| null;
 		const partner = store().get(id);
@@ -184,6 +185,10 @@ export function mountCompanions(app: Hono): void {
 			const invalid = validateModelChain(body.modelChain);
 			if (invalid) return c.json({ error: "bad_request", message: invalid }, 400);
 		}
+		// 派发权（2026-11-06 执事派发权开关）：省略 = 不改；类型在写入前拦，避免部分写入。
+		if (body?.dispatchAuthority !== undefined && typeof body.dispatchAuthority !== "boolean") {
+			return c.json({ error: "bad_request", message: "dispatchAuthority 必须是布尔值" }, 400);
+		}
 
 		// ── 全部合法，开始写 ──
 		if (avatar !== undefined) store().setAvatar(id, avatar);
@@ -192,6 +197,14 @@ export function mountCompanions(app: Hono): void {
 		if (typeof body?.status === "string") patch.status = body.status as PartnerStatus;
 		const updated = store().update(id, patch);
 		if (!updated) return c.json({ ok: false, error: "not_found" }, 404);
+		// 派发权（2026-11-06）：只对带 domain 的执事有意义；普通执事 400。
+		let refreshed = updated;
+		if (body?.dispatchAuthority !== undefined) {
+			if (!updated.domain) {
+				return c.json({ error: "bad_request", message: "该执事不带 domain，没有派发权可切" }, 400);
+			}
+			refreshed = store().setDispatchAuthority(id, body.dispatchAuthority) ?? updated;
+		}
 
 		// SOUL 修改 = 磁盘当前值 + 新版本快照（不覆盖旧版本：演化链可追溯）
 		let soulVersion: number | null = null;
@@ -211,7 +224,7 @@ export function mountCompanions(app: Hono): void {
 
 		return c.json({
 			ok: true,
-			partner: projection(updated),
+			partner: projection(refreshed),
 			...(soulVersion !== null ? { soulVersion } : {}),
 		});
 	});
@@ -580,7 +593,7 @@ function routineProjection(routine: {
 }
 
 /** 对外投影：只给对外字段。canonical 会话的内部自增 id 不出网（对外 id 一律 uuid）。 */
-function projection(partner: { id: string; name: string; status: string; currentVersion: number | null; createdAt: string; updatedAt: string; domain?: string | null; avatar?: string | null }) {
+function projection(partner: { id: string; name: string; status: string; currentVersion: number | null; createdAt: string; updatedAt: string; domain?: string | null; avatar?: string | null; dispatchAuthority?: boolean }) {
 	return {
 		id: partner.id,
 		name: partner.name,
@@ -590,6 +603,8 @@ function projection(partner: { id: string; name: string; status: string; current
 		updatedAt: partner.updatedAt,
 		// 纯增量：普通执事不带这个字段（行为零变化），执事带 domain。
 		...(partner.domain ? { domain: partner.domain } : {}),
+		// 派发权（2026-11-06 执事派发权开关，纯增量）：只对带 domain 的执事给，默认关。
+		...(partner.domain ? { dispatchAuthority: partner.dispatchAuthority } : {}),
 		// 纯增量（2026-11-06 B1）：未设置给 null，前端据此回落名字首字。
 		avatar: partner.avatar ?? null,
 	};
