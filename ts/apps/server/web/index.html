@@ -83,17 +83,16 @@
 
 <div class="app">
   <aside class="sidebar">
-    <!-- 收起轨道（2026-11-05 F1 / E4 重排 / E5 对齐）：对齐 CINDY 几何，72px 轨 + 36×36 圆钮。
-         顺序 = 总管（首字圆钮，点开主对话）→ 跟总管说话（＋）→ 任务中心 → 项目 → 分隔线 →
-         执事占位（不展开，悬停提示去看展开侧栏）→ 群组占位 → 设置 + 状态点。
-         展开态 E5 起按同一顺序排：总管区 → 任务中心/项目 → 执事花名册 → 群组 → 设置。
+    <!-- 收起轨道（2026-11-05 F1 / E4 重排 / E5 对齐）：对齐 CINDY 几何，72px 轨 + 40×40 圆钮。
+         顺序与展开态一致：新建对话（＋）→ 总管（首字圆钮，点开主对话）→ 任务中心 → 项目 →
+         分隔线 → 执事占位（不展开，悬停提示去看展开侧栏）→ 群组占位 → 底部一行齿轮 + 状态点。
          项目按钮与展开态 pill 共用同一个弹层（#proj-menu）。 -->
     <div class="side-rail" id="side-rail">
+      <button class="rail-btn" id="rail-new" type="button" data-tip="新建对话 (Ctrl+K)" aria-label="新建对话">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+      </button>
       <button class="rail-btn rail-chief" id="rail-chief" type="button" data-tip="总管 · 打开主对话" aria-label="总管 · 打开主对话">
         <span class="pt-avatar" aria-hidden="true">总</span>
-      </button>
-      <button class="rail-btn" id="rail-new" type="button" data-tip="跟总管说话 (Ctrl+K)" aria-label="跟总管说话">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
       </button>
       <button class="rail-btn" id="rail-tasks" type="button" data-tip="任务中心" aria-label="任务中心">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="8" height="4" x="8" y="2" rx="1" ry="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M12 11h4"/><path d="M12 16h4"/><path d="M8 11h.01"/><path d="M8 16h.01"/></svg>
@@ -116,33 +115,39 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/><path d="M8 12h.01"/><path d="M12 12h.01"/><path d="M16 12h.01"/></svg>
       </button>
       <div class="rail-flex" aria-hidden="true"></div>
-      <button class="rail-btn" id="rail-settings" type="button" data-tip="设置" aria-label="设置">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/>
-          <circle cx="12" cy="12" r="3"/>
-        </svg>
-      </button>
-      <div class="rail-status" id="rail-status" data-state="waiting" aria-hidden="true"><i></i></div>
+      <!-- 收起态底部：齿轮与状态点同一行，避免 72px 轨里竖向堆叠 -->
+      <div class="rail-foot">
+        <button class="rail-btn" id="rail-settings" type="button" data-tip="设置" aria-label="设置" title="设置">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/>
+            <circle cx="12" cy="12" r="3"/>
+          </svg>
+        </button>
+        <div class="rail-status" id="rail-status" data-state="waiting" aria-hidden="true"><i></i></div>
+      </div>
     </div>
 
-    <div class="sidebar-inner">
-      <!-- 总管区（E4）：＋跟总管说话 / 总管固定条目（状态点＋首字头像＋名字＋pill）/
+    <div class="sidebar-inner" id="sidebar-inner">
+      <!-- 总管区（E4）：新建对话 / 总管固定条目（首字头像＋名字＋pill＋状态点）/
            最近会话折叠（原「对话」列表整块移入这里，默认展开，折叠态存 localStorage）。 -->
       <div class="side-chief">
         <button class="new" id="new-chat" type="button"
-                aria-label="跟总管说话" title="跟总管说话 (Ctrl+K)">
+                aria-label="新建对话" title="新建对话 (Ctrl+K)">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
-          跟总管说话
+          新建对话
         </button>
 
         <div class="side-item chief-entry" id="chief-entry" role="button" tabindex="0"
              aria-label="总管 · 打开主对话" title="总管 · 打开主对话">
-          <i class="status-dot idle" id="chief-dot" aria-hidden="true"></i>
-          <span class="pt-avatar" aria-hidden="true">总</span>
+          <!-- 头像单独可聚焦：点它进编辑（不触发行点击），行其余部分仍打开主对话。
+               没有自定义图片时显示名字首字。 -->
+          <button class="pt-avatar avatar-edit" id="chief-avatar" type="button"
+                  aria-label="编辑总管头像" title="编辑总管头像">总</button>
           <span class="roster-name">总管</span>
           <span class="pill-tag">总管</span>
           <!-- E5：无 domain 的活跃单归总管；只显示不点击（总管的单没有 domain 筛选入口） -->
           <span class="side-count chief-count" id="chief-count" hidden></span>
+          <i class="status-dot idle" id="chief-dot" aria-hidden="true"></i>
         </div>
 
         <div class="recents" id="recents">
@@ -159,8 +164,8 @@
 
       <div class="rail-sep side-sep" aria-hidden="true"></div>
 
-      <!-- 工具区（E5 上移）：顺序与收起轨道一一对应——总管 → 新对话 → 任务中心 → 项目
-           → 执事 → 群组 → 设置。工具区放在执事之前，两边从上到下一致。 -->
+      <!-- 工具区（E5 上移）：顺序与收起轨道一一对应——新建对话 → 总管 → 任务中心 → 项目
+           → 执事 → 群组 → 底部齿轮。工具区放在执事之前，两边从上到下一致。 -->
       <div class="side-top">
         <button class="side-item" id="open-tasks" type="button" aria-label="任务中心" title="任务中心">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -176,10 +181,14 @@
         </button>
 
         <!-- 项目区（2026-11-04，F1 起无工作区也显示）：主项目 pill，点开是「主项目 + 子项目」总览。
-             没有工作区时作为「添加主项目」入口，不再整块隐藏。 -->
+             没有工作区时作为「设置主项目」入口，不再整块隐藏。 -->
         <div class="side-proj" id="side-proj" hidden>
           <button class="composer-pill proj-pill" id="proj-pill" type="button"
                   aria-haspopup="menu" aria-expanded="false" aria-label="项目" title="项目">
+            <svg class="proj-pill-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>
+            </svg>
             <span class="proj-pill-label" id="proj-pill-label">项目</span>
             <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
           </button>
@@ -207,19 +216,18 @@
       </button>
       <div class="roster" id="group-list" aria-label="群组列表" hidden></div>
 
-      <!-- 底部只留设置 + 连接状态，mt-auto 钉在侧栏底边 -->
+      <!-- 底部一行：左服务状态、右齿轮（只留图标，提示走 aria-label/title）。
+           mt-auto 钉在侧栏底边；设置页会隐藏侧栏，所以设置页自带返回按钮。 -->
       <div class="side-foot">
-        <!-- 设置入口常驻侧栏底部：设置页会隐藏侧栏，所以设置页自带返回按钮 -->
-        <button class="side-item" id="open-settings" type="button" aria-label="设置" title="设置">
+        <span class="status" id="status" data-state="waiting">
+          <i aria-hidden="true"></i><span id="status-text">连接中</span>
+        </span>
+        <button class="side-item foot-gear" id="open-settings" type="button" aria-label="设置" title="设置">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/>
             <circle cx="12" cy="12" r="3"/>
           </svg>
-          设置
         </button>
-        <span class="status" id="status" data-state="waiting">
-          <i aria-hidden="true"></i><span id="status-text">连接中</span>
-        </span>
       </div>
     </div>
   </aside>

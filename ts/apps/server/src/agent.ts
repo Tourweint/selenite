@@ -41,6 +41,7 @@ import {
 import { recentDiaryMemories, syncDiaryToMemory } from "./memory-ingest.ts";
 import { pathGuardBlockReason } from "./path-guard.ts";
 import {
+	CHIEF_PARTNER_ID,
 	COMPANIONS_ENABLED,
 	chiefPartnerEnabled,
 	chiefSkillsDir,
@@ -63,7 +64,7 @@ import { autonomyRiskVerdict } from "./autonomy-risk.ts";
 import { ReminderTask } from "./reminder.ts";
 import { createSkillStore, type SkillStore } from "./skills.ts";
 import { createTools } from "./tools.ts";
-import type { DelegationPhase, ThinkingLevel, TurnUsage } from "@lifediary/shared";
+import type { ChatKind, DelegationPhase, NewChatKind, ThinkingLevel, TurnUsage } from "@lifediary/shared";
 import { watchDelegation, emitDelegation, type DelegationEvent, type DelegationReport } from "./delegation.ts";
 
 /**
@@ -366,6 +367,31 @@ const PERSONA = [
 	"需要长期记住的事用 remember；想不起对方说过什么用 recall；要定时提醒用 set_reminder。",
 ].join("");
 
+/**
+ * 普通 worker 的人格（2026-11-06 侧栏调整 B2）。
+ *
+ * 为什么要单独一段：新建会话以前也走总管 persona——前端只是没把"总管"写进按钮，
+ * 模型那边照样自称总管、默认维护执事档案。worker 是**普通任务助手**：
+ * 不读总管 SOUL、不冒称总管、不建立执事身份，但工具闸门 / 工作区边界 / 审批一条不少。
+ */
+const WORKER_PERSONA = [
+	"你是一个普通任务助手，负责把交到你手上的具体事情办完。",
+	"说话直接、克制、就事论事，给结论也给依据；不冒充总管，也不代表任何执事。",
+	"涉及真实文件、真实数据、真实日程或当前时间的事，必须先用工具去看，不许凭印象回答或编造；看不到就说明缺什么。",
+	"没有预设的私人档案，也不主动建立执事身份。",
+	"需要长期记住的事用 remember；想不起对方说过什么用 recall；要定时提醒用 set_reminder。",
+].join("");
+
+/**
+ * 新会话能不能开成 worker（2026-11-06 B2 回滚开关）：`WORKER_CHAT_ENABLED=false` 只拦**新建**，
+ * 已经落盘的 worker 保持原身份（不把旧 worker 重解释成总管）。默认启用。
+ */
+export function workerChatEnabled(): boolean {
+	const raw = process.env.WORKER_CHAT_ENABLED?.trim().toLowerCase();
+	if (!raw) return true;
+	return raw !== "false" && raw !== "0";
+}
+
 // ── 记忆 ─────────────────────────────────────────────────
 /** 召回候选窗口下限（2026-11-04 批次一 A2-S）：不配 = 200；设 50 = 旧行为。 */
 function memoryCandidateFloor(): number | undefined {
@@ -554,6 +580,23 @@ const Chats = defineDoc<{ byExternal: Record<string, number> }>({
 	checkpointWhen: () => false,
 });
 
+/**
+ * 会话种类表（2026-11-06 侧栏调整 B2）：durable 内部会话 id → `chief | worker`。
+ *
+ * 为什么放 durable 而不是前端/本地文件：身份要跨刷新、跨标签页、跨重启稳定，
+ * 且不能被客户端自报（否则"普通会话"只是一句 UI 文案）。存在内部 id 上，
+ * 与对外 uuid 解耦——id 映射换实现时这张表不用动。
+ *
+ * 缺项 = 这次改动之前建的旧会话 = `chief`（默认仍是总管，手机与旧调用方零改动）。
+ */
+const ChatKinds = defineDoc<{ byInternal: Record<string, "chief" | "worker"> }>({
+	kind: "lifediary.chat-kinds",
+	version: 1,
+	scope: "session",
+	initial: () => ({ byInternal: {} }),
+	checkpointWhen: () => false,
+});
+
 // ── 装配 ─────────────────────────────────────────────────
 let opening: Promise<Harness> | null = null;
 
@@ -597,9 +640,26 @@ async function openHarness(): Promise<Harness> {
 				},
 			}),
 			sections: [
-				// 总管身份（批次D D1）：总管存在且 SOUL 可读时用 SOUL 当前版本快照，否则回落原 PERSONA
-				// 常量（兜底：执事库初始化失败不能把主对话弄哑）。首启 SOUL = PERSONA 原文 → 行为零变化。
-				{ key: "persona", render: () => resolvePersona(partnersStore, PERSONA) },
+				// 人格（2026-11-06 B2 改为按会话种类分流）：
+				//  - 非 chief 的执事会话 → 不注入总管 persona（身份来自其 configure instructions）；
+				//  - worker → 独立的普通任务助手提示；
+				//  - chief / 无记录旧会话 → 总管 SOUL 当前版本快照，读不到回落原 PERSONA 常量。
+				{
+					key: "persona",
+					render: async (input) => {
+						if (COMPANIONS_ENABLED) {
+							try {
+								const partnerId = partnersStore().partnerIdOfSession(Number(input.conversationId));
+								if (partnerId && partnerId !== CHIEF_PARTNER_ID) return undefined;
+							} catch {
+								// 档案库读失败：按总管处理，主对话不能哑
+							}
+						}
+						const kinds = await input.read.snapshot(ChatKinds, CTX);
+						if (kinds?.byInternal?.[String(input.conversationId)] === "worker") return WORKER_PERSONA;
+						return resolvePersona(partnersStore, PERSONA);
+					},
+				},
 				// 当前项目（2026-11-04 方案 §2.3）：每轮现渲染，不写进对话历史。
 				// 切换项目后 durable 会按 section 差异追加新的 pi.system，下一轮即生效。
 				{
@@ -1280,10 +1340,15 @@ function thinkingToolLevel(): ThinkingLevel {
 /**
  * 解析会话。`externalId` 为空表示新建。
  * 返回 null 表示"这个 id 我没发过" —— 调用方据此回 404，而不是偷偷建一个新的。
+ *
+ * `kind`（2026-11-06 侧栏调整 B2）：只对**新建**有意义，落进 ChatKinds doc，
+ * 与对外 id 映射在同一个 init 事务里写（不会出现"会话建好了但身份没记上"）。
+ * 缺省 = `chief`：手机与旧调用方不带这个参数，行为与改动前一致。
  */
 export async function openChat(
 	externalId: string | undefined,
 	modelRef?: { provider: string; modelId: string },
+	kind?: NewChatKind,
 ): Promise<ResolvedChat | null> {
 	const harness = await getHarness();
 	const config = readLlmConfig();
@@ -1291,15 +1356,18 @@ export async function openChat(
 
 	if (!externalId) {
 		const id = crypto.randomUUID();
+		const chatKind: NewChatKind = kind ?? "chief";
 		const conversation = await harness.createConversation(
 			{
 				ownership: { kind: "ownerless" },
 				// 新会话默认思考关（2026-10-31 方案 D2：聊天一律不思考，首字 0.8~0.9s）
 				agent: { model: modelRef ?? chatModelRef("off") },
-				// 建会话和写映射在同一个提交里，不会出现"会话建好了但映射没写上"
+				// 建会话、写映射、记种类在同一个提交里，三件事要么都在要么都不在
 				init: async (tx, conversationId) => {
 					const chats = await tx.doc(Chats);
 					chats.byExternal[id] = Number(conversationId);
+					const kinds = await tx.doc(ChatKinds);
+					kinds.byInternal[String(conversationId)] = chatKind;
 				},
 			},
 			CTX,
@@ -1362,6 +1430,33 @@ export async function externalChatIds(): Promise<Map<number, string>> {
 		if (Number.isFinite(id)) map.set(id, externalId);
 	}
 	return map;
+}
+
+/**
+ * 会话种类（2026-11-06 侧栏调整 B2，历史 / 列表响应用）。
+ *
+ * 顺序即语义：**执事链接优先**（partner 由服务端链接表判定，客户端不能自报）；
+ * 其次 ChatKinds 记录；没有记录 = 本次改动前建的旧会话 = `chief`。
+ */
+export async function chatKindOf(chat: ResolvedChat): Promise<ChatKind> {
+	const harness = await getHarness();
+	const kinds = await harness.snapshot(ChatKinds, CTX);
+	return chatKindOfInternal(chat.internalId, kinds?.byInternal ?? {});
+}
+
+/** 列表批量版：种类表只读一次，不逐会话打开（listChats 的代价口径不变）。 */
+function chatKindOfInternal(
+	internalId: number,
+	byInternal: Record<string, "chief" | "worker">,
+): ChatKind {
+	if (COMPANIONS_ENABLED) {
+		try {
+			if (partnersStore().partnerIdOfSession(internalId)) return "partner";
+		} catch {
+			/* 同上 */
+		}
+	}
+	return byInternal[String(internalId)] === "worker" ? "worker" : "chief";
 }
 
 // ── 对话流 ───────────────────────────────────────────────
@@ -2030,6 +2125,8 @@ export interface ChatIndexEntry {
 	title?: string;
 	/** 是否置顶（2026-11-04 批次一）；置顶的排前面由客户端处理 */
 	pinned?: boolean;
+	/** 会话种类（2026-11-06 侧栏调整 B2，纯增量）：前端据此筛"总管"入口，不按 id 猜身份 */
+	chatKind: ChatKind;
 }
 
 // ── 会话标题 / 从列表移除 ───────────────────────────────
@@ -2122,6 +2219,8 @@ export async function listChats(limit = 50): Promise<ChatIndexEntry[]> {
 	// 不是用户说过的话（2026-10-31）。正文仍可按 id 回读，只是不在列表里露头。
 	const meta = readChatMeta();
 	const hidden = new Set(meta.hidden);
+	// 种类表读一次（2026-11-06 B2）：逐会话查库会把列表代价再放大一倍
+	const kinds = (await harness.snapshot(ChatKinds, CTX))?.byInternal ?? {};
 	const pairs = Object.entries(chats?.byExternal ?? {})
 		.filter(([conversationId]) => !conversationId.startsWith(TASK_CONVERSATION_PREFIX))
 		.filter(([conversationId]) => !hidden.has(conversationId))
@@ -2156,6 +2255,7 @@ export async function listChats(limit = 50): Promise<ChatIndexEntry[]> {
 				lastAt,
 				firstText,
 				turns,
+				chatKind: chatKindOfInternal(Number(internalId), kinds),
 				...(meta.titles[conversationId] ? { title: meta.titles[conversationId] } : {}),
 				...(meta.pins.includes(conversationId) ? { pinned: true } : {}),
 			});

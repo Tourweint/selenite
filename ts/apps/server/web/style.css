@@ -370,7 +370,7 @@ html[data-sidebar="closed"] .sidebar-inner {
   inset: 0;
   z-index: 1;
   display: flex; flex-direction: column; align-items: center;
-  gap: 6px;
+  gap: 4px;
   padding: 14px 0 12px;
   opacity: 0;
   pointer-events: none;
@@ -381,24 +381,39 @@ html[data-sidebar="closed"] .side-rail {
   pointer-events: auto;
   transition: opacity 200ms cubic-bezier(0, 0, .2, 1) 120ms;
 }
-/* 36×36 圆钮 / 18px 图标（CINDY 收起态几何） */
+/* 40×40 圆钮 / 22px 图标：与展开态导航行同轴，图标不再 15/18px 混用 */
 .rail-btn {
   flex: none;
-  width: 36px; height: 36px;
+  width: 40px; height: 40px;
   display: grid; place-content: center;
   border: 0; border-radius: var(--r-full);
   background: transparent; color: var(--text-2);
   transition: background .15s ease, color .15s ease;
 }
-.rail-btn svg { width: 18px; height: 18px; }
+.rail-btn svg { width: 22px; height: 22px; }
+
 .rail-btn:hover:not(:disabled) { background: var(--card); color: var(--text); }
 .rail-btn[aria-current="true"] { background: var(--accent-soft); color: var(--accent); }
 .rail-btn:disabled { opacity: .38; cursor: default; }
 /* 22px 短分隔线：用 divider token，浅色主题的 card-border 是透明的 */
 .rail-sep { flex: none; width: 22px; height: 1px; margin: 2px 0; background: var(--divider); }
 .rail-flex { flex: 1; }
+/* 收起态底栏：齿轮中心必须和导航同一竖轴，状态点挂在右侧不参与居中计算。
+   以前是「齿轮 + 点」一起 justify-content:center，齿轮被点挤得偏左 ~6px。 */
+.rail-foot {
+  flex: none;
+  position: relative;
+  width: 100%;
+  display: flex; align-items: center; justify-content: center;
+}
+.rail-status {
+  position: absolute;
+  right: 5px; top: 50%;
+  transform: translateY(-50%);
+  display: flex; align-items: center; justify-content: center;
+}
 .rail-status i {
-  display: block; width: 7px; height: 7px; margin: 2px auto 0;
+  display: block; width: 7px; height: 7px;
   border-radius: 50%; background: var(--text-3);
   transition: background .2s ease;
 }
@@ -437,11 +452,12 @@ html[data-sidebar="closed"] .side-rail {
   letter-spacing: .02em;
 }
 
-/* 导航行：32px 胶囊 / 15px 图标 / 13px 文字 / 12px 内边距。
+/* 导航行：38px 胶囊 / 22px 图标 / 13px 文字 / 12px 内边距。
+   图标左右各留 3px，凑成 28px 槽位，和 28px 首字头像共用同一条文字轴线。
    hover 底色瞬时切换，不挂 transition——列表重排时旧 hover 渐变会拖尾（CINDY 同款）。 */
 .new {
   display: flex; align-items: center; justify-content: flex-start; gap: 8px;
-  width: 100%; height: 32px; padding: 0 12px;
+  width: 100%; height: 38px; padding: 0 12px;
   border: 0;
   border-radius: var(--r-full);
   background: transparent;
@@ -449,7 +465,7 @@ html[data-sidebar="closed"] .side-rail {
   font-size: 13px; font-weight: 400;
 }
 .new:hover { background: var(--card); color: var(--text); }
-.new svg { width: 15px; height: 15px; }
+.new svg { width: 22px; height: 22px; flex: none; margin: 0 3px; }
 
 /* 服务分区的模型下拉（2026-11-04）：清单来自 /healthz 的 models（接口文档 §2.8），
    不可切时前端退化成只读行，这个样式只在可切时被挂出来 */
@@ -533,12 +549,18 @@ html[data-sidebar="closed"] .side-rail {
 }
 
 /*
- * 侧栏底部常驻区：设置入口 + 连接状态。
- * 设置行与「新对话」同为 32px 胶囊行，hover / 选中态跟侧栏其他项一致。
+ * 侧栏底部常驻区：一行放服务状态（左）与齿轮（右）。
+ * 齿轮只留图标，提示由 aria-label / title 提供；与侧栏其他项共用 hover / 选中态。
  */
 .side-foot {
-  display: flex; flex-direction: column; align-items: stretch; gap: 2px;
-  /* 钉死在侧栏底边：会话列表再长也由 .chats 自己滚，底栏不被推挤 */
+  display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 8px;
+  /* 钉死在侧栏底边：会话列表再长也由列表自己滚，底栏不被推挤。
+     .sidebar-inner 是唯一的滚动容器，短窗口时 margin-top:auto 没有余量，
+     所以再用 sticky 兜住，内容再长也看得到设置与状态。 */
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  background: var(--backdrop);
   margin-top: auto;
   padding: 8px 0 2px;
   border-top: 1px solid var(--divider);
@@ -546,7 +568,7 @@ html[data-sidebar="closed"] .side-rail {
 
 .side-item {
   display: flex; align-items: center; justify-content: flex-start; gap: 8px;
-  width: 100%; height: 32px; padding: 0 12px;
+  width: 100%; height: 38px; padding: 0 12px;
   border: 0; border-radius: var(--r-full);
   background: transparent; color: var(--text-2);
   font-size: 13px; font-weight: 400;
@@ -557,12 +579,17 @@ html[data-sidebar="closed"] .side-rail {
   /* 内描边，不占布局 */
   box-shadow: inset 0 0 0 1px var(--accent-line);
 }
-.side-item svg { width: 15px; height: 15px; }
+.side-item svg { width: 22px; height: 22px; flex: none; margin: 0 3px; }
 /* 群组占位（E5）：和收起轨道的 disabled 占位同款，点了没反应要看得出来 */
 .side-item:disabled { opacity: .42; cursor: default; }
 .side-item:disabled:hover { background: transparent; color: var(--text-3); }
 
-.side-foot .status { padding: 0 12px 2px; }
+/* 底栏齿轮：只有 36×36 图标钮，不占整行宽度 */
+.side-foot .foot-gear {
+  width: 36px; height: 36px; padding: 0; justify-content: center;
+  flex: none;
+}
+.side-foot .status { padding: 0 0 0 12px; }
 
 .status { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--text-2); }
 .status i { width: 5px; height: 5px; border-radius: 50%; background: var(--text-3); transition: background .2s ease; }
@@ -579,29 +606,46 @@ html[data-sidebar="closed"] .side-rail {
 /* 展开态分隔线：沿用 .rail-sep 的「1px + divider 令牌」样式，宽度铺满侧栏 */
 .side-sep.rail-sep { width: 100%; }
 
-/* 首字圆形头像（无图时用，别加新图片资源） */
+/* 首字圆形头像（无图时用，别加新图片资源）：28px，与 22px 图标同一轴线 */
 .pt-avatar {
   flex: none;
-  width: 21px; height: 21px;
+  width: 28px; height: 28px;
   display: grid; place-content: center;
   border-radius: var(--r-full);
   background: var(--accent-soft);
   color: var(--accent);
-  font-size: 11px; font-weight: 600; line-height: 1;
+  font-size: 13px; font-weight: 600; line-height: 1;
+  overflow: hidden;
 }
+/* 自定义头像：铺满圆，不拉伸（服务端存的是 ≤256px 的 PNG） */
+.pt-avatar img {
+  width: 100%; height: 100%;
+  display: block; object-fit: cover;
+  border-radius: inherit;
+}
+/* 头像按钮：单独可聚焦，点它进编辑；行其余部分仍打开会话 */
+.avatar-edit {
+  border: 0; padding: 0;
+  cursor: pointer;
+  transition: filter .15s ease, box-shadow .15s ease;
+}
+.avatar-edit:hover { filter: brightness(1.06); box-shadow: 0 0 0 2px var(--accent-line); }
+.avatar-edit:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 .side-chief {
   flex: none;
   display: flex; flex-direction: column; gap: 2px;
 }
 
-/* 总管固定条目：状态点 + 首字头像 + 名字 + pill；永在最上 */
-.chief-entry { gap: 6px; cursor: pointer; }
+/* 总管固定条目：头像 + 名字 + pill；状态点固定在最右。永在最上 */
+.chief-entry { gap: 8px; cursor: pointer; }
 .chief-entry .roster-name { font-weight: 500; }
 .chief-entry .pill-tag { margin-left: auto; }
 /* E5：无 domain 的活跃单计数（不可点）；.side-count 默认 margin-left:auto，
    这里要贴着 pill 右侧，不能再抢一份自动外边距。 */
 .chief-count { margin-left: 0; flex: none; }
+/* 状态点在行尾；绿色取 --ok（四套主题都是明确绿），本批不改状态来源 */
+.chief-entry .status-dot { margin-left: 2px; }
 
 /* 最近会话折叠块 */
 .recents { display: flex; flex-direction: column; gap: 2px; }
@@ -654,6 +698,8 @@ html[data-sidebar="closed"] .side-rail {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .roster-row .pill-tag { margin-left: 0; flex: none; }
+/* 执事状态点同样固定在行尾，与总管一致 */
+.roster-row .status-dot { margin-left: 2px; }
 .roster-domain { font-size: 10px; }
 .roster-count { margin-left: auto; flex: none; border: 0; cursor: pointer; }
 .roster-idle {
@@ -665,8 +711,8 @@ html[data-sidebar="closed"] .side-rail {
   font-size: 12px; line-height: 1.5; color: var(--text-3);
 }
 
-/* 收起轨道：总管首字圆钮（36px 按钮内 26px 圆） */
-.rail-chief .pt-avatar { width: 26px; height: 26px; font-size: 13px; }
+/* 收起轨道：总管首字圆钮（40px 按钮内 28px 圆，和展开态同尺寸） */
+.rail-chief .pt-avatar { width: 28px; height: 28px; font-size: 13px; }
 
 .icon-btn {
   display: grid; place-content: center;
@@ -1064,6 +1110,8 @@ html[data-sidebar="closed"] .side-rail {
   transition: background .15s ease, color .15s ease;
 }
 .retry-btn:hover { background: var(--card); color: var(--text); }
+/* open 失败卡：重试 / 继续对话并排，窄屏自动折行 */
+.partner-open-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
 .caret {
   display: inline-block; width: 6px; height: 1em;
@@ -2279,6 +2327,9 @@ button.tk-archive-bar:focus-visible { outline: 2px solid var(--accent-line); out
   html[data-sidebar="closed"] .sidebar { display: flex; width: 48px; }
   .sidebar-inner { display: none; }
   .side-rail { opacity: 1; pointer-events: auto; }
+  /* 48px 轨放不下齿轮 + 状态点并排，窄屏改竖排，避免横向挤出 */
+  .rail-foot { flex-direction: column; gap: 2px; }
+  .rail-status { position: static; right: auto; transform: none; }
   .thread { padding: 18px 14px 8px; }
   .top { padding: 0 14px; }
   /* 窄窗口：设置左栏改横排（标题行 + 横向胶囊），内容列跟在下面 */
@@ -2557,12 +2608,19 @@ button.tk-archive-bar:focus-visible { outline: 2px solid var(--accent-line); out
 .side-proj { flex: none; }
 
 .proj-pill {
-  width: 100%; height: 32px; padding: 0 12px;
+  width: 100%; height: 38px;
+  /* 1px 透明边框来自 .composer-pill（hover 才显色），边框也在布局里：
+     padding 用 11px 抵掉，图标中心与其他导航行一样落在 x=36，不再偏 1px。 */
+  padding: 0 11px;
   gap: 8px;
   justify-content: flex-start;
   font-size: 13px;
   /* 侧栏导航行同口径：hover 底色瞬时切换（.composer-pill 的过渡只留给模型 pill） */
   transition: none;
+}
+/* 展开态主项目补文件夹线描图标；22px 图标 + 3px 内衬 = 28px 槽位，和导航行同轴 */
+.proj-pill .proj-pill-ico {
+  width: 22px; height: 22px; flex: none; margin: 0 3px;
 }
 .proj-pill .proj-pill-label { flex: 1; min-width: 0; text-align: left; }
 
@@ -2593,6 +2651,18 @@ button.tk-archive-bar:focus-visible { outline: 2px solid var(--accent-line); out
 .proj-item.is-static { cursor: default; }
 .proj-item:not(.is-static):hover { background: var(--surface-low); }
 .proj-item-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 项目弹层图标：主项目=文件夹，子项目=缩进的折入箭头；槽位定宽让文字轴线整齐 */
+.proj-ico {
+  flex: none;
+  width: 22px; height: 22px;
+  display: grid; place-content: center;
+  color: var(--text-3);
+}
+.proj-ico svg { width: 18px; height: 18px; }
+.proj-ico.is-main { color: var(--accent); }
+.proj-ico.is-sub svg { width: 15px; height: 15px; }
+/* 子项目右移一级，图标 + 缩进双重表达层级 */
+.proj-item.is-sub { padding-left: 26px; }
 /* 行尾标注：主项目；异常态（目录不在了=黄、跑出工作区=灰）。tk-badge 同款皮 */
 .proj-tag {
   flex: none;
@@ -2608,7 +2678,7 @@ button.tk-archive-bar:focus-visible { outline: 2px solid var(--accent-line); out
 /* 主项目与子项目之间的分隔线：两段不是同一类信息 */
 .proj-sep { height: 1px; margin: 4px 6px; background: var(--composer-border); }
 
-/* 底部入口（2026-11-05 F1）：添加子项目 / 添加主项目 / 管理项目（设置页） */
+/* 底部入口（2026-11-05 F1）：添加子项目 / 设置主项目 / 管理项目（设置页） */
 .proj-foot {
   display: flex; flex-direction: column; gap: 1px;
   margin: 4px -6px 0; padding: 4px 6px 0;
@@ -3193,6 +3263,15 @@ button.tk-archive-bar:focus-visible { outline: 2px solid var(--accent-line); out
 .pt-seg-title { font-size: 13px; font-weight: 600; color: var(--text); }
 .pt-basic { gap: 12px; }
 
+/* 头像编辑行（2026-11-06 C 批）：56px 预览 + 三个动作 */
+.pt-avatar-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.pt-avatar-preview { width: 56px; height: 56px; font-size: 20px; }
+.pt-avatar-preview:disabled { opacity: .5; cursor: default; }
+.pt-avatar-btns { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pt-avatar-btns .ghost,
+.pt-avatar-btns .btn-primary { height: 34px; }
+.pt-card-avatar { margin-right: 2px; }
+
 .pt-ta {
   width: 100%; padding: 8px 10px;
   border: 1px solid var(--outline); border-radius: var(--r-md);
@@ -3405,3 +3484,61 @@ button.tk-archive-bar:focus-visible { outline: 2px solid var(--accent-line); out
 .tasks-empty { padding: 40px 16px; text-align: center; color: var(--text-2); }
 .tasks-empty h2 { margin: 0 0 6px; font-size: 15px; color: var(--text); }
 .tasks-empty p { margin: 0 auto; max-width: 420px; font-size: 12.5px; line-height: 1.7; }
+
+/* ── 设置 · 头像（预设图库 + 本地上传）────────────────── */
+.av-targets { display: flex; flex-wrap: wrap; gap: 8px; }
+.av-target {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 6px 12px 6px 6px;
+  border: 1px solid var(--composer-border);
+  border-radius: var(--r-full);
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 13px; font-weight: 500;
+  cursor: pointer;
+  transition: background-color .15s ease, border-color .15s ease, color .15s ease;
+}
+.av-target:hover { background: var(--card-high); color: var(--text); }
+.av-target.is-active { color: var(--text); border-color: var(--accent-line); background: var(--accent-soft); }
+.av-target-avatar { width: 30px; height: 30px; font-size: 13px; }
+.av-target-name { max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.av-editor { display: flex; gap: 20px; flex-wrap: wrap; }
+.av-preview-col { display: flex; flex-direction: column; align-items: center; gap: 8px; width: 104px; flex: none; }
+.av-preview { width: 88px; height: 88px; font-size: 32px; }
+.av-main { flex: 1 1 320px; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+
+/* 筛选分段不挂滑行胶囊，这里给选中项一个明确底色 */
+.av-filter button[aria-checked="true"] { background: var(--card-high); color: var(--text); }
+
+.av-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(64px, 1fr));
+  gap: 8px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 2px;
+}
+.av-preset {
+  position: relative;
+  aspect-ratio: 1;
+  padding: 0;
+  border: 2px solid transparent;
+  border-radius: var(--r-md);
+  background: var(--surface-low);
+  cursor: pointer;
+  overflow: hidden;
+  transition: border-color .15s ease, transform .15s ease;
+}
+.av-preset img { width: 100%; height: 100%; display: block; object-fit: cover; }
+.av-preset:hover { transform: translateY(-1px); }
+.av-preset.is-active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-line); }
+.av-preset:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.av-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+@media (max-width: 560px) {
+  .av-editor { gap: 14px; }
+  .av-preview-col { width: 100%; flex-direction: row; justify-content: flex-start; }
+}
+

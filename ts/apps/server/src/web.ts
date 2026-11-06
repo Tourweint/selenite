@@ -31,6 +31,19 @@ export function mountWeb(app: Hono): void {
 		return c.html(html, 200, { "cache-control": "no-store" });
 	});
 
+	// 预设头像图库（web/preset/）：单独一条路由，只认 m01..m10 / f01..f20 形状的 PNG。
+	// 必须在通用 /assets/:file 之前注册，否则会被单层文件名规则先匹配成 404。
+	app.get("/assets/preset/:file", async (c) => {
+		const name = c.req.param("file");
+		if (!/^[mf]\d{2}\.png$/.test(name)) return c.notFound();
+		try {
+			const body = await readFile(new URL(`preset/${name}`, WEB_DIR));
+			return c.body(body, 200, { "content-type": "image/png", "cache-control": "no-store" });
+		} catch {
+			return c.notFound();
+		}
+	});
+
 	app.get("/assets/:file", async (c) => {
 		const name = c.req.param("file");
 		// 只允许白名单形状的文件名，挡掉 `..` 一类的路径穿越

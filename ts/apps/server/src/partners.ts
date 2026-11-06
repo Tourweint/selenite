@@ -76,6 +76,11 @@ export interface PartnerRow {
 	updatedAt: string;
 	/** 执事的领域名（批次D D2）；普通执事为 null。小写 ASCII，同 chancellor DOMAIN_PATTERN。 */
 	domain: string | null;
+	/**
+	 * 头像（2026-11-06 侧栏调整 B1）：有界 PNG data URL，或 null（未设置 → 前端用名字首字）。
+	 * 只供 `<img>` 渲染；服务端不存路径、不收外部 URL、不收 SVG（理由见 shared 的 PartnerAvatarSchema）。
+	 */
+	avatar: string | null;
 }
 
 export interface PartnerVersionRow {
@@ -186,7 +191,8 @@ export class PartnersStore {
 				current_version INTEGER,
 				created_at      TEXT NOT NULL,
 				updated_at      TEXT NOT NULL,
-				domain          TEXT
+				domain          TEXT,
+				avatar          TEXT
 			);
 			CREATE TABLE IF NOT EXISTS partner_versions (
 				partner_id   TEXT NOT NULL,
@@ -261,6 +267,10 @@ export class PartnersStore {
 		}>;
 		if (!columns.some((column) => column.name === "domain")) {
 			this.db.exec("ALTER TABLE partners ADD COLUMN domain TEXT");
+		}
+		// 头像列（2026-11-06 侧栏调整 B1）：旧库补 nullable 列，旧记录读出来是 null（前端首字兜底）。
+		if (!columns.some((column) => column.name === "avatar")) {
+			this.db.exec("ALTER TABLE partners ADD COLUMN avatar TEXT");
 		}
 	}
 
@@ -347,6 +357,19 @@ export class PartnersStore {
 				.prepare("UPDATE partners SET status = ?, updated_at = ? WHERE id = ?")
 				.run(patch.status, now, id);
 		}
+		return this.get(id);
+	}
+
+	/**
+	 * 设置 / 清除头像（2026-11-06 侧栏调整 B1）：一条 UPDATE 原子落地。
+	 * 只写 avatar（与 updated_at），不碰名字 / 状态 / 身份版本——坏图不该带出别的写入。
+	 * 校验在端点（shared 的 PartnerAvatarPatchSchema）；这里假设值已合法。
+	 */
+	setAvatar(id: string, avatar: string | null): PartnerRow | null {
+		if (!this.get(id)) return null;
+		this.db
+			.prepare("UPDATE partners SET avatar = ?, updated_at = ? WHERE id = ?")
+			.run(avatar, new Date().toISOString(), id);
 		return this.get(id);
 	}
 
@@ -1010,6 +1033,7 @@ function toPartner(row: Record<string, unknown>): PartnerRow {
 		createdAt: String(row.created_at ?? ""),
 		updatedAt: String(row.updated_at ?? ""),
 		domain: row.domain === null || row.domain === undefined ? null : String(row.domain),
+		avatar: row.avatar === null || row.avatar === undefined ? null : String(row.avatar),
 	};
 }
 

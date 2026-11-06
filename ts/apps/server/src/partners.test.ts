@@ -3,7 +3,44 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { DatabaseSync } from "node:sqlite";
+import {
+	PartnerAvatarPatchSchema,
+	partnerAvatarProblem,
+	PARTNER_AVATAR_MAX_BYTES,
+} from "@lifediary/shared";
 import { PARTNER_SLOT_LIMIT, PartnersStore } from "./partners.ts";
+
+/** 一张真实的 1×1 PNG（透明像素）：校验会走签名 / IHDR / 尺寸 / IEND 全链 */
+const VALID_PNG =
+	"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+function crc32(buf: Buffer): number {
+	let c = 0xffffffff;
+	for (const byte of buf) {
+		c ^= byte;
+		for (let k = 0; k < 8; k += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+	}
+	return (c ^ 0xffffffff) >>> 0;
+}
+
+/**
+ * 造一张「块结构合法、只有尺寸不对」的 PNG：用于尺寸校验（不依赖外部图片）。
+ * IHDR 的 CRC 必须算对——否则会先被 CRC 校验拦下，测不到尺寸分支。
+ */
+function fakePng(width: number, height: number): string {
+	const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+	const ihdr = Buffer.alloc(25);
+	ihdr.writeUInt32BE(13, 0);
+	ihdr.write("IHDR", 4, "ascii");
+	ihdr.writeUInt32BE(width, 8);
+	ihdr.writeUInt32BE(height, 12);
+	ihdr[16] = 8; // bit depth
+	ihdr[17] = 6; // RGBA
+	ihdr.writeUInt32BE(crc32(ihdr.subarray(4, 21)), 21);
+	const iend = Buffer.from([0, 0, 0, 0, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82]);
+	return `data:image/png;base64,${Buffer.concat([signature, ihdr, iend]).toString("base64")}`;
+}
 
 function tempRoot(): { root: string; db: string; homes: string } {
 	const root = mkdtempSync(join(tmpdir(), "lifediary-partners-"));
@@ -135,4 +172,98 @@ test("执事：删除连家目录一起清；例行任务 revision 自增", () =
 		store.close();
 		rmSync(root, { recursive: true, force: true });
 	}
+});
+
+// ── 头像（2026-11-06 侧栏调整 B1）───────────────────────────
+
+test("头像：保存 / 清除 / 重开存储仍在，旧记录读 null", () => {
+	const { root, db, homes } = tempRoot();
+	const first = new PartnersStore(db, homes);
+	const partner = first.create("头像执事");
+	try {
+		assert.equal(partner.avatar, null, "新建默认无头像 → 前端首字兜底");
+
+		const saved = first.setAvatar(partner.id, VALID_PNG);
+		assert.equal(saved?.avatar, VALID_PNG);
+		assert.equal(first.get(partner.id)?.avatar, VALID_PNG);
+	} finally {
+		first.close();
+	}
+
+	const reopened = new PartnersStore(db, homes);
+	try {
+		assert.equal(reopened.get(partner.id)?.avatar, VALID_PNG, "重开存储必须保留头像");
+
+		const cleared = reopened.setAvatar(partner.id, null);
+		assert.equal(cleared?.avatar, null, "null = 清除");
+		assert.equal(reopened.setAvatar("不存在", VALID_PNG), null);
+	} finally {
+		reopened.close();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("头像：旧库（没有 avatar 列）自动补列，旧记录读 null", () => {
+	const { root, db, homes } = tempRoot();
+	// 手工造一张改动前的 partners 表（只有老列），模拟真实旧库
+	const raw = new DatabaseSync(db);
+	raw.exec(`
+		CREATE TABLE partners (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'active',
+			current_version INTEGER,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			domain TEXT
+		);
+	`);
+	raw.prepare(
+		"INSERT INTO partners (id, name, status, current_version, created_at, updated_at, domain) VALUES (?, ?, 'active', 1, ?, ?, NULL)",
+	).run("old-partner", "旧执事", "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z");
+	raw.close();
+
+	const store = new PartnersStore(db, homes);
+	try {
+		const row = store.get("old-partner");
+		assert.ok(row, "旧记录必须还能读");
+		assert.equal(row?.avatar, null);
+		assert.equal(store.setAvatar("old-partner", VALID_PNG)?.avatar, VALID_PNG);
+	} finally {
+		store.close();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("头像契约：只收有界 PNG；JPEG / 外链 / SVG / 坏 base64 / 超限 / 截断 / 超大尺寸一律拒", () => {
+	assert.equal(partnerAvatarProblem(VALID_PNG), null, "合法 1×1 PNG 必须通过");
+	assert.equal(PartnerAvatarPatchSchema.safeParse(VALID_PNG).success, true);
+	assert.equal(PartnerAvatarPatchSchema.safeParse(null).success, true, "null = 清除，合法");
+
+	const rejected: Array<[string, string]> = [
+		["data:image/jpeg;base64,/9j/4AAQ", "只收 PNG"],
+		["https://example.com/a.png", "不收外部 URL"],
+		["data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=", "不收 SVG（可执行内容）"],
+		["data:image/png;base64,不是base64", "base64 非法字符"],
+		["data:image/png;base64,AAAA", "长度/内容不构成 PNG"],
+		[VALID_PNG.slice(0, -16), "截断的 PNG"],
+		[fakePng(300, 16), "尺寸超过 256"],
+		[fakePng(0, 16), "尺寸为 0"],
+	];
+	for (const [value, why] of rejected) {
+		assert.notEqual(partnerAvatarProblem(value), null, `应拒绝：${why}`);
+		assert.equal(PartnerAvatarPatchSchema.safeParse(value).success, false, `schema 应拒绝：${why}`);
+	}
+	// 尺寸用例必须真的走到尺寸分支（CRC 已算对，不会先被其它校验拦掉）
+	assert.match(partnerAvatarProblem(fakePng(300, 16)) ?? "", /尺寸/);
+	assert.match(partnerAvatarProblem(fakePng(0, 16)) ?? "", /尺寸/);
+
+	// 解码后超 128KiB（但字符串仍在 180000 字符内）
+	const oversizedBytes = `data:image/png;base64,${"A".repeat(174_800)}`;
+	assert.ok((174_800 / 4) * 3 > PARTNER_AVATAR_MAX_BYTES);
+	assert.ok(oversizedBytes.length < 180_000, "这条用例必须落在字符上限内，才测得到字节上限");
+	assert.match(partnerAvatarProblem(oversizedBytes) ?? "", /KiB/);
+	// 字符串本身超 180000 字符
+	const oversizedChars = `data:image/png;base64,${"A".repeat(180_001)}`;
+	assert.match(partnerAvatarProblem(oversizedChars) ?? "", /字符上限/);
 });

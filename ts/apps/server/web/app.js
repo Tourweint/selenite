@@ -13,6 +13,7 @@ const el = {
   chats: document.getElementById("chats"),
   // E4 侧栏：总管区 / 最近会话折叠 / 执事花名册
   chiefEntry: document.getElementById("chief-entry"),
+  chiefAvatar: document.getElementById("chief-avatar"),
   chiefDot: document.getElementById("chief-dot"),
   chiefCount: document.getElementById("chief-count"),
   recents: document.getElementById("recents"),
@@ -42,6 +43,8 @@ const el = {
   railSettings: document.getElementById("rail-settings"),
   railStatus: document.getElementById("rail-status"),
   railProj: document.getElementById("rail-proj"),
+  sideRail: document.getElementById("side-rail"),
+  sidebarInner: document.getElementById("sidebar-inner"),
   gate: document.getElementById("gate"),
   gateForm: document.getElementById("gate-form"),
   gateInput: document.getElementById("gate-input"),
@@ -191,7 +194,30 @@ function toggleSidebar() {
   else delete document.documentElement.dataset.sidebar;
   localStorage.setItem("lifediary.sidebar", next);
   el.toggleSidebar.setAttribute("aria-expanded", String(next === "open"));
+  applySidebarA11y();
 }
+
+/* 隐藏的那一层不能是 Tab 焦点（2026-11-06 C 批）：
+   展开时轨道藏着、收起时 inner 藏着；窄屏（≤800px）CSS 强制只显示 48px 轨道，
+   与 data-sidebar 无关，所以按「实际可见」算，不能只看 dataset。
+   inert 同时挡住鼠标与键盘，比只设 tabindex=-1 少一整套维护。 */
+const NARROW_SIDEBAR = matchMedia("(max-width: 800px)");
+
+function setInert(node, inert) {
+  if (!node) return;
+  if (inert) node.setAttribute("inert", "");
+  else node.removeAttribute("inert");
+}
+
+function applySidebarA11y() {
+  const narrow = NARROW_SIDEBAR.matches;
+  const railVisible = narrow || !sidebarOpen();
+  const innerVisible = !narrow && sidebarOpen();
+  setInert(el.sideRail, !railVisible);
+  setInert(el.sidebarInner, !innerVisible);
+}
+
+NARROW_SIDEBAR.addEventListener("change", applySidebarA11y);
 
 /* 顶部功能菜单：设置走独立路由（#/settings），不是弹层 */
 function setMenuOpen(open) {
@@ -360,18 +386,26 @@ function currentSettingsPage() {
   return SETTINGS_SECTIONS.some((section) => section.id === part) ? part : "appearance";
 }
 
+/**
+ * 真实路由切换（go / 浏览器前进后退 / 手改 hash）推进单调世代。
+ * 离开再回到同一 hash 也会让旧 open 作废；go() 自己触发的 hashchange
+ * 由 selfNavHash 认领，不重复推进（否则 openPartnerChat 自己的 go 会取消自己）。
+ */
+function noteRouteChange() {
+  state.routeGen += 1;
+  state.navToken += 1;
+}
+
 function go(route, page) {
-  if (route === "settings") {
-    location.hash = page ? `#/settings/${page}` : "#/settings";
-  } else if (route === "tasks") {
-    location.hash = tasksHash();
-  } else if (route === "domains") {
-    location.hash = "#/domains";
-  } else if (route === "groups") {
-    location.hash = "#/groups";
-  } else {
-    location.hash = "#/";
-  }
+  let next = "#/";
+  if (route === "settings") next = page ? `#/settings/${page}` : "#/settings";
+  else if (route === "tasks") next = tasksHash();
+  else if (route === "domains") next = "#/domains";
+  else if (route === "groups") next = "#/groups";
+  if (location.hash === next) return;
+  state.selfNavHash = next;
+  noteRouteChange();
+  location.hash = next;
 }
 
 function applyRoute() {
@@ -401,6 +435,22 @@ function applyRoute() {
 const state = {
   token: readToken(),
   conversationId: localStorage.getItem(KEY_CONV) || "",
+  /* 会话种类（2026-11-06 C 批）：chief|worker|partner。没有落盘会话时，首屏就是一个
+     普通 worker 空会话；有落盘会话时先空着，等 /messages 回读再认（不靠 id 猜）。 */
+  chatKind: localStorage.getItem(KEY_CONV) ? "" : "worker",
+  // 服务连通（/healthz）与总管档案状态：两者共同决定绿色在线点，sending 不再参与
+  serviceOk: false,
+  chiefStatus: "active",
+  // 执事缓存：头像 / 名字 / 状态都从这里取，避免每处再拉一遍
+  partners: [],
+  // 导航令牌：快速切会话时让旧的 open 响应作废，不允许把页面抢回去
+  navToken: 0,
+  // 路由世代：每次真实路由切换 +1（含浏览器后退）；旧 open 即使回到同一 hash 也失效
+  routeGen: 0,
+  // go() 自己写入的 hash：下一次 hashchange 认领它，不再当成用户导航
+  selfNavHash: "",
+  // 正在 open 的执事（防双击；同一个执事并发只发一次）
+  partnerOpening: new Set(),
   sending: false,
   stopRequested: false,
   stick: true,
@@ -1829,6 +1879,13 @@ function showGate(message) {
 // 页面已经开着的时候再补一个 #token= 只是改 hash，不会重新加载模块。
 // 监听一次，别让人以为"贴了没反应"。
 window.addEventListener("hashchange", () => {
+  // go() 自己写 hash 时已经同步推进过世代；其余 hashchange（后退/前进/手改）都要推进。
+  if (state.selfNavHash && state.selfNavHash === location.hash) {
+    state.selfNavHash = "";
+  } else {
+    state.selfNavHash = "";
+    noteRouteChange();
+  }
   const next = readToken();
   if (next && next !== state.token) {
     state.token = next;
@@ -1893,14 +1950,18 @@ async function checkHealth() {
     const response = await request("/healthz", { cache: "no-store" });
     if (!response.ok) throw new Error(String(response.status));
     const info = await response.json();
+    state.serviceOk = true;
     // 门开着的时候别把状态灯改回"在线"——那会跟"需要令牌"自相矛盾。
     if (el.gate.hidden) {
       setStatus("ok", info.llm === "mock" ? "服务在线 · mock" : "服务在线");
     }
+    syncPartnerDots();
     return true;
   } catch (error) {
     if (error.message !== "forbidden") {
+      state.serviceOk = false;
       setStatus("off", "服务离线");
+      syncPartnerDots();
     }
     return false;
   }
@@ -2063,7 +2124,6 @@ function startRename(row, chat) {
  * （partner-runtime.ts 的 partnerCanonicalExternalId）。 */
 
 const KEY_RECENTS = "lifediary.chief.recents";
-const PARTNER_NO_CHAT_HINT = "这个执事还没有对话，先去设置→执事试跑或派个活";
 
 /* 最近会话折叠：默认展开，折叠态存 localStorage（刷新后仍折叠）。 */
 function applyRecents() {
@@ -2083,11 +2143,146 @@ el.recentsToggle.addEventListener("click", toggleRecents);
 // currentSettingsPage() 做别名落到同一分区（会话分区已有搜索）。
 el.recentsAll.addEventListener("click", () => go("settings", "sessions"));
 
-/* 总管状态点：有进行中的轮（正在流式）就亮，否则灰。复用 .status-dot。 */
+/* ── 头像（2026-11-06 C 批）────────────────────────────
+ * 只存有界 PNG data URL（服务端同样复核）。渲染一律用 DOM 属性赋 src，
+ * 不把不可信字符串拼进 innerHTML；未设置时回落名字首字。 */
+
+const AVATAR_PREFIX = "data:image/png;base64,";
+const AVATAR_MAX_CHARS = 180000;
+const AVATAR_MAX_BYTES = 128 * 1024;
+const AVATAR_MAX_DIM = 256;
+const AVATAR_INPUT_LIMIT = 5 * 1024 * 1024;
+
+function avatarText(name) {
+  return String(name || "?").trim().slice(0, 1) || "?";
+}
+
+/** 把头像写进容器（button / span）：有图用 img，没图用首字 */
+function paintAvatar(host, avatar, name) {
+  if (!host) return;
+  if (avatar) {
+    const img = document.createElement("img");
+    img.alt = "";
+    img.decoding = "async";
+    img.setAttribute("aria-hidden", "true");
+    img.src = avatar; // 属性赋值，不拼 HTML
+    host.replaceChildren(img);
+  } else {
+    host.textContent = avatarText(name);
+  }
+}
+
+/** 头像 data URL 是否超出契约；合法返回 null（客户端先自查，服务端仍会复核） */
+function avatarDataProblem(dataUrl) {
+  if (!dataUrl.startsWith(AVATAR_PREFIX)) return "头像只接受 PNG";
+  if (dataUrl.length > AVATAR_MAX_CHARS) return "头像太大，换一张更简单的图片";
+  const b64 = dataUrl.slice(AVATAR_PREFIX.length);
+  if (!b64 || b64.length % 4 !== 0) return "头像数据不完整";
+  const padding = b64.endsWith("==") ? 2 : b64.endsWith("=") ? 1 : 0;
+  const bytes = (b64.length / 4) * 3 - padding;
+  if (bytes > AVATAR_MAX_BYTES) return "处理后的图片超过 128KiB，换一张更简单的图片";
+  return null;
+}
+
+/**
+ * 本地图片 → 有界 PNG data URL：先解码（坏图在这里就失败），再按最长边 ≤256 画到 canvas。
+ * 相片打成 256px PNG 仍可能超过 128KiB，此时依次退到 192 / 128，保证能存进去又不超上限。
+ * 不读文件名、不上传原图，页面上也只用 <img> 解码渲染。
+ */
+async function fileToAvatarPng(file) {
+  if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) {
+    throw new Error("只支持 PNG / JPEG / WebP 图片");
+  }
+  if (file.size > AVATAR_INPUT_LIMIT) {
+    throw new Error("图片超过 5MiB，换一张小一点的");
+  }
+  const url = URL.createObjectURL(file);
+  const img = new Image();
+  img.decoding = "async";
+  img.src = url;
+  try {
+    if (typeof img.decode === "function") {
+      try {
+        await img.decode();
+      } catch {
+        throw new Error("这张图片读不出来（可能已损坏）");
+      }
+    } else {
+      await new Promise((resolve, reject) => {
+        img.onload = () => resolve();
+        img.onerror = () => reject(new Error("这张图片读不出来（可能已损坏）"));
+      });
+    }
+    if (!img.naturalWidth || !img.naturalHeight) throw new Error("这张图片没有可用的画面");
+
+    let last = "";
+    for (const max of [AVATAR_MAX_DIM, 192, 128]) {
+      const scale = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+      const width = Math.max(1, Math.round(img.naturalWidth * scale));
+      const height = Math.max(1, Math.round(img.naturalHeight * scale));
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("浏览器画不了图，换个浏览器再试");
+      ctx.drawImage(img, 0, 0, width, height);
+      const dataUrl = canvas.toDataURL("image/png");
+      last = avatarDataProblem(dataUrl) || "";
+      if (!last) return dataUrl;
+    }
+    throw new Error(last || "这张图片不能用作头像");
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+/* 在线点 = 服务连通 && 伙伴 active（2026-11-06 C 批）：
+   active 且服务在线 → 绿；active 但服务失联 → 黄；暂停 / 归档 → 灰。
+   忙碌只走既有的单数 / 文案，不再参与在线色；state.sending 不再决定总管是否在线。 */
+function partnerDotClass(status) {
+  if (status === "active") return state.serviceOk ? "ok" : "warn";
+  return "idle";
+}
+
 function syncChiefDot() {
   if (!el.chiefDot) return;
-  el.chiefDot.classList.toggle("ok", state.sending);
-  el.chiefDot.classList.toggle("idle", !state.sending);
+  el.chiefDot.className = `status-dot ${partnerDotClass(state.chiefStatus || "active")}`;
+}
+
+/** 服务状态变化时就地改点，不重绘整份花名册（不打断 hover / 焦点） */
+function syncPartnerDots() {
+  syncChiefDot();
+  for (const row of document.querySelectorAll("#partner-roster [data-partner-id]")) {
+    const partner = state.partners.find((item) => item.id === row.dataset.partnerId);
+    const dot = row.querySelector(".status-dot");
+    if (partner && dot) dot.className = `status-dot ${partnerDotClass(partner.status)}`;
+  }
+  for (const dot of document.querySelectorAll("[data-pt-dot]")) {
+    const partner = state.partners.find((item) => item.id === dot.dataset.ptDot);
+    if (partner) dot.className = `status-dot ${partnerDotClass(partner.status)}`;
+  }
+}
+
+/** 总管头像 / 名字 / 状态同步到展开条目与收起轨道 */
+function syncChiefAvatar() {
+  const chief = state.partners.find((item) => item.id === "chief");
+  const name = String(chief?.name || "总管").trim() || "总管";
+  state.chiefStatus = chief?.status || "active";
+  const avatar = chief?.avatar || null;
+  if (el.chiefAvatar) {
+    paintAvatar(el.chiefAvatar, avatar, name);
+    el.chiefAvatar.setAttribute("aria-label", `编辑${name}头像`);
+    el.chiefAvatar.title = `编辑${name}头像`;
+  }
+  const railSlot = el.railChief?.querySelector(".pt-avatar");
+  if (railSlot) paintAvatar(railSlot, avatar, name);
+  syncChiefDot();
+}
+
+/** 执事会话表头用名字，不叫“新对话” */
+function partnerDisplayName(partnerId) {
+  const partner = state.partners.find((item) => item.id === partnerId);
+  return String(partner?.name || "执事").trim() || "执事";
 }
 
 /**
@@ -2097,14 +2292,17 @@ function syncChiefDot() {
  * 这里排除 partner-* 的执事 canonical 会话，避免把执事会话当成总管主对话。
  */
 function openChiefChat() {
+  // 只认 chatKind=chief 的历史（缺字段的旧会话按 chief，保住老数据）；
+  // 不靠 partner- 前缀之外的东西猜身份。没有就新开一条总管会话。
   const ordered = state.chats
     .filter((chat) => !String(chat.conversationId || "").startsWith("partner-"))
+    .filter((chat) => (chat.chatKind || "chief") === "chief")
     .reverse()
     .sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)));
   const recent = ordered[0];
   go("chat");
   if (recent) void openChat(recent.conversationId);
-  else startNewChat();
+  else startNewChat("chief");
 }
 
 el.chiefEntry.addEventListener("click", openChiefChat);
@@ -2115,13 +2313,22 @@ el.chiefEntry.addEventListener("keydown", (event) => {
   }
 });
 
+// 头像单独是按钮：点它进编辑，不打开会话；键盘事件也不再冒泡到行
+el.chiefAvatar?.addEventListener("click", (event) => {
+  event.stopPropagation();
+  void openEditPartnerModal("chief");
+});
+for (const type of ["keydown", "keyup"]) {
+  el.chiefAvatar?.addEventListener(type, (event) => event.stopPropagation());
+}
+
 /* 执事花名册：GET /api/v1/partners（过滤 chief + archived）
    + GET /api/v1/domains（domain → activeTickets）。两个端点各自容错，
    一个读不到不拖累另一个；403 交给令牌门，不把花名册刷成空。 */
 async function loadRoster() {
   const box = el.partnerRoster;
   if (!box) return;
-  let partners = [];
+  let partners = null;
   let domains = [];
   try {
     const response = await request("/api/v1/partners", { cache: "no-store" });
@@ -2135,10 +2342,18 @@ async function loadRoster() {
   } catch (error) {
     if (error.message === "forbidden") return;
   }
+  // 拉失败保留上一次的档案（头像 / 名字不闪没）
+  if (Array.isArray(partners)) state.partners = partners;
   renderRoster(
-    Array.isArray(partners) ? partners : [],
+    Array.isArray(partners) ? partners : state.partners,
     Array.isArray(domains) ? domains : [],
   );
+  syncChiefAvatar();
+  syncPartnerDots();
+  // 名册晚于会话加载时，把执事专线的表头补成名字（之前只有占位「执事」）
+  if (state.conversationId.startsWith("partner-") && currentRoute() === "chat") {
+    el.title.textContent = partnerDisplayName(state.conversationId.slice("partner-".length));
+  }
 }
 
 function renderRoster(partners, domainRows) {
@@ -2169,7 +2384,6 @@ function renderRoster(partners, domainRows) {
     const name = String(partner.name || "执事").trim() || "执事";
     const domain = String(partner.domain || "").trim();
     const active = domain ? activeByDomain.get(domain) || 0 : 0;
-    const lit = partner.status === "active";
 
     const row = document.createElement("div");
     row.className = "side-item roster-row";
@@ -2179,20 +2393,28 @@ function renderRoster(partners, domainRows) {
     row.title = `${name}${domain ? " · " + domain : ""}`;
 
     const dot = document.createElement("i");
-    dot.className = `status-dot ${lit ? "ok" : "idle"}`;
+    dot.className = `status-dot ${partnerDotClass(partner.status)}`;
     dot.setAttribute("aria-hidden", "true");
 
-    // 无图用名字首字圆形，别加新图片资源
-    const avatar = document.createElement("span");
-    avatar.className = "pt-avatar";
-    avatar.setAttribute("aria-hidden", "true");
-    avatar.textContent = name.slice(0, 1);
+    // 头像：有图用 img，没图用名字首字；点它进编辑，不打开会话
+    const avatar = document.createElement("button");
+    avatar.type = "button";
+    avatar.className = "pt-avatar avatar-edit";
+    avatar.title = "编辑头像";
+    avatar.setAttribute("aria-label", `编辑${name}的头像`);
+    paintAvatar(avatar, partner.avatar || null, name);
+    avatar.addEventListener("click", (event) => {
+      event.stopPropagation();
+      void openEditPartnerModal(id);
+    });
+    avatar.addEventListener("keydown", (event) => event.stopPropagation());
+    avatar.addEventListener("keyup", (event) => event.stopPropagation());
 
     const label = document.createElement("span");
     label.className = "roster-name";
     label.textContent = name;
 
-    row.append(dot, avatar, label);
+    row.append(avatar, label);
 
     if (domain) {
       const tag = document.createElement("span");
@@ -2220,6 +2442,9 @@ function renderRoster(partners, domainRows) {
       row.append(idle);
     }
 
+    // 状态点固定在最右；本批只调位置，不改 active/archived 的状态来源
+    row.append(dot);
+
     const open = () => void openPartnerChat(id);
     row.addEventListener("click", open);
     row.addEventListener("keydown", (event) => {
@@ -2234,32 +2459,258 @@ function renderRoster(partners, domainRows) {
 
 /**
  * 行点击 = 打开该执事的 canonical 对话。
- * 任务书写 go("#/chat/" + "partner-" + id)：本仓库 chat 会话 id 不在 hash 里，
- * 且「不改路由体系」不允许新增 #/chat/<id> 路由，故沿用既有跳转写法
- * （搜索结果 / 任务来源链接同款）：go("chat") 切路由，再 openChat(convId)。
- * 会话还没建过（404/空）→ 回退提示，不发请求建会话，不绕过 canonical 建立流程。
+ *
+ * 2026-11-06 C 批：先 POST /api/v1/partners/:id/open（服务端负责 ensurePartnerSession
+ * + 首次问候的持久去重），返回后再 openChat 回读。前端不再自己判断「有没有历史」，
+ * 否则第一次点永远没有入口。护栏：
+ *  - 同一个执事的 open 在飞时直接吞掉重复点击；
+ *  - 每次导航有令牌，快速切到别的会话 / 执事后旧响应直接作废；
+ *  - 失败给「重试 / 继续现有空会话」两个动作，不只 toast。
+ *
+ * 404 拆义（2026-11-06 返修，实测踩过）：open 的 404 有两种含义——
+ *  a) 服务进程比页面旧，还没有 /open 路由（Hono 对未知路由一律 404）；
+ *  b) 执事档案真被删了（花名册残留的幽灵行）。
+ * 两种都报「执事不存在」是谎报。用 GET /api/v1/partners/:id 复核一次：
+ *  200 = 服务旧 → 说清楚要重启服务，可重试；404 = 真没了 → 刷花名册让这行消失。
  */
 async function openPartnerChat(partnerId) {
-  const convId = `partner-${partnerId}`;
+  if (!partnerId || state.partnerOpening.has(partnerId)) return;
+  state.partnerOpening.add(partnerId);
+  const token = ++state.navToken;
+  const startHash = location.hash;
+  const startGen = state.routeGen;
+  // 离开再回到同一 hash 也算离开：routeGen 比 hash 字符串更可信。
+  const stillHere = () =>
+    token === state.navToken && state.routeGen === startGen && location.hash === startHash;
   try {
-    const response = await request(
-      `/api/v1/agent/chat/${encodeURIComponent(convId)}/messages?limit=200`,
-      { cache: "no-store" },
-    );
-    if (response.status === 404 || !response.ok) {
-      toast(PARTNER_NO_CHAT_HINT);
+    const response = await request(`/api/v1/partners/${encodeURIComponent(partnerId)}/open`, {
+      method: "POST",
+    });
+    if (response.status === 404) {
+      if (!stillHere()) return;
+      // 复核档案还在不在，两种 404 分开说、分开处置
+      const verdict = await partnerExistsAfter404(partnerId);
+      if (verdict === "gone") {
+        // 真被删了：列表里那行是幽灵，刷掉并明说，不报「点开失败」
+        void loadRoster();
+        toast("这个执事已删除，列表已刷新");
+      } else {
+        showPartnerOpenFailureCard(
+          partnerId,
+          verdict === "stale-server"
+            ? "服务还是旧版本，先重启服务（托盘右键退出后重开）再点。"
+            : "执事状态读不到，稍后再试。",
+          stillHere,
+        );
+      }
+      return;
+    }
+    if (response.status === 409) {
+      // 409 = 服务端说暂停/归档：列表可能还在显示旧状态，静默刷一次对齐
+      void loadRoster();
+      if (stillHere()) toast("这个执事已暂停或归档，先恢复再打开");
       return;
     }
     const data = await response.json().catch(() => ({}));
-    if (!Array.isArray(data.messages) || !data.messages.length) {
-      toast(PARTNER_NO_CHAT_HINT);
+    if (!response.ok || !data.ok) {
+      await showPartnerOpenFailure(
+        partnerId,
+        data.message || data.error || `打开失败（HTTP ${response.status}）`,
+        stillHere,
+      );
+      return;
+    }
+    if (!stillHere()) return; // 用户已经切走，旧响应不得抢回
+    // 只认服务端返回的 canonical id；缺字段说明契约不完整，不拿 partner-<id> 猜。
+    const convId = String(data.conversationId || "");
+    if (!convId) {
+      await showPartnerOpenFailure(partnerId, "服务端返回不完整，稍后再试", stillHere);
       return;
     }
     go("chat");
-    void openChat(convId);
+    await openChat(convId);
   } catch (error) {
-    if (error.message !== "forbidden") toast(PARTNER_NO_CHAT_HINT);
+    if (error.message !== "forbidden" && stillHere()) {
+      await showPartnerOpenFailure(partnerId, `打不开执事会话：${error.message}`, stillHere);
+    }
+  } finally {
+    state.partnerOpening.delete(partnerId);
   }
+}
+
+/**
+ * open 404 后复核档案：GET /api/v1/partners/:id。
+ * 200 = 档案在（服务版本旧，缺 /open 路由）；404 = 档案真没了；其他 = 读不到，无法判定。
+ */
+async function partnerExistsAfter404(partnerId) {
+  try {
+    const probe = await request(`/api/v1/partners/${encodeURIComponent(partnerId)}`, {
+      cache: "no-store",
+    });
+    if (probe.ok) return "stale-server";
+    if (probe.status === 404) return "gone";
+    return "unknown";
+  } catch (error) {
+    return error.message === "forbidden" ? "forbidden" : "unknown";
+  }
+}
+
+/**
+ * open 失败且只适合给一张可重试卡（不切会话、不动花名册）的轻量入口：
+ * 典型是 404 拆义出的「服务旧」——重试大概率还是 404，卡比 toast 留得住。
+ * 与 showPartnerOpenFailure 的差别：这里不做 canonical 探测，也不切路由。
+ */
+function showPartnerOpenFailureCard(partnerId, message, stillHere) {
+  if (!stillHere()) return;
+  const name = partnerDisplayName(partnerId);
+  const wrap = document.createElement("div");
+  wrap.className = "msg error partner-open-error";
+  const body = document.createElement("div");
+  body.className = "body";
+  body.textContent = `打开${name}失败：${message}`;
+  wrap.append(body);
+  const actions = document.createElement("div");
+  actions.className = "partner-open-actions";
+  const retry = document.createElement("button");
+  retry.type = "button";
+  retry.className = "retry-btn";
+  retry.textContent = "重试";
+  retry.title = "重新请求打开执事";
+  retry.addEventListener("click", () => {
+    wrap.remove();
+    void openPartnerChat(partnerId);
+  });
+  actions.append(retry);
+  wrap.append(actions);
+  el.thread.append(wrap);
+  updateHomeMode();
+  if (state.stick) scrollToEnd();
+}
+
+/** 只读探测 canonical 会话是否已由服务端确认存在（响应必须带同一个 conversationId） */
+async function partnerConversationExists(partnerId) {
+  const convId = partnerConversationId(partnerId);
+  try {
+    const response = await request(
+      `/api/v1/agent/chat/${encodeURIComponent(convId)}/messages?limit=1`,
+      { cache: "no-store" },
+    );
+    if (!response.ok) return false;
+    const data = await response.json().catch(() => null);
+    return Boolean(data && data.conversationId === convId);
+  } catch {
+    return false;
+  }
+}
+
+function partnerConversationId(partnerId) {
+  return `partner-${partnerId}`;
+}
+
+/** openChat 的结果只有在“仍是最后一次导航 + 仍是这条会话 + 仍在对话路由”时才算归属本次 */
+function ownsChatResult(result, conversationId) {
+  return Boolean(result) &&
+    result.token === state.navToken &&
+    result.conversationId === conversationId &&
+    state.conversationId === conversationId &&
+    currentRoute() === "chat";
+}
+
+/** 只打开已确认存在的 canonical；探测失败就不制造伪执事页面 */
+async function openConfirmedPartnerCanonical(partnerId) {
+  const convId = partnerConversationId(partnerId);
+  if (!(await partnerConversationExists(partnerId))) return { ok: false, reason: "missing" };
+  go("chat");
+  const result = await openChat(convId);
+  if (!ownsChatResult(result, convId)) {
+    return { ok: false, reason: result?.status === "missing" ? "missing" : "stale" };
+  }
+  return { ok: true, result };
+}
+
+/**
+ * open 失败（503 等）：
+ *  - canonical 已确认存在 → 切过去并挂可重试错误卡；
+ *  - 探测不到 canonical → 不切换、不改标题/身份，保留当前会话，只挂可重试错误卡。
+ * 错误文案用服务端的通用中文，不展示上游原文。
+ * 失败后顺手静默刷一次花名册（2026-11-06 返修）：档案可能刚被删/暂停，列表里的
+ * 名字、状态点、幽灵行跟着对齐——「点开失败但列表还说在」就是这次 bug 的观感来源。
+ */
+async function showPartnerOpenFailure(partnerId, message, stillHere) {
+  void loadRoster();
+  if (!stillHere()) return;
+  const name = partnerDisplayName(partnerId);
+  const convId = partnerConversationId(partnerId);
+  // 先探测再切路由：切完再看会把自己的 go("chat") 当成用户离开
+  const exists = await partnerConversationExists(partnerId);
+  if (!stillHere()) return;
+
+  if (!exists) {
+    // 不制造“标题是执事、身份却是 worker”的假页面：原会话、标题、chatKind 一律不动。
+    addPartnerOpenError(message, partnerId, false, name, { keptConversation: true });
+    // 错误卡挂在对话页；如果用户此刻在任务/设置页，补一条即时提示，别让点击像没反应。
+    if (currentRoute() !== "chat") toast(`打开${name}失败：${message}`);
+    return;
+  }
+
+  go("chat");
+  const result = await openChat(convId);
+  // openChat 自己会递增 token；这里用结果归属判断，不能拿旧 token 让正常路径失效。
+  if (!ownsChatResult(result, convId)) {
+    if (result?.status === "missing") toast("执事会话不在了，先点重试");
+    return;
+  }
+  addPartnerOpenError(message, partnerId, true, name);
+}
+
+function addPartnerOpenError(message, partnerId, canContinue, name, opts = {}) {
+  hideEmpty();
+  const wrap = document.createElement("div");
+  wrap.className = "msg error partner-open-error";
+  const body = document.createElement("div");
+  body.className = "body";
+  body.textContent = opts.keptConversation
+    ? `打开${name}失败：${message}。已保留当前会话，稍后可以重试。`
+    : `${name}的问候没生成：${message}`;
+  wrap.append(body);
+
+  const actions = document.createElement("div");
+  actions.className = "partner-open-actions";
+
+  const retry = document.createElement("button");
+  retry.type = "button";
+  retry.className = "retry-btn";
+  retry.textContent = "重试";
+  retry.title = "重新请求首次问候";
+  retry.addEventListener("click", () => {
+    wrap.remove();
+    void openPartnerChat(partnerId);
+  });
+  actions.append(retry);
+
+  if (canContinue) {
+    const cont = document.createElement("button");
+    cont.type = "button";
+    cont.className = "retry-btn";
+    cont.textContent = "继续对话";
+    cont.title = "不重试问候，直接在这个空会话里说话";
+    cont.addEventListener("click", async () => {
+      // 点击时再确认一次 canonical：会话可能在错误卡出现后被清理。
+      const opened = await openConfirmedPartnerCanonical(partnerId);
+      if (opened.ok) {
+        wrap.remove();
+        return;
+      }
+      if (opened.reason === "missing") toast("这个执事会话还没建好，先点重试");
+    });
+    actions.append(cont);
+  }
+
+  wrap.append(actions);
+  el.thread.append(wrap);
+  updateHomeMode();
+  if (state.stick) scrollToEnd();
+  if (currentRoute() === "chat") el.input.focus();
 }
 
 // 分区标题右侧 ＋：复用 E1「新建执事」模态，不重写
@@ -2783,6 +3234,8 @@ function renderMarkdown(source) {
 /* ── 打开会话 ─────────────────────────────────────────── */
 
 async function openChat(conversationId) {
+  const token = ++state.navToken; // 作废还在飞的 open / 上一次 openChat
+  const owner = () => token === state.navToken && state.conversationId === conversationId;
   state.conversationId = conversationId;
   localStorage.setItem(KEY_CONV, conversationId);
   // seq 游标跟着会话走：切会话就是重新全量回读，游标归零（2026-11-04 seq 方案）。
@@ -2797,11 +3250,19 @@ async function openChat(conversationId) {
       { cache: "no-store" },
     );
     if (response.status === 404) {
-      startNewChat();
-      return;
+      // 迟到的 404 不能把用户已经切过去的新会话清掉（send 的 start 帧也会改 conversationId）
+      if (!owner()) return { token, conversationId, status: "stale" };
+      // 会话没了：延续原身份重开（总管入口不能掉成普通 worker）
+      startNewChat(state.chatKind === "chief" ? "chief" : "worker");
+      return { token: state.navToken, conversationId: "", status: "missing", applied: true };
     }
     if (!response.ok) throw new Error(String(response.status));
     const data = await response.json();
+    // 这中间用户又切了别的会话：旧历史不许覆盖新会话的屏幕
+    if (!owner()) return { token, conversationId, status: "stale" };
+    // 续话身份只认服务端回读（缺字段的旧后端按 chief）；不靠 id 猜。
+    const kind = data.chatKind || "chief";
+    state.chatKind = kind;
     clearThread();
     const messages = data.messages || [];
     for (const message of messages) {
@@ -2815,8 +3276,14 @@ async function openChat(conversationId) {
         }
       }
     }
-    if (!messages.length) {
-      el.title.textContent = "新对话";
+    const partnerId = conversationId.startsWith("partner-")
+      ? conversationId.slice("partner-".length)
+      : "";
+    if (partnerId) {
+      // 执事专线表头用名字；身份仍以服务端 chatKind 为准，这里只是展示
+      el.title.textContent = partnerDisplayName(partnerId);
+    } else if (!messages.length) {
+      el.title.textContent = kind === "worker" ? "普通对话" : "新对话";
     } else {
       // 改过名的会话用存储标题（GET /chats 已带 title）；没改过名才从首句派生。
       // 不然 openChat 每次都把改名冲掉（顶栏永远是首句前 40 字）。
@@ -2824,25 +3291,36 @@ async function openChat(conversationId) {
       const first = messages.find((message) => message.role === "user");
       el.title.textContent = known || (first ? first.text.slice(0, 40) : "对话");
     }
+    el.title.dataset.chatKind = kind;
     state.stick = true;
     scrollToEnd();
+    if (!owner()) return { token, conversationId, status: "stale" };
     // 刷新页面 / 切回会话时，可能还有一条挂着等答复的审批
     await loadPendingApprovals(conversationId);
+    if (!owner()) return { token, conversationId, status: "stale" };
+    return { token, conversationId, status: "ok", applied: true, chatKind: kind };
   } catch (error) {
+    // 旧请求的失败不许挂到别人屏幕上
+    if (!owner()) return { token, conversationId, status: "stale" };
     if (error.message !== "forbidden" && error.message !== "not-found") {
       addError(`读历史失败：${error.message}`);
     }
+    return { token, conversationId, status: "error", applied: true };
+  } finally {
+    if (owner()) void syncCtxMeter(owner);
   }
-  void syncCtxMeter();
 }
 
-function startNewChat() {
+function startNewChat(kind = "worker") {
+  state.navToken += 1;
+  state.chatKind = kind === "chief" ? "chief" : "worker";
   state.conversationId = "";
   localStorage.removeItem(KEY_CONV);
   state.maxSeq = 0; // 新会话没有历史帧（2026-11-04 seq 方案）
   renderChats();
   clearThread();
-  el.title.textContent = "新对话";
+  el.title.textContent = state.chatKind === "chief" ? "新对话" : "普通对话";
+  el.title.dataset.chatKind = state.chatKind;
   el.ctxRing.hidden = true;
   el.input.focus();
 }
@@ -2856,7 +3334,7 @@ function setSending(value) {
   el.send.setAttribute("aria-label", value ? "停止" : "发送");
   el.send.title = value ? "停止" : "";
   syncSendEnabled();
-  // E4：总管状态点随「进行中的轮」亮/灰
+  // 忙碌不再改变总管在线色（2026-11-06 C 批）：只重算一次，保持与服务状态一致
   syncChiefDot();
 }
 
@@ -2893,17 +3371,21 @@ function maybeNotify(title, body, convId) {
 const CTX_R = 8.25;
 const CTX_C = 2 * Math.PI * CTX_R;
 
-async function syncCtxMeter() {
-  if (!state.conversationId || currentRoute() !== "chat") {
+async function syncCtxMeter(stillCurrent = () => true) {
+  const convId = state.conversationId;
+  if (!stillCurrent()) return;
+  if (!convId || currentRoute() !== "chat") {
     el.ctxRing.hidden = true;
     return;
   }
   try {
     const response = await request(
-      `/api/v1/agent/chat/${encodeURIComponent(state.conversationId)}/context`,
+      `/api/v1/agent/chat/${encodeURIComponent(convId)}/context`,
       { cache: "no-store" },
     );
     const data = await response.json();
+    // 请求期间切了会话 / 路由：旧游标不许画到新会话上
+    if (!stillCurrent() || state.conversationId !== convId) return;
     if (!data.used || !data.window) {
       el.ctxRing.hidden = true;
       return;
@@ -3029,7 +3511,7 @@ function renderApprovalCard(event) {
 
 /** 刷新/切会话时补挂还挂着的审批（只补没画过的） */
 async function loadPendingApprovals(conversationId) {
-  if (!conversationId) return;
+  if (!conversationId || state.conversationId !== conversationId) return;
   try {
     const response = await request(
       `/api/v1/agent/approvals?conversationId=${encodeURIComponent(conversationId)}`,
@@ -3037,6 +3519,8 @@ async function loadPendingApprovals(conversationId) {
     );
     if (!response.ok) return;
     const data = await response.json();
+    // 请求期间用户切了会话：审批卡不能挂到别人的屏幕上
+    if (state.conversationId !== conversationId) return;
     for (const item of data.approvals || []) {
       if (approvalCards.has(item.callId)) continue;
       const card = renderApprovalCard(item);
@@ -3227,7 +3711,9 @@ async function send(text) {
     const response = await request("/api/v1/agent/chat", {
       method: "POST",
       body: JSON.stringify({
-        ...(state.conversationId ? { conversationId: state.conversationId } : {}),
+        ...(state.conversationId
+          ? { conversationId: state.conversationId }
+          : { chatKind: state.chatKind === "chief" ? "chief" : "worker" }),
         messages: [{ role: "user", content: text }],
       }),
     });
@@ -3940,18 +4426,18 @@ function syncProjectPill() {
   // 用户看到的"项目凭空没了"。降级成可见的「项目不可用」pill，点一下给 toast 并重试；
   // 下次 hashchange / 启动 / 点击仍会自动恢复。只有 403（令牌门）才保持隐藏。
   const unavailable = Boolean(switcher.unavailable);
-  // F1：没有工作区也显示 pill —— 它同时是「添加主项目」的入口，
-  // 否则侧栏没有任何地方能打开添加主项目弹窗。
+  // F1：没有工作区也显示 pill —— 它同时是「设置主项目」的入口，
+  // 否则侧栏没有任何地方能打开设置主项目弹窗。
   const label = unavailable
     ? "项目不可用"
     : hasWorkspace
       ? baseNameOf(switcher.workspace?.rootPath) || "主项目"
-      : "添加主项目";
+      : "设置主项目";
   const tip = unavailable
     ? PROJECT_UNAVAILABLE_HINT
     : hasWorkspace
       ? `主项目：${switcher.workspace?.rootPath || ""} · ${switcher.subCount} 个子项目`
-      : "添加主项目";
+      : "设置主项目";
 
   if (el.sideProj) el.sideProj.hidden = false;
   if (el.railProj) el.railProj.hidden = false;
@@ -3960,7 +4446,10 @@ function syncProjectPill() {
   if (el.projectPill) {
     el.projectPill.classList.toggle("is-unavailable", unavailable);
     el.projectPill.title = tip;
-    el.projectPill.setAttribute("aria-label", unavailable ? "项目不可用" : `项目：${label}`);
+    el.projectPill.setAttribute(
+      "aria-label",
+      unavailable ? "项目不可用" : hasWorkspace ? `项目：${label}` : "设置主项目",
+    );
   }
 
   if (el.railProj) {
@@ -3972,7 +4461,33 @@ function syncProjectPill() {
   }
 }
 
-/** 弹层内容：主项目（带标注）+ 子项目总览 + 底部「添加子项目 · 添加主项目 · 管理项目」。
+/* 项目弹层的两个线描图标（静态图元，不引图标库/远程图片）：
+   主项目=文件夹，子项目=折入箭头，配合缩进表达层级。 */
+const PROJECT_ICONS = {
+  main:
+    '<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>',
+  sub: '<path d="M4 4v6a4 4 0 0 0 4 4h12"/><path d="m15 9 5 5-5 5"/>',
+};
+
+function projectIcon(kind) {
+  const slot = document.createElement("span");
+  slot.className = `proj-ico is-${kind}`;
+  slot.setAttribute("aria-hidden", "true");
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "2");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  svg.setAttribute("aria-hidden", "true");
+  // 只写入本文件里的常量图元，不拼接任何用户数据
+  svg.innerHTML = PROJECT_ICONS[kind] || "";
+  slot.append(svg);
+  return slot;
+}
+
+/** 弹层内容：主项目（带标注）+ 子项目总览 + 底部「添加子项目 · 设置主项目 · 管理项目」。
  *  只读总览，行不可点——不在侧栏切项目，派活时由助手按登记名指定。 */
 function renderProjectMenu(items) {
   const menu = el.projectMenu;
@@ -3983,7 +4498,7 @@ function renderProjectMenu(items) {
 
   if (hasWorkspace) {
     const main = document.createElement("div");
-    main.className = "proj-item is-static";
+    main.className = "proj-item is-static is-main";
     main.title = workspace.rootPath;
     const mainName = document.createElement("span");
     mainName.className = "proj-item-name";
@@ -3991,12 +4506,12 @@ function renderProjectMenu(items) {
     const mainTag = document.createElement("span");
     mainTag.className = "proj-tag";
     mainTag.textContent = "主项目";
-    main.append(mainName, mainTag);
+    main.append(projectIcon("main"), mainName, mainTag);
     menu.append(main);
   } else {
     const empty = document.createElement("div");
     empty.className = "proj-empty";
-    empty.textContent = "还没有主工作区。先添加主项目，项目才能登记进来。";
+    empty.textContent = "还没有主工作区。先设置主项目，项目才能登记进来。";
     menu.append(empty);
   }
 
@@ -4010,12 +4525,12 @@ function renderProjectMenu(items) {
   for (const project of items) {
     if (!hasWorkspace) break;
     const row = document.createElement("div");
-    row.className = "proj-item is-static";
+    row.className = "proj-item is-static is-sub";
     row.title = project.rootPath || project.name;
     const name = document.createElement("span");
     name.className = "proj-item-name";
     name.textContent = project.name;
-    row.append(name);
+    row.append(projectIcon("sub"), name);
     // 行尾标注异常：目录丢了（黄）优先于跑出工作区（灰）
     if (project.missing || project.outside) {
       const tag = document.createElement("span");
@@ -4036,7 +4551,7 @@ function renderProjectMenu(items) {
   const foot = document.createElement("div");
   foot.className = "proj-foot";
 
-  // 添加子项目：没有工作区时置灰，title 指明先去添加主项目
+  // 添加子项目：没有工作区时置灰，title 指明先去设置主项目
   const addSub = document.createElement("button");
   addSub.type = "button";
   addSub.className = "proj-manage";
@@ -4048,14 +4563,14 @@ function renderProjectMenu(items) {
     });
   } else {
     addSub.setAttribute("aria-disabled", "true");
-    addSub.title = "先添加主项目";
+    addSub.title = "先设置主项目";
   }
 
-  // 添加主项目：设置（或更换）最大工作区根目录
+  // 设置主项目：设置（或更换）最大工作区根目录
   const addMain = document.createElement("button");
   addMain.type = "button";
   addMain.className = "proj-manage";
-  addMain.textContent = "添加主项目";
+  addMain.textContent = "设置主项目";
   addMain.title = hasWorkspace ? "更换最大工作区根目录" : "设定最大工作区根目录";
   addMain.addEventListener("click", () => {
     closeProjectMenu();
@@ -4129,7 +4644,7 @@ function clearModalHint(node) {
 
 function openAddWorkspaceModal() {
   const currentRoot = state.switcher.workspace?.rootPath || "";
-  openModal("添加主项目", (body) => {
+  openModal("设置主项目", (body) => {
     body.innerHTML = `
       <p class="modal-desc">这是最大工作区边界，助手只能在这个目录内操作；更换会清空当前项目选择。</p>
       <div class="modal-field">
@@ -4187,7 +4702,7 @@ function openAddWorkspaceModal() {
           return;
         }
         closeModal();
-        toast("主项目已添加");
+        toast("主项目已设置");
         await refreshProjectViews();
       } catch (error) {
         if (error.message === "forbidden") {
@@ -4215,7 +4730,7 @@ function openAddSubprojectModal(explicitRoot) {
   // 设置页「添加子项目」不走侧栏切换器，根目录用设置页刚读到的那份（state.switcher 可能还没拉）
   const rootPath = explicitRoot || state.switcher.workspace?.rootPath || settingsWorkspace?.rootPath || "";
   if (!rootPath) {
-    toast("先添加主项目");
+    toast("先设置主项目");
     return;
   }
   openModal("添加子项目", (body) => {
@@ -4291,8 +4806,8 @@ function openAddSubprojectModal(explicitRoot) {
       }
       const relativePath = relativeWithinWorkspace(rootPath, path);
       if (!relativePath) {
-        setModalHint(hint, "必须在最大工作区内，先去添加主项目。");
-        toast("必须在最大工作区内，先去添加主项目");
+        setModalHint(hint, "必须在最大工作区内，先去设置主项目。");
+        toast("必须在最大工作区内，先去设置主项目");
         return;
       }
       confirm.disabled = true;
@@ -4423,7 +4938,7 @@ async function toggleProjectMenu(trigger) {
       return;
     }
     applyProjectData(data);
-    // 没有工作区也照常打开：里面还有「添加主项目」，是首次使用的唯一入口
+    // 没有工作区也照常打开：里面还有「设置主项目」，是首次使用的唯一入口
     renderProjectMenu(data.items);
     projectAnchor = trigger;
     openPopover(el.projectMenu, trigger);
@@ -4550,7 +5065,7 @@ document.addEventListener("keydown", (event) => {
   if (event.key.toLowerCase() === "k") {
     event.preventDefault();
     go("chat");
-    startNewChat();
+    startNewChat("worker");
   } else if (event.key === ",") {
     event.preventDefault();
     go("settings");
@@ -4585,7 +5100,10 @@ el.send.addEventListener("click", (event) => {
   void stopStreaming();
 });
 
-el.newChat.addEventListener("click", startNewChat);
+el.newChat.addEventListener("click", () => {
+  go("chat");
+  startNewChat("worker");
+});
 
 // 代码块复制（批次一）：事件挂在 thread 上，消息增删不用重挂；
 // 读 pre 的 innerText，流式中也能复制到当前最新的文本
@@ -4633,13 +5151,13 @@ async function exportAllData() {
 }
 
 /* ── 收起轨道（2026-11-05 F1 / E4 重排）──────────────────
-   收起不再是整栏消失：72px 图标轨上「总管 / 新对话 / 任务中心 / 项目 / 设置」是真功能；
+   收起不再是整栏消失：72px 图标轨上「新建对话 / 总管 / 任务中心 / 项目 / 设置」是真功能；
    执事占位与群组占位都保留（群组仍 disabled），执事不在轨道展开，悬停提示去展开侧栏。
    领域负责人占位移除：领域概览并入执事花名册，#/domains 独立页与路由原样保留。 */
 el.railNew.addEventListener("click", () => {
   if (!sidebarOpen()) toggleSidebar();
   go("chat");
-  startNewChat();
+  startNewChat("worker");
 });
 el.railSettings.addEventListener("click", () => go("settings"));
 // 总管首字圆钮 → 打开主对话；执事占位 → 展开侧栏看花名册
@@ -4695,6 +5213,11 @@ const SETTINGS_SECTIONS = [
     id: "service",
     label: "服务",
     icon: '<rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/>',
+  },
+  {
+    id: "avatars",
+    label: "头像",
+    icon: '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="10" r="3"/><path d="M7 20.662V19a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v1.662"/>',
   },
   {
     id: "partners",
@@ -5310,6 +5833,9 @@ async function renderSettings() {
     });
     document.getElementById("provider-add")?.addEventListener("click", () => showProviderTemplates());
     void loadServiceInfo();
+  } else if (page === "avatars") {
+    el.settingsInner.innerHTML = avatarSettingsMarkup();
+    void wireAvatarSettings();
   } else if (page === "partners") {
     el.settingsInner.innerHTML = sectionMarkup(
       "执事",
@@ -5343,6 +5869,280 @@ async function renderSettings() {
   replayPageEnter();
 }
 
+/* ── 头像设置（预设图库 + 本地上传）────────────────────── */
+const AVATAR_PRESET_FILES = {
+  male: Array.from({ length: 10 }, (_, i) => `m${String(i + 1).padStart(2, "0")}`),
+  female: Array.from({ length: 20 }, (_, i) => `f${String(i + 1).padStart(2, "0")}`),
+};
+const AVATAR_PRESET_URL = (file) => `/assets/preset/${file}.png`;
+
+function avatarSettingsMarkup() {
+  return sectionMarkup(
+    "头像",
+    `<div class="card">
+      ${rowMarkup("选择对象", "总管和每个执事都能单独换头像", `<div class="av-targets" id="av-targets"><div class="set-hint">读取中…</div></div>`)}
+    </div>
+    <div class="card" id="av-editor-card" hidden>
+      <div class="av-editor">
+        <div class="av-preview-col">
+          <span class="pt-avatar av-preview" id="av-preview" aria-hidden="true"></span>
+          <span class="set-hint" id="av-editor-name"></span>
+        </div>
+        <div class="av-main">
+          <div class="av-filter segmented" role="radiogroup" aria-label="预设筛选" id="av-filter">
+            <button type="button" data-av-filter="all" aria-checked="true">全部</button>
+            <button type="button" data-av-filter="male" aria-checked="false">男生</button>
+            <button type="button" data-av-filter="female" aria-checked="false">女生</button>
+          </div>
+          <div class="av-grid" id="av-grid"></div>
+        </div>
+      </div>
+      <div class="divider"></div>
+      <div class="av-actions">
+        <button class="ghost" id="av-upload" type="button">选择本地图片</button>
+        <button class="ghost" id="av-clear" type="button">清除头像</button>
+        <button class="btn-primary" id="av-save" type="button" disabled>保存</button>
+      </div>
+      <input type="file" id="av-file" accept="image/png,image/jpeg,image/webp" hidden />
+      <p class="modal-hint" id="av-hint">点预设或上传本地图片，再点「保存」生效；未设置时显示名字首字。</p>
+    </div>`,
+  );
+}
+
+async function wireAvatarSettings() {
+  const targets = document.getElementById("av-targets");
+  const editorCard = document.getElementById("av-editor-card");
+  const grid = document.getElementById("av-grid");
+  const preview = document.getElementById("av-preview");
+  const editorName = document.getElementById("av-editor-name");
+  const hint = document.getElementById("av-hint");
+  const saveBtn = document.getElementById("av-save");
+  const uploadBtn = document.getElementById("av-upload");
+  const clearBtn = document.getElementById("av-clear");
+  const fileInput = document.getElementById("av-file");
+  const filterBox = document.getElementById("av-filter");
+  if (!targets || !editorCard) return;
+
+  if (!state.partners.length) {
+    try {
+      const resp = await request("/api/v1/partners", { cache: "no-store" });
+      const data = await resp.json().catch(() => ({}));
+      if (Array.isArray(data.partners)) state.partners = data.partners;
+    } catch (error) {
+      if (error.message === "forbidden") return;
+      targets.innerHTML = `<div class="set-hint is-error">读不到：${esc(error.message)}</div>`;
+      return;
+    }
+  }
+  const partners = state.partners;
+  if (!partners.length) {
+    targets.innerHTML = `<div class="set-hint">还没有可编辑的对象。</div>`;
+    return;
+  }
+
+  let targetId = partners.some((p) => p.id === "chief") ? "chief" : partners[0].id;
+  let draft = null;
+  let dirty = false;
+  let presetFile = null;
+  let filter = "all";
+  let busy = false;
+  let decodeSeq = 0;
+
+  // 不缓存数组引用：loadRoster() 会用 GET 结果整体替换 state.partners，
+  // 这里始终读最新数组，避免保存后重渲染画到旧数组。
+  const current = () => state.partners.find((p) => p.id === targetId);
+  const nameOf = (p) => String(p?.name || "").trim() || (p?.id === "chief" ? "总管" : "执事");
+  const setHint = (text, isError = true) => {
+    hint.textContent = text;
+    hint.classList.toggle("is-error", Boolean(isError && text));
+  };
+
+  function renderTargets() {
+    targets.replaceChildren();
+    for (const p of state.partners) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "av-target" + (p.id === targetId ? " is-active" : "");
+      b.setAttribute("aria-pressed", String(p.id === targetId));
+      const slot = document.createElement("span");
+      slot.className = "pt-avatar av-target-avatar";
+      const label = document.createElement("span");
+      label.className = "av-target-name";
+      label.textContent = nameOf(p);
+      b.append(slot, label);
+      paintAvatar(slot, p.avatar || null, nameOf(p));
+      b.addEventListener("click", () => selectTarget(p.id));
+      targets.append(b);
+    }
+  }
+
+  function renderGrid() {
+    grid.replaceChildren();
+    const files = filter === "all"
+      ? [...AVATAR_PRESET_FILES.male, ...AVATAR_PRESET_FILES.female]
+      : AVATAR_PRESET_FILES[filter];
+    for (const file of files) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "av-preset" + (file === presetFile ? " is-active" : "");
+      b.title = file;
+      b.setAttribute("aria-label", `预设 ${file}`);
+      const img = document.createElement("img");
+      img.src = AVATAR_PRESET_URL(file);
+      img.alt = "";
+      img.decoding = "async";
+      img.setAttribute("aria-hidden", "true");
+      b.append(img);
+      b.addEventListener("click", () => void applyPreset(file));
+      grid.append(b);
+    }
+  }
+
+  function syncPreview() {
+    paintAvatar(preview, draft, nameOf(current()));
+    editorName.textContent = nameOf(current());
+  }
+
+  function setDirtyState(value) {
+    dirty = value;
+    saveBtn.disabled = busy || !dirty;
+  }
+
+  function selectTarget(id) {
+    if (busy) return;
+    targetId = id;
+    const p = current();
+    draft = p?.avatar || null;
+    presetFile = null;
+    setDirtyState(false);
+    editorCard.hidden = false;
+    renderTargets();
+    renderGrid();
+    syncPreview();
+    setHint("选好后点「保存」生效。", false);
+  }
+
+  async function applyPreset(file) {
+    if (busy) return;
+    const seq = ++decodeSeq;
+    busy = true;
+    saveBtn.disabled = true;
+    setHint("读取预设…", false);
+    try {
+      const resp = await fetch(AVATAR_PRESET_URL(file), { cache: "no-store" });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const blob = await resp.blob();
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(new Error("预设读不出来"));
+        reader.readAsDataURL(blob);
+      });
+      if (seq !== decodeSeq) return;
+      const problem = avatarDataProblem(dataUrl);
+      if (problem) throw new Error(problem);
+      draft = dataUrl;
+      presetFile = file;
+      setDirtyState(true);
+      syncPreview();
+      renderGrid();
+      setHint("已选预设，点「保存」生效。", false);
+    } catch (error) {
+      if (seq !== decodeSeq) return;
+      setHint(error.message);
+    } finally {
+      if (seq === decodeSeq) {
+        busy = false;
+        saveBtn.disabled = !dirty;
+      }
+    }
+  }
+
+  filterBox?.querySelectorAll("[data-av-filter]").forEach((b) => {
+    b.addEventListener("click", () => {
+      filter = b.dataset.avFilter;
+      filterBox.querySelectorAll("[data-av-filter]").forEach((x) =>
+        x.setAttribute("aria-checked", String(x === b)));
+      renderGrid();
+    });
+  });
+
+  uploadBtn?.addEventListener("click", () => { if (!busy) fileInput.click(); });
+  fileInput?.addEventListener("change", async () => {
+    const file = fileInput.files && fileInput.files[0];
+    fileInput.value = "";
+    if (!file || busy) return;
+    const seq = ++decodeSeq;
+    busy = true;
+    saveBtn.disabled = true;
+    setHint("处理中…", false);
+    try {
+      const dataUrl = await fileToAvatarPng(file);
+      if (seq !== decodeSeq) return;
+      draft = dataUrl;
+      presetFile = null;
+      setDirtyState(true);
+      syncPreview();
+      renderGrid();
+      setHint("已选本地图片，点「保存」生效。", false);
+    } catch (error) {
+      if (seq !== decodeSeq) return;
+      setHint(error.message);
+    } finally {
+      if (seq === decodeSeq) {
+        busy = false;
+        saveBtn.disabled = !dirty;
+      }
+    }
+  });
+
+  clearBtn?.addEventListener("click", () => {
+    if (busy) return;
+    decodeSeq += 1;
+    draft = null;
+    presetFile = null;
+    setDirtyState(true);
+    syncPreview();
+    renderGrid();
+    setHint("将清除头像，点「保存」生效。", false);
+  });
+
+  saveBtn?.addEventListener("click", async () => {
+    if (!dirty || busy) return;
+    const payload = draft;
+    busy = true;
+    saveBtn.disabled = true;
+    setHint("保存中…", false);
+    try {
+      const resp = await request(`/api/v1/partners/${encodeURIComponent(targetId)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ avatar: payload }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data.message || data.error || `HTTP ${resp.status}`);
+      draft = data.partner?.avatar ?? null;
+      setDirtyState(false);
+      const cached = state.partners.find((p) => p.id === targetId);
+      if (cached) cached.avatar = draft;
+      syncChiefAvatar();
+      void loadRoster();
+      syncPreview();
+      renderTargets();
+      toast("头像已保存");
+      setHint("头像已保存。", false);
+    } catch (error) {
+      if (error.message === "forbidden") return;
+      setHint(`没存成：${error.message}`);
+    } finally {
+      busy = false;
+      saveBtn.disabled = !dirty;
+    }
+  });
+
+  renderTargets();
+  selectTarget(targetId);
+}
+
 /* ── 项目分区（2026-11-04 批次六）───────────────────────
    服务端 2026-11-03 就有登记/提案/确认流，这里只是把它接上：
    工作区 = 一个根目录；项目 = 根目录下的已登记子目录；确认提案才建目录。
@@ -5351,8 +6151,8 @@ async function renderSettings() {
 const PROJECT_ERROR_TEXT = {
   bad_request: "名称和相对路径都要填。",
   bad_path: "路径不合法：工作区要写绝对路径；项目路径要写工作区内的相对路径。",
-  outside_workspace: "必须在最大工作区内，先去添加主项目。",
-  no_workspace: "还没有主工作区，先去添加主项目。",
+  outside_workspace: "必须在最大工作区内，先去设置主项目。",
+  no_workspace: "还没有主工作区，先去设置主项目。",
   inside_existing_project: "这个路径已经属于某个已登记项目了。",
   duplicate_project: "同名项目已存在。",
   already_decided: "这条请求已经处理过了。",
@@ -7151,7 +7951,7 @@ el.menuPop.addEventListener("click", (event) => {
     go("settings");
   } else if (item.dataset.action === "new") {
     go("chat");
-    startNewChat();
+    startNewChat("worker");
   }
 });
 document.addEventListener("click", (event) => {
@@ -7182,9 +7982,10 @@ function ptStatusPill(status) {
   return `<span class="pill-tag ${info.cls}">${esc(info.text)}</span>`;
 }
 
-function ptStatusDot(status) {
-  const cls = status === "active" ? "ok" : status === "paused" ? "warn" : "idle";
-  return `<span class="status-dot ${cls}" aria-hidden="true"></span>`;
+function ptStatusDot(status, id = "") {
+  // 与服务连通一起判：active + 在线才是绿；失联黄；暂停/归档灰（2026-11-06 C 批）
+  const attrs = id ? ` data-pt-dot="${esc(id)}"` : "";
+  return `<span class="status-dot ${partnerDotClass(status)}"${attrs} aria-hidden="true"></span>`;
 }
 
 /** 触发器人话化：cron 给原文 + 一句人话，其余给一句人话。返回值已转义，直接塞进模板。 */
@@ -7236,6 +8037,11 @@ async function loadPartners() {
     const response = await request("/api/v1/partners", { cache: "no-store" });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(String(response.status));
+    // 设置页也共享头像 / 状态缓存（侧栏与设置不各拉一份结论）
+    if (Array.isArray(data.partners)) {
+      state.partners = data.partners;
+      syncChiefAvatar();
+    }
     renderPartnerList(box, data.partners || []);
   } catch (error) {
     if (error.message === "forbidden") return;
@@ -7262,7 +8068,8 @@ function renderPartnerList(box, partners) {
     const nextStatus = partner.status === "active" ? "paused" : "active";
     card.innerHTML = `
       <div class="pt-card-head">
-        ${ptStatusDot(partner.status)}
+        ${ptStatusDot(partner.status, partner.id)}
+        <span class="pt-avatar pt-card-avatar" data-avatar-for="${attr(partner.id)}" aria-hidden="true"></span>
         <span class="row-label pt-name">${esc(partner.name || "")}</span>
         ${isChief ? '<span class="pill-tag">总管</span>' : ""}
         ${ptStatusPill(partner.status)}
@@ -7277,6 +8084,12 @@ function renderPartnerList(box, partners) {
         ${archived ? "" : `<button class="ghost" type="button" data-pt-toggle="${attr(partner.id)}" data-pt-next="${attr(nextStatus)}">${partner.status === "active" ? "暂停" : "恢复"}</button>`}
       </div>`;
     box.append(card);
+    // 头像只走 DOM 属性（不把 data URL 拼进 innerHTML）
+    paintAvatar(
+      card.querySelector("[data-avatar-for]"),
+      partner.avatar || null,
+      partner.name || "",
+    );
 
     card.querySelector("[data-pt-edit]")?.addEventListener("click", () => void openEditPartnerModal(partner.id));
     card.querySelector("[data-pt-run]")?.addEventListener("click", () =>
@@ -7407,6 +8220,24 @@ function ptBuildEditModal(body, partnerId, detail) {
   const chainText = chain.map((item) => `${item.providerId}|${item.modelId}|${item.keyEnv}`).join("\n");
   body.innerHTML = `
     <div class="pt-edit">
+      <div class="pt-seg">
+        <div class="pt-seg-head">
+          <span class="pt-seg-title">头像</span>
+          <span class="kv">PNG / JPEG / WebP · ≤5MiB</span>
+        </div>
+        <div class="pt-avatar-row">
+          <button class="pt-avatar avatar-edit pt-avatar-preview" id="pt-avatar-preview" type="button"
+                  aria-label="选择本地图片作为头像" title="选择本地图片"></button>
+          <div class="pt-avatar-btns">
+            <button class="ghost" id="pt-avatar-pick" type="button">选择图片</button>
+            <button class="ghost" id="pt-avatar-clear" type="button">清除</button>
+            <button class="btn-primary" id="pt-avatar-save" type="button" disabled>保存头像</button>
+          </div>
+        </div>
+        <input type="file" id="pt-avatar-file" accept="image/png,image/jpeg,image/webp" hidden />
+        <p class="modal-hint" id="pt-avatar-hint">会缩到最长边 256px 并转成 PNG 保存在服务端；未设置时显示名字首字。</p>
+      </div>
+
       <div class="pt-seg pt-basic">
         <label class="modal-field">
           <span>名字</span>
@@ -7457,6 +8288,8 @@ function ptBuildEditModal(body, partnerId, detail) {
   const nameInput = body.querySelector("#pt-name");
   body.querySelector("#pt-name-save")?.addEventListener("click", () => void ptSaveName(partnerId, nameInput));
 
+  ptWireAvatarEditor(body, partnerId, partner);
+
   const soulArea = body.querySelector("#pt-soul");
   const soulHint = body.querySelector("#pt-soul-hint");
   body.querySelector("#pt-soul-save")?.addEventListener("click", () => void ptSaveSoul(partnerId, soulArea, soulHint, body));
@@ -7471,6 +8304,125 @@ function ptBuildEditModal(body, partnerId, detail) {
   body.querySelector("#pt-routine-refresh")?.addEventListener("click", () => void ptRenderRoutineList(listBox, partnerId));
   ptWireRoutineForm(body, partnerId, listBox);
   void ptRenderRoutineList(listBox, partnerId);
+}
+
+/* 头像编辑（2026-11-06 C 批）：选择 → 本地预览 → 保存才写服务端；清除也走同一次保存。
+ * 取消 / 关闭模态不会改任何东西；坏图 / 超限只改提示，不覆盖已有头像。 */
+function ptWireAvatarEditor(body, partnerId, partner) {
+  const preview = body.querySelector("#pt-avatar-preview");
+  const fileInput = body.querySelector("#pt-avatar-file");
+  const hint = body.querySelector("#pt-avatar-hint");
+  const save = body.querySelector("#pt-avatar-save");
+  const pickButton = body.querySelector("#pt-avatar-pick");
+  const clearButton = body.querySelector("#pt-avatar-clear");
+  const name = String(partner.name || "").trim() || "执事";
+  let draft = partner.avatar || null;
+  let dirty = false;
+  // 选图解码是异步的：每次选图 / 清除都推进序号，迟到的结果不许覆盖最新草稿。
+  let decodeSeq = 0;
+  let decoding = false;
+  let saving = false;
+
+  // 模态关闭后 body 会从 DOM 摘掉：所有异步后续先看这个，不再碰失效节点。
+  const alive = () => body.isConnected;
+
+  const refreshSave = () => {
+    if (save) save.disabled = saving || decoding || !dirty;
+  };
+  const setDirty = (value) => {
+    dirty = value;
+    refreshSave();
+  };
+  const setSaving = (value) => {
+    saving = value;
+    if (fileInput) fileInput.disabled = value;
+    if (pickButton) pickButton.disabled = value;
+    if (clearButton) clearButton.disabled = value;
+    if (preview) preview.disabled = value;
+    refreshSave();
+  };
+
+  paintAvatar(preview, draft, name);
+  refreshSave();
+
+  const pick = () => {
+    if (!saving && alive()) fileInput?.click();
+  };
+
+  preview?.addEventListener("click", pick);
+  pickButton?.addEventListener("click", pick);
+
+  fileInput?.addEventListener("change", async () => {
+    const file = fileInput.files && fileInput.files[0];
+    fileInput.value = ""; // 同一张图再选一次也能触发 change
+    if (!file || saving || !alive()) return;
+    const seq = ++decodeSeq;
+    decoding = true;
+    refreshSave();
+    setModalHint(hint, "处理中…", false);
+    try {
+      const dataUrl = await fileToAvatarPng(file);
+      if (seq !== decodeSeq || !alive()) return; // 选 A 后清除 / 选 B：A 迟到就作废
+      draft = dataUrl;
+      setDirty(true);
+      paintAvatar(preview, draft, name);
+      setModalHint(hint, "已选好，点「保存头像」生效。", false);
+    } catch (error) {
+      if (seq !== decodeSeq || !alive()) return; // 迟到的失败也不许改最新提示
+      setModalHint(hint, error.message || "这张图片不能用作头像");
+    } finally {
+      if (seq === decodeSeq) {
+        decoding = false;
+        if (alive()) refreshSave();
+      }
+    }
+  });
+
+  clearButton?.addEventListener("click", () => {
+    if (saving || !alive()) return;
+    decodeSeq += 1; // 清掉正在解码的选图：清空是最后意图
+    decoding = false;
+    draft = null;
+    setDirty(true);
+    paintAvatar(preview, draft, name);
+    setModalHint(hint, "已清除，点「保存头像」生效。", false);
+  });
+
+  save?.addEventListener("click", async () => {
+    if (!dirty || saving || decoding || !alive()) return;
+    const payload = draft;
+    setSaving(true); // 保存期间禁止选择 / 清除 / 重复保存，旧响应没有机会覆盖新草稿
+    setModalHint(hint, "保存中…", false);
+    try {
+      const response = await request(`/api/v1/partners/${encodeURIComponent(partnerId)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ avatar: payload }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        if (alive()) {
+          setModalHint(hint, data.message || data.error || `没存成：HTTP ${response.status}`);
+        }
+        return;
+      }
+      draft = data.partner?.avatar ?? null;
+      dirty = false;
+      // 缓存同步：侧栏（展开 + 轨道）与设置页都从 state.partners 取头像。
+      // 即使模态已经关了也同步缓存；DOM 只在 body 还活着时碰。
+      const cached = state.partners.find((item) => item.id === partnerId);
+      if (cached) cached.avatar = draft;
+      syncChiefAvatar();
+      void loadRoster();
+      void loadPartners();
+      if (!alive()) return;
+      paintAvatar(preview, draft, name);
+      setModalHint(hint, "头像已保存。", false);
+    } catch (error) {
+      if (alive() && error.message !== "forbidden") setModalHint(hint, `没存成：${error.message}`);
+    } finally {
+      if (alive()) setSaving(false);
+    }
+  });
 }
 
 async function ptSaveName(partnerId, input) {
@@ -8903,6 +9855,13 @@ void (async () => {
   // E4：最近会话折叠态（localStorage）、总管状态点初值
   applyRecents();
   syncChiefDot();
+  // 隐藏层不作为 Tab 焦点：首帧按真实可见性定（窄屏只看轨道）
+  applySidebarA11y();
+  // 没有落盘会话 = 首屏普通 worker 空会话；表头要跟身份一致
+  if (!state.conversationId) {
+    el.title.textContent = state.chatKind === "chief" ? "新对话" : "普通对话";
+    el.title.dataset.chatKind = state.chatKind;
+  }
 
   // 深链：`?view=settings`（或 `?view=settings/连接页 id`）落设置页，
   // `?view=new` 开一个新对话（壳的托盘/快捷方式用得上）
@@ -8914,7 +9873,8 @@ void (async () => {
         go("settings", SETTINGS_SECTIONS.some((section) => section.id === sub) ? sub : undefined);
       }
     } else {
-      startNewChat();
+      go("chat");
+      startNewChat("worker");
     }
     // 用掉就清掉，否则以后每次刷新都被它拽回同一个地方
     const clean = new URL(location.href);

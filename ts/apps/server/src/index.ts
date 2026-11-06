@@ -17,6 +17,7 @@ import {
 import {
   addReminder,
   applyChatMode,
+  chatKindOf,
   chatMetaSummary,
   chatStream,
   contextUsageOf,
@@ -38,6 +39,7 @@ import {
   setPolicy,
   stopChat,
   usageSummary,
+  workerChatEnabled,
 } from "./agent.ts";
 import { createAuthMiddleware } from "./auth.ts";
 import { ChatEventStore, sseSeqEnabled } from "./chat-events.ts";
@@ -50,7 +52,8 @@ import { mountProjects } from "./projects.ts";
 import { mountDelegationApi } from "./delegation-api.ts";
 import { mountCompanions } from "./companion-api.ts";
 import { mountGroups } from "./group-api.ts";
-import { COMPANIONS_ENABLED } from "./partners.ts";
+import { COMPANIONS_ENABLED, partnersStore } from "./partners.ts";
+import { ensurePartnerSession } from "./partner-runtime.ts";
 import { routineEngine } from "./routines.ts";
 import { watchAllEvents } from "./agent.ts";
 import { autonomyEnabled, autonomyObserver } from "./autonomy.ts";
@@ -550,12 +553,50 @@ app.post("/api/v1/agent/chat", async (c) => {
   // 会话 id 只能由服务端发出去：不带 = 新建，带了就必须是发过的那个。
   // durable 内部用的是自增整数，对外仍然映射成 uuid —— 整数猜得到，uuid 猜不到。
   const requestedId = request.conversationId;
-  const chat = await openChat(requestedId).catch((error: unknown) => {
+  // 新建 worker 的回滚开关（2026-11-06 B2）：只拦新建；已落盘的 worker 保持原身份。
+  if (!requestedId && request.chatKind === "worker" && !workerChatEnabled()) {
+    return c.json(
+      { error: "worker_chat_disabled", message: "普通助手会话当前已关闭（WORKER_CHAT_ENABLED=false）" },
+      400,
+    );
+  }
+  let chat = await openChat(
+    requestedId,
+    undefined,
+    // 种类只在新建分支采用：续话不能靠这个字段改身份（下面另有不匹配校验）
+    requestedId ? undefined : request.chatKind,
+  ).catch((error: unknown) => {
     console.error(`[chat] 打开会话失败: ${error instanceof Error ? error.message : String(error)}`);
     return null;
   });
   if (!chat) {
     return c.json({ error: "unknown_conversation", message: "会话不存在，请不带 conversationId 新建" }, 404);
+  }
+
+  if (requestedId) {
+    const kind = await chatKindOf(chat);
+    // 续话带不匹配的种类：400，不隐式改身份（2026-11-06 B2）
+    if (request.chatKind && request.chatKind !== kind) {
+      return c.json(
+        { error: "chat_kind_mismatch", message: "该会话的种类已确定，不可通过续话更改" },
+        400,
+      );
+    }
+    // 主聊天续执事专线（2026-11-06 B2）：提交前对齐身份；暂停/归档不许继续跑。
+    // 对齐在 partner-runtime（agent.ts 不能反向 import 它），这里只做装配。
+    if (kind === "partner" && COMPANIONS_ENABLED) {
+      const partnerId = partnersStore().partnerIdOfSession(chat.internalId);
+      if (partnerId) {
+        const aligned = await ensurePartnerSession(partnerId).catch(() => null);
+        if (!aligned) {
+          return c.json(
+            { error: "partner_inactive", message: "执事当前是暂停或归档状态，先恢复再继续" },
+            409,
+          );
+        }
+        chat = aligned;
+      }
+    }
   }
 
   const lastUserText =
@@ -699,18 +740,20 @@ app.get("/api/v1/agent/chat/:conversationId/messages", async (c) => {
 
   const limit = Number(c.req.query("limit") ?? 50);
   const messages = await readTranscript(chat, Number.isFinite(limit) ? limit : 50);
+  // 会话种类（2026-11-06 B2）：前端据此恢复"普通 worker / 总管"身份，不按 id 猜
+  const chatKind = await chatKindOf(chat);
 
   const sinceRaw = c.req.query("sinceSeq");
   const eventStore = chatEventStoreOf();
   if (sinceRaw === undefined || sinceRaw === "" || !eventStore) {
-    return c.json({ conversationId: chat.externalId, messages });
+    return c.json({ conversationId: chat.externalId, messages, chatKind });
   }
   const sinceSeq = Number(sinceRaw);
   if (!Number.isFinite(sinceSeq) || sinceSeq < 0) {
     return c.json({ error: "bad_request", message: "sinceSeq 必须是非负整数" }, 400);
   }
   const { from, events } = eventStore.replaySince(chat.internalId, Math.floor(sinceSeq));
-  return c.json({ conversationId: chat.externalId, messages, fromSeq: from, events });
+  return c.json({ conversationId: chat.externalId, messages, chatKind, fromSeq: from, events });
 });
 
 /**

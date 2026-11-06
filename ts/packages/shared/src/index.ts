@@ -25,6 +25,23 @@ export const ChatMessageSchema = z.object({
 export type ChatMessage = z.infer<typeof ChatMessageSchema>;
 
 /**
+ * 会话种类（2026-11-06 侧栏调整 B2）。
+ *
+ * 为什么要有：默认 persona 一直是总管身份，前端"新建对话"只清空了本地状态，
+ * 新建出来的仍是总管会话。身份必须落在服务端（durable doc），不能只靠按钮文案。
+ *
+ * - `chief`  = 总管会话（历史默认；手机与旧调用方不带字段 → 仍 chief）
+ * - `worker` = 普通任务助手会话（新建入口显式指定）
+ * - `partner`= 执事专线（只出现在响应里：由 `partner_session_links` 判定，客户端不能自报）
+ */
+export const ChatKindSchema = z.enum(["chief", "worker", "partner"]);
+export type ChatKind = z.infer<typeof ChatKindSchema>;
+
+/** 新建会话时可指定的种类：partner 不能由客户端声明（身份由服务端链接表决定）。 */
+export const NewChatKindSchema = ChatKindSchema.exclude(["partner"]);
+export type NewChatKind = z.infer<typeof NewChatKindSchema>;
+
+/**
  * 上行请求。这里**故意**没有 userId：身份走鉴权头，不信任客户端自报。
  *
  * `conversationId` 的语义：**不带 = 新建会话**，服务端生成并在 `start` 事件里返回；
@@ -42,6 +59,11 @@ export const ChatRequestSchema = z.object({
 	 * 不会重复扣 token、也不会把同一段话记两遍记忆。弱网下很有用。
 	 */
 	requestId: z.string().min(1).max(128).optional(),
+	/**
+	 * 新会话种类（2026-11-06 侧栏调整 B2，纯增量）：只在不带 `conversationId` 时采用，
+	 * 缺省仍 `chief`（手机/旧调用方零改动）。续话时带不匹配的值 → 400，不隐式改身份。
+	 */
+	chatKind: NewChatKindSchema.optional(),
 });
 export type ChatRequest = z.infer<typeof ChatRequestSchema>;
 
@@ -550,6 +572,236 @@ export type RelayActorClaimResult = z.infer<typeof RelayActorClaimResultSchema>;
 export const PartnerStatusSchema = z.enum(["active", "paused", "archived"]);
 export type PartnerStatus = z.infer<typeof PartnerStatusSchema>;
 
+// ── 伙伴头像（2026-11-06 侧栏调整 B1）──────────────────────
+//
+// 取舍：**只收有界 PNG data URL**，不存文件路径、不收外部 URL、不收 SVG。
+//  - 文件路径会暴露本机目录，也会随家目录迁移失效；
+//  - 外部 URL 等于让服务端去抓任意地址（SSRF），而且离线就没了；
+//  - SVG 是可执行内容，服务端不该存"一段能被浏览器当文档执行的东西"。
+// PNG 只供 `<img src>` 渲染（图片解码器，不执行脚本），并有明确的字节/尺寸上限。
+//
+// 客户端负责把用户选的图缩成 ≤256px 的 PNG；服务端仍然全量复核（不信任客户端），
+// 因为契约是公开的，谁都能直接 POST 一段字符串。
+
+/** 头像字符串上限（data URL 整体，含前缀与 base64 填充） */
+export const PARTNER_AVATAR_MAX_CHARS = 180_000;
+/** 解码后字节上限（128KiB：256×256 RGBA 未压缩约 256KiB，PNG 压缩后远小于此） */
+export const PARTNER_AVATAR_MAX_BYTES = 128 * 1024;
+/** 单边尺寸上限（px）；下限固定 1 */
+export const PARTNER_AVATAR_MAX_DIMENSION = 256;
+/** 唯一允许的 data URL 前缀 */
+export const PARTNER_AVATAR_PREFIX = "data:image/png;base64,";
+
+const B64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/**
+ * 完整解开一段 base64（长度必须是 4 的倍数）。
+ * 刻意不用 Buffer/atob：shared 同时被服务端（tsx）和手机端（Metro）加载，
+ * 两边全局对象不一样。头像上限 128KiB，这里一次性解完——PNG 的块边界、
+ * IHDR 参数和 CRC 都要看真实字节，只解头尾会被坏图骗过去。
+ */
+function base64Decode(b64: string): Uint8Array | null {
+	if (b64.length === 0 || b64.length % 4 !== 0) return null;
+	const padding = b64.endsWith("==") ? 2 : b64.endsWith("=") ? 1 : 0;
+	const byteLength = (b64.length / 4) * 3 - padding;
+	const out = new Uint8Array(byteLength);
+	let cursor = 0;
+	for (let i = 0; i < b64.length; i += 4) {
+		const a = B64_ALPHABET.indexOf(b64[i]);
+		const b = B64_ALPHABET.indexOf(b64[i + 1]);
+		const c = b64[i + 2] === "=" ? 0 : B64_ALPHABET.indexOf(b64[i + 2]);
+		const d = b64[i + 3] === "=" ? 0 : B64_ALPHABET.indexOf(b64[i + 3]);
+		if (a < 0 || b < 0 || c < 0 || d < 0) return null;
+		const n = (a << 18) | (b << 12) | (c << 6) | d;
+		out[cursor++] = (n >> 16) & 0xff;
+		if (cursor < byteLength) out[cursor++] = (n >> 8) & 0xff;
+		if (cursor < byteLength) out[cursor++] = n & 0xff;
+	}
+	return cursor === byteLength ? out : null;
+}
+
+const CRC32_TABLE = (() => {
+	const table = new Uint32Array(256);
+	for (let n = 0; n < 256; n += 1) {
+		let c = n;
+		for (let k = 0; k < 8; k += 1) {
+			c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+		}
+		table[n] = c >>> 0;
+	}
+	return table;
+})();
+
+function pngCrc32(bytes: Uint8Array, start: number, end: number): number {
+	let c = 0xffffffff;
+	for (let i = start; i < end; i += 1) {
+		c = CRC32_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+	}
+	return (c ^ 0xffffffff) >>> 0;
+}
+
+function be32(bytes: Uint8Array, offset: number): number {
+	return (
+		(bytes[offset] << 24) |
+		(bytes[offset + 1] << 16) |
+		(bytes[offset + 2] << 8) |
+		bytes[offset + 3]
+	) >>> 0;
+}
+
+/** PNG 块类型必须是 4 个 ASCII 字母（大小写都合法；大小写决定 critical/ancillary）。 */
+function isChunkType(bytes: Uint8Array, offset: number): boolean {
+	for (let i = 0; i < 4; i += 1) {
+		const byte = bytes[offset + i];
+		if (!((byte >= 0x41 && byte <= 0x5a) || (byte >= 0x61 && byte <= 0x7a))) return false;
+	}
+	return true;
+}
+
+/**
+ * 逐块走完整个 PNG：签名 → IHDR（必须是首块且长度 13，参数合法）→ 每块 CRC →
+ * IDAT 存在 / 连续 / 在 IEND 前 → IEND 长度 0 且后面没有多余字节。
+ *
+ * 这里只做**结构**校验；IDAT 的 deflate 流是否真能解开由服务端用 zlib 复核
+ * （shared 不能 import Node，手机端也要能加载）。
+ */
+function pngProblem(bytes: Uint8Array): string | null {
+	const signature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+	if (bytes.length < 45) return "头像不是完整的 PNG";
+	if (signature.some((byte, index) => bytes[index] !== byte)) return "头像不是 PNG";
+
+	let offset = 8;
+	let seenIhdr = false;
+	let seenIdat = false;
+	let idatClosed = false;
+	let seenIend = false;
+	let seenPlte = false;
+	let colorType = -1;
+
+	while (offset < bytes.length) {
+		if (bytes.length - offset < 12) return "PNG 数据不完整";
+		const length = be32(bytes, offset);
+		const typeStart = offset + 4;
+		const dataStart = offset + 8;
+		const crcStart = dataStart + length;
+		if (length > bytes.length || crcStart + 4 > bytes.length) return "PNG 数据不完整";
+		if (!isChunkType(bytes, typeStart)) return "PNG 块类型不合法";
+		const type = String.fromCharCode(
+			bytes[typeStart],
+			bytes[typeStart + 1],
+			bytes[typeStart + 2],
+			bytes[typeStart + 3],
+		);
+		if (be32(bytes, crcStart) !== pngCrc32(bytes, typeStart, crcStart)) {
+			return "PNG 数据校验失败（CRC）";
+		}
+
+		if (!seenIhdr) {
+			if (type !== "IHDR") return "PNG 缺少 IHDR 块";
+			if (length !== 13) return "PNG IHDR 长度不合法";
+			const width = be32(bytes, dataStart);
+			const height = be32(bytes, dataStart + 4);
+			const bitDepth = bytes[dataStart + 8];
+			colorType = bytes[dataStart + 9];
+			const compression = bytes[dataStart + 10];
+			const filter = bytes[dataStart + 11];
+			const interlace = bytes[dataStart + 12];
+			if (
+				width < 1 ||
+				height < 1 ||
+				width > PARTNER_AVATAR_MAX_DIMENSION ||
+				height > PARTNER_AVATAR_MAX_DIMENSION
+			) {
+				return `头像尺寸需在 1–${PARTNER_AVATAR_MAX_DIMENSION}px 之间（当前 ${width}×${height}）`;
+			}
+			const depthsByColor: Record<number, number[]> = {
+				0: [1, 2, 4, 8, 16],
+				2: [8, 16],
+				3: [1, 2, 4, 8],
+				4: [8, 16],
+				6: [8, 16],
+			};
+			if (!depthsByColor[colorType]?.includes(bitDepth)) {
+				return "PNG IHDR 参数不合法（颜色类型 / 位深）";
+			}
+			if (compression !== 0 || filter !== 0 || interlace > 1) {
+				return "PNG IHDR 参数不合法（压缩 / 过滤 / 隔行）";
+			}
+			seenIhdr = true;
+		} else {
+			if (type === "IHDR") return "PNG 包含多个 IHDR 块";
+			if (type === "IDAT") {
+				if (idatClosed) return "PNG IDAT 块不连续";
+				if (colorType === 3 && !seenPlte) return "PNG 缺少调色板（PLTE）";
+				seenIdat = true;
+			} else {
+				if (seenIdat) idatClosed = true;
+				if (type === "PLTE") {
+					if (seenIdat) return "PNG PLTE 必须位于 IDAT 之前";
+					seenPlte = true;
+				}
+				if (type === "IEND") {
+					if (length !== 0) return "PNG IEND 长度不合法";
+					if (crcStart + 4 !== bytes.length) return "PNG IEND 之后有多余数据";
+					seenIend = true;
+				}
+			}
+		}
+
+		offset = crcStart + 4;
+		if (seenIend) break;
+	}
+
+	if (!seenIhdr) return "PNG 缺少 IHDR 块";
+	if (!seenIdat) return "PNG 缺少 IDAT 块";
+	if (!seenIend) return "PNG 数据不完整（缺少 IEND）";
+	return null;
+}
+
+/**
+ * 头像字符串的问题描述；合法返回 null。
+ * 校验顺序：前缀 → base64 形状 / 体积 → 完整解码 → PNG 签名 / 块边界 / IHDR / CRC / IDAT / IEND。
+ * 返回的是给人看的中文短句，端点直接用作 400 的 message。
+ */
+export function partnerAvatarProblem(value: string): string | null {
+	if (!value.startsWith(PARTNER_AVATAR_PREFIX)) {
+		return "头像只接受 PNG（data:image/png;base64,...）";
+	}
+	if (value.length > PARTNER_AVATAR_MAX_CHARS) {
+		return `头像字符串超过 ${PARTNER_AVATAR_MAX_CHARS} 字符上限`;
+	}
+	const b64 = value.slice(PARTNER_AVATAR_PREFIX.length);
+	if (b64.length === 0) return "头像内容为空";
+	if (b64.length % 4 !== 0) return "头像 base64 长度不合法";
+	if (!/^[A-Za-z0-9+/]+={0,2}$/.test(b64)) return "头像 base64 含非法字符";
+
+	const padding = b64.endsWith("==") ? 2 : b64.endsWith("=") ? 1 : 0;
+	const byteLength = (b64.length / 4) * 3 - padding;
+	if (byteLength > PARTNER_AVATAR_MAX_BYTES) {
+		return `头像解码后超过 ${PARTNER_AVATAR_MAX_BYTES / 1024}KiB 上限`;
+	}
+	if (byteLength < 45) return "头像不是完整的 PNG";
+
+	const bytes = base64Decode(b64);
+	if (!bytes) return "头像 base64 无法解码";
+	return pngProblem(bytes);
+}
+
+/** 合法头像：`data:image/png;base64,...`（有界）。 */
+export const PartnerAvatarSchema = z
+	.string()
+	.max(PARTNER_AVATAR_MAX_CHARS, { message: `头像字符串超过 ${PARTNER_AVATAR_MAX_CHARS} 字符上限` })
+	.superRefine((value, ctx) => {
+		const problem = partnerAvatarProblem(value);
+		if (problem) ctx.addIssue({ code: z.ZodIssueCode.custom, message: problem });
+	});
+export type PartnerAvatar = z.infer<typeof PartnerAvatarSchema>;
+
+/** PATCH 语义：字段遗漏 = 不改；`null` = 清除；字符串 = 设置。 */
+export const PartnerAvatarPatchSchema = PartnerAvatarSchema.nullable();
+export type PartnerAvatarPatch = z.infer<typeof PartnerAvatarPatchSchema>;
+
+
 /** 模型候选链项：keyEnv 只允许存 env 变量名（密钥纪律），任何值形状都会被服务端 400 */
 export const ModelChainItemSchema = z.object({
 	providerId: z.string(),
@@ -573,6 +825,11 @@ export const PartnerProfileSchema = z.object({
 	 * App 零改动：认不出的客户端按「忽略未知字段」处理即可。
 	 */
 	domain: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).optional(),
+	/**
+	 * 头像（2026-11-06 侧栏调整 B1，纯增量）：`null` = 未设置（前端回落名字首字）。
+	 * 只在 `GET /api/v1/partners/:id` 的投影里出现；旧客户端忽略未知字段即可。
+	 */
+	avatar: PartnerAvatarSchema.nullable(),
 });
 export type PartnerProfile = z.infer<typeof PartnerProfileSchema>;
 
