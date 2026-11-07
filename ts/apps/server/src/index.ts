@@ -3,6 +3,8 @@ import { serve } from "@hono/node-server";
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
 import { streamSSE } from "hono/streaming";
+import { appendFileSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 import { hostname } from "node:os";
 import QRCode from "qrcode";
 import type { MemoryScope } from "@lifediary/memory";
@@ -54,6 +56,11 @@ import { mountFiles } from "./files.ts";
 import { mountDelegationApi } from "./delegation-api.ts";
 import { mountCompanions } from "./companion-api.ts";
 import { mountGroups } from "./group-api.ts";
+// 长期课题（2026-11-07 批次一）：列表 / 详情 / 改节奏 / 暂停 / 关闭 / 立即研究 / 提议确认。
+// TOPICS_ENABLED=false 时 mountTopics 内部直接返回，整组路由 404（同 COMPANIONS 口径）。
+import { mountTopics } from "./topic-api.ts";
+// 搜索配置（2026-11-07 长期课题跟进 S2）：设置页直填 DeepSeek 搜索 key + 连接测试。
+import { mountSearch } from "./search-api.ts";
 import { COMPANIONS_ENABLED, partnersStore } from "./partners.ts";
 import { ensurePartnerSession } from "./partner-runtime.ts";
 import { routineEngine } from "./routines.ts";
@@ -116,6 +123,42 @@ try {
 injectProviderKeys();
 
 const app = new Hono();
+
+/** 服务端错误日志落点：桌面壳拉起进程时没有终端，文件是唯一能回看的地方。 */
+const SERVER_ERROR_LOG = process.env.AGENT_ERROR_LOG?.trim() || ".data/server-errors.log";
+
+/** 追加一行错误（尽力而为：写不进去只 warn，绝不能因为记日志再把请求搞挂）。 */
+function appendServerError(line: string): void {
+  try {
+    mkdirSync(dirname(SERVER_ERROR_LOG), { recursive: true });
+    appendFileSync(SERVER_ERROR_LOG, line);
+  } catch (error) {
+    console.warn(`[error] 写 ${SERVER_ERROR_LOG} 失败: ${error instanceof Error ? error.message : error}`);
+  }
+}
+
+/**
+ * 未捕获错误的统一出口（2026-11-07）。
+ *
+ * 两个理由：
+ * 1. **看得见**：Hono 默认只 `console.error` 一行，而桌面壳是 `cmd.Start()` 起的、
+ *    没有重定向 stdout/stderr，服务端日志根本没人收——"页面 500"于是变成无头案。
+ *    这里把错误追加到 `.data/server-errors.log`（只记时间/方法/路径/错误与栈，
+ *    不记请求体与对话内容），出问题时能直接查。
+ * 2. **说得清**：500 空体让前端只能显示"读历史失败：500"。这里回一个 `internal_error`
+ *    加一句稳定的说明，前端能把它当"服务端内部错误"处理，而不是当成历史丢了。
+ *    错误细节（message/stack）只进服务端日志，不下发客户端——它可能带上游地址或路径。
+ */
+app.onError((error, c) => {
+  const message = error instanceof Error ? error.message : String(error);
+  const at = new Date().toISOString();
+  const line = `${at} ${c.req.method} ${c.req.path} :: ${message}\n${
+    error instanceof Error && error.stack ? `${error.stack}\n` : ""
+  }`;
+  console.error(`[error] ${c.req.method} ${c.req.path}: ${message}`);
+  appendServerError(line);
+  return c.json({ error: "internal_error", message: "服务端内部错误，详见服务端日志" }, 500);
+});
 
 // M0 只在本机/局域网跑，放开来源方便真机调试。
 // 上公网前必须收紧成具体来源，否则等于把私人 Agent 敞开。
@@ -194,6 +237,13 @@ mountCompanions(app);
 // 群组（2026-11-06 群组方案）：执事群聊 + 共享时间线 + 确定性调度。
 // GROUPS_ENABLED / COMPANIONS_ENABLED 任一关着一个路由都不挂（404 = 未启用）。
 mountGroups(app);
+
+// 长期课题（2026-11-07 长期课题跟进）：课题户口本 + 提议确认 + 研究回合。
+// 开关关着一个路由都不挂（404 = 未启用）；研究闹钟由 agent 里注册的 TopicTask 负责。
+mountTopics(app);
+
+// 搜索配置：课题研究的硬前提（没 key 时 propose_topic / 研究回合都会拒绝）。
+mountSearch(app);
 
 // 审批答复（2026-11-04 批次二）：待批列表 + 幂等答复。开关关着时列表恒为空。
 mountApprovalApi(app);

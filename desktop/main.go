@@ -17,7 +17,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -113,44 +112,12 @@ func serverDir() string {
 }
 
 /*
-ensureService：服务没在跑，就在后台起一个——**不带窗口**。
+ensureService 已于 2026-11-07 退役，起停统一走 `runtime`（见 runtime.go）。
 
-以前是手工 `pnpm dev`，每次都在最前面弹一个黑框，很难受；而且用户得记住
-"先起服务再开壳"。现在壳自己处理：探不到 /healthz 就拉起，探得到就直接用
-（手动起的那个不会被顶掉）。
-
-服务要活过壳：不 Wait、不绑定父进程生命周期，壳关了它照跑（提醒、手机连接都在）。
+退役的原因不是"想重构"，而是这个函数**没有嘴**：它只会拉起、不会记住、也不会停。
+设置页要能停服务时，光有"探不到就拉"是不够的——还得知道"这次是用户让我别拉"，
+以及"该杀哪个 PID"。这些状态只能落在一个地方，于是收进了 runtimeCtl。
 */
-func ensureService(base string) {
-	if healthy(base) {
-		return
-	}
-	dir := serverDir()
-	if dir == "" {
-		log.Println("service: 找不到服务目录（可设 LIFEDIARY_SERVER_DIR）")
-		return
-	}
-
-	cmd := exec.Command("node", "--import", "tsx", "src/index.ts")
-	cmd.Dir = dir
-	env := os.Environ()
-	// 密钥主落点是 .env（2026-11-06 起，服务端 loadEnvFile 首行加载，宰相子进程继承），
-	// 这里只是兼容旧部署的兜底映射：用户环境变量 DASHSCOPE_API_KEY → LLM_API_KEY。
-	if strings.TrimSpace(os.Getenv("LLM_API_KEY")) == "" {
-		if key := strings.TrimSpace(os.Getenv("DASHSCOPE_API_KEY")); key != "" {
-			env = append(env, "LLM_API_KEY="+key)
-		}
-	}
-	cmd.Env = env
-	hideWindow(cmd)
-
-	if err := cmd.Start(); err != nil {
-		log.Println("service: 启动失败:", err)
-		return
-	}
-	_ = cmd.Process.Release()
-	log.Printf("service: 已在后台启动（%s）", dir)
-}
 
 // Shell 是暴露给页面的一小组原生能力（window.mygo.call）。
 //
@@ -182,6 +149,35 @@ func shellBindingsEnabled() bool {
 	return !strings.EqualFold(strings.TrimSpace(os.Getenv("LIFEDIARY_SHELL_BINDINGS")), "off")
 }
 
+// ── 运行时起停（2026-11-07）────────────────────────────────
+//
+// 设置页「服务 → 运行时」那张卡用这四个方法。为什么必须走壳：
+// 页面要停的就是它自己的后端，停下去之后所有 fetch 都会失败——连"现在是什么状态"
+// 都问不出来。只有壳知道 PID、知道服务目录、知道这次是不是用户让它停的。
+//
+// 注意返回的是 (RuntimeStatus, error)：MyGo 的 Bind 会把 error 映射成前端 Promise 的
+// reject，所以"没停成"能和"停成了"区分开，前端不能把失败当成已停。
+
+// RuntimeStatus 读一次当前状态（不看缓存，现探）。
+func (Shell) RuntimeStatus() (RuntimeStatus, error) {
+	return runtime.Status(), nil
+}
+
+// StopRuntime 停掉服务。幂等：本来没在跑也返回 stopped。
+func (Shell) StopRuntime() (RuntimeStatus, error) {
+	return runtime.Stop()
+}
+
+// StartRuntime 拉起服务；起没起来以 /healthz 为准，最多等 25 秒。
+func (Shell) StartRuntime() (RuntimeStatus, error) {
+	return runtime.Start()
+}
+
+// RestartRuntime 先停再起。正在跑的那一轮对话会中断（历史不丢）。
+func (Shell) RestartRuntime() (RuntimeStatus, error) {
+	return runtime.Restart()
+}
+
 // loadService 把窗口指向服务。业务全走 HTTP，桥接只用来补原生能力
 // （见 Shell，绑定在 main 里 App.Run 之前完成）。
 func loadService(w *mygo.Window) {
@@ -192,7 +188,9 @@ func loadService(w *mygo.Window) {
 		// 自己拉起服务时要多等一会儿：node 起 tsx 再连库，几秒钟很正常
 		budget := probeTimeout
 		if !healthy(base) {
-			ensureService(base)
+			// 用户主动停过就别再拉（2026-11-07）：否则点了"停止"再点托盘"重新连接"，
+			// 服务又自己回来了，那个开关等于没有。runtime.Ensure 内部认这个闩。
+			runtime.Ensure()
 			budget = 25 * time.Second
 		}
 		if err := waitHealthy(base, budget); err != nil {
@@ -370,13 +368,19 @@ func watchService(base string) {
 				failures = 0
 				continue
 			}
+			// 用户主动停的：不许重拉（2026-11-07）。没有这一句，点完"停止"半分钟后
+			// 服务自己回来，按钮就成了摆设——这是这次改动最容易漏掉的一处。
+			if runtime.UserStopped() {
+				failures = 0
+				continue
+			}
 			failures++
 			if failures < 3 || time.Since(lastPull) < 30*time.Second {
 				continue
 			}
 			lastPull = time.Now()
 			log.Println("watch: 服务失联，尝试重拉")
-			ensureService(base)
+			runtime.Ensure()
 		}
 	}()
 }
@@ -387,6 +391,9 @@ func main() {
 	}
 
 	app := mygo.App
+	// 运行时控制器认一个 base：起停与状态都以它为准（端口也从这里解析）。
+	// 必须在任何 Ensure / watchService 之前定下来，否则会去探默认端口。
+	runtime.base = baseURL()
 	// 在 RequestSingleInstanceLock 之后再改名：锁路径沿用可执行文件名，
 	// 老版本进程还在时不会因为改名各起一个实例。显示名用产品名。
 	app.SetName("Selenite")
@@ -411,9 +418,19 @@ func main() {
 			Menu: mygo.NewMenu([]*mygo.MenuItem{
 				{Label: "显示/隐藏", Click: func(*mygo.MenuItem, *mygo.Window) { toggleWindow() }},
 				{Label: "重新连接", Click: func(*mygo.MenuItem, *mygo.Window) {
-					if win != nil && !win.IsDestroyed() {
-						loadService(win)
+					if win == nil || win.IsDestroyed() {
+						return
 					}
+					// 托盘点「重新连接」是**人的明确要求**（2026-11-07）：
+					// 它要能越过"用户停过"那道闩，否则停完服务后托盘就再也救不回来，
+					// 只剩设置页一条路。自动路径（开窗、守护重拉）仍走 Ensure 认闩——
+					// 区分"人点的"和"系统自己撞见的"，是这次改动的分界线。
+					go func() {
+						if _, err := runtime.Start(); err != nil {
+							log.Println("tray: 重新连接失败:", err)
+						}
+						loadService(win)
+					}()
 				}},
 				mygo.Separator(),
 				// RoleQuit 的默认文案来自 MyGo 的本地化表，可能落到英文

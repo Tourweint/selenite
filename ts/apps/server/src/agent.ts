@@ -66,6 +66,9 @@ import { autonomyRiskVerdict } from "./autonomy-risk.ts";
 import { ReminderTask } from "./reminder.ts";
 import { createSkillStore, type SkillStore } from "./skills.ts";
 import { createTools } from "./tools.ts";
+import { TOPICS_ENABLED, topicsStore } from "./topics.ts";
+import { searchModule } from "./search.ts";
+import { TopicTask } from "./topic-runtime.ts";
 import type {
 	ChatKind,
 	DelegationPhase,
@@ -626,16 +629,88 @@ const ChatKinds = defineDoc<{ byInternal: Record<string, "chief" | "worker"> }>(
 let opening: Promise<Harness> | null = null;
 
 /**
+ * 当前可用的 Harness（成功打开后才有）。`opening` 是 Promise，成功与失败长得一样，
+ * 所以"这份是不是已经废了"只能拿对象本身来判断，另存一个引用。
+ */
+let opened: Harness | null = null;
+
+/** 正在关闭的旧 Harness（收尸中）。新实例要等它把 SQLite 句柄交出来再开。 */
+let closing: Promise<void> | null = null;
+
+/**
  * 我们自己的扩展（人格 + 技能索引 + 工具 + 钩子）。
  *
  * 提到模块作用域是为了**任务会话能把它摘掉**：日记任务（收敛/周报/分段…）不需要人格、
  * 不需要技能、不需要记忆注入、也不该有工具（它只产出文本），见 `configureTaskChat`。
  */
 let lifediaryExt: Extension | null = null;
+/**
+ * 课题研究专线的最小扩展（2026-11-07 长期课题跟进）：只装 `web_search`。
+ * 研究回合会摘掉 `lifediaryExt`（不要人格 / 技能 / 记忆），但搜索必须还在——
+ * 两件事拆成两个扩展，才能"摘掉主扩展的同时保留搜索"。
+ */
+let researchExt: Extension | null = null;
+
+/**
+ * 丢掉当前 Harness，下一个 `getHarness()` 重新打开（2026-11-07）。
+ *
+ * **为什么必须能自愈**：pi-durable 的 Session 把"存储错误"当终局——第一次 Storage 抛错就
+ * 整份 Session 进 failed 态，之后**每一次** commit / 读快照都立刻 reject，错误是
+ * `SessionFailed: Session failed after a storage error; close and reopen it`
+ * （见 pi-durable `session.d.ts` 类注释）。而我们是常驻进程、库是本地 SQLite 文件，
+ * 一次瞬时 IO 失败（WAL 被抢、磁盘抖动、杀毒扫描锁文件）不该要求用户手按重启。
+ * 内核文档自己写着 "Reopening recovers from what was committed"，照做即可。
+ *
+ * **为什么要真正 close**：只把 `opening` 置空的话，旧 Session 仍握着 SQLite 句柄和内存里的
+ * 任务图，新开一份会和它抢同一个库（WAL 下互相阻塞），句柄还会越积越多。
+ * failed 态下 `close()` 自己也可能 reject——吞掉，我们只是来收尸的。
+ *
+ * **并发**：多个请求可能同时撞到同一个失败。用对象判等 `opened !== dead` 让只有第一个真去关，
+ * 其余直接返回（它们随后取到的已经是新实例）。
+ */
+function discardHarness(dead: Harness, reason: string): void {
+	if (opened !== dead) return; // 别人已经换过了
+	opened = null;
+	opening = null;
+	console.warn(`[agent] Harness 失效（${reason}），已弃用，下次取用时重新打开`);
+	// 记下"正在关"，`getHarness()` 会等它把库交出来再开新实例——
+	// 否则新旧两份会同时挂在一个 SQLite 文件上（WAL 下互相阻塞，还可能读到半截状态）。
+	closing = dead
+		.close(BACKGROUND_CONTEXT)
+		.catch((error: unknown) => {
+			console.warn(
+				`[agent] 关闭失效 Harness 时报错（忽略）: ${error instanceof Error ? error.message : error}`,
+			);
+		})
+		.finally(() => {
+			closing = null;
+		});
+}
 
 export function getHarness(): Promise<Harness> {
-	opening ??= openHarness();
-	return opening;
+	if (opening) return opening;
+	// 上一次的收尸还没结束：等它。`closing` 兑现后库里没有旧句柄了，新实例才安全。
+	if (!closing) {
+		opening = openHarness().then(
+			(harness) => {
+				opened = harness;
+				// 失败是"静默"的：不挂这个监听，就只能等某个请求撞上 SessionFailed 才知道。
+				// 挂上之后，库里一出事就地丢掉，下一个请求自然重开——不用等用户刷新页面。
+				// 只在开出来这一处挂一次（`closed` 只兑现一次），不要放进每次调用里。
+				void harness.closed.then(() => discardHarness(harness, "Session 已关闭或存储失败"));
+				return harness;
+			},
+			(error: unknown) => {
+				// 首次打开就失败：不能把这份 reject 永久缓存。
+				// 否则一次瞬时失败（库被锁 / .data 还没就绪）会让之后每个请求都拿到同一个
+				// 已 reject 的 Promise，全站 500 且不再重试，只有重启能救。
+				opening = null;
+				throw error;
+			},
+		);
+		return opening;
+	}
+	return closing.then(() => getHarness());
 }
 
 async function openHarness(): Promise<Harness> {
@@ -648,22 +723,26 @@ async function openHarness(): Promise<Harness> {
 	const registry = createRegistry();
 	// pi 自带的那套读写改跑命令：走执行环境，比我们自己写的完整
 	registry.install(CodingTools);
+	const lifediaryTools = createTools({
+		memory: memoryEngine,
+		scopeOf,
+		skills: skillStore,
+		delegate: CHANCELLOR_ENABLED,
+		// 项目前置（2026-11-03 方案 §5.5）：派新活前先过登记表。
+		projects: projectsStore(),
+		// 任务单跑完回灌会话：空闲就自动出现一轮汇报，正忙则由 durable
+		// 排到本轮结束（见 sayInChat 的取舍说明）。
+		reportDelegation: (conversationId, report) => {
+			void reportDelegationResult(conversationId, report);
+		},
+		// 课题（2026-11-07）：createTools 内按 TOPICS_ENABLED / 依赖缺失决定注不注册。
+		topics: topicsStore(),
+		search: searchModule,
+	});
 	registry.install(
 		(lifediaryExt = defineExtension({
 			name: "lifediary",
-			tools: createTools({
-				memory: memoryEngine,
-				scopeOf,
-				skills: skillStore,
-				delegate: CHANCELLOR_ENABLED,
-				// 项目前置（2026-11-03 方案 §5.5）：派新活前先过登记表。
-				projects: projectsStore(),
-				// 任务单跑完回灌会话：空闲就自动出现一轮汇报，正忙则由 durable
-				// 排到本轮结束（见 sayInChat 的取舍说明）。
-				reportDelegation: (conversationId, report) => {
-					void reportDelegationResult(conversationId, report);
-				},
-			}),
+			tools: lifediaryTools,
 			sections: [
 				// 人格（2026-11-06 B2 改为按会话种类分流）：
 				//  - 非 chief 的执事会话 → 不注入总管 persona（身份来自其 configure instructions）；
@@ -706,6 +785,58 @@ async function openHarness(): Promise<Harness> {
 				{
 					key: "skills",
 					render: (input) => skillStore?.indexFor(Number(input.conversationId)),
+				},
+				// 课题（2026-11-07 长期课题跟进 §六）：清单 + 嗅探判据 + 攒着的简报。
+				// **每轮现渲染**（durable 只在 section 值变化时追加 pi.system）：
+				//   - 只给总管主对话：非 chief 执事 / worker / 群会话一律 undefined；
+				//   - 有 pendingPush 的课题在这里把简报带进本轮，并**渲染即标记已推送**
+				//     （每课题每次活跃只报一次；研究专线摘掉了本扩展，不会误触）；
+				//   - 没有在跟的课题也输出判据段，让总管知道"有这个口"。
+				{
+					key: "topics",
+					render: async (input) => {
+						if (!TOPICS_ENABLED) return undefined;
+						const conversationId = Number(input.conversationId);
+						if (COMPANIONS_ENABLED) {
+							try {
+								if (partnersStore().isGroupSession(conversationId)) return undefined;
+								const partnerId = partnersStore().partnerIdOfSession(conversationId);
+								if (partnerId && partnerId !== CHIEF_PARTNER_ID) return undefined;
+							} catch {
+								// 档案库读失败：按总管处理（主对话不能哑，与 persona 同口径）
+							}
+						}
+						const kinds = await input.read.snapshot(ChatKinds, CTX);
+						if (kinds?.byInternal?.[String(conversationId)] === "worker") return undefined;
+
+						const store = topicsStore();
+						const pushes = store.drainPendingPushes();
+						const digest = store.digestForInjection();
+						const lines: string[] = [];
+						if (digest) {
+							lines.push("在跟的课题：", digest);
+						} else {
+							lines.push("在跟的课题：（暂无）");
+						}
+						if (pushes.length > 0) {
+							// 只记条数，不记课题内容（日志纪律）
+							console.log(`[topics] 简报注入 ${pushes.length} 条`);
+							lines.push(
+								"",
+								"课题简报（攒着的，随本轮自然汇报给用户，别复述全文）：",
+								...pushes.map((topic) => {
+									const latest = topic.findings[0];
+									return `- ${topic.question}：${latest?.summary ?? "有新发现"}`;
+								}),
+							);
+						}
+						lines.push(
+							"",
+							"课题嗅探（从严，宁缺毋滥）：开放性问题 + 今天给不了定论 + 值得隔几天回头看 + 用户显出兴趣，四条都满足才用 propose_topic 提交提议；",
+							"同一话题单会话最多提一次；只提交提议、永不自动建课题（用户确认后才建）。",
+						);
+						return lines.join("\n");
+					},
 				},
 			],
 			hooks: [
@@ -885,9 +1016,19 @@ async function openHarness(): Promise<Harness> {
 					},
 				}),
 			],
-			tasks: [ReminderTask, RoutineTask],
+			tasks: [ReminderTask, RoutineTask, TopicTask],
 		})),
 	);
+
+	// 课题研究专线的最小扩展：摘掉 lifediaryExt（人格 / 技能 / 课题 section 全不要）后，
+	// 仍然要能拿到 web_search。TOPICS_ENABLED=false 时整块不装（一行回滚）。
+	if (TOPICS_ENABLED) {
+		researchExt = defineExtension({
+			name: "lifediary-research",
+			tools: lifediaryTools.filter((tool) => tool.name === "web_search"),
+		});
+		registry.install(researchExt);
+	}
 
 	// 可靠性旋钮（2026-11-04 批次一 A4）：全空时 settings 为 undefined，就是"不传"。
 	const settings = buildHarnessSettings(process.env);
@@ -998,6 +1139,32 @@ export async function configureTaskChat(
 			tools: [],
 			...(lifediaryExt ? { extensions: { remove: [lifediaryExt] } } : {}),
 			...(model ? { model } : {}),
+		},
+		CTX,
+	);
+}
+
+/**
+ * 课题研究专线的会话配置（2026-11-07 长期课题跟进 §四.4）。
+ *
+ * 工具面收敛走**白名单**：只给 `read`（CodingTools）与 `web_search`（lifediary-research 扩展）。
+ * 摘掉 `lifediaryExt` 后，write / edit / bash / delegate / skill / partner_* 一个都不在
+ * agent.tools 里——不是"靠 hook 事后拦"，而是模型根本看不到它们。
+ * 研究回合因此也不带人格、技能索引与课题 section（简报不会被研究轮误标已推送）。
+ */
+export async function configureResearchChat(
+	chat: ResolvedChat,
+	prompt: string,
+): Promise<void> {
+	const tools = [
+		...(CodingTools.tools ?? []).filter((tool) => tool.name === "read"),
+		...(researchExt?.tools ?? []),
+	];
+	await chat.conversation.configure(
+		{
+			instructions: prompt,
+			tools,
+			...(lifediaryExt ? { extensions: { remove: [lifediaryExt] } } : {}),
 		},
 		CTX,
 	);

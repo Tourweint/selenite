@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createSseDecoder, encodeSseEvent, type ChatEvent } from "@lifediary/shared";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	formatReport,
 	startDelegation,
 	type DelegationEvent,
 	type DelegationReport,
 } from "./delegation.ts";
+import { DelegationMessages } from "./delegation-messages.ts";
 import type {
 	ChancellorEvent,
 	ChancellorRequest,
@@ -143,6 +147,55 @@ test("分管路径未回滚：不带 managers 时仍注入身份", async () => {
 
 	assert.equal(seen?.managers, undefined, "总管 / 主人会话不能被悄悄改成直派");
 	assert.equal(seen?.managerIdentity?.name, "小明");
+});
+
+test("派活留言：受理落一条 out（带发送者），终态落一条 in", async () => {
+	// 2026-11-07 派活留言：任务详情要能回答"谁让我干这个"。
+	const dir = mkdtempSync(join(tmpdir(), "lifediary-msg-"));
+	const messages = new DelegationMessages(join(dir, "delegations.sqlite"));
+	const realPath = process.env.DELEGATIONS_DB_PATH;
+	process.env.DELEGATIONS_DB_PATH = join(dir, "delegations.sqlite");
+	// delegation.ts 用模块级单例；探针里换落点，别写进真实 .data
+	const { resetDelegationMessages } = await import("./delegation-messages.ts");
+	resetDelegationMessages(join(dir, "delegations.sqlite"));
+	try {
+		const { outcome } = startDelegation(
+			{
+				conversationId: 21,
+				domain: "frontend",
+				requirement: "把登录页的按钮对齐",
+				sender: { kind: "chief", name: "总管" },
+			},
+			{
+				run: (_request, options) => {
+					options.onEvent?.({ type: "ticket", ticketId: "T-MSG", message: "已受理" });
+					return Promise.resolve(result({ ticketId: "T-MSG", line: "对齐了，三个文件" }));
+				},
+				emit: () => undefined,
+				report: () => undefined,
+				autoReport: false,
+			},
+		);
+		await outcome;
+
+		const stored = messages.list("T-MSG");
+		assert.equal(stored.length >= 2, true, `至少 out + in 两条，实际 ${stored.length}`);
+		const out = stored.find((m) => m.direction === "out");
+		const back = stored.find((m) => m.direction === "in");
+		assert.ok(out, "必须有派出去的那条");
+		assert.equal(out?.fromKind, "chief");
+		assert.equal(out?.fromName, "总管");
+		assert.match(out?.body ?? "", /按钮对齐/);
+		assert.ok(back, "必须有交回来的那条");
+		assert.match(back?.body ?? "", /三个文件/);
+		assert.equal(messages.list("T-NOT-EXIST").length, 0, "没有记录 = 空数组，不是错误");
+	} finally {
+		resetDelegationMessages();
+		if (realPath === undefined) delete process.env.DELEGATIONS_DB_PATH;
+		else process.env.DELEGATIONS_DB_PATH = realPath;
+		messages.close();
+		rmSync(dir, { recursive: true, force: true });
+	}
 });
 
 test("后台完成：发终态 +「需要你」并回灌会话", async () => {

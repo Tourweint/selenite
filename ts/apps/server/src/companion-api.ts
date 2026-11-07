@@ -58,19 +58,15 @@ export function mountCompanions(app: Hono): void {
 			);
 		}
 		const domain = body?.domain?.trim() ?? "";
-		let partner: PartnerRow;
-		if (!domain) {
-			// 普通执事：不带 domain、不碰 chancellor，行为不变。
-			partner = store().create(name);
-		} else {
-			// 执事：核心复用（端点与 partner_manage 工具同一份，见 partner-manage.ts）。
-			// error 文案与改动前的 domain 校验 / 回滚逐字一致，端点对外形状零变化。
-			const result = createMinisterPartner({ name, domain });
-			if (!result.ok) {
-				return c.json({ error: "bad_request", message: result.error }, 400);
-			}
-			partner = result.value;
+		// 2026-11-07：domain 是**可选标签**。不带 domain 也要能建"可派活的执事"，
+		// 不再退化成"普通执事、不参与派单"——这是用户明确反馈的坑：
+		// 他建了执事却不知道领域填什么、填完也没有任何可见作用。
+		// 折中：仍然走 createMinisterPartner（同一份校验与播种），只是不建分管目录。
+		const result = createMinisterPartner({ name, ...(domain ? { domain } : {}) });
+		if (!result.ok) {
+			return c.json({ error: "bad_request", message: result.error }, 400);
 		}
+		const partner: PartnerRow = result.value;
 		// 带 soul 时落一次 v2 自定义版本（把 E1 前端「建完补 PATCH」的两段式收敛成一段）。
 		// bumpSoul 自带同一份上限校验，这里再兜住其它写盘错误，400 口径与 PATCH 一致。
 		if (soul.trim()) {
@@ -140,9 +136,30 @@ export function mountCompanions(app: Hono): void {
 				if (problem) return c.json({ error: "bad_request", message: problem }, 400);
 			}
 		}
-		// domain 是执事的路由主键，建后固定；要换领域先删再建。
+		// domain 现在是**可选标签**（2026-11-07），建后可改：
+		// 它不再承载派活路由（路由按执事 id / 会话链接），所以改名不会让旧单找不到负责人。
+		// 只做形状校验：小写 ASCII，与创建时同一套规则；空串 = 清掉标签。
 		if (body?.domain !== undefined) {
-			return c.json({ error: "bad_request", message: "domain 建后固定，不可修改" }, 400);
+			const next = typeof body.domain === "string" ? body.domain.trim() : null;
+			if (next === null) {
+				return c.json({ error: "bad_request", message: "domain 必须是字符串" }, 400);
+			}
+			if (next && !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(next)) {
+				return c.json(
+					{
+						error: "bad_request",
+						message: "domain 必须是小写 ASCII（小写字母、数字、连字符，不能以连字符开头或结尾）",
+					},
+					400,
+				);
+			}
+			const occupied = next ? store().partnerIdByDomain(next) : null;
+			if (occupied && occupied !== id) {
+				return c.json({ error: "bad_request", message: `domain「${next}」已被其他执事占用` }, 400);
+			}
+			if (!store().setDomain(id, next || null)) {
+				return c.json({ error: "not_found" }, 404);
+			}
 		}
 		// name：省略 / 全空白 = 不改（既有语义）；类型不对或超长 400——别让 update() 里的 trim 抛 500。
 		if (body?.name !== undefined) {

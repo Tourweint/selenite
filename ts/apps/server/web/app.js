@@ -31,6 +31,7 @@ const el = {
   secTasksAll: document.getElementById("sec-tasks-all"),
   tasksMini: document.getElementById("tasks-mini"),
   secGroupsAdd: document.getElementById("sec-groups-add"),
+  secGroupsAll: document.getElementById("sec-groups-all"),
   partnersBadge: document.getElementById("partners-badge"),
   partnerAddSide: document.getElementById("partner-add-side"),
   partnerRoster: document.getElementById("partner-roster"),
@@ -83,6 +84,11 @@ const el = {
   secGroupsToggle: document.getElementById("sec-groups-toggle"),
   railGroups: document.getElementById("rail-groups"),
   groupList: document.getElementById("group-list"),
+  // 长期课题（2026-11-07 批二）：轨道入口 + 展开态分区
+  railTopics: document.getElementById("rail-topics"),
+  secTopicsToggle: document.getElementById("sec-topics-toggle"),
+  topicList: document.getElementById("topic-list"),
+  topicsBadge: document.getElementById("topics-badge"),
   railTasks: document.getElementById("rail-tasks"),
   domainsBack: document.getElementById("domains-back"),
   domainsRefresh: document.getElementById("domains-refresh"),
@@ -485,6 +491,13 @@ function applyRoute() {
   el.viewTasks.hidden = route !== "tasks";
   el.viewDomains.hidden = route !== "domains";
   el.viewGroups.hidden = route !== "group";
+  // 群组侧栏的选中态只在群组路由里成立：离开群组页后「所有群聊」不该还亮着
+  // （2026-11-07 修：openGroupsView 只在进群组页时写 aria-current，回对话页就不再有
+  // 人复位它，实测高亮会一直挂在那里）。
+  el.secGroupsAll?.setAttribute(
+    "aria-current",
+    String(route === "group" && !groupRouteId()),
+  );
   el.toggleSidebar.hidden = route === "settings";
   el.openSettings.setAttribute("aria-current", String(route === "settings"));
   el.railTasks.setAttribute("aria-current", String(route === "tasks"));
@@ -493,6 +506,17 @@ function applyRoute() {
   else if (route === "domains") openDomains();
   else if (route === "group") void openGroupsView();
   else el.input.focus();
+  // 会话行的选中态跟着路由走（2026-11-07）：renderChats 里判了 currentRoute()，
+  // 但进群组/任务/设置时不一定会重绘列表——离开对话页就在这里把高亮摘掉，
+  // 回对话页再按当前会话补回来。不重排 DOM，只改属性。
+  if (route !== "chat") {
+    for (const row of el.chats?.querySelectorAll('.chat[aria-current="true"]') || []) {
+      row.removeAttribute("aria-current");
+    }
+  } else {
+    const current = el.chats?.querySelector(`.chat[data-conv="${CSS.escape(state.conversationId)}"]`);
+    if (current && !current.hasAttribute("aria-current")) current.setAttribute("aria-current", "true");
+  }
 }
 
 const state = {
@@ -1689,11 +1713,37 @@ function renderTicketDetail(data, fallbackId) {
       </section>`
     : "";
 
+  // 派活留言（2026-11-07）：把"谁在什么时候说了什么"摆在需求正文之前。
+  // 以前详情只有 ticket.prompt 一段裸文本，看不出是总管说的还是别人转的。
+  const messages = Array.isArray(data.messages) ? data.messages : [];
+  const SENDER_LABEL = { chief: "总管", partner: "", worker: "执行端", system: "系统" };
+  const messageRows = messages.length
+    ? `<section class="td-section td-messages">
+        <h3>派活往来<span>${messages.length}</span></h3>
+        ${messages
+          .map((message) => {
+            const who =
+              message.fromKind === "partner"
+                ? message.fromName || "执事"
+                : message.fromName || SENDER_LABEL[message.fromKind] || "系统";
+            const isOut = message.direction === "out";
+            return `<div class="td-msg" data-dir="${esc(message.direction || "out")}">
+              <div class="td-msg-top">
+                <span class="td-msg-who">${isOut ? "来自" : "回到"} ${esc(who)}</span>
+                <span class="td-stage" title="${esc(message.createdAt || "")}">${esc(relativeTime(message.createdAt))}</span>
+              </div>
+              <p class="td-msg-body">${esc(message.body || "")}</p>
+            </div>`;
+          })
+          .join("")}
+      </section>`
+    : "";
+
   el.tasksDetail.innerHTML = `
     <div class="td-card"${ticket.status === "needs_you" ? ' data-attn="1"' : ""}>
       <div class="td-head">
         <span class="tk-chip" data-tone="${statusTone}">${esc(statusLabel)}</span>
-        <span class="td-domain">${esc(data.domain || ticket.options?.domain || "总管（未分配）")}</span>
+        <span class="td-domain">${esc(data.domain || ticket.options?.domain || "")}</span>
         ${project ? `<span class="td-proj">项目 ${esc(project)}</span>` : ""}
         <span class="td-time">${esc(relativeTime(ticket.updated_at))}</span>
       </div>
@@ -1716,6 +1766,7 @@ function renderTicketDetail(data, fallbackId) {
     ${childRows}
     ${reviewRows}
     ${deadLetterRows}
+    ${messageRows}
   `;
 }
 
@@ -1856,10 +1907,7 @@ el.tasksBody.addEventListener("click", (event) => {
   const head = event.target.closest(".tk-conv-head, .tk-arch-conv");
   if (head) {
     const conversationId = head.dataset.conv || "";
-    if (conversationId) {
-      go("chat");
-      void openChat(conversationId);
-    }
+    if (conversationId) void openConversation(conversationId);
     return;
   }
 
@@ -2107,6 +2155,9 @@ function setStatus(stateName, text) {
 }
 
 async function checkHealth() {
+  // 用户自己停的（2026-11-07）：别再每 8 秒把状态灯刷成"服务离线"并弹错误，
+  // 那是我们的操作结果，不是故障。启动/刷新后 body 上没有这个标记，自然恢复轮询。
+  if (document.body.dataset.runtime === "stopped") return false;
   try {
     const response = await request("/healthz", { cache: "no-store" });
     if (!response.ok) throw new Error(String(response.status));
@@ -2178,7 +2229,10 @@ function renderChats() {
     row.setAttribute("role", "button");
     row.title = `${chatLabel(chat)} · ${chat.turns} 轮${chat.pinned ? " · 已置顶" : ""}`;
     row.dataset.conv = chat.conversationId;
-    if (chat.conversationId === state.conversationId) {
+    // 选中态只在对话路由里成立（2026-11-07 修）：进了群聊 / 任务页 / 设置页，
+    // 这条会话仍是「上次打开的那条」，但屏幕上已经不是它了——继续亮着会把人的
+    // 位置感带错（截图里群列表旁边还亮着一条会话，看着像同时在两处）。
+    if (chat.conversationId === state.conversationId && currentRoute() === "chat") {
       row.setAttribute("aria-current", "true");
     }
 
@@ -2233,11 +2287,15 @@ function renderChats() {
     actions.append(rename, hide, pin);
     row.append(actions);
 
-    row.addEventListener("click", () => void openChat(chat.conversationId));
+    // 点会话行 = 进这条对话。2026-11-07 修：以前只 openChat、不切路由，
+    // 从群聊 / 任务 / 设置页点过来时内容在背后换了、屏幕还停在原页（用户报的
+    // 「点了群聊之后点对话，界面切换不了」）。统一走 openConversation()，
+    // 与搜索结果、任务卡头、通知点击同一份"先切路由再回读"的口径。
+    row.addEventListener("click", () => void openConversation(chat.conversationId));
     row.addEventListener("keydown", (event) => {
       if (event.key === "Enter" || event.key === " ") {
         event.preventDefault();
-        void openChat(chat.conversationId);
+        void openConversation(chat.conversationId);
       }
     });
     el.chats.append(row);
@@ -2294,7 +2352,7 @@ const KEY_RECENTS = "lifediary.chief.recents"; // 旧键：只读迁移，不再
 /* 侧栏分区折叠（2026-11-07 统一批）：会话 / 任务中心 / 项目 / 执事 / 群组共用一套。
    键 `lifediary.side.<sec>`，值 open|closed，默认展开。
    旧的 lifediary.chief.recents 只作为「会话」分区的初始值读一次，之后各存各的。 */
-const SIDE_SECTIONS = ["partners", "chats", "projects", "groups"];
+const SIDE_SECTIONS = ["partners", "chats", "projects", "groups", "topics"];
 
 function sectionClosed(sec) {
   const stored = localStorage.getItem(`lifediary.side.${sec}`);
@@ -2942,6 +3000,8 @@ function clearThread() {
   // 切会话/新建时把审批卡片的倒计时停掉，免得旧卡在后面空转
   for (const { timer } of approvalCards.values()) clearInterval(timer);
   approvalCards.clear();
+  // 课题提议卡跟审批卡同命运：换会话后旧卡不再属于这一屏
+  topicProposalCards.clear();
   el.thread.replaceChildren();
   if (el.empty) el.thread.append(el.empty);
   updateHomeMode();
@@ -3061,6 +3121,9 @@ const TOOL_KINDS = {
   skill: { icon: "skill", verb: "技能" },
   delegate: { icon: "delegate", verb: "派活" },
   propose_project: { icon: "project", verb: "提议项目" },
+  // 长期课题（2026-11-07 批二）：提议卡与搜索都进工作过程
+  propose_topic: { icon: "project", verb: "提议课题" },
+  web_search: { icon: "search", verb: "搜索" },
   partner_manage: { icon: "delegate", verb: "执事" },
   partner_skill_write: { icon: "skill", verb: "执事技能" },
 };
@@ -3076,6 +3139,8 @@ const TOOL_ICON_PATHS = {
   skill: '<path d="M12 3l2.2 5.6L20 9.8l-4.4 3.6L17 20l-5-3-5 3 1.4-6.6L4 9.8l5.8-1.2z"/>',
   delegate: '<circle cx="9" cy="8" r="3"/><path d="M3 20a6 6 0 0 1 12 0"/><path d="M17 8h4"/><path d="m19 6 2 2-2 2"/>',
   project: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+  // Lucide search（0.468）：24 视框、2 号描边，与上面同族
+  search: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
   tool: '<path d="M14.7 6.3a4 4 0 1 0 5 5L21 10l-3-3z"/><path d="m9 15-6 6"/><path d="m14 10-4 4"/>',
   chevron: '<path d="m9 18 6-6-6-6"/>',
   check: '<path d="m20 6-11 11-5-5"/>',
@@ -3783,6 +3848,22 @@ function renderMarkdown(source) {
 
 /* ── 打开会话 ─────────────────────────────────────────── */
 
+/**
+ * 「从任何地方打开一条对话」的唯一入口（2026-11-07 修）：
+ * 先切到对话路由，再回读历史。
+ *
+ * 为什么不能只 openChat：它只换 state.conversationId 与线程内容，**不动路由**。
+ * 于是从群聊（#/group/<id>）/ 任务中心 / 设置页点会话行时，数据在背后换了、
+ * 屏幕还停在原页——用户看到的就是「点了没反应、界面切换不了」。
+ * go("chat") 改 hash → hashchange → applyRoute 把视图换回来；两件事的顺序不能反，
+ * 否则 applyRoute 可能带着旧会话重绘一次。
+ */
+async function openConversation(conversationId) {
+  if (!conversationId) return;
+  go("chat");
+  return openChat(conversationId);
+}
+
 async function openChat(conversationId) {
   const token = ++state.navToken; // 作废还在飞的 open / 上一次 openChat
   const owner = () => token === state.navToken && state.conversationId === conversationId;
@@ -3821,6 +3902,12 @@ async function openChat(conversationId) {
         // 工作过程（2026-11-07）：服务端从 durable 里把这一轮的 toolCall / tool-result
         // 配成 steps 下发；这里还原成与现场同一块（已收尾、默认折叠）。
         workPanelFromSteps(shown.root, message.steps, message.workMs);
+        // 课题提议卡（2026-11-07 批二）：历史回读也按工具结果重渲，状态由 GET 定
+        for (const step of Array.isArray(message.steps) ? message.steps : []) {
+          if (step && step.name === "propose_topic" && step.output) {
+            mountTopicProposalCard(shown.root, parseTopicProposalOutput(step.output));
+          }
+        }
         // 历史里的用时（2026-11-06）：服务端已下发 workMs（提问到收尾的墙钟），
         // 以前只有现场那一轮有耗时，切回来就没了。这里补成同一份脚注。
         // 完成时间 = 这条消息落盘的时刻（时间戳就是收尾时写的）。
@@ -3863,7 +3950,15 @@ async function openChat(conversationId) {
     // 旧请求的失败不许挂到别人屏幕上
     if (!owner()) return { token, conversationId, status: "stale" };
     if (error.message !== "forbidden" && error.message !== "not-found") {
-      addError(`读历史失败：${error.message}`);
+      // 500 不再只显示一个数字（2026-11-07）：那条路以前是"读历史失败：500"，
+      // 用户既不知道是历史没了还是服务端坏了，也不知道要不要重开。
+      // 现在服务端 500 会回 { error: "internal_error", message }，这里把话说清。
+      const serverBroken = error.message === "Internal Server Error" || error.message === "500";
+      addError(
+        serverBroken
+          ? "读历史失败：服务端内部错误（历史还在，不用重建）。稍后重试；反复出现请看服务端日志。"
+          : `读历史失败：${error.message}`,
+      );
     }
     return { token, conversationId, status: "error", applied: true };
   } finally {
@@ -3928,7 +4023,9 @@ function maybeNotify(title, body, convId, kind = "done") {
   const n = new Notification(title, { body: (body || "").slice(0, 120), tag: "lifediary" });
   n.addEventListener("click", () => {
     window.focus();
-    if (convId && convId !== state.conversationId) void openChat(convId);
+    // 通知点进来就是"我要看这条对话"：在群聊 / 任务页上收到通知也要真切过去，
+    // 所以走 openConversation（先切路由再回读），不是只换背后的会话。
+    if (convId && convId !== state.conversationId) void openConversation(convId);
     n.close();
   });
 }
@@ -4074,6 +4171,256 @@ function renderApprovalCard(event) {
 
   approvalCards.set(event.callId, { root: card, timer });
   return card;
+}
+
+/* ── 课题提议卡（2026-11-07 批二）─────────────────────────
+   总管调 propose_topic 后，工具结果里带 proposalId / question / flavor / cron。
+   前端在该条工具消息处渲染一张卡（照审批卡的 attention 形态），按 callId 去重；
+   状态不靠内存：每次渲前 GET /topics/proposals/:id 定态，刷新页面也能按 transcript 重渲。
+   接口失败不弹全局错误，卡内行内提示。 */
+const topicProposalCards = new Map();
+const TOPIC_FLAVOR_TEXT = { watch: "盯梢型 · 盯变化", dig: "啃题型 · 每周推进" };
+const WEEKDAY_NAMES = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+
+/** cron → 人话：只认「分 时 * * 周几」这种周节奏；其它原样展示（不猜）。 */
+function humanCron(cron) {
+  const raw = String(cron || "").trim();
+  const parts = raw.split(/\s+/);
+  if (parts.length !== 5) return raw;
+  const [minute, hour, dayOfMonth, month, dayOfWeek] = parts;
+  if (!/^\d{1,2}$/.test(minute) || !/^\d{1,2}$/.test(hour)) return raw;
+  if (dayOfMonth !== "*" || month !== "*") return raw;
+  const mm = Number(minute);
+  const hh = Number(hour);
+  if (mm > 59 || hh > 23) return raw;
+  const clock = `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+  if (dayOfWeek === "*") return `每天 ${clock}`;
+  const days = dayOfWeek.split(",").map((item) => item.trim());
+  if (!days.length || days.some((item) => !/^[0-7]$/.test(item))) return raw;
+  return `每${days.map((item) => WEEKDAY_NAMES[Number(item) % 7]).join("、")} ${clock}`;
+}
+
+function shortDateTime(iso) {
+  const date = new Date(iso);
+  if (!Number.isFinite(date.getTime())) return "";
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const dd = String(date.getDate()).padStart(2, "0");
+  const hh = String(date.getHours()).padStart(2, "0");
+  const mi = String(date.getMinutes()).padStart(2, "0");
+  return `${mm}-${dd} ${hh}:${mi}`;
+}
+
+/** 工具输出 → 提议数据；只有 ok:true 且带 proposalId 的才建卡（失败交给正文说明）。 */
+function parseTopicProposalOutput(output) {
+  if (typeof output !== "string") return null;
+  const text = output.trim();
+  if (!text.startsWith("{")) return null;
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!data || data.ok !== true) return null;
+  if (typeof data.proposalId !== "string" || !data.proposalId) return null;
+  if (typeof data.question !== "string" || !data.question.trim()) return null;
+  return {
+    proposalId: data.proposalId,
+    question: data.question.trim(),
+    flavor: data.flavor === "dig" ? "dig" : "watch",
+    cron: typeof data.cron === "string" && data.cron.trim() ? data.cron.trim() : "0 9 * * 1",
+  };
+}
+
+function mountTopicProposalCard(host, data) {
+  if (!host || !data) return;
+  if (topicProposalCards.has(data.proposalId)) return;
+
+  const card = document.createElement("section");
+  card.className = "attention topic-proposal";
+  card.dataset.proposalId = data.proposalId;
+
+  const title = document.createElement("p");
+  title.className = "attention-text";
+  title.textContent = "提议长期跟进这个课题";
+
+  const question = document.createElement("p");
+  question.className = "topic-proposal-q";
+  question.textContent = data.question;
+
+  const meta = document.createElement("div");
+  meta.className = "topic-proposal-meta";
+  const flavor = document.createElement("span");
+  flavor.className = "pill-tag topic-flavor";
+  flavor.dataset.flavor = data.flavor;
+  flavor.textContent = TOPIC_FLAVOR_TEXT[data.flavor];
+  const rhythm = document.createElement("span");
+  rhythm.textContent = `节奏：${humanCron(data.cron)}`;
+  meta.append(flavor, rhythm);
+
+  const expiry = document.createElement("div");
+  expiry.className = "topic-proposal-expiry";
+
+  const state = document.createElement("p");
+  state.className = "topic-proposal-state";
+  state.hidden = true;
+
+  const actions = document.createElement("div");
+  actions.className = "topic-proposal-actions";
+  actions.hidden = true;
+  const accept = document.createElement("button");
+  accept.type = "button";
+  accept.className = "btn-primary";
+  accept.textContent = "开课题";
+  const decline = document.createElement("button");
+  decline.type = "button";
+  decline.className = "ghost";
+  decline.textContent = "不用了";
+  actions.append(accept, decline);
+
+  const note = document.createElement("p");
+  note.className = "topic-proposal-note";
+
+  card.append(title, question, meta, expiry, state, actions, note);
+  host.append(card);
+  topicProposalCards.set(data.proposalId, card);
+  void hydrateTopicProposalCard(card);
+}
+
+function setTopicProposalNote(card, text, isError = false) {
+  const note = card.querySelector(".topic-proposal-note");
+  if (!note) return;
+  note.textContent = text || "";
+  note.classList.toggle("is-error", Boolean(isError) && Boolean(text));
+}
+
+/** 按服务端状态定卡：pending 出按钮；accepted / declined / expired 只留灰化文案。 */
+async function hydrateTopicProposalCard(card) {
+  const proposalId = card.dataset.proposalId;
+  const actions = card.querySelector(".topic-proposal-actions");
+  const stateEl = card.querySelector(".topic-proposal-state");
+  const expiry = card.querySelector(".topic-proposal-expiry");
+  const proposalPath = `/api/v1/topics/proposals/${encodeURIComponent(proposalId)}`;
+
+  let proposal = null;
+  try {
+    const response = await request(proposalPath, { cache: "no-store" });
+    if (response.status === 404) {
+      if (actions) actions.hidden = true;
+      setTopicProposalNote(card, "这条提议查不到了（可能已被清理）。");
+      return;
+    }
+    if (!response.ok) {
+      if (actions) actions.hidden = true;
+      setTopicProposalNote(card, `没法确认这条提议的状态（${response.status}），稍后再试。`);
+      return;
+    }
+    const payload = await response.json();
+    proposal = payload.proposal || null;
+  } catch {
+    if (actions) actions.hidden = true;
+    setTopicProposalNote(card, "读不到提议状态，检查服务是否在跑。");
+    return;
+  }
+  if (!proposal || !proposal.status) {
+    if (actions) actions.hidden = true;
+    setTopicProposalNote(card, "服务端没回提议状态，稍后再试。");
+    return;
+  }
+
+  if (expiry) {
+    expiry.textContent = proposal.expiresAt
+      ? `有效期到 ${shortDateTime(proposal.expiresAt)}（72 小时没处理就过期）`
+      : "";
+  }
+
+  const paintDone = (text) => {
+    card.classList.add("resolved");
+    if (actions) actions.hidden = true;
+    if (stateEl) {
+      stateEl.hidden = false;
+      stateEl.textContent = text;
+    }
+  };
+
+  if (proposal.status === "accepted") {
+    paintDone("已开课题，会按这个节奏研究。");
+    return;
+  }
+  if (proposal.status === "declined") {
+    paintDone("已谢绝。");
+    return;
+  }
+  if (proposal.status === "expired") {
+    paintDone("这条提议已经过期了（72 小时没处理）。");
+    return;
+  }
+
+  // pending：两个按钮
+  if (actions) actions.hidden = false;
+  const accept = card.querySelector(".topic-proposal-actions .btn-primary");
+  const decline = card.querySelector(".topic-proposal-actions .ghost");
+  if (!accept || !decline) return;
+  let busy = false;
+
+  const fail = (message) => {
+    setTopicProposalNote(card, message, true);
+    accept.disabled = false;
+    decline.disabled = false;
+    busy = false;
+  };
+
+  accept.addEventListener("click", async () => {
+    if (busy) return;
+    busy = true;
+    accept.disabled = true;
+    decline.disabled = true;
+    setTopicProposalNote(card, "");
+    try {
+      const response = await request(`${proposalPath}/accept`, { method: "POST" });
+      const payload = await response.json().catch(() => ({}));
+      if (response.ok) {
+        paintDone("已开课题，会按这个节奏研究。");
+        void loadTopicsSidebar();
+        return;
+      }
+      // 400 的业务拒绝（search_not_configured / topic_limit / exists / expired / not_found）
+      setTopicProposalNote(card, payload.message || "开课题失败，稍后再试。", true);
+      accept.disabled = false;
+      decline.disabled = false;
+      busy = false;
+      if (payload.error === "search_not_configured") {
+        const note = card.querySelector(".topic-proposal-note");
+        const link = document.createElement("button");
+        link.type = "button";
+        link.className = "attention-link topic-proposal-link";
+        link.textContent = "去设置里配搜索";
+        link.addEventListener("click", () => go("settings", "service"));
+        note?.append(document.createTextNode(" "), link);
+      }
+    } catch {
+      fail("请求没发出去，检查服务是否在跑。");
+    }
+  });
+
+  decline.addEventListener("click", async () => {
+    if (busy) return;
+    busy = true;
+    accept.disabled = true;
+    decline.disabled = true;
+    setTopicProposalNote(card, "");
+    try {
+      const response = await request(`${proposalPath}/decline`, { method: "POST" });
+      const payload = await response.json().catch(() => ({}));
+      if (response.ok) {
+        paintDone("已谢绝。");
+        return;
+      }
+      fail(payload.message || "谢绝失败，稍后再试。");
+    } catch {
+      fail("请求没发出去，检查服务是否在跑。");
+    }
+  });
 }
 
 /** 刷新/切会话时补挂还挂着的审批（只补没画过的） */
@@ -4511,7 +4858,13 @@ async function send(text) {
             // 这里不再插占位行——两处表头已经是同一件事的第二份说法。
           } else if (event.type === "tool") {
             if (event.status === "start") ensureWork().start(event.name, event.label, event.args);
-            else ensureWork().end(event.name, event.ok !== false, event.output, event.diff);
+            else {
+              ensureWork().end(event.name, event.ok !== false, event.output, event.diff);
+              // 课题提议（2026-11-07 批二）：结果落在该条工具消息处（对话末尾自然出现）
+              if (event.name === "propose_topic" && event.ok !== false) {
+                mountTopicProposalCard(turn.root, parseTopicProposalOutput(event.output));
+              }
+            }
             if (state.stick) scrollToEnd();
           } else if (event.type === "delegate") {
             // 派活也是一步：进同一个工作过程块，不再另起一行飘在正文上方。
@@ -7756,6 +8109,12 @@ document.addEventListener("keydown", (event) => {
         // 详情先退回看板，再按一次才回对话；跟设置页的返回逻辑一致
         if (currentTicketId()) go("tasks");
         else go("chat");
+      } else if (currentRoute() === "group") {
+        // 群组两层：群会话先退到群列表，列表再按一次才回对话
+        // （2026-11-07：顶栏返回键的 title 一直写着「返回对话 (Esc)」，
+        //  但 Esc 根本没绑过；这里把承诺补上，语义与任务页逐字同构）。
+        if (groupRouteId()) location.hash = "#/groups";
+        else go("chat");
       }
     }
     return;
@@ -7984,10 +8343,7 @@ function wireSettingsSearch() {
         <div class="row-label">${hit.label}</div>
         <div class="row-hint">${esc(hit.hint)}</div>
       </div>`;
-      row.addEventListener("click", () => {
-        go("chat");
-        void openChat(hit.conversationId);
-      });
+      row.addEventListener("click", () => void openConversation(hit.conversationId));
       box.append(row);
     }
   };
@@ -8491,6 +8847,61 @@ async function renderSettings() {
       </div>`,
     )}
     ${sectionMarkup(
+      "运行时",
+      `<div class="card" id="runtime-card">
+        ${rowMarkup(
+          "Node 服务",
+          "桌面壳拉起来的那个进程。停掉之后手机连接、提醒、例行任务都会断；历史不会丢，启动即可恢复。",
+          `<div class="runtime-actions">
+             <span class="kv" id="runtime-state">读取中…</span>
+             <button class="btn-primary" type="button" id="runtime-start" hidden>启动</button>
+             <button class="ghost" type="button" id="runtime-restart" hidden>重启</button>
+             <button class="ghost is-danger" type="button" id="runtime-stop" hidden>停止</button>
+           </div>`,
+        )}
+      </div>`,
+    )}
+    ${sectionMarkup(
+      "搜索",
+      `<div class="card" id="search-card">
+        ${rowMarkup(
+          "搜索（课题研究用）",
+          "DeepSeek 搜索，给长期课题的每周研究查资料用。变量名 <code>DEEPSEEK_SEARCH_API_KEY</code>",
+          `<span class="kv" id="search-state" data-state="unknown">读取中…</span>`,
+        )}
+        <div class="divider"></div>
+        <div class="field" id="search-key-api">
+          <span>DeepSeek 搜索 API Key</span>
+          <div class="secret-wrap">
+            <input id="search-apikey" type="password" autocomplete="new-password" spellcheck="false"
+                   aria-label="DeepSeek 搜索 API Key" placeholder="sk-…" />
+            <button class="secret-eye" type="button" id="search-eye" aria-label="显示密钥" title="显示密钥" aria-pressed="false">
+              <svg class="eye-show" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/>
+                <circle cx="12" cy="12" r="3"/>
+              </svg>
+              <svg class="eye-hide" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" hidden>
+                <path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49"/>
+                <path d="M14.084 14.158a3 3 0 0 1-4.242-4.242"/>
+                <path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143"/>
+                <path d="m2 2 20 20"/>
+              </svg>
+            </button>
+          </div>
+          <span class="field-hint">留空 = 不改。值只存在本机服务端，不进 git、不进日志、不下发手机。</span>
+        </div>
+        <div class="field" id="search-key-env" hidden>
+          <span>DEEPSEEK_SEARCH_API_KEY</span>
+          <span class="field-hint">这版服务端没开密钥直填：把值写进 .env，变量名就用这个；保存后重启服务生效。</span>
+        </div>
+        <div class="svc-form-actions">
+          <span class="set-hint" id="search-hint"></span>
+          <button class="btn-primary" type="button" id="search-save">保存</button>
+          <button class="ghost" type="button" id="search-test">测试连接</button>
+        </div>
+      </div>`,
+    )}
+    ${sectionMarkup(
       "供应商",
       `<div class="svc-head">
         <div class="row-main">
@@ -8538,6 +8949,9 @@ async function renderSettings() {
     });
     document.getElementById("provider-add")?.addEventListener("click", () => showProviderTemplates());
     void loadServiceInfo();
+    void initRuntimeCard();
+    // 搜索配置（2026-11-07 批二）：进页 GET 一次当前状态
+    void initSearchCard();
   } else if (page === "memory") {
     el.settingsInner.innerHTML = memorySettingsMarkup();
     void wireMemorySettings();
@@ -9365,6 +9779,134 @@ function renderDefaultModelRow(catalog) {
   });
 }
 
+/* ── 运行时起停（2026-11-07）────────────────────────────────
+ * 这一块**不能走 HTTP**：它要停的东西就是 HTTP 服务本身。停下去之后页面所有请求都会
+ * 失败，连"现在是什么状态"都问不出来。所以状态只从壳读，跟 /healthz 无关——
+ * 拿 healthz 判会把"我自己停的"误报成"服务挂了"。
+ *
+ * 浏览器里（非桌面壳）没有 window.mygo，退回只读提示，不出按钮。
+ */
+const RUNTIME_LABELS = {
+  running: "运行中",
+  starting: "启动中…",
+  stopped: "已停止",
+  failed: "未运行（异常退出）",
+  unknown: "未知",
+};
+
+/** 壳方法调用：MyGo 的 call 挂在 window.mygo 上，错误以 reject 形式回来。 */
+async function shellCall(method) {
+  const call = window.mygo?.call;
+  if (typeof call !== "function") throw new Error("only-desktop");
+  const value = await call.call(window.mygo, `Shell.${method}`);
+  // 有的桥接层会把结果包成 {result} / 字符串 JSON，这里统一拆一层。
+  if (typeof value === "string" && value.startsWith("{")) {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return value;
+    }
+  }
+  return value?.result ?? value;
+}
+
+function paintRuntime(status) {
+  const box = document.getElementById("runtime-card");
+  if (!box) return;
+  const label = box.querySelector("#runtime-state");
+  const start = box.querySelector("#runtime-start");
+  const restart = box.querySelector("#runtime-restart");
+  const stop = box.querySelector("#runtime-stop");
+  const state = status?.state || "unknown";
+
+  label.textContent = `${RUNTIME_LABELS[state] || state}${status?.pid ? ` · PID ${status.pid}` : ""}`;
+  label.dataset.state = state;
+  // 三种按钮互斥出现：跑着才有"重启/停止"，没跑才有"启动"
+  const running = state === "running";
+  if (start) start.hidden = running || state === "starting";
+  if (restart) restart.hidden = !running;
+  if (stop) stop.hidden = !running;
+}
+
+/** 停服之后整页失去后端：盖一块本地面板，别让人对着一屏报错点。 */
+function showRuntimeCurtain(visible, text) {
+  let layer = document.getElementById("runtime-curtain");
+  if (!layer) {
+    layer = document.createElement("div");
+    layer.id = "runtime-curtain";
+    layer.innerHTML = `<div class="runtime-curtain-card">
+      <h3>服务已停止</h3>
+      <p id="runtime-curtain-text">手机连接、提醒、例行任务都已断开。历史没有丢。</p>
+      <button class="btn-primary" type="button" id="runtime-curtain-start">启动服务</button>
+    </div>`;
+    document.body.append(layer);
+    layer.querySelector("#runtime-curtain-start").addEventListener("click", () => void startRuntimeFromUi());
+  }
+  if (typeof text === "string") layer.querySelector("#runtime-curtain-text").textContent = text;
+  layer.hidden = !visible;
+  // 让 checkHealth 别再刷"服务离线"——那是我们自己停的，不是失联。
+  document.body.dataset.runtime = visible ? "stopped" : "running";
+}
+
+async function startRuntimeFromUi() {
+  showRuntimeCurtain(true, "启动中…（首次启动要加载技能与记忆，通常 10–25 秒）");
+  try {
+    paintRuntime(await shellCall("StartRuntime"));
+    // 起来了就整页重来：SSE、健康轮询、会话列表一起重建，比逐块热修可靠。
+    location.reload();
+  } catch (error) {
+    showRuntimeCurtain(true, `启动失败：${error.message}`);
+  }
+}
+
+async function initRuntimeCard() {
+  const box = document.getElementById("runtime-card");
+  if (!box) return;
+  if (!inShell()) {
+    const label = box.querySelector("#runtime-state");
+    if (label) label.textContent = "仅桌面端可操作";
+    for (const id of ["runtime-start", "runtime-restart", "runtime-stop"]) {
+      const node = box.querySelector(`#${id}`);
+      if (node) node.hidden = true;
+    }
+    return;
+  }
+
+  const refresh = async () => {
+    try {
+      paintRuntime(await shellCall("RuntimeStatus"));
+    } catch {
+      paintRuntime(null);
+    }
+  };
+  await refresh();
+
+  box.querySelector("#runtime-stop")?.addEventListener("click", async () => {
+    if (!confirm("停掉 Node 服务？手机连接、提醒、正在跑的任务都会断开。历史不会丢。")) return;
+    try {
+      paintRuntime(await shellCall("StopRuntime"));
+      showRuntimeCurtain(true);
+    } catch (error) {
+      alert(`停止失败：${error.message}`);
+      await refresh();
+    }
+  });
+  box.querySelector("#runtime-start")?.addEventListener("click", () => void startRuntimeFromUi());
+  box.querySelector("#runtime-restart")?.addEventListener("click", async () => {
+    if (!confirm("重启 Node 服务？正在生成的回答会中断，历史不会丢。")) return;
+    try {
+      await shellCall("RestartRuntime");
+      location.reload();
+    } catch (error) {
+      showRuntimeCurtain(true, `重启失败：${error.message}`);
+    }
+  });
+
+  // 上次是用户停的：进来就显面板，别先闪一下"服务离线"
+  const status = await shellCall("RuntimeStatus").catch(() => null);
+  if (status?.state === "stopped") showRuntimeCurtain(true);
+}
+
 async function loadServiceInfo() {
   const set = (id, text) => {
     const node = document.getElementById(id);
@@ -10172,6 +10714,170 @@ function applyProviderSecretMode(host) {
   }
 }
 
+/* ── 设置 → 服务 → 搜索（2026-11-07 批二）──────────────────
+   key 落点照供应商直填：PUT 写 .data/provider-keys.json 并热注入 env；响应只回变量名。
+   老服务端 / PROVIDER_SECRETS=false 时退回「只展示变量名 + 手写 .env」的形态
+   （同 saveProviderFlow 的 404 / secrets_disabled 先例）。 */
+const SEARCH_ERROR_TEXT = {
+  search_not_configured: "还没配置搜索 Key：先在上面保存，或写进 .env。",
+  upstream_error: "搜索服务报错（上游 / 网络），稍后再试。",
+  bad_response: "搜索服务返回格式异常，稍后再试。",
+};
+
+function setSearchHint(host, text, isError = false) {
+  const node = host && host.querySelector("#search-hint");
+  if (!node) return;
+  node.textContent = text || "";
+  node.classList.toggle("is-error", Boolean(isError) && Boolean(text));
+}
+
+function paintSearchState(host, hasKey) {
+  const node = host && host.querySelector("#search-state");
+  if (!node) return;
+  node.textContent = hasKey ? "已配置" : "未配置";
+  node.dataset.state = hasKey ? "on" : "off";
+}
+
+function applySearchEnvMode(host) {
+  if (!host) return;
+  host.dataset.searchMode = "env";
+  const apiField = host.querySelector("#search-key-api");
+  const envField = host.querySelector("#search-key-env");
+  if (apiField) apiField.hidden = true;
+  if (envField) envField.hidden = false;
+  const actions = host.querySelector(".svc-form-actions");
+  if (actions) actions.hidden = true;
+  const stateNode = host.querySelector("#search-state");
+  if (stateNode) {
+    stateNode.textContent = "写 .env";
+    stateNode.dataset.state = "unknown";
+  }
+}
+
+/** 眼睛：只换 type，不落值（与供应商密钥框同款） */
+function wireSearchEye(host) {
+  const eye = host.querySelector("#search-eye");
+  const input = host.querySelector("#search-apikey");
+  if (!eye || !input) return;
+  eye.addEventListener("mousedown", (event) => event.preventDefault());
+  eye.addEventListener("click", () => {
+    const show = input.type === "password";
+    input.type = show ? "text" : "password";
+    eye.setAttribute("aria-pressed", String(show));
+    eye.setAttribute("aria-label", show ? "隐藏密钥" : "显示密钥");
+    eye.title = show ? "隐藏" : "显示";
+    const showIcon = eye.querySelector(".eye-show");
+    const hideIcon = eye.querySelector(".eye-hide");
+    if (showIcon) showIcon.hidden = show;
+    if (hideIcon) hideIcon.hidden = !show;
+  });
+}
+
+async function initSearchCard() {
+  const host = document.getElementById("search-card");
+  if (!host || host.dataset.wired === "1") return;
+  host.dataset.wired = "1";
+  wireSearchEye(host);
+
+  const input = host.querySelector("#search-apikey");
+  const save = host.querySelector("#search-save");
+  const test = host.querySelector("#search-test");
+
+  // 进页 GET 一次：已配置 / 未配置；404 = 老服务端，退回 env 形态
+  try {
+    const response = await request("/api/v1/agent/search", { cache: "no-store" });
+    if (response.status === 404) {
+      applySearchEnvMode(host);
+      return;
+    }
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const node = host.querySelector("#search-state");
+      if (node) node.textContent = "读取失败";
+      return;
+    }
+    paintSearchState(host, data.hasKey === true);
+  } catch {
+    const node = host.querySelector("#search-state");
+    if (node) node.textContent = "读取失败";
+  }
+
+  input?.addEventListener("input", () => setSearchHint(host, ""));
+
+  save?.addEventListener("click", async () => {
+    const apiKey = (input?.value || "").trim();
+    if (!apiKey) {
+      setSearchHint(host, "留空 = 不改；要保存请先填一个 Key。", false);
+      return;
+    }
+    save.disabled = true;
+    if (test) test.disabled = true;
+    setSearchHint(host, "保存中…", false);
+    try {
+      const response = await request("/api/v1/agent/search", {
+        method: "PUT",
+        body: JSON.stringify({ apiKey }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (response.ok) {
+        if (input) {
+          input.value = "";
+          input.type = "password";
+        }
+        const eye = host.querySelector("#search-eye");
+        if (eye) {
+          eye.setAttribute("aria-pressed", "false");
+          const showIcon = eye.querySelector(".eye-show");
+          const hideIcon = eye.querySelector(".eye-hide");
+          if (showIcon) showIcon.hidden = false;
+          if (hideIcon) hideIcon.hidden = true;
+        }
+        paintSearchState(host, true);
+        setSearchHint(host, "已保存，下一轮生效。", false);
+        return;
+      }
+      if (response.status === 404 || data.error === "secrets_disabled") {
+        applySearchEnvMode(host);
+        return;
+      }
+      setSearchHint(host, data.message || "保存失败，稍后再试。", true);
+    } catch {
+      setSearchHint(host, "请求没发出去，检查服务是否在跑。", true);
+    } finally {
+      save.disabled = false;
+      if (test) test.disabled = false;
+    }
+  });
+
+  test?.addEventListener("click", async () => {
+    test.disabled = true;
+    if (save) save.disabled = true;
+    setSearchHint(host, "测试中…", false);
+    try {
+      const response = await request("/api/v1/agent/search/test", { method: "POST" });
+      const data = await response.json().catch(() => ({}));
+      if (response.ok && data.ok === true) {
+        setSearchHint(host, data.message || `搜索通了，返回 ${data.hits ?? 0} 条`, false);
+        paintSearchState(host, true);
+        return;
+      }
+      const base = SEARCH_ERROR_TEXT[data.error] || "测试没通过，稍后再试。";
+      setSearchHint(
+        host,
+        data.message && data.error === "upstream_error" ? `${base}（${data.message}）` : base,
+        true,
+      );
+      if (data.error === "search_not_configured") paintSearchState(host, false);
+    } catch {
+      setSearchHint(host, "请求没发出去，检查服务是否在跑。", true);
+    } finally {
+      test.disabled = false;
+      if (save) save.disabled = false;
+    }
+  });
+}
+
+
 function wireProviderForm(host) {
   const hint = (text, isError = true) => setProviderHint(host, text, isError);
   const clear = () => hint("", false);
@@ -10738,15 +11444,15 @@ async function ptTogglePartner(id, nextStatus, button) {
 function openCreatePartnerModal() {
   openModal("新建执事", (body) => {
     body.innerHTML = `
-      <p class="modal-desc">给执事起个名字。填了领域就是总管执事的分管宰相，建好之后领域不可改。</p>
+      <p class="modal-desc">给执事起个名字就行。领域只是一句备注，可以不填、以后也能改，不影响派活。</p>
       <div class="modal-field">
         <span>名字（≤40 字）</span>
         <input class="modal-input" id="pt-new-name" type="text" maxlength="40" placeholder="例如：小助手" />
       </div>
       <div class="modal-field">
-        <span>领域（可选）</span>
+        <span>领域标签（可选）</span>
         <input class="modal-input is-mono" id="pt-new-domain" type="text" spellcheck="false"
-               placeholder="小写 ASCII 领域名，建了就是总管执事" />
+               placeholder="例如 frontend、写作；不填也行" />
       </div>
       <div class="modal-field">
         <span>一句话身份（可选）</span>
@@ -10871,7 +11577,7 @@ function ptBuildEditModal(body, partnerId, detail) {
       <div class="pt-seg pt-basic">
         <div class="pt-seg-head">
           <span class="pt-seg-title">名字与领域</span>
-          <span class="kv">领域建后不可改</span>
+          <span class="kv">领域只是备注，可留空、可改</span>
         </div>
         <div class="pt-basic-row">
           <label class="modal-field">
@@ -10882,11 +11588,15 @@ function ptBuildEditModal(body, partnerId, detail) {
             </div>
           </label>
           <label class="modal-field">
-            <span>领域</span>
-            <input class="modal-input is-mono" id="pt-domain" type="text" value="${attr(partner.domain || "")}"
-                   placeholder="普通执事没有领域" readonly />
+            <span>领域标签（可选）</span>
+            <div class="modal-row">
+              <input class="modal-input is-mono" id="pt-domain" type="text" value="${attr(partner.domain || "")}"
+                     placeholder="留空也行，不影响派活" />
+              <button class="ghost" id="pt-domain-save" type="button">保存</button>
+            </div>
           </label>
         </div>
+        <p class="set-hint">领域只是一句备注（例如 frontend、写作），用来在任务列表里区分活是谁的。留空照样能派活。</p>
       </div>
 
       <div class="pt-seg">
@@ -10910,6 +11620,25 @@ function ptBuildEditModal(body, partnerId, detail) {
 
   const nameInput = body.querySelector("#pt-name");
   body.querySelector("#pt-name-save")?.addEventListener("click", () => void ptSaveName(partnerId, nameInput));
+
+  // 领域标签（2026-11-07）：可留空、可改。空串 = 清掉标签（回到"普通执事"）。
+  const domainInput = body.querySelector("#pt-domain");
+  body.querySelector("#pt-domain-save")?.addEventListener("click", () => {
+    void (async () => {
+      const value = String(domainInput?.value || "").trim();
+      const res = await request(`/api/v1/partners/${encodeURIComponent(partnerId)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ domain: value }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        addNotice(data.message || "领域标签没保存成功。");
+        return;
+      }
+      partner.domain = value || null;
+      addNotice(value ? `领域标签已改成 ${value}。` : "领域标签已清空，不影响派活。");
+    })();
+  });
 
   void ptWireInstructionEditor(body, partnerId, partner, soul, detail.soulVersion ?? null);
 
@@ -11757,18 +12486,26 @@ function applyGroupsAvailability() {
   const on = groups.available === true;
   // 侧栏「群组」分区（2026-11-07 统一批）：折叠头 + 行尾 ＋ 是两个独立按钮，
   // 旧的一体式 #side-group 已从 HTML 移除（折叠箭头随四改一并退役）。
-  // 三个入口一起跟可用性走：轨道圆钮 / 分区名（进群组页）/ 行尾 ＋（建群）。
-  for (const button of [
-    el.railGroups,
-    el.secGroupsToggle,
-    el.secGroupsAdd,
+  // 四个入口一起跟可用性走：轨道圆钮 / 分区名（进群组页）/ 行尾 ＋（建群）/
+  // 分区底部的「所有群聊」（2026-11-07 新增，见下方注释）。
+  //
+  // 标题逐个给：以前一个循环把三颗按钮的 title 全写成「群组」，＋ 的「新建群组」
+  // 被顺手冲掉，悬停提示跟着丢了语义。
+  for (const [button, title] of [
+    [el.railGroups, "群组"],
+    [el.secGroupsToggle, "群组"],
+    [el.secGroupsAdd, "新建群组"],
+    [el.secGroupsAll, "查看全部群聊"],
   ]) {
     if (!button) continue;
     button.disabled = !on;
-    button.title = on ? "群组" : "群组未启用";
+    button.title = on ? title : "群组未启用";
   }
   if (el.groupList) el.groupList.hidden = !on;
   if (el.groupCreate) el.groupCreate.hidden = !on;
+  // 「所有群聊」这一行跟整节可用性走：群组没启用时它和折叠头一起灰掉，
+  // 不留一条点进去必然空页的入口。
+  if (el.secGroupsAll) el.secGroupsAll.hidden = !on;
 }
 
 /** 侧栏「群组」节：群名 + 成员数；点击进会话视图。 */
@@ -11817,6 +12554,388 @@ function renderGroupSidebar() {
     el.groupList.append(row);
   }
 }
+
+/* ── 侧栏课题（2026-11-07 批二）──────────────────────────
+   展开侧栏时拉 GET /topics；点开一行 = 时间线（GET /topics/:id 按需拉）。
+   改节奏 / 暂停恢复 / 关闭成功后就地刷新，不整页重载。
+   列表只放「在跟的」：closed 不进侧栏（方案 §六 的进行中课题列表）。 */
+let topicsSidebarAvailable = null; // null=未查 / true / false（404 = 未启用）
+let topicsSidebarList = [];
+const expandedTopicIds = new Set();
+
+const TOPIC_EMPTY_TEXT = "还没有在跟的课题。聊到值得长期跟进的问题，总管会提议。";
+
+async function loadTopicsSidebar({ force = false } = {}) {
+  if (!el.topicList) return;
+  if (topicsSidebarAvailable === false && !force) return;
+  try {
+    const response = await request("/api/v1/topics", { cache: "no-store" });
+    if (response.status === 404) {
+      // TOPICS_ENABLED=false / 老服务端：整块入口退场（不留点进去必然空页的入口）
+      topicsSidebarAvailable = false;
+      topicsSidebarList = [];
+      el.topicList.replaceChildren();
+      const section = document.getElementById("sec-topics");
+      if (section) section.hidden = true;
+      if (el.railTopics) el.railTopics.hidden = true;
+      return;
+    }
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(String(response.status));
+    topicsSidebarAvailable = true;
+    const section = document.getElementById("sec-topics");
+    if (section) section.hidden = false;
+    if (el.railTopics) el.railTopics.hidden = false;
+    topicsSidebarList = Array.isArray(data.topics) ? data.topics : [];
+    renderTopicSidebar();
+  } catch {
+    // 网络抖动不藏功能：已有列表保留；空列表给一句可重试的话
+    if (!topicsSidebarList.length && el.topicList) {
+      el.topicList.replaceChildren();
+      const empty = document.createElement("div");
+      empty.className = "roster-empty";
+      empty.textContent = "课题读取失败，稍后再试。";
+      el.topicList.append(empty);
+    }
+  }
+}
+
+function renderTopicSidebar() {
+  if (!el.topicList) return;
+  const ongoing = topicsSidebarList.filter((topic) => topic.status !== "closed");
+  if (el.topicsBadge) {
+    el.topicsBadge.hidden = ongoing.length === 0;
+    el.topicsBadge.textContent = String(ongoing.length);
+  }
+  el.topicList.replaceChildren();
+  if (!ongoing.length) {
+    const empty = document.createElement("div");
+    empty.className = "roster-empty";
+    empty.textContent = TOPIC_EMPTY_TEXT;
+    el.topicList.append(empty);
+    return;
+  }
+  for (const topic of ongoing) el.topicList.append(buildTopicRow(topic));
+}
+
+function buildTopicRow(topic) {
+  const wrap = document.createElement("div");
+  wrap.className = "topic-item";
+  wrap.dataset.topicId = topic.id;
+
+  const row = document.createElement("button");
+  row.type = "button";
+  row.className = "side-item topic-row";
+  row.title = topic.question;
+  const expanded = expandedTopicIds.has(topic.id);
+  row.setAttribute("aria-expanded", String(expanded));
+
+  const name = document.createElement("span");
+  name.className = "roster-name";
+  name.textContent = topic.question;
+
+  const flavor = document.createElement("span");
+  flavor.className = "pill-tag topic-flavor";
+  flavor.dataset.flavor = topic.flavor;
+  flavor.textContent = topic.flavor === "dig" ? "啃题" : "盯梢";
+
+  row.append(name, flavor);
+
+  if (topic.status === "paused") {
+    const paused = document.createElement("span");
+    paused.className = "topic-paused";
+    paused.textContent = "已暂停";
+    row.append(paused);
+  } else if (topic.nextFireAt) {
+    const next = document.createElement("span");
+    next.className = "roster-idle topic-next";
+    next.textContent = topic.nextFireLabel || shortDateTime(topic.nextFireAt);
+    next.title = `下次研究：${topic.nextFireLabel || topic.nextFireAt}`;
+    row.append(next);
+  }
+
+  const detail = document.createElement("div");
+  detail.className = "topic-detail";
+  detail.hidden = !expanded;
+
+  row.addEventListener("click", () => {
+    const open = detail.hidden;
+    if (open) {
+      expandedTopicIds.add(topic.id);
+      detail.hidden = false;
+      row.setAttribute("aria-expanded", "true");
+      void refreshTopicDetail(topic, detail);
+    } else {
+      expandedTopicIds.delete(topic.id);
+      detail.hidden = true;
+      row.setAttribute("aria-expanded", "false");
+    }
+  });
+
+  wrap.append(row, detail);
+  if (expanded) void refreshTopicDetail(topic, detail);
+  return wrap;
+}
+
+async function refreshTopicDetail(topic, detail) {
+  detail.replaceChildren();
+  const loading = document.createElement("p");
+  loading.className = "topic-detail-hint";
+  loading.textContent = "读取中…";
+  detail.append(loading);
+
+  let full = null;
+  try {
+    const response = await request(`/api/v1/topics/${encodeURIComponent(topic.id)}`, {
+      cache: "no-store",
+    });
+    if (response.ok) {
+      const payload = await response.json();
+      full = payload.topic || null;
+    }
+  } catch {
+    /* 下面统一给一句可重试的提示 */
+  }
+  if (!full) {
+    detail.replaceChildren();
+    const fail = document.createElement("p");
+    fail.className = "topic-detail-hint";
+    fail.textContent = "课题详情读取失败，稍后再试。";
+    detail.append(fail);
+    return;
+  }
+  renderTopicDetail(full, detail);
+}
+
+/** `0 9 * * 1` → { weekday: 1, hour: 9 }；不是周节奏就返回 null（下拉退回默认值）。 */
+function parseWeeklyCron(cron) {
+  const parts = String(cron || "").trim().split(/\s+/);
+  if (parts.length !== 5) return null;
+  const [minute, hour, dayOfMonth, month, dayOfWeek] = parts;
+  if (minute !== "0" || dayOfMonth !== "*" || month !== "*") return null;
+  if (!/^\d{1,2}$/.test(hour) || !/^[0-7]$/.test(dayOfWeek)) return null;
+  const hh = Number(hour);
+  if (hh > 23) return null;
+  return { weekday: Number(dayOfWeek) % 7, hour: hh };
+}
+
+function renderTopicDetail(topic, detail) {
+  detail.replaceChildren();
+
+  const head = document.createElement("div");
+  head.className = "topic-detail-head";
+
+  // 改节奏：每周几 + 时段（整点）两个下拉，拼成 `0 H * * D`
+  const parsed = parseWeeklyCron(topic.cron);
+  const weekday = document.createElement("select");
+  weekday.className = "topic-select";
+  weekday.setAttribute("aria-label", "每周几");
+  for (const [value, label] of [
+    [1, "周一"], [2, "周二"], [3, "周三"], [4, "周四"], [5, "周五"], [6, "周六"], [0, "周日"],
+  ]) {
+    const option = document.createElement("option");
+    option.value = String(value);
+    option.textContent = label;
+    weekday.append(option);
+  }
+  weekday.value = String(parsed ? parsed.weekday : 1);
+
+  const hour = document.createElement("select");
+  hour.className = "topic-select";
+  hour.setAttribute("aria-label", "时段");
+  for (let hh = 0; hh < 24; hh += 1) {
+    const option = document.createElement("option");
+    option.value = String(hh);
+    option.textContent = `${String(hh).padStart(2, "0")}:00`;
+    hour.append(option);
+  }
+  hour.value = String(parsed ? parsed.hour : 9);
+
+  const schedule = document.createElement("div");
+  schedule.className = "topic-schedule";
+  const weekPrefix = document.createElement("span");
+  weekPrefix.textContent = "每周";
+  schedule.append(weekPrefix, weekday, hour);
+
+  const state = document.createElement("span");
+  state.className = "topic-detail-state";
+  state.dataset.state = topic.status === "paused" ? "paused" : "active";
+  state.textContent = topic.status === "paused" ? "已暂停" : "进行中";
+
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "ghost topic-act";
+  toggle.textContent = topic.status === "paused" ? "恢复" : "暂停";
+
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "ghost is-danger topic-act";
+  close.textContent = "关闭";
+
+  head.append(schedule, state, toggle, close);
+  detail.append(head);
+
+  const hint = document.createElement("p");
+  hint.className = "topic-detail-hint";
+  detail.append(hint);
+
+  const setHint = (text, isError = false) => {
+    hint.textContent = text || "";
+    hint.classList.toggle("is-error", Boolean(isError) && Boolean(text));
+  };
+
+  const reload = async () => {
+    await loadTopicsSidebar({ force: true });
+  };
+
+  const patch = async (body, okText) => {
+    weekday.disabled = true;
+    hour.disabled = true;
+    toggle.disabled = true;
+    close.disabled = true;
+    setHint("保存中…");
+    try {
+      const response = await request(`/api/v1/topics/${encodeURIComponent(topic.id)}`, {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        setHint(payload.message || "没有保存成功，稍后再试。", true);
+        return false;
+      }
+      // 成功后整个侧栏会重绘（保留展开态），行内那句会跟着旧节点消失——用 toast 留个回执
+      toast(okText);
+      await reload();
+      return true;
+    } catch {
+      setHint("请求没发出去，检查服务是否在跑。", true);
+      return false;
+    } finally {
+      weekday.disabled = false;
+      hour.disabled = false;
+      toggle.disabled = false;
+      close.disabled = false;
+    }
+  };
+
+  const commitCron = () => {
+    const cron = `0 ${Number(hour.value)} * * ${Number(weekday.value)}`;
+    if (cron === topic.cron) return;
+    void patch({ cron }, "节奏已改。");
+  };
+  weekday.addEventListener("change", commitCron);
+  hour.addEventListener("change", commitCron);
+
+  toggle.addEventListener("click", () => {
+    void patch(
+      { status: topic.status === "paused" ? "active" : "paused" },
+      topic.status === "paused" ? "已恢复。" : "已暂停。",
+    );
+  });
+
+  // 关闭：先点一次变成确认态，再点一次才发请求（行内确认，不弹窗）
+  let armed = false;
+  let armTimer = 0;
+  close.addEventListener("click", async () => {
+    if (!armed) {
+      armed = true;
+      close.textContent = "确认关闭？";
+      setHint("再点一次就关掉；研究记录会留着。");
+      armTimer = setTimeout(() => {
+        armed = false;
+        close.textContent = "关闭";
+        setHint("");
+      }, 4000);
+      return;
+    }
+    clearTimeout(armTimer);
+    close.disabled = true;
+    setHint("关闭中…");
+    try {
+      const response = await request(`/api/v1/topics/${encodeURIComponent(topic.id)}/close`, {
+        method: "POST",
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        setHint(payload.message || "关闭失败，稍后再试。", true);
+        close.disabled = false;
+        return;
+      }
+      expandedTopicIds.delete(topic.id);
+      await reload();
+    } catch {
+      setHint("请求没发出去，检查服务是否在跑。", true);
+      close.disabled = false;
+    }
+  });
+
+  const timeline = document.createElement("div");
+  timeline.className = "topic-timeline";
+  if (!Array.isArray(topic.findings) || topic.findings.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "topic-detail-hint";
+    empty.textContent = "还没有研究记录，到点后会在这里出现。";
+    timeline.append(empty);
+  } else {
+    for (const finding of topic.findings) timeline.append(buildTopicFinding(finding));
+  }
+  detail.append(timeline);
+}
+
+function findingCompare(body) {
+  const lines = String(body || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const line = [...lines].reverse().find((item) => /^相比上次[:：]/.test(item));
+  return line ? line.replace(/^相比上次[:：]\s*/, "") : "";
+}
+
+function buildTopicFinding(finding) {
+  const wrap = document.createElement("div");
+  wrap.className = "topic-finding";
+
+  const head = document.createElement("div");
+  head.className = "topic-finding-head";
+  const date = document.createElement("span");
+  date.className = "topic-finding-date";
+  date.textContent = finding.date || "";
+  head.append(date);
+  if (finding.noNew) {
+    const pill = document.createElement("span");
+    pill.className = "pill-tag topic-no-new";
+    pill.textContent = "无新进展";
+    head.append(pill);
+  }
+  wrap.append(head);
+
+  const summary = document.createElement("div");
+  summary.className = "topic-finding-summary";
+  summary.textContent = finding.summary || "（本轮没有摘要）";
+  wrap.append(summary);
+
+  const compareText = findingCompare(finding.body);
+  if (compareText) {
+    const compare = document.createElement("div");
+    compare.className = "topic-finding-compare";
+    compare.textContent = `相比上次：${compareText}`;
+    wrap.append(compare);
+  }
+
+  if (finding.body) {
+    const details = document.createElement("details");
+    details.className = "topic-finding-body";
+    const label = document.createElement("summary");
+    label.textContent = "正文";
+    const pre = document.createElement("pre");
+    pre.textContent = finding.body;
+    details.append(label, pre);
+    wrap.append(details);
+  }
+  return wrap;
+}
+
 
 /** 群组路由入口：#/groups 列表态，#/group/:id 会话态。 */
 async function openGroupsView() {
@@ -13530,6 +14649,24 @@ el.secGroupsAdd?.addEventListener("click", () => {
   go("groups");
   void openCreateGroupModal();
 });
+/* 「所有群聊」：分区底部那一行（2026-11-07 用户口径「放在群组展开之后的底下，
+   不要放在返回之后」）。它只负责去列表态；群会话里点它同样落到 #/groups，
+   不必先按顶栏返回键再找入口。 */
+el.secGroupsAll?.addEventListener("click", () => go("groups"));
+
+/* 课题（2026-11-07 批二）：轨道按钮不带独立页面，只负责把展开侧栏打开、
+   把「课题」分区展开并滚到可见处；列表数据顺手现拉一次。 */
+el.railTopics?.addEventListener("click", () => {
+  if (!sidebarOpen()) toggleSidebar();
+  localStorage.setItem("lifediary.side.topics", "open");
+  applySections();
+  document.getElementById("sec-topics")?.scrollIntoView({ block: "nearest" });
+  void loadTopicsSidebar({ force: true });
+});
+// 分区头由 SIDE_SECTIONS 的循环统一折叠；这里只补「展开时现拉一次」，不再 toggle。
+el.secTopicsToggle?.addEventListener("click", () => {
+  if (!sectionClosed("topics")) void loadTopicsSidebar();
+});
 
 /* ── 启动 ─────────────────────────────────────────────── */
 
@@ -13541,6 +14678,8 @@ void (async () => {
   syncThinkingPill();
   // 侧栏分区折叠态（localStorage）与总管状态点初值
   applySections();
+  // 课题区（2026-11-07 批二）：首屏拉一次；404 时整块入口自己退场
+  void loadTopicsSidebar();
   syncChiefDot();
   // 隐藏层不作为 Tab 焦点：首帧按真实可见性定（窄屏只看轨道）
   applySidebarA11y();

@@ -20,6 +20,10 @@ import type {
 	TicketResult,
 } from "../../../../../chancellor/src/index.ts";
 import type { ProjectRef } from "./projects.ts";
+import {
+	delegationMessages,
+	type DelegationSenderKind,
+} from "./delegation-messages.ts";
 
 export type DelegationEvent =
 	/** 进度：这张单在哪个阶段、办到第几件、共几件、这件叫什么 */
@@ -105,6 +109,14 @@ export interface DelegationKickoff {
 	 * 再起一个分管等于把同一身份跑两遍。缺省 = 走既有分管路径。
 	 */
 	managers?: false;
+	/**
+	 * 这条派活是谁说的（2026-11-07 派活留言）。
+	 *
+	 * 只用于**旁路簿记**：派单落一条"来自 X · 时间 · 原文"的留言，让任务详情
+	 * 能回答"谁让我干这个"。不影响派单语义，也不改 chancellor 的任何输入。
+	 * 缺省 = 不记留言（单测与旧调用方零改动）。
+	 */
+	sender?: { kind: DelegationSenderKind; name: string };
 }
 
 /**
@@ -313,6 +325,8 @@ export function startDelegation(
 		settled = true;
 		ticketId = result.ticketId || ticketId;
 		const report = formatReport(result, kick.domain);
+		// 结论也落成一条留言：任务详情里 out / in 成对，读起来就是一段经过
+		recordMessage("in", result.line || report.text, { kind: "system", name: "执行端" });
 		runtime.emit(kick.conversationId, {
 			type: "delegate",
 			ticketId,
@@ -377,6 +391,35 @@ export function startDelegation(
 		return { id: ticketId, promise };
 	};
 
+	/**
+	 * 记一条派活留言（2026-11-07）。
+	 *
+	 * 写失败**不挡派单**：留言是簿记，派单是主链路。丢了留言最多是任务详情少一段
+	 * 来历，丢了一张单才是真事故。所以这里 catch 后只告警。
+	 */
+	const recordMessage = (
+		direction: "out" | "in" | "system",
+		body: string,
+		sender?: { kind: DelegationSenderKind; name: string },
+		ticket = ticketId,
+	): void => {
+		if (!sender || !ticket) return;
+		try {
+			delegationMessages().append({
+				ticketId: ticket,
+				direction,
+				fromKind: sender.kind,
+				fromName: sender.name,
+				body,
+				createdAt: new Date().toISOString(),
+			});
+		} catch (error) {
+			runtime.log?.(
+				`[delegate] 留言落库失败（不挡派单）：${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	};
+
 	const projectField = kick.project ? { project: kick.project } : {};
 	const idempotency = kick.requestId ? { idempotencyKey: kick.requestId } : {};
 	// 执事在自己领域内直派（2026-11-07）：managers:false 让 chancellor 不建分管宰相。
@@ -413,6 +456,21 @@ export function startDelegation(
 			...idempotency,
 			originConversationId: String(kick.conversationId),
 		});
+	}
+
+	// 派活留言（2026-11-07）：单号一确定就落一条"谁在什么时候说了什么"。
+	// 放在 launch 之后而不是之前：ticketId 要等 chancellor 的同步段发出来才有值。
+	if (kick.sender && !kick.resumeTicketId) {
+		recordMessage("out", kick.requirement, kick.sender, accepted.id || ticketId);
+	}
+	if (kick.sender && kick.resumeTicketId) {
+		// 续跑也是一句话：谁在回答、答了什么。方向仍是 out（从发出方看）。
+		recordMessage(
+			"out",
+			`（回答上一轮的提问）${kick.requirement}`,
+			kick.sender,
+			accepted.id || ticketId,
+		);
 	}
 
 	accepted.promise.then(settle).catch((error: unknown) => fail(error, accepted.id));

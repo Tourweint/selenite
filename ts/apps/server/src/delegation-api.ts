@@ -8,6 +8,7 @@ import { listManagers } from "../../../../../chancellor/src/manager/registry.ts"
 import { chancellorWorkRoot } from "./delegation.ts";
 import { DelegationReceipts } from "./delegation-receipts.ts";
 import { partnersStore } from "./partners.ts";
+import { DelegationMessages } from "./delegation-messages.ts";
 
 /**
  * 只读任务中心接口（2026-11-03 方案 §5.9）。
@@ -36,6 +37,34 @@ let deadLetterStoreInstance: DelegationReceipts | null = null;
 function deadLetterStore(): DelegationReceipts {
 	deadLetterStoreInstance ??= new DelegationReceipts();
 	return deadLetterStoreInstance;
+}
+
+/**
+ * 派活留言的只读出口（2026-11-07）。
+ *
+ * 与 `deadLetterStore()` 同一个懒建口径：同一个 SQLite 文件多连接同进程打开没有问题，
+ * 库打不开时给空数组——详情接口不能因为簿记库挂了就 500（历史单本来也没有留言）。
+ */
+let messagesStoreInstance: DelegationMessages | null = null;
+function messagesOf(ticketId: string): Array<{
+	direction: string;
+	fromKind: string;
+	fromName: string;
+	body: string;
+	createdAt: string;
+}> {
+	try {
+		messagesStoreInstance ??= new DelegationMessages();
+		return messagesStoreInstance.list(ticketId).map((message) => ({
+			direction: message.direction,
+			fromKind: message.fromKind,
+			fromName: message.fromName,
+			body: message.body,
+			createdAt: message.createdAt,
+		}));
+	} catch {
+		return [];
+	}
 }
 
 /** 看板列表行：只给界面需要的字段，不带 workRoot 绝对路径与 prompt 全文。 */
@@ -322,6 +351,8 @@ export function mountDelegationApi(app: Hono, opts: { workRoot?: string } = {}):
 				conversationId,
 				conversationTitle: conversationId ? titles.get(conversationId) ?? null : null,
 				chiefName: chiefNamesLoader()(found.ticket.options.domain),
+				// 派活留言（2026-11-07）：谁在什么时候说了什么。老单没有记录 = 空数组。
+				messages: messagesOf(found.ticket.id),
 				// 路径只给相对项目信息，不把 workRoot 绝对路径下发给客户端。
 				project: found.ticket.options.project ?? null,
 				tasks: found.store.tasksOf(found.ticket.id),

@@ -72,6 +72,9 @@ import { RelayInvokeError } from "./relay-client.ts";
 import { dispatchRemoteDelegation } from "./relay-matrix.ts";
 import { ReminderTask } from "./reminder.ts";
 import type { SkillStore } from "./skills.ts";
+// 课题工具（2026-11-07 长期课题跟进）：存储 / 搜索都从 deps 注入，测试可替换、缺失不注册。
+import { TOPICS_ENABLED, type TopicsStore } from "./topics.ts";
+import type { SearchModule } from "./search.ts";
 
 /**
  * 我们自己的工具。
@@ -85,6 +88,28 @@ import type { SkillStore } from "./skills.ts";
  */
 
 const MEMORY_KINDS: MemoryKind[] = ["fact", "episode", "preference", "entity"];
+
+/**
+ * 这条派活该记成"谁说的"（2026-11-07 派活留言）。
+ *
+ * 口径与 `effectivePartnerIdOfSession` 一致：执事会话 → 该执事的名字；
+ * 主人 / 总管会话 → 总管。查不到名字就返回 null（不记留言，不猜一个假名）。
+ *
+ * 为什么不在派单里现查：这里把"身份"和"领域"分开——领域是路由，
+ * 身份是"这句话谁说的"，两件事不该共用一次查询。
+ */
+function senderOf(conversationId: number): { kind: "chief" | "partner"; name: string } | null {
+	if (!COMPANIONS_ENABLED) return { kind: "chief", name: "总管" };
+	try {
+		const store = partnersStore();
+		const partnerId = store.partnerIdOfSession(conversationId);
+		if (!partnerId) return { kind: "chief", name: "总管" };
+		const name = store.get(partnerId)?.name?.trim();
+		return name ? { kind: "partner", name } : null;
+	} catch {
+		return { kind: "chief", name: "总管" };
+	}
+}
 
 /**
  * 调用方会话所属执事的领域（2026-11-07 执事直派）。
@@ -170,6 +195,13 @@ export interface ToolDeps {
 	groupContext?: () => GroupContext;
 	/** 派单回执表；不传用默认 `.data/delegations.sqlite`。测试可注入临时库。 */
 	receipts?: DelegationReceipts | null;
+	/**
+	 * 课题存储（2026-11-07 长期课题跟进）。可选注入：为 null / 缺省时
+	 * `propose_topic` 与 `web_search` 都不注册（研究回合也拿不到搜索）。
+	 */
+	topics?: TopicsStore | null;
+	/** 搜索适配层（2026-11-07）。测试注入假上游；缺省时不注册课题工具。 */
+	search?: SearchModule | null;
 }
 
 let sharedReceipts: DelegationReceipts | null = null;
@@ -592,6 +624,10 @@ export function createTools(deps: ToolDeps) {
 					...(requestId ? { requestId } : {}),
 					// 执事在自己领域内直派（2026-11-07）：不带 managers 就是既有分管路径
 					...(requestFields.managers === false ? { managers: false as const } : {}),
+					// 派活留言（2026-11-07）：谁在什么身份下说的这句话，落进任务详情
+					...(senderOf(conversationId)
+						? { sender: senderOf(conversationId)! }
+						: {}),
 				},
 				{
 					run: (request, options) =>
@@ -762,7 +798,11 @@ export function createTools(deps: ToolDeps) {
 					}),
 					name: Type.Optional(Type.String({ description: "create 必填，展示名，≤40 字" })),
 					domain: Type.Optional(
-						Type.String({ description: "create 必填，小写 ASCII 领域名（之后派活路由用）" }),
+						Type.String({
+							description:
+								"create 可选，小写 ASCII 的领域标签（备注用，不是路由键）。" +
+								"不确定填什么就留空——留空照样能建执事、照样能派活。",
+						}),
 					),
 					soul: Type.Optional(Type.String({ description: "create 可选，一句话身份；缺省用默认播种" })),
 				enabled: Type.Optional(
@@ -785,14 +825,20 @@ export function createTools(deps: ToolDeps) {
 						const name = (args.name ?? "").trim();
 						const domain = (args.domain ?? "").trim();
 						if (!name) return text("name 必填且不超过 40 字");
-						if (!domain) return text("domain 必填：小写 ASCII 领域名，之后派活用");
 						if (args.soul && args.soul.length > 4000) {
 							return text("soul 太长，一句话身份即可");
 						}
-						const result = createMinisterPartner({ name, domain, soul: args.soul }, ctx);
+						const result = createMinisterPartner(
+							{ name, ...(domain ? { domain } : {}), soul: args.soul },
+							ctx,
+						);
 						if (!result.ok) return text(result.error);
+						// 领域只是标签（2026-11-07）：留空也要说清"照样能派活"，
+						// 否则模型会以为建了个残缺的执事。
 						return text(
-							`执事 ${result.value.name} 已就位，domain=${result.value.domain}，之后派活用 domain`,
+							result.value.domain
+								? `执事 ${result.value.name} 已就位（领域标签：${result.value.domain}）。之后 delegate(domain=${result.value.domain}) 或直接按名字派都行。`
+								: `执事 ${result.value.name} 已就位（没有领域标签，不影响派活）。之后用 delegate 派给它就行。`,
 						);
 					}
 					if (args.action === "stop") {
@@ -945,6 +991,115 @@ export function createTools(deps: ToolDeps) {
 						);
 					}
 					return text("action 只能是 create / list");
+				},
+			}),
+		);
+	}
+
+	// 课题（2026-11-07 长期课题跟进 §五）：`web_search` + `propose_topic`。
+	// TOPICS_ENABLED=false 或依赖缺失 → 两个都不注册（一行回滚）。
+	// web_search 是纯网络读，**不进 WRITE_TOOLS**（approval-policy.ts 不动）。
+	const topicsDeps = TOPICS_ENABLED ? deps.topics ?? null : null;
+	const searchDeps = TOPICS_ENABLED ? deps.search ?? null : null;
+	if (topicsDeps && searchDeps) {
+		const topics = topicsDeps;
+		const search = searchDeps;
+		tools.push(
+			defineTool({
+				name: "web_search",
+				description:
+					"查公开网络资料拿事实（新闻、行情、论文、文档、政策），适合课题研究与需要实时性的问题。" +
+					"不适合：内部文件（用 read）、闲聊、以及一次搜索就能答完却反复搜；一次能答就别多搜。",
+				parameters: Type.Object({
+					query: Type.String({ description: "搜索关键词或一句话问题" }),
+					count: Type.Optional(
+						Type.Number({ description: "返回条数 1..10，默认 5", minimum: 1, maximum: 10 }),
+					),
+				}),
+				execute: async (args) => {
+					const result = await search.webSearch(args.query, args.count);
+					if (!result.ok) {
+						return text(
+							JSON.stringify({
+								ok: false,
+								error: result.error,
+								message: result.message,
+							}),
+						);
+					}
+					if (result.hits.length === 0) return text("没有找到相关结果。");
+					return text(
+						result.hits
+							.map((hit) => `${hit.title || "（无标题）"} — ${hit.url}\n${hit.summary}`)
+							.join("\n\n"),
+					);
+				},
+			}),
+			defineTool({
+				name: "propose_topic",
+				description:
+					"提议长期跟进一个课题。判据（从严，四条都满足才提）：开放性问题；今天给不了定论；" +
+					"值得隔几天回头看；用户显出兴趣。**只提交待确认的提议，不创建课题**——" +
+					"用户确认后才会建课题并开始按节奏研究。同一话题别重复提；用户直说「长期跟进 / 每周研究一下」时也用它。",
+				parameters: Type.Object({
+					question: Type.String({ description: "一句话问题，不超过 200 字" }),
+					flavor: Type.Unsafe<"watch" | "dig">({
+						type: "string",
+						enum: ["watch", "dig"],
+						description:
+							"watch=盯梢型（盯政策/价格/论文/动态，重点看和上次比变了什么）；" +
+							"dig=啃题型（搞懂一个大问题，每次往下啃一小块）",
+					}),
+					cron: Type.Optional(
+						Type.String({
+							description: "研究节奏，5 段 cron（分 时 日 月 周），默认「0 9 * * 1」= 每周一 09:00",
+						}),
+					),
+					origin: Type.Optional(
+						Type.Unsafe<"user" | "proposal">({
+							type: "string",
+							enum: ["user", "proposal"],
+							description:
+								"user=用户明确要求长期跟进；proposal=你自己嗅探到的（默认 proposal）",
+						}),
+					),
+				}),
+				execute: async (args, api) => {
+					// 群会话不进课题（与 remember 同口径）：群里提的题不属于任何一个人的长期目标。
+					if (partnersStore().isGroupSession(api.conversationId)) {
+						return text("群聊里不提课题；要长期跟进的事请主人在私聊里说。");
+					}
+					const question = args.question.trim();
+					if (!question) return text("question 不能为空");
+					if (question.length > 200) return text("question 不超过 200 字");
+					const result = topics.proposeTopic({
+						question,
+						flavor: args.flavor,
+						...(args.cron ? { cron: args.cron } : {}),
+						origin: args.origin === "user" ? "user" : "proposal",
+					});
+					if (!result.ok) {
+						return text(
+							JSON.stringify({
+								ok: false,
+								error: result.reason,
+								...(result.existingTopicId ? { existingTopicId: result.existingTopicId } : {}),
+								message: result.message,
+							}),
+						);
+					}
+					return text(
+						JSON.stringify({
+							ok: true,
+							proposalId: result.proposal.id,
+							question: result.proposal.question,
+							flavor: result.proposal.flavor,
+							cron: result.proposal.cron,
+							message:
+								"已提交待确认：用户确认后才会建课题并开始按节奏研究；" +
+								"确认之前不要把它当成已经在跟的课题。",
+						}),
+					);
 				},
 			}),
 		);

@@ -72,8 +72,8 @@ test("create：建出执事（partners 表 + 宰相目录 + SOUL 播种），文
 		const tool = manageTool(env.store, env.workRoot);
 		const out = await run(tool, { action: "create", name: "阿岚", domain: "finance" });
 		assert.match(out, /执事 阿岚 已就位/);
-		assert.match(out, /domain=finance/);
-		assert.match(out, /之后派活用 domain/);
+		// 2026-11-07：domain 降级为标签，文案改成"（领域标签：finance）"
+		assert.match(out, /领域标签：finance/);
 
 		const id = env.store.partnerIdByDomain("finance");
 		assert.ok(id, "partners 表能按 domain 反查到执事");

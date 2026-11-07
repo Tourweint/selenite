@@ -800,6 +800,9 @@ html[data-sidebar="closed"] .side-rail {
   font-size: 13px; text-align: left; cursor: pointer;
 }
 .sec-foot-link:hover { background: var(--card); color: var(--accent); }
+/* 「所有群聊」在列表态高亮（2026-11-07）：同一行在别的分区是"去整页看"的跳转，
+   这里也是；但用户从群里退出来时要能看出自己正站在这片列表上。 */
+.sec-foot-link[aria-current="true"] { background: var(--accent-soft); color: var(--accent); }
 
 /* 任务中心分区里的简版对话行：聚合灯 + 标题 + 时间 */
 .task-row { gap: 7px; }
@@ -2534,6 +2537,23 @@ button.tk-archive-bar:focus-visible { outline: 2px solid var(--accent-line); out
 .td-review .td-review-top { display: flex; align-items: center; gap: 8px; }
 .td-review .td-stage { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); }
 .td-review p { margin: 4px 0 0; line-height: 1.6; color: var(--text-2); }
+
+/* 派活往来（2026-11-07）：出方向和回方向用左侧竖线区分，正文保持可读 */
+.td-messages { display: flex; flex-direction: column; gap: 8px; }
+.td-msg {
+  padding: 9px 12px;
+  border: 1px solid var(--card-border); border-radius: var(--r-md);
+  background: var(--surface-low);
+  border-left: 2px solid var(--accent-line);
+}
+.td-msg[data-dir="in"] { border-left-color: var(--c-ok, #3f8f5f); opacity: .92; }
+.td-msg[data-dir="system"] { border-left-style: dashed; opacity: .8; }
+.td-msg .td-msg-top { display: flex; align-items: baseline; gap: 8px; justify-content: space-between; }
+.td-msg .td-msg-who { font-size: 11.5px; font-weight: 600; color: var(--text-2); }
+.td-msg .td-msg-body {
+  margin: 5px 0 0; font-size: 13px; line-height: 1.62; color: var(--text);
+  white-space: pre-wrap; word-break: break-word;
+}
 
 /* 迟到的回报（E2 #2）：节副注 + 行里的子单 id（等宽，和验收记录同一层） */
 .td-sec-hint { margin: -2px 4px 0; font-size: 11.5px; line-height: 1.5; color: var(--text-3); }
@@ -4570,3 +4590,183 @@ select.cs-input:disabled { color: var(--text-3); cursor: default; }
 .mem-item-meta { font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
 .mem-item-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; }
 .mem-act { font-size: 12px; padding: 4px 8px; }
+
+/* ── 运行时起停（2026-11-07）──────────────────────────────
+   设置 → 服务 → 运行时。三个按钮 + 一个状态字。
+   状态色只吃现有 token：跑着=--ok，停着=--text-2，异常=--c-error。 */
+.runtime-actions {
+  display: flex; align-items: center; justify-content: flex-end;
+  flex-wrap: wrap; gap: 8px;
+}
+#runtime-state {
+  font-size: 12.5px; color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+  margin-right: 4px;
+}
+#runtime-state[data-state="running"] { color: var(--ok, var(--text)); }
+#runtime-state[data-state="stopped"] { color: var(--text-3); }
+#runtime-state[data-state="failed"] { color: var(--c-error); }
+.ghost.is-danger { color: var(--c-error); border-color: color-mix(in srgb, var(--c-error) 40%, transparent); }
+.ghost.is-danger:hover { background: color-mix(in srgb, var(--c-error) 10%, transparent); color: var(--c-error); }
+
+/* 停服遮罩：服务没了，页面右上角那些轮询都会失败，先把话说清再给一颗能点的按钮 */
+#runtime-curtain {
+  position: fixed; inset: 0; z-index: 80;
+  display: flex; align-items: center; justify-content: center;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(2px);
+}
+#runtime-curtain[hidden] { display: none; }
+.runtime-curtain-card {
+  width: min(420px, calc(100vw - 40px));
+  padding: 22px 24px;
+  border: 1px solid var(--outline); border-radius: var(--r-lg, 16px);
+  background: var(--card);
+  box-shadow: 0 18px 48px rgb(0 0 0 / 18%);
+}
+.runtime-curtain-card h3 { margin: 0 0 8px; font-size: 15px; font-weight: 600; color: var(--text); }
+.runtime-curtain-card p { margin: 0 0 16px; font-size: 13px; line-height: 1.6; color: var(--text-2); }
+
+/* ── 课题批二（2026-11-07）：设置 · 搜索 / 侧栏课题区 / 提议卡 ──────────
+   全部追加在文件尾部；媒体查询排在本体定义之后（历史教训）。 */
+
+/* 设置 → 服务 → 搜索：状态字只吃现有 token */
+#search-state { font-variant-numeric: tabular-nums; }
+#search-state[data-state="on"] { color: var(--ok); }
+#search-state[data-state="off"],
+#search-state[data-state="unknown"] { color: var(--text-3); }
+#search-card .row-hint code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+}
+#search-card .svc-form-actions[hidden] { display: none; }
+/* 卡片里没有 .svc-detail 的内衬：给字段和按钮行补上同样的 16px 边距 */
+#search-card .field { padding: 12px 16px 0; }
+#search-card .svc-form-actions { padding: 10px 16px 14px; }
+
+/* 侧栏课题区：行 = 题目 + 口味 + 下次研究；点开在行内铺时间线 */
+.topic-roster { max-height: none; }
+.topic-item { display: flex; flex-direction: column; }
+.topic-row {
+  height: auto; min-height: 38px;
+  padding: 7px 12px;
+  flex-wrap: wrap; align-items: center; row-gap: 3px;
+  text-align: left; cursor: pointer;
+}
+.topic-row .roster-name {
+  flex: 1 1 auto; min-width: 0;
+  white-space: normal; line-height: 1.45;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.topic-flavor { flex: none; }
+.topic-flavor[data-flavor="watch"] {
+  color: var(--accent);
+  border-color: var(--accent-line);
+}
+.topic-flavor[data-flavor="dig"] {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 38%, transparent);
+}
+.topic-next {
+  margin-left: 0; flex: 0 0 auto;
+  font-size: 11px; color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.topic-paused {
+  margin-left: 0; flex: none;
+  font-size: 10.5px; padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--card-border);
+  color: var(--text-3);
+}
+.topic-detail {
+  display: flex; flex-direction: column; gap: 8px;
+  margin: 2px 0 8px 10px;
+  padding: 8px 4px 4px 10px;
+  border-left: 1px solid var(--divider);
+}
+.topic-detail[hidden] { display: none; }
+.topic-detail-head {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+}
+.topic-schedule {
+  display: flex; align-items: center; gap: 4px;
+  font-size: 11.5px; color: var(--text-2);
+}
+.topic-select {
+  font: inherit; font-size: 11.5px;
+  padding: 1px 3px;
+  border: 1px solid var(--card-border); border-radius: 6px;
+  background: var(--bg); color: var(--text);
+}
+.topic-detail-state {
+  font-size: 10.5px; padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--card-border);
+  color: var(--text-2);
+}
+.topic-detail-state[data-state="paused"] { color: var(--text-3); }
+.topic-act { font-size: 11px; padding: 3px 7px; }
+.topic-detail-hint {
+  margin: 0; font-size: 11.5px; line-height: 1.5; color: var(--text-3);
+}
+.topic-detail-hint.is-error { color: var(--c-error); }
+
+/* 研究时间线：每次研究一条 */
+.topic-timeline { display: flex; flex-direction: column; gap: 8px; }
+.topic-finding {
+  padding: 8px 9px;
+  border: 1px solid var(--card-border); border-radius: 9px;
+  background: var(--card-high);
+}
+.topic-finding-head { display: flex; align-items: center; gap: 6px; }
+.topic-finding-date {
+  font-size: 10.5px; color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.topic-no-new { font-size: 10px; }
+.topic-finding-summary {
+  margin-top: 3px;
+  font-size: 12px; line-height: 1.5; color: var(--text);
+}
+.topic-finding-compare {
+  margin-top: 2px;
+  font-size: 11px; line-height: 1.5; color: var(--text-2);
+}
+.topic-finding-body { margin-top: 4px; font-size: 11px; }
+.topic-finding-body summary { cursor: pointer; color: var(--text-2); }
+.topic-finding-body pre {
+  margin: 4px 0 0; padding: 6px;
+  max-height: 220px; overflow: auto;
+  white-space: pre-wrap; word-break: break-word;
+  font-size: 11px; line-height: 1.5;
+  background: var(--bg); border-radius: 6px;
+}
+
+/* 对话流课题提议卡（attention 的派生形态） */
+.topic-proposal {
+  display: flex; flex-direction: column; gap: 6px;
+  margin-top: 8px;
+}
+.topic-proposal-q {
+  margin: 0;
+  font-size: 13.5px; font-weight: 500; line-height: 1.55;
+}
+.topic-proposal-meta {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  font-size: 12px; color: var(--text-2);
+}
+.topic-proposal-expiry { font-size: 11.5px; color: var(--text-3); }
+.topic-proposal-state { margin: 0; font-size: 12.5px; color: var(--text-2); }
+.topic-proposal-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 2px; }
+.topic-proposal-actions[hidden] { display: none; }
+.topic-proposal-note {
+  margin: 0; font-size: 12px; line-height: 1.5; color: var(--text-2);
+}
+.topic-proposal-note.is-error { color: var(--c-error); }
+.topic-proposal-link {
+  border: 0; background: none; padding: 0 0 1px;
+  font: inherit; font-size: 12px;
+  cursor: pointer;
+}
+.topic-proposal.resolved { opacity: .72; }

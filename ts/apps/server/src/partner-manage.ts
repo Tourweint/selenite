@@ -41,7 +41,14 @@ const DOMAIN_ERROR =
 
 export interface CreateMinisterInput {
 	name: string;
-	domain: string;
+	/**
+	 * 领域标签（2026-11-07 起可选）。
+	 *
+	 * 语义降级：它不再是派活路由键，只是"这个执事负责哪块"的备注。
+	 * 留空 = 不绑定 chancellor 分管目录、不参与分管派单（等同普通执事）；
+	 * 填了仍会建 `managers/<domain>/` 并保留原有兼容行为。
+	 */
+	domain?: string;
 	/** create 可选：一句话身份；缺省用 delegationSoulSeed 播种。 */
 	soul?: string;
 }
@@ -58,14 +65,20 @@ export function createMinisterPartner(
 	ctx: MinisterContext = defaultMinisterContext(),
 ): MinisterResult<PartnerRow> {
 	const { store, workRoot } = ctx;
-	const { name, domain } = input;
+	const { name } = input;
+	const domain = input.domain?.trim() ?? "";
 	if (!name || name.length > 40) return { ok: false, error: "name 必填且不超过 40 字" };
-	if (!DOMAIN_PATTERN.test(domain)) return { ok: false, error: DOMAIN_ERROR };
-	if (store.partnerIdByDomain(domain)) {
-		return { ok: false, error: `domain「${domain}」已被其他执事占用` };
+	// 留空 = 普通执事（不带分管目录）。这是 2026-11-07 的语义降级：
+	// 领域从"必填路由键"变成"可选标签"，所以这里允许空串直接落库。
+	if (domain) {
+		if (!DOMAIN_PATTERN.test(domain)) return { ok: false, error: DOMAIN_ERROR };
+		if (store.partnerIdByDomain(domain)) {
+			return { ok: false, error: `domain「${domain}」已被其他执事占用` };
+		}
 	}
 	const soulSeed = input.soul?.trim() || delegationSoulSeed(name, domain);
-	const partner = store.create(name, { domain, soulSeed });
+	const partner = store.create(name, domain ? { domain, soulSeed } : { soulSeed });
+	if (!domain) return { ok: true, value: partner };
 	try {
 		// 宿主建宰相目录并透记 partner_id；chancellor 只存不解读。
 		ensureManager(workRoot, domain, { partnerId: partner.id });

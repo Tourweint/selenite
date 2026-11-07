@@ -113,6 +113,11 @@
       <button class="rail-btn" id="rail-groups" type="button" title="群组" data-tip="群组" aria-label="群组" disabled>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/><path d="M8 12h.01"/><path d="M12 12h.01"/><path d="M16 12h.01"/></svg>
       </button>
+      <!-- 长期课题（2026-11-07 批二）：轨道上只做「展开侧栏」的提示入口，
+           列表与时间线都在展开态的分区里（与执事占位同一思路）。 -->
+      <button class="rail-btn" id="rail-topics" type="button" title="课题（展开侧栏查看）" data-tip="课题（展开侧栏查看）" aria-label="课题">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m10.065 12.493-6.18 1.318a.934.934 0 0 1-1.108-.702l-.537-2.15a1.07 1.07 0 0 1 .691-1.265l13.504-4.44"/><path d="m13.56 11.747 4.332-.924"/><path d="m16 21-3.105-6.21"/><path d="M16.485 5.94a2 2 0 0 1 1.455-2.425l1.09-.272a1 1 0 0 1 1.212.727l1.515 6.06a1 1 0 0 1-.727 1.213l-1.09.272a2 2 0 0 1-2.425-1.455z"/><path d="m6.158 8.633 1.114 4.456"/><path d="m8 21 3.105-6.21"/><circle cx="12" cy="13" r="2"/></svg>
+      </button>
       <div class="rail-flex" aria-hidden="true"></div>
       <!-- 收起态底部（2026-11-07）：齿轮在上、状态点在正下方，同一竖轴。
            之前状态点绝对定位在右侧，跟齿轮不在一条线上，收起态看着别扭。 -->
@@ -227,7 +232,30 @@
           <div class="side-sec-clip">
             <div class="side-sec-inner">
               <div class="roster" id="group-list" aria-label="群组列表"></div>
+              <!-- 所有群聊（2026-11-07）：与任务中心/项目管理同一条「分区底部去整页看」的链接行。
+                   以前只有群会话顶栏的返回键能到群列表，用户口径是「别放在返回之后」——
+                   展开着群组就能直接进列表，群会话里也不必先返回再找。 -->
+              <button class="sec-foot-link" id="sec-groups-all" type="button">所有群聊 <span aria-hidden="true">→</span></button>
               </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 长期课题（2026-11-07 批二）：与执事 / 群组同一套分区外壳。
+           列表 = 进行中课题（题目 + 口味 + 下次研究）；点开一行在行内展开时间线与操作，
+           不改页面路由。空态一句话（见 app.js）。 -->
+      <section class="side-sec is-open" id="sec-topics" data-sec="topics">
+        <button class="side-sec-head" id="sec-topics-toggle" type="button" aria-expanded="true"
+                aria-controls="sec-topics-body" title="课题（点一下收起/展开）">
+          <svg class="sec-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m10.065 12.493-6.18 1.318a.934.934 0 0 1-1.108-.702l-.537-2.15a1.07 1.07 0 0 1 .691-1.265l13.504-4.44"/><path d="m13.56 11.747 4.332-.924"/><path d="m16 21-3.105-6.21"/><path d="M16.485 5.94a2 2 0 0 1 1.455-2.425l1.09-.272a1 1 0 0 1 1.212.727l1.515 6.06a1 1 0 0 1-.727 1.213l-1.09.272a2 2 0 0 1-2.425-1.455z"/><path d="m6.158 8.633 1.114 4.456"/><path d="m8 21 3.105-6.21"/><circle cx="12" cy="13" r="2"/></svg>
+          <span class="sec-name">课题</span>
+          <span class="side-count sec-count" id="topics-badge" hidden></span>
+        </button>
+        <div class="side-sec-body" id="sec-topics-body">
+          <div class="side-sec-clip">
+            <div class="side-sec-inner">
+              <div class="roster topic-roster" id="topic-list" aria-label="课题列表"></div>
+            </div>
           </div>
         </div>
       </section>
@@ -428,7 +456,10 @@
   <main class="main tasks" id="view-groups" hidden>
     <header class="tasks-top">
       <div class="tasks-title">
-        <button class="set-back" id="groups-back" type="button" aria-label="返回对话" title="返回对话 (Esc)">
+        <!-- 返回键文案按实际行为写（2026-11-07 修）：它的落点一直是「群会话 → 群列表、
+             列表 → 对话页」（见 groupsBack 的接线），原来 aria-label/title 写的是
+             「返回对话 (Esc)」——两个承诺都不对：没回对话，Esc 也没绑。 -->
+        <button class="set-back" id="groups-back" type="button" aria-label="返回" title="返回">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="m12 19-7-7 7-7"/>
             <path d="M19 12H5"/>

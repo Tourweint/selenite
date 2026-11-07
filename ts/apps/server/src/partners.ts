@@ -387,6 +387,24 @@ export class PartnersStore {
 	 * 设置派发权（2026-11-06 执事派发权开关）：一条 UPDATE 原子落地。
 	 * 只写 dispatch_authority（与 updated_at）；不存在返回 null，由调用方映射 404。
 	 */
+	/**
+	 * 改 domain 标签（2026-11-07）。
+	 *
+	 * 语义变化：domain 从"派活路由主键"降级为**可选展示标签**——派活路由按执事 id /
+	 * 会话链接，不再靠这个字符串，所以改名不会让历史单找不到负责人。
+	 * `null` = 清掉标签（回到"普通执事"）。
+	 *
+	 * 不加唯一约束：已有表结构里 domain 没有唯一索引，历史上也允许空值；
+	 * 占用冲突由调用方（端点 / 工具）先查后写，保持与创建路径同一套校验。
+	 */
+	setDomain(id: string, domain: string | null): PartnerRow | null {
+		if (!this.get(id)) return null;
+		this.db
+			.prepare("UPDATE partners SET domain = ?, updated_at = ? WHERE id = ?")
+			.run(domain, new Date().toISOString(), id);
+		return this.get(id);
+	}
+
 	setDispatchAuthority(id: string, enabled: boolean): PartnerRow | null {
 		if (!this.get(id)) return null;
 		this.db
@@ -1152,7 +1170,11 @@ function defaultSoul(name: string): string {
  * 宰相的「性格」由 chancellor 分管提示词给，这里只交代它是谁、管哪块。
  */
 export function delegationSoulSeed(name: string, domain: string): string {
-	return `你是${name}，${domain} 领域的负责人；总管把这一领域的事交给你，你带工人把活办完，只回一行结论。\n`;
+	// 没有领域标签时（2026-11-07 起 domain 可空）给一句通用身份，不硬编一个领域名——
+	// 编一个"general 领域"会让用户在界面上看到一个自己没选过的东西。
+	return domain
+		? `你是${name}，${domain} 领域的负责人；总管把这一领域的事交给你，你带工人把活办完，只回一行结论。\n`
+		: `你是${name}；总管把事交给你，你带工人把活办完，只回一行结论。\n`;
 }
 
 /**
