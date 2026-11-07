@@ -603,7 +603,8 @@ export function createTools(deps: ToolDeps) {
 				}
 			}
 
-			// 幂等回执（方案 §5.1）：新派先落回执再入队；续跑沿用原单，不建新回执。
+			// 幂等回执（方案 §5.1）：新派先落回执再入队；续跑不建新单，
+			// 只补一行 `resume:<原单id>:<次数>` 的会话映射（见下方受理之后那段）。
 			const receipts = resumeTicketId === undefined ? receiptsOf(deps) : null;
 			const explicitRequestId = (args.requestId ?? "").trim();
 			const requestId = receipts
@@ -691,6 +692,15 @@ export function createTools(deps: ToolDeps) {
 			);
 			if (ticketId) lastTicketByConversation.set(conversationId, ticketId);
 			if (project) lastProjectByConversation.set(conversationId, project);
+			// 续跑回执（2026-11-08 扫尾批 7a）：resume 沿用原单、不建新单，
+			// 回执也必须写一行，把这张单映射到**这次发起 resume 的会话**——
+			// 否则完成/重启恢复（A3b）按最初派单那行回灌，回答过的人看不到下文。
+			// 键用 `resumeTicketId` 而不是 `ticketId`：后者要等事件同步段填，且续跑本来就
+			// 只可能落在原单上（chancellor `resumeTicket()` 返回的就是 ticket.id）。
+			// 改派了新单（fellBack）不写：那已经不是这张单，写进去等于说谎。
+			if (resumeTicketId !== undefined && !fellBack) {
+				receiptsOf(deps).recordResume(resumeTicketId, conversationId);
+			}
 			if (receipts && requestId) {
 				if (ticketId) receipts.accept(requestId, ticketId, conversationId);
 				// 失败时回执要跟着落：拿到单号记 failed，没拿到记 uncertain（不自动重派）。

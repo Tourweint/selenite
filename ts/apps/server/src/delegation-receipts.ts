@@ -348,6 +348,43 @@ export class DelegationReceipts {
 			.get(prefix.length, prefix) as { n?: unknown } | undefined;
 		return Number(row?.n ?? 0);
 	}
+
+	/**
+	 * 续跑回执（2026-11-08 扫尾批 7a）：resume 不产新单，但要把这张单映射到
+	 * **这次发起 resume 的会话**——完成/重启恢复都按回执里的 ticket→conversation 回灌，
+	 * 不写这一行就永远落到最初派单的那条对话。
+	 *
+	 * 写法与重试同构：`resume:<原单id>:<次数>`，ticket_id 仍是原单号，一行一次 resume。
+	 * 次数递增保证幂等键不撞（同单连续 resume 各留一行），恢复端 `lookupByTicket`
+	 * 按 `updated_at DESC, rowid DESC` 取最新 —— 天然取到最近一次 resume 那行，不用改。
+	 *
+	 * `DELEGATION_MAP_PERSIST=false` 时**整行不写**（不是写一行空映射）：这条回执的唯一
+	 * 用途就是会话映射，写空映射反而会盖掉原单那行，比不写更差；回滚后应与改动前逐字节一致。
+	 *
+	 * 返回落下的 requestId；没落（开关关 / 单号为空）返回 null。
+	 */
+	recordResume(ticketId: string, conversationId: number): string | null {
+		if (!ticketId || !mapPersistEnabled()) return null;
+		const count = this.countResumes(ticketId) + 1;
+		const requestId = `resume:${ticketId}:${count}`;
+		const fingerprint = fingerprintOf({ kind: "resume", ticketId, count });
+		// 同一 requestId 并发撞车时 begin 返回 existing：那行已经指向"先到的那个会话"，
+		// 不再覆盖 —— 不去抢，也不报错。
+		if (this.begin(requestId, fingerprint, { explicit: true }).kind !== "new") return requestId;
+		this.accept(requestId, ticketId, conversationId);
+		return requestId;
+	}
+
+	/** 这张单被 resume 过几次（前缀口径同 `countRetries`：substr 精确匹配，不用 LIKE）。 */
+	countResumes(ticketId: string): number {
+		const prefix = `resume:${ticketId}:`;
+		const row = this.db
+			.prepare(
+				"SELECT COUNT(*) AS n FROM delegation_receipts WHERE substr(request_id, 1, ?) = ?",
+			)
+			.get(prefix.length, prefix) as { n?: unknown } | undefined;
+		return Number(row?.n ?? 0);
+	}
 }
 
 function toReceipt(row: Record<string, unknown>): DelegationReceipt {

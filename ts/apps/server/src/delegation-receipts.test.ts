@@ -278,6 +278,39 @@ test("回执：本进程的 accepting（boot 匹配）带空单号仍按 uncerta
 	}
 });
 
+test("续跑回执：每次 resume 各一行，反查取最新；开关关掉一行都不落", () => {
+	const root = tempRoot();
+	const file = join(root, "delegations.sqlite");
+	const receipts = new DelegationReceipts(file);
+	const previous = process.env.DELEGATION_MAP_PERSIST;
+	try {
+		// 原单：自动 id 受理在 802
+		assert.equal(receipts.begin("auto-x", "fp-x", { explicit: false }).kind, "new");
+		receipts.accept("auto-x", "T-R", 802);
+		assert.equal(receipts.lookupByTicket("T-R")?.conversationId, 802);
+
+		assert.equal(receipts.recordResume("T-R", 803), "resume:T-R:1");
+		assert.equal(receipts.lookupByTicket("T-R")?.conversationId, 803, "回灌目标跟着 resume 走");
+		assert.equal(receipts.recordResume("T-R", 805), "resume:T-R:2");
+		assert.equal(receipts.countResumes("T-R"), 2, "同单两次 resume 各留一行、幂等键不撞");
+		// 恢复端取的永远是最新那行（latest-wins），不看是不是第一条
+		assert.equal(receipts.lookupByTicket("T-R")?.requestId, "resume:T-R:2");
+		assert.equal(receipts.lookupByTicket("T-R")?.conversationId, 805);
+
+		// 回滚：DELEGATION_MAP_PERSIST=false → 不落行（不是落一行空映射盖掉旧的）
+		process.env.DELEGATION_MAP_PERSIST = "false";
+		assert.equal(receipts.recordResume("T-R", 806), null);
+		assert.equal(receipts.countResumes("T-R"), 2);
+		assert.equal(receipts.lookupByTicket("T-R")?.conversationId, 805);
+		assert.equal(receipts.recordResume("", 1), null, "空单号不落行");
+	} finally {
+		receipts.close();
+		if (previous === undefined) delete process.env.DELEGATION_MAP_PERSIST;
+		else process.env.DELEGATION_MAP_PERSIST = previous;
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("死信：主键幂等，重复记账只落一次，按父单可查", () => {
 	const root = tempRoot();
 	const receipts = new DelegationReceipts(join(root, "delegations.sqlite"));

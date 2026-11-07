@@ -54,8 +54,9 @@ function check(ok: boolean, label: string, detail = ""): void {
 	}
 }
 
-function makeFake(options: { resumeThrows?: boolean } = {}) {
+function makeFake(options: { resumeThrows?: boolean; prefix?: string } = {}) {
 	const calls: ChancellorRequest[] = [];
+	const prefix = options.prefix ?? "t";
 	let newTickets = 0;
 	let resumeThrows = options.resumeThrows ?? false;
 
@@ -79,7 +80,7 @@ function makeFake(options: { resumeThrows?: boolean } = {}) {
 
 		newTickets += 1;
 		return {
-			ticketId: `t${newTickets}`,
+			ticketId: `${prefix}${newTickets}`,
 			status: "needs_you",
 			line: "⚠ 需要你：验证码是啥？",
 			tasks: [],
@@ -108,7 +109,10 @@ function makeTools(run: Runner) {
 	const delegate = tools.find((tool) => tool.name === "delegate");
 	if (!delegate) throw new Error("delegate 没挂上");
 
-	return async (conversationId: number, args: { requirement: string; resume?: boolean }) => {
+	return async (
+		conversationId: number,
+		args: { requirement: string; resume?: boolean; requestId?: string },
+	) => {
 		const result = await delegate.execute(args as never, { conversationId } as never, {} as never);
 		return (result.output ?? [])
 			.map((item) => (item.type === "text" ? item.text : ""))
@@ -212,7 +216,96 @@ function watch(conversationId: number): { events: DelegationEvent[]; stop: () =>
 	check(fake.newTickets === 2, "续跑被拒后派了新单");
 }
 
-// 7. 取消 / 重试（扫尾批 1 A1）：作废位、投影、幂等、终态拒绝、settle 静默、重派挂原会话
+// 7. 续跑回执（2026-11-08 扫尾批 7a）：resume 补写会话映射
+//
+// 单号前缀用 R，避开前面几组的 t1/t2（同一份回执库，别让旧行混进断言）。
+// "原会话 ≠ 续跑会话"用现有代码路径构造：同一显式 requestId 从另一条会话再提一次
+// → 冲突分支把原单指针交给那条会话（`lastTicketByConversation`），它再 resume 就是
+// 一次"从别的对话续跑别人的单"——正是这条映射要覆盖的情形。
+{
+	const store = new DelegationReceipts(DB);
+	const { reportRecoveredTickets } = await import("../src/recovery-report.ts");
+	const fake = makeFake({ prefix: "R" });
+	const call = makeTools(fake.run);
+	const KEY = "probe-shared-request";
+	try {
+		// 7.1 原会话 802 派单 → 回执挂在 802
+		await call(802, { requirement: "整理 A", requestId: KEY });
+		check(
+			store.lookupByTicket("R1")?.conversationId === 802,
+			"原单回执仍挂在派单会话 802",
+			String(store.lookupByTicket("R1")?.conversationId),
+		);
+
+		// 7.2 会话 803 用同一个 requestId 再提（内容不同 → 冲突）→ 拿回原单 → 它 resume
+		const adopted = await call(803, { requirement: "B 的活", requestId: KEY });
+		check(adopted.includes("返回原单 R1"), "冲突分支把原单指针交给 803", adopted.slice(0, 40));
+		const resumeReply = await call(803, { requirement: "验证码 1234", resume: true });
+		check(resumeReply.includes("续上了"), "803 续跑的是原单 R1", resumeReply.replace(/\n/g, " / "));
+
+		// ① resume 后该单回执存在，且指向发起 resume 的会话（不是原派单会话）
+		const afterResume = store.lookupByTicket("R1");
+		check(
+			afterResume?.requestId === "resume:R1:1" && afterResume?.conversationId === 803,
+			"resume 回执存在并指向发起会话 803",
+			`requestId=${afterResume?.requestId} conversationId=${afterResume?.conversationId}`,
+		);
+		check(
+			store.lookupByTicket("R1")?.conversationId !== 802,
+			"最新回执不再指向原派单会话",
+		);
+
+		// ② 模拟重启恢复（A3b 同一函数 + 同一查询）→ 回灌落到 resume 会话
+		const said: Array<[number, string]> = [];
+		const sent = await reportRecoveredTickets([{ ticketId: "R1", status: "done" }], {
+			receipts: store,
+			say: (conversationId, line) => {
+				said.push([conversationId, line]);
+			},
+		});
+		check(
+			sent === 1 && said[0]?.[0] === 803,
+			"重启恢复回灌落到 resume 会话 803（不是原会话 802）",
+			JSON.stringify(said),
+		);
+
+		// ③ 同一单二次 resume → 不炸；次数递增、最新一行说了算
+		const again = await call(803, { requirement: "再答一次", resume: true });
+		check(again.includes("续上了"), "同一单第二次 resume 不报错", again.replace(/\n/g, " / "));
+		check(
+			store.lookup("resume:R1:1") !== null &&
+				store.lookup("resume:R1:2") !== null &&
+				store.lookupByTicket("R1")?.requestId === "resume:R1:2",
+			"两次 resume 各留一行（resume:R1:1 / :2），反查取最新",
+			String(store.lookupByTicket("R1")?.requestId),
+		);
+		check(store.countResumes("R1") === 2, "resume 次数累计为 2", String(store.countResumes("R1")));
+
+		// 7.3 第四次：换一条会话续跑（同一 requestId 再撞一次）→ 映射跟着人走
+		await call(804, { requirement: "C 的活", requestId: KEY });
+		await call(804, { requirement: "验证码 5678", resume: true });
+		check(
+			store.lookupByTicket("R1")?.requestId === "resume:R1:3" &&
+				store.lookupByTicket("R1")?.conversationId === 804,
+			"再次换会话 resume → 最新回执指向 804（latest-wins）",
+			`requestId=${store.lookupByTicket("R1")?.requestId} conversationId=${store.lookupByTicket("R1")?.conversationId}`,
+		);
+
+		// 7.4 回滚开关：DELEGATION_MAP_PERSIST=false → 一行 resume 回执都不落（回到改动前）
+		process.env.DELEGATION_MAP_PERSIST = "false";
+		await call(805, { requirement: "再答一次", resume: true });
+		check(
+			store.countResumes("R1") === 3 && store.lookupByTicket("R1")?.conversationId === 804,
+			"DELEGATION_MAP_PERSIST=false → 不落 resume 回执，映射保持原样",
+			`count=${store.countResumes("R1")}`,
+		);
+		delete process.env.DELEGATION_MAP_PERSIST;
+	} finally {
+		store.close();
+	}
+}
+
+// 8. 取消 / 重试（扫尾批 1 A1）：作废位、投影、幂等、终态拒绝、settle 静默、重派挂原会话
 {
 	const store = new DelegationReceipts(DB);
 	/** findTicket 从 chancellor 工作目录读 ticket.json：这里铺几张假单据。 */
@@ -362,7 +455,7 @@ function watch(conversationId: number): { events: DelegationEvent[]; stop: () =>
 	store.close();
 }
 
-// 8. 取消/重试的 HTTP 端点形状 + 回滚开关（Hono app.request 真过一遍路由）
+// 9. 取消/重试的 HTTP 端点形状 + 回滚开关（Hono app.request 真过一遍路由）
 {
 	const { Hono } = await import("hono");
 	const { mountDelegationApi } = await import("../src/delegation-api.ts");

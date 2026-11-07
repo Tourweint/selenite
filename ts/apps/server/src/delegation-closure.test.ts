@@ -68,12 +68,18 @@ test("父单：只有未终态子单时沿用 idle，不提前汇报", () => {
 	assert.match(result.line, /T-child-4:planning/);
 });
 
-test("父单：子单全终态且没有失败/中止时保持 done", () => {
+test("父单：idle 子单可续跑，不算终态——父单回 idle 不谎报 done（2026-11-08 chancellor 同步修正）", () => {
 	const result = enforceChildClosure(
 		done,
 		[child("T-child-5", "done"), child("T-child-8", "idle")],
 		"T-parent",
 	);
+	assert.equal(result.status, "idle");
+	assert.match(result.line, /T-child-8:idle/);
+});
+
+test("父单：子单全部真终态（done/needs_you/failed/aborted 各归各）时 done 才保持", () => {
+	const result = enforceChildClosure(done, [child("T-child-5", "done")], "T-parent");
 	assert.equal(result.status, "done");
 	assert.equal(result.line, done.line);
 });
