@@ -1472,8 +1472,8 @@ async function switchThinkingOnTool(api: HookApi, context: Context): Promise<voi
 	if (stickyThinkingLevel(api.conversationId) || thinkingRefused.has(api.conversationId)) return;
 	// 2026-10-31 命名整改（方案 D11）：这个名字以前叫 AGENT_TOOL_UPGRADE，
 	// 语义是"升级到更贵的模型"，会把读代码的人（包括我自己）带偏成"换模型"；
-	// 现在它做的是"把思考档切上去"。旧名保留为兼容回退，下一轮删。
-	if (((process.env.AGENT_THINK_ON_TOOL ?? process.env.AGENT_TOOL_UPGRADE) ?? "on").trim().toLowerCase() === "off") {
+	// 现在它做的是"把思考档切上去"。旧别名 AGENT_TOOL_UPGRADE 已于 2026-11-07 删除。
+	if ((process.env.AGENT_THINK_ON_TOOL ?? "on").trim().toLowerCase() === "off") {
 		return;
 	}
 

@@ -45,14 +45,17 @@ ts/
 | 失控保护 | ✅ 工具回合上限 100（`AGENT_MAX_TURNS`），撞上限给提示并硬停 |
 | 上下文压缩 | ✅ 阈值 + overflow 兜底，策略用默认 |
 | 记忆框架 | ✅ 四层通了；策略（抽取/巩固/召回质量）刻意留空 |
-| 工具调用 | ✅ 9 个（读/写/改/跑 + 记住/回忆/提醒 + `skill` + `delegate`；清单见接口文档 §4） |
+| 工具调用 | ✅ 10 个（读/写/改/跑 + 记住/回忆/提醒 + `skill` + `delegate` / `propose_project`；另有条件注册的 5 个，清单见接口文档 §4） |
 | 定时提醒 | ✅ `sleepUntil`，睡眠状态落库，重启不丢 |
-| 权限闸门 | ⚠️ 骨架（只读模式 / 拉黑工具），**没有逐次确认** |
-| 鉴权 | ⚠️ 只有共享令牌，**不带用户身份** |
+| 权限闸门 | ✅ 三档（`read-only` / `no-shell` / 黑名单 `AGENT_BLOCKED_TOOLS`）＋ 独立确认轴 `AGENT_CONFIRM_WRITES`（默认关，2026-11-04 批次二） |
+| 鉴权 | ✅ 共享令牌 ＋ 配对设备凭据（2026-11-04）＋ 本机页面 cookie（2026-11-03）；仍**不带用户身份**（D1） |
+| 执事 | ✅（2026-11-05 批次B） |
+| 群组 | ✅（2026-11-06，`GROUPS_ENABLED`） |
+| 长期课题跟进 | ✅（2026-11-07） |
 
 ## 工具与信任
 
-已注册 7 个工具：
+已注册工具 15 个（10 个基线 + 5 个条件注册，现行清单以接口文档 §4 为准）：
 
 | 工具 | 能力 | 风险 |
 |---|---|---|
@@ -63,6 +66,20 @@ ts/
 | `remember` | 写一条长期记忆 | 可撤回（删库记录） |
 | `recall` | 检索旧记忆 | 只读 |
 | `set_reminder` | 定一个到点提醒 | 可取消 |
+| `skill` | 按需取一份技能手册正文 | 只读 |
+| `delegate` | 把多步的活派给外部 worker | **不可撤销**（起 worker 写文件 / 跑命令） |
+| `propose_project` | 提交新建项目待确认请求 | 只写 proposal 行，不建目录 |
+| `partner_skill_write` | 写当前执事的技能库（写盘即生效） | **不可撤销**（写盘） |
+| `partner_manage` | 总管建 / 停 / 列执事 | **不可撤销**（改角色与领域目录） |
+| `group_manage` | 总管建群 / 列群 | 新建常驻多成员会话 |
+| `web_search` | 查公开网络资料 | 只读（纯网络读） |
+| `propose_topic` | 提议长期跟进一个课题 | 只写内部提议（语义同 `remember`） |
+
+注册条件：`read` / `write` / `edit` / `bash` 来自 pi 自带的 `CodingTools`；`skill` 需技能目录
+（`AGENT_SKILLS_DIR`）非空；`CHANCELLOR_ENABLED=false` 时 `delegate` / `propose_project` 都不上（回到 8 个）；
+`COMPANIONS_ENABLED=false` 时 `partner_skill_write` / `partner_manage` 都不上；`group_manage` 另需
+`GROUPS_ENABLED`（双闸，任一关即不上）；`TOPICS_ENABLED=false` 或课题存储 / 搜索适配层缺失时
+`web_search` / `propose_topic` 都不上。后五个是条件注册，不计入 10 个基线。
 
 **闸门只是骨架。** pi 自己不带权限系统，只在 `beforeTool` 留了一个钩子；
 我们在 `apps/server/src/agent.ts` 里挂了一层：
@@ -74,6 +91,7 @@ ts/
 **你愿意让自己的账号在这台机器上做什么**。
 本地自用没问题；接 IM 网关、暴露到局域网、或者让它跑无人值守任务之前，
 这层要升级成"逐次等人确认"，那才算真的闸门。
+2026-11-07 复核：现行已不止骨架——访问档三档（`read-only` / `no-shell` / 黑名单 `AGENT_BLOCKED_TOOLS`）＋ 独立确认轴 `AGENT_CONFIRM_WRITES`（默认关，2026-11-04 批次二）已落地，界面改完立刻生效、不用重启。
 
 ## 已退役
 

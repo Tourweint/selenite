@@ -280,12 +280,15 @@ function levelFromHeader(header: string | undefined): ThinkingLevel | null {
 /**
  * 旁路观察（`JEV_ROUTE=advisory`）：不阻塞、不改变任何行为，只把 Jev 的判断写进日志。
  *
- * 为什么先只做旁路：经 socks 代理实测 **850–1150ms**，放到首字路径上等于每轮白等 1 秒；
- * 而它换来的只是"要不要工具、要不要深想"的选择。先攒几天分布（needs_tools 占多少），
- * 再决定要不要真按它切通道、切模型档（那时才值得付这 1 秒）。
+ * 经 socks 代理实测 **850–1150ms**，放到首字路径上等于每轮白等 1 秒，所以这里只旁路记日志。
  *
- * `JEV_ROUTE=gate`（真改路由）**尚未实现**：它要配合快/深双模型档位一起做，
- * 现在就切会变成"没有收益的额外延迟"，所以显式打日志说明并按 advisory 处理。
+ * `JEV_ROUTE=gate` 现只做**思考档判定**（`decideMode`，新会话首条消息前）：
+ * `deep_think` → `high`；`reply_direct` 且置信 ≥ 0.6 → `off`；其余 / 低置信 → 保守 `high`；
+ * 超时（`JEV_TIMEOUT_MS`，默认 1200）判不出来 → 直接 `off`。
+ * **真改路由（快 / 深双模型切模型）未实现，已登记《2026-11-07-扫尾计划》批 7（A18）。**
+ *
+ * gate 下 `observeRoute` 直接 return 是**有意行为**：gate 已在建会话时判过一次，
+ * 绝不重复付这次延迟；并不是"按 advisory 处理"。
  */
 function observeRoute(conversationId: string, messages: ChatMessage[]): void {
 	// 只有 advisory 才每轮旁路判一次；gate 已经在建会话时判过，绝不重复付钱/付延迟
