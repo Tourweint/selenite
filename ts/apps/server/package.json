@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
+    "build": "node scripts/build.mjs",
+    "dist:probe": "tsx scripts/dist-probe.ts",
     "smoke": "tsx scripts/smoke.ts",
     "durable": "tsx scripts/durable-probe.ts",
     "bash-timeout": "tsx scripts/bash-timeout-probe.ts",
@@ -50,6 +52,7 @@
   "devDependencies": {
     "@types/node": "^22.10.0",
     "@types/qrcode": "^1.5.6",
+    "esbuild": "^0.28.2",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0"
   }

@@ -9461,6 +9461,16 @@ async function renderSettings() {
              <button class="ghost is-danger" type="button" id="runtime-stop" hidden>停止</button>
            </div>`,
         )}
+        <div class="divider" id="autostart-divider" hidden></div>
+        <div class="row" id="autostart-row" hidden>
+          <div class="row-main">
+            <div class="row-label">开机自启</div>
+            <div class="row-hint">登录 Windows 时自动启动 Selenite；服务仍由壳拉起，和这里的起停互不影响。</div>
+          </div>
+          <div class="row-control">
+            ${switchMarkup(false, { label: "开机自启", attrs: "data-autostart-switch" })}
+          </div>
+        </div>
       </div>`,
     )}
     ${sectionMarkup(
@@ -10546,11 +10556,12 @@ const RUNTIME_LABELS = {
   unknown: "未知",
 };
 
-/** 壳方法调用：MyGo 的 call 挂在 window.mygo 上，错误以 reject 形式回来。 */
-async function shellCall(method) {
+/** 壳方法调用：MyGo 的 call 挂在 window.mygo 上，错误以 reject 形式回来。
+ *  额外参数按 MyGo 绑定签名顺序透传（例：shellCall("SetOpenAtLogin", true)）。 */
+async function shellCall(method, ...args) {
   const call = window.mygo?.call;
   if (typeof call !== "function") throw new Error("only-desktop");
-  const value = await call.call(window.mygo, `Shell.${method}`);
+  const value = await call.call(window.mygo, `Shell.${method}`, ...args);
   // 有的桥接层会把结果包成 {result} / 字符串 JSON，这里统一拆一层。
   if (typeof value === "string" && value.startsWith("{")) {
     try {
@@ -10657,6 +10668,42 @@ async function initRuntimeCard() {
   // 上次是用户停的：进来就显面板，别先闪一下"服务离线"
   const status = await shellCall("RuntimeStatus").catch(() => null);
   if (status?.state === "stopped") showRuntimeCurtain(true);
+
+  await initAutostartRow();
+}
+
+/* 开机自启（2026-11-08 扫尾批 4b）。
+ * 读不到状态就不渲染：浏览器里没有 Shell，`LIFEDIARY_SHELL_BINDINGS=off` 时整组
+ * 绑定也没挂——两种情况都落在 OpenAtLogin 调用失败上，与"整组同退"口径一致。 */
+async function initAutostartRow() {
+  const row = document.getElementById("autostart-row");
+  const divider = document.getElementById("autostart-divider");
+  const sw = row?.querySelector("[data-autostart-switch]");
+  if (!row || !divider || !sw) return;
+
+  let enabled;
+  try {
+    enabled = Boolean(await shellCall("OpenAtLogin"));
+  } catch {
+    return; // 没有绑定：保持隐藏
+  }
+  row.hidden = false;
+  divider.hidden = false;
+  sw.setAttribute("aria-checked", enabled ? "true" : "false");
+
+  sw.addEventListener("click", async () => {
+    const next = sw.getAttribute("aria-checked") !== "true";
+    sw.disabled = true;
+    try {
+      const now = Boolean(await shellCall("SetOpenAtLogin", next));
+      sw.setAttribute("aria-checked", now ? "true" : "false");
+      toast(now ? "已开启开机自启" : "已关闭开机自启");
+    } catch (error) {
+      alert(`没改成功：${error.message}`);
+    } finally {
+      sw.disabled = false;
+    }
+  });
 }
 
 async function loadServiceInfo() {

@@ -99,7 +99,7 @@ func applyTrayState(s RuntimeState) {
 	case RuntimeStopped, RuntimeFailed:
 		_ = tray.SetIcon(trayIdleIconPNG, false) // 灰色图标
 	}
-	tray.SetToolTip("Selenite — " + trayStateText(s))
+	tray.SetToolTip("Selenite " + version + " — " + trayStateText(s))
 }
 
 func trayStateText(s RuntimeState) string {

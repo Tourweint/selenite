@@ -42,6 +42,11 @@ const (
 	probeInterval  = 250 * time.Millisecond
 )
 
+// version 是构建版本号，由 build.ps1 用
+// `-ldflags "-X main.version=$(git describe --tags --always)"` 注入；
+// `go run .` / 手工 `go build` 时保持 dev。
+var version = "dev"
+
 // win 是唯一的窗口；关窗只是隐藏，所以它可能长期存在但不可见。
 var win *mygo.Window
 
@@ -182,6 +187,26 @@ func (Shell) StartRuntime() (RuntimeStatus, error) {
 // RestartRuntime 先停再起。正在跑的那一轮对话会中断（历史不丢）。
 func (Shell) RestartRuntime() (RuntimeStatus, error) {
 	return runtime.Restart()
+}
+
+// ── 开机自启（2026-11-08 扫尾批 4b）─────────────────────────
+//
+// 自启的是**壳**（HKCU Run，由 MyGo 维护，任务管理器里可被关掉），服务照旧由壳拉起。
+// 这两个方法挂在同一个 Shell 组里：LIFEDIARY_SHELL_BINDINGS=off 时整组不挂，
+// 页面读不到状态就不渲染这个开关。
+
+// OpenAtLogin 读当前是否开机自启。
+func (Shell) OpenAtLogin() bool {
+	return mygo.App.OpenAtLogin()
+}
+
+// SetOpenAtLogin 开/关开机自启，返回落盘后的真实状态。
+// 注册表写失败时返回 error（前端能区分"没改成功"），状态仍按实际值回。
+func (Shell) SetOpenAtLogin(enabled bool) (bool, error) {
+	if err := mygo.App.SetOpenAtLogin(enabled); err != nil {
+		return mygo.App.OpenAtLogin(), err
+	}
+	return mygo.App.OpenAtLogin(), nil
 }
 
 // loadService 把窗口指向服务。业务全走 HTTP，桥接只用来补原生能力
@@ -431,7 +456,7 @@ func main() {
 
 		if t, err := mygo.NewTray(mygo.TrayOptions{
 			Icon:    trayIcon(),
-			ToolTip: "Selenite",
+			ToolTip: "Selenite " + version,
 			Menu: mygo.NewMenu([]*mygo.MenuItem{
 				{Label: "显示/隐藏", Click: func(*mygo.MenuItem, *mygo.Window) { toggleWindow() }},
 				{Label: "重新连接", Click: func(*mygo.MenuItem, *mygo.Window) {

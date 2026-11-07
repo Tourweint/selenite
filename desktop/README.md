@@ -42,16 +42,28 @@ cd ../desktop
 go run .
 ```
 
-编译成 exe：
+## 出 exe
 
 ```powershell
-go build -ldflags="-H windowsgui" -o lifediary-shell.exe .
+cd desktop
+powershell -ExecutionPolicy Bypass -File .\build.ps1
+```
+
+脚本等价于：
+
+```powershell
+go build -ldflags="-H windowsgui -X main.version=$(git describe --tags --always)" -o lifediary-shell.exe .
 ```
 
 `-H windowsgui` 不能省：不加的话它是控制台程序，双击会先弹一个黑框
 （那正是"桌面上冒出个 node 进程"的来源）。加上之后是 GUI 子系统，双击直接出窗口。
 
+版本号注入到托盘 tooltip（`Selenite <version> — 服务状态`）；`go run .` / 手工
+`go build` 没有注入时是 `dev`。图标已由 `rsrc.syso` 嵌入，构建不重生成。
+
 服务不用手动起：壳探不到 `/healthz` 会用隐藏进程把它拉起来，无控制台窗口。
+设置 → 服务 → 运行时那张卡的「开机自启」开关写 HKCU Run（由 MyGo 维护，任务管理器
+的「启动」页可关掉）；它只管壳，服务仍由壳拉起。
 
 服务不在默认端口时：
 
