@@ -10,6 +10,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
+	BasicConsolidator,
+	IMPORTANCE_CEIL,
 	InMemoryStore,
 	MAX_PREFERENCES_PER_TURN,
 	MemoryEngine,
@@ -17,10 +19,14 @@ import {
 	NoopExtractor,
 	PreferenceExtractor,
 	SqliteMemoryStore,
+	decayedImportance,
+	normalizeContent,
 	parsePreferenceJson,
+	reinforcedImportance,
 	renderPreference,
 	scopeKey,
 	type ExtractMessage,
+	type MemoryCandidate,
 	type MemoryRecord,
 	type MemoryScope,
 } from "../src/index.ts";
@@ -571,6 +577,217 @@ try {
 
   suite("InMemoryStore", () => new InMemoryStore());
   suite("SqliteMemoryStore", () => new SqliteMemoryStore(":memory:"));
+}
+
+// ── 12. 确定性巩固升级（2026-11-08 扫尾批 6 §一）──────────────
+// 规则 1 从"原始全等"升级为"规范化全等"：trim / 空白折叠 / 全半角统一 / 句末标点剥除。
+// 边界也要一起测：kind 不同不合并（那是两种用途），措辞不同不合并（那是模型建议的事）。
+{
+	const store = new InMemoryStore();
+	const consolidator = new BasicConsolidator();
+	const at = new Date("2026-11-08T00:00:00.000Z");
+	const candidate = (content: string, kind: MemoryCandidate["kind"] = "fact"): MemoryCandidate => ({
+		kind,
+		scope: "global",
+		content,
+		importance: 0.5,
+		veracity: "stated",
+		source: "user",
+	});
+
+	assert(
+		normalizeContent("  今天 在上海\n吃了小笼包。  ") === "今天 在上海 吃了小笼包",
+		`规范化应折叠空白并剥句末标点，实际 ${JSON.stringify(normalizeContent("  今天 在上海\n吃了小笼包。  "))}`,
+	);
+	assert(normalizeContent("ＯＫ　１２，１３。") === "OK 12,13", "全角应收成半角");
+
+	const first = consolidator.consolidate([candidate("今天在上海吃了小笼包")], store, at);
+	assert(first.added.length === 1, `首条应入库，实际 ${first.added.length}`);
+
+	const variants = [
+		"今天在上海吃了小笼包。",
+		"今天在上海吃了小笼包！",
+		"  今天在上海吃了小笼包  ",
+		"今天在上海吃了小笼包\n",
+	];
+	const merged = consolidator.consolidate(variants.map((text) => candidate(text)), store, at);
+	assert(merged.added.length === 0, `规范化等价的变体不应新增，实际新增 ${merged.added.length}`);
+	assert(merged.reinforced.length === variants.length, "规范化等价的变体都该转为强化");
+	assert(
+		Math.abs(store.get(first.added[0]!.id)!.importance - 0.5 - 0.1 * variants.length) < 1e-9,
+		"每次强化 importance +0.1",
+	);
+
+	// kind 不同 → 不是同一条（偏好 vs 经历，正文撞车也不合并）
+	const otherKind = consolidator.consolidate(
+		[candidate("今天在上海吃了小笼包", "episode")],
+		store,
+		at,
+	);
+	assert(otherKind.added.length === 1, "kind 不同应各自入库");
+
+	// 措辞不同 → 不合并（语义交给模型建议制，D18）
+	const rephrased = consolidator.consolidate(
+		[candidate("我在上海吃了小笼包")],
+		store,
+		at,
+	);
+	assert(rephrased.added.length === 1, "措辞不同不应被确定性规则合并");
+
+	console.log(
+		`✓ 确定性巩固：规范化变体 ${variants.length} 条转强化；kind / 措辞不同不合并`,
+	);
+}
+
+// ── 13. 时间衰减与使用强化（2026-11-08 扫尾批 6 §一）──────────
+// 日期推进用注入时钟（不 sleep）。两个性质最关键：
+//   1. 衰减从 lastRecallAt ?? createdAt 起算，且写回时锚点跟着值走 —— 不重复衰减；
+//   2. 下限 0.1 永不归零、永不删除；daily=0 一行回滚。
+{
+	const DAY = 86_400_000;
+	const base = new Date("2026-01-01T00:00:00.000Z");
+	const later = new Date(base.getTime() + 100 * DAY);
+
+	// 13.1 纯函数：100 天、0.99 → 0.8 * 0.99^100
+	const expected = 0.8 * Math.pow(0.99, 100);
+	const decayed = decayedImportance(0.8, base.toISOString(), later, 0.99);
+	assert(Math.abs(decayed - expected) < 1e-9, `衰减应等于 0.8*0.99^100，实际 ${decayed}`);
+
+	// 13.2 下限 0.1：再怎么久也不归零
+	const floor = decayedImportance(1, base.toISOString(), new Date(base.getTime() + 100_000 * DAY), 0.99);
+	assert(floor === 0.1, `衰减下限应为 0.1，实际 ${floor}`);
+	assert(decayedImportance(0.0001, base.toISOString(), later, 0.5) === 0.1, "初始就低于下限的值也抬到 0.1");
+
+	// 13.3 关闭：daily=0 原值返回（不衰减也不改数）
+	assert(decayedImportance(0.8, base.toISOString(), later, 0) === 0.8, "daily=0 不衰减");
+	assert(decayedImportance(0.8, null, later, 0.99) === 0.8, "锚点解析不了时原值返回");
+
+	// 13.4 使用强化封顶
+	assert(reinforcedImportance(0.5) === 0.55, "命中一次 +0.05");
+	assert(reinforcedImportance(IMPORTANCE_CEIL - 0.01) === IMPORTANCE_CEIL, "强化封顶 10");
+
+	// 13.5 引擎链路：读时衰减 + 写回 + 不重复衰减
+	const store = new InMemoryStore();
+	let clock = base;
+	const engine = new MemoryEngine({ store, decayDaily: 0.99, now: () => clock });
+	const record = engine.remember({
+		kind: "fact",
+		scope: { type: "global" },
+		content: "很久以前说过的一件事",
+		importance: 0.8,
+	});
+
+	clock = later;
+	engine.recall({ text: "很久以前 一件事", scopes: ["global"], limit: 5 });
+	const afterFirst = store.get(record.id)!;
+	assert(
+		Math.abs(afterFirst.importance - (expected + 0.05)) < 1e-9,
+		`100 天后召回应先衰减再 +0.05，实际 ${afterFirst.importance}`,
+	);
+	assert(afterFirst.lastRecalledAt === later.toISOString(), "写回时锚点应推到 now");
+	assert(afterFirst.recallCount === 1, "召回次数照旧 +1");
+
+	// 同一时刻再召回：从新锚点（now）起算，近似只加 0.05，而不是再乘一次 0.99^100
+	engine.recall({ text: "很久以前 一件事", scopes: ["global"], limit: 5 });
+	const afterSecond = store.get(record.id)!;
+	assert(
+		Math.abs(afterSecond.importance - (expected + 0.1)) < 1e-6,
+		`连续召回不应重复衰减，实际 ${afterSecond.importance}`,
+	);
+
+	// 13.6 daily=0（回滚）：只强化、不衰减
+	const rollbackStore = new InMemoryStore();
+	let rollbackClock = base;
+	const rollback = new MemoryEngine({
+		store: rollbackStore,
+		decayDaily: 0,
+		now: () => rollbackClock,
+	});
+	const kept = rollback.remember({
+		kind: "fact",
+		scope: { type: "global" },
+		content: "回滚档下的一条记忆",
+		importance: 0.6,
+	});
+	rollbackClock = later;
+	rollback.recall({ text: "回滚档", scopes: ["global"], limit: 5 });
+	assert(
+		Math.abs(rollbackStore.get(kept.id)!.importance - 0.65) < 1e-9,
+		"daily=0 时只做 +0.05，不衰减",
+	);
+
+	console.log("✓ 时间衰减 / 使用强化：下限 0.1、封顶 10、daily=0 回滚、不重复衰减");
+}
+
+// ── 14. 已存记忆导入（2026-11-08 扫尾批 6 §三）──────────────
+// 只增不改：规范化等价跳过并计数，已有记录一个字段都不动。
+{
+	const store = new InMemoryStore();
+	const at = new Date("2026-11-08T00:00:00.000Z");
+	const engine = new MemoryEngine({ store, now: () => at });
+	const existing = engine.remember({
+		kind: "fact",
+		scope: { type: "global" },
+		content: "我住在上海",
+		importance: 0.7,
+	});
+
+	const result = engine.importItems({
+		scope: { type: "global" },
+		items: [
+			{ text: "我住在上海。" }, // 规范化等价 → 跳过
+			{ text: "我养了一只猫" }, // 新增
+			{ text: "我养了一只猫！" }, // 批内重复 → 跳过
+			{ text: "   " }, // 空文本 → 跳过
+			{ text: "认不出的类型", kind: "nonsense" }, // 坏 kind → 跳过
+			{
+				text: "有一次去了杭州",
+				kind: "episode",
+				createdAt: "2023-05-01T00:00:00.000Z",
+				importance: 0.9,
+			},
+		],
+	});
+
+	assert(result.total === 6, `total 应为 6，实际 ${result.total}`);
+	assert(result.added.length === 2, `应新增 2 条，实际 ${result.added.length}`);
+	assert(result.skipped === 4, `应跳过 4 条，实际 ${result.skipped}`);
+	assert(
+		result.added.every((row) => row.source === "imported" && row.veracity === "imported"),
+		"导入记录 source / veracity 应标记为 imported",
+	);
+	const cat = result.added.find((row) => row.content === "我养了一只猫")!;
+	assert(cat.importance === 0.5, `缺省 importance 应为 0.5，实际 ${cat.importance}`);
+	const trip = result.added.find((row) => row.kind === "episode")!;
+	assert(trip.createdAt === "2023-05-01T00:00:00.000Z", "合法 createdAt 应保留");
+	assert(trip.importance === 0.9, "显式 importance 应保留");
+
+	// 只增不改：已有那行一个字段都没动
+	const untouched = store.get(existing.id)!;
+	assert(untouched.importance === 0.7, "导入不得提升已有记录的 importance");
+	assert(untouched.content === "我住在上海", "导入不得改写已有正文");
+
+	// 未来时间裁到 now（2099 的记忆会把新近度打爆）
+	const future = engine.importItems({
+		scope: { type: "global" },
+		items: [{ text: "来自未来的记忆", createdAt: "2099-01-01T00:00:00.000Z" }],
+	});
+	assert(future.added[0]!.createdAt === at.toISOString(), "未来 createdAt 应裁到 now");
+
+	// 已取代的记录也算"已经存在"：不把用户标过时的内容重新捞回来
+	const stale = engine.remember({
+		kind: "fact",
+		scope: { type: "global" },
+		content: "这条已经被标过时",
+	});
+	engine.supersede(stale.id, null);
+	const resurrect = engine.importItems({
+		scope: { type: "global" },
+		items: [{ text: "这条已经被标过时。" }],
+	});
+	assert(resurrect.added.length === 0 && resurrect.skipped === 1, "被取代的内容不应被导入复活");
+
+	console.log("✓ 导入：只增不改、规范化跳过 / 批内去重 / 坏 kind 跳过 / source=imported");
 }
 
 console.log("✓ 记忆框架自测通过");

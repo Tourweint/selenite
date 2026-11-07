@@ -1,4 +1,5 @@
-import { BasicConsolidator, type ConsolidateResult, type Consolidator } from "./consolidate.ts";
+import { BasicConsolidator, importMemories, type ConsolidateResult, type Consolidator, type ImportEntry, type ImportOutcome } from "./consolidate.ts";
+import { RECALL_BOOST } from "./decay.ts";
 import { HeuristicExtractor, type ExtractMessage, type Extractor } from "./extract.ts";
 import { touchRecall, WeightedRetriever, type Retriever } from "./recall.ts";
 import type { MemoryStore } from "./store.ts";
@@ -36,6 +37,11 @@ export interface MemoryEngineOptions {
 	retriever?: Retriever;
 	/** 召回候选窗口下限（2026-11-04 批次一 A2-S）；不传 = WeightedRetriever 的默认 200。 */
 	candidateFloor?: number;
+	/**
+	 * 日衰减系数（2026-11-08 扫尾批 6）：不传 / `0` = 不衰减（旧行为）。
+	 * 打分用它算"这一刻的 importance"，召回命中时也用它把值衰减到此刻再强化。
+	 */
+	decayDaily?: number;
 	now?: () => Date;
 }
 
@@ -44,14 +50,20 @@ export class MemoryEngine {
 	private readonly extractor: Extractor;
 	private readonly consolidator: Consolidator;
 	private readonly retriever: Retriever;
+	private readonly decayDaily: number;
 	private readonly now: () => Date;
 
 	constructor(options: MemoryEngineOptions) {
 		this.store = options.store;
 		this.extractor = options.extractor ?? new HeuristicExtractor();
 		this.consolidator = options.consolidator ?? new BasicConsolidator();
+		this.decayDaily = options.decayDaily ?? 0;
 		this.retriever =
-			options.retriever ?? new WeightedRetriever({ candidateFloor: options.candidateFloor });
+			options.retriever ??
+			new WeightedRetriever({
+				candidateFloor: options.candidateFloor,
+				decayDaily: this.decayDaily,
+			});
 		this.now = options.now ?? (() => new Date());
 	}
 
@@ -75,6 +87,22 @@ export class MemoryEngine {
 		};
 		this.store.put(record);
 		return record;
+	}
+
+	/**
+	 * 已存记忆导入（2026-11-08 扫尾批 6 §三）。
+	 *
+	 * 与 `ingestTurn` 的区别是**不抽取、不强化**：给什么存什么，
+	 * 规范化等价的跳过并计数，绝不动已有行（"只增不改"）。
+	 * scope 走 `scopeKey` 换算，与其它写入路径同一口径。
+	 */
+	importItems(input: { scope: MemoryScope; items: ImportEntry[]; now?: Date }): ImportOutcome {
+		return importMemories(
+			this.store,
+			scopeKey(input.scope),
+			input.items,
+			input.now ?? this.now(),
+		);
 	}
 
 	/**
@@ -131,7 +159,12 @@ export class MemoryEngine {
 		const at = this.now();
 		const hits = this.retriever.recall(query, this.store, at);
 		for (const hit of hits) {
-			touchRecall(this.store, hit.record, at);
+			// 衰减 + 使用强化同点落地（2026-11-08 扫尾批 6）：写回时锚点也推到 now，
+			// 所以同一个值不会被反复衰减（见 decay.ts 头注）。
+			touchRecall(this.store, hit.record, at, {
+				...(this.decayDaily > 0 ? { decayDaily: this.decayDaily } : {}),
+				reinforce: RECALL_BOOST,
+			});
 		}
 		return hits;
 	}
@@ -218,6 +251,16 @@ export class MemoryEngine {
 	/** 删一条（2026-11-06，设置页）。返回是否真的删掉了。 */
 	forget(id: string): boolean {
 		return this.store.remove(id);
+	}
+
+	/**
+	 * 按 id 取一条（2026-11-08 扫尾批 6 整理建议的"应用"用）。
+	 *
+	 * 与 `list()` 的区别：不受列表窗口 / 条数上限影响，也**包含已被取代的**——
+	 * 应用建议时要能回答"这条是不是已经被别的记录取代了"。
+	 */
+	getRecord(id: string): MemoryRecord | undefined {
+		return this.store.get(id);
 	}
 
 	/**

@@ -9667,11 +9667,12 @@ async function renderSettings() {
   replayPageEnter();
 }
 
-/* ── 记忆设置（2026-11-06）────────────────────────────────
- * 只读列表 + 两个动作：删掉 / 标过时。刻意不做编辑与搜索：
+/* ── 记忆设置（2026-11-06；2026-11-08 扫尾批 6 补整理与导入）──
+ * 只读列表 + 四个动作：删掉 / 标过时 / 整理记忆 / 导入记忆。刻意不做编辑与搜索：
  *   - 编辑记忆等于让它变成第二个人格，删了重说一遍更干净；
  *   - 千级以内先给分组滚动，真上千再加（同设置页不做全局搜索的口径）。
- * 数据形状见 memory-api.ts：GET /api/v1/agent/memory。 */
+ * 数据形状见 memory-api.ts：GET /api/v1/agent/memory。
+ * 「整理记忆」只出建议，人在卡片上逐条点「应用」才动库（D18）；导入只增不改。 */
 
 const MEMORY_KIND_LABEL = {
   preference: "偏好",
@@ -9680,6 +9681,11 @@ const MEMORY_KIND_LABEL = {
   entity: "人事物",
 };
 const MEMORY_KIND_ORDER = ["preference", "fact", "entity", "episode"];
+
+/** 当前查看 / 整理 / 导入的 scope。进页固定回 global，避免下拉与数据不同步。 */
+let memoryScope = "global";
+/** 本轮整理的结果计数（应用 / 忽略），只用于结果行。 */
+let memoryReviewStats = { applied: 0, ignored: 0, total: 0 };
 
 function memorySettingsMarkup() {
   return `${sectionMarkup(
@@ -9696,6 +9702,33 @@ function memorySettingsMarkup() {
         "auto = 有模型时用模型识别偏好，其余仍走规则；rule = 完全规则版（回滚档）",
         `<span class="kv is-mono" id="mem-extract">—</span>`,
       )}
+      <div class="divider"></div>
+      ${rowMarkup(
+        "范围",
+        "总管用 global；每个执事有自己的记忆库，互不可见",
+        `<select class="mem-select" id="mem-scope" aria-label="选择记忆范围">
+          <option value="global">总管（global）</option>
+        </select>`,
+      )}
+      <div class="divider"></div>
+      ${rowMarkup(
+        "整理与导入",
+        "整理只给建议，逐条确认才会标记过时；导入只增不改，重复的跳过",
+        `<div class="mem-tools">
+          <button class="ghost mem-act" type="button" id="mem-consolidate" hidden>整理记忆</button>
+          <button class="ghost mem-act" type="button" id="mem-import" hidden>导入记忆</button>
+          <input type="file" id="mem-import-file" accept=".json,application/json" hidden>
+        </div>`,
+      )}
+      <div class="mem-result" id="mem-import-result" hidden></div>
+    </div>
+    <div class="card" id="mem-proposals-card" hidden>
+      <div class="mem-prop-head">
+        <div class="set-card-title">整理建议<span class="mem-count" id="mem-prop-count"></span></div>
+        <div class="set-hint">这些都是模型给的<b>建议</b>，不会自动改。应用 = 被收编那条标为过时（记录还留着，可追溯）。</div>
+      </div>
+      <div class="mem-props" id="mem-props"></div>
+      <div class="mem-result" id="mem-prop-result" hidden></div>
     </div>
     <div class="card" id="mem-list-card">
       <div class="set-hint" id="mem-empty" hidden>
@@ -9709,27 +9742,91 @@ function memorySettingsMarkup() {
 async function wireMemorySettings() {
   const list = document.getElementById("mem-list");
   const status = document.getElementById("mem-status");
+  if (!list || !status) return;
+
+  memoryScope = "global";
+  memoryReviewStats = { applied: 0, ignored: 0, total: 0 };
+  const scopeSelect = document.getElementById("mem-scope");
+  if (scopeSelect) {
+    await fillMemoryScopes(scopeSelect);
+    scopeSelect.value = memoryScope;
+    scopeSelect.addEventListener("change", () => {
+      memoryScope = scopeSelect.value || "global";
+      clearProposalCards();
+      const importResult = document.getElementById("mem-import-result");
+      if (importResult) importResult.hidden = true;
+      void loadMemoryScope();
+    });
+  }
+
+  const consolidateButton = document.getElementById("mem-consolidate");
+  const importButton = document.getElementById("mem-import");
+  const fileInput = document.getElementById("mem-import-file");
+  consolidateButton?.addEventListener("click", () => void runMemoryConsolidate(consolidateButton));
+  importButton?.addEventListener("click", () => fileInput?.click());
+  fileInput?.addEventListener("change", () => void runMemoryImport(fileInput));
+
+  await loadMemoryScope();
+}
+
+/** 范围的候选：总管 + 未归档的执事。执事接口不可用（COMPANIONS_ENABLED=false）时只有总管。 */
+async function fillMemoryScopes(select) {
+  try {
+    const response = await request("/api/v1/partners", { cache: "no-store" });
+    if (!response.ok) return;
+    const data = await response.json().catch(() => ({}));
+    for (const partner of Array.isArray(data.partners) ? data.partners : []) {
+      if (!partner || !partner.id || partner.id === "chief") continue;
+      if (partner.status === "archived") continue;
+      const option = document.createElement("option");
+      option.value = `partner:${partner.id}`;
+      option.textContent = `${partner.name || "执事"}（执事）`;
+      select.append(option);
+    }
+  } catch (error) {
+    // 读不到执事就只留 global：范围选择不该把整页卡死
+    if (error.message === "forbidden") return;
+  }
+}
+
+async function loadMemoryScope() {
+  const list = document.getElementById("mem-list");
+  const status = document.getElementById("mem-status");
   const extract = document.getElementById("mem-extract");
   const empty = document.getElementById("mem-empty");
   if (!list || !status) return;
 
+  list.innerHTML = `<div class="set-hint">读取中…</div>`;
   try {
-    const response = await request("/api/v1/agent/memory", { cache: "no-store" });
+    const response = await request(
+      `/api/v1/agent/memory?scope=${encodeURIComponent(memoryScope)}&limit=300`,
+      { cache: "no-store" },
+    );
     const data = await response.json().catch(() => ({}));
     if (response.status === 404) {
       status.textContent = "未启用";
-      extract.textContent = "—";
+      if (extract) extract.textContent = "—";
+      toggleMemoryTools(false, false);
       list.innerHTML = `<div class="set-hint">记忆未启用（服务端 MEMORY_ENABLED=false）。</div>`;
       return;
     }
     if (!response.ok) throw new Error(String(response.status));
 
+    // 能力位（2026-11-08）：开关关着时按钮不渲染（端点也会 404）
+    toggleMemoryTools(data.canConsolidate === true, data.canImport === true);
+
     const items = Array.isArray(data.items) ? data.items : [];
     status.textContent = items.length > 0 ? `${items.length} 条` : "空";
-    extract.textContent = data.extract === "llm" ? "模型 + 规则" : "规则";
+    if (extract) extract.textContent = data.extract === "llm" ? "模型 + 规则" : "规则";
     if (items.length === 0) {
       list.replaceChildren();
-      if (empty) empty.hidden = false;
+      if (empty) {
+        empty.hidden = false;
+        empty.textContent =
+          memoryScope === "global"
+            ? "还没有记忆。聊几次之后，偏好会自动出现在这里；也可以直接对助手说「记住：……」"
+            : "这个执事还没有记忆。和它聊几次，或从这页导入。";
+      }
       return;
     }
     if (empty) empty.hidden = true;
@@ -9738,6 +9835,210 @@ async function wireMemorySettings() {
     if (error.message === "forbidden") return;
     status.textContent = "读取失败";
     list.innerHTML = `<div class="set-hint is-error">读不到记忆：${esc(error.message)}</div>`;
+  }
+}
+
+function toggleMemoryTools(consolidate, importable) {
+  const consolidateButton = document.getElementById("mem-consolidate");
+  const importButton = document.getElementById("mem-import");
+  if (consolidateButton) consolidateButton.hidden = !consolidate;
+  if (importButton) importButton.hidden = !importable;
+}
+
+function clearProposalCards() {
+  const card = document.getElementById("mem-proposals-card");
+  const box = document.getElementById("mem-props");
+  const line = document.getElementById("mem-prop-result");
+  const count = document.getElementById("mem-prop-count");
+  memoryReviewStats = { applied: 0, ignored: 0, total: 0 };
+  if (card) card.hidden = true;
+  if (box) box.replaceChildren();
+  if (line) { line.hidden = true; line.textContent = ""; }
+  if (count) count.textContent = "";
+}
+
+/**
+ * 「整理记忆」：一次模型调用只产出建议。
+ * 一条建议都不自动执行 —— 人在卡片上逐条点「应用」才走 supersede（D18）。
+ */
+async function runMemoryConsolidate(button) {
+  const card = document.getElementById("mem-proposals-card");
+  const box = document.getElementById("mem-props");
+  if (!card || !box) return;
+
+  clearProposalCards();
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = "整理中…";
+  try {
+    const response = await request("/api/v1/agent/memory/consolidate/review", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scope: memoryScope }),
+    });
+    if (response.status === 404) {
+      toast("整理记忆未启用（服务端 MEMORY_CONSOLIDATE_LLM=false）");
+      button.hidden = true;
+      return;
+    }
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.message || String(response.status));
+
+    const proposals = Array.isArray(data.proposals) ? data.proposals : [];
+    card.hidden = false;
+    memoryReviewStats = { applied: 0, ignored: 0, total: proposals.length };
+    const count = document.getElementById("mem-prop-count");
+    if (count) count.textContent = proposals.length > 0 ? `${proposals.length} 条` : "";
+    if (proposals.length === 0) {
+      box.innerHTML = `<div class="set-hint">没有发现可整理的重复记忆。</div>`;
+      return;
+    }
+    box.innerHTML = proposals.map(memoryProposalMarkup).join("");
+    wireMemoryProposalActions(box);
+  } catch (error) {
+    if (error.message === "forbidden") return;
+    card.hidden = false;
+    box.innerHTML = `<div class="set-hint is-error">整理失败：${esc(error.message)}</div>`;
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText;
+  }
+}
+
+function memoryProposalMarkup(item) {
+  const keep = String(item.keep?.content || item.keepId || "");
+  const drop = String(item.drop?.content || item.dropId || "");
+  const reason = String(item.reason || "");
+  return `<div class="mem-prop" data-keep="${esc(item.keepId)}" data-drop="${esc(item.dropId)}">
+    <div class="mem-prop-line"><span class="mem-prop-tag is-keep">保留</span><span class="mem-prop-text">${esc(keep)}</span></div>
+    <div class="mem-prop-line"><span class="mem-prop-tag is-drop">收编</span><span class="mem-prop-text">${esc(drop)}</span></div>
+    ${reason ? `<div class="mem-prop-reason">${esc(reason)}</div>` : ""}
+    <div class="mem-prop-actions">
+      <button class="ghost mem-act" type="button" data-prop-apply>应用</button>
+      <button class="ghost mem-act" type="button" data-prop-ignore>忽略</button>
+    </div>
+  </div>`;
+}
+
+function wireMemoryProposalActions(box) {
+  for (const card of box.querySelectorAll(".mem-prop")) {
+    const apply = card.querySelector("[data-prop-apply]");
+    const ignore = card.querySelector("[data-prop-ignore]");
+    apply?.addEventListener("click", async () => {
+      const keepId = card.dataset.keep;
+      const dropId = card.dataset.drop;
+      if (!keepId || !dropId) return;
+      if (apply.disabled) return;
+      apply.disabled = true;
+      if (ignore) ignore.disabled = true;
+      try {
+        const response = await request("/api/v1/agent/memory/consolidate/apply", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ scope: memoryScope, keepId, dropId }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.message || String(response.status));
+        card.classList.add("is-done");
+        const actions = card.querySelector(".mem-prop-actions");
+        if (actions) {
+          actions.innerHTML = `<span class="mem-prop-status">已应用${
+            data.alreadyApplied ? "（之前已应用过）" : ""
+          }</span>`;
+        }
+        memoryReviewStats.applied += 1;
+        updateMemoryProposalResult();
+        // 被收编的那条已经从召回里下线，列表跟着刷新
+        await loadMemoryScope();
+      } catch (error) {
+        if (error.message === "forbidden") return;
+        apply.disabled = false;
+        if (ignore) ignore.disabled = false;
+        toast(`应用失败：${error.message}`);
+      }
+    });
+    ignore?.addEventListener("click", () => {
+      card.remove();
+      memoryReviewStats.ignored += 1;
+      updateMemoryProposalResult();
+    });
+  }
+}
+
+/** 结果行："已应用 N / 忽略 M"；一条都没处理时不占位。 */
+function updateMemoryProposalResult() {
+  const line = document.getElementById("mem-prop-result");
+  if (!line) return;
+  const { applied, ignored, total } = memoryReviewStats;
+  if (applied + ignored === 0) {
+    line.hidden = true;
+    line.textContent = "";
+    return;
+  }
+  line.hidden = false;
+  line.textContent = `本次建议 ${total} 条：已应用 ${applied} / 忽略 ${ignored}`;
+}
+
+/**
+ * 「导入记忆」：前端只解析 + 计数（不做内容预检），确认后整份交给服务端校验。
+ * 文件格式（接口文档 §2.15）：裸数组，或 `{items:[…]}`，条目 `{text, kind?, createdAt?, importance?}`。
+ */
+async function runMemoryImport(input) {
+  const file = input?.files?.[0];
+  if (input) input.value = ""; // 允许连续选同一个文件
+  if (!file) return;
+
+  let parsed;
+  try {
+    parsed = JSON.parse(await file.text());
+  } catch {
+    toast("这个文件不是合法 JSON");
+    return;
+  }
+  const items = Array.isArray(parsed)
+    ? parsed
+    : Array.isArray(parsed?.items)
+      ? parsed.items
+      : null;
+  if (!items) {
+    toast('文件格式不对：需要一个数组，或 {"items": [...]}');
+    return;
+  }
+  if (items.length === 0) {
+    toast("这个文件里没有记忆条目");
+    return;
+  }
+
+  const select = document.getElementById("mem-scope");
+  const label = select?.selectedOptions?.[0]?.textContent || memoryScope;
+  if (!window.confirm(`把 ${items.length} 条记忆导入「${label}」？只增不改，重复的会跳过。`)) return;
+
+  const button = document.getElementById("mem-import");
+  const line = document.getElementById("mem-import-result");
+  if (button) button.disabled = true;
+  try {
+    const response = await request("/api/v1/agent/memory/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scope: memoryScope, items }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (response.status === 404) {
+      toast("导入未启用（服务端 MEMORY_IMPORT=false）");
+      if (button) button.hidden = true;
+      return;
+    }
+    if (!response.ok) throw new Error(data.message || String(response.status));
+    if (line) {
+      line.hidden = false;
+      line.textContent = `新增 ${data.added} 条 / 跳过 ${data.skipped} 条（共 ${data.total} 条）`;
+    }
+    await loadMemoryScope();
+  } catch (error) {
+    if (error.message === "forbidden") return;
+    toast(`导入失败：${error.message}`);
+  } finally {
+    if (button) button.disabled = false;
   }
 }
 

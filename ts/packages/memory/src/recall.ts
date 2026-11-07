@@ -1,3 +1,4 @@
+import { decayedImportance, RECALL_BOOST, reinforcedImportance } from "./decay.ts";
 import type { MemoryRecord, RecallHit, RecallQuery } from "./types.ts";
 import type { MemoryStore } from "./store.ts";
 
@@ -33,13 +34,20 @@ const DEFAULT_CANDIDATE_FLOOR = 200;
 export interface WeightedRetrieverOptions {
 	/** 候选窗口下限；50 = A2-S 之前的旧行为。 */
 	candidateFloor?: number;
+	/**
+	 * 日衰减系数（2026-11-08 扫尾批 6）：打分时把 importance 按距锚点的天数衰减。
+	 * 不传 / `0` = 不衰减（旧行为）。锚点 = `lastRecallAt ?? createdAt`。
+	 */
+	decayDaily?: number;
 }
 
 export class WeightedRetriever implements Retriever {
 	private readonly candidateFloor: number;
+	private readonly decayDaily: number;
 
 	constructor(options: WeightedRetrieverOptions = {}) {
 		this.candidateFloor = options.candidateFloor ?? DEFAULT_CANDIDATE_FLOOR;
+		this.decayDaily = options.decayDaily ?? 0;
 	}
 
 	recall(query: RecallQuery, store: MemoryStore, now: Date = new Date()): RecallHit[] {
@@ -73,10 +81,21 @@ export class WeightedRetriever implements Retriever {
 			const recency = recencyScore(record.createdAt, now);
 			const keyword = keywordScore(record.content, keywords);
 			const timesRecalled = Math.min(1, record.recallCount / 10);
+			// 衰减后的重要性参与打分（2026-11-08）：久未想起的旧事自然排后。
+			// 打分按 0..1 归一一档——重要性可以涨过 1（使用强化），但那一维最多记满分。
+			const importance = Math.min(
+				1,
+				decayedImportance(
+					record.importance,
+					record.lastRecalledAt ?? record.createdAt,
+					now,
+					this.decayDaily,
+				),
+			);
 
 			// 权重是拍的，改了也不算错 —— 但要有理由地改，别随手调。
 			const score =
-				record.importance * 0.45 + recency * 0.3 + keyword * 0.2 + timesRecalled * 0.05;
+				importance * 0.45 + recency * 0.3 + keyword * 0.2 + timesRecalled * 0.05;
 
 			hits.push({ record, score });
 		}
@@ -120,9 +139,38 @@ function keywordScore(content: string, keywords: string[]): number {
 	return Math.min(1, matched / Math.max(3, keywords.length * 0.2));
 }
 
-export function touchRecall(store: MemoryStore, record: MemoryRecord, now: Date): void {
+export interface TouchOptions {
+	/** 日衰减系数；`0` / 不传 = 不衰减。 */
+	decayDaily?: number;
+	/** 每次命中加多少重要性；`0` = 只记召回次数（2026-11-08 之前的旧行为）。 */
+	reinforce?: number;
+}
+
+/**
+ * 召回命中后的写回（2026-11-08 扫尾批 6 扩展）。
+ *
+ * 三件事一次做完，顺序不能换：
+ *   1. 先把 importance 衰减到**此刻**（从 `lastRecallAt ?? createdAt` 起算）；
+ *   2. 再按命中加一次强化（默认 +0.05，封顶 10）；
+ *   3. 最后把 `lastRecalledAt` 推到 now —— 锚点跟着值一起走，下一次衰减从新锚点起算，
+ *      不会把已经衰减过的值重复乘。
+ */
+export function touchRecall(
+	store: MemoryStore,
+	record: MemoryRecord,
+	now: Date,
+	options: TouchOptions = {},
+): void {
+	const decayed = decayedImportance(
+		record.importance,
+		record.lastRecalledAt ?? record.createdAt,
+		now,
+		options.decayDaily ?? 0,
+	);
+	const importance = reinforcedImportance(decayed, options.reinforce ?? RECALL_BOOST);
 	store.patch(record.id, {
 		recallCount: record.recallCount + 1,
 		lastRecalledAt: now.toISOString(),
+		importance,
 	});
 }

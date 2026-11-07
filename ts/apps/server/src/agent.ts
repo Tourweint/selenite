@@ -422,6 +422,18 @@ function memoryFtsEnabled(): boolean {
 	return (process.env.MEMORY_RETRIEVER ?? "").trim().toLowerCase() !== "js";
 }
 
+/**
+ * 记忆时间衰减（2026-11-08 扫尾批 6 §一）：日衰减系数，默认 0.99；`0` = 关（回滚）。
+ * 空串 / 非数字 / 越界一律回落默认值——衰减是后台机制，不该被一个坏 env 卡死。
+ */
+function memoryDecayDaily(): number {
+	const raw = (process.env.MEMORY_DECAY_DAILY ?? "").trim();
+	if (!raw) return 0.99;
+	const value = Number(raw);
+	if (!Number.isFinite(value) || value < 0 || value > 1) return 0.99;
+	return value;
+}
+
 export const memoryEngine: MemoryEngine | null = (() => {
 	if (process.env.MEMORY_ENABLED === "false") return null;
 	try {
@@ -430,6 +442,7 @@ export const memoryEngine: MemoryEngine | null = (() => {
 			dbPath: process.env.MEMORY_DB_PATH,
 			candidateFloor: memoryCandidateFloor(),
 			fts: memoryFtsEnabled(),
+			decayDaily: memoryDecayDaily(),
 			// 2026-11-06：不传 = 保持 memory 包的默认（HeuristicExtractor），
 			// 即 `MEMORY_EXTRACT=rule` 与"模型不可用"这两种情况**逐字节回到旧行为**。
 			...(extractor ? { extractor } : {}),

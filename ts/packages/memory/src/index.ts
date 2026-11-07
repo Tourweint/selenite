@@ -2,6 +2,7 @@ export * from "./types.ts";
 export * from "./store.ts";
 export * from "./extract.ts";
 export * from "./consolidate.ts";
+export * from "./decay.ts";
 export * from "./recall.ts";
 export * from "./engine.ts";
 
@@ -27,6 +28,8 @@ export function createMemoryEngine(options: {
 	 * 装配策略（用哪个模型、回滚开关）在 server 的 `memory-extract.ts`，这一层只收实现。
 	 */
 	extractor?: Extractor;
+	/** 日衰减系数（2026-11-08 扫尾批 6）；不传 = 不衰减（旧行为）。 */
+	decayDaily?: number;
 }): MemoryEngine | null {
 	if (options.enabled === false) return null;
 
@@ -37,5 +40,6 @@ export function createMemoryEngine(options: {
 		store: new SqliteMemoryStore(dbPath, { fts: options.fts }),
 		...(options.candidateFloor === undefined ? {} : { candidateFloor: options.candidateFloor }),
 		...(options.extractor === undefined ? {} : { extractor: options.extractor }),
+		...(options.decayDaily === undefined ? {} : { decayDaily: options.decayDaily }),
 	});
 }
