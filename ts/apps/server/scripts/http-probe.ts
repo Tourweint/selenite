@@ -1519,6 +1519,258 @@ try {
 		String(dmHistory.messages?.length),
 	);
 
+	// ── 20. 附件（2026-11-08 扫尾批 4a）────────────────────────
+	// 图片 base64 直进 durable（不做 blob 存储）；这条链路要验的是：受理 → 落库 →
+	// 回读带 images/messageId → faux 正常回，以及两条限制与一个回滚开关。
+	const TINY_PNG =
+		"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+	const readDetailed = async (id: string) =>
+		(
+			(await (await fetch(`${BASE}/api/v1/agent/chat/${id}/messages?limit=200`)).json()) as {
+				messages: {
+					role: string;
+					text: string;
+					id?: string;
+					images?: { mimeType: string; data: string }[];
+				}[];
+			}
+		).messages;
+
+	console.log("\n· 20. 附件：带一条 base64 小图的消息（全链路）");
+	const withImage = await chat({
+		messages: [
+			{
+				role: "user",
+				content: [
+					{ type: "text", text: "看看这张图" },
+					{ type: "image", mimeType: "image/png", data: TINY_PNG },
+				],
+			},
+		],
+	});
+	const imageConv = withImage.result.conversationId ?? "";
+	check(withImage.status === 200, "带图消息被受理（200）", String(withImage.status));
+	check(withImage.result.done, "faux 正常收尾");
+	check(Boolean(imageConv), "下发 conversationId", imageConv);
+	const imageHistory = await readDetailed(imageConv);
+	const imageUser = imageHistory.find((message) => message.role === "user");
+	check(
+		imageUser?.images?.[0]?.data === TINY_PNG && imageUser?.images?.[0]?.mimeType === "image/png",
+		"回读带 images（原样 base64 + mimeType）",
+		`${imageUser?.images?.length ?? 0} 张`,
+	);
+	check(imageUser?.text === "看看这张图", "文本与图片分开落，text 仍可读");
+	check(
+		/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(imageUser?.id ?? ""),
+		"用户消息带 uuid 形状的 messageId（不是内部自增 id）",
+		imageUser?.id ?? "(无)",
+	);
+
+	const tooMany = await chat({
+		messages: [
+			{
+				role: "user",
+				content: [
+					{ type: "text", text: "五张" },
+					...Array.from({ length: 5 }, () => ({
+						type: "image" as const,
+						mimeType: "image/png",
+						data: TINY_PNG,
+					})),
+				],
+			},
+		],
+	});
+	check(tooMany.status === 400, "超过 4 张图 → 400", String(tooMany.status));
+
+	const hugeImage = "A".repeat(Math.ceil((8 * 1024 * 1024 + 1) / 3) * 4);
+	const tooBig = await chat({
+		messages: [
+			{
+				role: "user",
+				content: [
+					{ type: "text", text: "一张大图" },
+					{ type: "image", mimeType: "image/png", data: hugeImage },
+				],
+			},
+		],
+	});
+	check(tooBig.status === 400, "单图解码后超 8MB → 400", String(tooBig.status));
+
+	// ── 21. 编辑重发（2026-11-08 扫尾批 4a）──────────────────
+	console.log("\n· 21. 编辑重发：fork 出新会话，老会话完好");
+	const editSeed = await chat({ messages: [{ role: "user", content: "第一句话" }] });
+	const editConv = editSeed.result.conversationId ?? "";
+	await chat({ conversationId: editConv, messages: [{ role: "user", content: "第二句话" }] });
+	const beforeEdit = await readDetailed(editConv);
+	check(beforeEdit.length >= 4, "老会话有两条问答", `${beforeEdit.length} 条`);
+	const secondUser = [...beforeEdit].reverse().find((message) => message.role === "user");
+	check(Boolean(secondUser?.id), "最后一条 user 有 messageId", secondUser?.id ?? "(无)");
+
+	const editResponse = await fetch(`${BASE}/api/v1/agent/chat/${editConv}/edit`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ messageId: secondUser?.id, text: "改过的第二句" }),
+	});
+	const edited = (await editResponse.json().catch(() => ({}))) as { conversationId?: string };
+	check(editResponse.status === 202, "受理即回 202", String(editResponse.status));
+	check(
+		Boolean(edited.conversationId) && edited.conversationId !== editConv,
+		"返回的是**新** conversationId",
+		`${edited.conversationId} ≠ ${editConv}`,
+	);
+
+	/** 后台轮询直到新会话里出现第 expectAnswers 条回答（编辑端点是 202 + 后台跑） */
+	const waitAnswers = async (id: string, expectAnswers: number, timeoutMs = 8000) => {
+		const deadline = Date.now() + timeoutMs;
+		let history = await readDetailed(id);
+		while (Date.now() < deadline) {
+			if (history.filter((message) => message.role === "assistant").length >= expectAnswers) break;
+			await sleep(150);
+			history = await readDetailed(id);
+		}
+		return history;
+	};
+	const forkedHistory = edited.conversationId
+		? await waitAnswers(edited.conversationId, 2)
+		: [];
+	const forkedUsers = forkedHistory.filter((message) => message.role === "user");
+	check(
+		forkedHistory.length >= 4 && forkedHistory[0]?.text === "第一句话",
+		"分叉点之前的历史完整（第一条 user 仍是原文）",
+		forkedHistory.map((message) => message.role).join(","),
+	);
+	check(
+		forkedUsers.at(-1)?.text === "改过的第二句",
+		"新会话最后一条 user 是新文本",
+		forkedUsers.at(-1)?.text ?? "(无)",
+	);
+	check(
+		forkedHistory.filter((message) => message.role === "assistant").length >= 2,
+		"新会话跑完了一轮（faux 正常回）",
+		`${forkedHistory.filter((message) => message.role === "assistant").length} 条回答`,
+	);
+	const oldAfter = await readDetailed(editConv);
+	check(
+		oldAfter.length === beforeEdit.length && oldAfter[3]?.text === beforeEdit[3]?.text,
+		"老会话原样保留（条数/内容都没被改）",
+		`${beforeEdit.length} → ${oldAfter.length} 条`,
+	);
+
+	// 编辑第一条：没有"之前"可分叉 → 走同形态的新会话，首条 user 就是新文本
+	const firstUser = beforeEdit.find((message) => message.role === "user");
+	const editFirst = await fetch(`${BASE}/api/v1/agent/chat/${editConv}/edit`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ messageId: firstUser?.id, text: "换一个开头" }),
+	});
+	const editedFirst = (await editFirst.json().catch(() => ({}))) as { conversationId?: string };
+	check(editFirst.status === 202, "编辑第一条也受理", String(editFirst.status));
+	const firstHistory = editedFirst.conversationId
+		? await waitAnswers(editedFirst.conversationId, 1)
+		: [];
+	check(
+		firstHistory[0]?.role === "user" && firstHistory[0]?.text === "换一个开头",
+		"新会话首条 user 就是新文本（旧历史不带过来）",
+		firstHistory[0]?.text ?? "(无)",
+	);
+
+	// 不属于本会话 / 不是 user：400
+	const crossEdit = await fetch(`${BASE}/api/v1/agent/chat/${editConv}/edit`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ messageId: "00000000-0000-4000-8000-000000000000", text: "乱指一条" }),
+	});
+	check(crossEdit.status === 400, "messageId 不属于本会话 → 400", String(crossEdit.status));
+
+	// ── 22. 编辑的忙时口径 + 两个回滚开关 ─────────────────────
+	console.log("\n· 22. 会话在跑时编辑 → 409；两个回滚开关");
+	server.kill();
+	await sleep(800);
+	// 换一个"永远在调工具"的 faux，并把回合上限拉高：这一轮会跑得足够久，
+	// 以便在它跑着的时候发编辑请求（409 的口径来自 pi.live.run，不是自记的布尔）。
+	// 会话必须在这个进程里新建：旧会话的模型绑定跨进程重启后不一定还解析得到，
+	// 那不是本项要验的东西。
+	server = startServer({
+		LLM_FAUX_TOOL: "recall",
+		AGENT_MAX_TURNS: "80",
+		AGENT_SSE_SEQ_DB_PATH: SEQ_DB,
+	});
+	await waitForReady();
+
+	// 直接读 SSE 的第一段拿 conversationId（start 帧在提交之前就发出去了）
+	const busyResponse = await fetch(`${BASE}/api/v1/agent/chat`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ messages: [{ role: "user", content: "跑一会儿" }] }),
+	});
+	const busyReader = busyResponse.body?.getReader();
+	let busyConv = "";
+	let busyBuffer = "";
+	while (busyReader && !busyConv) {
+		const chunk = await busyReader.read();
+		if (chunk.done) break;
+		busyBuffer += new TextDecoder().decode(chunk.value);
+		busyConv = /"conversationId":"([^"]+)"/.exec(busyBuffer)?.[1] ?? "";
+	}
+	check(Boolean(busyConv), "长轮次会话已开跑", busyConv);
+
+	let busyUser: { id?: string } | undefined;
+	for (let attempt = 0; attempt < 40 && !busyUser?.id; attempt += 1) {
+		await sleep(50);
+		const history = await readDetailed(busyConv);
+		busyUser = [...history].reverse().find((message) => message.text === "跑一会儿");
+	}
+	const busyEdit = await fetch(`${BASE}/api/v1/agent/chat/${busyConv}/edit`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ messageId: busyUser?.id, text: "趁跑着改" }),
+	});
+	check(busyEdit.status === 409, "会话在跑时编辑 → 409", String(busyEdit.status));
+	await fetch(`${BASE}/api/v1/agent/chat/${busyConv}/stop`, { method: "POST" }).catch(
+		() => undefined,
+	);
+	await busyReader?.cancel().catch(() => undefined);
+
+	// 两个开关同一次重启里验完：edit → 404；parts → 400；纯字符串照常
+	server.kill();
+	await sleep(800);
+	server = startServer({
+		AGENT_ATTACHMENTS: "false",
+		AGENT_EDIT_RESEND: "false",
+		AGENT_SSE_SEQ_DB_PATH: SEQ_DB,
+	});
+	await waitForReady();
+
+	const policyOff = (await (await fetch(`${BASE}/api/v1/agent/policy`)).json()) as {
+		attachments?: boolean;
+		editResend?: boolean;
+	};
+	check(
+		policyOff.attachments === false && policyOff.editResend === false,
+		"policy 投影如实给出两个开关（前端据此不渲染入口）",
+		JSON.stringify(policyOff),
+	);
+
+	const partsOff = await chat({
+		messages: [
+			{
+				role: "user",
+				content: [{ type: "image", mimeType: "image/png", data: TINY_PNG }],
+			},
+		],
+	});
+	check(partsOff.status === 400, "AGENT_ATTACHMENTS=false：分段请求 → 400", String(partsOff.status));
+	const stringOn = await chat({ messages: [{ role: "user", content: "纯文字照常" }] });
+	check(stringOn.status === 200, "同一开关下纯字符串照常（200）", String(stringOn.status));
+
+	const editOff = await fetch(`${BASE}/api/v1/agent/chat/${editConv}/edit`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ messageId: secondUser?.id, text: "关着还想改" }),
+	});
+	check(editOff.status === 404, "AGENT_EDIT_RESEND=false：端点 404", String(editOff.status));
+
 } finally {
 	server.kill();
 	await sleep(300);

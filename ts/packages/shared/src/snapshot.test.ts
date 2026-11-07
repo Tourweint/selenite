@@ -27,6 +27,10 @@ interface Def {
 	shape?: () => Record<string, unknown>;
 	type?: unknown;
 	innerType?: unknown;
+	/** ZodUnion / ZodDiscriminatedUnion 的成员 */
+	options?: readonly unknown[];
+	/** ZodLiteral 的字面值 */
+	value?: unknown;
 }
 
 function shapeOf(schema: unknown): unknown {
@@ -47,12 +51,17 @@ function shapeOf(schema: unknown): unknown {
 			return { kind: "number" };
 		case "ZodBoolean":
 			return { kind: "boolean" };
+		case "ZodLiteral":
+			return { kind: "literal", value: def.value };
 		case "ZodArray":
 			return { kind: "array", of: shapeOf(def.type) };
 		case "ZodOptional":
 			return { kind: "optional", of: shapeOf(def.innerType) };
 		case "ZodNullable":
 			return { kind: "nullable", of: shapeOf(def.innerType) };
+		case "ZodUnion":
+		case "ZodDiscriminatedUnion":
+			return { kind: "union", of: (def.options ?? []).map(shapeOf) };
 		default:
 			// 未知类型以原始 typeName 顶上来：将来 schema 换了种类，快照立刻显形。
 			return { kind: def.typeName ?? "unknown" };
@@ -97,6 +106,58 @@ const STEP_SHAPE = {
 	},
 };
 
+/** 上行内容分段（2026-11-08 扫尾批 4a）：text | image，形状对齐 pi-ai。 */
+const PART_SHAPE = {
+	kind: "union",
+	of: [
+		{
+			kind: "object",
+			fields: {
+				text: { kind: "string" },
+				type: { kind: "literal", value: "text" },
+			},
+		},
+		{
+			kind: "object",
+			fields: {
+				data: { kind: "string" },
+				mimeType: { kind: "string" },
+				type: { kind: "literal", value: "image" },
+			},
+		},
+	],
+};
+
+/** content 的 union：老客户端纯字符串 / 新客户端分段数组。 */
+const CONTENT_SHAPE = {
+	kind: "union",
+	of: [{ kind: "string" }, { kind: "array", of: PART_SHAPE }],
+};
+
+/** 回读消息形状被 TranscriptMessage / ChatTranscript.messages 两处引用。 */
+const MESSAGE_SHAPE = {
+	kind: "object",
+	fields: {
+		at: { kind: "number" },
+		// 2026-11-08 4a：可寻址 messageId（uuid 形状，不是内部条目 id）+ 用户消息图片
+		id: { kind: "optional", of: { kind: "string" } },
+		images: {
+			kind: "optional",
+			of: {
+				kind: "array",
+				of: {
+					kind: "object",
+					fields: { data: { kind: "string" }, mimeType: { kind: "string" } },
+				},
+			},
+		},
+		role: { kind: "enum", values: ["user", "assistant"] },
+		steps: { kind: "optional", of: { kind: "array", of: STEP_SHAPE } },
+		text: { kind: "string" },
+		workMs: { kind: "optional", of: { kind: "number" } },
+	},
+};
+
 /** 内联快照：形状改动在 diff 里一目了然，不另起 .snap 文件。 */
 const EXPECTED: Record<string, unknown> = {
 	TranscriptStepSchema: STEP_SHAPE,
@@ -105,37 +166,16 @@ const EXPECTED: Record<string, unknown> = {
 	ChatMessageSchema: {
 		kind: "object",
 		fields: {
-			content: { kind: "string" },
+			content: CONTENT_SHAPE,
 			role: { kind: "enum", values: ["system", "user", "assistant"] },
 		},
 	},
-	TranscriptMessageSchema: {
-		kind: "object",
-		fields: {
-			at: { kind: "number" },
-			role: { kind: "enum", values: ["user", "assistant"] },
-			steps: { kind: "optional", of: { kind: "array", of: STEP_SHAPE } },
-			text: { kind: "string" },
-			workMs: { kind: "optional", of: { kind: "number" } },
-		},
-	},
+	TranscriptMessageSchema: MESSAGE_SHAPE,
 	ChatTranscriptSchema: {
 		kind: "object",
 		fields: {
 			conversationId: { kind: "string" },
-			messages: {
-				kind: "array",
-				of: {
-					kind: "object",
-					fields: {
-						at: { kind: "number" },
-						role: { kind: "enum", values: ["user", "assistant"] },
-						steps: { kind: "optional", of: { kind: "array", of: STEP_SHAPE } },
-						text: { kind: "string" },
-						workMs: { kind: "optional", of: { kind: "number" } },
-					},
-				},
-			},
+			messages: { kind: "array", of: MESSAGE_SHAPE },
 		},
 	},
 	ChatRequestSchema: {
@@ -149,7 +189,7 @@ const EXPECTED: Record<string, unknown> = {
 				of: {
 					kind: "object",
 					fields: {
-						content: { kind: "string" },
+						content: CONTENT_SHAPE,
 						role: { kind: "enum", values: ["system", "user", "assistant"] },
 					},
 				},

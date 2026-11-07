@@ -1,4 +1,5 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Context } from "@earendil-works/chord";
@@ -20,6 +21,7 @@ import {
 	type LiveState,
 	type SettledSubmissionRecord,
 	type ToolHookCall,
+	type Tx,
 } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
@@ -54,6 +56,7 @@ import {
 } from "./partners.ts";
 import { currentProjectEnabled, projectsStore, workspaceRootReal } from "./projects.ts";
 import { chatModelRef, clampThinkingLevel, currentModels, currentThinkingLevels, isFaux, levelFromModelId, readLlmConfig } from "./provider.ts";
+import type { OutgoingPart } from "./attachments.ts";
 import {
 	bashTimeoutSeconds,
 	buildHarnessSettings,
@@ -1693,6 +1696,88 @@ function chatKindOfInternal(
 	return byInternal[String(internalId)] === "worker" ? "worker" : "chief";
 }
 
+/**
+ * 编辑重发的前一半：校验 + 分叉（2026-11-08 扫尾批 4a，方案 §二）。
+ *
+ * 语义决策（照方案）：内核 append-only、没有 truncate/edit，所以"改一句重说" =
+ * **fork 到那条消息之前 + 在新会话里提交新文本**。老会话完整保留（列表里会多一条
+ * 分叉前的旧会话，是方案登记的已知边界）。
+ *
+ * fork 的 `at` 是**包含**该条目的（durable 的父链上界是 `id <= at`），所以这里传的是
+ * 目标条目的**前一条**；编辑会话的第一条时没有"之前"可分叉，按同样的落地形态
+ * （同模型、同种类）开一个空会话。
+ *
+ * 这里只分叉、不提交：提交由路由复用 `chatStream` 主链路（SSE/用量/记忆一套行为），
+ * 这样 onSettled 的记忆抽取不会出现两份实现。
+ */
+export async function forkForEdit(
+	chat: ResolvedChat,
+	messageId: string,
+): Promise<
+	| { ok: true; chat: ResolvedChat }
+	| { ok: false; status: 400 | 409; error: string; message: string }
+> {
+	// 会话在跑：与插话同口径（409），不排队——编辑的语义是"替换那一句"，排队会分叉两次
+	if (await conversationIsBusy(chat.conversation)) {
+		return {
+			ok: false,
+			status: 409,
+			error: "conversation_busy",
+			message: "这一轮还在跑，等它结束再改",
+		};
+	}
+
+	const view = await chat.conversation.context(CTX);
+	const index = view.entries.findIndex(
+		(entry) =>
+			entry.kind === "pi.user" &&
+			messageIdOf(chat.externalId, Number(entry.id)) === messageId,
+	);
+	if (index < 0) {
+		return {
+			ok: false,
+			status: 400,
+			error: "message_not_found",
+			message: "这条消息不在这个会话里，或不是用户消息",
+		};
+	}
+
+	const harness = await getHarness();
+	const externalId = crypto.randomUUID();
+	const kind = await chatKindOf(chat);
+	const previous = index > 0 ? view.entries[index - 1] : undefined;
+
+	// 新会话的两张表：对外 uuid ↔ 内部 id、内部 id → 种类。与 openChat 的新建分支同口径，
+	// 写在 fork 的同一个事务里（不会出现"会话建好了但列表里找不到"）。
+	const init = async (tx: Tx, conversationId: number) => {
+		const chats = await tx.doc(Chats);
+		chats.byExternal[externalId] = Number(conversationId);
+		const kinds = await tx.doc(ChatKinds);
+		kinds.byInternal[String(conversationId)] = kind === "worker" ? "worker" : "chief";
+	};
+
+	const conversation = previous
+		? await chat.conversation.fork(
+				previous.id,
+				{ ownership: { kind: "ownerless" }, init },
+				CTX,
+			)
+		: await harness.createConversation(
+				{
+					ownership: { kind: "ownerless" },
+					// 同模型（含思考档变体）：新会话不是"回到默认模型"，而是"这句话换个说法"
+					agent: { model: (await chat.conversation.agent(CTX)).model },
+					init,
+				},
+				CTX,
+			);
+
+	return {
+		ok: true,
+		chat: { conversation, externalId, internalId: Number(conversation.id) },
+	};
+}
+
 // ── 对话流 ───────────────────────────────────────────────
 /**
  * 流里除了文本，还会有"这一轮没给出回答"的通知。
@@ -1808,6 +1893,12 @@ export type ChatStreamEvent =
 export interface ChatStreamInput {
 	conversation: Conversation;
 	text: string;
+	/**
+	 * 带图消息的分段（2026-11-08 扫尾批 4a）。有值就提交 parts（内核原生收
+	 * `string | (TextContent|ImageContent)[]`），没有就仍提交 `text` 字符串。
+	 * `text` 始终是"纯文本口径"，给记忆抽取、日志与回读用。
+	 */
+	parts?: OutgoingPart[];
 	/** 客户端重试时带同一个 requestId，就不会重复扣 token、重复写记忆 */
 	requestId?: string;
 	/**
@@ -1987,7 +2078,8 @@ export async function* chatStream(
 		const submission = await input.conversation.submit(
 			{
 				type: "input",
-				content: input.text,
+				// 有图提交分段，无图仍提交纯字符串（2026-11-08 扫尾批 4a）
+				content: input.parts ?? input.text,
 				requestId: input.requestId,
 				// 缺省 followUp = 改动前的排队行为；steer 只在客户端明确要求时才试
 				...(input.whenBusy ? { whenBusy: input.whenBusy } : {}),
@@ -2167,10 +2259,29 @@ export interface TranscriptMessage {
 	text: string;
 	/** 消息时间，epoch 毫秒 */
 	at: number;
+	/**
+	 * 可寻址 id（2026-11-08 扫尾批 4a）：只给 user 消息，编辑重发拿它指位置。
+	 * uuid 形状、不含 durable 内部自增 id（见 {@link messageIdOf}）。
+	 */
+	id?: string;
+	/** 用户消息带的图片（2026-11-08 扫尾批 4a）；文字仍走 `text` */
+	images?: { mimeType: string; data: string }[];
 	/** 这一轮的工作步骤（2026-11-07）；没有工具调用就不带 */
 	steps?: TranscriptStep[];
 	/** 那一轮从提问到收尾的墙钟时长（毫秒） */
 	workMs?: number;
+}
+
+/**
+ * 对外 messageId（2026-11-08 扫尾批 4a）。
+ *
+ * 为什么不直接下发 durable 的条目 id：硬约束是"对外 id 一律 uuid，内部自增整数不外泄"。
+ * 这里用 `(会话对外 uuid, 条目 id)` 做 sha256 再切成 uuid 形状 —— 稳定、可反查
+ * （读回条目时按同一函数重算），且离开会话 id 就没有意义。
+ */
+export function messageIdOf(externalId: string, entryId: number): string {
+	const hex = createHash("sha256").update(`${externalId}:${entryId}`).digest("hex");
+	return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }
 
 /**
@@ -2326,9 +2437,24 @@ export async function readTranscript(
 			if (!message) continue;
 			const text = contentText(message.content).trim();
 			const at = typeof message.timestamp === "number" ? message.timestamp : 0;
-			if (!text) continue;
+			// 2026-11-08 4a：纯图消息没有文本，也要下发（老逻辑会把它整条丢掉）
+			const parts = Array.isArray(message.content) ? message.content : [];
+			const images = parts
+				.filter(
+					(part): part is { type: "image"; mimeType: string; data: string } =>
+						part.type === "image",
+				)
+				.map((part) => ({ mimeType: part.mimeType, data: part.data }));
+			if (!text && images.length === 0) continue;
 			turnStartAt = at || undefined;
-			messages.push({ role: "user", text, at });
+			const outgoing: TranscriptMessage = {
+				role: "user",
+				text,
+				at,
+				id: messageIdOf(chat.externalId, Number(entry.id)),
+			};
+			if (images.length > 0) outgoing.images = images;
+			messages.push(outgoing);
 			continue;
 		}
 

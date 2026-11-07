@@ -1102,7 +1102,9 @@ html[data-sidebar="closed"] .side-rail {
 /* 消息从各自那一侧滑进来一点，比统一「上浮」更有方向感 */
 .msg { display: flex; }
 .msg.user {
-  justify-content: flex-end;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
   animation: msgRight var(--dur-base) var(--ease-decelerate) both;
 }
 .msg.assistant { animation: msgLeft var(--dur-base) var(--ease-decelerate) both; }
@@ -1167,6 +1169,69 @@ html[data-sidebar="closed"] .side-rail {
 }
 
 .msg.assistant .body { font-size: 14.5px; line-height: 1.68; color: var(--text); }
+
+/* ── 用户消息的图片与编辑入口（2026-11-08 扫尾批 4a）──────────────
+   图片贴在气泡下方（同一列、右对齐）；编辑入口 hover 才出现，与助手那条脚注同一套
+   "不占脸、不顶布局"的做法：留 20px 高度，避免 hover 时整条消息上下跳。 */
+.msg-images {
+  display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px;
+  max-width: 480px;
+}
+.msg-images[hidden] { display: none; }
+.msg-images img {
+  width: 120px; height: 120px; object-fit: cover;
+  border-radius: var(--r-md);
+  border: 1px solid var(--accent-line);
+  background: var(--card);
+  cursor: zoom-in;
+  transition: filter .15s ease;
+}
+.msg-images img:hover { filter: brightness(.94); }
+
+.msg-user-actions {
+  display: flex; justify-content: flex-end; gap: 6px;
+  min-height: 20px;
+  font-size: 11px; color: var(--text-3);
+  opacity: 0; pointer-events: none;
+  transition: opacity .15s ease;
+}
+.msg.user:hover .msg-user-actions,
+.msg.user:focus-within .msg-user-actions { opacity: 1; pointer-events: auto; }
+.msg-user-actions[hidden] { display: none; }
+.msg-user-actions button {
+  height: 20px; padding: 0 7px;
+  border: 1px solid var(--outline); border-radius: var(--r-sm);
+  background: var(--bg); color: var(--text-3);
+  font-size: 11px;
+  transition: color .15s ease, border-color .15s ease;
+}
+.msg-user-actions button:hover { color: var(--text); border-color: var(--text-3); }
+
+/* 行内编辑：替换气泡本身，宽度与气泡一致，取消/重发在下方 */
+.msg-editor { width: min(480px, 100%); display: flex; flex-direction: column; gap: 6px; }
+.msg-editor textarea {
+  width: 100%; min-height: 64px; max-height: 240px;
+  padding: 10px 14px;
+  border-radius: var(--r-lg) var(--r-lg) var(--r-sm) var(--r-lg);
+  border: 1px solid var(--accent-line);
+  background: var(--bg); color: var(--text);
+  font: inherit; font-size: 14.5px; line-height: 1.6;
+  resize: vertical; outline: none;
+}
+.msg-editor textarea:focus { border-color: var(--text-3); }
+.msg-editor-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.msg-editor-actions button {
+  height: 26px; padding: 0 12px;
+  border-radius: var(--r-full);
+  border: 1px solid var(--outline);
+  background: var(--bg); color: var(--text-2);
+  font-size: 12px;
+}
+.msg-editor-actions button.primary {
+  border-color: transparent;
+  background: var(--accent-container); color: var(--on-accent-container);
+}
+.msg-editor-actions button:disabled { opacity: .5; }
 
 .msg.error .body {
   padding: 10px 14px;
@@ -1645,11 +1710,53 @@ html[data-acts="0"] .wp { display: none !important; }
   transition: color .15s ease, border-color .15s ease, background-color .15s ease;
 }
 .composer-add svg { width: 14px; height: 14px; }
+.composer-add[hidden] { display: none; }
 .composer-add:hover,
 .composer-add:focus-visible {
   color: var(--text);
   border-color: var(--composer-border);
   background: var(--composer-pill-bg);
+}
+
+/* 附件（2026-11-08 扫尾批 4a）：待发图片的缩略条，贴在输入框与工具行之间 */
+.composer-attachments {
+  display: flex; flex-wrap: wrap; gap: 8px;
+  padding: 2px 8px 6px;
+}
+.composer-attachments[hidden] { display: none; }
+.composer-att {
+  position: relative;
+  width: 56px; height: 56px;
+  border-radius: var(--r-md);
+  overflow: hidden;
+  border: 1px solid var(--composer-border, var(--outline));
+  background: var(--card);
+}
+.composer-att img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.composer-att button {
+  position: absolute; top: 2px; right: 2px;
+  width: 18px; height: 18px;
+  display: grid; place-content: center;
+  border: 0; border-radius: var(--r-full);
+  background: color-mix(in srgb, #000 55%, transparent);
+  color: #fff; font-size: 12px; line-height: 1;
+  cursor: pointer;
+}
+.composer-att button:hover { background: color-mix(in srgb, #000 72%, transparent); }
+
+/* 大图查看（2026-11-08）：点缩略图打开，点任意处 / Esc 关闭 */
+.lightbox {
+  position: fixed; inset: 0; z-index: 90;
+  display: grid; place-content: center;
+  padding: 32px;
+  background: color-mix(in srgb, #000 78%, transparent);
+  cursor: zoom-out;
+}
+.lightbox[hidden] { display: none; }
+.lightbox img {
+  max-width: min(92vw, 1200px); max-height: 88vh;
+  border-radius: var(--r-md);
+  box-shadow: 0 18px 60px color-mix(in srgb, #000 45%, transparent);
 }
 
 .send {

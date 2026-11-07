@@ -18,6 +18,14 @@ import { renderTask, resolveTask, taskLabel, taskNames, TaskRenderError } from "
 import { classifyTurn, jevMode } from "./typesafe.ts";
 
 /**
+ * 兼容层内部的用户/助手消息：content 一律是纯文本。
+ * 这是 OpenAI 协议进来的形状（`textOf` 已把多段 content 拍平），
+ * 与 shared 的 `ChatMessage.content` union（2026-11-08 起可为图片分段）不是一回事——
+ * 手机端的 OpenAI 路径本批不做附件，保持纯字符串。
+ */
+type PlainMessage = { role: ChatMessage["role"]; content: string };
+
+/**
  * OpenAI 兼容端点：`POST /api/v1/llm/chat/completions`
  *
  * 存在的理由是**客户端已经在按这个协议说话了**。
@@ -93,7 +101,7 @@ function textOf(content: unknown): string {
  */
 function conversationIdFor(
 	rawHeader: string | undefined,
-	messages: ChatMessage[],
+	messages: PlainMessage[],
 	options?: { freshPrefixedWith?: string },
 ): string {
 	if (rawHeader?.trim()) return rawHeader.trim();
@@ -131,7 +139,7 @@ export function mountOpenAiCompat(app: Hono): void {
 			);
 		}
 
-		const messages: ChatMessage[] = body.messages
+		const messages: PlainMessage[] = body.messages
 			.filter((m) => m.role === "user" || m.role === "assistant" || m.role === "system")
 			.map((m) => ({
 				role: m.role as ChatMessage["role"],
@@ -235,7 +243,7 @@ async function decideMode(
 	conversationId: string,
 	internalId: number,
 	current: ThinkingLevel | null,
-	messages: ChatMessage[],
+	messages: PlainMessage[],
 ): Promise<ThinkingLevel> {
 	const requested = levelFromHeader(header);
 	if (requested) return requested;
@@ -290,7 +298,7 @@ function levelFromHeader(header: string | undefined): ThinkingLevel | null {
  * gate 下 `observeRoute` 直接 return 是**有意行为**：gate 已在建会话时判过一次，
  * 绝不重复付这次延迟；并不是"按 advisory 处理"。
  */
-function observeRoute(conversationId: string, messages: ChatMessage[]): void {
+function observeRoute(conversationId: string, messages: PlainMessage[]): void {
 	// 只有 advisory 才每轮旁路判一次；gate 已经在建会话时判过，绝不重复付钱/付延迟
 	if (jevMode() !== "advisory") return;
 	const recent = messages
@@ -322,7 +330,7 @@ interface TaskContext {
 /** Agent 路径：会话制、有记忆与工具（手机聊天走这条） */async function agentChat(
 	c: Context,
 	body: OpenAiChatRequest,
-	messages: ChatMessage[],
+	messages: PlainMessage[],
 	task?: TaskContext,
 ) {
 	const conversationId = task

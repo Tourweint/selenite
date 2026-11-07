@@ -18,11 +18,55 @@ export type Role = z.infer<typeof RoleSchema>;
 export const ThinkingLevelSchema = z.enum(["off", "low", "medium", "high"]);
 export type ThinkingLevel = z.infer<typeof ThinkingLevelSchema>;
 
+/**
+ * 一条用户消息的内容分段（2026-11-08 扫尾批 4a，附件/图片）。
+ *
+ * 形状对齐内核 pi-ai 的 `TextContent` / `ImageContent`：`image.data` 是**裸 base64**
+ * （不带 `data:` 前缀），条目层零转换。`content` 仍是 union —— 纯字符串的老调用方
+ * （手机、OpenAI 兼容层、旧脚本）逐字节不变。
+ *
+ * 图片限制在服务端复核（单图 ≤8MB、单条 ≤4 张），schema 只钉形状：
+ * 体积是业务规则，放在这里会让整份契约在解析阶段就拒掉本该给"400 带说明"的请求。
+ */
+export const TextPartSchema = z
+  .object({
+    type: z.literal("text"),
+    text: z.string(),
+  })
+  .strict();
+
+export const ImagePartSchema = z
+  .object({
+    type: z.literal("image"),
+    /** MIME（`image/png` / `image/jpeg` / …）；服务端只校验 `image/` 前缀 */
+    mimeType: z.string().min(1).max(100),
+    /** 裸 base64（不含 `data:` 前缀） */
+    data: z.string().min(1),
+  })
+  .strict();
+
+export const ContentPartSchema = z.union([TextPartSchema, ImagePartSchema]);
+export type ContentPart = z.infer<typeof ContentPartSchema>;
+export type TextPart = z.infer<typeof TextPartSchema>;
+export type ImagePart = z.infer<typeof ImagePartSchema>;
+
 export const ChatMessageSchema = z.object({
   role: RoleSchema,
-  content: z.string().min(1),
+  content: z.union([z.string().min(1), z.array(ContentPartSchema).min(1)]),
 });
 export type ChatMessage = z.infer<typeof ChatMessageSchema>;
+
+/**
+ * 取出 content 里的纯文本（多段用 `\n` 连，与 pi-ai `contentText` 同口径）。
+ * 分享给 openai-compat / 记忆抽取这类"只要文字"的调用方，避免各自写一份。
+ */
+export function chatContentText(content: ChatMessage["content"]): string {
+  if (typeof content === "string") return content;
+  return content
+    .filter((part): part is TextPart => part.type === "text")
+    .map((part) => part.text)
+    .join("\n");
+}
 
 /**
  * 会话种类（2026-11-06 侧栏调整 B2）。
@@ -106,6 +150,18 @@ export const TranscriptStepSchema = z.object({
 export type TranscriptStep = z.infer<typeof TranscriptStepSchema>;
 
 /**
+ * 读历史里附在用户消息上的图片（2026-11-08 扫尾批 4a）。
+ * 与上行 `ImagePartSchema` 同形状、少一个 `type`（回读只用来渲染，不参与再提交）。
+ */
+export const TranscriptImageSchema = z
+  .object({
+    mimeType: z.string(),
+    data: z.string(),
+  })
+  .strict();
+export type TranscriptImage = z.infer<typeof TranscriptImageSchema>;
+
+/**
  * 读历史接口的一条记录。
  *
  * 为什么需要它：一轮对话现在**可以在客户端关掉之后继续跑完**，
@@ -116,6 +172,19 @@ export const TranscriptMessageSchema = z.object({
   text: z.string(),
   /** epoch 毫秒 */
   at: z.number(),
+  /**
+   * 这条消息的可寻址 id（2026-11-08 扫尾批 4a，纯增量，只给 user 消息）。
+   *
+   * 用途：编辑重发要指到"哪一条"。**不是** durable 内部自增条目 id 原文——
+   * 对外 id 一律 uuid（会话 id 的例子），这里由 `(会话 uuid, 条目 id)` 哈希成
+   * uuid 形状，服务端按同一个函数反查。
+   */
+  id: z.string().optional(),
+  /**
+   * 这条用户消息带的图片（2026-11-08 扫尾批 4a，纯增量，老客户端忽略）。
+   * 文字仍走 `text`；纯图片消息 `text` 可能是空串。
+   */
+  images: z.array(TranscriptImageSchema).optional(),
   /**
    * 这条回答之前那一轮的工作步骤（2026-11-07，纯增量，老客户端忽略）。
    * 只挂在 assistant 上；一轮里没有工具调用就不带这个字段。

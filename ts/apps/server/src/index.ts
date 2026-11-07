@@ -11,11 +11,14 @@ import type { MemoryScope } from "@lifediary/memory";
 import {
   ChatRequestSchema,
   ThinkingLevelSchema,
+  chatContentText,
   type ChatEvent,
+  type ChatMessage,
   type FinishReason,
   type ThinkingLevel,
   type TurnUsage,
 } from "@lifediary/shared";
+import type { SettledSubmissionRecord } from "@earendil-works/pi-durable";
 import {
   addReminder,
   applyChatMode,
@@ -24,6 +27,7 @@ import {
   chatStream,
   contextUsageOf,
   externalChatIds,
+  forkForEdit,
   getPolicy,
   preferenceScopeOf,
   hideChat,
@@ -45,7 +49,13 @@ import {
   stopChat,
   usageSummary,
   workerChatEnabled,
+  type ResolvedChat,
 } from "./agent.ts";
+import {
+  assembleUserContent,
+  attachmentsEnabled,
+  editResendEnabled,
+} from "./attachments.ts";
 import { createAuthMiddleware } from "./auth.ts";
 import { ChatEventStore, sseSeqEnabled } from "./chat-events.ts";
 import { mountDiary } from "./diary.ts";
@@ -403,8 +413,12 @@ app.post("/api/v1/agent/chat/:conversationId/pin", async (c) => {
 /**
  * 访问档位（2026-11-03）：完全访问 / 只读 / 不跑命令。
  * 改完立刻生效——beforeTool 每次调用都重新判断，不用重启服务。
+ *
+ * 2026-11-08（扫尾批 4a）：响应顺带投影两个能力开关（`attachments` / `editResend`），
+ * 前端据此决定渲染不渲染入口。它们是**环境变量**、不是可写档位，所以 POST 不收、
+ * 但响应里照样带着（读一次 policy 就知道当前能力面）。
  */
-app.get("/api/v1/agent/policy", (c) => c.json(getPolicy()));
+app.get("/api/v1/agent/policy", (c) => c.json(policyProjection()));
 
 app.post("/api/v1/agent/policy", async (c) => {
   const body = (await c.req.json().catch(() => null)) as
@@ -417,13 +431,31 @@ app.post("/api/v1/agent/policy", async (c) => {
   if (body && "confirmWrites" in body && typeof body.confirmWrites !== "boolean") {
     return c.json({ error: "bad_request", message: "confirmWrites 只能是布尔值" }, 400);
   }
-  const next = setPolicy({
+  setPolicy({
     ...(access ? { access: access as "full" | "read-only" | "no-shell" } : {}),
     ...(Array.isArray(body?.blocked) ? { blocked: body!.blocked! } : {}),
     ...(typeof body?.confirmWrites === "boolean" ? { confirmWrites: body.confirmWrites } : {}),
   });
-  return c.json({ ok: true, ...next });
+  // 与改动前一致：POST 回的是写后的策略本身（不含 label），额外带上两个能力开关
+  const next = getPolicy();
+  return c.json({
+    ok: true,
+    access: next.access,
+    blocked: next.blocked,
+    confirmWrites: next.confirmWrites,
+    attachments: attachmentsEnabled(),
+    editResend: editResendEnabled(),
+  });
 });
+
+/** policy 投影：档位 + 标签 + 能力开关（只读投影，不写 .data/policy.json）。 */
+function policyProjection() {
+  return {
+    ...getPolicy(),
+    attachments: attachmentsEnabled(),
+    editResend: editResendEnabled(),
+  };
+}
 
 /**
  * 思考强度档（2026-11-04 思考档位方案 D4）：同一个模型的四条思考变体，不换模型。
@@ -623,6 +655,49 @@ app.post("/api/v1/agent/providers/:id/models/detect", async (c) => {
   return c.json(result);
 });
 
+/**
+ * 一轮**真正收尾**时的统一动作（2026-11-08 扫尾批 4a 抽出）。
+ *
+ * 原来这段内联在 `/chat` 的流里；编辑重发在后台跑同一套链路，抽出来才能保证
+ * "观察层 / 记忆抽取 / 会话记忆修剪"只有一份实现（方案 §二：SSE/用量/记忆全继承）。
+ * 记忆只吃文本：图片不进记忆，去的是"他说了什么"。
+ */
+function turnSettledHandler(chat: ResolvedChat, messages: ChatMessage[]) {
+  const scope: MemoryScope = { type: "session", id: String(chat.internalId) };
+  const plain = messages.map((message) => ({
+    role: message.role,
+    content: chatContentText(message.content),
+  }));
+  return (record: SettledSubmissionRecord): void => {
+    // 观察层的 errored/usage-limit 事件源（批次C C1）；开关关着时内部直接返回
+    autonomyObserver().onTurnSettled(
+      Number(chat.internalId),
+      record.status,
+      record.status === "unanswered" ? record.reason : "",
+    );
+    if (!memoryEngine || record.status !== "done") return;
+    // 刻意不 await —— 记忆写慢了不该拖慢任何东西
+    void memoryEngine
+      .ingestTurn(plain, scope, {
+        // 2026-11-06：偏好挂更宽的 scope（主人 global / 执事 partner:<id>），
+        // 其余仍落本会话。不传这个参数 = 全部落本会话，与旧行为一致。
+        preferenceScope: preferenceScopeOf(chat.internalId),
+      })
+      .then((result) => {
+        if (result.added.length > 0 || result.reinforced.length > 0) {
+          console.log(`[memory] +${result.added.length} ~${result.reinforced.length}`);
+        }
+        // 写入路径末尾按 MEMORY_SESSION_CAP 修剪会话/伙伴作用域；只记条数（D8）。
+        const pruned = pruneSessionMemory(memoryEngine);
+        if (pruned > 0) console.log(`[memory] prune -${pruned}`);
+      })
+      .catch((error: unknown) => {
+        const detail = error instanceof Error ? error.message : String(error);
+        console.error(`[memory] 写入失败: ${detail}`);
+      });
+  };
+}
+
 app.post("/api/v1/agent/chat", async (c) => {
   const raw = await c.req.json().catch(() => null);
   const parsed = ChatRequestSchema.safeParse(raw);
@@ -631,9 +706,27 @@ app.post("/api/v1/agent/chat", async (c) => {
   }
   const request = parsed.data;
 
+  // 附件口径（2026-11-08 扫尾批 4a）：先判开关，再拼内容。
+  // 开关关着时**只拦分段请求**；纯字符串老客户端逐字节不变。
+  const lastUser = [...request.messages].reverse().find((m) => m.role === "user");
+  if (!attachmentsEnabled() && lastUser && typeof lastUser.content !== "string") {
+    return c.json(
+      {
+        error: "attachments_disabled",
+        message: "附件已关闭（AGENT_ATTACHMENTS=false），请只发文字",
+      },
+      400,
+    );
+  }
+  const assembled = assembleUserContent(lastUser?.content ?? "");
+  if (!assembled.ok) {
+    return c.json({ error: "bad_request", message: assembled.message }, 400);
+  }
+  const lastUserText = assembled.value.text;
+
   // 未配置模型时走 mock：链路能验证，但不建会话、不写库。
   if (!readLlmConfig()) {
-    return streamMock(c, request.messages);
+    return streamMock(c, lastUserText);
   }
 
   // 会话 id 只能由服务端发出去：不带 = 新建，带了就必须是发过的那个。
@@ -685,10 +778,6 @@ app.post("/api/v1/agent/chat", async (c) => {
     }
   }
 
-  const lastUserText =
-    [...request.messages].reverse().find((m) => m.role === "user")?.content ?? "";
-  const scope: MemoryScope = { type: "session", id: String(chat.internalId) };
-
   return streamSSE(c, async (stream) => {
     const id = crypto.randomUUID();
 
@@ -721,41 +810,14 @@ app.post("/api/v1/agent/chat", async (c) => {
       for await (const event of chatStream({
         conversation: chat.conversation,
         text: lastUserText,
+        // 带图才给 parts；纯文本仍走字符串（老链路形状不变）
+        ...(assembled.value.parts ? { parts: assembled.value.parts } : {}),
         requestId: request.requestId,
         // 忙时投递方式（2026-11-07 消息即引导）：不传 = followUp，等于改动前的排队
         ...(request.whenBusy ? { whenBusy: request.whenBusy } : {}),
         // 记忆挂在"这一轮真的结束"上，不挂在"这条流结束"上：
         // 用户关掉界面之后它还会跑完，那一轮的记忆照样得写。
-        onSettled: (record) => {
-          // 观察层的 errored/usage-limit 事件源（批次C C1）；开关关着时内部直接返回
-          autonomyObserver().onTurnSettled(
-            Number(chat.internalId),
-            record.status,
-            record.status === "unanswered" ? record.reason : "",
-          );
-          if (!memoryEngine || record.status !== "done") return;
-          // 刻意不 await —— 记忆写慢了不该拖慢任何东西
-          void memoryEngine
-            .ingestTurn(request.messages, scope, {
-              // 2026-11-06：偏好挂更宽的 scope（主人 global / 执事 partner:<id>），
-              // 其余仍落本会话。不传这个参数 = 全部落本会话，与旧行为一致。
-              preferenceScope: preferenceScopeOf(chat.internalId),
-            })
-            .then((result) => {
-              if (result.added.length > 0 || result.reinforced.length > 0) {
-                console.log(
-                  `[chat ${id}] memory +${result.added.length} ~${result.reinforced.length}`,
-                );
-              }
-              // 写入路径末尾按 MEMORY_SESSION_CAP 修剪会话/伙伴作用域；只记条数（D8）。
-              const pruned = pruneSessionMemory(memoryEngine);
-              if (pruned > 0) console.log(`[chat ${id}] memory prune -${pruned}`);
-            })
-            .catch((error: unknown) => {
-              const detail = error instanceof Error ? error.message : String(error);
-              console.error(`[chat ${id}] 记忆写入失败: ${detail}`);
-            });
-        },
+        onSettled: turnSettledHandler(chat, request.messages),
       })) {
         // 客户端走了：只停止推送。那一轮还在服务端跑完并落库，
         // 下次打开用 GET .../messages 拿回来。
@@ -818,6 +880,73 @@ app.post("/api/v1/agent/chat", async (c) => {
       `[chat ${id}] stream=${streamEnd} chars=${chars} ms=${Date.now() - startedAt}`,
     );
   });
+});
+
+/**
+ * 编辑重发（2026-11-08 扫尾批 4a，方案 §二）。
+ *
+ * `POST .../chat/:conversationId/edit`，body `{ messageId, text }`：
+ * 校验消息属于本会话且是 user（会话在跑 → 409）→ fork 到**该条之前** →
+ * 在**新会话**里走 `chatStream` 主链路提交新文本 → `202 {ok:true, conversationId}`。
+ *
+ * 为什么用 fork 而不是就地改写：内核 append-only、没有 truncate/edit；fork 是一等
+ * API、零内核风险，老会话完整保留（列表里多一条分叉前的旧会话是方案登记的已知边界）。
+ *
+ * 提交在后台消费同一条 `chatStream`：记忆抽取挂在 onSettled 上，与 `/chat` 完全同一套；
+ * 客户端拿到 202 后 `openConversation(新 id)` 接管，再回读/补读这一轮。
+ * 回滚：`AGENT_EDIT_RESEND=false` → 端点 404（见接口文档 §6）。
+ */
+app.post("/api/v1/agent/chat/:conversationId/edit", async (c) => {
+  // 回滚开关：关着一律 404（"未启用"，与其它能力端点同口径）
+  if (!editResendEnabled()) return c.json({ error: "not_found" }, 404);
+  if (!readLlmConfig()) return c.json({ ok: false, reason: "llm_not_configured" }, 503);
+
+  const body = (await c.req.json().catch(() => null)) as
+    | { messageId?: unknown; text?: unknown }
+    | null;
+  const messageId = typeof body?.messageId === "string" ? body.messageId.trim() : "";
+  const text = typeof body?.text === "string" ? body.text : "";
+  if (!messageId || !text.trim()) {
+    return c.json({ error: "bad_request", message: "需要 messageId 和 text" }, 400);
+  }
+
+  const chat = await openChat(c.req.param("conversationId"));
+  if (!chat) return c.json({ error: "unknown_conversation" }, 404);
+
+  // 执事（及一切带身份链接的会话）不提供编辑重发：fork 会克隆不出 partner 链接，
+  // 新会话会丢掉执事身份落成总管会话（D14 身份冻结被 fork 绕道打破）。验收时补的闸。
+  if (partnersStore().partnerIdOfSession(chat.internalId)) {
+    return c.json(
+      { error: "bad_request", message: "执事对话暂不支持编辑重发" },
+      400,
+    );
+  }
+
+  const forked = await forkForEdit(chat, messageId);
+  if (!forked.ok) {
+    return c.json({ error: forked.error, message: forked.message }, forked.status);
+  }
+  const next = forked.chat;
+
+  // 后台跑完整一轮：客户端断开/不读都不影响它跑完并落库（与 /chat 同语义）。
+  void (async () => {
+    try {
+      for await (const _event of chatStream({
+        conversation: next.conversation,
+        text,
+        onSettled: turnSettledHandler(next, [{ role: "user", content: text }]),
+      })) {
+        // 编辑没有客户端读这条流：事件只为驱动主链路，丢弃即可
+      }
+    } catch (error) {
+      // 原始错误只进服务端日志（可能带上游地址）
+      console.error(
+        `[edit ${next.externalId}] 生成失败: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  })();
+
+  return c.json({ ok: true, conversationId: next.externalId }, 202);
 });
 
 /**
@@ -934,7 +1063,13 @@ app.get("/api/v1/agent/export", async (c) => {
       id: string;
       title: string;
       pinned: boolean;
-      messages: { role: string; at: number; text: string }[];
+      messages: {
+        role: string;
+        at: number;
+        text: string;
+        /** 用户消息的图片（2026-11-08 4a）：导出是"全部数据"，不能把图悄悄丢掉 */
+        images?: { mimeType: string; data: string }[];
+      }[];
     }[] = [];
     let messageCount = 0;
 
@@ -947,7 +1082,12 @@ app.get("/api/v1/agent/export", async (c) => {
         id: chat.conversationId,
         title: chat.title || chat.firstText,
         pinned: Boolean(chat.pinned),
-        messages: messages.map(({ role, at, text }) => ({ role, at, text })),
+        messages: messages.map(({ role, at, text, images }) => ({
+          role,
+          at,
+          text,
+          ...(images ? { images } : {}),
+        })),
       });
     }
 
@@ -1344,9 +1484,9 @@ function childrenLookup(workRoot: string): (parentTicketId: string) => DeadLette
  * mock **不建会话、不写库**，所以也没有事件可落——seq 方案下同样直发不带 seq
  * （接口文档 §2.1"未配置模型"口径：这条流从来不是重放通道）。
  */
-function streamMock(c: Context, messages: { role: string; content: string }[]) {
+function streamMock(c: Context, last: string) {
   const conversationId = crypto.randomUUID();
-  const last = messages.at(-1)?.content ?? "";  // 回复里带代码块 + 表格：界面渲染（高亮/复制按钮/markdown/表格）在无 key 环境也有得验
+  // 回复里带代码块 + 表格：界面渲染（高亮/复制按钮/markdown/表格）在无 key 环境也有得验
   const codeExample = [
     "",
     "顺便验证代码块的渲染与复制：",

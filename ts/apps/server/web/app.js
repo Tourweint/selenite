@@ -123,6 +123,10 @@ const el = {
   menuBtn: document.getElementById("menu-btn"),
   menuPop: document.getElementById("menu-pop"),
   composerAdd: document.getElementById("composer-add"),
+  composerFile: document.getElementById("composer-file"),
+  composerAttachments: document.getElementById("composer-attachments"),
+  lightbox: document.getElementById("lightbox"),
+  lightboxImg: document.getElementById("lightbox-img"),
   modelPill: document.getElementById("model-pill"),
   modelPillLabel: document.getElementById("model-pill-label"),
   modelThink: document.getElementById("model-think"),
@@ -541,6 +545,10 @@ const state = {
   sending: false,
   stopRequested: false,
   stick: true,
+  // 待发图片（2026-11-08 扫尾批 4a）：{mimeType, data(裸 base64)}，只存内存，切换会话/发出即清
+  pendingImages: [],
+  // 能力投影（GET /agent/policy 的 attachments / editResend）：关着时入口不渲染
+  capabilities: { attachments: true, editResend: true },
   chats: [],
   removed: 0,
   query: "",
@@ -3104,6 +3112,8 @@ function clearThread() {
   approvalCards.clear();
   // 课题提议卡跟审批卡同命运：换会话后旧卡不再属于这一屏
   topicProposalCards.clear();
+  // 待发图片属于"这一屏的这条会话"：切走就清，别把图带到另一条对话里
+  clearPendingImages();
   el.thread.replaceChildren();
   if (el.empty) el.thread.append(el.empty);
   updateHomeMode();
@@ -3113,7 +3123,7 @@ function hideEmpty() {
   if (el.empty && el.empty.isConnected) el.empty.remove();
 }
 
-function addMessage(role, text, at) {
+function addMessage(role, text, at, images = []) {
   hideEmpty();
   const wrap = document.createElement("div");
   wrap.className = `msg ${role}`;
@@ -3131,6 +3141,9 @@ function addMessage(role, text, at) {
   if (role === "user") body.textContent = text;
   else body.innerHTML = renderMarkdown(text);
   wrap.append(body);
+
+  // 用户消息的图片（2026-11-08 扫尾批 4a）：贴在气泡下方，点开看大图
+  if (role === "user") mountMessageImages(wrap, images);
 
   // 回答底下的一条脚注（2026-11-06）：复制 · 用时 · 完成时间。
   // 以前复制按钮浮在右上角、耗时单独 absolute 在右边，两者都对不齐正文；
@@ -3163,6 +3176,240 @@ function addMessage(role, text, at) {
   updateHomeMode();
   if (state.stick) scrollToEnd();
   return { root: wrap, body, foot };
+}
+
+/* ── 用户消息的图片 / 编辑重发（2026-11-08 扫尾批 4a）────────────
+   图片：base64 data URL 直接渲染（服务端回读同形状），点击开 lightbox。
+   编辑：只给**最后一条 user 消息**入口（方案 §二）；点开是行内输入框，提交后
+   服务端 fork 出新会话，这里 openConversation 接管并无缝补看这一轮。 */
+
+function mountMessageImages(root, images) {
+  if (!root || !Array.isArray(images) || images.length === 0) return;
+  const host = document.createElement("div");
+  host.className = "msg-images";
+  for (const image of images) {
+    if (!image || !image.data) continue;
+    const img = document.createElement("img");
+    img.src = `data:${image.mimeType || "image/png"};base64,${image.data}`;
+    img.alt = "图片";
+    img.loading = "lazy";
+    img.addEventListener("click", () => openLightbox(img.src));
+    host.append(img);
+  }
+  if (host.children.length) root.append(host);
+}
+
+function userActionsOf(root) {
+  let actions = root.querySelector(":scope > .msg-user-actions");
+  if (!actions) {
+    actions = document.createElement("div");
+    actions.className = "msg-user-actions";
+    root.prepend(actions);
+  }
+  return actions;
+}
+
+/**
+ * 把「编辑」入口挂到**最后一条**用户消息上（其它历史消息不提供，方案登记的刻意没有）。
+ * 会话切换 / 每轮发送后各刷一次；能力开关关着时一个都不渲染。
+ */
+function syncEditEntry() {
+  for (const button of el.thread.querySelectorAll(".msg-edit")) button.remove();
+  if (!state.capabilities.editResend) return;
+  const users = el.thread.querySelectorAll(".msg.user");
+  const last = users[users.length - 1];
+  if (!last) return;
+  const actions = userActionsOf(last);
+  if (actions.querySelector(".msg-edit")) return;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "msg-edit";
+  button.textContent = "编辑";
+  button.title = "改这句话并重发（会产生一条新会话）";
+  button.addEventListener("click", () => void startEditing(last));
+  actions.append(button);
+}
+
+/**
+ * 现场刚发出去的消息没有 messageId（SSE 不带它，契约没动）。点编辑时再拉一次历史，
+ * 按"从末尾对齐"把 id 写回所有用户气泡——limit 截断的是最早的部分，末尾一定对得上。
+ */
+async function resolveMessageId(root) {
+  const conversationId = state.conversationId;
+  if (!conversationId) return "";
+  try {
+    const response = await request(
+      `/api/v1/agent/chat/${encodeURIComponent(conversationId)}/messages?limit=200`,
+      { cache: "no-store" },
+    );
+    if (!response.ok) return "";
+    const data = await response.json();
+    const userMessages = (data.messages || []).filter((message) => message.role === "user");
+    const roots = [...el.thread.querySelectorAll(".msg.user")];
+    const count = Math.min(roots.length, userMessages.length);
+    for (let offset = 1; offset <= count; offset += 1) {
+      const node = roots[roots.length - offset];
+      const message = userMessages[userMessages.length - offset];
+      if (node && message?.id) node.dataset.messageId = message.id;
+    }
+    return root.dataset.messageId || "";
+  } catch {
+    return "";
+  }
+}
+
+async function startEditing(root) {
+  if (state.sending) {
+    toast("等这一轮结束再改");
+    return;
+  }
+  const conversationId = state.conversationId;
+  if (!conversationId) return;
+  const text = (root.querySelector(":scope > .body")?.textContent || "").trim();
+  const messageId = root.dataset.messageId || (await resolveMessageId(root));
+  if (!messageId) {
+    toast("这条消息暂时定位不到，刷新页面后再试");
+    return;
+  }
+  openInlineEditor(root, text, messageId);
+}
+
+function openInlineEditor(root, text, messageId) {
+  if (root.querySelector(":scope > .msg-editor")) return;
+  const body = root.querySelector(":scope > .body");
+  const images = root.querySelector(":scope > .msg-images");
+  const actions = root.querySelector(":scope > .msg-user-actions");
+  if (body) body.hidden = true;
+  if (images) images.hidden = true;
+  if (actions) actions.hidden = true;
+
+  const editor = document.createElement("div");
+  editor.className = "msg-editor";
+  const area = document.createElement("textarea");
+  area.value = text;
+  area.setAttribute("aria-label", "编辑这条消息");
+  const bar = document.createElement("div");
+  bar.className = "msg-editor-actions";
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.textContent = "取消";
+  const save = document.createElement("button");
+  save.type = "button";
+  save.className = "primary";
+  save.textContent = "改并重发";
+  bar.append(cancel, save);
+  editor.append(area, bar);
+  root.append(editor);
+  area.focus();
+  area.setSelectionRange(area.value.length, area.value.length);
+  if (state.stick) scrollToEnd();
+
+  const close = () => {
+    editor.remove();
+    if (body) body.hidden = false;
+    if (images) images.hidden = false;
+    if (actions) actions.hidden = false;
+  };
+  cancel.addEventListener("click", close);
+  area.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.stopPropagation();
+      close();
+      return;
+    }
+    // Ctrl/⌘+Enter 提交（与 composer 的"带修饰键发送"同习惯）；裸 Enter 留给换行
+    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      save.click();
+    }
+  });
+  save.addEventListener("click", () => {
+    const next = area.value.trim();
+    if (!next) return;
+    if (next === text) {
+      close();
+      return;
+    }
+    save.disabled = true;
+    cancel.disabled = true;
+    save.textContent = "重发中…";
+    void submitEdit(messageId, next, { save, cancel });
+  });
+}
+
+/**
+ * 提交编辑重发。成功 = 202 + 新 conversationId：立刻切过去（老会话原样留在列表里），
+ * 再等这一轮落库把回答补上。
+ */
+async function submitEdit(messageId, text, ui) {
+  const conversationId = state.conversationId;
+  try {
+    const response = await request(
+      `/api/v1/agent/chat/${encodeURIComponent(conversationId)}/edit`,
+      { method: "POST", body: JSON.stringify({ messageId, text }) },
+    );
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.conversationId) {
+      const why =
+        data.message ||
+        (response.status === 404
+          ? "编辑重发未开启（AGENT_EDIT_RESEND=false）"
+          : response.status === 409
+            ? "这一轮还在跑，等它结束再改"
+            : `改不了：HTTP ${response.status}`);
+      toast(why);
+      ui.save.disabled = false;
+      ui.cancel.disabled = false;
+      ui.save.textContent = "改并重发";
+      return;
+    }
+    await openConversation(data.conversationId);
+    // 新会话要立刻出现在侧栏里（与发送路径的 start 帧同一做法）
+    void loadChats();
+    await waitEditedTurn(data.conversationId);
+  } catch (error) {
+    ui.save.disabled = false;
+    ui.cancel.disabled = false;
+    ui.save.textContent = "改并重发";
+    toast(`改不了：${error.message}`);
+  }
+}
+
+/**
+ * 编辑重发后的回答是后台跑的（端点立刻 202），所以这里轮询回读：
+ * 一出现新的 assistant 消息就整屏重读一次（工作过程/用量脚注都跟着补上）。
+ * 轮询窗口 90s；期间按钮是「停止」，点了会走正常的 `POST .../stop`。
+ */
+async function waitEditedTurn(conversationId) {
+  if (state.conversationId !== conversationId) return;
+  setSending(true);
+  const deadline = Date.now() + 90_000;
+  try {
+    while (Date.now() < deadline && state.conversationId === conversationId) {
+      // 判据：最后一条 user 之后出现了 assistant。不按"条数变多"判——
+      // 分叉历史本身就带旧回答，数数会把"还没开始"当成"已经答完"。
+      const response = await request(
+        `/api/v1/agent/chat/${encodeURIComponent(conversationId)}/messages?limit=200`,
+        { cache: "no-store" },
+      ).catch(() => null);
+      if (response && response.ok) {
+        const data = await response.json().catch(() => ({}));
+        const messages = Array.isArray(data.messages) ? data.messages : [];
+        const lastUserIndex = messages.map((message) => message.role).lastIndexOf("user");
+        const answered =
+          lastUserIndex >= 0 &&
+          messages.slice(lastUserIndex + 1).some((message) => message.role === "assistant");
+        if (answered) {
+          await openChat(conversationId);
+          return;
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+      if (state.conversationId !== conversationId || state.stopRequested) return;
+    }
+  } finally {
+    setSending(false);
+  }
 }
 
 /**
@@ -3999,7 +4246,14 @@ async function openChat(conversationId) {
     clearThread();
     const messages = data.messages || [];
     for (const message of messages) {
-      const shown = addMessage(message.role === "user" ? "user" : "assistant", message.text, message.at);
+      const shown = addMessage(
+        message.role === "user" ? "user" : "assistant",
+        message.text,
+        message.at,
+        message.images,
+      );
+      // 可寻址 id（2026-11-08 4a）：编辑重发靠它定位这条 user 消息
+      if (message.role === "user" && message.id) shown.root.dataset.messageId = message.id;
       if (message.role !== "user") {
         // 工作过程（2026-11-07）：服务端从 durable 里把这一轮的 toolCall / tool-result
         // 配成 steps 下发；这里还原成与现场同一块（已收尾、默认折叠）。
@@ -4043,6 +4297,8 @@ async function openChat(conversationId) {
     el.title.dataset.chatKind = kind;
     state.stick = true;
     scrollToEnd();
+    // 编辑入口只挂在最后一条 user 消息上（2026-11-08 4a）
+    syncEditEntry();
     if (!owner()) return { token, conversationId, status: "stale" };
     // 刷新页面 / 切回会话时，可能还有一条挂着等答复的审批
     await loadPendingApprovals(conversationId);
@@ -4096,7 +4352,8 @@ function setSending(value) {
 }
 
 function syncSendEnabled() {
-  el.send.disabled = state.sending ? false : !el.input.value.trim();
+  // 纯图片消息也能发（2026-11-08 4a）：有文字或有附件都算"有内容"
+  el.send.disabled = state.sending ? false : !el.input.value.trim() && state.pendingImages.length === 0;
 }
 
 /* ── 桌面通知（批次二，三时机：完成 / 出错 / 待你处理）──────
@@ -4745,7 +5002,7 @@ function submitNext() {
   void send(next);
 }
 
-async function send(text) {
+async function send(text, images = []) {
   if (state.sending) return;
   setSending(true);
   state.stopRequested = false;
@@ -4761,8 +5018,10 @@ async function send(text) {
   // 标题跟着「这一屏的第一句」走，而不是跟着 conversationId 走：
   // mock 模式也会发 start，本地留下的 id 是假的，按 id 判断会一直不更新。
   const firstTurn = !el.thread.querySelector(".msg");
-  addMessage("user", text, Date.now());
-  if (firstTurn) el.title.textContent = text.replace(/\s+/g, " ").slice(0, 40);
+  addMessage("user", text, Date.now(), images);
+  if (firstTurn) el.title.textContent = (text || "图片").replace(/\s+/g, " ").slice(0, 40);
+  // 刚发出的这条就是最后一句话：编辑入口跟上去（messageId 在点的时候再补）
+  syncEditEntry();
   const turn = addMessage("assistant", "", Date.now());
   const body = turn.body;
   const caret = document.createElement("span");
@@ -4890,7 +5149,22 @@ async function send(text) {
         ...(state.conversationId
           ? { conversationId: state.conversationId }
           : { chatKind: state.chatKind === "chief" ? "chief" : "worker" }),
-        messages: [{ role: "user", content: text }],
+        // 有图才用分段数组；纯文本仍发字符串（老形状，服务端 union 兼容）
+        messages: [
+          {
+            role: "user",
+            content: images.length
+              ? [
+                  ...(text ? [{ type: "text", text }] : []),
+                  ...images.map((image) => ({
+                    type: "image",
+                    mimeType: image.mimeType,
+                    data: image.data,
+                  })),
+                ]
+              : text,
+          },
+        ],
       }),
     });
 
@@ -4900,7 +5174,7 @@ async function send(text) {
       localStorage.removeItem(KEY_CONV);
       body.remove();
       setSending(false);
-      return send(text);
+      return send(text, images);
     }
     if (!response.ok || !response.body) {
       body.remove();
@@ -8101,8 +8375,176 @@ el.modelMenu?.addEventListener("click", (event) => event.stopPropagation());
 el.chatSettingsBtn?.addEventListener("click", () => void toggleChatSettings());
 el.chatSettingsOverlay?.addEventListener("click", () => closeChatSettings());
 el.groupSettingsOverlay?.addEventListener("click", () => closeGroupSettingsDrawer());
-// 附件按钮只弹占位提示，不发请求
-el.composerAdd?.addEventListener("click", () => toast("附件还没接上，先占个位"));
+/* ── 附件（2026-11-08 扫尾批 4a）───────────────────────────
+   三入口：选择器 / 粘贴 / 拖拽。浏览器侧先挡一次（只收图片、单张 ≤8MB、单条 ≤4 张），
+   服务端还会全量复核——契约是公开的，前端校验只为体验，不能当边界。
+   发送时有图才用分段数组；纯文本仍是老形状（shared 的 content union 兼容两态）。
+   不做 blob 存储：base64 直接进服务端会话库（方案登记的已知边界）。 */
+const MAX_PENDING_IMAGES = 4;
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+
+function renderPendingImages() {
+  const host = el.composerAttachments;
+  if (!host) return;
+  host.replaceChildren();
+  host.hidden = state.pendingImages.length === 0;
+  state.pendingImages.forEach((image, index) => {
+    const item = document.createElement("div");
+    item.className = "composer-att";
+    const img = document.createElement("img");
+    img.src = `data:${image.mimeType};base64,${image.data}`;
+    img.alt = `待发图片 ${index + 1}`;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.setAttribute("aria-label", "移除这张图片");
+    remove.title = "移除";
+    remove.textContent = "×";
+    remove.addEventListener("click", () => {
+      state.pendingImages.splice(index, 1);
+      renderPendingImages();
+      syncSendEnabled();
+    });
+    item.append(img, remove);
+    host.append(item);
+  });
+}
+
+function clearPendingImages() {
+  state.pendingImages = [];
+  renderPendingImages();
+  syncSendEnabled();
+}
+
+/** File → {mimeType, data(裸 base64)}；不合法返回 null，太大返回 {error} */
+function readImageFile(file) {
+  return new Promise((resolve) => {
+    if (!file || !file.type || !file.type.startsWith("image/")) {
+      resolve(null);
+      return;
+    }
+    if (file.size > MAX_IMAGE_BYTES) {
+      resolve({ error: "单张图片不能超过 8MB" });
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === "string" ? reader.result : "";
+      const comma = result.indexOf(",");
+      if (comma < 0) {
+        resolve(null);
+        return;
+      }
+      resolve({ mimeType: file.type, data: result.slice(comma + 1) });
+    };
+    reader.onerror = () => resolve(null);
+    reader.readAsDataURL(file);
+  });
+}
+
+async function addImageFiles(files) {
+  const list = [...(files || [])];
+  if (!list.length) return;
+  if (!state.capabilities.attachments) {
+    toast("附件已在服务端关闭（AGENT_ATTACHMENTS=false）");
+    return;
+  }
+  for (const file of list) {
+    if (state.pendingImages.length >= MAX_PENDING_IMAGES) {
+      toast(`一条消息最多 ${MAX_PENDING_IMAGES} 张图片`);
+      break;
+    }
+    const image = await readImageFile(file);
+    if (!image) {
+      toast("只支持图片文件");
+      continue;
+    }
+    if (image.error) {
+      toast(image.error);
+      continue;
+    }
+    state.pendingImages.push(image);
+  }
+  renderPendingImages();
+  syncSendEnabled();
+}
+
+function openLightbox(src) {
+  if (!el.lightbox || !el.lightboxImg || !src) return;
+  el.lightboxImg.src = src;
+  el.lightbox.hidden = false;
+}
+
+function closeLightbox() {
+  if (!el.lightbox || !el.lightboxImg || el.lightbox.hidden) return;
+  el.lightbox.hidden = true;
+  el.lightboxImg.removeAttribute("src");
+}
+
+el.lightbox?.addEventListener("click", closeLightbox);
+
+el.composerAdd?.addEventListener("click", () => {
+  if (!state.capabilities.attachments) {
+    toast("附件已在服务端关闭（AGENT_ATTACHMENTS=false）");
+    return;
+  }
+  el.composerFile?.click();
+});
+
+el.composerFile?.addEventListener("change", () => {
+  const files = el.composerFile.files ? [...el.composerFile.files] : [];
+  el.composerFile.value = "";
+  void addImageFiles(files);
+});
+
+// 粘贴图片：输入框里 Ctrl+V 直接进待发条（截图文是最常用的入口）
+el.input.addEventListener("paste", (event) => {
+  const items = event.clipboardData?.items;
+  if (!items) return;
+  const files = [];
+  for (const item of items) {
+    if (item.kind !== "file") continue;
+    const file = item.getAsFile();
+    if (file && file.type.startsWith("image/")) files.push(file);
+  }
+  if (!files.length) return;
+  event.preventDefault();
+  void addImageFiles(files);
+});
+
+// 拖拽：整个 composer 是投放区（只拦 dragover 才收得到 drop）
+el.composer.addEventListener("dragover", (event) => {
+  if (!state.capabilities.attachments) return;
+  if (!event.dataTransfer?.types?.includes("Files")) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = "copy";
+});
+el.composer.addEventListener("drop", (event) => {
+  if (!state.capabilities.attachments) return;
+  const files = event.dataTransfer?.files ? [...event.dataTransfer.files] : [];
+  if (!files.length) return;
+  event.preventDefault();
+  void addImageFiles(files);
+});
+
+/**
+ * 能力投影（2026-11-08 4a）：GET /agent/policy 顺带带回 `attachments` / `editResend`。
+ * 关着就把入口**收掉**（而不是点了再报错）；拉不到按默认开处理，不因为一次网络抖动
+ * 把功能藏起来。
+ */
+async function loadCapabilities() {
+  try {
+    const response = await request("/api/v1/agent/policy", { cache: "no-store" });
+    if (!response.ok) return;
+    const data = await response.json();
+    state.capabilities.attachments = data.attachments !== false;
+    state.capabilities.editResend = data.editResend !== false;
+  } catch {
+    return;
+  }
+  if (el.composerAdd) el.composerAdd.hidden = !state.capabilities.attachments;
+  if (!state.capabilities.attachments) clearPendingImages();
+  syncEditEntry();
+}
 
 // pill 在右组（D2），不能再用 .composer-tools 判内外：按触发 pill 和菜单自己判
 document.addEventListener("click", (event) => {
@@ -8120,6 +8562,12 @@ document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
   // 输入法豁免： composing 中 / keyCode 229（安卓输入法）的 Esc 不当关闭用
   if (event.isComposing || event.keyCode === 229) return;
+  // 大图查看（2026-11-08）：它压在页面最上层，先关它
+  if (el.lightbox && !el.lightbox.hidden) {
+    event.stopImmediatePropagation();
+    closeLightbox();
+    return;
+  }
   // 模态在最上层：先关它，别同时把下面的弹层/路由也收掉。
   // stopImmediatePropagation 是给 reduced-motion 的：没有动画时 modalOpen()
   // 立刻变 false，第二个全局 Esc 监听会以为是普通返回。
@@ -8149,33 +8597,49 @@ el.composer.addEventListener("submit", (event) => {
   const steer = steerNextSubmit;
   steerNextSubmit = false;
   const text = el.input.value.trim();
-  if (!text) return;
+  // 图片条（2026-11-08 4a）：纯图消息允许，所以判空要把附件算进去
+  const images = state.pendingImages.slice();
+  if (!text && !images.length) return;
   // 手动压缩斜杠命令（扫尾批 1 B1）：只认 /compact 一个，刻意不做通用命令系统。
   // 命中后不作为消息发送、不进历史；剩余文字当作 instructions，wait=1 等结果。
   const compactMatch = /^\/compact\b/i.exec(text);
   if (compactMatch) {
+    if (images.length) {
+      toast("压缩命令不能带图片");
+      return;
+    }
     el.input.value = "";
     resize();
     void runCompactCommand(text.slice(compactMatch[0].length).trim());
     return;
   }
-  el.input.value = "";
-  resize();
   // 忙时两条路（2026-11-07 消息即引导）：
   //   Ctrl/⌘+Enter = 插话，带 whenBusy=steer 直接投到正在跑的这一轮；
   //   普通 Enter    = 本地排队（刷新即丢，方案登记的边界），本轮结束后依次真发。
+  // 附件只在空闲时发（2026-11-08 4a）：排队/插话都是纯文本通道，图先留在条上。
   if (state.sending) {
+    if (images.length) {
+      toast("附件消息要等这一轮结束再发");
+      return;
+    }
     if (steer) {
+      el.input.value = "";
+      resize();
       void steerIntoTurn(text);
       return;
     }
     if (state.queue.length < QUEUE_MAX) {
       state.queue.push(text);
+      el.input.value = "";
+      resize();
       renderQueue();
     }
     return;
   }
-  void send(text);
+  el.input.value = "";
+  resize();
+  clearPendingImages();
+  void send(text, images);
 });
 
 /** /compact（扫尾批 1 B1）：调手动压缩端点，等结果后用气泡（toast）提示。 */
@@ -14998,6 +15462,7 @@ void (async () => {
 
   await checkHealth();
   await loadChats();
+  void loadCapabilities(); // 附件 / 编辑重发的开关投影（2026-11-08 4a）
   void loadRoster(); // E4：执事花名册首帧
   void initGroups(); // 群组（2026-11-06 批二）：可用性探测 + 侧栏节首帧
   void refreshModelPill();

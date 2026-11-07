@@ -312,11 +312,13 @@
          思考强度收进模型菜单，挂在当前模型名下方一行。流式时发送同槽换成停止，没有第二个停止入口。 -->
     <form class="composer" id="composer" autocomplete="off">
       <textarea id="input" rows="1" placeholder="说点什么…" aria-label="输入消息"></textarea>
+      <!-- 待发附件（2026-11-08 扫尾批 4a）：缩略图预览 + 单张移除；有图才占位 -->
+      <div class="composer-attachments" id="composer-attachments" hidden></div>
+      <input type="file" id="composer-file" accept="image/*" multiple hidden>
       <div class="composer-foot">
         <div class="composer-tools">
-          <!-- 附件占位（2026-11-04）：只弹 toast，不上传、不发请求 -->
           <button class="composer-add" id="composer-add" type="button"
-                  aria-label="添加附件（未接入）" title="添加附件（未接入）">
+                  aria-label="添加图片" title="添加图片（也可以粘贴或拖进来）">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
           </button>
         </div>
@@ -520,6 +522,12 @@
 <div class="proj-pop composer-pop" id="proj-menu" role="menu" aria-label="项目" hidden></div>
 
 <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<!-- 大图查看（2026-11-08 扫尾批 4a）：点用户消息里的缩略图打开，点任意处 / Esc 关闭。
+     纯原生实现，不引第三方 lightbox 库。 -->
+<div class="lightbox" id="lightbox" hidden>
+  <img id="lightbox-img" alt="图片预览">
+</div>
 
 <!-- 轨道 tooltip（2026-11-05 F1）：挂在 body 下，避免被 .sidebar 的 overflow:hidden 裁掉。 -->
 <div class="rail-tip" id="rail-tip" role="tooltip" hidden></div>
