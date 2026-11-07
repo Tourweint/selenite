@@ -150,6 +150,88 @@ test("运行期坏文件保留上一份可用配置", () => {
 	assert.equal(catalog.providers[0]?.id, "alpha");
 });
 
+/**
+ * 扫尾批 2 / A2 回归（2026-11-07）：重启后旧会话绑定的派生变体 id 必须可解析。
+ *
+ * 用「带 query 的全新模块实例」模拟重启：variantSpecs / singleton / document 全空，
+ * 只有 providers.json 持久化——正是旧会话报 `...#think-off is not available` 的状态。
+ * 修复前这个用例红：目录里从未被 `chatModelRef` 碰过的模型，其变体没人注册。
+ */
+test("重启（注册表重建）后目录内模型的派生变体可直接解析（2026-11-07 扫尾批 2 / A2）", async () => {
+	const restartDir = mkdtempSync(join(tmpdir(), "lifediary-preseed-"));
+	const restartProviders = join(restartDir, "providers.json");
+	const restartRuntime = join(restartDir, "runtime.json");
+	writeFileSync(
+		restartProviders,
+		`${JSON.stringify({
+			schemaVersion: 1,
+			providers: [
+				{
+					id: "alpha",
+					name: "Alpha",
+					baseUrl: "http://127.0.0.1:9/v1",
+					keyEnv: "ALPHA_KEY",
+					models: ["mA", "mB"],
+					// mB 显式声明支持 low / high；缺省域也刻意不含 medium
+					modelThinkingLevels: { mB: ["off", "low", "high"] },
+					createdAt: "2026-11-07T00:00:00.000Z",
+				},
+			],
+			defaultSelection: { providerId: "alpha", modelId: "mA" },
+		})}\n`,
+	);
+
+	const envKeys = [
+		"LLM_PROVIDER",
+		"LLM_API_KEY",
+		"PROVIDERS_CONFIG",
+		"PROVIDERS_PATH",
+		"MODEL_RUNTIME_PATH",
+		"MODEL_VARIANT_PRESEEDED",
+	] as const;
+	const saved = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
+	try {
+		process.env.LLM_PROVIDER = "";
+		process.env.LLM_API_KEY = "test-key";
+		process.env.PROVIDERS_CONFIG = "true";
+		process.env.PROVIDERS_PATH = restartProviders;
+		process.env.MODEL_RUNTIME_PATH = restartRuntime;
+		delete process.env.MODEL_VARIANT_PRESEEDED; // 默认启用预注册
+		const fresh = await import(`./provider.ts?preseed=${Date.now()}`);
+		const models = fresh.currentModels(); // 首次访问触发注册表重建
+		// mB 从未被 chatModelRef 调用过：修复前 getModel 返回 undefined（not available）
+		assert.ok(
+			models.getModel("alpha", "mB#think-off"),
+			"mB#think-off 应可解析（not available 语义：重启后旧会话模型绑定）",
+		);
+		assert.ok(models.getModel("alpha", "mB#think-low"), "mB 声明支持 low，#think-low 应可解析");
+		assert.ok(models.getModel("alpha", "mA#think-off"), "mA（默认模型）#think-off 应可解析");
+		// 支持域外不注册：mB 没声明 medium，缺省域也刻意不含 medium
+		assert.equal(models.getModel("alpha", "mB#think-medium"), undefined, "未声明的 medium 不预注册");
+		// 复用既有派生逻辑：上游必须收到真实模型名，派生 id 不漏到 body.model
+		const derived = models.getModel("alpha", "mB#think-off") as
+			| { samplingParams?: Record<string, unknown> }
+			| undefined;
+		assert.equal(derived?.samplingParams?.model, "mB", "派生变体把 model 盖回真实模型名");
+
+		// 回滚开关：false 时跳过预注册，回到懒注册旧行为（方案 §六 / 接口文档 §6）
+		process.env.MODEL_VARIANT_PRESEEDED = "false";
+		const rolledBack = await import(`./provider.ts?preseed-off=${Date.now()}`);
+		assert.equal(
+			rolledBack.currentModels().getModel("alpha", "mB#think-off"),
+			undefined,
+			"MODEL_VARIANT_PRESEEDED=false 回到旧行为（变体不再预注册）",
+		);
+	} finally {
+		for (const key of envKeys) {
+			const value = saved[key];
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+		rmSync(restartDir, { recursive: true, force: true });
+	}
+});
+
 after(() => {
 	rmSync(dir, { recursive: true, force: true });
 });

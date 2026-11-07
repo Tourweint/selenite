@@ -440,6 +440,74 @@ function variantKey(providerId: string, id: string): string {
 	return `${providerId}|${id}`;
 }
 
+/**
+ * 思考变体的**纯派生**（2026-11-07 扫尾批 2 / A2 从 `chatModelRef` 拆出）。
+ *
+ * 给定基座模型与档位算出 spec，不碰注册表、不读运行时选择——注册表重建期与调用期共用，
+ * 避免两套派生逻辑漂移（任务书 §1）。
+ */
+function thinkingVariantSpec(
+	providerId: string,
+	baseModelId: string,
+	thinking: ThinkingLevel,
+): VariantSpec {
+	const id = `${baseModelId}#think-${thinking}`;
+	return {
+		id,
+		providerId,
+		baseModelId,
+		// `model` 盖回真实模型名；思考档显式声明，不赌上游默认值。
+		// 两档形状不同：off 只发 enable_thinking:false，其余只发 reasoning_effort
+		// （同时带两个会让上游按自己的优先级挑，档位就不可预测了）
+		samplingParams:
+			thinking === "off"
+				? { model: baseModelId, enable_thinking: false }
+				: { model: baseModelId, reasoning_effort: thinking },
+	};
+}
+
+/** 只往 variantSpecs 补一条（已存在就跳过）；不动目录代数、不触发发布 */
+function registerVariantSpec(spec: VariantSpec): void {
+	const key = variantKey(spec.providerId, spec.id);
+	if (variantSpecs.has(key)) return;
+	variantSpecs.set(key, spec);
+}
+
+/**
+ * 回滚开关（2026-11-07 扫尾批 2 / A2）：false = 注册表重建时不预注册变体，
+ * 回到懒注册形态（即本 bug），纯逃生门（方案 §六）。
+ */
+export function variantPreseedEnabled(): boolean {
+	return (process.env.MODEL_VARIANT_PRESEEDED ?? "").trim().toLowerCase() !== "false";
+}
+
+/**
+ * 变体随注册表重建确定性预注册（2026-11-07 扫尾批 2 / A2，方案 §二 主修）。
+ *
+ * 会话创建把派生变体 id（`<模型>#think-<档>`）写进 durable 会话并持久化；重启后注册表
+ * 只剩基础模型，且旧会话 resume 不重走创建路径、`syncConversationModel` 在"仍是当前模型"
+ * 时也不再调 `chatModelRef`，于是变体无人注册 → 内核 `Model ... is not available`。
+ * 这里在每次重建时按目录把该注册的变体一次性补齐：
+ *   - `#think-off` 恒注册（创建路径对任何模型都用它）；
+ *   - 其余档按该模型生效支持域（声明优先 / 缺省 off-low-high），不承载模型不支持的参数。
+ * 复用 `thinkingVariantSpec` / `registerVariantSpec`，不另写派生逻辑。
+ * **不动 revision**：重建本身会把 variantSpecs 带进单例，再改代数会触发无限重建。
+ * 任务温度变体（`<模型>#t…`）参数来自每次派发的请求体、非确定性规范形，不在此预注册（方案 §四边界）。
+ */
+function preseedThinkingVariants(doc: ProvidersDocument): void {
+	if (!variantPreseedEnabled()) return;
+	for (const entry of doc.providers) {
+		for (const modelId of entry.models) {
+			registerVariantSpec(thinkingVariantSpec(entry.id, modelId, "off"));
+			// rebuild 时 document === doc；thinkingLevelsFor 返回生效支持域（含缺省）
+			for (const level of thinkingLevelsFor(entry.id, modelId)) {
+				if (level === "off") continue;
+				registerVariantSpec(thinkingVariantSpec(entry.id, modelId, level));
+			}
+		}
+	}
+}
+
 /** `models()` 传给 Harness 的访问器：先查文件版本，没变直接返回单例（审查 S2） */
 export function currentModels(): Models {
 	if (isFaux()) return fauxModels();
@@ -463,6 +531,9 @@ function rebuild(): void {
 		const entry = doc.providers.find((provider) => provider.id === spec.providerId);
 		if (!entry || !entry.models.includes(spec.baseModelId)) variantSpecs.delete(key);
 	}
+
+	// 重建期确定性预注册（2026-11-07 扫尾批 2 / A2）：重启后旧会话绑定的派生变体不再丢
+	preseedThinkingVariants(doc);
 
 	const desired = new Map<string, Provider>();
 	for (const entry of doc.providers) desired.set(entry.id, buildProvider(entry));
@@ -705,27 +776,16 @@ export function chatModelRef(thinking: ThinkingLevel): ModelRef {
 	if (isFaux()) return config.model;
 
 	const { provider, modelId } = config.model;
-	const id = `${modelId}#think-${thinking}`;
-	const key = variantKey(provider, id);
+	const spec = thinkingVariantSpec(provider, modelId, thinking);
+	const key = variantKey(provider, spec.id);
 	if (!variantSpecs.has(key)) {
 		const base = currentModels().getModel(provider, modelId);
 		if (!base) throw new Error("聊天模型不在目录里，无法派生思考变体");
-		variantSpecs.set(key, {
-			id,
-			providerId: provider,
-			baseModelId: modelId,
-			// `model` 盖回真实模型名；思考档显式声明，不赌上游默认值。
-			// 两档形状不同：off 只发 enable_thinking:false，其余只发 reasoning_effort
-			// （同时带两个会让上游按自己的优先级挑，档位就不可预测了）
-			samplingParams:
-				thinking === "off"
-					? { model: modelId, enable_thinking: false }
-					: { model: modelId, reasoning_effort: thinking },
-		});
+		registerVariantSpec(spec);
 		revision += 1;
 		currentModels(); // 立刻把新变体发布进单例
 	}
-	return { provider, modelId: id };
+	return { provider, modelId: spec.id };
 }
 
 /** 某模型支持的思考档：providers.json 声明优先，缺省 `["off","low","high"]` */

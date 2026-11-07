@@ -44,6 +44,11 @@ const PROVIDERS = ".data/probe-providers.json";
 const RUNTIME = ".data/probe-providers-runtime.json";
 const FAUX_PROVIDERS = ".data/probe-providers-faux.json";
 const REAL_PROVIDERS = ".data/providers.json";
+/** §11 自带一套隔离数据：重启前后只碰这些文件，不干扰 §1–§10 的既有断言 */
+const RESTART_DB = ".data/probe-restart.sqlite";
+const RESTART_MEMORY = ".data/probe-restart-memory.db";
+const RESTART_PROVIDERS = ".data/probe-restart-providers.json";
+const RESTART_RUNTIME = ".data/probe-restart-runtime.json";
 
 let failures = 0;
 function check(ok: boolean, label: string, detail = ""): void {
@@ -663,6 +668,65 @@ try {
 		? `${statSync(REAL_PROVIDERS).mtimeMs}:${statSync(REAL_PROVIDERS).size}`
 		: "missing";
 	check(realAfter === realBefore, "没有碰真实 .data/providers.json", realAfter);
+
+	// ── 11. 重启后旧会话模型绑定（2026-11-07 扫尾批 2 / A2）────
+	// 真起服务 → 真重启（provider.ts 模块重新求值、注册表重建）→ 旧会话 resume 续聊。
+	// 修复前这一轮会报 no_model / not available；修复后变体随重建预注册，直接可解析。
+	console.log("\n· 11. 重启（注册表重建）后旧会话模型引用直接可解析");
+	fauxServer?.kill();
+	fauxServer = null;
+	await sleep(700);
+	for (const path of [
+		RESTART_DB,
+		`${RESTART_DB}-wal`,
+		`${RESTART_DB}-shm`,
+		RESTART_MEMORY,
+		RESTART_PROVIDERS,
+		RESTART_RUNTIME,
+	]) {
+		rmSync(path, { force: true });
+	}
+	const restartEnv: NodeJS.ProcessEnv = {
+		AGENT_DB_PATH: RESTART_DB,
+		MEMORY_DB_PATH: RESTART_MEMORY,
+		PROVIDERS_PATH: RESTART_PROVIDERS,
+		MODEL_RUNTIME_PATH: RESTART_RUNTIME,
+		// 目录里留一个从未被 chatModelRef 碰过的模型，验证预注册覆盖全目录（不只看当前选中）
+		LLM_MODELS: `${MODEL},unused-model`,
+	};
+	server = startServer(restartEnv);
+	await waitForReady();
+	const oldSession = await chat(BASE);
+	const oldId = oldSession.conversationId;
+	check(Boolean(oldId), "建好一条旧会话（绑定派生变体 id）", String(oldId));
+
+	server.kill();
+	await sleep(700);
+	server = startServer(restartEnv); // 真重启 → 注册表重建
+	await waitForReady();
+	const aBeforeResume = upstreamA.received.length;
+	const resumed = await chat(BASE, oldId); // 旧会话 resume：不走创建路径、也不切档
+	check(resumed.status === 200 && resumed.done, "重启后旧会话这一轮收尾", resumed.events.join(","));
+	check(!resumed.events.includes("error"), "没有 no_model / not available 错误事件", resumed.error ?? "");
+	check(resumed.text.includes("假上游"), "旧会话拿到了模型回复", resumed.text);
+	check(
+		upstreamA.received.length === aBeforeResume + 1,
+		"这一轮真打到了 A",
+		`A ${aBeforeResume} → ${upstreamA.received.length}`,
+	);
+
+	// 回滚开关：MODEL_VARIANT_PRESEEDED=false → 回到懒注册旧行为（用例能表达即可）
+	server.kill();
+	await sleep(700);
+	server = startServer({ ...restartEnv, MODEL_VARIANT_PRESEEDED: "false" });
+	await waitForReady();
+	const rolledBack = await chat(BASE, oldId);
+	check(rolledBack.status === 200, "回滚开关下请求本身不崩", String(rolledBack.status));
+	check(
+		rolledBack.events.includes("error") || !rolledBack.text,
+		"MODEL_VARIANT_PRESEEDED=false 回到懒注册旧行为（旧会话模型不可用）",
+		rolledBack.events.join(","),
+	);
 } finally {
 	server.kill();
 	fauxServer?.kill();
@@ -679,6 +743,12 @@ try {
 	rmSync(FAUX_PROVIDERS, { force: true });
 	rmSync(".data/probe-providers-faux.sqlite", { force: true });
 	rmSync(".data/probe-providers-faux-memory.db", { force: true });
+	rmSync(RESTART_DB, { force: true });
+	rmSync(`${RESTART_DB}-wal`, { force: true });
+	rmSync(`${RESTART_DB}-shm`, { force: true });
+	rmSync(RESTART_MEMORY, { force: true });
+	rmSync(RESTART_PROVIDERS, { force: true });
+	rmSync(RESTART_RUNTIME, { force: true });
 }
 
 console.log(failures === 0 ? "\n✓ 多供应商全部通过" : `\n✗ 有 ${failures} 项没通过`);
