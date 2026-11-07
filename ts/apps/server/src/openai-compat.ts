@@ -399,6 +399,8 @@ interface TaskContext {
 					// 思考增量 / 内部用量事件（2026-11-04 批次一）：OpenAI 协议没有对应位，跳过
 					event.type === "thinking" ||
 					event.type === "usage" ||
+					// 系统提示行（2026-11-07 消息即引导）：OpenAI 协议没有对应位，跳过
+					event.type === "notice" ||
 					// 审批（2026-11-04 批次二）：手机不进聊天流，审批走全局待办轮询
 					// （GET /agent/approvals 不带 conversationId），非流式响应不注入审批正文。
 					event.type === "approval"
@@ -466,8 +468,9 @@ interface TaskContext {
 					});
 					continue;
 				}
-				// 思考增量 / 内部用量事件（2026-11-04 批次一）：OpenAI 协议没有对应位，跳过
-				if (event.type === "thinking" || event.type === "usage") continue;
+				// 思考增量 / 内部用量事件（2026-11-04 批次一）与系统提示行（2026-11-07）：
+				// OpenAI 协议没有对应位，跳过
+				if (event.type === "thinking" || event.type === "usage" || event.type === "notice") continue;
 				// 工具起止：同样走非标准字段，让兼容层的客户端也能画"正在读 xxx"
 				if (event.type === "tool") {
 					await stream.writeSSE({
