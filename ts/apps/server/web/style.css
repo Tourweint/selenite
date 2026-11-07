@@ -70,6 +70,12 @@
 
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
     "Microsoft YaHei", system-ui, sans-serif;
+  /* 首页问候的展示字体（2026-11-07）：衬线体。水晶是冷光，衬线字是纸感，
+     两者并置才像「一块石头放在纸上」，无衬线会把它拉回按钮文案的层级。
+     只给首页那一句用，正文/控件仍是 --font；Windows 有思源宋（Noto Serif SC），
+     macOS 走 Songti SC，都没有才落到系统衬线。 */
+  --font-display: "Songti SC", "Noto Serif SC", "Source Han Serif SC",
+    "STSong", "SimSun", serif;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 
   --sidebar: 232px;
@@ -302,7 +308,14 @@ body {
 }
 
 button, input, textarea { font: inherit; color: inherit; }
-button { cursor: pointer; }
+/*
+ * 按钮一律从零开始画（2026-11-07 二次修）。
+ * 只写 `font/color` 不写 border 时，按钮会保留 UA 的 `2px outset` —— 在圆角按钮上
+ * 渲染成一圈上亮下暗的立体环，看起来就是「图标外面套了个黑圈」。所有自绘按钮都会
+ * 显式给 border（.ghost 1px、.btn-primary 0），所以这里统一清掉默认值不会改到既有控件。
+ */
+button { cursor: pointer; border: 0; }
+button:disabled { cursor: default; }
 svg { width: 16px; height: 16px; display: block; }
 [hidden] { display: none !important; }
 
@@ -371,7 +384,9 @@ html[data-sidebar="closed"] .sidebar-inner {
   z-index: 1;
   display: flex; flex-direction: column; align-items: center;
   gap: 4px;
-  padding: 14px 0 12px;
+  /* 底部 18px：状态点从「挂在齿轮右侧」改成「齿轮正下方」后整体高了一行，
+     12px 会让绿点贴着窗口下沿（2026-11-07 截图核对）。 */
+  padding: 14px 0 18px;
   opacity: 0;
   pointer-events: none;
   transition: opacity 180ms cubic-bezier(.4, 0, 1, 1);
@@ -398,19 +413,16 @@ html[data-sidebar="closed"] .side-rail {
 /* 22px 短分隔线：用 divider token，浅色主题的 card-border 是透明的 */
 .rail-sep { flex: none; width: 22px; height: 1px; margin: 2px 0; background: var(--divider); }
 .rail-flex { flex: 1; }
-/* 收起态底栏：齿轮中心必须和导航同一竖轴，状态点挂在右侧不参与居中计算。
-   以前是「齿轮 + 点」一起 justify-content:center，齿轮被点挤得偏左 ~6px。 */
+/* 收起态底栏（2026-11-07 用户口径）：状态点在齿轮**正下方**，同一竖轴居中。
+   之前状态点绝对定位在轨道右侧，跟齿轮不在一条线上——收起态像两颗不相干的点。 */
 .rail-foot {
   flex: none;
-  position: relative;
   width: 100%;
-  display: flex; align-items: center; justify-content: center;
+  display: flex; flex-direction: column; align-items: center; gap: 3px;
 }
 .rail-status {
-  position: absolute;
-  right: 5px; top: 50%;
-  transform: translateY(-50%);
   display: flex; align-items: center; justify-content: center;
+  height: 10px;
 }
 .rail-status i {
   display: block; width: 7px; height: 7px;
@@ -452,20 +464,8 @@ html[data-sidebar="closed"] .side-rail {
   letter-spacing: .02em;
 }
 
-/* 导航行：38px 胶囊 / 22px 图标 / 13px 文字 / 12px 内边距。
-   图标左右各留 3px，凑成 28px 槽位，和 28px 首字头像共用同一条文字轴线。
-   hover 底色瞬时切换，不挂 transition——列表重排时旧 hover 渐变会拖尾（CINDY 同款）。 */
-.new {
-  display: flex; align-items: center; justify-content: flex-start; gap: 8px;
-  width: 100%; height: 38px; padding: 0 12px;
-  border: 0;
-  border-radius: var(--r-full);
-  background: transparent;
-  color: var(--text-2);
-  font-size: 13px; font-weight: 400;
-}
-.new:hover { background: var(--card); color: var(--text); }
-.new svg { width: 22px; height: 22px; flex: none; margin: 0 3px; }
+/* 导航行（.side-item）的几何在下面「侧栏按人重排」那节统一给；
+   2026-11-07：顶部「新建对话」按钮（.new）已退役，样式一并删掉。 */
 
 /* 服务分区的模型下拉（2026-11-04）：清单来自 /healthz 的 models（接口文档 §2.8），
    不可切时前端退化成只读行，这个样式只在可切时被挂出来 */
@@ -498,14 +498,15 @@ html[data-sidebar="closed"] .side-rail {
   padding: 2px 0;
 }
 
-.chats-empty { padding: 10px; font-size: 12.5px; color: var(--text-3); }
+.chats-empty { padding: 10px; font-size: 13px; color: var(--text-3); }
 
 .chat {
   display: flex; align-items: center; gap: 4px;
-  width: 100%; padding: 7px 6px 7px 12px;
+  width: 100%; padding: 8px 6px 8px 12px;
   border-radius: var(--r-md);
   background: transparent; color: var(--text-2);
-  font-size: 13px; line-height: 1.45;
+  /* 2026-11-07 二改：会话行 13 → 14px，与分区头同一档（用户要求整体调大） */
+  font-size: 14px; line-height: 1.45;
   cursor: pointer;
   /* 背景色瞬时切换：hover 出现操作钮时行高/列宽都不变，不加 transition */
 }
@@ -548,30 +549,13 @@ html[data-sidebar="closed"] .side-rail {
   box-shadow: inset 0 0 0 1px var(--accent-line);
 }
 
-/*
- * 侧栏底部常驻区：一行放服务状态（左）与齿轮（右）。
- * 齿轮只留图标，提示由 aria-label / title 提供；与侧栏其他项共用 hover / 选中态。
- */
-.side-foot {
-  display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 8px;
-  /* 钉死在侧栏底边：会话列表再长也由列表自己滚，底栏不被推挤。
-     .sidebar-inner 是唯一的滚动容器，短窗口时 margin-top:auto 没有余量，
-     所以再用 sticky 兜住，内容再长也看得到设置与状态。 */
-  position: sticky;
-  bottom: 0;
-  z-index: 2;
-  background: var(--backdrop);
-  margin-top: auto;
-  padding: 8px 0 2px;
-  border-top: 1px solid var(--divider);
-}
-
 .side-item {
   display: flex; align-items: center; justify-content: flex-start; gap: 8px;
   width: 100%; height: 38px; padding: 0 12px;
   border: 0; border-radius: var(--r-full);
   background: transparent; color: var(--text-2);
-  font-size: 13px; font-weight: 400;
+  /* 2026-11-07 二改：13 → 14px（侧栏整体放大一档，与分区头对齐） */
+  font-size: 14px; font-weight: 400;
 }
 .side-item:hover { background: var(--card); color: var(--text); }
 .side-item[aria-current="true"] {
@@ -584,17 +568,56 @@ html[data-sidebar="closed"] .side-rail {
 .side-item:disabled { opacity: .42; cursor: default; }
 .side-item:disabled:hover { background: transparent; color: var(--text-3); }
 
-/* 底栏齿轮：只有 36×36 图标钮，不占整行宽度 */
-.side-foot .foot-gear {
-  width: 36px; height: 36px; padding: 0; justify-content: center;
-  flex: none;
+/*
+ * 侧栏底部常驻区（2026-11-07 二改）：与收起轨道同构——齿轮一颗居中，状态点正下方居中。
+ *
+ * 上一版是「齿轮整行 + 右侧『设置』文字」压着「圆点 + 『连接中』」一行文字：
+ * 两行都从左起排，字宽不同，展开态看着就是左一块右一块。
+ * 用户口径：设置不用文字、用图标就行；状态也只留点，不要占一行字。
+ * 所以这里两块都是居中的定宽图标钮，几何和 .rail-btn / .rail-status 一致。
+ */
+.side-foot {
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  /* 钉死在侧栏底边：会话列表再长也由列表自己滚，底栏不被推挤。
+     .sidebar-inner 是唯一的滚动容器，短窗口时 margin-top:auto 没有余量，
+     所以再用 sticky 兜住，内容再长也看得到设置与状态。 */
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  background: var(--backdrop);
+  margin-top: auto;
+  padding: 8px 0 10px;
+  border-top: 1px solid var(--divider);
 }
-.side-foot .status { padding: 0 0 0 12px; }
 
-.status { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--text-2); }
-.status i { width: 5px; height: 5px; border-radius: 50%; background: var(--text-3); transition: background .2s ease; }
-/* 在线文字与圆点一起变成功绿；waiting / off 保持原色 */
-.status[data-state="ok"] { color: var(--ok); }
+/* 底栏齿轮：40×40 圆形命中区（同 .rail-btn），图标 22px 同导航行 */
+.side-foot .foot-gear {
+  flex: none;
+  width: 40px; height: 40px; padding: 0;
+  display: grid; place-content: center;
+  border-radius: var(--r-full);
+}
+/* 图标尺寸必须显式写回：.side-item svg 是 22px，这里同宽同轴；
+   外层 grid 居中比 flex + margin 稳（按钮本身不再撑满一行）。 */
+.side-foot .foot-gear svg { width: 22px; height: 22px; margin: 0; }
+
+/* 状态：只剩一颗点，居中落在齿轮正下方（10px 行高同 .rail-status） */
+.side-foot .status {
+  display: flex; align-items: center; justify-content: center;
+  height: 10px;
+}
+.status-text {
+  /* 状态文案不常驻占位：视觉上只要一个点，文字留给 title 与读屏 */
+  position: absolute;
+  width: 1px; height: 1px;
+  margin: -1px; padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+.status i { display: block; width: 7px; height: 7px; border-radius: 50%; background: var(--text-3); transition: background .2s ease; }
+/* 在线 = 成功绿；off 用错误红；waiting 呼吸（与 .rail-status 同一套色） */
 .status[data-state="ok"] i { background: var(--ok); }
 .status[data-state="off"] i { background: var(--c-error); }
 .status[data-state="waiting"] i { background: var(--text-3); animation: breathe 1.6s ease-in-out infinite; }
@@ -632,11 +655,6 @@ html[data-sidebar="closed"] .side-rail {
 .avatar-edit:hover { filter: brightness(1.06); box-shadow: 0 0 0 2px var(--accent-line); }
 .avatar-edit:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-.side-chief {
-  flex: none;
-  display: flex; flex-direction: column; gap: 2px;
-}
-
 /* 总管固定条目：头像 + 名字 + pill；状态点固定在最右。永在最上 */
 .chief-entry { gap: 8px; cursor: pointer; }
 .chief-entry .roster-name { font-weight: 500; }
@@ -647,47 +665,175 @@ html[data-sidebar="closed"] .side-rail {
 /* 状态点在行尾；绿色取 --ok（四套主题都是明确绿），本批不改状态来源 */
 .chief-entry .status-dot { margin-left: 2px; }
 
-/* 最近会话折叠块 */
-.recents { display: flex; flex-direction: column; gap: 2px; }
-.recents-head {
-  display: flex; align-items: center; gap: 6px;
-  width: 100%; height: 26px; padding: 0 12px;
+/* ── 侧栏分区（2026-11-07 四改定稿）────────────────────────
+   一块分区 = 两行网格：[整行折叠按钮] [＋] + [分区体]。
+   用户口径：「箭头别要了，点击这个框相当于收起或展开，在右边留个加号」。
+   所以分区头本身就是按钮（图标 + 名称 + 计数），hover 给一层底；
+   折叠状态不靠箭头，靠「展开时有内容、收起时只剩这一行」直接可见。 */
+.side-sec {
+  flex: none;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 2px 0;
+  padding-top: 4px;
+  border-top: 1px solid var(--divider);
+}
+.side-sec-head {
+  min-width: 0;
+  display: flex; align-items: center; gap: 7px;
+  height: 36px; padding: 0 6px 0 8px;
   border: 0; border-radius: var(--r-md);
-  background: transparent; color: var(--text-3);
-  font-size: 12px; font-weight: 500;
+  background: transparent; color: var(--text);
+  font-size: 14px; font-weight: 600;
+  text-align: left;
   cursor: pointer;
 }
-.recents-head:hover { background: var(--card); color: var(--text-2); }
-.recents-chev { width: 12px; height: 12px; margin-left: auto; transition: transform .18s ease; }
-.recents.is-collapsed .recents-chev { transform: rotate(-90deg); }
-.recents.is-collapsed .recents-body { display: none; }
-.recents-body { display: block; }
-/* 折叠块内的会话列表不再抢剩余高度（原来 .chats 是 flex:1 自己滚） */
-.recents-body .chats { flex: none; max-height: 200px; overflow-y: auto; }
-
-.recents-all {
-  display: flex; align-items: center; gap: 4px;
-  width: 100%; height: 28px; padding: 0 12px;
-  border: 0; border-radius: var(--r-md);
-  background: transparent; color: var(--text-3);
-  font-size: 12px; cursor: pointer;
+.side-sec-head:hover:not(:disabled) { background: var(--card); }
+.side-sec-head:disabled { opacity: .5; cursor: default; }
+/* 分区图标：20px，与导航行 22px 图标同一视觉重量 */
+.sec-ico {
+  flex: none; width: 20px; height: 20px;
+  color: var(--text-3);
 }
-.recents-all:hover { background: var(--card); color: var(--accent); }
-
-/* 执事花名册 */
-.side-partners {
+.side-sec-head:hover .sec-ico { color: var(--text-2); }
+.sec-name {
   flex: none;
-  display: flex; flex-direction: column; gap: 2px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.partners-head { justify-content: space-between; }
-.roster-add {
-  width: 20px; height: 20px; padding: 0;
+/* 分区头里的计数：紧跟名称，最右边是 ＋ */
+.sec-count { margin-left: 2px; flex: none; }
+/* 行尾 ＋：24×24 命中区 + 16px 图标 */
+.sec-add-wrap { flex: none; display: flex; align-items: center; }
+.sec-add {
+  flex: none;
+  width: 24px; height: 24px; margin-right: 4px; padding: 0;
   display: grid; place-content: center;
   border: 0; border-radius: var(--r-sm);
-  background: transparent; color: var(--text-3);
-  font-size: 15px; line-height: 1; cursor: pointer;
+  background: transparent; color: var(--text-2);
+  cursor: pointer;
 }
-.roster-add:hover { background: var(--card-high); color: var(--accent); }
+.sec-add svg { width: 16px; height: 16px; }
+.sec-add:hover:not(:disabled) { background: var(--card-high); color: var(--accent); }
+.sec-add:disabled { opacity: .35; cursor: default; }
+/* 分区体：独占第二行，展开/收起走高度动画（2026-11-07 五改）。
+ *
+ * 为什么用 grid-template-rows 0fr → 1fr：内容高度是变的（会话多了、任务行多了都会长），
+ * 写死 max-height 要么裁掉、要么留一段空白；而 fr 轨道会按内容算，不用知道真实高度。
+ * 三层结构：
+ *   .side-sec-body  外层 grid 容器（只负责轨道过渡，overflow 交给 clip）
+ *   .side-sec-clip  裁切层（overflow:hidden + 1fr 轨道，收起到 0 时把内容整个藏掉）
+ *   .side-sec-inner 真正的内容（自身再排一列，带内边距，避免动画时贴边）
+ * 展开 220ms 走减速曲线（内容"落下来"），收起 160ms 略快（视线已经移走了，
+ * 拖泥带水反而像卡住）。透明度跟着走一档，避免 0 高时残留一条描边。 */
+.side-sec-body {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-rows: 1fr;
+  transition:
+    grid-template-rows var(--dur-slow) var(--ease-decelerate);
+}
+.side-sec-clip {
+  min-height: 0;
+  overflow: hidden;
+}
+.side-sec-inner {
+  display: flex; flex-direction: column; gap: 2px;
+  opacity: 1;
+  /* 展开时内容轻微下落 4px 淡入：高度是"打开"的，内容是"落进来"的 */
+  transform: translateY(0);
+  transition:
+    opacity 180ms var(--ease-standard) 30ms,
+    transform 220ms var(--ease-decelerate);
+}
+.side-sec.is-collapsed .side-sec-body {
+  grid-template-rows: 0fr;
+  /* 收起比展开快一档：手指离开后不该再等 */
+  transition: grid-template-rows 160ms var(--ease-accelerate);
+}
+.side-sec.is-collapsed .side-sec-inner {
+  /* 收起时**不提前淡出**：靠 .side-sec-clip 的高度裁切把内容卷上去。
+     一开始是 110ms 的 opacity 过渡，70ms 时内容已经看不见、只剩一截空壳在收，
+     观感像"先隐身再收框"（2026-11-07 中间帧截图核对过）。
+     现在把 opacity 归零放在 160ms 之后（= 收起时长），内容全程可见地卷走，
+     到最后一帧才归零——归零只是为了让收起态彻底不占 alpha，防 0 高时残留描边。 */
+  opacity: 0;
+  transition: opacity 0s linear 160ms;
+}
+/* 系统开了"减少动态效果"就直切：全局那条 .01ms 已经兜底，这里显式写一遍，
+   免得以后有人把全局规则收窄时这块变成"还在动"。 */
+@media (prefers-reduced-motion: reduce) {
+  .side-sec-body,
+  .side-sec-inner { transition: none; }
+}
+
+/* 项目 ＋ 的双入口菜单（2026-11-07 四改）：挂在 body 下，坐标 JS 写。
+   两行都是「标题 + 一行解释」——用户要区分的是"建新目录"和"登记已有目录"，
+   光两个词（新建项目 / 添加子项目）看不出差别，解释就写在行里。 */
+.proj-add-menu {
+  position: fixed;
+  z-index: 45;
+  min-width: 236px; max-width: min(300px, 86vw);
+  padding: 4px;
+  border: 1px solid var(--composer-border);
+  border-radius: var(--r-md);
+  background: var(--bg);
+  box-shadow: var(--shadow-menu);
+}
+.proj-add-item {
+  display: flex; flex-direction: column; gap: 1px;
+  width: 100%; padding: 7px 10px;
+  border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--text);
+  text-align: left; cursor: pointer;
+}
+.proj-add-item:hover { background: var(--surface-low); }
+.proj-add-label { font-size: 13.5px; font-weight: 600; }
+.proj-add-hint { font-size: 11.5px; color: var(--text-3); line-height: 1.4; }
+
+/* 分区底部的「去整页看」链接行：任务中心 / 项目管理各一条 */
+.sec-foot-link {
+  display: flex; align-items: center; gap: 4px;
+  width: 100%; height: 30px; padding: 0 12px;
+  border: 0; border-radius: var(--r-md);
+  background: transparent; color: var(--text-3);
+  font-size: 13px; text-align: left; cursor: pointer;
+}
+.sec-foot-link:hover { background: var(--card); color: var(--accent); }
+
+/* 任务中心分区里的简版对话行：聚合灯 + 标题 + 时间 */
+.task-row { gap: 7px; }
+.task-lamp {
+  flex: none; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--text-3);
+}
+.task-lamp[data-lamp="fail"] { background: var(--c-error); }
+.task-lamp[data-lamp="ask"] { background: var(--c-primary); }
+.task-lamp[data-lamp="run"] { background: var(--text-3); }
+
+/* 项目分区里的行：与执事行同一套 .side-item，图标槽对齐 28px 文字轴线 */
+/* 项目行（2026-11-06）：232px 侧栏里这一行要装下
+   图标 22 + 名字 + 「主项目」标注 + 两个文件入口，所以内边距与间隙都得收紧——
+   按 12px 内边距 + 6px 间隙时，主项目名只剩 54px，被截成「Wor…」。 */
+.proj-row { gap: 4px; padding-left: 8px; padding-right: 6px; cursor: default; }
+.proj-row.is-unavailable { color: var(--warn); cursor: pointer; }
+.proj-row.is-main .proj-ico { color: var(--accent); }
+/* 子项目右移一级：靠缩进 + 折入箭头表达层级，不额外加图标 */
+.proj-row.is-sub { padding-left: 18px; }
+.side-item-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 行尾的文件入口：**默认就要看得见**。
+   原来是 opacity:0，只在 hover 时出现——看不见的按钮等于没有。
+   现在常态 .55 淡显，行 hover / 键盘聚焦时提亮。
+   尺寸收到 20×20：232px 的侧栏里，行 = 图标22 + 名字 + 标注 + 两个入口，
+   24px 的按钮会把主项目名挤成「Wor…」（2026-11-06 截图核对）。 */
+.proj-row .proj-act { width: 20px; height: 20px; opacity: .55; }
+.proj-row .proj-act-ico svg { width: 13px; height: 13px; }
+.proj-row:hover .proj-act,
+.proj-row:focus-within .proj-act { opacity: 1; }
+/* 行内标注比浮层里的更紧凑：这里每像素都要留给项目名 */
+.proj-row .proj-tag { padding: 0 4px; font-size: 9.5px; line-height: 1.6; }
+
+/* 执事花名册（分区外壳与分区头统一由 .side-sec 提供） */
 .roster {
   display: flex; flex-direction: column; gap: 2px;
   max-height: 220px; overflow-y: auto;
@@ -714,11 +860,11 @@ html[data-sidebar="closed"] .side-rail {
 .roster-count { margin-left: auto; flex: none; border: 0; cursor: pointer; }
 .roster-idle {
   margin-left: auto; flex: none;
-  font-size: 11px; color: var(--text-3);
+  font-size: 12px; color: var(--text-3);
 }
 .roster-empty {
-  padding: 6px 12px;
-  font-size: 12px; line-height: 1.5; color: var(--text-3);
+  padding: 8px 12px;
+  font-size: 13px; line-height: 1.5; color: var(--text-3);
 }
 
 /* 收起轨道：总管首字圆钮（40px 按钮内 28px 圆，和展开态同尺寸） */
@@ -870,26 +1016,75 @@ html[data-sidebar="closed"] .side-rail {
 
 /* ── 空态 ─────────────────────────────────────────────── */
 
-.empty { margin: 13vh auto 0; text-align: center; color: var(--text-2); animation: rise .3s ease both; }
-/* 首页态：问候语坐在被抬起来的输入框上方（对齐 cindy 的首页层级：标识 → 输入 → 内容）。
-   22vh 是按整窗高度算的，标题栏占了顶部 40px，这里减掉它，位置才不会往下掉。 */
-.main[data-home="1"] .empty { display: block; margin-top: calc(22vh - var(--titlebar-h)); }
-.main[data-home="1"] .empty p {
-  margin: 0;
-  font-size: 17px; color: var(--text);
-  letter-spacing: .01em;
+/* 空态整组：水晶在左、问候在右（2026-11-07 用户指定横排）。
+   以前是图标竖着压在文字上方，88px 的方块把这一组的重心拉得很高，
+   横排后一行读完，重量落回文字上，水晶只当起首的字距。
+
+   字号放在整组上、图标用 em 跟着走：窄窗把字收到 22px 时，
+   54px 的石头会显得头重，绑成 1.8em 后它跟着缩到 40px，比例才一直是同一个。 */
+.empty {
+  display: inline-flex; align-items: center; gap: 16px;
+  margin: 13vh auto 0;
+  text-align: left;
+  font-size: clamp(22px, 2.2vw + 6px, 30px);
+  color: var(--text-2);
+  animation: rise .3s ease both;
 }
-.main[data-home="1"] .empty-mark { width: 88px; height: 88px; }
+/* 首页态：整组坐在被抬起来的输入框正上方（对齐 cindy 的首页层级：标识 → 输入 → 内容）。
+   不用 vh 硬算——原来 `22vh - 标题栏` 在窗口一矮就压到卡上（2026-11-06 已登记的老问题）。
+   这里直接对齐卡片顶边：卡片底边距主区底 = 50vh - offset，offset = 卡高/2 - 12，
+   于是卡片顶边离主区底 = 50vh + offset + 24；再加 18px 呼吸，就是下面的 +42。
+   卡高由 JS 实测，字号变大、占位文案换行都不会压上去。 */
+/* 首页时 .top 是 display:none，但 grid-template-rows 还是 `auto 1fr`：
+   .scroll 落在 auto 那一行，只拿到内容高（709 的主区里只占 392），主区下半截空着、
+   空态也被裁在这个矮框里。改成单行 1fr，滚动盒才铺满主区。 */
+.main[data-home="1"] { grid-template-rows: 1fr; }
+.main[data-home="1"] .scroll { height: 100%; }
+.main[data-home="1"] .thread {
+  min-height: 100%;
+  justify-content: flex-end;
+  padding-bottom: calc(50vh + var(--composer-home-offset) + 42px);
+}
+/* align-self 而不是 margin:0 auto：.thread 是纵向 flex，横向 auto margin 不会居中，
+   而 align-self:center 既居中又让这一组收缩到内容宽（否则会被拉成整行、靠左） */
+.main[data-home="1"] .empty { align-self: center; margin: 0; }
+/* 图标高度用 em 而不是 px：整组字号在 clamp 里缩放，石头跟着缩才不会头重脚轻。
+   1.8em 在宽窗（30px）下就是 54px——这是贴着 30px 宋体量出来的：
+   水晶宽高比只有 0.6，高度不够时它在字旁边就像一道竖线。 */
+.main[data-home="1"] .empty-mark { height: 1.8em; }
+
 /* 首页标识 = 项目水晶（2026-11-04，替掉旧的 40px 方块占位）：
-   无背景无描边，水晶自带渐变明暗面，外圈只给两层靛蓝光晕（取 --c-primary 色相） */
+   无背景无描边，水晶自带渐变明暗面，外圈只给两层靛蓝光晕（取 --c-primary 色相）。
+   2026-11-07 换成裁掉透明边的 crystal-mark.png：原来 512 方块里水晶只占中间一条，
+   88px 的框实际只画出 48px 的石头，横排时那段空白会变成一段莫名其妙的距离。 */
 .empty-mark {
-  display: block;
-  width: 72px; height: 72px; margin: 0 auto 18px;
+  display: block; flex: none;
+  height: 1.8em; width: auto;
   object-fit: contain;
   filter: drop-shadow(0 8px 22px rgba(62, 74, 140, .26))
           drop-shadow(0 2px 6px rgba(62, 74, 140, .14));
 }
 .empty p { margin: 0 0 16px; font-size: 14px; }
+
+/* 问候语（2026-11-07）：首页唯一的一句人话，用衬线体，字号抬到 30px。
+   无衬线在这里读起来像按钮文案；衬线带笔锋，跟水晶的冷光放在一起才像「纸上的题头」。
+   语句本身按时间段换（见 app.js 的 GREETING_SLOTS），CSS 只负责它怎么站着。
+
+   字号只在 .empty 上定一次（clamp 22→30），这里 inherit：图标用 em 跟着缩放，
+   两边必须是同一个值；若各自写一份 clamp，改动时就会不同步。
+   选择器带 .empty 前缀是因为上面那条 `.empty p` 的优先级 (0,1,1) 高于单个类，
+   不压过它就会被 14px 盖掉（第一版犯过，实测 computed 仍是 14px）。
+   用 clamp 而不是写死 30px：最长那句「早，今天想从哪儿开始？」在 600px 宽的窗口会折行。 */
+.empty p.empty-greet {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: inherit;
+  font-weight: 500; line-height: 1.25;
+  letter-spacing: .03em;
+  color: var(--text);
+  /* 中文不需要靠断词换行，一句话要么整行，要么在标点处断 */
+  word-break: keep-all;
+}
 .hints { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
 .hints button {
   height: 30px; padding: 0 13px;
@@ -919,17 +1114,41 @@ html[data-sidebar="closed"] .side-rail {
 }
 .msg.assistant { flex-direction: column; gap: 8px; position: relative; }
 
-.copy-btn {
-  position: absolute; top: -2px; right: -4px;
-  height: 22px; padding: 0 8px;
+/* 回答脚注（2026-11-06）：复制 · 用时 · 完成时间，收在正文下方一条线上。
+   以前复制按钮 absolute 在右上角、用 absolute 在右侧，两者永远对不齐；
+   现在还原成正常流里的 flex 行，hover 整条回答才淡入。
+
+   留 20px 高度是刻意的：不留就会在 hover 的一瞬间把下面的消息顶下去，
+   长对话里来回划鼠标会一直抖。负 margin 把父级 gap 抵掉，实际只多占一行细带。 */
+.msg-foot {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px;
+  min-height: 20px; margin-top: -6px;
+  font-size: 11px; color: var(--text-3);
+  opacity: 0; pointer-events: none;
+  transition: opacity .15s ease;
+}
+.msg.assistant:hover .msg-foot,
+.msg-foot:focus-within { opacity: 1; pointer-events: auto; }
+/* 键盘用户不必靠 hover 才能摸到复制 */
+.msg.assistant:focus-within .msg-foot { opacity: 1; pointer-events: auto; }
+
+.msg-foot .copy-btn {
+  height: 20px; padding: 0 7px;
   border: 1px solid var(--outline); border-radius: var(--r-sm);
   background: var(--bg); color: var(--text-3);
-  font-size: 11.5px;
-  opacity: 0; pointer-events: none;
-  transition: opacity .15s ease, color .15s ease;
+  font-size: 11px;
+  transition: color .15s ease, border-color .15s ease;
 }
-.msg.assistant:hover .copy-btn { opacity: 1; pointer-events: auto; }
-.copy-btn:hover { color: var(--text); }
+.msg-foot .copy-btn:hover { color: var(--text); border-color: var(--text-3); }
+
+.msg-usage,
+.msg-time { line-height: 20px; }
+/* 用时与完成时间之间一条细分隔，视觉上不糊成一坨 */
+.msg-time::before {
+  content: ""; display: inline-block;
+  width: 1px; height: 9px; margin-right: 10px;
+  background: var(--divider); vertical-align: -1px;
+}
 
 .body { min-width: 0; overflow-wrap: anywhere; }
 
@@ -1096,14 +1315,8 @@ html[data-sidebar="closed"] .side-rail {
   max-height: 240px; overflow-y: auto;
 }
 
-/* 消息级 token/耗时（批次一）：hover 出现，在复制按钮下方一档 */
-.msg-usage {
-  position: absolute; top: 24px; right: -4px;
-  font-size: 11px; color: var(--text-3);
-  opacity: 0; pointer-events: none;
-  transition: opacity .15s ease;
-}
-.msg.assistant:hover .msg-usage { opacity: 1; }
+/* 消息级 token/耗时：2026-11-06 起是 .msg-foot 里的一项，不再自己 absolute。
+   旧规则留着会把脚注撑成浮层，整段删掉。 */
 
 /* 手动中断的痕迹（批次一） */
 .msg.stopped {
@@ -1112,6 +1325,18 @@ html[data-sidebar="closed"] .side-rail {
 
 /* 错误行竖排：正文 + 重试按钮上下排（批次一） */
 .msg.error { flex-direction: column; align-items: flex-start; gap: 6px; }
+/* 系统提示行（2026-11-07 消息即引导）：插话/排队的诚实回执。
+   不是错误、也不是模型的正文，所以用中性胶囊，不进 markdown 渲染。 */
+.msg.notice { flex-direction: row; align-items: center; }
+.msg.notice .body {
+  padding: 6px 12px;
+  border-radius: var(--r-full);
+  background: var(--surface-low);
+  border: 1px solid var(--divider);
+  color: var(--text-3);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
 .retry-btn {
   height: 26px; padding: 0 10px;
   border: 1px solid var(--card-border); border-radius: var(--r-sm);
@@ -1136,57 +1361,129 @@ html[data-sidebar="closed"] .side-rail {
   to { opacity: 1; transform: none; }
 }
 
-/* ── 活动行 ───────────────────────────────────────────── */
+/* ── 工作过程（2026-11-07，对齐 ZCode 的「工作过程」）────────────
+ * 一块 = 头行（工作中/已工作 · 时长 · 步数）+ 步骤列表。
+ * 运行中展开、收尾折断——同一个 DOM，所以"点开看到的"永远是当时那些步骤。 */
 
-.acts { display: flex; flex-direction: column; gap: 1px; }
-.acts:empty { display: none; }
-/* 设置里关掉「工具活动」时整体不显示 */
-html[data-acts="0"] .acts { display: none !important; }
-
-.act {
-  display: flex; align-items: center; gap: 8px;
-  min-height: 26px; padding: 2px 8px;
-  border-radius: var(--r-sm);
-  font-size: 12.5px; color: var(--text-2);
-  /* 跟 body 的主题过渡同一档（.18s ease），只过渡颜色类属性 */
-  transition: color .18s ease, border-color .18s ease;
+.wp {
+  display: flex; flex-direction: column;
+  margin: 2px 0 4px;
+  border: 1px solid var(--card-border);
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--card) 55%, transparent);
+  overflow: hidden;
+  transition: background-color .18s ease, border-color .18s ease;
 }
-.act .dot {
+/* 设置里关掉「工具活动」时整块隐掉（沿用同一个开关） */
+html[data-acts="0"] .wp { display: none !important; }
+
+.wp-head {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; padding: 7px 10px;
+  border: 0; background: transparent;
+  color: var(--text-2); font-size: 12.5px; text-align: left;
+  cursor: pointer;
+  transition: background-color .15s ease, color .15s ease;
+}
+.wp-head:hover { background: var(--card); color: var(--text); }
+.wp-head:focus-visible {
+  outline: 2px solid var(--accent-line); outline-offset: -2px;
+}
+
+/* 运行中的小呼吸点：只表达"还在走"，不是进度条（进度由右侧步数说） */
+.wp[data-state="running"] .wp-head::before {
+  content: ""; flex: none;
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent);
+  animation: breathe 1.4s ease-in-out infinite;
+}
+.wp[data-state="interrupted"] .wp-head::before {
+  content: ""; flex: none;
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--text-3);
+}
+
+.wp-title { flex: none; font-weight: 500; color: var(--text); }
+.wp-meta {
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 11.5px; color: var(--text-3);
+}
+.wp-chevron {
+  flex: none; display: inline-flex; width: 14px; height: 14px;
+  color: var(--text-3);
+  transition: transform .18s ease, color .15s ease;
+}
+.wp-chevron svg { width: 14px; height: 14px; }
+.wp[data-open="1"] .wp-chevron { transform: rotate(90deg); }
+.wp-head:hover .wp-chevron { color: var(--text-2); }
+
+.wp-steps { display: none; flex-direction: column; gap: 1px; padding: 0 6px 6px; }
+.wp[data-open="1"] .wp-steps { display: flex; }
+/* 一步都没有（例如只有派活事件）就不撑一块空壳 */
+.wp[data-state="completed"]:not(:has(.wp-step)) .wp-steps { display: none; }
+
+.wp-step {
+  display: flex; flex-direction: column;
+  border-radius: var(--r-sm);
+  transition: background-color .15s ease;
+}
+.wp-step:hover { background: color-mix(in srgb, var(--card) 70%, transparent); }
+
+.wp-line {
+  display: flex; align-items: center; gap: 7px;
+  min-height: 24px; padding: 1px 4px;
+  font-size: 12px; color: var(--text-2);
+}
+.wp-icon {
+  flex: none; display: inline-flex; width: 13px; height: 13px;
+  color: var(--text-3);
+}
+.wp-icon svg { width: 13px; height: 13px; }
+.wp[data-state="running"] .wp-step[data-state="run"] .wp-icon { color: var(--accent); }
+
+/* 状态点：运行/成功/失败——成功是"已发生"，不抢眼；失败要红 */
+.wp-status {
   flex: none; width: 5px; height: 5px; border-radius: 50%;
   background: var(--text-3);
   transition: background-color .18s ease;
 }
-.act[data-state="run"] .dot { background: var(--accent); animation: breathe 1.2s ease-in-out infinite; }
-.act[data-state="err"] .dot { background: var(--c-error); }
-.act-name {
-  flex: none; font-family: var(--mono); font-size: 12px; color: var(--text);
-  transition: color .18s ease;
+.wp-step[data-state="run"] .wp-status { background: var(--accent); animation: breathe 1.2s ease-in-out infinite; }
+.wp-step[data-state="ok"] .wp-status { background: color-mix(in srgb, var(--text-3) 70%, transparent); }
+.wp-step[data-state="err"] .wp-status { background: var(--c-error); }
+/* 已转后台（2026-11-07）：派活受理后轮先收尾、chancellor 还在跑——
+   中空点 = 没结束也没失败，与"成功是已发生"的灰点区分开 */
+.wp-step[data-state="back"] .wp-status {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--text-3);
 }
-.act-label {
+
+.wp-verb { flex: none; color: var(--text); }
+.wp-name {
+  flex: none; font-family: var(--mono); font-size: 11.5px; color: var(--text-3);
+}
+.wp-label {
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-family: var(--mono); font-size: 12px; color: var(--text-3);
-  transition: color .18s ease;
+  font-family: var(--mono); font-size: 11.5px; color: var(--text-3);
 }
-.act[data-state="thinking"] {
-  font-style: italic; color: var(--text-3);
-  padding-left: 10px; margin: 2px 0 2px 7px;
-  border-left: 2px solid var(--outline); min-height: 22px;
-}
-.act[data-state="err"] .act-name { color: var(--c-error); }
+.wp-step[data-state="err"] .wp-label { color: var(--c-error); }
 
-/* 可展开的工具行：点开看参数 / 输出 */
-.act.expandable { cursor: pointer; flex-wrap: wrap; }
-.act.expandable::after {
-  content: "⌄"; margin-left: auto; flex: none;
-  font-size: 11px; color: var(--text-3);
-  transition: transform .15s ease, color .18s ease;
+/* 参数 / 输出 / 改动：默认收起在一层里，点开这一行才看（避免长输出撑爆时间线） */
+.wp-detail {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 0 4px 6px 27px;
 }
-.act[data-open="1"].expandable::after { transform: rotate(180deg); }
-
-.act-block {
-  display: none; flex-basis: 100%;
-  margin: 4px 0 2px; padding: 8px 10px;
-  max-height: 220px; overflow: auto;
+.wp-detail[hidden] { display: none; }
+.wp-block {
+  display: flex; flex-direction: column; gap: 3px;
+}
+.wp-block-tag {
+  font-size: 10.5px; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--text-3);
+}
+.wp-pre {
+  margin: 0; padding: 7px 9px;
+  max-height: 200px; overflow: auto;
   background: var(--bg);
   border: 1px solid var(--card-border);
   border-radius: var(--r-sm);
@@ -1195,23 +1492,13 @@ html[data-acts="0"] .acts { display: none !important; }
   white-space: pre-wrap; overflow-wrap: anywhere;
   transition: background-color .18s ease, border-color .18s ease, color .18s ease;
 }
-.act[data-open="1"] .act-block { display: block; }
-.act-block + .act-block { margin-top: 4px; }
+/* diff：按行染色（新增/删除/位置），比一段纯文本好扫 */
+.wp-pre-diff .d-add { color: var(--code-n); }
+.wp-pre-diff .d-del { color: var(--c-error); }
+.wp-pre-diff .d-hunk { color: var(--text-3); }
 
-details.acts > summary {
-  display: flex; align-items: center; gap: 6px;
-  height: 26px; padding: 2px 8px;
-  border-radius: var(--r-sm);
-  font-size: 12.5px; color: var(--text-2);
-  cursor: pointer; list-style: none;
-  transition: background-color .18s ease, color .18s ease;
-}
-details.acts > summary::-webkit-details-marker { display: none; }
-details.acts > summary:hover { background: var(--card); color: var(--text); }
-details.acts > summary::before {
-  content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); flex: none;
-}
-details.acts > .acts { padding-top: 2px; }
+/* 收起后步骤不再占位：头行一行就够；展开才铺开 */
+.wp[data-open="0"] .wp-detail { display: none; }
 
 .attention {
   padding: 10px 14px;
@@ -1471,7 +1758,9 @@ html[data-route="settings"] .sidebar { display: none; }
   scrollbar-gutter: stable;
 }
 .set-page {
-  max-width: 920px; margin: 0 auto;
+  /* 2026-11-07：内容列从 920 放到 1000。920 在 1440 宽的窗口里右侧留一大条空白，
+     卡片只有两列控件就撑满一行，看着空；1000 让「一列行 + 一列说明」有呼吸。 */
+  max-width: 1000px; margin: 0 auto;
   padding: 24px 4px 128px;
 }
 /* 切页进场：只动 opacity（compositor-only），150ms 同 cindy fast 档 */
@@ -2337,9 +2626,8 @@ button.tk-archive-bar:focus-visible { outline: 2px solid var(--accent-line); out
   html[data-sidebar="closed"] .sidebar { display: flex; width: 48px; }
   .sidebar-inner { display: none; }
   .side-rail { opacity: 1; pointer-events: auto; }
-  /* 48px 轨放不下齿轮 + 状态点并排，窄屏改竖排，避免横向挤出 */
-  .rail-foot { flex-direction: column; gap: 2px; }
-  .rail-status { position: static; right: auto; transform: none; }
+  /* 底栏本来就是竖排（齿轮在上、状态点在下），窄屏只需收一点间距 */
+  .rail-foot { gap: 2px; }
   .thread { padding: 18px 14px 8px; }
   .top { padding: 0 14px; }
   /* 窄窗口：设置左栏改横排（标题行 + 横向胶囊），内容列跟在下面 */
@@ -2411,7 +2699,7 @@ button.tk-archive-bar:focus-visible { outline: 2px solid var(--accent-line); out
   background: transparent; color: var(--text-2);
   /* 2026-11-05：模型名里 glm / kimi / MiniMax 的 g/p/y/k 会被 line-height:1 裁掉下缘，
      给到 1.4 再配 overflow:hidden 做省略号，字不再贴边。
-     （同样是 .proj-pill 的皮肤，改这里会一起生效，但只动字号行高不动几何） */
+     （项目区 2026-11-07 改内联行后不再共用这层皮肤，这里只服务模型 pill） */
   font-size: 13px; line-height: 1.4;
   transition: color .15s ease, border-color .15s ease, background-color .15s ease;
 }
@@ -2514,117 +2802,288 @@ button.tk-archive-bar:focus-visible { outline: 2px solid var(--accent-line); out
   .model-menu { width: min(320px, 100%); }
 }
 
-/* ── 对话右上角快捷设置（2026-11-07 抽屉改造）──────
- * 右上角图标按钮 + 右侧全高抽屉（替换下弹面板）。
+/* ── 右侧抽屉骨架（2026-11-07；群设置与对话设置共用）──────
+ * 右上角图标按钮 + 右侧全高抽屉（替换下弹面板/居中弹窗）。
  * 抽屉 fixed 贴右、左缘 1px 分割线，无圆角无悬浮阴影；遮罩实色压暗、
- * 不用 backdrop-filter（WebView2 下会渲染成黑块）。 */
+ * 不用 backdrop-filter（WebView2 下会渲染成黑块）。
+ *
+ * 2026-11-07 二次修（用户：「做得还是非常差」「外头带一个黑圈」）——两个真问题：
+ *  ① 入口按钮没清 UA 默认边框，2px outset 渲染成一圈立体黑环（根因已在全局 button 处修掉，
+ *     这里再显式给 0，单独改这一处也不会再生圈）；
+ *  ② 抽屉里所有行都贴着左右边缘排、行间只有 hover 没有分割，像一份没排过版的清单。
+ *     现按设置页的语言重画：内容区 16px 内边距 + 圆角卡（.cs-card）分行，行间 1px 分割，
+ *     卡与卡之间 10px 呼吸；图标 18px 起、标题 14px、副文本 12px，与设置页同一档。 */
 .top-wrap { flex: none; }
 .top-gear {
   display: inline-flex; align-items: center; justify-content: center;
-  width: 28px; height: 28px;
+  width: 28px; height: 28px; padding: 0;
+  border: 0; outline: none;
   border-radius: var(--r-md);
   background: transparent; color: var(--text-3);
   transition: background .15s ease, color .15s ease;
 }
 .top-gear:hover { background: var(--card); color: var(--text); }
+.top-gear:focus-visible { box-shadow: 0 0 0 2px var(--accent-line); }
 .top-gear:disabled { color: var(--text-3); cursor: default; }
 .top-gear svg { width: 15px; height: 15px; }
+/* 已展开：与 hover 同底，不额外画圈——圈是「选中态」，这里只需要一点底色 */
+.top-gear[aria-expanded="true"] { background: var(--card); color: var(--text); }
 
-#chat-settings-overlay {
+.side-overlay {
   position: fixed; inset: 0; z-index: 45;
   background: rgba(0, 0, 0, 0.45);
 }
-#chat-settings-overlay.pop-closing { opacity: 0; transition: opacity .25s ease-out; }
-#chat-settings-overlay.pop-open { animation: csFadeIn .25s ease-out; }
-@keyframes csFadeIn { from { opacity: 0; } to { opacity: 1; } }
+.side-overlay.pop-closing { opacity: 0; transition: opacity .25s ease-out; }
+.side-overlay.pop-open { animation: csFadeIn .25s ease-out; }
 
-#chat-settings-drawer {
+.side-drawer {
   position: fixed; inset: 0 0 0 auto; z-index: 46;
   width: 100%; max-width: 448px;
   display: flex; flex-direction: column;
   background: var(--surface);
   border-left: 1px solid var(--composer-border);
+  /* 左缘一道极浅的投影：抽屉是浮在纸面之上的「板」，没有它就会和聊天区糊成一片。
+     不用大阴影（那是悬浮卡的语言），只给 1px 之外的一档过渡。 */
+  box-shadow: -18px 0 40px -28px rgba(0, 0, 0, 0.28);
   overflow: hidden;
 }
+@keyframes csFadeIn { from { opacity: 0; } to { opacity: 1; } }
 @keyframes csDrawerIn { from { transform: translateX(100%); } to { transform: translateX(0); } }
 @keyframes csDrawerOut { from { transform: translateX(0); } to { transform: translateX(100%); } }
-#chat-settings-drawer.pop-open { animation: csDrawerIn .25s ease-out; }
-#chat-settings-drawer.pop-closing { animation: csDrawerOut .25s ease-out; }
+.side-drawer.pop-open { animation: csDrawerIn .25s ease-out; }
+.side-drawer.pop-closing { animation: csDrawerOut .25s ease-out; }
 @media (prefers-reduced-motion: reduce) {
-  #chat-settings-overlay.pop-open,
-  #chat-settings-overlay.pop-closing,
-  #chat-settings-drawer.pop-open,
-  #chat-settings-drawer.pop-closing { animation: none; }
+  .side-overlay.pop-open,
+  .side-overlay.pop-closing,
+  .side-drawer.pop-open,
+  .side-drawer.pop-closing { animation: none; }
 }
 
 /* 抽屉头部：返回箭头（二级页才显示）+ 标题 + X */
 .cs-head {
   flex: none;
-  display: flex; align-items: center; gap: 8px;
-  height: 56px; padding: 0 12px 0 16px;
-  border-bottom: 1px solid var(--composer-border);
+  display: flex; align-items: center; gap: 4px;
+  height: 54px; padding: 0 10px 0 8px;
+  border-bottom: 1px solid var(--divider);
 }
-.cs-head-title { flex: 1; min-width: 0; font-size: 15px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cs-head-title {
+  flex: 1; min-width: 0;
+  padding-left: 8px;
+  font-size: 14.5px; font-weight: 600; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .cs-icon-btn {
   display: inline-flex; align-items: center; justify-content: center;
-  width: 36px; height: 36px; flex: none;
-  border-radius: var(--r-md);
+  width: 32px; height: 32px; padding: 0; flex: none;
+  border: 0; outline: none;
+  border-radius: var(--r-sm);
   background: transparent; color: var(--text-3);
   transition: background .15s ease, color .15s ease;
 }
 .cs-icon-btn:hover { background: var(--card); color: var(--text); }
+.cs-icon-btn:focus-visible { box-shadow: 0 0 0 2px var(--accent-line); }
 .cs-icon-btn svg { width: 17px; height: 17px; }
 
-/* 抽屉内容区 */
-.cs-body { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 0 16px; }
+/* 抽屉内容区。
+   2026-11-07 二次修：对话设置改成「卡片浮在纸面上」的排版（14px 边距 + 卡间距），
+   但 .cs-body 是**群设置抽屉共用**的骨架，改它会连带把群设置的 1px 分隔线
+   变成两侧各 14px 的空隙。所以基础样式保持原样，卡片化只在对话设置里开（下表 + [data-cards]）。 */
+.cs-body {
+  flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+  padding: 8px 0 16px;
+}
+/* 对话设置专用：卡片列 */
+.cs-body[data-cards] {
+  display: flex; flex-direction: column; gap: 14px;
+  padding: 14px 14px 28px;
+}
 
-/* 首页四行：图标 + 标题/副文本 + 右侧 chevron */
+/* 卡片：一组成设置行，行间 1px 分割。与设置页 .card 同一材料（--card 底 + 16px 圆角），
+   但单独命名——设置页那张卡在 448px 的抽屉里会显得太宽太散。 */
+.cs-card {
+  display: flex; flex-direction: column;
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+}
+.cs-card > * + * { border-top: 1px solid var(--divider); }
+/* 分组标签是卡内的小标题，不是一行：它下面不画分隔线（否则标签像一条被划掉的行） */
+.cs-card > .cs-card-label + * { border-top: 0; }
+/* 卡片小标题：分组名，不抢行的注意力 */
+.cs-card-label {
+  padding: 12px 14px 9px;
+  font-size: 11.5px; font-weight: 600; letter-spacing: .04em;
+  color: var(--text-3);
+}
+
+/* 设置行：图标 + 标题/副文本 + 右值/chevron。
+   标题与副文本各自一块（原来两个 span 都是 inline，挤在同一行）。 */
 .cs-row {
   display: flex; align-items: center; gap: 12px;
-  width: 100%; min-height: 48px;
-  padding: 8px 16px;
+  width: 100%; min-height: 52px;
+  padding: 10px 14px;
   border: 0; border-radius: 0;
   background: transparent; color: var(--text);
   text-align: left; cursor: pointer;
-  transition: background .15s ease;
+  transition: background .14s ease;
 }
-.cs-row:hover { background: var(--card); }
-.cs-row-icon { flex: none; display: inline-flex; color: var(--text-3); }
+.cs-row:hover { background: var(--card-high); }
+.cs-row:focus-visible { outline: 2px solid var(--accent-line); outline-offset: -2px; }
+.cs-row[aria-current="true"] { background: var(--accent-soft); }
+.cs-row.is-static { cursor: default; }
+.cs-row.is-static:hover { background: transparent; }
+.cs-row-icon { flex: none; display: inline-flex; color: var(--text-2); }
 .cs-row-icon svg { width: 18px; height: 18px; }
-.cs-row-main { flex: 1; min-width: 0; }
-.cs-row-title { font-size: 14px; font-weight: 500; color: var(--text); }
-.cs-row-sub { margin-top: 1px; font-size: 12px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.cs-row-chevron { flex: none; display: inline-flex; color: var(--text-3); }
-.cs-row-chevron svg { width: 16px; height: 16px; }
-
-/* 二级页内的分组卡片（权限/通知复用设置页 rowMarkup 的行结构，只补容器间距） */
-.cs-section { padding: 8px 16px; }
-.cs-section .set-hint { margin-bottom: 8px; }
-
-/* 面板下半：一行一个模型批量添加；上边线与模型区隔开，负边距抵消 pop 内边距贴边 */
-.chat-settings-batch {
-  margin: 6px -6px -6px;
-  padding: 8px 6px 6px;
-  border-top: 1px solid var(--composer-border);
+.cs-row-main {
+  flex: 1; min-width: 0;
+  display: flex; flex-direction: column; gap: 2px;
 }
+.cs-row-title { display: block; font-size: 13.5px; font-weight: 500; line-height: 1.45; color: var(--text); }
+.cs-row-sub {
+  display: block;
+  font-size: 12px; line-height: 1.45; color: var(--text-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cs-row-value {
+  flex: none; max-width: 42%;
+  font-size: 12.5px; color: var(--text-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cs-row-chevron { flex: none; display: inline-flex; color: var(--text-3); }
+.cs-row-chevron svg { width: 15px; height: 15px; }
+
+/* 二级页里的说明块与字段（与设置页同口径，只是收在 448px 里） */
+.cs-note { padding: 2px 2px 0; font-size: 12px; line-height: 1.55; color: var(--text-2); }
+.cs-note-top { padding: 0 2px 10px; }
+.cs-field { display: flex; flex-direction: column; gap: 6px; padding: 12px 14px; }
+.cs-field-label { font-size: 12px; font-weight: 500; color: var(--text-2); }
+.cs-input, .cs-textarea {
+  width: 100%; box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid var(--outline); border-radius: var(--r-md);
+  background: var(--surface); color: var(--text);
+  font-size: 13px; line-height: 1.55; outline: none;
+  transition: border-color .15s ease;
+}
+.cs-input { height: 34px; padding: 0 10px; }
+.cs-textarea { resize: vertical; }
+.cs-input:focus, .cs-textarea:focus { border-color: var(--accent); }
+.cs-input[readonly] { color: var(--text-3); background: var(--surface-low); }
+/* 下拉框：自绘 chevron（原生箭头在四套主题下颜色不跟），右边留 30px 给它 */
+select.cs-input {
+  appearance: none; -webkit-appearance: none;
+  padding-right: 30px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239a97a5' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+  background-size: 14px 14px;
+  cursor: pointer;
+}
+select.cs-input:disabled { color: var(--text-3); cursor: default; }
+.cs-actions { display: flex; align-items: center; gap: 8px; padding: 10px 14px 12px; }
+.cs-actions .btn-primary { margin-left: auto; }
+.cs-hint { min-height: 17px; font-size: 12px; line-height: 1.5; color: var(--text-3); overflow-wrap: anywhere; }
+.cs-hint.is-error { color: var(--c-error); }
+
+/* 身份块（首页顶部）：**横排一行**——头像 + 名字/人设版本 + chevron。
+   与下面的设置行同一节奏（同样是 52px 量级的一行），只是更醒目一档。
+   2026-11-07 二次修：原来居中竖排的大头像卡片像「个人主页」，占了近 1/5 屏高。 */
+.cs-identity {
+  display: flex; align-items: center; gap: 12px;
+  width: 100%;
+  padding: 12px 14px;
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: var(--r-lg);
+  text-align: left; cursor: pointer;
+  transition: background .14s ease;
+}
+.cs-identity:hover { background: var(--card-high); }
+.cs-identity:focus-visible { outline: 2px solid var(--accent-line); outline-offset: -2px; }
+.cs-identity .pt-avatar { width: 40px; height: 40px; font-size: 16px; }
+.cs-identity-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.cs-identity-name {
+  font-size: 14px; font-weight: 600; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cs-identity-sub {
+  font-size: 12px; color: var(--text-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* 权限/通知这类只用现有 rowMarkup 的页面：把它们那一套 .row 收进卡片节奏 */
+.cs-card .row { min-height: 52px; padding: 10px 14px; }
+.cs-card .row-label { font-size: 13.5px; }
+.cs-card .divider { margin: 0 14px; }
+
+/* 批量添加：现在住进抽屉里的「模型」页卡片（2026-11-07 二次修），
+   不再依赖弹层的负边距补偿——按卡片内块处理，左右留 14px。 */
+.chat-settings-batch { padding: 0 14px 14px; }
+/* 标题与「加到：某家」上下两行：448px 里并排会把长供应商名压到只剩两个省略号 */
 .batch-head {
-  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
-  padding: 0 2px 6px;
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 0 0 8px;
   font-size: 12px; font-weight: 500; color: var(--text-2);
 }
 .batch-target { font-size: 11px; font-weight: 400; color: var(--text-3); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .batch-input {
   display: block; box-sizing: border-box; width: 100%;
   min-height: 64px; max-height: 160px; resize: vertical;
-  padding: 7px 9px;
+  padding: 8px 10px;
   font-family: var(--mono); font-size: 12px; line-height: 1.5;
-  color: var(--text); background: transparent;
-  border: 1px solid var(--outline); border-radius: 8px;
+  color: var(--text); background: var(--surface);
+  border: 1px solid var(--outline); border-radius: var(--r-md);
 }
 .batch-input:focus { outline: none; border-color: var(--accent-line); }
 .batch-input::placeholder { color: var(--text-3); }
-.batch-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-top: 6px; }
+.batch-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-top: 8px; }
 .batch-hint { flex: 1; min-width: 0; min-height: 17px; text-align: left; overflow-wrap: anywhere; }
+
+/* 备选链：一条一行，序号 + 两个下拉 + 三个动作钮。
+   下拉在 448px 里放不下「供应商 + 模型」并排，所以竖排两行（供应商 40% 宽浮在模型上方太挤）；
+   序号与动作钮贴两侧，视线沿左边一条轴往下走。 */
+.cs-chain { display: flex; flex-direction: column; padding: 0 14px 4px; }
+.cs-chain-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 0;
+}
+.cs-chain-row + .cs-chain-row { border-top: 1px solid var(--divider); }
+.cs-chain-order {
+  flex: none; width: 16px;
+  font-size: 11.5px; color: var(--text-3); text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+/* 一条备选：分组下拉吃满剩余宽，动作钮固定在右端一列 */
+.cs-chain-pick { flex: 1; min-width: 0; height: 30px; padding: 0 8px; font-size: 12.5px; }
+.cs-chain-actions { flex: none; display: flex; align-items: center; gap: 0; }
+.cs-chain-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; padding: 0;
+  border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--text-2);
+  transition: background .14s ease, color .14s ease;
+}
+.cs-chain-btn:hover:not(:disabled) { background: var(--surface-low); color: var(--text); }
+.cs-chain-btn:disabled { opacity: .28; cursor: default; }
+.cs-chain-btn svg { width: 15px; height: 15px; }
+.cs-chain-empty {
+  padding: 4px 0 10px;
+  font-size: 12px; line-height: 1.55; color: var(--text-3);
+}
+/* 链尾的「加一条」：虚线下划线按钮，明确是「往这条链里再加」，不是页面主操作 */
+.cs-chain-add { display: flex; align-items: center; gap: 8px; padding: 8px 0 10px; }
+.cs-chain-add-btn {
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 28px; padding: 0 10px 0 8px;
+  border: 1px dashed var(--outline); border-radius: var(--r-sm);
+  background: transparent; color: var(--text-2);
+  font-size: 12.5px;
+  transition: background .14s ease, border-color .14s ease, color .14s ease;
+}
+.cs-chain-add-btn:hover:not(:disabled) { border-color: var(--text-3); background: var(--surface-low); color: var(--text); }
+.cs-chain-add-btn:disabled { opacity: .45; cursor: default; }
+.cs-chain-add-btn svg { width: 13px; height: 13px; }
 
 /* 供应商切换行（D2）：一次只看一家，点段即筛，不留「全部」。
    pill 右对齐弹出，菜单可能比 pill 窄，所以分段行要能横滚而不撑破菜单。 */
@@ -2721,34 +3180,11 @@ button.tk-archive-bar:focus-visible { outline: 2px solid var(--accent-line); out
 }
 .model-menu-empty { padding: 10px; font-size: 12.5px; line-height: 1.5; color: var(--text-3); }
 
-/* ── 侧栏项目切换器（2026-11-04）──────────────────────────
-   展开态一颗裸态 pill：跟「新对话」同高同起点，静息无框，hover / 展开
-   才浮现一档淡底（沿用 .composer-pill 的皮肤与 token）。
-   弹层与模型菜单共用 morph 动效，只把定位方式换掉——它挂在 body 下，
-   不会被侧栏收起动画的 overflow:hidden 裁掉，坐标由 JS 写。 */
-
-.side-proj { flex: none; }
-
-.proj-pill {
-  width: 100%; height: 38px;
-  /* 1px 透明边框来自 .composer-pill（hover 才显色），边框也在布局里：
-     padding 用 11px 抵掉，图标中心与其他导航行一样落在 x=36，不再偏 1px。 */
-  padding: 0 11px;
-  gap: 8px;
-  justify-content: flex-start;
-  font-size: 13px;
-  /* 侧栏导航行同口径：hover 底色瞬时切换（.composer-pill 的过渡只留给模型 pill） */
-  transition: none;
-}
-/* 展开态主项目补文件夹线描图标；22px 图标 + 3px 内衬 = 28px 槽位，和导航行同轴 */
-.proj-pill .proj-pill-ico {
-  width: 22px; height: 22px; flex: none; margin: 0 3px;
-}
-.proj-pill .proj-pill-label { flex: 1; min-width: 0; text-align: left; }
-
-/* E5：接口读不到（旧后端 / 临时 5xx）时降级显示——仍可点，点一下就是重试 */
-.proj-pill.is-unavailable { opacity: .55; }
-.proj-pill.is-unavailable:hover { opacity: .78; }
+/* ── 侧栏项目区（2026-11-04 建，2026-11-07 改内联）──────────
+   展开态是 .side-sec 里的 .proj-row 行（主项目 + 子项目）；
+   收起轨道仍是 .rail-proj 圆钮，点开同一个弹层（72px 放不下内联列表）。
+   弹层与模型菜单共用 morph 动效；它挂在 body 下，不会被侧栏收起动画的
+   overflow:hidden 裁掉，坐标由 JS 写。 */
 .rail-proj.is-unavailable { opacity: .5; }
 
 /* 弹层：left/top 由 JS 写；z-index 压在门/提示之下（gate 10、toast 60），
@@ -2875,6 +3311,18 @@ button.tk-archive-bar:focus-visible { outline: 2px solid var(--accent-line); out
   font-size: 11.5px; line-height: 1.5; color: var(--text-3);
 }
 
+/* 层级说明（2026-11-06）：主项目/子项目各是什么、权限边界在哪。
+   只解释不改交互——行仍只读，管理动作仍在底部三个入口。 */
+/* 层级说明（2026-11-06）：侧栏里只有一行，跟项目行同缩进。
+   注意别用负 margin ——.sidebar-inner 的宽度是定值 + overflow-y:auto，
+   横向溢出会直接长出一条滚动条（第一版就是这么翻车的）。 */
+.proj-legend {
+  margin: 2px 0 0; padding: 4px 8px 0;
+  color: var(--text-3);
+  font-size: 10.5px; line-height: 1.5;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
 /* ── 通用模态弹窗（2026-11-05 F1，ZCode 规格）────────────
    遮罩 .6 / 暗色 .7 + 2px 背景模糊；面板 420 上限、16 圆角、1px 卡边框、
    --shadow-menu；进出场 100ms（fade + scale .95→1），reduced-motion 直切。
@@ -2903,6 +3351,15 @@ button.tk-archive-bar:focus-visible { outline: 2px solid var(--accent-line); out
   border: 1px solid var(--card-border);
   border-radius: 16px;
   box-shadow: var(--shadow-menu);
+}
+/* 宽档（2026-11-07）：需要两列或长文的模态（编辑人设：头像 + SOUL）。
+   只由 openModal 的 className 显式加上，其它模态仍是 420px——宽度不该被内容猜出来。 */
+.modal-panel.modal-wide {
+  width: min(760px, calc(100% - 2rem));
+  padding: 20px 22px;
+}
+@media (max-width: 720px) {
+  .modal-panel.modal-wide { padding: 16px; }
 }
 .modal-head {
   flex: none;
@@ -2943,6 +3400,12 @@ button.tk-archive-bar:focus-visible { outline: 2px solid var(--accent-line); out
   transition: border-color .15s ease;
 }
 .modal-row .ghost { flex: none; height: 36px; padding: 0 12px; border-radius: var(--r-md); font-size: 13px; }
+/* 纵向字段里的输入框不许被 flex 吃掉高度（2026-11-07）：
+   `.modal-field` 是 column 弹性容器，而 `.modal-input` 上的 `flex: 1` 会把 flex-basis 设成 0，
+   于是显式的 height:36px 在主轴上失效、输入框塌成一行文字高（19px）——「新建执事」与
+   「新建群组」两个模态实测都是这样，读起来像被压扁的排版。
+   只在 .modal-field 直接子级复位；`.modal-row` 里的横向输入框仍要 flex:1 吃满剩余宽。 */
+.modal-field > .modal-input { flex: 0 0 auto; }
 .modal-input:focus { border-color: var(--accent); }
 .modal-hint {
   margin: 0; min-height: 17px;
@@ -3410,15 +3873,31 @@ button.tk-archive-bar:focus-visible { outline: 2px solid var(--accent-line); out
   display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
   margin-bottom: 14px;
 }
-.pt-list { display: flex; flex-direction: column; gap: 12px; }
+/* 列表（2026-11-07）：一张卡一行、卡片间距 10px。原来一列堆三行（名字行 / 元信息 / 动作），
+   信息密度低且视觉上"三个小块"叠在一起，就是用户说的方框不正常。 */
+.pt-list { display: flex; flex-direction: column; gap: 10px; }
 
-.pt-card { padding: 14px 16px; gap: 10px; }
-.pt-card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.pt-name { min-width: 0; overflow-wrap: anywhere; }
-.pt-meta { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.pt-card {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 16px;
+}
+.pt-card-avatar { width: 40px; height: 40px; font-size: 16px; }
+.pt-card-main { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.pt-card-name-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.pt-name { min-width: 0; overflow-wrap: anywhere; font-size: 14px; }
+.pt-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12px; }
 .pt-domain { color: var(--text-3); }
-.pt-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+.pt-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; flex-wrap: wrap; }
+.pt-actions .ghost { height: 30px; padding: 0 11px; font-size: 12.5px; }
 .pt-empty { padding: 20px; gap: 12px; align-items: flex-start; }
+
+@media (max-width: 720px) {
+  .pt-card { grid-template-columns: 40px minmax(0, 1fr); }
+  .pt-actions { grid-column: 1 / -1; justify-content: flex-start; }
+}
 
 /* 编辑模态内容很长：给面板一个对视口确定的高度上限，.modal-body 才真的能滚动，
    否则底部（例行任务表单）落在视口外点不到。:has 只作用于执事编辑模态，不动别的模态。 */
@@ -3435,14 +3914,115 @@ button.tk-archive-bar:focus-visible { outline: 2px solid var(--accent-line); out
 .pt-seg-title { font-size: 13px; font-weight: 600; color: var(--text); }
 .pt-basic { gap: 12px; }
 
-/* 头像编辑行（2026-11-06 C 批）：56px 预览 + 三个动作 */
-.pt-avatar-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.pt-avatar-preview { width: 56px; height: 56px; font-size: 20px; }
-.pt-avatar-preview:disabled { opacity: .5; cursor: default; }
-.pt-avatar-btns { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.pt-avatar-btns .ghost,
-.pt-avatar-btns .btn-primary { height: 34px; }
+/* ── 人设（2026-11-07）：头像在左、正文在右，同一次保存 ──────────────
+   头像不再是独立表单：它是"这个角色长什么样"，与 SOUL 说的是同一件事，
+   所以并排放，按钮也只有一个「保存人设」。 */
+
+/* 人设段（2026-11-07）：头像与说明做成一行，正文吃满宽度。
+   两列（头像列 + 正文列）在实际渲染里左侧会空出一大条，正文也被挤窄，
+   所以改成"头像行 + 全宽正文"：头像 64px 不抢视线，正文拿到 700px 以上。
+   桌面 760px 宽的弹窗里，一行正文能放 50+ 字，长人设读起来才像文档。 */
+.pt-instr-top {
+  display: flex; align-items: center; gap: 14px;
+}
+.pt-instr-meta {
+  display: flex; flex-direction: column; gap: 3px;
+  min-width: 0; flex: 1 1 auto;
+}
+.pt-instr-sub { font-size: 11.5px; line-height: 1.5; color: var(--text-3); }
+.pt-portrait-btn {
+  position: relative;
+  flex: none;
+  width: 64px; height: 64px;
+  border-radius: var(--r-full);
+  font-size: 24px;
+}
+/* 有图时头像铺满圆（img 由 paintAvatar 塞进来），没图仍是首字 */
+.pt-portrait-btn img { border-radius: inherit; }
+.pt-portrait-btn:disabled { opacity: .6; cursor: default; }
+/* 右下角的"可换"角标：位移到圆外一点点，压在边线上，做发现性提示 */
+.pt-portrait-chev {
+  position: absolute; right: -2px; bottom: -2px;
+  display: grid; place-content: center;
+  width: 22px; height: 22px;
+  border-radius: var(--r-full);
+  border: 1px solid var(--card-border);
+  background: var(--card-high);
+  color: var(--text-2);
+  pointer-events: none;
+}
+.pt-portrait-chev svg { width: 12px; height: 12px; }
+.pt-portrait-btn:hover .pt-portrait-chev { color: var(--text); }
+.pt-instr-label { font-size: 13px; font-weight: 500; color: var(--text); }
+.pt-ta.is-soul { min-height: 156px; font-family: inherit; font-size: 13.5px; line-height: 1.75; }
+/* 默认只占 6 行：常见人设两三句话，给 220px 会白出一大片、还把下面的段挤出视口。
+   内容长了自己往下拉（resize: vertical 一直在）。 */
+
+/* 头像选择面板：贴着头像浮出，宽 332px（6 列 × 44px + 间距）。
+   用 fixed 挂 body、坐标由 JS 按按钮实测写入——弹窗 body 是滚动容器，
+   绝对定位塞在里面会被 overflow 裁掉下半截。 */
+.pt-portrait-pop {
+  position: fixed; top: 0; left: 0;
+  z-index: 56; /* 压过 .modal(55)，仍在 toast(60) 之下 */
+  width: 332px; max-width: calc(100vw - 48px);
+  max-height: calc(100vh - 24px);
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--card-border); border-radius: var(--r-lg);
+  background: var(--surface); box-shadow: var(--shadow-menu);
+  animation: set-fade .12s var(--ease-standard) both;
+}
+.pt-portrait-pop-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  font-size: 12.5px; font-weight: 500; color: var(--text);
+}
+.pt-portrait-pop-clear {
+  height: 26px; padding: 0 9px;
+  border: 1px solid var(--composer-border); border-radius: var(--r-full);
+  background: transparent; color: var(--text-3);
+  font-size: 11.5px; cursor: pointer;
+}
+.pt-portrait-pop-clear:hover { background: var(--surface-low); color: var(--text); }
+.pt-portrait-groups { display: flex; flex-direction: column; gap: 6px; }
+.pt-portrait-group-label { font-size: 11px; color: var(--text-3); letter-spacing: .02em; }
+.pt-portrait-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(44px, 1fr));
+  gap: 6px;
+  max-height: 232px; overflow-y: auto;
+  padding: 2px;
+}
+.pt-portrait-cell {
+  padding: 0; aspect-ratio: 1;
+  border: 2px solid transparent; border-radius: var(--r-full);
+  background: var(--surface-low); cursor: pointer; overflow: hidden;
+  transition: border-color .15s ease, transform .12s ease;
+}
+.pt-portrait-cell img { width: 100%; height: 100%; display: block; object-fit: cover; }
+.pt-portrait-cell:hover { transform: translateY(-1px); border-color: var(--outline); }
+.pt-portrait-cell.is-busy { opacity: .55; }
+.pt-portrait-cell:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.pt-portrait-pop-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding-top: 8px; border-top: 1px solid var(--divider);
+}
+.pt-portrait-pop-foot .ghost { height: 30px; font-size: 12px; }
+.pt-portrait-pop-note { font-size: 11px; color: var(--text-3); }
+
+/* 名字 / 领域：两列，窄屏落回单列 */
+.pt-basic-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  gap: 14px;
+}
+
 .pt-card-avatar { margin-right: 2px; }
+
+@media (max-width: 640px) {
+  .pt-instr-top { flex-wrap: wrap; }
+  .pt-portrait-pop { width: calc(100vw - 96px); }
+  .pt-basic-row { grid-template-columns: 1fr; }
+}
 
 .pt-ta {
   width: 100%; padding: 8px 10px;
@@ -3503,53 +4083,116 @@ button.tk-archive-bar:focus-visible { outline: 2px solid var(--accent-line); out
  * 时间线形态：主人右对齐 / 成员左对齐（头像 28px + 名字行 + 时间）/ 系统行居中发丝线 /
  * 5 分钟同作者合并（.gmsg-head 不画）+ 跨天 .group-day 分割。 */
 
-/* 侧栏「群组」节与列表卡片 */
+/* 侧栏「群组」节与列表（2026-11-07 统一：卡片网格 → 一行一群）
+ * 原实现是 minmax(240px,1fr) 的自适应网格：只有 1–2 个群时卡片被撑到 300px+，
+ * 右侧留一大片空白，像一张被拉宽的孤卡；而有 6 个群时又要横向扫格子。
+ * 现在与项目列表 / 执事花名册同族：一行一群、行高固定、右侧只留人数，
+ * 1 个群不空、N 个群向下长。 */
 .group-row { gap: 8px; }
-.group-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: 12px;
-  max-width: 920px;
+/* 整块一个描边容器（与设置页的列表卡、建群弹窗的 .gcf-list 同一形状）。
+   每行一个圆角卡片会让 1 个群时变成一张孤卡——那正是改版前的问题，只是换了个方向。 */
+.group-list {
+  display: flex; flex-direction: column;
+  max-width: 640px;
+  border: 1px solid var(--outline);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  overflow: hidden;
 }
-.group-card {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  align-items: flex-start;
+.group-item {
+  display: flex; align-items: center; gap: 10px;
+  width: 100%; padding: 11px 14px;
+  border: 0; border-bottom: 1px solid var(--divider);
+  border-radius: 0;
+  background: transparent; color: var(--text);
   text-align: left;
-  padding: 14px 16px;
-  border: 1px solid var(--composer-border);
-  border-radius: 14px;
-  background: var(--card);
-  transition: background-color .15s ease, border-color .15s ease;
+  transition: background-color .15s ease;
 }
-.group-card:hover { background: var(--card-high); border-color: var(--outline); }
-.group-card-head { display: flex; align-items: center; gap: 10px; }
-.group-card-avatar { background: var(--accent); color: var(--on-accent); }
-.group-card-name { font-weight: 600; }
-.group-card-meta { font-size: 12.5px; color: var(--text-2); }
-.group-card-members {
-  font-size: 12.5px; color: var(--text-3);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%;
+.group-list > .group-item:last-child { border-bottom: 0; }
+.group-item:hover { background: var(--card); }
+.group-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* 首字圆钮：用 accent-soft 而不是实心 accent——列表里实心色块会比群名先入眼 */
+.group-item-avatar { width: 30px; height: 30px; font-size: 13px; }
+/* 名字与副行必须各占一行：两者都是 span，父级不显式 flex 就会并排成
+   「书房小事 阅读助手、记账助手 · 不 @ 阅读助手 回」一整行（实测就这样）。 */
+.group-item-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.group-item-name {
+  font-size: 13.5px; font-weight: 500;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.group-item-sub {
+  margin-top: 1px;
+  font-size: 12px; color: var(--text-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.group-item-count { flex: none; font-size: 12px; color: var(--text-3); }
+.group-item-chevron { flex: none; display: inline-flex; color: var(--text-3); opacity: .55; }
+.group-item-chevron svg { width: 15px; height: 15px; }
+.group-item:hover .group-item-chevron { opacity: 1; color: var(--text-2); }
 
-/* 会话态 */
-.group-chat {
+/* 会话态
+ * 2026-11-07 修：`.tasks-scroll` 是 `overflow:auto` 的块，`height:100%` 在里面没有
+ * 可解析的基准，群会话实际是按内容高度铺开——结果整页跟着内容一起滚，
+ * 时间线自己不滚、composer 也不吸底。这里把滚动容器改成「撑满 + 只让时间线滚」。 */
+#view-groups .tasks-scroll { display: flex; flex-direction: column; overflow: hidden; }
+#view-groups .tasks-body { flex: 1; min-height: 0; overflow-y: auto; }
+#view-groups .group-chat {
+  flex: 1;
   display: flex; flex-direction: column;
   max-width: var(--thread); margin: 0 auto;
-  height: 100%; padding: 0 24px 16px;
+  width: 100%;
+  min-height: 0;
+  height: auto;
+  padding: 0 24px 16px;
 }
+
+/* 成员条（2026-11-07）：谁在群里、谁是值日，一眼看见；点一下 = @ 他。
+   没这条时「@」是纯文本技巧，用户只能靠记忆拼名字。 */
+.group-members {
+  flex: none;
+  display: flex; align-items: center; gap: 6px;
+  flex-wrap: wrap;
+  padding: 10px 0 8px;
+}
+.group-member {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 28px; padding: 0 10px 0 3px;
+  border: 1px solid var(--composer-border);
+  border-radius: var(--r-full);
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 12.5px;
+  transition: background-color .15s ease, border-color .15s ease, color .15s ease;
+}
+.group-member:hover { background: var(--card); border-color: var(--outline); color: var(--text); }
+.group-member:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.group-member-avatar { width: 22px; height: 22px; font-size: 11px; }
+.group-member-name { max-width: 8em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.group-member-duty {
+  padding: 0 5px;
+  border-radius: var(--r-full);
+  background: var(--accent-soft); color: var(--accent);
+  font-size: 10.5px; font-weight: 600; line-height: 1.6;
+}
+.group-member.is-off { opacity: .5; }
+
 .group-notice {
   flex: none;
-  margin: 4px 0 8px;
-  padding: 6px 12px;
+  margin: 0 0 8px;
+  padding: 7px 12px;
   border-radius: 10px;
   background: var(--surface-low);
   color: var(--text-2);
   font-size: 12.5px;
-  border: 1px dashed var(--outline);
+  line-height: 1.55;
+  border: 1px solid var(--divider);
+  border-left: 2px solid var(--accent-line);
 }
-.group-thread { flex: 1; overflow-y: auto; padding: 8px 2px; }
+.group-thread {
+  flex: 1; min-height: 0;
+  overflow-y: auto; padding: 8px 2px 4px;
+  display: flex; flex-direction: column;
+}
 .group-day {
   text-align: center; font-size: 12px; color: var(--text-3);
   margin: 14px 0 8px;
@@ -3567,56 +4210,78 @@ button.tk-archive-bar:focus-visible { outline: 2px solid var(--accent-line); out
   content: ""; flex: 1; height: 1px; background: var(--divider);
 }
 
-/* 气泡两形态 */
-.gmsg { display: flex; gap: 8px; margin: 4px 0; max-width: 78%; }
+/* 气泡两形态：头像与名字行顶端对齐（旧版 margin-top:20px 是硬凑，长名字会错位） */
+.gmsg { display: flex; gap: 8px; margin: 6px 0; max-width: 78%; }
+.gmsg + .gmsg { margin-top: 3px; }
 .gmsg.me { margin-left: auto; flex-direction: row-reverse; }
-.gmsg-avatar { width: 28px; height: 28px; font-size: 13px; flex: none; margin-top: 20px; }
-.gmsg-stack { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.gmsg-avatar { width: 28px; height: 28px; font-size: 13px; flex: none; }
+.gmsg.merged .gmsg-avatar { visibility: hidden; }
+.gmsg-stack { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .gmsg.me .gmsg-stack { align-items: flex-end; }
-.gmsg-head { display: flex; align-items: baseline; gap: 8px; padding: 0 4px; }
+.gmsg-head { display: flex; align-items: baseline; gap: 8px; padding: 0 4px; min-height: 18px; }
 .gmsg-who { font-size: 12.5px; font-weight: 600; color: var(--text-2); }
-.gmsg-at { font-size: 11.5px; color: var(--text-3); }
+.gmsg-at { font-size: 11.5px; color: var(--text-3); font-variant-numeric: tabular-nums; }
 .gmsg-live { color: var(--accent); }
 .gmsg-body {
   padding: 8px 12px;
   border-radius: 14px;
   background: var(--card);
   white-space: pre-wrap; word-break: break-word;
+  font-size: 14px; line-height: 1.55;
   border: 1px solid var(--composer-border);
 }
 .gmsg.me .gmsg-body { background: var(--accent); color: var(--on-accent); border-color: transparent; }
 .gmsg.streaming .gmsg-body { opacity: .85; }
+/* 正文里的 @点名：只上色，不加底（cindy 口径：它不是链接，只是点名词） */
+.gmsg-mention { color: var(--accent); font-weight: 600; }
+.gmsg.me .gmsg-mention { color: var(--on-accent); font-weight: 700; }
 
 /* composer（独立一份 DOM，样式骨架与主对话同拍） */
 .group-composer {
   position: relative;
   flex: none;
-  display: flex; align-items: flex-end; gap: 8px;
+  display: flex; align-items: flex-end; gap: 4px;
   margin-top: 8px;
-  padding: 8px 10px;
+  padding: 6px 8px 6px 6px;
   border: 1px solid var(--composer-border);
   border-radius: 16px;
   background: var(--surface);
 }
+/* @ 入口（2026-11-07）：左侧图标按钮，点了直接把「@」打进输入框并弹候选。
+   光靠 placeholder 提示不够——用户不会先打一个 @ 才发现有补全。 */
+.group-at-btn {
+  flex: none;
+  width: 30px; height: 30px;
+  display: grid; place-content: center;
+  border: 0; border-radius: var(--r-md);
+  background: transparent; color: var(--text-3);
+  transition: background-color .15s ease, color .15s ease;
+}
+.group-at-btn:hover { background: var(--card); color: var(--text); }
+.group-at-btn svg { width: 17px; height: 17px; }
 .group-input {
   flex: 1; resize: none;
   border: 0; outline: 0; background: transparent;
-  max-height: 160px; padding: 4px 2px;
+  min-height: 30px; max-height: 160px;
+  padding: 5px 2px;
+  box-sizing: border-box;
+  font-size: 14px; line-height: 1.5;
 }
 .group-send {
   flex: none;
-  width: 32px; height: 32px;
+  width: 30px; height: 30px;
   display: flex; align-items: center; justify-content: center;
   border: 0; border-radius: 10px;
   background: var(--accent); color: var(--on-accent);
 }
+.group-send svg { width: 16px; height: 16px; }
 .group-send:disabled { opacity: .45; cursor: default; }
 .group-send.group-stop { background: var(--card-high); color: var(--text); }
 
 /* @picker 浮层 */
 .group-atpop {
   position: absolute;
-  bottom: calc(100% + 6px); left: 10px;
+  bottom: calc(100% + 6px); left: 8px;
   min-width: 180px;
   padding: 4px;
   border-radius: 12px;
@@ -3632,85 +4297,276 @@ button.tk-archive-bar:focus-visible { outline: 2px solid var(--accent-line); out
 .group-atitem.current { background: var(--composer-pill-bg); }
 .group-atitem:hover { background: var(--composer-pill-bg); }
 
-/* 建群 / 群设置弹窗里的选择件 */
-.group-pick { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 10px; }
-.group-pick-item {
-  display: flex; align-items: center; gap: 6px;
-  padding: 6px 10px;
+/* 成员右键菜单（2026-11-07）：贴光标、越界翻转，几何同 .proj-pop */
+.gmenu {
+  position: fixed; z-index: 70;
+  min-width: 196px; max-width: 260px;
+  padding: 5px;
+  border-radius: 12px;
   border: 1px solid var(--composer-border);
-  border-radius: 10px;
-  cursor: pointer;
+  background: var(--surface);
+  box-shadow: var(--shadow-menu);
 }
-.group-pick-item:has(input:checked) { border-color: var(--accent); background: var(--composer-pill-bg); }
-.group-duty-item {
-  padding: 6px 12px;
-  border: 1px solid var(--composer-border);
-  border-radius: 10px;
-  background: transparent;
+.gmenu-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 8px 8px;
+  border-bottom: 1px solid var(--divider);
+  margin-bottom: 4px;
 }
-.group-duty-item.current { border-color: var(--accent); background: var(--composer-pill-bg); color: var(--accent); }
-.group-duty-add { border-style: dashed; color: var(--text-2); }
+.gmenu-avatar { width: 26px; height: 26px; font-size: 12px; }
+.gmenu-head-main { min-width: 0; }
+.gmenu-head-name {
+  font-size: 13px; font-weight: 600; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.gmenu-head-sub { font-size: 11.5px; color: var(--text-3); margin-top: 1px; }
+.gmenu-item {
+  display: flex; flex-direction: column; gap: 1px;
+  width: 100%; padding: 7px 8px;
+  border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--text);
+  text-align: left;
+}
+.gmenu-item:hover, .gmenu-item:focus-visible { background: var(--card); outline: none; }
+.gmenu-item-label { font-size: 13px; }
+.gmenu-item-hint { font-size: 11.5px; color: var(--text-3); overflow-wrap: anywhere; }
+
+/* 建群弹窗的成员选择（2026-11-07 统一：勾选胶囊 → 一行一人）
+ * 原来是一枚 13px 原生复选框塞进描边胶囊：Windows 上是蓝色方勾，跟整站的圆钮/胶囊语言打架；
+ * 而且"值日执事"是另起的第二块区域，勾人之前那里是空白——两块都在说"谁在群里"，
+ * 却要用户滚两次、理解两次。
+ * 现在一行一人：头像 + 名字 + 右侧两个互斥态（加入/移除 · 设为值日/值日），
+ * 值日就在成员行里点，不再单开一块。行高 34 与 .modal-input 的 36 同一节奏。 */
+.gcf-label {
+  display: flex; align-items: baseline; gap: 8px;
+}
+.gcf-count { font-size: 11.5px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.gcf-list {
+  display: flex; flex-direction: column;
+  border: 1px solid var(--outline);
+  border-radius: var(--r-md);
+  background: var(--card);
+  overflow: hidden;
+}
+.gcf-row {
+  display: flex; align-items: center; gap: 8px;
+  min-height: 37px;
+  padding: 5px 8px 5px 7px;
+  border-bottom: 1px solid var(--divider);
+}
+.gcf-row:last-child { border-bottom: 0; }
+.gcf-row .pt-avatar { width: 24px; height: 24px; font-size: 11px; }
+.gcf-name {
+  flex: 1; min-width: 0; font-size: 13px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 动作槽（加入 / 设为值日 / 值日）右对齐，后面跟一个恒定 24px 的移出槽。
+   两槽分开而不是合成一个 flex：动作按钮宽度不同（设为值日 vs 加入），
+   合在一起就会把 × 推来推去——实测两行的 × 差 34px，一列按钮看着是歪的。 */
+.gcf-role { flex: none; display: flex; align-items: center; justify-content: flex-end; gap: 4px; }
+.gcf-x-slot { flex: none; width: 24px; }
+.gcf-chip {
+  height: 26px; padding: 0 9px;
+  border: 1px solid transparent; border-radius: var(--r-full);
+  background: transparent; color: var(--text-3);
+  font-size: 12px; white-space: nowrap;
+  transition: background-color .15s ease, border-color .15s ease, color .15s ease;
+}
+.gcf-chip:hover { background: var(--surface-low); color: var(--text); }
+/* 三种态各有固定形状，不靠 aria 切换：
+   · 加入（还不在群里）= 描边按钮，是这一行唯一的主操作，必须看得出可以点；
+   · 移除（已在群里）= 低权重文字，hover 才转错误色——它比「值日」次要，不该抢眼；
+   · 值日 = 强调色淡底，读作"不 @ 时这个人在接话"。 */
+.gcf-chip.is-join {
+  padding: 0 10px;
+  border-color: var(--outline);
+  color: var(--text-2);
+}
+.gcf-chip.is-join:hover { border-color: var(--text-3); background: var(--surface-low); color: var(--text); }
+/* 移出 = 图标按钮（18px ×），常态几乎不占视觉，hover 才转错误色 */
+.gcf-chip.is-leave {
+  display: inline-grid; place-content: center;
+  width: 24px; height: 26px; padding: 0;
+  color: var(--text-3);
+}
+.gcf-chip.is-leave svg { width: 14px; height: 14px; }
+.gcf-chip.is-leave:hover { background: transparent; color: var(--c-error); }
+/* 当前值日 = 不可点标记。它不提供"取消"，因为群建出来必须有人接不 @ 的话；
+   换人请点别人那行的「设为值日」。形状与「成员条」里的值日小标同族。 */
+.gcf-duty {
+  display: inline-flex; align-items: center;
+  height: 26px; padding: 0 9px;
+  border-radius: var(--r-full);
+  background: var(--accent-soft); color: var(--accent);
+  font-size: 12px; font-weight: 600; white-space: nowrap;
+}
+/* 「设为值日」在非当前值日的人身上：描边按钮。它不再是 aria-pressed 开关
+   （值日只指向、不取消，当前值日那一行走 .gcf-duty 标记），所以按类名给形状。 */
+.gcf-chip.is-duty {
+  padding: 0 10px;
+  border-color: var(--outline);
+}
+.gcf-chip.is-duty:hover { border-color: var(--text-3); background: var(--surface-low); color: var(--text); }
+.gcf-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
 .ghost.danger { color: var(--c-error); }
+
+/* ── 群设置抽屉（2026-11-07）───────────────────────────────
+ * 首页：群身份（成员头像叠放 + 群名 + 人数/值日）+ 设置行 + 页尾删除。
+ * 二级页复用 .cs-head / .cs-body 骨架，控件是设置页那套 set-input / segmented。
+ * 行高 ≥52，行间 1px 分割 —— 与对话设置抽屉同一节奏。 */
+.gs-identity {
+  display: flex; flex-direction: column; align-items: center; gap: 9px;
+  padding: 22px 16px 18px;
+  border-bottom: 1px solid var(--divider);
+}
+.gs-identity-avatars { display: flex; align-items: center; }
+.gs-identity-avatars .pt-avatar {
+  width: 34px; height: 34px; font-size: 13px;
+  border: 2px solid var(--surface);
+  margin-left: -10px;
+}
+.gs-identity-avatars .pt-avatar:first-child { margin-left: 0; }
+.gs-identity-name {
+  font-size: 16px; font-weight: 600; color: var(--text);
+  max-width: 100%; text-align: center;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.gs-identity-meta { font-size: 12.5px; color: var(--text-3); text-align: center; }
+
+.gs-row {
+  display: flex; align-items: center; gap: 12px;
+  width: 100%; min-height: 54px;
+  padding: 10px 16px;
+  border: 0;
+  background: transparent; color: var(--text);
+  text-align: left;
+  transition: background-color .15s ease;
+}
+.gs-row:hover { background: var(--card); }
+.gs-row-icon { flex: none; display: inline-flex; color: var(--text-3); }
+.gs-row-icon svg { width: 17px; height: 17px; }
+.gs-row-main { flex: 1; min-width: 0; }
+.gs-row-title { font-size: 14px; }
+.gs-row-sub {
+  margin-top: 2px;
+  font-size: 12px; color: var(--text-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.gs-row-value {
+  flex: none; max-width: 40%;
+  font-size: 12.5px; color: var(--text-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.gs-row-chevron { flex: none; display: inline-flex; color: var(--text-3); }
+.gs-row-chevron svg { width: 15px; height: 15px; }
+.gs-section-label {
+  padding: 14px 16px 4px;
+  font-size: 12px; font-weight: 500; color: var(--text-3);
+}
+.gs-divider { height: 1px; margin: 0 16px; background: var(--divider); }
+.gs-footer { padding: 18px 16px 20px; display: flex; flex-direction: column; gap: 8px; }
+
+/* 二级页表单：字段 + 说明 + 底部动作条 */
+.gs-form { display: flex; flex-direction: column; gap: 14px; padding: 16px; }
+.gs-field { display: flex; flex-direction: column; gap: 6px; }
+.gs-field-label { font-size: 12px; font-weight: 500; color: var(--text-2); }
+.gs-form .set-input,
+.gs-form textarea.set-input { width: 100%; box-sizing: border-box; }
+.gs-form textarea.set-input { min-height: 92px; resize: vertical; line-height: 1.55; }
+.gs-actions { display: flex; align-items: center; gap: 8px; padding-top: 2px; }
+.gs-actions .btn-primary { margin-left: auto; }
+.gs-pick-note { font-size: 12px; color: var(--text-3); line-height: 1.55; }
+
+/* 成员页：一行一人（头像 + 名字 + 值日标记 + 移出），满员/下限时动作位写清原因 */
+.gs-member-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 16px;
+  min-height: 50px;
+}
+.gs-member-row .pt-avatar { width: 28px; height: 28px; font-size: 12px; }
+.gs-member-main { flex: 1; min-width: 0; }
+.gs-member-name {
+  font-size: 13.5px; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.gs-member-sub { font-size: 11.5px; color: var(--text-3); margin-top: 1px; }
+.gs-member-actions { flex: none; display: flex; align-items: center; gap: 6px; }
+.gs-chip-btn {
+  height: 26px; padding: 0 9px;
+  border: 1px solid var(--composer-border); border-radius: var(--r-full);
+  background: transparent; color: var(--text-2);
+  font-size: 12px; white-space: nowrap;
+}
+.gs-chip-btn:hover { background: var(--card); color: var(--text); }
+.gs-chip-btn[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.gs-chip-btn:disabled { opacity: .45; cursor: default; }
+.gs-chip-btn.is-danger:hover { border-color: var(--c-error); color: var(--c-error); background: transparent; }
+.gs-add-list { padding: 2px 10px 8px; display: flex; flex-direction: column; gap: 2px; }
+.gs-add-row {
+  display: flex; align-items: center; gap: 10px;
+  width: 100%; padding: 7px 8px;
+  border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--text);
+  text-align: left; font-size: 13px;
+}
+.gs-add-row:hover { background: var(--card); }
+.gs-add-row .pt-avatar { width: 24px; height: 24px; font-size: 11px; }
+.gs-add-plus { margin-left: auto; color: var(--text-3); font-size: 12.5px; }
+.gs-add-row:disabled { opacity: .45; cursor: default; }
+
+/* 群设置页尾的删除：居中一行小字按钮，不跟保存抢视线 */
+.gs-danger {
+  align-self: flex-start;
+  height: 30px; padding: 0 10px;
+  border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--c-error);
+  font-size: 12.5px;
+}
+.gs-danger:hover { background: color-mix(in srgb, var(--c-error) 10%, transparent); }
 
 /* 空状态（群组列表用；此前 tasks 段在用但一直没有样式，顺手补上） */
 .tasks-empty { padding: 40px 16px; text-align: center; color: var(--text-2); }
 .tasks-empty h2 { margin: 0 0 6px; font-size: 15px; color: var(--text); }
 .tasks-empty p { margin: 0 auto; max-width: 420px; font-size: 12.5px; line-height: 1.7; }
 
-/* ── 设置 · 头像（预设图库 + 本地上传）────────────────── */
-.av-targets { display: flex; flex-wrap: wrap; gap: 8px; }
-.av-target {
-  display: inline-flex; align-items: center; gap: 8px;
-  padding: 6px 12px 6px 6px;
-  border: 1px solid var(--composer-border);
-  border-radius: var(--r-full);
-  background: var(--surface);
+/* 头像预设图库（.av-* 一族）随设置「头像」页一起退役（2026-11-07）：
+   头像并进「人设」弹窗，选择面板改用 .pt-portrait-* 一族，旧的 av-target/av-grid/
+   av-editor 已无引用。预设 PNG 本体与 /assets/preset/:file 路由保持不变。 */
+
+/* ── 记忆设置（2026-11-06）────────────────────────────────
+   列表是"分组标题 + 条目"两层：条目左对齐正文、右侧只留删除。
+   形状与执事列表（.pt-card）同族，但不复用它的 class——那里有头像/状态徽章，
+   记忆不需要，混用会让两边的改动互相牵连。 */
+.mem-list { display: flex; flex-direction: column; gap: 16px; }
+.mem-group { display: flex; flex-direction: column; gap: 8px; }
+.mem-group-title {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12.5px; font-weight: 600; letter-spacing: .02em;
+  /* --text-3 在 --card-high 上只有 3:1 左右，12px 小字几乎看不清；
+     标题要能一眼扫到，用 --text-2（与 .row-hint 同档）。 */
   color: var(--text-2);
-  font-size: 13px; font-weight: 500;
-  cursor: pointer;
-  transition: background-color .15s ease, border-color .15s ease, color .15s ease;
 }
-.av-target:hover { background: var(--card-high); color: var(--text); }
-.av-target.is-active { color: var(--text); border-color: var(--accent-line); background: var(--accent-soft); }
-.av-target-avatar { width: 30px; height: 30px; font-size: 13px; }
-.av-target-name { max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-.av-editor { display: flex; gap: 20px; flex-wrap: wrap; }
-.av-preview-col { display: flex; flex-direction: column; align-items: center; gap: 8px; width: 104px; flex: none; }
-.av-preview { width: 88px; height: 88px; font-size: 32px; }
-.av-main { flex: 1 1 320px; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
-
-/* 筛选分段不挂滑行胶囊，这里给选中项一个明确底色 */
-.av-filter button[aria-checked="true"] { background: var(--card-high); color: var(--text); }
-
-.av-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(64px, 1fr));
-  gap: 8px;
-  max-height: 320px;
-  overflow-y: auto;
-  padding: 2px;
+.mem-count {
+  font-weight: 500; font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  padding: 1px 7px; border-radius: 999px;
+  /* 徽章只需要"比标题淡一点"，不要自带底色：
+     之前写 background: var(--bg) 时，如果元素被撑成整行宽，
+     就会在标题下面画出一条贯穿整行的灰带（看起来像删除线）。 */
+  color: var(--text-2);
 }
-.av-preset {
-  position: relative;
-  aspect-ratio: 1;
-  padding: 0;
-  border: 2px solid transparent;
-  border-radius: var(--r-md);
-  background: var(--surface-low);
-  cursor: pointer;
-  overflow: hidden;
-  transition: border-color .15s ease, transform .15s ease;
+.mem-item {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 10px 12px; border-radius: 12px;
+  background: var(--card-high);
 }
-.av-preset img { width: 100%; height: 100%; display: block; object-fit: cover; }
-.av-preset:hover { transform: translateY(-1px); }
-.av-preset.is-active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-line); }
-.av-preset:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-
-.av-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-
-@media (max-width: 560px) {
-  .av-editor { gap: 14px; }
-  .av-preview-col { width: 100%; flex-direction: row; justify-content: flex-start; }
+.mem-item-main { min-width: 0; flex: 1 1 auto; display: flex; flex-direction: column; gap: 4px; }
+.mem-item-text { font-size: 13px; line-height: 1.5; color: var(--text); overflow-wrap: anywhere; }
+.mem-item-why {
+  font-size: 12px; line-height: 1.5; color: var(--text-2);
+  overflow-wrap: anywhere;
 }
-
+.mem-item-meta { font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.mem-item-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; }
+.mem-act { font-size: 12px; padding: 4px 8px; }

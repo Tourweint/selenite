@@ -83,15 +83,14 @@
 
 <div class="app">
   <aside class="sidebar">
-    <!-- 收起轨道（2026-11-05 F1 / E4 重排 / E5 对齐）：对齐 CINDY 几何，72px 轨 + 40×40 圆钮。
-         顺序与展开态一致：新建对话（＋）→ 总管（首字圆钮，点开主对话）→ 任务中心 → 项目 →
-         分隔线 → 执事占位（不展开，悬停提示去看展开侧栏）→ 群组占位 → 底部一行齿轮 + 状态点。
-         项目按钮与展开态 pill 共用同一个弹层（#proj-menu）。 -->
+    <!-- 收起轨道（2026-11-05 F1 / E4 重排 / E5 对齐 / 2026-11-07 统一批）：
+         对齐 CINDY 几何，72px 轨 + 40×40 圆钮。顺序与展开态一致：
+         总管（首字圆钮）→ 任务中心 → 项目 → 执事占位（悬停提示去看展开侧栏）→ 群组
+         → 底部齿轮 + 状态点。2026-11-07：顶部「新建对话」退役（新建入口在展开态
+         「最近会话」分区头的 ＋），状态点改到齿轮正下方，不再挂在右侧。
+         项目按钮仍用弹层（72px 放不下内联列表），展开态则是内联分区。 -->
     <div class="side-rail" id="side-rail">
-      <button class="rail-btn" id="rail-new" type="button" data-tip="新建对话 (Ctrl+K)" aria-label="新建对话">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
-      </button>
-      <button class="rail-btn rail-chief" id="rail-chief" type="button" data-tip="总管 · 打开主对话" aria-label="总管 · 打开主对话">
+      <button class="rail-btn rail-chief" id="rail-chief" type="button" data-tip="总管" aria-label="总管">
         <span class="pt-avatar" aria-hidden="true">总</span>
       </button>
       <button class="rail-btn" id="rail-tasks" type="button" data-tip="任务中心" aria-label="任务中心">
@@ -115,7 +114,8 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/><path d="M8 12h.01"/><path d="M12 12h.01"/><path d="M16 12h.01"/></svg>
       </button>
       <div class="rail-flex" aria-hidden="true"></div>
-      <!-- 收起态底部：齿轮与状态点同一行，避免 72px 轨里竖向堆叠 -->
+      <!-- 收起态底部（2026-11-07）：齿轮在上、状态点在正下方，同一竖轴。
+           之前状态点绝对定位在右侧，跟齿轮不在一条线上，收起态看着别扭。 -->
       <div class="rail-foot">
         <button class="rail-btn" id="rail-settings" type="button" data-tip="设置" aria-label="设置" title="设置">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -128,106 +128,123 @@
     </div>
 
     <div class="sidebar-inner" id="sidebar-inner">
-      <!-- 总管区（E4）：新建对话 / 总管固定条目（首字头像＋名字＋pill＋状态点）/
-           最近会话折叠（原「对话」列表整块移入这里，默认展开，折叠态存 localStorage）。 -->
-      <div class="side-chief">
-        <button class="new" id="new-chat" type="button"
-                aria-label="新建对话" title="新建对话 (Ctrl+K)">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
-          新建对话
+      <!-- 总管（2026-11-07）：固定条目，不进折叠区，永在最上。
+           点头像 = 进编辑；点行其余部分 = 打开总管会话（历史里最近一条，没有就新开）。 -->
+      <div class="side-item chief-entry" id="chief-entry" role="button" tabindex="0"
+           aria-label="总管" title="总管">
+        <button class="pt-avatar avatar-edit" id="chief-avatar" type="button"
+                aria-label="编辑总管头像" title="编辑总管头像">总</button>
+        <span class="roster-name">总管</span>
+        <span class="pill-tag">总管</span>
+        <span class="side-count chief-count" id="chief-count" hidden></span>
+        <i class="status-dot idle" id="chief-dot" aria-hidden="true"></i>
+      </div>
+
+      <!-- 分区形态（2026-11-07 四改，用户口径）：
+           **不要箭头**——点整行（图标 + 名称）就是收起/展开；行尾只留一个 ＋。
+           展开/收起的状态用整行的 hover 底 + 名称颜色表达，不再靠箭头。
+           顺序按用户要求：执事在上（紧跟总管），然后是会话/任务、项目、群组。 -->
+
+      <!-- 执事（上移到总管之后） -->
+      <section class="side-sec is-open" id="sec-partners" data-sec="partners">
+        <button class="side-sec-head" id="sec-partners-toggle" type="button" aria-expanded="true"
+                aria-controls="sec-partners-body" title="执事（点一下收起/展开）">
+          <svg class="sec-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          <span class="sec-name">执事</span>
+          <span class="side-count sec-count" id="partners-badge" hidden></span>
         </button>
-
-        <div class="side-item chief-entry" id="chief-entry" role="button" tabindex="0"
-             aria-label="总管 · 打开主对话" title="总管 · 打开主对话">
-          <!-- 头像单独可聚焦：点它进编辑（不触发行点击），行其余部分仍打开主对话。
-               没有自定义图片时显示名字首字。 -->
-          <button class="pt-avatar avatar-edit" id="chief-avatar" type="button"
-                  aria-label="编辑总管头像" title="编辑总管头像">总</button>
-          <span class="roster-name">总管</span>
-          <span class="pill-tag">总管</span>
-          <!-- E5：无 domain 的活跃单归总管；只显示不点击（总管的单没有 domain 筛选入口） -->
-          <span class="side-count chief-count" id="chief-count" hidden></span>
-          <i class="status-dot idle" id="chief-dot" aria-hidden="true"></i>
-        </div>
-
-        <div class="recents" id="recents">
-          <button class="recents-head" id="recents-toggle" type="button" aria-expanded="true">
-            <span>最近会话</span>
-            <svg class="recents-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
-          </button>
-          <div class="recents-body" id="recents-body">
-            <nav class="chats" id="chats" aria-label="最近会话"></nav>
-            <button class="recents-all" id="recents-all" type="button">全部会话 <span aria-hidden="true">→</span></button>
+        <button class="sec-add" id="partner-add-side" type="button" aria-label="新建执事" title="新建执事">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+        </button>
+        <div class="side-sec-body" id="sec-partners-body">
+          <div class="side-sec-clip">
+            <div class="side-sec-inner">
+              <div class="roster" id="partner-roster" aria-label="执事花名册"></div>
+              </div>
           </div>
         </div>
-      </div>
+      </section>
 
-      <div class="rail-sep side-sep" aria-hidden="true"></div>
-
-      <!-- 工具区（E5 上移）：顺序与收起轨道一一对应——新建对话 → 总管 → 任务中心 → 项目
-           → 执事 → 群组 → 底部齿轮。工具区放在执事之前，两边从上到下一致。 -->
-      <div class="side-top">
-        <button class="side-item" id="open-tasks" type="button" aria-label="任务中心" title="任务中心">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <rect width="8" height="4" x="8" y="2" rx="1" ry="1"/>
-            <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>
-            <path d="M12 11h4"/>
-            <path d="M12 16h4"/>
-            <path d="M8 11h.01"/>
-            <path d="M8 16h.01"/>
-          </svg>
-          任务中心
-          <span class="side-count" id="tasks-badge" hidden></span>
+      <!-- 会话 / 任务中心合并（2026-11-07 四改）：两块的实效一样——都是"有哪些对话"。
+           现在一个分区、一个 ＋（新建一条普通对话），列表里同时显示两类行：
+             会话行    = 普通对话，点进对话；
+             任务行    = 有派活的对话，带聚合灯，点进任务中心那张卡。
+           会话行在前（最近聊的），任务行殿后（有活的），中间不加分隔条。 -->
+      <section class="side-sec is-open" id="sec-chats" data-sec="chats">
+        <button class="side-sec-head" id="sec-chats-toggle" type="button" aria-expanded="true"
+                aria-controls="sec-chats-body" title="对话（点一下收起/展开）">
+          <svg class="sec-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          <span class="sec-name">对话</span>
+          <span class="side-count sec-count" id="tasks-badge" hidden></span>
         </button>
+        <button class="sec-add" id="sec-chats-add" type="button" aria-label="新建对话" title="新建对话 (Ctrl+K)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+        </button>
+        <div class="side-sec-body" id="sec-chats-body">
+          <div class="side-sec-clip">
+            <div class="side-sec-inner">
+              <nav class="chats" id="chats" aria-label="对话"></nav>
+              <div class="roster" id="tasks-mini" aria-label="任务对话"></div>
+              <button class="sec-foot-link" id="sec-tasks-all" type="button">打开任务中心 <span aria-hidden="true">→</span></button>
+              </div>
+          </div>
+        </div>
+      </section>
 
-        <!-- 项目区（2026-11-04，F1 起无工作区也显示）：主项目 pill，点开是「主项目 + 子项目」总览。
-             没有工作区时作为「设置主项目」入口，不再整块隐藏。 -->
-        <div class="side-proj" id="side-proj" hidden>
-          <button class="composer-pill proj-pill" id="proj-pill" type="button"
-                  aria-haspopup="menu" aria-expanded="false" aria-label="项目" title="项目">
-            <svg class="proj-pill-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>
-            </svg>
-            <span class="proj-pill-label" id="proj-pill-label">项目</span>
-            <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+      <!-- 项目：行尾 ＋ 给两个入口（新建项目 / 添加已有子项目）。 -->
+      <section class="side-sec is-open" id="sec-projects" data-sec="projects">
+        <button class="side-sec-head" id="sec-projects-toggle" type="button" aria-expanded="true"
+                aria-controls="sec-projects-body" title="项目（点一下收起/展开）">
+          <svg class="sec-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+          <span class="sec-name" id="sec-projects-name">项目</span>
+        </button>
+        <div class="sec-add-wrap">
+          <button class="sec-add" id="sec-projects-add" type="button"
+                  aria-haspopup="menu" aria-expanded="false" aria-label="新建项目" title="新建项目 / 添加子项目">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
           </button>
         </div>
-      </div>
-
-      <div class="rail-sep side-sep" aria-hidden="true"></div>
-
-      <!-- 执事花名册（E4）：数据源 GET /api/v1/partners + /api/v1/domains；
-           分区标题右侧 ＋ 复用 E1「新建执事」模态；行点击进执事 canonical 会话。 -->
-      <div class="side-partners">
-        <div class="sidebar-head partners-head" title="执事" aria-label="执事">
-          执事
-          <button class="roster-add" id="partner-add-side" type="button" aria-label="新建执事" title="新建执事">＋</button>
+        <div class="side-sec-body" id="sec-projects-body">
+          <div class="side-sec-clip">
+            <div class="side-sec-inner">
+              <div class="roster" id="proj-list" aria-label="项目列表"></div>
+              <button class="sec-foot-link" id="sec-projects-manage" type="button">管理项目 → 设置</button>
+              </div>
+          </div>
         </div>
-        <div class="roster" id="partner-roster" aria-label="执事花名册"></div>
-      </div>
+      </section>
 
-      <!-- 群组（2026-11-06 群组方案批二）：点击进 #/groups（列表），
-           侧栏「群组」节列出已建的群；没有开关时按钮回占位（app.js 按 GROUPS 可用性启用） -->
-      <button class="side-item" id="side-group" type="button" disabled
-              aria-label="群组" title="群组">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/><path d="M8 12h.01"/><path d="M12 12h.01"/><path d="M16 12h.01"/></svg>
-        群组
-      </button>
-      <div class="roster" id="group-list" aria-label="群组列表" hidden></div>
+      <section class="side-sec is-open" id="sec-groups" data-sec="groups">
+        <button class="side-sec-head" id="sec-groups-toggle" type="button" aria-expanded="true"
+                aria-controls="sec-groups-body" title="群组（点一下收起/展开）" disabled>
+          <svg class="sec-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/><path d="M8 12h.01"/><path d="M12 12h.01"/><path d="M16 12h.01"/></svg>
+          <span class="sec-name">群组</span>
+        </button>
+        <button class="sec-add" id="sec-groups-add" type="button" aria-label="新建群组" title="新建群组" disabled>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+        </button>
+        <div class="side-sec-body" id="sec-groups-body">
+          <div class="side-sec-clip">
+            <div class="side-sec-inner">
+              <div class="roster" id="group-list" aria-label="群组列表"></div>
+              </div>
+          </div>
+        </div>
+      </section>
 
-      <!-- 底部一行：左服务状态、右齿轮（只留图标，提示走 aria-label/title）。
-           mt-auto 钉在侧栏底边；设置页会隐藏侧栏，所以设置页自带返回按钮。 -->
+      <!-- 底部（2026-11-07 二改）：与收起轨道完全同构——齿轮一颗居中，状态点正下方居中。
+           之前这里是「设置」整行文字 + 状态「点 + 连接中」一行文字，展开态看着像左右两列；
+           用户口径：设置不用文字，图标就行；状态也只要点，别占一行。 -->
       <div class="side-foot">
-        <span class="status" id="status" data-state="waiting">
-          <i aria-hidden="true"></i><span id="status-text">连接中</span>
-        </span>
         <button class="side-item foot-gear" id="open-settings" type="button" aria-label="设置" title="设置">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/>
             <circle cx="12" cy="12" r="3"/>
           </svg>
         </button>
+        <span class="status" id="status" data-state="waiting" role="status" aria-live="polite">
+          <i aria-hidden="true"></i><span class="status-text" id="status-text">连接中</span>
+        </span>
       </div>
     </div>
   </aside>
@@ -253,9 +270,10 @@
     <div class="scroll" id="scroll">
       <div class="thread" id="thread">
         <div class="empty" id="empty">
-          <!-- 首页标识：项目水晶（2026-11-04，无背景框，光晕由 CSS 滤镜给） -->
-          <img class="empty-mark" src="/assets/crystal.png" alt="" aria-hidden="true">
-          <p>说吧，我在。</p>
+          <!-- 首页标识（2026-11-07 改横排）：项目水晶与问候语左右并置，像一枚印在纸上的题头。
+               水晶无背景框，光晕由 CSS 滤镜给。 -->
+          <img class="empty-mark" src="/assets/crystal-mark.png" alt="" aria-hidden="true">
+          <p class="empty-greet" id="empty-greet">说吧，我在。</p>
         </div>
       </div>
     </div>
@@ -419,7 +437,16 @@
         <h1><span id="groups-title-text">群组</span><span class="tasks-title-sub" id="groups-title-sub"></span></h1>
       </div>
       <div class="tasks-actions">
-        <button class="ghost" id="group-settings-btn" type="button" hidden>群设置</button>
+        <!-- 群设置（2026-11-07）：纯图标入口，与右上角对话设置同款（.top-gear 几何）。
+             文字按钮在群会话顶栏里比标题还抢眼，图标 + title/aria-label 才是正解。 -->
+        <button class="top-gear" id="group-settings-btn" type="button" aria-label="群设置" title="群设置" hidden>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M20 7h-9"/>
+            <path d="M14 17H5"/>
+            <circle cx="17" cy="17" r="3"/>
+            <circle cx="7" cy="7" r="3"/>
+          </svg>
+        </button>
         <button class="btn-primary" id="group-create" type="button">新建群组</button>
       </div>
     </header>
@@ -429,10 +456,19 @@
       <div class="tasks-body" id="groups-body"></div>
       <!-- 会话态：时间线 + composer（复用主对话 composer 的样式骨架，独立一份 DOM） -->
       <div class="group-chat" id="group-chat" hidden>
+        <!-- 成员条（2026-11-07）：谁在群里一眼看见；点头像=把 @名字 插进输入框，
+             右键=同一份菜单（@他 / 复制名字）。@ 的发现性靠这条 + 输入框左侧 @ 按钮。 -->
+        <div class="group-members" id="group-members" role="group" aria-label="群成员"></div>
         <div class="group-notice" id="group-notice" hidden></div>
         <div class="group-thread" id="group-thread"></div>
         <div class="group-composer">
           <div class="group-atpop" id="group-atpop" role="listbox" aria-label="点名候选" hidden></div>
+          <button class="group-at-btn" id="group-at-btn" type="button" aria-label="点名（@）" title="点名 @">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="4"/>
+              <path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8"/>
+            </svg>
+          </button>
           <textarea class="group-input" id="group-input" rows="1"
                     placeholder="@点名、@所有人，或不 @ 发给值日执事…"></textarea>
           <button class="group-send" id="group-send" type="button" aria-label="发送" disabled>
@@ -475,8 +511,14 @@
   </div>
 </div>
 
-<div id="chat-settings-overlay" hidden></div>
-<aside id="chat-settings-drawer" role="dialog" aria-modal="true" aria-label="对话设置" hidden></aside>
+<div id="chat-settings-overlay" class="side-overlay" hidden></div>
+<aside id="chat-settings-drawer" class="side-drawer" role="dialog" aria-modal="true" aria-label="对话设置" hidden></aside>
+
+<!-- 群设置（2026-11-07）：与对话设置同一个抽屉骨架（.side-drawer / .side-overlay），
+     首页是群身份 + 设置行，二级页管改名/公告/应答口径/值日/成员，删除在页尾。
+     原先的居中弹窗（modal）在这个信息量下太挤：一屏塞满输入框与勾选胶囊，看不出层级。 -->
+<div id="group-settings-overlay" class="side-overlay" hidden></div>
+<aside id="group-settings-drawer" class="side-drawer" role="dialog" aria-modal="true" aria-label="群设置" hidden></aside>
 
 <div class="gate" id="gate" hidden>
   <form class="gate-box" id="gate-form">
