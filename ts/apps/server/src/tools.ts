@@ -220,6 +220,31 @@ function envFlag(name: string, fallback: boolean): boolean {
 	return raw !== "false" && raw !== "0";
 }
 
+/**
+ * 设备 worker 判定（2026-11-08 扫尾批 3-H B3）：执行体是否"不落本机磁盘项目"。
+ *
+ * `delegate` 入参里没有 worker 字段（参数见本文件 `delegate.parameters`）。代码里
+ * 设备执行体有两种表达，两种都不该过本机项目前置：
+ *  1. `targetDevice` 明确点名另一台设备 —— 走本文件的远程分支，在 `return` 处就
+ *     结束，天然到不了项目前置（注释「本机的项目前置不参与」）。"auto" 挑不出落回
+ *     本机时不算设备活：那时是本机执行，仍要项目。
+ *  2. chancellor 的雇员档 `CHANCELLOR_EMPLOYEE=phone`（chancellor `config.ts:9`
+ *     的 `EMPLOYEE: WorkerKind`，`WorkerKind` 含 `"phone"`）——本机 chancellor 把活
+ *     派给手机 worker，活去手机屏幕、不落本机磁盘（`plan.ts` 把 phone 单 writes
+ *     置空、`review.ts` 按汇报验收）。这条**会**走到项目前置，正是被 `needs_project`
+ *     硬拦的一条；本次豁免的就是它。
+ *
+ * 只判"执行体"，不改 `project` 本身的语义：设备活根本不进 `resolveDelegationProject`。
+ */
+export function isDeviceWorkerDelegation(
+	args: { targetDevice?: string },
+	env: NodeJS.ProcessEnv = process.env,
+): boolean {
+	const explicitDevice = (args.targetDevice ?? "").trim();
+	if (explicitDevice && explicitDevice !== "auto") return true;
+	return (env.CHANCELLOR_EMPLOYEE ?? "").trim().toLowerCase() === "phone";
+}
+
 function text(value: string) {
 	return { output: [{ type: "text" as const, text: value }] };
 }
@@ -338,6 +363,11 @@ export function createTools(deps: ToolDeps) {
 	const run = deps.delegateRun ?? runChancellor;
 	/** 回滚开关：`DELEGATION_PROJECT_REQUIRED=false` 回到 2026-11-02 的无项目行为。 */
 	const projectRequired = envFlag("DELEGATION_PROJECT_REQUIRED", true);
+	/**
+	 * 设备活项目前置豁免（2026-11-08 扫尾批 3-H B3）：默认开。
+	 * `DELEGATION_DEVICE_PROJECT_EXEMPT=false` → 设备活也要项目（回到本批前行为）。
+	 */
+	const deviceProjectExempt = envFlag("DELEGATION_DEVICE_PROJECT_EXEMPT", true);
 
 	const proposeProject = defineTool({
 		name: "propose_project",
@@ -402,7 +432,8 @@ export function createTools(deps: ToolDeps) {
 			"所以返回后直接告诉用户「已派发，完成后会汇报」即可，不要等结果、不要反复查询、不要重复派。" +
 			"填 `domain` 把活交给对应领域的负责人。**领域名必须是小写 ASCII**（小写字母、数字、连字符，如 `frontend` / `desktop-shell`）；" +
 			`当前已有领域：${domainList()}。不填则按旧路径直接派 worker。` +
-			"**派新活时必须带 `project`（已登记的项目名或 id）**；没有可用项目时会返回 " +
+			"**派新活时必须带 `project`（已登记的项目名或 id）**；手机/设备 worker 这类" +
+			"不落本机磁盘的活可省 `project`（设备活豁免）；本机活没有可用项目时会返回 " +
 			"`{\"error\":\"needs_project\"}` 并列出已有项目——先问用户要建哪个项目，" +
 			"用 `propose_project` 提交、等用户在设置里确认，再派。" +
 			"如果上一轮派出去的活卡住了、你问了用户一个问题、用户刚回答了你，用 `resume: true` 接着原单跑：" +
@@ -552,8 +583,12 @@ export function createTools(deps: ToolDeps) {
 
 			// 项目前置（方案 §5.5）：派新活必须过登记表；续跑沿用原单 / 上一轮的项目。
 			// 没有项目时**不建单、不建目录、不写文件**，只把清单交回给模型。
+			// 设备 worker（手机 / 点名设备的跨机派发）不落本机磁盘：豁免前置，按无项目单
+			// 受理（2026-11-08 扫尾批 3-H B3）。豁免只放行这一段，resolveDelegationProject
+			// 的 realpath / 工作区复核一点不动——设备活根本不该进那段。
+			const deviceWork = deviceProjectExempt && isDeviceWorkerDelegation(args);
 			let project: ProjectRef | undefined;
-			if (projectRequired) {
+			if (projectRequired && !deviceWork) {
 				if (args.project?.trim()) {
 					const gate = resolveDelegationProject(args.project, deps.projects ?? null);
 					if (!gate.ok) return text(gate.text);

@@ -200,6 +200,110 @@ test("delegate 工具在没有项目时返回 needs_project，且不调用 runne
 	assert.equal(called, 0, "没有项目不能起 worker");
 });
 
+// ── 设备活豁免项目前置（2026-11-08 扫尾批 3-H B3）──────────────
+// 判别字段先钉死：delegate 入参没有 worker 字段，设备执行体由「明确 targetDevice」
+// 与「chancellor 雇员档 CHANCELLOR_EMPLOYEE=phone」两处表达。
+
+test("设备 worker 判别：明确 targetDevice / phone 雇员 / 本机 / auto 回落", async () => {
+	const { isDeviceWorkerDelegation } = await import("./tools.ts");
+	assert.equal(isDeviceWorkerDelegation({ targetDevice: "device-b" }, {}), true, "明确点名设备 = 设备活");
+	assert.equal(isDeviceWorkerDelegation({ targetDevice: "auto" }, {}), false, "auto 落回本机不算设备活");
+	assert.equal(isDeviceWorkerDelegation({}, { CHANCELLOR_EMPLOYEE: "phone" }), true, "phone 雇员 = 设备活");
+	assert.equal(isDeviceWorkerDelegation({}, { CHANCELLOR_EMPLOYEE: "codebuddy" }), false, "本机 codebuddy 不是设备活");
+	assert.equal(isDeviceWorkerDelegation({}, {}), false, "默认 native 不是设备活");
+});
+
+/**
+ * 真跑一次 delegate 的项目前置：env 由调用方先设好（env-before-import 纪律——
+ * `createTools` 在调用那一刻读 env 开关、execute 那一刻读雇员档），回执/工作根都
+ * 指临时目录，不碰真实 .data。
+ */
+async function runProjectGateCase(): Promise<{ output: string; called: number; projectSeen: unknown }> {
+	const { createTools } = await import("./tools.ts");
+	const { DelegationReceipts } = await import("./delegation-receipts.ts");
+	const root = tempDir("device-gate");
+	const receipts = new DelegationReceipts(join(root, "delegations.sqlite"));
+	let called = 0;
+	let projectSeen: unknown = "未调用";
+	try {
+		const tools = createTools({
+			memory: null,
+			scopeOf: (id) => ({ type: "session", id: String(id) }) as never,
+			projects: null,
+			receipts,
+			delegateRun: (async (
+				request: { requirement: string; project?: unknown },
+				options: { onEvent?: (event: never) => void },
+			) => {
+				called += 1;
+				projectSeen = request.project;
+				options.onEvent?.({ type: "ticket", ticketId: "T-device", message: "已受理" } as never);
+				return { ticketId: "T-device", status: "done", line: "完成", tasks: [] };
+			}) as never,
+		});
+		const delegate = tools.find((tool) => tool.name === "delegate");
+		assert.ok(delegate);
+		const result = await delegate.execute(
+			{ requirement: "打开设置看一眼版本号" } as never,
+			{ conversationId: 7201 } as never,
+			{} as never,
+		);
+		const output = (result.output ?? [])
+			.map((item) => (item.type === "text" ? item.text : ""))
+			.join("");
+		return { output, called, projectSeen };
+	} finally {
+		receipts.close();
+		rmSync(root, { recursive: true, force: true });
+	}
+}
+
+test("设备活豁免项目前置（B3）：设备无项目受理 / 本机仍 needs_project / 开关关后设备也要项目", async () => {
+	const base = {
+		DELEGATION_PROJECT_REQUIRED: "true",
+		DELEGATION_ASYNC: "true",
+		// 不存在的临时根即可：domainList 读不到 managers 会自己回落，不碰真实工作区
+		CHANCELLOR_WORK_ROOT: join(tmpdir(), "lifediary-device-gate-work"),
+	};
+	const deviceEnv = { ...base, CHANCELLOR_EMPLOYEE: "phone", DELEGATION_DEVICE_PROJECT_EXEMPT: "true" };
+	const localEnv = { ...base, CHANCELLOR_EMPLOYEE: "codebuddy", DELEGATION_DEVICE_PROJECT_EXEMPT: "true" };
+	const rollbackEnv = { ...base, CHANCELLOR_EMPLOYEE: "phone", DELEGATION_DEVICE_PROJECT_EXEMPT: "false" };
+	const keys = [
+		"DELEGATION_PROJECT_REQUIRED",
+		"DELEGATION_DEVICE_PROJECT_EXEMPT",
+		"DELEGATION_ASYNC",
+		"CHANCELLOR_EMPLOYEE",
+		"CHANCELLOR_WORK_ROOT",
+	];
+	const snapshot = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+	try {
+		// ① 设备活（phone worker）无项目 → 受理，且按无项目单入队（不带 project）
+		Object.assign(process.env, deviceEnv);
+		const device = await runProjectGateCase();
+		assert.doesNotMatch(device.output, /needs_project/, "设备活不该被 needs_project 拦下");
+		assert.equal(device.called, 1, "设备活应真的起单");
+		assert.equal(device.projectSeen, undefined, "设备活按无项目单受理");
+
+		// ② 本机活（codebuddy）无项目 → 仍 needs_project，且不起 worker
+		Object.assign(process.env, localEnv);
+		const local = await runProjectGateCase();
+		assert.match(local.output, /needs_project/, "本机活仍要项目");
+		assert.equal(local.called, 0, "本机活没项目不能起 worker");
+
+		// ③ 回滚开关关 → 设备活也要项目（回到本批前行为）
+		Object.assign(process.env, rollbackEnv);
+		const rollback = await runProjectGateCase();
+		assert.match(rollback.output, /needs_project/, "开关关后设备活也要项目");
+		assert.equal(rollback.called, 0, "开关关后设备活没项目不能起 worker");
+	} finally {
+		for (const key of keys) {
+			const value = snapshot[key];
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	}
+});
+
 test("propose_project 工具只提交待确认请求", async () => {
 	const { createTools } = await import("./tools.ts");
 	const root = tempDir("propose-tool");
