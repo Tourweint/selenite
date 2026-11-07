@@ -11,8 +11,14 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
 	InMemoryStore,
+	MAX_PREFERENCES_PER_TURN,
 	MemoryEngine,
+	MIN_PREFERENCE_CONFIDENCE,
+	NoopExtractor,
+	PreferenceExtractor,
 	SqliteMemoryStore,
+	parsePreferenceJson,
+	renderPreference,
 	scopeKey,
 	type ExtractMessage,
 	type MemoryRecord,
@@ -343,6 +349,134 @@ try {
 	const globalOnly = partnerEngine.recall({ text: "配置", scopes: ["global"], limit: 10 });
 	assert(globalOnly.length === 1, "global 键空间照常可用");
 	console.log(`✓ partner 作用域：键空间隔离成立（key=${keyA.slice(0, 16)}…）`);
+}
+
+// ── 10. 偏好抽取（2026-11-06）───────────────────────────
+// 抽取器本身不碰模型：模型调用是注入的，这里注入一个假函数就能测全部分支。
+{
+	// 10.1 解析：模型最常犯的三种毛病（围栏 / 前后解释 / 字段名写错）都要能活
+	const fenced = parsePreferenceJson(
+		'好的，我提取到：\n```json\n[{"content":"用户不喜欢被追问太多","why":"说过会累","howToApply":"需要澄清时一次只问一个","confidence":0.9}]\n```',
+	);
+	assert(fenced.length === 1, `围栏 + 前后解释应解析出 1 条，实际 ${fenced.length}`);
+	assert(fenced[0]!.content.includes("追问"), "正文应保留");
+	assert(fenced[0]!.why === "说过会累" && fenced[0]!.howToApply.includes("一次只问一个"), "why/how 应保留");
+
+	const wrapped = parsePreferenceJson('{"preferences":[{"content":"以后都用中文","confidence":0.8}]}');
+	assert(wrapped.length === 1 && wrapped[0]!.content === "以后都用中文", "{preferences:[…]} 形状应支持");
+
+	// 10.2 阈值与上限
+	assert(
+		parsePreferenceJson(`[{"content":"低置信","confidence":${MIN_PREFERENCE_CONFIDENCE - 0.1}}]`).length === 0,
+		"低于阈值的应丢弃",
+	);
+	const many = parsePreferenceJson(
+		JSON.stringify(
+			Array.from({ length: MAX_PREFERENCES_PER_TURN + 3 }, (_, index) => ({
+				content: `偏好 ${index}`,
+				confidence: 0.9,
+			})),
+		),
+	);
+	assert(many.length === MAX_PREFERENCES_PER_TURN, `最多取 ${MAX_PREFERENCES_PER_TURN} 条，实际 ${many.length}`);
+
+	// 10.3 坏输入永不抛
+	for (const bad of ["", "   ", "不是 JSON", "[{", "null", "{}", "[1,2,3]"]) {
+		assert(parsePreferenceJson(bad).length === 0, `坏输入应返回空数组：${JSON.stringify(bad)}`);
+	}
+
+	// 10.4 渲染形状：Why/How 各占一行，超长截断
+	const rendered = renderPreference({
+		content: "  用户  偏好简洁  ",
+		why: "说过两次",
+		howToApply: "汇报时先给结论",
+		confidence: 0.9,
+	});
+	assert(rendered.startsWith("用户 偏好简洁\n"), "正文应压空白并换行");
+	assert(rendered.includes("Why: 说过两次") && rendered.includes("How: 汇报时先给结论"), "Why/How 段应在");
+	const long = renderPreference({ content: "很长".repeat(400), why: "", howToApply: "", confidence: 1 });
+	assert(long.length <= 400, `超长应截断到 400 内，实际 ${long.length}`);
+
+	// 10.5 PreferenceExtractor：模型给了就落 preference，模型挂了就返回空（绝不抛）
+	const engineWithModel = new MemoryEngine({
+		store: new InMemoryStore(),
+		extractor: new PreferenceExtractor(async () =>
+			JSON.stringify([{ content: "用户要求以后都先给结论", why: "不喜欢铺垫", howToApply: "回答开头", confidence: 0.95 }]),
+		),
+	});
+	const modelScope: MemoryScope = { type: "session", id: "pref-model" };
+	const prefResult = await engineWithModel.ingestTurn(
+		[{ role: "user", content: "以后都先给结论，别铺垫了，我不喜欢" }],
+		modelScope,
+		{ preferenceScope: { type: "global" } },
+	);
+	assert(prefResult.added.length === 1, `应落 1 条偏好，实际 ${prefResult.added.length}`);
+	assert(prefResult.added[0]!.kind === "preference", "kind 应为 preference");
+	assert(prefResult.added[0]!.scope === "global", `偏好应重挂到 global，实际 ${prefResult.added[0]!.scope}`);
+	assert(prefResult.added[0]!.source === "extract:preference", "来源应可辨认");
+
+	const engineNoModel = new MemoryEngine({
+		store: new InMemoryStore(),
+		extractor: new PreferenceExtractor(async () => {
+			throw new Error("上游 500");
+		}),
+	});
+	const failed = await engineNoModel.ingestTurn([{ role: "user", content: "随便说点什么内容" }], modelScope);
+	assert(failed.added.length === 0, "模型失败时应静默返回空，不得抛错");
+
+	// 10.6 不传 preferenceScope = 全部落本会话（旧行为）
+	const enginePlain = new MemoryEngine({ store: new InMemoryStore() });
+	const plain = await enginePlain.ingestTurn(turn1, scope);
+	assert(plain.added.every((r) => r.scope === scopeKey(scope)), "不传时 scope 不变");
+	assert(plain.added.every((r) => r.kind === "episode"), "不传时仍是旧行为：一律 episode");
+
+	// 10.7 NoopExtractor 仍是"什么都不抽"
+	const noopEngine = new MemoryEngine({ store: new InMemoryStore(), extractor: new NoopExtractor() });
+	const noop = await noopEngine.ingestTurn(turn1, scope);
+	assert(noop.added.length === 0, "Noop 应一条都不抽");
+
+	// 10.8 注入分组：偏好排在前、单独成段；没有偏好时逐字节等同旧形状
+	const injectEngine = new MemoryEngine({ store: new InMemoryStore() });
+	injectEngine.remember({ kind: "preference", scope: { type: "global" }, content: "用户不喜欢被追问太多" });
+	injectEngine.remember({ kind: "episode", scope: { type: "global" }, content: "今天面试挂了" });
+	const ctx = injectEngine.buildContext({ text: "追问 面试", scopes: ["global"], limit: 5 });
+	assert(ctx.includes("【用户偏好】"), "有偏好时应出现偏好段");
+	assert(ctx.indexOf("【用户偏好】") < ctx.indexOf("不喜欢被追问"), "偏好段应在条目之前");
+	assert(ctx.indexOf("【用户偏好】") < ctx.indexOf("【其它】"), "偏好段应排在其它之前");
+
+	const onlyEpisode = new MemoryEngine({ store: new InMemoryStore() });
+	onlyEpisode.remember({ kind: "episode", scope: { type: "global" }, content: "今天面试挂了" });
+	const plainCtx = onlyEpisode.buildContext({ text: "面试", scopes: ["global"] });
+	assert(!plainCtx.includes("【"), "没有偏好时不应出现分组标题（保持旧形状）");
+	assert(plainCtx.includes("- [episode] 今天面试挂了"), "旧形状的条目行不变");
+
+	// 10.9 取代与删除
+	const lifeEngine = new MemoryEngine({ store: new InMemoryStore() });
+	const old = lifeEngine.remember({ kind: "fact", scope: { type: "global" }, content: "我住在北京" });
+	const fresh = lifeEngine.remember({ kind: "fact", scope: { type: "global" }, content: "我搬到上海了" });
+	assert(lifeEngine.supersede(old.id, fresh.id)?.supersededBy === fresh.id, "取代应写回 supersededBy");
+	assert(
+		!lifeEngine.recall({ text: "北京 上海", scopes: ["global"], limit: 10 }).some((h) => h.record.id === old.id),
+		"被取代的记录不应再进召回",
+	);
+	const withHistory = lifeEngine.list({ scopes: ["global"], includeSuperseded: true });
+	assert(withHistory.some((r) => r.id === old.id), "历史链仍可查（includeSuperseded）");
+	assert(lifeEngine.supersede(old.id, "不存在的-id") === null, "替代者不存在时应拒绝");
+	assert(lifeEngine.supersede(old.id, old.id) === null, "不能取代自己");
+	assert(lifeEngine.forget(fresh.id), "删除应返回 true");
+	assert(!lifeEngine.forget(fresh.id), "重复删除应返回 false");
+	assert(!lifeEngine.recall({ text: "上海", scopes: ["global"] }).some((h) => h.record.id === fresh.id), "删除后不再召回");
+
+	// 10.10 list 分组：偏好最前，组内按时间倒序
+	const listEngine = new MemoryEngine({ store: new InMemoryStore() });
+	listEngine.remember({ kind: "episode", scope: { type: "global" }, content: "较早的经历" });
+	listEngine.remember({ kind: "fact", scope: { type: "global" }, content: "一个事实" });
+	listEngine.remember({ kind: "preference", scope: { type: "global" }, content: "一个偏好" });
+	const listed = listEngine.list({ scopes: ["global"] });
+	assert(listed[0]!.kind === "preference", `列表首条应是偏好，实际 ${listed[0]!.kind}`);
+	assert(listed.map((r) => r.kind).join(",") === "preference,fact,episode", `分组顺序不对：${listed.map((r) => r.kind)}`);
+
+	console.log("✓ 偏好抽取 / 注入分组 / 取代删除 / 列表分组 全部通过");
 }
 
 console.log("✓ 记忆框架自测通过");

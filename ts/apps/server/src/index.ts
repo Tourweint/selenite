@@ -23,6 +23,7 @@ import {
   contextUsageOf,
   externalChatIds,
   getPolicy,
+  preferenceScopeOf,
   hideChat,
   listChats,
   listReminders,
@@ -59,6 +60,7 @@ import { routineEngine } from "./routines.ts";
 import { watchAllEvents } from "./agent.ts";
 import { autonomyEnabled, autonomyObserver } from "./autonomy.ts";
 import { mountApprovalApi } from "./approval-api.ts";
+import { mountMemoryApi } from "./memory-api.ts";
 import { mountWeb } from "./web.ts";
 import { mountWorkerShell } from "./worker-shell.ts";
 import { syncDiaryToMemory } from "./memory-ingest.ts";
@@ -195,6 +197,8 @@ mountGroups(app);
 
 // 审批答复（2026-11-04 批次二）：待批列表 + 幂等答复。开关关着时列表恒为空。
 mountApprovalApi(app);
+// 记忆管理（2026-11-06）：看 / 删 / 标过时。只读列表不碰 durable，删改直接落记忆库。
+mountMemoryApi(app, { enabled: memoryEngine !== null });
 
 // 界面（2026-11-03）：原来那张 M0 调试页换成了真界面，仍然是同源静态文件。
 // 桌面壳和浏览器打开的都是这个 `/`。
@@ -653,7 +657,11 @@ app.post("/api/v1/agent/chat", async (c) => {
           if (!memoryEngine || record.status !== "done") return;
           // 刻意不 await —— 记忆写慢了不该拖慢任何东西
           void memoryEngine
-            .ingestTurn(request.messages, scope)
+            .ingestTurn(request.messages, scope, {
+              // 2026-11-06：偏好挂更宽的 scope（主人 global / 执事 partner:<id>），
+              // 其余仍落本会话。不传这个参数 = 全部落本会话，与旧行为一致。
+              preferenceScope: preferenceScopeOf(chat.internalId),
+            })
             .then((result) => {
               if (result.added.length > 0 || result.reinforced.length > 0) {
                 console.log(

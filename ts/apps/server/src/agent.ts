@@ -28,6 +28,7 @@ import {
 	createMemoryEngine,
 	scopeKey,
 	type MemoryEngine,
+	type MemoryRecord,
 	type MemoryScope,
 } from "@lifediary/memory";
 import { diaryStore } from "./diary.ts";
@@ -39,6 +40,7 @@ import {
 	WRITE_TOOLS,
 } from "./approval-policy.ts";
 import { recentDiaryMemories, syncDiaryToMemory } from "./memory-ingest.ts";
+import { memoryExtractMode, preferenceExtractionEnabled, preferenceExtractor } from "./memory-extract.ts";
 import { pathGuardBlockReason } from "./path-guard.ts";
 import {
 	CHIEF_PARTNER_ID,
@@ -410,10 +412,14 @@ function memoryFtsEnabled(): boolean {
 export const memoryEngine: MemoryEngine | null = (() => {
 	if (process.env.MEMORY_ENABLED === "false") return null;
 	try {
+		const extractor = preferenceExtractor();
 		return createMemoryEngine({
 			dbPath: process.env.MEMORY_DB_PATH,
 			candidateFloor: memoryCandidateFloor(),
 			fts: memoryFtsEnabled(),
+			// 2026-11-06：不传 = 保持 memory 包的默认（HeuristicExtractor），
+			// 即 `MEMORY_EXTRACT=rule` 与"模型不可用"这两种情况**逐字节回到旧行为**。
+			...(extractor ? { extractor } : {}),
 		});
 	} catch (error) {
 		const detail = error instanceof Error ? error.message : String(error);
@@ -486,6 +492,18 @@ function partnerScopeOf(conversationId: number): MemoryScope | null {
 
 function scopeOf(conversationId: number): MemoryScope {
 	return partnerScopeOf(conversationId) ?? { type: "session", id: String(conversationId) };
+}
+
+/**
+ * 偏好该落哪个 scope（2026-11-06）。
+ *
+ * - 主对话（总管 / 普通会话 / worker）→ `global`：偏好是**关于这个人**的，
+ *   换个会话照样该生效；
+ * - 执事会话 → `partner:<id>`：执事的记忆键空间与主人隔离（D15），
+ *   偏好也该留在它自己的地盘里，不能写进主人的 global。
+ */
+export function preferenceScopeOf(conversationId: number): MemoryScope {
+	return partnerScopeOf(conversationId) ?? { type: "global" };
 }
 
 /** 召回失败绝不能让对话失败，所以一律吞掉并降级为空上下文。 */
@@ -2209,6 +2227,89 @@ export function chatMetaSummary(): { hidden: number } {
  */
 export function chatTitles(): Record<string, string> {
 	return { ...readChatMeta().titles };
+}
+
+// ── 记忆（设置页，2026-11-06）──────────────────────────────
+//
+// 为什么放在 agent.ts 而不是新开一个模块：`memoryEngine` 是这里的模块级单例，
+// 另起一个模块还得反过来 import 它，等于把装配关系绕一圈。
+// 设置页只需要四个动作：看 / 删 / 标过时 / 看统计。
+
+export interface MemoryView {
+	id: string;
+	kind: string;
+	scope: string;
+	content: string;
+	importance: number;
+	veracity: string;
+	source: string;
+	createdAt: string;
+	recallCount: number;
+	supersededBy: string | null;
+}
+
+export interface MemoryOverview {
+	enabled: boolean;
+	/** 抽取档位：llm / rule / auto 实际生效的结果 */
+	extract: string;
+	total: number;
+	byKind: Record<string, number>;
+	items: MemoryView[];
+}
+
+function memoryView(record: MemoryRecord): MemoryView {
+	return {
+		id: record.id,
+		kind: record.kind,
+		scope: record.scope,
+		content: record.content,
+		importance: record.importance,
+		veracity: record.veracity,
+		source: record.source,
+		createdAt: record.createdAt,
+		recallCount: record.recallCount,
+		supersededBy: record.supersededBy,
+	};
+}
+
+/**
+ * 设置页的记忆列表。
+ *
+ * `scopes`：主对话看 `global`（偏好 + 日记摄入都在这里），执事看自己的键空间。
+ * 不传 = global。刻意**不列 session scope**：那是原始对话的沉淀，条数增长快、
+ * 对用户也没有"管理"的意义（真要清理走删会话）。
+ */
+export function memoryOverview(options: { scope?: string; limit?: number } = {}): MemoryOverview {
+	if (!memoryEngine) {
+		return { enabled: false, extract: memoryExtractMode(), total: 0, byKind: {}, items: [] };
+	}
+	try {
+		const scope = options.scope?.trim() || "global";
+		const records = memoryEngine.list({ scopes: [scope], limit: options.limit ?? 300 });
+		const byKind: Record<string, number> = {};
+		for (const record of records) byKind[record.kind] = (byKind[record.kind] ?? 0) + 1;
+		return {
+			enabled: true,
+			extract: memoryEngine && preferenceExtractionEnabled() ? "llm" : "rule",
+			total: records.length,
+			byKind,
+			items: records.map(memoryView),
+		};
+	} catch (error) {
+		const detail = error instanceof Error ? error.message : String(error);
+		console.warn(`[memory] 概览读取失败: ${detail}`);
+		return { enabled: true, extract: memoryExtractMode(), total: 0, byKind: {}, items: [] };
+	}
+}
+
+/** 删除一条记忆。返回 false = 没有这条（404 由 API 层决定）。 */
+export function forgetMemory(id: string): boolean {
+	return memoryEngine?.forget(id) ?? false;
+}
+
+/** 标记一条记忆为过时（可指定替代者）。返回 false = 目标或替代者不存在。 */
+export function supersedeMemory(id: string, byId?: string | null): boolean {
+	return Boolean(memoryEngine?.supersede(id, byId ?? null));
 }
 
 export async function listChats(limit = 50): Promise<ChatIndexEntry[]> {

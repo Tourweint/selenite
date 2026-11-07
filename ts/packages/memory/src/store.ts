@@ -31,6 +31,14 @@ export interface MemoryStore {
 	get(id: string): MemoryRecord | undefined;
 	search(filter: SearchFilter): MemoryRecord[];
 	patch(id: string, patch: Partial<Omit<MemoryRecord, "id">>): void;
+	/**
+	 * 物理删除一条（2026-11-06，设置页"删掉这条"）。
+	 *
+	 * 刻意是硬删而不是软删：记忆是私人物，用户按了删除就是删除；
+	 * 留一份"已删除但还在库里"的副本，等于在别处又存了一份对话内容。
+	 * 需要保留演化链时走 `patch(supersededBy)`（取代），不是删除。
+	 */
+	remove(id: string): boolean;
 	count(scope?: string): number;
 	/** 是否真的能做文本检索（2026-11-04 批次三）；内存实现恒 false。 */
 	ftsAvailable(): boolean;
@@ -330,6 +338,15 @@ export class SqliteMemoryStore implements MemoryStore {
 		return Number(row.n);
 	}
 
+	remove(id: string): boolean {
+		const existing = this.get(id);
+		if (!existing) return false;
+		this.db.prepare("DELETE FROM memories WHERE id = ?").run(id);
+		// 镜像同步：不删的话下次 count 对账会把整表重灌（能自愈，但白做一次全表扫）
+		if (this.ftsEnabled) this.db.prepare("DELETE FROM memory_fts WHERE content_id = ?").run(id);
+		return true;
+	}
+
 	close(): void {
 		this.db.close();
 	}
@@ -371,6 +388,10 @@ export class InMemoryStore implements MemoryStore {
 		const row = this.rows.get(id);
 		if (!row) return;
 		this.rows.set(id, { ...row, ...patch });
+	}
+
+	remove(id: string): boolean {
+		return this.rows.delete(id);
 	}
 
 	count(scope?: string): number {
