@@ -156,8 +156,19 @@ export interface GroupRow {
 	responderKind: GroupResponderKind;
 	/** kind=member 时的值日执事；必须是群成员 */
 	responderPartnerId: string | null;
-	/** 成员按 position 升序；只存引用，人格 = 各自 SOUL */
-	members: Array<{ partnerId: string; name: string; position: number; status: PartnerStatus }>;
+	/**
+	 * 成员按 position 升序；只存引用，人格 = 各自 SOUL。
+	 * avatar / domain 是**实时 join 档案表**得出的展示字段（不落 group_members）：
+	 * 头像给群复合头像用，domain 给 @名字·domain 长标签消歧用（2026-11-08 批三）。
+	 */
+	members: Array<{
+		partnerId: string;
+		name: string;
+		position: number;
+		status: PartnerStatus;
+		avatar: string | null;
+		domain: string | null;
+	}>;
 	createdAt: string;
 	updatedAt: string;
 }
@@ -795,11 +806,11 @@ export class PartnersStore {
 		return rows.map((row) => toGroup(row, this.membersOf(String(row.id))));
 	}
 
-	/** 群成员（position 升序）。名字/状态实时 join 档案表；档案没了给占位（渲染靠消息快照）。 */
+	/** 群成员（position 升序）。名字/状态/头像/领域实时 join 档案表；档案没了给占位（渲染靠消息快照）。 */
 	membersOf(groupId: string): GroupRow["members"] {
 		const rows = this.db
 			.prepare(
-				`SELECT m.partner_id, m.position, p.name, p.status
+				`SELECT m.partner_id, m.position, p.name, p.status, p.avatar, p.domain
 				 FROM group_members m LEFT JOIN partners p ON p.id = m.partner_id
 				 WHERE m.group_id = ? ORDER BY m.position`,
 			)
@@ -811,6 +822,8 @@ export class PartnersStore {
 			status: (m.status === null || m.status === undefined
 				? "archived"
 				: String(m.status)) as PartnerStatus,
+			avatar: m.avatar === null || m.avatar === undefined ? null : String(m.avatar),
+			domain: m.domain === null || m.domain === undefined ? null : String(m.domain),
 		}));
 	}
 

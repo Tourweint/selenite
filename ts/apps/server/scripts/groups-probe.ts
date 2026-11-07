@@ -92,6 +92,59 @@ async function main(): Promise<void> {
 		);
 		const groupId = created.body.group?.id as string;
 
+		// ── 成员投影（2026-11-08 批三）：avatar / domain / round ──
+		// 领域是长标签消歧的前提：先给三个成员挂上（companion-api 唯一性照常检查）
+		const domains: Array<[string, string]> = [
+			[shu, "books"],
+			[mo, "words"],
+			[zhai, "notes"],
+		];
+		for (const [id, domain] of domains) {
+			const patched = await api("PATCH", `/api/v1/partners/${id}`, { domain });
+			if (patched.status !== 200) throw new Error(`给执事设领域 ${domain} 失败`);
+		}
+		const detail = await api("GET", `/api/v1/groups/${groupId}`, null);
+		const detailMembers = detail.body.group?.members ?? [];
+		check(
+			"成员投影带 avatar / domain（前端复合头像 + 长标签用）",
+			detailMembers.length === 3 &&
+				detailMembers.every((m: Record<string, unknown>) => "avatar" in m && "domain" in m) &&
+				detailMembers.find((m: Record<string, unknown>) => m.partnerId === shu)?.domain === "books",
+			JSON.stringify(detailMembers.map((m: Record<string, unknown>) => `${m.name}:${m.domain}`)),
+		);
+		check(
+			"群详情带轮次状态 round（谁在忙胶囊：running + speaker）",
+			typeof detail.body.group?.round?.running === "boolean" &&
+				detail.body.group?.round?.speaker === null,
+			JSON.stringify(detail.body.group?.round),
+		);
+
+		// ── 长标签：@名字·domain 命中（2026-11-08 批三）──
+		const longRound = await postSse(`/api/v1/groups/${groupId}/chat`, {
+			text: "@阅读助手·books 说一句",
+		});
+		const longStarts = longRound.events.filter((e) => e.type === "start");
+		check(
+			"长标签命中：@阅读助手·books → 阅读助手发言",
+			longRound.status === 200 &&
+				longStarts.length === 1 &&
+				longStarts[0]?.sender?.id === shu,
+			`status=${longRound.status} starts=${longStarts.map((s) => s.sender?.name).join(",")}`,
+		);
+
+		// ── 长标签打错域：不命中、按普通文本（回落到值日）──
+		const wrongDomain = await postSse(`/api/v1/groups/${groupId}/chat`, {
+			text: "@阅读助手·nope 在吗",
+		});
+		const wrongStarts = wrongDomain.events.filter((e) => e.type === "start");
+		check(
+			"长标签打错域：不命中（按无 @ 走值日，不猜）",
+			wrongDomain.status === 200 &&
+				wrongStarts.length === 1 &&
+				wrongStarts[0]?.sender?.id === mo,
+			`status=${wrongDomain.status} starts=${wrongStarts.map((s) => s.sender?.name).join(",")}`,
+		);
+
 		// ── 发消息：无 @ → 值日回 ──
 		const round1 = await postSse(`/api/v1/groups/${groupId}/chat`, { text: "大家报个到" });
 		const starts1 = round1.events.filter((e) => e.type === "start");
@@ -148,13 +201,35 @@ async function main(): Promise<void> {
 		);
 		if (busyProbe.status === 200) await busyProbe.text(); // 读干净
 
-		// ── @ 歧义：把阅读助手改名成记账助手 → @记账助手 分不清人 → 400 ──
+		// ── @ 歧义：把阅读助手改名成记账助手 → @记账助手 分不清人 → 400（带候选清单）──
 		await api("PATCH", `/api/v1/partners/${shu}`, { name: "记账助手" });
 		const ambiguous = await postSse(`/api/v1/groups/${groupId}/chat`, { text: "@记账助手 在吗" });
+		const ambiguousBody = ambiguous.events[0]?.body ?? {};
 		check(
-			"重名后 @：400 拒绝不猜（SSE 前就拒）",
+			"重名后短名 @：400 拒绝不猜（SSE 前就拒）",
 			ambiguous.status === 400,
 			`status=${ambiguous.status}`,
+		);
+		check(
+			"400 载荷带候选清单 [{name, domain}]（前端据此拼长标签）",
+			Array.isArray(ambiguousBody.candidates) &&
+				ambiguousBody.candidates.length === 2 &&
+				ambiguousBody.candidates.every(
+					(c: Record<string, unknown>) => c.name === "记账助手" && typeof c.domain === "string",
+				),
+			JSON.stringify(ambiguousBody.candidates),
+		);
+		// 同一重名前缀下，唯一长标签能点名（重名不再等于整群禁 @）
+		const disambiguated = await postSse(`/api/v1/groups/${groupId}/chat`, {
+			text: "@记账助手·books 在吗",
+		});
+		const disambiguatedStarts = disambiguated.events.filter((e) => e.type === "start");
+		check(
+			"重名时长标签仍可点名：@记账助手·books → 原阅读助手（唯一）",
+			disambiguated.status === 200 &&
+				disambiguatedStarts.length === 1 &&
+				disambiguatedStarts[0]?.sender?.id === shu,
+			`status=${disambiguated.status} starts=${disambiguatedStarts.map((s) => s.sender?.id).join(",")}`,
 		);
 		// 改回去，别影响后面的场景
 		await api("PATCH", `/api/v1/partners/${shu}`, { name: "阅读助手" });

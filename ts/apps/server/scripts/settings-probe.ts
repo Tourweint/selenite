@@ -482,10 +482,11 @@ try {
 	);
 	check(
 		perChat[0] &&
-			!("conversationId" in perChat[0]) &&
+			// 2026-11-08 批三：按会话投影也带对外 conversationId（前端给审批卡标「来自 …」）
+			perChat[0].conversationId === first.conversationId &&
 			!("chatTitle" in perChat[0]) &&
 			!("origin" in perChat[0]),
-		"带参 GET 不塞全局字段、普通轮不带 origin（形状不变）",
+		"带参 GET 不塞全局走查字段、普通轮不带 origin（只多 conversationId）",
 		JSON.stringify(perChat[0]),
 	);
 	const unknown = await apiJson("/api/v1/agent/approvals?conversationId=00000000-0000-4000-8000-000000000000");

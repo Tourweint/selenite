@@ -11,7 +11,7 @@ import {
 import { partnersStore, type GroupRow } from "./partners.ts";
 import { readLlmConfig } from "./provider.ts";
 import { GroupRouteError, resolveGroupSpeakers } from "./group-routing.ts";
-import { groupRoundRunning, startGroupRound, stopGroupRound, type GroupStreamEvent } from "./group-runtime.ts";
+import { groupRoundRunning, groupRoundStatus, startGroupRound, stopGroupRound, type GroupStreamEvent } from "./group-runtime.ts";
 // 建群校验与落库的唯一实现在 group-manage（模型侧 group_manage 工具共用同一份）。
 // 开关也从那里 re-export：工具装配要按同一个开关决定注不注册，不能再各写一份。
 import {
@@ -180,7 +180,16 @@ export function mountGroups(app: Hono): void {
 			);
 		} catch (error) {
 			if (error instanceof GroupRouteError) {
-				return c.json({ error: "bad_request", message: error.message }, 400);
+				// 重名时带候选清单（名字 + 领域）：前端据此拼唯一长标签 @名字·domain。
+				// 这仍是"拒绝不猜"——只是把"能写对的形式"告诉用户，不让后端替你选人。
+				return c.json(
+					{
+						error: "bad_request",
+						message: error.message,
+						...(error.candidates ? { candidates: error.candidates } : {}),
+					},
+					400,
+				);
 			}
 			throw error;
 		}
@@ -252,17 +261,24 @@ function toChatEvent(event: GroupStreamEvent, roundId: string): ChatEvent {
 
 /** 对外投影：群行 + 成员（成员只给 id/名/在群状态，内部自增 id 不出网） */
 function groupProjection(group: GroupRow) {
+	const round = groupRoundStatus(group.id);
 	return {
 		id: group.id,
 		name: group.name,
 		notice: group.notice,
 		responderKind: group.responderKind,
 		responderPartnerId: group.responderPartnerId,
+		// 成员投影（2026-11-08 批三纯增量）：
+		// avatar = 复合头像用；domain = @名字·domain 长标签消歧用（对外只给领域标签，不给 uuid 以外的内部料）。
 		members: group.members.map((m) => ({
 			partnerId: m.partnerId,
 			name: m.name,
 			status: m.status,
+			avatar: m.avatar,
+			domain: m.domain,
 		})),
+		// 轮次状态（2026-11-08 批三）：群会话「谁在忙」胶囊轮询这一段；成员间隙 speaker=null。
+		round: { running: round.running, speaker: round.speaker },
 		createdAt: group.createdAt,
 		updatedAt: group.updatedAt,
 	};

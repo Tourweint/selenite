@@ -103,6 +103,23 @@ export function groupRoundRunning(groupId: string): boolean {
 	return running.has(groupId);
 }
 
+/**
+ * 当前正在发言的成员（2026-11-08 批三）：群会话的「谁在忙」胶囊要用。
+ * 只在成员轮内非空——成员之间的间隙是空的，如实不显示，不猜。
+ */
+const activeSpeakers = new Map<string, { partnerId: string; name: string }>();
+
+/** 群详情投影用：轮次是否在跑 + 正在说话的人（没有 = null） */
+export function groupRoundStatus(groupId: string): {
+	running: boolean;
+	speaker: { partnerId: string; name: string } | null;
+} {
+	return {
+		running: running.has(groupId),
+		speaker: activeSpeakers.get(groupId) ?? null,
+	};
+}
+
 /** 被停止作废的回合：当前成员流会自然结束（aborted），剩余队列在成员间检查点截断 */
 const abortedRounds = new Set<string>();
 
@@ -143,6 +160,7 @@ export function startGroupRound(
 		running.delete(group.id);
 		abortedRounds.delete(group.id);
 		liveTurns.delete(group.id);
+		activeSpeakers.delete(group.id);
 	});
 	return { roundId, channel };
 }
@@ -258,6 +276,7 @@ async function runMemberTurn(
 	liveTurns.set(group.id, chat);
 
 	const body = buildMemberInput(group, partner, roundId);
+	activeSpeakers.set(group.id, { partnerId: partner.id, name: partner.name });
 	channel.push({
 		type: "start",
 		id: roundId,
@@ -306,6 +325,7 @@ async function runMemberTurn(
 	} finally {
 		// 这一位说完了：位置清出来，成员间隙点停才不会停到早已闲着的上一条会话
 		if (liveTurns.get(group.id) === chat) liveTurns.delete(group.id);
+		if (activeSpeakers.get(group.id)?.partnerId === partner.id) activeSpeakers.delete(group.id);
 	}
 
 	const finalText = pieces.join("").trim();

@@ -57,6 +57,9 @@ export function mountApprovalApi(app: Hono): void {
 		const approvals = approvalStore()
 			.pendingOf(chat.internalId)
 			.map((record) => ({
+				// 2026-11-08 批三：带上对外会话 id，让前端能给审批卡标「来自 …」
+				// （与全局形态同名字段；纯增量，老客户端忽略）。
+				conversationId,
 				callId: record.callId,
 				tool: record.tool,
 				args: record.args,

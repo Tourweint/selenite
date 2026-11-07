@@ -36,12 +36,60 @@ test("@解析：按正文出现顺序，同一人去重", () => {
 	]);
 });
 
-test("@解析：重名歧义直接拒绝不猜", () => {
+test("@解析：重名歧义直接拒绝不猜（400 带候选清单）", () => {
 	const dup = [
-		{ partnerId: "p-a", name: "小双", position: 0 },
-		{ partnerId: "p-b", name: "小双", position: 1 },
+		{ partnerId: "p-a", name: "小双", position: 0, domain: "math" },
+		{ partnerId: "p-b", name: "小双", position: 1, domain: "words" },
 	];
 	assert.throws(() => parseMentionedIds("@小双 在吗", dup), GroupRouteError);
+	try {
+		parseMentionedIds("@小双 在吗", dup);
+	} catch (error) {
+		assert.ok(error instanceof GroupRouteError);
+		assert.deepEqual(error.candidates, [
+			{ name: "小双", domain: "math" },
+			{ name: "小双", domain: "words" },
+		]);
+	}
+});
+
+test("@解析：唯一长标签 @名字·domain 能点名重名中的一个", () => {
+	const dup = [
+		{ partnerId: "p-a", name: "小双", position: 0, domain: "math" },
+		{ partnerId: "p-b", name: "小双", position: 1, domain: "words" },
+	];
+	assert.deepEqual(parseMentionedIds("@小双·words 看一下", dup), ["p-b"]);
+	assert.deepEqual(parseMentionedIds("@小双·math 和 @小双·words", dup), ["p-a", "p-b"]);
+	// 无重名时短名照旧；长标签同样成立
+	assert.deepEqual(parseMentionedIds("@小双·math 在吗", [dup[0]!]), ["p-a"]);
+	assert.deepEqual(parseMentionedIds("@小双 在吗", [dup[0]!]), ["p-a"]);
+});
+
+test("@解析：长标签打错域 → 不命中（按普通文本，不回退短名）", () => {
+	const dup = [
+		{ partnerId: "p-a", name: "小双", position: 0, domain: "math" },
+		{ partnerId: "p-b", name: "小双", position: 1, domain: "words" },
+	];
+	assert.deepEqual(parseMentionedIds("@小双·bogus 在吗", dup), []);
+	// 打错域也不该被当成短名 → 不抛歧义错，按无 @ 走值日
+	assert.deepEqual(
+		resolveGroupSpeakers("@小双·bogus 在吗", { responderKind: "member", responderPartnerId: "p-a" }, dup),
+		["p-a"],
+	);
+	// 成员没有 domain 时长标签同样不命中
+	assert.deepEqual(parseMentionedIds("@阅读助手·math 在吗", MEMBERS), []);
+});
+
+test("@解析：重名但正文没用这个名字 → 不报错（走值日）", () => {
+	const dup = [
+		{ partnerId: "p-a", name: "小双", position: 0, domain: "math" },
+		{ partnerId: "p-b", name: "小双", position: 1, domain: "words" },
+	];
+	assert.deepEqual(parseMentionedIds("大家好", dup), []);
+	assert.deepEqual(
+		resolveGroupSpeakers("大家好", { responderKind: "member", responderPartnerId: "p-a" }, dup),
+		["p-a"],
+	);
 });
 
 test("@所有人：全员按 position，和写在正文哪里无关", () => {

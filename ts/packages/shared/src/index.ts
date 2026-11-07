@@ -231,8 +231,26 @@ export const GroupMemberSchema = z.object({
 	/** 成员表只存展示名快照，不复制人格（lobehub 教训）；人格 = 各自 SOUL */
 	name: z.string(),
 	position: z.number().int().min(0),
+	/** 档案实时状态（active / paused / archived）；2026-11-08 前服务端已透出，这里补齐 */
+	status: z.string().optional(),
+	/**
+	 * 复合头像（2026-11-08 批三）：档案 avatar 槽的 data URL，或 null（前端用名字首字）。
+	 * 群列表行 / 会话头用 2×2 网格拼，≤4 人直出，多人右下角 +N。
+	 */
+	avatar: z.string().nullable().optional(),
+	/** 执事域（2026-11-08 批三）：`@名字·domain` 唯一长标签消歧用；无 domain = null */
+	domain: z.string().nullable().optional(),
 });
 export type GroupMember = z.infer<typeof GroupMemberSchema>;
+
+/** 群轮次状态（2026-11-08 批三）：群会话「谁在忙」胶囊读这一段；成员间隙 speaker=null。 */
+export const GroupRoundSchema = z.object({
+	running: z.boolean(),
+	speaker: z
+		.object({ partnerId: z.string(), name: z.string() })
+		.nullable(),
+});
+export type GroupRound = z.infer<typeof GroupRoundSchema>;
 
 export const GroupMetaSchema = z.object({
 	id: z.string(),
@@ -243,6 +261,8 @@ export const GroupMetaSchema = z.object({
 	/** kind=member 时的值日执事；必须是群成员 */
 	responderPartnerId: z.string().nullable(),
 	members: z.array(GroupMemberSchema),
+	/** 轮次状态（2026-11-08 批三，纯增量） */
+	round: GroupRoundSchema.optional(),
 	createdAt: z.string(),
 	updatedAt: z.string(),
 });

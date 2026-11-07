@@ -73,4 +73,7 @@ test("审批投影：全局待办与按会话都透出 origin；普通轮不带�
 	const plainPerChat = perChatBody.approvals.find((item) => item.callId === "api-plain");
 	assert.equal(autoPerChat?.origin, "autonomous", "按会话投影透出 origin");
 	assert.ok(plainPerChat && !("origin" in plainPerChat), "普通轮按会话投影不带 origin 键");
+	// 2026-11-08 批三：按会话投影也带对外 conversationId（前端据此标「来自 …」）
+	assert.equal(autoPerChat?.conversationId, chat.externalId, "按会话投影透出 conversationId");
+	assert.equal(plainPerChat?.conversationId, chat.externalId);
 });

@@ -467,6 +467,9 @@
             <path d="M19 12H5"/>
           </svg>
         </button>
+        <!-- 复合头像（2026-11-08 批三）：群成员头像 2×2，1 人直出、多人右下角 +N。
+             列表态隐藏，进群会话才显示（名称仍在 h1，头像只是快捷认出）。 -->
+        <span class="pt-avatar group-head-avatar" id="group-head-avatar" aria-hidden="true" hidden></span>
         <h1><span id="groups-title-text">群组</span><span class="tasks-title-sub" id="groups-title-sub"></span></h1>
       </div>
       <div class="tasks-actions">
@@ -494,6 +497,11 @@
         <div class="group-members" id="group-members" role="group" aria-label="群成员"></div>
         <div class="group-notice" id="group-notice" hidden></div>
         <div class="group-thread" id="group-thread"></div>
+        <!-- 状态胶囊（2026-11-08 批三）：谁在忙 / 谁等审批。全都从既有端点轮询映射，
+             映射不来就整行隐藏（如实不显示，不猜）。 -->
+        <div class="group-pulse" id="group-pulse" role="status" hidden></div>
+        <!-- 重名 400 后的候选条（2026-11-08 批三）：点候选插入唯一长标签 @名字·领域 -->
+        <div class="group-at-hint" id="group-at-hint" hidden></div>
         <div class="group-composer">
           <div class="group-atpop" id="group-atpop" role="listbox" aria-label="点名候选" hidden></div>
           <button class="group-at-btn" id="group-at-btn" type="button" aria-label="点名（@）" title="点名 @">

@@ -73,9 +73,12 @@ const el = {
   groupSettingsDrawer: document.getElementById("group-settings-drawer"),
   groupSettingsOverlay: document.getElementById("group-settings-overlay"),
   groupChat: document.getElementById("group-chat"),
+  groupHeadAvatar: document.getElementById("group-head-avatar"),
   groupMembers: document.getElementById("group-members"),
   groupNotice: document.getElementById("group-notice"),
   groupThread: document.getElementById("group-thread"),
+  groupPulse: document.getElementById("group-pulse"),
+  groupAtHint: document.getElementById("group-at-hint"),
   groupInput: document.getElementById("group-input"),
   groupSend: document.getElementById("group-send"),
   groupStop: document.getElementById("group-stop"),
@@ -495,6 +498,8 @@ function applyRoute() {
   el.viewTasks.hidden = route !== "tasks";
   el.viewDomains.hidden = route !== "domains";
   el.viewGroups.hidden = route !== "group";
+  // 群会话的轮询只在该路由里跑：离开就停（2026-11-08 批三）
+  if (route !== "group") stopGroupPulse();
   // 群组侧栏的选中态只在群组路由里成立：离开群组页后「所有群聊」不该还亮着
   // （2026-11-07 修：openGroupsView 只在进群组页时写 aria-current，回对话页就不再有
   // 人复位它，实测高亮会一直挂在那里）。
@@ -4429,8 +4434,59 @@ async function syncCtxMeter(stillCurrent = () => true) {
 
 /* ── 审批卡片（批次二 A1）：写类工具要人确认 ─────────────
    按 callId 去重：SSE 与"刷新补挂"两条路都可能把它画一次。
-   答复后按钮置灰、倒计时停下；卡片留在原地作为痕迹。 */
+   答复后按钮置灰、倒计时停下；卡片留在原地作为痕迹。
+   2026-11-08 批三：标题下补一行「来自 <会话或群名> · <执事名>」——群成员的审批
+   与主人会话的审批长得一样，不标来源就分不清是谁在等确认。 */
 const approvalCards = new Map();
+
+/** `partner-<pid>-group-<gid>` → { partnerId, groupId }；不是群成员会话返回 null */
+function parseGroupMemberConversation(conversationId) {
+  const value = String(conversationId || "");
+  if (!value.startsWith("partner-")) return null;
+  const rest = value.slice("partner-".length);
+  const at = rest.indexOf("-group-");
+  if (at < 0) return null;
+  const partnerId = rest.slice(0, at);
+  const groupId = rest.slice(at + "-group-".length);
+  if (!partnerId || !groupId) return null;
+  return { partnerId, groupId };
+}
+
+/** 执事展示名（审批来源用：查不到就给空串，让调用方省略，不猜） */
+function approvalPartnerName(partnerId) {
+  if (!partnerId) return "";
+  if (partnerId === "chief") return "总管";
+  return state.partners.find((item) => item.id === partnerId)?.name || "";
+}
+
+/** 群投影（当前打开的群优先，其次侧栏列表；都查不到返回 null） */
+function groupProjectionById(groupId) {
+  if (groups.current?.id === groupId) return groups.current;
+  return groups.list.find((item) => item.id === groupId) || null;
+}
+
+/**
+ * 审批来源标签（2026-11-08 批三）：「来自 <会话或群名> · <执事名>」。
+ * 只写能反查到的：群成员会话 → 群名 + 成员名；执事专线 → 执事名；主对话 → 总管。
+ * task- 前缀（自主轮/课题专线）与查不到的一律返回空串——如实不显示，不猜。
+ */
+function approvalSourceLabel(conversationId) {
+  const value = String(conversationId || "");
+  if (!value) return "";
+  const ref = parseGroupMemberConversation(value);
+  if (ref) {
+    const group = groupProjectionById(ref.groupId);
+    const memberName =
+      group?.members.find((member) => member.partnerId === ref.partnerId)?.name ||
+      approvalPartnerName(ref.partnerId);
+    return [group?.name ? `群「${group.name}」` : "群聊", memberName].filter(Boolean).join(" · ");
+  }
+  if (value.startsWith("task-")) return "";
+  if (value.startsWith("partner-")) {
+    return approvalPartnerName(value.slice("partner-".length)) || "执事";
+  }
+  return "总管";
+}
 
 function renderApprovalCard(event) {
   if (!event || !event.callId) return null;
@@ -4453,6 +4509,16 @@ function renderApprovalCard(event) {
   }
   title.append(document.createTextNode("，需要你确认"));
   card.append(title);
+
+  // 来源行（2026-11-08 批三）：群成员轮的审批必须在卡上说是谁/哪个群，
+  // 否则同一张卡在主对话与执事专线里长得一模一样，只能靠猜。
+  const source = approvalSourceLabel(event.conversationId);
+  if (source) {
+    const from = document.createElement("p");
+    from.className = "approval-source";
+    from.textContent = `来自 ${source}`;
+    card.append(from);
+  }
 
   const args = document.createElement("pre");
   args.className = "approval-args";
@@ -4796,7 +4862,8 @@ async function loadPendingApprovals(conversationId) {
     if (state.conversationId !== conversationId) return;
     for (const item of data.approvals || []) {
       if (approvalCards.has(item.callId)) continue;
-      const card = renderApprovalCard(item);
+      // 来源行要会话 id：服务端已回（2026-11-08 批三），老服务端缺就用当前会话
+      const card = renderApprovalCard({ ...item, conversationId: item.conversationId || conversationId });
       if (!card) continue;
       hideEmpty();
       el.thread.append(card);
@@ -5126,7 +5193,7 @@ async function send(text, images = []) {
           applyTicketEvent({ ...event, phase: "needs_you" });
           maybeNotify("有任务单需要你处理", event.question || "", state.conversationId, "attention");
         } else if (event.type === "approval") {
-          const card = renderApprovalCard(event);
+          const card = renderApprovalCard({ ...event, conversationId: state.conversationId });
           if (card && !card.isConnected) turn.root.before(card);
           maybeNotify("有写操作需要你确认", event.tool || "", state.conversationId, "attention");
         } else if (event.type === "done") {
@@ -5276,7 +5343,7 @@ async function send(text, images = []) {
             if (state.stick) scrollToEnd();
           } else if (event.type === "approval") {
             // 写类工具要确认（批次二）：卡片挂在回答气泡上方，和 attention 同一套视觉
-            const card = renderApprovalCard(event);
+            const card = renderApprovalCard({ ...event, conversationId: streamConv });
             if (card && !card.isConnected) body.before(card);
             maybeNotify("有写操作需要你确认", event.tool || "", streamConv, "attention");
             if (state.stick) scrollToEnd();
@@ -10196,10 +10263,12 @@ async function loadPendingApprovalList() {
           : null;
         const remain =
           left === null ? "" : left > 0 ? `剩余 ${left} 秒，超时按拒绝处理` : "已超时";
+        // 来源（2026-11-08 批三）：能反查到群/执事就写清楚，否则退回 chatTitle
+        const source = approvalSourceLabel(item.conversationId) || item.chatTitle || "未命名会话";
         return `${index ? '<div class="divider"></div>' : ""}
         <div class="row">
           <div class="row-main">
-            <div class="row-label">${esc(item.chatTitle || "未命名会话")} · ${esc(item.tool || "工具")}${item.origin === "autonomous" ? '<span class="pill-tag">例行任务</span>' : ""}</div>
+            <div class="row-label">${esc(source)} · ${esc(item.tool || "工具")}${item.origin === "autonomous" ? '<span class="pill-tag">例行任务</span>' : ""}</div>
             <div class="row-hint">${esc((item.args || "").slice(0, 160))}</div>
             ${remain ? `<div class="row-hint">${remain}</div>` : ""}
           </div>
@@ -13253,7 +13322,7 @@ function openRunPartnerModal(partnerId, partnerName) {
 const groups = {
   available: null, // null = 还没探测过
   list: [],
-  current: null, // 当前打开的群（含 members）
+  current: null, // 当前打开的群（含 members / 成员头像与领域）
   messages: [],
   lastSeq: 0,
   sending: false,
@@ -13261,6 +13330,11 @@ const groups = {
   streamBubble: null, // 正在流式的气泡 DOM
   streamText: "",
   picked: [], // 建群弹窗里勾中的成员 id（弹窗期间的状态）
+  // 时间线渲染游标（2026-11-08 批三）：回读与实时追加共用，合并/日界都看它
+  lastMeta: null, // { key, day, at }
+  round: null, // 群详情投影的轮次状态 { running, speaker }
+  pending: [], // 全局待审批（映射到本群成员用）
+  pulseTimer: 0,
 };
 
 /** 探测群组可用性 + 侧栏「群组」节首帧。404 = 未启用，一切入口回占位。 */
@@ -13307,6 +13381,50 @@ function applyGroupsAvailability() {
   if (el.secGroupsAll) el.secGroupsAll.hidden = !on;
 }
 
+/** 群成员头像：成员投影自带 avatar 就用它（2026-11-08 批三），老服务端回落到花名册缓存 */
+function groupMemberAvatar(member) {
+  if (!member) return null;
+  return member.avatar || groupMemberAvatarOf(member.partnerId);
+}
+
+/**
+ * 复合头像（2026-11-08 批三）：群不是一个人，头像就用成员头像拼。
+ * 1 人直出（直接用其头像/首字）；2–4 人 2×2；>4 人取前 3 + 右下角 +N。
+ * host 保留 .pt-avatar（圆形容器），.gavatar 只覆盖内部布局；不复用首字逻辑。
+ */
+function paintGroupAvatar(host, members) {
+  if (!host) return;
+  const all = (Array.isArray(members) ? members : []).filter(Boolean);
+  host.replaceChildren();
+  host.classList.remove("gavatar", "gavatar-n2", "gavatar-n3", "gavatar-n4");
+  if (!all.length) {
+    host.textContent = "群";
+    return;
+  }
+  if (all.length === 1) {
+    paintAvatar(host, groupMemberAvatar(all[0]), all[0].name);
+    return;
+  }
+  const shown = all.length > 4 ? all.slice(0, 3) : all;
+  const cells = shown.length + (all.length > 4 ? 1 : 0);
+  host.textContent = "";
+  host.classList.add("gavatar", `gavatar-n${cells}`);
+  for (const member of shown) {
+    const cell = document.createElement("span");
+    cell.className = "gavatar-cell";
+    paintAvatar(cell, groupMemberAvatar(member), member.name);
+    cell.title = member.name || "";
+    host.append(cell);
+  }
+  if (all.length > 4) {
+    const more = document.createElement("span");
+    more.className = "gavatar-cell gavatar-more";
+    more.textContent = `+${all.length - 3}`;
+    more.title = `共 ${all.length} 名成员`;
+    host.append(more);
+  }
+}
+
 /** 侧栏「群组」节：群名 + 成员数；点击进会话视图。 */
 function renderGroupSidebar() {
   if (!el.groupList || groups.available !== true) return;
@@ -13329,7 +13447,7 @@ function renderGroupSidebar() {
     const avatar = document.createElement("span");
     avatar.className = "pt-avatar";
     avatar.setAttribute("aria-hidden", "true");
-    avatar.textContent = group.name.slice(0, 1);
+    paintGroupAvatar(avatar, group.members);
 
     const label = document.createElement("span");
     label.className = "roster-name";
@@ -13748,6 +13866,13 @@ async function openGroupsView() {
     el.groupCreate.hidden = groups.available !== true;
     el.groupChat.hidden = true;
     el.groupsBody.hidden = false;
+    if (el.groupHeadAvatar) el.groupHeadAvatar.hidden = true;
+    // 列表态没有"谁在忙"可看：停掉轮询，别在后台空转
+    stopGroupPulse();
+    if (el.groupPulse) {
+      el.groupPulse.replaceChildren();
+      el.groupPulse.hidden = true;
+    }
     await renderGroupsListPage();
     return;
   }
@@ -13798,7 +13923,7 @@ async function renderGroupsListPage() {
     const avatar = document.createElement("span");
     avatar.className = "pt-avatar group-item-avatar";
     avatar.setAttribute("aria-hidden", "true");
-    avatar.textContent = group.name.slice(0, 1);
+    paintGroupAvatar(avatar, group.members);
 
     const main = document.createElement("span");
     main.className = "group-item-main";
@@ -13854,6 +13979,11 @@ async function openGroupChat(groupId) {
     return;
   }
   el.groupsTitleText.textContent = groups.current.name;
+  // 会话头复合头像（2026-11-08 批三）：列表态没有它，进群才画
+  if (el.groupHeadAvatar) {
+    el.groupHeadAvatar.hidden = false;
+    paintGroupAvatar(el.groupHeadAvatar, groups.current.members);
+  }
   const duty = groups.current.members.find((m) => m.partnerId === groups.current.responderPartnerId);
   el.groupsTitleSub.textContent = duty
     ? ` · 值日 ${duty.name}`
@@ -13877,8 +14007,117 @@ async function openGroupChat(groupId) {
   }
   el.groupInput.value = "";
   resizeGroupInput();
+  // 状态胶囊（2026-11-08 批三）：先按详情里的轮次状态画一帧，再开轮询
+  groups.round = groups.current.round ?? null;
+  groups.pending = [];
   updateGroupSendState();
+  renderGroupPulse();
+  startGroupPulse();
   el.groupInput.focus();
+}
+
+/* ── 状态胶囊（2026-11-08 批三）：谁在忙 / 谁等审批 ────────
+ * 数据全部来自既有端点：群详情（round）+ 全局待审批（conversationId 映射到成员）。
+ * 轮询节奏跟群会话对齐（5s）——只有群会话打开时跑，离开就停。
+ * 映射不来的一律不画：查不到成员/群的审批不写进胶囊，不拿名字猜。 */
+
+const GROUP_PULSE_MS = 5000;
+
+function startGroupPulse() {
+  stopGroupPulse();
+  groups.pulseTimer = setInterval(() => void refreshGroupPulse(), GROUP_PULSE_MS);
+}
+
+function stopGroupPulse() {
+  if (!groups.pulseTimer) return;
+  clearInterval(groups.pulseTimer);
+  groups.pulseTimer = 0;
+}
+
+async function refreshGroupPulse() {
+  const group = groups.current;
+  const id = groupRouteId();
+  if (!group || currentRoute() !== "group" || id !== group.id) {
+    stopGroupPulse();
+    return;
+  }
+  const [detail, pending] = await Promise.all([
+    request(`/api/v1/groups/${encodeURIComponent(group.id)}`, { cache: "no-store" }).catch(() => null),
+    request("/api/v1/agent/approvals", { cache: "no-store" }).catch(() => null),
+  ]);
+  // 请求期间切了群 / 离开了群路由：旧响应不许画到新群上
+  if (!groups.current || groups.current.id !== group.id || groupRouteId() !== group.id) return;
+  if (detail?.ok) {
+    const data = await detail.json().catch(() => ({}));
+    if (data.group) groups.round = data.group.round ?? null;
+  }
+  if (pending) {
+    if (pending.ok) {
+      const data = await pending.json().catch(() => ({}));
+      if (Array.isArray(data.approvals)) groups.pending = data.approvals;
+    } else {
+      // 服务端明确拒绝（503 未配置模型 / 403）：待批清单不可信，宁可空着也不留旧的
+      groups.pending = [];
+    }
+  }
+  renderGroupPulse();
+}
+
+/** 本群成员里有哪些人挂着待批（按会话 id 反查；不是本群的一律忽略） */
+function groupPendingMembers() {
+  const group = groups.current;
+  if (!group) return [];
+  const waiting = new Set();
+  for (const item of groups.pending) {
+    const ref = parseGroupMemberConversation(item?.conversationId);
+    if (ref && ref.groupId === group.id) waiting.add(ref.partnerId);
+  }
+  return group.members.filter((member) => waiting.has(member.partnerId));
+}
+
+function renderGroupPulse() {
+  if (!el.groupPulse) return;
+  const group = groups.current;
+  if (!group) {
+    el.groupPulse.hidden = true;
+    el.groupPulse.replaceChildren();
+    return;
+  }
+  const chips = [];
+  const round = groups.round;
+  if (round?.running) {
+    chips.push({
+      kind: "busy",
+      text: round.speaker?.name ? `${round.speaker.name} 正在发言` : "群轮进行中",
+      title: "这一轮还没跑完，发消息会被拒（可点停止）",
+    });
+  } else if (groups.sending) {
+    chips.push({
+      kind: "busy",
+      text: groups.streamSender?.name ? `${groups.streamSender.name} 正在发言` : "正在回话",
+      title: "这一轮还没跑完",
+    });
+  }
+  for (const member of groupPendingMembers()) {
+    chips.push({
+      kind: "wait",
+      text: `${member.name} 等审批`,
+      title: `${member.name} 有个写操作在等确认（去设置 → 权限，或等这轮超时）`,
+    });
+  }
+  el.groupPulse.replaceChildren();
+  if (!chips.length) {
+    el.groupPulse.hidden = true;
+    return;
+  }
+  for (const chip of chips) {
+    const node = document.createElement("span");
+    node.className = `group-pulse-chip is-${chip.kind}`;
+    node.textContent = chip.text;
+    if (chip.title) node.title = chip.title;
+    el.groupPulse.append(node);
+  }
+  el.groupPulse.hidden = false;
 }
 
 /* ── 时间线渲染：四形态 ──────────────────────────────────
@@ -13893,15 +14132,8 @@ const GROUP_MEMBER_MAX = 6;
 
 function renderGroupTimeline() {
   el.groupThread.replaceChildren();
-  let lastRendered = null; // { key, day, at }
-  for (const message of groups.messages) {
-    appendGroupMessageToThread(message, lastRendered);
-    lastRendered = {
-      key: groupAuthorKey(message),
-      day: groupDayOf(message),
-      at: Date.parse(message.at || "") || 0,
-    };
-  }
+  groups.lastMeta = null;
+  for (const message of groups.messages) appendGroupMessageToThread(message);
   scrollGroupThread();
 }
 
@@ -13917,26 +14149,58 @@ function groupDayOf(message) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-function appendGroupMessageToThread(message, lastRendered) {
-  const day = groupDayOf(message);
-  if (!lastRendered || lastRendered.day !== day) {
-    const divider = document.createElement("div");
-    divider.className = "group-day";
-    divider.textContent = day;
-    el.groupThread.append(divider);
-  }
-  const at = Date.parse(message.at || "") || 0;
+/** 日期分割的可读标签（2026-11-08 批三）：今天 / 昨天 / M月D日（跨年才带年份） */
+function groupDayLabel(day) {
+  const [year, month, date] = String(day || "").split("-").map(Number);
+  if (!year || !month || !date) return String(day || "");
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const that = new Date(year, month - 1, date);
+  const diffDays = Math.round((today - that) / 86_400_000);
+  if (diffDays === 0) return "今天";
+  if (diffDays === 1) return "昨天";
+  return year === now.getFullYear() ? `${month}月${date}日` : `${year}年${month}月${date}日`;
+}
+
+/** 一条消息的渲染元信息（合并 / 日界判据）：回读与实时追加共用同一份 */
+function groupMetaOf(message) {
+  return {
+    key: groupAuthorKey(message),
+    day: groupDayOf(message),
+    at: Date.parse(message.at || "") || 0,
+  };
+}
+
+function appendGroupDayDivider(day) {
+  const divider = document.createElement("div");
+  divider.className = "group-day";
+  divider.textContent = groupDayLabel(day);
+  divider.title = day;
+  el.groupThread.append(divider);
+}
+
+/**
+ * 追加一条消息（回读与实时追加同一条路）。
+ * 合并条件：同作者 + 中间没有别人 + 同一天 + 间隔 <5 分钟；跨天绝不合并（否则会跨过日界）。
+ * 每条消息渲染后把游标写回 groups.lastMeta，两条路径行为一致。
+ */
+function appendGroupMessageToThread(message) {
+  const meta = groupMetaOf(message);
+  const lastRendered = groups.lastMeta;
+  if (!lastRendered || lastRendered.day !== meta.day) appendGroupDayDivider(meta.day);
   const merge =
-    lastRendered &&
-    lastRendered.key === groupAuthorKey(message) &&
+    Boolean(lastRendered) &&
+    lastRendered.key === meta.key &&
+    lastRendered.day === meta.day &&
     message.kind === "message" &&
-    at - (lastRendered.at || 0) < GROUP_MERGE_MS;
+    meta.at - (lastRendered.at || 0) < GROUP_MERGE_MS;
 
   if (message.kind === "system") {
     const line = document.createElement("div");
     line.className = "group-sys";
     line.textContent = message.content;
     el.groupThread.append(line);
+    groups.lastMeta = meta;
     return;
   }
 
@@ -13972,6 +14236,7 @@ function appendGroupMessageToThread(message, lastRendered) {
   stack.append(body);
   bubble.append(stack);
   el.groupThread.append(bubble);
+  groups.lastMeta = meta;
 }
 
 /** 群成员头像（按 partnerId 从花名册取；外侧缓存由 state.partners 负责） */
@@ -13981,8 +14246,9 @@ function groupMemberAvatarOf(partnerId) {
 }
 
 /**
- * 正文里的 @点名 上色（2026-11-07）。纯文本发送、发送时服务端重解析的口径不变，
- * 这里只做**显示**：把命中成员名的那段包一层 <span>，不改变 textContent 本身。
+ * 正文里的 @点名 上色（2026-11-07；2026-11-08 批三补长标签）。纯文本发送、发送时服务端
+ * 重解析的口径不变，这里只做**显示**：把命中成员名的那段包一层 <span>，不改变 textContent。
+ * 长标签 `@名字·domain` 整体上色；`@名字·打错的域` 不是点名，按普通文本留白（与服务端同判据）。
  * 用 DOM 拼节点而不是 innerHTML —— 正文是用户/模型产出，绝不拼 HTML。
  */
 function paintMentionText(host, text) {
@@ -13992,10 +14258,14 @@ function paintMentionText(host, text) {
     host.textContent = source;
     return;
   }
-  const names = members
-    .map((member) => member.name)
-    .filter(Boolean)
-    .sort((a, b) => b.length - a.length);
+  // 长标签优先：`小双·math` 排在 `小双` 前，避免只染半截
+  const labels = [];
+  for (const member of members) {
+    if (!member.name) continue;
+    if (member.domain) labels.push(`${member.name}·${member.domain}`);
+    labels.push(member.name);
+  }
+  labels.sort((a, b) => b.length - a.length);
   const fragment = document.createDocumentFragment();
   let cursor = 0;
   while (cursor < source.length) {
@@ -14008,8 +14278,10 @@ function paintMentionText(host, text) {
       cursor = at + 1;
       continue;
     }
-    const hit = names.find((name) => source.startsWith(name, at + 1));
-    if (!hit) {
+    const hit = labels.find((label) => source.startsWith(label, at + 1));
+    // 短名后面跟着 `·域` 但整体没命中长标签 = 打错的域：不是点名，整段留白
+    const looksLong = hit && !hit.includes("·") && source[at + 1 + hit.length] === "·";
+    if (!hit || looksLong) {
       fragment.append(document.createTextNode(source.slice(cursor, at + 1)));
       cursor = at + 1;
       continue;
@@ -14049,7 +14321,7 @@ function renderGroupMembersBar() {
 
     const avatar = document.createElement("span");
     avatar.className = "pt-avatar group-member-avatar";
-    paintAvatar(avatar, groupMemberAvatarOf(member.partnerId), member.name);
+    paintAvatar(avatar, groupMemberAvatar(member), member.name);
     const name = document.createElement("span");
     name.className = "group-member-name";
     name.textContent = member.name;
@@ -14065,7 +14337,7 @@ function renderGroupMembersBar() {
       chip.title = `${member.name} · 当前不在服务（发言会被跳过）`;
     }
 
-    chip.addEventListener("click", () => insertGroupMention(member.name));
+    chip.addEventListener("click", () => insertGroupMention(member));
     chip.addEventListener("contextmenu", (event) => {
       event.preventDefault();
       openGroupMemberMenu(event, member, isDuty);
@@ -14074,24 +14346,33 @@ function renderGroupMembersBar() {
   }
 }
 
-/** 把 @名字 插到光标处（不留双空格；已有 @ 就只补名字） */
-function insertGroupMention(name) {
-  if (!el.groupInput || !name) return;
+/**
+ * 把 @名字 插到光标处（不留双空格；已有 @ 就只补名字）。
+ * 带 domain 的成员插**长标签** `@名字·domain`（2026-11-08 批三）：
+ * 重名时短名会被后端 400 拒绝，长标签是那个唯一能写对的表达形式。
+ */
+function insertGroupMention(member) {
+  if (!el.groupInput) return;
+  const name = typeof member === "string" ? member : member?.name;
+  const domain = typeof member === "string" ? "" : member?.domain || "";
+  if (!name) return;
+  const tag = domain ? `${name}·${domain}` : name;
   const value = el.groupInput.value;
   const caret = el.groupInput.selectionStart ?? value.length;
   const before = value.slice(0, caret);
   const after = value.slice(caret);
-  // 光标前已有 @（含半截名字）就替换掉这段，接上选中的成员
+  // 光标前已有 @（含半截名字 / 半截长标签）就替换掉这段，接上选中的成员
   const partial = /(^|\s)@([^\s@]*)$/.exec(before);
   const head = partial ? before.slice(0, caret - partial[2].length - 1) : before;
   const pad = head && !head.endsWith(" ") ? " " : "";
-  const insert = `${pad}@${name} `;
+  const insert = `${pad}@${tag} `;
   el.groupInput.value = head + insert + after;
   const next = head.length + insert.length;
   el.groupInput.setSelectionRange(next, next);
   el.groupInput.focus();
   resizeGroupInput();
   updateGroupSendState();
+  clearGroupAtHint();
 }
 
 /**
@@ -14122,7 +14403,7 @@ function openGroupMemberMenu(event, member, isDuty) {
   header.className = "gmenu-head";
   const headerAvatar = document.createElement("span");
   headerAvatar.className = "pt-avatar gmenu-avatar";
-  paintAvatar(headerAvatar, groupMemberAvatarOf(member.partnerId), member.name);
+  paintAvatar(headerAvatar, groupMemberAvatar(member), member.name);
   const headerMain = document.createElement("div");
   headerMain.className = "gmenu-head-main";
   const headerName = document.createElement("div");
@@ -14157,7 +14438,8 @@ function openGroupMemberMenu(event, member, isDuty) {
     menu.append(button);
   };
 
-  item("＠ 他", `插入 @${member.name} 到输入框`, () => insertGroupMention(member.name));
+  const mentionTag = member.domain ? `${member.name}·${member.domain}` : member.name;
+  item("＠ 他", `插入 @${mentionTag} 到输入框`, () => insertGroupMention(member));
   item("复制名字", member.name, () => {
     navigator.clipboard
       ?.writeText(member.name)
@@ -14244,6 +14526,8 @@ function updateGroupSendState() {
   el.groupSend.disabled = groups.sending || !el.groupInput.value.trim();
   el.groupStop.hidden = !groups.sending;
   el.groupSend.hidden = groups.sending;
+  // 发/停的瞬间胶囊要跟上（轮询 5s，别让"正在发言"晚一拍）
+  renderGroupPulse();
 }
 
 async function sendGroupMessage() {
@@ -14266,7 +14550,7 @@ async function sendGroupMessage() {
     at: new Date().toISOString(),
   };
   groups.messages.push(localMessage);
-  appendGroupMessageToThread(localMessage, lastRenderedMeta());
+  appendGroupMessageToThread(localMessage);
   groups.lastSeq = localMessage.seq;
   scrollGroupThread();
 
@@ -14286,6 +14570,8 @@ async function sendGroupMessage() {
     if (response.status === 400) {
       const data = await response.json().catch(() => ({}));
       toast(data.message || "发不出去");
+      // 重名歧义：后端把候选（名字 + 领域）带回来，这里给一条可点的长标签提示条
+      showGroupAtHint(data.candidates);
       rollbackLocalMessage(localMessage.id, text);
       return;
     }
@@ -14330,18 +14616,13 @@ async function sendGroupMessage() {
   }
 }
 
-function lastRenderedMeta() {
-  for (let i = groups.messages.length - 2; i >= 0; i -= 1) {
-    const message = groups.messages[i];
-    return { key: groupAuthorKey(message), day: groupDayOf(message) };
-  }
-  return null;
-}
-
 function rollbackLocalMessage(localId, text) {
   groups.messages = groups.messages.filter((m) => m.id !== localId);
   const bubble = el.groupThread.querySelector(`[data-msg-id="${localId}"]`);
   bubble?.remove();
+  // 渲染游标跟着回退：下一条追加仍按真实最后一条判合并/日界
+  const last = groups.messages[groups.messages.length - 1];
+  groups.lastMeta = last ? groupMetaOf(last) : null;
   el.groupInput.value = text;
   resizeGroupInput();
   updateGroupSendState();
@@ -14352,12 +14633,19 @@ function handleGroupStreamEvent(event) {
   if (event.type === "start") {
     groups.streamSender = event.sender || null;
     groups.streamText = "";
+    // 日界与回读同一条规则（2026-11-08 批三）：跨天了先插分割线，实时追加也不漏
+    const streamDay = groupDayOf({ at: new Date().toISOString() });
+    if (!groups.lastMeta || groups.lastMeta.day !== streamDay) {
+      appendGroupDayDivider(streamDay);
+      groups.lastMeta = { key: "stream", day: streamDay, at: Date.now() };
+    }
     // 开一个正在发言的气泡（同 renderGroupTimeline 的左对齐形态）
     const bubble = document.createElement("div");
     bubble.className = "gmsg them streaming";
     const avatar = document.createElement("span");
     avatar.className = "pt-avatar gmsg-avatar";
-    avatar.textContent = (event.sender?.name || "?").slice(0, 1);
+    const senderMember = groups.current?.members.find((m) => m.partnerId === event.sender?.id) ?? null;
+    paintAvatar(avatar, groupMemberAvatar(senderMember), event.sender?.name || "");
     const stack = document.createElement("div");
     stack.className = "gmsg-stack";
     const head = document.createElement("div");
@@ -14453,12 +14741,24 @@ function updateGroupAtPop() {
     return;
   }
   const typed = match[2].toLowerCase();
+  // 长标签输入中（`@名字·域`）：前半段匹配名字、后半段匹配领域（2026-11-08 批三）
+  const [namePart = "", domainPart] = typed.split("·");
   const candidates = [];
-  if (!typed || "所有人".startsWith(typed)) candidates.push({ label: "所有人", insert: "@所有人 " });
+  if (domainPart === undefined && (!typed || "所有人".startsWith(typed))) {
+    candidates.push({ label: "所有人", insert: "@所有人 " });
+  }
   for (const member of groups.current.members) {
-    if (!typed || member.name.toLowerCase().includes(typed)) {
-      candidates.push({ label: member.name, insert: `@${member.name} ` });
-    }
+    const nameHit = !namePart || member.name.toLowerCase().includes(namePart);
+    const domainHit =
+      domainPart === undefined || (member.domain || "").toLowerCase().startsWith(domainPart);
+    if (!nameHit || !domainHit) continue;
+    // 带领域的一律按长标签展示与插入：重名时短名会被后端拒绝，
+    // 这里给的是"唯一能写对的形式"，而不是让用户先撞一次 400 再回来改。
+    candidates.push(
+      member.domain
+        ? { label: `${member.name}（${member.domain}）`, insert: `@${member.name}·${member.domain} ` }
+        : { label: member.name, insert: `@${member.name} ` },
+    );
   }
   if (!candidates.length) {
     closeGroupAtPop();
@@ -14498,6 +14798,41 @@ function pickGroupAt(index) {
   resizeGroupInput();
   updateGroupSendState();
   el.groupInput.focus();
+}
+
+/* ── 重名 400 的候选条（2026-11-08 批三）───────────────────
+ * 后端仍然拒绝不猜：重名短名 400，但把候选（名字 + 领域）随载荷带回来。
+ * 这里把候选画成一条可点的提示：点一下插入唯一长标签 @名字·领域，用户改一个字就能发。
+ * 不给后端加"猜一个人"的余地，也不让用户自己去记领域。 */
+
+function clearGroupAtHint() {
+  if (!el.groupAtHint) return;
+  el.groupAtHint.replaceChildren();
+  el.groupAtHint.hidden = true;
+}
+
+function showGroupAtHint(candidates) {
+  if (!el.groupAtHint) return;
+  const list = (Array.isArray(candidates) ? candidates : []).filter((item) => item && item.name);
+  if (!list.length) {
+    clearGroupAtHint();
+    return;
+  }
+  el.groupAtHint.replaceChildren();
+  const label = document.createElement("span");
+  label.className = "group-at-hint-label";
+  label.textContent = "重名了，改用长标签点名：";
+  el.groupAtHint.append(label);
+  for (const item of list) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "group-at-hint-chip";
+    chip.textContent = item.domain ? `${item.name}（${item.domain}）` : item.name;
+    chip.title = item.domain ? `插入 @${item.name}·${item.domain}` : `插入 @${item.name}`;
+    chip.addEventListener("click", () => insertGroupMention(item));
+    el.groupAtHint.append(chip);
+  }
+  el.groupAtHint.hidden = false;
 }
 
 /* ── 建群弹窗（2026-11-07 统一语言）──────────────────────────
@@ -14910,7 +15245,7 @@ function renderGroupSettingsHome(drawer) {
   for (const member of group.members.slice(0, 5)) {
     const avatar = document.createElement("span");
     avatar.className = "pt-avatar";
-    paintAvatar(avatar, groupMemberAvatarOf(member.partnerId), member.name);
+    paintAvatar(avatar, groupMemberAvatar(member), member.name);
     avatar.title = member.name;
     avatars.append(avatar);
   }
@@ -15120,7 +15455,7 @@ function renderGroupSettingsMembers(drawer) {
       row.className = "gs-member-row";
       const avatar = document.createElement("span");
       avatar.className = "pt-avatar";
-      paintAvatar(avatar, groupMemberAvatarOf(member.partnerId), member.name);
+      paintAvatar(avatar, groupMemberAvatar(member), member.name);
       const main = document.createElement("div");
       main.className = "gs-member-main";
       const nameNode = document.createElement("div");
@@ -15287,7 +15622,7 @@ function renderGroupSettingsReply(drawer) {
       row.className = "gs-row";
       const avatar = document.createElement("span");
       avatar.className = "pt-avatar";
-      paintAvatar(avatar, groupMemberAvatarOf(member.partnerId), member.name);
+      paintAvatar(avatar, groupMemberAvatar(member), member.name);
       const main = document.createElement("span");
       main.className = "gs-row-main";
       const title = document.createElement("span");
@@ -15392,6 +15727,8 @@ el.groupInput?.addEventListener("input", () => {
   resizeGroupInput();
   updateGroupSendState();
   updateGroupAtPop();
+  // 用户开始改正文：上一轮重名候选条已经过时，收掉（2026-11-08 批三）
+  clearGroupAtHint();
 });
 el.groupInput?.addEventListener("keydown", (event) => {
   if (groupAt.open) {

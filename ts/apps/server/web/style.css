@@ -1601,6 +1601,8 @@ html[data-acts="0"] .wp { display: none !important; }
   white-space: pre-wrap; word-break: break-word;
 }
 .approval-meta { font-size: 12px; color: var(--text-2); }
+/* 来源行（2026-11-08 批三）：标题下的第二行，弱一档；群成员轮的审批靠它认人 */
+.approval-source { margin: -2px 0 0; font-size: 12.5px; color: var(--text-3); }
 .approval-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .approval-remember {
   display: inline-flex; align-items: center; gap: 5px;
@@ -4258,6 +4260,33 @@ select.cs-input:disabled { color: var(--text-3); cursor: default; }
 .group-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 /* 首字圆钮：用 accent-soft 而不是实心 accent——列表里实心色块会比群名先入眼 */
 .group-item-avatar { width: 30px; height: 30px; font-size: 13px; }
+/* 会话头复合头像（2026-11-08 批三）：与列表行同尺寸，排在标题左侧 */
+.group-head-avatar { width: 30px; height: 30px; font-size: 12px; margin-right: 2px; }
+
+/* 复合头像（2026-11-08 批三）：成员头像 2×2 拼图
+ * 1 人直出（JS 走 paintAvatar）；2 人一行两格；3 人第三格横跨整行；4 人/多人 2×2，
+ * 多出来的用右下角 +N 表示。容器保留 .pt-avatar 的圆形裁剪，格子只负责铺图。 */
+.gavatar {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  grid-auto-rows: 1fr;
+  gap: 1px;
+  padding: 0;
+  place-content: stretch;
+  background: var(--divider);
+}
+.gavatar-n2 { grid-template-rows: 1fr; }
+.gavatar-n3 > .gavatar-cell:nth-child(3) { grid-column: 1 / -1; }
+.gavatar-cell {
+  display: grid; place-content: center;
+  min-width: 0; min-height: 0;
+  overflow: hidden;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 9px; font-weight: 600; line-height: 1;
+}
+.gavatar-cell img { width: 100%; height: 100%; display: block; object-fit: cover; }
+.gavatar-more { background: var(--card-high); color: var(--text-2); font-size: 8.5px; }
 /* 名字与副行必须各占一行：两者都是 span，父级不显式 flex 就会并排成
    「书房小事 阅读助手、记账助手 · 不 @ 阅读助手 回」一整行（实测就这样）。 */
 .group-item-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
@@ -4380,6 +4409,56 @@ select.cs-input:disabled { color: var(--text-3); cursor: default; }
 /* 正文里的 @点名：只上色，不加底（cindy 口径：它不是链接，只是点名词） */
 .gmsg-mention { color: var(--accent); font-weight: 600; }
 .gmsg.me .gmsg-mention { color: var(--on-accent); font-weight: 700; }
+
+/* 状态胶囊（2026-11-08 批三）：composer 上方一条细行，没内容就整行不占位。
+ * 忙 = accent（正在说话/正在跑），等审批 = warn（在等人，不是故障）。 */
+.group-pulse {
+  flex: none;
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 6px 2px 0;
+}
+.group-pulse-chip {
+  display: inline-flex; align-items: center;
+  height: 22px; padding: 0 9px;
+  border: 1px solid var(--divider);
+  border-radius: var(--r-full);
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 11.5px; white-space: nowrap;
+}
+.group-pulse-chip.is-busy {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.group-pulse-chip.is-wait {
+  border-color: color-mix(in srgb, var(--warn) 38%, transparent);
+  color: var(--warn);
+}
+
+/* 重名 400 的候选条（2026-11-08 批三）：一行可点的长标签候选，点一下插进输入框 */
+.group-at-hint {
+  flex: none;
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  margin: 6px 0 0;
+  padding: 7px 10px;
+  border: 1px solid var(--outline);
+  border-radius: 10px;
+  background: var(--surface-low);
+  font-size: 12px; color: var(--text-2);
+}
+.group-at-hint-label { color: var(--text-3); }
+.group-at-hint-chip {
+  height: 22px; padding: 0 9px;
+  border: 1px solid var(--composer-border);
+  border-radius: var(--r-full);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  transition: border-color .15s ease, color .15s ease;
+}
+.group-at-hint-chip:hover { border-color: var(--accent); color: var(--accent); }
+.group-at-hint-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 /* composer（独立一份 DOM，样式骨架与主对话同拍） */
 .group-composer {
