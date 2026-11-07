@@ -15,3 +15,13 @@ target/
 .box-agent/
 .creative-design/
 
+# 审查/验收的临时产物（2026-11-07 登记）：浏览器自动化脚本与截图、QA 数据库、
+# 探针落错位置的产物。都是当次验证用完即弃的东西，不入库。
+.box-agent-scratch/
+.mem-probe/
+.qa-memory/
+ts/.mem-probe/
+ts/.qa-memory/
+qa/
+qa-*.png
+
