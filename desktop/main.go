@@ -30,6 +30,12 @@ import (
 //go:embed assets/icon-tray.png
 var trayIconPNG []byte
 
+// trayIdleIconPNG 是服务停止/异常时用的灰色托盘图标：由 gen-gray-icon 从
+// icon-tray.png 去饱和度生成（保留 alpha），产物入库、运行时直接 embed。
+//
+//go:embed assets/icon-tray-idle.png
+var trayIdleIconPNG []byte
+
 const (
 	defaultBaseURL = "http://127.0.0.1:39847"
 	probeTimeout   = 3 * time.Second
@@ -399,10 +405,21 @@ func main() {
 	app.SetName("Selenite")
 	app.OnSecondInstance(func([]string, string) { showWindow() })
 
-	// 退出开始得比关窗早：先标记，再让 App.Quit 关闭窗口时不再被
-	// OnClose 的「关窗 = 隐藏」拦下来。
-	app.OnBeforeQuit(func(*mygo.QuitEvent) { quitting = true })
+	// 退出先挂起，异步查在飞任务（见 tray-features.go 的 checkBeforeQuit）：
+	// 没有在飞单/服务没跑就直接放 quit，有在飞单才弹确认。真正决定退出时
+	// 再置 quitting=true（OnClose 关窗放行依赖它）。
+	app.OnBeforeQuit(func(e *mygo.QuitEvent) {
+		if quitting {
+			return // 已走完异步确认，放行这次退出
+		}
+		e.PreventDefault()
+		if !quitChecking.CompareAndSwap(false, true) {
+			return // 已有一轮在查，别弹第二个确认框
+		}
+		go checkBeforeQuit()
+	})
 	app.OnWillQuit(func(*mygo.QuitEvent) {
+		stopTrayStateWatcher() // 退出时停掉状态轮询 goroutine
 		if tray != nil {
 			tray.Destroy()
 		}
@@ -432,6 +449,7 @@ func main() {
 						loadService(win)
 					}()
 				}},
+				{Label: "设置", Click: func(*mygo.MenuItem, *mygo.Window) { go openSettings() }},
 				mygo.Separator(),
 				// RoleQuit 的默认文案来自 MyGo 的本地化表，可能落到英文
 				// （Exit）。这里显式写中文，同时保留 Role 的退出语义。
@@ -454,6 +472,8 @@ func main() {
 		showWindow()
 		// 运行期服务守护（批次二）：启动探活只做一次，服务跑着挂掉就没人管了
 		watchService(baseURL())
+		// 托盘图标随服务状态变灰（扫尾批 1）：内部认 LIFEDIARY_TRAY_STATE 开关
+		startTrayStateWatcher()
 	})
 
 	// 关掉窗口不退出：托盘还在，服务还在。
