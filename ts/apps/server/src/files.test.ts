@@ -42,11 +42,19 @@ async function withFixture(run: (f: Fixture) => Promise<void>): Promise<void> {
 	}
 }
 
-function withEnv(key: string, value: string, run: () => void): void {
+/**
+ * 临时改 env 并真正包住一次 **await**（2026-11-06 修）。
+ *
+ * 原先这里是同步签名 `run: () => void`，两处调用却都传了 `async () => {...}`：
+ * `run()` 返回的 Promise 没人 await，`finally` 在请求发出前就把 env 还原了，
+ * 于是 `EXPLORER_OPEN=false` / `FILE_BROWSE=false` 的断言恒失败（200 !== 400/404）。
+ * 那不是行为回归，是测试写错了——files.ts 的开关本来就是每请求现读 env 的。
+ */
+async function withEnvAsync(key: string, value: string, run: () => Promise<void>): Promise<void> {
 	const previous = process.env[key];
 	process.env[key] = value;
 	try {
-		run();
+		await run();
 	} finally {
 		if (previous === undefined) delete process.env[key];
 		else process.env[key] = previous;
@@ -105,12 +113,14 @@ test("open-explorer：未知项目 400；EXPLORER_OPEN=false 回 400 且不起�
 		assert.equal(response.status, 400);
 		assert.equal(f.opened.length, 0);
 
-		withEnv("EXPLORER_OPEN", "false", () => {
-			// 同步 request：Hono 的 request 可以直接 await
+		// 这里必须把**请求本身**包进 withEnv：`explorerEnabled()` 是每次请求现读
+		// `process.env.EXPLORER_OPEN` 的（files.ts:38）。原先把请求写在回调外面，
+		// env 在请求发出前就被 finally 还原了，所以永久 200 —— 那不是行为回归，是测试写错了。
+		await withEnvAsync("EXPLORER_OPEN", "false", async () => {
+			const disabled = await f.app.request("/api/v1/workspaces/open-explorer", { method: "POST" });
+			assert.equal(disabled.status, 400, "开关关着应回 400");
+			assert.equal(f.opened.length, 0, "开关关着不起进程");
 		});
-		const disabled = await f.app.request("/api/v1/workspaces/open-explorer", { method: "POST" });
-		assert.equal(disabled.status, 400);
-		assert.equal(f.opened.length, 0, "开关关着不起进程");
 	});
 });
 
@@ -191,8 +201,8 @@ test("安全：越权路径被拒（.. / 符号链接逃逸 / 绝对路径），
 
 test("FILE_BROWSE=false：两个 files 端点整体下线（404）", async () => {
 	await withFixture(async (f) => {
-		withEnv("FILE_BROWSE", "false", async () => {
-			// 开关是现读 env 的，直接在同一 app 上验证
+		// 同 §open-explorer：开关是每次请求现读 env 的，必须用 async 版才能真正包住请求。
+		await withEnvAsync("FILE_BROWSE", "false", async () => {
 			const list = await f.app.request("/api/v1/files");
 			const content = await f.app.request("/api/v1/files/content?path=readme.md");
 			assert.equal(list.status, 404);
