@@ -64,8 +64,46 @@ export const ChatRequestSchema = z.object({
 	 * 缺省仍 `chief`（手机/旧调用方零改动）。续话时带不匹配的值 → 400，不隐式改身份。
 	 */
 	chatKind: NewChatKindSchema.optional(),
+	/**
+	 * 忙时投递方式（2026-11-07 消息即引导，纯增量）。
+	 *
+	 * - `followUp`（缺省）：排到本轮结束后，作为下一轮；等于改动前的行为。
+	 * - `steer`：插进**当前这一轮**，模型下一步就能看到。
+	 *
+	 * 这是"请求"不是"保证"：本轮没有可插的边界（例如已经收尾）时内核会落到队列，
+	 * 服务端照实发一条 `notice`，不把"受理"说成"已插入"。老客户端不传 = 行为不变。
+	 */
+	whenBusy: z.enum(["steer", "followUp"]).optional(),
 });
 export type ChatRequest = z.infer<typeof ChatRequestSchema>;
+
+/**
+ * 历史回放里的一步「工作过程」（2026-11-07，纯增量）。
+ *
+ * 存在的理由：流式期间的 `tool` 事件只在当轮界面上活过一次，刷新/切会话就没了。
+ * 步骤本来就躺在 durable 里（`pi.assistant` 的 toolCall + `pi.tool-result`），
+ * 这里只是把它们按调用顺序重建成客户端能直接渲染的形状，**不新增存储**。
+ *
+ * 字段口径与 `tool` 事件保持一致（截断上限相同），这样"现场看到的"与
+ * "回头翻到的"是同一份事实，不会出现点开历史比当时更少或更多的情况。
+ */
+export const TranscriptStepSchema = z.object({
+  /** 工具名（read / write / edit / bash / remember / delegate …） */
+  name: z.string(),
+  /** 最能说明"在干什么"的那一个参数（路径 / 命令 / 查询） */
+  label: z.string().optional(),
+  /** 调用参数 JSON，服务端截断到 1200 字符 */
+  args: z.string().optional(),
+  /** 工具输出，服务端截断到 2000 字符 */
+  output: z.string().optional(),
+  /** 编辑类工具的 unified diff（服务端截断到 2000 字符），其它工具没有 */
+  diff: z.string().optional(),
+  /** false = 这一步失败了（或这一轮被中断、没等到结果） */
+  ok: z.boolean(),
+  /** 该步耗时（毫秒）；老记录或没跑完的调用读不到就不带 */
+  ms: z.number().optional(),
+});
+export type TranscriptStep = z.infer<typeof TranscriptStepSchema>;
 
 /**
  * 读历史接口的一条记录。
@@ -78,6 +116,13 @@ export const TranscriptMessageSchema = z.object({
   text: z.string(),
   /** epoch 毫秒 */
   at: z.number(),
+  /**
+   * 这条回答之前那一轮的工作步骤（2026-11-07，纯增量，老客户端忽略）。
+   * 只挂在 assistant 上；一轮里没有工具调用就不带这个字段。
+   */
+  steps: z.array(TranscriptStepSchema).optional(),
+  /** 那一轮从提问到收尾的墙钟时长（毫秒）；有 steps 才可能有 */
+  workMs: z.number().optional(),
 });
 export type TranscriptMessage = z.infer<typeof TranscriptMessageSchema>;
 
@@ -235,7 +280,22 @@ export type ChatEvent =
 	 * 用这一帧告诉客户端；同一行会落 `group_messages(kind='system')`，
 	 * 回读可复现。老客户端按 `type` 分发，认不出就忽略。
 	 */
-	| { type: "notice"; text: string; seq?: number }
+	| {
+			type: "notice";
+			text: string;
+			/**
+			 * 插话回执的机器可读落点（2026-11-07 消息即引导，纯增量）。
+			 *
+			 * `whenBusy=steer` 的那一帧才带：
+			 * - `inserted`：插进了正在跑的这一轮，正文由**原来的那条流**继续画；
+			 * - `new-turn`：刚好收尾，这句补充成了新的一轮——它那条短连接就是
+			 *   唯一的正文来源，客户端只收回执的话必须收尾后回读一次，否则
+			 *   新一轮的回答没人画。
+			 * `text` 是给人看的话，不要拿文案做判断；认不出该值的客户端按无标记处理。
+			 */
+			steer?: "inserted" | "new-turn";
+			seq?: number;
+	  }
 	/**
 	 * 派单进度（2026-11-03）。
 	 *

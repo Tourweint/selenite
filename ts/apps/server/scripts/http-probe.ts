@@ -1475,6 +1475,50 @@ try {
 		"详情接口也给对话标题",
 		String(childTitleDetail.conversationTitle),
 	);
+	// ── 19. 忙时投递方式（2026-11-07 消息即引导）────────────────
+	// 契约层只验"字段被接受 + 语义没走偏"：faux 回答很快，这里不追真实插话时序
+	// （那由 browser 验收与 agent 的 notice 断言覆盖），只钉住三种输入的形状。
+	const dmConv = await (async () => {
+		const res = await fetch(`${BASE}/api/v1/agent/chat`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ messages: [{ role: "user", content: "投递方式探针" }] }),
+		});
+		const text = await res.text();
+		return /"conversationId":"([^"]+)"/.exec(text)?.[1] ?? "";
+	})();
+	console.log("\n· 19. 忙时投递方式（whenBusy）");
+	check(Boolean(dmConv), "建一条会话", dmConv);
+
+	const sendWhen = async (whenBusy: unknown): Promise<number> => {
+		const res = await fetch(`${BASE}/api/v1/agent/chat`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				conversationId: dmConv,
+				messages: [{ role: "user", content: "再说一句" }],
+				...(whenBusy === undefined ? {} : { whenBusy }),
+			}),
+		});
+		// 读完整条流，确保服务端把这一轮跑完（否则下一条会撞上"忙"）
+		await res.text();
+		return res.status;
+	};
+
+	check((await sendWhen(undefined)) === 200, "不带 whenBusy：与改动前一致（200）");
+	check((await sendWhen("followUp")) === 200, "whenBusy=followUp 被接受");
+	check((await sendWhen("steer")) === 200, "whenBusy=steer 被接受");
+	check((await sendWhen("bogus")) === 400, "非法 whenBusy → 400（不静默降级）");
+
+	const dmHistory = (await (await fetch(`${BASE}/api/v1/agent/chat/${dmConv}/messages`)).json()) as {
+		messages?: unknown[];
+	};
+	check(
+		(dmHistory.messages?.length ?? 0) >= 8,
+		"三次合法投递都落库（每轮 user+assistant）",
+		String(dmHistory.messages?.length),
+	);
+
 } finally {
 	server.kill();
 	await sleep(300);

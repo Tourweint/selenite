@@ -645,6 +645,8 @@ app.post("/api/v1/agent/chat", async (c) => {
         conversation: chat.conversation,
         text: lastUserText,
         requestId: request.requestId,
+        // 忙时投递方式（2026-11-07 消息即引导）：不传 = followUp，等于改动前的排队
+        ...(request.whenBusy ? { whenBusy: request.whenBusy } : {}),
         // 记忆挂在"这一轮真的结束"上，不挂在"这条流结束"上：
         // 用户关掉界面之后它还会跑完，那一轮的记忆照样得写。
         onSettled: (record) => {
@@ -691,7 +693,10 @@ app.post("/api/v1/agent/chat", async (c) => {
           // 审批（2026-11-04 批次二）：写类工具等客户端答复，属纯增量事件
           event.type === "approval" ||
           // 思考正文增量（2026-11-04 批次一），同属纯增量事件
-          event.type === "thinking"
+          event.type === "thinking" ||
+          // 系统提示行（2026-11-07 消息即引导）：插话/排队的诚实回执。
+          // 对外帧 shape 与群聊的 notice 一致，老客户端按 type 忽略即可。
+          event.type === "notice"
         ) {
           await send(event as unknown as ChatEvent);
           continue;

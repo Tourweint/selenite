@@ -92,6 +92,59 @@ test("立即返回任务单号，并把 domain 传给负责人", async () => {
 	await outcome;
 });
 
+test("执事直派：managers=false 传给 chancellor，且不注入身份", async () => {
+	// 2026-11-07 消息即引导与执事直派：执事在自己领域内派活时，
+	// 不再为该领域起一个分管宰相——请求带 managers:false，managerIdentity 不出现。
+	let seen: ChancellorRequest | undefined;
+	const { outcome } = startDelegation(
+		{
+			conversationId: 11,
+			domain: "frontend",
+			requirement: "把登录页的按钮对齐",
+			managers: false,
+		},
+		{
+			run: (request, options) => {
+				seen = request;
+				options.onEvent?.({ type: "ticket", ticketId: "T-9", message: "已受理" });
+				return Promise.resolve(result({ ticketId: "T-9" }));
+			},
+			emit: () => undefined,
+			// 即使装配层给了身份缝，直派也不该去取（取不到就没有）
+			identityHitFor: () => ({ name: "不该被用", soul: "不该被用" }),
+			report: () => undefined,
+			autoReport: false,
+		},
+	);
+	await outcome;
+
+	assert.equal(seen?.managers, false, "直派必须显式关掉分管");
+	assert.equal(seen?.domain, "frontend", "domain 仍保留，任务中心看得出是哪个领域派的");
+	assert.equal(seen?.managerIdentity, undefined, "直派不注入身份（他就是该领域负责人）");
+});
+
+test("分管路径未回滚：不带 managers 时仍注入身份", async () => {
+	let seen: ChancellorRequest | undefined;
+	const { outcome } = startDelegation(
+		{ conversationId: 12, domain: "frontend", requirement: "改个文案" },
+		{
+			run: (request, options) => {
+				seen = request;
+				options.onEvent?.({ type: "ticket", ticketId: "T-10", message: "已受理" });
+				return Promise.resolve(result({ ticketId: "T-10" }));
+			},
+			emit: () => undefined,
+			identityHitFor: () => ({ name: "小明", soul: "你是小明" }),
+			report: () => undefined,
+			autoReport: false,
+		},
+	);
+	await outcome;
+
+	assert.equal(seen?.managers, undefined, "总管 / 主人会话不能被悄悄改成直派");
+	assert.equal(seen?.managerIdentity?.name, "小明");
+});
+
 test("后台完成：发终态 +「需要你」并回灌会话", async () => {
 	const events: DelegationEvent[] = [];
 	const reports: DelegationReport[] = [];

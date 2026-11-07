@@ -66,7 +66,14 @@ import { autonomyRiskVerdict } from "./autonomy-risk.ts";
 import { ReminderTask } from "./reminder.ts";
 import { createSkillStore, type SkillStore } from "./skills.ts";
 import { createTools } from "./tools.ts";
-import type { ChatKind, DelegationPhase, NewChatKind, ThinkingLevel, TurnUsage } from "@lifediary/shared";
+import type {
+	ChatKind,
+	DelegationPhase,
+	NewChatKind,
+	ThinkingLevel,
+	TranscriptStep,
+	TurnUsage,
+} from "@lifediary/shared";
 import { watchDelegation, emitDelegation, type DelegationEvent, type DelegationReport } from "./delegation.ts";
 
 /**
@@ -1576,6 +1583,14 @@ export type ChatStreamEvent =
 	 */
 	| { type: "unanswered"; message: string }
 	/**
+	 * 系统提示行（2026-11-07 消息即引导）。
+	 *
+	 * 只用于"这件事发生了变化但你不需要看模型说话"的时刻：插话请求落了队列、
+	 * 补充已受理等。对外复用已有 `notice` 帧（群聊在用），不新增 SSE 类型。
+	 * `steer` 是机器可读的插话落点（shared 契约），客户端据此决定要不要回读。
+	 */
+	| { type: "notice"; text: string; steer?: "inserted" | "new-turn" }
+	/**
 	 * 本轮 token 用量（2026-11-04 批次一）。**内部事件**：index.ts 捕获后挂到
 	 * `done.usage` 上，不单独对外发帧——对外契约只加字段，不加类型。
 	 */
@@ -1594,6 +1609,27 @@ export interface ChatStreamInput {
 	 * 挂在这个回调上，就不会因为"用户关了个窗口"而漏记一轮对话。
 	 */
 	onSettled?: (record: SettledSubmissionRecord) => void;
+	/**
+	 * 忙时投递方式（2026-11-07 消息即引导）：透传给内核的 `whenBusy`。
+	 * 缺省 `followUp` = 改动前的排队行为。
+	 */
+	whenBusy?: "steer" | "followUp";
+}
+
+/**
+ * 这个会话此刻有没有在跑的一轮（2026-11-07 消息即引导）。
+ *
+ * 只读 `pi.live.run`：它是内核"有一轮正在进行"的自有状态（不是我们自己记的布尔）。
+ * 读不到就按空闲处理——插话在空闲时会自然变成普通输入，语义仍然正确。
+ */
+async function conversationIsBusy(conversation: Conversation): Promise<boolean> {
+	try {
+		const harness = await getHarness();
+		const live = await harness.snapshot(LiveDoc, conversation.id, CTX);
+		return Boolean(live?.run);
+	} catch {
+		return false;
+	}
 }
 
 /**
@@ -1621,6 +1657,14 @@ export async function* chatStream(
 	const delegations: DelegationEvent[] = [];
 	let emitted = "";
 	let emittedThinking = "";
+	/**
+	 * 当前生成段的代号（2026-11-07 消息即引导）。
+	 *
+	 * 工具轮之后内核会起**新的一段**生成；新段的文本不是旧段的前缀，`offer` 会
+	 * 直接把它挡掉（第二段永远发不出去）。所以按段重置基线，段与段之间补一条分隔线。
+	 * 同一段内的重试（attempt 变化）**不重置**：重试是从头再生成同一段，仍按增量发。
+	 */
+	let emittedSegment: string | null = null;
 	let wake: (() => void) | null = null;
 
 	const notify = () => {
@@ -1652,6 +1696,32 @@ export async function* chatStream(
 		const message = live?.generation?.message as { content?: unknown } | undefined;
 		if (!message?.content) return "";
 		return contentText(message.content as Parameters<typeof contentText>[0]);
+	};
+
+	/** 当前生成段的代号；没有正在生成的一段时返回 null。 */
+	const segmentOf = (value: ConversationView): string | null => {
+		const live = value.docs["pi.live"] as LiveState | undefined;
+		if (!live?.generation) return null;
+		return live.run?.taskId !== undefined ? String(live.run.taskId) : null;
+	};
+
+	/**
+	 * 段切换时清空增量基线（2026-11-07）。
+	 *
+	 * 只在"之前已经发过正文、现在进了另一段"时插入分隔与重置；首段不插分隔。
+	 * 不重置会怎样：工具轮后的第二段 `startsWith(emitted)` 恒假，整段静默丢失。
+	 */
+	const rollSegment = (value: ConversationView): void => {
+		const segment = segmentOf(value);
+		if (segment === null || segment === emittedSegment) return;
+		const first = emittedSegment === null;
+		emittedSegment = segment;
+		if (first || emitted.length === 0) return;
+		// 段与段之间空一行：客户端把它们拼成同一轮的正文，不能让两段糊在一起
+		queue.push("\n\n");
+		emitted = "";
+		emittedThinking = "";
+		notify();
 	};
 
 	/** 生成中的 thinking 块正文（2026-11-04 批次一；pi-ai 的块形状是 {type:"thinking", thinking}） */
@@ -1694,16 +1764,47 @@ export async function* chatStream(
 		// 运行时切模型后，还停在旧模型上的会话在这轮开跑前对齐过去（接口文档 §2.8）
 		await syncConversationModel(input.conversation, conversationId);
 		watch.start(async (value) => {
+			rollSegment(value);
 			offer(partialOf(value));
 			offerThinking(thinkingOf(value));
 		});
+		rollSegment(watch.value);
 		offer(partialOf(watch.value));
 		offerThinking(thinkingOf(watch.value));
 
+		// 提交前先看这轮是不是真的在跑：插话只对"正在跑的这一轮"有意义
+		const busyBeforeSubmit = await conversationIsBusy(input.conversation);
+
 		const submission = await input.conversation.submit(
-			{ type: "input", content: input.text, requestId: input.requestId },
+			{
+				type: "input",
+				content: input.text,
+				requestId: input.requestId,
+				// 缺省 followUp = 改动前的排队行为；steer 只在客户端明确要求时才试
+				...(input.whenBusy ? { whenBusy: input.whenBusy } : {}),
+			},
 			CTX,
 		);
+
+		// 回执诚实（2026-11-07）：请求插话不等于"已经插进去了"。内核的语义是
+		// "在下一次边界消费"——本轮还有工具轮就落在 postTools，已经收尾就等价于下一轮。
+		// 所以只承诺"会在这轮的下一个边界生效"，不承诺"模型马上看到了"。
+		//
+		// 空闲时提交的 steer 不只是一个"没插进去"的降级：它会成为**新的一轮**，
+		// 而调用方（插话那条短连接）按约定只收回执、不画正文。所以这里必须说清
+		// "这句话已经开了新一轮"，否则用户会以为它被吞了。
+		if (input.whenBusy === "steer") {
+			yield {
+				type: "notice",
+				text: busyBeforeSubmit
+					? "补充已作为插话发出：这一轮的下一个边界会带上它；没赶上就是下一轮的第一句。"
+					: "这一轮刚好收尾，这句补充已经作为新的一轮开始。",
+				// 机器可读落点（2026-11-07 补）：`new-turn` 时这条短连接是新一轮正文的
+				// 唯一来源，而它按约定只收回执——客户端要靠这个标记安排收尾后的回读，
+				// 不能靠猜文案（那是给人看的，不是给程序看的）。
+				steer: busyBeforeSubmit ? "inserted" : "new-turn",
+			};
+		}
 
 		void submission
 			.wait(CTX)
@@ -1857,6 +1958,10 @@ export interface TranscriptMessage {
 	text: string;
 	/** 消息时间，epoch 毫秒 */
 	at: number;
+	/** 这一轮的工作步骤（2026-11-07）；没有工具调用就不带 */
+	steps?: TranscriptStep[];
+	/** 那一轮从提问到收尾的墙钟时长（毫秒） */
+	workMs?: number;
 }
 
 /**
@@ -1944,11 +2049,50 @@ export async function sayInChat(chat: ResolvedChat, text: string): Promise<void>
 }
 
 /**
+ * 一步工作过程的截断上限：与 `tool` 事件的 `output` 同一口径（2000 字符）。
+ * 现场看到多长，回头翻到就多长——两边不一致会让人怀疑历史被裁剪过。
+ */
+const STEP_OUTPUT_LIMIT = TOOL_OUTPUT_LIMIT;
+/** 编辑类工具的 diff 单独给一档（比输出略短，面板里是一屏的事） */
+const STEP_DIFF_LIMIT = 2000;
+
+/** 与 toolOutput 同口径：先取文字、trim，再按上限截断并标注还剩多少 */
+function clampText(text: string, limit: number): string | undefined {
+	const one = text.trim();
+	if (!one) return undefined;
+	return one.length > limit
+		? `${one.slice(0, limit)}\n…（还有 ${one.length - limit} 字符）`
+		: one;
+}
+
+/**
+ * 从 `tool-result` 的 details 里取编辑 diff（2026-11-07）。
+ *
+ * `edit` 工具把 `{ diff, patch, firstChangedLine }` 放在 details 里（读
+ * `pi-durable` 的 `tools/edit.js` 确认），其它工具没有这个字段，所以这里
+ * 只认 `diff`，不强求——读不到就当作"这一步没有差异可看"。
+ */
+function stepDiff(details: unknown): string | undefined {
+	if (!details || typeof details !== "object") return undefined;
+	const diff = (details as { diff?: unknown }).diff;
+	return typeof diff === "string" ? clampText(diff, STEP_DIFF_LIMIT) : undefined;
+}
+
+/**
  * 读会话已有的对话记录。
  *
  * 存在的理由：一轮对话现在可以在**没有客户端看着**的情况下跑完（见 chatStream），
  * 所以客户端下次打开必须能把结果拉回来，否则"关掉界面它照样跑完"对用户没有意义。
- * 只取模型看得见的那部分（用户说了什么、模型答了什么），工具调用细节不在这里。
+ *
+ * 2026-11-07 起连同**工作过程**一起回放：流式期间的 `tool` 事件只活在当轮 DOM 里，
+ * 刷新就没了；而步骤本来就躺在 durable 里（`pi.assistant` 的 toolCall +
+ * `pi.tool-result`），所以这里只是按调用顺序把它们配成对，不新增任何存储。
+ *
+ * 配对规则（与 durable 的落库顺序一一对应）：
+ *   pi.user → [pi.assistant(带 toolCall) → pi.tool-result × n] × m → pi.assistant(正文)
+ * 步骤挂在**它后面那条带正文的回答**上；一轮里没有工具调用，`steps` 字段就不下发。
+ * 被中断、始终没等到回答的那一轮没有挂靠点，历史里不回放它的步骤（当轮界面上
+ * 仍会显示"已中断生成"，只是不持久化——与那句提示自己的生命周期一致）。
  */
 export async function readTranscript(
 	chat: ResolvedChat,
@@ -1957,17 +2101,101 @@ export async function readTranscript(
 	const view = await chat.conversation.context(CTX);
 	const messages: TranscriptMessage[] = [];
 
+	/** 本轮的步骤，按 toolCallId 索引；回答落盘时整段挂上去 */
+	let pending: TranscriptStep[] = [];
+	const byCallId = new Map<string, { step: TranscriptStep; settled: boolean }>();
+	/** 助手条目里模型侧看到的正文；entries 的类型是 Message 联合，取用前要收窄 */
+	/** 本轮提问的时间（算 workMs 用）；没有 user 开头就留 undefined */
+	let turnStartAt: number | undefined;
+
 	for (const entry of view.entries) {
-		if (entry.kind !== "pi.user" && entry.kind !== "pi.assistant") continue;
+		if (entry.kind === "pi.user") {
+			// 新一轮：上一轮没等到回答的步骤没有挂靠点，直接丢掉（见函数头注释）
+			pending = [];
+			byCallId.clear();
+			const message = entry.model?.[0];
+			if (!message) continue;
+			const text = contentText(message.content).trim();
+			const at = typeof message.timestamp === "number" ? message.timestamp : 0;
+			if (!text) continue;
+			turnStartAt = at || undefined;
+			messages.push({ role: "user", text, at });
+			continue;
+		}
+
+		if (entry.kind === "pi.tool-result") {
+			const message = entry.model?.[0];
+			if (!message || message.role !== "toolResult") continue;
+			const slot = byCallId.get(message.toolCallId);
+			if (!slot) continue;
+			const { step } = slot;
+			step.ok = !message.isError;
+			const output = clampText(contentText(message.content), STEP_OUTPUT_LIMIT);
+			if (output) step.output = output;
+			const diff = stepDiff((message as { details?: unknown }).details);
+			if (diff) step.diff = diff;
+			if (typeof message.durationMs === "number") step.ms = Math.round(message.durationMs);
+			slot.settled = true;
+			continue;
+		}
+
+		if (entry.kind !== "pi.assistant") continue;
 		const message = entry.model?.[0];
-		if (!message) continue;
+		if (!message || message.role !== "assistant") continue;
+		const at = typeof message.timestamp === "number" ? message.timestamp : 0;
+		// assistant 的 timestamp 是"请求开始"，收尾时刻要再加 durationMs（pi-ai 的口径）；
+		// 没有 durationMs 的旧记录退回 timestamp，宁可少算也不编一个数出来。
+		const endedAt =
+			at + (typeof message.durationMs === "number" ? Math.max(0, Math.round(message.durationMs)) : 0);
+
+		// 带工具调用的中间回合：只收步骤，不当成一条"回答"下发（正文往往是空的）
+		const parts = Array.isArray(message.content) ? message.content : [];
+		const calls = parts.filter((item) => item.type === "toolCall");
+		if (calls.length > 0) {
+			for (const call of calls) {
+				const step: TranscriptStep = { name: call.name, ok: true };
+				const label = toolLabel(call.arguments);
+				if (label) step.label = label;
+				const args = toolArgs(call.arguments).args;
+				if (args) step.args = args;
+				pending.push(step);
+				byCallId.set(call.id, { step, settled: false });
+			}
+			continue;
+		}
+
 		const text = contentText(message.content).trim();
 		if (!text) continue;
-		messages.push({
-			role: entry.kind === "pi.user" ? "user" : "assistant",
-			text,
-			at: typeof message.timestamp === "number" ? message.timestamp : 0,
-		});
+		const outgoing: TranscriptMessage = { role: "assistant", text, at };
+		if (pending.length > 0) {
+			// 没配到结果的（中断 / 崩在工具里）在这里定案：ok=false，避免历史把它画成成功。
+			// 判据是 settled 而不是"有没有输出"——成功的 `read` 也可能一字不吐。
+			for (const slot of byCallId.values()) {
+				if (!slot.settled) slot.step.ok = false;
+			}
+			outgoing.steps = pending;
+			if (turnStartAt !== undefined && endedAt > turnStartAt) outgoing.workMs = endedAt - turnStartAt;
+		}
+		messages.push(outgoing);
+		pending = [];
+		byCallId.clear();
+	}
+
+	// 收尾兜底：一轮因为撞工具回合上限 / 被停 / 崩在工具里而没能产出正文时，
+	// 上面那条"挂在回答上"的路就没有挂靠点，整轮步骤会凭空消失——
+	// 而这恰恰是最需要看过程的一轮。这里给它们一条只有步骤、正文为空的 assistant，
+	// 客户端照常渲染工作过程块（正文是空的，自然不显示字）。
+	if (pending.length > 0) {
+		for (const slot of byCallId.values()) {
+			if (!slot.settled) slot.step.ok = false;
+		}
+		const lastAt =
+			typeof view.entries.at(-1)?.model?.[0]?.timestamp === "number"
+				? (view.entries.at(-1)?.model?.[0]?.timestamp as number)
+				: 0;
+		const outgoing: TranscriptMessage = { role: "assistant", text: "", at: lastAt, steps: pending };
+		if (turnStartAt !== undefined && lastAt > turnStartAt) outgoing.workMs = lastAt - turnStartAt;
+		messages.push(outgoing);
 	}
 
 	return limit > 0 ? messages.slice(-limit) : messages;

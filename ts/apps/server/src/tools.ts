@@ -47,6 +47,11 @@ import {
 	type ProjectRef,
 	type ProjectsStore,
 } from "./projects.ts";
+// 派活路由（2026-11-07 消息即引导与执事直派）：执事在自己领域内不再绕回分管宰相。
+import {
+	resolveDelegateRouting,
+	routingToRequestFields,
+} from "./delegate-routing.ts";
 // 设备矩阵（2026-11-05 阶段二）：远程分支晚绑定取中继客户端。
 // relay-matrix → agent → tools 的环是运行期安全的（agent 绑定只在函数体内解引用）。
 import {
@@ -71,6 +76,24 @@ import type { SkillStore } from "./skills.ts";
  */
 
 const MEMORY_KINDS: MemoryKind[] = ["fact", "episode", "preference", "entity"];
+
+/**
+ * 调用方会话所属执事的领域（2026-11-07 执事直派）。
+ *
+ * 只认链接表里真实的执事档案：总管（`chief`）与主人会话没有领域，
+ * 返回 null —— 路由据此走"原样分管"。查库失败也返回 null（宁可按旧行为），
+ * 不让一次读失败把派单挡下来。
+ */
+function callerDomainOf(conversationId: number): string | null {
+	if (!COMPANIONS_ENABLED) return null;
+	try {
+		const partnerId = partnersStore().partnerIdOfSession(conversationId);
+		if (!partnerId) return null;
+		return partnersStore().get(partnerId)?.domain ?? null;
+	} catch {
+		return null;
+	}
+}
 
 /**
  * 本机 delegate 才反查执事身份（批次D D2）。
@@ -390,7 +413,19 @@ export function createTools(deps: ToolDeps) {
 			// 派活的进度和「需要你」要能实时到客户端，否则那几分钟界面是死的。
 			// 这里把 chancellor 的事件翻译成两种：正在办第几件、需要你回答什么。
 			const conversationId = Number(api.conversationId);
-			const domain = (args.domain ?? "").trim();
+			const requestedDomain = (args.domain ?? "").trim();
+			// 派活路由（2026-11-07）：执事在自己领域内直派，不再绕回分管宰相；
+			// 跨领域明确拒绝，不静默改道。总管 / 主人会话维持原语义。
+			const routing = resolveDelegateRouting(
+				{
+					partnerId: effectivePartnerIdOfSession(partnersStore(), conversationId),
+					domain: callerDomainOf(conversationId),
+				},
+				requestedDomain,
+			);
+			if (routing.kind === "rejected") return text(routing.reason);
+			const requestFields = routingToRequestFields(routing);
+			const domain = requestFields.domain;
 			// 远程分支（2026-11-05 阶段二）：点名另一台电脑执行。
 			// 本机的项目前置不参与（project 语义归目标机）；离线直接失败不排队。
 			const targetDevice = (args.targetDevice ?? "").trim();
@@ -538,6 +573,8 @@ export function createTools(deps: ToolDeps) {
 					resumeTicketId,
 					project,
 					...(requestId ? { requestId } : {}),
+					// 执事在自己领域内直派（2026-11-07）：不带 managers 就是既有分管路径
+					...(requestFields.managers === false ? { managers: false as const } : {}),
 				},
 				{
 					run: (request, options) =>

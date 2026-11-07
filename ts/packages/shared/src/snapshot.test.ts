@@ -7,6 +7,7 @@ import {
 	FinishReasonSchema,
 	RoleSchema,
 	TranscriptMessageSchema,
+	TranscriptStepSchema,
 	createSseDecoder,
 	encodeSseEvent,
 	type ChatEvent,
@@ -76,13 +77,29 @@ const SCHEMAS = {
 	ChatRequestSchema,
 	ChatMessageSchema,
 	TranscriptMessageSchema,
+	TranscriptStepSchema,
 	ChatTranscriptSchema,
 	RoleSchema,
 	FinishReasonSchema,
 };
 
+/** 步骤形状被两处引用（TranscriptStep / messages[].steps），抽出来免得改一处漏一处。 */
+const STEP_SHAPE = {
+	kind: "object",
+	fields: {
+		args: { kind: "optional", of: { kind: "string" } },
+		diff: { kind: "optional", of: { kind: "string" } },
+		label: { kind: "optional", of: { kind: "string" } },
+		ms: { kind: "optional", of: { kind: "number" } },
+		name: { kind: "string" },
+		ok: { kind: "boolean" },
+		output: { kind: "optional", of: { kind: "string" } },
+	},
+};
+
 /** 内联快照：形状改动在 diff 里一目了然，不另起 .snap 文件。 */
 const EXPECTED: Record<string, unknown> = {
+	TranscriptStepSchema: STEP_SHAPE,
 	RoleSchema: { kind: "enum", values: ["system", "user", "assistant"] },
 	FinishReasonSchema: { kind: "enum", values: ["stop", "length", "aborted", "error"] },
 	ChatMessageSchema: {
@@ -97,7 +114,9 @@ const EXPECTED: Record<string, unknown> = {
 		fields: {
 			at: { kind: "number" },
 			role: { kind: "enum", values: ["user", "assistant"] },
+			steps: { kind: "optional", of: { kind: "array", of: STEP_SHAPE } },
 			text: { kind: "string" },
+			workMs: { kind: "optional", of: { kind: "number" } },
 		},
 	},
 	ChatTranscriptSchema: {
@@ -111,7 +130,9 @@ const EXPECTED: Record<string, unknown> = {
 					fields: {
 						at: { kind: "number" },
 						role: { kind: "enum", values: ["user", "assistant"] },
+						steps: { kind: "optional", of: { kind: "array", of: STEP_SHAPE } },
 						text: { kind: "string" },
+						workMs: { kind: "optional", of: { kind: "number" } },
 					},
 				},
 			},
@@ -134,6 +155,8 @@ const EXPECTED: Record<string, unknown> = {
 				},
 			},
 			requestId: { kind: "optional", of: { kind: "string" } },
+			// 2026-11-07 消息即引导：忙时投递方式（steer 插进当前轮 / followUp 排队）
+			whenBusy: { kind: "optional", of: { kind: "enum", values: ["steer", "followUp"] } },
 		},
 	},
 };

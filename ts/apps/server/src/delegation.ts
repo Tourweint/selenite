@@ -99,6 +99,12 @@ export interface DelegationKickoff {
 	resumeTicketId?: string;
 	/** 幂等键；回执先落再入队，重启后同 id 只返回原单号。 */
 	requestId?: string;
+	/**
+	 * 硬开关（2026-11-07 执事直派）：false 时 chancellor 忽略 domain，绝不建分管宰相。
+	 * 只由"执事在自己领域内派活"这一条路由设置——他本来就是该领域的负责人，
+	 * 再起一个分管等于把同一身份跑两遍。缺省 = 走既有分管路径。
+	 */
+	managers?: false;
 }
 
 /**
@@ -243,9 +249,11 @@ export function startDelegation(
 	const projectName = kick.project?.name || kick.project?.id;
 	// 身份在派单开始时取一次快照，两次 launch（含续跑失败回退）共用同一个值：
 	// 单次派单内不变，不与「改 SOUL 下一轮生效」的版本化语义打架。
-	const managerIdentity = kick.domain
-		? buildManagerIdentity(runtime.identityHitFor?.(kick.domain) ?? null)
-		: undefined;
+	// 直派（2026-11-07）不注入身份：调用者本人就是该领域的负责人，再注入等于叠两层。
+	const managerIdentity =
+		kick.domain && kick.managers !== false
+			? buildManagerIdentity(runtime.identityHitFor?.(kick.domain) ?? null)
+			: undefined;
 	const emitProgress = (phase: DelegationPhase, next?: string, waitingOn?: string): void => {
 		if (next !== undefined) current = next;
 		// 单号还没出来时先不发：前端要靠 ticketId 归并，发空号只会多一条噪声。
@@ -371,6 +379,9 @@ export function startDelegation(
 
 	const projectField = kick.project ? { project: kick.project } : {};
 	const idempotency = kick.requestId ? { idempotencyKey: kick.requestId } : {};
+	// 执事在自己领域内直派（2026-11-07）：managers:false 让 chancellor 不建分管宰相。
+	// 递归在参数层断掉，不需要改跨仓契约。
+	const managerSwitch = kick.managers === false ? { managers: false as const } : {};
 	const first = launch(
 		kick.resumeTicketId
 			? { resumeTicketId: kick.resumeTicketId, answer: kick.requirement }
@@ -378,6 +389,7 @@ export function startDelegation(
 				requirement: kick.requirement,
 				...(kick.domain ? { domain: kick.domain } : {}),
 				...(managerIdentity ? { managerIdentity } : {}),
+				...managerSwitch,
 				...projectField,
 				...idempotency,
 				// 来源对话只透传（2026-11-05 跨仓契约）：chancellor 落 ticket.json，
@@ -396,6 +408,7 @@ export function startDelegation(
 			requirement: kick.requirement,
 			...(kick.domain ? { domain: kick.domain } : {}),
 			...(managerIdentity ? { managerIdentity } : {}),
+			...managerSwitch,
 			...projectField,
 			...idempotency,
 			originConversationId: String(kick.conversationId),
