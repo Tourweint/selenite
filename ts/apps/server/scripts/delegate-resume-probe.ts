@@ -4,19 +4,43 @@
 // 只断言路由本身（会话隔离、resume 参数、没单可续的兜底、进度/需要人帧）。
 //
 // 用法：`pnpm --filter @lifediary/server resume`
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type {
 	ChancellorOptions,
 	ChancellorRequest,
 	TicketResult,
 } from "../../../../../chancellor/src/index.ts";
-import { watchDelegation, type DelegationEvent } from "../src/delegation.ts";
+import {
+	startDelegation,
+	watchDelegation,
+	type DelegationEvent,
+	type DelegationReport,
+	type DelegationRuntime,
+} from "../src/delegation.ts";
 import { createTools } from "../src/tools.ts";
+import { DelegationReceipts } from "../src/delegation-receipts.ts";
+import { DelegationMessages } from "../src/delegation-messages.ts";
+import {
+	applyCancelProjection,
+	cancelTicketAction,
+	retryTicketAction,
+} from "../src/delegation-api.ts";
 
 // 这个探针验的是路由（resume / 新派 / 会话隔离），要同步拿结论；
 // 异步受理与后台回灌由 `src/delegation.test.ts` 覆盖。
 process.env.DELEGATION_ASYNC = "false";
 // 项目前置由 `src/projects.test.ts` 覆盖；这里只验路由，不注入项目登记表。
 process.env.DELEGATION_PROJECT_REQUIRED = "false";
+// 取消/重试（扫尾批 1 A1）要落作废位与回执；整份探针隔离到临时目录，别碰真实 .data。
+const TEMP = mkdtempSync(join(tmpdir(), "lifediary-resume-"));
+const RUNS = join(TEMP, "work");
+const DB = join(TEMP, "delegations.sqlite");
+process.env.DELEGATIONS_DB_PATH = DB;
+process.env.CHANCELLOR_WORK_ROOT = RUNS;
+process.env.DELEGATION_CANCEL = "true";
+mkdirSync(RUNS, { recursive: true });
 
 type Runner = (req: ChancellorRequest, opts?: ChancellorOptions) => Promise<TicketResult>;
 
@@ -188,5 +212,210 @@ function watch(conversationId: number): { events: DelegationEvent[]; stop: () =>
 	check(fake.newTickets === 2, "续跑被拒后派了新单");
 }
 
-console.log(failures === 0 ? "\n✓ 续跑路由全部通过" : `\n✗ 续跑路由有 ${failures} 项不对`);
+// 7. 取消 / 重试（扫尾批 1 A1）：作废位、投影、幂等、终态拒绝、settle 静默、重派挂原会话
+{
+	const store = new DelegationReceipts(DB);
+	/** findTicket 从 chancellor 工作目录读 ticket.json：这里铺几张假单据。 */
+	const writeTicket = (id: string, status: string, prompt: string): void => {
+		mkdirSync(join(RUNS, id), { recursive: true });
+		writeFileSync(
+			join(RUNS, id, "ticket.json"),
+			JSON.stringify({
+				id,
+				prompt,
+				status,
+				created_at: new Date().toISOString(),
+				updated_at: new Date().toISOString(),
+				options: {
+					dry: false,
+					maxTasks: 1,
+					workRoot: RUNS,
+					domain: "frontend",
+					project: { id: "p1", name: "示例项目", rootPath: join(TEMP, "p1") },
+				},
+				// 数字串 = 宿主内部会话 id（新单透传的就是它），接口层再换对外 uuid。
+				originConversationId: "9001",
+			}),
+		);
+	};
+	writeTicket("T-cancel-open", "dispatching", "整理 A");
+	writeTicket("T-terminal-done", "done", "整理 B");
+	writeTicket("T-retry-failed", "failed", "整理 C");
+	writeTicket("T-cancel-settle", "reviewing", "整理 D");
+
+	// 7.1 投影：canceled:true + status:"canceled" + originStatus 保留原值
+	const projected = applyCancelProjection({ status: "dispatching", id: "T-cancel-open" }, true);
+	check(
+		projected.canceled === true && projected.status === "canceled" && projected.originStatus === "dispatching",
+		"作废投影：canceled + status=canceled + originStatus 不丢事实",
+	);
+	const plain = applyCancelProjection({ status: "running" }, false);
+	check(
+		plain.canceled === false && plain.status === "running" && !("originStatus" in plain),
+		"未作废投影只叠加 canceled:false",
+	);
+
+	// 7.2 终态取消 → 400
+	const terminal = cancelTicketAction(store, RUNS, "T-terminal-done");
+	check(terminal.status === 400, "终态（done）取消 → 400", `status=${terminal.status}`);
+
+	// 7.3 重复取消幂等：两次都 200，canceled_at 不被改写
+	const first = cancelTicketAction(store, RUNS, "T-cancel-open");
+	const at1 = store.cancelInfo("T-cancel-open")?.canceledAt;
+	const second = cancelTicketAction(store, RUNS, "T-cancel-open");
+	const at2 = store.cancelInfo("T-cancel-open")?.canceledAt;
+	check(
+		first.status === 200 && second.status === 200 && first.body.status === "canceled",
+		"非终态取消 + 重复取消都回 200",
+	);
+	check(at1 === at2 && store.canceledTicketIds().has("T-cancel-open"), "重复取消幂等：作废位一行、时间不变");
+
+	// 7.4 取消后 settle 不回写、不发事件（作废生效的两个点）
+	cancelTicketAction(store, RUNS, "T-cancel-settle");
+	const settleEmits: DelegationEvent[] = [];
+	const settleReports: DelegationReport[] = [];
+	let resolveSettle: (value: TicketResult) => void = () => undefined;
+	const settleFinish = new Promise<TicketResult>((resolve) => {
+		resolveSettle = resolve;
+	});
+	startDelegation(
+		{ conversationId: 9001, domain: "frontend", requirement: "整理 D" },
+		{
+			run: (_request, options) => {
+				options?.onEvent?.({ type: "ticket", ticketId: "T-cancel-settle", message: "已受理" });
+				return settleFinish;
+			},
+			emit: (_conversationId, event) => settleEmits.push(event),
+			report: (_conversationId, report) => settleReports.push(report),
+			autoReport: true,
+			isCanceled: (id) => store.isCanceled(id),
+			log: () => undefined,
+		},
+	);
+	resolveSettle({ ticketId: "T-cancel-settle", status: "done", line: "完成了", tasks: [] });
+	await new Promise((resolve) => setTimeout(resolve, 30));
+	const messageStore = new DelegationMessages(DB);
+	const settleMessages = messageStore.list("T-cancel-settle");
+	messageStore.close();
+	check(settleReports.length === 0, "取消后 settle 不回写会话（report 不调用）");
+	check(settleEmits.length === 0, "取消后 emitProgress / settle 都不发事件（SSE 安静）");
+	check(
+		settleMessages.every((message) => message.direction !== "in"),
+		"取消后 settle 不 recordMessage('in') 回写",
+	);
+
+	// 7.5 重试：产出新单、挂原会话、新 requestId 防撞、回执带原单 conversation_id
+	function makeRetryRuntime(): {
+		calls: ChancellorRequest[];
+		runtime: DelegationRuntime;
+	} {
+		const calls: ChancellorRequest[] = [];
+		let seq = 0;
+		const runtime: DelegationRuntime = {
+			run: (request, options) => {
+				calls.push(request);
+				const ticketId = `T-retry-new-${(seq += 1)}`;
+				options?.onEvent?.({ type: "ticket", ticketId, message: "已受理" });
+				return Promise.resolve({ ticketId, status: "done", line: "重派完成", tasks: [] });
+			},
+			emit: () => undefined,
+			report: () => undefined,
+			autoReport: true,
+			isCanceled: (id) => store.isCanceled(id),
+			log: () => undefined,
+		};
+		return { calls, runtime };
+	}
+	const retry = makeRetryRuntime();
+	const retried = retryTicketAction(store, RUNS, "T-retry-failed", retry.runtime);
+	const newTicketId = String(retried.body.ticketId ?? "");
+	check(
+		retried.status === 200 && newTicketId !== "" && newTicketId !== "T-retry-failed",
+		"重试产出一张新单",
+		`newTicketId=${newTicketId}`,
+	);
+	check(
+		retry.calls.length === 1 && retry.calls[0]?.requirement === "整理 C",
+		"新单沿用原单需求正文",
+	);
+	check(
+		retry.calls[0]?.originConversationId === "9001",
+		"新单挂回原会话（originConversationId 透传）",
+	);
+	check(
+		String(retry.calls[0]?.idempotencyKey ?? "").startsWith("retry:T-retry-failed:"),
+		"新 requestId 用 retry:<原单id>:<次数> 防撞",
+		String(retry.calls[0]?.idempotencyKey),
+	);
+	const newReceipt = store.lookupByTicket(newTicketId);
+	check(newReceipt?.conversationId === 9001, "回执 accept 带原单 conversation_id");
+	// 再重试一次：次数累加到 :2，不撞上一次的幂等键
+	const again = makeRetryRuntime();
+	const retriedAgain = retryTicketAction(store, RUNS, "T-retry-failed", again.runtime);
+	check(
+		retriedAgain.status === 200 &&
+			String(again.calls[0]?.idempotencyKey ?? "").endsWith(":2"),
+		"第二次重试用 :2，幂等键不撞车",
+		String(again.calls[0]?.idempotencyKey),
+	);
+
+	store.close();
+}
+
+// 8. 取消/重试的 HTTP 端点形状 + 回滚开关（Hono app.request 真过一遍路由）
+{
+	const { Hono } = await import("hono");
+	const { mountDelegationApi } = await import("../src/delegation-api.ts");
+	const store = new DelegationReceipts(DB);
+	const runtime: DelegationRuntime = {
+		run: (_request, options) => {
+			const ticketId = "T-http-retry-1";
+			options?.onEvent?.({ type: "ticket", ticketId, message: "已受理" });
+			return Promise.resolve({ ticketId, status: "done", line: "重派完成", tasks: [] });
+		},
+		emit: () => undefined,
+		report: () => undefined,
+		autoReport: true,
+		isCanceled: (id) => store.isCanceled(id),
+		log: () => undefined,
+	};
+	const build = (): InstanceType<typeof Hono> => {
+		const app = new Hono();
+		mountDelegationApi(app, { workRoot: RUNS, store, retryRuntime: () => runtime });
+		return app;
+	};
+	const app = build();
+	const cancelRes = await app.request("/api/v1/tickets/T-cancel-open/cancel", { method: "POST" });
+	check(cancelRes.status === 200, "POST cancel → 200", `status=${cancelRes.status}`);
+	const terminalRes = await app.request("/api/v1/tickets/T-terminal-done/cancel", { method: "POST" });
+	check(terminalRes.status === 400, "终态 POST cancel → 400", `status=${terminalRes.status}`);
+	const retryRes = await app.request("/api/v1/tickets/T-retry-failed/retry", { method: "POST" });
+	const retryBody = (await retryRes.json()) as { ticketId?: string };
+	check(
+		retryRes.status === 200 && Boolean(retryBody.ticketId),
+		"POST retry → 200 带新单号",
+		`status=${retryRes.status}`,
+	);
+
+	// 回滚：DELEGATION_CANCEL=false → 两个端点都不挂（404）
+	process.env.DELEGATION_CANCEL = "false";
+	const offApp = build();
+	const offCancel = await offApp.request("/api/v1/tickets/T-cancel-open/cancel", { method: "POST" });
+	const offRetry = await offApp.request("/api/v1/tickets/T-retry-failed/retry", { method: "POST" });
+	check(
+		offCancel.status === 404 && offRetry.status === 404,
+		"DELEGATION_CANCEL=false → 两个端点都 404",
+		`cancel=${offCancel.status} retry=${offRetry.status}`,
+	);
+	process.env.DELEGATION_CANCEL = "true";
+	store.close();
+}
+
+try {
+	rmSync(TEMP, { recursive: true, force: true });
+} catch {
+	/* sqlite 句柄还开着时删不掉；临时目录在 tmpdir 下，留着无害 */
+}
+
+console.log(failures === 0 ? "\n✓ 续跑路由 / 取消重试全部通过" : `\n✗ 有 ${failures} 项不对`);
 process.exit(failures === 0 ? 0 : 1);

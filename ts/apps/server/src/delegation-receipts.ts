@@ -105,6 +105,15 @@ export class DelegationReceipts {
 				PRIMARY KEY (parent_ticket_id, child_ticket_id)
 			);
 		`);
+		// 2026-11-07 扫尾批 1 A1：任务「作废位」。取消 = harness 侧不再搬运结果，
+		// 不碰 chancellor 的进程/单据。挂在同一个 delegations 库，别新开文件。
+		this.db.exec(`
+			CREATE TABLE IF NOT EXISTS delegation_cancellations (
+				ticket_id       TEXT PRIMARY KEY,
+				canceled_at     TEXT NOT NULL,
+				conversation_id INTEGER
+			);
+		`);
 	}
 
 	close(): void {
@@ -280,6 +289,64 @@ export class DelegationReceipts {
 			note: text(row.note),
 			createdAt: text(row.created_at),
 		}));
+	}
+
+	// ── 作废位（2026-11-07 扫尾批 1 A1）──────────────────────
+	/**
+	 * 记一条作废。幂等 upsert：重复取消只保留第一次的 canceled_at，返回是否新插入。
+	 * conversation_id 是原单的宿主会话（内部自增整数），重试时用它把新单挂回同一条对话。
+	 */
+	cancelTicket(ticketId: string, conversationId: number | null): boolean {
+		const result = this.db
+			.prepare(
+				`INSERT OR IGNORE INTO delegation_cancellations
+				 (ticket_id, canceled_at, conversation_id) VALUES (?, ?, ?)`,
+			)
+			.run(ticketId, new Date().toISOString(), conversationId);
+		return Number(result.changes) > 0;
+	}
+
+	isCanceled(ticketId: string): boolean {
+		const row = this.db
+			.prepare("SELECT 1 FROM delegation_cancellations WHERE ticket_id = ?")
+			.get(ticketId);
+		return row !== undefined;
+	}
+
+	/** 投影用：一次取出所有已作废单号，避免逐行查库。 */
+	canceledTicketIds(): Set<string> {
+		const rows = this.db
+			.prepare("SELECT ticket_id FROM delegation_cancellations")
+			.all() as Array<Record<string, unknown>>;
+		return new Set(rows.map((row) => text(row.ticket_id)));
+	}
+
+	cancelInfo(ticketId: string): { canceledAt: string; conversationId: number | null } | null {
+		const row = this.db
+			.prepare("SELECT * FROM delegation_cancellations WHERE ticket_id = ?")
+			.get(ticketId) as Record<string, unknown> | undefined;
+		if (!row) return null;
+		return {
+			canceledAt: text(row.canceled_at),
+			conversationId:
+				row.conversation_id === null || row.conversation_id === undefined
+					? null
+					: Number(row.conversation_id),
+		};
+	}
+
+	/**
+	 * 这张单已经重派过几次（requestId = `retry:<原单id>:<次数>`）。
+	 * 用 substr 前缀精确匹配而不是 LIKE，免得单号里的 % / _ 被当成通配符。
+	 */
+	countRetries(ticketId: string): number {
+		const prefix = `retry:${ticketId}:`;
+		const row = this.db
+			.prepare(
+				"SELECT COUNT(*) AS n FROM delegation_receipts WHERE substr(request_id, 1, ?) = ?",
+			)
+			.get(prefix.length, prefix) as { n?: unknown } | undefined;
+		return Number(row?.n ?? 0);
 	}
 }
 

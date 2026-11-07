@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, normalize, parse, relative, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { Context, Hono } from "hono";
+import { chancellorWorkRoot } from "./delegation.ts";
 
 /**
  * 项目与工作区（2026-11-03 方案 §5.5）。
@@ -348,6 +349,37 @@ export class ProjectsStore {
 			)
 			.all() as Row[];
 		return rows.map(projectFromRow);
+	}
+
+	/** 改名（扫尾批 1 A4）：校验口径同建项目，排除自己。只改登记，不动磁盘。 */
+	renameProject(id: string, name: string): Project {
+		const next = name.trim();
+		if (!next) throw new ProjectError("bad_path", "项目名不能为空");
+		if (next.length > 60) throw new ProjectError("bad_path", "项目名不能超过 60 字");
+		const row = this.db.prepare("SELECT * FROM projects WHERE id = ?").get(id) as Row | undefined;
+		if (!row) throw new ProjectError("not_found", "找不到这个项目", 404);
+		if (this.listProjects().some((project) => project.id !== id && sameName(project.name, next))) {
+			throw new ProjectError("duplicate_project", `已经有叫「${next}」的项目`);
+		}
+		this.db.prepare("UPDATE projects SET name = ? WHERE id = ?").run(next, id);
+		return { ...projectFromRow(row), name: next };
+	}
+
+	/** 归档 / 恢复：`archived` 位本就存在、此前无写入方，本批接上。 */
+	setArchived(id: string, archived: boolean): Project {
+		const row = this.db.prepare("SELECT * FROM projects WHERE id = ?").get(id) as Row | undefined;
+		if (!row) throw new ProjectError("not_found", "找不到这个项目", 404);
+		this.db.prepare("UPDATE projects SET archived = ? WHERE id = ?").run(archived ? 1 : 0, id);
+		if (archived && this.getCurrentProjectId() === id) this.writeCurrentProjectId(null);
+		return { ...projectFromRow(row), archived };
+	}
+
+	/** 删除：只删登记行，不动磁盘目录；当前项目指向它时一并清掉指针。 */
+	deleteProject(id: string): void {
+		const row = this.db.prepare("SELECT id FROM projects WHERE id = ?").get(id) as Row | undefined;
+		if (!row) throw new ProjectError("not_found", "找不到这个项目", 404);
+		if (this.getCurrentProjectId() === id) this.writeCurrentProjectId(null);
+		this.db.prepare("DELETE FROM projects WHERE id = ?").run(id);
 	}
 
 	findProject(ref: string): Project | null {
@@ -774,13 +806,15 @@ export function mountProjects(app: Hono): void {
 		}
 	});
 
-	/** 已登记项目（含目录是否还在、是否仍在当前工作区内） */
+	/** 已登记项目（含目录是否还在、是否仍在当前工作区内）。默认滤掉 archived。 */
 	app.get("/api/v1/projects", (c) => {
 		try {
 			const store = projectsStore();
 			const workspace = store.getWorkspace();
 			const realWorkspace = workspace ? realpathOr(workspace.rootPath) : null;
-			const projects = store.listProjects().map((project) => {
+			// 归档折叠区要用：?includeArchived=1 才把已归档的一并返回。
+			const includeArchived = c.req.query("includeArchived") === "1";
+			const projects = store.listProjects(includeArchived).map((project) => {
 				const exists = existsSync(project.rootPath);
 				const realRoot = exists ? realpathOr(project.rootPath) : project.rootPath;
 				return {
@@ -841,6 +875,55 @@ export function mountProjects(app: Hono): void {
 	app.post("/api/v1/projects/:id/reject", (c) => {
 		try {
 			return c.json({ ok: true, proposal: projectsStore().rejectProposal(c.req.param("id")) });
+		} catch (error) {
+			return projectError(c, error);
+		}
+	});
+
+	// ── 改名 / 归档 / 恢复 / 删除（扫尾批 1 A4）──────────────────
+	// 纯增量端点；前端不接即旧行为。删除只删登记，不动磁盘目录。
+	app.patch("/api/v1/projects/:id", async (c) => {
+		const body = (await c.req.json().catch(() => null)) as { name?: unknown } | null;
+		if (typeof body?.name !== "string") {
+			return c.json({ error: "bad_request", message: "name 必填（字符串）" }, 400);
+		}
+		try {
+			return c.json({ ok: true, project: projectsStore().renameProject(c.req.param("id"), body.name) });
+		} catch (error) {
+			return projectError(c, error);
+		}
+	});
+
+	app.post("/api/v1/projects/:id/archive", (c) => {
+		try {
+			return c.json({ ok: true, project: projectsStore().setArchived(c.req.param("id"), true) });
+		} catch (error) {
+			return projectError(c, error);
+		}
+	});
+
+	app.post("/api/v1/projects/:id/unarchive", (c) => {
+		try {
+			return c.json({ ok: true, project: projectsStore().setArchived(c.req.param("id"), false) });
+		} catch (error) {
+			return projectError(c, error);
+		}
+	});
+
+	app.delete("/api/v1/projects/:id", async (c) => {
+		try {
+			const id = c.req.param("id");
+			// 守卫：该项目还有非终态派单（chancellor 工作目录还在跑）→ 400。
+			// 懒加载避免项目模块在启动期拉起整个任务中心链；读取复用 delegation-api 同一套。
+			const { projectHasInFlightTickets } = await import("./delegation-api.ts");
+			if (projectHasInFlightTickets(chancellorWorkRoot(), id)) {
+				return c.json(
+					{ error: "project_in_flight", message: "先取消或等任务完结，再删除项目登记" },
+					400,
+				);
+			}
+			projectsStore().deleteProject(id);
+			return c.json({ ok: true, id });
 		} catch (error) {
 			return projectError(c, error);
 		}

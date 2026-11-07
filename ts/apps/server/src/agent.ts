@@ -1106,6 +1106,48 @@ export async function applyChatMode(chat: ResolvedChat, level: ThinkingLevel): P
 	);
 }
 
+/** `Conversation.compact()` 受理即返回的 taskId（durable 内部自增整数，可 JSON 下发）。 */
+export type CompactTaskId = Awaited<ReturnType<Conversation["compact"]>>;
+
+/**
+ * 手动压缩（扫尾批 1 B1）：把内核本来就有的 `Conversation.compact` 接成一个端点。
+ * 它本就是「受理即返回」——压缩在后台做、在空闲/边界落摘要，与方案 §二一致。
+ */
+export async function startChatCompaction(
+	chat: ResolvedChat,
+	instructions?: string,
+): Promise<CompactTaskId> {
+	return chat.conversation.compact(instructions, CTX);
+}
+
+/**
+ * `?wait=1`：等这次压缩任务的终局，最多 timeoutMs。
+ * 超时不算失败——受理仍然有效，客户端可走 SSE / 刷新看结果；所以超时只回 false。
+ * `waitForTask` 用 BACKGROUND_CONTEXT（不带 AbortSignal），兑现与否都挂了 catch，
+ * 不会留未处理的 rejection；真正的上限交给外层 AGENT_COMPACT_WAIT_MS 的 race。
+ */
+export async function waitChatCompaction(
+	taskId: CompactTaskId,
+	timeoutMs: number,
+): Promise<boolean> {
+	const harness = await getHarness();
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const timeout = new Promise<false>((resolve) => {
+		timer = setTimeout(() => resolve(false), Math.max(0, timeoutMs));
+	});
+	try {
+		return await Promise.race([
+			harness.waitForTask(taskId, CTX).then(
+				() => true,
+				() => true,
+			),
+			timeout,
+		]);
+	} finally {
+		if (timer) clearTimeout(timer);
+	}
+}
+
 /**
  * 会话当前的档位（从 durable 里的模型引用读，重启后照样准）。
  * 没跑过的新会话返回 null；更早的会话可能没有 `#think-` 后缀，也返回 null。
@@ -2157,7 +2199,7 @@ export async function sayInConversation(
  *
  * 失败只记日志、不抛：活已经跑完，汇报写不进去不该把工具或流拖下水。
  */
-async function reportDelegationResult(
+export async function reportDelegationResult(
 	conversationId: number,
 	report: DelegationReport,
 ): Promise<void> {

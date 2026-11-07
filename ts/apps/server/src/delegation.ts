@@ -89,6 +89,12 @@ export interface DelegationRuntime {
 		 * 这样「不做跨电脑执事」由装配层保证，内核不查执事库、不在禁用执事时建库。
 		 */
 		identityHitFor?: (domain: string) => { name: string; soul: string } | null;
+		/**
+		 * 作废位查询（2026-11-07 扫尾批 1 A1）：单子被取消后，进度与终局都不再外发/回写。
+		 * 不传 = 没有作废概念（单测与旧调用方零改动）。由装配层读 delegations 库现查，
+		 * 这样取消发生后哪怕单子还在后台跑，也能立刻静默。
+		 */
+		isCanceled?: (ticketId: string) => boolean;
 		log?: (line: string) => void;
 	}
 
@@ -270,6 +276,8 @@ export function startDelegation(
 		if (next !== undefined) current = next;
 		// 单号还没出来时先不发：前端要靠 ticketId 归并，发空号只会多一条噪声。
 		if (!ticketId) return;
+		// 作废单点 2：已取消就不再转发进度事件（SSE 安静）。
+		if (runtime.isCanceled?.(ticketId)) return;
 		runtime.emit(kick.conversationId, {
 			type: "delegate",
 			ticketId,
@@ -324,6 +332,10 @@ export function startDelegation(
 		if (settled) return;
 		settled = true;
 		ticketId = result.ticketId || ticketId;
+		// 作废单点 1：已取消的单既不写回会话（不 recordMessage、不发 report），
+		// 也不为它发任何事件（作废单点 4：SSE 不再为该单发事件）。
+		// 执行端照常跑完、产物照常落盘——只是 harness 不再搬运结果。
+		if (runtime.isCanceled?.(ticketId)) return;
 		const report = formatReport(result, kick.domain);
 		// 结论也落成一条留言：任务详情里 out / in 成对，读起来就是一段经过
 		recordMessage("in", result.line || report.text, { kind: "system", name: "执行端" });
@@ -362,6 +374,8 @@ export function startDelegation(
 		const line = error instanceof Error ? error.message : String(error);
 		// 原始错误只进服务端日志：可能带上游地址甚至 key 片段。
 		runtime.log?.(`[delegate] 失败: ${line}`);
+		// 作废单失败也保持静默：不往对话里发 failed 帧、不汇报。
+		if (runtime.isCanceled?.(ticketId)) return;
 		runtime.emit(kick.conversationId, {
 			type: "delegate",
 			ticketId: ticketId || "(未受理)",

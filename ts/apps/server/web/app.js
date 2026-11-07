@@ -548,6 +548,8 @@ const state = {
   tickets: [],
   ticketsFetchedAt: 0,
   ticketsLoading: false,
+  // 取消/重试开关（扫尾批 1 A1）：来自 GET /tickets 的 cancelEnabled；关时不渲染按钮。
+  ticketsCancelEnabled: false,
   domainFilter: "",
   projectFilter: "",
   sort: "recent",
@@ -611,6 +613,7 @@ const TASK_STATUS = {
   done: ["已完成", "done"],
   failed: ["失败待看", "fail"],
   aborted: ["已中止", "fail"],
+  canceled: ["已作废", "idle"],
 };
 
 const SUBTASK_STATUS = {
@@ -762,7 +765,8 @@ function ticketLamp(ticket) {
   const status = ticket ? ticket.status : "";
   if (status === "failed" || status === "aborted") return "fail";
   if (status === "needs_you") return "ask";
-  if (status === "done") return "done";
+  // 作废单不再在跑：归到已完结折叠区，别一直挂在「进行中」列里（仍有「已作废」chip 与重试入口）。
+  if (status === "done" || status === "canceled") return "done";
   return "run";
 }
 
@@ -1176,6 +1180,24 @@ async function loadProjects({ force = false } = {}) {
 }
 
 /** 派活行：一单一行。摘要 / 状态 / 执行者 / 时间 + 「子单 N」展开区（两层收拢） */
+/** 取消/重试（扫尾批 1 A1）：只在该单可操作时渲染；开关关着一律不渲染。 */
+const RETRYABLE_TICKET_STATUS = new Set(["failed", "aborted", "canceled"]);
+// 服务端 cancel 只对这三个终态回 400，其余（含 needs_you / idle）都能作废。
+const CANCEL_BLOCKED_STATUS = new Set(["done", "failed", "aborted"]);
+function ticketActionButtons(ticket, enabled = state.ticketsCancelEnabled) {
+  if (!enabled) return "";
+  const status = String(ticket.status || "");
+  const canceled = Boolean(ticket.canceled) || status === "canceled";
+  const id = attr(ticket.id || "");
+  if (canceled || RETRYABLE_TICKET_STATUS.has(status)) {
+    return `<span class="tk-row-actions"><button class="tk-act" type="button" data-ticket-action="retry" data-ticket="${id}">重试</button></span>`;
+  }
+  if (!CANCEL_BLOCKED_STATUS.has(status)) {
+    return `<span class="tk-row-actions"><button class="tk-act" type="button" data-ticket-action="cancel" data-ticket="${id}">取消</button></span>`;
+  }
+  return "";
+}
+
 function workRow(ticket) {
   const children = childTicketsOf(ticket.id);
   const [label, tone] = TASK_STATUS[ticket.status] || [ticket.status || "未知", "idle"];
@@ -1211,6 +1233,7 @@ function workRow(ticket) {
       <span class="tk-row-who">${esc(employeeName(ticket.employee))}</span>
       <span class="tk-row-time">${esc(relativeTime(ticket.updated_at))}</span>
     </div>
+    ${ticketActionButtons(ticket)}
     ${
       children.length
         ? `<button class="tk-children-toggle" type="button" data-ticket="${attr(ticket.id)}" aria-expanded="${childrenOpen ? "true" : "false"}">
@@ -1529,6 +1552,9 @@ async function loadTickets({ silent = false, force = false, render = true } = {}
     const data = await response.json();
     state.tickets = Array.isArray(data.tickets) ? data.tickets : [];
     state.ticketsFetchedAt = Date.now();
+    // 开关随列表下发：DELEGATION_CANCEL=false 时服务端不挂端点，前端也不渲染按钮。
+    // 只认显式 true——老版本服务端没这个字段时按「不渲染」处理，避免点了 404。
+    state.ticketsCancelEnabled = data.cancelEnabled === true;
     syncTasksBadge();
     // 详情页自动刷新时只更新内存与徽标，不动正在看的详情（不重置滚动/展开状态）
     if (render && currentRoute() === "tasks" && !currentTicketId()) renderBoard();
@@ -1739,6 +1765,12 @@ function renderTicketDetail(data, fallbackId) {
       </section>`
     : "";
 
+  // 动作区（扫尾批 1 A1）：详情与行内共用一套按钮；开关随本页响应下发。
+  const actionButtons = ticketActionButtons(
+    ticket,
+    data.cancelEnabled === true || state.ticketsCancelEnabled,
+  );
+
   el.tasksDetail.innerHTML = `
     <div class="td-card"${ticket.status === "needs_you" ? ' data-attn="1"' : ""}>
       <div class="td-head">
@@ -1759,6 +1791,7 @@ function renderTicketDetail(data, fallbackId) {
       ${total > 0 ? `<div class="tk-bar"><i style="width:${percent}%"></i></div>` : ""}
       ${error ? `<p class="td-note" data-tone="${ticket.status === "failed" || ticket.status === "aborted" ? "fail" : "ask"}">${esc(error)}</p>` : ""}
     </div>
+    ${actionButtons ? `<div class="td-actions">${actionButtons}</div>` : ""}
     <section class="td-section">
       <h3>任务<span>${passed}/${total}</span></h3>
       <ul class="td-tasks">${taskRows}</ul>
@@ -1768,6 +1801,62 @@ function renderTicketDetail(data, fallbackId) {
     ${deadLetterRows}
     ${messageRows}
   `;
+}
+
+/* ── 取消 / 重试（扫尾批 1 A1）─────────────────────────────
+ * 作废 = harness 侧不再汇报、不写回对话；执行端可能继续跑完、产物照常落盘。
+ * 取消不可逆所以走确认弹窗；重试直接调端点。操作后本地立即置态 + 刷新列表。 */
+async function performTicketAction(ticketId, action) {
+  try {
+    const response = await request(`/api/v1/tickets/${encodeURIComponent(ticketId)}/${action}`, {
+      method: "POST",
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      toast(data?.message || `没成功：HTTP ${response.status}`);
+      return false;
+    }
+    const ticket = state.tickets.find((item) => item.id === ticketId);
+    if (ticket && action === "cancel") {
+      ticket.canceled = true;
+      ticket.status = "canceled";
+    }
+    toast(action === "cancel" ? "已作废" : "已重派新单");
+    await loadTickets({ force: true, silent: true, render: false });
+    if (currentRoute() === "tasks") {
+      if (currentTicketId()) void showTicketDetail(currentTicketId());
+      else renderBoard();
+    }
+    return true;
+  } catch (error) {
+    if (error.message !== "forbidden") toast(`没成功：${error.message}`);
+    return false;
+  }
+}
+
+function confirmCancelTicket(ticketId) {
+  openModal("作废这张任务单", (body) => {
+    body.innerHTML = `
+      <p class="modal-desc">作废后，执行端可能继续跑完、产物照常落盘，但它不再汇报、也不会把结果写回对话。此操作不可逆。</p>
+      <p class="modal-hint" id="tk-cancel-hint"></p>
+      <div class="modal-actions">
+        <button class="ghost" type="button" data-modal-cancel>暂不作废</button>
+        <button class="modal-danger" type="button" id="tk-cancel-confirm">确认作废</button>
+      </div>`;
+    const hint = body.querySelector("#tk-cancel-hint");
+    const confirm = body.querySelector("#tk-cancel-confirm");
+    body.querySelector("[data-modal-cancel]")?.addEventListener("click", closeModal);
+    confirm?.addEventListener("click", async () => {
+      if (confirm.disabled) return;
+      confirm.disabled = true;
+      const ok = await performTicketAction(ticketId, "cancel");
+      if (ok) closeModal();
+      else {
+        setModalHint(hint, "作废没成功，稍后再试一次");
+        confirm.disabled = false;
+      }
+    });
+  });
 }
 
 /* ── 任务中心自动更新（2026-11-04） ────────────────────────
@@ -1904,6 +1993,19 @@ el.tasksSort.addEventListener("change", () => {
  * 子单行是 <a>，自己的 href 会导航；派活行是 div[role=button]，键盘行为在下面补。
  */
 el.tasksBody.addEventListener("click", (event) => {
+  // 取消/重试按钮（扫尾批 1 A1）：行根是 div[role=button]，按钮必须先拦下，
+  // 否则一点就顺带跳进详情页。真实 <button> 自带键盘语义，不用再补 keydown。
+  const actionButton = event.target.closest("[data-ticket-action]");
+  if (actionButton) {
+    event.stopPropagation();
+    const ticketId = actionButton.dataset.ticket || "";
+    const action = actionButton.dataset.ticketAction;
+    if (!ticketId) return;
+    if (action === "cancel") confirmCancelTicket(ticketId);
+    else if (action === "retry") void performTicketAction(ticketId, "retry");
+    return;
+  }
+
   const head = event.target.closest(".tk-conv-head, .tk-arch-conv");
   if (head) {
     const conversationId = head.dataset.conv || "";
@@ -8048,6 +8150,15 @@ el.composer.addEventListener("submit", (event) => {
   steerNextSubmit = false;
   const text = el.input.value.trim();
   if (!text) return;
+  // 手动压缩斜杠命令（扫尾批 1 B1）：只认 /compact 一个，刻意不做通用命令系统。
+  // 命中后不作为消息发送、不进历史；剩余文字当作 instructions，wait=1 等结果。
+  const compactMatch = /^\/compact\b/i.exec(text);
+  if (compactMatch) {
+    el.input.value = "";
+    resize();
+    void runCompactCommand(text.slice(compactMatch[0].length).trim());
+    return;
+  }
   el.input.value = "";
   resize();
   // 忙时两条路（2026-11-07 消息即引导）：
@@ -8066,6 +8177,33 @@ el.composer.addEventListener("submit", (event) => {
   }
   void send(text);
 });
+
+/** /compact（扫尾批 1 B1）：调手动压缩端点，等结果后用气泡（toast）提示。 */
+async function runCompactCommand(instructions) {
+  const conversationId = state.conversationId;
+  if (!conversationId) {
+    toast("先打开一条对话再压缩上下文");
+    return;
+  }
+  try {
+    const response = await request(
+      `/api/v1/agent/chat/${encodeURIComponent(conversationId)}/compact?wait=1`,
+      { method: "POST", body: JSON.stringify({ instructions: instructions || undefined }) },
+    );
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      toast(
+        data?.reason === "llm_not_configured"
+          ? "还没配置模型，压缩不可用"
+          : data?.message || `压缩没成功：HTTP ${response.status}`,
+      );
+      return;
+    }
+    toast(data.waited === false ? "压缩已受理，仍在进行中" : "上下文已压缩");
+  } catch (error) {
+    if (error.message !== "forbidden") toast(`压缩没成功：${error.message}`);
+  }
+}
 
 el.input.addEventListener("input", () => {
   resize();
@@ -9210,7 +9348,8 @@ async function loadProjectsSettings() {
   try {
     const [workspaceResponse, projectsResponse, proposalsResponse] = await Promise.all([
       request("/api/v1/workspaces", { cache: "no-store" }),
-      request("/api/v1/projects", { cache: "no-store" }),
+      // 归档折叠区要把 archived 的一并读回来（扫尾批 1 A4）；默认列表已滤掉它们。
+      request("/api/v1/projects?includeArchived=1", { cache: "no-store" }),
       request("/api/v1/projects/proposals?status=pending", { cache: "no-store" }),
     ]);
     const workspaceData = await workspaceResponse.json();
@@ -9306,41 +9445,190 @@ function renderWorkspaceCard(workspace) {
   });
 }
 
+/** 一张项目卡（扫尾批 1 A4）：行内改名 / 归档或恢复 / 删除。 */
+function projectCardMarkup(workspace, project) {
+  const relativePath = relativeProjectPath(workspace?.rootPath, project.rootPath);
+  // 状态点优先级：目录丢失（黄）> 工作区外（灰）> 在（绿）
+  const dot = project.exists === false ? "warn" : project.insideWorkspace === false ? "idle" : "ok";
+  const archived = Boolean(project.archived);
+  const badges = [
+    `<span class="pill-tag">${project.vcs === "git" ? "git" : "无版本控制"}</span>`,
+    project.exists === false
+      ? '<span class="pill-tag warn">目录丢失</span>'
+      : '<span class="pill-tag ok">在</span>',
+    archived ? '<span class="pill-tag">已归档</span>' : "",
+    project.insideWorkspace === false ? '<span class="pill-tag">工作区外</span>' : "",
+  ]
+    .filter(Boolean)
+    .join("");
+  const id = attr(project.id);
+  return `<div class="proj-card" data-project-id="${id}">
+    <i class="status-dot ${dot}" aria-hidden="true"></i>
+    <div class="proj-card-main">
+      <div class="proj-card-title">${esc(project.name)}</div>
+      <div class="proj-card-path">${esc(relativePath)}</div>
+      <div class="proj-card-tags">${badges}</div>
+    </div>
+    <div class="proj-card-actions">
+      <button class="ghost" type="button" data-project-action="rename" data-project-id="${id}" data-project-name="${attr(project.name)}">改名</button>
+      <button class="ghost" type="button" data-project-action="${archived ? "unarchive" : "archive"}" data-project-id="${id}">${archived ? "恢复" : "归档"}</button>
+      <button class="ghost" type="button" data-project-action="delete" data-project-id="${id}" data-project-name="${attr(project.name)}">删除</button>
+    </div>
+  </div>`;
+}
+
 function renderProjectList(workspace, projects) {
   const box = document.getElementById("project-list");
   if (!box) return;
-  if (!projects.length) {
-    box.innerHTML = `<div class="set-empty">
+  const active = projects.filter((project) => !project.archived);
+  const archived = projects.filter((project) => project.archived);
+  const empty = `<div class="set-empty">
       <div class="set-card-title">还没有登记项目</div>
       <div class="set-hint">确认一条新建请求后，项目会出现在这里；派活时也从这里选。</div>
     </div>`;
-    return;
+  // 归档折叠区：用原生 details 收合，默认收起；空的就不摆这一节。
+  const archivedSection = archived.length
+    ? `<details class="proj-archived">
+        <summary>已归档（${archived.length}）</summary>
+        <div class="proj-archived-list">${archived.map((project) => projectCardMarkup(workspace, project)).join("")}</div>
+      </details>`
+    : "";
+  box.innerHTML = `${active.length ? active.map((project) => projectCardMarkup(workspace, project)).join("") : empty}${archivedSection}`;
+
+  // 每次 innerHTML 重建后旧按钮连同监听器一起没了，这里重新挂即可（同 proposal 列表写法）。
+  for (const button of box.querySelectorAll("[data-project-action]")) {
+    button.addEventListener("click", () => {
+      const id = button.dataset.projectId || "";
+      const name = button.dataset.projectName || "";
+      switch (button.dataset.projectAction) {
+        case "rename":
+          openRenameProjectModal(id, name);
+          break;
+        case "archive":
+        case "unarchive":
+          void doProjectAction(id, button.dataset.projectAction);
+          break;
+        case "delete":
+          confirmDeleteProject(id, name);
+          break;
+      }
+    });
   }
-  box.innerHTML = projects
-    .map((project) => {
-      const relativePath = relativeProjectPath(workspace?.rootPath, project.rootPath);
-      // 状态点优先级：目录丢失（黄）> 工作区外（灰）> 在（绿）
-      const dot = project.exists === false ? "warn" : project.insideWorkspace === false ? "idle" : "ok";
-      const badges = [
-        `<span class="pill-tag">${project.vcs === "git" ? "git" : "无版本控制"}</span>`,
-        project.exists === false
-          ? '<span class="pill-tag warn">目录丢失</span>'
-          : '<span class="pill-tag ok">在</span>',
-        project.archived ? '<span class="pill-tag">已归档</span>' : "",
-        project.insideWorkspace === false ? '<span class="pill-tag">工作区外</span>' : "",
-      ]
-        .filter(Boolean)
-        .join("");
-      return `<div class="proj-card">
-        <i class="status-dot ${dot}" aria-hidden="true"></i>
-        <div class="proj-card-main">
-          <div class="proj-card-title">${esc(project.name)}</div>
-          <div class="proj-card-path">${esc(relativePath)}</div>
-          <div class="proj-card-tags">${badges}</div>
-        </div>
+}
+
+/** 归档 / 恢复：纯增量端点，操作后重载项目设置页。 */
+async function doProjectAction(id, action) {
+  try {
+    const response = await request(`/api/v1/projects/${encodeURIComponent(id)}/${action}`, {
+      method: "POST",
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      toast(projectErrorText(data, response.status));
+      return;
+    }
+    toast(action === "archive" ? "已归档" : "已恢复");
+    await loadProjectsSettings();
+  } catch (error) {
+    if (error.message !== "forbidden") toast(`没成功：${error.message}`);
+  }
+}
+
+/** 改名弹窗（与既有「新建项目待确认」同风格）：只改登记名，不动磁盘。 */
+function openRenameProjectModal(id, name) {
+  openModal("项目改名", (body) => {
+    body.innerHTML = `
+      <p class="modal-desc">只改登记里的名字，不改动磁盘目录。</p>
+      <input class="modal-input" id="proj-rename-input" type="text" maxlength="60" value="${attr(name)}" spellcheck="false" />
+      <p class="modal-hint" id="proj-rename-hint"></p>
+      <div class="modal-actions">
+        <button class="ghost" type="button" data-modal-cancel>取消</button>
+        <button class="btn-primary" type="button" id="proj-rename-save">保存</button>
       </div>`;
-    })
-    .join("");
+    const input = body.querySelector("#proj-rename-input");
+    const hint = body.querySelector("#proj-rename-hint");
+    const save = body.querySelector("#proj-rename-save");
+    body.querySelector("[data-modal-cancel]")?.addEventListener("click", closeModal);
+    input?.addEventListener("input", () => clearModalHint(hint));
+    input?.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        save?.click();
+      }
+    });
+    save?.addEventListener("click", async () => {
+      if (save.disabled) return;
+      const next = String(input.value || "").trim();
+      if (!next) {
+        setModalHint(hint, "项目名不能为空");
+        return;
+      }
+      save.disabled = true;
+      try {
+        const response = await request(`/api/v1/projects/${encodeURIComponent(id)}`, {
+          method: "PATCH",
+          body: JSON.stringify({ name: next }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          setModalHint(hint, projectErrorText(data, response.status));
+          save.disabled = false;
+          return;
+        }
+        closeModal();
+        toast("已改名");
+        await loadProjectsSettings();
+      } catch (error) {
+        if (error.message === "forbidden") {
+          closeModal();
+          return;
+        }
+        setModalHint(hint, `没改成功：${error.message}`);
+        save.disabled = false;
+      }
+    });
+  });
+}
+
+/** 删除确认：文案明说「只删登记，不删磁盘目录」；有在飞单时服务端 400 会回说明。 */
+function confirmDeleteProject(id, name) {
+  openModal("删除项目登记", (body) => {
+    body.innerHTML = `
+      <p class="modal-desc">删除「${esc(name)}」的登记。<b>只删登记，不删磁盘目录</b>——文件都还在。此操作不能撤销，历史任务单保留但项目字段会变成悬空引用。</p>
+      <p class="modal-hint" id="proj-del-hint"></p>
+      <div class="modal-actions">
+        <button class="ghost" type="button" data-modal-cancel>取消</button>
+        <button class="modal-danger" type="button" id="proj-del-confirm">删除登记</button>
+      </div>`;
+    const hint = body.querySelector("#proj-del-hint");
+    const confirm = body.querySelector("#proj-del-confirm");
+    body.querySelector("[data-modal-cancel]")?.addEventListener("click", closeModal);
+    confirm?.addEventListener("click", async () => {
+      if (confirm.disabled) return;
+      confirm.disabled = true;
+      try {
+        const response = await request(`/api/v1/projects/${encodeURIComponent(id)}`, {
+          method: "DELETE",
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          setModalHint(hint, projectErrorText(data, response.status));
+          confirm.disabled = false;
+          return;
+        }
+        closeModal();
+        toast("已删除项目登记（磁盘目录保留）");
+        await loadProjectsSettings();
+      } catch (error) {
+        if (error.message === "forbidden") {
+          closeModal();
+          return;
+        }
+        setModalHint(hint, `没删成：${error.message}`);
+        confirm.disabled = false;
+      }
+    });
+  });
 }
 
 function renderProposalList(proposals) {
@@ -10785,7 +11073,7 @@ async function initSearchCard() {
 
   // 进页 GET 一次：已配置 / 未配置；404 = 老服务端，退回 env 形态
   try {
-    const response = await request("/api/v1/agent/search", { cache: "no-store" });
+    const response = await request("/api/v1/agent/search-provider", { cache: "no-store" });
     if (response.status === 404) {
       applySearchEnvMode(host);
       return;
@@ -10814,7 +11102,7 @@ async function initSearchCard() {
     if (test) test.disabled = true;
     setSearchHint(host, "保存中…", false);
     try {
-      const response = await request("/api/v1/agent/search", {
+      const response = await request("/api/v1/agent/search-provider", {
         method: "PUT",
         body: JSON.stringify({ apiKey }),
       });
@@ -10854,7 +11142,7 @@ async function initSearchCard() {
     if (save) save.disabled = true;
     setSearchHint(host, "测试中…", false);
     try {
-      const response = await request("/api/v1/agent/search/test", { method: "POST" });
+      const response = await request("/api/v1/agent/search-provider/test", { method: "POST" });
       const data = await response.json().catch(() => ({}));
       if (response.ok && data.ok === true) {
         setSearchHint(host, data.message || `搜索通了，返回 ${data.hits ?? 0} 条`, false);

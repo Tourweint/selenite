@@ -26,6 +26,14 @@ export interface SearchFilter {
 	limit?: number;
 }
 
+/** 封顶修剪的可选保护项（2026-11-07）。 */
+export interface PruneOptions {
+	/** 这些 kind 一律不删（偏好是稳定属性，换个会话也该在）。 */
+	protectKinds?: MemoryKind[];
+	/** 被别的记录 `supersededBy` 指向的行不删，避免留下悬空引用。 */
+	protectReferenced?: boolean;
+}
+
 export interface MemoryStore {
 	put(record: MemoryRecord): void;
 	get(id: string): MemoryRecord | undefined;
@@ -40,6 +48,16 @@ export interface MemoryStore {
 	 */
 	remove(id: string): boolean;
 	count(scope?: string): number;
+	/** 某个 scope 的条数（2026-11-07 封顶修剪）。 */
+	countByScope(scope: string): number;
+	/** 库里出现过的所有 scope（按前缀挑要修剪的作用域用）。 */
+	listScopes(): string[];
+	/**
+	 * 把某个 scope 修剪到至多 `keep` 条：按 `created_at` 最旧优先删，
+	 * 保护 `protectKinds` 与被 `supersededBy` 引用的行；`global` 拒绝修剪（抛错）。
+	 * 返回实际删除条数（只给调用方记数用，不含任何正文）。
+	 */
+	pruneOldest(scope: string, keep: number, options?: PruneOptions): number;
 	/** 是否真的能做文本检索（2026-11-04 批次三）；内存实现恒 false。 */
 	ftsAvailable(): boolean;
 	close(): void;
@@ -338,6 +356,63 @@ export class SqliteMemoryStore implements MemoryStore {
 		return Number(row.n);
 	}
 
+	countByScope(scope: string): number {
+		const row = this.db
+			.prepare("SELECT COUNT(*) AS n FROM memories WHERE scope = ?")
+			.get(scope) as { n: number };
+		return Number(row.n);
+	}
+
+	listScopes(): string[] {
+		const rows = this.db.prepare("SELECT DISTINCT scope FROM memories").all() as Array<
+			Record<string, unknown>
+		>;
+		return rows.map((row) => String(row.scope));
+	}
+
+	/**
+	 * 封顶修剪（2026-11-07）：一条 DELETE 子查询把最旧的、可删的行一次删掉。
+	 *
+	 * 两条 `DELETE` 共用同一个子查询（确定性 ORDER BY created_at, rowid）：先清 FTS 镜像、
+	 * 再删正表，中间不动 `memories`，所以两次选中的行完全一致。全程同步、无 await，
+	 * 单进程里不会被别的写入插进来。
+	 */
+	pruneOldest(scope: string, keep: number, options: PruneOptions = {}): number {
+		if (scope === "global") {
+			throw new Error("global scope 不做自动修剪：偏好与长期事实永不淘汰");
+		}
+		const cap = Math.max(0, Math.floor(keep));
+		const excess = this.countByScope(scope) - cap;
+		if (excess <= 0) return 0;
+
+		const conditions: string[] = ["scope = ?"];
+		const params: (string | number)[] = [scope];
+		const protectKinds = options.protectKinds ?? [];
+		if (protectKinds.length) {
+			conditions.push(`kind NOT IN (${protectKinds.map(() => "?").join(", ")})`);
+			params.push(...protectKinds);
+		}
+		if (options.protectReferenced) {
+			conditions.push(
+				"id NOT IN (SELECT superseded_by FROM memories WHERE superseded_by IS NOT NULL)",
+			);
+		}
+		const subquery =
+			`SELECT id FROM memories WHERE ${conditions.join(" AND ")}` +
+			" ORDER BY created_at ASC, rowid ASC LIMIT ?";
+		const allParams = [...params, excess];
+
+		if (this.ftsEnabled) {
+			this.db
+				.prepare(`DELETE FROM memory_fts WHERE content_id IN (${subquery})`)
+				.run(...allParams);
+		}
+		const result = this.db
+			.prepare(`DELETE FROM memories WHERE id IN (${subquery})`)
+			.run(...allParams);
+		return Number(result.changes);
+	}
+
 	remove(id: string): boolean {
 		const existing = this.get(id);
 		if (!existing) return false;
@@ -397,6 +472,38 @@ export class InMemoryStore implements MemoryStore {
 	count(scope?: string): number {
 		if (!scope) return this.rows.size;
 		return [...this.rows.values()].filter((r) => r.scope === scope).length;
+	}
+
+	countByScope(scope: string): number {
+		return [...this.rows.values()].filter((r) => r.scope === scope).length;
+	}
+
+	listScopes(): string[] {
+		return [...new Set([...this.rows.values()].map((r) => r.scope))];
+	}
+
+	pruneOldest(scope: string, keep: number, options: PruneOptions = {}): number {
+		if (scope === "global") {
+			throw new Error("global scope 不做自动修剪：偏好与长期事实永不淘汰");
+		}
+		const cap = Math.max(0, Math.floor(keep));
+		const inScope = [...this.rows.values()].filter((r) => r.scope === scope);
+		const excess = inScope.length - cap;
+		if (excess <= 0) return 0;
+
+		const referenced = new Set<string>();
+		if (options.protectReferenced) {
+			for (const row of this.rows.values()) {
+				if (row.supersededBy) referenced.add(row.supersededBy);
+			}
+		}
+		const protectKinds = new Set(options.protectKinds ?? []);
+		const deletable = inScope
+			.filter((r) => !protectKinds.has(r.kind) && !referenced.has(r.id))
+			.sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0));
+		const victims = deletable.slice(0, excess);
+		for (const victim of victims) this.rows.delete(victim.id);
+		return victims.length;
 	}
 
 	close(): void {

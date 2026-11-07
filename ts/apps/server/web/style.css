@@ -3592,6 +3592,24 @@ select.cs-input:disabled { color: var(--text-3); cursor: default; }
 .proj-card-actions { flex: none; display: flex; align-items: center; gap: 8px; }
 .proj-card .status-dot { margin-top: 5px; }
 
+/* 扫尾批 1：任务取消/重试行内按钮、详情动作区、项目行内动作与归档折叠 */
+.tk-row-actions { display: flex; gap: 6px; margin-top: 8px; }
+.tk-act {
+  appearance: none; cursor: pointer;
+  padding: 3px 10px; font-size: 11.5px; line-height: 1.4;
+  border: 1px solid var(--composer-border); border-radius: 999px;
+  background: var(--surface); color: var(--text-2);
+  transition: border-color .15s ease, color .15s ease;
+}
+.tk-act:hover { border-color: var(--accent-line); color: var(--text); }
+.tk-act:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 2px; }
+.td-actions { display: flex; gap: 8px; margin: 12px 0; }
+.td-actions .tk-act { padding: 5px 14px; font-size: 12.5px; }
+.proj-card-actions .ghost { padding: 4px 10px; font-size: 11.5px; }
+.proj-archived { margin-top: 10px; border-top: 1px solid var(--composer-border); padding-top: 10px; }
+.proj-archived > summary { cursor: pointer; font-size: 12.5px; color: var(--text-2); padding: 4px 2px; }
+.proj-archived-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+
 /* 状态点：在=绿 / 目录丢失=黄 / 工作区外=灰（与服务页同款） */
 .status-dot {
   flex: none; width: 8px; height: 8px;

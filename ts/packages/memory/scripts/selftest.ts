@@ -479,4 +479,98 @@ try {
 	console.log("✓ 偏好抽取 / 注入分组 / 取代删除 / 列表分组 全部通过");
 }
 
+// ── 11. 会话记忆封顶修剪（2026-11-07，扫尾批 1 §四）────────
+// 策略：session / partner: 前缀的 scope 按 cap 封顶，最旧优先删；
+// 保护 preference 与被 supersededBy 引用的行；global 永不自动删；cap=0 一行回滚。
+// 两种 store 都跑一遍，保证内存夹具与生产 SQLite 行为一致。
+{
+  const base = Date.now() - 300_000;
+  const at = (index: number) => new Date(base + index * 1000).toISOString();
+
+  function seed(
+    store: InMemoryStore | SqliteMemoryStore,
+    scope: string,
+    count: number,
+    overrides: (index: number) => Partial<MemoryRecord> = () => ({}),
+  ): string[] {
+    const ids: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const id = `${scope}-${index}`;
+      ids.push(id);
+      store.put(seedRecord(id, scope, `第 ${index} 条记录`, at(index), overrides(index)));
+    }
+    return ids;
+  }
+
+  function suite(name: string, make: () => InMemoryStore | SqliteMemoryStore): void {
+    const store = make();
+    const engine = new MemoryEngine({ store });
+
+    // 11.1 超限删旧：10 条剪到 4，删掉的必须是最旧 6 条
+    const old = seed(store, "session:prune-old", 10);
+    const removed = store.pruneOldest("session:prune-old", 4, {
+      protectKinds: ["preference"],
+      protectReferenced: true,
+    });
+    assert(removed === 6, `超限应删 6 条，实际 ${removed}`);
+    assert(store.countByScope("session:prune-old") === 4, `剪完应剩 4 条，实际 ${store.countByScope("session:prune-old")}`);
+    for (let i = 0; i < 6; i += 1) assert(store.get(old[i]) === undefined, `最旧第 ${i} 条应被删`);
+    for (let i = 6; i < 10; i += 1) assert(store.get(old[i]), `较新第 ${i} 条应保留`);
+
+    // 11.2 偏好不删：最旧一条是 preference，必须留下
+    const pref = seed(store, "session:prune-pref", 10, (index) =>
+      index === 0 ? { kind: "preference" } : {},
+    );
+    store.pruneOldest("session:prune-pref", 4, {
+      protectKinds: ["preference"],
+      protectReferenced: true,
+    });
+    assert(store.get(pref[0]) !== undefined, "preference 不能被修剪");
+    assert(store.countByScope("session:prune-pref") === 4, "偏好占名额后仍剪到 4 条");
+
+    // 11.3 被引用不删：最新一条 supersededBy 指向最旧一条 → 最旧那条要留
+    const ref = seed(store, "session:prune-ref", 10);
+    store.patch(ref[9], { supersededBy: ref[0] });
+    store.pruneOldest("session:prune-ref", 4, {
+      protectKinds: ["preference"],
+      protectReferenced: true,
+    });
+    assert(store.get(ref[0]) !== undefined, "被 supersededBy 引用的行不能被删");
+
+    // 11.4 cap=0 不动（engine 层一行回滚）
+    const before = store.count();
+    assert(engine.pruneSessionScopes(0) === 0, "cap=0 应返回 0（完全不修剪）");
+    assert(store.count() === before, "cap=0 后总条数不变");
+
+    // 11.5 global 不动：store 拒绝修剪（抛错）+ engine 修剪时 global 一条不删
+    const globalIds = seed(store, "global", 3);
+    let globalRejected = false;
+    try {
+      store.pruneOldest("global", 4, { protectKinds: ["preference"] });
+    } catch {
+      globalRejected = true;
+    }
+    assert(globalRejected, "pruneOldest('global') 应拒绝修剪（断言抛错）");
+    engine.pruneSessionScopes(4);
+    assert(store.countByScope("global") === 3, "global 三条一条不删");
+    for (const id of globalIds) assert(store.get(id), "global 记录仍在");
+
+    // 11.6 engine 装配确实修剪 session / partner: 前缀 scope
+    const wired = seed(store, "session:prune-engine", 9);
+    const enginePruned = engine.pruneSessionScopes(4);
+    assert(enginePruned >= 5, `engine 应至少删 5 条，实际 ${enginePruned}`);
+    assert(store.countByScope("session:prune-engine") === 4, "engine 把 9 条剪到 4");
+    assert(store.get(wired[0]) === undefined, "engine 同样按最旧优先");
+    seed(store, "partner:abc", 7);
+    engine.pruneSessionScopes(4);
+    assert(store.countByScope("partner:abc") === 4, "partner: 前缀 scope 也纳入修剪");
+
+    store.close();
+    console.log(`✓ 会话记忆封顶修剪（${name}）：删旧 / 保偏好 / 保被引用 / cap=0 不动 / global 不动`);
+  }
+
+  suite("InMemoryStore", () => new InMemoryStore());
+  suite("SqliteMemoryStore", () => new SqliteMemoryStore(":memory:"));
+}
+
 console.log("✓ 记忆框架自测通过");

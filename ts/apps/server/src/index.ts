@@ -38,6 +38,8 @@ import {
   sayInChat,
   sayInConversation,
   seedChiefPartner,
+  startChatCompaction,
+  waitChatCompaction,
   searchTranscripts,
   setPolicy,
   stopChat,
@@ -71,6 +73,7 @@ import { mountMemoryApi } from "./memory-api.ts";
 import { mountWeb } from "./web.ts";
 import { mountWorkerShell } from "./worker-shell.ts";
 import { syncDiaryToMemory } from "./memory-ingest.ts";
+import { pruneSessionMemory } from "./memory-prune.ts";
 import { RelayClient } from "./relay-client.ts";
 import { RelayChannelHub, type RelayChannelDeps } from "./relay-channels.ts";
 import {
@@ -462,6 +465,30 @@ app.post("/api/v1/agent/chat/:conversationId/mode", async (c) => {
   return c.json({ ok: true, thinking: level });
 });
 
+/**
+ * 手动压缩（扫尾批 1 B1，方案 §二）：`POST .../agent/chat/:conversationId/compact`。
+ * body `{ "instructions"?: string }`；受理即回 `{ok:true,taskId}`，压缩在后台做。
+ * `?wait=1` 时再等 `harness.waitForTask` 至多 `AGENT_COMPACT_WAIT_MS`（默认 60000）：
+ * 完成回 `{ok:true,compacted:true}`；超时回 `{ok:true,waited:false,taskId}`（受理仍有效）。
+ * 会话不存在 404、模型未配置 503，与 `/mode` 同口径；压缩事件内核本就发，SSE 透传不动。
+ */
+app.post("/api/v1/agent/chat/:conversationId/compact", async (c) => {
+  if (!readLlmConfig()) return c.json({ ok: false, reason: "llm_not_configured" }, 503);
+  const body = (await c.req.json().catch(() => null)) as { instructions?: unknown } | null;
+  const instructions = typeof body?.instructions === "string" ? body.instructions : undefined;
+  const chat = await openChat(c.req.param("conversationId"));
+  if (!chat) return c.json({ error: "unknown_conversation" }, 404);
+  const taskId = await startChatCompaction(chat, instructions);
+  if (c.req.query("wait") === "1") {
+    const raw = Number(process.env.AGENT_COMPACT_WAIT_MS ?? 60000);
+    const waitMs = Number.isFinite(raw) && raw > 0 ? raw : 60000;
+    const compacted = await waitChatCompaction(taskId, waitMs);
+    if (compacted) return c.json({ ok: true, compacted: true });
+    return c.json({ ok: true, waited: false, taskId });
+  }
+  return c.json({ ok: true, taskId });
+});
+
 /** 新体 `{thinking}` 优先；没有就按旧体 `{mode}` 映射（2026-11-04 思考档位 D4） */
 function parseThinkingLevel(body: { thinking?: unknown; mode?: unknown } | null): ThinkingLevel | null {
   if (typeof body?.thinking === "string") {
@@ -720,6 +747,9 @@ app.post("/api/v1/agent/chat", async (c) => {
                   `[chat ${id}] memory +${result.added.length} ~${result.reinforced.length}`,
                 );
               }
+              // 写入路径末尾按 MEMORY_SESSION_CAP 修剪会话/伙伴作用域；只记条数（D8）。
+              const pruned = pruneSessionMemory(memoryEngine);
+              if (pruned > 0) console.log(`[chat ${id}] memory prune -${pruned}`);
             })
             .catch((error: unknown) => {
               const detail = error instanceof Error ? error.message : String(error);

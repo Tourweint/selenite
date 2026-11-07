@@ -194,6 +194,27 @@ export class MemoryEngine {
 		return { total: all.length, byScope };
 	}
 
+	/**
+	 * 会话/伙伴作用域封顶修剪（2026-11-07）。
+	 *
+	 * 只认 `session:` / `partner:` 前缀的 scope：`global` 永不自动删（store 层也会拒），
+	 * 事实/经历按最旧优先淘汰，偏好与被 `supersededBy` 引用的行一律保留。
+	 * `cap <= 0`（含 `MEMORY_SESSION_CAP=0`）直接不动——一行回滚。
+	 * 返回删除总条数，供调用方只记条数、不记正文（D8）。
+	 */
+	pruneSessionScopes(cap: number): number {
+		if (!Number.isFinite(cap) || cap <= 0) return 0;
+		let pruned = 0;
+		for (const scope of this.store.listScopes()) {
+			if (!scope.startsWith("session:") && !scope.startsWith("partner:")) continue;
+			pruned += this.store.pruneOldest(scope, cap, {
+				protectKinds: ["preference"],
+				protectReferenced: true,
+			});
+		}
+		return pruned;
+	}
+
 	/** 删一条（2026-11-06，设置页）。返回是否真的删掉了。 */
 	forget(id: string): boolean {
 		return this.store.remove(id);

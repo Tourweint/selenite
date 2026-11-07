@@ -50,6 +50,7 @@ import {
 	DelegationReceipts,
 	requestFingerprint,
 } from "./delegation-receipts.ts";
+import { pruneSessionMemory } from "./memory-prune.ts";
 import {
 	ProjectError,
 	resolveDelegationProject,
@@ -266,6 +267,9 @@ export function createTools(deps: ToolDeps) {
 				veracity: "stated",
 				source: "user",
 			});
+			// 写入路径末尾同样按 cap 修剪（只记条数，见 memory-prune.ts）。
+			const pruned = pruneSessionMemory(engine);
+			if (pruned > 0) console.log(`[memory] 会话记忆修剪 -${pruned} 条`);
 			return text(`已记住：${record.content}`);
 		},
 	});
@@ -642,6 +646,9 @@ export function createTools(deps: ToolDeps) {
 					emit: emitDelegation,
 					report: deps.reportDelegation,
 					autoReport,
+					// 作废位（扫尾批 1 A1）：后台 settle / 进度帧现查一次，取消后立刻静默。
+					// 用可选调用兜住单测注入的 receipts 替身（它可能没有这个方法）。
+					isCanceled: (id) => receiptsOf(deps).isCanceled?.(id) ?? false,
 					// 只有本机 delegate 按 domain 反查执事身份；远程锚点会话不装配这个缝。
 					identityHitFor: localIdentityHit,
 					log: (line) => console.warn(line),

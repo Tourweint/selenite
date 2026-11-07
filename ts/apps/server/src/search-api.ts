@@ -16,7 +16,7 @@ import { searchConfigured, searchKeyEnv, webSearch } from "./search.ts";
 
 export function mountSearch(app: Hono): void {
 	// ── 查状态 ───────────────────────────────────────────
-	app.get("/api/v1/agent/search", (c) => {
+	app.get("/api/v1/agent/search-provider", (c) => {
 		return c.json({
 			ok: true,
 			keyEnv: searchKeyEnv(),
@@ -25,7 +25,7 @@ export function mountSearch(app: Hono): void {
 	});
 
 	// ── 直填（写密钥文件 + 热注入 env）────────────────────
-	app.put("/api/v1/agent/search", async (c) => {
+	app.put("/api/v1/agent/search-provider", async (c) => {
 		// 回滚开关与供应商密钥直填同一口径（PROVIDER_SECRETS=false → 400 secrets_disabled）
 		if (!providerSecretsEnabled()) {
 			return c.json(
@@ -59,7 +59,7 @@ export function mountSearch(app: Hono): void {
 	});
 
 	// ── 删除（界面不提供入口；留着给探针 / 运维）──────────
-	app.delete("/api/v1/agent/search", (c) => {
+	app.delete("/api/v1/agent/search-provider", (c) => {
 		const keyEnv = searchKeyEnv();
 		try {
 			removeProviderKeys([keyEnv]);
@@ -77,7 +77,7 @@ export function mountSearch(app: Hono): void {
 	});
 
 	// ── 连接测试：真调一次搜索 ───────────────────────────
-	app.post("/api/v1/agent/search/test", async (c) => {
+	app.post("/api/v1/agent/search-provider/test", async (c) => {
 		const result = await webSearch("连接测试", 1);
 		if (result.ok) {
 			console.log(`[search] 测试成功 hits=${result.hits.length}`);

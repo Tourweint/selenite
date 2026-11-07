@@ -1,12 +1,19 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { Hono } from "hono";
+import { runChancellor } from "../../../../../chancellor/src/index.ts";
 import { Store } from "../../../../../chancellor/src/store.ts";
 import type { TicketRow } from "../../../../../chancellor/src/store.ts";
 import type { Ticket } from "../../../../../chancellor/src/types.ts";
 import { listManagers } from "../../../../../chancellor/src/manager/registry.ts";
-import { chancellorWorkRoot } from "./delegation.ts";
-import { DelegationReceipts } from "./delegation-receipts.ts";
+import type { ProjectRef } from "./projects.ts";
+import {
+	chancellorWorkRoot,
+	emitDelegation,
+	startDelegation,
+	type DelegationRuntime,
+} from "./delegation.ts";
+import { DelegationReceipts, requestFingerprint } from "./delegation-receipts.ts";
 import { partnersStore } from "./partners.ts";
 import { DelegationMessages } from "./delegation-messages.ts";
 
@@ -22,6 +29,43 @@ const TERMINAL_TICKET_STATUS = new Set([
 	"idle",
 	"aborted",
 ]);
+
+/**
+ * 取消/重试回滚开关（扫尾批 1 A1）：`DELEGATION_CANCEL=false` 时两个端点一个都不挂（404），
+ * 前端也从列表响应里读到 cancelEnabled=false 而不渲染按钮。缺省开。
+ */
+export function delegationCancelEnabled(): boolean {
+	const raw = (process.env.DELEGATION_CANCEL?.trim() || "true").toLowerCase();
+	return raw !== "false" && raw !== "0";
+}
+
+/** 已终态：取消 400（done/failed/aborted）。needs_you / idle / canceled 仍可作废。 */
+const CANCEL_TERMINAL_STATUSES = new Set(["done", "failed", "aborted"]);
+/** 可重试：failed / aborted；canceled 由作废位单独判（ticket.json 里不会写 canceled）。 */
+const RETRYABLE_STATUSES = new Set(["failed", "aborted"]);
+
+export type ActionStatus = 200 | 400 | 404 | 409;
+export interface TicketActionResult {
+	status: ActionStatus;
+	body: Record<string, unknown>;
+}
+
+/**
+ * 作废位投影（列表行 / 详情共用，抽成纯函数给探针直接断言）：
+ * 已作废 → `canceled:true` + `status:"canceled"` + 原始状态放进 `originStatus`（不丢事实）；
+ * 未作废 → 只叠加 `canceled:false`。
+ */
+export function applyCancelProjection<T extends { status: string }>(
+	view: T,
+	canceled: boolean,
+): T & { canceled: boolean; originStatus?: string } {
+	if (!canceled) return Object.assign({}, view, { canceled: false as const });
+	return Object.assign({}, view, {
+		canceled: true as const,
+		status: "canceled",
+		originStatus: view.status,
+	});
+}
 
 interface TicketLocation {
 	ticket: Ticket;
@@ -89,6 +133,10 @@ interface TicketSummary {
 	conversationTitle: string | null;
 	/** 负责这张单的总管名：ticket.options.domain → partners 表 name。直派/查不到 → null。 */
 	chiefName: string | null;
+	/** 作废位（扫尾批 1 A1）：harness 侧不再搬运这张单的结果。 */
+	canceled: boolean;
+	/** 作废单显示 status="canceled"，原始状态放在这里不丢事实。 */
+	originStatus?: string;
 }
 
 /**
@@ -223,6 +271,7 @@ async function summarizeTickets(
 	loadExternal: () => Promise<Map<number, string>>,
 	loadTitles: (conversationIds: Array<string | null>) => Promise<Map<string, string>>,
 	chiefNameOf: (domain: string | null | undefined) => string | null,
+	canceledIds: Set<string>,
 ): Promise<TicketSummary[]> {
 	const store = new Store(runsDir);
 	try {
@@ -253,12 +302,19 @@ async function summarizeTickets(
 		);
 		// 标题只用本请求出现过的 conversationId 批量查一次（listChats 逐会话 open，不能逐行调）。
 		const titles = await loadTitles(summaries.map((summary) => summary.conversationId));
-		return summaries.map((summary) => ({
-			...summary,
-			conversationTitle: summary.conversationId
-				? titles.get(summary.conversationId) ?? null
-				: null,
-		}));
+		return summaries.map((summary) =>
+			applyCancelProjection(
+				{
+					...summary,
+					conversationTitle: summary.conversationId
+						? titles.get(summary.conversationId) ?? null
+						: null,
+				},
+				// 作废位投影：status 显示成 canceled，原始状态留在 originStatus。
+				// 没作废的单也带 canceled:false（纯增量，老客户端按字段忽略即可）。
+				canceledIds.has(summary.id),
+			),
+		);
 	} catch {
 		return [];
 	} finally {
@@ -276,8 +332,17 @@ function readTicketJson(runsDir: string, ticketId: string): Ticket | null {
 	}
 }
 
-export function mountDelegationApi(app: Hono, opts: { workRoot?: string } = {}): void {
+/** 探针可注入隔离库与假重派运行时；生产不传，走真 chancellor + 真汇报。 */
+export interface DelegationApiOptions {
+	workRoot?: string;
+	store?: DelegationReceipts;
+	retryRuntime?: () => DelegationRuntime;
+}
+
+export function mountDelegationApi(app: Hono, opts: DelegationApiOptions = {}): void {
 	const workRootOf = (): string => path.resolve(opts.workRoot ?? chancellorWorkRoot());
+	// 与只读投影同一个懒建口径：注入了就用注入的，否则用进程内单例。
+	const storeOf = (): DelegationReceipts => opts.store ?? deadLetterStore();
 
 	app.get("/api/v1/domains", (c) => {
 		const workRoot = workRootOf();
@@ -306,10 +371,17 @@ export function mountDelegationApi(app: Hono, opts: { workRoot?: string } = {}):
 		const loadExternal = externalChatIdsLoader();
 		const loadTitles = conversationTitlesLoader(300);
 		const chiefNameOf = chiefNamesLoader();
+		const canceledIds = (() => {
+			try {
+				return storeOf().canceledTicketIds();
+			} catch {
+				return new Set<string>();
+			}
+		})();
 
 		// 顶层 workRoot：不分管的老单（domain = null）
 		rows.push(
-			...(await summarizeTickets(workRoot, null, limit, loadExternal, loadTitles, chiefNameOf)),
+			...(await summarizeTickets(workRoot, null, limit, loadExternal, loadTitles, chiefNameOf, canceledIds)),
 		);
 		for (const entry of listManagers(workRoot)) {
 			const runsDir = entry.meta?.runs_dir;
@@ -322,6 +394,7 @@ export function mountDelegationApi(app: Hono, opts: { workRoot?: string } = {}):
 					loadExternal,
 					loadTitles,
 					chiefNameOf,
+					canceledIds,
 				)),
 			);
 		}
@@ -330,7 +403,12 @@ export function mountDelegationApi(app: Hono, opts: { workRoot?: string } = {}):
 			? rows.filter((row) => row.domain === domainFilter)
 			: rows;
 		filtered.sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1));
-		return c.json({ ok: true, tickets: filtered.slice(0, limit) });
+		return c.json({
+			ok: true,
+			tickets: filtered.slice(0, limit),
+			// 回滚开关下发：前端据此决定渲不渲染取消/重试按钮（开关关时不渲染）。
+			cancelEnabled: delegationCancelEnabled(),
+		});
 	});
 
 	app.get("/api/v1/tickets/:id", async (c) => {
@@ -344,13 +422,23 @@ export function mountDelegationApi(app: Hono, opts: { workRoot?: string } = {}):
 			);
 			const ticketView = { ...found.ticket };
 			delete ticketView.originConversationId;
+			// 作废位投影（扫尾批 1 A1）：详情同样叠加 canceled + status=canceled，
+			// 原始状态放 originStatus，不丢事实。
+			let canceled = false;
+			try {
+				canceled = storeOf().isCanceled(found.ticket.id);
+			} catch {
+				/* 簿记库挂了不挡详情 */
+			}
+			const projected = applyCancelProjection(ticketView, canceled);
 			return c.json({
 				ok: true,
-				ticket: ticketView,
+				ticket: projected,
 				domain: found.domain,
 				conversationId,
 				conversationTitle: conversationId ? titles.get(conversationId) ?? null : null,
 				chiefName: chiefNamesLoader()(found.ticket.options.domain),
+				cancelEnabled: delegationCancelEnabled(),
 				// 派活留言（2026-11-07）：谁在什么时候说了什么。老单没有记录 = 空数组。
 				messages: messagesOf(found.ticket.id),
 				// 路径只给相对项目信息，不把 workRoot 绝对路径下发给客户端。
@@ -377,6 +465,20 @@ export function mountDelegationApi(app: Hono, opts: { workRoot?: string } = {}):
 			found.store.close();
 		}
 	});
+
+	// ── 取消 / 重试（扫尾批 1 A1）────────────────────────────
+	// 回滚开关关着时两个端点一个都不挂（404）；前端由列表的 cancelEnabled 同步不渲染。
+	if (delegationCancelEnabled()) {
+		app.post("/api/v1/tickets/:id/cancel", (c) => {
+			const result = cancelTicketAction(storeOf(), workRootOf(), c.req.param("id"));
+			return c.json(result.body, result.status);
+		});
+		app.post("/api/v1/tickets/:id/retry", (c) => {
+			const runtime = opts.retryRuntime?.() ?? defaultRetryRuntime(storeOf());
+			const result = retryTicketAction(storeOf(), workRootOf(), c.req.param("id"), runtime);
+			return c.json(result.body, result.status);
+		});
+	}
 }
 
 function findTicket(workRoot: string, ticketId: string): TicketLocation | null {
@@ -423,4 +525,185 @@ function ticketStats(runsDir: string): { active: number; total: number } {
 	} finally {
 		store.close();
 	}
+}
+
+// ── 取消 / 重试的动作逻辑（抽成导出函数，探针可直接用假 runner 断言）──────
+
+/**
+ * 原单的宿主会话**内部自增整数**：`startDelegation` / `reportDelegationResult` 都吃这个。
+ * 取值顺序：ticket.json 的 originConversationId（数字）→ 受理回执 → 作废位记录。
+ * 非数字的 originConversationId 是对外 uuid，没法直接换算，只能回退后两条。
+ */
+function internalConversationId(
+	ticket: Ticket,
+	ticketId: string,
+	store: DelegationReceipts,
+): number | null {
+	const raw = ticket.originConversationId;
+	if (raw !== null && raw !== undefined && /^\d+$/.test(String(raw).trim())) {
+		return Number(String(raw).trim());
+	}
+	const receipt = store.lookupByTicket(ticketId);
+	if (receipt?.conversationId !== null && receipt?.conversationId !== undefined) {
+		return receipt.conversationId;
+	}
+	const cancel = store.cancelInfo(ticketId);
+	if (cancel?.conversationId !== null && cancel?.conversationId !== undefined) {
+		return cancel.conversationId;
+	}
+	return null;
+}
+
+/** ticket.json 里的项目引用 → 宿主 ProjectRef（重派时原样沿用，不重新走项目前置）。 */
+function toProjectRef(project: Ticket["options"]["project"]): ProjectRef | undefined {
+	if (!project?.id || !project.rootPath) return undefined;
+	return {
+		id: project.id,
+		name: project.name,
+		rootPath: project.rootPath,
+		vcs: project.vcs === "git" ? "git" : "none",
+		...(project.head !== undefined ? { head: project.head } : {}),
+		...(project.dataDir !== undefined ? { dataDir: project.dataDir } : {}),
+	};
+}
+
+/** 生产用的重派运行时：真 chancellor + 真回灌，与 tools.ts 的 delegate 装配同口径。 */
+function defaultRetryRuntime(store: DelegationReceipts): DelegationRuntime {
+	return {
+		run: (request, options) =>
+			runChancellor({ ...request, workRoot: chancellorWorkRoot() }, options),
+		emit: emitDelegation,
+		// 汇报回原会话是异步动作，懒加载 agent 避免只读接口在启动期拉起整个运行时。
+		report: (conversationId, report) => {
+			void import("./agent.ts")
+				.then((module) => module.reportDelegationResult(conversationId, report))
+				.catch(() => undefined);
+		},
+		autoReport: (process.env.DELEGATION_AUTO_REPORT?.trim() || "true").toLowerCase() !== "false",
+		isCanceled: (id) => store.isCanceled(id),
+		log: (line) => console.warn(line),
+	};
+}
+
+/** 取消：终态 400，其余（含 needs_you / canceled 重复）记作废位回 200。 */
+export function cancelTicketAction(
+	store: DelegationReceipts,
+	workRoot: string,
+	ticketId: string,
+): TicketActionResult {
+	const found = findTicket(workRoot, ticketId);
+	if (!found) return { status: 404, body: { ok: false, error: "not_found" } };
+	try {
+		const originStatus = String(found.ticket.status ?? "");
+		if (CANCEL_TERMINAL_STATUSES.has(originStatus)) {
+			return {
+				status: 400,
+				body: {
+					ok: false,
+					error: "ticket_terminal",
+					message: `任务已终态（${originStatus}），不能再作废`,
+				},
+			};
+		}
+		store.cancelTicket(ticketId, internalConversationId(found.ticket, ticketId, store));
+		return { status: 200, body: { ok: true, status: "canceled" } };
+	} finally {
+		found.store.close();
+	}
+}
+
+/**
+ * 重试：仅 failed / aborted / canceled（作废位）。从原单 ticket.json 读需求/领域/项目，
+ * 走既有 startDelegation 重派**新单**，requestId = `retry:<原单id>:<次数>` 防撞幂等键，
+ * 回执 accept 带原单 conversation_id（新单因此回写进同一条对话）。字段不够如实 400。
+ */
+export function retryTicketAction(
+	store: DelegationReceipts,
+	workRoot: string,
+	ticketId: string,
+	runtime: DelegationRuntime,
+): TicketActionResult {
+	const found = findTicket(workRoot, ticketId);
+	if (!found) return { status: 404, body: { ok: false, error: "not_found" } };
+	try {
+		const ticket = found.ticket;
+		const originStatus = String(ticket.status ?? "");
+		const canceled = store.isCanceled(ticketId);
+		if (!RETRYABLE_STATUSES.has(originStatus) && !canceled) {
+			return {
+				status: 400,
+				body: { ok: false, error: "not_retryable", message: "只有失败 / 中止 / 已作废的单能重试" },
+			};
+		}
+		const requirement = String(ticket.prompt ?? "").trim();
+		if (!requirement) {
+			return {
+				status: 400,
+				body: { ok: false, error: "missing_requirement", message: "原单没有需求正文（prompt），无法重派" },
+			};
+		}
+		const conversationId = internalConversationId(ticket, ticketId, store);
+		if (conversationId === null) {
+			return {
+				status: 400,
+				body: { ok: false, error: "missing_conversation", message: "原单没有来源会话信息，无法确定回写目标" },
+			};
+		}
+
+		const domain = String(ticket.options?.domain ?? "");
+		const project = toProjectRef(ticket.options?.project);
+		const retryCount = store.countRetries(ticketId) + 1;
+		const requestId = `retry:${ticketId}:${retryCount}`;
+		const fingerprint = requestFingerprint({ ticketId, requirement, domain, retryCount });
+		const begun = store.begin(requestId, fingerprint, { explicit: true, workRoot });
+		if (begun.kind !== "new") {
+			return {
+				status: 409,
+				body: { ok: false, error: "retry_conflict", message: "这次重派已经受理过，返回原单" },
+			};
+		}
+
+		const { ticketId: newTicketId } = startDelegation(
+			{
+				conversationId,
+				domain,
+				requirement,
+				requestId,
+				...(project ? { project } : {}),
+			},
+			runtime,
+		);
+		if (newTicketId) store.accept(requestId, newTicketId, conversationId);
+		else store.markFailed(requestId);
+		return { status: 200, body: { ok: true, ticketId: newTicketId } };
+	} finally {
+		found.store.close();
+	}
+}
+
+/**
+ * 项目删除守卫：chancellor 工作目录（顶层 + 各领域 runs）里是否还有该项目的非终态单。
+ * 复用任务中心同一套读取（Store.listTickets + readTicketJson），别在 projects.ts 里另拼路径。
+ */
+export function projectHasInFlightTickets(workRoot: string, projectId: string): boolean {
+	const dirs = [workRoot];
+	for (const entry of listManagers(workRoot)) {
+		const runsDir = entry.meta?.runs_dir;
+		if (runsDir && fs.existsSync(runsDir)) dirs.push(runsDir);
+	}
+	for (const dir of dirs) {
+		const store = new Store(dir);
+		try {
+			for (const row of store.listTickets(500)) {
+				if (TERMINAL_TICKET_STATUS.has(row.status)) continue;
+				const ticket = readTicketJson(dir, row.id);
+				if (ticket?.options?.project?.id === projectId) return true;
+			}
+		} catch {
+			/* 单个 runs 目录读不出来不当成「有在飞单」，别把删除卡死 */
+		} finally {
+			store.close();
+		}
+	}
+	return false;
 }
