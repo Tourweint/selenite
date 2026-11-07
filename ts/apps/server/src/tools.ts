@@ -20,6 +20,15 @@ import {
 } from "./partner-manage.ts";
 import { defineTool, type ToolRegistration } from "@earendil-works/pi-durable";
 import { scopeKey, type MemoryEngine, type MemoryKind, type MemoryScope } from "@lifediary/memory";
+// 群组核心（2026-11-07）：建群校验与落库的唯一实现，HTTP 端点共用同一份。
+import {
+	createGroupChecked,
+	defaultGroupContext,
+	groupsAvailable,
+	resolvePartnerByName,
+	resolvePartnersByName,
+	type GroupContext,
+} from "./group-manage.ts";
 // 派活能力（chancellor）。相对路径是刻意的：chancellor 是独立仓库，
 // 跑的是 .ts 源码，装进 node_modules 后 node 不会给里面的 .ts 剥类型
 // （ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING），所以不能走 file: 依赖。
@@ -151,6 +160,14 @@ export interface ToolDeps {
 	 * 不碰真实 .data/；不传用全局 partnersStore() + chancellorWorkRoot()。
 	 */
 	ministerContext?: () => MinisterContext;
+	/**
+	 * 群组能力（2026-11-07 群组入口统一）：为 true 时 `group_manage` 上架。
+	 * agent.ts 不传 → 回落 `groupsAvailable()`（GROUPS_ENABLED + COMPANIONS_ENABLED 双闸）；
+	 * 关掉任一个时工具不注册，模型也够不到建群（一行回滚）。
+	 */
+	groups?: boolean;
+	/** 群组核心的存储（2026-11-07）。测试注入临时 store，不碰真实 .data/。 */
+	groupContext?: () => GroupContext;
 	/** 派单回执表；不传用默认 `.data/delegations.sqlite`。测试可注入临时库。 */
 	receipts?: DelegationReceipts | null;
 }
@@ -817,6 +834,117 @@ export function createTools(deps: ToolDeps) {
 						);
 					}
 					return text("action 只能是 create / stop / list / set_dispatch");
+				},
+			}),
+		);
+	}
+
+	// 群组管理 group_manage（2026-11-07 群组入口统一）：**总管在对话里建群**。
+	// 之前只有界面按钮能建群，模型侧没有对应的手——总管说「建个群」只能干看着，
+	// 与 partner_manage（总管能建/停执事）的能力面不对称。
+	//
+	// v1 只开 create / list：改名/加减人/删群留在界面由人点（删群不可恢复、改名歧义大，
+	// 不值得给模型一只手）。详见 designs/2026-11-07-群组入口统一。
+	//
+	// 开关与端点同一个：GROUPS_ENABLED 或 COMPANIONS_ENABLED 任一个关着 → 工具不注册
+	// （一行回滚，模型也够不到建群）。
+	const groupsOn = deps.groups ?? groupsAvailable();
+	const groupContext = deps.groupContext ?? defaultGroupContext;
+	if (partnersOn && groupsOn) {
+		tools.push(
+			defineTool({
+				name: "group_manage",
+				description:
+					"总管管理群组（执事群聊）：create 建一个群、list 列出全部群。" +
+					"只有总管 / 主对话能用；执事自己的会话不能建群。" +
+					"成员用**名字**指定（2–6 位），必须是已有执事；值日执事不 @ 时回话，" +
+					"缺省取第一位成员。建好后说话不 @ 就发给值日，@名字 就点名。",
+				parameters: Type.Object({
+					action: Type.Unsafe<"create" | "list">({
+						type: "string",
+						enum: ["create", "list"],
+						description: "create=建群 / list=列出群",
+					}),
+					name: Type.Optional(Type.String({ description: "create 必填，群名，≤40 字" })),
+					members: Type.Optional(
+						Type.Array(Type.String(), {
+							description: "create 必填，2–6 位执事的名字（不是 id）",
+						}),
+					),
+					responder: Type.Optional(
+						Type.String({
+							description: "create 可选，值日执事的名字（必须是成员）；不填取第一位成员",
+						}),
+					),
+					notice: Type.Optional(
+						Type.String({ description: "create 可选，群公告 ≤500 字（这个群是干什么的）" }),
+					),
+				}),
+				execute: async (args, api) => {
+					const ctx = groupContext();
+					const conversationId = Number(api.conversationId);
+					// 权限判据与 partner_manage 逐字一致：只有总管 / 主对话能建群。
+					// effectivePartnerIdOfSession 落到非 chief 的真实 uuid = 某执事的会话 → 拒。
+					const effective = effectivePartnerIdOfSession(ctx.store, conversationId);
+					if (effective !== null && effective !== CHIEF_PARTNER_ID) {
+						return text("只有总管可以建群");
+					}
+					if (args.action === "list") {
+						const rows = ctx.store.listGroups();
+						if (rows.length === 0) return text("（暂无群组；用 create 建一个）");
+						return text(
+							rows
+								.map((row) => {
+									const duty = row.members.find(
+										(member) => member.partnerId === row.responderPartnerId,
+									);
+									const who = row.members.map((member) => member.name).join("、");
+									const reply =
+										row.responderKind === "everyone"
+											? "不 @ 全员回"
+											: row.responderKind === "mentions"
+												? "只回点名"
+												: duty
+													? `值日 ${duty.name}`
+													: "值日未设";
+									return `${row.name} · ${row.members.length} 人（${who}）· ${reply}`;
+								})
+								.join("\n"),
+						);
+					}
+					if (args.action === "create") {
+						const name = (args.name ?? "").trim();
+						if (!name) return text("create 需要 name（群名，≤40 字）");
+						if (name.length > 40) return text("群名不超过 40 字");
+						const memberNames = (args.members ?? []).map((value) => String(value));
+						const resolved = resolvePartnersByName(memberNames, ctx.store);
+						if (!resolved.ok) return text(resolved.error);
+						const duty = resolvePartnerByName(args.responder, ctx.store);
+						if (!duty.ok) return text(duty.error);
+						// 缺省值日 = 第一位成员（模型最常这么建：拉两个人，让先说的那位接话）
+						const dutyId = duty.value?.id ?? resolved.value[0]?.id ?? "";
+						const created = createGroupChecked(
+							{
+								name,
+								memberIds: resolved.value.map((partner) => partner.id),
+								responderKind: "member",
+								responderPartnerId: dutyId,
+								notice: args.notice ?? "",
+							},
+							ctx.store,
+						);
+						if (!created.ok) return text(created.error);
+						const who = created.value.members.map((member) => member.name).join("、");
+						const dutyName =
+							created.value.members.find(
+								(member) => member.partnerId === created.value.responderPartnerId,
+							)?.name ?? "第一位成员";
+						return text(
+							`群组 ${created.value.name} 已建好：${who}；不 @ 时 ${dutyName} 回。` +
+								"在群组页打开它就能说话（@名字 点名，@所有人 全员按顺序回）。",
+						);
+					}
+					return text("action 只能是 create / list");
 				},
 			}),
 		);

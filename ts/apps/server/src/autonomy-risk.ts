@@ -3,7 +3,7 @@
  *
  * cindy 六类里**结构上可达**的三类在本仓的映射：
  *   - 调度命令 / 授予常驻指令 → `set_reminder`（定时唤醒是常驻载体的现成形态）；
- *   - 新建完全访问任务 / 建停常驻角色 → `delegate` / `propose_project` / `partner_manage`；
+ *   - 新建完全访问任务 / 建停常驻角色 → `delegate` / `propose_project` / `partner_manage` / `group_manage`；
  *   - 写文件 / 跑命令 → `write` / `edit` / `bash` / `powershell` / `partner_skill_write`
  *     （现行 ask 面在自主轮收紧为必问）。
  *
@@ -20,6 +20,7 @@ export const AUTONOMY_RISK_TOOLS: Record<string, AutonomyRiskCategory> = {
 	delegate: "new_task",
 	propose_project: "new_task",
 	partner_manage: "new_task",
+	group_manage: "new_task",
 	write: "write",
 	edit: "write",
 	bash: "write",

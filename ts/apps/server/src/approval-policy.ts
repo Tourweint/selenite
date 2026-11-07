@@ -16,6 +16,8 @@
 // partner_skill_write（2026-11-05 批次B B2）：写执事的技能文件——写盘即进闸门，这是硬约束。
 // partner_manage（批次D D3）：建 / 停执事 = "授予常驻指令 / 新建任务"类，
 // 会改角色与 chancellor 领域目录，同样进 WRITE_TOOLS（D14 备忘兑现）。
+// group_manage（2026-11-07 群组入口统一）：总管建群 = 新建常驻多成员会话，
+// 与 partner_manage 同档（会改"谁跟谁在一起"的关系，不是只读）。
 export const WRITE_TOOLS = new Set([
 	"write",
 	"edit",
@@ -25,6 +27,7 @@ export const WRITE_TOOLS = new Set([
 	"propose_project",
 	"partner_skill_write",
 	"partner_manage",
+	"group_manage",
 ]);
 
 export interface ApprovalPolicy {

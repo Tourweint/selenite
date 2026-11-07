@@ -6,17 +6,21 @@ import {
 	GROUP_MESSAGE_LIMIT,
 	type ChatEvent,
 	type FinishReason,
-	type GroupResponderKind,
 	type GroupSender,
 } from "@lifediary/shared";
-import {
-	COMPANIONS_ENABLED,
-	partnersStore,
-	type GroupRow,
-} from "./partners.ts";
+import { partnersStore, type GroupRow } from "./partners.ts";
 import { readLlmConfig } from "./provider.ts";
 import { GroupRouteError, resolveGroupSpeakers } from "./group-routing.ts";
 import { groupRoundRunning, startGroupRound, stopGroupRound, type GroupStreamEvent } from "./group-runtime.ts";
+// 建群校验与落库的唯一实现在 group-manage（模型侧 group_manage 工具共用同一份）。
+// 开关也从那里 re-export：工具装配要按同一个开关决定注不注册，不能再各写一份。
+import {
+	createGroupChecked,
+	groupsAvailable,
+	normalizeResponderKind,
+} from "./group-manage.ts";
+
+export { GROUPS_ENABLED, groupsAvailable } from "./group-manage.ts";
 
 /**
  * 群组接口（2026-11-06 群组方案，接口文档 §2.14）。
@@ -24,18 +28,9 @@ import { groupRoundRunning, startGroupRound, stopGroupRound, type GroupStreamEve
  * `GROUPS_ENABLED=false` 或 `COMPANIONS_ENABLED=false`（成员都没了）：一个路由都不挂，
  * 404 语义 = 未启用（同 COMPANIONS 口径；鉴权失败才是 403 空体，业务拒绝才 400 带说明）。
  * 本模块只做 HTTP 形状映射与校验：路由与回合在 group-routing / group-runtime，
- * 存储在 partners.ts——和 companion-api 同一条分层纪律。
+ * 建群校验在 group-manage（与模型侧 group_manage 工具共用），存储在 partners.ts
+ * ——和 companion-api 同一条分层纪律。
  */
-
-/** 回滚开关（方案 §2.7）：false = 群端点一个不挂，rail 回到禁用占位 */
-export const GROUPS_ENABLED =
-	(process.env.GROUPS_ENABLED?.trim() || "true").toLowerCase() !== "false";
-
-export function groupsAvailable(): boolean {
-	return GROUPS_ENABLED && COMPANIONS_ENABLED;
-}
-
-const RESPONDER_KINDS: GroupResponderKind[] = ["member", "everyone", "mentions"];
 
 export function mountGroups(app: Hono): void {
 	if (!groupsAvailable()) return;
@@ -52,48 +47,12 @@ export function mountGroups(app: Hono): void {
 					notice?: string;
 			  }
 			| null;
-		const name = body?.name?.trim() ?? "";
-		if (!name || name.length > 40) {
-			return c.json({ error: "bad_request", message: "name 必填且不超过 40 字" }, 400);
+		// 校验 + 落库走 group-manage 的唯一实现（模型侧 group_manage 同一份）；这里只映射 HTTP 形状。
+		const created = createGroupChecked(body ?? {}, store());
+		if (!created.ok) {
+			return c.json({ error: "bad_request", message: created.error }, 400);
 		}
-		const notice = typeof body?.notice === "string" ? body.notice : "";
-		if (notice.length > 500) {
-			return c.json({ error: "bad_request", message: "公告不超过 500 字" }, 400);
-		}
-		const memberIds = [...new Set((body?.memberIds ?? []).map((id) => String(id).trim()).filter(Boolean))];
-		if (memberIds.length < GROUP_MEMBER_MIN || memberIds.length > GROUP_MEMBER_MAX) {
-			return c.json(
-				{ error: "bad_request", message: `成员要 ${GROUP_MEMBER_MIN}–${GROUP_MEMBER_MAX} 名执事` },
-				400,
-			);
-		}
-		const members = memberIds.map((id) => store().get(id));
-		if (members.some((m) => !m)) {
-			return c.json({ error: "bad_request", message: "有执事不存在，刷新后再试" }, 400);
-		}
-		if (new Set(members.map((m) => m!.name)).size !== members.length) {
-			return c.json({ error: "bad_request", message: "群里有重名执事，@ 会分不清人，请先改名" }, 400);
-		}
-		const kind = normalizeResponderKind(body?.responderKind);
-		let duty: string | null = body?.responderPartnerId?.trim() || null;
-		if (kind === "member") {
-			if (!duty) {
-				return c.json({ error: "bad_request", message: "值日执事必选（不 @ 就发给谁）" }, 400);
-			}
-			if (!memberIds.includes(duty)) {
-				return c.json({ error: "bad_request", message: "值日执事必须是群成员" }, 400);
-			}
-		} else {
-			duty = null;
-		}
-		const group = store().createGroup({
-			name,
-			notice,
-			responderKind: kind,
-			responderPartnerId: duty,
-			memberIds,
-		});
-		return c.json({ ok: true, group: groupProjection(group) }, 201);
+		return c.json({ ok: true, group: groupProjection(created.value) }, 201);
 	});
 
 	// ── 查 ───────────────────────────────────────────────
@@ -255,12 +214,6 @@ export function mountGroups(app: Hono): void {
 		await stopGroupRound(group.id);
 		return c.json({ ok: true, conversationId: group.id });
 	});
-}
-
-function normalizeResponderKind(raw: string | undefined): GroupResponderKind {
-	return raw && RESPONDER_KINDS.includes(raw as GroupResponderKind)
-		? (raw as GroupResponderKind)
-		: "member";
 }
 
 function numberQuery(raw: string | undefined): number | undefined {
