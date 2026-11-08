@@ -147,7 +147,6 @@ const el = {
   ctxRing: document.getElementById("ctx-ring"),
   ctxFill: document.getElementById("ctx-fill"),
   ctxPct: document.getElementById("ctx-pct"),
-  queuePanelHost: document.getElementById("composer"),
   windowControls: document.getElementById("window-controls"),
   winMin: document.getElementById("win-min"),
   winMax: document.getElementById("win-max"),
@@ -577,9 +576,6 @@ const state = {
   // 项目筛选的选项来自 GET /api/v1/projects；接口不在时用任务单里的项目名兜底
   projects: [],
   projectsFetchedAt: 0,
-  // 排队插话（批次二）：忙时发的消息先在这里排队，本轮结束后依次真发。
-  // 只存内存——刷新即丢，登记为已知边界（方案 §三）。
-  queue: [],
   // SSE 断点重放（2026-11-04 seq 方案）：当前会话已收到的最大事件序号。
   // 切会话/刷新即归零——那两种路径本来就走 /messages 全量回读，不需要补帧。
   maxSeq: 0,
@@ -4891,11 +4887,11 @@ async function loadPendingApprovals(conversationId) {
 async function steerIntoTurn(text) {
   if (!text) return;
   if (!state.conversationId) {
-    // 还没有会话可插：退回本地排队，避免"插话"变成一个没有落点的动作
-    if (state.queue.length < QUEUE_MAX) {
-      state.queue.push(text);
-      renderQueue();
-    }
+    // 还没有会话可插（新会话第一轮还没拿到 start 帧）：这句留在输入框，
+    // 本地队列已退役（扫尾批 8a），不能让它变成一个没有落点的动作
+    el.input.value = text;
+    resize();
+    addNotice("这一轮还没跑起来，这句先留在输入框。");
     return;
   }
   const bubble = addMessage("user", text, Date.now());
@@ -4952,7 +4948,7 @@ async function steerIntoTurn(text) {
       // 竞态兜底（2026-11-07 修）：刚好收尾时这句补充成了**新的一轮**，正文从
       // 这条短连接上流——而它只收回执。不给机器可读落点就没法分辨这种情况
       // （契约 notice.steer=new-turn），只能收尾后全量回读一次补上。
-      if (receipt.steer === "new-turn") scheduleSteerReconcile(state.conversationId);
+      if (receipt.steer === "new-turn") scheduleTurnReconcile(state.conversationId);
     }
   } catch {
     addNotice("插话的结果没确认，稍后看这一轮正文有没有带上它。");
@@ -4960,32 +4956,36 @@ async function steerIntoTurn(text) {
 }
 
 /**
- * 插话落成新一轮后的回读（2026-11-07 修）：那轮正文没有任何连接在画，
- * 等这一轮尘埃落定就全量回读一次，把回答与步骤补上屏。
+ * 轮末回读（2026-11-07 修，2026-11-08 扫尾批 8a 扩展到「排队插话」）。
+ *
+ * 用在两种"正文画在别处"的情形：
+ *   1. 插话刚好收尾，这句补充成了**新的一轮**（notice.steer=new-turn）；
+ *   2. 忙时排队的那句（whenBusy=followUp）变成下一轮跑完了——那条短连接按约定不画正文。
+ * 两条都没有客户端在画那一轮的正文，等这一轮尘埃落定就全量回读一次。
  * "落定"的判据是 transcript 尾条从我们那句插话（user）变成了回答（assistant）——
  * 这轮在服务端跑，客户端没有它的流，`state.sending` 帮不上忙。
  * 回读走 openChat 的服务端事实源重建，不会跟在跑的主流重复。
  */
-let steerReconcile = null;
+let turnReconcile = null;
 
-function scheduleSteerReconcile(conversationId) {
-  if (steerReconcile) {
-    clearInterval(steerReconcile.timer);
+function scheduleTurnReconcile(conversationId) {
+  if (turnReconcile) {
+    clearInterval(turnReconcile.timer);
   }
   const ticket = { conversationId, tries: 0, timer: 0 };
-  steerReconcile = ticket;
+  turnReconcile = ticket;
   ticket.timer = setInterval(async () => {
     // 人切走了会话：这次插话不归这屏管，切回去本来就会全量回读
     if (state.conversationId !== ticket.conversationId) {
       clearInterval(ticket.timer);
-      steerReconcile = null;
+      turnReconcile = null;
       return;
     }
     ticket.tries += 1;
     if (ticket.tries > 150) {
       // 5 分钟还没落定（服务端失联 / 这轮没产出回答）：放弃，用户刷新可见
       clearInterval(ticket.timer);
-      steerReconcile = null;
+      turnReconcile = null;
       return;
     }
     let settled = false;
@@ -5007,66 +5007,73 @@ function scheduleSteerReconcile(conversationId) {
     // 回答已经在盘上；若用户恰又开了新一轮（主流在画），等它收尾再重建
     if (state.sending) return;
     clearInterval(ticket.timer);
-    steerReconcile = null;
+    turnReconcile = null;
     void openChat(ticket.conversationId);
   }, 2000);
 }
 
-/* ── 排队插话（批次二）：忙时发的消息先排队，本轮结束后依次真发 ──
-   队列只在本机内存里（刷新即丢，方案 §三 登记的边界）；发送仍走现有
-   /chat 端点，以 SSE start 为成功依据——前端只是视图，不造第二份事实。 */
-const QUEUE_MAX = 10;
+/* ── 忙时排队（扫尾批 8a：插话队列服务端化）──────────────
+   语义没变：忙时按下的 Enter 仍是"下一轮的指令"（whenBusy=followUp）。变的是落点——
+   以前先塞进浏览器内存里的本地数组、本轮结束后由前端补发（刷新即丢），
+   现在直接提交给服务端，内核写进 durable 的 inbox（2026-11-07 消息即引导批起的
+   既有能力），刷新 / 断线后话还在，按提交顺序被消费。
+   前端只是视图，不造第二份事实：排队状态以 transcript 里的条目为准。 */
+let pendingFollowUps = 0;
 
-function renderQueue() {
-  let panel = document.getElementById("queue-panel");
-  if (!state.queue.length) {
-    panel?.remove();
+/**
+ * 忙时排队提交（2026-11-08 扫尾批 8a）。
+ *
+ * 渲染归属：这条连接上流的是**已经在跑的这一轮**（内核把同一轮同时推给两个订阅者），
+ * 后面还会接上排队那句变成的下一轮，所以这里不画正文——画了就是两份。
+ * 乐观气泡先上屏（发即上屏），归位靠这条连接跑完后的回读（scheduleTurnReconcile）。
+ * 也正因为这样，这条流要读到底：它收尾 = 排进来的那一轮也跑完了。
+ */
+async function followUp(text) {
+  if (!text) return;
+  if (!state.conversationId) {
+    // 新会话的第一轮还没拿到 start 帧：此时提交会**新建一条会话**，把话送错地方。
+    // 这句留在输入框，等这一轮跑起来再发。
+    el.input.value = text;
+    resize();
+    addNotice("这一轮还没跑起来，这句先留在输入框。");
     return;
   }
-  if (!panel) {
-    panel = document.createElement("div");
-    panel.id = "queue-panel";
-    panel.className = "queue-panel";
-    el.queuePanelHost.prepend(panel);
-  }
-  panel.replaceChildren();
-  const label = document.createElement("div");
-  label.className = "queue-label";
-  label.textContent = `排队中 ${state.queue.length} 条 · 本轮结束后依次发送`;
-  panel.append(label);
-  state.queue.forEach((text, index) => {
-    const row = document.createElement("div");
-    row.className = "queue-row";
-    const span = document.createElement("span");
-    span.className = "queue-text";
-    span.textContent = text;
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "queue-remove";
-    remove.textContent = "✕";
-    remove.title = "撤回这条";
-    remove.addEventListener("click", () => {
-      state.queue.splice(index, 1);
-      renderQueue();
+  const conversationId = state.conversationId;
+  const bubble = addMessage("user", text, Date.now());
+  try {
+    const response = await request("/api/v1/agent/chat", {
+      method: "POST",
+      body: JSON.stringify({
+        conversationId,
+        messages: [{ role: "user", content: text }],
+        whenBusy: "followUp",
+      }),
     });
-    row.append(span, remove);
-    panel.append(row);
-  });
-  // 停止之后队列留在原地，给一个「继续」的明确入口（cindy 同款语义）
-  const cont = document.createElement("button");
-  cont.type = "button";
-  cont.className = "queue-continue";
-  cont.hidden = state.sending;
-  cont.textContent = "继续发送";
-  cont.addEventListener("click", () => submitNext());
-  panel.append(cont);
-}
-
-function submitNext() {
-  renderQueue();
-  if (state.sending || !state.queue.length) return;
-  const next = state.queue.shift();
-  void send(next);
+    if (!response.ok || !response.body) {
+      // 服务端根本没受理：气泡撤回，话放回输入框（与插话同一条口径）
+      bubble.root.remove();
+      addNotice("这条没发出去，已经放回输入框。");
+      el.input.value = text;
+      resize();
+      return;
+    }
+    pendingFollowUps += 1;
+    void new Response(response.body)
+      .text()
+      .catch(() => "")
+      .finally(() => {
+        pendingFollowUps -= 1;
+        // 还有排队的连接在跑：等最后一轮跑完再回读，免得把还没轮到的气泡刷掉
+        if (pendingFollowUps > 0) return;
+        if (state.conversationId !== conversationId) return;
+        scheduleTurnReconcile(conversationId);
+      });
+  } catch {
+    bubble.root.remove();
+    addNotice("这条没发出去，已经放回输入框。");
+    el.input.value = text;
+    resize();
+  }
 }
 
 async function send(text, images = []) {
@@ -5407,11 +5414,8 @@ async function send(text, images = []) {
     // chancellor 还在后台跑，画「已转后台」，不能算进失败（2026-11-07 修）。
     for (const row of delegateRows.values()) row.handoff();
     if (work) work.finish(state.stopRequested ? "interrupted" : "completed");
-    renderQueue();
-    // 排队插话（批次二）：正常收尾就自动续发队列首条；人点了停止则留住队列，
-    // 面板上的「继续发送」按钮是明确的再启动入口
-    if (!state.stopRequested) submitNext();
-    else renderQueue();
+    // 忙时排队的那些话由服务端按序消费（扫尾批 8a），这里不再有轮末补发：
+    // 它们要么已经作为插话落进这一轮，要么在 durable 的 inbox 里等下一轮。
     el.input.focus();
   }
 }
@@ -8680,10 +8684,10 @@ el.composer.addEventListener("submit", (event) => {
     void runCompactCommand(text.slice(compactMatch[0].length).trim());
     return;
   }
-  // 忙时两条路（2026-11-07 消息即引导）：
+  // 忙时两条路（2026-11-07 消息即引导；2026-11-08 扫尾批 8a 改排队落点）：
   //   Ctrl/⌘+Enter = 插话，带 whenBusy=steer 直接投到正在跑的这一轮；
-  //   普通 Enter    = 本地排队（刷新即丢，方案登记的边界），本轮结束后依次真发。
-  // 附件只在空闲时发（2026-11-08 4a）：排队/插话都是纯文本通道，图先留在条上。
+  //   普通 Enter    = 排队，带 whenBusy=followUp 交给服务端落 durable（是下一轮的指令）。
+  // 两条都只走纯文本（附件只在空闲时发，图先留在条上）。
   if (state.sending) {
     if (images.length) {
       toast("附件消息要等这一轮结束再发");
@@ -8695,12 +8699,9 @@ el.composer.addEventListener("submit", (event) => {
       void steerIntoTurn(text);
       return;
     }
-    if (state.queue.length < QUEUE_MAX) {
-      state.queue.push(text);
-      el.input.value = "";
-      resize();
-      renderQueue();
-    }
+    el.input.value = "";
+    resize();
+    void followUp(text);
     return;
   }
   el.input.value = "";
