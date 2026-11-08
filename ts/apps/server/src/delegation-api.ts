@@ -16,6 +16,13 @@ import {
 import { DelegationReceipts, requestFingerprint } from "./delegation-receipts.ts";
 import { partnersStore } from "./partners.ts";
 import { DelegationMessages } from "./delegation-messages.ts";
+import {
+	appendTaskEvent,
+	getTaskConversation,
+	submitTaskReply,
+	taskAsConversationEnabled,
+	taskConversationMirror,
+} from "./task-conversation.ts";
 
 /**
  * 只读任务中心接口（2026-11-03 方案 §5.9）。
@@ -337,6 +344,8 @@ export interface DelegationApiOptions {
 	workRoot?: string;
 	store?: DelegationReceipts;
 	retryRuntime?: () => DelegationRuntime;
+	/** 回话端点（8g）的续跑运行时；探针替换成假 runner，生产走真 chancellor。 */
+	sayRuntime?: () => DelegationRuntime;
 }
 
 export function mountDelegationApi(app: Hono, opts: DelegationApiOptions = {}): void {
@@ -439,6 +448,10 @@ export function mountDelegationApi(app: Hono, opts: DelegationApiOptions = {}): 
 				conversationTitle: conversationId ? titles.get(conversationId) ?? null : null,
 				chiefName: chiefNamesLoader()(found.ticket.options.domain),
 				cancelEnabled: delegationCancelEnabled(),
+				// 任务专线（2026-11-08 扫尾批 8g）：启用开关 + 确定性会话 id（`task-<票号>`）。
+				// 未建过时也会给 id；前端回读 GET messages 得到 404 就按"还没有记录"展示。
+				taskConversationEnabled: taskAsConversationEnabled(),
+				taskConversationId: getTaskConversation(found.ticket.id)?.conversationId ?? null,
 				// 派活留言（2026-11-07）：谁在什么时候说了什么。老单没有记录 = 空数组。
 				messages: messagesOf(found.ticket.id),
 				// 路径只给相对项目信息，不把 workRoot 绝对路径下发给客户端。
@@ -477,6 +490,111 @@ export function mountDelegationApi(app: Hono, opts: DelegationApiOptions = {}): 
 			const runtime = opts.retryRuntime?.() ?? defaultRetryRuntime(storeOf());
 			const result = retryTicketAction(storeOf(), workRootOf(), c.req.param("id"), runtime);
 			return c.json(result.body, result.status);
+		});
+	}
+
+	// ── 任务回话（2026-11-08 扫尾批 8g）──────────────────────
+	// 一次 POST 驱动两件事：① 以用户条目写进 `task-<票号>` 专线（忙时 followUp）；
+	// ② 走既有续跑链路把这句话交给执行端（resumeOnly：被拒不改派新单）。
+	// 回滚开关关着时整条路由不挂 → 404（与 cancel/retry 同一口径）。
+	if (taskAsConversationEnabled()) {
+		app.post("/api/v1/tickets/:id/say", async (c) => {
+			const body = (await c.req.json().catch(() => null)) as { text?: unknown } | null;
+			const text = typeof body?.text === "string" ? body.text.trim() : "";
+			if (!text) return c.json({ ok: false, error: "bad_request", message: "需要 text" }, 400);
+
+			const found = findTicket(workRootOf(), c.req.param("id"));
+			if (!found) return c.json({ ok: false, error: "not_found" }, 404);
+			try {
+				const ticketId = found.ticket.id;
+				const status = String(found.ticket.status ?? "");
+				if (CANCEL_TERMINAL_STATUSES.has(status)) {
+					return c.json(
+						{
+							ok: false,
+							error: "ticket_terminal",
+							message: `任务已终态（${status}），不能再回话`,
+						},
+						400,
+					);
+				}
+				let canceled = false;
+				try {
+					canceled = storeOf().isCanceled(ticketId);
+				} catch {
+					/* 簿记库挂了不挡回话 */
+				}
+				if (canceled) {
+					return c.json(
+						{ ok: false, error: "ticket_canceled", message: "这张单已作废，回话不会送到执行端" },
+						400,
+					);
+				}
+				// 续跑必须有宿主对话（事件与汇报回那里）；与 retry 同口径，字段不够如实 400。
+				const host = internalConversationId(found.ticket, ticketId, storeOf());
+				if (host === null) {
+					return c.json(
+						{
+							ok: false,
+							error: "missing_conversation",
+							message: "原单没有来源会话信息，无法确定回写目标",
+						},
+						400,
+					);
+				}
+
+				const chat = await submitTaskReply(ticketId, text);
+				if (!chat) {
+					return c.json(
+						{
+							ok: false,
+							error: "conversation_unavailable",
+							message: "专线会话建不出来（模型未配置或存储不可用）",
+						},
+						503,
+					);
+				}
+
+				const runtime = opts.sayRuntime?.() ?? defaultRetryRuntime(storeOf());
+				const { fellBack } = startDelegation(
+					{
+						conversationId: host,
+						domain: String(found.ticket.options?.domain ?? ""),
+						requirement: text,
+						resumeTicketId: ticketId,
+						// 主人是回答这张单，不是重开一件；被拒只提示，不偷偷改派。
+						resumeOnly: true,
+						// 用户条目已经进了专线，留言不再镜像第二遍（留言表照写）。
+						skipMessageMirror: true,
+						sender: { kind: "chief", name: "主人" },
+					},
+					runtime,
+				);
+				if (fellBack) {
+					// 异步收口：回话已记进会话，但执行端没接住——在专线里如实留一句。
+					void appendTaskEvent(ticketId, {
+						kind: "notice",
+						text: "【系统】这张单已经不在等回答，回话没有送到执行端。",
+					});
+				}
+				// 只记单号、字数与是否续上（不记回话正文）。
+				console.log(
+					`[ticket] 回话 ticket=${ticketId.slice(0, 12)} chars=${text.length} resume=${
+						fellBack ? "rejected" : "sent"
+					}`,
+				);
+				return c.json(
+					{
+						ok: true,
+						ticketId,
+						conversationId: chat.externalId,
+						status: "accepted",
+					},
+					202,
+				);
+			} finally {
+				found.store.close();
+			}
 		});
 	}
 }
@@ -573,6 +691,8 @@ function defaultRetryRuntime(store: DelegationReceipts): DelegationRuntime {
 		run: (request, options) =>
 			runChancellor({ ...request, workRoot: chancellorWorkRoot() }, options),
 		emit: emitDelegation,
+		// 回话续跑同样双写进专线（8g）：重试出来的新单也自带同一条单的会话。
+		mirror: taskConversationMirror,
 		// 汇报回原会话是异步动作，懒加载 agent 避免只读接口在启动期拉起整个运行时。
 		report: (conversationId, report) => {
 			void import("./agent.ts")

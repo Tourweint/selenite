@@ -21,6 +21,8 @@ import {
 	startDelegation,
 	type DelegationEvent,
 } from "./delegation.ts";
+// 任务专线双写（2026-11-08 扫尾批 8g）：远程单在本机受理/运行，任务详情同样有一条专线。
+import { taskConversationMirror } from "./task-conversation.ts";
 import { projectsStore, resolveDelegationProject, type ProjectRef } from "./projects.ts";
 import { RelayInvokeError, type RelayClient } from "./relay-client.ts";
 import { autoCandidates, queryBusyMap, selectAutoDevice } from "./relay-auto.ts";
@@ -454,6 +456,8 @@ export function createMatrixChannels(): MatrixChannels {
 					// 锚点会话里也发事件（本机任务中心可见）；不写锚点汇报——
 					// 汇报经 status 轮询回发起端（方案 §四阶段二）。
 					emit: emitDelegation,
+					// 本机受理的远程单同样有任务详情，双写走同一条专线（2026-11-08 扫尾批 8g）。
+					mirror: taskConversationMirror,
 					autoReport: false,
 					log: (line) => console.warn(line),
 				},

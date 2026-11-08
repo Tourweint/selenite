@@ -252,3 +252,110 @@ test("只读接口：未知单号 404，路径穿越一律拒绝", async () => {
 		rmSync(root, { recursive: true, force: true });
 	}
 });
+
+// ── 任务回话（2026-11-08 扫尾批 8g）──────────────────────────
+// 成功路径（建专线 + submit + 续跑）需要真模型/Harness，由 http 探针覆盖；
+// 这里只钉开关、入参与前置拒绝，全部在到达 `submitTaskReply` 之前返回。
+
+function withTaskConversation<T>(enabled: boolean, fn: () => Promise<T>): Promise<T> {
+	const previous = process.env.TASK_AS_CONVERSATION;
+	process.env.TASK_AS_CONVERSATION = enabled ? "true" : "false";
+	return fn().finally(() => {
+		if (previous === undefined) delete process.env.TASK_AS_CONVERSATION;
+		else process.env.TASK_AS_CONVERSATION = previous;
+	});
+}
+
+test("任务回话：回滚开关关着时端点 404", async () => {
+	const root = temp("api-say-off");
+	try {
+		const workRoot = join(root, "runs");
+		const app = new Hono();
+		await withTaskConversation(false, async () => {
+			mountDelegationApi(app, { workRoot });
+			const response = await app.request("/api/v1/tickets/T-x/say", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ text: "在吗" }),
+			});
+			assert.equal(response.status, 404, "TASK_AS_CONVERSATION=false → 404（未启用）");
+		});
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("任务回话：缺 text / 未知单 / 终态 / 无来源会话都如实拒绝", async () => {
+	const root = temp("api-say-guard");
+	try {
+		const workRoot = join(root, "runs");
+		const store = new Store(workRoot);
+		store.saveTicket(makeTicket("T-done", workRoot, { status: "done" }));
+		store.saveTicket(makeTicket("T-orphan-say", workRoot, { status: "needs_you" }));
+		store.close();
+
+		const app = new Hono();
+		await withTaskConversation(true, async () => {
+			mountDelegationApi(app, { workRoot });
+
+			const empty = await app.request("/api/v1/tickets/T-done/say", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ text: "   " }),
+			});
+			assert.equal(empty.status, 400);
+
+			const missing = await app.request("/api/v1/tickets/T-none/say", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ text: "在吗" }),
+			});
+			assert.equal(missing.status, 404);
+
+			const terminal = await app.request("/api/v1/tickets/T-done/say", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ text: "在吗" }),
+			});
+			const terminalBody = (await terminal.json()) as { error?: string };
+			assert.equal(terminal.status, 400);
+			assert.equal(terminalBody.error, "ticket_terminal");
+
+			const orphan = await app.request("/api/v1/tickets/T-orphan-say/say", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ text: "在吗" }),
+			});
+			const orphanBody = (await orphan.json()) as { error?: string };
+			assert.equal(orphan.status, 400);
+			assert.equal(orphanBody.error, "missing_conversation");
+		});
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("详情：启用时带回 taskConversationEnabled 与确定性专线 id", async () => {
+	const root = temp("api-say-detail");
+	try {
+		const workRoot = join(root, "runs");
+		const store = new Store(workRoot);
+		store.saveTicket(makeTicket("T-conv", workRoot));
+		store.close();
+
+		const app = new Hono();
+		await withTaskConversation(true, async () => {
+			mountDelegationApi(app, { workRoot });
+			const response = await app.request("/api/v1/tickets/T-conv");
+			assert.equal(response.status, 200);
+			const body = (await response.json()) as {
+				taskConversationEnabled?: boolean;
+				taskConversationId?: string | null;
+			};
+			assert.equal(body.taskConversationEnabled, true);
+			assert.equal(body.taskConversationId, "task-T-conv", "id 是 task-<票号>，不需要读 Harness");
+		});
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});

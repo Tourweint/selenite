@@ -5,9 +5,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+	formatMessageLine,
+	formatProgressLine,
 	formatReport,
 	startDelegation,
 	type DelegationEvent,
+	type DelegationMirrorEntry,
 	type DelegationReport,
 } from "./delegation.ts";
 import { DelegationMessages } from "./delegation-messages.ts";
@@ -313,4 +316,109 @@ test("SSE 编解码能往返 delegate / attention 的新字段", () => {
 		question: "请点一下登录按钮",
 	};
 	assert.deepEqual(createSseDecoder().push(encodeSseEvent(attention)), [attention]);
+});
+
+// ── 任务专线双写（2026-11-08 扫尾批 8g）────────────────────
+
+test("formatProgressLine / formatMessageLine 是单行、带阶段与计数", () => {
+	assert.equal(
+		formatProgressLine({ phase: "running", done: 1, total: 3, current: "改窗口" }),
+		"【进度】进行中：改窗口（1/3）",
+	);
+	assert.equal(
+		formatProgressLine({
+			phase: "running",
+			done: 0,
+			total: 0,
+			current: "等文件",
+			waitingOn: "src/a.ts",
+		}),
+		"【进度】进行中：等文件，等 src/a.ts",
+	);
+	assert.equal(formatProgressLine({ phase: "accepted", done: 0, total: 0, current: "" }), "【进度】已受理：…");
+	assert.equal(formatMessageLine("总管", "把按钮改蓝"), "【留言】总管：把按钮改蓝");
+});
+
+test("双写：进度、留言、汇报按事件顺序镜像进专线", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "lifediary-mirror-"));
+	const realPath = process.env.DELEGATIONS_DB_PATH;
+	process.env.DELEGATIONS_DB_PATH = join(dir, "delegations.sqlite");
+	const { resetDelegationMessages } = await import("./delegation-messages.ts");
+	resetDelegationMessages(join(dir, "delegations.sqlite"));
+	try {
+		const mirrored: Array<{ ticketId: string; entry: DelegationMirrorEntry }> = [];
+		const { outcome } = startDelegation(
+			{
+				conversationId: 41,
+				domain: "前端",
+				requirement: "把按钮改蓝",
+				sender: { kind: "chief", name: "总管" },
+			},
+			{
+				run: (_request, options) => {
+					options.onEvent?.({ type: "ticket", ticketId: "T-MIRROR", message: "已受理" });
+					options.onEvent?.({ type: "planned", ticketId: "T-MIRROR", total: 2 });
+					options.onEvent?.({ type: "task-start", ticketId: "T-MIRROR", slug: "改按钮" });
+					options.onEvent?.({ type: "task-done", ticketId: "T-MIRROR", slug: "改按钮" });
+					return Promise.resolve(result({ ticketId: "T-MIRROR", line: "改完了，两个文件" }));
+				},
+				emit: () => undefined,
+				mirror: (ticketId, entry) => mirrored.push({ ticketId, entry }),
+				report: () => undefined,
+				autoReport: false,
+			},
+		);
+		await outcome;
+
+		assert.deepEqual(
+			mirrored.map((item) => item.entry.kind),
+			["notice", "notice", "notice", "notice", "message", "report"],
+			"进度 4 条 → out 留言 → REPORT；in 留言不重复镜像",
+		);
+		assert.ok(mirrored.every((item) => item.ticketId === "T-MIRROR"));
+		assert.equal(mirrored[0]?.entry.text, "【进度】已受理：已受理");
+		assert.equal(mirrored[1]?.entry.text, "【进度】进行中：拆好了，开始派（0/2）");
+		assert.equal(mirrored[2]?.entry.text, "【进度】进行中：改按钮（0/2）");
+		assert.equal(mirrored[3]?.entry.text, "【进度】进行中：改按钮（1/2）");
+		assert.equal(mirrored[4]?.entry.text, "【留言】总管：把按钮改蓝");
+		assert.equal(mirrored[5]?.entry.text, "【汇报】改完了，两个文件");
+	} finally {
+		resetDelegationMessages();
+		if (realPath === undefined) delete process.env.DELEGATIONS_DB_PATH;
+		else process.env.DELEGATIONS_DB_PATH = realPath;
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("resumeOnly：续跑被拒不改派新单，也不发失败播报", async () => {
+	const requests: ChancellorRequest[] = [];
+	const { ticketId, fellBack, outcome } = startDelegation(
+		{
+			conversationId: 42,
+			domain: "前端",
+			requirement: "验证码 1234",
+			resumeTicketId: "T-DONE",
+			resumeOnly: true,
+		},
+		{
+			run: (request) => {
+				requests.push(request);
+				return Promise.reject(new Error("这单没有在等回答的任务"));
+			},
+			emit: () => {
+				throw new Error("resumeOnly 被拒时不该发任何事件");
+			},
+			report: () => {
+				throw new Error("resumeOnly 被拒时不该汇报");
+			},
+			autoReport: true,
+		},
+	);
+
+	assert.equal(requests.length, 1, "只尝试续跑一次，没有第二次派活");
+	assert.equal(requests[0]?.resumeTicketId, "T-DONE");
+	assert.equal(requests[0]?.answer, "验证码 1234");
+	assert.equal(fellBack, true);
+	assert.equal(ticketId, "");
+	await assert.rejects(outcome);
 });

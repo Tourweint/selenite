@@ -43,6 +43,7 @@ import {
 	chancellorWorkRoot,
 	emitDelegation,
 	startDelegation,
+	type DelegationMirrorEntry,
 	type DelegationReport,
 } from "./delegation.ts";
 import {
@@ -173,6 +174,14 @@ export interface ToolDeps {
 	 * 会话忙时 durable 会把这条写入排到本轮结束，不打断当前对话。
 	 */
 	reportDelegation?: (conversationId: number, report: DelegationReport) => void;
+	/**
+	 * 任务专线双写（2026-11-08 扫尾批 8g）。
+	 *
+	 * 装配层（`agent/lifecycle.ts`）传 `taskConversationMirror`；不传 = 只写留言表。
+	 * 刻意用注入而不是在 tools.ts 里直接 import task-conversation：探针/单测也调
+	 * `createTools`，那里没有 durable 上下文，不能因为"带了个默认值"就去开真实 Harness。
+	 */
+	mirrorDelegation?: (ticketId: string, entry: DelegationMirrorEntry) => void;
 	/**
 	 * 项目/工作区登记表（2026-11-03 方案 §5.5）。
 	 * 派新活必须先过这里：没有已登记且仍在工作区内的项目一律返回 `needs_project`，
@@ -691,6 +700,9 @@ export function createTools(deps: ToolDeps) {
 					emit: emitDelegation,
 					report: deps.reportDelegation,
 					autoReport,
+					// 双写（8g）：进度 / REPORT / 留言同步进这张单的专线会话。
+					// 不传 = 旧行为（探针/单测不碰 durable）。
+					...(deps.mirrorDelegation ? { mirror: deps.mirrorDelegation } : {}),
 					// 作废位（扫尾批 1 A1）：后台 settle / 进度帧现查一次，取消后立刻静默。
 					// 用可选调用兜住单测注入的 receipts 替身（它可能没有这个方法）。
 					isCanceled: (id) => receiptsOf(deps).isCanceled?.(id) ?? false,

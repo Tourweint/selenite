@@ -72,6 +72,21 @@ export interface DelegationReport {
 	text: string;
 }
 
+/**
+ * 任务专线会话的镜像条目（2026-11-08 扫尾批 8g）。
+ *
+ * 只描述"往会话里追加一行什么"，怎么落（pi.assistant 条目、队列、幂等）由
+ * `task-conversation.ts` 决定。`kind` 目前只用于日志与测试断言：
+ *   - `notice`  = 进度/系统提示；
+ *   - `report`  = 执行端向主人汇报（终局那一行）；
+ *   - `message` = 留言表里的 out（派活原话 / 回答）同步一份。
+ * 镜像失败不挡派活：调用方拿到的是 `void`，实现内部自己兜。
+ */
+export interface DelegationMirrorEntry {
+	kind: "notice" | "report" | "message";
+	text: string;
+}
+
 export interface DelegationRuntime {
 	/** 真正跑 chancellor 的入口；测试可替换 */
 	run: (
@@ -81,6 +96,13 @@ export interface DelegationRuntime {
 	emit: (conversationId: number, event: DelegationEvent) => void;
 	/** 后台跑完后回灌会话；不传 = 不汇报 */
 	report?: (conversationId: number, report: DelegationReport) => void;
+	/**
+	 * 任务专线会话的双写缝（2026-11-08 扫尾批 8g）。
+	 *
+	 * 推送时机与 `emit` / `recordMessage` / 终局汇报完全一致（同步调用、同步入队），
+	 * 所以专线里的条目顺序 = 事件顺序。不传 = 只写留言表（单测与旧装配零改动）。
+	 */
+	mirror?: (ticketId: string, entry: DelegationMirrorEntry) => void;
 	/** `DELEGATION_AUTO_REPORT`，默认 true */
 		autoReport: boolean;
 		/**
@@ -123,6 +145,21 @@ export interface DelegationKickoff {
 	 * 缺省 = 不记留言（单测与旧调用方零改动）。
 	 */
 	sender?: { kind: DelegationSenderKind; name: string };
+	/**
+	 * 只续跑、不许改派（2026-11-08 扫尾批 8g 任务回话）。
+	 *
+	 * `delegate` 工具的既有语义是"续跑被拒就按新活派"；任务详情里的回话不能这样——
+	 * 主人是回答这张单，不是让总管重开一件。true 时续跑在派活前被拒就只返回
+	 * `fellBack=true`，不建新单（调用方据此提示"这单已经不在等回答"）。
+	 */
+	resumeOnly?: boolean;
+	/**
+	 * 不把 out 留言再镜像进专线（2026-11-08 扫尾批 8g）。
+	 *
+	 * 任务详情的回话已经以**用户条目**写进专线了，续跑时再镜像一条 `【留言】主人：…`
+	 * 等于同一句话出现两次。留言表照写（过渡期兜底视图），只跳过会话镜像。
+	 */
+	skipMessageMirror?: boolean;
 }
 
 /**
@@ -242,6 +279,38 @@ export function formatReport(
 	};
 }
 
+/** 进度行的阶段词（专线会话用；终态走 REPORT，不在 `emitProgress` 里）。 */
+const PROGRESS_LABEL: Partial<Record<DelegationPhase, string>> = {
+	accepted: "已受理",
+	planning: "规划中",
+	running: "进行中",
+	reviewing: "核对中",
+};
+
+/**
+ * 进度事件 → 专线会话里的一行（纯函数，单测直接断言）。
+ *
+ * 刻意不合并、不节流：留言表/事件是逐条发生的，专线也逐条记，
+ * 这样"专线里的顺序"才真的等于"事件发生的顺序"（方案 §四的验证项）。
+ */
+export function formatProgressLine(input: {
+	phase: DelegationPhase;
+	done: number;
+	total: number;
+	current: string;
+	waitingOn?: string;
+}): string {
+	const label = PROGRESS_LABEL[input.phase] ?? input.phase;
+	const count = input.total > 0 ? `（${input.done}/${input.total}）` : "";
+	const waiting = input.waitingOn ? `，等 ${input.waitingOn}` : "";
+	return `【进度】${label}：${input.current || "…"}${count}${waiting}`;
+}
+
+/** 留言 → 专线里的一行。 */
+export function formatMessageLine(name: string, body: string): string {
+	return `【留言】${name}：${body}`;
+}
+
 /**
  * 立即受理：同步返回任务单号，后台跑完再发事件/汇报。
  *
@@ -291,6 +360,11 @@ export function startDelegation(
 			...(projectName ? { project: projectName } : {}),
 			...(waitingOn ? { waitingOn } : {}),
 		});
+		// 双写（8g）：同一刻、同一内容进专线会话，不额外合并进度。
+		runtime.mirror?.(ticketId, {
+			kind: "notice",
+			text: formatProgressLine({ phase, done, total, current, ...(waitingOn ? { waitingOn } : {}) }),
+		});
 	};
 
 	const translate = (event: ChancellorEvent): void => {
@@ -339,6 +413,9 @@ export function startDelegation(
 		const report = formatReport(result, kick.domain);
 		// 结论也落成一条留言：任务详情里 out / in 成对，读起来就是一段经过
 		recordMessage("in", result.line || report.text, { kind: "system", name: "执行端" });
+		// 双写（8g）：REPORT 落 assistant 条目，语义 = 执行端向主人汇报。
+		// 用完整的那句 result.line（留言表同源），不是 80 字截断的 report.text。
+		runtime.mirror?.(ticketId, { kind: "report", text: `【汇报】${result.line || report.text}` });
 		runtime.emit(kick.conversationId, {
 			type: "delegate",
 			ticketId,
@@ -370,7 +447,8 @@ export function startDelegation(
 	const fail = (error: unknown, fallbackTicketId: string): void => {
 		if (settled) return;
 		settled = true;
-		ticketId = ticketId || fallbackTicketId;
+		// 续跑在派活前被拒时没有新单号；这时失败归属原单，不要发成「(未受理)」。
+		ticketId = ticketId || kick.resumeTicketId || fallbackTicketId;
 		const line = error instanceof Error ? error.message : String(error);
 		// 原始错误只进服务端日志：可能带上游地址甚至 key 片段。
 		runtime.log?.(`[delegate] 失败: ${line}`);
@@ -386,6 +464,10 @@ export function startDelegation(
 			current: "",
 			message: "派单失败，请稍后再试",
 		});
+		// 双写（8g）：失败也是一条单的动态，专线里要能看见（不含原始错误）。
+		if (ticketId) {
+			runtime.mirror?.(ticketId, { kind: "notice", text: "【汇报】派单失败，请稍后再试" });
+		}
 		if (runtime.autoReport && runtime.report) {
 			runtime.report(kick.conversationId, {
 				ticketId: ticketId || "(未受理)",
@@ -432,6 +514,14 @@ export function startDelegation(
 				`[delegate] 留言落库失败（不挡派单）：${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
+		// 双写（8g）：留言表之外同步抄一份进专线会话。
+		// in 方向（settle 的结论文）由 REPORT 镜像覆盖，这里跳过，避免同一句话两份。
+		if (direction !== "in" && !kick.skipMessageMirror) {
+			runtime.mirror?.(ticket, {
+				kind: "message",
+				text: formatMessageLine(sender.name, body),
+			});
+		}
 	};
 
 	const projectField = kick.project ? { project: kick.project } : {};
@@ -456,20 +546,26 @@ export function startDelegation(
 	);
 	let accepted = first;
 	let fellBack = false;
+	let dispatched = true;
 	if (kick.resumeTicketId && first.id === "") {
 		// 续跑在派活之前就被拒了（单子已完成/找不到）：没有可续的单，按新活派。
 		// 拒跑之前不会动 worker，所以不会和原单抢同一个屏幕。
 		fellBack = true;
 		first.promise.catch(() => undefined);
-		accepted = launch({
-			requirement: kick.requirement,
-			...(kick.domain ? { domain: kick.domain } : {}),
-			...(managerIdentity ? { managerIdentity } : {}),
-			...managerSwitch,
-			...projectField,
-			...idempotency,
-			originConversationId: String(kick.conversationId),
-		});
+		if (kick.resumeOnly) {
+			// 任务回话（8g）：主人回答的是这张单，被拒就明确失败，绝不悄悄重开一件。
+			dispatched = false;
+		} else {
+			accepted = launch({
+				requirement: kick.requirement,
+				...(kick.domain ? { domain: kick.domain } : {}),
+				...(managerIdentity ? { managerIdentity } : {}),
+				...managerSwitch,
+				...projectField,
+				...idempotency,
+				originConversationId: String(kick.conversationId),
+			});
+		}
 	}
 
 	// 派活留言（2026-11-07）：单号一确定就落一条"谁在什么时候说了什么"。
@@ -487,7 +583,11 @@ export function startDelegation(
 		);
 	}
 
-	accepted.promise.then(settle).catch((error: unknown) => fail(error, accepted.id));
+	// resumeOnly 且续跑被拒：没有可结算的东西（没建新单，原单也不动），
+	// 调用方从 `fellBack` 拿到结论自己提示；这里不再走 fail 的"派单失败"播报。
+	if (dispatched) {
+		accepted.promise.then(settle).catch((error: unknown) => fail(error, accepted.id));
+	}
 
 	return { ticketId, outcome: accepted.promise, fellBack };
 }

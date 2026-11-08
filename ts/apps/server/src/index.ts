@@ -43,6 +43,7 @@ import {
   sayInConversation,
   seedChiefPartner,
   startChatCompaction,
+  TASK_CONVERSATION_PREFIX,
   waitChatCompaction,
   searchTranscripts,
   setPolicy,
@@ -684,6 +685,9 @@ function turnSettledHandler(chat: ResolvedChat, messages: ChatMessage[]) {
       record.status === "unanswered" ? record.reason : "",
     );
     if (!memoryEngine || record.status !== "done") return;
+    // 任务专线（`task-` 前缀，2026-11-08 扫尾批 8g）不进记忆引擎：就算主人从会话页
+    // 直接点开它回话，也不该把"任务过程"沉淀成关于人的记忆（与研究回合同一口径）。
+    if (chat.externalId.startsWith(TASK_CONVERSATION_PREFIX)) return;
     // 刻意不 await —— 记忆写慢了不该拖慢任何东西
     void memoryEngine
       .ingestTurn(plain, scope, {

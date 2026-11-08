@@ -1377,6 +1377,14 @@ try {
 	// 历史单：ticket.json 没有字段，靠派单回执反查；以及一张既没字段也没回执的（→ null）。
 	store.saveTicket(fixture("T-legacy"));
 	store.saveTicket(fixture("T-orphan"));
+	// 任务专线夹具（8g）：非终态 + 有宿主会话，但**没有 plan.json**——
+	// 续跑会在派活前被 chancellor 拒掉，正好验 resumeOnly（不偷偷改派新单）。
+	store.saveTicket(
+		fixture("T-say", {
+			status: "needs_you",
+			originConversationId: String(internalId),
+		}),
+	);
 	store.close();
 	const receipts = new DelegationReceipts(TICKETS_DB);
 	receipts.begin("probe-legacy", "probe-fingerprint", { explicit: true });
@@ -1475,6 +1483,71 @@ try {
 		"详情接口也给对话标题",
 		String(childTitleDetail.conversationTitle),
 	);
+
+	// ── 18.5 任务即对话（2026-11-08 扫尾批 8g，接口文档 §2.9）──────
+	// 验：回话端点 202 → 建 `task-<票号>` 专线 → 用户条目落进去 → 续跑被拒走 resumeOnly
+	// （不建新单）→ 专线里留下说明；专线不进侧栏。三处"跳过"里，
+	// 任务卡由"专线不产单据"结构性保证、记忆由 configureTaskChat 摘扩展保证（见方案 §四）。
+	console.log("\n· 18.5 任务即对话：回话直通 + 双写 + 隔离");
+	const sayResponse = await fetch(`${BASE}/api/v1/tickets/T-say/say`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ text: "收到，继续" }),
+	});
+	const sayBody = (await sayResponse.json().catch(() => ({}))) as {
+		ok?: boolean;
+		conversationId?: string;
+		ticketId?: string;
+	};
+	check(sayResponse.status === 202, "回话受理 → 202", String(sayResponse.status));
+	check(
+		sayBody.conversationId === "task-T-say",
+		"专线会话 id = task-<票号>",
+		String(sayBody.conversationId),
+	);
+
+	const sayDetail = (await (await fetch(`${BASE}/api/v1/tickets/T-say`)).json()) as {
+		taskConversationEnabled?: boolean;
+		taskConversationId?: string | null;
+	};
+	check(
+		sayDetail.taskConversationEnabled === true && sayDetail.taskConversationId === "task-T-say",
+		"详情下发专线开关与确定性 id",
+		`${sayDetail.taskConversationEnabled} / ${sayDetail.taskConversationId}`,
+	);
+
+	// 专线回读：等用户条目 + 失败说明都落盘（续跑被拒是异步收口的）。
+	let sayTexts: string[] = [];
+	for (let attempt = 0; attempt < 50; attempt += 1) {
+		const response = await fetch(
+			`${BASE}/api/v1/agent/chat/task-T-say/messages?limit=200`,
+		);
+		if (response.ok) {
+			const data = (await response.json()) as { messages?: Array<{ text?: string }> };
+			sayTexts = (data.messages ?? []).map((message) => String(message.text ?? ""));
+		}
+		if (
+			sayTexts.includes("收到，继续") &&
+			sayTexts.some((text) => text.includes("已经不在等回答"))
+		) {
+			break;
+		}
+		await sleep(100);
+	}
+	check(sayTexts.includes("收到，继续"), "主人的回话以用户条目进了专线");
+	check(
+		sayTexts.some((text) => text.includes("已经不在等回答")),
+		"续跑被拒：专线如实说明，没有改派新单",
+	);
+
+	const sideChats = (await (await fetch(`${BASE}/api/v1/agent/chats?limit=300`)).json()) as {
+		chats?: Array<{ conversationId?: string }>;
+	};
+	check(
+		!(sideChats.chats ?? []).some((chat) => chat.conversationId === "task-T-say"),
+		"专线不进侧栏（沿用 task- 前缀过滤）",
+	);
+
 	// ── 19. 忙时投递方式（2026-11-07 消息即引导）────────────────
 	// 契约层只验"字段被接受 + 语义没走偏"：faux 回答很快，这里不追真实插话时序
 	// （那由 browser 验收与 agent 的 notice 断言覆盖），只钉住三种输入的形状。
@@ -1733,11 +1806,13 @@ try {
 	await busyReader?.cancel().catch(() => undefined);
 
 	// 两个开关同一次重启里验完：edit → 404；parts → 400；纯字符串照常
+	// 再加 8g 的 TASK_AS_CONVERSATION=false：回话端点同样 404（未启用）。
 	server.kill();
 	await sleep(800);
 	server = startServer({
 		AGENT_ATTACHMENTS: "false",
 		AGENT_EDIT_RESEND: "false",
+		TASK_AS_CONVERSATION: "false",
 		AGENT_SSE_SEQ_DB_PATH: SEQ_DB,
 	});
 	await waitForReady();
@@ -1770,6 +1845,17 @@ try {
 		body: JSON.stringify({ messageId: secondUser?.id, text: "关着还想改" }),
 	});
 	check(editOff.status === 404, "AGENT_EDIT_RESEND=false：端点 404", String(editOff.status));
+
+	const sayOff = await fetch(`${BASE}/api/v1/tickets/T-any/say`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ text: "在吗" }),
+	});
+	check(
+		sayOff.status === 404,
+		"TASK_AS_CONVERSATION=false：回话端点 404（未启用）",
+		String(sayOff.status),
+	);
 
 } finally {
 	server.kill();

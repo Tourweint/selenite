@@ -16,4 +16,4 @@ apps/server/data/
 # 从 ts/ 根目录跑探针时 chancellor 落在 cwd，同样不入库
 runs/
 data/
-ts/apps/server/managers/
+apps/server/managers/

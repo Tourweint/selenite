@@ -29,6 +29,9 @@ import {
 import { isAutonomyTurn } from "../autonomy-state.ts";
 import { autonomyRiskVerdict } from "../autonomy-risk.ts";
 import { emitDelegation, type DelegationReport } from "../delegation.ts";
+// 任务专线双写（2026-11-08 扫尾批 8g）：只有真正的装配层注入 mirror；
+// createTools 的探针/单测调用不传，避免去开真实 durable。
+import { taskConversationMirror } from "../task-conversation.ts";
 import { loopGuardEnabled, loopGuardFor, resetLoopGuard } from "../loop-guard.ts";
 import {
 	CHIEF_PARTNER_ID,
@@ -331,6 +334,9 @@ async function openHarness(): Promise<Harness> {
 		reportDelegation: (conversationId, report) => {
 			void reportDelegationResult(conversationId, report);
 		},
+		// 任务专线双写（2026-11-08 扫尾批 8g）：进度 / REPORT / out 留言同步一份
+		// 进 `task-<票号>` 会话。开关在 task-conversation 内部（TASK_AS_CONVERSATION）。
+		mirrorDelegation: taskConversationMirror,
 		// 课题（2026-11-07）：createTools 内按 TOPICS_ENABLED / 依赖缺失决定注不注册。
 		topics: topicsStore(),
 		search: searchModule,

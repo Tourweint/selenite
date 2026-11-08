@@ -1781,6 +1781,26 @@ function renderTicketDetail(data, fallbackId) {
     data.cancelEnabled === true || state.ticketsCancelEnabled,
   );
 
+  // 任务专线（2026-11-08 扫尾批 8g「任务即对话」）：一张单一条 `task-<票号>` 会话。
+  // 旧留言区保留（过渡期兜底），这里只加"回话 + 回读"；打开对话走通用会话页。
+  const taskConversationEnabled = data.taskConversationEnabled === true;
+  const taskConversationId =
+    typeof data.taskConversationId === "string" ? data.taskConversationId : "";
+  const conversationSection = taskConversationEnabled
+    ? `<section class="td-section td-task-convo" data-conv="${esc(taskConversationId)}">
+        <h3>任务对话</h3>
+        <p class="td-sec-hint">这张单的专线会话；在这里回话会直接转给执行端。</p>
+        <div class="td-convo-list" id="td-convo-list"><p class="td-note">正在读专线…</p></div>
+        <div class="td-convo-form">
+          <textarea class="cs-textarea" id="td-convo-input" rows="2" placeholder="在这张单里回话…"></textarea>
+          <div class="td-convo-actions">
+            <button class="primary" type="button" id="td-convo-send">发送</button>
+            <button class="ghost" type="button" id="td-convo-open" hidden>打开对话</button>
+          </div>
+        </div>
+      </section>`
+    : "";
+
   el.tasksDetail.innerHTML = `
     <div class="td-card"${ticket.status === "needs_you" ? ' data-attn="1"' : ""}>
       <div class="td-head">
@@ -1802,6 +1822,7 @@ function renderTicketDetail(data, fallbackId) {
       ${error ? `<p class="td-note" data-tone="${ticket.status === "failed" || ticket.status === "aborted" ? "fail" : "ask"}">${esc(error)}</p>` : ""}
     </div>
     ${actionButtons ? `<div class="td-actions">${actionButtons}</div>` : ""}
+    ${conversationSection}
     <section class="td-section">
       <h3>任务<span>${passed}/${total}</span></h3>
       <ul class="td-tasks">${taskRows}</ul>
@@ -1811,6 +1832,110 @@ function renderTicketDetail(data, fallbackId) {
     ${deadLetterRows}
     ${messageRows}
   `;
+
+  if (taskConversationEnabled) {
+    wireTicketConversation(String(ticket.id || fallbackId || ""), taskConversationId);
+  }
+}
+
+/* ── 任务专线：回读 + 回话（2026-11-08 扫尾批 8g）────────────
+ * 回读走既有 GET messages（没建过会话 = 404，按"还没有记录"展示）；
+ * 回话走 POST /tickets/:id/say，成功后重绘详情（服务端会带回新的会话 id）。
+ * 不在详情页维护 SSE：专线是慢通道，发完重读一次足够。 */
+function wireTicketConversation(ticketId, conversationId) {
+  const list = document.getElementById("td-convo-list");
+  const input = document.getElementById("td-convo-input");
+  const send = document.getElementById("td-convo-send");
+  const open = document.getElementById("td-convo-open");
+  if (!list || !input || !send) return;
+
+  if (open) {
+    open.addEventListener("click", () => {
+      if (conversationId) void openConversation(conversationId);
+    });
+  }
+
+  const load = async () => {
+    if (open) open.hidden = true;
+    if (!conversationId) {
+      list.innerHTML = `<p class="td-note">还没有专线记录；发第一句话会开一条。</p>`;
+      return;
+    }
+    try {
+      const response = await request(
+        `/api/v1/agent/chat/${encodeURIComponent(conversationId)}/messages?limit=200`,
+        { cache: "no-store" },
+      );
+      if (response.status === 404) {
+        list.innerHTML = `<p class="td-note">还没有专线记录；发第一句话会开一条。</p>`;
+        return;
+      }
+      if (!response.ok) throw new Error(String(response.status));
+      const data = await response.json();
+      const messages = Array.isArray(data.messages) ? data.messages : [];
+      // 会话确实存在（哪怕还是空的）才给"打开对话"，否则点了会掉进"新对话"。
+      if (open) open.hidden = false;
+      if (!messages.length) {
+        list.innerHTML = `<p class="td-note">专线还是空的；进度、汇报和回话都会出现在这里。</p>`;
+        return;
+      }
+      list.innerHTML = messages
+        .map((message) => {
+          const mine = message.role === "user";
+          const at = message.at ? new Date(message.at).toISOString() : "";
+          return `<div class="td-msg" data-dir="${mine ? "out" : "in"}">
+            <div class="td-msg-top">
+              <span class="td-msg-who">${mine ? "主人" : "任务专线"}</span>
+              <span class="td-stage" title="${esc(at)}">${esc(at ? relativeTime(at) : "")}</span>
+            </div>
+            <p class="td-msg-body">${esc(message.text || "")}</p>
+          </div>`;
+        })
+        .join("");
+      list.scrollTop = list.scrollHeight;
+    } catch (error) {
+      list.innerHTML = `<p class="td-note" data-tone="fail">专线没读出来（${esc(error.message || "未知错误")}），稍后再试。</p>`;
+    }
+  };
+
+  const submit = async () => {
+    const text = input.value.trim();
+    if (!text || send.disabled) return;
+    send.disabled = true;
+    try {
+      const response = await request(
+        `/api/v1/tickets/${encodeURIComponent(ticketId)}/say`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ text }),
+        },
+      );
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        toast(data?.message || `没发出去：HTTP ${response.status}`);
+        return;
+      }
+      input.value = "";
+      toast("已发到专线");
+      // 重绘一次：服务端会把新建的专线 id 一起带回（首次回话时列表由它变成可读）。
+      await showTicketDetail(ticketId);
+    } catch (error) {
+      if (error.message !== "forbidden") toast(`没发出去：${error.message}`);
+    } finally {
+      send.disabled = false;
+    }
+  };
+
+  send.addEventListener("click", () => void submit());
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      void submit();
+    }
+  });
+
+  void load();
 }
 
 /* ── 取消 / 重试（扫尾批 1 A1）─────────────────────────────

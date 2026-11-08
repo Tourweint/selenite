@@ -2631,6 +2631,15 @@ button.tk-archive-bar:focus-visible { outline: 2px solid var(--accent-line); out
   white-space: pre-wrap; word-break: break-word;
 }
 
+/* 任务专线（2026-11-08 扫尾批 8g）：回读列表 + 回话框；沿用留言行的视觉 */
+.td-task-convo .td-convo-list {
+  display: flex; flex-direction: column; gap: 8px;
+  max-height: 340px; overflow-y: auto;
+}
+.td-convo-form { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.td-convo-form textarea { width: 100%; box-sizing: border-box; min-height: 62px; line-height: 1.55; }
+.td-convo-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
 /* 迟到的回报（E2 #2）：节副注 + 行里的子单 id（等宽，和验收记录同一层） */
 .td-sec-hint { margin: -2px 4px 0; font-size: 11.5px; line-height: 1.5; color: var(--text-3); }
 .td-review .td-deadletter-id {
