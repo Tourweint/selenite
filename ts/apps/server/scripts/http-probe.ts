@@ -57,6 +57,9 @@ function startServer(extraEnv: NodeJS.ProcessEnv = {}): ChildProcess {
 			AGENT_POLICY_PATH: ".data/probe-http-policy.json",
 			// 本机 cookie 密钥（auth.ts 落盘保底）：探针起停多次服务，别碰真实 .data/local-secret
 			AGENT_LOCAL_SECRET_PATH: ".data/probe-http-local-secret",
+			// 高级开关 / 技能启停位（2026-11-09）：探针隔离，别写真实 .data 的开关文件
+			AGENT_FLAGS_PATH: ".data/probe-http-flags.json",
+			AGENT_SKILLS_STATE_PATH: ".data/probe-http-skill-state.json",
 			NODE_OPTIONS: "",
 			...extraEnv,
 		},
@@ -2112,6 +2115,134 @@ try {
 		keptState.workspace?.rootPath ?? "null",
 	);
 
+	// ── 26. 高级开关 + 技能启停位（2026-11-09）────────────────────
+	console.log("\n· 26. 高级开关读写 / 技能默认全关·启停·批量");
+	const flagsList = (await (await fetch(`${BASE}/api/v1/agent/flags`)).json()) as {
+		flags: { key: string; value: string; hot: boolean }[];
+	};
+	check(
+		flagsList.flags.some((flag) => flag.key === "AUTONOMY_ENABLED" && flag.hot) &&
+			flagsList.flags.some((flag) => flag.key === "COMPANIONS_ENABLED" && !flag.hot),
+		"GET /agent/flags：白名单齐全且 hot 标注正确",
+	);
+	const flagPut = await fetch(`${BASE}/api/v1/agent/flags/AGENT_ATTACHMENTS`, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ value: "false" }),
+	});
+	const flagPutJson = (await flagPut.json()) as { ok?: boolean; hot?: boolean };
+	check(flagPut.status === 200 && flagPutJson.ok === true && flagPutJson.hot === true, "PUT 开关成功且标热");
+	const flagBad = await fetch(`${BASE}/api/v1/agent/flags/MEMORY_EXTRACT`, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ value: "bogus" }),
+	});
+	check(flagBad.status === 400, "非法取值 400", String(flagBad.status));
+	// 热语义实证：attachmentsEnabled 懒读 env——关掉后 capabilities 投影立刻变（同进程内）
+	const flagsAfter = (await (await fetch(`${BASE}/api/v1/agent/flags`)).json()) as {
+		flags: { key: string; value: string; overridden: boolean }[];
+	};
+	check(
+		flagsAfter.flags.find((flag) => flag.key === "AGENT_ATTACHMENTS")?.value === "false" &&
+			flagsAfter.flags.find((flag) => flag.key === "AGENT_ATTACHMENTS")?.overridden === true,
+		"GET 回读：值与 overridden 都对",
+	);
+	await fetch(`${BASE}/api/v1/agent/flags/AGENT_ATTACHMENTS`, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ value: "true" }),
+	});
+
+	// 技能：建一条 → 默认关 → 单条开 → 批量关（默认全关是 2026-11-09 用户口径）
+	const skillPut = await fetch(`${BASE}/api/v1/agent/skills/probe-skill`, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ content: "探针技能摘要\n探针技能正文" }),
+	});
+	check(skillPut.status === 200 || skillPut.status === 201, "探针技能已写入", String(skillPut.status));
+	const skillList = (await (await fetch(`${BASE}/api/v1/agent/skills`)).json()) as {
+		items: { name: string; enabled: boolean }[];
+	};
+	const probeSkill = skillList.items.find((item) => item.name === "probe-skill");
+	check(probeSkill?.enabled === false, "新建技能默认全关", String(probeSkill?.enabled));
+	await fetch(`${BASE}/api/v1/agent/skills/probe-skill/enabled`, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ enabled: true }),
+	});
+	const skillList2 = (await (await fetch(`${BASE}/api/v1/agent/skills`)).json()) as {
+		items: { name: string; enabled: boolean }[];
+	};
+	check(
+		skillList2.items.find((item) => item.name === "probe-skill")?.enabled === true,
+		"单条开启后 enabled=true",
+	);
+	const skillAllOff = await fetch(`${BASE}/api/v1/agent/skills/enabled-all`, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ enabled: false }),
+	});
+	const skillAllOffJson = (await skillAllOff.json()) as { ok?: boolean; count?: number };
+	check(skillAllOff.status === 200 && skillAllOffJson.ok === true && (skillAllOffJson.count ?? 0) >= 1, "批量全关成功");
+
+	// ── 27. 员工档案 · 技能清单（2026-11-09）──────────────────
+	console.log("\n· 27. 员工档案：GET /partners/:id/skills（只读技能清单）");
+	// §18 起探针进程把 COMPANIONS_ENABLED 置了 false（为了 import agent 不碰执事库），
+	// §25/26 的服务没显式开回来。执事端点要真挂着，这里单独起一轮开着的进程。
+	server.kill();
+	await sleep(800);
+	server = startServer({ COMPANIONS_ENABLED: "true", LIFEDIARY_DEFAULT_WORKSPACE: seedWs });
+	await waitForReady();
+
+	const skillsPartner = await fetch(`${BASE}/api/v1/partners`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ name: "技能清单探针" }),
+	});
+	const skillsPartnerBody = (await skillsPartner.json()) as { ok?: boolean; partner?: { id?: string } };
+	const skillsPartnerId = skillsPartnerBody.partner?.id ?? "";
+	check(
+		skillsPartner.status === 201 && Boolean(skillsPartnerId),
+		"建一个用来验技能清单的执事",
+		String(skillsPartner.status),
+	);
+
+	const skillsEmpty = (await (
+		await fetch(`${BASE}/api/v1/partners/${skillsPartnerId}/skills`)
+	).json()) as { ok?: boolean; skills?: unknown[] };
+	check(
+		skillsEmpty.ok === true && Array.isArray(skillsEmpty.skills) && skillsEmpty.skills.length === 0,
+		"空技能目录 → skills: []",
+	);
+
+	// 直接写家目录（同 partner_skill_write 的形态：skills/<slug>.md，第 1 行 = 摘要）
+	const skillsDir = join(".data/probe-http-partner-homes", skillsPartnerId, "skills");
+	mkdirSync(skillsDir, { recursive: true });
+	writeFileSync(join(skillsDir, "probe-record.md"), "探针技能：一页看全的摘要\n这是正文，不进 summary。\n", "utf8");
+	writeFileSync(join(skillsDir, "ignore.txt"), "不是 md，不该出现", "utf8");
+
+	const skillsList = (await (
+		await fetch(`${BASE}/api/v1/partners/${skillsPartnerId}/skills`)
+	).json()) as {
+		ok?: boolean;
+		skills?: { name: string; summary: string; updatedAt: string }[];
+	};
+	const oneSkill = skillsList.skills?.find((skill) => skill.name === "probe-record");
+	check(
+		skillsList.ok === true &&
+			oneSkill?.summary === "探针技能：一页看全的摘要" &&
+			!Number.isNaN(Date.parse(oneSkill?.updatedAt ?? "")),
+		"GET skills 读回 name / 首行 summary / mtime",
+		oneSkill ? `${oneSkill.name} · ${oneSkill.summary}` : "读不到",
+	);
+	check(
+		skillsList.skills?.every((skill) => skill.name !== "ignore") === true,
+		"非 .md 文件不进清单",
+	);
+
+	const skillsMissing = await fetch(`${BASE}/api/v1/partners/no-such-partner/skills`);
+	check(skillsMissing.status === 404, "未知执事 → 404", String(skillsMissing.status));
+
 } finally {
 	server.kill();
 	await sleep(300);
@@ -2128,6 +2259,8 @@ try {
 	rmSync(WORKSPACE_B, { recursive: true, force: true });
 	rmSync(GATE_OUTSIDE_DIR, { recursive: true, force: true });
 	rmSync(".data/probe-http-default-ws", { recursive: true, force: true });
+	rmSync(".data/probe-http-flags.json", { force: true });
+	rmSync(".data/probe-http-skill-state.json", { force: true });
 	rmSync(".data/probe-http-gate-providers.json", { force: true });
 	rmSync(".data/probe-http-gate-runtime.json", { force: true });
 	rmSync(".data/probe-http-chat-events.sqlite", { force: true });

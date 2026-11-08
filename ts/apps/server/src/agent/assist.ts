@@ -11,6 +11,7 @@ import {
 	resolvePartnerScope,
 } from "../partners.ts";
 import { createSkillStore, resolveSkillsDir, type SkillStore } from "../skills.ts";
+import { getSkillState, skillStateEnabled } from "../skill-state.ts";
 
 /**
  * 派活能力（chancellor）是否装。
@@ -117,19 +118,24 @@ export const memoryEngine: MemoryEngine | null = (() => {
 const resolvedSkills = resolveSkillsDir();
 const SKILLS_DIRS: string[] = resolvedSkills.dirs.map((source) => source.dir);
 
+// 技能启停位（2026-11-09 用户拍板：默认全关，界面上开）。SKILL_STATE=false 逃生门 = 回到全进索引。
+// 注意 getSkillState() 在闭包里懒取（别在模块顶层解构）——首次调用发生在请求期，.env 已就绪。
+const skillVisible = (name: string): boolean =>
+	skillStateEnabled() && getSkillState().isEnabled(name);
+
 export const skillStore: SkillStore | null = (() => {
 	// 主对话（总管）技能（批次D D1）：总管技能目录优先、全局 skills/ 兜底，同名时总管覆盖全局
 	// （createSkillStore 对目录数组按先到先得合并）。CHIEF_PARTNER=false 时只留全局目录 = 改动前。
 	if (chiefPartnerEnabled()) {
 		try {
-			return createSkillStore([chiefSkillsDir(), ...SKILLS_DIRS]);
+			return createSkillStore([chiefSkillsDir(), ...SKILLS_DIRS], { visible: skillVisible });
 		} catch (error) {
 			const detail = error instanceof Error ? error.message : String(error);
 			console.warn(`总管技能目录加载失败，回落全局技能: ${detail}`);
 		}
 	}
 	try {
-		return createSkillStore(SKILLS_DIRS);
+		return createSkillStore(SKILLS_DIRS, { visible: skillVisible });
 	} catch (error) {
 		const detail = error instanceof Error ? error.message : String(error);
 		console.warn(`技能目录加载失败，本次无技能可用: ${detail}`);

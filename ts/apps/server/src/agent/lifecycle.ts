@@ -74,6 +74,7 @@ import { searchModule } from "../search.ts";
 import { createTools } from "../tools.ts";
 import { TOPICS_ENABLED, topicsStore } from "../topics.ts";
 import { TopicTask } from "../topic-runtime.ts";
+import { skillSlashOf } from "../skills.ts";
 import {
 	CHANCELLOR_ENABLED,
 	PERSONA,
@@ -629,6 +630,20 @@ async function openHarness(): Promise<Harness> {
 						);
 						if (memory) {
 							extra.push({ role: "system", content: memory, timestamp: Date.now() });
+						}
+
+						// 技能斜杠调用（2026-11-09 用户口径：对话框输入「/技能名」就能用）：
+						// 本轮用户消息以 /技能名 开头 → 手册整份注入本轮（D5 的"正文按需取"，这就是那一次）。
+						// 开着（在启停名单里）才注入——关着的技能 tool 侧取不到，这里同样不给。
+						const slashName = skillSlashOf(lastUser ? contentText(lastUser.content) : "");
+						const slashManual = slashName ? skillStore?.manual(slashName) : undefined;
+						if (slashName && slashManual) {
+							extra.push({
+								role: "system",
+								content:
+									`【技能调用 · ${slashName}】\n${slashManual}\n（用户消息开头的 /${slashName} 就是调用这份手册；其余文字是这一轮的指令。）`,
+								timestamp: Date.now(),
+							});
 						}
 
 						// 一次模型请求 = 一个工具回合。run 一换，预算就重新算。

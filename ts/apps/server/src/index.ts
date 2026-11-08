@@ -60,6 +60,7 @@ import { PairingStore, buildPairUrl, resolvePairBase } from "./pairing.ts";
 import { pairPage } from "./pair-page.ts";
 import { mountPhoneWorker } from "./phone-worker.ts";
 import { mountProjects, seedDefaultWorkspace } from "./projects.ts";
+import { loadFlagOverrides, mountFlags } from "./flags.ts";
 import { mountFiles } from "./files.ts";
 import { mountDelegationApi } from "./delegation-api.ts";
 import { mountCompanions } from "./companion-api.ts";
@@ -132,6 +133,10 @@ try {
 // 2026-11-05 密钥直填：启动时把 .data/provider-keys.json 注入进程 env。
 // 必须放在 loadEnvFile 之后、任何模型配置读取之前——手写 .env / 部署 env 的已有值优先。
 injectProviderKeys();
+
+// 界面高级开关（2026-11-09）：.data/agent-flags.json 里用户改过的开关覆盖 env。
+// 必须放在路由挂载之前——挂载期的开关（执事/群组/课题/技能管理）要吃到覆盖值。
+loadFlagOverrides();
 
 const app = new Hono();
 
@@ -261,6 +266,8 @@ mountSearch(app);
 
 // 审批答复（2026-11-04 批次二）：待批列表 + 幂等答复。开关关着时列表恒为空。
 mountApprovalApi(app);
+// 高级开关（2026-11-09）：界面读写运行时开关（.data/agent-flags.json）。AGENT_FLAGS_UI=false 整组不挂。
+mountFlags(app);
 // 记忆管理（2026-11-06）：看 / 删 / 标过时。只读列表不碰 durable，删改直接落记忆库。
 mountMemoryApi(app, { enabled: memoryEngine !== null });
 // 技能管理（2026-11-08 扫尾批 9-S）：目录解析 = AGENT_SKILLS_DIR → 用户目录 → 应用目录兜底。

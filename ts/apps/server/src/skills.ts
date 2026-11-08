@@ -289,8 +289,13 @@ export function findSkillInDir(dir: string, name: string): ScannedSkill | null {
  * 每个名字只认第一个出现它的目录，含格式不对的文件也占位，防全局兜底顶掉总管占位。
  * 单目录形态行为与改动前一致。
  */
-export function createSkillStore(dirOrDirs: string | string[]): SkillStore | null {
+export function createSkillStore(
+	dirOrDirs: string | string[],
+	options: { visible?: (name: string) => boolean } = {},
+): SkillStore | null {
 	const dirs = Array.isArray(dirOrDirs) ? dirOrDirs : [dirOrDirs];
+	// 启停位（2026-11-09）：visible 不传 = 全部可见（旧行为）；传了则索引 / 名单 / 取手册都按它过滤
+	const visible = options.visible ?? (() => true);
 
 	const skills = new Map<string, { summary: string; manual: string }>();
 	const claimed = new Set<string>();
@@ -307,9 +312,11 @@ export function createSkillStore(dirOrDirs: string | string[]): SkillStore | nul
 	}
 	if (skills.size === 0) return null;
 
-	const frozen = new Map<number, string>();
-	const renderIndex = (): string => {
-		const lines = [...skills.entries()].map(([name, skill]) => `- ${name}：${skill.summary}`);
+	const frozen = new Map<number, string | undefined>();
+	const renderIndex = (): string | undefined => {
+		const lines = [...skills.keys()].filter(visible).map((name) => `- ${name}：${skills.get(name)!.summary}`);
+		// 一个可见的都没有：整个 section 省略（接口注释的既有口径），别渲染空标题
+		if (!lines.length) return undefined;
 		return (
 			"可用技能（对方的事需要按某个流程引导时，先调 skill(name) 取完整手册再开始）：\n" +
 			lines.join("\n")
@@ -321,15 +328,22 @@ export function createSkillStore(dirOrDirs: string | string[]): SkillStore | nul
 	const preview = names.slice(0, 40).join("、") + (names.length > 40 ? `、…（共 ${names.length} 条）` : "");
 	console.log(`[skills] 已加载 ${skills.size} 条技能：${preview}`);
 	return {
-		names: () => [...skills.keys()],
-		manual: (name) => skills.get(name)?.manual,
+		names: () => [...skills.keys()].filter(visible),
+		manual: (name) => (visible(name) ? skills.get(name)?.manual : undefined),
 		indexFor(conversationId) {
-			let index = frozen.get(conversationId);
-			if (index === undefined) {
-				index = renderIndex();
-				frozen.set(conversationId, index);
-			}
-			return index;
+			// 全关时渲染结果是 undefined：用 has 判冻，别用 get——undefined 也算"已冻结"
+			if (!frozen.has(conversationId)) frozen.set(conversationId, renderIndex());
+			return frozen.get(conversationId);
 		},
 	};
+}
+
+/**
+ * 技能斜杠调用（2026-11-09 用户口径：对话框输入「/技能名」就能用）。
+ * 纯函数：匹配 `/name`（名字规则与 SKILL_NAME 同一条）+ 后面是空白或行尾才算，
+ * `/abc/def` 这种路径样不算。生命周期钩子据此把手册整份注入本轮。
+ */
+export function skillSlashOf(text: string): string | null {
+	const match = /^\/([a-z0-9][a-z0-9-_]{0,63})(?:\s|$)/.exec(String(text || "").trimStart());
+	return match ? match[1] : null;
 }

@@ -18,6 +18,7 @@ import {
 	type ResolvedSkillsDir,
 	type SkillSource,
 } from "./skills.ts";
+import { getSkillState } from "./skill-state.ts";
 
 /**
  * 技能管理端点（2026-11-08 扫尾批 9-S；2026-11-08 批 10-A 改多来源只读展示）。
@@ -143,6 +144,7 @@ function insideSource(dir: string, path: string): boolean {
 export function mountSkills(app: Hono, deps: SkillsApiDeps = {}): void {
 	const resolve = deps.resolve ?? (() => resolveSkillsDir());
 	if (!(deps.enabled ?? skillsAdminEnabled())) return;
+	const skillState = getSkillState();
 
 	app.get("/api/v1/agent/skills", (c) => {
 		const resolved = resolve();
@@ -154,6 +156,7 @@ export function mountSkills(app: Hono, deps: SkillsApiDeps = {}): void {
 			origin: string;
 			writable: boolean;
 			form: "flat" | "dir";
+			enabled: boolean;
 		}[] = [];
 		const claimed = new Set<string>();
 		for (const source of resolved.dirs) {
@@ -177,6 +180,8 @@ export function mountSkills(app: Hono, deps: SkillsApiDeps = {}): void {
 						origin: source.origin,
 						writable: source.writable,
 						form: entry.form,
+						// 启停位（2026-11-09）：默认全关，界面上逐条/批量开
+						enabled: skillState.isEnabled(entry.name),
 					});
 				} catch {
 					// 单个文件读不了不该让整页列表 500
@@ -195,6 +200,59 @@ export function mountSkills(app: Hono, deps: SkillsApiDeps = {}): void {
 			})),
 			items,
 		});
+	});
+
+	/** 启停位（2026-11-09 用户拍板：技能默认全关，界面上开）。开 = 进索引/能被 skill 工具取到。 */
+	app.put("/api/v1/agent/skills/:name/enabled", async (c) => {
+		const name = c.req.param("name");
+		if (!SKILL_NAME.test(name)) {
+			return c.json(
+				{ error: "bad_request", message: "技能名只能是小写字母 / 数字 / 短横线 / 下划线，1-64 字符" },
+				400,
+			);
+		}
+		const body = (await c.req.json().catch(() => null)) as { enabled?: unknown } | null;
+		if (typeof body?.enabled !== "boolean") {
+			return c.json({ error: "bad_request", message: "enabled 必须是布尔" }, 400);
+		}
+		// 存在性：按加载器同一条先到先得扫一遍（关着的技能从 names() 里查不到，不能拿那个判断）
+		let exists = false;
+		for (const source of resolve().dirs) {
+			const found = findSkillInDir(source.dir, name);
+			if (found?.valid) {
+				exists = true;
+				break;
+			}
+		}
+		if (!exists) return c.json({ error: "not_found", message: `没有叫「${name}」的技能` }, 404);
+		skillState.setEnabled(name, body.enabled);
+		return c.json({
+			ok: true,
+			name,
+			enabled: body.enabled,
+			// 索引按会话冻结（D5）：开关对已在跑的会话不生效；工具侧取手册是即时的
+			note: "索引随下一个会话刷新；已在跑的会话里 skill 工具立即取不到（或恢复）这份手册",
+		});
+	});
+
+	/** 批量启停（2026-11-09 用户口径：默认全关，界面上能一键全开/全关） */
+	app.put("/api/v1/agent/skills/enabled-all", async (c) => {
+		const body = (await c.req.json().catch(() => null)) as { enabled?: unknown } | null;
+		if (typeof body?.enabled !== "boolean") {
+			return c.json({ error: "bad_request", message: "enabled 必须是布尔" }, 400);
+		}
+		const names: string[] = [];
+		const claimed = new Set<string>();
+		for (const source of resolve().dirs) {
+			for (const entry of scanSkillDir(source.dir)) {
+				if (claimed.has(entry.name)) continue;
+				claimed.add(entry.name);
+				// 与列表同一条管理面规则：白名单外的名字不进管理面，也不被它批量开关
+				if (entry.valid && SKILL_NAME.test(entry.name)) names.push(entry.name);
+			}
+		}
+		skillState.setAll(body.enabled, names);
+		return c.json({ ok: true, count: names.length, enabled: body.enabled, note: "索引随下一个会话刷新" });
 	});
 
 	app.get("/api/v1/agent/skills/:name", (c) => {
