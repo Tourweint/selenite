@@ -8973,6 +8973,12 @@ const SETTINGS_SECTIONS = [
     icon: '<circle cx="10" cy="8" r="5"/><path d="M2 21a8 8 0 0 1 12.9-6.3"/><path d="M18 15l3 3-6 6-3.5.5.5-3.5z"/>',
   },
   {
+    id: "skills",
+    label: "技能",
+    // 2026-11-08 扫尾批 9-S：技能 = 给 AI 的操作手册，用 book-open 比拼图更贴"手册"这件事
+    icon: '<path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/>',
+  },
+  {
     id: "about",
     label: "关于",
     icon: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
@@ -9668,6 +9674,26 @@ async function renderSettings() {
     );
     document.getElementById("partner-add")?.addEventListener("click", () => openCreatePartnerModal());
     void loadPartners();
+  } else if (page === "skills") {
+    el.settingsInner.innerHTML = `${sectionMarkup(
+      "技能",
+      `<div class="sk-head">
+        <div class="row-main">
+          <div class="set-card-title">技能库</div>
+          <div class="set-hint">技能 = 给 AI 的操作手册：第 1 行是索引摘要，其余是正文。放进目录即生效于下一个会话。</div>
+          <div class="sk-path" id="skill-path">读取中…</div>
+        </div>
+        <button class="btn-primary" type="button" id="skill-add">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+          新建技能
+        </button>
+      </div>
+      <div class="sk-list" id="skill-list">
+        <div class="set-hint">读取中…</div>
+      </div>`,
+    )}`;
+    document.getElementById("skill-add")?.addEventListener("click", () => openCreateSkillModal());
+    void loadSkills();
   } else {
     el.settingsInner.innerHTML = sectionMarkup(
       "关于",
@@ -9680,6 +9706,286 @@ async function renderSettings() {
   }
 
   replayPageEnter();
+}
+
+/* ── 技能设置（2026-11-08 扫尾批 9-S）──────────────
+ * 技能 = 给 AI 的操作手册（`skills/<name>.md`，第 1 行 = 索引用摘要）。
+ * 目录解析在服务端（`resolveSkillsDir`）：AGENT_SKILLS_DIR → 用户目录 → 应用目录兜底。
+ * 这里只说"人对文件做了什么"：列表 / 点开编辑 / 新建 / 删除。
+ * 刻意不做启停位：删除即停；增删只影响下一个会话（D5 既有取舍，文案如实写）。 */
+
+const SKILL_ORIGIN_LABEL = {
+  env: "AGENT_SKILLS_DIR",
+  user: "用户目录",
+  app: "内置目录",
+};
+const SKILL_NAME_RE = /^[a-z0-9][a-z0-9-_]{0,63}$/;
+
+/** 「对已在跑的会话不生效，下一个会话开始使用」——三处入口共用同一句，避免各自改口径 */
+const SKILL_NEXT_TURN_HINT = "对已在跑的会话不生效，下一个会话开始使用。";
+
+function skillSizeText(size) {
+  const bytes = Number(size) || 0;
+  if (bytes < 1024) return `${bytes} B`;
+  return `${(bytes / 1024).toFixed(1)} KB`;
+}
+
+function skillWhenText(iso) {
+  const at = Date.parse(String(iso || ""));
+  return Number.isFinite(at) ? new Date(at).toLocaleString("zh-CN") : "—";
+}
+
+async function loadSkills() {
+  const box = document.getElementById("skill-list");
+  const path = document.getElementById("skill-path");
+  const add = document.getElementById("skill-add");
+  if (!box) return;
+  try {
+    const response = await request("/api/v1/agent/skills", { cache: "no-store" });
+    const data = await response.json().catch(() => ({}));
+    if (response.status === 404) {
+      if (path) path.textContent = "";
+      if (add) add.hidden = true;
+      box.innerHTML = `<div class="card sk-empty"><p class="set-hint">技能管理未启用（服务端 SKILLS_ADMIN=false）。</p></div>`;
+      return;
+    }
+    if (!response.ok) throw new Error(String(response.status));
+    if (path) {
+      const origin = SKILL_ORIGIN_LABEL[data.origin] || data.origin || "";
+      path.textContent = `位置：${data.dir || "—"}${origin ? `（${origin}）` : ""}`;
+    }
+    renderSkillList(box, Array.isArray(data.items) ? data.items : []);
+  } catch (error) {
+    if (error.message === "forbidden") return;
+    box.innerHTML = `<div class="set-hint is-error">读不到技能：${esc(String(error.message))}</div>`;
+  }
+}
+
+function renderSkillList(box, items) {
+  box.replaceChildren();
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "card sk-empty";
+    empty.innerHTML = `<p class="set-hint">还没有技能。点右上「新建技能」写一份手册；也可以把现成的 .md 放进技能目录（第 1 行是摘要）。</p>`;
+    box.append(empty);
+    return;
+  }
+  for (const item of items) {
+    const name = String(item.name || "");
+    const card = document.createElement("div");
+    card.className = "card sk-item";
+    card.innerHTML = `
+      <button class="sk-open" type="button" data-skill-open="${attr(name)}" title="点开编辑">
+        <span class="sk-item-name">${esc(name)}</span>
+        <span class="sk-item-summary">${esc(String(item.summary || "（第 1 行是空摘要，不会进索引）"))}</span>
+        <span class="sk-item-meta">${esc(skillWhenText(item.updatedAt))} · ${esc(skillSizeText(item.size))}</span>
+      </button>
+      <div class="sk-item-actions">
+        <button class="ghost mem-act" type="button" data-skill-delete="${attr(name)}">删除</button>
+      </div>`;
+    box.append(card);
+    card.querySelector("[data-skill-open]")?.addEventListener("click", () => void openEditSkillModal(name));
+    card.querySelector("[data-skill-delete]")?.addEventListener("click", () => openDeleteSkillModal(name));
+  }
+}
+
+/** 读一条技能正文；失败返回 null（已经 toast 过，调用方直接收工） */
+async function readSkill(name) {
+  try {
+    const response = await request(`/api/v1/agent/skills/${encodeURIComponent(name)}`, {
+      cache: "no-store",
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      toast(data.message || `读不到技能：HTTP ${response.status}`);
+      return null;
+    }
+    return String(data.content ?? "");
+  } catch (error) {
+    if (error.message !== "forbidden") toast(`读不到技能：${error.message}`);
+    return null;
+  }
+}
+
+async function openEditSkillModal(name) {
+  const content = await readSkill(name);
+  if (content === null) return;
+  openModal(
+    `技能 · ${name}`,
+    (body) => {
+      body.innerHTML = `
+        <p class="modal-desc">第 1 行是索引摘要，第 2 行起是完整手册。保存即写文件；${SKILL_NEXT_TURN_HINT}</p>
+        <div class="modal-field">
+          <span>技能名（文件名，不可在这里改）</span>
+          <div class="sk-readonly">${esc(name)}</div>
+        </div>
+        <div class="modal-field">
+          <span>正文（Markdown，≤64KB）</span>
+          <textarea class="sk-ta" id="sk-content" rows="16" spellcheck="false"></textarea>
+        </div>
+        <p class="modal-hint" id="sk-hint"></p>
+        <div class="modal-actions">
+          <button class="ghost" type="button" data-modal-cancel>取消</button>
+          <button class="modal-primary" id="sk-save" type="button">保存</button>
+        </div>`;
+      const area = body.querySelector("#sk-content");
+      const hint = body.querySelector("#sk-hint");
+      const save = body.querySelector("#sk-save");
+      area.value = content;
+      body.querySelector("[data-modal-cancel]")?.addEventListener("click", closeModal);
+      area.addEventListener("input", () => clearModalHint(hint));
+
+      const submit = async () => {
+        if (save.disabled) return;
+        if (!area.value.trim()) {
+          setModalHint(hint, "正文不能为空。");
+          area.focus();
+          return;
+        }
+        save.disabled = true;
+        setModalHint(hint, "保存中…", false);
+        try {
+          const response = await request(`/api/v1/agent/skills/${encodeURIComponent(name)}`, {
+            method: "PUT",
+            body: JSON.stringify({ content: area.value }),
+          });
+          const data = await response.json().catch(() => ({}));
+          if (!response.ok) {
+            setModalHint(hint, data.message || `没保存：HTTP ${response.status}`);
+            return;
+          }
+          closeModal();
+          toast("技能已保存");
+          void loadSkills();
+        } catch (error) {
+          if (error.message === "forbidden") { closeModal(); return; }
+          setModalHint(hint, `没保存：${error.message}`);
+        } finally {
+          save.disabled = false;
+        }
+      };
+      save.addEventListener("click", () => void submit());
+    },
+    { className: "modal-wide" },
+  );
+}
+
+function openCreateSkillModal() {
+  openModal(
+    "新建技能",
+    (body) => {
+      body.innerHTML = `
+        <p class="modal-desc">技能名就是文件名（小写字母 / 数字 / 短横线 / 下划线）。第 1 行写一句话摘要，第 2 行起写手册。${SKILL_NEXT_TURN_HINT}</p>
+        <div class="modal-field">
+          <span>技能名</span>
+          <input class="modal-input is-mono" id="sk-new-name" type="text" maxlength="64"
+                 spellcheck="false" placeholder="例如 daily-brief" />
+        </div>
+        <div class="modal-field">
+          <span>正文（Markdown，≤64KB）</span>
+          <textarea class="sk-ta" id="sk-new-content" rows="14" spellcheck="false"
+                    placeholder="第一行：一句话摘要&#10;第二行起：完整手册…"></textarea>
+        </div>
+        <p class="modal-hint" id="sk-new-hint"></p>
+        <div class="modal-actions">
+          <button class="ghost" type="button" data-modal-cancel>取消</button>
+          <button class="modal-primary" id="sk-new-go" type="button">新建</button>
+        </div>`;
+      const nameInput = body.querySelector("#sk-new-name");
+      const area = body.querySelector("#sk-new-content");
+      const hint = body.querySelector("#sk-new-hint");
+      const go = body.querySelector("#sk-new-go");
+      body.querySelector("[data-modal-cancel]")?.addEventListener("click", closeModal);
+
+      const submit = async () => {
+        if (go.disabled) return;
+        const name = nameInput.value.trim();
+        if (!SKILL_NAME_RE.test(name)) {
+          setModalHint(hint, "技能名只能是小写字母 / 数字 / 短横线 / 下划线，1-64 字符。");
+          nameInput.focus();
+          return;
+        }
+        if (!area.value.trim()) {
+          setModalHint(hint, "正文不能为空。");
+          area.focus();
+          return;
+        }
+        go.disabled = true;
+        setModalHint(hint, "创建中…", false);
+        try {
+          // 先探一下同名：新建不该悄悄覆盖已有技能（要改请从列表点开）
+          const exists = await request(`/api/v1/agent/skills/${encodeURIComponent(name)}`, {
+            cache: "no-store",
+          });
+          if (exists.ok) {
+            setModalHint(hint, "已有同名技能；要改它请关掉这里、从列表点开编辑。");
+            return;
+          }
+          const response = await request(`/api/v1/agent/skills/${encodeURIComponent(name)}`, {
+            method: "PUT",
+            body: JSON.stringify({ content: area.value }),
+          });
+          const data = await response.json().catch(() => ({}));
+          if (!response.ok) {
+            setModalHint(hint, data.message || `没建成：HTTP ${response.status}`);
+            return;
+          }
+          closeModal();
+          toast("技能已新建");
+          void loadSkills();
+        } catch (error) {
+          if (error.message === "forbidden") { closeModal(); return; }
+          setModalHint(hint, `没建成：${error.message}`);
+        } finally {
+          go.disabled = false;
+        }
+      };
+      go.addEventListener("click", () => void submit());
+      nameInput.addEventListener("input", () => clearModalHint(hint));
+      nameInput.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") { event.preventDefault(); void submit(); }
+      });
+    },
+    { className: "modal-wide" },
+  );
+}
+
+function openDeleteSkillModal(name) {
+  openModal("删除技能", (body) => {
+    body.innerHTML = `
+      <p class="modal-desc">删除 <b>${esc(name)}</b> 后，这份手册不再加载。${SKILL_NEXT_TURN_HINT}</p>
+      <p class="modal-hint" id="sk-del-hint"></p>
+      <div class="modal-actions">
+        <button class="ghost" type="button" data-modal-cancel>先留着</button>
+        <button class="modal-danger" id="sk-del-go" type="button">确认删除</button>
+      </div>`;
+    const hint = body.querySelector("#sk-del-hint");
+    const go = body.querySelector("#sk-del-go");
+    body.querySelector("[data-modal-cancel]")?.addEventListener("click", closeModal);
+    go.addEventListener("click", async () => {
+      if (go.disabled) return;
+      go.disabled = true;
+      setModalHint(hint, "删除中…", false);
+      try {
+        const response = await request(`/api/v1/agent/skills/${encodeURIComponent(name)}`, {
+          method: "DELETE",
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          setModalHint(hint, data.message || `没删掉：HTTP ${response.status}`);
+          return;
+        }
+        closeModal();
+        toast("技能已删除");
+        void loadSkills();
+      } catch (error) {
+        if (error.message === "forbidden") { closeModal(); return; }
+        setModalHint(hint, `没删掉：${error.message}`);
+      } finally {
+        go.disabled = false;
+      }
+    });
+  });
 }
 
 /* ── 记忆设置（2026-11-06；2026-11-08 扫尾批 6 补整理与导入）──

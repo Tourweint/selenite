@@ -1,4 +1,3 @@
-import { fileURLToPath } from "node:url";
 import { createMemoryEngine, scopeKey, type MemoryEngine, type MemoryScope } from "@lifediary/memory";
 import { diaryStore } from "../diary.ts";
 import { recentDiaryMemories, syncDiaryToMemory } from "../memory-ingest.ts";
@@ -11,7 +10,7 @@ import {
 	partnersStore,
 	resolvePartnerScope,
 } from "../partners.ts";
-import { createSkillStore, type SkillStore } from "../skills.ts";
+import { APP_SKILLS_DIR, createSkillStore, resolveSkillsDir, type SkillStore } from "../skills.ts";
 
 /**
  * 派活能力（chancellor）是否装。
@@ -110,23 +109,29 @@ export const memoryEngine: MemoryEngine | null = (() => {
 })();
 
 // ── 技能 ─────────────────────────────────────────────────
-/** 技能目录：默认跟着代码走（apps/server/skills/），可用 AGENT_SKILLS_DIR 换 */
-const SKILLS_DIR =
-	process.env.AGENT_SKILLS_DIR?.trim() || fileURLToPath(new URL("../skills", import.meta.url));
+/**
+ * 技能目录（2026-11-08 扫尾批 9-S）：解析优先级 = AGENT_SKILLS_DIR 显式 → 用户目录
+ * （%USERPROFILE%\.lifediary\skills，首访自动建）→ 应用目录兜底，见 skills.ts 的
+ * resolveSkillsDir()。用户目录首访为空，所以 origin=user 时要并上应用目录
+ * （先到先得），两条内置手册才不会消失。
+ */
+const resolvedSkills = resolveSkillsDir();
+const SKILLS_DIRS: string[] =
+	resolvedSkills.origin === "user" ? [resolvedSkills.dir, APP_SKILLS_DIR] : [resolvedSkills.dir];
 
 export const skillStore: SkillStore | null = (() => {
 	// 主对话（总管）技能（批次D D1）：总管技能目录优先、全局 skills/ 兜底，同名时总管覆盖全局
 	// （createSkillStore 对目录数组按先到先得合并）。CHIEF_PARTNER=false 时只留全局目录 = 改动前。
 	if (chiefPartnerEnabled()) {
 		try {
-			return createSkillStore([chiefSkillsDir(), SKILLS_DIR]);
+			return createSkillStore([chiefSkillsDir(), ...SKILLS_DIRS]);
 		} catch (error) {
 			const detail = error instanceof Error ? error.message : String(error);
 			console.warn(`总管技能目录加载失败，回落全局技能: ${detail}`);
 		}
 	}
 	try {
-		return createSkillStore(SKILLS_DIR);
+		return createSkillStore(SKILLS_DIRS);
 	} catch (error) {
 		const detail = error instanceof Error ? error.message : String(error);
 		console.warn(`技能目录加载失败，本次无技能可用: ${detail}`);

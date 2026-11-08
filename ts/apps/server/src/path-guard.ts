@@ -55,9 +55,17 @@ function realTarget(target: string): string {
 }
 
 /** 根自身也算"在根内"（写根目录本身会由工具自己报错，不在这里制造歧义）。 */
-function insideOrEqual(root: string, target: string): boolean {
+export function insideOrEqual(root: string, target: string): boolean {
 	const rel = relative(root, target);
 	return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+/**
+ * 目标路径的**真实落点**（含尚未存在的路径：最近的已存在祖先 realpath 后接回尾段）。
+ * 导出给 `skills-api.ts` 用：技能写盘的越界复核与 pathGuard 必须是同一套算法。
+ */
+export function realTargetOf(target: string): string {
+	return realTarget(target);
 }
 
 export interface PathGuardInput {

@@ -80,6 +80,9 @@ import { watchAllEvents } from "./agent.ts";
 import { autonomyEnabled, autonomyObserver } from "./autonomy.ts";
 import { mountApprovalApi } from "./approval-api.ts";
 import { mountMemoryApi } from "./memory-api.ts";
+// 技能管理（2026-11-08 扫尾批 9-S）：设置页「技能」分区的增删改查，写操作锁死在技能目录内。
+// SKILLS_ADMIN=false 时 mountSkills 内部直接返回，整组路由 404（同 TOPICS/COMPANIONS 口径）。
+import { mountSkills } from "./skills-api.ts";
 import { mountWeb } from "./web.ts";
 import { mountWorkerShell } from "./worker-shell.ts";
 import { syncDiaryToMemory } from "./memory-ingest.ts";
@@ -262,6 +265,9 @@ mountSearch(app);
 mountApprovalApi(app);
 // 记忆管理（2026-11-06）：看 / 删 / 标过时。只读列表不碰 durable，删改直接落记忆库。
 mountMemoryApi(app, { enabled: memoryEngine !== null });
+// 技能管理（2026-11-08 扫尾批 9-S）：目录解析 = AGENT_SKILLS_DIR → 用户目录 → 应用目录兜底。
+// 技能增删只影响下一个会话（D5 既有取舍），UI 文案已如实说明。
+mountSkills(app);
 
 // 界面（2026-11-03）：原来那张 M0 调试页换成了真界面，仍然是同源静态文件。
 // 桌面壳和浏览器打开的都是这个 `/`。
