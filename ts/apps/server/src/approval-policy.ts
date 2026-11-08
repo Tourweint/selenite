@@ -4,8 +4,11 @@
  * 单独成模块的理由同 reliability.ts：agent.ts 模块加载即建 memoryEngine / skillStore，
  * 单测 import 它会有副作用。这里只做"给定策略与工具名 → 拦 / 问 / 放"的纯判断。
  *
- * **独立轴**：三档（access）是能力边界，`confirmWrites` 是确认策略，两者可以同时成立。
+ * **独立轴**：三档（access）是能力边界，审批档是确认策略，两者可以同时成立。
  * 同时成立时**拦优先**——只读模式下问都不用问，直接拒。
+ *
+ * 2026-11-08 扫尾批 10-C：确认轴从布尔 `confirmWrites` 升级为三档
+ * （`ask-all` / `ask-critical` / `none`）；旧布尔在 policy 层做兼容映射。
  */
 
 /**
@@ -31,7 +34,43 @@ export const WRITE_TOOLS = new Set([
 ]);
 
 export interface ApprovalPolicy {
-	confirmWrites: boolean;
+	/** 审批档：全问 / 只问高危 / 全不问 */
+	approvalLevel: ApprovalLevel;
+}
+
+/** 审批三档（2026-11-08 扫尾批 10-C，用户拍板） */
+export type ApprovalLevel = "ask-all" | "ask-critical" | "none";
+
+/**
+ * `ask-critical` 的缺省高危清单：会起执行 / 烧 token 的动作。
+ *
+ * 文件 write / edit 这类常规写**不在**清单里——"只问重要的"就是让它们自动放行。
+ * `send_to_agent` 不在 `WRITE_TOOLS`（它不写文件），但它会起一轮对方模型调用，
+ * 同样属于"会花钱"的一类，所以单列进来。
+ */
+export const DEFAULT_CRITICAL_TOOLS = [
+	"bash",
+	"powershell",
+	"delegate",
+	"partner_manage",
+	"send_to_agent",
+] as const;
+
+/**
+ * 实际生效的高危清单。`AGENT_APPROVAL_CRITICAL_TOOLS`（逗号分隔）可整体覆盖；
+ * 空串 / 未设回落缺省（配错了宁可多问，不能悄悄变成"全不问"）。
+ */
+export function approvalCriticalTools(
+	env: Record<string, string | undefined> = process.env,
+): ReadonlySet<string> {
+	const raw = env.AGENT_APPROVAL_CRITICAL_TOOLS?.trim();
+	if (!raw) return new Set(DEFAULT_CRITICAL_TOOLS);
+	return new Set(
+		raw
+			.split(",")
+			.map((name) => name.trim())
+			.filter(Boolean),
+	);
 }
 
 export type ApprovalVerdict =
@@ -47,14 +86,25 @@ export type ApprovalVerdict =
  *
  * `blockReason` 来自现有的 `readOnlyBlockReason()`：黑名单、只读档、不跑命令档都在这里落地。
  * 它优先于审批——被策略拦下的调用没有"确认后就能跑"的说法。
+ *
+ * 三档（2026-11-08 扫尾批 10-C）：
+ *   - `ask-all`：写类工具（`WRITE_TOOLS`）全问，另加高危清单——保证三档单调
+ *     （`ask-all` 一定包含 `ask-critical` 问的那些；`send_to_agent` 不在 `WRITE_TOOLS`，
+ *     旧布尔只有 true/false，没有"全问却漏掉递话"的道理）；
+ *   - `ask-critical`：只问 `critical` 清单（缺省命令 / 派活 / 执事管理 / 递话）；
+ *   - `none`：不问——与旧 `confirmWrites:false` 一致。
  */
 export function needsApproval(
 	policy: ApprovalPolicy,
 	tool: string,
 	blockReason?: string,
+	critical: ReadonlySet<string> = approvalCriticalTools(),
 ): ApprovalVerdict {
 	if (blockReason) return { kind: "block", reason: blockReason };
-	if (policy.confirmWrites && WRITE_TOOLS.has(tool)) return { kind: "ask" };
+	if (policy.approvalLevel === "ask-all" && (WRITE_TOOLS.has(tool) || critical.has(tool))) {
+		return { kind: "ask" };
+	}
+	if (policy.approvalLevel === "ask-critical" && critical.has(tool)) return { kind: "ask" };
 	return { kind: "allow" };
 }
 

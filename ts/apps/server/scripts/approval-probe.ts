@@ -16,7 +16,7 @@
  *   pnpm --filter @lifediary/server approval
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 
 const PORT = Number(process.env.PROBE_PORT ?? 8099);
@@ -29,6 +29,10 @@ const RAN_ASYNC = ".data/probe-approval-ran.txt";
 /** 换参数段：旧参数写这个文件、新参数写 RAN_SWAP */
 const RAN_MISMATCH = ".data/probe-approval-ran-old.txt";
 const RAN_SWAP = ".data/probe-approval-ran2.txt";
+/** 三档矩阵段：write 工具真的落盘 */
+const RAN_WRITE = ".data/probe-approval-write.txt";
+/** 三档矩阵段的项目库（delegate 的 needs_project 判定用，绝不碰真实 .data） */
+const PROJECTS_DB = ".data/probe-approval-projects.sqlite";
 
 let failures = 0;
 function check(ok: boolean, label: string, detail = ""): void {
@@ -76,6 +80,9 @@ function baseEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
 		AGENT_POLICY_PATH: POLICY,
 		AGENT_CHAT_META_PATH: ".data/probe-approval-chat-meta.json",
 		CHANCELLOR_ENABLED: "false",
+		// 三档矩阵段会真调 delegate（none 档放行）：项目库必须隔离，
+		// 空库 = 没有工作区 = needs_project，不会真起 chancellor 进程。
+		PROJECTS_DB_PATH: PROJECTS_DB,
 		// faux 只发一个工具调用：没有合法参数时内核在校验阶段就挡掉，根本走不到 beforeTool
 		LLM_FAUX_TOOL: "bash",
 		LLM_FAUX_ARGS: "",
@@ -302,6 +309,23 @@ async function setPolicy(body: Record<string, unknown>): Promise<number> {
 	return response.status;
 }
 
+/** POST /policy 的完整响应（三档兼容映射要同时看 status 与 body） */
+async function postPolicy(
+	body: Record<string, unknown>,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+	const response = await fetch(`${BASE}/api/v1/agent/policy`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify(body),
+	});
+	return { status: response.status, body: (await response.json().catch(() => ({}))) as Record<string, unknown> };
+}
+
+async function getPolicyBody(): Promise<Record<string, unknown>> {
+	const response = await fetch(`${BASE}/api/v1/agent/policy`);
+	return response.ok ? ((await response.json()) as Record<string, unknown>) : {};
+}
+
 interface StoredApproval {
 	callId: string;
 	status: string;
@@ -333,6 +357,8 @@ rmSync(POLICY, { force: true });
 rmSync(RAN_ASYNC, { force: true });
 rmSync(RAN_MISMATCH, { force: true });
 rmSync(RAN_SWAP, { force: true });
+rmSync(RAN_WRITE, { force: true });
+rmSync(PROJECTS_DB, { force: true });
 
 /** 新形态段的公共 env：确认开着、bash 不超时、faux 只在 3 个回合内打转 */
 function asyncEnv(command: string): NodeJS.ProcessEnv {
@@ -748,6 +774,239 @@ try {
 	check(leftover?.status === "timeout", "遗留 pending 在启动时被置 timeout", leftover?.status ?? "(没找到记录)");
 
 	await boot({ AGENT_CONFIRM_WRITES: "1", AGENT_BASH_TIMEOUT_S: "1" });
+
+	// ══════════════════════════════════════════════════════
+	// C. 审批三档（2026-11-08 扫尾批 10-C）
+	//    三档 × {write, bash, delegate} 真装配行为 + 旧布尔映射 + critical 清单 env 覆盖
+	// ══════════════════════════════════════════════════════
+	console.log("\n════ C. 审批三档（10-C）：三档 × 工具类矩阵 ════");
+	modeEnv = {};
+	rmSync(RAN_WRITE, { force: true });
+
+	type Level = "ask-all" | "ask-critical" | "none";
+
+	/** 每种工具一份合法参数（否则内核校验阶段就挡掉，走不到 beforeTool） */
+	const gateArgs: Record<string, Record<string, string>> = {
+		bash: { command: "echo three-level" },
+		write: { path: RAN_WRITE, content: "three-level\n" },
+		delegate: { requirement: "探针：只验闸门，不真派活（无项目会回 needs_project）" },
+	};
+
+	async function gateCase(
+		level: Level,
+		tool: "bash" | "write" | "delegate",
+		expect: "ask" | "allow",
+		expectOk?: boolean,
+		extra: NodeJS.ProcessEnv = {},
+	): Promise<void> {
+		const label = `${level} × ${tool}`;
+		// 每档现写：policy.json 会跨重启保留，先清掉才能让这一档从干净状态起步
+		rmSync(POLICY, { force: true });
+		await boot({
+			AGENT_APPROVAL_MODE: "",
+			AGENT_CONFIRM_WRITES: "",
+			AGENT_MAX_TURNS: "3",
+			AGENT_BASH_TIMEOUT_S: "900",
+			LLM_FAUX_TOOL: tool,
+			LLM_FAUX_ARGS: JSON.stringify(gateArgs[tool]),
+			...extra,
+		});
+		const wrote = await setPolicy({ approvalLevel: level });
+		check(wrote === 200, `${label}：审批档写入成功`, String(wrote));
+
+		const stream = new ChatStream({ text: `${label} 探针` });
+		await stream.next((event) => event.type === "start");
+		// 谁先到就说明闸门怎么判的：approval = 问了；tool:start = 直接放行执行了
+		const first = await stream.next(
+			(event) =>
+				event.type === "approval" ||
+				(event.type === "tool" && (event as ToolEvent).status === "start"),
+			15_000,
+		);
+		if (expect === "ask") {
+			check(first?.type === "approval", `${label} → 弹审批`, first?.type);
+			check(
+				!stream.events.some((event) => event.type === "tool"),
+				`${label} → 拦在动手之前（没有 tool 事件）`,
+			);
+		} else {
+			check(first?.type === "tool", `${label} → 不弹审批，直接执行`, first?.type);
+			check(
+				!stream.events.some((event) => event.type === "approval"),
+				`${label} → 没有任何 approval 帧`,
+			);
+			if (expectOk !== undefined) {
+				const end = await stream.next<ToolEvent>(
+					(event) => event.type === "tool" && event.status === "end",
+					20_000,
+				);
+				check(end?.ok === expectOk, `${label} → 工具收尾 ok=${String(expectOk)}`, String(end?.ok));
+				// delegate 放行后没有项目 → 工具返回 needs_project（仍是"执行过"的证据），
+				// 同时证明探针没有真的起 chancellor 进程。
+				if (tool === "delegate") {
+					check(
+						Boolean(end?.output?.includes("needs_project")),
+						`${label} → 停在 needs_project（没有真派活）`,
+						end?.output?.slice(0, 120),
+					);
+				}
+			}
+			if (tool === "write") {
+				check(existsSync(RAN_WRITE), `${label} → 文件真的落盘（放行不是假放行）`);
+				rmSync(RAN_WRITE, { force: true });
+			}
+		}
+		await stop(stream.conversationId!);
+		stream.abort();
+		await sleep(250);
+	}
+
+	// ask-all：三个都要问
+	await gateCase("ask-all", "bash", "ask");
+	await gateCase("ask-all", "write", "ask");
+	await gateCase("ask-all", "delegate", "ask", undefined, { CHANCELLOR_ENABLED: "true" });
+	// ask-critical：只问命令 / 派活，write 自动放行
+	await gateCase("ask-critical", "bash", "ask");
+	await gateCase("ask-critical", "write", "allow", true);
+	await gateCase("ask-critical", "delegate", "ask", undefined, { CHANCELLOR_ENABLED: "true" });
+	// none：全部放行（delegate 落到 needs_project 即"执行过"的证据，不真起进程）
+	await gateCase("none", "bash", "allow", true);
+	await gateCase("none", "write", "allow", true);
+	await gateCase("none", "delegate", "allow", true, { CHANCELLOR_ENABLED: "true" });
+
+	// ── C2. 旧 confirmWrites 布尔映射 + 非法值 400 ──────────
+	console.log("\n· C2 旧 confirmWrites POST 兼容映射 / GET 双字段 / 非法值 400");
+	rmSync(POLICY, { force: true });
+	await boot({
+		AGENT_APPROVAL_MODE: "",
+		AGENT_CONFIRM_WRITES: "",
+		LLM_FAUX_TOOL: "bash",
+		LLM_FAUX_ARGS: JSON.stringify({ command: "true" }),
+		AGENT_MAX_TURNS: "2",
+	});
+	const initial = await getPolicyBody();
+	check(
+		initial.approvalLevel === "none" && initial.confirmWrites === false,
+		"缺省档位 = none（旧布尔 false）",
+		JSON.stringify(initial),
+	);
+
+	const legacyOn = await postPolicy({ confirmWrites: true });
+	check(
+		legacyOn.status === 200 && legacyOn.body.approvalLevel === "ask-all" && legacyOn.body.confirmWrites === true,
+		"POST confirmWrites:true → ask-all（旧语义 1/true 映射）",
+		JSON.stringify(legacyOn.body),
+	);
+	const readBack = await getPolicyBody();
+	check(
+		readBack.approvalLevel === "ask-all" && readBack.confirmWrites === true,
+		"GET 同时回 approvalLevel 与派生的 confirmWrites",
+		JSON.stringify(readBack),
+	);
+
+	const legacyOff = await postPolicy({ confirmWrites: false });
+	check(
+		legacyOff.status === 200 && legacyOff.body.approvalLevel === "none" && legacyOff.body.confirmWrites === false,
+		"POST confirmWrites:false → none",
+		JSON.stringify(legacyOff.body),
+	);
+
+	const critical = await postPolicy({ approvalLevel: "ask-critical" });
+	check(
+		critical.status === 200 && critical.body.approvalLevel === "ask-critical" && critical.body.confirmWrites === true,
+		"POST approvalLevel:ask-critical → 落库，派生 confirmWrites=true",
+		JSON.stringify(critical.body),
+	);
+
+	const bad = await postPolicy({ approvalLevel: "ask-some" });
+	check(
+		bad.status === 400 && bad.body.error === "bad_request",
+		"非法 approvalLevel → 400",
+		JSON.stringify(bad),
+	);
+	const badLegacy = await postPolicy({ confirmWrites: "yes" });
+	check(
+		badLegacy.status === 400 && badLegacy.body.error === "bad_request",
+		"旧 confirmWrites 非布尔 → 400（兼容不等于放宽）",
+		JSON.stringify(badLegacy),
+	);
+
+	// policy.json 落的是新字段；旧字段不再写
+	const stored = JSON.parse(readFileSync(POLICY, "utf8")) as Record<string, unknown>;
+	check(
+		stored.approvalLevel === "ask-critical" && !("confirmWrites" in stored),
+		"policy.json 存 approvalLevel、不再写 confirmWrites",
+		JSON.stringify(stored),
+	);
+
+	// ── C3. 读旧 policy.json（只有 confirmWrites）→ 映射 ask-all ──
+	console.log("\n· C3 老 policy.json（confirmWrites:true）→ ask-all");
+	rmSync(POLICY, { force: true });
+	writeFileSync(POLICY, JSON.stringify({ access: "full", blocked: [], confirmWrites: true }, null, 2));
+	await boot({
+		AGENT_APPROVAL_MODE: "",
+		AGENT_CONFIRM_WRITES: "",
+		LLM_FAUX_TOOL: "bash",
+		LLM_FAUX_ARGS: JSON.stringify({ command: "true" }),
+		AGENT_MAX_TURNS: "2",
+	});
+	const migrated = await getPolicyBody();
+	check(
+		migrated.approvalLevel === "ask-all" && migrated.confirmWrites === true,
+		"旧字段读档兼容 → ask-all",
+		JSON.stringify(migrated),
+	);
+
+	// ── C4. critical 清单 env 覆盖 ──────────────────────────
+	console.log("\n· C4 AGENT_APPROVAL_CRITICAL_TOOLS 覆盖缺省清单");
+	rmSync(POLICY, { force: true });
+	await boot({
+		AGENT_APPROVAL_MODE: "",
+		AGENT_CONFIRM_WRITES: "",
+		AGENT_APPROVAL_CRITICAL_TOOLS: "write",
+		AGENT_MAX_TURNS: "3",
+		LLM_FAUX_TOOL: "write",
+		LLM_FAUX_ARGS: JSON.stringify(gateArgs.write),
+	});
+	await setPolicy({ approvalLevel: "ask-critical" });
+	const customWrite = new ChatStream({ text: "自定义清单：write 该问" });
+	await customWrite.next((event) => event.type === "start");
+	const customAsk = await customWrite.next(
+		(event) =>
+			event.type === "approval" || (event.type === "tool" && (event as ToolEvent).status === "start"),
+		15_000,
+	);
+	check(customAsk?.type === "approval", "清单改成 write → write 反而要问", customAsk?.type);
+	check(!existsSync(RAN_WRITE), "问的时候不落盘");
+	await stop(customWrite.conversationId!);
+	customWrite.abort();
+	await sleep(250);
+
+	rmSync(POLICY, { force: true });
+	await boot({
+		AGENT_APPROVAL_MODE: "",
+		AGENT_CONFIRM_WRITES: "",
+		AGENT_APPROVAL_CRITICAL_TOOLS: "write",
+		AGENT_MAX_TURNS: "3",
+		LLM_FAUX_TOOL: "bash",
+		LLM_FAUX_ARGS: JSON.stringify(gateArgs.bash),
+	});
+	await setPolicy({ approvalLevel: "ask-critical" });
+	const customBash = new ChatStream({ text: "自定义清单：bash 不该问" });
+	await customBash.next((event) => event.type === "start");
+	const customAllow = await customBash.next(
+		(event) =>
+			event.type === "approval" || (event.type === "tool" && (event as ToolEvent).status === "start"),
+		15_000,
+	);
+	check(customAllow?.type === "tool", "清单里的 bash 被移除 → 直接执行", customAllow?.type);
+	check(
+		!customBash.events.some((event) => event.type === "approval"),
+		"没有任何 approval 帧",
+	);
+	await stop(customBash.conversationId!);
+	customBash.abort();
+	await sleep(250);
 } finally {
 	killServer();
 	await sleep(300);
@@ -759,6 +1018,8 @@ try {
 	rmSync(RAN_ASYNC, { force: true });
 	rmSync(RAN_MISMATCH, { force: true });
 	rmSync(RAN_SWAP, { force: true });
+	rmSync(RAN_WRITE, { force: true });
+	rmSync(PROJECTS_DB, { force: true });
 	rmSync(".data/probe-approval-chat-meta.json", { force: true });
 }
 

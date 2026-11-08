@@ -7186,7 +7186,7 @@ function csBatchCard(providers, current) {
   return card;
 }
 
-/* ── 二级页 · 权限档：三档分段 + 写确认开关 + 审批入口 ──
+/* ── 二级页 · 权限档：三档分段 + 审批三档 + 审批入口 ──
    轻量重实现，不复用 loadPolicy（那是 getElementById 硬编码 #policy-switch，
    与全屏设置页双绑会打架）；GET /agent/policy 读档、POST 回写（2026-11-07 定论）。 */
 function renderCsPolicyPage() {
@@ -7207,12 +7207,14 @@ function renderCsPolicyPage() {
         </div>
         <span class="cs-hint">完全访问 = 能改文件、能跑命令。改完立刻生效。</span>
       </div>
-      <div class="cs-row is-static">
-        <span class="cs-row-main">
-          <span class="cs-row-title">写操作逐次确认</span>
-          <span class="cs-row-sub">开启后，改文件 / 跑命令 / 派活前先问你一句</span>
-        </span>
-        ${switchMarkup(csPolicy?.confirmWrites === true, { label: "写操作逐次确认", attrs: 'id="cs-policy-confirm-writes"' })}
+      <div class="cs-field">
+        <span class="cs-field-label">动手之前问不问我</span>
+        <div class="segmented slide" role="radiogroup" aria-label="审批档" id="cs-policy-approval-level">
+          <button type="button" data-approval="ask-all" aria-checked="false">全部问我</button>
+          <button type="button" data-approval="ask-critical" aria-checked="false">只问重要的</button>
+          <button type="button" data-approval="none" aria-checked="false">全不问</button>
+        </div>
+        <span class="cs-hint">只问重要的 = 只拦跑命令、派活等会起执行的动作；改文件自动放行。</span>
       </div>
       <button class="cs-row" type="button" id="cs-approval-entry">
         <span class="cs-row-main">
@@ -7254,21 +7256,36 @@ function renderCsPolicyPage() {
     }
   }
 
-  const confirm = body.querySelector("#cs-policy-confirm-writes");
-  confirm?.addEventListener("click", async () => {
-    const next = confirm.getAttribute("aria-checked") !== "true";
-    confirm.setAttribute("aria-checked", String(next));
-    if (csPolicy) csPolicy.confirmWrites = next;
-    try {
-      await request("/api/v1/agent/policy", {
-        method: "POST",
-        body: JSON.stringify({ confirmWrites: next }),
-      });
-    } catch {
-      toast("写确认开关保存失败，请重试");
-      void refreshCsPolicy();
+  // 审批三档（2026-11-08 扫尾批 10-C）：与「权限档」同源 /policy，抽屉里只改确认轴
+  const approvalBox = body.querySelector("#cs-policy-approval-level");
+  if (approvalBox) {
+    mountSegmented(approvalBox);
+    for (const button of approvalBox.querySelectorAll("[data-approval]")) {
+      button.setAttribute(
+        "aria-checked",
+        String(button.dataset.approval === csPolicy?.approvalLevel),
+      );
     }
-  });
+    syncSegmented(approvalBox);
+    for (const button of approvalBox.querySelectorAll("[data-approval]")) {
+      button.addEventListener("click", async () => {
+        for (const other of approvalBox.querySelectorAll("[data-approval]")) {
+          other.setAttribute("aria-checked", String(other === button));
+        }
+        syncSegmented(approvalBox);
+        if (csPolicy) csPolicy.approvalLevel = button.dataset.approval;
+        try {
+          await request("/api/v1/agent/policy", {
+            method: "POST",
+            body: JSON.stringify({ approvalLevel: button.dataset.approval }),
+          });
+        } catch {
+          toast("审批档保存失败，请重试");
+          void refreshCsPolicy();
+        }
+      });
+    }
+  }
 
   // 审批计数：GET /agent/approvals 不带 conversationId = 全局 pending
   void (async () => {
@@ -9435,12 +9452,13 @@ async function renderSettings() {
         )}
         <div class="divider"></div>
         ${rowMarkup(
-          "写操作逐次确认",
-          "开启后，改文件 / 跑命令 / 派活前先问你一句。手机不进聊天流，审批走全局待办轮询，也能在这里或手机上答复。",
-          switchMarkup(false, {
-            label: "写操作逐次确认",
-            attrs: 'id="policy-confirm-writes" data-confirm-writes',
-          }),
+          "审批档",
+          "全部问我 = 改文件 / 跑命令 / 派活前都问一句；只问重要的 = 只拦命令执行、派活等会起执行的动作；全不问 = 直接做。手机不进聊天流，审批走全局待办轮询，也能在这里或手机上答复。",
+          `<div class="segmented slide" role="radiogroup" aria-label="审批档" id="policy-approval-level">
+             <button type="button" data-approval="ask-all" aria-checked="false">全部问我</button>
+             <button type="button" data-approval="ask-critical" aria-checked="false">只问重要的</button>
+             <button type="button" data-approval="none" aria-checked="false">全不问</button>
+           </div>`,
         )}
         <div class="divider"></div>
         ${rowMarkup(
@@ -11235,18 +11253,29 @@ async function loadPolicy() {
     });
   }
 
-  // 写操作逐次确认（批次二）：独立轴，和三档可以同时生效
-  const confirm = document.getElementById("policy-confirm-writes");
-  if (confirm) {
-    if (data) confirm.setAttribute("aria-checked", String(data.confirmWrites === true));
-    confirm.addEventListener("click", async () => {
-      const next = confirm.getAttribute("aria-checked") !== "true";
-      confirm.setAttribute("aria-checked", String(next));
-      await request("/api/v1/agent/policy", {
-        method: "POST",
-        body: JSON.stringify({ confirmWrites: next }),
-      }).catch(() => undefined);
-    });
+  // 审批三档（2026-11-08 扫尾批 10-C）：独立轴，与上面三档可以同时生效。
+  // 旧客户端只认派生的 confirmWrites 布尔，新界面读 approvalLevel。
+  const approval = document.getElementById("policy-approval-level");
+  if (approval) {
+    mountSegmented(approval);
+    if (data) {
+      for (const button of approval.querySelectorAll("[data-approval]")) {
+        button.setAttribute("aria-checked", String(button.dataset.approval === data.approvalLevel));
+      }
+    }
+    syncSegmented(approval);
+    for (const button of approval.querySelectorAll("[data-approval]")) {
+      button.addEventListener("click", async () => {
+        for (const other of approval.querySelectorAll("[data-approval]")) {
+          other.setAttribute("aria-checked", String(other === button));
+        }
+        syncSegmented(approval);
+        await request("/api/v1/agent/policy", {
+          method: "POST",
+          body: JSON.stringify({ approvalLevel: button.dataset.approval }),
+        }).catch(() => undefined);
+      });
+    }
   }
 }
 

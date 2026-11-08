@@ -423,18 +423,38 @@ app.get("/api/v1/agent/policy", (c) => c.json(policyProjection()));
 
 app.post("/api/v1/agent/policy", async (c) => {
   const body = (await c.req.json().catch(() => null)) as
-    | { access?: string; blocked?: string[]; confirmWrites?: unknown }
+    | { access?: string; blocked?: string[]; approvalLevel?: unknown; confirmWrites?: unknown }
     | null;
   const access = body?.access;
   if (access && access !== "full" && access !== "read-only" && access !== "no-shell") {
     return c.json({ error: "bad_request", message: "access 只能是 full / read-only / no-shell" }, 400);
   }
+  // 三档（2026-11-08 扫尾批 10-C）：新字段优先，旧布尔照旧收（true→ask-all / false→none）
+  if (
+    body &&
+    "approvalLevel" in body &&
+    body.approvalLevel !== "ask-all" &&
+    body.approvalLevel !== "ask-critical" &&
+    body.approvalLevel !== "none"
+  ) {
+    return c.json(
+      { error: "bad_request", message: "approvalLevel 只能是 ask-all / ask-critical / none" },
+      400,
+    );
+  }
   if (body && "confirmWrites" in body && typeof body.confirmWrites !== "boolean") {
     return c.json({ error: "bad_request", message: "confirmWrites 只能是布尔值" }, 400);
   }
+  const approvalLevel =
+    body?.approvalLevel === "ask-all" ||
+    body?.approvalLevel === "ask-critical" ||
+    body?.approvalLevel === "none"
+      ? body.approvalLevel
+      : undefined;
   setPolicy({
     ...(access ? { access: access as "full" | "read-only" | "no-shell" } : {}),
     ...(Array.isArray(body?.blocked) ? { blocked: body!.blocked! } : {}),
+    ...(approvalLevel ? { approvalLevel } : {}),
     ...(typeof body?.confirmWrites === "boolean" ? { confirmWrites: body.confirmWrites } : {}),
   });
   // 与改动前一致：POST 回的是写后的策略本身（不含 label），额外带上只读能力投影
@@ -443,6 +463,8 @@ app.post("/api/v1/agent/policy", async (c) => {
     ok: true,
     access: next.access,
     blocked: next.blocked,
+    approvalLevel: next.approvalLevel,
+    // 派生字段：旧客户端只认布尔
     confirmWrites: next.confirmWrites,
     // 2026-11-08 扫尾批 8c：审批形态是 env（不可写），这里只回显，形状与 GET 对齐
     approvalMode: next.approvalMode,

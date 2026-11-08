@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { WRITE_TOOLS } from "../approval-policy.ts";
+import { WRITE_TOOLS, type ApprovalLevel } from "../approval-policy.ts";
 import { bashTimeoutSeconds } from "../reliability.ts";
 
 /** full = 全部放行；read-only = 只允许读（写文件/跑命令一律拦住） */
@@ -16,11 +16,15 @@ interface PolicyState {
 	access: ToolAccess;
 	blocked: string[];
 	/**
-	 * 写类工具执行前是否要人确认（2026-11-04 批次二，独立轴）。
-	 * 默认关 = 与改动前完全一致；`AGENT_CONFIRM_WRITES=1` 打开。
+	 * 审批档（2026-11-08 扫尾批 10-C，独立轴，取代旧的布尔 `confirmWrites`）。
+	 * 三档：`ask-all` 全问 / `ask-critical` 只问高危 / `none` 全不问。
+	 * 默认 `none` = 与改动前完全一致；`AGENT_CONFIRM_WRITES=1` 仍是初值来源（映射 ask-all）。
 	 */
-	confirmWrites: boolean;
+	approvalLevel: ApprovalLevel;
 }
+
+/** 兼容老 policy.json：旧字段 `confirmWrites` 只在读档时认 */
+type StoredPolicy = Partial<PolicyState> & { confirmWrites?: unknown };
 
 const POLICY_PATH = process.env.AGENT_POLICY_PATH?.trim() || ".data/policy.json";
 
@@ -29,6 +33,10 @@ const ACCESS_LABEL: Record<ToolAccess, string> = {
 	"read-only": "只读",
 	"no-shell": "不跑命令",
 };
+
+function isApprovalLevel(value: unknown): value is ApprovalLevel {
+	return value === "ask-all" || value === "ask-critical" || value === "none";
+}
 
 function initialPolicy(): PolicyState {
 	const access = (process.env.AGENT_TOOL_POLICY?.trim() || "full").toLowerCase();
@@ -39,24 +47,32 @@ function initialPolicy(): PolicyState {
 			.split(",")
 			.map((name) => name.trim())
 			.filter(Boolean),
-		confirmWrites: confirm === "1" || confirm === "true",
+		// 旧 env 语义原样保留：1/true = 全问，其余 = 全不问
+		approvalLevel: confirm === "1" || confirm === "true" ? "ask-all" : "none",
 	};
 }
 
 function loadPolicy(): PolicyState {
 	const base = initialPolicy();
 	try {
-		const parsed = JSON.parse(readFileSync(POLICY_PATH, "utf8")) as Partial<PolicyState>;
+		const parsed = JSON.parse(readFileSync(POLICY_PATH, "utf8")) as StoredPolicy;
 		const access =
 			parsed.access === "read-only" || parsed.access === "no-shell" || parsed.access === "full"
 				? parsed.access
 				: base.access;
+		// 新字段优先；老安装的 policy.json 只有 `confirmWrites` 布尔，按旧语义映射；
+		// 两个都没有才回落 env 初值（别写死 none，否则设了 env 的老安装也不生效）
+		const approvalLevel = isApprovalLevel(parsed.approvalLevel)
+			? parsed.approvalLevel
+			: typeof parsed.confirmWrites === "boolean"
+				? parsed.confirmWrites
+					? "ask-all"
+					: "none"
+				: base.approvalLevel;
 		return {
 			access,
 			blocked: Array.isArray(parsed.blocked) ? parsed.blocked : base.blocked,
-			// 老安装的 policy.json 里没有这个字段：回落 env 初值，别写死 false
-			confirmWrites:
-				typeof parsed.confirmWrites === "boolean" ? parsed.confirmWrites : base.confirmWrites,
+			approvalLevel,
 		};
 	} catch {
 		return base;
@@ -81,18 +97,38 @@ export function approvalMode(): ApprovalMode {
 
 export let policy: PolicyState = loadPolicy();
 
-export function getPolicy(): PolicyState & { label: string; approvalMode: ApprovalMode } {
-	return { ...policy, label: ACCESS_LABEL[policy.access], approvalMode: approvalMode() };
+/**
+ * 对外投影。
+ *
+ * `confirmWrites` 是**派生字段**（2026-11-08 扫尾批 10-C）：旧客户端只认布尔，
+ * `none` → false，其余（ask-all / ask-critical）→ true。新客户端读 `approvalLevel`。
+ */
+export function getPolicy(): PolicyState & {
+	label: string;
+	approvalMode: ApprovalMode;
+	confirmWrites: boolean;
+} {
+	return {
+		...policy,
+		label: ACCESS_LABEL[policy.access],
+		approvalMode: approvalMode(),
+		confirmWrites: policy.approvalLevel !== "none",
+	};
 }
 
 export function setPolicy(next: {
 	access?: ToolAccess;
 	blocked?: string[];
+	approvalLevel?: ApprovalLevel;
+	/** 旧字段兼容：true → ask-all，false → none（显式 approvalLevel 优先） */
 	confirmWrites?: boolean;
 }): PolicyState {
 	if (next.access) policy.access = next.access;
 	if (Array.isArray(next.blocked)) policy.blocked = next.blocked.filter(Boolean);
-	if (typeof next.confirmWrites === "boolean") policy.confirmWrites = next.confirmWrites;
+	if (isApprovalLevel(next.approvalLevel)) policy.approvalLevel = next.approvalLevel;
+	else if (typeof next.confirmWrites === "boolean") {
+		policy.approvalLevel = next.confirmWrites ? "ask-all" : "none";
+	}
 	try {
 		mkdirSync(dirname(POLICY_PATH), { recursive: true });
 		writeFileSync(POLICY_PATH, JSON.stringify(policy, null, 2));
