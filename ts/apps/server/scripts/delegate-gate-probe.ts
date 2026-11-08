@@ -20,6 +20,7 @@ process.env.AGENT_TOOL_POLICY = mode;
 process.env.LLM_PROVIDER = "faux";
 process.env.LLM_API_KEY = process.env.LLM_API_KEY ?? "";
 process.env.AGENT_DB_PATH = process.env.AGENT_DB_PATH ?? ".data/gate-probe-agent.sqlite";
+process.env.AGENT_POLICY_PATH = process.env.AGENT_POLICY_PATH ?? ".data/gate-probe-policy.json"; // 策略落盘会盖过 env 初值（批次二口径），探针必须隔离
 process.env.MEMORY_DB_PATH = process.env.MEMORY_DB_PATH ?? ".data/gate-probe-memory.db";
 
 const { readOnlyBlockReason } = await import("../src/agent.ts");
