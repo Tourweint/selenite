@@ -50,7 +50,6 @@ const el = {
   railChief: document.getElementById("rail-chief"),
   railPartners: document.getElementById("rail-partners"),
   railSettings: document.getElementById("rail-settings"),
-  railStatus: document.getElementById("rail-status"),
   railProj: document.getElementById("rail-proj"),
   sideRail: document.getElementById("side-rail"),
   sidebarInner: document.getElementById("sidebar-inner"),
@@ -138,7 +137,7 @@ const el = {
   chatSettingsDrawer: document.getElementById("chat-settings-drawer"),
   chatSettingsOverlay: document.getElementById("chat-settings-overlay"),
   toast: document.getElementById("toast"),
-  railTip: document.getElementById("rail-tip"),
+  hoverTip: document.getElementById("hover-tip"),
   modal: document.getElementById("modal"),
   modalMask: document.getElementById("modal-mask"),
   modalClose: document.getElementById("modal-close"),
@@ -160,12 +159,13 @@ const KEY_ACCENT = "lifediary.accent";
 const KEY_SEND = "lifediary.sendKey";
 const KEY_ACTS = "lifediary.showActs";
 
-/* id 与 html[data-theme] 一一对应；预览色写死，不跟当前 token 走 */
+/* id 与 html[data-theme] 一一对应；预览色写死，不跟当前 token 走。
+   white/black 2026-11-08 柔化（纯白纯黑太刺眼），预览色随 token 同步 */
 const THEMES = [
   { id: "paper", name: "米黄", bg: "#fdf9f2", card: "#f6f1e7", accent: "#3e4a8c" },
-  { id: "white", name: "纯白", bg: "#ffffff", card: "#fafafa", accent: "#3e4a8c" },
+  { id: "white", name: "暖白", bg: "#fafaf8", card: "#f4f4f1", accent: "#3e4a8c" },
   { id: "indigo", name: "靛蓝夜", bg: "#12141d", card: "#191c27", accent: "#8b97ea" },
-  { id: "black", name: "纯黑", bg: "#000000", card: "#0e0e12", accent: "#8b97ea" },
+  { id: "black", name: "炭黑", bg: "#17171a", card: "#1d1d21", accent: "#8b97ea" },
 ];
 const THEME_IDS = THEMES.map((item) => item.id);
 
@@ -214,7 +214,8 @@ function sidebarOpen() {
 
 function toggleSidebar() {
   closeProjectMenu();
-  hideRailTip();
+  hideHoverTip();
+  closePeek(true);
   const next = sidebarOpen() ? "closed" : "open";
   if (next === "closed") document.documentElement.dataset.sidebar = "closed";
   else delete document.documentElement.dataset.sidebar;
@@ -244,6 +245,85 @@ function applySidebarA11y() {
 }
 
 NARROW_SIDEBAR.addEventListener("change", applySidebarA11y);
+
+/* ── 侧栏悬停浮出（2026-11-08，抄 Cindy peek）────────────────
+ * 侧栏收起时，悬停顶栏的收起/展开钮 120ms → 侧栏面板以浮层形式滑出在轨道右侧
+ * （盖在内容上，不挤压主区）；指针离开 160ms 宽限后滑出；浮出中点按钮 = 正式展开。
+ * 参数对齐 Cindy useSidebarPeek：open delay 120 / close grace 160 / 收场动画 200。
+ * 已展开、窄屏（≤800px）、reduced-motion 都不启用。 */
+const PEEK_OPEN_DELAY_MS = 120;
+const PEEK_CLOSE_GRACE_MS = 160;
+const PEEK_CLOSE_ANIM_MS = 200;
+let peekTimer = 0;
+let peekCloseTimer = 0;
+
+function peekAvailable() {
+  return window.innerWidth > 800 && !noMotion.matches;
+}
+
+function openPeek() {
+  if (!peekAvailable()) return;
+  if (document.documentElement.dataset.peek === "on") return;
+  document.documentElement.dataset.peek = "on";
+  // 收起态 inner 是 inert 的（applySidebarA11y）：浮出期间解除，收场时交还
+  setInert(el.sidebarInner, false);
+}
+
+function closePeek(immediate = false) {
+  clearTimeout(peekCloseTimer);
+  peekCloseTimer = 0;
+  const root = document.documentElement;
+  if (!root.dataset.peek) return;
+  if (immediate || root.dataset.peek === "off") {
+    delete root.dataset.peek;
+    applySidebarA11y();
+    return;
+  }
+  root.dataset.peek = "off"; // CSS 原地滑出，动画完由定时器摘标记
+  applySidebarA11y();
+  peekCloseTimer = setTimeout(() => {
+    delete document.documentElement.dataset.peek;
+    peekCloseTimer = 0;
+  }, PEEK_CLOSE_ANIM_MS);
+}
+
+function schedulePeekClose() {
+  clearTimeout(peekCloseTimer);
+  peekCloseTimer = setTimeout(() => closePeek(true), PEEK_CLOSE_GRACE_MS);
+}
+
+(function wireSidebarPeek() {
+  const button = el.toggleSidebar;
+  const aside = el.sidebarInner?.closest(".sidebar");
+  if (!button || !aside) return;
+  button.addEventListener("mouseenter", () => {
+    if (document.documentElement.dataset.sidebar !== "closed" || !peekAvailable()) return;
+    clearTimeout(peekCloseTimer); // 正在收场又回来了：别收了
+    peekCloseTimer = 0;
+    clearTimeout(peekTimer);
+    peekTimer = setTimeout(openPeek, PEEK_OPEN_DELAY_MS);
+  });
+  button.addEventListener("mouseleave", () => {
+    clearTimeout(peekTimer);
+    peekTimer = 0;
+    if (document.documentElement.dataset.peek === "on") schedulePeekClose();
+  });
+  // 指针从按钮挪进面板（穿过轨道）不清场；整块侧栏都离开才开始宽限倒计时
+  aside.addEventListener("mouseenter", () => {
+    clearTimeout(peekCloseTimer);
+    peekCloseTimer = 0;
+  });
+  aside.addEventListener("mouseleave", () => {
+    if (document.documentElement.dataset.peek === "on") schedulePeekClose();
+  });
+  // 浮出中点了面板里的东西：用完就收（想固定展开走按钮，那是 pin）
+  aside.addEventListener("click", () => {
+    if (document.documentElement.dataset.peek === "on") closePeek(true);
+  });
+  window.addEventListener("resize", () => {
+    if (!peekAvailable()) closePeek(true);
+  });
+})();
 
 /* 顶部功能菜单：设置走独立路由（#/settings），不是弹层 */
 function setMenuOpen(open) {
@@ -487,7 +567,8 @@ function go(route, page) {
 function applyRoute() {
   closeMenu();
   closeProjectMenu();
-  hideRailTip();
+  hideHoverTip();
+  closePeek(true);
   const route = currentRoute();
   // 设置页是独立整页：侧栏不占位，侧栏开关只在设置页之外出现；
   // 任务中心保留侧栏（入口就在侧栏底部，也能顺手回对话）。
@@ -2384,11 +2465,12 @@ async function request(path, init = {}) {
 
 /* ── 状态灯 ───────────────────────────────────────────── */
 
-/** 侧栏展开态的状态行与收起轨道的小圆点共用同一份状态 */
+/** 展开侧栏的状态点（唯一的服务状态灯，2026-11-08 收起态的点退役）。
+ *  收起轨道的齿轮用 data-tip 兜住同一份信息：悬停即见「设置 · 服务在线」。 */
 function setStatus(stateName, text) {
   el.status.dataset.state = stateName;
   el.statusText.textContent = text;
-  el.railStatus.dataset.state = stateName;
+  if (el.railSettings) el.railSettings.dataset.tip = `设置 · ${text}`;
 }
 
 async function checkHealth() {
@@ -3272,28 +3354,45 @@ function addMessage(role, text, at, images = []) {
   // 用户消息的图片（2026-11-08 扫尾批 4a）：贴在气泡下方，点开看大图
   if (role === "user") mountMessageImages(wrap, images);
 
-  // 回答底下的一条脚注（2026-11-06）：复制 · 用时 · 完成时间。
+  // 回答底下的一条脚注（2026-11-06 建这条线；2026-11-08 图标化）：复制图标 · 用时 · 完成时间。
   // 以前复制按钮浮在右上角、耗时单独 absolute 在右边，两者都对不齐正文；
-  // 现在统一收进正文下方的 .msg-foot，hover 才出现。
+  // 现在统一收进正文下方的 .msg-foot，hover 才出现。复制从文字改 Lucide 图标
+  // （2026-11-08 用户口径：脚注要简洁，能图标就别文字），反馈用图标互换。
   let foot = null;
   if (role === "assistant") {
     foot = document.createElement("div");
     foot.className = "msg-foot";
     wrap.append(foot);
 
+    const footSvg = (paths) =>
+      `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
+    const ICON_COPY = footSvg(
+      '<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
+    );
+    const ICON_COPIED = footSvg('<path d="M20 6 9 17l-5-5"/>');
+    const ICON_FAILED = footSvg('<path d="M18 6 6 18"/><path d="m6 6 12 12"/>');
+
     const copy = document.createElement("button");
     copy.type = "button";
     copy.className = "copy-btn";
-    copy.textContent = "复制";
+    copy.title = "复制";
+    copy.setAttribute("aria-label", "复制");
+    copy.innerHTML = ICON_COPY;
     copy.addEventListener("click", async () => {
+      let ok = true;
       try {
         await navigator.clipboard.writeText(body.innerText);
-        copy.textContent = "已复制";
       } catch {
-        copy.textContent = "复制失败";
+        ok = false;
       }
+      copy.classList.toggle("is-done", ok);
+      copy.classList.toggle("is-failed", !ok);
+      copy.innerHTML = ok ? ICON_COPIED : ICON_FAILED;
+      copy.title = ok ? "已复制" : "复制失败";
       setTimeout(() => {
-        copy.textContent = "复制";
+        copy.classList.remove("is-done", "is-failed");
+        copy.innerHTML = ICON_COPY;
+        copy.title = "复制";
       }, 1200);
     });
     foot.append(copy);
@@ -3540,11 +3639,13 @@ async function waitEditedTurn(conversationId) {
 }
 
 /**
- * 在脚注里落「完成于 …」。
+ * 在脚注里落完成时间。
  *
  * 刻意不在 addMessage 里写：那一轮刚建出来时只有一个光标，写上去就是
  * "刚开始就完成于 xx:xx"。历史回读（文案已定）走 openChat，现场那一轮
  * 等 done / 收尾再落，两边才会显示真正的收尾时刻。
+ *
+ * 2026-11-08 用户口径：脚注去文字，只留时刻本体（"完成于"进 title）。
  */
 function markDoneAt(root, ms) {
   const foot = root?.querySelector?.(".msg-foot");
@@ -3556,7 +3657,11 @@ function markDoneAt(root, ms) {
     stamp.dataset.role = "done-at";
     foot.append(stamp);
   }
-  stamp.textContent = `完成于 ${clockOf(ms)}`;
+  stamp.textContent = clockOf(ms);
+  const d = new Date(ms);
+  stamp.title = Number.isFinite(d.getTime())
+    ? `完成于 ${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${clockOf(ms)}`
+    : "";
 }
 
 /** 脚注时间：今天只给 HH:MM，隔天补 M/D——历史会话里"完成于 14:03"没有信息量 */
@@ -5749,40 +5854,67 @@ async function selectDirectory() {
   }
 }
 
-/* ── 收起轨道 tooltip（右侧弹出）──────────────────────────
- * 挂在 body 下而不是 ::after：.sidebar 收起动画靠 overflow:hidden 裁内容，
- * 伪元素会被一起裁掉。 */
-function hideRailTip() {
-  if (el.railTip) el.railTip.hidden = true;
+/* ── 全局悬停提示（2026-11-08，原「收起轨道 tooltip」泛化）──────────
+ * 任何带 data-tip 的元素（轨道按钮 / 侧栏分区头 / 设置页 ⓘ / 记忆组头…）
+ * 悬停 ~450ms 后弹出小签，离开即收。Cindy 同款参数：12px 圆角、纯 opacity 进场、无箭头。
+ * 挂 body 下（fixed 定位）：侧栏收起动画靠 overflow:hidden 裁内容，伪元素会被一起裁掉，
+ * 设置页的分区滚动容器同理——fixed + body 挂载躲开一切裁切。 */
+const TIP_SHOW_DELAY_MS = 450;
+const hoverTipState = { timer: 0, anchor: null };
+
+function hideHoverTip() {
+  clearTimeout(hoverTipState.timer);
+  hoverTipState.timer = 0;
+  hoverTipState.anchor = null;
+  if (el.hoverTip) el.hoverTip.hidden = true;
 }
 
-function showRailTip(trigger) {
-  if (!el.railTip || !trigger) return;
-  // 展开态轨道整体 pointer-events:none；键盘 Tab 进来时也别弹一个看不见的提示
-  const rail = trigger.closest(".side-rail");
-  if (rail && getComputedStyle(rail).pointerEvents === "none") return;
-  const text = trigger.dataset.tip;
+function showHoverTip(target) {
+  const tipEl = el.hoverTip;
+  if (!tipEl || !target) return;
+  const text = target.getAttribute("data-tip");
   if (!text) return;
-  const anchor = trigger.getBoundingClientRect();
-  el.railTip.textContent = text;
-  el.railTip.hidden = false;
-  const gap = 10;
-  const maxLeft = window.innerWidth - 8 - el.railTip.offsetWidth;
-  const left = Math.min(anchor.right + gap, Math.max(8, maxLeft));
-  el.railTip.style.left = `${Math.round(left)}px`;
-  el.railTip.style.top = `${Math.round(anchor.top + anchor.height / 2)}px`;
-  el.railTip.style.transform = "translateY(-50%)";
+  // 展开态轨道整体 pointer-events:none；键盘 Tab 进来时也别弹一个看不见的提示
+  const rail = target.closest(".side-rail");
+  if (rail && getComputedStyle(rail).pointerEvents === "none") return;
+  hoverTipState.anchor = target;
+  tipEl.textContent = text;
+  tipEl.hidden = false;
+  const box = target.getBoundingClientRect();
+  const tipBox = tipEl.getBoundingClientRect();
+  const gap = 8;
+  // 垂直：默认元素上方，顶上放不下翻到下方；水平：跟元素左缘，右侧贴边兜底
+  let top = box.top - tipBox.height - gap;
+  if (top < 8) top = box.bottom + gap;
+  let left = box.left;
+  if (left + tipBox.width > window.innerWidth - 8) left = window.innerWidth - 8 - tipBox.width;
+  tipEl.style.left = `${Math.round(Math.max(8, left))}px`;
+  tipEl.style.top = `${Math.round(Math.max(8, top))}px`;
 }
 
-for (const node of document.querySelectorAll("#side-rail [data-tip]")) {
-  node.addEventListener("mouseenter", () => showRailTip(node));
-  node.addEventListener("mouseleave", hideRailTip);
-  node.addEventListener("focus", () => showRailTip(node));
-  node.addEventListener("blur", hideRailTip);
-  // 点了就走：别让提示压在刚打开的弹层/新页面上面
-  node.addEventListener("click", hideRailTip);
-}
-window.addEventListener("resize", hideRailTip);
+document.addEventListener("mouseover", (event) => {
+  const target = event.target.closest?.("[data-tip]");
+  if (!target || target === hoverTipState.anchor) return;
+  clearTimeout(hoverTipState.timer);
+  hoverTipState.timer = setTimeout(() => showHoverTip(target), TIP_SHOW_DELAY_MS);
+});
+document.addEventListener("mouseout", (event) => {
+  const target = event.target.closest?.("[data-tip]");
+  if (!target) return;
+  // 同一元素内部挪动（穿过 svg/文字）不算离开
+  if (event.relatedTarget && target.contains(event.relatedTarget)) return;
+  hideHoverTip();
+});
+// 键盘可达：Tab 聚焦立即出（不等延迟），移走即收
+document.addEventListener("focusin", (event) => {
+  const target = event.target.closest?.("[data-tip]");
+  if (target && target !== hoverTipState.anchor) showHoverTip(target);
+});
+document.addEventListener("focusout", hideHoverTip);
+// 点了就走：别让提示压在刚打开的弹层/新页面上面；滚动/缩放时锚点已经不对了，直接收
+document.addEventListener("click", hideHoverTip);
+window.addEventListener("resize", hideHoverTip);
+window.addEventListener("scroll", hideHoverTip, true);
 
 async function fetchModelCatalog() {
   const response = await request("/api/v1/agent/model", { cache: "no-store" });
@@ -6049,6 +6181,8 @@ async function chooseModel(provider, modelId, levels, { keepOpen = false, menu =
       // 重渲染把刚点的按钮换掉了：焦点跟到新行，键盘 Tab 能直接进档位
       host.querySelector('.model-row[data-current="1"] .model-item')?.focus();
     }
+    // 宿主同步钩子（2026-11-08）：抽屉主选的触发钮靠 modelchange 把名字跟上去
+    host?.dispatchEvent(new CustomEvent("modelchange", { bubbles: true }));
     toast(
       provider.hasKey === false
         ? "已切换；该供应商缺 API Key，聊天前请在服务端环境设置对应变量"
@@ -7066,8 +7200,9 @@ function appendCsGoalCard(body) {
  *      设置→服务的默认模型行是同一个接口、同一套目录，不另造一份；
  *   ② 备选：这个执事的候选链（PATCH /partners/:id { modelChain }）——只在主模型
  *      「没应答且原因可切」时按链往下换，keyEnv 只填变量名（密钥纪律）。
- * 两段都从**已有**模型里选（供应商 × 模型两个下拉，选项来自 /agent/model），
- * 不再要求手打 providerId|modelId|KEY_ENV_NAME。批量加模型仍然保留在页尾。 */
+ * 两段都从**已有**模型里选（选项来自 /agent/model），不再要求手打
+ * providerId|modelId|KEY_ENV_NAME。批量加模型卡退役（2026-11-08 用户口径：
+ * 「模型肯定是能出现的，手输兜底没用」）——加模型的正式入口在 设置 → 服务。 */
 function renderCsModelPage() {
   const drawer = el.chatSettingsDrawer;
   const catalog = csCatalog;
@@ -7082,7 +7217,6 @@ function renderCsModelPage() {
   body.append(csPrimaryCard(providers, catalog.current || null));
   // 备选链挂在执事身上；普通助手会话没有链可配，不摆这张卡
   if (csTarget) body.append(csFallbackCard(providers));
-  body.append(csBatchCard(providers, catalog.current || null));
 }
 
 /** 这页改的是谁：避免在执事会话里以为改了执事、其实改的是全局主选 */
@@ -7102,77 +7236,73 @@ function csPrimaryCard(providers, current) {
   const field = document.createElement("div");
   field.className = "cs-field";
   field.innerHTML = `
-    <select class="cs-input" id="cs-primary-select" aria-label="主选模型"></select>
+    <div class="cs-model-pick">
+      <button type="button" class="cs-input cs-model-trigger" id="cs-primary-trigger"
+              aria-haspopup="menu" aria-expanded="false">
+        <span class="cs-model-label" id="cs-primary-label"></span>
+        <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+      </button>
+      <div class="model-menu composer-pop cs-model-menu" id="cs-primary-menu" role="menu" hidden></div>
+    </div>
     <span class="cs-hint" id="cs-primary-hint">切换后下一轮生效。</span>`;
   card.append(field);
-  const select = field.querySelector("#cs-primary-select");
+  const trigger = field.querySelector("#cs-primary-trigger");
+  const label = field.querySelector("#cs-primary-label");
+  const menu = field.querySelector("#cs-primary-menu");
   const hint = field.querySelector("#cs-primary-hint");
 
-  for (const provider of providers) {
-    const group = document.createElement("optgroup");
-    group.label = provider.name || provider.id;
-    for (const raw of provider.models) {
-      const model = normalizeModelRow(raw);
-      if (!model) continue;
-      const option = document.createElement("option");
-      option.value = `${provider.id}|${model.id}`;
-      option.textContent = model.id;
-      // 思考支持域跟着行走（2026-11-07 修）：切换时 chooseModel 要拿它做档位折算，
-      // 不给的话 clampThinking 按"无档位"处理，用户的思考档会被静默重置成 off
-      option.dataset.thinkingLevels = JSON.stringify(model.thinkingLevels);
-      if (current && current.providerId === provider.id && current.modelId === model.id) {
-        option.selected = true;
-      }
-      group.append(option);
-    }
-    if (group.children.length) select.append(group);
-  }
+  const paintLabel = () => {
+    const cur = state.modelCatalog?.current || current || null;
+    label.textContent = cur ? cur.modelId : "还没选模型";
+    label.title = cur ? `${cur.providerId} · ${cur.modelId}` : "";
+  };
+  paintLabel();
+
   if (!providers.length) {
-    select.disabled = true;
-    const option = document.createElement("option");
-    option.textContent = "还没有可选模型：到全部设置 → 服务里添加供应商";
-    select.append(option);
+    trigger.disabled = true;
+    label.textContent = "还没有可选模型";
     hint.textContent = "配好供应商后这里就有清单了。";
     return card;
   }
-  // 当前模型不在清单里（供应商被删 / 模型下线）：补一条占位，别让下拉静默跳到第一家
-  const value = current ? `${current.providerId}|${current.modelId}` : "";
-  if (value && !Array.from(select.options).some((option) => option.value === value)) {
-    const option = document.createElement("option");
-    option.value = value;
-    option.textContent = `${current.modelId}（当前，已不在清单）`;
-    option.selected = true;
-    select.prepend(option);
-  }
 
-  select.addEventListener("change", async () => {
-    const [providerId, modelId] = String(select.value).split("|");
-    const provider = providers.find((item) => item.id === providerId);
-    if (!provider || !modelId) return;
-    select.disabled = true;
-    hint.classList.remove("is-error");
-    hint.textContent = "切换中…";
-    // 选中行自带思考支持域（build 时落在 option.dataset 上），档位折算用
-    const levels = (() => {
-      try {
-        const raw = select.selectedOptions[0]?.dataset.thinkingLevels;
-        const parsed = raw ? JSON.parse(raw) : null;
-        return Array.isArray(parsed) && parsed.length ? parsed : null;
-      } catch {
-        return null;
-      }
-    })();
-    const ok = await chooseModel(provider, modelId, levels, { keepOpen: true });
-    select.disabled = false;
-    if (!ok) {
-      hint.textContent = "没切成，稍后再试。";
-      hint.classList.add("is-error");
+  trigger.addEventListener("click", async () => {
+    if (popoverOpen(menu)) {
+      closePopover(menu, trigger);
       return;
     }
-    csCatalog = state.modelCatalog;
-    hint.textContent = "已切换，下一轮生效；下一轮会慢一点（上游缓存重建）。";
-    if (drawerOpen() && csPage === "model") renderCsPage();
+    trigger.disabled = true;
+    try {
+      // 每次打开都现拉：不缓存陈旧目录（同 composer 菜单，审查 S2）
+      const catalog = await fetchModelCatalog();
+      csCatalog = catalog;
+      state.modelCatalog = catalog;
+      renderModelMenu(catalog, localStorage.getItem(KEY_MODEL_PROVIDER), menu);
+      openPopover(menu, trigger);
+    } catch (error) {
+      if (error.message !== "forbidden") {
+        hint.textContent = "拿不到模型清单，稍后再试。";
+        hint.classList.add("is-error");
+      }
+    } finally {
+      trigger.disabled = false;
+    }
   });
+
+  // 当前模型不在清单里（供应商被删 / 模型下线）：触发钮照常显示它，提示里说明，
+  // 用户从菜单里选一个就换掉了（不再造一条原生 select 的占位 option）
+  if (current) {
+    const inCatalog = providers.some(
+      (provider) =>
+        provider.id === current.providerId &&
+        provider.models.some((raw) => normalizeModelRow(raw)?.id === current.modelId),
+    );
+    if (!inCatalog) {
+      label.title = `${current.providerId} · ${current.modelId}（当前，已不在清单）`;
+      hint.textContent = "当前模型已不在清单里，打开上面选一个换掉。";
+    }
+  }
+  // chooseModel 成功后会在菜单宿主上派发 modelchange（冒泡）：触发钮名字跟上去
+  menu.addEventListener("modelchange", paintLabel);
   return card;
 }
 
@@ -7413,51 +7543,6 @@ function csFallbackCard(providers) {
   return card;
 }
 
-/** ③ 批量添加：一行一个模型 ID，加到主选所在的那家（没主选就第一家有模型的） */
-function csBatchCard(providers, current) {
-  const providerId = current ? current.providerId : providers[0]?.id || "";
-  const provider = providers.find((item) => item.id === providerId);
-  const card = csCard("清单里没有这个模型？");
-  const batch = document.createElement("div");
-  batch.className = "chat-settings-batch";
-  batch.innerHTML = `
-    <div class="batch-head">
-      <span>一行一个模型 ID，直接加进清单</span>
-      <span class="batch-target" id="batch-target"></span>
-    </div>
-    <textarea class="batch-input is-mono" id="batch-models" rows="4" spellcheck="false"
-      aria-label="一行一个模型 ID" placeholder="一行一个模型 ID，例如：\nqwen3-max\nqwen-plus"></textarea>
-    <div class="batch-actions">
-      <span class="set-hint batch-hint" id="batch-hint"></span>
-      <button class="ghost" type="button" id="batch-import">导入</button>
-    </div>`;
-  card.append(batch);
-  const target = batch.querySelector("#batch-target");
-  if (target) target.textContent = provider ? `加到：${provider.name || provider.id}` : "";
-  batch.querySelector("#batch-import")?.addEventListener("click", () => {
-    void importBatchModels(
-      providerId,
-      batch.querySelector("#batch-models")?.value || "",
-      batch.querySelector("#batch-hint"),
-      batch,
-    ).then(async (added) => {
-      if (!added) return;
-      // 加完刷新目录：新模型要能立刻出现在上面两个下拉里
-      csProviders = null;
-      try {
-        const next = await fetchModelCatalog();
-        csCatalog = next;
-        state.modelCatalog = next;
-        updateModelPill();
-      } catch {
-        /* 目录没刷新也不影响已经写进配置的模型，下次打开抽屉自然会有 */
-      }
-      if (drawerOpen() && csPage === "model") renderCsPage();
-    });
-  });
-  return card;
-}
-
 /* ── 二级页 · 权限档：三档分段 + 审批三档 + 审批入口 ──
    轻量重实现，不复用 loadPolicy（那是 getElementById 硬编码 #policy-switch，
    与全屏设置页双绑会打架）；GET /agent/policy 读档、POST 回写（2026-11-07 定论）。 */
@@ -7488,15 +7573,7 @@ function renderCsPolicyPage() {
         </div>
         <span class="cs-hint">只问重要的 = 只拦跑命令、派活等会起执行的动作；改文件自动放行。</span>
       </div>
-      <button class="cs-row" type="button" id="cs-approval-entry">
-        <span class="cs-row-main">
-          <span class="cs-row-title">待处理审批</span>
-          <span class="cs-row-sub" id="cs-approval-count">读取中…</span>
-        </span>
-        <span class="cs-row-chevron">${csSvg(CS_ICONS.chevron).innerHTML}</span>
-      </button>
-    </div>
-    <p class="cs-note">审批在「全部设置 → 权限」里批准 / 拒绝。</p>`;
+    </div>`;
   drawer.append(body);
 
   // 三档分段：mountSegmented/syncSegmented 复用，事件只绑抽屉这一份
@@ -7558,24 +7635,6 @@ function renderCsPolicyPage() {
       });
     }
   }
-
-  // 审批计数：GET /agent/approvals 不带 conversationId = 全局 pending
-  void (async () => {
-    const node = body.querySelector("#cs-approval-count");
-    if (!node) return;
-    try {
-      const response = await request("/api/v1/agent/approvals", { cache: "no-store" });
-      const data = await response.json();
-      const count = Array.isArray(data) ? data.length : Array.isArray(data.approvals) ? data.approvals.length : 0;
-      node.textContent = count > 0 ? `${count} 条待处理` : "没有待处理";
-    } catch {
-      node.textContent = "—";
-    }
-  })();
-  body.querySelector("#cs-approval-entry")?.addEventListener("click", () => {
-    closeChatSettings();
-    location.hash = "#/settings";
-  });
 }
 
 /* ── 二级页 · 通知：主开关（KEY_NOTIFY，含权限申请）+ 三时机过滤 ──
@@ -7654,100 +7713,6 @@ function renderCsNotifyPage() {
 }
 
 /** 逐行校验：非法行（超长）整批拦下并列明行号；合法行去重后与既有清单合并回写 */
-async function importBatchModels(providerId, text, hintNode, batchBox) {
-  const setHint = (msg, isError = true) => {
-    if (!hintNode) return;
-    hintNode.textContent = msg;
-    hintNode.classList.toggle("is-error", isError);
-  };
-  if (!providerId) {
-    setHint("还没有供应商：先到设置 → 服务里添加");
-    return false;
-  }
-  const invalid = [];
-  const ids = [];
-  const seen = new Set();
-  String(text).split(/\r?\n/).forEach((line, index) => {
-    const value = line.trim();
-    if (!value) return;
-    if (value.length > 200) {
-      invalid.push(`第 ${index + 1} 行超长（模型 ID 最多 200 字符）`);
-      return;
-    }
-    if (seen.has(value)) return; // 同一次输入里的重复行只取一个
-    seen.add(value);
-    ids.push(value);
-  });
-  if (invalid.length) {
-    setHint(`这些行没法用，先改掉再导入：${invalid.join("；")}`);
-    return;
-  }
-  if (!ids.length) {
-    setHint("先填至少一行模型 ID");
-    return;
-  }
-  const button = batchBox?.querySelector("#batch-import");
-  if (button?.disabled) return;
-  if (button) button.disabled = true;
-  setHint("保存中…", false);
-  try {
-    // 拿全量记录：模型菜单的投影（/agent/model）不含 baseUrl/keyEnv/元数据，回写必须原样带上
-    const listResponse = await request("/api/v1/agent/providers", { cache: "no-store" });
-    if (!listResponse.ok) {
-      setHint(`读不到供应商配置：HTTP ${listResponse.status}`);
-      return;
-    }
-    const listData = await listResponse.json().catch(() => ({}));
-    const provider = (listData.providers || []).find((item) => item.id === providerId);
-    if (!provider) {
-      setHint("找不到这家供应商，刷新后再试");
-      return;
-    }
-    const existing = new Set(provider.models || []);
-    const fresh = ids.filter((id) => !existing.has(id));
-    const duplicated = ids.filter((id) => existing.has(id));
-    if (!fresh.length) {
-      setHint(`都已在清单里（${duplicated.join("、")}），没有新增`, false);
-      return;
-    }
-    // 只增不改：既有模型的元数据/档位原样保留；不删任何模型（避开 selected_model_missing）
-    const saved = await postProvider({
-      id: provider.id,
-      previousId: provider.id,
-      name: provider.name || provider.id,
-      baseUrl: provider.baseUrl || "",
-      keyEnv: provider.keyEnv || "",
-      models: [...(provider.models || []), ...fresh],
-      modelMeta: provider.modelMeta || {},
-      modelThinkingLevels: provider.modelThinkingLevels || {},
-      allowEmptyModels: true,
-    });
-    if (!saved.response.ok) {
-      setHint(providerErrorText(saved.data || {}, saved.response.status));
-      return;
-    }
-    const listed = (state.providers || []).find((item) => item.id === providerId);
-    if (listed) listed.models = [...(listed.models || []), ...fresh];
-    await refreshModelPill().catch(() => undefined);
-    const textarea = batchBox?.querySelector("#batch-models");
-    if (textarea) textarea.value = "";
-    setHint(
-      `已加入 ${fresh.length} 个模型，下一轮生效${duplicated.length ? `；${duplicated.length} 个已存在，跳过：${duplicated.join("、")}` : ""}`,
-      false,
-    );
-    return true; // 真的写进了清单：调用方（抽屉）据此重拉目录，让新模型立刻能选
-  } catch (error) {
-    if (error.message === "forbidden") {
-      closeChatSettings();
-      return;
-    }
-    setHint(`没存上：${error.message}`);
-  } finally {
-    if (button) button.disabled = false;
-  }
-  return false;
-}
-
 /* ── 侧栏项目面板（2026-11-04 建，2026-11-06 改为总览）────
  * 展开态 pill 与收起轨道按钮是同一份弹层、同一个渲染函数。
  * pill = 主项目（工作区根）；展开是「主项目 + 子项目」总览，**不再切「当前项目」**
@@ -7898,15 +7863,8 @@ function syncProjectRows(items) {
     box.append(empty);
   }
 
-  // 层级说明（2026-11-06）：侧栏只留一行，完整解释在设置页「项目」分区。
-  // 一开始写成三行小字，实测把 232px 的侧栏撑出横向滚动条，而且天天占位；
-  // 这是"看一眼就懂"的注释，不是常驻内容，压缩成一行 + title 更合适。
-  const legend = document.createElement("p");
-  legend.className = "proj-legend";
-  legend.textContent = "主项目=打杂空间，子项目=登记的仓库";
-  legend.title =
-    "主项目 = 最大工作区根目录，打杂和临时文件放这里；子项目 = 登记进来的独立目录，通常是代码仓库或另一个项目。不在完全访问档时，助手只能在这两个空间里动手。";
-  box.append(legend);
+  // 层级说明（2026-11-08 起不再常驻）：解释挪到「项目」分区头的 data-tip，
+  // 侧栏不再有常驻小字（2026-11-06 曾压成一行小字，仍天天占位）。
 }
 
 /* 收起轨道的项目按钮仍走弹层（72px 放不下内联列表），内容复用同一个总览渲染。 */
@@ -8820,7 +8778,8 @@ async function toggleProjectMenu(trigger) {
       return;
     }
     applyProjectData(data);
-    // 没有工作区也照常打开：里面还有「设置主项目」，是首次使用的唯一入口
+    // 没有工作区也照常打开：里面还有「设置主项目」（2026-11-08 起服务端启动会播种
+    // 默认工作区，这个入口只剩兜底/换目录用，不再是首次使用的必经之路）
     renderProjectMenu(data.items);
     projectAnchor = trigger;
     openPopover(el.projectMenu, trigger);
@@ -9048,6 +9007,11 @@ async function loadCapabilities() {
 // pill 在右组（D2），不能再用 .composer-tools 判内外：按触发 pill 和菜单自己判
 document.addEventListener("click", (event) => {
   if (!event.target.closest("#model-pill") && !event.target.closest("#model-menu")) closeModelMenu();
+  // 抽屉主选模型弹层（2026-11-08）：点外收起（元素随抽屉重渲，每次现查现判）
+  const csPick = document.getElementById("cs-primary-menu");
+  if (csPick && !csPick.hidden && !event.target.closest(".cs-model-pick")) {
+    closePopover(csPick, document.getElementById("cs-primary-trigger"));
+  }
   // 项目弹层有两个触发点（展开态 pill / 轨道按钮），菜单自己也算里面
   if (
     !event.target.closest("#proj-pill") &&
@@ -9079,6 +9043,12 @@ document.addEventListener("keydown", (event) => {
   if (groupSettingsOpen()) {
     event.stopImmediatePropagation();
     closeGroupSettingsDrawer();
+    return;
+  }
+  // 抽屉主选模型弹层开着：先收它，抽屉留着（同一优先级思路：先收最上层）
+  const csPick = document.getElementById("cs-primary-menu");
+  if (csPick && !csPick.hidden) {
+    closePopover(csPick, document.getElementById("cs-primary-trigger"));
     return;
   }
   closeModelMenu();
@@ -9504,11 +9474,20 @@ function wireSettingsSearch() {
   });
 }
 
-function rowMarkup(label, hint, control) {
+const ROW_TIP_ICON =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>';
+
+/** 一行设置 = 标签 + 控件。
+ *  hint 2026-11-08 起默认**不再常驻**：标签旁一颗 ⓘ，悬停出全句（全局 data-tip）——
+ *  设置页只留"状态/结果"类文案占一行（inlineHint: true，如动态计数、带代码格式的变量名）。 */
+function rowMarkup(label, hint, control, { inlineHint = false } = {}) {
+  const tipBadge = hint && !inlineHint
+    ? `<span class="row-tip" data-tip="${attr(hint)}" role="note" aria-label="${attr(hint)}">${ROW_TIP_ICON}</span>`
+    : "";
   return `<div class="row">
     <div class="row-main">
-      <div class="row-label">${label}</div>
-      ${hint ? `<div class="row-hint">${hint}</div>` : ""}
+      <div class="row-label">${label}${tipBadge}</div>
+      ${hint && inlineHint ? `<div class="row-hint">${hint}</div>` : ""}
     </div>
     <div class="row-control">${control}</div>
   </div>`;
@@ -9699,6 +9678,7 @@ async function renderSettings() {
                  "已移除的会话",
                  `有 ${state.removed} 个会话从列表里拿掉了，数据还在`,
                  `<button class="ghost" type="button" id="restore-chats">恢复</button>`,
+                 { inlineHint: true },
                )}`
             : ""
         }
@@ -9725,7 +9705,7 @@ async function renderSettings() {
         <div class="divider"></div>
         ${rowMarkup(
           "审批档",
-          "全部问我 = 改文件 / 跑命令 / 派活前都问一句；只问重要的 = 只拦命令执行、派活等会起执行的动作；全不问 = 直接做。手机不进聊天流，审批走全局待办轮询，也能在这里或手机上答复。",
+          "全部问我 = 改文件 / 跑命令 / 派活前都问一句；只问重要的 = 只拦命令执行、派活等会起执行的动作；全不问 = 直接做。审批会直接弹在界面右下角，不用来这里找。",
           `<div class="segmented slide" role="radiogroup" aria-label="审批档" id="policy-approval-level">
              <button type="button" data-approval="ask-all" aria-checked="false">全部问我</button>
              <button type="button" data-approval="ask-critical" aria-checked="false">只问重要的</button>
@@ -9738,15 +9718,6 @@ async function renderSettings() {
           "环境变量 AUTONOMY_ENABLED 控制；页面只读显示开 / 关，不在这里改。",
           `<span class="kv" id="policy-autonomy">…</span>`,
         )}
-        <div class="divider"></div>
-        ${rowMarkup(
-          "待处理审批",
-          "全局待办：其他会话等着的写操作也会列在这里；批准 / 拒绝与聊天卡片等价（重复答复幂等）。",
-          `<span class="kv" id="pending-approval-count">…</span>`,
-        )}
-        <div id="pending-approval-list">
-          <div class="row"><div class="row-main"><div class="row-hint">读取中…</div></div></div>
-        </div>
       </div>`,
     )}`;
 
@@ -9774,7 +9745,7 @@ async function renderSettings() {
       ?.addEventListener("click", () => void exportAllData());
     void loadPolicy();
     void loadAutonomySwitch();
-    void loadPendingApprovalList();
+    void refreshApprovalPopups();
   } else if (page === "projects") {
     // 2026-11-05 G1：卡片补内衬（p-4 / sm:p-6），主项目/子项目/待确认三段分开；
     // 带目录选择器（壳内系统对话框、壳外只留手输）。
@@ -9983,6 +9954,7 @@ async function renderSettings() {
           "搜索（课题研究用）",
           "DeepSeek 搜索，给长期课题的每周研究查资料用。变量名 <code>DEEPSEEK_SEARCH_API_KEY</code>",
           `<span class="kv" id="search-state" data-state="unknown">读取中…</span>`,
+          { inlineHint: true },
         )}
         <div class="divider"></div>
         <div class="field" id="search-key-api">
@@ -10422,6 +10394,13 @@ const MEMORY_KIND_LABEL = {
   entity: "人事物",
 };
 const MEMORY_KIND_ORDER = ["preference", "fact", "entity", "episode"];
+/* 组头悬停解释（2026-11-08）：组标题挪到卡片外，"经历是干啥的"这类疑问悬停即答 */
+const MEMORY_KIND_TIPS = {
+  preference: "你的喜好与习惯（例如「喜欢简洁的汇报」）。每轮对话开头都会被想起。",
+  fact: "关于你和你的生活的客观事实（例如「家里有两只猫」），按相关度召回。",
+  entity: "重要的人、项目、东西的条目，聊到相关的就会想起。",
+  episode: "聊过、经历过的事的记录，帮你想起「上次……」。按相关度召回，不会每次都出现。",
+};
 
 /** 当前查看 / 整理 / 导入的 scope。进页固定回 global，避免下拉与数据不同步。 */
 let memoryScope = "global";
@@ -10465,13 +10444,12 @@ function memorySettingsMarkup() {
     </div>
     <div class="card" id="mem-proposals-card" hidden>
       <div class="mem-prop-head">
-        <div class="set-card-title">整理建议<span class="mem-count" id="mem-prop-count"></span></div>
-        <div class="set-hint">这些都是模型给的<b>建议</b>，不会自动改。应用 = 被收编那条标为过时（记录还留着，可追溯）。</div>
+        <div class="set-card-title">整理建议<span class="mem-count" id="mem-prop-count"></span><span class="row-tip" data-tip="这些都是模型给的建议，不会自动改。应用 = 被收编那条标为过时（记录还留着，可追溯）。" role="note" aria-label="这些都是模型给的建议，不会自动改。应用 = 被收编那条标为过时（记录还留着，可追溯）。">${ROW_TIP_ICON}</span></div>
       </div>
       <div class="mem-props" id="mem-props"></div>
       <div class="mem-result" id="mem-prop-result" hidden></div>
     </div>
-    <div class="card" id="mem-list-card">
+    <div id="mem-list-card">
       <div class="set-hint" id="mem-empty" hidden>
         还没有记忆。聊几次之后，偏好会自动出现在这里；也可以直接对助手说「记住：……」。
       </div>
@@ -10794,12 +10772,20 @@ function renderMemoryList(box, items) {
     ...MEMORY_KIND_ORDER.filter((kind) => groups.has(kind)),
     ...[...groups.keys()].filter((kind) => !MEMORY_KIND_ORDER.includes(kind)),
   ];
+  // 2026-11-08 重排：分组标题从大卡内部挪到**卡片外**（与「记忆」节标题同一节律），
+  // 每类一张自己的卡；空分组不出现。组头悬停有一句"这是干啥的"（MEMORY_KIND_TIPS）。
   box.innerHTML = order
     .map((kind) => {
       const rows = groups.get(kind);
-      return `<div class="mem-group">
-        <div class="mem-group-title">${esc(MEMORY_KIND_LABEL[kind] || kind)}<span class="mem-count">${rows.length}</span></div>
-        ${rows.map((item) => memoryItemMarkup(item)).join("")}
+      const tip = MEMORY_KIND_TIPS[kind] || "";
+      const label = esc(MEMORY_KIND_LABEL[kind] || kind);
+      return `<div class="mem-sec">
+        <div class="mem-sec-head">
+          <h3 class="mem-sec-title">${label}</h3>
+          <span class="mem-count">${rows.length}</span>
+          ${tip ? `<span class="row-tip" data-tip="${attr(tip)}" role="note" aria-label="${attr(tip)}">${ROW_TIP_ICON}</span>` : ""}
+        </div>
+        <div class="card">${rows.map((item) => memoryItemMarkup(item)).join("")}</div>
       </div>`;
     })
     .join("");
@@ -11268,76 +11254,135 @@ async function decideProjectProposal(id, action) {
   }
 }
 
-/**
- * 设置页「权限」卡里的全局待办（2026-11-04 批次六）。
- * 不带 conversationId = 跨会话；标题只认改名表，取不到显示「未命名会话」。
- */
-async function loadPendingApprovalList() {
-  const box = document.getElementById("pending-approval-list");
-  const count = document.getElementById("pending-approval-count");
-  if (!box) return;
-  const empty = (text) => {
-    box.innerHTML = `<div class="row"><div class="row-main"><div class="row-hint">${esc(text)}</div></div></div>`;
-    if (count) count.textContent = "0";
-  };
+/* ── 审批浮窗（2026-11-08）：人在别的会话/别的页也能当场批 ─────────
+ * 全局待审批 5 秒一拉，一份数据多处分用（浮窗 / 群胶囊）。浮窗只弹「当前看不见的」：
+ * 当前会话已有的对话流卡、点过「忽略」的都不重复。同屏最多 3 张，余下收成一行计数。
+ * 原设置页「待处理审批」块与抽屉入口退役：bury 在设置里难找，审批不点头 agent 就干等。 */
+const APPROVAL_POP_POLL_MS = 5000;
+const APPROVAL_POP_MAX = 3;
+const APPROVAL_POP_X =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
+let approvalPopTimer = 0;
+let approvalPopTicker = 0;
+let approvalPopItems = [];
+const approvalPopDismissed = new Set(); // 本次会话期内点过「忽略」的 callId
 
+function approvalPopHost() {
+  let host = document.getElementById("approval-popups");
+  if (!host) {
+    host = document.createElement("div");
+    host.id = "approval-popups";
+    document.body.append(host);
+  }
+  return host;
+}
+
+/** 弹不弹这一条：被忽略过、当前会话的对话流卡已经挂着 → 都不弹 */
+function approvalPopVisible(item) {
+  if (approvalPopDismissed.has(item.callId)) return false;
+  const card = approvalCards.get(item.callId);
+  if (card?.root?.isConnected) return false;
+  return true;
+}
+
+/** blocking 形态给倒计时，async 形态只写「等待处理」（同对话流卡的口径） */
+function approvalPopRemainText(deadlineAt) {
+  if (state.capabilities.approvalMode !== "blocking") return "等待处理";
+  const deadline = Date.parse(deadlineAt || "");
+  if (!Number.isFinite(deadline)) return "";
+  const left = Math.max(0, Math.round((deadline - Date.now()) / 1000));
+  return left > 0 ? `剩余 ${left} 秒，超时按拒绝处理` : "已超时";
+}
+
+function renderApprovalPopups() {
+  const host = approvalPopHost();
+  const visible = approvalPopItems.filter(approvalPopVisible);
+  host.replaceChildren();
+  if (!visible.length) {
+    host.hidden = true;
+    syncApprovalPopTicker();
+    return;
+  }
+  host.hidden = false;
+  for (const item of visible.slice(0, APPROVAL_POP_MAX)) host.append(approvalPopupCard(item));
+  if (visible.length > APPROVAL_POP_MAX) {
+    const more = document.createElement("div");
+    more.className = "approval-pop-more";
+    more.textContent = `还有 ${visible.length - APPROVAL_POP_MAX} 条待处理`;
+    host.append(more);
+  }
+  syncApprovalPopTicker();
+}
+
+function approvalPopupCard(item) {
+  const source = approvalSourceLabel(item.conversationId) || item.chatTitle || "未命名会话";
+  const card = document.createElement("div");
+  card.className = "approval-pop";
+  const deadline = Date.parse(item.deadlineAt || "");
+  card.innerHTML = `
+    <div class="approval-pop-head">
+      <span class="approval-pop-tool">${esc(item.tool || "工具")}${item.origin === "autonomous" ? '<span class="pill-tag">例行任务</span>' : ""}</span>
+      <button class="approval-pop-close" type="button" title="忽略（这条不再弹；审批还在，超时按拒绝处理）" aria-label="忽略">${APPROVAL_POP_X}</button>
+    </div>
+    <div class="approval-pop-source">${esc(source)}</div>
+    ${String(item.args || "").trim() ? `<pre class="approval-pop-args">${esc(String(item.args).slice(0, 160))}</pre>` : ""}
+    <div class="approval-pop-foot">
+      <span class="approval-pop-time" data-deadline="${Number.isFinite(deadline) ? deadline : ""}">${esc(approvalPopRemainText(item.deadlineAt))}</span>
+      <button class="ghost" type="button" data-pop-approve="${esc(item.callId)}">批准</button>
+      <button class="ghost" type="button" data-pop-reject="${esc(item.callId)}">拒绝</button>
+    </div>`;
+  card.querySelector("[data-pop-approve]")?.addEventListener("click", () => void decideGlobalApproval(item.callId, "approve"));
+  card.querySelector("[data-pop-reject]")?.addEventListener("click", () => void decideGlobalApproval(item.callId, "reject"));
+  card.querySelector(".approval-pop-close")?.addEventListener("click", () => {
+    approvalPopDismissed.add(item.callId);
+    renderApprovalPopups();
+  });
+  // 点卡片跳到那条会话（按钮上的点击不算）
+  card.addEventListener("click", (event) => {
+    if (event.target.closest("button")) return;
+    if (item.conversationId) void openConversation(item.conversationId);
+  });
+  return card;
+}
+
+/** 倒计时一秒一跳；没有可见卡片就停表 */
+function syncApprovalPopTicker() {
+  const need = Boolean(document.querySelector(".approval-pop"));
+  if (need && !approvalPopTicker) {
+    approvalPopTicker = setInterval(() => {
+      for (const node of document.querySelectorAll(".approval-pop-time")) {
+        const deadline = Number(node.dataset.deadline);
+        node.textContent = Number.isFinite(deadline) && deadline
+          ? approvalPopRemainText(new Date(deadline).toISOString())
+          : approvalPopRemainText("");
+      }
+    }, 1000);
+  } else if (!need && approvalPopTicker) {
+    clearInterval(approvalPopTicker);
+    approvalPopTicker = 0;
+  }
+}
+
+async function refreshApprovalPopups() {
+  // 用户自己停了 runtime：别把浮窗刷成错误态（同 checkHealth 的口径）
+  if (document.body.dataset.runtime === "stopped") {
+    approvalPopItems = [];
+    renderApprovalPopups();
+    return;
+  }
   try {
     const response = await request("/api/v1/agent/approvals", { cache: "no-store" });
-    if (response.status === 503) {
-      empty("还没有配置模型，暂时没有审批。");
-      if (count) count.textContent = "—";
-      return;
-    }
-    if (!response.ok) throw new Error(String(response.status));
-    const data = await response.json();
-    const approvals = data.approvals || [];
-    if (count) count.textContent = String(approvals.length);
-    if (!approvals.length) {
-      empty("没有待处理的审批。");
-      return;
-    }
-
-    box.innerHTML = approvals
-      .map((item, index) => {
-        // 2026-11-08 扫尾批 8c：blocking 形态才有倒计时；async 形态只写「等待处理」
-        const deadline = Date.parse(item.deadlineAt || "");
-        const left = Number.isFinite(deadline)
-          ? Math.max(0, Math.round((deadline - Date.now()) / 1000))
-          : null;
-        const remain =
-          state.capabilities.approvalMode === "blocking"
-            ? left === null
-              ? ""
-              : left > 0
-                ? `剩余 ${left} 秒，超时按拒绝处理`
-                : "已超时"
-            : "等待处理";
-        // 来源（2026-11-08 批三）：能反查到群/执事就写清楚，否则退回 chatTitle
-        const source = approvalSourceLabel(item.conversationId) || item.chatTitle || "未命名会话";
-        return `${index ? '<div class="divider"></div>' : ""}
-        <div class="row">
-          <div class="row-main">
-            <div class="row-label">${esc(source)} · ${esc(item.tool || "工具")}${item.origin === "autonomous" ? '<span class="pill-tag">例行任务</span>' : ""}</div>
-            <div class="row-hint">${esc((item.args || "").slice(0, 160))}</div>
-            ${remain ? `<div class="row-hint">${remain}</div>` : ""}
-          </div>
-          <div class="row-control">
-            <button class="ghost" type="button" data-approval-approve="${esc(item.callId)}">批准</button>
-            <button class="ghost" type="button" data-approval-reject="${esc(item.callId)}">拒绝</button>
-          </div>
-        </div>`;
-      })
-      .join("");
-
-    for (const button of box.querySelectorAll("[data-approval-approve]")) {
-      button.addEventListener("click", () => void decideGlobalApproval(button.dataset.approvalApprove, "approve"));
-    }
-    for (const button of box.querySelectorAll("[data-approval-reject]")) {
-      button.addEventListener("click", () => void decideGlobalApproval(button.dataset.approvalReject, "reject"));
-    }
+    const data = response.ok ? await response.json().catch(() => ({})) : {};
+    approvalPopItems = Array.isArray(data.approvals) ? data.approvals : [];
   } catch (error) {
-    if (error.message !== "forbidden") empty(`读不到待办：${error.message}`);
+    if (error.message !== "forbidden") approvalPopItems = [];
   }
+  renderApprovalPopups();
+}
+
+function startApprovalPopWatch() {
+  if (approvalPopTimer) return;
+  approvalPopTimer = setInterval(() => void refreshApprovalPopups(), APPROVAL_POP_POLL_MS);
 }
 
 async function decideGlobalApproval(callId, decision) {
@@ -11367,7 +11412,10 @@ async function decideGlobalApproval(callId, decision) {
       for (const button of entry.root.querySelectorAll("button")) button.disabled = true;
       approvalCards.delete(callId);
     }
-    await loadPendingApprovalList();
+    // 浮窗同步（2026-11-08）：把已答复的从待弹清单里去掉立刻重画，
+    // 不等下一轮 5 秒轮询——批完还挂着一张可再点的卡会误导
+    approvalPopItems = approvalPopItems.filter((item) => item.callId !== callId);
+    renderApprovalPopups();
   } catch (error) {
     if (error.message !== "forbidden") toast(`答复失败：${error.message}`);
   }
@@ -16920,6 +16968,9 @@ void (async () => {
   applyRoute();
   setInterval(checkHealth, 8000);
   setInterval(autoSyncTick, 5000);
+  // 审批浮窗（2026-11-08）：全局待审批 5 秒一拉，右下角常驻——人在哪都能当场批
+  void refreshApprovalPopups();
+  startApprovalPopWatch();
   // 问候语跨段自动换（2026-11-07）：窗口常开着过夜也不能一直挂着「晚安」。
   // 一分钟查一次就够——换段是整点的事，没人会盯着这一秒；
   // 只改文本、不重建 DOM，所以不会打断动画，也不会闪。

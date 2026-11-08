@@ -115,17 +115,17 @@
  * 迁移口径：旧 "dark" → "indigo"，旧 "light" / 缺省 → "paper"（见 index.html 与 app.js）。
  */
 
-/* ── White：纯白 ── */
+/* ── White：暖白（2026-11-08 柔化：纯白太刺眼，降为微暖灰白；手机端 Theme.kt 未跟随） ── */
 html[data-theme="white"] {
-  --bg: #ffffff;
-  --surface: #ffffff;
-  --surface-low: #f4f4f5;
-  --card: #fafafa;
-  --card-high: #f0f0f1;
+  --bg: #fafaf8;
+  --surface: #fafaf8;
+  --surface-low: #f3f3f0;
+  --card: #f4f4f1;
+  --card-high: #ededea;
   --text: #1a1a1e;
   --text-2: #52525b;
   --text-3: #9b9ba4;
-  --outline: #d4d4d8;
+  --outline: #d7d7d3;
   --divider: rgba(0, 0, 0, 0.10);
 
   /* accent 三档同 paper：白底上原色对比最好，不再另调 */
@@ -158,7 +158,7 @@ html[data-theme="white"] {
   --composer-pill-bg: rgba(0, 0, 0, 0.05);
   --composer-border: rgba(0, 0, 0, 0.14);
 
-  --backdrop: #f0f0f2;
+  --backdrop: #f1f1ee;
   --composer-shadow: 0 10px 28px rgba(0, 0, 0, 0.10);
   --modal-mask: rgba(0, 0, 0, 0.6);
 
@@ -216,18 +216,18 @@ html[data-theme="indigo"] {
   color-scheme: dark;
 }
 
-/* ── Black：纯黑 OLED（底色纯黑，卡片留一档可辨层级） ── */
+/* ── Black：炭黑（2026-11-08 柔化：纯黑对比太硬，降为炭黑；手机端 Theme.kt 未跟随） ── */
 html[data-theme="black"] {
-  --bg: #000000;
-  /* 主区就是纯黑（OLED 省电/纯净），层级交给卡片 #0e0e12 和描边 */
-  --surface: #000000;
-  --surface-low: #0a0a0d;
-  --card: #0e0e12;
-  --card-high: #16161c;
-  --text: #ededf0;
+  --bg: #17171a;
+  /* 主区就是炭黑，层级交给卡片 #1d1d21 和描边 */
+  --surface: #17171a;
+  --surface-low: #121215;
+  --card: #1d1d21;
+  --card-high: #242429;
+  --text: #e6e6ea;
   --text-2: #a0a0aa;
   --text-3: #66666f;
-  --outline: #33333c;
+  --outline: #3a3a44;
   --divider: rgba(255, 255, 255, 0.12);
 
   --c-primary: #8b97ea;
@@ -259,7 +259,7 @@ html[data-theme="black"] {
   --composer-pill-bg: rgba(255, 255, 255, 0.10);
   --composer-border: rgba(255, 255, 255, 0.16);
 
-  --backdrop: #000000;
+  --backdrop: #101013;
   --composer-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
   --modal-mask: rgba(0, 0, 0, 0.7);
 
@@ -396,6 +396,40 @@ html[data-sidebar="closed"] .side-rail {
   pointer-events: auto;
   transition: opacity 200ms cubic-bezier(0, 0, .2, 1) 120ms;
 }
+
+/* ── 侧栏悬停浮出（2026-11-08，抄 Cindy peek）──────────────
+   收起态下悬停顶栏的收起/展开钮：面板以 fixed 浮层出现在轨道右侧（盖在内容上，
+   不挤压主区）。.sidebar 平时 z-index:0、被 .main(z1) 压住——浮出期间整体抬到 30。
+   fixed 的包含块是视口（.sidebar 没有 transform），不会被 overflow:hidden 裁掉；
+   data-peek 由 JS 管理：on=滑入，off=原地滑出（160ms 后摘标记）。 */
+html[data-peek] .sidebar { z-index: 30; }
+html[data-peek="on"] .sidebar-inner,
+html[data-peek="off"] .sidebar-inner {
+  position: fixed;
+  left: var(--rail);
+  top: var(--titlebar-h);
+  bottom: 0;
+  width: var(--sidebar);
+  z-index: 45;
+  background: var(--backdrop);
+  border-right: 1px solid var(--divider);
+  box-shadow: var(--shadow-menu);
+}
+html[data-peek="on"] .sidebar-inner {
+  opacity: 1;
+  pointer-events: auto;
+  animation: sidebarPeekIn 200ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+html[data-peek="off"] .sidebar-inner {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(-16px);
+  transition: transform 160ms ease, opacity 160ms ease;
+}
+@keyframes sidebarPeekIn {
+  from { opacity: 0; transform: translateX(-16px); }
+  to { opacity: 1; transform: none; }
+}
 /* 40×40 圆钮 / 22px 图标：与展开态导航行同轴，图标不再 15/18px 混用 */
 .rail-btn {
   flex: none;
@@ -413,41 +447,30 @@ html[data-sidebar="closed"] .side-rail {
 /* 22px 短分隔线：用 divider token，浅色主题的 card-border 是透明的 */
 .rail-sep { flex: none; width: 22px; height: 1px; margin: 2px 0; background: var(--divider); }
 .rail-flex { flex: 1; }
-/* 收起态底栏（2026-11-07 用户口径）：状态点在齿轮**正下方**，同一竖轴居中。
-   之前状态点绝对定位在轨道右侧，跟齿轮不在一条线上——收起态像两颗不相干的点。 */
+/* 收起态底栏（2026-11-08 用户口径）：状态点退役（「一收起就多一颗点，看着别扭」），
+   只留齿轮；服务在线/离线信息挪进齿轮的 data-tip（setStatus 动态更新）。 */
 .rail-foot {
   flex: none;
   width: 100%;
   display: flex; flex-direction: column; align-items: center; gap: 3px;
 }
-.rail-status {
-  display: flex; align-items: center; justify-content: center;
-  height: 10px;
-}
-.rail-status i {
-  display: block; width: 7px; height: 7px;
-  border-radius: 50%; background: var(--text-3);
-  transition: background .2s ease;
-}
-/* 在线 = 成功绿（F2 的 --ok，四套主题各有值） */
-.rail-status[data-state="ok"] i { background: var(--ok); }
-.rail-status[data-state="off"] i { background: var(--c-error); }
-.rail-status[data-state="waiting"] i { background: var(--text-3); animation: breathe 1.6s ease-in-out infinite; }
 
-/* 轨道 tooltip：右侧弹出，挂 body 下避开侧栏 overflow 裁切 */
-.rail-tip {
+/* 全局悬停提示（2026-11-08 由轨道 tip 泛化）：data-tip 元素悬停即出，挂 body 下
+   避开一切 overflow 裁切。反色小签、12px 圆角、可换行、纯 opacity 进场（信息不是对象）。 */
+.hover-tip {
   position: fixed;
   z-index: 80;
-  max-width: min(280px, calc(100vw - 96px));
+  max-width: min(320px, calc(100vw - 96px));
   padding: 5px 9px;
-  border-radius: var(--r-sm);
+  border-radius: var(--r-md);
   background: var(--text);
   color: var(--bg);
-  font-size: 12px; line-height: 1.4;
-  white-space: nowrap;
+  font-size: 12px; line-height: 1.45;
   pointer-events: none;
   box-shadow: var(--shadow-menu);
+  animation: hoverTipIn .12s ease-out;
 }
+@keyframes hoverTipIn { from { opacity: 0; } }
 
 /* 顶部主导航组（2026-11-05 F1）：三行等权，行距 2px，整体上移 */
 .side-top {
@@ -569,15 +592,14 @@ html[data-sidebar="closed"] .side-rail {
 .side-item:disabled:hover { background: transparent; color: var(--text-3); }
 
 /*
- * 侧栏底部常驻区（2026-11-07 二改）：与收起轨道同构——齿轮一颗居中，状态点正下方居中。
+ * 侧栏底部常驻区（2026-11-08 三改）：齿轮在左、状态点同行在右——左右排列（用户口径）。
  *
- * 上一版是「齿轮整行 + 右侧『设置』文字」压着「圆点 + 『连接中』」一行文字：
- * 两行都从左起排，字宽不同，展开态看着就是左一块右一块。
- * 用户口径：设置不用文字、用图标就行；状态也只留点，不要占一行字。
- * 所以这里两块都是居中的定宽图标钮，几何和 .rail-btn / .rail-status 一致。
+ * 2026-11-07 版是齿轮居中、点在其正下方竖排；2026-11-08 口径：展开态两元素左右排，
+ * 收起态的点整个退役（信息挪进齿轮 data-tip）。状态点在剩余宽度里居中，
+ * 既不贴着齿轮也不顶到边，视觉重心稳。
  */
 .side-foot {
-  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  display: flex; flex-direction: row; align-items: center; gap: 8px;
   /* 钉死在侧栏底边：会话列表再长也由列表自己滚，底栏不被推挤。
      .sidebar-inner 是唯一的滚动容器，短窗口时 margin-top:auto 没有余量，
      所以再用 sticky 兜住，内容再长也看得到设置与状态。 */
@@ -586,7 +608,7 @@ html[data-sidebar="closed"] .side-rail {
   z-index: 2;
   background: var(--backdrop);
   margin-top: auto;
-  padding: 8px 0 10px;
+  padding: 8px 12px 10px;
   border-top: 1px solid var(--divider);
 }
 
@@ -601,8 +623,9 @@ html[data-sidebar="closed"] .side-rail {
    外层 grid 居中比 flex + margin 稳（按钮本身不再撑满一行）。 */
 .side-foot .foot-gear svg { width: 22px; height: 22px; margin: 0; }
 
-/* 状态：只剩一颗点，居中落在齿轮正下方（10px 行高同 .rail-status） */
+/* 状态：只剩一颗点，在齿轮右侧的剩余宽度里居中（10px 行高） */
 .side-foot .status {
+  flex: 1;
   display: flex; align-items: center; justify-content: center;
   height: 10px;
 }
@@ -617,7 +640,7 @@ html[data-sidebar="closed"] .side-rail {
   border: 0;
 }
 .status i { display: block; width: 7px; height: 7px; border-radius: 50%; background: var(--text-3); transition: background .2s ease; }
-/* 在线 = 成功绿；off 用错误红；waiting 呼吸（与 .rail-status 同一套色） */
+/* 在线 = 成功绿；off 用错误红；waiting 呼吸（收起态的点退役后，这是全站唯一的服务状态灯） */
 .status[data-state="ok"] i { background: var(--ok); }
 .status[data-state="off"] i { background: var(--c-error); }
 .status[data-state="waiting"] i { background: var(--text-3); animation: breathe 1.6s ease-in-out infinite; }
@@ -1119,15 +1142,15 @@ html[data-sidebar="closed"] .side-rail {
 }
 .msg.assistant { flex-direction: column; gap: 8px; position: relative; }
 
-/* 回答脚注（2026-11-06）：复制 · 用时 · 完成时间，收在正文下方一条线上。
-   以前复制按钮 absolute 在右上角、用 absolute 在右侧，两者永远对不齐；
-   现在还原成正常流里的 flex 行，hover 整条回答才淡入。
+/* 回答脚注（2026-11-06 建；2026-11-08 图标化+拉开距离）：复制图标 · 用时 · 完成时间，
+   收在正文下方一条线上，hover 整条回答才淡入。
+   2026-11-08 用户口径：脚注离正文远一点（负 margin 归零改正 2px）、复制用图标不用文字。
 
    留 20px 高度是刻意的：不留就会在 hover 的一瞬间把下面的消息顶下去，
-   长对话里来回划鼠标会一直抖。负 margin 把父级 gap 抵掉，实际只多占一行细带。 */
+   长对话里来回划鼠标会一直抖。 */
 .msg-foot {
-  display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px;
-  min-height: 20px; margin-top: -6px;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px;
+  min-height: 20px; margin-top: 2px;
   font-size: 11px; color: var(--text-3);
   opacity: 0; pointer-events: none;
   transition: opacity .15s ease;
@@ -1137,14 +1160,19 @@ html[data-sidebar="closed"] .side-rail {
 /* 键盘用户不必靠 hover 才能摸到复制 */
 .msg.assistant:focus-within .msg-foot { opacity: 1; pointer-events: auto; }
 
+/* 复制按钮（2026-11-08 图标化）：Lucide copy 内联 13px，无框无底，hover 才有淡底；
+   成功变 ✓（--ok）、失败变 ×（--c-error），1.2s 后由 JS 换回复制图标 */
 .msg-foot .copy-btn {
-  height: 20px; padding: 0 7px;
-  border: 1px solid var(--outline); border-radius: var(--r-sm);
-  background: var(--bg); color: var(--text-3);
-  font-size: 11px;
-  transition: color .15s ease, border-color .15s ease;
+  width: 24px; height: 20px; padding: 0;
+  display: grid; place-content: center;
+  border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--text-3);
+  transition: color .15s ease, background .15s ease;
 }
-.msg-foot .copy-btn:hover { color: var(--text); border-color: var(--text-3); }
+.msg-foot .copy-btn svg { width: 13px; height: 13px; }
+.msg-foot .copy-btn:hover { color: var(--text); background: var(--card-high); }
+.msg-foot .copy-btn.is-done { color: var(--ok); }
+.msg-foot .copy-btn.is-failed { color: var(--c-error); }
 
 .msg-usage,
 .msg-time { line-height: 20px; }
@@ -1578,6 +1606,59 @@ html[data-acts="0"] .wp { display: none !important; }
 }
 .approval.resolved { opacity: .72; }
 
+/* ── 审批浮窗（2026-11-08）：右下角常驻，人在别的会话/页面也弹 ──
+   压过抽屉与 peek（z40/45），低于模态（z60）；宽度 320 与模型菜单同档。 */
+#approval-popups {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 55;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(320px, calc(100vw - 32px));
+}
+.approval-pop {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  background: var(--surface);
+  border: 1px solid var(--outline);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-menu);
+  animation: hoverTipIn .15s ease-out;
+  cursor: pointer;
+}
+.approval-pop-head { display: flex; align-items: center; gap: 8px; }
+.approval-pop-tool {
+  display: flex; align-items: center; gap: 6px; min-width: 0;
+  font-size: 13px; font-weight: 600; color: var(--text);
+}
+.approval-pop-close {
+  flex: none; margin-left: auto;
+  width: 22px; height: 22px;
+  display: grid; place-content: center;
+  border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--text-3);
+  cursor: pointer;
+  transition: color .15s ease, background .15s ease;
+}
+.approval-pop-close:hover { color: var(--text); background: var(--card-high); }
+.approval-pop-close svg { width: 12px; height: 12px; }
+.approval-pop-source { font-size: 12px; color: var(--text-2); }
+.approval-pop-args {
+  margin: 0; padding: 6px 8px;
+  max-height: 64px; overflow: auto;
+  font-family: var(--mono); font-size: 11px; line-height: 1.5;
+  color: var(--text-2); white-space: pre-wrap; overflow-wrap: anywhere;
+  background: var(--surface-low); border-radius: var(--r-sm);
+}
+.approval-pop-foot { display: flex; align-items: center; gap: 8px; }
+.approval-pop-time { margin-right: auto; font-size: 11.5px; color: var(--text-3); }
+.approval-pop-actions { display: flex; gap: 8px; }
+.approval-pop-more { text-align: center; font-size: 11.5px; color: var(--text-3); }
+
 /* ── 输入 ─────────────────────────────────────────────── */
 
 /*
@@ -1968,6 +2049,16 @@ html[data-route="settings"] .sidebar { display: none; }
 .row-main { min-width: 0; }
 .row-label { font-size: 13.5px; font-weight: 500; color: var(--text); }
 .row-hint { font-size: 12px; color: var(--text-2); margin-top: 3px; line-height: 1.45; }
+/* ⓘ 悬停解释（2026-11-08）：描述性 hint 不再常驻标签底下，标签旁一颗 ⓘ，悬停出全句。
+   状态/结果类文案仍走 .row-hint 常驻（rowMarkup 的 inlineHint）。 */
+.row-tip {
+  display: inline-flex; align-items: center;
+  width: 13px; height: 13px; margin-left: 6px; vertical-align: -2px;
+  color: var(--text-3); cursor: help;
+  transition: color .15s ease;
+}
+.row-tip:hover { color: var(--text); }
+.row-tip svg { width: 13px; height: 13px; }
 .row-control { flex: 0 1 auto; min-width: 0; display: flex; align-items: center; gap: 8px; }
 
 .divider { height: 1px; margin: 0 16px; background: var(--divider); }
@@ -3086,6 +3177,18 @@ select.cs-input {
   cursor: pointer;
 }
 select.cs-input:disabled { color: var(--text-3); cursor: default; }
+/* 抽屉主选模型（2026-11-08）：原生 select 退役——弹开的列表是 OS 样式，跟全站不是一个长相。
+   改成触发钮 + 复用 composer 的 renderModelMenu：供应商分段、12px 圆角、思考档全套现成。 */
+.cs-model-pick { position: relative; }
+.cs-model-trigger {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  text-align: left; cursor: pointer;
+}
+.cs-model-trigger:hover { border-color: var(--text-3); }
+.cs-model-trigger:disabled { opacity: .55; cursor: default; }
+.cs-model-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cs-model-trigger .chev { flex: none; width: 14px; height: 14px; color: var(--text-3); }
+.cs-model-menu { max-height: 300px; }
 .cs-actions { display: flex; align-items: center; gap: 8px; padding: 10px 14px 12px; }
 .cs-actions .btn-primary { margin-left: auto; }
 .cs-hint { min-height: 17px; font-size: 12px; line-height: 1.5; color: var(--text-3); overflow-wrap: anywhere; }
@@ -3121,29 +3224,6 @@ select.cs-input:disabled { color: var(--text-3); cursor: default; }
 .cs-card .row { min-height: 52px; padding: 10px 14px; }
 .cs-card .row-label { font-size: 13.5px; }
 .cs-card .divider { margin: 0 14px; }
-
-/* 批量添加：现在住进抽屉里的「模型」页卡片（2026-11-07 二次修），
-   不再依赖弹层的负边距补偿——按卡片内块处理，左右留 14px。 */
-.chat-settings-batch { padding: 0 14px 14px; }
-/* 标题与「加到：某家」上下两行：448px 里并排会把长供应商名压到只剩两个省略号 */
-.batch-head {
-  display: flex; flex-direction: column; gap: 2px;
-  padding: 0 0 8px;
-  font-size: 12px; font-weight: 500; color: var(--text-2);
-}
-.batch-target { font-size: 11px; font-weight: 400; color: var(--text-3); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.batch-input {
-  display: block; box-sizing: border-box; width: 100%;
-  min-height: 64px; max-height: 160px; resize: vertical;
-  padding: 8px 10px;
-  font-family: var(--mono); font-size: 12px; line-height: 1.5;
-  color: var(--text); background: var(--surface);
-  border: 1px solid var(--outline); border-radius: var(--r-md);
-}
-.batch-input:focus { outline: none; border-color: var(--accent-line); }
-.batch-input::placeholder { color: var(--text-3); }
-.batch-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-top: 8px; }
-.batch-hint { flex: 1; min-width: 0; min-height: 17px; text-align: left; overflow-wrap: anywhere; }
 
 /* 备选链：一条一行，序号 + 两个下拉 + 三个动作钮。
    下拉在 448px 里放不下「供应商 + 模型」并排，所以竖排两行（供应商 40% 宽浮在模型上方太挤）；
@@ -4734,14 +4814,16 @@ select.cs-input:disabled { color: var(--text-3); cursor: default; }
    头像并进「人设」弹窗，选择面板改用 .pt-portrait-* 一族，旧的 av-target/av-grid/
    av-editor 已无引用。预设 PNG 本体与 /assets/preset/:file 路由保持不变。 */
 
-/* ── 记忆设置（2026-11-06）────────────────────────────────
-   列表是"分组标题 + 条目"两层：条目左对齐正文、右侧只留删除。
+/* ── 记忆设置（2026-11-06 建；2026-11-08 重排）──────────────
+   分组标题挪到卡片外（与节标题 set-sec-title 同节律），每类一张自己的卡；
+   条目左对齐正文、右侧只留删除。组头带 ⓘ 悬停解释（"经历是干啥的"）。
    形状与执事列表（.pt-card）同族，但不复用它的 class——那里有头像/状态徽章，
    记忆不需要，混用会让两边的改动互相牵连。 */
 .mem-list { display: flex; flex-direction: column; gap: 16px; }
-.mem-group { display: flex; flex-direction: column; gap: 8px; }
-.mem-group-title {
-  display: flex; align-items: center; gap: 8px;
+.mem-sec { display: flex; flex-direction: column; gap: 8px; }
+.mem-sec-head { display: flex; align-items: center; gap: 8px; }
+.mem-sec-title {
+  margin: 0;
   font-size: 12.5px; font-weight: 600; letter-spacing: .02em;
   /* --text-3 在 --card-high 上只有 3:1 左右，12px 小字几乎看不清；
      标题要能一眼扫到，用 --text-2（与 .row-hint 同档）。 */

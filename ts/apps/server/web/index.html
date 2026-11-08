@@ -86,8 +86,9 @@
     <!-- 收起轨道（2026-11-05 F1 / E4 重排 / E5 对齐 / 2026-11-07 统一批）：
          对齐 CINDY 几何，72px 轨 + 40×40 圆钮。顺序与展开态一致：
          总管（首字圆钮）→ 任务中心 → 项目 → 执事占位（悬停提示去看展开侧栏）→ 群组
-         → 底部齿轮 + 状态点。2026-11-07：顶部「新建对话」退役（新建入口在展开态
-         「最近会话」分区头的 ＋），状态点改到齿轮正下方，不再挂在右侧。
+         → 底部齿轮。2026-11-07：顶部「新建对话」退役（新建入口在展开态
+         「最近会话」分区头的 ＋）；2026-11-08：状态点退役（收起态只留齿轮，
+         服务在线/离线挪进齿轮 data-tip）。
          项目按钮仍用弹层（72px 放不下内联列表），展开态则是内联分区。 -->
     <div class="side-rail" id="side-rail">
       <button class="rail-btn rail-chief" id="rail-chief" type="button" data-tip="总管" aria-label="总管">
@@ -119,8 +120,7 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m10.065 12.493-6.18 1.318a.934.934 0 0 1-1.108-.702l-.537-2.15a1.07 1.07 0 0 1 .691-1.265l13.504-4.44"/><path d="m13.56 11.747 4.332-.924"/><path d="m16 21-3.105-6.21"/><path d="M16.485 5.94a2 2 0 0 1 1.455-2.425l1.09-.272a1 1 0 0 1 1.212.727l1.515 6.06a1 1 0 0 1-.727 1.213l-1.09.272a2 2 0 0 1-2.425-1.455z"/><path d="m6.158 8.633 1.114 4.456"/><path d="m8 21 3.105-6.21"/><circle cx="12" cy="13" r="2"/></svg>
       </button>
       <div class="rail-flex" aria-hidden="true"></div>
-      <!-- 收起态底部（2026-11-07）：齿轮在上、状态点在正下方，同一竖轴。
-           之前状态点绝对定位在右侧，跟齿轮不在一条线上，收起态看着别扭。 -->
+      <!-- 收起态底部（2026-11-08）：只留齿轮；状态点退役，在线/离线在 data-tip 里。 -->
       <div class="rail-foot">
         <button class="rail-btn" id="rail-settings" type="button" data-tip="设置" aria-label="设置" title="设置">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -128,7 +128,6 @@
             <circle cx="12" cy="12" r="3"/>
           </svg>
         </button>
-        <div class="rail-status" id="rail-status" data-state="waiting" aria-hidden="true"><i></i></div>
       </div>
     </div>
 
@@ -153,7 +152,7 @@
       <!-- 执事（上移到总管之后） -->
       <section class="side-sec is-open" id="sec-partners" data-sec="partners">
         <button class="side-sec-head" id="sec-partners-toggle" type="button" aria-expanded="true"
-                aria-controls="sec-partners-body" title="执事（点一下收起/展开）">
+                aria-controls="sec-partners-body" data-tip="执事（点一下收起/展开）">
           <svg class="sec-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
           <span class="sec-name">执事</span>
           <span class="side-count sec-count" id="partners-badge" hidden></span>
@@ -177,7 +176,7 @@
            会话行在前（最近聊的），任务行殿后（有活的），中间不加分隔条。 -->
       <section class="side-sec is-open" id="sec-chats" data-sec="chats">
         <button class="side-sec-head" id="sec-chats-toggle" type="button" aria-expanded="true"
-                aria-controls="sec-chats-body" title="对话（点一下收起/展开）">
+                aria-controls="sec-chats-body" data-tip="对话（点一下收起/展开）">
           <svg class="sec-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
           <span class="sec-name">对话</span>
           <span class="side-count sec-count" id="tasks-badge" hidden></span>
@@ -199,7 +198,8 @@
       <!-- 项目：行尾 ＋ 给两个入口（新建项目 / 添加已有子项目）。 -->
       <section class="side-sec is-open" id="sec-projects" data-sec="projects">
         <button class="side-sec-head" id="sec-projects-toggle" type="button" aria-expanded="true"
-                aria-controls="sec-projects-body" title="项目（点一下收起/展开）">
+                aria-controls="sec-projects-body"
+                data-tip="项目（点一下收起/展开）· 主项目 = 最大工作区根目录，打杂和临时文件放这里；子项目 = 登记进来的独立目录，通常是代码仓库或另一个项目。不在完全访问档时，助手只能在这两个空间里动手。">
           <svg class="sec-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
           <span class="sec-name" id="sec-projects-name">项目</span>
         </button>
@@ -221,7 +221,7 @@
 
       <section class="side-sec is-open" id="sec-groups" data-sec="groups">
         <button class="side-sec-head" id="sec-groups-toggle" type="button" aria-expanded="true"
-                aria-controls="sec-groups-body" title="群组（点一下收起/展开）" disabled>
+                aria-controls="sec-groups-body" data-tip="群组（点一下收起/展开）" disabled>
           <svg class="sec-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/><path d="M8 12h.01"/><path d="M12 12h.01"/><path d="M16 12h.01"/></svg>
           <span class="sec-name">群组</span>
         </button>
@@ -246,7 +246,7 @@
            不改页面路由。空态一句话（见 app.js）。 -->
       <section class="side-sec is-open" id="sec-topics" data-sec="topics">
         <button class="side-sec-head" id="sec-topics-toggle" type="button" aria-expanded="true"
-                aria-controls="sec-topics-body" title="课题（点一下收起/展开）">
+                aria-controls="sec-topics-body" data-tip="课题（点一下收起/展开）">
           <svg class="sec-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m10.065 12.493-6.18 1.318a.934.934 0 0 1-1.108-.702l-.537-2.15a1.07 1.07 0 0 1 .691-1.265l13.504-4.44"/><path d="m13.56 11.747 4.332-.924"/><path d="m16 21-3.105-6.21"/><path d="M16.485 5.94a2 2 0 0 1 1.455-2.425l1.09-.272a1 1 0 0 1 1.212.727l1.515 6.06a1 1 0 0 1-.727 1.213l-1.09.272a2 2 0 0 1-2.425-1.455z"/><path d="m6.158 8.633 1.114 4.456"/><path d="m8 21 3.105-6.21"/><circle cx="12" cy="13" r="2"/></svg>
           <span class="sec-name">课题</span>
           <span class="side-count sec-count" id="topics-badge" hidden></span>
@@ -260,9 +260,8 @@
         </div>
       </section>
 
-      <!-- 底部（2026-11-07 二改）：与收起轨道完全同构——齿轮一颗居中，状态点正下方居中。
-           之前这里是「设置」整行文字 + 状态「点 + 连接中」一行文字，展开态看着像左右两列；
-           用户口径：设置不用文字，图标就行；状态也只要点，别占一行。 -->
+      <!-- 底部（2026-11-08 三改）：齿轮在左、状态点在右，同一行左右排列（用户口径）。
+           状态文案仍不常驻，藏在 status-text 供读屏；收起轨道已无状态点。 -->
       <div class="side-foot">
         <button class="side-item foot-gear" id="open-settings" type="button" aria-label="设置" title="设置">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -538,7 +537,7 @@
 </div>
 
 <!-- 轨道 tooltip（2026-11-05 F1）：挂在 body 下，避免被 .sidebar 的 overflow:hidden 裁掉。 -->
-<div class="rail-tip" id="rail-tip" role="tooltip" hidden></div>
+<div class="hover-tip" id="hover-tip" role="tooltip" hidden></div>
 
 <!-- 通用模态弹窗（2026-11-05 F1，ZCode 规格）：纯手写，与 composer morph 弹层并存。
      内容由 openModal(title, bodyBuilder) 每次重建；Esc / 点遮罩 / 右上 X 关闭。 -->
