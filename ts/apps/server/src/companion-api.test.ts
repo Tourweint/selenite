@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -449,4 +449,42 @@ test("currentGoal：老库（partners 无 current_goal 列）打开不炸、旧�
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
+});
+
+// ── 员工档案 · 技能清单（2026-11-09）────────────────────────
+
+test("GET /partners/:id/skills：首行摘要 + mtime，非 md 不收；空目录 / 未知执事", async () => {
+	const partner = store.create("技能清单执事");
+	const skillsDir = store.skillsDirOf(partner.id);
+	mkdirSync(skillsDir, { recursive: true });
+
+	// 目录存在但为空 → 空列表，不报错
+	const emptyRes = await app.request(`/api/v1/partners/${partner.id}/skills`);
+	assert.equal(emptyRes.status, 200);
+	const emptyBody = (await emptyRes.json()) as { ok?: boolean; skills?: unknown[] };
+	assert.equal(emptyBody.ok, true);
+	assert.deepEqual(emptyBody.skills, []);
+
+	writeFileSync(join(skillsDir, "meeting.md"), "会议纪要的写法\r\n\r\n第一步：先记结论。\n", "utf8");
+	writeFileSync(join(skillsDir, "recall.md"), "回忆引导的口径\n正文", "utf8");
+	writeFileSync(join(skillsDir, "notes.txt"), "不该被收录", "utf8");
+
+	const listRes = await app.request(`/api/v1/partners/${partner.id}/skills`);
+	assert.equal(listRes.status, 200);
+	const body = (await listRes.json()) as {
+		ok?: boolean;
+		skills?: { name: string; summary: string; updatedAt: string }[];
+	};
+	assert.equal(body.ok, true);
+	assert.deepEqual(
+		body.skills?.map((skill) => skill.name),
+		["meeting", "recall"],
+		"只收 *.md、按名字排序",
+	);
+	assert.equal(body.skills?.[0]?.summary, "会议纪要的写法", "summary = 第一行（CRLF 也只取一行）");
+	assert.equal(body.skills?.[1]?.summary, "回忆引导的口径");
+	assert.ok(!Number.isNaN(Date.parse(body.skills?.[0]?.updatedAt ?? "")), "updatedAt 是合法时间");
+
+	const missing = await app.request("/api/v1/partners/no-such-partner/skills");
+	assert.equal(missing.status, 404, "未知执事 404");
 });

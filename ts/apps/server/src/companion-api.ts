@@ -1,4 +1,6 @@
 import type { Hono } from "hono";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { extname, join } from "node:path";
 import { inflateSync } from "node:zlib";
 import {
 	PARTNER_AVATAR_MAX_DIMENSION,
@@ -87,6 +89,41 @@ export function mountCompanions(app: Hono): void {
 
 	app.get("/api/v1/partners", (c) => {
 		return c.json({ ok: true, partners: store().list().map(projection) });
+	});
+
+	/**
+	 * 员工档案 · 技能清单（2026-11-09）：**只读**，不写状态、不进闸门。
+	 * 数据来自执事家目录 skills/ 的 *.md：name = 文件名去扩展、summary = 第一行
+	 * （技能手册既有口径：第 1 行 = 索引用摘要）、updatedAt = 文件 mtime。
+	 * 目录不存在 / 为空 / 单个文件读不了都按「没有技能」处理，不让整页 500。
+	 * 放在 `/:id` 之前注册：更具体的路径先命中，不依赖路由匹配顺序的巧合。
+	 */
+	app.get("/api/v1/partners/:id/skills", (c) => {
+		const id = c.req.param("id");
+		if (!store().get(id)) return c.json({ ok: false, error: "not_found" }, 404);
+		const dir = store().skillsDirOf(id);
+		const skills: { name: string; summary: string; updatedAt: string }[] = [];
+		try {
+			for (const entry of readdirSync(dir, { withFileTypes: true })) {
+				// 只认普通文件：符号链接 isFile() 为 false，顺带不把家目录外的文件端出去
+				if (!entry.isFile() || extname(entry.name).toLowerCase() !== ".md") continue;
+				const path = join(dir, entry.name);
+				try {
+					const firstLine = readFileSync(path, "utf8").split(/\r?\n/, 1)[0]?.trim() ?? "";
+					skills.push({
+						name: entry.name.replace(/\.md$/i, ""),
+						summary: firstLine,
+						updatedAt: statSync(path).mtime.toISOString(),
+					});
+				} catch {
+					// 单个文件读不了不该让整页列表 500（同 skills-api.ts 口径）
+				}
+			}
+		} catch {
+			// 目录不存在 / 读不到 = 空列表
+		}
+		skills.sort((a, b) => a.name.localeCompare(b.name));
+		return c.json({ ok: true, skills });
 	});
 
 	app.get("/api/v1/partners/:id", (c) => {
