@@ -37,6 +37,25 @@ import {
 	resolvePersona,
 } from "../partners.ts";
 import { pathGuardBlockReason } from "../path-guard.ts";
+// 执事间递话（2026-11-08 扫尾批 8d）：状态与话术在 partner-relay.ts，
+// 送达（submit 进目标会话）在这里——本文件才持有 harness。
+import {
+	RELAY_AUTONOMY_BLOCK_MESSAGE,
+	RELAY_CALLER_BLOCK_MESSAGE,
+	RELAY_CHIEF_BLOCK_MESSAGE,
+	RELAY_GROUP_BLOCK_MESSAGE,
+	RELAY_HOP_BLOCK_MESSAGE,
+	RELAY_TOOL_NAME,
+	beginRelayRun,
+	claimRelayTarget,
+	clearRelayTarget,
+	currentRelayRunKey,
+	isRelayRun,
+	markRelayRun,
+	markRelayTarget,
+	partnerRelayEnabled,
+	type RelayDeliverResult,
+} from "../partner-relay.ts";
 import { currentProjectEnabled, projectsStore, workspaceRootReal } from "../projects.ts";
 import {
 	chatModelRef,
@@ -207,6 +226,89 @@ export function getHarness(): Promise<Harness> {
 	return closing.then(() => getHarness());
 }
 
+/**
+ * 执事间递话的送达（2026-11-08 扫尾批 8d）。
+ *
+ * 送达 = 向目标执事**主会话**提交一条 user 输入（durable 语义，零新增存储）：
+ * 目标忙 → followUp 排队到下一个边界；空闲 → 直接起一轮。没有信箱表，
+ * 消息本体就是对方 transcript 里的那句话（方案 §一.2）。
+ *
+ * 目标会话 id 来自 `partner_session_links`（`sessionIdOfPartner`，只读）。
+ * **没建过会话就明确报错、不代建**：建会话要跑身份对齐（partner-runtime 的
+ * ensurePartnerSession，import agent），那是装配层；而且"从没打开过的执事"
+ * 递过去也没人看。模型收到的是可执行的引导（先点开一次），不是静默失败。
+ */
+async function deliverPartnerRelay(
+	targetPartnerId: string,
+	body: string,
+): Promise<RelayDeliverResult> {
+	const target = partnersStore().get(targetPartnerId);
+	if (!target) return { ok: false, error: "这位执事已经不在了" };
+	const sessionId = partnersStore().sessionIdOfPartner(targetPartnerId);
+	if (sessionId === null) {
+		return {
+			ok: false,
+			error: `「${target.name}」还没有自己的会话——先在侧栏点开它一次，再递话`,
+		};
+	}
+	try {
+		const harness = await getHarness();
+		const live = await harness.snapshot(LiveDoc, sessionId as never, CTX);
+		const busy = Boolean(live?.run);
+		const conversation = await harness.conversation(sessionId as never, CTX);
+		if (!conversation) return { ok: false, error: "对方会话已经不在了（可能被删）" };
+		// **先标记再提交**：目标那一轮的第一个 beforeRequest 要认领它，
+		// 否则"递话触发的轮次摘掉工具"会漏（提交后才标记已经晚了一步）。
+		markRelayTarget(sessionId);
+		try {
+			await conversation.submit(
+				{ type: "input", content: body, whenBusy: "followUp" },
+				CTX,
+			);
+		} catch (error) {
+			clearRelayTarget(sessionId);
+			throw error;
+		}
+		return { ok: true, busy };
+	} catch (error) {
+		const detail = error instanceof Error ? error.message : String(error);
+		return { ok: false, error: `提交失败：${detail.slice(0, 200)}` };
+	}
+}
+
+/**
+ * `send_to_agent` 的通道闸（2026-11-08 扫尾批 8d，方案 §一.4/§一.5/§一.7）。
+ *
+ * 这是**结构保证**，不是提示词保证：符合条件的轮次里工具被 beforeTool 直接摘掉，
+ * 模型再怎么想递也递不出去。四条按顺序：
+ *   1. 例行/自主轮 → 不可用（没有主人语境，批次C D14 口径）；
+ *   2. 群会话 → 不可用（方案 §二：不做群内定向私聊）；
+ *   3. 不是执事主会话（主人对话 / 总管）→ 不可用（主人直接说要谁干嘛就行）；
+ *   4. 本 run 是递话触发的 → 不可用（hop 恒为 1，断乒乓）。
+ *
+ * 第 4 条靠进程内 run 标记（beforeRequest 认领），不读库、不受存储抖动影响。
+ */
+function relayToolBlockReason(conversationId: number): string | undefined {
+	if (!COMPANIONS_ENABLED) return RELAY_CALLER_BLOCK_MESSAGE;
+	if (isAutonomyTurn(conversationId)) return RELAY_AUTONOMY_BLOCK_MESSAGE;
+	let store: ReturnType<typeof partnersStore>;
+	try {
+		store = partnersStore();
+	} catch {
+		return "执事档案读不到，暂时不能递话。";
+	}
+	if (store.isGroupSession(conversationId)) return RELAY_GROUP_BLOCK_MESSAGE;
+	const partnerId = store.partnerIdOfSession(conversationId);
+	if (!partnerId) return RELAY_CALLER_BLOCK_MESSAGE;
+	if (partnerId === CHIEF_PARTNER_ID) return RELAY_CHIEF_BLOCK_MESSAGE;
+	const runKey = currentRelayRunKey(conversationId);
+	// run 键由 beforeRequest 写；缺失说明这一轮没走过正常装配（理论上不可能），
+	// fail-closed：宁可拒一次递话，也不让"防乒乓"在未知形态下失守。
+	if (!runKey) return "这一轮的状态读不出来，暂时不能递话。";
+	if (isRelayRun(conversationId, runKey)) return RELAY_HOP_BLOCK_MESSAGE;
+	return undefined;
+}
+
 async function openHarness(): Promise<Harness> {
 	const config = readLlmConfig();
 	if (!config) throw new Error("LLM 未配置：设 LLM_API_KEY 之后再启动");
@@ -232,6 +334,12 @@ async function openHarness(): Promise<Harness> {
 		// 课题（2026-11-07）：createTools 内按 TOPICS_ENABLED / 依赖缺失决定注不注册。
 		topics: topicsStore(),
 		search: searchModule,
+		// 执事间递话（2026-11-08 扫尾批 8d）：执事能力 + 通道开关**双闸**，
+		// 关任一个 → `send_to_agent` 不上架（模型侧 tool_unavailable = 本批的回滚形态）。
+		relay:
+			COMPANIONS_ENABLED && partnerRelayEnabled()
+				? { deliver: deliverPartnerRelay }
+				: null,
 	});
 	registry.install(
 		(lifediaryExt = defineExtension({
@@ -339,6 +447,13 @@ async function openHarness(): Promise<Harness> {
 					beforeTool: async (call: ToolHookCall, api, context) => {
 						if (toolsBlocked.has(api.conversationId)) {
 							return { block: "本轮工具调用已达上限，请直接用已有信息回答" };
+						}
+						// 执事间递话的通道闸（2026-11-08 扫尾批 8d）：先于通用闸门。
+						// 防乒乓是结构保证 —— 递话触发的轮次里工具在这里被摘掉（方案 §一.5），
+						// 与模型说了什么无关。主人对话 / 群会话 / 自主轮同样在这条拦下。
+						if (call.name === RELAY_TOOL_NAME && partnerRelayEnabled()) {
+							const relayBlock = relayToolBlockReason(api.conversationId);
+							if (relayBlock) return { block: relayBlock };
 						}
 						const readOnly = readOnlyBlockReason(call.name);
 						// 自主轮高危审批（批次C C2）：例行轮（autonomyTurns 事实源）里
@@ -513,6 +628,15 @@ async function openHarness(): Promise<Harness> {
 						const key = `${api.conversationId}:${String(runId ?? "none")}`;
 						const used = (runTurns.get(key) ?? 0) + 1;
 						runTurns.set(key, used);
+
+						// 执事间递话（2026-11-08 扫尾批 8d）：把 run 身份记给通道，并认领
+						// "这一轮由递话触发"的一次性标记。认领放在这里而不是 beforeTool，
+						// 是因为一次模型请求对应一轮里**第一个**必到的点；mid-run 被 followUp
+						// 插进来的递话也在这里认领（那时 used>1，标记落到同一个 run 键上）。
+						beginRelayRun(api.conversationId, key);
+						if (claimRelayTarget(api.conversationId)) {
+							markRelayRun(api.conversationId, key);
+						}
 
 						if (MAX_TURNS > 0 && used > MAX_TURNS) {
 							toolsBlocked.add(api.conversationId);

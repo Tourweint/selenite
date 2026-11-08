@@ -675,6 +675,18 @@ export class PartnersStore {
 		return row?.partner_id ? String(row.partner_id) : null;
 	}
 
+	/**
+	 * `partnerIdOfSession` 的反向只读助手（2026-11-08 扫尾批 8d 执事间递话）：
+	 * 执事**主会话**的内部 id；还没建过会话 = null。
+	 *
+	 * 只看 `canonical`（执事主会话）。例行专线 / 群成员会话 / 领域路由都不是"递话该落的会话"：
+	 * 前者跑完即弃、后者没有对外的入口。**只读**：不建会话、不改身份版本——
+	 * 建会话要跑身份对齐（partner-runtime，import agent），那是装配层的事，不塞进存储层。
+	 */
+	sessionIdOfPartner(partnerId: string): number | null {
+		return this.findSessionLink(partnerId, "canonical", "canonical")?.sessionId ?? null;
+	}
+
 	// ── 例行任务定义（B3）────────────────────────────────
 	createRoutine(input: {
 		partnerId: string;

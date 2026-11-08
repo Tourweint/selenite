@@ -25,6 +25,9 @@ import type { OutgoingPart } from "../attachments.ts";
 import { watchDelegation, type DelegationEvent } from "../delegation.ts";
 import { memoryExtractMode, preferenceExtractionEnabled } from "../memory-extract.ts";
 import { COMPANIONS_ENABLED, partnersStore } from "../partners.ts";
+// 执事间递话的主人通知口（2026-11-08 扫尾批 8d）：递话发生在别的会话里，
+// 这里只订阅"主人能看到的那一条"（只报谁→谁，正文不展示）。
+import { watchChiefNotice } from "../partner-relay.ts";
 import {
 	chatModelRef,
 	clampThinkingLevel,
@@ -733,6 +736,27 @@ export async function* chatStream(
 		delegations.push(event);
 		notify();
 	});
+	/**
+	 * 执事间递话的主人通知（2026-11-08 扫尾批 8d）。
+	 *
+	 * 只有**主人的对话**订阅（`chatKindOfInternal === "chief"`）：执事自己那条流
+	 * 已经在工具卡里看到"我递了话"，再弹一条只会让人以为收到了别人的话。
+	 * 与派单进度同款——进程内轻事件，没开流就收不到、不落盘（不伪造主人的时间线）。
+	 */
+	const relayNotices: string[] = [];
+	const kindsForNotice = COMPANIONS_ENABLED
+		? await getHarness()
+				.then((harness) => harness.snapshot(ChatKinds, CTX))
+				.catch(() => null)
+		: null;
+	const unwatchRelayNotice =
+		COMPANIONS_ENABLED &&
+		chatKindOfInternal(conversationId, kindsForNotice?.byInternal ?? {}) === "chief"
+			? watchChiefNotice((text) => {
+					relayNotices.push(text);
+					notify();
+				})
+			: () => {};
 	/** 待推送的工具起止 */
 	const tools: ToolEvent[] = [];
 	const unwatchTool = watchTool(conversationId, (event) => {
@@ -816,6 +840,7 @@ export async function* chatStream(
 			thinkings.length > 0 ||
 			phases.length > 0 ||
 			delegations.length > 0 ||
+			relayNotices.length > 0 ||
 			tools.length > 0
 		) {
 			if (queue.length === 0 && thinkings.length === 0) {
@@ -874,6 +899,12 @@ export async function* chatStream(
 					yield { type: "progress", phase };
 					continue;
 				}
+				// 执事间递话：主人时间线上的"谁 → 谁递了一条"（正文不在这里）
+				const relayNotice = relayNotices.shift();
+				if (relayNotice) {
+					yield { type: "notice", text: relayNotice };
+					continue;
+				}
 				await new Promise<void>((resolve) => {
 					wake = resolve;
 				});
@@ -916,6 +947,7 @@ export async function* chatStream(
 		unwatchPhase();
 		unwatchDelegation();
 		unwatchTool();
+		unwatchRelayNotice();
 		// 只关掉"看"这件事，不碰正在跑的那一轮
 		await watch.stop().catch(() => undefined);
 	}

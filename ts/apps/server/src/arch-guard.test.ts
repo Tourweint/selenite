@@ -31,6 +31,9 @@ const READ_TOOLS = new Set([
 	"set_reminder",
 	"skill",
 	"read",
+	// 2026-11-08 扫尾批 8d：执事间递话只往对方会话提交一条输入，不写盘、不起进程；
+	// 它的边界不在只读闸门，而在 lifecycle 的通道闸（执事会话 / 非自主轮 / hop=1）。
+	"send_to_agent",
 ]);
 /** 内核五件：pi-durable 的 CodingTools（read/write/edit/bash/powershell）。 */
 const KERNEL_TOOLS = new Set(["read", "write", "edit", "bash", "powershell"]);
@@ -114,7 +117,16 @@ test("闸门完整性：基础三件是纯读，都不在 WRITE_TOOLS 里", () =
 });
 
 test("闸门完整性：实际注册全集 = WRITE_TOOLS ∪ READ_TOOLS", () => {
-	const full = createTools(makeDeps({ delegate: true, skills: MOCK_SKILLS, partners: true }));
+	const full = createTools(
+		makeDeps({
+			delegate: true,
+			skills: MOCK_SKILLS,
+			partners: true,
+			// 执事间递话（2026-11-08 扫尾批 8d）：装配层显式传 relay 才注册；
+			// 这里给个不落盘的桩，只为让"注册全集"把 send_to_agent 也覆盖进来。
+			relay: { deliver: async () => ({ ok: false, error: "stub" }) },
+		}),
+	);
 	const registered = new Set(full.map((t) => t.name));
 	for (const name of KERNEL_TOOLS) registered.add(name);
 	const covered = new Set<string>([...WRITE_TOOLS, ...READ_TOOLS]);

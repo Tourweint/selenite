@@ -51,6 +51,9 @@ import {
 	requestFingerprint,
 } from "./delegation-receipts.ts";
 import { pruneSessionMemory } from "./memory-prune.ts";
+// 执事间递话（2026-11-08 扫尾批 8d）：通道与工具定义在 partner-relay.ts，
+// 送达函数由装配层注入（本文件不持有 harness）。
+import { createSendToAgentTool, type PartnerRelayDeps } from "./partner-relay.ts";
 import {
 	ProjectError,
 	resolveDelegationProject,
@@ -203,6 +206,12 @@ export interface ToolDeps {
 	topics?: TopicsStore | null;
 	/** 搜索适配层（2026-11-07）。测试注入假上游；缺省时不注册课题工具。 */
 	search?: SearchModule | null;
+	/**
+	 * 执事间递话（2026-11-08 扫尾批 8d）：传了才注册 `send_to_agent`。
+	 * 装配层按 `COMPANIONS_ENABLED && PARTNER_RELAY_ENABLED` 决定传不传
+	 * ——不传 = 工具不上架（一行回滚），模型侧报 `tool_unavailable`。
+	 */
+	relay?: PartnerRelayDeps | null;
 }
 
 let sharedReceipts: DelegationReceipts | null = null;
@@ -773,6 +782,10 @@ export function createTools(deps: ToolDeps) {
 			}),
 		);
 	}
+
+	// 执事间递话（2026-11-08 扫尾批 8d）：装配层显式传 deps.relay 才上架。
+	// 不做 deps 缺省回落——"主人对话不挂 / 回滚开关"必须由装配层一处决定（lifecycle）。
+	if (deps.relay) tools.push(createSendToAgentTool(deps.relay));
 
 	if (deps.delegate !== false) tools.push(delegate, proposeProject);
 

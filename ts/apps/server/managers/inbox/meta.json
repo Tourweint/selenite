@@ -1,0 +1,11 @@
+{
+  "domain": "inbox",
+  "created_at": "2026-11-08T09:30:45.455Z",
+  "updated_at": "2026-11-08T10:29:23.679Z",
+  "work_dir": "D:\\Projects\\projects\\lifediary-harness\\ts\\apps\\server\\managers\\inbox\\workspace",
+  "runs_dir": "D:\\Projects\\projects\\lifediary-harness\\ts\\apps\\server\\managers\\inbox\\runs",
+  "db_path": "D:\\Projects\\projects\\lifediary-harness\\ts\\apps\\server\\managers\\inbox\\.agent.sqlite",
+  "conversation_id": null,
+  "rotations": 0,
+  "partner_id": "3d735b2f-41ff-4cfe-ad31-e9bc179881ab"
+}
