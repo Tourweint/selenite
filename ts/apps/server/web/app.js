@@ -9842,6 +9842,7 @@ async function renderSettings() {
 const SKILL_ORIGIN_LABEL = {
   env: "AGENT_SKILLS_DIR",
   user: "用户目录",
+  agents: ".agents/skills",
   app: "内置目录",
 };
 const SKILL_NAME_RE = /^[a-z0-9][a-z0-9-_]{0,63}$/;
@@ -9897,20 +9898,24 @@ function renderSkillList(box, items) {
   }
   for (const item of items) {
     const name = String(item.name || "");
+    // 只读来源（~/.agents/skills）只展示不给删：那是别的工具的家，改删请去原目录（2026-11-08 批 10-A）
+    const readOnly = item.writable === false;
+    const originLabel = readOnly ? SKILL_ORIGIN_LABEL[item.origin] || String(item.origin || "") : "";
     const card = document.createElement("div");
     card.className = "card sk-item";
     card.innerHTML = `
-      <button class="sk-open" type="button" data-skill-open="${attr(name)}" title="点开编辑">
+      <button class="sk-open" type="button" data-skill-open="${attr(name)}" title="点开${readOnly ? "查看" : "编辑"}">
         <span class="sk-item-name">${esc(name)}</span>
         <span class="sk-item-summary">${esc(String(item.summary || "（第 1 行是空摘要，不会进索引）"))}</span>
-        <span class="sk-item-meta">${esc(skillWhenText(item.updatedAt))} · ${esc(skillSizeText(item.size))}</span>
+        <span class="sk-item-meta">${esc(skillWhenText(item.updatedAt))} · ${esc(skillSizeText(item.size))}${readOnly ? ` · ${esc(originLabel)}（只读）` : ""}</span>
       </button>
       <div class="sk-item-actions">
-        <button class="ghost mem-act" type="button" data-skill-delete="${attr(name)}">删除</button>
+        ${readOnly ? "" : `<button class="ghost mem-act" type="button" data-skill-delete="${attr(name)}">删除</button>`}
       </div>`;
     box.append(card);
     card.querySelector("[data-skill-open]")?.addEventListener("click", () => void openEditSkillModal(name));
-    card.querySelector("[data-skill-delete]")?.addEventListener("click", () => openDeleteSkillModal(name));
+    const remove = card.querySelector("[data-skill-delete]");
+    if (remove) remove.addEventListener("click", () => openDeleteSkillModal(name));
   }
 }
 

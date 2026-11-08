@@ -1,19 +1,21 @@
 /**
- * 技能管理探针（2026-11-08 扫尾批 9-S）。
+ * 技能管理探针（2026-11-08 扫尾批 9-S；批 10-A 加 .agents 只读来源）。
  *
- * 真起服务、真 HTTP、真文件，四段：
- *   A. 用户目录：首访自动建 `%USERPROFILE%/.lifediary/skills` → 列表 → 新建 → 读 → 覆盖 → 删除；
+ * 真起服务、真 HTTP、真文件，五段：
+ *   A. 用户目录：首访自动建 `%USERPROFILE%/.lifediary/skills` → 列表（含内置手册）→ 新建 → 读 → 覆盖 → 删除；
  *      名字白名单 / 两行结构 / 64KB 上限三组 400；无令牌 403 空体。
  *   B. AGENT_SKILLS_DIR 显式优先：origin=env，目录由写入时创建。
  *   C. 用户目录建不出来（用文件冒充 USERPROFILE）→ origin=app，两条内置手册可见，且只读不写。
- *   D. SKILLS_ADMIN=false → 路由不挂（404，= 未启用）。
+ *   D. 标准用户技能目录 `%USERPROFILE%/.agents/skills`：两种形态进列表并标 origin=agents / writable=false；
+ *      可读、不可写、不可删。
+ *   E. SKILLS_ADMIN=false → 路由不挂（404，= 未启用）。
  *
  * 卫生：所有落点都在系统临时目录 + `.data/probe-skills-*`，跑完即删；不碰真实用户目录与内置手册。
  *
  *   pnpm --filter @lifediary/server skills
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -31,6 +33,7 @@ const RUNTIME = ".data/probe-skills-runtime.json";
 
 const ROOT = mkdtempSync(join(tmpdir(), "lifediary-skills-probe-"));
 const HOME = join(ROOT, "home");
+const HOME_AGENTS = join(ROOT, "home-agents");
 const ENV_DIR = join(ROOT, "env-skills");
 const BLOCKER = join(ROOT, "home-blocked");
 
@@ -151,7 +154,30 @@ try {
 	check(initial.body.origin === "user", "origin=user", String(initial.body.origin));
 	check(initial.body.dir === userDir, "dir 指向用户目录", String(initial.body.dir));
 	check(existsSync(userDir), "用户目录首访已自动创建");
-	check(Array.isArray(initial.body.items) && initial.body.items.length === 0, "初始技能为空");
+	const initialItems = (initial.body.items ?? []) as {
+		name: string;
+		origin: string;
+		writable: boolean;
+	}[];
+	const initialNames = initialItems.map((item) => item.name).sort();
+	check(
+		initialItems.length === 2 &&
+			initialNames.includes("meeting_guide") &&
+			initialNames.includes("recall_guide"),
+		"初始列表 = 两条内置手册（用户目录为空）",
+		initialNames.join("、"),
+	);
+	check(
+		initialItems.every((item) => item.origin === "app" && item.writable === false),
+		"内置手册标 origin=app、只读",
+		JSON.stringify(initialItems.map((item) => [item.origin, item.writable])),
+	);
+	const initialDirs = (initial.body.dirs ?? []) as { dir: string; origin: string }[];
+	check(
+		initialDirs.map((source) => source.origin).join(",") === "user,agents,app",
+		"读取链 = user → agents → app",
+		initialDirs.map((source) => source.origin).join(","),
+	);
 
 	const content = "每天的简报流程\n按项目分组列出变化，超过三条才细说。";
 	const created = await put("daily-brief", content);
@@ -159,10 +185,18 @@ try {
 	check(readFileSync(join(userDir, "daily-brief.md"), "utf8") === content, "文件内容与请求一致");
 
 	const listed = await apiJson("/api/v1/agent/skills");
-	const items = (listed.body.items ?? []) as { name: string; summary: string; size: number }[];
-	check(items.length === 1 && items[0]?.name === "daily-brief", "列表出现新技能", JSON.stringify(items));
-	check(items[0]?.summary === "每天的简报流程", "首行 = 索引摘要", String(items[0]?.summary));
-	check(Number(items[0]?.size) > 0, "size > 0", String(items[0]?.size));
+	const items = (listed.body.items ?? []) as {
+		name: string;
+		summary: string;
+		size: number;
+		origin: string;
+		writable: boolean;
+	}[];
+	const brief = items.find((item) => item.name === "daily-brief");
+	check(Boolean(brief), "列表出现新技能", items.map((item) => item.name).join("、"));
+	check(brief?.summary === "每天的简报流程", "首行 = 索引摘要", String(brief?.summary));
+	check(Number(brief?.size) > 0, "size > 0", String(brief?.size));
+	check(brief?.origin === "user" && brief?.writable === true, "用户目录技能可写", JSON.stringify(brief));
 
 	const read = await apiJson("/api/v1/agent/skills/daily-brief");
 	check(read.status === 200 && read.body.content === content, "GET 单条正文一致");
@@ -212,8 +246,53 @@ try {
 	check(appRead.status === 200 && String(appRead.body.content).length > 0, "内置手册可读");
 	await stopServer();
 
-	// ── D. 回滚开关 ────────────────────────────────────────────
-	console.log("\nD. SKILLS_ADMIN=false");
+	// ── D. 标准用户技能目录（.agents/skills，只读）──────────────
+	console.log("\nD. %USERPROFILE%/.agents/skills（跨工具用户技能，只读）");
+	const agentsSkills = join(HOME_AGENTS, ".agents", "skills");
+	mkdirSync(join(agentsSkills, "agents-dir"), { recursive: true });
+	writeFileSync(
+		join(agentsSkills, "agents-dir", "SKILL.md"),
+		"---\nname: agents-dir\ndescription: 标准目录形态的摘要\n---\n标准目录形态的正文",
+	);
+	writeFileSync(join(agentsSkills, "agents-flat.md"), "扁平形态的摘要\n扁平形态的正文");
+	await startServer({ USERPROFILE: HOME_AGENTS, HOME: HOME_AGENTS });
+
+	const agentsList = await apiJson("/api/v1/agent/skills");
+	const agentsItems = (agentsList.body.items ?? []) as {
+		name: string;
+		summary: string;
+		origin: string;
+		writable: boolean;
+	}[];
+	const agentDir = agentsItems.find((item) => item.name === "agents-dir");
+	const agentFlat = agentsItems.find((item) => item.name === "agents-flat");
+	check(Boolean(agentDir && agentFlat), "两种形态都进了列表", agentsItems.map((item) => item.name).join("、"));
+	check(
+		agentDir?.summary === "标准目录形态的摘要",
+		"目录形态：frontmatter description 作摘要",
+		String(agentDir?.summary),
+	);
+	check(
+		agentDir?.origin === "agents" && agentDir?.writable === false && agentFlat?.writable === false,
+		".agents 技能标 origin=agents、只读",
+		JSON.stringify([agentDir?.origin, agentDir?.writable, agentFlat?.writable]),
+	);
+	const agentsRead = await apiJson("/api/v1/agent/skills/agents-dir");
+	check(
+		agentsRead.status === 200 && String(agentsRead.body.content).includes("标准目录形态的正文"),
+		".agents 技能可读（正文全文）",
+		`HTTP ${agentsRead.status}`,
+	);
+	check((await put("agents-flat", "改摘要\n改正文")).status === 400, "只读来源 PUT → 400");
+	check(
+		(await apiJson("/api/v1/agent/skills/agents-flat", { method: "DELETE" })).status === 400,
+		"只读来源 DELETE → 400",
+	);
+	check(!existsSync(join(HOME_AGENTS, ".lifediary", "skills", "agents-flat.md")), "没有落影子副本");
+	await stopServer();
+
+	// ── E. 回滚开关 ────────────────────────────────────────────
+	console.log("\nE. SKILLS_ADMIN=false");
 	await startServer({ SKILLS_ADMIN: "false", USERPROFILE: HOME, HOME });
 	check((await apiJson("/api/v1/agent/skills")).status === 404, "列表 404（= 未启用）");
 	check((await put("whatever", "摘要\n正文")).status === 404, "写入 404");

@@ -5,14 +5,15 @@ import { join } from "node:path";
 import test from "node:test";
 import { Hono } from "hono";
 import { mountSkills, SKILL_SLOT_LIMIT } from "./skills-api.ts";
-import { resolveSkillsDir } from "./skills.ts";
+import { createSkillStore, resolveSkillsDir, type ResolvedSkillsDir } from "./skills.ts";
 
 /**
- * 技能管理（2026-11-08 扫尾批 9-S）单测。
+ * 技能（2026-11-08 扫尾批 9-S；批 10-A 加标准用户目录与两种文件形态）单测。
  *
- * 两段：
- *   1. 目录解析优先级：env 显式 → 用户目录（自动建）→ 应用目录兜底；
- *   2. 端点 CRUD 与边界：名字白名单、64KB 上限、两行结构、越界（含符号链接）拒绝。
+ * 三段：
+ *   1. 目录解析优先级：env 显式 → 用户目录（自动建）→ `~/.agents/skills`（只读）→ 应用目录兜底；
+ *   2. 加载器：扁平 `<名>.md` + 目录 `<名>/SKILL.md`，同名先到先得、坏文件占名不顶替；
+ *   3. 端点 CRUD 与边界：名字白名单、64KB 上限、两行结构、越界（含符号链接）拒绝、只读来源不可写删。
  *
  * 全部落在系统临时目录，跑完即删；不碰真实 `.data` 与用户主目录。
  */
@@ -31,13 +32,30 @@ function freshDir(name: string): string {
 	return dir;
 }
 
-test("resolveSkillsDir：AGENT_SKILLS_DIR 显式最高优先，且不替用户建目录", () => {
+test("resolveSkillsDir：AGENT_SKILLS_DIR 显式最高优先，且不替用户建目录；链里仍带 .agents 与应用目录", () => {
 	const envDir = join(root, "env-skills");
+	const home = join(root, "home-env");
+	const appDir = join(root, "app-env");
 	const result = resolveSkillsDir({
-		env: { AGENT_SKILLS_DIR: envDir, USERPROFILE: join(root, "home-env") },
+		env: { AGENT_SKILLS_DIR: envDir, USERPROFILE: home },
+		home,
+		appDir,
 	});
-	assert.deepEqual(result, { dir: envDir, origin: "env" });
+	assert.equal(result.dir, envDir);
+	assert.equal(result.origin, "env");
 	assert.equal(existsSync(envDir), false, "显式目录不存在时不该被自动创建");
+	assert.equal(existsSync(join(home, ".lifediary", "skills")), false, "显式模式下不建用户目录");
+	assert.deepEqual(
+		result.dirs.map((source) => [source.origin, source.writable]),
+		[
+			["env", true],
+			["agents", false],
+			["app", false],
+		],
+		"读取链 = env → .agents → 应用目录，只有主目录可写",
+	);
+	assert.equal(result.dirs[1]?.dir, join(home, ".agents", "skills"));
+	assert.equal(result.dirs[2]?.dir, appDir);
 });
 
 test("resolveSkillsDir：无显式配置时落用户目录，并首次访问自动建目录", () => {
@@ -46,9 +64,15 @@ test("resolveSkillsDir：无显式配置时落用户目录，并首次访问自�
 	assert.equal(result.origin, "user");
 	assert.equal(result.dir, join(home, ".lifediary", "skills"));
 	assert.equal(existsSync(result.dir), true, "用户目录应被自动创建");
+	assert.deepEqual(
+		result.dirs.map((source) => source.origin),
+		["user", "agents", "app"],
+	);
+	assert.equal(result.dirs[0]?.writable, true);
+	assert.equal(result.dirs[1]?.exists, false, ".agents/skills 不存在时如实标 false（加载器跳过）");
 });
 
-test("resolveSkillsDir：用户目录建不出来时回落应用目录", () => {
+test("resolveSkillsDir：用户目录建不出来时回落应用目录，且链里不留重复项", () => {
 	// 用文件冒充主目录：join(file, ".lifediary", "skills") 的 mkdir 必然失败（ENOTDIR/EEXIST）
 	const blocker = join(root, "home-blocked");
 	writeFileSync(blocker, "not a directory");
@@ -56,11 +80,86 @@ test("resolveSkillsDir：用户目录建不出来时回落应用目录", () => {
 	const result = resolveSkillsDir({ env: {}, home: blocker, appDir });
 	assert.equal(result.origin, "app");
 	assert.equal(result.dir, appDir);
+	assert.equal(result.dirs[0]?.dir, appDir, "主目录排第一");
+	assert.equal(
+		result.dirs.filter((source) => source.origin === "app").length,
+		1,
+		"应用目录既是主目录又是兜底时只留一项",
+	);
 });
 
-function apiApp(dir: string) {
+test("加载器：扁平 .md 与 目录/SKILL.md 两种形态并存，同名时扁平优先", () => {
+	const dir = freshDir("loader-forms");
+	writeFileSync(join(dir, "alpha.md"), "摘要 A\n正文 A");
+	mkdirSync(join(dir, "beta"));
+	writeFileSync(
+		join(dir, "beta", "SKILL.md"),
+		"---\nname: beta\ndescription: 摘要 B\ntools: [x]\n---\n\n正文 B\n",
+	);
+	mkdirSync(join(dir, "alpha-dir"));
+	writeFileSync(join(dir, "alpha-dir", "SKILL.md"), "---\ndescription: 目录摘要\n---\n目录正文");
+	mkdirSync(join(dir, "same"));
+	writeFileSync(join(dir, "same", "SKILL.md"), "---\ndescription: 目录版同名\n---\n目录正文");
+	writeFileSync(join(dir, "same.md"), "扁平版同名\n扁平正文");
+	// 格式不对：没有 frontmatter description → 不上索引，但仍占名
+	mkdirSync(join(dir, "broken"));
+	writeFileSync(join(dir, "broken", "SKILL.md"), "只有正文，没有 frontmatter");
+	// 多行块标记不解析：摘要留一个 ">" 等于没有摘要，同样跳过
+	mkdirSync(join(dir, "block"));
+	writeFileSync(join(dir, "block", "SKILL.md"), "---\ndescription: >\n  多行描述\n---\n正文");
+
+	const store = createSkillStore(dir);
+	assert.ok(store);
+	assert.deepEqual(store.names().sort(), ["alpha", "alpha-dir", "beta", "same"]);
+	assert.equal(store.manual("alpha"), "正文 A");
+	assert.equal(store.manual("beta"), "正文 B", "frontmatter 之后的正文，忽略其余字段");
+	assert.equal(store.manual("alpha-dir"), "目录正文");
+	assert.equal(store.manual("same"), "扁平正文", "同目录同名时扁平 .md 先到先得");
+	assert.equal(store.manual("broken"), undefined);
+	const index = store.indexFor(1) ?? "";
+	assert.match(index, /alpha：摘要 A/);
+	assert.match(index, /beta：摘要 B/);
+	assert.doesNotMatch(index, /broken/);
+});
+
+test("加载器：多目录先到先得；坏文件占名，不被低优先级同名顶掉", () => {
+	const high = freshDir("loader-high");
+	const low = freshDir("loader-low");
+	writeFileSync(join(high, "shared.md"), "高管摘要\n高管正文");
+	writeFileSync(join(low, "shared.md"), "全局摘要\n全局正文");
+	writeFileSync(join(low, "only-low.md"), "低优先摘要\n低优先正文");
+	// 高优先级目录里同名但格式不对：应占名并让这个名字整个失效
+	mkdirSync(join(high, "broken"));
+	writeFileSync(join(high, "broken", "SKILL.md"), "没有 description");
+	writeFileSync(join(low, "broken.md"), "低优先坏同名\n正文");
+
+	const store = createSkillStore([high, low]);
+	assert.ok(store);
+	assert.equal(store.manual("shared"), "高管正文");
+	assert.equal(store.manual("only-low"), "低优先正文");
+	assert.equal(store.manual("broken"), undefined, "坏文件占名：低优先级的同名不该顶上来");
+});
+
+function resolved(
+	main: string,
+	extra: { dir: string; origin: "agents" | "app"; writable: boolean }[] = [],
+): ResolvedSkillsDir {
+	return {
+		dir: main,
+		origin: "user",
+		dirs: [
+			{ dir: main, origin: "user", writable: true, exists: existsSync(main) },
+			...extra.map((source) => ({ ...source, exists: existsSync(source.dir) })),
+		],
+	};
+}
+
+function apiApp(target: ResolvedSkillsDir | string) {
 	const app = new Hono();
-	mountSkills(app, { resolve: () => ({ dir, origin: "user" }), enabled: true });
+	mountSkills(app, {
+		resolve: () => (typeof target === "string" ? resolved(target) : target),
+		enabled: true,
+	});
 	return app;
 }
 
@@ -131,6 +230,76 @@ test("技能端点：名字白名单与正文结构/大小校验", async () => {
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify({ content: 123 }),
 	})).status, 400);
+});
+
+test("技能端点：列表合并只读来源并标 origin；.agents 技能可读、不可写/删", async () => {
+	const main = freshDir("api-ro-main");
+	const agents = freshDir("api-ro-agents");
+	// .agents 里的标准形态：<名>/SKILL.md
+	mkdirSync(join(agents, "from-agents"));
+	writeFileSync(
+		join(agents, "from-agents", "SKILL.md"),
+		"---\nname: from-agents\ndescription: 只读来源的摘要\n---\n只读来源的正文",
+	);
+	// 扁平形态也认
+	writeFileSync(join(agents, "agent-flat.md"), "扁平只读摘要\n扁平只读正文");
+	// 主目录有一份同名：主目录先到先得，列表只出一条
+	writeFileSync(join(main, "agent-flat.md"), "主目录摘要\n主目录正文");
+
+	const app = apiApp(resolved(main, [{ dir: agents, origin: "agents", writable: false }]));
+	const listed = await json(await app.request("/api/v1/agent/skills"));
+	const items = listed.items as {
+		name: string;
+		summary: string;
+		origin: string;
+		writable: boolean;
+		form: string;
+	}[];
+	const byName = new Map(items.map((item) => [item.name, item]));
+	assert.equal(byName.get("from-agents")?.origin, "agents");
+	assert.equal(byName.get("from-agents")?.writable, false);
+	assert.equal(byName.get("from-agents")?.form, "dir");
+	assert.equal(byName.get("agent-flat")?.origin, "user", "同名时主目录先到先得");
+	assert.equal(items.length, 2, "同名只出一条");
+
+	const dirs = listed.dirs as { dir: string; origin: string; writable: boolean }[];
+	assert.equal(dirs.length, 2);
+	assert.deepEqual(
+		dirs.map((source) => source.origin),
+		["user", "agents"],
+	);
+
+	const read = await json(await app.request("/api/v1/agent/skills/from-agents"));
+	assert.equal(read.origin, "agents");
+	assert.equal(read.writable, false);
+	assert.match(String(read.content), /description: 只读来源的摘要/);
+
+	const writeReadOnly = await put(app, "from-agents", "改摘要\n改正文");
+	assert.equal(writeReadOnly.status, 400, "只读来源不给写");
+	assert.match(String((await json(writeReadOnly)).message), /只读用户技能目录/);
+	assert.equal(existsSync(join(main, "from-agents.md")), false, "不落影子副本");
+
+	const deleteReadOnly = await app.request("/api/v1/agent/skills/from-agents", { method: "DELETE" });
+	assert.equal(deleteReadOnly.status, 400, "只读来源不给删");
+	assert.equal(existsSync(join(agents, "from-agents", "SKILL.md")), true);
+});
+
+test("技能端点：应用目录内置手册仍可在主目录写同名覆盖（9-S 合并语义保留）", async () => {
+	const main = freshDir("api-app-main");
+	const appDir = freshDir("api-app-builtin");
+	writeFileSync(join(appDir, "meeting_guide.md"), "内置摘要\n内置正文");
+	const app = apiApp(resolved(main, [{ dir: appDir, origin: "app", writable: false }]));
+
+	const before = await json(await app.request("/api/v1/agent/skills"));
+	assert.equal((before.items as { name: string }[])[0]?.name, "meeting_guide");
+
+	const created = await put(app, "meeting_guide", "我的摘要\n我的正文");
+	assert.equal(created.status, 200, "内置手册允许被主目录同名覆盖");
+	const after = await json(await app.request("/api/v1/agent/skills"));
+	const items = after.items as { name: string; origin: string; summary: string }[];
+	assert.equal(items.length, 1, "覆盖后仍只出一条");
+	assert.equal(items[0]?.origin, "user");
+	assert.equal(items[0]?.summary, "我的摘要");
 });
 
 test("技能端点：目录内符号链接指向外部时读写一律 400", async (t) => {

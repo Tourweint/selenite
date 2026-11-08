@@ -352,3 +352,82 @@ test("死信：主键幂等，重复记账只落一次，按父单可查", () =>
 		rmSync(root, { recursive: true, force: true });
 	}
 });
+
+test("改派回执：续跑被拒改派的新单也落映射，重启回灌落到发起续跑的会话", async () => {
+	const { createTools } = await import("./tools.ts");
+	const { reportRecoveredTickets } = await import("./recovery-report.ts");
+	const root = tempRoot();
+	const receipts = new DelegationReceipts(join(root, "delegations.sqlite"));
+	const previousRequired = process.env.DELEGATION_PROJECT_REQUIRED;
+	const previousRoot = process.env.CHANCELLOR_WORK_ROOT;
+	process.env.DELEGATION_PROJECT_REQUIRED = "false";
+	process.env.CHANCELLOR_WORK_ROOT = join(root, "runs");
+	let calls = 0;
+	try {
+		const tools = createTools({
+			memory: null,
+			scopeOf: (id) => ({ type: "session", id: String(id) }) as never,
+			projects: null,
+			receipts,
+			delegateRun: (async (
+				_request: { resumeTicketId?: string },
+				options: { onEvent?: (event: never) => void },
+			) => {
+				calls += 1;
+				if (calls === 1) {
+					options.onEvent?.({ type: "ticket", ticketId: "T-OLD", message: "已受理" } as never);
+					return { ticketId: "T-OLD", status: "done", line: "完成", tasks: [] };
+				}
+				if (_request.resumeTicketId) {
+					// 续跑在派活前就被拒：没有可续的单
+					throw new Error("这张单已经结束");
+				}
+				// 改派出的新单：同步段先发单号，工具据此写回执
+				options.onEvent?.({ type: "manager", ticketId: "T-FB" } as never);
+				return { ticketId: "T-FB", status: "done", line: "改派完成", tasks: [] };
+			}) as never,
+		});
+		const delegate = tools.find((tool) => tool.name === "delegate");
+		assert.ok(delegate);
+
+		// 先派一张单，让会话记住"最后一张单"（resume 只能续同一轮里最后那张）
+		await delegate.execute(
+			{ requirement: "先派一张单" } as never,
+			{ conversationId: 7123 } as never,
+			{} as never,
+		);
+		// 再回答它：续跑被拒 → 改派新单
+		const result = await delegate.execute(
+			{ requirement: "验证码 1234", resume: true } as never,
+			{ conversationId: 7123 } as never,
+			{} as never,
+		);
+		assert.match(textOf(result), /T-FB/, "改派的新单号要回给模型");
+
+		const receipt = receipts.lookupByTicket("T-FB");
+		assert.equal(receipt?.conversationId, 7123, "新单映射到发起续跑的会话");
+		assert.match(String(receipt?.requestId), /^resume:T-FB:\d+$/, "与 7a 同款键法");
+
+		// 重启恢复：按单号查回执 → 写回那个会话（不是最初派单的会话）
+		const said: Array<{ conversationId: number; text: string }> = [];
+		const sent = await reportRecoveredTickets(
+			[{ ticketId: "T-FB", status: "done" }],
+			{
+				receipts,
+				say: (conversationId, text) => {
+					said.push({ conversationId, text });
+				},
+			},
+		);
+		assert.equal(sent, 1);
+		assert.equal(said[0]?.conversationId, 7123);
+		assert.match(said[0]?.text ?? "", /T-FB/);
+	} finally {
+		receipts.close();
+		if (previousRequired === undefined) delete process.env.DELEGATION_PROJECT_REQUIRED;
+		else process.env.DELEGATION_PROJECT_REQUIRED = previousRequired;
+		if (previousRoot === undefined) delete process.env.CHANCELLOR_WORK_ROOT;
+		else process.env.CHANCELLOR_WORK_ROOT = previousRoot;
+		rmSync(root, { recursive: true, force: true });
+	}
+});

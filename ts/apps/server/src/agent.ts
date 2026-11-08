@@ -35,6 +35,11 @@ export type {
 	TurnPhase,
 } from "./agent/shared.ts";
 
+// 轮次收尾（2026-11-08 批 10-A 下沉）：普通轮 / 编辑重发 / 审批续跑共用同一套
+// 观察层 + 记忆抽取 + 会话记忆修剪。观察层由 index.ts 启动时注入，避免 agent/ 内部成环。
+export { setTurnSettledObserver, turnSettledHandler } from "./agent/settled.ts";
+export type { SettledChat, TurnSettledObserver } from "./agent/settled.ts";
+
 export {
 	getHarness,
 	reportDelegationResult,

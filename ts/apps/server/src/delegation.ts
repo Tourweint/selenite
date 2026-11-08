@@ -224,6 +224,23 @@ export function truncate(text: string, max: number): string {
 	return oneLine.length <= max ? oneLine : `${oneLine.slice(0, max - 1)}…`;
 }
 
+/**
+ * 收到工人「需要你」时的应答口径（2026-11-08 员工人格化刀一 §4 B2，提示词层）。
+ *
+ * 为什么要有这一条：attention 三种（need_input / need_decision / need_action）是
+ * **工人卡住等你**，不是"出错了"。执事答得了就该直接答；一时答不了（缺信息 / 要问主人 /
+ * 需要用户拍板），也必须明确让工人**跳过该项继续其余部分**——否则整单停在一件小事上，
+ * 用户看到的是"活干到一半没了"。审批侧已有同款"先做不需要批准的部分"（批 8c turn-gate），
+ * 这里只补 attention 这一侧，两处互不替代。
+ *
+ * 落点：由 `agent/partner-context.ts` 拼进执事轮的「当前在办」段（只在有在办事项时出现）。
+ */
+export const ATTENTION_REPLY_GUIDANCE = [
+	"工人回报「需要你」（need_input / need_decision / need_action）时：",
+	"- 答得了就直接答（缺什么信息就补什么，要主人拍板的就明确说是哪一项）。",
+	"- 一时答不了，就明确告诉工人：「这一项先跳过，继续其余部分，这项回头再补」——不要让整单停在这一项上，也不要自己猜一个答案糊过去。",
+].join("\n");
+
 /** 注入给 chancellor 的宰相身份正文上限（批次D D2）：宿主侧按 UTF-8 字节截断，chancellor 只透传。 */
 export const MANAGER_SOUL_LIMIT_BYTES = 4 * 1024;
 

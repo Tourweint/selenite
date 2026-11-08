@@ -280,7 +280,12 @@ export function createTools(deps: ToolDeps) {
 		description:
 			"把一件事写进长期记忆，以后每次对话都可能被想起来。" +
 			"适合：对方的偏好、家人朋友宠物、长期目标、重要经历。" +
-			"不适合：一次性的琐事、马上就会变的信息。",
+			"不适合：一次性的琐事、马上就会变的信息。" +
+			// 2026-11-08 员工人格化刀一 E3：被教诲必须落成偏好，不能只在当下照做。
+			// 偏好层有"永不删"保护（记忆巩固的 protectKinds），教过的话不会被衰减掉。
+			"**用户用「以后 / 记住 / 下次」这类话纠正你、或给你立规矩时，必须立刻用本工具记一条 " +
+			"kind=preference、taught=true 的记忆**——不要只在这一次照做，也不要只是口头答应；" +
+			"记的是那条规矩本身（做什么 / 不做什么），不是这次对话的经过。",
 		parameters: Type.Object({
 			content: Type.String({ description: "要记住的内容，一句话，用第三人称或原话" }),
 			kind: Type.Optional(
@@ -292,6 +297,14 @@ export function createTools(deps: ToolDeps) {
 			),
 			importance: Type.Optional(
 				Type.Number({ description: "重要程度 0..1，默认 0.7", minimum: 0, maximum: 1 }),
+			),
+			// 2026-11-08 刀一 E3：教诲来源标记。store 的 source 是自由字符串（imported 先例），
+			// 不需要改记忆 schema；巩固 / 召回都不按 source 分支，写进去只是留审计线索。
+			taught: Type.Optional(
+				Type.Boolean({
+					description:
+						"用户教你规矩（「以后… / 记住… / 下次…」）时为 true：这条会标成 taught 来源。普通事实不填。",
+				}),
 			),
 		}),
 		execute: async (args, api) => {
@@ -308,7 +321,7 @@ export function createTools(deps: ToolDeps) {
 				importance: args.importance,
 				// 人自己说的（或当面转述的），可信度最高
 				veracity: "stated",
-				source: "user",
+				source: args.taught ? "taught" : "user",
 			});
 			// 写入路径末尾同样按 cap 修剪（只记条数，见 memory-prune.ts）。
 			const pruned = pruneSessionMemory(engine);
@@ -463,11 +476,18 @@ export function createTools(deps: ToolDeps) {
 			"**注意（只讲文件路径，不是能力限制）**：工人写文件时用相对路径（如 `summary.md`），" +
 			"不要指定工作目录之外的绝对路径；产物最后落在 chancellor 的 runs/<ticket>/ 下，不在你指定的绝对位置。" +
 			"工人在手机上干活时，它看到的是手机屏幕、点的是手机上的按钮——**它碰不到你电脑上的文件**；" +
-			"反过来，它交回来的是一句话，不是手机里的截图或文件。",
+			"反过来，它交回来的是一句话，不是手机里的截图或文件。" +
+			// 2026-11-08 员工人格化刀一 E1 消费点 2（任务书四段）：描述层给口径，参数结构不变。
+			"**任务书按四段写**：目标 / 怎么算好 / 可自主范围 / 必须请示。" +
+			"你若带「岗位契约」，后两段直接按契约的「决策分级」「验收标准」填写；没有契约就按常理写清边界。" +
+			"工人回报「需要你」（need_input / need_decision / need_action）时，答得了就答；" +
+			"一时答不了，明确告诉它「这一项先跳过，继续其余部分，这项回头再补」，别让整单停在一件小事上。",
 		parameters: Type.Object({
 			requirement: Type.String({
 				description:
-					"要做的事，一句话说清，并且带上「怎么算做完了」。" +
+					"要做的事，按四段写清：① 目标（要达成什么）② 怎么算好（验收标准）" +
+					"③ 可自主范围（哪些你可以自己定）④ 必须请示（哪些要先问你）。" +
+					"带岗位契约时，后两段照契约的「决策分级」「验收标准」写。" +
 					"resume 时只写用户的那句回答，不要重述任务。" +
 					"要写文件时给相对路径；要读的文件给绝对路径没问题。",
 			}),
@@ -718,9 +738,16 @@ export function createTools(deps: ToolDeps) {
 			// 否则完成/重启恢复（A3b）按最初派单那行回灌，回答过的人看不到下文。
 			// 键用 `resumeTicketId` 而不是 `ticketId`：后者要等事件同步段填，且续跑本来就
 			// 只可能落在原单上（chancellor `resumeTicket()` 返回的就是 ticket.id）。
-			// 改派了新单（fellBack）不写：那已经不是这张单，写进去等于说谎。
 			if (resumeTicketId !== undefined && !fellBack) {
 				receiptsOf(deps).recordResume(resumeTicketId, conversationId);
+			}
+			// 改派回执（2026-11-08 批 10-A，上位计划 §四⑤）：续跑被拒改派时，
+			// `startDelegation` 建的是一张**新单**，而这条路径 `receipts` 为 null（上面按
+			// "resume 不建新单"跳过 begin），新单就一条映射都没有——完成/重启回灌查
+			// `lookupByTicket(新单号)` 落空。与 7a 同款键法补一行 `resume:<新单号>:<次数>`，
+			// 指向**发起续跑的会话**，汇报才回得到提问的人。
+			if (fellBack && ticketId) {
+				receiptsOf(deps).recordResume(ticketId, conversationId);
 			}
 			if (receipts && requestId) {
 				if (ticketId) receipts.accept(requestId, ticketId, conversationId);

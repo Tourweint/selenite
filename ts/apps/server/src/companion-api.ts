@@ -8,6 +8,7 @@ import {
 import {
 	COMPANIONS_ENABLED,
 	PARTNER_SLOT_LIMIT,
+	partnerContractEnabled,
 	partnersStore,
 	type PartnerRow,
 	type PartnerStatus,
@@ -94,9 +95,66 @@ export function mountCompanions(app: Hono): void {
 			// SOUL 当前值（磁盘）与版本号一起给：界面编辑 SOUL 改的是磁盘，生效在下一轮
 			soul: store().readSoulFromHome(partner.id) ?? current?.soulSource ?? "",
 			soulVersion: current?.version ?? null,
+			// 岗位契约（2026-11-08 员工人格化刀一 E1）：纯增量字段，关掉开关时两列都不出现；
+			// **列表端点形状不变**（手机端只读列表，不需要正文）。
+			...(partnerContractEnabled()
+				? {
+						contract:
+							store().readContractFromHome(partner.id) ??
+							current?.contractSource ??
+							"",
+						contractVersion: current?.version ?? null,
+					}
+				: {}),
 			// 模型候选链（B4）：只含 keyEnv 名，绝不回显任何密钥值
 			modelChain: store().getModelChain(partner.id),
 		});
+	});
+
+	/**
+	 * 岗位契约编辑（2026-11-08 员工人格化刀一 E1）。
+	 *
+	 * 形态照 SOUL 的编辑口径（磁盘当前值 + 新版本快照，**下一轮生效**），但独立成一个端点：
+	 * 调岗与改人格是两件事，放同一个 PATCH 里会让"我只想改职责"顺手带上人格 diff。
+	 * 契约与 SOUL 共用版本号（一个身份版本 = 当时的 SOUL + CONTRACT 对）。
+	 *
+	 * `PARTNER_CONTRACT=false` → 400 带说明（不是 404：端点还在，只是功能关着，
+	 * 与"执事能力整体未启用"的 404 语义区分开）。
+	 */
+	app.put("/api/v1/partners/:id/contract", async (c) => {
+		if (!partnerContractEnabled()) {
+			return c.json(
+				{
+					error: "bad_request",
+					message: "岗位契约未启用（PARTNER_CONTRACT=false）",
+				},
+				400,
+			);
+		}
+		const body = (await c.req.json().catch(() => null)) as { contract?: unknown } | null;
+		if (typeof body?.contract !== "string") {
+			return c.json({ error: "bad_request", message: "contract 必须是字符串" }, 400);
+		}
+		// 与 SOUL 同一个槽位护栏：在写盘之前拦，避免半写状态。
+		if (Buffer.byteLength(body.contract, "utf8") > PARTNER_SLOT_LIMIT) {
+			return c.json(
+				{ error: "bad_request", message: `内容超过 ${PARTNER_SLOT_LIMIT} 字节上限（槽位护栏）` },
+				400,
+			);
+		}
+		const id = c.req.param("id");
+		if (!store().get(id)) return c.json({ ok: false, error: "not_found" }, 404);
+		try {
+			const contractVersion = store().bumpContract(id, body.contract);
+			return c.json({
+				ok: true,
+				contract: store().readContractFromHome(id) ?? body.contract,
+				contractVersion,
+			});
+		} catch (error) {
+			const detail = error instanceof Error ? error.message : String(error);
+			return c.json({ error: "bad_request", message: detail }, 400);
+		}
 	});
 
 	app.patch("/api/v1/partners/:id", async (c) => {

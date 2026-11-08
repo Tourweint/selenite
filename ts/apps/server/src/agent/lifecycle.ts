@@ -84,6 +84,7 @@ import {
 	skillStore,
 } from "./assist.ts";
 import { approvalArgsHash } from "./approval-key.ts";
+import { buildPartnerTurnContext } from "./partner-context.ts";
 import { BASH_TIMEOUT_S, approvalMode, policy, readOnlyBlockReason } from "./policy.ts";
 import {
 	CTX,
@@ -665,6 +666,46 @@ async function openHarness(): Promise<Harness> {
 							toolsBlocked.delete(api.conversationId);
 							// 防打转守卫同步清零（批次A A1）：判据按轮计，不跨轮累计
 							resetLoopGuard(api.conversationId);
+						}
+
+						// 执事轮输入（2026-11-08 员工人格化刀一 E1/E5）：岗位契约 + 当前在办。
+						//
+						// **两类执事轮都走这一条**：私聊/例行（partner-runtime.runPartnerTurn）与
+						// 群成员轮（group-runtime.buildMemberInput）用的都是同一条 harness +
+						// 同一个扩展，所以在这里按会话认执事即可——不必在两处装配代码里各写一遍
+						// （写两遍反而会让群轮看到两份）。总管 / 主人会话（partnerIdOfSession=null）
+						// 不注入；SOUL 仍在 instructions 里，这里只补契约与状态。
+						//
+						// 只在本轮**第一次**模型请求时算（used===1）：在办清单要扫 chancellor 的
+						// runs/ 目录、开 sqlite，一轮里几十次工具回合各算一遍纯属浪费；这一轮开始
+						// 时看到的在办，就是这一轮的"当前在办"。
+						//
+						// 走 system 消息而不是拼进用户正文：状态每轮都变，拼进正文会被固化进
+						// transcript（既污染历史，又让模型每轮重读一段旧状态）。
+						if (used === 1 && COMPANIONS_ENABLED) {
+							try {
+								const partnerId = partnersStore().partnerIdOfSession(api.conversationId);
+								if (partnerId) {
+									const turnContext = buildPartnerTurnContext(
+										partnerId,
+										api.conversationId,
+									);
+									if (turnContext.text) {
+										extra.push({
+											role: "system",
+											content: turnContext.text,
+											timestamp: Date.now(),
+										});
+									}
+								}
+							} catch (error) {
+								// 档案 / 任务中心读失败：这一轮少一段状态，但对话不能哑
+								console.warn(
+									`[partner] 会话 ${api.conversationId} 上下文装配失败: ${
+										error instanceof Error ? error.message : String(error)
+									}`,
+								);
+							}
 						}
 
 						if (extra.length === 0) return undefined;

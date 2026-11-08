@@ -65,11 +65,10 @@ function makeFake(options: { resumeThrows?: boolean; prefix?: string } = {}) {
 		// 与 chancellor 一致：单子已完成/找不到时，续跑在派活前就抛错，不发任何事件。
 		if (req.resumeTicketId && resumeThrows) throw new Error("这单没有在等回答的任务");
 
-		opts?.onEvent?.({ type: "planned", ticketId: "fake", total: 1 });
-		opts?.onEvent?.({ type: "task-start", ticketId: "fake", slug: "do-it" });
-		opts?.onEvent?.({ type: "task-done", ticketId: "fake", slug: "do-it" });
-
 		if (req.resumeTicketId) {
+			opts?.onEvent?.({ type: "planned", ticketId: req.resumeTicketId, total: 1 });
+			opts?.onEvent?.({ type: "task-start", ticketId: req.resumeTicketId, slug: "do-it" });
+			opts?.onEvent?.({ type: "task-done", ticketId: req.resumeTicketId, slug: "do-it" });
 			return {
 				ticketId: req.resumeTicketId,
 				status: "done",
@@ -78,9 +77,17 @@ function makeFake(options: { resumeThrows?: boolean; prefix?: string } = {}) {
 			};
 		}
 
+		// 新派：单号同时进事件与返回值（事件里的 ticketId 是"同步段拿单号"的唯一来源，
+		// 用常量会让调用方记错单——改派回执这类断言就落在错单上）
 		newTickets += 1;
+		const ticket = `${prefix}${newTickets}`;
+		opts?.onEvent?.({ type: "ticket", ticketId: ticket, message: "已受理" });
+		opts?.onEvent?.({ type: "planned", ticketId: ticket, total: 1 });
+		opts?.onEvent?.({ type: "task-start", ticketId: ticket, slug: "do-it" });
+		opts?.onEvent?.({ type: "task-done", ticketId: ticket, slug: "do-it" });
+
 		return {
-			ticketId: `${prefix}${newTickets}`,
+			ticketId: ticket,
 			status: "needs_you",
 			line: "⚠ 需要你：验证码是啥？",
 			tasks: [],
@@ -291,7 +298,40 @@ function watch(conversationId: number): { events: DelegationEvent[]; stop: () =>
 			`requestId=${store.lookupByTicket("R1")?.requestId} conversationId=${store.lookupByTicket("R1")?.conversationId}`,
 		);
 
-		// 7.4 回滚开关：DELEGATION_MAP_PERSIST=false → 一行 resume 回执都不落（回到改动前）
+		// 7.4 续跑被拒改派（2026-11-08 批 10-A）：改派出的**新单**也要有映射，
+		// 否则完成 / 重启回灌按单号查不到人，提问的那条对话永远收不到下文。
+		{
+			const fallbackFake = makeFake({ prefix: "F" });
+			const fallbackCall = makeTools(fallbackFake.run);
+			await fallbackCall(806, { requirement: "先派一单" });
+			fallbackFake.setResumeThrows(true);
+			const reply = await fallbackCall(806, { requirement: "验证码 9999", resume: true });
+			// 同步形态直接回结果正文，不含单号（单号由下面回执断言守住）
+			check(
+				reply.includes("没有可续的单，已按新活派"),
+				"续跑被拒 → 走「没有可续的单，已按新活派」分支",
+				reply.replace(/\n/g, " / "),
+			);
+			check(
+				store.lookupByTicket("F2")?.conversationId === 806,
+				"改派新单的回执指向发起续跑的会话 806",
+				String(store.lookupByTicket("F2")?.conversationId),
+			);
+			const saidFallback: Array<[number, string]> = [];
+			const sentFallback = await reportRecoveredTickets([{ ticketId: "F2", status: "done" }], {
+				receipts: store,
+				say: (conversationId, line) => {
+					saidFallback.push([conversationId, line]);
+				},
+			});
+			check(
+				sentFallback === 1 && saidFallback[0]?.[0] === 806,
+				"重启回灌按新单号落到 806",
+				JSON.stringify(saidFallback),
+			);
+		}
+
+		// 7.5 回滚开关：DELEGATION_MAP_PERSIST=false → 一行 resume 回执都不落（回到改动前）
 		process.env.DELEGATION_MAP_PERSIST = "false";
 		await call(805, { requirement: "再答一次", resume: true });
 		check(

@@ -390,6 +390,11 @@ async function runMemberTurn(
  * 从没发言过的成员带最近 30 条窗口（懒建会话的首轮上下文）。
  * 他人消息在成员视角是 user 角色带说话人标签，自己的历史仍是 assistant——
  * 语气不污染靠这一条（lobehub 投影思路）。
+ *
+ * 岗位契约 / 当前在办（2026-11-08 员工人格化刀一 E1/E5）**不在这里拼**：
+ * 成员轮与专线轮走的是同一条 harness + 同一个扩展，`agent/lifecycle.ts` 的
+ * beforeRequest 会按会话认执事、把两段以 system 消息注入。两处都拼会重复两遍。
+ * 这里保持"群语境"本身的形状（谁在场、群里说了什么、怎么回话）。
  */
 function buildMemberInput(
 	group: GroupRow,

@@ -2,7 +2,6 @@ import type { Hono } from "hono";
 import {
 	existsSync,
 	mkdirSync,
-	readdirSync,
 	readFileSync,
 	realpathSync,
 	renameSync,
@@ -12,25 +11,34 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { insideOrEqual, realTargetOf } from "./path-guard.ts";
-import { resolveSkillsDir, type ResolvedSkillsDir } from "./skills.ts";
+import {
+	findSkillInDir,
+	resolveSkillsDir,
+	scanSkillDir,
+	type ResolvedSkillsDir,
+	type SkillSource,
+} from "./skills.ts";
 
 /**
- * 技能管理端点（2026-11-08 扫尾批 9-S，上位计划 §三.2）。
+ * 技能管理端点（2026-11-08 扫尾批 9-S；2026-11-08 批 10-A 改多来源只读展示）。
  *
  * 动作都是"人对自己的技能库"的操作：
- *   GET    /api/v1/agent/skills        列表（名字 + 首行摘要 + 大小 + 更新时间）
- *   GET    /api/v1/agent/skills/:name  读一条（.md 全文）
- *   PUT    /api/v1/agent/skills/:name  写一条（不存在即新建；body `{content}`）
- *   DELETE /api/v1/agent/skills/:name  删一条（删除即停用，没有启停位）
+ *   GET    /api/v1/agent/skills        列表（全部来源；名字 + 摘要 + 大小 + 更新时间 + 来源）
+ *   GET    /api/v1/agent/skills/:name  读一条（.md / SKILL.md 全文；任意来源都可读）
+ *   PUT    /api/v1/agent/skills/:name  写一条（只在**主目录**；不存在即新建）
+ *   DELETE /api/v1/agent/skills/:name  删一条（**只删主目录**；删除即停用，没有启停位）
  *
  * 口径照本项目其它管理端点：
  *   - 鉴权失败 403 空体（auth 中间件统一处理，这里不碰）；
- *   - 技能名不合法 / 正文超限 / 路径越界 → 400 带说明；
+ *   - 技能名不合法 / 正文超限 / 路径越界 / 只读来源 → 400 带说明；
  *   - 找不到 → 404 `not_found`；
  *   - `SKILLS_ADMIN=false` → 整组路由不挂（404 = 未启用）。
  *
- * **写操作锁死在 `resolveSkillsDir()` 解析出的目录内**：名字白名单挡穿越，realpath 复核
+ * **写操作锁死在 `resolveSkillsDir()` 的主目录内**：名字白名单挡穿越，realpath 复核
  * （复用 path-guard 的 `realTargetOf` / `insideOrEqual`）挡"目录内符号链接指向外面"。
+ * `~/.agents/skills` 是别的工具的家：**可读、不可写/删**（连影子副本都不落主目录——
+ * 那样用户会以为自己改的是那一份）。应用目录的内置手册仍允许在用户目录写同名技能覆盖，
+ * 这是 9-S 就有的合并语义（先到先得）。
  *
  * 为什么不做启停位：技能是目录里的文件，删除即停；多一个"禁用"状态就多一份与磁盘不一致的状态。
  * 增删只影响下一个会话（D5 的既有取舍），界面文案如实说明。
@@ -107,51 +115,122 @@ function atomicWrite(path: string, content: string): void {
 	}
 }
 
+/** 只读来源里的同名技能（用于把"不能在这里改"说清楚，而不是默默落一份影子副本）。 */
+function readOnlyMatchOf(sources: SkillSource[], name: string): SkillSource | null {
+	for (const source of sources) {
+		if (source.writable) continue;
+		// `~/.agents/skills` 只读；应用目录允许被用户目录同名覆盖（9-S 的合并语义），不拦
+		if (source.origin !== "agents") continue;
+		if (findSkillInDir(source.dir, name)) return source;
+	}
+	return null;
+}
+
+/**
+ * 管理面（列表 / 读一条）的越界复核：文件解引用后必须仍在该来源目录内。
+ *
+ * 加载器（模型侧）不设这道闸——那里只是读用户自己的目录；但管理端点会把内容
+ * 原样回给前端，目录里一个指向外部的符号链接就等于把任意文件端出去。
+ */
+function insideSource(dir: string, path: string): boolean {
+	try {
+		return insideOrEqual(realpathSync(dir), realTargetOf(path));
+	} catch {
+		return false;
+	}
+}
+
 export function mountSkills(app: Hono, deps: SkillsApiDeps = {}): void {
 	const resolve = deps.resolve ?? (() => resolveSkillsDir());
 	if (!(deps.enabled ?? skillsAdminEnabled())) return;
 
 	app.get("/api/v1/agent/skills", (c) => {
-		const { dir, origin } = resolve();
-		const items: { name: string; summary: string; size: number; updatedAt: string }[] = [];
-		if (existsSync(dir)) {
-			for (const file of readdirSync(dir).sort()) {
-				if (!file.endsWith(".md")) continue;
-				const name = file.slice(0, -3);
-				const checked = skillPathOf(dir, name);
+		const resolved = resolve();
+		const items: {
+			name: string;
+			summary: string;
+			size: number;
+			updatedAt: string;
+			origin: string;
+			writable: boolean;
+			form: "flat" | "dir";
+		}[] = [];
+		const claimed = new Set<string>();
+		for (const source of resolved.dirs) {
+			for (const entry of scanSkillDir(source.dir)) {
+				if (claimed.has(entry.name)) continue; // 与加载器同一条先到先得规则
+				claimed.add(entry.name);
+				if (!entry.valid) continue;
 				// 白名单外的文件名（如中文名）继续给模型用，但不进管理面：
-				// 管理端点只能按白名单读写，列出来也点不开。
-				if (!checked.ok) continue;
+				// 管理端点只能按白名单读写，列出来也点不开。只读来源同样按这条过滤。
+				if (!SKILL_NAME.test(entry.name)) continue;
+				// 目录里若有指向外部的符号链接，内容可能是任意文件——不进管理列表
+				if (!insideSource(source.dir, entry.path)) continue;
 				try {
-					const stat = statSync(checked.path);
+					const stat = statSync(entry.path);
 					if (!stat.isFile()) continue;
-					const raw = readFileSync(checked.path, "utf8").trim();
-					const summary = (raw.split(/\r?\n/)[0] ?? "").trim();
-					items.push({ name, summary, size: stat.size, updatedAt: stat.mtime.toISOString() });
+					items.push({
+						name: entry.name,
+						summary: entry.summary,
+						size: stat.size,
+						updatedAt: stat.mtime.toISOString(),
+						origin: source.origin,
+						writable: source.writable,
+						form: entry.form,
+					});
 				} catch {
 					// 单个文件读不了不该让整页列表 500
 				}
 			}
 		}
-		return c.json({ ok: true, dir, origin, items });
+		return c.json({
+			ok: true,
+			dir: resolved.dir,
+			origin: resolved.origin,
+			dirs: resolved.dirs.map((source) => ({
+				dir: source.dir,
+				origin: source.origin,
+				writable: source.writable,
+				exists: source.exists,
+			})),
+			items,
+		});
 	});
 
 	app.get("/api/v1/agent/skills/:name", (c) => {
-		const { dir } = resolve();
-		const checked = skillPathOf(dir, c.req.param("name"));
-		if (!checked.ok) return c.json({ error: "bad_request", message: checked.message }, 400);
-		if (!existsSync(checked.path)) {
-			return c.json({ error: "not_found", message: "没有这个技能" }, 404);
+		const name = c.req.param("name");
+		if (!SKILL_NAME.test(name)) {
+			return c.json(
+				{ error: "bad_request", message: "技能名只能是小写字母 / 数字 / 短横线 / 下划线，1-64 字符" },
+				400,
+			);
 		}
-		try {
-			return c.json({
-				ok: true,
-				name: c.req.param("name"),
-				content: readFileSync(checked.path, "utf8"),
-			});
-		} catch {
-			return c.json({ error: "not_found", message: "读不到这个技能" }, 404);
+		const resolved = resolve();
+		// 读取链先到先得：第一个"占了这个名字"的来源就是它，格式不对也一样（与加载器一致）
+		for (const source of resolved.dirs) {
+			const found = findSkillInDir(source.dir, name);
+			if (!found) continue;
+			// 符号链接指向目录外：与写侧同一口径，一律 400，不读、不端出去
+			if (!insideSource(source.dir, found.path)) {
+				return c.json({ error: "bad_request", message: "路径越出技能目录" }, 400);
+			}
+			if (!found.valid) {
+				return c.json({ error: "not_found", message: "这个技能格式不对，读不出正文" }, 404);
+			}
+			try {
+				return c.json({
+					ok: true,
+					name,
+					content: readFileSync(found.path, "utf8"),
+					origin: source.origin,
+					writable: source.writable,
+					form: found.form,
+				});
+			} catch {
+				return c.json({ error: "not_found", message: "读不到这个技能" }, 404);
+			}
 		}
+		return c.json({ error: "not_found", message: "没有这个技能" }, 404);
 	});
 
 	app.put("/api/v1/agent/skills/:name", async (c) => {
@@ -163,7 +242,8 @@ export function mountSkills(app: Hono, deps: SkillsApiDeps = {}): void {
 		const problem = contentProblem(body.content);
 		if (problem) return c.json({ error: "bad_request", message: problem }, 400);
 
-		const { dir } = resolve();
+		const resolved = resolve();
+		const dir = resolved.dir;
 		try {
 			mkdirSync(dir, { recursive: true });
 		} catch {
@@ -171,6 +251,20 @@ export function mountSkills(app: Hono, deps: SkillsApiDeps = {}): void {
 		}
 		const checked = skillPathOf(dir, name);
 		if (!checked.ok) return c.json({ error: "bad_request", message: checked.message }, 400);
+
+		// 主目录里还没有这份技能、但只读用户目录里有 → 明确拒绝（不写影子副本）
+		if (!existsSync(checked.path)) {
+			const readOnly = readOnlyMatchOf(resolved.dirs, name);
+			if (readOnly) {
+				return c.json(
+					{
+						error: "bad_request",
+						message: `这个技能来自只读用户技能目录（${readOnly.dir}），不能在这里改；要改请在原目录里改`,
+					},
+					400,
+				);
+			}
+		}
 
 		const created = !existsSync(checked.path);
 		try {
@@ -187,10 +281,21 @@ export function mountSkills(app: Hono, deps: SkillsApiDeps = {}): void {
 
 	app.delete("/api/v1/agent/skills/:name", (c) => {
 		const name = c.req.param("name");
-		const { dir } = resolve();
+		const resolved = resolve();
+		const dir = resolved.dir;
 		const checked = skillPathOf(dir, name);
 		if (!checked.ok) return c.json({ error: "bad_request", message: checked.message }, 400);
 		if (!existsSync(checked.path)) {
+			const readOnly = readOnlyMatchOf(resolved.dirs, name);
+			if (readOnly) {
+				return c.json(
+					{
+						error: "bad_request",
+						message: `这个技能来自只读用户技能目录（${readOnly.dir}），不能在这里删；要删请在原目录里删`,
+					},
+					400,
+				);
+			}
 			return c.json({ error: "not_found", message: "没有这个技能" }, 404);
 		}
 		try {

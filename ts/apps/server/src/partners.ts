@@ -40,6 +40,34 @@ import type { MemoryScope } from "@lifediary/memory";
 export const COMPANIONS_ENABLED =
 	(process.env.COMPANIONS_ENABLED?.trim() || "true").toLowerCase() !== "false";
 
+/**
+ * 岗位契约总开关（2026-11-08 员工人格化刀一 E1）：`PARTNER_CONTRACT=false` → 不播种
+ * `CONTRACT.md`、不注入、写端点 400；SOUL 侧行为零变化（一行 env 回到纯 SOUL 形态）。
+ * 与其它开关同一读法：只有明确写 false/0 才关，拼错一个值不会把能力误关。
+ */
+export function partnerContractEnabled(): boolean {
+	const raw = process.env.PARTNER_CONTRACT?.trim().toLowerCase();
+	if (!raw) return true;
+	return raw !== "false" && raw !== "0";
+}
+
+/**
+ * 岗位契约的固定四节（2026-11-08 E1）。**标题逐字**：契约文件按这四个二级标题分节，
+ * 渲染时只认这四节，其余内容忽略；空节连标题一起省略。
+ * 新建执事播种的空模板 = 只有这四个标题（存量执事不自动补文件，缺失 = 该节为空）。
+ */
+export const PARTNER_CONTRACT_SECTIONS = [
+	"职责范围",
+	"决策分级",
+	"验收标准",
+	"汇报对象",
+] as const;
+
+/** 新建执事的空契约模板：只有四节标题，没有正文。 */
+export function partnerContractTemplate(): string {
+	return PARTNER_CONTRACT_SECTIONS.map((section) => `## ${section}`).join("\n\n");
+}
+
 const DEFAULT_DB_PATH = ".data/partners.sqlite";
 const DEFAULT_HOMES_ROOT = ".data/partner-homes";
 
@@ -93,6 +121,12 @@ export interface PartnerVersionRow {
 	version: number;
 	/** SOUL.md 正文快照（冻结） */
 	soulSource: string;
+	/**
+	 * CONTRACT.md 正文快照（2026-11-08 员工人格化刀一 E1，冻结）。
+	 * 一个身份版本 = 当时的 SOUL + CONTRACT 对；改任一文本都 bump 版本并落双快照。
+	 * `null` = 该版本没有契约快照（老库 / 总管 / 开关关着时建的家）。
+	 */
+	contractSource: string | null;
 	/** 能力 JSON：模型候选链（B4）+ 预留位；只允许存引用（keyEnv 名），不允许存值 */
 	capabilities: string | null;
 	createdAt: string;
@@ -215,6 +249,7 @@ export class PartnersStore {
 				partner_id   TEXT NOT NULL,
 				version      INTEGER NOT NULL,
 				soul_source  TEXT NOT NULL,
+				contract_source TEXT,
 				capabilities TEXT,
 				created_at   TEXT NOT NULL,
 				PRIMARY KEY (partner_id, version)
@@ -293,6 +328,14 @@ export class PartnersStore {
 		if (!columns.some((column) => column.name === "dispatch_authority")) {
 			this.db.exec("ALTER TABLE partners ADD COLUMN dispatch_authority INTEGER NOT NULL DEFAULT 0");
 		}
+		// 岗位契约快照列（2026-11-08 员工人格化刀一 E1）：旧库补 nullable 列，
+		// 老版本读出来是 null（= 无契约快照），不炸、不补数据、不越权回填。
+		const versionColumns = this.db.prepare("PRAGMA table_info(partner_versions)").all() as Array<{
+			name?: unknown;
+		}>;
+		if (!versionColumns.some((column) => column.name === "contract_source")) {
+			this.db.exec("ALTER TABLE partner_versions ADD COLUMN contract_source TEXT");
+		}
 	}
 
 	close(): void {
@@ -313,7 +356,10 @@ export class PartnersStore {
 		// 执事用「一句话版本」SOUL 播种（批次D D2），普通执事用默认模板。
 		this.ensureHome(id, name, opts?.soulSeed);
 		const soul = this.readSoulFromHome(id) ?? defaultSoul(name);
-		this.pushVersion(id, soul, null);
+		// 岗位契约（2026-11-08 E1）：**只在新建时**播种空模板；存量执事不自动补文件
+		// （不越权——它没见过这份契约，凭空出现一个文件比没有更让人困惑）。
+		this.seedContract(id);
+		this.pushVersion(id, soul, null, this.readContractFromHome(id));
 		this.ensureHome(id, name, opts?.soulSeed);
 		// 执事：在链接表登记领域路由（role 枚举扩一型 'delegation'）。
 		// 既有 UNIQUE (partner_id, role, route_key) 已覆盖这个组合，无需改约束。
@@ -342,6 +388,9 @@ export class PartnersStore {
 				CHIEF_PARTNER_ID,
 				this.readSoulFromHome(CHIEF_PARTNER_ID) ?? seedSoul,
 				null,
+				// 总管刻意不播种岗位契约（他是主人本体，不是被派的执事）；
+				// 有人手工放了 CONTRACT.md 才读得到，读不到就是 null。
+				this.readContractFromHome(CHIEF_PARTNER_ID),
 			);
 		}
 	}
@@ -445,17 +494,28 @@ export class PartnersStore {
 	}
 
 	// ── 身份版本 ─────────────────────────────────────────
-	/** 新增一个身份版本（冻结快照），current_version 指过去。 */
-	pushVersion(partnerId: string, soulSource: string, capabilities: string | null): number {
+	/**
+	 * 新增一个身份版本（冻结快照），current_version 指过去。
+	 *
+	 * 2026-11-08 员工人格化刀一 E1：一个身份版本 = 当时的 SOUL + CONTRACT 对。
+	 * `contractSource` 缺省 = null（老调用方 / 没有契约的档案），语义等同"该版本没有契约"。
+	 * 改任一文本都要走本函数并带上另一份的当前快照，别只更新一份。
+	 */
+	pushVersion(
+		partnerId: string,
+		soulSource: string,
+		capabilities: string | null,
+		contractSource: string | null = null,
+	): number {
 		const partner = this.get(partnerId);
 		if (!partner) throw new Error(`执事不存在：${partnerId}`);
 		const version = (partner.currentVersion ?? 0) + 1;
 		const now = new Date().toISOString();
 		this.db
 			.prepare(
-				"INSERT INTO partner_versions (partner_id, version, soul_source, capabilities, created_at) VALUES (?, ?, ?, ?, ?)",
+				"INSERT INTO partner_versions (partner_id, version, soul_source, contract_source, capabilities, created_at) VALUES (?, ?, ?, ?, ?, ?)",
 			)
-			.run(partnerId, version, soulSource, capabilities, now);
+			.run(partnerId, version, soulSource, contractSource, capabilities, now);
 		this.db
 			.prepare("UPDATE partners SET current_version = ?, updated_at = ? WHERE id = ?")
 			.run(version, now, partnerId);
@@ -473,6 +533,10 @@ export class PartnersStore {
 					partnerId: String(row.partner_id),
 					version: Number(row.version),
 					soulSource: String(row.soul_source ?? ""),
+					contractSource:
+						row.contract_source === null || row.contract_source === undefined
+							? null
+							: String(row.contract_source),
 					capabilities: row.capabilities === null || row.capabilities === undefined ? null : String(row.capabilities),
 					createdAt: String(row.created_at ?? ""),
 				}
@@ -546,6 +610,25 @@ export class PartnersStore {
 		return this.readHomeFile(partnerId, "SOUL.md");
 	}
 
+	/**
+	 * 岗位契约当前值（磁盘）。缺失 = null（旧执事没有这个文件，读取方按"四节全空"处理）。
+	 * 与 SOUL 同址同权限：64KB 单槽、原子写。
+	 */
+	readContractFromHome(partnerId: string): string | null {
+		return this.readHomeFile(partnerId, "CONTRACT.md");
+	}
+
+	/**
+	 * 播种空契约模板（只在新建执事时调用；幂等，已有内容绝不覆盖）。
+	 * 开关关着 = 一个字节都不写（回滚后与改动前逐字节一致）。
+	 */
+	seedContract(partnerId: string): void {
+		if (!partnerContractEnabled()) return;
+		const path = join(this.homeOf(partnerId), "CONTRACT.md");
+		if (existsSync(path)) return;
+		this.atomicWrite(path, partnerContractTemplate());
+	}
+
 	readUserMd(partnerId: string): string | null {
 		return this.readHomeFile(partnerId, join("memories", "USER.md"));
 	}
@@ -560,11 +643,31 @@ export class PartnersStore {
 		}
 	}
 
-	/** 改 SOUL.md（磁盘当前值）+ 落新版本快照，返回新版本号。能力（候选链）随版本延续，不被冲掉。 */
+	/**
+	 * 改 SOUL.md（磁盘当前值）+ 落新版本快照，返回新版本号。能力（候选链）随版本延续，不被冲掉。
+	 * 2026-11-08 E1：契约快照同时落一份（身份版本 = SOUL + CONTRACT 对），
+	 * 取磁盘当前值（它是"当前值"的家），取不到再退当前快照。
+	 */
 	bumpSoul(partnerId: string, soulSource: string): number {
 		if (!this.get(partnerId)) throw new Error(`执事不存在：${partnerId}`);
 		this.atomicWrite(join(this.homeOf(partnerId), "SOUL.md"), soulSource);
-		return this.pushVersion(partnerId, soulSource, this.currentVersion(partnerId)?.capabilities ?? null);
+		const current = this.currentVersion(partnerId);
+		const contract = this.readContractFromHome(partnerId) ?? current?.contractSource ?? null;
+		return this.pushVersion(partnerId, soulSource, current?.capabilities ?? null, contract);
+	}
+
+	/**
+	 * 改 CONTRACT.md（磁盘当前值）+ 落新版本快照，返回新版本号（2026-11-08 E1）。
+	 *
+	 * 与 bumpSoul 完全同构：调岗是低频慎重的事，但"下一轮生效"的口径与 SOUL 一致——
+	 * 改完不当场变身。SOUL 侧取磁盘当前值（同上），能力随版本延续。
+	 */
+	bumpContract(partnerId: string, contractSource: string): number {
+		if (!this.get(partnerId)) throw new Error(`执事不存在：${partnerId}`);
+		this.atomicWrite(join(this.homeOf(partnerId), "CONTRACT.md"), contractSource);
+		const current = this.currentVersion(partnerId);
+		const soul = this.readSoulFromHome(partnerId) ?? current?.soulSource ?? "";
+		return this.pushVersion(partnerId, soul, current?.capabilities ?? null, contractSource);
 	}
 
 	/** 模型候选链（B4）随版本存取；只挂引用不挂值，校验在 model-chain.ts。 */
@@ -580,7 +683,16 @@ export class PartnersStore {
 	}
 
 	setModelChain(partnerId: string, chain: ModelChainItemLike[]): number {
-		return this.pushVersion(partnerId, this.readSoulFromHome(partnerId) ?? "", JSON.stringify({ modelChain: chain }));
+		const current = this.currentVersion(partnerId);
+		// 2026-11-08 E1：切模型也是新身份版本，契约快照跟着延续（不冲成 null）。
+		// 取法同 bumpSoul：磁盘当前值优先，取不到再退当前快照。
+		const contract = this.readContractFromHome(partnerId) ?? current?.contractSource ?? null;
+		return this.pushVersion(
+			partnerId,
+			this.readSoulFromHome(partnerId) ?? "",
+			JSON.stringify({ modelChain: chain }),
+			contract,
+		);
 	}
 
 	// ── 会话链接 ─────────────────────────────────────────
@@ -673,6 +785,24 @@ export class PartnersStore {
 			)
 			.get(sessionId) as { partner_id?: unknown } | undefined;
 		return row?.partner_id ? String(row.partner_id) : null;
+	}
+
+	/**
+	 * 该执事名下所有**真实**会话的内部 id（2026-11-08 员工人格化刀一 E5）。
+	 *
+	 * 用途：判断"这张派活单是不是他发起的"——派单时 `originConversationId` 落的就是
+	 * 发起会话的内部 id。canonical / routine / group 都算；`session_id > 0` 滤掉
+	 * delegation 占位行（领域路由不是会话）。只读，不建链接。
+	 */
+	sessionIdsOf(partnerId: string): number[] {
+		const rows = this.db
+			.prepare(
+				"SELECT session_id FROM partner_session_links WHERE partner_id = ? AND session_id > 0",
+			)
+			.all(partnerId) as Array<{ session_id?: unknown }>;
+		return rows
+			.map((row) => Number(row.session_id))
+			.filter((id) => Number.isInteger(id) && id > 0);
 	}
 
 	/**

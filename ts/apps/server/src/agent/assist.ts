@@ -10,7 +10,7 @@ import {
 	partnersStore,
 	resolvePartnerScope,
 } from "../partners.ts";
-import { APP_SKILLS_DIR, createSkillStore, resolveSkillsDir, type SkillStore } from "../skills.ts";
+import { createSkillStore, resolveSkillsDir, type SkillStore } from "../skills.ts";
 
 /**
  * 派活能力（chancellor）是否装。
@@ -110,14 +110,12 @@ export const memoryEngine: MemoryEngine | null = (() => {
 
 // ── 技能 ─────────────────────────────────────────────────
 /**
- * 技能目录（2026-11-08 扫尾批 9-S）：解析优先级 = AGENT_SKILLS_DIR 显式 → 用户目录
- * （%USERPROFILE%\.lifediary\skills，首访自动建）→ 应用目录兜底，见 skills.ts 的
- * resolveSkillsDir()。用户目录首访为空，所以 origin=user 时要并上应用目录
- * （先到先得），两条内置手册才不会消失。
+ * 技能读取链（2026-11-08 批 10-A）：`resolveSkillsDir().dirs` 已经是完整的合并链——
+ * AGENT_SKILLS_DIR 显式 / 用户目录（首访自动建）→ `%USERPROFILE%\.agents\skills`（只读）
+ * → 应用目录兜底。主目录排第一，用户目录为空时内置手册仍然可见；同名先到先得。
  */
 const resolvedSkills = resolveSkillsDir();
-const SKILLS_DIRS: string[] =
-	resolvedSkills.origin === "user" ? [resolvedSkills.dir, APP_SKILLS_DIR] : [resolvedSkills.dir];
+const SKILLS_DIRS: string[] = resolvedSkills.dirs.map((source) => source.dir);
 
 export const skillStore: SkillStore | null = (() => {
 	// 主对话（总管）技能（批次D D1）：总管技能目录优先、全局 skills/ 兜底，同名时总管覆盖全局

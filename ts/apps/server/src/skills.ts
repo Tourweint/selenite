@@ -1,15 +1,22 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /**
  * 技能库（2026-10-31，App 方案《Agent 化与上下文分层》步骤 2，D4/D5）。
  *
  * 技能 = 一份**流程类手册**（怎么引导一场会议回顾、怎么引导一次回忆），不是事实、不是人格。
- * 存放：技能目录下的 `*.md` 文件，文件名 = 技能名。目录解析见 `resolveSkillsDir()`（2026-11-08 扫尾批 9-S：
- * `AGENT_SKILLS_DIR` 显式 → 用户目录 → 应用目录兜底；用户目录可增删，应用目录是内置手册）。
- * 文件格式刻意简单：**第 1 行 = 索引里的一行摘要，其余 = 完整手册**。
+ * 存放（2026-11-08 批 10-A 起为**多目录合并链**，先到先得）：
+ *   1. `AGENT_SKILLS_DIR` 显式（部署自选；管理端点也写这里）；
+ *   2. 用户目录 `%USERPROFILE%\.lifediary\skills`（管理界面写这里，首访自动 mkdir）；
+ *   3. 标准用户技能目录 `%USERPROFILE%\.agents\skills`（跨工具共享，**只读**）；
+ *   4. 应用目录 `apps/server/skills/`（内置手册兜底）。
+ *
+ * 两种文件形态都认：
+ *   - 扁平 `<名>.md`：第 1 行 = 索引摘要，其余 = 完整手册（本仓库原生形态）；
+ *   - 目录 `<名>/SKILL.md`：标准 agent skill 形态，摘要 = frontmatter 的 `description`，
+ *     正文 = frontmatter 之后的内容，其余 frontmatter 字段忽略。
  *
  * 与缓存的关系（方案 §2.1 不变量：所有 system 在首轮 user 前写齐，此后冻结）：
  * - 索引走 L1（extension 的 `skills` section），durable 对 section 是"最小补丁"语义——
@@ -40,13 +47,29 @@ export interface SkillStore {
  */
 export const APP_SKILLS_DIR = fileURLToPath(new URL("../skills", import.meta.url));
 
-export type SkillsDirOrigin = "env" | "user" | "app";
+export type SkillsDirOrigin = "env" | "user" | "agents" | "app";
+
+export interface SkillSource {
+	/** 目录绝对（或部署给的）路径 */
+	dir: string;
+	/** env = AGENT_SKILLS_DIR 显式；user = 用户目录；agents = `~/.agents/skills`；app = 应用目录兜底 */
+	origin: SkillsDirOrigin;
+	/**
+	 * 管理端点能否在这个目录里写/删。
+	 * 只有主目录为 true；`~/.agents/skills` 是别的工具的家，只读；应用目录是内置手册，只读。
+	 */
+	writable: boolean;
+	/** 目录当前是否存在（不存在时加载器跳过，管理列表也如实标出来） */
+	exists: boolean;
+}
 
 export interface ResolvedSkillsDir {
-	/** 技能目录（管理端点只读写这里） */
+	/** 主目录（管理端点写目标）；读取链里的第一个 */
 	dir: string;
-	/** env = AGENT_SKILLS_DIR 显式；user = 用户目录；app = 应用目录兜底 */
-	origin: SkillsDirOrigin;
+	/** 主目录来源（`agents` 永远不会是主目录） */
+	origin: Exclude<SkillsDirOrigin, "agents">;
+	/** 完整读取链，按优先级从高到低排列 */
+	dirs: SkillSource[];
 }
 
 export interface ResolveSkillsDirOptions {
@@ -61,41 +84,210 @@ function userHomeOf(env: NodeJS.ProcessEnv): string {
 	return env.USERPROFILE?.trim() || env.HOME?.trim() || homedir();
 }
 
-/**
- * 技能目录解析（2026-11-08 扫尾批 9-S，上位计划 §三.1）。
- *
- * 优先级：
- *   1. `AGENT_SKILLS_DIR` 显式指定（部署自选目录，不替用户建）；
- *   2. 用户目录 `%USERPROFILE%\.lifediary\skills`——**不存在则首次访问自动 mkdir**，
- *      这样设置页打开就能立刻增删，不用先手工建目录；
- *   3. 应用目录 `apps/server/skills/` 兜底（内置手册；只有用户目录建不出来时才落到这里）。
- *
- * 注意这只是"**可写的那一个**目录"。技能库（`createSkillStore`）要保留两条内置手册可见时，
- * 调用方在 origin=user 的情况下应传 `[resolved.dir, APP_SKILLS_DIR]`：先到先得，
- * 用户目录的同名技能覆盖内置手册。origin=app 时单目录即可。
- */
-export function resolveSkillsDir(options: ResolveSkillsDirOptions = {}): ResolvedSkillsDir {
-	const env = options.env ?? process.env;
-	const explicit = env.AGENT_SKILLS_DIR?.trim();
-	if (explicit) return { dir: explicit, origin: "env" };
-
-	const home = options.home?.trim() || userHomeOf(env);
-	const userDir = join(home, ".lifediary", "skills");
-	try {
-		mkdirSync(userDir, { recursive: true });
-		return { dir: userDir, origin: "user" };
-	} catch (error) {
-		const detail = error instanceof Error ? error.message : String(error);
-		console.warn(`[skills] 用户技能目录不可用（${detail}），回落应用目录`);
-	}
-	return { dir: options.appDir ?? APP_SKILLS_DIR, origin: "app" };
+/** 路径去重键：Windows 大小写不敏感，同一个目录写两种大小写不该算两个来源。 */
+function pathKey(dir: string): string {
+	const absolute = resolvePath(dir);
+	return process.platform === "win32" ? absolute.toLowerCase() : absolute;
 }
 
 /**
- * dir 可为单目录，或**按优先级从高到低排列的目录数组**（批次D D1 的总管技能合并）。
+ * 技能读取链解析（2026-11-08 批 10-A，上位计划 §一；取代 9-S 的单目录版本）。
+ *
+ * 优先级（**先到先得**，同名技能只有第一个来源生效）：
+ *   1. `AGENT_SKILLS_DIR` 显式指定（部署自选目录，不替用户建）——显式时它取代主目录槽位，
+ *      不再额外创建 `.lifediary\skills`；
+ *   2. 用户目录 `%USERPROFILE%\.lifediary\skills`——**不存在则首次访问自动 mkdir**，
+ *      这样设置页打开就能立刻增删，不用先手工建目录；
+ *   3. 标准用户技能目录 `%USERPROFILE%\.agents\skills`（跨工具共享，只读；不存在就跳过）；
+ *   4. 应用目录 `apps/server/skills/` 兜底（内置手册）。
+ *
+ * 主目录 = 管理端点（GET/PUT/DELETE）的写目标：有显式 env 就是 env 目录，否则用户目录，
+ * 用户目录建不出来才回落应用目录（沿用 9-S 的兜底）。`dirs` 是**读取链**：主目录永远第一，
+ * 后面跟着 .agents 与应用目录（同一路径只留一次）。
+ */
+export function resolveSkillsDir(options: ResolveSkillsDirOptions = {}): ResolvedSkillsDir {
+	const env = options.env ?? process.env;
+	const appDir = options.appDir ?? APP_SKILLS_DIR;
+	const home = options.home?.trim() || userHomeOf(env);
+	const agentsDir = join(home, ".agents", "skills");
+
+	const explicit = env.AGENT_SKILLS_DIR?.trim();
+	let main: { dir: string; origin: Exclude<SkillsDirOrigin, "agents"> };
+	if (explicit) {
+		main = { dir: explicit, origin: "env" };
+	} else {
+		const userDir = join(home, ".lifediary", "skills");
+		try {
+			mkdirSync(userDir, { recursive: true });
+			main = { dir: userDir, origin: "user" };
+		} catch (error) {
+			const detail = error instanceof Error ? error.message : String(error);
+			console.warn(`[skills] 用户技能目录不可用（${detail}），回落应用目录`);
+			main = { dir: appDir, origin: "app" };
+		}
+	}
+
+	const dirs: SkillSource[] = [];
+	const seen = new Set<string>();
+	const push = (dir: string, origin: SkillsDirOrigin, writable: boolean) => {
+		const key = pathKey(dir);
+		if (seen.has(key)) return;
+		seen.add(key);
+		dirs.push({ dir, origin, writable, exists: existsSync(dir) });
+	};
+	push(main.dir, main.origin, true);
+	push(agentsDir, "agents", false);
+	push(appDir, "app", false);
+
+	return { dir: main.dir, origin: main.origin, dirs };
+}
+
+/**
+ * 一个目录里扫出来的技能（含格式不对的条目）。
+ *
+ * `valid=false` 的条目**仍然占名**：合并链靠它挡住低优先级目录里的同名技能——
+ * 否则一份坏掉的总管技能会被全局同名手册顶掉，行为和"没有这份技能"完全不一样。
+ */
+export interface ScannedSkill {
+	name: string;
+	/** flat = `<名>.md`；dir = `<名>/SKILL.md` */
+	form: "flat" | "dir";
+	/** 实际读取的文件路径（列表要 stat 它） */
+	path: string;
+	summary: string;
+	manual: string;
+	valid: boolean;
+}
+
+/**
+ * frontmatter 的最小解析：只认第一段 `---` 包起来的单行 `key: value`。
+ *
+ * 刻意不做完整 YAML：技能只需要 `description`，其余字段忽略；多行块（`|` / `>`）
+ * 与缩进续行都不解析——真需要时再换解析器，而不是在这里长出一个半成品的 YAML。
+ */
+function parseFrontmatter(raw: string): { data: Record<string, string>; body: string } {
+	const lines = raw.split(/\r?\n/);
+	if (lines[0]?.trim() !== "---") return { data: {}, body: raw };
+	let end = -1;
+	for (let index = 1; index < lines.length; index += 1) {
+		if (lines[index]?.trim() === "---") {
+			end = index;
+			break;
+		}
+	}
+	if (end === -1) return { data: {}, body: raw };
+	const data: Record<string, string> = {};
+	for (let index = 1; index < end; index += 1) {
+		const line = lines[index] ?? "";
+		if (!line.trim() || line.startsWith(" ") || line.startsWith("\t")) continue;
+		const colon = line.indexOf(":");
+		if (colon <= 0) continue;
+		const key = line.slice(0, colon).trim().toLowerCase();
+		let value = line.slice(colon + 1).trim();
+		if (
+			(value.startsWith('"') && value.endsWith('"')) ||
+			(value.startsWith("'") && value.endsWith("'"))
+		) {
+			value = value.slice(1, -1).trim();
+		}
+		data[key] = value;
+	}
+	return { data, body: lines.slice(end + 1).join("\n") };
+}
+
+function readFlatSkill(path: string, name: string): ScannedSkill {
+	const base = { name, form: "flat" as const, path, summary: "", manual: "", valid: false };
+	try {
+		const raw = readFileSync(path, "utf8").trim();
+		const [first, ...rest] = raw.split("\n");
+		const summary = (first ?? "").trim();
+		const manual = rest.join("\n").trim();
+		// 格式不对的文件宁可不上索引：渲染半份手册比没有手册更糟
+		if (!summary || !manual) return base;
+		return { ...base, summary, manual, valid: true };
+	} catch {
+		return base;
+	}
+}
+
+function readDirSkill(path: string, name: string): ScannedSkill {
+	const base = { name, form: "dir" as const, path, summary: "", manual: "", valid: false };
+	try {
+		const raw = readFileSync(path, "utf8");
+		const { data, body } = parseFrontmatter(raw);
+		const rawSummary = (data.description ?? "").trim();
+		// 多行块标记（`>` / `|`）只留一个符号等于没有摘要：宁可跳过，也不把 ">" 注进索引
+		const summary = /^[>|][+-]?$/.test(rawSummary) ? "" : rawSummary;
+		const manual = body.trim();
+		// 标准形态：没有 description 就没有索引摘要，只能跳过（正文仍可手工看）
+		if (!summary || !manual) return base;
+		return { ...base, summary, manual, valid: true };
+	} catch {
+		return base;
+	}
+}
+
+/**
+ * 扫一个技能目录，返回两种形态的条目（扁平 .md 与 目录/SKILL.md）。
+ *
+ * 同一目录内同名时**扁平形态优先**（`.md` 是本仓库原生写法，先到先得的老口径）；
+ * 两种形态都按名字排序遍历，结果稳定。
+ */
+export function scanSkillDir(dir: string): ScannedSkill[] {
+	if (!existsSync(dir)) return [];
+	let entries: string[];
+	try {
+		entries = readdirSync(dir).sort();
+	} catch {
+		return [];
+	}
+
+	const out: ScannedSkill[] = [];
+	const claimed = new Set<string>();
+
+	// 第一轮：扁平 `<名>.md`
+	for (const file of entries) {
+		if (!file.endsWith(".md")) continue;
+		const name = file.slice(0, -3);
+		if (!name || claimed.has(name)) continue;
+		claimed.add(name);
+		out.push(readFlatSkill(join(dir, file), name));
+	}
+
+	// 第二轮：`<名>/SKILL.md`（隐藏目录跳过：.git / .DS_Store 之类不是技能）
+	for (const entry of entries) {
+		if (entry.startsWith(".")) continue;
+		if (claimed.has(entry)) continue;
+		const path = join(dir, entry, "SKILL.md");
+		if (!existsSync(path)) continue;
+		claimed.add(entry);
+		out.push(readDirSkill(path, entry));
+	}
+
+	return out;
+}
+
+/**
+ * 在单个目录里按名字找一条技能（扁平优先，其次目录形态）。
+ *
+ * 只给管理端点的"读一条"用：它要的是**原始文件全文**（编辑器里看到什么就存什么），
+ * 与加载器的摘要/正文切分不是一回事。名字来自 URL，先由白名单挡住穿越。
+ */
+export function findSkillInDir(dir: string, name: string): ScannedSkill | null {
+	if (!name || name === "." || name === ".." || /[/\\]/.test(name)) return null;
+	const flat = join(dir, `${name}.md`);
+	if (existsSync(flat)) return readFlatSkill(flat, name);
+	const dirSkill = join(dir, name, "SKILL.md");
+	if (existsSync(dirSkill)) return readDirSkill(dirSkill, name);
+	return null;
+}
+
+/**
+ * dir 可为单目录，或**按优先级从高到低排列的目录数组**（批次D D1 的总管技能合并；
+ * 2026-11-08 批 10-A 起 assist.ts 传的是 `resolveSkillsDir().dirs` 的全链）。
  * 数组形态：先到的目录拥有同名技能（同名时总管技能覆盖全局 skills/ 兜底）；
  * 每个名字只认第一个出现它的目录，含格式不对的文件也占位，防全局兜底顶掉总管占位。
- * 单目录形态行为与改动前完全一致。
+ * 单目录形态行为与改动前一致。
  */
 export function createSkillStore(dirOrDirs: string | string[]): SkillStore | null {
 	const dirs = Array.isArray(dirOrDirs) ? dirOrDirs : [dirOrDirs];
@@ -103,22 +295,14 @@ export function createSkillStore(dirOrDirs: string | string[]): SkillStore | nul
 	const skills = new Map<string, { summary: string; manual: string }>();
 	const claimed = new Set<string>();
 	for (const dir of dirs) {
-		if (!existsSync(dir)) continue;
-		for (const file of readdirSync(dir).sort()) {
-			if (!file.endsWith(".md")) continue;
-			const name = file.slice(0, -3);
-			if (claimed.has(name)) continue; // 先到的目录优先
-			claimed.add(name);
-			const raw = readFileSync(join(dir, file), "utf8").trim();
-			const [first, ...rest] = raw.split("\n");
-			const summary = (first ?? "").trim();
-			const manual = rest.join("\n").trim();
-			// 格式不对的文件宁可不上索引：渲染半份手册比没有手册更糟
-			if (!summary || !manual) {
-				console.warn(`[skills] 跳过格式不对的技能文件（第 1 行应是摘要）：${file}`);
+		for (const entry of scanSkillDir(dir)) {
+			if (claimed.has(entry.name)) continue; // 先到的目录优先
+			claimed.add(entry.name);
+			if (!entry.valid) {
+				console.warn(`[skills] 跳过格式不对的技能文件: ${entry.path}`);
 				continue;
 			}
-			skills.set(name, { summary, manual });
+			skills.set(entry.name, { summary: entry.summary, manual: entry.manual });
 		}
 	}
 	if (skills.size === 0) return null;
@@ -132,7 +316,10 @@ export function createSkillStore(dirOrDirs: string | string[]): SkillStore | nul
 		);
 	};
 
-	console.log(`[skills] 已加载 ${skills.size} 条技能：${[...skills.keys()].join("、")}`);
+	// 名字只记前 40 个：`.agents/skills` 可能有上百条，整串打出来日志没法看
+	const names = [...skills.keys()];
+	const preview = names.slice(0, 40).join("、") + (names.length > 40 ? `、…（共 ${names.length} 条）` : "");
+	console.log(`[skills] 已加载 ${skills.size} 条技能：${preview}`);
 	return {
 		names: () => [...skills.keys()],
 		manual: (name) => skills.get(name)?.manual,

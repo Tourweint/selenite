@@ -1768,6 +1768,9 @@ try {
 		LLM_FAUX_TOOL: "recall",
 		AGENT_MAX_TURNS: "80",
 		AGENT_SSE_SEQ_DB_PATH: SEQ_DB,
+		// §18 起在探针进程内把 COMPANIONS_ENABLED 置了 false（为了 import agent 不碰执事库），
+		// startServer 继承 process.env，这里必须显式打开——§23 要验执事端点。
+		COMPANIONS_ENABLED: "true",
 	});
 	await waitForReady();
 
@@ -1805,6 +1808,80 @@ try {
 	);
 	await busyReader?.cancel().catch(() => undefined);
 
+	// ── 23. 岗位契约（2026-11-08 员工人格化刀一 E1）──────────────
+	// 写入 → 读到 → 列表形状不变；开关关着时的 400 放到下面同一轮重启里验。
+	console.log("\n· 23. 岗位契约：写入 → 读到；GET /partners 形状不变");
+	const partnerCreated = await fetch(`${BASE}/api/v1/partners`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ name: "契约探针" }),
+	});
+	const partnerCreatedBody = (await partnerCreated.json()) as {
+		ok?: boolean;
+		partner?: { id?: string };
+	};
+	const contractPartnerId = partnerCreatedBody.partner?.id ?? "";
+	check(
+		partnerCreated.status === 201 && Boolean(contractPartnerId),
+		"建一个用来验契约的执事",
+		String(partnerCreated.status),
+	);
+
+	const contractBefore = (await (
+		await fetch(`${BASE}/api/v1/partners/${contractPartnerId}`)
+	).json()) as { contract?: string; contractVersion?: number };
+	check(
+		typeof contractBefore.contract === "string" &&
+			contractBefore.contract.includes("## 职责范围") &&
+			contractBefore.contractVersion === 1,
+		"详情：新建执事带四节空模板，版本 = 1",
+		`v=${String(contractBefore.contractVersion)}`,
+	);
+
+	const contractText = [
+		"## 职责范围",
+		"桌面壳与安装包。",
+		"",
+		"## 决策分级",
+		"文案自己定；动安装流程先申请。",
+		"",
+		"## 验收标准",
+		"能装能卸，探针全绿。",
+		"",
+		"## 汇报对象",
+		"向总管汇报。",
+	].join("\n");
+	const contractPut = await fetch(`${BASE}/api/v1/partners/${contractPartnerId}/contract`, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ contract: contractText }),
+	});
+	const contractPutBody = (await contractPut.json()) as { contractVersion?: number };
+	check(
+		contractPut.status === 200 && contractPutBody.contractVersion === 2,
+		"PUT 契约：落新版本（与 SOUL 共用版本号，v2）",
+		String(contractPutBody.contractVersion),
+	);
+
+	const contractAfter = (await (
+		await fetch(`${BASE}/api/v1/partners/${contractPartnerId}`)
+	).json()) as { contract?: string; contractVersion?: number; soulVersion?: number };
+	check(
+		contractAfter.contract === contractText && contractAfter.contractVersion === 2,
+		"详情：写进去的契约逐字读回（磁盘当前值）",
+		`v=${String(contractAfter.contractVersion)}`,
+	);
+
+	const partnerList = (await (await fetch(`${BASE}/api/v1/partners`)).json()) as {
+		partners?: Array<Record<string, unknown>>;
+	};
+	check(
+		Array.isArray(partnerList.partners) &&
+			partnerList.partners.every((row) => !("contract" in row) && !("soul" in row)),
+		"GET /partners 列表形状不变（不夹带契约 / SOUL 正文）",
+		`${partnerList.partners?.length ?? 0} 行`,
+	);
+
 	// 两个开关同一次重启里验完：edit → 404；parts → 400；纯字符串照常
 	// 再加 8g 的 TASK_AS_CONVERSATION=false：回话端点同样 404（未启用）。
 	server.kill();
@@ -1813,6 +1890,9 @@ try {
 		AGENT_ATTACHMENTS: "false",
 		AGENT_EDIT_RESEND: "false",
 		TASK_AS_CONVERSATION: "false",
+		// 2026-11-08 员工人格化刀一 E1 的回滚开关：写端点 400 带说明（不是 404）
+		PARTNER_CONTRACT: "false",
+		COMPANIONS_ENABLED: "true",
 		AGENT_SSE_SEQ_DB_PATH: SEQ_DB,
 	});
 	await waitForReady();
@@ -1855,6 +1935,25 @@ try {
 		sayOff.status === 404,
 		"TASK_AS_CONVERSATION=false：回话端点 404（未启用）",
 		String(sayOff.status),
+	);
+
+	const contractOff = await fetch(`${BASE}/api/v1/partners/${contractPartnerId}/contract`, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ contract: "## 职责范围\n关了还想写" }),
+	});
+	const contractOffBody = (await contractOff.json()) as { message?: string };
+	check(
+		contractOff.status === 400 && (contractOffBody.message ?? "").includes("PARTNER_CONTRACT"),
+		"PARTNER_CONTRACT=false：写端点 400 带说明（不是 404）",
+		`${contractOff.status} ${contractOffBody.message ?? ""}`,
+	);
+	const contractDetailOff = (await (
+		await fetch(`${BASE}/api/v1/partners/${contractPartnerId}`)
+	).json()) as Record<string, unknown>;
+	check(
+		!("contract" in contractDetailOff) && !("contractVersion" in contractDetailOff),
+		"PARTNER_CONTRACT=false：详情不带契约字段（回纯 SOUL 形态）",
 	);
 
 } finally {

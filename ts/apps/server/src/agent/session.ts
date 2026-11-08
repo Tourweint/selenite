@@ -40,6 +40,7 @@ import {
 import { ReminderTask } from "../reminder.ts";
 import { memoryEngine } from "./assist.ts";
 import { getHarness, lifediaryExt, rememberLevel, researchExt, stickyThinkingLevel } from "./lifecycle.ts";
+import { turnSettledHandler } from "./settled.ts";
 import {
 	CTX,
 	ChatKinds,
@@ -975,8 +976,9 @@ export async function stopChat(chat: ResolvedChat): Promise<void> {
  * 与 `sayInChat` 的区别：那是"以助手身份写一句、不调模型"；这里是一轮真对话。
  * 没有客户端看这条流，事件全部丢弃；会话正忙时内核按 followUp 排队到下一个边界。
  *
- * 已知边界：这条续跑不挂 `onSettled`（记忆抽取在 index.ts 的聊天链路里），
- * 所以这一轮的对话不会进记忆。审批指令本身不是用户说的内容，代价可以接受。
+ * 2026-11-08 批 10-A：续跑轮挂上**与普通轮同一个** `turnSettledHandler`
+ * （观察层 / 记忆抽取 / 会话记忆修剪），不再有"审批续跑不进记忆"的缺口。
+ * 用的也是 `chatStream` 的 `onSettled`，不是另抄一份逻辑。
  */
 export async function continueConversation(conversationId: number, text: string): Promise<void> {
 	try {
@@ -986,7 +988,18 @@ export async function continueConversation(conversationId: number, text: string)
 			console.warn(`[agent] 会话 ${conversationId} 已不存在，跳过审批后的续跑`);
 			return;
 		}
-		for await (const _event of chatStream({ conversation, text })) {
+		// 续跑这轮的用户侧只有这一句指令；对外 id 只用于任务专线过滤（读不到就当普通会话，
+		// 绝不让一次映射读取失败把续跑本身拦掉）
+		const externalId =
+			(await externalChatIds().catch(() => new Map<number, string>())).get(conversationId) ?? "";
+		for await (const _event of chatStream({
+			conversation,
+			text,
+			onSettled: turnSettledHandler(
+				{ internalId: conversationId, externalId },
+				[{ role: "user", content: text }],
+			),
+		})) {
 			// 没有客户端读这条流：事件只为驱动主链路，丢弃即可
 		}
 	} catch (error) {
