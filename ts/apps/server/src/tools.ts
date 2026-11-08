@@ -305,7 +305,10 @@ export function createTools(deps: ToolDeps) {
 			// 偏好层有"永不删"保护（记忆巩固的 protectKinds），教过的话不会被衰减掉。
 			"**用户用「以后 / 记住 / 下次」这类话纠正你、或给你立规矩时，必须立刻用本工具记一条 " +
 			"kind=preference、taught=true 的记忆**——不要只在这一次照做，也不要只是口头答应；" +
-			"记的是那条规矩本身（做什么 / 不做什么），不是这次对话的经过。",
+			"记的是那条规矩本身（做什么 / 不做什么），不是这次对话的经过。" +
+			// 2026-11-08 员工人格化刀三 E3：教诲分两层，规矩与方法不互斥。
+			"若教的是方法 / 步骤（「这类活怎么做」）而非规矩，在具备 partner_skill_write 工具时另写成技能文件沉淀；" +
+			"规矩本身仍落 preference。两件事不互斥：规矩进偏好（永不删），方法进技能（按需取用）。",
 		parameters: Type.Object({
 			content: Type.String({ description: "要记住的内容，一句话，用第三人称或原话" }),
 			kind: Type.Optional(
@@ -867,7 +870,10 @@ export function createTools(deps: ToolDeps) {
 				name: "partner_skill_write",
 				description:
 					"把一份技能手册写进当前执事的技能库（skills/<slug>.md，首行 = 索引用的一句话摘要）。" +
-					"执事会话写各自的技能库，主对话写总管技能库；写盘即生效，下一轮进身份提示词的技能索引。",
+					"执事会话写各自的技能库，主对话写总管技能库；写盘即生效，下一轮进身份提示词的技能索引。" +
+					// 2026-11-08 员工人格化刀三 E3：被教新方法 / 自己总结出可复用做法时主动沉淀。
+					"被主人教了新方法、或自己总结出可复用的做法时，写成技能文件" +
+					"（文件名 = 活的名字，第一行 = 一句索引用摘要），下次同类任务书可直接引用。",
 				parameters: Type.Object({
 					slug: Type.String({
 						description: "技能名，小写字母/数字/短横线，1-64 字符，如 daily-brief",
