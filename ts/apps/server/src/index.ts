@@ -59,7 +59,7 @@ import { mountOpenAiCompat } from "./openai-compat.ts";
 import { PairingStore, buildPairUrl, resolvePairBase } from "./pairing.ts";
 import { pairPage } from "./pair-page.ts";
 import { mountPhoneWorker } from "./phone-worker.ts";
-import { mountProjects } from "./projects.ts";
+import { mountProjects, seedDefaultWorkspace } from "./projects.ts";
 import { mountFiles } from "./files.ts";
 import { mountDelegationApi } from "./delegation-api.ts";
 import { mountCompanions } from "./companion-api.ts";
@@ -234,6 +234,9 @@ mountWorkerShell(app);
 // 项目与工作区（2026-11-03 方案 §5.5）：派单前置。新建项目根目录只提交待确认请求，
 // 用户在设置页确认后才建目录、登记。界面上线前用 HTTP 也能完成同一流程。
 mountProjects(app);
+// 默认工作区（2026-11-08 用户拍板）：首次使用不再要引导，没设过就静默落 <主目录>/lifediary。
+// LIFEDIARY_DEFAULT_WORKSPACE=off 退回旧行为（不播种）；已设置过的一律不动。
+seedDefaultWorkspace();
 
 // 文件浏览入口（2026-11-06）：open-explorer + files 只读浏览。回滚开关
 // EXPLORER_OPEN=false / FILE_BROWSE=false（方案：docs/设计方案/2026-11-06-文件浏览入口（桌面资源管理器与手机端）.md）。

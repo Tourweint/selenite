@@ -737,6 +737,40 @@ export function projectsStore(): ProjectsStore {
 	return store;
 }
 
+/** 默认工作区落点：LIFEDIARY_DEFAULT_WORKSPACE 可换路径；off / 0 / false = 关掉播种。 */
+export function defaultWorkspaceRoot(): string | null {
+	const flag = process.env.LIFEDIARY_DEFAULT_WORKSPACE?.trim();
+	if (flag && ["off", "0", "false"].includes(flag.toLowerCase())) return null;
+	return resolve(flag || join(homedir(), "lifediary"));
+}
+
+/**
+ * 首次使用播种默认工作区（2026-11-08 用户拍板：不做引导，默认落 <主目录>/lifediary，之后可改）。
+ * 只在**没设过**时动手——用户已经选了根目录的，一次都不动。
+ * 换了 PROJECTS_DB_PATH 跑（测试/探针）默认不播种，别往真实主目录写；
+ * 要验这段就显式给 LIFEDIARY_DEFAULT_WORKSPACE 指到临时目录。
+ * 任何失败只 warn：播种不成 = 退回旧行为（未设置态，侧栏仍有「设置主项目」兜底入口）。
+ */
+export function seedDefaultWorkspace(store: ProjectsStore = projectsStore()): Workspace | null {
+	if (store.getWorkspace()) return null;
+	const flag = process.env.LIFEDIARY_DEFAULT_WORKSPACE?.trim();
+	if (flag && ["off", "0", "false"].includes(flag.toLowerCase())) return null;
+	const usingDefaultDb = !process.env.PROJECTS_DB_PATH?.trim();
+	if (!usingDefaultDb && !flag) return null;
+	const root = defaultWorkspaceRoot();
+	if (!root) return null;
+	try {
+		mkdirSync(root, { recursive: true });
+		return store.setWorkspace(root);
+	} catch (error) {
+		console.warn(
+			"[projects] 默认工作区没建成，保持未设置（可在设置页手动选）:",
+			error instanceof Error ? error.message : error,
+		);
+		return null;
+	}
+}
+
 /** 最大工作区根的 realpath；未设工作区或根目录已不可达 → null（守卫据此旁路）。 */
 export function workspaceRootReal(store: ProjectsStore = projectsStore()): string | null {
 	const workspace = store.getWorkspace();

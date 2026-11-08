@@ -17,6 +17,7 @@ import {
 	ProjectsStore,
 	resolveDelegationProject,
 	resolveProjectPath,
+	seedDefaultWorkspace,
 	validateWorkspaceRoot,
 } from "./projects.ts";
 
@@ -50,6 +51,55 @@ test("工作区拒绝盘符根、主目录与不存在的路径", () => {
 		assert.throws(() => validateWorkspaceRoot(file), ProjectError);
 		assert.equal(validateWorkspaceRoot(root), realpathSync(root));
 	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("默认工作区播种：没设过才落点；已设过不动；off 关掉；换库跑不碰真实主目录", () => {
+	const root = tempDir("seed");
+	const store = new ProjectsStore(join(root, "projects.sqlite"));
+	const savedFlag = process.env.LIFEDIARY_DEFAULT_WORKSPACE;
+	const savedDb = process.env.PROJECTS_DB_PATH;
+	try {
+		// 没设过：播种到 flag 指的目录（目录不存在就建）
+		process.env.LIFEDIARY_DEFAULT_WORKSPACE = join(root, "ws");
+		delete process.env.PROJECTS_DB_PATH;
+		const seeded = seedDefaultWorkspace(store);
+		assert.ok(seeded);
+		assert.equal(seeded.rootPath, realpathSync(join(root, "ws")));
+		assert.ok(existsSync(join(root, "ws")));
+
+		// 已设过：再播种不动用户的选择
+		process.env.LIFEDIARY_DEFAULT_WORKSPACE = join(root, "ws2");
+		assert.equal(seedDefaultWorkspace(store), null);
+		assert.equal(store.getWorkspace()?.rootPath, seeded.rootPath);
+
+		// off / 0 / false：回滚开关，不播种
+		const freshOff = new ProjectsStore(join(root, "fresh-off.sqlite"));
+		try {
+			process.env.LIFEDIARY_DEFAULT_WORKSPACE = "off";
+			assert.equal(seedDefaultWorkspace(freshOff), null);
+			assert.equal(freshOff.getWorkspace(), null);
+		} finally {
+			freshOff.close();
+		}
+
+		// 换了 PROJECTS_DB_PATH 跑（探针/测试态）又没给 flag：默认不碰真实主目录
+		const freshProbe = new ProjectsStore(join(root, "fresh-probe.sqlite"));
+		try {
+			process.env.LIFEDIARY_DEFAULT_WORKSPACE = "";
+			process.env.PROJECTS_DB_PATH = join(root, "explicit.sqlite");
+			assert.equal(seedDefaultWorkspace(freshProbe), null);
+			assert.equal(freshProbe.getWorkspace(), null);
+		} finally {
+			freshProbe.close();
+		}
+	} finally {
+		if (savedFlag === undefined) delete process.env.LIFEDIARY_DEFAULT_WORKSPACE;
+		else process.env.LIFEDIARY_DEFAULT_WORKSPACE = savedFlag;
+		if (savedDb === undefined) delete process.env.PROJECTS_DB_PATH;
+		else process.env.PROJECTS_DB_PATH = savedDb;
+		store.close();
 		rmSync(root, { recursive: true, force: true });
 	}
 });

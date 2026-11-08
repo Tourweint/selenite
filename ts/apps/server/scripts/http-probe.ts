@@ -2072,6 +2072,46 @@ try {
 		`${ruleCountOn} → ${routinesOff.routines?.length ?? 0}`,
 	);
 
+	// ── 25. 默认工作区播种（2026-11-08）：没设过 → 静默落指定目录；已设过不动 ──
+	console.log("\n· 25. 默认工作区播种（LIFEDIARY_DEFAULT_WORKSPACE）");
+	server.kill();
+	await sleep(800);
+	// 全新项目库：§14 建过工作区 A，得清掉才能验「没设过」这条路
+	rmSync(PROJECTS_DB, { force: true });
+	rmSync(`${PROJECTS_DB}-wal`, { force: true });
+	rmSync(`${PROJECTS_DB}-shm`, { force: true });
+	const seedWs = resolve(".data/probe-http-default-ws");
+	rmSync(seedWs, { recursive: true, force: true });
+	server = startServer({ LIFEDIARY_DEFAULT_WORKSPACE: seedWs });
+	await waitForReady();
+	const seededState = (await (await fetch(`${BASE}/api/v1/workspaces`)).json()) as {
+		workspace: { rootPath: string } | null;
+	};
+	check(
+		seededState.workspace?.rootPath === seedWs,
+		"没设过工作区：启动即静默播种默认目录",
+		seededState.workspace?.rootPath ?? "null",
+	);
+	check(existsSync(seedWs), "默认工作区目录已创建");
+	const reseed = await fetch(`${BASE}/api/v1/workspaces`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ rootPath: WORKSPACE_A }),
+	});
+	check(reseed.status === 200, "用户随后改根目录仍然可行", String(reseed.status));
+	server.kill();
+	await sleep(800);
+	server = startServer({ LIFEDIARY_DEFAULT_WORKSPACE: seedWs });
+	await waitForReady();
+	const keptState = (await (await fetch(`${BASE}/api/v1/workspaces`)).json()) as {
+		workspace: { rootPath: string } | null;
+	};
+	check(
+		keptState.workspace?.rootPath === WORKSPACE_A,
+		"重启后已设的根目录保留（播种不覆盖用户选择）",
+		keptState.workspace?.rootPath ?? "null",
+	);
+
 } finally {
 	server.kill();
 	await sleep(300);
@@ -2087,6 +2127,7 @@ try {
 	rmSync(WORKSPACE_A, { recursive: true, force: true });
 	rmSync(WORKSPACE_B, { recursive: true, force: true });
 	rmSync(GATE_OUTSIDE_DIR, { recursive: true, force: true });
+	rmSync(".data/probe-http-default-ws", { recursive: true, force: true });
 	rmSync(".data/probe-http-gate-providers.json", { force: true });
 	rmSync(".data/probe-http-gate-runtime.json", { force: true });
 	rmSync(".data/probe-http-chat-events.sqlite", { force: true });
