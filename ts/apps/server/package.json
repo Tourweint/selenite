@@ -35,7 +35,11 @@
     "group-manage": "tsx scripts/group-manage-probe.ts",
     "transcript-steps": "tsx scripts/transcript-steps-probe.ts",
     "files": "tsx scripts/files-probe.ts",
-    "topic": "tsx scripts/topic-probe.ts"
+    "topic": "tsx scripts/topic-probe.ts",
+    "pid": "tsx scripts/pid-liveness-probe.ts",
+    "resume-busy": "tsx scripts/harness-resume-busy-probe.ts",
+    "worktree": "tsx scripts/worktree-cleanup-probe.ts",
+    "context-ratio": "tsx scripts/context-ratio-probe.ts"
   },
   "dependencies": {
     "@earendil-works/chord": "1.4.0",
