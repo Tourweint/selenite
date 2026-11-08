@@ -45,7 +45,7 @@ ts/
 | 失控保护 | ✅ 工具回合上限 100（`AGENT_MAX_TURNS`），撞上限给提示并硬停 |
 | 上下文压缩 | ✅ 阈值 + overflow 兜底，策略用默认 |
 | 记忆框架 | ✅ 四层通了；策略（抽取/巩固/召回质量）刻意留空 |
-| 工具调用 | ✅ 10 个（读/写/改/跑 + 记住/回忆/提醒 + `skill` + `delegate` / `propose_project`；另有条件注册的 5 个，清单见接口文档 §4） |
+| 工具调用 | ✅ 10 个（读/写/改/跑 + 记住/回忆/提醒 + `skill` + `delegate` / `propose_project`；另有条件注册的 6 个，清单见接口文档 §4） |
 | 定时提醒 | ✅ `sleepUntil`，睡眠状态落库，重启不丢 |
 | 权限闸门 | ✅ 三档（`read-only` / `no-shell` / 黑名单 `AGENT_BLOCKED_TOOLS`）＋ 独立确认轴 `AGENT_CONFIRM_WRITES`（默认关，2026-11-04 批次二） |
 | 鉴权 | ✅ 共享令牌 ＋ 配对设备凭据（2026-11-04）＋ 本机页面 cookie（2026-11-03）；仍**不带用户身份**（D1） |
@@ -55,7 +55,7 @@ ts/
 
 ## 工具与信任
 
-已注册工具 15 个（10 个基线 + 5 个条件注册，现行清单以接口文档 §4 为准）：
+已注册工具 16 个（10 个基线 + 6 个条件注册，现行清单以接口文档 §4 为准）：
 
 | 工具 | 能力 | 风险 |
 |---|---|---|
@@ -74,12 +74,14 @@ ts/
 | `group_manage` | 总管建群 / 列群 | 新建常驻多成员会话 |
 | `web_search` | 查公开网络资料 | 只读（纯网络读） |
 | `propose_topic` | 提议长期跟进一个课题 | 只写内部提议（语义同 `remember`） |
+| `send_to_agent` | 执事给另一位执事递一条话（只送到对方会话，一跳） | 会让对方起一轮；每 run 最多 3 条 |
 
 注册条件：`read` / `write` / `edit` / `bash` 来自 pi 自带的 `CodingTools`；`skill` 需技能目录
 （`AGENT_SKILLS_DIR`）非空；`CHANCELLOR_ENABLED=false` 时 `delegate` / `propose_project` 都不上（回到 8 个）；
 `COMPANIONS_ENABLED=false` 时 `partner_skill_write` / `partner_manage` 都不上；`group_manage` 另需
 `GROUPS_ENABLED`（双闸，任一关即不上）；`TOPICS_ENABLED=false` 或课题存储 / 搜索适配层缺失时
-`web_search` / `propose_topic` 都不上。后五个是条件注册，不计入 10 个基线。
+`web_search` / `propose_topic` 都不上；`send_to_agent` 需 `COMPANIONS_ENABLED` 且 `PARTNER_RELAY_ENABLED`
+（2026-11-08 扫尾批 8d）。后六个是条件注册，不计入 10 个基线。
 
 **闸门只是骨架。** pi 自己不带权限系统，只在 `beforeTool` 留了一个钩子；
 我们在 `apps/server/src/agent.ts` 里挂了一层：
