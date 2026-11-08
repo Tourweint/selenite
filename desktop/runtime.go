@@ -90,8 +90,11 @@ func listening(port int) bool {
 //
 // 只在人点停止、以及查状态时跑，不在热路径上；所以用 netstat 解析就够，
 // 不为它维护一套 TCP 表 → PID 的 syscall（那是要跟着 Windows 版本变的）。
+//
+// 但"不在热路径"不等于"不常跑"：托盘状态轮询 5s 一次 Status，每次都走到这里。
+// 所以必须走 outputHidden——裸 exec 会在 GUI 壳下每次闪一个控制台窗口。
 func pidOnPort(port int) int {
-	out, err := exec.Command("netstat", "-ano", "-p", "TCP").Output()
+	out, err := outputHidden(exec.Command("netstat", "-ano", "-p", "TCP"))
 	if err != nil {
 		return 0
 	}
@@ -187,9 +190,11 @@ func (r *runtimeCtl) startLocked() (RuntimeStatus, error) {
 		}
 	}
 	cmd.Env = env
+	// 两件事一起挂：DETACHED_PROCESS 让服务活过壳（hideWindow），
+	// 无窗口由 startHidden 兜底（它不会覆盖上面的 CreationFlags）。
 	hideWindow(cmd)
 
-	if err := cmd.Start(); err != nil {
+	if err := startHidden(cmd); err != nil {
 		return r.statusLocked(), fmt.Errorf("启动失败: %w", err)
 	}
 	r.pid = cmd.Process.Pid
@@ -225,7 +230,7 @@ func (r *runtimeCtl) Stop() (RuntimeStatus, error) {
 
 	// /T 不能省：tsx 是 loader 进程，它会再 fork 真正的服务进程；
 	// 只杀父进程会留下孤儿占着端口，下次启动直接 EADDRINUSE。
-	if err := exec.Command("taskkill", "/PID", strconv.Itoa(pid), "/T", "/F").Run(); err != nil {
+	if err := runHidden(exec.Command("taskkill", "/PID", strconv.Itoa(pid), "/T", "/F")); err != nil {
 		r.stopped = false // 没停成，把闩还回去，别让用户以为停了
 		return r.statusLocked(), fmt.Errorf("停止失败（PID %d）: %w", pid, err)
 	}
