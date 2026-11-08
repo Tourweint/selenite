@@ -790,4 +790,176 @@ try {
 	console.log("✓ 导入：只增不改、规范化跳过 / 批内去重 / 坏 kind 跳过 / source=imported");
 }
 
+// ── 15. work 履历（2026-11-08 刀二 E2）────────────────
+// work = append-only 台账：不合并、不衰减、召回默认排除、按 scope 封顶、
+// 只走结构化查询。两种 store 都跑一遍（与 §11 同款）。
+{
+	const at = new Date("2026-11-08T00:00:00.000Z");
+	const workScope = scopeKey({ type: "partner", id: "11111111-1111-4111-8111-111111111111" });
+
+	function seedWork(
+		store: InMemoryStore | SqliteMemoryStore,
+		scope: string,
+		kind: MemoryRecord["kind"],
+		content: string,
+		createdAt: string,
+		importance = 0.5,
+	): MemoryRecord {
+		const record: MemoryRecord = {
+			id: `work-${scope}-${content}-${createdAt}`,
+			kind,
+			scope,
+			content,
+			importance,
+			veracity: "stated",
+			source: "work",
+			createdAt,
+			validUntil: null,
+			supersededBy: null,
+			recallCount: 0,
+			lastRecalledAt: null,
+		};
+		store.put(record);
+		return record;
+	}
+
+	// 15.1 写入 + 不合并：work 候选一律 append（同正文也不强化）；非 work 撞 work 正文也不合并。
+	{
+		const store = new InMemoryStore();
+		const consolidator = new BasicConsolidator();
+		const candidate = (
+			content: string,
+			kind: MemoryCandidate["kind"] = "work",
+		): MemoryCandidate => ({
+			kind,
+			scope: workScope,
+			content,
+			importance: 0.5,
+			veracity: "stated",
+			source: "work",
+		});
+		const first = consolidator.consolidate([candidate("整理纪要")], store, at);
+		assert(first.added.length === 1 && first.added[0]!.kind === "work", "work 候选应直接入库");
+		const second = consolidator.consolidate(
+			[candidate("整理纪要。"), candidate("整理纪要！")],
+			store,
+			at,
+		);
+		assert(second.added.length === 2, `work 同正文也各记一条，实际新增 ${second.added.length}`);
+		assert(second.reinforced.length === 0, "work 不强化");
+		assert(store.countByScope(workScope) === 3, "三条履历都在");
+		const cross = consolidator.consolidate([candidate("整理纪要", "episode")], store, at);
+		assert(cross.added.length === 1, "非 work 撞 work 正文照常入库（kind 不同）");
+	}
+
+	// 15.2 不衰减 + 召回排除：衰减开着、推进 100 天，work 不进召回且一个字段都不动。
+	{
+		const store = new InMemoryStore();
+		let clock = at;
+		const engine = new MemoryEngine({ store, decayDaily: 0.99, now: () => clock });
+		const work = seedWork(
+			store,
+			workScope,
+			"work",
+			"T-1｜整理纪要｜终态=done｜完成",
+			at.toISOString(),
+			0.8,
+		);
+		seedWork(store, workScope, "fact", "普通事实", at.toISOString(), 0.8);
+		clock = new Date(at.getTime() + 100 * 86_400_000);
+		const hits = engine.recall({ text: "整理纪要 普通事实", scopes: [workScope], limit: 10 });
+		assert(hits.every((hit) => hit.record.kind !== "work"), "work 不进召回");
+		assert(hits.some((hit) => hit.record.kind === "fact"), "普通记忆照常召回");
+		const untouched = store.get(work.id)!;
+		assert(untouched.importance === 0.8, "work importance 不被衰减 / 强化");
+		assert(
+			untouched.recallCount === 0 && untouched.lastRecalledAt === null,
+			"work 不写回召回信息",
+		);
+	}
+
+	// 15.3 结构化查询：按 scope+kind 取最近 N 条，created_at 倒序。
+	{
+		const store = new InMemoryStore();
+		for (let index = 0; index < 5; index += 1) {
+			seedWork(
+				store,
+				workScope,
+				"work",
+				`T-${index}｜任务｜终态=done｜完成`,
+				new Date(at.getTime() + index * 1000).toISOString(),
+			);
+		}
+		seedWork(store, workScope, "fact", "不是履历", new Date(at.getTime() + 9999 * 1000).toISOString());
+		const rows = store.search({ scopes: [workScope], kinds: ["work"], limit: 3 });
+		assert(rows.length === 3, "limit 生效");
+		assert(rows.every((row) => row.kind === "work"), "只返回 work");
+		assert(
+			rows[0]!.content.includes("T-4") && rows[2]!.content.includes("T-2"),
+			"按时间倒序",
+		);
+	}
+
+	// 15.4 cap 修剪：work 按 scope 封顶、超出删最旧；非 work 一条不动；不传 kinds 回到旧行为。
+	function capSuite(name: string, make: () => InMemoryStore | SqliteMemoryStore): void {
+		const store = make();
+		const base = at.getTime();
+		for (let index = 0; index < 5; index += 1) {
+			seedWork(
+				store,
+				"session:work-cap",
+				"work",
+				`第 ${index} 单`,
+				new Date(base + index * 1000).toISOString(),
+			);
+		}
+		// 最旧的一条，但不是 work：kind 专属修剪绝不能碰它。
+		seedWork(store, "session:work-cap", "fact", "普通事实", new Date(base - 1000).toISOString());
+		const removed = store.pruneOldest("session:work-cap", 3, { kinds: ["work"] });
+		assert(removed === 2, `${name}: 5 条 work 剪到 3 应删 2，实际 ${removed}`);
+		const rows = store.search({
+			scopes: ["session:work-cap"],
+			includeSuperseded: true,
+			limit: 100,
+		});
+		assert(rows.filter((row) => row.kind === "work").length === 3, `${name}: 剩 3 条 work`);
+		assert(
+			rows.some((row) => row.kind === "fact" && row.content === "普通事实"),
+			`${name}: 非 work 一条不删`,
+		);
+		assert(
+			rows
+				.filter((row) => row.kind === "work")
+				.every((row) => row.content !== "第 0 单" && row.content !== "第 1 单"),
+			`${name}: 删的是最旧`,
+		);
+		// 不传 kinds = 改动前行为：按整个 scope 计数（4 条剪到 2 → 删 2）。
+		assert(store.pruneOldest("session:work-cap", 2) === 2, `${name}: 不传 kinds 回到整体封顶`);
+		store.close();
+		console.log(`✓ work cap 修剪（${name}）：kind 专属删旧 / 非 work 不动 / 不传 kinds 旧行为`);
+	}
+	capSuite("InMemoryStore", () => new InMemoryStore());
+	capSuite("SqliteMemoryStore", () => new SqliteMemoryStore(":memory:"));
+
+	// 15.5 导入跳过 work：IMPORT_KINDS 不含 work，导入通道不许伪造履历。
+	{
+		const store = new InMemoryStore();
+		const engine = new MemoryEngine({ store, now: () => at });
+		const outcome = engine.importItems({
+			scope: { type: "partner", id: "22222222-2222-4222-8222-222222222222" },
+			items: [
+				{ text: "伪造的履历", kind: "work" },
+				{ text: "正常事实", kind: "fact" },
+			],
+		});
+		assert(
+			outcome.added.length === 1 && outcome.added[0]!.kind === "fact",
+			"work 导入应被跳过",
+		);
+		assert(outcome.skipped === 1, "work 导入计入 skipped");
+	}
+
+	console.log("✓ work 履历：写入 / 不合并不衰减 / cap 修剪 / 召回排除 / 结构化查询 / 导入跳过");
+}
+
 console.log("✓ 记忆框架自测通过");

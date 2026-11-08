@@ -339,6 +339,66 @@ test("在办段：明细 ≤3 条 + 超出只报条数；attention 口径文案�
 	}
 });
 
+test("刀二：当前目标 + 履历摘要在同一装配点；顺序 = 契约 → 目标 → 在办；零记录不加", () => {
+	const { root, db, homes, workRoot } = tempRoot();
+	const store = new PartnersStore(db, homes);
+	try {
+		const partner = store.create("阿岚");
+		store.linkSession({
+			partnerId: partner.id,
+			role: "canonical",
+			routeKey: "canonical",
+			sessionId: 505,
+		});
+		store.bumpContract(partner.id, "## 职责范围\n桌面壳与安装包。");
+		store.setCurrentGoal(partner.id, "本季度把安装包做稳");
+
+		// 一张在办单，让【当前在办】段存在（履历摘要挂在段末尾）。
+		const saved = new Store(workRoot);
+		saved.saveTicket(
+			ticketFixture(workRoot, "T-505", "dispatching", { originConversationId: "505" }),
+		);
+		saved.close();
+
+		const deps = {
+			store,
+			workRoot,
+			approvals: { pendingOf: () => [] },
+			workSummary: () => ({ done: 8, failed: 1, stopped: 1, total: 10 }),
+		};
+		const context = buildPartnerTurnContext(partner.id, 505, deps);
+
+		// ① 目标段（不版本化、现取现用）
+		assert.equal(context.goal, "【当前目标】本季度把安装包做稳");
+		// ② 契约段照旧
+		assert.match(context.contract ?? "", /【岗位契约】/);
+		// ③ 在办段末尾的履历摘要（过去时）+ 盘点口径（不打分 / 不自动建规则）
+		assert.match(context.status ?? "", /【当前在办】/);
+		assert.match(context.status ?? "", /近 10 单：完成 8、失败 1、中止 1/);
+		assert.match(context.status ?? "", /不打分、不列 KPI 数字/);
+		assert.match(context.status ?? "", /不要自己悄悄创建回顾规则/);
+		const text = context.text ?? "";
+		assert.ok(text.indexOf("【岗位契约】") < text.indexOf("【当前目标】"));
+		assert.ok(text.indexOf("【当前目标】") < text.indexOf("【当前在办】"));
+
+		// 零记录：段还在（有在办单），但不加履历摘要行、不带盘点口径。
+		const zero = buildPartnerTurnContext(partner.id, 505, { ...deps, workSummary: () => null });
+		assert.ok(!(zero.status ?? "").includes("近 10 单"), "零记录不加");
+		assert.ok(!(zero.status ?? "").includes("不打分"), "零记录不带盘点口径");
+		assert.match(zero.status ?? "", /【当前在办】/, "在办段照常");
+
+		// 清除目标：目标段消失，其余不变。
+		store.setCurrentGoal(partner.id, null);
+		const noGoal = buildPartnerTurnContext(partner.id, 505, deps);
+		assert.equal(noGoal.goal, null);
+		assert.ok(!(noGoal.text ?? "").includes("【当前目标】"));
+		assert.match(noGoal.text ?? "", /近 10 单：完成 8、失败 1、中止 1/, "履历摘要不受影响");
+	} finally {
+		store.close();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("契约解析：只认四个固定标题，空节连标题一起省略", () => {
 	const source = [
 		"# 我的契约（这行不是节标题，忽略）",

@@ -311,7 +311,11 @@ export async function reviewScope(
 		return { ok: false, status: 400, error: "bad_request", message: "scope 只能是 global 或 partner:<id>" };
 	}
 
-	const records = memoryEngine.list({ scopes: [scope], limit: MAX_REVIEW_RECORDS });
+	// work 是 append-only 履历台账（2026-11-08 刀二 E2）：语义去重不作用于履历，
+	// 同正文的不同单是两条历史，合并=篡改。整理建议的输入里直接剔除。
+	const records = memoryEngine
+		.list({ scopes: [scope], limit: MAX_REVIEW_RECORDS })
+		.filter((record) => record.kind !== "work");
 	const generatedAt = new Date().toISOString();
 	if (records.length < 2) {
 		// 一条（或零条）记忆没有"重复"可谈：不打这一枪模型，也不写待决文件。
@@ -407,6 +411,10 @@ export function applyProposal(scope: string, keepId: string, dropId: string): Ap
 	const drop = memoryEngine.getRecord(dropId);
 	if (!keep || !drop || keep.scope !== scope || drop.scope !== scope) {
 		return { ok: false, status: 404, error: "not_found", message: "记忆不存在，或不属于这个 scope" };
+	}
+	// 防御：整理建议的输入已剔除 work，但人手工把 work id 传进来也不能合并履历。
+	if (keep.kind === "work" || drop.kind === "work") {
+		return { ok: false, status: 400, error: "bad_request", message: "工作履历不参与整理（append-only）" };
 	}
 	if (drop.supersededBy === keepId) {
 		return { ok: true, scope, keepId, dropId, alreadyApplied: true };

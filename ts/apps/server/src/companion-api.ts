@@ -18,6 +18,8 @@ import {
 import { createMinisterPartner, stopMinisterPartner } from "./partner-manage.ts";
 import { runPartnerTurn, openPartnerConversation } from "./partner-runtime.ts";
 import { routineEngine } from "./routines.ts";
+// triggers 校验上移到 routine-manage.ts：HTTP 端点与 routine_manage 工具共用一份。
+import { validateTriggers } from "./routine-manage.ts";
 import { validateModelChain, type ModelChainItem } from "./model-chain.ts";
 
 /**
@@ -32,6 +34,8 @@ import { validateModelChain, type ModelChainItem } from "./model-chain.ts";
 
 /** 档案名上限：建（POST）与改（PATCH）同一口径。 */
 const PARTNER_NAME_LIMIT = 40;
+/** 当前目标上限（2026-11-08 刀二 E4）：不版本化、现取现用，仍给个护栏防无界正文。 */
+const PARTNER_GOAL_LIMIT = 1000;
 
 export function mountCompanions(app: Hono): void {
 	if (!COMPANIONS_ENABLED) return;
@@ -108,6 +112,9 @@ export function mountCompanions(app: Hono): void {
 				: {}),
 			// 模型候选链（B4）：只含 keyEnv 名，绝不回显任何密钥值
 			modelChain: store().getModelChain(partner.id),
+			// 当前目标（2026-11-08 刀二 E4）：纯增量、不版本化、现取现用。
+			// **列表端点形状不变**（手机端只读列表，字段经 shared 暴露在刀三）。
+			currentGoal: partner.currentGoal,
 		});
 	});
 
@@ -168,6 +175,7 @@ export function mountCompanions(app: Hono): void {
 					domain?: unknown;
 					avatar?: unknown;
 					dispatchAuthority?: unknown;
+					currentGoal?: unknown;
 			  }
 			| null;
 		const partner = store().get(id);
@@ -264,6 +272,25 @@ export function mountCompanions(app: Hono): void {
 		if (body?.dispatchAuthority !== undefined && typeof body.dispatchAuthority !== "boolean") {
 			return c.json({ error: "bad_request", message: "dispatchAuthority 必须是布尔值" }, 400);
 		}
+		// 当前目标（2026-11-08 刀二 E4）：省略 = 不改；null / 空串（含全空白）= 清除；
+		// 字符串 = 设置（trim 后存）。不版本化——目标不是身份，不 bump 版本、不动 SOUL / 契约。
+		let currentGoal: string | null | undefined;
+		if (body?.currentGoal !== undefined) {
+			if (body.currentGoal === null) {
+				currentGoal = null;
+			} else if (typeof body.currentGoal === "string") {
+				const trimmed = body.currentGoal.trim();
+				if (trimmed.length > PARTNER_GOAL_LIMIT) {
+					return c.json(
+						{ error: "bad_request", message: `currentGoal 不超过 ${PARTNER_GOAL_LIMIT} 字` },
+						400,
+					);
+				}
+				currentGoal = trimmed || null;
+			} else {
+				return c.json({ error: "bad_request", message: "currentGoal 必须是字符串或 null" }, 400);
+			}
+		}
 
 		// ── 全部合法，开始写 ──
 		if (avatar !== undefined) store().setAvatar(id, avatar);
@@ -297,9 +324,16 @@ export function mountCompanions(app: Hono): void {
 			soulVersion = store().setModelChain(id, body.modelChain as ModelChainItem[]);
 		}
 
+		// 当前目标（刀二 E4）：一条 UPDATE，不碰身份版本。省略就完全不写。
+		if (currentGoal !== undefined) {
+			refreshed = store().setCurrentGoal(id, currentGoal) ?? refreshed;
+		}
+
 		return c.json({
 			ok: true,
 			partner: projection(refreshed),
+			// 纯增量回显（不进列表投影）：PATCH 后能直接读回设成什么 / 是否清除。
+			currentGoal: refreshed.currentGoal,
 			...(soulVersion !== null ? { soulVersion } : {}),
 		});
 	});
@@ -597,35 +631,6 @@ function avatarPngDataProblem(value: string): string | null {
 	if (raw.length !== expected) return "头像 PNG 压缩数据与尺寸不匹配";
 	if (!pngFilterBytesValid(raw, width, height, bitDepth, colorType, interlace)) {
 		return "头像 PNG 像素数据无效";
-	}
-	return null;
-}
-
-function validateTriggers(triggers: unknown): string | null {
-	if (!Array.isArray(triggers) || triggers.length === 0) {
-		return "triggers 必须是非空数组";
-	}
-	for (const trigger of triggers) {
-		const t = trigger as { type?: string; expr?: string; seconds?: number; at?: string; kind?: string };
-		if (t.type === "cron") {
-			if (typeof t.expr !== "string" || t.expr.trim().split(/\s+/).length !== 5) {
-				return "cron 触发器需要 5 段表达式（分 时 日 月 周）";
-			}
-		} else if (t.type === "interval") {
-			if (typeof t.seconds !== "number" || t.seconds < 60) {
-				return "interval 触发器的 seconds 至少 60";
-			}
-		} else if (t.type === "once") {
-			if (typeof t.at !== "string" || Number.isNaN(Date.parse(t.at))) {
-				return "once 触发器需要合法的 at（ISO 时间）";
-			}
-		} else if (t.type === "event") {
-			if (t.kind !== "delegation" && t.kind !== "tool" && t.kind !== "phase") {
-				return "event 触发器的 kind 只能是 delegation / tool / phase";
-			}
-		} else {
-			return "触发器 type 只能是 cron / interval / once / event";
-		}
 	}
 	return null;
 }

@@ -20,7 +20,7 @@ const LEVELS: ApprovalLevel[] = ["ask-all", "ask-critical", "none"];
 /** 常规写（ask-critical 下应自动放行） */
 const ROUTINE_WRITE_TOOLS = ["write", "edit", "propose_project", "partner_skill_write", "group_manage"];
 /** 高危（ask-critical 下也要问） */
-const CRITICAL_TOOLS = ["bash", "powershell", "delegate", "partner_manage", "send_to_agent"];
+const CRITICAL_TOOLS = ["bash", "powershell", "delegate", "partner_manage", "send_to_agent", "routine_manage"];
 
 function verdict(level: ApprovalLevel, tool: string, critical?: ReadonlySet<string>) {
 	return needsApproval({ approvalLevel: level }, tool, undefined, critical);

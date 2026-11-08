@@ -369,3 +369,84 @@ test("PATCH：空 name / 空 soul 仍是不改（既有语义），不会被新�
 		assert.deepEqual(state(partner.id), before);
 	}
 });
+
+// ── 当前目标（2026-11-08 员工人格化刀二 E4）────────────────
+
+test("currentGoal：PATCH 设置 → detail 读回 → 列表形状不变；空串/null 清除；非法 400", async () => {
+	const id = store.create("目标执事").id;
+
+	const set = await patch(id, { currentGoal: "本季度把安装包做稳" });
+	assert.equal(set.status, 200);
+	assert.equal(set.body.currentGoal, "本季度把安装包做稳");
+	assert.equal(store.get(id)?.currentGoal, "本季度把安装包做稳");
+
+	const detailRes = await app.request(`/api/v1/partners/${id}`);
+	const detail = (await detailRes.json()) as {
+		currentGoal?: unknown;
+		partner?: Record<string, unknown>;
+	};
+	assert.equal(detail.currentGoal, "本季度把安装包做稳", "只进 detail 端点");
+	assert.equal("currentGoal" in (detail.partner ?? {}), false, "detail 的 partner 投影形状不变");
+
+	const listRes = await app.request("/api/v1/partners");
+	const list = (await listRes.json()) as { partners?: Array<Record<string, unknown>> };
+	assert.equal(
+		list.partners?.every((row) => !("currentGoal" in row)),
+		true,
+		"GET /api/v1/partners 列表形状不变（零 shared 改动）",
+	);
+
+	// 省略 = 不改
+	const omit = await patch(id, { name: "改个名" });
+	assert.equal(omit.status, 200);
+	assert.equal(store.get(id)?.currentGoal, "本季度把安装包做稳");
+
+	// 空串 / 全空白 / null = 清除
+	for (const clear of ["", "   ", null]) {
+		const cleared = await patch(id, { currentGoal: clear });
+		assert.equal(cleared.status, 200);
+		assert.equal(store.get(id)?.currentGoal, null, `currentGoal=${JSON.stringify(clear)} 清除`);
+	}
+
+	// 非法类型 / 超长 → 400 且旧值不变（整批先校验再写）
+	await patch(id, { currentGoal: "先设一个" });
+	for (const bad of [123, true, {}, "x".repeat(1001)]) {
+		const res = await patch(id, { currentGoal: bad });
+		assert.equal(res.status, 400, `currentGoal=${JSON.stringify(bad)} 应 400`);
+		assert.equal(store.get(id)?.currentGoal, "先设一个", "400 后旧值不变");
+	}
+});
+
+test("currentGoal：老库（partners 无 current_goal 列）打开不炸、旧行读出 null、可写", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "lifediary-goal-legacy-"));
+	const dbPath = join(dir, "partners.sqlite");
+	try {
+		const { DatabaseSync } = await import("node:sqlite");
+		const legacy = new DatabaseSync(dbPath);
+		legacy.exec(`
+			CREATE TABLE partners (
+				id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active',
+				current_version INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+			);
+		`);
+		const now = new Date().toISOString();
+		legacy
+			.prepare(
+				"INSERT INTO partners (id, name, status, current_version, created_at, updated_at) VALUES (?, ?, 'active', 1, ?, ?)",
+			)
+			.run("legacy-goal", "老执事", now, now);
+		legacy.close();
+
+		const { PartnersStore } = await import("./partners.ts");
+		const migrated = new PartnersStore(dbPath, join(dir, "homes"));
+		try {
+			assert.equal(migrated.get("legacy-goal")?.currentGoal, null, "缺列 = null，不补数据");
+			migrated.setCurrentGoal("legacy-goal", "补一个目标");
+			assert.equal(migrated.get("legacy-goal")?.currentGoal, "补一个目标", "迁移后可写");
+		} finally {
+			migrated.close();
+		}
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});

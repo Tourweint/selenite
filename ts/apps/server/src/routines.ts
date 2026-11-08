@@ -36,6 +36,18 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 
 const DEFAULT_STATE_PATH = ".data/routines.json";
 const PROMPT_LIMIT = 100_000;
+
+/**
+ * 自建巡逻总开关（2026-11-08 员工人格化刀二 E4）：`ROUTINE_SELF_SERVICE=false`
+ * → `routine_manage` 工具不上架，回到"只有 HTTP 能建例行规则"的形态（一行回滚）。
+ * 执事能力整体关时也一并关（没有执事会话就谈不上"自己建"）。
+ * 只有明确写 false/0 才关，拼错一个值不会把能力误关掉。
+ */
+export function routineSelfServiceEnabled(): boolean {
+	if (!COMPANIONS_ENABLED) return false;
+	const raw = (process.env.ROUTINE_SELF_SERVICE ?? "").trim().toLowerCase();
+	return raw !== "false" && raw !== "0";
+}
 /** 执行历史最多留多少条（状态文件有界） */
 const RUN_HISTORY_LIMIT = 50;
 /** deferred 重试间隔（执事忙/上一轮没跑完） */

@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { autonomyRiskVerdict, AUTONOMY_RISK_TOOLS } from "./autonomy-risk.ts";
 
 test("自主轮风险表：六类映射的三类可达工具在自主轮一律强制 ask", () => {
-	for (const tool of ["set_reminder", "delegate", "propose_project", "partner_manage", "write", "edit", "bash", "powershell", "partner_skill_write"]) {
+	for (const tool of ["set_reminder", "delegate", "propose_project", "partner_manage", "routine_manage", "write", "edit", "bash", "powershell", "partner_skill_write"]) {
 		const verdict = autonomyRiskVerdict(tool, true);
 		assert.equal(verdict.forceAsk, true, `${tool} 在自主轮必须强制 ask`);
 		assert.ok(verdict.category, `${tool} 必须带风险类别`);
@@ -17,6 +17,15 @@ test("自主轮风险表：partner_manage 建/停执事属 new_task（D14 备忘
 	assert.equal(auto.category, "new_task");
 	const normal = autonomyRiskVerdict("partner_manage", false);
 	assert.equal(normal.forceAsk, false, "普通轮按 AGENT_CONFIRM_WRITES 口径，不归风险表管");
+});
+
+test("自主轮风险表：routine_manage 自建巡逻属 new_task（刀二 E4，D14 备忘兑现）", () => {
+	assert.equal(AUTONOMY_RISK_TOOLS.routine_manage, "new_task");
+	const auto = autonomyRiskVerdict("routine_manage", true);
+	assert.equal(auto.forceAsk, true, "自主轮里执事自建常驻轮必须弹卡（禁记住绕过）");
+	assert.equal(auto.category, "new_task");
+	const normal = autonomyRiskVerdict("routine_manage", false);
+	assert.equal(normal.forceAsk, false, "普通轮按审批档口径，不归风险表管");
 });
 
 test("自主轮风险表：普通轮行为完全不变（D6 口径不动）", () => {

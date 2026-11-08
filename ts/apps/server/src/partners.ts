@@ -114,6 +114,12 @@ export interface PartnerRow {
 	 * 默认关。只对带 domain 的执事有意义。
 	 */
 	dispatchAuthority: boolean;
+	/**
+	 * 当前目标（2026-11-08 员工人格化刀二 E4）：这一阵子在奔什么，用户 / 总管可改。
+	 * **不版本化**（不是身份，是现取现用的状态），只进 detail 端点与 PATCH，
+	 * 列表形状不变（字段经 shared 暴露在刀三）。空串 / null = 清除。
+	 */
+	currentGoal: string | null;
 }
 
 export interface PartnerVersionRow {
@@ -243,7 +249,8 @@ export class PartnersStore {
 				updated_at      TEXT NOT NULL,
 				domain          TEXT,
 				avatar          TEXT,
-			dispatch_authority INTEGER NOT NULL DEFAULT 0
+			dispatch_authority INTEGER NOT NULL DEFAULT 0,
+			current_goal    TEXT
 			);
 			CREATE TABLE IF NOT EXISTS partner_versions (
 				partner_id   TEXT NOT NULL,
@@ -327,6 +334,11 @@ export class PartnersStore {
 		// 派发权列（2026-11-06 执事派发权开关）：旧库补列，旧记录读出来是 false（默认关）。
 		if (!columns.some((column) => column.name === "dispatch_authority")) {
 			this.db.exec("ALTER TABLE partners ADD COLUMN dispatch_authority INTEGER NOT NULL DEFAULT 0");
+		}
+		// 当前目标列（2026-11-08 员工人格化刀二 E4）：旧库补 nullable 列，
+		// 老记录读出来是 null（= 没设目标），不炸、不补数据、不版本化。
+		if (!columns.some((column) => column.name === "current_goal")) {
+			this.db.exec("ALTER TABLE partners ADD COLUMN current_goal TEXT");
 		}
 		// 岗位契约快照列（2026-11-08 员工人格化刀一 E1）：旧库补 nullable 列，
 		// 老版本读出来是 null（= 无契约快照），不炸、不补数据、不越权回填。
@@ -470,6 +482,19 @@ export class PartnersStore {
 		this.db
 			.prepare("UPDATE partners SET dispatch_authority = ?, updated_at = ? WHERE id = ?")
 			.run(enabled ? 1 : 0, new Date().toISOString(), id);
+		return this.get(id);
+	}
+
+	/**
+	 * 设置 / 清除当前目标（2026-11-08 员工人格化刀二 E4）：一条 UPDATE 原子落地。
+	 * 形状校验在端点（字符串 / null / 空 = 清除）；这里假设值已合法。
+	 * 只写 current_goal 与 updated_at，不碰身份版本——目标不是身份，不 bump。
+	 */
+	setCurrentGoal(id: string, goal: string | null): PartnerRow | null {
+		if (!this.get(id)) return null;
+		this.db
+			.prepare("UPDATE partners SET current_goal = ?, updated_at = ? WHERE id = ?")
+			.run(goal, new Date().toISOString(), id);
 		return this.get(id);
 	}
 
@@ -1230,6 +1255,10 @@ function toPartner(row: Record<string, unknown>): PartnerRow {
 		domain: row.domain === null || row.domain === undefined ? null : String(row.domain),
 		avatar: row.avatar === null || row.avatar === undefined ? null : String(row.avatar),
 		dispatchAuthority: Number(row.dispatch_authority ?? 0) !== 0,
+		currentGoal:
+			row.current_goal === null || row.current_goal === undefined
+				? null
+				: String(row.current_goal),
 	};
 }
 

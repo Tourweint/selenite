@@ -125,6 +125,10 @@ test("闸门完整性：实际注册全集 = WRITE_TOOLS ∪ READ_TOOLS", () => 
 			// 执事间递话（2026-11-08 扫尾批 8d）：装配层显式传 relay 才注册；
 			// 这里给个不落盘的桩，只为让"注册全集"把 send_to_agent 也覆盖进来。
 			relay: { deliver: async () => ({ ok: false, error: "stub" }) },
+			// 自建巡逻（2026-11-08 刀二 E4）：装配层显式传 routineSelfService 才注册；
+			// 只验工具全集，排链桩不落盘。
+			routineSelfService: true,
+			scheduleRoutine: async () => undefined,
 		}),
 	);
 	const registered = new Set(full.map((t) => t.name));

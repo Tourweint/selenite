@@ -67,10 +67,13 @@ export class WeightedRetriever implements Retriever {
 		// 窗口保住"最近的上下文"，两者都要——只用文本命中时，命中 1 条候选池就从 200 缩到 1。
 		const byId = new Map<string, MemoryRecord>();
 		if (text) {
-			for (const record of store.search({ ...baseSearch, text })) byId.set(record.id, record);
-		}
-		for (const record of store.search(baseSearch)) byId.set(record.id, record);
-		const candidates = [...byId.values()];
+		for (const record of store.search({ ...baseSearch, text })) byId.set(record.id, record);
+	}
+	for (const record of store.search(baseSearch)) byId.set(record.id, record);
+	// work 是 append-only 履历台账（2026-11-08 刀二 E2）：**召回默认排除**，不污染日常记忆。
+	// 装配与盘点走 store.search({ kinds:["work"] }) 的结构化查询，不走语义召回。
+	// 排除在候选集这一层做，work 因此也不进 hits、不触发 touchRecall 的衰减 / 强化写回（不衰减）。
+	const candidates = [...byId.values()].filter((record) => record.kind !== "work");
 
 		const keywords = extractKeywords(query.text);
 		const hits: RecallHit[] = [];

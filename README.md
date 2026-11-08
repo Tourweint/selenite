@@ -55,7 +55,7 @@ ts/
 
 ## 工具与信任
 
-已注册工具 16 个（10 个基线 + 6 个条件注册，现行清单以接口文档 §4 为准）：
+已注册工具 17 个（10 个基线 + 7 个条件注册，现行清单以接口文档 §4 为准）：
 
 | 工具 | 能力 | 风险 |
 |---|---|---|
@@ -75,13 +75,16 @@ ts/
 | `web_search` | 查公开网络资料 | 只读（纯网络读） |
 | `propose_topic` | 提议长期跟进一个课题 | 只写内部提议（语义同 `remember`） |
 | `send_to_agent` | 执事给另一位执事递一条话（只送到对方会话，一跳） | 会让对方起一轮；每 run 最多 3 条 |
+| `routine_manage` | 执事给自己建 / 停 / 启 / 删例行规则（自建巡逻） | **高危**：让模型在后台自主跑轮，第一次要人点头；每执事活动规则 ≤10 条 |
 
 注册条件：`read` / `write` / `edit` / `bash` 来自 pi 自带的 `CodingTools`；`skill` 需技能目录
 （`AGENT_SKILLS_DIR`）非空；`CHANCELLOR_ENABLED=false` 时 `delegate` / `propose_project` 都不上（回到 8 个）；
 `COMPANIONS_ENABLED=false` 时 `partner_skill_write` / `partner_manage` 都不上；`group_manage` 另需
 `GROUPS_ENABLED`（双闸，任一关即不上）；`TOPICS_ENABLED=false` 或课题存储 / 搜索适配层缺失时
 `web_search` / `propose_topic` 都不上；`send_to_agent` 需 `COMPANIONS_ENABLED` 且 `PARTNER_RELAY_ENABLED`
-（2026-11-08 扫尾批 8d）。后六个是条件注册，不计入 10 个基线。
+（2026-11-08 扫尾批 8d）；`routine_manage` 需 `COMPANIONS_ENABLED` 且 `ROUTINE_SELF_SERVICE` 开
+（`ROUTINE_SELF_SERVICE=false` → 工具不上架，2026-11-08 员工人格化刀二 E4）。
+后七个是条件注册，不计入 10 个基线。
 
 **闸门只是骨架。** pi 自己不带权限系统，只在 `beforeTool` 留了一个钩子；
 我们在 `apps/server/src/agent.ts` 里挂了一层：

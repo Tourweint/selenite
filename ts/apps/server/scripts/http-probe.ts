@@ -1956,6 +1956,122 @@ try {
 		"PARTNER_CONTRACT=false：详情不带契约字段（回纯 SOUL 形态）",
 	);
 
+	// ── 24. 员工人格化刀二：currentGoal / 自建巡逻上架（2026-11-08）──────
+	console.log("\n· 24. 刀二：PATCH currentGoal → 详情读回 → 列表形状；routine_manage 上架 / 回滚");
+	// 24.1 当前目标（纯端点；当前这轮服务 COMPANIONS_ENABLED=true）。
+	const goalSet = await fetch(`${BASE}/api/v1/partners/${contractPartnerId}`, {
+		method: "PATCH",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ currentGoal: "本季度把安装包做稳" }),
+	});
+	const goalSetBody = (await goalSet.json()) as { currentGoal?: unknown };
+	check(
+		goalSet.status === 200 && goalSetBody.currentGoal === "本季度把安装包做稳",
+		"PATCH currentGoal 写进去",
+		String(goalSet.status),
+	);
+	const goalDetail = (await (
+		await fetch(`${BASE}/api/v1/partners/${contractPartnerId}`)
+	).json()) as { currentGoal?: unknown };
+	check(goalDetail.currentGoal === "本季度把安装包做稳", "detail 端点逐字读回 currentGoal");
+	const goalList = (await (await fetch(`${BASE}/api/v1/partners`)).json()) as {
+		partners?: Array<Record<string, unknown>>;
+	};
+	check(
+		Array.isArray(goalList.partners) && goalList.partners.every((row) => !("currentGoal" in row)),
+		"GET /partners 列表形状不变（不夹带 currentGoal）",
+		`${goalList.partners?.length ?? 0} 行`,
+	);
+	const goalClear = await fetch(`${BASE}/api/v1/partners/${contractPartnerId}`, {
+		method: "PATCH",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ currentGoal: "" }),
+	});
+	const goalClearBody = (await goalClear.json()) as { currentGoal?: unknown };
+	check(goalClearBody.currentGoal === null, "空串清除 currentGoal（PATCH 回显 null）");
+
+	// 24.2 routine_manage 场景：faux 真链路调工具，开关开 → 工具上架且执事真建出自己的规则。
+	const routineEnv = {
+		COMPANIONS_ENABLED: "true",
+		PARTNER_GREETING_ENABLED: "false",
+		AGENT_SSE_SEQ_DB_PATH: SEQ_DB,
+		LLM_FAUX_TOOL: "routine_manage",
+		LLM_FAUX_ARGS: JSON.stringify({
+			action: "create",
+			name: "每周五自己盘点",
+			prompt: "读自己的工作履历，写一段自然语言总结，向主人汇报",
+			triggers: [{ type: "cron", expr: "0 18 * * 5" }],
+			sessionMode: "fresh",
+		}),
+		// faux 只会调工具、永不收尾：压低回合上限让流正常收尾（§10 同款）。
+		AGENT_MAX_TURNS: "3",
+		TOOL_LOOP_GUARD: "false",
+	};
+	server.kill();
+	await sleep(800);
+	server = startServer(routineEnv);
+	await waitForReady();
+
+	// 打开执事专线（问候生成关掉，避免 faux 干扰），拿到执事会话的对外 uuid。
+	const opened = await fetch(`${BASE}/api/v1/partners/${contractPartnerId}/open`, {
+		method: "POST",
+	});
+	const openedBody = (await opened.json()) as { conversationId?: string; greeting?: string };
+	const partnerConversationId = openedBody.conversationId ?? "";
+	check(
+		opened.status === 200 && Boolean(partnerConversationId),
+		"打开执事专线（PARTNER_GREETING_ENABLED=false）",
+		`${opened.status} ${openedBody.greeting ?? ""}`,
+	);
+
+	const routineChat = await chatRaw({
+		conversationId: partnerConversationId,
+		messages: [{ role: "user", content: "给自己建一条每周五的盘点规则" }],
+	});
+	const toolFrames = routineChat.frames.filter(
+		(frame) => frame.type === "tool" && (frame.raw as { name?: string }).name === "routine_manage",
+	);
+	check(
+		toolFrames.length > 0,
+		"ROUTINE_SELF_SERVICE 开：routine_manage 工具已上架并被真调用",
+		`${toolFrames.length} 帧`,
+	);
+	const routinesOn = (await (
+		await fetch(`${BASE}/api/v1/routines?partnerId=${contractPartnerId}`)
+	).json()) as { routines?: Array<{ name?: string; partnerId?: string }> };
+	check(
+		(routinesOn.routines ?? []).some(
+			(row) => row.name === "每周五自己盘点" && row.partnerId === contractPartnerId,
+		),
+		"执事在自己的会话里真建出规则，且落到自己名下",
+		`${routinesOn.routines?.length ?? 0} 条`,
+	);
+	const ruleCountOn = routinesOn.routines?.length ?? 0;
+
+	// 24.3 回滚：ROUTINE_SELF_SERVICE=false → 工具不上架，模型侧够不到，也不新建规则。
+	server.kill();
+	await sleep(800);
+	server = startServer({ ...routineEnv, ROUTINE_SELF_SERVICE: "false" });
+	await waitForReady();
+	const offChat = await chatRaw({
+		conversationId: partnerConversationId,
+		messages: [{ role: "user", content: "再给自己建一条规则" }],
+	});
+	check(
+		offChat.frames.every(
+			(frame) => frame.type !== "tool" || (frame.raw as { name?: string }).name !== "routine_manage",
+		),
+		"ROUTINE_SELF_SERVICE=false：routine_manage 不上架（没有它的工具帧）",
+	);
+	const routinesOff = (await (
+		await fetch(`${BASE}/api/v1/routines?partnerId=${contractPartnerId}`)
+	).json()) as { routines?: Array<unknown> };
+	check(
+		(routinesOff.routines?.length ?? 0) === ruleCountOn,
+		"开关关着：规则数不增加（没有偷偷新建）",
+		`${ruleCountOn} → ${routinesOff.routines?.length ?? 0}`,
+	);
+
 } finally {
 	server.kill();
 	await sleep(300);

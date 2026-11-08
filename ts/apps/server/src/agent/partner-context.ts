@@ -6,6 +6,7 @@ import type { Ticket } from "../../../../../../chancellor/src/types.ts";
 import { approvalStore } from "../approvals.ts";
 import {
 	ATTENTION_REPLY_GUIDANCE,
+	WORK_REVIEW_GUIDANCE,
 	chancellorWorkRoot,
 } from "../delegation.ts";
 import {
@@ -127,6 +128,17 @@ export interface PartnerContextDeps {
 	workRoot?: string;
 	/** 每次扫描每类 runs 目录取多少张单（默认 200；够覆盖"在办 + 最近一单"）。 */
 	ticketLimit?: number;
+	/**
+	 * 该执事近 N 单 work 履历聚合（2026-11-08 刀二 E2）。
+	 * 由装配层（lifecycle）注入 `workSummaryFor`；不传 = 不加履历摘要行
+	 * （单测零副作用，也不去开真实记忆库）。结构化查询，不走语义召回。
+	 */
+	workSummary?: (partnerId: string) => {
+		done: number;
+		failed: number;
+		stopped: number;
+		total: number;
+	} | null;
 }
 
 function readTicketJson(runsDir: string, ticketId: string): Ticket | null {
@@ -239,7 +251,16 @@ export function buildPartnerStatusSection(
 		approvals = [];
 	}
 
-	if (active.length === 0 && approvals.length === 0 && !last) return undefined;
+	// 履历摘要（**过去时**）与在办（**现在时**）两层互补别混：
+	// 在办来自 runs 扫描（刀一），履历来自 work 记录的结构化查询（刀二）。
+	// 零记录不加（workSummary 返回 null 或 total=0）。
+	const summary = deps.workSummary?.(partnerId) ?? null;
+	const workLine =
+		summary && summary.total > 0
+			? `近 10 单：完成 ${summary.done}、失败 ${summary.failed}、中止 ${summary.stopped}`
+			: null;
+
+	if (active.length === 0 && approvals.length === 0 && !last && !workLine) return undefined;
 
 	const lines: string[] = ["【当前在办】"];
 	if (active.length > 0) {
@@ -261,7 +282,27 @@ export function buildPartnerStatusSection(
 	}
 	// 有在办/待批时把「答不了怎么办」的口径带上（B2）：模型只在真有工人等它时才需要它。
 	lines.push("", ATTENTION_REPLY_GUIDANCE);
+	// 段末尾挂一行履历摘要 + 周期盘点口径（刀二 E2/E4）：有履历才出现。
+	if (workLine) {
+		lines.push("", workLine, "", WORK_REVIEW_GUIDANCE);
+	}
 	return lines.join("\n");
+}
+
+// ── 当前目标 ─────────────────────────────────────────────
+
+/**
+ * 【当前目标】段（2026-11-08 刀二 E4）：有目标才出现，一行。
+ *
+ * 目标**不版本化**（不是身份，是"现在在奔什么"），现取现用：改完下一轮读到新的。
+ * 与契约（低频、版本化、下一轮生效）刻意分开；空 / 全空白 = 整段省略。
+ */
+export function buildPartnerGoalSection(
+	partnerId: string,
+	store: PartnersStore = partnersStore(),
+): string | undefined {
+	const goal = store.get(partnerId)?.currentGoal?.trim();
+	return goal ? `【当前目标】${goal}` : undefined;
 }
 
 // ── 整体装配 ─────────────────────────────────────────────
@@ -271,18 +312,22 @@ export interface PartnerTurnContext {
 	soul: string;
 	/** 岗位契约段（开关关 / 空 → null） */
 	contract: string | null;
-	/** 当前在办段（三项皆空 → null） */
+	/** 当前目标段（E4，无目标 → null） */
+	goal: string | null;
+	/** 当前在办段（三项皆空 + 无履历 → null） */
 	status: string | null;
-	/** 注入模型请求的附加段：契约 + 在办（都空 → undefined） */
+	/** 注入模型请求的附加段：契约 + 目标 + 在办（都空 → undefined） */
 	text: string | undefined;
 }
 
 /**
  * 执事轮输入的单一装配点（E1 + E5）。
  *
- * 顺序固定：**SOUL（身份）→ 岗位契约 → 当前在办**。前两段来自同一个身份版本，
- * 第三段现查现拼。`text` 只含后两段：SOUL 在 instructions 里，重复一遍等于每轮
+ * 顺序固定：**SOUL（身份）→ 岗位契约 → 当前目标 → 当前在办**。前两段来自同一个身份版本，
+ * 后两段现查现拼。`text` 只含后三段：SOUL 在 instructions 里，重复一遍等于每轮
  * 白付一份 token，还会让模型看到两个版本的身份。
+ *
+ * 刀二只在同一装配点加两段（目标 / 履历摘要），**没有第二条注入通道**。
  */
 export function buildPartnerTurnContext(
 	partnerId: string,
@@ -296,7 +341,8 @@ export function buildPartnerTurnContext(
 	const contract = renderContractSection(
 		current?.contractSource ?? store.readContractFromHome(partnerId),
 	) ?? null;
+	const goal = buildPartnerGoalSection(partnerId, store) ?? null;
 	const status = buildPartnerStatusSection(partnerId, conversationId, { ...deps, store }) ?? null;
-	const text = [contract, status].filter((part): part is string => Boolean(part)).join("\n\n");
-	return { soul, contract, status, text: text || undefined };
+	const text = [contract, goal, status].filter((part): part is string => Boolean(part)).join("\n\n");
+	return { soul, contract, goal, status, text: text || undefined };
 }

@@ -16,6 +16,8 @@ import {
 import { DelegationReceipts, requestFingerprint } from "./delegation-receipts.ts";
 import { partnersStore } from "./partners.ts";
 import { DelegationMessages } from "./delegation-messages.ts";
+// 重试 / 回话续跑的终态同样落一条 work 履历（刀二 E2）。
+import { recordWorkSettlement } from "./work-record.ts";
 import {
 	appendTaskEvent,
 	getTaskConversation,
@@ -701,6 +703,8 @@ function defaultRetryRuntime(store: DelegationReceipts): DelegationRuntime {
 		},
 		autoReport: (process.env.DELEGATION_AUTO_REPORT?.trim() || "true").toLowerCase() !== "false",
 		isCanceled: (id) => store.isCanceled(id),
+		// 重派 / 回话续跑出来的新单也是一张真单，终态照样结算落履历（刀二 E2）。
+		recordWork: recordWorkSettlement,
 		log: (line) => console.warn(line),
 	};
 }

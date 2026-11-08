@@ -7,9 +7,11 @@
  *   - 写文件 / 跑命令 → `write` / `edit` / `bash` / `powershell` / `partner_skill_write`
  *     （现行 ask 面在自主轮收紧为必问）。
  *
- * **结构上不可达的三类**（工具不存在，模型够不着）："删除自动化"、"恢复暂停执行"、
- * routine 管理——将来给模型开 routine 工具时必须**先**加进这张表（D14 备忘）。
- * 批次D D3 的 `partner_manage`（建 / 停执事）上架前已先登记在此，D14 备忘随之兑现。
+ * **结构上不可达的两类**（工具不存在，模型够不着）："删除自动化"、"恢复暂停执行"。
+ * "routine 管理"于 2026-11-08 刀二 E4 落地为 `routine_manage`（执事自建巡逻）：
+ * **上架前已先登记在此**（D14 备忘兑现），自主轮里一律强制 ask、禁"记住"绕过——
+ * 让模型在后台自主跑轮的事，第一次必须人点头。
+ * 批次D D3 的 `partner_manage`（建 / 停执事）同理。
  * "代主人回答权限请求"的等效实现更严：自主轮的审批一律转全局待办、禁"记住"。
  */
 
@@ -21,6 +23,8 @@ export const AUTONOMY_RISK_TOOLS: Record<string, AutonomyRiskCategory> = {
 	propose_project: "new_task",
 	partner_manage: "new_task",
 	group_manage: "new_task",
+	// 执事自建巡逻（刀二 E4）：新建常驻自主轮，与 partner_manage 同档。
+	routine_manage: "new_task",
 	write: "write",
 	edit: "write",
 	bash: "write",

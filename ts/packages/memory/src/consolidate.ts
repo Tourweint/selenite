@@ -80,9 +80,17 @@ export class BasicConsolidator implements Consolidator {
 
 			// 同 scope + 同 kind + 规范化全等才算"重复"（2026-11-08）：
 			// kind 不同意味着用途不同（一条是偏好、一条是经历），正文撞车也不该合并。
-			const existing = store
-				.search({ scopes: [candidate.scope], limit: 200 })
-				.find((record) => record.kind === candidate.kind && sameContent(record.content, candidate.content));
+			// work 是 append-only 履历（2026-11-08 刀二 E2）：正文撞车也是另一单，
+			// 一律跳过查重直接 append，绝不合并 / 强化（"整理纪要"干十次是十条履历）。
+			const existing =
+				candidate.kind === "work"
+					? undefined
+					: store
+						.search({ scopes: [candidate.scope], limit: 200 })
+						.find(
+							(record) =>
+								record.kind === candidate.kind && sameContent(record.content, candidate.content),
+						);
 
 			if (existing) {
 				// 同类内容再次出现：说明这不是一次性事件，重要性上浮。

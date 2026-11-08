@@ -30,6 +30,11 @@ export interface SearchFilter {
 export interface PruneOptions {
 	/** 这些 kind 一律不删（偏好是稳定属性，换个会话也该在）。 */
 	protectKinds?: MemoryKind[];
+	/**
+	 * 只统计 / 删除这些 kind 的行（2026-11-08 刀二 E2：work 履历按 scope 专属封顶）。
+	 * 不传 = 按整个 scope 计数删除（改动前行为，§11 用例守护）。
+	 */
+	kinds?: MemoryKind[];
 	/** 被别的记录 `supersededBy` 指向的行不删，避免留下悬空引用。 */
 	protectReferenced?: boolean;
 }
@@ -382,11 +387,28 @@ export class SqliteMemoryStore implements MemoryStore {
 			throw new Error("global scope 不做自动修剪：偏好与长期事实永不淘汰");
 		}
 		const cap = Math.max(0, Math.floor(keep));
-		const excess = this.countByScope(scope) - cap;
+
+		// 计数条件 = scope +（可选）kind 专属；删除条件在这之上再加保护项。
+		// 不传 kinds 时 countParts 只有 scope = ?，与改动前 countByScope 等价。
+		const countParts: string[] = ["scope = ?"];
+		const countParams: (string | number)[] = [scope];
+		const kinds = options.kinds;
+		if (kinds?.length) {
+			countParts.push(`kind IN (${kinds.map(() => "?").join(", ")})`);
+			countParams.push(...kinds);
+		}
+		const total = Number(
+			(
+				this.db
+					.prepare(`SELECT COUNT(*) AS n FROM memories WHERE ${countParts.join(" AND ")}`)
+					.get(...countParams) as { n: number }
+			).n,
+		);
+		const excess = total - cap;
 		if (excess <= 0) return 0;
 
-		const conditions: string[] = ["scope = ?"];
-		const params: (string | number)[] = [scope];
+		const conditions: string[] = [...countParts];
+		const params: (string | number)[] = [...countParams];
 		const protectKinds = options.protectKinds ?? [];
 		if (protectKinds.length) {
 			conditions.push(`kind NOT IN (${protectKinds.map(() => "?").join(", ")})`);
@@ -487,7 +509,10 @@ export class InMemoryStore implements MemoryStore {
 			throw new Error("global scope 不做自动修剪：偏好与长期事实永不淘汰");
 		}
 		const cap = Math.max(0, Math.floor(keep));
-		const inScope = [...this.rows.values()].filter((r) => r.scope === scope);
+		const kinds = options.kinds;
+		const inScope = [...this.rows.values()].filter(
+			(r) => r.scope === scope && (!kinds?.length || kinds.includes(r.kind)),
+		);
 		const excess = inScope.length - cap;
 		if (excess <= 0) return 0;
 

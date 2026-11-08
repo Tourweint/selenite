@@ -69,7 +69,7 @@ import {
 } from "../provider.ts";
 import { buildHarnessSettings, reliabilitySummary } from "../reliability.ts";
 import { ReminderTask } from "../reminder.ts";
-import { RoutineTask } from "../routines.ts";
+import { RoutineTask, routineEngine, routineSelfServiceEnabled } from "../routines.ts";
 import { searchModule } from "../search.ts";
 import { createTools } from "../tools.ts";
 import { TOPICS_ENABLED, topicsStore } from "../topics.ts";
@@ -85,6 +85,8 @@ import {
 } from "./assist.ts";
 import { approvalArgsHash } from "./approval-key.ts";
 import { buildPartnerTurnContext } from "./partner-context.ts";
+// 执事轮装配的履历摘要读口（2026-11-08 刀二 E2）：结构化查询 work 记录，不走语义召回。
+import { workSummaryFor } from "../work-record.ts";
 import { BASH_TIMEOUT_S, approvalMode, policy, readOnlyBlockReason } from "./policy.ts";
 import {
 	CTX,
@@ -347,6 +349,10 @@ async function openHarness(): Promise<Harness> {
 			COMPANIONS_ENABLED && partnerRelayEnabled()
 				? { deliver: deliverPartnerRelay }
 				: null,
+		// 自建巡逻（2026-11-08 刀二 E4）：ROUTINE_SELF_SERVICE=false → 工具不上架；
+		// 上架时把排链函数注入工具，避免 tools.ts 反向 import routines.ts 绕成环。
+		routineSelfService: routineSelfServiceEnabled(),
+		scheduleRoutine: (routineId) => routineEngine().ensureScheduled(routineId),
 	});
 	registry.install(
 		(lifediaryExt = defineExtension({
@@ -689,6 +695,7 @@ async function openHarness(): Promise<Harness> {
 									const turnContext = buildPartnerTurnContext(
 										partnerId,
 										api.conversationId,
+										{ workSummary: workSummaryFor },
 									);
 									if (turnContext.text) {
 										extra.push({

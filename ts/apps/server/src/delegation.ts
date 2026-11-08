@@ -24,6 +24,7 @@ import {
 	delegationMessages,
 	type DelegationSenderKind,
 } from "./delegation-messages.ts";
+import type { WorkSettlementInput, WorkStatus } from "./work-record.ts";
 
 export type DelegationEvent =
 	/** 进度：这张单在哪个阶段、办到第几件、共几件、这件叫什么 */
@@ -117,6 +118,12 @@ export interface DelegationRuntime {
 		 * 这样取消发生后哪怕单子还在后台跑，也能立刻静默。
 		 */
 		isCanceled?: (ticketId: string) => boolean;
+		/**
+		 * 终态结算落一条 work 履历（2026-11-08 刀二 E2）。只在真终态调一次：
+		 * done / failed / aborted / canceled；needs_you / idle 是中间态，不落账。
+		 * 不传 = 不落账（单测与旧调用方零改动）。由装配层注入，内核不碰记忆库。
+		 */
+		recordWork?: (input: WorkSettlementInput) => void;
 		log?: (line: string) => void;
 	}
 
@@ -239,6 +246,22 @@ export const ATTENTION_REPLY_GUIDANCE = [
 	"工人回报「需要你」（need_input / need_decision / need_action）时：",
 	"- 答得了就直接答（缺什么信息就补什么，要主人拍板的就明确说是哪一项）。",
 	"- 一时答不了，就明确告诉工人：「这一项先跳过，继续其余部分，这项回头再补」——不要让整单停在这一项上，也不要自己猜一个答案糊过去。",
+].join("\n");
+
+/**
+ * 周期盘点口径（2026-11-08 员工人格化刀二 E4，方案 §五.5：不打分、不搞 KPI 数字）。
+ *
+ * 提示词层，两处消费：`tools.ts` 的 `routine_manage` 工具描述、
+ * `agent/partner-context.ts` 的装配段。执事按周期盘点时：读自己 work 履历 →
+ * 一段自然语言总结（几单、成几单、什么教训）→ 总结落一条 episode 记忆 → 向主人汇报。
+ * 刻意**不**要求自动建周回顾规则（静默的自动轮 = 意外 token 账单）：规则由主人配，
+ * 或主人说一句"你每周五自己盘点"后由执事经 routine_manage 自建（人点头过一次）。
+ */
+export const WORK_REVIEW_GUIDANCE = [
+	"按周期盘点自己干过的活时：读自己的 work 工作履历，用一段自然语言说清这一阵子",
+	"接了几单、成了几单、哪一单卡过、有什么该记取的教训（不打分、不列 KPI 数字）；",
+	"把这段总结用 remember 落一条 kind=episode 的记忆，再向主人汇报。",
+	"不要自己悄悄创建回顾规则——要主人配，或主人说一句你再用 routine_manage 建。",
 ].join("\n");
 
 /** 注入给 chancellor 的宰相身份正文上限（批次D D2）：宿主侧按 UTF-8 字节截断，chancellor 只透传。 */
@@ -423,10 +446,38 @@ export function startDelegation(
 		if (settled) return;
 		settled = true;
 		ticketId = result.ticketId || ticketId;
+		// 终态结算（2026-11-08 刀二 E2）：真终态落一条 work 履历，settled 守卫保证一次。
+		//
+		// 放在作废位判断**之前**：取消 / 中止也要结算（终态=canceled / aborted）。
+		// needs_you / idle 是"等回答 / 等子单"的中间态，不落账——否则续跑后会
+		// 对同一单再落一条，违反"每单一条、终态写一次、中间态不写"。
+		// 写失败只 warn，不影响结算主流程（recordWork 自身也兜了一层）。
+		const canceled = runtime.isCanceled?.(ticketId) ?? false;
+		const workStatus: WorkStatus | null = canceled
+			? "canceled"
+			: result.status === "done" || result.status === "failed" || result.status === "aborted"
+				? result.status
+				: null;
+		if (workStatus && runtime.recordWork) {
+			try {
+				runtime.recordWork({
+					ticketId,
+					requirement: kick.requirement,
+					status: workStatus,
+					line: result.line,
+					productDirs: (result.tasks ?? []).map((task) => task.dir).filter(Boolean),
+					originConversationId: kick.conversationId,
+					domain: kick.domain,
+				});
+			} catch (error) {
+				const detail = error instanceof Error ? error.message : String(error);
+				console.warn(`[work] 履历落账异常（不影响结算）: ${detail.slice(0, 200)}`);
+			}
+		}
 		// 作废单点 1：已取消的单既不写回会话（不 recordMessage、不发 report），
 		// 也不为它发任何事件（作废单点 4：SSE 不再为该单发事件）。
 		// 执行端照常跑完、产物照常落盘——只是 harness 不再搬运结果。
-		if (runtime.isCanceled?.(ticketId)) return;
+		if (canceled) return;
 		const report = formatReport(result, kick.domain);
 		// 结论也落成一条留言：任务详情里 out / in 成对，读起来就是一段经过
 		recordMessage("in", result.line || report.text, { kind: "system", name: "执行端" });
@@ -469,8 +520,28 @@ export function startDelegation(
 		const line = error instanceof Error ? error.message : String(error);
 		// 原始错误只进服务端日志：可能带上游地址甚至 key 片段。
 		runtime.log?.(`[delegate] 失败: ${line}`);
+		// 终态结算（刀二 E2）：派单失败也是一条终态（failed）；没有单号就不记
+		// （没有可归属的单）。作废单的失败照样结算，但终态按用户的取消记 canceled
+		// （与 settle 口径一致）。结果行固定，不把原始错误写进履历（日志纪律）。
+		const canceled = runtime.isCanceled?.(ticketId) ?? false;
+		if (runtime.recordWork && ticketId) {
+			try {
+				runtime.recordWork({
+					ticketId,
+					requirement: kick.requirement,
+					status: canceled ? "canceled" : "failed",
+					line: "派单失败，请稍后再试",
+					productDirs: [],
+					originConversationId: kick.conversationId,
+					domain: kick.domain,
+				});
+			} catch (recordError) {
+				const detail = recordError instanceof Error ? recordError.message : String(recordError);
+				console.warn(`[work] 履历落账异常（不影响结算）: ${detail.slice(0, 200)}`);
+			}
+		}
 		// 作废单失败也保持静默：不往对话里发 failed 帧、不汇报。
-		if (runtime.isCanceled?.(ticketId)) return;
+		if (canceled) return;
 		runtime.emit(kick.conversationId, {
 			type: "delegate",
 			ticketId: ticketId || "(未受理)",

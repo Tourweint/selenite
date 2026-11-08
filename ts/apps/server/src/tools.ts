@@ -40,18 +40,29 @@ import {
 	validateDomain,
 } from "../../../../../chancellor/src/manager/registry.ts";
 import {
+	WORK_REVIEW_GUIDANCE,
 	chancellorWorkRoot,
 	emitDelegation,
 	startDelegation,
 	type DelegationMirrorEntry,
 	type DelegationReport,
 } from "./delegation.ts";
+// 执事自建巡逻核心（2026-11-08 刀二 E4）：与 HTTP 端点共用校验 / 归属 / 上限。
+import {
+	defaultRoutineManageContext,
+	performRoutineAction,
+	type RoutineManageAction,
+	type RoutineManageResult,
+} from "./routine-manage.ts";
+import type { RoutineTrigger } from "./partners.ts";
 import {
 	autoRequestId,
 	DelegationReceipts,
 	requestFingerprint,
 } from "./delegation-receipts.ts";
 import { pruneSessionMemory } from "./memory-prune.ts";
+// 工作履历：派单终态结算落一条 work 记录（2026-11-08 刀二 E2）。
+import { recordWorkSettlement } from "./work-record.ts";
 // 执事间递话（2026-11-08 扫尾批 8d）：通道与工具定义在 partner-relay.ts，
 // 送达函数由装配层注入（本文件不持有 harness）。
 import { createSendToAgentTool, type PartnerRelayDeps } from "./partner-relay.ts";
@@ -221,6 +232,15 @@ export interface ToolDeps {
 	 * ——不传 = 工具不上架（一行回滚），模型侧报 `tool_unavailable`。
 	 */
 	relay?: PartnerRelayDeps | null;
+	/**
+	 * 自建巡逻（2026-11-08 刀二 E4）：为 true 时 `routine_manage` 工具上架。
+	 * 装配层（lifecycle）按 `routineSelfServiceEnabled()` 传入；**不传 = 不上架**
+	 * （单测 / 探针零改动，避免工具全集快照误伤）。`ROUTINE_SELF_SERVICE=false`
+	 * 或 `COMPANIONS_ENABLED=false` → 不上架（模型侧 tool_unavailable，一行回滚）。
+	 */
+	routineSelfService?: boolean;
+	/** 排 durable 闹钟；生产由 lifecycle 注入 `routineEngine().ensureScheduled`。 */
+	scheduleRoutine?: (routineId: string) => Promise<void>;
 }
 
 let sharedReceipts: DelegationReceipts | null = null;
@@ -726,6 +746,9 @@ export function createTools(deps: ToolDeps) {
 					// 作废位（扫尾批 1 A1）：后台 settle / 进度帧现查一次，取消后立刻静默。
 					// 用可选调用兜住单测注入的 receipts 替身（它可能没有这个方法）。
 					isCanceled: (id) => receiptsOf(deps).isCanceled?.(id) ?? false,
+					// 终态结算落一条 work 履历到发起执事 scope（刀二 E2）；中间态 / 无执事
+					// / 写失败都在 work-record.ts 与 delegation.ts 内部兜住，不挡派单。
+					recordWork: recordWorkSettlement,
 					// 只有本机 delegate 按 domain 反查执事身份；远程锚点会话不装配这个缝。
 					identityHitFor: localIdentityHit,
 					log: (line) => console.warn(line),
@@ -1095,6 +1118,94 @@ export function createTools(deps: ToolDeps) {
 						);
 					}
 					return text("action 只能是 create / list");
+				},
+			}),
+		);
+	}
+
+	// 自建巡逻 routine_manage（2026-11-08 员工人格化刀二 E4）：执事给自己建 / 停 / 删
+	// 例行规则。装配层显式传 routineSelfService 才上架（照 partner_manage 的条件注册先例）：
+	// ROUTINE_SELF_SERVICE=false / COMPANIONS_ENABLED=false → 不上架，一行回滚。
+	// 核心逻辑（校验 / 归属 / 上限 / 落库）在 routine-manage.ts，这里只做形状与文案。
+	if (deps.routineSelfService === true) {
+		const scheduleRoutine = deps.scheduleRoutine;
+		tools.push(
+			defineTool({
+				name: "routine_manage",
+				description:
+					"管理**你自己**的例行规则（到点自动跑一轮）：create 建、disable 停用、enable 启用、delete 删除。" +
+					"只能动自己名下的规则，动别人的一律当找不到；每个执事最多 10 条活动规则。" +
+					"create 需要 name（≤40 字）、prompt（这一轮要做什么）、triggers（cron 五段 / interval≥60s / once ISO / event）、sessionMode（persistent 复用会话 / fresh 每轮全新），" +
+					"其余动作带 id。例：主人说「你每周五自己盘点」，就用 create 建一条 cron「0 18 * * 5」的周盘点规则。\n" +
+					WORK_REVIEW_GUIDANCE,
+				parameters: Type.Object({
+					action: Type.Unsafe<RoutineManageAction>({
+						type: "string",
+						enum: ["create", "disable", "enable", "delete"],
+						description: "create=建 / disable=停用 / enable=启用 / delete=删除",
+					}),
+					id: Type.Optional(Type.String({ description: "disable / enable / delete 必填：自己的规则 id" })),
+					name: Type.Optional(Type.String({ description: "create 必填，规则名 ≤40 字" })),
+					prompt: Type.Optional(Type.String({ description: "create 必填，每次触发要执行的指令正文" })),
+					triggers: Type.Optional(
+						Type.Unsafe<RoutineTrigger[]>({
+							type: "array",
+							items: { type: "object" },
+							description:
+								"create 必填，非空数组。cron={type:'cron',expr:'0 18 * * 5'} / " +
+								"interval={type:'interval',seconds:3600} / once={type:'once',at:'ISO时间'} / " +
+								"event={type:'event',kind:'delegation'|'tool'|'phase',match?:{}}",
+						}),
+					),
+					sessionMode: Type.Optional(
+						Type.Unsafe<"persistent" | "fresh">({
+							type: "string",
+							enum: ["persistent", "fresh"],
+							description: "create 可选：persistent=复用主会话 / fresh=每轮全新（缺省 persistent）",
+						}),
+					),
+				}),
+				execute: async (args, api) => {
+					// partnerId 由**调用者会话**认出后绑定，绝不接受模型传进来的 partnerId
+					// （防越权改别人的规则）。主人 / 总管会话没有执事链接 → 明确拒绝。
+					let partnerId: string | null = null;
+					try {
+						partnerId = partnersStore().partnerIdOfSession(Number(api.conversationId));
+					} catch {
+						// 读库失败按"不属于任何执事"处理，不把原始错误回给模型
+					}
+					if (!partnerId) {
+						return text("这个会话不属于任何执事，不能自建巡逻（只有执事能给自己建规则）。");
+					}
+					let result: RoutineManageResult;
+					try {
+						result = performRoutineAction(
+							{
+								action: args.action,
+								...(args.id !== undefined ? { id: args.id } : {}),
+								...(args.name !== undefined ? { name: args.name } : {}),
+								...(args.prompt !== undefined ? { prompt: args.prompt } : {}),
+								...(args.triggers !== undefined ? { triggers: args.triggers } : {}),
+								...(args.sessionMode !== undefined ? { sessionMode: args.sessionMode } : {}),
+							},
+							defaultRoutineManageContext(partnerId),
+						);
+					} catch (error) {
+						const detail = error instanceof Error ? error.message : String(error);
+						return text(`操作失败：${detail.slice(0, 200)}`);
+					}
+					// create / enable 要排 durable 闹钟；排不上只 warn + 在回话里如实说，
+					// 规则已经落库（revision / 防自环由 routines.ts 既有机制照常生效）。
+					if (result.ok && result.schedule && result.routineId && scheduleRoutine) {
+						try {
+							await scheduleRoutine(result.routineId);
+						} catch (error) {
+							const detail = error instanceof Error ? error.message : String(error);
+							console.warn(`[routine_manage] 排定时链失败（规则已建）: ${detail.slice(0, 200)}`);
+							return text(`${result.message}（定时链没排上，需主人检查会话：${detail.slice(0, 80)}）`);
+						}
+					}
+					return text(result.message);
 				},
 			}),
 		);

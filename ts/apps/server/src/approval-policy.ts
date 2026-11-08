@@ -21,6 +21,8 @@
 // 会改角色与 chancellor 领域目录，同样进 WRITE_TOOLS（D14 备忘兑现）。
 // group_manage（2026-11-07 群组入口统一）：总管建群 = 新建常驻多成员会话，
 // 与 partner_manage 同档（会改"谁跟谁在一起"的关系，不是只读）。
+// routine_manage（2026-11-08 刀二 E4）：执事给自己建 / 停 / 删例行规则 = 新建常驻
+// 自主轮，同样进闸门；`ROUTINE_SELF_SERVICE=false` 时整个工具不上架（一行回滚）。
 export const WRITE_TOOLS = new Set([
 	"write",
 	"edit",
@@ -31,6 +33,7 @@ export const WRITE_TOOLS = new Set([
 	"partner_skill_write",
 	"partner_manage",
 	"group_manage",
+	"routine_manage",
 ]);
 
 export interface ApprovalPolicy {
@@ -47,6 +50,8 @@ export type ApprovalLevel = "ask-all" | "ask-critical" | "none";
  * 文件 write / edit 这类常规写**不在**清单里——"只问重要的"就是让它们自动放行。
  * `send_to_agent` 不在 `WRITE_TOOLS`（它不写文件），但它会起一轮对方模型调用，
  * 同样属于"会花钱"的一类，所以单列进来。
+ * `routine_manage`（2026-11-08 刀二 E4）：让模型在后台自主跑轮的事，与
+ * `partner_manage` **同档高危**——第一次要人点头。
  */
 export const DEFAULT_CRITICAL_TOOLS = [
 	"bash",
@@ -54,6 +59,7 @@ export const DEFAULT_CRITICAL_TOOLS = [
 	"delegate",
 	"partner_manage",
 	"send_to_agent",
+	"routine_manage",
 ] as const;
 
 /**
