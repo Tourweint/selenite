@@ -215,7 +215,6 @@ function sidebarOpen() {
 function toggleSidebar() {
   closeProjectMenu();
   hideHoverTip();
-  closePeek(true);
   const next = sidebarOpen() ? "closed" : "open";
   if (next === "closed") document.documentElement.dataset.sidebar = "closed";
   else delete document.documentElement.dataset.sidebar;
@@ -246,84 +245,9 @@ function applySidebarA11y() {
 
 NARROW_SIDEBAR.addEventListener("change", applySidebarA11y);
 
-/* ── 侧栏悬停浮出（2026-11-08，抄 Cindy peek）────────────────
- * 侧栏收起时，悬停顶栏的收起/展开钮 120ms → 侧栏面板以浮层形式滑出在轨道右侧
- * （盖在内容上，不挤压主区）；指针离开 160ms 宽限后滑出；浮出中点按钮 = 正式展开。
- * 参数对齐 Cindy useSidebarPeek：open delay 120 / close grace 160 / 收场动画 200。
- * 已展开、窄屏（≤800px）、reduced-motion 都不启用。 */
-const PEEK_OPEN_DELAY_MS = 120;
-const PEEK_CLOSE_GRACE_MS = 160;
-const PEEK_CLOSE_ANIM_MS = 200;
-let peekTimer = 0;
-let peekCloseTimer = 0;
-
-function peekAvailable() {
-  return window.innerWidth > 800 && !noMotion.matches;
-}
-
-function openPeek() {
-  if (!peekAvailable()) return;
-  if (document.documentElement.dataset.peek === "on") return;
-  document.documentElement.dataset.peek = "on";
-  // 收起态 inner 是 inert 的（applySidebarA11y）：浮出期间解除，收场时交还
-  setInert(el.sidebarInner, false);
-}
-
-function closePeek(immediate = false) {
-  clearTimeout(peekCloseTimer);
-  peekCloseTimer = 0;
-  const root = document.documentElement;
-  if (!root.dataset.peek) return;
-  if (immediate || root.dataset.peek === "off") {
-    delete root.dataset.peek;
-    applySidebarA11y();
-    return;
-  }
-  root.dataset.peek = "off"; // CSS 原地滑出，动画完由定时器摘标记
-  applySidebarA11y();
-  peekCloseTimer = setTimeout(() => {
-    delete document.documentElement.dataset.peek;
-    peekCloseTimer = 0;
-  }, PEEK_CLOSE_ANIM_MS);
-}
-
-function schedulePeekClose() {
-  clearTimeout(peekCloseTimer);
-  peekCloseTimer = setTimeout(() => closePeek(true), PEEK_CLOSE_GRACE_MS);
-}
-
-(function wireSidebarPeek() {
-  const button = el.toggleSidebar;
-  const aside = el.sidebarInner?.closest(".sidebar");
-  if (!button || !aside) return;
-  button.addEventListener("mouseenter", () => {
-    if (document.documentElement.dataset.sidebar !== "closed" || !peekAvailable()) return;
-    clearTimeout(peekCloseTimer); // 正在收场又回来了：别收了
-    peekCloseTimer = 0;
-    clearTimeout(peekTimer);
-    peekTimer = setTimeout(openPeek, PEEK_OPEN_DELAY_MS);
-  });
-  button.addEventListener("mouseleave", () => {
-    clearTimeout(peekTimer);
-    peekTimer = 0;
-    if (document.documentElement.dataset.peek === "on") schedulePeekClose();
-  });
-  // 指针从按钮挪进面板（穿过轨道）不清场；整块侧栏都离开才开始宽限倒计时
-  aside.addEventListener("mouseenter", () => {
-    clearTimeout(peekCloseTimer);
-    peekCloseTimer = 0;
-  });
-  aside.addEventListener("mouseleave", () => {
-    if (document.documentElement.dataset.peek === "on") schedulePeekClose();
-  });
-  // 浮出中点了面板里的东西：用完就收（想固定展开走按钮，那是 pin）
-  aside.addEventListener("click", () => {
-    if (document.documentElement.dataset.peek === "on") closePeek(true);
-  });
-  window.addEventListener("resize", () => {
-    if (!peekAvailable()) closePeek(true);
-  });
-})();
+/* 侧栏悬停浮出（peek）2026-11-08 做过、当天退役（用户拍板"感觉很难受"）：
+ * 鼠标扫过左上角就弹一大块面板压内容，且"悬停预览/点击固定"两套逻辑叠着，
+ * 点展开按钮反而显得没用。回到「点按钮展开/收起」的单一形态，代码不保留。 */
 
 /* 顶部功能菜单：设置走独立路由（#/settings），不是弹层 */
 function setMenuOpen(open) {
@@ -568,7 +492,6 @@ function applyRoute() {
   closeMenu();
   closeProjectMenu();
   hideHoverTip();
-  closePeek(true);
   const route = currentRoute();
   // 设置页是独立整页：侧栏不占位，侧栏开关只在设置页之外出现；
   // 任务中心保留侧栏（入口就在侧栏底部，也能顺手回对话）。

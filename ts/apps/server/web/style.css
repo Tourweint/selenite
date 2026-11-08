@@ -397,39 +397,9 @@ html[data-sidebar="closed"] .side-rail {
   transition: opacity 200ms cubic-bezier(0, 0, .2, 1) 120ms;
 }
 
-/* ── 侧栏悬停浮出（2026-11-08，抄 Cindy peek）──────────────
-   收起态下悬停顶栏的收起/展开钮：面板以 fixed 浮层出现在轨道右侧（盖在内容上，
-   不挤压主区）。.sidebar 平时 z-index:0、被 .main(z1) 压住——浮出期间整体抬到 30。
-   fixed 的包含块是视口（.sidebar 没有 transform），不会被 overflow:hidden 裁掉；
-   data-peek 由 JS 管理：on=滑入，off=原地滑出（160ms 后摘标记）。 */
-html[data-peek] .sidebar { z-index: 30; }
-html[data-peek="on"] .sidebar-inner,
-html[data-peek="off"] .sidebar-inner {
-  position: fixed;
-  left: var(--rail);
-  top: var(--titlebar-h);
-  bottom: 0;
-  width: var(--sidebar);
-  z-index: 45;
-  background: var(--backdrop);
-  border-right: 1px solid var(--divider);
-  box-shadow: var(--shadow-menu);
-}
-html[data-peek="on"] .sidebar-inner {
-  opacity: 1;
-  pointer-events: auto;
-  animation: sidebarPeekIn 200ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-html[data-peek="off"] .sidebar-inner {
-  opacity: 0;
-  pointer-events: none;
-  transform: translateX(-16px);
-  transition: transform 160ms ease, opacity 160ms ease;
-}
-@keyframes sidebarPeekIn {
-  from { opacity: 0; transform: translateX(-16px); }
-  to { opacity: 1; transform: none; }
-}
+/* 侧栏悬停浮出（peek）2026-11-08 做过、当天退役（用户拍板）：扫过左上角就弹面板压内容，
+   且"悬停预览/点击固定"两套逻辑叠着难受。回到点按钮展开/收起的单一形态。 */
+
 /* 40×40 圆钮 / 22px 图标：与展开态导航行同轴，图标不再 15/18px 混用 */
 .rail-btn {
   flex: none;
@@ -1607,7 +1577,7 @@ html[data-acts="0"] .wp { display: none !important; }
 .approval.resolved { opacity: .72; }
 
 /* ── 审批浮窗（2026-11-08）：右下角常驻，人在别的会话/页面也弹 ──
-   压过抽屉与 peek（z40/45），低于模态（z60）；宽度 320 与模型菜单同档。 */
+   压过侧栏与抽屉（z0/40），低于模态（z60）；宽度 320 与模型菜单同档。 */
 #approval-popups {
   position: fixed;
   right: 16px;
