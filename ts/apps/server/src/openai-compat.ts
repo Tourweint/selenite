@@ -293,7 +293,7 @@ function levelFromHeader(header: string | undefined): ThinkingLevel | null {
  * `JEV_ROUTE=gate` 现只做**思考档判定**（`decideMode`，新会话首条消息前）：
  * `deep_think` → `high`；`reply_direct` 且置信 ≥ 0.6 → `off`；其余 / 低置信 → 保守 `high`；
  * 超时（`JEV_TIMEOUT_MS`，默认 1200）判不出来 → 直接 `off`。
- * **真改路由（快 / 深双模型切模型）未实现，已登记《2026-11-07-扫尾计划》批 7（A18）。**
+ * **真改路由（快 / 深双模型切模型）用户拍板作废（2026-11-08，批 9 计划）：默认思考关 + 首次工具调用自动升思考（AGENT_THINK_ON_TOOL）已确定性覆盖，决策模型无必要。**
  *
  * gate 下 `observeRoute` 直接 return 是**有意行为**：gate 已在建会话时判过一次，
  * 绝不重复付这次延迟；并不是"按 advisory 处理"。
