@@ -63,10 +63,26 @@ function loadPolicy(): PolicyState {
 	}
 }
 
+/** 审批形态：`async`（缺省，等待态落库、答复触发续跑）/ `blocking`（旧 120s 阻塞，回滚用） */
+export type ApprovalMode = "async" | "blocking";
+
+/**
+ * 当前审批形态（2026-11-08 扫尾批 8c）。
+ *
+ * 只认 env、**不落 policy.json**：这是部署形态，不是用户在界面上的档位。
+ * 缺省 async = 新形态；`AGENT_APPROVAL_MODE=blocking` 一行回滚到旧的 120s 阻塞等待
+ * （旧代码路径整段保留，见 `agent/lifecycle.ts` 的 beforeTool）。
+ */
+export function approvalMode(): ApprovalMode {
+	return (process.env.AGENT_APPROVAL_MODE ?? "").trim().toLowerCase() === "blocking"
+		? "blocking"
+		: "async";
+}
+
 export let policy: PolicyState = loadPolicy();
 
-export function getPolicy(): PolicyState & { label: string } {
-	return { ...policy, label: ACCESS_LABEL[policy.access] };
+export function getPolicy(): PolicyState & { label: string; approvalMode: ApprovalMode } {
+	return { ...policy, label: ACCESS_LABEL[policy.access], approvalMode: approvalMode() };
 }
 
 export function setPolicy(next: {

@@ -1,5 +1,11 @@
 import type { Hono } from "hono";
 import { chatTitles, externalChatIds, openChat } from "./agent.ts";
+import { approvalMode } from "./agent/policy.ts";
+import { continueConversation } from "./agent/session.ts";
+import {
+	approvalApprovedInstruction,
+	approvalRejectedInstruction,
+} from "./agent/turn-gate.ts";
 import { approvalStore } from "./approvals.ts";
 import { readLlmConfig } from "./provider.ts";
 
@@ -81,8 +87,25 @@ export function mountApprovalApi(app: Hono): void {
 		}
 
 		const callId = c.req.param("callId").trim();
+		// 先记"这次答复之前是不是 pending"：幂等重发不能重复开一轮续跑
+		const wasPending = approvalStore().recordOf(callId)?.status === "pending";
 		const record = approvalStore().decide(callId, decision, body?.remember === true);
 		if (!record) return c.json({ ok: false, error: "unknown_approval" }, 404);
+
+		// 2026-11-08 扫尾批 8c：async 形态下答复即触发续跑——
+		// 批准 → 让模型重发那个调用（闸门按 one-shot 放行清单核销）；
+		// 拒绝 → 让模型继续别的工作。blocking 形态靠钩子里 waitForApproval 自己醒，不能重复开轮。
+		if (
+			wasPending &&
+			approvalMode() === "async" &&
+			(record.status === "approved" || record.status === "rejected")
+		) {
+			const text =
+				record.status === "approved"
+					? approvalApprovedInstruction(record.tool, record.args)
+					: approvalRejectedInstruction(record.tool);
+			void continueConversation(record.conversationId, text);
+		}
 
 		// 已决的再发一次也回 200 + 原状态（幂等：不二次结算、不二次唤醒钩子）
 		return c.json({ ok: true, status: record.status });

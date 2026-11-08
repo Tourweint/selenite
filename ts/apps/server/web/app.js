@@ -551,8 +551,9 @@ const state = {
   stick: true,
   // 待发图片（2026-11-08 扫尾批 4a）：{mimeType, data(裸 base64)}，只存内存，切换会话/发出即清
   pendingImages: [],
-  // 能力投影（GET /agent/policy 的 attachments / editResend）：关着时入口不渲染
-  capabilities: { attachments: true, editResend: true },
+  // 能力投影（GET /agent/policy 的 attachments / editResend / approvalMode）：
+  // 关着时入口不渲染；审批形态决定审批卡显示倒计时还是「等待处理」
+  capabilities: { attachments: true, editResend: true, approvalMode: "async" },
   chats: [],
   removed: 0,
   query: "",
@@ -4524,17 +4525,26 @@ function renderApprovalCard(event) {
   const meta = document.createElement("div");
   meta.className = "approval-meta";
   const remain = document.createElement("span");
-  const deadline = Date.parse(event.deadlineAt || "");
-  const tick = () => {
-    if (!Number.isFinite(deadline)) {
-      remain.textContent = "";
-      return;
-    }
-    const left = Math.max(0, Math.round((deadline - Date.now()) / 1000));
-    remain.textContent = left > 0 ? `剩余 ${left} 秒，超时按拒绝处理` : "已超时";
-  };
-  tick();
-  const timer = setInterval(tick, 1000);
+  // 2026-11-08 扫尾批 8c：审批形态决定这一行。
+  // blocking（AGENT_APPROVAL_MODE=blocking）= 旧形态，保留倒计时；
+  // async（缺省）= 等待态落库，没有截止时间，只写「等待处理」。
+  const blocking = state.capabilities.approvalMode === "blocking";
+  let timer = null;
+  if (blocking) {
+    const deadline = Date.parse(event.deadlineAt || "");
+    const tick = () => {
+      if (!Number.isFinite(deadline)) {
+        remain.textContent = "";
+        return;
+      }
+      const left = Math.max(0, Math.round((deadline - Date.now()) / 1000));
+      remain.textContent = left > 0 ? `剩余 ${left} 秒，超时按拒绝处理` : "已超时";
+    };
+    tick();
+    timer = setInterval(tick, 1000);
+  } else {
+    remain.textContent = "等待处理";
+  }
   meta.append(remain);
   card.append(meta);
 
@@ -8601,6 +8611,9 @@ el.composer.addEventListener("drop", (event) => {
  * 能力投影（2026-11-08 4a）：GET /agent/policy 顺带带回 `attachments` / `editResend`。
  * 关着就把入口**收掉**（而不是点了再报错）；拉不到按默认开处理，不因为一次网络抖动
  * 把功能藏起来。
+ *
+ * 2026-11-08 扫尾批 8c：顺带读审批形态（`approvalMode`）。`blocking` = 旧的 120s 阻塞，
+ * 卡片保留倒计时；缺省 `async` = 等待态落库，卡片显示「等待处理」、不显示倒计时。
  */
 async function loadCapabilities() {
   try {
@@ -8609,6 +8622,7 @@ async function loadCapabilities() {
     const data = await response.json();
     state.capabilities.attachments = data.attachments !== false;
     state.capabilities.editResend = data.editResend !== false;
+    state.capabilities.approvalMode = data.approvalMode === "blocking" ? "blocking" : "async";
   } catch {
     return;
   }
@@ -10559,12 +10573,19 @@ async function loadPendingApprovalList() {
 
     box.innerHTML = approvals
       .map((item, index) => {
+        // 2026-11-08 扫尾批 8c：blocking 形态才有倒计时；async 形态只写「等待处理」
         const deadline = Date.parse(item.deadlineAt || "");
         const left = Number.isFinite(deadline)
           ? Math.max(0, Math.round((deadline - Date.now()) / 1000))
           : null;
         const remain =
-          left === null ? "" : left > 0 ? `剩余 ${left} 秒，超时按拒绝处理` : "已超时";
+          state.capabilities.approvalMode === "blocking"
+            ? left === null
+              ? ""
+              : left > 0
+                ? `剩余 ${left} 秒，超时按拒绝处理`
+                : "已超时"
+            : "等待处理";
         // 来源（2026-11-08 批三）：能反查到群/执事就写清楚，否则退回 chatTitle
         const source = approvalSourceLabel(item.conversationId) || item.chatTitle || "未命名会话";
         return `${index ? '<div class="divider"></div>' : ""}

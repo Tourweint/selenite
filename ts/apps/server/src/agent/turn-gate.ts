@@ -101,3 +101,46 @@ export const aborting = new Set<string>();
 export const LOOP_GUARD_BLOCK_MESSAGE =
 	"已连续重复完全相同的工具调用且没有任何进展，工具被暂停。" +
 	"请直接用已经拿到的信息回答；确实缺信息就照实说明，不要继续重复同一个调用。";
+
+// ── 审批话术（2026-11-08 扫尾批 8c）────────────────────────
+
+/**
+ * 新形态下被挂起的工具调用回给模型的答复（本轮不阻塞）。
+ *
+ * 三件事必须说清：为什么没执行 / 别原样重试（faux 与部分真实模型会立刻重试，
+ * 重试只会再挂一条同样的待批）/ 现在能做什么。批准后的续跑由服务端 followUp 触发，
+ * 模型不用自己等。
+ */
+export const APPROVAL_WAITING_MESSAGE =
+	"这个操作在等用户批准，本轮没有执行。不要原样重试（重试也只会继续等）；" +
+	"你可以先把不需要批准的部分做完，或者直接告诉用户在等批准。批准后我会继续。";
+
+/** 参数摘要进提示词前压成一行、限长（审批记录里的是 1200 字符的 JSON） */
+function inlineArgs(args: string): string {
+	const one = args.replace(/\s+/g, " ").trim();
+	if (!one) return "";
+	return one.length > 300 ? `${one.slice(0, 300)}…` : one;
+}
+
+/**
+ * 批准后自动提交给会话的 followUp 指令（人类可读；它会落成一条 user 消息）。
+ *
+ * 明确要求"原样重发"：闸门按 tool + 参数指纹核销，改参数就不会命中 —— 与其让模型
+ * 猜为什么又被拦，不如直说。
+ */
+export function approvalApprovedInstruction(tool: string, args: string): string {
+	const summary = inlineArgs(args);
+	return (
+		`用户已批准 \`${tool}\`${summary ? `：${summary}` : ""}——` +
+		"立即重新发起同一个工具调用（工具与参数保持完全一致），完成后继续原本的工作。" +
+		"不要换成别的工具或别的参数。"
+	);
+}
+
+/** 拒绝后自动提交的 followUp 指令：别卡死，也别原样硬顶 */
+export function approvalRejectedInstruction(tool: string): string {
+	return (
+		`用户拒绝了 \`${tool}\`：这个调用不要执行，也不要原样重试。` +
+		"请继续其余工作，能做多少做多少；确实有必要换个做法，就提出新的调用（它仍会重新征求用户批准）。"
+	);
+}

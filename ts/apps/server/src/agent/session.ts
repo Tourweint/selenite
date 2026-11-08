@@ -934,6 +934,36 @@ export async function stopChat(chat: ResolvedChat): Promise<void> {
 	await chat.conversation.abort(CTX);
 }
 
+/**
+ * 服务端主动给会话补一句话并**驱动它跑完**（2026-11-08 扫尾批 8c）。
+ *
+ * 审批答复后的续跑走这一条：把"已批准 / 已拒绝"作为一条用户消息提交进去，
+ * 模型下一轮就会重发同一个调用（或改做别的），从而不需要人再说一句。
+ *
+ * 与 `sayInChat` 的区别：那是"以助手身份写一句、不调模型"；这里是一轮真对话。
+ * 没有客户端看这条流，事件全部丢弃；会话正忙时内核按 followUp 排队到下一个边界。
+ *
+ * 已知边界：这条续跑不挂 `onSettled`（记忆抽取在 index.ts 的聊天链路里），
+ * 所以这一轮的对话不会进记忆。审批指令本身不是用户说的内容，代价可以接受。
+ */
+export async function continueConversation(conversationId: number, text: string): Promise<void> {
+	try {
+		const harness = await getHarness();
+		const conversation = await harness.conversation(conversationId as never, CTX);
+		if (!conversation) {
+			console.warn(`[agent] 会话 ${conversationId} 已不存在，跳过审批后的续跑`);
+			return;
+		}
+		for await (const _event of chatStream({ conversation, text })) {
+			// 没有客户端读这条流：事件只为驱动主链路，丢弃即可
+		}
+	} catch (error) {
+		console.warn(
+			`[agent] 会话 ${conversationId} 审批后续跑失败: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+}
+
 export interface TranscriptMessage {
 	role: "user" | "assistant";
 	text: string;

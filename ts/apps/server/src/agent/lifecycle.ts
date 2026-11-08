@@ -61,7 +61,8 @@ import {
 	scopeOf,
 	skillStore,
 } from "./assist.ts";
-import { BASH_TIMEOUT_S, policy, readOnlyBlockReason } from "./policy.ts";
+import { approvalArgsHash } from "./approval-key.ts";
+import { BASH_TIMEOUT_S, approvalMode, policy, readOnlyBlockReason } from "./policy.ts";
 import {
 	CTX,
 	DB_PATH,
@@ -76,6 +77,7 @@ import {
 	toolOutput,
 } from "./shared.ts";
 import {
+	APPROVAL_WAITING_MESSAGE,
 	HARD_STOP_GRACE,
 	LOOP_GUARD_BLOCK_MESSAGE,
 	MAX_TURNS,
@@ -379,43 +381,75 @@ async function openHarness(): Promise<Harness> {
 							const a = call.arguments as { timeout?: number };
 							if (a.timeout === undefined) injected = { ...a, timeout: BASH_TIMEOUT_S };
 						}
-						// 审批（2026-11-04 批次二）：写类工具在真正动手前挂起等人答复。
+						// 审批（2026-11-04 批次二；2026-11-08 扫尾批 8c 默认为「等待态落库」形态）：
+						//   - 先查一次性放行清单：人批准过的「同工具 + 同参数」重发 → 核销并放行；
+						//     换参数就不命中，重新走审批（批了 A 不能执行 B）。
+						//   - 没命中 → 落 pending：blocking 形态挂起等答复（旧行为），
+						//     async 形态回拒绝性答复、本轮照常收尾，答复后由服务端 followUp 续跑。
 						// 本会话记住过的工具直接放行（进程内，重启失效）。
-						// 自主轮禁"记住"绕过（批次C C2）：例行轮的每次写/派都必须真人答复
+						// 自主轮禁"记住"绕过（批次C C2）：例行轮的每次写/派都必须真人答复。
 						if (verdict.kind === "ask" && (autonomous || !approvalStore().isRemembered(api.conversationId, call.name))) {
+							const mode = approvalMode();
 							const timeoutS = approvalTimeoutSeconds(process.env);
-							const pending = approvalStore().create({
-								callId: call.id,
-								conversationId: api.conversationId,
-								tool: call.name,
-								// 与 tool 事件同一口径截断；这份摘要会落盘（有意），永不进日志
-								args: toolArgs(call.arguments).args ?? "",
-								timeoutMs: timeoutS * 1000,
-								...(autonomous ? { origin: "autonomous" as const } : {}),
-							});
-							// 借派活通道发给对话流（见 delegation.ts 模块头注释）
-							emitDelegation(api.conversationId, {
-								type: "approval",
-								callId: pending.record.callId,
-								tool: pending.record.tool,
-								args: pending.record.args,
-								deadlineAt: pending.record.deadlineAt,
-								...(autonomous ? { origin: "autonomous" as const } : {}),
-							});
-							const status = await waitForApproval(pending, timeoutS, context.abortSignal);
-							if (status !== "approved") {
-								return { block: denialReason(status, call.name, timeoutS) };
+							// 指纹拿**原始 arguments** 算（不能拿截断后的 args 摘要，否则长参数永远对不上）
+							const argsHash = approvalArgsHash(call.arguments);
+							const openPending = () => {
+								const pending = approvalStore().create({
+									callId: call.id,
+									conversationId: api.conversationId,
+									tool: call.name,
+									// 与 tool 事件同一口径截断；这份摘要会落盘（有意），永不进日志
+									args: toolArgs(call.arguments).args ?? "",
+									argsHash,
+									// async 形态下 deadlineAt 只作展示（旧客户端倒计时），不据此结算
+									timeoutMs: timeoutS * 1000,
+									...(autonomous ? { origin: "autonomous" as const } : {}),
+								});
+								// 借派活通道发给对话流（见 delegation.ts 模块头注释）
+								emitDelegation(api.conversationId, {
+									type: "approval",
+									callId: pending.record.callId,
+									tool: pending.record.tool,
+									args: pending.record.args,
+									deadlineAt: pending.record.deadlineAt,
+									...(autonomous ? { origin: "autonomous" as const } : {}),
+								});
+								return pending;
+							};
+							if (mode === "async" && approvalStore().consumeGrant(api.conversationId, call.name, argsHash)) {
+								// 命中：批准的调用，复判等待期里可能变了的策略与边界（与旧路径同一口径）
+								const recheck = readOnlyBlockReason(call.name);
+								if (recheck) return { block: recheck };
+								const recheckPath = pathGuardBlockReason({
+									tool: call.name,
+									args: call.arguments,
+									workspaceRoot: workspaceRootReal(),
+									cwd: sessionCwd(),
+								});
+								if (recheckPath) return { block: recheckPath };
+							} else if (mode === "blocking") {
+								const status = await waitForApproval(openPending(), timeoutS, context.abortSignal);
+								if (status !== "approved") {
+									return { block: denialReason(status, call.name, timeoutS) };
+								}
+								// 批准后复判：等待期间可能被切到只读 / 拉黑 / 换工作区
+								const recheck = readOnlyBlockReason(call.name);
+								if (recheck) return { block: recheck };
+								const recheckPath = pathGuardBlockReason({
+									tool: call.name,
+									args: call.arguments,
+									workspaceRoot: workspaceRootReal(),
+									cwd: sessionCwd(),
+								});
+								if (recheckPath) return { block: recheckPath };
+							} else {
+								// async：同一件事只挂一张卡（模型重试同参数时不再重复弹），
+								// 然后回拒绝性答复让本轮收尾——零挂起、零等待。
+								if (!approvalStore().findPending(api.conversationId, call.name, argsHash)) {
+									openPending();
+								}
+								return { block: APPROVAL_WAITING_MESSAGE };
 							}
-							// 批准后复判：等待期间可能被切到只读 / 拉黑 / 换工作区
-							const recheck = readOnlyBlockReason(call.name);
-							if (recheck) return { block: recheck };
-							const recheckPath = pathGuardBlockReason({
-								tool: call.name,
-								args: call.arguments,
-								workspaceRoot: workspaceRootReal(),
-								cwd: sessionCwd(),
-							});
-							if (recheckPath) return { block: recheckPath };
 						}
 						// 告诉客户端"现在开始动手了"（工具可能跑几十秒，界面上不能一直空白）
 						emitPhase(api.conversationId, "working");
@@ -550,9 +584,10 @@ async function openHarness(): Promise<Harness> {
 		CTX,
 	);
 
-	// 审批状态先加载：遗留 pending 会在这里按 timeout 结算（fail-closed）。
-	// 必须早于 resume()——恢复重走 beforeTool 时会生成新的审批。
-	approvalStore().load();
+	// 审批状态先加载。2026-11-08 扫尾批 8c 起缺省**保留**遗留 pending（等待态落库，
+	// 人随时回来批）；只有 blocking 回滚形态才把遗留 pending 置 timeout（fail-closed）。
+	// 必须早于 resume()——恢复重走 beforeTool 时会复用 callId 生成/覆盖审批记录。
+	approvalStore().load({ expireLeftover: approvalMode() === "blocking" });
 
 	// 上次进程没跑完的活（包括睡着的提醒）接着跑
 	harness.resume();

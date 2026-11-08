@@ -436,13 +436,15 @@ app.post("/api/v1/agent/policy", async (c) => {
     ...(Array.isArray(body?.blocked) ? { blocked: body!.blocked! } : {}),
     ...(typeof body?.confirmWrites === "boolean" ? { confirmWrites: body.confirmWrites } : {}),
   });
-  // 与改动前一致：POST 回的是写后的策略本身（不含 label），额外带上两个能力开关
+  // 与改动前一致：POST 回的是写后的策略本身（不含 label），额外带上只读能力投影
   const next = getPolicy();
   return c.json({
     ok: true,
     access: next.access,
     blocked: next.blocked,
     confirmWrites: next.confirmWrites,
+    // 2026-11-08 扫尾批 8c：审批形态是 env（不可写），这里只回显，形状与 GET 对齐
+    approvalMode: next.approvalMode,
     attachments: attachmentsEnabled(),
     editResend: editResendEnabled(),
   });
