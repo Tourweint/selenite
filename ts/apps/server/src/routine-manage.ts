@@ -42,7 +42,15 @@ export function validateTriggers(triggers: unknown): string | null {
 		return "triggers 必须是非空数组";
 	}
 	for (const trigger of triggers) {
-		const t = trigger as { type?: string; expr?: string; seconds?: number; at?: string; kind?: string };
+		const t = trigger as {
+			type?: string;
+			expr?: string;
+			seconds?: number;
+			at?: string;
+			kind?: string;
+			if?: { note?: unknown } | null;
+			ends?: { at?: unknown; after?: unknown } | null;
+		};
 		if (t.type === "cron") {
 			if (typeof t.expr !== "string" || t.expr.trim().split(/\s+/).length !== 5) {
 				return "cron 触发器需要 5 段表达式（分 时 日 月 周）";
@@ -61,6 +69,28 @@ export function validateTriggers(triggers: unknown): string | null {
 			}
 		} else {
 			return "触发器 type 只能是 cron / interval / once / event";
+		}
+		// 前置条件（批 21 §三）：形状不对就拒，别让它落库后永远跳过或永远不判。
+		if (t.if !== undefined && t.if !== null) {
+			const note = t.if.note;
+			if (typeof note !== "string" || !note.trim() || note.trim().length > UNTIL_LIMIT) {
+				return `if.note 必填且不超过 ${UNTIL_LIMIT} 字`;
+			}
+		}
+		// 结束条件（批 21 §三）：至少给一个；非法值拒掉。
+		if (t.ends !== undefined && t.ends !== null) {
+			const at = t.ends.at;
+			const after = t.ends.after;
+			if (at === undefined && after === undefined) return "ends 至少要给 at 或 after";
+			if (at !== undefined && (typeof at !== "string" || Number.isNaN(Date.parse(at)))) {
+				return "ends.at 需要合法的 ISO 时间";
+			}
+			if (
+				after !== undefined &&
+				(typeof after !== "number" || !Number.isInteger(after) || after < 1 || after > MAX_RUNS_LIMIT)
+			) {
+				return `ends.after 必须是 1..${MAX_RUNS_LIMIT} 的整数`;
+			}
 		}
 	}
 	return null;

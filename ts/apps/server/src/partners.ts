@@ -179,23 +179,39 @@ export interface ModelChainItemLike {
 	thinkingLevel?: string;
 }
 
+/** 每个触发器都可能带的前置 / 结束条件（2026-11-10 批 21 §三）。 */
+export interface RoutineTriggerGates {
+	/**
+	 * 前置条件（`ROUTINE_CONDITIONAL` 开时生效）：触发前先问模型"这句成立吗"，
+	 * 不成立就跳过本轮（记一条 skipped run，不消耗 maxRuns）。判定见 routine-gate.ts。
+	 */
+	if?: { note: string };
+	/**
+	 * 结束条件：`at` = 到这个时间点后不再触发；`after` = 跑满 N 次后停
+	 * （`maxRuns` 的别名，两者同时存在取更小的）。判定见 routine-conditions.ts。
+	 */
+	ends?: { at?: string; after?: number };
+}
+
 /** 例行任务触发器（B3）。cron 为 5 段标准式；event 的 match 是字段等值过滤。 */
-export type RoutineTrigger =
-	| { type: "cron"; expr: string }
-	| { type: "interval"; seconds: number }
-	| { type: "once"; at: string }
-	| {
-			type: "event";
-			kind: "delegation" | "tool" | "phase";
-			match?: Record<string, string>;
-			/**
-			 * 三件门（2026-11-10 批 15 §一，`ROUTINE_TRIGGER_GATES` 默认开）：
-			 * 只对 event 触发器生效，三个可选字段可组合。判定在 routine-conditions.ts。
-			 */
-			baseline?: { key: string; delta: number };
-			edge?: true;
-			cooldownSec?: number;
-	  };
+export type RoutineTrigger = RoutineTriggerGates &
+	(
+		| { type: "cron"; expr: string }
+		| { type: "interval"; seconds: number }
+		| { type: "once"; at: string }
+		| {
+				type: "event";
+				kind: "delegation" | "tool" | "phase";
+				match?: Record<string, string>;
+				/**
+				 * 三件门（2026-11-10 批 15 §一，`ROUTINE_TRIGGER_GATES` 默认开）：
+				 * 只对 event 触发器生效，三个可选字段可组合。判定在 routine-conditions.ts。
+				 */
+				baseline?: { key: string; delta: number };
+				edge?: true;
+				cooldownSec?: number;
+		  }
+	);
 
 export interface RoutineDef {
 	id: string;

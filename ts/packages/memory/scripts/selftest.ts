@@ -21,6 +21,8 @@ import {
 	REDACTED,
 	SqliteMemoryStore,
 	decayedImportance,
+	idCardValid,
+	luhnValid,
 	memoryRedactEnabled,
 	normalizeContent,
 	consolidateScope,
@@ -1000,6 +1002,42 @@ try {
 	);
 	assert(redactSecrets("密码：abc12345，别告诉别人").includes("密码："), "字段名应保留（读得懂）");
 
+	// ── 校验位规则（2026-11-10 批 21 §五）──────────────────
+	// 银行卡：16 位连续数字 + Luhn（≥8 个正例，含首尾边界与大小写/标点）
+	const cardPositives: Array<[string, string]> = [
+		["Visa 测试卡", "卡号 4111111111111111，请记一下"],
+		["Mastercard 测试卡", "5500005555555559"],
+		["普通 Luhn 通过的 16 位", "账号是 1234567890123452 谢谢"],
+		["文本开头", "4539578763621486 是我的卡"],
+		["文本结尾", "备用卡 6011000990139424"],
+		["句中标点包围", "付款用（5500005555555559）。"],
+		["身份证 18 位（末位数字）", "身份证 440524188001010014"],
+		["身份证 18 位（末位 X）", "身份证 11010519491231002X"],
+		["身份证 18 位（小写 x）", "身份证号 11010519491231002x。"],
+		["卡号与身份证同段", "4111111111111111 / 310101198505050056"],
+	];
+	for (const [label, text] of cardPositives) {
+		assert(redactSecrets(text).includes(REDACTED), `${label} 应被打码：${redactSecrets(text)}`);
+	}
+	assert(
+		!redactSecrets("卡号 4111111111111111，请记一下").includes("4111111111111111"),
+		"银行卡号不应残留",
+	);
+	assert(
+		!redactSecrets("身份证 11010519491231002X").includes("11010519491231002X"),
+		"身份证号不应残留",
+	);
+	// 校验函数本身：正例 / 边界
+	assert(luhnValid("4111111111111111"), "Visa 测试卡应通过 Luhn");
+	assert(luhnValid("5500005555555559"), "Mastercard 测试卡应通过 Luhn");
+	assert(luhnValid("0000000000000000") === false, "全 0 虽然数学上过 Luhn，但不是卡号（不当敏感物）");
+	assert(!luhnValid("4111111111111112"), "改一位应不通过");
+	assert(!luhnValid("411111111111111"), "15 位不是银行卡口径");
+	assert(idCardValid("11010519491231002X"), "身份证校验位（X）");
+	assert(idCardValid("11010519491231002x"), "小写 x 同样是合法校验位");
+	assert(idCardValid("510104199212120031"), "身份证校验位（数字）");
+	assert(!idCardValid("110105194912310021"), "校验位错一位应拒绝");
+
 	const negatives = [
 		"我的手机号是 13800138000，随时联系",
 		"我的生日是 1990-01-01",
@@ -1007,6 +1045,15 @@ try {
 		"豆豆是我养的猫，今年三岁",
 		"今天整理了三箱旧照片，按年份分好了",
 		"这周打算每天走八千步",
+		// 校验位规则的"故意放行"（§5.2 / §5.3 反例）
+		"生日 19900101 那天拍的",
+		"邮编 200030，寄到这个地址",
+		"流水号 2026010112304567（16 位，不过 Luhn）",
+		"订单 12345678901234567（17 位）",
+		"订单 1234567890123456789（19 位）",
+		"身份证 110105194912310021（校验位错）",
+		"占位数字 0000000000000000 不是卡号",
+		"旧卡号 30569309025904（14 位）",
 	];
 	for (const text of negatives) {
 		assert(redactSecrets(text) === text, `不该误伤：${text} → ${redactSecrets(text)}`);
@@ -1040,7 +1087,9 @@ try {
 	assert(memoryRedactEnabled({ MEMORY_REDACT: "0" }) === false, "MEMORY_REDACT=0 关");
 	assert(memoryRedactEnabled({}) === true, "缺省开");
 
-	console.log(`✓ 凭据打码：${positives.length} 个正例 / ${negatives.length} 个反例 / 写入收口 / 开关旁路`);
+	console.log(
+		`✓ 凭据打码：${positives.length + cardPositives.length} 个正例 / ${negatives.length} 个反例 / 写入收口 / 开关旁路`,
+	);
 }
 
 // ── 17. intention 前瞻意图（2026-11-09 T4 §3）────────────

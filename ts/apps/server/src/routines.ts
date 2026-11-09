@@ -13,18 +13,24 @@ import {
 import { ensurePartnerSession, runPartnerTurn } from "./partner-runtime.ts";
 import {
 	buildRoutinePrompt,
+	effectiveMaxRuns,
 	emptyRoutineWatchFile,
 	evaluateTriggerGate,
 	extractRoutineDone,
 	planRoutineWatch,
 	releaseRoutineWatch,
 	routineConditionalEnabled,
+	routineConditionNotes,
 	routineRunVerdict,
 	routineTriggerGatesEnabled,
+	shouldAdvanceCursor,
+	triggerEndedAt,
 	type RoutineOutcome,
 	type RoutineWatchFile,
 	type TriggerGateState,
 } from "./routine-conditions.ts";
+import { evaluateRoutineCondition } from "./routine-gate.ts";
+import { routineQuietEnabled } from "./routine-quiet.ts";
 import { runSourceEnabled, type RunSource } from "./run-source.ts";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 
@@ -119,10 +125,23 @@ interface RoutineState {
 	gates: Record<string, TriggerGateState>;
 	/** 自建规则（routine_manage 建的）标记：它们的首轮 runSource 记 routine_self */
 	selfCreated: Record<string, true>;
+	/**
+	 * 每规则的"上次看到哪里"（2026-11-10 批 21 §六）：上一轮**产出被保留**的 endedAt。
+	 * 没有 = 还没成功保留过任何一轮（下次从头看）。quiet / skipped / failed 不推进。
+	 */
+	cursors: Record<string, string>;
 }
 
 function emptyState(): RoutineState {
-	return { version: 1, receipts: {}, runs: [], running: {}, gates: {}, selfCreated: {} };
+	return {
+		version: 1,
+		receipts: {},
+		runs: [],
+		running: {},
+		gates: {},
+		selfCreated: {},
+		cursors: {},
+	};
 }
 
 // ── durable 任务：alarm-only ─────────────────────────────
@@ -212,6 +231,8 @@ class RoutineEngine {
 					parsed.selfCreated && typeof parsed.selfCreated === "object"
 						? parsed.selfCreated
 						: {},
+				cursors:
+					parsed.cursors && typeof parsed.cursors === "object" ? parsed.cursors : {},
 			};
 		} catch {
 			this.state = emptyState();
@@ -372,6 +393,30 @@ class RoutineEngine {
 	}
 
 	/**
+	 * 前置条件没成立 / 判不出来：记一条 skipped run（批 21 §三.2）。
+	 * 只记枚举口径，条件原文不进日志。`skipReason` 让 `completedRunCount` 认出
+	 * "这不是一次真跑"，不消耗 maxRuns / ends.after 的额度。
+	 */
+	private recordConditionSkip(routine: RoutineDef, trigger: string, unavailable: boolean): void {
+		const now = new Date().toISOString();
+		this.recordRun({
+			id: randomUUID(),
+			routineId: routine.id,
+			partnerId: routine.partnerId,
+			status: "skipped",
+			trigger,
+			startedAt: now,
+			endedAt: now,
+			summary: unavailable ? "前置条件判定不可用，按不成立跳过" : "前置条件不成立，跳过本轮",
+			outcome: "skipped",
+			skipReason: "condition_not_met",
+		});
+		console.log(
+			`[routine] 前置条件${unavailable ? "判定不可用" : "不成立"}，跳过本轮（规则 ${routine.id.slice(0, 8)}）`,
+		);
+	}
+
+	/**
 	 * 上一轮的结构化结局（2026-11-10 批 13 §四.2）：只认有 outcome 的终态记录，
 	 * 跳过 running 与老记录（老记录没有 outcome，不能拿它冒充"上一次"）。
 	 */
@@ -386,13 +431,29 @@ class RoutineEngine {
 	}
 
 	/**
+	 * 上次看到哪里（批 21 §六）：上一轮产出被保留时的 endedAt。
+	 * 开关 `ROUTINE_QUIET` 关着时不读不写（回到"每轮都从头看"的旧形态）。
+	 */
+	private cursorOf(routineId: string): string | undefined {
+		if (!routineQuietEnabled()) return undefined;
+		const cursor = this.load().cursors[routineId];
+		return typeof cursor === "string" && cursor ? cursor : undefined;
+	}
+
+	/**
 	 * 已自动完成的次数（不含本轮与手动试跑）。按 run id 去重——历史记录里同一条 run
 	 * 可能因"开跑先落盘、收尾再落一次"出现两次，不能把 maxRuns 算翻倍。
+	 * 前置条件没成立而跳过的轮次（批 21 §三）不算"跑过一次"：它们没消耗执行。
 	 */
 	private completedRunCount(routineId: string): number {
 		const ids = new Set<string>();
 		for (const run of this.load().runs) {
-			if (run.routineId === routineId && run.status !== "running" && run.trigger !== "手动") {
+			if (
+				run.routineId === routineId &&
+				run.status !== "running" &&
+				run.trigger !== "手动" &&
+				run.skipReason !== "condition_not_met"
+			) {
 				ids.add(run.id);
 			}
 		}
@@ -466,6 +527,8 @@ class RoutineEngine {
 			if (!routine.enabled) continue;
 			for (const [triggerIndex, trigger] of routine.triggers.entries()) {
 				if (trigger.type !== "event" || trigger.kind !== kind) continue;
+				// 结束时间已过（批 21 §三）：这个触发器不再被事件唤醒。
+				if (routineConditionalEnabled() && triggerEndedAt(trigger)) continue;
 				const match = trigger.match ?? {};
 				const matched = Object.entries(match).every(
 					([key, value]) => (fields[key] ?? "") === value,
@@ -522,6 +585,8 @@ class RoutineEngine {
 	async nextFireFrom(routine: RoutineDef, from: Date = new Date()): Promise<Date | null> {
 		let best: Date | null = null;
 		for (const trigger of routine.triggers) {
+			// 结束时间已过（批 21 §三）：这个触发器不再排下一次。
+			if (routineConditionalEnabled() && triggerEndedAt(trigger, from.getTime())) continue;
 			let candidate: Date | null = null;
 			if (trigger.type === "cron") {
 				candidate = nextCronFire(trigger.expr, from);
@@ -601,13 +666,26 @@ class RoutineEngine {
 			return;
 		}
 
+		// 条件门控开关（2026-11-10 批 13 §四.3）：关着时下面所有新字段一律不参与。
+		const conditional = routineConditionalEnabled();
+
+		// 前置条件（2026-11-10 批 21 §三）：触发前问一次模型"成立吗"。
+		// 失败 / 解析失败一律当不成立（fail-closed）；不成立就记 skipped、不建 run、不占额度。
+		if (conditional) {
+			for (const note of routineConditionNotes(routine.triggers)) {
+				const verdict = await evaluateRoutineCondition({ note, prompt: routine.prompt });
+				if (verdict !== "met") {
+					this.recordConditionSkip(routine, trigger, verdict === "unavailable");
+					return;
+				}
+			}
+		}
+
 		// 看护单例（批 15 §四）：新的一轮开始前认领；旧看护只暂停不删。
 		this.claimWatch(routine);
 
 		const runId = randomUUID();
 		const startedAt = new Date().toISOString();
-		// 条件门控开关（2026-11-10 批 13 §四.3）：关着时下面所有新字段一律不参与。
-		const conditional = routineConditionalEnabled();
 		const completedBefore = this.completedRunCount(routine.id);
 		const runSource = this.takeRunSource(routine, source);
 		state.running[routine.id] = { runId, startedAt };
@@ -633,6 +711,7 @@ class RoutineEngine {
 				prompt: routine.prompt.slice(0, PROMPT_LIMIT),
 				lastOutcome: conditional ? this.lastOutcomeOf(routine.id) : undefined,
 				untilNote: conditional ? routine.until?.note : undefined,
+				cursorAt: conditional ? this.cursorOf(routine.id) : undefined,
 				conditional,
 			});
 			const result = await runPartnerTurn(routine.partnerId, prompt, {
@@ -654,13 +733,17 @@ class RoutineEngine {
 			const doneMarker = conditional
 				? extractRoutineDone(result.text ?? "")
 				: { text: result.text ?? "", done: false };
+			// ends.after 是 maxRuns 的别名（批 21 §三）：两者同时存在取更小的。
+			const maxRuns = conditional
+				? effectiveMaxRuns(routine.maxRuns, routine.triggers)
+				: routine.maxRuns;
 			const verdict = routineRunVerdict({
 				ok: result.ok,
 				quiet: result.quiet === true,
 				skippedToolCount: skipped.length,
 				untilMet: doneMarker.done,
 				conditional,
-				...(routine.maxRuns !== undefined ? { maxRuns: routine.maxRuns } : {}),
+				...(maxRuns !== undefined ? { maxRuns } : {}),
 				completedRunsBefore: completedBefore,
 			});
 			if (conditional) run.outcome = verdict.outcome;
@@ -678,6 +761,19 @@ class RoutineEngine {
 				console.log(`[routine] 本轮无更新（规则 ${routine.id.slice(0, 8)}），不写摘要`);
 			}
 			if (!result.ok) run.error = result.error;
+			// 游标（批 21 §六）：只有产出被保留才推进；quiet / skipped / failed 原地不动，
+			// 下一轮仍从同一处看（读失败已记 failed，不会被当成"无新内容"）。
+			if (
+				run.endedAt &&
+				shouldAdvanceCursor({
+					ok: result.ok,
+					quiet: result.quiet === true,
+					skippedToolCount: skipped.length,
+				}) &&
+				routineQuietEnabled()
+			) {
+				finished.cursors[routine.id] = run.endedAt;
+			}
 			finished.runs.push(run);
 			if (finished.runs.length > RUN_HISTORY_LIMIT) {
 				finished.runs.splice(0, finished.runs.length - RUN_HISTORY_LIMIT);

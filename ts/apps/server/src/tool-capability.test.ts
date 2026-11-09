@@ -1,16 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { MemoryScope } from "@lifediary/memory";
-import { DEFAULT_CRITICAL_TOOLS, WRITE_TOOLS } from "./approval-policy.ts";
+import { DEFAULT_CRITICAL_TOOLS, WRITE_TOOLS, declaredCriticalTools } from "./approval-policy.ts";
 import type { SkillStore } from "./skills.ts";
 import { createTools, type ToolDeps } from "./tools.ts";
 import { TOOL_CAPABILITIES, capabilityOf, declaredToolNames } from "./tool-capability.ts";
 
 /**
- * 能力声明的一致性守卫（2026-11-09 任务书 T3 §1.3）。
+ * 能力声明的一致性守卫（2026-11-09 任务书 T3 §1.3；2026-11-10 批 21 §一.4 加强）。
  *
- * 这是本项真正的价值：以后新增工具**忘了登记**、或登记了但 `destructive` 跟
- * `WRITE_TOOLS` 对不上，这里立刻红。声明本身不改任何判定逻辑（见文件头注释）。
+ * 自从 `needsApproval()` 改读声明（批 21），这张表就是审批的事实源：
+ * 漏登记 / 登记错一个 `destructive`，等于闸门悄悄改了口径。所以这里做**双向集合等值**，
+ * 而不是逐项 `assert.equal`：两边多一个或少一个都会红。
  */
 
 const GLOBAL_SCOPE: MemoryScope = { type: "global" };
@@ -79,31 +80,42 @@ test("能力声明：每个实际注册的工具都有声明", () => {
 	assert.deepEqual(missing, [], `这些工具注册了却没登记能力声明：${missing.join(", ")}`);
 });
 
-test("能力声明：destructive 与 WRITE_TOOLS 逐项等值（双向）", () => {
-	for (const [name, cap] of Object.entries(TOOL_CAPABILITIES)) {
-		assert.equal(
-			cap.destructive,
-			WRITE_TOOLS.has(name),
-			`${name}: destructive=${cap.destructive} 与 WRITE_TOOLS.has=${WRITE_TOOLS.has(name)} 不一致`,
-		);
-	}
+test("能力声明：destructive 集合 === WRITE_TOOLS 集合（双向，集合级）", () => {
+	const byDeclaration = new Set(
+		Object.values(TOOL_CAPABILITIES)
+			.filter((cap) => cap.destructive)
+			.map((cap) => cap.name),
+	);
+	assert.deepEqual(
+		[...byDeclaration].sort(),
+		[...WRITE_TOOLS].sort(),
+		"声明的 destructive 集合与 WRITE_TOOLS 不等（多一个/少一个都会让审批口径漂移）",
+	);
 	for (const name of WRITE_TOOLS) {
-		assert.ok(capabilityOf(name), `WRITE_TOOLS 里的 ${name} 没有能力声明`);
 		assert.equal(capabilityOf(name)?.destructive, true, `${name} 在 WRITE_TOOLS 里但未标 destructive`);
+	}
+	for (const name of byDeclaration) {
+		assert.ok(WRITE_TOOLS.has(name), `${name} 声明 destructive 却不在 WRITE_TOOLS 里`);
 	}
 });
 
-test("能力声明：needsApproval !== never 的集合 = DEFAULT_CRITICAL_TOOLS", () => {
-	const byCapability = new Set(
+test("能力声明：needsApproval === critical 的集合 === DEFAULT_CRITICAL_TOOLS（双向，集合级）", () => {
+	const byDeclaration = new Set(
 		Object.values(TOOL_CAPABILITIES)
-			.filter((cap) => cap.needsApproval !== "never")
+			.filter((cap) => cap.needsApproval === "critical")
 			.map((cap) => cap.name),
 	);
 	const critical = new Set<string>(DEFAULT_CRITICAL_TOOLS);
 	assert.deepEqual(
-		[...byCapability].sort(),
+		[...byDeclaration].sort(),
 		[...critical].sort(),
 		"高危清单与声明里的 needsApproval 对不上（改了一边忘了另一边）",
+	);
+	// 运行时判定读的就是这个函数：它与常量必须是同一份真话
+	assert.deepEqual(
+		[...declaredCriticalTools()].sort(),
+		[...critical].sort(),
+		"declaredCriticalTools() 与 DEFAULT_CRITICAL_TOOLS 不一致",
 	);
 });
 

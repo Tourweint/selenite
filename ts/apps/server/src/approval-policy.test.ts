@@ -95,6 +95,15 @@ test("critical 清单：缺省五项；env 逗号分隔整体覆盖；空串回�
 	assert.deepEqual([...blank].sort(), [...DEFAULT_CRITICAL_TOOLS].sort());
 });
 
+test("未登记的工具（2026-11-10 批 21 §1.3）：一律按最严处理，绝不静默放行", () => {
+	// 声明表里没有 → 当作 destructive + critical：两个档位都要问，none 仍不问（与旧口径一致）
+	assert.deepEqual(verdict("ask-all", "brand_new_tool"), { kind: "ask" });
+	assert.deepEqual(verdict("ask-critical", "brand_new_tool"), { kind: "ask" });
+	assert.deepEqual(verdict("none", "brand_new_tool"), { kind: "allow" });
+	// 显式清单覆盖仍然生效（人配的优先于"保守兜底"）
+	assert.deepEqual(verdict("ask-critical", "brand_new_tool", new Set(["write"])), { kind: "allow" });
+});
+
 test("拒绝理由：三种终态各给一句人话，且不带参数内容", () => {
 	assert.match(denialReason("rejected", "bash", 120), /拒绝.*bash/);
 	assert.match(denialReason("timeout", "bash", 120), /120 秒.*拒绝/);
