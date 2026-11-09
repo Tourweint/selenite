@@ -3,6 +3,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { approvalStore } from "./approvals.ts";
 import { approvalTimeoutSeconds } from "./approval-policy.ts";
 import { emitDelegation } from "./delegation.ts";
+import { encodeToolResult, err, ok } from "./tool-result.ts";
 
 /**
  * 结构化提问 `ask_user`（2026-11-09 保证实现纵深 §3）。
@@ -201,8 +202,15 @@ export function createAskUserTool(): ToolRegistration {
 				callId: api.callId,
 				args,
 			});
-			const message = created.ok ? ASK_USER_WAITING_MESSAGE : created.message;
-			return { output: [{ type: "text" as const, text: message }] };
+			// 统一返回契约（批 16 §一）：新工具走 ToolResult，旧工具不动。
+			const result = created.ok
+				? ok({ status: "waiting", callId: created.callId, message: ASK_USER_WAITING_MESSAGE })
+				: err(
+						"ask_user_rejected",
+						created.message,
+						"改一次参数再问；能从文件 / 记忆 / 工具查到的事实先自己查，别问人。",
+					);
+			return { output: [{ type: "text" as const, text: encodeToolResult(result) }] };
 		},
 	});
 }
