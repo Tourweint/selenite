@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { readFileSync } from "node:fs";
 import {
 	FAILURE_STREAK_THRESHOLD,
 	FailureStreak,
@@ -97,4 +98,17 @@ test("可序列化：快照往返后连击与已提示位都还在；坏行丢�
 
 test("进程内单例可读：failureStreak() 返回同一份状态", () => {
 	assert.equal(failureStreak(), failureStreak());
+});
+
+/**
+ * 接线守卫（2026-11-10 补全批 12 遗留）：模块再好，没人调用等于没做。
+ * 断言 lifecycle.ts 真的把 tool-error / timeout / rejected 三类接上了——
+ * 以后谁把这行删了，这里会红。
+ */
+test("接线：lifecycle 里 tool-error / timeout / rejected 都真的在记账", () => {
+  const source = readFileSync(new URL("./agent/lifecycle.ts", import.meta.url), "utf8");
+  assert.ok(source.includes("tool-error"), "afterTool 应记录 tool-error");
+  assert.ok(source.includes("isTimeout ? \"timeout\" : \"tool-error\""), "afterTool 应按 isError 分流");
+  assert.ok(source.includes("status === \"rejected\" ? \"rejected\" : \"timeout\""), "审批拒绝应记 rejected");
+  assert.ok(source.includes("failureStreak().recordSuccess(streakSource)"), "工具跑通应清零");
 });

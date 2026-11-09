@@ -48,6 +48,8 @@ import { capabilityOf } from "../tool-capability.ts";
 // 中途播报（2026-11-10 批 13 §三）：工具本身在 tools.ts 注册，这里只做上架范围闸门。
 import { PROGRESS_TOOL_NAME, progressReportAllowed, progressReportEnabled } from "../progress-report.ts";
 import { emitDelegation, type DelegationReport } from "../delegation.ts";
+// 同类失败连击（批 12 遗留补全 2026-11-10）：tool-error / timeout 两类在此接线。
+import { failureStreak } from "../failure-streak.ts";
 import { auditGateBlock, type GateBlockCategory } from "../gate-audit.ts";
 // 任务专线双写（2026-11-08 扫尾批 8g）：只有真正的装配层注入 mirror；
 // createTools 的探针/单测调用不传，避免去开真实 durable。
@@ -775,6 +777,12 @@ async function openHarness(): Promise<Harness> {
 									// ask_user 走 /answer，不会进 blocking；万一出现按中止处理。
 									const denial =
 										status === "answered" ? ("aborted" as const) : status;
+									// 同类失败连击（批 12 遗留补全）：被拒 / 超时各算一类。
+									// 同一个工具连着三次被拒，说明该换做法而不是继续要授权。
+									failureStreak().recordFailure(
+										`tool:${call.name}`,
+										status === "rejected" ? "rejected" : "timeout",
+									);
 									return blocked(
 										denialReason(
 											denial,
@@ -825,6 +833,18 @@ async function openHarness(): Promise<Harness> {
 						// 放在这里而不是 tools.ts：工具侧不必知道 agent/ 的存在。
 						if (call.name === "delegate" && (call.arguments as { resume?: boolean }).resume === true) {
 							markRecoverResume(api.conversationId);
+						}
+						// 同类失败连击（批 12 遗留补全）：工具报错 / 超时各算一类，连到 3 次建议人接管。
+						// 来源用工具名——同一个工具反复栽才是可行动的信号；只记账，文案由调用方决定。
+						if (call.parent === undefined) {
+							const streakSource = `tool:${call.name}`;
+							if (result.isError) {
+								const text = typeof result.output === "string" ? result.output : "";
+								const isTimeout = /timed out|timeout/i.test(text);
+								failureStreak().recordFailure(streakSource, isTimeout ? "timeout" : "tool-error");
+							} else {
+								failureStreak().recordSuccess(streakSource);
+							}
 						}
 						// 防打转守卫记账（批次A A1）：铁证已由 beforeTool 拦下，这里只出疑似告警。
 						// 被闸门拦下的调用走不到这里（beforeTool 提前 return），天然不喂守卫。
