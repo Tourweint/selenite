@@ -648,6 +648,52 @@ const VERDICT_LABEL = {
   blocked: ["受阻", "ask"],
 };
 
+/**
+ * 验收阶段名（2026-11-10 批 18 §一）：服务端存的是 process/report/artifacts/llm
+ * 这样的内部枚举，界面上说人话（面板七原则③）。
+ */
+const REVIEW_STAGE_LABEL = {
+  process: "过程",
+  report: "汇报",
+  artifacts: "产物",
+  llm: "模型",
+};
+
+/**
+ * 任务阶段条（2026-11-10 批 18 §1.1）：受理 → 规划 → 执行 → 验收 → 完成。
+ * 只用 ticket.status 推导，不新增字段；终态失败 / 中止 / 作废**不猜**走到哪一步
+ * （返回 -1，只把五个阶段画成暗色，真实状态由状态片说）。
+ */
+const TICKET_STAGES = ["受理", "规划", "执行", "验收", "完成"];
+const TICKET_STAGE_OF_STATUS = {
+  received: 0,
+  planning: 1,
+  planned: 1,
+  dispatching: 2,
+  idle: 2,
+  needs_you: 2,
+  reviewing: 3,
+  done: 4,
+};
+
+function ticketStageIndex(status) {
+  const index = TICKET_STAGE_OF_STATUS[String(status || "")];
+  return Number.isInteger(index) ? index : -1;
+}
+
+function ticketStagesHtml(status, repairRound) {
+  const index = ticketStageIndex(status);
+  const nodes = TICKET_STAGES.map((label, i) => {
+    const stateOf = i < index ? "done" : i === index ? "now" : "todo";
+    return `<li class="td-stage-node" data-state="${stateOf}">${esc(label)}</li>`;
+  }).join("");
+  const round = Number(repairRound) > 0 ? Number(repairRound) : 0;
+  return `<div class="td-stages-wrap">
+      <ol class="td-stages"${index >= 0 ? ` data-stage="${index}"` : ' data-stage="none"'}>${nodes}</ol>
+      ${round > 0 ? `<span class="td-round" title="这张单已经自动返工过的轮次">返工 ${round} 轮</span>` : ""}
+    </div>`;
+}
+
 /** 雇员对外只说「执行者」，类型作为后缀（L3 补齐 qoder 国际/国内、原生、总管） */
 const EMPLOYEE_LABEL = {
   "pi-durable": "本机执行者",
@@ -771,8 +817,8 @@ function ticketText(ticket, key) {
 }
 
 /* 聚合灯（照 CINDY resolveSessionRightStatus 的优先级）：
- * 红「有单出错」→ 蓝「等你处理」→ 灰「执行中」→ 全 done 无灯。 */
-const LAMP_TEXT = { fail: "有单出错", ask: "等你处理", run: "执行中", done: "已完成" };
+ * 红「有单出错」→ 蓝「等你处理」→ 灰「执行中」→ 灰「已完结」无灯。 */
+const LAMP_TEXT = { fail: "有单出错", ask: "等你处理", run: "执行中", done: "已完结" };
 const LAMP_ORDER = ["fail", "ask", "run", "done"];
 
 /** 单灯：failed/aborted 红；needs_you 蓝；done 无灯；其余（排队/派发/验收/等文件）灰 */
@@ -1285,17 +1331,27 @@ function conversationCard(card) {
   return element;
 }
 
+/**
+ * 「派活」次数的唯一算法（批 18 七原则⑤）：父单一行算一次，子单不算。
+ * 统计条与标题副行都走它——两处各算一份就会互相矛盾。
+ */
+function dispatchedCount(cards, direct) {
+  return (
+    cards.reduce((sum, card) => sum + workRowsOf(card).length, 0) +
+    direct.filter((ticket) => !ticket.parentTicketId).length
+  );
+}
+
 function renderStats(cards, direct) {
   const count = (lamp) => cards.filter((card) => card.lamp === lamp).length;
   // 「派活」数的是派活行（父单），子单不算一次派活
-  const dispatched =
-    cards.reduce((sum, card) => sum + workRowsOf(card).length, 0) +
-    direct.filter((ticket) => !ticket.parentTicketId).length;
+  const dispatched = dispatchedCount(cards, direct);
   const stats = [
     ["进行中", count("run"), "run"],
     ["等你处理", count("ask"), "ask"],
     ["有单出错", count("fail"), "fail"],
-    ["已完成", count("done"), ""],
+    // 已作废的单也收在「已完结」折叠区：叫「已完成」会把作废说成干完了（七原则⑤）
+    ["已完结", count("done"), ""],
     ["派活", dispatched, ""],
   ];
   el.tasksStats.replaceChildren();
@@ -1386,8 +1442,9 @@ function renderArchive(cards) {
   el.tasksArchive.append(
     foldSection({
       count: cards.length,
-      label: `已完结 ${cards.length} 个对话（已完成）`,
-      emptyText: "已完结 0 个对话（已完成）",
+      // 这一区收的是「已完结」：done 与已作废都在里面，别写「已完成」（七原则⑤）
+      label: `已完结 ${cards.length} 个对话`,
+      emptyText: "已完结 0 个对话",
       open: state.tasksArchiveOpen,
       onToggle: (next) => {
         state.tasksArchiveOpen = next;
@@ -1501,7 +1558,7 @@ function renderBoard() {
       ? `共 ${totalTickets} 次直派（没有来源对话）`
       : filtered
         ? `筛选 ${visibleCards.length} / 共 ${cards.length} 个对话`
-        : `共 ${cards.length} 个对话 · ${totalTickets} 次派活`;
+        : `共 ${cards.length} 个对话 · ${dispatchedCount(cards, direct)} 次派活`;
   }
 
   // 一张任务单都没有时，统计和筛选没有信息量，让位给空状态说明；打手四卡仍要露脸
@@ -1726,17 +1783,25 @@ function renderTicketDetail(data, fallbackId) {
       </section>`
     : "";
 
+  // 验收证据（2026-11-10 批 18 §1.2）：逐条 verdict / reason / 是哪个任务 / 哪一类核对。
+  // 以前只留最近 6 条且标题写总数——数字和列表长度对不上（七原则②），现在列表照单全收。
+  // 改动的路径在 run.json 的 changedPaths，详情端点没有投影；本批不加字段，
+  // 所以这里不编结构化路径（artifacts 阶段的 reason 里本来就带着路径清单）。
+  const taskBySeq = new Map(tasks.map((task) => [Number(task.seq), task]));
   const reviewRows = reviews.length
     ? `<section class="td-section">
-        <h3>验收记录<span>${reviews.length}</span></h3>
+        <h3>验收证据<span>${reviews.length}</span></h3>
         ${reviews
-          .slice(-6)
           .map((review) => {
             const [label, tone] = VERDICT_LABEL[review.verdict] || [review.verdict || "", "idle"];
+            const task = taskBySeq.get(Number(review.seq));
+            const taskTitle = String(task?.title || task?.slug || review.slug || "").trim();
+            const stage = REVIEW_STAGE_LABEL[review.stage] || "验收";
             return `<div class="td-review">
               <div class="td-review-top">
                 <span class="tk-chip" data-tone="${tone}">${esc(label)}</span>
-                <span class="td-stage">${esc(review.stage || "")}</span>
+                <span class="td-review-task">${esc(taskTitle || "（未找到对应任务）")}</span>
+                <span class="td-stage">${esc(stage)}</span>
               </div>
               <p>${esc(review.reason || "（没有说明）")}</p>
             </div>`;
@@ -1845,6 +1910,7 @@ function renderTicketDetail(data, fallbackId) {
         <span class="td-time">${esc(relativeTime(ticket.updated_at))}</span>
       </div>
       <h2 class="td-prompt">${esc(String(ticket.prompt || "").trim() || "（没有说明）")}</h2>
+      ${ticketStagesHtml(ticket.status, repairRound)}
       ${stepsSection}
       <div class="td-meta">
         <span>任务 <b>${passed}/${total}</b></span>
@@ -2766,6 +2832,89 @@ function partnerDotClass(status) {
   return "idle";
 }
 
+/* ── 忙因胶囊（2026-11-10 批 18 §二）────────────────────────
+ * 优先级：等审批 > 跑任务 > 等回答 > 空闲。
+ * 数据只用现成两路：`/api/v1/partners`（status / domain）+ `/api/v1/domains`（activeTickets）
+ * + 全局待办 `/api/v1/agent/approvals`（不带 conversationId，快照在 refreshApprovalPopups 里刷）。
+ * 拿不到待办快照时**不猜**「不在等审批」，降级成只分忙/空闲（七原则⑤诚实状态）。
+ */
+let approvalPopKnown = false;
+
+/** 某执事挂着的待办条数（主会话 `partner-<id>` 与群成员轮 `partner-<id>-group-<g>` 都算） */
+function partnerPendingCounts(partnerId) {
+  let approvals = 0;
+  let questions = 0;
+  const self = `partner-${partnerId}`;
+  for (const item of approvalPopItems) {
+    const conversationId = String(item?.conversationId || "");
+    const owner =
+      conversationId === self
+        ? partnerId
+        : (parseGroupMemberConversation(conversationId)?.partnerId || "");
+    if (owner !== partnerId) continue;
+    if (item.kind === "ask_user" || item.tool === "ask_user") questions += 1;
+    else approvals += 1;
+  }
+  return { approvals, questions };
+}
+
+/** 忙因胶囊内容；空闲返回 null（不占地方，七原则⑥） */
+function partnerBusyOf(partner, activeTickets) {
+  const active = Number(activeTickets) || 0;
+  if (!approvalPopKnown) {
+    return active > 0 ? { label: "忙", kind: "work", title: "有在办的任务单" } : null;
+  }
+  const { approvals, questions } = partnerPendingCounts(String(partner.id || ""));
+  if (approvals > 0) {
+    return {
+      label: "等审批",
+      kind: "wait",
+      title: `${approvals} 个写操作在等确认（去浮窗或设置 → 权限处理）`,
+    };
+  }
+  if (active > 0) {
+    return { label: "跑任务", kind: "work", title: `有 ${active} 张任务单没结束` };
+  }
+  if (questions > 0) {
+    return {
+      label: "等回答",
+      kind: "ask",
+      title: `${questions} 个问题在等你回答`,
+    };
+  }
+  return null;
+}
+
+function paintBusyChip(node, busy) {
+  if (!node) return;
+  if (!busy) {
+    node.hidden = true;
+    node.textContent = "";
+    node.removeAttribute("data-kind");
+    node.removeAttribute("title");
+    return;
+  }
+  node.hidden = false;
+  node.dataset.kind = busy.kind;
+  node.textContent = busy.label;
+  node.title = busy.title;
+}
+
+/** 待办快照变了就地改胶囊，不重绘整份花名册（不打断 hover / 焦点） */
+function syncRosterBusy() {
+  for (const row of document.querySelectorAll("#partner-roster [data-partner-id]")) {
+    const partner = state.partners.find((item) => item.id === row.dataset.partnerId);
+    if (!partner) continue;
+    const domain = String(partner.domain || "").trim();
+    const active = domain ? rosterDomainActive.get(domain) || 0 : 0;
+    const busy = partnerBusyOf(partner, active);
+    paintBusyChip(row.querySelector(".roster-busy"), busy);
+    // 「空闲」与忙因互斥：只在没有任务单、也没胶囊时露出来
+    const idle = row.querySelector(".roster-idle");
+    if (idle && !row.querySelector(".roster-count")) idle.hidden = Boolean(busy);
+  }
+}
+
 function syncChiefDot() {
   if (!el.chiefDot) return;
   el.chiefDot.className = `status-dot ${partnerDotClass(state.chiefStatus || "active")}`;
@@ -2878,6 +3027,9 @@ async function loadRoster() {
   }
 }
 
+/** 最近一次花名册拿到的「按领域在办单数」：忙因胶囊就地重算用 */
+let rosterDomainActive = new Map();
+
 function renderRoster(partners, domainRows) {
   const box = el.partnerRoster;
   box.replaceChildren();
@@ -2887,6 +3039,8 @@ function renderRoster(partners, domainRows) {
     const key = String(row.domain || "").trim();
     if (key) activeByDomain.set(key, Number(row.activeTickets) || 0);
   }
+  // 忙因胶囊在待办快照变化时用同一份数据就地重算（syncRosterBusy），不重绘整份花名册
+  rosterDomainActive = activeByDomain;
 
   // 数据源返回全部（含 chief）；过滤掉 chief 与已归档的
   const roster = partners.filter(
@@ -2906,6 +3060,8 @@ function renderRoster(partners, domainRows) {
     const name = String(partner.name || "执事").trim() || "执事";
     const domain = String(partner.domain || "").trim();
     const active = domain ? activeByDomain.get(domain) || 0 : 0;
+    // 忙因算一次、两处用：有胶囊时不再写「空闲」，否则同一行自相矛盾（七原则⑤）
+    const busy = partnerBusyOf(partner, active);
 
     const row = document.createElement("div");
     row.className = "side-item roster-row";
@@ -3012,12 +3168,19 @@ function renderRoster(partners, domainRows) {
     } else {
       const idle = document.createElement("span");
       idle.className = "roster-idle";
+      // 有忙因胶囊时不写「空闲」：同一行不能两个相反的说法
+      idle.hidden = Boolean(busy);
       idle.textContent = "空闲";
       row.append(idle);
     }
 
     // 状态点固定在最右；本批只调位置，不改 active/archived 的状态来源
-    row.append(dot);
+    // 忙因胶囊（批 18 §二）紧挨状态点：忙时才占位，空闲不画（七原则⑥）
+    const busyChip = document.createElement("span");
+    busyChip.className = "roster-busy";
+    busyChip.hidden = true;
+    paintBusyChip(busyChip, busy);
+    row.append(busyChip, dot);
 
     const open = () => void openPartnerChat(id);
     row.addEventListener("click", open);
@@ -10672,13 +10835,21 @@ function renderSkillList(box, items) {
     // 只读来源（~/.agents/skills）只展示不给删：那是别的工具的家，改删请去原目录（2026-11-08 批 10-A）
     const readOnly = item.writable === false;
     const originLabel = readOnly ? SKILL_ORIGIN_LABEL[item.origin] || String(item.origin || "") : "";
+    // 用量（2026-11-10 批 18 §四，批 17 端点已有）：只展示，不给操作——
+    // 技能仍然只能由人删，"归档"这类按钮刻意不做（产物由人管，不由界面推断废弃）。
+    const usage = Number.isFinite(item.usageCount) ? Number(item.usageCount) : null;
+    const usageText = usage === null ? "" : usage > 0 ? ` · 用过 ${usage} 次` : " · 从未用过";
+    const staleTag =
+      item.stale === true
+        ? `<span class="sk-stale" title="按最近一次使用时间算，已经 90 天没被取用过；只标记，不删不移">90 天未用</span>`
+        : "";
     const card = document.createElement("div");
     card.className = "card sk-item";
     card.innerHTML = `
       <button class="sk-open" type="button" data-skill-open="${attr(name)}" title="点开${readOnly ? "查看" : "编辑"}">
         <span class="sk-item-name">${esc(name)}</span>
         <span class="sk-item-summary">${esc(String(item.summary || "（第 1 行是空摘要，不会进索引）"))}</span>
-        <span class="sk-item-meta">${esc(skillWhenText(item.updatedAt))} · ${esc(skillSizeText(item.size))}${readOnly ? ` · ${esc(originLabel)}（只读）` : ""}</span>
+        <span class="sk-item-meta">${esc(skillWhenText(item.updatedAt))} · ${esc(skillSizeText(item.size))}${esc(usageText)}${readOnly ? ` · ${esc(originLabel)}（只读）` : ""}${staleTag ? ` ${staleTag}` : ""}</span>
       </button>
       <div class="sk-item-actions">
         ${switchMarkup(item.enabled === true, { label: `开关 ${name}`, attrs: `data-skill-switch="${attr(name)}"` })}
@@ -12251,17 +12422,24 @@ async function refreshApprovalPopups() {
   // 用户自己停了 runtime：别把浮窗刷成错误态（同 checkHealth 的口径）
   if (document.body.dataset.runtime === "stopped") {
     approvalPopItems = [];
+    approvalPopKnown = false;
     renderApprovalPopups();
+    syncRosterBusy();
     return;
   }
   try {
     const response = await request("/api/v1/agent/approvals", { cache: "no-store" });
     const data = response.ok ? await response.json().catch(() => ({})) : {};
     approvalPopItems = Array.isArray(data.approvals) ? data.approvals : [];
+    // 只有服务端明确回了清单，才敢说「这个执事不在等审批」（批 18 §2.2 降级口径）
+    approvalPopKnown = response.ok && data.ok !== false;
   } catch (error) {
     if (error.message !== "forbidden") approvalPopItems = [];
+    approvalPopKnown = false;
   }
   renderApprovalPopups();
+  // 同一份快照也喂侧栏忙因胶囊（不额外打一次接口）
+  syncRosterBusy();
 }
 
 function startApprovalPopWatch() {

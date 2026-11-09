@@ -7,16 +7,26 @@
  * `code` 给机器分支（稳定枚举，不改语义），`message` 给人 / 模型读，
  * `hint` 是可选的"下一步该干什么"（gstack「错误写给 AI 看」的同族实践）。
  *
- * **为什么先只给新工具用**：我们现有 20 来个工具的返回形状各自为政（有的回中文句子、
+ * **为什么不是一次全改**：我们现有 20 来个工具的返回形状各自为政（有的回中文句子、
  * 有的回 JSON、有的直接抛错），一次性全改会把每一条工具链路的模型行为一起动掉，
- * 审查范围无法验证。所以这一批只落**契约与三个最近新增的工具**（`ask_user` /
- * `report_progress` / `recall_sessions`），旧工具逐字节不动。
+ * 审查范围无法验证。所以批 16 先落**契约 + 三个新工具**（`ask_user` /
+ * `report_progress` / `recall_sessions`），其余逐字节不动；再按下面的顺序一批一批迁。
  *
- * **旧工具怎么逐步迁移**（下一批从哪开始）：先迁只读、低风险的（`recall` / `recall_sessions`
- * 同族 → `web_search` / `propose_topic`），每迁一个就把该工具的输出解析与
- * 对应测试一起改，一次一批；写类工具（`delegate` / `work_*`）最后迁，
- * 因为它们的结果还被回执 / 恢复链路读取。迁移时保持人读的 `message` 不变，
- * 只把外层包成 `ToolResult`，别顺手改文案。
+ * **旧工具怎么逐步迁移**（下一批从哪开始）：先迁只读、低风险的，每迁一个就把该工具的输出解析与
+ * 对应测试一起改，一次一批。
+ *
+ * 迁移进度（2026-11-10 批 18 §五核对）：
+ *   - **已迁**：`recall_sessions` / `ask_user` / `report_progress` /
+ *     `recall` / `web_search` / `propose_topic` / `skill`（最后四件是批 18 迁的）。
+ *   - **还没迁**（都是会改状态或结果被别的链路读取的，必须单独一批一起改）：
+ *     `remember` / `set_reminder` / `persona_recall` / `send_to_agent` / `delegate` /
+ *     `propose_project` / `partner_skill_write` / `partner_manage` / `group_manage` /
+ *     `routine_manage`。其中 `delegate` / `work_*` / `partner_*` 的结果被回执与恢复链路解析，
+ *     改形状要连读取方一起改（批 18 明确不做）。
+ *   - **不在范围内**：`read` / `write` / `edit` / `bash` 是 durable 的 `CodingTools` 提供的，
+ *     形状由上游决定，这里不改。
+ *
+ * 迁移时保持人读的 `message` 不变，只把外层包成 `ToolResult`，别顺手改文案。
  *
  * 序列化：模型侧只能拿到文本，所以用 `encodeToolResult()` 统一成一行 JSON ——
  * 一个地方决定编码，将来要换格式（比如加 schemaVersion）只改这里。
