@@ -14,6 +14,7 @@ import {
 	type DelegationRuntime,
 } from "./delegation.ts";
 import { DelegationReceipts, requestFingerprint } from "./delegation-receipts.ts";
+import { projectRunSource, type RunSource } from "./run-source.ts";
 // 证据裁判（2026-11-10 批 14）：重派 / 回话续跑出来的新单同样带裁判。
 import { withDelegationJudge } from "./delegation-judge.ts";
 import { partnersStore } from "./partners.ts";
@@ -92,6 +93,21 @@ let deadLetterStoreInstance: DelegationReceipts | null = null;
 function deadLetterStore(): DelegationReceipts {
 	deadLetterStoreInstance ??= new DelegationReceipts();
 	return deadLetterStoreInstance;
+}
+
+/**
+ * 任务详情里的触发来源（2026-11-10 批 15 §三）：
+ * 读回执的 `run_source`；老数据 null → 视为 human；没有回执 / 开关关着 → 不出现。
+ * 簿记库挂了不挡详情（与留言 / 死信同一口径）。
+ */
+function runSourceOfTicket(ticketId: string): RunSource | undefined {
+	try {
+		const receipt = deadLetterStore().lookupByTicket(ticketId);
+		// 没有回执 → 不出现；有回执但列为 null（老数据）→ human；开关关着 → 不出现。
+		return receipt ? projectRunSource(receipt.runSource) : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 /**
@@ -444,6 +460,7 @@ export function mountDelegationApi(app: Hono, opts: DelegationApiOptions = {}): 
 				/* 簿记库挂了不挡详情 */
 			}
 			const projected = applyCancelProjection(ticketView, canceled);
+			const runSource = runSourceOfTicket(found.ticket.id);
 			return c.json({
 				ok: true,
 				ticket: projected,
@@ -451,6 +468,9 @@ export function mountDelegationApi(app: Hono, opts: DelegationApiOptions = {}): 
 				conversationId,
 				conversationTitle: conversationId ? titles.get(conversationId) ?? null : null,
 				chiefName: chiefNamesLoader()(found.ticket.options.domain),
+				// 触发来源（2026-11-10 批 15 §三，纯增量）：老数据 null 视为 human；
+				// 没有回执 / RUN_SOURCE=false 时**不出现**这个键（前端零影响）。
+				...(runSource ? { runSource } : {}),
 				cancelEnabled: delegationCancelEnabled(),
 				// 任务专线（2026-11-08 扫尾批 8g）：启用开关 + 确定性会话 id（`task-<票号>`）。
 				// 未建过时也会给 id；前端回读 GET messages 得到 404 就按"还没有记录"展示。
@@ -791,7 +811,12 @@ export function retryTicketAction(
 		const retryCount = store.countRetries(ticketId) + 1;
 		const requestId = `retry:${ticketId}:${retryCount}`;
 		const fingerprint = requestFingerprint({ ticketId, requirement, domain, retryCount });
-		const begun = store.begin(requestId, fingerprint, { explicit: true, workRoot });
+		const begun = store.begin(requestId, fingerprint, {
+			explicit: true,
+			workRoot,
+			// HTTP 重试端点直接触发 → script（RUN_SOURCE=false 时 begin 不落列）。
+			runSource: "script",
+		});
 		if (begun.kind !== "new") {
 			return {
 				status: 409,

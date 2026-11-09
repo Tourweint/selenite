@@ -84,11 +84,16 @@ import {
 	claimRelayTarget,
 	clearRelayTarget,
 	currentRelayRunKey,
+	emitRelayReceipt,
 	isRelayRun,
 	markRelayRun,
 	markRelayTarget,
 	partnerRelayEnabled,
+	partnerRelayReceiptEnabled,
+	relayOutcomeEntry,
+	relaySettledText,
 	type RelayDeliverResult,
+	type RelaySenderContext,
 } from "../partner-relay.ts";
 import { currentProjectEnabled, projectsStore, workspaceRootReal } from "../projects.ts";
 import {
@@ -286,6 +291,7 @@ export function getHarness(): Promise<Harness> {
 async function deliverPartnerRelay(
 	targetPartnerId: string,
 	body: string,
+	sender: RelaySenderContext,
 ): Promise<RelayDeliverResult> {
 	const target = partnersStore().get(targetPartnerId);
 	if (!target) return { ok: false, error: "这位执事已经不在了" };
@@ -305,14 +311,53 @@ async function deliverPartnerRelay(
 		// **先标记再提交**：目标那一轮的第一个 beforeRequest 要认领它，
 		// 否则"递话触发的轮次摘掉工具"会漏（提交后才标记已经晚了一步）。
 		markRelayTarget(sessionId);
+		let submission;
 		try {
-			await conversation.submit(
+			submission = await conversation.submit(
 				{ type: "input", content: body, whenBusy: "followUp" },
 				CTX,
 			);
 		} catch (error) {
 			clearRelayTarget(sessionId);
 			throw error;
+		}
+		// 两态回执（批 15 §五）：提交成功 = queued；对方那一轮真的结算 = settled。
+		// **不 await**：回执要等对方跑完，不能把发送方的工具调用挂住。
+		if (partnerRelayReceiptEnabled()) {
+			void (async () => {
+				try {
+					const record = await submission.wait(CTX);
+					let line = "";
+					if (record.status === "done") {
+						const view = await conversation.context(CTX);
+						const answer = view.entries.find((entry) => entry.id === record.answer);
+						line = answer?.model?.[0]
+							? contentText(answer.model[0].content as Parameters<typeof contentText>[0])
+							: "";
+					}
+					const text = relaySettledText(target.name, line);
+					// ① 回流到发送方**正在流式**的那条会话（没开流就收不到，不伪造时间线）
+					emitRelayReceipt(sender.conversationId, text);
+					// ② 发送方 transcript 记一条留言（与 8g 的留言镜像同款 assistant 条目）
+					const senderConversation = await harness.conversation(
+						sender.conversationId as never,
+						CTX,
+					);
+					if (senderConversation) {
+						await senderConversation.submit(
+							{ type: "write", entry: relayOutcomeEntry(`【留言】${text}`) },
+							CTX,
+						);
+					}
+				} catch (error) {
+					// 回执是旁路：失败只记枚举式原因，不影响已经送出去的这条话。
+					console.warn(
+						`[relay] 两态回执回流失败（不挡递话）：${
+							error instanceof Error ? error.message.slice(0, 120) : "unknown"
+						}`,
+					);
+				}
+			})();
 		}
 		return { ok: true, busy };
 	} catch (error) {
@@ -392,6 +437,8 @@ async function openHarness(): Promise<Harness> {
 		// 上架时把排链函数注入工具，避免 tools.ts 反向 import routines.ts 绕成环。
 		routineSelfService: routineSelfServiceEnabled(),
 		scheduleRoutine: (routineId) => routineEngine().ensureScheduled(routineId),
+		// 自建规则的首轮来源标记（2026-11-10 批 15 §三）：routine_manage 建规则时落一笔。
+		markSelfRoutine: (routineId) => routineEngine().markSelfCreated(routineId),
 		// agent 中途播报（2026-11-10 批 13 §三）：默认开；AGENT_PROGRESS_REPORT=false → 不上架。
 		// 任务专线镜像只在"当前会话正好是 task- 专线"时写一条，没有则什么也不做。
 		progressReport: progressReportEnabled(),

@@ -67,6 +67,8 @@ import {
 	DelegationReceipts,
 	requestFingerprint,
 } from "./delegation-receipts.ts";
+import { delegationRunSource, runSourceEnabled } from "./run-source.ts";
+import { isRoutineTurn } from "./unattended.ts";
 import { pruneSessionMemory } from "./memory-prune.ts";
 // 工作履历：派单终态结算落一条 work 记录（2026-11-08 刀二 E2）。
 import { recordWorkSettlement } from "./work-record.ts";
@@ -298,6 +300,12 @@ export interface ToolDeps {
 	routineSelfService?: boolean;
 	/** 排 durable 闹钟；生产由 lifecycle 注入 `routineEngine().ensureScheduled`。 */
 	scheduleRoutine?: (routineId: string) => Promise<void>;
+	/**
+	 * 自建规则标记（2026-11-10 批 15 §三）：routine_manage 建出来的规则，首轮
+	 * runSource 记 `routine_self`。生产由 lifecycle 注入 `routineEngine().markSelfCreated`；
+	 * 不传 = 不记（单测 / 探针零副作用）。
+	 */
+	markSelfRoutine?: (routineId: string) => void;
 	/**
 	 * agent 中途播报（2026-11-10 批 13 §三）：为 true 时 `report_progress` 上架。
 	 * 装配层按 `AGENT_PROGRESS_REPORT`（默认开）传入；**不传 = 不上架**
@@ -847,6 +855,15 @@ export function createTools(deps: ToolDeps) {
 				const begun = receipts.begin(requestId, fingerprint, {
 					explicit: Boolean(explicitRequestId),
 					workRoot: chancellorWorkRoot(),
+					// 触发来源（批 15 §三）：例行轮 / 设备 / 人；开关关着不写。
+					...(runSourceEnabled()
+						? {
+								runSource: delegationRunSource({
+									device: deviceWork,
+									routineTurn: isRoutineTurn(conversationId),
+								}),
+							}
+						: {}),
 				});
 				if (begun.kind === "conflict") {
 					// 同一 requestId 但内容不同：不报冲突、不让模型换号重派，直接把原单交回。
@@ -1485,6 +1502,10 @@ export function createTools(deps: ToolDeps) {
 					} catch (error) {
 						const detail = error instanceof Error ? error.message : String(error);
 						return text(`操作失败：${detail.slice(0, 200)}`);
+					}
+					// 自建标记：这条规则的首轮 runSource 记 routine_self（批 15 §三）。
+					if (result.ok && args.action === "create" && result.routineId) {
+						deps.markSelfRoutine?.(result.routineId);
 					}
 					// create / enable 要排 durable 闹钟；排不上只 warn + 在回话里如实说，
 					// 规则已经落库（revision / 防自环由 routines.ts 既有机制照常生效）。
