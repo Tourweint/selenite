@@ -23,6 +23,7 @@ import {
 	startDelegation,
 	type DelegationEvent,
 } from "./delegation.ts";
+import { currentAuthority } from "./delegation-authority.ts";
 // 任务专线双写（2026-11-08 扫尾批 8g）：远程单在本机受理/运行，任务详情同样有一条专线。
 import { taskConversationMirror } from "./task-conversation.ts";
 import { projectsStore, resolveDelegationProject, type ProjectRef } from "./projects.ts";
@@ -436,7 +437,7 @@ export function createMatrixChannels(): MatrixChannels {
 				requirement: input.prompt,
 				domain: input.domain ?? "",
 				projectId: project?.id ?? "",
-			}), { explicit: true, workRoot: chancellorWorkRoot(), runSource: "device" });
+			}), { explicit: true, workRoot: chancellorWorkRoot(), runSource: "device", authority: currentAuthority() });
 			if (begun.kind === "conflict") {
 				throw new RelayInvokeError("bad_request", "同 requestId 但内容不同（冲突），拒绝受理");
 			}

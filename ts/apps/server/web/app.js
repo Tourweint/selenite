@@ -576,6 +576,8 @@ const state = {
   tasksDirectOpen: false,
   // 派活行内「子单 N」展开态：Set of 派活行（父单）id，同样只记会话内存
   tasksChildrenOpen: new Set(),
+  // 多副本组展开态（批 19 §五）：Set of groupId（= requestId），只记会话内存
+  tasksFanoutOpen: new Set(),
   // 外部打手过滤（L3）：空 = 不过滤；等于某个 employee 时只留含该执行者的对话卡
   tasksEmployeeFilter: "",
   // 项目筛选的选项来自 GET /api/v1/projects；接口不在时用任务单里的项目名兜底
@@ -692,6 +694,22 @@ function ticketStagesHtml(status, repairRound) {
       <ol class="td-stages"${index >= 0 ? ` data-stage="${index}"` : ' data-stage="none"'}>${nodes}</ol>
       ${round > 0 ? `<span class="td-round" title="这张单已经自动返工过的轮次">返工 ${round} 轮</span>` : ""}
     </div>`;
+}
+
+/** 过程关口（2026-11-10 批 19 §四）：阶段条下方的小徽章；没有 gates 就不渲染。 */
+function ticketGatesHtml(gates) {
+  const list = (Array.isArray(gates) ? gates : []).filter(
+    (gate) => gate && typeof gate.name === "string" && gate.name.trim(),
+  );
+  if (!list.length) return "";
+  return `<div class="td-gates" aria-label="过程关口">${list
+    .map(
+      (gate) =>
+        `<span class="td-gate" data-state="${gate.passed === true ? "pass" : "fail"}"${
+          gate.note ? ` title="${attr(gate.note)}"` : ""
+        }>${esc(gate.name)}</span>`,
+    )
+    .join("")}</div>`;
 }
 
 /** 雇员对外只说「执行者」，类型作为后缀（L3 补齐 qoder 国际/国内、原生、总管） */
@@ -1259,6 +1277,72 @@ function ticketActionButtons(ticket, enabled = state.ticketsCancelEnabled) {
   return "";
 }
 
+/**
+ * 多副本归并（2026-11-10 批 19 §五）：同一 groupId（= requestId）的派活行收成一行。
+ * 只做展示归并；不等待、不自动消费——副本各自照常跑、照常结算。
+ * 只有 ≥2 张同组才折叠；单张仍按普通派活行渲染（老服务端不带 groupId 时零变化）。
+ */
+function fanoutLayout(tickets) {
+  const groups = new Map();
+  const layout = [];
+  for (const ticket of tickets) {
+    const groupId = ticketText(ticket, "groupId");
+    if (!groupId) {
+      layout.push({ ticket });
+      continue;
+    }
+    let group = groups.get(groupId);
+    if (!group) {
+      group = { groupId, tickets: [] };
+      groups.set(groupId, group);
+      layout.push({ group });
+    }
+    group.tickets.push(ticket);
+  }
+  const result = [];
+  for (const entry of layout) {
+    if (!entry.group) {
+      result.push(entry);
+      continue;
+    }
+    if (entry.group.tickets.length > 1) result.push(entry);
+    else for (const ticket of entry.group.tickets) result.push({ ticket });
+  }
+  return result;
+}
+
+/** 同组副本折叠行：「3 个副本，已完成 2」，点开逐张看。 */
+function fanoutRow(group) {
+  const total = group.tickets.length;
+  const done = group.tickets.filter((ticket) => String(ticket.status || "") === "done").length;
+  const open = state.tasksFanoutOpen.has(group.groupId);
+  const row = document.createElement("div");
+  row.className = "tk-row tk-fanout";
+  row.dataset.group = group.groupId;
+  row.innerHTML = `
+    <div class="tk-row-top">
+      <span class="tk-row-prompt">${esc(`${total} 个副本，已完成 ${done}`)}</span>
+      <span class="tk-chip" data-tone="${done === total ? "done" : "run"}">${done}/${total}</span>
+    </div>
+    <button class="tk-children-toggle" type="button" aria-expanded="${open ? "true" : "false"}">
+      <span>${total} 张单</span><span class="tk-child-caret" aria-hidden="true">▸</span>
+    </button>
+    <div class="tk-children"${open ? "" : " hidden"}></div>
+  `;
+  const body = row.querySelector(".tk-children");
+  for (const ticket of group.tickets) body.append(workRow(ticket));
+  row.querySelector(".tk-children-toggle").addEventListener("click", () => {
+    const next = !state.tasksFanoutOpen.has(group.groupId);
+    if (next) state.tasksFanoutOpen.add(group.groupId);
+    else state.tasksFanoutOpen.delete(group.groupId);
+    body.hidden = !next;
+    row
+      .querySelector(".tk-children-toggle")
+      .setAttribute("aria-expanded", next ? "true" : "false");
+  });
+  return row;
+}
+
 function workRow(ticket) {
   const children = childTicketsOf(ticket.id);
   const [label, tone] = TASK_STATUS[ticket.status] || [ticket.status || "未知", "idle"];
@@ -1327,7 +1411,9 @@ function conversationCard(card) {
     <div class="tk-rows"></div>
   `;
   const rows = element.querySelector(".tk-rows");
-  for (const ticket of workRowsOf(card)) rows.append(workRow(ticket));
+  for (const entry of fanoutLayout(workRowsOf(card))) {
+    rows.append(entry.group ? fanoutRow(entry.group) : workRow(entry.ticket));
+  }
   return element;
 }
 
@@ -1911,6 +1997,7 @@ function renderTicketDetail(data, fallbackId) {
       </div>
       <h2 class="td-prompt">${esc(String(ticket.prompt || "").trim() || "（没有说明）")}</h2>
       ${ticketStagesHtml(ticket.status, repairRound)}
+      ${ticketGatesHtml(data.gates)}
       ${stepsSection}
       <div class="td-meta">
         <span>任务 <b>${passed}/${total}</b></span>

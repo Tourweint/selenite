@@ -356,6 +356,122 @@ test("详情：启用时带回 taskConversationEnabled 与确定性专线 id", a
 			assert.equal(body.taskConversationId, "task-T-conv", "id 是 task-<票号>，不需要读 Harness");
 		});
 	} finally {
+		// Windows 上 sqlite 句柄回收有延迟：删除带重试。
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+	}
+});
+
+test("过程关口：reviews + 返工轮投影；开关关掉不带 gates", async () => {
+	const root = temp("api-gates");
+	try {
+		const workRoot = join(root, "runs");
+		const store = new Store(workRoot);
+		store.saveTicket(makeTicket("T-gates", workRoot, { repairRound: 2 }));
+		store.saveReview({
+			ticket_id: "T-gates",
+			seq: 1,
+			slug: "01-write",
+			verdict: "pass",
+			reason: "文件已改",
+			stage: "artifacts",
+		});
+		store.saveReview({
+			ticket_id: "T-gates",
+			seq: 2,
+			slug: "02-test",
+			verdict: "fail",
+			reason: "测试没过",
+			stage: "process",
+		});
+		store.close();
+
+		const app = new Hono();
+		mountDelegationApi(app, { workRoot });
+
+		const response = await app.request("/api/v1/tickets/T-gates");
+		assert.equal(response.status, 200);
+		const body = (await response.json()) as {
+			gates?: Array<{ name: string; passed: boolean; note?: string }>;
+		};
+		assert.deepEqual(body.gates, [
+			{ name: "验收：01-write", passed: true, note: "文件已改" },
+			{ name: "验收：02-test", passed: false, note: "测试没过" },
+			{ name: "返工", passed: true, note: "已返工 2 轮" },
+		]);
+
+		const saved = process.env.TICKET_GATES;
+		process.env.TICKET_GATES = "false";
+		try {
+			const off = await app.request("/api/v1/tickets/T-gates");
+			const offBody = (await off.json()) as Record<string, unknown>;
+			assert.equal("gates" in offBody, false, "开关关掉详情不带 gates");
+		} finally {
+			if (saved === undefined) delete process.env.TICKET_GATES;
+			else process.env.TICKET_GATES = saved;
+		}
+	} finally {
 		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("多副本对齐：同 requestId 的单在列表/详情共用 groupId；开关关掉不出现", async () => {
+	const root = temp("api-fanout");
+	try {
+		const workRoot = join(root, "runs");
+		// 同一 requestId 的副本分散在不同 runs 目录（顶层 / 领域各一份；同库只有一个
+		// idempotency_key 唯一位，真实扇出也是这样按领域分目录落的）。
+		const manager = ensureManager(workRoot, "fan");
+		const rootStore = new Store(workRoot);
+		rootStore.saveTicket(makeTicket("T-fan-a", workRoot, { idempotencyKey: "req-1" }));
+		rootStore.saveTicket(makeTicket("T-solo", workRoot));
+		rootStore.close();
+		const managerStore = new Store(manager.runs_dir);
+		managerStore.saveTicket(
+			makeTicket("T-fan-b", manager.runs_dir, {
+				idempotencyKey: "req-1",
+				options: { dry: true, maxTasks: 8, workRoot: manager.runs_dir, domain: "fan" },
+			}),
+		);
+		managerStore.close();
+
+		const app = new Hono();
+		mountDelegationApi(app, { workRoot });
+
+		const list = (await (await app.request("/api/v1/tickets?limit=50")).json()) as {
+			tickets: Array<{ id: string; groupId: string | null }>;
+		};
+		const byId = new Map(list.tickets.map((ticket) => [ticket.id, ticket.groupId]));
+		assert.equal(byId.get("T-fan-a"), "req-1");
+		assert.equal(byId.get("T-fan-b"), "req-1");
+		assert.equal(byId.get("T-solo"), null, "没有 requestId 的单不带组");
+
+		const detail = (await (await app.request("/api/v1/tickets/T-fan-a")).json()) as {
+			groupId?: string;
+		};
+		assert.equal(detail.groupId, "req-1");
+
+		const saved = process.env.DELEGATION_FANOUT_GROUP;
+		process.env.DELEGATION_FANOUT_GROUP = "false";
+		try {
+			const offDetail = (await (await app.request("/api/v1/tickets/T-fan-a")).json()) as Record<
+				string,
+				unknown
+			>;
+			assert.equal("groupId" in offDetail, false, "开关关掉详情不带 groupId");
+			const offList = (await (await app.request("/api/v1/tickets?limit=50")).json()) as {
+				tickets: Array<{ groupId: string | null }>;
+			};
+			assert.ok(offList.tickets.every((ticket) => ticket.groupId === null), "列表也不带组");
+		} finally {
+			if (saved === undefined) delete process.env.DELEGATION_FANOUT_GROUP;
+			else process.env.DELEGATION_FANOUT_GROUP = saved;
+		}
+	} finally {
+		// Windows 上目录句柄回收比文件慢半拍；断言已经跑完，清理失败不应把用例判红。
+		try {
+			rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+		} catch {
+			/* 句柄由 OS 在进程退出时回收 */
+		}
 	}
 });

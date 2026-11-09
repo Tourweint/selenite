@@ -9,9 +9,12 @@ import type { SkillStore } from "./skills.ts";
 import { createTools } from "./tools.ts";
 import {
 	ATTENTION_ONE_QUESTION,
+	CLARIFY_CONTRACT,
 	GROUNDING_DISCIPLINE,
 	REPORT_FOUR_LINES,
 	WORK_SILENCE_DISCIPLINE,
+	clarifyContractEnabled,
+	clarifyContractFor,
 	formatReport,
 	startDelegation,
 	type DelegationEvent,
@@ -24,7 +27,11 @@ import {
 	lifecycleOwnsVerification,
 	verificationIronLawFor,
 } from "./agent/turn-gate.ts";
-import { buildPartnerDisciplineSection, buildPartnerTurnContext } from "./agent/partner-context.ts";
+import {
+	ARTIFACT_HANDOFF,
+	buildPartnerDisciplineSection,
+	buildPartnerTurnContext,
+} from "./agent/partner-context.ts";
 import { PARTNER_CONTRACT_SECTIONS, PartnersStore, partnerContractTemplate } from "./partners.ts";
 import { failureStreak } from "./failure-streak.ts";
 
@@ -41,6 +48,8 @@ const FIXED_TEXTS: Array<[string, string]> = [
 	["ATTENTION_ONE_QUESTION", ATTENTION_ONE_QUESTION],
 	["REPORT_FOUR_LINES", REPORT_FOUR_LINES],
 	["TAKEOVER_HINT", TAKEOVER_HINT],
+	["CLARIFY_CONTRACT", CLARIFY_CONTRACT],
+	["ARTIFACT_HANDOFF", ARTIFACT_HANDOFF],
 ];
 
 test("固定字节：七段口径都不含日期 / 时刻 / 会话 id", () => {
@@ -48,6 +57,47 @@ test("固定字节：七段口径都不含日期 / 时刻 / 会话 id", () => {
 		assert.ok(text.length > 0, `${name} 不能为空`);
 		assert.equal(/20\d{2}-\d{1,2}-\d{1,2}/.test(text), false, `${name} 不含日期`);
 		assert.equal(/\d{1,2}:\d{2}/.test(text), false, `${name} 不含时刻`);
+	}
+});
+
+test("开工前先问清：三件事 + 一次一问 + 小活不问；只给总管", () => {
+	assert.match(CLARIFY_CONTRACT, /大活（要改 3 个以上文件 \/ 要跑命令 \/ 涉及不可逆操作）/);
+	assert.match(CLARIFY_CONTRACT, /对象是什么/);
+	assert.match(CLARIFY_CONTRACT, /期望的结果长什么样/);
+	assert.match(CLARIFY_CONTRACT, /怎么算做好了/);
+	assert.match(CLARIFY_CONTRACT, /一次只问一个/);
+	assert.match(CLARIFY_CONTRACT, /小活不问/);
+	// 只给总管 / 主对话：普通执事走 partner-context 的提问纪律。
+	assert.equal(clarifyContractFor(null), CLARIFY_CONTRACT);
+	assert.equal(clarifyContractFor("chief"), CLARIFY_CONTRACT);
+	assert.equal(clarifyContractFor("partner-uuid"), undefined);
+	// 开关旁路（缺省开；显式 false 关）。
+	assert.equal(clarifyContractEnabled({} as NodeJS.ProcessEnv), true);
+	assert.equal(clarifyContractEnabled({ AGENT_CLARIFY_CONTRACT: "false" } as NodeJS.ProcessEnv), false);
+	const saved = process.env.AGENT_CLARIFY_CONTRACT;
+	process.env.AGENT_CLARIFY_CONTRACT = "false";
+	try {
+		assert.equal(clarifyContractFor(null), undefined);
+	} finally {
+		if (saved === undefined) delete process.env.AGENT_CLARIFY_CONTRACT;
+		else process.env.AGENT_CLARIFY_CONTRACT = saved;
+	}
+});
+
+test("产物交接：产物落盘、点名路径、下一棒从产物开始", () => {
+	assert.match(ARTIFACT_HANDOFF, /产出物必须落盘/);
+	assert.match(ARTIFACT_HANDOFF, /下一棒从产物开始，不要从转述开始/);
+	assert.match(ARTIFACT_HANDOFF, /点名产物路径/);
+	assert.match(ARTIFACT_HANDOFF, /没有落盘的「做完了」不算交接完成/);
+	assert.ok(buildPartnerDisciplineSection("partner-uuid").includes(ARTIFACT_HANDOFF), "执事纪律段包含产物交接");
+	assert.ok(buildPartnerDisciplineSection("chief").includes(ARTIFACT_HANDOFF), "总管纪律段同样包含");
+	const saved = process.env.PARTNER_ARTIFACT_HANDOFF;
+	process.env.PARTNER_ARTIFACT_HANDOFF = "false";
+	try {
+		assert.ok(!buildPartnerDisciplineSection("partner-uuid").includes(ARTIFACT_HANDOFF), "开关关掉整段不注入");
+	} finally {
+		if (saved === undefined) delete process.env.PARTNER_ARTIFACT_HANDOFF;
+		else process.env.PARTNER_ARTIFACT_HANDOFF = saved;
 	}
 });
 
@@ -121,7 +171,7 @@ test("装配：执事轮输入含四段纪律；总管轮不重复验证铁律",
 		assert.match(chief.discipline, /【裁决纪律】/);
 		assert.equal(
 			buildPartnerDisciplineSection("chief"),
-			[RULING_DISCIPLINE, WORK_SILENCE_DISCIPLINE, GROUNDING_DISCIPLINE, ATTENTION_ONE_QUESTION].join(
+			[RULING_DISCIPLINE, WORK_SILENCE_DISCIPLINE, GROUNDING_DISCIPLINE, ARTIFACT_HANDOFF, ATTENTION_ONE_QUESTION].join(
 				"\n\n",
 			),
 		);

@@ -47,7 +47,12 @@ import {
 import { capabilityOf } from "../tool-capability.ts";
 // 中途播报（2026-11-10 批 13 §三）：工具本身在 tools.ts 注册，这里只做上架范围闸门。
 import { PROGRESS_TOOL_NAME, progressReportAllowed, progressReportEnabled } from "../progress-report.ts";
-import { emitDelegation, type DelegationReport } from "../delegation.ts";
+import {
+	clarifyContractEnabled,
+	clarifyContractFor,
+	emitDelegation,
+	type DelegationReport,
+} from "../delegation.ts";
 // 同类失败连击（批 12 遗留补全 2026-11-10）：tool-error / timeout 两类在此接线。
 import { failureStreak } from "../failure-streak.ts";
 import { auditGateBlock, type GateBlockCategory } from "../gate-audit.ts";
@@ -62,6 +67,13 @@ import {
 	resolvePersona,
 } from "../partners.ts";
 import { pathGuardBlockReason } from "../path-guard.ts";
+// 世界状态重验（2026-11-10 批 19 §七）：批准时拍指纹，执行前再拍一张。
+import {
+	WORLD_STATE_TOOLS,
+	confirmWorldStateEnabled,
+	verifyWorldState,
+	worldStateTarget,
+} from "../world-state.ts";
 // 只读白名单（2026-11-09 任务书 T3 §2）：只能把 ask 变 allow，碰不到 block。
 import { isReadOnlyShellCommand, readAllowlistEnabled } from "../read-allowlist.ts";
 // bash 超时转后台（2026-11-09 任务书 T3 §3）：识别内核超时文案 + 起 detached 子进程。
@@ -132,6 +144,9 @@ import { buildPartnerTurnContext } from "./partner-context.ts";
 // 执事轮装配的履历摘要读口（2026-11-08 刀二 E2）：结构化查询 work 记录，不走语义召回。
 import { workSummaryFor } from "../work-record.ts";
 import { BASH_TIMEOUT_S, approvalMode, policy, readOnlyBlockReason } from "./policy.ts";
+// 授权重验的档位来源（2026-11-10 批 19 §六）：tools / delegation 不静态 import policy，
+// 由装配层在模块加载时把"读 policy"的函数注进去（arch-guard 的 env 加载顺序不被污染）。
+import { setApprovalLevelSource } from "../delegation-authority.ts";
 import {
 	CTX,
 	DB_PATH,
@@ -159,6 +174,9 @@ import {
 	toolsBlocked,
 	waitForApproval,
 } from "./turn-gate.ts";
+
+// 装配层认领"当前审批档位"这个事实源（批 19 §六）；在模块加载时接上，续跑时现读。
+setApprovalLevelSource(() => policy.approvalLevel);
 
 /**
  * Agent 装配。
@@ -503,6 +521,26 @@ async function openHarness(): Promise<Harness> {
 						return lifecycleOwnsVerification(partnerId) ? VERIFICATION_IRON_LAW : undefined;
 					},
 				},
+				// 开工前先问清（2026-11-10 批 19 §一）：紧接 persona / 验证铁律，固定字节。
+				// 只给总管 / 主对话；普通执事的提问纪律在 partner-context，worker 不背这套。
+				{
+					key: "clarify_contract",
+					render: async (input) => {
+						if (!clarifyContractEnabled()) return undefined;
+						let partnerId: string | null = null;
+						if (COMPANIONS_ENABLED) {
+							try {
+								partnerId = partnersStore().partnerIdOfSession(Number(input.conversationId));
+							} catch {
+								// 档案库读失败：按总管处理
+							}
+						}
+						if (partnerId && partnerId !== CHIEF_PARTNER_ID) return undefined;
+						const kinds = await input.read.snapshot(ChatKinds, CTX);
+						if (kinds?.byInternal?.[String(input.conversationId)] === "worker") return undefined;
+						return clarifyContractFor(partnerId);
+					},
+				},
 				// 注入防线（2026-11-09 T2）：排在 persona / 验证铁律之后，固定字节、不含动态内容。
 				// 关掉时整段省略（不注空壳）。
 				{
@@ -746,6 +784,13 @@ async function openHarness(): Promise<Harness> {
 									// async 形态下 deadlineAt 只作展示（旧客户端倒计时），不据此结算
 									timeoutMs: timeoutS * 1000,
 									...(autonomous ? { origin: "autonomous" as const } : {}),
+									// 世界状态快照（批 19 §七）：只对 write / edit，且开关打开时才拍；
+									// 缺省不写 = 与改动前逐字节一致。
+									...(() => {
+										if (!confirmWorldStateEnabled()) return {};
+										const world = worldStateTarget(call.name, call.arguments, sessionCwd());
+										return world ? { worldState: world } : {};
+									})(),
 								});
 								// 借派活通道发给对话流（见 delegation.ts 模块头注释）
 								emitDelegation(api.conversationId, {
@@ -758,7 +803,10 @@ async function openHarness(): Promise<Harness> {
 								});
 								return pending;
 							};
-							if (mode === "async" && approvalStore().consumeGrant(api.conversationId, call.name, argsHash)) {
+							const grant = mode === "async"
+								? approvalStore().consumeGrantEntry(api.conversationId, call.name, argsHash)
+								: null;
+							if (mode === "async" && grant) {
 								// 命中：批准的调用，复判等待期里可能变了的策略与边界（与旧路径同一口径）
 								const recheck = readOnlyBlockReason(call.name);
 								if (recheck) return blocked(recheck, "policy", "policy-recheck");
@@ -769,6 +817,17 @@ async function openHarness(): Promise<Harness> {
 									cwd: sessionCwd(),
 								});
 								if (recheckPath) return blocked(recheckPath, "path", "path-guard-recheck");
+								// 世界状态重验（批 19 §七）：批准后目标文件被改过 → 拒绝执行，让模型重新确认。
+								// 只对 write / edit；开关默认关。
+								if (confirmWorldStateEnabled() && WORLD_STATE_TOOLS.has(call.name)) {
+									const verdict = verifyWorldState(
+										grant.worldState,
+										worldStateTarget(call.name, call.arguments, sessionCwd()),
+									);
+									if (!verdict.ok) {
+										return blocked(verdict.reason, "approval", "world-state");
+									}
+								}
 							} else if (mode === "blocking") {
 								const status = await waitForApproval(openPending(), timeoutS, context.abortSignal);
 								if (status !== "approved") {
