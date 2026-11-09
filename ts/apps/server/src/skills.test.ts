@@ -340,3 +340,54 @@ test("技能端点：目录内符号链接指向外部时读写一律 400", asyn
 	const list = await json(await app.request("/api/v1/agent/skills"));
 	assert.deepEqual(list.items, [], "越界的符号链接不该出现在管理列表里");
 });
+
+test("技能端点：列表带 usageCount / lastUsedAt；>90 天未用标 stale（只标记，不删不移）", async () => {
+	const dir = freshDir("api-usage");
+	const app = apiApp(dir);
+	await put(app, "used-skill", "常用技能\n正文");
+	await put(app, "stale-skill", "很久没用的技能\n正文");
+
+	const usagePath = join(root, "skill-usage.json");
+	writeFileSync(
+		usagePath,
+		JSON.stringify({
+			usage: {
+				"used-skill": { count: 3, lastUsedAt: new Date().toISOString() },
+				"stale-skill": {
+					count: 1,
+					lastUsedAt: new Date(Date.now() - 100 * 86_400_000).toISOString(),
+				},
+			},
+		}),
+		"utf8",
+	);
+	const previousUsage = process.env.AGENT_SKILL_USAGE_PATH;
+	process.env.AGENT_SKILL_USAGE_PATH = usagePath;
+	try {
+		const body = await json(await app.request("/api/v1/agent/skills"));
+		const items = body.items as Array<{
+			name: string;
+			usageCount?: number;
+			lastUsedAt?: string | null;
+			stale: boolean;
+		}>;
+		const used = items.find((item) => item.name === "used-skill")!;
+		const stale = items.find((item) => item.name === "stale-skill")!;
+		assert.equal(used.usageCount, 3);
+		assert.equal(used.stale, false, "最近用过不标 stale");
+		assert.equal(stale.usageCount, 1);
+		assert.equal(stale.stale, true, "超过 90 天未用应标 stale");
+		assert.ok(existsSync(join(dir, "stale-skill.md")), "只标记，不删文件");
+
+		// 回滚开关：SKILL_USAGE=false → 不吐用量字段，也不标 stale
+		process.env.SKILL_USAGE = "false";
+		const offBody = await json(await app.request("/api/v1/agent/skills"));
+		const offItems = offBody.items as Array<Record<string, unknown>>;
+		assert.equal("usageCount" in offItems[0]!, false, "关着时不吐用量字段");
+		assert.equal(offItems[0]!.stale, false);
+	} finally {
+		if (previousUsage === undefined) delete process.env.AGENT_SKILL_USAGE_PATH;
+		else process.env.AGENT_SKILL_USAGE_PATH = previousUsage;
+		delete process.env.SKILL_USAGE;
+	}
+});

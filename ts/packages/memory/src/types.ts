@@ -69,7 +69,16 @@ export type MemoryKind =
 	 * 未过期时在注入里单独成组、优先于普通事实。降级是读时惰性的（见 engine.recall），
 	 * 不建定时器。巩固不合并、时间衰减不作用（与 `work` 同待遇）。
 	 */
-	| "intention";
+	| "intention"
+	/**
+	 * 经验层（2026-11-10 批 17 §一）：「这类活下次可以怎么做」。
+	 *
+	 * 与 `work` 的分工：work 是**发生过什么**的 append-only 台账（不进召回）；
+	 * experience 是**下次怎么做**的可复用做法，进召回、不参与时间衰减（经验不该过期）、
+	 * 参与巩固合并（同 scope 规范化等价的经验可合并——与 work 相反）。
+	 * 写入只发生在派单 `done` 且过价值门槛时（见 server 的 work-record.ts），宁缺毋滥。
+	 */
+	| "experience";
 
 /**
  * 可信度来源。参考 mnemopi 的 veracity：
@@ -101,6 +110,15 @@ export interface MemoryRecord {
 	/** 召回次数与最近一次召回时间，用于强化 */
 	recallCount: number;
 	lastRecalledAt: string | null;
+	/**
+	 * 使用次数与最近使用时间（2026-11-10 批 17 §三）。
+	 *
+	 * 与 `recallCount` 的区别：那是「被召回」的旧账（时间衰减的锚点也跟着它走），
+	 * 这里只服务于**巩固时的保留优先级排序**（使用越多越该留）。召回命中时两者一起 +1。
+	 * 可选字段：老数据没有这两列，读出来按 0 / null 处理。
+	 */
+	usageCount?: number;
+	lastUsedAt?: string | null;
 }
 
 /** 抽取层产出、尚未入库的候选 */
@@ -134,6 +152,13 @@ export interface RecallHit {
 /** 注入结果的预算约束：prompt 里给记忆留多少字 */
 export interface InjectOptions {
 	maxChars?: number;
+	/**
+	 * 是否渲染「也许值得提起」分组（2026-11-10 批 17 §二）。
+	 *
+	 * 默认 false —— 这是"主动开口"类能力，先观望。只有总管主对话装配层会传 true
+	 * （执事轮不传：避免执事跑题）。开关落在 server 的 env，这一层不读环境变量。
+	 */
+	proactive?: boolean;
 }
 
 export interface RememberInput {
