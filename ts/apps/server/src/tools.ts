@@ -50,6 +50,8 @@ import {
 	type DelegationMirrorEntry,
 	type DelegationReport,
 } from "./delegation.ts";
+// 证据裁判（2026-11-10 批 14）：验收 fail 时起 read-only 子会话，结论回传 chancellor 返工判定。
+import { withDelegationJudge } from "./delegation-judge.ts";
 // 裁决纪律（2026-11-10 批 12 §一.2）：与执事轮输入同一份文本，接在 delegate 描述尾部。
 import { RULING_DISCIPLINE } from "./agent/turn-gate.ts";
 // 执事自建巡逻核心（2026-11-08 刀二 E4）：与 HTTP 端点共用校验 / 归属 / 上限。
@@ -897,11 +899,11 @@ export function createTools(deps: ToolDeps) {
 					run: (request, options) =>
 						run(
 							{ ...request, workRoot: chancellorWorkRoot() },
-							{
+							withDelegationJudge({
 								...options,
 								// 后台执行不能挂本轮对话的 abortSignal：用户这一轮结束不该杀掉任务。
 								...(asyncMode ? {} : { signal: context.abortSignal }),
-							},
+							}),
 						),
 					emit: emitDelegation,
 					report: deps.reportDelegation,

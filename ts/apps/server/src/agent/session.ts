@@ -9,6 +9,7 @@ import {
 	type LiveState,
 	type SettledSubmissionRecord,
 	type Tx,
+	type ToolRegistration,
 } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import type { MemoryRecord } from "@lifediary/memory";
@@ -191,6 +192,32 @@ export async function configureResearchChat(
 			instructions: prompt,
 			tools,
 			...(lifediaryExt ? { extensions: { remove: [lifediaryExt] } } : {}),
+		},
+		CTX,
+	);
+}
+
+/**
+ * 证据裁判会话的配置（2026-11-10 批 14）。
+ *
+ * 与 `configureResearchChat` 同一形态：工具面由调用方给**白名单**（只有 `read` 与
+ * 只读 bash），摘掉 `lifediaryExt` 后 write / edit / delegate / skill / partner_*
+ * 根本不在 agent.tools 里——不是"靠 hook 事后拦"，是模型看不到。
+ *
+ * `cwd` 指向**合并后的项目根**：裁判读到的必须是落盘事实，不是某个 worker 的工作副本。
+ */
+export async function configureJudgeChat(
+	chat: ResolvedChat,
+	prompt: string,
+	tools: readonly ToolRegistration[],
+	cwd?: string,
+): Promise<void> {
+	await chat.conversation.configure(
+		{
+			instructions: prompt,
+			tools,
+			...(lifediaryExt ? { extensions: { remove: [lifediaryExt] } } : {}),
+			...(cwd ? { cwd } : {}),
 		},
 		CTX,
 	);

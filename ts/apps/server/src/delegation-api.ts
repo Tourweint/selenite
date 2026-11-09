@@ -14,6 +14,8 @@ import {
 	type DelegationRuntime,
 } from "./delegation.ts";
 import { DelegationReceipts, requestFingerprint } from "./delegation-receipts.ts";
+// 证据裁判（2026-11-10 批 14）：重派 / 回话续跑出来的新单同样带裁判。
+import { withDelegationJudge } from "./delegation-judge.ts";
 import { partnersStore } from "./partners.ts";
 import { DelegationMessages } from "./delegation-messages.ts";
 // 重试 / 回话续跑的终态同样落一条 work 履历（刀二 E2）。
@@ -698,7 +700,10 @@ function toProjectRef(project: Ticket["options"]["project"]): ProjectRef | undef
 function defaultRetryRuntime(store: DelegationReceipts): DelegationRuntime {
 	return {
 		run: (request, options) =>
-			runChancellor({ ...request, workRoot: chancellorWorkRoot() }, options),
+			runChancellor(
+				{ ...request, workRoot: chancellorWorkRoot() },
+				withDelegationJudge(options),
+			),
 		emit: emitDelegation,
 		// 回话续跑同样双写进专线（8g）：重试出来的新单也自带同一条单的会话。
 		mirror: taskConversationMirror,
