@@ -19,6 +19,8 @@ import type {
 	ChancellorRequest,
 	TicketResult,
 } from "../../../../../chancellor/src/index.ts";
+import { TAKEOVER_HINT } from "./agent/turn-gate.ts";
+import { failureStreak, takeoverHintEnabled } from "./failure-streak.ts";
 import type { ProjectRef } from "./projects.ts";
 import {
 	delegationMessages,
@@ -289,6 +291,21 @@ export const ATTENTION_REPLY_GUIDANCE = [
 ].join("\n");
 
 /**
+ * 提问纪律：一次一个问题（2026-11-10 批 12 §一.7.1，四#4）。
+ *
+ * 为什么要有：把三个问题塞进一段话，人只会回答最后一个；问「这样可以吗」等于
+ * 把判断又推回给人。点名对象、给出选项，才是一次能结束的提问。
+ *
+ * 固定字节；落点：执事轮输入（partner-context），与上面的 attention 应答口径同族。
+ */
+export const ATTENTION_ONE_QUESTION = [
+	"【提问纪律】",
+	"- 一次只问一个具体问题，别把三个问题塞进一段话。",
+	"- 问题要点名对象与期望：「第 2 条的标题你想要哪种：A / B」，不要问「这样可以吗」。",
+	"- 问题若是因为某条消息 / 某个文件引起的，点名那条消息或文件，别让人自己去回忆。",
+].join("\n");
+
+/**
  * 周期盘点口径（2026-11-08 员工人格化刀二 E4，方案 §五.5：不打分、不搞 KPI 数字）。
  *
  * 提示词层，两处消费：`tools.ts` 的 `routine_manage` 工具描述、
@@ -302,6 +319,38 @@ export const WORK_REVIEW_GUIDANCE = [
 	"接了几单、成了几单、哪一单卡过、有什么该记取的教训（不打分、不列 KPI 数字）；",
 	"把这段总结用 remember 落一条 kind=episode 的记忆，再向主人汇报。",
 	"不要自己悄悄创建回顾规则——要主人配，或主人说一句你再用 routine_manage 建。",
+].join("\n");
+
+/**
+ * 委派回报四行格式（2026-11-10 批 12 §一.3，按 nightly-labs 的汇报口径改写）。
+ *
+ * 为什么要有：工人交回来的常常是"过程流水账"或一句"做完了"，派活的人拿不到
+ * 可核对的东西，只能再问一遍。四行把**结论 / 成果 / 证据 / 解锁**固定成同一形状，
+ * 读的人一眼知道要不要接手。
+ *
+ * 固定字节；落点：`delegate` 工具描述（派活前让总管 / 执事把这套口径交待给工人）。
+ */
+export const REPORT_FOUR_LINES = [
+	"状态：完成 / 部分完成 / 卡住",
+	"结果：一句话说清做成了什么（不是过程）",
+	"证据：拿什么证明的（改了哪个文件 / 跑了什么命令 / 看到什么输出）",
+	"解锁：卡住时，下一步需要谁做什么；没卡住就写「无」",
+].join("\n");
+
+/**
+ * 干活期间的沉默纪律 + 交付物自含证据（2026-11-10 批 12 §一.6，四#3 剩余）。
+ *
+ * 为什么要有：执事接单后每做一步播报一句「我正在…」，等于把人的注意力当进度条用；
+ * 真正需要人的时候（结果 / 决定 / 交不了差）反而埋在一串噪声里。交付物另附证据，
+ * 是为了让"做完了"可被核对，而不是让主人再跑一遍验证。
+ *
+ * 固定字节；落点：执事轮输入（partner-context，总管与执事共用同一装配点）。
+ */
+export const WORK_SILENCE_DISCIPLINE = [
+	"【干活期间】",
+	"- 接单确认只发一次，点名说清要干什么；之后干活期间不说话（不播报「我正在…」）。",
+	"- 再开口只有三种情况：有结果了 / 需要人做决定 / 干不完要交代。",
+	"- 交付物必须自己带着验收证据：改了哪个文件、跑了什么、看到什么。没有证据的「做完了」不算完成。",
 ].join("\n");
 
 /** 注入给 chancellor 的宰相身份正文上限（批次D D2）：宿主侧按 UTF-8 字节截断，chancellor 只透传。 */
@@ -333,6 +382,13 @@ function truncateUtf8(text: string, maxBytes: number): string {
 export function formatReport(
 	result: TicketResult,
 	domain: string,
+	options: {
+		/**
+		 * 同类失败连击已达阈值（2026-11-10 批 12 §一.4）：在 needs_you 那行末尾
+		 * 追加接管建议。默认 false，旧调用方逐字节不变。
+		 */
+		takeover?: boolean;
+	} = {},
 ): DelegationReport {
 	const phase: DelegationPhase =
 		result.status === "done"
@@ -347,7 +403,9 @@ export function formatReport(
 		phase === "done"
 			? `已完成：${result.line}`
 			: phase === "needs_you"
-				? `有一项需要你处理：${result.attention?.question ?? result.line}`
+				? `有一项需要你处理：${result.attention?.question ?? result.line}${
+						options.takeover ? `（${TAKEOVER_HINT}）` : ""
+					}`
 				: phase === "aborted"
 					? `已中断：${result.line}`
 					: `未完成：${result.line}`;
@@ -518,7 +576,26 @@ export function startDelegation(
 		// 也不为它发任何事件（作废单点 4：SSE 不再为该单发事件）。
 		// 执行端照常跑完、产物照常落盘——只是 harness 不再搬运结果。
 		if (canceled) return;
-		const report = formatReport(result, kick.domain);
+		// 同类失败连击（2026-11-10 批 12 §一.4）：按来源（领域，无领域退回 worker）
+		// 记连续失败，成功一次清零。取消是用户动作，不记（上面已 return）。
+		// 只有 needs_you / failed / aborted 算失败；idle 是等子单的中间态，不记。
+		const streakSource = kick.domain || "worker";
+		let takeover = false;
+		if (result.status === "done") {
+			failureStreak().recordSuccess(streakSource);
+		} else if (
+			result.status === "needs_you" ||
+			result.status === "failed" ||
+			result.status === "aborted"
+		) {
+			const streak = failureStreak().recordFailure(
+				streakSource,
+				result.status === "needs_you" ? "needs_you" : "unresolved",
+			);
+			// 开关只决定"追不追加那句话"；连击记账照常（关掉后仍可在别处观察）。
+			takeover = streak.suggestTakeover && takeoverHintEnabled();
+		}
+		const report = formatReport(result, kick.domain, { takeover });
 		// 结论也落成一条留言：任务详情里 out / in 成对，读起来就是一段经过
 		recordMessage("in", result.line || report.text, { kind: "system", name: "执行端" });
 		// 双写（8g）：REPORT 落 assistant 条目，语义 = 执行端向主人汇报。
@@ -543,7 +620,10 @@ export function startDelegation(
 				ticketId,
 				domain: kick.domain,
 				kind: result.attention.kind,
-				question: result.attention.question,
+				// 接管建议只追加在卡片文案末尾（批 12 §一.4.3）；问题原文不动。
+				question: takeover
+					? `${result.attention.question}\n${TAKEOVER_HINT}`
+					: result.attention.question,
 			});
 		}
 		// idle = 父单还有子任务没终态，或等下一个触发：只更新事件，不汇报。

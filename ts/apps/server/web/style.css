@@ -562,11 +562,11 @@ html[data-sidebar="closed"] .side-rail {
 .side-item:disabled:hover { background: transparent; color: var(--text-3); }
 
 /*
- * 侧栏底部常驻区（2026-11-09 四改）：齿轮在左、状态灯紧贴其右侧，同一行（用户口径：左右排列）。
+ * 侧栏底部常驻区（2026-11-09 五改）：齿轮在左、状态灯顶到**最右边**（用户拍板，不贴齿轮）。
  *
- * 2026-11-08 版把点放在"剩余宽度居中"——232px 侧栏里它悬在约六成宽的半空，
- * 左不着齿轮右不着边，用户看着怪。现在贴着齿轮当状态灯，整组与上方导航同一条左轴；
- * 收起态的点整个退役（信息挪进齿轮 data-tip）。
+ * 演变：08 版点在剩余宽度居中（悬空怪）→ 09 上午贴齿轮旁（用户否了）→ 现在推到最右。
+ * margin-left:auto 把点顶到行尾，与齿轮一左一右各占一头；收起态的点整个退役
+ * （信息挪进齿轮 data-tip）。
  */
 .side-foot {
   display: flex; flex-direction: row; align-items: center; gap: 10px;
@@ -593,9 +593,10 @@ html[data-sidebar="closed"] .side-rail {
    外层 grid 居中比 flex + margin 稳（按钮本身不再撑满一行）。 */
 .side-foot .foot-gear svg { width: 22px; height: 22px; margin: 0; }
 
-/* 状态：一颗点紧贴齿轮右侧、与齿轮垂直居中（10px 行高，点 8px） */
+/* 状态：一颗点顶到行尾最右（margin-left:auto），与齿轮垂直居中（10px 行高，点 8px） */
 .side-foot .status {
   flex: none;
+  margin-left: auto;
   display: flex; align-items: center; justify-content: center;
   height: 10px;
 }
@@ -2034,16 +2035,12 @@ html[data-route="settings"] .sidebar { display: none; }
 .row-main { min-width: 0; }
 .row-label { font-size: 13.5px; font-weight: 500; color: var(--text); }
 .row-hint { font-size: 12px; color: var(--text-2); margin-top: 3px; line-height: 1.45; }
-/* ⓘ 悬停解释（2026-11-08）：描述性 hint 不再常驻标签底下，标签旁一颗 ⓘ，悬停出全句。
+/* 悬停解释（2026-11-08 建 ⓘ、2026-11-09 二改图标退役）：解释直接挂在标签文字的
+   data-tip 上，悬停即出（全局 hover-tip 系统）；带 data-tip 的标签用 help 光标示意。
    状态/结果类文案仍走 .row-hint 常驻（rowMarkup 的 inlineHint）。 */
-.row-tip {
-  display: inline-flex; align-items: center;
-  width: 13px; height: 13px; margin-left: 6px; vertical-align: -2px;
-  color: var(--text-3); cursor: help;
-  transition: color .15s ease;
-}
-.row-tip:hover { color: var(--text); }
-.row-tip svg { width: 13px; height: 13px; }
+.row-label[data-tip],
+.mem-sec-title[data-tip],
+.set-card-title[data-tip] { cursor: help; }
 .row-control { flex: 0 1 auto; min-width: 0; display: flex; align-items: center; gap: 8px; }
 
 .divider { height: 1px; margin: 0 16px; background: var(--divider); }
@@ -4861,6 +4858,7 @@ select.cs-input:disabled { color: var(--text-3); cursor: default; }
 /* 技能（2026-11-08 扫尾批 9-S）
    列表 = 一张卡一份手册：点整块打开编辑，删除在右侧。名字用 mono，和文件名对得上。 */
 .sk-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+.sk-head-actions { display: flex; align-items: center; gap: 8px; flex: none; }
 .sk-path { margin-top: 2px; color: var(--text-3); font-family: var(--mono); font-size: 11px; overflow-wrap: anywhere; }
 .sk-list { display: flex; flex-direction: column; gap: 10px; }
 .sk-empty { padding: 20px; }
@@ -4874,7 +4872,32 @@ select.cs-input:disabled { color: var(--text-3); cursor: default; }
 .sk-item-name { font-family: var(--mono); font-size: 12px; color: var(--text-3); }
 .sk-item-summary { font-size: 13px; line-height: 1.5; color: var(--text); overflow-wrap: anywhere; }
 .sk-item-meta { font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
-.sk-item-actions { display: flex; align-items: center; gap: 6px; }
+.sk-item-actions { display: flex; align-items: center; gap: 10px; }
+
+/* 技能斜杠选择器（2026-11-09）：输入「/xxx」时贴着输入框上沿弹可用技能单 */
+#skill-suggest {
+  position: fixed;
+  z-index: 70;
+  min-width: 300px; max-width: 400px;
+  max-height: 300px; overflow: auto;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--outline);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-menu);
+}
+.skill-suggest-item {
+  display: flex; flex-direction: column; gap: 2px; width: 100%;
+  padding: 7px 9px; text-align: left;
+  border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--text); cursor: pointer;
+}
+.skill-suggest-item.is-active { background: var(--card-high); }
+.skill-suggest-item .s-name { font-family: var(--mono); font-size: 12.5px; font-weight: 600; }
+.skill-suggest-item .s-sum {
+  font-size: 11.5px; color: var(--text-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .sk-readonly {
   padding: 6px 10px; border-radius: var(--r-md);
   background: var(--card-high); color: var(--text-2);

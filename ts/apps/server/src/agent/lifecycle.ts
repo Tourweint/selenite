@@ -132,6 +132,8 @@ import {
 	LOOP_GUARD_BLOCK_MESSAGE,
 	MAX_TURNS,
 	TURN_LIMIT_INSTRUCTION,
+	VERIFICATION_IRON_LAW,
+	lifecycleOwnsVerification,
 	aborting,
 	limitHits,
 	runTurns,
@@ -419,7 +421,24 @@ async function openHarness(): Promise<Harness> {
 						return resolvePersona(partnersStore, PERSONA);
 					},
 				},
-				// 注入防线（2026-11-09 T2）：紧跟在 persona 之后，固定字节、不含动态内容。
+				// 验证铁律（2026-11-10 批 12 §一.1）：紧跟 persona，固定字节、不含动态内容。
+				// 非总管的执事轮由 partner-context 注入（他们的 persona 段本来就不出现），
+				// 这里跳过，免得同一段在一轮里进两遍；查档案失败按总管处理（主对话不能哑）。
+				{
+					key: "verification_iron_law",
+					render: (input) => {
+						let partnerId: string | null = null;
+						if (COMPANIONS_ENABLED) {
+							try {
+								partnerId = partnersStore().partnerIdOfSession(Number(input.conversationId));
+							} catch {
+								// 档案库读失败：按总管处理
+							}
+						}
+						return lifecycleOwnsVerification(partnerId) ? VERIFICATION_IRON_LAW : undefined;
+					},
+				},
+				// 注入防线（2026-11-09 T2）：排在 persona / 验证铁律之后，固定字节、不含动态内容。
 				// 关掉时整段省略（不注空壳）。
 				{
 					key: "injection_guard",

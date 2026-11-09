@@ -5,9 +5,12 @@ import { Store } from "../../../../../../chancellor/src/store.ts";
 import type { Ticket } from "../../../../../../chancellor/src/types.ts";
 import { approvalStore } from "../approvals.ts";
 import { INJECTION_GUARD, injectionGuardEnabled } from "./injection-guard.ts";
+import { RULING_DISCIPLINE, verificationIronLawFor } from "./turn-gate.ts";
 import {
+	ATTENTION_ONE_QUESTION,
 	ATTENTION_REPLY_GUIDANCE,
 	WORK_REVIEW_GUIDANCE,
+	WORK_SILENCE_DISCIPLINE,
 	chancellorWorkRoot,
 } from "../delegation.ts";
 import {
@@ -308,6 +311,23 @@ export function buildPartnerGoalSection(
 
 // ── 整体装配 ─────────────────────────────────────────────
 
+/**
+ * 纪律段（2026-11-10 批 12）：执事轮常量口径，全部固定字节、不含动态内容。
+ *
+ * 为什么集中在这里：任务的七件里有四件是提示词纪律，它们与契约 / 状态一样
+ * 「每轮现渲染、不写进 transcript」。**总管（chief）的验证铁律由 lifecycle 的
+ * persona 段注入**，这里跳过，避免同一段进两遍；普通执事没有 persona 段，在这里补。
+ */
+export function buildPartnerDisciplineSection(partnerId: string): string {
+	const blocks = [
+		verificationIronLawFor(partnerId),
+		RULING_DISCIPLINE,
+		WORK_SILENCE_DISCIPLINE,
+		ATTENTION_ONE_QUESTION,
+	];
+	return blocks.filter((part): part is string => Boolean(part)).join("\n\n");
+}
+
 export interface PartnerTurnContext {
 	/** 身份正文（当前版本快照）。调用方放进 instructions；这里带出来是为了整体断言。 */
 	soul: string;
@@ -315,22 +335,25 @@ export interface PartnerTurnContext {
 	contract: string | null;
 	/** 当前目标段（E4，无目标 → null） */
 	goal: string | null;
+	/** 纪律段（批 12：验证 / 裁决 / 干活期间 / 提问；固定字节，永远非空） */
+	discipline: string;
 	/** 当前在办段（三项皆空 + 无履历 → null） */
 	status: string | null;
 	/** 注入防线段（开关关 → null；固定字节，不随轮次变化） */
 	guard: string | null;
-	/** 注入模型请求的附加段：契约 + 目标 + 在办 + 防线（都空 → undefined） */
+	/** 注入模型请求的附加段：契约 + 目标 + 纪律 + 在办 + 防线（都空 → undefined） */
 	text: string | undefined;
 }
 
 /**
  * 执事轮输入的单一装配点（E1 + E5）。
  *
- * 顺序固定：**SOUL（身份）→ 岗位契约 → 当前目标 → 当前在办**。前两段来自同一个身份版本，
- * 后两段现查现拼。`text` 只含后三段：SOUL 在 instructions 里，重复一遍等于每轮
+ * 顺序固定：**SOUL（身份）→ 岗位契约 → 当前目标 → 纪律 → 当前在办**。前两段来自同一个身份版本，
+ * 后三段现查现拼。`text` 只含后四段：SOUL 在 instructions 里，重复一遍等于每轮
  * 白付一份 token，还会让模型看到两个版本的身份。
  *
- * 刀二只在同一装配点加两段（目标 / 履历摘要），**没有第二条注入通道**。
+ * 刀二只在同一装配点加两段（目标 / 履历摘要），批 12 再加一段固定纪律，
+ * **没有第二条注入通道**。
  */
 export function buildPartnerTurnContext(
 	partnerId: string,
@@ -345,11 +368,13 @@ export function buildPartnerTurnContext(
 		current?.contractSource ?? store.readContractFromHome(partnerId),
 	) ?? null;
 	const goal = buildPartnerGoalSection(partnerId, store) ?? null;
+	// 纪律段（批 12）放在动态状态之前：固定字节先落，在办清单每轮变。
+	const discipline = buildPartnerDisciplineSection(partnerId);
 	const status = buildPartnerStatusSection(partnerId, conversationId, { ...deps, store }) ?? null;
 	// 注入防线（2026-11-09 T2）：放在执事轮输入尾部；固定字节，开关只决定注不注。
 	const guard = injectionGuardEnabled() ? INJECTION_GUARD : null;
-	const text = [contract, goal, status, guard]
+	const text = [contract, goal, discipline, status, guard]
 		.filter((part): part is string => Boolean(part))
 		.join("\n\n");
-	return { soul, contract, goal, status, guard, text: text || undefined };
+	return { soul, contract, goal, discipline, status, guard, text: text || undefined };
 }

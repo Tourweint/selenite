@@ -1,4 +1,5 @@
 import { approvalStore, type ApprovalOutcome, type PendingApproval } from "../approvals.ts";
+import { CHIEF_PARTNER_ID } from "../partners.ts";
 
 /**
  * 等一次审批：答复 / 超时 / 本轮中止，谁先到算谁。
@@ -68,6 +69,73 @@ export const MAX_TURNS = (() => {
 
 /** 撞上限时给用户看的话 */
 export const TURN_LIMIT_MESSAGE = "工具调用已达到上限，请重新发送请求。";
+
+/**
+ * 验证铁律（2026-11-10 批 12 §一.1，按 superpowers verification-before-completion 改写）。
+ *
+ * 为什么要有这一条：模型最常犯的错不是做错，是**没验就说好**——「应该能过」「上次跑过」
+ * 一句话把没跑过的验证糊过去；人拿着假结论继续往下走，比直接报错贵得多。
+ * 运行时闸门管不到「这句结论有没有证据」，只能把「先跑、再看、后说」钉成硬纪律。
+ *
+ * 固定字节：不含时间 / 会话 / 名字，开关只决定注不注。
+ * 落点：总管 persona 段之后（lifecycle 的 section）与执事轮输入（partner-context；
+ * 非总管执事由那里注入，lifecycle 侧跳过，避免同一段进两遍）。
+ */
+export const VERIFICATION_IRON_LAW = [
+	"【验证铁律】",
+	"- 这一轮里没有真的跑过验证，就不许说「完成了 / 修好了 / 通过了」。",
+	"- 五步门：先说清「哪条命令能证明这句话」→ 真跑 → 读完整个输出（看退出码、数失败数）→ 与结论对账 → 才下结论。",
+	"- 主张 ↔ 证据对照：",
+	"  · 说「测试通过」→ 要有 0 失败的输出；「上次跑过」「应该能过」不算。",
+	"  · 说「改好了」→ 要看到原症状已经消失；只改了代码不算。",
+	"  · 说「做完了」→ 要有落盘的改动；自己说做完了不算。",
+	"  · 说「要求都满足了」→ 要逐条对着清单打勾；测试全绿不算。",
+	"- 红旗（出现即是在撒谎，回头去跑）：说「应该 / 大概 / 看起来没问题」；没跑就先说「很好 / 完成 / 搞定」；想「就这一次不用验」；累了想收工。",
+].join("\n");
+
+/**
+ * 验证铁律归谁：总管（chief）与没有执事身份的会话由 lifecycle 的 section 注入；
+ * 普通执事由 `partner-context` 注入。两个入口共用下面这对判定，
+ * 单测能直接断言「谁有、谁没有」而不用起 harness。
+ */
+
+/** 执事轮输入用：只有非总管执事在这里补（总管的在 persona 段之后，避免一段进两遍）。 */
+export function verificationIronLawFor(partnerId: string | null): string | undefined {
+	return partnerId && partnerId !== CHIEF_PARTNER_ID ? VERIFICATION_IRON_LAW : undefined;
+}
+
+/** lifecycle section 用：总管 / 无执事身份的会话由 persona 侧负责。 */
+export function lifecycleOwnsVerification(partnerId: string | null): boolean {
+	return !partnerId || partnerId === CHIEF_PARTNER_ID;
+}
+
+/**
+ * 裁决纪律（2026-11-10 批 12 §一.2，按 superpowers subagent-driven-development 改写）。
+ *
+ * 为什么要有这一条：执行方最贵的浪费不是做错，是**停下来等一句「要不要继续」**——
+ * 人的一天被切成十几个确认回合。纪律的落点是「四停之外自己裁决 + 留一行账」：
+ * 人靠那行账事后推翻，而不是靠事前逐个点头。
+ *
+ * 固定字节；落点两处：执事轮输入（partner-context）与 `delegate` 工具描述尾部。
+ */
+export const RULING_DISCIPLINE = [
+	"【裁决纪律】",
+	"- 继续干，别反复请示：「要不要我继续」是在浪费人的一天；计划里的事一口气做完。",
+	"- 只有四种情况停下问人：① 不可逆或破坏性的操作；② 安全敏感的动作；③ 工作目录之外的副作用（合并、推共享分支、发布）；④ 计划烂到往前每一步都是猜。",
+	"- 四停之外一律自己裁决，并记一行账：`裁决：<决定了什么> — <为什么> — <错了的代价>`；写进给主人的汇报或任务单留言，让人事后看得见、能推翻。",
+	"- 一个错的裁决，人看得见、也能让我改；一个卡着等回答的会话，花掉的是人一整天。",
+].join("\n");
+
+/**
+ * 同类失败三次后的接管提示（2026-11-10 批 12 §一.4）。
+ *
+ * 为什么要有：运行时只认得「同一次工具调用重复」与「重派次数」，认不出
+ * 「同一来源在同一类别上连着栽三次」。到第三次，继续换花样试的收益已经低于
+ * 把决定权交回人手里；文案只说事实与出路，不评价模型。
+ *
+ * 固定字节（「3」是阈值不是动态内容）；`AGENT_TAKEOVER_HINT=false` 时调用方不追加。
+ */
+export const TAKEOVER_HINT = "这类问题已经连着 3 次没解决，建议你来接手，或者换个说法重新派一次。";
 
 /** 撞上限之后告诉模型的：别再动手了，用人话收尾 */
 export const TURN_LIMIT_INSTRUCTION =

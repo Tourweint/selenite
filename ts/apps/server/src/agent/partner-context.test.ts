@@ -55,16 +55,22 @@ function ticketFixture(
 	} as Ticket;
 }
 
-test("契约：新建执事播种四节空模板；改契约 = 双快照 bump，SOUL / 能力延续", () => {
+test("契约：新建执事播种四节标题（决策分级带调查铁律）；改契约 = 双快照 bump，SOUL / 能力延续", () => {
 	const { root, db, homes } = tempRoot();
 	const store = new PartnersStore(db, homes);
 	try {
 		const partner = store.create("小澈");
 		assert.equal(partner.currentVersion, 1);
 		assert.ok(existsSync(join(store.homeOf(partner.id), "CONTRACT.md")), "新建执事要有 CONTRACT.md");
-		assert.equal(store.readContractFromHome(partner.id), partnerContractTemplate());
-		// 空模板 = 只有四个标题，渲染出来是空（没有一节有正文）
-		assert.equal(renderContractSection(store.readContractFromHome(partner.id)), undefined);
+		const template = store.readContractFromHome(partner.id) ?? "";
+		assert.equal(template, partnerContractTemplate());
+		// 2026-11-10 批 12 §一.5：四节标题逐字不动，「决策分级」带调查铁律默认正文。
+		for (const section of PARTNER_CONTRACT_SECTIONS) {
+			assert.ok(template.includes(`## ${section}`), `标题逐字保留：${section}`);
+		}
+		assert.match(template, /没有调查不许改/);
+		assert.match(template, /同一条思路连修 3 次还不行/);
+		assert.match(renderContractSection(template) ?? "", /## 决策分级[\s\S]*自带验收证据/);
 
 		const v1Soul = store.getVersion(partner.id, 1)?.soulSource ?? "";
 		const contract1 = [
@@ -265,11 +271,16 @@ test("装配：SOUL / 岗位契约 / 当前在办三段各自可见，顺序 = �
 	}
 });
 
-test("空态省略：空契约 + 无在办 / 无待批 / 无最近单 → 契约与在办都不注入", () => {
+test("空态省略：空契约 + 无在办 → 契约与在办不注入；纪律段与防线照常", () => {
 	const { root, db, homes, workRoot } = tempRoot();
 	const store = new PartnersStore(db, homes);
 	try {
 		const partner = store.create("空空");
+		// 新执事的模板自 2026-11-10 起带「决策分级」默认正文；这里改回纯标题，验证空节省略。
+		store.bumpContract(
+			partner.id,
+			PARTNER_CONTRACT_SECTIONS.map((section) => `## ${section}`).join("\n\n"),
+		);
 		store.linkSession({
 			partnerId: partner.id,
 			role: "canonical",
@@ -284,11 +295,16 @@ test("空态省略：空契约 + 无在办 / 无待批 / 无最近单 → 契约
 		assert.match(context.soul, /空空/, "SOUL 永远在");
 		assert.equal(context.contract, null);
 		assert.equal(context.status, null);
-		// 2026-11-09 T2：注入防线默认开 → 前两段空时 text 只剩防线（固定字节）
+		// 2026-11-10 批 12：纪律段固定注入（非总管执事含验证铁律），在办清单空不影响它。
+		assert.match(context.discipline, /【验证铁律】/);
+		assert.match(context.discipline, /【裁决纪律】/);
+		assert.match(context.discipline, /【干活期间】/);
+		assert.match(context.discipline, /【提问纪律】/);
+		// 2026-11-09 T2：注入防线默认开 → 前两段空时 text = 纪律 + 防线
 		assert.match(context.guard ?? "", /【材料安全】/);
-		assert.equal(context.text, context.guard, "没有契约/在办时只注入防线");
+		assert.equal(context.text, `${context.discipline}\n\n${context.guard}`);
 
-		// 开关关 → 三段都空，text 回到 undefined（与旧行为逐字节一致）
+		// 开关关 → 契约与在办仍空；防线消失后 text 只剩纪律段（不再回到 undefined）
 		const previous = process.env.AGENT_INJECTION_GUARD;
 		try {
 			process.env.AGENT_INJECTION_GUARD = "false";
@@ -298,7 +314,7 @@ test("空态省略：空契约 + 无在办 / 无待批 / 无最近单 → 契约
 				approvals: { pendingOf: () => [] },
 			});
 			assert.equal(bare.guard, null);
-			assert.equal(bare.text, undefined, "防线关 + 两段都空 → 不注入任何东西");
+			assert.equal(bare.text, bare.discipline, "防线关 + 两段都空 → 只剩固定纪律段");
 		} finally {
 			if (previous === undefined) delete process.env.AGENT_INJECTION_GUARD;
 			else process.env.AGENT_INJECTION_GUARD = previous;
