@@ -15,12 +15,14 @@ import {
   type ThinkingLevel,
   type TurnUsage,
 } from "@lifediary/shared";
+import { scopeKey } from "@lifediary/memory";
 import {
   addReminder,
   applyChatMode,
   chatKindOf,
   chatMetaSummary,
   chatStream,
+  chatTitles,
   contextUsageOf,
   externalChatIds,
   forkForEdit,
@@ -31,6 +33,7 @@ import {
   memoryEngine,
   openChat,
   pinChat,
+  preferenceScopeOf,
   readTranscript,
   renameChat,
   restoreChats,
@@ -113,6 +116,23 @@ import {
   setRuntimeModel,
 } from "./provider.ts";
 import { injectProviderKeys } from "./provider-secrets.ts";
+// 会话导出「接续文件」（2026-11-10 批 20 §一）：拼接是纯函数，正文只在响应体里出现。
+import {
+  buildHandoff,
+  chatExportHandoffEnabled,
+  HANDOFF_MEMORY_LIMIT,
+  handoffFileName,
+  parseHandoffLimit,
+  type HandoffMemory,
+} from "./chat-handoff.ts";
+// 旧会话定点找回（2026-11-10 批 20 §四）：按消息下标取窗口，不改内核加 seq。
+import {
+  chatContextLookupEnabled,
+  contextMessageOf,
+  parseAroundIndex,
+  parseContextRadius,
+  sliceAroundIndex,
+} from "./chat-context.ts";
 import { chancellorWorkRoot } from "./delegation.ts";
 import { DelegationReceipts } from "./delegation-receipts.ts";
 import {
@@ -993,6 +1013,71 @@ app.get("/api/v1/agent/chat/:conversationId/messages", async (c) => {
 });
 
 /**
+ * 记忆摘要（导出「接续文件」用）：该**作用域**的 preference + experience，最多 20 条。
+ *
+ * 主对话看 `global`，执事会话看自己的 `partner:<uuid>` 键空间——与偏好落点同口径
+ * （`preferenceScopeOf`）。`session:` 原始对话沉淀刻意不导：接续文件要的是"关于这个人 /
+ * 这段关系"的长期事实，不是又抄一遍对话。
+ */
+function handoffMemoryOf(internalId: number): HandoffMemory {
+  if (!memoryEngine) return { enabled: false, scope: "", items: [] };
+  const scope = scopeKey(preferenceScopeOf(internalId));
+  try {
+    const records = memoryEngine.list({ scopes: [scope], limit: 200 });
+    const items = records
+      .filter((record) => record.kind === "preference" || record.kind === "experience")
+      .slice(0, HANDOFF_MEMORY_LIMIT)
+      .map((record) => ({ kind: record.kind, content: record.content }));
+    return { enabled: true, scope, items };
+  } catch {
+    // 只给枚举级说明：原始错误可能带上路径 / 正文
+    console.warn("[export] 记忆摘要读取失败（本次不带记忆）");
+    return { enabled: true, scope, items: [], note: "服务端读取记忆失败" };
+  }
+}
+
+/**
+ * 会话导出「接续文件」（2026-11-10 批 20 §一，接口文档 §2.2.1）。
+ *
+ * 一份 markdown：角色说明 + 读取说明 + 记忆摘要（最多 20 条）+ 最近 N 轮原文。
+ * **一次性响应体，不落服务端磁盘**（隐私口径）；`format` 只支持 `handoff`。
+ * 回滚：`CHAT_EXPORT_HANDOFF=false` → 404（与其它能力端点同口径）。
+ */
+app.get("/api/v1/agent/chat/:conversationId/export", async (c) => {
+  if (!chatExportHandoffEnabled()) return c.json({ error: "not_found" }, 404);
+
+  const rawFormat = (c.req.query("format") ?? "").trim().toLowerCase();
+  if (rawFormat && rawFormat !== "handoff") {
+    return c.json({ error: "bad_request", message: "只支持 format=handoff" }, 400);
+  }
+  const turns = parseHandoffLimit(c.req.query("limit"));
+  if (turns === null) {
+    return c.json({ error: "bad_request", message: "limit 必须是 1–200 的整数" }, 400);
+  }
+  if (!readLlmConfig()) return c.json({ ok: false, reason: "llm_not_configured" }, 503);
+
+  const chat = await openChat(c.req.param("conversationId"));
+  if (!chat) return c.json({ error: "unknown_conversation" }, 404);
+
+  const [messages, chatKind] = await Promise.all([readTranscript(chat, 0), chatKindOf(chat)]);
+  const document = buildHandoff({
+    conversationId: chat.externalId,
+    title: chatTitles()[chat.externalId],
+    kind: chatKind,
+    messages,
+    memory: handoffMemoryOf(chat.internalId),
+    turns,
+  });
+
+  // 只作为一次性下载返回：不写盘、不进缓存。文件名只带会话 uuid 前 8 位，不含标题。
+  return c.body(document.markdown, 200, {
+    "content-type": "text/markdown; charset=utf-8",
+    "content-disposition": `attachment; filename="${handoffFileName(chat.externalId)}"`,
+    "cache-control": "no-store",
+  });
+});
+
+/**
  * 手动停止当前这一轮。
  *
  * 跟"客户端断开"是两件事：这是人的明确意图。停了之后再说一句话就是新一轮。
@@ -1121,12 +1206,76 @@ app.get("/api/v1/agent/export", async (c) => {
   }
 });
 
-/** 上下文占用（批次二）：给标题栏「已用/窗口」徽标用；mock 下两者皆 null */
+/**
+ * 上下文占用（批次二）：给标题栏「已用/窗口」徽标用；mock 下两者皆 null。
+ *
+ * 2026-11-10 批 20 §四在同一条路径上加了**定点找回**（`?aroundIndex=<n>&radius=5`）：
+ * 无 `aroundIndex` 时逐字节保持旧语义（`{used, window}`），因为早先已有客户端在用；
+ * 带 `aroundIndex` 时走「旧会话定点找回」。两条语义靠参数分流，回滚开关只管新语义。
+ */
 app.get("/api/v1/agent/chat/:conversationId/context", async (c) => {
-  if (!readLlmConfig()) return c.json({ used: null, window: null });
+  const rawIndex = c.req.query("aroundIndex");
+
+  // ── 旧语义：上下文占用（无 aroundIndex 时行为不变）──
+  if (rawIndex === undefined) {
+    if (!readLlmConfig()) return c.json({ used: null, window: null });
+    const chat = await openChat(c.req.param("conversationId"));
+    if (!chat) return c.json({ error: "unknown_conversation" }, 404);
+    return c.json(await contextUsageOf(chat.conversation));
+  }
+
+  // ── 新语义：旧会话定点找回（2026-11-10 批 20 §四，接口文档 §2.2.2）──
+  if (!chatContextLookupEnabled()) return c.json({ error: "not_found" }, 404);
+
+  const aroundIndex = parseAroundIndex(rawIndex);
+  if (aroundIndex === null) {
+    return c.json(
+      { error: "bad_request", message: "aroundIndex 必须是非负整数（消息数组下标，从 0 开始）" },
+      400,
+    );
+  }
+  const radius = parseContextRadius(c.req.query("radius"));
+  if (radius === null) {
+    return c.json({ error: "bad_request", message: "radius 必须是 0–50 的整数" }, 400);
+  }
+  if (!readLlmConfig()) return c.json({ ok: false, reason: "llm_not_configured" }, 503);
+
   const chat = await openChat(c.req.param("conversationId"));
   if (!chat) return c.json({ error: "unknown_conversation" }, 404);
-  return c.json(await contextUsageOf(chat.conversation));
+
+  // transcript 没有 seq（前置勘察确认）：用消息数组下标寻址，不为这个改内核。
+  const messages = await readTranscript(chat, 0);
+  const total = messages.length;
+  if (total === 0) {
+    return c.json({
+      conversationId: chat.externalId,
+      total,
+      aroundIndex,
+      radius,
+      from: 0,
+      to: -1,
+      messages: [],
+    });
+  }
+  if (aroundIndex >= total) {
+    return c.json(
+      { error: "bad_request", message: `aroundIndex 超出范围（共 ${total} 条）`, total },
+      400,
+    );
+  }
+
+  const slice = sliceAroundIndex(messages, aroundIndex, radius);
+  return c.json({
+    conversationId: chat.externalId,
+    total,
+    aroundIndex,
+    radius,
+    from: slice.from,
+    to: slice.to,
+    messages: slice.messages.map((message, offset) =>
+      contextMessageOf(message, slice.from + offset),
+    ),
+  });
 });
 
 /** 内容级跨会话搜索（批次二）：逐会话 LIKE，q 最少 2 字符（见接口文档 §2.5） */
