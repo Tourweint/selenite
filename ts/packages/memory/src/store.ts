@@ -1,4 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
+import { memoryRedactEnabled, redactSecrets } from "./redact.ts";
 import type { MemoryKind, MemoryRecord } from "./types.ts";
 
 /**
@@ -81,6 +82,7 @@ const COLUMNS = [
 	"superseded_by",
 	"recall_count",
 	"last_recalled_at",
+	"expires_at",
 ] as const;
 
 function rowToRecord(row: Record<string, unknown>): MemoryRecord {
@@ -98,6 +100,7 @@ function rowToRecord(row: Record<string, unknown>): MemoryRecord {
 		recallCount: Number(row.recall_count),
 		lastRecalledAt:
 			row.last_recalled_at === null ? null : String(row.last_recalled_at),
+		expiresAt: row.expires_at === null || row.expires_at === undefined ? null : String(row.expires_at),
 	};
 }
 
@@ -114,7 +117,8 @@ CREATE TABLE IF NOT EXISTS memories (
 	valid_until      TEXT,
 	superseded_by    TEXT,
 	recall_count     INTEGER NOT NULL DEFAULT 0,
-	last_recalled_at TEXT
+	last_recalled_at TEXT,
+	expires_at       TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_memories_scope   ON memories(scope);
 CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at);
@@ -170,6 +174,17 @@ function buildFtsMatch(text: string): string | null {
 export interface SqliteMemoryStoreOptions {
 	/** 是否启用 FTS5 trigram 候选集（2026-11-04 批次三）。默认 true；false = 回到批次一行为。 */
 	fts?: boolean;
+	/**
+	 * 落盘前凭据打码（2026-11-09 T4 §2）。不传 = 读 `MEMORY_REDACT`（默认开）；
+	 * 传 false = 直通（回滚）。唯一收口点在 `put()` / `patch(content)`：
+	 * 工具、抽取、导入、巩固、日记摄入全都走这里。
+	 */
+	redact?: boolean;
+}
+
+/** 测试 / 无盘场景的打码开关口径与 SQLite 版一致。 */
+export interface InMemoryStoreOptions {
+	redact?: boolean;
 }
 
 /**
@@ -180,11 +195,28 @@ export interface SqliteMemoryStoreOptions {
 export class SqliteMemoryStore implements MemoryStore {
 	private readonly db: DatabaseSync;
 	private readonly ftsEnabled: boolean;
+	private readonly redact: boolean;
 
 	constructor(path: string, options: SqliteMemoryStoreOptions = {}) {
 		this.db = new DatabaseSync(path);
 		this.db.exec(SCHEMA);
+		this.ensureColumns();
+		this.redact = options.redact ?? memoryRedactEnabled();
 		this.ftsEnabled = options.fts !== false && this.initFts();
+	}
+
+	/**
+	 * 老库补列（2026-11-09 T4 §3）：`CREATE TABLE IF NOT EXISTS` 只对新库生效，
+	 * 已有 `memory.db` 不会因为 SCHEMA 改了长出新列。个人记忆量级，ALTER 瞬时完成；
+	 * 不做版本表——一列一判，比半成品的迁移框架更稳。
+	 */
+	private ensureColumns(): void {
+		const columns = this.db.prepare("PRAGMA table_info(memories)").all() as Array<{
+			name?: unknown;
+		}>;
+		if (!columns.some((column) => String(column.name) === "expires_at")) {
+			this.db.exec("ALTER TABLE memories ADD COLUMN expires_at TEXT");
+		}
 	}
 
 	/**
@@ -221,6 +253,9 @@ export class SqliteMemoryStore implements MemoryStore {
 	}
 
 	put(record: MemoryRecord): void {
+		// 隐私收口点（2026-11-09 T4 §2）：所有写入方（remember / 抽取 / 导入 / 巩固 /
+		// 日记摄入）最终都走这里。只改 content，其余字段原样落库。
+		const content = this.redact ? redactSecrets(record.content) : record.content;
 		this.db
 			.prepare(
 				`INSERT INTO memories (${COLUMNS.join(", ")})
@@ -229,13 +264,13 @@ export class SqliteMemoryStore implements MemoryStore {
 				   kind=excluded.kind, scope=excluded.scope, content=excluded.content,
 				   importance=excluded.importance, veracity=excluded.veracity,
 				   source=excluded.source, valid_until=excluded.valid_until,
-				   superseded_by=excluded.superseded_by`,
+				   superseded_by=excluded.superseded_by, expires_at=excluded.expires_at`,
 			)
 			.run(
 				record.id,
 				record.kind,
 				record.scope,
-				record.content,
+				content,
 				record.importance,
 				record.veracity,
 				record.source,
@@ -244,9 +279,10 @@ export class SqliteMemoryStore implements MemoryStore {
 				record.supersededBy,
 				record.recallCount,
 				record.lastRecalledAt,
+				record.expiresAt ?? null,
 			);
 		// 镜像维护：put 一律 delete+insert（upsert 可能换了 content）
-		if (this.ftsEnabled) this.replaceFtsRow(record.id, record.content);
+		if (this.ftsEnabled) this.replaceFtsRow(record.id, content);
 	}
 
 	private replaceFtsRow(id: string, content: string): void {
@@ -331,6 +367,7 @@ export class SqliteMemoryStore implements MemoryStore {
 			supersededBy: "superseded_by",
 			recallCount: "recall_count",
 			lastRecalledAt: "last_recalled_at",
+			expiresAt: "expires_at",
 		};
 
 		const sets: string[] = [];
@@ -338,8 +375,13 @@ export class SqliteMemoryStore implements MemoryStore {
 		for (const [key, value] of Object.entries(patch)) {
 			const column = map[key];
 			if (!column) continue;
+			// content 也是写入：同一把打码尺子，避免"改一条就漏一次"
+			const stored =
+				key === "content" && this.redact && typeof value === "string"
+					? redactSecrets(value)
+					: value;
 			sets.push(`${column} = ?`);
-			params.push(value as string | number | null);
+			params.push(stored as string | number | null);
 		}
 		if (sets.length === 0) return;
 
@@ -452,6 +494,11 @@ export class SqliteMemoryStore implements MemoryStore {
 /** 测试与无盘场景用。行为与 SQLite 版一致，只是一个 Map。 */
 export class InMemoryStore implements MemoryStore {
 	private readonly rows = new Map<string, MemoryRecord>();
+	private readonly redact: boolean;
+
+	constructor(options: InMemoryStoreOptions = {}) {
+		this.redact = options.redact ?? memoryRedactEnabled();
+	}
 
 	/**
 	 * 没有索引，`filter.text` 一律忽略（2026-11-04 批次三的刻意行为）。
@@ -462,7 +509,8 @@ export class InMemoryStore implements MemoryStore {
 	}
 
 	put(record: MemoryRecord): void {
-		this.rows.set(record.id, { ...record });
+		const content = this.redact ? redactSecrets(record.content) : record.content;
+		this.rows.set(record.id, { ...record, content });
 	}
 
 	get(id: string): MemoryRecord | undefined {
@@ -484,7 +532,9 @@ export class InMemoryStore implements MemoryStore {
 	patch(id: string, patch: Partial<Omit<MemoryRecord, "id">>): void {
 		const row = this.rows.get(id);
 		if (!row) return;
-		this.rows.set(id, { ...row, ...patch });
+		const next = { ...row, ...patch };
+		if (this.redact && patch.content !== undefined) next.content = redactSecrets(next.content);
+		this.rows.set(id, next);
 	}
 
 	remove(id: string): boolean {

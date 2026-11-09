@@ -384,7 +384,14 @@ class RoutineEngine {
 			delete finished.running[routine.id];
 			run.status = result.ok ? "success" : "failed";
 			run.endedAt = new Date().toISOString();
-			run.summary = (result.text || result.error || "").replace(/\s+/g, " ").slice(0, 200);
+			// 安静轮（2026-11-09 T2）：只记枚举，不把"无事发生"的正文写进摘要
+			run.summary = result.quiet
+				? "quiet"
+				: (result.text || result.error || "").replace(/\s+/g, " ").slice(0, 200);
+			if (result.quiet) {
+				// 日志纪律：只说"这轮安静"，不记产出正文
+				console.log(`[routine] 本轮无更新（规则 ${routine.id.slice(0, 8)}），不写摘要`);
+			}
 			if (!result.ok) run.error = result.error;
 			finished.runs.push(run);
 			if (finished.runs.length > RUN_HISTORY_LIMIT) {

@@ -22,6 +22,7 @@ import type {
 } from "@lifediary/shared";
 import { approvalStore } from "../approvals.ts";
 import type { OutgoingPart } from "../attachments.ts";
+import { userInputSubmission } from "./user-input.ts";
 import { watchDelegation, type DelegationEvent } from "../delegation.ts";
 import { memoryExtractMode, preferenceExtractionEnabled } from "../memory-extract.ts";
 import { COMPANIONS_ENABLED, partnersStore } from "../partners.ts";
@@ -781,14 +782,9 @@ export async function* chatStream(
 		const busyBeforeSubmit = await conversationIsBusy(input.conversation);
 
 		const submission = await input.conversation.submit(
-			{
-				type: "input",
-				// 有图提交分段，无图仍提交纯字符串（2026-11-08 扫尾批 4a）
-				content: input.parts ?? input.text,
-				requestId: input.requestId,
-				// 缺省 followUp = 改动前的排队行为；steer 只在客户端明确要求时才试
-				...(input.whenBusy ? { whenBusy: input.whenBusy } : {}),
-			},
+			// 产品承诺（2026-11-09 T2 §5）：人的消息永远插得上话——忙时 followUp
+			// 排队到本轮收尾，不拒、不丢。缺省值写死在 userInputSubmission，不靠内核默认。
+			userInputSubmission(input),
 			CTX,
 		);
 

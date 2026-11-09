@@ -84,9 +84,12 @@ export class MemoryEngine {
 			supersededBy: null,
 			recallCount: 0,
 			lastRecalledAt: null,
+			expiresAt: input.expiresAt ?? null,
 		};
 		this.store.put(record);
-		return record;
+		// 回读：store 在落盘前会做凭据打码（2026-11-09 T4 §2），
+		// 调用方拿到的应是"真正入库的那份"，否则工具会把未打码原文再吐一遍。
+		return this.store.get(record.id) ?? record;
 	}
 
 	/**
@@ -157,16 +160,44 @@ export class MemoryEngine {
 	/** 每轮开头调用；命中即回写强化信息 */
 	recall(query: RecallQuery): RecallHit[] {
 		const at = this.now();
+		// 意图过期降级（2026-11-09 T4 §3）：**读时惰性**，不建定时器。
+		// 选读时而不是巩固入口：巩固只在会话边界触发，跨天回来打开应用可能先读后巩固；
+		// 读时做，才能保证"看到的 kind 一定没过期"。降级 = 原地改 kind，不删记录。
+		this.demoteExpiredIntentions(query.scopes, at);
 		const hits = this.retriever.recall(query, this.store, at);
 		for (const hit of hits) {
 			// 衰减 + 使用强化同点落地（2026-11-08 扫尾批 6）：写回时锚点也推到 now，
 			// 所以同一个值不会被反复衰减（见 decay.ts 头注）。
+			// intention 不参与时间衰减（2026-11-09 T4 §3，与 work 同待遇）：到期由 expiresAt 管，
+			// 不该再被 importance 衰减二次惩罚；命中强化照旧。
 			touchRecall(this.store, hit.record, at, {
-				...(this.decayDaily > 0 ? { decayDaily: this.decayDaily } : {}),
+				...(this.decayDaily > 0 && hit.record.kind !== "intention"
+					? { decayDaily: this.decayDaily }
+					: {}),
 				reinforce: RECALL_BOOST,
 			});
 		}
 		return hits;
+	}
+
+	/**
+	 * 把 `expiresAt` 已过的 intention 原地降级为 fact（保留 id / 正文 / 时间）。
+	 *
+	 * 只扫 `kinds:["intention"]` 的窗口，规模是"当前没兑现的打算"，不会随记忆总量增长。
+	 * 时间解析不了（坏数据）不降级——宁可让它继续被当意图，也不要误改。
+	 */
+	private demoteExpiredIntentions(scopes: string[], at: Date): void {
+		const now = at.getTime();
+		for (const record of this.store.search({
+			...(scopes.length ? { scopes } : {}),
+			kinds: ["intention"],
+			limit: 10_000,
+		})) {
+			if (!record.expiresAt) continue;
+			const expires = Date.parse(record.expiresAt);
+			if (Number.isNaN(expires) || expires >= now) continue;
+			this.store.patch(record.id, { kind: "fact", expiresAt: null });
+		}
 	}
 
 	/**
@@ -184,7 +215,12 @@ export class MemoryEngine {
 		if (hits.length === 0) return "";
 
 		const preferences = hits.filter((hit) => hit.record.kind === "preference");
-		const others = hits.filter((hit) => hit.record.kind !== "preference");
+		// 未过期的 intention 紧随偏好单独成组（2026-11-09 T4 §3）：
+		// 过期的那批已在 recall() 里降级为 fact，到不了这里。
+		const intentions = hits.filter((hit) => hit.record.kind === "intention");
+		const others = hits.filter(
+			(hit) => hit.record.kind !== "preference" && hit.record.kind !== "intention",
+		);
 
 		const lines: string[] = [];
 		let used = 0;
@@ -203,9 +239,15 @@ export class MemoryEngine {
 				if (!push(`- ${flat(hit.record.content)}`)) break;
 			}
 		}
+		if (intentions.length > 0) {
+			push("【打算】");
+			for (const hit of intentions) {
+				if (!push(`- ${flat(hit.record.content)}`)) break;
+			}
+		}
 		if (others.length > 0) {
 			// 只有偏好时不要空标题；只有其它时保持 2026-11-06 之前的形状（逐字节兼容）
-			if (preferences.length > 0) push("【其它】");
+			if (preferences.length > 0 || intentions.length > 0) push("【其它】");
 			for (const hit of others) {
 				if (!push(`- [${hit.record.kind}] ${flat(hit.record.content)}`)) break;
 			}
@@ -241,7 +283,9 @@ export class MemoryEngine {
 		for (const scope of this.store.listScopes()) {
 			if (!scope.startsWith("session:") && !scope.startsWith("partner:")) continue;
 			pruned += this.store.pruneOldest(scope, cap, {
-				protectKinds: ["preference"],
+				// intention 与 preference 同档保护（2026-11-09 T4 §3）：没兑现的打算
+				// 不该因为会话记忆封顶被悄悄删掉；过期后它会自己降级为 fact，届时按普通规则走。
+				protectKinds: ["preference", "intention"],
 				protectReferenced: true,
 			});
 		}
@@ -271,12 +315,14 @@ export class MemoryEngine {
 	 * 不在这里做关键词搜索：千级规模先给滚动，真需要再加（同设置页不做全局搜索的口径）。
 	 */
 	list(options: { scopes?: string[]; limit?: number; includeSuperseded?: boolean } = {}): MemoryRecord[] {
+		// 列表同样做惰性降级（2026-11-09 T4 §3）：设置页不该把过期的"打算"还挂在意图组里。
+		this.demoteExpiredIntentions(options.scopes ?? [], this.now());
 		const rows = this.store.search({
 			...(options.scopes?.length ? { scopes: options.scopes } : {}),
 			includeSuperseded: options.includeSuperseded ?? false,
 			limit: Math.max(1, Math.min(2000, options.limit ?? 500)),
 		});
-		const order: Record<string, number> = { preference: 0, fact: 1, entity: 2, episode: 3 };
+		const order: Record<string, number> = { preference: 0, intention: 1, fact: 2, entity: 3, episode: 4 };
 		return [...rows].sort((a, b) => {
 			const rank = (order[a.kind] ?? 9) - (order[b.kind] ?? 9);
 			return rank !== 0 ? rank : a.createdAt < b.createdAt ? 1 : -1;

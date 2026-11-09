@@ -1575,6 +1575,21 @@ html[data-acts="0"] .wp { display: none !important; }
   font-size: 12.5px; color: var(--text-2); cursor: pointer;
 }
 .approval.resolved { opacity: .72; }
+/* 带说明拒绝（2026-11-09 §4.3）：默认只有一行小字入口，展开后再出输入框 */
+.approval-more {
+  align-self: flex-start;
+  border: 0; background: none; padding: 0;
+  color: var(--text-3); font-size: 12px; cursor: pointer;
+  text-decoration: underline; text-underline-offset: 3px;
+}
+.approval-more:hover { color: var(--text-2); }
+.approval-feedback { display: flex; flex-direction: column; gap: 6px; }
+.approval-feedback[hidden] { display: none; }
+.approval-feedback .cs-textarea { font-size: 12.5px; }
+.approval-pop-question {
+  font-size: 13px; line-height: 1.55; color: var(--text);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
 
 /* ── 审批浮窗（2026-11-08）：右下角常驻，人在别的会话/页面也弹 ──
    压过侧栏与抽屉（z0/40），低于模态（z60）；宽度 320 与模型菜单同档。 */
@@ -2614,6 +2629,20 @@ button.tk-archive-bar:focus-visible { outline: 2px solid var(--accent-line); out
 .td-head .td-time { margin-left: auto; }
 .td-prompt { margin: 10px 0 0; font-size: 15px; line-height: 1.6; font-weight: 600; color: var(--text); }
 .td-meta { margin-top: 8px; font-size: 12px; color: var(--text-2); display: flex; gap: 12px; flex-wrap: wrap; }
+/* 计划附件（2026-11-09 §2.4）：默认一行"现在到哪一步"，点开才展开全部 */
+.td-steps { margin-top: 10px; font-size: 12.5px; color: var(--text-2); }
+.td-steps > summary {
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+  cursor: pointer; list-style: none;
+}
+.td-steps > summary::-webkit-details-marker { display: none; }
+.td-steps > summary::before { content: "▸"; color: var(--text-3); }
+.td-steps[open] > summary::before { content: "▾"; }
+.td-step-label { color: var(--text-3); }
+.td-step-now { color: var(--text); }
+.td-step-round { color: var(--text-3); font-size: 11.5px; }
+.td-step-list { margin: 8px 0 0; padding-left: 22px; line-height: 1.7; color: var(--text-2); }
+.td-step-list li { margin: 2px 0; }
 .td-card .tk-bar { margin-top: 12px; height: 4px; }
 .td-note {
   margin: 12px 0 0; padding: 8px 10px;
@@ -4820,6 +4849,12 @@ select.cs-input:disabled { color: var(--text-3); cursor: default; }
   overflow-wrap: anywhere;
 }
 .mem-item-meta { font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+/* 意图徽章（2026-11-09 T4 §3）：只给 kind=intention，与组标题同词"打算" */
+.mem-item-badge {
+  display: inline-block; margin-right: 6px; padding: 0 6px;
+  border-radius: 999px; font-size: 10.5px; line-height: 16px;
+  color: var(--text-2); background: var(--card);
+}
 .mem-item-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; }
 .mem-act { font-size: 12px; padding: 4px 8px; }
 

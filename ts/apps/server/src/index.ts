@@ -54,6 +54,8 @@ import {
 } from "./attachments.ts";
 import { createAuthMiddleware } from "./auth.ts";
 import { ChatEventStore, sseSeqEnabled } from "./chat-events.ts";
+// stream_stalled 看门狗（2026-11-09 任务书 T3 §4）：只记账，不改行为、不中断。
+import { stallWatchdog } from "./watchdog.ts";
 import { mountDiary } from "./diary.ts";
 import { mountOpenAiCompat } from "./openai-compat.ts";
 import { PairingStore, buildPairUrl, resolvePairBase } from "./pairing.ts";
@@ -74,7 +76,7 @@ import { COMPANIONS_ENABLED, partnersStore } from "./partners.ts";
 import { ensurePartnerSession } from "./partner-runtime.ts";
 import { routineEngine } from "./routines.ts";
 import { watchAllEvents } from "./agent.ts";
-import { autonomyEnabled, autonomyObserver } from "./autonomy.ts";
+import { autonomyMode, autonomyObserver, observeCount24h } from "./autonomy.ts";
 import { mountApprovalApi } from "./approval-api.ts";
 import { mountMemoryApi } from "./memory-api.ts";
 // 技能管理（2026-11-08 扫尾批 9-S）：设置页「技能」分区的增删改查，写操作锁死在技能目录内。
@@ -120,6 +122,8 @@ import {
 	type DeadLetterChild,
 } from "./recovery-report.ts";
 import { recoverDelegations, type RecoveredTicket } from "../../../../../chancellor/src/index.ts";
+// 恢复注记（2026-11-09 任务书 T3 §5）：只有进程内记账，无存储依赖。
+import { markRecoverResume, recoverNoteEnabled } from "./agent/recover-note.ts";
 import { Store } from "../../../../../chancellor/src/store.ts";
 import { listManagers } from "../../../../../chancellor/src/manager/registry.ts";
 
@@ -579,9 +583,15 @@ app.get("/healthz", (c) => {
     llm: info.model ? "upstream" : "mock",
     model: info.model,
     models: info.models,
-    // E2 #6：只露「自主轮总开关」这一个布尔，不露任何会话/内容信息；
+    // E2 #6：只露「自主轮总开关」的档位与计数，不露任何会话/内容信息；
     // 前端权限卡据此显示开/关（环境变量），读不到 env 的页面也能看状态。
-    autonomy: autonomyEnabled(),
+    // 2026-11-09 T2：扩成三档 + 24h 观察计数（observe 档"这几天它本来会提醒你 N 次"）。
+    // 纯增量：`mode` 是档位，`observeCount24h` 按观察记录文件算（off 时通常为 0）；
+    // 仍不含任何会话/内容信息。
+    autonomy: {
+      mode: autonomyMode(),
+      observeCount24h: observeCount24h(),
+    },
   });
 });
 
@@ -779,8 +789,11 @@ app.post("/api/v1/agent/chat", async (c) => {
     // 宁可客户端重拉，也不发"承诺过却补不回来"的帧。开关关着时 store 为空，退回直发。
     // 注意落库的是**带 seq 的帧**：重放出来必须和实发的一模一样（http 探针 §13 实测踩过）。
     const eventStore = chatEventStoreOf();
+    // 看门狗（2026-11-09）：每帧记一次"最后事件时刻"，流结束移出跟踪。
+    const stallWatch = stallWatchdog();
     const nextSeq = eventStore ? () => eventStore.nextSeq(chat.internalId) : null;
     const send = async (event: ChatEvent) => {
+      stallWatch.note(chat.internalId, event.type);
       if (eventStore && nextSeq) {
         const seq = nextSeq();
         const stamped = { ...event, seq } as ChatEvent;
@@ -873,6 +886,8 @@ app.post("/api/v1/agent/chat", async (c) => {
     console.log(
       `[chat ${id}] stream=${streamEnd} chars=${chars} ms=${Date.now() - startedAt}`,
     );
+    // 这一轮的流结束（正常 / 报错 / 客户端断开），移出卡死跟踪。
+    stallWatch.finish(chat.internalId);
   });
 });
 
@@ -1402,10 +1417,21 @@ export { app };
  * 回灌不是启动的必要条件。开关关或没有模型配置时连回执库都不打开。
  */
 async function reportRecoveries(entries: RecoveredTicket[]): Promise<void> {
-  if (entries.length === 0 || !recoverReportEnabled() || !readLlmConfig()) return;
+  if (entries.length === 0 || !readLlmConfig()) return;
 
   const receipts = new DelegationReceipts();
   try {
+    // 恢复注记（2026-11-09 任务书 T3 §5）：自动续跑（still_running）的单，
+    // 在原会话下一次模型请求前注入一次「先查再动」。记账与 resumeCount 同族（进程内），
+    // 不新建存储；`DELEGATION_RECOVER_REPORT=false` 只关状态行回灌，不关这条。
+    if (recoverNoteEnabled()) {
+      for (const entry of entries) {
+        if (entry.status !== "still_running") continue;
+        const conversationId = receipts.lookupByTicket(entry.ticketId)?.conversationId;
+        if (typeof conversationId === "number") markRecoverResume(conversationId);
+      }
+    }
+    if (!recoverReportEnabled()) return;
     const sent = await reportRecoveredTickets(entries, {
       receipts,
       say: async (conversationId, text) => {

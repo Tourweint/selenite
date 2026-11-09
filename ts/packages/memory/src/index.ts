@@ -1,5 +1,6 @@
 export * from "./types.ts";
 export * from "./store.ts";
+export * from "./redact.ts";
 export * from "./extract.ts";
 export * from "./consolidate.ts";
 export * from "./decay.ts";

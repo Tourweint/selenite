@@ -32,7 +32,7 @@ export interface FlagDef {
 
 /** 进界面的白名单：只收"用户行为开关"，路径/令牌类一律不收 */
 export const FLAG_DEFS: FlagDef[] = [
-	{ key: "AUTONOMY_ENABLED", values: ["true", "false"], defaultValue: "false", hot: true },
+	{ key: "AUTONOMY_ENABLED", values: ["true", "false", "observe"], defaultValue: "false", hot: true },
 	{ key: "AGENT_ATTACHMENTS", values: ["true", "false"], defaultValue: "true", hot: true },
 	{ key: "AGENT_EDIT_RESEND", values: ["true", "false"], defaultValue: "true", hot: true },
 	{ key: "CURRENT_PROJECT", values: ["true", "false"], defaultValue: "true", hot: true },
@@ -47,6 +47,8 @@ export const FLAG_DEFS: FlagDef[] = [
 	{ key: "GROUPS_ENABLED", values: ["true", "false"], defaultValue: "true", hot: false },
 	{ key: "CHANCELLOR_ENABLED", values: ["true", "false"], defaultValue: "true", hot: false },
 	{ key: "TOPICS_ENABLED", values: ["true", "false"], defaultValue: "true", hot: false },
+	// 结构化提问（2026-11-09）：工具注册在启动时冻结，所以 hot:false。
+	{ key: "AGENT_ASK_USER", values: ["true", "false"], defaultValue: "true", hot: false },
 ];
 
 const FLAG_BY_KEY = new Map(FLAG_DEFS.map((def) => [def.key, def]));

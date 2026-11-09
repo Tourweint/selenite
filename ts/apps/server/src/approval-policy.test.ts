@@ -9,6 +9,7 @@ import {
 	needsApproval,
 	type ApprovalLevel,
 } from "./approval-policy.ts";
+import { approvalRejectedInstruction } from "./agent/turn-gate.ts";
 
 /**
  * 审批判定的三档矩阵（2026-11-08 扫尾批 10-C）。
@@ -98,6 +99,26 @@ test("拒绝理由：三种终态各给一句人话，且不带参数内容", ()
 	assert.match(denialReason("aborted", "bash", 120), /停止/);
 });
 
+test("拒绝带反馈（2026-11-09 §4.1）：不带时逐字节等于旧文案，带时换成指导语", () => {
+	// 不带 feedback：与改动前的字符串完全一致（单测按字节断言）
+	assert.equal(
+		denialReason("rejected", "bash", 120),
+		"你拒绝了这次 bash 调用，工具没有执行。",
+	);
+	// 带 feedback：换成「主人的要求」那一句，且不掺旧后缀
+	assert.equal(
+		denialReason("rejected", "bash", 120, "先只改 src/app.ts，别动样式"),
+		"你拒绝了这次 bash 调用。主人的要求：先只改 src/app.ts，别动样式",
+	);
+	// 空白 feedback 视为没带
+	assert.equal(
+		denialReason("rejected", "bash", 120, "   "),
+		"你拒绝了这次 bash 调用，工具没有执行。",
+	);
+	// 只对 rejected 生效：超时/中止传了也不用
+	assert.match(denialReason("timeout", "bash", 120, "随便改"), /120 秒/);
+});
+
 test("审批超时：默认 120；0 / 负数 / 非法值都回落 120", () => {
 	assert.equal(approvalTimeoutSeconds({}), 120);
 	assert.equal(approvalTimeoutSeconds({ AGENT_APPROVAL_TIMEOUT_S: "" }), 120);
@@ -106,4 +127,15 @@ test("审批超时：默认 120；0 / 负数 / 非法值都回落 120", () => {
 	assert.equal(approvalTimeoutSeconds({ AGENT_APPROVAL_TIMEOUT_S: "0" }), 120);
 	assert.equal(approvalTimeoutSeconds({ AGENT_APPROVAL_TIMEOUT_S: "-5" }), 120);
 	assert.equal(approvalTimeoutSeconds({ AGENT_APPROVAL_TIMEOUT_S: "abc" }), 120);
+});
+
+test("拒绝续跑指令同样带反馈（async 路径）", () => {
+	const legacy =
+		"用户拒绝了 `write`：这个调用不要执行，也不要原样重试。" +
+		"请继续其余工作，能做多少做多少；确实有必要换个做法，就提出新的调用（它仍会重新征求用户批准）。";
+	assert.equal(approvalRejectedInstruction("write"), legacy);
+	assert.equal(
+		approvalRejectedInstruction("write", "只动 README"),
+		"你拒绝了这次 write 调用。主人的要求：只动 README",
+	);
 });

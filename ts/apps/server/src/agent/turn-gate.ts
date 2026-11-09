@@ -137,8 +137,23 @@ export function approvalApprovedInstruction(tool: string, args: string): string 
 	);
 }
 
-/** 拒绝后自动提交的 followUp 指令：别卡死，也别原样硬顶 */
-export function approvalRejectedInstruction(tool: string): string {
+/** 用户答复了 ask_user 的问题后自动提交的 followUp（2026-11-09 §3.1） */
+export function askUserAnsweredInstruction(answer: string): string {
+	return (
+		`主人回答了你刚才的问题：\n${answer}\n` +
+		"按这个回答继续；不要再问同一个问题，也不要原样重问。"
+	);
+}
+
+/**
+ * 拒绝后自动提交的 followUp 指令：别卡死，也别原样硬顶。
+ *
+ * `feedback`（2026-11-09 §4.1）：拒绝时人附的指导语。带了就把「你拒绝了这次 X 调用。
+ * 主人的要求：<feedback>」原样交给模型；不带时**逐字节等于**旧文案。
+ */
+export function approvalRejectedInstruction(tool: string, feedback?: string): string {
+	const note = feedback?.trim();
+	if (note) return `你拒绝了这次 ${tool} 调用。主人的要求：${note}`;
 	return (
 		`用户拒绝了 \`${tool}\`：这个调用不要执行，也不要原样重试。` +
 		"请继续其余工作，能做多少做多少；确实有必要换个做法，就提出新的调用（它仍会重新征求用户批准）。"

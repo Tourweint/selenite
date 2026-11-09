@@ -63,6 +63,15 @@ export const DEFAULT_CRITICAL_TOOLS = [
 ] as const;
 
 /**
+ * 为什么 `ask_user` 两个清单都不进（2026-11-09 §3.3，逐处确认过）：
+ * - 它不写盘、不起进程，进 `WRITE_TOOLS` 会让只读档误伤一个纯问答工具；
+ * - 它**本来就必然等一个人答复**，进高危清单再套一层审批是套娃（同一件事问两遍）。
+ * 按名判断的其它位置（autonomy-risk / path-guard / loop-guard / relay / session 研究专线）
+ * 都只认各自的写 / 风险 / 路径 / 读工具名，`ask_user` 不在其中；
+ * `approvals.ts` 按 tool 名匹配 pending 的几处天然容纳它（记录里带 `kind=ask_user`）。
+ */
+
+/**
  * 实际生效的高危清单。`AGENT_APPROVAL_CRITICAL_TOOLS`（逗号分隔）可整体覆盖；
  * 空串 / 未设回落缺省（配错了宁可多问，不能悄悄变成"全不问"）。
  */
@@ -116,12 +125,22 @@ export function needsApproval(
 
 export type ApprovalDenial = "rejected" | "timeout" | "aborted";
 
-/** 拒绝/超时/中止时回给模型的理由（没有参数内容，只有工具名与状态） */
+/**
+ * 拒绝/超时/中止时回给模型的理由（没有参数内容，只有工具名与状态）。
+ *
+ * `feedback`（2026-11-09 §4.1）：拒绝时人可以附一句指导语。带了就换成
+ * `你拒绝了这次 <tool> 调用。主人的要求：<feedback>`；不带时**逐字节等于**旧文案。
+ */
 export function denialReason(
 	status: ApprovalDenial,
 	tool: string,
 	timeoutS: number,
+	feedback?: string,
 ): string {
+	const note = feedback?.trim();
+	if (status === "rejected" && note) {
+		return `你拒绝了这次 ${tool} 调用。主人的要求：${note}`;
+	}
 	if (status === "rejected") return `你拒绝了这次 ${tool} 调用，工具没有执行。`;
 	if (status === "timeout") {
 		return `审批等待超过 ${timeoutS} 秒没有答复，已按拒绝处理，${tool} 没有执行。`;

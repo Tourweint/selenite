@@ -1681,6 +1681,20 @@ function renderTicketDetail(data, fallbackId) {
   const lastAction = String(ticket.lastAction || data.lastAction || "").trim();
   const waitingOn = String(ticket.waitingOn || data.waitingOn || "").trim();
   const heartbeat = ticket.lastHeartbeat || data.lastHeartbeat || "";
+  // 计划附件（2026-11-09 §2.4）：没有 steps 时整块不渲染（零影响）。
+  // "现在到哪一步"按已过任务数估（任务中心没有逐 step 状态，不编一个假进度）。
+  const steps = Array.isArray(data.steps)
+    ? data.steps
+    : Array.isArray(ticket.steps)
+      ? ticket.steps
+      : [];
+  const stepIndex = steps.length > 0 ? Math.min(passed, steps.length - 1) : -1;
+  // 返工轮次（§1.5）：可选字段，缺省 0 = 不显示。
+  const repairRound = Number.isInteger(data.repairRound)
+    ? data.repairRound
+    : Number.isInteger(ticket.repairRound)
+      ? ticket.repairRound
+      : 0;
 
   const taskRows = tasks.length
     ? tasks
@@ -1805,6 +1819,22 @@ function renderTicketDetail(data, fallbackId) {
       </section>`
     : "";
 
+  // 计划附件（2026-11-09 §2.4）：默认只显示"现在到哪一步"，点开才展开全部 steps。
+  // 没有 steps 就整块不出现；返工单在行尾带上轮次，避免"怎么又回到第一步"的困惑。
+  const stepsSection =
+    steps.length > 0
+      ? `<details class="td-steps">
+          <summary>
+            <span class="td-step-label">现在到哪一步</span>
+            <span class="td-step-now">第 ${stepIndex + 1}/${steps.length} 步：${esc(steps[stepIndex] || "")}</span>
+            ${repairRound > 0 ? `<span class="td-step-round">返工第 ${repairRound} 轮</span>` : ""}
+          </summary>
+          <ol class="td-step-list">
+            ${steps.map((step) => `<li>${esc(step)}</li>`).join("")}
+          </ol>
+        </details>`
+      : "";
+
   el.tasksDetail.innerHTML = `
     <div class="td-card"${ticket.status === "needs_you" ? ' data-attn="1"' : ""}>
       <div class="td-head">
@@ -1814,6 +1844,7 @@ function renderTicketDetail(data, fallbackId) {
         <span class="td-time">${esc(relativeTime(ticket.updated_at))}</span>
       </div>
       <h2 class="td-prompt">${esc(String(ticket.prompt || "").trim() || "（没有说明）")}</h2>
+      ${stepsSection}
       <div class="td-meta">
         <span>任务 <b>${passed}/${total}</b></span>
         ${employee ? `<span>执行者 ${esc(employee)}</span>` : ""}
@@ -4638,6 +4669,109 @@ function approvalSourceLabel(conversationId) {
   return "总管";
 }
 
+/** ask_user 的 args 是 JSON：question / options / recommended（服务端已校验） */
+function parseAskUserPayload(raw) {
+  try {
+    const value = JSON.parse(String(raw || ""));
+    return {
+      question: String(value.question || "").trim(),
+      options: Array.isArray(value.options)
+        ? value.options.filter((item) => typeof item === "string").slice(0, 3)
+        : [],
+      recommended: Number.isInteger(value.recommended) ? value.recommended : null,
+    };
+  } catch {
+    return { question: String(raw || "").trim(), options: [], recommended: null };
+  }
+}
+
+/**
+ * 提问卡（2026-11-09 §3）：模型有事问人，不执行任何工具。
+ * 答复走 POST /agent/approvals/:callId/answer（不是 approve/reject）；
+ * 点选项 = 直接答复该选项原文，也可以在输入框里自己写。
+ */
+function renderAskUserCard(card, event) {
+  const payload = parseAskUserPayload(event.args);
+  const title = document.createElement("p");
+  title.className = "attention-text";
+  title.textContent = "有个问题等你回答";
+  card.append(title);
+
+  const source = approvalSourceLabel(event.conversationId);
+  if (source) {
+    const from = document.createElement("p");
+    from.className = "approval-source";
+    from.textContent = `来自 ${source}`;
+    card.append(from);
+  }
+
+  const question = document.createElement("p");
+  question.className = "attention-text";
+  question.textContent = payload.question || "（问题正文缺失）";
+  card.append(question);
+
+  const status = document.createElement("div");
+  status.className = "approval-meta";
+  status.textContent = "等待处理";
+  card.append(status);
+
+  const actions = document.createElement("div");
+  actions.className = "approval-actions";
+  const input = document.createElement("textarea");
+  input.className = "cs-textarea";
+  input.rows = 2;
+  input.placeholder = "直接回答…";
+  const send = document.createElement("button");
+  send.type = "button";
+  send.className = "primary";
+  send.textContent = "回答";
+  actions.append(input, send);
+  card.append(actions);
+
+  const optionButtons = [];
+  if (payload.options.length) {
+    const options = document.createElement("div");
+    options.className = "approval-actions";
+    payload.options.forEach((text, index) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "ghost";
+      button.textContent =
+        index === payload.recommended ? `${text}（建议）` : text;
+      button.addEventListener("click", () => void answer(text));
+      options.append(button);
+      optionButtons.push(button);
+    });
+    card.append(options);
+  }
+
+  const answer = async (text) => {
+    if (!text.trim()) return;
+    for (const button of optionButtons) button.disabled = true;
+    send.disabled = true;
+    input.disabled = true;
+    try {
+      const response = await request(
+        `/api/v1/agent/approvals/${encodeURIComponent(event.callId)}/answer`,
+        { method: "POST", body: JSON.stringify({ answer: text }) },
+      );
+      if (!response.ok) throw new Error(String(response.status));
+      status.textContent = "已回答";
+      approvalCards.delete(event.callId);
+      card.classList.add("resolved");
+    } catch {
+      status.textContent = "答复失败，请重试";
+      for (const button of optionButtons) button.disabled = false;
+      send.disabled = false;
+      input.disabled = false;
+    }
+  };
+  send.addEventListener("click", () => void answer(input.value));
+
+  approvalCards.set(event.callId, { root: card, timer: null });
+  return card;
+}
+
 function renderApprovalCard(event) {
   if (!event || !event.callId) return null;
   const existing = approvalCards.get(event.callId);
@@ -4646,6 +4780,12 @@ function renderApprovalCard(event) {
   const card = document.createElement("div");
   card.className = "attention approval";
   card.dataset.callId = event.callId;
+
+  // ask_user（2026-11-09 §3）：这不是"要不要执行"，是一个问题。
+  // 服务端把 question/options 塞在 args（JSON）里，SSE 帧不改契约。
+  if (event.tool === "ask_user" || event.kind === "ask_user") {
+    return renderAskUserCard(card, event);
+  }
 
   const title = document.createElement("p");
   title.className = "attention-text";
@@ -4719,16 +4859,45 @@ function renderApprovalCard(event) {
   actions.append(rememberLabel, approve, reject);
   card.append(actions);
 
-  const decide = async (decision) => {
+  // 带说明拒绝（2026-11-09 §4.3）：默认折叠，只有一行小字入口；
+  // 不填就是普通拒绝（与旧行为逐字节一致），填了服务端把它当"主人的要求"交给模型。
+  const more = document.createElement("button");
+  more.type = "button";
+  more.className = "approval-more";
+  more.textContent = "带说明拒绝";
+  const feedbackRow = document.createElement("div");
+  feedbackRow.className = "approval-feedback";
+  feedbackRow.hidden = true;
+  const feedbackInput = document.createElement("textarea");
+  feedbackInput.className = "cs-textarea";
+  feedbackInput.rows = 2;
+  feedbackInput.placeholder = "告诉他怎么改（可选，不填就是普通拒绝）";
+  const feedbackSend = document.createElement("button");
+  feedbackSend.type = "button";
+  feedbackSend.className = "ghost";
+  feedbackSend.textContent = "拒绝并说明";
+  feedbackRow.append(feedbackInput, feedbackSend);
+  card.append(more, feedbackRow);
+  more.addEventListener("click", () => {
+    feedbackRow.hidden = !feedbackRow.hidden;
+    if (!feedbackRow.hidden) feedbackInput.focus();
+  });
+
+  const decide = async (decision, note = "") => {
     approve.disabled = true;
     reject.disabled = true;
     remember.disabled = true;
+    feedbackSend.disabled = true;
     try {
       const response = await request(
         `/api/v1/agent/approvals/${encodeURIComponent(event.callId)}`,
         {
           method: "POST",
-          body: JSON.stringify({ decision, remember: remember.checked }),
+          body: JSON.stringify({
+            decision,
+            remember: remember.checked,
+            ...(note.trim() ? { feedback: note.trim() } : {}),
+          }),
         },
       );
       if (!response.ok) throw new Error(String(response.status));
@@ -4748,10 +4917,12 @@ function renderApprovalCard(event) {
       approve.disabled = false;
       reject.disabled = false;
       remember.disabled = false;
+      feedbackSend.disabled = false;
     }
   };
   approve.addEventListener("click", () => void decide("approve"));
   reject.addEventListener("click", () => void decide("reject"));
+  feedbackSend.addEventListener("click", () => void decide("reject", feedbackInput.value));
 
   approvalCards.set(event.callId, { root: card, timer });
   return card;
@@ -10312,14 +10483,16 @@ function openDeleteSkillModal(name) {
 
 const MEMORY_KIND_LABEL = {
   preference: "偏好",
+  intention: "打算",
   fact: "事实",
   episode: "经历",
   entity: "人事物",
 };
-const MEMORY_KIND_ORDER = ["preference", "fact", "entity", "episode"];
+const MEMORY_KIND_ORDER = ["preference", "intention", "fact", "entity", "episode"];
 /* 组头悬停解释（2026-11-08）：组标题挪到卡片外，"经历是干啥的"这类疑问悬停即答 */
 const MEMORY_KIND_TIPS = {
   preference: "你的喜好与习惯（例如「喜欢简洁的汇报」）。每轮对话开头都会被想起。",
+  intention: "还没兑现的打算（例如「下周开始跑步」）。未过期时优先想起；到期后自动变成普通事实。",
   fact: "关于你和你的生活的客观事实（例如「家里有两只猫」），按相关度召回。",
   entity: "重要的人、项目、东西的条目，聊到相关的就会想起。",
   episode: "聊过、经历过的事的记录，帮你想起「上次……」。按相关度召回，不会每次都出现。",
@@ -10722,11 +10895,13 @@ function memoryItemMarkup(item) {
   const extra = lines.slice(1).filter(Boolean);
   const when = String(item.createdAt || "").slice(0, 10);
   const recalled = Number(item.recallCount) > 0 ? ` · 想起 ${Number(item.recallCount)} 次` : "";
+  // 2026-11-09 T4 §3：只给 intention 一个徽章，其余 kind 的展示不动。
+  const badge = item.kind === "intention" ? `<span class="mem-item-badge">打算</span>` : "";
   return `<div class="mem-item" data-memory-id="${esc(item.id)}">
     <div class="mem-item-main">
       <div class="mem-item-text">${esc(head)}</div>
       ${extra.length ? `<div class="mem-item-why">${extra.map((line) => esc(line)).join("<br>")}</div>` : ""}
-      <div class="mem-item-meta">${esc(when)}${esc(recalled)}</div>
+      <div class="mem-item-meta">${badge}${esc(when)}${esc(recalled)}</div>
     </div>
     <div class="mem-item-actions">
       <button class="ghost mem-act" type="button" data-mem-supersede="${esc(item.id)}"
@@ -11241,6 +11416,9 @@ function approvalPopupCard(item) {
   const source = approvalSourceLabel(item.conversationId) || item.chatTitle || "未命名会话";
   const card = document.createElement("div");
   card.className = "approval-pop";
+  if (item.tool === "ask_user" || item.kind === "ask_user") {
+    return askUserPopupCard(card, item, source);
+  }
   const deadline = Date.parse(item.deadlineAt || "");
   card.innerHTML = `
     <div class="approval-pop-head">
@@ -11251,11 +11429,24 @@ function approvalPopupCard(item) {
     ${String(item.args || "").trim() ? `<pre class="approval-pop-args">${esc(String(item.args).slice(0, 160))}</pre>` : ""}
     <div class="approval-pop-foot">
       <span class="approval-pop-time" data-deadline="${Number.isFinite(deadline) ? deadline : ""}">${esc(approvalPopRemainText(item.deadlineAt))}</span>
+      <button class="approval-more" type="button" data-pop-more="${esc(item.callId)}">带说明拒绝</button>
       <button class="ghost" type="button" data-pop-approve="${esc(item.callId)}">批准</button>
       <button class="ghost" type="button" data-pop-reject="${esc(item.callId)}">拒绝</button>
+    </div>
+    <div class="approval-feedback" data-pop-feedback="${esc(item.callId)}" hidden>
+      <textarea class="cs-textarea" rows="2" placeholder="告诉他怎么改（可选，不填就是普通拒绝）"></textarea>
+      <button class="ghost" type="button" data-pop-reject-note="${esc(item.callId)}">拒绝并说明</button>
     </div>`;
   card.querySelector("[data-pop-approve]")?.addEventListener("click", () => void decideGlobalApproval(item.callId, "approve"));
   card.querySelector("[data-pop-reject]")?.addEventListener("click", () => void decideGlobalApproval(item.callId, "reject"));
+  card.querySelector("[data-pop-more]")?.addEventListener("click", () => {
+    const row = card.querySelector("[data-pop-feedback]");
+    if (row) row.hidden = !row.hidden;
+  });
+  card.querySelector("[data-pop-reject-note]")?.addEventListener("click", () => {
+    const input = card.querySelector("[data-pop-feedback] textarea");
+    void decideGlobalApproval(item.callId, "reject", input ? input.value : "");
+  });
   card.querySelector(".approval-pop-close")?.addEventListener("click", () => {
     approvalPopDismissed.add(item.callId);
     renderApprovalPopups();
@@ -11264,6 +11455,46 @@ function approvalPopupCard(item) {
   card.addEventListener("click", (event) => {
     if (event.target.closest("button")) return;
     if (item.conversationId) void openConversation(item.conversationId);
+  });
+  return card;
+}
+
+/** 提问的浮窗卡（2026-11-09 §3）：选项即答复，也可以自己写。 */
+function askUserPopupCard(card, item, source) {
+  const payload = parseAskUserPayload(item.args);
+  card.innerHTML = `
+    <div class="approval-pop-head">
+      <span class="approval-pop-tool">有个问题等你回答</span>
+      <button class="approval-pop-close" type="button" title="忽略" aria-label="忽略">${APPROVAL_POP_X}</button>
+    </div>
+    <div class="approval-pop-source">${esc(source)}</div>
+    <div class="approval-pop-question">${esc(payload.question || "（问题正文缺失）")}</div>
+    ${
+      payload.options.length
+        ? `<div class="approval-actions">${payload.options
+            .map((text, index) => {
+              const label = index === payload.recommended ? `${text}（建议）` : text;
+              return `<button class="ghost" type="button" data-answer="${index}">${esc(label)}</button>`;
+            })
+            .join("")}</div>`
+        : ""
+    }
+    <div class="approval-feedback">
+      <textarea class="cs-textarea" rows="2" placeholder="直接回答…"></textarea>
+      <button class="ghost" type="button" data-answer-send="1">回答</button>
+    </div>`;
+  card.querySelectorAll("[data-answer]").forEach((button, index) => {
+    button.addEventListener("click", () =>
+      void answerGlobalQuestion(item.callId, payload.options[index] || ""),
+    );
+  });
+  card.querySelector("[data-answer-send]")?.addEventListener("click", () => {
+    const input = card.querySelector(".approval-feedback textarea");
+    void answerGlobalQuestion(item.callId, input ? input.value : "");
+  });
+  card.querySelector(".approval-pop-close")?.addEventListener("click", () => {
+    approvalPopDismissed.add(item.callId);
+    renderApprovalPopups();
   });
   return card;
 }
@@ -11308,11 +11539,16 @@ function startApprovalPopWatch() {
   approvalPopTimer = setInterval(() => void refreshApprovalPopups(), APPROVAL_POP_POLL_MS);
 }
 
-async function decideGlobalApproval(callId, decision) {
+async function decideGlobalApproval(callId, decision, feedback = "") {
   try {
     const response = await request(`/api/v1/agent/approvals/${encodeURIComponent(callId)}`, {
       method: "POST",
-      body: JSON.stringify({ decision }),
+      body: JSON.stringify({
+        decision,
+        ...(decision === "reject" && String(feedback || "").trim()
+          ? { feedback: String(feedback).trim() }
+          : {}),
+      }),
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
@@ -11337,6 +11573,34 @@ async function decideGlobalApproval(callId, decision) {
     }
     // 浮窗同步（2026-11-08）：把已答复的从待弹清单里去掉立刻重画，
     // 不等下一轮 5 秒轮询——批完还挂着一张可再点的卡会误导
+    approvalPopItems = approvalPopItems.filter((item) => item.callId !== callId);
+    renderApprovalPopups();
+  } catch (error) {
+    if (error.message !== "forbidden") toast(`答复失败：${error.message}`);
+  }
+}
+
+/** ask_user 的答复（2026-11-09 §3）：浮窗与对话流卡片共用这一条路 */
+async function answerGlobalQuestion(callId, text) {
+  const answer = String(text || "").trim();
+  if (!answer) return;
+  try {
+    const response = await request(
+      `/api/v1/agent/approvals/${encodeURIComponent(callId)}/answer`,
+      { method: "POST", body: JSON.stringify({ answer }) },
+    );
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      toast(data.message || data.error || `答复失败：HTTP ${response.status}`);
+      return;
+    }
+    toast("已回答");
+    const entry = approvalCards.get(callId);
+    if (entry) {
+      entry.root.classList.add("resolved");
+      for (const button of entry.root.querySelectorAll("button")) button.disabled = true;
+      approvalCards.delete(callId);
+    }
     approvalPopItems = approvalPopItems.filter((item) => item.callId !== callId);
     renderApprovalPopups();
   } catch (error) {
@@ -11522,7 +11786,7 @@ async function loadPolicy() {
   }
 }
 
-/** 自主轮总开关（E2 #6）：只读显示开/关。/healthz 只露这一个布尔，不露任何会话/内容信息。 */
+/** 自主轮总开关（E2 #6）：只读显示开/关（2026-11-09 T2 起三档 + 观察计数）。 */
 async function loadAutonomySwitch() {
   const node = document.getElementById("policy-autonomy");
   if (!node) return;
@@ -11530,10 +11794,26 @@ async function loadAutonomySwitch() {
     const response = await request("/healthz", { cache: "no-store" });
     if (!response.ok) throw new Error(String(response.status));
     const info = await response.json();
-    node.textContent = info.autonomy ? "开（环境变量）" : "关（环境变量）";
-    node.title = info.autonomy
-      ? "AUTONOMY_ENABLED 已开启（观察与审批生效）"
-      : "AUTONOMY_ENABLED 未开启（默认关）";
+    // 兼容旧服务端：老形态是布尔；新形态 { mode, observeCount24h }
+    const autonomy = info.autonomy;
+    const mode = typeof autonomy === "object" && autonomy !== null
+      ? autonomy.mode
+      : autonomy
+        ? "on"
+        : "off";
+    const observed = typeof autonomy === "object" && autonomy !== null
+      ? Number(autonomy.observeCount24h) || 0
+      : 0;
+    if (mode === "on") {
+      node.textContent = "开（环境变量）";
+      node.title = "AUTONOMY_ENABLED 已开启（观察与审批生效）";
+    } else if (mode === "observe") {
+      node.textContent = `观察中（24h 本来会提醒 ${observed} 次）`;
+      node.title = "AUTONOMY_ENABLED=observe：只记观察记录，不写会话";
+    } else {
+      node.textContent = "关（环境变量）";
+      node.title = "AUTONOMY_ENABLED 未开启（默认关）";
+    }
   } catch {
     node.textContent = "读不到";
   }

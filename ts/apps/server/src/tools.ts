@@ -19,6 +19,7 @@ import {
 	type MinisterContext,
 } from "./partner-manage.ts";
 import { defineTool, type ToolRegistration } from "@earendil-works/pi-durable";
+import { askUserEnabled, createAskUserTool } from "./ask-user.ts";
 import { scopeKey, type MemoryEngine, type MemoryKind, type MemoryScope } from "@lifediary/memory";
 // 群组核心（2026-11-07）：建群校验与落库的唯一实现，HTTP 端点共用同一份。
 import {
@@ -43,6 +44,7 @@ import {
 	WORK_REVIEW_GUIDANCE,
 	chancellorWorkRoot,
 	emitDelegation,
+	normalizeDelegationSteps,
 	startDelegation,
 	type DelegationMirrorEntry,
 	type DelegationReport,
@@ -91,6 +93,9 @@ import type { SkillStore } from "./skills.ts";
 // 课题工具（2026-11-07 长期课题跟进）：存储 / 搜索都从 deps 注入，测试可替换、缺失不注册。
 import { TOPICS_ENABLED, type TopicsStore } from "./topics.ts";
 import type { SearchModule } from "./search.ts";
+// 会话考古（2026-11-09 T4 §4）：检索实现留在 agent/session-search.ts（只依赖 shared），
+// 这里只收注入函数，避免 tools.ts 反向 import session.ts 绕成环。
+import type { SessionSearchHit } from "./agent/session-search.ts";
 
 /**
  * 我们自己的工具。
@@ -103,7 +108,7 @@ import type { SearchModule } from "./search.ts";
  * 加一个 **skill**（2026-10-31 方案 D5：技能正文按需取，不进 system）。
  */
 
-const MEMORY_KINDS: MemoryKind[] = ["fact", "episode", "preference", "entity"];
+const MEMORY_KINDS: MemoryKind[] = ["fact", "episode", "preference", "entity", "intention"];
 
 /**
  * 这条派活该记成"谁说的"（2026-11-07 派活留言）。
@@ -233,6 +238,12 @@ export interface ToolDeps {
 	 */
 	relay?: PartnerRelayDeps | null;
 	/**
+	 * 会话考古（2026-11-09 T4 §4）：传了才注册 `recall_sessions`。
+	 * 装配层按 `AGENT_RECALL_SESSIONS`（默认开）决定传不传——不传 = 工具不上架
+	 * （模型侧 tool_unavailable，一行回滚）。实现由 lifecycle 注入，tools 不碰 durable。
+	 */
+	recallSessions?: ((query: string, options: { days?: number; limit?: number }) => Promise<SessionSearchHit[]>) | null;
+	/**
 	 * 自建巡逻（2026-11-08 刀二 E4）：为 true 时 `routine_manage` 工具上架。
 	 * 装配层（lifecycle）按 `routineSelfServiceEnabled()` 传入；**不传 = 不上架**
 	 * （单测 / 探针零改动，避免工具全集快照误伤）。`ROUTINE_SELF_SERVICE=false`
@@ -300,6 +311,9 @@ export function createTools(deps: ToolDeps) {
 		description:
 			"把一件事写进长期记忆，以后每次对话都可能被想起来。" +
 			"适合：对方的偏好、家人朋友宠物、长期目标、重要经历。" +
+			// 2026-11-09 T4 §3：前瞻意图单独一类，带有效期；过期自动降级为事实。
+			"对方说「我打算 / 我准备 / 下周开始……」这类还没发生的计划时用 kind=intention，" +
+			"并尽量给 expiresInDays——到期后它自动变成普通事实，不会一直挂在「打算」里。" +
 			"不适合：一次性的琐事、马上就会变的信息。" +
 			// 2026-11-08 员工人格化刀一 E3：被教诲必须落成偏好，不能只在当下照做。
 			// 偏好层有"永不删"保护（记忆巩固的 protectKinds），教过的话不会被衰减掉。
@@ -315,7 +329,17 @@ export function createTools(deps: ToolDeps) {
 				Type.Unsafe<MemoryKind>({
 					type: "string",
 					enum: MEMORY_KINDS,
-					description: "fact=事实 / episode=经历过的事 / preference=偏好 / entity=人事物",
+					description:
+						"fact=事实 / episode=经历过的事 / preference=偏好 / entity=人事物 / intention=打算（我打算…）",
+				}),
+			),
+			// 2026-11-09 T4 §3：只对 kind=intention 有意义。其余 kind 传了也忽略。
+			expiresInDays: Type.Optional(
+				Type.Number({
+					description:
+						"kind=intention 时有效：多少天后这条打算自动降级为普通事实。1..365，不传 = 不过期。",
+					minimum: 1,
+					maximum: 365,
 				}),
 			),
 			importance: Type.Optional(
@@ -345,6 +369,15 @@ export function createTools(deps: ToolDeps) {
 				// 人自己说的（或当面转述的），可信度最高
 				veracity: "stated",
 				source: args.taught ? "taught" : "user",
+				// 有效期只对 intention 生效（2026-11-09 T4 §3）：其它 kind 传了也忽略，
+				// 不因为一个多余参数把普通事实变成"会过期"。
+				expiresAt:
+					(args.kind ?? "fact") === "intention" && typeof args.expiresInDays === "number"
+						? new Date(
+								api.now() +
+									Math.min(365, Math.max(1, Math.floor(args.expiresInDays))) * 86_400_000,
+							).toISOString()
+						: null,
 			});
 			// 写入路径末尾同样按 cap 修剪（只记条数，见 memory-prune.ts）。
 			const pruned = pruneSessionMemory(engine);
@@ -503,6 +536,9 @@ export function createTools(deps: ToolDeps) {
 			// 2026-11-08 员工人格化刀一 E1 消费点 2（任务书四段）：描述层给口径，参数结构不变。
 			"**任务书按四段写**：目标 / 怎么算好 / 可自主范围 / 必须请示。" +
 			"你若带「岗位契约」，后两段直接按契约的「决策分级」「验收标准」填写；没有契约就按常理写清边界。" +
+			// 2026-11-09 保证实现纵深 §2.2：计划附件与任务书四段并列，不替换。
+			"**多步活要写 `steps`**：一件事如果有 ≥3 个动作、或者要跨文件改，就用 steps 列出可核对的动作序列" +
+			"（≤12 条，每条一句话说清做什么、怎么算做到）；一句话就能说完的小活不写。" +
 			"工人回报「需要你」（need_input / need_decision / need_action）时，答得了就答；" +
 			"一时答不了，明确告诉它「这一项先跳过，继续其余部分，这项回头再补」，别让整单停在一件小事上。",
 		parameters: Type.Object({
@@ -553,11 +589,26 @@ export function createTools(deps: ToolDeps) {
 						"不会重复起一张单。不填时服务端按会话 + 需求自动生成。",
 				}),
 			),
+			steps: Type.Optional(
+				Type.Array(Type.String(), {
+					description:
+						"这条要求拆成的可核对动作序列（≤12 条，每条 ≤200 字）。" +
+						"多步活（≥3 个动作或跨文件）必写；一句话的小活不写。",
+				}),
+			),
 		}),
 		execute: async (args, api, context) => {
 			// 派活的进度和「需要你」要能实时到客户端，否则那几分钟界面是死的。
 			// 这里把 chancellor 的事件翻译成两种：正在办第几件、需要你回答什么。
 			const conversationId = Number(api.conversationId);
+			// 计划附件（2026-11-09 §2.1）：先校验，超限不建单、不发送任何副作用。
+			const stepsCheck = normalizeDelegationSteps(args.steps);
+			if (!stepsCheck.ok) {
+				return text(
+					JSON.stringify({ ok: false, error: "invalid_steps", message: stepsCheck.message }),
+				);
+			}
+			const steps = stepsCheck.steps;
 			const requestedDomain = (args.domain ?? "").trim();
 			// 派活路由（2026-11-07）：执事在自己领域内直派，不再绕回分管宰相；
 			// 跨领域明确拒绝，不静默改道。总管 / 主人会话维持原语义。
@@ -722,6 +773,7 @@ export function createTools(deps: ToolDeps) {
 					requirement: args.requirement,
 					resumeTicketId,
 					project,
+					...(steps ? { steps } : {}),
 					...(requestId ? { requestId } : {}),
 					// 执事在自己领域内直派（2026-11-07）：不带 managers 就是既有分管路径
 					...(requestFields.managers === false ? { managers: false as const } : {}),
@@ -824,6 +876,51 @@ export function createTools(deps: ToolDeps) {
 
 	const tools: ToolRegistration[] = [remember, recall, remind];
 
+	// 会话考古（2026-11-09 T4 §4）：条件注册，不进基线 10 个工具；只读，不进 WRITE_TOOLS。
+	// 回滚：lifecycle 不传 deps.recallSessions（AGENT_RECALL_SESSIONS=false）→ 这里整块不执行。
+	if (deps.recallSessions) {
+		const searchSessions = deps.recallSessions;
+		tools.push(
+			defineTool({
+				name: "recall_sessions",
+				description:
+					"在**以前所有对话的原文**里找一句话（含执事会话、群聊、任务专线）。" +
+					"记忆想不起来、或者要确认「上次是不是聊过这件事」时用它；只读，不改任何东西。" +
+					"返回会话标题、时间和命中处前后各约 100 字；查不到就返回空。",
+				parameters: Type.Object({
+					query: Type.String({ description: "要找的内容，至少 2 个字；用关键词或一句话" }),
+					days: Type.Optional(
+						Type.Number({
+							description: "只搜最近多少天，默认 30",
+							minimum: 1,
+							maximum: 365,
+						}),
+					),
+					limit: Type.Optional(
+						Type.Number({ description: "最多返回几条，默认 5", minimum: 1, maximum: 20 }),
+					),
+				}),
+				execute: async (args) => {
+					const hits = await searchSessions(args.query, {
+						...(args.days === undefined ? {} : { days: args.days }),
+						...(args.limit === undefined ? {} : { limit: args.limit }),
+					});
+					// 只记字数与条数，不记 query 原文与正文（D8 / 日志纪律）
+					console.log(`[recall_sessions] q=${args.query.length}字 hits=${hits.length}`);
+					if (hits.length === 0) return text("没有找到相关的对话记录。");
+					return text(
+						hits
+							.map((hit) => {
+								const when = hit.at ? new Date(hit.at).toISOString().slice(0, 10) : "日期未知";
+								return `- ${when}｜${hit.title || "（无标题）"}（${hit.conversationId}）\n  …${hit.snippet}…`;
+							})
+							.join("\n"),
+					);
+				},
+			}),
+		);
+	}
+
 	if (deps.skills) {
 		const skills = deps.skills;
 		tools.push(
@@ -853,6 +950,10 @@ export function createTools(deps: ToolDeps) {
 	if (deps.relay) tools.push(createSendToAgentTool(deps.relay));
 
 	if (deps.delegate !== false) tools.push(delegate, proposeProject);
+
+	// 结构化提问（2026-11-09 保证实现纵深 §3）：默认上架，AGENT_ASK_USER=false 一行回滚。
+	// 它不写盘、不起进程，因此不在 WRITE_TOOLS / 高危清单里。
+	if (askUserEnabled()) tools.push(createAskUserTool());
 
 	// 执事技能写入（2026-11-05 批次B B2；批次D D1 扩到主对话=总管）。
 	// 写的是 partner-homes/<id>/skills/<slug>.md（64KB 上限、原子写都在 partners.ts）。

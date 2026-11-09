@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 端到端探针：真起一个服务进程，用假模型（LLM_PROVIDER=faux）跑完整链路。
  *
  * 和 durable-probe 的分工：
@@ -60,6 +60,12 @@ function startServer(extraEnv: NodeJS.ProcessEnv = {}): ChildProcess {
 			// 高级开关 / 技能启停位（2026-11-09）：探针隔离，别写真实 .data 的开关文件
 			AGENT_FLAGS_PATH: ".data/probe-http-flags.json",
 			AGENT_SKILLS_STATE_PATH: ".data/probe-http-skill-state.json",
+			// 主动性三档 / 观察记录（2026-11-09 T2）：探针显式关掉，别读开发机 env、别写真实账本
+			AUTONOMY_ENABLED: "",
+			AUTONOMY_OBSERVE_PATH: ".data/probe-http-autonomy-observe.jsonl",
+			// 审批 / 闸门审计（2026-11-09）：同样隔离，绝不碰真实 .data/approvals.json
+			AGENT_APPROVALS_PATH: ".data/probe-http-approvals.json",
+			AGENT_GATE_AUDIT_PATH: ".data/probe-http-gate-blocks.jsonl",
 			NODE_OPTIONS: "",
 			...extraEnv,
 		},
@@ -170,6 +176,9 @@ const GATE_PROJECT_DIR = join(WORKSPACE_A, GATE_PROJECT_REL);
 const GATE_INSIDE_REL = "inside-guard.txt";
 const GATE_OUTSIDE_DIR = resolve(".data/probe-http-outside");
 const GATE_OUTSIDE_FILE = join(GATE_OUTSIDE_DIR, "escape.txt");
+/** 闸门审计 / 审批落点（2026-11-09）：与 startServer 的 env 一致，探针隔离 */
+const GATE_AUDIT_FILE = ".data/probe-http-gate-blocks.jsonl";
+const APPROVALS_FILE = ".data/probe-http-approvals.json";
 
 interface GateRequest {
 	body: Record<string, unknown>;
@@ -180,6 +189,8 @@ const gateRequests: GateRequest[] = [];
 const gateModelsAuth: string[] = [];
 /** 假上游下一轮 write 要写哪（空字符串 = 只回文本） */
 let gateWritePath = "";
+/** 假上游下一轮改回 ask_user 调用（2026-11-09 §3 探针）；null = 不改 */
+let gateAskUserArgs: Record<string, unknown> | null = null;
 
 function readRequestBody(request: IncomingMessage): Promise<string> {
 	return new Promise((done) => {
@@ -251,7 +262,36 @@ const gateUpstream: Server = createServer(async (request, response) => {
 		"cache-control": "no-cache",
 		connection: "keep-alive",
 	});
-	if (!hasToolResult && gateWritePath) {
+	if (!hasToolResult && gateAskUserArgs) {
+		sseChunk(response, {
+			...base,
+			choices: [
+				{
+					index: 0,
+					delta: {
+						role: "assistant",
+						tool_calls: [
+							{
+								index: 0,
+								id: "call_gate_ask_1",
+								type: "function",
+								function: {
+									name: "ask_user",
+									arguments: JSON.stringify(gateAskUserArgs),
+								},
+							},
+						],
+					},
+					finish_reason: null,
+				},
+			],
+		});
+		sseChunk(response, {
+			...base,
+			choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+			usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+		});
+	} else if (!hasToolResult && gateWritePath) {
 		sseChunk(response, {
 			...base,
 			choices: [
@@ -522,9 +562,13 @@ try {
 		llm: string;
 		model: string | null;
 		models: string[];
+		autonomy?: { mode?: string; observeCount24h?: number };
 	};
 	check(fauxHealth.model === "faux", "faux 下 healthz 报 faux", JSON.stringify(fauxHealth));
 	check(fauxHealth.models.length === 0, "faux 没有可切清单");
+	// 2026-11-09 T2：autonomy 从布尔扩成 { mode, observeCount24h }（纯增量；默认 off）
+	check(fauxHealth.autonomy?.mode === "off", "healthz autonomy.mode = off", JSON.stringify(fauxHealth.autonomy));
+	check(fauxHealth.autonomy?.observeCount24h === 0, "healthz autonomy.observeCount24h = 0");
 
 	// faux 下 /mode 是空操作但仍返回 ok（chatModelRef 原样返回，不派生思考变体）
 	const fauxMode = await fetch(
@@ -744,6 +788,8 @@ try {
 	mkdirSync(WORKSPACE_A, { recursive: true });
 	mkdirSync(WORKSPACE_B, { recursive: true });
 	mkdirSync(GATE_OUTSIDE_DIR, { recursive: true });
+	rmSync(GATE_AUDIT_FILE, { force: true });
+	rmSync(APPROVALS_FILE, { force: true });
 	rmSync(".data/probe-http-gate-providers.json", { force: true });
 	rmSync(".data/probe-http-gate-runtime.json", { force: true });
 	await new Promise<void>((done) => gateUpstream.listen(UPSTREAM_PORT, "127.0.0.1", () => done()));
@@ -925,6 +971,151 @@ try {
 		"模型收到的工具结果含「路径越出最大工作区」",
 		outsideToolText.slice(0, 120),
 	);
+
+	// 14.5.1 闸门留痕（2026-11-09 §5）：越界拦下要落一行账，但不含参数 / 路径。
+	const auditRaw = existsSync(GATE_AUDIT_FILE) ? readFileSync(GATE_AUDIT_FILE, "utf8") : "";
+	const auditRows = auditRaw
+		.split("\n")
+		.filter(Boolean)
+		.map((line) => {
+			try {
+				return JSON.parse(line) as Record<string, unknown>;
+			} catch {
+				return {} as Record<string, unknown>;
+			}
+		});
+	check(
+		auditRows.some((row) => row.reason === "path" && row.tool === "write"),
+		"闸门留痕：越界写落一行 path 审计",
+		`${auditRows.length} 行`,
+	);
+	check(!auditRaw.includes("escape.txt"), "闸门审计不含参数 / 目标路径");
+
+	// ── 14.6 拒绝带反馈 + ask_user（2026-11-09 §3 / §4，真 pending / 真续跑）──
+	console.log("\n· 14.6 拒绝带反馈 + 结构化提问（ask_user）");
+	const setApprovalLevel = (level: string) =>
+		fetch(`${BASE}/api/v1/agent/policy`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ approvalLevel: level }),
+		});
+	check((await setApprovalLevel("ask-all")).status === 200, "切审批档 ask-all");
+
+	type PendingItem = { callId: string; tool: string; args: string; kind?: string };
+	const pendingOf = async (conversationId: string): Promise<PendingItem[]> => {
+		const response = await fetch(
+			`${BASE}/api/v1/agent/approvals?conversationId=${encodeURIComponent(conversationId)}`,
+		);
+		if (!response.ok) return [];
+		const data = (await response.json()) as { approvals?: PendingItem[] };
+		return data.approvals ?? [];
+	};
+	const conversationTextOf = async (conversationId: string): Promise<string> => {
+		const response = await fetch(
+			`${BASE}/api/v1/agent/chat/${encodeURIComponent(conversationId)}/messages?limit=200`,
+		);
+		if (!response.ok) return "";
+		const data = (await response.json()) as {
+			messages?: Array<{ role?: string; text?: string }>;
+		};
+		return (data.messages ?? []).map((message) => String(message.text ?? "")).join("\n");
+	};
+	const waitForText = async (conversationId: string, needle: string): Promise<boolean> => {
+		for (let attempt = 0; attempt < 50; attempt += 1) {
+			if ((await conversationTextOf(conversationId)).includes(needle)) return true;
+			await sleep(100);
+		}
+		return false;
+	};
+
+	// 14.6.1 写工具被挂起 → 拒绝时带一句指导语 → 续跑把它交给模型
+	gateWritePath = GATE_INSIDE_REL;
+	gateRequests.length = 0;
+	const approvalRun = await chat({ messages: [{ role: "user", content: "在项目里写个文件" }] });
+	const approvalConversationId = approvalRun.result.conversationId ?? "";
+	check(
+		approvalRun.status === 200 && approvalRun.result.done,
+		"写工具挂起后本轮正常收尾",
+		String(approvalRun.status),
+	);
+	check(approvalRun.result.events.includes("approval"), "SSE 有 approval 事件（待确认卡）");
+	const writePending = (await pendingOf(approvalConversationId)).find(
+		(item) => item.tool === "write",
+	);
+	check(Boolean(writePending?.callId), "GET approvals 补挂这条 pending");
+	const decideApproval = (callId: string, body: Record<string, unknown>) =>
+		fetch(`${BASE}/api/v1/agent/approvals/${encodeURIComponent(callId)}`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(body),
+		});
+	const tooLongFeedback = await decideApproval(writePending?.callId ?? "?", {
+		decision: "reject",
+		feedback: "x".repeat(501),
+	});
+	check(tooLongFeedback.status === 400, "feedback 超 500 字 → 400", String(tooLongFeedback.status));
+	const rejectFeedback = "只改 README.md，别动其他文件";
+	const rejectResponse = await decideApproval(writePending?.callId ?? "?", {
+		decision: "reject",
+		feedback: rejectFeedback,
+	});
+	const rejectBody = (await rejectResponse.json().catch(() => ({}))) as { status?: string };
+	check(
+		rejectResponse.status === 200 && rejectBody.status === "rejected",
+		"拒绝带 feedback → 200 rejected",
+		`${rejectResponse.status} ${rejectBody.status}`,
+	);
+	check(
+		await waitForText(approvalConversationId, `主人的要求：${rejectFeedback}`),
+		"拒绝理由带进续跑（模型收到「主人的要求：…」）",
+	);
+
+	// 14.6.2 ask_user：问题落 pending（kind=ask_user）→ 单独答复路径 → followUp 交回
+	gateWritePath = "";
+	gateAskUserArgs = {
+		question: "先改哪个文件？",
+		options: ["src/app.ts", "src/main.ts"],
+		recommended: 0,
+	};
+	gateRequests.length = 0;
+	const askRun = await chat({ messages: [{ role: "user", content: "我该先改哪个" }] });
+	const askConversationId = askRun.result.conversationId ?? "";
+	check(
+		askRun.status === 200 && askRun.result.done,
+		"ask_user 挂起后本轮收尾",
+		String(askRun.status),
+	);
+	check(askRun.result.events.includes("approval"), "ask_user 借审批通道发事件");
+	const question = (await pendingOf(askConversationId)).find(
+		(item) => item.tool === "ask_user",
+	);
+	check(question?.kind === "ask_user", "pending 带 kind=ask_user", String(question?.kind));
+	check(
+		String(question?.args ?? "").includes("先改哪个文件？"),
+		"pending.args 带问题原文",
+	);
+	const wrongDecision = await decideApproval(question?.callId ?? "?", { decision: "approve" });
+	check(wrongDecision.status === 400, "ask_user 走 approve → 400", String(wrongDecision.status));
+	const answerResponse = await fetch(
+		`${BASE}/api/v1/agent/approvals/${encodeURIComponent(question?.callId ?? "?")}/answer`,
+		{
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ answer: "src/app.ts" }),
+		},
+	);
+	const answerBody = (await answerResponse.json().catch(() => ({}))) as { status?: string };
+	check(
+		answerResponse.status === 200 && answerBody.status === "answered",
+		"提问答复 → 200 answered",
+		`${answerResponse.status} ${answerBody.status}`,
+	);
+	check(
+		await waitForText(askConversationId, "主人回答了你刚才的问题"),
+		"答复作为 followUp 交回模型",
+	);
+	gateAskUserArgs = null;
+	check((await setApprovalLevel("none")).status === 200, "恢复审批档 none");
 
 	// ── 15. CURRENT_PROJECT=false 回滚（接口文档 §2.7）──
 	console.log("\n· 15. CURRENT_PROJECT=false 回滚");
@@ -1380,6 +1571,13 @@ try {
 	// 历史单：ticket.json 没有字段，靠派单回执反查；以及一张既没字段也没回执的（→ null）。
 	store.saveTicket(fixture("T-legacy"));
 	store.saveTicket(fixture("T-orphan"));
+	// 计划附件 / 返工轮次夹具（2026-11-09 §2.3 / §1.5）：详情必须读得到，缺省不出现。
+	store.saveTicket(
+		fixture("T-steps", {
+			steps: ["读 src/a.ts", "改 src/b.ts"],
+			repairRound: 1,
+		}),
+	);
 	// 任务专线夹具（8g）：非终态 + 有宿主会话，但**没有 plan.json**——
 	// 续跑会在派活前被 chancellor 拒掉，正好验 resumeOnly（不偷偷改派新单）。
 	store.saveTicket(
@@ -1445,6 +1643,28 @@ try {
 	check(
 		childDetail.ticket !== undefined && !("originConversationId" in childDetail.ticket),
 		"详情不下发内部 id 原文",
+	);
+	// 计划附件 / 返工轮次（2026-11-09 §2.3 / §1.5）：有则下发，无则不出现。
+	const stepsDetail = (await (await fetch(`${BASE}/api/v1/tickets/T-steps`)).json()) as {
+		steps?: string[];
+		repairRound?: number;
+		childTicket?: unknown;
+	};
+	check(
+		Array.isArray(stepsDetail.steps) &&
+			stepsDetail.steps.length === 2 &&
+			stepsDetail.steps[1] === "改 src/b.ts",
+		"详情下发 steps（顺序原样）",
+		JSON.stringify(stepsDetail.steps),
+	);
+	check(stepsDetail.repairRound === 1, "详情下发 repairRound", String(stepsDetail.repairRound));
+	const plainDetail = (await (await fetch(`${BASE}/api/v1/tickets/T-child`)).json()) as Record<
+		string,
+		unknown
+	>;
+	check(
+		!("steps" in plainDetail) && !("repairRound" in plainDetail),
+		"没有 steps / repairRound 的单不带这两个键（前端零影响）",
 	);
 	check(
 		ticketRows.get("T-orphan")?.conversationId === null,
@@ -2263,6 +2483,8 @@ try {
 	rmSync(".data/probe-http-skill-state.json", { force: true });
 	rmSync(".data/probe-http-gate-providers.json", { force: true });
 	rmSync(".data/probe-http-gate-runtime.json", { force: true });
+	rmSync(GATE_AUDIT_FILE, { force: true });
+	rmSync(APPROVALS_FILE, { force: true });
 	rmSync(".data/probe-http-chat-events.sqlite", { force: true });
 	rmSync(".data/probe-http-providers.json", { force: true });
 	rmSync(".data/probe-http-policy.json", { force: true });

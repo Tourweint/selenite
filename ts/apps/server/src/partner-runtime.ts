@@ -10,6 +10,11 @@ import {
 	type PartnerRow,
 } from "./partners.ts";
 import { markAutonomyTurn, unmarkAutonomyTurn } from "./autonomy-state.ts";
+import {
+	assessRoutineOutput,
+	ROUTINE_QUIET_INSTRUCTION,
+	routineQuietEnabled,
+} from "./routine-quiet.ts";
 import { nextChainCandidate } from "./model-chain.ts";
 import type { SettledSubmissionRecord } from "@earendil-works/pi-durable";
 import {
@@ -148,8 +153,10 @@ export interface PartnerTurnOptions {
 
 export interface PartnerTurnResult {
 	ok: boolean;
-	/** 模型这一轮说的话（聚合 delta） */
+	/** 模型这一轮说的话（聚合 delta；quiet 时已剔除 [[no-update]] 标记） */
 	text: string;
+	/** 例行轮"没有值得报告的内容"（2026-11-09 T2 安静契约）；调用方据此不写摘要 */
+	quiet?: boolean;
 	/** 失败原因（执事不存在 / 未启用 / 模型未配置等），大白话给调用方 */
 	error?: string;
 }
@@ -182,13 +189,20 @@ export async function runPartnerTurn(
 	if (!chat) return { ok: false, text: "", error: "执事会话取不到（未启用或未配置模型）" };
 
 	const authority = opts.authority ?? "entrusted";
-	// 文本头（透明性）：模型知道这一轮是谁发起的；判定事实源在 autonomy-state.ts
-	const body = authority === "autonomous" ? `[Scheduled run context]
+	// 安静契约只对例行轮生效（手动试跑 = 用户主动要，必须给产出）
+	const quietEligible = authority === "autonomous" && routineQuietEnabled();
+	// 文本头（透明性）：模型知道这一轮是谁发起的；判定事实源在 autonomy-state.ts。
+	// 例行轮尾部多一行"没内容就回标记"的出口（固定字节，见 routine-quiet.ts）。
+	const body = authority === "autonomous"
+		? `[Scheduled run context]
 turnAuthority: autonomous
 
-${text}` : text;
+${text}${quietEligible ? `\n\n${ROUTINE_QUIET_INSTRUCTION}` : ""}`
+		: text;
 
 	const pieces: string[] = [];
+	/** 本轮是否真的产出了模型正文（unanswered 的说明不算，别把错误当"安静"） */
+	let sawDelta = false;
 	if (authority === "autonomous") markAutonomyTurn(chat.internalId);
 	try {
 		// 结算记录拿来看 unanswered 的 reason（候选链要不要切就看它）
@@ -202,8 +216,10 @@ ${text}` : text;
 					settled.record = record;
 				},
 			})) {
-				if (event.type === "delta") pieces.push(event.text);
-				else if (event.type === "unanswered") pieces.push(event.message);
+				if (event.type === "delta") {
+					pieces.push(event.text);
+					sawDelta = true;
+				} else if (event.type === "unanswered") pieces.push(event.message);
 			}
 		};
 		await runOnce();
@@ -224,7 +240,17 @@ ${text}` : text;
 			await runOnce();
 		}
 
-		return { ok: true, text: pieces.join("") };
+		// 安静契约（2026-11-09 T2）：判定是确定性的，不调模型；标记从产出里剔除。
+		// 判为 quiet 时调用方不写摘要、不额外汇报（run 记录 summary="quiet"）。
+		// 边界：模型这一轮的 assistant 条目由 durable 内核落盘，服务端没有撤回 API；
+		// 这里保证的是"服务端不再写第二遍"，不是"transcript 里绝对没有痕迹"。
+		const joined = pieces.join("");
+		// 只在"真跑完了"的轮次上判安静：unanswered 的说明/错误不能当"没内容"吞掉。
+		const canJudge = quietEligible && (sawDelta || settled.record?.status === "done");
+		const verdict = canJudge ? assessRoutineOutput(joined) : { quiet: false, text: joined };
+		return verdict.quiet
+			? { ok: true, text: verdict.text, quiet: true }
+			: { ok: true, text: verdict.text };
 	} catch (error) {
 		const detail = error instanceof Error ? error.message : String(error);
 		return { ok: false, text: pieces.join(""), error: `这一轮没跑完：${detail}` };

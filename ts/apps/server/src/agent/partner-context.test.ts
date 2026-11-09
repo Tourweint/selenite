@@ -265,7 +265,7 @@ test("装配：SOUL / 岗位契约 / 当前在办三段各自可见，顺序 = �
 	}
 });
 
-test("空态省略：空契约 + 无在办 / 无待批 / 无最近单 → 三段都不注入", () => {
+test("空态省略：空契约 + 无在办 / 无待批 / 无最近单 → 契约与在办都不注入", () => {
 	const { root, db, homes, workRoot } = tempRoot();
 	const store = new PartnersStore(db, homes);
 	try {
@@ -284,7 +284,25 @@ test("空态省略：空契约 + 无在办 / 无待批 / 无最近单 → 三段
 		assert.match(context.soul, /空空/, "SOUL 永远在");
 		assert.equal(context.contract, null);
 		assert.equal(context.status, null);
-		assert.equal(context.text, undefined, "两段都空 → 不注入任何东西");
+		// 2026-11-09 T2：注入防线默认开 → 前两段空时 text 只剩防线（固定字节）
+		assert.match(context.guard ?? "", /【材料安全】/);
+		assert.equal(context.text, context.guard, "没有契约/在办时只注入防线");
+
+		// 开关关 → 三段都空，text 回到 undefined（与旧行为逐字节一致）
+		const previous = process.env.AGENT_INJECTION_GUARD;
+		try {
+			process.env.AGENT_INJECTION_GUARD = "false";
+			const bare = buildPartnerTurnContext(partner.id, 303, {
+				store,
+				workRoot,
+				approvals: { pendingOf: () => [] },
+			});
+			assert.equal(bare.guard, null);
+			assert.equal(bare.text, undefined, "防线关 + 两段都空 → 不注入任何东西");
+		} finally {
+			if (previous === undefined) delete process.env.AGENT_INJECTION_GUARD;
+			else process.env.AGENT_INJECTION_GUARD = previous;
+		}
 	} finally {
 		store.close();
 		rmSync(root, { recursive: true, force: true });

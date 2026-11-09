@@ -4,6 +4,7 @@ import { listManagers } from "../../../../../../chancellor/src/manager/registry.
 import { Store } from "../../../../../../chancellor/src/store.ts";
 import type { Ticket } from "../../../../../../chancellor/src/types.ts";
 import { approvalStore } from "../approvals.ts";
+import { INJECTION_GUARD, injectionGuardEnabled } from "./injection-guard.ts";
 import {
 	ATTENTION_REPLY_GUIDANCE,
 	WORK_REVIEW_GUIDANCE,
@@ -316,7 +317,9 @@ export interface PartnerTurnContext {
 	goal: string | null;
 	/** 当前在办段（三项皆空 + 无履历 → null） */
 	status: string | null;
-	/** 注入模型请求的附加段：契约 + 目标 + 在办（都空 → undefined） */
+	/** 注入防线段（开关关 → null；固定字节，不随轮次变化） */
+	guard: string | null;
+	/** 注入模型请求的附加段：契约 + 目标 + 在办 + 防线（都空 → undefined） */
 	text: string | undefined;
 }
 
@@ -343,6 +346,10 @@ export function buildPartnerTurnContext(
 	) ?? null;
 	const goal = buildPartnerGoalSection(partnerId, store) ?? null;
 	const status = buildPartnerStatusSection(partnerId, conversationId, { ...deps, store }) ?? null;
-	const text = [contract, goal, status].filter((part): part is string => Boolean(part)).join("\n\n");
-	return { soul, contract, goal, status, text: text || undefined };
+	// 注入防线（2026-11-09 T2）：放在执事轮输入尾部；固定字节，开关只决定注不注。
+	const guard = injectionGuardEnabled() ? INJECTION_GUARD : null;
+	const text = [contract, goal, status, guard]
+		.filter((part): part is string => Boolean(part))
+		.join("\n\n");
+	return { soul, contract, goal, status, guard, text: text || undefined };
 }

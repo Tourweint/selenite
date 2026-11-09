@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { defineTask } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { nextCronFire } from "./cron.ts";
+import { wrapUntrustedObjective } from "./agent/injection-guard.ts";
 import { CHIEF_PARTNER_ID } from "./partners.ts";
 import { TOPICS_ENABLED, topicsStore, type Topic } from "./topics.ts";
 
@@ -282,7 +283,7 @@ export function renderResearchPrompt(topic: Topic): string {
 		"你是总管的研究分身，正在执行一次定时研究。只做调查与综合：不改文件、不派活、不碰任务中心。",
 		`本轮工具只有只读的 read 与 web_search；回答要像一个靠谱的研究员，不编造来源。`,
 		"",
-		`# 课题\n${topic.question}`,
+		`# 课题\n${wrapUntrustedObjective(topic.question)}`,
 		`口味：${topic.flavor === "watch" ? "watch（盯梢型）" : "dig（啃题型）"}`,
 		"",
 		"# 已有发现（最新在前）",

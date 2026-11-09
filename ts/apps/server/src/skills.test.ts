@@ -5,7 +5,13 @@ import { join } from "node:path";
 import test from "node:test";
 import { Hono } from "hono";
 import { mountSkills, SKILL_SLOT_LIMIT } from "./skills-api.ts";
-import { createSkillStore, resolveSkillsDir, type ResolvedSkillsDir } from "./skills.ts";
+import {
+	APP_SKILLS_DIR,
+	createSkillStore,
+	resolveSkillsDir,
+	scanSkillDir,
+	type ResolvedSkillsDir,
+} from "./skills.ts";
 
 /**
  * 技能（2026-11-08 扫尾批 9-S；批 10-A 加标准用户目录与两种文件形态）单测。
@@ -120,6 +126,23 @@ test("加载器：扁平 .md 与 目录/SKILL.md 两种形态并存，同名时�
 	assert.match(index, /alpha：摘要 A/);
 	assert.match(index, /beta：摘要 B/);
 	assert.doesNotMatch(index, /broken/);
+});
+
+test("内置方法论技能：scanSkillDir 能读到 4 个新技能，摘要取自第 1 行", () => {
+	// 2026-11-09 T4 §1：方法论技能包是纯内容，靠既有扁平 md 加载器直接生效。
+	const scanned = new Map(scanSkillDir(APP_SKILLS_DIR).map((item) => [item.name, item]));
+	for (const [name, summary] of [
+		["writing_plan", "写计划：把要求拆成能一条条核对的动作"],
+		["executing_plan", "执行计划：一次只做一步，做完先自检再进下一步"],
+		["verifying_done", "验证完成：这一轮没真的跑过，就不能说完成了"],
+		["debugging", "系统化调试：先复现再定位，没有调查不许改"],
+	] as const) {
+		const skill = scanned.get(name);
+		assert.ok(skill, `应扫到内置技能 ${name}`);
+		assert.equal(skill.valid, true, `${name} 应是有效技能（有摘要与正文）`);
+		assert.equal(skill.summary, summary, `${name} 摘要应取第 1 行`);
+		assert.ok(skill.manual.length > 100, `${name} 正文应有可执行内容`);
+	}
 });
 
 test("加载器：多目录先到先得；坏文件占名，不被低优先级同名顶掉", () => {

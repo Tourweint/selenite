@@ -7,6 +7,13 @@ import {
 	type AutonomyEventShape,
 	type AutonomyEventType,
 } from "./autonomy-core.ts";
+import {
+	autonomyMode,
+	autonomyRemindAction,
+	recordObserve,
+	REMIND_LIMIT,
+	type AutonomyMode,
+} from "./autonomy-mode.ts";
 import { classifyUnanswered } from "./model-chain.ts";
 import { watchAllEvents, sayInConversation, type GlobalAgentEvent } from "./agent.ts";
 import { watchAllDelegationEvents, type DelegationEvent } from "./delegation.ts";
@@ -29,6 +36,8 @@ import { partnersStore } from "./partners.ts";
  *
  * 总开关 `AUTONOMY_ENABLED` 默认 false：false 时 observe() 不订阅、账本不建、
  * sweep 定时器不启、自主轮标记不生效——全部行为为零。
+ * 2026-11-09 T2 起多一档 `observe`：订阅与判定照旧，但提醒只落
+ * `.data/autonomy-observe.jsonl`，**不写会话、不起任何模型调用**——先看它想干什么。
  */
 
 const DEFAULT_STATE_PATH = ".data/autonomy-state.json";
@@ -40,14 +49,6 @@ const TOOL_IN_FLIGHT_STUCK_MS = 45 * 60_000;
 const WAITING_MS = 5 * 60_000;
 /** sweep 兜底扫描间隔 */
 const SWEEP_TICK_MS = 30_000;
-/** 提醒行上限（formatReport ≤80 字的同族口径，这里给观察行 140） */
-const REMIND_LIMIT = 140;
-
-export function autonomyEnabled(): boolean {
-	const raw = process.env.AUTONOMY_ENABLED?.trim().toLowerCase();
-	if (!raw) return false;
-	return raw !== "false" && raw !== "0";
-}
 
 function stuckTimeoutMs(): number {
 	const raw = Number(process.env.AUTONOMY_STUCK_MIN_S);
@@ -62,14 +63,28 @@ interface ConversationWatch {
 	toolInFlightSince: number | null;
 }
 
-class AutonomyObserver {
+/** 观察层的注入缝（生产不传；单测传假 say / 固定档位，不碰真实 .data 与真实会话）。 */
+export interface AutonomyObserverDeps {
+	mode?: () => AutonomyMode;
+	say?: (conversationId: number, text: string) => Promise<unknown>;
+	/** 观察记录落点（默认读 AUTONOMY_OBSERVE_PATH） */
+	observe?: typeof recordObserve;
+}
+
+export class AutonomyObserver {
 	private receipts = new AutonomyReceipts();
 	private watches = new Map<number, ConversationWatch>();
 	private timer: ReturnType<typeof setInterval> | null = null;
 	private subscribed = false;
 
+	constructor(private readonly deps: AutonomyObserverDeps = {}) {}
+
+	private mode(): AutonomyMode {
+		return (this.deps.mode ?? autonomyMode)();
+	}
+
 	subscribe(): void {
-		if (this.subscribed || !autonomyEnabled()) return;
+		if (this.subscribed || this.mode() === "off") return;
 		this.subscribed = true;
 		this.load();
 		watchAllEvents((event) => this.onAgentEvent(event));
@@ -78,7 +93,7 @@ class AutonomyObserver {
 
 	/** 轮次结算（index.ts 的 onSettled 处喂进来）：errored / usage-limit 两类的事件源。 */
 	onTurnSettled(conversationId: number, status: string, reason: string): void {
-		if (!autonomyEnabled() || !this.subscribed) return;
+		if (this.mode() === "off" || !this.subscribed) return;
 		if (this.excluded(conversationId)) return;
 		if (status !== "unanswered") {
 			// 正常结束：清 stuck 观察态（本轮有结论了）
@@ -151,7 +166,7 @@ class AutonomyObserver {
 	}
 
 	private sweep(): void {
-		if (!autonomyEnabled()) return;
+		if (this.mode() === "off") return;
 		// 没有观察对象也没有挂审批：定时器按需存在（批次C细化 §3.2），清掉
 		if (!this.needsSweep()) {
 			if (this.timer !== null) {
@@ -195,14 +210,31 @@ class AutonomyObserver {
 	}
 
 	// ── 提醒 ──
-	private remind(event: AutonomyEventShape, detail: string, conversationIdOverride?: number): void {
+	/**
+	 * 提醒的统一出口（public 供单测直接喂事件，不改生产调用点）。
+	 *
+	 * 三档在这里分叉：off = 零行为（不记账不落盘）；observe = 只记一条观察记录；
+	 * on = 写会话行。**observe 分支没有任何 sayInConversation 调用**——这是"先看它想干什么"
+	 * 的结构保证，不靠调用方自律。
+	 */
+	remind(event: AutonomyEventShape, detail: string, conversationIdOverride?: number): void {
+		const action = autonomyRemindAction(this.mode());
+		if (action === "skip") return;
 		if (!this.receipts.shouldRemind(event)) return;
 		this.receipts.record(event);
 		this.save();
 		const target = conversationIdOverride ?? event.conversationId;
+		if (action === "observe") {
+			(this.deps.observe ?? recordObserve)({
+				type: event.type,
+				conversationId: target,
+				summary: detail,
+			});
+			return;
+		}
 		if (target <= 0) return; // sweep 汇总行没落点时只记账
 		const text = `【需要你】${detail}`.slice(0, REMIND_LIMIT);
-		void sayInConversation(target, text).catch(() => {
+		void (this.deps.say ?? sayInConversation)(target, text).catch(() => {
 			// 写不进去（会话没了）就算了：账已记，不重试不报错
 		});
 	}
@@ -273,3 +305,12 @@ export function autonomyObserver(): AutonomyObserver {
 
 export const AUTONOMY_MAX_PER_DAY = AUTONOMY_CAP_PER_DAY;
 export { autonomyEventId };
+// 三档与观察记录的纯函数对外面不变：index.ts / 测试从 autonomy.ts 取同一份。
+export {
+	autonomyEnabled,
+	autonomyMode,
+	autonomyRemindAction,
+	observeCount24h,
+	recordObserve,
+	type AutonomyMode,
+} from "./autonomy-mode.ts";

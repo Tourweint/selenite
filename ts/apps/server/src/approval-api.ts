@@ -5,6 +5,7 @@ import { continueConversation } from "./agent/session.ts";
 import {
 	approvalApprovedInstruction,
 	approvalRejectedInstruction,
+	askUserAnsweredInstruction,
 } from "./agent/turn-gate.ts";
 import { approvalStore } from "./approvals.ts";
 import { readLlmConfig } from "./provider.ts";
@@ -49,6 +50,8 @@ export function mountApprovalApi(app: Hono): void {
 					args: record.args,
 					deadlineAt: record.deadlineAt,
 					createdAt: record.createdAt,
+					// ask_user 的问题卡（2026-11-09）：纯增量；老客户端按普通审批处理。
+					...(record.kind ? { kind: record.kind } : {}),
 					// 自主轮标记纯增量透出（E2 #0）：undefined 不带键，老客户端忽略。
 					...(record.origin ? { origin: record.origin } : {}),
 				});
@@ -71,6 +74,8 @@ export function mountApprovalApi(app: Hono): void {
 				args: record.args,
 				deadlineAt: record.deadlineAt,
 				createdAt: record.createdAt,
+				// ask_user 的问题卡（2026-11-09）：纯增量；老客户端按普通审批处理。
+				...(record.kind ? { kind: record.kind } : {}),
 				// 自主轮标记纯增量透出（E2 #0）：undefined 不带键，老客户端忽略。
 				...(record.origin ? { origin: record.origin } : {}),
 			}));
@@ -79,17 +84,43 @@ export function mountApprovalApi(app: Hono): void {
 
 	app.post("/api/v1/agent/approvals/:callId", async (c) => {
 		const body = (await c.req.json().catch(() => null)) as
-			| { decision?: string; remember?: unknown }
+			| { decision?: string; remember?: unknown; feedback?: unknown }
 			| null;
 		const decision = body?.decision;
 		if (decision !== "approve" && decision !== "reject") {
 			return c.json({ error: "bad_request", message: "decision 只能是 approve / reject" }, 400);
 		}
+		// 拒绝带指导语（2026-11-09 §4.2）：可选，≤500 字；不填 = 旧行为。
+		const feedback = typeof body?.feedback === "string" ? body.feedback.trim() : "";
+		if (feedback.length > 500) {
+			return c.json(
+				{ error: "bad_request", message: "feedback 最多 500 字" },
+				400,
+			);
+		}
 
 		const callId = c.req.param("callId").trim();
+		// ask_user 的答复走 /answer（§4.4）：approve/reject 对它没有语义。
+		const before = approvalStore().recordOf(callId);
+		if (!before) return c.json({ ok: false, error: "unknown_approval" }, 404);
+		if (before.kind === "ask_user") {
+			return c.json(
+				{
+					ok: false,
+					error: "ask_user_answer_required",
+					message: "这是一个提问，请走 POST /api/v1/agent/approvals/:callId/answer 答复",
+				},
+				400,
+			);
+		}
 		// 先记"这次答复之前是不是 pending"：幂等重发不能重复开一轮续跑
-		const wasPending = approvalStore().recordOf(callId)?.status === "pending";
-		const record = approvalStore().decide(callId, decision, body?.remember === true);
+		const wasPending = before.status === "pending";
+		const record = approvalStore().decide(
+			callId,
+			decision,
+			body?.remember === true,
+			decision === "reject" ? feedback : undefined,
+		);
 		if (!record) return c.json({ ok: false, error: "unknown_approval" }, 404);
 
 		// 2026-11-08 扫尾批 8c：async 形态下答复即触发续跑——
@@ -103,11 +134,42 @@ export function mountApprovalApi(app: Hono): void {
 			const text =
 				record.status === "approved"
 					? approvalApprovedInstruction(record.tool, record.args)
-					: approvalRejectedInstruction(record.tool);
+					: approvalRejectedInstruction(record.tool, record.feedback);
 			void continueConversation(record.conversationId, text);
 		}
 
 		// 已决的再发一次也回 200 + 原状态（幂等：不二次结算、不二次唤醒钩子）
+		return c.json({ ok: true, status: record.status });
+	});
+
+	// ask_user 的答复（2026-11-09 §3.1 / §4.4）：同一张 pending 表，单独的语义。
+	// 答复正文会作为 followUp 交回模型；不带 approval 的批准/拒绝含义。
+	app.post("/api/v1/agent/approvals/:callId/answer", async (c) => {
+		const body = (await c.req.json().catch(() => null)) as { answer?: unknown } | null;
+		const answer = typeof body?.answer === "string" ? body.answer.trim() : "";
+		if (!answer) {
+			return c.json({ error: "bad_request", message: "需要 answer" }, 400);
+		}
+		if (answer.length > 1000) {
+			return c.json({ error: "bad_request", message: "answer 最多 1000 字" }, 400);
+		}
+
+		const callId = c.req.param("callId").trim();
+		const before = approvalStore().recordOf(callId);
+		if (!before) return c.json({ ok: false, error: "unknown_approval" }, 404);
+		if (before.kind !== "ask_user") {
+			return c.json(
+				{ ok: false, error: "not_a_question", message: "这条待办不是提问，请走审批答复" },
+				400,
+			);
+		}
+		const wasPending = before.status === "pending";
+		const record = approvalStore().answer(callId, answer);
+		if (!record) return c.json({ ok: false, error: "unknown_approval" }, 404);
+		// 幂等：重复答复不重复续跑
+		if (wasPending && record.status === "answered") {
+			void continueConversation(record.conversationId, askUserAnsweredInstruction(answer));
+		}
 		return c.json({ ok: true, status: record.status });
 	});
 }

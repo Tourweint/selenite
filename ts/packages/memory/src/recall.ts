@@ -86,14 +86,18 @@ export class WeightedRetriever implements Retriever {
 			const timesRecalled = Math.min(1, record.recallCount / 10);
 			// 衰减后的重要性参与打分（2026-11-08）：久未想起的旧事自然排后。
 			// 打分按 0..1 归一一档——重要性可以涨过 1（使用强化），但那一维最多记满分。
+			// intention 不参与时间衰减（2026-11-09 T4 §3）：它有自己的 expiresAt，
+			// 未到期前不该因为"放了两周"被打低；到期由引擎降级为 fact。
 			const importance = Math.min(
 				1,
-				decayedImportance(
-					record.importance,
-					record.lastRecalledAt ?? record.createdAt,
-					now,
-					this.decayDaily,
-				),
+				record.kind === "intention"
+					? record.importance
+					: decayedImportance(
+							record.importance,
+							record.lastRecalledAt ?? record.createdAt,
+							now,
+							this.decayDaily,
+						),
 			);
 
 			// 权重是拍的，改了也不算错 —— 但要有理由地改，别随手调。

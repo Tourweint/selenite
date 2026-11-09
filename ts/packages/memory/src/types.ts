@@ -61,7 +61,15 @@ export type MemoryKind =
 	 * 按 scope 封顶 200 条删最旧。执事轮装配与盘点走结构化查询（scope+kind），
 	 * 不走语义召回。与另外四种语义零交叉，旧数据天然兼容。
 	 */
-	| "work";
+	| "work"
+	/**
+	 * 前瞻意图（2026-11-09 T4 §3）："我打算下周开始跑步"。
+	 *
+	 * 与 fact 的区别在**时态**：它有 `expiresAt`，过期后原地降级为 `fact`（不删），
+	 * 未过期时在注入里单独成组、优先于普通事实。降级是读时惰性的（见 engine.recall），
+	 * 不建定时器。巩固不合并、时间衰减不作用（与 `work` 同待遇）。
+	 */
+	| "intention";
 
 /**
  * 可信度来源。参考 mnemopi 的 veracity：
@@ -83,6 +91,11 @@ export interface MemoryRecord {
 	createdAt: string;
 	/** 过了这个时间就不该再被召回（临时状态类记忆） */
 	validUntil: string | null;
+	/**
+	 * 意图的失效时间（ISO，2026-11-09 T4 §3）。只有 `kind === "intention"` 有意义；
+	 * 过了这个时刻，读取路径把它原地降级为 `fact`（保留记录与演化链）。
+	 */
+	expiresAt?: string | null;
 	/** 被哪条记忆取代。不删旧记录，保留可追溯的演化链 */
 	supersededBy: string | null;
 	/** 召回次数与最近一次召回时间，用于强化 */
@@ -99,6 +112,8 @@ export interface MemoryCandidate {
 	veracity: Veracity;
 	source: string;
 	validUntil?: string | null;
+	/** 仅 intention 使用（2026-11-09 T4 §3）。 */
+	expiresAt?: string | null;
 }
 
 export interface RecallQuery {
@@ -129,4 +144,6 @@ export interface RememberInput {
 	veracity?: Veracity;
 	source?: string;
 	validUntil?: string | null;
+	/** 仅 intention 使用（2026-11-09 T4 §3）。 */
+	expiresAt?: string | null;
 }

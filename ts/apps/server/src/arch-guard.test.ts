@@ -34,6 +34,9 @@ const READ_TOOLS = new Set([
 	// 2026-11-08 扫尾批 8d：执事间递话只往对方会话提交一条输入，不写盘、不起进程；
 	// 它的边界不在只读闸门，而在 lifecycle 的通道闸（执事会话 / 非自主轮 / hop=1）。
 	"send_to_agent",
+	// 2026-11-09 保证实现纵深 §3.3：ask_user 不写盘、不起进程；它本来就必然等一个人答复，
+	// 再套审批是套娃，所以只登记进这张"不需要进闸门"的名单，不进 WRITE_TOOLS / 高危清单。
+	"ask_user",
 ]);
 /** 内核五件：pi-durable 的 CodingTools（read/write/edit/bash/powershell）。 */
 const KERNEL_TOOLS = new Set(["read", "write", "edit", "bash", "powershell"]);

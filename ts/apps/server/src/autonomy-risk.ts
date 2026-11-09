@@ -43,3 +43,55 @@ export function autonomyRiskVerdict(tool: string, autonomous: boolean): Autonomy
 	const category = AUTONOMY_RISK_TOOLS[tool];
 	return category ? { forceAsk: true, category } : { forceAsk: false };
 }
+
+// ── 自动化永不扩权（2026-11-09 T2 §4，红线口径）────────────────
+//
+// 口径：例行任务 / 自建巡逻 / 自主轮**永远不能超过发起者本人的权限**。
+// C2 的"高危工具强制 ask"只是"要人点头"；这里补的是**结构性拒绝**：
+// 模型在后台跑的时候，不能给自己新建常驻自动化、不能给别的执事发指令、不能遥控设备。
+// 不是 ask，是 block——ask 还能被点批准，block 连门都没有。
+
+/** 自主轮里结构性拒绝的工具（自己给自己扩权的四种形态）。 */
+export const AUTONOMY_NO_ESCALATION_TOOLS = new Set([
+	"routine_manage",
+	"partner_manage",
+	"group_manage",
+	"send_to_agent",
+]);
+
+/** 回滚开关：`AUTONOMY_NO_ESCALATION=false`（或 0/off）→ 回滚到本批前行为。默认开。 */
+export function autonomyNoEscalationEnabled(): boolean {
+	const raw = process.env.AUTONOMY_NO_ESCALATION?.trim().toLowerCase();
+	if (!raw) return true;
+	return raw !== "false" && raw !== "0" && raw !== "off";
+}
+
+/**
+ * 自主轮结构性拒绝的理由；undefined = 放行。
+ * 非自主轮**完全不看这张表**（普通轮行为逐字节不变）。
+ */
+export function autonomyEscalationBlockReason(
+	tool: string,
+	args: unknown,
+	autonomous: boolean,
+	enabled: boolean = autonomyNoEscalationEnabled(),
+): string | undefined {
+	if (!autonomous || !enabled) return undefined;
+	if (AUTONOMY_NO_ESCALATION_TOOLS.has(tool)) {
+		return `自动化不能给自己扩权：自主轮里不能调用 ${tool}（建/停常驻任务、给别的执事递话都算扩权）`;
+	}
+	if (tool === "delegate") {
+		const input = (args ?? {}) as { targetDevice?: unknown; project?: unknown; resume?: unknown };
+		if (typeof input.targetDevice === "string" && input.targetDevice.trim()) {
+			return "自动化不能给自己扩权：自主轮里不能遥控别的设备（去掉 targetDevice 再派）";
+		}
+		// 续跑沿用原单项目，可以不带；新派必须带 project。
+		if (input.resume !== true) {
+			const project = typeof input.project === "string" ? input.project.trim() : "";
+			if (!project) {
+				return "自动化不能给自己扩权：自主轮里派新活必须带 project（续跑可沿用原单项目）";
+			}
+		}
+	}
+	return undefined;
+}

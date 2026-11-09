@@ -18,10 +18,13 @@ import {
 	MIN_PREFERENCE_CONFIDENCE,
 	NoopExtractor,
 	PreferenceExtractor,
+	REDACTED,
 	SqliteMemoryStore,
 	decayedImportance,
+	memoryRedactEnabled,
 	normalizeContent,
 	parsePreferenceJson,
+	redactSecrets,
 	reinforcedImportance,
 	renderPreference,
 	scopeKey,
@@ -960,6 +963,166 @@ try {
 	}
 
 	console.log("✓ work 履历：写入 / 不合并不衰减 / cap 修剪 / 召回排除 / 结构化查询 / 导入跳过");
+}
+
+// ── 16. 凭据打码（2026-11-09 T4 §2）──────────────────────
+// 纯函数正反例 + 唯一收口点（store.put）+ 开关旁路。
+{
+	const positives: Array<[string, string]> = [
+		["sk- 形态", "我的 key 是 sk-abcdefgh12345678，别外传"],
+		["Bearer", "Authorization: Bearer abcdefgh12345678"],
+		["api_key=", "配置里 api_key=abcdef123456"],
+		["api-key:", "api-key: abcdef123456"],
+		["token:", "token: abcdef123456"],
+		["password=", "password=abc12345"],
+		["passwd:", "passwd: abc12345"],
+		["中文密码", "密码：abc12345"],
+		["中文密钥", "密钥=abc12345"],
+		["JWT", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"],
+		["长 hex", "编号 550e8400e29b41d4a716446655440000550e8400e29b41d4a716446655440000"],
+		["长 base64", "凭条 QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo5ODc2NTQ="],
+		["github_pat", "github_pat_11ABCDEFG0123456789"],
+		["ghp_", "ghp_abcdefgh12345678"],
+	];
+	for (const [label, text] of positives) {
+		const out = redactSecrets(text);
+		assert(out.includes(REDACTED), `${label} 应被打码：${out}`);
+	}
+	// 值本身必须消失，不能只加一个占位符
+	assert(
+		!redactSecrets("我的 key 是 sk-abcdefgh12345678").includes("abcdefgh12345678"),
+		"sk- 的值不应残留",
+	);
+	assert(
+		!redactSecrets("密码：abc12345，别告诉别人").includes("abc12345"),
+		"中文密码的值不应残留",
+	);
+	assert(redactSecrets("密码：abc12345，别告诉别人").includes("密码："), "字段名应保留（读得懂）");
+
+	const negatives = [
+		"我的手机号是 13800138000，随时联系",
+		"我的生日是 1990-01-01",
+		"我住在上海市徐汇区某路 123 号",
+		"豆豆是我养的猫，今年三岁",
+		"今天整理了三箱旧照片，按年份分好了",
+		"这周打算每天走八千步",
+	];
+	for (const text of negatives) {
+		assert(redactSecrets(text) === text, `不该误伤：${text} → ${redactSecrets(text)}`);
+	}
+
+	// 幂等：已打码的内容再过一次不变
+	const once = redactSecrets("token: abcdef123456");
+	assert(redactSecrets(once) === once, "打码应幂等");
+
+	// 收口点：所有写入方都走 put —— 引擎 remember / 直接 put 一样被打码
+	const engine = new MemoryEngine({ store: new InMemoryStore() });
+	const remembered = engine.remember({
+		kind: "fact",
+		scope: { type: "global" },
+		content: "我的 api_key=abcdef123456",
+	});
+	assert(remembered.content.includes(REDACTED), "remember 返回的应是入库后的打码内容");
+	assert(engine.getRecord(remembered.id)!.content.includes(REDACTED), "库里应是打码内容");
+
+	// patch 换 content 也打码
+	const store = new InMemoryStore();
+	store.put(seedRecord("r-1", "global", "普通内容", new Date().toISOString()));
+	store.patch("r-1", { content: "token=abcdef123456" });
+	assert(store.get("r-1")!.content.includes(REDACTED), "patch 改 content 同样打码");
+
+	// 开关旁路（一行回滚）
+	const raw = new InMemoryStore({ redact: false });
+	raw.put(seedRecord("r-2", "global", "我的 token=abcdef123456", new Date().toISOString()));
+	assert(raw.get("r-2")!.content.includes("abcdef123456"), "redact:false 时应直通");
+	assert(memoryRedactEnabled({ MEMORY_REDACT: "false" }) === false, "MEMORY_REDACT=false 关");
+	assert(memoryRedactEnabled({ MEMORY_REDACT: "0" }) === false, "MEMORY_REDACT=0 关");
+	assert(memoryRedactEnabled({}) === true, "缺省开");
+
+	console.log(`✓ 凭据打码：${positives.length} 个正例 / ${negatives.length} 个反例 / 写入收口 / 开关旁路`);
+}
+
+// ── 17. intention 前瞻意图（2026-11-09 T4 §3）────────────
+// 三个性质：过期降级不删、未过期优先注入、巩固 / 衰减不碰。
+{
+	const DAY = 86_400_000;
+	const base = new Date("2026-01-01T00:00:00.000Z");
+	let clock = base;
+	const store = new InMemoryStore();
+	const engine = new MemoryEngine({ store, decayDaily: 0.99, now: () => clock });
+
+	const plan = engine.remember({
+		kind: "intention",
+		scope: { type: "global" },
+		content: "我打算下周开始跑步",
+		importance: 0.6,
+		expiresAt: new Date(base.getTime() + 7 * DAY).toISOString(),
+	});
+	assert(store.get(plan.id)!.kind === "intention", "写入应是 intention");
+	assert(
+		store.get(plan.id)!.expiresAt === new Date(base.getTime() + 7 * DAY).toISOString(),
+		"expiresAt 应原样落库",
+	);
+
+	// 未过期：单独成组，排在普通事实之前
+	engine.remember({ kind: "fact", scope: { type: "global" }, content: "今天面试挂了" });
+	clock = new Date(base.getTime() + 3 * DAY);
+	const freshCtx = engine.buildContext({ text: "跑步 面试", scopes: ["global"], limit: 5 });
+	assert(freshCtx.includes("【打算】"), `未过期意图应单独成组：${freshCtx}`);
+	assert(
+		freshCtx.indexOf("【打算】") < freshCtx.indexOf("【其它】"),
+		"意图组应排在其它之前（紧随偏好）",
+	);
+
+	// 过期：读时原地降级成 fact，不删记录
+	clock = new Date(base.getTime() + 8 * DAY);
+	const expiredHits = engine.recall({ text: "跑步 面试", scopes: ["global"], limit: 5 });
+	const demoted = expiredHits.find((hit) => hit.record.id === plan.id);
+	assert(demoted?.record.kind === "fact", "过期后召回里应是 fact");
+	assert(store.get(plan.id)!.kind === "fact", "过期降级应落库（原地改 kind）");
+	assert(store.get(plan.id)!.content === "我打算下周开始跑步", "降级不删、不改正文");
+	const expiredCtx = engine.buildContext({ text: "跑步 面试", scopes: ["global"], limit: 5 });
+	assert(!expiredCtx.includes("【打算】"), "过期后不应再出现在意图组");
+
+	// 无 expiresAt 的 intent 不会自己过期；且不参与时间衰减（100 天后只 +0.05）
+	const permanent = engine.remember({
+		kind: "intention",
+		scope: { type: "global" },
+		content: "我打算一直学下去",
+		importance: 0.6,
+	});
+	clock = new Date(base.getTime() + 100 * DAY);
+	engine.recall({ text: "学下去", scopes: ["global"], limit: 5 });
+	const kept = store.get(permanent.id)!;
+	assert(kept.kind === "intention", "没有 expiresAt 的意图不过期");
+	assert(
+		Math.abs(kept.importance - 0.65) < 1e-9,
+		`意图不参与衰减，只 +0.05，实际 ${kept.importance}`,
+	);
+
+	// 巩固：同正文的意图不合并、不强化（各自有各自的时间与承诺）
+	const cStore = new InMemoryStore();
+	const consolidator = new BasicConsolidator();
+	const candidate = (content: string): MemoryCandidate => ({
+		kind: "intention",
+		scope: "global",
+		content,
+		importance: 0.5,
+		veracity: "stated",
+		source: "user",
+		expiresAt: new Date(base.getTime() + 7 * DAY).toISOString(),
+	});
+	const first = consolidator.consolidate([candidate("我打算学游泳")], cStore, base);
+	const second = consolidator.consolidate([candidate("我打算学游泳")], cStore, base);
+	assert(first.added.length === 1 && second.added.length === 1, "同正文意图应各记一条");
+	assert(second.reinforced.length === 0, "意图不参与合并 / 强化");
+	assert(cStore.countByScope("global") === 2, "两条意图都在");
+	assert(
+		first.added[0]!.expiresAt === new Date(base.getTime() + 7 * DAY).toISOString(),
+		"巩固写入应保留 expiresAt",
+	);
+
+	console.log("✓ intention：过期降级 / 未过期优先注入 / 不衰减 / 巩固不合并");
 }
 
 console.log("✓ 记忆框架自测通过");

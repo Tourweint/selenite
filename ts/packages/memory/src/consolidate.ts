@@ -82,8 +82,10 @@ export class BasicConsolidator implements Consolidator {
 			// kind 不同意味着用途不同（一条是偏好、一条是经历），正文撞车也不该合并。
 			// work 是 append-only 履历（2026-11-08 刀二 E2）：正文撞车也是另一单，
 			// 一律跳过查重直接 append，绝不合并 / 强化（"整理纪要"干十次是十条履历）。
+			// intention（2026-11-09 T4 §3）同理：两次「打算」即使同文，也该保留各自的
+			// 时间与有效期；合并会把其中一条的承诺吃掉。
 			const existing =
-				candidate.kind === "work"
+				candidate.kind === "work" || candidate.kind === "intention"
 					? undefined
 					: store
 						.search({ scopes: [candidate.scope], limit: 200 })
@@ -114,6 +116,7 @@ export class BasicConsolidator implements Consolidator {
 				supersededBy: null,
 				recallCount: 0,
 				lastRecalledAt: null,
+				expiresAt: candidate.expiresAt ?? null,
 			};
 
 			store.put(record);
@@ -212,6 +215,7 @@ export function importMemories(
 			supersededBy: null,
 			recallCount: 0,
 			lastRecalledAt: null,
+			expiresAt: null,
 		};
 		store.put(record);
 		added.push(record);

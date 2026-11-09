@@ -18,7 +18,14 @@ import { dirname } from "node:path";
  *   - `remember` 只在进程内（`Map<会话, Set<工具>>`），重启失效、需要重新批准。
  */
 
-export type ApprovalStatus = "pending" | "approved" | "rejected" | "timeout" | "aborted";
+export type ApprovalStatus =
+	| "pending"
+	| "approved"
+	| "rejected"
+	| "timeout"
+	| "aborted"
+	/** ask_user 的答复（2026-11-09）：问题被回答，不是批准也不是拒绝。 */
+	| "answered";
 /** 结算后的状态（不再有 pending） */
 export type ApprovalOutcome = Exclude<ApprovalStatus, "pending">;
 export type ApprovalDecision = "approve" | "reject";
@@ -46,6 +53,18 @@ export interface ApprovalRecord {
 	 * 客户端据此把卡片标注为「例行任务」；纯增量字段，老客户端忽略。
 	 */
 	origin?: "autonomous";
+	/**
+	 * 这条 pending 是什么（2026-11-09）：缺省 `approval`（旧记录都是它）。
+	 * `ask_user` = 模型向人提问，答复正文走 `answer()`，不是 approve/reject。
+	 */
+	kind?: "approval" | "ask_user";
+	/**
+	 * 拒绝时人给的一句指导语（2026-11-09 §4）：≤500 字，回给模型代替默认拒绝理由。
+	 * 只有 `rejected` 记录可能有；不带 = 旧文案逐字节不变。
+	 */
+	feedback?: string;
+	/** ask_user 的答复正文（≤1000 字）；只有 `answered` 记录可能有。 */
+	answer?: string;
 }
 
 export interface ApprovalCreateInput {
@@ -58,6 +77,8 @@ export interface ApprovalCreateInput {
 	timeoutMs: number;
 	/** 自主轮标记（批次C C2）：例行轮的审批卡带 origin，纯增量字段 */
 	origin?: "autonomous";
+	/** 这条 pending 的形态；缺省 approval（ask_user 见 §3） */
+	kind?: "approval" | "ask_user";
 }
 
 /**
@@ -99,7 +120,8 @@ function normalize(raw: unknown): ApprovalRecord | null {
 		status !== "approved" &&
 		status !== "rejected" &&
 		status !== "timeout" &&
-		status !== "aborted"
+		status !== "aborted" &&
+		status !== "answered"
 	) {
 		return null;
 	}
@@ -113,6 +135,9 @@ function normalize(raw: unknown): ApprovalRecord | null {
 		status,
 		...(typeof value.argsHash === "string" && value.argsHash ? { argsHash: value.argsHash } : {}),
 		...(typeof value.decidedAt === "number" ? { decidedAt: value.decidedAt } : {}),
+		...(value.kind === "ask_user" ? { kind: "ask_user" as const } : {}),
+		...(typeof value.feedback === "string" && value.feedback ? { feedback: value.feedback } : {}),
+		...(typeof value.answer === "string" && value.answer ? { answer: value.answer } : {}),
 	};
 }
 
@@ -197,6 +222,7 @@ export class ApprovalStore {
 			status: "pending",
 			...(input.argsHash ? { argsHash: input.argsHash } : {}),
 			...(input.origin ? { origin: input.origin } : {}),
+			...(input.kind === "ask_user" ? { kind: "ask_user" as const } : {}),
 		};
 		this.records.set(record.callId, record);
 		this.waiters.set(record.callId, resolve);
@@ -205,21 +231,54 @@ export class ApprovalStore {
 	}
 
 	/** 答复。未知 callId → null；已决 → 原记录（幂等，不改状态、不重复放行） */
-	decide(callId: string, decision: ApprovalDecision, remember = false): ApprovalRecord | null {
+	decide(
+		callId: string,
+		decision: ApprovalDecision,
+		remember = false,
+		/** 拒绝时的指导语（§4）：≤500 字由调用方校验，这里只 trim 后落库 */
+		feedback?: string,
+	): ApprovalRecord | null {
 		this.ensureLoaded();
 		const record = this.records.get(callId);
 		if (!record) return null;
+		// ask_user 的答复走 `answer()`：approve/reject 语义不适用（§3/§4.4）。
+		if (record.kind === "ask_user") return record;
 		if (record.status !== "pending") return record;
 
 		const status: ApprovalOutcome = decision === "approve" ? "approved" : "rejected";
 		record.status = status;
 		record.decidedAt = Date.now();
+		const note = feedback?.trim();
+		if (status === "rejected" && note) record.feedback = note;
 		if (status === "approved") {
 			if (remember) this.remember(record.conversationId, record.tool);
 			// 一次性放行：模型重发同一个工具调用时核销。没有指纹的老记录不外发放行（重新问一次）
 			if (record.argsHash) this.grant(record);
 		}
 		this.resolve(record.callId, status);
+		this.persist();
+		return record;
+	}
+
+	/**
+	 * ask_user 的答复（2026-11-09 §3/§4.4）：同一张表、加 `kind` 列 + 单独一条答复路径。
+	 *
+	 * 为什么不复用 approve/reject：语义不是"同意执行"，而是"人回答了一个问题"；
+	 * 硬塞进二分会让闸门的放行清单与拒绝文案都跟着说谎。
+	 * 非 ask_user / 已决 → 不改状态，返回原记录（幂等）。
+	 */
+	answer(callId: string, text: string): ApprovalRecord | null {
+		this.ensureLoaded();
+		const record = this.records.get(callId);
+		if (!record) return null;
+		if (record.kind !== "ask_user") return record;
+		if (record.status !== "pending") return record;
+		const answer = text.trim();
+		if (!answer) return record;
+		record.status = "answered";
+		record.decidedAt = Date.now();
+		record.answer = answer;
+		this.resolve(callId, "answered");
 		this.persist();
 		return record;
 	}

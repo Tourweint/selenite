@@ -22,13 +22,21 @@ import { CodingTools } from "@earendil-works/pi-durable/tools";
 import type { ThinkingLevel } from "@lifediary/shared";
 import { approvalStore, type ApprovalOutcome } from "../approvals.ts";
 import {
+	ASK_USER_TOOL_NAME,
+	ASK_USER_WAITING_MESSAGE,
+	askUserEnabled,
+	createAskUserPending,
+} from "../ask-user.ts";
+import {
 	approvalTimeoutSeconds,
 	denialReason,
 	needsApproval,
+	type ApprovalVerdict,
 } from "../approval-policy.ts";
 import { isAutonomyTurn } from "../autonomy-state.ts";
-import { autonomyRiskVerdict } from "../autonomy-risk.ts";
+import { autonomyEscalationBlockReason, autonomyRiskVerdict } from "../autonomy-risk.ts";
 import { emitDelegation, type DelegationReport } from "../delegation.ts";
+import { auditGateBlock, type GateBlockCategory } from "../gate-audit.ts";
 // 任务专线双写（2026-11-08 扫尾批 8g）：只有真正的装配层注入 mirror；
 // createTools 的探针/单测调用不传，避免去开真实 durable。
 import { taskConversationMirror } from "../task-conversation.ts";
@@ -40,6 +48,17 @@ import {
 	resolvePersona,
 } from "../partners.ts";
 import { pathGuardBlockReason } from "../path-guard.ts";
+// 只读白名单（2026-11-09 任务书 T3 §2）：只能把 ask 变 allow，碰不到 block。
+import { isReadOnlyShellCommand, readAllowlistEnabled } from "../read-allowlist.ts";
+// bash 超时转后台（2026-11-09 任务书 T3 §3）：识别内核超时文案 + 起 detached 子进程。
+import {
+	bashBackgroundEnabled,
+	moveToBackground,
+	replacedResult,
+	timeoutSecondsFromResult,
+} from "../bash-background.ts";
+// 恢复注记（2026-11-09 任务书 T3 §5）：续跑的下一轮模型请求前注入一次「先查再动」。
+import { markRecoverResume, takeRecoverNote } from "./recover-note.ts";
 // 执事间递话（2026-11-08 扫尾批 8d）：状态与话术在 partner-relay.ts，
 // 送达（submit 进目标会话）在这里——本文件才持有 harness。
 import {
@@ -75,6 +94,8 @@ import { createTools } from "../tools.ts";
 import { TOPICS_ENABLED, topicsStore } from "../topics.ts";
 import { TopicTask } from "../topic-runtime.ts";
 import { skillSlashOf } from "../skills.ts";
+// 会话考古（2026-11-09 T4 §4）：检索实现只依赖 shared，不会与本文件成环。
+import { recallSessionsEnabled, searchSessions } from "./session-search.ts";
 import {
 	CHANCELLOR_ENABLED,
 	PERSONA,
@@ -85,6 +106,7 @@ import {
 	skillStore,
 } from "./assist.ts";
 import { approvalArgsHash } from "./approval-key.ts";
+import { INJECTION_GUARD, injectionGuardEnabled, wrapUntrustedObjective } from "./injection-guard.ts";
 import { buildPartnerTurnContext } from "./partner-context.ts";
 // 执事轮装配的履历摘要读口（2026-11-08 刀二 E2）：结构化查询 work 记录，不走语义召回。
 import { workSummaryFor } from "../work-record.ts";
@@ -354,6 +376,13 @@ async function openHarness(): Promise<Harness> {
 		// 上架时把排链函数注入工具，避免 tools.ts 反向 import routines.ts 绕成环。
 		routineSelfService: routineSelfServiceEnabled(),
 		scheduleRoutine: (routineId) => routineEngine().ensureScheduled(routineId),
+		// 会话考古（2026-11-09 T4 §4）：默认开；AGENT_RECALL_SESSIONS=false → 不传，
+		// `recall_sessions` 整块不注册（模型侧 tool_unavailable，一行回滚）。
+		// 用 getHarness() 惰性取：createTools 执行时 harness 还没 open，真正调用时已就绪。
+		recallSessions: recallSessionsEnabled()
+			? (query, options) =>
+					getHarness().then((harness) => searchSessions(harness, query, options))
+			: null,
 	});
 	registry.install(
 		(lifediaryExt = defineExtension({
@@ -379,6 +408,12 @@ async function openHarness(): Promise<Harness> {
 						if (kinds?.byInternal?.[String(input.conversationId)] === "worker") return WORKER_PERSONA;
 						return resolvePersona(partnersStore, PERSONA);
 					},
+				},
+				// 注入防线（2026-11-09 T2）：紧跟在 persona 之后，固定字节、不含动态内容。
+				// 关掉时整段省略（不注空壳）。
+				{
+					key: "injection_guard",
+					render: () => (injectionGuardEnabled() ? INJECTION_GUARD : undefined),
 				},
 				// 当前项目（2026-11-04 方案 §2.3）：每轮现渲染，不写进对话历史。
 				// 切换项目后 durable 会按 section 差异追加新的 pi.system，下一轮即生效。
@@ -442,7 +477,8 @@ async function openHarness(): Promise<Harness> {
 								"课题简报（攒着的，随本轮自然汇报给用户，别复述全文）：",
 								...pushes.map((topic) => {
 									const latest = topic.findings[0];
-									return `- ${topic.question}：${latest?.summary ?? "有新发现"}`;
+									// 课题问题是用户可控文本：注入时标成不可信目标（§3.4）
+									return `- ${wrapUntrustedObjective(topic.question)}：${latest?.summary ?? "有新发现"}`;
 								}),
 							);
 						}
@@ -459,26 +495,68 @@ async function openHarness(): Promise<Harness> {
 				// 权限闸门：pi 本身不带，这是唯一能拦下工具调用的地方
 				hook(ToolTask, {
 					beforeTool: async (call: ToolHookCall, api, context) => {
+						// 闸门留痕（2026-11-09 保证实现纵深 §5）：所有拦下都经这里收口，
+						// 保证"模型看得到、账上也有一行"。只记工具名 + 类别，**不记参数**。
+						const blocked = (
+							reason: string,
+							category: GateBlockCategory,
+							source: string,
+						) => {
+							auditGateBlock({
+								conversationId: api.conversationId,
+								tool: call.name,
+								category,
+								source,
+							});
+							return { block: reason };
+						};
 						if (toolsBlocked.has(api.conversationId)) {
-							return { block: "本轮工具调用已达上限，请直接用已有信息回答" };
+							return blocked(
+								"本轮工具调用已达上限，请直接用已有信息回答",
+								"turn-limit",
+								"turn-limit",
+							);
+						}
+						// 结构化提问（2026-11-09 §3）：借审批 pending 管线挂一张问题卡，
+						// 本轮到此收尾；人答复后由答复端点 followUp 续跑。
+						// 校验失败只回给模型（不建 pending、不算闸门拦下）。
+						if (call.name === ASK_USER_TOOL_NAME && askUserEnabled()) {
+							const created = createAskUserPending({
+								conversationId: api.conversationId,
+								callId: call.id,
+								args: call.arguments,
+							});
+							return { block: created.ok ? ASK_USER_WAITING_MESSAGE : created.message };
+						}
+						// 自动化永不扩权（2026-11-09 T2 §4）：自主轮里结构性拒绝
+						// routine_manage / partner_manage / group_manage / send_to_agent，
+						// 以及带 targetDevice 或缺 project 的 delegate。**不是 ask，是 block**。
+						// 放在递话通道闸之前：自主轮的 send_to_agent 统一回"不能扩权"的理由。
+						const autonomous = isAutonomyTurn(api.conversationId);
+						if (autonomous) {
+							const escalation = autonomyEscalationBlockReason(
+								call.name,
+								call.arguments,
+								autonomous,
+							);
+							if (escalation) return { block: escalation };
 						}
 						// 执事间递话的通道闸（2026-11-08 扫尾批 8d）：先于通用闸门。
 						// 防乒乓是结构保证 —— 递话触发的轮次里工具在这里被摘掉（方案 §一.5），
 						// 与模型说了什么无关。主人对话 / 群会话 / 自主轮同样在这条拦下。
 						if (call.name === RELAY_TOOL_NAME && partnerRelayEnabled()) {
 							const relayBlock = relayToolBlockReason(api.conversationId);
-							if (relayBlock) return { block: relayBlock };
+							if (relayBlock) return blocked(relayBlock, "relay", "relay");
 						}
 						const readOnly = readOnlyBlockReason(call.name);
 						// 自主轮高危审批（批次C C2）：例行轮（autonomyTurns 事实源）里
 						// RISK_TOOLS 一律强制 ask——普通轮行为完全不变（D6 口径不动）。
-						const autonomous = isAutonomyTurn(api.conversationId);
 						const risk = autonomyRiskVerdict(call.name, autonomous);
-						const verdict = risk.forceAsk
+						let verdict: ApprovalVerdict = risk.forceAsk
 							? ({ kind: "ask" } as const)
 							: needsApproval(policy, call.name, readOnly);
 						if (verdict.kind === "block") {
-							return { block: verdict.reason };
+							return blocked(verdict.reason, "policy", "policy");
 						}
 						// 最大工作区物理边界（2026-11-04 方案 §2.4）：write/edit 的目标路径
 						// 解析后必须落在工作区根内。未设工作区时旁路（不把没配的人锁死）。
@@ -489,7 +567,7 @@ async function openHarness(): Promise<Harness> {
 							workspaceRoot: workspaceRootReal(),
 							cwd: sessionCwd(),
 						});
-						if (pathBlock) return { block: pathBlock };
+						if (pathBlock) return blocked(pathBlock, "path", "path-guard");
 						// 防打转守卫（2026-11-05 批次A A1）：放在闸门之后——被拦的调用没执行，
 						// 不喂守卫；铁证在执行前拦下，省掉一次注定无意义的执行。
 						// 只统计顶层调用（嵌套不喂，防放大误判）；≥30s 节奏轮询在守卫内豁免。
@@ -499,7 +577,7 @@ async function openHarness(): Promise<Harness> {
 								console.warn(
 									`[loop-guard] 会话 ${api.conversationId} 铁证中断 pattern=${guardHit.pattern} count=${guardHit.count} tool=${call.name}`,
 								);
-								return { block: LOOP_GUARD_BLOCK_MESSAGE };
+								return blocked(LOOP_GUARD_BLOCK_MESSAGE, "loop-guard", "loop-guard");
 							}
 						}
 						// bash 默认超时（2026-11-04 批次一 A4）：只补模型没传的 timeout。
@@ -509,6 +587,17 @@ async function openHarness(): Promise<Harness> {
 						if (call.name === "bash" && BASH_TIMEOUT_S > 0) {
 							const a = call.arguments as { timeout?: number };
 							if (a.timeout === undefined) injected = { ...a, timeout: BASH_TIMEOUT_S };
+						}
+						// 只读白名单（2026-11-09 任务书 T3 §2，默认关）：只降噪，不放宽封锁。
+						// 位置刻意在 block / pathBlock / loop-guard 之后：那些判定已经把该拦的拦了，
+						// 这里只把剩下的 `ask` 降成 `allow`。自主轮的强制问（risk.forceAsk）不在此列。
+						if (
+							verdict.kind === "ask" &&
+							!risk.forceAsk &&
+							readAllowlistEnabled() &&
+							isReadOnlyShellCommand(call.name, call.arguments, workspaceRootReal(), sessionCwd())
+						) {
+							verdict = { kind: "allow" };
 						}
 						// 审批（2026-11-04 批次二；2026-11-08 扫尾批 8c 默认为「等待态落库」形态）：
 						//   - 先查一次性放行清单：人批准过的「同工具 + 同参数」重发 → 核销并放行；
@@ -548,29 +637,43 @@ async function openHarness(): Promise<Harness> {
 							if (mode === "async" && approvalStore().consumeGrant(api.conversationId, call.name, argsHash)) {
 								// 命中：批准的调用，复判等待期里可能变了的策略与边界（与旧路径同一口径）
 								const recheck = readOnlyBlockReason(call.name);
-								if (recheck) return { block: recheck };
+								if (recheck) return blocked(recheck, "policy", "policy-recheck");
 								const recheckPath = pathGuardBlockReason({
 									tool: call.name,
 									args: call.arguments,
 									workspaceRoot: workspaceRootReal(),
 									cwd: sessionCwd(),
 								});
-								if (recheckPath) return { block: recheckPath };
+								if (recheckPath) return blocked(recheckPath, "path", "path-guard-recheck");
 							} else if (mode === "blocking") {
 								const status = await waitForApproval(openPending(), timeoutS, context.abortSignal);
 								if (status !== "approved") {
-									return { block: denialReason(status, call.name, timeoutS) };
+									// 拒绝带指导语（2026-11-09 §4.1）：blocking 形态的答复在记录里，
+									// 不带 feedback 时 denialReason 逐字节等于旧文案。
+									// ask_user 走 /answer，不会进 blocking；万一出现按中止处理。
+									const denial =
+										status === "answered" ? ("aborted" as const) : status;
+									return blocked(
+										denialReason(
+											denial,
+											call.name,
+											timeoutS,
+											approvalStore().recordOf(call.id)?.feedback,
+										),
+										"approval",
+										"approval",
+									);
 								}
 								// 批准后复判：等待期间可能被切到只读 / 拉黑 / 换工作区
 								const recheck = readOnlyBlockReason(call.name);
-								if (recheck) return { block: recheck };
+								if (recheck) return blocked(recheck, "policy", "policy-recheck");
 								const recheckPath = pathGuardBlockReason({
 									tool: call.name,
 									args: call.arguments,
 									workspaceRoot: workspaceRootReal(),
 									cwd: sessionCwd(),
 								});
-								if (recheckPath) return { block: recheckPath };
+								if (recheckPath) return blocked(recheckPath, "path", "path-guard-recheck");
 							} else {
 								// async：同一件事只挂一张卡（模型重试同参数时不再重复弹），
 								// 然后回拒绝性答复让本轮收尾——零挂起、零等待。
@@ -595,6 +698,12 @@ async function openHarness(): Promise<Harness> {
 					},
 					// 工具跑完、把结果交回模型 → 又回到"在思考"
 					afterTool: (call: ToolHookCall, result, api) => {
+						// 恢复注记（2026-11-09 任务书 T3 §5）：`delegate resume:true` = 一次续跑，
+						// 记一笔；下一次模型请求前由 beforeRequest 注入一次「先查再动」。
+						// 放在这里而不是 tools.ts：工具侧不必知道 agent/ 的存在。
+						if (call.name === "delegate" && (call.arguments as { resume?: boolean }).resume === true) {
+							markRecoverResume(api.conversationId);
+						}
 						// 防打转守卫记账（批次A A1）：铁证已由 beforeTool 拦下，这里只出疑似告警。
 						// 被闸门拦下的调用走不到这里（beforeTool 提前 return），天然不喂守卫。
 						if (loopGuardEnabled() && call.parent === undefined) {
@@ -608,14 +717,40 @@ async function openHarness(): Promise<Harness> {
 								);
 							}
 						}
+						// bash 超时转后台（2026-11-09 任务书 T3 §3，默认关）：超时 ≠ 失败。
+						// 只认内核固定文案（`Command timed out after N seconds`），然后由服务端
+						// 自己 spawn 同一条命令继续跑；工具结果换成"已转到后台"这一句。
+						// 先决定再发工具帧——否则 UI 先看到一个失败帧、模型却收到"已转到后台"。
+						let backgrounded: ReturnType<typeof replacedResult> | undefined;
+						if (bashBackgroundEnabled() && (call.name === "bash" || call.name === "powershell")) {
+							const timeoutS = timeoutSecondsFromResult(result);
+							const command = (call.arguments as { command?: unknown }).command;
+							if (timeoutS !== null && typeof command === "string" && command.trim()) {
+								const moved = moveToBackground({
+									command,
+									cwd: sessionCwd(),
+									timeoutSeconds: timeoutS,
+									onFinished: (record, logTail) => {
+										const tail = logTail.trim();
+										void sayInConversation(
+											api.conversationId,
+											`后台任务 ${record.id} 已结束（退出码 ${record.exitCode ?? "未知"}）。` +
+												(tail ? `\n最后一段输出：\n${tail}` : ""),
+										).catch(() => undefined);
+									},
+								});
+								backgrounded = replacedResult(moved.message);
+							}
+						}
+						const finalResult = backgrounded ?? result;
 						emitPhase(api.conversationId, "thinking");
 						emitTool(api.conversationId, {
 							name: call.name,
 							status: "end",
-							ok: !result.isError,
-							...toolOutput(result),
+							ok: finalResult.isError !== true,
+							...toolOutput(finalResult),
 						});
-						return undefined;
+						return backgrounded;
 					},
 				}),
 				// 每次请求前：注入记忆 + 数这是本轮的第几个工具回合
@@ -644,6 +779,13 @@ async function openHarness(): Promise<Harness> {
 									`【技能调用 · ${slashName}】\n${slashManual}\n（用户消息开头的 /${slashName} 就是调用这份手册；其余文字是这一轮的指令。）`,
 								timestamp: Date.now(),
 							});
+						}
+
+						// 恢复注记（2026-11-09 任务书 T3 §5）：续跑（delegate resume / 启动自动续跑）
+						// 之后的模型请求补一次「先查再动」；取走即核销，每张单最多一次。
+						const recoverNote = takeRecoverNote(api.conversationId);
+						if (recoverNote) {
+							extra.push({ role: "system", content: recoverNote, timestamp: Date.now() });
 						}
 
 						// 一次模型请求 = 一个工具回合。run 一换，预算就重新算。

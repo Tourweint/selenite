@@ -153,6 +153,11 @@ export interface DelegationKickoff {
 	 */
 	sender?: { kind: DelegationSenderKind; name: string };
 	/**
+	 * 计划附件（2026-11-09 保证实现纵深 §2）：这条要求拆成的可核对动作序列。
+	 * 已由 `normalizeDelegationSteps` 校验；缺省 = 旧行为（不落字段、不进提示词）。
+	 */
+	steps?: string[];
+	/**
 	 * 只续跑、不许改派（2026-11-08 扫尾批 8g 任务回话）。
 	 *
 	 * `delegate` 工具的既有语义是"续跑被拒就按新活派"；任务详情里的回话不能这样——
@@ -229,6 +234,41 @@ export function emitDelegation(conversationId: number, event: DelegationEvent): 
 export function truncate(text: string, max: number): string {
 	const oneLine = text.replace(/\s+/g, " ").trim();
 	return oneLine.length <= max ? oneLine : `${oneLine.slice(0, max - 1)}…`;
+}
+
+/** 计划附件的上限（2026-11-09 §2.1）：≤12 条，每条 ≤200 字。 */
+export const DELEGATION_STEPS_MAX = 12;
+export const DELEGATION_STEP_MAX_CHARS = 200;
+
+/**
+ * 校验 `delegate` 的 steps 参数（纯函数，单测直接断言）。
+ *
+ * 语义 = "这条要求拆成的可核对动作序列"。不传 / 空数组 = 旧行为（ticket 不带 steps 字段）；
+ * 超限直接报错，**不建单**——宁可让模型改一次参数，也不要在详情里显示半截步骤。
+ */
+export function normalizeDelegationSteps(
+	raw: unknown,
+): { ok: true; steps?: string[] } | { ok: false; message: string } {
+	if (raw === undefined || raw === null) return { ok: true };
+	if (!Array.isArray(raw)) return { ok: false, message: "steps 必须是字符串数组" };
+	if (raw.length === 0) return { ok: true };
+	if (raw.length > DELEGATION_STEPS_MAX) {
+		return { ok: false, message: `steps 最多 ${DELEGATION_STEPS_MAX} 条（当前 ${raw.length}）` };
+	}
+	const steps: string[] = [];
+	for (const item of raw) {
+		if (typeof item !== "string") return { ok: false, message: "steps 每一项都必须是字符串" };
+		const text = item.trim();
+		if (!text) return { ok: false, message: "steps 里不能有空步骤" };
+		if (text.length > DELEGATION_STEP_MAX_CHARS) {
+			return {
+				ok: false,
+				message: `每条步骤最多 ${DELEGATION_STEP_MAX_CHARS} 字（当前 ${text.length}）`,
+			};
+		}
+		steps.push(text);
+	}
+	return { ok: true, steps };
 }
 
 /**
@@ -627,6 +667,8 @@ export function startDelegation(
 				...managerSwitch,
 				...projectField,
 				...idempotency,
+				// 计划附件（2026-11-09 §2）：只有新派带；续跑沿用原单，不覆盖。
+				...(kick.steps && kick.steps.length > 0 ? { steps: kick.steps } : {}),
 				// 来源对话只透传（2026-11-05 跨仓契约）：chancellor 落 ticket.json，
 				// 子单从父单继承；这里给内部会话 id 的字符串形式，接口层再换对外 uuid。
 				originConversationId: String(kick.conversationId),
@@ -651,6 +693,7 @@ export function startDelegation(
 				...managerSwitch,
 				...projectField,
 				...idempotency,
+				...(kick.steps && kick.steps.length > 0 ? { steps: kick.steps } : {}),
 				originConversationId: String(kick.conversationId),
 			});
 		}

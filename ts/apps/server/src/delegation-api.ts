@@ -458,6 +458,13 @@ export function mountDelegationApi(app: Hono, opts: DelegationApiOptions = {}): 
 				messages: messagesOf(found.ticket.id),
 				// 路径只给相对项目信息，不把 workRoot 绝对路径下发给客户端。
 				project: found.ticket.options.project ?? null,
+				// 计划附件与返工轮次（2026-11-09 §2.3 / §1.5）：可选字段，不出现 = 前端零影响。
+				...(Array.isArray(found.ticket.steps) && found.ticket.steps.length > 0
+					? { steps: found.ticket.steps }
+					: {}),
+				...(typeof found.ticket.repairRound === "number" && found.ticket.repairRound > 0
+					? { repairRound: found.ticket.repairRound }
+					: {}),
 				tasks: found.store.tasksOf(found.ticket.id),
 				reviews: found.store.reviewsOf(found.ticket.id),
 				children: found.store.childrenOf(found.ticket.id).map((child) => ({
