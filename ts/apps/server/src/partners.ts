@@ -54,7 +54,8 @@ export function partnerContractEnabled(): boolean {
 /**
  * 岗位契约的固定四节（2026-11-08 E1）。**标题逐字**：契约文件按这四个二级标题分节，
  * 渲染时只认这四节，其余内容忽略；空节连标题一起省略。
- * 新建执事播种的空模板 = 只有这四个标题（存量执事不自动补文件，缺失 = 该节为空）。
+ * 新建执事播种的模板 = 这四个标题（「决策分级」自 2026-11-10 起带默认正文；
+ * 存量执事不自动补文件，缺失 = 该节为空）。
  */
 export const PARTNER_CONTRACT_SECTIONS = [
 	"职责范围",
@@ -63,9 +64,26 @@ export const PARTNER_CONTRACT_SECTIONS = [
 	"汇报对象",
 ] as const;
 
-/** 新建执事的空契约模板：只有四节标题，没有正文。 */
+/**
+ * 「决策分级」的默认正文（2026-11-10 批 12 §一.5，三#2 调查铁律）。
+ *
+ * 为什么只在新建执事时播种：契约是执事自己的文件，存量执事的 CONTRACT.md
+ * 一律不动（不越权改人家的家目录）；新执事从第一天起就带着这条调查纪律。
+ * 标题四节不变，正文只落「决策分级」——它管的是"什么时候可以自己动手"。
+ */
+export const PARTNER_CONTRACT_DECISION_DEFAULTS = [
+	"- 没有调查不许改：先复现、再看现象、再动手；猜着改三次不如查一次。",
+	"- 同一条思路连修 3 次还不行 → 停下，把已查明的事写成一段话交上去，别继续硬修。",
+	"- 交付物要自带验收证据：说「做完了」要能指出凭什么。",
+].join("\n");
+
+/** 新建执事的契约模板：四节标题不变；「决策分级」带调查铁律默认正文。 */
 export function partnerContractTemplate(): string {
-	return PARTNER_CONTRACT_SECTIONS.map((section) => `## ${section}`).join("\n\n");
+	return PARTNER_CONTRACT_SECTIONS.map((section) =>
+		section === "决策分级"
+			? `## ${section}\n${PARTNER_CONTRACT_DECISION_DEFAULTS}`
+			: `## ${section}`,
+	).join("\n\n");
 }
 
 const DEFAULT_DB_PATH = ".data/partners.sqlite";

@@ -1,0 +1,20 @@
+你在 git worktree `<本地项目区>\projects\lh-b12`（分支 batch12/prompts，基线 73ea73d）里工作。**所有读写都在这个 worktree 内**，不要碰 <repo> 主仓，也不要碰 <chancellor>。
+
+任务书：`docs/设计方案/2026-11-10-批12任务书（CodeBuddy·保证实现提示词七件）.md`
+先完整读它（尤其〇节的"写法约定"），再逐项实现七件：
+1 验证铁律 / 2 裁决记账与四停条件 / 3 委派回报四行格式 / 4 同类失败三次建议接管（这条要写代码）/ 5 执事契约调查铁律 / 6 干活期间沉默+交付物自含证据 / 7 注意力纪律+拒绝概念登记法
+
+有一个前置勘察结论可直接用（2026-11-10 已核实，行号是快照、以代码为准）：
+- 总管 PERSONA 在 `agent/assist.ts:24-38`；persona section 注册在 `agent/lifecycle.ts:397-421`（key: "persona" 在 407），后续段 injection_guard(425) / current_project(431) / skills(447) / topics(457)。
+- 执事身份 `renderPartnerIdentity` 在 `partner-runtime.ts:49-71`；`buildPartnerTurnContext` 在 `agent/partner-context.ts:335-355`，text 依次拼：契约段 → 目标段 → 状态段 → INJECTION_GUARD(350)；状态段内 285 行追加 ATTENTION_REPLY_GUIDANCE、288 行追加 WORK_REVIEW_GUIDANCE。
+- 现有纪律常量：ATTENTION_REPLY_GUIDANCE(delegation.ts:285-289)、WORK_REVIEW_GUIDANCE(delegation.ts:300-305)、TURN_LIMIT_INSTRUCTION(agent/turn-gate.ts:73-76)、APPROVAL_WAITING_MESSAGE(turn-gate.ts:114-116)、ASK_USER_WAITING_MESSAGE(ask-user.ts:38-41)、ROUTINE_QUIET_INSTRUCTION(routine-quiet.ts:15-16)、RECOVER_NOTE(agent/recover-note.ts:18-22)、INJECTION_GUARD(agent/injection-guard.ts:11-16)。
+- 契约四节标题 `partners.ts:59-64`；空模板 `partnerContractTemplate()` 在 `partners.ts:67-69`；播种 `seedContract()` 在 `partners.ts:650-655`，只在新建执事时调（`partners.ts:373`）。
+- delegate description 在 `tools.ts:480-507`；attention 话术在 `tools.ts:635-636`；attention 事件发出在 `delegation.ts:540-548`，needs_you 汇报行在 `delegation.ts:349-350`。
+- **失败计数没有现成可复用机制**：loop-guard 的 streak 是"完全相同工具调用"且每轮清零（lifecycle.ts:841）；delegation-receipts 的 countRetries/countResumes 是重派/续跑次数，不是失败次数。所以第 4 条要**新建** `failure-streak.ts`。
+
+额外要求：
+- 依赖已装好。`cd ts` 后：`pnpm typecheck`、`pnpm --filter @lifediary/server test`、`pnpm --filter @lifediary/server http`、`pnpm gate read-only` / `pnpm gate full`。
+- 每完成一件就跑一次 typecheck + test。
+- 不许 git commit。
+- 变更记录写 `docs/变更记录/2026-11-10-批12（保证实现提示词七件）.md`。
+- 最后回复：做了什么 / 验了什么（贴关键输出）/ 已知边界 / 没跑的验证。控制长度，不要贴大段代码。

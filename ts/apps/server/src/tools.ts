@@ -41,6 +41,7 @@ import {
 	validateDomain,
 } from "../../../../../chancellor/src/manager/registry.ts";
 import {
+	REPORT_FOUR_LINES,
 	WORK_REVIEW_GUIDANCE,
 	chancellorWorkRoot,
 	emitDelegation,
@@ -49,6 +50,8 @@ import {
 	type DelegationMirrorEntry,
 	type DelegationReport,
 } from "./delegation.ts";
+// 裁决纪律（2026-11-10 批 12 §一.2）：与执事轮输入同一份文本，接在 delegate 描述尾部。
+import { RULING_DISCIPLINE } from "./agent/turn-gate.ts";
 // 执事自建巡逻核心（2026-11-08 刀二 E4）：与 HTTP 端点共用校验 / 归属 / 上限。
 import {
 	defaultRoutineManageContext,
@@ -633,7 +636,13 @@ export function createTools(deps: ToolDeps) {
 			"**多步活要写 `steps`**：一件事如果有 ≥3 个动作、或者要跨文件改，就用 steps 列出可核对的动作序列" +
 			"（≤12 条，每条一句话说清做什么、怎么算做到）；一句话就能说完的小活不写。" +
 			"工人回报「需要你」（need_input / need_decision / need_action）时，答得了就答；" +
-			"一时答不了，明确告诉它「这一项先跳过，继续其余部分，这项回头再补」，别让整单停在一件小事上。",
+			"一时答不了，明确告诉它「这一项先跳过，继续其余部分，这项回头再补」，别让整单停在一件小事上。" +
+			// 2026-11-10 批 12 §一.3：四行回报口径随派活一起交待下去，别让工人交流水账。
+			"**派活前告诉工人按四行回报**（回报开头写「给<你的名字>：」，不要把任务原样发回给派活的人）：\n" +
+			REPORT_FOUR_LINES +
+			// 2026-11-10 批 12 §一.2：四停之外自己裁决、记一行账，别反复请示。
+			"\n\n" +
+			RULING_DISCIPLINE,
 		parameters: Type.Object({
 			requirement: Type.String({
 				description:

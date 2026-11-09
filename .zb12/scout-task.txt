@@ -1,0 +1,12 @@
+只读勘察，不改任何文件、不 commit。仓库根 `<本地项目区>\projects\lh-b12`。
+
+请回答下面 6 个问题，每条给"文件:行号"证据，不要贴大段代码：
+
+1) 总管（chief）的系统提示词是从哪拼出来的？`resolvePersona` / `PERSONA` 在哪个文件？persona section 在哪注册？
+2) 执事（partner）的提示词：`renderPartnerIdentity` 拼了什么？`buildPartnerTurnContext` 追加了哪几段（列出每段的常量名与文件行号）？
+3) 现有"注意力/汇报纪律"类常量有哪些？逐个列（名字 + 文件:行号 + 一句话作用）。已知至少有 ATTENTION_REPLY_GUIDANCE、WORK_REVIEW_GUIDANCE，还有别的吗？
+4) 执事岗位契约（CONTRACT.md）的四节标题定义在哪个文件哪一行？新执事播种的空模板文案在哪？
+5) `delegate` 工具返回给模型的字符串里，"需要你"（attention）的处理话术在哪？（找 need_input / need_decision / need_action 相关）
+6) 有没有现成的"失败计数 / 连续失败"机制可以用？找 loop-guard.ts 与 delegation-receipts.ts 里跟"失败次数"有关的状态，说明能否复用来做"同类失败连续 3 次→建议人接管"。
+
+输出 markdown，按 1)~6) 分节，每节 2-6 行。
