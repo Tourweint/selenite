@@ -206,6 +206,41 @@ test("回执：旧库自动迁移，会话映射随受理落库并可反查", ()
 	}
 });
 
+test("回执：授权依据只落列不接判定，旧行与坏 JSON 都按 null 读", () => {
+	const root = tempRoot();
+	const file = join(root, "delegations.sqlite");
+	const receipts = new DelegationReceipts(file);
+	try {
+		receipts.begin("r-auth", "fp-auth", {
+			explicit: true,
+			workRoot: root,
+			authority: { level: "ask-critical", at: "2026-11-10T00:00:00.000Z" },
+		});
+		assert.deepEqual(receipts.lookup("r-auth")?.authority, {
+			level: "ask-critical",
+			at: "2026-11-10T00:00:00.000Z",
+		});
+		// 没给 = null（与旧记录同形，读取方必须容忍）
+		receipts.begin("r-noauth", "fp-noauth", { explicit: true, workRoot: root });
+		assert.equal(receipts.lookup("r-noauth")?.authority, null);
+	} finally {
+		receipts.close();
+	}
+
+	// 手工改坏：读取按 null，不为了一个展示字段把整条回执读挂
+	const raw = new DatabaseSync(file);
+	raw.prepare("UPDATE delegation_receipts SET authority = ? WHERE request_id = 'r-auth'").run("{not json");
+	raw.close();
+
+	const again = new DelegationReceipts(file);
+	try {
+		assert.equal(again.lookup("r-auth")?.authority, null);
+	} finally {
+		again.close();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("回执：DELEGATION_MAP_PERSIST=false 时不写会话列，每次 accept 都读 env", () => {
 	const root = tempRoot();
 	const receipts = new DelegationReceipts(join(root, "delegations.sqlite"));

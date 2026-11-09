@@ -105,6 +105,8 @@ import type { SearchModule } from "./search.ts";
 // 会话考古（2026-11-09 T4 §4）：检索实现留在 agent/session-search.ts（只依赖 shared），
 // 这里只收注入函数，避免 tools.ts 反向 import session.ts 绕成环。
 import type { SessionSearchHit } from "./agent/session-search.ts";
+// 工具返回统一契约（2026-11-10 批 16 §一）：当前只给 recall_sessions 用，旧工具仍然 text()。
+import { encodeToolResult, err, ok, type ToolResult } from "./tool-result.ts";
 
 /**
  * 我们自己的工具。
@@ -357,6 +359,11 @@ export function isDeviceWorkerDelegation(
 
 function text(value: string) {
 	return { output: [{ type: "text" as const, text: value }] };
+}
+
+/** 统一契约形态的工具输出（批 16 §一）：一行 JSON，只给新工具用。 */
+function textToolResult<T>(result: ToolResult<T>) {
+	return { output: [{ type: "text" as const, text: encodeToolResult(result) }] };
 }
 
 // ── persona_recall 渲染（2026-11-09 persona 接入批一）──────────────
@@ -1031,20 +1038,40 @@ export function createTools(deps: ToolDeps) {
 					),
 				}),
 				execute: async (args) => {
-					const hits = await searchSessions(args.query, {
-						...(args.days === undefined ? {} : { days: args.days }),
-						...(args.limit === undefined ? {} : { limit: args.limit }),
-					});
+					let hits: SessionSearchHit[];
+					try {
+						hits = await searchSessions(args.query, {
+							...(args.days === undefined ? {} : { days: args.days }),
+							...(args.limit === undefined ? {} : { limit: args.limit }),
+						});
+					} catch (error) {
+						// 只记原因，不记 query 原文（日志纪律）
+						const detail = error instanceof Error ? error.message : String(error);
+						console.warn(`[recall_sessions] 检索失败: ${detail.slice(0, 200)}`);
+						return textToolResult(
+							err("recall_failed", "会话检索这次没跑成。", "换个关键词再试；还不行就明说查不了，不要编。"),
+						);
+					}
 					// 只记字数与条数，不记 query 原文与正文（D8 / 日志纪律）
 					console.log(`[recall_sessions] q=${args.query.length}字 hits=${hits.length}`);
-					if (hits.length === 0) return text("没有找到相关的对话记录。");
-					return text(
-						hits
-							.map((hit) => {
-								const when = hit.at ? new Date(hit.at).toISOString().slice(0, 10) : "日期未知";
-								return `- ${when}｜${hit.title || "（无标题）"}（${hit.conversationId}）\n  …${hit.snippet}…`;
-							})
-							.join("\n"),
+					if (hits.length === 0) {
+						return textToolResult(
+							ok({ count: 0, hits, message: "没有找到相关的对话记录。" }),
+						);
+					}
+					return textToolResult(
+						ok({
+							count: hits.length,
+							hits,
+							message: hits
+								.map((hit) => {
+									const when = hit.at
+										? new Date(hit.at).toISOString().slice(0, 10)
+										: "日期未知";
+									return `- ${when}｜${hit.title || "（无标题）"}（${hit.conversationId}）\n  …${hit.snippet}…`;
+								})
+								.join("\n"),
+						}),
 					);
 				},
 			}),

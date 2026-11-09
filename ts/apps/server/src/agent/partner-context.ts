@@ -9,6 +9,7 @@ import { RULING_DISCIPLINE, verificationIronLawFor } from "./turn-gate.ts";
 import {
 	ATTENTION_ONE_QUESTION,
 	ATTENTION_REPLY_GUIDANCE,
+	GROUNDING_DISCIPLINE,
 	WORK_REVIEW_GUIDANCE,
 	WORK_SILENCE_DISCIPLINE,
 	chancellorWorkRoot,
@@ -335,17 +336,21 @@ export function buildPartnerGoalSection(
 // ── 整体装配 ─────────────────────────────────────────────
 
 /**
- * 纪律段（2026-11-10 批 12）：执事轮常量口径，全部固定字节、不含动态内容。
+ * 纪律段（2026-11-10 批 12 + 批 16）：执事轮常量口径，全部固定字节、不含动态内容。
  *
  * 为什么集中在这里：任务的七件里有四件是提示词纪律，它们与契约 / 状态一样
  * 「每轮现渲染、不写进 transcript」。**总管（chief）的验证铁律由 lifecycle 的
  * persona 段注入**，这里跳过，避免同一段进两遍；普通执事没有 persona 段，在这里补。
+ * 答案接地（批 16 §五）不按身份分：谁汇报谁负责。
  */
 export function buildPartnerDisciplineSection(partnerId: string): string {
 	const blocks = [
 		verificationIronLawFor(partnerId),
 		RULING_DISCIPLINE,
 		WORK_SILENCE_DISCIPLINE,
+		// 答案接地（批 16 §五）：总管与执事都要——它管的是"说出口的事实"，
+		// 谁汇报谁负责，不按身份分。
+		GROUNDING_DISCIPLINE,
 		// 汇报卡三规则（批 15 §二）：只给普通执事；总管那条时间线由界面承载，
 		// 加进来会改变总管纪律段的固定字节，故跳过。
 		partnerId === CHIEF_PARTNER_ID || !briefCardRulesEnabled() ? undefined : BRIEF_CARD_RULES,
@@ -361,7 +366,7 @@ export interface PartnerTurnContext {
 	contract: string | null;
 	/** 当前目标段（E4，无目标 → null） */
 	goal: string | null;
-	/** 纪律段（批 12：验证 / 裁决 / 干活期间 / 提问；固定字节，永远非空） */
+	/** 纪律段（批 12：验证 / 裁决 / 干活期间 / 提问；批 16：答案接地；固定字节，永远非空） */
 	discipline: string;
 	/** 当前在办段（三项皆空 + 无履历 → null） */
 	status: string | null;

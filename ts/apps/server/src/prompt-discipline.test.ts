@@ -9,6 +9,7 @@ import type { SkillStore } from "./skills.ts";
 import { createTools } from "./tools.ts";
 import {
 	ATTENTION_ONE_QUESTION,
+	GROUNDING_DISCIPLINE,
 	REPORT_FOUR_LINES,
 	WORK_SILENCE_DISCIPLINE,
 	formatReport,
@@ -36,12 +37,13 @@ const FIXED_TEXTS: Array<[string, string]> = [
 	["VERIFICATION_IRON_LAW", VERIFICATION_IRON_LAW],
 	["RULING_DISCIPLINE", RULING_DISCIPLINE],
 	["WORK_SILENCE_DISCIPLINE", WORK_SILENCE_DISCIPLINE],
+	["GROUNDING_DISCIPLINE", GROUNDING_DISCIPLINE],
 	["ATTENTION_ONE_QUESTION", ATTENTION_ONE_QUESTION],
 	["REPORT_FOUR_LINES", REPORT_FOUR_LINES],
 	["TAKEOVER_HINT", TAKEOVER_HINT],
 ];
 
-test("固定字节：六段口径都不含日期 / 时刻 / 会话 id", () => {
+test("固定字节：七段口径都不含日期 / 时刻 / 会话 id", () => {
 	for (const [name, text] of FIXED_TEXTS) {
 		assert.ok(text.length > 0, `${name} 不能为空`);
 		assert.equal(/20\d{2}-\d{1,2}-\d{1,2}/.test(text), false, `${name} 不含日期`);
@@ -63,6 +65,13 @@ test("裁决纪律：继续干 + 四停 + 一行账", () => {
 	assert.match(RULING_DISCIPLINE, /只有四种情况停下问人/);
 	assert.match(RULING_DISCIPLINE, /不可逆或破坏性的操作/);
 	assert.match(RULING_DISCIPLINE, /裁决：<决定了什么>/);
+});
+
+test("答案接地：数值 / 日期 / 引文要查得到，查不到就说记不清", () => {
+	assert.match(GROUNDING_DISCIPLINE, /必须真的能在记忆 \/ transcript \/ 文件里查到/);
+	assert.match(GROUNDING_DISCIPLINE, /recall_sessions/);
+	assert.match(GROUNDING_DISCIPLINE, /我记不清了/);
+	assert.match(GROUNDING_DISCIPLINE, /不要编/);
 });
 
 test("四行回报：状态 / 结果 / 证据 / 解锁 逐行", () => {
@@ -112,7 +121,9 @@ test("装配：执事轮输入含四段纪律；总管轮不重复验证铁律",
 		assert.match(chief.discipline, /【裁决纪律】/);
 		assert.equal(
 			buildPartnerDisciplineSection("chief"),
-			[RULING_DISCIPLINE, WORK_SILENCE_DISCIPLINE, ATTENTION_ONE_QUESTION].join("\n\n"),
+			[RULING_DISCIPLINE, WORK_SILENCE_DISCIPLINE, GROUNDING_DISCIPLINE, ATTENTION_ONE_QUESTION].join(
+				"\n\n",
+			),
 		);
 	} finally {
 		store.close();

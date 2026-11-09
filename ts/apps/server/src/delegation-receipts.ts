@@ -27,6 +27,18 @@ const BOOT_ID = randomUUID();
 
 export type ReceiptOutcome = "accepting" | "accepted" | "uncertain" | "failed";
 
+/**
+ * 这单当时凭什么被允许（2026-11-10 批 16 §六；全景调研四 §十一#6）。
+ *
+ * `level` 是审批档位（`ask-all` / `ask-critical` / `none` / 将来的其它档位名），
+ * `at` 是拍板时刻的 ISO 时间。**只记录，不参与判定**：本批不加任何"恢复前重验"的分支，
+ * 现有链路读到它也不会做什么——留这一列是为了四 §4.3 的"恢复前重验"将来有据可查。
+ */
+export interface ReceiptAuthority {
+	level: string;
+	at: string;
+}
+
 export interface DelegationReceipt {
 	requestId: string;
 	fingerprint: string;
@@ -42,6 +54,11 @@ export interface DelegationReceipt {
 	 * 旧行为 null（投影时视为 human）；`RUN_SOURCE=false` 时不写。
 	 */
 	runSource: RunSource | null;
+	/**
+	 * 授权依据（批 16 §六）：审批档位 + 拍板时刻；不参与任何判定。
+	 * 旧行 / 没写 → null（读取方必须容忍，投影不要假设它存在）。
+	 */
+	authority: ReceiptAuthority | null;
 	createdAt: string;
 	updatedAt: string;
 }
@@ -101,6 +118,10 @@ export class DelegationReceipts {
 		// 批 15 §三：触发来源。旧行补不上信息，永远按 NULL（投影视为 human）处理。
 		if (!columns.some((column) => column.name === "run_source")) {
 			this.db.exec("ALTER TABLE delegation_receipts ADD COLUMN run_source TEXT");
+		}
+		// 批 16 §六：授权依据（JSON `{level, at}`）。只落列不接判定；旧行永远是 NULL。
+		if (!columns.some((column) => column.name === "authority")) {
+			this.db.exec("ALTER TABLE delegation_receipts ADD COLUMN authority TEXT");
 		}
 		this.db.exec(
 			"CREATE INDEX IF NOT EXISTS idx_delegation_receipts_ticket ON delegation_receipts(ticket_id);",
@@ -175,11 +196,11 @@ export class DelegationReceipts {
 	begin(
 		requestId: string,
 		fingerprint: string,
-		opts: { explicit: boolean; workRoot?: string; runSource?: RunSource },
+		opts: { explicit: boolean; workRoot?: string; runSource?: RunSource; authority?: ReceiptAuthority },
 	): ReceiptBegin {
 		const existing = this.lookup(requestId);
 		if (!existing) {
-			this.insert(requestId, fingerprint, opts.runSource);
+			this.insert(requestId, fingerprint, opts.runSource, opts.authority);
 			return { kind: "new" };
 		}
 		if (existing.fingerprint !== fingerprint) {
@@ -205,7 +226,7 @@ export class DelegationReceipts {
 			return { kind: "existing", receipt: existing };
 		}
 		// 自动 id：原单已经终态，允许重新派，回执改指向新单。
-		this.reinsert(requestId, fingerprint, opts.runSource);
+		this.reinsert(requestId, fingerprint, opts.runSource, opts.authority);
 		return { kind: "new", receipt: existing };
 	}
 
@@ -246,22 +267,48 @@ export class DelegationReceipts {
 			.run(outcome, new Date().toISOString(), requestId);
 	}
 
-	private insert(requestId: string, fingerprint: string, runSource?: RunSource): void {
+	private insert(
+		requestId: string,
+		fingerprint: string,
+		runSource?: RunSource,
+		authority?: ReceiptAuthority,
+	): void {
 		const now = new Date().toISOString();
 		this.db
 			.prepare(
-				"INSERT INTO delegation_receipts (request_id, ticket_id, fingerprint, outcome, boot_id, run_source, created_at, updated_at) VALUES (?, '', ?, 'accepting', ?, ?, ?, ?)",
+				"INSERT INTO delegation_receipts (request_id, ticket_id, fingerprint, outcome, boot_id, run_source, authority, created_at, updated_at) VALUES (?, '', ?, 'accepting', ?, ?, ?, ?, ?)",
 			)
-			.run(requestId, fingerprint, BOOT_ID, persistedRunSource(runSource), now, now);
+			.run(
+				requestId,
+				fingerprint,
+				BOOT_ID,
+				persistedRunSource(runSource),
+				persistedAuthority(authority),
+				now,
+				now,
+			);
 	}
 
-	private reinsert(requestId: string, fingerprint: string, runSource?: RunSource): void {
+	private reinsert(
+		requestId: string,
+		fingerprint: string,
+		runSource?: RunSource,
+		authority?: ReceiptAuthority,
+	): void {
 		const now = new Date().toISOString();
+		// 重派是**新的一次决定**：没给 authority 就清空，别把上一单的授权依据带过来。
 		this.db
 			.prepare(
-				"UPDATE delegation_receipts SET ticket_id = '', fingerprint = ?, outcome = 'accepting', boot_id = ?, run_source = ?, updated_at = ? WHERE request_id = ?",
+				"UPDATE delegation_receipts SET ticket_id = '', fingerprint = ?, outcome = 'accepting', boot_id = ?, run_source = ?, authority = ?, updated_at = ? WHERE request_id = ?",
 			)
-			.run(fingerprint, BOOT_ID, persistedRunSource(runSource), now, requestId);
+			.run(
+				fingerprint,
+				BOOT_ID,
+				persistedRunSource(runSource),
+				persistedAuthority(authority),
+				now,
+				requestId,
+			);
 	}
 
 	// ── 死信（A2 补差）────────────────────────────────────
@@ -409,9 +456,31 @@ function toReceipt(row: Record<string, unknown>): DelegationReceipt {
 		bootId: row.boot_id === null || row.boot_id === undefined ? null : text(row.boot_id) || null,
 		outcome: (text(row.outcome) as ReceiptOutcome) || "accepting",
 		runSource: (text(row.run_source) as RunSource) || null,
+		authority: parseAuthority(row.authority),
 		createdAt: text(row.created_at),
 		updatedAt: text(row.updated_at),
 	};
+}
+
+/**
+ * 授权依据的读取容错（批 16 §六）：旧行 NULL、手工改坏的 JSON、缺字段，
+ * 一律按 null 返回——**读取方不该为了一个展示字段把整条回执读挂**。
+ */
+function parseAuthority(value: unknown): ReceiptAuthority | null {
+	if (typeof value !== "string" || !value.trim()) return null;
+	try {
+		const parsed = JSON.parse(value) as { level?: unknown; at?: unknown };
+		if (typeof parsed.level !== "string" || typeof parsed.at !== "string") return null;
+		return { level: parsed.level, at: parsed.at };
+	} catch {
+		return null;
+	}
+}
+
+/** 没给就不写（NULL）；给了就存 JSON，固定键序 `{level, at}`。 */
+function persistedAuthority(authority: ReceiptAuthority | undefined): string | null {
+	if (!authority) return null;
+	return JSON.stringify({ level: authority.level, at: authority.at });
 }
 
 /** 开关关着 / 没给来源 → NULL（不写）；老调用方与回滚口径一致。 */

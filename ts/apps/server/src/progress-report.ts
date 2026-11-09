@@ -3,6 +3,7 @@ import { LiveDoc, defineTool, type ToolRegistration } from "@earendil-works/pi-d
 import { CHIEF_PARTNER_ID, partnersStore } from "./partners.ts";
 import { emitDelegation } from "./delegation.ts";
 import { isTaskSession } from "./unattended.ts";
+import { encodeToolResult, err, ok, type ToolResult } from "./tool-result.ts";
 
 /**
  * agent → 用户中途播报（2026-11-10 批 13 §三，全景调研 #18）。
@@ -120,30 +121,48 @@ export function createReportProgressTool(deps: ProgressReportDeps = {}): ToolReg
 		execute: async (args, api, context) => {
 			const conversationId = Number(api.conversationId);
 			const message = String(args.message ?? "").replace(/\s+/g, " ").trim();
-			if (!message) return text("message 不能为空。");
+			if (!message) return text(err("progress_empty", "message 不能为空。", "说一句话再说。"));
 			if (message.length > PROGRESS_MESSAGE_LIMIT) {
 				return text(
-					`这条 ${message.length} 字，超过 ${PROGRESS_MESSAGE_LIMIT} 字上限。压缩成一句再说。`,
+					err(
+						"progress_too_long",
+						`这条 ${message.length} 字，超过 ${PROGRESS_MESSAGE_LIMIT} 字上限。`,
+						"压缩成一句再说。",
+					),
 				);
 			}
 			if (!allowed(conversationId)) {
-				return text("这个会话不需要中途播报（主人就在对话里看着）；把结果直接写进回复即可。");
+				return text(
+					err(
+						"progress_out_of_scope",
+						"这个会话不需要中途播报（主人就在对话里看着）。",
+						"把结果直接写进回复即可。",
+					),
+				);
 			}
 
 			const live = await api.snapshot(LiveDoc, api.conversationId, context);
 			const slot = takeProgressSlot(conversationId, progressRunKey(conversationId, live));
-			if (!slot.allowed) return text(progressCapMessage());
+			if (!slot.allowed) {
+				return text(err("progress_cap_reached", progressCapMessage(), "合并成一条，或留到最后一起说。"));
+			}
 
 			const notice = progressNoticeText(message);
 			emitDelegation(conversationId, { type: "notice", text: notice });
 			deps.mirrorTaskNotice?.(conversationId, notice);
 			// 日志只记字数与序号，不记正文（对话内容不进日志）。
 			console.log(`[progress] 会话 ${conversationId} 第 ${slot.used} 条（${message.length} 字）`);
-			return text(`已播报（本轮第 ${slot.used} 条）。继续做手里的事，不要结束本轮。`);
+			return text(
+				ok({
+					used: slot.used,
+					limit: PROGRESS_MAX_PER_RUN,
+					message: `已播报（本轮第 ${slot.used} 条）。继续做手里的事，不要结束本轮。`,
+				}),
+			);
 		},
 	});
 }
 
-function text(value: string) {
-	return { output: [{ type: "text" as const, text: value }] };
+function text<T>(result: ToolResult<T>) {
+	return { output: [{ type: "text" as const, text: encodeToolResult(result) }] };
 }
