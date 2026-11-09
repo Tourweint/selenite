@@ -3,6 +3,8 @@ import { test } from "node:test";
 import {
 	RELAY_HOP_TAG,
 	RELAY_MAX_PER_RUN,
+	RELAY_RECEIPT_QUEUED,
+	RELAY_RECEIPT_SETTLED,
 	beginRelayRun,
 	claimRelayTarget,
 	clearRelayTarget,
@@ -11,9 +13,13 @@ import {
 	markRelayRun,
 	markRelayTarget,
 	partnerRelayEnabled,
+	partnerRelayReceiptEnabled,
 	relayBody,
+	relayDeliveredText,
 	relayNoticeText,
+	relayOutcomeEntry,
 	relayRunKey,
+	relaySettledText,
 	resetRelayState,
 	resolveRelayTarget,
 	takeRelaySlot,
@@ -200,4 +206,55 @@ test("回滚开关：只有明确写 false/0 才关（缺省与新值都开）",
 	assert.equal(partnerRelayEnabled({ PARTNER_RELAY_ENABLED: "true" } as NodeJS.ProcessEnv), true);
 	assert.equal(partnerRelayEnabled({ PARTNER_RELAY_ENABLED: "false" } as NodeJS.ProcessEnv), false);
 	assert.equal(partnerRelayEnabled({ PARTNER_RELAY_ENABLED: "0" } as NodeJS.ProcessEnv), false);
+});
+
+// ── 批 15 §五：两态回执（queued / settled）───────────────
+
+test("回执开关：默认开；false/0/off 才关", () => {
+	assert.equal(partnerRelayReceiptEnabled({}), true);
+	assert.equal(partnerRelayReceiptEnabled({ PARTNER_RELAY_RECEIPT: "false" }), false);
+	assert.equal(partnerRelayReceiptEnabled({ PARTNER_RELAY_RECEIPT: "0" }), false);
+	assert.equal(partnerRelayReceiptEnabled({ PARTNER_RELAY_RECEIPT: "off" }), false);
+	assert.equal(partnerRelayReceiptEnabled({ PARTNER_RELAY_RECEIPT: "true" }), true);
+});
+
+test("queued 文案：开关关着逐字节等于旧文案（回滚口径）", () => {
+	const when = "对方正在忙，这条排在它本轮之后";
+	const legacy =
+		`已递给「信使乙」（${when}）。` +
+		"主人那边只会看到一条通知、看不到原文；需要主人知道的事，你自己也要在回复里说。";
+	assert.equal(relayDeliveredText("信使乙", true, false), legacy);
+	assert.equal(
+		relayDeliveredText("信使乙", false, false),
+		`已递给「信使乙」（对方空闲，已开始看）。` +
+			"主人那边只会看到一条通知、看不到原文；需要主人知道的事，你自己也要在回复里说。",
+	);
+});
+
+test("queued 文案：开着时明确两态，不把“已投递”说成“已处理”", () => {
+	const out = relayDeliveredText("信使乙", false, true);
+	assert.ok(out.includes(RELAY_RECEIPT_QUEUED));
+	assert.match(out, /对方跑完后会回你一条结果/);
+	assert.ok(!out.includes(RELAY_RECEIPT_SETTLED));
+});
+
+test("settled 文案：一句话 + 长度限制 + 空结果兜底", () => {
+	const out = relaySettledText("信使乙", "查完了。\n明天上午十点开会。");
+	assert.equal(out, "「信使乙」处理完了你递的那条话：查完了。 明天上午十点开会。");
+
+	const long = relaySettledText("信使乙", "字".repeat(400));
+	assert.ok(long.length <= 200, `实际 ${long.length}`);
+	assert.ok(long.endsWith("…"));
+
+	assert.match(relaySettledText("信使乙", "  "), /没有给出结论/);
+});
+
+test("settled 落点：发送方 transcript 记一条 pi.assistant 留言", () => {
+	const entry = relayOutcomeEntry("【留言】「信使乙」处理完了你递的那条话：好");
+	assert.equal(entry.kind, "pi.assistant");
+	const data = entry.data as { relay?: string; receipt?: string } | undefined;
+	assert.equal(data?.relay, "outcome");
+	assert.equal(data?.receipt, RELAY_RECEIPT_SETTLED);
+	const text = entry.model?.[0]?.content;
+	assert.ok(JSON.stringify(text).includes("【留言】"));
 });

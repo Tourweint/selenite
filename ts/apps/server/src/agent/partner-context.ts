@@ -14,6 +14,7 @@ import {
 	chancellorWorkRoot,
 } from "../delegation.ts";
 import {
+	CHIEF_PARTNER_ID,
 	PARTNER_CONTRACT_SECTIONS,
 	partnerContractEnabled,
 	partnersStore,
@@ -38,6 +39,28 @@ import {
  * 回滚：`PARTNER_CONTRACT=false` 只关第 2 段；第 3 段是纯装配，没有独立开关
  * （关掉执事能力时整个 hook 不跑）。
  */
+
+// ── 汇报卡三规则（2026-11-10 批 15 §二，全景调研 #41）────────
+//
+// 只在**执事的汇报 / 日报类场景**注入文案与纪律（本批不做推送通道，触发时机由宿主决定）：
+//   1. 没有值得报的就不发——宁可安静，不要"今天一切正常"的噪声；
+//   2. 同一件事有更新就改原来那条，不新开；
+//   3. 只在"今天第一次打开"或"离开三小时以上回来"出现，永不抢屏。
+// 固定字节，不含日期 / 时刻 / 会话 id（与批 12 的纪律段同一口径）。
+
+export const BRIEF_CARD_RULES = [
+	"【汇报卡】",
+	"- 没有值得报的就不发：宁可安静，也不要「今天一切正常」这种噪声。",
+	"- 就地编辑：同一件事有更新，改原来那条，不要新开一条。",
+	"- 只在「今天第一次打开」或「离开三小时以上回来」时出现；永不抢屏（不弹窗、不打断）。",
+].join("\n");
+
+/** 回滚开关：默认开；`BRIEF_CARD_RULES=false` → 纪律段回到改动前（逐字节一致）。 */
+export function briefCardRulesEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = (env.BRIEF_CARD_RULES ?? "").trim().toLowerCase();
+	if (!raw) return true;
+	return raw !== "false" && raw !== "0" && raw !== "off";
+}
 
 // ── 岗位契约 ─────────────────────────────────────────────
 
@@ -323,6 +346,9 @@ export function buildPartnerDisciplineSection(partnerId: string): string {
 		verificationIronLawFor(partnerId),
 		RULING_DISCIPLINE,
 		WORK_SILENCE_DISCIPLINE,
+		// 汇报卡三规则（批 15 §二）：只给普通执事；总管那条时间线由界面承载，
+		// 加进来会改变总管纪律段的固定字节，故跳过。
+		partnerId === CHIEF_PARTNER_ID || !briefCardRulesEnabled() ? undefined : BRIEF_CARD_RULES,
 		ATTENTION_ONE_QUESTION,
 	];
 	return blocks.filter((part): part is string => Boolean(part)).join("\n\n");

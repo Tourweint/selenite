@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { runSourceEnabled, type RunSource } from "./run-source.ts";
 
 /**
  * 派单回执（2026-11-03 方案 §5.1）。
@@ -36,6 +37,11 @@ export interface DelegationReceipt {
 	/** 落这行状态时的进程代号（A2 补差）。旧行/NULL 一律视为"别的进程落的"。 */
 	bootId: string | null;
 	outcome: ReceiptOutcome;
+	/**
+	 * 触发来源（2026-11-10 批 15 §三）：human / routine / routine_self / script / test / device。
+	 * 旧行为 null（投影时视为 human）；`RUN_SOURCE=false` 时不写。
+	 */
+	runSource: RunSource | null;
 	createdAt: string;
 	updatedAt: string;
 }
@@ -91,6 +97,10 @@ export class DelegationReceipts {
 		}
 		if (!columns.some((column) => column.name === "boot_id")) {
 			this.db.exec("ALTER TABLE delegation_receipts ADD COLUMN boot_id TEXT");
+		}
+		// 批 15 §三：触发来源。旧行补不上信息，永远按 NULL（投影视为 human）处理。
+		if (!columns.some((column) => column.name === "run_source")) {
+			this.db.exec("ALTER TABLE delegation_receipts ADD COLUMN run_source TEXT");
 		}
 		this.db.exec(
 			"CREATE INDEX IF NOT EXISTS idx_delegation_receipts_ticket ON delegation_receipts(ticket_id);",
@@ -165,11 +175,11 @@ export class DelegationReceipts {
 	begin(
 		requestId: string,
 		fingerprint: string,
-		opts: { explicit: boolean; workRoot?: string },
+		opts: { explicit: boolean; workRoot?: string; runSource?: RunSource },
 	): ReceiptBegin {
 		const existing = this.lookup(requestId);
 		if (!existing) {
-			this.insert(requestId, fingerprint);
+			this.insert(requestId, fingerprint, opts.runSource);
 			return { kind: "new" };
 		}
 		if (existing.fingerprint !== fingerprint) {
@@ -195,7 +205,7 @@ export class DelegationReceipts {
 			return { kind: "existing", receipt: existing };
 		}
 		// 自动 id：原单已经终态，允许重新派，回执改指向新单。
-		this.reinsert(requestId, fingerprint);
+		this.reinsert(requestId, fingerprint, opts.runSource);
 		return { kind: "new", receipt: existing };
 	}
 
@@ -236,22 +246,22 @@ export class DelegationReceipts {
 			.run(outcome, new Date().toISOString(), requestId);
 	}
 
-	private insert(requestId: string, fingerprint: string): void {
+	private insert(requestId: string, fingerprint: string, runSource?: RunSource): void {
 		const now = new Date().toISOString();
 		this.db
 			.prepare(
-				"INSERT INTO delegation_receipts (request_id, ticket_id, fingerprint, outcome, boot_id, created_at, updated_at) VALUES (?, '', ?, 'accepting', ?, ?, ?)",
+				"INSERT INTO delegation_receipts (request_id, ticket_id, fingerprint, outcome, boot_id, run_source, created_at, updated_at) VALUES (?, '', ?, 'accepting', ?, ?, ?, ?)",
 			)
-			.run(requestId, fingerprint, BOOT_ID, now, now);
+			.run(requestId, fingerprint, BOOT_ID, persistedRunSource(runSource), now, now);
 	}
 
-	private reinsert(requestId: string, fingerprint: string): void {
+	private reinsert(requestId: string, fingerprint: string, runSource?: RunSource): void {
 		const now = new Date().toISOString();
 		this.db
 			.prepare(
-				"UPDATE delegation_receipts SET ticket_id = '', fingerprint = ?, outcome = 'accepting', boot_id = ?, updated_at = ? WHERE request_id = ?",
+				"UPDATE delegation_receipts SET ticket_id = '', fingerprint = ?, outcome = 'accepting', boot_id = ?, run_source = ?, updated_at = ? WHERE request_id = ?",
 			)
-			.run(fingerprint, BOOT_ID, now, requestId);
+			.run(fingerprint, BOOT_ID, persistedRunSource(runSource), now, requestId);
 	}
 
 	// ── 死信（A2 补差）────────────────────────────────────
@@ -398,9 +408,16 @@ function toReceipt(row: Record<string, unknown>): DelegationReceipt {
 				: Number(row.conversation_id),
 		bootId: row.boot_id === null || row.boot_id === undefined ? null : text(row.boot_id) || null,
 		outcome: (text(row.outcome) as ReceiptOutcome) || "accepting",
+		runSource: (text(row.run_source) as RunSource) || null,
 		createdAt: text(row.created_at),
 		updatedAt: text(row.updated_at),
 	};
+}
+
+/** 开关关着 / 没给来源 → NULL（不写）；老调用方与回滚口径一致。 */
+function persistedRunSource(source: RunSource | undefined): string | null {
+	if (!source || !runSourceEnabled()) return null;
+	return source;
 }
 
 /** A3a 回滚开关：只有显式 "false" 才关；不配 = 落库。 */

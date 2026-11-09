@@ -436,7 +436,7 @@ export function createMatrixChannels(): MatrixChannels {
 				requirement: input.prompt,
 				domain: input.domain ?? "",
 				projectId: project?.id ?? "",
-			}), { explicit: true, workRoot: chancellorWorkRoot() });
+			}), { explicit: true, workRoot: chancellorWorkRoot(), runSource: "device" });
 			if (begun.kind === "conflict") {
 				throw new RelayInvokeError("bad_request", "同 requestId 但内容不同（冲突），拒绝受理");
 			}

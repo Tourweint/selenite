@@ -1,5 +1,10 @@
 import { Type } from "@earendil-works/pi-ai";
-import { LiveDoc, defineTool, type ToolRegistration } from "@earendil-works/pi-durable";
+import {
+	LiveDoc,
+	defineTool,
+	type EntryDraft,
+	type ToolRegistration,
+} from "@earendil-works/pi-durable";
 import {
 	CHIEF_PARTNER_ID,
 	partnersStore,
@@ -36,6 +41,20 @@ export function partnerRelayEnabled(env: NodeJS.ProcessEnv = process.env): boole
 	if (!raw) return true;
 	return raw !== "false" && raw !== "0";
 }
+
+/**
+ * 两态回执开关（2026-11-10 批 15 §五）：`PARTNER_RELAY_RECEIPT=false` → 只有 queued，
+ * 不订阅目标轮结算、不回流 notice、不写 outcome 留言（回到改动前）。
+ */
+export function partnerRelayReceiptEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = env.PARTNER_RELAY_RECEIPT?.trim().toLowerCase();
+	if (!raw) return true;
+	return raw !== "false" && raw !== "0" && raw !== "off";
+}
+
+/** 两态的名字就这两个：对方会话已收到（queued）/ 对方那一轮真的跑完了（settled）。 */
+export const RELAY_RECEIPT_QUEUED = "queued";
+export const RELAY_RECEIPT_SETTLED = "settled";
 
 /** 单个 run 内最多递几次（方案 §一.4 第二条） */
 export const RELAY_MAX_PER_RUN = 3;
@@ -241,6 +260,64 @@ export function relayNoticeText(from: RelaySender, to: RelayTarget): string {
 	return `执事「${from.name}」→「${to.name}」：递了一条话（正文不在这里，点开「${to.name}」的会话可看）。`;
 }
 
+/**
+ * 送达时回给模型的文案（2026-11-10 批 15 §五）。
+ *
+ * `receipt=false` 时**逐字节**等于改动前的那句（回滚口径）；
+ * 开时显式写 `queued`，并说明"对方跑完会回你一条结果"——两态不能混成一句"已送达"。
+ */
+export function relayDeliveredText(targetName: string, busy: boolean, receipt: boolean): string {
+	const when = busy ? "对方正在忙，这条排在它本轮之后" : "对方空闲，已开始看";
+	const head = receipt
+		? `已递给「${targetName}」（${RELAY_RECEIPT_QUEUED}；${when}）。对方跑完后会回你一条结果。`
+		: `已递给「${targetName}」（${when}）。`;
+	return (
+		head +
+		"主人那边只会看到一条通知、看不到原文；需要主人知道的事，你自己也要在回复里说。"
+	);
+}
+
+/**
+ * 对方跑完后回流的那一句（settled）：`「B」处理完了你递的那条话：<一句话结果>`。
+ * 只取一句话、≤160 字，不把对方的整篇回复倒回发送方。
+ */
+export function relaySettledText(targetName: string, result: string): string {
+	const flat = result.replace(/\s+/g, " ").trim();
+	const oneLine = flat.length <= 160 ? flat : `${flat.slice(0, 159)}…`;
+	return `「${targetName}」处理完了你递的那条话：${oneLine || "（对方这轮没有给出结论）"}`;
+}
+
+/**
+ * 写进发送方 transcript 的"留言"条目（与 8g 的留言镜像同款形状：`pi.assistant`）。
+ * 只做旁路记录，不伪造用户发言、不改变会话语义。
+ */
+export function relayOutcomeEntry(text: string): EntryDraft {
+	const at = Date.now();
+	return {
+		kind: "pi.assistant",
+		data: { relay: "outcome", receipt: RELAY_RECEIPT_SETTLED },
+		model: [
+			{
+				role: "assistant",
+				content: [{ type: "text", text }],
+				api: "lifediary.relay",
+				provider: "lifediary",
+				model: "lifediary.relay",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: at,
+			},
+		],
+	};
+}
+
 // ── 进程内状态：每 run 计数 / 递话触发的轮次标记 / 主人通知口 ──
 
 /** run 身份键：与 turn-gate 的回合计数同一口径（`inputs[0] ?? taskId`，每轮都变） */
@@ -349,6 +426,41 @@ export function emitChiefNotice(text: string): void {
 	}
 }
 
+// ── 两态回执：结算回流到发送方的流（2026-11-10 批 15 §五）──
+//
+// 与主人通知口同款"进程内轻事件"：只有发送方**正在流式**的那条会话收得到；
+// 没开流就收不到、不落盘（不伪造时间线）。持久那一份走 `relayOutcomeEntry`
+// 写进发送方 transcript，两者互不替代。
+const relayReceiptSinks = new Map<number, Set<(text: string) => void>>();
+
+export function watchRelayReceipt(
+	conversationId: number,
+	sink: (text: string) => void,
+): () => void {
+	let set = relayReceiptSinks.get(conversationId);
+	if (!set) {
+		set = new Set();
+		relayReceiptSinks.set(conversationId, set);
+	}
+	set.add(sink);
+	return () => {
+		set.delete(sink);
+		if (set.size === 0) relayReceiptSinks.delete(conversationId);
+	};
+}
+
+export function emitRelayReceipt(conversationId: number, text: string): void {
+	const set = relayReceiptSinks.get(conversationId);
+	if (!set) return;
+	for (const sink of set) {
+		try {
+			sink(text);
+		} catch {
+			/* 订阅方异常不该影响递话 */
+		}
+	}
+}
+
 // ── 工具 ─────────────────────────────────────────────────
 
 export interface RelayDeliverResult {
@@ -358,14 +470,26 @@ export interface RelayDeliverResult {
 	error?: string;
 }
 
+/** 发送方身份（两态回执要知道"跑完后回给谁、回哪条会话"）。 */
+export interface RelaySenderContext {
+	conversationId: number;
+	partnerId: string;
+	name: string;
+}
+
 export interface PartnerRelayDeps {
 	/** 执事库；不传用全局 store（单测注入临时库） */
 	store?: () => PartnersStore;
 	/**
 	 * 真正送达：把包装好的正文提交进目标执事的会话。
 	 * 装配层（agent/lifecycle.ts）实现——它才持有 harness；本模块不 import agent/。
+	 * `sender` 只用于两态回执（目标轮结算后回流），不影响送达本身。
 	 */
-	deliver: (targetPartnerId: string, body: string) => Promise<RelayDeliverResult>;
+	deliver: (
+		targetPartnerId: string,
+		body: string,
+		sender: RelaySenderContext,
+	) => Promise<RelayDeliverResult>;
 }
 
 /**
@@ -425,7 +549,11 @@ export function createSendToAgentTool(deps: PartnerRelayDeps): ToolRegistration 
 			if (!slot.allowed) return text(relayCapMessage());
 
 			const from: RelaySender = { name: self.name, domain: self.domain };
-			const delivered = await deps.deliver(resolved.target.id, relayBody(from, message));
+			const delivered = await deps.deliver(resolved.target.id, relayBody(from, message), {
+				conversationId: Number(api.conversationId),
+				partnerId: selfId,
+				name: self.name,
+			});
 			if (!delivered.ok) {
 				return text(`没递出去：${delivered.error ?? "未知原因"}`);
 			}
@@ -433,11 +561,14 @@ export function createSendToAgentTool(deps: PartnerRelayDeps): ToolRegistration 
 			// 主人知情（方案 §一.6）：只报"谁 → 谁"，不递原文
 			emitChiefNotice(relayNoticeText(from, resolved.target));
 
-			// 大实话：对方正忙时这条排在它本轮之后，不是"已经读了"
-			const when = delivered.busy ? "对方正在忙，这条排在它本轮之后" : "对方空闲，已开始看";
+			// 大实话：对方正忙时这条排在它本轮之后，不是"已经读了"；
+			// 开了两态回执还要说清现在只是 queued（2026-11-10 批 15 §五）。
 			return text(
-				`已递给「${resolved.target.name}」（${when}）。` +
-					"主人那边只会看到一条通知、看不到原文；需要主人知道的事，你自己也要在回复里说。",
+				relayDeliveredText(
+					resolved.target.name,
+					delivered.busy === true,
+					partnerRelayReceiptEnabled(),
+				),
 			);
 		},
 	});

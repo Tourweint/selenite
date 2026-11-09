@@ -29,7 +29,7 @@ import { memoryExtractMode, preferenceExtractionEnabled } from "../memory-extrac
 import { COMPANIONS_ENABLED, partnersStore } from "../partners.ts";
 // 执事间递话的主人通知口（2026-11-08 扫尾批 8d）：递话发生在别的会话里，
 // 这里只订阅"主人能看到的那一条"（只报谁→谁，正文不展示）。
-import { watchChiefNotice } from "../partner-relay.ts";
+import { watchChiefNotice, watchRelayReceipt } from "../partner-relay.ts";
 import {
 	chatModelRef,
 	clampThinkingLevel,
@@ -796,6 +796,17 @@ export async function* chatStream(
 					notify();
 				})
 			: () => {};
+	/**
+	 * 两态回执（2026-11-10 批 15 §五）：对方跑完后，settled 一句回流到**发送方
+	 * 正在流式的会话**。与主人通知口同款：没开流就收不到、不落盘；持久那一份
+	 * 在发送方 transcript 里（lifecycle 写 `pi.assistant` 留言条目）。
+	 */
+	const unwatchRelayReceipt = COMPANIONS_ENABLED
+		? watchRelayReceipt(conversationId, (text) => {
+				relayNotices.push(text);
+				notify();
+			})
+		: () => {};
 	/** 待推送的工具起止 */
 	const tools: ToolEvent[] = [];
 	const unwatchTool = watchTool(conversationId, (event) => {
@@ -987,6 +998,7 @@ export async function* chatStream(
 		unwatchDelegation();
 		unwatchTool();
 		unwatchRelayNotice();
+		unwatchRelayReceipt();
 		// 只关掉"看"这件事，不碰正在跑的那一轮
 		await watch.stop().catch(() => undefined);
 	}

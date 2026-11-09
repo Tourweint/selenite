@@ -7,6 +7,9 @@ import { DatabaseSync } from "node:sqlite";
 import { Store } from "../../../../../../chancellor/src/store.ts";
 import type { Ticket } from "../../../../../../chancellor/src/types.ts";
 import {
+	BRIEF_CARD_RULES,
+	briefCardRulesEnabled,
+	buildPartnerDisciplineSection,
 	buildPartnerStatusSection,
 	buildPartnerTurnContext,
 	renderContractSection,
@@ -460,4 +463,34 @@ test("契约解析：只认四个固定标题，空节连标题一起省略", ()
 	assert.match(rendered, /## 职责范围/);
 	assert.ok(!rendered.includes("## 决策分级"), "空节省略标题");
 	assert.ok(!rendered.includes("不该出现"), "四节之外的内容不注入");
+});
+
+// ── 批 15 §二：汇报卡三规则 ───────────────────────────────
+
+test("汇报卡常量：三条纪律逐字在、固定字节不含日期 / 时刻", () => {
+	assert.match(BRIEF_CARD_RULES, /没有值得报的就不发/);
+	assert.match(BRIEF_CARD_RULES, /今天一切正常/);
+	assert.match(BRIEF_CARD_RULES, /就地编辑/);
+	assert.match(BRIEF_CARD_RULES, /不要新开一条/);
+	assert.match(BRIEF_CARD_RULES, /离开三小时以上回来/);
+	assert.match(BRIEF_CARD_RULES, /永不抢屏/);
+	assert.equal(/20\d{2}-\d{1,2}-\d{1,2}/.test(BRIEF_CARD_RULES), false);
+	assert.equal(/\d{1,2}:\d{2}/.test(BRIEF_CARD_RULES), false);
+});
+
+test("汇报卡注入：普通执事有、总管没有（总管纪律段固定字节不变）", () => {
+	assert.ok(buildPartnerDisciplineSection("partner-uuid").includes(BRIEF_CARD_RULES));
+	assert.ok(!buildPartnerDisciplineSection("chief").includes(BRIEF_CARD_RULES));
+});
+
+test("汇报卡开关：BRIEF_CARD_RULES=false 时纪律段回到改动前", () => {
+	const previous = process.env.BRIEF_CARD_RULES;
+	process.env.BRIEF_CARD_RULES = "false";
+	try {
+		assert.equal(briefCardRulesEnabled(), false);
+		assert.ok(!buildPartnerDisciplineSection("partner-uuid").includes(BRIEF_CARD_RULES));
+	} finally {
+		if (previous === undefined) delete process.env.BRIEF_CARD_RULES;
+		else process.env.BRIEF_CARD_RULES = previous;
+	}
 });

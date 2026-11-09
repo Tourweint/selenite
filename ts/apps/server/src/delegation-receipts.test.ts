@@ -431,3 +431,51 @@ test("改派回执：续跑被拒改派的新单也落映射，重启回灌落�
 		rmSync(root, { recursive: true, force: true });
 	}
 });
+
+// ── 批 15 §三：run_source 列 ─────────────────────────────
+
+test("runSource：受理时落列，按单号反查读回", () => {
+	const root = tempRoot();
+	const receipts = new DelegationReceipts(join(root, "delegations.sqlite"));
+	try {
+		assert.equal(
+			receipts.begin("rs-1", "fp", { explicit: true, workRoot: root, runSource: "routine" }).kind,
+			"new",
+		);
+		receipts.accept("rs-1", "T-rs");
+		assert.equal(receipts.lookupByTicket("T-rs")?.runSource, "routine");
+	} finally {
+		receipts.close();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("runSource：老数据没有列值 = null（投影侧视为 human）", () => {
+	const root = tempRoot();
+	const receipts = new DelegationReceipts(join(root, "delegations.sqlite"));
+	try {
+		receipts.begin("rs-old", "fp", { explicit: true, workRoot: root });
+		receipts.accept("rs-old", "T-old");
+		assert.equal(receipts.lookupByTicket("T-old")?.runSource, null);
+	} finally {
+		receipts.close();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("runSource：RUN_SOURCE=false → 不写列（回滚口径）", () => {
+	const root = tempRoot();
+	const receipts = new DelegationReceipts(join(root, "delegations.sqlite"));
+	const previous = process.env.RUN_SOURCE;
+	process.env.RUN_SOURCE = "false";
+	try {
+		receipts.begin("rs-off", "fp", { explicit: true, workRoot: root, runSource: "device" });
+		receipts.accept("rs-off", "T-off");
+		assert.equal(receipts.lookupByTicket("T-off")?.runSource, null);
+	} finally {
+		if (previous === undefined) delete process.env.RUN_SOURCE;
+		else process.env.RUN_SOURCE = previous;
+		receipts.close();
+		rmSync(root, { recursive: true, force: true });
+	}
+});

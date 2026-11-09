@@ -13,11 +13,19 @@ import {
 import { ensurePartnerSession, runPartnerTurn } from "./partner-runtime.ts";
 import {
 	buildRoutinePrompt,
+	emptyRoutineWatchFile,
+	evaluateTriggerGate,
 	extractRoutineDone,
+	planRoutineWatch,
+	releaseRoutineWatch,
 	routineConditionalEnabled,
 	routineRunVerdict,
+	routineTriggerGatesEnabled,
 	type RoutineOutcome,
+	type RoutineWatchFile,
+	type TriggerGateState,
 } from "./routine-conditions.ts";
+import { runSourceEnabled, type RunSource } from "./run-source.ts";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 
 /**
@@ -42,6 +50,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
  */
 
 const DEFAULT_STATE_PATH = ".data/routines.json";
+const DEFAULT_WATCH_PATH = ".data/routine-watch.json";
 const PROMPT_LIMIT = 100_000;
 
 /**
@@ -54,6 +63,16 @@ export function routineSelfServiceEnabled(): boolean {
 	if (!COMPANIONS_ENABLED) return false;
 	const raw = (process.env.ROUTINE_SELF_SERVICE ?? "").trim().toLowerCase();
 	return raw !== "false" && raw !== "0";
+}
+
+/**
+ * 看护单例交接开关（2026-11-10 批 15 §四）：默认开；
+ * `ROUTINE_WATCH_SINGLETON=false` → 不读不写 watch.json，行为回到改动前。
+ */
+export function routineWatchSingletonEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = (env.ROUTINE_WATCH_SINGLETON ?? "").trim().toLowerCase();
+	if (!raw) return true;
+	return raw !== "false" && raw !== "0" && raw !== "off";
 }
 /** 执行历史最多留多少条（状态文件有界） */
 const RUN_HISTORY_LIMIT = 50;
@@ -82,6 +101,11 @@ export interface RoutineRunRecord {
 	skipped?: boolean;
 	skipReason?: string;
 	error?: string;
+	/**
+	 * 触发来源（2026-11-10 批 15 §三，`RUN_SOURCE` 默认开）。
+	 * 老记录没有这个字段 = 视为 human / 未知；开关关着时不写。
+	 */
+	runSource?: RunSource;
 }
 
 interface RoutineState {
@@ -91,10 +115,14 @@ interface RoutineState {
 	runs: RoutineRunRecord[];
 	/** 每规则"最近一次开始跑"的标记：重启后 running → interrupted 的判定依据 */
 	running: Record<string, { runId: string; startedAt: string }>;
+	/** 事件触发器三件门的状态：`${routineId}:${triggerIndex}` → 状态 */
+	gates: Record<string, TriggerGateState>;
+	/** 自建规则（routine_manage 建的）标记：它们的首轮 runSource 记 routine_self */
+	selfCreated: Record<string, true>;
 }
 
 function emptyState(): RoutineState {
-	return { version: 1, receipts: {}, runs: [], running: {} };
+	return { version: 1, receipts: {}, runs: [], running: {}, gates: {}, selfCreated: {} };
 }
 
 // ── durable 任务：alarm-only ─────────────────────────────
@@ -164,7 +192,7 @@ class RoutineEngine {
 	/** 每规则一条串行 lane：上一次没跑完，本次 deferred */
 	private lanes = new Map<string, Promise<void>>();
 	/** deferred 等待中的再触发（lane 清空后执行） */
-	private deferred = new Map<string, Array<{ trigger: string; dedupeKey: string }>>();
+	private deferred = new Map<string, Array<{ trigger: string; dedupeKey: string; source: RunSource }>>();
 	private subscribed = false;
 
 	// ── 状态文件（原子写；坏文件当空账）──
@@ -179,6 +207,11 @@ class RoutineEngine {
 				receipts: parsed.receipts && typeof parsed.receipts === "object" ? parsed.receipts : {},
 				runs: Array.isArray(parsed.runs) ? parsed.runs.slice(-RUN_HISTORY_LIMIT) : [],
 				running: parsed.running && typeof parsed.running === "object" ? parsed.running : {},
+				gates: parsed.gates && typeof parsed.gates === "object" ? parsed.gates : {},
+				selfCreated:
+					parsed.selfCreated && typeof parsed.selfCreated === "object"
+						? parsed.selfCreated
+						: {},
 			};
 		} catch {
 			this.state = emptyState();
@@ -202,6 +235,115 @@ class RoutineEngine {
 			}
 			throw error;
 		}
+	}
+
+	// ── 看护单例（批 15 §四）──────────────────────────────
+	/** 看护账本路径；`ROUTINE_WATCH_PATH` 只给单测 / 探针换落点。 */
+	private watchPath(): string {
+		return process.env.ROUTINE_WATCH_PATH?.trim() || DEFAULT_WATCH_PATH;
+	}
+
+	private readWatch(): RoutineWatchFile {
+		const path = this.watchPath();
+		if (!existsSync(path)) return emptyRoutineWatchFile();
+		try {
+			const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<RoutineWatchFile>;
+			return {
+				version: 1,
+				watches:
+					parsed.watches && typeof parsed.watches === "object" ? parsed.watches : {},
+				handedTo:
+					parsed.handedTo && typeof parsed.handedTo === "object" ? parsed.handedTo : {},
+			};
+		} catch {
+			// 坏文件当空账：宁可重新认领，也不要让看护卡死。
+			return emptyRoutineWatchFile();
+		}
+	}
+
+	private writeWatch(file: RoutineWatchFile): void {
+		const path = this.watchPath();
+		mkdirSync(dirname(path), { recursive: true });
+		const tmp = `${path}.${process.pid}.tmp`;
+		writeFileSync(tmp, JSON.stringify(file), "utf8");
+		renameSync(tmp, path);
+	}
+
+	/**
+	 * 这一轮开始前的看护认领。**同一执事同一时刻最多一个看护**：
+	 * 已有别的看护在盯 → 旧规则只暂停（enabled=false，revision+1 让在飞闹钟作废），
+	 * 并在 watch.json 的 handedTo 记一次；旧规则不删除。
+	 * 写失败只 warn：看护账是旁路，不能把例行主链路拖下水。
+	 */
+	private claimWatch(routine: RoutineDef): void {
+		if (!routineWatchSingletonEnabled()) return;
+		// 用**当前**定义判断：交接刚把旧规则停掉时，旧规则的迟到触发不该再把看护抢回去。
+		const current = partnersStore().getRoutine(routine.id);
+		if (!current || !current.enabled || !current.until?.note) return;
+		try {
+			const file = this.readWatch();
+			const plan = planRoutineWatch({
+				file,
+				key: current.partnerId,
+				routineId: current.id,
+				name: current.name,
+				now: new Date().toISOString(),
+				wantsWatch: true,
+				enabled: true,
+			});
+			if (!plan.takeOver) return;
+			if (plan.handoffFrom) {
+				const previous = partnersStore().getRoutine(plan.handoffFrom);
+				if (previous && previous.enabled) {
+					// 只暂停不删；revision+1 由 updateRoutine 负责，在飞闹钟醒来会自动作废。
+					partnersStore().updateRoutine(previous.id, { enabled: false });
+				}
+				console.log(
+					`[routine] 看护交接 ${plan.handoffFrom.slice(0, 8)} → ${current.id.slice(0, 8)}（旧的只暂停）`,
+				);
+			}
+			if (plan.file !== file) this.writeWatch(plan.file);
+		} catch (error) {
+			console.warn(
+				`[routine] 看护账写入失败（规则 ${routine.id.slice(0, 8)}）：${
+					error instanceof Error ? error.message.slice(0, 120) : "unknown"
+				}`,
+			);
+		}
+	}
+
+	/** 规则置停（until 达成 / 跑满 maxRuns）：从看护账里摘掉（handedTo 保留，便于追溯）。 */
+	private releaseWatch(routineId: string): void {
+		if (!routineWatchSingletonEnabled()) return;
+		try {
+			const file = this.readWatch();
+			const next = releaseRoutineWatch(file, routineId);
+			if (next !== file) this.writeWatch(next);
+		} catch {
+			/* 旁路账，失败不影响置停 */
+		}
+	}
+
+	/**
+	 * 自建规则标记（routine_manage 建的）：它的**首轮** runSource 记 `routine_self`，
+	 * 之后回到 `routine`。开关关着时不记（行为回到改动前）。
+	 */
+	markSelfCreated(routineId: string): void {
+		if (!runSourceEnabled()) return;
+		const state = this.load();
+		state.selfCreated[routineId] = true;
+		this.save();
+	}
+
+	/** 取本轮的来源：自建规则的首轮升级为 routine_self；开关关着不写。 */
+	private takeRunSource(routine: RoutineDef, base: RunSource): RunSource | undefined {
+		if (!runSourceEnabled()) return undefined;
+		const state = this.load();
+		if (base === "routine" && state.selfCreated[routine.id]) {
+			delete state.selfCreated[routine.id];
+			return "routine_self";
+		}
+		return base;
 	}
 
 	/** 回执窗口清理 + 终态记账。 */
@@ -263,6 +405,7 @@ class RoutineEngine {
 			const current = partnersStore().getRoutine(routineId);
 			if (!current || !current.enabled) return;
 			partnersStore().updateRoutine(routineId, { enabled: false });
+			this.releaseWatch(routineId);
 			console.log(`[routine] 规则 ${routineId.slice(0, 8)} 已置停（${reason}）`);
 		} catch (error) {
 			// 置停失败不覆盖本轮已落盘的结局；下一次触发会再判一次。
@@ -321,13 +464,49 @@ class RoutineEngine {
 
 		for (const routine of partnersStore().listRoutines()) {
 			if (!routine.enabled) continue;
-			for (const trigger of routine.triggers) {
+			for (const [triggerIndex, trigger] of routine.triggers.entries()) {
 				if (trigger.type !== "event" || trigger.kind !== kind) continue;
 				const match = trigger.match ?? {};
 				const matched = Object.entries(match).every(
 					([key, value]) => (fields[key] ?? "") === value,
 				);
-				if (!matched) continue;
+				// 三件门（批 15 §一）：cooldown → edge → baseline → 原 match。
+				// 状态按"规则 + 触发器序号"落 routines.json；开关关着时只看 matched。
+				const gatesOn = routineTriggerGatesEnabled();
+				const gateKey = `${routine.id}:${triggerIndex}`;
+				const gate = evaluateTriggerGate({
+					spec: {
+						...(trigger.baseline ? { baseline: trigger.baseline } : {}),
+						...(trigger.edge === true ? { edge: true as const } : {}),
+						...(typeof trigger.cooldownSec === "number"
+							? { cooldownSec: trigger.cooldownSec }
+							: {}),
+					},
+					...(this.load().gates[gateKey] ? { state: this.load().gates[gateKey] } : {}),
+					now: Date.now(),
+					matched,
+					...(trigger.baseline
+						? { observed: Number(fields[trigger.baseline.key]) }
+						: {}),
+					enabled: gatesOn,
+				});
+				if (gatesOn) {
+					const previousGate = this.load().gates[gateKey];
+					if (JSON.stringify(previousGate ?? null) !== JSON.stringify(gate.state)) {
+						this.load().gates[gateKey] = gate.state;
+						try {
+							this.save();
+						} catch (error) {
+							// 门状态是旁路账：写不进去就按内存里的继续，不吞掉本轮事件。
+							console.warn(
+								`[routine] 门状态落盘失败（规则 ${routine.id.slice(0, 8)}）：${
+									error instanceof Error ? error.message.slice(0, 120) : "unknown"
+								}`,
+							);
+						}
+					}
+				}
+				if (!gate.fire) continue;
 				// 去重 key：规则 + 触发形状 + 来源会话 + 分钟桶（同一分钟的同形事件只算一次）
 				const minute = Math.floor(Date.now() / 60_000);
 				const dedupeKey = `evt:${routine.id}:${kind}:${JSON.stringify(match)}:${conversationId}:${minute}`;
@@ -383,12 +562,17 @@ class RoutineEngine {
 
 	// ── 执行 ──
 	/** 触发一次（lane 串行 + 回执去重 + deferred）。 */
-	async fire(routine: RoutineDef, trigger: string, dedupeKey: string): Promise<void> {
+	async fire(
+		routine: RoutineDef,
+		trigger: string,
+		dedupeKey: string,
+		source: RunSource = "routine",
+	): Promise<void> {
 		if (this.receiptLive(dedupeKey)) return;
 		this.rememberReceipt(dedupeKey);
 		const previous = this.lanes.get(routine.id) ?? Promise.resolve();
 		const lane = previous
-			.then(() => this.runOnce(routine, trigger))
+			.then(() => this.runOnce(routine, trigger, source))
 			.catch(() => undefined)
 			.finally(() => {
 				if (this.lanes.get(routine.id) === lane) this.lanes.delete(routine.id);
@@ -397,29 +581,35 @@ class RoutineEngine {
 				if (pending && this.lanes.has(routine.id) === false) {
 					this.deferred.delete(routine.id);
 					const next = pending[0];
-					if (next) void this.fire(routine, next.trigger, `${next.dedupeKey}:retry`);
+					if (next) {
+						void this.fire(routine, next.trigger, `${next.dedupeKey}:retry`, next.source);
+					}
 				}
 			});
 		this.lanes.set(routine.id, lane);
 		await lane;
 	}
 
-	private async runOnce(routine: RoutineDef, trigger: string): Promise<void> {
+	private async runOnce(routine: RoutineDef, trigger: string, source: RunSource): Promise<void> {
 		const state = this.load();
 		// 终态落盘失败期间：宁可漏跑不可丢账——上一条还没记账就不开新的
 		const lastRun = state.runs[state.runs.length - 1];
 		if (lastRun && lastRun.status === "running") {
 			const pending = this.deferred.get(routine.id) ?? [];
-			pending.push({ trigger, dedupeKey: `${routine.id}:${Date.now()}` });
+			pending.push({ trigger, dedupeKey: `${routine.id}:${Date.now()}`, source });
 			this.deferred.set(routine.id, pending);
 			return;
 		}
+
+		// 看护单例（批 15 §四）：新的一轮开始前认领；旧看护只暂停不删。
+		this.claimWatch(routine);
 
 		const runId = randomUUID();
 		const startedAt = new Date().toISOString();
 		// 条件门控开关（2026-11-10 批 13 §四.3）：关着时下面所有新字段一律不参与。
 		const conditional = routineConditionalEnabled();
 		const completedBefore = this.completedRunCount(routine.id);
+		const runSource = this.takeRunSource(routine, source);
 		state.running[routine.id] = { runId, startedAt };
 		const run: RoutineRunRecord = {
 			id: runId,
@@ -428,6 +618,7 @@ class RoutineEngine {
 			status: "running",
 			trigger,
 			startedAt,
+			...(runSource ? { runSource } : {}),
 		};
 		state.runs.push(run);
 		if (state.runs.length > RUN_HISTORY_LIMIT) {
@@ -509,8 +700,11 @@ class RoutineEngine {
 		}
 	}
 
-	/** 手动跑一次（run_now）：用户发起，按 entrusted 记，不占定时链。 */
-	async runNow(routineId: string): Promise<{ ok: boolean; text: string; error?: string }> {
+	/** 手动跑一次（run_now）：用户/脚本发起，按 entrusted 记，不占定时链。 */
+	async runNow(
+		routineId: string,
+		source: RunSource = "script",
+	): Promise<{ ok: boolean; text: string; error?: string }> {
 		const routine = partnersStore().getRoutine(routineId);
 		if (!routine) return { ok: false, text: "", error: "例行任务不存在" };
 		const previous = this.lanes.get(routine.id) ?? Promise.resolve();
@@ -529,6 +723,7 @@ class RoutineEngine {
 						? "skipped"
 						: "success"
 					: "failed";
+				const runSource = runSourceEnabled() ? source : undefined;
 				state.runs.push({
 					id: randomUUID(),
 					routineId,
@@ -541,6 +736,7 @@ class RoutineEngine {
 					// 手动试跑不判 until / 不占 maxRuns 的"自动停"语义，但结局照记，
 					// 下一次定时触发仍能看到"上一次的结果"。
 					...(routineConditionalEnabled() ? { outcome } : {}),
+					...(runSource ? { runSource } : {}),
 					...(skipped.length > 0
 						? { skipped: true, skipReason: `unattended:${skipped.join(",")}` }
 						: {}),

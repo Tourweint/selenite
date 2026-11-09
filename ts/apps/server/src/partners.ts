@@ -184,7 +184,18 @@ export type RoutineTrigger =
 	| { type: "cron"; expr: string }
 	| { type: "interval"; seconds: number }
 	| { type: "once"; at: string }
-	| { type: "event"; kind: "delegation" | "tool" | "phase"; match?: Record<string, string> };
+	| {
+			type: "event";
+			kind: "delegation" | "tool" | "phase";
+			match?: Record<string, string>;
+			/**
+			 * 三件门（2026-11-10 批 15 §一，`ROUTINE_TRIGGER_GATES` 默认开）：
+			 * 只对 event 触发器生效，三个可选字段可组合。判定在 routine-conditions.ts。
+			 */
+			baseline?: { key: string; delta: number };
+			edge?: true;
+			cooldownSec?: number;
+	  };
 
 export interface RoutineDef {
 	id: string;
