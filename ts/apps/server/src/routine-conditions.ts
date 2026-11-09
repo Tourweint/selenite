@@ -30,18 +30,23 @@ export interface RoutinePromptInput {
 	lastOutcome?: RoutineOutcome;
 	/** 完成条件的文字说明 */
 	untilNote?: string;
+	/** 上次看到这里（游标）；只有产出被保留过才有值（批 21 §六） */
+	cursorAt?: string;
 	/** 开关形态：false 时两段上下文都不加（回到旧提示词） */
 	conditional: boolean;
 }
 
 /**
- * 组装这一轮的提示词：`[上一次的结果]` → 原文 → `[完成条件]`。
+ * 组装这一轮的提示词：`[上一次的结果]` → `[上次看到这里]` → 原文 → `[完成条件]`。
  * 顺序刻意固定：上一次的结局在前（模型先知道接着做什么），完成条件在后（最后才判停）。
  */
 export function buildRoutinePrompt(input: RoutinePromptInput): string {
 	if (!input.conditional) return input.prompt;
 	const blocks: string[] = [];
 	if (input.lastOutcome) blocks.push(`上一次的结果是 ${input.lastOutcome}。`);
+	if (input.cursorAt) {
+		blocks.push(`[上次看到这里] ${input.cursorAt}；这一轮只看这之后的新内容。`);
+	}
 	blocks.push(input.prompt);
 	if (input.untilNote?.trim()) {
 		blocks.push(
@@ -56,6 +61,61 @@ export function buildRoutinePrompt(input: RoutinePromptInput): string {
 export function extractRoutineDone(raw: string): { text: string; done: boolean } {
 	if (!raw.includes(ROUTINE_DONE_MARKER)) return { text: raw, done: false };
 	return { text: raw.split(ROUTINE_DONE_MARKER).join("").trim(), done: true };
+}
+
+// ── 触发器的 if / ends（2026-11-10 批 21 §三）──────────────────
+//
+// `if` 的模型调用在 routine-gate.ts（有 I/O）；这里只放确定性部分：
+// `at` 过期判定、`ends.after` 与 `maxRuns` 取更小。
+
+export interface RoutineEndsSpec {
+	at?: string;
+	after?: number;
+}
+
+/** 触发器是否已过 `ends.at`（到点后不再触发）。非法时间当"没设"，不误杀老规则。 */
+export function triggerEndedAt(
+	trigger: { ends?: RoutineEndsSpec },
+	now: number = Date.now(),
+): boolean {
+	const at = trigger.ends?.at;
+	if (!at) return false;
+	const parsed = Date.parse(at);
+	return Number.isFinite(parsed) && now >= parsed;
+}
+
+/**
+ * 实际生效的"跑满多少次停"：`routine.maxRuns` 与所有触发器的 `ends.after` 取更小。
+ * 没有上限 = undefined（与批 13 的 maxRuns 语义一致）。
+ */
+export function effectiveMaxRuns(
+	base: number | undefined,
+	triggers: readonly { ends?: RoutineEndsSpec }[],
+): number | undefined {
+	let value =
+		typeof base === "number" && Number.isFinite(base) && base > 0 ? Math.floor(base) : undefined;
+	for (const trigger of triggers) {
+		const after = trigger.ends?.after;
+		if (typeof after !== "number" || !Number.isFinite(after) || after <= 0) continue;
+		const next = Math.floor(after);
+		value = value === undefined ? next : Math.min(value, next);
+	}
+	return value;
+}
+
+/**
+ * 带 `if` 的触发器条件（按声明顺序去重）。
+ * 多个触发器各带 `if` 时**全部成立才跑**：任一条判不成立就跳过本轮（保守口径）。
+ */
+export function routineConditionNotes(
+	triggers: readonly { if?: { note: string } }[],
+): string[] {
+	const notes: string[] = [];
+	for (const trigger of triggers) {
+		const note = trigger.if?.note?.trim();
+		if (note && !notes.includes(note)) notes.push(note);
+	}
+	return notes;
 }
 
 export interface RoutineRunVerdictInput {
@@ -103,6 +163,25 @@ export function routineRunVerdict(input: RoutineRunVerdictInput): RoutineRunVerd
 	}
 	if (input.quiet) return { outcome: "quiet", stop: maxed };
 	return { outcome: maxed ? "done" : "success", stop: maxed };
+}
+
+// ── 游标推进时机（2026-11-10 批 21 §六，三B 后半）─────────────
+//
+// "上次看到哪里"的游标只在**本轮产出被保留**时推进：
+//   - quiet（没内容）→ 不推进：下次还要从同一处看；
+//   - skipped（工具被无人值守跳过，这一轮不算看完）→ 不推进；
+//   - failed（读失败 / 模型失败）→ 不推进，且结局已记 failed（不是 quiet）。
+// 游标本身是宿主侧的时间水位（上一轮被保留的 run.endedAt），不解析正文。
+
+export interface CursorAdvanceInput {
+	ok: boolean;
+	quiet: boolean;
+	/** 本轮被无人值守跳过的工具数（>0 = 没跑全） */
+	skippedToolCount: number;
+}
+
+export function shouldAdvanceCursor(input: CursorAdvanceInput): boolean {
+	return input.ok && !input.quiet && input.skippedToolCount === 0;
 }
 
 // ── 事件触发器的三件门（2026-11-10 批 15 §一，全景调研 #29）────

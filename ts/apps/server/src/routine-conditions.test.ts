@@ -3,14 +3,18 @@ import { test } from "node:test";
 import {
 	ROUTINE_DONE_MARKER,
 	buildRoutinePrompt,
+	effectiveMaxRuns,
 	emptyRoutineWatchFile,
 	evaluateTriggerGate,
 	extractRoutineDone,
 	planRoutineWatch,
 	releaseRoutineWatch,
+	routineConditionNotes,
 	routineConditionalEnabled,
 	routineRunVerdict,
 	routineTriggerGatesEnabled,
+	shouldAdvanceCursor,
+	triggerEndedAt,
 } from "./routine-conditions.ts";
 
 /**
@@ -433,4 +437,64 @@ test("看护：规则停了就从账里摘掉（handedTo 保留）", () => {
 	const released = releaseRoutineWatch(plan.file, "r-a");
 	assert.equal(released.watches["p-1"], undefined);
 	assert.equal(released.handedTo["r-older"], "r-a", "交接账保留便于追溯");
+});
+
+// ── if / ends（2026-11-10 批 21 §三）──────────────────────────
+
+test("ends.at：到点后触发器过期；非法时间当没设（不误杀老规则）", () => {
+	const at = "2026-11-10T12:00:00.000Z";
+	const trigger = { ends: { at } };
+	assert.equal(triggerEndedAt(trigger, Date.parse(at) - 1), false, "差 1ms 还该触发");
+	assert.equal(triggerEndedAt(trigger, Date.parse(at)), true, "到点即过期");
+	assert.equal(triggerEndedAt(trigger, Date.parse(at) + 1), true);
+	assert.equal(triggerEndedAt({}, Date.parse(at)), false);
+	assert.equal(triggerEndedAt({ ends: { at: "not-a-date" } }, Date.parse(at)), false);
+});
+
+test("ends.after 是 maxRuns 的别名：取更小的；都缺省 = 不设上限", () => {
+	assert.equal(effectiveMaxRuns(undefined, [{ ends: { after: 5 } }]), 5);
+	assert.equal(effectiveMaxRuns(3, [{ ends: { after: 5 } }]), 3, "maxRuns 更小");
+	assert.equal(effectiveMaxRuns(8, [{ ends: { after: 5 } }, { ends: { after: 2 } }]), 2, "多个触发器取最小");
+	assert.equal(effectiveMaxRuns(undefined, []), undefined);
+	assert.equal(effectiveMaxRuns(0, [{ ends: { after: 0 } }]), undefined, "非正数等于没设");
+});
+
+test("if 条件去重保序：多个触发器各带 if 时全部要成立（由引擎逐条问）", () => {
+	assert.deepEqual(
+		routineConditionNotes([
+			{ if: { note: "今天有雨吗" } },
+			{ if: { note: " 今天有雨吗 " } },
+			{ if: { note: "日历上有新会议吗" } },
+			{},
+		]),
+		["今天有雨吗", "日历上有新会议吗"],
+	);
+	assert.deepEqual(routineConditionNotes([{}, { if: { note: "   " } }]), []);
+});
+
+// ── 游标推进时机（2026-11-10 批 21 §六）────────────────────
+
+test("游标：只有产出被保留（非 quiet、非 skipped、成功）才推进", () => {
+	const base = { ok: true, quiet: false, skippedToolCount: 0 };
+	assert.equal(shouldAdvanceCursor(base), true);
+	assert.equal(shouldAdvanceCursor({ ...base, quiet: true }), false, "quiet 不推进");
+	assert.equal(shouldAdvanceCursor({ ...base, skippedToolCount: 1 }), false, "跳步不推进");
+	assert.equal(shouldAdvanceCursor({ ...base, ok: false }), false, "失败（含读失败）不推进");
+});
+
+test("提示词：[上次看到这里] 只在有游标且有条件门控时出现", () => {
+	const withCursor = buildRoutinePrompt({
+		prompt: "看新消息",
+		cursorAt: "2026-11-10T08:00:00.000Z",
+		conditional: true,
+	});
+	assert.match(withCursor, /\[上次看到这里\] 2026-11-10T08:00:00\.000Z/);
+	assert.ok(withCursor.indexOf("[上次看到这里]") < withCursor.indexOf("看新消息"), "游标在原文之前");
+
+	assert.equal(
+		buildRoutinePrompt({ prompt: "看新消息", cursorAt: "2026-11-10T08:00:00.000Z", conditional: false }),
+		"看新消息",
+		"开关关着时逐字节不变",
+	);
+	assert.equal(buildRoutinePrompt({ prompt: "看新消息", conditional: true }), "看新消息", "没有游标不加段");
 });

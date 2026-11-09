@@ -1,15 +1,17 @@
 /**
- * 工具能力声明（2026-11-09 任务书 T3 §1）。
+ * 工具能力声明（2026-11-09 任务书 T3 §1；2026-11-10 批 21 §一 起接管审批判定）。
  *
- * 本批做的是「**登记，不是接管**」：把每个已注册工具的口径显式写成一份可测的声明，
+ * 2026-11-09 那批做的是「**登记，不是接管**」：把每个已注册工具的口径显式写成一份可测的声明，
  * 让「谁写盘、谁起进程、谁要人点头」从散落在 `WRITE_TOOLS` / `DEFAULT_CRITICAL_TOOLS`
  * / 注释里的隐性知识，变成一张表 + 单测断言。
  *
- * **判定逻辑完全没变**：`needsApproval()` 仍读老的 `WRITE_TOOLS` 与高危清单，
- * `readOnlyBlockReason()` 也仍读 `WRITE_TOOLS`。这里的数据不参与任何运行时判断——
- * 只被 `tool-capability.test.ts` 拿来对齐。
- *
- * 下一批才让闸门读声明（先让本表与老清单稳定一致一段时间，再切换事实源）。
+ * 2026-11-10 批 21：**审批判定已读本表**（`approval-policy.ts` 的 `needsApproval()`）：
+ *   - `destructive` 承担 `WRITE_TOOLS` 在审批里的角色（`ask-all` 的问法）；
+ *   - `needsApproval === "critical"` 承担 `DEFAULT_CRITICAL_TOOLS` 的角色；
+ *   - `AGENT_APPROVAL_CRITICAL_TOOLS` / 调用方显式清单仍然整体覆盖（人配的优先）；
+ *   - 表里没有的工具按最严处理（destructive + critical）并 warn 一次。
+ * **零行为变更**：两个集合与老清单逐项等值，由 `tool-capability.test.ts` 双向断言。
+ * `readOnlyBlockReason()`（只读档的能力边界）仍读 `WRITE_TOOLS`——那是与审批正交的另一条轴。
  *
  * 字段口径：
  * - `destructive` = 不可撤销（写盘 / 起进程 / 派活）。**与 `WRITE_TOOLS` 逐项等值**，

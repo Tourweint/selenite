@@ -27,10 +27,18 @@
  * 谁答都一样。
  */
 
+import { TOOL_CAPABILITIES, capabilityOf, type ToolCapability } from "./tool-capability.ts";
+
 /**
  * 会写文件 / 起进程 / 派活的工具。新工具必须加进来，否则 `AGENT_TOOL_POLICY=read-only` 就是个谎。
  * `delegate` 本身不写文件，但它会起 worker 去写；`propose_project` 只写 proposal 行，
  * 但会引出"建目录/登记项目"，与 delegate 同档。
+ *
+ * 2026-11-10 批 21：**审批判定改读能力声明**（`tool-capability.ts` 的 `destructive` /
+ * `needsApproval`），本集合只剩 `readOnlyBlockReason()` 这个能力边界在用。
+ * 之所以不一起搬走：`AGENT_TOOL_POLICY=read-only` 的"谁能写盘"是与审批正交的另一条轴
+ * （见文件头），改它等于改能力边界，不属本批"零行为变更"。两边的一致性由
+ * `tool-capability.test.ts` 双向断言钉住。
  */
 // partner_skill_write（2026-11-05 批次B B2）：写执事的技能文件——写盘即进闸门，这是硬约束。
 // partner_manage（批次D D3）：建 / 停执事 = "授予常驻指令 / 新建任务"类，
@@ -90,6 +98,50 @@ export const DEFAULT_CRITICAL_TOOLS = [
  */
 
 /**
+ * 能力声明说"该按高危问"的工具（2026-11-10 批 21 §一）。
+ * 与 `DEFAULT_CRITICAL_TOOLS` 逐项等值，由 `tool-capability.test.ts` 双向断言；
+ * 声明是事实源，常量留着给文档与单测对照。
+ */
+export function declaredCriticalTools(): ReadonlySet<string> {
+	return new Set(
+		Object.values(TOOL_CAPABILITIES)
+			.filter((capability) => capability.needsApproval === "critical")
+			.map((capability) => capability.name),
+	);
+}
+
+/** 未登记的工具：按最严处理（写盘 + 高危），并只在第一次见到时告警一次。 */
+const UNREGISTERED_CAPABILITY: ToolCapability = {
+	name: "(unregistered)",
+	readOnly: false,
+	destructive: true,
+	sideEffectScope: "process",
+	riskLevel: "high",
+	needsApproval: "critical",
+	concurrentSafe: false,
+};
+
+const warnedUnregistered = new Set<string>();
+
+/**
+ * 取工具的能力声明；表里没有 = 保守当作 destructive + critical（§1.3）。
+ *
+ * 为什么保守：声明是新增工具时必须补的一行；漏补时宁可多问一次，
+ * 也不能让一个会写盘的陌生工具从闸门底下溜过去。
+ */
+export function capabilityForApproval(tool: string): ToolCapability {
+	const capability = capabilityOf(tool);
+	if (capability) return capability;
+	if (!warnedUnregistered.has(tool)) {
+		warnedUnregistered.add(tool);
+		console.warn(
+			`[approval] 未登记的工具「${tool}」按最严处理（destructive + critical），请在 tool-capability.ts 补声明`,
+		);
+	}
+	return UNREGISTERED_CAPABILITY;
+}
+
+/**
  * 实际生效的高危清单。`AGENT_APPROVAL_CRITICAL_TOOLS`（逗号分隔）可整体覆盖；
  * 空串 / 未设回落缺省（配错了宁可多问，不能悄悄变成"全不问"）。
  */
@@ -121,23 +173,35 @@ export type ApprovalVerdict =
  * 它优先于审批——被策略拦下的调用没有"确认后就能跑"的说法。
  *
  * 三档（2026-11-08 扫尾批 10-C）：
- *   - `ask-all`：写类工具（`WRITE_TOOLS`）全问，另加高危清单——保证三档单调
- *     （`ask-all` 一定包含 `ask-critical` 问的那些；`send_to_agent` 不在 `WRITE_TOOLS`，
+ *   - `ask-all`：写类工具（能力声明的 `destructive`）全问，另加高危清单——保证三档单调
+ *     （`ask-all` 一定包含 `ask-critical` 问的那些；`send_to_agent` 不是 destructive，
  *     旧布尔只有 true/false，没有"全问却漏掉递话"的道理）；
- *   - `ask-critical`：只问 `critical` 清单（缺省命令 / 派活 / 执事管理 / 递话）；
+ *   - `ask-critical`：只问高危清单（缺省命令 / 派活 / 执事管理 / 递话）；
  *   - `none`：不问——与旧 `confirmWrites:false` 一致。
+ *
+ * 2026-11-10 批 21 §一：判定改读能力声明，**不是**改语义——
+ *   - `destructive` 与旧 `WRITE_TOOLS` 逐项等值（单测双向钉住）；
+ *   - 高危清单的优先级：调用方显式传入 > `AGENT_APPROVAL_CRITICAL_TOOLS` > 声明。
+ *     人显式配的必须盖过声明，否则"界面把 bash 从高危里去掉"会失效。
+ *   - 未登记的工具按最严处理并 warn 一次（见 `capabilityForApproval`）。
  */
 export function needsApproval(
 	policy: ApprovalPolicy,
 	tool: string,
 	blockReason?: string,
-	critical: ReadonlySet<string> = approvalCriticalTools(),
+	critical?: ReadonlySet<string>,
 ): ApprovalVerdict {
 	if (blockReason) return { kind: "block", reason: blockReason };
-	if (policy.approvalLevel === "ask-all" && (WRITE_TOOLS.has(tool) || critical.has(tool))) {
+	const capability = capabilityForApproval(tool);
+	// 显式清单（参数或 env）是"整体覆盖"：配了 write 就只有 write，不叠加声明。
+	const override =
+		critical ??
+		(process.env.AGENT_APPROVAL_CRITICAL_TOOLS?.trim() ? approvalCriticalTools() : undefined);
+	const isCritical = override ? override.has(tool) : capability.needsApproval === "critical";
+	if (policy.approvalLevel === "ask-all" && (capability.destructive || isCritical)) {
 		return { kind: "ask" };
 	}
-	if (policy.approvalLevel === "ask-critical" && critical.has(tool)) return { kind: "ask" };
+	if (policy.approvalLevel === "ask-critical" && isCritical) return { kind: "ask" };
 	return { kind: "allow" };
 }
 

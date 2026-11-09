@@ -16,7 +16,7 @@
  * - 开关 `AGENT_BASH_BG_TIMEOUT`，**缺省 false**（先观望，开了才转）。
  */
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import {
 	closeSync,
 	mkdirSync,
@@ -31,6 +31,12 @@ const DEFAULT_DIR = ".data/bg-jobs";
 const SUMMARY_LIMIT = 120;
 const LOG_TAIL_CHARS = 2000;
 const TIMEOUT_RE = /Command timed out after ([0-9.]+) seconds/;
+/** index.json 的条数上限（超过时启动裁掉最旧的已结束任务，只删索引，不删日志）。 */
+export const BG_INDEX_LIMIT = 200;
+/** 日志查看端点最多回多少行。 */
+export const BG_LOG_TAIL_LINES = 200;
+/** 任务 id 形状就是本模块自己生成的：只认这个形状，避免 `../` 之类拼进文件路径。 */
+const JOB_ID_RE = /^bg-[a-z0-9]+-[a-z0-9]+$/;
 
 export interface BgJobRecord {
 	id: string;
@@ -48,9 +54,20 @@ export function bashBackgroundEnabled(env: Record<string, string | undefined> = 
 	return raw === "1" || raw === "true" || raw === "on";
 }
 
-/** 落点目录（不在 env 里开放：`index.json` 的路径属于部署细节，测试走参数注入）。 */
-export function bashJobsDir(): string {
-	return DEFAULT_DIR;
+/**
+ * 落点目录。缺省 `.data/bg-jobs`；`AGENT_BG_JOBS_DIR` 只给探针/测试隔离用
+ * （照 `.data/approvals.json` 等既有 `*_PATH` 的做法），不是给部署换落点的开关。
+ */
+export function bashJobsDir(env: Record<string, string | undefined> = process.env): string {
+	return env.AGENT_BG_JOBS_DIR?.trim() || DEFAULT_DIR;
+}
+
+function indexPathOf(dir: string): string {
+	return join(dir, "index.json");
+}
+
+function logPathOf(dir: string, id: string): string {
+	return join(dir, `${id}.log`);
 }
 
 function textOf(value: unknown): string {
@@ -126,6 +143,130 @@ function tailOf(logPath: string): string {
 	}
 }
 
+// ── 管理面（2026-11-10 批 21 §二）────────────────────────────
+//
+// 只做三件事：列任务 / 看日志尾部 / 杀本进程起的任务。
+// **进程归属只看本进程的内存表**：重启后 index.json 里的 running 记录一律当"查不到活进程"，
+// 绝不按 pid 去杀 —— pid 会被复用，杀错人比杀不掉更糟。
+
+const liveJobs = new Map<string, ChildProcess>();
+
+export interface BgJobView {
+	id: string;
+	commandSummary: string;
+	startedAt: string;
+	endedAt: string | null;
+	exitCode: number | null;
+	status: BgJobRecord["status"];
+}
+
+/** 列出索引里的任务（index 顺序 = 创建顺序）。坏文件/不存在都回空数组。 */
+export function listBgJobs(dir: string = bashJobsDir()): BgJobView[] {
+	return readIndex(indexPathOf(dir)).map((record) => ({
+		id: record.id,
+		commandSummary: record.commandSummary,
+		startedAt: record.startedAt,
+		endedAt: record.endedAt ?? null,
+		exitCode: typeof record.exitCode === "number" ? record.exitCode : null,
+		// 上一进程留下的 running 原样透出：本模块不替重启结算改账，
+		// 也绝不把"索引说在跑"当成"活进程还在"（kill 的归属另看内存表）。
+		status: record.status,
+	}));
+}
+
+export interface BgJobLog {
+	found: boolean;
+	/** 尾部文本（最多 `BG_LOG_TAIL_LINES` 行） */
+	log: string;
+	/** 整份日志的行数（给调用方判断是否截断） */
+	totalLines: number;
+}
+
+/** 日志尾部（最多 200 行）。未知 id / 非法 id / 日志不存在都回 found:false。 */
+export function readBgJobLog(
+	id: string,
+	dir: string = bashJobsDir(),
+	limit = BG_LOG_TAIL_LINES,
+): BgJobLog {
+	if (!JOB_ID_RE.test(id)) return { found: false, log: "", totalLines: 0 };
+	if (!readIndex(indexPathOf(dir)).some((record) => record.id === id)) {
+		return { found: false, log: "", totalLines: 0 };
+	}
+	let text: string;
+	try {
+		text = readFileSync(logPathOf(dir, id), "utf8");
+	} catch {
+		// 索引里有、日志被删了：仍然算"这个任务存在"，只是没有内容。
+		return { found: true, log: "", totalLines: 0 };
+	}
+	const lines = text.split(/\r?\n/);
+	// 末尾换行会切出一个空串，先去掉再数，否则"1 行"永远显示成 2 行。
+	if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+	const tail = lines.slice(-Math.max(1, limit)).join("\n");
+	return { found: true, log: tail, totalLines: lines.length };
+}
+
+export type BgKillResult = "killed" | "unknown" | "not_running" | "not_owned";
+
+/**
+ * 杀一个本进程起的、仍在跑的任务。
+ *
+ * 用进程组（POSIX 上 spawn 时 `detached: true` 让它成为组长）或 `taskkill /T`
+ * （Windows）连子进程一起收，否则 shell 活着、真正的命令还在跑。
+ */
+export function killBgJob(id: string, dir: string = bashJobsDir()): BgKillResult {
+	if (!JOB_ID_RE.test(id)) return "unknown";
+	const record = readIndex(indexPathOf(dir)).find((entry) => entry.id === id);
+	if (!record) return "unknown";
+	const child = liveJobs.get(id);
+	if (!child || child.exitCode !== null || child.killed) return "not_owned";
+	if (record.status !== "running") return "not_running";
+
+	const pid = child.pid;
+	if (pid === undefined) return "not_running";
+	try {
+		if (process.platform === "win32") {
+			spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true });
+		} else {
+			// 负号 = 整个进程组；子进程是 detached 起的，组号就是它的 pid。
+			process.kill(-pid, "SIGTERM");
+		}
+		return "killed";
+	} catch (error) {
+		console.warn(
+			`[bg-job ${id}] kill 失败: ${error instanceof Error ? error.message : String(error)}`,
+		);
+		return "not_running";
+	}
+}
+
+/**
+ * 索引裁剪（启动时调一次）：超过 `limit` 条时，从最旧的**已结束**任务开始删索引条目；
+ * 在跑的不删，日志文件一个都不删（按 id 还能找回原始输出）。
+ * 返回被裁掉的条数。
+ */
+export function pruneBgIndex(
+	dir: string = bashJobsDir(),
+	limit = BG_INDEX_LIMIT,
+): number {
+	const path = indexPathOf(dir);
+	const records = readIndex(path);
+	if (records.length <= limit) return 0;
+	const ended = records
+		.filter((record) => record.status !== "running")
+		.sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt));
+	const drop = new Set<string>();
+	let remaining = records.length;
+	for (const record of ended) {
+		if (remaining <= limit) break;
+		drop.add(record.id);
+		remaining -= 1;
+	}
+	if (drop.size === 0) return 0;
+	writeIndex(path, records.filter((record) => !drop.has(record.id)));
+	return drop.size;
+}
+
 export interface MoveToBackgroundInput {
 	command: string;
 	cwd: string;
@@ -176,8 +317,11 @@ export function moveToBackground(input: MoveToBackgroundInput): MovedJob {
 		windowsHide: true,
 	});
 	closeSync(fd);
+	// 管理面只认本进程起的活进程（kill 端点据此判断归属）。
+	if (child.pid !== undefined) liveJobs.set(id, child);
 
 	const finish = (exitCode: number | null, status: BgJobRecord["status"]): void => {
+		liveJobs.delete(id);
 		const done: BgJobRecord = { ...record, endedAt: new Date().toISOString(), exitCode, status };
 		try {
 			upsertRecord(index, done);

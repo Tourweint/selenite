@@ -5,8 +5,9 @@
  * 以后每一轮相关对话都可能把它的片段带进 prompt。写入时打掉一次，
  * 比在召回、导出、日志三处各防一次可靠。
  *
- * 口径（任务书 §2.1）：
- *   - 打码对象：API key / token / 密码 / 长随机串（base64 / hex）。
+ * 口径（任务书 §2.1；2026-11-10 批 21 §五 补齐校验位规则）：
+ *   - 打码对象：API key / token / 密码 / 长随机串（base64 / hex）；
+ *     以及**带校验位**的银行卡（16 位 + Luhn）与身份证（18 位 + 校验位）。
  *   - **故意放行**：手机号、生日、地址、人名——这些是日记该记住的事实，
  *     不是敏感物。反例只在"明显无害"的形态上放行（任务书铁律 3）。
  *   - 纯函数、零依赖：不读时钟、不读 env、不抛错。开关由调用方（store）传。
@@ -42,8 +43,7 @@ const KEYED_RULES: RegExp[] = [
  * 裸露的凭据形态：没有字段名，靠自身的形状识别。
  * 顺序在 KEYED_RULES 之后：先保标签，再吃剩下的。
  */
-const BARE_RULES: Array<{ pattern: RegExp; replacement: string }> = [
-	// Bearer 头：保留 "Bearer " 前缀，客户端仍能看出认证方式
+const BARE_RULES: Array<{ pattern: RegExp; replacement: string }> = [	// Bearer 头：保留 "Bearer " 前缀，客户端仍能看出认证方式
 	{ pattern: /(\bBearer\s+)[A-Za-z0-9._~+/=-]{8,}/gi, replacement: `$1${REDACTED}` },
 	// 常见厂商前缀 key：sk- / pk- / rk- / ghp_ / github_pat_ / xoxb- 等
 	{ pattern: /\b(?:sk|pk|rk)[-_][A-Za-z0-9_-]{8,}/g, replacement: REDACTED },
@@ -68,6 +68,8 @@ const BARE_RULES: Array<{ pattern: RegExp; replacement: string }> = [
 /** Luhn 算法（ISO/IEC 7812-1）：从右往左隔位翻倍求和，模 10 为 0 通过。 */
 export function luhnValid(digits: string): boolean {
 	if (!/^\d{2,}$/.test(digits)) return false;
+	// 全 0 / 全同数字数学上能过 Luhn，但不是卡号——不当敏感物。
+	if (new Set(digits).size < 2) return false;
 	let sum = 0;
 	let double = false;
 	for (let i = digits.length - 1; i >= 0; i -= 1) {
@@ -122,9 +124,21 @@ export function redactSecrets(text: string): string {
 	for (const pattern of KEYED_RULES) {
 		output = output.replace(pattern, (_match, prefix: string) => `${prefix}${REDACTED}`);
 	}
-	output = redactSensitiveNumbers(output);
+	// 校验位规则（2026-11-10 批 21 §五）：先身份证（18 位），再银行卡（16 位）。
+	// 数字串必须独立成段（前后都不是数字）——否则会把 19 位流水号里的 18 位当成身份证。
+	output = output.replace(/(?<!\d)\d{17}[\dXx](?!\d)/g, (match) =>
+		idCardValid(match) ? REDACTED : match,
+	);
+	output = output.replace(/(?<!\d)\d{16}(?!\d)/g, (match) =>
+		luhnValid(match) ? REDACTED : match,
+	);
 	for (const rule of BARE_RULES) {
 		output = output.replace(rule.pattern, rule.replacement);
 	}
 	return output;
 }
+
+/**
+ * Luhn 校验（银行卡号）。纯数字串；全 0 这类"能过校验位的占位数字"不算卡号。
+ * 只判 16 位（任务书 §5.1）——手机号 11 位、日期 8 位、邮编 6 位都够不到这个长度。
+ */

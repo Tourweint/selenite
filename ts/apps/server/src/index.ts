@@ -81,6 +81,9 @@ import { routineEngine } from "./routines.ts";
 import { watchAllEvents } from "./agent.ts";
 import { autonomyMode, autonomyObserver, observeCount24h } from "./autonomy.ts";
 import { mountApprovalApi } from "./approval-api.ts";
+// bash 后台任务管理面（2026-11-10 批 21 §二）：列表 / 日志尾部 / kill。
+// 开关沿用 AGENT_BASH_BG_TIMEOUT，关着时整组 404（与 TOPICS/COMPANIONS 同口径）。
+import { mountBgJobs } from "./bg-jobs-api.ts";
 import { mountMemoryApi } from "./memory-api.ts";
 // 技能管理（2026-11-08 扫尾批 9-S）：设置页「技能」分区的增删改查，写操作锁死在技能目录内。
 // SKILLS_ADMIN=false 时 mountSkills 内部直接返回，整组路由 404（同 TOPICS/COMPANIONS 口径）。
@@ -290,6 +293,8 @@ mountSearch(app);
 
 // 审批答复（2026-11-04 批次二）：待批列表 + 幂等答复。开关关着时列表恒为空。
 mountApprovalApi(app);
+// bash 后台任务管理面（2026-11-10 批 21 §二）：转后台之后要能看见、能收尾。
+mountBgJobs(app);
 // 高级开关（2026-11-09）：界面读写运行时开关（.data/agent-flags.json）。AGENT_FLAGS_UI=false 整组不挂。
 mountFlags(app);
 // 记忆管理（2026-11-06）：看 / 删 / 标过时。只读列表不碰 durable，删改直接落记忆库。

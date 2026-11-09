@@ -1,14 +1,19 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	bashBackgroundEnabled,
+	killBgJob,
+	listBgJobs,
 	moveToBackground,
+	pruneBgIndex,
+	readBgJobLog,
 	replacedResult,
 	summarizeCommand,
 	timeoutSecondsFromResult,
+	type BgJobRecord,
 } from "./bash-background.ts";
 
 /**
@@ -111,4 +116,140 @@ test("工具结果替换：不回传 isError（否则模型会当成失败重跑
 	assert.equal(replacement.isError, false);
 	assert.equal(replacement.structuredOutput.exitCode, -1);
 	assert.match(replacement.output[0].text, /bg-x/);
+});
+
+// ── 管理面（2026-11-10 批 21 §二）────────────────────────────
+
+function writeIndex(dir: string, records: BgJobRecord[]): void {
+	writeFileSync(join(dir, "index.json"), JSON.stringify(records), "utf8");
+}
+
+test("列表：索引原样投影，缺省字段给 null（不编造退出码）", () => {
+	const dir = tempDir();
+	writeIndex(dir, [
+		{
+			id: "bg-a-111111",
+			commandSummary: "npm run build",
+			startedAt: "2026-11-10T01:00:00.000Z",
+			endedAt: "2026-11-10T01:01:00.000Z",
+			exitCode: 0,
+			status: "done",
+		},
+		{ id: "bg-b-222222", commandSummary: "npm run dev", startedAt: "2026-11-10T01:02:00.000Z", status: "running" },
+	]);
+	const jobs = listBgJobs(dir);
+	assert.equal(jobs.length, 2);
+	assert.deepEqual(jobs[0], {
+		id: "bg-a-111111",
+		commandSummary: "npm run build",
+		startedAt: "2026-11-10T01:00:00.000Z",
+		endedAt: "2026-11-10T01:01:00.000Z",
+		exitCode: 0,
+		status: "done",
+	});
+	assert.equal(jobs[1]!.endedAt, null);
+	assert.equal(jobs[1]!.exitCode, null);
+	assert.deepEqual(listBgJobs(join(dir, "no-such")), [], "目录不存在 → 空数组");
+});
+
+test("日志尾部：最多 200 行、以最新一行结尾；非法 id / 未知 id 都拒绝", () => {
+	const dir = tempDir();
+	writeIndex(dir, [
+		{ id: "bg-log-333333", commandSummary: "x", startedAt: "2026-11-10T01:00:00.000Z", status: "done" },
+	]);
+	const lines = Array.from({ length: 250 }, (_, index) => `line-${index + 1}`);
+	writeFileSync(join(dir, "bg-log-333333.log"), `${lines.join("\n")}\n`, "utf8");
+
+	const tail = readBgJobLog("bg-log-333333", dir);
+	assert.equal(tail.found, true);
+	assert.equal(tail.totalLines, 250, "末尾换行不算一整行");
+	const kept = tail.log.split("\n");
+	assert.equal(kept.length, 200);
+	assert.equal(kept[0], "line-51");
+	assert.equal(kept[199], "line-250");
+
+	assert.equal(readBgJobLog("bg-nope-999999", dir).found, false, "索引里没有 = 不存在");
+	assert.equal(readBgJobLog("../../etc/passwd", dir).found, false, "路径形状的 id 一律拒绝");
+	assert.equal(readBgJobLog("bg-log-333333", join(dir, "no-such")).found, false);
+});
+
+test("kill：只认本进程起的活进程；未知 / 已结束 / 不是本进程起的分开报", async () => {
+	const dir = tempDir();
+	const finished = new Promise<BgJobRecord>((resolve) => {
+		moveToBackground({
+			command: 'node -e "setTimeout(()=>{},30000)"',
+			cwd: process.cwd(),
+			timeoutSeconds: 1,
+			dir,
+			onFinished: (record) => resolve(record),
+		});
+	});
+	const index = JSON.parse(readFileSync(join(dir, "index.json"), "utf8")) as BgJobRecord[];
+	const id = index[index.length - 1]!.id;
+
+	assert.equal(killBgJob("bg-nope-999999", dir), "unknown");
+	// 索引里再塞一条 running，但活进程不在本进程的内存表里（模拟重启后残留）
+	writeIndex(dir, [
+		...index,
+		{
+			id: "bg-stale-444444",
+			commandSummary: "x",
+			startedAt: "2026-11-10T01:00:00.000Z",
+			status: "running",
+		},
+	]);
+	assert.equal(killBgJob("bg-stale-444444", dir), "not_owned");
+
+	// 本次自己起的那个仍在跑 → 真杀；杀完 close 事件把状态收口
+	assert.equal(killBgJob(id, dir), "killed");
+	const record = await finished;
+	assert.equal(record.status, "failed", "被杀掉的任务按失败收口（有结束时间）");
+	assert.equal(record.endedAt !== undefined, true);
+	assert.equal(killBgJob(id, dir), "not_owned", "同一任务不能杀第二次");
+});
+
+test("索引裁剪：超限时只删最旧的已结束条目，在跑的与日志文件都不动", () => {
+	const dir = tempDir();
+	const records: BgJobRecord[] = [
+		{
+			id: "bg-run-000000",
+			commandSummary: "long",
+			startedAt: "2026-11-10T00:00:00.000Z",
+			status: "running",
+		},
+		{
+			id: "bg-old-111111",
+			commandSummary: "old",
+			startedAt: "2026-11-10T00:01:00.000Z",
+			endedAt: "2026-11-10T00:02:00.000Z",
+			exitCode: 0,
+			status: "done",
+		},
+		{
+			id: "bg-old-222222",
+			commandSummary: "older",
+			startedAt: "2026-11-10T00:00:30.000Z",
+			endedAt: "2026-11-10T00:01:30.000Z",
+			exitCode: 0,
+			status: "done",
+		},
+		{
+			id: "bg-new-333333",
+			commandSummary: "new",
+			startedAt: "2026-11-10T00:03:00.000Z",
+			endedAt: "2026-11-10T00:04:00.000Z",
+			exitCode: 0,
+			status: "done",
+		},
+	];
+	writeIndex(dir, records);
+	for (const record of records) writeFileSync(join(dir, `${record.id}.log`), "x", "utf8");
+
+	assert.equal(pruneBgIndex(dir, 3), 1, "只裁一条");
+	const kept = (JSON.parse(readFileSync(join(dir, "index.json"), "utf8")) as BgJobRecord[]).map(
+		(record) => record.id,
+	);
+	assert.deepEqual(kept.sort(), ["bg-new-333333", "bg-old-111111", "bg-run-000000"].sort());
+	assert.equal(readFileSync(join(dir, "bg-old-222222.log"), "utf8"), "x", "日志文件不删");
+	assert.equal(pruneBgIndex(dir, 3), 0, "没超限时不动");
 });

@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+	TASK_BASELINE_START,
+	hasTaskBaseline,
+	renderTaskBaseline,
 	renderTaskConversationPrompt,
 	taskAsConversationEnabled,
 	taskConversationExternalId,
+	taskKeyedBaselineEnabled,
 } from "./task-conversation.ts";
 import { TASK_CONVERSATION_PREFIX } from "./agent/shared.ts";
 
@@ -44,5 +48,43 @@ test("回滚开关：TASK_AS_CONVERSATION=false 时旁路", () => {
 	} finally {
 		if (previous === undefined) delete process.env.TASK_AS_CONVERSATION;
 		else process.env.TASK_AS_CONVERSATION = previous;
+	}
+});
+
+// ── 键控基线（2026-11-10 批 21 §四）──────────────────────
+
+test("键控基线：steps + writes 渲染成带起止标记的整块", () => {
+	const block = renderTaskBaseline({
+		id: "T-abc123",
+		steps: ["读 source.txt", " 写 excerpt.txt "],
+		writes: ["excerpt.txt", "summary.md"],
+	});
+	assert.ok(block);
+	assert.ok(block!.startsWith(TASK_BASELINE_START));
+	assert.ok(block!.includes("1. 读 source.txt"));
+	assert.ok(block!.includes("2. 写 excerpt.txt"), "步骤去空白");
+	assert.ok(block!.includes("excerpt.txt、summary.md"));
+	assert.ok(block!.endsWith("[[/keyed:task:acceptance]]"));
+});
+
+test("键控基线：没有 steps / writes 时不写空块", () => {
+	assert.equal(renderTaskBaseline({ id: "T-empty" }), null);
+	assert.equal(renderTaskBaseline({ id: "T-empty", steps: ["  "], writes: [] }), null);
+});
+
+test("键控基线：只认起点标记（幂等，正文被改写也算在）", () => {
+	assert.equal(hasTaskBaseline(["随便说两句", `${TASK_BASELINE_START}\n步骤：…`]), true);
+	assert.equal(hasTaskBaseline(["随便说两句"]), false);
+	assert.equal(hasTaskBaseline([]), false);
+});
+
+test("键控基线开关：默认开；false/0/off 才关", () => {
+	assert.equal(taskKeyedBaselineEnabled({}), true);
+	assert.equal(taskKeyedBaselineEnabled({ TASK_KEYED_BASELINE: "" }), true);
+	for (const value of ["false", "FALSE", "0", "off", " off "]) {
+		assert.equal(taskKeyedBaselineEnabled({ TASK_KEYED_BASELINE: value }), false, value);
+	}
+	for (const value of ["true", "1", "on"]) {
+		assert.equal(taskKeyedBaselineEnabled({ TASK_KEYED_BASELINE: value }), true, value);
 	}
 });

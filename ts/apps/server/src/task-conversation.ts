@@ -15,9 +15,14 @@
  *
  * 回滚：`TASK_AS_CONVERSATION=false` 时 ensure/get/append 全部旁路，
  * delegation 仍只写留言表、`POST /tickets/:id/say` 不挂（404）。
+ *
+ * 键控基线（2026-11-10 批 21 §四）：验收标准（ticket.steps + 计划任务的 writes）以
+ * `[[keyed:task:acceptance]]` 块随专线双写，压缩吃掉后在下次写消息前整块补回。
+ * 回滚 `TASK_KEYED_BASELINE=false`（默认开）。
  */
 
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { contentText } from "@earendil-works/pi-ai";
 import type { EntryDraft } from "@earendil-works/pi-durable";
 import type { ResolvedChat } from "./agent.ts";
 import type { DelegationMirrorEntry } from "./delegation.ts";
@@ -28,6 +33,16 @@ const CTX = BACKGROUND_CONTEXT;
 /** 回滚开关：缺省开；`false` / `0` / `off` 时整体旁路。 */
 export function taskAsConversationEnabled(): boolean {
 	const raw = (process.env.TASK_AS_CONVERSATION?.trim() || "true").toLowerCase();
+	return raw !== "false" && raw !== "0" && raw !== "off";
+}
+
+/**
+ * 键控基线开关（2026-11-10 批 21 §四）：默认开；`TASK_KEYED_BASELINE=false` 时
+ * 既不写验收标准块、也不做压缩后的还原检查（回到批 20 的形态）。
+ */
+export function taskKeyedBaselineEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = (env.TASK_KEYED_BASELINE ?? "").trim().toLowerCase();
+	if (!raw) return true;
 	return raw !== "false" && raw !== "0" && raw !== "off";
 }
 
@@ -54,6 +69,127 @@ export function renderTaskConversationPrompt(ticketId: string): string {
 
 /** 进程内缓存：同一张单只 open 一次；重启后由 ensure 重新打开（幂等）。 */
 const chats = new Map<string, ResolvedChat>();
+
+// ── 键控基线：验收标准压缩后整块还原（2026-11-10 批 21 §四）──
+//
+// 任务专线会被压缩，压缩可能把"这张单要交什么"吃掉。把它们做成一个**按 key 定位的块**：
+//   - 写入点：专线第一次被写（创建）时；
+//   - 还原点：每次往专线写系统事件 / 主人回话前，检查块还在不在，不在就整块补回。
+// 只按起点标记判在不在（不解析正文）：模型或压缩改写了正文也算"在"，避免每轮重写刷屏。
+
+/** 键控块的 key（对外可见于会话正文；不含单号，同一条专线只有一张单）。 */
+export const TASK_BASELINE_KEY = "task:acceptance";
+export const TASK_BASELINE_START = `[[keyed:${TASK_BASELINE_KEY}]]`;
+export const TASK_BASELINE_END = `[[/keyed:${TASK_BASELINE_KEY}]]`;
+
+/** 写基线需要的票面信息（`writes` 来自已拆好的计划任务，没有计划时为空）。 */
+export interface KeyedBaselineTicket {
+	id: string;
+	steps?: readonly string[];
+	writes?: readonly string[];
+}
+
+/**
+ * 纯渲染：没有 steps 也没有 writes 时返回 null（不写空块——空块被压缩吃掉也无所谓，
+ * 补回去只是噪声）。
+ */
+export function renderTaskBaseline(ticket: KeyedBaselineTicket): string | null {
+	const steps = (ticket.steps ?? []).map((step) => step.trim()).filter(Boolean);
+	const writes = (ticket.writes ?? []).map((write) => write.trim()).filter(Boolean);
+	if (steps.length === 0 && writes.length === 0) return null;
+	const lines = [
+		TASK_BASELINE_START,
+		"【验收标准·键控基线】这张单完成时必须满足；若本段被压缩吃掉，系统会整块补回。",
+	];
+	if (steps.length > 0) {
+		lines.push("步骤：");
+		steps.forEach((step, index) => lines.push(`${index + 1}. ${step}`));
+	}
+	if (writes.length > 0) lines.push(`声明要写的路径：${writes.join("、")}`);
+	lines.push(TASK_BASELINE_END);
+	return lines.join("\n");
+}
+
+/** 这段文本里是否已有键控块（只看起点标记，幂等）。 */
+export function hasTaskBaseline(texts: readonly string[]): boolean {
+	return texts.some((text) => text.includes(TASK_BASELINE_START));
+}
+
+/** 票面信息提供者：由装配层（delegation-api）注入，本模块不 import 任务中心。 */
+export type TaskBaselineProvider = (ticketId: string) => KeyedBaselineTicket | null;
+let baselineProvider: TaskBaselineProvider | null = null;
+
+export function setTaskBaselineProvider(provider: TaskBaselineProvider | null): void {
+	baselineProvider = provider;
+}
+
+/** 从会话上下文里抽纯文本（只读模型消息；工具结果不参与判定）。 */
+function entryTexts(entries: readonly { model?: unknown }[]): string[] {
+	const texts: string[] = [];
+	for (const entry of entries) {
+		const model = entry.model;
+		if (!Array.isArray(model)) continue;
+		for (const message of model) {
+			const content = (message as { content?: unknown }).content;
+			if (content === undefined) continue;
+			const text = contentText(content as Parameters<typeof contentText>[0]);
+			if (text) texts.push(text);
+		}
+	}
+	return texts;
+}
+
+/**
+ * 确认专线里有键控块，没有就写一条。
+ *
+ * `conversationId` 是**内部自增 id**（`chat.internalId`）：调用方手里本来就有它，
+ * 不必再按外部 id 反查。返回 true = 这次补写了一条；false = 已有 / 开关关 / 无票面 / 失败。
+ * 这是旁路：任何异常都只 warn，不影响专线主写入。
+ */
+export async function ensureKeyedBaseline(
+	conversationId: number,
+	ticket: KeyedBaselineTicket,
+): Promise<boolean> {
+	if (!taskAsConversationEnabled() || !taskKeyedBaselineEnabled()) return false;
+	const block = renderTaskBaseline(ticket);
+	if (!block) return false;
+	const chat = [...chats.values()].find((entry) => entry.internalId === conversationId);
+	if (!chat) return false;
+	try {
+		const view = await chat.conversation.context(CTX);
+		if (hasTaskBaseline(entryTexts(view.entries))) return false;
+		await chat.conversation.submit({ type: "write", entry: buildEntry(block) }, CTX);
+		console.log(
+			`[task-conv] 键控基线已写入 ticket=${ticket.id.slice(0, 12)} steps=${ticket.steps?.length ?? 0}`,
+		);
+		return true;
+	} catch (error) {
+		console.warn(
+			`[task-conv] 键控基线写入失败 ticket=${ticket.id.slice(0, 12)} reason=${
+				error instanceof Error ? error.message.slice(0, 120) : "unknown"
+			}`,
+		);
+		return false;
+	}
+}
+
+/**
+ * 按单号取票面信息并确保基线在。写入点与还原点共用这一条路径：
+ * 创建时（第一条系统事件）写一次，之后每次写消息前检查一次。
+ */
+async function ensureBaselineOf(chat: ResolvedChat, ticketId: string): Promise<void> {
+	if (!taskKeyedBaselineEnabled() || !baselineProvider) return;
+	let ticket: KeyedBaselineTicket | null = null;
+	try {
+		ticket = baselineProvider(ticketId);
+	} catch {
+		// 票面读不到（库/文件异常）：不写基线，专线照常写。
+		return;
+	}
+	if (!ticket) return;
+	await ensureKeyedBaseline(chat.internalId, ticket);
+}
+
 /** 并发 ensure 的合并位：双击 / 事件同时到达时不要建出两条会话。 */
 const creating = new Map<string, Promise<ResolvedChat | null>>();
 /** 每张单的写入队列（保证 ordering）。 */
@@ -158,6 +294,8 @@ function buildEntry(text: string): EntryDraft {
 async function writeTaskEvent(ticketId: string, entry: DelegationMirrorEntry): Promise<void> {
 	const chat = await ensureTaskConversation(ticketId);
 	if (!chat) return;
+	// 还原点（批 21 §四）：压缩可能吃掉验收标准；每次写之前确认它还在。
+	await ensureBaselineOf(chat, ticketId);
 	try {
 		await chat.conversation.submit({ type: "write", entry: buildEntry(entry.text) }, CTX);
 	} catch (error) {
@@ -225,6 +363,8 @@ export async function submitTaskReply(
 ): Promise<ResolvedChat | null> {
 	const chat = await ensureTaskConversation(ticketId);
 	if (!chat) return null;
+	// 还原点（批 21 §四）：主人回话前先确认验收标准还在（同一句话触发的一次写）。
+	await ensureBaselineOf(chat, ticketId);
 	try {
 		await chat.conversation.submit(
 			{ type: "input", content: text, whenBusy: "followUp" },

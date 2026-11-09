@@ -26,6 +26,7 @@ import { recordWorkSettlement } from "./work-record.ts";
 import {
 	appendTaskEvent,
 	getTaskConversation,
+	setTaskBaselineProvider,
 	submitTaskReply,
 	taskAsConversationEnabled,
 	taskConversationMirror,
@@ -467,6 +468,37 @@ export function mountDelegationApi(app: Hono, opts: DelegationApiOptions = {}): 
 	const workRootOf = (): string => path.resolve(opts.workRoot ?? chancellorWorkRoot());
 	// 与只读投影同一个懒建口径：注入了就用注入的，否则用进程内单例。
 	const storeOf = (): DelegationReceipts => opts.store ?? deadLetterStore();
+
+	// 键控基线的票面来源（2026-11-10 批 21 §四）：验收标准 = ticket.json 的 steps
+	// + plan.json 里各任务的 writes。专线模块不 import 任务中心，由这里注入。
+	// 任何读取失败都返回 null（不写基线），绝不挡专线本身的写入。
+	setTaskBaselineProvider((ticketId) => {
+		try {
+			const found = findTicket(workRootOf(), ticketId);
+			if (!found) return null;
+			try {
+				const steps = Array.isArray(found.ticket.steps) ? found.ticket.steps : [];
+				let writes: string[] = [];
+				try {
+					const plan = JSON.parse(
+						fs.readFileSync(path.join(found.store.ticketDir(ticketId), "plan.json"), "utf8"),
+					) as { tasks?: Array<{ writes?: unknown }> };
+					writes = (plan.tasks ?? []).flatMap((task) =>
+						Array.isArray(task.writes)
+							? task.writes.filter((item): item is string => typeof item === "string")
+							: [],
+					);
+				} catch {
+					// 还没规划 / 坏文件：只写 steps
+				}
+				return { id: ticketId, steps, writes: [...new Set(writes)] };
+			} finally {
+				found.store.close();
+			}
+		} catch {
+			return null;
+		}
+	});
 
 	app.get("/api/v1/domains", (c) => {
 		const workRoot = workRootOf();

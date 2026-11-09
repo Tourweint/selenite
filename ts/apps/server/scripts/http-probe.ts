@@ -1584,6 +1584,8 @@ try {
 		fixture("T-say", {
 			status: "needs_you",
 			originConversationId: String(internalId),
+			// 键控基线（批 21 §四）：steps 进专线的验收标准块（没有 plan.json → writes 为空）。
+			steps: ["确认需求", "给出方案"],
 		}),
 	);
 	store.close();
@@ -1761,6 +1763,15 @@ try {
 	check(
 		sayTexts.some((text) => text.includes("已经不在等回答")),
 		"续跑被拒：专线如实说明，没有改派新单",
+	);
+	check(
+		sayTexts.some(
+			(text) =>
+				text.includes("[[keyed:task:acceptance]]") &&
+				text.includes("确认需求") &&
+				text.includes("给出方案"),
+		),
+		"键控基线：验收标准（steps）随专线双写",
 	);
 
 	const sideChats = (await (await fetch(`${BASE}/api/v1/agent/chats?limit=300`)).json()) as {
@@ -2541,6 +2552,106 @@ try {
 	);
 	check(contextBadIndex.status === 400, "aroundIndex 非法 → 400", String(contextBadIndex.status));
 
+	// ── 29. bash 后台任务管理面（2026-11-10 批 21 §二）──────────
+	console.log("\n· 29. bash 后台任务：列表 / 日志尾部 / kill / 开关 404");
+	server.kill();
+	await sleep(800);
+	// 预置索引：一条已结束、一条"running"（不是本进程起的 → kill 必须拒绝）。
+	// 真跑后台任务要等一次真实超时，探针里不值当；这里验的是管理面读的文件口径。
+	const bgDir = ".data/probe-http-bg-jobs";
+	rmSync(bgDir, { recursive: true, force: true });
+	mkdirSync(bgDir, { recursive: true });
+	writeFileSync(
+		join(bgDir, "index.json"),
+		JSON.stringify(
+			[
+				{
+					id: "bg-probe1-aaaaaa",
+					commandSummary: "npm run build",
+					startedAt: "2026-11-10T01:00:00.000Z",
+					endedAt: "2026-11-10T01:02:00.000Z",
+					exitCode: 0,
+					status: "done",
+				},
+				{
+					id: "bg-probe2-bbbbbb",
+					commandSummary: "npm run dev",
+					startedAt: "2026-11-10T01:03:00.000Z",
+					status: "running",
+				},
+			],
+			null,
+			2,
+		),
+		"utf8",
+	);
+	writeFileSync(
+		join(bgDir, "bg-probe1-aaaaaa.log"),
+		Array.from({ length: 250 }, (_, index) => `line-${index + 1}`).join("\n"),
+		"utf8",
+	);
+	server = startServer({
+		COMPANIONS_ENABLED: "true",
+		AGENT_BASH_BG_TIMEOUT: "1",
+		AGENT_BG_JOBS_DIR: bgDir,
+	});
+	await waitForReady();
+
+	const bgList = await fetch(`${BASE}/api/v1/agent/bg-jobs`);
+	const bgListBody = (await bgList.json()) as {
+		ok?: boolean;
+		jobs?: { id: string; commandSummary: string; status: string; exitCode: number | null; endedAt: string | null }[];
+	};
+	const doneJob = bgListBody.jobs?.find((job) => job.id === "bg-probe1-aaaaaa");
+	const runningJob = bgListBody.jobs?.find((job) => job.id === "bg-probe2-bbbbbb");
+	check(bgList.status === 200 && bgListBody.ok === true, "列表端点可用", String(bgList.status));
+	check(
+		doneJob?.status === "done" && doneJob.exitCode === 0 && doneJob.endedAt !== null,
+		"已结束任务带退出码与结束时间",
+		JSON.stringify(doneJob),
+	);
+	check(
+		runningJob?.status === "running" && runningJob.endedAt === null && runningJob.exitCode === null,
+		"在跑任务不带结束字段",
+	);
+
+	const bgLog = await fetch(`${BASE}/api/v1/agent/bg-jobs/bg-probe1-aaaaaa/log`);
+	const bgLogBody = (await bgLog.json()) as { ok?: boolean; lines?: number; log?: string };
+	const logLines = (bgLogBody.log ?? "").split("\n");
+	check(bgLog.status === 200 && bgLogBody.lines === 250, "日志端点报告总行数", String(bgLogBody.lines));
+	check(
+		logLines.length === 200 && logLines[logLines.length - 1] === "line-250",
+		"只回最后 200 行，且以最新一行结尾",
+		String(logLines.length),
+	);
+	const bgLogMissing = await fetch(`${BASE}/api/v1/agent/bg-jobs/bg-nope-xxxxxx/log`);
+	check(bgLogMissing.status === 404, "未知任务日志 → 404", String(bgLogMissing.status));
+
+	const killNotOwned = await fetch(`${BASE}/api/v1/agent/bg-jobs/bg-probe2-bbbbbb/kill`, {
+		method: "POST",
+	});
+	const killNotOwnedBody = (await killNotOwned.json()) as { error?: string };
+	check(
+		killNotOwned.status === 409 && killNotOwnedBody.error === "not_owned_process",
+		"不是本进程起的任务 → 409 拒绝",
+		String(killNotOwned.status),
+	);
+	const killDone = await fetch(`${BASE}/api/v1/agent/bg-jobs/bg-probe1-aaaaaa/kill`, {
+		method: "POST",
+	});
+	check(killDone.status === 409, "已结束任务 → 409", String(killDone.status));
+	const killUnknown = await fetch(`${BASE}/api/v1/agent/bg-jobs/bg-nope-xxxxxx/kill`, {
+		method: "POST",
+	});
+	check(killUnknown.status === 404, "未知任务 kill → 404", String(killUnknown.status));
+
+	server.kill();
+	await sleep(800);
+	server = startServer({ COMPANIONS_ENABLED: "true", AGENT_BASH_BG_TIMEOUT: "" });
+	await waitForReady();
+	const bgOff = await fetch(`${BASE}/api/v1/agent/bg-jobs`);
+	check(bgOff.status === 404, "开关关着 → 三个端点整组 404", String(bgOff.status));
+
 } finally {
 	server.kill();
 	await sleep(300);
@@ -2564,6 +2675,7 @@ try {
 	rmSync(GATE_AUDIT_FILE, { force: true });
 	rmSync(APPROVALS_FILE, { force: true });
 	rmSync(".data/probe-http-chat-events.sqlite", { force: true });
+	rmSync(".data/probe-http-bg-jobs", { recursive: true, force: true });
 	rmSync(".data/probe-http-providers.json", { force: true });
 	rmSync(".data/probe-http-policy.json", { force: true });
 	rmSync(".data/probe-http-secret-providers.json", { force: true });
