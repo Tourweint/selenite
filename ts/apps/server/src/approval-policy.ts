@@ -23,6 +23,7 @@
 // 与 partner_manage 同档（会改"谁跟谁在一起"的关系，不是只读）。
 // routine_manage（2026-11-08 刀二 E4）：执事给自己建 / 停 / 删例行规则 = 新建常驻
 // 自主轮，同样进闸门；`ROUTINE_SELF_SERVICE=false` 时整个工具不上架（一行回滚）。
+// persona_recall（2026-11-09 persona接入批一）：起 python 子进程查 persona-metric，按字面进闸门；命令行拼死（python + 固定脚本），模型自由度只有 query 文本。
 export const WRITE_TOOLS = new Set([
 	"write",
 	"edit",
@@ -34,6 +35,7 @@ export const WRITE_TOOLS = new Set([
 	"partner_manage",
 	"group_manage",
 	"routine_manage",
+	"persona_recall",
 ]);
 
 export interface ApprovalPolicy {

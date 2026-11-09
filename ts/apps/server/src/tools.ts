@@ -110,6 +110,36 @@ import type { SessionSearchHit } from "./agent/session-search.ts";
 
 const MEMORY_KINDS: MemoryKind[] = ["fact", "episode", "preference", "entity", "intention"];
 
+// ── persona-metric 检索结果的形状（2026-11-09 persona 接入批一）──────
+// 刻意不在本文件 import `persona-ask.ts`：工具只收注入函数，单测/探针不需要
+// 真实 python 路径也能构造替身。字段与那边 `PersonaAskResult` 结构一致即可。
+export type PersonaRecallGroup = "memory_day" | "event" | "segment" | "fact" | "entity" | "tension";
+
+export interface PersonaRecallHit {
+	id: string;
+	date?: string;
+	title?: string;
+	text?: string;
+	kind?: string;
+	source?: string;
+	why?: string;
+}
+
+export interface PersonaRecallResult {
+	ok: boolean;
+	question: string;
+	qtype?: string;
+	groups?: Partial<Record<PersonaRecallGroup, PersonaRecallHit[]>>;
+	unknown?: string;
+	coverage?: {
+		not_searched?: string[];
+		not_indexed?: string[];
+		gaps?: string[];
+		gap_months?: string[];
+	};
+	error?: string;
+}
+
 /**
  * 这条派活该记成"谁说的"（2026-11-07 派活留言）。
  *
@@ -244,6 +274,15 @@ export interface ToolDeps {
 	 */
 	recallSessions?: ((query: string, options: { days?: number; limit?: number }) => Promise<SessionSearchHit[]>) | null;
 	/**
+	 * persona-metric 记忆库检索（2026-11-09 persona 接入批一）：传了才注册 `persona_recall`。
+	 * 装配层按 `PERSONA_MEMORY_ASK`（配置=启用）与 `PERSONA_MEMORY_ENABLED`（false=显式关）
+	 * 双闸决定传不传——不传 = 工具不上架（模型侧 tool_unavailable，一行回滚）。
+	 * 实现由 lifecycle 注入，tools 不 import persona-ask.ts（避免单测依赖真实 python 路径）。
+	 */
+	personaAsk?:
+		| ((question: string, options?: { limit?: number }) => Promise<PersonaRecallResult>)
+		| null;
+	/**
 	 * 自建巡逻（2026-11-08 刀二 E4）：为 true 时 `routine_manage` 工具上架。
 	 * 装配层（lifecycle）按 `routineSelfServiceEnabled()` 传入；**不传 = 不上架**
 	 * （单测 / 探针零改动，避免工具全集快照误伤）。`ROUTINE_SELF_SERVICE=false`
@@ -296,6 +335,60 @@ export function isDeviceWorkerDelegation(
 
 function text(value: string) {
 	return { output: [{ type: "text" as const, text: value }] };
+}
+
+// ── persona_recall 渲染（2026-11-09 persona 接入批一）──────────────
+const PERSONA_GROUP_LABELS: Record<PersonaRecallGroup, string> = {
+	memory_day: "日记忆",
+	event: "事件",
+	segment: "片段",
+	fact: "事实",
+	entity: "人物",
+	tension: "张力",
+};
+const PERSONA_GROUP_ORDER: PersonaRecallGroup[] = [
+	"memory_day",
+	"event",
+	"fact",
+	"segment",
+	"entity",
+	"tension",
+];
+/** 单条正文摘要上限（任务书 §2.3）。 */
+const PERSONA_HIT_MAX_CHARS = 160;
+
+function clipPersonaText(value: string): string {
+	return value.length > PERSONA_HIT_MAX_CHARS ? `${value.slice(0, PERSONA_HIT_MAX_CHARS)}…` : value;
+}
+
+/**
+ * 按组列条目：`- [组名] 日期｜标题：正文摘要（出处 id）`，组间空行。
+ * `unknown` 是 ask.py 的"查不到 ≠ 没有这回事"说明，**必须原文透传**；
+ * coverage 的 gaps / gap_months 提醒哪些时段没有记录。
+ */
+export function renderPersonaAsk(result: PersonaRecallResult): string {
+	const blocks: string[] = [];
+	for (const group of PERSONA_GROUP_ORDER) {
+		const hits = result.groups?.[group];
+		if (!hits || hits.length === 0) continue;
+		const lines = hits.map((hit) => {
+			const when = hit.date?.trim();
+			const title = hit.title?.trim();
+			const body = hit.text?.trim();
+			const detail = [title, body ? clipPersonaText(body) : ""].filter(Boolean).join("：");
+			const head = [when, detail || "（无摘要）"].filter(Boolean).join("｜");
+			return `- [${PERSONA_GROUP_LABELS[group]}] ${head}（${hit.id}）`;
+		});
+		blocks.push(lines.join("\n"));
+	}
+
+	let out = blocks.length > 0 ? blocks.join("\n\n") : "个人记忆库里没有查到相关记录。";
+	if (result.unknown?.trim()) out += `\n\n注意：${result.unknown.trim()}`;
+	const gaps = [...(result.coverage?.gaps ?? []), ...(result.coverage?.gap_months ?? [])];
+	if (gaps.length > 0) {
+		out += `\n\n记忆库在这些时段没有记录：${[...new Set(gaps)].join("、")}`;
+	}
+	return out;
 }
 
 export function createTools(deps: ToolDeps) {
@@ -916,6 +1009,54 @@ export function createTools(deps: ToolDeps) {
 							})
 							.join("\n"),
 					);
+				},
+			}),
+		);
+	}
+
+	// persona-metric 记忆库检索（2026-11-09 persona 接入批一）：条件注册，不进基线。
+	// 回滚：lifecycle 不传 deps.personaAsk（PERSONA_MEMORY_ASK 未配置 / ENABLED=false）
+	// → 这里整块不执行。它起 python 子进程，按硬约束字面进了 WRITE_TOOLS（不进高危清单）。
+	if (deps.personaAsk) {
+		const personaAsk = deps.personaAsk;
+		tools.push(
+			defineTool({
+				name: "persona_recall",
+				description:
+					"在**主人的个人记忆库**（跨越很多年的原始记录与分析）里检索证据条目，每条带出处 id。" +
+					"适用：本地记忆想不起来 / 查很久以前（如去年、2024 年）的事 / 主人要求给原文出处。" +
+					"**查不到 ≠ 没有这回事**：返回里有『不确定』说明时照转述，不要编。" +
+					"与 recall 分工：recall 查最近与偏好，persona_recall 查一生；先 recall 再 persona_recall。",
+				parameters: Type.Object({
+					query: Type.String({ description: "要查什么，用关键词或一句话" }),
+					limit: Type.Optional(
+						Type.Number({ description: "每组最多返回几条，默认 5", minimum: 1, maximum: 20 }),
+					),
+				}),
+				execute: async (args, api) => {
+					// 与 recall 同款：群聊不走个人记忆。
+					if (partnersStore().isGroupSession(api.conversationId)) {
+						return text("群聊不走个人记忆；答案以群里的聊天记录为准。");
+					}
+					const limit = Math.max(1, Math.min(20, Math.floor(args.limit ?? 5)));
+					let result: PersonaRecallResult;
+					try {
+						result = await personaAsk(args.query, { limit });
+					} catch {
+						// 注入实现理论上不抛，这里兜一层：检索失败绝不打断裂对话轮。
+						result = { ok: false, question: args.query };
+					}
+					const hits = result.groups
+						? Object.values(result.groups).reduce((sum, group) => sum + (group?.length ?? 0), 0)
+						: 0;
+					// 只记字数 / 状态 / 条数，不记 query 原文与正文（日志纪律）。
+					console.log(`[persona_recall] q=${args.query.length}字 ok=${result.ok} hits=${hits}`);
+					if (!result.ok) {
+						return text(
+							"个人记忆库暂时查不了（原因已记日志），你可以说说想确认什么，我换个方式找。",
+						);
+					}
+					return text(renderPersonaAsk(result));
 				},
 			}),
 		);

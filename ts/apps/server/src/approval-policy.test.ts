@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { test } from "node:test";
 import {
 	DEFAULT_CRITICAL_TOOLS,
@@ -138,4 +140,25 @@ test("拒绝续跑指令同样带反馈（async 路径）", () => {
 		approvalRejectedInstruction("write", "只动 README"),
 		"你拒绝了这次 write 调用。主人的要求：只动 README",
 	);
+});
+
+// ── persona_recall（2026-11-09 persona 接入批一）────────────
+test("persona_recall：进 WRITE_TOOLS；ask-all 问、none 放行、不进高危清单", () => {
+	assert.ok(WRITE_TOOLS.has("persona_recall"), "起 python 子进程的工具必须进闸门");
+	assert.ok(
+		!(DEFAULT_CRITICAL_TOOLS as readonly string[]).includes("persona_recall"),
+		"命令拼死、只有 query 文本，不该按高危打断用户",
+	);
+	assert.deepEqual(verdict("ask-all", "persona_recall"), { kind: "ask" });
+	assert.deepEqual(verdict("ask-critical", "persona_recall"), { kind: "allow" });
+	assert.deepEqual(verdict("none", "persona_recall"), { kind: "allow" });
+});
+
+test("persona_recall：read-only 档被 readOnlyBlockReason 拦下", async () => {
+	// policy 的 access 在模块加载时读 env：先设好只读档与不存在 policy.json 的路径，
+	// 再动态 import，避免读到本机 .data/policy.json。
+	process.env.AGENT_TOOL_POLICY = "read-only";
+	process.env.AGENT_POLICY_PATH = join(tmpdir(), "lifediary-approval-policy-no-policy.json");
+	const { readOnlyBlockReason } = await import("./agent/policy.ts");
+	assert.notEqual(readOnlyBlockReason("persona_recall"), undefined, "只读档应拦 persona_recall");
 });

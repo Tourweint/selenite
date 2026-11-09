@@ -203,6 +203,16 @@ export const TOOL_CAPABILITIES: Record<string, ToolCapability> = {
 		concurrentSafe: true,
 		notes: "自建常驻自主轮；与 partner_manage 同档，第一次要人点头。",
 	},
+	persona_recall: {
+		name: "persona_recall",
+		readOnly: false,
+		destructive: true,
+		sideEffectScope: "process",
+		riskLevel: "medium",
+		needsApproval: "never",
+		concurrentSafe: true,
+		notes: "经固定 ask.py 起 python 子进程查 persona 记忆库；命令拼死、argv 传参，只读查询但按硬约束进闸门，不进高危清单。",
+	},
 
 	// ── 课题 / 搜索 / 递话 ─────────────────────────────────
 	web_search: {

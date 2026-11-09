@@ -96,6 +96,8 @@ import { TopicTask } from "../topic-runtime.ts";
 import { skillSlashOf } from "../skills.ts";
 // 会话考古（2026-11-09 T4 §4）：检索实现只依赖 shared，不会与本文件成环。
 import { recallSessionsEnabled, searchSessions } from "./session-search.ts";
+// persona-metric 记忆库检索（2026-11-09 persona 接入批一）：双闸都过才上架工具。
+import { askPersona, askPersonaAvailable, personaAskEnabled } from "../persona-ask.ts";
 import {
 	CHANCELLOR_ENABLED,
 	PERSONA,
@@ -383,6 +385,14 @@ async function openHarness(): Promise<Harness> {
 			? (query, options) =>
 					getHarness().then((harness) => searchSessions(harness, query, options))
 			: null,
+		// persona-metric 记忆库检索（2026-11-09 persona 接入批一，方案 D-甲/D-乙/D-己）：
+		// `PERSONA_MEMORY_ASK` 配置 = 启用（默认未配置 = 工具不上架）；`PERSONA_MEMORY_ENABLED=false`
+		// = 显式关。双闸都过才注入，`persona_recall` 才注册（模型侧 tool_unavailable，一行回滚）。
+		// 本批只走按需工具，不进 recallContext / buildContext 的每轮注入链。
+		personaAsk:
+			personaAskEnabled() && askPersonaAvailable()
+				? (question, options) => askPersona(question, options)
+				: null,
 	});
 	registry.install(
 		(lifediaryExt = defineExtension({

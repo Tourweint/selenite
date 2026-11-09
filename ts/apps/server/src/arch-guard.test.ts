@@ -132,6 +132,9 @@ test("闸门完整性：实际注册全集 = WRITE_TOOLS ∪ READ_TOOLS", () => 
 			// 只验工具全集，排链桩不落盘。
 			routineSelfService: true,
 			scheduleRoutine: async () => undefined,
+			// persona 检索（2026-11-09 批一）：条件注册且进了 WRITE_TOOLS，
+			// 这里给替身把 persona_recall 也覆盖进"注册全集"。
+			personaAsk: async () => ({ ok: true, question: "stub" }),
 		}),
 	);
 	const registered = new Set(full.map((t) => t.name));

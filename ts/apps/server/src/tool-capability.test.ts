@@ -27,7 +27,7 @@ function makeDeps(over: Partial<ToolDeps> = {}): ToolDeps {
 /** 内核五件不在 createTools 里（装的是 CodingTools），手工补名。 */
 const KERNEL_TOOLS = ["read", "write", "edit", "bash", "powershell"];
 
-/** 本次上架的全集：10 基线 + 7 个条件注册 + ask_user（本批之后）。 */
+/** 本次上架的全集：10 基线 + 条件注册 + ask_user（本批之后）。 */
 const EXPECTED_TOOLS = [
 	...KERNEL_TOOLS,
 	"remember",
@@ -43,6 +43,7 @@ const EXPECTED_TOOLS = [
 	"web_search",
 	"propose_topic",
 	"send_to_agent",
+	"persona_recall",
 	"ask_user",
 ].sort();
 
@@ -55,6 +56,8 @@ function registeredToolNames(): string[] {
 			relay: { deliver: async () => ({ ok: false, error: "stub" }) },
 			routineSelfService: true,
 			scheduleRoutine: async () => undefined,
+			// persona 检索（2026-11-09 批一）：条件注册，给个不落盘替身把全集覆盖进来。
+			personaAsk: async () => ({ ok: true, question: "stub" }),
 		}),
 	);
 	return [...new Set([...KERNEL_TOOLS, ...tools.map((t) => t.name)])].sort();
