@@ -19,6 +19,7 @@ import {
 	type SkillSource,
 } from "./skills.ts";
 import { getSkillState } from "./skill-state.ts";
+import { isSkillStale, readSkillUsage, skillUsageEnabled } from "./skill-usage.ts";
 
 /**
  * 技能管理端点（2026-11-08 扫尾批 9-S；2026-11-08 批 10-A 改多来源只读展示）。
@@ -43,6 +44,10 @@ import { getSkillState } from "./skill-state.ts";
  *
  * 为什么不做启停位：技能是目录里的文件，删除即停；多一个"禁用"状态就多一份与磁盘不一致的状态。
  * 增删只影响下一个会话（D5 的既有取舍），界面文案如实说明。
+ *
+ * **永不自动删除（2026-11-10 批 17 §四.4，纪律）**：技能只能由人删。
+ * 用量账只负责标记 `stale`（>90 天未用），不删、不移、不改文件；
+ * 本文件里唯一的删除是用户显式 `DELETE /skills/:name`。别在这里加"自动清理"。
  */
 
 /** 单槽上限 64KB（与执事 SOUL/USER/技能同口径，cindy 同款） */
@@ -148,6 +153,10 @@ export function mountSkills(app: Hono, deps: SkillsApiDeps = {}): void {
 
 	app.get("/api/v1/agent/skills", (c) => {
 		const resolved = resolve();
+		// 用量账（2026-11-10 批 17 §四）：每请求读一份；开关关着时整组字段不出现（回滚到旧形状）。
+		const usageOn = skillUsageEnabled();
+		const usage = usageOn ? readSkillUsage() : {};
+		const now = new Date();
 		const items: {
 			name: string;
 			summary: string;
@@ -157,6 +166,10 @@ export function mountSkills(app: Hono, deps: SkillsApiDeps = {}): void {
 			writable: boolean;
 			form: "flat" | "dir";
 			enabled: boolean;
+			/** 2026-11-10 批 17：可选字段，老客户端忽略即可。 */
+			usageCount?: number;
+			lastUsedAt?: string | null;
+			stale: boolean;
 		}[] = [];
 		const claimed = new Set<string>();
 		for (const source of resolved.dirs) {
@@ -172,6 +185,8 @@ export function mountSkills(app: Hono, deps: SkillsApiDeps = {}): void {
 				try {
 					const stat = statSync(entry.path);
 					if (!stat.isFile()) continue;
+					const used = usage[entry.name];
+					const lastUsedAt = used?.lastUsedAt ?? null;
 					items.push({
 						name: entry.name,
 						summary: entry.summary,
@@ -182,6 +197,13 @@ export function mountSkills(app: Hono, deps: SkillsApiDeps = {}): void {
 						form: entry.form,
 						// 启停位（2026-11-09）：默认全关，界面上逐条/批量开
 						enabled: skillState.isEnabled(entry.name),
+						// 只标记，不删不移；从未用过的以文件 mtime 为基线（新建技能不会一上来就 stale）
+						...(usageOn
+							? { usageCount: used?.count ?? 0, lastUsedAt }
+							: {}),
+						stale: usageOn
+							? isSkillStale(lastUsedAt, stat.mtime.toISOString(), now)
+							: false,
 					});
 				} catch {
 					// 单个文件读不了不该让整页列表 500

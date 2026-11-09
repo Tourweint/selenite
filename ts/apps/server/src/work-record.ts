@@ -31,6 +31,54 @@ export const WORK_RECORD_CAP = 200;
 /** 履历摘要窗口：近 10 单。 */
 export const WORK_SUMMARY_LIMIT = 10;
 
+/**
+ * 经验层的价值门槛（2026-11-10 批 17 §一.2）：结果行 ≥40 字且至少含一个具体动作词。
+ * 门槛刻意确定性、不调模型——宁缺毋滥，抽不出来就不存。
+ */
+export const EXPERIENCE_MIN_CHARS = 40;
+
+/** 具体动作词：出现任意一个才算"可复用的做法"，而不是一句"做完了"。 */
+const EXPERIENCE_ACTION_WORDS = [
+	"改",
+	"写",
+	"读",
+	"跑",
+	"查",
+	"整理",
+	"合并",
+	"删除",
+	"替换",
+	"核对",
+	"重试",
+	"迁移",
+	"拆分",
+	"回滚",
+	"验证",
+	"补",
+	"建",
+	"装",
+	"配",
+];
+
+/** 回归开关（`PARTNER_EXPERIENCE`，默认 true）：false = 只落 work 履历，回到批 17 之前的形态。 */
+export function experienceRecordEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = (env.PARTNER_EXPERIENCE ?? "").trim().toLowerCase();
+	return raw !== "false" && raw !== "0";
+}
+
+/**
+ * 结果行 → 一条经验（纯函数，单测直接断言；不过门槛返回 null）。
+ *
+ * 只做确定性筛选，不做总结：内容就是"下次同类活可以这样做：<结果行>"。
+ * 为什么不在写给模型之前再润色：这是验收后可核对的一句做法，改写反而可能编出没发生过的事。
+ */
+export function experienceInsight(line: string): string | null {
+	const flat = String(line ?? "").replace(/\s+/g, " ").trim();
+	if (flat.length < EXPERIENCE_MIN_CHARS) return null;
+	if (!EXPERIENCE_ACTION_WORDS.some((word) => flat.includes(word))) return null;
+	return `下次同类活可以这样做：${oneLine(flat, 160)}`;
+}
+
 export type WorkStatus = "done" | "failed" | "aborted" | "canceled";
 
 export interface WorkSettlementInput {
@@ -153,6 +201,33 @@ export function recordWorkSettlement(input: WorkSettlementInput): void {
 		db.put(record);
 		// 每 scope 200 条封顶、超出删最旧；只按 work 计数，不动别的形态。
 		db.pruneOldest(scope, WORK_RECORD_CAP, { kinds: ["work"] });
+
+		// 经验层（2026-11-10 批 17 §一）：done 才抽，且必须过价值门槛。
+		// 与 work 的区别：这条会进召回（下次同类活能被想起），且参与巩固合并。
+		// 不过门槛就一条都不写——宁缺毋滥；开关 false 时整段跳过。
+		if (input.status === "done" && experienceRecordEnabled()) {
+			const insight = experienceInsight(input.line);
+			if (insight) {
+				const at = new Date().toISOString();
+				db.put({
+					id: `experience:${input.ticketId}`,
+					kind: "experience",
+					scope,
+					content: insight,
+					// 比 work 台账略高：经验是"下次怎么做"，比"这单发生过"更该被想起
+					importance: 0.6,
+					veracity: "tool",
+					source: "work",
+					createdAt: at,
+					validUntil: null,
+					supersededBy: null,
+					recallCount: 0,
+					lastRecalledAt: null,
+					usageCount: 0,
+					lastUsedAt: null,
+				});
+			}
+		}
 	} catch (error) {
 		const detail = error instanceof Error ? error.message : String(error);
 		console.warn(`[work] 履历落库失败（不影响结算）: ${detail.slice(0, 200)}`);

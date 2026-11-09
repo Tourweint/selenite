@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -16,6 +16,8 @@ process.env.AGENT_APPROVALS_PATH = join(root, "approvals.json");
 process.env.MEMORY_DB_PATH = join(root, "memory.db");
 // 整理建议的待决文件：必须隔离，别碰真实 .data/memory-proposals.json
 process.env.MEMORY_PROPOSALS_PATH = join(root, "memory-proposals.json");
+// 巩固审计 diff 落点（2026-11-10 批 17 §三）：同样隔离
+process.env.MEMORY_CONSOLIDATE_DIFF_PATH = join(root, "memory-consolidate-diff.json");
 process.env.PROJECTS_DB_PATH = join(root, "projects.sqlite");
 process.env.PROVIDERS_PATH = join(root, "providers.json");
 process.env.DELEGATIONS_DB_PATH = join(root, "delegations.sqlite");
@@ -310,6 +312,148 @@ test("整理记忆：MEMORY_CONSOLIDATE_LLM=false → 两个端点 404，列表�
 		assert.equal(list.canImport, true, "导入是另一条开关，互不牵连");
 	} finally {
 		delete process.env.MEMORY_CONSOLIDATE_LLM;
+	}
+});
+
+// ── 巩固审计（2026-11-10 批 17 §三）────────────────────────
+
+test("巩固审计：pass 只出建议并落 diff；usage 排序 / 未用淘汰 / 库一个字段都不动", async () => {
+	const { SqliteMemoryStore } = await import("@lifediary/memory");
+	const engine = memoryEngine!;
+	const partnerId = "77777777-7777-4777-8777-777777777777";
+	const scope = `partner:${partnerId}`;
+	const partnerScope = { type: "partner" as const, id: partnerId };
+
+	const keep = engine.remember({
+		kind: "fact",
+		scope: partnerScope,
+		content: "审计测试：同一条重复事实",
+		importance: 0.4,
+	});
+	const drop = engine.remember({
+		kind: "fact",
+		scope: partnerScope,
+		content: "审计测试：同一条重复事实。",
+		importance: 0.4,
+	});
+	const stale = engine.remember({
+		kind: "fact",
+		scope: partnerScope,
+		content: "审计测试：很久以前的低价值记录",
+		importance: 0.3,
+	});
+	const pref = engine.remember({
+		kind: "preference",
+		scope: partnerScope,
+		content: "审计测试：低重要度偏好",
+		importance: 0.2,
+	});
+
+	// 用量 / 创建时间只能直接改库（remember 不接受这两个字段）
+	const db = new SqliteMemoryStore(process.env.MEMORY_DB_PATH as string);
+	const old = new Date(Date.now() - 200 * 86_400_000).toISOString();
+	db.patch(keep.id, {
+		usageCount: 5,
+		lastUsedAt: new Date().toISOString(),
+		createdAt: new Date(Date.now() - 10 * 86_400_000).toISOString(),
+	});
+	db.patch(drop.id, {
+		usageCount: 0,
+		lastUsedAt: null,
+		createdAt: new Date().toISOString(),
+	});
+	db.patch(stale.id, { usageCount: 0, lastUsedAt: null, createdAt: old, importance: 0.3 });
+	db.patch(pref.id, { usageCount: 0, lastUsedAt: null, createdAt: old, importance: 0.2 });
+	db.close();
+
+	const before = engine.list({ scopes: [scope], includeSuperseded: true }).length;
+	const response = await newApp().request("/api/v1/agent/memory/consolidate/pass", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ scope }),
+	});
+	assert.equal(response.status, 200);
+	const body = (await response.json()) as {
+		merged: Array<{ keepId: string; dropId: string; summary: string }>;
+		retired: Array<{ id: string; kind: string; summary: string }>;
+		kept: number;
+	};
+	assert.equal(body.merged.length, 1, "一条合并建议");
+	assert.equal(body.merged[0]!.keepId, keep.id, "保留 usage 更高的那条");
+	assert.equal(body.merged[0]!.dropId, drop.id);
+	assert.deepEqual(
+		body.retired.map((entry) => entry.id),
+		[stale.id],
+		"只建议淘汰久未使用的低重要度条目；偏好不动",
+	);
+	assert.equal(body.kept, before - 2);
+
+	// 红线：库一个字段都不动
+	assert.equal(engine.list({ scopes: [scope], includeSuperseded: true }).length, before, "不删任何一条");
+	assert.equal(engine.getRecord(drop.id)!.supersededBy, null, "不自动 supersede");
+	assert.equal(engine.getRecord(stale.id)!.supersededBy, null);
+
+	// diff 文件形状：只 id / kind / ≤40 字摘要，不抄正文
+	const raw = readFileSync(process.env.MEMORY_CONSOLIDATE_DIFF_PATH as string, "utf8");
+	const file = JSON.parse(raw) as Record<string, unknown>;
+	assert.deepEqual(
+		Object.keys(file).sort(),
+		["generatedAt", "kept", "merged", "retired", "scope"],
+		"diff 形状 = { merged, retired, kept }（加 scope / generatedAt）",
+	);
+	assert.ok(body.retired.every((entry) => entry.summary.length <= 40), "摘要 ≤40 字");
+
+	// 界面可查：GET 读回同一份
+	const read = await newApp().request("/api/v1/agent/memory/consolidate/diff");
+	assert.equal(read.status, 200);
+	const readBody = (await read.json()) as { scope: string; retired: Array<{ id: string }> };
+	assert.equal(readBody.scope, scope);
+	assert.deepEqual(readBody.retired.map((entry) => entry.id), [stale.id]);
+
+	// 回滚开关：MEMORY_USAGE_RANKING=false → 给不出淘汰建议，保留优先级回到创建时间
+	process.env.MEMORY_USAGE_RANKING = "false";
+	try {
+		const legacy = await newApp().request("/api/v1/agent/memory/consolidate/pass", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ scope }),
+		});
+		const legacyBody = (await legacy.json()) as {
+			merged: Array<{ keepId: string }>;
+			retired: unknown[];
+		};
+		assert.equal(legacy.status, 200);
+		assert.equal(legacyBody.retired.length, 0, "关掉 usage 排序后不出淘汰建议");
+		assert.equal(legacyBody.merged[0]!.keepId, drop.id, "按创建时间保留最新一条");
+	} finally {
+		delete process.env.MEMORY_USAGE_RANKING;
+	}
+});
+
+test("巩固审计：缺 scope / 非法的 scope → 400；没跑过 diff → 404", async () => {
+	const app = newApp();
+	const missing = await app.request("/api/v1/agent/memory/consolidate/pass", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({}),
+	});
+	assert.equal(missing.status, 400);
+	const bad = await app.request("/api/v1/agent/memory/consolidate/pass", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ scope: "session:1" }),
+	});
+	assert.equal(bad.status, 400);
+
+	// 指到一个从未写过的路径：读口按"还没跑过"处理
+	const previous = process.env.MEMORY_CONSOLIDATE_DIFF_PATH;
+	process.env.MEMORY_CONSOLIDATE_DIFF_PATH = join(root, "never-written.json");
+	try {
+		const absent = await app.request("/api/v1/agent/memory/consolidate/diff");
+		assert.equal(absent.status, 404);
+	} finally {
+		if (previous === undefined) delete process.env.MEMORY_CONSOLIDATE_DIFF_PATH;
+		else process.env.MEMORY_CONSOLIDATE_DIFF_PATH = previous;
 	}
 });
 

@@ -84,6 +84,8 @@ export class BasicConsolidator implements Consolidator {
 			// 一律跳过查重直接 append，绝不合并 / 强化（"整理纪要"干十次是十条履历）。
 			// intention（2026-11-09 T4 §3）同理：两次「打算」即使同文，也该保留各自的
 			// 时间与有效期；合并会把其中一条的承诺吃掉。
+			// experience（2026-11-10 批 17 §一.3）反过来：同一套做法再出现一次是"确认"，
+			// 照常合并 / 强化——这是经验层与 work 台账刻意相反的地方。
 			const existing =
 				candidate.kind === "work" || candidate.kind === "intention"
 					? undefined
@@ -234,4 +236,158 @@ function resolveImportedTime(raw: unknown, now: Date): string {
 	if (Number.isNaN(parsed)) return now.toISOString();
 	const at = new Date(Math.min(parsed, now.getTime()));
 	return at.toISOString();
+}
+
+// ── 巩固审计（2026-11-10 批 17 §三）────────────────────────
+//
+// 这是一个**只读**的确定性管线：给定一个 scope，算出「哪些可以合并 / 哪些建议淘汰 /
+// 留下几条」，不写库、不删任何一条。与上面 `BasicConsolidator` 的分工：
+//   - BasicConsolidator 回答"新候选怎么和已有记忆相处"（写入路径）；
+//   - 这里回答"库现在长什么样、哪些该收拾"（审计路径，产出交给人看）。
+// 语义去重仍然只走模型建议制（server 的 memory-consolidate.ts），这里只做规范化等价。
+
+/** 未用淘汰的观察窗口：超过 90 天没被召回。 */
+export const CONSOLIDATE_STALE_DAYS = 90;
+/** 未用淘汰的重要性门槛：importance < 0.5 才建议。 */
+export const CONSOLIDATE_RETIRE_IMPORTANCE = 0.5;
+/** 摘要上限：只给一句可读的标签，不把正文整段抄进 diff 文件。 */
+export const CONSOLIDATE_SUMMARY_CHARS = 40;
+
+/** diff 里的一条（淘汰候选 / 保留项的标签）。 */
+export interface ConsolidateDiffEntry {
+	id: string;
+	kind: MemoryKind;
+	/** 正文摘要（≤40 字），只用于人读，不是正文 */
+	summary: string;
+}
+
+export interface ConsolidateMergeSuggestion {
+	/** 保留哪条（使用优先级更高） */
+	keepId: string;
+	/** 建议并进 keepId 的那条 */
+	dropId: string;
+	summary: string;
+}
+
+/**
+ * 一次巩固的差异摘要（2026-11-10 批 17 §3.2）。
+ *
+ * `kept` = 审计后"仍然独立存在"的条数（总数 − 合并建议里被并掉的 − 淘汰建议）。
+ * 三组都只是**建议**：调用方（server）只负责落盘给人看，不得据此自动删 / 自动 supersede。
+ */
+export interface ConsolidateDiff {
+	scope: string;
+	generatedAt: string;
+	kept: number;
+	merged: ConsolidateMergeSuggestion[];
+	retired: ConsolidateDiffEntry[];
+}
+
+export interface ConsolidateScopeOptions {
+	now?: Date;
+	/**
+	 * usage 排序（`MEMORY_USAGE_RANKING`，默认 true）：按 `usageCount` 降序、
+	 * `lastUsedAt` 降序决定保留优先级，并产出未用淘汰建议。
+	 * false = 回滚到"只看创建时间、不给淘汰建议"的旧口径（diff 形状不变）。
+	 */
+	usageRanking?: boolean;
+}
+
+/** 这些 kind 不参与"未用淘汰"建议：稳定属性 / 经验 / 台账 / 还有效的打算。 */
+const RETIRE_EXEMPT: ReadonlySet<MemoryKind> = new Set([
+	"preference",
+	"experience",
+	"work",
+	"intention",
+]);
+
+/** 这些 kind 不参与确定性合并：work 是 append-only，intention 各自有承诺。 */
+const MERGE_EXEMPT: ReadonlySet<MemoryKind> = new Set(["work", "intention"]);
+
+function diffSummary(content: string): string {
+	const flat = content.replace(/\s+/g, " ").trim();
+	return flat.length <= CONSOLIDATE_SUMMARY_CHARS
+		? flat
+		: `${flat.slice(0, CONSOLIDATE_SUMMARY_CHARS - 1)}…`;
+}
+
+/** 保留优先级：使用多的在前；usageRanking 关掉时退回创建时间倒序。 */
+function keepOrder(usageRanking: boolean) {
+	return (a: MemoryRecord, b: MemoryRecord): number => {
+		if (usageRanking) {
+			const usage = (b.usageCount ?? 0) - (a.usageCount ?? 0);
+			if (usage !== 0) return usage;
+			// 没被用过的排最后（null 不参与 Date.parse 的 0 值比较）
+			const aUsed = a.lastUsedAt ? Date.parse(a.lastUsedAt) : 0;
+			const bUsed = b.lastUsedAt ? Date.parse(b.lastUsedAt) : 0;
+			const safeA = Number.isNaN(aUsed) ? 0 : aUsed;
+			const safeB = Number.isNaN(bUsed) ? 0 : bUsed;
+			if (safeB !== safeA) return safeB - safeA;
+		}
+		return a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0;
+	};
+}
+
+/**
+ * 审计一个 scope：产出合并 / 淘汰 / 保留三组建议，**不改库**。
+ *
+ * 判据（全部确定性，不调模型）：
+ *   - 合并：同 kind + 规范化等价（work / intention 除外），保留 usage 更高的一条；
+ *   - 淘汰：`usageRanking` 开着、距 `lastUsedAt ?? lastRecalledAt ?? createdAt` > 90 天、
+ *     `importance < 0.5`、kind 不在 preference / experience / work / intention；
+ *   - 已被列为合并 drop 的条目不再重复列进淘汰。
+ *
+ * 上限刻意不设：审计只给人看，截断会让人误以为"剩下的都没问题"。
+ */
+export function consolidateScope(
+	store: MemoryStore,
+	scope: string,
+	options: ConsolidateScopeOptions = {},
+): ConsolidateDiff {
+	const now = options.now ?? new Date();
+	const usageRanking = options.usageRanking ?? true;
+	const rows = [...store.search({ scopes: [scope], limit: 100_000 })].sort(keepOrder(usageRanking));
+
+	const merged: ConsolidateMergeSuggestion[] = [];
+	const mergedDropIds = new Set<string>();
+	const seen = new Map<string, MemoryRecord>();
+	for (const record of rows) {
+		if (MERGE_EXEMPT.has(record.kind)) continue;
+		const normalized = normalizeContent(record.content);
+		if (!normalized) continue;
+		const key = `${record.kind}\u0000${normalized}`;
+		const keep = seen.get(key);
+		if (!keep) {
+			seen.set(key, record);
+			continue;
+		}
+		merged.push({
+			keepId: keep.id,
+			dropId: record.id,
+			summary: diffSummary(record.content),
+		});
+		mergedDropIds.add(record.id);
+	}
+
+	const retired: ConsolidateDiffEntry[] = [];
+	if (usageRanking) {
+		const threshold = now.getTime() - CONSOLIDATE_STALE_DAYS * 86_400_000;
+		for (const record of rows) {
+			if (RETIRE_EXEMPT.has(record.kind)) continue;
+			if (mergedDropIds.has(record.id)) continue;
+			if (record.importance >= CONSOLIDATE_RETIRE_IMPORTANCE) continue;
+			// 从未被用过就退到创建时间：一条刚建的低重要度记忆不该马上被建议淘汰。
+			const anchor = Date.parse(record.lastUsedAt ?? record.lastRecalledAt ?? record.createdAt);
+			if (Number.isNaN(anchor) || anchor >= threshold) continue;
+			retired.push({ id: record.id, kind: record.kind, summary: diffSummary(record.content) });
+		}
+	}
+
+	return {
+		scope,
+		generatedAt: now.toISOString(),
+		kept: Math.max(0, rows.length - merged.length - retired.length),
+		merged,
+		retired,
+	};
 }

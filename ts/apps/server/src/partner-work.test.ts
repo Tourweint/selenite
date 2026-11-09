@@ -31,6 +31,8 @@ const { partnersStore, PartnersStore } = await import("./partners.ts");
 const { startDelegation } = await import("./delegation.ts");
 const {
 	closeWorkStore,
+	experienceInsight,
+	experienceRecordEnabled,
 	formatWorkContent,
 	recordWorkSettlement,
 	workRecordEnabled,
@@ -86,6 +88,16 @@ function workRows(scope = scopeA): Array<{ id: string; kind: string; content: st
 	const db = new SqliteMemoryStore(process.env.MEMORY_DB_PATH as string);
 	try {
 		return db.search({ scopes: [scope], kinds: ["work"], limit: 1000 });
+	} finally {
+		db.close();
+	}
+}
+
+/** 经验层（2026-11-10 批 17 §一）：同 scope 下 kind=experience 的记录。 */
+function experienceRows(scope = scopeA) {
+	const db = new SqliteMemoryStore(process.env.MEMORY_DB_PATH as string);
+	try {
+		return db.search({ scopes: [scope], kinds: ["experience"], limit: 1000 });
 	} finally {
 		db.close();
 	}
@@ -207,6 +219,94 @@ test("work 记录：落到发起执事 scope、格式一行、稳定 id 幂等�
 	} finally {
 		if (previous === undefined) delete process.env.PARTNER_WORK_RECORD;
 		else process.env.PARTNER_WORK_RECORD = previous;
+	}
+});
+
+// ─────────────────────────────────────────────────────────
+// 批 17 §一：经验层（experience）
+// ─────────────────────────────────────────────────────────
+
+test("experienceInsight：过门槛（≥40 字 + 动作词）才给，宁缺毋滥", () => {
+	assert.equal(experienceInsight("做完了"), null, "太短不存");
+	assert.equal(
+		experienceInsight("这次把三个页面的标题都改成了蓝色，顺便统一了间距"),
+		null,
+		"没有具体动作词不存（哪怕够长）",
+	);
+	const insight = experienceInsight("先把原文件读一遍，改完再跑一次探针确认，最后把结果记进变更记录，并把踩过的坑补进说明");
+	assert.ok(insight, "够长且含动作词应通过");
+	assert.match(insight!, /下次同类活可以这样做/);
+	assert.match(insight!, /读|改|跑/);
+});
+
+test("经验落账：done + 过门槛才写一条；失败 / 不过门槛 / 开关关都不写", () => {
+	assert.equal(experienceRecordEnabled(), true, "PARTNER_EXPERIENCE 默认开");
+
+	// done + 过门槛：work 与 experience 各一条
+	recordWorkSettlement(
+		settlement({
+			ticketId: "T-exp",
+			status: "done",
+			line: "先把原文件读一遍，改完再跑一次探针确认，最后把结果记进变更记录，并把踩过的坑补进说明",
+		}),
+	);
+	const rows = experienceRows();
+	const row = rows.find((entry) => entry.id === "experience:T-exp")!;
+	assert.ok(row, "id = experience:<票号>");
+	assert.equal(row.kind, "experience");
+	assert.equal(row.source, "work");
+	assert.match(row.content, /下次同类活可以这样做/);
+	assert.equal(workRows().some((entry) => entry.id === "work:T-exp"), true, "work 履历照旧落");
+
+	// 重入不新增（稳定 id upsert）
+	recordWorkSettlement(
+		settlement({
+			ticketId: "T-exp",
+			status: "done",
+			line: "先把原文件读一遍，改完再跑一次探针确认，最后把结果记进变更记录，并把踩过的坑补进说明",
+		}),
+	);
+	assert.equal(experienceRows().filter((entry) => entry.id === "experience:T-exp").length, 1, "不重复落");
+
+	// done 但不过门槛：只有 work，没有 experience
+	recordWorkSettlement(settlement({ ticketId: "T-short", status: "done", line: "做完了" }));
+	assert.equal(experienceRows().some((entry) => entry.id === "experience:T-short"), false, "不过门槛不写");
+
+	// failed 哪怕结果行过门槛也不抽经验
+	recordWorkSettlement(
+		settlement({
+			ticketId: "T-fail",
+			status: "failed",
+			line: "先把原文件读一遍，改完再跑一次探针确认，最后把结果记进变更记录，并把踩过的坑补进说明",
+		}),
+	);
+	assert.equal(experienceRows().some((entry) => entry.id === "experience:T-fail"), false, "只有 done 才抽");
+
+	// 开关 false：work 照落，experience 一个字节都不写
+	const previous = process.env.PARTNER_EXPERIENCE;
+	process.env.PARTNER_EXPERIENCE = "false";
+	try {
+		assert.equal(experienceRecordEnabled(), false);
+		recordWorkSettlement(
+			settlement({
+				ticketId: "T-exp-off",
+				status: "done",
+				line: "先把原文件读一遍，改完再跑一次探针确认，最后把结果记进变更记录，并把踩过的坑补进说明",
+			}),
+		);
+		assert.equal(
+			experienceRows().some((entry) => entry.id === "experience:T-exp-off"),
+			false,
+			"开关关不抽经验",
+		);
+		assert.equal(
+			workRows().some((entry) => entry.id === "work:T-exp-off"),
+			true,
+			"work 履历不受经验开关影响",
+		);
+	} finally {
+		if (previous === undefined) delete process.env.PARTNER_EXPERIENCE;
+		else process.env.PARTNER_EXPERIENCE = previous;
 	}
 });
 

@@ -83,6 +83,8 @@ const COLUMNS = [
 	"recall_count",
 	"last_recalled_at",
 	"expires_at",
+	"usage_count",
+	"last_used_at",
 ] as const;
 
 function rowToRecord(row: Record<string, unknown>): MemoryRecord {
@@ -101,6 +103,9 @@ function rowToRecord(row: Record<string, unknown>): MemoryRecord {
 		lastRecalledAt:
 			row.last_recalled_at === null ? null : String(row.last_recalled_at),
 		expiresAt: row.expires_at === null || row.expires_at === undefined ? null : String(row.expires_at),
+		usageCount: row.usage_count === null || row.usage_count === undefined ? 0 : Number(row.usage_count),
+		lastUsedAt:
+			row.last_used_at === null || row.last_used_at === undefined ? null : String(row.last_used_at),
 	};
 }
 
@@ -118,7 +123,9 @@ CREATE TABLE IF NOT EXISTS memories (
 	superseded_by    TEXT,
 	recall_count     INTEGER NOT NULL DEFAULT 0,
 	last_recalled_at TEXT,
-	expires_at       TEXT
+	expires_at       TEXT,
+	usage_count      INTEGER NOT NULL DEFAULT 0,
+	last_used_at     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_memories_scope   ON memories(scope);
 CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at);
@@ -206,16 +213,22 @@ export class SqliteMemoryStore implements MemoryStore {
 	}
 
 	/**
-	 * 老库补列（2026-11-09 T4 §3）：`CREATE TABLE IF NOT EXISTS` 只对新库生效，
-	 * 已有 `memory.db` 不会因为 SCHEMA 改了长出新列。个人记忆量级，ALTER 瞬时完成；
+	 * 老库补列（2026-11-09 T4 §3；2026-11-10 批 17 §三补 usage 两列）：`CREATE TABLE IF NOT EXISTS`
+	 * 只对新库生效，已有 `memory.db` 不会因为 SCHEMA 改了长出新列。个人记忆量级，ALTER 瞬时完成；
 	 * 不做版本表——一列一判，比半成品的迁移框架更稳。
 	 */
 	private ensureColumns(): void {
 		const columns = this.db.prepare("PRAGMA table_info(memories)").all() as Array<{
 			name?: unknown;
 		}>;
-		if (!columns.some((column) => String(column.name) === "expires_at")) {
-			this.db.exec("ALTER TABLE memories ADD COLUMN expires_at TEXT");
+		const names = new Set(columns.map((column) => String(column.name)));
+		const additions: Array<[string, string]> = [
+			["expires_at", "TEXT"],
+			["usage_count", "INTEGER NOT NULL DEFAULT 0"],
+			["last_used_at", "TEXT"],
+		];
+		for (const [name, ddl] of additions) {
+			if (!names.has(name)) this.db.exec(`ALTER TABLE memories ADD COLUMN ${name} ${ddl}`);
 		}
 	}
 
@@ -280,6 +293,8 @@ export class SqliteMemoryStore implements MemoryStore {
 				record.recallCount,
 				record.lastRecalledAt,
 				record.expiresAt ?? null,
+				record.usageCount ?? 0,
+				record.lastUsedAt ?? null,
 			);
 		// 镜像维护：put 一律 delete+insert（upsert 可能换了 content）
 		if (this.ftsEnabled) this.replaceFtsRow(record.id, content);
@@ -368,6 +383,8 @@ export class SqliteMemoryStore implements MemoryStore {
 			recallCount: "recall_count",
 			lastRecalledAt: "last_recalled_at",
 			expiresAt: "expires_at",
+			usageCount: "usage_count",
+			lastUsedAt: "last_used_at",
 		};
 
 		const sets: string[] = [];
@@ -510,7 +527,13 @@ export class InMemoryStore implements MemoryStore {
 
 	put(record: MemoryRecord): void {
 		const content = this.redact ? redactSecrets(record.content) : record.content;
-		this.rows.set(record.id, { ...record, content });
+		// 与 SQLite 版同口径：这两列有默认值，缺省按 0 / null 落，读出来形状一致。
+		this.rows.set(record.id, {
+			...record,
+			content,
+			usageCount: record.usageCount ?? 0,
+			lastUsedAt: record.lastUsedAt ?? null,
+		});
 	}
 
 	get(id: string): MemoryRecord | undefined {

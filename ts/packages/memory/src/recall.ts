@@ -88,9 +88,10 @@ export class WeightedRetriever implements Retriever {
 			// 打分按 0..1 归一一档——重要性可以涨过 1（使用强化），但那一维最多记满分。
 			// intention 不参与时间衰减（2026-11-09 T4 §3）：它有自己的 expiresAt，
 			// 未到期前不该因为"放了两周"被打低；到期由引擎降级为 fact。
+			// experience 同理（2026-11-10 批 17 §一）：经验不该过期。
 			const importance = Math.min(
 				1,
-				record.kind === "intention"
+				record.kind === "intention" || record.kind === "experience"
 					? record.importance
 					: decayedImportance(
 							record.importance,
@@ -101,8 +102,12 @@ export class WeightedRetriever implements Retriever {
 			);
 
 			// 权重是拍的，改了也不算错 —— 但要有理由地改，别随手调。
+			// experience 与 fact 同组、权重略高（×1.08，2026-11-10 批 17 §一.3）：
+			// 可复用的做法比一次性事实更值得先被想起。
+			const kindBoost = record.kind === "experience" ? 1.08 : 1;
 			const score =
-				importance * 0.45 + recency * 0.3 + keyword * 0.2 + timesRecalled * 0.05;
+				(importance * 0.45 + recency * 0.3 + keyword * 0.2 + timesRecalled * 0.05) *
+				kindBoost;
 
 			hits.push({ record, score });
 		}
@@ -146,6 +151,18 @@ function keywordScore(content: string, keywords: string[]): number {
 	return Math.min(1, matched / Math.max(3, keywords.length * 0.2));
 }
 
+/**
+ * 这条记忆是否与当前话题**直接相关**（有任何一个双字片段命中）。
+ *
+ * 给注入层的「也许值得提起」分组用（2026-11-10 批 17 §二）：
+ * 直接相关的进常规分组，不相关的旧记忆才进主动提起组。复用召回的打分口径，
+ * 不另造一套"相关"定义。
+ */
+export function directlyRelevant(content: string, query: string): boolean {
+	const keywords = extractKeywords(query);
+	return keywords.length > 0 && keywordScore(content, keywords) > 0;
+}
+
 export interface TouchOptions {
 	/** 日衰减系数；`0` / 不传 = 不衰减。 */
 	decayDaily?: number;
@@ -179,5 +196,8 @@ export function touchRecall(
 		recallCount: record.recallCount + 1,
 		lastRecalledAt: now.toISOString(),
 		importance,
+		// 使用账（2026-11-10 批 17 §三）：只服务巩固排序，与 recallCount 同点 +1。
+		usageCount: (record.usageCount ?? 0) + 1,
+		lastUsedAt: now.toISOString(),
 	});
 }

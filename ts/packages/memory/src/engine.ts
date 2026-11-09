@@ -1,7 +1,16 @@
-import { BasicConsolidator, importMemories, type ConsolidateResult, type Consolidator, type ImportEntry, type ImportOutcome } from "./consolidate.ts";
+import {
+	BasicConsolidator,
+	consolidateScope,
+	importMemories,
+	type ConsolidateDiff,
+	type ConsolidateResult,
+	type Consolidator,
+	type ImportEntry,
+	type ImportOutcome,
+} from "./consolidate.ts";
 import { RECALL_BOOST } from "./decay.ts";
 import { HeuristicExtractor, type ExtractMessage, type Extractor } from "./extract.ts";
-import { touchRecall, WeightedRetriever, type Retriever } from "./recall.ts";
+import { directlyRelevant, touchRecall, WeightedRetriever, type Retriever } from "./recall.ts";
 import type { MemoryStore } from "./store.ts";
 import {
 	scopeKey,
@@ -44,6 +53,15 @@ export interface MemoryEngineOptions {
 	decayDaily?: number;
 	now?: () => Date;
 }
+
+const DAY_MS = 86_400_000;
+
+/** 「也许值得提起」的上限：最多 2 条、每条 ≤80 字（2026-11-10 批 17 §二.1）。 */
+const PROACTIVE_LIMIT = 2;
+const PROACTIVE_MAX_CHARS = 80;
+/** 进主动提起组的门槛：importance ≥ 0.7 且超过 7 天没被召回。 */
+const PROACTIVE_MIN_IMPORTANCE = 0.7;
+const PROACTIVE_STALE_DAYS = 7;
 
 export class MemoryEngine {
 	private readonly store: MemoryStore;
@@ -170,13 +188,15 @@ export class MemoryEngine {
 			// 所以同一个值不会被反复衰减（见 decay.ts 头注）。
 			// intention 不参与时间衰减（2026-11-09 T4 §3，与 work 同待遇）：到期由 expiresAt 管，
 			// 不该再被 importance 衰减二次惩罚；命中强化照旧。
+			// experience 同样不衰减（2026-11-10 批 17 §一.3）：经验不该过期。
 			touchRecall(this.store, hit.record, at, {
-				...(this.decayDaily > 0 && hit.record.kind !== "intention"
+				...(this.decayDaily > 0 &&
+				hit.record.kind !== "intention" &&
+				hit.record.kind !== "experience"
 					? { decayDaily: this.decayDaily }
 					: {}),
 				reinforce: RECALL_BOOST,
-			});
-		}
+			});		}
 		return hits;
 	}
 
@@ -211,6 +231,7 @@ export class MemoryEngine {
 	 */
 	buildContext(query: RecallQuery, options: InjectOptions = {}): string {
 		const maxChars = options.maxChars ?? 1200;
+		const at = this.now();
 		const hits = this.recall(query);
 		if (hits.length === 0) return "";
 
@@ -218,9 +239,30 @@ export class MemoryEngine {
 		// 未过期的 intention 紧随偏好单独成组（2026-11-09 T4 §3）：
 		// 过期的那批已在 recall() 里降级为 fact，到不了这里。
 		const intentions = hits.filter((hit) => hit.record.kind === "intention");
-		const others = hits.filter(
+		let others = hits.filter(
 			(hit) => hit.record.kind !== "preference" && hit.record.kind !== "intention",
 		);
+
+		// 「也许值得提起」（2026-11-10 批 17 §二）：命中但当前话题用不上的旧记忆。
+		// 判据全部确定性：importance ≥ 0.7、距 lastRecalledAt ?? createdAt 超过 7 天、
+		// 与当前话题没有任何关键词交集；最多 2 条、每条 ≤80 字。
+		// 被挑中的从「其它」移走，避免同一条出现两次。
+		const proactive = options.proactive
+			? others
+					.filter((hit) => {
+						const record = hit.record;
+						if (record.importance < PROACTIVE_MIN_IMPORTANCE) return false;
+						const anchor = Date.parse(record.lastRecalledAt ?? record.createdAt);
+						if (Number.isNaN(anchor)) return false;
+						if ((at.getTime() - anchor) / DAY_MS <= PROACTIVE_STALE_DAYS) return false;
+						return !directlyRelevant(record.content, query.text);
+					})
+					.slice(0, PROACTIVE_LIMIT)
+			: [];
+		if (proactive.length > 0) {
+			const picked = new Set(proactive.map((hit) => hit.record.id));
+			others = others.filter((hit) => !picked.has(hit.record.id));
+		}
 
 		const lines: string[] = [];
 		let used = 0;
@@ -232,6 +274,13 @@ export class MemoryEngine {
 		};
 		// 偏好里可能带 Why/How 两行：注入时压成一行（预算按整条算，别让换行白占额度）
 		const flat = (text: string): string => text.replace(/\s*\n\s*/g, " ").trim();
+		/** 主动提起组的一条：超 80 字截断（预算口径），并保留省略号。 */
+		const clipped = (text: string): string => {
+			const one = flat(text);
+			return one.length <= PROACTIVE_MAX_CHARS
+				? one
+				: `${one.slice(0, PROACTIVE_MAX_CHARS - 1)}…`;
+		};
 
 		if (preferences.length > 0) {
 			push("【用户偏好】");
@@ -252,12 +301,32 @@ export class MemoryEngine {
 				if (!push(`- [${hit.record.kind}] ${flat(hit.record.content)}`)) break;
 			}
 		}
+		// 固定放最后：主动提起是"顺带一句"，不该挤掉当轮真正相关的记忆。
+		if (proactive.length > 0) {
+			push("【也许值得提起】");
+			for (const hit of proactive) {
+				if (!push(`- [${hit.record.kind}] ${clipped(hit.record.content)}`)) break;
+			}
+		}
 		if (lines.length === 0) return "";
 
 		return [
 			"以下是你记得的关于这个人的信息（按相关度排序）。自然使用，不要逐条复述，也不要提及「记忆」这个词：",
 			...lines,
 		].join("\n");
+	}
+
+	/**
+	 * 巩固审计（2026-11-10 批 17 §三）：只读——算一份差异摘要，不改库、不删任何一条。
+	 *
+	 * `usageRanking=false`（`MEMORY_USAGE_RANKING` 回滚）= 按创建时间新旧决定保留优先级、
+	 * 不给未用淘汰建议；diff 形状不变，`retired` 为空。
+	 */
+	auditConsolidation(scope: string, options: { usageRanking?: boolean } = {}): ConsolidateDiff {
+		return consolidateScope(this.store, scope, {
+			now: this.now(),
+			usageRanking: options.usageRanking ?? true,
+		});
 	}
 
 	stats(): { total: number; byScope: Record<string, number> } {
@@ -285,7 +354,9 @@ export class MemoryEngine {
 			pruned += this.store.pruneOldest(scope, cap, {
 				// intention 与 preference 同档保护（2026-11-09 T4 §3）：没兑现的打算
 				// 不该因为会话记忆封顶被悄悄删掉；过期后它会自己降级为 fact，届时按普通规则走。
-				protectKinds: ["preference", "intention"],
+				// experience / work 同样保护（2026-11-10 批 17 §一.3）：经验不衰减；work 是
+				// append-only 台账、有自己的 200 条封顶——都不该被这条通用修剪静默删掉。
+				protectKinds: ["preference", "intention", "experience", "work"],
 				protectReferenced: true,
 			});
 		}
@@ -322,7 +393,14 @@ export class MemoryEngine {
 			includeSuperseded: options.includeSuperseded ?? false,
 			limit: Math.max(1, Math.min(2000, options.limit ?? 500)),
 		});
-		const order: Record<string, number> = { preference: 0, intention: 1, fact: 2, entity: 3, episode: 4 };
+		const order: Record<string, number> = {
+			preference: 0,
+			intention: 1,
+			fact: 2,
+			experience: 3,
+			entity: 4,
+			episode: 5,
+		};
 		return [...rows].sort((a, b) => {
 			const rank = (order[a.kind] ?? 9) - (order[b.kind] ?? 9);
 			return rank !== 0 ? rank : a.createdAt < b.createdAt ? 1 : -1;

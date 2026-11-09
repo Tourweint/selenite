@@ -8,6 +8,7 @@ import {
 	reviewScope,
 	type ReviewGenerator,
 } from "./memory-consolidate.ts";
+import { readConsolidateDiff, runConsolidatePass } from "./memory-consolidate-pass.ts";
 
 /**
  * 记忆管理接口（2026-11-06；2026-11-08 扫尾批 6 补整理与导入）。
@@ -106,6 +107,9 @@ export function mountMemoryApi(app: Hono, deps: MemoryApiDeps): void {
 		if (!result.ok) {
 			return c.json({ error: result.error, message: result.message }, result.status as 400 | 404 | 502 | 503);
 		}
+		// 本次整理同时跑一遍**确定性审计**（2026-11-10 批 17 §三）：只写 diff 文件，不删任何一条。
+		// 放在模型成功之后：模型挂掉时没必要留一份"看起来整理过"的快照。
+		runConsolidatePass(scope);
 		return c.json({
 			ok: true,
 			scope: result.scope,
@@ -144,6 +148,35 @@ export function mountMemoryApi(app: Hono, deps: MemoryApiDeps): void {
 			dropId: result.dropId,
 			alreadyApplied: result.alreadyApplied,
 		});
+	});
+
+	// ── 巩固审计（2026-11-10 批 17 §三）──────────────────────
+	// 确定性、只读：产出 { merged, retired, kept } 并落 .data/memory-consolidate-diff.json。
+	// **淘汰只出建议，绝不自动删**——没有"应用"端点，删一条仍走 DELETE /memory/:id。
+	app.post("/api/v1/agent/memory/consolidate/pass", async (c) => {
+		if (!deps.enabled) {
+			return c.json({ error: "memory_disabled", message: "记忆未启用（MEMORY_ENABLED=false）" }, 404);
+		}
+		const body = (await c.req.json().catch(() => null)) as { scope?: unknown } | null;
+		const scope = typeof body?.scope === "string" ? body.scope.trim() : "";
+		if (!scope) return c.json({ error: "bad_request", message: "需要 scope" }, 400);
+		if (!/^(global|partner:.+)$/.test(scope)) {
+			return c.json({ error: "bad_request", message: "scope 只能是 global 或 partner:<id>" }, 400);
+		}
+		const diff = runConsolidatePass(scope);
+		if (!diff) {
+			return c.json({ error: "memory_disabled", message: "记忆未启用（MEMORY_ENABLED=false）" }, 404);
+		}
+		return c.json({ ok: true, ...diff });
+	});
+
+	app.get("/api/v1/agent/memory/consolidate/diff", (c) => {
+		if (!deps.enabled) {
+			return c.json({ error: "memory_disabled", message: "记忆未启用（MEMORY_ENABLED=false）" }, 404);
+		}
+		const diff = readConsolidateDiff();
+		if (!diff) return c.json({ error: "not_found", message: "还没跑过巩固审计" }, 404);
+		return c.json({ ok: true, ...diff });
 	});
 
 	// ── 导入（2026-11-08 扫尾批 6 §三）──────────────────────

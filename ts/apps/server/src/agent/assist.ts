@@ -12,6 +12,7 @@ import {
 } from "../partners.ts";
 import { createSkillStore, resolveSkillsDir, type SkillStore } from "../skills.ts";
 import { getSkillState, skillStateEnabled } from "../skill-state.ts";
+import { proactiveForTurn } from "../memory-proactive.ts";
 
 /**
  * 派活能力（chancellor）是否装。
@@ -206,14 +207,19 @@ export function recallContext(conversationId: number, text: string): string {
 		// 执事会话（批次B B1）：global + 执事键空间 + 本会话三条都进候选；
 		// 键空间过滤是 store 的硬过滤（scope IN），执事键空间外的记录不会被召回。
 		const partner = partnerScopeOf(conversationId);
-		return memoryEngine.buildContext({
-			text,
-			scopes: [
-				"global",
-				...(partner ? [scopeKey(partner)] : []),
-				scopeKey({ type: "session", id: String(conversationId) }),
-			],
-		});
+		return memoryEngine.buildContext(
+			{
+				text,
+				scopes: [
+					"global",
+					...(partner ? [scopeKey(partner)] : []),
+					scopeKey({ type: "session", id: String(conversationId) }),
+				],
+			},
+			// 「也许值得提起」（2026-11-10 批 17 §二）：默认关；执事轮不注入，
+			// 免得执事在干活时被旧事带走（总开关与执事判断都在 memory-proactive.ts）。
+			{ proactive: proactiveForTurn(partner !== null) },
+		);
 	} catch (error) {
 		const detail = error instanceof Error ? error.message : String(error);
 		console.warn(`记忆召回失败，本轮不使用记忆: ${detail}`);

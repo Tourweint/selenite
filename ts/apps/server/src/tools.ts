@@ -72,6 +72,8 @@ import { isRoutineTurn } from "./unattended.ts";
 import { pruneSessionMemory } from "./memory-prune.ts";
 // 工作履历：派单终态结算落一条 work 记录（2026-11-08 刀二 E2）。
 import { recordWorkSettlement } from "./work-record.ts";
+// 技能用量账（2026-11-10 批 17 §四）：skill 工具每取一次手册 +1（旁路审计，失败不挡工具）。
+import { recordSkillUse } from "./skill-usage.ts";
 // 执事间递话（2026-11-08 扫尾批 8d）：通道与工具定义在 partner-relay.ts，
 // 送达函数由装配层注入（本文件不持有 harness）。
 import { createSendToAgentTool, type PartnerRelayDeps } from "./partner-relay.ts";
@@ -1144,6 +1146,8 @@ export function createTools(deps: ToolDeps) {
 							`没有叫「${args.name}」的技能。可用：${skills.names().join("、") || "（无）"}`,
 						);
 					}
+					// 取到才计数（2026-11-10 批 17 §四）：拿不到手册不算使用。
+					recordSkillUse(args.name);
 					return text(manual);
 				},
 			}),

@@ -23,6 +23,7 @@ import {
 	decayedImportance,
 	memoryRedactEnabled,
 	normalizeContent,
+	consolidateScope,
 	parsePreferenceJson,
 	redactSecrets,
 	reinforcedImportance,
@@ -1123,6 +1124,215 @@ try {
 	);
 
 	console.log("✓ intention：过期降级 / 未过期优先注入 / 不衰减 / 巩固不合并");
+}
+
+// ── 18. 经验层 experience（2026-11-10 批 17 §一）────────────
+// 四个性质：进召回且权重略高、不参与时间衰减、参与合并、封顶修剪受保护。
+{
+	const DAY = 86_400_000;
+	const base = new Date("2026-01-01T00:00:00.000Z");
+	const later = new Date(base.getTime() + 100 * DAY);
+	const scope = "partner:eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+	const store = new InMemoryStore();
+
+	// 18.1 不衰减：100 天后只 +0.05（与 intention 同待遇）
+	store.put(
+		seedRecord("x-1", scope, "整理纪要时先读原文件再改，最后跑一遍探针确认", base.toISOString(), {
+			kind: "experience",
+			importance: 0.8,
+		}),
+	);
+	let clock = later;
+	const engine = new MemoryEngine({ store, decayDaily: 0.99, now: () => clock });
+	const hits = engine.recall({ text: "整理纪要 探针", scopes: [scope], limit: 5 });
+	assert(hits.some((hit) => hit.record.kind === "experience"), "experience 应进召回");
+	assert(
+		Math.abs(store.get("x-1")!.importance - 0.85) < 1e-9,
+		`experience 不参与衰减，只 +0.05，实际 ${store.get("x-1")!.importance}`,
+	);
+
+	// 18.2 权重略高于 fact：同正文同重要度同时刻，experience 排前
+	const rankStore = new InMemoryStore();
+	const at = base.toISOString();
+	rankStore.put(seedRecord("r-fact", scope, "同一句话的做法", at, { kind: "fact", importance: 0.6 }));
+	rankStore.put(
+		seedRecord("r-exp", scope, "同一句话的做法", at, { kind: "experience", importance: 0.6 }),
+	);
+	const rankHits = new MemoryEngine({ store: rankStore, now: () => base }).recall({
+		text: "做法",
+		scopes: [scope],
+		limit: 5,
+	});
+	assert(
+		rankHits[0]?.record.kind === "experience",
+		`同分时 experience 应略高（实际首条 ${rankHits[0]?.record.kind}）`,
+	);
+
+	// 18.3 参与合并：同 scope 规范化等价的经验 → 第二条转强化
+	const cStore = new InMemoryStore();
+	const consolidator = new BasicConsolidator();
+	const candidate = (content: string): MemoryCandidate => ({
+		kind: "experience",
+		scope,
+		content,
+		importance: 0.6,
+		veracity: "tool",
+		source: "work",
+	});
+	const first = consolidator.consolidate([candidate("先读原文件再改，最后跑探针")], cStore, base);
+	const second = consolidator.consolidate([candidate("先读原文件再改，最后跑探针。")], cStore, base);
+	assert(first.added.length === 1 && second.added.length === 0, "经验重复应合并而不是新增");
+	assert(second.reinforced.length === 1, "经验重复应转为强化");
+
+	// 18.4 会话封顶修剪保护 experience
+	const pruneStore = new InMemoryStore();
+	for (let index = 0; index < 10; index += 1) {
+		pruneStore.put(
+			seedRecord(`p-${index}`, "session:exp-cap", `第 ${index} 条`, new Date(base.getTime() + index * 1000).toISOString(), {
+				kind: index === 0 ? "experience" : "fact",
+			}),
+		);
+	}
+	new MemoryEngine({ store: pruneStore }).pruneSessionScopes(4);
+	assert(pruneStore.get("p-0") !== undefined, "experience 不应被会话封顶静默删掉");
+
+	console.log("✓ experience：进召回（权重略高）/ 不衰减 / 参与合并 / 封顶受保护");
+}
+
+// ── 19. 主动提起分组（2026-11-10 批 17 §二）──────────────
+// 高重要度 + 超 7 天未召回 + 与当前话题无关键词交集 → 「也许值得提起」；
+// 最多 2 条、每条 ≤80 字、默认不渲染（开关旁路）。
+{
+	const DAY = 86_400_000;
+	const at = new Date("2026-06-01T00:00:00.000Z");
+	const ago = (days: number) => new Date(at.getTime() - days * DAY).toISOString();
+	const store = new InMemoryStore();
+	store.put(
+		seedRecord("h-1", "global", "去年在青岛看过一次日出，风很大但很值", ago(30), {
+			importance: 0.8,
+		}),
+	);
+	store.put(
+		seedRecord("h-2", "global", "小时候住的老院子有一棵石榴树", ago(60), { importance: 0.9 }),
+	);
+	store.put(
+		seedRecord("h-3", "global", "那次修车师傅说电瓶该换了，后来果然打不着火", ago(90), {
+			importance: 0.75,
+		}),
+	);
+	store.put(
+		seedRecord("h-new", "global", "今天刚记下的一件事，跟话题无关", ago(0), { importance: 0.95 }),
+	);
+	store.put(
+		seedRecord("h-low", "global", "很久以前的一条低重要度记录", ago(120), { importance: 0.3 }),
+	);
+	store.put(
+		seedRecord("h-rel", "global", "跑步膝盖疼的时候先歇两天再拉伸", ago(30), { importance: 0.8 }),
+	);
+	store.put(
+		seedRecord("h-long", "global", `这是一条很长的旧记忆${"补充".repeat(60)}`, ago(45), {
+			importance: 0.85,
+		}),
+	);
+	const engine = new MemoryEngine({ store, now: () => at });
+
+	const ctx = engine.buildContext(
+		{ text: "跑步 拉伸", scopes: ["global"], limit: 20 },
+		{ proactive: true, maxChars: 4000 },
+	);
+	const group = ctx.split("【也许值得提起】")[1] ?? "";
+	assert(group.length > 0, `主动提起组应出现：${ctx}`);
+	const items = group
+		.split("\n")
+		.filter((line) => line.startsWith("- "))
+		.slice(0, 10);
+	assert(items.length === 2, `主动提起组最多 2 条，实际 ${items.length}`);
+	assert(!group.includes("今天刚记下"), "新记忆不进主动提起组");
+	assert(
+		group.split("\n").filter((line) => line.startsWith("- ")).every((line) => line.length <= 90),
+		"每条主动提起应 ≤80 字（加 kind 前缀不超过 90）",
+	);
+	assert(!group.includes("跑步膝盖疼"), "与当前话题直接相关的记忆不该进主动提起组");
+
+	// 默认不渲染（开关旁路）：不传 proactive 时逐字节回到三组形状
+	const plain = engine.buildContext({ text: "跑步 拉伸", scopes: ["global"], limit: 20 });
+	assert(!plain.includes("【也许值得提起】"), "默认关闭：不出现主动提起组");
+
+	console.log("✓ 主动提起：旧高重要度进组 / 新记忆不进 / 最多 2 条 / 每条 ≤80 字 / 默认关闭");
+}
+
+// ── 20. 巩固审计（2026-11-10 批 17 §三）──────────────────
+// usage 排序决定保留优先级；未用淘汰只列不删；usageRanking=false 一行回滚。
+{
+	const DAY = 86_400_000;
+	const now = new Date("2026-06-01T00:00:00.000Z");
+	const ago = (days: number) => new Date(now.getTime() - days * DAY).toISOString();
+	const store = new InMemoryStore();
+	store.put(
+		seedRecord("c-keep", "global", "同一句重复的事实", ago(10), {
+			usageCount: 5,
+			lastUsedAt: ago(1),
+		}),
+	);
+	store.put(
+		seedRecord("c-drop", "global", "同一句重复的事实。", ago(1), {
+			usageCount: 1,
+			lastUsedAt: ago(20),
+		}),
+	);
+	store.put(
+		seedRecord("c-stale", "global", "很久以前的一条低价值记录", ago(200), {
+			importance: 0.3,
+			usageCount: 0,
+			lastUsedAt: null,
+		}),
+	);
+	store.put(
+		seedRecord("c-pref", "global", "低重要度偏好", ago(200), {
+			kind: "preference",
+			importance: 0.2,
+		}),
+	);
+	store.put(
+		seedRecord("c-exp", "global", "低重要度经验", ago(200), {
+			kind: "experience",
+			importance: 0.2,
+		}),
+	);
+	store.put(
+		seedRecord("c-work", "global", "低重要度履历", ago(200), {
+			kind: "work",
+			importance: 0.2,
+		}),
+	);
+	const total = store.count();
+
+	const diff = consolidateScope(store, "global", { now });
+	assert(diff.merged.length === 1, `应给出一条合并建议，实际 ${diff.merged.length}`);
+	assert(diff.merged[0]!.keepId === "c-keep", "合并应保留 usage 更高的那条");
+	assert(diff.merged[0]!.dropId === "c-drop", "usage 低的进 drop");
+	assert(diff.retired.length === 1 && diff.retired[0]!.id === "c-stale", "只建议淘汰久未使用的低重要度条目");
+	assert(diff.retired.every((entry) => entry.kind !== "preference"), "偏好不进淘汰建议");
+	assert(diff.kept === total - 2, `kept 应为 ${total - 2}，实际 ${diff.kept}`);
+
+	// 只出建议：库一个字段都不动
+	assert(store.count() === total, "审计不得删任何一条");
+	assert(store.get("c-drop")!.supersededBy === null, "审计不得自动 supersede");
+
+	// usageRanking=false：按创建时间决定保留；不给淘汰建议
+	const legacy = consolidateScope(store, "global", { now, usageRanking: false });
+	assert(legacy.retired.length === 0, "关掉 usage 排序后不出淘汰建议");
+	assert(legacy.merged[0]!.keepId === "c-drop", "关掉 usage 排序后按创建时间保留最新一条");
+
+	// 召回命中即记使用账（usageCount +1）
+	const uStore = new InMemoryStore();
+	uStore.put(seedRecord("u-1", "global", "一条会被召回的记忆", ago(1), { importance: 0.7 }));
+	const uEngine = new MemoryEngine({ store: uStore, now: () => now });
+	uEngine.recall({ text: "会 被 召回", scopes: ["global"], limit: 5 });
+	assert(uStore.get("u-1")!.usageCount === 1, "召回命中应 usageCount +1");
+	assert(uStore.get("u-1")!.lastUsedAt === now.toISOString(), "召回命中应记 lastUsedAt");
+
+	console.log("✓ 巩固审计：usage 排序 / 淘汰只列不删 / usageRanking 回滚 / 使用账 +1");
 }
 
 console.log("✓ 记忆框架自测通过");
