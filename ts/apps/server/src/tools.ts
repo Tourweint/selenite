@@ -107,7 +107,8 @@ import type { SearchModule } from "./search.ts";
 // 会话考古（2026-11-09 T4 §4）：检索实现留在 agent/session-search.ts（只依赖 shared），
 // 这里只收注入函数，避免 tools.ts 反向 import session.ts 绕成环。
 import type { SessionSearchHit } from "./agent/session-search.ts";
-// 工具返回统一契约（2026-11-10 批 16 §一）：当前只给 recall_sessions 用，旧工具仍然 text()。
+// 工具返回统一契约（2026-11-10 批 16 §一；批 18 §五迁入只读四件）：
+// 已迁 = recall_sessions / ask_user / report_progress / recall / web_search / propose_topic / skill。
 import { encodeToolResult, err, ok, type ToolResult } from "./tool-result.ts";
 
 /**
@@ -523,18 +524,34 @@ export function createTools(deps: ToolDeps) {
 			const engine = requireMemory();
 			// 群会话不参与记忆引擎（群组方案 §2.2，v1 最简形态）：群聊查记忆也跳过
 			if (partnersStore().isGroupSession(api.conversationId)) {
-				return text("群聊不走个人记忆；答案以群里的聊天记录为准。");
+				return textToolResult(
+					err(
+						"group_session",
+						"群聊不走个人记忆；答案以群里的聊天记录为准。",
+						"按群里的聊天记录回答，不要当这里是私聊。",
+					),
+				);
 			}
 			const hits = engine.recall({
 				text: args.query,
 				scopes: ["global", scopeKey(scopeOf(api.conversationId))],
 				limit: Math.max(1, Math.min(20, Math.floor(args.limit ?? 5))),
 			});
-			if (hits.length === 0) return text("没有找到相关记忆。");
-			return text(
-				hits
-					.map((hit) => `- [${hit.record.kind}] ${hit.record.content}（${hit.record.createdAt.slice(0, 10)}）`)
-					.join("\n"),
+			if (hits.length === 0) {
+				return textToolResult(ok({ count: 0, message: "没有找到相关记忆。" }));
+			}
+			return textToolResult(
+				ok({
+					count: hits.length,
+					// 正文只走 message（与迁移前逐字节一致）；不把 record 原样塞进 data，
+					// 那里带 scope / id 等内部字段，模型不需要。
+					message: hits
+						.map(
+							(hit) =>
+								`- [${hit.record.kind}] ${hit.record.content}（${hit.record.createdAt.slice(0, 10)}）`,
+						)
+						.join("\n"),
+				}),
 			);
 		},
 	});
@@ -1142,13 +1159,17 @@ export function createTools(deps: ToolDeps) {
 				execute: async (args) => {
 					const manual = skills.manual(args.name);
 					if (!manual) {
-						return text(
-							`没有叫「${args.name}」的技能。可用：${skills.names().join("、") || "（无）"}`,
+						return textToolResult(
+							err(
+								"skill_not_found",
+								`没有叫「${args.name}」的技能。可用：${skills.names().join("、") || "（无）"}`,
+								"从会话的 skills 索引里挑一个名字再取。",
+							),
 						);
 					}
 					// 取到才计数（2026-11-10 批 17 §四）：拿不到手册不算使用。
 					recordSkillUse(args.name);
-					return text(manual);
+					return textToolResult(ok({ name: args.name, message: manual }));
 				},
 			}),
 		);
@@ -1578,19 +1599,28 @@ export function createTools(deps: ToolDeps) {
 				execute: async (args) => {
 					const result = await search.webSearch(args.query, args.count);
 					if (!result.ok) {
-						return text(
-							JSON.stringify({
-								ok: false,
-								error: result.error,
-								message: result.message,
-							}),
+						// code 直接用适配层的稳定枚举（search_not_configured / upstream_error / bad_response）
+						return textToolResult(
+							err(
+								result.error,
+								result.message,
+								result.error === "search_not_configured"
+									? "告诉主人去设置里填搜索 key，别用推理冒充搜索。"
+									: undefined,
+							),
 						);
 					}
-					if (result.hits.length === 0) return text("没有找到相关结果。");
-					return text(
-						result.hits
-							.map((hit) => `${hit.title || "（无标题）"} — ${hit.url}\n${hit.summary}`)
-							.join("\n\n"),
+					if (result.hits.length === 0) {
+						return textToolResult(ok({ count: 0, message: "没有找到相关结果。" }));
+					}
+					return textToolResult(
+						ok({
+							count: result.hits.length,
+							hits: result.hits,
+							message: result.hits
+								.map((hit) => `${hit.title || "（无标题）"} — ${hit.url}\n${hit.summary}`)
+								.join("\n\n"),
+						}),
 					);
 				},
 			}),
@@ -1626,11 +1656,21 @@ export function createTools(deps: ToolDeps) {
 				execute: async (args, api) => {
 					// 群会话不进课题（与 remember 同口径）：群里提的题不属于任何一个人的长期目标。
 					if (partnersStore().isGroupSession(api.conversationId)) {
-						return text("群聊里不提课题；要长期跟进的事请主人在私聊里说。");
+						return textToolResult(
+							err(
+								"group_session",
+								"群聊里不提课题；要长期跟进的事请主人在私聊里说。",
+								"等主人在私聊里说，不要在这里建课题。",
+							),
+						);
 					}
 					const question = args.question.trim();
-					if (!question) return text("question 不能为空");
-					if (question.length > 200) return text("question 不超过 200 字");
+					if (!question) return textToolResult(err("question_empty", "question 不能为空"));
+					if (question.length > 200) {
+						return textToolResult(
+							err("question_too_long", "question 不超过 200 字", "把问题压成一句再提。"),
+						);
+					}
 					const result = topics.proposeTopic({
 						question,
 						flavor: args.flavor,
@@ -1638,18 +1678,19 @@ export function createTools(deps: ToolDeps) {
 						origin: args.origin === "user" ? "user" : "proposal",
 					});
 					if (!result.ok) {
-						return text(
-							JSON.stringify({
-								ok: false,
-								error: result.reason,
-								...(result.existingTopicId ? { existingTopicId: result.existingTopicId } : {}),
-								message: result.message,
-							}),
+						// 已在跟的题把 id 放进 hint（ToolError 没有给业务字段留位置，别为它改契约）
+						return textToolResult(
+							err(
+								result.reason,
+								result.message,
+								result.existingTopicId
+									? `已在跟的课题 id：${result.existingTopicId}（别重复提）`
+									: undefined,
+							),
 						);
 					}
-					return text(
-						JSON.stringify({
-							ok: true,
+					return textToolResult(
+						ok({
 							proposalId: result.proposal.id,
 							question: result.proposal.question,
 							flavor: result.proposal.flavor,
