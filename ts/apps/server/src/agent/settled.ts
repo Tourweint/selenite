@@ -2,6 +2,7 @@ import type { SettledSubmissionRecord } from "@earendil-works/pi-durable";
 import type { MemoryScope } from "@lifediary/memory";
 import { chatContentText, type ChatMessage } from "@lifediary/shared";
 import { pruneSessionMemory } from "../memory-prune.ts";
+import { appendPersonaExport, personaExportEnabled } from "../persona-export.ts";
 import { memoryEngine, preferenceScopeOf } from "./assist.ts";
 import { TASK_CONVERSATION_PREFIX } from "./shared.ts";
 
@@ -37,19 +38,36 @@ export interface SettledChat {
 	externalId: string;
 }
 
+/**
+ * 本轮最终 assistant 文本的懒读取（2026-11-09 persona 接入批二）。
+ *
+ * `plain` 是**请求时刻**的消息快照，客户端通常只带这一句 user，拿不到本轮新生成的回复；
+ * 内核在 settle 后由 session.ts 提供"读 durable 里本轮最后一条 assistant"的入口。
+ * 只有导出开关打开、且 plain 里没有尾随 assistant 时才会被调用（默认关 = 零成本）。
+ */
+export type TurnReplyReader = () => Promise<string>;
+
 export function turnSettledHandler(chat: SettledChat, messages: ChatMessage[]) {
 	const scope: MemoryScope = { type: "session", id: String(chat.internalId) };
 	const plain = messages.map((message) => ({
 		role: message.role,
 		content: chatContentText(message.content),
 	}));
-	return (record: SettledSubmissionRecord): void => {
+	return (record: SettledSubmissionRecord, replyText?: TurnReplyReader): void => {
 		// 观察层的 errored/usage-limit 事件源（批次C C1）；开关关着时内部直接返回
 		observer?.(
 			Number(chat.internalId),
 			record.status,
 			record.status === "unanswered" ? record.reason : "",
 		);
+		// persona 导出（2026-11-09 批二）：done 轮追加一行；开关默认关，三项会话过滤在模块内。
+		// 不 await —— 写盘慢了不拖对话；失败只 warn（导出绝不能打断对话）。
+		if (record.status === "done" && personaExportEnabled()) {
+			appendPersonaExport(chat, plain, undefined, {
+				turnId: String(record.id),
+				...(replyText ? { reply: replyText } : {}),
+			});
+		}
 		if (!memoryEngine || record.status !== "done") return;
 		// 任务专线（`task-` 前缀，2026-11-08 扫尾批 8g）不进记忆引擎：就算主人从会话页
 		// 直接点开它回话，也不该把"任务过程"沉淀成关于人的记忆（与研究回合同一口径）。

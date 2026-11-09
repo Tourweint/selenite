@@ -592,8 +592,11 @@ export interface ChatStreamInput {
 	 * 关键区别：客户端关掉界面 / 断网，只是没人看这条流了，
 	 * 那一轮还在服务端跑；它跑完才该触发记忆抽取、才该算数。
 	 * 挂在这个回调上，就不会因为"用户关了个窗口"而漏记一轮对话。
+	 *
+	 * 第二个参数是**懒读取**：本轮最终 assistant 文本（2026-11-09 persona 接入批二）。
+	 * 传函数而不是值，是为了让默认关闭的导出开关不产生额外 durable 读。
 	 */
-	onSettled?: (record: SettledSubmissionRecord) => void;
+	onSettled?: (record: SettledSubmissionRecord, replyText?: () => Promise<string>) => void;
 	/**
 	 * 忙时投递方式（2026-11-07 消息即引导）：透传给内核的 `whenBusy`。
 	 * 缺省 `followUp` = 改动前的排队行为。
@@ -814,7 +817,8 @@ export async function* chatStream(
 				outcome.record = record;
 				// 这一轮尘埃落定：即便上面的流早被客户端关掉了，这里照样会跑
 				try {
-					input.onSettled?.(record);
+					// 本轮最终回复用懒读取给 settle 回调（persona 导出用；不调 = 不读）
+					input.onSettled?.(record, () => answerText(input.conversation));
 				} catch (error) {
 					console.warn(
 						`[agent] onSettled 回调失败: ${error instanceof Error ? error.message : String(error)}`,
