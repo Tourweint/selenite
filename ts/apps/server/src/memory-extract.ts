@@ -21,6 +21,7 @@ import {
 	type MemoryCandidate,
 	type MemoryScope,
 } from "@lifediary/memory";
+import { auxiliaryModel } from "./auxiliary.ts";
 import { currentModels, isFaux, readLlmConfig } from "./provider.ts";
 
 /**
@@ -44,6 +45,9 @@ const PREFERENCE_TIMEOUT_MS = 20_000;
  * - 它是一次"有输入、要一段输出"的判断，不需要历史、不需要工具、不需要落库；
  * - 失败就是失败，不会在会话库里留一个半截的空会话。
  *
+ * 模型走 `auxiliaryModel("extract")`（2026-11-10 批 20 §二）：`AUX_MODEL_EXTRACT`
+ * 可以给偏好抽取单独 pin 一个小模型；没配 / `AUX_LLM=false` 时回落当前会话模型。
+ *
  * 返回 null = 这次没拿到文本（未配置 / faux / 报错 / 超时）。
  */
 async function generateOnce(messages: ExtractMessage[]): Promise<string | null> {
@@ -53,8 +57,9 @@ async function generateOnce(messages: ExtractMessage[]): Promise<string | null> 
 	// 走它只会把假文本写成偏好，所以直接当"没有模型"。
 	if (isFaux()) return null;
 
+	const ref = auxiliaryModel("extract", { current: config.model }) ?? config.model;
 	const models = currentModels();
-	const model = models.getModel(config.model.provider, config.model.modelId);
+	const model = models.getModel(ref.provider, ref.modelId);
 	if (!model) return null;
 
 	const controller = new AbortController();

@@ -2463,6 +2463,84 @@ try {
 	const skillsMissing = await fetch(`${BASE}/api/v1/partners/no-such-partner/skills`);
 	check(skillsMissing.status === 404, "未知执事 → 404", String(skillsMissing.status));
 
+	// ── 28. 导出「接续文件」/ 旧会话定点找回（2026-11-10 批 20）────
+	console.log("\n· 28. 会话导出「接续文件」与旧会话定点找回");
+	const handoffResponse = await fetch(
+		`${BASE}/api/v1/agent/chat/${externalId}/export?format=handoff&limit=2`,
+	);
+	const exportType = handoffResponse.headers.get("content-type") ?? "";
+	const exportBody = await handoffResponse.text();
+	check(handoffResponse.status === 200, "导出端点可用", String(handoffResponse.status));
+	check(exportType.includes("text/markdown"), "返回 markdown", exportType);
+	check(
+		handoffResponse.headers.get("content-disposition")?.includes("attachment") === true,
+		"按附件下载",
+	);
+	check(exportBody.includes("这份文件可以直接粘给任何 AI 继续聊"), "带读取说明");
+	check(exportBody.includes("你是主人身边的 AI 助手"), "带角色说明");
+	check(exportBody.includes("## 记忆摘要"), "带记忆摘要段");
+	check(exportBody.includes("## 最近 2 轮对话"), "limit 生效（2 轮）");
+	check(
+		(exportBody.match(/^\*\*主人\*\*/gm) ?? []).length === 2,
+		"只含最近 2 轮的用户原文",
+		String((exportBody.match(/^\*\*主人\*\*/gm) ?? []).length),
+	);
+	const exportBadFormat = await fetch(`${BASE}/api/v1/agent/chat/${externalId}/export?format=json`);
+	check(exportBadFormat.status === 400, "不支持的 format → 400", String(exportBadFormat.status));
+	const exportBadLimit = await fetch(`${BASE}/api/v1/agent/chat/${externalId}/export?limit=0`);
+	check(exportBadLimit.status === 400, "limit 越界 → 400", String(exportBadLimit.status));
+	const exportMissing = await fetch(
+		`${BASE}/api/v1/agent/chat/00000000-0000-4000-8000-000000000000/export`,
+	);
+	check(exportMissing.status === 404, "未知会话 → 404", String(exportMissing.status));
+
+	const allMessages = (await (
+		await fetch(`${BASE}/api/v1/agent/chat/${externalId}/messages`)
+	).json()) as { messages: { role: string; text: string }[] };
+	const mid = Math.min(2, allMessages.messages.length - 1);
+	const contextResponse = await fetch(
+		`${BASE}/api/v1/agent/chat/${externalId}/context?aroundIndex=${mid}&radius=1`,
+	);
+	const contextBody = (await contextResponse.json()) as {
+		total?: number;
+		from?: number;
+		to?: number;
+		messages?: { index: number; role: string }[];
+	};
+	check(contextResponse.status === 200, "定点找回可用", String(contextResponse.status));
+	check(
+		contextBody.total === allMessages.messages.length,
+		"total 与 /messages 一致",
+		`${contextBody.total} vs ${allMessages.messages.length}`,
+	);
+	check(
+		contextBody.messages?.length === 3 &&
+			contextBody.from === mid - 1 &&
+			contextBody.to === mid + 1,
+		"中心前后各 1 条",
+		`${contextBody.from}–${contextBody.to}`,
+	);
+	check(
+		contextBody.messages?.every((message, offset) => message.index === mid - 1 + offset) === true,
+		"每条带绝对下标",
+	);
+	const contextOut = await fetch(
+		`${BASE}/api/v1/agent/chat/${externalId}/context?aroundIndex=9999&radius=1`,
+	);
+	const contextOutBody = (await contextOut.json()) as { total?: number };
+	check(
+		contextOut.status === 400 && contextOutBody.total === allMessages.messages.length,
+		"越界 → 400 且带 total",
+	);
+	const contextBadRadius = await fetch(
+		`${BASE}/api/v1/agent/chat/${externalId}/context?aroundIndex=0&radius=999`,
+	);
+	check(contextBadRadius.status === 400, "radius 越界 → 400", String(contextBadRadius.status));
+	const contextBadIndex = await fetch(
+		`${BASE}/api/v1/agent/chat/${externalId}/context?aroundIndex=abc`,
+	);
+	check(contextBadIndex.status === 400, "aroundIndex 非法 → 400", String(contextBadIndex.status));
+
 } finally {
 	server.kill();
 	await sleep(300);
