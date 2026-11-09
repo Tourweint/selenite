@@ -588,7 +588,8 @@ const state = {
   modelCatalog: null,
   // 设置页供应商投影（批次五）：GET /agent/providers
   providers: [],
-  // 服务页右栏当前状态（G1）：templates=模板选择 / form=编辑现有 / new=新建表单 / empty
+  // 模型页右栏当前状态（G1；2026-11-09 随供应商双栏从服务页拆到模型页）：
+  // templates=模板选择 / form=编辑现有 / new=新建表单 / empty
   providerView: { mode: "empty", providerId: "", templateId: "" },
   // 密钥填写形态：api=界面直填（PUT /secret）；env=后端没有该接口时退回变量名手输
   providerSecretMode: "api",
@@ -2974,6 +2975,28 @@ function renderRoster(partners, domainRows) {
       row.append(dispatch);
     }
 
+    // 员工档案直达（2026-11-09）：小按钮与行尾文件入口同一套 .proj-act 材料，
+    // 内联 Lucide 图标（与全站 37 处同口径），常态就能看见。
+    const profileBtn = document.createElement("button");
+    profileBtn.type = "button";
+    profileBtn.className = "proj-act";
+    profileBtn.style.width = "20px";
+    profileBtn.style.height = "20px";
+    profileBtn.style.opacity = ".7";
+    profileBtn.title = `看${name}的档案`;
+    profileBtn.setAttribute("aria-label", `打开${name}的员工档案`);
+    const profileIco = document.createElement("span");
+    profileIco.className = "proj-act-ico";
+    profileIco.append(csSvg(CS_ICONS.idcard));
+    profileBtn.append(profileIco);
+    profileBtn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      void openPartnerProfile(id);
+    });
+    profileBtn.addEventListener("keydown", (event) => event.stopPropagation());
+    profileBtn.addEventListener("keyup", (event) => event.stopPropagation());
+    row.append(profileBtn);
+
     if (active > 0) {
       // 数字可点 → 任务中心按 domain 筛选（.side-count 与任务中心徽章同款）
       const count = document.createElement("button");
@@ -3087,6 +3110,27 @@ async function openPartnerChat(partnerId) {
   } finally {
     state.partnerOpening.delete(partnerId);
   }
+}
+
+/**
+ * 花名册「档案」直达（2026-11-09）：开该执事会话 + 抽屉**直落**档案页。
+ *
+ * 任务书允许降级到「开对话 + 开抽屉 home」，这里做到的是更高一档：csTarget 显式给
+ * partnerId、csPage 直接给档案页，不靠 csResolveTarget 猜当前会话（会话刚 open 完、
+ * 或 open 失败留在旧会话时，档案页仍明确显示你点的那个执事）。
+ */
+async function openPartnerProfile(partnerId, page = "records") {
+  await openPartnerChat(partnerId);
+  if (drawerOpen()) {
+    // 抽屉已开着：直接切页，别走 toggle（toggle 的语义是关掉它）
+    csTarget = partnerId;
+    csDetail = null;
+    csPage = page;
+    renderCsPage();
+    void refreshCsDetail();
+    return;
+  }
+  await openDrawerAt(partnerId, page);
 }
 
 /**
@@ -6120,7 +6164,7 @@ function renderModelMenu(catalog, preferredProviderId, menu = el.modelMenu) {
   if (!providers.length) {
     const row = document.createElement("div");
     row.className = "model-menu-empty";
-    row.textContent = "还没有可选模型：到设置 → 服务里添加供应商";
+    row.textContent = "还没有可选模型：到设置 → 模型里添加供应商";
     menu.append(row);
     return;
   }
@@ -6302,7 +6346,7 @@ async function chooseCurrentThinking(level) {
  * 模型二级页整体搬入原下弹面板的模型菜单 + 批量加模型，渲染零语义改动。 */
 
 const DRAWER_MS = 250;
-let csPage = "home"; // home | persona | model | policy | notify
+let csPage = "home"; // home | persona | model | policy | notify | records | memories | routines | skills
 let csTimer = 0;
 let csCatalog = null; // 打开抽屉时现拉的模型目录（同原「每次打开现拉」口径）
 let csPolicy = null;  // 打开抽屉时顺带拉的权限档；失败保持 null（副文本显示 —）
@@ -6366,19 +6410,20 @@ function closeChatSettings() {
   closeDrawer();
 }
 
-async function toggleChatSettings() {
-  if (drawerOpen()) {
-    closeChatSettings();
-    return;
-  }
+/**
+ * 打开抽屉并落在指定页（2026-11-09 从 toggleChatSettings 抽出）。
+ * 目标与页面都由调用方给：常规入口传 csResolveTarget() / home，
+ * 花名册「档案」直达传 partnerId / 某个档案页，不靠猜当前会话。
+ */
+async function openDrawerAt(target, page) {
   el.chatSettingsBtn.disabled = true;
   try {
     // 每次打开都现拉：不缓存陈旧目录（同模型菜单口径）
     csCatalog = await fetchModelCatalog();
     state.modelCatalog = csCatalog;
     updateModelPill();
-    csTarget = csResolveTarget();
-    csPage = "home";
+    csTarget = target;
+    csPage = page;
     csDetail = null;
     renderCsPage();
     openDrawer();
@@ -6390,6 +6435,14 @@ async function toggleChatSettings() {
   } finally {
     el.chatSettingsBtn.disabled = false;
   }
+}
+
+async function toggleChatSettings() {
+  if (drawerOpen()) {
+    closeChatSettings();
+    return;
+  }
+  await openDrawerAt(csResolveTarget(), "home");
 }
 
 /**
@@ -6472,6 +6525,12 @@ const CS_ICONS = {
   arrowUp: '<path d="m18 15-6-6-6 6"/>',
   plus: '<path d="M5 12h14"/><path d="M12 5v14"/>',
   arrowDown: '<path d="m6 9 6 6 6-6"/>',
+  // 员工档案（2026-11-09）：四页各一枚 + 花名册「档案」按钮一枚，全部内联 Lucide 路径（同全站口径）
+  history: '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/>',
+  notes: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/>',
+  repeat: '<path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/>',
+  book: '<path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"/>',
+  idcard: '<rect x="2" y="4" width="20" height="16" rx="2"/><circle cx="8" cy="10" r="2"/><path d="M4 16c0-2 2-3 4-3s4 1 4 3"/><path d="M14 9h6"/><path d="M14 13h6"/>',
 };
 
 function csHead(title, { back = false } = {}) {
@@ -6554,6 +6613,7 @@ function renderCsPage() {
   else if (csPage === "model") renderCsModelPage();
   else if (csPage === "policy") renderCsPolicyPage();
   else if (csPage === "notify") renderCsNotifyPage();
+  else if (CS_PROFILE_PAGES[csPage]) void renderCsProfilePage(csPage);
   else renderCsHome();
   const next = drawer.querySelector(".cs-body");
   if (next) next.scrollTop = csPage === "home" ? keepScroll : 0;
@@ -6712,6 +6772,27 @@ function renderCsHome() {
   );
   body.append(agentCard);
 
+  // 员工档案（2026-11-09）：一个执事的家底一页看全，四个只读页。
+  // 普通助手会话没有角色（csTarget=null），不摆这四行——摆了点进去只有说明，等于噪声
+  // （与「备选模型」「身份块」同口径）。
+  if (csTarget) {
+    const profileCard = csCard("档案");
+    for (const [page, config] of Object.entries(CS_PROFILE_PAGES)) {
+      profileCard.append(
+        csRow({
+          icon: config.icon,
+          title: config.title,
+          sub: config.sub,
+          onClick: () => {
+            csPage = page;
+            renderCsPage();
+          },
+        }),
+      );
+    }
+    body.append(profileCard);
+  }
+
   const allCard = csCard("更多");
   allCard.append(
     csRow({
@@ -6726,6 +6807,311 @@ function renderCsHome() {
   );
   body.append(allCard);
   drawer.append(body);
+}
+
+/* ── 二级页 · 员工档案（2026-11-09）：一个执事的家底一页看全 ──────
+ * 四个**只读**页：工作履历 / 记忆 / 例行规则 / 技能。零新存储，全部复用既有端点 +
+ * 本批唯一新端点 GET /api/v1/partners/:id/skills：
+ *   GET /api/v1/agent/memory?scope=partner:<id>&limit=2000 → work 进履历、其余进记忆
+ *   GET /api/v1/routines?partnerId=<id>                     → 例行规则
+ *   GET /api/v1/partners/:id/skills                        → 技能
+ * 刻意只读：编辑仍走人设页三卡（SOUL / 契约 / 目标）与例行任务既有编辑面；
+ * 记忆删除 / 整理沿用设置页记忆区，档案页不重复做（避免两处真相）。
+ * 总管（chief）记忆在 global，其余在 partner:<id>；普通助手会话没有身份，给说明不摆空数据。
+ * 全部复用 csCard / csRow / cs-note / pill-tag 既有类，不动 style.css。
+ */
+
+/** 档案页的 scope：总管读写 global，执事读写自己的键空间。 */
+function csProfileScope(target) {
+  return target === "chief" ? "global" : `partner:${target}`;
+}
+
+/** 时间戳统一成「YYYY-MM-DD HH:mm」，取不到就空串。 */
+function csProfileWhen(value) {
+  return String(value || "").replace("T", " ").slice(0, 16);
+}
+
+/** 档案页通用行：正文原样（可换行）+ 一行小字（时间 + 徽章）。只读，没有点击行为。 */
+function csProfileRow(content, metaText, badges = []) {
+  const row = document.createElement("div");
+  row.className = "cs-row is-static";
+  row.style.alignItems = "flex-start";
+  const main = document.createElement("span");
+  main.className = "cs-row-main";
+  const text = document.createElement("span");
+  text.className = "cs-row-title";
+  text.style.whiteSpace = "pre-wrap";
+  text.style.overflowWrap = "anywhere";
+  text.textContent = String(content || "");
+  main.append(text);
+  if (metaText || badges.length) {
+    const meta = document.createElement("span");
+    meta.className = "cs-row-sub";
+    meta.style.whiteSpace = "normal";
+    meta.style.overflow = "visible";
+    meta.style.textOverflow = "clip";
+    meta.style.display = "flex";
+    meta.style.flexWrap = "wrap";
+    meta.style.alignItems = "center";
+    meta.style.gap = "6px";
+    meta.style.marginTop = "4px";
+    if (metaText) {
+      const when = document.createElement("span");
+      when.textContent = metaText;
+      meta.append(when);
+    }
+    for (const badge of badges) {
+      if (!badge || !badge.text) continue;
+      const chip = document.createElement("span");
+      chip.className = `pill-tag${badge.tone ? ` ${badge.tone}` : ""}`;
+      chip.style.marginLeft = "0";
+      chip.textContent = badge.text;
+      meta.append(chip);
+    }
+    main.append(meta);
+  }
+  row.append(main);
+  return row;
+}
+
+/** 分组卡：组头中文标签 + 条数徽章，下面逐行 append。 */
+function csProfileGroup(label, count) {
+  const card = csCard();
+  const head = document.createElement("div");
+  head.className = "cs-card-label";
+  head.textContent = label;
+  const chip = document.createElement("span");
+  chip.className = "pill-tag";
+  chip.textContent = String(count);
+  head.append(chip);
+  card.append(head);
+  return card;
+}
+
+/** 空态话术：与 persona 页同一套 cs-note。 */
+function csProfileEmpty(body, text) {
+  const note = document.createElement("p");
+  note.className = "cs-note";
+  note.textContent = text;
+  body.append(note);
+}
+
+/** 记忆 / 履历同源：一次拉全量（2000 是服务端上限），前端按 kind 分拣。 */
+async function csLoadProfileMemory(target) {
+  const response = await request(
+    `/api/v1/agent/memory?scope=${encodeURIComponent(csProfileScope(target))}&limit=2000`,
+    { cache: "no-store" },
+  );
+  if (response.status === 404) return { disabled: true, items: [] };
+  if (!response.ok) throw new Error(String(response.status));
+  const data = await response.json().catch(() => ({}));
+  return { disabled: false, items: Array.isArray(data.items) ? data.items : [] };
+}
+
+async function csLoadProfileRoutines(target) {
+  const response = await request(`/api/v1/routines?partnerId=${encodeURIComponent(target)}`, {
+    cache: "no-store",
+  });
+  // 404 = 执事能力整体未启用（整组路由不挂），按空列表处理
+  if (response.status === 404) return [];
+  if (!response.ok) throw new Error(String(response.status));
+  const data = await response.json().catch(() => ({}));
+  return Array.isArray(data.routines) ? data.routines : [];
+}
+
+async function csLoadProfileSkills(target) {
+  const response = await request(`/api/v1/partners/${encodeURIComponent(target)}/skills`, {
+    cache: "no-store",
+  });
+  // 404 = 执事不存在 / 执事能力未启用，按空列表处理，不假装成故障
+  if (response.status === 404) return [];
+  if (!response.ok) throw new Error(String(response.status));
+  const data = await response.json().catch(() => ({}));
+  return Array.isArray(data.skills) ? data.skills : [];
+}
+
+/** 触发器原样展示：cron/interval/once/event 的表达式不翻译成人话。 */
+function csTriggerText(trigger) {
+  const type = String(trigger?.type || "");
+  if (type === "cron") return `cron · ${trigger.expr ?? ""}`;
+  if (type === "interval") return `interval · ${trigger.seconds ?? ""}`;
+  if (type === "once") return `once · ${trigger.at ?? ""}`;
+  if (type === "event") return `event · ${trigger.kind ?? ""}`;
+  return type || JSON.stringify(trigger ?? {});
+}
+
+function csPaintRecords(body, payload, emptyText) {
+  if (payload.disabled) {
+    csProfileEmpty(body, "记忆未启用（服务端 MEMORY_ENABLED=false），看不到工作履历。");
+    return;
+  }
+  const rows = payload.items
+    .filter((item) => item && item.kind === "work")
+    .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))
+    .map((item) =>
+      csProfileRow(item.content, csProfileWhen(item.createdAt), [
+        { text: String(item.source || "work") },
+      ]),
+    );
+  if (!rows.length) {
+    csProfileEmpty(body, emptyText);
+    return;
+  }
+  const card = csProfileGroup("工作履历", rows.length);
+  for (const row of rows) card.append(row);
+  body.append(card);
+}
+
+function csPaintMemories(body, payload, emptyText) {
+  if (payload.disabled) {
+    csProfileEmpty(body, "记忆未启用（服务端 MEMORY_ENABLED=false）。");
+    return;
+  }
+  const items = payload.items.filter((item) => item && item.kind !== "work");
+  if (!items.length) {
+    csProfileEmpty(body, emptyText);
+    return;
+  }
+  const groups = new Map();
+  for (const item of items) {
+    const kind = String(item.kind || "fact");
+    if (!groups.has(kind)) groups.set(kind, []);
+    groups.get(kind).push(item);
+  }
+  // 与设置页记忆列表同一套分组顺序；认不出的 kind 原样排在后面，不谎报成某一类
+  const order = [
+    ...MEMORY_KIND_ORDER.filter((kind) => groups.has(kind)),
+    ...[...groups.keys()].filter((kind) => !MEMORY_KIND_ORDER.includes(kind)),
+  ];
+  for (const kind of order) {
+    const rows = groups.get(kind);
+    const card = csProfileGroup(MEMORY_KIND_LABEL[kind] || kind, rows.length);
+    for (const item of rows) {
+      card.append(
+        csProfileRow(item.content, csProfileWhen(item.createdAt), [
+          { text: String(item.source || "—") },
+        ]),
+      );
+    }
+    body.append(card);
+  }
+}
+
+function csPaintRoutines(body, routines, emptyText) {
+  if (!routines.length) {
+    csProfileEmpty(body, emptyText);
+    return;
+  }
+  const card = csProfileGroup("例行规则", routines.length);
+  for (const routine of routines) {
+    const triggers = Array.isArray(routine.triggers) ? routine.triggers : [];
+    const lines = [String(routine.name || "（未命名）"), ...triggers.map(csTriggerText)];
+    card.append(
+      csProfileRow(lines.join("\n"), "", [
+        { text: routine.enabled ? "启用" : "停用", tone: routine.enabled ? "ok" : "" },
+        { text: String(routine.sessionMode || "—") },
+      ]),
+    );
+  }
+  body.append(card);
+}
+
+function csPaintSkills(body, skills, emptyText) {
+  if (!skills.length) {
+    csProfileEmpty(body, emptyText);
+    return;
+  }
+  const card = csProfileGroup("技能", skills.length);
+  for (const skill of skills) {
+    const content = [String(skill.name || ""), String(skill.summary || "")]
+      .filter(Boolean)
+      .join("\n");
+    card.append(csProfileRow(content, csProfileWhen(skill.updatedAt)));
+  }
+  body.append(card);
+}
+
+const CS_PROFILE_PAGES = {
+  records: {
+    title: "工作履历",
+    icon: "history",
+    sub: "结算过的派单台账",
+    empty: "还没有结算过的单子——派出去的单完工后会自动记在这里。",
+    load: csLoadProfileMemory,
+    paint: csPaintRecords,
+  },
+  memories: {
+    title: "记忆",
+    icon: "notes",
+    sub: "偏好 / 事实 / 经历 / 实体",
+    empty: "还没有记忆。你教它的话（“记住…”）会落在这里。",
+    load: csLoadProfileMemory,
+    paint: csPaintMemories,
+  },
+  routines: {
+    title: "例行规则",
+    icon: "repeat",
+    sub: "定时 / 事件触发的自主轮",
+    empty: "还没有例行规则。",
+    load: csLoadProfileRoutines,
+    paint: csPaintRoutines,
+  },
+  skills: {
+    title: "技能",
+    icon: "book",
+    sub: "家目录里的技能手册",
+    empty: "还没有技能文件。",
+    load: csLoadProfileSkills,
+    paint: csPaintSkills,
+  },
+};
+
+/** 档案四页共用骨架：返回 / 标题 / 无身份说明 / 读取中 / 失败 / 空态 / 内容。 */
+async function renderCsProfilePage(page) {
+  const config = CS_PROFILE_PAGES[page];
+  const drawer = el.chatSettingsDrawer;
+  if (!drawer || !config) return;
+  const target = csTarget;
+  drawer.replaceChildren(csHead(config.title, { back: true }));
+  const body = document.createElement("div");
+  body.className = "cs-body";
+  body.dataset.cards = "";
+  drawer.append(body);
+
+  const note = (text) => {
+    body.replaceChildren();
+    const p = document.createElement("p");
+    p.className = "cs-note";
+    p.textContent = text;
+    body.append(p);
+  };
+
+  if (!target) {
+    note("这条是普通助手会话，没有可看的员工档案。打开某个执事的会话，或点花名册里的「档案」再看。");
+    return;
+  }
+  // 花名册直达时目标是显式给的，未必等于当前会话身份；把「这是谁的档案」写清楚，
+  // 免得出现「改了别人却以为改的是这个助手」那种谎报（csResolveTarget 注释里的老坑）。
+  const partner = state.partners.find((item) => item.id === target) || null;
+  const who = document.createElement("p");
+  who.className = "cs-note cs-note-top";
+  who.textContent = `档案：${String(partner?.name || "").trim() || (target === "chief" ? "总管" : target)}`;
+  const loading = document.createElement("p");
+  loading.className = "cs-note";
+  loading.textContent = "读取中…";
+  body.append(who, loading);
+
+  let payload;
+  try {
+    payload = await config.load(target);
+  } catch (error) {
+    if (error.message !== "forbidden") note(`读取失败：${error.message}`);
+    return;
+  }
+  // 晚到的响应不盖掉用户已经切走的页（同 refreshCsDetail 口径）
+  if (!drawerOpen() || csPage !== page || csTarget !== target) return;
+  loading.remove();
+  config.paint(body, payload, config.empty);
 }
 
 /* ── 二级页 · 人设：头像 + 名字 + 正文，一次保存 ──────────────
@@ -7291,12 +7677,12 @@ function appendCsGoalCard(body) {
  *
  * 所以这一页是**同一个角色**的两件模型设置，共用一份「已有模型」清单：
  *   ① 主选：全局运行时模型（POST /agent/model，下一轮生效）——与 composer pill、
- *      设置→服务的默认模型行是同一个接口、同一套目录，不另造一份；
+ *      设置→模型的默认模型行是同一个接口、同一套目录，不另造一份；
  *   ② 备选：这个执事的候选链（PATCH /partners/:id { modelChain }）——只在主模型
  *      「没应答且原因可切」时按链往下换，keyEnv 只填变量名（密钥纪律）。
  * 两段都从**已有**模型里选（选项来自 /agent/model），不再要求手打
  * providerId|modelId|KEY_ENV_NAME。批量加模型卡退役（2026-11-08 用户口径：
- * 「模型肯定是能出现的，手输兜底没用」）——加模型的正式入口在 设置 → 服务。 */
+ * 「模型肯定是能出现的，手输兜底没用」）——加模型的正式入口在 设置 → 模型。 */
 function renderCsModelPage() {
   const drawer = el.chatSettingsDrawer;
   const catalog = csCatalog;
@@ -7578,7 +7964,7 @@ async function mountChainEditor(host, { partnerId, chain, onSaved }) {
   async function save(next) {
     const missing = next.filter((item) => !item.keyEnv);
     if (missing.length) {
-      setHint("有供应商没读到 keyEnv（供应商配置缺变量名），先到全部设置 → 服务里补上。", true);
+      setHint("有供应商没读到 keyEnv（供应商配置缺变量名），先到全部设置 → 模型里补上。", true);
       return;
     }
     setHint("保存中…");
@@ -9232,6 +9618,8 @@ async function runCompactCommand(instructions) {
 el.input.addEventListener("input", () => {
   resize();
   syncSendEnabled();
+  // 技能斜杠选择器（2026-11-09）：输入「/xxx」时弹可用技能单
+  void refreshSkillSuggest();
 });
 
 el.input.addEventListener("keydown", (event) => {
@@ -9430,6 +9818,12 @@ const SETTINGS_SECTIONS = [
     icon: '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
   },
   {
+    id: "models",
+    label: "模型",
+    // Lucide sparkles 0.468 完整五图元：模型/生成的通用记号（2026-11-09 从服务页拆出）
+    icon: '<path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/><path d="M20 3v4"/><path d="M22 5h-4"/><path d="M4 17v2"/><path d="M5 18H3"/>',
+  },
+  {
     id: "service",
     label: "服务",
     icon: '<rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/>',
@@ -9568,19 +9962,15 @@ function wireSettingsSearch() {
   });
 }
 
-const ROW_TIP_ICON =
-  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>';
-
 /** 一行设置 = 标签 + 控件。
- *  hint 2026-11-08 起默认**不再常驻**：标签旁一颗 ⓘ，悬停出全句（全局 data-tip）——
- *  设置页只留"状态/结果"类文案占一行（inlineHint: true，如动态计数、带代码格式的变量名）。 */
+ *  hint 2026-11-08 起默认**不再常驻**；2026-11-09 二改：连 ⓘ 图标也去掉——
+ *  data-tip 直接挂在**标签文字**上，悬停即出全句（全局 data-tip 系统）。
+ *  设置页只留"状态/结果"类文案占一行（inlineHint: true，如动态计数、保存反馈）。 */
 function rowMarkup(label, hint, control, { inlineHint = false } = {}) {
-  const tipBadge = hint && !inlineHint
-    ? `<span class="row-tip" data-tip="${attr(hint)}" role="note" aria-label="${attr(hint)}">${ROW_TIP_ICON}</span>`
-    : "";
+  const tipAttr = hint && !inlineHint ? ` data-tip="${attr(hint)}"` : "";
   return `<div class="row">
     <div class="row-main">
-      <div class="row-label">${label}${tipBadge}</div>
+      <div class="row-label"${tipAttr}>${label}</div>
       ${hint && inlineHint ? `<div class="row-hint">${hint}</div>` : ""}
     </div>
     <div class="row-control">${control}</div>
@@ -9809,7 +10199,7 @@ async function renderSettings() {
         <div class="divider"></div>
         ${rowMarkup(
           "自主轮（观察与审批）",
-          "环境变量 AUTONOMY_ENABLED 控制；页面只读显示开 / 关，不在这里改。",
+          "在 设置 → 服务 → 高级开关 里改；这里只读显示当前状态。",
           `<span class="kv" id="policy-autonomy">…</span>`,
         )}
       </div>`,
@@ -9857,8 +10247,7 @@ async function renderSettings() {
         <div class="set-card-body">
           <div class="set-card-head">
             <div class="row-main">
-              <div class="set-card-title">已登记的项目</div>
-              <div class="set-hint">派活时从这里选；目录丢了、或跑出当前工作区，会标出来。</div>
+              <div class="set-card-title" data-tip="派活时从这里选；目录丢了、或跑出当前工作区，会标出来。">已登记的项目</div>
             </div>
             <button class="btn-primary" type="button" id="project-add">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
@@ -9889,8 +10278,7 @@ async function renderSettings() {
       `<div class="card" id="reminder-add-card">
         <div class="row">
           <div class="row-main">
-            <div class="row-label">加一条</div>
-            <div class="row-hint">不经过模型，直接定个时间提醒；到点会出现在对话里。</div>
+            <div class="row-label" data-tip="不经过模型，直接定个时间提醒；到点会出现在对话里。">加一条</div>
           </div>
         </div>
         <div class="divider"></div>
@@ -9956,8 +10344,7 @@ async function renderSettings() {
       `<div class="card">
         <div class="pair">
           <div class="pair-info">
-            <div class="row-label">扫码连接手机</div>
-            <div class="row-hint">手机 App 扫这个码，换一个长期有效的设备凭据——不用把 AGENT_TOKEN 抄到手机上。</div>
+            <div class="row-label" data-tip="手机 App 扫这个码，换一个长期有效的设备凭据——不用把 AGENT_TOKEN 抄到手机上。">扫码连接手机</div>
             <div class="pair-url" id="pair-url">正在取配对码…</div>
             <div class="pair-meta" id="pair-meta"></div>
             <button class="ghost" id="pair-refresh" type="button">换一个码</button>
@@ -9981,10 +10368,9 @@ async function renderSettings() {
       }
     }, 100000);
   } else if (page === "service") {
-    // 模型行不套 rowMarkup：有多个可选项时右栏换成下拉、提示行要动态改文案
+    // 服务页（2026-11-09 拆分后）：只留服务状态与开关——地址 / 通知 / 鉴权 / 用量 / 运行时 / 高级开关 / 搜索。
+    // 默认模型与供应商双栏在「模型」页；模型行不套 rowMarkup 那套规矩跟着搬过去了。
     const notifyOn = localStorage.getItem(KEY_NOTIFY) === "1";
-    // 供应商双栏每次进页重置到"当前默认供应商"；模板/表单状态由 renderProviderDetail 接手
-    state.providerView = { mode: "empty", providerId: "" };
     el.settingsInner.innerHTML = `${sectionMarkup(
       "服务",
       `<div class="card">
@@ -9992,17 +10378,14 @@ async function renderSettings() {
         <div class="divider"></div>
         <div class="row">
           <div class="row-main">
-            <div class="row-label">默认模型</div>
-            <div class="row-hint" id="svc-model-hint">读取中…</div>
+            <div class="row-label">桌面通知</div>
+            <div class="row-hint">回复完成 / 出错 / 任务单待你处理时提醒；窗口正看着那个会话就不打扰</div>
+            <div class="row-hint" id="svc-notify-hint" hidden></div>
           </div>
-          <div class="row-control" id="svc-model-control"><span class="kv" id="svc-model">…</span></div>
+          <div class="row-control">
+            ${switchMarkup(notifyOn, { label: "桌面通知", attrs: 'data-notify-switch' })}
+          </div>
         </div>
-        <div class="divider"></div>
-        ${rowMarkup(
-          "桌面通知",
-          "回复完成 / 出错 / 任务单待你处理时提醒；窗口正看着那个会话就不打扰",
-          switchMarkup(notifyOn, { label: "桌面通知", attrs: 'data-notify-switch' }),
-        )}
         <div class="divider"></div>
         ${rowMarkup("鉴权", "", `<span class="kv" id="svc-auth">…</span>`)}
         <div class="divider"></div>
@@ -10032,13 +10415,18 @@ async function renderSettings() {
         <div class="divider" id="autostart-divider" hidden></div>
         <div class="row" id="autostart-row" hidden>
           <div class="row-main">
-            <div class="row-label">开机自启</div>
-            <div class="row-hint">登录 Windows 时自动启动 Selenite；服务仍由壳拉起，和这里的起停互不影响。</div>
+            <div class="row-label" data-tip="登录 Windows 时自动启动 Selenite；服务仍由壳拉起，和这里的起停互不影响。">开机自启</div>
           </div>
           <div class="row-control">
             ${switchMarkup(false, { label: "开机自启", attrs: "data-autostart-switch" })}
           </div>
         </div>
+      </div>`,
+    )}
+    ${sectionMarkup(
+      "高级开关",
+      `<div class="card" id="flags-card">
+        <div class="row"><div class="row-main"><div class="row-hint">读取中…</div></div></div>
       </div>`,
     )}
     ${sectionMarkup(
@@ -10081,6 +10469,56 @@ async function renderSettings() {
           <button class="ghost" type="button" id="search-test">测试连接</button>
         </div>
       </div>`,
+    )}`;
+    // 供应商与默认模型已拆到「模型」页（2026-11-09）：服务页只留服务自身的状态与开关。
+    // 通知开关（批次二）：开的时候才请求系统权限；被拒就退回关闭并提示
+    const notifySwitch = el.settingsInner.querySelector("[data-notify-switch]");
+    notifySwitch?.addEventListener("click", async () => {
+      const want = notifySwitch.getAttribute("aria-checked") !== "true";
+      if (!want) {
+        localStorage.setItem(KEY_NOTIFY, "0");
+        notifySwitch.setAttribute("aria-checked", "false");
+        return;
+      }
+      if (!("Notification" in window)) {
+        const hint = document.getElementById("svc-notify-hint");
+        if (hint) { hint.hidden = false; hint.textContent = "这个环境不支持通知"; }
+        return;
+      }
+      if (Notification.permission !== "granted") {
+        const permission = await Notification.requestPermission();
+        if (permission !== "granted") {
+          const hint = document.getElementById("svc-notify-hint");
+          if (hint) { hint.hidden = false; hint.textContent = "通知权限被拒了，去系统设置里开"; }
+          notifySwitch.setAttribute("aria-checked", "false");
+          return;
+        }
+      }
+      localStorage.setItem(KEY_NOTIFY, "1");
+      notifySwitch.setAttribute("aria-checked", "true");
+    });
+    void loadServiceInfo();
+    void initRuntimeCard();
+    // 搜索配置（2026-11-07 批二）：进页 GET 一次当前状态
+    void initSearchCard();
+    // 高级开关（2026-11-09）：读一次渲染行
+    void loadFlagsSettings();
+  } else if (page === "models") {
+    // 模型页（2026-11-09 从服务页拆出）：默认模型行 + 供应商双栏。
+    // 拆的理由：这两块是"配上游"，跟服务状态（地址/通知/运行时）不是一个话题；
+    // 服务页那时候已经四节起步，模型再挤在第一节里，找东西要滚三屏。
+    // 元素 id 从 svc-model-* 改名 mdl-*：整块都搬走了，id 留着 svc- 前缀会骗人。
+    el.settingsInner.innerHTML = `${sectionMarkup(
+      "默认模型",
+      `<div class="card">
+        <div class="row">
+          <div class="row-main">
+            <div class="row-label">默认模型</div>
+            <div class="row-hint" id="mdl-hint">读取中…</div>
+          </div>
+          <div class="row-control" id="mdl-control"><span class="kv" id="mdl-current">…</span></div>
+        </div>
+      </div>`,
     )}
     ${sectionMarkup(
       "供应商",
@@ -10102,37 +10540,10 @@ async function renderSettings() {
         </div>
       </div>`,
     )}`;
-    // 通知开关（批次二）：开的时候才请求系统权限；被拒就退回关闭并提示
-    const notifySwitch = el.settingsInner.querySelector("[data-notify-switch]");
-    notifySwitch?.addEventListener("click", async () => {
-      const want = notifySwitch.getAttribute("aria-checked") !== "true";
-      if (!want) {
-        localStorage.setItem(KEY_NOTIFY, "0");
-        notifySwitch.setAttribute("aria-checked", "false");
-        return;
-      }
-      if (!("Notification" in window)) {
-        const hint = document.getElementById("svc-model-hint");
-        if (hint) hint.textContent = "这个环境不支持通知";
-        return;
-      }
-      if (Notification.permission !== "granted") {
-        const permission = await Notification.requestPermission();
-        if (permission !== "granted") {
-          const hint = document.getElementById("svc-model-hint");
-          if (hint) hint.textContent = "通知权限被拒了，去系统设置里开";
-          notifySwitch.setAttribute("aria-checked", "false");
-          return;
-        }
-      }
-      localStorage.setItem(KEY_NOTIFY, "1");
-      notifySwitch.setAttribute("aria-checked", "true");
-    });
+    // 供应商双栏每次进页重置到"当前默认供应商"；模板/表单状态由 renderProviderDetail 接手
+    state.providerView = { mode: "empty", providerId: "" };
     document.getElementById("provider-add")?.addEventListener("click", () => showProviderTemplates());
-    void loadServiceInfo();
-    void initRuntimeCard();
-    // 搜索配置（2026-11-07 批二）：进页 GET 一次当前状态
-    void initSearchCard();
+    void loadModelsInfo();
   } else if (page === "memory") {
     el.settingsInner.innerHTML = memorySettingsMarkup();
     void wireMemorySettings();
@@ -10141,8 +10552,7 @@ async function renderSettings() {
       "人设",
       `<div class="pt-head">
         <div class="row-main">
-          <div class="set-card-title">总管与执事</div>
-          <div class="set-hint">头像和「它是谁」一起改：点「改人设」进弹窗，左边换头像、右边写正文，一次保存。模型候选链与例行任务也在里面。</div>
+          <div class="set-card-title" data-tip="头像和「它是谁」一起改：点「改人设」进弹窗，左边换头像、右边写正文，一次保存。模型候选链与例行任务也在里面。">总管与执事</div>
         </div>
         <button class="btn-primary" type="button" id="partner-add">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
@@ -10160,20 +10570,25 @@ async function renderSettings() {
       "技能",
       `<div class="sk-head">
         <div class="row-main">
-          <div class="set-card-title">技能库</div>
-          <div class="set-hint">技能 = 给 AI 的操作手册：第 1 行是索引摘要，其余是正文。放进目录即生效于下一个会话。</div>
+          <div class="set-card-title" data-tip="技能 = 给 AI 的操作手册（第 1 行是索引摘要，其余是正文）。默认全关：开了才进 agent 的技能索引；对话里输入 /技能名 直接调用。开关对已在跑的会话不生效，下一个会话开始。">技能库</div>
           <div class="sk-path" id="skill-path">读取中…</div>
         </div>
-        <button class="btn-primary" type="button" id="skill-add">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
-          新建技能
-        </button>
+        <div class="sk-head-actions">
+          <button class="ghost" type="button" id="skill-all-on" title="全部开启（下一个会话进索引）">全开</button>
+          <button class="ghost" type="button" id="skill-all-off" title="全部关闭（默认态）">全关</button>
+          <button class="btn-primary" type="button" id="skill-add">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+            新建技能
+          </button>
+        </div>
       </div>
       <div class="sk-list" id="skill-list">
         <div class="set-hint">读取中…</div>
       </div>`,
     )}`;
     document.getElementById("skill-add")?.addEventListener("click", () => openCreateSkillModal());
+    document.getElementById("skill-all-on")?.addEventListener("click", () => void toggleAllSkills(true));
+    document.getElementById("skill-all-off")?.addEventListener("click", () => void toggleAllSkills(false));
     void loadSkills();
   } else {
     el.settingsInner.innerHTML = sectionMarkup(
@@ -10266,10 +10681,17 @@ function renderSkillList(box, items) {
         <span class="sk-item-meta">${esc(skillWhenText(item.updatedAt))} · ${esc(skillSizeText(item.size))}${readOnly ? ` · ${esc(originLabel)}（只读）` : ""}</span>
       </button>
       <div class="sk-item-actions">
+        ${switchMarkup(item.enabled === true, { label: `开关 ${name}`, attrs: `data-skill-switch="${attr(name)}"` })}
         ${readOnly ? "" : `<button class="ghost mem-act" type="button" data-skill-delete="${attr(name)}">删除</button>`}
       </div>`;
     box.append(card);
     card.querySelector("[data-skill-open]")?.addEventListener("click", () => void openEditSkillModal(name));
+    const sw = card.querySelector("[data-skill-switch]");
+    if (sw) {
+      sw.addEventListener("click", () => {
+        void toggleSkillEnabled(name, sw.getAttribute("aria-checked") !== "true", sw);
+      });
+    }
     const remove = card.querySelector("[data-skill-delete]");
     if (remove) remove.addEventListener("click", () => openDeleteSkillModal(name));
   }
@@ -10474,6 +10896,309 @@ function openDeleteSkillModal(name) {
   });
 }
 
+/* ── 高级开关（2026-11-09）：服务端 env 行为开关搬进界面 ──────────
+ * 数据面：GET/PUT /api/v1/agent/flags（服务端 .data/agent-flags.json 覆盖 env，见 flags.ts）。
+ * hot=true 改完即时生效；hot=false（路由挂载/工具注册类，启动时冻结）重启后生效——
+ * toast 与悬停提示都写明，不装即时。密钥/路径/令牌类 env 不进这张表（密钥纪律）。 */
+
+/** 多档开关的选项（键不在表里 = 布尔开关）。value 是写进 env 的真值，label 给人看。 */
+const FLAG_CHOICES = {
+  MEMORY_EXTRACT: [
+    { value: "auto", label: "auto" },
+    { value: "llm", label: "llm" },
+    { value: "rule", label: "rule" },
+  ],
+  AUTONOMY_ENABLED: [
+    { value: "false", label: "关" },
+    { value: "observe", label: "只观察" },
+    { value: "true", label: "开" },
+  ],
+};
+
+const FLAG_LABELS = {
+  AUTONOMY_ENABLED: { label: "自主轮", tip: "关 = 完全不动；只观察 = 照常判定但只记账、不真的去做（先看它本来会做什么，放几天再决定）；开 = 真起轮（改动前默认关）。" },
+  AGENT_ATTACHMENTS: { label: "附件", tip: "对话里能发图片附件；关掉后分段发送会被拒。" },
+  AGENT_EDIT_RESEND: { label: "编辑重发", tip: "自己的消息可以编辑后重发。" },
+  CURRENT_PROJECT: { label: "当前项目", tip: "派活按当前项目归属；关掉 = 只有主工作区杂事态。" },
+  MEMORY_ENABLED: { label: "记忆", tip: "记忆引擎总闸；关掉后新记忆立即停写，已加载的库要重启才彻底卸下。" },
+  MINISTER_DISPATCH_AUTHORITY: { label: "执事派发权", tip: "开 = 执事在自己的领域内可以直派活；关 = 全部绕回总管（改动前默认关）。" },
+  DEVICE_AUTO_DISPATCH: { label: "设备自动派活", tip: "targetDevice=auto 时自动选设备（主机优先）。" },
+  PARTNER_WORK_RECORD: { label: "工作履历", tip: "每单结算给执事落一条履历记录（append-only 台账）。" },
+  SKILLS_ADMIN: { label: "技能管理", tip: "设置 → 技能 的增删改端点。" },
+  ROUTINE_SELF_SERVICE: { label: "执事自建巡逻", tip: "执事可以用 routine_manage 给自己建/停例行规则（高危档，首次要人点头）。" },
+  COMPANIONS_ENABLED: { label: "执事", tip: "执事（伙伴）体系总闸。" },
+  GROUPS_ENABLED: { label: "群组", tip: "群聊与值日制。" },
+  CHANCELLOR_ENABLED: { label: "派活（宰相）", tip: "delegation 派活链路总闸；关掉 = 回到 8 个基础工具。" },
+  TOPICS_ENABLED: { label: "长期课题", tip: "课题户口本 + 每周研究。" },
+};
+
+async function loadFlagsSettings() {
+  const card = document.getElementById("flags-card");
+  if (!card) return;
+  try {
+    const response = await request("/api/v1/agent/flags", { cache: "no-store" });
+    if (!response.ok) throw new Error(String(response.status));
+    const data = await response.json().catch(() => ({}));
+    renderFlagRows(card, Array.isArray(data.flags) ? data.flags : []);
+  } catch (error) {
+    if (error.message === "forbidden") return;
+    card.innerHTML = `<div class="row"><div class="row-main"><div class="row-hint">读不到开关：${esc(String(error.message))}</div></div></div>`;
+  }
+}
+
+function renderFlagRows(card, flags) {
+  card.replaceChildren();
+  if (!flags.length) {
+    card.innerHTML = `<div class="row"><div class="row-main"><div class="row-hint">这台服务端没开放开关（AGENT_FLAGS_UI=false）。</div></div></div>`;
+    return;
+  }
+  for (const flag of flags) {
+    const meta = FLAG_LABELS[flag.key] || { label: flag.key, tip: "" };
+    const hot = flag.hot !== false;
+    const valueText =
+      flag.value === "true" ? "开" : flag.value === "false" ? "关" : flag.value;
+    const tip =
+      `${meta.tip}${meta.tip ? " " : ""}当前：${valueText}` +
+      `${hot ? "；改完即时生效" : "；重启服务后生效"}${flag.overridden ? "（已被界面改过，恢复默认就拨回这个位置）" : ""}`;
+    // 多档开关（2026-11-09 T2）：AUTONOMY_ENABLED 有 observe 档，布尔开关表达不了，
+    // 与 MEMORY_EXTRACT 同用 segmented；标签写人话，不暴露 env 原值。
+    const choices = FLAG_CHOICES[flag.key];
+    const control = choices
+      ? `<div class="segmented" role="radiogroup" aria-label="${attr(meta.label)}" data-flag-select="${attr(flag.key)}">
+           ${choices.map((c) => `<button type="button" data-value="${attr(c.value)}" aria-checked="${flag.value === c.value}">${esc(c.label)}</button>`).join("")}
+         </div>`
+      : switchMarkup(flag.value === "true", {
+          label: meta.label,
+          attrs: `data-flag-switch="${attr(flag.key)}"`,
+        });
+    card.insertAdjacentHTML("beforeend", rowMarkup(meta.label, tip, control));
+  }
+  for (const sw of card.querySelectorAll("[data-flag-switch]")) {
+    sw.addEventListener("click", () => {
+      void toggleFlag(sw.dataset.flagSwitch, sw.getAttribute("aria-checked") !== "true", sw);
+    });
+  }
+  for (const seg of card.querySelectorAll("[data-flag-select]")) {
+    for (const button of seg.querySelectorAll("button")) {
+      button.addEventListener("click", () => {
+        if (button.getAttribute("aria-checked") === "true") return;
+        void toggleFlag(seg.dataset.flagSelect, button.dataset.value, null, seg);
+      });
+    }
+    mountSegmented(seg);
+  }
+}
+
+async function toggleFlag(key, value, sw, seg) {
+  const setBusy = (busy) => {
+    if (sw) sw.disabled = busy;
+    if (seg) for (const button of seg.querySelectorAll("button")) button.disabled = busy;
+  };
+  setBusy(true);
+  try {
+    const response = await request(`/api/v1/agent/flags/${encodeURIComponent(key)}`, {
+      method: "PUT",
+      body: JSON.stringify({ value: String(value) }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      toast(data.message || `没存成：HTTP ${response.status}`);
+      return;
+    }
+    if (sw) sw.setAttribute("aria-checked", String(value === "true"));
+    if (seg) {
+      for (const button of seg.querySelectorAll("button")) {
+        button.setAttribute("aria-checked", String(button.dataset.value === String(value)));
+      }
+      syncSegmented(seg);
+    }
+    toast(data.hot ? "已保存，即时生效" : "已保存，重启服务后生效");
+  } catch (error) {
+    if (error.message !== "forbidden") toast(`没存成：${error.message}`);
+  } finally {
+    setBusy(false);
+  }
+}
+
+/* ── 技能启停位 + 批量（2026-11-09 用户拍板：技能默认全关，开了才进索引）──
+ * 数据面：GET /agent/skills 的 items[].enabled + PUT /agent/skills/:name/enabled +
+ * PUT /agent/skills/enabled-all。索引按会话冻结（D5），开关对已在跑的会话不生效；
+ * skill 工具取手册是即时的（关了立刻取不到）。 */
+
+async function toggleSkillEnabled(name, enabled, sw) {
+  if (sw) sw.disabled = true;
+  try {
+    const response = await request(
+      `/api/v1/agent/skills/${encodeURIComponent(name)}/enabled`,
+      { method: "PUT", body: JSON.stringify({ enabled }) },
+    );
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      toast(data.message || `没存成：HTTP ${response.status}`);
+      if (sw) sw.disabled = false;
+      return;
+    }
+    if (sw) {
+      sw.setAttribute("aria-checked", String(enabled));
+      sw.disabled = false;
+    }
+    toast(enabled ? `已开启「${name}」，下一个会话进索引` : `已关闭「${name}」`);
+  } catch (error) {
+    if (error.message !== "forbidden") toast(`没存成：${error.message}`);
+    if (sw) sw.disabled = false;
+  }
+}
+
+async function toggleAllSkills(enabled) {
+  try {
+    const response = await request("/api/v1/agent/skills/enabled-all", {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      toast(data.message || `没存成：HTTP ${response.status}`);
+      return;
+    }
+    toast(enabled ? `已全开 ${data.count} 个技能，下一个会话进索引` : `已全关 ${data.count} 个技能`);
+    void loadSkills();
+  } catch (error) {
+    if (error.message !== "forbidden") toast(`没存成：${error.message}`);
+  }
+}
+
+/* ── 技能斜杠选择器（2026-11-09 用户口径：对话输入「/」出技能单，回车/点击补全）──
+ * 只列**开着**的技能（全关时输入 / 不弹单，打字不受任何干扰）。
+ * 补全成「/名字 」后继续打指令；发送后服务端把手册整份注入那一轮（lifecycle beforeRequest）。 */
+
+const skillSuggest = { el: null, items: [], index: 0, cacheAt: 0 };
+
+function skillSuggestNode() {
+  if (!skillSuggest.el) {
+    const node = document.createElement("div");
+    node.id = "skill-suggest";
+    node.setAttribute("role", "listbox");
+    node.setAttribute("aria-label", "技能补全");
+    document.body.append(node);
+    skillSuggest.el = node;
+  }
+  return skillSuggest.el;
+}
+
+/** 输入框整串是「/xxx」才算（打完空格开始写指令就不弹了） */
+function skillSuggestPrefix(text) {
+  return /^\/([a-z0-9][a-z0-9-_]*)$/i.exec(String(text || "").trimStart());
+}
+
+async function skillSuggestItems() {
+  if (Date.now() - skillSuggest.cacheAt < 30_000 && skillSuggest.items) return skillSuggest.items;
+  try {
+    const response = await request("/api/v1/agent/skills", { cache: "no-store" });
+    if (!response.ok) return [];
+    const data = await response.json().catch(() => ({}));
+    skillSuggest.items = (Array.isArray(data.items) ? data.items : []).filter((item) => item.enabled);
+    skillSuggest.cacheAt = Date.now();
+  } catch {
+    skillSuggest.items = [];
+  }
+  return skillSuggest.items;
+}
+
+async function refreshSkillSuggest() {
+  const input = el.input;
+  const node = skillSuggestNode();
+  const match = input ? skillSuggestPrefix(input.value) : null;
+  if (!match) {
+    closeSkillSuggest();
+    return;
+  }
+  const all = await skillSuggestItems();
+  const prefix = match[1].toLowerCase();
+  const items = all.filter((item) => String(item.name || "").startsWith(prefix));
+  if (!items.length) {
+    closeSkillSuggest();
+    return;
+  }
+  skillSuggest.items = items;
+  skillSuggest.index = Math.min(skillSuggest.index, items.length - 1);
+  node.replaceChildren(
+    ...items.map((item, index) => {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "skill-suggest-item" + (index === skillSuggest.index ? " is-active" : "");
+      row.setAttribute("role", "option");
+      row.setAttribute("aria-selected", String(index === skillSuggest.index));
+      row.innerHTML = `<span class="s-name">/${esc(item.name)}</span><span class="s-sum">${esc(String(item.summary || ""))}</span>`;
+      row.addEventListener("click", () => applySkillSuggest(item.name));
+      row.addEventListener("mousemove", () => {
+        if (skillSuggest.index === index) return;
+        skillSuggest.index = index;
+        paintSkillSuggest();
+      });
+      return row;
+    }),
+  );
+  const rect = input.getBoundingClientRect();
+  node.style.display = "block";
+  const box = node.getBoundingClientRect();
+  let top = rect.top - box.height - 6;
+  if (top < 8) top = rect.bottom + 6;
+  node.style.left = `${Math.round(Math.max(8, rect.left))}px`;
+  node.style.top = `${Math.round(top)}px`;
+}
+
+function paintSkillSuggest() {
+  const node = skillSuggest.el;
+  if (!node) return;
+  node.querySelectorAll(".skill-suggest-item").forEach((row, index) => {
+    row.classList.toggle("is-active", index === skillSuggest.index);
+    row.setAttribute("aria-selected", String(index === skillSuggest.index));
+  });
+}
+
+function applySkillSuggest(name) {
+  const input = el.input;
+  if (input) {
+    input.value = `/${name} `;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.focus();
+  }
+  closeSkillSuggest();
+}
+
+function closeSkillSuggest() {
+  skillSuggest.index = 0;
+  if (skillSuggest.el) skillSuggest.el.style.display = "none";
+}
+
+// 挂在 document 捕获段：抢在 composer 的 Enter 发送之前处理补全键
+document.addEventListener(
+  "keydown",
+  (event) => {
+    const node = skillSuggest.el;
+    if (!node || node.style.display !== "block" || !node.firstElementChild) return;
+    if (event.target !== el.input) return;
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      const delta = event.key === "ArrowDown" ? 1 : -1;
+      skillSuggest.index = (skillSuggest.index + delta + skillSuggest.items.length) % skillSuggest.items.length;
+      paintSkillSuggest();
+    } else if (event.key === "Enter" || event.key === "Tab") {
+      const picked = skillSuggest.items[skillSuggest.index];
+      if (picked) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        applySkillSuggest(picked.name);
+      }
+    } else if (event.key === "Escape") {
+      event.stopImmediatePropagation();
+      closeSkillSuggest();
+    }
+  },
+  true,
+);
+
 /* ── 记忆设置（2026-11-06；2026-11-08 扫尾批 6 补整理与导入）──
  * 只读列表 + 四个动作：删掉 / 标过时 / 整理记忆 / 导入记忆。刻意不做编辑与搜索：
  *   - 编辑记忆等于让它变成第二个人格，删了重说一遍更干净；
@@ -10540,7 +11265,7 @@ function memorySettingsMarkup() {
     </div>
     <div class="card" id="mem-proposals-card" hidden>
       <div class="mem-prop-head">
-        <div class="set-card-title">整理建议<span class="mem-count" id="mem-prop-count"></span><span class="row-tip" data-tip="这些都是模型给的建议，不会自动改。应用 = 被收编那条标为过时（记录还留着，可追溯）。" role="note" aria-label="这些都是模型给的建议，不会自动改。应用 = 被收编那条标为过时（记录还留着，可追溯）。">${ROW_TIP_ICON}</span></div>
+        <div class="set-card-title" data-tip="这些都是模型给的建议，不会自动改。应用 = 被收编那条标为过时（记录还留着，可追溯）。">整理建议<span class="mem-count" id="mem-prop-count"></span></div>
       </div>
       <div class="mem-props" id="mem-props"></div>
       <div class="mem-result" id="mem-prop-result" hidden></div>
@@ -10877,9 +11602,8 @@ function renderMemoryList(box, items) {
       const label = esc(MEMORY_KIND_LABEL[kind] || kind);
       return `<div class="mem-sec">
         <div class="mem-sec-head">
-          <h3 class="mem-sec-title">${label}</h3>
+          <h3 class="mem-sec-title"${tip ? ` data-tip="${attr(tip)}"` : ""}>${label}</h3>
           <span class="mem-count">${rows.length}</span>
-          ${tip ? `<span class="row-tip" data-tip="${attr(tip)}" role="note" aria-label="${attr(tip)}">${ROW_TIP_ICON}</span>` : ""}
         </div>
         <div class="card">${rows.map((item) => memoryItemMarkup(item)).join("")}</div>
       </div>`;
@@ -11827,8 +12551,8 @@ async function loadAutonomySwitch() {
  * 统一走 normalizeModelRow（与模型菜单同一份归一化），不再把行当字符串拼。
  */
 function renderDefaultModelRow(catalog) {
-  const control = document.getElementById("svc-model-control");
-  const hint = document.getElementById("svc-model-hint");
+  const control = document.getElementById("mdl-control");
+  const hint = document.getElementById("mdl-hint");
   if (!control || !hint) return;
   const current = catalog && catalog.current ? catalog.current : null;
   const providers = (catalog && catalog.providers ? catalog.providers : [])
@@ -11851,23 +12575,23 @@ function renderDefaultModelRow(catalog) {
   };
 
   if (!current) {
-    control.innerHTML = `<span class="kv" id="svc-model">未配置（mock 回显）</span>`;
+    control.innerHTML = `<span class="kv" id="mdl-current">未配置（mock 回显）</span>`;
     setHint("配好 LLM_API_KEY 就会播种一个默认供应商，之后可在这里切");
     return;
   }
   if (current.providerId === "faux") {
-    control.innerHTML = `<span class="kv" id="svc-model">faux</span>`;
+    control.innerHTML = `<span class="kv" id="mdl-current">faux</span>`;
     setHint("faux 是假模型（链路验证用），没有可切的真实模型");
     return;
   }
   if (options.length < 2) {
-    control.innerHTML = `<span class="kv" id="svc-model">${esc(current.modelId)}</span>`;
+    control.innerHTML = `<span class="kv" id="mdl-current">${esc(current.modelId)}</span>`;
     setHint("在下面的供应商里多填几个模型，就能在这里切");
     return;
   }
 
   // 可切：下拉 + 切换反馈。同一上游端点下换模型名，密钥与地址不动（硬约束）。
-  control.innerHTML = `<select class="model-select" id="svc-model-select" aria-label="选择模型">
+  control.innerHTML = `<select class="model-select" id="mdl-select" aria-label="选择模型">
       ${providers
         .map(
           (provider) => `<optgroup label="${esc(provider.name || provider.id)}">
@@ -11884,7 +12608,7 @@ function renderDefaultModelRow(catalog) {
         .join("")}
     </select>`;
   setHint("切换后下一轮对话生效");
-  const select = document.getElementById("svc-model-select");
+  const select = document.getElementById("mdl-select");
   let msgTimer = 0;
   const say = (text) => {
     setHint(text);
@@ -12086,6 +12810,7 @@ async function initAutostartRow() {
   });
 }
 
+/** 服务页读数（2026-11-09 拆分后）：地址 / 鉴权 / 用量。默认模型与供应商在「模型」页，走 loadModelsInfo。 */
 async function loadServiceInfo() {
   const set = (id, text) => {
     const node = document.getElementById(id);
@@ -12093,17 +12818,6 @@ async function loadServiceInfo() {
   };
   set("svc-address", location.origin);
   set("svc-auth", state.token ? "已配置令牌" : "未配置（仅本机）");
-
-  try {
-    const catalog = await fetchModelCatalog();
-    state.modelCatalog = catalog;
-    renderDefaultModelRow(catalog);
-    updateModelPill();
-  } catch {
-    set("svc-model", "读取失败");
-    const hint = document.getElementById("svc-model-hint");
-    if (hint) hint.textContent = "";
-  }
 
   const renderUsageModels = (models) => {
     const box = document.getElementById("svc-usage-models");
@@ -12141,7 +12855,24 @@ async function loadServiceInfo() {
     const box = document.getElementById("svc-usage-models");
     if (box) box.innerHTML = `<div class="row-hint">读不到用量明细</div>`;
   }
+}
 
+/** 模型页读数（2026-11-09 从服务页拆出）：默认模型行 + 供应商双栏。 */
+async function loadModelsInfo() {
+  const set = (id, text) => {
+    const node = document.getElementById(id);
+    if (node) node.textContent = text;
+  };
+  try {
+    const catalog = await fetchModelCatalog();
+    state.modelCatalog = catalog;
+    renderDefaultModelRow(catalog);
+    updateModelPill();
+  } catch {
+    set("mdl-current", "读取失败");
+    const hint = document.getElementById("mdl-hint");
+    if (hint) hint.textContent = "";
+  }
   await loadProviders();
 }
 
