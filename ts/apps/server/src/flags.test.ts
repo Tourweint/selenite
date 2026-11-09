@@ -54,12 +54,21 @@ test("API：GET 列表带 hot/defaultValue，PUT 校验取值，AGENT_FLAGS_UI=f
 	mountFlags(app);
 	const list = await app.request("/api/v1/agent/flags");
 	assert.equal(list.status, 200);
-	const data = (await list.json()) as { flags: { key: string; hot: boolean }[] };
+	const data = (await list.json()) as {
+		flags: { key: string; hot: boolean; defaultValue: string }[];
+	};
 	assert.ok(data.flags.length >= FLAG_DEFS.length);
 	const autonomy = data.flags.find((flag) => flag.key === "AUTONOMY_ENABLED");
 	assert.equal(autonomy?.hot, true);
 	const companions = data.flags.find((flag) => flag.key === "COMPANIONS_ENABLED");
 	assert.equal(companions?.hot, false, "执事总闸是挂载期冻结，标 hot=false");
+	// persona 记忆库接入（2026-11-09）：两个消费处都懒读 env，热生效；导出默认关。
+	const personaMemory = data.flags.find((flag) => flag.key === "PERSONA_MEMORY_ENABLED");
+	assert.equal(personaMemory?.hot, true, "persona_recall 的关闸每次调用前懒读，热生效");
+	assert.equal(personaMemory?.defaultValue, "true");
+	const personaExport = data.flags.find((flag) => flag.key === "PERSONA_EXPORT_ENABLED");
+	assert.equal(personaExport?.hot, true, "导出开关每轮 settled 懒读，热生效");
+	assert.equal(personaExport?.defaultValue, "false", "对外送数据默认不动");
 
 	const put = await app.request("/api/v1/agent/flags/CHANCELLOR_ENABLED", {
 		method: "PUT",

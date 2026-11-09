@@ -38,6 +38,11 @@ export const FLAG_DEFS: FlagDef[] = [
 	{ key: "CURRENT_PROJECT", values: ["true", "false"], defaultValue: "true", hot: true },
 	{ key: "MEMORY_ENABLED", values: ["true", "false"], defaultValue: "true", hot: true },
 	{ key: "MEMORY_EXTRACT", values: ["auto", "llm", "rule"], defaultValue: "auto", hot: true },
+	// persona 记忆库接入（2026-11-09）：读 = persona_recall 工具的显式关闸（默认开，
+	// 但还要求 PERSONA_MEMORY_ASK 配了 ask.py 路径才上架——路径类 env 按白名单纪律不进界面，
+	// 开关文案里写明）；写 = 主对话导出（默认关，对外送数据默认不动）。两个消费处都懒读 env，热生效。
+	{ key: "PERSONA_MEMORY_ENABLED", values: ["true", "false"], defaultValue: "true", hot: true },
+	{ key: "PERSONA_EXPORT_ENABLED", values: ["true", "false"], defaultValue: "false", hot: true },
 	{ key: "MINISTER_DISPATCH_AUTHORITY", values: ["true", "false"], defaultValue: "false", hot: true },
 	{ key: "DEVICE_AUTO_DISPATCH", values: ["true", "false"], defaultValue: "true", hot: true },
 	{ key: "PARTNER_WORK_RECORD", values: ["true", "false"], defaultValue: "true", hot: true },

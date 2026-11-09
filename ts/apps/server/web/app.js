@@ -10930,6 +10930,10 @@ const FLAG_LABELS = {
   GROUPS_ENABLED: { label: "群组", tip: "群聊与值日制。" },
   CHANCELLOR_ENABLED: { label: "派活（宰相）", tip: "delegation 派活链路总闸；关掉 = 回到 8 个基础工具。" },
   TOPICS_ENABLED: { label: "长期课题", tip: "课题户口本 + 每周研究。" },
+  // persona 记忆库接入（2026-11-09）：读 = 查一生记忆库；写 = 对话归档。ASK 路径不进界面（路径类 env），
+  // 开关文案里写清前置条件，别让用户拨了没反应以为是坏了。
+  PERSONA_MEMORY_ENABLED: { label: "一生记忆库（查）", tip: "主人问到很久以前的事、或要原文出处时，去个人记忆库（persona-metric）检索证据。前置：.env 里 PERSONA_MEMORY_ASK 需指向 ask.py；没配的话这个开关拨了也不上架工具。" },
+  PERSONA_EXPORT_ENABLED: { label: "对话归档（送）", tip: "每轮主对话聊完后，把你和助手的原话追加进导出目录，由记忆库那边定期收走归档。默认关——开了才往外送数据。" },
 };
 
 async function loadFlagsSettings() {
@@ -11005,7 +11009,9 @@ async function toggleFlag(key, value, sw, seg) {
       toast(data.message || `没存成：HTTP ${response.status}`);
       return;
     }
-    if (sw) sw.setAttribute("aria-checked", String(value === "true"));
+    // 布尔拨杆路径传的是 boolean，分段控件路径传的是字符串——统一归一成字符串再比，
+    // 否则 String(true === "true") 恒为 false，拨杆点击后服务端已翻但 UI 永远显示旧态（实测复现）。
+    if (sw) sw.setAttribute("aria-checked", String(String(value) === "true"));
     if (seg) {
       for (const button of seg.querySelectorAll("button")) {
         button.setAttribute("aria-checked", String(button.dataset.value === String(value)));
