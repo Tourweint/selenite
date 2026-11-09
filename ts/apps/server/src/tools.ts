@@ -71,6 +71,8 @@ import { recordWorkSettlement } from "./work-record.ts";
 // 执事间递话（2026-11-08 扫尾批 8d）：通道与工具定义在 partner-relay.ts，
 // 送达函数由装配层注入（本文件不持有 harness）。
 import { createSendToAgentTool, type PartnerRelayDeps } from "./partner-relay.ts";
+// agent 中途播报（2026-11-10 批 13 §三）：工具定义在 progress-report.ts，送达走 delegation 通道。
+import { createReportProgressTool } from "./progress-report.ts";
 import {
 	ProjectError,
 	resolveDelegationProject,
@@ -294,6 +296,13 @@ export interface ToolDeps {
 	routineSelfService?: boolean;
 	/** 排 durable 闹钟；生产由 lifecycle 注入 `routineEngine().ensureScheduled`。 */
 	scheduleRoutine?: (routineId: string) => Promise<void>;
+	/**
+	 * agent 中途播报（2026-11-10 批 13 §三）：为 true 时 `report_progress` 上架。
+	 * 装配层按 `AGENT_PROGRESS_REPORT`（默认开）传入；**不传 = 不上架**
+	 * （单测 / 探针零改动）。任务专线的镜像由 `mirrorTaskNotice` 注入。
+	 */
+	progressReport?: boolean;
+	mirrorTaskNotice?: (conversationId: number, text: string) => void;
 }
 
 let sharedReceipts: DelegationReceipts | null = null;
@@ -1105,6 +1114,13 @@ export function createTools(deps: ToolDeps) {
 	// 它不写盘、不起进程，因此不在 WRITE_TOOLS / 高危清单里。
 	if (askUserEnabled()) tools.push(createAskUserTool());
 
+	// agent 中途播报（2026-11-10 批 13 §三）：装配层显式传 progressReport 才上架
+	// （AGENT_PROGRESS_REPORT=false / 0 / off → 不上架，一行回滚）。
+	// 它不写盘、不起进程：不进 WRITE_TOOLS / 高危清单，只登记能力声明。
+	if (deps.progressReport === true) {
+		tools.push(createReportProgressTool({ mirrorTaskNotice: deps.mirrorTaskNotice }));
+	}
+
 	// 执事技能写入（2026-11-05 批次B B2；批次D D1 扩到主对话=总管）。
 	// 写的是 partner-homes/<id>/skills/<slug>.md（64KB 上限、原子写都在 partners.ts）。
 	// 执事会话写该执事的技能；主对话（owner 会话）解析为 chief → 写总管技能库；
@@ -1393,6 +1409,7 @@ export function createTools(deps: ToolDeps) {
 					"管理**你自己**的例行规则（到点自动跑一轮）：create 建、disable 停用、enable 启用、delete 删除。" +
 					"只能动自己名下的规则，动别人的一律当找不到；每个执事最多 10 条活动规则。" +
 					"create 需要 name（≤40 字）、prompt（这一轮要做什么）、triggers（cron 五段 / interval≥60s / once ISO / event）、sessionMode（persistent 复用会话 / fresh 每轮全新），" +
+					"可选 untilNote（完成条件，一句话；每轮跑完由你判断达成没有，达成即自动停用、保留历史）与 maxRuns（跑满 N 次自动停）。" +
 					"其余动作带 id。例：主人说「你每周五自己盘点」，就用 create 建一条 cron「0 18 * * 5」的周盘点规则。\n" +
 					WORK_REVIEW_GUIDANCE,
 				parameters: Type.Object({
@@ -1421,6 +1438,20 @@ export function createTools(deps: ToolDeps) {
 							description: "create 可选：persistent=复用主会话 / fresh=每轮全新（缺省 persistent）",
 						}),
 					),
+					untilNote: Type.Optional(
+						Type.String({
+							description:
+								"create 可选：完成条件的文字说明（≤200 字）。每轮跑完由你判断达成没有；" +
+								"达成时在回复最后单独一行写 [[routine-done]]，规则会自动停用（不删）。",
+						}),
+					),
+					maxRuns: Type.Optional(
+						Type.Number({
+							description: "create 可选：跑满 N 次自动停（1..1000）；不传 = 不限次数",
+							minimum: 1,
+							maximum: 1000,
+						}),
+					),
 				}),
 				execute: async (args, api) => {
 					// partnerId 由**调用者会话**认出后绑定，绝不接受模型传进来的 partnerId
@@ -1444,6 +1475,8 @@ export function createTools(deps: ToolDeps) {
 								...(args.prompt !== undefined ? { prompt: args.prompt } : {}),
 								...(args.triggers !== undefined ? { triggers: args.triggers } : {}),
 								...(args.sessionMode !== undefined ? { sessionMode: args.sessionMode } : {}),
+								...(args.untilNote !== undefined ? { untilNote: args.untilNote } : {}),
+								...(args.maxRuns !== undefined ? { maxRuns: args.maxRuns } : {}),
 							},
 							defaultRoutineManageContext(partnerId),
 						);

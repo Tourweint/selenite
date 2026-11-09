@@ -196,6 +196,14 @@ export interface RoutineDef {
 	/** persistent = 复用主会话（跟进类保上下文）；fresh = 每次全新专线（检查类防污染） */
 	sessionMode: "persistent" | "fresh";
 	enabled: boolean;
+	/**
+	 * 完成条件（2026-11-10 批 13 §四.1）：一句**文字条件**，每轮跑完由模型自己判断
+	 * 达成没有；判达成 → `enabled=false`（不删，保留历史）。不做表达式引擎。
+	 * `ROUTINE_CONDITIONAL=false` 时忽略（老规则不受影响）。
+	 */
+	until?: { note: string };
+	/** 跑满 N 次自动停（同上开关；比 ends={after,at,times} 全套便宜）。 */
+	maxRuns?: number;
 	/** 每次修改 +1：durable 任务带着旧 revision 醒来时据此作废（替代"取消任务"） */
 	revision: number;
 	createdAt: string;
@@ -297,6 +305,8 @@ export class PartnersStore {
 				session_mode TEXT NOT NULL DEFAULT 'persistent',
 				enabled      INTEGER NOT NULL DEFAULT 1,
 				revision     INTEGER NOT NULL DEFAULT 1,
+				until_note   TEXT,
+				max_runs     INTEGER,
 				created_at   TEXT NOT NULL,
 				updated_at   TEXT NOT NULL
 			);
@@ -365,6 +375,17 @@ export class PartnersStore {
 		}>;
 		if (!versionColumns.some((column) => column.name === "contract_source")) {
 			this.db.exec("ALTER TABLE partner_versions ADD COLUMN contract_source TEXT");
+		}
+		// 例行任务条件门控（2026-11-10 批 13 §四）：旧库补两个 nullable 列，
+		// 老规则读出来是 null（= 无完成条件 / 不限次数），不炸、不补数据。
+		const routineColumns = this.db.prepare("PRAGMA table_info(routines)").all() as Array<{
+			name?: unknown;
+		}>;
+		if (!routineColumns.some((column) => column.name === "until_note")) {
+			this.db.exec("ALTER TABLE routines ADD COLUMN until_note TEXT");
+		}
+		if (!routineColumns.some((column) => column.name === "max_runs")) {
+			this.db.exec("ALTER TABLE routines ADD COLUMN max_runs INTEGER");
 		}
 	}
 
@@ -868,13 +889,17 @@ export class PartnersStore {
 		triggers: RoutineTrigger[];
 		sessionMode: "persistent" | "fresh";
 		enabled: boolean;
+		/** 完成条件（2026-11-10 批 13 §四）：文字条件，达成即停 */
+		until?: { note: string };
+		/** 跑满 N 次自动停 */
+		maxRuns?: number;
 	}): RoutineDef {
 		if (!this.get(input.partnerId)) throw new Error(`执事不存在：${input.partnerId}`);
 		const id = randomUUID();
 		const now = new Date().toISOString();
 		this.db
 			.prepare(
-				"INSERT INTO routines (id, partner_id, name, prompt, triggers, session_mode, enabled, revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+				"INSERT INTO routines (id, partner_id, name, prompt, triggers, session_mode, enabled, revision, until_note, max_runs, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
 			)
 			.run(
 				id,
@@ -884,6 +909,10 @@ export class PartnersStore {
 				JSON.stringify(input.triggers),
 				input.sessionMode,
 				input.enabled ? 1 : 0,
+				input.until?.note.trim() || null,
+				typeof input.maxRuns === "number" && input.maxRuns > 0
+					? Math.floor(input.maxRuns)
+					: null,
 				now,
 				now,
 			);
@@ -917,14 +946,28 @@ export class PartnersStore {
 			triggers?: RoutineTrigger[];
 			sessionMode?: "persistent" | "fresh";
 			enabled?: boolean;
+			/** `null` = 清掉完成条件；`undefined` = 不动 */
+			until?: { note: string } | null;
+			/** `null` = 取消次数上限；`undefined` = 不动 */
+			maxRuns?: number | null;
 		},
 	): RoutineDef | null {
 		const existing = this.getRoutine(id);
 		if (!existing) return null;
 		const now = new Date().toISOString();
+		const untilNote =
+			patch.until === undefined
+				? (existing.until?.note ?? null)
+				: (patch.until?.note.trim() || null);
+		const maxRuns =
+			patch.maxRuns === undefined
+				? (existing.maxRuns ?? null)
+				: (typeof patch.maxRuns === "number" && patch.maxRuns > 0
+						? Math.floor(patch.maxRuns)
+						: null);
 		this.db
 			.prepare(
-				"UPDATE routines SET name = ?, prompt = ?, triggers = ?, session_mode = ?, enabled = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
+				"UPDATE routines SET name = ?, prompt = ?, triggers = ?, session_mode = ?, enabled = ?, until_note = ?, max_runs = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
 			)
 			.run(
 				patch.name ?? existing.name,
@@ -932,6 +975,8 @@ export class PartnersStore {
 				JSON.stringify(patch.triggers ?? existing.triggers),
 				patch.sessionMode ?? existing.sessionMode,
 				(patch.enabled ?? existing.enabled) ? 1 : 0,
+				untilNote,
+				maxRuns,
 				now,
 				id,
 			);
@@ -1288,6 +1333,9 @@ function toRoutine(row: Record<string, unknown>): RoutineDef {
 	} catch {
 		// 坏 JSON 当无触发器：任务不会响，但档案可改
 	}
+	const untilNote =
+		row.until_note === null || row.until_note === undefined ? "" : String(row.until_note).trim();
+	const maxRunsRaw = Number(row.max_runs);
 	return {
 		id: String(row.id),
 		partnerId: String(row.partner_id),
@@ -1296,6 +1344,10 @@ function toRoutine(row: Record<string, unknown>): RoutineDef {
 		triggers,
 		sessionMode: row.session_mode === "fresh" ? "fresh" : "persistent",
 		enabled: Number(row.enabled ?? 0) === 1,
+		...(untilNote ? { until: { note: untilNote } } : {}),
+		...(Number.isFinite(maxRunsRaw) && maxRunsRaw > 0
+			? { maxRuns: Math.floor(maxRunsRaw) }
+			: {}),
 		revision: Number(row.revision ?? 1),
 		createdAt: String(row.created_at ?? ""),
 		updatedAt: String(row.updated_at ?? ""),

@@ -176,6 +176,65 @@ test("执事：删除连家目录一起清；例行任务 revision 自增", () =
 
 // ── 头像（2026-11-06 侧栏调整 B1）───────────────────────────
 
+test("例行条件：until / maxRuns 存取、可清除，老规则默认没有", () => {
+	const { root, db, homes } = tempRoot();
+	const store = new PartnersStore(db, homes);
+	try {
+		const partner = store.create("条件执事");
+		const plain = store.createRoutine({
+			partnerId: partner.id,
+			name: "老规则",
+			prompt: "照旧跑",
+			triggers: [{ type: "cron", expr: "0 9 * * *" }],
+			sessionMode: "persistent",
+			enabled: true,
+		});
+		assert.equal(plain.until, undefined);
+		assert.equal(plain.maxRuns, undefined);
+
+		const conditional = store.createRoutine({
+			partnerId: partner.id,
+			name: "有条件的规则",
+			prompt: "整理到没有待办为止",
+			triggers: [{ type: "interval", seconds: 600 }],
+			sessionMode: "fresh",
+			enabled: true,
+			until: { note: "待办清零" },
+			maxRuns: 5,
+		});
+		assert.deepEqual(conditional.until, { note: "待办清零" });
+		assert.equal(conditional.maxRuns, 5);
+
+		// 重开存储：值必须还在（落库而不是只在内存）
+		store.close();
+		const reopened = new PartnersStore(db, homes);
+		try {
+			const back = reopened.getRoutine(conditional.id);
+			assert.deepEqual(back?.until, { note: "待办清零" });
+			assert.equal(back?.maxRuns, 5);
+
+			const cleared = reopened.updateRoutine(conditional.id, { until: null, maxRuns: null });
+			assert.equal(cleared?.until, undefined, "null = 清掉完成条件");
+			assert.equal(cleared?.maxRuns, undefined, "null = 取消次数上限");
+
+			const restored = reopened.updateRoutine(conditional.id, {
+				until: { note: "改过的条件" },
+				maxRuns: 2,
+			});
+			assert.deepEqual(restored?.until, { note: "改过的条件" });
+			assert.equal(restored?.maxRuns, 2);
+			// 不传的字段保持原值（部分更新）
+			const kept = reopened.updateRoutine(conditional.id, { enabled: false });
+			assert.deepEqual(kept?.until, { note: "改过的条件" });
+			assert.equal(kept?.maxRuns, 2);
+		} finally {
+			reopened.close();
+		}
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("头像：保存 / 清除 / 重开存储仍在，旧记录读 null", () => {
 	const { root, db, homes } = tempRoot();
 	const first = new PartnersStore(db, homes);

@@ -11,6 +11,12 @@ import {
 } from "./partners.ts";
 import { markAutonomyTurn, unmarkAutonomyTurn } from "./autonomy-state.ts";
 import {
+	clearUnattendedSkips,
+	markRoutineTurn,
+	takeUnattendedSkips,
+	unmarkRoutineTurn,
+} from "./unattended.ts";
+import {
 	assessRoutineOutput,
 	ROUTINE_QUIET_INSTRUCTION,
 	routineQuietEnabled,
@@ -157,6 +163,11 @@ export interface PartnerTurnResult {
 	text: string;
 	/** 例行轮"没有值得报告的内容"（2026-11-09 T2 安静契约）；调用方据此不写摘要 */
 	quiet?: boolean;
+	/**
+	 * 无人值守下被跳过的工具名（枚举，不含参数；2026-11-10 批 13 §二.2）。
+	 * 空数组 = 没有跳过任何步骤。
+	 */
+	skipped?: string[];
 	/** 失败原因（执事不存在 / 未启用 / 模型未配置等），大白话给调用方 */
 	error?: string;
 }
@@ -203,6 +214,11 @@ ${text}${quietEligible ? `\n\n${ROUTINE_QUIET_INSTRUCTION}` : ""}`
 	const pieces: string[] = [];
 	/** 本轮是否真的产出了模型正文（unanswered 的说明不算，别把错误当"安静"） */
 	let sawDelta = false;
+	// 无人值守标记（2026-11-10 批 13 §一）：例行轮不必依赖 AUTONOMY_ENABLED——
+	// 那个总闸默认关，但例行任务照常跑，判定必须独立成立。
+	if (authority === "autonomous") markRoutineTurn(chat.internalId);
+	// 每轮开头清一次跳过账：只统计本轮，不把上一轮的残留带进 run 记录。
+	clearUnattendedSkips(chat.internalId);
 	if (authority === "autonomous") markAutonomyTurn(chat.internalId);
 	try {
 		// 结算记录拿来看 unanswered 的 reason（候选链要不要切就看它）
@@ -248,14 +264,23 @@ ${text}${quietEligible ? `\n\n${ROUTINE_QUIET_INSTRUCTION}` : ""}`
 		// 只在"真跑完了"的轮次上判安静：unanswered 的说明/错误不能当"没内容"吞掉。
 		const canJudge = quietEligible && (sawDelta || settled.record?.status === "done");
 		const verdict = canJudge ? assessRoutineOutput(joined) : { quiet: false, text: joined };
+		const skipped = takeUnattendedSkips(chat.internalId);
 		return verdict.quiet
-			? { ok: true, text: verdict.text, quiet: true }
-			: { ok: true, text: verdict.text };
+			? { ok: true, text: verdict.text, quiet: true, skipped }
+			: { ok: true, text: verdict.text, skipped };
 	} catch (error) {
 		const detail = error instanceof Error ? error.message : String(error);
-		return { ok: false, text: pieces.join(""), error: `这一轮没跑完：${detail}` };
+		return {
+			ok: false,
+			text: pieces.join(""),
+			error: `这一轮没跑完：${detail}`,
+			skipped: takeUnattendedSkips(chat.internalId),
+		};
 	} finally {
-		if (authority === "autonomous") unmarkAutonomyTurn(chat.internalId);
+		if (authority === "autonomous") {
+			unmarkAutonomyTurn(chat.internalId);
+			unmarkRoutineTurn(chat.internalId);
+		}
 	}
 }
 
