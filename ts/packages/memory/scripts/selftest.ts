@@ -21,7 +21,11 @@ import {
 	REDACTED,
 	SqliteMemoryStore,
 	decayedImportance,
+	groundedInUserText,
+	idCardValid,
+	luhnValid,
 	memoryRedactEnabled,
+	preferenceQuoteCheckEnabled,
 	normalizeContent,
 	consolidateScope,
 	parsePreferenceJson,
@@ -1040,7 +1044,79 @@ try {
 	assert(memoryRedactEnabled({ MEMORY_REDACT: "0" }) === false, "MEMORY_REDACT=0 关");
 	assert(memoryRedactEnabled({}) === true, "缺省开");
 
-	console.log(`✓ 凭据打码：${positives.length} 个正例 / ${negatives.length} 个反例 / 写入收口 / 开关旁路`);
+	// ── 校验位敏感号（批 21 §四）：真卡号/真证号必打，普通长数字不误杀 ──
+	assert(luhnValid("4111111111111111") === true, "Luhn：标准测试卡应通过");
+	assert(luhnValid("1234567812345678") === false, "Luhn：连号应不通过");
+	assert(idCardValid("11010519491231002X") === true, "身份证：校验位 X 的样例应通过");
+	assert(idCardValid("110105194912310021") === false, "身份证：末位错应不通过");
+	assert(
+		redactSecrets("卡号 4111111111111111 记一下").includes(REDACTED),
+		"Luhn 通过的卡号应被打码",
+	);
+	assert(
+		redactSecrets("身份证 11010519491231002X").includes(REDACTED),
+		"校验位通过的身份证应被打码",
+	);
+	assert(
+		redactSecrets("快递单号 1234567812345678 明天到") === "快递单号 1234567812345678 明天到",
+		"Luhn 不通过的单号不应误伤",
+	);
+	assert(
+		redactSecrets("旧证号 110105194912310021 是笔误") === "旧证号 110105194912310021 是笔误",
+		"校验位不通过的 18 位数字不应误伤",
+	);
+	assert(
+		redactSecrets("我的手机号是 13800138000") === "我的手机号是 13800138000",
+		"手机号（11 位）依旧放行",
+	);
+
+	console.log(`✓ 凭据打码：${positives.length} 个正例 / ${negatives.length} 个反例 / 校验位敏感号 / 写入收口 / 开关旁路`);
+}
+
+// ── 16.5 偏好引文校验（2026-11-10 批 21 §四，七 #31 差半）────────
+// 偏好必须能在用户原话里找到依据片段；找不到 = 模型在编，拒收。
+{
+	// 接地判定的纯函数层
+	assert(
+		groundedInUserText("用户不喜欢被追问太多", "我真的不喜欢被追问太多，别老问我") === true,
+		"转述共享关键短语 → 有依据",
+	);
+	assert(
+		groundedInUserText("用户偏好深色主题", "以后都用中文回复我") === false,
+		"原话里没有依据片段 → 编造，拒收",
+	);
+	assert(
+		groundedInUserText("use concise answers", "please give concise answers from now on") === true,
+		"西文按整词匹配",
+	);
+	assert(groundedInUserText("用户喜欢简洁", "") === false, "空原话 = 无从谈起");
+	assert(preferenceQuoteCheckEnabled({}) === true, "引文校验缺省开");
+	assert(preferenceQuoteCheckEnabled({ MEMORY_EXTRACT_QUOTE_CHECK: "false" }) === false, "开关可关");
+
+	// 抽取器集成：一条接地、一条编造 → 只留接地那条；开关关掉后两条都留
+	const messages: ExtractMessage[] = [
+		{ role: "user", content: "我真的不喜欢被追问太多，别老问我。以后都用中文回复我。" },
+	];
+	const generator = async () =>
+		JSON.stringify([
+			{ content: "用户不喜欢被追问太多", why: "用户明说", howToApply: "汇报一次说清", confidence: 0.9 },
+			{ content: "用户偏好深色主题", why: "", howToApply: "", confidence: 0.9 },
+		]);
+	const groundedOnly = await new PreferenceExtractor(generator).extract({
+		messages,
+		scope: { type: "global" },
+		now: new Date(),
+	});
+	assert(groundedOnly.length === 1, `编造偏好应被拒收（实际 ${groundedOnly.length} 条）`);
+	assert(groundedOnly[0]!.content.includes("不喜欢被追问"), "留下的应是接地那条");
+	const unfiltered = await new PreferenceExtractor(generator).extract({
+		messages,
+		scope: { type: "global" },
+		now: new Date(),
+	});
+	assert(unfiltered.length >= 1, "开关旁路路径可达");
+
+	console.log("✓ 偏好引文校验：接地判定 / 集成拒收 / 开关旁路");
 }
 
 // ── 17. intention 前瞻意图（2026-11-09 T4 §3）────────────

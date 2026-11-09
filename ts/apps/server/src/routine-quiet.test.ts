@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
 	assessRoutineOutput,
+	assessRoutineOutputGuarded,
 	NO_UPDATE_MARKER,
 	routineQuietEnabled,
 	routineQuietMinChars,
@@ -73,4 +74,18 @@ test("阈值与回滚开关：ROUTINE_QUIET=false 回到旧行为；阈值可调
 	withEnv({ ROUTINE_QUIET_MIN_CHARS: "abc" }, () => {
 		assert.equal(routineQuietMinChars(), 40, "非法值回落缺省");
 	});
+});
+
+test("工具报错压制安静（批 21 §三：读失败不当无新）", () => {
+	// 看起来"没内容"的产出 + 本轮有工具报错 → 不判安静（宁可多报一次）
+	assert.equal(assessRoutineOutputGuarded("没查到新内容", 1).quiet, false);
+	assert.equal(assessRoutineOutputGuarded("没查到新内容", 3).quiet, false);
+	// [[no-update]] 显式标记也一样被压制——模型说没更新，但工具刚报过错，不可信
+	assert.equal(assessRoutineOutputGuarded(`查完了。${NO_UPDATE_MARKER}`, 1).quiet, false);
+	// 没有工具报错 → 判定原样
+	assert.equal(assessRoutineOutputGuarded("没查到新内容", 0).quiet, true);
+	// 工具报错不反向制造 quiet：本来就有内容的轮照旧
+	assert.equal(assessRoutineOutputGuarded("发现了 3 条新消息，已整理进笔记", 2).quiet, false);
+	// 文本原样透传（含标记剔除），不因压制而改变
+	assert.equal(assessRoutineOutputGuarded(`查完了。${NO_UPDATE_MARKER}`, 1).text, "查完了。");
 });

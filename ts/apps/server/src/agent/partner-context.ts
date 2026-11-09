@@ -84,6 +84,27 @@ export function artifactHandoffEnabled(env: NodeJS.ProcessEnv = process.env): bo
 	return raw !== "false" && raw !== "0" && raw !== "off";
 }
 
+// ── 主人数据红线（2026-11-10 批 21 §七；compass AGENTS.md 四条成文）────────
+//
+// 六 §七#5 的差半：权限分级表 / 提案制 / 引原话不打分 / 日记不可重写。
+// 注入防御与"一次批准一次改动"此前已落地（批 11/批 12），不在此重复。
+// 固定字节；落点：执事纪律段（总管与普通执事共用——总管同样面对主人的数据）。
+
+export const OWNER_DATA_DISCIPLINE = [
+	"【主人数据红线】",
+	"- 数据域分级：主人的日记与记忆=只能追加或经提案；主人配置=只读；自己的家目录=可写。",
+	"- 有判断，无权力：改主人层面的文件先提案，说清改什么、为什么；一次批准只覆盖一件事。",
+	"- 日记域永不删除、重写、重排或「顺手清理」：只追加，或出一份只读报告。",
+	"- 引主人的原话：引原文并标日期；不复述成自己的话，不打分不评判。",
+].join("\n");
+
+/** 回滚开关：默认开；`PARTNER_OWNER_DATA_DISCIPLINE=false` → 纪律段回到改动前（逐字节一致）。 */
+export function ownerDataDisciplineEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = (env.PARTNER_OWNER_DATA_DISCIPLINE ?? "").trim().toLowerCase();
+	if (!raw) return true;
+	return raw !== "false" && raw !== "0" && raw !== "off";
+}
+
 // ── 岗位契约 ─────────────────────────────────────────────
 
 /**
@@ -374,6 +395,9 @@ export function buildPartnerDisciplineSection(partnerId: string): string {
 		GROUNDING_DISCIPLINE,
 		// 产物交接（批 19 §三）：接力时产物优先；同样不按身份分，谁交接谁负责。
 		artifactHandoffEnabled() ? ARTIFACT_HANDOFF : undefined,
+		// 主人数据红线（批 21 §七）：数据域分级/提案制/日记不可重写/引原话不打分；
+		// 不按身份分——总管与执事同样面对主人的数据。
+		ownerDataDisciplineEnabled() ? OWNER_DATA_DISCIPLINE : undefined,
 		// 汇报卡三规则（批 15 §二）：只给普通执事；总管那条时间线由界面承载，
 		// 加进来会改变总管纪律段的固定字节，故跳过。
 		partnerId === CHIEF_PARTNER_ID || !briefCardRulesEnabled() ? undefined : BRIEF_CARD_RULES,

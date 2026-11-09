@@ -58,6 +58,59 @@ const BARE_RULES: Array<{ pattern: RegExp; replacement: string }> = [
 	},
 ];
 
+// ── 校验位敏感号（2026-11-10 批 21 §四，七 #31 差半）──────────────
+//
+// 光看形状会把普通长数字（快递单 / 订单号）误杀，所以只打"校验位也通过"的：
+// 银行卡走 Luhn，身份证走 GB 11643 的 MOD 11-2。误伤率从"所有 13-19 位数字"
+// 降到"碰巧通过校验位的那一小撮"，而真卡号/真证号必过。15 位老身份证没有
+// 校验位可验，刻意不收（形状打码会误伤 15 位普通数字）。
+
+/** Luhn 算法（ISO/IEC 7812-1）：从右往左隔位翻倍求和，模 10 为 0 通过。 */
+export function luhnValid(digits: string): boolean {
+	if (!/^\d{2,}$/.test(digits)) return false;
+	let sum = 0;
+	let double = false;
+	for (let i = digits.length - 1; i >= 0; i -= 1) {
+		let value = digits.charCodeAt(i) - 48;
+		if (double) {
+			value *= 2;
+			if (value > 9) value -= 9;
+		}
+		sum += value;
+		double = !double;
+	}
+	return sum % 10 === 0;
+}
+
+/** 18 位身份证校验（GB 11643-1999 MOD 11-2）：末位可为 X。 */
+export function idCardValid(id: string): boolean {
+	if (!/^\d{17}[\dXx]$/.test(id)) return false;
+	const weights = [7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2];
+	const checks = ["1", "0", "X", "9", "8", "7", "6", "5", "4", "3", "2"];
+	let sum = 0;
+	for (let i = 0; i < 17; i += 1) {
+		sum += (id.charCodeAt(i) - 48) * weights[i]!;
+	}
+	return checks[sum % 11] === id.charAt(17).toUpperCase();
+}
+
+/** 13-19 位、前后不再连着数字（手机号 11 位、日期、普通编号都够不着）。 */
+const SENSITIVE_NUMBER_PATTERNS = {
+	idCard: /(?<![0-9Xx])[0-9]{17}[0-9Xx](?![0-9Xx])/g,
+	cardLike: /(?<![0-9])[0-9]{13,19}(?![0-9])/g,
+};
+
+/** 校验位敏感号打码：身份证（含 X）先走，剩下的长数字里只打 Luhn 通过的。 */
+function redactSensitiveNumbers(text: string): string {
+	let output = text.replace(SENSITIVE_NUMBER_PATTERNS.idCard, (match) =>
+		idCardValid(match) ? REDACTED : match,
+	);
+	output = output.replace(SENSITIVE_NUMBER_PATTERNS.cardLike, (match) =>
+		luhnValid(match) ? REDACTED : match,
+	);
+	return output;
+}
+
 /**
  * 把一段正文里的凭据替换成 `«redacted»`。幂等：已经打码的占位符不会再被命中。
  * 没有命中时原样返回（不做 trim / 不做空白归一 —— 那是巩固层的活）。
@@ -69,6 +122,7 @@ export function redactSecrets(text: string): string {
 	for (const pattern of KEYED_RULES) {
 		output = output.replace(pattern, (_match, prefix: string) => `${prefix}${REDACTED}`);
 	}
+	output = redactSensitiveNumbers(output);
 	for (const rule of BARE_RULES) {
 		output = output.replace(rule.pattern, rule.replacement);
 	}

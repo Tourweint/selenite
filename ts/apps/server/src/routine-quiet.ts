@@ -56,3 +56,20 @@ export function assessRoutineOutput(raw: string): RoutineOutputVerdict {
 		/\d{1,2}\s*月\s*\d{1,2}\s*日/.test(text);
 	return { quiet: !hasSignal, text };
 }
+
+/**
+ * 带工具错误语境的安静判定（2026-11-10 批 21 §三，七 #40 的"读失败不当无新"）。
+ *
+ * 本轮有任何工具报错时，"看起来没内容"不能当安静吞掉——读源失败 ≠ 没有更新，
+ * 宁可多报一次，不把读失败说成"无新"（OpenMausBot 游标纪律的运行层对应物；
+ * 触发层的游标已由三门"触发时才写基线"管住，这里管产出层）。
+ * 工具报错只压 quiet，不反向制造 quiet；非 quiet 判定原样返回。
+ */
+export function assessRoutineOutputGuarded(
+	raw: string,
+	toolErrorCount: number,
+): RoutineOutputVerdict {
+	const verdict = assessRoutineOutput(raw);
+	if (verdict.quiet && toolErrorCount > 0) return { quiet: false, text: verdict.text };
+	return verdict;
+}

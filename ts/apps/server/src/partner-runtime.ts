@@ -11,13 +11,15 @@ import {
 } from "./partners.ts";
 import { markAutonomyTurn, unmarkAutonomyTurn } from "./autonomy-state.ts";
 import {
+	clearTurnToolErrors,
 	clearUnattendedSkips,
 	markRoutineTurn,
+	takeTurnToolErrors,
 	takeUnattendedSkips,
 	unmarkRoutineTurn,
 } from "./unattended.ts";
 import {
-	assessRoutineOutput,
+	assessRoutineOutputGuarded,
 	ROUTINE_QUIET_INSTRUCTION,
 	routineQuietEnabled,
 } from "./routine-quiet.ts";
@@ -164,6 +166,11 @@ export interface PartnerTurnResult {
 	/** 例行轮"没有值得报告的内容"（2026-11-09 T2 安静契约）；调用方据此不写摘要 */
 	quiet?: boolean;
 	/**
+	 * 本轮报过错的工具名（枚举，不含参数与报错正文；2026-11-10 批 21 §三）。
+	 * 有它在手时安静判定已被压制（读失败不当"无新"）；空/缺省 = 本轮没有工具报错。
+	 */
+	toolErrors?: string[];
+	/**
 	 * 无人值守下被跳过的工具名（枚举，不含参数；2026-11-10 批 13 §二.2）。
 	 * 空数组 = 没有跳过任何步骤。
 	 */
@@ -217,8 +224,9 @@ ${text}${quietEligible ? `\n\n${ROUTINE_QUIET_INSTRUCTION}` : ""}`
 	// 无人值守标记（2026-11-10 批 13 §一）：例行轮不必依赖 AUTONOMY_ENABLED——
 	// 那个总闸默认关，但例行任务照常跑，判定必须独立成立。
 	if (authority === "autonomous") markRoutineTurn(chat.internalId);
-	// 每轮开头清一次跳过账：只统计本轮，不把上一轮的残留带进 run 记录。
-	clearUnattendedSkips(chat.internalId);
+		// 每轮开头清一次跳过账与工具报错账：只统计本轮，不把上一轮的残留带进 run 记录。
+		clearUnattendedSkips(chat.internalId);
+		clearTurnToolErrors(chat.internalId);
 	if (authority === "autonomous") markAutonomyTurn(chat.internalId);
 	try {
 		// 结算记录拿来看 unanswered 的 reason（候选链要不要切就看它）
@@ -261,13 +269,22 @@ ${text}${quietEligible ? `\n\n${ROUTINE_QUIET_INSTRUCTION}` : ""}`
 		// 边界：模型这一轮的 assistant 条目由 durable 内核落盘，服务端没有撤回 API；
 		// 这里保证的是"服务端不再写第二遍"，不是"transcript 里绝对没有痕迹"。
 		const joined = pieces.join("");
+		// 工具报错账（批 21 §三）：本轮有任何工具报错，"看起来没内容"不当安静吞掉。
+		const toolErrors = takeTurnToolErrors(chat.internalId);
 		// 只在"真跑完了"的轮次上判安静：unanswered 的说明/错误不能当"没内容"吞掉。
 		const canJudge = quietEligible && (sawDelta || settled.record?.status === "done");
-		const verdict = canJudge ? assessRoutineOutput(joined) : { quiet: false, text: joined };
+		const verdict = canJudge
+			? assessRoutineOutputGuarded(joined, toolErrors.length)
+			: { quiet: false, text: joined };
 		const skipped = takeUnattendedSkips(chat.internalId);
 		return verdict.quiet
 			? { ok: true, text: verdict.text, quiet: true, skipped }
-			: { ok: true, text: verdict.text, skipped };
+			: {
+					ok: true,
+					text: verdict.text,
+					skipped,
+					...(toolErrors.length > 0 ? { toolErrors } : {}),
+				};
 	} catch (error) {
 		const detail = error instanceof Error ? error.message : String(error);
 		return {

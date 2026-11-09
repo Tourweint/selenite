@@ -29,8 +29,10 @@ import {
 } from "./agent/turn-gate.ts";
 import {
 	ARTIFACT_HANDOFF,
+	OWNER_DATA_DISCIPLINE,
 	buildPartnerDisciplineSection,
 	buildPartnerTurnContext,
+	ownerDataDisciplineEnabled,
 } from "./agent/partner-context.ts";
 import { PARTNER_CONTRACT_SECTIONS, PartnersStore, partnerContractTemplate } from "./partners.ts";
 import { failureStreak } from "./failure-streak.ts";
@@ -50,9 +52,10 @@ const FIXED_TEXTS: Array<[string, string]> = [
 	["TAKEOVER_HINT", TAKEOVER_HINT],
 	["CLARIFY_CONTRACT", CLARIFY_CONTRACT],
 	["ARTIFACT_HANDOFF", ARTIFACT_HANDOFF],
+	["OWNER_DATA_DISCIPLINE", OWNER_DATA_DISCIPLINE],
 ];
 
-test("固定字节：七段口径都不含日期 / 时刻 / 会话 id", () => {
+test("固定字节：八段口径都不含日期 / 时刻 / 会话 id", () => {
 	for (const [name, text] of FIXED_TEXTS) {
 		assert.ok(text.length > 0, `${name} 不能为空`);
 		assert.equal(/20\d{2}-\d{1,2}-\d{1,2}/.test(text), false, `${name} 不含日期`);
@@ -98,6 +101,34 @@ test("产物交接：产物落盘、点名路径、下一棒从产物开始", ()
 	} finally {
 		if (saved === undefined) delete process.env.PARTNER_ARTIFACT_HANDOFF;
 		else process.env.PARTNER_ARTIFACT_HANDOFF = saved;
+	}
+});
+
+test("主人数据红线（批 21 §七）：分级 / 提案制 / 日记不可重写 / 引原话不打分", () => {
+	assert.match(OWNER_DATA_DISCIPLINE, /数据域分级/);
+	assert.match(OWNER_DATA_DISCIPLINE, /只能追加或经提案/);
+	assert.match(OWNER_DATA_DISCIPLINE, /主人配置=只读/);
+	assert.match(OWNER_DATA_DISCIPLINE, /有判断，无权力/);
+	assert.match(OWNER_DATA_DISCIPLINE, /一次批准只覆盖一件事/);
+	assert.match(OWNER_DATA_DISCIPLINE, /日记域永不删除、重写、重排/);
+	assert.match(OWNER_DATA_DISCIPLINE, /引原文并标日期/);
+	assert.match(OWNER_DATA_DISCIPLINE, /不打分不评判/);
+	assert.ok(
+		buildPartnerDisciplineSection("partner-uuid").includes(OWNER_DATA_DISCIPLINE),
+		"执事纪律段包含主人数据红线",
+	);
+	assert.ok(buildPartnerDisciplineSection("chief").includes(OWNER_DATA_DISCIPLINE), "总管纪律段同样包含");
+	const saved = process.env.PARTNER_OWNER_DATA_DISCIPLINE;
+	process.env.PARTNER_OWNER_DATA_DISCIPLINE = "false";
+	try {
+		assert.ok(
+			!buildPartnerDisciplineSection("partner-uuid").includes(OWNER_DATA_DISCIPLINE),
+			"开关关掉整段不注入",
+		);
+		assert.equal(ownerDataDisciplineEnabled({} as NodeJS.ProcessEnv), true, "缺省开");
+	} finally {
+		if (saved === undefined) delete process.env.PARTNER_OWNER_DATA_DISCIPLINE;
+		else process.env.PARTNER_OWNER_DATA_DISCIPLINE = saved;
 	}
 });
 
@@ -171,9 +202,14 @@ test("装配：执事轮输入含四段纪律；总管轮不重复验证铁律",
 		assert.match(chief.discipline, /【裁决纪律】/);
 		assert.equal(
 			buildPartnerDisciplineSection("chief"),
-			[RULING_DISCIPLINE, WORK_SILENCE_DISCIPLINE, GROUNDING_DISCIPLINE, ARTIFACT_HANDOFF, ATTENTION_ONE_QUESTION].join(
-				"\n\n",
-			),
+			[
+				RULING_DISCIPLINE,
+				WORK_SILENCE_DISCIPLINE,
+				GROUNDING_DISCIPLINE,
+				ARTIFACT_HANDOFF,
+				OWNER_DATA_DISCIPLINE,
+				ATTENTION_ONE_QUESTION,
+			].join("\n\n"),
 		);
 	} finally {
 		store.close();

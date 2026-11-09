@@ -195,3 +195,32 @@ export function takeUnattendedSkips(conversationId: number): string[] {
 	skips.delete(conversationId);
 	return [...set].sort();
 }
+
+// ── 工具报错记账（2026-11-10 批 21 §三，七 #40"读失败不当无新"）──────
+//
+// 与跳过记账同款：只记**工具名枚举**，不记参数与报错正文。一轮开始清空、
+// 跑完由 partner-runtime 取走——安静判定据此把"有工具报错的轮"从 quiet 里捞出来
+// （读源失败 ≠ 没有更新）。进程内 Map，不落盘。
+
+const turnToolErrors = new Map<number, Set<string>>();
+
+export function clearTurnToolErrors(conversationId: number): void {
+	turnToolErrors.delete(conversationId);
+}
+
+export function noteTurnToolError(conversationId: number, tool: string): void {
+	let set = turnToolErrors.get(conversationId);
+	if (!set) {
+		set = new Set<string>();
+		turnToolErrors.set(conversationId, set);
+	}
+	set.add(tool);
+}
+
+/** 取走本轮报错的工具名（取走即清空）；没有报错 = 空数组。 */
+export function takeTurnToolErrors(conversationId: number): string[] {
+	const set = turnToolErrors.get(conversationId);
+	if (!set) return [];
+	turnToolErrors.delete(conversationId);
+	return [...set].sort();
+}

@@ -16,15 +16,16 @@ import (
 	"os"
 	"os/exec"
 	"testing"
+	"time"
 )
 
 func TestServicePort(t *testing.T) {
 	cases := map[string]int{
 		"http://127.0.0.1:39847": 39847,
-		"http://127.0.0.1:5000/":  5000,
-		"http://127.0.0.1":        39847, // 没写端口 → 默认值
-		"":                        39847,
-		"not a url":               39847,
+		"http://127.0.0.1:5000/": 5000,
+		"http://127.0.0.1":       39847, // 没写端口 → 默认值
+		"":                       39847,
+		"not a url":              39847,
 	}
 	for base, want := range cases {
 		if got := servicePort(base); got != want {
@@ -131,5 +132,41 @@ func TestStatusSeparatesStoppedFromFailed(t *testing.T) {
 func TestNetstatAvailable(t *testing.T) {
 	if _, err := exec.LookPath("netstat"); err != nil {
 		t.Skip("没有 netstat，跳过（Windows 自带；其它平台这条用例不适用）")
+	}
+}
+
+// 批 21 §五：守护熔断状态机（不需要真起 Node 的那部分）。
+// 窗口内 3 次失败开熔断；健康/手动重试清零；窗口外的旧失败不计入。
+func TestWatchBreaker(t *testing.T) {
+	r := &runtimeCtl{base: "http://127.0.0.1:1"}
+	base := time.Now()
+	if r.BreakerOpen() {
+		t.Fatal("新控制器不该带着熔断")
+	}
+	// 窗口内两次失败：还不开
+	if r.NotePullFailure(base) {
+		t.Fatal("1 次失败不该开熔断")
+	}
+	if r.NotePullFailure(base.Add(time.Minute)) {
+		t.Fatal("2 次失败不该开熔断")
+	}
+	// 第三次（仍在 10 分钟窗口内）→ 熔断打开
+	if !r.NotePullFailure(base.Add(2 * time.Minute)) {
+		t.Fatal("窗口内第 3 次失败应开熔断")
+	}
+	if !r.BreakerOpen() {
+		t.Fatal("熔断应已打开")
+	}
+	// 清零（手动重试/健康）→ 关
+	r.ResetWatchBreaker()
+	if r.BreakerOpen() {
+		t.Fatal("清零后熔断应解除")
+	}
+	// 窗口滑动：两次在窗口内、第三次已滑出 → 不开
+	r2 := &runtimeCtl{base: "http://127.0.0.1:1"}
+	_ = r2.NotePullFailure(base)
+	_ = r2.NotePullFailure(base.Add(time.Minute))
+	if r2.NotePullFailure(base.Add(11 * time.Minute)) {
+		t.Fatal("10 分钟窗口外的失败不应计入（老失败不该永久记账）")
 	}
 }

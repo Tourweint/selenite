@@ -39,6 +39,7 @@ import { autonomyEscalationBlockReason, autonomyRiskVerdict } from "../autonomy-
 import {
 	UNATTENDED_SKIP_MESSAGE,
 	isUnattended,
+	noteTurnToolError,
 	noteUnattendedSkip,
 	resolveUnattendedVerdict,
 	unattendedDenyReason,
@@ -139,7 +140,7 @@ import {
 	skillStore,
 } from "./assist.ts";
 import { approvalArgsHash } from "./approval-key.ts";
-import { INJECTION_GUARD, injectionGuardEnabled, wrapUntrustedObjective } from "./injection-guard.ts";
+import { INJECTION_GUARD, guardRelayDelivery, injectionGuardEnabled, wrapUntrustedObjective } from "./injection-guard.ts";
 import { buildPartnerTurnContext } from "./partner-context.ts";
 // 执事轮装配的履历摘要读口（2026-11-08 刀二 E2）：结构化查询 work 记录，不走语义召回。
 import { workSummaryFor } from "../work-record.ts";
@@ -313,6 +314,9 @@ async function deliverPartnerRelay(
 	body: string,
 	sender: RelaySenderContext,
 ): Promise<RelayDeliverResult> {
+	// 批 21 §二：递话正文是"别人说的话"，送达前包 untrusted_objective（数据非指令）；
+	// 开关沿用 AGENT_INJECTION_GUARD，关时逐字节不变。
+	const guardedBody = guardRelayDelivery(body);
 	const target = partnersStore().get(targetPartnerId);
 	if (!target) return { ok: false, error: "这位执事已经不在了" };
 	const sessionId = partnersStore().sessionIdOfPartner(targetPartnerId);
@@ -334,7 +338,7 @@ async function deliverPartnerRelay(
 		let submission;
 		try {
 			submission = await conversation.submit(
-				{ type: "input", content: body, whenBusy: "followUp" },
+				{ type: "input", content: guardedBody, whenBusy: "followUp" },
 				CTX,
 			);
 		} catch (error) {
@@ -898,6 +902,9 @@ async function openHarness(): Promise<Harness> {
 						if (call.parent === undefined) {
 							const streakSource = `tool:${call.name}`;
 							if (result.isError) {
+								// 例行轮安静契约的"读失败不当无新"（批 21 §三）：本轮工具报过错，
+								// 产出就不能当安静吞掉——partner-runtime 收轮时取走。
+								noteTurnToolError(api.conversationId, call.name);
 								const text = typeof result.output === "string" ? result.output : "";
 								const isTimeout = /timed out|timeout/i.test(text);
 								failureStreak().recordFailure(streakSource, isTimeout ? "timeout" : "tool-error");

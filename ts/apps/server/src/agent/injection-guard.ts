@@ -25,3 +25,15 @@ export function injectionGuardEnabled(): boolean {
 export function wrapUntrustedObjective(text: string): string {
 	return `<untrusted_objective>${text}</untrusted_objective>`;
 }
+
+/**
+ * 递话送达体进目标上下文前的包裹决策（批 21 §二）。
+ *
+ * 递话正文是"别人说的话"——INJECTION_GUARD 第三条纪律的对象。在送达边界
+ * （lifecycle `deliverPartnerRelay`）把整个送达体包成 untrusted_objective：
+ * hop 标记与来信人行是机械描述，一并包住无害；正文才是要标记的部分。
+ * 开关沿用 `AGENT_INJECTION_GUARD`（不加新开关）；关时逐字节等于原送达体。
+ */
+export function guardRelayDelivery(body: string, enabled = injectionGuardEnabled()): string {
+	return enabled ? wrapUntrustedObjective(body) : body;
+}

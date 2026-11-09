@@ -664,10 +664,14 @@ class RoutineEngine {
 				completedRunsBefore: completedBefore,
 			});
 			if (conditional) run.outcome = verdict.outcome;
+			// 工具报错的轮（批 21 §三"读失败不当无新"）：安静已被压制，这里把报错工具
+			// 记成枚举前缀，run 记录一眼看出"这轮为什么没算安静"。不记报错正文（日志纪律）。
+			const toolErrors = result.toolErrors ?? [];
+			const errorTag = toolErrors.length > 0 ? `[工具报错:${toolErrors.join(",")}] ` : "";
 			// 安静轮（2026-11-09 T2）：只记枚举，不把"无事发生"的正文写进摘要
 			run.summary = result.quiet
 				? "quiet"
-				: (doneMarker.text || result.error || "").replace(/\s+/g, " ").slice(0, 200);
+				: (errorTag + (doneMarker.text || result.error || "")).replace(/\s+/g, " ").slice(0, 200);
 			if (skipped.length > 0) {
 				console.log(
 					`[routine] 本轮跳过 ${skipped.length} 个需要花钱/批准的步骤（规则 ${routine.id.slice(0, 8)}）`,

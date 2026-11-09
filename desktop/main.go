@@ -377,9 +377,12 @@ func trayIcon() []byte {
 	return trayIconPNG
 }
 
-// watchService：运行期守护（批次二）。
+// watchService：运行期守护（批次二；批 21 §五加退避与熔断）。
 //
-// 10s 一探 /healthz，连续 3 次失败视为失联，自动重拉一次（30s 防抖，防疯狂重启）。
+// 10s 一探 /healthz，连续 3 次失败视为失联，自动重拉。重拉后按 1/2/4s 退避
+// （封顶 4s，DSH-Android 参数）在 25s 窗口内等它就绪：等到了清零计数，等不到
+// 记一次"拉起失败"——10 分钟内 3 次拉起失败即熔断，停止自动重拉并弹一次提示
+// （对话框带"立即重试"，点了就清零计数再拉一次）。服务探活到健康也会自动解除熔断。
 // 页面自己的 checkHealth 每 8s 自查，服务一回来界面自动恢复；这里的职责只是
 // 把挂掉的进程重新拉起来，不碰页面。LIFEDIARY_SHELL_WATCH=off 关掉（回滚开关）。
 func watchService(base string) {
@@ -388,7 +391,6 @@ func watchService(base string) {
 	}
 	go func() {
 		failures := 0
-		var lastPull time.Time
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
@@ -397,6 +399,7 @@ func watchService(base string) {
 			}
 			if healthy(base) {
 				failures = 0
+				runtime.ResetWatchBreaker() // 活着：熔断自动解除（含用户手动拉起的情形）
 				continue
 			}
 			// 用户主动停的：不许重拉（2026-11-07）。没有这一句，点完"停止"半分钟后
@@ -405,15 +408,64 @@ func watchService(base string) {
 				failures = 0
 				continue
 			}
-			failures++
-			if failures < 3 || time.Since(lastPull) < 30*time.Second {
+			// 熔断中：只观察不重拉（用户从对话框/设置页手动拉起后这里自然恢复）。
+			if runtime.BreakerOpen() {
 				continue
 			}
-			lastPull = time.Now()
+			failures++
+			if failures < 3 {
+				continue
+			}
 			log.Println("watch: 服务失联，尝试重拉")
 			runtime.Ensure()
+			// 拉起后别急着算账：按 1/2/4s 退避在 25s 窗口内等就绪（等的是"这次拉起
+			// 到底成没成"这个事实，替代原来固定 30s 防抖的拍脑袋等待）。
+			if waitHealthyBackoff(base, 25*time.Second) {
+				failures = 0
+				runtime.ResetWatchBreaker()
+				continue
+			}
+			if runtime.NotePullFailure(time.Now()) {
+				log.Println("watch: 10 分钟内 3 次拉起失败，守护熔断，停止自动重拉")
+				pullBreakerDialog(base)
+			}
 		}
 	}()
+}
+
+// waitHealthyBackoff 在 deadline 内按 1/2/4s（封顶 4s）退避探活；健康返回 true。
+func waitHealthyBackoff(base string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	gap := time.Second
+	for {
+		if healthy(base) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(gap)
+		if gap < 4*time.Second {
+			gap *= 2
+		}
+	}
+}
+
+// pullBreakerDialog 熔断时的一次性提示：说明现状，给"立即重试"入口（清零计数再拉）。
+// 阻塞在守护 goroutine 里没关系——服务已经起不来了，ticker 丢几个 tick 无所谓。
+func pullBreakerDialog(base string) {
+	res, err := mygo.Dialog.Message(mygo.MessageOptions{
+		Type:          mygo.MessageWarning,
+		Title:         "Selenite 服务守护",
+		Message:       "服务连续 3 次拉起都没就绪，守护已暂停自动重拉（避免无限重启）。可以手动重试一次；反复失败请看服务日志（server-err.log）。",
+		Buttons:       []string{"知道了", "立即重试"},
+		DefaultButton: 0,
+		CancelButton:  0,
+	})
+	if err == nil && res.Button == 1 {
+		runtime.ResetWatchBreaker()
+		runtime.Ensure()
+	}
 }
 
 func main() {

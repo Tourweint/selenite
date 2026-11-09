@@ -61,6 +61,58 @@ type runtimeCtl struct {
 	pid int
 	// busy = 正在起（Start 里拉起后等就绪的那几十秒），界面显示"启动中"。
 	busy bool
+	// 守护熔断（批 21 §五，DSH-Android 参数）：pullWindow 内连续 pullFailLimit 次
+	// "拉起后仍不健康"→ 熔断，watchService 停止自动重拉（弹一次提示，可手动重试）。
+	// 任何一次成功拉起 / 探活到健康都清零——熔断防的是"起不来时无限重拉"，
+	// 不是"永远不再拉"。
+	pullFailAt []time.Time
+	breaker    bool
+}
+
+// 守护熔断参数（照 DSH-Android ENGINE-CONTRACT 的形状，窗口化防"横跨半小时的三次"）
+const (
+	pullWindow    = 10 * time.Minute
+	pullFailLimit = 3
+)
+
+// NotePullFailure 记一次"拉起后仍不健康"；窗口内满 3 次返回 true（熔断打开）。
+func (r *runtimeCtl) NotePullFailure(now time.Time) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.pullFailAt = append(r.pullFailAt, now)
+	// 只留窗口内的
+	fresh := r.pullFailAt[:0]
+	for _, at := range r.pullFailAt {
+		if now.Sub(at) <= pullWindow {
+			fresh = append(fresh, at)
+		}
+	}
+	r.pullFailAt = fresh
+	if len(r.pullFailAt) >= pullFailLimit {
+		r.breaker = true
+	}
+	return r.breaker
+}
+
+// BreakerOpen 给 watchService 看：熔断中只观察不重拉。
+func (r *runtimeCtl) BreakerOpen() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.breaker
+}
+
+// ResetWatchBreaker 清零失败计数并解除熔断（手动重试 / 探活到健康都走这里）。
+func (r *runtimeCtl) ResetWatchBreaker() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.pullFailAt = nil
+	r.breaker = false
+}
+
+// resetWatchBreakerLocked 供已持锁的路径（startLocked）调用；sync.Mutex 不可重入。
+func (r *runtimeCtl) resetWatchBreakerLocked() {
+	r.pullFailAt = nil
+	r.breaker = false
 }
 
 var runtime = &runtimeCtl{base: defaultBaseURL}
@@ -169,6 +221,7 @@ func (r *runtimeCtl) Start() (RuntimeStatus, error) {
 func (r *runtimeCtl) startLocked() (RuntimeStatus, error) {
 	if healthy(r.base) {
 		r.stopped = false // 已经活着：清掉闩，免得守护被一个过期的"停过"卡住
+		r.resetWatchBreakerLocked()
 		return r.statusLocked(), nil
 	}
 	dir := serverDir()
@@ -208,6 +261,8 @@ func (r *runtimeCtl) startLocked() (RuntimeStatus, error) {
 	if err := waitHealthy(r.base, 25*time.Second); err != nil {
 		return r.statusLocked(), fmt.Errorf("进程已拉起（PID %d）但没就绪: %w", r.pid, err)
 	}
+	// 这次拉起是成功的：守护的失败计数与熔断一并清零（批 21 §五"手动重试清零计数"）。
+	r.resetWatchBreakerLocked()
 	return r.statusLocked(), nil
 }
 

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
 	INJECTION_GUARD,
+	guardRelayDelivery,
 	injectionGuardEnabled,
 	wrapUntrustedObjective,
 } from "./agent/injection-guard.ts";
@@ -40,4 +41,16 @@ test("开关：缺省开；false / 0 / off 关", () => {
 test("用户可控目标：包裹成 untrusted_objective，原文不丢", () => {
 	const wrapped = wrapUntrustedObjective("帮我查一下某公司最近的动向");
 	assert.equal(wrapped, "<untrusted_objective>帮我查一下某公司最近的动向</untrusted_objective>");
+});
+
+test("递话送达体（批 21 §二）：开时包 untrusted_objective，关时逐字节不变", () => {
+	const body = "[relay hop=1][来自执事 信使甲（inbox）] 帮我看下日历\n（这是执事间递话……）";
+	const wrapped = guardRelayDelivery(body, true);
+	assert.equal(
+		wrapped,
+		`<untrusted_objective>${body}</untrusted_objective>`,
+		"整送达体包住（hop 标记是机械描述，一并包住无害），正文逐字节保留",
+	);
+	assert.equal(guardRelayDelivery(body, false), body, "开关关：逐字节等于原送达体（回滚口径）");
+	assert.ok(wrapped.includes("帮我看下日历"), "正文不丢");
 });

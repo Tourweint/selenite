@@ -110,6 +110,51 @@ export const MIN_PREFERENCE_CONFIDENCE = 0.6;
 /** 单条偏好正文上限（含 why/how 段），超过截断——防一段话占满注入预算。 */
 export const MAX_PREFERENCE_CHARS = 400;
 
+// ── 引文校验（2026-11-10 批 21 §四，七 #31 差半）────────────────
+//
+// 偏好必须能在**用户自己的原话**里找到依据片段，找不到 = 模型在编造
+// （把常识或它自己的想法安到用户头上）。与 GROUNDING_DISCIPLINE 同哲学的
+// 机械版：接地不做自然语言判断，只做"归一化后有没有共同的连续片段"。
+
+/** 引文校验开关：`MEMORY_EXTRACT_QUOTE_CHECK=false` 关（默认开，回滚一行）。 */
+export function preferenceQuoteCheckEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = env.MEMORY_EXTRACT_QUOTE_CHECK?.trim().toLowerCase();
+	if (!raw) return true;
+	return raw !== "false" && raw !== "0" && raw !== "off";
+}
+
+/** 归一化：小写、去空白与常见标点——只服务依据匹配，不做通用清洗。 */
+function normalizeForGrounding(text: string): string {
+	return text
+		.toLowerCase()
+		.replace(/[\s，。；、！？：,.:;!?()（）"'「」『』【】\-—_~/\\]+/g, "");
+}
+
+/**
+ * 一条偏好草稿是否在用户原话里有依据：
+ *   - 中文（含 CJK）：content 归一化后，任取 4 个连续字符能在用户原话里找到即算
+ *     （转述会换句式，但关键短语总会保留；4 字在中文里已足够特异）；
+ *   - 纯西文：content 的任一 ≥4 字母词在原话里出现即算。
+ * 空原话 = 没有依据（用户什么都没说，偏好无从谈起）。
+ */
+export function groundedInUserText(content: string, userText: string): boolean {
+	const needle = normalizeForGrounding(content);
+	const haystack = normalizeForGrounding(userText);
+	if (!needle || !haystack) return false;
+	const hasCjk = /\p{Script=Han}/u.test(needle);
+	if (!hasCjk) {
+		// 西文按整词匹配——归一化会把词并成一串，所以从原文小写后切词比对
+		const words = content.toLowerCase().match(/[a-z0-9]{4,}/g) ?? [];
+		const haystackWords = new Set(userText.toLowerCase().match(/[a-z0-9]{4,}/g) ?? []);
+		return words.some((word) => haystackWords.has(word));
+	}
+	for (let i = 0; i + 4 <= needle.length; i += 1) {
+		if (haystack.includes(needle.slice(i, i + 4))) return true;
+	}
+	// content 比较短时（归一化后不足 4 字），退回"整段出现"判定
+	return needle.length < 4 && haystack.includes(needle);
+}
+
 /** 把一条候选渲染成入库形状：`偏好\nWhy: …\nHow: …`（两段可缺）。 */
 export function renderPreference(draft: PreferenceDraft): string {
 	const content = draft.content.replace(/\s+/g, " ").trim();
@@ -242,7 +287,25 @@ export class PreferenceExtractor implements Extractor {
 		if (!raw) return [];
 
 		const scope = scopeKey(input.scope);
-		return parsePreferenceJson(raw).map((draft) => ({
+		const userText = input.messages
+			.filter((message) => message.role === "user")
+			.map((message) => message.content)
+			.join("\n");
+		const quoteCheck = preferenceQuoteCheckEnabled();
+		let rejected = 0;
+		const kept = parsePreferenceJson(raw).filter((draft) => {
+			// 引文校验（批 21 §四）：原话里找不到依据片段的不入库——模型把常识当偏好
+			// 是"宁拒勿收"的经典误报源。只数一次量，不回显内容（日志不含对话内容）。
+			if (quoteCheck && !groundedInUserText(draft.content, userText)) {
+				rejected += 1;
+				return false;
+			}
+			return true;
+		});
+		if (rejected > 0) {
+			console.warn(`[memory-extract] 偏好引文校验拒收 ${rejected} 条（用户原话里找不到依据）`);
+		}
+		return kept.map((draft) => ({
 			kind: "preference" as const,
 			scope,
 			content: renderPreference(draft),
