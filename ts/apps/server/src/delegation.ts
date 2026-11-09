@@ -21,6 +21,8 @@ import type {
 } from "../../../../../chancellor/src/index.ts";
 import { TAKEOVER_HINT } from "./agent/turn-gate.ts";
 import { failureStreak, takeoverHintEnabled } from "./failure-streak.ts";
+import { CHIEF_PARTNER_ID } from "./partners.ts";
+import { authorityRecheckEnabled, recheckAuthority } from "./delegation-authority.ts";
 import type { ProjectRef } from "./projects.ts";
 import {
 	delegationMessages,
@@ -133,6 +135,13 @@ export interface DelegationRuntime {
 		 * 不传 = 不落账（单测与旧调用方零改动）。由装配层注入，内核不碰记忆库。
 		 */
 		recordWork?: (input: WorkSettlementInput) => void;
+		/**
+		 * 续跑前的授权重验（2026-11-10 批 19 §六）：按单号读受理回执里的审批档位。
+		 * 不传 = 不重验（单测与旧调用方零改动）。
+		 */
+		authorityAtAccept?: (ticketId: string) => string | null;
+		/** 现在的审批档位（`ask-all` / `ask-critical` / `none`）；不传 = 读不到，按更严处理。 */
+		approvalLevelNow?: () => string | null;
 		log?: (line: string) => void;
 	}
 
@@ -376,6 +385,37 @@ export const GROUNDING_DISCIPLINE = [
 	"- 说「你上次说过 X」之前，先用 recall 或 recall_sessions 确认 X 真的存在。",
 	"- 查不到就说「我记不清了」，不要编；宁可少说一句，不要补一个像真的细节。",
 ].join("\n");
+
+/**
+ * 总管「开工前先问清」契约（2026-11-10 批 19 §一；全景调研七 #4）。
+ *
+ * 为什么要有：大活开工前不确认对象 / 期望 / 验收，做到一半才发现方向错了，
+ * 返工代价远大于一次提问。但小活不该问——问多了是骚扰，所以契约同时给出"不问"的边界。
+ *
+ * 固定字节；落点：`agent/lifecycle.ts` 的 persona 段之后（只给总管 / 主对话，
+ * 普通执事轮的提问纪律由 partner-context 的 ATTENTION_ONE_QUESTION 负责）。
+ */
+export const CLARIFY_CONTRACT = [
+	"【开工前先问清】",
+	"- 大活（要改 3 个以上文件 / 要跑命令 / 涉及不可逆操作）开工前，先用 ask_user 确认三件事：",
+	"  ① 对象是什么（哪个文件 / 哪个 App / 哪段时间）② 你期望的结果长什么样 ③ 怎么算做好了。",
+	"- 一次只问一个，别把三个问题塞进一次；上一问答完再问下一句。",
+	"- 小活不问（一句话能答的、单文件小改）——问多了是骚扰。",
+].join("\n");
+
+/** 回滚开关：默认开；`AGENT_CLARIFY_CONTRACT=false` → 整段不注入（逐字节回到改动前）。 */
+export function clarifyContractEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = (env.AGENT_CLARIFY_CONTRACT ?? "").trim().toLowerCase();
+	if (!raw) return true;
+	return !["false", "0", "off"].includes(raw);
+}
+
+/** 总管 / 主对话才有；普通执事返回 undefined（他们的提问纪律在 partner-context）。 */
+export function clarifyContractFor(partnerId: string | null): string | undefined {
+	if (!clarifyContractEnabled()) return undefined;
+	if (partnerId && partnerId !== CHIEF_PARTNER_ID) return undefined;
+	return CLARIFY_CONTRACT;
+}
 
 /** 注入给 chancellor 的宰相身份正文上限（批次D D2）：宿主侧按 UTF-8 字节截断，chancellor 只透传。 */
 export const MANAGER_SOUL_LIMIT_BYTES = 4 * 1024;
@@ -758,6 +798,24 @@ export function startDelegation(
 
 	const projectField = kick.project ? { project: kick.project } : {};
 	const idempotency = kick.requestId ? { idempotencyKey: kick.requestId } : {};
+	// 授权重验（批 19 §六）：续跑前把"受理时的审批档位"和"现在的档位"对一遍。
+	// **不阻断**：更严 / 读不到都只记一行 warning；档位变了不是撤销授权。
+	if (kick.resumeTicketId && authorityRecheckEnabled() && runtime.authorityAtAccept) {
+		try {
+			const check = recheckAuthority(
+				runtime.authorityAtAccept(kick.resumeTicketId),
+				runtime.approvalLevelNow?.() ?? null,
+			);
+			if (check.warning) {
+				runtime.log?.(`${check.warning} ticket=${kick.resumeTicketId.slice(0, 12)}`);
+			}
+		} catch {
+			// 回执 / 策略读取异常：不挡续跑；只记一句枚举式告警。
+			runtime.log?.(
+				`[delegate] 续跑授权重验读取失败（照常续跑） ticket=${kick.resumeTicketId.slice(0, 12)}`,
+			);
+		}
+	}
 	// 执事在自己领域内直派（2026-11-07）：managers:false 让 chancellor 不建分管宰相。
 	// 递归在参数层断掉，不需要改跨仓契约。
 	const managerSwitch = kick.managers === false ? { managers: false as const } : {};

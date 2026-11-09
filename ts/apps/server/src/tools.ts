@@ -68,6 +68,7 @@ import {
 	requestFingerprint,
 } from "./delegation-receipts.ts";
 import { delegationRunSource, runSourceEnabled } from "./run-source.ts";
+import { currentApprovalLevel, currentAuthority } from "./delegation-authority.ts";
 import { isRoutineTurn } from "./unattended.ts";
 import { pruneSessionMemory } from "./memory-prune.ts";
 // 工作履历：派单终态结算落一条 work 记录（2026-11-08 刀二 E2）。
@@ -881,6 +882,8 @@ export function createTools(deps: ToolDeps) {
 				const begun = receipts.begin(requestId, fingerprint, {
 					explicit: Boolean(explicitRequestId),
 					workRoot: chancellorWorkRoot(),
+					// 授权依据（批 19 §六）：受理这一刻的审批档位 + 时间，只记录不判定。
+					authority: currentAuthority(),
 					// 触发来源（批 15 §三）：例行轮 / 设备 / 人；开关关着不写。
 					...(runSourceEnabled()
 						? {
@@ -962,6 +965,10 @@ export function createTools(deps: ToolDeps) {
 					recordWork: recordWorkSettlement,
 					// 只有本机 delegate 按 domain 反查执事身份；远程锚点会话不装配这个缝。
 					identityHitFor: localIdentityHit,
+					// 续跑授权重验（批 19 §六）：受理档位取回执，现在档位取运行时策略。
+					authorityAtAccept: (id) =>
+						receiptsOf(deps).lookupByTicket(id)?.authority?.level ?? null,
+					approvalLevelNow: () => currentApprovalLevel(),
 					log: (line) => console.warn(line),
 				},
 			);

@@ -63,6 +63,27 @@ export function briefCardRulesEnabled(env: NodeJS.ProcessEnv = process.env): boo
 	return raw !== "false" && raw !== "0" && raw !== "off";
 }
 
+// ── 产物交接（2026-11-10 批 19 §三；全景调研三 §四#1）────────
+//
+// 多执事接力时，最大的损耗是"上一棒口头总结了什么"替代了"上一棒真的留下了什么"：
+// 下一棒只能重做一遍，或者接在一个不准确的转述上。这条把"产物优先"钉成契约：
+// 产出物必须落盘、交接必须点名路径、下一棒从产物开始读。
+// 固定字节；落点：执事纪律段（总管与普通执事共用同一装配点）。
+
+export const ARTIFACT_HANDOFF = [
+	"【产物交接】",
+	"- 多执事接力时，产出物必须落盘（文件 / 任务单附件）；下一棒从产物开始，不要从转述开始。",
+	"- 交接时在留言里点名产物路径（哪个文件 / 哪个目录），让下一棒能直接打开。",
+	"- 没有落盘的「做完了」不算交接完成：话可以少说，产物不能少。",
+].join("\n");
+
+/** 回滚开关：默认开；`PARTNER_ARTIFACT_HANDOFF=false` → 纪律段回到改动前（逐字节一致）。 */
+export function artifactHandoffEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = (env.PARTNER_ARTIFACT_HANDOFF ?? "").trim().toLowerCase();
+	if (!raw) return true;
+	return raw !== "false" && raw !== "0" && raw !== "off";
+}
+
 // ── 岗位契约 ─────────────────────────────────────────────
 
 /**
@@ -351,6 +372,8 @@ export function buildPartnerDisciplineSection(partnerId: string): string {
 		// 答案接地（批 16 §五）：总管与执事都要——它管的是"说出口的事实"，
 		// 谁汇报谁负责，不按身份分。
 		GROUNDING_DISCIPLINE,
+		// 产物交接（批 19 §三）：接力时产物优先；同样不按身份分，谁交接谁负责。
+		artifactHandoffEnabled() ? ARTIFACT_HANDOFF : undefined,
 		// 汇报卡三规则（批 15 §二）：只给普通执事；总管那条时间线由界面承载，
 		// 加进来会改变总管纪律段的固定字节，故跳过。
 		partnerId === CHIEF_PARTNER_ID || !briefCardRulesEnabled() ? undefined : BRIEF_CARD_RULES,

@@ -1,5 +1,6 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import type { WorldFingerprint } from "./world-state.ts";
 
 /**
  * 审批 store（2026-11-04 批次二，A1；2026-11-08 扫尾批 8c 改等待态语义）。
@@ -65,6 +66,11 @@ export interface ApprovalRecord {
 	feedback?: string;
 	/** ask_user 的答复正文（≤1000 字）；只有 `answered` 记录可能有。 */
 	answer?: string;
+	/**
+	 * 批准时的目标文件指纹（2026-11-10 批 19 §七）：只对 write / edit，
+	 * 开关 `AGENT_CONFIRM_WORLD_STATE` 打开时才写。缺省 = 不重验（逐字节回到改动前）。
+	 */
+	worldState?: WorldFingerprint;
 }
 
 export interface ApprovalCreateInput {
@@ -79,6 +85,8 @@ export interface ApprovalCreateInput {
 	origin?: "autonomous";
 	/** 这条 pending 的形态；缺省 approval（ask_user 见 §3） */
 	kind?: "approval" | "ask_user";
+	/** 批准时的目标文件指纹（批 19 §七）；缺省 = 不重验。 */
+	worldState?: WorldFingerprint;
 }
 
 /**
@@ -92,6 +100,8 @@ export interface ApprovalGrant {
 	tool: string;
 	argsHash: string;
 	grantedAt: number;
+	/** 批准那一刻的目标文件指纹（批 19 §七）；缺省 = 这条放行不重验。 */
+	worldState?: WorldFingerprint;
 }
 
 export interface PendingApproval {
@@ -104,6 +114,16 @@ export interface PendingApproval {
 const TERMINAL_TTL_MS = 86_400_000;
 /** 放行的保鲜期：批了却一直没重发，一天后自动作废（不让"批准"无限期挂着） */
 const GRANT_TTL_MS = 86_400_000;
+
+/** 世界状态指纹的读取容错（批 19 §七）：字段不完整就当没有，不为此把整条记录读挂。 */
+function normalizeWorldState(value: unknown): WorldFingerprint | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	const raw = value as Partial<WorldFingerprint>;
+	if (typeof raw.path !== "string" || !raw.path) return undefined;
+	if (typeof raw.exists !== "boolean") return undefined;
+	if (typeof raw.mtimeMs !== "number" || typeof raw.size !== "number") return undefined;
+	return { path: raw.path, exists: raw.exists, mtimeMs: raw.mtimeMs, size: raw.size };
+}
 
 function normalize(raw: unknown): ApprovalRecord | null {
 	if (!raw || typeof raw !== "object") return null;
@@ -138,6 +158,10 @@ function normalize(raw: unknown): ApprovalRecord | null {
 		...(value.kind === "ask_user" ? { kind: "ask_user" as const } : {}),
 		...(typeof value.feedback === "string" && value.feedback ? { feedback: value.feedback } : {}),
 		...(typeof value.answer === "string" && value.answer ? { answer: value.answer } : {}),
+		...(() => {
+			const world = normalizeWorldState(value.worldState);
+			return world ? { worldState: world } : {};
+		})(),
 	};
 }
 
@@ -155,6 +179,10 @@ function normalizeGrant(raw: unknown): ApprovalGrant | null {
 		tool: value.tool,
 		argsHash: value.argsHash,
 		grantedAt: value.grantedAt,
+		...(() => {
+			const world = normalizeWorldState(value.worldState);
+			return world ? { worldState: world } : {};
+		})(),
 	};
 }
 
@@ -223,6 +251,7 @@ export class ApprovalStore {
 			...(input.argsHash ? { argsHash: input.argsHash } : {}),
 			...(input.origin ? { origin: input.origin } : {}),
 			...(input.kind === "ask_user" ? { kind: "ask_user" as const } : {}),
+			...(input.worldState ? { worldState: input.worldState } : {}),
 		};
 		this.records.set(record.callId, record);
 		this.waiters.set(record.callId, resolve);
@@ -237,6 +266,8 @@ export class ApprovalStore {
 		remember = false,
 		/** 拒绝时的指导语（§4）：≤500 字由调用方校验，这里只 trim 后落库 */
 		feedback?: string,
+		/** 批准那一刻的目标文件指纹（批 19 §七）；给了就覆盖创建时的快照。 */
+		worldState?: WorldFingerprint,
 	): ApprovalRecord | null {
 		this.ensureLoaded();
 		const record = this.records.get(callId);
@@ -251,6 +282,7 @@ export class ApprovalStore {
 		const note = feedback?.trim();
 		if (status === "rejected" && note) record.feedback = note;
 		if (status === "approved") {
+			if (worldState) record.worldState = worldState;
 			if (remember) this.remember(record.conversationId, record.tool);
 			// 一次性放行：模型重发同一个工具调用时核销。没有指纹的老记录不外发放行（重新问一次）
 			if (record.argsHash) this.grant(record);
@@ -351,18 +383,30 @@ export class ApprovalStore {
 	 * 不命中返回 false（换参数重发 = 重新审批）。空指纹永不命中。
 	 */
 	consumeGrant(conversationId: number, tool: string, argsHash: string): boolean {
+		return this.consumeGrantEntry(conversationId, tool, argsHash) !== null;
+	}
+
+	/**
+	 * 与 `consumeGrant` 同一条核销逻辑，但把那条放行原样交回（批 19 §七）：
+	 * 世界状态重验要用批准时拍的文件指纹。不命中 → null。
+	 */
+	consumeGrantEntry(
+		conversationId: number,
+		tool: string,
+		argsHash: string,
+	): ApprovalGrant | null {
 		this.ensureLoaded();
-		if (!argsHash) return false;
+		if (!argsHash) return null;
 		const index = this.grants.findIndex(
 			(grant) =>
 				grant.conversationId === conversationId &&
 				grant.tool === tool &&
 				grant.argsHash === argsHash,
 		);
-		if (index < 0) return false;
-		this.grants.splice(index, 1);
+		if (index < 0) return null;
+		const [entry] = this.grants.splice(index, 1);
 		this.persist();
-		return true;
+		return entry ?? null;
 	}
 
 	/** 还剩几条放行（单测与探针核销断言用；不含参数内容） */
@@ -460,6 +504,7 @@ export class ApprovalStore {
 			tool: record.tool,
 			argsHash: record.argsHash,
 			grantedAt: Date.now(),
+			...(record.worldState ? { worldState: record.worldState } : {}),
 		});
 	}
 

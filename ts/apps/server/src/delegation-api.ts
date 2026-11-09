@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { Hono } from "hono";
-import { runChancellor } from "../../../../../chancellor/src/index.ts";
+import { runChancellor, JUDGE_FILE } from "../../../../../chancellor/src/index.ts";
+import { judgeCallsOf, judgeEnabled } from "../../../../../chancellor/src/judge.ts";
 import { Store } from "../../../../../chancellor/src/store.ts";
 import type { TicketRow } from "../../../../../chancellor/src/store.ts";
 import type { Ticket } from "../../../../../chancellor/src/types.ts";
@@ -14,6 +15,7 @@ import {
 	type DelegationRuntime,
 } from "./delegation.ts";
 import { DelegationReceipts, requestFingerprint } from "./delegation-receipts.ts";
+import { currentApprovalLevel, currentAuthority } from "./delegation-authority.ts";
 import { projectRunSource, type RunSource } from "./run-source.ts";
 // 证据裁判（2026-11-10 批 14）：重派 / 回话续跑出来的新单同样带裁判。
 import { withDelegationJudge } from "./delegation-judge.ts";
@@ -49,6 +51,74 @@ const TERMINAL_TICKET_STATUS = new Set([
 export function delegationCancelEnabled(): boolean {
 	const raw = (process.env.DELEGATION_CANCEL?.trim() || "true").toLowerCase();
 	return raw !== "false" && raw !== "0";
+}
+
+/** 过程关口投影开关（2026-11-10 批 19 §四）：默认开；`TICKET_GATES=false` → 详情不带 gates。 */
+export function ticketGatesEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = (env.TICKET_GATES ?? "").trim().toLowerCase();
+	if (!raw) return true;
+	return raw !== "false" && raw !== "0" && raw !== "off";
+}
+
+/** 多副本归并开关（2026-11-10 批 19 §五）：默认开；`DELEGATION_FANOUT_GROUP=false` → 不带 groupId。 */
+export function fanoutGroupEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = (env.DELEGATION_FANOUT_GROUP ?? "").trim().toLowerCase();
+	if (!raw) return true;
+	return raw !== "false" && raw !== "0" && raw !== "off";
+}
+
+/** 任务过程关口（2026-11-10 批 19 §四.1）：只投影已有事实，不新增判定。 */
+export interface TicketGate {
+	name: string;
+	passed: boolean;
+	note?: string;
+}
+
+function clipNote(text: string, max = 80): string {
+	const flat = text.replace(/\s+/g, " ").trim();
+	return flat.length <= max ? flat : `${flat.slice(0, max - 1)}…`;
+}
+
+/**
+ * 关口投影（纯函数，单测直接断言）：验收关口（reviews[]）+ 裁判结论（开了才投影）
+ * + 返工轮次。**不判断"应该怎样"**，只把落盘事实换成人能读的徽章。
+ */
+export function buildTicketGates(input: {
+	reviews: Array<{ slug?: unknown; verdict?: unknown; reason?: unknown }>;
+	judgeCalls?: Array<{ round?: unknown; verdict?: unknown; reason?: unknown }>;
+	repairRound?: number;
+	judgeOn?: boolean;
+}): TicketGate[] {
+	const gates: TicketGate[] = [];
+	for (const review of input.reviews) {
+		const slug = String(review.slug ?? "").trim();
+		const verdict = String(review.verdict ?? "").trim();
+		const reason = String(review.reason ?? "").trim();
+		gates.push({
+			name: slug ? `验收：${slug}` : "验收",
+			passed: verdict === "pass",
+			...(reason ? { note: clipNote(reason) } : {}),
+		});
+	}
+	if (input.judgeOn && input.judgeCalls && input.judgeCalls.length > 0) {
+		const last = input.judgeCalls[input.judgeCalls.length - 1]!;
+		const verdict = String(last.verdict ?? "").trim();
+		const reason = String(last.reason ?? "").trim();
+		const round = Number(last.round);
+		const note = [Number.isFinite(round) && round > 0 ? `第 ${round} 轮` : "", verdict, reason]
+			.filter(Boolean)
+			.join(" · ");
+		gates.push({
+			name: "裁判",
+			passed: verdict === "done",
+			...(note ? { note: clipNote(note) } : {}),
+		});
+	}
+	const repairRound = Number(input.repairRound);
+	if (Number.isInteger(repairRound) && repairRound > 0) {
+		gates.push({ name: "返工", passed: true, note: `已返工 ${repairRound} 轮` });
+	}
+	return gates;
 }
 
 /** 已终态：取消 400（done/failed/aborted）。needs_you / idle / canceled 仍可作废。 */
@@ -162,6 +232,8 @@ interface TicketSummary {
 	chiefName: string | null;
 	/** 作废位（扫尾批 1 A1）：harness 侧不再搬运这张单的结果。 */
 	canceled: boolean;
+	/** 多副本归并（批 19 §五）：同一 requestId 的单共用这个值；没有 requestId → null。 */
+	groupId: string | null;
 	/** 作废单显示 status="canceled"，原始状态放在这里不丢事实。 */
 	originStatus?: string;
 }
@@ -325,6 +397,10 @@ async function summarizeTickets(
 				waitingOn: ticket?.waitingOn ?? null,
 				conversationId: ticket ? await conversationIdOf(ticket, loadExternal) : null,
 				chiefName: chiefNameOf(ticket?.options.domain),
+				// 多副本归并（批 19 §五）：requestId 就是 groupId；开关关 / 没 requestId → null。
+				groupId: fanoutGroupEnabled()
+					? String(ticket?.idempotencyKey ?? "").trim() || null
+					: null,
 			})),
 		);
 		// 标题只用本请求出现过的 conversationId 批量查一次（listChats 逐会话 open，不能逐行调）。
@@ -356,6 +432,25 @@ function readTicketJson(runsDir: string, ticketId: string): Ticket | null {
 		) as Ticket;
 	} catch {
 		return null;
+	}
+}
+
+/**
+ * 裁判记录读口（批 19 §四）：judge.json 是 chancellor 落盘的审计事实，宿主管道只读。
+ * 文件缺失 / 坏 JSON → 空数组（老单没有裁判，不是错误）。
+ */
+function judgeCallsOfTicket(store: Store, ticketId: string): Array<{
+	round?: unknown;
+	verdict?: unknown;
+	reason?: unknown;
+}> {
+	try {
+		const file = JSON.parse(
+			fs.readFileSync(path.join(store.ticketDir(ticketId), JUDGE_FILE), "utf8"),
+		) as Parameters<typeof judgeCallsOf>[0];
+		return judgeCallsOf(file) as Array<{ round?: unknown; verdict?: unknown; reason?: unknown }>;
+	} catch {
+		return [];
 	}
 }
 
@@ -461,6 +556,20 @@ export function mountDelegationApi(app: Hono, opts: DelegationApiOptions = {}): 
 			}
 			const projected = applyCancelProjection(ticketView, canceled);
 			const runSource = runSourceOfTicket(found.ticket.id);
+			// 过程关口（批 19 §四）：只读 reviews / judge.json / repairRound 三处落盘事实；
+			// 开关关着就不出现这个键（前端零影响）。
+			const reviews = found.store.reviewsOf(found.ticket.id);
+			const gates = ticketGatesEnabled()
+				? buildTicketGates({
+						reviews,
+						judgeCalls: judgeCallsOfTicket(found.store, found.ticket.id),
+						repairRound: found.ticket.repairRound,
+						judgeOn: judgeEnabled(),
+					})
+				: null;
+			const groupId = fanoutGroupEnabled()
+				? String(found.ticket.idempotencyKey ?? "").trim() || null
+				: null;
 			return c.json({
 				ok: true,
 				ticket: projected,
@@ -471,6 +580,10 @@ export function mountDelegationApi(app: Hono, opts: DelegationApiOptions = {}): 
 				// 触发来源（2026-11-10 批 15 §三，纯增量）：老数据 null 视为 human；
 				// 没有回执 / RUN_SOURCE=false 时**不出现**这个键（前端零影响）。
 				...(runSource ? { runSource } : {}),
+				// 多副本归并（批 19 §五）：同 requestId 的单带同一个 groupId。
+				...(groupId ? { groupId } : {}),
+				// 过程关口（批 19 §四）：过了哪些关，纯投影。
+				...(gates ? { gates } : {}),
 				cancelEnabled: delegationCancelEnabled(),
 				// 任务专线（2026-11-08 扫尾批 8g）：启用开关 + 确定性会话 id（`task-<票号>`）。
 				// 未建过时也会给 id；前端回读 GET messages 得到 404 就按"还没有记录"展示。
@@ -488,7 +601,7 @@ export function mountDelegationApi(app: Hono, opts: DelegationApiOptions = {}): 
 					? { repairRound: found.ticket.repairRound }
 					: {}),
 				tasks: found.store.tasksOf(found.ticket.id),
-				reviews: found.store.reviewsOf(found.ticket.id),
+				reviews,
 				children: found.store.childrenOf(found.ticket.id).map((child) => ({
 					id: child.id,
 					status: child.status,
@@ -737,6 +850,9 @@ function defaultRetryRuntime(store: DelegationReceipts): DelegationRuntime {
 		isCanceled: (id) => store.isCanceled(id),
 		// 重派 / 回话续跑出来的新单也是一张真单，终态照样结算落履历（刀二 E2）。
 		recordWork: recordWorkSettlement,
+		// 续跑授权重验（批 19 §六）：受理档位取回执，现在档位取运行时策略。
+		authorityAtAccept: (id) => store.lookupByTicket(id)?.authority?.level ?? null,
+		approvalLevelNow: () => currentApprovalLevel(),
 		log: (line) => console.warn(line),
 	};
 }
@@ -816,6 +932,8 @@ export function retryTicketAction(
 			workRoot,
 			// HTTP 重试端点直接触发 → script（RUN_SOURCE=false 时 begin 不落列）。
 			runSource: "script",
+			// 授权依据（批 19 §六）：重试也是一次受理，记下当时的审批档位。
+			authority: currentAuthority(),
 		});
 		if (begun.kind !== "new") {
 			return {

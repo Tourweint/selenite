@@ -2691,6 +2691,24 @@ button.tk-archive-bar:focus-visible { outline: 2px solid var(--accent-line); out
   color: color-mix(in srgb, var(--c-tertiary) 78%, var(--text));
   font-size: 11px; white-space: nowrap;
 }
+/* 过程关口（2026-11-10 批 19 §四）：阶段条下方的"过了哪些关"小徽章 */
+.td-gates { margin-top: 8px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.td-gate {
+  padding: 1px 8px;
+  border: 1px solid var(--divider);
+  border-radius: var(--r-full);
+  background: var(--surface-2, var(--surface));
+  color: var(--text-3);
+  font-size: 11px; white-space: nowrap;
+}
+.td-gate::before { content: "✓ "; }
+.td-gate[data-state="fail"] { color: var(--text-2); border-color: color-mix(in srgb, var(--c-danger) 38%, transparent); }
+.td-gate[data-state="fail"]::before { content: "✕ "; color: var(--c-danger); }
+.td-gate[data-state="pass"]::before { color: var(--c-success, var(--accent)); }
+/* 多副本折叠行（批 19 §五）：与普通派活行同宽，内部复用子单展开区样式 */
+.tk-fanout { cursor: default; }
+.tk-fanout > .tk-children-toggle { margin-top: 2px; }
+.tk-fanout .tk-children .tk-row { padding-left: 8px; border-left: 2px solid var(--divider); }
 .td-meta { margin-top: 8px; font-size: 12px; color: var(--text-2); display: flex; gap: 12px; flex-wrap: wrap; }
 /* 计划附件（2026-11-09 §2.4）：默认一行"现在到哪一步"，点开才展开全部 */
 .td-steps { margin-top: 10px; font-size: 12.5px; color: var(--text-2); }

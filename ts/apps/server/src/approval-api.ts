@@ -9,6 +9,8 @@ import {
 } from "./agent/turn-gate.ts";
 import { approvalStore } from "./approvals.ts";
 import { readLlmConfig } from "./provider.ts";
+import { questionOfArgs, recordVerifiedAnswer } from "./verified-answer.ts";
+import { snapshotPath } from "./world-state.ts";
 
 /**
  * 审批接口（2026-11-04 批次二，A1；批次六加全局待办）。
@@ -115,11 +117,18 @@ export function mountApprovalApi(app: Hono): void {
 		}
 		// 先记"这次答复之前是不是 pending"：幂等重发不能重复开一轮续跑
 		const wasPending = before.status === "pending";
+		// 世界状态（批 19 §七）：批准这一刻重拍目标指纹（创建 pending 时的旧快照会被覆盖），
+		// 执行前再比对——"批准之后被改过"才算数。只在创建时拍过快照的 write / edit 上发生。
+		const approvedWorldState =
+			decision === "approve" && before.worldState
+				? snapshotPath(before.worldState.path)
+				: undefined;
 		const record = approvalStore().decide(
 			callId,
 			decision,
 			body?.remember === true,
 			decision === "reject" ? feedback : undefined,
+			approvedWorldState,
 		);
 		if (!record) return c.json({ ok: false, error: "unknown_approval" }, 404);
 
@@ -168,6 +177,13 @@ export function mountApprovalApi(app: Hono): void {
 		if (!record) return c.json({ ok: false, error: "unknown_approval" }, 404);
 		// 幂等：重复答复不重复续跑
 		if (wasPending && record.status === "answered") {
+			// 答案沉淀（2026-11-10 批 19 §二）：人亲口答过的问题下次不用再问。
+			// 只落记忆，不改答复语义；群会话与开关关闭都在 recordVerifiedAnswer 内旁路。
+			recordVerifiedAnswer({
+				conversationId: record.conversationId,
+				question: questionOfArgs(before.args),
+				answer: record.answer ?? answer,
+			});
 			void continueConversation(record.conversationId, askUserAnsweredInstruction(answer));
 		}
 		return c.json({ ok: true, status: record.status });
