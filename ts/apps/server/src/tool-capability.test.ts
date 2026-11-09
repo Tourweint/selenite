@@ -45,6 +45,7 @@ const EXPECTED_TOOLS = [
 	"send_to_agent",
 	"persona_recall",
 	"ask_user",
+	"report_progress",
 ].sort();
 
 function registeredToolNames(): string[] {
@@ -58,6 +59,8 @@ function registeredToolNames(): string[] {
 			scheduleRoutine: async () => undefined,
 			// persona 检索（2026-11-09 批一）：条件注册，给个不落盘替身把全集覆盖进来。
 			personaAsk: async () => ({ ok: true, question: "stub" }),
+			// 中途播报（2026-11-10 批 13）：条件注册，显式开才上架。
+			progressReport: true,
 		}),
 	);
 	return [...new Set([...KERNEL_TOOLS, ...tools.map((t) => t.name)])].sort();

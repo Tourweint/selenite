@@ -37,6 +37,9 @@ const READ_TOOLS = new Set([
 	// 2026-11-09 保证实现纵深 §3.3：ask_user 不写盘、不起进程；它本来就必然等一个人答复，
 	// 再套审批是套娃，所以只登记进这张"不需要进闸门"的名单，不进 WRITE_TOOLS / 高危清单。
 	"ask_user",
+	// 2026-11-10 批 13 §三：中途播报只发一个 notice 帧，不写盘、不起进程；
+	// 它的边界是 beforeTool 的"只在执事轮 / 任务专线"范围闸，不在只读闸门。
+	"report_progress",
 ]);
 /** 内核五件：pi-durable 的 CodingTools（read/write/edit/bash/powershell）。 */
 const KERNEL_TOOLS = new Set(["read", "write", "edit", "bash", "powershell"]);
@@ -135,6 +138,8 @@ test("闸门完整性：实际注册全集 = WRITE_TOOLS ∪ READ_TOOLS", () => 
 			// persona 检索（2026-11-09 批一）：条件注册且进了 WRITE_TOOLS，
 			// 这里给替身把 persona_recall 也覆盖进"注册全集"。
 			personaAsk: async () => ({ ok: true, question: "stub" }),
+			// 中途播报（2026-11-10 批 13）：条件注册，显式开才上架。
+			progressReport: true,
 		}),
 	);
 	const registered = new Set(full.map((t) => t.name));

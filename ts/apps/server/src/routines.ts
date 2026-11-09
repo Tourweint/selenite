@@ -11,6 +11,13 @@ import {
 	type RoutineTrigger,
 } from "./partners.ts";
 import { ensurePartnerSession, runPartnerTurn } from "./partner-runtime.ts";
+import {
+	buildRoutinePrompt,
+	extractRoutineDone,
+	routineConditionalEnabled,
+	routineRunVerdict,
+	type RoutineOutcome,
+} from "./routine-conditions.ts";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 
 /**
@@ -66,6 +73,14 @@ export interface RoutineRunRecord {
 	endedAt?: string;
 	/** 结果摘要（≤200 字，枚举口径：不给正文） */
 	summary?: string;
+	/**
+	 * 结构化结局（2026-11-10 批 13 §四.2）：下一次触发带给模型，"接着上次往下做"。
+	 * `ROUTINE_CONDITIONAL=false` 时不写（新字段被忽略，行为回到改动前）。
+	 */
+	outcome?: RoutineOutcome;
+	/** 无人值守下跳过了步骤（2026-11-10 批 13 §二.2）；只记工具名枚举，不记正文 */
+	skipped?: boolean;
+	skipReason?: string;
 	error?: string;
 }
 
@@ -214,6 +229,51 @@ class RoutineEngine {
 		this.save();
 	}
 
+	/**
+	 * 上一轮的结构化结局（2026-11-10 批 13 §四.2）：只认有 outcome 的终态记录，
+	 * 跳过 running 与老记录（老记录没有 outcome，不能拿它冒充"上一次"）。
+	 */
+	private lastOutcomeOf(routineId: string): RoutineOutcome | undefined {
+		const runs = this.load().runs;
+		for (let i = runs.length - 1; i >= 0; i -= 1) {
+			const run = runs[i];
+			if (!run || run.routineId !== routineId || run.status === "running") continue;
+			if (run.outcome) return run.outcome;
+		}
+		return undefined;
+	}
+
+	/**
+	 * 已自动完成的次数（不含本轮与手动试跑）。按 run id 去重——历史记录里同一条 run
+	 * 可能因"开跑先落盘、收尾再落一次"出现两次，不能把 maxRuns 算翻倍。
+	 */
+	private completedRunCount(routineId: string): number {
+		const ids = new Set<string>();
+		for (const run of this.load().runs) {
+			if (run.routineId === routineId && run.status !== "running" && run.trigger !== "手动") {
+				ids.add(run.id);
+			}
+		}
+		return ids.size;
+	}
+
+	/** 条件达成 / 跑满上限：置停（enabled=false），不删规则；revision+1 让在飞闹钟作废。 */
+	private stopRoutine(routineId: string, reason: RoutineOutcome): void {
+		try {
+			const current = partnersStore().getRoutine(routineId);
+			if (!current || !current.enabled) return;
+			partnersStore().updateRoutine(routineId, { enabled: false });
+			console.log(`[routine] 规则 ${routineId.slice(0, 8)} 已置停（${reason}）`);
+		} catch (error) {
+			// 置停失败不覆盖本轮已落盘的结局；下一次触发会再判一次。
+			console.warn(
+				`[routine] 置停失败（规则 ${routineId.slice(0, 8)}）：${
+					error instanceof Error ? error.message.slice(0, 120) : "unknown"
+				}`,
+			);
+		}
+	}
+
 	// ── 订阅 ──
 	/** 启动时调一次：接全局事件口 + 结算上一进程留下的 running。 */
 	subscribe(): void {
@@ -357,6 +417,9 @@ class RoutineEngine {
 
 		const runId = randomUUID();
 		const startedAt = new Date().toISOString();
+		// 条件门控开关（2026-11-10 批 13 §四.3）：关着时下面所有新字段一律不参与。
+		const conditional = routineConditionalEnabled();
+		const completedBefore = this.completedRunCount(routine.id);
 		state.running[routine.id] = { runId, startedAt };
 		const run: RoutineRunRecord = {
 			id: runId,
@@ -373,21 +436,52 @@ class RoutineEngine {
 		this.save();
 
 		try {
-			const result = await runPartnerTurn(
-				routine.partnerId,
-				routine.prompt.slice(0, PROMPT_LIMIT),
-				{ authority: "autonomous", sessionMode: routine.sessionMode },
-			);
+			// 条件门控（2026-11-10 批 13 §四）：上次结局 + 完成条件进提示词。
+			// 开关关着时 buildRoutinePrompt 原样返回规则正文（逐字节回到改动前）。
+			const prompt = buildRoutinePrompt({
+				prompt: routine.prompt.slice(0, PROMPT_LIMIT),
+				lastOutcome: conditional ? this.lastOutcomeOf(routine.id) : undefined,
+				untilNote: conditional ? routine.until?.note : undefined,
+				conditional,
+			});
+			const result = await runPartnerTurn(routine.partnerId, prompt, {
+				authority: "autonomous",
+				sessionMode: routine.sessionMode,
+			});
 			const finished = this.load();
 			const mark = finished.running[routine.id];
 			if (mark?.runId !== runId) return; // 期间被重启结算过，不再覆盖
 			delete finished.running[routine.id];
 			run.status = result.ok ? "success" : "failed";
 			run.endedAt = new Date().toISOString();
+			const skipped = result.skipped ?? [];
+			if (skipped.length > 0) {
+				// 只记枚举与步骤名，不记正文（批 13 §二.2 / 日志纪律）。
+				run.skipped = true;
+				run.skipReason = `unattended:${skipped.join(",")}`;
+			}
+			const doneMarker = conditional
+				? extractRoutineDone(result.text ?? "")
+				: { text: result.text ?? "", done: false };
+			const verdict = routineRunVerdict({
+				ok: result.ok,
+				quiet: result.quiet === true,
+				skippedToolCount: skipped.length,
+				untilMet: doneMarker.done,
+				conditional,
+				...(routine.maxRuns !== undefined ? { maxRuns: routine.maxRuns } : {}),
+				completedRunsBefore: completedBefore,
+			});
+			if (conditional) run.outcome = verdict.outcome;
 			// 安静轮（2026-11-09 T2）：只记枚举，不把"无事发生"的正文写进摘要
 			run.summary = result.quiet
 				? "quiet"
-				: (result.text || result.error || "").replace(/\s+/g, " ").slice(0, 200);
+				: (doneMarker.text || result.error || "").replace(/\s+/g, " ").slice(0, 200);
+			if (skipped.length > 0) {
+				console.log(
+					`[routine] 本轮跳过 ${skipped.length} 个需要花钱/批准的步骤（规则 ${routine.id.slice(0, 8)}）`,
+				);
+			}
 			if (result.quiet) {
 				// 日志纪律：只说"这轮安静"，不记产出正文
 				console.log(`[routine] 本轮无更新（规则 ${routine.id.slice(0, 8)}），不写摘要`);
@@ -398,6 +492,8 @@ class RoutineEngine {
 				finished.runs.splice(0, finished.runs.length - RUN_HISTORY_LIMIT);
 			}
 			this.save();
+			// 达成条件 / 跑满上限 → 置停（不删，保留历史）。停完在飞的闹钟醒来对不上 revision 自动作废。
+			if (verdict.stop) this.stopRoutine(routine.id, verdict.outcome);
 		} catch (error) {
 			const finished = this.load();
 			const mark = finished.running[routine.id];
@@ -406,6 +502,8 @@ class RoutineEngine {
 			run.status = "failed";
 			run.endedAt = new Date().toISOString();
 			run.error = error instanceof Error ? error.message : String(error);
+			// 抛异常也是"上一次的结果"，不能让下一轮看不到失败。
+			if (conditional) run.outcome = "failed";
 			finished.runs.push(run);
 			this.save();
 		}
@@ -425,6 +523,12 @@ class RoutineEngine {
 				});
 				result = run;
 				const state = this.load();
+				const skipped = run.skipped ?? [];
+				const outcome: RoutineOutcome = run.ok
+					? skipped.length > 0
+						? "skipped"
+						: "success"
+					: "failed";
 				state.runs.push({
 					id: randomUUID(),
 					routineId,
@@ -434,6 +538,12 @@ class RoutineEngine {
 					startedAt: new Date().toISOString(),
 					endedAt: new Date().toISOString(),
 					summary: (run.text || run.error || "").replace(/\s+/g, " ").slice(0, 200),
+					// 手动试跑不判 until / 不占 maxRuns 的"自动停"语义，但结局照记，
+					// 下一次定时触发仍能看到"上一次的结果"。
+					...(routineConditionalEnabled() ? { outcome } : {}),
+					...(skipped.length > 0
+						? { skipped: true, skipReason: `unattended:${skipped.join(",")}` }
+						: {}),
 					...(run.error ? { error: run.error } : {}),
 				});
 				if (state.runs.length > RUN_HISTORY_LIMIT) {
@@ -462,6 +572,8 @@ function delegateEventFields(event: DelegationEvent): Record<string, string> {
 	if (event.type === "attention") {
 		return { type: "attention", kind: event.kind, ticketId: event.ticketId };
 	}
+	// 中途播报（批13 §三）不是可触发事件：给一个中性字段，别被当成审批。
+	if (event.type === "notice") return { type: "notice" };
 	return { type: "approval", tool: event.tool };
 }
 

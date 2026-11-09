@@ -27,6 +27,10 @@ export const ROUTINE_SELF_SERVICE_LIMIT = 10;
 
 const NAME_LIMIT = 40;
 const PROMPT_LIMIT = 100_000;
+/** 完成条件的文字上限（够写一句判据，不写长文） */
+const UNTIL_LIMIT = 200;
+/** 次数上限的护栏：1..1000（再大就等于不限，没必要把账本拖长） */
+const MAX_RUNS_LIMIT = 1000;
 
 /**
  * triggers 形状校验。**从 companion-api.ts 上移到这里的唯一一份**：
@@ -73,6 +77,10 @@ export interface RoutineManageInput {
 	prompt?: string;
 	triggers?: RoutineTrigger[];
 	sessionMode?: "persistent" | "fresh";
+	/** create 可选：完成条件（文字）；达成即停，不删规则（批 13 §四） */
+	untilNote?: string;
+	/** create 可选：跑满 N 次自动停（批 13 §四） */
+	maxRuns?: number;
 }
 
 export interface RoutineManageContext {
@@ -127,6 +135,26 @@ export function performRoutineAction(
 		if (triggerError) {
 			return { ok: false, code: "bad_request", message: triggerError };
 		}
+		// 条件门控（2026-11-10 批 13 §四）：两个字段都是可选纯增量，老调用不受影响。
+		const untilNote = (input.untilNote ?? "").trim();
+		if (untilNote.length > UNTIL_LIMIT) {
+			return {
+				ok: false,
+				code: "bad_request",
+				message: `untilNote（完成条件）不超过 ${UNTIL_LIMIT} 字`,
+			};
+		}
+		const maxRuns = input.maxRuns;
+		if (
+			maxRuns !== undefined &&
+			(!Number.isInteger(maxRuns) || maxRuns < 1 || maxRuns > MAX_RUNS_LIMIT)
+		) {
+			return {
+				ok: false,
+				code: "bad_request",
+				message: `maxRuns 必须是 1..${MAX_RUNS_LIMIT} 的整数`,
+			};
+		}
 		if (activeCount(store, partnerId) >= ROUTINE_SELF_SERVICE_LIMIT) {
 			return {
 				ok: false,
@@ -141,11 +169,19 @@ export function performRoutineAction(
 			triggers: input.triggers as RoutineTrigger[],
 			sessionMode: input.sessionMode === "fresh" ? "fresh" : "persistent",
 			enabled: true,
+			...(untilNote ? { until: { note: untilNote } } : {}),
+			...(typeof maxRuns === "number" ? { maxRuns } : {}),
 		});
+		const extras = [
+			untilNote ? `完成条件：${untilNote}` : "",
+			typeof maxRuns === "number" ? `跑满 ${maxRuns} 次自动停` : "",
+		].filter(Boolean);
 		return {
 			ok: true,
 			code: "ok",
-			message: `已建好例行规则「${routine.name}」（${routine.id}），按触发器周期执行。`,
+			message:
+				`已建好例行规则「${routine.name}」（${routine.id}），按触发器周期执行。` +
+				(extras.length > 0 ? `${extras.join("；")}。` : ""),
 			routineId: routine.id,
 			schedule: true,
 		};

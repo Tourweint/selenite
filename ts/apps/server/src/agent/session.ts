@@ -39,6 +39,7 @@ import {
 	readLlmConfig,
 } from "../provider.ts";
 import { ReminderTask } from "../reminder.ts";
+import { markTaskSession } from "../unattended.ts";
 import { memoryEngine } from "./assist.ts";
 import { getHarness, lifediaryExt, rememberLevel, researchExt, stickyThinkingLevel } from "./lifecycle.ts";
 import { turnSettledHandler } from "./settled.ts";
@@ -302,7 +303,11 @@ export async function openChat(
 	if (internalId === undefined) return null;
 
 	const conversation = await harness.conversation(internalId as never, CTX);
-	return conversation ? { conversation, externalId, internalId } : null;
+	if (!conversation) return null;
+	// `task-` 前缀会话登记（2026-11-10 批 13 §一）：无人值守判定是同步的，
+	// external→internal 的 durable 映射是异步的，打开时顺手记一笔。
+	if (externalId.startsWith(TASK_CONVERSATION_PREFIX)) markTaskSession(Number(internalId));
+	return { conversation, externalId, internalId };
 }
 
 /**
@@ -334,7 +339,9 @@ export async function openOrCreateChat(
 		},
 		CTX,
 	);
-	return { conversation, externalId, internalId: Number(conversation.id) };
+	const internalId = Number(conversation.id);
+	if (externalId.startsWith(TASK_CONVERSATION_PREFIX)) markTaskSession(internalId);
+	return { conversation, externalId, internalId };
 }
 
 /**
@@ -884,6 +891,10 @@ export async function* chatStream(
 							kind: delegation.kind,
 							question: delegation.question,
 						};
+					} else if (delegation.type === "notice") {
+						// agent 中途播报（2026-11-10 批 13 §三）：只送到当前这条流，
+						// 没开流就收不到、不落盘（不伪造主人的时间线）。
+						yield { type: "notice", text: delegation.text };
 					} else {
 						yield {
 							type: "approval",

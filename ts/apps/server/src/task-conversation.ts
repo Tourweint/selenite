@@ -199,6 +199,21 @@ export function taskConversationMirror(ticketId: string, entry: DelegationMirror
 }
 
 /**
+ * agent 中途播报的任务专线镜像（2026-11-10 批 13 §三.2）。
+ *
+ * 只有当前会话**正好是一条任务专线**时才写（没有这张单 = 什么也不做）。
+ * 专线本身由系统写入，不伪造用户发言；播报仍以 `pi.assistant` 条目落，与进度同形。
+ */
+export function mirrorTaskNotice(conversationId: number, text: string): void {
+	for (const [ticketId, chat] of chats) {
+		if (chat.internalId === conversationId) {
+			void appendTaskEvent(ticketId, { kind: "notice", text });
+			return;
+		}
+	}
+}
+
+/**
  * 把主人的回话写进专线（真用户输入，忙时 followUp）。
  *
  * 只负责"进会话"这一半；"送到执行端"那一半仍由调用方走 `startDelegation` 的

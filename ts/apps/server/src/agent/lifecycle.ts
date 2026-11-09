@@ -35,11 +35,23 @@ import {
 } from "../approval-policy.ts";
 import { isAutonomyTurn } from "../autonomy-state.ts";
 import { autonomyEscalationBlockReason, autonomyRiskVerdict } from "../autonomy-risk.ts";
+// 无人值守（2026-11-10 批 13 §一/§二）：三态判定先于审批，绝不落 pending。
+import {
+	UNATTENDED_SKIP_MESSAGE,
+	isUnattended,
+	noteUnattendedSkip,
+	resolveUnattendedVerdict,
+	unattendedDenyReason,
+	unattendedPolicyEnabled,
+} from "../unattended.ts";
+import { capabilityOf } from "../tool-capability.ts";
+// 中途播报（2026-11-10 批 13 §三）：工具本身在 tools.ts 注册，这里只做上架范围闸门。
+import { PROGRESS_TOOL_NAME, progressReportAllowed, progressReportEnabled } from "../progress-report.ts";
 import { emitDelegation, type DelegationReport } from "../delegation.ts";
 import { auditGateBlock, type GateBlockCategory } from "../gate-audit.ts";
 // 任务专线双写（2026-11-08 扫尾批 8g）：只有真正的装配层注入 mirror；
 // createTools 的探针/单测调用不传，避免去开真实 durable。
-import { taskConversationMirror } from "../task-conversation.ts";
+import { taskConversationMirror, mirrorTaskNotice } from "../task-conversation.ts";
 import { loopGuardEnabled, loopGuardFor, resetLoopGuard } from "../loop-guard.ts";
 import {
 	CHIEF_PARTNER_ID,
@@ -380,6 +392,10 @@ async function openHarness(): Promise<Harness> {
 		// 上架时把排链函数注入工具，避免 tools.ts 反向 import routines.ts 绕成环。
 		routineSelfService: routineSelfServiceEnabled(),
 		scheduleRoutine: (routineId) => routineEngine().ensureScheduled(routineId),
+		// agent 中途播报（2026-11-10 批 13 §三）：默认开；AGENT_PROGRESS_REPORT=false → 不上架。
+		// 任务专线镜像只在"当前会话正好是 task- 专线"时写一条，没有则什么也不做。
+		progressReport: progressReportEnabled(),
+		mirrorTaskNotice,
 		// 会话考古（2026-11-09 T4 §4）：默认开；AGENT_RECALL_SESSIONS=false → 不传，
 		// `recall_sessions` 整块不注册（模型侧 tool_unavailable，一行回滚）。
 		// 用 getHarness() 惰性取：createTools 执行时 harness 还没 open，真正调用时已就绪。
@@ -546,6 +562,33 @@ async function openHarness(): Promise<Harness> {
 								"turn-limit",
 							);
 						}
+						// 无人值守（2026-11-10 批 13 §一/§二）：**先于一切审批判定**。
+						// 三态收口——allow / skip / deny；绝不落 pending 等人（人在睡觉）。
+						// 开关默认 false：关着时这一整块不执行，行为与改动前逐字节一致。
+						let unattendedAllow = false;
+						if (unattendedPolicyEnabled() && isUnattended(api.conversationId)) {
+							const verdict = resolveUnattendedVerdict(call.name, capabilityOf(call.name));
+							if (verdict === "deny") {
+								return blocked(unattendedDenyReason(call.name), "policy", "unattended");
+							}
+							if (verdict === "skip") {
+								noteUnattendedSkip(api.conversationId, call.name);
+								// 跳过不是失败：模型拿到固定话术，继续做不需要花钱的部分。
+								return blocked(UNATTENDED_SKIP_MESSAGE, "policy", "unattended-skip");
+							}
+							// allow = 照常执行，**而且不再走下面的审批**：否则自定义的
+							// `AGENT_APPROVAL_CRITICAL_TOOLS` 仍可能把 allow 的工具问成 pending。
+							unattendedAllow = true;
+						}
+						// 中途播报的上架范围（2026-11-10 批 13 §三.4）：只在执事轮 / 任务专线；
+						// 主人对话里不需要（人就在看着），结构性拦下而不是靠模型自觉。
+						if (call.name === PROGRESS_TOOL_NAME && !progressReportAllowed(api.conversationId)) {
+							return blocked(
+								"这个会话不需要中途播报（主人就在对话里看着）；把结果直接写进回复即可。",
+								"policy",
+								"progress-scope",
+							);
+						}
 						// 结构化提问（2026-11-09 §3）：借审批 pending 管线挂一张问题卡，
 						// 本轮到此收尾；人答复后由答复端点 followUp 续跑。
 						// 校验失败只回给模型（不建 pending、不算闸门拦下）。
@@ -581,9 +624,12 @@ async function openHarness(): Promise<Harness> {
 						// 自主轮高危审批（批次C C2）：例行轮（autonomyTurns 事实源）里
 						// RISK_TOOLS 一律强制 ask——普通轮行为完全不变（D6 口径不动）。
 						const risk = autonomyRiskVerdict(call.name, autonomous);
-						let verdict: ApprovalVerdict = risk.forceAsk
+						let verdict: ApprovalVerdict = risk.forceAsk && !unattendedAllow
 							? ({ kind: "ask" } as const)
 							: needsApproval(policy, call.name, readOnly);
+						// 无人值守 allow：执行但不再问。显式 block（黑名单 / 只读档）仍然优先——
+						// 那是用户写死的边界，不是"要不要人点头"。
+						if (unattendedAllow && verdict.kind !== "block") verdict = { kind: "allow" };
 						if (verdict.kind === "block") {
 							return blocked(verdict.reason, "policy", "policy");
 						}

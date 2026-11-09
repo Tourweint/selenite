@@ -257,6 +257,18 @@ export const TOOL_CAPABILITIES: Record<string, ToolCapability> = {
 		concurrentSafe: false,
 		notes: "向用户提问并等回答；不改任何外部状态，但一轮里只能挂一个提问。",
 	},
+
+	// ── 中途播报（2026-11-10 批 13 §三）──────────────────────
+	report_progress: {
+		name: "report_progress",
+		readOnly: false,
+		destructive: false,
+		sideEffectScope: "none",
+		riskLevel: "low",
+		needsApproval: "never",
+		concurrentSafe: true,
+		notes: "中途对主人说一句（notice 帧，不结束本轮）；不落盘、不写时间线，没开流就收不到。",
+	},
 };
 
 export function capabilityOf(name: string): ToolCapability | undefined {

@@ -65,7 +65,14 @@ export type DelegationEvent =
 			deadlineAt: string;
 			/** 自主轮标记（批次C C2）：例行轮的审批卡，纯增量字段 */
 			origin?: "autonomous";
-	  };
+	  }
+	/**
+	 * agent 中途播报（2026-11-10 批 13 §三，`report_progress`）。
+	 *
+	 * 只借本通道送到**正在流式的那条会话**（conversationId 就是发射方），
+	 * 与派活进度同款：进程内轻事件，没开流就收不到、不落盘。
+	 */
+	| { type: "notice"; text: string };
 
 export interface DelegationReport {
 	ticketId: string;
