@@ -56,6 +56,7 @@ export {
 	chatStream,
 	chatTitles,
 	configureResearchChat,
+	configureJudgeChat,
 	configureTaskChat,
 	contextUsageOf,
 	conversationThinkingLevel,
