@@ -14,6 +14,7 @@ import {
 	startDelegation,
 	type DelegationRuntime,
 } from "./delegation.ts";
+import { bashJobsDir, listBgJobs } from "./bash-background.ts";
 import { DelegationReceipts, requestFingerprint } from "./delegation-receipts.ts";
 import { currentApprovalLevel, currentAuthority } from "./delegation-authority.ts";
 import { projectRunSource, type RunSource } from "./run-source.ts";
@@ -120,6 +121,135 @@ export function buildTicketGates(input: {
 		gates.push({ name: "返工", passed: true, note: `已返工 ${repairRound} 轮` });
 	}
 	return gates;
+}
+
+/**
+ * 验收项投影开关（2026-11-10 批 23 §一）：默认开；
+ * `DELEGATION_ACCEPTANCE_CHECKS=false` → 详情不带 `acceptanceChecks`。
+ */
+export function acceptanceChecksEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = (env.DELEGATION_ACCEPTANCE_CHECKS ?? "").trim().toLowerCase();
+	if (!raw) return true;
+	return raw !== "false" && raw !== "0" && raw !== "off";
+}
+
+/** `steps` 里验收项的前缀（全角冒号为主，半角同一个意思）。 */
+const ACCEPTANCE_PREFIX_RE = /^验\s*[：:]\s*/;
+
+export type AcceptanceCheckStatus = "passed" | "failed" | "unknown";
+
+export interface AcceptanceCheck {
+	/** 去掉 `验：` 前缀后的验收原文 */
+	text: string;
+	status: AcceptanceCheckStatus;
+	note?: string;
+}
+
+/**
+ * 验收项逐项投影（批 23 §一，纯函数，单测直接断言）。
+ *
+ * `steps` 里 `验：…` 开头的是验收项，其余算动作（动作仍在 `steps` 里，不重复列）。
+ * **判定只按已有事实**：`reviews[]` 全 pass → 全部 passed；有 fail → 全部 failed；
+ * 没有 reviews（或只有 blocked 这类非 pass 非 fail 的结论）→ unknown，并在 note 写明原因。
+ * 不按验收项逐条去猜哪条过了——那是编造。
+ */
+export function projectAcceptanceChecks(
+	steps: unknown,
+	reviews: Array<{ slug?: unknown; verdict?: unknown }>,
+): AcceptanceCheck[] {
+	if (!Array.isArray(steps)) return [];
+	const texts = steps
+		.filter((step): step is string => typeof step === "string")
+		.map((step) => step.trim())
+		.map((step) => (ACCEPTANCE_PREFIX_RE.test(step) ? step.replace(ACCEPTANCE_PREFIX_RE, "").trim() : ""))
+		.filter(Boolean);
+	if (texts.length === 0) return [];
+
+	const verdicts = reviews.map((review) => String(review.verdict ?? "").trim());
+	const failedSlugs = reviews
+		.filter((review) => String(review.verdict ?? "").trim() === "fail")
+		.map((review) => String(review.slug ?? "").trim())
+		.filter(Boolean);
+	if (reviews.length === 0) {
+		return texts.map((text) => ({
+			text,
+			status: "unknown",
+			note: "没有验收记录（reviews 为空），无法逐项判定",
+		}));
+	}
+	if (verdicts.every((verdict) => verdict === "pass")) {
+		return texts.map((text) => ({ text, status: "passed" }));
+	}
+	if (failedSlugs.length > 0) {
+		return texts.map((text) => ({
+			text,
+			status: "failed",
+			note: clipNote(`验收未通过：${failedSlugs.join(" / ")}`),
+		}));
+	}
+	// 有结论但既不是全 pass 也没有 fail（如 blocked）：如实标 unknown，不替它判失败。
+	return texts.map((text) => ({
+		text,
+		status: "unknown",
+		note: clipNote(`验收结论未定（${verdicts.join(" / ")}），无法逐项判定`),
+	}));
+}
+
+/** 后台任务投影开关（2026-11-10 批 23 §二）：默认开；`TICKET_BG_JOBS=false` → 详情不带 `bgJobs`。 */
+export function ticketBgJobsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = (env.TICKET_BG_JOBS ?? "").trim().toLowerCase();
+	if (!raw) return true;
+	return raw !== "false" && raw !== "0" && raw !== "off";
+}
+
+export interface TicketBgJob {
+	id: string;
+	commandSummary: string;
+	startedAt: string;
+	endedAt?: string;
+	exitCode?: number;
+}
+
+/**
+ * 后台任务只读投影（批 23 §二，纯函数，单测直接断言）。
+ *
+ * `bg-jobs/index.json` 里**没有 ticketId**（批 21 落盘时没有这张单的概念），所以只能按
+ * 时间窗口做 best-effort：起点 = 单的 `created_at`，终点 = 终态单的 `updated_at`、在办单的
+ * 当前时刻。窗口内同时开着的别的单的后台任务也会混进来——这是索引缺字段的已知边界，
+ * 不在这里编造归属。
+ *
+ * 只给摘要四个字段：**不返回日志正文**（走 `GET /api/v1/agent/bg-jobs/:id/log`）。
+ */
+export function projectTicketBgJobs(
+	ticket: { created_at?: string; updated_at?: string; status?: string },
+	jobs: Array<{
+		id: string;
+		commandSummary: string;
+		startedAt: string;
+		endedAt: string | null;
+		exitCode: number | null;
+	}>,
+	now: number = Date.now(),
+): TicketBgJob[] {
+	const start = Date.parse(String(ticket.created_at ?? ""));
+	if (!Number.isFinite(start)) return [];
+	const recordedEnd = Date.parse(String(ticket.updated_at ?? ""));
+	const end =
+		TERMINAL_TICKET_STATUS.has(String(ticket.status ?? "")) && Number.isFinite(recordedEnd)
+			? recordedEnd
+			: now;
+	return jobs
+		.filter((job) => {
+			const at = Date.parse(job.startedAt);
+			return Number.isFinite(at) && at >= start && at <= end;
+		})
+		.map((job) => ({
+			id: job.id,
+			commandSummary: job.commandSummary,
+			startedAt: job.startedAt,
+			...(job.endedAt ? { endedAt: job.endedAt } : {}),
+			...(typeof job.exitCode === "number" ? { exitCode: job.exitCode } : {}),
+		}));
 }
 
 /** 已终态：取消 400（done/failed/aborted）。needs_you / idle / canceled 仍可作废。 */
@@ -602,6 +732,20 @@ export function mountDelegationApi(app: Hono, opts: DelegationApiOptions = {}): 
 			const groupId = fanoutGroupEnabled()
 				? String(found.ticket.idempotencyKey ?? "").trim() || null
 				: null;
+			// 验收项逐项投影（批 23 §一）：只认 steps 里 `验：` 开头的项；没有 = 不带键。
+			const acceptanceChecks = acceptanceChecksEnabled()
+				? projectAcceptanceChecks(found.ticket.steps, reviews)
+				: [];
+			// 后台任务投影（批 23 §二）：只列该单时间窗口内的摘要，日志正文另走 bg-jobs 端点。
+			const bgJobs = ticketBgJobsEnabled()
+				? (() => {
+						try {
+							return projectTicketBgJobs(found.ticket, listBgJobs(bashJobsDir()));
+						} catch {
+							return [];
+						}
+					})()
+				: [];
 			return c.json({
 				ok: true,
 				ticket: projected,
@@ -616,6 +760,10 @@ export function mountDelegationApi(app: Hono, opts: DelegationApiOptions = {}): 
 				...(groupId ? { groupId } : {}),
 				// 过程关口（批 19 §四）：过了哪些关，纯投影。
 				...(gates ? { gates } : {}),
+				// 验收项逐项状态（批 23 §一）：开关关 / 没有 `验：` 项时**不出现**。
+				...(acceptanceChecks.length > 0 ? { acceptanceChecks } : {}),
+				// 后台任务摘要（批 23 §二）：开关关 / 窗口内没有时**不出现**（正文在 /bg-jobs/:id/log）。
+				...(bgJobs.length > 0 ? { bgJobs } : {}),
 				cancelEnabled: delegationCancelEnabled(),
 				// 任务专线（2026-11-08 扫尾批 8g）：启用开关 + 确定性会话 id（`task-<票号>`）。
 				// 未建过时也会给 id；前端回读 GET messages 得到 404 就按"还没有记录"展示。
