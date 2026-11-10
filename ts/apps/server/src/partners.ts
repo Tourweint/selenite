@@ -879,6 +879,25 @@ export class PartnersStore {
 	}
 
 	/**
+	 * 内部会话 id → 该 id **只作为 canonical 主会话**时的执事（2026-11-10 批 29 返工）。
+	 *
+	 * 与 `partnerIdOfSession` 同表同法，只多一条 `role = 'canonical'`：
+	 * 群成员（role='group'）、例行专线（role='routine'）、课题专线（role='topic'）
+	 * 都不算"这个执事的门面会话"。**刻意不合并进原函数**——原函数的语义是
+	 * "这条会话归谁"，记忆 / 自环判定依赖它把群成员与专线也认成执事；
+	 * 唤醒要的是更窄的"派活会话是不是主对话"，所以单独一个方法。
+	 */
+	canonicalPartnerIdOfSession(sessionId: number): string | null {
+		// session_id > 0 同款：滤掉 delegation 领域路由的占位行。
+		const row = this.db
+			.prepare(
+				"SELECT partner_id FROM partner_session_links WHERE session_id = ? AND session_id > 0 AND role = 'canonical' ORDER BY created_at LIMIT 1",
+			)
+			.get(sessionId) as { partner_id?: unknown } | undefined;
+		return row?.partner_id ? String(row.partner_id) : null;
+	}
+
+	/**
 	 * 该执事名下所有**真实**会话的内部 id（2026-11-08 员工人格化刀一 E5）。
 	 *
 	 * 用途：判断"这张派活单是不是他发起的"——派单时 `originConversationId` 落的就是

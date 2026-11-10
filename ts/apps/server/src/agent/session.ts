@@ -671,7 +671,7 @@ export interface ChatStreamInput {
  * 只读 `pi.live.run`：它是内核"有一轮正在进行"的自有状态（不是我们自己记的布尔）。
  * 读不到就按空闲处理——插话在空闲时会自然变成普通输入，语义仍然正确。
  */
-async function conversationIsBusy(conversation: Conversation): Promise<boolean> {
+export async function conversationIsBusy(conversation: Conversation): Promise<boolean> {
 	try {
 		const harness = await getHarness();
 		const live = await harness.snapshot(LiveDoc, conversation.id, CTX);

@@ -157,6 +157,13 @@ export interface PartnerTurnOptions {
 	authority?: "autonomous" | "entrusted";
 	/** persistent = 复用主会话（默认）；fresh = 每次全新专线会话（跑完留着，task- 前缀不进列表） */
 	sessionMode?: "persistent" | "fresh";
+	/**
+	 * 安静契约是否适用于这一轮（2026-11-10 批 29）。
+	 *
+	 * 缺省 = 沿用"只有 autonomous 轮才判安静"的旧口径；显式 `false` = 这轮不适用安静契约
+	 * （派活唤醒轮必有内容：接住汇报就是产出）。
+	 */
+	quiet?: boolean;
 }
 
 export interface PartnerTurnResult {
@@ -207,8 +214,9 @@ export async function runPartnerTurn(
 	if (!chat) return { ok: false, text: "", error: "执事会话取不到（未启用或未配置模型）" };
 
 	const authority = opts.authority ?? "entrusted";
-	// 安静契约只对例行轮生效（手动试跑 = 用户主动要，必须给产出）
-	const quietEligible = authority === "autonomous" && routineQuietEnabled();
+	// 安静契约只对例行轮生效（手动试跑 = 用户主动要，必须给产出）；
+	// 唤醒轮显式传 quiet=false（接住汇报就是内容，不闭嘴）。
+	const quietEligible = (opts.quiet ?? (authority === "autonomous")) && routineQuietEnabled();
 	// 文本头（透明性）：模型知道这一轮是谁发起的；判定事实源在 autonomy-state.ts。
 	// 例行轮尾部多一行"没内容就回标记"的出口（固定字节，见 routine-quiet.ts）。
 	const body = authority === "autonomous"

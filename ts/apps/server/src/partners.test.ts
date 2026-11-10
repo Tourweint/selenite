@@ -144,6 +144,60 @@ test("执事：会话链接与反向查询（scopeOf 的数据源）", () => {
 	}
 });
 
+test("执事：canonicalPartnerIdOfSession 只认 canonical 主会话（批 29 返工）", () => {
+	const { root, db, homes } = tempRoot();
+	const store = new PartnersStore(db, homes);
+	try {
+		const partner = store.create("门面执事");
+		// canonical：命中
+		store.linkSession({
+			partnerId: partner.id,
+			role: "canonical",
+			routeKey: "canonical",
+			sessionId: 7101,
+		});
+		assert.equal(store.canonicalPartnerIdOfSession(7101), partner.id);
+
+		// 群成员 / 例行专线 / 课题专线：原函数认，canonical 版不认
+		store.linkSession({
+			partnerId: partner.id,
+			role: "group",
+			routeKey: "group:g1",
+			sessionId: 7102,
+		});
+		store.linkSession({
+			partnerId: partner.id,
+			role: "routine",
+			routeKey: "routine:fresh:t1",
+			sessionId: 7103,
+		});
+		store.linkSession({
+			partnerId: partner.id,
+			role: "topic",
+			routeKey: "topic:tp1",
+			sessionId: 7104,
+		});
+		for (const sessionId of [7102, 7103, 7104]) {
+			assert.equal(store.partnerIdOfSession(sessionId), partner.id, `${sessionId} 原函数仍认`);
+			assert.equal(
+				store.canonicalPartnerIdOfSession(sessionId),
+				null,
+				`${sessionId} 不是 canonical 主会话`,
+			);
+		}
+
+		// delegation 占位行 session_id=0：两种查法都不命中
+		store.linkDelegation(partner.id, "前端");
+		assert.equal(store.canonicalPartnerIdOfSession(0), null, "占位行不算任何会话");
+		assert.equal(store.partnerIdOfSession(0), null);
+		// 没链接：null
+		assert.equal(store.canonicalPartnerIdOfSession(7199), null);
+	} finally {
+		store.close();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("执事：删除连家目录一起清；例行任务 revision 自增", () => {
 	const { root, db, homes } = tempRoot();
 	const store = new PartnersStore(db, homes);

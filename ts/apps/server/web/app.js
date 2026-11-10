@@ -11320,6 +11320,7 @@ const FLAG_LABELS = {
   COMPANIONS_ENABLED: { label: "执事", tip: "执事（伙伴）体系总闸。" },
   GROUPS_ENABLED: { label: "群组", tip: "群聊与值日制。" },
   CHANCELLOR_ENABLED: { label: "派活（宰相）", tip: "delegation 派活链路总闸；关掉 = 回到 8 个基础工具。" },
+  DELEGATION_WAKE_ENABLED: { label: "派活完成即唤醒", tip: "后台任务到终态后，把派活的会话自动叫起来跑一轮、接住结果并向你转述。关掉 = 只写汇报，不主动开口（改动前行为）。" },
   TOPICS_ENABLED: { label: "长期课题", tip: "课题户口本 + 每周研究。" },
   // persona 记忆库接入（2026-11-09）：读 = 查一生记忆库；写 = 对话归档。ASK 路径不进界面（路径类 env），
   // 开关文案里写清前置条件，别让用户拨了没反应以为是坏了。

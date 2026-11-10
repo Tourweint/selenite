@@ -50,6 +50,8 @@ import { capabilityOf } from "../tool-capability.ts";
 // 中途播报（2026-11-10 批 13 §三）：工具本身在 tools.ts 注册，这里只做上架范围闸门。
 import { PROGRESS_TOOL_NAME, progressReportAllowed, progressReportEnabled } from "../progress-report.ts";
 import { emitDelegation, type DelegationReport } from "../delegation.ts";
+// 派活完成即唤醒（2026-11-10 批 29）：汇报写回后叫起派活会话接结果。
+import { wakeOnDelegationReport } from "../delegation-wake.ts";
 // 同类失败连击（批 12 遗留补全 2026-11-10）：tool-error / timeout 两类在此接线。
 import { failureStreak } from "../failure-streak.ts";
 import { auditGateBlock, type GateBlockCategory } from "../gate-audit.ts";
@@ -541,6 +543,8 @@ async function openHarness(): Promise<Harness> {
 		// 排到本轮结束（见 sayInChat 的取舍说明）。
 		reportDelegation: (conversationId, report) => {
 			void reportDelegationResult(conversationId, report);
+			// 汇报写了就唤醒（批 29）：两条结算路径都汇到这个回调，结构保证不漏。
+			void wakeOnDelegationReport(conversationId, report);
 		},
 		// 任务专线双写（2026-11-08 扫尾批 8g）：进度 / REPORT / out 留言同步一份
 		// 进 `task-<票号>` 会话。开关在 task-conversation 内部（TASK_AS_CONVERSATION）。
