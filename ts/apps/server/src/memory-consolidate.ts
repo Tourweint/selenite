@@ -17,6 +17,7 @@ import type { MemoryRecord, MemoryScope } from "@lifediary/memory";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { memoryEngine, supersedeMemory } from "./agent.ts";
+import { auxiliaryModel } from "./auxiliary.ts";
 import { currentModels, isFaux, readLlmConfig } from "./provider.ts";
 
 // ── 开关 ────────────────────────────────────────────────
@@ -97,15 +98,21 @@ export type ReviewGenerator = (input: {
 	user: string;
 }) => Promise<string | null>;
 
-/** 默认实现：一次独立模型调用（不进主会话、不留半截会话），照偏好抽取的范式。 */
+/**
+ * 默认实现：一次独立模型调用（不进主会话、不留半截会话），照偏好抽取的范式。
+ *
+ * 模型走 `auxiliaryModel("review")`（2026-11-10 批 23b §三）：`AUX_MODEL_REVIEW` 可以给
+ * "找重复 / 编建议"这活单独 pin 一个模型；没配 / `AUX_LLM=false` 时回落当前会话模型。
+ */
 async function generateReview(input: { system: string; user: string }): Promise<string | null> {
 	const config = readLlmConfig();
 	if (!config) return null;
 	// faux 是"真实 durable 链路 + 假模型"：拿它的输出当建议只会是假文本，视为没有模型。
 	if (isFaux()) return null;
 
+	const ref = auxiliaryModel("review", { current: config.model }) ?? config.model;
 	const models = currentModels();
-	const model = models.getModel(config.model.provider, config.model.modelId);
+	const model = models.getModel(ref.provider, ref.modelId);
 	if (!model) return null;
 
 	const controller = new AbortController();

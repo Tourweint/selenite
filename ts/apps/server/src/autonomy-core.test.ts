@@ -41,7 +41,8 @@ test("观察层账本：同会话同类型 24h 内最多 6 次（第 7 次拒绝
 });
 
 test("观察层账本：sweep 按 2h 时间桶分 id；24h 后可再提醒", () => {
-	let t = Date.now();
+	// 起点对齐到 2h 桶中央：否则真实时钟靠近桶边界时，+3h 仍可能落在同一桶（曾偶发红）。
+	let t = Math.floor(Date.now() / 7_200_000) * 7_200_000 + 3_600_000;
 	const now = () => new Date((t += 60_000));
 	const receipts = new AutonomyReceipts({}, now);
 	const sweep = { type: "sweep" as const, conversationId: 0, key: "" };

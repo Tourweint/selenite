@@ -224,3 +224,73 @@ test("skill：取到手册包 ok，手册正文就在 message 里（内容逐字
 	assert.equal(miss.error?.code, "skill_not_found");
 	assert.equal(miss.error?.message, "没有叫「没有这个」的技能。可用：daily-brief");
 });
+
+/**
+ * delegate 契约迁移（2026-11-10 批 23b 五§八#1）：只包外层，不碰文案与业务分支。
+ *
+ * 回执用替身：真实 `DelegationReceipts` 会落 sqlite，这里只验证工具返回形状；
+ * 回执自身的行为在 `delegation-receipts.test.ts`。
+ */
+const stubReceipts = {
+	begin: () => ({ kind: "begun" }),
+	accept: () => undefined,
+	markFailed: () => undefined,
+	recordResume: () => undefined,
+	isCanceled: () => false,
+	lookupByTicket: () => undefined,
+} as never;
+
+function delegateDeps(run: unknown, projects: unknown = null) {
+	return {
+		memory: null,
+		scopeOf: () => GLOBAL_SCOPE,
+		projects,
+		receipts: stubReceipts,
+		delegateRun: run,
+	} as never;
+}
+
+const DELEGATE_TEXT = "已受理：任务单 T-9。它在后台执行，完成后我会汇报；不要等，也不要重复派。";
+
+test("delegate：成功外层是 ok，message 逐字不变，ticketId 在 data", async () => {
+	const previous = process.env.DELEGATION_PROJECT_REQUIRED;
+	process.env.DELEGATION_PROJECT_REQUIRED = "false";
+	try {
+		const tools = createTools(
+			delegateDeps(async (_request: unknown, options: { onEvent?: (event: unknown) => void }) => {
+				options.onEvent?.({ type: "ticket", ticketId: "T-9", message: "已受理" });
+				return { ticketId: "T-9", status: "done", line: "完成", tasks: [] };
+			}),
+		);
+		const out = await runTool(toolNamed(tools, "delegate"), { requirement: "写一个文件" });
+		assert.equal(out.ok, true);
+		assert.equal(out.data.message, DELEGATE_TEXT);
+		assert.equal(out.data.ticketId, "T-9");
+	} finally {
+		if (previous === undefined) delete process.env.DELEGATION_PROJECT_REQUIRED;
+		else process.env.DELEGATION_PROJECT_REQUIRED = previous;
+	}
+});
+
+test("delegate：needs_project 仍在 data（不是 error），候选清单不丢", async () => {
+	const previous = process.env.DELEGATION_PROJECT_REQUIRED;
+	process.env.DELEGATION_PROJECT_REQUIRED = "true";
+	try {
+		let called = 0;
+		const tools = createTools(
+			delegateDeps(async () => {
+				called += 1;
+				throw new Error("不该跑到执行");
+			}),
+		);
+		const out = await runTool(toolNamed(tools, "delegate"), { requirement: "写一个文件" });
+		assert.equal(out.ok, true, "needs_project 是业务分支，不是工具调用失败");
+		assert.equal(out.data.error, "needs_project");
+		assert.deepEqual(out.data.projects, []);
+		assert.match(out.data.message, /项目/);
+		assert.equal(called, 0, "没有项目不能起 worker");
+	} finally {
+		if (previous === undefined) delete process.env.DELEGATION_PROJECT_REQUIRED;
+		else process.env.DELEGATION_PROJECT_REQUIRED = previous;
+	}
+});
