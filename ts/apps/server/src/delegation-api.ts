@@ -566,6 +566,57 @@ function readTicketJson(runsDir: string, ticketId: string): Ticket | null {
 	}
 }
 
+/** 一组副本的到齐情况（批 26 §二）。`total = 0` 由调用方判 404。 */
+interface FanoutGroupSummary {
+	groupId: string;
+	total: number;
+	done: number;
+	pending: number;
+	status: "settled" | "pending";
+}
+
+/**
+ * 数一组副本：按 `ticket.idempotencyKey` 全量对一遍（顶层 + 各领域）。
+ *
+ * 为什么不用列表接口：列表有 limit 与排序，聚合要的是"这一组有几张、几张终态"，
+ * 少一张就会把 pending 说成 settled——宁可多读几份 ticket.json。
+ */
+function summarizeFanoutGroup(
+	workRoot: string,
+	groupId: string,
+	canceledIds: Set<string>,
+): FanoutGroupSummary {
+	const runsDirs = [workRoot];
+	for (const entry of listManagers(workRoot)) {
+		if (entry.meta?.runs_dir) runsDirs.push(entry.meta.runs_dir);
+	}
+	let total = 0;
+	let done = 0;
+	for (const runsDir of runsDirs) {
+		const store = new Store(runsDir);
+		try {
+			for (const row of store.listTickets(500)) {
+				const ticket = readTicketJson(runsDir, row.id);
+				if (!ticket) continue;
+				if (String(ticket.idempotencyKey ?? "").trim() !== groupId) continue;
+				total += 1;
+				if (TERMINAL_TICKET_STATUS.has(row.status) || canceledIds.has(row.id)) done += 1;
+			}
+		} catch {
+			// 单个库打不开就跳过；少读一个库最多让等待方多等一轮，不会把 pending 说成 settled。
+		} finally {
+			store.close();
+		}
+	}
+	return {
+		groupId,
+		total,
+		done,
+		pending: total - done,
+		status: total > 0 && done === total ? "settled" : "pending",
+	};
+}
+
 /**
  * 裁判记录读口（批 19 §四）：judge.json 是 chancellor 落盘的审计事实，宿主管道只读。
  * 文件缺失 / 坏 JSON → 空数组（老单没有裁判，不是错误）。
@@ -695,6 +746,33 @@ export function mountDelegationApi(app: Hono, opts: DelegationApiOptions = {}): 
 			// 回滚开关下发：前端据此决定渲不渲染取消/重试按钮（开关关时不渲染）。
 			cancelEnabled: delegationCancelEnabled(),
 		});
+	});
+
+	/**
+	 * 多副本聚合（2026-11-10 批 26 §二）：一组副本到齐了没有。
+	 *
+	 * 只读、只数事实：`groupId` = 同一次 requestId 扇出的那几张单（批 19 已把它们标成同一组）。
+	 * `status = settled` 仅当**全部都终态**（终态表同任务中心，含作废位——作废后 harness
+	 * 不再搬这张单的结果，等待方没必要再等它）。**不自动消费、不改任何单**。
+	 *
+	 * **人的消息不在这组里**：主人回话走 `POST /tickets/:id/say`（单线），不进组、
+	 * 不影响 settled 判定；所以要等的只有执行端那几张副本。
+	 * 开关沿用 `DELEGATION_FANOUT_GROUP`：关着时组这个概念不存在 → 404。
+	 */
+	app.get("/api/v1/tickets/groups/:groupId", (c) => {
+		const groupId = c.req.param("groupId").trim();
+		if (!fanoutGroupEnabled() || !groupId) {
+			return c.json({ ok: false, error: "not_found" }, 404);
+		}
+		let canceledIds: Set<string> = new Set();
+		try {
+			canceledIds = storeOf().canceledTicketIds();
+		} catch {
+			/* 簿记库挂了不挡聚合：按"没有作废位"数，最多把一张已作废的单多等一会儿 */
+		}
+		const summary = summarizeFanoutGroup(workRootOf(), groupId, canceledIds);
+		if (summary.total === 0) return c.json({ ok: false, error: "not_found" }, 404);
+		return c.json({ ok: true, ...summary });
 	});
 
 	app.get("/api/v1/tickets/:id", async (c) => {

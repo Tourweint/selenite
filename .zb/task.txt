@@ -1,0 +1,22 @@
+你在 git worktree `<本地项目区>\projects\lh-b26`（分支 batch26-all）里工作。**所有读写都在这个 worktree 内**。
+
+任务书：`docs/设计方案/2026-11-10-批26任务书（剩下的全做）.md`
+
+**本批只做 §一 / §二 / §四 三节**（§三 §五 下一批）：
+1. §一 手机 worker 执行前重验（取消后不产生副作用，单测钉死）
+2. §二 多副本自动等待聚合端点 `GET /api/v1/tickets/groups/:groupId`
+3. §四 配对设备指纹（人眼可核）+ 键变更 fail-closed 标记
+
+**不要碰**：`agent/injection.ts`（还没有）、`auxiliary.ts`、`delegation-judge.ts`、总账文件。
+
+关键事实：
+- `phone-worker.ts` 有 `UPSTREAM_TIMEOUT_MS` 与 abort signal；`dispatch()` 在 42 行附近。
+- `delegation-api.ts` 已有 `groupId`（批 19）。
+- `pairing.ts` 有 `deviceId` + `tokenHash`（sha256），`sha256()` 私有函数在 60 行附近。
+
+要求：
+- `cd ts` 后：`pnpm typecheck`、`pnpm --filter @lifediary/server test`、`pnpm --filter @lifediary/server http`
+- 每完成一节跑一次 typecheck + test
+- 不许 git commit
+- 变更记录写 `docs/变更记录/2026-11-10-批26a（worker重验·多副本聚合·配对指纹）.md`
+- 最后回复：做了什么 / 验了什么 / 已知边界，控制在 500 字内

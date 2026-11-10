@@ -36,6 +36,10 @@ interface StoredDevice {
 	name: string;
 	/** sha256(deviceToken) */
 	tokenHash: string;
+	/** 指纹（2026-11-10 批 26 §四）：sha256(id + tokenHash) 的短摘要，人眼可核。 */
+	fingerprint?: string;
+	/** 键被换过（文件里的 tokenHash 与指纹对不上）：该设备的凭据一律 fail-closed。 */
+	keyChangedAt?: number;
 	createdAt: number;
 	lastSeenAt?: number;
 	revokedAt?: number;
@@ -55,6 +59,33 @@ export type RedeemError =
 export interface RedeemResult {
 	deviceToken: string;
 	deviceId: string;
+	/** 人眼可核的设备指纹（批 26 §四）；开关关着时不出现。 */
+	fingerprint?: string;
+}
+
+/**
+ * 指纹开关（2026-11-10 批 26 §四）：默认开。
+ * `PAIR_DEVICE_FINGERPRINT=false` → 不生成 / 不下发指纹，也不做键变更判定（一行回滚）。
+ */
+export function deviceFingerprintEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = (env.PAIR_DEVICE_FINGERPRINT ?? "").trim().toLowerCase();
+	if (!raw) return true;
+	return raw !== "false" && raw !== "0" && raw !== "off";
+}
+
+/**
+ * 设备指纹：`sha256("lifediary-device-v1|id|tokenHash")` 前 12 位十六进制，4-4-4 分组。
+ *
+ * 只回答一个问题——"手机上和电脑上显示的是不是同一台"。48 bit 够人眼核对，
+ * **不可反推令牌**，也不当凭据用（鉴权仍只认 deviceToken 的 sha256）。
+ */
+export function deviceFingerprint(deviceId: string, tokenHash: string): string {
+	const digest = createHash("sha256")
+		.update(`lifediary-device-v1|${deviceId}|${tokenHash}`)
+		.digest("hex")
+		.slice(0, 12)
+		.toUpperCase();
+	return `${digest.slice(0, 4)}-${digest.slice(4, 8)}-${digest.slice(8, 12)}`;
 }
 
 function sha256(value: string): string {
@@ -69,36 +100,81 @@ function hashEquals(a: string, b: string): boolean {
 	return timingSafeEqual(bufferA, bufferB);
 }
 
-function load(): Store {
+function load(storePath: string): Store {
 	try {
-		if (!existsSync(STORE_PATH)) return { devices: [] };
-		const parsed = JSON.parse(readFileSync(STORE_PATH, "utf8")) as Store;
+		if (!existsSync(storePath)) return { devices: [] };
+		const parsed = JSON.parse(readFileSync(storePath, "utf8")) as Store;
 		return { code: parsed.code, devices: Array.isArray(parsed.devices) ? parsed.devices : [] };
 	} catch (error) {
 		// 文件损坏就当作没有配对过（设备得重新扫一次），而不是让服务起不来
 		console.warn(
-			`[pairing] 读取 ${STORE_PATH} 失败，按空状态继续: ${error instanceof Error ? error.message : String(error)}`,
+			`[pairing] 读取 ${storePath} 失败，按空状态继续: ${error instanceof Error ? error.message : String(error)}`,
 		);
 		return { devices: [] };
 	}
 }
 
-function save(store: Store): void {
-	mkdirSync(dirname(STORE_PATH), { recursive: true });
-	const tmp = `${STORE_PATH}.tmp`;
+function save(storePath: string, store: Store): void {
+	mkdirSync(dirname(storePath), { recursive: true });
+	const tmp = `${storePath}.tmp`;
 	writeFileSync(tmp, JSON.stringify(store, null, 2), "utf8");
-	renameSync(tmp, STORE_PATH);
+	renameSync(tmp, storePath);
 }
 
 export class PairingStore {
-	private store: Store = load();
+	private readonly store: Store;
+
+	constructor(private readonly storePath: string = STORE_PATH) {
+		this.store = load(storePath);
+		// 迁移 + 键变更判定都在构造时做一次：指纹缺失补算，指纹对不上 → 标记 fail-closed。
+		if (deviceFingerprintEnabled()) this.sealFingerprints();
+	}
+
+	/**
+	 * 给每台设备补/核指纹（2026-11-10 批 26 §四）。
+	 *
+	 * - 老记录没有指纹 → 补算写入（一次性迁移，不算键变更）；
+	 * - 有指纹但对不上 → **标记 keyChangedAt**，该设备凭据 failed closed。
+	 *   键只会在配对时生成、正常路径不会变；对不上说明文件被改过 / 从别的机器搬了过来，
+	 *   这时"静默按新键认"等于把别人换进来的键当成主人。
+	 */
+	private sealFingerprints(now = Date.now()): void {
+		let dirty = false;
+		for (const device of this.store.devices) {
+			const expected = deviceFingerprint(device.id, device.tokenHash);
+			if (device.fingerprint === undefined) {
+				device.fingerprint = expected;
+				dirty = true;
+				continue;
+			}
+			if (device.fingerprint !== expected && device.keyChangedAt === undefined) {
+				device.keyChangedAt = now;
+				dirty = true;
+				console.warn(
+					`[pairing] 设备 ${device.id.slice(0, 8)} 的凭据指纹不匹配，已按 fail-closed 停用`,
+				);
+			}
+		}
+		if (dirty) this.persist();
+	}
+
+	/** 落盘失败只 warn：配对库写不进去不该让服务起不来（与 load 同口径）。 */
+	private persist(): void {
+		try {
+			save(this.storePath, this.store);
+		} catch (error) {
+			console.warn(
+				`[pairing] 写入 ${this.storePath} 失败: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
 
 	/** 生成一枚新码（同一时刻只保留一枚；新码顶掉旧码）。返回明文码，只在此刻存在。 */
 	issueCode(now = Date.now()): { code: string; expiresAt: number } {
 		const code = String(randomInt(0, 1_000_000)).padStart(6, "0");
 		const expiresAt = now + CODE_TTL_SECONDS * 1000;
 		this.store.code = { hash: sha256(code), expiresAt, attempts: 0 };
-		save(this.store);
+		this.persist();
 		return { code, expiresAt };
 	}
 
@@ -118,16 +194,19 @@ export class PairingStore {
 
 		if (!hashEquals(current.hash, sha256(code.trim()))) {
 			current.attempts += 1;
-			save(this.store);
+			this.persist();
 			return current.attempts >= MAX_CODE_ATTEMPTS ? "too_many_attempts" : "unknown_code";
 		}
 
 		const deviceToken = randomBytes(32).toString("base64url");
+		const tokenHash = sha256(deviceToken);
+		const id = randomBytes(8).toString("hex");
 		const device: StoredDevice = {
-			id: randomBytes(8).toString("hex"),
+			id,
 			name: deviceName.trim().slice(0, 40) || "手机",
-			tokenHash: sha256(deviceToken),
+			tokenHash,
 			createdAt: now,
+			...(deviceFingerprintEnabled() ? { fingerprint: deviceFingerprint(id, tokenHash) } : {}),
 		};
 		current.usedAt = now;
 		// 设备上限：踢掉最久没用过的那台（防无限堆积）
@@ -135,8 +214,12 @@ export class PairingStore {
 			.filter((item) => !item.revokedAt)
 			.sort((a, b) => (b.lastSeenAt ?? b.createdAt) - (a.lastSeenAt ?? a.createdAt))
 			.slice(0, MAX_DEVICES);
-		save(this.store);
-		return { deviceToken, deviceId: device.id };
+		this.persist();
+		return {
+			deviceToken,
+			deviceId: device.id,
+			...(device.fingerprint ? { fingerprint: device.fingerprint } : {}),
+		};
 	}
 
 	/** 设备凭据是否有效（每次请求都会走一次；命中即刷新 lastSeenAt，但最多每分钟落一次盘） */
@@ -145,26 +228,35 @@ export class PairingStore {
 		let touched = false;
 		for (const device of this.store.devices) {
 			if (device.revokedAt) continue;
+			// 键变更 fail-closed（批 26 §四）：指纹对不上的设备不再接受任何凭据，
+			// 直到主人在电脑上撤销 / 重新配对。宁可多要求一次配对，不静默认一把被换掉的键。
+			if (device.keyChangedAt) continue;
 			if (!hashEquals(device.tokenHash, hash)) continue;
 			if (!device.lastSeenAt || now - device.lastSeenAt > 60_000) {
 				device.lastSeenAt = now;
 				touched = true;
 			}
-			if (touched) save(this.store);
+			if (touched) this.persist();
 			return true;
 		}
 		return false;
 	}
 
+	/** 对外设备清单：始终不含 tokenHash；开关关着时连指纹 / 键变更位也不出现（回滚）。 */
 	listDevices(): Array<Omit<StoredDevice, "tokenHash">> {
-		return this.store.devices.map(({ tokenHash: _hidden, ...rest }) => rest);
+		const withFingerprint = deviceFingerprintEnabled();
+		return this.store.devices.map(({ tokenHash: _hidden, ...rest }) => {
+			if (withFingerprint) return rest;
+			const { fingerprint: _fingerprint, keyChangedAt: _keyChanged, ...legacy } = rest;
+			return legacy;
+		});
 	}
 
 	revokeDevice(id: string, now = Date.now()): boolean {
 		const device = this.store.devices.find((item) => item.id === id && !item.revokedAt);
 		if (!device) return false;
 		device.revokedAt = now;
-		save(this.store);
+		this.persist();
 		return true;
 	}
 

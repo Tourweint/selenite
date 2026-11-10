@@ -480,6 +480,92 @@ test("多副本对齐：同 requestId 的单在列表/详情共用 groupId；开
 	}
 });
 
+// ── 多副本聚合（2026-11-10 批 26 §二）────────────────────
+
+test("多副本聚合：2 个副本 1 个完成 → pending；全完成 → settled；未知组 / 开关关 → 404", async () => {
+	const root = temp("api-group-aggregate");
+	try {
+		const workRoot = join(root, "runs");
+		const manager = ensureManager(workRoot, "agg");
+		const rootStore = new Store(workRoot);
+		// 同一 requestId 的副本分散在顶层与领域（同库只有一个 idempotency_key 唯一位）。
+		rootStore.saveTicket(
+			makeTicket("T-agg-a", workRoot, { idempotencyKey: "g-1", status: "done" }),
+		);
+		rootStore.saveTicket(
+			makeTicket("T-agg-c", workRoot, { idempotencyKey: "g-2", status: "done" }),
+		);
+		rootStore.close();
+		const managerStore = new Store(manager.runs_dir);
+		managerStore.saveTicket(
+			makeTicket("T-agg-b", manager.runs_dir, {
+				idempotencyKey: "g-1",
+				options: { dry: true, maxTasks: 8, workRoot: manager.runs_dir, domain: "agg" },
+			}),
+		);
+		managerStore.saveTicket(
+			makeTicket("T-agg-d", manager.runs_dir, {
+				idempotencyKey: "g-2",
+				status: "failed",
+				options: { dry: true, maxTasks: 8, workRoot: manager.runs_dir, domain: "agg" },
+			}),
+		);
+		managerStore.close();
+
+		const app = new Hono();
+		mountDelegationApi(app, { workRoot });
+
+		const pending = (await (await app.request("/api/v1/tickets/groups/g-1")).json()) as {
+			ok: boolean;
+			groupId: string;
+			total: number;
+			done: number;
+			pending: number;
+			status: string;
+		};
+		assert.deepEqual(pending, {
+			ok: true,
+			groupId: "g-1",
+			total: 2,
+			done: 1,
+			pending: 1,
+			status: "pending",
+		});
+
+		const settled = (await (await app.request("/api/v1/tickets/groups/g-2")).json()) as {
+			groupId: string;
+			total: number;
+			done: number;
+			pending: number;
+			status: string;
+		};
+		assert.equal(settled.groupId, "g-2");
+		assert.equal(settled.total, 2);
+		assert.equal(settled.done, 2);
+		assert.equal(settled.pending, 0);
+		assert.equal(settled.status, "settled");
+
+		const unknown = await app.request("/api/v1/tickets/groups/nobody");
+		assert.equal(unknown.status, 404);
+
+		const saved = process.env.DELEGATION_FANOUT_GROUP;
+		process.env.DELEGATION_FANOUT_GROUP = "false";
+		try {
+			const off = await app.request("/api/v1/tickets/groups/g-1");
+			assert.equal(off.status, 404, "开关关着时组这个概念不存在");
+		} finally {
+			if (saved === undefined) delete process.env.DELEGATION_FANOUT_GROUP;
+			else process.env.DELEGATION_FANOUT_GROUP = saved;
+		}
+	} finally {
+		try {
+			rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+		} catch {
+			/* 句柄由 OS 在进程退出时回收 */
+		}
+	}
+});
+
 // ── 验收项逐项投影（2026-11-10 批 23 §一）────────────────────
 
 test("验收项：只认 `验：` 前缀（半角冒号同样认），状态只按 reviews 判", () => {

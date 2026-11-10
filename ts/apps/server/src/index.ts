@@ -339,6 +339,11 @@ app.get("/api/v1/pair/devices", (c) => {
     createdAt: device.createdAt,
     lastSeenAt: device.lastSeenAt ?? null,
     revoked: Boolean(device.revokedAt),
+    // 人眼可核的指纹 + 键变更位（2026-11-10 批 26 §四）；开关关着时两者都不出现。
+    ...(device.fingerprint !== undefined ? { fingerprint: device.fingerprint } : {}),
+    ...(device.keyChangedAt !== undefined
+      ? { keyChanged: true, keyChangedAt: device.keyChangedAt }
+      : {}),
   }));
   return c.json({ devices });
 });
@@ -406,7 +411,13 @@ app.post("/api/v1/pair/redeem", async (c) => {
     return c.json({ error: result }, status);
   }
   console.log(`[pair] 新设备已配对（${ip}），当前共 ${pairing.listDevices().length} 台`);
-  return c.json({ deviceToken: result.deviceToken, name: hostname(), version: SERVER_VERSION });
+  return c.json({
+    deviceToken: result.deviceToken,
+    deviceId: result.deviceId,
+    ...(result.fingerprint ? { fingerprint: result.fingerprint } : {}),
+    name: hostname(),
+    version: SERVER_VERSION,
+  });
 });
 
 app.get("/api/v1/pair/devices", (c) => c.json(pairing.listDevices()));
