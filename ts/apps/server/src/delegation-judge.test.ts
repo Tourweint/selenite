@@ -15,6 +15,7 @@ import {
 	guardJudgeRead,
 	judgeBashAllowed,
 	judgeReadAllowed,
+	judgeRetestEnabled,
 	judgeSessionName,
 	judgeToolCapMessage,
 	type JudgeToolCounter,
@@ -210,4 +211,63 @@ test("裁判会话名：task- 前缀（不进历史列表）且每次不同", ()
 	assert.ok(first.startsWith(JUDGE_SESSION_PREFIX));
 	assert.ok(first.startsWith("task-judge-"));
 	assert.notEqual(first, second);
+});
+
+test("裁判重跑测试（批 22 §三）：开关关照拒；开关开只放 test 形态与 git 只读子命令", () => {
+	const root = workspace();
+	const saved = process.env.DELEGATION_JUDGE_RETEST;
+	try {
+		// 开关关（缺省）：测试与 git 一律照拒（原行为回归）
+		delete process.env.DELEGATION_JUDGE_RETEST;
+		assert.equal(judgeBashAllowed("npm test", root, root), false);
+		assert.equal(judgeBashAllowed("pnpm test", root, root), false);
+		assert.equal(judgeBashAllowed("git diff", root, root), false);
+
+		process.env.DELEGATION_JUDGE_RETEST = "true";
+		// 放行：test 形态（可带路径参数）与 git 只读子命令
+		const allowed = [
+			"npm test",
+			"npm test src/a.test.ts",
+			"pnpm test",
+			"pnpm run test:unit",
+			"pnpm run test-e2e",
+			"npx vitest run",
+			"npx vitest run src/a.test.ts",
+			"git status",
+			"git diff",
+			"git log --oneline",
+			"git show HEAD",
+			"git diff --stat src/",
+		];
+		for (const command of allowed) {
+			assert.equal(judgeBashAllowed(command, root, root), true, command);
+		}
+		// 照拒：任意脚本 / 安装 / 写动作 / 可执行旗标 / 组合语法 / 通配
+		const denied = [
+			"npm run deploy",
+			"npm install",
+			"pnpm run lint",
+			"npx vitest",
+			"git commit -m x",
+			"git push",
+			"git checkout main",
+			"git log -c foo=bar",
+			"git diff --pretty=format:x",
+			"npm test > out.txt",
+			"npm test && echo done",
+			"npm test src/*.ts",
+			"git log `cat f`",
+		];
+		for (const command of denied) {
+			assert.equal(judgeBashAllowed(command, root, root), false, command);
+		}
+		// 开关取值口径：true/1/on 开；false/0/off/其他 关
+		for (const [value, want] of [["1", true], ["on", true], ["0", false], ["off", false], ["yes", false]] as const) {
+			process.env.DELEGATION_JUDGE_RETEST = value;
+			assert.equal(judgeRetestEnabled(), want, value);
+		}
+	} finally {
+		if (saved === undefined) delete process.env.DELEGATION_JUDGE_RETEST;
+		else process.env.DELEGATION_JUDGE_RETEST = saved;
+	}
 });

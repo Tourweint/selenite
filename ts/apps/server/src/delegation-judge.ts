@@ -44,9 +44,61 @@ export function judgeToolCapMessage(max: number): string {
 /**
  * bash 的只读判定（裁判专用口径，与 `AGENT_READ_ALLOWLIST` 同一份词表）。
  * 纯函数导出是为了单测能直接断言"写命令进不来"，不用起会话。
+ *
+ * 批 22 §三（#36 差半）：`DELEGATION_JUDGE_RETEST` 开（默认关，放宽类默认关）时
+ * 额外放行"重跑测试"级命令——裁判要能独立复核"测试通过"这条最关键的自报证据，
+ * 不能只靠读代码。第二级纪律与第一级一致：单条、无管道/重定向/通配/命令组合。
  */
 export function judgeBashAllowed(command: string, cwd: string, workspaceRoot: string): boolean {
-	return isReadOnlyShellCommand("bash", { command }, workspaceRoot, cwd);
+	if (isReadOnlyShellCommand("bash", { command }, workspaceRoot, cwd)) return true;
+	return judgeRetestEnabled() && isJudgeRetestCommand(command, workspaceRoot, cwd);
+}
+
+/** 回滚开关：`DELEGATION_JUDGE_RETEST=false/0/off` 关（缺省关）；总开关仍受 `DELEGATION_JUDGE` 约束。 */
+export function judgeRetestEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = env.DELEGATION_JUDGE_RETEST?.trim().toLowerCase();
+	if (!raw) return false;
+	return raw === "true" || raw === "1" || raw === "on";
+}
+
+/**
+ * "重跑测试"级命令的形状判定（纯函数）：
+ *   - `npm test` / `pnpm test`：不带参数，或只带文件路径参数（不含 `-` 开头的旗标）；
+ *   - `npm run <script>` / `pnpm run <script>`：脚本名后只允许路径类参数；
+ *   - `npx vitest run`：同上；
+ *   - `git status` / `git diff` / `git log` / `git show`：只读子命令，`diff`/`log`/`show`
+ *     允许路径参数，但拒绝任何写动作子命令与 `--exec` 类旗标。
+ * 含管道 / 重定向 / 命令组合 / 通配的一律拒绝（调用方在第一级之外仍会整条检查）。
+ */
+export function isJudgeRetestCommand(command: string, _workspaceRoot: string, _cwd: string): boolean {
+	const text = command.trim();
+	if (!text) return false;
+	// 与第一级同一条底线：任何 shell 组合语法（管道/顺序/后台/重定向/替换/通配/换行）直接出局
+	if (/[|;&><`$\n*]/.test(text)) return false;
+	const tokens = text.split(/\s+/);
+	const head = tokens[0]?.toLowerCase();
+	if (head === "npm" || head === "pnpm" || head === "npx") {
+		// `npm test` / `pnpm test` / `npx vitest run` / `npm|pnpm run <名字含 test 的脚本>`；
+		// run 任意脚本等于任意执行（deploy 也是 script），与裁判只读定位冲突——只认 test 系。
+		if (head === "npx") {
+			if (tokens[1]?.toLowerCase() !== "vitest" || tokens[2]?.toLowerCase() !== "run") return false;
+			return tokens.slice(3).every((token) => token !== "" && !token.startsWith("-"));
+		}
+		const sub = tokens[1]?.toLowerCase() ?? "";
+		if (sub === "test") return tokens.slice(2).every((token) => token !== "" && !token.startsWith("-"));
+		if (sub === "run" && /test/i.test(tokens[2] ?? "")) {
+			return tokens.slice(3).every((token) => token !== "" && !token.startsWith("-"));
+		}
+		return false;
+	}
+	if (head === "git") {
+		const sub = tokens[1]?.toLowerCase() ?? "";
+		if (!["status", "diff", "log", "show"].includes(sub)) return false;
+		// 只读展示旗标一小撮；其余旗标（含 `-c`、`--pretty=` 这类可执行口）与赋值形状全拒
+		const flags = new Set(["--stat", "--oneline", "--name-only", "--name-status", "-p", "--abbrev-commit"]);
+		return tokens.slice(2).every((token) => (token.startsWith("-") ? flags.has(token) : true));
+	}
+	return false;
 }
 
 /**
@@ -195,7 +247,8 @@ export function renderJudgePrompt(input: JudgeInput): string {
 		"",
 		"## 你的工具（只有这两个，且都会被审计）",
 		"- `read`：读**工作区内**的文件（越界会被拒）。",
-		"- `bash`：只能跑只读命令（cat/head/tail/grep/rg/ls/dir/type/where/file/stat/wc/sort/uniq/find），单条、无管道 / 重定向 / 通配；只能读工作区内。跑不了 npm / git / 测试。越界会被拒绝。",
+		"- `bash`：只能跑只读命令（cat/head/tail/grep/rg/ls/dir/type/where/file/stat/wc/sort/uniq/find），单条、无管道 / 重定向 / 通配；只能读工作区内。" +
+			"测试与 git 的只读动作（npm test / npm run / pnpm test / pnpm run / npx vitest run、git status/diff/log/show）按宿主配置可能放行，被拒就别再试。",
 		`- 最多 ${input.maxTools} 次工具调用；超了会被拒。`,
 		"- 你没有写文件、改文件、派活的工具——**裁判一旦能写，就能把活干了再宣布通过，证据就没了**。不要尝试这些动作。",
 		"",
