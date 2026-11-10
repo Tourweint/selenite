@@ -106,3 +106,27 @@ test("pin 不在目录里 → 回落当前模型（不静默换路由）", () =>
 		CURRENT,
 	);
 });
+
+/**
+ * 已接线的两处（2026-11-10 批 23b §三）：`extract`（偏好抽取）与 `review`（记忆整理建议）。
+ * 配了 `AUX_MODEL_<USE>` 就返回该模型；没配回落当前会话模型。
+ * `compact` 不在列：内核 `Conversation.compact()` 不收模型，没法接；`title` 当前没有自动标题。
+ */
+test("已接用途：pin 了用 pin 的模型，没配回落当前模型", () => {
+	for (const use of ["extract", "review"] as const) {
+		assert.deepEqual(
+			auxiliaryModel(use, {
+				current: CURRENT,
+				env: { [`AUX_MODEL_${use.toUpperCase()}`]: "small-model" },
+				models: fakeModels(),
+			}),
+			{ provider: "bailian", modelId: "small-model" },
+			`${use} 应当用 pin 的模型`,
+		);
+		assert.deepEqual(
+			auxiliaryModel(use, { current: CURRENT, env: {}, models: fakeModels() }),
+			CURRENT,
+			`${use} 没配时应回落当前模型`,
+		);
+	}
+});

@@ -15,14 +15,16 @@
  * **旧工具怎么逐步迁移**（下一批从哪开始）：先迁只读、低风险的，每迁一个就把该工具的输出解析与
  * 对应测试一起改，一次一批。
  *
- * 迁移进度（2026-11-10 批 18 §五核对）：
+ * 迁移进度（2026-11-10 批 23b 核对）：
  *   - **已迁**：`recall_sessions` / `ask_user` / `report_progress` /
- *     `recall` / `web_search` / `propose_topic` / `skill`（最后四件是批 18 迁的）。
+ *     `recall` / `web_search` / `propose_topic` / `skill`（批 18）、
+ *     `delegate`（批 23b；只包外层，`needs_project` / `ticketId` 等业务分支留在 `data`）。
  *   - **还没迁**（都是会改状态或结果被别的链路读取的，必须单独一批一起改）：
- *     `remember` / `set_reminder` / `persona_recall` / `send_to_agent` / `delegate` /
+ *     `remember` / `set_reminder` / `persona_recall` / `send_to_agent` /
  *     `propose_project` / `partner_skill_write` / `partner_manage` / `group_manage` /
- *     `routine_manage`。其中 `delegate` / `work_*` / `partner_*` 的结果被回执与恢复链路解析，
- *     改形状要连读取方一起改（批 18 明确不做）。
+ *     `routine_manage`。其中 `work_*` / `partner_*` 的结果被回执与恢复链路解析，
+ *     改形状要连读取方一起改。`delegate` 已单独迁完：回执链路读的是 `startDelegation`
+ *     的落库记录，不解析工具输出文本。
  *   - **不在范围内**：`read` / `write` / `edit` / `bash` 是 durable 的 `CodingTools` 提供的，
  *     形状由上游决定，这里不改。
  *

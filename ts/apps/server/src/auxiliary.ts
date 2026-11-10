@@ -10,8 +10,14 @@
  *   - 没配 / 配的名字不在目录里 → 回落当前会话模型（行为与改动前一致）；
  *   - `AUX_LLM=false` → 全部回落当前模型（一行回滚）。
  *
- * 本批只接线 `extract`（`memory-extract.ts`）；`title` 因为当前没有自动标题而**不接线**，
- * 其余用途留接口不接。这一层不做模型调用本身——调用方自己决定超时 / 重试 / 失败语义。
+ * 接线状态（2026-11-10 批 23b §三）：
+ *   - 已接：`extract`（`memory-extract.ts` 偏好抽取）、`review`（`routine-gate.ts` 例行条件判定
+ *     + `memory-consolidate.ts` 的语义整理建议，后一处是批 23b 补的）；
+ *   - **没接**：`title`（当前没有自动标题）、`compact`（内核 `Conversation.compact()`
+ *     只收 `instructions` + `Context`，压缩模型由当前会话模型与 compaction policy 决定，
+ *     **无法指定单独的压缩模型**——不是这里不接，是内核没有这个入口）。
+ *
+ * 这一层不做模型调用本身——调用方自己决定超时 / 重试 / 失败语义。
  */
 
 import type { ModelRef } from "./provider.ts";

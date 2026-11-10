@@ -370,6 +370,35 @@ function textToolResult<T>(result: ToolResult<T>) {
 	return { output: [{ type: "text" as const, text: encodeToolResult(result) }] };
 }
 
+/**
+ * `delegate` 的工具结果（2026-11-10 批 23b 五§八#1）：只包外层，人读 `message` 逐字不变。
+ *
+ * 业务分支的附加字段（`ticketId`、`needs_project` 的候选项目清单、幂等命中的原单号）
+ * 放 `data`——模型靠它们决定下一步，塞进 `error` 就只剩一句话。真正的失败
+ * （设备矩阵不可用 / 派单异常）走 `err`。
+ */
+function delegateResult(message: string, extra: Record<string, unknown> = {}) {
+	return textToolResult(ok({ message, ...extra }));
+}
+
+/**
+ * `needs_project` 这类分支迁移前就是一段 JSON（`{error, message, projects}`）。
+ * "原样进 data" = 连字段名一起保留，只去掉内层的 `ok`（外层已经有 `ok: true`）。
+ */
+function delegateJsonData(raw: string): Record<string, unknown> {
+	try {
+		const parsed = JSON.parse(raw) as unknown;
+		if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+			const data = { ...(parsed as Record<string, unknown>) };
+			delete data.ok;
+			return data;
+		}
+	} catch {
+		// 不是 JSON（旧文案）→ 只当 message
+	}
+	return { message: raw };
+}
+
 // ── persona_recall 渲染（2026-11-09 persona 接入批一）──────────────
 const PERSONA_GROUP_LABELS: Record<PersonaRecallGroup, string> = {
 	memory_day: "日记忆",
@@ -754,9 +783,7 @@ export function createTools(deps: ToolDeps) {
 			// 计划附件（2026-11-09 §2.1）：先校验，超限不建单、不发送任何副作用。
 			const stepsCheck = normalizeDelegationSteps(args.steps);
 			if (!stepsCheck.ok) {
-				return text(
-					JSON.stringify({ ok: false, error: "invalid_steps", message: stepsCheck.message }),
-				);
+				return textToolResult(ok({ error: "invalid_steps", message: stepsCheck.message }));
 			}
 			const steps = stepsCheck.steps;
 			const requestedDomain = (args.domain ?? "").trim();
@@ -769,7 +796,9 @@ export function createTools(deps: ToolDeps) {
 				},
 				requestedDomain,
 			);
-			if (routing.kind === "rejected") return text(routing.reason);
+			if (routing.kind === "rejected") {
+				return textToolResult(err("delegate_rejected", routing.reason));
+			}
 			const requestFields = routingToRequestFields(routing);
 			const domain = requestFields.domain;
 			// 远程分支（2026-11-05 阶段二）：点名另一台电脑执行。
@@ -780,20 +809,26 @@ export function createTools(deps: ToolDeps) {
 			if (targetDevice) {
 				// "auto" 是第三态：开关关着就按非法参数拒绝，不让它悄悄降级成本机
 				if (targetDevice === "auto" && !deviceAutoDispatchEnabled()) {
-					return text(
-						JSON.stringify({
-							ok: false,
-							error: "auto_disabled",
-							message: "自动挑机未开启（DEVICE_AUTO_DISPATCH）",
-						}),
+					return textToolResult(
+						err("auto_disabled", "自动挑机未开启（DEVICE_AUTO_DISPATCH）"),
 					);
 				}
 				const client = currentRelayClient();
 				if (!deviceMatrixEnabled() || !client) {
-					return text("设备矩阵未开启（DEVICE_MATRIX_ENABLED=off 或中继未连接），targetDevice 不可用。");
+					return textToolResult(
+						err(
+							"device_matrix_unavailable",
+							"设备矩阵未开启（DEVICE_MATRIX_ENABLED=off 或中继未连接），targetDevice 不可用。",
+						),
+					);
 				}
 				if (args.resume === true) {
-					return text("远端单的续跑（resume）暂不支持：请直接重派一张新单到该设备。");
+					return textToolResult(
+						err(
+							"remote_resume_unsupported",
+							"远端单的续跑（resume）暂不支持：请直接重派一张新单到该设备。",
+						),
+					);
 				}
 				try {
 					const result = await dispatchRemoteDelegation(client, {
@@ -813,15 +848,20 @@ export function createTools(deps: ToolDeps) {
 							result.pickedHome ? "主机" : "",
 							result.deviceDescription ?? "",
 						].filter(Boolean);
-						return text(
+						return delegateResult(
 							`已交由设备「${result.deviceName}」${tags.length > 0 ? `（${tags.join("，")}）` : ""}执行（远端请求 ${result.requestId.slice(0, 8)}）。` +
 								"它在后台跑，完成后我会把汇报写进本会话。不要重复派、不要轮询。",
+							{
+								deviceName: result.deviceName,
+								requestId: result.requestId,
+								...(result.pickedHome ? { pickedHome: true } : {}),
+							},
 						);
 					}
 				} catch (error) {
 					const code = error instanceof RelayInvokeError ? error.code : "internal";
 					const message = error instanceof Error ? error.message.slice(0, 200) : "派发失败";
-					return text(JSON.stringify({ ok: false, error: code, message }));
+					return textToolResult(err(code, message));
 				}
 			}
 			// 非法领域名（尤其是中文）直接回可用清单，不建单、不让模型猜。
@@ -829,7 +869,9 @@ export function createTools(deps: ToolDeps) {
 				try {
 					validateDomain(domain, chancellorWorkRoot());
 				} catch (error) {
-					return text(error instanceof Error ? error.message : String(error));
+					return textToolResult(
+						err("invalid_domain", error instanceof Error ? error.message : String(error)),
+					);
 				}
 			}
 			const asyncMode = envFlag("DELEGATION_ASYNC", true);
@@ -853,11 +895,12 @@ export function createTools(deps: ToolDeps) {
 			if (projectRequired && !deviceWork) {
 				if (args.project?.trim()) {
 					const gate = resolveDelegationProject(args.project, deps.projects ?? null);
-					if (!gate.ok) return text(gate.text);
+					// needs_project 是业务分支：项目清单原样进 data，不塞进 error。
+					if (!gate.ok) return textToolResult(ok(delegateJsonData(gate.text)));
 					project = gate.project;
 				} else if (resumeTicketId === undefined) {
 					const gate = resolveDelegationProject(undefined, deps.projects ?? null);
-					if (!gate.ok) return text(gate.text);
+					if (!gate.ok) return textToolResult(ok(delegateJsonData(gate.text)));
 					project = gate.project;
 				} else {
 					// 老会话重启后可能记不住项目；续跑本身不需要新项目。
@@ -900,15 +943,16 @@ export function createTools(deps: ToolDeps) {
 					// 同一 requestId 但内容不同：不报冲突、不让模型换号重派，直接把原单交回。
 					const existing = begun.receipt?.ticketId ?? "";
 					if (existing) lastTicketByConversation.set(conversationId, existing);
-					return text(
+					return delegateResult(
 						`该请求号已受理过，返回原单${existing ? ` ${existing}` : "（原单还在受理中）"}，没有重复派。` +
 							"后台跑完会汇报。",
+						existing ? { ticketId: existing } : {},
 					);
 				}
 				if (begun.kind === "uncertain") {
-					return text(
-						JSON.stringify({
-							ok: false,
+					// 结果未知是**业务分支**：ticketId 必须留在 data 里，模型要先用它确认，不能重派。
+					return textToolResult(
+						ok({
 							error: "uncertain",
 							ticketId: begun.receipt?.ticketId ?? "",
 							message:
@@ -919,9 +963,10 @@ export function createTools(deps: ToolDeps) {
 				if (begun.kind === "existing") {
 					const existing = begun.receipt?.ticketId ?? "";
 					if (existing) lastTicketByConversation.set(conversationId, existing);
-					return text(
+					return delegateResult(
 						`这次派活已经受理过，沿用原任务单 ${existing || "(受理中)"}，没有重复派。` +
 							"后台跑完会汇报。",
+						existing ? { ticketId: existing } : {},
 					);
 				}
 			}
@@ -1011,30 +1056,44 @@ export function createTools(deps: ToolDeps) {
 					const result = await outcome;
 					lastTicketByConversation.set(conversationId, result.ticketId);
 					const line = result.line || "派出去的活没有返回结论。";
-					if (noTicket) return text(`${fallbackNotice}${line}\n（没有可续的单，已按新活派）`);
-					if (resumeTicketId) {
-						return text(`${fallbackNotice}${line}\n（已把用户的回答交回原单，它在接着做。）`);
+					const ticket = result.ticketId ? { ticketId: result.ticketId } : {};
+					if (noTicket) {
+						return delegateResult(
+							`${fallbackNotice}${line}\n（没有可续的单，已按新活派）`,
+							ticket,
+						);
 					}
-					return text(fallbackNotice + line);
+					if (resumeTicketId) {
+						return delegateResult(
+							`${fallbackNotice}${line}\n（已把用户的回答交回原单，它在接着做。）`,
+							ticket,
+						);
+					}
+					return delegateResult(fallbackNotice + line, ticket);
 				} catch {
-					return text(`${fallbackNotice}派单失败，请稍后再试。`);
+					return textToolResult(err("delegate_failed", `${fallbackNotice}派单失败，请稍后再试。`));
 				}
 			}
 
+			const ticket = ticketId ? { ticketId } : {};
+			const domainField = domain ? { domain } : {};
 			if (noTicket) {
-				return text(
+				return delegateResult(
 					`${fallbackNotice}已按新活派：任务单 ${ticketId || "(受理中)"}` +
 						`${domain ? `（领域：${domain}）` : ""}。它在后台执行，完成后我会汇报。`,
+					{ ...ticket, ...domainField },
 				);
 			}
 			if (resumeTicketId) {
-				return text(
+				return delegateResult(
 					`${fallbackNotice}已把回答交回原单 ${ticketId}，它继续在后台跑，完成后我会汇报。`,
+					ticket,
 				);
 			}
-			return text(
+			return delegateResult(
 				`${fallbackNotice}已受理：任务单 ${ticketId || "(受理中)"}${domain ? `（领域：${domain}）` : ""}。` +
 					"它在后台执行，完成后我会汇报；不要等，也不要重复派。",
+				{ ...ticket, ...domainField },
 			);
 		},
 	});
