@@ -382,29 +382,38 @@ try {
 	check(usage.models.length > 0, "有用量记录", JSON.stringify(usage.models[0]));
 
 	// ── 5. 提醒 ───────────────────────────────────────
-	// ── 4.5 注入审计端点（2026-11-10 批 26b §二）──────────
-	// 真 HTTP 验：只回元数据、不回正文；批 A 框架只接管 injection_guard 一个。
+	// ── 4.5 注入审计端点（2026-11-10 批 26b §二 / 批 27 §四）──────────
+	// 真 HTTP 验：只回元数据、不回正文；批 27 起全部注入都进清单（source 区分来源模块）。
 	console.log("\n· 4.5 注入审计端点（只回元数据，不回正文）");
 	const injectionsRes = await fetch(`${BASE}/api/v1/agent/chat/${externalId}/injections`);
 	check(injectionsRes.status === 200, "GET .../injections → 200", String(injectionsRes.status));
 	const injections = (await injectionsRes.json()) as Array<Record<string, unknown>>;
+	const injectionIds = injections.map((row) => String(row.id));
 	check(
-		Array.isArray(injections) && injections.length === 1,
-		"批 A 只接管一个注入",
-		JSON.stringify(injections),
+		Array.isArray(injections) && injectionIds.length >= 5,
+		"全部注入条目已登记（批 27 B/C/D 接管后不再是 1 条）",
+		JSON.stringify(injectionIds),
 	);
-	const injRow = injections[0] ?? {};
 	check(
-		injRow.id === "injection_guard" &&
-			injRow.source === "injection_guard" &&
+		["persona", "injection_guard", "current_project", "topics"].every((id) =>
+			injectionIds.includes(id),
+		),
+		"section 注入都在清单里",
+		JSON.stringify(injectionIds),
+	);
+	const injRow = injections.find((row) => row.id === "injection_guard") ?? {};
+	check(
+		injRow.source === "lifecycle" &&
 			injRow.scope === "session" &&
+			injRow.channel === "system" &&
 			typeof injRow.length === "number" &&
 			(injRow.length as number) > 0,
-		"审计行形状 {id,source,scope,length}",
+		"审计行形状 {id,source,scope,channel,length}",
 		JSON.stringify(injRow),
 	);
 	check(
-		!("text" in injRow) && !JSON.stringify(injections).includes("【材料安全】"),
+		injections.every((row) => !("text" in row)) &&
+			!JSON.stringify(injections).includes("【材料安全】"),
 		"审计不返正文（无 text 字段、无实文片段）",
 	);
 

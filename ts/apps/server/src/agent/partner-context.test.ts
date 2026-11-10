@@ -303,25 +303,10 @@ test("空态省略：空契约 + 无在办 → 契约与在办不注入；纪律
 		assert.match(context.discipline, /【裁决纪律】/);
 		assert.match(context.discipline, /【干活期间】/);
 		assert.match(context.discipline, /【提问纪律】/);
-		// 2026-11-09 T2：注入防线默认开 → 前两段空时 text = 纪律 + 防线
-		assert.match(context.guard ?? "", /【材料安全】/);
-		assert.equal(context.text, `${context.discipline}\n\n${context.guard}`);
-
-		// 开关关 → 契约与在办仍空；防线消失后 text 只剩纪律段（不再回到 undefined）
-		const previous = process.env.AGENT_INJECTION_GUARD;
-		try {
-			process.env.AGENT_INJECTION_GUARD = "false";
-			const bare = buildPartnerTurnContext(partner.id, 303, {
-				store,
-				workRoot,
-				approvals: { pendingOf: () => [] },
-			});
-			assert.equal(bare.guard, null);
-			assert.equal(bare.text, bare.discipline, "防线关 + 两段都空 → 只剩固定纪律段");
-		} finally {
-			if (previous === undefined) delete process.env.AGENT_INJECTION_GUARD;
-			else process.env.AGENT_INJECTION_GUARD = previous;
-		}
+		// 2026-11-10 批 27 §5.1：注入防线（injection_guard）已由 lifecycle 的 system 段注入，
+		// 执事尾巴这份同 id 同正文的重复合并掉了——合并文本 = 纪律段，不含【材料安全】。
+		assert.equal(context.text, context.discipline);
+		assert.ok(!(context.text ?? "").includes("【材料安全】"), "执事尾巴不再重复注入防线");
 	} finally {
 		store.close();
 		rmSync(root, { recursive: true, force: true });
