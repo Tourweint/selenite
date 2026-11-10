@@ -4,8 +4,16 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { PairingStore, deviceFingerprint } from "./pairing.ts";
+import { PairingStore, deviceFingerprint, pairTwoStepEnabled } from "./pairing.ts";
 import type { RedeemResult } from "./pairing.ts";
+
+/**
+ * 两段式配对（2026-11-10 批 28 §一）：begin 拿 code + confirmToken，confirm 才发令牌。
+ *
+ * 安全语义：**只扫码（只有 code）不能完成配对**——必须有人在电脑端交出 confirmToken。
+ * 这里覆盖任务书 §1.6 六条（成功 / 只有 code / confirmToken 错 / 过期 / 重放 / 开关回滚），
+ * 外加「明文不落盘」「失败计入既有 attempts 限流」两条硬约束。
+ */
 
 /**
  * 配对设备指纹 + 键变更 fail-closed（2026-11-10 批 26 §四）。
@@ -145,6 +153,107 @@ test("开关 PAIR_DEVICE_FINGERPRINT=false：不生成 / 不下发指纹，也�
 	} finally {
 		if (saved === undefined) delete process.env.PAIR_DEVICE_FINGERPRINT;
 		else process.env.PAIR_DEVICE_FINGERPRINT = saved;
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+// ── 两段式配对（2026-11-10 批 28 §一）──────────────────────────────
+function twoStepFixture(): { dir: string; file: string; store: PairingStore } {
+	const dir = tempDir("pair-two-step");
+	const file = join(dir, "pairing.json");
+	return { dir, file, store: new PairingStore(file) };
+}
+
+test("两段式成功：begin 拿 code+confirmToken，confirm 才发令牌；两者都只存 sha256", () => {
+	const { dir, file, store } = twoStepFixture();
+	try {
+		const { code, expiresAt, confirmToken } = store.begin();
+		assert.match(code, /^\d{6}$/);
+		assert.ok(expiresAt > 0);
+		assert.ok(confirmToken.length >= 20, "confirmToken 应是高熵随机串，不是短码");
+
+		const result = store.confirm(code, confirmToken, "测试机");
+		assert.notEqual(typeof result, "string", "code 与 confirmToken 都交齐才成功");
+		assert.equal(store.verifyDeviceToken((result as RedeemResult).deviceToken), true);
+
+		// 硬约束：明文码 / 明文 confirmToken 都不落盘，落盘只有哈希。
+		// 不比对整串 raw（6 位数字可能是时间戳的子串），只查落盘字段的值。
+		const stored = JSON.parse(readFileSync(file, "utf8")) as {
+			code?: Record<string, unknown>;
+		};
+		const values = Object.values(stored.code ?? {});
+		assert.ok(!values.includes(code), "明文 code 不作为任何字段落盘");
+		assert.ok(!values.includes(confirmToken), "明文 confirmToken 不作为任何字段落盘");
+		assert.ok(stored.code?.hash && stored.code?.confirmHash, "落盘只留两枚哈希");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("只扫码不能完成：confirm 只给 code（无 confirmToken）→ 拒绝；单段 redeem 也兑不了两段式码", () => {
+	const { dir, store } = twoStepFixture();
+	try {
+		const { code } = store.begin();
+		assert.equal(store.confirm(code, "", "手机"), "confirm_required", "只有 code 不能完成配对");
+		// 即便绕过 confirm 直接走单段 redeem，两段式码也不该被兑掉
+		assert.equal(store.redeem(code, "手机"), "unknown_code");
+		assert.equal(store.listDevices().length, 0, "到这一步不能产生任何设备");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("confirmToken 错 → 拒绝；连续错计入既有 attempts，撞上限作废", () => {
+	const { dir, store } = twoStepFixture();
+	try {
+		const { code } = store.begin();
+		assert.equal(store.confirm(code, "不是那枚令牌", "手机"), "bad_confirm");
+		// 既有 attempts 限流：与 redeem 共用一个计数器，错满 5 次作废这枚码
+		for (let i = 0; i < 3; i += 1) {
+			assert.equal(store.confirm(code, "还是错", "手机"), "bad_confirm");
+		}
+		assert.equal(store.confirm(code, "第五次错", "手机"), "too_many_attempts");
+		assert.equal(store.confirm(code, "正确令牌也没用了", "手机"), "too_many_attempts");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("两段式过期 → 拒绝（code 与 confirmToken 同生共死，默认 5 分钟）", () => {
+	const { dir, store } = twoStepFixture();
+	try {
+		const t0 = 1_700_000_000_000;
+		const { code, expiresAt, confirmToken } = store.begin(t0);
+		assert.equal(expiresAt - t0, 300_000, "默认 5 分钟");
+		assert.equal(store.confirm(code, confirmToken, "手机", t0 + 301_000), "code_expired");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("一次性（重放失败）：confirm 成功后第二次 → code_used", () => {
+	const { dir, store } = twoStepFixture();
+	try {
+		const { code, confirmToken } = store.begin();
+		assert.notEqual(typeof store.confirm(code, confirmToken, "手机"), "string");
+		assert.equal(store.confirm(code, confirmToken, "手机"), "code_used", "confirmToken 不能重放");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("开关 PAIR_TWO_STEP=false 回滚到单段：默认 true，关掉后 issueCode→redeem 照常", () => {
+	assert.equal(pairTwoStepEnabled({}), true, "缺省 true（收紧，但为了安全默认开）");
+	assert.equal(pairTwoStepEnabled({ AUX_LLM: "false" }), true, "只认 PAIR_TWO_STEP");
+	for (const off of ["false", "0", "off", "FALSE"]) {
+		assert.equal(pairTwoStepEnabled({ PAIR_TWO_STEP: off }), false, `${off} 关`);
+	}
+	const { dir, store } = twoStepFixture();
+	try {
+		// 回滚形态：只有单段链路；begin/confirm 端点在服务端由开关关掉，这里验旧链路仍可用
+		const code = store.issueCode().code;
+		assert.notEqual(typeof store.redeem(code, "手机"), "string", "旧单段 redeem 回滚用，照常可用");
+	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
 });

@@ -2808,7 +2808,12 @@ try {
 
 	server.kill();
 	await sleep(800);
-	server = startServer({ COMPANIONS_ENABLED: "true", AGENT_BASH_BG_TIMEOUT: "" });
+	// §30 走的是旧单段 redeem（验指纹），两段式默认开会把 redeem 收紧关闭，这里显式回滚。
+	server = startServer({
+		COMPANIONS_ENABLED: "true",
+		AGENT_BASH_BG_TIMEOUT: "",
+		PAIR_TWO_STEP: "false",
+	});
 	await waitForReady();
 	const bgOff = await fetch(`${BASE}/api/v1/agent/bg-jobs`);
 	check(bgOff.status === 404, "开关关着 → 三个端点整组 404", String(bgOff.status));
@@ -2853,6 +2858,119 @@ try {
 		await fetch(`${BASE}/api/v1/pair/devices/${redeemedBody.deviceId}/revoke`, { method: "POST" });
 	}
 
+	// ── 31. 两段式配对 + 找旧事搜索端点（2026-11-10 批 28）──
+	// 真起一个 PAIR_TWO_STEP=true 的服务：验「只扫码不能完成」、confirm 才发令牌、重放失效、
+	// 单段 redeem 被收紧关闭；顺带验只读搜索端点的 400 / 形状。
+	console.log("\n· 31. 两段式配对 + 找旧事只读搜索端点（批 28）");
+	server.kill();
+	await sleep(800);
+	server = startServer({
+		PAIR_TWO_STEP: "true",
+		PAIRING_STORE_PATH: ".data/probe-http-pairing-2step.json",
+	});
+	await waitForReady();
+
+	const beginResp = await fetch(`${BASE}/api/v1/pairing/begin`, { method: "POST" });
+	const begun = (await beginResp.json()) as {
+		code?: string;
+		expiresAt?: number;
+		confirmToken?: string;
+	};
+	check(
+		beginResp.status === 200 &&
+			typeof begun.code === "string" &&
+			typeof begun.expiresAt === "number" &&
+			typeof begun.confirmToken === "string" &&
+			begun.confirmToken.length >= 20,
+		"begin 返回 code + expiresAt + confirmToken（confirmToken 不随二维码下发）",
+		`${beginResp.status} ct=${begun.confirmToken?.length}`,
+	);
+
+	// 只给 code（不输 confirmToken）→ 不能完成配对
+	const onlyCode = await fetch(`${BASE}/api/v1/pairing/confirm`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ code: begun.code }),
+	});
+	const onlyCodeBody = (await onlyCode.json()) as { error?: string; deviceToken?: string };
+	check(
+		onlyCode.status === 400 &&
+			onlyCodeBody.error === "confirm_required" &&
+			!onlyCodeBody.deviceToken,
+		"只扫码（只有 code）不能完成配对",
+		`${onlyCode.status} ${onlyCodeBody.error}`,
+	);
+
+	const badConfirm = await fetch(`${BASE}/api/v1/pairing/confirm`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ code: begun.code, confirmToken: "错的令牌" }),
+	});
+	const badConfirmBody = (await badConfirm.json()) as { error?: string };
+	check(
+		badConfirm.status === 400 && badConfirmBody.error === "bad_confirm",
+		"confirmToken 错 → 400 bad_confirm",
+		`${badConfirm.status} ${badConfirmBody.error}`,
+	);
+
+	// 单段 redeem 在两段式默认开时被收紧关闭（不能凭 code 单段兑到凭据）
+	const oldRedeem = await fetch(`${BASE}/api/v1/pair/redeem`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ code: begun.code, deviceName: "探针手机" }),
+	});
+	const oldRedeemBody = (await oldRedeem.json()) as { error?: string };
+	check(
+		oldRedeem.status === 410 && oldRedeemBody.error === "two_step_required",
+		"PAIR_TWO_STEP=true 时单段 redeem 关闭（只扫码兑不到）",
+		`${oldRedeem.status} ${oldRedeemBody.error}`,
+	);
+
+	// code + confirmToken 都交齐 → 才发令牌
+	const confirmResp = await fetch(`${BASE}/api/v1/pairing/confirm`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({
+			code: begun.code,
+			confirmToken: begun.confirmToken,
+			deviceName: "探针手机",
+		}),
+	});
+	const confirmBody = (await confirmResp.json()) as { deviceToken?: string; deviceId?: string };
+	check(
+		confirmResp.status === 200 && typeof confirmBody.deviceToken === "string",
+		"两段式都交齐才发设备令牌",
+		String(confirmResp.status),
+	);
+
+	// 重放 → code_used（confirmToken 一次性）
+	const replay = await fetch(`${BASE}/api/v1/pairing/confirm`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ code: begun.code, confirmToken: begun.confirmToken }),
+	});
+	const replayBody = (await replay.json()) as { error?: string };
+	check(
+		replay.status === 409 && replayBody.error === "code_used",
+		"confirmToken 一次性：重放 → 409 code_used",
+		`${replay.status} ${replayBody.error}`,
+	);
+
+	// 找旧事只读搜索端点：空 / 短查询 400，正常查询形状 {hits:[]}（无命中给空）
+	const ssEmpty = await fetch(`${BASE}/api/v1/agent/sessions/search?q=`);
+	check(ssEmpty.status === 400, "sessions/search 空查询 → 400", String(ssEmpty.status));
+	const ssShort = await fetch(`${BASE}/api/v1/agent/sessions/search?q=%E7%88%AC`);
+	check(ssShort.status === 400, "sessions/search 短查询 → 400", String(ssShort.status));
+	const ssOk = await fetch(
+		`${BASE}/api/v1/agent/sessions/search?q=${encodeURIComponent("不存在的词xyz")}&days=365&limit=5`,
+	);
+	const ssBody = (await ssOk.json()) as { hits?: unknown[] };
+	check(
+		ssOk.status === 200 && Array.isArray(ssBody.hits),
+		"sessions/search 正常查询 → 200 {hits:[]}",
+		`${ssOk.status} ${JSON.stringify(ssBody).slice(0, 60)}`,
+	);
+
 } finally {
 	server.kill();
 	await sleep(300);
@@ -2892,6 +3010,8 @@ try {
 		[".data/probe-http-partner-homes", { recursive: true, force: true }],
 		[".data/probe-http-pairing.json", { force: true }],
 		[".data/probe-http-pairing.json.tmp", { force: true }],
+		[".data/probe-http-pairing-2step.json", { force: true }],
+		[".data/probe-http-pairing-2step.json.tmp", { force: true }],
 	];
 	for (const [path, options] of leftovers) {
 		try {

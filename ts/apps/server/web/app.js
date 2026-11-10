@@ -10212,6 +10212,131 @@ function wireSettingsSearch() {
   });
 }
 
+/**
+ * 「找旧事」（2026-11-10 批 28 §二）：只读 UI。
+ * 关键词 → GET /api/v1/agent/sessions/search → 结果列表 → 点一条用命中的 aroundIndex 拉
+ * GET /api/v1/agent/chat/:id/context?aroundIndex=&radius= 看前后文。
+ * 不 fork、不新开会话、不改任何东西（服务端两个端点都是只读，任务书 §2.2 明确不做 fork）。
+ */
+function openRecallModal() {
+  const safe = (v) => esc(String(v ?? ""));
+  openModal(
+    "找旧事",
+    (body) => {
+      body.innerHTML = `
+        <p class="modal-desc">在所有旧会话的原文里搜一句话，点一条看前后文。只读，不会改动或新开会话。</p>
+        <div class="modal-row">
+          <input class="modal-input" id="recall-q" type="search" placeholder="关键词，至少 2 个字" aria-label="找旧事关键词" />
+          <button class="btn-primary" type="button" id="recall-go">查找</button>
+        </div>
+        <div id="recall-results" class="recall-results"><div class="set-hint">输入关键词开始查找。</div></div>
+        <div id="recall-context" class="recall-context" hidden></div>
+      `;
+      const input = body.querySelector("#recall-q");
+      const results = body.querySelector("#recall-results");
+      const contextBox = body.querySelector("#recall-context");
+
+      const renderHits = (hits) => {
+        contextBox.hidden = true;
+        contextBox.replaceChildren();
+        results.hidden = false;
+        results.replaceChildren();
+        if (!hits.length) {
+          results.innerHTML = `<div class="set-hint">没有找到相关的旧事。</div>`;
+          return;
+        }
+        for (const hit of hits) {
+          const row = document.createElement("button");
+          row.type = "button";
+          row.className = "recall-hit";
+          row.innerHTML = `
+            <span class="recall-hit-head">
+              <span class="recall-hit-title">${safe(hit.title || "（无标题）")}</span>
+              <span class="recall-hit-time">${safe(new Date(hit.at).toLocaleString("zh-CN"))}</span>
+            </span>
+            <span class="recall-hit-snippet">${safe(hit.snippet)}</span>
+          `;
+          row.addEventListener("click", () => void showContext(hit));
+          results.append(row);
+        }
+      };
+
+      const showContext = async (hit) => {
+        results.hidden = true;
+        contextBox.hidden = false;
+        contextBox.innerHTML = `<div class="set-hint">读取上下文…</div>`;
+        const around = Number.isFinite(Number(hit.aroundIndex)) ? Number(hit.aroundIndex) : 0;
+        try {
+          const resp = await request(
+            `/api/v1/agent/chat/${encodeURIComponent(hit.conversationId)}/context?aroundIndex=${encodeURIComponent(around)}&radius=5`,
+            { cache: "no-store" },
+          );
+          if (!resp.ok) {
+            contextBox.innerHTML = `<div class="set-hint is-error">读不到上下文（${resp.status}）。</div>`;
+            return;
+          }
+          const data = await resp.json();
+          const head = document.createElement("div");
+          head.className = "recall-ctx-head";
+          head.innerHTML = `
+            <button class="ghost" type="button" id="recall-back">← 返回结果</button>
+            <span class="recall-ctx-meta">${safe(hit.title || "会话")} · 共 ${safe(data.total)} 条 · 第 ${safe(data.from)}–${safe(data.to)} 条</span>
+          `;
+          contextBox.replaceChildren(head);
+          head.querySelector("#recall-back")?.addEventListener("click", () => {
+            contextBox.hidden = true;
+            contextBox.replaceChildren();
+            results.hidden = false;
+          });
+          for (const msg of data.messages || []) {
+            const hitClass = Number(msg.index) === around ? " recall-msg-hit" : "";
+            const line = document.createElement("div");
+            line.className = `recall-msg ${msg.role === "user" ? "recall-msg-user" : "recall-msg-assistant"}${hitClass}`;
+            line.innerHTML = `
+              <div class="recall-msg-meta">${msg.role === "user" ? "我" : "Selenite"} · ${safe(new Date(msg.at).toLocaleString("zh-CN"))} · #${safe(msg.index)}</div>
+              <div class="recall-msg-text">${safe(msg.text || "（空）")}</div>
+            `;
+            contextBox.append(line);
+          }
+        } catch (error) {
+          contextBox.innerHTML = `<div class="set-hint is-error">读不到上下文：${safe(error.message)}</div>`;
+        }
+      };
+
+      const runSearch = async () => {
+        const q = input.value.trim();
+        contextBox.hidden = true;
+        results.hidden = false;
+        if (q.length < 2) {
+          results.innerHTML = `<div class="set-hint">关键词至少 2 个字。</div>`;
+          return;
+        }
+        results.innerHTML = `<div class="set-hint">查找中…</div>`;
+        try {
+          const resp = await request(
+            `/api/v1/agent/sessions/search?q=${encodeURIComponent(q)}&days=365&limit=20`,
+            { cache: "no-store" },
+          );
+          if (!resp.ok) {
+            results.innerHTML = `<div class="set-hint is-error">查找失败（${resp.status}）。</div>`;
+            return;
+          }
+          const data = await resp.json();
+          renderHits(data.hits || []);
+        } catch (error) {
+          results.innerHTML = `<div class="set-hint is-error">查找失败：${safe(error.message)}</div>`;
+        }
+      };
+
+      body.querySelector("#recall-go")?.addEventListener("click", () => void runSearch());
+      input?.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") void runSearch();
+      });
+    },
+    { className: "modal-wide" },
+  );
+}
+
 /** 一行设置 = 标签 + 控件。
  *  hint 2026-11-08 起默认**不再常驻**；2026-11-09 二改：连 ⓘ 图标也去掉——
  *  data-tip 直接挂在**标签文字**上，悬停即出全句（全局 data-tip 系统）。
@@ -10391,6 +10516,13 @@ async function renderSettings() {
         <div class="divider"></div>
         <div id="search-results"></div>
         <div id="content-results"></div>
+        <div class="divider"></div>
+        ${rowMarkup(
+          "找旧事",
+          "在所有旧会话的原文里搜一句话，点结果看前后文（只读，不新开会话）",
+          `<button class="ghost" type="button" id="open-recall">查找…</button>`,
+        )}
+        <div class="divider"></div>
         ${rowMarkup(
           "回车发送",
           "开启后回车直接发送；关掉则回车换行、Ctrl+Enter 发送",
@@ -10456,6 +10588,7 @@ async function renderSettings() {
     )}`;
 
     wireSettingsSearch();
+    document.getElementById("open-recall")?.addEventListener("click", () => openRecallModal());
     const sendSwitch = el.settingsInner.querySelector("[data-send-key-switch]");
     sendSwitch?.addEventListener("click", () => {
       const next = sendSwitch.getAttribute("aria-checked") !== "true";

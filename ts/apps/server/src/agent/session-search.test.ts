@@ -5,9 +5,12 @@ import test from "node:test";
 import { createTools } from "../tools.ts";
 import {
 	SNIPPET_MAX_CHARS,
+	findAroundIndex,
+	parseSessionSearchQuery,
 	recallSessionsEnabled,
 	searchSessions,
 	searchTranscriptLines,
+	sessionSearchApiEnabled,
 	type SessionReader,
 	type TranscriptSource,
 } from "./session-search.ts";
@@ -138,4 +141,84 @@ test("会话考古：开关与条件注册（不传 = 工具不上架）", () =>
 	assert.ok(withTool.some((tool) => tool.name === "recall_sessions"), "注入后工具应上架");
 	const without = createTools({ ...base, recallSessions: null });
 	assert.ok(!without.some((tool) => tool.name === "recall_sessions"), "不注入则不上架（回滚形态）");
+});
+
+// ── 只读搜索端点（2026-11-10 批 28 §二，接口文档 §2.5）──────────────────
+test("搜索端点参数：空/短查询 → null（400）；形状与 days·limit 收敛", () => {
+	assert.equal(parseSessionSearchQuery({}), null, "缺 q → null");
+	assert.equal(parseSessionSearchQuery({ q: "  " }), null, "空查询 → null（调用方回 400）");
+	assert.equal(parseSessionSearchQuery({ q: "爬" }), null, "短于 2 字 → null");
+	assert.deepEqual(parseSessionSearchQuery({ q: "  爬山  ", days: "60", limit: "3" }), {
+		query: "爬山",
+		options: { days: 60, limit: 3 },
+	});
+	assert.deepEqual(parseSessionSearchQuery({ q: "爬山", days: "abc", limit: "" }), {
+		query: "爬山",
+		options: {}, // 非数字 / 空串都不塞进 options，交给检索核心回落
+	});
+	assert.equal(sessionSearchApiEnabled({}), true, "缺省开");
+	assert.equal(sessionSearchApiEnabled({ AGENT_SESSIONS_SEARCH: "false" }), false, "false 关");
+	assert.equal(sessionSearchApiEnabled({ AGENT_SESSIONS_SEARCH: "0" }), false, "0 关");
+	assert.equal(
+		sessionSearchApiEnabled({ AGENT_RECALL_SESSIONS: "false" }),
+		true,
+		"与工具开关互不牵连：关模型工具不等于关界面找旧事",
+	);
+});
+
+test("搜索端点结果：命中形状固定、snippet ≤200 不含整段正文；aroundIndex 与定点找回同源", async () => {
+	process.env.AGENT_CHAT_META_PATH = join(tmpdir(), "lifediary-no-such-chat-meta-2.json");
+	const longText = `${"甲".repeat(150)}马拉松${"乙".repeat(150)}`;
+	const at = NOW - DAY;
+	const reader: SessionReader = {
+		async snapshot() {
+			return { byExternal: { "conv-a": 1 } };
+		},
+		async conversation() {
+			return {
+				context: async () => ({
+					entries: [
+						{
+							kind: "pi.user",
+							model: [{ role: "user", content: [{ type: "text", text: "先聊点别的" }], timestamp: at - 1000 }],
+						},
+						{
+							kind: "pi.user",
+							model: [{ role: "user", content: [{ type: "text", text: longText }], timestamp: at }],
+						},
+					],
+				}),
+			} as never;
+		},
+	};
+	const parsed = parseSessionSearchQuery({ q: "马拉松" })!;
+	const hits = await searchSessions(reader, parsed.query, parsed.options, NOW);
+	assert.equal(hits.length, 1);
+	const hit = hits[0]!;
+	// 形状：只有这四个字段，没有把整段正文塞进结果
+	assert.deepEqual(Object.keys(hit).sort(), ["at", "conversationId", "snippet", "title"]);
+	assert.ok(hit.snippet.length <= SNIPPET_MAX_CHARS, "snippet 不得超过 200 字");
+	assert.ok(!hit.snippet.includes("乙".repeat(150)), "结果不含正文超长（不带整段）");
+	assert.ok(hit.snippet.includes("马拉松"), "命中词仍在 snippet 里");
+
+	// 模拟定点找回端点的 readTranscript 结果：命中那条在下标 1
+	const messages = [
+		{ text: "先聊点别的", at: at - 1000 },
+		{ text: longText, at },
+	];
+	assert.equal(
+		findAroundIndex(messages, hit, "马拉松"),
+		1,
+		"时间一致 + 正文含命中词 → 精确定位到 readTranscript 下标 1",
+	);
+});
+
+test("findAroundIndex 兜底：命中词找不到时按时间就近；空消息回 0", () => {
+	const messages = [
+		{ text: "甲", at: 100 },
+		{ text: "乙", at: 200 },
+		{ text: "丙", at: 300 },
+	];
+	assert.equal(findAroundIndex(messages, { at: 210 }, "不存在的词"), 1);
+	assert.equal(findAroundIndex([], { at: 0 }, "马拉松"), 0);
 });

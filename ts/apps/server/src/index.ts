@@ -26,6 +26,7 @@ import {
   contextUsageOf,
   externalChatIds,
   forkForEdit,
+  getHarness,
   getPolicy,
   hideChat,
   listChats,
@@ -61,7 +62,7 @@ import { ChatEventStore, sseSeqEnabled } from "./chat-events.ts";
 import { stallWatchdog } from "./watchdog.ts";
 import { mountDiary } from "./diary.ts";
 import { mountOpenAiCompat } from "./openai-compat.ts";
-import { PairingStore, buildPairUrl, resolvePairBase } from "./pairing.ts";
+import { PairingStore, buildPairUrl, resolvePairBase, pairTwoStepEnabled } from "./pairing.ts";
 import { pairPage } from "./pair-page.ts";
 import { mountPhoneWorker } from "./phone-worker.ts";
 import { mountProjects, seedDefaultWorkspace } from "./projects.ts";
@@ -136,6 +137,13 @@ import {
   parseContextRadius,
   sliceAroundIndex,
 } from "./chat-context.ts";
+// 旧会话「找旧事」只读搜索端点（2026-11-10 批 28 §二）：复用 recall_sessions 的检索核心。
+import {
+  findAroundIndex,
+  parseSessionSearchQuery,
+  searchSessions,
+  sessionSearchApiEnabled,
+} from "./agent/session-search.ts";
 import { chancellorWorkRoot } from "./delegation.ts";
 import { DelegationReceipts } from "./delegation-receipts.ts";
 import {
@@ -234,7 +242,13 @@ const chatEventStoreOf = (): ChatEventStore | undefined => {
   chatEventStore ??= new ChatEventStore();
   return chatEventStore;
 };
-const PAIR_OPEN_PATHS = new Set(["/api/v1/pair/info", "/api/v1/pair/redeem"]);
+const PAIR_OPEN_PATHS = new Set([
+  "/api/v1/pair/info",
+  "/api/v1/pair/redeem",
+  // 两段式 confirm 必须免鉴权：手机此刻还没有任何凭据（与单段 redeem 同口径）。
+  // begin 是电脑端调用（要鉴权），故意不在此列。
+  "/api/v1/pairing/confirm",
+]);
 app.use("/api/v1/*", async (c, next) => {
   if (PAIR_OPEN_PATHS.has(c.req.path)) return next();
   return auth(c, next);
@@ -383,8 +397,23 @@ app.post("/api/v1/pair/code", (c) => {
   return c.json({ code, expiresAt, url: buildPairUrl(resolvePairBase(currentPort()), code) });
 });
 
-/** 用码换设备凭据（免鉴权：手机此刻还没有任何凭据） */
+/**
+ * 用码换设备凭据（单段 / 回滚通道，免鉴权：手机此刻还没有任何凭据）。
+ *
+ * 2026-11-10 批 28 §一：两段式默认开（PAIR_TWO_STEP=true）时这条单段捷径**关闭**，
+ * 否则"只扫码拿到 code 就能兑凭据"会让两段式形同虚设（手机绝不代确认）。
+ * 回滚：PAIR_TWO_STEP=false → 逐字节回到旧单段行为。
+ */
 app.post("/api/v1/pair/redeem", async (c) => {
+  if (pairTwoStepEnabled()) {
+    return c.json(
+      {
+        error: "two_step_required",
+        message: "单段配对在 PAIR_TWO_STEP=true 时关闭；请改用 /api/v1/pairing/begin + /confirm",
+      },
+      410,
+    );
+  }
   const ip = (() => {
     try {
       return getConnInfo(c).remote.address ?? "local";
@@ -413,6 +442,68 @@ app.post("/api/v1/pair/redeem", async (c) => {
     return c.json({ error: result }, status);
   }
   console.log(`[pair] 新设备已配对（${ip}），当前共 ${pairing.listDevices().length} 台`);
+  return c.json({
+    deviceToken: result.deviceToken,
+    deviceId: result.deviceId,
+    ...(result.fingerprint ? { fingerprint: result.fingerprint } : {}),
+    name: hostname(),
+    version: SERVER_VERSION,
+  });
+});
+
+// ── 两段式配对（2026-11-10 批 28 §一）──────────────────────────────
+/**
+ * 第一段：电脑端（已鉴权）起一枚两段式码。
+ * `code` 给手机扫（进二维码），`confirmToken` 只回电脑端确认用、**不随二维码下发**。
+ * `PAIR_TWO_STEP=false` 时整组两段式端点不启用（404，回到旧单段）。
+ */
+app.post("/api/v1/pairing/begin", (c) => {
+  if (!pairTwoStepEnabled()) return c.json({ error: "not_found" }, 404);
+  const { code, expiresAt, confirmToken } = pairing.begin();
+  return c.json({ code, expiresAt, confirmToken });
+});
+
+/**
+ * 第二段：`code` + `confirmToken` 同时正确才发设备令牌（免鉴权：手机此刻还没有凭据）。
+ * 只拿到 code 不能完成——必须有人在电脑端把 confirmToken 输进去（手机绝不代确认）。
+ */
+app.post("/api/v1/pairing/confirm", async (c) => {
+  if (!pairTwoStepEnabled()) return c.json({ error: "not_found" }, 404);
+  const ip = (() => {
+    try {
+      return getConnInfo(c).remote.address ?? "local";
+    } catch {
+      return "local";
+    }
+  })();
+  // 与 redeem 共用 IP 限流；码内 attempts 限流由 PairingStore.confirm 负责（两者同一计数器）。
+  if (redeemRateLimited(ip)) return c.json({ error: "too_many_attempts" }, 429);
+
+  const body = (await c.req.json().catch(() => null)) as
+    | { code?: string; confirmToken?: string; deviceName?: string }
+    | null;
+  const code = body?.code?.trim();
+  if (!code) return c.json({ error: "bad_request" }, 400);
+
+  const result = pairing.confirm(
+    code,
+    body?.confirmToken?.trim() ?? "",
+    body?.deviceName?.trim() || "手机",
+  );
+  if (typeof result === "string") {
+    const status =
+      result === "unknown_code"
+        ? 404
+        : result === "confirm_required" || result === "bad_confirm"
+          ? 400
+          : result === "code_used"
+            ? 409
+            : result === "code_expired"
+              ? 410
+              : 429;
+    return c.json({ error: result }, status);
+  }
+  console.log(`[pair] 新设备已两段式配对（${ip}），当前共 ${pairing.listDevices().length} 台`);
   return c.json({
     deviceToken: result.deviceToken,
     deviceId: result.deviceId,
@@ -1319,6 +1410,44 @@ app.get("/api/v1/agent/search", async (c) => {
   if (q.trim().length < 2) return c.json({ hits: [] });
   if (!readLlmConfig()) return c.json({ hits: [] });
   return c.json({ hits: await searchTranscripts(q, 20) });
+});
+
+/**
+ * 旧会话「找旧事」只读搜索（2026-11-10 批 28 §二，接口文档 §2.5）。
+ *
+ * 与上面的 `/agent/search` 刻意分开：那条走 `searchTranscripts`（跳过任务专线与隐藏会话），
+ * 这条复用 `recall_sessions` 的 `searchSessions`（覆盖全部会话、snippet 脱敏截断），
+ * 并给每条命中补一个 `aroundIndex`，前端点一条就能用既有
+ * `GET /api/v1/agent/chat/:id/context?aroundIndex=&radius=` 拉上下文弹窗（只读、不 fork）。
+ *
+ * 只读：只 `getHarness()` / `openChat()` / `readTranscript()` 读 durable，不写、不开新会话。
+ * 回滚：`AGENT_SESSIONS_SEARCH=false` → 404（整组端点不启用）。
+ */
+app.get("/api/v1/agent/sessions/search", async (c) => {
+  if (!sessionSearchApiEnabled()) return c.json({ error: "not_found" }, 404);
+  const parsed = parseSessionSearchQuery({
+    q: c.req.query("q") ?? undefined,
+    days: c.req.query("days") ?? undefined,
+    limit: c.req.query("limit") ?? undefined,
+  });
+  if (!parsed) {
+    return c.json({ error: "bad_request", message: "q 至少 2 个字符" }, 400);
+  }
+
+  const hits = await searchSessions(await getHarness(), parsed.query, parsed.options);
+  // 每条命中补一个与定点找回同源的下标：按会话缓存正文，避免同会话多命中重复读。
+  const messagesByConversation = new Map<string, Awaited<ReturnType<typeof readTranscript>>>();
+  const enriched: Array<(typeof hits)[number] & { aroundIndex: number }> = [];
+  for (const hit of hits) {
+    let messages = messagesByConversation.get(hit.conversationId);
+    if (!messages) {
+      const chat = await openChat(hit.conversationId);
+      messages = chat ? await readTranscript(chat, 0) : [];
+      messagesByConversation.set(hit.conversationId, messages);
+    }
+    enriched.push({ ...hit, aroundIndex: findAroundIndex(messages, hit, parsed.query) });
+  }
+  return c.json({ hits: enriched });
 });
 
 /** 还没响的提醒（读 durable 的任务图） */

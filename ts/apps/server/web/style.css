@@ -5235,3 +5235,51 @@ select.cs-input:disabled { color: var(--text-3); cursor: default; }
   cursor: pointer;
 }
 .topic-proposal.resolved { opacity: .72; }
+
+/* ── 找旧事（2026-11-10 批 28 §二）：只读的旧会话检索弹窗 ────────── */
+.recall-results {
+  display: flex; flex-direction: column; gap: 8px;
+  max-height: 46vh; overflow-y: auto;
+}
+.recall-results[hidden], .recall-context[hidden] { display: none; }
+.recall-hit {
+  display: flex; flex-direction: column; gap: 4px;
+  width: 100%; padding: 10px 12px;
+  text-align: left;
+  background: var(--card);
+  border: 1px solid var(--outline); border-radius: var(--r-md);
+  color: var(--text); cursor: pointer;
+}
+.recall-hit:hover { background: var(--card-high); border-color: var(--accent); }
+.recall-hit:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.recall-hit-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+}
+.recall-hit-title { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.recall-hit-time { flex: none; font-size: 11.5px; color: var(--text-3); }
+.recall-hit-snippet {
+  font-size: 12.5px; line-height: 1.55; color: var(--text-2);
+  overflow-wrap: anywhere; white-space: pre-wrap;
+}
+.recall-context {
+  display: flex; flex-direction: column; gap: 8px;
+  max-height: 52vh; overflow-y: auto;
+}
+.recall-ctx-head {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding-bottom: 4px; border-bottom: 1px solid var(--divider);
+}
+.recall-ctx-meta { font-size: 12px; color: var(--text-2); }
+.recall-msg {
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 8px 10px;
+  background: var(--card); border-radius: var(--r-md);
+  border: 1px solid transparent;
+}
+.recall-msg-assistant { background: var(--surface); }
+.recall-msg-hit { border-color: var(--accent); }
+.recall-msg-meta { font-size: 11px; color: var(--text-3); }
+.recall-msg-text {
+  font-size: 13px; line-height: 1.6; color: var(--text);
+  overflow-wrap: anywhere; white-space: pre-wrap;
+}

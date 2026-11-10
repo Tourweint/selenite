@@ -1,0 +1,24 @@
+你在 git worktree `<本地项目区>\projects\lh-b28`（分支 batch28-rest）里工作。**所有读写都在这个 worktree 内**。
+
+任务书：`docs/设计方案/2026-11-10-批28任务书（剩下三条）.md`
+先完整读它，把**三节全做完**：
+
+1. §一 两段式配对（服务端接口先就位：begin 拿 code+confirmToken，confirm 才发令牌；**只扫码不能完成配对**）
+2. §二 旧会话定点找回 UI（后端已有 aroundIndex；补搜索端点 + 前端弹窗，只读不 fork）
+3. §三 auxiliary title/vision 显式标注"无调用点"并在调用时 warn（避免配了以为生效）
+
+**重要**：另一个会话正在改 `agent/injection.ts` 与 `agent/lifecycle.ts`，
+你**绝对不要碰这两个文件**，也不要碰 `delegation-judge.ts` 和总账文件。
+
+关键事实：
+- `pairing.ts` 有 `deviceId` + `tokenHash` + 指纹（批 26a）；单段 redeem 在 `/pairing/redeem`。
+- 批 20 的定点找回端点是 `GET /api/v1/agent/chat/:conversationId/context?aroundIndex=&radius=`。
+- `recall_sessions` 工具已有跨会话检索逻辑（`agent/session-search.ts`），搜索端点可复用它。
+- `auxiliary.ts` 有 `auxiliaryModel(use)`。
+
+要求：
+- `cd ts` 后：`pnpm typecheck`、`pnpm --filter @lifediary/server test`、`pnpm --filter @lifediary/server http`
+- 前端改完 `node --check`（拷 .mjs）
+- 不许 git commit
+- 变更记录写 `docs/变更记录/2026-11-10-批28（两段式配对·旧事找回UI·auxiliary收口）.md`
+- 最后回复：做了什么 / 验了什么 / 已知边界，控制在 600 字内
