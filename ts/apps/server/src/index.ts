@@ -147,6 +147,8 @@ import {
 import { recoverDelegations, type RecoveredTicket } from "../../../../../chancellor/src/index.ts";
 // 恢复注记（2026-11-09 任务书 T3 §5）：只有进程内记账，无存储依赖。
 import { markRecoverResume, recoverNoteEnabled } from "./agent/recover-note.ts";
+// 注入审计（2026-11-10 批 26b §二）：只回元数据、不回正文的框架注入清单。
+import { auditInjections, injectionAuditEnabled } from "./agent/injection.ts";
 import { Store } from "../../../../../chancellor/src/store.ts";
 import { listManagers } from "../../../../../chancellor/src/manager/registry.ts";
 
@@ -1026,6 +1028,23 @@ app.get("/api/v1/agent/chat/:conversationId/messages", async (c) => {
   }
   const { from, events } = eventStore.replaySince(chat.internalId, Math.floor(sinceSeq));
   return c.json({ conversationId: chat.externalId, messages, chatKind, fromSeq: from, events });
+});
+
+/**
+ * 注入审计（2026-11-10 批 26b §二 / #7 批 A）。
+ *
+ * `GET /api/v1/agent/chat/:conversationId/injections` → `[{id, source, scope, length}]`：
+ * 框架当前接管的注入清单。**只回元数据、不回正文**（`length` 是正文字符数），
+ * 所以即便正文是固定提示词也不会从这里泄露。
+ *
+ * 开关 `AGENT_INJECTION_AUDIT`（默认开；显式 `false` → 404，一行回滚，与 TOPICS/导出同口径）。
+ * `conversationId` 只作上下文传入：批 A 接管的是框架级静态注入（所有会话同一份），
+ * 因此这里不解析 durable 会话、不依赖 LLM 配置、也不校验会话是否存在——它是诊断端点，
+ * 不是会话数据接口。批 A 只接管了 `injection_guard` 一个，数组至多一行。
+ */
+app.get("/api/v1/agent/chat/:conversationId/injections", (c) => {
+  if (!injectionAuditEnabled()) return c.json({ error: "not_found" }, 404);
+  return c.json(auditInjections({ conversationId: c.req.param("conversationId") }));
 });
 
 /**

@@ -23,6 +23,9 @@ import type {
 } from "@lifediary/shared";
 import { approvalStore } from "../approvals.ts";
 import type { OutgoingPart } from "../attachments.ts";
+// 杂活模型（2026-11-10 批 26b §一）：compact 配置能解析，但内核不支持指定压缩模型，
+// 配了要记一条明确日志（不静默失效）。开关沿用 AUX_LLM。
+import { auxiliaryEnabled, auxPinnedModelId } from "../auxiliary.ts";
 import { userInputSubmission } from "./user-input.ts";
 import { watchDelegation, type DelegationEvent } from "../delegation.ts";
 import { memoryExtractMode, preferenceExtractionEnabled } from "../memory-extract.ts";
@@ -95,13 +98,37 @@ export async function applyChatMode(chat: ResolvedChat, level: ThinkingLevel): P
 export type CompactTaskId = Awaited<ReturnType<Conversation["compact"]>>;
 
 /**
+ * 压缩模型「配了但没生效」只记一次（2026-11-10 批 26b §一）。
+ *
+ * 内核 `Conversation.compact(instructions, context)` **不收模型参数**，压缩模型由当前
+ * 会话模型与 compaction policy 决定 —— 这里没有可以接 `AUX_MODEL_COMPACT` 的入口。
+ * 但配置不能静默失效：只要配了 `AUX_MODEL_COMPACT`（且 `AUX_LLM` 总开关开着），
+ * 就明确记一条日志说清"内核不支持、没生效"，不要让人以为 pin 生效了。
+ *
+ * 只记一次：`startChatCompaction` 每次手动压缩都会调用，模块级标记防刷屏；日志只含
+ * 用途枚举与变量名，不含对话内容。
+ */
+let compactModelIgnoredWarned = false;
+function warnCompactModelIgnored(env: NodeJS.ProcessEnv = process.env): void {
+	if (compactModelIgnoredWarned) return;
+	if (!auxiliaryEnabled(env)) return;
+	if (!auxPinnedModelId("compact", env)) return;
+	compactModelIgnoredWarned = true;
+	console.warn("[aux] 当前内核不支持指定压缩模型，AUX_MODEL_COMPACT 未生效");
+}
+
+/**
  * 手动压缩（扫尾批 1 B1）：把内核本来就有的 `Conversation.compact` 接成一个端点。
  * 它本就是「受理即返回」——压缩在后台做、在空闲/边界落摘要，与方案 §二一致。
+ *
+ * 2026-11-10 批 26b §一：`AUX_MODEL_COMPACT` 配了也没法接（内核不收模型），这里只补
+ * 一条"未生效"日志；压缩调用本身逐字节不变，仍走 `compact(instructions, CTX)`。
  */
 export async function startChatCompaction(
 	chat: ResolvedChat,
 	instructions?: string,
 ): Promise<CompactTaskId> {
+	warnCompactModelIgnored();
 	return chat.conversation.compact(instructions, CTX);
 }
 

@@ -130,3 +130,23 @@ test("已接用途：pin 了用 pin 的模型，没配回落当前模型", () =>
 		);
 	}
 });
+
+/**
+ * compact（2026-11-10 批 26b §一）：内核 `Conversation.compact()` 不收模型参数，
+ * 所以 `compact` 用途**接不进压缩调用**；但这一层的解析必须照常工作——配了返回 pin 的
+ * 模型、没配回落当前模型，绝不静默失效（未生效的事实由 startChatCompaction 记日志）。
+ */
+test("compact 用途能解析：配了返回 pin 的模型，没配回落当前模型", () => {
+	assert.deepEqual(
+		auxiliaryModel("compact", {
+			current: CURRENT,
+			env: { AUX_MODEL_COMPACT: "small-model" },
+			models: fakeModels(),
+		}),
+		{ provider: "bailian", modelId: "small-model" },
+	);
+	assert.deepEqual(
+		auxiliaryModel("compact", { current: CURRENT, env: {}, models: fakeModels() }),
+		CURRENT,
+	);
+});
