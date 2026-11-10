@@ -1,0 +1,22 @@
+你在 git worktree `<本地项目区>\projects\lh-b26b`（分支 batch26b-inject）里工作。**所有读写都在这个 worktree 内**。
+
+任务书：`docs/设计方案/2026-11-10-批26b任务书（auxiliary与注入框架）.md`
+先完整读它，然后把**两节都做完**：
+
+1. §一 auxiliary compact：配置能解析 + 配了但内核不支持时**记一条明确日志**（不静默失效）
+2. §二 注入框架批 A：建 `agent/injection.ts` 框架 + 审计端点 + **只接管 injection_guard 一个**
+
+**§二 硬标准**：接管后 injection_guard 的注入内容与位置必须与改造前**逐字节一致**。
+单测直接断言 `collectInjections([guardProvider], ctx).system[0].text === INJECTION_GUARD`。
+
+关键事实：
+- `auxiliary.ts` 有 `auxiliaryModel(use)`；`startChatCompaction` 在 `agent/session.ts`。
+- `injection-guard.ts` 导出 `INJECTION_GUARD`；`lifecycle.ts` 在 persona 后注入它（section key 是 `injection_guard`）。
+- 审计端点参考 `index.ts` 里其它 `/api/v1/agent/chat/:conversationId/*` 的写法。
+
+要求：
+- `cd ts` 后：`pnpm typecheck`、`pnpm --filter @lifediary/server test`、`pnpm --filter @lifediary/server http`
+- 每完成一节跑一次 typecheck + test
+- 不许 git commit
+- 变更记录写 `docs/变更记录/2026-11-10-批26b（auxiliary配置与注入框架A）.md`
+- 最后回复：做了什么 / 验了什么 / 已知边界，控制在 500 字内

@@ -140,7 +140,9 @@ import {
 	skillStore,
 } from "./assist.ts";
 import { approvalArgsHash } from "./approval-key.ts";
-import { INJECTION_GUARD, guardRelayDelivery, injectionGuardEnabled, wrapUntrustedObjective } from "./injection-guard.ts";
+import { guardRelayDelivery, wrapUntrustedObjective } from "./injection-guard.ts";
+// 注入框架（2026-11-10 批 26b §二）：injection_guard 改走框架收集，内容与位置逐字节不变。
+import { collectInjections, guardProvider } from "./injection.ts";
 import { buildPartnerTurnContext } from "./partner-context.ts";
 // 执事轮装配的履历摘要读口（2026-11-08 刀二 E2）：结构化查询 work 记录，不走语义召回。
 import { workSummaryFor } from "../work-record.ts";
@@ -545,12 +547,17 @@ async function openHarness(): Promise<Harness> {
 						return clarifyContractFor(partnerId);
 					},
 				},
-				// 注入防线（2026-11-09 T2）：排在 persona / 验证铁律之后，固定字节、不含动态内容。
-				// 关掉时整段省略（不注空壳）。
-				{
-					key: "injection_guard",
-					render: () => (injectionGuardEnabled() ? INJECTION_GUARD : undefined),
-				},
+			// 注入防线（2026-11-09 T2）：排在 persona / 验证铁律之后，固定字节、不含动态内容。
+			// 关掉时整段省略（不注空壳）。
+			// 2026-11-10 批 26b §二：这是本批唯一接管进注入框架的 section。
+			// section 仍留在数组的原下标（位置逐字节不变），render 改走 collectInjections
+			// 取回同一段 INJECTION_GUARD 实文（内容逐字节不变）；关时 system 为空 → undefined。
+			{
+				key: "injection_guard",
+				render: (input) =>
+					collectInjections([guardProvider], { conversationId: input.conversationId })
+						.system[0]?.text,
+			},
 				// 当前项目（2026-11-04 方案 §2.3）：每轮现渲染，不写进对话历史。
 				// 切换项目后 durable 会按 section 差异追加新的 pi.system，下一轮即生效。
 				{

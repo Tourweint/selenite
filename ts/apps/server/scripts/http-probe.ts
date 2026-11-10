@@ -382,6 +382,32 @@ try {
 	check(usage.models.length > 0, "有用量记录", JSON.stringify(usage.models[0]));
 
 	// ── 5. 提醒 ───────────────────────────────────────
+	// ── 4.5 注入审计端点（2026-11-10 批 26b §二）──────────
+	// 真 HTTP 验：只回元数据、不回正文；批 A 框架只接管 injection_guard 一个。
+	console.log("\n· 4.5 注入审计端点（只回元数据，不回正文）");
+	const injectionsRes = await fetch(`${BASE}/api/v1/agent/chat/${externalId}/injections`);
+	check(injectionsRes.status === 200, "GET .../injections → 200", String(injectionsRes.status));
+	const injections = (await injectionsRes.json()) as Array<Record<string, unknown>>;
+	check(
+		Array.isArray(injections) && injections.length === 1,
+		"批 A 只接管一个注入",
+		JSON.stringify(injections),
+	);
+	const injRow = injections[0] ?? {};
+	check(
+		injRow.id === "injection_guard" &&
+			injRow.source === "injection_guard" &&
+			injRow.scope === "session" &&
+			typeof injRow.length === "number" &&
+			(injRow.length as number) > 0,
+		"审计行形状 {id,source,scope,length}",
+		JSON.stringify(injRow),
+	);
+	check(
+		!("text" in injRow) && !JSON.stringify(injections).includes("【材料安全】"),
+		"审计不返正文（无 text 字段、无实文片段）",
+	);
+
 	console.log("\n· 5. 提醒接口");
 	const at = Date.now() + 1_200;
 	const created = await fetch(`${BASE}/api/v1/agent/reminders`, {
