@@ -67,6 +67,8 @@ function startServer(extraEnv: NodeJS.ProcessEnv = {}): ChildProcess {
 			AGENT_APPROVALS_PATH: ".data/probe-http-approvals.json",
 			AGENT_GATE_AUDIT_PATH: ".data/probe-http-gate-blocks.jsonl",
 			NODE_OPTIONS: "",
+			// 配对库隔离（批 26 §四的指纹探针会真的配对一台设备）：绝不碰真实 .data/pairing.json
+			PAIRING_STORE_PATH: ".data/probe-http-pairing.json",
 			...extraEnv,
 		},
 		stdio: ["ignore", "pipe", "pipe"],
@@ -1588,6 +1590,15 @@ try {
 			steps: ["确认需求", "给出方案"],
 		}),
 	);
+	// 多副本聚合夹具（批 26 §二）：groupId 就是 ticket.idempotencyKey。
+	// 同一个库里 idempotency_key 有唯一约束，所以同组的两张必须分散在不同 runs 目录
+	// （真实扇出也是按领域分目录落的）—— 这里放一张在顶层，另一张放到下面领域目录。
+	store.saveTicket(
+		fixture("T-group-a", { idempotencyKey: "probe-group-1", status: "done" }),
+	);
+	store.saveTicket(
+		fixture("T-group-c", { idempotencyKey: "probe-group-2", status: "done" }),
+	);
 	store.close();
 	const receipts = new DelegationReceipts(TICKETS_DB);
 	receipts.begin("probe-legacy", "probe-fingerprint", { explicit: true });
@@ -1601,6 +1612,20 @@ try {
 	const domainStore = new Store(domainRunsDir);
 	domainStore.saveTicket(
 		fixture("T-domain", {
+			options: { dry: true, maxTasks: 8, workRoot: TICKETS_ROOT, domain: "probe-domain" },
+		}),
+	);
+	// 聚合组的另一半（批 26 §二）：同组副本落在领域目录，聚合端点必须跨目录数齐。
+	domainStore.saveTicket(
+		fixture("T-group-b", {
+			idempotencyKey: "probe-group-1",
+			options: { dry: true, maxTasks: 8, workRoot: TICKETS_ROOT, domain: "probe-domain" },
+		}),
+	);
+	domainStore.saveTicket(
+		fixture("T-group-d", {
+			idempotencyKey: "probe-group-2",
+			status: "failed",
 			options: { dry: true, maxTasks: 8, workRoot: TICKETS_ROOT, domain: "probe-domain" },
 		}),
 	);
@@ -1708,6 +1733,41 @@ try {
 		"详情接口也给对话标题",
 		String(childTitleDetail.conversationTitle),
 	);
+
+	// ── 18.6 多副本聚合（2026-11-10 批 26 §二，接口文档 §2.9）──────
+	// 两个组：g-1 一终态一在办 → pending；g-2 两张都终态 → settled；未知组 → 404。
+	console.log("\n· 18.6 多副本聚合：GET /tickets/groups/:groupId");
+	const groupPending = await fetch(`${BASE}/api/v1/tickets/groups/probe-group-1`);
+	const groupPendingBody = (await groupPending.json()) as {
+		ok?: boolean;
+		groupId?: string;
+		total?: number;
+		done?: number;
+		pending?: number;
+		status?: string;
+	};
+	check(
+		groupPending.status === 200 &&
+			groupPendingBody.total === 2 &&
+			groupPendingBody.done === 1 &&
+			groupPendingBody.pending === 1 &&
+			groupPendingBody.status === "pending",
+		"一终态一在办 → pending（2/1/1）",
+		JSON.stringify(groupPendingBody),
+	);
+	const groupSettled = (await (
+		await fetch(`${BASE}/api/v1/tickets/groups/probe-group-2`)
+	).json()) as { total?: number; done?: number; pending?: number; status?: string };
+	check(
+		groupSettled.total === 2 &&
+			groupSettled.done === 2 &&
+			groupSettled.pending === 0 &&
+			groupSettled.status === "settled",
+		"全部终态 → settled（2/2/0）",
+		JSON.stringify(groupSettled),
+	);
+	const groupUnknown = await fetch(`${BASE}/api/v1/tickets/groups/probe-group-nobody`);
+	check(groupUnknown.status === 404, "未知组 → 404", String(groupUnknown.status));
 
 	// ── 18.5 任务即对话（2026-11-08 扫尾批 8g，接口文档 §2.9）──────
 	// 验：回话端点 202 → 建 `task-<票号>` 专线 → 用户条目落进去 → 续跑被拒走 resumeOnly
@@ -2727,41 +2787,93 @@ try {
 	const bgOff = await fetch(`${BASE}/api/v1/agent/bg-jobs`);
 	check(bgOff.status === 404, "开关关着 → 三个端点整组 404", String(bgOff.status));
 
+	// ── 30. 配对设备指纹（2026-11-10 批 26 §四，接口文档 §5）──
+	// 真走一遍裸码配对：redeem 下发指纹 → 设备清单同一指纹 → 清单不含哈希 → 撤销。
+	console.log("\n· 30. 配对设备指纹：redeem 下发 + 设备清单人眼可核");
+	const pairCode = (await (
+		await fetch(`${BASE}/api/v1/pair/code`, { method: "POST" })
+	).json()) as { code?: string };
+	const redeemed = await fetch(`${BASE}/api/v1/pair/redeem`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ code: pairCode.code, deviceName: "探针手机" }),
+	});
+	const redeemedBody = (await redeemed.json()) as {
+		deviceToken?: string;
+		deviceId?: string;
+		fingerprint?: string;
+	};
+	check(
+		redeemed.status === 200 &&
+			/^[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}$/.test(redeemedBody.fingerprint ?? ""),
+		"redeem 下发人眼可核指纹（4-4-4）",
+		String(redeemedBody.fingerprint),
+	);
+	const devicesBody = (await (await fetch(`${BASE}/api/v1/pair/devices`)).json()) as {
+		devices?: Array<{ id: string; fingerprint?: string; keyChanged?: boolean }>;
+	};
+	const mine = (devicesBody.devices ?? []).find((device) => device.id === redeemedBody.deviceId);
+	check(
+		mine?.fingerprint === redeemedBody.fingerprint,
+		"设备清单上的指纹与 redeem 一致",
+		String(mine?.fingerprint),
+	);
+	check(
+		mine !== undefined && !("tokenHash" in (mine as Record<string, unknown>)),
+		"设备清单不含凭据哈希",
+	);
+	check(mine?.keyChanged !== true, "正常设备不带键变更标记");
+	if (redeemedBody.deviceId) {
+		await fetch(`${BASE}/api/v1/pair/devices/${redeemedBody.deviceId}/revoke`, { method: "POST" });
+	}
+
 } finally {
 	server.kill();
 	await sleep(300);
 	gateUpstream.close();
-	// 探针产物不留
-	rmSync(DB, { force: true });
-	rmSync(`${DB}-wal`, { force: true });
-	rmSync(`${DB}-shm`, { force: true });
-	rmSync(MEMORY_DB, { force: true });
-	rmSync(PROJECTS_DB, { force: true });
-	rmSync(`${PROJECTS_DB}-wal`, { force: true });
-	rmSync(`${PROJECTS_DB}-shm`, { force: true });
-	rmSync(WORKSPACE_A, { recursive: true, force: true });
-	rmSync(WORKSPACE_B, { recursive: true, force: true });
-	rmSync(GATE_OUTSIDE_DIR, { recursive: true, force: true });
-	rmSync(".data/probe-http-default-ws", { recursive: true, force: true });
-	rmSync(".data/probe-http-flags.json", { force: true });
-	rmSync(".data/probe-http-skill-state.json", { force: true });
-	rmSync(".data/probe-http-gate-providers.json", { force: true });
-	rmSync(".data/probe-http-gate-runtime.json", { force: true });
-	rmSync(GATE_AUDIT_FILE, { force: true });
-	rmSync(APPROVALS_FILE, { force: true });
-	rmSync(".data/probe-http-chat-events.sqlite", { force: true });
-	rmSync(".data/probe-http-bg-jobs", { recursive: true, force: true });
-	rmSync(".data/probe-http-providers.json", { force: true });
-	rmSync(".data/probe-http-policy.json", { force: true });
-	rmSync(".data/probe-http-secret-providers.json", { force: true });
-	rmSync(".data/probe-http-provider-keys.json", { force: true });
-	rmSync(".data/probe-http-secret-runtime.json", { force: true });
-	rmSync(".data/probe-http-tickets", { recursive: true, force: true });
-	rmSync(".data/probe-http-delegations.sqlite", { force: true });
-	rmSync(".data/probe-http-partners.sqlite", { force: true });
-	rmSync(".data/probe-http-partners.sqlite-wal", { force: true });
-	rmSync(".data/probe-http-partners.sqlite-shm", { force: true });
-	rmSync(".data/probe-http-partner-homes", { recursive: true, force: true });
+	// 探针产物不留。Windows 上目录句柄回收比进程退出慢半拍，清理失败不该把"断言全过"
+	// 判成失败（测试里同样的口径），逐条兜住。
+	const leftovers: Array<[string, Parameters<typeof rmSync>[1]]> = [
+		[DB, { force: true }],
+		[`${DB}-wal`, { force: true }],
+		[`${DB}-shm`, { force: true }],
+		[MEMORY_DB, { force: true }],
+		[PROJECTS_DB, { force: true }],
+		[`${PROJECTS_DB}-wal`, { force: true }],
+		[`${PROJECTS_DB}-shm`, { force: true }],
+		[WORKSPACE_A, { recursive: true, force: true }],
+		[WORKSPACE_B, { recursive: true, force: true }],
+		[GATE_OUTSIDE_DIR, { recursive: true, force: true }],
+		[".data/probe-http-default-ws", { recursive: true, force: true }],
+		[".data/probe-http-flags.json", { force: true }],
+		[".data/probe-http-skill-state.json", { force: true }],
+		[".data/probe-http-gate-providers.json", { force: true }],
+		[".data/probe-http-gate-runtime.json", { force: true }],
+		[GATE_AUDIT_FILE, { force: true }],
+		[APPROVALS_FILE, { force: true }],
+		[".data/probe-http-chat-events.sqlite", { force: true }],
+		[".data/probe-http-bg-jobs", { recursive: true, force: true }],
+		[".data/probe-http-providers.json", { force: true }],
+		[".data/probe-http-policy.json", { force: true }],
+		[".data/probe-http-secret-providers.json", { force: true }],
+		[".data/probe-http-provider-keys.json", { force: true }],
+		[".data/probe-http-secret-runtime.json", { force: true }],
+		[".data/probe-http-tickets", { recursive: true, force: true }],
+		[".data/probe-http-delegations.sqlite", { force: true }],
+		[".data/probe-http-partners.sqlite", { force: true }],
+		[".data/probe-http-partners.sqlite-wal", { force: true }],
+		[".data/probe-http-partners.sqlite-shm", { force: true }],
+		[".data/probe-http-partner-homes", { recursive: true, force: true }],
+		[".data/probe-http-pairing.json", { force: true }],
+		[".data/probe-http-pairing.json.tmp", { force: true }],
+	];
+	for (const [path, options] of leftovers) {
+		try {
+			rmSync(path, options);
+		} catch {
+			/* 句柄由 OS 在进程退出时回收 */
+		}
+	}
 }
 
 console.log(failures === 0 ? "\n✓ 端到端全部通过" : `\n✗ 有 ${failures} 项没通过`);

@@ -86,19 +86,25 @@ export function pairPage(options: PairPageOptions): string {
   if (token) {
     fetch('/api/v1/pair/devices', { headers: { 'Authorization': 'Bearer ' + token } })
       .then(function (r) { return r.ok ? r.json() : []; })
-      .then(function (devices) {
+      .then(function (payload) {
+        // 兼容两种形态：{devices:[…]}（现行）与裸数组（旧调试客户端）
+        var devices = Array.isArray(payload) ? payload : (payload && payload.devices) || [];
         if (!devices.length) { box.innerHTML = '<div class="dim">还没有已配对的设备</div>'; return; }
         devices.forEach(function (d) {
           var row = document.createElement('div');
           row.className = 'device';
           var label = document.createElement('span');
-          label.textContent = d.name + (d.revokedAt ? '（已撤销）' : '') +
-            ' · ' + new Date(d.createdAt).toLocaleString();
+          // 指纹（批 26 §四）：和手机「设置 → 本机指纹」逐字符对照，一致才是同一台。
+          var parts = [d.name];
+          if (d.fingerprint) parts.push('指纹 ' + d.fingerprint);
+          parts.push(d.revokedAt ? '已撤销' : new Date(d.createdAt).toLocaleString());
+          if (d.keyChanged) parts.push('⚠ 凭据已变更，已停用');
+          label.textContent = parts.join(' · ');
           row.appendChild(label);
           if (!d.revokedAt) {
             var btn = document.createElement('button');
             btn.className = 'ghost';
-            btn.textContent = '撤销';
+            btn.textContent = d.keyChanged ? '撤销（需重配）' : '撤销';
             btn.onclick = function () {
               fetch('/api/v1/pair/devices/' + d.id + '/revoke', {
                 method: 'POST',
