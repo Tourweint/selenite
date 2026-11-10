@@ -5,7 +5,7 @@
  *   A. 用户目录：首访自动建 `%USERPROFILE%/.lifediary/skills` → 列表（含内置手册）→ 新建 → 读 → 覆盖 → 删除；
  *      名字白名单 / 两行结构 / 64KB 上限三组 400；无令牌 403 空体。
  *   B. AGENT_SKILLS_DIR 显式优先：origin=env，目录由写入时创建。
- *   C. 用户目录建不出来（用文件冒充 USERPROFILE）→ origin=app，两条内置手册可见，且只读不写。
+ *   C. 用户目录建不出来（用文件冒充 USERPROFILE）→ origin=app，内置手册全部可见，且只读不写。
  *   D. 标准用户技能目录 `%USERPROFILE%/.agents/skills`：两种形态进列表并标 origin=agents / writable=false；
  *      可读、不可写、不可删。
  *   E. SKILLS_ADMIN=false → 路由不挂（404，= 未启用）。
@@ -15,9 +15,10 @@
  *   pnpm --filter @lifediary/server skills
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 
 const PORT = Number(process.env.PROBE_PORT ?? 8118);
@@ -30,6 +31,19 @@ const POLICY = ".data/probe-skills-policy.json";
 const PAIRING = ".data/probe-skills-pairing.json";
 const PROVIDERS = ".data/probe-skills-providers.json";
 const RUNTIME = ".data/probe-skills-runtime.json";
+
+/**
+ * 内置手册全集：跟 `apps/server/skills/` 目录走，不硬编码条数。
+ * 批 11 把内置手册从 2 条扩到 6 条后没人重跑本探针，断言停在 `length === 2` 被绊住
+ * （2026-11-10 接入 ego-browser 技能时撞见，改为按目录自同步）。
+ */
+const BUILTIN_DIR = fileURLToPath(new URL("../skills", import.meta.url));
+const BUILTIN_NAMES = existsSync(BUILTIN_DIR)
+	? readdirSync(BUILTIN_DIR)
+			.filter((file) => file.endsWith(".md"))
+			.map((file) => file.slice(0, -3))
+			.sort()
+	: [];
 
 const ROOT = mkdtempSync(join(tmpdir(), "lifediary-skills-probe-"));
 const HOME = join(ROOT, "home");
@@ -161,11 +175,11 @@ try {
 	}[];
 	const initialNames = initialItems.map((item) => item.name).sort();
 	check(
-		initialItems.length === 2 &&
-			initialNames.includes("meeting_guide") &&
-			initialNames.includes("recall_guide"),
-		"初始列表 = 两条内置手册（用户目录为空）",
-		initialNames.join("、"),
+		initialItems.length === BUILTIN_NAMES.length &&
+			BUILTIN_NAMES.every((name) => initialNames.includes(name)) &&
+			initialNames.every((name) => BUILTIN_NAMES.includes(name)),
+		"初始列表 = 内置手册全集（用户目录为空）",
+		`${initialNames.join("、")}（内置 ${BUILTIN_NAMES.length} 条）`,
 	);
 	check(
 		initialItems.every((item) => item.origin === "app" && item.writable === false),
@@ -238,8 +252,8 @@ try {
 	check(appList.body.origin === "app", "origin=app", String(appList.body.origin));
 	const names = appItems.map((item) => item.name).sort();
 	check(
-		names.includes("meeting_guide") && names.includes("recall_guide"),
-		"两条内置手册可见",
+		BUILTIN_NAMES.every((name) => names.includes(name)),
+		"内置手册全部可见",
 		names.join("、"),
 	);
 	const appRead = await apiJson("/api/v1/agent/skills/meeting_guide");
