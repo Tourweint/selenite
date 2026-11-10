@@ -271,6 +271,18 @@ export const TOOL_CAPABILITIES: Record<string, ToolCapability> = {
 		concurrentSafe: true,
 		notes: "中途对主人说一句（notice 帧，不结束本轮）；不落盘、不写时间线，没开流就收不到。",
 	},
+	save_skill_advice: {
+		name: "save_skill_advice",
+		readOnly: false,
+		destructive: false,
+		sideEffectScope: "workspace",
+		riskLevel: "low",
+		needsApproval: "never",
+		concurrentSafe: false,
+		// 批 30 修订：只写建议快照（.data/skills-advice.json），不碰启停位——
+		// 采纳是人的动作（设置页 PUT）。原子写，坏不了技能目录。
+		notes: "技能分类建议落盘：写建议快照；启停位不动，采纳由人在设置页决定。",
+	},
 };
 
 export function capabilityOf(name: string): ToolCapability | undefined {

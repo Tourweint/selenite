@@ -318,27 +318,48 @@ try {
 	check((await put("whatever", "摘要\n正文")).status === 404, "写入 404");
 	await stopServer();
 
-	// ── F. 技能分类建议（2026-11-10 批 30）────────────────────
-	// faux 模型下 POST = 503（模型不可用）；快照走手工写入（真模型评估是浏览器实测的事）。
+	// ── F. 技能分类建议（2026-11-10 批 30 修订：评估在总管对话里做）──
+	// GET 带预填提示词；POST = 导入总管评估完的 JSON（工具同款清洗）；PUT = 采纳启停位。
 	console.log("\nF. 技能分类建议（advice 三端点）");
 	await startServer({ USERPROFILE: HOME, HOME });
-	// F1. 无快照：GET 空形状、PUT 全被闸（名字不在快照）
+	// F1. 无快照：GET 空形状 + 预填提示词（有技能就有 prompt）、PUT 全被闸（名字不在快照）
 	const adviceEmpty = await apiJson("/api/v1/agent/skills/advice");
 	check(
 		adviceEmpty.status === 200 &&
 			adviceEmpty.body.ok === true &&
 			Object.keys(adviceEmpty.body.items ?? {}).length === 0 &&
-			Array.isArray(adviceEmpty.body.unevaluated),
-		"GET 无快照 → 空形状 + unevaluated 数组",
-		`HTTP ${adviceEmpty.status}`,
+			Array.isArray(adviceEmpty.body.unevaluated) &&
+			typeof adviceEmpty.body.prompt === "string" &&
+			(adviceEmpty.body.prompt as string).includes("save_skill_advice"),
+		"GET 无快照 → 空形状 + 预填提示词（教总管调工具）",
+		`HTTP ${adviceEmpty.status} prompt=${typeof adviceEmpty.body.prompt}`,
 	);
-	// F2. faux 模型 POST → 503（生成没跑成，而不是把假文本写进快照）
-	const advicePost = await apiJson("/api/v1/agent/skills/advice", { method: "POST" });
+	// F2. POST 导入：合法条目落盘、非法条目丢弃（评估 JSON 来自总管对话，同工具清洗口径）
+	await put("advice-keep", "建议开启的技能\n正文");
+	const adviceImport = await apiJson("/api/v1/agent/skills/advice", {
+		method: "POST",
+		body: JSON.stringify({
+			items: {
+				"advice-keep": ["keep", "daily", "基础设施"],
+				"advice-bad": ["nope", "daily", "坏栏位"],
+			},
+			model: "chief-conversation",
+		}),
+	});
+	const importItems = (adviceImport.body.items ?? {}) as Record<string, { bucket?: string }>;
 	check(
-		advicePost.status === 503 && typeof advicePost.body.message === "string",
-		"POST（faux 模型）→ 503 模型不可用",
-		`HTTP ${advicePost.status}`,
+		adviceImport.status === 200 &&
+			importItems["advice-keep"]?.bucket === "keep" &&
+			importItems["advice-bad"] === undefined,
+		"POST 导入 → 合法条目落盘、非法条目丢弃",
+		`HTTP ${adviceImport.status} items=${JSON.stringify(importItems)}`,
 	);
+	// F2b. POST 全非法 → 400（一条合法都没有 = 整份不可信）
+	const adviceBad = await apiJson("/api/v1/agent/skills/advice", {
+		method: "POST",
+		body: JSON.stringify({ items: { x: ["bad", "bad", "bad"] } }),
+	});
+	check(adviceBad.status === 400, "POST 全非法 → 400", `HTTP ${adviceBad.status}`);
 	// F3. 手写一份快照（含一条指向已消失技能的脏数据），GET 应差集标注
 	const snapshotPath = join(ROOT, "skills-advice.json");
 	writeFileSync(
@@ -353,7 +374,6 @@ try {
 		}),
 		"utf8",
 	);
-	await put("advice-keep", "建议开启的技能\n正文");
 	const adviceDirty = await apiJson("/api/v1/agent/skills/advice");
 	const dirtyItems = (adviceDirty.body.items ?? {}) as Record<string, { bucket?: string }>;
 	const dirtyUnevaluated = (adviceDirty.body.unevaluated ?? []) as string[];

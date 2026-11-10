@@ -7,9 +7,11 @@ import { test } from "node:test";
 import {
 	adviceViewOf,
 	illegalAdviceActions,
+	makeSkillAdviceSaver,
 	parseAdviceResponse,
 	pruneAdviceSnapshot,
 	readAdviceSnapshot,
+	renderAdvicePrompt,
 	sanitizeAdviceItem,
 	skillAdviceEnabled,
 	skillAdvicePath,
@@ -189,4 +191,49 @@ test("renderAdviceUserInput：每行一条 JSON，summary 截 200 字", () => {
 	assert.equal(first.summary.length, 200);
 	const second = JSON.parse(lines[1]) as { usageCount: number | null };
 	assert.equal(second.usageCount, null);
+});
+
+test("renderAdvicePrompt：提示词含判据、工具名与完整清单（预填给总管用）", () => {
+	const rows: AdviceSkillRow[] = [
+		{ name: "alpha", summary: "摘要甲", enabled: false, usageCount: 0, stale: false, origin: "agents" },
+		{ name: "beta", summary: "摘要乙", enabled: true, usageCount: 3, stale: false, origin: "user" },
+	];
+	const prompt = renderAdvicePrompt(rows);
+	assert.ok(prompt.includes("save_skill_advice"), "要教总管调落盘工具");
+	assert.ok(prompt.includes("keep"), "要带三栏判据");
+	assert.ok(prompt.includes("\"name\":\"alpha\""), "清单要嵌进提示词");
+	assert.ok(prompt.includes("摘要甲"), "摘要在清单里");
+	assert.ok(prompt.includes("rare 一律配 skip"), "频率口径要带");
+});
+
+test("makeSkillAdviceSaver：合法落盘 / 非法条目丢弃 / 全非法报错 / 保留未覆盖条目", () => {
+	const dir = mkdtempSync(join(tmpdir(), "skill-saver-test-"));
+	try {
+		const path = join(dir, "advice.json");
+		// 先放一份旧快照，验"未被本次清单覆盖的条目保留"
+		writeAdviceSnapshot(path, {
+			generatedAt: "t0",
+			model: "old",
+			items: { oldbie: { bucket: "scene", frequency: "monthly", reason: "旧建议" } },
+		});
+		const save = makeSkillAdviceSaver(path);
+		const result = save({
+			alpha: ["keep", "daily", "基础设施"],
+			bad: ["nope", "daily", "x"], // 非法 bucket：丢弃不报错
+		});
+		assert.ok(result.ok);
+		assert.equal(result.saved, 1);
+		assert.equal(result.kept, 1); // oldbie 不在本次清单里，保留
+		const snapshot = readAdviceSnapshot(path);
+		assert.equal(snapshot?.items.alpha?.bucket, "keep");
+		assert.equal(snapshot?.items.oldbie?.reason, "旧建议");
+		assert.equal(snapshot?.model, "chief-conversation");
+
+		// 全非法 = 整份不落
+	 const fail = save({ x: ["bad", "bad", "bad"] });
+		assert.equal(fail.ok, false);
+		if (!fail.ok) assert.equal(fail.error, "no_valid_items");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
 });

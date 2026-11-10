@@ -102,6 +102,7 @@ import { RelayInvokeError } from "./relay-client.ts";
 import { dispatchRemoteDelegation } from "./relay-matrix.ts";
 import { ReminderTask } from "./reminder.ts";
 import type { SkillStore } from "./skills.ts";
+import type { SkillAdviceSaveResult } from "./skill-advice.ts";
 // 课题工具（2026-11-07 长期课题跟进）：存储 / 搜索都从 deps 注入，测试可替换、缺失不注册。
 import { TOPICS_ENABLED, type TopicsStore } from "./topics.ts";
 import type { SearchModule } from "./search.ts";
@@ -318,6 +319,12 @@ export interface ToolDeps {
 	 * （单测 / 探针零改动）。任务专线的镜像由 `mirrorTaskNotice` 注入。
 	 */
 	progressReport?: boolean;
+	/**
+	 * 技能分类建议落盘（2026-11-10 批 30 修订）：传了才注册 `save_skill_advice`。
+	 * 装配层按 `SKILL_ADVICE`（默认开）决定传不传——不传 = 工具不上架（一行回滚）。
+	 * 实现由 lifecycle 注入（包住 skill-advice.ts 的清洗与原子写），tools 不碰文件系统。
+	 */
+	skillAdviceSave?: ((items: Record<string, string[]>) => SkillAdviceSaveResult) | null;
 	mirrorTaskNotice?: (conversationId: number, text: string) => void;
 }
 
@@ -1261,6 +1268,52 @@ export function createTools(deps: ToolDeps) {
 	// 执事间递话（2026-11-08 扫尾批 8d）：装配层显式传 deps.relay 才上架。
 	// 不做 deps 缺省回落——"主人对话不挂 / 回滚开关"必须由装配层一处决定（lifecycle）。
 	if (deps.relay) tools.push(createSendToAgentTool(deps.relay));
+
+	// 技能分类建议落盘（2026-11-10 批 30 修订）：装配层显式传 deps.skillAdviceSave 才上架
+	//（SKILL_ADVICE=false → 不传 = 不上架）。评估流程是"设置页 → 总管对话预填提示词 →
+	// 总管逐条评估 → 本工具把 JSON 结果写进快照 → 用户回设置页采纳"，
+	// 写的只是建议快照（.data/skills-advice.json），**不碰启停位**（采纳是人的动作，走 PUT）。
+	if (deps.skillAdviceSave) {
+		const saveAdvice = deps.skillAdviceSave;
+		tools.push(
+			defineTool({
+				name: "save_skill_advice",
+				description:
+					"把技能分类评估的结果一次性写进建议快照（设置页的三栏与频率就是读它）。" +
+					"只在主人让你评估技能库、并且你已经逐条判断完之后调用一次。" +
+					"清单里没评估到的技能不会被覆盖——快照会保留它们原来的建议。" +
+					"它不改变任何技能的开关：主人会回设置页自己决定采纳哪些。",
+				parameters: Type.Object({
+					items: Type.Record(
+						Type.String(),
+						Type.Array(Type.String(), { maxItems: 3, minItems: 3 }),
+						{
+							description:
+								"技能名 → [bucket, frequency, reason] 三元素数组。" +
+								"bucket: keep(建议开启)|scene(按场景)|skip(建议不开)；" +
+								"frequency: daily|weekly|monthly|rare（rare 应配 skip）；reason ≤20 字",
+						},
+					),
+				}),
+				execute: async (args) => {
+					const result = saveAdvice(args.items);
+					if (!result.ok) {
+						return textToolResult(err(result.error, result.message, result.hint));
+					}
+					const { saved, kept } = result;
+					return textToolResult(
+						ok({
+							saved,
+							kept,
+							message:
+								`已存 ${saved} 条建议${kept ? `（另保留快照里原有 ${kept} 条未被本次清单覆盖）` : ""}。` +
+								"主人可以回设置页技能页查看分栏并采纳。",
+						}),
+					);
+				},
+			}),
+		);
+	}
 
 	if (deps.delegate !== false) tools.push(delegate, proposeProject);
 

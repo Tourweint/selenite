@@ -49,6 +49,7 @@ import {
 import { capabilityOf } from "../tool-capability.ts";
 // 中途播报（2026-11-10 批 13 §三）：工具本身在 tools.ts 注册，这里只做上架范围闸门。
 import { PROGRESS_TOOL_NAME, progressReportAllowed, progressReportEnabled } from "../progress-report.ts";
+import { makeSkillAdviceSaver, skillAdviceEnabled, skillAdvicePath } from "../skill-advice.ts";
 import { emitDelegation, type DelegationReport } from "../delegation.ts";
 // 派活完成即唤醒（2026-11-10 批 29）：汇报写回后叫起派活会话接结果。
 import { wakeOnDelegationReport } from "../delegation-wake.ts";
@@ -568,6 +569,10 @@ async function openHarness(): Promise<Harness> {
 		// 任务专线镜像只在"当前会话正好是 task- 专线"时写一条，没有则什么也不做。
 		progressReport: progressReportEnabled(),
 		mirrorTaskNotice,
+		// 技能分类建议落盘（2026-11-10 批 30 修订）：SKILL_ADVICE=false → save_skill_advice
+		// 不上架。评估在总管对话里做（设置页预填提示词 → 总管逐条评估 → 本工具写快照），
+		// 快照路径与 skills-api 的 advice 端点同一个文件（skillAdvicePath）。
+		skillAdviceSave: skillAdviceEnabled() ? makeSkillAdviceSaver(skillAdvicePath()) : null,
 		// 会话考古（2026-11-09 T4 §4）：默认开；AGENT_RECALL_SESSIONS=false → 不传，
 		// `recall_sessions` 整块不注册（模型侧 tool_unavailable，一行回滚）。
 		// 用 getHarness() 惰性取：createTools 执行时 harness 还没 open，真正调用时已就绪。

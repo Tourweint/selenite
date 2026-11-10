@@ -47,6 +47,8 @@ const EXPECTED_TOOLS = [
 	"persona_recall",
 	"ask_user",
 	"report_progress",
+	// 批 30 修订：save_skill_advice（SKILL_ADVICE 开时上架；能力表已登记）
+	"save_skill_advice",
 ].sort();
 
 function registeredToolNames(): string[] {
@@ -60,6 +62,8 @@ function registeredToolNames(): string[] {
 			scheduleRoutine: async () => undefined,
 			// persona 检索（2026-11-09 批一）：条件注册，给个不落盘替身把全集覆盖进来。
 			personaAsk: async () => ({ ok: true, question: "stub" }),
+			skillAdviceSave: () => ({ ok: true, saved: 0, kept: 0 }),
+			skillAdviceSave: () => ({ ok: true, saved: 0, kept: 0 }),
 			// 中途播报（2026-11-10 批 13）：条件注册，显式开才上架。
 			progressReport: true,
 		}),

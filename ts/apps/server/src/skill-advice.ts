@@ -205,9 +205,11 @@ export function illegalAdviceActions(
 	return actions.filter((action) => !(action.name in snapshot.items)).map((action) => action.name);
 }
 
-/* ── 评估的模型调用与提示词 ────────────────────────────────────────────────
- * 独立请求、不进主会话（范式同 memory-extract 的 generateOnce：completeSimple、
- * faux 当作没有模型、超时宁可丢也不挂着）。 */
+/* ── 评估提示词与快照落盘（2026-11-10 批 30 修订版）────────────────────────
+ * 评估**不在服务端后端跑**（v1 的候选链盲扫被用户否了：不知道会撞上哪个模型，
+ * 万一能力低但计费高就亏了）。流程改为：设置页按钮 → 跳到总管对话并预填提示词 →
+ * 总管在用户眼皮底下（用户自己选的模型）枚举技能清单逐条评估 → 调
+ * `save_skill_advice` 工具把结果写进快照 → 用户回设置页分栏采纳。 */
 
 export interface AdviceSkillRow {
 	name: string;
@@ -230,127 +232,78 @@ export function renderAdviceUserInput(rows: readonly AdviceSkillRow[]): string {
 			origin: row.origin,
 		}),
 	);
-	return `以下是本机 agent 技能库的全量清单（JSON 行）：\n${lines.join("\n")}\n`;
+	return lines.join("\n");
 }
-
-export const ADVICE_TIMEOUT_MS = 90_000;
 
 /**
- * 一次性模型调用：独立请求、不进主会话（范式同 memory-extract 的 generateOnce）。
- * 返回 null = 没拿到可用文本（无任何可用模型 / faux / 报错 / 超时 / 输出解析失败）。
- *
- * 模型挑选是**候选链**（批 30 实测教训：当前模型 ≠ 可用模型——界面切到某 provider
- * 但该 provider 的 keyEnv 没配时，"回落当前模型"整条死）。顺序：
- *   1. auxiliaryModel("advice") pin 的模型（AUX_MODEL_ADVICE 显式指定，最高优先）；
- *   2. 当前会话模型；
- *   3. modelCatalog 里 hasKey=true 的 provider×model 逐个试（配置文件顺序）。
- * 每个候选一次机会（报错就换下一个），全部失败才 null。
- *
- * provider 依赖在这里就地 import（与 memory-extract 同款）——本模块的纯函数部分
- * 仍然可以脱离 provider 单测。
+ * 总管对话用的评估提示词（前端预填）。清单由服务端拼好嵌进去，
+ * 总管只需要：逐条评估 → 调 save_skill_advice 一次性落盘 → 回用户一句摘要。
  */
-export async function generateAdvice(rows: readonly AdviceSkillRow[]): Promise<string | null> {
-	const { modelCatalog, currentModels, isFaux, readLlmConfig } = await import("./provider.ts");
-	const { auxiliaryModel } = await import("./auxiliary.ts");
-	if (isFaux()) return null;
+export function renderAdvicePrompt(rows: readonly AdviceSkillRow[]): string {
+	return `帮我评估技能库：逐条判断下面每份技能手册对咱们的价值，分三栏，然后把结果一次性存起来（调 save_skill_advice 工具），最后用两三句话告诉我：建议开启哪些、你把哪些放进了"按场景"、哪些不建议开。
 
-	const models = currentModels();
-	const candidates: { provider: string; modelId: string }[] = [];
-	const push = (ref: { provider: string; modelId: string } | null) => {
-		if (ref && !candidates.some((c) => c.provider === ref.provider && c.modelId === ref.modelId)) {
-			candidates.push({ provider: ref.provider, modelId: ref.modelId });
-		}
-	};
-	push(auxiliaryModel("advice", { current: readLlmConfig()?.model }));
-	push(readLlmConfig()?.model ?? null);
-	for (const provider of modelCatalog().providers) {
-		if (!provider.hasKey) continue;
-		for (const model of provider.models) push({ provider: provider.id, modelId: model.id });
-	}
-
-	for (const candidate of candidates) {
-		const model = models.getModel(candidate.provider, candidate.modelId);
-		if (!model) continue;
-		const text = await adviceOnce(models, model, rows);
-		if (text !== null) return text;
-	}
-	return null;
-}
-
-/** 单个候选模型的一次调用；失败（报错 / 超时 / 输出不可解析）返回 null，由调用方换下一个 */
-async function adviceOnce(
-	models: Awaited<ReturnType<typeof import("./provider.ts").currentModels>>,
-	model: Parameters<typeof models.completeSimple>[0],
-	rows: readonly AdviceSkillRow[],
-): Promise<string | null> {
-	const controller = new AbortController();
-	const timer = setTimeout(() => controller.abort(), ADVICE_TIMEOUT_MS);
-	try {
-		const response = await models.completeSimple(
-			model,
-			{
-				systemPrompt: adviceSystemPrompt(),
-				messages: [
-					{
-						role: "user" as const,
-						content: renderAdviceUserInput(rows),
-						timestamp: Date.now(),
-					},
-				],
-			},
-			// 分类活不需要深思：minimal 思考档，把 token 全留给 122 条 JSON 输出
-			{ signal: controller.signal, maxTokens: 16000, temperature: 0, reasoning: "minimal" },
-		);
-		if (response.stopReason !== "stop") {
-			// aborted 大多是超时中止，error 多是供应商没配 key：静默 null 会让"评估没跑成"查不到原因
-			console.warn(
-				`[skills] 分类建议调用未出结果: stop=${response.stopReason}，输入 ${rows.length} 条技能`,
-			);
-			return null;
-		}
-		const text = contentText(response.content);
-		// 输出必须能解析成合法建议才算成功——半截 JSON 当作没跑成，调用方换下一个模型
-		return text && parseAdviceResponse(text) ? text : null;
-	} catch (error) {
-		const detail = error instanceof Error ? error.message : String(error);
-		// 只有错误摘要，没有对话内容
-		console.warn(`[skills] 分类建议调用失败: ${detail.slice(0, 200)}`);
-		return null;
-	} finally {
-		clearTimeout(timer);
-	}
-}
-
-/** contentText 的本地实现（provider 的同名函数未导出；这里只需要拼纯文本） */
-function contentText(content: unknown): string {
-	if (typeof content === "string") return content;
-	if (Array.isArray(content)) {
-		return content
-			.map((part) =>
-				part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string"
-					? (part as { text: string }).text
-					: "",
-			)
-			.join("");
-	}
-	return "";
-}
-
-export function adviceSystemPrompt(): string {
-	return `你是本机 agent 的技能库管家。技能库里有大量第三方技能（装的时候面向的是别的 agent 工具），你的任务是逐条判断它们对这个 agent 的价值，输出三栏分类。
-
-你评估的 agent 是：Windows 本机单人 agent（Hono 服务 + bash/read/write/edit 工具面，不是 Claude Code / ZCode / Cursor）。技能的"运行环境"是本机 Windows + ego lite 浏览器（Chromium，可复用用户登录态）。技能本身是操作手册，不会定时运行；"frequency"是你预估 agent 多久会用上一次。
+评估对象是**我**——Windows 本机单人 agent（bash/read/write/edit 工具面 + ego lite 浏览器；不是 Claude Code / ZCode / Cursor）。技能是操作手册，不会定时运行；frequency 是预估我多久用上一次。
 
 三栏判据：
-- keep（建议开启）：基础设施 / 常用能力，本机 agent 有用且能跑起来。
-- scene（按场景）：特定任务才用得上，开着也行，交给用户逐条决定。
-- skip（建议不开）：面向别的 agent 平台或环境（如依赖 Claude Code / ZCode 特有机制）、面向别的发布渠道（公众号/微博等）、本机 agent 根本用不上、或几乎永远用不到。
+- keep（建议开启）：基础设施 / 常用能力，对我和这个环境有用且跑得起来。
+- scene（按场景）：特定任务才用得上，开着也行，交给主人逐条决定。
+- skip（建议不开）：面向别的 agent 平台或环境（如依赖 Claude Code / ZCode 特有机制）、面向别的发布渠道（公众号/微博等）、在这个环境根本用不上、或几乎永远用不到。
 
 频率口径：daily=基础设施/几乎每天可用；weekly=常规任务会用；monthly=偶尔的场景；rare=几乎用不上。rare 一律配 skip。
 
-参考信息（不强制）：usageCount≥3 且 stale=false 且当前 enabled=true 的技能，说明用户实际在用，倾向 keep。
+参考信息（不强制）：usageCount≥3 且 stale=false 且当前 enabled=true 的技能，说明主人实际在用，倾向 keep。
 
-输出格式（紧凑，为了装下上百条）：items 的每条值是**三元素数组** [bucket, frequency, reason]：
-{"items": {"<技能名>": ["keep", "daily", "≤20字理由"], ...}}
-清单里的每一条都要出现在 items 里；reason ≤20 字；不要输出 JSON 以外的任何文字。`;
+技能清单（JSON 行，每行一条）：
+${renderAdviceUserInput(rows)}`;
+}
+
+/** 工具/导入入口共用的快照写入：整份替换 items（先与现有快照按当前清单合并语义由调用方定）。 */
+export function saveAdviceItems(
+	path: string,
+	items: Record<string, SkillAdviceEntry>,
+	model: string,
+): SkillAdviceSnapshot {
+	const previous = readAdviceSnapshot(path);
+	const snapshot: SkillAdviceSnapshot = {
+		generatedAt: new Date().toISOString(),
+		model: model || previous?.model || "",
+		items: { ...(previous?.items ?? {}), ...items },
+	};
+	writeAdviceSnapshot(path, snapshot);
+	return snapshot;
+}
+
+/** `save_skill_advice` 工具的结果：saved=本次落盘条数，kept=快照里未被本次清单覆盖的原有条数 */
+export type SkillAdviceSaveResult =
+	| { ok: true; saved: number; kept: number }
+	| { ok: false; error: string; message: string; hint?: string };
+
+/**
+ * 工具入口（lifecycle 注入给 tools.ts；包住清洗 + 落盘）：
+ * 输入是模型给的原始 `名 → [bucket, frequency, reason]` 映射，非法条目丢弃不报错
+ * （清单大，个别笔误不该让整份作废）；一条合法都没有才算失败。
+ */
+export function makeSkillAdviceSaver(
+	path: string,
+): (items: Record<string, string[]>) => SkillAdviceSaveResult {
+	return (rawItems) => {
+		const items: Record<string, SkillAdviceEntry> = {};
+		for (const [name, raw] of Object.entries(rawItems ?? {})) {
+			const entry = sanitizeAdviceItem(raw);
+			if (entry) items[name] = entry;
+		}
+		if (Object.keys(items).length === 0) {
+			return {
+				ok: false,
+				error: "no_valid_items",
+				message:
+					"items 里没有一条合法建议（每条要是 [bucket, frequency, reason] 三元素数组，bucket/frequency 按口径取值）",
+				hint: "对照口径重给：bucket=keep|scene|skip，frequency=daily|weekly|monthly|rare。",
+			};
+		}
+		const previous = readAdviceSnapshot(path);
+		const kept = Object.keys(previous?.items ?? {}).filter((name) => !(name in items)).length;
+		saveAdviceItems(path, items, "chief-conversation");
+		return { ok: true, saved: Object.keys(items).length, kept };
+	};
 }

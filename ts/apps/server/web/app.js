@@ -10971,7 +10971,7 @@ async function renderSettings() {
           <div class="sk-path" id="skill-path">读取中…</div>
         </div>
         <div class="sk-head-actions">
-          <button class="ghost" type="button" id="skill-advice-run" title="Agent 逐条评估：哪些建议开启、哪些按场景、哪些不用，附预计使用频率（技能多，约 30-90 秒）">让 Agent 评估</button>
+          <button class="ghost" type="button" id="skill-advice-run" title="跳到总管对话并填好评估提示词：你看过点发送，总管逐条评估后把结果存回快照（用你当前选的模型，不换模型）">让 Agent 评估</button>
           <button class="ghost" type="button" id="skill-advice-adopt" title="把『建议开启』栏全部打开（下一个会话进索引）" hidden>一键采纳</button>
           <button class="ghost" type="button" id="skill-all-on" title="全部开启（下一个会话进索引）">全开</button>
           <button class="ghost" type="button" id="skill-all-off" title="全部关闭（默认态）">全关</button>
@@ -11062,32 +11062,33 @@ async function fetchSkillAdvice() {
   }
 }
 
-/** 评估入口：POST 生成（10-30 秒），成功后重载列表。按钮全程禁用防连点。 */
+/**
+ * 评估入口（批 30 修订）：不再后端盲跑模型——那不知道会撞上哪个模型，万一能力低但
+ * 计费高就亏了。改为：取服务端拼好的评估提示词 → 跳到总管对话（最新一条或新开）→
+ * 提示词预填进输入框。主人看过、点发送，总管在主人选的模型上把活干了（结果经
+ * save_skill_advice 工具写回快照），再回技能页分栏采纳。
+ */
 async function runSkillAdvice() {
   const run = document.getElementById("skill-advice-run");
-  const adopt = document.getElementById("skill-advice-adopt");
   if (!run || run.disabled) return;
-  const original = run.textContent;
   run.disabled = true;
-  if (adopt) adopt.disabled = true;
-  run.textContent = "评估中…（技能多，最多 90 秒）";
   try {
-    const response = await request("/api/v1/agent/skills/advice", { method: "POST" });
+    const response = await request("/api/v1/agent/skills/advice", { cache: "no-store" });
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      toast(data.message || `评估没跑成：HTTP ${response.status}`);
+    if (!response.ok || !data.prompt) {
+      toast(data.message || "拿不到评估提示词（技能库可能是空的）");
       return;
     }
-    skillAdvice.view = data;
-    skillAdvice.filter = "all";
-    toast("评估完成，已按建议分栏");
-    void loadSkills();
+    if (data.ok) skillAdvice.view = data;
+    openChiefChat();
+    el.input.value = data.prompt;
+    resize();
+    el.input.focus();
+    toast("评估提示词已填进总管输入框——看过没问题就发送");
   } catch (error) {
-    if (error.message !== "forbidden") toast(`评估没跑成：${error.message}`);
+    if (error.message !== "forbidden") toast(`没拿到评估提示词：${error.message}`);
   } finally {
     run.disabled = false;
-    if (adopt) adopt.disabled = false;
-    run.textContent = original;
   }
 }
 

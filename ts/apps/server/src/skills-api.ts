@@ -21,19 +21,17 @@ import {
 import { getSkillState } from "./skill-state.ts";
 import { isSkillStale, readSkillUsage, skillUsageEnabled } from "./skill-usage.ts";
 import {
-	adviceSystemPrompt,
 	adviceViewOf,
-	generateAdvice,
 	illegalAdviceActions,
 	parseAdviceResponse,
 	pruneAdviceSnapshot,
 	readAdviceSnapshot,
+	renderAdvicePrompt,
 	skillAdviceEnabled,
 	skillAdvicePath,
 	writeAdviceSnapshot,
 	type AdviceSkillRow,
 } from "./skill-advice.ts";
-import { readLlmConfig } from "./provider.ts";
 
 /**
  * 技能管理端点（2026-11-08 扫尾批 9-S；2026-11-08 批 10-A 改多来源只读展示）。
@@ -338,39 +336,43 @@ export function mountSkills(app: Hono, deps: SkillsApiDeps = {}): void {
 		return c.json({ ok: true, count: names.length, enabled: body.enabled, note: "索引随下一个会话刷新" });
 	});
 
-	/* ── 技能分类建议（2026-11-10 批 30；`SKILL_ADVICE=false` 回滚 = 三条路由不挂）──
-	 * 建议归建议（skills-advice.json 快照），开关归开关（skills-state.json）：
-	 * 本组路由里唯一的写动作是 PUT 采纳启停位（名字必须来自快照）。
+	/* ── 技能分类建议（2026-11-10 批 30；`SKILL_ADVICE=false` 回滚 = 路由不挂）──
+	 * 评估在**总管对话里**做（v1 的后端候选链盲扫被用户否了：不知道会撞上哪个模型，
+	 * 万一能力低但计费高就亏了）——这里只出"预填提示词"（GET 带 prompt）和收
+	 * "总管评估完的 JSON"（POST 导入快照）。采纳仍是 PUT（名字必须来自快照）。
 	 * ego-browser 这类符号链接技能不在管理列表（insideSource 闸），天然不进评估范围。 */
 	if (adviceOn) {
 		app.get("/api/v1/agent/skills/advice", (c) => {
-			const names = adminSkillNames();
-			const view = adviceViewOf(readAdviceSnapshot(advicePath()), names);
-			return c.json({ ok: true, ...view });
+			const rows = adminSkillRows();
+			const view = adviceViewOf(readAdviceSnapshot(advicePath()), rows.map((row) => row.name));
+			// 无快照 / 快照过期时给预填提示词：前端拿它跳总管对话并预填（用户点发送才开跑）
+			const prompt = rows.length ? renderAdvicePrompt(rows) : null;
+			return c.json({ ok: true, ...view, prompt });
 		});
 
 		app.post("/api/v1/agent/skills/advice", async (c) => {
+			const body = (await c.req.json().catch(() => null)) as
+				| { items?: unknown; model?: unknown }
+				| null;
+			if (!body || typeof body !== "object" || Array.isArray(body.items)) {
+				return c.json({ error: "bad_request", message: "需要 items 对象（save_skill_advice 的同款输出）" }, 400);
+			}
+			// 与工具同一条清洗口径：非法条目丢、一条合法都没有 = 整份不可信
+			const items = parseAdviceResponse(JSON.stringify({ items: body.items }));
+			if (items === null) {
+				return c.json({ error: "bad_request", message: "items 里没有一条合法建议（bucket/frequency 不合口径）" }, 400);
+			}
 			const rows = adminSkillRows();
 			if (!rows.length) {
 				return c.json({ error: "bad_request", message: "技能库是空的，没有可评估的对象" }, 400);
 			}
-			const text = await generateAdvice(rows);
-			if (text === null) {
-				return c.json({ error: "unavailable", message: "模型不可用，评估没跑成" }, 503);
-			}
-			const items = parseAdviceResponse(text);
-			if (items === null) {
-				return c.json({ error: "unavailable", message: "模型输出解析失败，评估没跑成" }, 503);
-			}
 			// 先修旧快照（清掉已消失技能）再合并本次结果，一次性原子替换
 			const previous = readAdviceSnapshot(advicePath());
 			const merged = previous ? pruneAdviceSnapshot(previous, rows.map((row) => row.name)) : null;
-			const baseItems = merged?.items ?? {};
-			const config = readLlmConfig();
 			writeAdviceSnapshot(advicePath(), {
 				generatedAt: new Date().toISOString(),
-				model: config ? `${config.model.provider}/${config.model.modelId}` : "",
-				items: { ...baseItems, ...items },
+				model: typeof body.model === "string" ? body.model : (merged?.model ?? ""),
+				items: { ...(merged?.items ?? {}), ...items },
 			});
 			const view = adviceViewOf(readAdviceSnapshot(advicePath()), rows.map((row) => row.name));
 			return c.json({ ok: true, ...view });
