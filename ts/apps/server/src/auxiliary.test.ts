@@ -53,7 +53,7 @@ test("pin 变量名按用途大写；没配 / 空白 → null", () => {
 	);
 	assert.equal(auxPinnedModelId("title", { AUX_MODEL_TITLE: "t" }), "t");
 	assert.equal(auxPinnedModelId("vision", { AUX_MODEL_VISION: "v" }), "v");
-	assert.deepEqual([...AUX_USES], ["title", "compact", "vision", "review", "extract"]);
+	assert.deepEqual([...AUX_USES], ["title", "compact", "vision", "review", "extract", "advice"]);
 });
 
 test("没有当前模型 → null（不编一个路由）", () => {

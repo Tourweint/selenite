@@ -9,6 +9,8 @@
  *   D. 标准用户技能目录 `%USERPROFILE%/.agents/skills`：两种形态进列表并标 origin=agents / writable=false；
  *      可读、不可写、不可删。
  *   E. SKILLS_ADMIN=false → 路由不挂（404，= 未启用）。
+ *   F. 技能分类建议（2026-11-10 批 30）：无快照空形状 / faux POST 503 / 差集标注 /
+ *      PUT 采纳生效 + 伪造 400 / SKILL_ADVICE=false 回滚。
  *
  * 卫生：所有落点都在系统临时目录 + `.data/probe-skills-*`，跑完即删；不碰真实用户目录与内置手册。
  *
@@ -76,6 +78,10 @@ function baseEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
 		PAIRING_STORE_PATH: PAIRING,
 		PROVIDERS_PATH: PROVIDERS,
 		MODEL_RUNTIME_PATH: RUNTIME,
+		// 启停位 / 建议快照也锁进临时目录：F 段采纳会写启停位，漏了就会污染生产
+		// .data/skills-state.json（2026-11-10 批 30 实测踩中：advice-keep 漏进了生产 state）
+		AGENT_SKILLS_STATE_PATH: join(ROOT, "skills-state.json"),
+		AGENT_SKILLS_ADVICE_PATH: join(ROOT, "skills-advice.json"),
 		CHANCELLOR_ENABLED: "false",
 		AUTONOMY_ENABLED: "false",
 		AGENT_TOOL_POLICY: "full",
@@ -310,6 +316,85 @@ try {
 	await startServer({ SKILLS_ADMIN: "false", USERPROFILE: HOME, HOME });
 	check((await apiJson("/api/v1/agent/skills")).status === 404, "列表 404（= 未启用）");
 	check((await put("whatever", "摘要\n正文")).status === 404, "写入 404");
+	await stopServer();
+
+	// ── F. 技能分类建议（2026-11-10 批 30）────────────────────
+	// faux 模型下 POST = 503（模型不可用）；快照走手工写入（真模型评估是浏览器实测的事）。
+	console.log("\nF. 技能分类建议（advice 三端点）");
+	await startServer({ USERPROFILE: HOME, HOME });
+	// F1. 无快照：GET 空形状、PUT 全被闸（名字不在快照）
+	const adviceEmpty = await apiJson("/api/v1/agent/skills/advice");
+	check(
+		adviceEmpty.status === 200 &&
+			adviceEmpty.body.ok === true &&
+			Object.keys(adviceEmpty.body.items ?? {}).length === 0 &&
+			Array.isArray(adviceEmpty.body.unevaluated),
+		"GET 无快照 → 空形状 + unevaluated 数组",
+		`HTTP ${adviceEmpty.status}`,
+	);
+	// F2. faux 模型 POST → 503（生成没跑成，而不是把假文本写进快照）
+	const advicePost = await apiJson("/api/v1/agent/skills/advice", { method: "POST" });
+	check(
+		advicePost.status === 503 && typeof advicePost.body.message === "string",
+		"POST（faux 模型）→ 503 模型不可用",
+		`HTTP ${advicePost.status}`,
+	);
+	// F3. 手写一份快照（含一条指向已消失技能的脏数据），GET 应差集标注
+	const snapshotPath = join(ROOT, "skills-advice.json");
+	writeFileSync(
+		snapshotPath,
+		JSON.stringify({
+			generatedAt: "2026-11-10T00:00:00.000Z",
+			model: "probe/model",
+			items: {
+				"advice-keep": { bucket: "keep", frequency: "daily", reason: "基础设施" },
+				"advice-gone": { bucket: "skip", frequency: "rare", reason: "已删除的技能" },
+			},
+		}),
+		"utf8",
+	);
+	await put("advice-keep", "建议开启的技能\n正文");
+	const adviceDirty = await apiJson("/api/v1/agent/skills/advice");
+	const dirtyItems = (adviceDirty.body.items ?? {}) as Record<string, { bucket?: string }>;
+	const dirtyUnevaluated = (adviceDirty.body.unevaluated ?? []) as string[];
+	check(
+		adviceDirty.status === 200 &&
+			dirtyItems["advice-keep"]?.bucket === "keep" &&
+			dirtyItems["advice-gone"] === undefined &&
+			adviceDirty.body.stale === true &&
+			dirtyUnevaluated.includes("agents-flat") === false,
+		"GET 差集：消失技能剔除、真实技能保留、stale 标注",
+		JSON.stringify(adviceDirty.body.items),
+	);
+	// F4. PUT 采纳：快照内名字生效、伪造名字 400
+	const adoptOk = await apiJson("/api/v1/agent/skills/advice", {
+		method: "PUT",
+		body: JSON.stringify({ actions: [{ name: "advice-keep", enabled: true }] }),
+	});
+	check(
+		adoptOk.status === 200 && adoptOk.body.applied === 1,
+		"PUT 采纳（快照内名字）→ 生效",
+		`HTTP ${adoptOk.status} applied=${adoptOk.body.applied}`,
+	);
+	const forge = await apiJson("/api/v1/agent/skills/advice", {
+		method: "PUT",
+		body: JSON.stringify({ actions: [{ name: "not-in-snapshot", enabled: true }] }),
+	});
+	check(forge.status === 400, "PUT 伪造建议（不在快照）→ 400", `HTTP ${forge.status}`);
+	// F5. 采纳真的写了启停位（读启停端点核账）
+	const enabledList = await apiJson("/api/v1/agent/skills");
+	const enabledItems = (enabledList.body.items ?? []) as { name: string; enabled: boolean }[];
+	const enabledEntry = enabledItems.find((item) => item.name === "advice-keep");
+	check(enabledEntry?.enabled === true, "采纳后启停位真的开了", `enabled=${enabledEntry?.enabled}`);
+	// F6. 回滚开关：SKILL_ADVICE=false → advice 路由不挂（其余技能路由照常）
+	await stopServer();
+	await startServer({
+		SKILL_ADVICE: "false",
+		USERPROFILE: HOME,
+		HOME,
+	});
+	check((await apiJson("/api/v1/agent/skills/advice")).status === 404, "SKILL_ADVICE=false → advice 404");
+	check((await apiJson("/api/v1/agent/skills")).status === 200, "技能列表不受影响");
 	await stopServer();
 } finally {
 	server?.kill();

@@ -26,10 +26,17 @@
 import type { ModelRef } from "./provider.ts";
 import { currentModels, readLlmConfig } from "./provider.ts";
 
-export type AuxUse = "title" | "compact" | "vision" | "review" | "extract";
+export type AuxUse = "title" | "compact" | "vision" | "review" | "extract" | "advice";
 
 /** 用途清单（文档 / 探针用；新增用途时这里与 `AuxUse` 一起改）。 */
-export const AUX_USES: readonly AuxUse[] = ["title", "compact", "vision", "review", "extract"];
+export const AUX_USES: readonly AuxUse[] = [
+	"title",
+	"compact",
+	"vision",
+	"review",
+	"extract",
+	"advice",
+];
 
 /**
  * 当前**无调用点**的用途（2026-11-10 批 28 §三）：把"没有调用点"写进代码，不只在变更记录里。
@@ -43,7 +50,8 @@ export const AUX_USES: readonly AuxUse[] = ["title", "compact", "vision", "revie
  * `AUX_MODEL_TITLE` / `AUX_MODEL_VISION` 以为生效，`auxiliaryModel()` 被调用到这两个用途时
  * 打一条 warn（进程内只一次，见 `warnedNoCallSite`），提示"该用途当前无调用方，配置不会生效"。
  * `compact` 不在此列：批 26b 已由 `startChatCompaction` 单独记"内核不支持指定压缩模型"日志，
- * 属另一条已登记的口径；`review` / `extract` 是已接线的正常用途。
+ * 属另一条已登记的口径；`review` / `extract` 是已接线的正常用途；
+ * `advice`（批 30）由技能分类建议接线的正常用途。
  */
 const NO_CALL_SITE_USES: ReadonlySet<AuxUse> = new Set<AuxUse>(["title", "vision"]);
 

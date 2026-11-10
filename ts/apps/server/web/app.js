@@ -810,6 +810,20 @@ function relativeTime(iso) {
   return new Date(iso).toLocaleDateString("zh-CN");
 }
 
+/* ── 陈旧提示（批 31 痕迹蒸发）────────────────────────────
+ * 执行中的单超过 24 小时没动静，时间后面补一句「（很久没动静）」。
+ * 这是文案不是状态：只改变人看到什么，不改变机器判什么——状态机不降级、不通知。
+ * 终态卡（done/failed/aborted/canceled）与 needs_you（等人 ≠ 陈旧）一律不加。 */
+const STALE_TICKET_MS = 24 * 60 * 60 * 1000;
+const STALE_TICKET_HINT = "（很久没动静）";
+function stalenessHint(status, iso) {
+  const done_ = ["done", "canceled", "failed", "aborted", "needs_you"];
+  if (done_.indexOf(status) !== -1) return "";
+  const stamp = new Date(iso).getTime();
+  if (!Number.isFinite(stamp)) return "";
+  return Date.now() - stamp > STALE_TICKET_MS ? STALE_TICKET_HINT : "";
+}
+
 /* ── 一张卡 = 一条对话（L3，2026-11-05） ───────────────────
  * 三层粒度：对话卡 → 派活行（父单）→ 子单。
  * - 卡头是对话本身（标题 / 总管 / 区域 / 聚合灯 / 最近时间），点它回原对话；
@@ -1376,7 +1390,7 @@ function workRow(ticket) {
     </div>
     <div class="tk-row-meta">
       <span class="tk-row-who">${esc(employeeName(ticket.employee))}</span>
-      <span class="tk-row-time">${esc(relativeTime(ticket.updated_at))}</span>
+      <span class="tk-row-time">${esc(relativeTime(ticket.updated_at))}${esc(stalenessHint(ticket.status, ticket.updated_at))}</span>
     </div>
     ${ticketActionButtons(ticket)}
     ${
@@ -1406,7 +1420,7 @@ function conversationCard(card) {
     <button class="tk-conv-head" type="button" data-conv="${attr(card.conversationId)}" title="回到这条对话">
       <span class="tk-conv-title">${esc(card.title || "未命名对话")}</span>
       <span class="tk-conv-badges">${badges}</span>
-      <span class="tk-conv-tail">${lamp}<span class="tk-conv-time">${esc(relativeTime(card.updated_at))}</span></span>
+      <span class="tk-conv-tail">${lamp}<span class="tk-conv-time">${esc(relativeTime(card.updated_at))}${esc(card.lamp === "run" ? stalenessHint("run", card.updated_at) : "")}</span></span>
     </button>
     <div class="tk-rows"></div>
   `;
@@ -1993,7 +2007,7 @@ function renderTicketDetail(data, fallbackId) {
         <span class="tk-chip" data-tone="${statusTone}">${esc(statusLabel)}</span>
         <span class="td-domain">${esc(data.domain || ticket.options?.domain || "")}</span>
         ${project ? `<span class="td-proj">项目 ${esc(project)}</span>` : ""}
-        <span class="td-time">${esc(relativeTime(ticket.updated_at))}</span>
+        <span class="td-time">${esc(relativeTime(ticket.updated_at))}${esc(stalenessHint(ticket.status, ticket.updated_at))}</span>
       </div>
       <h2 class="td-prompt">${esc(String(ticket.prompt || "").trim() || "（没有说明）")}</h2>
       ${ticketStagesHtml(ticket.status, repairRound)}
@@ -2005,7 +2019,7 @@ function renderTicketDetail(data, fallbackId) {
         <span>任务单 ${esc(ticket.id || fallbackId)}</span>
         ${lastAction ? `<span>最近 ${esc(lastAction)}</span>` : ""}
         ${waitingOn ? `<span>等文件 ${esc(waitingOn)}</span>` : ""}
-        ${heartbeat ? `<span>心跳 ${esc(relativeTime(heartbeat))}</span>` : ""}
+        ${heartbeat ? `<span>心跳 ${esc(relativeTime(heartbeat))}${esc(stalenessHint(ticket.status, heartbeat))}</span>` : ""}
       </div>
       ${total > 0 ? `<div class="tk-bar"><i style="width:${percent}%"></i></div>` : ""}
       ${error ? `<p class="td-note" data-tone="${ticket.status === "failed" || ticket.status === "aborted" ? "fail" : "ask"}">${esc(error)}</p>` : ""}
@@ -10957,6 +10971,8 @@ async function renderSettings() {
           <div class="sk-path" id="skill-path">读取中…</div>
         </div>
         <div class="sk-head-actions">
+          <button class="ghost" type="button" id="skill-advice-run" title="Agent 逐条评估：哪些建议开启、哪些按场景、哪些不用，附预计使用频率（技能多，约 30-90 秒）">让 Agent 评估</button>
+          <button class="ghost" type="button" id="skill-advice-adopt" title="把『建议开启』栏全部打开（下一个会话进索引）" hidden>一键采纳</button>
           <button class="ghost" type="button" id="skill-all-on" title="全部开启（下一个会话进索引）">全开</button>
           <button class="ghost" type="button" id="skill-all-off" title="全部关闭（默认态）">全关</button>
           <button class="btn-primary" type="button" id="skill-add">
@@ -10965,6 +10981,7 @@ async function renderSettings() {
           </button>
         </div>
       </div>
+      <div class="sk-filters" id="skill-filters" hidden></div>
       <div class="sk-list" id="skill-list">
         <div class="set-hint">读取中…</div>
       </div>`,
@@ -10972,6 +10989,12 @@ async function renderSettings() {
     document.getElementById("skill-add")?.addEventListener("click", () => openCreateSkillModal());
     document.getElementById("skill-all-on")?.addEventListener("click", () => void toggleAllSkills(true));
     document.getElementById("skill-all-off")?.addEventListener("click", () => void toggleAllSkills(false));
+    document
+      .getElementById("skill-advice-run")
+      ?.addEventListener("click", () => void runSkillAdvice());
+    document
+      .getElementById("skill-advice-adopt")
+      ?.addEventListener("click", () => void adoptSkillAdvice());
     void loadSkills();
   } else {
     el.settingsInner.innerHTML = sectionMarkup(
@@ -11004,6 +11027,102 @@ const SKILL_NAME_RE = /^[a-z0-9][a-z0-9-_]{0,63}$/;
 /** 「对已在跑的会话不生效，下一个会话开始使用」——三处入口共用同一句，避免各自改口径 */
 const SKILL_NEXT_TURN_HINT = "对已在跑的会话不生效，下一个会话开始使用。";
 
+/* ── 技能分类建议（2026-11-10 批 30）──
+ * Agent 评估 + 人确认：三栏（keep=建议开启 / scene=按场景 / skip=建议不开）
+ * + 预计使用频率（技能是手册不运行，频率只做"值不值得开"的参考）。
+ * 建议快照在服务端 .data/skills-advice.json；采纳才写启停位。 */
+
+const SKILL_ADVICE_BUCKET_LABEL = { keep: "建议开启", scene: "按场景", skip: "建议不开" };
+const SKILL_ADVICE_FREQ_LABEL = {
+  daily: "每天会用到",
+  weekly: "每周用上",
+  monthly: "每月一次上下",
+  rare: "几乎用不上",
+};
+const SKILL_ADVICE_FILTERS = [
+  { key: "all", label: "全部" },
+  { key: "keep", label: "建议开启" },
+  { key: "scene", label: "按场景" },
+  { key: "skip", label: "建议不开" },
+  { key: "none", label: "未评估" },
+];
+
+/** 会话级状态：当前建议快照 + 筛选位（离开技能页即弃，不持久） */
+const skillAdvice = { view: null, filter: "all" };
+
+async function fetchSkillAdvice() {
+  try {
+    const response = await request("/api/v1/agent/skills/advice", { cache: "no-store" });
+    if (!response.ok) return null; // 404 = SKILL_ADVICE=false，整个功能不出现
+    const data = await response.json().catch(() => ({}));
+    return data.ok ? data : null;
+  } catch (error) {
+    if (error.message !== "forbidden") return null;
+    return null;
+  }
+}
+
+/** 评估入口：POST 生成（10-30 秒），成功后重载列表。按钮全程禁用防连点。 */
+async function runSkillAdvice() {
+  const run = document.getElementById("skill-advice-run");
+  const adopt = document.getElementById("skill-advice-adopt");
+  if (!run || run.disabled) return;
+  const original = run.textContent;
+  run.disabled = true;
+  if (adopt) adopt.disabled = true;
+  run.textContent = "评估中…（技能多，最多 90 秒）";
+  try {
+    const response = await request("/api/v1/agent/skills/advice", { method: "POST" });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      toast(data.message || `评估没跑成：HTTP ${response.status}`);
+      return;
+    }
+    skillAdvice.view = data;
+    skillAdvice.filter = "all";
+    toast("评估完成，已按建议分栏");
+    void loadSkills();
+  } catch (error) {
+    if (error.message !== "forbidden") toast(`评估没跑成：${error.message}`);
+  } finally {
+    run.disabled = false;
+    if (adopt) adopt.disabled = false;
+    run.textContent = original;
+  }
+}
+
+/** 一键采纳：把 keep 栏（且矛盾标记不拦——采纳的是人的决定）逐条开开 */
+async function adoptSkillAdvice() {
+  const view = skillAdvice.view;
+  if (!view) return;
+  const keepNames = Object.entries(view.items || {})
+    .filter(([, entry]) => entry && entry.bucket === "keep")
+    .map(([name]) => name);
+  if (!keepNames.length) {
+    toast("『建议开启』栏是空的，没什么可采纳");
+    return;
+  }
+  const adopt = document.getElementById("skill-advice-adopt");
+  if (adopt) adopt.disabled = true;
+  try {
+    const response = await request("/api/v1/agent/skills/advice", {
+      method: "PUT",
+      body: JSON.stringify({ actions: keepNames.map((name) => ({ name, enabled: true })) }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      toast(data.message || `没存成：HTTP ${response.status}`);
+      return;
+    }
+    toast(`已开启 ${data.applied} 个技能，下一个会话进索引`);
+    void loadSkills();
+  } catch (error) {
+    if (error.message !== "forbidden") toast(`没存成：${error.message}`);
+  } finally {
+    if (adopt) adopt.disabled = false;
+  }
+}
+
 function skillSizeText(size) {
   const bytes = Number(size) || 0;
   if (bytes < 1024) return `${bytes} B`;
@@ -11021,7 +11140,11 @@ async function loadSkills() {
   const add = document.getElementById("skill-add");
   if (!box) return;
   try {
-    const response = await request("/api/v1/agent/skills", { cache: "no-store" });
+    // 建议快照与列表并行取；404（SKILL_ADVICE=false）= 功能整体不出现
+    const [response, adviceView] = await Promise.all([
+      request("/api/v1/agent/skills", { cache: "no-store" }),
+      fetchSkillAdvice(),
+    ]);
     const data = await response.json().catch(() => ({}));
     if (response.status === 404) {
       if (path) path.textContent = "";
@@ -11034,10 +11157,47 @@ async function loadSkills() {
       const origin = SKILL_ORIGIN_LABEL[data.origin] || data.origin || "";
       path.textContent = `位置：${data.dir || "—"}${origin ? `（${origin}）` : ""}`;
     }
+    skillAdvice.view = adviceView;
     renderSkillList(box, Array.isArray(data.items) ? data.items : []);
   } catch (error) {
     if (error.message === "forbidden") return;
     box.innerHTML = `<div class="set-hint is-error">读不到技能：${esc(String(error.message))}</div>`;
+  }
+}
+
+/** 筛选 chips（有建议快照才出现）：全部 / 建议开启 / 按场景 / 建议不开 / 未评估 */
+function renderSkillFilters(box, items) {
+  const holder = document.getElementById("skill-filters");
+  if (!holder) return;
+  const view = skillAdvice.view;
+  if (!view) {
+    holder.hidden = true;
+    holder.replaceChildren();
+    return;
+  }
+  const counts = { all: items.length, keep: 0, scene: 0, skip: 0, none: 0 };
+  for (const item of items) {
+    const entry = view.items?.[item.name];
+    if (entry) counts[entry.bucket] += 1;
+    else counts.none += 1;
+  }
+  holder.hidden = false;
+  holder.replaceChildren();
+  for (const spec of SKILL_ADVICE_FILTERS) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "sk-filter-chip";
+    chip.dataset.filter = spec.key;
+    chip.setAttribute("aria-checked", String(skillAdvice.filter === spec.key));
+    chip.textContent = `${spec.label} ${counts[spec.key]}`;
+    chip.addEventListener("click", () => {
+      skillAdvice.filter = spec.key;
+      for (const button of holder.querySelectorAll(".sk-filter-chip")) {
+        button.setAttribute("aria-checked", String(button.dataset.filter === spec.key));
+      }
+      renderSkillList(box, items);
+    });
+    holder.append(chip);
   }
 }
 
@@ -11050,7 +11210,28 @@ function renderSkillList(box, items) {
     box.append(empty);
     return;
   }
-  for (const item of items) {
+  renderSkillFilters(box, items);
+  const view = skillAdvice.view;
+  const keepCount = view
+    ? Object.values(view.items || {}).filter((entry) => entry?.bucket === "keep").length
+    : 0;
+  const adopt = document.getElementById("skill-advice-adopt");
+  if (adopt) adopt.hidden = !(view && keepCount > 0);
+  const filtered =
+    view && skillAdvice.filter !== "all"
+      ? items.filter((item) => {
+          const entry = view.items?.[item.name];
+          return skillAdvice.filter === "none" ? !entry : entry?.bucket === skillAdvice.filter;
+        })
+      : items;
+  if (!filtered.length) {
+    const empty = document.createElement("div");
+    empty.className = "card sk-empty";
+    empty.innerHTML = `<p class="set-hint">这一栏没有技能。</p>`;
+    box.append(empty);
+    return;
+  }
+  for (const item of filtered) {
     const name = String(item.name || "");
     // 只读来源（~/.agents/skills）只展示不给删：那是别的工具的家，改删请去原目录（2026-11-08 批 10-A）
     const readOnly = item.writable === false;
@@ -11063,11 +11244,23 @@ function renderSkillList(box, items) {
       item.stale === true
         ? `<span class="sk-stale" title="按最近一次使用时间算，已经 90 天没被取用过；只标记，不删不移">90 天未用</span>`
         : "";
+    // 建议徽章（批 30）：bucket + 频率 + 理由 hover；rare+keep 自相矛盾 → 待复核，不进一键采纳口径之外的建议
+    const entry = view?.items?.[name];
+    let adviceTag = "";
+    if (view && !entry) {
+      adviceTag = `<span class="sk-advice sk-advice-none" title="Agent 还没评估过这条（快照生成后新装的技能）。点「让 Agent 评估」重新生成。">未评估</span>`;
+    } else if (entry) {
+      const contradictory = entry.bucket === "keep" && entry.frequency === "rare";
+      const cls = contradictory ? "sk-advice-warn" : `sk-advice-${entry.bucket}`;
+      const label = contradictory ? "待复核" : SKILL_ADVICE_BUCKET_LABEL[entry.bucket] || entry.bucket;
+      const tip = `预计${SKILL_ADVICE_FREQ_LABEL[entry.frequency] || entry.frequency}用上；${entry.reason || "（没有理由）"}${contradictory ? "；模型说建议开启但频率几乎用不上，自相矛盾，采纳前自己看一眼" : ""}`;
+      adviceTag = `<span class="sk-advice ${cls}" title="${attr(tip)}">${esc(label)} · ${esc(SKILL_ADVICE_FREQ_LABEL[entry.frequency] || entry.frequency)}</span>`;
+    }
     const card = document.createElement("div");
     card.className = "card sk-item";
     card.innerHTML = `
       <button class="sk-open" type="button" data-skill-open="${attr(name)}" title="点开${readOnly ? "查看" : "编辑"}">
-        <span class="sk-item-name">${esc(name)}</span>
+        <span class="sk-item-name">${esc(name)}${adviceTag}</span>
         <span class="sk-item-summary">${esc(String(item.summary || "（第 1 行是空摘要，不会进索引）"))}</span>
         <span class="sk-item-meta">${esc(skillWhenText(item.updatedAt))} · ${esc(skillSizeText(item.size))}${esc(usageText)}${readOnly ? ` · ${esc(originLabel)}（只读）` : ""}${staleTag ? ` ${staleTag}` : ""}</span>
       </button>

@@ -4974,6 +4974,56 @@ select.cs-input:disabled { color: var(--text-3); cursor: default; }
 }
 .sk-item-actions { display: flex; align-items: center; gap: 10px; }
 
+/* 分类建议（2026-11-10 批 30）：筛选 chips + 建议徽章。
+   徽章色 follow 语义：keep=正向（accent）、scene=中性（text-3）、skip=弱化（outline），
+   待复核=警示（tertiary），未评估=无底色纯描边。全部 10px 小字，不抢名字的戏。 */
+.sk-filters { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.sk-filter-chip {
+  padding: 3px 10px;
+  border: 1px solid var(--outline);
+  border-radius: var(--r-full);
+  background: var(--surface);
+  color: var(--text-3);
+  font-size: 11px;
+  cursor: pointer;
+}
+.sk-filter-chip:hover { border-color: var(--accent); color: var(--text); }
+.sk-filter-chip[aria-checked="true"] {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+  color: color-mix(in srgb, var(--accent) 80%, var(--text));
+}
+.sk-advice {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: var(--r-full);
+  font-size: 10px; line-height: 1.7;
+  font-family: var(--font-sans, inherit);
+}
+.sk-advice-keep {
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+  color: color-mix(in srgb, var(--accent) 82%, var(--text));
+}
+.sk-advice-scene {
+  border: 1px solid var(--outline);
+  background: var(--surface);
+  color: var(--text-3);
+}
+.sk-advice-skip {
+  border: 1px solid transparent;
+  background: color-mix(in srgb, var(--text-3) 8%, var(--surface));
+  color: var(--text-3);
+  text-decoration: none;
+}
+.sk-advice-warn {
+  border: 1px solid color-mix(in srgb, var(--c-tertiary) 55%, transparent);
+  background: color-mix(in srgb, var(--c-tertiary) 14%, var(--surface));
+  color: color-mix(in srgb, var(--c-tertiary) 80%, var(--text));
+}
+.sk-advice-none { border: 1px dashed var(--outline); color: var(--text-3); }
+
 /* 技能斜杠选择器（2026-11-09）：输入「/xxx」时贴着输入框上沿弹可用技能单 */
 #skill-suggest {
   position: fixed;

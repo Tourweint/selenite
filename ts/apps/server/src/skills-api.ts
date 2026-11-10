@@ -20,6 +20,20 @@ import {
 } from "./skills.ts";
 import { getSkillState } from "./skill-state.ts";
 import { isSkillStale, readSkillUsage, skillUsageEnabled } from "./skill-usage.ts";
+import {
+	adviceSystemPrompt,
+	adviceViewOf,
+	generateAdvice,
+	illegalAdviceActions,
+	parseAdviceResponse,
+	pruneAdviceSnapshot,
+	readAdviceSnapshot,
+	skillAdviceEnabled,
+	skillAdvicePath,
+	writeAdviceSnapshot,
+	type AdviceSkillRow,
+} from "./skill-advice.ts";
+import { readLlmConfig } from "./provider.ts";
 
 /**
  * 技能管理端点（2026-11-08 扫尾批 9-S；2026-11-08 批 10-A 改多来源只读展示）。
@@ -150,6 +164,53 @@ export function mountSkills(app: Hono, deps: SkillsApiDeps = {}): void {
 	const resolve = deps.resolve ?? (() => resolveSkillsDir());
 	if (!(deps.enabled ?? skillsAdminEnabled())) return;
 	const skillState = getSkillState();
+	const adviceOn = skillAdviceEnabled();
+	const advicePath = () => skillAdvicePath();
+
+	/** 管理面口径的技能名清单（先到先得 + 白名单 + 越界复核；与列表端点同一条规则） */
+	const adminSkillNames = (): string[] => {
+		const names: string[] = [];
+		const claimed = new Set<string>();
+		for (const source of resolve().dirs) {
+			for (const entry of scanSkillDir(source.dir)) {
+				if (claimed.has(entry.name)) continue;
+				claimed.add(entry.name);
+				if (!entry.valid) continue;
+				if (!SKILL_NAME.test(entry.name)) continue;
+				if (!insideSource(source.dir, entry.path)) continue;
+				names.push(entry.name);
+			}
+		}
+		return names;
+	};
+
+	/** 评估输入行：在名字清单之上带摘要 / 启停 / 用量（模型判断"本机用不上"要有材料） */
+	const adminSkillRows = (): AdviceSkillRow[] => {
+		const resolved = resolve();
+		const usageOn = skillUsageEnabled();
+		const usage = usageOn ? readSkillUsage() : {};
+		const now = new Date();
+		const rows: AdviceSkillRow[] = [];
+		const claimed = new Set<string>();
+		for (const source of resolved.dirs) {
+			for (const entry of scanSkillDir(source.dir)) {
+				if (claimed.has(entry.name)) continue;
+				claimed.add(entry.name);
+				if (!entry.valid || !SKILL_NAME.test(entry.name)) continue;
+				if (!insideSource(source.dir, entry.path)) continue;
+				const used = usage[entry.name];
+				rows.push({
+					name: entry.name,
+					summary: entry.summary,
+					enabled: skillState.isEnabled(entry.name),
+					usageCount: usageOn ? (used?.count ?? 0) : null,
+					stale: usageOn ? isSkillStale(used?.lastUsedAt ?? null, entry.path ? statSync(entry.path).mtime.toISOString() : now.toISOString()) : false,
+					origin: source.origin,
+				});
+			}
+		}
+		return rows;
+	};
 
 	app.get("/api/v1/agent/skills", (c) => {
 		const resolved = resolve();
@@ -276,6 +337,82 @@ export function mountSkills(app: Hono, deps: SkillsApiDeps = {}): void {
 		skillState.setAll(body.enabled, names);
 		return c.json({ ok: true, count: names.length, enabled: body.enabled, note: "索引随下一个会话刷新" });
 	});
+
+	/* ── 技能分类建议（2026-11-10 批 30；`SKILL_ADVICE=false` 回滚 = 三条路由不挂）──
+	 * 建议归建议（skills-advice.json 快照），开关归开关（skills-state.json）：
+	 * 本组路由里唯一的写动作是 PUT 采纳启停位（名字必须来自快照）。
+	 * ego-browser 这类符号链接技能不在管理列表（insideSource 闸），天然不进评估范围。 */
+	if (adviceOn) {
+		app.get("/api/v1/agent/skills/advice", (c) => {
+			const names = adminSkillNames();
+			const view = adviceViewOf(readAdviceSnapshot(advicePath()), names);
+			return c.json({ ok: true, ...view });
+		});
+
+		app.post("/api/v1/agent/skills/advice", async (c) => {
+			const rows = adminSkillRows();
+			if (!rows.length) {
+				return c.json({ error: "bad_request", message: "技能库是空的，没有可评估的对象" }, 400);
+			}
+			const text = await generateAdvice(rows);
+			if (text === null) {
+				return c.json({ error: "unavailable", message: "模型不可用，评估没跑成" }, 503);
+			}
+			const items = parseAdviceResponse(text);
+			if (items === null) {
+				return c.json({ error: "unavailable", message: "模型输出解析失败，评估没跑成" }, 503);
+			}
+			// 先修旧快照（清掉已消失技能）再合并本次结果，一次性原子替换
+			const previous = readAdviceSnapshot(advicePath());
+			const merged = previous ? pruneAdviceSnapshot(previous, rows.map((row) => row.name)) : null;
+			const baseItems = merged?.items ?? {};
+			const config = readLlmConfig();
+			writeAdviceSnapshot(advicePath(), {
+				generatedAt: new Date().toISOString(),
+				model: config ? `${config.model.provider}/${config.model.modelId}` : "",
+				items: { ...baseItems, ...items },
+			});
+			const view = adviceViewOf(readAdviceSnapshot(advicePath()), rows.map((row) => row.name));
+			return c.json({ ok: true, ...view });
+		});
+
+		app.put("/api/v1/agent/skills/advice", async (c) => {
+			const body = (await c.req.json().catch(() => null)) as { actions?: unknown } | null;
+			if (!Array.isArray(body?.actions)) {
+				return c.json({ error: "bad_request", message: "需要 actions 数组" }, 400);
+			}
+			const actions: { name: string; enabled: boolean }[] = [];
+			for (const raw of body.actions) {
+				if (!raw || typeof raw !== "object") continue;
+				const { name, enabled } = raw as Record<string, unknown>;
+				if (typeof name !== "string" || !SKILL_NAME.test(name) || typeof enabled !== "boolean") continue;
+				actions.push({ name, enabled });
+			}
+			if (!actions.length) {
+				return c.json({ error: "bad_request", message: "actions 里没有合法条目" }, 400);
+			}
+			// 闸门：名字必须来自快照（防"伪造建议直接开技能"）；启停端点再做技能存在性检查
+			const illegal = illegalAdviceActions(actions, readAdviceSnapshot(advicePath()));
+			if (illegal.length) {
+				return c.json(
+					{ error: "bad_request", message: `这些名字不在评估快照里：${illegal.join("、")}` },
+					400,
+				);
+			}
+			let applied = 0;
+			for (const action of actions) {
+				const exists = adminSkillNames().includes(action.name);
+				if (!exists) continue;
+				skillState.setEnabled(action.name, action.enabled);
+				applied += 1;
+			}
+			return c.json({
+				ok: true,
+				applied,
+				note: "索引随下一个会话刷新；已在跑的会话里 skill 工具立即取不到（或恢复）这份手册",
+			});
+		});
+	}
 
 	app.get("/api/v1/agent/skills/:name", (c) => {
 		const name = c.req.param("name");
