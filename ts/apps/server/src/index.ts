@@ -149,6 +149,7 @@ import { recoverDelegations, type RecoveredTicket } from "../../../../../chancel
 import { markRecoverResume, recoverNoteEnabled } from "./agent/recover-note.ts";
 // 注入审计（2026-11-10 批 26b §二）：只回元数据、不回正文的框架注入清单。
 import { auditInjections, injectionAuditEnabled } from "./agent/injection.ts";
+import { INJECTION_REGISTRY } from "./agent/injection-registry.ts";
 import { Store } from "../../../../../chancellor/src/store.ts";
 import { listManagers } from "../../../../../chancellor/src/manager/registry.ts";
 
@@ -1031,20 +1032,43 @@ app.get("/api/v1/agent/chat/:conversationId/messages", async (c) => {
 });
 
 /**
- * 注入审计（2026-11-10 批 26b §二 / #7 批 A）。
+ * 注入审计（2026-11-10 批 26b §二 / #7 批 A；批 27 §四扩到全部注入）。
  *
- * `GET /api/v1/agent/chat/:conversationId/injections` → `[{id, source, scope, length}]`：
- * 框架当前接管的注入清单。**只回元数据、不回正文**（`length` 是正文字符数），
- * 所以即便正文是固定提示词也不会从这里泄露。
+ * `GET /api/v1/agent/chat/:conversationId/injections` → `[{id, source, scope, channel, length}]`：
+ * 框架当前接管的注入清单（`source` 区分 `lifecycle` / `assist` / `partner-context`）。
+ * **只回元数据、不回正文**（`length` 是正文字符数），所以即便正文是固定提示词也不会从这里泄露。
  *
  * 开关 `AGENT_INJECTION_AUDIT`（默认开；显式 `false` → 404，一行回滚，与 TOPICS/导出同口径）。
- * `conversationId` 只作上下文传入：批 A 接管的是框架级静态注入（所有会话同一份），
- * 因此这里不解析 durable 会话、不依赖 LLM 配置、也不校验会话是否存在——它是诊断端点，
- * 不是会话数据接口。批 A 只接管了 `injection_guard` 一个，数组至多一行。
+ *
+ * 会尽量把会话解析成内部 id / 种类 / 执事，好让 persona、执事纪律这些"按身份分流"的条目
+ * 与真实一轮一致；解析不到（未配置 LLM / 会话不存在）就按原始 id 出清单，绝不 500。
+ * `dryRun` 保证读端点无副作用：课题不吞简报、技能不冻结索引、任务近况不摄入日记；
+ * 执事「当前在办」也不列（它要扫 runs/ 目录 + 开 SQLite，付不起这份代价）。
  */
-app.get("/api/v1/agent/chat/:conversationId/injections", (c) => {
+app.get("/api/v1/agent/chat/:conversationId/injections", async (c) => {
   if (!injectionAuditEnabled()) return c.json({ error: "not_found" }, 404);
-  return c.json(auditInjections({ conversationId: c.req.param("conversationId") }));
+  const raw = c.req.param("conversationId");
+  let conversationId: number | string = raw;
+  let chatKind: "chief" | "worker" | null = null;
+  let partnerId: string | null = null;
+  try {
+    const chat = await openChat(raw);
+    if (chat) {
+      conversationId = chat.internalId;
+      chatKind = (await chatKindOf(chat)) === "worker" ? "worker" : "chief";
+      partnerId = COMPANIONS_ENABLED ? partnersStore().partnerIdOfSession(chat.internalId) : null;
+    }
+  } catch {
+    // 解析失败 = 只按原始 id 出静态清单（诊断端点不能因为会话读不到就 500）
+  }
+  return c.json(
+    auditInjections(INJECTION_REGISTRY, {
+      conversationId,
+      chatKind,
+      partnerId,
+      dryRun: true,
+    }),
+  );
 });
 
 /**

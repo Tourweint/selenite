@@ -11,8 +11,9 @@ import {
 	openOrCreateChat,
 	stickyThinkingLevel,
 	TASK_CONVERSATION_PREFIX,
-	taskMemoryBlock,
 } from "./agent.ts";
+import { collectInjections } from "./agent/injection.ts";
+import { taskMemoryProvider } from "./agent/assist.ts";
 import { chatModelRef, readLlmConfig, taskModelRef } from "./provider.ts";
 import { renderTask, resolveTask, taskLabel, taskNames, TaskRenderError } from "./tasks.ts";
 import { classifyTurn, jevMode } from "./typesafe.ts";
@@ -200,7 +201,11 @@ export function mountOpenAiCompat(app: Hono): void {
 			}
 			// 近况记忆（2026-10-31，记忆方案 §4）：只有声明了 `memory` 的任务才注入，
 			// 且**拼在 instructions 尾部**——模板前缀不变，缓存照旧命中（方案 §2.3 实测）。
-			const memory = task.memory === "diary" ? taskMemoryBlock() : "";
+			// 2026-11-10 批 27 §二.1：正文改由注入框架取（`taskMemoryProvider`），内容逐字节不变。
+			const memory =
+				task.memory === "diary"
+					? collectInjections([taskMemoryProvider], { conversationId: 0 }).system[0]?.text ?? ""
+					: "";
 			const promptWithMemory = memory ? `${prompt}\n\n${memory}` : prompt;
 			if (memory) {
 				console.log(`[compat task ${taskLabel(task)}] 注入近况记忆 ${memory.length} 字符`);

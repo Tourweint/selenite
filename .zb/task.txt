@@ -1,0 +1,21 @@
+你在 git worktree `<本地项目区>\projects\lh-b27`（分支 batch27-inject-bcd）里工作。**所有读写都在这个 worktree 内**。
+
+任务书：`docs/设计方案/2026-11-10-批27任务书（注入框架BCD）.md`
+先完整读它。批 26b 已建好框架（`agent/injection.ts`）并只接管了 `injection_guard`，
+本批把**剩下全部注入**接管进来：B 期 6 个 section、C 期 assist+partner-context、D 期 extra.push+settled。
+
+**硬标准**：每一处接管后，内容与位置必须与改造前**逐字节一致**，每处都要有单测断言。
+
+**分批做**（B → C → D），每期做完跑一次全量 test，不要一次性全改。
+
+关键事实：
+- `lifecycle.ts` 现有 7 个 section（persona/verification_iron_law/clarify_contract/injection_guard/current_project/skills/topics）+ 5 处 extra.push。
+- `skills` 是**按会话冻结**的；`topics` 每轮现渲染 + drainPendingPushes；`persona` 每轮现算——接管后必须保留这些语义。
+- `assist.ts` 3 处、`partner-context.ts` 11 段、`settled.ts` 1 处。
+- 框架里 `collectInjections` 已支持 order 排序 + id 去重 + channel 分流。
+
+要求：
+- `cd ts` 后：`pnpm typecheck`、`pnpm --filter @lifediary/server test`、`pnpm --filter @lifediary/server http`
+- 不许 git commit
+- 变更记录写 `docs/变更记录/2026-11-10-批27（注入框架BCD）.md`，**列出发现重复的注入**
+- 最后回复：做了什么 / 每期验了什么 / 发现哪些重复 / 已知边界，控制在 600 字内

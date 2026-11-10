@@ -2,6 +2,7 @@ import { createMemoryEngine, scopeKey, type MemoryEngine, type MemoryScope } fro
 import { diaryStore } from "../diary.ts";
 import { recentDiaryMemories, syncDiaryToMemory } from "../memory-ingest.ts";
 import { preferenceExtractor } from "../memory-extract.ts";
+import { INJECTION_ORDER, type InjectionEntry, type InjectionProvider } from "./injection.ts";
 import {
 	COMPANIONS_ENABLED,
 	chiefPartnerEnabled,
@@ -270,3 +271,45 @@ export function taskMemoryBlock(days = 3, limit = 12): string {
 		return "";
 	}
 }
+
+// ── 注入 provider（2026-11-10 批 27 §二）────────────────────
+//
+// 记忆的两个注入口都从这里出，装配层只收集、不再自己拼字符串：
+//   1. `recallContext` → 每轮模型请求前的 system 消息（lifecycle beforeRequest 第 1 处）；
+//   2. `taskMemoryBlock` → 任务通道 instructions 尾部（openai-compat 的 X-Task 分支）。
+// 人格常量（PERSONA / WORKER_PERSONA）是 persona section 的实文来源，已在 B 期随
+// `lifecycle-injections.ts` 接管——合起来就是"assist 涉及 3 处注入"的口径。
+
+function memoryEntry(text: string): InjectionEntry {
+	return {
+		id: "memory_recall",
+		text,
+		order: INJECTION_ORDER.memory_recall,
+		scope: "turn",
+		channel: "message",
+	};
+}
+
+/** 聊天记忆召回：每轮现算，空串不注（与改造前 `if (memory)` 同口径）。 */
+export const memoryRecallProvider: InjectionProvider = (ctx) => {
+	const text = recallContext(Number(ctx.conversationId), ctx.userText ?? "");
+	return text ? memoryEntry(text) : undefined;
+};
+
+/**
+ * 任务近况记忆：拼在 instructions 尾部（不是消息流）。空 = 不注。
+ * `channel: "system"` 表示"系统侧文本"，位置由调用方决定（openai-compat 的模板尾部）。
+ * 审计（dryRun）不跑：`taskMemoryBlock` 会先摄入日记镜像（写库），读端点不该有副作用。
+ */
+export const taskMemoryProvider: InjectionProvider = (ctx) => {
+	if (ctx.dryRun) return undefined;
+	const text = taskMemoryBlock();
+	if (!text) return undefined;
+	return {
+		id: "task_memory",
+		text,
+		order: INJECTION_ORDER.task_memory,
+		scope: "turn",
+		channel: "system",
+	};
+};

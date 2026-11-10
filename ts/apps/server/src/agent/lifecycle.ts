@@ -14,6 +14,7 @@ import {
 	type Extension,
 	type HookApi,
 	LiveDoc,
+	type PromptSection,
 	type ToolHookCall,
 } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
@@ -48,12 +49,7 @@ import {
 import { capabilityOf } from "../tool-capability.ts";
 // 中途播报（2026-11-10 批 13 §三）：工具本身在 tools.ts 注册，这里只做上架范围闸门。
 import { PROGRESS_TOOL_NAME, progressReportAllowed, progressReportEnabled } from "../progress-report.ts";
-import {
-	clarifyContractEnabled,
-	clarifyContractFor,
-	emitDelegation,
-	type DelegationReport,
-} from "../delegation.ts";
+import { emitDelegation, type DelegationReport } from "../delegation.ts";
 // 同类失败连击（批 12 遗留补全 2026-11-10）：tool-error / timeout 两类在此接线。
 import { failureStreak } from "../failure-streak.ts";
 import { auditGateBlock, type GateBlockCategory } from "../gate-audit.ts";
@@ -61,12 +57,7 @@ import { auditGateBlock, type GateBlockCategory } from "../gate-audit.ts";
 // createTools 的探针/单测调用不传，避免去开真实 durable。
 import { taskConversationMirror, mirrorTaskNotice } from "../task-conversation.ts";
 import { loopGuardEnabled, loopGuardFor, resetLoopGuard } from "../loop-guard.ts";
-import {
-	CHIEF_PARTNER_ID,
-	COMPANIONS_ENABLED,
-	partnersStore,
-	resolvePersona,
-} from "../partners.ts";
+import { CHIEF_PARTNER_ID, COMPANIONS_ENABLED, partnersStore } from "../partners.ts";
 import { pathGuardBlockReason } from "../path-guard.ts";
 // 世界状态重验（2026-11-10 批 19 §七）：批准时拍指纹，执行前再拍一张。
 import {
@@ -85,7 +76,7 @@ import {
 	timeoutSecondsFromResult,
 } from "../bash-background.ts";
 // 恢复注记（2026-11-09 任务书 T3 §5）：续跑的下一轮模型请求前注入一次「先查再动」。
-import { markRecoverResume, takeRecoverNote } from "./recover-note.ts";
+import { markRecoverResume } from "./recover-note.ts";
 // 执事间递话（2026-11-08 扫尾批 8d）：状态与话术在 partner-relay.ts，
 // 送达（submit 进目标会话）在这里——本文件才持有 harness。
 import {
@@ -110,7 +101,7 @@ import {
 	type RelayDeliverResult,
 	type RelaySenderContext,
 } from "../partner-relay.ts";
-import { currentProjectEnabled, projectsStore, workspaceRootReal } from "../projects.ts";
+import { projectsStore, workspaceRootReal } from "../projects.ts";
 import {
 	chatModelRef,
 	clampThinkingLevel,
@@ -125,27 +116,24 @@ import { searchModule } from "../search.ts";
 import { createTools } from "../tools.ts";
 import { TOPICS_ENABLED, topicsStore } from "../topics.ts";
 import { TopicTask } from "../topic-runtime.ts";
-import { skillSlashOf } from "../skills.ts";
 // 会话考古（2026-11-09 T4 §4）：检索实现只依赖 shared，不会与本文件成环。
 import { recallSessionsEnabled, searchSessions } from "./session-search.ts";
 // persona-metric 记忆库检索（2026-11-09 persona 接入批一）：双闸都过才上架工具。
 import { askPersona, askPersonaAvailable, personaAskEnabled } from "../persona-ask.ts";
-import {
-	CHANCELLOR_ENABLED,
-	PERSONA,
-	WORKER_PERSONA,
-	memoryEngine,
-	recallContext,
-	scopeOf,
-	skillStore,
-} from "./assist.ts";
+import { CHANCELLOR_ENABLED, memoryEngine, scopeOf, skillStore } from "./assist.ts";
 import { approvalArgsHash } from "./approval-key.ts";
-import { guardRelayDelivery, wrapUntrustedObjective } from "./injection-guard.ts";
-// 注入框架（2026-11-10 批 26b §二）：injection_guard 改走框架收集，内容与位置逐字节不变。
+import { guardRelayDelivery } from "./injection-guard.ts";
+// 注入框架（2026-11-10 批 26b §二 / 批 27 §一）：全部注入改走框架收集，内容与位置逐字节不变。
 import { collectInjections, guardProvider } from "./injection.ts";
-import { buildPartnerTurnContext } from "./partner-context.ts";
-// 执事轮装配的履历摘要读口（2026-11-08 刀二 E2）：结构化查询 work 记录，不走语义召回。
-import { workSummaryFor } from "../work-record.ts";
+import {
+	LIFECYCLE_MESSAGE_PROVIDERS,
+	clarifyContractProvider,
+	currentProjectProvider,
+	personaProvider,
+	skillsProvider,
+	topicsProvider,
+	verificationIronLawProvider,
+} from "./lifecycle-injections.ts";
 import { BASH_TIMEOUT_S, approvalMode, policy, readOnlyBlockReason } from "./policy.ts";
 // 授权重验的档位来源（2026-11-10 批 19 §六）：tools / delegation 不静态 import policy，
 // 由装配层在模块加载时把"读 policy"的函数注进去（arch-guard 的 env 加载顺序不被污染）。
@@ -168,9 +156,6 @@ import {
 	HARD_STOP_GRACE,
 	LOOP_GUARD_BLOCK_MESSAGE,
 	MAX_TURNS,
-	TURN_LIMIT_INSTRUCTION,
-	VERIFICATION_IRON_LAW,
-	lifecycleOwnsVerification,
 	aborting,
 	limitHits,
 	runTurns,
@@ -425,6 +410,116 @@ function relayToolBlockReason(conversationId: number): string | undefined {
 	return undefined;
 }
 
+// ── 生命周期注入（2026-11-10 批 27 §一）──────────────────────
+//
+// 7 个 section 的**物理顺序仍由本数组下标决定**（模型看到的顺序 = 数组顺序）；
+// 每段正文改走注入框架收集（`collectInjections` + 对应 provider），
+// 内容与位置与改造前逐字节一致。provider 的 order 只用于框架内排序，不决定这里的位置。
+
+/** 会话挂的执事（档案读失败 → null = 按总管 / 普通会话处理，主对话不能哑）。 */
+function partnerOfSession(conversationId: number): string | null {
+	if (!COMPANIONS_ENABLED) return null;
+	try {
+		return partnersStore().partnerIdOfSession(conversationId);
+	} catch {
+		return null;
+	}
+}
+
+type SectionInput = Parameters<NonNullable<PromptSection["render"]>>[0];
+
+/** 会话种类快照（worker 分流用；读不到按 chief，与改造前同口径）。 */
+async function chatKindOfSection(input: SectionInput): Promise<"chief" | "worker"> {
+	const kinds = await input.read.snapshot(ChatKinds, CTX);
+	return kinds?.byInternal?.[String(input.conversationId)] === "worker" ? "worker" : "chief";
+}
+
+/** 群会话判定（档案读失败 → false，与改造前 try/catch 后按总管处理同口径）。 */
+function groupOfSession(conversationId: number): boolean {
+	if (!COMPANIONS_ENABLED) return false;
+	try {
+		return partnersStore().isGroupSession(conversationId);
+	} catch {
+		return false;
+	}
+}
+
+export const LIFECYCLE_SECTIONS: readonly PromptSection[] = [
+	// 人格（2026-11-06 B2 分流）：非 chief 执事不注总管 persona；worker 用独立提示；
+	// chief / 无记录旧会话用 SOUL 快照，读不到回落 PERSONA。
+	{
+		key: "persona",
+		render: async (input) => {
+			const conversationId = Number(input.conversationId);
+			const chatKind = await chatKindOfSection(input);
+			return collectInjections([personaProvider], {
+				conversationId,
+				partnerId: partnerOfSession(conversationId),
+				chatKind,
+			}).system[0]?.text;
+		},
+	},
+	// 验证铁律（2026-11-10 批 12 §一.1）：紧跟 persona，固定字节。
+	{
+		key: "verification_iron_law",
+		render: (input) => {
+			const conversationId = Number(input.conversationId);
+			return collectInjections([verificationIronLawProvider], {
+				conversationId,
+				partnerId: partnerOfSession(conversationId),
+			}).system[0]?.text;
+		},
+	},
+	// 开工前先问清（2026-11-10 批 19 §一）：只给总管 / 主对话。
+	{
+		key: "clarify_contract",
+		render: async (input) => {
+			const conversationId = Number(input.conversationId);
+			const chatKind = await chatKindOfSection(input);
+			return collectInjections([clarifyContractProvider], {
+				conversationId,
+				partnerId: partnerOfSession(conversationId),
+				chatKind,
+			}).system[0]?.text;
+		},
+	},
+	// 注入防线（2026-11-09 T2）：固定字节；关掉时整段省略。
+	{
+		key: "injection_guard",
+		render: (input) =>
+			collectInjections([guardProvider], { conversationId: input.conversationId })
+				.system[0]?.text,
+	},
+	// 当前项目（2026-11-04 方案 §2.3）：每轮现渲染，不写进对话历史。
+	{
+		key: "current_project",
+		render: (input) =>
+			collectInjections([currentProjectProvider], { conversationId: input.conversationId })
+				.system[0]?.text,
+	},
+	// L1 技能索引（2026-10-31 方案 D5）：按会话冻结（provider 内部走 indexFor）。
+	{
+		key: "skills",
+		render: (input) =>
+			collectInjections([skillsProvider], { conversationId: input.conversationId })
+				.system[0]?.text,
+	},
+	// 课题（2026-11-07 §六）：每轮现渲染 + drainPendingPushes；只给总管主对话。
+	{
+		key: "topics",
+		render: async (input) => {
+			const conversationId = Number(input.conversationId);
+			const chatKind = await chatKindOfSection(input);
+			return collectInjections([topicsProvider], {
+				conversationId,
+				partnerId: partnerOfSession(conversationId),
+				group: groupOfSession(conversationId),
+				chatKind,
+			}).system[0]?.text;
+		},
+	},
+];
+
 async function openHarness(): Promise<Harness> {
 	const config = readLlmConfig();
 	if (!config) throw new Error("LLM 未配置：设 LLM_API_KEY 之后再启动");
@@ -489,151 +584,7 @@ async function openHarness(): Promise<Harness> {
 		(lifediaryExt = defineExtension({
 			name: "lifediary",
 			tools: lifediaryTools,
-			sections: [
-				// 人格（2026-11-06 B2 改为按会话种类分流）：
-				//  - 非 chief 的执事会话 → 不注入总管 persona（身份来自其 configure instructions）；
-				//  - worker → 独立的普通任务助手提示；
-				//  - chief / 无记录旧会话 → 总管 SOUL 当前版本快照，读不到回落原 PERSONA 常量。
-				{
-					key: "persona",
-					render: async (input) => {
-						if (COMPANIONS_ENABLED) {
-							try {
-								const partnerId = partnersStore().partnerIdOfSession(Number(input.conversationId));
-								if (partnerId && partnerId !== CHIEF_PARTNER_ID) return undefined;
-							} catch {
-								// 档案库读失败：按总管处理，主对话不能哑
-							}
-						}
-						const kinds = await input.read.snapshot(ChatKinds, CTX);
-						if (kinds?.byInternal?.[String(input.conversationId)] === "worker") return WORKER_PERSONA;
-						return resolvePersona(partnersStore, PERSONA);
-					},
-				},
-				// 验证铁律（2026-11-10 批 12 §一.1）：紧跟 persona，固定字节、不含动态内容。
-				// 非总管的执事轮由 partner-context 注入（他们的 persona 段本来就不出现），
-				// 这里跳过，免得同一段在一轮里进两遍；查档案失败按总管处理（主对话不能哑）。
-				{
-					key: "verification_iron_law",
-					render: (input) => {
-						let partnerId: string | null = null;
-						if (COMPANIONS_ENABLED) {
-							try {
-								partnerId = partnersStore().partnerIdOfSession(Number(input.conversationId));
-							} catch {
-								// 档案库读失败：按总管处理
-							}
-						}
-						return lifecycleOwnsVerification(partnerId) ? VERIFICATION_IRON_LAW : undefined;
-					},
-				},
-				// 开工前先问清（2026-11-10 批 19 §一）：紧接 persona / 验证铁律，固定字节。
-				// 只给总管 / 主对话；普通执事的提问纪律在 partner-context，worker 不背这套。
-				{
-					key: "clarify_contract",
-					render: async (input) => {
-						if (!clarifyContractEnabled()) return undefined;
-						let partnerId: string | null = null;
-						if (COMPANIONS_ENABLED) {
-							try {
-								partnerId = partnersStore().partnerIdOfSession(Number(input.conversationId));
-							} catch {
-								// 档案库读失败：按总管处理
-							}
-						}
-						if (partnerId && partnerId !== CHIEF_PARTNER_ID) return undefined;
-						const kinds = await input.read.snapshot(ChatKinds, CTX);
-						if (kinds?.byInternal?.[String(input.conversationId)] === "worker") return undefined;
-						return clarifyContractFor(partnerId);
-					},
-				},
-			// 注入防线（2026-11-09 T2）：排在 persona / 验证铁律之后，固定字节、不含动态内容。
-			// 关掉时整段省略（不注空壳）。
-			// 2026-11-10 批 26b §二：这是本批唯一接管进注入框架的 section。
-			// section 仍留在数组的原下标（位置逐字节不变），render 改走 collectInjections
-			// 取回同一段 INJECTION_GUARD 实文（内容逐字节不变）；关时 system 为空 → undefined。
-			{
-				key: "injection_guard",
-				render: (input) =>
-					collectInjections([guardProvider], { conversationId: input.conversationId })
-						.system[0]?.text,
-			},
-				// 当前项目（2026-11-04 方案 §2.3）：每轮现渲染，不写进对话历史。
-				// 切换项目后 durable 会按 section 差异追加新的 pi.system，下一轮即生效。
-				{
-					key: "current_project",
-					render: () => {
-						if (!currentProjectEnabled()) return undefined;
-						const project = currentProject();
-						if (!project) return "当前无特定项目（杂事模式）。文件操作默认在主工作区。";
-						return [
-							`当前项目：${project.name}`,
-							`根路径：${project.rootPath}`,
-							"文件操作默认在此项目内。",
-						].join("\n");
-					},
-				},
-				// L1 技能索引（2026-10-31 方案 D5）：排在 persona 后（"会话后部"），按会话冻结——
-				// 首轮渲染后技能目录再变也不改写本会话，否则 durable 会追加新 pi.system、缓存前缀整段作废。
-				// 没有技能时 render 返回 undefined，整个 section 省略。
-				{
-					key: "skills",
-					render: (input) => skillStore?.indexFor(Number(input.conversationId)),
-				},
-				// 课题（2026-11-07 长期课题跟进 §六）：清单 + 嗅探判据 + 攒着的简报。
-				// **每轮现渲染**（durable 只在 section 值变化时追加 pi.system）：
-				//   - 只给总管主对话：非 chief 执事 / worker / 群会话一律 undefined；
-				//   - 有 pendingPush 的课题在这里把简报带进本轮，并**渲染即标记已推送**
-				//     （每课题每次活跃只报一次；研究专线摘掉了本扩展，不会误触）；
-				//   - 没有在跟的课题也输出判据段，让总管知道"有这个口"。
-				{
-					key: "topics",
-					render: async (input) => {
-						if (!TOPICS_ENABLED) return undefined;
-						const conversationId = Number(input.conversationId);
-						if (COMPANIONS_ENABLED) {
-							try {
-								if (partnersStore().isGroupSession(conversationId)) return undefined;
-								const partnerId = partnersStore().partnerIdOfSession(conversationId);
-								if (partnerId && partnerId !== CHIEF_PARTNER_ID) return undefined;
-							} catch {
-								// 档案库读失败：按总管处理（主对话不能哑，与 persona 同口径）
-							}
-						}
-						const kinds = await input.read.snapshot(ChatKinds, CTX);
-						if (kinds?.byInternal?.[String(conversationId)] === "worker") return undefined;
-
-						const store = topicsStore();
-						const pushes = store.drainPendingPushes();
-						const digest = store.digestForInjection();
-						const lines: string[] = [];
-						if (digest) {
-							lines.push("在跟的课题：", digest);
-						} else {
-							lines.push("在跟的课题：（暂无）");
-						}
-						if (pushes.length > 0) {
-							// 只记条数，不记课题内容（日志纪律）
-							console.log(`[topics] 简报注入 ${pushes.length} 条`);
-							lines.push(
-								"",
-								"课题简报（攒着的，随本轮自然汇报给用户，别复述全文）：",
-								...pushes.map((topic) => {
-									const latest = topic.findings[0];
-									// 课题问题是用户可控文本：注入时标成不可信目标（§3.4）
-									return `- ${wrapUntrustedObjective(topic.question)}：${latest?.summary ?? "有新发现"}`;
-								}),
-							);
-						}
-						lines.push(
-							"",
-							"课题嗅探（从严，宁缺毋滥）：开放性问题 + 今天给不了定论 + 值得隔几天回头看 + 用户显出兴趣，四条都满足才用 propose_topic 提交提议；",
-							"同一话题单会话最多提一次；只提交提议、永不自动建课题（用户确认后才建）。",
-						);
-						return lines.join("\n");
-					},
-				},
-			],
+			sections: LIFECYCLE_SECTIONS,
 			hooks: [
 				// 权限闸门：pi 本身不带，这是唯一能拦下工具调用的地方
 				hook(ToolTask, {
@@ -971,37 +922,8 @@ async function openHarness(): Promise<Harness> {
 				// 每次请求前：注入记忆 + 数这是本轮的第几个工具回合
 				hook(GenerationTask, {
 					beforeRequest: async (request, api, ctx) => {
-						const extra: { role: "system"; content: string; timestamp: number }[] = [];
-
 						const lastUser = [...request.messages].reverse().find((m) => m.role === "user");
-						const memory = recallContext(
-							api.conversationId,
-							lastUser ? contentText(lastUser.content) : "",
-						);
-						if (memory) {
-							extra.push({ role: "system", content: memory, timestamp: Date.now() });
-						}
-
-						// 技能斜杠调用（2026-11-09 用户口径：对话框输入「/技能名」就能用）：
-						// 本轮用户消息以 /技能名 开头 → 手册整份注入本轮（D5 的"正文按需取"，这就是那一次）。
-						// 开着（在启停名单里）才注入——关着的技能 tool 侧取不到，这里同样不给。
-						const slashName = skillSlashOf(lastUser ? contentText(lastUser.content) : "");
-						const slashManual = slashName ? skillStore?.manual(slashName) : undefined;
-						if (slashName && slashManual) {
-							extra.push({
-								role: "system",
-								content:
-									`【技能调用 · ${slashName}】\n${slashManual}\n（用户消息开头的 /${slashName} 就是调用这份手册；其余文字是这一轮的指令。）`,
-								timestamp: Date.now(),
-							});
-						}
-
-						// 恢复注记（2026-11-09 任务书 T3 §5）：续跑（delegate resume / 启动自动续跑）
-						// 之后的模型请求补一次「先查再动」；取走即核销，每张单最多一次。
-						const recoverNote = takeRecoverNote(api.conversationId);
-						if (recoverNote) {
-							extra.push({ role: "system", content: recoverNote, timestamp: Date.now() });
-						}
+						const userText = lastUser ? contentText(lastUser.content) : "";
 
 						// 一次模型请求 = 一个工具回合。run 一换，预算就重新算。
 						//
@@ -1026,11 +948,6 @@ async function openHarness(): Promise<Harness> {
 						if (MAX_TURNS > 0 && used > MAX_TURNS) {
 							toolsBlocked.add(api.conversationId);
 							limitHits.set(api.conversationId, (limitHits.get(api.conversationId) ?? 0) + 1);
-							extra.push({
-								role: "system",
-								content: TURN_LIMIT_INSTRUCTION,
-								timestamp: Date.now(),
-							});
 							console.warn(
 								`[agent] 会话 ${api.conversationId}（run ${String(live?.run?.taskId)}）工具回合达上限 ${MAX_TURNS}`,
 							);
@@ -1046,46 +963,19 @@ async function openHarness(): Promise<Harness> {
 							resetLoopGuard(api.conversationId);
 						}
 
-						// 执事轮输入（2026-11-08 员工人格化刀一 E1/E5）：岗位契约 + 当前在办。
-						//
-						// **两类执事轮都走这一条**：私聊/例行（partner-runtime.runPartnerTurn）与
-						// 群成员轮（group-runtime.buildMemberInput）用的都是同一条 harness +
-						// 同一个扩展，所以在这里按会话认执事即可——不必在两处装配代码里各写一遍
-						// （写两遍反而会让群轮看到两份）。总管 / 主人会话（partnerIdOfSession=null）
-						// 不注入；SOUL 仍在 instructions 里，这里只补契约与状态。
-						//
-						// 只在本轮**第一次**模型请求时算（used===1）：在办清单要扫 chancellor 的
-						// runs/ 目录、开 sqlite，一轮里几十次工具回合各算一遍纯属浪费；这一轮开始
-						// 时看到的在办，就是这一轮的"当前在办"。
-						//
-						// 走 system 消息而不是拼进用户正文：状态每轮都变，拼进正文会被固化进
-						// transcript（既污染历史，又让模型每轮重读一段旧状态）。
-						if (used === 1 && COMPANIONS_ENABLED) {
-							try {
-								const partnerId = partnersStore().partnerIdOfSession(api.conversationId);
-								if (partnerId) {
-									const turnContext = buildPartnerTurnContext(
-										partnerId,
-										api.conversationId,
-										{ workSummary: workSummaryFor },
-									);
-									if (turnContext.text) {
-										extra.push({
-											role: "system",
-											content: turnContext.text,
-											timestamp: Date.now(),
-										});
-									}
-								}
-							} catch (error) {
-								// 档案 / 任务中心读失败：这一轮少一段状态，但对话不能哑
-								console.warn(
-									`[partner] 会话 ${api.conversationId} 上下文装配失败: ${
-										error instanceof Error ? error.message : String(error)
-									}`,
-								);
-							}
-						}
+						// 5 处消息注入（2026-11-10 批 27 §三）：记忆召回 / 技能斜杠 / 恢复注记 /
+						// 回合上限 / 执事轮上下文。框架负责排序与去重，装配处按收集结果**依次压入**，
+						// 位置与改造前一致（仍是本轮模型请求最前面的几条 system 消息）。
+						// 执事轮输入只在本轮第一次请求时算（used===1），provider 内照旧判定。
+						const extra = collectInjections(LIFECYCLE_MESSAGE_PROVIDERS, {
+							conversationId: api.conversationId,
+							turn: used,
+							userText,
+						}).message.map((item) => ({
+							role: "system" as const,
+							content: item.text,
+							timestamp: Date.now(),
+						}));
 
 						if (extra.length === 0) return undefined;
 						return { messages: [...extra, ...request.messages] };

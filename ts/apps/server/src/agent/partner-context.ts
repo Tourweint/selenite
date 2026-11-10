@@ -4,7 +4,12 @@ import { listManagers } from "../../../../../../chancellor/src/manager/registry.
 import { Store } from "../../../../../../chancellor/src/store.ts";
 import type { Ticket } from "../../../../../../chancellor/src/types.ts";
 import { approvalStore } from "../approvals.ts";
-import { INJECTION_GUARD, injectionGuardEnabled } from "./injection-guard.ts";
+import {
+	INJECTION_ORDER,
+	collectInjections,
+	type InjectionEntry,
+	type InjectionProvider,
+} from "./injection.ts";
 import { RULING_DISCIPLINE, verificationIronLawFor } from "./turn-gate.ts";
 import {
 	ATTENTION_ONE_QUESTION,
@@ -377,6 +382,38 @@ export function buildPartnerGoalSection(
 
 // ── 整体装配 ─────────────────────────────────────────────
 
+/** 段 id → 框架顺序（2026-11-10 批 27）。顺序 = 改造前 `[contract, goal, discipline, status]` 的拼接顺序。 */
+const ORDER: Record<string, number> = {
+	partner_contract: INJECTION_ORDER.partner_contract,
+	partner_goal: INJECTION_ORDER.partner_goal,
+	partner_verification: INJECTION_ORDER.partner_verification,
+	partner_ruling: INJECTION_ORDER.partner_ruling,
+	partner_work_silence: INJECTION_ORDER.partner_work_silence,
+	partner_grounding: INJECTION_ORDER.partner_grounding,
+	partner_artifact_handoff: INJECTION_ORDER.partner_artifact_handoff,
+	partner_owner_data: INJECTION_ORDER.partner_owner_data,
+	partner_brief_card: INJECTION_ORDER.partner_brief_card,
+	partner_attention: INJECTION_ORDER.partner_attention,
+	partner_status: INJECTION_ORDER.partner_status,
+};
+
+/** 纪律段在合并文本里的次序（`buildPartnerDisciplineSection` 靠它拼，测试也照它断言）。 */
+const DISCIPLINE_IDS = [
+	"partner_verification",
+	"partner_ruling",
+	"partner_work_silence",
+	"partner_grounding",
+	"partner_artifact_handoff",
+	"partner_owner_data",
+	"partner_brief_card",
+	"partner_attention",
+] as const;
+
+function entry(id: string, text: string | undefined): InjectionEntry | undefined {
+	if (!text) return undefined;
+	return { id, text, order: ORDER[id] ?? 0, scope: "session", channel: "message" };
+}
+
 /**
  * 纪律段（2026-11-10 批 12 + 批 16）：执事轮常量口径，全部固定字节、不含动态内容。
  *
@@ -385,25 +422,91 @@ export function buildPartnerGoalSection(
  * persona 段注入**，这里跳过，避免同一段进两遍；普通执事没有 persona 段，在这里补。
  * 答案接地（批 16 §五）不按身份分：谁汇报谁负责。
  */
-export function buildPartnerDisciplineSection(partnerId: string): string {
-	const blocks = [
-		verificationIronLawFor(partnerId),
-		RULING_DISCIPLINE,
-		WORK_SILENCE_DISCIPLINE,
+function disciplineBlocks(partnerId: string): Array<{ id: string; text: string }> {
+	const blocks: Array<{ id: string; text: string | undefined }> = [
+		{ id: "partner_verification", text: verificationIronLawFor(partnerId) },
+		{ id: "partner_ruling", text: RULING_DISCIPLINE },
+		{ id: "partner_work_silence", text: WORK_SILENCE_DISCIPLINE },
 		// 答案接地（批 16 §五）：总管与执事都要——它管的是"说出口的事实"，
 		// 谁汇报谁负责，不按身份分。
-		GROUNDING_DISCIPLINE,
+		{ id: "partner_grounding", text: GROUNDING_DISCIPLINE },
 		// 产物交接（批 19 §三）：接力时产物优先；同样不按身份分，谁交接谁负责。
-		artifactHandoffEnabled() ? ARTIFACT_HANDOFF : undefined,
+		{
+			id: "partner_artifact_handoff",
+			text: artifactHandoffEnabled() ? ARTIFACT_HANDOFF : undefined,
+		},
 		// 主人数据红线（批 21 §七）：数据域分级/提案制/日记不可重写/引原话不打分；
 		// 不按身份分——总管与执事同样面对主人的数据。
-		ownerDataDisciplineEnabled() ? OWNER_DATA_DISCIPLINE : undefined,
+		{
+			id: "partner_owner_data",
+			text: ownerDataDisciplineEnabled() ? OWNER_DATA_DISCIPLINE : undefined,
+		},
 		// 汇报卡三规则（批 15 §二）：只给普通执事；总管那条时间线由界面承载，
 		// 加进来会改变总管纪律段的固定字节，故跳过。
-		partnerId === CHIEF_PARTNER_ID || !briefCardRulesEnabled() ? undefined : BRIEF_CARD_RULES,
-		ATTENTION_ONE_QUESTION,
+		{
+			id: "partner_brief_card",
+			text:
+				partnerId === CHIEF_PARTNER_ID || !briefCardRulesEnabled()
+					? undefined
+					: BRIEF_CARD_RULES,
+		},
+		{ id: "partner_attention", text: ATTENTION_ONE_QUESTION },
 	];
-	return blocks.filter((part): part is string => Boolean(part)).join("\n\n");
+	return blocks.filter((part): part is { id: string; text: string } => Boolean(part.text));
+}
+
+export function buildPartnerDisciplineSection(partnerId: string): string {
+	return disciplineBlocks(partnerId)
+		.map((block) => block.text)
+		.join("\n\n");
+}
+
+/**
+ * 执事轮的各段 provider（2026-11-10 批 27 §二.2 接管）。
+ *
+ * 每段一个 id / order：框架负责排序与去重，`buildPartnerTurnContext` 只是把它们
+ * 按 `\n\n` 拼回改造前那一段消息。**注入防线不在这里**——`injection_guard` 已由
+ * lifecycle 的 system 段统一注入，原先执事尾巴那份是同 id 同正文的重复，批 27 合并。
+ *
+ * `status` 在审计（dryRun）下跳过：它要扫 chancellor 的 runs/ 目录 + 开 SQLite，
+ * 读端点不该付这份代价（契约 / 目标 / 纪律仍照常列出）。
+ */
+export function partnerContextProviders(
+	partnerId: string,
+	conversationId: number,
+	deps: PartnerContextDeps = {},
+): InjectionProvider[] {
+	const store = deps.store ?? partnersStore();
+	let loaded = false;
+	let current: ReturnType<PartnersStore["currentVersion"]> = null;
+	const currentOf = () => {
+		if (!loaded) {
+			current = store.currentVersion(partnerId);
+			loaded = true;
+		}
+		return current;
+	};
+
+	const providers: InjectionProvider[] = [
+		// 契约取"当前版本快照"；老库/手工放了文件但没快照的，退磁盘当前值。
+		() =>
+			entry(
+				"partner_contract",
+				renderContractSection(
+					currentOf()?.contractSource ?? store.readContractFromHome(partnerId),
+				),
+			),
+		() => entry("partner_goal", buildPartnerGoalSection(partnerId, store)),
+		...disciplineBlocks(partnerId).map((block) => () => entry(block.id, block.text)),
+		(ctx) =>
+			ctx.dryRun
+				? undefined
+				: entry(
+						"partner_status",
+						buildPartnerStatusSection(partnerId, conversationId, { ...deps, store }),
+					),
+	];
+	return providers;
 }
 
 export interface PartnerTurnContext {
@@ -417,21 +520,20 @@ export interface PartnerTurnContext {
 	discipline: string;
 	/** 当前在办段（三项皆空 + 无履历 → null） */
 	status: string | null;
-	/** 注入防线段（开关关 → null；固定字节，不随轮次变化） */
-	guard: string | null;
-	/** 注入模型请求的附加段：契约 + 目标 + 纪律 + 在办 + 防线（都空 → undefined） */
+	/** 注入模型请求的附加段：契约 + 目标 + 纪律 + 在办（都空 → undefined） */
 	text: string | undefined;
 }
 
 /**
- * 执事轮输入的单一装配点（E1 + E5）。
+ * 执事轮输入的单一装配点（E1 + E5；2026-11-10 批 27 走注入框架）。
  *
  * 顺序固定：**SOUL（身份）→ 岗位契约 → 当前目标 → 纪律 → 当前在办**。前两段来自同一个身份版本，
  * 后三段现查现拼。`text` 只含后四段：SOUL 在 instructions 里，重复一遍等于每轮
  * 白付一份 token，还会让模型看到两个版本的身份。
  *
  * 刀二只在同一装配点加两段（目标 / 履历摘要），批 12 再加一段固定纪律，
- * **没有第二条注入通道**。
+ * **没有第二条注入通道**。批 27 起各段带 id 过 `collectInjections`（排序 + 去重），
+ * 再按改造前的顺序拼回同一段文本——内容与位置逐字节不变。
  */
 export function buildPartnerTurnContext(
 	partnerId: string,
@@ -441,18 +543,33 @@ export function buildPartnerTurnContext(
 	const store = deps.store ?? partnersStore();
 	const current = store.currentVersion(partnerId);
 	const soul = current?.soulSource ?? store.readSoulFromHome(partnerId) ?? "";
-	// 契约取"当前版本快照"；老库/手工放了文件但没快照的，退磁盘当前值。
-	const contract = renderContractSection(
-		current?.contractSource ?? store.readContractFromHome(partnerId),
-	) ?? null;
-	const goal = buildPartnerGoalSection(partnerId, store) ?? null;
-	// 纪律段（批 12）放在动态状态之前：固定字节先落，在办清单每轮变。
-	const discipline = buildPartnerDisciplineSection(partnerId);
-	const status = buildPartnerStatusSection(partnerId, conversationId, { ...deps, store }) ?? null;
-	// 注入防线（2026-11-09 T2）：放在执事轮输入尾部；固定字节，开关只决定注不注。
-	const guard = injectionGuardEnabled() ? INJECTION_GUARD : null;
-	const text = [contract, goal, discipline, status, guard]
+	const entries = collectInjections(partnerContextProviders(partnerId, conversationId, deps), {
+		conversationId,
+		partnerId,
+	}).message;
+	const byId = new Map(entries.map((item) => [item.id, item.text]));
+	const discipline = DISCIPLINE_IDS.map((id) => byId.get(id))
 		.filter((part): part is string => Boolean(part))
 		.join("\n\n");
-	return { soul, contract, goal, discipline, status, guard, text: text || undefined };
+	const text = entries.map((item) => item.text).join("\n\n");
+	return {
+		soul,
+		contract: byId.get("partner_contract") ?? null,
+		goal: byId.get("partner_goal") ?? null,
+		discipline,
+		status: byId.get("partner_status") ?? null,
+		text: text || undefined,
+	};
 }
+
+/**
+ * 审计用的 provider（`source: "partner-context"`）：只在 ctx 带执事 id 时展开各段。
+ * 没有执事 id（主人会话 / 未解析会话）→ 什么都不注，与改造前一致。
+ */
+export const partnerContextInjectionProvider: InjectionProvider = (ctx) => {
+	if (!ctx.partnerId) return undefined;
+	return collectInjections(
+		partnerContextProviders(ctx.partnerId, Number(ctx.conversationId)),
+		ctx,
+	).message;
+};
