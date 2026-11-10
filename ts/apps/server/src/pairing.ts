@@ -29,6 +29,13 @@ interface StoredCode {
 	expiresAt: number;
 	usedAt?: number;
 	attempts: number;
+	/**
+	 * 两段式配对（2026-11-10 批 28 §一）：sha256(confirmToken)，只存哈希。
+	 * 只有 `begin()` 签发的码带这一位；`confirm()` 认它，`redeem()` 不认——
+	 * 保证「只扫码（拿到 code）不能完成配对」。confirmToken 与 code 同记录、同 expiresAt，
+	 * 即"与 code 绑定、同生共死"（默认 5 分钟，随 `PAIR_CODE_TTL_SECONDS`）。
+	 */
+	confirmHash?: string;
 }
 
 interface StoredDevice {
@@ -61,6 +68,29 @@ export interface RedeemResult {
 	deviceId: string;
 	/** 人眼可核的设备指纹（批 26 §四）；开关关着时不出现。 */
 	fingerprint?: string;
+}
+
+/**
+ * 两段式确认（`confirm`）的错误口径（2026-11-10 批 28 §一）。
+ * 与 `RedeemError` 分开：单段 `redeem` 的契约一个字不改，新增错误只服务两段式。
+ *   - `confirm_required`：只给了 code、没给 confirmToken（"只有 code 不能完成"）；
+ *   - `bad_confirm`：confirmToken 错了；
+ *   - `code_used`：重放（code / confirmToken 一次性，成功即作废）。
+ * 其余 `unknown_code` / `code_expired` / `too_many_attempts` 与单段同义。
+ */
+export type ConfirmError =
+	| "unknown_code"
+	| "confirm_required"
+	| "bad_confirm"
+	| "code_used"
+	| "code_expired"
+	| "too_many_attempts";
+
+/** 两段式开关（2026-11-10 批 28 §一）：默认 true（收紧）。false / 0 / off → 回到旧单段。 */
+export function pairTwoStepEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = (env.PAIR_TWO_STEP ?? "").trim().toLowerCase();
+	if (!raw) return true;
+	return raw !== "false" && raw !== "0" && raw !== "off";
 }
 
 /**
@@ -178,26 +208,38 @@ export class PairingStore {
 		return { code, expiresAt };
 	}
 
+	/**
+	 * 两段式第一段（2026-11-10 批 28 §一）：出一枚带 `confirmToken` 的码。
+	 *
+	 * `code` 给手机扫（进二维码），`confirmToken` 给**电脑端**确认（不随二维码下发）。
+	 * 两者都只在此刻以明文返回一次，落盘都只有 sha256；同一记录、同一过期时刻。
+	 * 语义：**只拿到 code 不能换凭据**，必须 `confirm()` 同时交出 code + confirmToken。
+	 */
+	begin(now = Date.now()): { code: string; expiresAt: number; confirmToken: string } {
+		const code = String(randomInt(0, 1_000_000)).padStart(6, "0");
+		const confirmToken = randomBytes(24).toString("base64url");
+		const expiresAt = now + CODE_TTL_SECONDS * 1000;
+		this.store.code = {
+			hash: sha256(code),
+			expiresAt,
+			attempts: 0,
+			confirmHash: sha256(confirmToken),
+		};
+		this.persist();
+		return { code, expiresAt, confirmToken };
+	}
+
 	/** 当前是否还有一枚可用码（调试页据此显示"生成/等待扫码"） */
 	hasLiveCode(now = Date.now()): boolean {
 		const code = this.store.code;
 		return !!code && !code.usedAt && code.expiresAt > now && code.attempts < MAX_CODE_ATTEMPTS;
 	}
 
-	/** 用码换设备凭据。失败会累计尝试次数（撞上限即作废这枚码）。 */
-	redeem(code: string, deviceName: string, now = Date.now()): RedeemResult | RedeemError {
-		const current = this.store.code;
-		if (!current) return "unknown_code";
-		if (current.usedAt) return "code_used";
-		if (current.expiresAt <= now) return "code_expired";
-		if (current.attempts >= MAX_CODE_ATTEMPTS) return "too_many_attempts";
-
-		if (!hashEquals(current.hash, sha256(code.trim()))) {
-			current.attempts += 1;
-			this.persist();
-			return current.attempts >= MAX_CODE_ATTEMPTS ? "too_many_attempts" : "unknown_code";
-		}
-
+	/**
+	 * 发设备凭据（单段 redeem / 两段式 confirm 共用）：生成令牌、登记设备、把码标记为已用。
+	 * 抽出来是为了两段式与单段逐字节共用同一套设备语义（指纹 / 上限 / 落盘），不改 `redeem` 行为。
+	 */
+	private issueDevice(deviceName: string, now: number): RedeemResult {
 		const deviceToken = randomBytes(32).toString("base64url");
 		const tokenHash = sha256(deviceToken);
 		const id = randomBytes(8).toString("hex");
@@ -208,7 +250,8 @@ export class PairingStore {
 			createdAt: now,
 			...(deviceFingerprintEnabled() ? { fingerprint: deviceFingerprint(id, tokenHash) } : {}),
 		};
-		current.usedAt = now;
+		const current = this.store.code;
+		if (current) current.usedAt = now;
 		// 设备上限：踢掉最久没用过的那台（防无限堆积）
 		this.store.devices = [...this.store.devices, device]
 			.filter((item) => !item.revokedAt)
@@ -220,6 +263,65 @@ export class PairingStore {
 			deviceId: device.id,
 			...(device.fingerprint ? { fingerprint: device.fingerprint } : {}),
 		};
+	}
+
+	/** 用码换设备凭据（单段 / 回滚通道）。失败会累计尝试次数（撞上限即作废这枚码）。 */
+	redeem(code: string, deviceName: string, now = Date.now()): RedeemResult | RedeemError {
+		const current = this.store.code;
+		if (!current) return "unknown_code";
+		if (current.usedAt) return "code_used";
+		if (current.expiresAt <= now) return "code_expired";
+		if (current.attempts >= MAX_CODE_ATTEMPTS) return "too_many_attempts";
+		// 两段式码带 confirmHash：从**单段视角**它不是一枚可兑的码。服务端在
+		// PAIR_TWO_STEP=true 时直接关掉 /pair/redeem 路由；这里再兜一层，避免任何
+		// 其它调用面绕过开关把两段式码单段兑掉（"只扫码不能完成"）。
+		if (current.confirmHash) return "unknown_code";
+
+		if (!hashEquals(current.hash, sha256(code.trim()))) {
+			current.attempts += 1;
+			this.persist();
+			return current.attempts >= MAX_CODE_ATTEMPTS ? "too_many_attempts" : "unknown_code";
+		}
+
+		return this.issueDevice(deviceName, now);
+	}
+
+	/**
+	 * 两段式第二段（2026-11-10 批 28 §一）：code + confirmToken 同时正确才发凭据。
+	 *
+	 * - `confirmToken` 一次性、随 code 一起 5 分钟过期、与 code 绑定（同一记录）；
+	 * - 只给 code（无 confirmToken）→ `confirm_required`；confirmToken 错 → `bad_confirm`；
+	 * - **失败一律计入既有 `attempts`**（与 `redeem` 共用一个计数器、共用 MAX_CODE_ATTEMPTS）；
+	 * - 成功即把码标记已用，重放第二次 → `code_used`。
+	 */
+	confirm(
+		code: string,
+		confirmToken: string,
+		deviceName: string,
+		now = Date.now(),
+	): RedeemResult | ConfirmError {
+		const current = this.store.code;
+		// 不是两段式码（普通 issueCode 出的）→ 不走这里，按"没有待确认的码"处理。
+		if (!current || !current.confirmHash) return "unknown_code";
+		if (current.usedAt) return "code_used";
+		if (current.expiresAt <= now) return "code_expired";
+		if (current.attempts >= MAX_CODE_ATTEMPTS) return "too_many_attempts";
+
+		if (!hashEquals(current.hash, sha256(code.trim()))) {
+			current.attempts += 1;
+			this.persist();
+			return current.attempts >= MAX_CODE_ATTEMPTS ? "too_many_attempts" : "unknown_code";
+		}
+
+		const supplied = (confirmToken ?? "").trim();
+		if (!supplied || !hashEquals(current.confirmHash, sha256(supplied))) {
+			current.attempts += 1;
+			this.persist();
+			if (current.attempts >= MAX_CODE_ATTEMPTS) return "too_many_attempts";
+			return supplied ? "bad_confirm" : "confirm_required";
+		}
+
+		return this.issueDevice(deviceName, now);
 	}
 
 	/** 设备凭据是否有效（每次请求都会走一次；命中即刷新 lastSeenAt，但最多每分钟落一次盘） */

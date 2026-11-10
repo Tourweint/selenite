@@ -70,6 +70,80 @@ export function recallSessionsEnabled(env: NodeJS.ProcessEnv = process.env): boo
 	return raw !== "false" && raw !== "0" && raw !== "off";
 }
 
+/**
+ * 只读搜索端点的回滚开关（2026-11-10 批 28 §二）：默认开。
+ * `AGENT_SESSIONS_SEARCH=false` → `GET /api/v1/agent/sessions/search` 整组 404
+ * （与工具上架开关同口径，一行退回"没有这个端点"的形态）。
+ * 刻意与 `AGENT_RECALL_SESSIONS` 分开：关模型工具不等于要关掉界面「找旧事」。
+ */
+export function sessionSearchApiEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = env.AGENT_SESSIONS_SEARCH?.trim().toLowerCase();
+	if (!raw) return true;
+	return raw !== "false" && raw !== "0" && raw !== "off";
+}
+
+/**
+ * 只读搜索端点的查询参数解析（2026-11-10 批 28 §二）：纯函数，单测不必起 Hono。
+ * 空 / 短查询 → null（调用方回 400）；days / limit 透传给 `searchTranscriptLines` 收敛。
+ */
+export interface SessionSearchQuery {
+	query: string;
+	options: SessionSearchOptions;
+}
+export function parseSessionSearchQuery(raw: {
+	q?: string;
+	days?: string;
+	limit?: string;
+}): SessionSearchQuery | null {
+	const query = (raw.q ?? "").trim();
+	// 与检索核心同阈值（短于 2 字直接空），但这里有明确边界：空/短查询是 bad_request，
+	// 不静默返回 `{hits:[]}` 让界面误以为"没有匹配"。
+	if (query.length < 2) return null;
+	const options: SessionSearchOptions = {};
+	const daysRaw = raw.days?.trim();
+	const limitRaw = raw.limit?.trim();
+	const days = daysRaw ? Number(daysRaw) : undefined;
+	const limit = limitRaw ? Number(limitRaw) : undefined;
+	if (days !== undefined && Number.isFinite(days)) options.days = days;
+	if (limit !== undefined && Number.isFinite(limit)) options.limit = limit;
+	return { query, options };
+}
+
+/**
+ * 命中消息在会话正文（`readTranscript(chat, 0)` 口径）里的下标，供只读 UI 直接当
+ * `GET .../context?aroundIndex=` 用（2026-11-10 批 28 §二）。
+ *
+ * `searchSessions` 的 hit 带 `at`（消息时间戳）与 snippet，但没有下标；定点找回端点
+ * 用的是消息数组下标。这里用「时间一致 + 正文含命中词」精确定位，取不到再按时间就近。
+ * 纯函数：不碰 durable，单测可直接造消息数组断言。
+ */
+export function findAroundIndex(
+	messages: ReadonlyArray<{ text: string; at: number }>,
+	hit: { at: number },
+	query: string,
+): number {
+	const needle = query.trim().toLowerCase();
+	if (needle.length >= 2) {
+		const exact = messages.findIndex(
+			(m) => m.at === hit.at && m.text.toLowerCase().includes(needle),
+		);
+		if (exact >= 0) return exact;
+		const byText = messages.findIndex((m) => m.text.toLowerCase().includes(needle));
+		if (byText >= 0) return byText;
+	}
+	if (messages.length === 0) return 0;
+	let best = 0;
+	let bestDelta = Math.abs(messages[0]!.at - hit.at);
+	for (let i = 1; i < messages.length; i += 1) {
+		const delta = Math.abs(messages[i]!.at - hit.at);
+		if (delta < bestDelta) {
+			best = i;
+			bestDelta = delta;
+		}
+	}
+	return best;
+}
+
 function clampInt(value: unknown, fallback: number, min: number, max: number): number {
 	if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
 	return Math.min(max, Math.max(min, Math.floor(value)));

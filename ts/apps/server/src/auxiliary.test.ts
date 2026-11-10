@@ -5,6 +5,7 @@ import {
 	auxPinnedModelId,
 	auxiliaryEnabled,
 	auxiliaryModel,
+	type AuxUse,
 } from "./auxiliary.ts";
 
 /**
@@ -51,7 +52,8 @@ test("pin 变量名按用途大写；没配 / 空白 → null", () => {
 		"small-model",
 	);
 	assert.equal(auxPinnedModelId("title", { AUX_MODEL_TITLE: "t" }), "t");
-	assert.deepEqual([...AUX_USES], ["title", "compact", "review", "extract"]);
+	assert.equal(auxPinnedModelId("vision", { AUX_MODEL_VISION: "v" }), "v");
+	assert.deepEqual([...AUX_USES], ["title", "compact", "vision", "review", "extract"]);
 });
 
 test("没有当前模型 → null（不编一个路由）", () => {
@@ -149,4 +151,48 @@ test("compact 用途能解析：配了返回 pin 的模型，没配回落当前�
 		auxiliaryModel("compact", { current: CURRENT, env: {}, models: fakeModels() }),
 		CURRENT,
 	);
+});
+
+/**
+ * title / vision 显式"无调用点"（2026-11-10 批 28 §三）：配了照常返回配置值，
+ * 但调用时打一条 warn 提示"当前无调用方、配置不会生效"；只一次，warn 可注入以便断言。
+ */
+test("title / vision 无调用点：配了返回配置值但打 warn（只一次、可注入）", () => {
+	for (const use of ["title", "vision"] as const) {
+		const warns: string[] = [];
+		const warned = new Set<AuxUse>();
+		const deps = {
+			current: CURRENT,
+			env: { [`AUX_MODEL_${use.toUpperCase()}`]: "small-model" },
+			models: fakeModels(),
+			warn: (message: string) => warns.push(message),
+			warned,
+		};
+		assert.deepEqual(
+			auxiliaryModel(use, deps),
+			{ provider: "bailian", modelId: "small-model" },
+			`${use} 配了要返回配置值，不因"无调用点"改变解析契约`,
+		);
+		assert.equal(warns.length, 1, `${use} 调用要打一条 warn`);
+		assert.match(warns[0]!, /无调用方.*配置不会生效/);
+		assert.match(warns[0]!, new RegExp(use), "warn 要带用途名，便于定位");
+
+		// 同一用途再调一次：进程内只告警一次
+		auxiliaryModel(use, deps);
+		assert.equal(warns.length, 1, `${use} 只告警一次`);
+	}
+});
+
+test("已接用途 extract / review 不触发无调用点 warn", () => {
+	const warns: string[] = [];
+	const deps = {
+		current: CURRENT,
+		env: {},
+		models: fakeModels(),
+		warn: (message: string) => warns.push(message),
+		warned: new Set<AuxUse>(),
+	};
+	auxiliaryModel("extract", deps);
+	auxiliaryModel("review", deps);
+	assert.equal(warns.length, 0, "已接线用途不该被误标成无调用点");
 });
