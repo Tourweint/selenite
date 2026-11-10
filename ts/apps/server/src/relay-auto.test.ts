@@ -331,6 +331,9 @@ test("relay-matrix 台账：旧行没有 pickedBy / pickReason / pickedHome 仍�
 		"utf8",
 	);
 	process.env.REMOTE_DELEGATIONS_PATH = file;
+	// 本测试只验字段兼容（旧行缺新字段仍可读），不验 TTL：显式关掉清扫，
+	// 否则 2023 年的 finishedAt 会被批 31 的 7 天 TTL 清掉（那是 relay-matrix.test.ts 的事）。
+	process.env.REMOTE_DELEGATIONS_TTL_DAYS = "0";
 	try {
 		// 动态 import 是刻意的：STORE_PATH 在 relay-matrix 模块加载期取 env，
 		// 必须先设好临时路径再加载，免得到开发机的 .data 里读真实台账。
@@ -343,6 +346,7 @@ test("relay-matrix 台账：旧行没有 pickedBy / pickReason / pickedHome 仍�
 		assert.equal(rows[0]?.pickedHome, undefined);
 	} finally {
 		delete process.env.REMOTE_DELEGATIONS_PATH;
+		delete process.env.REMOTE_DELEGATIONS_TTL_DAYS;
 		rmSync(dir, { recursive: true, force: true });
 	}
 });

@@ -82,6 +82,12 @@ export interface DelegationReport {
 	phase: DelegationPhase;
 	/** 写回会话的一行话，已截断到 80 字 */
 	text: string;
+	/**
+	 * 产物目录指针（批 31 痕迹协作补课）：`result.tasks[].dir`，最多 3 个，与
+	 * work 履历同口径。**只进唤醒提示词**（delegation-wake.ts 渲染成"落点"行），
+	 * 汇报正文与镜像不动；没有任务目录的旧结果缺省无此字段。
+	 */
+	productDirs?: string[];
 }
 
 /**
@@ -478,6 +484,9 @@ export function formatReport(
 		domain,
 		phase,
 		text: truncate(`${head}${body}`, 80),
+		...(result.tasks?.some((task) => task.dir)
+			? { productDirs: result.tasks.map((task) => task.dir).filter(Boolean).slice(0, 3) }
+			: {}),
 	};
 }
 

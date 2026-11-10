@@ -56,7 +56,24 @@ const POLL_FAST_ROUNDS = 5;
 const STORE_PATH =
 	process.env.REMOTE_DELEGATIONS_PATH?.trim() || ".data/remote-delegations.json";
 
-interface RemoteRow {
+/**
+ * 远端单台账 TTL（批 31）：终态行保留几天后从 JSON 清掉（状态查询仍可问目标机，
+ * 与 `finishedAt` 字段注释同口径）。0 = 不清理（回滚形态）。
+ */
+function remoteLedgerTtlDays(env: NodeJS.ProcessEnv = process.env): number {
+	const raw = env.REMOTE_DELEGATIONS_TTL_DAYS?.trim() || "7";
+	const parsed = Number.parseInt(raw, 10);
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+/** 终态且 finishedAt 距今超过 TTL 天 → 过期（纯函数，单测直接调）。 */
+export function isExpiredRemoteRow(row: RemoteRow, now: number, ttlDays: number): boolean {
+	if (ttlDays <= 0) return false;
+	if (row.finishedAt === undefined) return false;
+	return now - row.finishedAt > ttlDays * 24 * 60 * 60 * 1000;
+}
+
+export interface RemoteRow {
 	requestId: string;
 	targetDeviceId: string;
 	targetDeviceName: string;
@@ -116,6 +133,17 @@ class RemoteDelegationStore {
 
 	list(): RemoteRow[] {
 		this.load();
+		// 批 31（痕迹蒸发）：兑现 finishedAt 的注释承诺——终态行放一段时间后清掉，
+		// 台账只增不减会把手机端任务中心撑成垃圾场。读侧惰性清扫：台账低频写，
+		// 消费方都走 list()，不需要常驻定时器。0 = 不清理（回滚形态）。
+		const ttlDays = remoteLedgerTtlDays();
+		if (ttlDays > 0) {
+			const before = this.rows.size;
+			for (const [id, row] of this.rows) {
+				if (isExpiredRemoteRow(row, Date.now(), ttlDays)) this.rows.delete(id);
+			}
+			if (this.rows.size !== before) this.save();
+		}
 		return [...this.rows.values()].sort((a, b) => b.updatedAt - a.updatedAt);
 	}
 }

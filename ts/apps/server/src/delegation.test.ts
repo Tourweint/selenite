@@ -296,6 +296,35 @@ test("formatReport 按 80 字截断，并写清单号与领域", () => {
 	assert.ok(report.text.endsWith("…"));
 });
 
+test("formatReport 填充产物指针（批 31）：截 3 个、无目录时缺省无字段", () => {
+	const task = (dir: string) => ({ seq: 1, slug: "s", title: "t", status: "passed" as const, reason: "", dir });
+	// 有任务目录：填 productDirs（最多 3 个，与 work-record 同口径）
+	const withDirs = formatReport(
+		result({
+			ticketId: "T-10",
+			status: "done",
+			line: "ok",
+			tasks: [task("runs/T-10/task-1"), task("runs/T-10/task-2"), task("runs/T-10/task-3"), task("runs/T-10/task-4")],
+		}),
+		"前端",
+	);
+	assert.deepEqual(withDirs.productDirs, ["runs/T-10/task-1", "runs/T-10/task-2", "runs/T-10/task-3"]);
+	// 没有任务目录：无 productDirs 字段（旧结果逐字节不变）
+	const noTasks = formatReport(result({ ticketId: "T-11", status: "done", line: "ok" }), "前端");
+	assert.equal("productDirs" in noTasks, false, "无任务目录 → 缺省无字段");
+	// 任务全无目录：同样缺省
+	const emptyDirs = formatReport(
+		result({
+			ticketId: "T-12",
+			status: "failed",
+			line: "bad",
+			tasks: [task("")],
+		}),
+		"前端",
+	);
+	assert.equal("productDirs" in emptyDirs, false, "目录全空 → 缺省无字段");
+});
+
 test("SSE 编解码能往返 delegate / attention 的新字段", () => {
 	const event: ChatEvent = {
 		type: "delegate",

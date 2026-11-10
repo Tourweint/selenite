@@ -135,9 +135,12 @@ export function buildWakePrompt(reports: DelegationReport[]): string {
 		"",
 		"本批终态：",
 	].join("\n");
-	const lines = reports.map(
-		(report) => `- 单 ${report.ticketId.slice(0, 6)}（${report.phase}）：${report.text}`,
-	);
+	const lines = reports.map((report) => {
+		const line = `- 单 ${report.ticketId.slice(0, 6)}（${report.phase}）：${report.text}`;
+		// 批 31：有产物目录才追加落点行；无指针时逐字节与改动前一致。
+		if (!report.productDirs?.length) return line;
+		return `${line}\n  落点：${report.productDirs.join("、")}`;
+	});
 	return [header, ...lines].join("\n");
 }
 

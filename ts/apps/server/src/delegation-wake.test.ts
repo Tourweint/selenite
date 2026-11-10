@@ -124,6 +124,29 @@ test("buildWakePrompt：固定头逐字、单号截 6 位、多单合并", () =>
 	assert.ok(!prompt.includes("3f2a91f"), "单号只取前 6 位");
 });
 
+test("buildWakePrompt：带产物指针追加落点行，无指针逐字节同旧（批 31）", () => {
+	// 有指针：单行下挂"落点"行
+	const withDirs = buildWakePrompt([
+		{
+			ticketId: "3f2a91ffffff",
+			domain: "前端",
+			phase: "done",
+			text: "示例汇报一",
+			productDirs: ["runs/3f2a91/task-1", "runs/3f2a91/task-2"],
+		},
+	]);
+	assert.ok(
+		withDirs.includes("- 单 3f2a91（done）：示例汇报一\n  落点：runs/3f2a91/task-1、runs/3f2a91/task-2"),
+		"落点行紧跟单行、缩进两格",
+	);
+	// 无指针：与固定头 + 裸单行的旧形态逐字节一致（既有测试 104 行同款断言兜回归）
+	const legacy = buildWakePrompt([
+		{ ticketId: "8c04d2", domain: "后端", phase: "failed", text: "示例汇报二" },
+	]);
+	assert.ok(legacy.endsWith("- 单 8c04d2（failed）：示例汇报二"), "无指针不加落点行");
+	assert.ok(!legacy.includes("\n  落点："), "无指针不出现落点续行（固定头里的「落点」二字除外）");
+});
+
 test("collectPending：取走即清空、同会话合并、跨会话互不串", () => {
 	const store = new Map<number, DelegationReport[]>([
 		[1, [report("a"), report("b")]],
