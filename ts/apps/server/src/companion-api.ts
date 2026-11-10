@@ -23,6 +23,11 @@ import { routineEngine } from "./routines.ts";
 // triggers 校验上移到 routine-manage.ts：HTTP 端点与 routine_manage 工具共用一份。
 import { validateTriggers } from "./routine-manage.ts";
 import { validateModelChain, type ModelChainItem } from "./model-chain.ts";
+import {
+	exportPartnerBundle,
+	importPartnerBundle,
+	partnerBundleEnabled,
+} from "./partner-bundle.ts";
 
 /**
  * 执事管理接口（2026-11-05 批次B B2）。
@@ -124,6 +129,47 @@ export function mountCompanions(app: Hono): void {
 		}
 		skills.sort((a, b) => a.name.localeCompare(b.name));
 		return c.json({ ok: true, skills });
+	});
+
+	/**
+	 * 团队包导出 / 导入（2026-11-10 批 25 §二）。
+	 *
+	 * 都是**只搬运内容、不迁移运行态**：导出是只读的，导入落成 paused（见 partner-bundle.ts
+	 * 的 SAFE_ARRIVAL）。`PARTNER_BUNDLE=false` → 两个端点 404（能力未启用，不是业务拒绝）。
+	 * 导入放在 `/:id` 之前注册：路径段不同本不冲突，放前面只是让"包"的入口一眼可见。
+	 */
+	app.get("/api/v1/partners/:id/bundle", (c) => {
+		if (!partnerBundleEnabled()) return c.json({ ok: false, error: "not_found" }, 404);
+		const bundle = exportPartnerBundle(c.req.param("id"));
+		if (!bundle) return c.json({ ok: false, error: "not_found" }, 404);
+		// RFC 5987：中文文件名走 filename*，filename 留 ASCII 兜底。
+		const ascii = bundle.filename.replace(/[^\x20-\x7e]/g, "_").replace(/"/g, "");
+		c.header("Content-Type", "application/json; charset=utf-8");
+		c.header(
+			"Content-Disposition",
+			`attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(bundle.filename)}`,
+		);
+		return c.body(bundle.content, 200);
+	});
+
+	app.post("/api/v1/partners/import-bundle", async (c) => {
+		if (!partnerBundleEnabled()) return c.json({ ok: false, error: "not_found" }, 404);
+		const body = await c.req.json().catch(() => null);
+		const result = importPartnerBundle(body);
+		if (!result.ok) {
+			// 重名 / 包不合法都是 400 带说明；不覆盖现有执事（团队包不是恢复备份）。
+			return c.json({ error: "bad_request", code: result.code, message: result.message }, 400);
+		}
+		return c.json(
+			{
+				ok: true,
+				partner: projection(result.partner),
+				imported: result.imported,
+				safety: result.safety,
+				warnings: result.warnings,
+			},
+			201,
+		);
 	});
 
 	app.get("/api/v1/partners/:id", (c) => {

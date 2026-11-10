@@ -38,13 +38,24 @@ function groupTool(store: PartnersStore, groups = true) {
 	return tools.find((entry) => entry.name === "group_manage");
 }
 
+async function runRaw(
+	tool: NonNullable<ReturnType<typeof groupTool>>,
+	args: Record<string, unknown>,
+	conversationId = 100,
+): Promise<{ ok: boolean; data?: any; error?: { code: string; message: string; hint?: string } }> {
+	const result = await tool.execute(args as never, { conversationId } as never, {} as never);
+	const text = (result.output ?? []).map((item) => (item.type === "text" ? item.text : "")).join("");
+	return JSON.parse(text);
+}
+
+/** 迁移后文案在 data.message / error.message（批 25 §一）；旧断言继续按文案验收。 */
 async function run(
 	tool: NonNullable<ReturnType<typeof groupTool>>,
 	args: Record<string, unknown>,
 	conversationId = 100,
 ): Promise<string> {
-	const result = await tool.execute(args as never, { conversationId } as never, {} as never);
-	return (result.output ?? []).map((item) => (item.type === "text" ? item.text : "")).join("");
+	const parsed = await runRaw(tool, args, conversationId);
+	return parsed.ok ? (parsed.data?.message ?? "") : (parsed.error?.message ?? "");
 }
 
 // ── 注册与开关 ───────────────────────────────────────────
@@ -237,6 +248,66 @@ test("list：没有群时给明确空态（不是空字符串）", async () => {
 		assert.ok(tool);
 		const out = await run(tool, { action: "list" });
 		assert.match(out, /暂无群组/);
+	} finally {
+		env.cleanup();
+	}
+});
+
+// ── 统一契约（2026-11-10 批 25 §一）────────────────────────
+test("契约：建群成功是 ok + data.message，文案逐字不变", async () => {
+	const env = tempRoot();
+	try {
+		env.store.create("阅读助手");
+		env.store.create("记账助手");
+		const tool = groupTool(env.store);
+		assert.ok(tool);
+		const out = await runRaw(tool, { action: "create", name: "书房小事", members: ["阅读助手", "记账助手"] });
+		assert.equal(out.ok, true);
+		assert.deepEqual(Object.keys(out), ["ok", "data"]);
+		assert.equal(
+			out.data.message,
+			"群组 书房小事 已建好：阅读助手、记账助手；不 @ 时 阅读助手 回。" +
+				"在群组页打开它就能说话（@名字 点名，@所有人 全员按顺序回）。",
+		);
+	} finally {
+		env.cleanup();
+	}
+});
+
+test("契约：成员解析失败与越权走 err，候选清单仍在 message 里", async () => {
+	const env = tempRoot();
+	try {
+		env.store.create("阅读助手");
+		env.store.create("记账助手");
+		const tool = groupTool(env.store);
+		assert.ok(tool);
+
+		const missing = await runRaw(tool, {
+			action: "create",
+			name: "空群",
+			members: ["阅读助手", "查无此人"],
+		});
+		assert.equal(missing.ok, false);
+		assert.equal(missing.error?.code, "member_not_found");
+		assert.match(missing.error?.message ?? "", /找不到执事「查无此人」。现有执事：/);
+		assert.match(missing.error?.message ?? "", /阅读助手/);
+
+		const other = env.store.create("小澈");
+		env.store.linkSession({
+			partnerId: other.id,
+			role: "canonical",
+			routeKey: "canonical",
+			sessionId: 778,
+		});
+		const forbidden = await runRaw(
+			tool,
+			{ action: "create", name: "不该建的群", members: ["阅读助手", "小澈"] },
+			778,
+		);
+		assert.deepEqual(forbidden, {
+			ok: false,
+			error: { code: "forbidden", message: "只有总管可以建群" },
+		});
 	} finally {
 		env.cleanup();
 	}
