@@ -212,6 +212,84 @@ test("propose_topic：失败走 err，已在跟的 id 进 hint；参数校验也
 	assert.deepEqual(empty, { ok: false, error: { code: "question_empty", message: "question 不能为空" } });
 });
 
+/**
+ * 写类工具契约迁移（2026-11-10 批 25 §一）：`propose_project` / `partner_skill_write`。
+ * 与 delegate 同口径——成功包 `ok`，业务分支留在 `data`，真失败才走 `err`。
+ */
+test("propose_project：成功保留结构化字段，needs_project 是业务分支不是错误", async () => {
+	const base = deps({ recall: () => [] });
+	const tools = createTools({
+		...base,
+		delegate: true,
+		projects: {
+			proposeProject: (name: string, path: string) => ({
+				id: "proposal-9",
+				name,
+				relativePath: path,
+			}),
+		},
+	} as never);
+	const out = await runTool(toolNamed(tools, "propose_project"), { name: "新项目", path: "new" });
+	assert.deepEqual(out, {
+		ok: true,
+		data: {
+			message:
+				"已提交待确认：用户在项目设置里确认后才会创建目录并登记。" +
+				"确认之前不要派工到它，也不要自己建这个目录。",
+			proposalId: "proposal-9",
+			name: "新项目",
+			path: "new",
+		},
+	});
+
+	// 没有登记表：旧代码用 ok:false + error:needs_project 表达；现在外层 ok，
+	// 字段名与文案原样留在 data（模型照样能据此先去建项目）。
+	const noProjects = createTools({ ...base, delegate: true } as never);
+	const branch = await runTool(toolNamed(noProjects, "propose_project"), { name: "x", path: "y" });
+	assert.deepEqual(branch, {
+		ok: true,
+		data: { message: "项目登记表不可用", error: "needs_project" },
+	});
+});
+
+test("partner_skill_write：成功是 ok + data.message；越权/非法 slug 走 err", async () => {
+	const { partnersStore } = await import("./partners.ts");
+	const store = partnersStore();
+	// 工具按会话反查执事：把会话 7 挂到一位临时执事上（库在 tmp，不碰 .env）。
+	const partner = store.create("写技能的执事");
+	store.linkSession({
+		partnerId: partner.id,
+		role: "canonical",
+		routeKey: "canonical",
+		sessionId: 7,
+	});
+	const tools = createTools(deps({ recall: () => [] }));
+	const written = await runTool(toolNamed(tools, "partner_skill_write"), {
+		slug: "daily-brief",
+		content: "# 日报\n按顺序做。",
+	});
+	assert.deepEqual(written, {
+		ok: true,
+		data: { message: "技能 daily-brief 已写入执事技能库，下一轮进索引。" },
+	});
+
+	const badSlug = await runTool(toolNamed(tools, "partner_skill_write"), {
+		slug: "日报",
+		content: "# 日报",
+	});
+	assert.equal(badSlug.ok, false);
+	assert.equal(badSlug.error?.code, "invalid_slug");
+	assert.equal(badSlug.error?.message, "slug 只能是小写字母/数字/短横线，1-64 字符。");
+
+	const noSummary = await runTool(toolNamed(tools, "partner_skill_write"), {
+		slug: "empty",
+		content: "   ",
+	});
+	assert.equal(noSummary.ok, false);
+	assert.equal(noSummary.error?.code, "empty_summary");
+	assert.equal(noSummary.error?.message, "技能手册第一行是索引摘要，不能为空。");
+});
+
 test("skill：取到手册包 ok，手册正文就在 message 里（内容逐字不变）", async () => {
 	const tools = createTools(deps({ recall: () => [] }));
 	const okOut = await runTool(toolNamed(tools, "skill"), { name: "daily-brief" });

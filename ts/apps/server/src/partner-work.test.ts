@@ -544,6 +544,17 @@ test("routine_manage 工具：非执事会话拒；执事会话 create 落库并
 		999,
 	);
 	assert.match(owner, /不属于任何执事/);
+	// 契约（批 25 §一）：拒绝走 err(not_partner_session)，不是 ok。
+	const ownerParsed = JSON.parse(owner) as {
+		ok: boolean;
+		error?: { code: string; message: string };
+	};
+	assert.equal(ownerParsed.ok, false);
+	assert.equal(ownerParsed.error?.code, "not_partner_session");
+	assert.equal(
+		ownerParsed.error?.message,
+		"这个会话不属于任何执事，不能自建巡逻（只有执事能给自己建规则）。",
+	);
 
 	// 执事会话（101 = 甲）→ 建自己的规则，且排链函数被调用一次。
 	const before = singleton.listRoutines(partnerA.id).length;
@@ -557,6 +568,9 @@ test("routine_manage 工具：非执事会话拒；执事会话 create 落库并
 		101,
 	);
 	assert.match(ok, /已建好例行规则/);
+	const okParsed = JSON.parse(ok) as { ok: boolean; data?: { message?: string } };
+	assert.equal(okParsed.ok, true);
+	assert.match(okParsed.data?.message ?? "", /^已建好例行规则「自建周盘点」/);
 	assert.equal(singleton.listRoutines(partnerA.id).length, before + 1);
 	const created = singleton.listRoutines(partnerA.id).at(-1)!;
 	assert.equal(created.partnerId, partnerA.id, "partnerId 绑定调用者会话，不是模型传的");

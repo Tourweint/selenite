@@ -382,6 +382,14 @@ function delegateResult(message: string, extra: Record<string, unknown> = {}) {
 }
 
 /**
+ * 写类工具的统一成功形状（2026-11-10 批 25 §一）：只包外层，`message` 逐字不变。
+ * 与 `delegateResult` 同构；分开命名只是让调用点读得出"这是哪一类工具"。
+ */
+function writeToolResult(message: string, extra: Record<string, unknown> = {}) {
+	return textToolResult(ok({ message, ...extra }));
+}
+
+/**
  * `needs_project` 这类分支迁移前就是一段 JSON（`{error, message, projects}`）。
  * "原样进 data" = 连字段名一起保留，只去掉内层的 `ok`（外层已经有 `ok: true`）。
  */
@@ -641,27 +649,34 @@ export function createTools(deps: ToolDeps) {
 		}),
 		execute: async (args) => {
 			if (!deps.projects) {
-				return text(
-					JSON.stringify({ ok: false, error: "needs_project", message: "项目登记表不可用" }),
-				);
+				// 业务分支（不是调用失败）：保留旧字段名 error 与文案，只去掉内层 ok，
+				// 外层由统一契约给 ok: true（同 delegate 的 needs_project 口径）。
+				return writeToolResult("项目登记表不可用", { error: "needs_project" });
 			}
 			try {
 				const proposal = deps.projects.proposeProject(args.name, args.path);
-				return text(
-					JSON.stringify({
-						ok: true,
+				return writeToolResult(
+					"已提交待确认：用户在项目设置里确认后才会创建目录并登记。" +
+						"确认之前不要派工到它，也不要自己建这个目录。",
+					{
 						proposalId: proposal.id,
 						name: proposal.name,
 						path: proposal.relativePath,
-						message:
-							"已提交待确认：用户在项目设置里确认后才会创建目录并登记。" +
-							"确认之前不要派工到它，也不要自己建这个目录。",
-					}),
+					},
 				);
 			} catch (error) {
 				const code = error instanceof ProjectError ? error.code : "failed";
 				const message = error instanceof Error ? error.message : String(error);
-				return text(JSON.stringify({ ok: false, error: code, message }));
+				// 没有工作区是"下一步该干什么"明确的失败：给 hint，别让模型反复重试。
+				return textToolResult(
+					err(
+						code,
+						message,
+						code === "no_workspace"
+							? "先让用户在设置里选定工作区，再提项目。"
+							: undefined,
+					),
+				);
 			}
 		},
 	});
@@ -1295,23 +1310,37 @@ export function createTools(deps: ToolDeps) {
 						Number(context.conversationId),
 					);
 					if (!partnerId) {
-						return text("这个会话不属于任何执事，不能写执事技能。");
+						return textToolResult(
+							err(
+								"not_partner_session",
+								"这个会话不属于任何执事，不能写执事技能。",
+								"在执事自己的会话里再写；主对话写的是总管技能库，不是执事技能。",
+							),
+						);
 					}
 					if (!/^[a-z0-9][a-z0-9-_]{0,63}$/.test(args.slug)) {
-						return text("slug 只能是小写字母/数字/短横线，1-64 字符。");
+						return textToolResult(
+							err(
+								"invalid_slug",
+								"slug 只能是小写字母/数字/短横线，1-64 字符。",
+								"用 daily-brief 这种短横线名字。",
+							),
+						);
 					}
 					if (!args.content.trim() || !args.content.trim().split("\n")[0]?.trim()) {
-						return text("技能手册第一行是索引摘要，不能为空。");
+						return textToolResult(
+							err("empty_summary", "技能手册第一行是索引摘要，不能为空。"),
+						);
 					}
 					try {
 						partnersStore().atomicWrite(
 							join(partnersStore().skillsDirOf(partnerId), `${args.slug}.md`),
 							args.content,
 						);
-						return text(`技能 ${args.slug} 已写入执事技能库，下一轮进索引。`);
+						return writeToolResult(`技能 ${args.slug} 已写入执事技能库，下一轮进索引。`);
 					} catch (error) {
 						const detail = error instanceof Error ? error.message : String(error);
-						return text(`写入失败：${detail}`);
+						return textToolResult(err("write_failed", `写入失败：${detail}`));
 					}
 				},
 			}),
@@ -1358,23 +1387,31 @@ export function createTools(deps: ToolDeps) {
 					// uuid（某执事的专线会话）一律拒；owner 会话解析为 chief / null，放行。
 					const effective = effectivePartnerIdOfSession(ctx.store, conversationId);
 					if (effective !== null && effective !== CHIEF_PARTNER_ID) {
-						return text("只有总管可以管理执事");
+						return textToolResult(err("forbidden", "只有总管可以管理执事"));
 					}
 					if (args.action === "create") {
 						const name = (args.name ?? "").trim();
 						const domain = (args.domain ?? "").trim();
-						if (!name) return text("name 必填且不超过 40 字");
+						if (!name) return textToolResult(err("invalid_name", "name 必填且不超过 40 字"));
 						if (args.soul && args.soul.length > 4000) {
-							return text("soul 太长，一句话身份即可");
+							return textToolResult(err("soul_too_long", "soul 太长，一句话身份即可"));
 						}
 						const result = createMinisterPartner(
 							{ name, ...(domain ? { domain } : {}), soul: args.soul },
 							ctx,
 						);
-						if (!result.ok) return text(result.error);
+						if (!result.ok) {
+							// 核心层只回一句中文；这里把它归到三个稳定码，模型据此决定改 domain 还是改名字。
+							const code = result.error.includes("已被其他执事占用")
+								? "domain_taken"
+								: result.error.includes("domain 必须")
+									? "invalid_domain"
+									: "create_failed";
+							return textToolResult(err(code, result.error));
+						}
 						// 领域只是标签（2026-11-07）：留空也要说清"照样能派活"，
 						// 否则模型会以为建了个残缺的执事。
-						return text(
+						return writeToolResult(
 							result.value.domain
 								? `执事 ${result.value.name} 已就位（领域标签：${result.value.domain}）。之后 delegate(domain=${result.value.domain}) 或直接按名字派都行。`
 								: `执事 ${result.value.name} 已就位（没有领域标签，不影响派活）。之后用 delegate 派给它就行。`,
@@ -1382,24 +1419,38 @@ export function createTools(deps: ToolDeps) {
 					}
 					if (args.action === "stop") {
 						const partnerId = (args.partnerId ?? "").trim();
-						if (!partnerId) return text("stop 需要 partnerId（执事 id）");
+						if (!partnerId) {
+							return textToolResult(err("missing_partner_id", "stop 需要 partnerId（执事 id）"));
+						}
 						if (partnerId === CHIEF_PARTNER_ID) {
-							return text("不能停总管自己：总管是主对话本体，不在可停用的执事里。");
+							return textToolResult(
+								err(
+									"forbidden",
+									"不能停总管自己：总管是主对话本体，不在可停用的执事里。",
+								),
+							);
 						}
 						const partner = ctx.store.get(partnerId);
 						if (!partner || !partner.domain) {
-							return text(`找不到 id 为 ${partnerId} 的执事（只能停带 domain 的执事）。`);
+							return textToolResult(
+								err(
+									"not_found",
+									`找不到 id 为 ${partnerId} 的执事（只能停带 domain 的执事）。`,
+								),
+							);
 						}
 						const result = stopMinisterPartner(partnerId, ctx);
-						if (!result.ok) return text("执事不存在或已被停用。");
-						return text(
+						if (!result.ok) {
+							return textToolResult(err("not_found", "执事不存在或已被停用。"));
+						}
+						return writeToolResult(
 							`执事 ${partner.name}（domain=${partner.domain}）已停用并归档，之后派活不要再指向它。`,
 						);
 					}
 					if (args.action === "list") {
 						const rows = listMinisterPartners(ctx, (args.partnerId ?? "").trim() || undefined);
-						if (rows.length === 0) return text("（暂无执事；用 create 建一个）");
-						return text(
+						if (rows.length === 0) return writeToolResult("（暂无执事；用 create 建一个）");
+						return writeToolResult(
 							rows.map(
 								(row) =>
 									`${row.name} · ${row.domain} · ${row.status} · 派发权${row.dispatchAuthority ? "开" : "关"}`,
@@ -1408,17 +1459,28 @@ export function createTools(deps: ToolDeps) {
 					}
 					if (args.action === "set_dispatch") {
 						const dispatchId = (args.partnerId ?? "").trim();
-						if (!dispatchId) return text("set_dispatch 需要 partnerId（执事 id）");
+						if (!dispatchId) {
+							return textToolResult(
+								err("missing_partner_id", "set_dispatch 需要 partnerId（执事 id）"),
+							);
+						}
 						if (typeof args.enabled !== "boolean") {
-							return text("set_dispatch 需要 enabled（true=开 / false=关）");
+							return textToolResult(
+								err(
+									"invalid_argument",
+									"set_dispatch 需要 enabled（true=开 / false=关）",
+								),
+							);
 						}
 						const result = setMinisterDispatchAuthority(dispatchId, args.enabled, ctx);
-						if (!result.ok) return text(result.error);
-						return text(
+						if (!result.ok) return textToolResult(err("not_found", result.error));
+						return writeToolResult(
 							`执事 ${result.value.name}（domain=${result.value.domain}）的派发权已${args.enabled ? "打开：之后 delegate(domain=…) 会以它的名义派分管" : "关闭：之后 delegate(domain=…) 不再经过它，等同无分管领域"}。`,
 						);
 					}
-					return text("action 只能是 create / stop / list / set_dispatch");
+					return textToolResult(
+						err("invalid_action", "action 只能是 create / stop / list / set_dispatch"),
+					);
 				},
 			}),
 		);
@@ -1472,12 +1534,12 @@ export function createTools(deps: ToolDeps) {
 					// effectivePartnerIdOfSession 落到非 chief 的真实 uuid = 某执事的会话 → 拒。
 					const effective = effectivePartnerIdOfSession(ctx.store, conversationId);
 					if (effective !== null && effective !== CHIEF_PARTNER_ID) {
-						return text("只有总管可以建群");
+						return textToolResult(err("forbidden", "只有总管可以建群"));
 					}
 					if (args.action === "list") {
 						const rows = ctx.store.listGroups();
-						if (rows.length === 0) return text("（暂无群组；用 create 建一个）");
-						return text(
+						if (rows.length === 0) return writeToolResult("（暂无群组；用 create 建一个）");
+						return writeToolResult(
 							rows
 								.map((row) => {
 									const duty = row.members.find(
@@ -1499,13 +1561,33 @@ export function createTools(deps: ToolDeps) {
 					}
 					if (args.action === "create") {
 						const name = (args.name ?? "").trim();
-						if (!name) return text("create 需要 name（群名，≤40 字）");
-						if (name.length > 40) return text("群名不超过 40 字");
+						if (!name) {
+							return textToolResult(err("invalid_name", "create 需要 name（群名，≤40 字）"));
+						}
+						if (name.length > 40) {
+							return textToolResult(err("invalid_name", "群名不超过 40 字"));
+						}
 						const memberNames = (args.members ?? []).map((value) => String(value));
 						const resolved = resolvePartnersByName(memberNames, ctx.store);
-						if (!resolved.ok) return text(resolved.error);
+						// 成员名解析失败是参数非法（重名 / 查无此人），文案里已经带可用清单，
+						// 不塞进 data：data 是成功后的结构化结果，不是错误容器。
+						if (!resolved.ok) {
+							return textToolResult(
+								err(
+									resolved.error.includes("不止一位") ? "ambiguous_member" : "member_not_found",
+									resolved.error,
+								),
+							);
+						}
 						const duty = resolvePartnerByName(args.responder, ctx.store);
-						if (!duty.ok) return text(duty.error);
+						if (!duty.ok) {
+							return textToolResult(
+								err(
+									duty.error.includes("不止一位") ? "ambiguous_responder" : "member_not_found",
+									duty.error,
+								),
+							);
+						}
 						// 缺省值日 = 第一位成员（模型最常这么建：拉两个人，让先说的那位接话）
 						const dutyId = duty.value?.id ?? resolved.value[0]?.id ?? "";
 						const created = createGroupChecked(
@@ -1518,18 +1600,18 @@ export function createTools(deps: ToolDeps) {
 							},
 							ctx.store,
 						);
-						if (!created.ok) return text(created.error);
+						if (!created.ok) return textToolResult(err("bad_request", created.error));
 						const who = created.value.members.map((member) => member.name).join("、");
 						const dutyName =
 							created.value.members.find(
 								(member) => member.partnerId === created.value.responderPartnerId,
 							)?.name ?? "第一位成员";
-						return text(
+						return writeToolResult(
 							`群组 ${created.value.name} 已建好：${who}；不 @ 时 ${dutyName} 回。` +
 								"在群组页打开它就能说话（@名字 点名，@所有人 全员按顺序回）。",
 						);
 					}
-					return text("action 只能是 create / list");
+					return textToolResult(err("invalid_action", "action 只能是 create / list"));
 				},
 			}),
 		);
@@ -1602,7 +1684,13 @@ export function createTools(deps: ToolDeps) {
 						// 读库失败按"不属于任何执事"处理，不把原始错误回给模型
 					}
 					if (!partnerId) {
-						return text("这个会话不属于任何执事，不能自建巡逻（只有执事能给自己建规则）。");
+						return textToolResult(
+							err(
+								"not_partner_session",
+								"这个会话不属于任何执事，不能自建巡逻（只有执事能给自己建规则）。",
+								"让执事在自己的会话里建；主对话不代建。",
+							),
+						);
 					}
 					let result: RoutineManageResult;
 					try {
@@ -1621,24 +1709,31 @@ export function createTools(deps: ToolDeps) {
 						);
 					} catch (error) {
 						const detail = error instanceof Error ? error.message : String(error);
-						return text(`操作失败：${detail.slice(0, 200)}`);
+						return textToolResult(err("failed", `操作失败：${detail.slice(0, 200)}`));
 					}
 					// 自建标记：这条规则的首轮 runSource 记 routine_self（批 15 §三）。
 					if (result.ok && args.action === "create" && result.routineId) {
 						deps.markSelfRoutine?.(result.routineId);
 					}
+					// 失败码直接用核心层的稳定枚举（bad_request / not_found / limit）。
+					if (!result.ok) return textToolResult(err(result.code, result.message));
 					// create / enable 要排 durable 闹钟；排不上只 warn + 在回话里如实说，
 					// 规则已经落库（revision / 防自环由 routines.ts 既有机制照常生效）。
-					if (result.ok && result.schedule && result.routineId && scheduleRoutine) {
+					if (result.schedule && result.routineId && scheduleRoutine) {
 						try {
 							await scheduleRoutine(result.routineId);
 						} catch (error) {
 							const detail = error instanceof Error ? error.message : String(error);
 							console.warn(`[routine_manage] 排定时链失败（规则已建）: ${detail.slice(0, 200)}`);
-							return text(`${result.message}（定时链没排上，需主人检查会话：${detail.slice(0, 80)}）`);
+							// 规则已落库，这是"部分成功"不是失败：message 保留旧文案，
+							// scheduled=false 让模型知道闹钟没排上。
+							return writeToolResult(
+								`${result.message}（定时链没排上，需主人检查会话：${detail.slice(0, 80)}）`,
+								{ scheduled: false },
+							);
 						}
 					}
-					return text(result.message);
+					return writeToolResult(result.message);
 				},
 			}),
 		);

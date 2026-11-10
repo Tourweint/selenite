@@ -50,19 +50,33 @@ function manageTool(store: PartnersStore, workRoot: string) {
 }
 
 /** 跑一次工具，拼回纯文本输出。conversationId 默认主人会话（解析为 chief，放行）。 */
-async function run(
+async function runRaw(
 	tool: NonNullable<ReturnType<typeof manageTool>>,
 	args: Record<string, unknown>,
 	conversationId = 100,
-): Promise<string> {
+): Promise<{ ok: boolean; data?: any; error?: { code: string; message: string; hint?: string } }> {
 	const result = await tool.execute(
 		args as never,
 		{ conversationId } as never,
 		{} as never,
 	);
-	return (result.output ?? [])
+	const text = (result.output ?? [])
 		.map((item) => (item.type === "text" ? item.text : ""))
 		.join("");
+	return JSON.parse(text);
+}
+
+/**
+ * 迁移后（批 25 §一）输出是统一契约，人读文案在 `data.message` / `error.message`。
+ * 这里取回文案本身——旧断言继续按"文案逐字不变"验收，形状另用 `runRaw` 断言。
+ */
+async function run(
+	tool: NonNullable<ReturnType<typeof manageTool>>,
+	args: Record<string, unknown>,
+	conversationId = 100,
+): Promise<string> {
+	const parsed = await runRaw(tool, args, conversationId);
+	return parsed.ok ? (parsed.data?.message ?? "") : (parsed.error?.message ?? "");
 }
 
 // ── create ───────────────────────────────────────────────
@@ -227,6 +241,58 @@ test("list：没有执事时给模型友好提示", async () => {
 		const tool = manageTool(env.store, env.workRoot);
 		const out = await run(tool, { action: "list" });
 		assert.match(out, /暂无执事/);
+	} finally {
+		env.cleanup();
+	}
+});
+
+// ── 统一契约（2026-11-10 批 25 §一）────────────────────────
+test("契约：成功外层是 ok + data.message，文案逐字不变", async () => {
+	const env = tempRoot();
+	try {
+		const tool = manageTool(env.store, env.workRoot);
+		const created = await runRaw(tool, { action: "create", name: "阿岚", domain: "finance" });
+		assert.equal(created.ok, true);
+		assert.deepEqual(Object.keys(created), ["ok", "data"], "成功只有 ok + data");
+		assert.equal(
+			created.data.message,
+			"执事 阿岚 已就位（领域标签：finance）。之后 delegate(domain=finance) 或直接按名字派都行。",
+		);
+
+		// list 也是成功：空态 / 有内容都走 ok，不当错误
+		const empty = await runRaw(tool, { action: "list", partnerId: "not-exist" });
+		assert.equal(empty.ok, true);
+		assert.equal(empty.data.message, "（暂无执事；用 create 建一个）");
+	} finally {
+		env.cleanup();
+	}
+});
+
+test("契约：真失败走 err(code,message)，越权与参数非法各给稳定码", async () => {
+	const env = tempRoot();
+	try {
+		const tool = manageTool(env.store, env.workRoot);
+		const other = env.store.create("小澈");
+		env.store.linkSession({
+			partnerId: other.id,
+			role: "canonical",
+			routeKey: "canonical",
+			sessionId: 999,
+		});
+
+		const forbidden = await runRaw(tool, { action: "create", name: "阿岚" }, 999);
+		assert.deepEqual(forbidden, {
+			ok: false,
+			error: { code: "forbidden", message: "只有总管可以管理执事" },
+		});
+
+		const noName = await runRaw(tool, { action: "create" });
+		assert.equal(noName.ok, false);
+		assert.equal(noName.error?.code, "invalid_name");
+
+		const badAction = await runRaw(tool, { action: "explode" });
+		assert.equal(badAction.ok, false);
+		assert.equal(badAction.error?.code, "invalid_action");
 	} finally {
 		env.cleanup();
 	}

@@ -2116,6 +2116,66 @@ try {
 		`${partnerList.partners?.length ?? 0} 行`,
 	);
 
+	// ── 23b. 团队包（2026-11-10 批 25 §二）────────────────────
+	// 导出 → 改名导入 → 重名 400；开关关掉的两个 404 放在下面同一轮重启里验。
+	console.log("\n· 23b. 团队包：导出附件 / 导入落安全态 / 重名 400");
+	const bundleResponse = await fetch(`${BASE}/api/v1/partners/${contractPartnerId}/bundle`);
+	const bundleDisposition = bundleResponse.headers.get("content-disposition") ?? "";
+	const bundleBody = (await bundleResponse.text()).trim();
+	let bundleJson: Record<string, any> | null = null;
+	try {
+		bundleJson = JSON.parse(bundleBody) as Record<string, any>;
+	} catch {
+		bundleJson = null;
+	}
+	check(
+		bundleResponse.status === 200 &&
+			/^attachment; filename=".*\.json"/.test(bundleDisposition) &&
+			bundleJson?.format === "lifediary-partner-bundle" &&
+			bundleJson?.partner?.name === "契约探针" &&
+			typeof bundleJson?.contract === "string" &&
+			bundleJson.contract.includes("## 职责范围") &&
+			bundleJson?.safety?.approvalLevel === "ask-all",
+		"GET /partners/:id/bundle：JSON 附件，含档案 / SOUL / 契约 / safety",
+		String(bundleResponse.status),
+	);
+
+	const importPayload = JSON.parse(JSON.stringify(bundleJson ?? {})) as Record<string, any>;
+	if (importPayload.partner) importPayload.partner.name = "导入探针";
+	// 故意把包里的开关改成"最松"：导入必须无视，落成安全态。
+	importPayload.safety = { approvalLevel: "none", skillsEnabled: true, routinesPaused: false };
+	if (importPayload.partner) importPayload.partner.status = "active";
+	const imported = await fetch(`${BASE}/api/v1/partners/import-bundle`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify(importPayload),
+	});
+	const importedBody = (await imported.json()) as {
+		partner?: { name?: string; status?: string; domain?: string | null };
+		safety?: { approvalLevel?: string };
+	};
+	check(
+		imported.status === 201 &&
+			importedBody.partner?.name === "导入探针" &&
+			importedBody.partner.status === "paused" &&
+			!importedBody.partner.domain &&
+			importedBody.safety?.approvalLevel === "ask-all",
+		"POST import-bundle：201，到货 paused + safety 全保守（不信包里的开关）",
+		`${String(imported.status)} / ${String(importedBody.partner?.status)}`,
+	);
+
+	const duplicateImport = await fetch(`${BASE}/api/v1/partners/import-bundle`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify(importPayload),
+	});
+	const duplicateBody = (await duplicateImport.json()) as { code?: string };
+	check(
+		duplicateImport.status === 400 && duplicateBody.code === "duplicate_name",
+		"重名导入 → 400 duplicate_name，不覆盖",
+		String(duplicateImport.status),
+	);
+
 	// 两个开关同一次重启里验完：edit → 404；parts → 400；纯字符串照常
 	// 再加 8g 的 TASK_AS_CONVERSATION=false：回话端点同样 404（未启用）。
 	server.kill();
@@ -2126,6 +2186,8 @@ try {
 		TASK_AS_CONVERSATION: "false",
 		// 2026-11-08 员工人格化刀一 E1 的回滚开关：写端点 400 带说明（不是 404）
 		PARTNER_CONTRACT: "false",
+		// 2026-11-10 批 25 §2.4：团队包整体关掉 → 两个端点都 404
+		PARTNER_BUNDLE: "false",
 		COMPANIONS_ENABLED: "true",
 		AGENT_SSE_SEQ_DB_PATH: SEQ_DB,
 	});
@@ -2188,6 +2250,19 @@ try {
 	check(
 		!("contract" in contractDetailOff) && !("contractVersion" in contractDetailOff),
 		"PARTNER_CONTRACT=false：详情不带契约字段（回纯 SOUL 形态）",
+	);
+
+	// 团队包回滚开关（批 25 §2.4）：关掉 = 两个端点都 404（能力未启用）。
+	const bundleOff = await fetch(`${BASE}/api/v1/partners/${contractPartnerId}/bundle`);
+	const importOff = await fetch(`${BASE}/api/v1/partners/import-bundle`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: "{}",
+	});
+	check(
+		bundleOff.status === 404 && importOff.status === 404,
+		"PARTNER_BUNDLE=false：导出 / 导入两个端点都 404",
+		`${bundleOff.status} / ${importOff.status}`,
 	);
 
 	// ── 24. 员工人格化刀二：currentGoal / 自建巡逻上架（2026-11-08）──────
