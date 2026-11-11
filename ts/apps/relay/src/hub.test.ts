@@ -52,6 +52,9 @@ function connectClient(port: number, token: string): Client {
 	const waiters: Array<(value: unknown) => void> = [];
 	ws.on("message", (raw: Buffer) => {
 		const message = JSON.parse(raw.toString("utf8")) as unknown;
+		// 2026-11-11 批R R3：presence 是纯增量帧，老客户端按协议约定静默忽略。
+		// 这里照同一个语义跳过——否则每条既有用例都要多吞一帧欢迎后的名册广播。
+		if ((message as { kind?: string } | null)?.kind === "presence") return;
 		const waiter = waiters.shift();
 		if (waiter) waiter(message);
 		else queue.push(message);

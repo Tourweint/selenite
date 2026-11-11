@@ -10,6 +10,7 @@ import { STORE_PATH } from "./store.ts";
  * - RELAY_STORE_PATH    名册落点（默认 .data/relay-state.json）
  * - RELAY_OWNER_TOKEN   管理员令牌（空 = 仅 loopback 可签发加入码/撤销设备）
  * - RELAY_CODE_TTL_SECONDS / RELAY_MAX_DEVICES  配对码与设备上限
+ * - RELAY_MOBILE_PROXY_ENABLED  手机代理面开关（默认开；off = 反代与扫码加入 404）
  *
  * 日志纪律：只记设备 id / 平台 / 通道名 / 计数，channel payload 不进日志。
  */

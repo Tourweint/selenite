@@ -1,10 +1,15 @@
+import { randomUUID } from "node:crypto";
 import {
 	RELAY_MAX_FRAME_BYTES,
 	RELAY_PROTOCOL_VERSION,
+	RelayInvokeResultFrameSchema,
 	type RelayDeliver,
 	type RelayErrorFrame,
 	type RelayHello,
+	type RelayInvokeFrame,
+	type RelayInvokePayload,
 	type RelayMetaRequest,
+	type RelayPresenceFrame,
 	type RelayResult,
 } from "@lifediary/shared";
 import type { WebSocket } from "ws";
@@ -16,6 +21,9 @@ import { MAX_DESCRIPTION_LENGTH, type RelayStore } from "./store.ts";
  * 只做四件事：认人（hello）、按 dst 转发（deliver/result，覆写 src）、
  * 同设备顶替（新连接踢旧连接）、在场维护。channel/payload 对中继不透明——
  * 语义校验全部在被控端的通道白名单里，这里只看信封形状与帧长。
+ *
+ * 2026-11-11 批R 补两件：名册变更广播（presence）、反向 HTTP 代理的
+ * invoke/invoke_result 往返（中继只补路由，HTTP 语义原样透传）。
  *
  * 关闭码：4400 协议版本不符 / 4401 鉴权失败 / 4402 握手超时 / 4409 同设备顶替。
  */
@@ -49,9 +57,19 @@ export interface RouteOutcome {
 	reason?: "unknown_device" | "device_offline" | "payload_too_large" | "bad_request";
 }
 
+/** 反代一次 invoke 的结果：拿到主机的 HTTP 回包，或"发不出去/没等到"。 */
+export type InvokeOutcome =
+	| { ok: true; status: number; body: string }
+	| { ok: false; reason: "device_offline" | "timeout" | "payload_too_large" };
+
 export class RelayHub {
 	/** deviceId → 当前连接（同设备重连顶替，旧连接以 4409 关闭） */
 	private conns = new Map<string, WebSocket & { hubInfo?: HubConnectionInfo }>();
+	/** invoke id → 等回包的 HTTP 请求（2026-11-11 批R R1） */
+	private invokes = new Map<
+		string,
+		{ resolve: (outcome: InvokeOutcome) => void; timer: ReturnType<typeof setTimeout> }
+	>();
 	private cleanupTimer: ReturnType<typeof setInterval> | null = null;
 
 	constructor(
@@ -93,6 +111,63 @@ export class RelayHub {
 			/* 已在关闭途中 */
 		}
 		return true;
+	}
+
+	/**
+	 * 反向 HTTP 代理（2026-11-11 批R R1）：把一条 HTTP 请求作为 invoke 帧投给目标设备，
+	 * 等它的 invoke_result。**不排队**：目标不在线立刻返回，超时按调用方口径回 504。
+	 *
+	 * 中继不解析、不改写 status/body——它只是把"手机发来的 HTTP"运到主机再运回来。
+	 */
+	invoke(deviceId: string, payload: RelayInvokePayload, timeoutMs = 15_000): Promise<InvokeOutcome> {
+		const conn = this.conns.get(deviceId);
+		if (!conn || conn.readyState !== 1 /* OPEN */) {
+			return Promise.resolve({ ok: false, reason: "device_offline" });
+		}
+		const frame: RelayInvokeFrame = { kind: "invoke", id: randomUUID(), payload };
+		// 帧长沿用中继上限：超了不发（HTTP 侧翻成 413），别让目标端 ws 静默丢帧。
+		if (Buffer.byteLength(JSON.stringify(frame)) > RELAY_MAX_FRAME_BYTES) {
+			return Promise.resolve({ ok: false, reason: "payload_too_large" });
+		}
+		if ((conn.bufferedAmount ?? 0) > BACKPRESSURE_LIMIT_BYTES) {
+			return Promise.resolve({ ok: false, reason: "device_offline" });
+		}
+		return new Promise<InvokeOutcome>((resolve) => {
+			const timer = setTimeout(() => {
+				this.invokes.delete(frame.id);
+				resolve({ ok: false, reason: "timeout" });
+			}, timeoutMs);
+			timer.unref?.();
+			this.invokes.set(frame.id, { resolve, timer });
+			try {
+				conn.send(JSON.stringify(frame));
+				this.log(`[relay] invoke device=${deviceId} id=${frame.id}`);
+			} catch {
+				this.invokes.delete(frame.id);
+				clearTimeout(timer);
+				resolve({ ok: false, reason: "device_offline" });
+			}
+		});
+	}
+
+	/** 名册变更广播（R3）：hello 成功 / 连接关闭后推全量投影给所有在线连接。 */
+	private broadcastPresence(): void {
+		const frame: RelayPresenceFrame = {
+			kind: "presence",
+			devices: this.store.listDevices(Date.now(), this.onlineIds),
+		};
+		const text = JSON.stringify(frame);
+		for (const conn of this.conns.values()) {
+			if (conn.readyState !== 1) continue;
+			// 慢消费者不为一条名册帧触发 1013（那是 deliver 的保命闸门），跳过即可：
+			// 下次 hello/bye 还会再广播，名册最终一致。
+			if ((conn.bufferedAmount ?? 0) > BACKPRESSURE_LIMIT_BYTES) continue;
+			try {
+				conn.send(text);
+			} catch {
+				/* 已在关闭途中 */
+			}
+		}
 	}
 
 	/** 接管一条刚 upgrade 的连接：第一帧必须是 hello（15 秒）。 */
@@ -186,6 +261,8 @@ export class RelayHub {
 				devices: this.store.listDevices(Date.now(), this.onlineIds),
 			}),
 		);
+		// 名册变了：推给所有人（含刚连上的这台——welcome 只是它自己的快照）。
+		this.broadcastPresence();
 		return hello;
 	}
 
@@ -200,6 +277,11 @@ export class RelayHub {
 		// 这是信封里唯一的"中继看得懂"的业务帧——存的是路由元数据，方案 §六备选。
 		if (frame?.kind === "meta") {
 			this.handleMeta(ws, parsed as RelayMetaRequest);
+			return;
+		}
+		if (frame?.kind === "invoke_result") {
+			// 反代回包（2026-11-11 批R R1）：只认中继自己发出去的 id，不做转发。
+			this.settleInvoke(parsed);
 			return;
 		}
 		if (frame?.kind === "deliver") {
@@ -232,6 +314,17 @@ export class RelayHub {
 			return;
 		}
 		this.sendError(ws, undefined, "bad_request", "未知帧类型");
+	}
+
+	/** invoke_result：按 id 兑现等回包的 HTTP 请求；认不出的 id 静默忽略。 */
+	private settleInvoke(parsed: unknown): void {
+		const result = RelayInvokeResultFrameSchema.safeParse(parsed);
+		if (!result.success) return;
+		const pending = this.invokes.get(result.data.id);
+		if (!pending) return;
+		this.invokes.delete(result.data.id);
+		clearTimeout(pending.timer);
+		pending.resolve({ ok: true, status: result.data.payload.status, body: result.data.payload.body });
 	}
 
 	private handleMeta(ws: WebSocket, meta: RelayMetaRequest): void {
@@ -380,6 +473,7 @@ export class RelayHub {
 			this.conns.delete(info.deviceId);
 			this.store.touch(info.deviceId);
 			this.log(`[relay] bye device=${info.deviceId} online=${this.conns.size}`);
+			this.broadcastPresence();
 		}
 	}
 

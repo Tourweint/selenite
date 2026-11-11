@@ -667,6 +667,83 @@ export type RelayErrorFrame = z.infer<typeof RelayErrorFrameSchema>;
 export const RelayPingSchema = z.object({ kind: z.literal("ping"), at: z.number() });
 export const RelayPongSchema = z.object({ kind: z.literal("pong"), at: z.number() });
 
+// ── 手机经中继（2026-11-11 批R）────────────────────────────────────────
+//
+// R1 反向 HTTP 代理：手机把 base 指到中继，REST 由中继收下、以 `invoke` 帧投给
+// 名册里的任务主机执行，主机回 `invoke_result`，中继把 status/body **原样**回给手机。
+// 中继不看 HTTP 语义，只补路由；查询串与正文都是原文，不做二次编码。
+// 协议版本仍是 v1——新增帧都是"认不出就忽略"的增量。
+
+export const RelayInvokePayloadSchema = z
+	.object({
+		/** 大写 HTTP 方法（GET/POST/…），中继按原样投递 */
+		method: z.string().min(1).max(16),
+		/** 完整服务端路径（含 `/api/v1` 前缀），不含查询串 */
+		path: z.string().min(1).max(2048),
+		/** 含前导 `?` 的查询串；没有查询串为空串 */
+		query: z.string().max(2048),
+		/** 只带手机原始请求的 authorization（中继不替换，也不存 harness 令牌） */
+		headers: z.record(z.string()),
+		/** 请求正文原文；没有正文 = null */
+		body: z.string().nullable(),
+	})
+	.strict();
+export type RelayInvokePayload = z.infer<typeof RelayInvokePayloadSchema>;
+
+/** 中继 → 任务主机：代理一条 HTTP 请求。 */
+export const RelayInvokeFrameSchema = z
+	.object({
+		kind: z.literal("invoke"),
+		id: z.string().min(1).max(64),
+		payload: RelayInvokePayloadSchema,
+	})
+	.strict();
+export type RelayInvokeFrame = z.infer<typeof RelayInvokeFrameSchema>;
+
+/** 任务主机 → 中继：HTTP 结果（status + 正文原文）。 */
+export const RelayInvokeResultFrameSchema = z
+	.object({
+		kind: z.literal("invoke_result"),
+		id: z.string().min(1).max(64),
+		payload: z
+			.object({
+				status: z.number().int().min(100).max(599),
+				body: z.string(),
+			})
+			.strict(),
+	})
+	.strict();
+export type RelayInvokeResultFrame = z.infer<typeof RelayInvokeResultFrameSchema>;
+
+/**
+ * 名册变更广播（R3）：hello 成功与连接关闭后推给**所有在线连接**。
+ * 全量投影（复用 `RelayDeviceView`），不是增量——帧小频低，省掉客户端合并逻辑。
+ * 老客户端必须静默忽略未知 kind（协议既有约定）。
+ */
+export const RelayPresenceFrameSchema = z
+	.object({
+		kind: z.literal("presence"),
+		devices: z.array(RelayDeviceViewSchema),
+	})
+	.strict();
+export type RelayPresenceFrame = z.infer<typeof RelayPresenceFrameSchema>;
+
+/** 扫码加入（R2）：一次性加入码换设备凭据。码本身即凭证，端点免 Bearer。 */
+export const RelayJoinRequestSchema = z.object({
+	joinCode: z.string().min(1).max(128),
+	deviceName: z.string().min(1).max(40),
+	platform: z.string().max(20).optional(),
+});
+export type RelayJoinRequest = z.infer<typeof RelayJoinRequestSchema>;
+
+/** 加入成功只回这一次明文 deviceToken（中继只存 sha256）。 */
+export const RelayJoinResponseSchema = z.object({
+	deviceId: z.string().min(1),
+	deviceToken: z.string().min(1),
+	protocolVersion: z.number().int(),
+});
+export type RelayJoinResponse = z.infer<typeof RelayJoinResponseSchema>;
+
 /** 通道名约定：主动推送以 "push/" 开头（是否可推仍由被控端白名单决定）。 */
 export const RELAY_PUSH_CHANNEL_PREFIX = "push/";
 

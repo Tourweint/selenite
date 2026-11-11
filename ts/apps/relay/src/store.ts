@@ -47,6 +47,21 @@ export interface StoredCode {
 	attempts: number;
 }
 
+/**
+ * 一次性加入码（2026-11-11 批R R2，扫码加入）。
+ *
+ * 与 `StoredCode`（6 位配对码，同刻一枚）刻意分开：加入码是 256 位随机串、
+ * 10 分钟 TTL、最多 5 个并发——扫码场景要"电脑出码、手机扫完即用"，
+ * 短码那套"新码顶旧码 + 错 5 次作废"的防爆破逻辑用不上（256 位猜不了）。
+ * 两套都只存 sha256，明文只在签发那一刻存在。
+ */
+export interface StoredJoinCode {
+	/** sha256(joinCode) */
+	hash: string;
+	expiresAt: number;
+	createdAt: number;
+}
+
 export interface StoredActor {
 	actorId: string;
 	name: string;
@@ -59,6 +74,8 @@ export interface Store {
 	devices: StoredDevice[];
 	/** 伙伴 → 主机路由表（阶段三）：路由元数据，中继仲裁的唯一状态 */
 	actors?: StoredActor[];
+	/** 扫码加入码（2026-11-11 批R）：只存 sha256，10 分钟 TTL、一次性 */
+	joinCodes?: StoredJoinCode[];
 	/**
 	 * 任务主机位（2026-11-05 主机优先制）：**全矩阵唯一**，同刻只有一台。
 	 * 与上面的伙伴归属 `actors[].homeDeviceId` 是**两个概念**（任务主机位 vs 伙伴归属），
@@ -78,12 +95,13 @@ export interface RedeemSuccess {
 	deviceToken: string;
 }
 
-function sha256(value: string): string {
+/** sha256 十六进制摘要。配对码 / 设备令牌 / 加入码共用（pairing.ts 也用它）。 */
+export function sha256(value: string): string {
 	return createHash("sha256").update(value).digest("hex");
 }
 
 /** 定长比较（两个 sha256 hex 等长），避免把"前缀对了"泄露给计时攻击 */
-function hashEquals(a: string, b: string): boolean {
+export function hashEquals(a: string, b: string): boolean {
 	const bufferA = Buffer.from(a);
 	const bufferB = Buffer.from(b);
 	if (bufferA.length !== bufferB.length) return false;
@@ -107,6 +125,7 @@ export class RelayStore {
 			return {
 				code: parsed.code,
 				devices: Array.isArray(parsed.devices) ? parsed.devices : [],
+				joinCodes: Array.isArray(parsed.joinCodes) ? parsed.joinCodes : [],
 				// 主机位必须随盘走：重启后名册还在、主机位却丢了，等于用户静默被改配置
 				homeDeviceId: typeof parsed.homeDeviceId === "string" ? parsed.homeDeviceId : null,
 			};
@@ -163,6 +182,48 @@ export class RelayStore {
 		);
 	}
 
+	/**
+	 * 有效加入码（未过期）。过期条目读时过滤、落盘时自然消失——不需要独立的清扫器。
+	 * 策略（TTL / 并发上限 / 一次性）在 pairing.ts，这里只管持久化口径。
+	 */
+	readJoinCodes(now = Date.now()): StoredJoinCode[] {
+		return (this.data.joinCodes ?? []).filter((item) => item.expiresAt > now);
+	}
+
+	writeJoinCodes(codes: StoredJoinCode[]): void {
+		this.data.joinCodes = codes;
+		this.save();
+	}
+
+	/**
+	 * 签发一台新设备（2026-11-11 批R 从 `redeem` 抽出）：配对码兑换与扫码加入
+	 * 共用同一套令牌生成 / 名字截断 / 设备上限淘汰逻辑，两条路不发散。
+	 * 明文 deviceToken 只在这里返回一次，落盘的是 sha256。
+	 */
+	createDevice(
+		deviceName: string,
+		platform: string,
+		capabilities: string[],
+		now = Date.now(),
+	): RedeemSuccess {
+		const deviceToken = randomBytes(32).toString("base64url");
+		const device: StoredDevice = {
+			id: randomBytes(8).toString("hex"),
+			name: deviceName.trim().slice(0, 40) || "未命名设备",
+			platform: platform.trim().slice(0, 20) || "unknown",
+			tokenHash: sha256(deviceToken),
+			createdAt: now,
+			capabilities: capabilities.slice(0, 16),
+		};
+		// 设备上限：踢掉最久没上线的（防无限堆积），与 harness pairing 同口径
+		this.data.devices = [...this.data.devices, device]
+			.filter((item) => !item.revokedAt)
+			.sort((a, b) => (b.lastSeenAt ?? b.createdAt) - (a.lastSeenAt ?? a.createdAt))
+			.slice(0, MAX_DEVICES);
+		this.save();
+		return { deviceId: device.id, deviceToken };
+	}
+
 	/** 用加入码换设备凭据。错码累计尝试次数，撞上限作废。 */
 	redeem(
 		code: string,
@@ -183,23 +244,9 @@ export class RelayStore {
 			return current.attempts >= MAX_CODE_ATTEMPTS ? "too_many_attempts" : "unknown_code";
 		}
 
-		const deviceToken = randomBytes(32).toString("base64url");
-		const device: StoredDevice = {
-			id: randomBytes(8).toString("hex"),
-			name: deviceName.trim().slice(0, 40) || "未命名设备",
-			platform: platform.trim().slice(0, 20) || "unknown",
-			tokenHash: sha256(deviceToken),
-			createdAt: now,
-			capabilities: capabilities.slice(0, 16),
-		};
 		current.usedAt = now;
-		// 设备上限：踢掉最久没上线的（防无限堆积），与 harness pairing 同口径
-		this.data.devices = [...this.data.devices, device]
-			.filter((item) => !item.revokedAt)
-			.sort((a, b) => (b.lastSeenAt ?? b.createdAt) - (a.lastSeenAt ?? a.createdAt))
-			.slice(0, MAX_DEVICES);
-		this.save();
-		return { deviceId: device.id, deviceToken };
+		// createDevice 内落盘，usedAt 同一次写盘持久化（不再单独 save）
+		return this.createDevice(deviceName, platform, capabilities, now);
 	}
 
 	/** 设备令牌 → deviceId（连接鉴权每次都走；lastSeenAt 最多每分钟落一次盘）。 */
