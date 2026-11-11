@@ -44,6 +44,48 @@ export function deviceMaxActivePerDevice(env: NodeJS.ProcessEnv = process.env): 
 	return Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : 3;
 }
 
+/**
+ * 中继手机代理面（2026-11-11 批H H1）：`mobile/proxy` 通道与「添加设备」加入码。
+ * 默认**开**（与中继侧同名开关同口径，批R 已按默认开部署）；只有显式 `off/false/0` 才关。
+ * 关 = 被控端不注册该通道（fail-closed，中继发来的 invoke 一律回 404），
+ * 同时 harness 的 `POST /api/v1/relay/join-code` 也 404。
+ */
+export function relayMobileProxyEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = (env.RELAY_MOBILE_PROXY_ENABLED ?? "").trim().toLowerCase();
+	return raw !== "off" && raw !== "false" && raw !== "0";
+}
+
+/**
+ * 中继的对外 HTTP 形态（2026-11-11 批H H2）：由 `RELAY_URL` 推出来给二维码用。
+ *
+ * `RELAY_URL` 是本进程连 WS 用的地址（`ws(s)://host:port[/ws]`，见 relaySettings），
+ * 手机要的是 `http(s)://host:port`。非 http(s)/ws(s) 或解析失败 → 空串（调用方要求手填）。
+ * 传入任意用户填的地址也走这一支：只放行 http(s)，顺带拒绝带账号密码的 URL。
+ */
+export function normalizeRelayHttpBase(raw: string): string {
+	const text = raw.trim();
+	if (!text) return "";
+	let url: URL;
+	try {
+		url = new URL(text);
+	} catch {
+		return "";
+	}
+	if (url.username || url.password) return "";
+	if (url.protocol === "ws:") url.protocol = "http:";
+	else if (url.protocol === "wss:") url.protocol = "https:";
+	else if (url.protocol !== "http:" && url.protocol !== "https:") return "";
+	url.pathname = url.pathname.replace(/\/ws\/?$/, "").replace(/\/+$/, "");
+	url.search = "";
+	url.hash = "";
+	return url.toString().replace(/\/$/, "");
+}
+
+/** 默认中继 HTTP 地址（`RELAY_URL` 的对外形态）；没配就空串，让弹窗里手填。 */
+export function relayHttpBase(env: NodeJS.ProcessEnv = process.env): string {
+	return normalizeRelayHttpBase(env.RELAY_URL ?? "");
+}
+
 /** 执事认主机（阶段三）：harness 注册/领取执事归属。依赖中继。 */
 export function companionHomeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
 	const raw = (env.COMPANION_HOME_ENABLED ?? "").trim().toLowerCase();

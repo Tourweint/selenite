@@ -11112,6 +11112,16 @@ async function renderSettings() {
           </div>
           <img class="pair-qr" id="pair-qr" alt="配对二维码" hidden />
         </div>
+        <div class="divider"></div>
+        <div class="row">
+          <div class="row-main">
+            <div class="row-label" data-tip="手机在外网/流量下也能连这台电脑：经中继出一枚一次性加入码，手机 App 扫码即加入。">经中继添加设备</div>
+            <div class="row-hint">加入码 10 分钟内有效、只能用一次；扫完就出现在「已连接的设备」里。</div>
+          </div>
+          <div class="row-control">
+            <button class="ghost" type="button" id="relay-add-device">添加设备</button>
+          </div>
+        </div>
       </div>`,
     )}
     ${sectionMarkup(
@@ -11119,6 +11129,7 @@ async function renderSettings() {
       `<div class="card" id="device-card"></div>`,
     )}`;
     document.getElementById("pair-refresh").addEventListener("click", () => void loadPair());
+    document.getElementById("relay-add-device").addEventListener("click", () => openAddDeviceModal());
     void loadPair();
     void loadDevices();
     // 配对码是限时的，停在这一页太久就自己换一张，别让人扫到过期码
@@ -13386,6 +13397,98 @@ async function loadPair() {
     urlEl.textContent = "拿不到配对信息";
     metaEl.textContent = String(error.message || error);
   }
+}
+
+/**
+ * 「添加设备」（2026-11-11 批H H2）：经中继出一枚一次性加入码。
+ *
+ * 浏览器不直连中继——跨源没开 CORS，owner 令牌也绝不能下发客户端。
+ * 这里调 harness 的 `/api/v1/relay/join-code`，由服务端代调中继并生成二维码。
+ * 地址默认取 `RELAY_URL` 的对外形态，弹窗里可改（内网/域名对外形态不同）。
+ * 手机加没加上不在弹窗里回显：扫完去「已连接的设备」看（同一页下面就是）。
+ */
+function openAddDeviceModal() {
+  openModal("添加设备", (body) => {
+    body.innerHTML = `
+      <div class="modal-field">
+        <span>中继地址</span>
+        <input class="modal-input" id="relay-join-url" spellcheck="false" autocomplete="off"
+               placeholder="http://<中继地址>:<端口>" aria-label="中继地址" />
+      </div>
+      <div class="relay-join">
+        <img class="relay-join-qr" id="relay-join-qr" alt="加入二维码" hidden />
+        <div class="relay-join-side">
+          <div class="relay-join-label">加入码</div>
+          <div class="relay-join-code" id="relay-join-code">正在取码…</div>
+          <div class="relay-join-meta" id="relay-join-meta"></div>
+        </div>
+      </div>
+      <div class="modal-hint" id="relay-join-hint">手机 App 扫上面的码即可加入；加入码只能用一次。</div>
+      <div class="modal-actions">
+        <button class="modal-primary" type="button" id="relay-join-refresh">换新码</button>
+      </div>`;
+    const urlInput = body.querySelector("#relay-join-url");
+    const codeEl = body.querySelector("#relay-join-code");
+    const qrEl = body.querySelector("#relay-join-qr");
+    const metaEl = body.querySelector("#relay-join-meta");
+    const hintEl = body.querySelector("#relay-join-hint");
+    const refresh = body.querySelector("#relay-join-refresh");
+    let expiresAt = 0;
+    let timer = 0;
+
+    const paintLeft = () => {
+      // 弹窗关掉后 body 会被清空：定时器自己收尾，别留着空转
+      if (!codeEl.isConnected) { clearInterval(timer); return; }
+      const left = Math.max(0, expiresAt - Date.now());
+      if (!left) { metaEl.textContent = "已过期，点「换新码」"; return; }
+      const minutes = Math.floor(left / 60000);
+      const seconds = Math.floor((left % 60000) / 1000);
+      metaEl.textContent = `${minutes}:${String(seconds).padStart(2, "0")} 后过期 · 只能用一次`;
+    };
+
+    const render = (data) => {
+      urlInput.value = data.relayUrl || urlInput.value;
+      codeEl.textContent = data.joinCode;
+      qrEl.src = data.dataUrl;
+      qrEl.hidden = false;
+      expiresAt = Number(data.expiresAt) || 0;
+      clearInterval(timer);
+      paintLeft();
+      timer = setInterval(paintLeft, 1000);
+      hintEl.textContent = "手机 App 扫上面的码即可加入；加入码只能用一次。";
+      hintEl.classList.remove("is-error");
+    };
+
+    const load = async () => {
+      if (refresh.disabled) return;
+      refresh.disabled = true;
+      hintEl.textContent = "正在取码…";
+      hintEl.classList.remove("is-error");
+      try {
+        const response = await request("/api/v1/relay/join-code", {
+          method: "POST",
+          body: JSON.stringify({ relayUrl: urlInput.value.trim() }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          hintEl.textContent = data.message || `取码失败：HTTP ${response.status}`;
+          hintEl.classList.add("is-error");
+          return;
+        }
+        render(data);
+      } catch (error) {
+        if (error.message !== "forbidden") {
+          hintEl.textContent = `取码失败：${error.message}`;
+          hintEl.classList.add("is-error");
+        }
+      } finally {
+        refresh.disabled = false;
+      }
+    };
+
+    refresh.addEventListener("click", () => void load());
+    void load();
+  });
 }
 
 /** 工具活动可以整体隐掉（只看回答的那种用法） */

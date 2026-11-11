@@ -103,8 +103,9 @@ export function createRelayApp(store: RelayStore, hub: RelayHub): Hono {
 	// status/body 原样回给手机。**只默认路由到主机**——目标设备不可指定，避免手机凭
 	// token 把请求打到任意设备（越权面收敛）。
 	//
-	// 鉴权：走既有 deviceIdOf；手机令牌必须就是 harness 的 AGENT_TOKEN，
-	// 中继不存 harness 令牌、也不替换 Authorization（第一版已知简化）。
+	// 鉴权：走既有 deviceIdOf（手机令牌是 join/配对签发的设备令牌）。中继不存 harness
+	// 令牌、也不替换 Authorization；harness 侧（批H `mobile/proxy`）在内部调用时映射成
+	// 自己的 AGENT_TOKEN——"扫码加入 = 授权这台手机用这台电脑"。
 	app.all("/api/v1/*", async (c) => {
 		if (!mobileProxyEnabled()) return c.body(null, 404);
 		if (!deviceIdOf(c.req.header("authorization"))) return c.body(null, 403);

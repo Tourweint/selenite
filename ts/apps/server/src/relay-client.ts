@@ -3,9 +3,12 @@ import {
 	RELAY_MAX_FRAME_BYTES,
 	RELAY_PROTOCOL_VERSION,
 	RelayErrorFrameSchema,
+	RelayInvokeFrameSchema,
 	type RelayErrorFrame,
 	type RelayErrorCode,
 	type RelayHello,
+	type RelayInvokeFrame,
+	type RelayInvokePayload,
 	type RelayMetaAction,
 	type RelayResult,
 	type RelayRouted,
@@ -35,6 +38,11 @@ export interface RelayClientOptions {
 	capabilities: string[];
 	/** 被控端通道分发器（relay-channels 提供） */
 	onInvoke: (src: string, channel: string, payload: unknown) => Promise<unknown>;
+	/**
+	 * 中继反代（2026-11-11 批H H1）：收到 `invoke` 帧 → 本进程执行 → 回 `invoke_result`。
+	 * 不传时一律回 404（通道未注册）；抛错折成 500，绝不让中继干等超时。
+	 */
+	onInvokeHttp?: (payload: RelayInvokePayload) => Promise<{ status: number; body: string }>;
 	/** 重连后恢复订阅等状态 */
 	onReconnected?: (deviceId: string) => void;
 	onDisconnected?: () => void;
@@ -221,6 +229,13 @@ export class RelayClient {
 				void this.dispatch(routed);
 				return;
 			}
+			if (kind === "invoke") {
+				// 中继反代（2026-11-11 批H）：中继 R1 直接投帧，不走 deliver/routed。
+				const invoke = RelayInvokeFrameSchema.safeParse(frame);
+				if (!invoke.success) return;
+				void this.dispatchHttp(invoke.data);
+				return;
+			}
 			if (kind === "result") {
 				const result = frame as RelayResult;
 				const pending = this.pending.get(result.id);
@@ -297,6 +312,21 @@ export class RelayClient {
 				error: { code: code as RelayErrorCode, message },
 			});
 		}
+	}
+
+	/** 反代帧：执行完回 `invoke_result`（中继只认这一种回包）。 */
+	private async dispatchHttp(frame: RelayInvokeFrame): Promise<void> {
+		let outcome: { status: number; body: string };
+		try {
+			outcome = this.options.onInvokeHttp
+				? await this.options.onInvokeHttp(frame.payload)
+				: { status: 404, body: JSON.stringify({ error: "not_found" }) };
+		} catch {
+			outcome = { status: 500, body: JSON.stringify({ error: "internal_error" }) };
+		}
+		// 日志纪律：只记状态，不记路径 / 正文 / 令牌
+		this.log(`[relay] invoke_result status=${outcome.status}`);
+		this.rawSend({ kind: "invoke_result", id: frame.id, payload: outcome });
 	}
 
 	private rawSend(frame: unknown): void {

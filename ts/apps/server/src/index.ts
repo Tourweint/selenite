@@ -93,13 +93,14 @@ import { mountWeb } from "./web.ts";
 import { mountWorkerShell } from "./worker-shell.ts";
 import { syncDiaryToMemory } from "./memory-ingest.ts";
 import { RelayClient } from "./relay-client.ts";
-import { RelayChannelHub, type RelayChannelDeps } from "./relay-channels.ts";
+import { RelayChannelHub, type RelayChannelDeps, type RelayHttpRequest } from "./relay-channels.ts";
 import {
   relayEnabled,
   relaySettings,
   deviceMatrixEnabled,
   deviceAutoDispatchEnabled,
   companionHomeEnabled,
+  relayMobileProxyEnabled,
 } from "./relay-config.ts";
 import { companionHomeController, type CompanionHomeController } from "./relay-home.ts";
 import { mountRelayMobileProxy } from "./relay-mobile-proxy.ts";
@@ -1526,6 +1527,37 @@ app.post("/api/v1/agent/reminders", async (c) => {
 let relayClient: RelayClient | null = null;
 let relayChannels: RelayChannelHub | null = null;
 let homeController: CompanionHomeController | null = null;
+
+/**
+ * mobile/proxy 的内部执行体（2026-11-11 批H H1）：直接在进程内把请求喂给 Hono，
+ * 不经过网络（免端口自环、免再走一遍 Node HTTP 栈），status 与正文原样回给中继。
+ *
+ * 鉴权映射：手机带的是中继签发的 deviceToken，与本进程 AGENT_TOKEN 不是同一套
+ * （批R 已知简化 + join 流程的固有冲突）。中继在投 invoke 前已经验过 deviceToken，
+ * 所以这里**一律用本进程 AGENT_TOKEN** 作为内部凭据；没配令牌时不注入（fail-closed，
+ * 内部鉴权会按非本机拒掉）。
+ */
+async function dispatchRelayHttp(request: RelayHttpRequest): Promise<{ status: number; body: string }> {
+  const headers: Record<string, string> = {};
+  for (const [key, value] of Object.entries(request.headers)) {
+    const name = key.toLowerCase();
+    // 逐跳头不带进内部调用（app.request 自己会算 body 长度）
+    if (name === "host" || name === "connection" || name === "content-length" || name === "transfer-encoding") {
+      continue;
+    }
+    headers[name] = value;
+  }
+  const agentToken = process.env.AGENT_TOKEN?.trim();
+  if (agentToken) headers.authorization = `Bearer ${agentToken}`;
+  const method = request.method.toUpperCase();
+  const response = await app.request(`${request.path}${request.query}`, {
+    method,
+    headers,
+    ...(request.body !== null && method !== "GET" && method !== "HEAD" ? { body: request.body } : {}),
+  });
+  return { status: response.status, body: await response.text() };
+}
+
 if (relayEnabled()) {
   const settings = relaySettings();
   if (!settings) {
@@ -1546,6 +1578,8 @@ if (relayEnabled()) {
       approvals: () => approvalStore(),
       // 阶段三：降级执事的专线会话拒绝经这台设备代发（fail-closed）
       chatSendGuard: async (conversationId) => (await homeController?.chatSendGuard(conversationId)) ?? null,
+      // 批H H1：反代通道。开关关着 = 不传执行体 = 通道未注册（invoke 一律 404）。
+      dispatchHttp: relayMobileProxyEnabled() ? dispatchRelayHttp : undefined,
     };
     relayChannels = new RelayChannelHub(
       deps,
@@ -1564,6 +1598,11 @@ if (relayEnabled()) {
       onInvoke: (src, channel, payload) => {
         if (!relayChannels) throw new Error("中继通道未装配");
         return relayChannels.handle(src, channel, payload);
+      },
+      // 批H H1：中继反代帧（与 routed 通道并行的另一条入站路）
+      onInvokeHttp: (payload) => {
+        if (!relayChannels) return Promise.resolve({ status: 404, body: JSON.stringify({ error: "not_found" }) });
+        return relayChannels.handleHttpInvoke(payload);
       },
       onReconnected: () => {
         void homeController?.ensureDemotion().catch(() => {});

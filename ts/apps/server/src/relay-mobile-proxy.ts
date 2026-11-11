@@ -1,4 +1,5 @@
 import type { Hono } from "hono";
+import QRCode from "qrcode";
 import type { RelayClient } from "./relay-client.ts";
 import {
 	listRemoteDelegations,
@@ -9,7 +10,14 @@ import {
 	companionHomeController,
 	type CompanionHomeController,
 } from "./relay-home.ts";
-import { companionHomeEnabled, deviceAutoDispatchEnabled, deviceMatrixEnabled } from "./relay-config.ts";
+import {
+	companionHomeEnabled,
+	deviceAutoDispatchEnabled,
+	deviceMatrixEnabled,
+	normalizeRelayHttpBase,
+	relayHttpBase,
+	relayMobileProxyEnabled,
+} from "./relay-config.ts";
 import { externalChatIds, sayInConversation } from "./agent.ts";
 import type { ChatIndexEntry } from "./agent.ts";
 
@@ -110,6 +118,58 @@ export function mountRelayMobileProxy(app: Hono, deps: RelayMobileProxyDeps): vo
 			const message = error instanceof Error ? error.message : "派发失败";
 			return c.json({ error: code, message }, 502);
 		}
+	});
+
+	// ── 「添加设备」加入码（2026-11-11 批H H2）────────────────────
+	//
+	// 浏览器**不直连中继**：跨源没开 CORS，owner 令牌也绝不能下发客户端（密钥纪律）。
+	// 这里由 harness 代调中继 `POST /api/relay/join-code`，只把加入码/二维码/地址交给页面。
+	// owner 令牌只从本进程 env 读（RELAY_OWNER_TOKEN，与中继侧同名）；没配就不带——
+	// 中继在"未配 owner 令牌"时按自有口径放行（部署机 loopback 直调那条）。
+	//
+	// relayUrl 可由弹窗覆盖（内网/域名等对外形态不同）；只放行 http(s)，防被当成任意 SSRF 跳板。
+	app.post("/api/v1/relay/join-code", async (c) => {
+		if (!relayMobileProxyEnabled()) return c.json({ error: "not_available" }, 404);
+		const body = (await c.req.json().catch(() => null)) as { relayUrl?: unknown } | null;
+		const requested = typeof body?.relayUrl === "string" ? body.relayUrl.trim() : "";
+		const base = normalizeRelayHttpBase(requested || relayHttpBase());
+		if (!base) {
+			return c.json({ error: "bad_request", message: "中继地址需要 http(s)://host[:端口]" }, 400);
+		}
+		const ownerToken = process.env.RELAY_OWNER_TOKEN?.trim() ?? "";
+		let response: Response;
+		try {
+			response = await fetch(`${base}/api/relay/join-code`, {
+				method: "POST",
+				...(ownerToken ? { headers: { authorization: `Bearer ${ownerToken}` } } : {}),
+				signal: AbortSignal.timeout(8_000),
+			});
+		} catch {
+			return c.json({ error: "relay_unreachable", message: "连不上中继，检查地址与网络" }, 502);
+		}
+		if (response.status === 403) {
+			return c.json(
+				{ error: "relay_forbidden", message: "中继拒绝了 owner 鉴权；在本机 .env 配 RELAY_OWNER_TOKEN 后重启" },
+				502,
+			);
+		}
+		if (!response.ok) {
+			return c.json({ error: "relay_error", message: `中继返回 HTTP ${response.status}` }, 502);
+		}
+		const issued = (await response.json().catch(() => null)) as {
+			joinCode?: unknown;
+			expiresAt?: unknown;
+		} | null;
+		const joinCode = typeof issued?.joinCode === "string" ? issued.joinCode : "";
+		const expiresAt = typeof issued?.expiresAt === "number" ? issued.expiresAt : 0;
+		if (!joinCode || !expiresAt) {
+			return c.json({ error: "relay_error", message: "中继回包缺少 joinCode / expiresAt" }, 502);
+		}
+		// 二维码内容 = 手机端深链；地址做百分号编码，手机侧按查询参数解码（Android Uri 默认解码）。
+		const url = `lifediary://relay/join?u=${encodeURIComponent(base)}&c=${encodeURIComponent(joinCode)}`;
+		const dataUrl = await QRCode.toDataURL(url, { margin: 1, width: 360 });
+		c.header("Cache-Control", "no-store");
+		return c.json({ joinCode, expiresAt, relayUrl: base, url, dataUrl });
 	});
 
 	// 会话列表透传（手机现有 GET /agent/chats 的同形状；不经此端点也能用）

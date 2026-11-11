@@ -2308,6 +2308,23 @@ html[data-route="settings"] .sidebar { display: none; }
 }
 .pair-meta { font-size: 11.5px; color: var(--text-3); }
 
+/* 添加设备（2026-11-11 批H）：加入码要能照着念，二维码别把字挤没 */
+.relay-join { display: flex; align-items: center; gap: 16px; }
+.relay-join-qr {
+  flex: none;
+  width: 148px; height: 148px;
+  padding: 8px;
+  background: #ffffff;
+  border-radius: var(--r-md);
+}
+.relay-join-side { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.relay-join-label { font-size: 12px; color: var(--text-3); }
+.relay-join-code {
+  font-family: var(--mono); font-size: 20px; line-height: 1.35;
+  letter-spacing: .5px; word-break: break-all; color: var(--text);
+}
+.relay-join-meta { font-size: 11.5px; color: var(--text-3); }
+
 /* 右值：只在真的放不下时才断行（break-all 会把 127.0.0.1 拆成两截） */
 .kv {
   font-family: var(--mono); font-size: 12.5px; color: var(--text-2);

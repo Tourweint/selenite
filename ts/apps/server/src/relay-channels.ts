@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
+import { RelayInvokePayloadSchema } from "@lifediary/shared";
 import type { ChatIndexEntry } from "./agent.ts";
 import type { ChatEventStore } from "./chat-events.ts";
 import type { ApprovalStore } from "./approvals.ts";
 import type { MatrixChannels } from "./relay-matrix.ts";
 import { RelayInvokeError } from "./relay-client.ts";
+import { relayMobileProxyEnabled } from "./relay-config.ts";
 
 /**
  * 中继通道层（2026-11-05 多端同步方案块1，阶段一）。
@@ -25,7 +27,27 @@ export const RELAY_INVOKE_CHANNELS = [
 	"events/unsubscribe",
 	"approvals/pending",
 	"approvals/answer",
+	// 中继反代（2026-11-11 批H H1）：手机把 REST 交给中继，中继以 invoke 帧投到本进程。
+	// 帧形状与 routed 通道不同（payload 是 HTTP 请求），走 handleHttpInvoke 单独分发。
+	"mobile/proxy",
 ] as const;
+
+/** 反代通道名：中继 R1 的 invoke 帧落到这里（与 routed 的 channel 字段共用白名单语义）。 */
+export const RELAY_MOBILE_PROXY_CHANNEL = "mobile/proxy";
+
+/** mobile/proxy 的请求形状（与 shared 的 RelayInvokePayload 同构，这里只给 deps 用）。 */
+export interface RelayHttpRequest {
+	method: string;
+	path: string;
+	query: string;
+	headers: Record<string, string>;
+	body: string | null;
+}
+
+export interface RelayHttpResult {
+	status: number;
+	body: string;
+}
 
 /** 阶段二（设备矩阵）通道：仅 DEVICE_MATRIX_ENABLED 时进白名单。 */
 export const RELAY_MATRIX_CHANNELS = [
@@ -49,6 +71,17 @@ export interface RelayChannelDeps {
 	approvals: () => ApprovalStore;
 	/** 阶段三：chat/send 前的执事降级守卫；返回非空字符串 = 拒绝原因 */
 	chatSendGuard?: (conversationId: string) => Promise<string | null>;
+	/**
+	 * mobile/proxy（2026-11-11 批H）：本进程内调 HTTP handler（index.ts 传 `app.request`，
+	 * 不真发 HTTP、免端口自环）。**不传 = 通道未注册**（RELAY_MOBILE_PROXY_ENABLED=off 时
+	 * 装配层直接不传），此时 invoke 一律回 404，等价"这条通道不存在"。
+	 */
+	dispatchHttp?: (request: RelayHttpRequest) => Promise<RelayHttpResult>;
+}
+
+/** 通道未注册 / 关闭时的统一回包（与 harness 自己的 404 形状一致）。 */
+function notFound(): RelayHttpResult {
+	return { status: 404, body: JSON.stringify({ error: "not_found" }) };
 }
 
 interface Subscription {
@@ -82,6 +115,13 @@ export class RelayChannelHub {
 			if (channel === "delegation/accept") return this.matrix.accept(payload);
 			if (channel === "delegation/busy") return this.matrix.busy();
 			return this.matrix.status(payload);
+		}
+		if (channel === RELAY_MOBILE_PROXY_CHANNEL) {
+			// routed 帧走的是通道语义：没注册就按"未开放"拒绝（invoke 帧另走 404，见 handleHttpInvoke）
+			if (!this.deps.dispatchHttp || !relayMobileProxyEnabled()) {
+				throw new RelayInvokeError("channel_not_allowed", `通道未开放：${channel}`);
+			}
+			return this.handleHttpInvoke(payload);
 		}
 		switch (channel) {
 			case "info/probe":
@@ -152,6 +192,34 @@ export class RelayChannelHub {
 			}
 			default:
 				throw new RelayInvokeError("channel_not_allowed", `通道未开放：${channel}`);
+		}
+	}
+
+	/**
+	 * mobile/proxy（2026-11-11 批H H1）：把中继投来的 HTTP 请求在本进程内执行。
+	 *
+	 * 与 routed 通道的区别是**失败不抛 RelayInvokeError**——中继只认 `invoke_result`
+	 * 帧（不认 result），抛错会让手机干等 15 秒再吃 504；所以所有失败都折成
+	 * HTTP 状态原样回传（通道未注册 404 / 形状不对 400 / 内部异常 500）。
+	 *
+	 * 只放行 `/api/v1/` 前缀：中继是可信转发方，但没必要把静态页/配对页也暴露成遥控面。
+	 */
+	async handleHttpInvoke(payload: unknown): Promise<RelayHttpResult> {
+		const dispatch = this.deps.dispatchHttp;
+		if (!dispatch || !relayMobileProxyEnabled()) return notFound();
+		const parsed = RelayInvokePayloadSchema.safeParse(payload);
+		if (!parsed.success) return { status: 400, body: JSON.stringify({ error: "bad_request" }) };
+		if (!parsed.data.path.startsWith("/api/v1/")) {
+			return { status: 400, body: JSON.stringify({ error: "bad_request" }) };
+		}
+		// 加入码是"电脑本地管理动作"，**不走手机反代**：否则任一已加入设备都能替主人继续
+		// 发码拉新设备，绕过中继侧 owner-only 的签发口径。回 404（这条路上它不存在）。
+		if (parsed.data.path === "/api/v1/relay/join-code") return notFound();
+		try {
+			return await dispatch(parsed.data);
+		} catch {
+			// 正文/令牌不进日志也不外泄：异常细节只留在服务端（app.onError 那套）。
+			return { status: 500, body: JSON.stringify({ error: "internal_error" }) };
 		}
 	}
 
