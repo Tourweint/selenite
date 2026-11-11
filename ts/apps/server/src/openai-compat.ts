@@ -17,6 +17,7 @@ import { taskMemoryProvider } from "./agent/assist.ts";
 import { chatModelRef, readLlmConfig, taskModelRef } from "./provider.ts";
 import { renderTask, resolveTask, taskLabel, taskNames, TaskRenderError } from "./tasks.ts";
 import { classifyTurn, jevMode } from "./typesafe.ts";
+import { stallWatchdog } from "./watchdog.ts";
 
 /**
  * 兼容层内部的用户/助手消息：content 一律是纯文本。
@@ -446,10 +447,21 @@ interface TaskContext {
 
 	// ── 流式：逐块转成 OpenAI 的 chunk 形状 ────────
 	return streamSSE(c, async (stream) => {
+		// 看门狗（2026-11-12 扩面，口径见 watchdog.ts 头注释）：与 /chat 同一 chatStream
+		// 引擎、同一上游阻塞点。首帧要等引擎第一个事件，流一开就先记一笔，
+		// 首帧前的窗口（openChat 后引擎迟迟不出声）不漏记；"open" 不是事件类型，
+		// 表示"流已开、还没发过帧"。
+		const stallWatch = stallWatchdog();
+		stallWatch.note(chat.internalId, "open");
 		try {
 			for await (const event of chatStream(input)) {
 				// 断线不中止那一轮（跟自有端点一致），这里只是没人读了
 				if (stream.aborted) break;
+				// thinking / usage / notice 在 OpenAI 协议里不产帧，按"没有 SSE 事件"的
+				// 口径不刷新计时（与 /chat 的 usage 不记账一致）；其余产出帧的事件都记。
+				if (event.type !== "thinking" && event.type !== "usage" && event.type !== "notice") {
+					stallWatch.note(chat.internalId, event.type);
+				}
 				// 进度帧：不带正文，只带一个非标准字段（客户端的 OpenAI chunk 解析会忽略未知字段）
 				if (event.type === "progress") {
 					await stream.writeSSE({
@@ -582,6 +594,9 @@ interface TaskContext {
 				})
 				.catch(() => undefined);
 			await stream.writeSSE({ data: "[DONE]" }).catch(() => undefined);
+		} finally {
+			// 流结束（正常 / 报错 / 客户端断开），移出卡死跟踪
+			stallWatch.finish(chat.internalId);
 		}
 	});
 }

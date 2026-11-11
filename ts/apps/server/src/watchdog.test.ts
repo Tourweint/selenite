@@ -78,3 +78,43 @@ test("流结束（finish）后不再记；有事件时不写文件", () => {
 	assert.equal(existsSync(second), false, "没有卡死就不该创建审计文件");
 	dog.close();
 });
+
+test("扩面（2026-11-12）：群回合的 uuid 键照记；数字键与 uuid 键互不干扰", () => {
+	const third = join(dir, "third.jsonl");
+	let now = 0;
+	const dog = new StallWatchdog({ filePath: third, timeoutS: 60, startTimer: false, now: () => now });
+	const groupId = "0f4d6c8e-1111-4222-8333-444455556666";
+
+	// 群回合：首帧前先记一笔（"subscribe" = 流已开还没发过帧），再无帧 → 超时记录
+	dog.note(groupId, "subscribe");
+	now += 90_000;
+	const written = dog.scan();
+	assert.equal(written.length, 1);
+	assert.equal(written[0].conversationId, groupId, "uuid 键原样落账");
+	assert.equal(written[0].lastEvent, "subscribe");
+
+	// 同一条流有帧后重新计时；流结束移出跟踪
+	dog.note(groupId, "delta");
+	now += 10_000;
+	assert.deepEqual(dog.scan(), [], "群回合有新帧不该记");
+	dog.finish(groupId);
+	now += 10 * 60_000;
+	assert.deepEqual(dog.scan(), [], "群回合流结束不该再记");
+
+	// 数字键（/chat 内部 id）与 uuid 键并存，各记各的
+	dog.note(7, "start");
+	dog.note(groupId, "thinking");
+	now += 90_000;
+	const both = dog.scan();
+	assert.equal(both.length, 2, "两个键各自超时各自记");
+	assert.deepEqual(
+		both.map((record) => record.conversationId).sort(),
+		[7, groupId].sort(),
+	);
+
+	const lines = readFileSync(third, "utf8").trim().split("\n");
+	assert.equal(lines.length, 3, "uuid 键 1 条 + 并存 2 条");
+	const parsed = lines.map((line) => JSON.parse(line) as { conversationId: number | string });
+	assert.ok(parsed.every((record) => typeof record.conversationId === "number" || typeof record.conversationId === "string"));
+	dog.close();
+});

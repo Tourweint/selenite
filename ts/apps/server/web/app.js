@@ -11510,6 +11510,19 @@ function skillWhenText(iso) {
   return Number.isFinite(at) ? new Date(at).toLocaleString("zh-CN") : "—";
 }
 
+/** 上次使用距今的说法（批 17 端点的 lastUsedAt，2026-11-12 前端补消费）：
+ *  当天 = 「今天」，不满一天但已跨日 = 「昨天」，其余按整天数 = 「N 天前」。
+ *  字段缺失 / 解析不了 → 空串（调用方整段不显示，不出 NaN/undefined）。 */
+function skillLastUsedText(iso) {
+  const at = Date.parse(String(iso || ""));
+  if (!Number.isFinite(at)) return "";
+  const now = Date.now();
+  if (at >= now) return "今天"; // 服务端钟领先于本机钟：视为刚用过
+  if (new Date(at).toDateString() === new Date(now).toDateString()) return "今天";
+  const days = Math.floor((now - at) / 86_400_000);
+  return days < 1 ? "昨天" : `${days} 天前`;
+}
+
 async function loadSkills() {
   const box = document.getElementById("skill-list");
   const path = document.getElementById("skill-path");
@@ -11612,10 +11625,17 @@ function renderSkillList(box, items) {
     // 只读来源（~/.agents/skills）只展示不给删：那是别的工具的家，改删请去原目录（2026-11-08 批 10-A）
     const readOnly = item.writable === false;
     const originLabel = readOnly ? SKILL_ORIGIN_LABEL[item.origin] || String(item.origin || "") : "";
-    // 用量（2026-11-10 批 18 §四，批 17 端点已有）：只展示，不给操作——
+    // 用量（2026-11-10 批 18 §四，批 17 端点已有；2026-11-12 前端补 lastUsedAt 展示）：只展示，不给操作——
     // 技能仍然只能由人删，"归档"这类按钮刻意不做（产物由人管，不由界面推断废弃）。
+    // SKILL_USAGE 关着时端点整组不回这三个字段 → usageText 为空串，行退回纯「时间 · 大小」旧形状。
     const usage = Number.isFinite(item.usageCount) ? Number(item.usageCount) : null;
-    const usageText = usage === null ? "" : usage > 0 ? ` · 用过 ${usage} 次` : " · 从未用过";
+    const lastUsed = skillLastUsedText(item.lastUsedAt);
+    const usageText =
+      usage === null
+        ? ""
+        : usage > 0
+          ? ` · 用过 ${usage} 次${lastUsed ? ` · 上次 ${lastUsed}` : ""}`
+          : " · 没用过";
     const staleTag =
       item.stale === true
         ? `<span class="sk-stale" title="按最近一次使用时间算，已经 90 天没被取用过；只标记，不删不移">90 天未用</span>`

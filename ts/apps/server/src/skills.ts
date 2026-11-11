@@ -160,10 +160,56 @@ export interface ScannedSkill {
 }
 
 /**
- * frontmatter 的最小解析：只认第一段 `---` 包起来的单行 `key: value`。
+ * 块标量取值（2026-11-11）：从 `start` 行起收集到缩进回退（返回那一行，主循环把它当 key
+ * 继续解析）或 frontmatter 结束。块缩进 = 第一条非空行的缩进；空行属于块。
+ * `>` 折叠式：非空行之间折成空格、空行算段落换行；`|` 字面式：保留换行；
+ * `-` 变体不补尾换行（clip/strip 之差）。比真 YAML 简化：锚点 / 别名 / 更深缩进的
+ * 字面保留都不认——description 用不到，别在这里长出半成品 YAML。
+ */
+function blockScalarOf(
+	lines: string[],
+	start: number,
+	end: number,
+	folded: boolean,
+	strip: boolean,
+): { value: string; next: number } {
+	let indent = -1;
+	const collected: string[] = [];
+	let next = end;
+	for (let index = start; index < end; index += 1) {
+		const line = lines[index] ?? "";
+		if (!line.trim()) {
+			collected.push("");
+			continue;
+		}
+		const currentIndent = line.length - line.trimStart().length;
+		if (indent === -1) indent = currentIndent;
+		if (currentIndent < indent) {
+			next = index;
+			break;
+		}
+		collected.push(line.slice(indent));
+	}
+	while (collected.length && !collected[0]!.trim()) collected.shift();
+	while (collected.length && !collected[collected.length - 1]!.trim()) collected.pop();
+	if (!collected.length) return { value: "", next };
+	if (!folded) return { value: collected.join("\n") + (strip ? "" : "\n"), next };
+	let value = "";
+	for (const text of collected) {
+		if (!text.trim()) value += "\n";
+		else if (!value || value.endsWith("\n")) value += text;
+		else value += ` ${text}`;
+	}
+	return { value, next };
+}
+
+/**
+ * frontmatter 的最小解析（2026-10-31 最小实现；2026-11-11 补多行块标量）：
+ * 只认第一段 `---` 包起来的单行 `key: value`，外加 `key: >` / `>-` / `|` / `|-`
+ * 块标量（后续行按缩进归属，见 blockScalarOf）——官方 SKILL.md 的 description 是这种写法。
  *
- * 刻意不做完整 YAML：技能只需要 `description`，其余字段忽略；多行块（`|` / `>`）
- * 与缩进续行都不解析——真需要时再换解析器，而不是在这里长出一个半成品的 YAML。
+ * 刻意不做完整 YAML：技能只需要 `description`，其余字段忽略；锚点 / 别名 / 嵌套结构 /
+ * 引号转义都不解析——真需要时再换解析器，而不是在这里长出一个半成品的 YAML。
  */
 function parseFrontmatter(raw: string): { data: Record<string, string>; body: string } {
 	const lines = raw.split(/\r?\n/);
@@ -183,7 +229,17 @@ function parseFrontmatter(raw: string): { data: Record<string, string>; body: st
 		const colon = line.indexOf(":");
 		if (colon <= 0) continue;
 		const key = line.slice(0, colon).trim().toLowerCase();
-		let value = line.slice(colon + 1).trim();
+		const marker = line.slice(colon + 1).trim();
+		// 块标量只认 `>` / `>-` / `|` / `|-` 四个写法；`>+` / `|2` 之类按单行值落下去，
+		// readDirSkill 会把"只剩一个符号"的值当没有摘要跳过
+		const block = /^([>|])(-)?$/.exec(marker);
+		if (block) {
+			const scalar = blockScalarOf(lines, index + 1, end, block[1] === ">", block[2] === "-");
+			data[key] = scalar.value;
+			index = scalar.next - 1; // 主循环再 +1；next 指向块后第一条非块内容
+			continue;
+		}
+		let value = marker;
 		if (
 			(value.startsWith('"') && value.endsWith('"')) ||
 			(value.startsWith("'") && value.endsWith("'"))
@@ -216,8 +272,10 @@ function readDirSkill(path: string, name: string): ScannedSkill {
 		const raw = readFileSync(path, "utf8");
 		const { data, body } = parseFrontmatter(raw);
 		const rawSummary = (data.description ?? "").trim();
-		// 多行块标记（`>` / `|`）只留一个符号等于没有摘要：宁可跳过，也不把 ">" 注进索引
-		const summary = /^[>|][+-]?$/.test(rawSummary) ? "" : rawSummary;
+		// 解析器不支持的块标量变体（`>+` / `|2` / `>-2` 等：chomp 指示符或显式缩进位数）
+		// 会按单行值落成一个裸符号：等于没有摘要，宁可跳过，也不把 ">" 注进索引
+		// （2026-11-11 起常规的 `>` / `|` 块已由解析器吃掉）
+		const summary = /^[>|][+-]?\d*$/.test(rawSummary) ? "" : rawSummary;
 		const manual = body.trim();
 		// 标准形态：没有 description 就没有索引摘要，只能跳过（正文仍可手工看）
 		if (!summary || !manual) return base;

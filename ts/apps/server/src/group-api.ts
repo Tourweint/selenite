@@ -12,6 +12,7 @@ import { partnersStore, type GroupRow } from "./partners.ts";
 import { readLlmConfig } from "./provider.ts";
 import { GroupRouteError, resolveGroupSpeakers } from "./group-routing.ts";
 import { groupRoundRunning, groupRoundStatus, startGroupRound, stopGroupRound, type GroupStreamEvent } from "./group-runtime.ts";
+import { stallWatchdog } from "./watchdog.ts";
 // 建群校验与落库的唯一实现在 group-manage（模型侧 group_manage 工具共用同一份）。
 // 开关也从那里 re-export：工具装配要按同一个开关决定注不注册，不能再各写一份。
 import {
@@ -205,13 +206,22 @@ export function mountGroups(app: Hono): void {
 
 		const { roundId, channel } = startGroupRound(group, text);
 		return streamSSE(c, async (stream) => {
-			// 只推送。客户端断开这里会抛——回合照跑完落库（断线 ≠ 取消，方案 §2.4）
+			// 看门狗（2026-11-12 扩面，watchdog.ts 头注释有清点口径）：成员轮走同一
+			// chatStream，回合卡住 = 这条 SSE 无帧。键用群 uuid（同群并发已被 409 闸住）。
+			// 首帧前先记账一次：会话懒建/身份对齐卡住时这条流同样静默，不能漏记。
+			const stallWatch = stallWatchdog();
+			stallWatch.note(group.id, "subscribe");
 			try {
+				// 只推送。客户端断开这里会抛——回合照跑完落库（断线 ≠ 取消，方案 §2.4）
 				for await (const event of channel.subscribe()) {
-					await stream.writeSSE({ data: JSON.stringify(toChatEvent(event, roundId)) });
+					const frame = toChatEvent(event, roundId);
+					stallWatch.note(group.id, frame.type);
+					await stream.writeSSE({ data: JSON.stringify(frame) });
 				}
 			} catch {
 				// 断开属正常路径：吞掉，落库由 group-runtime 负责
+			} finally {
+				stallWatch.finish(group.id);
 			}
 		});
 	});

@@ -110,22 +110,68 @@ test("加载器：扁平 .md 与 目录/SKILL.md 两种形态并存，同名时�
 	// 格式不对：没有 frontmatter description → 不上索引，但仍占名
 	mkdirSync(join(dir, "broken"));
 	writeFileSync(join(dir, "broken", "SKILL.md"), "只有正文，没有 frontmatter");
-	// 多行块标记不解析：摘要留一个 ">" 等于没有摘要，同样跳过
+	// 多行块标量（2026-11-11 起 description: > 折叠块正常解析，不再整条跳过）
 	mkdirSync(join(dir, "block"));
 	writeFileSync(join(dir, "block", "SKILL.md"), "---\ndescription: >\n  多行描述\n---\n正文");
 
 	const store = createSkillStore(dir);
 	assert.ok(store);
-	assert.deepEqual(store.names().sort(), ["alpha", "alpha-dir", "beta", "same"]);
+	assert.deepEqual(store.names().sort(), ["alpha", "alpha-dir", "beta", "block", "same"]);
 	assert.equal(store.manual("alpha"), "正文 A");
 	assert.equal(store.manual("beta"), "正文 B", "frontmatter 之后的正文，忽略其余字段");
 	assert.equal(store.manual("alpha-dir"), "目录正文");
 	assert.equal(store.manual("same"), "扁平正文", "同目录同名时扁平 .md 先到先得");
 	assert.equal(store.manual("broken"), undefined);
+	assert.equal(store.manual("block"), "正文", "多行块 description 不再挡住整条技能");
 	const index = store.indexFor(1) ?? "";
 	assert.match(index, /alpha：摘要 A/);
 	assert.match(index, /beta：摘要 B/);
+	assert.match(index, /block：多行描述/);
 	assert.doesNotMatch(index, /broken/);
+});
+
+test("frontmatter 多行块标量：折叠 / 字面 / `-` 变体 / 缩进 / CRLF，块后正文与后续 key 照常", () => {
+	const dir = freshDir("loader-block-scalar");
+	const add = (name: string, content: string) => {
+		mkdirSync(join(dir, name));
+		writeFileSync(join(dir, name, "SKILL.md"), content);
+	};
+	// 折叠式 `>`：换行折成空格，frontmatter 结束符紧贴块后（正文分隔照常）
+	add("fold", "---\nname: fold\ndescription: >\n  第一行\n  第二行\n---\n折叠正文");
+	// 折叠收尾变体 `>-`：不补尾换行（摘要本身会 trim，语义与 `>` 一致）
+	add("fold-strip", "---\ndescription: >-\n  A\n  B\n---\n正文");
+	// 字面式 `|`：保留换行
+	add("literal", "---\ndescription: |\n  line1\n  line2\n---\n正文");
+	// 字面收尾变体 `|-`：同样保留内部换行
+	add("literal-strip", "---\ndescription: |-\n  L1\n  L2\n---\n正文");
+	// 块缩进按第一条非空行定（这里 4 空格）；缩进回退后的 key 正常解析、其余字段忽略
+	add("indent", "---\ndescription: >\n    深缩进摘要\nversion: 1.2.3\n---\n正文");
+	// 折叠式里的空行 = 段落换行
+	add("paragraph", "---\ndescription: >\n  段一\n\n  段二\n---\n正文");
+	// CRLF 行尾：整份文件都是 \r\n
+	add("crlf", "---\r\ndescription: >\r\n  win 摘要一\r\n  win 摘要二\r\n---\r\nwin 正文\r\n");
+	// 空块（标记后没有内容行）= 没有摘要，走 valid=false 占名
+	add("empty-block", "---\ndescription: >\n---\n正文");
+
+	const scanned = new Map(scanSkillDir(dir).map((item) => [item.name, item]));
+	assert.equal(scanned.get("fold")?.summary, "第一行 第二行");
+	assert.equal(scanned.get("fold")?.manual, "折叠正文", "块后的 `---` 照样分隔出正文");
+	assert.equal(scanned.get("fold-strip")?.summary, "A B");
+	assert.equal(scanned.get("literal")?.summary, "line1\nline2");
+	assert.equal(scanned.get("literal-strip")?.summary, "L1\nL2");
+	assert.equal(scanned.get("indent")?.summary, "深缩进摘要", "缩进按第一条非空行归属");
+	assert.equal(scanned.get("paragraph")?.summary, "段一\n段二");
+	assert.equal(scanned.get("crlf")?.summary, "win 摘要一 win 摘要二", "CRLF 行尾不破坏块解析");
+	assert.equal(scanned.get("crlf")?.manual, "win 正文");
+	assert.equal(scanned.get("empty-block")?.valid, false, "空块 = 没有摘要，仍占名");
+	assert.ok(scanned.get("empty-block"), "invalid 条目仍出现在扫描结果里");
+
+	const store = createSkillStore(dir);
+	assert.ok(store);
+	const index = store.indexFor(1) ?? "";
+	assert.match(index, /fold：第一行 第二行/);
+	assert.match(index, /literal：line1\nline2/);
+	assert.equal(store.names().includes("empty-block"), false, "空块技能不进索引");
 });
 
 test("内置方法论技能：scanSkillDir 能读到 4 个新技能，摘要取自第 1 行", () => {

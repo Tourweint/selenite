@@ -3,6 +3,9 @@ import { test } from "node:test";
 import {
 	evalCases,
 	runApprovalPool,
+	runAutonomyEscalationPool,
+	runDelegateRoutingPool,
+	runRunSourcePool,
 	runUnattendedPool,
 	type EvalCase,
 	type EvalPoolName,
@@ -10,7 +13,7 @@ import {
 } from "./eval-pool.ts";
 
 /**
- * 纯判定函数回归集（2026-11-10 批 20 §三）。
+ * 纯判定函数回归集（2026-11-10 批 20 §三；2026-11-12 扩容补三个池）。
  *
  * tune 与 holdout 都跑（任务书 §3.2），但用途不同：
  *   - tune：跟着需求改；
@@ -58,4 +61,37 @@ test("无人值守三态：两个池全过", () => {
 		assertAllPass(runUnattendedPool(pool), `resolveUnattendedVerdict/${pool}`);
 	}
 	assert.equal(runUnattendedPool().length, evalCases().unattended.length);
+});
+
+test("执事直派四象限：案例表 10–15 条，tune / holdout 各半", () => {
+	assertPoolShape(evalCases().delegateRouting as EvalCase<unknown>[], "resolveDelegateRouting");
+});
+
+test("自主轮结构性拒绝：案例表 10–15 条，tune / holdout 各半", () => {
+	assertPoolShape(evalCases().escalation as EvalCase<unknown>[], "autonomyEscalationBlockReason");
+});
+
+test("派单来源优先级：案例表 10–15 条，tune / holdout 各半", () => {
+	assertPoolShape(evalCases().runSource as EvalCase<unknown>[], "delegationRunSource");
+});
+
+test("执事直派四象限：两个池全过", () => {
+	for (const pool of POOLS) {
+		assertAllPass(runDelegateRoutingPool(pool), `resolveDelegateRouting/${pool}`);
+	}
+	assert.equal(runDelegateRoutingPool().length, evalCases().delegateRouting.length, "不传池 = 两池都跑");
+});
+
+test("自主轮结构性拒绝：两个池全过", () => {
+	for (const pool of POOLS) {
+		assertAllPass(runAutonomyEscalationPool(pool), `autonomyEscalationBlockReason/${pool}`);
+	}
+	assert.equal(runAutonomyEscalationPool().length, evalCases().escalation.length);
+});
+
+test("派单来源优先级：两个池全过", () => {
+	for (const pool of POOLS) {
+		assertAllPass(runRunSourcePool(pool), `delegationRunSource/${pool}`);
+	}
+	assert.equal(runRunSourcePool().length, evalCases().runSource.length);
 });
