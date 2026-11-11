@@ -13,10 +13,10 @@
  * 原始错误只留摘要（可能带上游地址）。
  */
 import { contentText } from "@earendil-works/pi-ai";
-import type { MemoryRecord, MemoryScope } from "@lifediary/memory";
+import { redactSecrets, type MemoryRecord, type MemoryScope } from "@lifediary/memory";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { memoryEngine, supersedeMemory } from "./agent.ts";
+import { findEvidence, memoryEngine, supersedeMemory, type EvidenceHit } from "./agent.ts";
 import { auxiliaryModel } from "./auxiliary.ts";
 import { currentModels, isFaux, readLlmConfig } from "./provider.ts";
 
@@ -35,6 +35,14 @@ export function consolidateLlmEnabled(): boolean {
  */
 export function memoryImportEnabled(): boolean {
 	return !isOff(process.env.MEMORY_IMPORT);
+}
+
+/**
+ * `MEMORY_REVIEW_EVIDENCE`（2026-11-10，回滚开关）：`false` / `0` = 整理建议不回原始
+ * 对话找证据引文（响应里没有 `evidence` 字段，前端不渲染引文块）。默认开。
+ */
+export function reviewEvidenceEnabled(): boolean {
+	return !isOff(process.env.MEMORY_REVIEW_EVIDENCE);
 }
 
 function isOff(raw: string | undefined): boolean {
@@ -78,7 +86,22 @@ export interface ConsolidateProposal {
 	/** 两端正文随建议一起返回：前端不必再从列表里反查（列表可能只取了前 300 条） */
 	keep: ProposalSide;
 	drop: ProposalSide;
+	/**
+	 * 证据引文（2026-11-10 对标 Anthropic「做梦」§一）：drop 端正文在**原始对话**里的
+	 * 命中片段，人拍板前可核对"这条记忆当初真是这么说的吗"。
+	 * 开关开着时恒有值（查不到 = null，不挡应用）；`MEMORY_REVIEW_EVIDENCE=false`
+	 * 时整个字段不下发（undefined，JSON 序列化自动丢弃）。
+	 */
+	evidence?: ProposalEvidence | null;
 }
+
+/** 证据引文命中的一条（形状照跨会话搜索 `EvidenceHit`，去掉 title 之类卡片用不上的）。 */
+export type ProposalEvidence = EvidenceHit;
+
+/** 证据查找函数的形状（测试/探针注入假实现；默认 = 真扫跨会话记录）。 */
+export type EvidenceFinder = (
+	needles: string[],
+) => Promise<Map<string, EvidenceHit>>;
 
 export interface ProposalDraft {
 	keepId: string;
@@ -309,7 +332,7 @@ function sideOf(record: MemoryRecord): ProposalSide {
  */
 export async function reviewScope(
 	scope: string,
-	options: { generate?: ReviewGenerator } = {},
+	options: { generate?: ReviewGenerator; findEvidence?: EvidenceFinder } = {},
 ): Promise<ReviewResult> {
 	if (!memoryEngine) {
 		return { ok: false, status: 404, error: "memory_disabled", message: "记忆未启用（MEMORY_ENABLED=false）" };
@@ -377,14 +400,49 @@ export async function reviewScope(
 		});
 	}
 
+	// 证据引文（2026-11-10 对标 Anthropic「做梦」§一）：给每条建议的 drop 端回原始
+	// 对话找出处，人拍板前可核对"这条记忆当初真是这么说的吗"。
+	// 查不到 = null（不挡应用）；查找失败同样降级为 null——证据缺着比建议发不出去强。
+	// 开关关着时不设置该字段（undefined，JSON 序列化自动丢弃，前端不渲染引文块）。
+	if (reviewEvidenceEnabled() && proposals.length > 0) {
+		const lookup = options.findEvidence ?? findEvidence;
+		let hits: Map<string, EvidenceHit>;
+		try {
+			hits = await lookup(proposals.map((proposal) => proposal.drop.content));
+		} catch (error) {
+			const detail = error instanceof Error ? error.message : String(error);
+			console.warn(`[memory] 证据引文查找失败: ${detail.slice(0, 200)}`);
+			hits = new Map();
+		}
+		for (const proposal of proposals) {
+			const hit = hits.get(proposal.drop.content);
+			// 引文过一遍凭据打码：与记忆正文同一政策——原文片段可能带 sk-…/key=…，
+			// 渲染或转存都不该带（P2-1，验收 2026-11-10）。
+			proposal.evidence = hit ? { ...hit, text: redactSecrets(hit.text) } : null;
+		}
+	}
+
 	const path = proposalsPath();
 	const pending = readPending(path);
-	pending[scope] = { generatedAt, proposals };
+	// 待决文件只存 id / 理由 / 两端正文快照（接口文档 §2.15.1 口径）：evidence 只进响应，
+	// 落盘等于把对话片段多存一份（P1-2，验收 2026-11-10）——写之前剥掉。
+	pending[scope] = {
+		generatedAt,
+		proposals: proposals.map((proposal) => ({
+			keepId: proposal.keepId,
+			dropId: proposal.dropId,
+			reason: proposal.reason,
+			keep: proposal.keep,
+			drop: proposal.drop,
+		})),
+	};
 	writePending(path, pending);
 
 	// 只记条数 / 耗时，不记正文（D8）
 	console.log(
-		`[memory] 整理建议 scope=${scope} 输入=${records.length} 建议=${proposals.length} ${Date.now() - started}ms`,
+		`[memory] 整理建议 scope=${scope} 输入=${records.length} 建议=${proposals.length} 证据=${
+			proposals.filter((proposal) => proposal.evidence).length
+		} ${Date.now() - started}ms`,
 	);
 
 	return { ok: true, scope, total: records.length, generatedAt, proposals };

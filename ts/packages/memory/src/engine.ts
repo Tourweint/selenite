@@ -129,12 +129,13 @@ export class MemoryEngine {
 	/**
 	 * 会话边界调用：抽取 + 巩固。
 	 *
-	 * `preferenceScope`（2026-11-06）：偏好**不留在会话作用域**——"我不喜欢被追问"
-	 * 换个会话就失效，等于没记住。凡是 `kind === "preference"` 的候选，写入前统一改挂到
+	 * `preferenceScope`（2026-11-06；2026-11-10 起经验同待遇）：偏好与经验**不留在会话
+	 * 作用域**——"我不喜欢被追问"、"这类活下次该怎么做"换个会话就失效，等于没记住。
+	 * 凡是 `kind === "preference" || kind === "experience"` 的候选，写入前统一改挂到
 	 * 这个更宽的 scope（主人在 `global`，执事在 `partner:<id>`）。
 	 *
-	 * 这个"重挂"刻意在 `Extractor` 之外做：抽取器只回答"这是不是偏好"，
-	 * "偏好该存哪"是装配层的知识（谁在跟谁说话）。接口不变。
+	 * 这个"重挂"刻意在 `Extractor` 之外做：抽取器只回答"是不是这两类"，
+	 * "该存哪"是装配层的知识（谁在跟谁说话）。接口不变。
 	 */
 	async ingestTurn(
 		messages: ExtractMessage[],
@@ -147,7 +148,9 @@ export class MemoryEngine {
 		if (preferenceScope) {
 			const key = scopeKey(preferenceScope);
 			for (const candidate of candidates) {
-				if (candidate.kind === "preference") candidate.scope = key;
+				if (candidate.kind === "preference" || candidate.kind === "experience") {
+					candidate.scope = key;
+				}
 			}
 		}
 		return this.consolidator.consolidate(candidates, this.store, at);

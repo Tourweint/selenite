@@ -63,7 +63,6 @@ function registeredToolNames(): string[] {
 			// persona 检索（2026-11-09 批一）：条件注册，给个不落盘替身把全集覆盖进来。
 			personaAsk: async () => ({ ok: true, question: "stub" }),
 			skillAdviceSave: () => ({ ok: true, saved: 0, kept: 0 }),
-			skillAdviceSave: () => ({ ok: true, saved: 0, kept: 0 }),
 			// 中途播报（2026-11-10 批 13）：条件注册，显式开才上架。
 			progressReport: true,
 		}),

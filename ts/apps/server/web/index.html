@@ -307,9 +307,14 @@
 
     <!-- 输入框是一个容器卡（2026-11-04 对齐 cindy ComposerCard）：
          边框/卡底在容器上，textarea 透明无框；底部工具行左：附件占位，
-         右：模型 + 上下文环 + 发送（模型紧挨发送，CINDY / ZCode 同款，D2 挪的）。
-         思考强度收进模型菜单，挂在当前模型名下方一行。流式时发送同槽换成停止，没有第二个停止入口。 -->
+         右：上下文环 + 模型 + 发送（2026-11-11 上下文环挪到模型左边）。
+         思考强度收进模型菜单，挂在当前模型名下方一行。流式时发送同槽换成停止，没有第二个停止入口。
+         composer 是绝对定位（bottom:14px），错误卡（批 32）放不进静态流里——
+         放进容器卡顶部（附件槽上方），对齐 ZCode「横幅在输入框上方」的观感。
+         2026-11-11 输入栏学 ZCode：打字实时长高（resize() 挂上 input 事件），
+         卡高由 ResizeObserver 写进 --composer-h，消息区让位与底缝遮衬跟着走。 -->
     <form class="composer" id="composer" autocomplete="off">
+      <div class="chat-error" id="chat-error" hidden></div>
       <textarea id="input" rows="1" placeholder="说点什么…" aria-label="输入消息"></textarea>
       <!-- 待发附件（2026-11-08 扫尾批 4a）：缩略图预览 + 单张移除；有图才占位 -->
       <div class="composer-attachments" id="composer-attachments" hidden></div>
@@ -323,6 +328,16 @@
         </div>
 
         <div class="composer-meta">
+          <!-- 上下文环（2026-11-04 从顶栏搬进 composer 右下；2026-11-11 用户拍板挪到
+               模型 pill 左边）：20×20 进度环 + 已用 token 的 K/M 数字，百分比收进悬停 -->
+          <span class="ctx-ring" id="ctx-ring" hidden>
+            <svg viewBox="0 0 20 20" aria-hidden="true">
+              <circle class="ctx-track" cx="10" cy="10" r="8.25"/>
+              <circle class="ctx-fill" id="ctx-fill" cx="10" cy="10" r="8.25"/>
+            </svg>
+            <span class="ctx-pct" id="ctx-pct"></span>
+          </span>
+
           <!-- 模型快捷切换（2026-11-04 批次五）：每次打开现拉，一次只看一家供应商。
                2026-11-04 界面 v2：思考强度并入每行（原来独立的思考档 pill 已删）。
                D2：pill 挪进右组，菜单仍由包裹层定位（贴着 pill 右上角往上弹）。 -->
@@ -336,14 +351,6 @@
             <div class="model-menu composer-pop" id="model-menu" role="menu" hidden></div>
           </div>
 
-          <!-- 上下文环（2026-11-04 从顶栏搬进 composer 右下）：20×20 进度环 + 百分比 -->
-          <span class="ctx-ring" id="ctx-ring" hidden>
-            <svg viewBox="0 0 20 20" aria-hidden="true">
-              <circle class="ctx-track" cx="10" cy="10" r="8.25"/>
-              <circle class="ctx-fill" id="ctx-fill" cx="10" cy="10" r="8.25"/>
-            </svg>
-            <span class="ctx-pct" id="ctx-pct"></span>
-          </span>
           <button class="send" id="send" type="submit" aria-label="发送" disabled>
             <svg class="ico-send" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 7-7 7 7"/><path d="M12 19V5"/></svg>
             <!-- 停止方块按 CINDY SendButton 规格：10×10 圆角 1.5（24 视框里 rect 9x9 @ 7.5,7.5）

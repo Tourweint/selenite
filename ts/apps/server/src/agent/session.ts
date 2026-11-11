@@ -12,15 +12,17 @@ import {
 	type ToolRegistration,
 } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
-import type { MemoryRecord } from "@lifediary/memory";
+import { locateEvidence, normalizeForGrounding, type MemoryRecord } from "@lifediary/memory";
 import type {
 	ChatKind,
 	DelegationPhase,
 	NewChatKind,
+	StreamErrorCode,
 	ThinkingLevel,
 	TranscriptStep,
 	TurnUsage,
 } from "@lifediary/shared";
+import { describeStreamError } from "../stream-error.ts";
 import { approvalStore } from "../approvals.ts";
 import type { OutgoingPart } from "../attachments.ts";
 // 杂活模型（2026-11-10 批 26b §一）：compact 配置能解析，但内核不支持指定压缩模型，
@@ -563,6 +565,8 @@ export type ChatStreamEvent =
 			output?: string;
 			/** 调用参数（JSON，截断过），只在 start 上有 */
 			args?: string;
+			/** 编辑类工具的 unified diff（批 33，截断过），只在 end 上有；与历史 steps 同口径 */
+			diff?: string;
 	  }
 	/**
 	 * 派活的进度（2026-11-02；2026-11-03 补任务单字段）。
@@ -621,7 +625,13 @@ export type ChatStreamEvent =
 	 * 必须显式吐出来：否则客户端只看到"空内容 + 正常结束"，等于给用户一个空气泡，
 	 * 而且分不清是"模型没话说"还是"上游挂了"（实测：key 无效时就是这样）。
 	 */
-	| { type: "unanswered"; message: string }
+	| {
+			type: "unanswered";
+			message: string;
+			/** 错误类别与脱敏摘要（2026-11-10 批 32）；index.ts 把它们透成 error 帧的 code/detail */
+			code?: StreamErrorCode;
+			detail?: string;
+	  }
 	/**
 	 * 系统提示行（2026-11-07 消息即引导）。
 	 *
@@ -927,6 +937,8 @@ export async function* chatStream(
 						ok: tool.ok,
 						output: tool.output,
 						args: tool.args,
+						// 编辑类工具的 diff（批 33）：现场与历史 steps 同一份事实
+						diff: tool.diff,
 					};
 					continue;
 				}
@@ -1003,12 +1015,21 @@ export async function* chatStream(
 				if (delta) yield { type: "delta", text: delta };
 			}
 		} else if (outcome.record?.status === "unanswered") {
-			// 细节只进日志：里面可能带上游原文（含 key 片段）
+			// 完整原文只进日志：里面可能带上游地址甚至 key 片段
 			console.warn(
 				`[agent] 本轮未回答: ${outcome.record.reason} ${JSON.stringify(outcome.record.detail ?? null)}`,
 			);
-			// 但用户得看到一句话，不能只收到"空回复"
-			yield { type: "unanswered", message: "这次没能生成回复，请再试一次。" };
+			// 分类 + 脱敏后给用户一句话（批 32）：aborted/reset 返回 null——
+			// 人自己停的前端已有「已中断生成」，再发错误帧就是报二遍。
+			const described = describeStreamError(outcome.record.reason, outcome.record.detail);
+			if (described) {
+				yield {
+					type: "unanswered",
+					message: described.message,
+					code: described.code,
+					detail: described.detail,
+				};
+			}
 		}
 
 		// 撞了工具上限：不管模型最后有没有收尾，这句提示都由我们补，
@@ -1231,10 +1252,21 @@ export async function readTranscript(
 		const endedAt =
 			at + (typeof message.durationMs === "number" ? Math.max(0, Math.round(message.durationMs)) : 0);
 
-		// 带工具调用的中间回合：只收步骤，不当成一条"回答"下发（正文往往是空的）
+		// 带工具调用的中间回合：收步骤；正文不为空就作为一步「说」下发（批 32）。
+		// 模型动手前常先说话（"我先看看这个文件…"），以前直接丢掉，历史回读
+		// 就看不到这段——现场有、翻历史没有，会让人怀疑记录被裁过。
 		const parts = Array.isArray(message.content) ? message.content : [];
 		const calls = parts.filter((item) => item.type === "toolCall");
 		if (calls.length > 0) {
+			const spoken = contentText(
+				parts.filter((item) => item.type !== "toolCall"),
+			).trim();
+			if (spoken) {
+				const say: TranscriptStep = { name: "say", ok: true, format: "md" };
+				const text = clampText(spoken, STEP_OUTPUT_LIMIT);
+				if (text) say.output = text;
+				pending.push(say);
+			}
 			for (const call of calls) {
 				const step: TranscriptStep = { name: call.name, ok: true };
 				const label = toolLabel(call.arguments);
@@ -1728,4 +1760,87 @@ export async function searchTranscripts(q: string, limit = 20): Promise<SearchHi
 		}
 	}
 	return hits;
+}
+
+// ── 记忆证据引文（2026-11-10 对标 Anthropic「做梦」§一）────────────────
+//
+// 整理建议只看记忆库本身，回不到原始对话——抽取时记错的内容没有任何证据能发现
+// 它错（Anthropic 纠正月见山那条错笔记，靠的正是回头翻原始记录）。findEvidence
+// 补这半步：给建议卡上的每条记忆回原始对话里找"当初真是这么说的"的片段。
+// 仍然只建议、人拍板（D18 不变），这半步只是把证据摆到人眼前。
+
+/** 证据引文命中的一条。`text` 是原文片段（±40/80 字），给卡片直接渲染。 */
+export interface EvidenceHit {
+	conversationId: string;
+	at: number;
+	role: "user" | "assistant";
+	text: string;
+}
+
+/**
+ * 按记忆正文在跨会话记录里找**原始出处**。
+ *
+ * 与 `searchTranscripts` 的分工：那边是人输入的查询词、命中即返回（limit 条）；
+ * 这边是 ≤50 条建议各自要一个出处，**单遍扫描**共享一次 pass，全部命中即早停。
+ * 会话范围照 `listChats` 口径（任务专线与隐藏会话天然不在列表里）。
+ *
+ * 匹配在归一化层做（`locateEvidence`，与抽取侧引文校验同一套口径）：偏好是模型的
+ * 转述，原话里找不到逐字片段很正常，找 4~12 字的归一化锚点；episode 是逐字句，
+ * 通常一发命中。查不到 = 那条 `evidence` 为空，不挡应用。
+ *
+ * 代价与 `searchTranscripts` 同口径：**显式动作**（人点了"整理记忆"才跑这一次），
+ * 慢一点可接受。
+ *
+ * @param needles 记忆正文原文（可带 Why/How 多行；内部只取首行）。返回 Map 以
+ *   **传入的原始串**为键，调用方直接用 `proposal.drop.content` 取。
+ */
+export async function findEvidence(
+	needles: string[],
+	options: { chatLimit?: number; transcriptLimit?: number } = {},
+): Promise<Map<string, EvidenceHit>> {
+	const found = new Map<string, EvidenceHit>();
+	// 键用原始串；匹配用首行。归一化后不足 4 字的锚点太泛（两个字就能撞上一堆闲聊），直接跳过。
+	const pending = needles.filter(
+		(needle) => typeof needle === "string" && normalizeForGrounding(needle.split("\n")[0] ?? "").length >= 4,
+	);
+	if (pending.length === 0) return found;
+
+	let chats: ChatIndexEntry[];
+	try {
+		chats = await listChats(options.chatLimit ?? 200);
+	} catch {
+		// 列表读不出来 = 这次没证据，建议照常返回
+		return found;
+	}
+
+	for (const chat of chats) {
+		if (pending.length === 0) break;
+		try {
+			const resolved = await openChat(chat.conversationId);
+			if (!resolved) continue;
+			const messages = await readTranscript(resolved, options.transcriptLimit ?? 200);
+			for (const message of messages) {
+				if (pending.length === 0) break;
+				// 逐条剥离已命中的：一条正文只需要一个出处
+				for (let index = pending.length - 1; index >= 0; index -= 1) {
+					const needle = pending[index]!;
+					const snippet = locateEvidence(message.text, needle);
+					if (!snippet) continue;
+					found.set(needle, {
+						conversationId: chat.conversationId,
+						at: message.at,
+						role: message.role,
+						text: snippet,
+					});
+					pending.splice(index, 1);
+				}
+			}
+		} catch (error) {
+			// 单会话读失败不挡整查（与 searchTranscripts 同口径）
+			console.warn(
+				`[evidence] 会话 ${chat.conversationId} 读取失败: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+	return found;
 }

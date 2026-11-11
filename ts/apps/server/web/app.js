@@ -43,6 +43,7 @@ const el = {
   emptyGreet: document.getElementById("empty-greet"),
   scroll: document.getElementById("scroll"),
   composer: document.getElementById("composer"),
+  chatError: document.getElementById("chat-error"),
   input: document.getElementById("input"),
   send: document.getElementById("send"),
   status: document.getElementById("status"),
@@ -260,7 +261,6 @@ function closeMenu() {
 }
 
 /** 没有消息时输入框抬到中间（首页态），一开口就落回底部 */
-let composerObserver = null;
 
 /** 首页居中靠实测卡高：CSS 只负责 `50vh - var(--composer-home-offset)`，
  *  高度变了（textarea 换行 / 工具行折行）由 ResizeObserver 重算。
@@ -271,21 +271,24 @@ function measureHomeOffset() {
   el.viewChat.style.setProperty("--composer-home-offset", `${height / 2 - 12}px`);
 }
 
+/* 输入卡高度统一实测（2026-11-11，学 ZCode 输入栏长高）：卡高写进 --composer-h，
+   消息区让位（.thread padding）与底缝遮衬都吃这个变量——长高、错误卡、附件行一处不漏。
+   观察器常驻：对话态的卡也会长，不再只在首页挂着；首页态顺带重算居中偏移。 */
+if (typeof ResizeObserver === "function" && el.composer) {
+  new ResizeObserver(() => {
+    const height = el.composer.getBoundingClientRect().height;
+    if (!height) return;
+    el.viewChat.style.setProperty("--composer-h", `${Math.round(height)}px`);
+    if (el.viewChat.dataset.home === "1") measureHomeOffset();
+  }).observe(el.composer);
+}
+
 function updateHomeMode() {
   const home = !el.thread.querySelector(".msg");
   el.viewChat.dataset.home = home ? "1" : "0";
   if (home) {
     measureHomeOffset();
     syncGreeting();
-    // 只在首页态挂观察器：对话态 bottom 固定 14px，卡高变化与定位无关
-    if (!composerObserver && typeof ResizeObserver === "function") {
-      composerObserver = new ResizeObserver(measureHomeOffset);
-      composerObserver.observe(el.composer);
-    }
-  } else if (composerObserver) {
-    composerObserver.disconnect();
-    composerObserver = null;
-    el.viewChat.style.removeProperty("--composer-home-offset");
   }
 }
 
@@ -3583,6 +3586,8 @@ function clearThread() {
   approvalCards.clear();
   // 课题提议卡跟审批卡同命运：换会话后旧卡不再属于这一屏
   topicProposalCards.clear();
+  // 错误卡同理（批 32）：报错是"那一条会话里那一轮"的事，不追着人跑
+  hideChatError();
   // 待发图片属于"这一屏的这条会话"：切走就清，别把图带到另一条对话里
   clearPendingImages();
   el.thread.replaceChildren();
@@ -3984,6 +3989,8 @@ const TOOL_ICON_PATHS = {
   project: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
   // Lucide search（0.468）：24 视框、2 号描边，与上面同族
   search: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
+  // 引号气泡：折叠区里"模型说过的话"用（批 32）
+  say: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
   tool: '<path d="M14.7 6.3a4 4 0 1 0 5 5L21 10l-3-3z"/><path d="m9 15-6 6"/><path d="m14 10-4 4"/>',
   chevron: '<path d="m9 18 6-6-6-6"/>',
   check: '<path d="m20 6-11 11-5-5"/>',
@@ -4130,6 +4137,41 @@ function createWorkPanel(root) {
       paintHead();
       return row;
     },
+    /**
+     * 一句"说过的话"进折叠区（2026-11-10 批 32，对齐 ZCode：只留结尾正文）。
+     *
+     * 模型一轮里会先说话再动工具（"我先看看这个文件…"），这些中间话以前全堆在
+     * 正文里；现在工具一动手，之前的话就折进来当一行「说」，点开看原文。
+     * 状态恒为 ok（话说完就是说完，没有成败语义）；label 摘首行，正文进展开块。
+     */
+    say(text) {
+      const one = String(text || "").trim();
+      if (!one) return;
+      const row = document.createElement("div");
+      row.className = "wp-step wp-say";
+      row.dataset.state = "ok";
+
+      const dot = document.createElement("span");
+      dot.className = "wp-status";
+      const verb = document.createElement("span");
+      verb.className = "wp-verb";
+      verb.textContent = "说";
+      const firstLine = one.split("\n").find((line) => line.trim()) || one;
+      const labelEl = document.createElement("span");
+      labelEl.className = "wp-label";
+      labelEl.textContent = firstLine.length > 80 ? `${firstLine.slice(0, 80)}…` : firstLine;
+      labelEl.title = firstLine;
+
+      const line = document.createElement("div");
+      line.className = "wp-line";
+      line.append(toolIcon("say"), dot, verb, labelEl);
+
+      row.append(line);
+      addStepBlock(row, "原文", one, "md");
+      list.append(row);
+      stepCount += 1;
+      paintHead();
+    },
     /** 工具结束：定成败、补输出（有 diff 就优先画 diff，比"Successfully replaced…"有用） */
     end(name, ok, output, diff) {
       const queue = open.get(name);
@@ -4247,6 +4289,12 @@ function addStepBlock(row, label, text, kind = "pre") {
   pre.className = kind === "diff" ? "wp-pre wp-pre-diff" : "wp-pre";
   if (kind === "diff") pre.innerHTML = paintDiff(text);
   else pre.textContent = text;
+  // 说过的话按 markdown 渲染（批 32）：那是模型写给**人**看的正文，pre 会把
+  // 列表/加粗全变成星号字。wp-pre-md 才是它的样式档。
+  if (kind === "md") {
+    pre.classList.add("wp-pre-md");
+    pre.innerHTML = renderMarkdown(text);
+  }
   pre.addEventListener("click", (event) => event.stopPropagation());
   block.append(tag, pre);
   body.append(block);
@@ -4269,6 +4317,12 @@ function workPanelFromSteps(root, steps, workMs) {
   if (!Array.isArray(steps) || steps.length === 0) return null;
   const panel = createWorkPanel(root);
   for (const step of steps) {
+    // 「说」步（2026-11-10 批 32）：历史里的中间话还原成与现场同一行。
+    // 现场是 answer 累积后折走，历史是服务端从带工具回合里捞出来——两边同形。
+    if (step.name === "say" && step.format === "md") {
+      panel.say(step.output || "");
+      continue;
+    }
     panel.start(step.name, step.label, undefined);
     panel.end(step.name, step.ok !== false, step.output, step.diff);
   }
@@ -4276,6 +4330,136 @@ function workPanelFromSteps(root, steps, workMs) {
   // 时长以服务端事实为准（现场那块是本地表；历史里没有"正在跑"，直接用落库值）
   if (typeof workMs === "number" && workMs > 0) panel.setDuration(workMs);
   return panel;
+}
+
+/* ── 文件变更汇总（2026-11-10 批 33，学 ZCode ConversationFileSummaryPanel）──
+ * ZCode 的形状：折叠行「改了 N 个文件 +A -B」，点开逐文件列表（路径 + 每文件 +/-）。
+ * 数据源走现成的 edit/write 工具步骤（事件与历史 steps 都带 label=路径、diff），
+ * 不新增存储、不动契约口径——工具事件这批起带 diff（纯增量），两边终于同一份事实。
+ * 刻意没有：ZCode 的逐文件 diff 查看器与回退按钮——MyGo 没有 code viewer 与 rewind
+ * 机制，完整改动在工作过程折叠区里点开 edit 步骤就能看，这里只做"动了哪些"的提示。
+ */
+
+/** 只认改文件的工具；read/bash 不算（bash 改的文件事件里没有路径，编不出来） */
+const FILECHANGE_TOOLS = new Set(["edit", "write"]);
+
+/** unified diff → +N / -M 行数：跳过文件头（+++ / ---），逐行数前缀 */
+function diffStats(diff) {
+  let add = 0;
+  let del = 0;
+  for (const line of String(diff || "").split("\n")) {
+    if (line.startsWith("+++") || line.startsWith("---")) continue;
+    if (line.startsWith("+")) add += 1;
+    else if (line.startsWith("-")) del += 1;
+  }
+  return { add, del };
+}
+
+/** 一轮的文件变更收集器：按路径聚合（同一个文件改三次算一个文件、行数累加） */
+function fileChangeCollector() {
+  const map = new Map();
+  return {
+    add(name, label, diff) {
+      if (!FILECHANGE_TOOLS.has(name) || !label) return;
+      const entry = map.get(label) || { add: 0, del: 0 };
+      const stats = diffStats(diff);
+      entry.add += stats.add;
+      entry.del += stats.del;
+      map.set(label, entry);
+    },
+    /** 展开用的有序列表：按第一次动手的先后排（时间序，不按字母序） */
+    list() {
+      return [...map.entries()].map(([path, counts]) => ({ path, ...counts }));
+    },
+  };
+}
+
+/**
+ * 「改了 N 个文件」汇总卡：挂在正文下方、工作过程块之后。
+ * 历史回读从 steps 收集（collectFileChangesFromSteps），形状与现场一致。
+ */
+function mountFileSummary(root, files) {
+  if (!root || !files.length) return;
+  const totalAdd = files.reduce((sum, file) => sum + file.add, 0);
+  const totalDel = files.reduce((sum, file) => sum + file.del, 0);
+
+  const box = document.createElement("section");
+  box.className = "fsum";
+  box.dataset.open = "0";
+
+  const chevron = document.createElement("span");
+  chevron.className = "fsum-chevron";
+  chevron.innerHTML =
+    `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ` +
+    `stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${TOOL_ICON_PATHS.chevron}</svg>`;
+
+  const title = document.createElement("span");
+  title.className = "fsum-title";
+  title.textContent = files.length === 1 ? "改了 1 个文件" : `改了 ${files.length} 个文件`;
+
+  const nums = document.createElement("span");
+  nums.className = "fsum-nums";
+  if (totalAdd > 0) {
+    const add = document.createElement("i");
+    add.className = "fsum-add";
+    add.textContent = `+${totalAdd}`;
+    nums.append(add);
+  }
+  if (totalDel > 0) {
+    const del = document.createElement("i");
+    del.className = "fsum-del";
+    del.textContent = `-${totalDel}`;
+    nums.append(del);
+  }
+
+  const head = document.createElement("button");
+  head.type = "button";
+  head.className = "fsum-head";
+  head.setAttribute("aria-expanded", "false");
+  head.title = "点开看动了哪些文件（完整改动在工作过程里）";
+  head.append(chevron, title, nums);
+  head.addEventListener("click", () => {
+    const open = box.dataset.open !== "1";
+    box.dataset.open = open ? "1" : "0";
+    head.setAttribute("aria-expanded", String(open));
+  });
+
+  const list = document.createElement("div");
+  list.className = "fsum-files";
+  for (const file of files) {
+    const row = document.createElement("div");
+    row.className = "fsum-file";
+    const path = document.createElement("span");
+    path.className = "fsum-path";
+    path.textContent = file.path;
+    path.title = file.path;
+    row.append(path);
+    if (file.add > 0) {
+      const add = document.createElement("i");
+      add.className = "fsum-add";
+      add.textContent = `+${file.add}`;
+      row.append(add);
+    }
+    if (file.del > 0) {
+      const del = document.createElement("i");
+      del.className = "fsum-del";
+      del.textContent = `-${file.del}`;
+      row.append(del);
+    }
+    list.append(row);
+  }
+
+  box.append(head, list);
+  root.append(box);
+}
+
+/** 历史回读的收集：从一条回答的 steps 里捞出 edit / write 步骤（与现场同口径） */
+function collectFileChangesFromSteps(steps) {
+  const collector = fileChangeCollector();
+  for (const step of Array.isArray(steps) ? steps : []) {
+    if (step && step.label) collector.add(step.name, step.label, step.diff);
+  }
+  return collector.list();
 }
 
 /** 错误行。`retryable` 时带「重试」——重发这条错误的最后一句话（批次一，2026-11-04） */
@@ -4299,26 +4483,98 @@ function addNotice(text) {
 }
 
 function addError(text, opts = {}) {
-  const wrap = document.createElement("div");
-  wrap.className = "msg error";
-  const body = document.createElement("div");
-  body.className = "body";
-  body.textContent = text;
-  wrap.append(body);
-  if (opts.retryable && state.lastUserText) {
-    const retry = document.createElement("button");
-    retry.type = "button";
-    retry.className = "retry-btn";
-    retry.textContent = "重试";
-    retry.title = "重新发送上一条消息";
-    retry.addEventListener("click", () => {
-      wrap.remove();
-      void send(state.lastUserText);
+  // 批 32（对齐 ZCode ChatErrorBanner）：错误不再插进消息流（流里一行红字
+  // 会把正文挤乱、滚动跳位），改挂 composer 上方一张卡：一行摘要 +
+  // 详情（弹窗）/ 复制 / 重试 / ×。opts.detail 为脱敏摘要，opts.code 稳定类别。
+  showChatError({
+    message: text,
+    detail: opts.detail || "",
+    retryable: Boolean(opts.retryable && state.lastUserText),
+  });
+}
+
+/**
+ * 错误卡（2026-11-10 批 32）：渲染 / 更新 composer 上方那张卡。
+ * 一轮只留一张卡——同一轮里接连报错时后到的覆盖先到的（人在意的是最新一次）。
+ * `retryPayload` 存「重试」要重发的那条话；切会话 / 发新消息时整卡退场。
+ */
+function showChatError({ message, detail = "", retryable = false, retryPayload = null }) {
+  const host = el.chatError;
+  if (!host) return;
+  host.replaceChildren();
+  host.hidden = false;
+
+  const icon = document.createElement("span");
+  icon.className = "chat-error-icon";
+  icon.innerHTML =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<circle cx="12" cy="12" r="9"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>';
+
+  const text = document.createElement("div");
+  text.className = "chat-error-text";
+  text.textContent = message || "出错了";
+
+  const actions = document.createElement("div");
+  actions.className = "chat-error-actions";
+  const button = (label, title, onClick) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "ghost chat-error-btn";
+    b.textContent = label;
+    b.title = title;
+    b.addEventListener("click", onClick);
+    actions.append(b);
+    return b;
+  };
+
+  // 详情才进小窗（ZCode 的理由：内嵌展开会把消息区撑高、滚动跳动）
+  if (detail) {
+    button("详情", "查看脱敏后的错误细节", () => {
+      openModal("错误详情", (body) => {
+        const pre = document.createElement("pre");
+        pre.className = "chat-error-detail";
+        pre.textContent = detail;
+        body.append(pre);
+      });
     });
-    wrap.append(retry);
   }
-  el.thread.append(wrap);
-  if (state.stick) scrollToEnd();
+  if (detail || message) {
+    button("复制", "复制这条报错（已脱敏），方便贴给别人看", async () => {
+      const full = detail ? `${message}\n\n${detail}` : message;
+      try {
+        await navigator.clipboard.writeText(full);
+        toast("已复制（不含密钥与上游地址）");
+      } catch {
+        toast("复制失败，手动选文本吧");
+      }
+    });
+  }
+  if (retryable) {
+    button("重试", "重新发送上一条消息", () => {
+      hideChatError();
+      void send(retryPayload ?? state.lastUserText);
+    });
+  }
+  const dismiss = document.createElement("button");
+  dismiss.type = "button";
+  dismiss.className = "ghost chat-error-btn chat-error-close";
+  dismiss.setAttribute("aria-label", "关闭");
+  dismiss.title = "关闭";
+  dismiss.innerHTML =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
+  dismiss.addEventListener("click", hideChatError);
+  actions.append(dismiss);
+
+  host.append(icon, text, actions);
+}
+
+/** 错误卡退场。切会话 / 发出新消息时调用——错误是"那一轮"的事，不追着人跑。 */
+function hideChatError() {
+  if (!el.chatError) return;
+  el.chatError.hidden = true;
+  el.chatError.replaceChildren();
 }
 
 /**
@@ -4377,14 +4633,36 @@ const esc = (text) => text.replace(/[&<>]/g, (char) => ESCAPES[char]);
 /** 放进 HTML 属性值里用：esc 不处理引号，这里补上 */
 const attr = (text) => esc(String(text ?? "")).replace(/"/g, "&quot;");
 
+/**
+ * 行内渲染（2026-11-10 批 33 对齐 ZCode 的 markdown 水平）。
+ * 顺序有讲究：先转义，再把行内码换占位符保护起来（里面的 `*`、URL 不该再被加工），
+ * 然后加粗/斜体/删除线 → 显式链接 → 图片 → 裸 URL 自动链接 → 任务单号。
+ */
 function inline(raw) {
+  const protectedCode = [];
   return esc(raw)
-    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    // 行内码先保护：内容原样保留，不参与后续任何替换
+    .replace(/`([^`]+)`/g, (_m, code) => {
+      protectedCode.push(`<code>${code}</code>`);
+      return `\u0001${protectedCode.length - 1}\u0001`;
+    })
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
     .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+    // 删除线（批 33）：GFM ~~text~~
+    .replace(/~~([^~]+)~~/g, "<del>$1</del>")
     .replace(
       /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
       '<a href="$2" target="_blank" rel="noreferrer">$1</a>',
+    )
+    // 图片（批 33）：只认 https，模型偶尔会贴图链；失败就当普通链接看
+    .replace(
+      /!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)/g,
+      '<img src="$2" alt="$1" loading="lazy" class="md-img">',
+    )
+    // 裸 URL 自动链接（批 33）：不在 href 属性里（前面不是引号/等号）才补 <a>
+    .replace(
+      /(^|[\s(（【])((?:https?:\/\/)[^\s<>"'）】]+[^\s<>"'（）】.,;:!?])/g,
+      (_m, prefix, url) => `${prefix}<a href="${url}" target="_blank" rel="noreferrer">${url}</a>`,
     )
     // 任务单号自动变链接：历史里的「【任务 t-2026… · 前端】已完成」也能点进详情。
     // 只在空白/括号后命中，避免把 code、属性值里的字符改坏。
@@ -4392,7 +4670,9 @@ function inline(raw) {
       /(^|[\s(（【])((?:t-\d{8}-\d{6}-[0-9a-z]+|T-\d{3,}))(?![0-9a-z-])/gi,
       (_match, prefix, id) =>
         `${prefix}<a href="#/tasks?ticket=${encodeURIComponent(id)}" class="ticket-link">${id}</a>`,
-    );
+    )
+    // 还原行内码（内容已转义过，直接回填）
+    .replace(/\u0001(\d+)\u0001/g, (_m, index) => protectedCode[Number(index)] || "");
 }
 
 /* ── 对话里的派单提示 ─────────────────────────────────────
@@ -4551,7 +4831,11 @@ function codeBlockHtml(lang, code) {
   } catch {
     body = esc(code);
   }
-  return `<div class="codeblock"><button class="code-copy" type="button" title="复制代码">复制</button><pre class="code"><code>${body}</code></pre></div>`;
+  // 语言标签（批 33，对齐 ZCode）：有名字才显示，匿名围栏不摆一个空标签
+  const head = key
+    ? `<div class="code-head"><span class="code-lang">${esc(key)}</span><button class="code-copy" type="button" title="复制代码">复制</button></div>`
+    : `<button class="code-copy" type="button" title="复制代码">复制</button>`;
+  return `<div class="codeblock">${head}<pre class="code"><code>${body}</code></pre></div>`;
 }
 
 /* ── 表格（批次二）：GFM 管道表格，只做基本形态 ──────────────
@@ -4592,19 +4876,31 @@ function renderMarkdown(source) {
 
   const out = [];
   let paragraph = [];
-  let list = null;
-
   const flushParagraph = () => {
     if (paragraph.length) {
       out.push(`<p>${inline(paragraph.join("\n"))}</p>`);
       paragraph = [];
     }
   };
-  const flushList = () => {
-    if (list) {
-      out.push(`</${list}>`);
-      list = null;
-    }
+  /**
+   * 列表栈（批 33，学 ZCode 的嵌套观感）：每层记类型 / 缩进 / 是否有开着没关的 <li>。
+   * 缩进比当前层深 ≥2 空格 = 开子列表（子列表住在上一个 <li> 里）；浅了就逐层收。
+   * 刻意只认 2 空格一档的粗口径：模型输出的缩进本来就不严格，够读就行。
+   */
+  const listStack = [];
+  const listCloseLevel = () => {
+    const top = listStack.pop();
+    if (top.liOpen) out.push("</li>");
+    out.push(`</${top.type}>`);
+  };
+  const listFlush = () => {
+    while (listStack.length) listCloseLevel();
+  };
+  const listOpenItem = (content) => {
+    const top = listStack[listStack.length - 1];
+    if (top.liOpen) out.push("</li>");
+    top.liOpen = true;
+    out.push(`<li>${listItemHtml(content)}`);
   };
 
   const lines = text.split("\n");
@@ -4613,20 +4909,20 @@ function renderMarkdown(source) {
     const placeholder = line.trim().match(/^\u0000(\d+)\u0000$/);
     if (placeholder) {
       flushParagraph();
-      flushList();
+      listFlush();
       out.push(blocks[Number(placeholder[1])]);
       continue;
     }
     if (!line.trim()) {
       flushParagraph();
-      flushList();
+      listFlush();
       continue;
     }
 
     let match;
     if ((match = line.match(/^(#{1,4})\s+(.*)$/))) {
       flushParagraph();
-      flushList();
+      listFlush();
       const level = match[1].length;
       out.push(`<h${level}>${inline(match[2])}</h${level}>`);
       continue;
@@ -4634,7 +4930,7 @@ function renderMarkdown(source) {
     // 表格分支（批次二）：表头行 + 分隔行 + 连续数据行
     if (isTableRow(line) && index + 1 < lines.length && isTableDelim(lines[index + 1])) {
       flushParagraph();
-      flushList();
+      listFlush();
       const header = splitTableRow(line);
       const aligns = splitTableRow(lines[index + 1]).map((cell) =>
         /^:-+:$/.test(cell) ? "center" : /-+:$/.test(cell) ? "right" : "left",
@@ -4649,35 +4945,48 @@ function renderMarkdown(source) {
       out.push(tableHtml(header, aligns, rows));
       continue;
     }
-    if ((match = line.match(/^\s*[-*+]\s+(.*)$/))) {
+    // 列表分支（批 33 重写）：缩进感知 + 任务清单（- [ ] / - [x]）
+    if ((match = line.match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/))) {
       flushParagraph();
-      if (list !== "ul") {
-        flushList();
-        out.push("<ul>");
-        list = "ul";
+      const indent = match[1].replace(/\t/g, "  ").length;
+      const ordered = /\d/.test(match[2]);
+      const type = ordered ? "ol" : "ul";
+      const top = listStack[listStack.length - 1];
+      if (top && indent >= top.indent + 2) {
+        // 开子列表：住在上一个 <li> 里（它还开着，不用关）
+        out.push(`<${type}>`);
+        listStack.push({ type, indent, liOpen: false });
+        listOpenItem(match[3]);
+      } else {
+        while (listStack.length && indent < listStack[listStack.length - 1].indent) {
+          listCloseLevel();
+        }
+        const same = listStack[listStack.length - 1];
+        if (!same || same.type !== type) {
+          listFlush();
+          out.push(`<${type}>`);
+          listStack.push({ type, indent, liOpen: false });
+        }
+        listOpenItem(match[3]);
       }
-      out.push(`<li>${inline(match[1])}</li>`);
       continue;
     }
-    if ((match = line.match(/^\s*\d+[.)]\s+(.*)$/))) {
+    // 引用块（批 33 重写）：连续 > 行合成一个 <blockquote>，行间 <br>；
+    // 多层 > 只剥一层、内容原样渲染（嵌套引用是罕见输入，不追求完美）。
+    if (/^>\s?/.test(line)) {
       flushParagraph();
-      if (list !== "ol") {
-        flushList();
-        out.push("<ol>");
-        list = "ol";
+      listFlush();
+      const quoted = [line.replace(/^>\s?/, "")];
+      while (index + 1 < lines.length && /^>\s?/.test(lines[index + 1])) {
+        index += 1;
+        quoted.push(lines[index].replace(/^>\s?/, ""));
       }
-      out.push(`<li>${inline(match[1])}</li>`);
-      continue;
-    }
-    if ((match = line.match(/^>\s?(.*)$/))) {
-      flushParagraph();
-      flushList();
-      out.push(`<blockquote>${inline(match[1])}</blockquote>`);
+      out.push(`<blockquote>${quoted.map((one) => inline(one)).join("<br>")}</blockquote>`);
       continue;
     }
     if (/^(-{3,}|\*{3,}|_{3,})$/.test(line.trim())) {
       flushParagraph();
-      flushList();
+      listFlush();
       out.push("<hr />");
       continue;
     }
@@ -4685,8 +4994,22 @@ function renderMarkdown(source) {
   }
 
   flushParagraph();
-  flushList();
+  listFlush();
   return out.join("");
+}
+
+/**
+ * 列表项内容（批 33）：任务清单项 `- [ ]` / `- [x]` 渲染成只读勾选框
+ * （模型写给人看的清单，勾不勾由人记在心里，不是可交互控件——点了也不该假装有状态）。
+ * 其余照旧走 inline。
+ */
+function listItemHtml(content) {
+  const task = content.match(/^\[( |x|X)\]\s+(.*)$/);
+  if (task) {
+    const checked = task[1].toLowerCase() === "x" ? " checked" : "";
+    return `<span class="md-task"><input type="checkbox" disabled${checked} aria-hidden="true">${inline(task[2])}</span>`;
+  }
+  return inline(content);
 }
 
 /* ── 打开会话 ─────────────────────────────────────────── */
@@ -4752,6 +5075,8 @@ async function openChat(conversationId) {
         // 工作过程（2026-11-07）：服务端从 durable 里把这一轮的 toolCall / tool-result
         // 配成 steps 下发；这里还原成与现场同一块（已收尾、默认折叠）。
         workPanelFromSteps(shown.root, message.steps, message.workMs);
+        // 文件变更汇总（批 33）：从同一份 steps 收集，与现场同一张卡
+        mountFileSummary(shown.root, collectFileChangesFromSteps(message.steps));
         // 课题提议卡（2026-11-07 批二）：历史回读也按工具结果重渲，状态由 GET 定
         for (const step of Array.isArray(message.steps) ? message.steps : []) {
           if (step && step.name === "propose_topic" && step.output) {
@@ -4910,8 +5235,10 @@ async function syncCtxMeter(stillCurrent = () => true) {
     const pct = Math.min(100, Math.max(0, Math.round((data.used / data.window) * 100)));
     el.ctxFill.style.strokeDasharray = `${CTX_C}`;
     el.ctxFill.style.strokeDashoffset = `${CTX_C * (1 - pct / 100)}`;
-    el.ctxPct.textContent = `${pct}%`;
-    el.ctxRing.title = `上下文已用 ${pct}%（${data.used.toLocaleString()} / ${data.window.toLocaleString()} tokens）`;
+    // 数字口径（2026-11-11 用户拍板）：环边只摆已用 token 的 K/M 格式（4K / 1.2M）；
+    // 细节全部收进悬停——用了 / 顶了（占上限比例）/ 最多，不出现「已用 token」字样。
+    el.ctxPct.textContent = formatTokenCount(data.used);
+    el.ctxRing.title = `用了 ${formatTokenCount(data.used)} · 顶了 ${pct}% · 最多 ${formatTokenCount(data.window)}`;
     // 阈值：<70% 中性灰；70–90% 警示；>90% 错误
     el.ctxRing.classList.toggle("warn", pct >= 70 && pct <= 90);
     el.ctxRing.classList.toggle("danger", pct > 90);
@@ -5724,6 +6051,8 @@ async function send(text, images = []) {
   state.stopRequested = false;
   state.lastUserText = text; // 错误行的「重试」用（批次一）
   state.stick = true;
+  // 新的一轮开跑：上一轮的错误卡退场（批 32）——人在发新消息，旧错不再是当下的事
+  hideChatError();
   const turnStartMs = Date.now();
   // 通知与「正看着这个会话」的静默判定要用这一轮的会话 id（批次二）
   let streamConv = state.conversationId;
@@ -5761,6 +6090,25 @@ async function send(text, images = []) {
     if (!work) work = createWorkPanel(turn.root);
     return work;
   };
+  /**
+   * 说过的话折进工作过程（2026-11-10 批 32，学 ZCode「只留结尾」）：
+   * 工具 start / 派活帧一到，answer 里已累积的中间话就折成一行「说」，
+   * 正文清零等下一段。折叠态与展开态同一个 DOM，点开还是那段原文。
+   * 刻意等"动手"才折：纯说话的轮次一段到底，不折腾。
+   */
+  const foldSpoken = () => {
+    const spoken = answer.trim();
+    if (!spoken) return;
+    ensureWork().say(spoken);
+    answer = "";
+    paint();
+  };
+  /**
+   * 文件变更收集（批 33，学 ZCode 的「改了 N 个文件」）：只认 edit / write，
+   * 按路径聚合 +/- 行数（diff 统计）。bash 改的文件不进来——事件里没有路径，
+   * 编不出来；write 覆盖全文件也没有 diff，只列路径不带数字，不编数。
+   */
+  const fileChanges = fileChangeCollector();
   // 派活行（2026-11-07 修）：按 ticketId 一单一行，进度帧更新、终态帧收行。
   // 轮收尾还在跑的由 finally 里 handoff 画「已转后台」——chancellor 比轮活得久。
   const delegateRows = new Map();
@@ -5949,9 +6297,14 @@ async function send(text, images = []) {
             // 「在想」由思考卡表头表达；「在动手」由工作过程块表头表达。
             // 这里不再插占位行——两处表头已经是同一件事的第二份说法。
           } else if (event.type === "tool") {
-            if (event.status === "start") ensureWork().start(event.name, event.label, event.args);
-            else {
+            if (event.status === "start") {
+              // 工具动手前，说过的话先进折叠区（批 32）：正文只留最后一段。
+              // "读过再答"的多段轮次里，第一段话在第一只工具 start 时折走。
+              if (answer.trim()) foldSpoken();
+              ensureWork().start(event.name, event.label, event.args);
+            } else {
               ensureWork().end(event.name, event.ok !== false, event.output, event.diff);
+              if (event.diff) fileChanges.add(event.name, event.label, event.diff);
               // 课题提议（2026-11-07 批二）：结果落在该条工具消息处（对话末尾自然出现）
               if (event.name === "propose_topic" && event.ok !== false) {
                 mountTopicProposalCard(turn.root, parseTopicProposalOutput(event.output));
@@ -5962,6 +6315,7 @@ async function send(text, images = []) {
             // 派活也是一步：进同一个工作过程块，不再另起一行飘在正文上方。
             // 行的生死跟 phase 走：终态帧（done / needs_you / aborted / failed）
             // 一定有一帧，到了就收行；还在跑的由收尾 handoff 兜底（见 delegateRows）。
+            if (answer.trim()) foldSpoken();
             const row = delegateRowOf(event);
             row.setLabel(`${event.done}/${event.total} ${event.current || event.lastAction || ""}`.trim());
             if (event.phase === "done" || event.phase === "needs_you") {
@@ -6010,16 +6364,20 @@ async function send(text, images = []) {
             attachUsage(turn.root, event.usage || { input: 0, output: 0, cacheRead: 0 }, Date.now() - turnStartMs);
             void syncCtxMeter();
           } else if (event.type === "unanswered") {
-            // 后端明确说「这次没能生成回复」：用它的文案，别让结尾兜底再补一句笼统的"模型没有返回内容。"
+            // 后端明确说「这次没能生成回复」：用它的文案与脱敏 detail（批 32），
+            // 别让结尾兜底再补一句笼统的"模型没有返回内容。"
             noReplyExplained = true;
-            addError(event.message);
+            addError(event.message, { detail: event.detail });
             maybeNotify("这一轮没答上来", el.title.textContent || "对话", streamConv, "error");
             if (state.stick) scrollToEnd();
           } else if (event.type === "error") {
-            // 后端把 unanswered 透成 error 帧时（index.ts 收尾兜底），文案就是那句具体提示，
+            // 后端把 unanswered 透成 error 帧（index.ts），文案与 code/detail 一起带来。
             // 同样记下，避免结尾再叠一条"模型没有返回内容。"
             noReplyExplained = true;
-            addError(event.message || "出错了", { retryable: true });
+            addError(event.message || "出错了", {
+              retryable: true,
+              detail: event.detail,
+            });
             maybeNotify("Selenite 出错了", event.message || "", streamConv, "error");
           }
         }
@@ -6056,6 +6414,9 @@ async function send(text, images = []) {
     // chancellor 还在后台跑，画「已转后台」，不能算进失败（2026-11-07 修）。
     for (const row of delegateRows.values()) row.handoff();
     if (work) work.finish(state.stopRequested ? "interrupted" : "completed");
+    // 一轮收尾：动过文件就在正文下方挂一张「改了 N 个文件」汇总卡（批 33，
+    // 学 ZCode ConversationFileSummaryPanel——折叠区收掉之后，动了哪些文件还留得住）
+    mountFileSummary(turn.root, fileChanges.list());
     // 忙时排队的那些话由服务端按序消费（扫尾批 8a），这里不再有轮末补发：
     // 它们要么已经作为插话落进这一轮，要么在 durable 的 inbox 里等下一轮。
     el.input.focus();
@@ -9946,10 +10307,13 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
+/** 输入栏学 ZCode（2026-11-11）：打字/换行/粘贴实时长高——原来只在发送清空后重算，
+ *  打字过程中永远一行；上限交给 CSS 的 max-height: 200px，超出内部滚动。 */
 function resize() {
   el.input.style.height = "auto";
   el.input.style.height = `${Math.min(el.input.scrollHeight, 200)}px`;
 }
+el.input.addEventListener("input", resize);
 
 /** 停止当前这一轮：人的明确意图（跟客户端断开是两回事） */
 async function stopStreaming() {
@@ -12041,10 +12405,25 @@ function memoryProposalMarkup(item) {
   const keep = String(item.keep?.content || item.keepId || "");
   const drop = String(item.drop?.content || item.dropId || "");
   const reason = String(item.reason || "");
+  // 证据引文（2026-11-10 对标 Anthropic「做梦」）：有 = 可点回原对话核对；
+  // null = 没找到（导入 / 日记来源的记录本来就不在对话里），不挡应用；
+  // undefined（服务端开关关着没下发）= 整个块不渲染。
+  let evidenceBlock = "";
+  if (item.evidence !== undefined) {
+    const ev = item.evidence && typeof item.evidence === "object" ? item.evidence : null;
+    if (ev && ev.text) {
+      evidenceBlock = `<button class="mem-prop-evidence is-hit" type="button"${
+        ev.conversationId ? ` data-conv="${attr(ev.conversationId)}"` : ""
+      } data-tip="原始出处${ev.conversationId ? "，点击跳回原对话" : ""}">${esc(ev.text)}</button>`;
+    } else {
+      evidenceBlock = `<div class="mem-prop-evidence is-miss">未找到原始出处（导入或日记来源的记录不在对话里），不挡应用</div>`;
+    }
+  }
   return `<div class="mem-prop" data-keep="${esc(item.keepId)}" data-drop="${esc(item.dropId)}">
     <div class="mem-prop-line"><span class="mem-prop-tag is-keep">保留</span><span class="mem-prop-text">${esc(keep)}</span></div>
     <div class="mem-prop-line"><span class="mem-prop-tag is-drop">收编</span><span class="mem-prop-text">${esc(drop)}</span></div>
     ${reason ? `<div class="mem-prop-reason">${esc(reason)}</div>` : ""}
+    ${evidenceBlock}
     <div class="mem-prop-actions">
       <button class="ghost mem-act" type="button" data-prop-apply>应用</button>
       <button class="ghost mem-act" type="button" data-prop-ignore>忽略</button>
@@ -12056,6 +12435,11 @@ function wireMemoryProposalActions(box) {
   for (const card of box.querySelectorAll(".mem-prop")) {
     const apply = card.querySelector("[data-prop-apply]");
     const ignore = card.querySelector("[data-prop-ignore]");
+    // 证据引文可点回原对话（没有 conversationId 就只是静态片段，点了不动作）
+    card.querySelector(".mem-prop-evidence.is-hit[data-conv]")?.addEventListener("click", (event) => {
+      const conversationId = event.currentTarget?.getAttribute("data-conv");
+      if (conversationId) void openConversation(conversationId);
+    });
     apply?.addEventListener("click", async () => {
       const keepId = card.dataset.keep;
       const dropId = card.dataset.drop;

@@ -13,14 +13,18 @@ import {
 	BasicConsolidator,
 	IMPORTANCE_CEIL,
 	InMemoryStore,
+	MAX_EXPERIENCES_PER_TURN,
 	MAX_PREFERENCES_PER_TURN,
 	MemoryEngine,
 	MIN_PREFERENCE_CONFIDENCE,
 	NoopExtractor,
-	PreferenceExtractor,
+	DialogueExtractor,
+	PREFERENCE_PROMPT,
 	REDACTED,
 	SqliteMemoryStore,
 	decayedImportance,
+	experienceExtractionEnabled,
+	extractionPrompt,
 	groundedInUserText,
 	idCardValid,
 	luhnValid,
@@ -28,6 +32,9 @@ import {
 	preferenceQuoteCheckEnabled,
 	normalizeContent,
 	consolidateScope,
+	locateEvidence,
+	normalizeForGroundingWithMap,
+	parseExtractionJson,
 	parsePreferenceJson,
 	redactSecrets,
 	reinforcedImportance,
@@ -411,10 +418,10 @@ try {
 	const long = renderPreference({ content: "很长".repeat(400), why: "", howToApply: "", confidence: 1 });
 	assert(long.length <= 400, `超长应截断到 400 内，实际 ${long.length}`);
 
-	// 10.5 PreferenceExtractor：模型给了就落 preference，模型挂了就返回空（绝不抛）
+	// 10.5 DialogueExtractor（只抽偏好档）：模型给了就落 preference，模型挂了就返回空（绝不抛）
 	const engineWithModel = new MemoryEngine({
 		store: new InMemoryStore(),
-		extractor: new PreferenceExtractor(async () =>
+		extractor: new DialogueExtractor(async () =>
 			JSON.stringify([{ content: "用户要求以后都先给结论", why: "不喜欢铺垫", howToApply: "回答开头", confidence: 0.95 }]),
 		),
 	});
@@ -431,7 +438,7 @@ try {
 
 	const engineNoModel = new MemoryEngine({
 		store: new InMemoryStore(),
-		extractor: new PreferenceExtractor(async () => {
+		extractor: new DialogueExtractor(async () => {
 			throw new Error("上游 500");
 		}),
 	});
@@ -1147,14 +1154,14 @@ try {
 			{ content: "用户不喜欢被追问太多", why: "用户明说", howToApply: "汇报一次说清", confidence: 0.9 },
 			{ content: "用户偏好深色主题", why: "", howToApply: "", confidence: 0.9 },
 		]);
-	const groundedOnly = await new PreferenceExtractor(generator).extract({
+	const groundedOnly = await new DialogueExtractor(generator).extract({
 		messages,
 		scope: { type: "global" },
 		now: new Date(),
 	});
 	assert(groundedOnly.length === 1, `编造偏好应被拒收（实际 ${groundedOnly.length} 条）`);
 	assert(groundedOnly[0]!.content.includes("不喜欢被追问"), "留下的应是接地那条");
-	const unfiltered = await new PreferenceExtractor(generator).extract({
+	const unfiltered = await new DialogueExtractor(generator).extract({
 		messages,
 		scope: { type: "global" },
 		now: new Date(),
@@ -1454,6 +1461,122 @@ try {
 	assert(uStore.get("u-1")!.lastUsedAt === now.toISOString(), "召回命中应记 lastUsedAt");
 
 	console.log("✓ 巩固审计：usage 排序 / 淘汰只列不删 / usageRanking 回滚 / 使用账 +1");
+}
+
+// ── 18. 经验抽取与证据引文（2026-11-10 对标 Anthropic「做梦」）────────
+// 两个动作：①对话里"用户纠正过/验证过的做法"落成 experience（与偏好同一管线）；
+// ②整理建议回原始对话找证据引文（locateEvidence 纯函数部分在包内测）。
+{
+	// 18.1 合并解析：{preferences, experiences} 新形状；旧形状逐字节兼容
+	const combined = parseExtractionJson(
+		'```json\n{"preferences":[{"content":"以后都用中文","confidence":0.9}],"experiences":[{"content":"写周报先给结论","why":"上次被打回来","howToApply":"汇报开头一行结论","confidence":0.85}]}\n```',
+	);
+	assert(
+		combined.preferences.length === 1 && combined.experiences.length === 1,
+		"合并形状应两类各解析出 1 条",
+	);
+	assert(parseExtractionJson('[{"content":"旧形状","confidence":0.9}]').experiences.length === 0, "裸数组 = 只有偏好");
+	assert(
+		parseExtractionJson('{"preferences":[{"content":"旧形状","confidence":0.9}]}').experiences.length === 0,
+		"旧对象形状无经验",
+	);
+	const solo = parseExtractionJson('{"experiences":[{"content":"只有经验栏也能活","confidence":0.9}]}');
+	assert(solo.preferences.length === 0 && solo.experiences.length === 1, "只给经验栏也要能解析");
+	for (const bad of ["", "   ", "不是 JSON", "[{", "null", "{}", "[1,2,3]"]) {
+		const parsed = parseExtractionJson(bad);
+		assert(
+			parsed.preferences.length === 0 && parsed.experiences.length === 0,
+			`坏输入应返回两类皆空：${JSON.stringify(bad)}`,
+		);
+	}
+
+	// 18.2 DialogueExtractor：一次调用出两类、偏好在前、经验与偏好同样重挂宽 scope
+	const expMessages: ExtractMessage[] = [
+		{ role: "user", content: "上次那样汇报被打回来，这回先给结论就过了。以后都这么干，我不喜欢铺垫。" },
+	];
+	const expGenerator = async () =>
+		JSON.stringify({
+			preferences: [{ content: "用户要求以后都先给结论", why: "不喜欢铺垫", howToApply: "回答开头", confidence: 0.9 }],
+			experiences: [{ content: "汇报先给结论", why: "上次被打回", howToApply: "回答开头一行", confidence: 0.85 }],
+		});
+	const expEngine = new MemoryEngine({
+		store: new InMemoryStore(),
+		extractor: new DialogueExtractor(expGenerator, { experience: true }),
+	});
+	const expResult = await expEngine.ingestTurn(expMessages, { type: "session", id: "exp" }, {
+		preferenceScope: { type: "global" },
+	});
+	const kinds = expResult.added.map((record) => record.kind);
+	assert(kinds.includes("preference") && kinds.includes("experience"), `应两类都落库，实际 ${kinds.join("/")}`);
+	assert(kinds[0] === "preference", "偏好应排在经验前面（巩固层同段话偏好优先占位）");
+	const experience = expResult.added.find((record) => record.kind === "experience")!;
+	assert(experience.scope === "global", `经验应与偏好同样重挂 global，实际 ${experience.scope}`);
+	assert(experience.source === "extract:experience", "经验来源应可辨认");
+	assert(experience.veracity === "stated", "经验是用户自己说的");
+	assert(experience.content.includes("Why: ") && experience.content.includes("How: "), "经验正文应带 Why/How 段");
+
+	// 18.3 关掉经验：提示词逐字节回旧形态，解析出的经验栏整段丢弃
+	assert(extractionPrompt(false) === PREFERENCE_PROMPT, "关经验 = 发旧偏好提示词（逐字节）");
+	assert(extractionPrompt(true) !== PREFERENCE_PROMPT, "开经验 = 发合并提示词");
+	const noExp = await new DialogueExtractor(expGenerator, { experience: false }).extract({
+		messages: expMessages,
+		scope: { type: "global" },
+		now: new Date(),
+	});
+	assert(noExp.every((candidate) => candidate.kind === "preference"), "关掉后经验栏整段丢弃");
+	assert(noExp.length === 1, `偏好照抽，实际 ${noExp.length} 条`);
+
+	// 18.4 经验同样过引文校验：用户原话里找不到依据的"经验"不入库（宁拒勿收）
+	const fabricated = await new DialogueExtractor(
+		async () =>
+			JSON.stringify({ preferences: [], experiences: [{ content: "用户偏好深色主题", confidence: 0.9 }] }),
+		{ experience: true },
+	).extract({ messages: expMessages, scope: { type: "global" }, now: new Date() });
+	assert(fabricated.length === 0, "编造的经验应被引文校验拒收");
+
+	// 18.5 经验上限与开关
+	const capped = parseExtractionJson(
+		JSON.stringify({
+			experiences: Array.from({ length: MAX_EXPERIENCES_PER_TURN + 2 }, (_, index) => ({
+				content: `经验 ${index}`,
+				confidence: 0.9,
+			})),
+		}),
+	);
+	assert(capped.experiences.length === MAX_EXPERIENCES_PER_TURN, `经验最多 ${MAX_EXPERIENCES_PER_TURN} 条`);
+	assert(experienceExtractionEnabled({} as NodeJS.ProcessEnv) === true, "缺省 = 开");
+	assert(
+		experienceExtractionEnabled({ MEMORY_EXTRACT_EXPERIENCE: "false" } as unknown as NodeJS.ProcessEnv) === false,
+		"MEMORY_EXTRACT_EXPERIENCE=false = 关",
+	);
+
+	console.log("✓ 经验抽取：合并解析 / 一次调用两类 / 重挂 / 开关回滚 / 引文校验 / 上限");
+
+	// 18.6 locateEvidence：逐字命中（episode）、转述命中（4 字锚点）、未命中、截断、标点容忍
+	const dialogue =
+		"用户：我今天把周报改成先写结论了，上次那样被领导打回来过，先给结论之后一次就过了。";
+	const verbatim = locateEvidence(dialogue, "今天把周报改成先写结论了");
+	assert(verbatim !== null && verbatim.includes("先写结论"), "episode 逐字句应命中");
+	const paraphrase = locateEvidence(dialogue, "周报汇报先给结论，避免被打回\nWhy: 上次被打回\nHow: 回答开头");
+	assert(paraphrase !== null && paraphrase.includes("周报"), "转述应通过 4 字锚点命中（Why/How 不参与匹配）");
+	assert(locateEvidence(dialogue, "用户喜欢深色主题") === null, "毫无依据的找不到");
+	const longText = "甲".repeat(60) + "我要记的关键证据在这里" + "乙".repeat(120);
+	const clipped = locateEvidence(longText, "我要记的关键证据在这里");
+	assert(clipped !== null && clipped.startsWith("…") && clipped.endsWith("…"), "命中在长文本中段应两头带省略号");
+	assert(locateEvidence("我要 记的，关键证据在这里。", "我要记的关键证据在这里") !== null, "标点/空白差异应容忍");
+	assert(locateEvidence("Why: 上次被打回", "正 文\nWhy: 上次被打回") === null, "锚点不足 4 字（首行）= null");
+
+	// 18.7 附：emoji（代理对）文本 —— norm / map / 原文三者必须同在 UTF-16 下标域，引文才不错位
+	const mapped = normalizeForGroundingWithMap("😀a，İb");
+	assert(mapped.norm.length === mapped.map.length, "map 与归一化串应同长（UTF-16 域不变式）");
+	const emojiText = "😀".repeat(60) + "你好，" + "关键证据在这里";
+	const emojiHit = locateEvidence(emojiText, "关键证据在这里");
+	assert(emojiHit !== null && emojiHit.includes("关键证据在这里"), `emoji 文本引文应摘到命中处：${emojiHit}`);
+	const farEmoji = "😀".repeat(200) + "，".repeat(200) + "关键证据在这里";
+	const farHit = locateEvidence(farEmoji, "关键证据在这里");
+	assert(farHit !== null && farHit.includes("关键证据在这里"), "超长 emoji 前缀的引文也应摘到命中处");
+
+	console.log("✓ 证据引文：逐字/转述命中 / 未命中 / 截断 / 标点容忍 / emoji 下标域");
 }
 
 console.log("✓ 记忆框架自测通过");

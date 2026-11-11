@@ -1028,8 +1028,10 @@ html[data-sidebar="closed"] .side-rail {
 .thread {
   max-width: var(--thread);
   margin: 0 auto;
-  /* 底部留出输入框的高度，否则最后一条永远被压在它下面 */
-  padding: 26px 22px 108px;
+  /* 底部让位 = 输入卡实测高度（JS 写进 --composer-h，缺省 86 = 卡 min-height）+ 22 呼吸。
+     输入栏长高（2026-11-11 学 ZCode）/错误卡/附件行出现时由 ResizeObserver 同步，
+     最后一条消息永远不被压在卡下。原来写死 108px，只够一行高的卡。 */
+  padding: 26px 22px calc(var(--composer-h, 86px) + 22px);
   display: flex; flex-direction: column; gap: 18px;
 }
 
@@ -1296,8 +1298,10 @@ html[data-sidebar="closed"] .side-rail {
 }
 .body th { background: var(--card-high); font-weight: 600; color: var(--text); }
 
-/* 上下文环形指示（2026-11-04 从顶栏搬进 composer 右下，对齐 cindy ContextCapacityRing）：
-   20×20 进度环 + 12px 百分比；颜色走 currentColor，阈值只换 class。 */
+/* 上下文环形指示（2026-11-04 从顶栏搬进 composer 右下，对齐 cindy ContextCapacityRing；
+   2026-11-11 挪到模型 pill 左侧，环边数字从百分比改为已用 token 的 K/M 格式——
+   环弧仍按占比画，百分比收进悬停）：20×20 进度环 + 12px 数字；
+   颜色走 currentColor，阈值只换 class。 */
 .ctx-ring {
   display: inline-flex; align-items: center; gap: 6px;
   height: 28px;
@@ -1343,6 +1347,78 @@ html[data-sidebar="closed"] .side-rail {
 }
 .codeblock:hover .code-copy { opacity: 1; pointer-events: auto; }
 .code-copy:hover { color: var(--text); }
+
+/* 代码块头行（批 33，对齐 ZCode）：语言标签在左、复制在右；有头行时复制不再是悬浮钮 */
+.code-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 5px 8px 5px 10px;
+  background: color-mix(in srgb, var(--card) 60%, transparent);
+  border-bottom: 1px solid var(--card-border);
+  border-radius: var(--r-sm) var(--r-sm) 0 0;
+}
+.code-lang {
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .04em;
+  color: var(--text-3); text-transform: uppercase;
+}
+.code-head .code-copy {
+  position: static; opacity: 1; pointer-events: auto;
+  border: 0; background: transparent;
+}
+/* 有头行时把 pre 上边角压平（头行已经带了圆角） */
+.codeblock:has(.code-head) .code { border-top-left-radius: 0; border-top-right-radius: 0; }
+
+/* 任务清单（批 33）：只读勾选框，勾上的是模型报告的状态 */
+.md-task { display: inline-flex; align-items: baseline; gap: 6px; }
+.md-task input[type="checkbox"] {
+  flex: none; width: 13px; height: 13px;
+  margin: 0; position: relative; top: 1px;
+  accent-color: var(--accent);
+}
+/* markdown 图片：限制在正文宽度内，别把气泡撑爆 */
+.md-img { max-width: 100%; height: auto; border-radius: var(--r-sm); }
+
+/* ── 文件变更汇总卡（批 33，学 ZCode ConversationFileSummaryPanel）────
+ * 正文下方、工作过程之后：折叠行「改了 N 个文件 +A -B」，
+ * 点开逐文件列表（路径 + 每文件 +/-）。折叠态与 ZCode 一致只占一行。 */
+.fsum {
+  margin: 8px 0 0;
+  border: 1px solid var(--card-border);
+  border-radius: var(--r-md);
+  background: var(--card);
+  overflow: hidden;
+}
+.fsum-head {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; padding: 7px 10px;
+  background: transparent; color: var(--text-2);
+  font-size: 12.5px; text-align: left;
+  transition: background-color .15s ease;
+}
+.fsum-head:hover { background: color-mix(in srgb, var(--card-high) 50%, transparent); }
+.fsum-chevron { flex: none; display: inline-flex; width: 13px; height: 13px; color: var(--text-3); }
+.fsum-chevron svg { width: 13px; height: 13px; transition: transform .18s ease; }
+.fsum[data-open="1"] .fsum-chevron svg { transform: rotate(90deg); }
+.fsum-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fsum-nums { flex: none; display: inline-flex; gap: 6px; font-style: normal; }
+.fsum-add, .fsum-del { font-style: normal; font-family: var(--mono); font-size: 11.5px; }
+.fsum-add { color: var(--code-n); }
+.fsum-del { color: var(--c-error); }
+.fsum-files {
+  display: none; flex-direction: column;
+  border-top: 1px solid var(--card-border);
+}
+.fsum[data-open="1"] .fsum-files { display: flex; }
+.fsum-file {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 10px 5px 31px;
+  font-size: 12px;
+}
+.fsum-file + .fsum-file { border-top: 1px solid color-mix(in srgb, var(--card-border) 55%, transparent); }
+.fsum-path {
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--mono); font-size: 11.5px; color: var(--text-2);
+}
 
 /* 高亮 token：五类，颜色走 --code-* 家族（跟随主题） */
 .tok-k { color: var(--code-k); }
@@ -1403,6 +1479,64 @@ html[data-sidebar="closed"] .side-rail {
 .retry-btn:hover { background: var(--card); color: var(--text); }
 /* open 失败卡：重试 / 继续对话并排，窄屏自动折行 */
 .partner-open-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+/* ── 错误卡（2026-11-10 批 32，对齐 ZCode ChatErrorBanner）──────────
+ * 在 composer 容器卡内部的第一格（textarea 上方；composer 是绝对定位，
+ * 卡放不进外部静态流）。一行摘要 + 动作按钮；详情进模态小窗。
+ * 以前是往消息流里插一行红字：正文被挤乱、滚动跳位、重试按钮悬在流里没归处。
+ * 卡跟"当前会话"走：切会话 / 发新消息由 JS 整卡退场。 */
+.chat-error {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px;
+  border: 1px solid color-mix(in srgb, var(--c-error) 45%, transparent);
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--c-error) 7%, var(--card));
+  color: var(--c-error);
+  font-size: 13px;
+}
+.chat-error[hidden] { display: none; }
+.chat-error-icon { flex: none; display: inline-flex; width: 16px; height: 16px; }
+.chat-error-icon svg { width: 16px; height: 16px; }
+.chat-error-text {
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.chat-error-actions { flex: none; display: flex; align-items: center; gap: 6px; }
+.chat-error-btn {
+  height: 24px; padding: 0 8px;
+  border: 1px solid var(--card-border); border-radius: var(--r-sm);
+  background: var(--card-high); color: var(--text-2);
+  font-size: 12px;
+  transition: background .15s ease, color .15s ease;
+}
+.chat-error-btn:hover { background: var(--card); color: var(--text); }
+.chat-error-close { padding: 0 5px; }
+.chat-error-close svg { width: 13px; height: 13px; display: block; }
+/* 详情小窗里的脱敏原文 */
+.chat-error-detail {
+  margin: 0; padding: 10px 12px;
+  max-height: 50vh; overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--r-sm);
+  font-family: var(--mono); font-size: 12px; line-height: 1.6;
+  color: var(--text-2);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+
+/* 折叠区里的「说」行（批 32）：模型动手前说过的话。图标用气泡引号，
+   状态点沿用成功灰（话说完就是说完，没有成败语义）。 */
+.wp-say .wp-verb { color: var(--text-2); }
+
+/* 「说」行的展开块按 markdown 渲染（同对话正文，字号缩小一档），
+   不再用 pre：列表/加粗不该显示成星号。 */
+.wp-pre-md {
+  font-family: inherit;
+  font-size: 12.5px; line-height: 1.6;
+  color: var(--text-2);
+  background: transparent;
+  border: 0; padding: 2px 0 4px;
+}
 
 .caret {
   display: inline-block; width: 6px; height: 1em;
@@ -1678,6 +1812,8 @@ html[data-acts="0"] .wp { display: none !important; }
   left: 50%;
   transform: translateX(-50%);
   bottom: 14px;
+  /* 压过底缝遮衬（.main[data-home]::after z1）：衬条只垫在卡底下，不许盖卡 */
+  z-index: 2;
   /* 与消息栏（--thread: 920px）同宽（2026-11-05 用户拍板），左右各留 16px；
      取值同参考实现 deepseek-harness 的 --dsh-chat-content-width: min(100% - 32px, 920px) */
   width: min(920px, calc(100% - 32px));
@@ -1698,6 +1834,18 @@ html[data-acts="0"] .wp { display: none !important; }
 }
 /* 聚焦只把描边压深一档（cindy 的中性观感），不加发光、不动底色 */
 .composer:focus-within { border-color: var(--text-3); }
+
+/* 底缝遮衬（2026-11-11 用户报）：composer 浮在滚动区上，卡底下那条 14px 缝会露出
+   滚动的文字。一条与主区同色的衬条垫到卡底下（比缝高 4px，上缘藏进卡影里），
+   消息滚到这里就等于落进卡后，缝里永远是干净的背景。
+   层级：衬条 z1 > 消息，composer z2 > 衬条；首页/对话两态都垫（首页那条下面没有东西）。 */
+.main[data-home]::after {
+  content: "";
+  position: absolute; left: 0; right: 0; bottom: 0; height: 18px;
+  background: var(--surface);
+  z-index: 1;
+  pointer-events: none;
+}
 
 /*
  * 首页态：顶栏让位给全局 chrome，页面中心是「问候 + 大输入框」。
@@ -5105,6 +5253,26 @@ select.cs-input:disabled { color: var(--text-3); cursor: default; }
 .mem-prop-reason { font-size: 12px; line-height: 1.5; color: var(--text-2); overflow-wrap: anywhere; }
 .mem-prop-actions { display: flex; align-items: center; gap: 6px; justify-content: flex-end; }
 .mem-prop-status { font-size: 11.5px; color: var(--text-2); }
+/* 证据引文（2026-11-10 对标 Anthropic「做梦」）：建议卡上"当初的原话" */
+.mem-prop-evidence {
+  margin: 2px 0 0 24px;
+  padding: 6px 9px;
+  font-size: 12px; line-height: 1.5;
+  color: var(--text-2);
+  background: var(--card, transparent);
+  border-left: 2px solid var(--outline);
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+.mem-prop-evidence.is-hit {
+  display: block; width: calc(100% - 24px);
+  font-style: italic;
+  color: var(--text);
+  cursor: pointer;
+}
+.mem-prop-evidence.is-hit:hover { border-left-color: var(--c-tertiary, var(--text-3)); }
+.mem-prop-evidence.is-miss { font-size: 11.5px; color: var(--text-3); }
 
 /* ── 运行时起停（2026-11-07）──────────────────────────────
    设置 → 服务 → 运行时。三个按钮 + 一个状态字。

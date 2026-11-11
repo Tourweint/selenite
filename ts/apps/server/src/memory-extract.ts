@@ -2,7 +2,7 @@
  * 偏好抽取的**装配层**（2026-11-06）。
  *
  * 分工：
- * - `@lifediary/memory` 只提供 `PreferenceExtractor` 的形状与解析（不碰模型、不读 env）；
+ * - `@lifediary/memory` 只提供 `DialogueExtractor`（偏好 + 经验）的形状与解析（不碰模型、不读 env）；
  * - 这里负责"用哪个模型、超时多久、失败怎么办、日志记什么"。
  *
  * 为什么值得单独一层：memory 包是纯内核，装配策略会随供应商/配额/开关变；
@@ -13,8 +13,9 @@
  */
 import { contentText } from "@earendil-works/pi-ai";
 import {
+	DialogueExtractor,
 	HeuristicExtractor,
-	PreferenceExtractor,
+	experienceExtractionEnabled,
 	renderTranscript,
 	type ExtractMessage,
 	type Extractor,
@@ -92,16 +93,20 @@ async function generateOnce(messages: ExtractMessage[]): Promise<string | null> 
 }
 
 /**
- * 组合抽取器：**偏好走 LLM，其余走规则**。
+ * 组合抽取器：**偏好/经验走 LLM，其余走规则**。
  *
  * 为什么两类都跑（而不是二选一）：
- * - LLM 只抽偏好（窄口径，可预算），事实/经历仍然靠规则——它做这件事已经够好且免费；
- * - 两套产出的 kind 不相交（preference vs episode），不会互相打架；
- * - `auto` 档的语义因此是"在旧行为之上**增加**偏好"，而不是"换一套行为"。
+ * - LLM 只判"规则做不了、又高频影响回答"的窄口径（偏好 + 经验，2026-11-10 对标
+ *   Anthropic 加了经验，`MEMORY_EXTRACT_EXPERIENCE=false` 可单独关），
+ *   事实/经历仍然靠规则——它做这件事已经够好且免费；
+ * - 两套产出的 kind 不相交（preference / experience vs episode），不会互相打架；
+ * - `auto` 档的语义因此是"在旧行为之上**增加**"，而不是"换一套行为"。
  *   这一点很重要：升级不该让用户已经习惯的记忆突然少一半。
  */
 class LayeredExtractor implements Extractor {
-	private readonly preference = new PreferenceExtractor(generateOnce);
+	private readonly judgment = new DialogueExtractor(generateOnce, {
+		experience: experienceExtractionEnabled(),
+	});
 	private readonly fallback = new HeuristicExtractor();
 
 	async extract(input: {
@@ -110,17 +115,20 @@ class LayeredExtractor implements Extractor {
 		now: Date;
 	}): Promise<MemoryCandidate[]> {
 		const started = Date.now();
-		const [preferences, episodes] = await Promise.all([
-			this.preference.extract(input).catch(() => [] as MemoryCandidate[]),
+		const [judged, episodes] = await Promise.all([
+			this.judgment.extract(input).catch(() => [] as MemoryCandidate[]),
 			this.fallback.extract(input),
 		]);
-		if (preferences.length > 0) {
+		// 只记条数与枚举，不记内容（D8）。经验关着时恒为 0，等于旧的"偏好抽取 +N 条"。
+		const preferenceCount = judged.filter((candidate) => candidate.kind === "preference").length;
+		const experienceCount = judged.filter((candidate) => candidate.kind === "experience").length;
+		if (preferenceCount + experienceCount > 0) {
 			console.log(
-				`[memory] 偏好抽取 +${preferences.length} 条（${Date.now() - started}ms，输入 ${renderTranscript(input.messages).length} 字）`,
+				`[memory] 偏好/经验抽取 +${preferenceCount + experienceCount} 条（偏好${preferenceCount}/经验${experienceCount}，${Date.now() - started}ms，输入 ${renderTranscript(input.messages).length} 字）`,
 			);
 		}
-		// 偏好在前：巩固层按顺序处理，同一段话里"偏好"优先占位
-		return [...preferences, ...episodes];
+		// 偏好在前：巩固层按顺序处理，同一段话里"偏好"优先占位（DialogueExtractor 已保证，这里兜一层）
+		return [...judged, ...episodes];
 	}
 }
 

@@ -1,5 +1,6 @@
 import type { RecoveredTicket } from "../../../../../chancellor/src/index.ts";
 import { truncate } from "./delegation.ts";
+import { TERMINAL_TICKET_STATUS } from "./delegation-receipts.ts";
 
 /**
  * 恢复结算的状态行回灌（2026-11-04 批次四 A3b）。
@@ -10,9 +11,6 @@ import { truncate } from "./delegation.ts";
  * 口径：**一行状态，不是任务结果正文**。恢复时手里只有 status / error，
  * 复述正文既没有内容也没有意义。
  */
-
-/** 对外 5 态。只有落在这里的才回灌；still_running / unknown 是 chancellor 的内部占位。 */
-const TERMINAL_STATUSES = new Set(["done", "needs_you", "failed", "idle", "aborted"]);
 
 /** 回执表里 A3b 需要的那一个查询，收窄成接口方便测试注入。 */
 export interface RecoveryReceiptLookup {
@@ -64,7 +62,7 @@ export async function reportRecoveredTickets(
 	let sent = 0;
 
 	for (const entry of entries) {
-		if (!entry.ticketId || !TERMINAL_STATUSES.has(entry.status)) continue;
+		if (!entry.ticketId || !TERMINAL_TICKET_STATUS.has(entry.status)) continue;
 
 		const receipt = deps.receipts.lookupByTicket(entry.ticketId);
 		if (!receipt) {
@@ -135,7 +133,7 @@ export function collectDeadLetters(
 	let recorded = 0;
 
 	for (const entry of entries) {
-		if (!entry.ticketId || !TERMINAL_STATUSES.has(entry.status)) continue;
+		if (!entry.ticketId || !TERMINAL_TICKET_STATUS.has(entry.status)) continue;
 		const children = deps.childrenOf(entry.ticketId);
 		for (const child of children) {
 			const note = !CHILD_TERMINAL.has(child.status)

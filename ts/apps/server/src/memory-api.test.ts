@@ -18,6 +18,9 @@ process.env.MEMORY_DB_PATH = join(root, "memory.db");
 process.env.MEMORY_PROPOSALS_PATH = join(root, "memory-proposals.json");
 // 巩固审计 diff 落点（2026-11-10 批 17 §三）：同样隔离
 process.env.MEMORY_CONSOLIDATE_DIFF_PATH = join(root, "memory-consolidate-diff.json");
+// 证据引文（2026-11-10 对标 Anthropic）默认关掉：别让既有用例真去扫跨会话记录；
+// 专测里显式打开（开关是每次请求读的，进程内翻转即可）。
+process.env.MEMORY_REVIEW_EVIDENCE = "false";
 process.env.PROJECTS_DB_PATH = join(root, "projects.sqlite");
 process.env.PROVIDERS_PATH = join(root, "providers.json");
 process.env.DELEGATIONS_DB_PATH = join(root, "delegations.sqlite");
@@ -38,6 +41,7 @@ const { Hono } = await import("hono");
 const { mountMemoryApi } = await import("./memory-api.ts");
 const { memoryEngine } = await import("./agent.ts");
 const { pendingProposalCount } = await import("./memory-consolidate.ts");
+type EvidenceHit = import("./agent.ts").EvidenceHit;
 
 type Generator = (input: { system: string; user: string }) => Promise<string | null>;
 
@@ -177,6 +181,95 @@ function idOf(user: string, content: string): string {
 	assert.ok(line, `输入清单里应包含「${content}」`);
 	return /id=([^\s]+)/.exec(line!)?.[1] ?? "";
 }
+
+test("整理建议带证据引文：命中挂 evidence；查不到 = null；开关关 = 字段不下发", async () => {
+	const engine = memoryEngine!;
+	engine.remember({ kind: "episode", scope: { type: "global" }, content: "证据测试：我先给结论再给细节" });
+	engine.remember({ kind: "fact", scope: { type: "global" }, content: "证据测试：养了一只猫" });
+	const generate: Generator = async ({ user }) =>
+		JSON.stringify({
+			proposals: [
+				{ keepId: idOf(user, "养了一只猫"), dropId: idOf(user, "我先给结论再给细节"), reason: "后者并进前者" },
+			],
+		});
+	// 假证据查找：只有"先给结论"那条命中，另一条没有出处
+	const findEvidence = async (needles: string[]) => {
+		const hits = new Map<string, EvidenceHit>();
+		for (const needle of needles) {
+			if (needle.includes("我先给结论")) {
+				hits.set(needle, { conversationId: "conv-1", at: 1234, role: "user", text: "…我先给结论再给细节…" });
+			}
+		}
+		return hits;
+	};
+
+	// 顶部把开关锁成了 false；这里显式开回来（开关每次请求都读，进程内翻转即可）
+	const previous = process.env.MEMORY_REVIEW_EVIDENCE;
+	process.env.MEMORY_REVIEW_EVIDENCE = "";
+	try {
+		const app = new Hono();
+		mountMemoryApi(app, { enabled: true, generate, findEvidence });
+		const reviewed = await app.request("/api/v1/agent/memory/consolidate/review", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ scope: "global" }),
+		});
+		assert.equal(reviewed.status, 200);
+		const body = (await reviewed.json()) as {
+			proposals: Array<{ drop: { content: string }; evidence?: { conversationId: string; text: string } | null }>;
+		};
+		assert.equal(body.proposals.length, 1);
+		assert.ok(body.proposals[0]!.evidence, "命中应有证据引文");
+		assert.equal(body.proposals[0]!.evidence!.conversationId, "conv-1");
+		assert.ok(body.proposals[0]!.evidence!.text.includes("先给结论"), "引文应带原文片段");
+
+		// evidence 只进响应、不落待决文件（接口文档 §2.15.1"只存 id/理由/两端正文快照"口径）
+		const pendingRaw = JSON.parse(
+			readFileSync(join(root, "memory-proposals.json"), "utf8"),
+		) as { global?: { proposals: Array<Record<string, unknown>> } };
+		assert.equal(
+			"evidence" in pendingRaw.global!.proposals[0]!,
+			false,
+			"evidence 不应落待决文件",
+		);
+
+		// 查不到 = null，不挡应用（下一单证明 apply 照常）
+		const missGenerate: Generator = async ({ user }) =>
+			JSON.stringify({
+				proposals: [{ keepId: idOf(user, "养了一只猫"), dropId: idOf(user, "我先给结论再给细节"), reason: "并进" }],
+			});
+		const missApp = new Hono();
+		mountMemoryApi(missApp, {
+			enabled: true,
+			generate: missGenerate,
+			findEvidence: async () => new Map(),
+		});
+		const missed = await missApp.request("/api/v1/agent/memory/consolidate/review", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ scope: "global" }),
+		});
+		assert.equal(missed.status, 200);
+		const missBody = (await missed.json()) as { proposals: Array<{ evidence: string | null }> };
+		assert.equal(missBody.proposals[0]!.evidence, null, "查不到应是 null 而不是缺字段");
+
+		// 开关关掉：字段整个不下发（JSON 序列化丢 undefined）
+		process.env.MEMORY_REVIEW_EVIDENCE = "false";
+		const offApp = new Hono();
+		mountMemoryApi(offApp, { enabled: true, generate, findEvidence });
+		const off = await offApp.request("/api/v1/agent/memory/consolidate/review", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ scope: "global" }),
+		});
+		assert.equal(off.status, 200);
+		const offBody = (await off.json()) as { proposals: Array<Record<string, unknown>> };
+		assert.equal("evidence" in offBody.proposals[0]!, false, "开关关着时不应出现 evidence 字段");
+	} finally {
+		if (previous === undefined) delete process.env.MEMORY_REVIEW_EVIDENCE;
+		else process.env.MEMORY_REVIEW_EVIDENCE = previous;
+	}
+});
 
 test("整理记忆：只出建议不动库；应用落 supersededBy；忽略无副作用", async () => {
 	const engine = memoryEngine!;

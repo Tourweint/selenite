@@ -49,6 +49,7 @@ import {
 import { capabilityOf } from "../tool-capability.ts";
 // 中途播报（2026-11-10 批 13 §三）：工具本身在 tools.ts 注册，这里只做上架范围闸门。
 import { PROGRESS_TOOL_NAME, progressReportAllowed, progressReportEnabled } from "../progress-report.ts";
+import { runIdentityKey } from "../run-key.ts";
 import { makeSkillAdviceSaver, skillAdviceEnabled, skillAdvicePath } from "../skill-advice.ts";
 import { emitDelegation, type DelegationReport } from "../delegation.ts";
 // 派活完成即唤醒（2026-11-10 批 29）：汇报写回后叫起派活会话接结果。
@@ -151,6 +152,7 @@ import {
 	emitTool,
 	sessionCwd,
 	toolArgs,
+	toolDiff,
 	toolLabel,
 	toolOutput,
 } from "./shared.ts";
@@ -924,6 +926,8 @@ async function openHarness(): Promise<Harness> {
 							status: "end",
 							ok: finalResult.isError !== true,
 							...toolOutput(finalResult),
+							// 编辑类工具带 diff（批 33）：现场工具行与文件汇总和历史 steps 同一份事实
+							...toolDiff(finalResult),
 						});
 						return backgrounded;
 					},
@@ -935,13 +939,9 @@ async function openHarness(): Promise<Harness> {
 						const userText = lastUser ? contentText(lastUser.content) : "";
 
 						// 一次模型请求 = 一个工具回合。run 一换，预算就重新算。
-						//
-						// 拿 `run.inputs[0]` 当 run 身份：run.taskId 每一轮都会变
-						// （每一轮是一个新的 generation 任务），用它计数永远归零，
-						// 上限就形同虚设 —— 这个坑是实测踩出来的。
+						// run 身份口径（inputs[0] 优先；taskId 每轮都变的坑）统一在 run-key.ts。
 						const live = await api.snapshot(LiveDoc, api.conversationId, ctx);
-						const runId = live?.run?.inputs?.[0] ?? live?.run?.taskId;
-						const key = `${api.conversationId}:${String(runId ?? "none")}`;
+						const key = runIdentityKey(api.conversationId, live);
 						const used = (runTurns.get(key) ?? 0) + 1;
 						runTurns.set(key, used);
 

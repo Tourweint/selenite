@@ -4,6 +4,9 @@ import { CHIEF_PARTNER_ID, partnersStore } from "./partners.ts";
 import { emitDelegation } from "./delegation.ts";
 import { isTaskSession } from "./unattended.ts";
 import { encodeToolResult, err, ok, type ToolResult } from "./tool-result.ts";
+import { runIdentityKey as progressRunKey } from "./run-key.ts";
+
+export { progressRunKey };
 
 /**
  * agent → 用户中途播报（2026-11-10 批 13 §三，全景调研 #18）。
@@ -55,13 +58,7 @@ export function progressReportAllowed(conversationId: number): boolean {
 	return partnerId !== null && partnerId !== CHIEF_PARTNER_ID;
 }
 
-/** 这一轮的身份键：与 turn-gate / relay 同一口径（`inputs[0] ?? taskId`）。 */
-export function progressRunKey(
-	conversationId: number,
-	live: { run?: { inputs?: readonly unknown[]; taskId?: unknown } } | null | undefined,
-): string {
-	return `${conversationId}:${String(live?.run?.inputs?.[0] ?? live?.run?.taskId ?? "none")}`;
-}
+// 这一轮的身份键唯一实现在 run-key.ts（与回合上限 / relay 同一口径）；原名照旧导出。
 
 // 每 run 已播条数（key = run 键）。会话切换 run 时丢掉上一轮的计数，Map 不随轮次增长。
 const progressUses = new Map<string, number>();

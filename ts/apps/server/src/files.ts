@@ -16,12 +16,14 @@
  *   - 全部走 /api/v1/* 鉴权，失败 403 空体；业务拒绝 400 带说明。
  *
  * 回滚开关：`EXPLORER_OPEN=false` → open-explorer 返回 400（回到无此端点形态）；
+ *           `EXPLORER_FOCUS=false` → Windows 上退回裸 spawn explorer（窗口会被压在底层）；
  *           `FILE_BROWSE=false` → files 两个端点整体下线（404）。
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import type { Context, Hono } from "hono";
 import type { FileEntry } from "@lifediary/shared";
@@ -38,10 +40,73 @@ export function explorerOpenEnabled(): boolean {
 	return (process.env.EXPLORER_OPEN?.trim() || "true").toLowerCase() !== "false";
 }
 
+/** 焦点式打开（2026-11-11）：`false` = Windows 退回裸 spawn（旧形态）。 */
+export function explorerFocusEnabled(): boolean {
+	return (process.env.EXPLORER_FOCUS?.trim() || "true").toLowerCase() !== "false";
+}
+
 /** 打开目录的命令（按平台）；提成可注入是为了探针/单测不真弹窗口。 */
 export type Opener = (dir: string) => void;
 
+/**
+ * Windows 焦点式打开（2026-11-11 用户拍板「直接弹到顶层」）：
+ * 服务是无窗口的后台进程，裸 spawn explorer 的窗口会被 Windows 前台规则压在最底层
+ * （2026-11-11 实测：裸 spawn 与 Shell COM 裸开都不拿前台）。
+ * 这段脚本：Shell.Application COM 开窗 → 轮询拿到新窗口句柄 → SwitchToThisWindow 切前台
+ * （2026-11-11 同机实测：切换后连续 6 次采样全在前台，模拟服务端拉起后 1s 内完成）。
+ * SwitchToThisWindow 是 user32 未文档化但长期稳定的 API（explorer 任务栏同款），
+ * 配 EXPLORER_FOCUS 回滚开关兜底。
+ * 必须走 -File 传脚本文件：-EncodedCommand 形态下 Shell COM 开不出窗口
+ * （2026-11-11 二分定位：-File ±NonInteractive 都正常，-EncodedCommand 必挂）；
+ * 路径经 argv 传入，顺带绕开中文路径的文件编码问题（脚本本体保持纯 ASCII）。
+ * spawn 不能带 detached：DETACHED_PROCESS 下 PowerShell 没有控制台直接起不来
+ * （2026-11-11 二分定位：windowsHide 单独用正常，detached ± windowsHide 都死）；
+ * windowsHide 已给子进程独立隐藏控制台，不会被服务端 Ctrl+C 连带杀掉。
+ */
+const WINDOWS_FOCUS_OPEN_PS1 = `param([string]$Dir)
+
+$sh = New-Object -ComObject Shell.Application
+$sh.Open($Dir)
+$uri = ([System.Uri]$Dir).AbsoluteUri
+$h = 0
+for ($i = 0; $i -lt 30; $i++) {
+  Start-Sleep -Milliseconds 100
+  $w = @($sh.Windows() | Where-Object { $_.LocationURL -eq $uri })[0]
+  if ($w) { $h = $w.HWND; break }
+}
+if ($h -ne 0) {
+  Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class FgSwitch { [DllImport("user32.dll")] public static extern void SwitchToThisWindow(IntPtr h, bool altTab); }'
+  [FgSwitch]::SwitchToThisWindow([IntPtr]$h, $true)
+}
+`;
+
 function platformOpen(dir: string): void {
+	if (process.platform === "win32" && explorerFocusEnabled()) {
+		try {
+			// 脚本每次落临时目录再 -File 起进程；内容纯 ASCII，用户路径不落盘。
+			const scriptPath = join(tmpdir(), "lifediary-open-focus.ps1");
+			writeFileSync(scriptPath, WINDOWS_FOCUS_OPEN_PS1, "utf8");
+			const child = spawn(
+				"powershell",
+				[
+					"-NoProfile",
+					"-NonInteractive",
+					"-ExecutionPolicy",
+					"Bypass",
+					"-File",
+					scriptPath,
+					"-Dir",
+					dir,
+				],
+				// 不能加 detached（DETACHED_PROCESS 杀死 PowerShell，见上注）；unref 只是不等它。
+				{ stdio: "ignore", windowsHide: true },
+			);
+			child.unref();
+			return;
+		} catch {
+			// 脚本落盘失败（磁盘只读等）→ 落回裸 spawn：窗口还开，只是可能垫底。
+		}
+	}
 	const command =
 		process.platform === "win32" ? "explorer" : process.platform === "darwin" ? "open" : "xdg-open";
 	const child = spawn(command, [dir], { detached: true, stdio: "ignore" });

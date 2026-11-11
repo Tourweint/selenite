@@ -22,6 +22,19 @@ import { MAX_DESCRIPTION_LENGTH, type RelayStore } from "./store.ts";
 
 const HELLO_TIMEOUT_MS = 15_000;
 const CLEANUP_INTERVAL_MS = 60_000;
+/**
+ * 入站活跃度判定（2026-11-11 抄 cindy hub.ts:348-353）：任何合法入站帧刷新 lastInboundAt，
+ * 超过 IDLE_TIMEOUT_MS 没有任何入站 → 连接已是半开死链（对端断网未挥手），terminate 清位。
+ * 为什么不用 ping 探测：我们与 cindy 都没有客户端周期 ping（harness 只回 pong 不发 ping），
+ * 主动 ping 要新增客户端协议；入站 idle 判定零协议改动，语义等价（cindy 同款 90s）。
+ */
+const IDLE_TIMEOUT_MS = 90_000;
+/**
+ * 出站背压闸门（2026-11-11 抄 cindy hub.ts:367-377）：send 前查 ws.bufferedAmount，
+ * 慢消费者（对端卡死/弱网不读）会把内核 ws 缓冲无界堆高——1.6G 小机上这是 OOM 主通道。
+ * 超阈以 1013 Try Again Later 主动关闭，客户端按重连退避自愈。
+ */
+const BACKPRESSURE_LIMIT_BYTES = 8 * 1024 * 1024;
 
 export interface HubConnectionInfo {
 	deviceId: string;
@@ -98,6 +111,8 @@ export class RelayHub {
 				this.sendError(ws, undefined, "payload_too_large", "帧超过上限，不解析不转发");
 				return;
 			}
+			// 入站活跃度（cindy 同款）：任何合法帧（哪怕之后解析失败）都算"对端活着"
+			(ws as WebSocket & { hubInfo?: HubConnectionInfo; lastInboundAt?: number }).lastInboundAt = Date.now();
 			let parsed: unknown;
 			try {
 				parsed = JSON.parse(raw.toString("utf8"));
@@ -341,6 +356,18 @@ export class RelayHub {
 			return { forwarded: false, reason: known ? "device_offline" : "unknown_device" };
 		}
 		if (dstConn.readyState !== 1 /* OPEN */) return { forwarded: false, reason: "device_offline" };
+		// 出站背压（cindy 同款）：缓冲超限 = 对端不读，再堆就是 OOM。1013 关掉让它重连。
+		const buffered = (dstConn as WebSocket & { bufferedAmount?: number }).bufferedAmount ?? 0;
+		if (buffered > BACKPRESSURE_LIMIT_BYTES) {
+			this.log(`[relay] backpressure device=${dst} buffered=${buffered} -> close 1013`);
+			try {
+				dstConn.close(1013, "try again later");
+			} catch {
+				/* 已在关闭途中 */
+			}
+			this.conns.delete(dst);
+			return { forwarded: false, reason: "device_offline" };
+		}
 		dstConn.send(JSON.stringify(frame));
 		this.log(`[relay] forward id=${id} src=${src} dst=${dst}`);
 		return { forwarded: true };
@@ -357,8 +384,23 @@ export class RelayHub {
 	}
 
 	private sweep(): void {
-		// 半开连接兜底：readyState 不是 OPEN 的清出名册（close 事件迟到的场景）
+		// 半开连接兜底（两道）：
+		// ① readyState 不是 OPEN 的清出名册（close 事件迟到的场景，原有）；
+		// ② 入站 idle 超限的 terminate（cindy 同款 2026-11-11）：对端断网未挥手时
+		//    readyState 仍是 OPEN 但永远是死链，占着名册让对端一直"在线"。
+		const now = Date.now();
 		for (const [deviceId, ws] of this.conns) {
+			const last = (ws as WebSocket & { lastInboundAt?: number }).lastInboundAt;
+			if (last !== undefined && now - last > IDLE_TIMEOUT_MS) {
+				this.log(`[relay] idle device=${deviceId} lastInbound=${Math.round((now - last) / 1000)}s -> terminate`);
+				this.conns.delete(deviceId);
+				try {
+					ws.terminate();
+				} catch {
+					/* 已在关闭途中 */
+				}
+				continue;
+			}
 			if (ws.readyState !== 1) this.conns.delete(deviceId);
 		}
 	}

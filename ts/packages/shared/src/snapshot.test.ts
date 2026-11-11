@@ -98,6 +98,8 @@ const STEP_SHAPE = {
 	fields: {
 		args: { kind: "optional", of: { kind: "string" } },
 		diff: { kind: "optional", of: { kind: "string" } },
+		// 「说」步渲染档（2026-11-10 批 32）：md = output 按正文渲染，缺省 = 工具输出 pre
+		format: { kind: "optional", of: { kind: "literal", value: "md" } },
 		label: { kind: "optional", of: { kind: "string" } },
 		ms: { kind: "optional", of: { kind: "number" } },
 		name: { kind: "string" },

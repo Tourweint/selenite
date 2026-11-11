@@ -11,6 +11,9 @@ import {
 	type PartnerRow,
 	type PartnersStore,
 } from "./partners.ts";
+import { runIdentityKey as relayRunKey } from "./run-key.ts";
+
+export { relayRunKey };
 
 /**
  * 执事间消息通道（2026-11-08 扫尾批 8d；方案 `2026-11-08-扫尾批8d方案（执事间消息通道）.md`）。
@@ -320,13 +323,7 @@ export function relayOutcomeEntry(text: string): EntryDraft {
 
 // ── 进程内状态：每 run 计数 / 递话触发的轮次标记 / 主人通知口 ──
 
-/** run 身份键：与 turn-gate 的回合计数同一口径（`inputs[0] ?? taskId`，每轮都变） */
-export function relayRunKey(
-	conversationId: number,
-	live: { run?: { inputs?: readonly unknown[]; taskId?: unknown } } | null | undefined,
-): string {
-	return `${conversationId}:${String(live?.run?.inputs?.[0] ?? live?.run?.taskId ?? "none")}`;
-}
+// run 身份键唯一实现在 run-key.ts（回合上限 / 播报配额共用同一口径）；原名照旧导出。
 
 /** 每 run 已递条数（key = run 键） */
 const relayUses = new Map<string, number>();

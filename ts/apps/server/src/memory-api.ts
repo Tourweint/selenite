@@ -6,6 +6,7 @@ import {
 	importMemory,
 	memoryImportEnabled,
 	reviewScope,
+	type EvidenceFinder,
 	type ReviewGenerator,
 } from "./memory-consolidate.ts";
 import { readConsolidateDiff, runConsolidatePass } from "./memory-consolidate-pass.ts";
@@ -38,6 +39,8 @@ export interface MemoryApiDeps {
 	enabled: boolean;
 	/** 测试/探针注入的假模型输出；不传 = 真模型（faux / 未配置 → 503）。 */
 	generate?: ReviewGenerator;
+	/** 测试/探针注入的假证据查找；不传 = 真扫跨会话记录（`MEMORY_REVIEW_EVIDENCE=false` 可关）。 */
+	findEvidence?: EvidenceFinder;
 }
 
 export function mountMemoryApi(app: Hono, deps: MemoryApiDeps): void {
@@ -103,7 +106,10 @@ export function mountMemoryApi(app: Hono, deps: MemoryApiDeps): void {
 		const scope = typeof body?.scope === "string" ? body.scope.trim() : "";
 		if (!scope) return c.json({ error: "bad_request", message: "需要 scope" }, 400);
 
-		const result = await reviewScope(scope, deps.generate ? { generate: deps.generate } : {});
+		const result = await reviewScope(scope, {
+			...(deps.generate ? { generate: deps.generate } : {}),
+			...(deps.findEvidence ? { findEvidence: deps.findEvidence } : {}),
+		});
 		if (!result.ok) {
 			return c.json({ error: result.error, message: result.message }, result.status as 400 | 404 | 502 | 503);
 		}

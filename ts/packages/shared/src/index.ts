@@ -146,6 +146,11 @@ export const TranscriptStepSchema = z.object({
   ok: z.boolean(),
   /** 该步耗时（毫秒）；老记录或没跑完的调用读不到就不带 */
   ms: z.number().optional(),
+  /**
+   * 「说」步的正文渲染档（2026-11-10 批 32，纯增量）：`md` = `output` 是模型
+   * 写给人的正文，按 markdown 渲染；缺省 = 工具输出，按纯文本 pre 渲染。
+   */
+  format: z.literal("md").optional(),
 });
 export type TranscriptStep = z.infer<typeof TranscriptStepSchema>;
 
@@ -226,13 +231,21 @@ export const GROUP_MEMBER_MAX = 6;
 /** 单条群消息正文上限（与方案 §2.1 一致） */
 export const GROUP_MESSAGE_LIMIT = 8000;
 
+/**
+ * 执事档案状态（2026-11-05 批次B 定；2026-11-10 自 §伙伴节上移）：
+ * GroupMember.status 与执事档案同口径复用这一枚举——Zod 组合是运行时求值，
+ * 声明必须落在首个使用点之前，故放在这里而不是伙伴节。
+ */
+export const PartnerStatusSchema = z.enum(["active", "paused", "archived"]);
+export type PartnerStatus = z.infer<typeof PartnerStatusSchema>;
+
 export const GroupMemberSchema = z.object({
 	partnerId: z.string(),
 	/** 成员表只存展示名快照，不复制人格（lobehub 教训）；人格 = 各自 SOUL */
 	name: z.string(),
 	position: z.number().int().min(0),
-	/** 档案实时状态（active / paused / archived）；2026-11-08 前服务端已透出，这里补齐 */
-	status: z.string().optional(),
+	/** 档案实时状态；2026-11-08 前服务端已透出，2026-11-10 从裸 string 收紧为本文件同一枚举 */
+	status: PartnerStatusSchema.optional(),
 	/**
 	 * 复合头像（2026-11-08 批三）：档案 avatar 槽的 data URL，或 null（前端用名字首字）。
 	 * 群列表行 / 会话头用 2×2 网格拼，≤4 人直出，多人右下角 +N。
@@ -309,6 +322,22 @@ export interface TurnUsage {
 export type TurnPhase = "thinking" | "working";
 
 /**
+ * 上游/模型错误的稳定类别（2026-11-10，纯增量）。
+ *
+ * 为什么要有：`error.message` 是给人看的中文措辞，客户端不该拿它做判断
+ * （文案一改就碎）。分类在服务端做完（见 `apps/server/src/stream-error.ts`），
+ * 这里只是把结果带给前端。`detail` 已在服务端脱敏（剥 key / 上游地址）。
+ */
+export type StreamErrorCode =
+	| "rate_limited"
+	| "auth"
+	| "timeout"
+	| "network"
+	| "context_overflow"
+	| "model_error"
+	| "unknown";
+
+/**
  * SSE 下行事件。客户端只依赖这一个联合类型，
  * 服务端加减字段时另一端会被编译器当场指出来——这就是共用一份定义的意义。
  *
@@ -358,10 +387,31 @@ export type ChatEvent =
 			output?: string;
 			/** 调用参数（JSON，服务端截断到 1200 字符） */
 			args?: string;
+			/**
+			 * 编辑类工具的 unified diff（2026-11-10 批 33，纯增量；服务端截断到 2000 字符）。
+			 * 只有 `edit` 这类把 `details.diff` 放进结果里的工具才有——以前只有历史 steps
+			 * 带 diff，现场工具行画不出改动，两边不一致；现在对齐（口径同 steps）。
+			 */
+			diff?: string;
 			seq?: number;
 	  }
   | { type: "done"; id: string; finishReason: FinishReason; /** 本轮 token 用量（2026-11-04 批次一）；读不到就不带 */ usage?: TurnUsage; seq?: number }
-  | { type: "error"; message: string; seq?: number }
+  | {
+			type: "error";
+			message: string;
+			/**
+			 * 错误类别（2026-11-10，纯增量）：`rate_limited` / `auth` / `timeout` /
+			 * `network` / `context_overflow` / `model_error` / `unknown`。
+			 * 客户端按 code 决定卡片措辞与动作，**不要解析 message 文案**（那是给人看的）。
+			 */
+			code?: StreamErrorCode;
+			/**
+			 * 脱敏后的细节摘要（2026-11-10，纯增量）：已剥 key / 地址，供「详情」小窗展示。
+			 * 服务端保证不含密钥片段；原始上游错误只进服务端日志，绝不下发。
+			 */
+			detail?: string;
+			seq?: number;
+	  }
 	/**
 	 * 群时间线系统行（2026-11-06 群组方案 §2.5，纯增量）。
 	 *
@@ -717,9 +767,7 @@ export type RelayActorClaimResult = z.infer<typeof RelayActorClaimResultSchema>;
 // ── 伙伴与例行任务（2026-11-05 批次B，REST 投影形状）──
 // 现阶段前端不消费（桌面/手机都还没接）；这里先立形状，端点以服务端代码为准
 // （接口文档 §2.11/§2.12 与本节同步维护）。无新 SSE 事件。
-
-export const PartnerStatusSchema = z.enum(["active", "paused", "archived"]);
-export type PartnerStatus = z.infer<typeof PartnerStatusSchema>;
+// PartnerStatusSchema 已上移到群成员节（首个使用点之前，2026-11-10）。
 
 // ── 伙伴头像（2026-11-06 侧栏调整 B1）──────────────────────
 //

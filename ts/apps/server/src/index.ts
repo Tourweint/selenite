@@ -158,6 +158,8 @@ import { markRecoverResume, recoverNoteEnabled } from "./agent/recover-note.ts";
 // 注入审计（2026-11-10 批 26b §二）：只回元数据、不回正文的框架注入清单。
 import { auditInjections, injectionAuditEnabled } from "./agent/injection.ts";
 import { INJECTION_REGISTRY } from "./agent/injection-registry.ts";
+// 错误分类（2026-11-10 批 32）：上游/模型错误 → 脱敏短句 + 稳定 code，给前端错误卡。
+import { describeStreamError } from "./stream-error.ts";
 import { Store } from "../../../../../chancellor/src/store.ts";
 import { listManagers } from "../../../../../chancellor/src/manager/registry.ts";
 
@@ -990,18 +992,31 @@ app.post("/api/v1/agent/chat", async (c) => {
           turnUsage = event.usage;
           continue;
         }
-        // 工具调用撞上限：这一轮没有回答，但已经做过的工具结果都保留
+        // 工具调用撞上限 / 一轮没给出回答（批 32）：都透成 error 帧。
+        // `code`（稳定类别）与 `detail`（已脱敏摘要）跟着 unanswered 一起带给前端，
+        // 供错误卡决定措辞与「详情」小窗内容；老客户端多收两个可选字段无害。
         streamEnd = "error";
-        await send({ type: "error", message: event.message }).catch(() => undefined);
+        const described =
+          event.type === "unanswered" ? { code: event.code, detail: event.detail } : {};
+        await send({
+          type: "error",
+          message: event.message,
+          ...described,
+        }).catch(() => undefined);
       }
     } catch (error) {
       streamEnd = "error";
       const detail = error instanceof Error ? error.message : String(error);
       // 原始错误只进服务端日志：里面可能带上游地址甚至 key 片段。
       console.error(`[chat ${id}] 生成失败: ${detail}`);
-      await send({ type: "error", message: "生成失败，请稍后重试" }).catch(
-        () => undefined,
-      );
+      // 这里的 detail 是异常 message（服务端内部错误，非上游原文），照旧脱敏后下发
+      const described = describeStreamError("model_error", detail);
+      await send({
+        type: "error",
+        message: described?.message ?? "生成失败，请稍后重试",
+        ...(described?.code ? { code: described.code } : {}),
+        ...(described?.detail ? { detail: described.detail } : {}),
+      }).catch(() => undefined);
     }
 
     // 客户端已断开时这里会抛，属正常路径，吞掉。

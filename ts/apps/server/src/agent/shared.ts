@@ -146,6 +146,8 @@ export interface ToolEvent {
 	ok?: boolean;
 	output?: string;
 	args?: string;
+	/** 编辑类工具的 unified diff（2026-11-10 批 33，截断到 2000 字符）；只有 edit 这类有 details.diff 的工具才有 */
+	diff?: string;
 }
 
 /** 参数也截断：`write` 的 content 可能是整个文件，塞进事件里会把流撑爆 */
@@ -190,6 +192,20 @@ export function toolOutput(result: { output?: unknown }): { output?: string } {
 			text.length > TOOL_OUTPUT_LIMIT
 				? `${text.slice(0, TOOL_OUTPUT_LIMIT)}\n…（还有 ${text.length - TOOL_OUTPUT_LIMIT} 字符）`
 				: text,
+	};
+}
+
+/** 编辑类工具的 unified diff（2026-11-10 批 33）：与 session.ts 的 stepDiff 同口径，供 tool 事件与历史 steps 两边一致 */
+export function toolDiff(result: unknown): { diff?: string } {
+	const details = (result as { details?: unknown } | null | undefined)?.details;
+	if (!details || typeof details !== "object") return {};
+	const diff = (details as { diff?: unknown }).diff;
+	if (typeof diff !== "string" || !diff.trim()) return {};
+	return {
+		diff:
+			diff.length > TOOL_OUTPUT_LIMIT
+				? `${diff.slice(0, TOOL_OUTPUT_LIMIT)}\n…（还有 ${diff.length - TOOL_OUTPUT_LIMIT} 字符）`
+				: diff,
 	};
 }
 

@@ -77,7 +77,17 @@ export interface ReceiptBegin {
 	receipt?: DelegationReceipt;
 }
 
-const TERMINAL_TICKET_STATUS = new Set([
+/**
+ * chancellor 任务单终态口径，宿主侧**唯一一份**（2026-11-10 状态机清点收口）。
+ *
+ * chancellor/src/store.ts 里另有同名私有集合（未导出，跨仓不可 import），升级 chancellor
+ * 时以它的五值为准对齐。此前 delegation-api / agent/partner-context / recovery-report 各抄一份、
+ * 靠注释互指"同一套"——第 4 份（recovery-report，2026-11-04 批次四）的出现证明注释守不住，
+ * 收口成共享常量；partner-context 原注"刻意不导出"（怕为只读展示改两处形状）随之推翻：
+ * import 共享 Set 不改任何调用方的形状。取消/重试用的 CANCEL_TERMINAL_STATUSES（delegation-api）
+ * 是本集合的真子集、语义不同，刻意不合并。
+ */
+export const TERMINAL_TICKET_STATUS = new Set([
 	"done",
 	"needs_you",
 	"failed",

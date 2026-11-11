@@ -4,6 +4,7 @@ import { listManagers } from "../../../../../../chancellor/src/manager/registry.
 import { Store } from "../../../../../../chancellor/src/store.ts";
 import type { Ticket } from "../../../../../../chancellor/src/types.ts";
 import { approvalStore } from "../approvals.ts";
+import { TERMINAL_TICKET_STATUS } from "../delegation-receipts.ts";
 import {
 	INJECTION_ORDER,
 	collectInjections,
@@ -160,13 +161,8 @@ export function renderContractSection(contractSource: string | null | undefined)
 
 // ── 当前在办 ─────────────────────────────────────────────
 
-/**
- * 终态口径：与 `delegation-api.ts` / `delegation-receipts.ts` 的
- * `TERMINAL_TICKET_STATUS` 同一套（done / needs_you / failed / idle / aborted）。
- * 刻意不导出成共享常量：那两处各自是接口投影与回执判定的私有语义，
- * 为一个只读展示去改它们的形状不划算；三处一致由这里的注释与测试守着。
- */
-const TERMINAL_TICKET_STATUS = new Set(["done", "needs_you", "failed", "idle", "aborted"]);
+// 终态口径唯一实现在 delegation-receipts.ts（2026-11-10 收口；原注"刻意不导出"已推翻，
+// 见该处注释与变更记录 2026-11-10-状态机清点）。
 
 const STATUS_LABEL: Record<string, string> = {
 	received: "已受理",

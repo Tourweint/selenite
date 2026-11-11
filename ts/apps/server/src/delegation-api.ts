@@ -15,7 +15,11 @@ import {
 	type DelegationRuntime,
 } from "./delegation.ts";
 import { bashJobsDir, listBgJobs } from "./bash-background.ts";
-import { DelegationReceipts, requestFingerprint } from "./delegation-receipts.ts";
+import {
+	DelegationReceipts,
+	TERMINAL_TICKET_STATUS,
+	requestFingerprint,
+} from "./delegation-receipts.ts";
 import { currentApprovalLevel, currentAuthority } from "./delegation-authority.ts";
 import { projectRunSource, type RunSource } from "./run-source.ts";
 // 证据裁判（2026-11-10 批 14）：重派 / 回话续跑出来的新单同样带裁判。
@@ -37,14 +41,6 @@ import {
  * 只读任务中心接口（2026-11-03 方案 §5.9）。
  * 界面这次不做；这里先把领域与单 ticket 的读取口子留好，字段口径以这里为准。
  */
-
-const TERMINAL_TICKET_STATUS = new Set([
-	"done",
-	"needs_you",
-	"failed",
-	"idle",
-	"aborted",
-]);
 
 /**
  * 取消/重试回滚开关（扫尾批 1 A1）：`DELEGATION_CANCEL=false` 时两个端点一个都不挂（404），
