@@ -13,7 +13,7 @@
 |---|---|
 | **通用**，不是某个 App 的后端插件 | 今天记一整天，明天整理文件夹、查资料、跑个命令，用的是同一个 Agent 和同一份记忆 |
 | **个人**，不是平台 | 一个用户、一台机器、一份数据。不做多租户、不做账号体系、不做计费 |
-| **自有** | 记忆、会话、密钥全在本机；模型与供应商在界面里配，密钥仍只走环境变量 |
+| **自有** | 记忆、会话、密钥全在本机；模型与供应商在界面里配，密钥走环境变量（`.env` 主落点），界面直填的 key 落服务端热注入文件，两路共存、都不入库不下发 |
 
 「记录」是重点方向，因为它决定了三件事，而这三件事对通用 Agent 同样成立：
 
@@ -28,6 +28,7 @@ ts/
 ├── packages/shared/     契约 + SSE 编解码（服务端与客户端共用）
 ├── packages/memory/     记忆四层：存储 / 抽取 / 巩固 / 召回
 ├── apps/server/         Hono + SSE，持有 LLM key，装配 Harness
+├── apps/relay/          自建中继（哑路由 + 名册 + 扫码加入；部署口径见其 README）
 └── README.md            ← 从这里开始
 ```
 
@@ -45,7 +46,7 @@ ts/
 | 失控保护 | ✅ 工具回合上限 100（`AGENT_MAX_TURNS`），撞上限给提示并硬停 |
 | 上下文压缩 | ✅ 阈值 + overflow 兜底，策略用默认 |
 | 记忆框架 | ✅ 四层通了；策略（抽取/巩固/召回质量）刻意留空 |
-| 工具调用 | ✅ 10 个（读/写/改/跑 + 记住/回忆/提醒 + `skill` + `delegate` / `propose_project`；另有条件注册的 6 个，清单见接口文档 §4） |
+| 工具调用 | ✅ 10 个基线（读/写/改/跑 + 记住/回忆/提醒 + `skill` + `delegate` / `propose_project`）＋ 12 个条件注册（清单见接口文档 §4；2026-11-13 核对） |
 | 定时提醒 | ✅ `sleepUntil`，睡眠状态落库，重启不丢 |
 | 权限闸门 | ✅ 三档（`read-only` / `no-shell` / 黑名单 `AGENT_BLOCKED_TOOLS`）＋ 独立确认轴 `AGENT_CONFIRM_WRITES`（默认关，2026-11-04 批次二） |
 | 鉴权 | ✅ 共享令牌 ＋ 配对设备凭据（2026-11-04）＋ 本机页面 cookie（2026-11-03）；仍**不带用户身份**（D1） |
@@ -55,7 +56,9 @@ ts/
 
 ## 工具与信任
 
-已注册工具 17 个（10 个基线 + 7 个条件注册，现行清单以接口文档 §4 为准）：
+已注册工具 22 个（10 个基线 + 12 个条件注册，现行清单以接口文档 §4 为准，2026-11-13 核对；
+pi 的 `powershell` 本仓**未注册**——`CodingTools` 只带 read/write/edit/bash 四件，能力声明里的
+`powershell` 是防御性覆盖）：
 
 | 工具 | 能力 | 风险 |
 |---|---|---|
@@ -76,6 +79,11 @@ ts/
 | `propose_topic` | 提议长期跟进一个课题 | 只写内部提议（语义同 `remember`） |
 | `send_to_agent` | 执事给另一位执事递一条话（只送到对方会话，一跳） | 会让对方起一轮；每 run 最多 3 条 |
 | `routine_manage` | 执事给自己建 / 停 / 启 / 删例行规则（自建巡逻） | **高危**：让模型在后台自主跑轮，第一次要人点头；每执事活动规则 ≤10 条 |
+| `recall_sessions` | 跨全部会话检索 transcript（"会话考古"，含任务专线 / 隐藏会话） | 只读（子串检索，出口打码） |
+| `persona_recall` | 查 persona-metric 个人记忆库（起 python 子进程调 ask.py） | 只读库；**进 `WRITE_TOOLS`**（起进程按硬约束进闸门），不进高危清单 |
+| `save_skill_advice` | 把技能评估结果写进建议快照（不动启停，采纳在人） | 写盘（`.data/skills-advice.json`） |
+| `ask_user` | 结构化提问，人答复后服务端续跑 | 不写盘不起进程（等答复本身就是闸） |
+| `report_progress` | 长任务中途对主人播报一句（notice 帧，仅执事轮与任务专线） | 不落盘（没开流就收不到） |
 
 注册条件：`read` / `write` / `edit` / `bash` 来自 pi 自带的 `CodingTools`；`skill` 需技能目录
 （`AGENT_SKILLS_DIR`）非空；`CHANCELLOR_ENABLED=false` 时 `delegate` / `propose_project` 都不上（回到 8 个）；
@@ -83,8 +91,12 @@ ts/
 `GROUPS_ENABLED`（双闸，任一关即不上）；`TOPICS_ENABLED=false` 或课题存储 / 搜索适配层缺失时
 `web_search` / `propose_topic` 都不上；`send_to_agent` 需 `COMPANIONS_ENABLED` 且 `PARTNER_RELAY_ENABLED`
 （2026-11-08 扫尾批 8d）；`routine_manage` 需 `COMPANIONS_ENABLED` 且 `ROUTINE_SELF_SERVICE` 开
-（`ROUTINE_SELF_SERVICE=false` → 工具不上架，2026-11-08 员工人格化刀二 E4）。
-后七个是条件注册，不计入 10 个基线。
+（`ROUTINE_SELF_SERVICE=false` → 工具不上架，2026-11-08 员工人格化刀二 E4）；
+`recall_sessions` 需 `AGENT_RECALL_SESSIONS`（默认开）；`persona_recall` 需 `PERSONA_MEMORY_ASK` 配置
+ask.py 路径且 `PERSONA_MEMORY_ENABLED` 未关（默认未配置 = 不上架）；
+`save_skill_advice` 需 `SKILL_ADVICE`（默认开）；`ask_user` / `report_progress` 分别受
+`AGENT_ASK_USER` / `AGENT_PROGRESS_REPORT`（均默认开，关了不上架）。
+后 12 个是条件注册，不计入 10 个基线。
 
 **闸门只是骨架。** pi 自己不带权限系统，只在 `beforeTool` 留了一个钩子；
 我们在 `apps/server/src/agent.ts` 里挂了一层：

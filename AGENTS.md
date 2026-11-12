@@ -38,6 +38,7 @@ ts/packages/shared/     契约单文件：请求 / 事件 Zod schema + SSE 编�
 ts/packages/memory/     记忆四层：存储 / 抽取 / 巩固 / 召回
 ts/apps/server/         Hono + SSE + 装配（agent.ts 是核心：Harness / 会话 / 闸门 / 派活）
 ts/apps/server/skills/  技能手册 *.md（文件名 = 技能名，第 1 行 = 索引用摘要）
+ts/apps/relay/          自建中继（哑路由 + 名册 + 加入码；部署口径见 ts/apps/relay/README.md）
 desktop/                MyGo 桌面壳（Go）
 docs/                   基线文档（现行口径）/ 设计方案（设计期）/ 变更记录（落地期）
 ```
