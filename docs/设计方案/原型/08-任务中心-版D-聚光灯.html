@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>任务中心 · 版 D 聚光灯</title>
+<style>
+  :root{
+    --bg:#fdf9f2; --surface-low:#f7f3eb; --card:#f6f1e7; --card-high:#ede9e0;
+    --text:#2e2b3a; --text-2:#6e6b7e; --text-3:#9a97a5;
+    --outline:#c8c5bc; --divider:rgba(200,197,188,.55);
+    --primary:#3e4a8c; --on-primary:#fff;
+    --primary-container:#f0ede5; --on-primary-container:#1e1b4b;
+    --sec-container:#f5edd9; --on-sec-container:#4a3b1e;
+    --ter-container:#fceecb; --on-ter-container:#5c4210;
+    --error:#b3564d; --error-container:#f6e2df;
+    --ok:#1f9d4d; --ok-container:#e2f2e8;
+    --warn:#b07d2b;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--text);display:flex;
+    font:13px/1.6 "Segoe UI","Microsoft YaHei UI","PingFang SC",-apple-system,sans-serif}
+
+  .rail{width:56px;flex:none;border-right:1px solid var(--divider);display:flex;flex-direction:column;
+    align-items:center;padding:14px 0;gap:6px}
+  .rail .rb{width:38px;height:38px;border-radius:12px;display:grid;place-items:center;color:var(--text-3)}
+  .rail .rb:hover{background:var(--card-high);color:var(--text-2)}
+  .rail .rb.on{background:var(--primary);color:var(--on-primary)}
+  .rail svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+  .rail .sp{flex:1}
+
+  .main{flex:1;min-width:0;padding:26px 26px 46px;overflow-y:auto}
+  .wrap{max-width:760px;margin:0 auto}
+
+  .greet{margin:0 0 20px}
+  .greet h1{margin:0;font-size:20px;font-weight:700;letter-spacing:.01em}
+  .greet p{margin:5px 0 0;font-size:13px;color:var(--text-2)}
+  .greet .hl{color:var(--primary);font-weight:600}
+  .greet .hl-warn{color:var(--warn);font-weight:600}
+
+  /* ── 聚光灯主卡 ───────────────────────────────────────── */
+  .spot{background:var(--card);border:1px solid rgba(200,197,188,.5);border-radius:24px;padding:22px 24px 18px;
+    box-shadow:0 2px 12px rgba(46,43,58,.06);margin-bottom:18px}
+  .spot .top{display:flex;align-items:center;gap:12px}
+  .ava{width:40px;height:40px;flex:none;border-radius:14px;display:grid;place-items:center;font-size:17px;font-weight:700}
+  .ava.v1{background:var(--primary-container);color:var(--primary)}
+  .ava.v2{background:var(--sec-container);color:var(--on-sec-container)}
+  .ava.v3{background:var(--ter-container);color:var(--on-ter-container)}
+  .ava.v4{background:var(--error-container);color:var(--error)}
+  .spot .tt{flex:1;min-width:0}
+  .spot .tt h2{margin:0;font-size:16.5px;font-weight:700;line-height:1.4}
+  .spot .tt .meta{margin:3px 0 0;font-size:12px;color:var(--text-3)}
+  .spot .eyebrow{font-size:10.5px;letter-spacing:.28em;color:var(--text-3);font-weight:600;margin:0 0 4px}
+
+  /* 大阶段条：带字 */
+  .bigstage{display:grid;grid-template-columns:repeat(5,1fr);margin:20px 4px 4px;position:relative}
+  .bigstage::before{content:"";position:absolute;left:9%;right:9%;top:5px;height:1px;background:var(--divider)}
+  .bs{position:relative;text-align:center;font-size:11px;color:var(--text-3)}
+  .bs i{display:block;width:10px;height:10px;border-radius:50%;background:var(--card-high);border:1.5px solid var(--outline);
+    margin:0 auto 6px;position:relative;z-index:1}
+  .bs.done i{background:var(--primary);border-color:var(--primary)}
+  .bs.done{color:var(--text-2)}
+  .bs.now i{background:var(--bg);border-color:var(--primary);box-shadow:0 0 0 4px rgba(62,74,140,.16)}
+  .bs.now{color:var(--primary);font-weight:600}
+  .bs.fail-now i{background:var(--error);border-color:var(--error)}
+  .bs.fail-now{color:var(--error);font-weight:600}
+
+  .doing{margin:14px 0 0;padding:11px 14px;border-radius:12px;background:var(--surface-low);
+    font-size:12.5px;color:var(--text-2);display:flex;align-items:center;gap:9px}
+  .doing .dot{width:8px;height:8px;border-radius:50%;background:var(--primary);flex:none;animation:pulse 2s infinite}
+  .doing.warn .dot{background:var(--warn)}
+  .doing.fail .dot{background:var(--error)}
+
+  .rows{list-style:none;margin:12px 0 0;padding:0}
+  .rows li{display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:10px}
+  .rows li:hover{background:var(--card-high)}
+  .tool{width:20px;height:20px;flex:none;border-radius:7px;display:grid;place-items:center;font-size:9.5px;font-weight:700}
+  .tool.cb{background:var(--primary-container);color:var(--primary)}
+  .tool.qi{background:var(--sec-container);color:var(--on-sec-container)}
+  .brief{flex:1;min-width:0;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .st{flex:none;font-size:11px;display:inline-flex;align-items:center;gap:4px}
+  .st i{width:5px;height:5px;border-radius:50%}
+  .st.ok{color:var(--ok)} .st.ok i{background:var(--ok)}
+  .st.run{color:var(--text-2)} .st.run i{background:var(--text-3);animation:pulse 2.4s infinite}
+  .st.ask{color:var(--warn)} .st.ask i{background:var(--warn)}
+  .st.fail{color:var(--error)} .st.fail i{background:var(--error)}
+
+  .spot .foot{display:flex;gap:8px;justify-content:flex-end;margin-top:14px;padding-top:13px;border-top:1px dashed var(--divider)}
+  .btn{font-size:12px;padding:6px 16px;border-radius:11px;cursor:pointer;border:1px solid transparent}
+  .btn.primary{background:var(--primary);color:var(--on-primary)}
+  .btn.primary:hover{filter:brightness(1.08)}
+  .btn.ghost{background:none;color:var(--text-2);border-color:var(--divider)}
+  .btn.ghost:hover{background:var(--card-high)}
+
+  /* ── 其他在跑：小卡行 ─────────────────────────────────── */
+  .mini-h{display:flex;align-items:center;gap:8px;margin:0 2px 9px;font-size:12.5px;font-weight:600;color:var(--text-2)}
+  .mini-h .ln{flex:1;height:1px;background:var(--divider);opacity:.5}
+  .minis{display:grid;grid-template-columns:1fr 1fr;gap:9px}
+  .mini{background:var(--surface-low);border:1px solid rgba(200,197,188,.4);border-radius:14px;padding:11px 13px;
+    cursor:pointer;transition:background .15s,border-color .15s;display:flex;gap:10px;align-items:center}
+  .mini:hover{background:var(--card-high)}
+  .mini .ava{width:30px;height:30px;font-size:13px;border-radius:11px}
+  .mini .bd{flex:1;min-width:0}
+  .mini h3{margin:0;font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .mini p{margin:2px 0 0;font-size:11px;color:var(--text-3);display:flex;align-items:center;gap:5px}
+  .mini p i{width:5px;height:5px;border-radius:50%;background:var(--text-3);flex:none}
+  .mini[data-lamp=run] p i{background:var(--primary);animation:pulse 2.4s infinite}
+  .mini[data-lamp=fail] p i{background:var(--error)}
+  .mini .go{color:var(--text-3);font-size:14px;flex:none}
+
+  /* ── 底部一行 ─────────────────────────────────────────── */
+  .baseline{margin-top:26px;display:flex;align-items:center;gap:8px;justify-content:center;
+    font-size:11.5px;color:var(--text-3)}
+  .baseline button{background:none;border:none;color:var(--text-3);font-size:11.5px;cursor:pointer;
+    padding:4px 8px;border-radius:8px}
+  .baseline button:hover{background:var(--card);color:var(--text-2)}
+
+  .ver{position:fixed;right:14px;bottom:12px;display:flex;align-items:center;gap:10px;
+    background:var(--card);border:1px solid var(--divider);border-radius:999px;padding:5px 8px 5px 14px;
+    font-size:11.5px;color:var(--text-2);box-shadow:0 2px 8px rgba(46,43,58,.08)}
+  .ver b{font-weight:600;color:var(--text)}
+  .ver a{color:var(--text-3);text-decoration:none;padding:2px 5px;border-radius:7px}
+  .ver a:hover{background:var(--card-high);color:var(--text-2)}
+  .ver a.cur{background:var(--primary);color:var(--on-primary)}
+
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+</style>
+</head>
+<body>
+
+<aside class="rail" aria-hidden="true">
+  <div class="rb"><svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div>
+  <div class="rb on"><svg viewBox="0 0 24 24"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M9 12h6M9 16h6"/></svg></div>
+  <div class="rb"><svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg></div>
+  <div class="rb"><svg viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></div>
+  <div class="sp"></div>
+  <div class="rb"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.08a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.08a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.08a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></div>
+</aside>
+
+<main class="main"><div class="wrap">
+
+  <header class="greet">
+    <h1>下午好。</h1>
+    <p>执事们正在做 <span class="hl">3 件事</span>，其中 <span class="hl-warn">1 件</span>想请你拍板。</p>
+  </header>
+
+  <section class="spot" id="spot"><!-- JS 渲染 --></section>
+
+  <div class="mini-h">其他在跑 <span class="ln"></span></div>
+  <section class="minis" id="minis"><!-- JS 渲染 --></section>
+
+  <div class="baseline">
+    <span>已完结 6 个对话</span>·<button>更早的直派 2 单</button>·<button>全部历史 →</button>
+  </div>
+
+</div></main>
+
+<div class="ver">
+  <span>设计稿 <b>D · 聚光灯</b></span>
+  <a href="05-任务中心-版A-精修工单墙.html">A</a><a href="06-任务中心-版B-现在时间线.html">B</a><a href="07-任务中心-版C-驾驶舱.html">C</a><a href="08-任务中心-版D-聚光灯.html" class="cur">D</a>
+</div>
+
+<script>
+  const STAGES = ["受理","规划","执行","验收","完成"];
+  const CONVS = [
+    {
+      id:"ui4", lamp:"ask", ava:"手", tint:"v1",
+      title:"手机 UI 四件：图标对齐 Lucide",
+      meta:"总管 · 区域 lifediary · 18 分钟前",
+      stage:3, stageFail:false,
+      doing:["warn","头像同步那单返工到第 2 轮，验收想请你拍板过不过。"],
+      rows:[
+        ["cb","37 处图标对齐 Lucide 视框","ok","已通过"],
+        ["cb","头像同步（/providerId 取 group.id）","ask","待你处理"],
+      ],
+      actions:[["ghost","稍后"],["primary","去处理"]],
+    },
+    {
+      id:"search", lamp:"run", ava:"搜", tint:"v1",
+      title:"搜索分页与历史窗口",
+      meta:"区域 lifediary-harness · 5 分钟前",
+      stage:3, stageFail:false,
+      doing:["run","正在验收：改了 2 个文件，+184 −9。"],
+      rows:[["cb","搜索分页 + 200 条历史窗口","run","验收中"]],
+      actions:[["primary","打开对话"]],
+    },
+    {
+      id:"skills", lamp:"run", ava:"技", tint:"v2",
+      title:"技能手册补目录",
+      meta:"区域 lifediary-harness · 32 分钟前",
+      stage:2, stageFail:false,
+      doing:["run","正在执行：给 skills/ 手册补索引目录。"],
+      rows:[["qi","给 skills/ 手册补索引","run","进行中"]],
+      actions:[["primary","打开对话"]],
+    },
+    {
+      id:"weekly", lamp:"fail", ava:"周", tint:"v4",
+      title:"周报：近七天总结",
+      meta:"区域 日记 · 2 小时前",
+      stage:-1, stageFail:true,
+      doing:["fail","执行超时：跑了 24 分钟没有回音，先看看原因或重试。"],
+      rows:[["cb","汇总近七天日记生成周报","fail","失败待看"]],
+      actions:[["ghost","看看原因"],["primary","重试"]],
+    },
+  ];
+
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+  function stageHtml(c) {
+    if (c.stage < 0) {
+      return `<div class="bigstage">${STAGES.map((s) => `<div class="bs"><i></i>${esc(s)}</div>`).join("")}</div>`;
+    }
+    return `<div class="bigstage">${STAGES.map((s, i) => {
+      const cls = i < c.stage ? "done" : i === c.stage ? "now" : "";
+      return `<div class="bs ${cls}"><i></i>${esc(s)}</div>`;
+    }).join("")}</div>`;
+  }
+
+  function spotHtml(c) {
+    const stCls = { run:"", ask:"warn", fail:"fail" }[c.lamp] || "";
+    return `
+      <div class="top">
+        <span class="ava ${c.tint}">${esc(c.ava)}</span>
+        <div class="tt">
+          <p class="eyebrow">聚光灯</p>
+          <h2>${esc(c.title)}</h2>
+          <p class="meta">${esc(c.meta)}</p>
+        </div>
+      </div>
+      ${stageHtml(c)}
+      <div class="doing ${stCls}"><span class="dot"></span>${esc(c.doing[1])}</div>
+      <ul class="rows">
+        ${c.rows.map(([tool, brief, tone, label]) => `
+          <li><span class="tool ${tool}">${tool.toUpperCase()}</span>
+              <span class="brief">${esc(brief)}</span>
+              <span class="st ${tone}"><i></i>${esc(label)}</span></li>`).join("")}
+      </ul>
+      <div class="foot">
+        ${c.actions.map(([kind, label]) => `<button class="btn ${kind}">${esc(label)}</button>`).join("")}
+      </div>`;
+  }
+
+  function miniHtml(c) {
+    const stText = { run:"进行中", ask:"等你拍板", fail:"出错", done:"已完成" }[c.lamp] || "";
+    return `
+      <div class="mini" data-lamp="${c.lamp}" data-id="${c.id}">
+        <span class="ava ${c.tint}">${esc(c.ava)}</span>
+        <div class="bd"><h3>${esc(c.title)}</h3><p><i></i>${esc(stText)} · ${esc(c.meta.split(" · ").pop())}</p></div>
+        <span class="go">›</span>
+      </div>`;
+  }
+
+  let current = 0;
+  function render() {
+    const c = CONVS[current];
+    document.getElementById("spot").innerHTML = spotHtml(c);
+    const others = CONVS.map((x, i) => [x, i]).filter(([, i]) => i !== current);
+    document.getElementById("minis").innerHTML = others.map(([x, i]) => miniHtml(x)).join("")
+      || `<p style="grid-column:1/-1;margin:0;color:var(--text-3);font-size:12px">其他都收工了。</p>`;
+    document.querySelectorAll(".mini").forEach((el) => {
+      el.addEventListener("click", () => {
+        current = CONVS.findIndex((x) => x.id === el.dataset.id);
+        render();
+        document.getElementById("spot").scrollIntoView({ behavior:"smooth", block:"start" });
+      });
+    });
+  }
+  render();
+</script>
+</body>
+</html>

@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="paper">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>技能卡片 · 四个方向</title>
+<style>
+  :root {
+    --bg: #fdf9f2; --surface: #fdf9f2; --surface-low: #f7f3eb;
+    --card: #f6f1e7; --card-high: #ede9e0;
+    --text: #2e2b3a; --text-2: #6e6b7e; --text-3: #9a97a5;
+    --outline: #c8c5bc; --divider: rgba(200, 197, 188, 0.55);
+    --accent: #3e4a8c; --c-primary: #3e4a8c; --c-tertiary: #e0a84a; --c-error: #b3564d;
+    --r-sm: 8px; --r-md: 12px; --r-lg: 16px; --r-full: 9999px;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+      "Microsoft YaHei", system-ui, sans-serif;
+    color-scheme: light;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 26px 32px 64px;
+    background: var(--bg); color: var(--text);
+    font-family: var(--font); font-size: 13px; line-height: 1.5;
+  }
+  .wrap { max-width: 1000px; margin: 0 auto; }
+  h1 { margin: 0; font-size: 18px; font-weight: 500; }
+  .page-hint { margin: 4px 0 30px; color: var(--text-3); font-size: 12px; line-height: 1.6; }
+  section { margin: 0 0 38px; }
+  .v-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 3px; }
+  .v-tag { font-family: var(--mono); font-size: 11px; color: var(--accent); letter-spacing: .04em; }
+  .v-title { margin: 0; font-size: 14px; font-weight: 500; }
+  .v-note { margin: 0 0 12px; color: var(--text-3); font-size: 11.5px; line-height: 1.6; }
+  .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+
+  .card { background: var(--card); border-radius: var(--r-lg); padding: 13px 15px; }
+  .nm { font-family: var(--mono); font-size: 12px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sum {
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2;
+    overflow: hidden; font-size: 12.5px; line-height: 1.55; color: var(--text-2); overflow-wrap: anywhere;
+  }
+  .meta { display: flex; flex-wrap: wrap; align-items: center; column-gap: 5px; row-gap: 2px; font-size: 11px; color: var(--text-3); white-space: nowrap; }
+  .dot { width: 3px; height: 3px; border-radius: 50%; background: var(--text-3); display: inline-block; }
+  .ro { font-size: 10.5px; color: var(--text-3); }
+  .stale { color: color-mix(in srgb, var(--c-tertiary) 78%, var(--text)); }
+  .sw { position: relative; flex: none; width: 36px; height: 20px; border-radius: var(--r-full); background: color-mix(in srgb, var(--text-3) 34%, transparent); }
+  .sw::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--text-2); box-shadow: 0 1px 2px rgba(0,0,0,.2); }
+  .sw.on { background: var(--accent); }
+  .sw.on::after { left: 18px; background: #fff; }
+  .trash { width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; border-radius: 7px; color: var(--text-3); }
+  .trash svg { width: 13px; height: 13px; }
+
+  .chip {
+    display: inline-flex; align-items: center; height: 17px; padding: 0 7px;
+    border-radius: var(--r-full); font-size: 10.5px; line-height: 1; white-space: nowrap;
+  }
+  .c-keep { color: color-mix(in srgb, var(--accent) 84%, var(--text)); background: color-mix(in srgb, var(--accent) 12%, var(--surface)); border: 1px solid color-mix(in srgb, var(--accent) 34%, transparent); }
+  .c-scene { color: var(--text-2); background: var(--surface-low); border: 1px solid var(--outline); }
+  .c-skip { color: var(--text-3); background: color-mix(in srgb, var(--text-3) 8%, var(--surface)); border: 1px solid transparent; }
+  .c-warn { color: color-mix(in srgb, var(--c-tertiary) 84%, var(--text)); background: color-mix(in srgb, var(--c-tertiary) 13%, var(--surface)); border: 1px solid color-mix(in srgb, var(--c-tertiary) 46%, transparent); }
+  .c-none { color: var(--text-3); border: 1px dashed var(--outline); }
+
+  /* ── A · 名字优先 ─────────────────────────── */
+  .a { display: flex; flex-direction: column; height: 132px; gap: 6px; }
+  .a .top { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .a .nm { flex: 0 1 auto; min-width: 0; font-size: 13px; color: var(--text); font-weight: 500; }
+  .a .chip { flex: none; margin-left: auto; }
+  .a .sum { flex: none; min-height: 39px; }
+  .a .foot { margin-top: auto; }
+  .a .foot { display: flex; align-items: center; gap: 7px; min-width: 0; }
+  .a .foot .meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .a .foot .act { margin-left: auto; display: flex; align-items: center; gap: 4px; flex: none; }
+
+  /* ── B · 图标卡 ───────────────────────────── */
+  .b { display: flex; flex-direction: column; height: 150px; gap: 7px; }
+  .b .top { display: flex; align-items: center; gap: 9px; min-width: 0; }
+  .b .tile {
+    flex: none; width: 30px; height: 30px; border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--card-high); color: var(--text-2);
+    font-family: var(--mono); font-size: 10px; letter-spacing: .02em;
+  }
+  .b .who { min-width: 0; flex: 1 1 auto; }
+  .b .nm { font-size: 12.5px; color: var(--text); font-weight: 500; }
+  .b .sub { margin-top: 1px; font-size: 10.5px; color: var(--text-3); }
+  .b .sum { flex: none; min-height: 39px; padding-left: 39px; }
+  .b .foot { margin-top: auto; }
+  .b .foot { display: flex; align-items: center; gap: 5px; padding-left: 39px; }
+  .b .foot .meta { margin-left: auto; }
+
+  /* ── C · 色点（无徽章墙）──────────────────── */
+  .c { display: flex; flex-direction: column; height: 132px; gap: 6px; }
+  .c .top { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .c .nm { flex: 0 1 auto; min-width: 0; font-size: 13px; color: var(--text); font-weight: 500; }
+  .c .bucket { margin-left: auto; flex: none; display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--text-3); }
+  .c .bucket i { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+  .c .sum { flex: none; min-height: 39px; }
+  .c .foot { margin-top: auto; }
+  .c .foot { display: flex; align-items: center; gap: 7px; }
+  .c .act { margin-left: auto; display: flex; align-items: center; gap: 4px; }
+
+  /* ── D · 极简 ─────────────────────────────── */
+  .d { display: flex; flex-direction: column; height: 112px; gap: 5px; }
+  .d .top { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .d .nm { flex: 0 1 auto; min-width: 0; font-size: 12.5px; color: var(--text); font-weight: 500; }
+  .d .right { margin-left: auto; display: flex; align-items: center; gap: 6px; flex: none; }
+  .d .sum { flex: none; min-height: 19px; -webkit-line-clamp: 1; line-clamp: 1; }
+  .d .foot { margin-top: auto; }
+  .d .foot { display: flex; align-items: center; gap: 6px; font-size: 10.5px; color: var(--text-3); }
+  .d .foot .dotb { width: 5px; height: 5px; border-radius: 50%; }
+  .d .foot .ro { margin-left: auto; }
+  .d .foot .sw { flex: none; }
+
+  .legend { display: flex; gap: 12px; margin: 0 0 10px; font-size: 10.5px; color: var(--text-3); }
+  .legend b { font-weight: 500; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>技能卡片 · 四个方向</h1>
+  <p class="page-hint">
+    同一批假数据（可写 / 只读 / 开 / 关 / 未评估 / 待复核 / 90 天未用都在里面），卡片宽度与真实设置页一致（内容宽 1000px → 三列）。
+    共同口径：<b>名字当主角</b>，摘要两行封顶，秒级时间与文件大小从卡片撤掉（点开看），删除降级成小图标。
+  </p>
+
+  <!-- A -->
+  <section>
+    <div class="v-head"><span class="v-tag">A</span><h2 class="v-title">名字优先 · 一行元信息</h2></div>
+    <p class="v-note">名字回到正文最亮的一档；建议收成 4 字小签；底部只留「用过几次 · 多久前」，开关与删除靠右。信息层级最干净，我倾向这版。</p>
+    <div class="grid">
+      <article class="card a">
+        <div class="top"><span class="nm">daily-brief</span><span class="chip c-keep">建议开启</span></div>
+        <p class="sum">把一天的日记整理成一段简报，附上待办和情绪小结。</p>
+        <div class="foot">
+          <span class="meta">用过 12 次 · 3 天前</span>
+          <span class="act"><span class="sw on"></span><span class="trash"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/></svg></span></span>
+        </div>
+      </article>
+      <article class="card a">
+        <div class="top"><span class="nm">agent-desktop</span><span class="chip c-none">未评估</span></div>
+        <p class="sum">Operate desktop applications on macOS, Windows and Linux through native accessibility trees, using…</p>
+        <div class="foot">
+          <span class="meta">用过 2 次 · 2 天前<span class="dot"></span><span class="ro">只读</span></span>
+          <span class="act"><span class="sw on"></span></span>
+        </div>
+      </article>
+      <article class="card a">
+        <div class="top"><span class="nm">adapt</span><span class="chip c-skip">建议不开</span></div>
+        <p class="sum">Adapt designs to work across different screen sizes, devices, contexts, or platforms. Ensures consistent experience…</p>
+        <div class="foot">
+          <span class="meta">没用过<span class="dot"></span><span class="ro">只读</span><span class="dot"></span><span class="stale">90 天未用</span></span>
+          <span class="act"><span class="sw"></span></span>
+        </div>
+      </article>
+      <article class="card a">
+        <div class="top"><span class="nm">chinese-ancient-architecture-infographic</span><span class="chip c-scene">按场景</span></div>
+        <p class="sum">生成中国古建筑主题的信息图，输出可直接渲染的 HTML，含榫卯、斗拱等结构示意。</p>
+        <div class="foot">
+          <span class="meta">没用过<span class="dot"></span><span class="ro">只读</span></span>
+          <span class="act"><span class="sw"></span></span>
+        </div>
+      </article>
+      <article class="card a">
+        <div class="top"><span class="nm">huashu-nuwa</span><span class="chip c-warn">待复核</span></div>
+        <p class="sum">把任何主题写成一篇有骨架、有观点、能落地的长文（中文写作方法论）。</p>
+        <div class="foot">
+          <span class="meta">用过 1 次 · 5 天前<span class="dot"></span><span class="ro">只读</span></span>
+          <span class="act"><span class="sw on"></span></span>
+        </div>
+      </article>
+      <article class="card a">
+        <div class="top"><span class="nm">probe-skill</span><span class="chip c-skip">建议不开</span></div>
+        <p class="sum">探针技能摘要</p>
+        <div class="foot">
+          <span class="meta">没用过</span>
+          <span class="act"><span class="sw"></span><span class="trash"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/></svg></span></span>
+        </div>
+      </article>
+    </div>
+  </section>
+
+  <!-- B -->
+  <section>
+    <div class="v-head"><span class="v-tag">B</span><h2 class="v-title">图标卡 · 名字带首字母块</h2></div>
+    <p class="v-note">每张卡多一个 30px 的字母块，扫读时更容易“认脸”；建议签留在卡片底部，摘要左对齐下沉。更像应用抽屉，但卡片会略满。</p>
+    <div class="grid">
+      <article class="card b">
+        <div class="top">
+          <span class="tile">db</span>
+          <span class="who"><div class="nm">daily-brief</div><div class="sub">你的技能</div></span>
+          <span class="sw on"></span>
+        </div>
+        <p class="sum">把一天的日记整理成一段简报，附上待办和情绪小结。</p>
+        <div class="foot"><span class="chip c-keep">建议开启</span><span class="meta">用过 12 次 · 3 天前</span></div>
+      </article>
+      <article class="card b">
+        <div class="top">
+          <span class="tile">ad</span>
+          <span class="who"><div class="nm">agent-desktop</div><div class="sub">.agents · 只读</div></span>
+          <span class="sw on"></span>
+        </div>
+        <p class="sum">Operate desktop applications on macOS, Windows and Linux through native accessibility trees, using…</p>
+        <div class="foot"><span class="chip c-none">未评估</span><span class="meta">用过 2 次 · 2 天前</span></div>
+      </article>
+      <article class="card b">
+        <div class="top">
+          <span class="tile">ad</span>
+          <span class="who"><div class="nm">adapt</div><div class="sub">.agents · 只读</div></span>
+          <span class="sw"></span>
+        </div>
+        <p class="sum">Adapt designs to work across different screen sizes, devices, contexts, or platforms. Ensures consistent experience…</p>
+        <div class="foot"><span class="chip c-skip">建议不开</span><span class="meta">没用过 · <span class="stale">90 天未用</span></span></div>
+      </article>
+      <article class="card b">
+        <div class="top">
+          <span class="tile">ca</span>
+          <span class="who"><div class="nm">chinese-ancient-architecture-infographic</div><div class="sub">.agents · 只读</div></span>
+          <span class="sw"></span>
+        </div>
+        <p class="sum">生成中国古建筑主题的信息图，输出可直接渲染的 HTML，含榫卯、斗拱等结构示意。</p>
+        <div class="foot"><span class="chip c-scene">按场景</span><span class="meta">没用过</span></div>
+      </article>
+      <article class="card b">
+        <div class="top">
+          <span class="tile">hn</span>
+          <span class="who"><div class="nm">huashu-nuwa</div><div class="sub">.agents · 只读</div></span>
+          <span class="sw on"></span>
+        </div>
+        <p class="sum">把任何主题写成一篇有骨架、有观点、能落地的长文（中文写作方法论）。</p>
+        <div class="foot"><span class="chip c-warn">待复核</span><span class="meta">用过 1 次 · 5 天前</span></div>
+      </article>
+      <article class="card b">
+        <div class="top">
+          <span class="tile">ps</span>
+          <span class="who"><div class="nm">probe-skill</div><div class="sub">你的技能</div></span>
+          <span class="sw"></span>
+        </div>
+        <p class="sum">探针技能摘要</p>
+        <div class="foot"><span class="chip c-skip">建议不开</span><span class="meta">没用过</span></div>
+      </article>
+    </div>
+  </section>
+
+  <!-- C -->
+  <section>
+    <div class="v-head"><span class="v-tag">C</span><h2 class="v-title">色点 · 把建议降成一句小字</h2></div>
+    <p class="v-note">建议不再用胶囊，只留一个 6px 色点 + 四个字，挂在右上角；名字和摘要之间没有色块竞争。最安静的一版。</p>
+    <div class="legend">
+      <span><i class="dot" style="background:var(--accent);width:6px;height:6px"></i> 建议开启</span>
+      <span><i class="dot" style="background:var(--text-3);width:6px;height:6px"></i> 按场景</span>
+      <span><i class="dot" style="background:var(--outline);width:6px;height:6px"></i> 建议不开</span>
+      <span><i class="dot" style="background:var(--c-tertiary);width:6px;height:6px"></i> 待复核</span>
+      <span><i class="dot" style="border:1px dashed var(--outline);width:6px;height:6px;background:transparent"></i> 未评估</span>
+    </div>
+    <div class="grid">
+      <article class="card c">
+        <div class="top"><span class="nm">daily-brief</span><span class="bucket"><i style="background:var(--accent)"></i>建议开启</span></div>
+        <p class="sum">把一天的日记整理成一段简报，附上待办和情绪小结。</p>
+        <div class="foot"><span class="meta">用过 12 次 · 3 天前</span><span class="act"><span class="sw on"></span><span class="trash"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/></svg></span></span></div>
+      </article>
+      <article class="card c">
+        <div class="top"><span class="nm">agent-desktop</span><span class="bucket"><i style="border:1px dashed var(--outline)"></i>未评估</span></div>
+        <p class="sum">Operate desktop applications on macOS, Windows and Linux through native accessibility trees, using…</p>
+        <div class="foot"><span class="meta">用过 2 次 · 2 天前<span class="dot"></span><span class="ro">只读</span></span><span class="act"><span class="sw on"></span></span></div>
+      </article>
+      <article class="card c">
+        <div class="top"><span class="nm">adapt</span><span class="bucket"><i style="background:var(--outline)"></i>建议不开</span></div>
+        <p class="sum">Adapt designs to work across different screen sizes, devices, contexts, or platforms. Ensures consistent experience…</p>
+        <div class="foot"><span class="meta">没用过<span class="dot"></span><span class="ro">只读</span><span class="dot"></span><span class="stale">90 天未用</span></span><span class="act"><span class="sw"></span></span></div>
+      </article>
+      <article class="card c">
+        <div class="top"><span class="nm">chinese-ancient-architecture-infographic</span><span class="bucket"><i style="background:var(--text-3)"></i>按场景</span></div>
+        <p class="sum">生成中国古建筑主题的信息图，输出可直接渲染的 HTML，含榫卯、斗拱等结构示意。</p>
+        <div class="foot"><span class="meta">没用过<span class="dot"></span><span class="ro">只读</span></span><span class="act"><span class="sw"></span></span></div>
+      </article>
+      <article class="card c">
+        <div class="top"><span class="nm">huashu-nuwa</span><span class="bucket"><i style="background:var(--c-tertiary)"></i>待复核</span></div>
+        <p class="sum">把任何主题写成一篇有骨架、有观点、能落地的长文（中文写作方法论）。</p>
+        <div class="foot"><span class="meta">用过 1 次 · 5 天前<span class="dot"></span><span class="ro">只读</span></span><span class="act"><span class="sw on"></span></span></div>
+      </article>
+      <article class="card c">
+        <div class="top"><span class="nm">probe-skill</span><span class="bucket"><i style="background:var(--outline)"></i>建议不开</span></div>
+        <p class="sum">探针技能摘要</p>
+        <div class="foot"><span class="meta">没用过</span><span class="act"><span class="sw"></span><span class="trash"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/></svg></span></span></div>
+      </article>
+    </div>
+  </section>
+
+  <!-- D -->
+  <section>
+    <div class="v-head"><span class="v-tag">D</span><h2 class="v-title">最紧凑 · 摘要一行</h2></div>
+    <p class="v-note">摘要砍到一行，卡片压到 108px，同样的屏能多扫两行；建议只留一个色点（靠 hover 看理由）。适合技能很多时当索引，但摘要信息量最少。</p>
+    <div class="grid">
+      <article class="card d">
+        <div class="top"><span class="nm">daily-brief</span><span class="right"><span class="dotb" style="background:var(--accent)"></span></span></div>
+        <p class="sum">把一天的日记整理成一段简报，附上待办和情绪小结。</p>
+        <div class="foot"><span>用过 12 次 · 3 天前</span><span class="ro">你的技能</span><span class="sw on"></span></div>
+      </article>
+      <article class="card d">
+        <div class="top"><span class="nm">agent-desktop</span><span class="right"><span class="dotb" style="border:1px dashed var(--outline)"></span></span></div>
+        <p class="sum">Operate desktop applications on macOS, Windows and Linux through native accessibility trees…</p>
+        <div class="foot"><span>用过 2 次 · 2 天前</span><span class="ro">只读</span><span class="sw on"></span></div>
+      </article>
+      <article class="card d">
+        <div class="top"><span class="nm">adapt</span><span class="right"><span class="dotb" style="background:var(--outline)"></span></span></div>
+        <p class="sum">Adapt designs to work across different screen sizes, devices, contexts, or platforms…</p>
+        <div class="foot"><span>没用过 · <span class="stale">90 天未用</span></span><span class="ro">只读</span><span class="sw"></span></div>
+      </article>
+      <article class="card d">
+        <div class="top"><span class="nm">chinese-ancient-architecture-infographic</span><span class="right"><span class="dotb" style="background:var(--text-3)"></span></span></div>
+        <p class="sum">生成中国古建筑主题的信息图，输出可直接渲染的 HTML，含榫卯、斗拱等结构示意。</p>
+        <div class="foot"><span>没用过</span><span class="ro">只读</span><span class="sw"></span></div>
+      </article>
+      <article class="card d">
+        <div class="top"><span class="nm">huashu-nuwa</span><span class="right"><span class="dotb" style="background:var(--c-tertiary)"></span></span></div>
+        <p class="sum">把任何主题写成一篇有骨架、有观点、能落地的长文（中文写作方法论）。</p>
+        <div class="foot"><span>用过 1 次 · 5 天前</span><span class="ro">只读</span><span class="sw on"></span></div>
+      </article>
+      <article class="card d">
+        <div class="top"><span class="nm">probe-skill</span><span class="right"><span class="dotb" style="background:var(--outline)"></span></span></div>
+        <p class="sum">探针技能摘要</p>
+        <div class="foot"><span>没用过</span><span class="ro">你的技能</span><span class="sw"></span></div>
+      </article>
+    </div>
+  </section>
+
+  <p class="page-hint" style="margin-top:-12px">
+    共同取舍：卡片上不再出现秒级更新时间、文件大小、建议频率长文案——这三样都挪进点开的弹窗；
+    删除从文字按钮降成垃圾桶图标（只读卡片没有）。开关保留原尺寸，位置统一在右下。
+  </p>
+</div>
+</body>
+</html>

@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>今日回顾 · 版 F 日报视图</title>
+<style>
+  :root{
+    --bg:#fdf9f2; --surface-low:#f7f3eb; --card:#f6f1e7; --card-high:#ede9e0;
+    --text:#2e2b3a; --text-2:#6e6b7e; --text-3:#9a97a5;
+    --outline:#c8c5bc; --divider:rgba(200,197,188,.55);
+    --primary:#3e4a8c; --on-primary:#fff;
+    --primary-container:#f0ede5; --on-primary-container:#1e1b4b;
+    --sec-container:#f5edd9; --on-sec-container:#4a3b1e;
+    --ter-container:#fceecb; --on-ter-container:#5c4210;
+    --error:#b3564d; --error-container:#f6e2df;
+    --ok:#1f9d4d; --ok-container:#e2f2e8;
+    --warn:#b07d2b;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--text);display:flex;
+    font:13px/1.6 "Segoe UI","Microsoft YaHei UI","PingFang SC",-apple-system,sans-serif}
+
+  .rail{width:56px;flex:none;border-right:1px solid var(--divider);display:flex;flex-direction:column;
+    align-items:center;padding:14px 0;gap:6px}
+  .rail .rb{width:38px;height:38px;border-radius:12px;display:grid;place-items:center;color:var(--text-3)}
+  .rail .rb:hover{background:var(--card-high);color:var(--text-2)}
+  .rail .rb.on{background:var(--primary);color:var(--on-primary)}
+  .rail svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+  .rail .sp{flex:1}
+
+  .main{flex:1;min-width:0;padding:26px 26px 60px;overflow-y:auto}
+  .wrap{max-width:760px;margin:0 auto}
+
+  .head{display:flex;align-items:center;gap:14px;margin-bottom:14px}
+  .head h1{margin:0;font-size:19px;font-weight:700}
+  .head .sp{flex:1}
+  .back{background:none;border:1px solid var(--divider);color:var(--text-2);font-size:12px;
+    padding:5px 13px;border-radius:10px;cursor:pointer}
+  .back:hover{background:var(--card-high)}
+
+  /* 日期切换 */
+  .pager{display:flex;align-items:center;gap:4px;margin-bottom:16px;background:var(--card);
+    border:1px solid rgba(200,197,188,.5);border-radius:12px;padding:3px;width:fit-content}
+  .pager button{border:none;background:none;color:var(--text-2);font-size:12px;cursor:pointer;
+    padding:5px 12px;border-radius:9px}
+  .pager button:hover:not([disabled]):not(.cur){background:var(--card-high)}
+  .pager button.cur{background:var(--primary);color:var(--on-primary);font-weight:600}
+  .pager button[disabled]{color:var(--text-3);opacity:.5;cursor:default}
+
+  /* 摘要 */
+  .sum{display:flex;gap:22px;padding:2px 4px 16px;border-bottom:1px solid var(--divider);margin-bottom:18px}
+  .sum .n b{display:block;font-size:20px;font-weight:700;line-height:1.2}
+  .sum .n span{font-size:11px;color:var(--text-3)}
+  .sum .n.ask b{color:var(--warn)} .sum .n.done b{color:var(--ok)}
+
+  /* 时间线 */
+  .tl{position:relative;padding-left:52px}
+  .tl::before{content:"";position:absolute;left:41px;top:6px;bottom:6px;width:1px;background:var(--divider)}
+  .grp{margin:14px 0 10px;font-size:11px;color:var(--text-3);letter-spacing:.2em;position:relative;left:-52px;width:32px;text-align:right}
+  .entry{position:relative;margin-bottom:9px}
+  .entry .dot{position:absolute;left:-15px;top:15px;width:9px;height:9px;border-radius:50%;
+    background:var(--bg);border:2px solid var(--text-3);z-index:1}
+  .entry[data-kind=done] .dot{border-color:var(--ok);background:var(--ok)}
+  .entry[data-kind=run] .dot{border-color:var(--primary);animation:pulse 2.4s infinite}
+  .entry[data-kind=ask] .dot{border-color:var(--warn)}
+  .entry[data-kind=fail] .dot{border-color:var(--error)}
+  .entry .tm{position:absolute;left:-56px;width:32px;text-align:right;top:14px;font-size:10.5px;color:var(--text-3)}
+  .ecard{background:var(--card);border:1px solid rgba(200,197,188,.5);border-radius:14px;padding:11px 15px;
+    cursor:pointer;transition:box-shadow .15s}
+  .ecard:hover{box-shadow:0 3px 10px rgba(46,43,58,.09)}
+  .ecard .r1{display:flex;align-items:center;gap:9px}
+  .ecard h3{margin:0;font-size:13px;font-weight:600;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .tool{width:20px;height:20px;flex:none;border-radius:7px;display:grid;place-items:center;font-size:9.5px;font-weight:700}
+  .tool.cb{background:var(--primary-container);color:var(--primary)}
+  .tool.qi{background:var(--sec-container);color:var(--on-sec-container)}
+  .tool.mg{background:var(--ok-container);color:var(--ok)}
+  .done-ic{width:18px;height:18px;flex:none;border-radius:50%;background:var(--ok-container);color:var(--ok);
+    display:grid;place-items:center;font-size:10px}
+  .ask-ic{width:18px;height:18px;flex:none;border-radius:50%;background:var(--ter-container);color:var(--warn);
+    display:grid;place-items:center;font-size:10px;font-weight:700}
+  .ecard .r2{margin:4px 0 0;font-size:12px;color:var(--text-2)}
+  .ecard .r2 .stp{color:var(--text-3);font-size:11px}
+  .ecard.dim{opacity:.66}
+  .ecard.dim:hover{opacity:1}
+
+  .foot{margin-top:30px;text-align:center;font-size:11.5px;color:var(--text-3)}
+
+  .ver{position:fixed;right:14px;bottom:12px;display:flex;align-items:center;gap:8px;
+    background:var(--card);border:1px solid var(--divider);border-radius:999px;padding:5px 8px 5px 14px;
+    font-size:11.5px;color:var(--text-2);box-shadow:0 2px 8px rgba(46,43,58,.08)}
+  .ver b{font-weight:600;color:var(--text)}
+  .ver .cap{color:var(--text-3);margin-right:2px}
+  .ver a{color:var(--text-3);text-decoration:none;padding:2px 5px;border-radius:7px}
+  .ver a:hover{background:var(--card-high);color:var(--text-2)}
+  .ver a.cur{background:var(--primary);color:var(--on-primary)}
+
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+</style>
+</head>
+<body>
+
+<aside class="rail" aria-hidden="true">
+  <div class="rb"><svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div>
+  <div class="rb"><svg viewBox="0 0 24 24"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M9 12h6M9 16h6"/></svg></div>
+  <div class="rb"><svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg></div>
+  <div class="rb on"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg></div>
+  <div class="sp"></div>
+  <div class="rb"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.08a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.08a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.08a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></div>
+</aside>
+
+<main class="main"><div class="wrap">
+
+  <header class="head">
+    <h1>今日回顾</h1>
+    <div class="sp"></div>
+    <button class="back">← 回任务中心</button>
+  </header>
+
+  <nav class="pager">
+    <button id="prevDay">‹ 前一天</button>
+    <button id="dayToday" class="cur">今天</button>
+    <button id="dayYesterday">昨天</button>
+    <button disabled>› 后一天</button>
+  </nav>
+
+  <section class="sum" id="sum"><!-- JS 渲染 --></section>
+
+  <section class="tl" id="tl"><!-- JS 渲染 --></section>
+
+  <p class="foot">每天零点翻新一天。都不看了就早点休息。</p>
+
+</div></main>
+
+<div class="ver">
+  <span>设计稿 <b>F · 今日回顾</b></span>
+  <span class="cap">第2轮</span><a href="09-任务中心-版E1-等你回话（单列）.html">E1</a><a href="10-任务中心-版E2-等你回话（双列）.html">E2</a><a href="11-今日回顾-版F-日报视图.html" class="cur">F</a>
+  <span class="cap">第1轮</span><a href="05-任务中心-版A-精修工单墙.html">A</a><a href="06-任务中心-版B-现在时间线.html">B</a><a href="07-任务中心-版C-驾驶舱.html">C</a><a href="08-任务中心-版D-聚光灯.html">D</a>
+</div>
+
+<script>
+  const DAYS = {
+    today: {
+      sum: [["8", "次派活", ""], ["4", "完结对话", "done"], ["12", "改了文件", ""], ["2", "等你回话", "ask"]],
+      groups: [
+        { name: "上午", items: [
+          { tm: "09:12", kind: "done", icon: "✓", title: "手机 IM 式首页与会话列表", note: "4 次派活全部完成<span class='stp'>· CodeBuddy · 点开回原对话</span>" },
+          { tm: "10:15", kind: "run", icon: "CB", tool: "cb", title: "搜索分页与历史窗口", note: "派给 CodeBuddy<span class='stp'>· 改了 2 个文件 +184 −9 · 还在验收</span>" },
+          { tm: "11:47", kind: "done", icon: "✓", title: "手机身份顶栏与对话设置", note: "5 次派活全部完成<span class='stp'>· 点开回原对话</span>" },
+        ]},
+        { name: "下午", items: [
+          { tm: "13:02", kind: "run", icon: "CB", tool: "cb", title: "下载目录整理", note: "排队中<span class='stp'>· 前面还有一单</span>" },
+          { tm: "13:20", kind: "fail", icon: "!", title: "周报：近七天总结", note: "执行超时<span class='stp'>· 先挂起，明天重试</span>" },
+          { tm: "14:05", kind: "run", icon: "QI", tool: "qi", title: "技能手册补目录", note: "派给 Qoder 国际<span class='stp'>· 正在执行</span>" },
+          { tm: "14:32", kind: "ask", icon: "问", title: "手机 UI 四件：图标对齐 Lucide", note: "总管留话：返工第 2 轮，等你拍板<span class='stp'>· 点开去回话</span>" },
+        ]},
+        { name: "晚上", items: [
+          { tm: "—", kind: "idle", icon: "", title: "还没动静", note: "有活会接着记在这里。" },
+        ]},
+      ],
+    },
+    yesterday: {
+      sum: [["14", "次派活", ""], ["6", "完结对话", "done"], ["31", "改了文件", ""], ["0", "等你回话", "ask"]],
+      groups: [
+        { name: "上午", items: [
+          { tm: "09:40", kind: "done", icon: "✓", title: "供应商单 key 局限登记", note: "1 次派活完成<span class='stp'>· 只写文档没动代码</span>" },
+          { tm: "11:20", kind: "done", icon: "✓", title: "旧事搬进记忆", note: "2 次派活完成<span class='stp'>· 搜索结果跳回原文定位</span>" },
+        ]},
+        { name: "下午", items: [
+          { tm: "15:03", kind: "done", icon: "✓", title: "中继服务器部署", note: "3 次派活完成<span class='tp'>· systemd 拉起 + 两道闸门</span>" },
+          { tm: "16:45", kind: "done", icon: "✓", title: "群组功能上线（值日制）", note: "6 次派活完成<span class='stp'>· 探针 21 项全绿</span>" },
+        ]},
+        { name: "晚上", items: [
+          { tm: "21:30", kind: "done", icon: "✓", title: "手机身份顶栏方案", note: "写了方案没实施<span class='stp'>· 批 A+B 次日落地</span>" },
+        ]},
+      ],
+    },
+  };
+
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+  let day = "today";
+
+  function render() {
+    const d = DAYS[day];
+    document.getElementById("sum").innerHTML = d.sum
+      .map(([v, label, tone]) => `<div class="n ${tone}"><b>${esc(v)}</b><span>${esc(label)}</span></div>`).join("");
+    document.getElementById("tl").innerHTML = d.groups.map((g) =>
+      `<div class="grp">${esc(g.name)}</div>` +
+      g.items.map((it) => `
+        <div class="entry" data-kind="${it.kind}">
+          <span class="dot"></span><span class="tm">${esc(it.tm)}</span>
+          <div class="ecard ${it.kind === "done" || it.kind === "idle" ? "dim" : ""}">
+            <div class="r1">
+              ${it.tool ? `<span class="tool ${it.tool}">${esc(it.icon)}</span>`
+                        : it.kind === "done" ? `<span class="done-ic">✓</span>`
+                        : it.kind === "ask" ? `<span class="ask-ic">总</span>` : ""}
+              <h3>${esc(it.title)}</h3>
+            </div>
+            <p class="r2">${it.note}</p>
+          </div>
+        </div>`).join("")
+    ).join("");
+    document.getElementById("dayToday").classList.toggle("cur", day === "today");
+    document.getElementById("dayYesterday").classList.toggle("cur", day === "yesterday");
+  }
+
+  document.getElementById("dayToday").addEventListener("click", () => { day = "today"; render(); });
+  document.getElementById("dayYesterday").addEventListener("click", () => { day = "yesterday"; render(); });
+  render();
+</script>
+</body>
+</html>

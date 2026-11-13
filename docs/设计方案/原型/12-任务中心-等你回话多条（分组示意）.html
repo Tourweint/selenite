@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>等你回话 · 多条时（分组示意）</title>
+<style>
+  :root{
+    --bg:#fdf9f2; --surface-low:#f7f3eb; --card:#f6f1e7; --card-high:#ede9e0;
+    --text:#2e2b3a; --text-2:#6e6b7e; --text-3:#9a97a5;
+    --outline:#c8c5bc; --divider:rgba(200,197,188,.55);
+    --primary:#3e4a8c; --on-primary:#fff;
+    --primary-container:#f0ede5;
+    --ter-container:#fceecb; --error:#b3564d;
+    --ok:#1f9d4d; --ok-container:#e2f2e8;
+    --warn:#b07d2b;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font:13px/1.6 "Segoe UI","Microsoft YaHei UI","PingFang SC",-apple-system,sans-serif}
+  .wrap{max-width:780px;margin:0 auto;padding:26px 26px 60px}
+
+  .head{display:flex;align-items:center;gap:10px;margin-bottom:4px}
+  .head h1{margin:0;font-size:18px;font-weight:700}
+  .head .cnt{background:var(--warn);color:#fff;border-radius:999px;font-size:11.5px;padding:1px 9px;line-height:18px;font-weight:600}
+  .head .sp{flex:1}
+  .head .sort{font-size:11px;color:var(--text-3)}
+  .sub{margin:0 0 16px;font-size:12px;color:var(--text-3)}
+
+  .ngroup{background:linear-gradient(0deg,rgba(224,168,74,.05),rgba(224,168,74,.05)),var(--card);
+    border:1px solid rgba(176,125,43,.3);border-radius:18px;padding:13px 15px 11px;margin-bottom:12px}
+  .ng-h{display:flex;align-items:center;gap:10px;padding-bottom:9px;margin-bottom:9px;border-bottom:1px dashed var(--divider)}
+  .ng-h .ava{width:30px;height:30px;flex:none;border-radius:11px;display:grid;place-items:center;font-size:13px;font-weight:700}
+  .ava.v1{background:var(--primary-container);color:var(--primary)}
+  .ava.v2{background:var(--ter-container);color:var(--on-ter-container)}
+  .ava.v3{background:var(--ok-container);color:var(--ok)}
+  .ng-h .bd{flex:1;min-width:0}
+  .ng-h h3{margin:0;font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .ng-h p{margin:1px 0 0;font-size:11px;color:var(--text-3)}
+  .ng-h p b{color:var(--warn);font-weight:600}
+  .btn{font-size:11.5px;padding:5px 13px;border-radius:10px;cursor:pointer;border:1px solid transparent;flex:none}
+  .btn.primary{background:var(--primary);color:var(--on-primary)}
+  .btn.primary:hover{filter:brightness(1.08)}
+
+  .msg{display:flex;gap:10px;background:var(--bg);border:1px solid var(--divider);border-radius:14px;
+    padding:10px 13px;cursor:pointer}
+  .msg+.msg{margin-top:8px}
+  .msg:hover{border-color:var(--outline)}
+  .msg .ava{width:28px;height:28px;flex:none;border-radius:10px;background:var(--primary-container);color:var(--primary);
+    display:grid;place-items:center;font-size:12px;font-weight:700}
+  .msg .ava.sys{background:var(--card-high);color:var(--text-3)}
+  .msg .bd{flex:1;min-width:0}
+  .msg .who{font-size:11px;color:var(--text-3);margin:0 0 2px}
+  .msg .who b{color:var(--text-2);font-weight:600}
+  .msg .who .sys-tag{border:1px solid var(--divider);border-radius:6px;padding:0 5px;font-size:10px;color:var(--text-3)}
+  .msg .quote{margin:0;font-size:12.5px;line-height:1.65}
+  .msg .tm{font-size:10.5px;color:var(--text-3);flex:none;margin-top:2px}
+
+  .morefold{width:100%;display:flex;align-items:center;gap:8px;background:none;border:none;cursor:pointer;
+    padding:9px 12px;border-radius:12px;color:var(--text-3);font-size:12px;margin-top:2px}
+  .morefold:hover{background:var(--card)}
+  .morefold .caret{transition:transform .15s}
+  .morefold[aria-expanded=true] .caret{transform:rotate(90deg)}
+  #older[hidden]{display:none}
+  .note{margin:18px 2px 0;font-size:11.5px;color:var(--text-3)}
+  .note b{color:var(--text-2)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="head">
+    <h1>等你回话</h1><span class="cnt">6</span>
+    <div class="sp"></div><span class="sort">等最久的在最上</span>
+  </header>
+  <p class="sub">都是总管转给你的；点气泡回那句话，点「去处理」进对话处理。</p>
+
+  <!-- 组1：等最久 -->
+  <section class="ngroup">
+    <div class="ng-h">
+      <span class="ava v2">日</span>
+      <div class="bd"><h3>日记 v2：执事扩 diary 字段</h3><p><b>等了 3 小时</b> · 1 条</p></div>
+      <button class="btn primary">去处理 →</button>
+    </div>
+    <div class="msg" title="点开回到这句">
+      <span class="ava">总</span>
+      <div class="bd">
+        <p class="who"><b>总管</b> · 等你点头</p>
+        <p class="quote">diary 字段的契约是纯增量，老数据不受影响。方案我看过没问题，你点头我就往下派手机那头。</p>
+      </div>
+      <span class="tm">3 小时前</span>
+    </div>
+  </section>
+
+  <!-- 组2：两条 -->
+  <section class="ngroup">
+    <div class="ng-h">
+      <span class="ava v1">手</span>
+      <div class="bd"><h3>手机 UI 四件：图标对齐 Lucide</h3><p><b>等了 1 小时 20 分</b> · 2 条</p></div>
+      <button class="btn primary">去处理 →</button>
+    </div>
+    <div class="msg" title="点开回到这句">
+      <span class="ava">总</span>
+      <div class="bd">
+        <p class="who"><b>总管</b></p>
+        <p class="quote">「头像同步」返工到第 2 轮，代码我看过了，providerId 这次取对了。你拍个板：过，还是打回？</p>
+      </div>
+      <span class="tm">18 分钟前</span>
+    </div>
+    <div class="msg" title="点开回到这句">
+      <span class="ava">总</span>
+      <div class="bd">
+        <p class="who"><b>总管</b> · 顺带问一句</p>
+        <p class="quote">对了，设置分块那单要不要也照 cindy 的分组重排？不急，你回头一起说。</p>
+      </div>
+      <span class="tm">1 小时前</span>
+    </div>
+  </section>
+
+  <!-- 组3：系统代发（自动化必须有身份） -->
+  <section class="ngroup">
+    <div class="ng-h">
+      <span class="ava v3">中</span>
+      <div class="bd"><h3>中继日志清理</h3><p><b>等了 25 分钟</b> · 1 条</p></div>
+      <button class="btn primary">去处理 →</button>
+    </div>
+    <div class="msg" title="点开回到这句">
+      <span class="ava sys">系</span>
+      <div class="bd">
+        <p class="who"><span class="sys-tag">系统代发</span> · 总管正忙，先替他带一句</p>
+        <p class="quote">relay 服务器磁盘用到 82%，清不清近 30 天日志，需要你拿主意。</p>
+      </div>
+      <span class="tm">25 分钟前</span>
+    </div>
+  </section>
+
+  <!-- 更早的收起 -->
+  <button class="morefold" id="moreBtn" aria-expanded="false">
+    <span class="caret">▸</span> 还有 2 条更早的（11-12 之前）
+  </button>
+  <div id="older" hidden>
+    <section class="ngroup" style="opacity:.75">
+      <div class="ng-h">
+        <span class="ava v1">供</span>
+        <div class="bd"><h3>供应商单 key 局限</h3><p>等了 1 天 · 1 条</p></div>
+        <button class="btn primary">去处理 →</button>
+      </div>
+      <div class="msg">
+        <span class="ava">总</span>
+        <div class="bd"><p class="who"><b>总管</b></p>
+        <p class="quote">底座其实支持多 key，要不要把 ProviderEntry 改成数组？你定。</p></div>
+        <span class="tm">昨天</span>
+      </div>
+    </section>
+    <section class="ngroup" style="opacity:.75">
+      <div class="ng-h">
+        <span class="ava v2">技</span>
+        <div class="bd"><h3>技能评估建议采纳</h3><p>等了 2 天 · 1 条</p></div>
+        <button class="btn primary">去处理 →</button>
+      </div>
+      <div class="msg">
+        <span class="ava">总</span>
+        <div class="bd"><p class="who"><b>总管</b></p>
+        <p class="quote">122 条建议评完了，采纳 16 条，清单在对话里，等你过目。</p></div>
+        <span class="tm">前天</span>
+      </div>
+    </section>
+  </div>
+
+  <p class="note">分组口径：<b>一条对话一组</b>（和"一张卡=一条对话"同构）；组按<b>等最久</b>排，组内留言按时间正序叠；超过 3 组自动收进"更早的"，点开展开。气泡本身可点=定位到那句。</p>
+
+</div>
+
+<script>
+  document.getElementById("moreBtn").addEventListener("click", function () {
+    const older = document.getElementById("older");
+    const open = older.hidden;
+    older.hidden = !open;
+    this.setAttribute("aria-expanded", String(open));
+  });
+</script>
+</body>
+</html>

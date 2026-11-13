@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>任务中心 · 版 C 驾驶舱</title>
+<style>
+  :root{
+    --bg:#fdf9f2; --surface-low:#f7f3eb; --card:#f6f1e7; --card-high:#ede9e0;
+    --text:#2e2b3a; --text-2:#6e6b7e; --text-3:#9a97a5;
+    --outline:#c8c5bc; --divider:rgba(200,197,188,.55);
+    --primary:#3e4a8c; --on-primary:#fff;
+    --primary-container:#f0ede5; --on-primary-container:#1e1b4b;
+    --sec-container:#f5edd9; --on-sec-container:#4a3b1e;
+    --ter-container:#fceecb; --on-ter-container:#5c4210;
+    --error:#b3564d; --error-container:#f6e2df;
+    --ok:#1f9d4d; --ok-container:#e2f2e8;
+    --warn:#b07d2b;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--text);display:flex;
+    font:13px/1.6 "Segoe UI","Microsoft YaHei UI","PingFang SC",-apple-system,sans-serif}
+
+  .rail{width:56px;flex:none;border-right:1px solid var(--divider);display:flex;flex-direction:column;
+    align-items:center;padding:14px 0;gap:6px}
+  .rail .rb{width:38px;height:38px;border-radius:12px;display:grid;place-items:center;color:var(--text-3)}
+  .rail .rb:hover{background:var(--card-high);color:var(--text-2)}
+  .rail .rb.on{background:var(--primary);color:var(--on-primary)}
+  .rail svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+  .rail .sp{flex:1}
+
+  .main{flex:1;min-width:0;padding:22px 26px 46px}
+  .wrap{max-width:1180px;margin:0 auto}
+
+  .head{display:flex;align-items:center;gap:14px;margin-bottom:16px}
+  .head h1{margin:0;font-size:19px;font-weight:700}
+  .head .sp{flex:1}
+  .btn{font-size:12px;padding:5px 14px;border-radius:10px;cursor:pointer;border:1px solid transparent}
+  .btn.primary{background:var(--primary);color:var(--on-primary)}
+  .btn.primary:hover{filter:brightness(1.08)}
+  .btn.ghost{background:none;color:var(--text-2);border-color:var(--divider)}
+  .btn.ghost:hover{background:var(--card-high)}
+
+  /* ── 统计带 ───────────────────────────────────────────── */
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}
+  .stat{background:var(--card);border:1px solid rgba(200,197,188,.5);border-radius:16px;padding:12px 15px;
+    display:flex;align-items:center;gap:12px}
+  .stat .ic{width:36px;height:36px;flex:none;border-radius:12px;display:grid;place-items:center}
+  .stat .ic svg{width:17px;height:17px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+  .stat b{display:block;font-size:21px;line-height:1.15;font-weight:700}
+  .stat span{font-size:11.5px;color:var(--text-3)}
+  .stat.run .ic{background:var(--primary-container);color:var(--primary)}
+  .stat.ask .ic{background:var(--ter-container);color:var(--warn)}
+  .stat.fail .ic{background:var(--error-container);color:var(--error)}
+  .stat.done .ic{background:var(--ok-container);color:var(--ok)}
+
+  /* ── 执行者卡 ─────────────────────────────────────────── */
+  .hitters{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:20px}
+  .hitter{background:var(--surface-low);border:1px solid rgba(200,197,188,.4);border-radius:14px;
+    padding:10px 13px;cursor:pointer}
+  .hitter:hover{background:var(--card-high)}
+  .hitter .r1{display:flex;align-items:center;gap:8px}
+  .tool{width:22px;height:22px;flex:none;border-radius:8px;display:grid;place-items:center;font-size:10px;font-weight:700}
+  .tool.cb{background:var(--primary-container);color:var(--primary)}
+  .tool.qi{background:var(--sec-container);color:var(--on-sec-container)}
+  .tool.qc{background:var(--ter-container);color:var(--on-ter-container)}
+  .tool.mg{background:var(--ok-container);color:var(--ok)}
+  .hitter .nm{font-size:12.5px;font-weight:600;flex:1}
+  .hitter .ct{font-size:11px;font-weight:600;color:var(--primary);background:var(--primary-container);
+    border-radius:999px;padding:0 7px;line-height:17px}
+  .hitter .r2{margin:7px 0 0;font-size:11.5px;color:var(--text-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .hitter .r3{margin:3px 0 0;font-size:10.5px;color:var(--text-3);display:flex;align-items:center;gap:5px}
+  .hitter .r3 i{width:6px;height:6px;border-radius:50%;background:var(--outline)}
+  .hitter .r3.busy i{background:var(--primary);animation:pulse 2s infinite}
+  .hitter .r3.online i{background:var(--ok)}
+
+  /* ── 主体两栏 ─────────────────────────────────────────── */
+  .cols{display:grid;grid-template-columns:5fr 7fr;gap:14px;align-items:start}
+  .panel-h{display:flex;align-items:center;gap:8px;margin:0 2px 9px;font-size:12.5px;font-weight:600;color:var(--text-2)}
+  .panel-h .cnt{font-weight:600;color:var(--text-3);font-size:11.5px}
+  .panel-h .ln{flex:1;height:1px;background:var(--divider);opacity:.5}
+
+  /* 需要你：收件箱行 */
+  .inbox{display:flex;flex-direction:column;gap:8px}
+  .inrow{background:var(--card);border:1px solid rgba(200,197,188,.5);border-radius:14px;padding:11px 13px;
+    display:flex;gap:11px;align-items:center;cursor:pointer;transition:box-shadow .15s}
+  .inrow:hover{box-shadow:0 3px 10px rgba(46,43,58,.09)}
+  .inrow[data-kind=ask]{border-left:3px solid var(--warn)}
+  .inrow[data-kind=fail]{border-left:3px solid var(--error)}
+  .inrow .ic{width:30px;height:30px;flex:none;border-radius:10px;display:grid;place-items:center}
+  .inrow[data-kind=ask] .ic{background:var(--ter-container);color:var(--warn)}
+  .inrow[data-kind=fail] .ic{background:var(--error-container);color:var(--error)}
+  .inrow .ic svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+  .inrow .bd{flex:1;min-width:0}
+  .inrow h3{margin:0;font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .inrow p{margin:2px 0 0;font-size:11.5px;color:var(--text-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .inrow .tm{font-size:11px;color:var(--text-3);flex:none}
+
+  /* 在跑：紧凑卡网格 */
+  .runs{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .rcard{background:var(--card);border:1px solid rgba(200,197,188,.5);border-radius:16px;padding:13px 14px;
+    cursor:pointer;transition:box-shadow .15s,transform .15s}
+  .rcard:hover{box-shadow:0 3px 10px rgba(46,43,58,.09);transform:translateY(-1px)}
+  .rcard .r1{display:flex;align-items:center;gap:9px}
+  .ava{width:28px;height:28px;flex:none;border-radius:10px;display:grid;place-items:center;font-size:12.5px;font-weight:700}
+  .ava.v1{background:var(--primary-container);color:var(--primary)}
+  .ava.v2{background:var(--sec-container);color:var(--on-sec-container)}
+  .ava.v3{background:var(--ter-container);color:var(--on-ter-container)}
+  .rcard h3{margin:0;font-size:13px;font-weight:600;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .rcard .r2{margin:9px 0 0;font-size:12px;color:var(--text-2)}
+  .rcard .r2 .doing{color:var(--primary);font-weight:600}
+  .rcard .stage{display:flex;align-items:center;gap:6px;margin-top:9px}
+  .rcard .stage ol{display:flex;align-items:center;margin:0;padding:0;list-style:none;flex:1}
+  .rcard .stage li{width:6px;height:6px;border-radius:50%;background:var(--card-high);border:1px solid var(--outline);flex:none}
+  .rcard .stage li+li{margin-left:12px;position:relative}
+  .rcard .stage li+li::before{content:"";position:absolute;left:-12px;top:2.5px;width:12px;height:1px;background:var(--divider)}
+  .rcard .stage li.done{background:var(--primary);border-color:var(--primary)}
+  .rcard .stage li.done+li::before{background:var(--primary)}
+  .rcard .stage li.now{background:var(--bg);border-color:var(--primary);box-shadow:0 0 0 3px rgba(62,74,140,.18)}
+  .rcard .stage .nowlb{font-size:10.5px;color:var(--text-3);flex:none}
+  .rcard .r3{margin:8px 0 0;font-size:11px;color:var(--text-3);display:flex;align-items:center;gap:6px}
+
+  /* ── 历史抽屉 ─────────────────────────────────────────── */
+  .scrim{position:fixed;inset:0;background:rgba(46,43,58,.28);opacity:0;pointer-events:none;transition:opacity .18s;z-index:40}
+  .scrim.show{opacity:1;pointer-events:auto}
+  .drawer{position:fixed;top:0;right:-380px;bottom:0;width:360px;background:var(--bg);z-index:41;
+    border-left:1px solid var(--divider);box-shadow:-8px 0 28px rgba(46,43,58,.14);transition:right .2s;
+    display:flex;flex-direction:column}
+  .drawer.show{right:0}
+  .drawer .dh{display:flex;align-items:center;gap:10px;padding:16px 18px 12px}
+  .drawer .dh h2{margin:0;font-size:15px;font-weight:700;flex:1}
+  .drawer .dh button{border:none;background:none;color:var(--text-3);cursor:pointer;font-size:16px;padding:4px 8px;border-radius:8px}
+  .drawer .dh button:hover{background:var(--card-high);color:var(--text-2)}
+  .drawer .db{flex:1;overflow-y:auto;padding:0 12px 20px}
+  .drawer .cap{font-size:11px;color:var(--text-3);letter-spacing:.08em;margin:14px 8px 6px}
+  .drawer .row{display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:10px;cursor:pointer;font-size:12.5px}
+  .drawer .row:hover{background:var(--card)}
+  .drawer .chk{color:var(--ok);width:15px;text-align:center;flex:none}
+  .drawer .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-2)}
+  .drawer .c{font-size:10.5px;color:var(--text-3);flex:none}
+
+  .ver{position:fixed;right:14px;bottom:12px;display:flex;align-items:center;gap:10px;
+    background:var(--card);border:1px solid var(--divider);border-radius:999px;padding:5px 8px 5px 14px;
+    font-size:11.5px;color:var(--text-2);box-shadow:0 2px 8px rgba(46,43,58,.08)}
+  .ver b{font-weight:600;color:var(--text)}
+  .ver a{color:var(--text-3);text-decoration:none;padding:2px 5px;border-radius:7px}
+  .ver a:hover{background:var(--card-high);color:var(--text-2)}
+  .ver a.cur{background:var(--primary);color:var(--on-primary)}
+
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+</style>
+</head>
+<body>
+
+<aside class="rail" aria-hidden="true">
+  <div class="rb"><svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div>
+  <div class="rb on"><svg viewBox="0 0 24 24"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M9 12h6M9 16h6"/></svg></div>
+  <div class="rb"><svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg></div>
+  <div class="rb"><svg viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></div>
+  <div class="sp"></div>
+  <div class="rb"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.08a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.08a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.08a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></div>
+</aside>
+
+<main class="main"><div class="wrap">
+
+  <header class="head">
+    <h1>任务中心</h1>
+    <div class="sp"></div>
+    <button class="btn ghost" id="openHist">历史</button>
+  </header>
+
+  <section class="stats">
+    <div class="stat run">
+      <span class="ic"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></span>
+      <div><b>2</b><span>在跑 · 1 个在验收</span></div>
+    </div>
+    <div class="stat ask">
+      <span class="ic"><svg viewBox="0 0 24 24"><path d="M9 12h6M9 16h4M12 3a6 6 0 0 0-6 6c0 2-1 3-2 4h16c-1-1-2-2-2-4a6 6 0 0 0-6-6z"/><path d="M10 17a2 2 0 0 0 4 0"/></svg></span>
+      <div><b>1</b><span>等你拍板</span></div>
+    </div>
+    <div class="stat fail">
+      <span class="ic"><svg viewBox="0 0 24 24"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4M12 17h.01"/></svg></span>
+      <div><b>1</b><span>出错 · 执行超时</span></div>
+    </div>
+    <div class="stat done">
+      <span class="ic"><svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg></span>
+      <div><b>4</b><span>今日完结 · 派活 14 次</span></div>
+    </div>
+  </section>
+
+  <section class="hitters">
+    <div class="hitter">
+      <div class="r1"><span class="tool cb">CB</span><span class="nm">CodeBuddy</span><span class="ct">2</span></div>
+      <p class="r2">正在收尾「搜索分页与历史窗口」</p>
+      <p class="r3 busy"><i></i>在跑 · 最新 5 分钟前</p>
+    </div>
+    <div class="hitter">
+      <div class="r1"><span class="tool qi">QI</span><span class="nm">Qoder 国际</span><span class="ct">1</span></div>
+      <p class="r2">正在「技能手册补目录」</p>
+      <p class="r3 busy"><i></i>在跑 · 最新 32 分钟前</p>
+    </div>
+    <div class="hitter">
+      <div class="r1"><span class="tool qc">QC</span><span class="nm">Qoder 国内</span></div>
+      <p class="r2" style="color:var(--text-3)">今天还没派过活</p>
+      <p class="r3"><i></i>空闲</p>
+    </div>
+    <div class="hitter">
+      <div class="r1"><span class="tool mg">手</span><span class="nm">手机</span></div>
+      <p class="r2" style="color:var(--text-3)">vivo 真机已连接</p>
+      <p class="r3 online"><i></i>在线</p>
+    </div>
+  </section>
+
+  <section class="cols">
+
+    <div>
+      <div class="panel-h">需要你 <span class="cnt">2</span><span class="ln"></span></div>
+      <div class="inbox">
+        <div class="inrow" data-kind="ask">
+          <span class="ic"><svg viewBox="0 0 24 24"><path d="M9 12h6M9 16h4M12 3a6 6 0 0 0-6 6c0 2-1 3-2 4h16c-1-1-2-2-2-4a6 6 0 0 0-6-6z"/><path d="M10 17a2 2 0 0 0 4 0"/></svg></span>
+          <div class="bd">
+            <h3>手机 UI 四件：图标对齐 Lucide</h3>
+            <p>头像同步返工第 2 轮，验收等你拍板</p>
+          </div>
+          <span class="tm">18 分钟前</span>
+        </div>
+        <div class="inrow" data-kind="fail">
+          <span class="ic"><svg viewBox="0 0 24 24"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4M12 17h.01"/></svg></span>
+          <div class="bd">
+            <h3>周报：近七天总结</h3>
+            <p>执行超时 · 看看原因或重试</p>
+          </div>
+          <span class="tm">2 小时前</span>
+        </div>
+        <div class="inrow" data-kind="ask">
+          <span class="ic"><svg viewBox="0 0 24 24"><path d="M9 12h6M9 16h4M12 3a6 6 0 0 0-6 6c0 2-1 3-2 4h16c-1-1-2-2-2-4a6 6 0 0 0-6-6z"/><path d="M10 17a2 2 0 0 0 4 0"/></svg></span>
+          <div class="bd">
+            <h3>日记 v2：执事扩 diary 字段</h3>
+            <p>diary 字段契约（纯增量）等你看一眼</p>
+          </div>
+          <span class="tm">1 小时前</span>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="panel-h">在跑 <span class="cnt">3</span><span class="ln"></span></div>
+      <div class="runs">
+        <div class="rcard">
+          <div class="r1"><span class="ava v1">搜</span><h3>搜索分页与历史窗口</h3></div>
+          <p class="r2"><span class="doing">正在验收</span> · 改了 2 个文件 +184 −9</p>
+          <div class="stage">
+            <ol><li class="done"></li><li class="done"></li><li class="done"></li><li class="now"></li><li></li></ol>
+            <span class="nowlb">验收中</span>
+          </div>
+          <p class="r3"><span class="tool cb" style="width:18px;height:18px;font-size:9px">CB</span>CodeBuddy · 5 分钟前</p>
+        </div>
+        <div class="rcard">
+          <div class="r1"><span class="ava v2">技</span><h3>技能手册补目录</h3></div>
+          <p class="r2"><span class="doing">正在执行</span> · 给 skills/ 手册补索引</p>
+          <div class="stage">
+            <ol><li class="done"></li><li class="done"></li><li class="now"></li><li></li><li></li></ol>
+            <span class="nowlb">执行中</span>
+          </div>
+          <p class="r3"><span class="tool qi" style="width:18px;height:18px;font-size:9px">QI</span>Qoder 国际 · 32 分钟前</p>
+        </div>
+        <div class="rcard">
+          <div class="r1"><span class="ava v3">下</span><h3>下载目录整理</h3></div>
+          <p class="r2" style="color:var(--text-3)">排队中 · 前面还有一单</p>
+          <div class="stage">
+            <ol><li class="done"></li><li class="now"></li><li></li><li></li><li></li></ol>
+            <span class="nowlb">排队</span>
+          </div>
+          <p class="r3"><span class="tool cb" style="width:18px;height:18px;font-size:9px">CB</span>CodeBuddy · 3 分钟前</p>
+        </div>
+      </div>
+    </div>
+
+  </section>
+
+</div></main>
+
+<div class="scrim" id="scrim"></div>
+<aside class="drawer" id="drawer">
+  <div class="dh"><h2>历史</h2><button id="closeHist">✕</button></div>
+  <div class="db">
+    <p class="cap">已完结 · 6 个对话</p>
+    <div class="row"><span class="chk">✓</span><span class="t">手机身份顶栏与对话设置</span><span class="c">5 次 · 昨天</span></div>
+    <div class="row"><span class="chk">✓</span><span class="t">手机 IM 式首页与会话列表</span><span class="c">4 次 · 昨天</span></div>
+    <div class="row"><span class="chk">✓</span><span class="t">群组功能上线（值日制）</span><span class="c">6 次 · 前天</span></div>
+    <div class="row"><span class="chk">✓</span><span class="t">旧事搬进记忆</span><span class="c">2 次 · 11-11</span></div>
+    <div class="row"><span class="chk">✓</span><span class="t">中继服务器部署</span><span class="c">3 次 · 11-11</span></div>
+    <div class="row"><span class="chk">✓</span><span class="t">供应商单 key 局限登记</span><span class="c">1 次 · 11-10</span></div>
+    <p class="cap">更早的直派 · 2 单（没有来源对话）</p>
+    <div class="row"><span class="chk" style="color:var(--text-3)">·</span><span class="t">faux 工具冒烟单</span><span class="c">11-09</span></div>
+    <div class="row"><span class="chk" style="color:var(--text-3)">·</span><span class="t">探针直派单</span><span class="c">11-08</span></div>
+  </div>
+</aside>
+
+<div class="ver">
+  <span>设计稿 <b>C · 驾驶舱</b></span>
+  <a href="05-任务中心-版A-精修工单墙.html">A</a><a href="06-任务中心-版B-现在时间线.html">B</a><a href="07-任务中心-版C-驾驶舱.html" class="cur">C</a><a href="08-任务中心-版D-聚光灯.html">D</a>
+</div>
+
+<script>
+  const drawer = document.getElementById("drawer");
+  const scrim = document.getElementById("scrim");
+  function setDrawer(open) {
+    drawer.classList.toggle("show", open);
+    scrim.classList.toggle("show", open);
+  }
+  document.getElementById("openHist").addEventListener("click", () => setDrawer(true));
+  document.getElementById("closeHist").addEventListener("click", () => setDrawer(false));
+  scrim.addEventListener("click", () => setDrawer(false));
+</script>
+</body>
+</html>

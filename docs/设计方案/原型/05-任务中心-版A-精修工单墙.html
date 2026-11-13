@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>任务中心 · 版 A 精修工单墙</title>
+<style>
+  /* ── 取自 style.css paper 主题（2026-11-05 四主题）──────── */
+  :root{
+    --bg:#fdf9f2; --surface-low:#f7f3eb; --card:#f6f1e7; --card-high:#ede9e0;
+    --text:#2e2b3a; --text-2:#6e6b7e; --text-3:#9a97a5;
+    --outline:#c8c5bc; --divider:rgba(200,197,188,.55);
+    --primary:#3e4a8c; --on-primary:#fff;
+    --primary-container:#f0ede5; --on-primary-container:#1e1b4b;
+    --sec-container:#f5edd9; --on-sec-container:#4a3b1e;
+    --ter-container:#fceecb; --on-ter-container:#5c4210;
+    --error:#b3564d; --error-container:#f6e2df;
+    --ok:#1f9d4d; --ok-container:#e2f2e8;
+    --warn:#b07d2b;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--text);display:flex;
+    font:13px/1.6 "Segoe UI","Microsoft YaHei UI","PingFang SC",-apple-system,sans-serif}
+
+  /* ── 左侧轨道（示意，真实壳里已有）──────────────────────── */
+  .rail{width:56px;flex:none;border-right:1px solid var(--divider);display:flex;flex-direction:column;
+    align-items:center;padding:14px 0;gap:6px}
+  .rail .rb{width:38px;height:38px;border-radius:12px;display:grid;place-items:center;color:var(--text-3)}
+  .rail .rb:hover{background:var(--card-high);color:var(--text-2)}
+  .rail .rb.on{background:var(--primary);color:var(--on-primary)}
+  .rail svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+  .rail .sp{flex:1}
+
+  /* ── 主区 ─────────────────────────────────────────────── */
+  .main{flex:1;min-width:0;padding:22px 26px 46px;overflow-x:auto}
+  .wrap{max-width:1180px;margin:0 auto}
+
+  .head{display:flex;align-items:flex-end;gap:16px;margin-bottom:16px}
+  .head h1{margin:0;font-size:19px;font-weight:700;letter-spacing:.01em}
+  .head .sub{margin:3px 0 0;font-size:12.5px;color:var(--text-2)}
+  .head .sub b{font-weight:600}
+  .head .sub .n-ask{color:var(--warn)} .head .sub .n-fail{color:var(--error)} .head .sub .n-run{color:var(--primary)}
+  .head .sp{flex:1}
+  .pill{border:1px solid var(--divider);background:var(--card);color:var(--text-2);font-size:12px;
+    padding:5px 11px;border-radius:10px;display:inline-flex;align-items:center;gap:5px}
+  .pill:hover{background:var(--card-high)}
+  .pill svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round}
+  .iconbtn{width:30px;height:30px;border-radius:10px;display:grid;place-items:center;color:var(--text-3);
+    border:1px solid transparent;background:none}
+  .iconbtn:hover{background:var(--card-high);color:var(--text-2)}
+  .iconbtn svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+
+  /* ── 执行者条 ─────────────────────────────────────────── */
+  .hitters{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:18px}
+  .hitter{display:flex;align-items:center;gap:8px;padding:7px 12px 7px 8px;border-radius:12px;
+    background:var(--card);border:1px solid var(--divider);cursor:pointer}
+  .hitter:hover{background:var(--card-high)}
+  .hitter .tool{width:22px;height:22px;font-size:10px}
+  .hitter .nm{font-size:12.5px;font-weight:600}
+  .hitter .st{font-size:11px;color:var(--text-3);display:flex;align-items:center;gap:5px}
+  .hitter .st i{width:6px;height:6px;border-radius:50%;background:var(--outline)}
+  .hitter .st.busy i{background:var(--primary);animation:pulse 2s infinite}
+  .hitter .st.online i{background:var(--ok)}
+  .hitter .ct{font-size:11px;font-weight:600;color:var(--primary);background:var(--primary-container);
+    border-radius:999px;padding:0 7px;line-height:17px}
+
+  /* ── 三列 ─────────────────────────────────────────────── */
+  .board{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;align-items:start}
+  .col-h{display:flex;align-items:center;gap:7px;margin:0 2px 9px;font-size:12.5px;font-weight:600;color:var(--text-2)}
+  .col-h i{width:7px;height:7px;border-radius:50%}
+  .col-h .cnt{font-weight:600;color:var(--text-3);font-size:11.5px}
+  .col[data-col=ask]  .col-h i{background:var(--warn)}
+  .col[data-col=fail] .col-h i{background:var(--error)}
+  .col[data-col=run]  .col-h i{background:var(--primary);animation:pulse 2.4s infinite}
+  .col .stack{display:flex;flex-direction:column;gap:10px}
+
+  /* ── 对话卡 ───────────────────────────────────────────── */
+  .conv{background:var(--card);border:1px solid rgba(200,197,188,.5);border-radius:16px;padding:13px 14px 11px;
+    box-shadow:0 1px 2px rgba(46,43,58,.04);transition:box-shadow .15s,transform .15s}
+  .conv:hover{box-shadow:0 3px 10px rgba(46,43,58,.09);transform:translateY(-1px)}
+  .conv[data-lamp=ask]{background:linear-gradient(0deg,rgba(224,168,74,.05),rgba(224,168,74,.05)),var(--card);
+    border-color:rgba(176,125,43,.35)}
+  .conv[data-lamp=fail]{border-color:rgba(179,86,77,.35)}
+  .conv-head{display:flex;gap:10px;align-items:flex-start;cursor:pointer}
+  .ava{width:30px;height:30px;flex:none;border-radius:10px;display:grid;place-items:center;
+    font-size:13px;font-weight:700}
+  .ava.v1{background:var(--primary-container);color:var(--primary)}
+  .ava.v2{background:var(--sec-container);color:var(--on-sec-container)}
+  .ava.v3{background:var(--ter-container);color:var(--on-ter-container)}
+  .ava.v4{background:var(--error-container);color:var(--error)}
+  .ava.v5{background:var(--ok-container);color:var(--ok)}
+  .conv-tt{flex:1;min-width:0}
+  .conv-tt h3{margin:1px 0 0;font-size:13.5px;font-weight:600;line-height:1.4}
+  .conv-tt .meta{margin:2px 0 0;font-size:11.5px;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .lamp{flex:none;font-size:11px;display:inline-flex;align-items:center;gap:5px;margin-top:2px}
+  .lamp i{width:6px;height:6px;border-radius:50%}
+  .lamp[data-lamp=ask]{color:var(--warn)} .lamp[data-lamp=ask] i{background:var(--warn)}
+  .lamp[data-lamp=fail]{color:var(--error)} .lamp[data-lamp=fail] i{background:var(--error)}
+  .lamp[data-lamp=run]{color:var(--text-3)} .lamp[data-lamp=run] i{background:var(--text-3);animation:pulse 2.4s infinite}
+
+  /* 阶段条 */
+  .stage{display:flex;align-items:center;gap:8px;margin:10px 0 2px;padding-left:40px}
+  .stage ol{display:flex;align-items:center;margin:0;padding:0;list-style:none;flex:1}
+  .stage li{width:7px;height:7px;border-radius:50%;background:var(--card-high);border:1px solid var(--outline);flex:none}
+  .stage li+li{margin-left:14px;position:relative}
+  .stage li+li::before{content:"";position:absolute;left:-14px;top:3px;width:14px;height:1px;background:var(--divider)}
+  .stage li.done{background:var(--primary);border-color:var(--primary)}
+  .stage li.done+li::before{background:var(--primary)}
+  .stage li.now{background:var(--bg);border-color:var(--primary);box-shadow:0 0 0 3px rgba(62,74,140,.18)}
+  .stage .nowlb{font-size:11px;color:var(--text-2);flex:none}
+
+  /* 派活行 */
+  .rows{list-style:none;margin:8px 0 0;padding:0}
+  .rows li{display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:10px;cursor:pointer}
+  .rows li:hover{background:var(--card-high)}
+  .rows li+li{margin-top:2px}
+  .tool{width:20px;height:20px;flex:none;border-radius:7px;display:grid;place-items:center;
+    font-size:9.5px;font-weight:700;letter-spacing:.02em}
+  .tool.cb{background:var(--primary-container);color:var(--primary)}
+  .tool.qi{background:var(--sec-container);color:var(--on-sec-container)}
+  .tool.qc{background:var(--ter-container);color:var(--on-ter-container)}
+  .tool.mg{background:var(--primary-container);color:var(--primary)}
+  .brief{flex:1;min-width:0;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .child{font-size:10.5px;color:var(--text-3);flex:none;border:1px solid var(--divider);border-radius:999px;padding:0 6px;line-height:15px}
+  .st{flex:none;font-size:11px;display:inline-flex;align-items:center;gap:4px}
+  .st i{width:5px;height:5px;border-radius:50%}
+  .st.ok{color:var(--ok)} .st.ok i{background:var(--ok)}
+  .st.run{color:var(--text-2)} .st.run i{background:var(--text-3);animation:pulse 2.4s infinite}
+  .st.idle{color:var(--text-3)} .st.idle i{background:var(--outline)}
+  .st.ask{color:var(--warn)} .st.ask i{background:var(--warn)}
+  .st.fail{color:var(--error)} .st.fail i{background:var(--error)}
+
+  /* 卡脚按钮 */
+  .conv-foot{display:flex;gap:8px;justify-content:flex-end;margin-top:9px;padding-top:9px;border-top:1px dashed var(--divider)}
+  .btn{font-size:12px;padding:5px 14px;border-radius:10px;cursor:pointer;border:1px solid transparent}
+  .btn.primary{background:var(--primary);color:var(--on-primary)}
+  .btn.primary:hover{filter:brightness(1.08)}
+  .btn.ghost{background:none;color:var(--text-2);border-color:var(--divider)}
+  .btn.ghost:hover{background:var(--card-high)}
+
+  /* ── 已完结折叠区 ─────────────────────────────────────── */
+  .archive{margin-top:22px}
+  .fold{width:100%;display:flex;align-items:center;gap:8px;background:none;border:none;cursor:pointer;
+    padding:9px 10px;border-radius:10px;color:var(--text-3);font-size:12px}
+  .fold:hover{background:var(--card)}
+  .fold .caret{transition:transform .15s}
+  .fold[aria-expanded=true] .caret{transform:rotate(90deg)}
+  .fold .ln{flex:1;height:1px;background:var(--divider);opacity:.6}
+  .archlist{margin:2px 0 0;padding:0 10px 4px;list-style:none}
+  .archlist li{display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:10px;cursor:pointer;font-size:12.5px}
+  .archlist li:hover{background:var(--card)}
+  .archlist .chk{color:var(--ok);flex:none;width:15px;text-align:center}
+  .archlist .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-2)}
+  .archlist .c{font-size:11px;color:var(--text-3);flex:none}
+  .archlist .tm{font-size:11px;color:var(--text-3);flex:none}
+  .archlist[hidden]{display:none}
+
+  /* 版本标 */
+  .ver{position:fixed;right:14px;bottom:12px;display:flex;align-items:center;gap:10px;
+    background:var(--card);border:1px solid var(--divider);border-radius:999px;padding:5px 8px 5px 14px;
+    font-size:11.5px;color:var(--text-2);box-shadow:0 2px 8px rgba(46,43,58,.08)}
+  .ver b{font-weight:600;color:var(--text)}
+  .ver a{color:var(--text-3);text-decoration:none;padding:2px 5px;border-radius:7px}
+  .ver a:hover{background:var(--card-high);color:var(--text-2)}
+  .ver a.cur{background:var(--primary);color:var(--on-primary)}
+
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+</style>
+</head>
+<body>
+
+<aside class="rail" aria-hidden="true">
+  <div class="rb"><svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div>
+  <div class="rb on"><svg viewBox="0 0 24 24"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M9 12h6M9 16h6"/></svg></div>
+  <div class="rb"><svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg></div>
+  <div class="rb"><svg viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></div>
+  <div class="sp"></div>
+  <div class="rb"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.08a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.08a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.08a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></div>
+</aside>
+
+<main class="main"><div class="wrap">
+
+  <header class="head">
+    <div>
+      <h1>任务中心</h1>
+      <p class="sub"><b class="n-run">2 个在跑</b> · <b class="n-ask">1 件等你拍板</b> · <b class="n-fail">1 个出错</b> · 今天派了 6 次</p>
+    </div>
+    <div class="sp"></div>
+    <button class="pill">全部领域 <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>
+    <button class="pill">全部项目 <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>
+    <button class="pill">最近优先 <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>
+    <button class="iconbtn" title="刷新"><svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6"/></svg></button>
+  </header>
+
+  <section class="hitters">
+    <div class="hitter" title="只看 CodeBuddy 派出去的活">
+      <span class="tool cb">CB</span><span class="nm">CodeBuddy</span>
+      <span class="st busy"><i></i>2 单在跑</span><span class="ct">2</span>
+    </div>
+    <div class="hitter" title="只看 Qoder 国际派出去的活">
+      <span class="tool qi">QI</span><span class="nm">Qoder 国际</span>
+      <span class="st busy"><i></i>1 单在跑</span><span class="ct">1</span>
+    </div>
+    <div class="hitter">
+      <span class="tool qc">QC</span><span class="nm">Qoder 国内</span>
+      <span class="st"><i></i>空闲</span>
+    </div>
+    <div class="hitter">
+      <span class="tool mg">手</span><span class="nm">手机</span>
+      <span class="st online"><i></i>在线</span>
+    </div>
+  </section>
+
+  <section class="board">
+
+    <div class="col" data-col="ask">
+      <div class="col-h"><i></i>待你处理 <span class="cnt">2</span></div>
+      <div class="stack">
+
+        <article class="conv" data-lamp="ask">
+          <header class="conv-head">
+            <span class="ava v1">手</span>
+            <div class="conv-tt">
+              <h3>手机 UI 四件：图标对齐 Lucide</h3>
+              <p class="meta">总管 · 区域 lifediary · 18 分钟前</p>
+            </div>
+            <span class="lamp" data-lamp="ask"><i></i>等你处理</span>
+          </header>
+          <div class="stage">
+            <ol><li class="done"></li><li class="done"></li><li class="done"></li><li class="now"></li><li></li></ol>
+            <span class="nowlb">验收 · 返工 2 轮</span>
+          </div>
+          <ul class="rows">
+            <li><span class="tool cb">CB</span><span class="brief">37 处图标对齐 Lucide 视框</span><span class="st ok"><i></i>已通过</span></li>
+            <li><span class="tool cb">CB</span><span class="brief">头像同步（/providerId 取 group.id）</span><span class="st ask"><i></i>待你处理</span><span class="child">子单 2</span></li>
+          </ul>
+          <footer class="conv-foot">
+            <button class="btn ghost">稍后</button>
+            <button class="btn primary">去处理</button>
+          </footer>
+        </article>
+
+        <article class="conv" data-lamp="ask">
+          <header class="conv-head">
+            <span class="ava v3">日</span>
+            <div class="conv-tt">
+              <h3>日记 v2：执事扩 diary 字段</h3>
+              <p class="meta">总管 · 区域 lifediary-harness · 1 小时前</p>
+            </div>
+            <span class="lamp" data-lamp="ask"><i></i>等你处理</span>
+          </header>
+          <div class="stage">
+            <ol><li class="done"></li><li class="done"></li><li class="now"></li><li></li><li></li></ol>
+            <span class="nowlb">执行 · 第 3 次派活</span>
+          </div>
+          <ul class="rows">
+            <li><span class="tool cb">CB</span><span class="brief">diary 字段契约（纯增量）</span><span class="st ask"><i></i>待你处理</span></li>
+            <li><span class="tool mg">手</span><span class="brief">手机提醒适配</span><span class="st ok"><i></i>已完成</span></li>
+          </ul>
+          <footer class="conv-foot">
+            <button class="btn ghost">稍后</button>
+            <button class="btn primary">去处理</button>
+          </footer>
+        </article>
+
+      </div>
+    </div>
+
+    <div class="col" data-col="fail">
+      <div class="col-h"><i></i>出错 <span class="cnt">1</span></div>
+      <div class="stack">
+
+        <article class="conv" data-lamp="fail">
+          <header class="conv-head">
+            <span class="ava v4">周</span>
+            <div class="conv-tt">
+              <h3>周报：近七天总结</h3>
+              <p class="meta">区域 日记 · 2 小时前</p>
+            </div>
+            <span class="lamp" data-lamp="fail"><i></i>有单出错</span>
+          </header>
+          <div class="stage">
+            <ol><li class="done"></li><li class="done"></li><li class="done"></li><li></li><li></li></ol>
+            <span class="nowlb">执行超时</span>
+          </div>
+          <ul class="rows">
+            <li><span class="tool cb">CB</span><span class="brief">汇总近七天日记生成周报</span><span class="st fail"><i></i>失败待看</span></li>
+          </ul>
+          <footer class="conv-foot">
+            <button class="btn ghost">看看原因</button>
+            <button class="btn primary">重试</button>
+          </footer>
+        </article>
+
+      </div>
+    </div>
+
+    <div class="col" data-col="run">
+      <div class="col-h"><i></i>进行中 <span class="cnt">3</span></div>
+      <div class="stack">
+
+        <article class="conv" data-lamp="run">
+          <header class="conv-head">
+            <span class="ava v5">搜</span>
+            <div class="conv-tt">
+              <h3>搜索分页与历史窗口</h3>
+              <p class="meta">区域 lifediary-harness · 5 分钟前</p>
+            </div>
+            <span class="lamp" data-lamp="run"><i></i>执行中</span>
+          </header>
+          <div class="stage">
+            <ol><li class="done"></li><li class="done"></li><li class="done"></li><li class="now"></li><li></li></ol>
+            <span class="nowlb">验收中</span>
+          </div>
+          <ul class="rows">
+            <li><span class="tool cb">CB</span><span class="brief">搜索分页 + 200 条历史窗口</span><span class="st run"><i></i>验收中</span></li>
+          </ul>
+        </article>
+
+        <article class="conv" data-lamp="run">
+          <header class="conv-head">
+            <span class="ava v2">技</span>
+            <div class="conv-tt">
+              <h3>技能手册补目录</h3>
+              <p class="meta">区域 lifediary-harness · 32 分钟前</p>
+            </div>
+            <span class="lamp" data-lamp="run"><i></i>执行中</span>
+          </header>
+          <div class="stage">
+            <ol><li class="done"></li><li class="done"></li><li class="now"></li><li></li><li></li></ol>
+            <span class="nowlb">执行中</span>
+          </div>
+          <ul class="rows">
+            <li><span class="tool qi">QI</span><span class="brief">给 skills/ 手册补索引目录</span><span class="st run"><i></i>进行中</span></li>
+          </ul>
+        </article>
+
+        <article class="conv" data-lamp="run">
+          <header class="conv-head">
+            <span class="ava v1">下</span>
+            <div class="conv-tt">
+              <h3>下载目录整理</h3>
+              <p class="meta">区域 日常 · 3 分钟前</p>
+            </div>
+            <span class="lamp" data-lamp="run"><i></i>排队中</span>
+          </header>
+          <div class="stage">
+            <ol><li class="done"></li><li class="now"></li><li></li><li></li><li></li></ol>
+            <span class="nowlb">排队</span>
+          </div>
+          <ul class="rows">
+            <li><span class="tool cb">CB</span><span class="brief">按类型归档近 30 天下载</span><span class="st idle"><i></i>排队中</span></li>
+          </ul>
+        </article>
+
+      </div>
+    </div>
+
+  </section>
+
+  <section class="archive">
+    <button class="fold" id="foldArch" aria-expanded="false">
+      <span class="caret">▸</span> 已完结 6 个对话 <span class="ln"></span>
+    </button>
+    <ul class="archlist" id="archList" hidden>
+      <li><span class="chk">✓</span><span class="t">手机身份顶栏与对话设置</span><span class="c">5 次派活</span><span class="tm">昨天</span></li>
+      <li><span class="chk">✓</span><span class="t">手机 IM 式首页与会话列表</span><span class="c">4 次派活</span><span class="tm">昨天</span></li>
+      <li><span class="chk">✓</span><span class="t">群组功能上线（值日制）</span><span class="c">6 次派活</span><span class="tm">前天</span></li>
+      <li><span class="chk">✓</span><span class="t">旧事搬进记忆</span><span class="c">2 次派活</span><span class="tm">11-11</span></li>
+      <li><span class="chk">✓</span><span class="t">中继服务器部署</span><span class="c">3 次派活</span><span class="tm">11-11</span></li>
+      <li><span class="chk">✓</span><span class="t">供应商单 key 局限登记</span><span class="c">1 次派活</span><span class="tm">11-10</span></li>
+    </ul>
+    <button class="fold" aria-expanded="false" style="margin-top:2px">
+      <span class="caret">▸</span> 更早的直派 2 单（没有来源对话） <span class="ln"></span>
+    </button>
+  </section>
+
+</div></main>
+
+<div class="ver">
+  <span>设计稿 <b>A · 精修工单墙</b></span>
+  <a href="05-任务中心-版A-精修工单墙.html" class="cur">A</a><a href="06-任务中心-版B-现在时间线.html">B</a><a href="07-任务中心-版C-驾驶舱.html">C</a><a href="08-任务中心-版D-聚光灯.html">D</a>
+</div>
+
+<script>
+  document.getElementById("foldArch").addEventListener("click", function () {
+    const list = document.getElementById("archList");
+    const open = list.hidden;
+    list.hidden = !open;
+    this.setAttribute("aria-expanded", String(open));
+  });
+</script>
+</body>
+</html>

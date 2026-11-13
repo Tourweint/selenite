@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>任务中心 · 版 E2 等你回话（双列）</title>
+<style>
+  :root{
+    --bg:#fdf9f2; --surface-low:#f7f3eb; --card:#f6f1e7; --card-high:#ede9e0;
+    --text:#2e2b3a; --text-2:#6e6b7e; --text-3:#9a97a5;
+    --outline:#c8c5bc; --divider:rgba(200,197,188,.55);
+    --primary:#3e4a8c; --on-primary:#fff;
+    --primary-container:#f0ede5; --on-primary-container:#1e1b4b;
+    --sec-container:#f5edd9; --on-sec-container:#4a3b1e;
+    --ter-container:#fceecb; --on-ter-container:#5c4210;
+    --error:#b3564d; --error-container:#f6e2df;
+    --ok:#1f9d4d; --ok-container:#e2f2e8;
+    --warn:#b07d2b;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--text);display:flex;
+    font:13px/1.6 "Segoe UI","Microsoft YaHei UI","PingFang SC",-apple-system,sans-serif}
+
+  .rail{width:56px;flex:none;border-right:1px solid var(--divider);display:flex;flex-direction:column;
+    align-items:center;padding:14px 0;gap:6px}
+  .rail .rb{width:38px;height:38px;border-radius:12px;display:grid;place-items:center;color:var(--text-3)}
+  .rail .rb:hover{background:var(--card-high);color:var(--text-2)}
+  .rail .rb.on{background:var(--primary);color:var(--on-primary)}
+  .rail svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+  .rail .sp{flex:1}
+
+  .main{flex:1;min-width:0;padding:22px 26px 46px;overflow-y:auto}
+  .wrap{max-width:1180px;margin:0 auto}
+
+  .head{display:flex;align-items:center;gap:14px;margin-bottom:16px}
+  .head h1{margin:0;font-size:19px;font-weight:700}
+  .head .sub{margin:2px 0 0;font-size:12.5px;color:var(--text-2)}
+  .head .sp{flex:1}
+  .btn{font-size:12px;padding:5px 14px;border-radius:10px;cursor:pointer;border:1px solid transparent}
+  .btn.primary{background:var(--primary);color:var(--on-primary)}
+  .btn.primary:hover{filter:brightness(1.08)}
+  .btn.ghost{background:none;color:var(--text-2);border-color:var(--divider)}
+  .btn.ghost:hover{background:var(--card-high)}
+
+  .cols{display:grid;grid-template-columns:7fr 5fr;gap:16px;align-items:start}
+
+  /* ── 等你回话：大区 ───────────────────────────────────── */
+  .needs{background:linear-gradient(0deg,rgba(224,168,74,.06),rgba(224,168,74,.06)),var(--card);
+    border:1px solid rgba(176,125,43,.35);border-radius:20px;padding:16px 18px 14px;margin-bottom:18px}
+  .np-h{display:flex;align-items:center;gap:9px;margin-bottom:12px}
+  .np-h h2{margin:0;font-size:14.5px;font-weight:700}
+  .np-h .cnt{background:var(--warn);color:#fff;border-radius:999px;font-size:11px;padding:1px 8px;line-height:17px;font-weight:600}
+  .np-h .hint{margin-left:auto;font-size:11px;color:var(--text-3)}
+  .msg{display:flex;gap:12px;background:var(--bg);border:1px solid var(--divider);border-radius:16px;padding:13px 15px}
+  .msg+.msg{margin-top:10px}
+  .msg .ava{width:36px;height:36px;flex:none;border-radius:12px;background:var(--primary-container);color:var(--primary);
+    display:grid;place-items:center;font-size:15px;font-weight:700}
+  .msg .bd{flex:1;min-width:0}
+  .msg .who{font-size:11.5px;color:var(--text-3);margin:0 0 3px}
+  .msg .who b{color:var(--text-2);font-weight:600}
+  .msg .quote{margin:0;font-size:13.5px;line-height:1.7}
+  .msg .meta{margin:7px 0 0;font-size:11.5px;color:var(--text-3);display:flex;align-items:center;gap:6px}
+  .msg .meta .from{color:var(--primary);cursor:pointer}
+  .msg .meta .from:hover{text-decoration:underline}
+  .msg .mfoot{display:flex;justify-content:flex-end;gap:8px;margin-top:10px}
+
+  /* ── 区块标题 ─────────────────────────────────────────── */
+  .sec-h{display:flex;align-items:center;gap:8px;margin:0 2px 9px;font-size:12.5px;font-weight:600;color:var(--text-2)}
+  .sec-h .cnt{color:var(--text-3);font-size:11.5px}
+  .sec-h .ln{flex:1;height:1px;background:var(--divider);opacity:.5}
+
+  /* ── 在跑：小卡 ───────────────────────────────────────── */
+  .minis{display:grid;grid-template-columns:1fr 1fr;gap:9px}
+  .mini{background:var(--card);border:1px solid rgba(200,197,188,.5);border-radius:14px;padding:11px 13px;
+    cursor:pointer;display:flex;gap:10px;align-items:center;transition:box-shadow .15s}
+  .mini:hover{box-shadow:0 3px 10px rgba(46,43,58,.09)}
+  .mini .ava{width:30px;height:30px;flex:none;border-radius:11px;display:grid;place-items:center;font-size:13px;font-weight:700}
+  .ava.v1{background:var(--primary-container);color:var(--primary)}
+  .ava.v2{background:var(--sec-container);color:var(--on-sec-container)}
+  .ava.v3{background:var(--ter-container);color:var(--on-ter-container)}
+  .ava.v4{background:var(--error-container);color:var(--error)}
+  .mini .bd{flex:1;min-width:0}
+  .mini h3{margin:0;font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .mini p{margin:2px 0 0;font-size:11px;color:var(--text-3);display:flex;align-items:center;gap:5px}
+  .mini p i{width:5px;height:5px;border-radius:50%;background:var(--text-3);flex:none}
+  .mini[data-lamp=run] p i{background:var(--primary);animation:pulse 2.4s infinite}
+  .mini[data-lamp=fail] p i{background:var(--error)}
+
+  /* ── 打手：可展开 ─────────────────────────────────────── */
+  .hits{display:flex;flex-direction:column;gap:8px;margin-bottom:18px}
+  .hit{background:var(--surface-low);border:1px solid rgba(200,197,188,.4);border-radius:14px;overflow:hidden}
+  .hit-h{display:flex;align-items:center;gap:9px;padding:10px 14px;cursor:pointer;user-select:none}
+  .hit-h:hover{background:var(--card-high)}
+  .tool{width:22px;height:22px;flex:none;border-radius:8px;display:grid;place-items:center;font-size:10px;font-weight:700}
+  .tool.cb{background:var(--primary-container);color:var(--primary)}
+  .tool.qi{background:var(--sec-container);color:var(--on-sec-container)}
+  .tool.qc{background:var(--ter-container);color:var(--on-ter-container)}
+  .tool.mg{background:var(--ok-container);color:var(--ok)}
+  .hit-h .nm{font-size:12.5px;font-weight:600}
+  .hit-h .st{font-size:11px;color:var(--text-3);display:flex;align-items:center;gap:5px}
+  .hit-h .st i{width:6px;height:6px;border-radius:50%;background:var(--outline)}
+  .hit-h .st.busy i{background:var(--primary);animation:pulse 2s infinite}
+  .hit-h .ct{margin-left:auto;font-size:11px;font-weight:600;color:var(--primary);background:var(--primary-container);
+    border-radius:999px;padding:0 7px;line-height:17px}
+  .hit-h .caret{color:var(--text-3);transition:transform .15s;font-size:11px}
+  .hit.open .hit-h .caret{transform:rotate(90deg)}
+  .hit-b{border-top:1px dashed var(--divider);padding:4px 14px 10px}
+  .hit-b[hidden]{display:none}
+  .hit-row{display:flex;align-items:center;gap:9px;padding:8px 6px;border-radius:10px;cursor:pointer;font-size:12.5px}
+  .hit-row:hover{background:var(--card)}
+  .hit-row .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .hit-row .tm{font-size:10.5px;color:var(--text-3);flex:none}
+  .dotst{flex:none;font-size:11px;display:inline-flex;align-items:center;gap:4px}
+  .dotst i{width:5px;height:5px;border-radius:50%}
+  .dotst.run{color:var(--text-2)} .dotst.run i{background:var(--primary)}
+  .dotst.idle{color:var(--text-3)} .dotst.idle i{background:var(--outline)}
+  .hit-empty{margin:0;padding:8px 6px;font-size:11.5px;color:var(--text-3)}
+
+  /* 今日回顾卡 */
+  .recap{background:var(--card);border:1px solid rgba(200,197,188,.5);border-radius:16px;padding:14px 16px;cursor:pointer}
+  .recap:hover{box-shadow:0 3px 10px rgba(46,43,58,.09)}
+  .recap h3{margin:0;font-size:13px;font-weight:600;display:flex;align-items:center;gap:8px}
+  .recap h3 svg{width:15px;height:15px;stroke:var(--primary);fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+  .recap p{margin:6px 0 0;font-size:11.5px;color:var(--text-3)}
+  .recap .nums{display:flex;gap:16px;margin-top:9px}
+  .recap .n b{display:block;font-size:16px;font-weight:700;color:var(--text)}
+  .recap .n span{font-size:10.5px;color:var(--text-3)}
+
+  .ver{position:fixed;right:14px;bottom:12px;display:flex;align-items:center;gap:8px;
+    background:var(--card);border:1px solid var(--divider);border-radius:999px;padding:5px 8px 5px 14px;
+    font-size:11.5px;color:var(--text-2);box-shadow:0 2px 8px rgba(46,43,58,.08)}
+  .ver b{font-weight:600;color:var(--text)}
+  .ver .cap{color:var(--text-3);margin-right:2px}
+  .ver a{color:var(--text-3);text-decoration:none;padding:2px 5px;border-radius:7px}
+  .ver a:hover{background:var(--card-high);color:var(--text-2)}
+  .ver a.cur{background:var(--primary);color:var(--on-primary)}
+
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+</style>
+</head>
+<body>
+
+<aside class="rail" aria-hidden="true">
+  <div class="rb"><svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div>
+  <div class="rb on"><svg viewBox="0 0 24 24"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M9 12h6M9 16h6"/></svg></div>
+  <div class="rb"><svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg></div>
+  <div class="rb"><svg viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></div>
+  <div class="sp"></div>
+  <div class="rb"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.08a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.08a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.08a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></div>
+</aside>
+
+<main class="main"><div class="wrap">
+
+  <header class="head">
+    <div>
+      <h1>任务中心</h1>
+      <p class="sub">2 条等你回话 · 4 件事在跑</p>
+    </div>
+    <div class="sp"></div>
+    <button class="btn ghost">今日回顾 →</button>
+  </header>
+
+  <div class="cols">
+
+    <div>
+      <section class="needs">
+        <div class="np-h">
+          <h2>等你回话</h2><span class="cnt">2</span>
+          <span class="hint">都是总管转给你的，点「去处理」回到那句话</span>
+        </div>
+
+        <div class="msg">
+          <span class="ava">总</span>
+          <div class="bd">
+            <p class="who"><b>总管</b> · 转达 CodeBuddy 的验收请求</p>
+            <p class="quote">「头像同步」返工到第 2 轮，代码我看过了，providerId 这次取对了。你拍个板：过，还是打回？</p>
+            <p class="meta">来自 <span class="from">手机 UI 四件：图标对齐 Lucide</span> · 18 分钟前</p>
+            <div class="mfoot">
+              <button class="btn ghost">稍后</button>
+              <button class="btn primary">去处理 →</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="msg">
+          <span class="ava">总</span>
+          <div class="bd">
+            <p class="who"><b>总管</b> · 等你点头</p>
+            <p class="quote">diary 字段的契约是纯增量，老数据不受影响。方案我看过没问题，你点头我就往下派手机那头。</p>
+            <p class="meta">来自 <span class="from">日记 v2：执事扩 diary 字段</span> · 1 小时前</p>
+            <div class="mfoot">
+              <button class="btn ghost">稍后</button>
+              <button class="btn primary">去处理 →</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <div class="sec-h">在跑 <span class="cnt">4</span><span class="ln"></span></div>
+      <section class="minis">
+        <div class="mini" data-lamp="run">
+          <span class="ava v1">搜</span>
+          <div class="bd"><h3>搜索分页与历史窗口</h3><p><i></i>验收中 · 5 分钟前</p></div>
+        </div>
+        <div class="mini" data-lamp="run">
+          <span class="ava v2">技</span>
+          <div class="bd"><h3>技能手册补目录</h3><p><i></i>执行中 · 32 分钟前</p></div>
+        </div>
+        <div class="mini" data-lamp="run">
+          <span class="ava v3">下</span>
+          <div class="bd"><h3>下载目录整理</h3><p><i></i>排队中 · 3 分钟前</p></div>
+        </div>
+        <div class="mini" data-lamp="fail">
+          <span class="ava v4">周</span>
+          <div class="bd"><h3>周报：近七天总结</h3><p><i></i>出错 · 2 小时前</p></div>
+        </div>
+      </section>
+    </div>
+
+    <div>
+      <div class="sec-h">打手 <span class="ln"></span></div>
+      <section class="hits">
+
+        <div class="hit open">
+          <div class="hit-h">
+            <span class="tool cb">CB</span><span class="nm">CodeBuddy</span>
+            <span class="st busy"><i></i>在跑 2</span><span class="ct">2</span><span class="caret">▸</span>
+          </div>
+          <div class="hit-b">
+            <div class="hit-row"><span class="t">搜索分页与历史窗口</span><span class="dotst run"><i></i>验收中</span><span class="tm">5 分钟前</span></div>
+            <div class="hit-row"><span class="t">下载目录整理（排队）</span><span class="dotst idle"><i></i>排队中</span><span class="tm">3 分钟前</span></div>
+          </div>
+        </div>
+
+        <div class="hit">
+          <div class="hit-h">
+            <span class="tool qi">QI</span><span class="nm">Qoder 国际</span>
+            <span class="st busy"><i></i>在跑 1</span><span class="ct">1</span><span class="caret">▸</span>
+          </div>
+          <div class="hit-b" hidden>
+            <div class="hit-row"><span class="t">技能手册补目录</span><span class="dotst run"><i></i>执行中</span><span class="tm">32 分钟前</span></div>
+          </div>
+        </div>
+
+        <div class="hit">
+          <div class="hit-h">
+            <span class="tool qc">QC</span><span class="nm">Qoder 国内</span>
+            <span class="st"><i></i>空闲</span><span class="caret">▸</span>
+          </div>
+          <div class="hit-b" hidden>
+            <p class="hit-empty">今天还没派过活。</p>
+          </div>
+        </div>
+
+        <div class="hit">
+          <div class="hit-h">
+            <span class="tool mg">手</span><span class="nm">手机</span>
+            <span class="st"><i></i>在线</span><span class="caret">▸</span>
+          </div>
+          <div class="hit-b" hidden>
+            <p class="hit-empty">vivo 真机在线，没有在跑的单。</p>
+          </div>
+        </div>
+
+      </section>
+
+      <div class="recap">
+        <h3><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>今日回顾</h3>
+        <p>下班前看看今天都干了啥</p>
+        <div class="nums">
+          <div class="n"><b>8</b><span>次派活</span></div>
+          <div class="n"><b>4</b><span>完结对话</span></div>
+          <div class="n"><b>12</b><span>改了文件</span></div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+</div></main>
+
+<div class="ver">
+  <span>设计稿 <b>E2 · 等你回话（双列）</b></span>
+  <span class="cap">第2轮</span><a href="09-任务中心-版E1-等你回话（单列）.html">E1</a><a href="10-任务中心-版E2-等你回话（双列）.html" class="cur">E2</a><a href="11-今日回顾-版F-日报视图.html">F</a>
+  <span class="cap">第1轮</span><a href="05-任务中心-版A-精修工单墙.html">A</a><a href="06-任务中心-版B-现在时间线.html">B</a><a href="07-任务中心-版C-驾驶舱.html">C</a><a href="08-任务中心-版D-聚光灯.html">D</a>
+</div>
+
+<script>
+  document.querySelectorAll(".hit-h").forEach((head) => {
+    head.addEventListener("click", () => {
+      const hit = head.parentElement;
+      const body = hit.querySelector(".hit-b");
+      const open = body.hidden;
+      body.hidden = !open;
+      hit.classList.toggle("open", open);
+    });
+  });
+</script>
+</body>
+</html>
