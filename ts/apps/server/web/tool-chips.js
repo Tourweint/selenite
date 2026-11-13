@@ -18,7 +18,14 @@ const MAX_VISIBLE_CHIPS = 8;
 /** 详情面板最大高度（px）：超过就在面板里滚，不撑正文。 */
 const DETAIL_MAX_HEIGHT = 260;
 
+/** 设置 → 外观 → 工具详情 的选择落在这个键上（纯前端，同字体/主题做法） */
+const KEY_TOOL_DETAIL = "lifediary.toolDetail";
 let detailMode = "inline";
+try {
+  detailMode = localStorage.getItem(KEY_TOOL_DETAIL) === "popover" ? "popover" : "inline";
+} catch {
+  /* 隐私模式下读不到 localStorage：按默认内联 */
+}
 const listeners = new Set();
 
 /** 设置页改完调一次：所有已渲染的块下次点击用新形态。 */
@@ -30,6 +37,19 @@ export function setDetailMode(mode) {
 export function getDetailMode() {
   return detailMode;
 }
+
+/** 设置页切完调：落 localStorage + 更新当前形态（已渲染的块下次点击即用新形态）。 */
+export function chooseDetailMode(mode) {
+  setDetailMode(mode);
+  try {
+    localStorage.setItem(KEY_TOOL_DETAIL, detailMode);
+  } catch {
+    /* 写不进去也不影响本次会话 */
+  }
+  return detailMode;
+}
+
+export { KEY_TOOL_DETAIL };
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -71,9 +91,15 @@ export function createChip(spec, hooks = {}) {
 /** 详情卡：命令 / 用时 / 改动 / 输出（或 diff）。限高由 CSS 的 max-height 兜。 */
 export function buildDetailCard(spec, { onClose } = {}) {
   const card = el("div", "tdetail-card");
+  // JS 里也限一次：CSS 被别的页面覆盖/遗漏时，面板也不会无限撑开。
+  card.style.maxHeight = `${DETAIL_MAX_HEIGHT}px`;
   const head = el("div", "tdetail-head");
   const title = el("span", "tdetail-title", `${spec.verb || ""}${spec.target ? ` · ${spec.target}` : ""}`);
-  const state = el("span", "tdetail-state", spec.state === "run" ? "运行中" : spec.state === "err" ? "失败" : "完成");
+  const state = el(
+    "span",
+    "tdetail-state",
+    spec.state === "run" ? "运行中" : spec.state === "err" ? "失败" : spec.state === "back" ? "后台继续" : "完成",
+  );
   const close = el("button", "tdetail-close", "×");
   close.type = "button";
   close.setAttribute("aria-label", "关闭细节");
@@ -91,7 +117,9 @@ export function buildDetailCard(spec, { onClose } = {}) {
     row.append(el("b", null, key), el("span", null, value));
     rows.append(row);
   };
-  addRow("命令", spec.command || spec.args || spec.target);
+  const args = String(spec.args || "").trim();
+  // read/write 这类工具的 args 是 JSON，不假装它是 shell 命令。
+  addRow(/^[{[]/.test(args) ? "参数" : "命令", spec.command || args || spec.target);
   addRow("用时", spec.duration);
   addRow("改动", spec.diffSummary);
   if (rows.children.length) card.append(rows);
@@ -122,6 +150,8 @@ export function buildDetailCard(spec, { onClose } = {}) {
  */
 export function createToolChips(host, options = {}) {
   const wrap = el("div", "tchips-wrap");
+  // 只有现场这一轮播新块入场；历史回读几十枚块不该在打开会话时一起动。
+  if (options.live) wrap.classList.add("is-live");
   const line = el("div", "tchips");
   const more = el("button", "tchips-more");
   more.type = "button";
@@ -213,7 +243,8 @@ export function createToolChips(host, options = {}) {
     const limit = expanded ? chips.length : MAX_VISIBLE_CHIPS;
     let hidden = 0;
     chips.forEach((chip, index) => {
-      const show = index < limit;
+      // 运行中的那块永远可见：它是"现在在干嘛"，不能被 +N 收起来。
+      const show = index < limit || chip.dataset.state === "run";
       chip.hidden = !show;
       if (!show) hidden += 1;
     });
@@ -222,15 +253,11 @@ export function createToolChips(host, options = {}) {
       more.textContent = `+${hidden}`;
       more.title = `还有 ${hidden} 个工具调用，点开看`;
       more.setAttribute("aria-label", `还有 ${hidden} 个工具调用`);
-    } else if (!expanded && chips.length > MAX_VISIBLE_CHIPS) {
+    } else if (expanded) {
       more.hidden = false;
       more.textContent = "收起";
     } else {
       more.hidden = true;
-    }
-    if (expanded && chips.length > MAX_VISIBLE_CHIPS) {
-      more.hidden = false;
-      more.textContent = "收起";
     }
   };
 
@@ -255,6 +282,7 @@ export function createToolChips(host, options = {}) {
       chip.__setState = (state) => {
         record.state = state;
         chip.dataset.state = state;
+        renderVisibility();
       };
       chip.__setDetail = (patch) => Object.assign(record, patch);
       line.append(chip);
@@ -276,7 +304,6 @@ export function createToolChips(host, options = {}) {
       if (!chip) return;
       Object.assign(chip.__spec, patch);
       chip.dataset.state = patch.state || (patch.ok === false ? "err" : "ok");
-      if (chip.dataset.state === "ok") chip.classList.add("is-settled");
       if (openChip === chip) {
         const card = buildDetailCard(chip.__spec, { onClose: closeDetail });
         if (openPanel) {
@@ -297,12 +324,20 @@ export function createToolChips(host, options = {}) {
       expanded = false;
       renderVisibility();
     },
-    /** 一轮收尾：还开着的详情关掉，避免盖住后面的回答。 */
+    /** 一轮收尾：还开着的详情关掉；没等到结果的运行块标失败（不能画成成功）。 */
     finish() {
       closeDetail();
+      for (const chip of chips) {
+        // 派活是后台长任务：可能跨过这一组、跨过这一轮，不能因为封组就判失败；
+        // 它的终态由 delegate 事件 / handoff 决定。
+        if (chip.dataset.state === "run" && !String(chip.__spec?.id || "").startsWith("delegate:")) {
+          chip.__spec.state = "err";
+          chip.dataset.state = "err";
+        }
+      }
+      renderVisibility();
     },
     closeDetail,
   };
 }
 
-export const CHIP_LIMITS = { MAX_VISIBLE_CHIPS, DETAIL_MAX_HEIGHT };

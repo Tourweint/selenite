@@ -1,90 +1,52 @@
 /**
- * 工具执行流与 diff 摘要
+ * 工具执行流：话 → 灰块 → 话 → 灰块
  *
- * 2026-11-13 从 web/app.js（25,467 行单文件）按职责拆出；正文是原文搬运，未改写行为。
- * 原文件只有一个作用域、函数互调没有固定方向，拆开后模块之间必然互相 import（环）。
- * ESM 允许循环引用，前提是模块顶层求值时不向别的模块取值；本层把启动代码全放在入口
- * app.js 文末，各模块顶层只做声明、常量与事件监听注册。
- */
-
-import { esc, renderMarkdown } from "./markdown.js";
-import { createToolChips } from "./tool-chips.js";
-import { TOOL_ICON_PATHS, createWorkPanel, shortDuration, toolKindOf } from "./work-panel.js";
-
-function addStepBlock(row, label, text, kind = "pre") {
-  row.classList.add("has-detail");
-  let body = row.querySelector(".wp-detail");
-  if (!body) {
-    body = document.createElement("div");
-    body.className = "wp-detail";
-    row.append(body);
-  }
-  const block = document.createElement("div");
-  block.className = "wp-block";
-  const tag = document.createElement("span");
-  tag.className = "wp-block-tag";
-  tag.textContent = label;
-  const pre = document.createElement("pre");
-  pre.className = kind === "diff" ? "wp-pre wp-pre-diff" : "wp-pre";
-  if (kind === "diff") pre.innerHTML = paintDiff(text);
-  else pre.textContent = text;
-  // 说过的话按 markdown 渲染（批 32）：那是模型写给**人**看的正文，pre 会把
-  // 列表/加粗全变成星号字。wp-pre-md 才是它的样式档。
-  if (kind === "md") {
-    pre.classList.add("wp-pre-md");
-    pre.innerHTML = renderMarkdown(text);
-  }
-  pre.addEventListener("click", (event) => event.stopPropagation());
-  block.append(tag, pre);
-  body.append(block);
-  body.hidden = false;
-}
-
-/** diff 逐行染色：+新增 / -删除 / …上下文。文本本身不是 HTML，先转义再上色 */
-function paintDiff(text) {
-  return String(text)
-    .split(/\r?\n/)
-    .map((line) => {
-      const cls = line.startsWith("+") ? "d-add" : line.startsWith("-") ? "d-del" : "";
-      return cls ? `<span class="${cls}">${esc(line)}</span>` : esc(line);
-    })
-    .join(String.fromCharCode(10));
-}
-
-/** 历史回读：把服务端下发的一轮 steps 还原成同一块（已收尾、默认折叠） */
-function workPanelFromSteps(root, steps, workMs) {
-  if (!Array.isArray(steps) || steps.length === 0) return null;
-  const panel = createWorkPanel(root);
-  for (const step of steps) {
-    // 「说」步（2026-11-10 批 32）：历史里的中间话还原成与现场同一行。
-    // 现场是 answer 累积后折走，历史是服务端从带工具回合里捞出来——两边同形。
-    if (step.name === "say" && step.format === "md") {
-      panel.say(step.output || "");
-      continue;
-    }
-    panel.start(step.name, step.label, undefined);
-    panel.end(step.name, step.ok !== false, step.output, step.diff);
-  }
-  panel.finish("completed");
-  // 时长以服务端事实为准（现场那块是本地表；历史里没有"正在跑"，直接用落库值）
-  if (typeof workMs === "number" && workMs > 0) panel.setDuration(workMs);
-  return panel;
-}
-
-/**
- * 一轮工具执行 = 一串小灰块（2026-11-13 用户拍板 E1 方案）。
+ * 2026-11-13 用户拍板 E1 方案，替换原「工作过程面板」（旧 work-panel.js 已删）。
  *
- * 形状：话是正文，工具是灰块，二者交替出现——模型说一句、动一次手、再说一句。
+ * 形状：模型说一句、动一次手、再说一句。说出来的话留在正文，动手缩成一枚小灰块。
  * 主界面**不写"几步/几秒"**；步数、耗时、命令、输出、diff 全在点击后的详情里。
- * 细节形态（内联展开 / 附近小窗）由 `tool-chips.js` 按设置决定，默认内联。
+ * 细节形态（原地展开 / 附近小窗）由 `tool-chips.js` 按设置决定，默认内联。
  *
- * 用两个元素把一轮串起来：
- * - `body.seg`：每一段话一个正文段（streamView 绑一段，说完就换下一段）；
+ * 两个元素把一轮串起来：
+ * - `.body`：每一段话一个正文段（streamView 绑一段，说完就换下一段）；
  * - `.tchips`：一组灰块（一次连续动手 = 一组），插在两段话之间。
  * 收尾后它们按真实顺序留在消息里，不再折成一行。
  */
 
-/** 一轮里的工具流：按"话 → 灰块 → 话 → 灰块"依次落 DOM。 */
+import { renderMarkdown } from "./markdown.js";
+import { createToolChips } from "./tool-chips.js";
+import { TOOL_ICON_PATHS, shortDuration, toolKindOf } from "./tool-meta.js";
+
+/** 工具图标的内联 SVG（灰块和详情标题共用一套） */
+function toolIconSvg(kind) {
+  return (
+    `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" ` +
+    `stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">` +
+    `${TOOL_ICON_PATHS[kind] || TOOL_ICON_PATHS.tool}</svg>`
+  );
+}
+
+/** +A/−M 摘要（和文件汇总卡同一口径：只数改文件的行） */
+function diffSummaryOf(diff) {
+  let add = 0;
+  let del = 0;
+  for (const line of String(diff || "").split("\n")) {
+    if (line.startsWith("+++") || line.startsWith("---")) continue;
+    if (line.startsWith("+")) add += 1;
+    else if (line.startsWith("-")) del += 1;
+  }
+  if (!add && !del) return "";
+  return `+${add} −${del}`;
+}
+
+/**
+ * 一轮里的工具流。调用方：
+ * - `start(name, label, args)` 工具开始；
+ * - `end(name, ok, output, diff)` 工具结束；
+ * - `breakGroup()` 这段话结束、下一组另起（工具动手前调）；
+ * - `track(label, domain)` 派活；
+ * - `finish()` 一轮收尾。
+ */
 function createToolFlow(root, options = {}) {
   const live = options.live === true;
   let group = null; // 当前这组灰块（createToolChips 的实例）
@@ -97,24 +59,19 @@ function createToolFlow(root, options = {}) {
 
   return {
     root,
-    /** 工具开始：建组（若尚未建）并推一枚运行中的块。 */
     start(name, label, args) {
       const kind = toolKindOf(name);
       ensureGroup().push({
         id: name,
         verb: kind.verb || name,
         target: label || "",
-        iconSvg:
-          `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" ` +
-          `stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">` +
-          `${TOOL_ICON_PATHS[kind.icon] || TOOL_ICON_PATHS.tool}</svg>`,
+        iconSvg: toolIconSvg(kind.icon),
         args,
         state: "run",
       });
       stepCount += 1;
       return group;
     },
-    /** 工具结束：定状态、补输出/diff/耗时。 */
     end(name, ok, output, diff) {
       if (!group) return;
       const duration = group.durationOf?.(name);
@@ -126,10 +83,7 @@ function createToolFlow(root, options = {}) {
         duration: duration ? shortDuration(duration) : "",
       });
     },
-    /**
-     * 一段话结束（工具要动手了）：这组灰块已经落在这里，下一段话要接在它们后面。
-     * 调用方负责在新正文段里继续写；这里只把当前组封口，下一枚块另起一组。
-     */
+    /** 一段话结束（工具要动手了）：这组灰块封口，下一段话接在它们后面。 */
     breakGroup() {
       group?.finish();
       group = null;
@@ -141,10 +95,7 @@ function createToolFlow(root, options = {}) {
         id: `delegate:${stepCount}`,
         verb: kind.verb || "派活",
         target: domain ? `${domain} · ${label || ""}`.trim() : label || "",
-        iconSvg:
-          `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" ` +
-          `stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">` +
-          `${TOOL_ICON_PATHS[kind.icon] || TOOL_ICON_PATHS.tool}</svg>`,
+        iconSvg: toolIconSvg(kind.icon),
         args: label,
         state: "run",
       });
@@ -164,13 +115,9 @@ function createToolFlow(root, options = {}) {
         },
       };
     },
-    /** 一轮收尾：还开着的详情关掉，块留在原地（不再折成一行）。 */
     finish() {
       group?.finish();
       group = null;
-    },
-    setDuration() {
-      /* 不再显示"已工作 Ns · M 步"：总时长由消息脚注承担 */
     },
     get count() {
       return stepCount;
@@ -178,24 +125,11 @@ function createToolFlow(root, options = {}) {
   };
 }
 
-/** +A/-M 摘要（和文件汇总卡同一口径：只数改文件的行） */
-function diffSummaryOf(diff) {
-  let add = 0;
-  let del = 0;
-  for (const line of String(diff || "").split("\n")) {
-    if (line.startsWith("+++") || line.startsWith("---")) continue;
-    if (line.startsWith("+")) add += 1;
-    else if (line.startsWith("-")) del += 1;
-  }
-  if (!add && !del) return "";
-  return `+${add} −${del}`;
-}
-
 /**
  * 历史回读：把服务端下发的一轮 steps 还原成同一形状——
  * 「说」是正文段，工具是灰块，按真实顺序插在最终回答之前。
  */
-function toolFlowFromSteps(root, steps, workMs) {
+function toolFlowFromSteps(root, steps) {
   if (!Array.isArray(steps) || steps.length === 0) return null;
   const flow = document.createElement("div");
   flow.className = "flow";
@@ -204,12 +138,13 @@ function toolFlowFromSteps(root, steps, workMs) {
   else root.append(flow);
   root.classList.add("has-flow");
 
-  const chips = createToolChips(flow, { live: false });
-  let groupOpen = false;
+  // 每组工具一块自己的 .tchips：中间夹了「说」就另起一组，顺序才是真实的
+  // "话 → 块 → 话 → 块"。只用一个实例会把第二组块也塞回第一组里。
+  let chips = null;
   const segment = (text) => {
-    if (chips && groupOpen) {
+    if (chips) {
       chips.finish();
-      groupOpen = false;
+      chips = null;
     }
     const seg = document.createElement("div");
     seg.className = "body";
@@ -222,15 +157,13 @@ function toolFlowFromSteps(root, steps, workMs) {
       segment(step.output || "");
       continue;
     }
+    if (!chips) chips = createToolChips(flow, { live: false });
     const kind = toolKindOf(step.name);
     chips.push({
       id: step.name,
       verb: kind.verb || step.name,
       target: step.label || "",
-      iconSvg:
-        `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" ` +
-        `stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">` +
-        `${TOOL_ICON_PATHS[kind.icon] || TOOL_ICON_PATHS.tool}</svg>`,
+      iconSvg: toolIconSvg(kind.icon),
       args: step.args,
       state: step.ok === false ? "err" : "ok",
       output: step.output,
@@ -238,12 +171,11 @@ function toolFlowFromSteps(root, steps, workMs) {
       diffSummary: step.diff ? diffSummaryOf(step.diff) : "",
       duration: typeof step.ms === "number" ? shortDuration(step.ms) : "",
     });
-    groupOpen = true;
   }
-  chips.finish();
+  chips?.finish();
   // 最终回答那段 body 移到 flow 末尾，保持"话在块后"的顺序
   if (body) flow.append(body);
-  return { flow, workMs };
+  return flow;
 }
 
-export { addStepBlock, createToolFlow, diffSummaryOf, paintDiff, toolFlowFromSteps, workPanelFromSteps };
+export { createToolFlow, diffSummaryOf, toolFlowFromSteps };

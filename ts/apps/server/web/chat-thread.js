@@ -101,7 +101,12 @@ function addMessage(role, text, at, images = [], options = {}) {
     copy.addEventListener("click", async () => {
       let ok = true;
       try {
-        await navigator.clipboard.writeText(body.innerText);
+        // E1 灰块：一轮可能分成多段正文（话/块/话），复制要把所有正文段拼起来，
+        // 不能只取第一段。灰块本身和脚注不属于回答原文。
+        const parts = [...wrap.querySelectorAll(":scope > .flow > .body, :scope > .body")]
+          .map((seg) => seg.innerText)
+          .filter(Boolean);
+        await navigator.clipboard.writeText(parts.join("\n\n"));
       } catch {
         ok = false;
       }

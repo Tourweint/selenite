@@ -17,7 +17,7 @@ import { chiefDisplayName, partnerDisplayName, syncChatHeadAvatar } from "./part
 import { go, syncRailCurrent, syncSideRowsCurrent } from "./route.js";
 import { state } from "./state.js";
 import { ensureChatPagingFlag } from "./tasks-redesign.js";
-import { workPanelFromSteps } from "./tool-flow.js";
+import { toolFlowFromSteps } from "./tool-flow.js";
 import { loadPendingApprovals, mountTopicProposalCard, parseTopicProposalOutput } from "./topic-proposal.js";
 import { toast } from "./ui-atoms.js";
 
@@ -88,9 +88,9 @@ function renderTranscriptMessage(message, options = {}) {
   // 可寻址 id（2026-11-08 4a）：编辑重发靠它定位这条 user 消息
   if (message.role === "user" && message.id) shown.root.dataset.messageId = message.id;
   if (message.role !== "user") {
-    // 工作过程（2026-11-07）：服务端从 durable 里把这一轮的 toolCall / tool-result
-    // 配成 steps 下发；这里还原成与现场同一块（已收尾、默认折叠）。
-    workPanelFromSteps(shown.root, message.steps, message.workMs);
+    // 工具灰块（2026-11-13 E1）：服务端从 durable 里把这一轮的 toolCall / tool-result
+    // 配成 steps 下发；这里还原成与现场同一形状——话在正文，工具是灰块。
+    toolFlowFromSteps(shown.root, message.steps);
     // 文件变更汇总（批 33）：从同一份 steps 收集，与现场同一张卡
     mountFileSummary(shown.root, collectFileChangesFromSteps(message.steps));
     // 课题提议卡（2026-11-07 批二）：历史回读也按工具结果重渲，状态由 GET 定

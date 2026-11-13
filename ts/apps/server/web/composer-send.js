@@ -22,7 +22,7 @@ import { createStreamRevealer } from "./stream-reveal.js";
 import { applyTicketEvent } from "./tasks-live.js";
 import { loadPendingApprovals, mountTopicProposalCard, parseTopicProposalOutput, scheduleTurnReconcile } from "./topic-proposal.js";
 import { noMotion } from "./ui-atoms.js";
-import { createWorkPanel } from "./work-panel.js";
+import { createToolFlow } from "./tool-flow.js";
 
 /* ── 发送 ─────────────────────────────────────────────── */
 
@@ -148,12 +148,20 @@ async function send(text, images = [], files = []) {
   // 刚发出的这条就是最后一句话：编辑入口跟上去（messageId 在点的时候再补）
   syncEditEntry();
   const turn = addMessage("assistant", "", Date.now(), [], { fresh: true });
-  const body = turn.body;
+  // 这一轮的结构是"话 → 灰块 → 话 → 灰块"（E1 方案，2026-11-13）：
+  // turn.root 下先插一个 .flow 容器，每一段话是一个 .body，连续动一次手是一组 .tchips。
+  // 段与段之间顺序就是真实发生顺序，收尾也不再折成一行。
+  const flow = document.createElement("div");
+  flow.className = "flow";
+  turn.root.insertBefore(flow, turn.foot);
+  let body = turn.body;
+  flow.append(body);
+
   // 逐字浮现（2026-11-13）：旧版每帧整段 innerHTML 会杀掉子节点动画，
   // 逐字只能靠"只追加、不重建旧 span"的增量渲染（见 stream-reveal.js）。
   // 关掉开关或系统减少动态效果时退回旧路径，caret 也跟旧路径一起保留。
   const canReveal = () => state.chatRevealFlag !== false && !noMotion.matches;
-  const streamView = canReveal()
+  let streamView = canReveal()
     ? createStreamRevealer({ body, renderHtml: renderMarkdown, canAnimate: canReveal })
     : null;
   const caret = streamView ? null : document.createElement("span");
@@ -161,6 +169,31 @@ async function send(text, images = [], files = []) {
     caret.className = "caret";
     body.append(caret);
   }
+  /** 当前这段是否已经封口（工具动过手，下一句话要另起一段）。 */
+  let segmentClosed = false;
+  /** 下一个 delta 落到哪段正文：封口了就新开一段，接在灰块后面。 */
+  const ensureSegment = () => {
+    if (!segmentClosed) return;
+    segmentClosed = false;
+    // 上一段话已经落定，累积器清零——否则新段会从上一段开头重放一遍。
+    answer = "";
+    const next = document.createElement("div");
+    next.className = "body";
+    flow.append(next);
+    body = next;
+    streamView = canReveal()
+      ? createStreamRevealer({ body: next, renderHtml: renderMarkdown, canAnimate: canReveal })
+      : null;
+    if (caret) next.append(caret);
+  };
+  const closeSegment = () => {
+    if (segmentClosed) return;
+    if (streamView) streamView.finish(answer);
+    else if (body.isConnected) body.innerHTML = renderMarkdown(answer);
+    // 空段（没说话就动手）不占位：留着会在"话/块"之间多出一条 8px 的缝。
+    if (!answer.trim() && body.isConnected) body.remove();
+    segmentClosed = true;
+  };
 
   // 思考折叠卡（批次一，对齐 cindy ThinkingCard）：全态默认折叠，
   // 流式中计时跳秒，正文开始后定格。thinking 增量都往同一张卡里追加。
@@ -173,23 +206,25 @@ async function send(text, images = [], files = []) {
   let thinkTimer = 0;
   let answered = false;
 
-  // 工作过程块：有工具才建（第一只工具动手时），建了就一直在正文下方。
+  // 工具流：有工具才建（第一只工具动手时）。它把灰块插在 .flow 里，
+  // 顺序就是"话 → 块 → 话"；主界面不写步数/耗时，细节点块看（tool-chips.js）。
   let work = null;
   const ensureWork = () => {
-    if (!work) work = createWorkPanel(turn.root, { live: true });
+    if (!work) work = createToolFlow(flow, { live: true });
     return work;
   };
   /**
-   * 说过的话折进工作过程（2026-11-10 批 32）。
-   * 2026-11-13：E1 灰块改造待接，先保持旧行为。
+   * 工具要动手了：当前这段话封口，灰块接在它后面。
+   * 不再把中间话折进面板（批 32 的「只留结尾」在 E1 下退役）——
+   * E1 要的就是"说过的话留在正文、动手缩成小块"的交替阅读。
    */
-  const foldSpoken = () => {
-    const spoken = answer.trim();
-    if (!spoken) return;
-    ensureWork().say(spoken);
-    answer = "";
-    streamView?.reset();
-    paint();
+  const breakForTool = () => {
+    ensureWork();
+    // 连续动第二次手（中间没说话）：留在同一组灰块里，别把一动手拆成一行一枚。
+    if (segmentClosed) return;
+    closeSegment();
+    // 另起一组：start() 的灰块接在这段话后面。
+    work.breakGroup();
   };
   /**
    * 文件变更收集（批 33，学 ZCode 的「改了 N 个文件」）：只认 edit / write，
@@ -348,12 +383,12 @@ async function send(text, images = [], files = []) {
       // 服务重启过、或者那个会话已经不在：当新会话重发一次。
       state.conversationId = "";
       localStorage.removeItem(KEY_CONV);
-      body.remove();
+      turn.root.remove();
       setSending(false);
       return send(text, images, files);
     }
     if (!response.ok || !response.body) {
-      body.remove();
+      turn.root.remove();
       addError(`请求失败：HTTP ${response.status}`, { retryable: true });
       return;
     }
@@ -402,15 +437,18 @@ async function send(text, images = [], files = []) {
             // 独立成行，不并进这一轮的正文（answer 不追加）。
             addNotice(event.text || "");
           } else if (event.type === "delta") {
+            // 工具动过手之后来的第一句话：另起一段正文，接在灰块后面。
+            ensureSegment();
             answer += event.text;
             endThinkCard();
             schedule();
           } else if (event.type === "progress") {
-            // 「在想」由思考卡表头表达；「在动手」由工作过程块表头表达。
+            // 「在想」由思考卡表头表达；「在动手」由工具灰块表达。
             // 这里不再插占位行——两处表头已经是同一件事的第二份说法。
           } else if (event.type === "tool") {
             if (event.status === "start") {
-              if (answer.trim()) foldSpoken();
+              // 工具动手：当前话段封口，灰块接在它后面（话留在正文，不折叠）。
+              breakForTool();
               ensureWork().start(event.name, event.label, event.args);
             } else {
               ensureWork().end(event.name, event.ok !== false, event.output, event.diff);
@@ -422,10 +460,10 @@ async function send(text, images = [], files = []) {
             }
             if (state.stick) scrollToEnd();
           } else if (event.type === "delegate") {
-            // 派活也是一步：进同一个工作过程块，不再另起一行飘在正文上方。
+            // 派活也是一枚灰块：和工具在同一组里，不另起一行飘在正文上方。
             // 行的生死跟 phase 走：终态帧（done / needs_you / aborted / failed）
             // 一定有一帧，到了就收行；还在跑的由收尾 handoff 兜底（见 delegateRows）。
-            if (answer.trim()) foldSpoken();
+            breakForTool();
             const row = delegateRowOf(event);
             row.setLabel(`${event.done}/${event.total} ${event.current || event.lastAction || ""}`.trim());
             if (event.phase === "done" || event.phase === "needs_you") {
@@ -517,17 +555,12 @@ async function send(text, images = [], files = []) {
       el.thread.append(note);
       if (state.stick) scrollToEnd();
     }
-    if (body.isConnected) {
-      // 收尾去掉所有 reveal span：正文完整重渲染一次，和 ZCode 结束后切 static 一致。
-      if (streamView) streamView.finish(answer);
-      else body.innerHTML = renderMarkdown(answer);
-    }
-    // 收尾：工作过程折成一行「已工作 Ns · M 步」，点开还是刚才那些步骤。
-    // 人点了停止 → 标 interrupted（表头写"已中断"），不能画成正常完成。
-    // 派活行先 handoff：它不在 open 队列里，finish 不管；没终态帧的说明
-    // chancellor 还在后台跑，画「已转后台」，不能算进失败（2026-11-07 修）。
+    // 收尾：当前这段正文封口（去掉 reveal span，完整重渲染一次），
+    // 灰块留在原地（不再折成"已工作 Ns · M 步"一行）。
+    // 人点了停止 → 派活行标「已转后台」而不是失败（2026-11-07 修）。
+    closeSegment();
     for (const row of delegateRows.values()) row.handoff();
-    if (work) work.finish(state.stopRequested ? "interrupted" : "completed");
+    if (work) work.finish();
     // 一轮收尾：动过文件就在正文下方挂一张「改了 N 个文件」汇总卡（批 33，
     // 学 ZCode ConversationFileSummaryPanel——折叠区收掉之后，动了哪些文件还留得住）
     mountFileSummary(turn.root, fileChanges.list());

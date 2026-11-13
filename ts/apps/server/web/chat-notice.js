@@ -16,7 +16,7 @@ import { formatTokenCount } from "./providers.js";
 import { currentRoute } from "./route.js";
 import { state } from "./state.js";
 import { openModal, toast } from "./ui-atoms.js";
-import { TOOL_ICON_PATHS } from "./work-panel.js";
+import { TOOL_ICON_PATHS } from "./tool-meta.js";
 
 /* ── 文件变更汇总（2026-11-10 批 33，学 ZCode ConversationFileSummaryPanel）──
  * ZCode 的形状：折叠行「改了 N 个文件 +A -B」，点开逐文件列表（路径 + 每文件 +/-）。
@@ -61,7 +61,7 @@ function fileChangeCollector() {
 }
 
 /**
- * 「改了 N 个文件」汇总卡：挂在正文下方、工作过程块之后。
+ * 「改了 N 个文件」汇总卡：挂在正文下方、灰块之后。
  * 历史回读从 steps 收集（collectFileChangesFromSteps），形状与现场一致。
  */
 function mountFileSummary(root, files) {

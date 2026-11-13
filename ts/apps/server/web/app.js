@@ -31,7 +31,6 @@ import "./partners-status.js";
 import "./avatar.js";
 import "./partner-roster.js";
 import "./chat-thread.js";
-import "./work-panel.js";
 import "./tool-flow.js";
 import "./chat-notice.js";
 import "./markdown.js";

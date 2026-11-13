@@ -20,7 +20,7 @@ import { openAddProjectModal } from "./project-modal.js";
 import { showProviderTemplates } from "./providers.js";
 import { currentRoute, currentSettingsPage, go } from "./route.js";
 import { openAddSearchSourceModal } from "./search-sources.js";
-import { replayPageEnter, rowMarkup, sectionMarkup, switchMarkup } from "./settings-atoms.js";
+import { mountSegmented, replayPageEnter, rowMarkup, sectionMarkup, switchMarkup, syncSegmented } from "./settings-atoms.js";
 import { ACCENTS, renderSettingsNav } from "./settings-base.js";
 import { applyActPref, initRuntimeCard, loadPair, loadRelayStatus, loadServiceInfo, openAddDeviceModal } from "./settings-connection.js";
 import { memorySettingsMarkupLegacy, wireMemorySettingsLegacy } from "./settings-memory.js";
@@ -34,6 +34,7 @@ import { state } from "./state.js";
 import { ensureFlag } from "./tasks-redesign.js";
 import { KEY_ACCENT, KEY_ACTS, KEY_SEND, THEMES, currentThemeChoice, openFontModal, setAccent, setThemeChoice } from "./theme.js";
 import { closePopover, toast } from "./ui-atoms.js";
+import { chooseDetailMode, getDetailMode } from "./tool-chips.js";
 
 let pairTimer = 0;
 async function renderSettings() {
@@ -88,6 +89,15 @@ async function renderSettings() {
           "全站默认 + 聊天 / 设置 / 其他界面分别覆盖；字号按区域缩放，改完即时生效。",
           `<button class="ghost" type="button" id="font-open">修改</button>`,
         )}
+        <div class="divider"></div>
+        ${rowMarkup(
+          "工具详情",
+          "点对话里的工具小块时，细节在原地展开还是在旁边弹小窗",
+          `<div class="segmented slide" role="radiogroup" aria-label="工具详情">
+             <button type="button" data-tool-detail="inline" aria-checked="${getDetailMode() === "inline"}">原地展开</button>
+             <button type="button" data-tool-detail="popover" aria-checked="${getDetailMode() === "popover"}">附近小窗</button>
+           </div>`,
+        )}
       </div>`,
     );
 
@@ -99,6 +109,20 @@ async function renderSettings() {
       button.addEventListener("click", () => setAccent(button.dataset.accentChoice));
     }
     document.getElementById("font-open")?.addEventListener("click", openFontModal);
+    // 工具详情：两档分段，点哪档就落哪档（localStorage，改完下一次点块即生效）
+    const detailBox = el.settingsInner.querySelector("[data-tool-detail]")?.closest(".segmented");
+    if (detailBox) {
+      for (const button of detailBox.querySelectorAll("[data-tool-detail]")) {
+        button.addEventListener("click", () => {
+          const value = chooseDetailMode(button.dataset.toolDetail);
+          for (const other of detailBox.querySelectorAll("[data-tool-detail]")) {
+            other.setAttribute("aria-checked", String(other.dataset.toolDetail === value));
+          }
+          syncSegmented(detailBox);
+        });
+      }
+      mountSegmented(detailBox);
+    }
   } else if (page === "chats") {
     const sendKey = localStorage.getItem(KEY_SEND) || "enter";
     const showActs = localStorage.getItem(KEY_ACTS) !== "0";
