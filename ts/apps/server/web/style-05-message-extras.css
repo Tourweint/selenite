@@ -1,0 +1,349 @@
+/*
+ * 用户消息图片与编辑入口、文件变更汇总卡
+ *
+ * 2026-11-13 从 web/style.css（7,373 行单文件）按分区切出；正文是原文搬运，未改一条规则。
+ * 原区间 L1353–L1695。@import 顺序即层叠顺序，改样式只改对应分部。
+ */
+/* ── 用户消息的图片与编辑入口（2026-11-08 扫尾批 4a）──────────────
+   图片贴在气泡下方（同一列、右对齐）；编辑入口 hover 才出现，与助手那条脚注同一套
+   "不占脸、不顶布局"的做法：留 20px 高度，避免 hover 时整条消息上下跳。 */
+.msg-images {
+  display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px;
+  max-width: 480px;
+}
+.msg-images[hidden] { display: none; }
+.msg-images img {
+  width: 120px; height: 120px; object-fit: cover;
+  border-radius: var(--r-md);
+  border: 1px solid var(--chat-hairline);
+  background: var(--card);
+  cursor: zoom-in;
+  transition: filter .15s ease;
+}
+.msg-images img:hover { filter: brightness(.94); }
+
+/* 消息里的文件卡（2026-11-13 附件走路径）：与输入框上方同一张卡，右对齐贴在文字上方 */
+.msg-files {
+  display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px;
+  max-width: 480px;
+}
+.msg-files[hidden] { display: none; }
+.msg-file {
+  display: flex; align-items: center; gap: 8px;
+  max-width: 280px; padding: 7px 10px;
+  border: 1px solid var(--chat-hairline);
+  border-radius: var(--r-md);
+  background: var(--card);
+}
+.msg-file svg { width: 18px; height: 18px; flex: none; color: var(--text-3); }
+.msg-file-main { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.msg-file-name {
+  font-size: 12.5px; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.msg-file-meta { font-size: 11px; color: var(--text-3); }
+
+.msg-user-actions {
+  display: flex; justify-content: flex-end; gap: 6px;
+  min-height: 20px;
+  font-size: 11px; color: var(--text-3);
+  opacity: 0; pointer-events: none;
+  transition: opacity .15s ease;
+}
+.msg.user:hover .msg-user-actions,
+.msg.user:focus-within .msg-user-actions { opacity: 1; pointer-events: auto; }
+.msg-user-actions[hidden] { display: none; }
+.msg-user-actions button {
+  height: 20px; padding: 0 7px;
+  border: 1px solid var(--outline); border-radius: var(--r-sm);
+  background: var(--bg); color: var(--text-3);
+  font-size: 11px;
+  transition: color .15s ease, border-color .15s ease;
+}
+.msg-user-actions button:hover { color: var(--text); border-color: var(--text-3); }
+
+/* 行内编辑：替换气泡本身，宽度与气泡一致，取消/重发在下方 */
+.msg-editor { width: min(480px, 100%); display: flex; flex-direction: column; gap: 6px; }
+.msg-editor textarea {
+  width: 100%; min-height: 64px; max-height: 240px;
+  padding: 10px 14px;
+  border-radius: var(--r-lg) var(--r-lg) var(--r-sm) var(--r-lg);
+  border: 1px solid var(--accent-line);
+  background: var(--bg); color: var(--text);
+  font: inherit; font-size: 14.5px; line-height: 1.6;
+  resize: vertical; outline: none;
+}
+.msg-editor textarea:focus { border-color: var(--text-3); }
+.msg-editor-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.msg-editor-actions button {
+  height: 26px; padding: 0 12px;
+  border-radius: var(--r-full);
+  border: 1px solid var(--outline);
+  background: var(--bg); color: var(--text-2);
+  font-size: 12px;
+}
+.msg-editor-actions button.primary {
+  border-color: transparent;
+  background: var(--accent-container); color: var(--on-accent-container);
+}
+.msg-editor-actions button:disabled { opacity: .5; }
+
+.msg.error .body {
+  padding: 10px 14px;
+  border: 1px solid var(--c-error);
+  border-radius: var(--r-md);
+  color: var(--c-error);
+  font-size: 13.5px;
+}
+
+.body > :first-child { margin-top: 0; }
+.body > :last-child { margin-bottom: 0; }
+.body p { margin: 0 0 12px; }
+.body h1, .body h2, .body h3, .body h4 { margin: 20px 0 10px; line-height: 1.4; font-weight: 600; color: var(--text); }
+.body h1 { font-size: 19px; }
+.body h2 { font-size: 17px; }
+.body h3 { font-size: 15.5px; }
+.body h4 { font-size: 14.5px; }
+.body ul, .body ol { margin: 0 0 12px; padding-left: 20px; }
+.body li { margin: 2px 0; }
+.body li::marker { color: var(--text-3); }
+.body blockquote {
+  margin: 0 0 12px; padding: 2px 0 2px 12px;
+  border-left: 2px solid var(--outline);
+  color: var(--text-2);
+}
+.body hr { border: 0; border-top: 1px solid var(--divider); margin: 18px 0; }
+.body a { color: var(--accent); text-decoration: none; }
+.body a:hover { text-decoration: underline; }
+.body strong { font-weight: 600; }
+
+/* 表格（批次二）：GFM 管道表格；外层管横滚，防宽表撑破消息栏 */
+.table-wrap { overflow-x: auto; margin: 0 0 12px; }
+.body table {
+  border-collapse: collapse;
+  font-size: 13px; line-height: 1.55;
+}
+.body th, .body td {
+  border: 1px solid var(--divider);
+  padding: 6px 10px;
+  text-align: left;
+}
+.body th { background: var(--card-high); font-weight: 600; color: var(--text); }
+
+/* 上下文环形指示（2026-11-04 从顶栏搬进 composer 右下，对齐 cindy ContextCapacityRing；
+   2026-11-11 挪到模型 pill 左侧；2026-11-13 用户拍板环边不再摆任何数字，
+   2026-11-13 二轮：用户说「有点大」，20×20 → 16×16、环高 28 → 24、描边 2.5 → 2.2；
+   「用了 / 顶了 / 最多」全部收进悬停 title；颜色走 currentColor，阈值只换 class。 */
+.ctx-ring {
+  display: inline-flex; align-items: center;
+  height: 24px;
+  color: var(--text-3);
+  transition: color .18s ease;
+}
+.ctx-ring[hidden] { display: none; }
+.ctx-ring svg { width: 16px; height: 16px; flex: none; }
+.ctx-track { fill: none; stroke: var(--divider); stroke-width: 2.2; }
+.ctx-fill {
+  fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round;
+  /* 12 点起顺时针：圆默认从 3 点起笔，整体转 -90° */
+  transform: rotate(-90deg); transform-origin: 10px 10px;
+  transition: stroke-dashoffset .3s ease;
+}
+.ctx-ring.warn { color: var(--warn); }
+.ctx-ring.danger { color: var(--c-error); }
+
+.body code {
+  font-family: var(--mono); font-size: 12.8px;
+  background: var(--chat-inset); border-radius: var(--r-sm);
+  padding: 1.5px 5px;
+}
+.body pre.code {
+  margin: 0; padding: 12px 14px;
+  background: var(--chat-inset); border: 1px solid var(--chat-hairline);
+  border-radius: var(--r-md); overflow-x: auto;
+  box-shadow: var(--card-glow);
+}
+.body pre.code code { background: none; padding: 0; font-size: 12.6px; line-height: 1.62; }
+
+/* 代码块容器（2026-11-04 批次一）：外边距归容器，复制按钮 hover 出现 */
+.codeblock { position: relative; margin: 0 0 12px; }
+.code-copy {
+  position: absolute; top: 8px; right: 8px;
+  height: 22px; padding: 0 8px;
+  border: 1px solid var(--outline); border-radius: var(--r-sm);
+  background: var(--bg); color: var(--text-3);
+  font-size: 11.5px;
+  opacity: 0; pointer-events: none;
+  transition: opacity .15s ease, color .15s ease;
+}
+.codeblock:hover .code-copy { opacity: 1; pointer-events: auto; }
+.code-copy:hover { color: var(--text); }
+
+/* 代码块头行（批 33，对齐 ZCode）：语言标签在左、复制在右；有头行时复制不再是悬浮钮 */
+.code-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 5px 8px 5px 10px;
+  background: var(--chat-inset);
+  border-bottom: 1px solid var(--chat-hairline);
+  border-radius: var(--r-sm) var(--r-sm) 0 0;
+}
+.code-lang {
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .04em;
+  color: var(--text-3); text-transform: uppercase;
+}
+.code-head .code-copy {
+  position: static; opacity: 1; pointer-events: auto;
+  border: 0; background: transparent;
+}
+/* 有头行时把 pre 上边角压平（头行已经带了圆角） */
+.codeblock:has(.code-head) .code { border-top-left-radius: 0; border-top-right-radius: 0; }
+
+/* 任务清单（批 33）：只读勾选框，勾上的是模型报告的状态 */
+.md-task { display: inline-flex; align-items: baseline; gap: 6px; }
+.md-task input[type="checkbox"] {
+  flex: none; width: 13px; height: 13px;
+  margin: 0; position: relative; top: 1px;
+  accent-color: var(--accent);
+}
+/* markdown 图片：限制在正文宽度内，别把气泡撑爆 */
+.md-img { max-width: 100%; height: auto; border-radius: var(--r-sm); }
+
+/* ── 文件变更汇总卡（批 33，学 ZCode ConversationFileSummaryPanel）────
+ * 正文下方、工作过程之后：折叠行「改了 N 个文件 +A -B」，
+ * 点开逐文件列表（路径 + 每文件 +/-）。折叠态与 ZCode 一致只占一行。 */
+.fsum {
+  margin: 8px 0 0;
+  border: 1px solid var(--chat-hairline);
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--card) 55%, transparent);
+  overflow: hidden;
+}
+.fsum-head {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; padding: 7px 10px;
+  background: transparent; color: var(--text-2);
+  font-size: 12.5px; text-align: left;
+  transition: background-color .15s ease;
+}
+.fsum-head:hover { background: color-mix(in srgb, var(--card-high) 50%, transparent); }
+.fsum-chevron { flex: none; display: inline-flex; width: 13px; height: 13px; color: var(--text-3); }
+.fsum-chevron svg { width: 13px; height: 13px; transition: transform .18s ease; }
+.fsum[data-open="1"] .fsum-chevron svg { transform: rotate(90deg); }
+.fsum-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fsum-nums { flex: none; display: inline-flex; gap: 6px; font-style: normal; }
+.fsum-add, .fsum-del { font-style: normal; font-family: var(--mono); font-size: 11.5px; }
+.fsum-add { color: var(--code-n); }
+.fsum-del { color: var(--c-error); }
+.fsum-files {
+  display: none; flex-direction: column;
+  border-top: 1px solid var(--card-border);
+}
+.fsum[data-open="1"] .fsum-files { display: flex; }
+.fsum-file {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 10px 5px 31px;
+  font-size: 12px;
+}
+.fsum-file + .fsum-file { border-top: 1px solid color-mix(in srgb, var(--card-border) 55%, transparent); }
+.fsum-path {
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--mono); font-size: 11.5px; color: var(--text-2);
+}
+
+/* 高亮 token：五类，颜色走 --code-* 家族（跟随主题） */
+.tok-k { color: var(--code-k); }
+.tok-s { color: var(--code-s); }
+.tok-c { color: var(--code-c); font-style: italic; }
+.tok-n { color: var(--code-n); }
+.tok-a { color: var(--code-a); }
+
+/* 思考折叠卡（2026-11-04 批次一，对齐 cindy ThinkingCard）：
+   全态默认折叠；正文斜体 + 左侧细轨；流式中 summary 由 JS 计时 */
+.think {
+  margin: 0 0 8px;
+  border-left: 2px solid var(--accent-line);
+  padding: 2px 0 2px 10px;
+  animation: thinkIn 220ms var(--ease-decelerate) both;
+}
+@keyframes thinkIn {
+  from { opacity: 0; transform: translateY(2px); }
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .think { animation: none; }
+}
+.think summary {
+  cursor: pointer; user-select: none;
+  font-size: 12px; color: var(--text-3);
+  transition: color .15s ease;
+}
+.think summary:hover { color: var(--text-2); }
+/* 运行中的彗星环：14px 的 conic 渐变 + 径向遮罩，比转圈图标安静；
+   定格后 display:none，不在已完成的卡上继续转（2026-11-13，对齐 ZCode 的"工作中"）。 */
+.think-orb {
+  display: inline-block; vertical-align: -2px;
+  width: 14px; height: 14px; margin-right: 6px;
+  border-radius: 50%;
+  background: conic-gradient(from 0turn, transparent 0 52%, var(--accent) 70%, transparent 88% 100%);
+  -webkit-mask: radial-gradient(circle, transparent 53%, #000 55%);
+  mask: radial-gradient(circle, transparent 53%, #000 55%);
+  animation: thinkSpin 1.1s linear infinite;
+}
+.think[data-live="0"] .think-orb { display: none; }
+/* 思考中扫光：3 倍宽渐变横移，4s 一圈；只动 background-position，不触发布局。 */
+.think[data-live="1"] .think-label {
+  background: linear-gradient(90deg, var(--text-3) 0%, var(--text) 45%, var(--text) 55%, var(--text-3) 100%);
+  background-size: 300% 100%;
+  -webkit-background-clip: text; background-clip: text;
+  color: transparent; -webkit-text-fill-color: transparent;
+  animation: thinkShimmer 4s linear infinite;
+}
+@keyframes thinkSpin { to { transform: rotate(1turn); } }
+@keyframes thinkShimmer {
+  from { background-position: 100% 0; }
+  to { background-position: 0% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .think-orb, .think[data-live="1"] .think-label { animation: none; }
+}
+.think-body {
+  margin-top: 6px;
+  font-size: 12.5px; font-style: italic; color: var(--text-2);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  max-height: 240px; overflow-y: auto;
+}
+
+/* 消息级 token/耗时：2026-11-06 起是 .msg-foot 里的一项，不再自己 absolute。
+   旧规则留着会把脚注撑成浮层，整段删掉。 */
+
+/* 手动中断的痕迹（批次一） */
+.msg.stopped {
+  font-size: 12px; font-style: italic; color: var(--text-3);
+}
+
+/* 错误行竖排：正文 + 重试按钮上下排（批次一） */
+.msg.error { flex-direction: column; align-items: flex-start; gap: 6px; }
+/* 系统提示行（2026-11-07 消息即引导）：插话/排队的诚实回执。
+   不是错误、也不是模型的正文，所以用中性胶囊，不进 markdown 渲染。 */
+.msg.notice { flex-direction: row; align-items: center; }
+.msg.notice .body {
+  padding: 6px 12px;
+  border-radius: var(--r-full);
+  background: var(--surface-low);
+  border: 1px solid var(--divider);
+  color: var(--text-3);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.retry-btn {
+  height: 26px; padding: 0 10px;
+  border: 1px solid var(--card-border); border-radius: var(--r-sm);
+  background: var(--card-high); color: var(--text-2);
+  font-size: 12px;
+  transition: background .15s ease, color .15s ease;
+}
+.retry-btn:hover { background: var(--card); color: var(--text); }
+/* open 失败卡：重试 / 继续对话并排，窄屏自动折行 */
+.partner-open-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+

@@ -1,0 +1,300 @@
+/*
+ * 服务页供应商双栏
+ *
+ * 2026-11-13 从 web/style.css（7,373 行单文件）按分区切出；正文是原文搬运，未改一条规则。
+ * 原区间 L5070–L5363。@import 顺序即层叠顺序，改样式只改对应分部。
+ */
+/* ── 服务页：供应商双栏（ZCode SectionLayout）────────── */
+.svc-split {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  min-height: 420px;
+  border: 1px solid var(--composer-border);
+  border-radius: var(--r-lg);
+  background: var(--card);
+  overflow: clip;
+}
+@media (min-width: 720px) {
+  .svc-split { grid-template-columns: 224px minmax(0, 1fr); }
+}
+.svc-nav {
+  min-width: 0;
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 8px 6px;
+  border-right: 1px solid var(--divider);
+  overflow-y: auto;
+}
+@media (min-width: 720px) {
+  .svc-nav { padding: 8px; }
+}
+.svc-row {
+  position: relative;
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; height: 32px; padding: 0 8px;
+  border: 1px solid transparent; border-radius: var(--r-sm);
+  background: transparent; color: var(--text);
+  font-size: 13px; text-align: left; cursor: pointer;
+  transition: background-color .15s ease, border-color .15s ease;
+}
+.svc-row:hover { border-color: var(--composer-border); }
+.svc-row[aria-selected="true"] {
+  border-color: var(--composer-border);
+  background: var(--card-high);
+}
+.svc-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.svc-row-initial {
+  display: grid; flex: none;
+  width: 22px; height: 22px; border-radius: var(--r-sm);
+  place-content: center;
+  background: var(--surface-low); color: var(--text-2);
+  font-size: 11.5px; font-weight: 600;
+}
+.svc-row-initial svg { width: 15px; height: 15px; display: block; }
+.svc-row-label {
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 供应商行尾的模型个数（2026-11-12 M1）：只给一个数字，不写「个模型」——
+   列表宽度 224，多两个字会把名字挤掉。 */
+.svc-row-count {
+  flex: none;
+  font-size: 11px; color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.svc-row .status-dot { flex: none; }
+.svc-nav-empty { padding: 4px 8px; font-size: 11.5px; line-height: 1.5; color: var(--text-3); }
+@media (max-width: 719px) {
+  .svc-row {
+    width: 32px; height: 32px; margin: 0 auto; padding: 0;
+    justify-content: center; gap: 0;
+  }
+  .svc-row-label { display: none; }
+  .svc-row-count { display: none; }
+  .svc-row .status-dot {
+    position: absolute; right: 1px; bottom: 1px;
+    box-shadow: 0 0 0 2px var(--card);
+  }
+  .svc-nav-empty { display: none; }
+}
+
+.svc-detail { position: relative; min-width: 0; padding: 16px; }
+@media (min-width: 720px) {
+  .svc-detail { padding: 20px 24px; }
+}
+.svc-detail-empty {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 10px;
+  padding: 24px 0;
+}
+
+/* 下拉展开：0fr → 1fr + opacity，200ms；reduced-motion 直切（ZCode ModelEditorAdvanced 同款） */
+.svc-expand {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition:
+    grid-template-rows var(--dur-base) var(--ease-standard),
+    opacity var(--dur-base) var(--ease-standard);
+}
+.svc-expand.is-open { grid-template-rows: 1fr; opacity: 1; }
+.svc-expand > * { min-height: 0; overflow: hidden; }
+@media (prefers-reduced-motion: reduce) {
+  .svc-expand { transition: none; }
+}
+
+/* 模板选择：返回行 + 卡片网格（min-h-16，图标槽 36px） */
+.svc-tpl-head { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+.svc-back {
+  flex: none;
+  display: grid; place-content: center;
+  width: 28px; height: 28px; padding: 0;
+  border: 0; border-radius: var(--r-full);
+  background: transparent; color: var(--text-3); cursor: pointer;
+  transition: background-color .15s ease, color .15s ease;
+}
+.svc-back:hover { background: var(--surface-low); color: var(--text); }
+.svc-back:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.svc-back svg { width: 16px; height: 16px; }
+.svc-tpl-title { margin: 0; font-size: 15px; font-weight: 600; color: var(--text); }
+.svc-tpl-grid { display: grid; grid-template-columns: 1fr; gap: 8px; }
+/* 两列只在右栏真的够宽时才开：分节内容列上限 ≈ 视口 - 侧栏 276 - 边距 40，
+   右栏再扣掉左栏 224。1080 视口 ≈ 右栏 540，两列各 266，图标+箭头之外还剩 170 给文字；
+   再窄就一列——否则每张卡只剩 ~110，名字会被挤成一列一个字（823 窗口实测）。 */
+@media (min-width: 1080px) {
+  .svc-tpl-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+.svc-tpl {
+  display: flex; align-items: center; gap: 12px;
+  min-height: 64px; min-width: 0; padding: 12px 16px;
+  border: 1px solid var(--composer-border); border-radius: var(--r-sm);
+  background: var(--surface); color: var(--text); text-align: left; cursor: pointer;
+  transition: border-color .15s ease, background-color .15s ease;
+}
+.svc-tpl:hover { border-color: var(--text-3); background: var(--surface-low); }
+.svc-tpl:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.svc-tpl-icon {
+  flex: none;
+  display: grid; place-content: center;
+  width: 36px; height: 36px;
+  border-radius: var(--r-sm);
+  background: var(--surface-low); color: var(--text-2);
+  font-size: 13px; font-weight: 600;
+}
+/* 品牌图标（2026-11-13）：SVG 自带 1em，尺寸统一成 22px；没有图标的模板仍是文字标记 */
+.svc-tpl-icon svg { width: 22px; height: 22px; display: block; }
+.svc-tpl-main { flex: 1; min-width: 0; }
+.svc-tpl-name { display: block; font-size: 13px; font-weight: 500; color: var(--text); }
+.svc-tpl-desc {
+  display: block;
+  margin-top: 2px;
+  font-size: 11.5px; line-height: 1.4; color: var(--text-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.svc-tpl .chev { width: 14px; height: 14px; flex: none; color: var(--text-3); }
+
+/* 供应商表单 */
+.svc-form {
+  display: flex; flex-direction: column; gap: 14px;
+  /* 拉数据时轻微降透明（不位移、不弹跳） */
+  transition: opacity 150ms var(--ease-standard);
+}
+/* 切换中的一帧：从 .55 淡回 1，让“换了一个人”有反馈但页面不闪 */
+@keyframes svc-swap-in { from { opacity: .55; } to { opacity: 1; } }
+.svc-form.is-swapping { animation: svc-swap-in 160ms var(--ease-standard); }
+/* 拉数据中：保留现有值，只把不透明度压下去一点，绝不出现白块 */
+.svc-detail.is-loading .svc-form { opacity: .55; }
+@media (prefers-reduced-motion: reduce) {
+  .svc-form.is-swapping { animation: none; }
+}
+.svc-form-head { display: flex; align-items: flex-start; gap: 10px; }
+.svc-form-head .set-card-title { margin-top: 3px; }
+.field-hint { font-size: 11.5px; line-height: 1.45; color: var(--text-3); }
+.field input.is-mono { font-family: var(--mono); font-size: 12.5px; }
+/* 「获取 Key ↗」：模板给的申请入口，和字段名同一行，不额外占高度 */
+.field > span .field-link {
+  margin-left: 8px;
+  font-size: 11.5px; color: var(--accent); text-decoration: none;
+}
+.field > span .field-link:hover { text-decoration: underline; }
+.field > span .field-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+/* 套餐分段（2026-11-13）：轨道不铺满整行，按钮宽度跟文字走；窄屏折行而不是溢出 */
+#pv-plan-field .segmented { align-self: flex-start; flex-wrap: wrap; max-width: 100%; }
+
+/* API Key + 眼睛（CINDY 同款交互：右侧圆钮切明文，不重建输入框） */
+.secret-wrap { position: relative; display: flex; align-items: center; }
+.secret-wrap input { flex: 1; min-width: 0; padding-right: 40px; }
+.secret-eye {
+  position: absolute; right: 4px; top: 50%;
+  display: grid; place-content: center;
+  width: 26px; height: 26px; padding: 0;
+  border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--text-3);
+  transform: translateY(-50%);
+  cursor: pointer;
+  transition: background-color .15s ease, color .15s ease;
+}
+.secret-eye:hover { background: var(--surface-low); color: var(--text); }
+.secret-eye:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.secret-eye svg { width: 15px; height: 15px; }
+
+/* 模型清单（2026-11-05，2026-11-13 表头并进字段名那行）：字段名 + 右上「添加模型」同一行。
+   按钮 28px 会把行高顶起来，用负外边距收掉，字段与字段之间的间距才和上面几个字段一样。 */
+.field-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+}
+.field-head .svc-model-add { margin-block: -5px; }
+.svc-model-add {
+  flex: none;
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 28px; padding: 0 10px;
+  font-size: 12px; border-radius: var(--r-sm);
+}
+.svc-model-add svg { width: 14px; height: 14px; }
+/* 模型清单（2026-11-12 M1）：从"一张模型一张小卡"改成卡内平铺行。
+   十几个模型时，套框小卡会把右栏堆成一片边框；平铺 + 行底细线更像一份清单。
+   元信息挪到行尾做成定宽列（131K · 4K），长短 id 不再把第二行挤得参差。 */
+.svc-model-list {
+  display: flex; flex-direction: column;
+  margin-top: 8px;
+  border-top: 1px solid var(--divider);
+}
+.svc-model-row {
+  display: flex; align-items: center; gap: 8px;
+  min-width: 0; min-height: 38px; padding: 4px 2px;
+  border-bottom: 1px solid var(--divider);
+}
+.svc-model-row:last-child { border-bottom: 0; }
+.svc-model-main {
+  display: flex; align-items: center; gap: 12px;
+  flex: 1; min-width: 0;
+}
+.svc-model-id {
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--mono); font-size: 12.5px; color: var(--text);
+}
+.svc-model-meta {
+  flex: none; width: 84px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  text-align: right;
+  font-size: 11px; color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+@media (max-width: 719px) {
+  .svc-model-main { flex-direction: column; align-items: flex-start; gap: 2px; }
+  .svc-model-meta { width: auto; text-align: left; }
+}
+.svc-model-act {
+  flex: none;
+  display: grid; place-content: center;
+  width: 28px; height: 28px; padding: 0;
+  border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--text-3); cursor: pointer;
+  transition: background-color .15s ease, color .15s ease;
+}
+.svc-model-act:hover { background: var(--surface-low); color: var(--text); }
+.svc-model-act.is-danger:hover { color: var(--c-error); }
+.svc-model-act:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.svc-model-act svg { width: 14px; height: 14px; }
+.svc-model-empty {
+  padding: 12px;
+  border: 1px dashed var(--outline); border-radius: var(--r-sm);
+  font-size: 12px; line-height: 1.5; color: var(--text-3);
+}
+
+/* 模型弹窗的思考档多选 */
+.pm-levels { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+.pm-level-opt {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12.5px; color: var(--text-2); cursor: pointer;
+}
+.pm-level-opt input { accent-color: var(--accent); }
+
+.svc-form-actions {
+  display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px;
+}
+.svc-form-actions .set-hint { margin-right: auto; min-height: 17px; text-align: left; }
+.ghost.is-danger {
+  color: var(--c-error);
+  border-color: color-mix(in srgb, var(--c-error) 38%, transparent);
+}
+.ghost.is-danger:hover {
+  background: color-mix(in srgb, var(--c-error) 12%, transparent);
+  color: var(--c-error);
+}
+.ghost.is-danger:disabled {
+  color: var(--text-3);
+  border-color: var(--outline);
+  background: transparent;
+}
+
+/* 删除确认：复用 .modal，仅确认钮换成 destructive 色 */
+.modal-danger {
+  height: 32px; padding: 0 14px;
+  border: 0; border-radius: var(--r-md);
+  background: var(--c-error); color: var(--bg);
+  font-size: 13px; font-weight: 500;
+  transition: filter .15s ease;
+}
+.modal-danger:hover { filter: brightness(1.05); }
+.modal-danger:disabled { opacity: .5; cursor: default; filter: none; }
+

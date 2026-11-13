@@ -1,0 +1,296 @@
+/*
+ * 字体设置、空态、消息基础
+ *
+ * 2026-11-13 从 web/style.css（7,373 行单文件）按分区切出；正文是原文搬运，未改一条规则。
+ * 原区间 L1063–L1352。@import 顺序即层叠顺序，改样式只改对应分部。
+ */
+/* ── 字体设置（2026-11-13）──────────────────────────────
+   全站默认写 `--font`；分区只覆盖自己的根，未选的项回落到全站。
+   字号用 zoom 作用在区域根上：字、间距、控件一起放大，比只改 font-size 更整齐；
+   宽度用 100%/zoom 反向补偿，放大后仍贴合容器。 */
+#view-chat {
+  font-family: var(--font-chat, var(--font));
+  zoom: var(--zoom-chat, 1);
+  width: calc(100% / var(--zoom-chat, 1));
+}
+/* 首页态不做字号缩放：问候与输入卡按 50vh / 13vh 定位，zoom 会把整组往上抬；
+   首页只有一句问候 + 占位符，字号跟随默认即可，开始对话后再按聊天区字号缩放。 */
+#view-chat[data-home="1"] { zoom: 1; width: 100%; --zoom-chat: 1; }
+#view-settings { font-family: var(--font-settings, var(--font)); }
+#settings-inner {
+  zoom: var(--zoom-settings, 1);
+  width: calc(100% / var(--zoom-settings, 1));
+}
+#view-tasks, #view-domains, #view-groups, #view-search {
+  font-family: var(--font-other, var(--font));
+  zoom: var(--zoom-other, 1);
+  width: calc(100% / var(--zoom-other, 1));
+}
+/* 弹窗与对话设置抽屉是 body 级元素，用当前路由标记带上所在区域的字体；
+   只跟字体，不跟字号缩放，避免弹窗尺寸随区域字号跳。 */
+#modal[data-scope="chat"], #chat-settings-drawer { font-family: var(--font-chat, var(--font)); }
+#modal[data-scope="settings"] { font-family: var(--font-settings, var(--font)); }
+#modal[data-scope="tasks"],
+#modal[data-scope="domains"],
+#modal[data-scope="group"],
+#modal[data-scope="search"] { font-family: var(--font-other, var(--font)); }
+@keyframes viewIn {
+  /* 铺满窗口后不再用位移入场，否则会短暂露出底下的背景 */
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.top {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 0 22px;
+  height: 48px;
+  border-bottom: 1px solid var(--divider);
+}
+.top h1 {
+  margin: 0; font-size: 13px; font-weight: 500; color: var(--text-2);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  flex: 1; min-width: 0;
+}
+/* 顶栏「我在跟谁说话」（2026-11-13）：头像贴标题左侧，只在执事专线出现。
+   尺寸比群组顶栏（30px）小一号——这里的标题是 13px 的浅色会话名，不是 14px 的群名，
+   头像跟着字号走才不头重；无头像时整块收起，标题仍顶在最左（与改造前一致）。 */
+.top-id {
+  display: flex; align-items: center; gap: 8px;
+  flex: 1; min-width: 0;
+}
+.chat-head-avatar { width: 26px; height: 26px; font-size: 12px; }
+
+.ghost {
+  height: 28px; padding: 0 12px;
+  border: 1px solid var(--outline); border-radius: var(--r-md);
+  background: transparent; color: var(--text-2); font-size: 12.5px;
+  transition: background .15s ease, color .15s ease;
+}
+.ghost:hover { background: var(--card); color: var(--text); }
+.ghost:disabled { color: var(--text-3); cursor: default; }
+
+.scroll { overflow-y: auto; min-height: 0; }
+
+.thread {
+  max-width: var(--thread);
+  margin: 0 auto;
+  /* 底部让位 = 输入卡实测高度（JS 写进 --composer-h，缺省 86 = 卡 min-height）
+     + 卡底距 + 尾缝。输入栏长高（2026-11-11 学 ZCode）/错误卡/附件行出现时由
+     ResizeObserver 同步，最后一条消息永远不被压在卡下。原来写死 108px，只够一行高的卡。
+
+     2026-11-13 用户报「最后一条贴输入框太近」：原来只写 `+ 22px`，而 composer 本身
+     离底 14px，扣完净空只剩 8px —— 一条消息的底边几乎是蹭在卡沿上。现在把卡底那
+     14px 显式算进来，尾缝取 44px（≈ 一条消息框的高度），净空才是看得到的 44px。
+     首页态不走这条：`.main[data-home="1"] .thread` 自己整条覆写 padding-bottom。 */
+  padding: 26px 22px calc(var(--composer-h, 86px) + 14px + 44px);
+  display: flex; flex-direction: column; gap: 18px;
+}
+
+/* ── 空态 ─────────────────────────────────────────────── */
+
+/* 空态整组：水晶在左、问候在右（2026-11-07 用户指定横排）。
+   以前是图标竖着压在文字上方，88px 的方块把这一组的重心拉得很高，
+   横排后一行读完，重量落回文字上，水晶只当起首的字距。
+
+   字号放在整组上、图标用 em 跟着走：窄窗把字收到 22px 时，
+   54px 的石头会显得头重，绑成 1.8em 后它跟着缩到 40px，比例才一直是同一个。 */
+.empty {
+  display: inline-flex; align-items: center; gap: 16px;
+  margin: 13vh auto 0;
+  text-align: left;
+  font-size: clamp(22px, 2.2vw + 6px, 30px);
+  color: var(--text-2);
+  animation: rise .3s ease both;
+}
+/* 首页态：整组坐在被抬起来的输入框正上方（对齐 cindy 的首页层级：标识 → 输入 → 内容）。
+   不用 vh 硬算——原来 `22vh - 标题栏` 在窗口一矮就压到卡上（2026-11-06 已登记的老问题）。
+   这里直接对齐卡片顶边：卡片底边距主区底 = 50vh - offset，offset = 卡高/2 - 12，
+   于是卡片顶边离主区底 = 50vh + offset + 24；再加 18px 呼吸，就是下面的 +42。
+   卡高由 JS 实测，字号变大、占位文案换行都不会压上去。 */
+/* 首页时 .top 是 display:none，但 grid-template-rows 还是 `auto 1fr`：
+   .scroll 落在 auto 那一行，只拿到内容高（709 的主区里只占 392），主区下半截空着、
+   空态也被裁在这个矮框里。改成单行 1fr，滚动盒才铺满主区。 */
+.main[data-home="1"] { grid-template-rows: 1fr; }
+.main[data-home="1"] .scroll { height: 100%; }
+.main[data-home="1"] .thread {
+  min-height: 100%;
+  justify-content: flex-end;
+  padding-bottom: calc(50vh + var(--composer-home-offset) + 42px);
+}
+/* align-self 而不是 margin:0 auto：.thread 是纵向 flex，横向 auto margin 不会居中，
+   而 align-self:center 既居中又让这一组收缩到内容宽（否则会被拉成整行、靠左） */
+.main[data-home="1"] .empty { align-self: center; margin: 0; }
+/* 图标高度用 em 而不是 px：整组字号在 clamp 里缩放，石头跟着缩才不会头重脚轻。
+   1.8em 在宽窗（30px）下就是 54px——这是贴着 30px 宋体量出来的：
+   水晶宽高比只有 0.6，高度不够时它在字旁边就像一道竖线。 */
+.main[data-home="1"] .empty-mark { height: 1.8em; }
+
+/* 首页标识 = 项目水晶（2026-11-04，替掉旧的 40px 方块占位）：
+   无背景无描边，水晶自带渐变明暗面，外圈只给两层靛蓝光晕（取 --c-primary 色相）。
+   2026-11-07 换成裁掉透明边的 crystal-mark.png：原来 512 方块里水晶只占中间一条，
+   88px 的框实际只画出 48px 的石头，横排时那段空白会变成一段莫名其妙的距离。 */
+.empty-mark {
+  display: block; flex: none;
+  height: 1.8em; width: auto;
+  object-fit: contain;
+  filter: drop-shadow(0 8px 22px rgba(62, 74, 140, .26))
+          drop-shadow(0 2px 6px rgba(62, 74, 140, .14));
+}
+.empty p { margin: 0 0 16px; font-size: 14px; }
+
+/* 问候语（2026-11-07）：首页唯一的一句人话，用衬线体，字号抬到 30px。
+   无衬线在这里读起来像按钮文案；衬线带笔锋，跟水晶的冷光放在一起才像「纸上的题头」。
+   语句本身按时间段换（见 app.js 的 GREETING_SLOTS），CSS 只负责它怎么站着。
+
+   字号只在 .empty 上定一次（clamp 22→30），这里 inherit：图标用 em 跟着缩放，
+   两边必须是同一个值；若各自写一份 clamp，改动时就会不同步。
+   选择器带 .empty 前缀是因为上面那条 `.empty p` 的优先级 (0,1,1) 高于单个类，
+   不压过它就会被 14px 盖掉（第一版犯过，实测 computed 仍是 14px）。
+   用 clamp 而不是写死 30px：最长那句「早，今天想从哪儿开始？」在 600px 宽的窗口会折行。 */
+.empty p.empty-greet {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: inherit;
+  font-weight: 500; line-height: 1.25;
+  letter-spacing: .03em;
+  color: var(--text);
+  /* 中文不需要靠断词换行，一句话要么整行，要么在标点处断 */
+  word-break: keep-all;
+}
+.hints { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+.hints button {
+  height: 30px; padding: 0 13px;
+  border: 1px solid var(--outline); border-radius: var(--r-md);
+  background: transparent; color: var(--text-2); font-size: 12.5px;
+  transition: background .15s ease, color .15s ease;
+}
+.hints button:hover { background: var(--card); color: var(--text); }
+
+/* ── 消息 ─────────────────────────────────────────────── */
+
+.msg { display: flex; }
+.msg.user {
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+/* 只有人刚发/刚回的那条带 .is-new（addMessage options.fresh）；历史回读不播，
+   否则打开一条 200 条的旧会话会整屏同时入场。260ms 上浮 8px，比横向滑入更安静。 */
+.msg.is-new { animation: msgIn var(--enter-duration) var(--enter-ease) both; }
+@keyframes msgIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+.msg.assistant { flex-direction: column; gap: 8px; position: relative; }
+
+/* 历史分页（2026-11-13 按天分组·上滑加载）：
+   日期分隔条与群聊 .group-day 同一套视觉，避免两处日历口径又长歪；
+   顶部一行只在"还有更早 / 正在加载 / 已到最早"时出现。 */
+.msg-day {
+  text-align: center; font-size: 12px; color: var(--text-3);
+  margin: 4px 0 2px;
+  display: flex; align-items: center; gap: 12px;
+}
+.msg-day::before, .msg-day::after {
+  content: ""; flex: 1; height: 1px; background: var(--divider);
+}
+.history-top {
+  display: flex; justify-content: center; align-items: center;
+  min-height: 24px; margin: -4px 0 -6px;
+  font-size: 12.5px; color: var(--text-3);
+}
+.history-top[hidden] { display: none; }
+.history-more {
+  border: 1px solid var(--outline); border-radius: 999px;
+  background: transparent; color: var(--text-2);
+  font-size: 12.5px; padding: 4px 14px; cursor: pointer;
+  transition: background .15s ease, color .15s ease;
+}
+.history-more:hover { background: var(--card); color: var(--text); }
+.history-loading, .history-start { color: var(--text-3); }
+
+/* 流式逐字浮现：DOM 文本第一帧就完整，只让 opacity 变（见 stream-reveal.js）。
+   用 transition + @starting-style，不用 keyframes——span 在下一轮会从 new 变 settled，
+   keyframes 会因选择器失配被移除；transition 只要 property 仍含 opacity 就会跑完。
+   刻意不加 will-change：每个单元一个 span，提升合成层反而拖垮长消息。 */
+[data-reveal] {
+  transition: opacity var(--reveal-duration) var(--reveal-ease)
+    var(--reveal-delay, 0ms);
+}
+@starting-style {
+  [data-reveal="new"] { opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-reveal] { transition: none; }
+  .msg.is-new { animation: none; }
+}
+
+/* 搜索命中跳回（2026-11-12）：整条消息铺一层主色淡底再退掉，指明"刚跳到这里"。
+   只动背景不动布局——长会话里定位不能让下面的内容跟着上下跳。 */
+.msg.is-jump-hit {
+  border-radius: var(--r-md);
+  animation: jumpHit 2.8s var(--ease-decelerate) 1;
+}
+@keyframes jumpHit {
+  0%, 22% { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+  100% { background: transparent; }
+}
+
+/* 回答脚注（2026-11-06 建；2026-11-08 图标化+拉开距离）：复制图标 · 用时 · 完成时间，
+   收在正文下方一条线上，hover 整条回答才淡入。
+   2026-11-08 用户口径：脚注离正文远一点（负 margin 归零改正 2px）、复制用图标不用文字。
+
+   留 20px 高度是刻意的：不留就会在 hover 的一瞬间把下面的消息顶下去，
+   长对话里来回划鼠标会一直抖。 */
+.msg-foot {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px;
+  min-height: 20px; margin-top: 2px;
+  font-size: 11px; color: var(--text-3);
+  opacity: 0; pointer-events: none;
+  transition: opacity .15s ease;
+}
+.msg.assistant:hover .msg-foot,
+.msg-foot:focus-within { opacity: 1; pointer-events: auto; }
+/* 键盘用户不必靠 hover 才能摸到复制 */
+.msg.assistant:focus-within .msg-foot { opacity: 1; pointer-events: auto; }
+
+/* 复制按钮（2026-11-08 图标化）：Lucide copy 内联 13px，无框无底，hover 才有淡底；
+   成功变 ✓（--ok）、失败变 ×（--c-error），1.2s 后由 JS 换回复制图标 */
+.msg-foot .copy-btn {
+  width: 24px; height: 20px; padding: 0;
+  display: grid; place-content: center;
+  border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--text-3);
+  transition: color .15s ease, background .15s ease;
+}
+.msg-foot .copy-btn svg { width: 13px; height: 13px; }
+.msg-foot .copy-btn:hover { color: var(--text); background: var(--card-high); }
+.msg-foot .copy-btn.is-done { color: var(--ok); }
+.msg-foot .copy-btn.is-failed { color: var(--c-error); }
+
+.msg-usage,
+.msg-time { line-height: 20px; }
+/* 用时与完成时间之间一条细分隔，视觉上不糊成一坨 */
+.msg-time::before {
+  content: ""; display: inline-block;
+  width: 1px; height: 9px; margin-right: 10px;
+  background: var(--divider); vertical-align: -1px;
+}
+
+.body { min-width: 0; overflow-wrap: anywhere; }
+
+.msg.user .body {
+  max-width: 480px;
+  padding: 10px 14px;
+  /* 2026-11-13：气泡从淡紫改中性墨色（ZCode 口径：气泡几乎无色，强调色不进气泡）。
+     主题色只在链接 / 运行态 / 选中态出现。 */
+  background: var(--chat-bubble);
+  border: 1px solid var(--chat-hairline);
+  color: var(--text);
+  border-radius: var(--r-lg) var(--r-lg) var(--r-sm) var(--r-lg);
+  font-size: 14.5px; line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.msg.assistant .body { font-size: 14.5px; line-height: 1.68; color: var(--text); }
+

@@ -1,0 +1,488 @@
+/*
+ * 右侧抽屉骨架（群设置与对话设置共用）
+ *
+ * 2026-11-13 从 web/style.css（7,373 行单文件）按分区切出；正文是原文搬运，未改一条规则。
+ * 原区间 L3868–L4349。@import 顺序即层叠顺序，改样式只改对应分部。
+ */
+/* ── 右侧抽屉骨架（2026-11-07；群设置与对话设置共用）──────
+ * 右上角图标按钮 + 右侧全高抽屉（替换下弹面板/居中弹窗）。
+ * 抽屉 fixed 贴右、左缘 1px 分割线，无圆角无悬浮阴影；遮罩实色压暗、
+ * 不用 backdrop-filter（WebView2 下会渲染成黑块）。
+ *
+ * 2026-11-07 二次修（用户：「做得还是非常差」「外头带一个黑圈」）——两个真问题：
+ *  ① 入口按钮没清 UA 默认边框，2px outset 渲染成一圈立体黑环（根因已在全局 button 处修掉，
+ *     这里再显式给 0，单独改这一处也不会再生圈）；
+ *  ② 抽屉里所有行都贴着左右边缘排、行间只有 hover 没有分割，像一份没排过版的清单。
+ *     现按设置页的语言重画：内容区 16px 内边距 + 圆角卡（.cs-card）分行，行间 1px 分割，
+ *     卡与卡之间 10px 呼吸；图标 18px 起、标题 14px、副文本 12px，与设置页同一档。 */
+.top-wrap { flex: none; }
+.top-gear {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; padding: 0;
+  border: 0; outline: none;
+  border-radius: var(--r-md);
+  background: transparent; color: var(--text-3);
+  transition: background .15s ease, color .15s ease;
+}
+.top-gear:hover { background: var(--card); color: var(--text); }
+.top-gear:focus-visible { box-shadow: 0 0 0 2px var(--accent-line); }
+.top-gear:disabled { color: var(--text-3); cursor: default; }
+.top-gear svg { width: 15px; height: 15px; }
+/* 已展开：与 hover 同底，不额外画圈——圈是「选中态」，这里只需要一点底色 */
+.top-gear[aria-expanded="true"] { background: var(--card); color: var(--text); }
+
+.side-overlay {
+  position: fixed; inset: 0; z-index: 45;
+  background: rgba(0, 0, 0, 0.45);
+}
+.side-overlay.pop-closing { opacity: 0; transition: opacity .25s ease-out; }
+.side-overlay.pop-open { animation: csFadeIn .25s ease-out; }
+
+.side-drawer {
+  position: fixed; inset: 0 0 0 auto; z-index: 46;
+  width: 100%; max-width: 448px;
+  display: flex; flex-direction: column;
+  background: var(--surface);
+  border-left: 1px solid var(--composer-border);
+  /* 左缘一道极浅的投影：抽屉是浮在纸面之上的「板」，没有它就会和聊天区糊成一片。
+     不用大阴影（那是悬浮卡的语言），只给 1px 之外的一档过渡。 */
+  box-shadow: -18px 0 40px -28px rgba(0, 0, 0, 0.28);
+  overflow: hidden;
+}
+@keyframes csFadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes csDrawerIn { from { transform: translateX(100%); } to { transform: translateX(0); } }
+@keyframes csDrawerOut { from { transform: translateX(0); } to { transform: translateX(100%); } }
+.side-drawer.pop-open { animation: csDrawerIn .25s ease-out; }
+.side-drawer.pop-closing { animation: csDrawerOut .25s ease-out; }
+@media (prefers-reduced-motion: reduce) {
+  .side-overlay.pop-open,
+  .side-overlay.pop-closing,
+  .side-drawer.pop-open,
+  .side-drawer.pop-closing { animation: none; }
+}
+
+/* 抽屉头部：返回箭头（二级页才显示）+ 标题 + X */
+.cs-head {
+  flex: none;
+  display: flex; align-items: center; gap: 4px;
+  height: 54px; padding: 0 10px 0 8px;
+  border-bottom: 1px solid var(--divider);
+}
+.cs-head-title {
+  flex: 1; min-width: 0;
+  padding-left: 8px;
+  font-size: 14.5px; font-weight: 600; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cs-icon-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 32px; height: 32px; padding: 0; flex: none;
+  border: 0; outline: none;
+  border-radius: var(--r-sm);
+  background: transparent; color: var(--text-3);
+  transition: background .15s ease, color .15s ease;
+}
+.cs-icon-btn:hover { background: var(--card); color: var(--text); }
+.cs-icon-btn:focus-visible { box-shadow: 0 0 0 2px var(--accent-line); }
+.cs-icon-btn svg { width: 17px; height: 17px; }
+
+/* 抽屉内容区。
+   2026-11-07 二次修：对话设置改成「卡片浮在纸面上」的排版（14px 边距 + 卡间距），
+   但 .cs-body 是**群设置抽屉共用**的骨架，改它会连带把群设置的 1px 分隔线
+   变成两侧各 14px 的空隙。所以基础样式保持原样，卡片化只在对话设置里开（下表 + [data-cards]）。 */
+.cs-body {
+  flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+  padding: 8px 0 16px;
+}
+/* 对话设置专用：卡片列 */
+.cs-body[data-cards] {
+  display: flex; flex-direction: column; gap: 14px;
+  padding: 14px 14px 28px;
+}
+
+/* 卡片：一组成设置行，行间 1px 分割。与设置页 .card 同一材料（--card 底 + 16px 圆角），
+   但单独命名——设置页那张卡在 448px 的抽屉里会显得太宽太散。 */
+.cs-card {
+  display: flex; flex-direction: column;
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+}
+.cs-card > * + * { border-top: 1px solid var(--divider); }
+/* 分组标签是卡内的小标题，不是一行：它下面不画分隔线（否则标签像一条被划掉的行） */
+.cs-card > .cs-card-label + * { border-top: 0; }
+/* 卡片小标题：分组名，不抢行的注意力 */
+.cs-card-label {
+  padding: 12px 14px 9px;
+  font-size: 11.5px; font-weight: 600; letter-spacing: .04em;
+  color: var(--text-3);
+}
+
+/* 设置行：图标 + 标题/副文本 + 右值/chevron。
+   标题与副文本各自一块（原来两个 span 都是 inline，挤在同一行）。 */
+.cs-row {
+  display: flex; align-items: center; gap: 12px;
+  width: 100%; min-height: 52px;
+  padding: 10px 14px;
+  border: 0; border-radius: 0;
+  background: transparent; color: var(--text);
+  text-align: left; cursor: pointer;
+  transition: background .14s ease;
+}
+.cs-row:hover { background: var(--card-high); }
+.cs-row:focus-visible { outline: 2px solid var(--accent-line); outline-offset: -2px; }
+.cs-row[aria-current="true"] { background: var(--accent-soft); }
+.cs-row.is-static { cursor: default; }
+.cs-row.is-static:hover { background: transparent; }
+.cs-row-icon { flex: none; display: inline-flex; color: var(--text-2); }
+.cs-row-icon svg { width: 18px; height: 18px; }
+.cs-row-main {
+  flex: 1; min-width: 0;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.cs-row-title { display: block; font-size: 13.5px; font-weight: 500; line-height: 1.45; color: var(--text); }
+.cs-row-sub {
+  display: block;
+  font-size: 12px; line-height: 1.45; color: var(--text-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cs-row-value {
+  flex: none; max-width: 42%;
+  font-size: 12.5px; color: var(--text-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cs-row-chevron { flex: none; display: inline-flex; color: var(--text-3); }
+.cs-row-chevron svg { width: 15px; height: 15px; }
+
+/* 首页的值格（2026-11-13 B 版）：模型 / 权限并排两块，值先行，副文本压在下面。
+   两格等宽，值最长是模型 id（16px 会在 190px 里截断，title 里留全名）。 */
+.cs-tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.cs-tile {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 4px;
+  min-width: 0;
+  padding: 12px 14px 11px;
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: var(--r-lg);
+  text-align: left; cursor: pointer;
+  transition: background .14s ease, border-color .14s ease;
+}
+.cs-tile:hover { background: var(--card-high); }
+.cs-tile:focus-visible { outline: 2px solid var(--accent-line); outline-offset: -2px; }
+.cs-tile-label { font-size: 11.5px; letter-spacing: .04em; color: var(--text-3); }
+.cs-tile-value {
+  width: 100%;
+  font-size: 16px; font-weight: 600; line-height: 1.3; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cs-tile-sub {
+  width: 100%;
+  font-size: 11.5px; line-height: 1.4; color: var(--text-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* 档案一页四分段（2026-11-13 B 版）：分段条 + 一张只读清单。
+   分段条是「当前在看哪一类」的开关，条数跟在名字后面，切换只换下面的清单。 */
+.cs-arch-tabs {
+  display: flex; gap: 2px; padding: 3px;
+  background: var(--surface-low);
+  border: 1px solid var(--card-border);
+  border-radius: var(--r-md);
+}
+.cs-arch-tab {
+  flex: 1; min-width: 0;
+  display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+  height: 30px; padding: 0 6px;
+  border: 0; border-radius: calc(var(--r-md) - 2px);
+  background: transparent; color: var(--text-3);
+  font-size: 12.5px; white-space: nowrap;
+  transition: background .14s ease, color .14s ease;
+}
+.cs-arch-tab:hover { color: var(--text); }
+.cs-arch-tab[aria-selected="true"] {
+  background: var(--card); color: var(--text); font-weight: 500;
+  box-shadow: var(--shadow);
+}
+.cs-arch-tab em {
+  font-style: normal; font-size: 11px; color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.cs-arch-panel {
+  display: flex; flex-direction: column;
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+}
+.cs-arch-panel .cs-note { padding: 12px 14px; }
+.cs-arch-row {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 11px 14px;
+}
+.cs-arch-row + .cs-arch-row { border-top: 1px solid var(--divider); }
+.cs-arch-date {
+  flex: none; width: 38px; padding-top: 1px;
+  font-size: 11px; line-height: 1.5; color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.cs-arch-dot {
+  flex: none; width: 5px; height: 5px; margin-top: 7px;
+  border-radius: 50%; background: var(--ok);
+}
+.cs-arch-dot.off { background: var(--outline); }
+.cs-arch-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.cs-arch-text {
+  font-size: 13px; line-height: 1.5; color: var(--text);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.cs-arch-meta {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  font-size: 11px; line-height: 1.4; color: var(--text-3);
+}
+.cs-arch-right { flex: none; padding-top: 1px; font-size: 11.5px; color: var(--text-3); }
+
+/* 权限三档（B 版）：一行一档 + 一句解释，右侧一个单选点。
+   三个词并排时分不清「只读」与「不跑命令」，所以竖排、每档自带说明。 */
+.cs-policy-list { display: flex; flex-direction: column; gap: 6px; }
+.cs-opt {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 12px 10px 13px;
+  border: 1px solid var(--card-border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  text-align: left; cursor: pointer;
+  transition: background .14s ease, border-color .14s ease;
+}
+.cs-opt:hover { border-color: var(--outline); }
+.cs-opt:focus-visible { outline: 2px solid var(--accent-line); outline-offset: -2px; }
+.cs-opt[aria-checked="true"] { border-color: var(--accent-line); background: var(--card); }
+.cs-opt-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.cs-opt-title { font-size: 13px; font-weight: 500; color: var(--text); }
+.cs-opt-sub { font-size: 11.5px; line-height: 1.4; color: var(--text-3); }
+.cs-opt-dot {
+  flex: none; width: 14px; height: 14px;
+  border: 1px solid var(--outline); border-radius: 50%;
+}
+.cs-opt[aria-checked="true"] .cs-opt-dot {
+  border-color: var(--accent);
+  background: var(--accent);
+  box-shadow: inset 0 0 0 3px var(--card);
+}
+
+/* 二级页里的说明块与字段（与设置页同口径，只是收在 448px 里） */
+.cs-note { padding: 2px 2px 0; font-size: 12px; line-height: 1.55; color: var(--text-2); }
+.cs-note-top { padding: 0 2px 10px; }
+.cs-field { display: flex; flex-direction: column; gap: 6px; padding: 12px 14px; }
+.cs-field-label { font-size: 12px; font-weight: 500; color: var(--text-2); }
+.cs-input, .cs-textarea {
+  width: 100%; box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid var(--outline); border-radius: var(--r-md);
+  background: var(--surface); color: var(--text);
+  font-size: 13px; line-height: 1.55; outline: none;
+  transition: border-color .15s ease;
+}
+.cs-input { height: 34px; padding: 0 10px; }
+.cs-textarea { resize: vertical; }
+.cs-input:focus, .cs-textarea:focus { border-color: var(--accent); }
+.cs-input[readonly] { color: var(--text-3); background: var(--surface-low); }
+/* 下拉框：自绘 chevron（原生箭头在四套主题下颜色不跟），右边留 30px 给它 */
+select.cs-input {
+  appearance: none; -webkit-appearance: none;
+  padding-right: 30px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239a97a5' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+  background-size: 14px 14px;
+  cursor: pointer;
+}
+select.cs-input:disabled { color: var(--text-3); cursor: default; }
+/* 抽屉主选模型（2026-11-08）：原生 select 退役——弹开的列表是 OS 样式，跟全站不是一个长相。
+   改成触发钮 + 复用 composer 的 renderModelMenu：供应商分段、12px 圆角、思考档全套现成。 */
+.cs-model-pick { position: relative; }
+.cs-model-trigger {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  text-align: left; cursor: pointer;
+}
+.cs-model-trigger:hover { border-color: var(--text-3); }
+.cs-model-trigger:disabled { opacity: .55; cursor: default; }
+.cs-model-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cs-model-trigger .chev { flex: none; width: 14px; height: 14px; color: var(--text-3); }
+.cs-model-menu { max-height: 300px; }
+.cs-actions { display: flex; align-items: center; gap: 8px; padding: 10px 14px 12px; }
+.cs-actions .btn-primary { margin-left: auto; }
+.cs-hint { min-height: 17px; font-size: 12px; line-height: 1.5; color: var(--text-3); overflow-wrap: anywhere; }
+.cs-hint.is-error { color: var(--c-error); }
+
+/* 身份块（首页顶部）：**横排一行**——头像 + 名字/人设版本 + chevron。
+   与下面的设置行同一节奏（同样是 52px 量级的一行），只是更醒目一档。
+   2026-11-07 二次修：原来居中竖排的大头像卡片像「个人主页」，占了近 1/5 屏高。 */
+.cs-identity {
+  display: flex; align-items: center; gap: 12px;
+  width: 100%;
+  padding: 12px 14px;
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: var(--r-lg);
+  text-align: left; cursor: pointer;
+  transition: background .14s ease;
+}
+.cs-identity:hover { background: var(--card-high); }
+.cs-identity:focus-visible { outline: 2px solid var(--accent-line); outline-offset: -2px; }
+.cs-identity .pt-avatar { width: 40px; height: 40px; font-size: 16px; }
+.cs-identity-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.cs-identity-name {
+  font-size: 14px; font-weight: 600; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cs-identity-sub {
+  font-size: 12px; color: var(--text-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* 权限/通知这类只用现有 rowMarkup 的页面：把它们那一套 .row 收进卡片节奏 */
+.cs-card .row { min-height: 52px; padding: 10px 14px; }
+.cs-card .row-label { font-size: 13.5px; }
+.cs-card .divider { margin: 0 14px; }
+
+/* 备选链：一条一行，序号 + 两个下拉 + 三个动作钮。
+   下拉在 448px 里放不下「供应商 + 模型」并排，所以竖排两行（供应商 40% 宽浮在模型上方太挤）；
+   序号与动作钮贴两侧，视线沿左边一条轴往下走。 */
+.cs-chain { display: flex; flex-direction: column; padding: 0 14px 4px; }
+.cs-chain-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 0;
+}
+.cs-chain-row + .cs-chain-row { border-top: 1px solid var(--divider); }
+.cs-chain-order {
+  flex: none; width: 16px;
+  font-size: 11.5px; color: var(--text-3); text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+/* 一条备选：分组下拉吃满剩余宽，动作钮固定在右端一列 */
+.cs-chain-pick { flex: 1; min-width: 0; height: 30px; padding: 0 8px; font-size: 12.5px; }
+.cs-chain-actions { flex: none; display: flex; align-items: center; gap: 0; }
+.cs-chain-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; padding: 0;
+  border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--text-2);
+  transition: background .14s ease, color .14s ease;
+}
+.cs-chain-btn:hover:not(:disabled) { background: var(--surface-low); color: var(--text); }
+.cs-chain-btn:disabled { opacity: .28; cursor: default; }
+.cs-chain-btn svg { width: 15px; height: 15px; }
+.cs-chain-empty {
+  padding: 4px 0 10px;
+  font-size: 12px; line-height: 1.55; color: var(--text-3);
+}
+/* 链尾的「加一条」：虚线下划线按钮，明确是「往这条链里再加」，不是页面主操作 */
+.cs-chain-add { display: flex; align-items: center; gap: 8px; padding: 8px 0 10px; }
+.cs-chain-add-btn {
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 28px; padding: 0 10px 0 8px;
+  border: 1px dashed var(--outline); border-radius: var(--r-sm);
+  background: transparent; color: var(--text-2);
+  font-size: 12.5px;
+  transition: background .14s ease, border-color .14s ease, color .14s ease;
+}
+.cs-chain-add-btn:hover:not(:disabled) { border-color: var(--text-3); background: var(--surface-low); color: var(--text); }
+.cs-chain-add-btn:disabled { opacity: .45; cursor: default; }
+.cs-chain-add-btn svg { width: 13px; height: 13px; }
+
+/* 供应商切换行（D2）：一次只看一家，点段即筛，不留「全部」。
+   pill 右对齐弹出，菜单可能比 pill 窄，所以分段行要能横滚而不撑破菜单。 */
+.provider-seg {
+  position: sticky; top: 0; z-index: 1;
+  display: flex; align-items: center; gap: 2px;
+  /* 抵消 .composer-pop 的 6px 内边距，贴住菜单两边；滚动时靠同色阴影盖住顶上那道缝 */
+  margin: -6px -6px 4px; padding: 6px;
+  background: var(--card);
+  box-shadow: 0 -6px 0 var(--card);
+  border-bottom: 1px solid var(--composer-border);
+  overflow-x: auto; overflow-y: hidden;
+  scrollbar-width: none;
+}
+.provider-seg::-webkit-scrollbar { display: none; }
+.provider-opt {
+  /* 不压扁：名字太长就省略，家数多了让分段行自己横滚 */
+  flex: none; min-width: 0; max-width: 130px;
+  display: inline-flex; align-items: center; gap: 4px;
+  height: 24px; padding: 0 8px;
+  border: 0; border-radius: var(--r-full);
+  background: transparent; color: var(--text-3);
+  font-size: 12px; line-height: 1.4; white-space: nowrap;
+  transition: background-color .15s ease, color .15s ease;
+}
+.provider-opt > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.provider-opt:hover { color: var(--text); }
+.provider-opt[aria-pressed="true"] {
+  background: var(--card-high);
+  color: var(--text); font-weight: 500;
+}
+.provider-opt .model-menu-warn { flex: none; }
+.model-menu-warn { color: var(--c-error); font-size: 10.5px; }
+
+/* 行 = 模型名（左，可点）+ 思考档分段（右），行高 36 / 圆角 8（对齐 CINDY） */
+.model-row {
+  display: flex; align-items: center; gap: 8px;
+  min-height: 36px; padding: 3px 4px 3px 10px;
+  border-radius: var(--r-sm);
+  transition: background-color .15s ease;
+}
+.model-row:hover { background: var(--surface-low); }
+/* 当前行（2026-11-05）：档位分段从名字右边挪到下面一行——行宽只由模型名决定，
+   切模型 / 切供应商时行内左右间距不再跳，长名字也不会被分段压出省略号。
+   交互口径不变（D2：分段只属于当前模型行，先选模型再选强度）。 */
+.model-row[data-current="1"] {
+  flex-direction: column; align-items: stretch; gap: 3px;
+  padding: 3px 4px 6px 10px;
+}
+.model-row[data-current="1"] .model-item { flex: none; }
+.model-item {
+  display: flex; align-items: center; gap: 6px;
+  flex: 1; min-width: 0;
+  height: 30px; padding: 0;
+  border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--text);
+  font-size: 13px; text-align: left;
+}
+.model-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-meta { flex: none; margin-left: auto; font-size: 11px; color: var(--text-3); }
+.model-item[aria-checked="true"] { color: var(--accent); font-weight: 600; }
+.model-item[aria-checked="true"] .model-meta { color: var(--accent); }
+
+/* 行内思考档：只渲染该模型 thinkingLevels 里有的档（关 / 低 / 中 / 高），
+   落在当前模型名下方一行。没有已选模型时整段 hidden：先选模型，才谈强度（D2）。 */
+.think-seg {
+  flex: none; align-self: flex-start;
+  display: inline-flex; align-items: center; gap: 1px;
+  padding: 1px;
+  border: 1px solid var(--composer-border);
+  border-radius: var(--r-sm);
+  background: var(--surface-low);
+  /* 菜单重渲染会重建分段：出现时轻落 2px 淡入，60ms 后起、与弹层 220ms 同拍收；
+     换档位只改选中态不重建节点，不会反复播 */
+  animation: thinkSegIn 160ms cubic-bezier(.3, .9, .25, 1) 60ms backwards;
+}
+@keyframes thinkSegIn {
+  from { opacity: 0; transform: translateY(-2px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.think-seg[hidden] { display: none; }
+.think-opt {
+  height: 20px; min-width: 24px; padding: 0 5px;
+  border: 0; border-radius: 6px;
+  background: transparent; color: var(--text-3);
+  font-size: 11px; line-height: 1.4;
+  transition: background-color .15s ease, color .15s ease;
+}
+.think-opt:hover { color: var(--text); }
+.think-opt[aria-pressed="true"] {
+  background: var(--card-high);
+  color: var(--text);
+  font-weight: 500;
+}
+.model-menu-empty { padding: 10px; font-size: 12.5px; line-height: 1.5; color: var(--text-3); }
+

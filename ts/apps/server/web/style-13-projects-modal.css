@@ -1,0 +1,396 @@
+/*
+ * 侧栏项目区、通用模态弹窗
+ *
+ * 2026-11-13 从 web/style.css（7,373 行单文件）按分区切出；正文是原文搬运，未改一条规则。
+ * 原区间 L4350–L4739。@import 顺序即层叠顺序，改样式只改对应分部。
+ */
+/* ── 侧栏项目区（2026-11-04 建，2026-11-07 改内联）──────────
+   展开态是 .side-sec 里的 .proj-row 行（工作区根 + 项目，平级）；
+   收起轨道仍是 .rail-proj 圆钮，点开同一个弹层（72px 放不下内联列表）。
+   弹层与模型菜单共用 morph 动效；它挂在 body 下，不会被侧栏收起动画的
+   overflow:hidden 裁掉，坐标由 JS 写。 */
+.rail-proj.is-unavailable { opacity: .5; }
+
+/* 弹层：left/top 由 JS 写；z-index 压在门/提示之下（gate 10、toast 60），
+   宽度高度都收住，长项目名自己省略号截断 */
+.proj-pop {
+  left: 0; top: 0; bottom: auto;
+  z-index: 9;
+  min-width: 208px; max-width: min(268px, 86vw);
+  max-height: min(52vh, 380px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.proj-item {
+  display: flex; align-items: center; gap: 6px;
+  width: 100%; height: 32px; padding: 0 10px;
+  border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--text);
+  font-size: 13px; text-align: left;
+}
+/* 2026-11-06 总览化：行是只读信息（.is-static），只有底部入口行还保留 hover 反馈 */
+.proj-item.is-static { cursor: default; }
+.proj-item:not(.is-static):hover { background: var(--surface-low); }
+.proj-item-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 项目弹层图标：工作区与项目同一种文件夹，槽位定宽让文字轴线整齐 */
+.proj-ico {
+  flex: none;
+  width: 22px; height: 22px;
+  display: grid; place-content: center;
+  color: var(--text-3);
+}
+.proj-ico svg { width: 18px; height: 18px; }
+.proj-ico.is-main { color: var(--accent); }
+.proj-ico.is-sub svg { width: 18px; height: 18px; }
+/* 2026-11-12：平级目录，不再右移一级 */
+.proj-item.is-sub { padding-left: 10px; }
+/* 行尾标注：主项目；异常态（目录不在了=黄、跑出工作区=灰）。tk-badge 同款皮 */
+.proj-tag {
+  flex: none;
+  padding: 0 6px;
+  border: 1px solid var(--divider); border-radius: var(--r-full);
+  color: var(--text-3);
+  font-size: 10.5px; line-height: 1.7;
+  white-space: nowrap;
+}
+.proj-tag.is-warn { color: var(--warn); border-color: var(--warn); }
+.proj-tag.is-idle { color: var(--text-3); }
+
+/* 主项目与子项目之间的分隔线：两段不是同一类信息 */
+.proj-sep { height: 1px; margin: 4px 6px; background: var(--composer-border); }
+
+/* 行尾小动作钮（2026-11-06 文件浏览入口）：浏览文件 / 在资源管理器中打开。
+   默认半隐，行 hover 才提亮——入口在但不抢视线。 */
+.proj-act {
+  flex: none;
+  display: grid; place-content: center;
+  width: 24px; height: 24px;
+  border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--text-3);
+  opacity: .55;
+}
+.proj-item:hover .proj-act { opacity: 1; }
+.proj-act:hover { background: var(--surface-low); color: var(--accent); }
+.proj-act-ico { display: grid; place-content: center; }
+.proj-act-ico svg { width: 15px; height: 15px; }
+
+/* 底部入口（2026-11-05 F1）：添加子项目 / 设置主项目 / 管理项目（设置页） */
+.proj-foot {
+  display: flex; flex-direction: column; gap: 1px;
+  margin: 4px -6px 0; padding: 4px 6px 0;
+  border-top: 1px solid var(--composer-border);
+}
+.proj-manage {
+  display: flex; align-items: center;
+  width: 100%; height: 28px; padding: 0 10px;
+  border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--text-3);
+  font-size: 11.5px; text-align: left;
+}
+.proj-manage:hover { background: var(--surface-low); color: var(--text); }
+/* 没有工作区时「添加子项目」置灰但仍要能 hover 出 title 说明原因 */
+.proj-manage[aria-disabled="true"],
+.proj-manage[aria-disabled="true"]:hover {
+  opacity: .5; cursor: default;
+  background: transparent; color: var(--text-3);
+}
+
+/* 侧栏文件浏览器（2026-11-06 文件浏览入口，只读）：面包屑 + 目录列表 + 文本预览 */
+.file-browser .fb-bar {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 8px;
+}
+.file-browser .fb-up { flex: none; }
+.file-browser .fb-crumb {
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--text-3); font-size: 12px;
+}
+.file-browser .fb-list {
+  max-height: 320px; overflow: auto;
+  border: 1px solid var(--divider); border-radius: var(--r-sm);
+}
+.file-browser .fb-row {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; height: 30px; padding: 0 10px;
+  border: 0; background: transparent; color: var(--text);
+  font-size: 12.5px; text-align: left;
+}
+.file-browser .fb-row:hover { background: var(--surface-low); }
+.file-browser .fb-row.is-dir .fb-name { color: var(--accent); }
+.file-browser .fb-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-browser .fb-meta { flex: none; color: var(--text-3); font-size: 11px; }
+.file-browser .fb-empty { padding: 12px 10px; color: var(--text-3); font-size: 12.5px; }
+.file-browser .fb-view {
+  max-height: 320px; overflow: auto; margin: 0;
+  padding: 10px;
+  border: 1px solid var(--divider); border-radius: var(--r-sm);
+  background: var(--surface-low);
+  color: var(--text); font-size: 12px; line-height: 1.5;
+  white-space: pre-wrap; word-break: break-all;
+}
+.proj-empty {
+  padding: 8px 10px;
+  font-size: 11.5px; line-height: 1.5; color: var(--text-3);
+}
+
+/* 层级说明（2026-11-06 起历代减字，2026-11-13 弹层内彻底退役）：说明收进
+   展开态分区头的 data-tip，弹层里不再留常驻小字。 */
+
+/* 悬停卡里的清单让卡片整体滚动（2026-11-13）：.roster 自带的 220px 限高
+   是给展开态侧栏的分区体用的，卡内不限——外层 .proj-pop 管滚动。 */
+.proj-pop .roster { max-height: none; overflow: visible; }
+
+/* ── 通用模态弹窗（2026-11-05 F1，ZCode 规格）────────────
+   遮罩 .6 / 暗色 .7 + 2px 背景模糊；面板 420 上限、16 圆角、1px 卡边框、
+   --shadow-menu；进出场 100ms（fade + scale .95→1），reduced-motion 直切。
+   纯 CSS，不引库；与 composer 的 morph 弹层互不共享生命周期。 */
+.modal {
+  position: fixed; inset: 0;
+  /* 压在弹层（proj-pop 9 / composer-pop 40）之上，但在 toast 之下 */
+  z-index: 55;
+  display: grid; place-items: center;
+  padding: 0;
+}
+.modal[hidden] { display: none !important; }
+.modal-mask {
+  position: absolute; inset: 0;
+  background: var(--modal-mask);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+}
+.modal-panel {
+  position: relative; z-index: 1;
+  display: flex; flex-direction: column;
+  width: min(420px, calc(100% - 2rem));
+  max-height: calc(100% - 2rem);
+  padding: 16px;
+  background: var(--surface);
+  border: 1px solid var(--card-border);
+  border-radius: 16px;
+  box-shadow: var(--shadow-menu);
+}
+/* 宽档（2026-11-07）：需要两列或长文的模态（编辑人设：头像 + SOUL）。
+   只由 openModal 的 className 显式加上，其它模态仍是 420px——宽度不该被内容猜出来。 */
+.modal-panel.modal-wide {
+  width: min(760px, calc(100% - 2rem));
+  padding: 20px 22px;
+}
+@media (max-width: 720px) {
+  .modal-panel.modal-wide { padding: 16px; }
+}
+/* 字体弹窗（2026-11-13）：三行「区域 + 字体 + 字号」，560px 够放两列下拉。 */
+.modal-panel.modal-font { width: min(560px, calc(100% - 2rem)); }
+.modal-head {
+  flex: none;
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+}
+.modal-title {
+  margin: 0;
+  font-size: 15px; font-weight: 600; line-height: 1.4; color: var(--text);
+}
+.modal-x {
+  flex: none;
+  width: 26px; height: 26px; padding: 0;
+  display: grid; place-content: center;
+  border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--text-3);
+}
+.modal-x:hover { background: var(--card); color: var(--text); }
+.modal-x:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.modal-body {
+  display: flex; flex-direction: column; gap: 12px;
+  margin-top: 12px;
+  min-height: 0; overflow-y: auto;
+}
+.modal-desc {
+  margin: 0;
+  font-size: 12.5px; line-height: 1.6; color: var(--text-2);
+}
+/* 统一确认框（2026-11-13）：替换 window.confirm 的原生小窗。
+   左侧一枚 34px 图标（普通=问号/强调，危险=叹号/红），右侧文案；危险动作只在
+   图标和确认钮上用红色，整块不铺红底，避免每次删除都像报错。 */
+.modal-confirm { display: flex; align-items: flex-start; gap: 12px; }
+.modal-confirm-icon {
+  flex: none;
+  width: 34px; height: 34px;
+  display: grid; place-content: center;
+  border-radius: 11px;
+  font-size: 15px; font-weight: 600; line-height: 1;
+  user-select: none;
+}
+.modal-confirm-icon.is-accent {
+  background: var(--accent-soft); color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent-line);
+}
+.modal-confirm-icon.is-danger {
+  background: color-mix(in srgb, var(--c-error) 12%, var(--surface));
+  color: var(--c-error);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--c-error) 28%, transparent);
+}
+.modal-confirm-copy { min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+.modal-confirm .modal-desc { font-size: 13px; }
+.modal-confirm .modal-hint { min-height: 0; }
+.modal-field { display: flex; flex-direction: column; gap: 6px; }
+.modal-field > span { font-size: 12px; color: var(--text-3); }
+.modal-row { display: flex; align-items: center; gap: 8px; }
+.modal-input {
+  flex: 1; min-width: 0;
+  height: 36px; padding: 0 10px;
+  background: var(--card);
+  border: 1px solid var(--outline); border-radius: var(--r-md);
+  color: var(--text); font-size: 13px;
+  outline: none;
+  transition: border-color .15s ease;
+}
+.modal-row .ghost { flex: none; height: 36px; padding: 0 12px; border-radius: var(--r-md); font-size: 13px; }
+/* 纵向字段里的输入框不许被 flex 吃掉高度（2026-11-07）：
+   `.modal-field` 是 column 弹性容器，而 `.modal-input` 上的 `flex: 1` 会把 flex-basis 设成 0，
+   于是显式的 height:36px 在主轴上失效、输入框塌成一行文字高（19px）——「新建执事」与
+   「新建群组」两个模态实测都是这样，读起来像被压扁的排版。
+   只在 .modal-field 直接子级复位；`.modal-row` 里的横向输入框仍要 flex:1 吃满剩余宽。 */
+.modal-field > .modal-input { flex: 0 0 auto; }
+.modal-input:focus { border-color: var(--accent); }
+.modal-hint {
+  margin: 0; min-height: 17px;
+  font-size: 12px; line-height: 1.45; color: var(--text-2);
+}
+.modal-hint.is-error { color: var(--c-error); }
+.modal-actions {
+  display: flex; align-items: center; justify-content: flex-end; gap: 8px;
+  margin-top: 2px;
+}
+.modal-actions .ghost,
+.modal-primary {
+  height: 32px; padding: 0 14px;
+  border-radius: var(--r-md); font-size: 13px;
+}
+.modal-primary {
+  border: 0;
+  background: var(--accent); color: var(--on-accent);
+  font-weight: 500;
+}
+.modal-primary:hover { filter: brightness(1.05); }
+.modal-primary:disabled { opacity: .5; cursor: default; filter: none; }
+
+/* 字体表单（2026-11-13）：全站默认一行 + 三个区域行；右边两支下拉等宽。 */
+.font-form { display: flex; flex-direction: column; gap: 10px; }
+.font-divider { height: 1px; background: var(--divider); margin: 2px 0; }
+.font-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) 150px 104px;
+  align-items: center; gap: 10px;
+}
+.font-row-head { font-size: 11.5px; color: var(--text-3); padding: 0 2px; }
+.font-row-name { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.font-row-name span { font-size: 13px; color: var(--text); }
+.font-row-name small { font-size: 11.5px; line-height: 1.4; color: var(--text-3); }
+.font-row-base .font-row-name span { font-weight: 500; }
+.font-row-note { font-size: 11.5px; color: var(--text-3); }
+.font-select {
+  width: 100%; height: 32px; padding: 0 8px;
+  border: 1px solid var(--outline); border-radius: var(--r-md);
+  background: var(--surface); color: var(--text);
+  font: inherit; font-size: 12.5px; outline: none;
+}
+.font-select:focus { border-color: var(--accent); }
+.font-note { margin: -2px 0 0; font-size: 11.5px; line-height: 1.5; color: var(--text-3); }
+.font-actions .ghost { margin-right: auto; }
+.font-saved { margin-right: 4px; font-size: 11.5px; color: var(--text-3); }
+
+/* 导出弹层（2026-11-13）：一组带说明的复选项。
+   说明比名字重要——"这一块会出哪些文件"要写在脸上，否则五个抽象名词选不下去。 */
+.export-list { display: flex; flex-direction: column; gap: 2px; }
+.export-part {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 9px 10px; border-radius: var(--r-md);
+  cursor: pointer;
+  transition: background .15s ease;
+}
+.export-part:hover { background: var(--card); }
+.export-part input[type="checkbox"] {
+  flex: none; width: 15px; height: 15px; margin: 2px 0 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.export-part-main { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.export-part-name { font-size: 13px; line-height: 1.3; color: var(--text); }
+.export-part-main small { font-size: 11.5px; line-height: 1.45; color: var(--text-3); }
+.export-part-sub { margin-left: 14px; }
+.export-part.is-muted { opacity: .5; }
+.export-part.is-muted input { cursor: default; }
+@media (max-width: 520px) {
+  .font-row { grid-template-columns: 1fr 1fr; }
+  .font-row-name { grid-column: 1 / -1; }
+  .font-row-head { display: none; }
+  .font-row-note { display: none; }
+  .font-row-base .font-select { grid-column: 1 / -1; }
+}
+
+@keyframes modalIn {
+  from { opacity: 0; transform: scale(.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+@keyframes modalOut {
+  from { opacity: 1; transform: scale(1); }
+  to { opacity: 0; transform: scale(.95); }
+}
+@keyframes modalMaskIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes modalMaskOut { from { opacity: 1; } to { opacity: 0; } }
+.modal.is-open .modal-mask { animation: modalMaskIn 100ms var(--ease-standard) both; }
+.modal.is-open .modal-panel { animation: modalIn 100ms var(--ease-standard) both; }
+.modal.is-closing .modal-mask { animation: modalMaskOut 100ms var(--ease-standard) both; }
+.modal.is-closing .modal-panel { animation: modalOut 100ms var(--ease-standard) both; }
+@media (prefers-reduced-motion: reduce) {
+  .modal.is-open .modal-mask,
+  .modal.is-open .modal-panel,
+  .modal.is-closing .modal-mask,
+  .modal.is-closing .modal-panel { animation: none; }
+}
+
+.toast {
+  position: fixed; left: 50%; bottom: 96px; transform: translateX(-50%);
+  z-index: 60;
+  max-width: min(520px, 90vw);
+  padding: 9px 14px;
+  border-radius: var(--r-full);
+  background: var(--text); color: var(--card);
+  font-size: 13px; line-height: 1.4;
+  box-shadow: 0 10px 30px rgba(46, 43, 58, .22);
+}
+.toast[hidden] { display: none; }
+
+.pill-tag {
+  display: inline-block; margin-left: 6px; padding: 1px 6px;
+  border: 1px solid var(--divider); border-radius: var(--r-full);
+  font-size: 10.5px; font-weight: 500; color: var(--text-3);
+  vertical-align: 1px;
+}
+.pill-tag.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 38%, transparent); }
+/* 警示档走 --warn（琥珀），与状态点同一语义；旧的错误红留给真正的失败 */
+.pill-tag.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 38%, transparent); }
+
+.provider-form { padding: 2px 0 6px; }
+.provider-form-inner { display: flex; flex-direction: column; gap: 10px; padding-top: 14px; }
+.provider-form-title {
+  display: flex; align-items: baseline; gap: 10px;
+  font-size: 13px; font-weight: 600; color: var(--text);
+}
+.provider-id { font-size: 11.5px; font-weight: 400; color: var(--text-3); }
+.field { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--text-3); }
+.field input, .field textarea {
+  width: 100%; padding: 8px 10px;
+  border: 1px solid var(--outline); border-radius: var(--r-md);
+  background: transparent; color: var(--text);
+  font: inherit; font-size: 13px; line-height: 1.45;
+  outline: none;
+  transition: border-color .15s ease;
+}
+.field textarea { min-height: 76px; resize: vertical; font-family: var(--mono); }
+.field input:focus, .field textarea:focus { border-color: var(--accent); }
+.provider-form-actions {
+  display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px;
+}
+.provider-form-actions .row-hint { margin-right: auto; text-align: left; }
+

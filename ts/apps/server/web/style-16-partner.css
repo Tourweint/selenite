@@ -1,0 +1,219 @@
+/*
+ * 执事与例行任务、人设
+ *
+ * 2026-11-13 从 web/style.css（7,373 行单文件）按分区切出；正文是原文搬运，未改一条规则。
+ * 原区间 L5364–L5576。@import 顺序即层叠顺序，改样式只改对应分部。
+ */
+/* ── 执事与例行任务（E1，2026-11-05）──────────────────────
+   只吃现有令牌：--card / --surface-low / --divider / --outline / --text-* /
+   --mono / --accent / --c-error / --r-*。所有颜色随四套主题走，不硬编码色值。 */
+
+.pt-head {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+  margin-bottom: 14px;
+}
+/* 列表（2026-11-07）：一张卡一行、卡片间距 10px。原来一列堆三行（名字行 / 元信息 / 动作），
+   信息密度低且视觉上"三个小块"叠在一起，就是用户说的方框不正常。 */
+.pt-list { display: flex; flex-direction: column; gap: 10px; }
+
+.pt-card {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 16px;
+}
+.pt-card-avatar { width: 40px; height: 40px; font-size: 16px; }
+.pt-card-main { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.pt-card-name-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.pt-name { min-width: 0; overflow-wrap: anywhere; font-size: 14px; }
+.pt-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12px; }
+.pt-domain { color: var(--text-3); }
+.pt-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; flex-wrap: wrap; }
+.pt-actions .ghost { height: 30px; padding: 0 11px; font-size: 12.5px; }
+.pt-empty { padding: 20px; gap: 12px; align-items: flex-start; }
+
+@media (max-width: 720px) {
+  .pt-card { grid-template-columns: 40px minmax(0, 1fr); }
+  .pt-actions { grid-column: 1 / -1; justify-content: flex-start; }
+}
+
+/* 编辑模态内容很长：给面板一个对视口确定的高度上限，.modal-body 才真的能滚动，
+   否则底部（例行任务表单）落在视口外点不到。:has 只作用于执事编辑模态，不动别的模态。 */
+.modal-panel:has(.pt-edit) { max-height: calc(100vh - 2rem); }
+
+/* 编辑模态：一个 .pt-edit 包三段，段间用细分隔线 */
+.pt-edit { display: flex; flex-direction: column; gap: 14px; }
+.pt-seg {
+  display: flex; flex-direction: column; gap: 10px;
+  padding-top: 14px; border-top: 1px solid var(--divider);
+}
+.pt-edit > .pt-seg:first-child { border-top: 0; padding-top: 0; }
+.pt-seg-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.pt-seg-title { font-size: 13px; font-weight: 600; color: var(--text); }
+.pt-basic { gap: 12px; }
+
+/* ── 人设（2026-11-07）：头像在左、正文在右，同一次保存 ──────────────
+   头像不再是独立表单：它是"这个角色长什么样"，与 SOUL 说的是同一件事，
+   所以并排放，按钮也只有一个「保存人设」。 */
+
+/* 人设段（2026-11-07）：头像与说明做成一行，正文吃满宽度。
+   两列（头像列 + 正文列）在实际渲染里左侧会空出一大条，正文也被挤窄，
+   所以改成"头像行 + 全宽正文"：头像 64px 不抢视线，正文拿到 700px 以上。
+   桌面 760px 宽的弹窗里，一行正文能放 50+ 字，长人设读起来才像文档。 */
+.pt-instr-top {
+  display: flex; align-items: center; gap: 14px;
+}
+.pt-instr-meta {
+  display: flex; flex-direction: column; gap: 3px;
+  min-width: 0; flex: 1 1 auto;
+}
+.pt-instr-sub { font-size: 11.5px; line-height: 1.5; color: var(--text-3); }
+.pt-portrait-btn {
+  position: relative;
+  flex: none;
+  width: 64px; height: 64px;
+  border-radius: var(--r-full);
+  font-size: 24px;
+}
+/* 有图时头像铺满圆（img 由 paintAvatar 塞进来），没图仍是首字 */
+.pt-portrait-btn img { border-radius: inherit; }
+.pt-portrait-btn:disabled { opacity: .6; cursor: default; }
+/* 右下角的"可换"角标：位移到圆外一点点，压在边线上，做发现性提示 */
+.pt-portrait-chev {
+  position: absolute; right: -2px; bottom: -2px;
+  display: grid; place-content: center;
+  width: 22px; height: 22px;
+  border-radius: var(--r-full);
+  border: 1px solid var(--card-border);
+  background: var(--card-high);
+  color: var(--text-2);
+  pointer-events: none;
+}
+.pt-portrait-chev svg { width: 12px; height: 12px; }
+.pt-portrait-btn:hover .pt-portrait-chev { color: var(--text); }
+.pt-instr-label { font-size: 13px; font-weight: 500; color: var(--text); }
+.pt-ta.is-soul { min-height: 156px; font-family: inherit; font-size: 13.5px; line-height: 1.75; }
+/* 默认只占 6 行：常见人设两三句话，给 220px 会白出一大片、还把下面的段挤出视口。
+   内容长了自己往下拉（resize: vertical 一直在）。 */
+
+/* 头像选择面板：贴着头像浮出，宽 332px（6 列 × 44px + 间距）。
+   用 fixed 挂 body、坐标由 JS 按按钮实测写入——弹窗 body 是滚动容器，
+   绝对定位塞在里面会被 overflow 裁掉下半截。 */
+.pt-portrait-pop {
+  position: fixed; top: 0; left: 0;
+  z-index: 56; /* 压过 .modal(55)，仍在 toast(60) 之下 */
+  width: 332px; max-width: calc(100vw - 48px);
+  max-height: calc(100vh - 24px);
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--card-border); border-radius: var(--r-lg);
+  background: var(--surface); box-shadow: var(--shadow-menu);
+  animation: set-fade .12s var(--ease-standard) both;
+}
+.pt-portrait-pop-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  font-size: 12.5px; font-weight: 500; color: var(--text);
+}
+.pt-portrait-pop-clear {
+  height: 26px; padding: 0 9px;
+  border: 1px solid var(--composer-border); border-radius: var(--r-full);
+  background: transparent; color: var(--text-3);
+  font-size: 11.5px; cursor: pointer;
+}
+.pt-portrait-pop-clear:hover { background: var(--surface-low); color: var(--text); }
+.pt-portrait-groups { display: flex; flex-direction: column; gap: 6px; }
+.pt-portrait-group-label { font-size: 11px; color: var(--text-3); letter-spacing: .02em; }
+.pt-portrait-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(44px, 1fr));
+  gap: 6px;
+  max-height: 232px; overflow-y: auto;
+  padding: 2px;
+}
+.pt-portrait-cell {
+  padding: 0; aspect-ratio: 1;
+  border: 2px solid transparent; border-radius: var(--r-full);
+  background: var(--surface-low); cursor: pointer; overflow: hidden;
+  transition: border-color .15s ease, transform .12s ease;
+}
+.pt-portrait-cell img { width: 100%; height: 100%; display: block; object-fit: cover; }
+.pt-portrait-cell:hover { transform: translateY(-1px); border-color: var(--outline); }
+.pt-portrait-cell.is-busy { opacity: .55; }
+.pt-portrait-cell:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.pt-portrait-pop-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding-top: 8px; border-top: 1px solid var(--divider);
+}
+.pt-portrait-pop-foot .ghost { height: 30px; font-size: 12px; }
+.pt-portrait-pop-note { font-size: 11px; color: var(--text-3); }
+
+/* 名字 / 领域：两列，窄屏落回单列 */
+.pt-basic-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  gap: 14px;
+}
+
+.pt-card-avatar { margin-right: 2px; }
+
+@media (max-width: 640px) {
+  .pt-instr-top { flex-wrap: wrap; }
+  .pt-portrait-pop { width: calc(100vw - 96px); }
+  .pt-basic-row { grid-template-columns: 1fr; }
+}
+
+.pt-ta {
+  width: 100%; padding: 8px 10px;
+  border: 1px solid var(--outline); border-radius: var(--r-md);
+  background: var(--card); color: var(--text);
+  font-family: var(--mono); font-size: 12.5px; line-height: 1.5;
+  outline: none; resize: vertical;
+  transition: border-color .15s ease;
+}
+.pt-ta:focus { border-color: var(--accent); }
+.pt-ta.is-soul { min-height: 180px; }
+
+.pt-human { color: var(--text-2); }
+.pt-mode-row { display: flex; align-items: center; gap: 8px; }
+
+.pt-new {
+  display: flex; flex-direction: column; gap: 10px;
+  margin-top: 2px; padding: 12px;
+  border: 1px solid var(--divider); border-radius: var(--r-md);
+}
+
+.pt-routine-list { display: flex; flex-direction: column; gap: 8px; }
+.pt-routine {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--divider); border-radius: var(--r-md);
+  background: var(--surface-low);
+}
+.pt-routine-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.pt-routine-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.pt-routine-actions .ghost { padding: 0 10px; }
+.pt-trigger { line-height: 1.6; }
+
+.pt-runs { display: flex; flex-direction: column; gap: 6px; padding-top: 4px; }
+.pt-run {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 6px 8px;
+  border: 1px solid var(--divider); border-radius: var(--r-sm);
+  font-size: 11.5px;
+}
+.pt-run .pill-tag { margin-left: 0; }
+.pt-run-trigger { color: var(--text-3); }
+.pt-run-summary { flex: 1 1 160px; min-width: 0; color: var(--text-2); overflow-wrap: anywhere; }
+.pt-run-time { flex: none; font-family: var(--mono); font-size: 10.5px; color: var(--text-3); }
+
+.pt-result {
+  margin: 0; padding: 10px 12px;
+  border: 1px solid var(--divider); border-radius: var(--r-md);
+  background: var(--surface-low); color: var(--text);
+  font-size: 12.5px; line-height: 1.5;
+  white-space: pre-wrap; word-break: break-word;
+  max-height: 220px; overflow-y: auto;
+}
+.pt-result.is-error { color: var(--c-error); }
+

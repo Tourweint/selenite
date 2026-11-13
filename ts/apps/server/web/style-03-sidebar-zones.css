@@ -1,0 +1,383 @@
+/*
+ * 侧栏分区（按人重排 / 标题栏 / 主区）
+ *
+ * 2026-11-13 从 web/style.css（7,373 行单文件）按分区切出；正文是原文搬运，未改一条规则。
+ * 原区间 L686–L1062。@import 顺序即层叠顺序，改样式只改对应分部。
+ */
+/* ── 侧栏分区（2026-11-07 四改定稿）────────────────────────
+   一块分区 = 两行网格：[整行折叠按钮] [＋] + [分区体]。
+   用户口径：「箭头别要了，点击这个框相当于收起或展开，在右边留个加号」。
+   所以分区头本身就是按钮（图标 + 名称 + 计数），hover 给一层底；
+   折叠状态不靠箭头，靠「展开时有内容、收起时只剩这一行」直接可见。 */
+.side-sec {
+  flex: none;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 2px 0;
+  padding-top: 4px;
+  border-top: 1px solid var(--divider);
+}
+.side-sec-head {
+  min-width: 0;
+  display: flex; align-items: center; gap: 7px;
+  height: 36px; padding: 0 6px 0 8px;
+  border: 0; border-radius: var(--r-md);
+  background: transparent; color: var(--text);
+  font-size: 14px; font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.side-sec-head:hover:not(:disabled) { background: var(--card); }
+.side-sec-head:disabled { opacity: .5; cursor: default; }
+/* 分区图标：20px，与导航行 22px 图标同一视觉重量 */
+.sec-ico {
+  flex: none; width: 20px; height: 20px;
+  color: var(--text-3);
+}
+.side-sec-head:hover .sec-ico { color: var(--text-2); }
+.sec-name {
+  flex: none;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 分区头里的计数：紧跟名称，最右边是 ＋ */
+.sec-count { margin-left: 2px; flex: none; }
+/* 行尾 ＋：24×24 命中区 + 16px 图标 */
+.sec-add-wrap { flex: none; display: flex; align-items: center; }
+.sec-add {
+  flex: none;
+  width: 24px; height: 24px; margin-right: 4px; padding: 0;
+  display: grid; place-content: center;
+  border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--text-2);
+  cursor: pointer;
+}
+.sec-add svg { width: 16px; height: 16px; }
+.sec-add:hover:not(:disabled) { background: var(--card-high); color: var(--accent); }
+.sec-add:disabled { opacity: .35; cursor: default; }
+/* 分区体：独占第二行，展开/收起走高度动画（2026-11-07 五改）。
+ *
+ * 为什么用 grid-template-rows 0fr → 1fr：内容高度是变的（会话多了、任务行多了都会长），
+ * 写死 max-height 要么裁掉、要么留一段空白；而 fr 轨道会按内容算，不用知道真实高度。
+ * 三层结构：
+ *   .side-sec-body  外层 grid 容器（只负责轨道过渡，overflow 交给 clip）
+ *   .side-sec-clip  裁切层（overflow:hidden + 1fr 轨道，收起到 0 时把内容整个藏掉）
+ *   .side-sec-inner 真正的内容（自身再排一列，带内边距，避免动画时贴边）
+ * 展开 220ms 走减速曲线（内容"落下来"），收起 160ms 略快（视线已经移走了，
+ * 拖泥带水反而像卡住）。透明度跟着走一档，避免 0 高时残留一条描边。 */
+.side-sec-body {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-rows: 1fr;
+  transition:
+    grid-template-rows var(--dur-slow) var(--ease-decelerate);
+}
+.side-sec-clip {
+  min-height: 0;
+  overflow: hidden;
+}
+.side-sec-inner {
+  display: flex; flex-direction: column; gap: 2px;
+  opacity: 1;
+  /* 展开时内容轻微下落 4px 淡入：高度是"打开"的，内容是"落进来"的 */
+  transform: translateY(0);
+  transition:
+    opacity 180ms var(--ease-standard) 30ms,
+    transform 220ms var(--ease-decelerate);
+}
+.side-sec.is-collapsed .side-sec-body {
+  grid-template-rows: 0fr;
+  /* 收起比展开快一档：手指离开后不该再等 */
+  transition: grid-template-rows 160ms var(--ease-accelerate);
+}
+.side-sec.is-collapsed .side-sec-inner {
+  /* 收起时**不提前淡出**：靠 .side-sec-clip 的高度裁切把内容卷上去。
+     一开始是 110ms 的 opacity 过渡，70ms 时内容已经看不见、只剩一截空壳在收，
+     观感像"先隐身再收框"（2026-11-07 中间帧截图核对过）。
+     现在把 opacity 归零放在 160ms 之后（= 收起时长），内容全程可见地卷走，
+     到最后一帧才归零——归零只是为了让收起态彻底不占 alpha，防 0 高时残留描边。 */
+  opacity: 0;
+  transition: opacity 0s linear 160ms;
+}
+/* 系统开了"减少动态效果"就直切：全局那条 .01ms 已经兜底，这里显式写一遍，
+   免得以后有人把全局规则收窄时这块变成"还在动"。 */
+@media (prefers-reduced-motion: reduce) {
+  .side-sec-body,
+  .side-sec-inner { transition: none; }
+}
+
+/* 项目 ＋ 的双入口菜单（2026-11-07 四改）：挂在 body 下，坐标 JS 写。
+   两行都是「标题 + 一行解释」——用户要区分的是"建新目录"和"登记已有目录"，
+   光两个词（新建项目 / 添加子项目）看不出差别，解释就写在行里。 */
+.proj-add-menu {
+  position: fixed;
+  z-index: 45;
+  min-width: 236px; max-width: min(300px, 86vw);
+  padding: 4px;
+  border: 1px solid var(--composer-border);
+  border-radius: var(--r-md);
+  background: var(--bg);
+  box-shadow: var(--shadow-menu);
+}
+.proj-add-item {
+  display: flex; flex-direction: column; gap: 1px;
+  width: 100%; padding: 7px 10px;
+  border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--text);
+  text-align: left; cursor: pointer;
+}
+.proj-add-item:hover { background: var(--surface-low); }
+.proj-add-label { font-size: 13.5px; font-weight: 600; }
+.proj-add-hint { font-size: 11.5px; color: var(--text-3); line-height: 1.4; }
+
+/* 分区底部的「去整页看」链接行：任务中心 / 项目管理各一条 */
+.sec-foot-link {
+  display: flex; align-items: center; gap: 4px;
+  width: 100%; height: 30px; padding: 0 12px;
+  border: 0; border-radius: var(--r-md);
+  background: transparent; color: var(--text-3);
+  font-size: 13px; text-align: left; cursor: pointer;
+}
+.sec-foot-link:hover { background: var(--card); color: var(--accent); }
+/* 「所有群聊」在列表态高亮（2026-11-07）：同一行在别的分区是"去整页看"的跳转，
+   这里也是；但用户从群里退出来时要能看出自己正站在这片列表上。 */
+.sec-foot-link[aria-current="true"] { background: var(--accent-soft); color: var(--accent); }
+
+/* 任务中心分区里的简版对话行：聚合灯 + 标题 + 时间 */
+.task-row { gap: 7px; }
+.task-lamp {
+  flex: none; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--text-3);
+}
+.task-lamp[data-lamp="fail"] { background: var(--c-error); }
+.task-lamp[data-lamp="ask"] { background: var(--c-primary); }
+.task-lamp[data-lamp="run"] { background: var(--text-3); }
+
+/* 项目分区里的行：与执事行同一套 .side-item，图标槽对齐 28px 文字轴线 */
+/* 项目行（2026-11-06）：232px 侧栏里这一行要装下
+   图标 22 + 名字 + 「主项目」标注 + 两个文件入口，所以内边距与间隙都得收紧——
+   按 12px 内边距 + 6px 间隙时，主项目名只剩 54px，被截成「Wor…」。 */
+.proj-row { gap: 4px; padding-left: 8px; padding-right: 6px; cursor: default; }
+.proj-row.is-unavailable { color: var(--warn); cursor: pointer; }
+.proj-row.is-main .proj-ico { color: var(--accent); }
+/* 子项目右移一级：靠缩进 + 折入箭头表达层级，不额外加图标 */
+/* 2026-11-12：工作区与项目是平级目录，缩进与图标尺寸一致；只有「默认」标签区分主根。 */
+.proj-row.is-sub { padding-left: 8px; }
+.side-item-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 行尾的文件入口：**默认就要看得见**。
+   原来是 opacity:0，只在 hover 时出现——看不见的按钮等于没有。
+   现在常态 .55 淡显，行 hover / 键盘聚焦时提亮。
+   尺寸收到 20×20：232px 的侧栏里，行 = 图标22 + 名字 + 标注 + 两个入口，
+   24px 的按钮会把主项目名挤成「Wor…」（2026-11-06 截图核对）。 */
+.proj-row .proj-act { width: 20px; height: 20px; opacity: .55; }
+.proj-row .proj-act-ico svg { width: 13px; height: 13px; }
+.proj-row:hover .proj-act,
+.proj-row:focus-within .proj-act { opacity: 1; }
+/* 行内标注比浮层里的更紧凑：这里每像素都要留给项目名 */
+.proj-row .proj-tag { padding: 0 4px; font-size: 9.5px; line-height: 1.6; }
+
+/* 项目行（2026-11-13 项目容器）：点行 = 选中（决定下一个新对话），▾ 展开文件夹清单。 */
+.proj-row.is-project { position: relative; cursor: pointer; }
+.proj-row.is-project .proj-count {
+  flex: none; min-width: 16px; height: 16px; padding: 0 5px;
+  display: grid; place-content: center;
+  border-radius: 999px;
+  background: var(--surface-low); color: var(--text-3);
+  font-size: 10.5px; line-height: 1; font-variant-numeric: tabular-nums;
+}
+.proj-row.is-current .proj-count { background: var(--accent-soft); color: var(--accent); }
+/* 文件夹浮卡挂在 body 上（侧栏 .side-sec-clip 的 overflow:hidden 会把它裁掉），
+   坐标由 toggleProjectFlyout 按行实测写入，所以这里只要 fixed + 视觉。 */
+.proj-flyout {
+  position: fixed; z-index: 60;
+  display: block;
+  padding: 8px;
+  border: 1px solid var(--composer-border); border-radius: var(--r-sm);
+  background: var(--surface); box-shadow: var(--shadow-menu);
+}
+.proj-fly-head { padding: 0 4px 6px; font-size: 11px; color: var(--text-3); }
+.proj-fly-row { padding: 5px 4px; border-radius: var(--r-sm); }
+.proj-fly-row:hover { background: var(--surface-low); }
+.proj-fly-top { display: flex; align-items: center; gap: 6px; }
+.proj-fly-label {
+  flex: 1; min-width: 0;
+  font-size: 12px; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.proj-fly-acts { display: flex; gap: 2px; }
+.proj-fly-acts .proj-act { opacity: .7; }
+.proj-fly-row.is-primary .proj-root-dot { background: var(--accent); border-color: var(--accent); }
+.proj-fly-path {
+  margin-top: 2px; padding-left: 12px;
+  font-size: 10.5px; color: var(--text-2);
+  /* 侧栏里路径只有 250 来像素：换行比省略号有用（要看得出是哪一层目录） */
+  white-space: normal; overflow-wrap: anywhere;
+}
+
+/* 执事花名册（分区外壳与分区头统一由 .side-sec 提供） */
+.roster {
+  display: flex; flex-direction: column; gap: 2px;
+  max-height: 220px; overflow-y: auto;
+}
+.roster-row { gap: 6px; cursor: pointer; }
+.roster-row .roster-name {
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.roster-row .pill-tag { margin-left: 0; flex: none; }
+/* 执事状态点同样固定在行尾，与总管一致 */
+.roster-row .status-dot { margin-left: 2px; }
+.roster-domain { font-size: 10px; }
+/* 派发权拨杆（2026-11-06）：小 pill 按钮，亮/灰两态；用 --ok/--muted 令牌，四套主题自动跟随 */
+.roster-dispatch {
+  font-size: 10px;
+  margin-left: 0; flex: none;
+  cursor: pointer;
+  background: none;
+}
+.roster-dispatch.on { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 38%, transparent); }
+.roster-dispatch.off { color: var(--muted); opacity: 0.7; }
+.roster-dispatch:disabled { cursor: wait; opacity: 0.5; }
+.roster-count { margin-left: auto; flex: none; border: 0; cursor: pointer; }
+.roster-idle {
+  margin-left: auto; flex: none;
+  font-size: 12px; color: var(--text-3);
+}
+/* 忙因胶囊（2026-11-10 批 18 §二）：只在忙时占位，紧挨状态点；颜色同任务中心状态小片 */
+.roster-busy {
+  flex: none;
+  padding: 0 6px;
+  border: 1px solid var(--divider);
+  border-radius: var(--r-full);
+  font-size: 10px; line-height: 1.7; white-space: nowrap;
+  color: var(--text-2);
+}
+.roster-busy[data-kind="wait"] {
+  background: color-mix(in srgb, var(--c-tertiary) 16%, var(--surface));
+  color: color-mix(in srgb, var(--c-tertiary) 76%, var(--text));
+  border-color: color-mix(in srgb, var(--c-tertiary) 46%, transparent);
+}
+.roster-busy[data-kind="work"] {
+  background: var(--accent-soft); color: var(--accent);
+  border-color: var(--accent-line);
+}
+.roster-busy[data-kind="ask"] {
+  background: var(--card-high); color: var(--text);
+  border-color: var(--divider);
+}
+.roster-empty {
+  padding: 8px 12px;
+  font-size: 13px; line-height: 1.5; color: var(--text-3);
+}
+
+/* 收起轨道：总管首字圆钮（40px 按钮内 28px 圆，和展开态同尺寸） */
+.rail-chief .pt-avatar { width: 28px; height: 28px; font-size: 13px; }
+
+.icon-btn {
+  display: grid; place-content: center;
+  width: 28px; height: 28px;
+  border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--text-2);
+  transition: background .15s ease, color .15s ease;
+}
+.icon-btn:hover { background: var(--card); color: var(--text); }
+.icon-btn[aria-current="true"] { background: var(--accent-soft); color: var(--accent); }
+
+/* ── 自绘标题栏（全局） ────────────────────────────────── */
+
+/*
+ * 一条 40px 的顶栏横贯窗口：左侧品牌 + 侧栏开关/菜单，右侧设置 + 窗口三键。
+ * 空白区是 drag 区（双击最大化由壳处理）；所有可点击元素显式 no-drag。
+ * 普通浏览器没有 MyGo API，window-controls 保持 hidden。
+ */
+.titlebar {
+  position: fixed; inset: 0 0 auto 0;
+  z-index: 40;
+  display: flex; align-items: center;
+  height: var(--titlebar-h);
+  padding: 0 6px 0 14px;
+  background: var(--backdrop);
+  user-select: none;
+  -webkit-app-region: drag;
+}
+.titlebar-brand {
+  flex: none;
+  font-size: 13px; font-weight: 600; color: var(--text);
+  letter-spacing: .01em;
+}
+.titlebar-drag { flex: 1; align-self: stretch; -webkit-app-region: drag; }
+
+.chrome {
+  display: flex; align-items: center; gap: 2px;
+  margin-left: 12px;
+  -webkit-app-region: no-drag;
+}
+.chrome .icon-btn {
+  width: 28px; height: 28px;
+  border-radius: var(--r-full);
+  color: var(--text-2);
+}
+.chrome .icon-btn:hover { background: color-mix(in srgb, var(--text) 8%, transparent); }
+.chrome .icon-btn svg { width: 15px; height: 15px; }
+
+.window-controls {
+  display: flex; align-items: center; gap: 2px;
+  flex: none;
+  -webkit-app-region: no-drag;
+}
+.window-btn {
+  display: grid; place-content: center;
+  width: 28px; height: 28px;
+  border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--text-2);
+  transition: background .12s ease, color .12s ease;
+  -webkit-app-region: no-drag;
+}
+.window-btn svg { width: 14px; height: 14px; }
+.window-btn:hover { background: color-mix(in srgb, var(--text) 10%, transparent); color: var(--text); }
+.window-btn.close:hover { background: #e81123; color: #fff; }
+
+.menu-wrap { position: relative; }
+.menu-pop {
+  position: absolute;
+  top: 34px; left: 0;
+  z-index: 50;
+  min-width: 148px;
+  padding: 5px;
+  background: var(--surface);
+  border: 1px solid var(--outline);
+  border-radius: var(--r-md);
+  box-shadow: 0 14px 36px rgba(22, 20, 46, .18);
+  animation: rise .16s ease both;
+}
+.menu-pop button {
+  display: flex; align-items: center;
+  width: 100%; height: 32px; padding: 0 10px;
+  border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--text);
+  font-size: 13px; text-align: left;
+}
+.menu-pop button:hover { background: var(--card); }
+
+/* ── 主区 ─────────────────────────────────────────────── */
+
+/*
+ * 主对话区直接铺满窗口，不再做浮起卡片：
+ * 只有左上角保留 16px 圆角（它与侧栏/标题栏的交界），其余三角走直角，
+ * 右、下两边贴住窗口边。参考 deepseek-harness 的 Windows 做法：
+ * centerCol 的 border-radius 是 `16px 0 0 0`，窗口本身的圆角由壳负责。
+ */
+.main {
+  display: grid; grid-template-rows: auto 1fr; min-height: 0;
+  position: relative;
+  z-index: 1;
+  flex: 1; min-width: 0;
+  margin: 0;
+  background: var(--surface);
+  border: 0;
+  border-radius: 16px 0 0 0;
+  box-shadow: none;
+  overflow: hidden;
+  animation: viewIn .26s cubic-bezier(.16, 1, .3, 1) both;
+}
+

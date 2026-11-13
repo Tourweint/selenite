@@ -1,0 +1,372 @@
+/*
+ * 色板与四套主题（:root 变量 / white / indigo / black / accent）
+ *
+ * 2026-11-13 从 web/style.css（7,373 行单文件）按分区切出；正文是原文搬运，未改一条规则。
+ * 原区间 L1–L366。@import 顺序即层叠顺序，改样式只改对应分部。
+ */
+/*
+ * 配色不是自己想的，是从手机端搬的：
+ * <lifediary 手机仓>\core\designsystem\...\theme\Theme.kt
+ * 2026-11-05 起四套：paper（奶白纸 + 靛蓝墨，= :root）/ white（纯白）/
+ * indigo（靛蓝夜，石墨蓝黑改进版）/ black（纯黑 OLED）。
+ *
+ * 形状同样照手机端：8 / 12 / 16 / 24 四档，按钮和分组卡都是 16 的 squircle，
+ * 不是胶囊（2026-10-21 手机端明确要求「按钮和设置页那个方框一样」）。
+ */
+
+:root {
+  /* ── Paper：奶白纸 ── */
+  --bg: #fdf9f2;
+  --surface: #fdf9f2;
+  --surface-low: #f7f3eb;
+  --card: #f6f1e7;
+  --card-high: #ede9e0;
+  --text: #2e2b3a;
+  --text-2: #6e6b7e;
+  --text-3: #9a97a5;
+  --outline: #c8c5bc;
+  --divider: rgba(200, 197, 188, 0.55);
+
+  --c-primary: #3e4a8c;
+  --c-on-primary: #ffffff;
+  --c-primary-container: #f0ede5;
+  --c-on-primary-container: #1e1b4b;
+  --c-secondary: #b89b6e;
+  --c-on-secondary: #ffffff;
+  --c-secondary-container: #f5edd9;
+  --c-on-secondary-container: #4a3b1e;
+  --c-tertiary: #e0a84a;
+  --c-on-tertiary: #ffffff;
+  --c-tertiary-container: #fceecb;
+  --c-on-tertiary-container: #5c4210;
+  --c-error: #b3564d;
+
+  /* 代码高亮的五类 token（2026-11-04 批次一）：取自家色板，不引配色库 */
+  --code-k: #3e4a8c;
+  --code-s: #8a6d3b;
+  --code-c: #9a947f;
+  --code-n: #a4761f;
+  --code-a: #5b6b9e;
+
+  --card-border: transparent;
+  --card-glow: none;
+  --shadow: 0 1px 2px rgba(46, 43, 58, 0.04);
+  /* 浮层阴影 / 警示色（2026-11-04 composer 对齐 cindy）：菜单与上下文环用 */
+  --shadow-menu: 0 4px 16px rgba(46, 43, 58, 0.15);
+  --warn: #b07d2b;
+  /* 成功 / 在线一类的正色（2026-11-05 四主题）：别处不再硬编码绿值 */
+  --ok: #1f9d4d;
+  /* composer 工具行 pill 的 hover/展开底色：浅色在卡底上压一层墨，不是另一块卡 */
+  --composer-pill-bg: rgba(46, 43, 58, 0.06);
+  /* 输入卡与浮层的描边（2026-11-04 界面 v2）：--card-border 浅色是透明的，
+     拿它当边框等于没线；这一档是「看得见但不抢」的中性线 */
+  --composer-border: rgba(46, 43, 58, 0.14);
+  /* 首页居中偏移：JS 按实测卡高写入（高度/2 - 12），JS 失效时回退这个常量 */
+  --composer-home-offset: 64px;
+
+  /* 浮层背景：主区铺满窗口后只在左上角的 16px 圆角处露出这一档底色 */
+  --backdrop: #f1ebe0;
+  --composer-shadow: 0 10px 28px rgba(46, 43, 58, 0.10);
+
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 16px;
+  --r-xl: 24px;
+  --r-full: 9999px;
+
+  /* 正文字体（2026-11-13 用户拍板）：宋体优先，壳子 / 系统自带字体兜底。
+     原来正文走系统无衬线、只有首页题头用衬线；现在统一成纸感。
+     Windows 落到 SimSun，macOS 走 Songti SC / STSong，装了思源宋的走 Noto Serif SC；
+     都没有才落到系统衬线。代码/路径仍走 --mono。 */
+  --font: "Songti SC", "Noto Serif SC", "Source Han Serif SC", "STSong",
+    "SimSun", "Microsoft YaHei", serif;
+  /* 展示字体跟正文同一套；靠字号 / 字重 / 字距做层级，不再另造第二套字体。 */
+  --font-display: var(--font);
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+
+  --sidebar: 232px;
+  /* 收起轨道（2026-11-05 F1）：对齐 CINDY，72px 轨 + 36×36 圆钮 */
+  --rail: 72px;
+  /* 对话流宽度 = 与 composer（920px）一般宽（2026-11-05 用户拍板：700 太窄，不做可调） */
+  --thread: 920px;
+  --titlebar-h: 40px;
+
+  /* 模态遮罩（2026-11-05 F1）：浅色主题 .6，暗色 .7（见各主题覆盖） */
+  --modal-mask: rgba(0, 0, 0, 0.6);
+
+  /* 动效 tokens：取自参考项目 legacy-agent-orchestrator 的那一套，
+     原则是「动画只做反馈，单次不超过 360ms」 */
+  --dur-fast: 120ms;
+  --dur-base: 200ms;
+  --dur-slow: 240ms;
+  --dur-slower: 360ms;
+  --dur-enter: 300ms;
+  --ease-standard: cubic-bezier(.4, 0, .2, 1);
+  --ease-decelerate: cubic-bezier(0, 0, .2, 1);
+  --ease-accelerate: cubic-bezier(.4, 0, 1, 1);
+  --ease-emphasized: cubic-bezier(.34, 1.56, .64, 1);
+
+  /* 对话流浮现（2026-11-13，对齐 ZCode）：逐字 300ms ease-out 只动 opacity；
+     整条消息入场 260ms 急起缓收。时长固定，不按模型吐字速度缩短——
+     能不能看出淡入取决于单个字有几帧在渐变，与速度无关。 */
+  --reveal-duration: 300ms;
+  --reveal-ease: ease-out;
+  --enter-duration: 260ms;
+  --enter-ease: cubic-bezier(.16, 1, .3, 1);
+
+  /* 对话区中性面（2026-11-13）：气泡压一层墨、卡片用 hairline、代码/参数用 inset。
+     强调色只留给链接 / 运行态 / 选中态，不进气泡。 */
+  --chat-bubble: color-mix(in srgb, var(--text) 5%, transparent);
+  --chat-hairline: color-mix(in srgb, var(--text) 9%, transparent);
+  --chat-inset: color-mix(in srgb, var(--text) 4%, transparent);
+
+  /* 主题色的派生档：切主题色时这些会跟着走，不是只换按钮底色 */
+  --accent-soft: color-mix(in srgb, var(--accent) 13%, var(--bg));
+  --accent-line: color-mix(in srgb, var(--accent) 32%, transparent);
+
+  color-scheme: light;
+}
+
+/*
+ * ── 四套主题（2026-11-05 定稿）────────────────────────────
+ * :root 就是 paper（米黄纸，沿用 2026-10 的一版，值不动）；
+ * white / indigo / black 只覆盖同名 token，布局与形状 token 留在 :root。
+ * 纪律：:root 里的每个主题 token，下面三套都必须有值，缺一个就是暗色下漏色。
+ * 迁移口径：旧 "dark" → "indigo"，旧 "light" / 缺省 → "paper"（见 index.html 与 app.js）。
+ */
+
+/* ── White：暖白（2026-11-08 柔化：纯白太刺眼，降为微暖灰白；手机端 Theme.kt 未跟随） ── */
+html[data-theme="white"] {
+  --bg: #fafaf8;
+  --surface: #fafaf8;
+  --surface-low: #f3f3f0;
+  --card: #f4f4f1;
+  --card-high: #ededea;
+  --text: #1a1a1e;
+  --text-2: #52525b;
+  --text-3: #9b9ba4;
+  --outline: #d7d7d3;
+  --divider: rgba(0, 0, 0, 0.10);
+
+  /* accent 三档同 paper：白底上原色对比最好，不再另调 */
+  --c-primary: #3e4a8c;
+  --c-on-primary: #ffffff;
+  --c-primary-container: #f0ede5;
+  --c-on-primary-container: #1e1b4b;
+  --c-secondary: #b89b6e;
+  --c-on-secondary: #ffffff;
+  --c-secondary-container: #f5edd9;
+  --c-on-secondary-container: #4a3b1e;
+  --c-tertiary: #e0a84a;
+  --c-on-tertiary: #ffffff;
+  --c-tertiary-container: #fceecb;
+  --c-on-tertiary-container: #5c4210;
+  --c-error: #b3564d;
+
+  --code-k: #3e4a8c;
+  --code-s: #8a6d3b;
+  --code-c: #9a947f;
+  --code-n: #a4761f;
+  --code-a: #5b6b9e;
+
+  --card-border: rgba(0, 0, 0, 0.08);
+  --card-glow: none;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow-menu: 0 4px 16px rgba(0, 0, 0, 0.12);
+  --warn: #b07d2b;
+  --ok: #1f9d4d;
+  --composer-pill-bg: rgba(0, 0, 0, 0.05);
+  --composer-border: rgba(0, 0, 0, 0.14);
+
+  --backdrop: #f1f1ee;
+  --composer-shadow: 0 10px 28px rgba(0, 0, 0, 0.10);
+  --modal-mask: rgba(0, 0, 0, 0.6);
+
+  /* 对话区中性面：白底同样用墨色压层，不跟主题色走 */
+  --chat-bubble: color-mix(in srgb, var(--text) 5%, transparent);
+  --chat-hairline: color-mix(in srgb, var(--text) 9%, transparent);
+  --chat-inset: color-mix(in srgb, var(--text) 4%, transparent);
+
+  color-scheme: light;
+}
+
+/* ── Indigo：靛蓝夜（2026-11-05 改进版：紫蓝 → 石墨蓝黑，去紫降饱和） ── */
+html[data-theme="indigo"] {
+  --bg: #12141d;
+  --surface: #161922;
+  --surface-low: #181b26;
+  --card: #191c27;
+  --card-high: #212433;
+  --text: #e7e9f2;
+  --text-2: #a5a9ba;
+  --text-3: #6d7183;
+  --outline: #3a3f52;
+  --divider: rgba(255, 255, 255, 0.09);
+
+  /* 深色下 accent 提亮一档；gold / amber 也各给一档亮色 */
+  --c-primary: #8b97ea;
+  --c-on-primary: #101223;
+  --c-primary-container: #262b45;
+  --c-on-primary-container: #dfe3f5;
+  --c-secondary: #d4b896;
+  --c-on-secondary: #2b2317;
+  --c-secondary-container: #3a3327;
+  --c-on-secondary-container: #f5edd9;
+  --c-tertiary: #e8c06a;
+  --c-on-tertiary: #2b2310;
+  --c-tertiary-container: #443a20;
+  --c-on-tertiary-container: #fceecb;
+  --c-error: #e5a9a2;
+
+  --code-k: #8b97ea;
+  --code-s: #d4b896;
+  --code-c: #6d7183;
+  --code-n: #e8c06a;
+  --code-a: #9fb0d8;
+
+  /* 卡片比底色亮一档 + 5% 白内侧微光，不叠投影 */
+  --card-border: rgba(255, 255, 255, 0.07);
+  --card-glow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  --shadow: none;
+  --shadow-menu: 0 4px 16px rgba(0, 0, 0, 0.5);
+  --warn: #f3a115;
+  --ok: #34c268;
+  --composer-pill-bg: rgba(255, 255, 255, 0.08);
+  --composer-border: rgba(255, 255, 255, 0.12);
+
+  --backdrop: #0d0f16;
+  --composer-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+  --modal-mask: rgba(0, 0, 0, 0.7);
+
+  /* 对话区中性面：暗色用白墨压层，不用主题色（否则整块发紫） */
+  --chat-bubble: color-mix(in srgb, #ffffff 8%, transparent);
+  --chat-hairline: color-mix(in srgb, #ffffff 10%, transparent);
+  --chat-inset: color-mix(in srgb, #ffffff 6%, transparent);
+
+  color-scheme: dark;
+}
+
+/* ── Black：炭黑（2026-11-08 柔化：纯黑对比太硬，降为炭黑；手机端 Theme.kt 未跟随） ── */
+html[data-theme="black"] {
+  --bg: #17171a;
+  /* 主区就是炭黑，层级交给卡片 #1d1d21 和描边 */
+  --surface: #17171a;
+  --surface-low: #121215;
+  --card: #1d1d21;
+  --card-high: #242429;
+  --text: #e6e6ea;
+  --text-2: #a0a0aa;
+  --text-3: #66666f;
+  --outline: #3a3a44;
+  --divider: rgba(255, 255, 255, 0.12);
+
+  --c-primary: #8b97ea;
+  --c-on-primary: #0a0a12;
+  --c-primary-container: #232840;
+  --c-on-primary-container: #dfe3f5;
+  --c-secondary: #d4b896;
+  --c-on-secondary: #2b2317;
+  --c-secondary-container: #3a3327;
+  --c-on-secondary-container: #f5edd9;
+  --c-tertiary: #e8c06a;
+  --c-on-tertiary: #2b2310;
+  --c-tertiary-container: #443a20;
+  --c-on-tertiary-container: #fceecb;
+  --c-error: #e5a9a2;
+
+  --code-k: #8b97ea;
+  --code-s: #d4b896;
+  --code-c: #66666f;
+  --code-n: #e8c06a;
+  --code-a: #9fb0d8;
+
+  --card-border: rgba(255, 255, 255, 0.10);
+  --card-glow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  --shadow: none;
+  --shadow-menu: 0 6px 20px rgba(0, 0, 0, 0.8);
+  --warn: #f3a115;
+  --ok: #34c268;
+  --composer-pill-bg: rgba(255, 255, 255, 0.10);
+  --composer-border: rgba(255, 255, 255, 0.16);
+
+  --backdrop: #101013;
+  --composer-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+  --modal-mask: rgba(0, 0, 0, 0.7);
+
+  /* 对话区中性面：暗色用白墨压层，不用主题色 */
+  --chat-bubble: color-mix(in srgb, #ffffff 8%, transparent);
+  --chat-hairline: color-mix(in srgb, #ffffff 10%, transparent);
+  --chat-inset: color-mix(in srgb, #ffffff 6%, transparent);
+
+  color-scheme: dark;
+}
+
+/* ── 主题色三选：都来自色板，不新造颜色 ── */
+:root,
+html[data-accent="indigo"] {
+  --accent: var(--c-primary);
+  --on-accent: var(--c-on-primary);
+  --accent-container: var(--c-primary-container);
+  --on-accent-container: var(--c-on-primary-container);
+}
+html[data-accent="gold"] {
+  --accent: var(--c-secondary);
+  --on-accent: var(--c-on-secondary);
+  --accent-container: var(--c-secondary-container);
+  --on-accent-container: var(--c-on-secondary-container);
+}
+html[data-accent="amber"] {
+  --accent: var(--c-tertiary);
+  --on-accent: var(--c-on-tertiary);
+  --accent-container: var(--c-tertiary-container);
+  --on-accent-container: var(--c-on-tertiary-container);
+}
+
+* { box-sizing: border-box; }
+
+html, body { height: 100%; margin: 0; }
+
+body {
+  background: var(--backdrop);
+  color: var(--text);
+  font: 14px/1.6 var(--font);
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  /*
+   * 标题栏是 fixed 的，这里用 padding 预留它的高度，而不是给 .app 加 margin-top：
+   * body 没有边框/内边距时，.app 的 margin-top 会和 body 折叠，文档高度比视口多 40px。
+   * 那样只要有一次 scrollIntoView / focus 让根节点滚动，整页就会上移 40px
+   * （左上圆角被固定标题栏盖住、上下各多出一条背景横条），而且刷新前不会自己回来。
+   */
+  padding-top: var(--titlebar-h);
+  transition: background-color .18s ease, color .18s ease;
+}
+
+button, input, textarea, select { font: inherit; color: inherit; }
+/*
+ * 按钮一律从零开始画（2026-11-07 二次修）。
+ * 只写 `font/color` 不写 border 时，按钮会保留 UA 的 `2px outset` —— 在圆角按钮上
+ * 渲染成一圈上亮下暗的立体环，看起来就是「图标外面套了个黑圈」。所有自绘按钮都会
+ * 显式给 border（.ghost 1px、.btn-primary 0），所以这里统一清掉默认值不会改到既有控件。
+ */
+button { cursor: pointer; border: 0; }
+button:disabled { cursor: default; }
+svg { width: 16px; height: 16px; display: block; }
+[hidden] { display: none !important; }
+
+/*
+ * 侧栏是垫在下面的背景层，主对话区是浮在它上面的一张圆角纸。
+ * 折叠动画只走侧栏的 width，主区由 flex 自然让位；侧栏内容定宽并原地淡出，
+ * 不在滑动过程中重排（参考 deepseek-harness 的「定宽冻结 + 淡出」，
+ * 那边用过更重的 grid 轨道方案，这里保持 width 足够稳定）。
+ * 开=减速曲线 360ms，关=加速曲线 250ms：关比开快一点，手感才不黏。
+ */
+.app {
+  position: relative;
+  display: flex;
+  /* 标题栏高度由 body 的 padding-top 预留（见上），这里不再加 margin-top */
+  height: 100%;
+  overflow: hidden;
+  background: var(--backdrop);
+}
+

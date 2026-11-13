@@ -1,0 +1,416 @@
+/*
+ * 群组
+ *
+ * 2026-11-13 从 web/style.css（7,373 行单文件）按分区切出；正文是原文搬运，未改一条规则。
+ * 原区间 L5577–L5986。@import 顺序即层叠顺序，改样式只改对应分部。
+ */
+/* ── 群组（2026-11-06 群组方案批二）────────────────────────
+ * 列表态卡片 + 会话态时间线四形态 + @picker。只吃主题 token，四套色板自动适配。
+ * 时间线形态：主人右对齐 / 成员左对齐（头像 28px + 名字行 + 时间）/ 系统行居中发丝线 /
+ * 5 分钟同作者合并（.gmsg-head 不画）+ 跨天 .group-day 分割。 */
+
+/* 侧栏「群组」节与列表（2026-11-07 统一：卡片网格 → 一行一群）
+ * 原实现是 minmax(240px,1fr) 的自适应网格：只有 1–2 个群时卡片被撑到 300px+，
+ * 右侧留一大片空白，像一张被拉宽的孤卡；而有 6 个群时又要横向扫格子。
+ * 现在与项目列表 / 执事花名册同族：一行一群、行高固定、右侧只留人数，
+ * 1 个群不空、N 个群向下长。 */
+.group-row { gap: 8px; }
+/* 整块一个描边容器（与设置页的列表卡、建群弹窗的 .gcf-list 同一形状）。
+   每行一个圆角卡片会让 1 个群时变成一张孤卡——那正是改版前的问题，只是换了个方向。 */
+.group-list {
+  display: flex; flex-direction: column;
+  max-width: 640px;
+  border: 1px solid var(--outline);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  overflow: hidden;
+}
+.group-item {
+  display: flex; align-items: center; gap: 10px;
+  width: 100%; padding: 11px 14px;
+  border: 0; border-bottom: 1px solid var(--divider);
+  border-radius: 0;
+  background: transparent; color: var(--text);
+  text-align: left;
+  transition: background-color .15s ease;
+}
+.group-list > .group-item:last-child { border-bottom: 0; }
+.group-item:hover { background: var(--card); }
+.group-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* 首字圆钮：用 accent-soft 而不是实心 accent——列表里实心色块会比群名先入眼 */
+.group-item-avatar { width: 30px; height: 30px; font-size: 13px; }
+/* 会话头复合头像（2026-11-08 批三）：与列表行同尺寸，排在标题左侧 */
+.group-head-avatar { width: 30px; height: 30px; font-size: 12px; margin-right: 2px; }
+
+/* 复合头像（2026-11-08 批三）：成员头像 2×2 拼图
+ * 1 人直出（JS 走 paintAvatar）；2 人一行两格；3 人第三格横跨整行；4 人/多人 2×2，
+ * 多出来的用右下角 +N 表示。容器保留 .pt-avatar 的圆形裁剪，格子只负责铺图。 */
+.gavatar {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  grid-auto-rows: 1fr;
+  gap: 1px;
+  padding: 0;
+  place-content: stretch;
+  background: var(--divider);
+}
+.gavatar-n2 { grid-template-rows: 1fr; }
+.gavatar-n3 > .gavatar-cell:nth-child(3) { grid-column: 1 / -1; }
+.gavatar-cell {
+  display: grid; place-content: center;
+  min-width: 0; min-height: 0;
+  overflow: hidden;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 9px; font-weight: 600; line-height: 1;
+}
+.gavatar-cell img { width: 100%; height: 100%; display: block; object-fit: cover; }
+.gavatar-more { background: var(--card-high); color: var(--text-2); font-size: 8.5px; }
+/* 名字与副行必须各占一行：两者都是 span，父级不显式 flex 就会并排成
+   「书房小事 阅读助手、记账助手 · 不 @ 阅读助手 回」一整行（实测就这样）。 */
+.group-item-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.group-item-name {
+  font-size: 13.5px; font-weight: 500;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.group-item-sub {
+  margin-top: 1px;
+  font-size: 12px; color: var(--text-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.group-item-count { flex: none; font-size: 12px; color: var(--text-3); }
+.group-item-chevron { flex: none; display: inline-flex; color: var(--text-3); opacity: .55; }
+.group-item-chevron svg { width: 15px; height: 15px; }
+.group-item:hover .group-item-chevron { opacity: 1; color: var(--text-2); }
+
+/* 会话态
+ * 2026-11-07 修：`.tasks-scroll` 是 `overflow:auto` 的块，`height:100%` 在里面没有
+ * 可解析的基准，群会话实际是按内容高度铺开——结果整页跟着内容一起滚，
+ * 时间线自己不滚、composer 也不吸底。这里把滚动容器改成「撑满 + 只让时间线滚」。 */
+#view-groups .tasks-scroll { display: flex; flex-direction: column; overflow: hidden; }
+#view-groups .tasks-body { flex: 1; min-height: 0; overflow-y: auto; }
+#view-groups .group-chat {
+  flex: 1;
+  display: flex; flex-direction: column;
+  max-width: var(--thread); margin: 0 auto;
+  width: 100%;
+  min-height: 0;
+  height: auto;
+  padding: 0 24px 16px;
+}
+
+/* 成员条（2026-11-07）：谁在群里、谁是值日，一眼看见；点一下 = @ 他。
+   没这条时「@」是纯文本技巧，用户只能靠记忆拼名字。 */
+.group-members {
+  flex: none;
+  display: flex; align-items: center; gap: 6px;
+  flex-wrap: wrap;
+  padding: 10px 0 8px;
+}
+.group-member {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 28px; padding: 0 10px 0 3px;
+  border: 1px solid var(--composer-border);
+  border-radius: var(--r-full);
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 12.5px;
+  transition: background-color .15s ease, border-color .15s ease, color .15s ease;
+}
+.group-member:hover { background: var(--card); border-color: var(--outline); color: var(--text); }
+.group-member:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.group-member-avatar { width: 22px; height: 22px; font-size: 11px; }
+.group-member-name { max-width: 8em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.group-member-duty {
+  padding: 0 5px;
+  border-radius: var(--r-full);
+  background: var(--accent-soft); color: var(--accent);
+  font-size: 10.5px; font-weight: 600; line-height: 1.6;
+}
+.group-member.is-off { opacity: .5; }
+
+.group-notice {
+  flex: none;
+  margin: 0 0 8px;
+  padding: 7px 12px;
+  border-radius: 10px;
+  background: var(--surface-low);
+  color: var(--text-2);
+  font-size: 12.5px;
+  line-height: 1.55;
+  border: 1px solid var(--divider);
+  border-left: 2px solid var(--accent-line);
+}
+.group-thread {
+  flex: 1; min-height: 0;
+  overflow-y: auto; padding: 8px 2px 4px;
+  display: flex; flex-direction: column;
+}
+.group-day {
+  text-align: center; font-size: 12px; color: var(--text-3);
+  margin: 14px 0 8px;
+  display: flex; align-items: center; gap: 12px;
+}
+.group-day::before, .group-day::after {
+  content: ""; flex: 1; height: 1px; background: var(--divider);
+}
+.group-sys {
+  text-align: center; font-size: 12.5px; color: var(--text-3);
+  margin: 6px 0;
+  display: flex; align-items: center; gap: 12px;
+}
+.group-sys::before, .group-sys::after {
+  content: ""; flex: 1; height: 1px; background: var(--divider);
+}
+
+/* 气泡两形态：头像与名字行顶端对齐（旧版 margin-top:20px 是硬凑，长名字会错位） */
+.gmsg { display: flex; gap: 8px; margin: 6px 0; max-width: 78%; }
+.gmsg + .gmsg { margin-top: 3px; }
+.gmsg.me { margin-left: auto; flex-direction: row-reverse; }
+.gmsg-avatar { width: 28px; height: 28px; font-size: 13px; flex: none; }
+.gmsg.merged .gmsg-avatar { visibility: hidden; }
+.gmsg-stack { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.gmsg.me .gmsg-stack { align-items: flex-end; }
+.gmsg-head { display: flex; align-items: baseline; gap: 8px; padding: 0 4px; min-height: 18px; }
+.gmsg-who { font-size: 12.5px; font-weight: 600; color: var(--text-2); }
+.gmsg-at { font-size: 11.5px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.gmsg-live { color: var(--accent); }
+.gmsg-body {
+  padding: 8px 12px;
+  border-radius: 14px;
+  background: var(--card);
+  white-space: pre-wrap; word-break: break-word;
+  font-size: 14px; line-height: 1.55;
+  border: 1px solid var(--composer-border);
+}
+.gmsg.me .gmsg-body { background: var(--accent); color: var(--on-accent); border-color: transparent; }
+.gmsg.streaming .gmsg-body { opacity: .85; }
+/* 正文里的 @点名：只上色，不加底（cindy 口径：它不是链接，只是点名词） */
+.gmsg-mention { color: var(--accent); font-weight: 600; }
+.gmsg.me .gmsg-mention { color: var(--on-accent); font-weight: 700; }
+
+/* 状态胶囊（2026-11-08 批三）：composer 上方一条细行，没内容就整行不占位。
+ * 忙 = accent（正在说话/正在跑），等审批 = warn（在等人，不是故障）。 */
+.group-pulse {
+  flex: none;
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 6px 2px 0;
+}
+.group-pulse-chip {
+  display: inline-flex; align-items: center;
+  height: 22px; padding: 0 9px;
+  border: 1px solid var(--divider);
+  border-radius: var(--r-full);
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 11.5px; white-space: nowrap;
+}
+.group-pulse-chip.is-busy {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.group-pulse-chip.is-wait {
+  border-color: color-mix(in srgb, var(--warn) 38%, transparent);
+  color: var(--warn);
+}
+
+/* 重名 400 的候选条（2026-11-08 批三）：一行可点的长标签候选，点一下插进输入框 */
+.group-at-hint {
+  flex: none;
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  margin: 6px 0 0;
+  padding: 7px 10px;
+  border: 1px solid var(--outline);
+  border-radius: 10px;
+  background: var(--surface-low);
+  font-size: 12px; color: var(--text-2);
+}
+.group-at-hint-label { color: var(--text-3); }
+.group-at-hint-chip {
+  height: 22px; padding: 0 9px;
+  border: 1px solid var(--composer-border);
+  border-radius: var(--r-full);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  transition: border-color .15s ease, color .15s ease;
+}
+.group-at-hint-chip:hover { border-color: var(--accent); color: var(--accent); }
+.group-at-hint-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* composer（独立一份 DOM，样式骨架与主对话同拍） */
+.group-composer {
+  position: relative;
+  flex: none;
+  display: flex; align-items: flex-end; gap: 4px;
+  margin-top: 8px;
+  padding: 6px 8px 6px 6px;
+  border: 1px solid var(--composer-border);
+  border-radius: 16px;
+  background: var(--surface);
+}
+/* @ 入口（2026-11-07）：左侧图标按钮，点了直接把「@」打进输入框并弹候选。
+   光靠 placeholder 提示不够——用户不会先打一个 @ 才发现有补全。 */
+.group-at-btn {
+  flex: none;
+  width: 30px; height: 30px;
+  display: grid; place-content: center;
+  border: 0; border-radius: var(--r-md);
+  background: transparent; color: var(--text-3);
+  transition: background-color .15s ease, color .15s ease;
+}
+.group-at-btn:hover { background: var(--card); color: var(--text); }
+.group-at-btn svg { width: 17px; height: 17px; }
+.group-input {
+  flex: 1; resize: none;
+  border: 0; outline: 0; background: transparent;
+  min-height: 30px; max-height: 160px;
+  padding: 5px 2px;
+  box-sizing: border-box;
+  font-size: 14px; line-height: 1.5;
+}
+.group-send {
+  flex: none;
+  width: 30px; height: 30px;
+  display: flex; align-items: center; justify-content: center;
+  border: 0; border-radius: 10px;
+  background: var(--accent); color: var(--on-accent);
+}
+.group-send svg { width: 16px; height: 16px; }
+.group-send:disabled { opacity: .45; cursor: default; }
+.group-send.group-stop { background: var(--card-high); color: var(--text); }
+
+/* @picker 浮层 */
+.group-atpop {
+  position: absolute;
+  bottom: calc(100% + 6px); left: 8px;
+  min-width: 180px;
+  padding: 4px;
+  border-radius: 12px;
+  border: 1px solid var(--composer-border);
+  background: var(--surface);
+  box-shadow: var(--shadow-menu);
+  z-index: 30;
+}
+.group-atitem {
+  padding: 6px 10px; border-radius: 8px;
+  font-size: 13px; cursor: pointer;
+}
+.group-atitem.current { background: var(--composer-pill-bg); }
+.group-atitem:hover { background: var(--composer-pill-bg); }
+
+/* 成员右键菜单（2026-11-07）：贴光标、越界翻转，几何同 .proj-pop */
+.gmenu {
+  position: fixed; z-index: 70;
+  min-width: 196px; max-width: 260px;
+  padding: 5px;
+  border-radius: 12px;
+  border: 1px solid var(--composer-border);
+  background: var(--surface);
+  box-shadow: var(--shadow-menu);
+}
+.gmenu-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 8px 8px;
+  border-bottom: 1px solid var(--divider);
+  margin-bottom: 4px;
+}
+.gmenu-avatar { width: 26px; height: 26px; font-size: 12px; }
+.gmenu-head-main { min-width: 0; }
+.gmenu-head-name {
+  font-size: 13px; font-weight: 600; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.gmenu-head-sub { font-size: 11.5px; color: var(--text-3); margin-top: 1px; }
+.gmenu-item {
+  display: flex; flex-direction: column; gap: 1px;
+  width: 100%; padding: 7px 8px;
+  border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--text);
+  text-align: left;
+}
+.gmenu-item:hover, .gmenu-item:focus-visible { background: var(--card); outline: none; }
+.gmenu-item-label { font-size: 13px; }
+.gmenu-item-hint { font-size: 11.5px; color: var(--text-3); overflow-wrap: anywhere; }
+
+/* 建群弹窗的成员选择（2026-11-07 统一：勾选胶囊 → 一行一人）
+ * 原来是一枚 13px 原生复选框塞进描边胶囊：Windows 上是蓝色方勾，跟整站的圆钮/胶囊语言打架；
+ * 而且"值日执事"是另起的第二块区域，勾人之前那里是空白——两块都在说"谁在群里"，
+ * 却要用户滚两次、理解两次。
+ * 现在一行一人：头像 + 名字 + 右侧两个互斥态（加入/移除 · 设为值日/值日），
+ * 值日就在成员行里点，不再单开一块。行高 34 与 .modal-input 的 36 同一节奏。 */
+.gcf-label {
+  display: flex; align-items: baseline; gap: 8px;
+}
+.gcf-count { font-size: 11.5px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.gcf-list {
+  display: flex; flex-direction: column;
+  border: 1px solid var(--outline);
+  border-radius: var(--r-md);
+  background: var(--card);
+  overflow: hidden;
+}
+.gcf-row {
+  display: flex; align-items: center; gap: 8px;
+  min-height: 37px;
+  padding: 5px 8px 5px 7px;
+  border-bottom: 1px solid var(--divider);
+}
+.gcf-row:last-child { border-bottom: 0; }
+.gcf-row .pt-avatar { width: 24px; height: 24px; font-size: 11px; }
+.gcf-name {
+  flex: 1; min-width: 0; font-size: 13px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 动作槽（加入 / 设为值日 / 值日）右对齐，后面跟一个恒定 24px 的移出槽。
+   两槽分开而不是合成一个 flex：动作按钮宽度不同（设为值日 vs 加入），
+   合在一起就会把 × 推来推去——实测两行的 × 差 34px，一列按钮看着是歪的。 */
+.gcf-role { flex: none; display: flex; align-items: center; justify-content: flex-end; gap: 4px; }
+.gcf-x-slot { flex: none; width: 24px; }
+.gcf-chip {
+  height: 26px; padding: 0 9px;
+  border: 1px solid transparent; border-radius: var(--r-full);
+  background: transparent; color: var(--text-3);
+  font-size: 12px; white-space: nowrap;
+  transition: background-color .15s ease, border-color .15s ease, color .15s ease;
+}
+.gcf-chip:hover { background: var(--surface-low); color: var(--text); }
+/* 三种态各有固定形状，不靠 aria 切换：
+   · 加入（还不在群里）= 描边按钮，是这一行唯一的主操作，必须看得出可以点；
+   · 移除（已在群里）= 低权重文字，hover 才转错误色——它比「值日」次要，不该抢眼；
+   · 值日 = 强调色淡底，读作"不 @ 时这个人在接话"。 */
+.gcf-chip.is-join {
+  padding: 0 10px;
+  border-color: var(--outline);
+  color: var(--text-2);
+}
+.gcf-chip.is-join:hover { border-color: var(--text-3); background: var(--surface-low); color: var(--text); }
+/* 移出 = 图标按钮（18px ×），常态几乎不占视觉，hover 才转错误色 */
+.gcf-chip.is-leave {
+  display: inline-grid; place-content: center;
+  width: 24px; height: 26px; padding: 0;
+  color: var(--text-3);
+}
+.gcf-chip.is-leave svg { width: 14px; height: 14px; }
+.gcf-chip.is-leave:hover { background: transparent; color: var(--c-error); }
+/* 当前值日 = 不可点标记。它不提供"取消"，因为群建出来必须有人接不 @ 的话；
+   换人请点别人那行的「设为值日」。形状与「成员条」里的值日小标同族。 */
+.gcf-duty {
+  display: inline-flex; align-items: center;
+  height: 26px; padding: 0 9px;
+  border-radius: var(--r-full);
+  background: var(--accent-soft); color: var(--accent);
+  font-size: 12px; font-weight: 600; white-space: nowrap;
+}
+/* 「设为值日」在非当前值日的人身上：描边按钮。它不再是 aria-pressed 开关
+   （值日只指向、不取消，当前值日那一行走 .gcf-duty 标记），所以按类名给形状。 */
+.gcf-chip.is-duty {
+  padding: 0 10px;
+  border-color: var(--outline);
+}
+.gcf-chip.is-duty:hover { border-color: var(--text-3); background: var(--surface-low); color: var(--text); }
+.gcf-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.ghost.danger { color: var(--c-error); }
+

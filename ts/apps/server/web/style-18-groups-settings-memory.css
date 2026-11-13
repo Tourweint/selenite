@@ -1,0 +1,434 @@
+/*
+ * 群设置抽屉、记忆设置
+ *
+ * 2026-11-13 从 web/style.css（7,373 行单文件）按分区切出；正文是原文搬运，未改一条规则。
+ * 原区间 L5987–L6414。@import 顺序即层叠顺序，改样式只改对应分部。
+ */
+/* ── 群设置抽屉（2026-11-07）───────────────────────────────
+ * 首页：群身份（成员头像叠放 + 群名 + 人数/值日）+ 设置行 + 页尾删除。
+ * 二级页复用 .cs-head / .cs-body 骨架，控件是设置页那套 set-input / segmented。
+ * 行高 ≥52，行间 1px 分割 —— 与对话设置抽屉同一节奏。 */
+.gs-identity {
+  display: flex; flex-direction: column; align-items: center; gap: 9px;
+  padding: 22px 16px 18px;
+  border-bottom: 1px solid var(--divider);
+}
+.gs-identity-avatars { display: flex; align-items: center; }
+.gs-identity-avatars .pt-avatar {
+  width: 34px; height: 34px; font-size: 13px;
+  border: 2px solid var(--surface);
+  margin-left: -10px;
+}
+.gs-identity-avatars .pt-avatar:first-child { margin-left: 0; }
+.gs-identity-name {
+  font-size: 16px; font-weight: 600; color: var(--text);
+  max-width: 100%; text-align: center;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.gs-identity-meta { font-size: 12.5px; color: var(--text-3); text-align: center; }
+
+.gs-row {
+  display: flex; align-items: center; gap: 12px;
+  width: 100%; min-height: 54px;
+  padding: 10px 16px;
+  border: 0;
+  background: transparent; color: var(--text);
+  text-align: left;
+  transition: background-color .15s ease;
+}
+.gs-row:hover { background: var(--card); }
+.gs-row-icon { flex: none; display: inline-flex; color: var(--text-3); }
+.gs-row-icon svg { width: 17px; height: 17px; }
+.gs-row-main { flex: 1; min-width: 0; }
+.gs-row-title { font-size: 14px; }
+.gs-row-sub {
+  margin-top: 2px;
+  font-size: 12px; color: var(--text-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.gs-row-value {
+  flex: none; max-width: 40%;
+  font-size: 12.5px; color: var(--text-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.gs-row-chevron { flex: none; display: inline-flex; color: var(--text-3); }
+.gs-row-chevron svg { width: 15px; height: 15px; }
+.gs-section-label {
+  padding: 14px 16px 4px;
+  font-size: 12px; font-weight: 500; color: var(--text-3);
+}
+.gs-divider { height: 1px; margin: 0 16px; background: var(--divider); }
+.gs-footer { padding: 18px 16px 20px; display: flex; flex-direction: column; gap: 8px; }
+
+/* 二级页表单：字段 + 说明 + 底部动作条 */
+.gs-form { display: flex; flex-direction: column; gap: 14px; padding: 16px; }
+.gs-field { display: flex; flex-direction: column; gap: 6px; }
+.gs-field-label { font-size: 12px; font-weight: 500; color: var(--text-2); }
+.gs-form .set-input,
+.gs-form textarea.set-input { width: 100%; box-sizing: border-box; }
+.gs-form textarea.set-input { min-height: 92px; resize: vertical; line-height: 1.55; }
+.gs-actions { display: flex; align-items: center; gap: 8px; padding-top: 2px; }
+.gs-actions .btn-primary { margin-left: auto; }
+.gs-pick-note { font-size: 12px; color: var(--text-3); line-height: 1.55; }
+
+/* 成员页：一行一人（头像 + 名字 + 值日标记 + 移出），满员/下限时动作位写清原因 */
+.gs-member-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 16px;
+  min-height: 50px;
+}
+.gs-member-row .pt-avatar { width: 28px; height: 28px; font-size: 12px; }
+.gs-member-main { flex: 1; min-width: 0; }
+.gs-member-name {
+  font-size: 13.5px; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.gs-member-sub { font-size: 11.5px; color: var(--text-3); margin-top: 1px; }
+.gs-member-actions { flex: none; display: flex; align-items: center; gap: 6px; }
+.gs-chip-btn {
+  height: 26px; padding: 0 9px;
+  border: 1px solid var(--composer-border); border-radius: var(--r-full);
+  background: transparent; color: var(--text-2);
+  font-size: 12px; white-space: nowrap;
+}
+.gs-chip-btn:hover { background: var(--card); color: var(--text); }
+.gs-chip-btn[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.gs-chip-btn:disabled { opacity: .45; cursor: default; }
+.gs-chip-btn.is-danger:hover { border-color: var(--c-error); color: var(--c-error); background: transparent; }
+.gs-add-list { padding: 2px 10px 8px; display: flex; flex-direction: column; gap: 2px; }
+.gs-add-row {
+  display: flex; align-items: center; gap: 10px;
+  width: 100%; padding: 7px 8px;
+  border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--text);
+  text-align: left; font-size: 13px;
+}
+.gs-add-row:hover { background: var(--card); }
+.gs-add-row .pt-avatar { width: 24px; height: 24px; font-size: 11px; }
+.gs-add-plus { margin-left: auto; color: var(--text-3); font-size: 12.5px; }
+.gs-add-row:disabled { opacity: .45; cursor: default; }
+
+/* 群设置页尾的删除：居中一行小字按钮，不跟保存抢视线 */
+.gs-danger {
+  align-self: flex-start;
+  height: 30px; padding: 0 10px;
+  border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--c-error);
+  font-size: 12.5px;
+}
+.gs-danger:hover { background: color-mix(in srgb, var(--c-error) 10%, transparent); }
+
+/* 空状态（群组列表用；此前 tasks 段在用但一直没有样式，顺手补上） */
+.tasks-empty { padding: 40px 16px; text-align: center; color: var(--text-2); }
+.tasks-empty h2 { margin: 0 0 6px; font-size: 15px; color: var(--text); }
+.tasks-empty p { margin: 0 auto; max-width: 420px; font-size: 12.5px; line-height: 1.7; }
+
+/* 头像预设图库（.av-* 一族）随设置「头像」页一起退役（2026-11-07）：
+   头像并进「人设」弹窗，选择面板改用 .pt-portrait-* 一族，旧的 av-target/av-grid/
+   av-editor 已无引用。预设 PNG 本体与 /assets/preset/:file 路由保持不变。 */
+
+/* ── 记忆设置（2026-11-06 建；2026-11-08 重排）──────────────
+   分组标题挪到卡片外（与节标题 set-sec-title 同节律），每类一张自己的卡；
+   条目左对齐正文、右侧只留删除。组头带 ⓘ 悬停解释（"经历是干啥的"）。
+   形状与执事列表（.pt-card）同族，但不复用它的 class——那里有头像/状态徽章，
+   记忆不需要，混用会让两边的改动互相牵连。 */
+.mem-list { display: flex; flex-direction: column; gap: 16px; }
+.mem-sec { display: flex; flex-direction: column; gap: 8px; }
+.mem-sec-head { display: flex; align-items: center; gap: 8px; }
+.mem-sec-title {
+  margin: 0;
+  font-size: 12.5px; font-weight: 600; letter-spacing: .02em;
+  /* --text-3 在 --card-high 上只有 3:1 左右，12px 小字几乎看不清；
+     标题要能一眼扫到，用 --text-2（与 .row-hint 同档）。 */
+  color: var(--text-2);
+}
+.mem-count {
+  font-weight: 500; font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  padding: 1px 7px; border-radius: 999px;
+  /* 徽章只需要"比标题淡一点"，不要自带底色：
+     之前写 background: var(--bg) 时，如果元素被撑成整行宽，
+     就会在标题下面画出一条贯穿整行的灰带（看起来像删除线）。 */
+  color: var(--text-2);
+}
+.mem-item {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 10px 12px; border-radius: 12px;
+  background: var(--card-high);
+}
+.mem-item-main { min-width: 0; flex: 1 1 auto; display: flex; flex-direction: column; gap: 4px; }
+.mem-item-text { font-size: 13px; line-height: 1.5; color: var(--text); overflow-wrap: anywhere; }
+.mem-item-why {
+  font-size: 12px; line-height: 1.5; color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+.mem-item-meta { font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+/* 意图徽章（2026-11-09 T4 §3）：只给 kind=intention，与组标题同词"打算" */
+.mem-item-badge {
+  display: inline-block; margin-right: 6px; padding: 0 6px;
+  border-radius: 999px; font-size: 10.5px; line-height: 16px;
+  color: var(--text-2); background: var(--card);
+}
+.mem-item-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; }
+.mem-act { font-size: 12px; padding: 4px 8px; }
+
+/* 技能（2026-11-08 扫尾批 9-S；2026-11-13 用户拍板 A+C 版）
+   一行 2–3 张等宽定高卡：名字回到正文最亮一档，摘要最多两行，建议 = 6px 色点 + 四个字；
+   底部只留「用过几次 · 多久前」+ 开关 / 删除图标。时间、大小、来源与全文点开弹窗看。 */
+.sk-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+.sk-head-actions { display: flex; align-items: center; gap: 8px; flex: none; }
+.sk-path { margin-top: 2px; color: var(--text-3); font-family: var(--mono); font-size: 11px; overflow-wrap: anywhere; }
+.sk-list { display: flex; flex-direction: column; }
+.sk-empty { padding: 20px; }
+/* 定高是刻意的：卡片墙一行三四张时，行高随摘要长短跳动会很难扫；截断的两行摘要
+   悬停有 title 全文，点开弹窗看完整内容。 */
+.sk-item { display: flex; flex-direction: column; gap: 6px; height: 132px; padding: 13px 15px; }
+.sk-open {
+  flex: 1 1 auto; display: flex; flex-direction: column; gap: 6px; min-width: 0;
+  margin: 0; padding: 0; border: 0; background: none;
+  font: inherit; color: inherit; text-align: left; cursor: pointer;
+}
+.sk-open:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 6px; }
+.sk-item-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.sk-item-name {
+  flex: 0 1 auto; min-width: 0;
+  font-family: var(--mono); font-size: 13px; font-weight: 500; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 建议 = 色点 + 四个字（C 版）：不抢名字的戏，频率与理由收进 hover。
+   keep=正向（accent）、scene=中性（text-3）、skip=弱化（outline）、待复核=警示（tertiary）、未评估=虚线空圈 */
+.sk-bucket {
+  margin-left: auto; flex: none;
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 10.5px; line-height: 1; color: var(--text-3); white-space: nowrap;
+}
+.sk-bucket i { width: 6px; height: 6px; border-radius: 50%; display: inline-block; flex: none; }
+.sk-bucket-keep i { background: var(--accent); }
+.sk-bucket-scene i { background: var(--text-3); }
+.sk-bucket-skip i { background: var(--outline); }
+.sk-bucket-warn i { background: var(--c-tertiary); }
+.sk-bucket-none i { background: transparent; border: 1px dashed var(--outline); }
+.sk-item-summary {
+  flex: none; min-height: 39px;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2;
+  overflow: hidden;
+  font-size: 12.5px; line-height: 1.55; color: var(--text-2); overflow-wrap: anywhere;
+}
+.sk-item-foot { display: flex; align-items: center; gap: 7px; }
+.sk-item-meta {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums;
+}
+.sk-sep { margin: 0 3px; }
+/* 只读 / 久未使用只在 meta 里点一句，不再做成胶囊：卡片上只留一个视觉重点（名字） */
+.sk-ro { color: var(--text-3); }
+.sk-stale { color: color-mix(in srgb, var(--c-tertiary) 78%, var(--text)); }
+.sk-item-actions { flex: none; display: flex; align-items: center; gap: 2px; }
+.sk-del {
+  width: 24px; height: 24px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 0; border-radius: 7px; background: transparent;
+  color: var(--text-3); cursor: pointer;
+}
+.sk-del svg { width: 13px; height: 13px; }
+.sk-del:hover { background: var(--card-high); color: var(--c-error); }
+.sk-del:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* 弹窗里的补充细节（卡片上撤掉的那几项） */
+.sk-detail-meta { margin: -6px 0 0; color: var(--text-3); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+
+/* 工具条（2026-11-13 二轮）：分类 / 排序两个下拉 + 一个批量开关。
+   原来这里是一排 chips + 全开/全关/一键采纳四个按钮，按钮比卡片还抢眼。 */
+.sk-toolbar { display: flex; align-items: center; gap: 8px; margin: 0 0 16px; }
+.sk-toolbar-spacer { flex: 1; }
+.sk-select { position: relative; }
+.sk-select-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 28px; padding: 0 10px;
+  border: 1px solid var(--outline); border-radius: var(--r-full);
+  background: var(--surface); color: var(--text-2);
+  font-size: 12px; font-family: inherit; cursor: pointer;
+}
+.sk-select-btn:hover { border-color: var(--accent); color: var(--text); }
+.sk-select-btn[aria-expanded="true"] {
+  border-color: var(--accent); background: var(--card); color: var(--text);
+}
+.sk-select-btn .sk-select-count { color: var(--text-3); font-variant-numeric: tabular-nums; }
+.sk-select-btn svg { width: 12px; height: 12px; color: var(--text-3); }
+.sk-select-menu {
+  position: absolute; left: 0; top: calc(100% + 6px); z-index: 30;
+  min-width: 168px; padding: 5px;
+  border: 1px solid var(--composer-border); border-radius: var(--r-md);
+  background: var(--surface); box-shadow: var(--shadow-menu);
+}
+.sk-select-item {
+  display: flex; align-items: center; gap: 8px; width: 100%; height: 30px;
+  padding: 0 8px; border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--text); font-size: 12.5px; font-family: inherit;
+  text-align: left; cursor: pointer;
+}
+.sk-select-item:hover, .sk-select-item:focus-visible { background: var(--card); outline: none; }
+.sk-select-item .sk-select-label { flex: 1; }
+.sk-select-item .sk-select-count { color: var(--text-3); font-variant-numeric: tabular-nums; }
+.sk-select-check { width: 13px; height: 13px; color: var(--accent); visibility: hidden; }
+.sk-select-item[aria-checked="true"] .sk-select-check { visibility: visible; }
+.sk-select-item[aria-checked="true"] { font-weight: 500; }
+.sk-bulk { height: 28px; padding: 0 12px; font-size: 12px; }
+
+/* Agent 建议横幅（替代原来的「一键采纳」按钮）：只在还有没开的建议条目时出现 */
+.sk-advice-banner {
+  display: flex; align-items: center; gap: 9px;
+  margin: 0 0 14px; padding: 8px 12px;
+  border: 1px solid var(--accent-line); border-radius: var(--r-md);
+  background: var(--accent-soft); color: var(--text-2);
+  font-size: 12px; line-height: 1.5;
+}
+.sk-banner-icon { flex: none; display: inline-flex; color: var(--accent); }
+.sk-banner-icon svg { width: 15px; height: 15px; }
+.sk-banner-text { flex: 1; min-width: 0; }
+.sk-banner-text b { font-weight: 600; color: var(--text); }
+.sk-advice-banner .ghost { flex: none; height: 24px; padding: 0 10px; font-size: 12px; }
+
+/* 两区（已开启 / 未开启）与分区标题 */
+.sk-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 10px; }
+.sk-section + .sk-section { margin-top: 20px; }
+.sk-section-head { display: flex; align-items: center; gap: 8px; margin: 0 0 9px; }
+.sk-section-title { font-size: 12px; font-weight: 500; color: var(--text-2); }
+.sk-section-count { font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.sk-section-head::after { content: ""; flex: 1; height: 1px; background: var(--divider); }
+
+/* 新建技能：两条路的选择卡 */
+.sk-choice { display: flex; flex-direction: column; gap: 8px; }
+.sk-choice-item {
+  display: flex; align-items: flex-start; gap: 11px; width: 100%;
+  padding: 12px 14px;
+  border: 1px solid var(--outline); border-radius: var(--r-md);
+  background: var(--surface); color: var(--text);
+  font-family: inherit; text-align: left; cursor: pointer;
+}
+.sk-choice-item:hover, .sk-choice-item:focus-visible {
+  border-color: var(--accent); background: var(--accent-soft); outline: none;
+}
+.sk-choice-icon {
+  flex: none; width: 30px; height: 30px;
+  display: grid; place-content: center;
+  border-radius: 9px; background: var(--card-high); color: var(--text-2);
+}
+.sk-choice-icon svg { width: 16px; height: 16px; }
+.sk-choice-item:hover .sk-choice-icon { color: var(--accent); }
+.sk-choice-main { min-width: 0; }
+.sk-choice-title { display: block; font-size: 13px; font-weight: 500; }
+.sk-choice-hint { display: block; margin-top: 2px; font-size: 11.5px; line-height: 1.5; color: var(--text-3); }
+
+/* 技能斜杠选择器（2026-11-09）：输入「/xxx」时贴着输入框上沿弹可用技能单 */
+#skill-suggest {
+  position: fixed;
+  z-index: 70;
+  min-width: 300px; max-width: 400px;
+  max-height: 300px; overflow: auto;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--outline);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-menu);
+}
+.skill-suggest-item {
+  display: flex; flex-direction: column; gap: 2px; width: 100%;
+  padding: 7px 9px; text-align: left;
+  border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--text); cursor: pointer;
+}
+.skill-suggest-item.is-active { background: var(--card-high); }
+.skill-suggest-item .s-name { font-family: var(--mono); font-size: 12.5px; font-weight: 600; }
+.skill-suggest-item .s-sum {
+  font-size: 11.5px; color: var(--text-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sk-readonly {
+  padding: 6px 10px; border-radius: var(--r-md);
+  background: var(--card-high); color: var(--text-2);
+  font-family: var(--mono); font-size: 12.5px;
+}
+/* 只读技能的详情（2026-11-12）：摘要整段换行；原文用 pre 保住 frontmatter 的排版 */
+.sk-ro-text {
+  padding: 7px 10px; border-radius: var(--r-md);
+  background: var(--card-high); color: var(--text-2);
+  font-size: 12.5px; line-height: 1.55; overflow-wrap: anywhere;
+}
+.sk-ro-pre {
+  margin: 0; max-height: 320px; overflow: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--outline); border-radius: var(--r-md);
+  background: var(--card-high); color: var(--text-2);
+  font-family: var(--mono); font-size: 12px; line-height: 1.5;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.sk-ta {
+  width: 100%; padding: 8px 10px;
+  border: 1px solid var(--outline); border-radius: var(--r-md);
+  background: var(--card); color: var(--text);
+  font-family: var(--mono); font-size: 12.5px; line-height: 1.5;
+  outline: none; resize: vertical;
+  transition: border-color .15s ease;
+}
+.sk-ta:focus { border-color: var(--accent); }
+
+/* 整理与导入（2026-11-08 扫尾批 6）
+   范围下拉与设置页其它下拉同族；建议卡是"保留 / 收编 / 理由"三行，动作在右下。 */
+.mem-select {
+  font: inherit; font-size: 12.5px;
+  padding: 4px 8px;
+  border: 1px solid var(--card-border); border-radius: 8px;
+  background: var(--bg); color: var(--text);
+  max-width: 220px;
+}
+.mem-tools { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.mem-result {
+  margin: 0 12px 10px;
+  font-size: 12px; color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+.mem-props { display: flex; flex-direction: column; gap: 10px; padding: 10px 16px 12px; }
+.mem-prop-head { display: flex; flex-direction: column; gap: 4px; padding: 14px 16px 0; }
+.mem-prop-head .set-card-title { display: flex; align-items: center; gap: 8px; }
+.mem-prop {
+  display: flex; flex-direction: column; gap: 5px;
+  padding: 10px 12px; border-radius: 12px;
+  background: var(--card-high);
+}
+.mem-prop.is-done { opacity: .72; }
+.mem-prop-line { display: flex; align-items: flex-start; gap: 8px; }
+.mem-prop-tag {
+  flex: 0 0 auto;
+  font-size: 10.5px; line-height: 1.6;
+  padding: 0 6px; border-radius: 999px;
+  border: 1px solid var(--card-border);
+  color: var(--text-2);
+}
+.mem-prop-tag.is-keep { color: var(--ok, var(--text)); }
+.mem-prop-tag.is-drop { color: var(--text-3); }
+.mem-prop-text { font-size: 13px; line-height: 1.5; color: var(--text); overflow-wrap: anywhere; }
+.mem-prop-reason { font-size: 12px; line-height: 1.5; color: var(--text-2); overflow-wrap: anywhere; }
+.mem-prop-actions { display: flex; align-items: center; gap: 6px; justify-content: flex-end; }
+.mem-prop-status { font-size: 11.5px; color: var(--text-2); }
+/* 证据引文（2026-11-10 对标 Anthropic「做梦」）：建议卡上"当初的原话" */
+.mem-prop-evidence {
+  margin: 2px 0 0 24px;
+  padding: 6px 9px;
+  font-size: 12px; line-height: 1.5;
+  color: var(--text-2);
+  background: var(--card, transparent);
+  border-left: 2px solid var(--outline);
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+.mem-prop-evidence.is-hit {
+  display: block; width: calc(100% - 24px);
+  font-style: italic;
+  color: var(--text);
+  cursor: pointer;
+}
+.mem-prop-evidence.is-hit:hover { border-left-color: var(--c-tertiary, var(--text-3)); }
+.mem-prop-evidence.is-miss { font-size: 11.5px; color: var(--text-3); }
+

@@ -1,0 +1,426 @@
+/*
+ * 搜索页、令牌门
+ *
+ * 2026-11-13 从 web/style.css（7,373 行单文件）按分区切出；正文是原文搬运，未改一条规则。
+ * 原区间 L2387–L2806。@import 顺序即层叠顺序，改样式只改对应分部。
+ */
+/* ── 搜索页（2026-11-12）──────────────────────────────────────
+   独立一页：一个输入框 + 按对话分组的结果。组 = 一条对话（标题 + 命中数），
+   组内是片段，点片段回原会话定位；同一段话不会既当标题又当结果出现两遍。
+   宽度收到 720：搜索是"读句子"，太长一行反而难扫。 */
+.search-top {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 16px; height: 64px; padding: 0 24px; flex: none;
+}
+.search-title { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.search-title h1 { margin: 0; font-size: 16px; font-weight: 600; color: var(--text); }
+.search-title-sub { margin-left: 8px; font-size: 12px; font-weight: 400; color: var(--text-3); }
+.search-scroll { overflow-y: auto; padding: 8px 24px 48px; min-height: 0; }
+.search-field { position: relative; display: flex; align-items: center; max-width: 720px; margin: 0 auto; }
+.search-ico {
+  position: absolute; left: 14px; width: 16px; height: 16px;
+  color: var(--text-3); pointer-events: none;
+}
+.search-input {
+  width: 100%; height: 48px; padding: 0 16px 0 40px;
+  border: 1px solid var(--card-border); border-radius: var(--r-lg);
+  background: var(--card); color: var(--text);
+  font: inherit; font-size: 14px; outline: none;
+}
+.search-input:focus { border-color: var(--accent); }
+.search-input::placeholder { color: var(--text-3); }
+.search-hint { max-width: 720px; margin: 10px auto 0; font-size: 12px; line-height: 1.6; color: var(--text-2); }
+.search-hint.is-error { color: var(--c-error); }
+.search-results { max-width: 720px; margin: 18px auto 0; display: flex; flex-direction: column; gap: 12px; }
+.sr-empty { padding: 24px 4px; font-size: 13px; line-height: 1.7; color: var(--text-2); }
+.sr-group {
+  background: var(--card); border: 1px solid var(--card-border);
+  border-radius: var(--r-lg); overflow: hidden;
+}
+.sr-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+  width: 100%; padding: 12px 16px; border: 0;
+  background: transparent; color: var(--text); text-align: left; cursor: pointer;
+}
+.sr-head:hover { background: var(--card-high); }
+.sr-head:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.sr-title { font-size: 13.5px; font-weight: 600; overflow-wrap: anywhere; }
+.sr-meta { flex: none; font-size: 11.5px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+/* 标题是从正文里推出来的组没有组头，第一条命中就是卡首行——别再画内嵌上边线，
+   否则会和卡片自己的描边叠成一条双线。 */
+.sr-hits:not(:first-child) { border-top: 1px solid var(--divider); }
+/* 无组头、多命中时的计数行（不可点）：只报数，不重复正文 */
+.sr-count {
+  padding: 12px 16px 10px;
+  font-size: 11.5px; color: var(--text-3); font-variant-numeric: tabular-nums;
+}
+.sr-hit {
+  display: flex; align-items: baseline; gap: 12px;
+  width: 100%; padding: 10px 16px; border: 0;
+  background: transparent; color: var(--text-2); text-align: left; cursor: pointer;
+}
+.sr-hit + .sr-hit { border-top: 1px solid var(--divider); }
+.sr-hit:hover { background: var(--card-high); color: var(--text); }
+.sr-hit:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.sr-snippet { flex: 1 1 auto; min-width: 0; font-size: 12.5px; line-height: 1.55; overflow-wrap: anywhere; white-space: pre-wrap; }
+.sr-time { flex: none; font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.sr-more {
+  align-self: flex-start; padding: 8px 16px 12px; border: 0;
+  background: transparent; color: var(--accent); font-size: 12px; cursor: pointer;
+}
+/* 结果底部（2026-11-12）：查看更多 / 搜索更早的历史 / 已覆盖全部历史 */
+.sr-foot {
+  display: flex; align-items: center; justify-content: center;
+  gap: 8px 16px; flex-wrap: wrap; padding: 4px 0 8px;
+}
+.sr-foot-btn {
+  height: 32px; padding: 0 14px;
+  border: 1px solid var(--card-border); border-radius: var(--r-full);
+  background: var(--card); color: var(--text);
+  font: inherit; font-size: 12.5px; cursor: pointer;
+}
+.sr-foot-btn:hover { border-color: var(--accent); }
+.sr-foot-btn:disabled { opacity: .5; cursor: default; }
+.sr-scope-btn {
+  border: 0; background: transparent; padding: 6px 2px;
+  color: var(--text-3); font: inherit; font-size: 12px; cursor: pointer;
+}
+.sr-scope-btn:hover { color: var(--accent); }
+.sr-scope-note { font-size: 12px; color: var(--text-3); }
+
+/* 命中词：默认 <mark> 在深色主题下是刺眼的亮黄底，改成主色淡底 + 正文色 */
+mark {
+  padding: 0 1px; border-radius: 3px;
+  background: color-mix(in srgb, var(--accent) 26%, transparent);
+  color: inherit;
+}
+
+/* 主题色板（2026-11-05 取代旧的三段明暗切换）：四枚预览方块，下挂主题名。
+   预览色写死在 JS 的 THEMES 里（不跟当前 token 走），否则四枚会长得一模一样。 */
+.theme-picker { display: flex; flex-wrap: wrap; gap: 8px; }
+.theme-choice {
+  display: flex; flex-direction: column; align-items: center; gap: 5px;
+  padding: 5px 6px 4px;
+  border: 1px solid transparent; border-radius: var(--r-md);
+  background: transparent; color: var(--text-2);
+  font-size: 11.5px; line-height: 1.4;
+  transition: background-color .15s ease, border-color .15s ease, color .15s ease;
+}
+.theme-choice:hover { background: var(--surface-low); color: var(--text); }
+.theme-choice[aria-checked="true"] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-line);
+  color: var(--text);
+}
+.theme-choice:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.theme-chip {
+  position: relative; display: block;
+  width: 52px; height: 34px;
+  border-radius: var(--r-sm);
+  background: var(--tc-bg);
+  box-shadow: inset 0 0 0 1px rgba(127, 127, 127, .32);
+}
+.theme-chip-card {
+  position: absolute; left: 7px; right: 7px; bottom: 7px; height: 9px;
+  border-radius: 3px;
+  background: var(--tc-card);
+  box-shadow: 0 0 0 1px rgba(127, 127, 127, .22);
+}
+.theme-chip-dot {
+  position: absolute; top: 7px; right: 8px;
+  width: 7px; height: 7px; border-radius: var(--r-full);
+  background: var(--tc-accent);
+}
+.theme-name { white-space: nowrap; }
+
+/* 通用开关（2026-11-05 G1，正式组件）：设置页所有布尔项只有这一套，
+   取代 F2 临时抽的 .spring-switch。几何照 CINDY components/ui/switch：
+   轨道 36×20 + 2px 透明内缩边（内容盒 32×16）、thumb 16px、checked 位移 16px；
+   hover thumb 17px、按下 18×14 的轻微形变（CINDY 注释原话：subtle deformation）。
+   轨道 checked 走 --accent；thumb 未选 --text-2 / 选中 --on-accent，四主题都对得上。 */
+.switch {
+  --sw-thumb: 16px;
+  --sw-thumb-h: 16px;
+  box-sizing: border-box;
+  position: relative; flex: none;
+  display: inline-flex; align-items: center;
+  width: 36px; height: 20px; padding: 0;
+  border: 2px solid transparent; border-radius: var(--r-full);
+  background: color-mix(in srgb, var(--text-3) 34%, transparent);
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-standard);
+}
+/* 24px 高的透明点击热区，可见轨道仍是 20px（CINDY 同款） */
+.switch::after {
+  content: "";
+  position: absolute; inset: -4px -2px;
+  border-radius: inherit;
+}
+.switch:not(:disabled):hover { --sw-thumb: 17px; }
+.switch:not(:disabled):active { --sw-thumb: 18px; --sw-thumb-h: 14px; }
+.switch[aria-checked="true"] { background: var(--accent); }
+.switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.switch:disabled { opacity: .5; cursor: not-allowed; }
+.switch-thumb {
+  display: block; flex: none;
+  width: var(--sw-thumb); height: var(--sw-thumb-h);
+  border-radius: var(--r-full);
+  background: var(--text-2);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .20);
+  transform: translateX(0);
+  /* 位移走全仓的 --ease-emphasized（轻微回弹，和主题切换滑块同一档）；
+     CINDY 原文注释是 no overshoot，这里按本仓用户要求保留回弹，幅度由 120ms 收住。 */
+  transition: transform var(--dur-fast) var(--ease-emphasized),
+              width var(--dur-fast) var(--ease-decelerate),
+              height var(--dur-fast) var(--ease-decelerate),
+              background-color var(--dur-fast) var(--ease-standard);
+}
+/* 内容盒 32px - thumb 宽度 = 位移量，形变时也贴着右内边 */
+.switch[aria-checked="true"] .switch-thumb {
+  background: var(--on-accent);
+  transform: translateX(calc(32px - var(--sw-thumb)));
+}
+@media (prefers-reduced-motion: reduce) {
+  .switch,
+  .switch-thumb { transition: none; }
+}
+
+.card {
+  display: flex; flex-direction: column;
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--card-glow);
+  overflow: hidden;
+}
+
+.row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 16px; min-height: 56px; padding: 12px 16px;
+}
+.row-main { min-width: 0; }
+.row-label { font-size: 13.5px; font-weight: 500; color: var(--text); }
+.row-hint { font-size: 12px; color: var(--text-2); margin-top: 3px; line-height: 1.45; }
+/* 悬停解释（2026-11-08 建 ⓘ、2026-11-09 二改图标退役）：解释直接挂在标签文字的
+   data-tip 上，悬停即出（全局 hover-tip 系统）；带 data-tip 的标签用 help 光标示意。
+   状态/结果类文案仍走 .row-hint 常驻（rowMarkup 的 inlineHint）。 */
+.row-label[data-tip],
+.mem-sec-title[data-tip],
+.set-card-title[data-tip] { cursor: help; }
+.row-control { flex: 0 1 auto; min-width: 0; display: flex; align-items: center; gap: 8px; }
+
+.divider { height: 1px; margin: 0 16px; background: var(--divider); }
+
+/* 分段控件 */
+.segmented {
+  /* relative 是滑行高亮层的定位基准；不写死在某个 id 上，任何 .segmented.slide 都能用。
+     2026-11-05 形状对齐 CINDY segmented-control.css 原版：整条圆胶囊轨道（radius-full，
+     无描边）、选项完全圆、高亮胶囊 border-radius: inherit + 阴影。 */
+  position: relative;
+  display: inline-flex; gap: 2px; padding: 2px;
+  background: var(--surface-low);
+  border: 0;
+  border-radius: var(--r-full);
+  /* 权限 / 发送键 / 工具活动三处分段控件共用：切主题时底色和描边跟着走 */
+  transition: background-color .18s ease, border-color .18s ease;
+}
+.segmented button {
+  position: relative; z-index: 1;
+  height: 26px; padding: 0 12px;
+  border: 0; border-radius: var(--r-full);
+  background: transparent; color: var(--text-2);
+  font-size: 12px; font-weight: 500; line-height: 1;
+  transition: background-color .18s ease, color .18s ease;
+}
+.segmented button:hover { color: var(--text); }
+.segmented button[aria-checked="true"] {
+  background: transparent;
+  color: var(--text);
+  font-weight: 500;
+  outline: none;
+}
+.segmented button:not([aria-checked="true"]):hover { background: var(--card-high); }
+
+/* 共享滑行高亮层：照 CINDY components/ui/segmented-control 的实现抄——
+   一个 absolute 小胶囊（.segmented-plate），width/height/transform 由 JS 按选中按钮实测写入，
+   过渡只跑 transform / width / height（200ms = CINDY --motion-base，
+   曲线 cubic-bezier(.4,0,.2,1) = CINDY --motion-ease-move，本仓同名 --ease-standard）。
+   首帧定位由 JS 关掉过渡再写，避免从左上角滑进来。 */
+.segmented-plate {
+  box-sizing: border-box;
+  position: absolute; top: 0; left: 0; z-index: 0;
+  pointer-events: none;
+  /* CINDY 原版：radius 继承容器（完全圆）、选中底 + 阴影，无描边 */
+  border: 0;
+  border-radius: inherit;
+  background: var(--card-high);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .12), inset 0 0 0 1px var(--card-border);
+  opacity: 0;
+  /* 动画换本仓弹簧（用户拍板：形状 CINDY、动画用主题滑块那档回弹）；
+     300ms 让 1.56 的过冲读得出来，200ms 内回弹看不清。 */
+  transition:
+    transform var(--dur-enter) var(--ease-emphasized),
+    width var(--dur-enter) var(--ease-emphasized),
+    height var(--dur-enter) var(--ease-emphasized);
+}
+.segmented[data-plate="ready"] > .segmented-plate { opacity: 1; }
+/* 有滑行胶囊时，选中态只剩文字色，底色/描边交给胶囊，避免两层叠色 */
+.segmented.slide button[aria-checked="true"] {
+  background: transparent;
+  outline: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .segmented-plate { transition: none; }
+}
+
+/* 主题色色块 */
+.swatches { display: inline-flex; gap: 8px; }
+.swatch {
+  width: 26px; height: 26px; padding: 0;
+  border: 2px solid transparent;
+  border-radius: var(--r-sm);
+  outline: 1px solid var(--outline);
+  outline-offset: 1px;
+  transition: border-color .15s ease;
+}
+.swatch[aria-checked="true"] { border-color: var(--text); }
+
+/* 二维码：左文字右码，别让它一个人占满一屏 */
+.pair {
+  display: flex; align-items: center; justify-content: center; gap: 32px; padding: 16px;
+  /* 2026-11-13：与 .card 同元素时（class="card pair"）会被 .card 的 column 顶掉，显式横排；
+     二维码贴最右会隔出一大段空白，所以内容整组居中（左文字右码） */
+  flex-direction: row;
+}
+.pair-info {
+  flex: none; max-width: 420px;
+  display: flex; flex-direction: column; align-items: flex-start; gap: 6px;
+}
+.pair-qr {
+  flex: none;
+  width: 164px; height: 164px;
+  padding: 8px;
+  background: #ffffff;
+  border-radius: var(--r-md);
+}
+.pair-url {
+  font-family: var(--mono); font-size: 11.5px; color: var(--text-2);
+  word-break: break-all; line-height: 1.5;
+}
+.pair-meta { font-size: 11.5px; color: var(--text-3); }
+
+/* 连接页链路图（2026-11-13）：这台电脑 → 中继（VPS）→ 手机，三格 + 一行断点提示。
+   与手机端中继页同一套语言：状态点 + 两三个字的短词，不铺解释性句子。 */
+.conn-chain {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; max-width: 620px;
+  margin: 0 auto;
+  padding: 18px 16px 10px;
+}
+.conn-node {
+  flex: 1; min-width: 0;
+  display: flex; flex-direction: column; align-items: center; gap: 5px;
+}
+.conn-k { font-size: 11px; color: var(--text-3); }
+.conn-v {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 13px; color: var(--text);
+  white-space: nowrap;
+}
+.conn-link {
+  flex: none; width: 26px; height: 1px;
+  background: var(--divider);
+}
+.conn-hint {
+  max-width: 620px;
+  margin: 0 auto;
+  padding: 0 16px 14px;
+  text-align: center;
+  font-size: 12px; line-height: 1.5; color: var(--text-2);
+}
+.conn-howto {
+  display: flex; flex-direction: column; gap: 8px;
+  margin-top: 2px; padding: 12px 16px 14px;
+  border-top: 1px solid var(--divider);
+}
+.howto-step {
+  display: flex; align-items: flex-start; gap: 10px;
+  font-size: 12.5px; line-height: 1.5; color: var(--text);
+}
+.howto-step .n {
+  flex: none;
+  display: grid; place-items: center;
+  width: 18px; height: 18px; margin-top: 1px;
+  border-radius: var(--r-full);
+  background: var(--card-high); color: var(--text-2);
+  font-size: 10.5px;
+}
+.howto-step code {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--surface-low);
+  font-family: var(--mono); font-size: 11.5px;
+  color: var(--text-2);
+}
+
+/* 添加设备（2026-11-11 批H）：加入码要能照着念，二维码别把字挤没 */
+.relay-join { display: flex; align-items: center; gap: 16px; }
+.relay-join-qr {
+  flex: none;
+  width: 148px; height: 148px;
+  padding: 8px;
+  background: #ffffff;
+  border-radius: var(--r-md);
+}
+.relay-join-side { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.relay-join-label { font-size: 12px; color: var(--text-3); }
+.relay-join-code {
+  font-family: var(--mono); font-size: 20px; line-height: 1.35;
+  letter-spacing: .5px; word-break: break-all; color: var(--text);
+}
+.relay-join-meta { font-size: 11.5px; color: var(--text-3); }
+
+/* 右值：只在真的放不下时才断行（break-all 会把 127.0.0.1 拆成两截） */
+.kv {
+  font-family: var(--mono); font-size: 12.5px; color: var(--text-2);
+  overflow-wrap: anywhere; text-align: right;
+}
+
+/* ── 令牌门 ───────────────────────────────────────────── */
+
+.gate {
+  position: fixed; inset: 0; z-index: 10;
+  display: grid; place-content: center;
+  background: rgba(22, 20, 46, .55);
+  padding: 24px;
+}
+.gate[hidden] { display: none; }
+
+.gate-box {
+  width: min(400px, 92vw);
+  padding: 20px;
+  background: var(--surface);
+  border: 1px solid var(--outline);
+  border-radius: var(--r-lg);
+  box-shadow: 0 18px 48px rgba(22, 20, 46, .28);
+  animation: rise .2s ease both;
+}
+.gate-box h2 { margin: 0 0 8px; font-size: 15px; font-weight: 600; }
+.gate-box p { margin: 0 0 14px; font-size: 13px; color: var(--text-2); line-height: 1.6; }
+.gate-box code { font-family: var(--mono); font-size: 12px; background: var(--card); border-radius: var(--r-sm); padding: 1px 5px; }
+.gate-box input {
+  width: 100%; height: 40px; padding: 0 12px;
+  background: var(--card); border: 1px solid var(--outline);
+  border-radius: var(--r-md); outline: none; font-size: 13.5px;
+}
+.gate-box input:focus { border-color: var(--accent); }
+.gate-row { display: flex; gap: 8px; margin-top: 14px; }
+.gate-row button {
+  flex: 1; height: 40px; padding: 0 14px;
+  border: 0; border-radius: var(--r-md);
+  font-size: 13px; font-weight: 500;
+}
+.gate-row button[type="submit"] { background: var(--accent); color: var(--on-accent); }
+.gate-row button[type="submit"]:hover { filter: brightness(1.05); }
+.gate-err { margin: 12px 0 0; color: var(--c-error); font-size: 12.5px; }
+

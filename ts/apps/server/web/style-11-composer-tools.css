@@ -1,0 +1,236 @@
+/*
+ * 滚动条、composer 底部工具行（pill / 弹出层）
+ *
+ * 2026-11-13 从 web/style.css（7,373 行单文件）按分区切出；正文是原文搬运，未改一条规则。
+ * 原区间 L3638–L3867。@import 顺序即层叠顺序，改样式只改对应分部。
+ */
+/* ── 滚动条 ───────────────────────────────────────────── */
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb {
+  background: var(--outline);
+  border-radius: var(--r-full);
+  border: 3px solid transparent; background-clip: content-box;
+}
+::-webkit-scrollbar-track { background: transparent; }
+
+/* 设置页切页由 .set-page.enter 统一负责（150ms fade），不再做分组错峰进场 */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+}
+
+@media (max-width: 800px) {
+  /* 窄屏不留完整侧栏，但保留 48px 收起轨道：新对话 / 任务中心 / 设置
+     都还要能点到（任务中心有侧栏入口，窄屏也不能只剩一个死路）。 */
+  .sidebar,
+  html[data-sidebar="closed"] .sidebar { display: flex; width: 48px; }
+  .sidebar-inner { display: none; }
+  .side-rail { opacity: 1; pointer-events: auto; }
+  /* 底栏本来就是竖排（齿轮在上、状态点在下），窄屏只需收一点间距 */
+  .rail-foot { gap: 2px; }
+  .thread { padding: 18px 14px 8px; }
+  .top { padding: 0 14px; }
+  /* 窄窗口：设置左栏改横排（标题行 + 横向胶囊），内容列跟在下面 */
+  .main.settings { flex-direction: column; }
+  .set-side {
+    width: 100%;
+    flex-direction: row; align-items: center; gap: 8px;
+    padding: 10px 14px 4px;
+    overflow-x: auto; overflow-y: hidden;
+  }
+  .set-head { padding: 0 4px 0 0; }
+  .set-head h1 { font-size: 18px; }
+  .set-nav { flex-direction: row; gap: 4px; }
+  .set-nav button { width: auto; white-space: nowrap; }
+  .set-scroll { padding: 0 14px; }
+  .set-page { padding: 12px 0 64px; }
+  .row { flex-wrap: wrap; }
+
+  /* 任务中心窄窗：顶栏允许折成两行，筛选与刷新不挤出屏幕；看板保持三列横滚 */
+  .tasks-top {
+    flex-wrap: wrap; row-gap: 8px;
+    padding: 8px 12px;
+    align-content: center;
+  }
+  .tasks-actions { flex: 1 1 100%; justify-content: space-between; }
+  .tasks-filters { flex: 1 1 auto; }
+  .tasks-scroll { padding: 12px 12px 20px; }
+  .tasks-stats { gap: 8px; margin-bottom: 10px; }
+  .tk-stat { min-width: 104px; padding: 8px 10px; }
+  /* 打手四卡在窄窗保留一排横滚，别折成四行把看板推下去 */
+  .tk-hitters { gap: 8px; margin-bottom: 10px; }
+  .tk-hitter { min-width: 148px; padding: 8px 10px; }
+  .tasks-state { margin-top: 28px; padding: 0 8px; }
+}
+
+/* 手机宽度（375 / 390）：三个下拉按可用宽度折行，不把顶栏撑破；三列仍是固定宽度，靠横滚 */
+@media (max-width: 560px) {
+  .tasks-filters { width: 100%; }
+  .tasks-select { flex: 1 1 108px; min-width: 0; }
+  .tasks-actions { gap: 6px; }
+  .tasks-title-sub { display: none; }
+  .tasks-scroll { padding: 10px 10px 18px; }
+}
+
+/* 触屏：点击区域至少 40~44px，轨道按钮也要够得着 */
+@media (pointer: coarse) {
+  .rail-btn { width: 44px; height: 44px; }
+  .side-item { height: 44px; }
+  .tasks-select { height: 40px; font-size: 13px; }
+  .tasks-actions .ghost { min-height: 40px; }
+  .tk-conv-head,
+  .tk-row { padding: 11px 13px; }
+  .tk-hitter { min-height: 56px; }
+}
+
+/* ── composer 底部工具行：pill / 弹出层（2026-11-04 对齐 cindy）──
+   模型 pill 与菜单共用 morph 弹出动效，思考强度是菜单里的行内分段。
+   布局类（.composer-tools / .composer-meta）在 composer-foot 那节，这里只管零件。 */
+
+/* 每颗 pill 各自包一层，菜单据此定位（贴着触发 pill 的右上角往上弹） */
+.composer-wrap { position: relative; display: flex; min-width: 0; flex: 0 1 auto; }
+
+/* 静息全裸：无底色无描边；hover / 展开 / 键盘聚焦才浮现一档淡底 */
+.composer-pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 30px; padding: 0 9px;
+  min-width: 0;
+  border: 1px solid transparent; border-radius: var(--r-full);
+  background: transparent; color: var(--text-2);
+  /* 2026-11-05：模型名里 glm / kimi / MiniMax 的 g/p/y/k 会被 line-height:1 裁掉下缘，
+     给到 1.4 再配 overflow:hidden 做省略号，字不再贴边。
+     （项目区 2026-11-07 改内联行后不再共用这层皮肤，这里只服务模型 pill） */
+  font-size: 13px; line-height: 1.4;
+  transition: color .15s ease, border-color .15s ease, background-color .15s ease;
+}
+.composer-pill:hover,
+.composer-pill:focus-visible,
+.composer-pill[aria-expanded="true"] {
+  color: var(--text);
+  border-color: var(--composer-border);
+  background: var(--composer-pill-bg);
+}
+.composer-pill:disabled { opacity: .5; cursor: default; }
+.composer-pill > span {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.composer-pill .chev { width: 14px; height: 14px; flex: none; opacity: .6; }
+
+/* 模型名：长 id 截断，不把工具行撑破；窄窗口按视口收窄（pill 现在挨着发送，位子更紧）。
+   2026-11-13 起 pill 只有模型名：供应商与思考档移进 title / 菜单，不再有 .model-think。 */
+.model-pill > span { max-width: min(320px, 42vw); }
+
+/* pill 文字滚动（2026-11-05，ZCode RollingToolbarLabel 同拍）：换模型时
+   旧字向上滚出淡去、新字从下方滚入，200ms。外层 #model-pill-label 是裁切罩
+   （overflow 来自 .composer-pill > span），动的是内层；absolute 的 exit 盖在
+   原位向上走。文字没变不播（JS 侧也拦了一道）。
+   2026-11-13：label 自己改成 flex 容器——原来它是 flex item 里再套一个
+   inline-block，行盒被 baseline 撑高 4px，模型名比右边的思考档高出一截；
+   改成 flex 后行盒就是 18.2px，两者在 30px 的 pill 里同心。 */
+#model-pill-label { position: relative; display: flex; align-items: center; min-width: 0; }
+.pill-label-text {
+  display: inline-block; max-width: 100%; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+@keyframes pillLabelIn {
+  from { opacity: 0; transform: translateY(0.75em); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes pillLabelOut {
+  from { opacity: 1; transform: translateY(0); }
+  to { opacity: 0; transform: translateY(-0.75em); }
+}
+.pill-label-enter { animation: pillLabelIn 200ms cubic-bezier(.4, 0, .2, 1) both; }
+.pill-label-exit {
+  position: absolute; left: 0; top: 0;
+  animation: pillLabelOut 200ms cubic-bezier(.4, 0, .2, 1) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .pill-label-enter,
+  .pill-label-exit { animation: none; }
+}
+
+/*
+ * morph 弹出层（抄 cindy morph-popover）：打开时从 pill 位置向上浮 6px 淡入，
+ * 关闭反向缩回，220ms。圆角起点用 15px（= 30px pill 高的一半）而不是 9999px ——
+ * 距离 12px 终点只差 3px，插值中间帧不会鼓包。动画期间 overflow 由 JS 收住，
+ * 结束再放开滚动。
+ */
+.composer-pop {
+  position: absolute; left: 0; bottom: calc(100% + 8px); z-index: 40;
+  padding: 6px;
+  background: var(--card);
+  /* 线 + 阴影双保险（2026-11-04 界面 v2）：点开后不只是一片影子 */
+  border: 1px solid var(--composer-border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-menu);
+  transform-origin: 50% 100%;
+}
+.composer-pop[hidden] { display: none; }
+@keyframes composerPopIn {
+  from { opacity: 0; transform: translateY(6px); border-radius: 15px; }
+  to { opacity: 1; transform: translateY(0); border-radius: 12px; }
+}
+@keyframes composerPopOut {
+  from { opacity: 1; transform: translateY(0); border-radius: 12px; }
+  to { opacity: 0; transform: translateY(6px); border-radius: 15px; }
+}
+.composer-pop.pop-open { animation: composerPopIn 220ms cubic-bezier(.3, .9, .25, 1) both; }
+.composer-pop.pop-closing { animation: composerPopOut 220ms cubic-bezier(.3, .9, .25, 1) both; }
+@media (prefers-reduced-motion: reduce) {
+  .composer-pop.pop-open,
+  .composer-pop.pop-closing { animation: none; }
+  .think-seg { animation: none; }
+}
+
+.model-menu {
+  /* 宽度钉死，不跟内容走（2026-11-05）：切供应商只换内容不改框。
+     320 容得下当前最长模型名（13px 实测 ~297 含内边距），更长的名字照旧省略号截断。
+     锚定改右缘（2026-11-05 第二轮，同 cindy MorphPopover align="end"）：
+     pill 右缘挨着发送键是稳定的，换模型 pill 只往左伸缩，弹层就定得住；
+     贴左缘的话 pill 一变宽弹层就被拖着跑。窄屏（≤560px）改贴整张 composer 卡，见下方断点。 */
+  left: auto; right: 0;
+  width: min(320px, 88vw); max-height: 320px; overflow: auto;
+}
+
+/* 设置 → 模型 · 默认模型卡（2026-11-12 M1）
+   卡片自身 overflow:hidden（全局 .card），所以「更换」弹层挂在外层 .mdl-wrap 上；
+   .composer-pop 默认是"在触发点上方"（给底部 composer 用的），这里改成向下展开。 */
+.mdl-wrap { position: relative; }
+.mdl-card {
+  /* .card 的默认方向是 column（分组卡里装行），这里要横排：左边模型名、右边「更换」 */
+  flex-direction: row;
+  display: flex; align-items: center; gap: 16px;
+  padding: 16px 18px;
+}
+.mdl-main { flex: 1; min-width: 0; }
+.mdl-name {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 18px; font-weight: 600; line-height: 1.25; color: var(--text);
+}
+.mdl-sub {
+  margin-top: 4px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 12px; color: var(--text-2);
+}
+.mdl-change { flex: none; }
+.mdl-menu {
+  top: calc(100% + 8px); bottom: auto;
+  width: min(340px, 92vw);
+  transform-origin: 50% 0;
+}
+
+/* 窄屏断点必须排在本节定义之后：同权重时后者赢，放前面会被上面的
+   position:relative / width 顶掉（2026-11-05 实测踩过）。
+   固定 320px 贴 pill 左缘会探出视口：composer-wrap 让出定位，弹层改锚
+   整张 composer 卡（.composer 是定位祖先），宽度按卡收。 */
+@media (max-width: 560px) {
+  .composer-wrap { position: static; }
+  .model-menu { width: min(320px, 100%); }
+}
+

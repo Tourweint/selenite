@@ -1,0 +1,355 @@
+/*
+ * 错误卡、工具灰块（E1）、审批浮窗
+ *
+ * 2026-11-13 从 web/style.css（7,373 行单文件）按分区切出；正文是原文搬运，未改一条规则。
+ * 原区间 L1696–L2044。@import 顺序即层叠顺序，改样式只改对应分部。
+ */
+/* ── 错误卡（2026-11-10 批 32，对齐 ZCode ChatErrorBanner）──────────
+ * 在 composer 容器卡内部的第一格（textarea 上方；composer 是绝对定位，
+ * 卡放不进外部静态流）。一行摘要 + 动作按钮；详情进模态小窗。
+ * 以前是往消息流里插一行红字：正文被挤乱、滚动跳位、重试按钮悬在流里没归处。
+ * 卡跟"当前会话"走：切会话 / 发新消息由 JS 整卡退场。 */
+.chat-error {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px;
+  border: 1px solid color-mix(in srgb, var(--c-error) 45%, transparent);
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--c-error) 7%, var(--card));
+  color: var(--c-error);
+  font-size: 13px;
+}
+.chat-error[hidden] { display: none; }
+.chat-error-icon { flex: none; display: inline-flex; width: 16px; height: 16px; }
+.chat-error-icon svg { width: 16px; height: 16px; }
+.chat-error-text {
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.chat-error-actions { flex: none; display: flex; align-items: center; gap: 6px; }
+.chat-error-btn {
+  height: 24px; padding: 0 8px;
+  border: 1px solid var(--card-border); border-radius: var(--r-sm);
+  background: var(--card-high); color: var(--text-2);
+  font-size: 12px;
+  transition: background .15s ease, color .15s ease;
+}
+.chat-error-btn:hover { background: var(--card); color: var(--text); }
+.chat-error-close { padding: 0 5px; }
+.chat-error-close svg { width: 13px; height: 13px; display: block; }
+/* 详情小窗里的脱敏原文 */
+.chat-error-detail {
+  margin: 0; padding: 10px 12px;
+  max-height: 50vh; overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--r-sm);
+  font-family: var(--mono); font-size: 12px; line-height: 1.6;
+  color: var(--text-2);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+
+/* 折叠区里的「说」行已随旧工作面板退役（E1 灰块：话直接留在正文）。
+   这里保留 caret 与上浮 keyframes，下面的 .tchips 是新的工具块。 */
+
+.caret {
+  display: inline-block; width: 6px; height: 1em;
+  margin-left: 2px; vertical-align: -1px;
+  border-radius: 1px; background: var(--accent);
+  animation: blink 1.1s steps(2, start) infinite;
+}
+@keyframes blink { 50% { opacity: 0; } }
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ── 工具灰块（2026-11-13 E1，替换旧「工作过程面板」）────────────
+ * 一轮的结构：话 → 一组灰块 → 话 → 一组灰块。
+ * 灰块只写 icon + 动词 + 目标；步数/耗时/命令/输出/diff 全在点击后的详情里。
+ * 超过 8 个先收进「+N」，点开铺全部；详情面板限高 260px，内部滚动。 */
+
+.flow { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.msg.assistant .flow { min-width: 0; }
+
+.tchips-wrap { margin: 2px 0 2px; min-width: 0; }
+/* 设置里关掉「工具活动」：整组灰块隐掉（沿用同一个开关） */
+html[data-acts="0"] .tchips-wrap { display: none !important; }
+
+.tchips {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 5px;
+  min-width: 0;
+}
+
+.tchip {
+  position: relative;
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 24px; max-width: 100%; padding: 0 8px;
+  border: 1px solid transparent; border-radius: 6px;
+  background: var(--chat-inset);
+  font-family: var(--mono); font-size: 10.5px; line-height: 1;
+  color: var(--text-3);
+  cursor: pointer;
+  overflow: hidden;
+  transition: background-color .18s ease, border-color .18s ease, color .18s ease;
+}
+.tchips-wrap.is-live .tchip { animation: tchipIn .22s var(--ease-decelerate) both; }
+@keyframes tchipIn {
+  from { opacity: 0; transform: translateY(3px) scale(.98); }
+  to { opacity: 1; transform: none; }
+}
+.tchip:hover { background: var(--card-high); }
+.tchip:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 1px; }
+
+.tchip-icon { flex: none; display: inline-flex; width: 11px; height: 11px; }
+.tchip-icon svg { width: 11px; height: 11px; }
+.tchip-verb { flex: none; color: var(--text-2); }
+.tchip-target {
+  min-width: 0; max-width: 220px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tchip-check { display: none; flex: none; width: 10px; height: 10px; color: var(--text-3); }
+.tchip-check svg { width: 10px; height: 10px; display: block; }
+.tchip[data-state="ok"] .tchip-check { display: inline-flex; }
+
+/* 运行中：整块 accent 化 + 底边 1.2s 扫光 */
+.tchip[data-state="run"] {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.tchip[data-state="run"] .tchip-verb { color: var(--accent); }
+.tchip[data-state="err"] {
+  border-color: color-mix(in srgb, var(--c-error) 35%, transparent);
+  background: color-mix(in srgb, var(--c-error) 8%, transparent);
+  color: var(--c-error);
+}
+.tchip[data-state="err"] .tchip-verb { color: var(--c-error); }
+/* 已转后台：空心边，不画成失败 */
+.tchip[data-state="back"] {
+  border-color: var(--chat-hairline);
+  background: transparent;
+  color: var(--text-3);
+}
+/* 详情打开的那枚：描边亮起来，和面板对应 */
+.tchip[aria-expanded="true"] {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+
+.tchip-sweep {
+  position: absolute; left: 0; bottom: 0; width: 34%; height: 1.5px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  opacity: 0; transform: translateX(-100%);
+}
+.tchip[data-state="run"] .tchip-sweep {
+  opacity: .9;
+  animation: tchipSweep 1.2s ease-in-out infinite;
+}
+@keyframes tchipSweep {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(300%); }
+}
+
+/* 「+N」：超出的块先收起来 */
+.tchips-more {
+  flex: none; height: 24px; padding: 0 8px;
+  border: 1px solid var(--chat-hairline); border-radius: 6px;
+  background: transparent; color: var(--text-3);
+  font-family: var(--mono); font-size: 10.5px; line-height: 1;
+  cursor: pointer;
+  transition: background-color .15s ease, color .15s ease, border-color .15s ease;
+}
+.tchips-more:hover { background: var(--card-high); color: var(--text); }
+.tchips-more:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 1px; }
+
+/* 内联详情：在灰块下面原地展开 */
+.tchips-inline { display: block; min-width: 0; }
+.tchips-detail {
+  display: grid; grid-template-rows: 0fr;
+  margin-top: 0;
+  transition: grid-template-rows .26s var(--ease-decelerate), margin-top .26s var(--ease-decelerate);
+}
+.tchips-detail.is-open { grid-template-rows: 1fr; margin-top: 6px; }
+.tchips-detail-inner { overflow: hidden; min-height: 0; }
+
+/* 附近小窗：固定定位，不挤正文 */
+.tchips-pop {
+  position: fixed; z-index: 55;
+  border: 1px solid var(--chat-hairline); border-radius: 11px;
+  background: var(--surface);
+  box-shadow: var(--shadow-menu);
+  animation: tdetailIn .18s var(--ease-decelerate) both;
+}
+@keyframes tdetailIn {
+  from { opacity: 0; transform: translateY(-4px) scale(.98); }
+  to { opacity: 1; transform: none; }
+}
+
+/* 详情卡：限高 260px，超出内部滚动——思考/输出/长 diff 都不许把正文撑开 */
+.tdetail-card {
+  display: flex; flex-direction: column;
+  max-height: 260px;
+  padding: 10px 11px;
+  border: 1px solid var(--chat-hairline); border-radius: 9px;
+  background: var(--surface);
+  min-width: 0;
+}
+.tchips-pop .tdetail-card { border: 0; border-radius: 11px; }
+.tdetail-head { display: flex; align-items: center; gap: 8px; flex: none; }
+.tdetail-title {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--mono); font-size: 11.5px; font-weight: 600; color: var(--text);
+}
+.tdetail-state { margin-left: auto; flex: none; font-family: var(--mono); font-size: 10px; color: var(--text-3); }
+.tdetail-close {
+  flex: none; display: grid; place-items: center;
+  width: 20px; height: 20px; padding: 0;
+  border: 0; border-radius: 5px; background: transparent;
+  color: var(--text-3); font-size: 14px; line-height: 1; cursor: pointer;
+}
+.tdetail-close:hover { background: var(--inset, var(--chat-inset)); color: var(--text); }
+
+.tdetail-rows {
+  display: flex; flex-direction: column; gap: 3px;
+  margin-top: 8px; flex: none;
+}
+.tdetail-row { display: flex; gap: 8px; font-family: var(--mono); font-size: 10.5px; min-width: 0; }
+.tdetail-row b { flex: none; width: 30px; font-weight: 400; color: var(--text-3); }
+.tdetail-row span { min-width: 0; color: var(--text-2); overflow-wrap: anywhere; }
+
+.tdetail-label {
+  margin: 9px 0 4px; flex: none;
+  font-family: var(--mono); font-size: 9.5px; letter-spacing: .05em;
+  text-transform: uppercase; color: var(--text-3);
+}
+/* 面板内部滚动：正文高度不变，内容再长也只动这里 */
+.tdetail-pre {
+  margin: 0; padding: 8px 9px;
+  flex: 1 1 auto; min-height: 0;
+  max-height: 180px; overflow: auto;
+  border-radius: 6px; background: var(--chat-inset);
+  font-family: var(--mono); font-size: 10.5px; line-height: 1.55;
+  color: var(--text-2);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.tdetail-pre .d-add { color: var(--ok); }
+.tdetail-pre .d-del { color: var(--c-error); }
+.tdetail-wait { color: var(--text-3); }
+
+@media (max-width: 720px) {
+  .tchip-target { max-width: 140px; }
+  .tchips-pop { max-width: calc(100vw - 24px); }
+}
+
+.attention {
+  padding: 10px 14px;
+  border: 1px solid var(--card-border);
+  border-left: 2px solid var(--accent);
+  border-radius: var(--r-md);
+  background: var(--card);
+  color: var(--text);
+  font-size: 13.5px;
+  transition: background-color .18s ease, border-color .18s ease, color .18s ease;
+}
+/* 待你处理卡片：一句话 + 一条去任务中心的链接（批次：任务中心入口） */
+.attention-text { margin: 0; }
+.attention-link {
+  display: inline-flex; align-items: center; gap: 4px;
+  margin-top: 6px; padding-bottom: 1px;
+  border-bottom: 1px solid var(--accent-line);
+  color: var(--accent); font-size: 12.5px; text-decoration: none;
+  transition: color .18s ease, border-color .18s ease;
+}
+.attention-link:hover { border-bottom-color: var(--accent); }
+
+/* 审批卡片（批次二 A1）：attention 的底色 + 参数预览 + 三个动作 */
+.approval { display: flex; flex-direction: column; gap: 8px; }
+.approval-args {
+  margin: 0; padding: 8px 10px;
+  max-height: 140px; overflow: auto;
+  border-radius: var(--r-sm);
+  background: var(--bg, transparent);
+  border: 1px solid var(--card-border);
+  font-size: 12px; line-height: 1.5;
+  white-space: pre-wrap; word-break: break-word;
+}
+.approval-meta { font-size: 12px; color: var(--text-2); }
+/* 来源行（2026-11-08 批三）：标题下的第二行，弱一档；群成员轮的审批靠它认人 */
+.approval-source { margin: -2px 0 0; font-size: 12.5px; color: var(--text-3); }
+.approval-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.approval-remember {
+  display: inline-flex; align-items: center; gap: 5px;
+  margin-right: auto;
+  font-size: 12.5px; color: var(--text-2); cursor: pointer;
+}
+.approval.resolved { opacity: .72; }
+/* 带说明拒绝（2026-11-09 §4.3）：默认只有一行小字入口，展开后再出输入框 */
+.approval-more {
+  align-self: flex-start;
+  border: 0; background: none; padding: 0;
+  color: var(--text-3); font-size: 12px; cursor: pointer;
+  text-decoration: underline; text-underline-offset: 3px;
+}
+.approval-more:hover { color: var(--text-2); }
+.approval-feedback { display: flex; flex-direction: column; gap: 6px; }
+.approval-feedback[hidden] { display: none; }
+.approval-feedback .cs-textarea { font-size: 12.5px; }
+.approval-pop-question {
+  font-size: 13px; line-height: 1.55; color: var(--text);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+
+/* ── 审批浮窗（2026-11-08）：右下角常驻，人在别的会话/页面也弹 ──
+   压过侧栏与抽屉（z0/40），低于模态（z60）；宽度 320 与模型菜单同档。 */
+#approval-popups {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 55;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(320px, calc(100vw - 32px));
+}
+.approval-pop {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  background: var(--surface);
+  border: 1px solid var(--outline);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-menu);
+  animation: hoverTipIn .15s ease-out;
+  cursor: pointer;
+}
+.approval-pop-head { display: flex; align-items: center; gap: 8px; }
+.approval-pop-tool {
+  display: flex; align-items: center; gap: 6px; min-width: 0;
+  font-size: 13px; font-weight: 600; color: var(--text);
+}
+.approval-pop-close {
+  flex: none; margin-left: auto;
+  width: 22px; height: 22px;
+  display: grid; place-content: center;
+  border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--text-3);
+  cursor: pointer;
+  transition: color .15s ease, background .15s ease;
+}
+.approval-pop-close:hover { color: var(--text); background: var(--card-high); }
+.approval-pop-close svg { width: 12px; height: 12px; }
+.approval-pop-source { font-size: 12px; color: var(--text-2); }
+.approval-pop-args {
+  margin: 0; padding: 6px 8px;
+  max-height: 64px; overflow: auto;
+  font-family: var(--mono); font-size: 11px; line-height: 1.5;
+  color: var(--text-2); white-space: pre-wrap; overflow-wrap: anywhere;
+  background: var(--surface-low); border-radius: var(--r-sm);
+}
+.approval-pop-foot { display: flex; align-items: center; gap: 8px; }
+.approval-pop-time { margin-right: auto; font-size: 11.5px; color: var(--text-3); }
+.approval-pop-actions { display: flex; gap: 8px; }
+.approval-pop-more { text-align: center; font-size: 11.5px; color: var(--text-3); }
+
