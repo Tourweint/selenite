@@ -52,10 +52,14 @@ function baseEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
 		AGENT_DB_PATH: DB,
 		MEMORY_ENABLED: "false",
 		AGENT_APPROVALS_PATH: APPROVALS,
+		AUTONOMY_ENABLED: "false", // 探针显式关（默认已于 2026-11-13 翻成开）
 		AGENT_CHAT_META_PATH: CHAT_META,
 		AGENT_POLICY_PATH: POLICY,
 		PROJECTS_DB_PATH: PROJECTS_DB,
 		PAIRING_STORE_PATH: PAIRING,
+		// 本探针只验 deviceToken 能读全局待办，不验两段式；显式走单段（两段式自 2026-11-10 默认开，
+		// 不关的话 /pair/redeem 会按契约回 410，B4 永远配不上设备）。
+		PAIR_TWO_STEP: "false",
 		PROVIDERS_PATH: PROVIDERS,
 		MODEL_RUNTIME_PATH: RUNTIME,
 		CHANCELLOR_ENABLED: "false",
@@ -357,7 +361,7 @@ try {
 		body: JSON.stringify({ name: "child", path: "demo/sub" }),
 	});
 	check(
-		result.status === 400 && result.body.error === "inside_existing_project",
+		result.status === 409 && result.body.error === "inside_existing_project",
 		"项目内子目录 → inside_existing_project",
 		JSON.stringify(result.body),
 	);

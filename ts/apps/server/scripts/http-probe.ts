@@ -60,8 +60,9 @@ function startServer(extraEnv: NodeJS.ProcessEnv = {}): ChildProcess {
 			// 高级开关 / 技能启停位（2026-11-09）：探针隔离，别写真实 .data 的开关文件
 			AGENT_FLAGS_PATH: ".data/probe-http-flags.json",
 			AGENT_SKILLS_STATE_PATH: ".data/probe-http-skill-state.json",
-			// 主动性三档 / 观察记录（2026-11-09 T2）：探针显式关掉，别读开发机 env、别写真实账本
-			AUTONOMY_ENABLED: "",
+			// 主动性三档 / 观察记录（2026-11-09 T2）：探针显式关掉（缺省已是开，2026-11-13 起），
+			// 别读开发机 env、别写真实账本
+			AUTONOMY_ENABLED: "false",
 			AUTONOMY_OBSERVE_PATH: ".data/probe-http-autonomy-observe.jsonl",
 			// 审批 / 闸门审计（2026-11-09）：同样隔离，绝不碰真实 .data/approvals.json
 			AGENT_APPROVALS_PATH: ".data/probe-http-approvals.json",
@@ -193,6 +194,18 @@ const gateModelsAuth: string[] = [];
 let gateWritePath = "";
 /** 假上游下一轮改回 ask_user 调用（2026-11-09 §3 探针）；null = 不改 */
 let gateAskUserArgs: Record<string, unknown> | null = null;
+/**
+ * §14.8 忙时归档：探针把假上游的模型响应压住（闸开着）＝服务端这轮真的在跑
+ * （pi.live.run 由内核在 generation 启动时置位，必然先于模型请求到达这里）。
+ * 探针断言完把闸放开。批A 试过"发完立刻归档"的窄窗口，faux 下不稳定（Windows）；
+ * 闸控窗口是确定性的，且忙态语义仍是内核自有的 run 字段，不是探针记的布尔。
+ */
+let gateUpstreamHold = false;
+let gateUpstreamRelease: (() => void) | null = null;
+const releaseHeldUpstream = (): void => {
+	gateUpstreamRelease?.();
+	gateUpstreamRelease = null;
+};
 
 function readRequestBody(request: IncomingMessage): Promise<string> {
 	return new Promise((done) => {
@@ -249,6 +262,14 @@ const gateUpstream: Server = createServer(async (request, response) => {
 		/* 记空对象，断言自然会挂 */
 	}
 	gateRequests.push({ body, at: Date.now() });
+
+	// §14.8 忙时归档的闸：请求已到达（gateRequests 已记）＝这轮的 pi.live.run 已置位。
+	// 压住响应，等探针断言完 busy 400 再放行（探针负责复位两个变量）。
+	if (gateUpstreamHold) {
+		await new Promise<void>((done) => {
+			gateUpstreamRelease = done;
+		});
+	}
 
 	const messages = messagesOf(body);
 	// 已经有工具结果 → 这是同一轮的第二跳，回文本收尾（否则会一直调工具到上限）
@@ -427,7 +448,7 @@ try {
 	check(created.status === 201, "提醒创建成功", String(created.status));
 
 	const pending = (await (await fetch(`${BASE}/api/v1/agent/reminders`)).json()) as {
-		reminders: { text: string; status: string }[];
+		reminders: { id: number; reminderId: string; text: string; status: string; repeat: string; until?: number }[];
 	};
 	check(pending.reminders.length === 1, "列表里有一条待触发", JSON.stringify(pending.reminders[0]));
 
@@ -436,6 +457,29 @@ try {
 		reminders: unknown[];
 	};
 	check(afterFire.reminders.length === 0, "到点后不再挂在待触发里");
+
+	// 每日提醒 + 取消（2026-11-12）：repeat=daily 标记出来；DELETE 后列表清掉。
+	const dailyAt = Date.now() + 60_000;
+	const dailyCreated = await fetch(`${BASE}/api/v1/agent/reminders`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ conversationId: externalId, text: "每天写日记", at: dailyAt, repeat: "daily" }),
+	});
+	check(dailyCreated.status === 201, "每日提醒创建成功", String(dailyCreated.status));
+	const withDaily = (await (await fetch(`${BASE}/api/v1/agent/reminders`)).json()) as {
+		reminders: { id: number; reminderId: string; text: string; repeat: string; until?: number }[];
+	};
+	const daily = withDaily.reminders.find((row) => row.text === "每天写日记");
+	check(Boolean(daily && daily.repeat === "daily"), "提醒带 repeat=daily", JSON.stringify(daily));
+	const cancelled = await fetch(`${BASE}/api/v1/agent/reminders/${daily!.id}`, { method: "DELETE" });
+	check(cancelled.status === 200, "取消提醒成功", String(cancelled.status));
+	const afterCancel = (await (await fetch(`${BASE}/api/v1/agent/reminders`)).json()) as {
+		reminders: { reminderId: string }[];
+	};
+	check(
+		!afterCancel.reminders.some((row) => row.reminderId === daily!.reminderId),
+		"取消后不再出现在列表里",
+	);
 
 	// ── 6. 客户端跑掉，那一轮还得跑完 ─────────────────
 	console.log("\n· 6. 客户端中途断开，服务端继续跑完并落库");
@@ -603,7 +647,7 @@ try {
 	};
 	check(fauxHealth.model === "faux", "faux 下 healthz 报 faux", JSON.stringify(fauxHealth));
 	check(fauxHealth.models.length === 0, "faux 没有可切清单");
-	// 2026-11-09 T2：autonomy 从布尔扩成 { mode, observeCount24h }（纯增量；默认 off）
+	// 2026-11-09 T2：autonomy 从布尔扩成 { mode, observeCount24h }（纯增量；探针 env 显式关，见 spawn env）
 	check(fauxHealth.autonomy?.mode === "off", "healthz autonomy.mode = off", JSON.stringify(fauxHealth.autonomy));
 	check(fauxHealth.autonomy?.observeCount24h === 0, "healthz autonomy.observeCount24h = 0");
 
@@ -952,18 +996,52 @@ try {
 	mkdirSync(GATE_PROJECT_DIR, { recursive: true });
 
 	const workspaceBSet = await setWorkspace(WORKSPACE_B);
-	check(workspaceBSet.status === 200, "换工作区 B（旧项目落在新根外）");
+	check(workspaceBSet.status === 200, "换工作区 B（项目是独立根，仍在根集合里）");
 	const outsideResponse = await putCurrentProject(projectId);
-	const outsideJson = (await outsideResponse.json()) as { error?: string };
+	const outsideJson = (await outsideResponse.json()) as {
+		ok?: boolean;
+		projectId?: string | null;
+		error?: string;
+	};
 	check(
-		outsideResponse.status === 400 && outsideJson.error === "outside_workspace",
-		"工作区外 → 400 outside_workspace",
-		`${outsideResponse.status} ${outsideJson.error}`,
+		outsideResponse.status === 200 && outsideJson.projectId === projectId,
+		"换工作区后旧项目仍可选（多根平级）",
+		`${outsideResponse.status} ${outsideJson.error ?? ""}`,
 	);
 	const backToA = await setWorkspace(WORKSPACE_A);
 	check(backToA.status === 200, "切回工作区 A");
 	const reselected = await putCurrentProject(projectId);
 	check(reselected.status === 200, "切回工作区后可再次选中", String(reselected.status));
+
+	// 14.3.1 改路径 / 移除 / 恢复（2026-11-12 多根）
+	const patchRoot = await fetch(`${BASE}/api/v1/projects/${projectId}`, {
+		method: "PATCH",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ rootPath: GATE_PROJECT_DIR }),
+	});
+	check(patchRoot.status === 200, "PATCH rootPath 改项目路径", String(patchRoot.status));
+	const removeProject = await fetch(`${BASE}/api/v1/projects/${projectId}/remove`, {
+		method: "POST",
+	});
+	const removeJson = (await removeProject.json()) as { project?: { archived?: boolean } };
+	check(
+		removeProject.status === 200 && removeJson.project?.archived === true,
+		"移除项目（软删除）",
+		String(removeProject.status),
+	);
+	const removedSelect = await putCurrentProject(projectId);
+	const removedJson = (await removedSelect.json()) as { error?: string };
+	check(
+		removedSelect.status === 400 && removedJson.error === "unknown_project",
+		"移除后不能再选为当前项目",
+		`${removedSelect.status} ${removedJson.error}`,
+	);
+	const restoreProject = await fetch(`${BASE}/api/v1/projects/${projectId}/restore`, {
+		method: "POST",
+	});
+	check(restoreProject.status === 200, "恢复项目", String(restoreProject.status));
+	const reselectAfterRestore = await putCurrentProject(projectId);
+	check(reselectAfterRestore.status === 200, "恢复后可再次选中", String(reselectAfterRestore.status));
 
 	// 14.4 系统提示注入 + 工作区内写入放行（相对路径按项目根解析）
 	gateWritePath = GATE_INSIDE_REL;
@@ -981,7 +1059,7 @@ try {
 	);
 	const insideBody = gateRequests.at(-1)?.body ?? {};
 	check(
-		!toolMessagesOf(insideBody).includes("最大工作区"),
+		!toolMessagesOf(insideBody).includes("不在已登记的工作区/项目目录内"),
 		"放行时没有越界提示",
 	);
 	const insideSystem = systemMessagesOf(insideBody);
@@ -1004,9 +1082,9 @@ try {
 	check(!existsSync(GATE_OUTSIDE_FILE), "越界写入没有落盘", GATE_OUTSIDE_FILE);
 	const outsideToolText = toolMessagesOf(gateRequests.at(-1)?.body ?? {});
 	check(
-		outsideToolText.includes("路径越出最大工作区"),
-		"模型收到的工具结果含「路径越出最大工作区」",
-		outsideToolText.slice(0, 120),
+		outsideToolText.includes("不在已登记的工作区/项目目录内"),
+		"模型收到的工具结果含「不在已登记的工作区/项目目录内」",
+		outsideToolText.slice(0, 160),
 	);
 
 	// 14.5.1 闸门留痕（2026-11-09 §5）：越界拦下要落一行账，但不含参数 / 路径。
@@ -1153,6 +1231,352 @@ try {
 	);
 	gateAskUserArgs = null;
 	check((await setApprovalLevel("none")).status === 200, "恢复审批档 none");
+
+	// ── 14.7 归档模块（2026-11-12，接口文档 §2.5 / §2.7）──
+	console.log("\n· 14.7 归档模块（会话 + 项目连带）");
+	type ArchivedChat = {
+		conversationId?: string;
+		archived?: boolean;
+		archivedAt?: number;
+		projectName?: string;
+	};
+	const archivedCountOf = async (): Promise<number> => {
+		const response = await fetch(`${BASE}/api/v1/agent/chats?limit=5`);
+		const body = (await response.json()) as { archived?: number; removed?: number };
+		check(!("removed" in body), "GET /agent/chats 不再返回 removed");
+		return Number(body.archived) || 0;
+	};
+	const archivedListOf = async (): Promise<ArchivedChat[]> => {
+		const response = await fetch(`${BASE}/api/v1/agent/chats/archived?limit=200`);
+		const body = (await response.json()) as { chats?: ArchivedChat[]; total?: number };
+		return body.chats ?? [];
+	};
+	const archiveOne = (conversationId: string, action = "archive") =>
+		fetch(`${BASE}/api/v1/agent/chat/${encodeURIComponent(conversationId)}/${action}`, {
+			method: "POST",
+		});
+
+	const archiveBaseline = await archivedCountOf();
+	const archiveChatRun = await chat({
+		chatKind: "worker",
+		messages: [{ role: "user", content: "归档探针：这条不要了" }],
+	});
+	const archiveChatId = archiveChatRun.result.conversationId ?? "";
+	check(Boolean(archiveChatId), "建一条普通会话", String(archiveChatRun.status));
+	const archiveResponse = await archiveOne(archiveChatId, "archive");
+	check(archiveResponse.status === 200, "POST /chat/:id/archive → 200", String(archiveResponse.status));
+	check((await archivedCountOf()) === archiveBaseline + 1, "归档计数 +1");
+	let archivedList = await archivedListOf();
+	const archivedEntry = archivedList.find((chat) => chat.conversationId === archiveChatId);
+	check(Boolean(archivedEntry?.archived), "归档清单包含该会话且 archived=true");
+	check(
+		typeof archivedEntry?.archivedAt === "number" && archivedEntry.archivedAt > 0,
+		"归档清单带 archivedAt",
+		String(archivedEntry?.archivedAt),
+	);
+
+	const unarchiveResponse = await archiveOne(archiveChatId, "unarchive");
+	check(unarchiveResponse.status === 200, "POST /chat/:id/unarchive → 200");
+	check((await archivedCountOf()) === archiveBaseline, "单条恢复后归档计数回落");
+	check(
+		!(await archivedListOf()).some((chat) => chat.conversationId === archiveChatId),
+		"单条恢复后不在归档清单",
+	);
+
+	const hideAliasResponse = await archiveOne(archiveChatId, "hide");
+	check(hideAliasResponse.status === 200, "/hide 兼容别名仍可用");
+	await archiveOne(archiveChatId, "unarchive");
+
+	// 项目连带：当前项目仍选中；新建 worker 会话会记 projectId
+	const ownedChatRun = await chat({
+		chatKind: "worker",
+		messages: [{ role: "user", content: "项目归档连带探针" }],
+	});
+	const ownedChatId = ownedChatRun.result.conversationId ?? "";
+	check(Boolean(ownedChatId), "在当前项目下建一条普通会话", String(ownedChatRun.status));
+	const archiveProjectResponse = await fetch(`${BASE}/api/v1/projects/${projectId}/archive`, {
+		method: "POST",
+	});
+	const archiveProjectBody = (await archiveProjectResponse.json().catch(() => ({}))) as {
+		archivedChats?: number;
+		project?: { archived?: boolean };
+	};
+	check(
+		archiveProjectResponse.status === 200 && archiveProjectBody.project?.archived === true,
+		"项目归档 → 200 archived=true",
+		String(archiveProjectResponse.status),
+	);
+	check(
+		Number(archiveProjectBody.archivedChats) >= 1,
+		"项目归档连带归档该项目下新建的会话",
+		`archivedChats=${archiveProjectBody.archivedChats}`,
+	);
+	archivedList = await archivedListOf();
+	check(
+		archivedList.some(
+			(chat) => chat.conversationId === ownedChatId && chat.projectName === GATE_PROJECT_NAME,
+		),
+		"连带归档的会话带项目名",
+	);
+	const restoreProjectResponse = await fetch(`${BASE}/api/v1/projects/${projectId}/restore`, {
+		method: "POST",
+	});
+	check(restoreProjectResponse.status === 200, "恢复项目 → 200", String(restoreProjectResponse.status));
+	check(
+		(await archivedListOf()).some((chat) => chat.conversationId === ownedChatId),
+		"恢复项目不自动恢复会话（仍在归档）",
+	);
+	await archiveOne(ownedChatId, "unarchive");
+	check(
+		!(await archivedListOf()).some((chat) => chat.conversationId === ownedChatId),
+		"会话可单独恢复",
+	);
+
+	// ── 14.8 永久删除 + 忙时归档（2026-11-13 归档管理对齐 ZCode，接口文档 §2.5）──
+	console.log("\n· 14.8 永久删除（预检/执行/回滚开关）+ 忙时归档 400");
+	type DeletePreviewNode = { conversationId?: string; title?: string; rounds?: number; lastAt?: number };
+	type DeletePreviewBody = {
+		conversationId?: string;
+		title?: string;
+		rounds?: number;
+		lastAt?: number;
+		archivedAt?: number;
+		blocked?: { reason?: string; detail?: string };
+		subtree?: DeletePreviewNode[];
+		estimate?: { conversations?: number; entries?: number; tasks?: number; submissions?: number };
+	};
+	const deletionPreviewOf = (conversationId: string) =>
+		fetch(`${BASE}/api/v1/agent/chat/${encodeURIComponent(conversationId)}/deletion-preview`);
+	const deletionDeleteOf = (conversationId: string) =>
+		fetch(`${BASE}/api/v1/agent/chat/${encodeURIComponent(conversationId)}/delete`, { method: "POST" });
+	/** sessions/search 枚举面 = Chats 全量映射（含归档）：删除后映射清了，搜索自动不含它。 */
+	const sessionSearchIds = async (q: string): Promise<string[]> => {
+		const response = await fetch(
+			`${BASE}/api/v1/agent/sessions/search?q=${encodeURIComponent(q)}&days=365&limit=20`,
+		);
+		const body = (await response.json()) as { hits?: { conversationId?: string }[] };
+		return (body.hits ?? []).map((hit) => String(hit.conversationId));
+	};
+	const putFlag = (key: string, value: string) =>
+		fetch(`${BASE}/api/v1/agent/flags/${key}`, {
+			method: "PUT",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ value }),
+		});
+
+	// 回滚开关先归位：flags 文件跨探针轮次留存（上一轮异常退出可能留下 false），
+	// 别让上轮残留污染本轮的正常态断言。
+	const hardDeleteReset = await putFlag("CHAT_HARD_DELETE", "true");
+	check(hardDeleteReset.status === 200, "CHAT_HARD_DELETE 归位 true", String(hardDeleteReset.status));
+
+	// 正常态：建会话 → 归档 → 预检形状（subtree / estimate）
+	const DEL_ANCHOR = "zqk77";
+	const delChatRun = await chat({
+		chatKind: "worker",
+		messages: [{ role: "user", content: `归档探针：删除锚点${DEL_ANCHOR}，这条要连根删掉` }],
+	});
+	const delChatId = delChatRun.result.conversationId ?? "";
+	check(Boolean(delChatId), "建一条待删除的普通会话", String(delChatRun.status));
+
+	const freshPreviewRes = await deletionPreviewOf(delChatId);
+	const freshPreview = (await freshPreviewRes.json().catch(() => ({}))) as DeletePreviewBody;
+	check(
+		freshPreviewRes.status === 200 && freshPreview.blocked?.reason === "not-archived",
+		"未归档 preview → 200 + blocked not-archived（门槛是字段不是错误码）",
+		`${freshPreviewRes.status} ${freshPreview.blocked?.reason}`,
+	);
+	check(
+		Array.isArray(freshPreview.subtree) && freshPreview.subtree.length === 0,
+		"blocked 时 subtree 为空数组（不给名单）",
+	);
+	check(
+		(freshPreview.estimate?.conversations ?? 0) >= 1,
+		"blocked 时 estimate 仍给出（SQL COUNT）",
+		JSON.stringify(freshPreview.estimate),
+	);
+
+	check((await archiveOne(delChatId, "archive")).status === 200, "归档待删除会话 → 200");
+	const delPreviewRes = await deletionPreviewOf(delChatId);
+	const delPreview = (await delPreviewRes.json().catch(() => ({}))) as DeletePreviewBody;
+	check(
+		delPreviewRes.status === 200 && delPreview.blocked === undefined,
+		"归档后 preview 不再 blocked",
+		`${delPreviewRes.status}`,
+	);
+	check(delPreview.conversationId === delChatId, "preview.conversationId = 目标");
+	check(
+		typeof delPreview.archivedAt === "number" && delPreview.archivedAt > 0,
+		"preview 带 archivedAt",
+		String(delPreview.archivedAt),
+	);
+	check(
+		delPreview.rounds === 1 && typeof delPreview.lastAt === "number" && delPreview.lastAt > 0,
+		"preview.rounds / lastAt 有值",
+		`rounds=${delPreview.rounds}`,
+	);
+	check(
+		delPreview.subtree?.some((node) => node.conversationId === delChatId) === true &&
+			delPreview.subtree.every(
+				(node) =>
+					typeof node.conversationId === "string" &&
+					typeof node.rounds === "number" &&
+					typeof node.lastAt === "number",
+			),
+		"subtree 名单含目标且节点形状 {conversationId,title,rounds,lastAt}",
+	);
+	check(
+		delPreview.estimate?.conversations === 1 &&
+			(delPreview.estimate.entries ?? 0) >= 2 &&
+			(delPreview.estimate.submissions ?? 0) >= 1,
+		"estimate 计数与内容对得上",
+		JSON.stringify(delPreview.estimate),
+	);
+
+	// 正向对照：sessions/search（枚举面 = Chats 全量映射，含归档）此刻搜得到
+	const hitsBeforeDelete = await sessionSearchIds(DEL_ANCHOR);
+	check(hitsBeforeDelete.includes(delChatId), "删除前 sessions/search 能搜到（对照）");
+
+	const delDeleteRes = await deletionDeleteOf(delChatId);
+	const delDeleteBody = (await delDeleteRes.json().catch(() => ({}))) as {
+		ok?: boolean;
+		deleted?: { conversations?: number; entries?: number; tasks?: number; submissions?: number };
+		error?: string;
+	};
+	check(
+		delDeleteRes.status === 200 && delDeleteBody.ok === true,
+		"POST delete → 200 {ok:true}",
+		`${delDeleteRes.status} ${delDeleteBody.error ?? ""}`,
+	);
+	check(
+		(delDeleteBody.deleted?.conversations ?? 0) >= 1 &&
+			(delDeleteBody.deleted?.entries ?? 0) >= 2 &&
+			(delDeleteBody.deleted?.submissions ?? 0) >= 1,
+		"deleted 计数全 >0（conversations/entries/submissions）",
+		JSON.stringify(delDeleteBody.deleted),
+	);
+	check(
+		!(await archivedListOf()).some((chat) => chat.conversationId === delChatId),
+		"删后归档清单不含它",
+	);
+	const activeListAfter = (await (
+		await fetch(`${BASE}/api/v1/agent/chats?limit=200`)
+	).json()) as { chats?: { conversationId?: string }[] };
+	check(
+		!(activeListAfter.chats ?? []).some((chat) => chat.conversationId === delChatId),
+		"删后活跃清单不含它",
+	);
+	check(
+		!(await sessionSearchIds(DEL_ANCHOR)).includes(delChatId),
+		"删后内容搜索（sessions/search）不含它",
+	);
+	check(
+		(await deletionPreviewOf(delChatId)).status === 404,
+		"删后 preview → 404 unknown_chat",
+	);
+
+	// kind 门槛：主对话（chief，缺项即 chief）归档了也拒
+	const chiefArchivedCount = await archivedCountOf();
+	check(
+		(await archiveOne(externalId, "archive")).status === 200,
+		"归档主对话（chief）",
+	);
+	const chiefPreviewRes = await deletionPreviewOf(externalId);
+	const chiefPreview = (await chiefPreviewRes.json().catch(() => ({}))) as DeletePreviewBody;
+	check(
+		chiefPreviewRes.status === 200 && chiefPreview.blocked?.reason === "kind",
+		"chief preview → blocked kind",
+		chiefPreview.blocked?.detail ?? "",
+	);
+	const chiefDeleteRes = await deletionDeleteOf(externalId);
+	const chiefDeleteBody = (await chiefDeleteRes.json().catch(() => ({}))) as {
+		error?: string;
+		blocked?: { reason?: string };
+	};
+	check(
+		chiefDeleteRes.status === 400 &&
+			chiefDeleteBody.error === "delete_blocked" &&
+			chiefDeleteBody.blocked?.reason === "kind",
+		"chief delete → 400 delete_blocked/kind",
+		`${chiefDeleteRes.status} ${chiefDeleteBody.error}`,
+	);
+	await archiveOne(externalId, "unarchive");
+	check(
+		(await archivedCountOf()) === chiefArchivedCount,
+		"chief 预检完恢复原状（unarchive，不留下归档）",
+	);
+
+	// 忙时归档 400：闸住假上游的模型响应 = 这轮真在跑（pi.live.run 是内核自有状态）。
+	// 等到模型请求**到达假上游**再归档：generation 先于模型请求置 run，此刻必忙，无竞态。
+	const holdArchivedBaseline = await archivedCountOf();
+	const holdRequestBaseline = gateRequests.length;
+	gateUpstreamHold = true;
+	const holdResponse = await fetch(`${BASE}/api/v1/agent/chat`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ messages: [{ role: "user", content: "归档探针：趁我跑着归档试试" }] }),
+	});
+	const holdReader = holdResponse.body?.getReader();
+	const holdDecoder = new TextDecoder();
+	let holdConvId = "";
+	let holdBuffer = "";
+	while (holdReader && !holdConvId) {
+		const chunk = await holdReader.read();
+		if (chunk.done) break;
+		holdBuffer += holdDecoder.decode(chunk.value, { stream: true });
+		holdConvId = /"conversationId":"([^"]+)"/.exec(holdBuffer)?.[1] ?? "";
+	}
+	for (let attempt = 0; attempt < 100 && gateRequests.length <= holdRequestBaseline; attempt += 1) {
+		await sleep(50);
+	}
+	check(Boolean(holdConvId), "busy 会话已开跑", holdConvId);
+	check(
+		gateRequests.length > holdRequestBaseline,
+		"busy 轮的模型请求已到达假上游（run 必已置位）",
+	);
+	const holdArchiveRes = await fetch(
+		`${BASE}/api/v1/agent/chat/${encodeURIComponent(holdConvId)}/archive`,
+		{ method: "POST" },
+	);
+	const holdArchiveBody = (await holdArchiveRes.json().catch(() => ({}))) as {
+		error?: string;
+		message?: string;
+	};
+	check(
+		holdArchiveRes.status === 400 &&
+			holdArchiveBody.error === "conversation_busy" &&
+			holdArchiveBody.message === "会话正在运行，请先停止再归档",
+		"运行中归档 → 400 conversation_busy 带说明",
+		`${holdArchiveRes.status} ${holdArchiveBody.error}`,
+	);
+	check((await archivedCountOf()) === holdArchivedBaseline, "忙时归档被拒：归档计数不变");
+	gateUpstreamHold = false;
+	releaseHeldUpstream();
+	// 放闸后把这一轮读到 done：不留挂着的一轮给后面的段落（§15 重启前核账干净）
+	let holdDone = false;
+	while (holdReader && !holdDone) {
+		const chunk = await holdReader.read();
+		if (chunk.done) break;
+		holdDone = holdDecoder.decode(chunk.value, { stream: true }).includes('"type":"done"');
+	}
+	check(holdDone, "放开闸后 busy 轮正常收尾", holdConvId);
+	await archiveOne(holdConvId, "archive");
+	await archiveOne(holdConvId, "unarchive"); // 预检段结束恢复原状，不留下归档
+
+	// 回滚开关：CHAT_HARD_DELETE=false → 两端点 400「永久删除已关闭」
+	check((await putFlag("CHAT_HARD_DELETE", "false")).status === 200, "PUT CHAT_HARD_DELETE=false");
+	const offPreviewRes = await deletionPreviewOf("probe-disabled-id");
+	const offPreviewBody = (await offPreviewRes.json().catch(() => ({}))) as { message?: string };
+	check(
+		offPreviewRes.status === 400 && offPreviewBody.message === "永久删除已关闭",
+		"开关关：preview → 400 永久删除已关闭",
+		`${offPreviewRes.status} ${offPreviewBody.message}`,
+	);
+	check((await deletionDeleteOf("probe-disabled-id")).status === 400, "开关关：delete → 400");
+	check((await putFlag("CHAT_HARD_DELETE", "true")).status === 200, "改回 CHAT_HARD_DELETE=true");
+	check(
+		(await deletionPreviewOf("probe-disabled-id")).status === 404,
+		"开关开回：preview 恢复查 404（unknown_chat，不再是开关 400）",
+	);
 
 	// ── 15. CURRENT_PROJECT=false 回滚（接口文档 §2.7）──
 	console.log("\n· 15. CURRENT_PROJECT=false 回滚");

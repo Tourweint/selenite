@@ -8,7 +8,7 @@ import { DatabaseSync } from "node:sqlite";
  * 把收到的请求体记下来，逐条断言；再由它回一段固定的 SSE。
  *
  * 覆盖：
- *   1. 四个任务（converge / weekly / segment / interview）各自落成一条 durable 会话，且能回读；
+ *   1. 三个任务（weekly / segment / interview）各自落成一条 durable 会话，且能回读；
  *   2. 参数透传生效（假上游看到的 body 里就有）；
  *   3. system 段 = 服务端渲染的模板（不是客户端给的、也不是人格）；
  *   4. 任务会话没有工具（`tools` 为空或缺失）；
@@ -134,6 +134,7 @@ function startServer(): ChildProcess {
 			LLM_MODEL_FAST: "fake-fast",
 			AGENT_TOKEN: "",
 			AGENT_DB_PATH: DB,
+			AUTONOMY_ENABLED: "false", // 探针显式关（默认已于 2026-11-13 翻成开）
 			MEMORY_DB_PATH: MEMORY_DB,
 			DIARY_DB_PATH: DIARY_DB,
 			// 播种会写 providers.json；探针必须隔离，别碰真实 .data
@@ -203,7 +204,6 @@ async function chatIndexCount(): Promise<number> {
 
 /** 变量样例：每个任务一套，值里带标记串，便于在 system 里定位"渲染进去了" */
 const VARS: Record<string, Record<string, string>> = {
-	converge: { user_messages: "- 今天把方案重写了一遍", entry_types: "（待用户确认）" },
 	weekly: {
 		positive_facts: "- 本周聊了 5 天",
 		profile_markdown: "（画像占位）",
@@ -217,7 +217,6 @@ const VARS: Record<string, Record<string, string>> = {
 
 /** 各任务的参数：照抄 App 现版（LlmRequest 的 temperature / maxTokens / expectJson） */
 const PARAMS: Record<string, { temperature?: number; max_tokens?: number; response_format?: unknown }> = {
-	converge: { temperature: 0.4, max_tokens: 4000 },
 	weekly: { temperature: 0.5, max_tokens: 4000 },
 	segment: { temperature: 0.2, max_tokens: 3000, response_format: { type: "json_object" } },
 	interview: { temperature: 0.6, max_tokens: 2000 },
@@ -262,10 +261,10 @@ try {
 	});
 	check(syncRes.status === 200, "fixture 推进镜像库", String(syncRes.status));
 
-	// ── 1. 四个任务：各自一条会话、可回读、参数透传 ──────────
-	console.log("\n· 1. 四个任务各跑一遍（X-Task → Agent 会话 → 落库 → 回读）");
+	// ── 1. 三个任务：各自一条会话、可回读、参数透传 ──────────
+	console.log("\n· 1. 三个任务各跑一遍（X-Task → Agent 会话 → 落库 → 回读）");
 	const anchors: Record<string, string> = {};
-	for (const name of ["converge", "weekly", "segment", "interview"] as const) {
+	for (const name of ["weekly", "segment", "interview"] as const) {
 		const spec = allTasks().find((task) => task.name === name);
 		if (!spec) {
 			check(false, `${name} 在任务表里`, "tasks.ts 缺这张表");
@@ -496,16 +495,16 @@ try {
 	await sleep(900);
 	server = startServer();
 	await waitForReady();
-	const convergeId = anchors.converge;
-	if (convergeId) {
-		const messages = await readMessages(convergeId);
+	const weeklyId = anchors.weekly;
+	if (weeklyId) {
+		const messages = await readMessages(weeklyId);
 		check(messages.length >= 2, "重启后任务会话仍能回读", `${messages.length} 条`);
 	} else {
-		check(false, "重启前没拿到 converge 的会话 id");
+		check(false, "重启前没拿到 weekly 的会话 id");
 	}
 
 	// ── 6b. 记忆注入：只有声明了 memory 的任务才带 <memory>（方案 §4 例外表）──
-	console.log("\n· 6b. 近况记忆注入（question 有、converge 没有）");
+	console.log("\n· 6b. 近况记忆注入（question 有、segment 没有）");
 	{
 		const before = recorded.length;
 		const ask = await callTask("question", VARS.question, "请按上面的语气与规范，生成今天的一个问题。", PARAMS.question);
@@ -516,18 +515,18 @@ try {
 			check(system.includes("<memory>"), "question 的 system 里带了近况记忆块");
 			check(system.includes(fixtureText.slice(0, 12)), "记忆块里含 fixture 的成稿内容");
 		}
-		const beforeConverge = recorded.length;
-		await callTask("converge", VARS.converge, "请整理成稿", PARAMS.converge);
-		const convergeBody = recorded[beforeConverge]?.body;
-		if (convergeBody) {
-			check(!systemMessageOf(convergeBody).includes("<memory>"), "converge 不注入记忆（成稿类）");
+		const beforePlain = recorded.length;
+		await callTask("segment", VARS.segment, "请按上面的格式只输出 JSON", PARAMS.segment);
+		const plainBody = recorded[beforePlain]?.body;
+		if (plainBody) {
+			check(!systemMessageOf(plainBody).includes("<memory>"), "segment 不注入记忆（无 memory 声明）");
 		}
 	}
 
 	// ── 7. 每次调用一个会话；任务会话不进"历史对话" ──────────
 	console.log("\n· 7. 任务会话：一次调用一条、不进列表");
-	const first = await callTask("converge", VARS.converge, "请整理成稿", PARAMS.converge);
-	const second = await callTask("converge", VARS.converge, "请整理成稿", PARAMS.converge);
+	const first = await callTask("weekly", VARS.weekly, "请按上面的约束写这一周的回顾", PARAMS.weekly);
+	const second = await callTask("weekly", VARS.weekly, "请按上面的约束写这一周的回顾", PARAMS.weekly);
 	const firstId = String(first.json.id ?? "");
 	const secondId = String(second.json.id ?? "");
 	check(firstId !== secondId, "同样的任务调两次 → 两条不同会话", `${firstId} / ${secondId}`);
