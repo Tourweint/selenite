@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { contentText } from "@earendil-works/pi-ai";
 import {
@@ -45,6 +45,9 @@ import {
 	readLlmConfig,
 } from "../provider.ts";
 import { ReminderTask } from "../reminder.ts";
+// 项目归属（2026-11-12 归档模块 §5）：建普通会话时只读当前项目 id；项目库坏了不能挡建会话，
+// 所以调用点一律 try/catch 旁路（见 openChat）。
+import { projectsStore } from "../projects.ts";
 import { markTaskSession } from "../unattended.ts";
 import { memoryEngine } from "./assist.ts";
 import { getHarness, lifediaryExt, rememberLevel, researchExt, stickyThinkingLevel } from "./lifecycle.ts";
@@ -52,6 +55,7 @@ import { turnSettledHandler } from "./settled.ts";
 import {
 	CTX,
 	ChatKinds,
+	ChatProjects,
 	Chats,
 	ResolvedChat,
 	TASK_CONVERSATION_PREFIX,
@@ -336,17 +340,32 @@ export async function openChat(
 	if (!externalId) {
 		const id = crypto.randomUUID();
 		const chatKind: NewChatKind = kind ?? "chief";
+		// 项目归属只记普通会话（2026-11-12 归档模块 §5）：执事 / 群 / 任务会话不该被
+		// "项目归档"连带。当前项目每轮现读；项目库坏了只旁路归属，绝不让建会话失败。
+		let projectId: string | null = null;
+		if (chatKind === "worker") {
+			try {
+				projectId = projectsStore().getCurrentProject()?.id ?? null;
+			} catch {
+				projectId = null;
+			}
+		}
 		const conversation = await harness.createConversation(
 			{
 				ownership: { kind: "ownerless" },
 				// 新会话默认思考关（2026-10-31 方案 D2：聊天一律不思考，首字 0.8~0.9s）
 				agent: { model: modelRef ?? chatModelRef("off") },
-				// 建会话、写映射、记种类在同一个提交里，三件事要么都在要么都不在
+				// 建会话、写映射、记种类（以及普通会话的项目归属）在同一个提交里，
+				// 要么都在要么都不在
 				init: async (tx, conversationId) => {
 					const chats = await tx.doc(Chats);
 					chats.byExternal[id] = Number(conversationId);
 					const kinds = await tx.doc(ChatKinds);
 					kinds.byInternal[String(conversationId)] = chatKind;
+					if (projectId) {
+						const chatProjects = await tx.doc(ChatProjects);
+						chatProjects.byInternal[String(conversationId)] = projectId;
+					}
 				},
 			},
 			CTX,
@@ -429,8 +448,11 @@ export async function chatKindOf(chat: ResolvedChat): Promise<ChatKind> {
 	return chatKindOfInternal(chat.internalId, kinds?.byInternal ?? {});
 }
 
-/** 列表批量版：种类表只读一次，不逐会话打开（listChats 的代价口径不变）。 */
-function chatKindOfInternal(
+/**
+ * 列表批量版：种类表只读一次，不逐会话打开（listChats 的代价口径不变）。
+ * 2026-11-13 起导出：自动归档与永久删除的"只收普通会话"判定用同一份（别再抄一份漂移）。
+ */
+export function chatKindOfInternal(
 	internalId: number,
 	byInternal: Record<string, "chief" | "worker">,
 ): ChatKind {
@@ -494,6 +516,12 @@ export async function forkForEdit(
 	const externalId = crypto.randomUUID();
 	const kind = await chatKindOf(chat);
 	const previous = index > 0 ? view.entries[index - 1] : undefined;
+	// 编辑分叉也是"在这个项目下新建的会话"：继承原会话的创建时归属，
+	// 否则项目归档时这条分叉会漏在活跃列表里（2026-11-12 归档模块 §5）。
+	const sourceProjectId =
+		kind === "worker"
+			? (await harness.snapshot(ChatProjects, CTX))?.byInternal?.[String(chat.internalId)]
+			: undefined;
 
 	// 新会话的两张表：对外 uuid ↔ 内部 id、内部 id → 种类。与 openChat 的新建分支同口径，
 	// 写在 fork 的同一个事务里（不会出现"会话建好了但列表里找不到"）。
@@ -502,6 +530,10 @@ export async function forkForEdit(
 		chats.byExternal[externalId] = Number(conversationId);
 		const kinds = await tx.doc(ChatKinds);
 		kinds.byInternal[String(conversationId)] = kind === "worker" ? "worker" : "chief";
+		if (sourceProjectId) {
+			const chatProjects = await tx.doc(ChatProjects);
+			chatProjects.byInternal[String(conversationId)] = sourceProjectId;
+		}
 	};
 
 	const conversation = previous
@@ -1375,19 +1407,35 @@ async function logTurnUsage(conversation: Conversation, internalId: number): Pro
  *
  * used 不自己数 token——直接取本轮最后一次请求的 `usage.input`，那是上游真实测量的
  * prompt 大小（压缩/截断后的效果都体现在里面），比拿 ContextView 自算准。
- * window 取模型目录的 contextWindow；读不到就给 null，前端隐藏徽标。
+ *
+ * window 取**这个会话自己绑定的模型**的 contextWindow（2026-11-13）：以前读全局
+ * 默认模型，会话在 pill 里切过模型 / 旧会话还停在别的模型上时，环会按错的窗口
+ * 算占比（也看起来像"上下文不是按这个会话加载的"）。会话模型还没 configure 时
+ * 才回退全局默认；两处都读不到就给 null，前端隐藏徽标。
  */
 export async function contextUsageOf(
 	conversation: Conversation,
 ): Promise<{ used: number | null; window: number | null }> {
 	const usage = await readLastTurnUsage(conversation);
 	if (!usage || usage.input <= 0) return { used: null, window: null };
+	const windowOf = (provider: string | undefined, modelId: string | undefined): number | null => {
+		if (!provider || !modelId) return null;
+		try {
+			// 会话里存的是派生模型引用（`#think-*` / `#t…`），窗口按基座模型查
+			const model = currentModels().getModel(provider, modelId.split("#")[0]);
+			const value = (model as { contextWindow?: number } | undefined)?.contextWindow;
+			return typeof value === "number" && value > 0 ? value : null;
+		} catch {
+			return null;
+		}
+	};
 	const config = readLlmConfig();
-	let window: number | null = null;
-	if (config) {
-		const model = currentModels().getModel(config.model.provider, config.model.modelId);
-		window = (model as { contextWindow?: number } | undefined)?.contextWindow ?? null;
-	}
+	const agent = await conversation.agent(CTX).catch(() => null);
+	// 先按会话自己的模型取；会话模型被删 / 还没 configure（例如旧会话停在已移除的
+	// 供应商上）才回退全局默认——绝不因为查不到会话模型就把整块徽标藏掉。
+	const window =
+		windowOf(agent?.model?.provider, agent?.model?.modelId) ??
+		windowOf(config?.model.provider, config?.model.modelId);
 	return { used: usage.input, window };
 }
 
@@ -1422,47 +1470,118 @@ export async function usageSummary(): Promise<UsageSummary> {
 
 export interface ReminderSummary {
 	id: number;
+	/** 稳定提醒 id（每日续排沿用；列表按它归组） */
+	reminderId: string;
 	status: "pending" | "running" | "waiting" | "sleeping" | "completing" | "terminal";
 	text: string;
 	at: number;
+	/** 频率（2026-11-12）：none = 一次性；daily = 每天 */
+	repeat: "none" | "daily";
+	/** 目标执事（2026-11-12）；null = 建在普通会话里 */
+	partnerId: string | null;
 	until?: number;
 	conversationId: number;
 }
 
-/** 还没响的提醒（直接读 durable 的任务图，不另存一份） */
+/**
+ * 提醒列表（直接读 durable 的任务图，不另存一份）。
+ *
+ * 2026-11-12：每日提醒会每天换一个任务，所以按 `reminderId` 归组——
+ * 每组只返回一个代表：优先当前还活着的那个（sleeping/pending），都结束了才给最新一条终态。
+ * 否则列表会一天多一行"已结束"，桌面页会被历史刷屏。
+ */
 export async function listReminders(): Promise<ReminderSummary[]> {
 	const harness = await getHarness();
 	const inspection = await harness.inspect(CTX);
-	return inspection.tasks
-		.filter((task) => task.record.kind === ReminderTask.definition.name)
-		.map((task) => {
-			const record = task.record as unknown as {
-				id: number;
-				input: { text: string; at: number };
-				conversationId: number;
+	type Row = {
+		id: number;
+		input: { text: string; at: number; repeat?: "none" | "daily"; reminderId?: string; partnerId?: string | null };
+		conversationId: number;
+		live: boolean;
+		until?: number;
+	};
+	const groups = new Map<string, Row[]>();
+	for (const task of inspection.tasks) {
+		if (task.record.kind !== ReminderTask.definition.name) continue;
+		const record = task.record as unknown as {
+			id: number;
+			input: {
+				text: string;
+				at: number;
+				repeat?: "none" | "daily";
+				reminderId?: string;
+				partnerId?: string | null;
 			};
-			return {
-				id: record.id,
-				status: task.state.kind === "sleeping" ? "sleeping" : task.state.kind === "blocked" ? "terminal" : "pending",
-				text: record.input.text,
-				at: record.input.at,
-				...(task.state.kind === "sleeping" ? { until: task.state.until } : {}),
-				conversationId: record.conversationId,
-			};
+			conversationId: number;
+		};
+		const live = task.state.kind !== "blocked";
+		const row: Row = {
+			id: record.id,
+			input: record.input,
+			conversationId: record.conversationId,
+			live,
+			...(task.state.kind === "sleeping" ? { until: task.state.until } : {}),
+		};
+		const key = record.input.reminderId ?? `legacy-${record.id}`;
+		const bucket = groups.get(key);
+		if (bucket) bucket.push(row);
+		else groups.set(key, [row]);
+	}
+
+	const result: ReminderSummary[] = [];
+	for (const [reminderId, rows] of groups) {
+		const live = rows
+			.filter((row) => row.live)
+			.sort((a, b) => a.input.at - b.input.at)[0];
+		const chosen = live ?? rows.sort((a, b) => b.input.at - a.input.at)[0];
+		if (!chosen) continue;
+		result.push({
+			id: chosen.id,
+			reminderId,
+			status: chosen.live ? (chosen.until === undefined ? "pending" : "sleeping") : "terminal",
+			text: chosen.input.text,
+			at: chosen.input.at,
+			repeat: chosen.input.repeat === "daily" ? "daily" : "none",
+			partnerId: chosen.input.partnerId ?? null,
+			...(chosen.until !== undefined ? { until: chosen.until } : {}),
+			conversationId: chosen.conversationId,
 		});
+	}
+	return result.sort((a, b) => a.at - b.at);
 }
 
 /** 主动加一个提醒（HTTP 端调用；Agent 自己加走 set_reminder 工具） */
 export async function addReminder(
 	chat: ResolvedChat,
-	input: { text: string; at: number },
+	input: { text: string; at: number; repeat?: "none" | "daily"; partnerId?: string | null },
 ): Promise<number> {
+	const reminderId = randomUUID();
 	const id = await chat.conversation.commit(
 		(tx) =>
-			tx.createTask(ReminderTask, input, { ownership: { kind: "conversation" } }),
+			tx.createTask(
+				ReminderTask,
+				{ ...input, reminderId },
+				{ ownership: { kind: "conversation" } },
+			),
 		CTX,
 	);
 	return Number(id);
+}
+
+/**
+ * 取消一条提醒（2026-11-12）。
+ *
+ * 只允许取消真实存在的提醒任务（先对列表校验），避免任意 taskId 把别人的对话轮 abort 掉。
+ * 返回 false = 没有这条提醒（或已经结束）。
+ */
+export async function cancelReminder(taskId: number): Promise<boolean> {
+	const reminders = await listReminders();
+	if (!reminders.some((reminder) => reminder.id === taskId && reminder.status !== "terminal")) {
+		return false;
+	}
+	const harness = await getHarness();
+	await harness.abortTask(taskId as never, CTX);
+	return true;
 }
 
 // ── 会话索引（2026-10-29 配对配套）────────────────────────
@@ -1488,17 +1607,31 @@ export interface ChatIndexEntry {
 	pinned?: boolean;
 	/** 会话种类（2026-11-06 侧栏调整 B2，纯增量）：前端据此筛"总管"入口，不按 id 猜身份 */
 	chatKind: ChatKind;
+	/**
+	 * 以下四个是归档清单（2026-11-12 归档模块 §3）的增量字段：
+	 * 活跃清单不改变现有字段，只有 `GET /agent/chats/archived` 保证带 `archived` / `archivedAt`。
+	 */
+	archived?: boolean;
+	archivedAt?: number;
+	projectId?: string;
+	projectName?: string;
 }
 
-// ── 会话标题 / 从列表移除 ───────────────────────────────
+// ── 会话标题 / 归档 ─────────────────────────────────────
 /**
  * durable 里没有「标题」这个概念（Conversation 只有 id / owner / model 这些），
- * 也没有删除接口。所以标题、以及我们自己的「从列表移除」都记在这份小文件里，
+ * 也没有删除接口。所以标题、以及我们自己的「归档」都记在这份小文件里，
  * 不往内核的表结构里塞东西 —— 那是升级时最容易痛的地方。
+ *
+ * 2026-11-12 归档模块：`hidden` → `archived`，并新增 `archivedAt`（归档时间）。
+ * 读路径兼容旧键（`archived ?? hidden`），写路径只写新键；旧键在首次写入后消失。
+ * 归档永不物理删除会话，恢复只改这份文件。
  */
-interface ChatMeta {
+export interface ChatMeta {
 	titles: Record<string, string>;
-	hidden: string[];
+	archived: string[];
+	/** 归档时间（epoch 毫秒）；旧数据可能没有，读不到就回退到最后一句时间 */
+	archivedAt: Record<string, number>;
 	/** 置顶的会话 id，按置顶先后排（2026-11-04 批次一） */
 	pins: string[];
 }
@@ -1506,24 +1639,85 @@ interface ChatMeta {
 const CHAT_META_PATH =
 	process.env.AGENT_CHAT_META_PATH?.trim() || ".data/chat-meta.json";
 
-function readChatMeta(): ChatMeta {
+export function readChatMeta(): ChatMeta {
 	try {
-		const parsed = JSON.parse(readFileSync(CHAT_META_PATH, "utf8")) as Partial<ChatMeta>;
+		const parsed = JSON.parse(readFileSync(CHAT_META_PATH, "utf8")) as Partial<ChatMeta> & {
+			hidden?: unknown;
+		};
+		// 兼容旧键：2026-11-12 之前叫 hidden
+		const archived = Array.isArray(parsed.archived)
+			? parsed.archived.filter((id): id is string => typeof id === "string")
+			: Array.isArray(parsed.hidden)
+				? parsed.hidden.filter((id): id is string => typeof id === "string")
+				: [];
+		const archivedAt: Record<string, number> = {};
+		if (parsed.archivedAt && typeof parsed.archivedAt === "object" && !Array.isArray(parsed.archivedAt)) {
+			for (const [id, at] of Object.entries(parsed.archivedAt)) {
+				if (typeof at === "number" && Number.isFinite(at)) archivedAt[id] = at;
+			}
+		}
 		return {
 			titles:
 				parsed.titles && typeof parsed.titles === "object" ? parsed.titles : {},
-			hidden: Array.isArray(parsed.hidden) ? parsed.hidden : [],
+			archived,
+			archivedAt,
 			pins: Array.isArray(parsed.pins) ? parsed.pins : [],
 		};
 	} catch {
-		// 文件不存在或坏了：当作没改过名、没移除过，不影响会话本身
-		return { titles: {}, hidden: [], pins: [] };
+		// 文件不存在或坏了：当作没改过名、没归档过，不影响会话本身
+		return { titles: {}, archived: [], archivedAt: {}, pins: [] };
 	}
 }
 
 function writeChatMeta(meta: ChatMeta): void {
+	// 原子写（2026-11-13 永久删除批A，参照 flags.ts 的 atomicWrite）：临时文件 + rename。
+	// 以前是就地 writeFileSync，进程中途被杀会留下半截 JSON，重启后整份 chat-meta 当空处理
+	// （标题/归档/置顶全丢）。永久删除也走这条路，写失败代价变高了，先补上这层。
 	mkdirSync(dirname(CHAT_META_PATH), { recursive: true });
-	writeFileSync(CHAT_META_PATH, JSON.stringify(meta, null, 2));
+	const temp = `${CHAT_META_PATH}.tmp-${process.pid}-${Date.now()}`;
+	try {
+		// 只写新键：旧 `hidden` 不回写，回滚代码仍能读新键
+		writeFileSync(temp, JSON.stringify(meta, null, 2), "utf8");
+		renameSync(temp, CHAT_META_PATH);
+	} catch (error) {
+		try {
+			rmSync(temp, { force: true });
+		} catch {
+			/* 清理失败就算了，别盖住原始错误 */
+		}
+		throw error;
+	}
+}
+
+/**
+ * 清掉一批会话在 chat-meta 里的全部痕迹（2026-11-13 永久删除批A）：
+ * `titles` / `archived` / `archivedAt` / `pins` 四组一起删。
+ * 永久删除在 durable 行清完之后调它；没有痕迹就不写盘。
+ */
+export function purgeChatMetaEntries(conversationIds: readonly string[]): void {
+	const meta = readChatMeta();
+	let changed = false;
+	for (const conversationId of conversationIds) {
+		if (conversationId in meta.titles) {
+			delete meta.titles[conversationId];
+			changed = true;
+		}
+		const archivedIndex = meta.archived.indexOf(conversationId);
+		if (archivedIndex !== -1) {
+			meta.archived.splice(archivedIndex, 1);
+			changed = true;
+		}
+		if (conversationId in meta.archivedAt) {
+			delete meta.archivedAt[conversationId];
+			changed = true;
+		}
+		const pinIndex = meta.pins.indexOf(conversationId);
+		if (pinIndex !== -1) {
+			meta.pins.splice(pinIndex, 1);
+			changed = true;
+		}
+	}
+	if (changed) writeChatMeta(meta);
 }
 
 export function renameChat(conversationId: string, title: string): { title?: string } {
@@ -1535,10 +1729,59 @@ export function renameChat(conversationId: string, title: string): { title?: str
 	return { title: clean || undefined };
 }
 
-/** 「移除」只是从列表里拿掉，会话本身和记忆都还在（没有删除接口） */
-export function hideChat(conversationId: string): void {
+/**
+ * 归档：只是从活跃列表里拿掉，会话本身和记忆都还在（没有删除接口）。
+ * 重复归档只更新时间，不产生重复条目；`at` 供批量场景注入同一时刻。
+ */
+export function archiveChat(conversationId: string, at = Date.now()): void {
 	const meta = readChatMeta();
-	if (!meta.hidden.includes(conversationId)) meta.hidden.push(conversationId);
+	if (!meta.archived.includes(conversationId)) meta.archived.push(conversationId);
+	meta.archivedAt[conversationId] = at;
+	writeChatMeta(meta);
+}
+
+/**
+ * 归档端点的防误触入口（2026-11-13 对齐 ZCode 批A）：**运行中禁止归档**。
+ *
+ * 先解析 id 并判忙，忙则拒绝（400 带说明，与 forkForEdit 的 409 同款思路）；
+ * 解析失败（不存在的 id）与忙态读不出来时按改动前行为归档——归档可恢复，
+ * 不因为"多加了一道防误触"让老客户端的归档变得更不可用。归档仍不中断运行：
+ * 是"先停止再归"，不是"归档即停止"。
+ */
+export async function archiveChatGuarded(
+	conversationId: string,
+): Promise<{ ok: true } | { ok: false; status: 400; error: string; message: string }> {
+	try {
+		const chat = await openChat(conversationId);
+		if (chat && (await conversationIsBusy(chat.conversation))) {
+			return {
+				ok: false,
+				status: 400,
+				error: "conversation_busy",
+				message: "会话正在运行，请先停止再归档",
+			};
+		}
+	} catch (error) {
+		// harness 打不开（存储抖动 / 未配置模型）不该挡归档：按空闲处理，行为与改动前一致
+		console.warn(
+			`[chats] 归档前判忙失败，按空闲处理: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+	archiveChat(conversationId);
+	return { ok: true };
+}
+
+/** 兼容别名：2026-11-12 之前叫 hideChat（旧调用方零改动）。 */
+export const hideChat = archiveChat;
+
+/** 从归档里恢复一条（幂等）：不在归档里也什么都不写、不报错。 */
+export function unarchiveChat(conversationId: string): void {
+	const meta = readChatMeta();
+	const index = meta.archived.indexOf(conversationId);
+	const hadAt = conversationId in meta.archivedAt;
+	if (index === -1 && !hadAt) return;
+	if (index !== -1) meta.archived.splice(index, 1);
+	delete meta.archivedAt[conversationId];
 	writeChatMeta(meta);
 }
 
@@ -1552,16 +1795,21 @@ export function pinChat(conversationId: string, pinned: boolean): boolean {
 	return pinned && meta.pins.includes(conversationId);
 }
 
-export function restoreChats(): number {
+/** 全部恢复：清空归档 id 与归档时间两组，返回恢复条数。 */
+export function restoreArchivedChats(): number {
 	const meta = readChatMeta();
-	const count = meta.hidden.length;
-	meta.hidden = [];
+	const count = meta.archived.length;
+	meta.archived = [];
+	meta.archivedAt = {};
 	writeChatMeta(meta);
 	return count;
 }
 
-export function chatMetaSummary(): { hidden: number } {
-	return { hidden: readChatMeta().hidden.length };
+/** 兼容别名：2026-11-12 之前叫 restoreChats（旧调用方零改动）。 */
+export const restoreChats = restoreArchivedChats;
+
+export function chatMetaSummary(): { archived: number } {
+	return { archived: readChatMeta().archived.length };
 }
 
 /**
@@ -1570,6 +1818,60 @@ export function chatMetaSummary(): { hidden: number } {
  */
 export function chatTitles(): Record<string, string> {
 	return { ...readChatMeta().titles };
+}
+
+// ── 项目归档连带（2026-11-12 归档模块 §5）───────────────
+/** 群 / 执事会话的对外 id 前缀：与 group-runtime / partner-runtime 的约定一致，不该被项目连带归档。 */
+const PARTNER_CONVERSATION_PREFIX = "partner-";
+
+/**
+ * 纯过滤：从 durable 的两张映射表里挑出"属于这个项目、且允许连带归档"的对外会话 id。
+ *
+ * 独立成纯函数是为了直接断言（单测不搭 durable）：只认 `ChatProjects` 里真的记了
+ * `projectId` 的会话，不按目录 / 时间猜旧会话归属；`task-` 与 `partner-` 前缀跳过。
+ */
+export function projectChatExternalIds(
+	chatProjects: Record<string, string>,
+	chatsByExternal: Record<string, number>,
+	projectId: string,
+): string[] {
+	const externalByInternal = new Map<number, string>();
+	for (const [externalId, internalId] of Object.entries(chatsByExternal)) {
+		externalByInternal.set(Number(internalId), externalId);
+	}
+	const result: string[] = [];
+	for (const [internalId, mappedProjectId] of Object.entries(chatProjects)) {
+		if (mappedProjectId !== projectId) continue;
+		const externalId = externalByInternal.get(Number(internalId));
+		if (!externalId) continue;
+		if (externalId.startsWith(TASK_CONVERSATION_PREFIX)) continue;
+		if (externalId.startsWith(PARTNER_CONVERSATION_PREFIX)) continue;
+		result.push(externalId);
+	}
+	return result;
+}
+
+/**
+ * 项目归档后连带归档"这个项目下新建的普通会话"（2026-11-12 归档模块 §5）。
+ *
+ * 只读 `ChatProjects` 的创建时归属，**旧会话不回溯**；只写 chat-meta，不碰正文 / 磁盘。
+ * 返回实际归档条数（重复归档也算一次：它在归档里就是用户看到的结果）。
+ */
+export async function archiveChatsOfProject(projectId: string): Promise<number> {
+	if (!projectId) return 0;
+	const harness = await getHarness();
+	const [chats, chatProjects] = await Promise.all([
+		harness.snapshot(Chats, CTX),
+		harness.snapshot(ChatProjects, CTX),
+	]);
+	const externalIds = projectChatExternalIds(
+		chatProjects?.byInternal ?? {},
+		chats?.byExternal ?? {},
+		projectId,
+	);
+	const at = Date.now();
+	for (const externalId of externalIds) archiveChat(externalId, at);
+	return externalIds.length;
 }
 
 // ── 记忆（设置页，2026-11-06）──────────────────────────────
@@ -1655,6 +1957,68 @@ export function supersedeMemory(id: string, byId?: string | null): boolean {
 	return Boolean(memoryEngine?.supersede(id, byId ?? null));
 }
 
+type HarnessHandle = Awaited<ReturnType<typeof getHarness>>;
+
+/** 列表 / 归档清单共用的会话元数据（不含种类与 chat-meta 字段）。 */
+export interface ChatStats {
+	firstText: string;
+	turns: number;
+	createdAt: number;
+	lastAt: number;
+}
+
+/**
+ * 读一个会话的首句 / 轮数 / 首末时间。
+ * `turns === 0` 返回 null：空会话不进任何清单（原有 listChats 口径不变）。
+ * 2026-11-13 起导出：自动归档的 lastAt 与永久删除预检的 rounds/lastAt 用同一口径（不另抄一份）。
+ */
+export async function readChatStats(
+	harness: HarnessHandle,
+	internalId: number,
+): Promise<ChatStats | null> {
+	const conversation = await harness.conversation(internalId as never, CTX);
+	if (!conversation) return null;
+	const view = await conversation.context(CTX);
+	let firstText = "";
+	let turns = 0;
+	let createdAt = 0;
+	let lastAt = 0;
+	for (const entry of view.entries) {
+		if (entry.kind !== "pi.user" && entry.kind !== "pi.assistant") continue;
+		const message = entry.model?.[0];
+		if (!message) continue;
+		const at = typeof message.timestamp === "number" ? message.timestamp : 0;
+		if (entry.kind === "pi.user") {
+			turns += 1;
+			if (!firstText) firstText = contentText(message.content).trim().slice(0, 40);
+		}
+		if (!createdAt && at) createdAt = at;
+		if (at > lastAt) lastAt = at;
+	}
+	if (turns === 0) return null;
+	return { firstText, turns, createdAt, lastAt };
+}
+
+/** 活跃清单与归档清单共用的 entry 构建（避免两份逻辑漂移）。 */
+function chatEntryOf(
+	conversationId: string,
+	internalId: number,
+	stats: ChatStats,
+	meta: ChatMeta,
+	kinds: Record<string, "chief" | "worker">,
+): ChatIndexEntry {
+	return {
+		conversationId,
+		createdAt: stats.createdAt,
+		lastAt: stats.lastAt,
+		firstText: stats.firstText,
+		turns: stats.turns,
+		chatKind: chatKindOfInternal(internalId, kinds),
+		...(meta.titles[conversationId] ? { title: meta.titles[conversationId] } : {}),
+		...(meta.pins.includes(conversationId) ? { pinned: true } : {}),
+	};
+}
+
 export async function listChats(limit = 50): Promise<ChatIndexEntry[]> {
 	if (!readLlmConfig()) return [];
 	const harness = await getHarness();
@@ -1662,47 +2026,20 @@ export async function listChats(limit = 50): Promise<ChatIndexEntry[]> {
 	// 任务会话（`X-Task` 通道产生）不进"历史对话"：它们的首句是"请整理成稿"这类指令，
 	// 不是用户说过的话（2026-10-31）。正文仍可按 id 回读，只是不在列表里露头。
 	const meta = readChatMeta();
-	const hidden = new Set(meta.hidden);
+	const archived = new Set(meta.archived);
 	// 种类表读一次（2026-11-06 B2）：逐会话查库会把列表代价再放大一倍
 	const kinds = (await harness.snapshot(ChatKinds, CTX))?.byInternal ?? {};
 	const pairs = Object.entries(chats?.byExternal ?? {})
 		.filter(([conversationId]) => !conversationId.startsWith(TASK_CONVERSATION_PREFIX))
-		.filter(([conversationId]) => !hidden.has(conversationId))
+		.filter(([conversationId]) => !archived.has(conversationId))
 		.slice(-limit);
 	const entries: ChatIndexEntry[] = [];
 
 	for (const [conversationId, internalId] of pairs) {
 		try {
-			const conversation = await harness.conversation(internalId as never, CTX);
-			if (!conversation) continue;
-			const view = await conversation.context(CTX);
-			let firstText = "";
-			let turns = 0;
-			let createdAt = 0;
-			let lastAt = 0;
-			for (const entry of view.entries) {
-				if (entry.kind !== "pi.user" && entry.kind !== "pi.assistant") continue;
-				const message = entry.model?.[0];
-				if (!message) continue;
-				const at = typeof message.timestamp === "number" ? message.timestamp : 0;
-				if (entry.kind === "pi.user") {
-					turns += 1;
-					if (!firstText) firstText = contentText(message.content).trim().slice(0, 40);
-				}
-				if (!createdAt && at) createdAt = at;
-				if (at > lastAt) lastAt = at;
-			}
-			if (turns === 0) continue;
-			entries.push({
-				conversationId,
-				createdAt,
-				lastAt,
-				firstText,
-				turns,
-				chatKind: chatKindOfInternal(Number(internalId), kinds),
-				...(meta.titles[conversationId] ? { title: meta.titles[conversationId] } : {}),
-				...(meta.pins.includes(conversationId) ? { pinned: true } : {}),
-			});
+			const stats = await readChatStats(harness, Number(internalId));
+			if (!stats) continue;
+			entries.push(chatEntryOf(conversationId, Number(internalId), stats, meta, kinds));
 		} catch (error) {
 			// 单个会话读失败不该让整张索引失败（重装场景下可能是残留的空会话）
 			console.warn(
@@ -1712,6 +2049,80 @@ export async function listChats(limit = 50): Promise<ChatIndexEntry[]> {
 	}
 
 	return entries.sort((a, b) => b.lastAt - a.lastAt);
+}
+
+/**
+ * 纯映射：把 `chat-meta.archived` 的对外 id 反查成 durable 内部 id，保持归档数组顺序。
+ * 独立成纯函数是给单测钉"归档清单不从活跃清单截断"的结构（不搭 harness 也能断言条数）。
+ */
+export function archivedChatPairs(
+	archivedIds: readonly string[],
+	chatsByExternal: Record<string, number>,
+): { conversationId: string; internalId: number }[] {
+	const pairs: { conversationId: string; internalId: number }[] = [];
+	for (const conversationId of archivedIds) {
+		const internalId = chatsByExternal[conversationId];
+		if (internalId === undefined) continue;
+		pairs.push({ conversationId, internalId: Number(internalId) });
+	}
+	return pairs;
+}
+
+/**
+ * 归档会话清单（2026-11-12 归档模块 §3）。
+ *
+ * 与 `listChats` 的关键区别：**按 `chat-meta.archived` 的 id 反查**，不走活跃清单的
+ * `slice(-limit)`——归档的多是旧会话，按活跃清单截断会把它们漏掉。`limit` 只截最终结果。
+ * 项目标签只在该会话有归属映射、且项目登记还在（含已归档项目）时给。
+ */
+export async function listArchivedChats(limit = 200): Promise<ChatIndexEntry[]> {
+	if (!readLlmConfig()) return [];
+	const harness = await getHarness();
+	const chats = await harness.snapshot(Chats, CTX);
+	const meta = readChatMeta();
+	// 种类表读一次（与 listChats 同口径）
+	const kinds = (await harness.snapshot(ChatKinds, CTX))?.byInternal ?? {};
+	const chatProjects = (await harness.snapshot(ChatProjects, CTX))?.byInternal ?? {};
+	const byExternal = chats?.byExternal ?? {};
+
+	const projectNames = new Map<string, string>();
+	if (Object.keys(chatProjects).length > 0) {
+		try {
+			// 项目库读不出来就不显示项目标签，不影响归档清单本身
+			for (const project of projectsStore().listProjects(true)) {
+				projectNames.set(project.id, project.name);
+			}
+		} catch {
+			/* 同上 */
+		}
+	}
+
+	const entries: ChatIndexEntry[] = [];
+	for (const { conversationId, internalId } of archivedChatPairs(meta.archived, byExternal)) {
+		try {
+			const stats = await readChatStats(harness, internalId);
+			if (!stats) continue;
+			const projectId = chatProjects[String(internalId)];
+			const projectName = projectId ? projectNames.get(projectId) : undefined;
+			entries.push({
+				...chatEntryOf(conversationId, internalId, stats, meta, kinds),
+				archived: true,
+				// 旧数据没有归档时间：按方案回退到最后一句时间（不是 0，排序才有意义）
+				archivedAt: meta.archivedAt[conversationId] ?? stats.lastAt,
+				...(projectId && projectName ? { projectId, projectName } : {}),
+			});
+		} catch (error) {
+			// 单个会话读失败不该让整张归档清单失败
+			console.warn(
+				`[chats] 读取归档会话 ${conversationId} 失败: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+
+	const cap = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 200;
+	return entries
+		.sort((a, b) => (b.archivedAt ?? b.lastAt) - (a.archivedAt ?? a.lastAt))
+		.slice(0, cap);
 }
 
 // ── 内容级搜索（2026-11-04 批次二）────────────────────────

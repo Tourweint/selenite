@@ -69,6 +69,24 @@ export const ChatKinds = defineDoc<{ byInternal: Record<string, "chief" | "worke
 	checkpointWhen: () => false,
 });
 
+/**
+ * 会话的项目归属（2026-11-12 归档模块方案 §5）：durable 内部会话 id → 项目 uuid。
+ *
+ * 只在 `openChat` 新建**普通会话**（`chatKind=worker`）且当时有当前项目时写，
+ * 与 `Chats` / `ChatKinds` 在同一个 init 事务里落盘（不会出现"会话建好了但归属没记上"）。
+ * 执事 / 群（`partner-`）、任务（`task-`）、OpenAI 兼容自动建会话**不记**。
+ *
+ * 缺项 = 本次改动之前建的旧会话，没有归属（旧数据不回溯、不按目录猜）；
+ * 存的是项目 uuid，项目改名不影响；项目硬删除会留下悬空 id，归档页查不到名字就不显示标签。
+ */
+export const ChatProjects = defineDoc<{ byInternal: Record<string, string> }>({
+	kind: "lifediary.chat-projects",
+	version: 1,
+	scope: "session",
+	initial: () => ({ byInternal: {} }),
+	checkpointWhen: () => false,
+});
+
 export interface ResolvedChat {
 	conversation: Conversation;
 	/** 对外 id，客户端存的是这个 */

@@ -19,6 +19,8 @@ import { scopeKey } from "@lifediary/memory";
 import {
   addReminder,
   applyChatMode,
+  archiveChatGuarded,
+  cancelReminder,
   chatKindOf,
   chatMetaSummary,
   chatStream,
@@ -28,7 +30,7 @@ import {
   forkForEdit,
   getHarness,
   getPolicy,
-  hideChat,
+  listArchivedChats,
   listChats,
   listReminders,
   memoryEngine,
@@ -37,13 +39,14 @@ import {
   preferenceScopeOf,
   readTranscript,
   renameChat,
-  restoreChats,
+  restoreArchivedChats,
   sayInChat,
   sayInConversation,
   seedChiefPartner,
   setTurnSettledObserver,
   startChatCompaction,
   turnSettledHandler,
+  unarchiveChat,
   waitChatCompaction,
   searchTranscripts,
   setPolicy,
@@ -67,6 +70,11 @@ import { pairPage } from "./pair-page.ts";
 import { mountPhoneWorker } from "./phone-worker.ts";
 import { mountProjects, seedDefaultWorkspace } from "./projects.ts";
 import { loadFlagOverrides, mountFlags } from "./flags.ts";
+// 自动归档调度器（2026-11-13 归档管理对齐 ZCode 批A）：启动 sync 一次，
+// ARCHIVE_AUTO_ENABLED=false（默认）时零行为；flags 端点改开关后由 onChange 动态开停。
+import { autoArchiveScheduler } from "./agent/auto-archive.ts";
+// 永久删除端点（同批）：mountDurableDelete 挂 deletion-preview / delete 两组路由。
+import { mountDurableDelete } from "./agent/durable-delete.ts";
 import { mountFiles } from "./files.ts";
 import { mountDelegationApi } from "./delegation-api.ts";
 import { mountCompanions } from "./companion-api.ts";
@@ -78,6 +86,7 @@ import { mountTopics } from "./topic-api.ts";
 import { mountSearch } from "./search-api.ts";
 import { COMPANIONS_ENABLED, partnersStore } from "./partners.ts";
 import { ensurePartnerSession } from "./partner-runtime.ts";
+import { setReminderDeliverer } from "./reminder.ts";
 import { routineEngine } from "./routines.ts";
 import { watchAllEvents } from "./agent.ts";
 import { autonomyMode, autonomyObserver, observeCount24h } from "./autonomy.ts";
@@ -142,7 +151,7 @@ import {
 import {
   findAroundIndex,
   parseSessionSearchQuery,
-  searchSessions,
+  searchSessionsPage,
   sessionSearchApiEnabled,
 } from "./agent/session-search.ts";
 import { chancellorWorkRoot } from "./delegation.ts";
@@ -316,7 +325,15 @@ mountApprovalApi(app);
 // bash 后台任务管理面（2026-11-10 批 21 §二）：转后台之后要能看见、能收尾。
 mountBgJobs(app);
 // 高级开关（2026-11-09）：界面读写运行时开关（.data/agent-flags.json）。AGENT_FLAGS_UI=false 整组不挂。
-mountFlags(app);
+mountFlags(app, {
+  // 自动归档的开关/天数写成功后立刻开停调度器（hot 开关的运行中生效路径；
+  // 没有这一步，运行中打开 ARCHIVE_AUTO_ENABLED 要等重启）
+  onChange: (key) => {
+    if (key === "ARCHIVE_AUTO_ENABLED" || key === "ARCHIVE_AUTO_DAYS") {
+      autoArchiveScheduler().sync();
+    }
+  },
+});
 // 记忆管理（2026-11-06）：看 / 删 / 标过时。只读列表不碰 durable，删改直接落记忆库。
 mountMemoryApi(app, { enabled: memoryEngine !== null });
 // 技能管理（2026-11-08 扫尾批 9-S）：目录解析 = AGENT_SKILLS_DIR → 用户目录 → 应用目录兜底。
@@ -529,14 +546,28 @@ app.post("/api/v1/pair/devices/:id/revoke", (c) =>
 app.get("/api/v1/agent/chats", async (c) => {
   const limit = Number(c.req.query("limit") ?? 50);
   const chats = await listChats(Number.isFinite(limit) ? limit : 50);
-  return c.json({ chats, removed: chatMetaSummary().hidden });
+  // 2026-11-12 归档模块：`removed` → `archived`（计数）。手机端只读 `chats`，改名不断手机。
+  return c.json({ chats, archived: chatMetaSummary().archived });
 });
 
 /**
- * 会话改名 / 从列表移除（2026-11-03）。
+ * 归档会话清单（2026-11-12 归档模块 §3）。
+ *
+ * 按 chat-meta 的归档 id 反查，不受活跃清单 limit 截断；`limit` 只截最终结果
+ * （非法值回落 200）。`total` 是归档总数（chat-meta 口径），可能大于本页条数。
+ */
+app.get("/api/v1/agent/chats/archived", async (c) => {
+  const raw = Number(c.req.query("limit") ?? 200);
+  const limit = Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 200;
+  const chats = await listArchivedChats(limit);
+  return c.json({ chats, total: chatMetaSummary().archived });
+});
+
+/**
+ * 会话改名 / 归档（2026-11-03；2026-11-12 改名「归档」）。
  *
  * durable 没有标题和删除的概念，所以这两件事只写我们自己的 `chat-meta.json`：
- * 改名不影响内核；「移除」只是不在列表里出现，会话与记忆都还在。
+ * 改名不影响内核；「归档」只是不在活跃列表里出现，会话与记忆都还在。
  */
 app.post("/api/v1/agent/chat/:conversationId/rename", async (c) => {
   const body = (await c.req.json().catch(() => null)) as { title?: string } | null;
@@ -544,12 +575,41 @@ app.post("/api/v1/agent/chat/:conversationId/rename", async (c) => {
   return c.json({ ok: true, ...renameChat(c.req.param("conversationId"), title) });
 });
 
-app.post("/api/v1/agent/chat/:conversationId/hide", (c) => {
-  hideChat(c.req.param("conversationId"));
+/**
+ * 归档一条会话：主入口（`/hide` 保留为兼容别名，同一 handler）。
+ * 2026-11-13 对齐 ZCode 批A：**运行中禁止归档**（busy → 400 带说明），
+ * 判定与拒绝语义都在 `archiveChatGuarded`（session.ts），这里只做参数与响应映射。
+ */
+const archiveChatHandler = async (c: Context) => {
+  const conversationId = c.req.param("conversationId");
+  if (!conversationId) return c.json({ error: "bad_request" }, 400);
+  const result = await archiveChatGuarded(conversationId);
+  if (!result.ok) return c.json({ error: result.error, message: result.message }, result.status);
+  return c.json({ ok: true });
+};
+app.post("/api/v1/agent/chat/:conversationId/archive", archiveChatHandler);
+app.post("/api/v1/agent/chat/:conversationId/hide", archiveChatHandler);
+
+/** 单条恢复（幂等：不在归档里也返回 ok）。恢复无害，不判忙。 */
+app.post("/api/v1/agent/chat/:conversationId/unarchive", (c) => {
+  unarchiveChat(c.req.param("conversationId"));
   return c.json({ ok: true });
 });
 
-app.post("/api/v1/agent/chats/restore", (c) => c.json({ ok: true, restored: restoreChats() }));
+/**
+ * 全部恢复 → `{ok, restored}`。
+ * 2026-11-13 对齐 ZCode 批A：**UI 不再暴露页级"全部恢复"**（组级恢复取代之），
+ * 端点保留不删——旧客户端 / 探针 / 回滚不 404（方案 §1）。
+ */
+app.post("/api/v1/agent/chats/restore", (c) =>
+  c.json({ ok: true, restored: restoreArchivedChats() }),
+);
+
+/**
+ * 永久删除（2026-11-13 对齐 ZCode 批A）：预检 + 执行，归档是唯一门槛，
+ * 只收普通会话、连分叉子树一起删。实现与挂载在 agent/durable-delete.ts。
+ */
+mountDurableDelete(app);
 
 /** 置顶 / 取消置顶（2026-11-04 批次一）：只影响列表顺序，写 chat-meta，不碰会话本身 */
 app.post("/api/v1/agent/chat/:conversationId/pin", async (c) => {
@@ -1457,8 +1517,12 @@ app.get("/api/v1/agent/search", async (c) => {
  *
  * 与上面的 `/agent/search` 刻意分开：那条走 `searchTranscripts`（跳过任务专线与隐藏会话），
  * 这条复用 `recall_sessions` 的 `searchSessions`（覆盖全部会话、snippet 脱敏截断），
- * 并给每条命中补一个 `aroundIndex`，前端点一条就能用既有
- * `GET /api/v1/agent/chat/:id/context?aroundIndex=&radius=` 拉上下文弹窗（只读、不 fork）。
+ * 并给每条命中补一个 `aroundIndex`（定位口径与 §2.2.2 同源）。
+ *
+ * 消费方（2026-11-12 起）：独立搜索页 `#/search` 的原文段走本端点（界面只留这一个搜索）；
+ * 点一条按 `at` 跳回原会话并定位到那一句。分页用 `offset + limit`，响应额外回 `total`
+ * （未分页的命中总数）给"还有 N 处 / 查看更多"用；`total` 不是稳定快照，只作展示。
+ * `aroundIndex` 仍是稳定的绝对下标，留给需要前后文窗口的消费者（§2.2.2 端点保留）。
  *
  * 只读：只 `getHarness()` / `openChat()` / `readTranscript()` 读 durable，不写、不开新会话。
  * 回滚：`AGENT_SESSIONS_SEARCH=false` → 404（整组端点不启用）。
@@ -1469,16 +1533,17 @@ app.get("/api/v1/agent/sessions/search", async (c) => {
     q: c.req.query("q") ?? undefined,
     days: c.req.query("days") ?? undefined,
     limit: c.req.query("limit") ?? undefined,
+    offset: c.req.query("offset") ?? undefined,
   });
   if (!parsed) {
     return c.json({ error: "bad_request", message: "q 至少 2 个字符" }, 400);
   }
 
-  const hits = await searchSessions(await getHarness(), parsed.query, parsed.options);
+  const page = await searchSessionsPage(await getHarness(), parsed.query, parsed.options);
   // 每条命中补一个与定点找回同源的下标：按会话缓存正文，避免同会话多命中重复读。
   const messagesByConversation = new Map<string, Awaited<ReturnType<typeof readTranscript>>>();
-  const enriched: Array<(typeof hits)[number] & { aroundIndex: number }> = [];
-  for (const hit of hits) {
+  const enriched: Array<(typeof page.hits)[number] & { aroundIndex: number }> = [];
+  for (const hit of page.hits) {
     let messages = messagesByConversation.get(hit.conversationId);
     if (!messages) {
       const chat = await openChat(hit.conversationId);
@@ -1487,7 +1552,7 @@ app.get("/api/v1/agent/sessions/search", async (c) => {
     }
     enriched.push({ ...hit, aroundIndex: findAroundIndex(messages, hit, parsed.query) });
   }
-  return c.json({ hits: enriched });
+  return c.json({ hits: enriched, total: page.total });
 });
 
 /** 还没响的提醒（读 durable 的任务图） */
@@ -1496,10 +1561,21 @@ app.get("/api/v1/agent/reminders", async (c) => {
   return c.json({ reminders: await listReminders() });
 });
 
-/** 直接加一个提醒，不经过模型 */
+/**
+ * 直接加一个提醒，不经过模型。
+ *
+ * 2026-11-12 扩展：`repeat: "none"|"daily"`（每天自动续排）、`partnerId`（目标执事）；
+ * 不传 `partnerId` 时行为与旧版一致（`conversationId` 或默认会话）。
+ */
 app.post("/api/v1/agent/reminders", async (c) => {
   const body = (await c.req.json().catch(() => null)) as
-    | { conversationId?: string; text?: string; at?: string | number }
+    | {
+        conversationId?: string;
+        text?: string;
+        at?: string | number;
+        repeat?: unknown;
+        partnerId?: unknown;
+      }
     | null;
   const text = body?.text?.trim();
   if (!text || !body?.at) {
@@ -1512,13 +1588,41 @@ app.post("/api/v1/agent/reminders", async (c) => {
   if (at <= Date.now()) {
     return c.json({ error: "bad_request", message: "at 已经过去了" }, 400);
   }
-
-  const chat = await openChat(body.conversationId);
-  if (!chat) {
-    return c.json({ error: "unknown_conversation" }, 404);
+  const repeat = body?.repeat === undefined ? "none" : body.repeat;
+  if (repeat !== "none" && repeat !== "daily") {
+    return c.json({ error: "bad_request", message: "repeat 只能是 none / daily" }, 400);
   }
-  const taskId = await addReminder(chat, { text, at });
-  return c.json({ ok: true, taskId, conversationId: chat.externalId }, 201);
+  const partnerId =
+    typeof body?.partnerId === "string" && body.partnerId.trim()
+      ? body.partnerId.trim()
+      : null;
+  if (partnerId === null && body?.partnerId !== undefined && body.partnerId !== null) {
+    return c.json({ error: "bad_request", message: "partnerId 必须是字符串或 null" }, 400);
+  }
+
+  const chat = partnerId
+    ? await ensurePartnerSession(partnerId)
+    : await openChat(body.conversationId);
+  if (!chat) {
+    return partnerId
+      ? c.json({ error: "partner_not_found", message: "执事不存在或已暂停" }, 404)
+      : c.json({ error: "unknown_conversation" }, 404);
+  }
+  const taskId = await addReminder(chat, { text, at, repeat, partnerId });
+  return c.json({ ok: true, taskId, conversationId: chat.externalId, repeat, partnerId }, 201);
+});
+
+/** 取消一条提醒（2026-11-12）：每日续排的链在取消当前任务后不再续。 */
+app.delete("/api/v1/agent/reminders/:taskId", async (c) => {
+  const taskId = Number(c.req.param("taskId"));
+  if (!Number.isInteger(taskId) || taskId <= 0) {
+    return c.json({ error: "bad_request", message: "taskId 必须是正整数" }, 400);
+  }
+  const cancelled = await cancelReminder(taskId);
+  if (!cancelled) {
+    return c.json({ error: "not_found", message: "没有这条提醒，或已经结束" }, 404);
+  }
+  return c.json({ ok: true });
 });
 
 // ── 中继（2026-11-05 多端同步方案块1，阶段一）──────────────────────
@@ -1738,6 +1842,12 @@ app.post("/api/v1/relay/home/actors/:id/messages", async (c) => {
 
 const port = Number(process.env.PORT ?? 39847);
 
+// 定时任务到点开口（2026-11-13）：提醒任务到点在会话里写一条 assistant 消息，
+// 客户端打开就看到「执事来找你」；用注册回调避免 reminder.ts ↔ lifecycle.ts 循环 import。
+setReminderDeliverer(async (conversationId, text) => {
+  await sayInConversation(conversationId, text);
+});
+
 serve({ fetch: app.fetch, port }, (info) => {
   const mode = readLlmConfig() ? "真实上游" : "mock（未配置 LLM_API_KEY）";
   // 批次D D1：首次启动播种总管（固定 id "chief"，SOUL.md = 旧 PERSONA 原文，幂等）。
@@ -1784,6 +1894,8 @@ serve({ fetch: app.fetch, port }, (info) => {
   }
   // 任务观察层（2026-11-05 批次C C1）：AUTONOMY_ENABLED=false 时 subscribe 内部直接返回（零行为）
   autonomyObserver().subscribe();
+  // 自动归档调度器（2026-11-13 批A）：ARCHIVE_AUTO_ENABLED=false（默认）时不开定时器，零开销
+  autoArchiveScheduler().sync();
   // 轮次收尾的观察层口（2026-11-08 批 10-A）：普通轮 / 编辑重发 / 审批续跑共用
   // agent/settled.ts 的同一个 handler。这里注入而不是让 agent/ 反向 import autonomy（会成环）。
   setTurnSettledObserver((conversationId, status, reason) =>

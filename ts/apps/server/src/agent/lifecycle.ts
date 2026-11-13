@@ -105,7 +105,7 @@ import {
 	type RelayDeliverResult,
 	type RelaySenderContext,
 } from "../partner-relay.ts";
-import { projectsStore, workspaceRootReal } from "../projects.ts";
+import { projectsStore, workspaceRootsReal } from "../projects.ts";
 import {
 	chatModelRef,
 	clampThinkingLevel,
@@ -264,6 +264,14 @@ function discardHarness(dead: Harness, reason: string): void {
 }
 
 export function getHarness(): Promise<Harness> {
+	// 维护互斥（2026-11-13 永久删除批A）：删除会话期间新请求在这里排队等，
+	// 而不是重开 Harness 去和临时 SQLite 连接抢同一个库文件（见 beginHarnessMaintenance）。
+	if (maintenanceDrained) return maintenanceDrained.then(() => getHarness());
+	return openOrReuseHarness();
+}
+
+/** 打开或复用 Harness（getHarness 的本体；维护持有者经 getHarnessForMaintenance 绕闸走这里）。 */
+function openOrReuseHarness(): Promise<Harness> {
 	if (opening) return opening;
 	// 上一次的收尸还没结束：等它。`closing` 兑现后库里没有旧句柄了，新实例才安全。
 	if (!closing) {
@@ -286,7 +294,103 @@ export function getHarness(): Promise<Harness> {
 		);
 		return opening;
 	}
-	return closing.then(() => getHarness());
+	return closing.then(() => openOrReuseHarness());
+}
+
+// ── 维护互斥（2026-11-13 永久删除批A）──────────────────────
+//
+// 永久删除要对 .data/agent.sqlite 做裸 SQL 手术，而同一进程只有一个 Harness 独占 storage。
+// 手术窗口内必须保证：① 当前 Harness 真的关了（SQLite 句柄交出来）；② 没人重开它——
+// 否则新请求 getHarness() 会开一份新实例，和手术连接抢同一个库（WAL 下互相阻塞，
+// 还可能把删掉一半的行重新缓存进内存）。所以这里给 lifecycle 加一把"维护闸"：
+// begin 之后 getHarness() 一律排队等维护结束，只有维护持有者能经
+// getHarnessForMaintenance() 绕闸取用（复核忙态、清映射文档时仍要读写 durable）。
+//
+// 与 discardHarness 的关系：discard 是"坏了自救"（被动），维护闸是"我要动库"（主动）；
+// 两者共用 opened / opening / closing 三个状态位，关库路径一致。
+
+let maintenanceCount = 0;
+/** 维护进行中时非空：所有 getHarness() 调用先等它兑现（维护结束时 resolve）。 */
+let maintenanceDrained: Promise<void> | null = null;
+let maintenanceDrain: (() => void) | null = null;
+/** 排他队列：并发删除在此串行（第二段的重跑预检看到第一段删完后的状态，不与手术并发抢库）。 */
+let maintenanceChain: Promise<void> = Promise.resolve();
+
+/** 维护是否进行中（测试与排查用）。 */
+export function harnessMaintenanceActive(): boolean {
+	return maintenanceCount > 0;
+}
+
+/** 进入维护：getHarness() 从此刻起排队（已持有的引用不受影响）。可重入（计数）。 */
+export function beginHarnessMaintenance(): void {
+	maintenanceCount += 1;
+	if (maintenanceDrained === null) {
+		maintenanceDrained = new Promise<void>((resolve) => {
+			maintenanceDrain = resolve;
+		});
+	}
+}
+
+/** 结束维护：计数归零时放行所有排队的 getHarness()。 */
+export function endHarnessMaintenance(): void {
+	if (maintenanceCount === 0) return;
+	maintenanceCount -= 1;
+	if (maintenanceCount === 0 && maintenanceDrain) {
+		const drain = maintenanceDrain;
+		maintenanceDrain = null;
+		maintenanceDrained = null;
+		drain();
+	}
+}
+
+/**
+ * 排他执行一段维护（2026-11-13 永久删除批A）。
+ *
+ * 只有"挡住 getHarness"还不够：两个并发删除若同时进闸，第二段的
+ * `getHarnessForMaintenance()` 会在第一段做 SQL 手术期间**重开 Harness**，两头抢同一个库。
+ * 所以维护本体走这条串行队列——第二段排到第一段之后，重跑预检看到的是删完后的状态
+ * （目标多半已不在映射里 → 404 拒掉），绝不与第一段的手术并发。
+ */
+export function runExclusiveMaintenance<T>(fn: () => Promise<T>): Promise<T> {
+	const run = maintenanceChain.then(async () => {
+		beginHarnessMaintenance();
+		try {
+			return await fn();
+		} finally {
+			endHarnessMaintenance();
+		}
+	});
+	maintenanceChain = run.then(
+		() => undefined,
+		() => undefined,
+	);
+	return run;
+}
+
+/** 仅供维护持有者：绕过维护闸取 Harness（复核忙态 / 清映射文档）。其他调用方走 getHarness() 排队。 */
+export function getHarnessForMaintenance(): Promise<Harness> {
+	return openOrReuseHarness();
+}
+
+/** 关掉当前 Harness 并等它把 SQLite 句柄交出来（裸 SQL 手术前必须独占库文件）。 */
+export async function closeHarnessForMaintenance(): Promise<void> {
+	const dead = opened;
+	if (dead && !closing) {
+		opened = null;
+		opening = null;
+		console.warn("[agent] 维护窗口：主动关闭 Harness，SQLite 句柄交出后做删除手术");
+		closing = dead
+			.close(BACKGROUND_CONTEXT)
+			.catch((error: unknown) => {
+				console.warn(
+					`[agent] 维护关闭 Harness 时报错（忽略）: ${error instanceof Error ? error.message : error}`,
+				);
+			})
+			.finally(() => {
+				closing = null;
+			});
+	}
+	if (closing) await closing;
 }
 
 /**
@@ -699,7 +803,7 @@ async function openHarness(): Promise<Harness> {
 						const pathBlock = pathGuardBlockReason({
 							tool: call.name,
 							args: call.arguments,
-							workspaceRoot: workspaceRootReal(),
+							workspaceRoots: workspaceRootsReal(),
 							cwd: sessionCwd(),
 						});
 						if (pathBlock) return blocked(pathBlock, "path", "path-guard");
@@ -730,7 +834,7 @@ async function openHarness(): Promise<Harness> {
 							verdict.kind === "ask" &&
 							!risk.forceAsk &&
 							readAllowlistEnabled() &&
-							isReadOnlyShellCommand(call.name, call.arguments, workspaceRootReal(), sessionCwd())
+							isReadOnlyShellCommand(call.name, call.arguments, workspaceRootsReal(), sessionCwd())
 						) {
 							verdict = { kind: "allow" };
 						}
@@ -786,7 +890,7 @@ async function openHarness(): Promise<Harness> {
 								const recheckPath = pathGuardBlockReason({
 									tool: call.name,
 									args: call.arguments,
-									workspaceRoot: workspaceRootReal(),
+									workspaceRoots: workspaceRootsReal(),
 									cwd: sessionCwd(),
 								});
 								if (recheckPath) return blocked(recheckPath, "path", "path-guard-recheck");
@@ -832,7 +936,7 @@ async function openHarness(): Promise<Harness> {
 								const recheckPath = pathGuardBlockReason({
 									tool: call.name,
 									args: call.arguments,
-									workspaceRoot: workspaceRootReal(),
+									workspaceRoots: workspaceRootsReal(),
 									cwd: sessionCwd(),
 								});
 								if (recheckPath) return blocked(recheckPath, "path", "path-guard-recheck");

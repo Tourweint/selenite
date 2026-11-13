@@ -33,10 +33,12 @@ export interface SessionSearchHit {
 }
 
 export interface SessionSearchOptions {
-	/** 只搜最近多少天，默认 30，收敛到 1..365。 */
+	/** 只搜最近多少天，默认 30，收敛到 1..36500（约一百年 = 实际不设下限）。 */
 	days?: number;
 	/** 最多几条命中，默认 5，收敛到 1..20。 */
 	limit?: number;
+	/** 跳过最新的多少条命中（分页用），默认 0，收敛到 0..1000000。 */
+	offset?: number;
 }
 
 /** 一条可检索的 transcript 行（角色不在工具输出里，留着给测试与将来扩展）。 */
@@ -54,9 +56,15 @@ export interface TranscriptSource {
 
 const DAY_MS = 86_400_000;
 const DEFAULT_DAYS = 30;
-const MAX_DAYS = 365;
+/**
+ * 时间窗上限（2026-11-12 搜索页要"查看更多 / 更早的历史"）：原来 365 天是给
+ * `recall_sessions` 工具收着用的。一百年 = 实际不设下限；工具的默认窗口仍是 30 天。
+ * 分页由 limit + offset 管，与时间窗正交。
+ */
+const MAX_DAYS = 36_500;
 const DEFAULT_LIMIT = 5;
 const MAX_LIMIT = 20;
+const MAX_OFFSET = 1_000_000;
 /** snippet 硬上限：命中处前后各 100 字。 */
 export const SNIPPET_MAX_CHARS = 200;
 
@@ -94,6 +102,7 @@ export function parseSessionSearchQuery(raw: {
 	q?: string;
 	days?: string;
 	limit?: string;
+	offset?: string;
 }): SessionSearchQuery | null {
 	const query = (raw.q ?? "").trim();
 	// 与检索核心同阈值（短于 2 字直接空），但这里有明确边界：空/短查询是 bad_request，
@@ -102,10 +111,13 @@ export function parseSessionSearchQuery(raw: {
 	const options: SessionSearchOptions = {};
 	const daysRaw = raw.days?.trim();
 	const limitRaw = raw.limit?.trim();
+	const offsetRaw = raw.offset?.trim();
 	const days = daysRaw ? Number(daysRaw) : undefined;
 	const limit = limitRaw ? Number(limitRaw) : undefined;
+	const offset = offsetRaw ? Number(offsetRaw) : undefined;
 	if (days !== undefined && Number.isFinite(days)) options.days = days;
 	if (limit !== undefined && Number.isFinite(limit)) options.limit = limit;
+	if (offset !== undefined && Number.isFinite(offset)) options.offset = offset;
 	return { query, options };
 }
 
@@ -150,22 +162,19 @@ function clampInt(value: unknown, fallback: number, min: number, max: number): n
 }
 
 /**
- * 纯检索核心：给定若干会话的 transcript 行，返回命中片段。
- *
- * 抽成纯函数是为了让 §4.4 的用例不必真起 durable：跨两个会话建数据、
- * 验 days/limit/snippet 截断都在这里完成；durable 适配层只负责"把库读成这个形状"。
+ * 一次扫描：收集全部命中并按时间倒序（分页与计数共用）。
+ * 扫描代价与 `sources` 大小同阶；只有显式搜索会走这里，不做后台预跑。
  */
-export function searchTranscriptLines(
+function collectTranscriptHits(
 	sources: TranscriptSource[],
 	query: string,
-	options: SessionSearchOptions = {},
-	now: number = Date.now(),
-): SessionSearchHit[] {
+	options: SessionSearchOptions,
+	now: number,
+): { sorted: SessionSearchHit[]; total: number } {
 	const needle = query.trim().toLowerCase();
 	// 1 个字会把整个库捞出来；与 searchTranscripts 同口径，短于 2 字直接空。
-	if (needle.length < 2) return [];
+	if (needle.length < 2) return { sorted: [], total: 0 };
 	const days = clampInt(options.days, DEFAULT_DAYS, 1, MAX_DAYS);
-	const limit = clampInt(options.limit, DEFAULT_LIMIT, 1, MAX_LIMIT);
 	const cutoff = now - days * DAY_MS;
 
 	const hits: SessionSearchHit[] = [];
@@ -186,7 +195,43 @@ export function searchTranscriptLines(
 		}
 	}
 
-	return hits.sort((a, b) => b.at - a.at).slice(0, limit);
+	const sorted = hits.sort((a, b) => b.at - a.at);
+	return { sorted, total: sorted.length };
+}
+
+/**
+ * 纯检索核心：给定若干会话的 transcript 行，返回**一页**命中片段。
+ *
+ * 抽成纯函数是为了让 §4.4 的用例不必真起 durable：跨两个会话建数据、
+ * 验 days/limit/offset/snippet 截断都在这里完成；durable 适配层只负责"把库读成这个形状"。
+ */
+export function searchTranscriptLines(
+	sources: TranscriptSource[],
+	query: string,
+	options: SessionSearchOptions = {},
+	now: number = Date.now(),
+): SessionSearchHit[] {
+	const limit = clampInt(options.limit, DEFAULT_LIMIT, 1, MAX_LIMIT);
+	const offset = clampInt(options.offset, 0, 0, MAX_OFFSET);
+	const { sorted } = collectTranscriptHits(sources, query, options, now);
+	return sorted.slice(offset, offset + limit);
+}
+
+/**
+ * 与 `searchTranscriptLines` 同一次扫描，额外回 `total`（命中总数，未分页）。
+ * 搜索页要靠它显示"还有 N 处"；分开导出是为了不改变工具侧
+ * `recall_sessions` 的函数形状（它只要数组）。
+ */
+export function searchTranscriptPage(
+	sources: TranscriptSource[],
+	query: string,
+	options: SessionSearchOptions = {},
+	now: number = Date.now(),
+): { hits: SessionSearchHit[]; total: number } {
+	const limit = clampInt(options.limit, DEFAULT_LIMIT, 1, MAX_LIMIT);
+	const offset = clampInt(options.offset, 0, 0, MAX_OFFSET);
+	const { sorted, total } = collectTranscriptHits(sources, query, options, now);
+	return { hits: sorted.slice(offset, offset + limit), total };
 }
 
 /** durable 的最小读取面：测试注入假实现，生产传 Harness。 */
@@ -236,6 +281,25 @@ export async function searchSessions(
 	now: number = Date.now(),
 ): Promise<SessionSearchHit[]> {
 	if (query.trim().length < 2) return [];
+	return searchTranscriptLines(await readTranscriptSources(reader), query, options, now);
+}
+
+/**
+ * 与 `searchSessions` 同一份读取 + 扫描，回 `{hits, total}`（2026-11-12 搜索页分页）。
+ * 只读、无副作用；`total` 是未分页的命中总数。
+ */
+export async function searchSessionsPage(
+	reader: SessionReader,
+	query: string,
+	options: SessionSearchOptions = {},
+	now: number = Date.now(),
+): Promise<{ hits: SessionSearchHit[]; total: number }> {
+	if (query.trim().length < 2) return { hits: [], total: 0 };
+	return searchTranscriptPage(await readTranscriptSources(reader), query, options, now);
+}
+
+/** 把 durable 的全部会话读成可检索行（逐会话打开；读失败跳过，不挡整查）。 */
+async function readTranscriptSources(reader: SessionReader): Promise<TranscriptSource[]> {
 	const chats = await reader.snapshot(Chats, CTX);
 	const titles = readChatTitles();
 	const sources: TranscriptSource[] = [];
@@ -269,5 +333,5 @@ export async function searchSessions(
 		}
 	}
 
-	return searchTranscriptLines(sources, query, options, now);
+	return sources;
 }
