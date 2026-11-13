@@ -1,15 +1,50 @@
 import type { Hono } from "hono";
+import type { MemoryKind } from "@lifediary/memory";
 import { forgetMemory, memoryOverview, supersedeMemory } from "./agent.ts";
 import {
 	applyProposal,
+	consolidateJobEnabled,
 	consolidateLlmEnabled,
+	dismissProposal,
 	importMemory,
 	memoryImportEnabled,
-	reviewScope,
+	reviewState,
+	startReview,
+	validTargetScope,
 	type EvidenceFinder,
 	type ReviewGenerator,
 } from "./memory-consolidate.ts";
 import { readConsolidateDiff, runConsolidatePass } from "./memory-consolidate-pass.ts";
+import { askPersonaAvailable, askPersonaCatalog, personaAskEnabled } from "./persona-ask.ts";
+
+/** 记忆管理端点接受的 kind 全集（2026-11-13：列表过滤与排除都只认这些）。 */
+const ALL_MEMORY_KINDS: MemoryKind[] = [
+	"preference",
+	"intention",
+	"fact",
+	"entity",
+	"episode",
+	"experience",
+	"work",
+];
+
+function parseKindList(raw: string | undefined): MemoryKind[] | null {
+	if (!raw) return null;
+	const out: MemoryKind[] = [];
+	for (const part of raw.split(",")) {
+		const value = part.trim() as MemoryKind;
+		if (!value) continue;
+		if (!ALL_MEMORY_KINDS.includes(value)) return []; // 空数组 = 非法（调用方 400）
+		if (!out.includes(value)) out.push(value);
+	}
+	return out.length > 0 ? out : null;
+}
+
+/** 外接记忆库页脚开关（2026-11-13）：`MEMORY_EXTERNAL=false` 时整块不显示、端点 404。 */
+function memoryExternalEnabled(): boolean {
+	const value = (process.env.MEMORY_EXTERNAL ?? "").trim().toLowerCase();
+	return value !== "false" && value !== "0" && value !== "off";
+}
 
 /**
  * 记忆管理接口（2026-11-06；2026-11-08 扫尾批 6 补整理与导入）。
@@ -47,19 +82,45 @@ export function mountMemoryApi(app: Hono, deps: MemoryApiDeps): void {
 	app.get("/api/v1/agent/memory", (c) => {
 		const scope = (c.req.query("scope") ?? "").trim();
 		const rawLimit = Number(c.req.query("limit") ?? 300);
-		const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.floor(rawLimit) : 300;
+		// 2026-11-13：limit=0 = 只回计数（A 版首屏先拉概览，再按分组懒加载）。
+		const limit = Number.isFinite(rawLimit)
+			? Math.max(0, Math.min(2000, Math.floor(rawLimit)))
+			: 300;
+		const rawOffset = Number(c.req.query("offset") ?? 0);
+		const offset = Number.isFinite(rawOffset)
+			? Math.max(0, Math.min(1_000_000, Math.floor(rawOffset)))
+			: 0;
 		if (!deps.enabled) {
 			return c.json({ error: "memory_disabled", message: "记忆未启用（MEMORY_ENABLED=false）" }, 404);
 		}
-		const overview = memoryOverview({ ...(scope ? { scope } : {}), limit });
+		const kinds = parseKindList(c.req.query("kind"));
+		const excludeKinds = parseKindList(c.req.query("excludeKinds"));
+		if (kinds !== null && kinds.length === 0) {
+			return c.json({ error: "bad_request", message: "kind 里有认不出的记忆类型" }, 400);
+		}
+		if (excludeKinds !== null && excludeKinds.length === 0) {
+			return c.json({ error: "bad_request", message: "excludeKinds 里有认不出的记忆类型" }, 400);
+		}
+		const q = (c.req.query("q") ?? "").trim().slice(0, 200);
+		const overview = memoryOverview({
+			...(scope ? { scope } : {}),
+			limit,
+			offset,
+			...(q ? { q } : {}),
+			...(kinds ? { kinds } : {}),
+			...(excludeKinds ? { excludeKinds } : {}),
+		});
 		// canConsolidate / canImport 是能力位（2026-11-08）：前端据此决定渲不渲染按钮。
 		// 纯增量字段，老客户端忽略即可；与 GET /agent/policy 的 attachments 同口径。
 		return c.json({
 			ok: true,
 			...overview,
 			limit,
+			offset,
 			canConsolidate: consolidateLlmEnabled(),
 			canImport: memoryImportEnabled(),
+			// 后台整理能力位（2026-11-13）：true = 前端可以用 ?background=1 并轮询 state。
+			consolidateJob: consolidateJobEnabled(),
 		});
 	});
 
@@ -94,8 +155,41 @@ export function mountMemoryApi(app: Hono, deps: MemoryApiDeps): void {
 		return c.json({ ok: true, superseded: id, byId });
 	});
 
-	// ── 整理记忆（2026-11-08 扫尾批 6 §二）────────────────────
+	// ── 外接记忆库 · 库边界（2026-11-13 A 版页脚）──────────────
+	// 只读：`ask.py --catalog-only`，不碰 persona.db、不调模型。未配置不 spawn。
+	app.get("/api/v1/agent/memory/external", async (c) => {
+		if (!deps.enabled) {
+			return c.json({ error: "memory_disabled", message: "记忆未启用（MEMORY_ENABLED=false）" }, 404);
+		}
+		if (!memoryExternalEnabled()) return c.json({ error: "not_found" }, 404);
+
+		const configured = askPersonaAvailable();
+		const enabled = personaAskEnabled();
+		const provider = { id: "persona", name: "一生记忆库" } as const;
+		if (!configured || !enabled) {
+			return c.json({
+				ok: true,
+				configured,
+				ready: false,
+				provider,
+				reason: configured ? "disabled" : "not_configured",
+			});
+		}
+
+		const catalog = await askPersonaCatalog();
+		return c.json({
+			ok: true,
+			configured: true,
+			ready: catalog.ok,
+			provider,
+			...(catalog.lines.length ? { catalog: { lines: catalog.lines } } : {}),
+			...(catalog.ok ? {} : { reason: catalog.error || "unavailable" }),
+		});
+	});
+
+	// ── 整理记忆（2026-11-08 扫尾批 6 §二；2026-11-13 后台任务）────
 	// 开关关着一律 404（"未启用"，与其它能力端点同口径）；前端按 canConsolidate 不渲染按钮。
+	// `?background=1` = 立即 202 + 后台跑（A 版记忆页）；不带 = 同步返回（旧页/旧探针兼容）。
 	app.post("/api/v1/agent/memory/consolidate/review", async (c) => {
 		if (!deps.enabled) {
 			return c.json({ error: "memory_disabled", message: "记忆未启用（MEMORY_ENABLED=false）" }, 404);
@@ -105,17 +199,46 @@ export function mountMemoryApi(app: Hono, deps: MemoryApiDeps): void {
 		const body = (await c.req.json().catch(() => null)) as { scope?: unknown } | null;
 		const scope = typeof body?.scope === "string" ? body.scope.trim() : "";
 		if (!scope) return c.json({ error: "bad_request", message: "需要 scope" }, 400);
+		if (!validTargetScope(scope)) {
+			return c.json({ error: "bad_request", message: "scope 只能是 global 或 partner:<id>" }, 400);
+		}
 
-		const result = await reviewScope(scope, {
+		const background =
+			consolidateJobEnabled() && (c.req.query("background") === "1" || c.req.query("background") === "true");
+		const job = startReview(scope, {
 			...(deps.generate ? { generate: deps.generate } : {}),
 			...(deps.findEvidence ? { findEvidence: deps.findEvidence } : {}),
+			// 本次整理同时跑一遍**确定性审计**（2026-11-10 批 17 §三）：只写 diff 文件，不删任何一条。
+			// 放在任务成功回调里：模型挂掉时没必要留一份"看起来整理过"的快照。
+			onSuccess: () => {
+				runConsolidatePass(scope);
+			},
 		});
+
+		if (background) {
+			// 不 await：任务在后台跑，结果由 GET /consolidate/state 读。
+			return c.json(
+				{
+					ok: true,
+					scope,
+					running: true,
+					startedAt: job.startedAt,
+					...(job.alreadyRunning ? { alreadyRunning: true } : {}),
+				},
+				202,
+			);
+		}
+		if (job.alreadyRunning) {
+			return c.json(
+				{ error: "review_running", message: "这个范围正在整理，请稍候再点", startedAt: job.startedAt },
+				409,
+			);
+		}
+
+		const result = await job.promise!;
 		if (!result.ok) {
 			return c.json({ error: result.error, message: result.message }, result.status as 400 | 404 | 502 | 503);
 		}
-		// 本次整理同时跑一遍**确定性审计**（2026-11-10 批 17 §三）：只写 diff 文件，不删任何一条。
-		// 放在模型成功之后：模型挂掉时没必要留一份"看起来整理过"的快照。
-		runConsolidatePass(scope);
 		return c.json({
 			ok: true,
 			scope: result.scope,
@@ -123,6 +246,46 @@ export function mountMemoryApi(app: Hono, deps: MemoryApiDeps): void {
 			generatedAt: result.generatedAt,
 			proposals: result.proposals,
 		});
+	});
+
+	// 整理状态（2026-11-13 A 版）：切页回来能看到"在跑 / 上次结果 / 失败原因"。
+	app.get("/api/v1/agent/memory/consolidate/state", (c) => {
+		if (!deps.enabled) {
+			return c.json({ error: "memory_disabled", message: "记忆未启用（MEMORY_ENABLED=false）" }, 404);
+		}
+		if (!consolidateLlmEnabled()) return c.json({ error: "not_found" }, 404);
+		const scope = (c.req.query("scope") ?? "").trim();
+		if (!scope) return c.json({ error: "bad_request", message: "需要 scope" }, 400);
+		if (!validTargetScope(scope)) {
+			return c.json({ error: "bad_request", message: "scope 只能是 global 或 partner:<id>" }, 400);
+		}
+		const state = reviewState(scope);
+		const diff = readConsolidateDiff();
+		const audit = diff && diff.scope === scope ? diff : null;
+		return c.json({ ok: true, ...state, audit });
+	});
+
+	// 忽略一条整理建议（2026-11-13）：从待决文件与内存结果里摘掉，刷新不再回来。
+	app.post("/api/v1/agent/memory/consolidate/dismiss", async (c) => {
+		if (!deps.enabled) {
+			return c.json({ error: "memory_disabled", message: "记忆未启用（MEMORY_ENABLED=false）" }, 404);
+		}
+		if (!consolidateLlmEnabled()) return c.json({ error: "not_found" }, 404);
+		const body = (await c.req.json().catch(() => null)) as {
+			scope?: unknown;
+			keepId?: unknown;
+			dropId?: unknown;
+		} | null;
+		const scope = typeof body?.scope === "string" ? body.scope.trim() : "";
+		const keepId = typeof body?.keepId === "string" ? body.keepId.trim() : "";
+		const dropId = typeof body?.dropId === "string" ? body.dropId.trim() : "";
+		if (!scope || !keepId || !dropId) {
+			return c.json({ error: "bad_request", message: "需要 scope / keepId / dropId" }, 400);
+		}
+		if (!validTargetScope(scope)) {
+			return c.json({ error: "bad_request", message: "scope 只能是 global 或 partner:<id>" }, 400);
+		}
+		return c.json({ ok: true, dismissed: dismissProposal(scope, keepId, dropId) });
 	});
 
 	app.post("/api/v1/agent/memory/consolidate/apply", async (c) => {

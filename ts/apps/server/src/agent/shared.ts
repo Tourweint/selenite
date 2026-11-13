@@ -1,7 +1,8 @@
+import { existsSync } from "node:fs";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { contentText } from "@earendil-works/pi-ai";
 import { defineDoc, type Conversation } from "@earendil-works/pi-durable";
-import { currentProjectEnabled, projectsStore } from "../projects.ts";
+import { currentProjectEnabled, projectsStore, type Project } from "../projects.ts";
 
 export const CTX = BACKGROUND_CONTEXT;
 
@@ -14,7 +15,7 @@ const WORKDIR = process.env.AGENT_WORKDIR?.trim() || process.cwd();
  * 切换后下一轮自然生效；目录没了/移出工作区时 getCurrentProject() 返回 null，
  * cwd 与系统提示回到主工作区形态。`CURRENT_PROJECT=false` 时整体旁路。
  */
-export function currentProject(): { name: string; rootPath: string } | null {
+export function currentProject(): Project | null {
 	if (!currentProjectEnabled()) return null;
 	try {
 		return projectsStore().getCurrentProject();
@@ -24,9 +25,48 @@ export function currentProject(): { name: string; rootPath: string } | null {
 	}
 }
 
-/** 本轮会话执行环境的 cwd（当前项目根优先，否则 WORKDIR） */
-export function sessionCwd(): string {
+/**
+ * 会话 cwd 的进程内缓存（2026-11-13 会话绑定即快照）。
+ *
+ * 真源是 `pi.agent.cwd`——新建会话时写死，之后换主文件夹也不动（老会话留在原地）。
+ * 这里只是它的同步副本：内核每轮构建 env 都会把 `cwd` 交过来（`node/../../agent/lifecycle.ts`
+ * 的 `env` 工厂），我们顺手记一笔，于是重启后第一轮就把缓存回填了。
+ */
+const sessionCwds = new Map<number, string>();
+
+export function noteSessionCwd(conversationId: number | string, cwd?: string | null): void {
+	const key = Number(conversationId);
+	if (!Number.isFinite(key)) return;
+	const value = typeof cwd === "string" ? cwd.trim() : "";
+	if (!value) {
+		sessionCwds.delete(key);
+		return;
+	}
+	sessionCwds.set(key, value);
+}
+
+/**
+ * 本轮会话执行环境的 cwd（2026-11-13）：
+ * 1. 这个会话创建时钉下的项目主文件夹（快照优先，换主文件夹不影响老会话）；
+ * 2. 没绑定项目的会话（杂事态 / 改动前的旧会话）→ 全局当前项目的主文件夹；
+ * 3. 再没有 → `AGENT_WORKDIR`。
+ * 快照目录没了（项目硬删 / 盘符变了）就回落，别把失效路径带进下一轮。
+ */
+export function sessionCwd(conversationId?: number | string): string {
+	if (conversationId !== undefined) {
+		const key = Number(conversationId);
+		const bound = Number.isFinite(key) ? sessionCwds.get(key) : undefined;
+		if (bound && existsSync(bound)) return bound;
+	}
 	return currentProject()?.rootPath ?? WORKDIR;
+}
+
+/** 会话绑定的项目（快照的文件夹，用于注入清单）；没有绑定返回 null。 */
+export function sessionBoundCwd(conversationId?: number | string): string | null {
+	if (conversationId === undefined) return null;
+	const key = Number(conversationId);
+	const bound = Number.isFinite(key) ? sessionCwds.get(key) : undefined;
+	return bound && existsSync(bound) ? bound : null;
 }
 
 // ── 对外会话 id ↔ 内部会话 id ────────────────────────────

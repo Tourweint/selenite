@@ -12,6 +12,7 @@ package main
 
 import (
 	_ "embed"
+	"encoding/base64"
 	"fmt"
 	"log"
 	"net/http"
@@ -152,6 +153,77 @@ func (Shell) SelectDirectory() (string, error) {
 		return "", nil
 	}
 	return paths[0], nil
+}
+
+// shellSaveBytesMax 是经由桥传字节的上限。
+// 桥是 JSON，字节要先 base64 成字符串（体积 ×1.33）；几百 MB 的包这么传会卡住整个
+// WebView 进程，所以到这条线就明确告诉用户"去浏览器导"，而不是悄悄卡死。
+const shellSaveBytesMax = 96 << 20
+
+// SelectFiles 弹系统文件选择器（多选），返回选中的绝对路径（2026-11-13 附件走路径）。
+//
+// 为什么走壳：浏览器出于安全拿不到用户选文件的真实路径，只能把字节复制给服务端；
+// 壳能直接给路径，消息里只带地址、零拷贝。用户取消返回空切片（不是 error）。
+func (Shell) SelectFiles() ([]string, error) {
+	paths, err := mygo.Dialog.Open(mygo.OpenDialogOptions{
+		Parent:   win,
+		Title:    "添加文件",
+		Multiple: true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(paths) == 0 {
+		return []string{}, nil
+	}
+	return paths, nil
+}
+
+// SaveExport 弹系统另存为对话框，把页面给的导出包写到用户选的位置，返回最终路径。
+//
+// 为什么走壳：WebView2 没有 File System Access API，页面里的 <a download> 只会落到
+// 系统下载目录；"自己选存哪"这件事只有壳能办（系统对话框 + 写盘）。
+// 用户取消返回空串；壳没重编时页面侧调用会失败，前端自动退回下载目录那条路。
+func (Shell) SaveExport(suggestedName string, dataBase64 string) (string, error) {
+	name := strings.TrimSpace(filepath.Base(suggestedName))
+	if name == "" || name == "." || name == string(filepath.Separator) {
+		name = "selenite-export.zip"
+	}
+	if !strings.HasSuffix(strings.ToLower(name), ".zip") {
+		name += ".zip"
+	}
+	defaultDir := ""
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		defaultDir = filepath.Join(home, "Downloads", name)
+	} else {
+		defaultDir = name
+	}
+
+	path, err := mygo.Dialog.Save(mygo.SaveDialogOptions{
+		Parent:      win,
+		Title:       "导出数据",
+		DefaultPath: defaultDir,
+		ButtonLabel: "保存",
+		Filters:     []mygo.FileFilter{{Name: "ZIP 压缩包", Extensions: []string{"zip"}}},
+	})
+	if err != nil {
+		return "", err
+	}
+	if path == "" {
+		return "", nil // 用户取消
+	}
+
+	raw, err := base64.StdEncoding.DecodeString(dataBase64)
+	if err != nil {
+		return "", fmt.Errorf("导出数据编码不对：%w", err)
+	}
+	if len(raw) > shellSaveBytesMax {
+		return "", fmt.Errorf("导出包超过 %d MB，请用浏览器打开页面导出", shellSaveBytesMax/(1<<20))
+	}
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 // shellBindingsEnabled 是 F3.5 的回滚开关：设为 off 就不挂 Shell，

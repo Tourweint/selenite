@@ -45,10 +45,33 @@ export const ImagePartSchema = z
   })
   .strict();
 
-export const ContentPartSchema = z.union([TextPartSchema, ImagePartSchema]);
+/**
+ * 文件附件（2026-11-13 附件走路径）：**只带地址，不带内容**。
+ *
+ * `path` 是服务端可直接 `read` 的绝对路径 —— 桌面壳里由原生选择器给出（零拷贝），
+ * 浏览器里由 `POST /api/v1/agent/attachments` 落盘后回填。服务端只做 `stat` 校验，
+ * 不读内容；pi-ai 没有文件类型的 Content，因此内核看到的是拼进正文的清单行
+ * （见 `renderFileManifest`），由模型自己决定要不要读。
+ */
+export const FilePartSchema = z
+  .object({
+    type: z.literal("file"),
+    /** 绝对路径（Windows 盘符或 `/` 开头）；长度由服务端复核 */
+    path: z.string().min(1).max(4096),
+    /** 展示名（原文件名） */
+    name: z.string().min(1).max(255),
+    /** MIME，未知就不给 */
+    mimeType: z.string().max(100).optional(),
+    /** 字节数，未知就不给 */
+    bytes: z.number().int().nonnegative().optional(),
+  })
+  .strict();
+
+export const ContentPartSchema = z.union([TextPartSchema, ImagePartSchema, FilePartSchema]);
 export type ContentPart = z.infer<typeof ContentPartSchema>;
 export type TextPart = z.infer<typeof TextPartSchema>;
 export type ImagePart = z.infer<typeof ImagePartSchema>;
+export type FilePart = z.infer<typeof FilePartSchema>;
 
 export const ChatMessageSchema = z.object({
   role: RoleSchema,
@@ -167,6 +190,86 @@ export const TranscriptImageSchema = z
 export type TranscriptImage = z.infer<typeof TranscriptImageSchema>;
 
 /**
+ * 读历史里附在用户消息上的文件（2026-11-13 附件走路径）。
+ * 与上行 `FilePartSchema` 同形状、少一个 `type`（回读只用来渲染，不参与再提交）。
+ */
+export const TranscriptFileSchema = z
+  .object({
+    path: z.string(),
+    name: z.string(),
+    mimeType: z.string().optional(),
+    bytes: z.number().optional(),
+  })
+  .strict();
+export type TranscriptFile = z.infer<typeof TranscriptFileSchema>;
+
+/**
+ * durable 里的附件清单（2026-11-13）。
+ *
+ * pi-ai 的 UserInput 只有 text / image 两种 Content，文件没有位置可放，所以把
+ * 文件列表写成**正文最前面的一行**：固定前缀 + JSON 数组。JSON 会把路径里的
+ * 换行、引号转义掉，所以清单永远是一行，回读按"第一行 + 前缀"识别，不会跨行跑偏。
+ *
+ * 只由服务端写；用户手打同款前缀时，`parseFileManifest` 解析失败就原样当正文。
+ */
+export const FILE_MANIFEST_PREFIX = "[附件] ";
+export const FILE_MANIFEST_HINT = "用户附上了以下文件，需要时用 read 工具按路径读取：";
+
+/** 一条用户消息最多几个文件（与图片的 4 张上限互不占用） */
+export const MAX_FILES_PER_MESSAGE = 8;
+
+/** 文件列表 → durable 清单行（不含正文换行；调用方自己补空行） */
+export function renderFileManifest(files: readonly TranscriptFile[]): string {
+  const rows = files.map((file) => ({
+    name: file.name,
+    path: file.path,
+    ...(file.mimeType ? { mimeType: file.mimeType } : {}),
+    ...(typeof file.bytes === "number" ? { bytes: file.bytes } : {}),
+  }));
+  return `${FILE_MANIFEST_PREFIX}${FILE_MANIFEST_HINT}${JSON.stringify(rows)}`;
+}
+
+/**
+ * durable 正文 → { files, text }。
+ *
+ * 只认最前面那一行 `[附件] <提示><JSON[]>`；解析不出来就原样返回（不猜、不抛）。
+ * 纯文件消息剥完清单后 text 是空串。
+ */
+export function parseFileManifest(text: string): { files: TranscriptFile[]; text: string } {
+  const head = FILE_MANIFEST_PREFIX + FILE_MANIFEST_HINT;
+  if (!text.startsWith(head)) return { files: [], text };
+  const newline = text.indexOf("\n");
+  const firstLine = newline < 0 ? text : text.slice(0, newline);
+  const rest = newline < 0 ? "" : text.slice(newline + 1);
+  const payload = firstLine.slice(head.length);
+  let rows: unknown;
+  try {
+    rows = JSON.parse(payload);
+  } catch {
+    return { files: [], text };
+  }
+  if (!Array.isArray(rows) || rows.length === 0) return { files: [], text };
+  const files: TranscriptFile[] = [];
+  for (const row of rows) {
+    if (!row || typeof row !== "object") return { files: [], text };
+    const value = row as Record<string, unknown>;
+    if (typeof value.path !== "string" || !value.path || typeof value.name !== "string") {
+      return { files: [], text };
+    }
+    files.push({
+      path: value.path,
+      name: value.name,
+      ...(typeof value.mimeType === "string" && value.mimeType ? { mimeType: value.mimeType } : {}),
+      ...(typeof value.bytes === "number" ? { bytes: value.bytes } : {}),
+    });
+  }
+  // 清单与正文之间固定一个空行（组装时写的是 `\n\n`）：剥掉清单后只去这一行
+  const body = rest.startsWith("\n") ? rest.slice(1) : rest;
+  return { files, text: body.trim() ? body : "" };
+}
+
+
+/**
  * 读历史接口的一条记录。
  *
  * 为什么需要它：一轮对话现在**可以在客户端关掉之后继续跑完**，
@@ -191,6 +294,11 @@ export const TranscriptMessageSchema = z.object({
    */
   images: z.array(TranscriptImageSchema).optional(),
   /**
+   * 这条用户消息带的文件（2026-11-13 附件走路径，纯增量，老客户端忽略）。
+   * 只有路径，没有内容；文字仍走 `text`，纯文件消息 `text` 可能是空串。
+   */
+  files: z.array(TranscriptFileSchema).optional(),
+  /**
    * 这条回答之前那一轮的工作步骤（2026-11-07，纯增量，老客户端忽略）。
    * 只挂在 assistant 上；一轮里没有工具调用就不带这个字段。
    */
@@ -203,6 +311,13 @@ export type TranscriptMessage = z.infer<typeof TranscriptMessageSchema>;
 export const ChatTranscriptSchema = z.object({
   conversationId: z.string(),
   messages: z.array(TranscriptMessageSchema),
+  /**
+   * 历史分页（2026-11-13 按天分组·上滑加载，纯增量，只有 `page=1`/`before` 请求才带）。
+   * `hasMore` = 还有更早；`nextBefore` = 下一页不透明游标（没有更早时不带）。
+   * 老客户端忽略即可；不带分页参数时响应形状与改动前一致。
+   */
+  hasMore: z.boolean().optional(),
+  nextBefore: z.string().optional(),
 });
 export type ChatTranscript = z.infer<typeof ChatTranscriptSchema>;
 

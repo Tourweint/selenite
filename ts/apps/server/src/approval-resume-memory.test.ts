@@ -21,8 +21,9 @@ process.env.AGENT_DB_PATH = join(root, "agent.sqlite");
 process.env.AGENT_APPROVALS_PATH = join(root, "approvals.json");
 process.env.MEMORY_ENABLED = "true";
 process.env.MEMORY_DB_PATH = join(root, "memory.db");
-// 规则抽取器：faux 没有可用模型，auto 本来也会落到规则，这里写死免得随环境漂
-process.env.MEMORY_EXTRACT = "rule";
+// 规则抽取器：faux 没有可用模型，auto 本来也会落到规则，这里写死免得随环境漂。
+// 2026-11-13：改成 auto + 默认噪声过滤——审批续跑注入的合成指令不再写成经历。
+process.env.MEMORY_EXTRACT = "auto";
 process.env.PROJECTS_DB_PATH = join(root, "projects.sqlite");
 process.env.PROVIDERS_PATH = join(root, "providers.json");
 process.env.DELEGATIONS_DB_PATH = join(root, "delegations.sqlite");
@@ -57,7 +58,6 @@ test("审批续跑轮结束后记忆抽取被调用一次", async () => {
 	assert.ok(memoryEngine, "测试环境应当有记忆库");
 	const chat = await openChat(undefined);
 	assert.ok(chat, "faux 下能建一个会话");
-
 	approvalStore().create({
 		callId: "resume-memory",
 		conversationId: chat.internalId,
@@ -77,21 +77,16 @@ test("审批续跑轮结束后记忆抽取被调用一次", async () => {
 	const body = (await response.json()) as { status?: string };
 	assert.equal(body.status, "approved");
 
-	// 续跑在后台跑：等记忆落库（ingestTurn 是 void，不阻塞答复）
+	// 续跑在后台跑：等记忆抽取走完（ingestTurn 是 void，不阻塞答复）。
+	// 2026-11-13：审批续跑注入的「用户已批准 …」「不要换成…」是服务端合成指令，
+	// 默认噪声过滤下不应再落成 episode；这里给抽取留足时间，再断言一条都没有。
 	const scope = `session:${chat.internalId}`;
-	const deadline = Date.now() + 15_000;
-	let records: { content: string }[] = [];
-	while (Date.now() < deadline) {
-		records = memoryEngine!.list({ scopes: [scope], limit: 50 });
-		if (records.length > 0) break;
-		await sleep(100);
-	}
+	await sleep(500);
+	const records = memoryEngine!.list({ scopes: [scope], limit: 50 });
 
-	assert.ok(records.length > 0, "续跑轮的内容写进了会话记忆");
-	// 规则抽取器按句切分：「用户已批准 …」与「不要换成别的工具…」两句
-	assert.ok(
-		records.some((record) => record.content.includes("用户已批准")),
-		`记忆里应有审批指令原文，实际：${JSON.stringify(records.map((record) => record.content.slice(0, 20)))}`,
+	assert.equal(
+		records.length,
+		0,
+		`合成指令不应进记忆，实际：${JSON.stringify(records.map((record) => record.content.slice(0, 28)))}`,
 	);
-	assert.equal(records.length, 2, "一轮续跑只抽取一次（两条句子 = 一次 ingestTurn）");
 });

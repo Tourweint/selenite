@@ -1,0 +1,663 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>项目容器 · 侧栏与设置页原型</title>
+<style>
+  /* 全部取产品 token（style.css :root / Paper 主题），不新造颜色 */
+  :root {
+    --bg: #fdf9f2;
+    --surface-low: #f7f3eb;
+    --card: #f6f1e7;
+    --card-high: #ede9e0;
+    --text: #2e2b3a;
+    --text-2: #6e6b7e;
+    --text-3: #9a97a5;
+    --outline: #c8c5bc;
+    --divider: rgba(200, 197, 188, 0.55);
+    --hair: rgba(46, 43, 58, 0.14);
+    --accent: #3e4a8c;
+    --accent-soft: color-mix(in srgb, #3e4a8c 13%, #fdf9f2);
+    --accent-line: color-mix(in srgb, #3e4a8c 32%, transparent);
+    --warn: #b07d2b;
+    --error: #b3564d;
+    --backdrop: #f1ebe0;
+    --shadow-menu: 0 4px 16px rgba(46, 43, 58, 0.15);
+    --font: "Songti SC", "Noto Serif SC", "Source Han Serif SC", "STSong", Songti, serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --r-sm: 8px;
+    --r-md: 12px;
+    --r-lg: 16px;
+    --r-full: 9999px;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    padding: 34px 32px 56px;
+    background: var(--backdrop);
+    color: var(--text);
+    font: 13px/1.6 var(--font);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .page-head { max-width: 1112px; margin: 0 auto 26px; }
+  .page-head h1 {
+    margin: 0 0 5px;
+    font-size: 20px;
+    font-weight: 500;
+    letter-spacing: 0.02em;
+  }
+  .page-head p { margin: 0; color: var(--text-2); font-size: 12px; max-width: 800px; }
+
+  .stage {
+    max-width: 1112px;
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 300px;
+    gap: 32px;
+    align-items: start;
+  }
+
+  .block-label {
+    margin: 0 0 8px;
+    color: var(--text-3);
+    font-size: 11.5px;
+    letter-spacing: 0.06em;
+  }
+
+  /* ── 通用控件（对齐 .ghost / .set-input / .proj-tag）──────── */
+  .ghost {
+    height: 28px;
+    padding: 0 12px;
+    border: 1px solid var(--outline);
+    border-radius: var(--r-md);
+    background: transparent;
+    color: var(--text-2);
+    font: inherit;
+    font-size: 12.5px;
+    cursor: default;
+    transition: background-color .15s ease, color .15s ease;
+  }
+  .ghost:hover { background: var(--card); color: var(--text); }
+  .ghost.sm { height: 26px; padding: 0 10px; font-size: 12px; }
+
+  .tag {
+    flex: none;
+    padding: 0 6px;
+    border: 1px solid var(--divider);
+    border-radius: var(--r-full);
+    color: var(--text-3);
+    font-size: 10.5px;
+    line-height: 1.7;
+    white-space: nowrap;
+  }
+  .tag.is-accent { color: var(--accent); border-color: var(--accent-line); }
+
+  /* ── 设置页 ──────────────────────────────────────────── */
+  .settings {
+    background: var(--bg);
+    border: 1px solid var(--hair);
+    border-radius: var(--r-lg);
+    overflow: hidden;
+  }
+  .settings-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 44px;
+    padding: 0 18px;
+    border-bottom: 1px solid var(--divider);
+    color: var(--text-2);
+    font-size: 12.5px;
+  }
+  .settings-bar b { color: var(--text); font-weight: 500; }
+  .settings-bar .crumb { color: var(--text-3); }
+  .settings-bar .spacer { flex: 1; }
+  .settings-bar .close { color: var(--text-3); font-size: 14px; }
+
+  .settings-body { padding: 18px 18px 22px; }
+
+  /* 默认目录：刻意比项目卡淡一档，它不是项目 */
+  .default-card {
+    border: 1px solid var(--divider);
+    border-radius: var(--r-sm);
+    background: var(--surface-low);
+    padding: 11px 14px;
+    margin-bottom: 24px;
+  }
+  .default-card .line { display: flex; align-items: center; gap: 8px; }
+  .default-card .path { flex: 1; min-width: 0; font-family: var(--mono); font-size: 12.5px; color: var(--text); }
+  .default-card .hint { margin: 7px 0 0; color: var(--text-3); font-size: 11.5px; }
+
+  .sec-head { display: flex; align-items: baseline; gap: 8px; margin: 0 0 10px; }
+  .sec-head h2 { margin: 0; font-size: 13.5px; font-weight: 500; }
+  .sec-head .count { color: var(--text-3); font-size: 11.5px; font-family: var(--mono); }
+  .sec-head .spacer { flex: 1; }
+
+  /* 项目卡：照 .proj-card（surface + hair 边框 + r-sm） */
+  .proj {
+    border: 1px solid var(--hair);
+    border-radius: var(--r-sm);
+    background: var(--bg);
+    margin-bottom: 8px;
+    overflow: hidden;
+  }
+  .proj-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 42px;
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--divider);
+  }
+  .proj-name { font-size: 13.5px; font-weight: 500; white-space: nowrap; }
+  .proj-meta { color: var(--text-3); font-size: 11.5px; }
+  .proj-meta::before { content: "·"; margin-right: 6px; color: var(--text-3); }
+  .proj-head .spacer { flex: 1; }
+
+  .folders { padding: 2px 0; }
+
+  .folder {
+    display: grid;
+    grid-template-columns: 12px 152px minmax(0, 1fr) 86px 44px 38px;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 14px;
+    border-top: 1px solid var(--divider);
+  }
+  .folder:first-child { border-top: 0; }
+  .folder:hover { background: var(--surface-low); }
+
+  .dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    border: 1px solid var(--outline);
+    justify-self: center;
+  }
+  .dot.is-primary { border-color: var(--accent); background: var(--accent); }
+  .dot.is-warn { border-color: var(--warn); }
+
+  .f-label {
+    display: flex; align-items: center; gap: 5px;
+    min-width: 0;
+    font-size: 12.5px;
+    color: var(--text);
+  }
+  .f-label span.nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .f-path {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--text-2);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .f-act {
+    border: 0;
+    background: transparent;
+    padding: 2px 4px;
+    color: var(--text-3);
+    font: inherit;
+    font-size: 11.5px;
+    cursor: default;
+    justify-self: end;
+    white-space: nowrap;
+  }
+  .f-act:hover { color: var(--text); }
+  .f-act.danger:hover { color: var(--error); }
+
+  .folder.is-missing .f-path { color: var(--warn); }
+
+  .add-row { padding: 8px 14px 10px; border-top: 1px solid var(--divider); }
+  .proj-foot {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 14px;
+    border-top: 1px solid var(--divider);
+    background: var(--surface-low);
+    color: var(--text-3);
+    font-size: 11px;
+  }
+  .proj-foot .spacer { flex: 1; }
+
+  /* ── 侧栏 ────────────────────────────────────────────── */
+  .rail {
+    background: var(--bg);
+    border: 1px solid var(--hair);
+    border-radius: var(--r-lg);
+    padding: 10px 8px 12px;
+  }
+  .rail .sec {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 10px 6px;
+    color: var(--text-2);
+    font-size: 12px;
+  }
+  .rail .sec .spacer { flex: 1; }
+  .rail .sec .plus { color: var(--text-3); font-size: 13px; }
+
+  .pitem {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    height: 38px;
+    padding: 0 12px;
+    border-radius: var(--r-full);
+    color: var(--text-2);
+    font-size: 13.5px;
+    cursor: default;
+  }
+  .pitem:hover { background: var(--card); color: var(--text); }
+  .pitem.is-selected {
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-weight: 500;
+    box-shadow: inset 0 0 0 1px var(--accent-line);
+  }
+  .pitem .ico { width: 16px; height: 16px; flex: none; opacity: .75; }
+  .pitem .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pitem .n { font-family: var(--mono); font-size: 11px; color: var(--text-3); font-weight: 400; }
+  .pitem .caret { color: var(--text-3); font-size: 9px; font-weight: 400; }
+
+  /* 悬停浮卡：吃 --shadow-menu，不新增阴影 */
+  .flyout {
+    position: absolute;
+    left: 8px;
+    top: calc(100% + 4px);
+    width: 310px;
+    padding: 6px;
+    background: var(--bg);
+    border: 1px solid var(--hair);
+    border-radius: var(--r-md);
+    box-shadow: var(--shadow-menu);
+    z-index: 5;
+    opacity: 0;
+    transform: translateY(-3px);
+    pointer-events: none;
+    transition: opacity .14s ease, transform .14s ease;
+  }
+  .pitem:hover .flyout { opacity: 1; transform: none; pointer-events: auto; }
+
+  .flyout .hd {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px 8px;
+    border-bottom: 1px solid var(--divider);
+  }
+  .flyout .hd b { font-size: 12.5px; font-weight: 500; color: var(--text); }
+  .flyout .hd .spacer { flex: 1; }
+  .flyout .hd .lab { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); }
+
+  .frow { display: flex; align-items: center; gap: 7px; padding: 6px 8px; border-radius: var(--r-sm); }
+  .frow:hover { background: var(--surface-low); }
+  .frow .dot { flex: none; }
+  .frow .txt { flex: 1; min-width: 0; }
+  .frow .l { font-size: 12px; color: var(--text); }
+  .frow .p {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--text-3);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .frow .act {
+    flex: none;
+    width: 22px; height: 22px;
+    display: grid; place-items: center;
+    border-radius: var(--r-sm);
+    color: var(--text-3);
+  }
+  .frow .act:hover { background: var(--card); color: var(--text); }
+
+  .rail-hint {
+    margin: 6px 8px 0;
+    padding: 8px 10px;
+    border: 1px solid var(--divider);
+    border-radius: var(--r-sm);
+    color: var(--text-3);
+    font-size: 11px;
+    background: var(--surface-low);
+  }
+  .rail-hint b { font-family: var(--mono); font-weight: 400; color: var(--text-2); }
+
+  .fold-preview { margin-top: 16px; }
+  .flyout.is-static {
+    position: static;
+    width: 100%;
+    opacity: 1;
+    transform: none;
+    pointer-events: auto;
+  }
+
+  /* 对话归属 pill */
+  .pill-demo { margin-top: 16px; }
+  .chat-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 26px;
+    padding: 0 11px 0 9px;
+    border: 1px solid var(--hair);
+    border-radius: var(--r-full);
+    background: var(--surface-low);
+    color: var(--text-2);
+    font-size: 11.5px;
+  }
+  .chat-pill .rd { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); opacity: .6; }
+  .chat-pill b { font-size: 12px; font-weight: 500; color: var(--text); }
+  .chat-pill .sep { color: var(--text-3); }
+  .pill-note { margin: 8px 2px 0; color: var(--text-3); font-size: 11px; }
+
+  /* ── 说明区 ──────────────────────────────────────────── */
+  .notes {
+    max-width: 1112px;
+    margin: 28px auto 0;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+  }
+  .note {
+    border: 1px solid var(--hair);
+    border-radius: var(--r-sm);
+    background: var(--bg);
+    padding: 13px 15px 14px;
+  }
+  .note h3 { margin: 0 0 7px; font-size: 12.5px; font-weight: 500; color: var(--text); }
+  .note ol, .note ul { margin: 0; padding-left: 15px; color: var(--text-2); font-size: 11.5px; line-height: 1.8; }
+  .note li::marker { color: var(--text-3); }
+  .note.is-warn { border-left: 2px solid var(--warn); }
+
+  footer {
+    max-width: 1112px;
+    margin: 22px auto 0;
+    color: var(--text-3);
+    font-size: 11px;
+    font-family: var(--mono);
+  }
+
+  svg.i { width: 16px; height: 16px; stroke-width: 1.6; }
+</style>
+</head>
+<body>
+
+<div class="page-head">
+  <h1>项目容器 · 侧栏与设置页</h1>
+  <p>一个项目 = 一个名字 + 一组文件夹（其中一个是主文件夹）。左：设置 → 项目；右：侧栏项目分区。静态原型，配色与卡片照现有设置页。</p>
+</div>
+
+<div class="stage">
+
+  <!-- ── 左：设置页 ─────────────────────────────────── -->
+  <section>
+    <p class="block-label">设置 → 项目</p>
+
+    <div class="settings">
+      <div class="settings-bar">
+        <span>设置</span>
+        <span class="crumb">· 项目</span>
+        <span class="spacer"></span>
+        <span class="close">✕</span>
+      </div>
+
+      <div class="settings-body">
+
+        <div class="default-card">
+          <div class="line">
+            <span class="path"><本地项目区></span>
+            <span class="tag">默认目录</span>
+            <button class="ghost sm">改路径</button>
+          </div>
+          <p class="hint">没有项目时，助手在这里干活。它不是项目，所以不在下面的列表里。</p>
+        </div>
+
+        <div class="sec-head">
+          <h2>项目</h2>
+          <span class="count">2</span>
+          <span class="spacer"></span>
+          <button class="ghost sm">＋ 新建项目</button>
+        </div>
+
+        <div class="proj">
+          <div class="proj-head">
+            <span class="proj-name">lifediary-harness</span>
+            <span class="proj-meta">3 个文件夹 · 2 个仓库</span>
+            <span class="spacer"></span>
+            <button class="ghost sm">归档项目</button>
+          </div>
+
+          <div class="folders">
+            <div class="folder">
+              <span class="dot is-primary"></span>
+              <span class="f-label"><span class="nm">lifediary-harness</span><span class="tag is-accent">主</span></span>
+              <span class="f-path"><repo></span>
+              <span></span>
+              <button class="f-act">改路径</button>
+              <span></span>
+            </div>
+
+            <div class="folder">
+              <span class="dot"></span>
+              <span class="f-label"><span class="nm">atlas</span></span>
+              <span class="f-path"><本地项目区>\projects\atlas</span>
+              <button class="f-act">设为主</button>
+              <button class="f-act">改路径</button>
+              <button class="f-act danger">移除</button>
+            </div>
+
+            <div class="folder">
+              <span class="dot"></span>
+              <span class="f-label"><span class="nm">手机端</span></span>
+              <span class="f-path"><lifediary 手机仓></span>
+              <button class="f-act">设为主</button>
+              <button class="f-act">改路径</button>
+              <button class="f-act danger">移除</button>
+            </div>
+
+            <div class="folder is-missing">
+              <span class="dot is-warn"></span>
+              <span class="f-label"><span class="nm">旧仓库</span><span class="tag" style="color:var(--warn);border-color:var(--warn)">不在了</span></span>
+              <span class="f-path">E:\archive\old-harness</span>
+              <span></span>
+              <button class="f-act">改路径</button>
+              <button class="f-act danger">移除</button>
+            </div>
+          </div>
+
+          <div class="add-row"><button class="ghost sm">＋ 添加文件夹</button></div>
+          <div class="proj-foot">
+            <span>只改登记，磁盘不动</span>
+            <span class="spacer"></span>
+            <span>创建于 2026-10-25</span>
+          </div>
+        </div>
+
+        <div class="proj">
+          <div class="proj-head">
+            <span class="proj-name">atlas</span>
+            <span class="proj-meta">1 个文件夹</span>
+            <span class="spacer"></span>
+            <button class="ghost sm">归档项目</button>
+          </div>
+          <div class="folders">
+            <div class="folder">
+              <span class="dot is-primary"></span>
+              <span class="f-label"><span class="nm">atlas</span><span class="tag is-accent">主</span></span>
+              <span class="f-path"><本地项目区>\projects\atlas</span>
+              <span></span>
+              <button class="f-act">改路径</button>
+              <span></span>
+            </div>
+          </div>
+          <div class="add-row"><button class="ghost sm">＋ 添加文件夹</button></div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ── 右：侧栏 ───────────────────────────────────── -->
+  <aside>
+    <p class="block-label">侧栏 · 项目分区</p>
+
+    <div class="rail">
+      <div class="sec">
+        <span>项目</span>
+        <span class="spacer"></span>
+        <span class="plus">＋</span>
+      </div>
+
+      <div class="pitem is-selected">
+        <svg class="ico i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+        <span class="nm">lifediary-harness</span>
+        <span class="n">3</span>
+        <span class="caret">▾</span>
+
+        <div class="flyout">
+          <div class="hd">
+            <b>lifediary-harness</b>
+            <span class="spacer"></span>
+            <span class="lab">3 个文件夹</span>
+          </div>
+
+          <div class="frow">
+            <span class="dot is-primary"></span>
+            <span class="txt">
+              <div class="l">lifediary-harness <span style="color:var(--accent);font-size:10px">主</span></div>
+              <div class="p"><repo></div>
+            </span>
+            <span class="act"><svg class="i" style="width:14px;height:14px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round"><path d="M8 5h9a2 2 0 0 1 2 2v9M4 9v9a2 2 0 0 0 2 2h9"/></svg></span>
+            <span class="act"><svg class="i" style="width:14px;height:14px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round"><path d="M14 4h6v6M20 4l-9 9M12 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6"/></svg></span>
+          </div>
+
+          <div class="frow">
+            <span class="dot"></span>
+            <span class="txt">
+              <div class="l">atlas</div>
+              <div class="p"><本地项目区>\projects\atlas</div>
+            </span>
+            <span class="act"><svg class="i" style="width:14px;height:14px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round"><path d="M8 5h9a2 2 0 0 1 2 2v9M4 9v9a2 2 0 0 0 2 2h9"/></svg></span>
+            <span class="act"><svg class="i" style="width:14px;height:14px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round"><path d="M14 4h6v6M20 4l-9 9M12 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6"/></svg></span>
+          </div>
+
+          <div class="frow">
+            <span class="dot"></span>
+            <span class="txt">
+              <div class="l">手机端</div>
+              <div class="p"><lifediary 手机仓></div>
+            </span>
+            <span class="act"><svg class="i" style="width:14px;height:14px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round"><path d="M8 5h9a2 2 0 0 1 2 2v9M4 9v9a2 2 0 0 0 2 2h9"/></svg></span>
+            <span class="act"><svg class="i" style="width:14px;height:14px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round"><path d="M14 4h6v6M20 4l-9 9M12 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6"/></svg></span>
+          </div>
+
+          <div class="hd" style="border-bottom:0;border-top:1px solid var(--divider);margin-top:4px;padding:7px 8px 2px;color:var(--text-3);font-size:11px">
+            点这一行选中项目；右上 ＋ 直接在这个项目里新开对话
+          </div>
+        </div>
+      </div>
+
+      <div class="pitem">
+        <svg class="ico i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+        <span class="nm">atlas</span>
+        <span class="n">1</span>
+        <span class="caret">▾</span>
+      </div>
+
+      <div class="rail-hint">没有项目时，这里只有一行说明，指向默认目录 <b><本地项目区></b>。工作区本身不占一行。</div>
+    </div>
+
+    <div class="fold-preview">
+      <p class="block-label">展开态（悬停或点 ▾）</p>
+      <div class="flyout is-static">
+        <div class="hd">
+          <b>lifediary-harness</b>
+          <span class="spacer"></span>
+          <span class="lab">3 个文件夹</span>
+        </div>
+        <div class="frow">
+          <span class="dot is-primary"></span>
+          <span class="txt">
+            <div class="l">lifediary-harness <span style="color:var(--accent);font-size:10px">主</span></div>
+            <div class="p"><repo></div>
+          </span>
+          <span class="act"><svg class="i" style="width:14px;height:14px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round"><path d="M8 5h9a2 2 0 0 1 2 2v9M4 9v9a2 2 0 0 0 2 2h9"/></svg></span>
+          <span class="act"><svg class="i" style="width:14px;height:14px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round"><path d="M14 4h6v6M20 4l-9 9M12 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6"/></svg></span>
+        </div>
+        <div class="frow">
+          <span class="dot"></span>
+          <span class="txt">
+            <div class="l">atlas</div>
+            <div class="p"><本地项目区>\projects\atlas</div>
+          </span>
+          <span class="act"><svg class="i" style="width:14px;height:14px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round"><path d="M8 5h9a2 2 0 0 1 2 2v9M4 9v9a2 2 0 0 0 2 2h9"/></svg></span>
+          <span class="act"><svg class="i" style="width:14px;height:14px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round"><path d="M14 4h6v6M20 4l-9 9M12 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6"/></svg></span>
+        </div>
+        <div class="frow">
+          <span class="dot"></span>
+          <span class="txt">
+            <div class="l">手机端</div>
+            <div class="p"><lifediary 手机仓></div>
+          </span>
+          <span class="act"><svg class="i" style="width:14px;height:14px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round"><path d="M8 5h9a2 2 0 0 1 2 2v9M4 9v9a2 2 0 0 0 2 2h9"/></svg></span>
+          <span class="act"><svg class="i" style="width:14px;height:14px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round"><path d="M14 4h6v6M20 4l-9 9M12 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6"/></svg></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="pill-demo">
+      <p class="block-label">对话里 · 归属 pill</p>
+      <span class="chat-pill">
+        <span class="rd"></span>
+        <b>lifediary-harness</b>
+        <span class="sep">·</span>
+        <span>主文件夹</span>
+      </span>
+      <p class="pill-note">hover 出全部文件夹；点击只有「改用另一个项目（仅本会话之后）」。</p>
+    </div>
+  </aside>
+</div>
+
+<div class="notes">
+  <div class="note">
+    <h3>交互规则</h3>
+    <ol>
+      <li>项目行：点 = 选中，决定下一个新对话落在哪个项目；＋ = 直接新开。</li>
+      <li>主文件夹只有「改路径」；附加文件夹多「设为主」「移除」。</li>
+      <li>「设为主」二次确认：只影响之后新建的会话。</li>
+      <li>「移除」只删登记，剩最后一个根时不给入口。</li>
+    </ol>
+  </div>
+
+  <div class="note">
+    <h3>为什么工作区不在这里</h3>
+    <ul>
+      <li>它不是项目：没有名字、不能加文件夹、不参与派活。</li>
+      <li>占着项目的位置，会被读成「第一个项目」。</li>
+      <li>它仍在设置页第一栏，仍在边界里，只是不占座位。</li>
+    </ul>
+  </div>
+
+  <div class="note is-warn">
+    <h3>这条会怎么错</h3>
+    <ul>
+      <li>换了主文件夹，老会话还在原地——会被读成「没生效」。</li>
+      <li>两个文件夹都有 README.md 时，模型仍可能读错那一份。</li>
+      <li>项目多了，侧栏会变长；超过 8 个要靠折叠与搜索，首版不做。</li>
+    </ul>
+  </div>
+</div>
+
+<footer>原型 · 2026-11-13 · docs/设计方案/2026-11-13-项目容器（一个项目多个文件夹）.md</footer>
+
+</body>
+</html>

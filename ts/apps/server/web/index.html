@@ -22,6 +22,18 @@
     if (localStorage.getItem("lifediary.sidebar") === "closed") {
       document.documentElement.dataset.sidebar = "closed";
     }
+    // 回答气泡（2026-11-13）：同主题一样，属性要在样式表生效前写好，
+    // 否则开着气泡的用户每次刷新都会先看到一帧满宽的旧排版。
+    try {
+      var bubble = JSON.parse(localStorage.getItem("lifediary.answerBubble") || "null");
+      if (bubble && bubble.on === true) {
+        var bubbleW = Math.min(92, Math.max(60, Math.round(Number(bubble.width) || 80)));
+        document.documentElement.dataset.answerBubble = "1";
+        document.documentElement.style.setProperty("--bubble-w", bubbleW + "%");
+      }
+    } catch (e) {
+      /* 存坏了就按默认（无气泡）走 */
+    }
   })();
 </script>
 </head>
@@ -83,27 +95,30 @@
 
 <div class="app">
   <aside class="sidebar">
-    <!-- 收起轨道（2026-11-05 F1 / E4 重排 / E5 对齐 / 2026-11-07 统一批）：
-         对齐 CINDY 几何，72px 轨 + 40×40 圆钮。顺序与展开态一致：
-         总管（首字圆钮）→ 任务中心 → 项目 → 执事占位（悬停提示去看展开侧栏）→ 群组
-         → 底部齿轮。2026-11-07：顶部「新建对话」退役（新建入口在展开态
-         「最近会话」分区头的 ＋）；2026-11-08：状态点退役（收起态只留齿轮，
-         服务在线/离线挪进齿轮 data-tip）。
+    <!-- 收起轨道（2026-11-05 F1 / E4 重排 / E5 对齐 / 2026-11-07 统一批 / 2026-11-13 对齐展开侧栏）：
+         72px 轨 + 40×40 圆钮，顺序 = 展开态分区的镜像：
+         总管（首字圆钮）→ 执事 → 对话 → 项目 → 群组 → 课题 → 底部齿轮。
+         任务中心 / 今日回顾不进轨道（2026-11-13 用户拍板）：入口留在展开态「对话」分区底部的
+         「打开任务中心 →」和任务页里的「今日回顾 →」。
+         2026-11-07：顶部「新建对话」退役（新建入口在展开态「对话」分区头的 ＋）；
+         2026-11-08：状态点退役（收起态只留齿轮，服务状态看顶栏状态灯）。
          项目按钮仍用弹层（72px 放不下内联列表），展开态则是内联分区。 -->
     <div class="side-rail" id="side-rail">
       <!-- 轨道按钮不挂 title/data-tip（2026-11-13 用户拍板）：悬停说明文字全部退役，
-           项目/群组/执事悬停直接浮总览卡（见 app.js 轨道悬停浮卡），其余按钮无可说之事。
-           aria-label 保留给读屏。 -->
+           每个钮悬停直接浮对应总览卡（见 app.js 轨道悬停浮卡）。aria-label 保留给读屏。 -->
       <button class="rail-btn rail-chief" id="rail-chief" type="button" aria-label="总管">
         <span class="pt-avatar" aria-hidden="true">总</span>
       </button>
-      <button class="rail-btn" id="rail-tasks" type="button" aria-label="任务中心">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="8" height="4" x="8" y="2" rx="1" ry="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M12 11h4"/><path d="M12 16h4"/><path d="M8 11h.01"/><path d="M8 16h.01"/></svg>
+      <div class="rail-sep" aria-hidden="true"></div>
+      <!-- 执事：悬停浮花名册卡（2026-11-13，与项目同一套）。 -->
+      <button class="rail-btn rail-partners-hint" id="rail-partners" type="button"
+              aria-label="执事" aria-haspopup="menu" aria-expanded="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
       </button>
-      <!-- 今日回顾（2026-11-13 批 1）：任务中心的日报视图，独立路由 #/review。
-           轨道按钮不挂 data-tip（同上 2026-11-13 拍板），aria-label 给读屏。 -->
-      <button class="rail-btn" id="rail-review" type="button" aria-label="今日回顾">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M16 2v4"/><path d="M8 2v4"/><path d="M3 10h18"/></svg>
+      <!-- 对话（2026-11-13）：镜像展开态「对话」分区；悬停浮最近会话卡，卡底保留新建 / 搜索。 -->
+      <button class="rail-btn" id="rail-chats" type="button"
+              aria-label="对话" aria-haspopup="menu" aria-expanded="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
       </button>
       <!-- 轨道态项目按钮：悬停/点开都是「工作区根 + 项目」总览弹层（与展开态同一份）。 -->
       <button class="rail-btn rail-proj" id="rail-proj" type="button"
@@ -113,20 +128,14 @@
           <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>
         </svg>
       </button>
-      <div class="rail-sep" aria-hidden="true"></div>
-      <!-- 执事占位：悬停浮花名册卡（2026-11-13，与项目同一套），
-           原「展开侧栏查看」提示与点击展开侧栏一并退役。 -->
-      <button class="rail-btn rail-partners-hint" id="rail-partners" type="button"
-              aria-label="执事" aria-haspopup="menu" aria-expanded="false">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-      </button>
       <button class="rail-btn" id="rail-groups" type="button"
               aria-label="群组" aria-haspopup="menu" aria-expanded="false" disabled>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/><path d="M8 12h.01"/><path d="M12 12h.01"/><path d="M16 12h.01"/></svg>
       </button>
-      <!-- 长期课题（2026-11-07 批二）：轨道上只做「展开侧栏」的入口，
-           列表与时间线都在展开态的分区里。悬停不出卡（课题无小总览可浮）。 -->
-      <button class="rail-btn" id="rail-topics" type="button" aria-label="课题">
+      <!-- 长期课题（2026-11-07 批二 / 2026-11-13 浮卡）：列表与时间线在展开态分区；
+           轨道悬停浮进行中课题卡，点行 / 卡底入口展开侧栏落到对应位置。 -->
+      <button class="rail-btn" id="rail-topics" type="button"
+              aria-label="课题" aria-haspopup="menu" aria-expanded="false">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m10.065 12.493-6.18 1.318a.934.934 0 0 1-1.108-.702l-.537-2.15a1.07 1.07 0 0 1 .691-1.265l13.504-4.44"/><path d="m13.56 11.747 4.332-.924"/><path d="m16 21-3.105-6.21"/><path d="M16.485 5.94a2 2 0 0 1 1.455-2.425l1.09-.272a1 1 0 0 1 1.212.727l1.515 6.06a1 1 0 0 1-.727 1.213l-1.09.272a2 2 0 0 1-2.425-1.455z"/><path d="m6.158 8.633 1.114 4.456"/><path d="m8 21 3.105-6.21"/><circle cx="12" cy="13" r="2"/></svg>
       </button>
       <div class="rail-flex" aria-hidden="true"></div>
@@ -143,15 +152,14 @@
 
     <div class="sidebar-inner" id="sidebar-inner">
       <!-- 总管（2026-11-07）：固定条目，不进折叠区，永在最上。
-           点头像 = 进编辑；点行其余部分 = 打开总管会话（历史里最近一条，没有就新开）。 -->
+           2026-11-13 收窄：整行只有「打开总管会话」一件事——头像不再进编辑，
+           改头像 / 改名字一律去右侧对话设置的人设页或设置→执事。 -->
       <div class="side-item chief-entry" id="chief-entry" role="button" tabindex="0"
            aria-label="总管" title="总管">
-        <button class="pt-avatar avatar-edit" id="chief-avatar" type="button"
-                aria-label="编辑总管头像" title="编辑总管头像">总</button>
+        <span class="pt-avatar" id="chief-avatar" aria-hidden="true">总</span>
         <span class="roster-name">总管</span>
         <span class="pill-tag">总管</span>
         <span class="side-count chief-count" id="chief-count" hidden></span>
-        <i class="status-dot idle" id="chief-dot" aria-hidden="true"></i>
       </div>
 
       <!-- 分区形态（2026-11-07 四改，用户口径）：
@@ -294,7 +302,13 @@
 
   <main class="main" id="view-chat">
     <header class="top">
-      <h1 id="title">新对话</h1>
+      <!-- 对话对手（2026-11-13）：执事专线显示该执事的头像 + 名字，跟侧栏花名册同一张脸。
+           总管 / 普通对话不摆头像——总管不是「某个人」，标题就是这条会话自己的名字；
+           群组顶栏的复合头像在 view-groups 里，两边共用同一套 .pt-avatar 语言。 -->
+      <div class="top-id">
+        <span class="pt-avatar chat-head-avatar" id="chat-head-avatar" aria-hidden="true" hidden></span>
+        <h1 id="title">总管</h1>
+      </div>
       <!-- 对话现场快捷设置（2026-11-07 抽屉改造）：右上角图标按钮，点击从右侧滑入全高抽屉
            （首页四行 + 各二级页，见 app.js 渲染）。与 composer 模型 pill 共用同一套数据与渲染。 -->
       <div class="top-wrap">
@@ -322,25 +336,33 @@
     </div>
 
     <!-- 输入框是一个容器卡（2026-11-04 对齐 cindy ComposerCard）：
-         边框/卡底在容器上，textarea 透明无框；底部工具行左：附件占位，
+         边框/卡底在容器上，textarea 透明无框；底部工具行左：加号菜单，
          右：上下文环 + 模型 + 发送（2026-11-11 上下文环挪到模型左边）。
-         思考强度收进模型菜单，挂在当前模型名下方一行。流式时发送同槽换成停止，没有第二个停止入口。
+         2026-11-13：附件预览在 textarea **上方**（附件在上、我们说的话在下）；加号是菜单
+         （图片/文件、截图、新建目标）。思考强度收进模型菜单。
          composer 是绝对定位（bottom:14px），错误卡（批 32）放不进静态流里——
          放进容器卡顶部（附件槽上方），对齐 ZCode「横幅在输入框上方」的观感。
          2026-11-11 输入栏学 ZCode：打字实时长高（resize() 挂上 input 事件），
          卡高由 ResizeObserver 写进 --composer-h，消息区让位与底缝遮衬跟着走。 -->
     <form class="composer" id="composer" autocomplete="off">
       <div class="chat-error" id="chat-error" hidden></div>
-      <textarea id="input" rows="1" placeholder="说点什么…" aria-label="输入消息"></textarea>
-      <!-- 待发附件（2026-11-08 扫尾批 4a）：缩略图预览 + 单张移除；有图才占位 -->
+      <!-- 待发附件（2026-11-08 扫尾批 4a；2026-11-13 挪到输入框上方）：
+           图片缩略图 + 文件小卡，右上角单个移除；有附件才占位。 -->
       <div class="composer-attachments" id="composer-attachments" hidden></div>
-      <input type="file" id="composer-file" accept="image/*" multiple hidden>
+      <textarea id="input" rows="1" placeholder="说点什么…" aria-label="输入消息"></textarea>
+      <input type="file" id="composer-file" multiple hidden>
       <div class="composer-foot">
         <div class="composer-tools">
-          <button class="composer-add" id="composer-add" type="button"
-                  aria-label="添加图片" title="添加图片（也可以粘贴或拖进来）">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
-          </button>
+          <!-- 加号菜单（2026-11-13，抄 ZCode/cindy 的 composer「+」）：
+               添加图片或文件 / 截图 / 新建目标。菜单向上弹，和模型菜单同一套 composer-pop。 -->
+          <div class="composer-wrap">
+            <button class="composer-add" id="composer-add" type="button"
+                    aria-label="添加" aria-haspopup="menu" aria-expanded="false"
+                    title="添加：图片、文件、截图、目标">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+            </button>
+            <div class="composer-pop plus-menu" id="composer-plus-menu" role="menu" hidden></div>
+          </div>
         </div>
 
         <div class="composer-meta">
@@ -356,12 +378,12 @@
 
           <!-- 模型快捷切换（2026-11-04 批次五）：每次打开现拉，一次只看一家供应商。
                2026-11-04 界面 v2：思考强度并入每行（原来独立的思考档 pill 已删）。
+               2026-11-13 用户口径：pill 只显示模型名，供应商与思考档都收进 title / 菜单。
                D2：pill 挪进右组，菜单仍由包裹层定位（贴着 pill 右上角往上弹）。 -->
           <div class="composer-wrap">
             <button class="composer-pill model-pill" id="model-pill" type="button" aria-haspopup="menu" aria-expanded="false"
                     title="切换模型（下一轮生效）">
               <span id="model-pill-label">模型</span>
-              <span class="model-think" id="model-think" hidden></span>
               <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
             </button>
             <div class="model-menu composer-pop" id="model-menu" role="menu" hidden></div>
@@ -632,10 +654,13 @@
      弹层放进去会被一起裁掉。位置由 JS 按触发元素实测写入，动效沿用 .composer-pop。 -->
 <div class="proj-pop composer-pop" id="proj-menu" role="menu" aria-label="项目" hidden></div>
 
-<!-- 收起轨道悬停卡（2026-11-13）：群组 / 执事，与项目弹层同一套壳与动效。
+<!-- 收起轨道悬停卡（2026-11-13）：总管 / 执事 / 对话 / 群组 / 课题，与项目弹层同一套壳与动效。
      内容由 JS 现渲（与展开态分区同一份渲染函数），悬停 ~350ms 浮出、离开即收。 -->
+<div class="proj-pop composer-pop" id="rail-chief-menu" role="menu" aria-label="总管" hidden></div>
 <div class="proj-pop composer-pop" id="rail-groups-menu" role="menu" aria-label="群组" hidden></div>
 <div class="proj-pop composer-pop" id="rail-partners-menu" role="menu" aria-label="执事" hidden></div>
+<div class="proj-pop composer-pop" id="rail-chats-menu" role="menu" aria-label="对话" hidden></div>
+<div class="proj-pop composer-pop" id="rail-topics-menu" role="menu" aria-label="课题" hidden></div>
 
 <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 
@@ -687,6 +712,7 @@
   </form>
 </div>
 
+<script type="module" src="/assets/bubble-mode.js"></script>
 <script type="module" src="/assets/app.js"></script>
 </body>
 </html>

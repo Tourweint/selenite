@@ -150,6 +150,7 @@ import {
 	currentProject,
 	emitPhase,
 	emitTool,
+	noteSessionCwd,
 	sessionCwd,
 	toolArgs,
 	toolDiff,
@@ -804,7 +805,7 @@ async function openHarness(): Promise<Harness> {
 							tool: call.name,
 							args: call.arguments,
 							workspaceRoots: workspaceRootsReal(),
-							cwd: sessionCwd(),
+							cwd: sessionCwd(api.conversationId),
 						});
 						if (pathBlock) return blocked(pathBlock, "path", "path-guard");
 						// 防打转守卫（2026-11-05 批次A A1）：放在闸门之后——被拦的调用没执行，
@@ -834,7 +835,7 @@ async function openHarness(): Promise<Harness> {
 							verdict.kind === "ask" &&
 							!risk.forceAsk &&
 							readAllowlistEnabled() &&
-							isReadOnlyShellCommand(call.name, call.arguments, workspaceRootsReal(), sessionCwd())
+							isReadOnlyShellCommand(call.name, call.arguments, workspaceRootsReal(), sessionCwd(api.conversationId))
 						) {
 							verdict = { kind: "allow" };
 						}
@@ -865,7 +866,7 @@ async function openHarness(): Promise<Harness> {
 									// 缺省不写 = 与改动前逐字节一致。
 									...(() => {
 										if (!confirmWorldStateEnabled()) return {};
-										const world = worldStateTarget(call.name, call.arguments, sessionCwd());
+										const world = worldStateTarget(call.name, call.arguments, sessionCwd(api.conversationId));
 										return world ? { worldState: world } : {};
 									})(),
 								});
@@ -891,7 +892,7 @@ async function openHarness(): Promise<Harness> {
 									tool: call.name,
 									args: call.arguments,
 									workspaceRoots: workspaceRootsReal(),
-									cwd: sessionCwd(),
+									cwd: sessionCwd(api.conversationId),
 								});
 								if (recheckPath) return blocked(recheckPath, "path", "path-guard-recheck");
 								// 世界状态重验（批 19 §七）：批准后目标文件被改过 → 拒绝执行，让模型重新确认。
@@ -899,7 +900,7 @@ async function openHarness(): Promise<Harness> {
 								if (confirmWorldStateEnabled() && WORLD_STATE_TOOLS.has(call.name)) {
 									const verdict = verifyWorldState(
 										grant.worldState,
-										worldStateTarget(call.name, call.arguments, sessionCwd()),
+										worldStateTarget(call.name, call.arguments, sessionCwd(api.conversationId)),
 									);
 									if (!verdict.ok) {
 										return blocked(verdict.reason, "approval", "world-state");
@@ -937,7 +938,7 @@ async function openHarness(): Promise<Harness> {
 									tool: call.name,
 									args: call.arguments,
 									workspaceRoots: workspaceRootsReal(),
-									cwd: sessionCwd(),
+									cwd: sessionCwd(api.conversationId),
 								});
 								if (recheckPath) return blocked(recheckPath, "path", "path-guard-recheck");
 							} else {
@@ -1009,7 +1010,7 @@ async function openHarness(): Promise<Harness> {
 							if (timeoutS !== null && typeof command === "string" && command.trim()) {
 								const moved = moveToBackground({
 									command,
-									cwd: sessionCwd(),
+									cwd: sessionCwd(api.conversationId),
 									timeoutSeconds: timeoutS,
 									onFinished: (record, logTail) => {
 										const tail = logTail.trim();
@@ -1127,7 +1128,13 @@ async function openHarness(): Promise<Harness> {
 			registry,
 			// 每个会话的执行环境：cwd 跟着会话走；当前项目非空时用项目根（每轮现读）。
 			// 会话显式配了 cwd 仍以它优先，保持"会话自己的设置不被全局状态覆盖"。
-			env: ({ cwd }) => new NodeExecutionEnv({ cwd: cwd ?? sessionCwd() }),
+			env: ({ conversationId, cwd }) => {
+				// 2026-11-13 会话绑定即快照：内核带着该会话 `pi.agent.cwd` 来（新建会话时钉死），
+				// 顺手记进同步缓存，beforeTool 的 path-guard / 后台搬运才拿得到"这个会话的路"。
+				// 没有绑定（杂事态 / 旧会话）时 cwd 为空，退回全局当前项目。
+				if (cwd) noteSessionCwd(conversationId, cwd);
+				return new NodeExecutionEnv({ cwd: cwd ?? sessionCwd(conversationId) });
+			},
 			...(settings ? { settings } : {}),
 			onReport: (error, info) => {
 				const detail = error instanceof Error ? error.message : String(error);

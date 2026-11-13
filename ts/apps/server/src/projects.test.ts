@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, parse, resolve } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import {
 	isInside,
@@ -477,6 +478,119 @@ test("符号链接逃逸在提交时就被 realpath 拦住", (t) => {
 		assert.equal(existsSync(join(outside, "newdir")), false);
 		assert.equal(store.listProjects().length, 0);
 		assert.equal(isInside(workspace, outside), false);
+	} finally {
+		store.close();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("项目容器：旧库（只有 projects.root_path）自动补一条 primary 根", () => {
+	const root = tempDir("roots-migrate");
+	const dbPath = join(root, "projects.sqlite");
+	const workspace = join(root, "ws");
+	const folder = join(root, "app");
+	mkdirSync(workspace, { recursive: true });
+	mkdirSync(folder, { recursive: true });
+	const first = new ProjectsStore(dbPath);
+	first.setWorkspace(workspace);
+	const project = first.confirmProposal(first.proposeProject("旧项目", folder).id);
+	first.close();
+
+	// 抹掉根表，模拟 2026-11-13 之前的库（那时只有一个 root_path 列）。
+	const raw = new DatabaseSync(dbPath);
+	raw.prepare("DELETE FROM project_roots").run();
+	raw.close();
+
+	const reopened = new ProjectsStore(dbPath);
+	try {
+		const migrated = reopened.listProjects();
+		assert.equal(migrated.length, 1);
+		assert.equal(migrated[0].id, project.id);
+		assert.equal(migrated[0].roots.length, 1);
+		assert.equal(migrated[0].roots[0].role, "primary");
+		assert.equal(migrated[0].roots[0].path, realpathSync(folder));
+		// 迁移是幂等的：再开一次还是同一条。
+		assert.equal(reopened.listProjects()[0].roots.length, 1);
+	} finally {
+		reopened.close();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("项目容器：加文件夹 / 设为主 / 移除的口径", () => {
+	const root = tempDir("roots-crud");
+	const store = new ProjectsStore(join(root, "projects.sqlite"));
+	try {
+		const workspace = join(root, "ws");
+		mkdirSync(workspace, { recursive: true });
+		store.setWorkspace(workspace);
+		const dirs = ["main", "phone", "extra"].map((name) => {
+			const path = join(root, name);
+			mkdirSync(path, { recursive: true });
+			return path;
+		});
+		const [mainDir, phoneDir, extraDir] = dirs;
+
+		const project = store.confirmProposal(store.proposeProject("多根", mainDir).id);
+		assert.equal(project.roots.length, 1);
+		assert.equal(project.roots[0].role, "primary");
+		assert.equal(project.rootPath, realpathSync(mainDir));
+
+		// 加第二个文件夹：主文件夹不变
+		const added = store.addRoot(project.id, { path: phoneDir, label: "手机端" });
+		assert.equal(added.roots.length, 2);
+		assert.equal(added.roots[1].label, "手机端");
+		assert.equal(added.roots[1].role, "extra");
+		assert.equal(added.rootPath, realpathSync(mainDir));
+
+		// 同一个目录加两次 → duplicate_root
+		assert.throws(
+			() => store.addRoot(project.id, { path: phoneDir }),
+			(error) => error instanceof ProjectError && error.code === "duplicate_root",
+		);
+		// 项目内同名 → duplicate_label
+		assert.throws(
+			() => store.addRoot(project.id, { path: extraDir, label: "手机端" }),
+			(error) => error instanceof ProjectError && error.code === "duplicate_label",
+		);
+		// 互相包含的两个文件夹 → 拒绝（嵌套报 inside_existing_project，反向报 root_overlaps_root）
+		const nested = join(phoneDir, "nested");
+		mkdirSync(nested, { recursive: true });
+		assert.throws(
+			() => store.addRoot(project.id, { path: nested }),
+			(error) =>
+				error instanceof ProjectError &&
+				["inside_existing_project", "root_overlaps_root"].includes(error.code),
+		);
+
+		// 设为主：rootPath 缓存列跟着换，老主降级为 extra
+		const promoted = store.promoteRoot(project.id, added.roots[1].id);
+		assert.equal(promoted.rootPath, realpathSync(phoneDir));
+		assert.equal(
+			promoted.roots.find((item) => item.path === realpathSync(phoneDir))?.role,
+			"primary",
+		);
+		assert.equal(
+			promoted.roots.find((item) => item.path === realpathSync(mainDir))?.role,
+			"extra",
+		);
+
+		// 主文件夹不能直接移除
+		const primaryId = promoted.roots.find((item) => item.role === "primary")!.id;
+		assert.throws(
+			() => store.removeRoot(project.id, primaryId),
+			(error) => error instanceof ProjectError && error.code === "root_is_primary",
+		);
+		// 附加文件夹可以移除；移除后剩一个，最后那个也不许移除
+		const extraOfMain = promoted.roots.find((item) => item.path === realpathSync(mainDir))!;
+		const removed = store.removeRoot(project.id, extraOfMain.id);
+		assert.equal(removed.roots.length, 1);
+		assert.throws(
+			() => store.removeRoot(project.id, removed.roots[0].id),
+			(error) => error instanceof ProjectError && error.code === "last_root",
+		);
+		// 移除只删登记，磁盘目录还在
+		assert.equal(existsSync(mainDir), true);
 	} finally {
 		store.close();
 		rmSync(root, { recursive: true, force: true });

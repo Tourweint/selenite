@@ -58,6 +58,7 @@ export {
 	cancelReminder,
 	chatKindOf,
 	chatMetaSummary,
+	pruneChatMetaOrphans,
 	chatStream,
 	chatTitles,
 	configureResearchChat,
@@ -71,6 +72,7 @@ export {
 	hideChat,
 	listArchivedChats,
 	listChats,
+	listChatsForExport,
 	listReminders,
 	memoryOverview,
 	messageIdOf,
@@ -104,3 +106,12 @@ export type {
 	TranscriptMessage,
 	UsageSummary,
 } from "./agent/session.ts";
+
+// 对话历史倒序游标分页（2026-11-13 方案「按天分组·上滑加载」）
+export {
+	HISTORY_PAGE_DEFAULT,
+	HISTORY_PAGE_MAX,
+	decodeHistoryCursor,
+	readTranscriptPage,
+} from "./agent/transcript-page.ts";
+export type { TranscriptPage } from "./agent/transcript-page.ts";

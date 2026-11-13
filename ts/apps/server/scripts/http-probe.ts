@@ -15,6 +15,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { inflateRawSync } from "node:zlib";
 import type { Ticket } from "../../../../../chancellor/src/types.ts";
 
 const PORT = Number(process.env.PROBE_PORT ?? 8098);
@@ -46,6 +47,10 @@ function startServer(extraEnv: NodeJS.ProcessEnv = {}): ChildProcess {
 			AGENT_DB_PATH: DB,
 			MEMORY_DB_PATH: MEMORY_DB,
 			PROJECTS_DB_PATH: PROJECTS_DB,
+			// 归档 / 永久删除都写 chat-meta：必须隔离，绝不碰真实 .data/chat-meta.json
+			// （2026-11-13 实测：§14.7/§14.8 归档的探针会话 id 写进了生产文件，
+			//  清库后全成孤儿，归档页显示 120 条却一条取不出）
+			AGENT_CHAT_META_PATH: ".data/probe-http-chat-meta.json",
 			// 显式清空：别让开发机上的 env 混进探针（§15 会单独打开 false）
 			CURRENT_PROJECT: "",
 			// 播种会写 providers.json；探针必须隔离，别碰真实 .data
@@ -57,6 +62,8 @@ function startServer(extraEnv: NodeJS.ProcessEnv = {}): ChildProcess {
 			AGENT_POLICY_PATH: ".data/probe-http-policy.json",
 			// 本机 cookie 密钥（auth.ts 落盘保底）：探针起停多次服务，别碰真实 .data/local-secret
 			AGENT_LOCAL_SECRET_PATH: ".data/probe-http-local-secret",
+			// 附件上传落点（2026-11-13 附件走路径）：探针收的文件只写这里，结束即清
+			ATTACHMENTS_DIR: ".data/probe-http-attachments",
 			// 高级开关 / 技能启停位（2026-11-09）：探针隔离，别写真实 .data 的开关文件
 			AGENT_FLAGS_PATH: ".data/probe-http-flags.json",
 			AGENT_SKILLS_STATE_PATH: ".data/probe-http-skill-state.json",
@@ -156,6 +163,52 @@ async function chat(body: unknown): Promise<{ status: number; result: ChatResult
 		if (payload.type === "done") result.done = true;
 	}
 	return { status: response.status, result };
+}
+
+/**
+ * 最小 zip 读取（只给探针用）：读中央目录里的文件名 + 取某一条的内容。
+ * 压缩流本身对不对由 src/zip.test.ts 自己解包验；这里要的是"包里真有这些文件、
+ * manifest 能读出来、明文里没有密钥"。
+ */
+function zipNames(buffer: Buffer): string[] {
+	const eocd = buffer.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
+	if (eocd < 0) return [];
+	const count = buffer.readUInt16LE(eocd + 10);
+	let cursor = buffer.readUInt32LE(eocd + 16);
+	const names: string[] = [];
+	for (let index = 0; index < count; index += 1) {
+		const nameLength = buffer.readUInt16LE(cursor + 28);
+		const extraLength = buffer.readUInt16LE(cursor + 30);
+		const commentLength = buffer.readUInt16LE(cursor + 32);
+		names.push(buffer.subarray(cursor + 46, cursor + 46 + nameLength).toString("utf8"));
+		cursor += 46 + nameLength + extraLength + commentLength;
+	}
+	return names;
+}
+
+function zipEntryText(buffer: Buffer, name: string): string | null {
+	const eocd = buffer.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
+	if (eocd < 0) return null;
+	const count = buffer.readUInt16LE(eocd + 10);
+	let cursor = buffer.readUInt32LE(eocd + 16);
+	for (let index = 0; index < count; index += 1) {
+		const nameLength = buffer.readUInt16LE(cursor + 28);
+		const extraLength = buffer.readUInt16LE(cursor + 30);
+		const commentLength = buffer.readUInt16LE(cursor + 32);
+		const method = buffer.readUInt16LE(cursor + 10);
+		const compressed = buffer.readUInt32LE(cursor + 20);
+		const localOffset = buffer.readUInt32LE(cursor + 42);
+		const entryName = buffer.subarray(cursor + 46, cursor + 46 + nameLength).toString("utf8");
+		if (entryName === name) {
+			const localNameLength = buffer.readUInt16LE(localOffset + 26);
+			const localExtraLength = buffer.readUInt16LE(localOffset + 28);
+			const start = localOffset + 30 + localNameLength + localExtraLength;
+			const body = buffer.subarray(start, start + compressed);
+			return (method === 8 ? inflateRawSync(body) : body).toString("utf8");
+		}
+		cursor += 46 + nameLength + extraLength + commentLength;
+	}
+	return null;
 }
 
 rmSync(DB, { force: true });
@@ -587,6 +640,88 @@ try {
 	check(
 		transcript.messages.some((message) => message.role === "assistant" && message.text.length > 0),
 		"有模型回答",
+	);
+
+	// §8.1 历史分页（2026-11-13 按天分组·上滑加载）：page/before 只增不改老契约。
+	type PagedTranscript = {
+		messages: { role: string; text: string }[];
+		hasMore?: boolean;
+		nextBefore?: string;
+	};
+	const legacyAll = (await (
+		await fetch(`${BASE}/api/v1/agent/chat/${externalId}/messages?limit=0`)
+	).json()) as PagedTranscript;
+	const firstPage = (await (
+		await fetch(`${BASE}/api/v1/agent/chat/${externalId}/messages?page=1&limit=4`)
+	).json()) as PagedTranscript;
+	check(
+		(firstPage.messages?.length ?? 0) > 0 && (firstPage.messages?.length ?? 0) <= 4,
+		"分页第一页不超过 limit（不切轮，可能少一条）",
+		String(firstPage.messages?.length),
+	);
+	check(
+		firstPage.messages?.[0]?.role === "user",
+		"一页从用户提问开头（不切轮）",
+		String(firstPage.messages?.[0]?.role),
+	);
+	check(
+		firstPage.hasMore === true && typeof firstPage.nextBefore === "string",
+		"还有更早时给 hasMore + nextBefore",
+		`hasMore=${String(firstPage.hasMore)} nextBefore=${Boolean(firstPage.nextBefore)}`,
+	);
+	// 顺着游标翻到最早：每页 ≤limit、页首是 user、拼起来与全量逐条一致。
+	const pagedTexts: string[] = [];
+	let cursor: string | undefined = firstPage.nextBefore;
+	let lastPage: PagedTranscript = firstPage;
+	pagedTexts.unshift(...(firstPage.messages ?? []).map((m) => m.text));
+	for (let index = 0; index < 20 && cursor; index += 1) {
+		const page = (await (
+			await fetch(
+				`${BASE}/api/v1/agent/chat/${externalId}/messages?page=1&limit=4&before=${encodeURIComponent(cursor)}`,
+			)
+		).json()) as PagedTranscript;
+		check(
+			(page.messages?.length ?? 0) <= 4,
+			"后续页也不超过 limit",
+			String(page.messages?.length),
+		);
+		check(
+			page.messages?.[0]?.role === "user" || page.messages?.length === 0,
+			"后续页也从用户提问开头（不切轮）",
+			String(page.messages?.[0]?.role),
+		);
+		pagedTexts.unshift(...(page.messages ?? []).map((m) => m.text));
+		lastPage = page;
+		cursor = page.nextBefore;
+		if (!page.hasMore) break;
+	}
+	check(
+		lastPage.hasMore === false && lastPage.nextBefore === undefined,
+		"最后一页 hasMore=false 且不带游标",
+		`hasMore=${String(lastPage.hasMore)} nextBefore=${Boolean(lastPage.nextBefore)}`,
+	);
+	check(
+		pagedTexts.join("\n") === legacyAll.messages.map((m) => m.text).join("\n"),
+		"逐页翻完与全量逐条一致（无重叠无遗漏）",
+		`${pagedTexts.length} vs ${legacyAll.messages.length}`,
+	);
+	const badCursor = await fetch(
+		`${BASE}/api/v1/agent/chat/${externalId}/messages?page=1&limit=4&before=not-a-cursor`,
+	);
+	check(badCursor.status === 400, "非法游标回 400", String(badCursor.status));
+	const crossCursor = await fetch(
+		`${BASE}/api/v1/agent/chat/${newId}/messages?page=1&limit=4&before=${encodeURIComponent(firstPage.nextBefore ?? "")}`,
+	);
+	check(crossCursor.status === 400, "跨会话游标回 400", String(crossCursor.status));
+	const badLimit = await fetch(`${BASE}/api/v1/agent/chat/${externalId}/messages?page=1&limit=0`);
+	check(badLimit.status === 400, "分页 limit 越界回 400", String(badLimit.status));
+	const legacyShape = (await (
+		await fetch(`${BASE}/api/v1/agent/chat/${externalId}/messages`)
+	).json()) as Record<string, unknown>;
+	check(
+		!("hasMore" in legacyShape) && !("nextBefore" in legacyShape),
+		"不带 page/before 时响应形状与旧版一致（无分页字段）",
+		Object.keys(legacyShape).join(","),
 	);
 
 	// ── 9. 重启后会话还在 ─────────────────────────────
@@ -1959,6 +2094,86 @@ try {
 	);
 	check(Array.isArray(exported.usage?.models), "usage 原样带 models");
 
+	// 2026-11-13 导出升级（接口文档 §2.5）：可选块 / 多文件 / 压缩包
+	const zipResponse = await fetch(`${BASE}/api/v1/agent/export?format=zip`);
+	const zipBuffer = Buffer.from(await zipResponse.arrayBuffer());
+	check(zipResponse.status === 200, "GET /agent/export?format=zip → 200", String(zipResponse.status));
+	check(
+		(zipResponse.headers.get("content-type") ?? "").includes("application/zip"),
+		"响应是 application/zip",
+		zipResponse.headers.get("content-type") ?? "",
+	);
+	const zipDisposition = zipResponse.headers.get("content-disposition") ?? "";
+	check(
+		/attachment/.test(zipDisposition) && /selenite-export-\d{4}-\d{2}-\d{2}-\d{4}\.zip/.test(zipDisposition),
+		"Content-Disposition = attachment + 日期时分文件名",
+		zipDisposition,
+	);
+	check(
+		zipBuffer.subarray(0, 2).toString("binary") === "PK" && zipBuffer.length > 22,
+		"响应体是 zip 字节",
+		String(zipBuffer.length),
+	);
+
+	const zipFiles = zipNames(zipBuffer);
+	check(zipFiles.length > 0, "zip 里有文件", String(zipFiles.length));
+	check(zipFiles.some((name) => name.endsWith("/README.md")), "包根有 README.md");
+	check(zipFiles.some((name) => name.endsWith("/manifest.json")), "包根有 manifest.json");
+	check(
+		zipFiles.some((name) => name.endsWith("/conversations/index.json")),
+		"默认选全部块：conversations/index.json 在包里",
+	);
+	check(
+		zipFiles.some((name) => /\/conversations\/[^/]+\/transcript\.md$/.test(name)),
+		"每段会话一个文件夹（transcript.md）",
+		zipFiles.find((name) => name.endsWith("/transcript.md")) ?? "",
+	);
+
+	const manifestName = zipFiles.find((name) => name.endsWith("/manifest.json")) ?? "";
+	const manifestText = manifestName ? zipEntryText(zipBuffer, manifestName) ?? "" : "";
+	const readmeName = zipFiles.find((name) => name.endsWith("/README.md")) ?? "";
+	const readmeText = readmeName ? zipEntryText(zipBuffer, readmeName) ?? "" : "";
+	const zipManifest = manifestText ? (JSON.parse(manifestText) as Record<string, unknown>) : {};
+	const zipParts = (zipManifest["parts"] as { id?: string; status?: string; counts?: unknown }[] | undefined) ?? [];
+	check(zipManifest["format"] === "lifediary-export", "manifest.format 正确", String(zipManifest["format"]));
+	check(zipManifest["formatVersion"] === 1, "manifest.formatVersion = 1");
+	check(zipParts.length === 5, "manifest 有五个块", String(zipParts.length));
+	check(
+		zipParts.every((part) => typeof part.status === "string" && typeof part.id === "string"),
+		"每块都带 id 与 status",
+	);
+	check(Boolean(readmeText.includes("不是可一键恢复的备份格式")), "README 说明「这不是备份」");
+	check(!manifestText.includes(SECRET_KEY) && !readmeText.includes(SECRET_KEY), "zip 清单/说明无密钥明文");
+
+	// 只选一块 + 不带图片
+	const memoryOnly = await fetch(`${BASE}/api/v1/agent/export?format=zip&parts=memory&images=0`);
+	const memoryOnlyBuffer = Buffer.from(await memoryOnly.arrayBuffer());
+	const memoryOnlyNames = zipNames(memoryOnlyBuffer);
+	check(memoryOnly.status === 200, "parts=memory → 200", String(memoryOnly.status));
+	const memoryManifestName = memoryOnlyNames.find((name) => name.endsWith("/manifest.json")) ?? "";
+	const memoryManifestText = memoryManifestName ? zipEntryText(memoryOnlyBuffer, memoryManifestName) ?? "" : "";
+	const memoryPart = (
+		JSON.parse(memoryManifestText) as { parts?: { id?: string; status?: string; notes?: string[] }[] }
+	).parts?.[0];
+	check(memoryPart?.id === "memory", "只选一块时 manifest 只有这一块", String(memoryPart?.id ?? "?"));
+	check(
+		memoryPart?.status === "ok"
+			? memoryOnlyNames.some((name) => name.endsWith("/memory/records.jsonl"))
+			: memoryPart?.status === "empty",
+		"记忆块：有数据就带 records.jsonl，没有就如实标 empty",
+		`${memoryPart?.status ?? "?"} ${(memoryPart?.notes ?? []).join("；")}`,
+	);
+	check(
+		memoryOnlyNames.every((name) => !name.includes("/conversations/")),
+		"没选的块不建目录",
+		memoryOnlyNames.filter((name) => name.includes("/conversations/")).join(","),
+	);
+
+	const badParts = await fetch(`${BASE}/api/v1/agent/export?format=zip&parts=nope`);
+	check(badParts.status === 400, "未知 parts → 400", String(badParts.status));
+	const badImages = await fetch(`${BASE}/api/v1/agent/export?format=zip&images=2`);
+	check(badImages.status === 400, "images 只认 0/1 → 400", String(badImages.status));
+
 	// ── 18. 任务单来源对话（L1，2026-11-05，接口文档 §2.9）──
 	console.log("\n· 18. 任务单来源对话（conversationId）");
 	const TICKETS_BASE = resolve(".data/probe-http-tickets");
@@ -2358,6 +2573,7 @@ try {
 					text: string;
 					id?: string;
 					images?: { mimeType: string; data: string }[];
+					files?: { path: string; name: string; mimeType?: string; bytes?: number }[];
 				}[];
 			}
 		).messages;
@@ -2422,6 +2638,73 @@ try {
 		],
 	});
 	check(tooBig.status === 400, "单图解码后超 8MB → 400", String(tooBig.status));
+
+	// ── 20b. 附件走路径（2026-11-13）────────────────────────
+	// 浏览器没有真实路径 → 上传落盘拿服务端路径；消息里只带 path，durable 不存文件内容。
+	console.log("\n· 20b. 附件走路径：上传拿服务端路径 → 消息只带 path");
+	const upload = await fetch(`${BASE}/api/v1/agent/attachments`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({
+			name: "探针附件.txt",
+			mimeType: "text/plain",
+			data: Buffer.from("附件正文").toString("base64"),
+		}),
+	});
+	const uploadBody = (await upload.json()) as {
+		ok?: boolean;
+		file?: { path: string; name: string; bytes: number };
+	};
+	check(
+		upload.status === 200 && uploadBody.file?.name === "探针附件.txt",
+		"上传落盘 → 200 + 文件名",
+		`${String(upload.status)} ${uploadBody.file?.name ?? ""}`,
+	);
+	const uploadedPath = uploadBody.file?.path ?? "";
+	check(Boolean(uploadedPath) && existsSync(uploadedPath), "回传的是服务端可读绝对路径", uploadedPath);
+	check(
+		uploadBody.file?.bytes === Buffer.byteLength("附件正文"),
+		"字节数一致",
+		String(uploadBody.file?.bytes),
+	);
+
+	const withFile = await chat({
+		messages: [
+			{
+				role: "user",
+				content: [
+					{ type: "text", text: "看看这个文件" },
+					{ type: "file", path: uploadedPath, name: "探针附件.txt", mimeType: "text/plain" },
+				],
+			},
+		],
+	});
+	const fileConv = withFile.result.conversationId ?? "";
+	check(
+		withFile.status === 200 && withFile.result.done,
+		"带文件消息被受理并收尾",
+		String(withFile.status),
+	);
+	const fileUser = (await readDetailed(fileConv)).find((message) => message.role === "user");
+	check(
+		fileUser?.files?.[0]?.path === uploadedPath && fileUser?.files?.[0]?.name === "探针附件.txt",
+		"回读带 files（路径 + 名字）",
+		JSON.stringify(fileUser?.files),
+	);
+	check(fileUser?.text === "看看这个文件", "正文与文件分开落，text 仍可读");
+
+	const pathMissing = await chat({
+		messages: [
+			{
+				role: "user",
+				content: [
+					{ type: "text", text: "坏路径" },
+					{ type: "file", path: "D:\\不存在\\a.txt", name: "a.txt" },
+				],
+			},
+		],
+	});
+	check(pathMissing.status === 400, "路径不存在 → 400 带说明", String(pathMissing.status));
 
 	// ── 21. 编辑重发（2026-11-08 扫尾批 4a）──────────────────
 	console.log("\n· 21. 编辑重发：fork 出新会话，老会话完好");
@@ -2701,6 +2984,8 @@ try {
 	await sleep(800);
 	server = startServer({
 		AGENT_ATTACHMENTS: "false",
+		// 2026-11-13 附件走路径：任意文件入口的上传端点单独一个开关
+		AGENT_FILE_ATTACHMENTS: "false",
 		AGENT_EDIT_RESEND: "false",
 		TASK_AS_CONVERSATION: "false",
 		// 2026-11-08 员工人格化刀一 E1 的回滚开关：写端点 400 带说明（不是 404）
@@ -2714,12 +2999,29 @@ try {
 
 	const policyOff = (await (await fetch(`${BASE}/api/v1/agent/policy`)).json()) as {
 		attachments?: boolean;
+		fileAttachments?: boolean;
 		editResend?: boolean;
 	};
 	check(
 		policyOff.attachments === false && policyOff.editResend === false,
 		"policy 投影如实给出两个开关（前端据此不渲染入口）",
 		JSON.stringify(policyOff),
+	);
+	check(
+		policyOff.fileAttachments === false,
+		"AGENT_FILE_ATTACHMENTS=false：policy 的 fileAttachments=false",
+		String(policyOff.fileAttachments),
+	);
+
+	const uploadOff = await fetch(`${BASE}/api/v1/agent/attachments`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ name: "x.txt", data: Buffer.from("x").toString("base64") }),
+	});
+	check(
+		uploadOff.status === 404,
+		"AGENT_FILE_ATTACHMENTS=false：上传端点 404",
+		String(uploadOff.status),
 	);
 
 	const partsOff = await chat({
@@ -2943,11 +3245,16 @@ try {
 	// ── 26. 高级开关 + 技能启停位（2026-11-09）────────────────────
 	console.log("\n· 26. 高级开关读写 / 技能默认全关·启停·批量");
 	const flagsList = (await (await fetch(`${BASE}/api/v1/agent/flags`)).json()) as {
-		flags: { key: string; value: string; hot: boolean }[];
+		flags: { key: string; value: string; hot: boolean; defaultValue: string }[];
 	};
 	check(
 		flagsList.flags.some((flag) => flag.key === "AUTONOMY_ENABLED" && flag.hot) &&
-			flagsList.flags.some((flag) => flag.key === "COMPANIONS_ENABLED" && !flag.hot),
+			flagsList.flags.some((flag) => flag.key === "COMPANIONS_ENABLED" && !flag.hot) &&
+			// 对话逐字浮现（2026-11-13）：web 开新消息时懒读，默认开。
+			flagsList.flags.some(
+				(flag) =>
+					flag.key === "CHAT_STREAM_REVEAL" && flag.hot && flag.defaultValue === "true",
+			),
 		"GET /agent/flags：白名单齐全且 hot 标注正确",
 	);
 	const flagPut = await fetch(`${BASE}/api/v1/agent/flags/AGENT_ATTACHMENTS`, {
@@ -3430,6 +3737,8 @@ try {
 		[APPROVALS_FILE, { force: true }],
 		[".data/probe-http-chat-events.sqlite", { force: true }],
 		[".data/probe-http-bg-jobs", { recursive: true, force: true }],
+		// 2026-11-13 附件走路径：上传的探针文件也只留在探针目录
+		[".data/probe-http-attachments", { recursive: true, force: true }],
 		[".data/probe-http-providers.json", { force: true }],
 		[".data/probe-http-policy.json", { force: true }],
 		[".data/probe-http-secret-providers.json", { force: true }],

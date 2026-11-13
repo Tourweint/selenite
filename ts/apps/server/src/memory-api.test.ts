@@ -408,6 +408,163 @@ test("整理记忆：MEMORY_CONSOLIDATE_LLM=false → 两个端点 404，列表�
 	}
 });
 
+// ── 2026-11-13 A 版：真实计数 / 搜索 / 分页 / 排除 work ─────────────
+
+test("记忆列表：q 精确子串、真实计数、kind/offset/excludeKinds 分页", async () => {
+	const engine = memoryEngine!;
+	const partner = "44444444-4444-4444-8444-444444444444";
+	const scope = { type: "partner" as const, id: partner };
+	engine.remember({ kind: "fact", scope, content: "搜索测试：家里有两只猫" });
+	engine.remember({ kind: "fact", scope, content: "搜索测试：猫叫豆豆" });
+	engine.remember({ kind: "preference", scope, content: "搜索测试：汇报先给结论" });
+	engine.remember({ kind: "episode", scope, content: "搜索测试：上周去了杭州" });
+	engine.remember({ kind: "work", scope, content: "搜索测试：T-1 写周报" });
+
+	const app = newApp();
+	const scopeKey = `partner:${partner}`;
+	const summary = await app.request(
+		`/api/v1/agent/memory?scope=${encodeURIComponent(scopeKey)}&limit=0&q=${encodeURIComponent("搜索测试")}&excludeKinds=work`,
+	);
+	assert.equal(summary.status, 200);
+	const body = (await summary.json()) as {
+		total: number;
+		items: unknown[];
+		counts: { all: number; byKind: Record<string, number>; superseded: number };
+	};
+	assert.equal(body.items.length, 0, "limit=0 只回计数");
+	assert.equal(body.total, 4, "真实总数不含 work");
+	assert.equal(body.counts.all, 4);
+	assert.equal(body.counts.byKind.fact, 2);
+	assert.equal(body.counts.byKind.preference, 1);
+	assert.equal(body.counts.byKind.episode, 1);
+	assert.equal(body.counts.byKind.work, undefined, "excludeKinds=work 不把履历算进来");
+
+	const page = await app.request(
+		`/api/v1/agent/memory?scope=${encodeURIComponent(scopeKey)}&kind=fact&q=${encodeURIComponent("搜索测试")}&excludeKinds=work&limit=1&offset=1`,
+	);
+	const pageBody = (await page.json()) as {
+		total: number;
+		items: Array<{ kind: string; content: string }>;
+		hasMore: boolean;
+	};
+	assert.equal(pageBody.total, 2, "kind 过滤后的真实总数");
+	assert.equal(pageBody.items.length, 1);
+	assert.equal(pageBody.items[0]!.kind, "fact");
+	assert.equal(pageBody.hasMore, false, "offset+1 已到末尾");
+
+	const bad = await app.request("/api/v1/agent/memory?kind=nope");
+	assert.equal(bad.status, 400, "认不出的 kind 应 400");
+});
+
+test("整理后台任务：202 单飞、state 可恢复、dismiss 持久化", async () => {
+	const engine = memoryEngine!;
+	const partner = "55555555-5555-4555-8555-555555555555";
+	const scope = { type: "partner" as const, id: partner };
+	const scopeKey = `partner:${partner}`;
+	const keep = engine.remember({ kind: "fact", scope, content: "后台测试：养了一只猫" });
+	const drop = engine.remember({ kind: "fact", scope, content: "后台测试：猫叫豆豆" });
+
+	let release!: () => void;
+	const gate = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	const generate: Generator = async ({ user }) => {
+		await gate;
+		return JSON.stringify({
+			proposals: [{ keepId: idOf(user, "养了一只猫"), dropId: idOf(user, "猫叫豆豆"), reason: "并进" }],
+		});
+	};
+	const app = newApp(true, generate);
+
+	const start = await app.request("/api/v1/agent/memory/consolidate/review?background=1", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ scope: scopeKey }),
+	});
+	assert.equal(start.status, 202);
+	const startBody = (await start.json()) as { running: boolean; startedAt: string };
+	assert.equal(startBody.running, true);
+
+	// 同 scope 再点：不重复调模型，直接 202 alreadyRunning
+	const second = await app.request("/api/v1/agent/memory/consolidate/review?background=1", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ scope: scopeKey }),
+	});
+	assert.equal(second.status, 202);
+	assert.equal(((await second.json()) as { alreadyRunning?: boolean }).alreadyRunning, true);
+
+	const running = await app.request(
+		`/api/v1/agent/memory/consolidate/state?scope=${encodeURIComponent(scopeKey)}`,
+	);
+	const runningBody = (await running.json()) as { running: boolean; startedAt: string };
+	assert.equal(runningBody.running, true);
+
+	release();
+	const deadline = Date.now() + 3000;
+	let state: {
+		running: boolean;
+		source: string;
+		proposals: Array<{ keepId: string; dropId: string }>;
+	} = { running: true, source: "none", proposals: [] };
+	while (Date.now() < deadline) {
+		const response = await app.request(
+			`/api/v1/agent/memory/consolidate/state?scope=${encodeURIComponent(scopeKey)}`,
+		);
+		state = (await response.json()) as typeof state;
+		if (!state.running) break;
+		await new Promise((resolve) => setTimeout(resolve, 20));
+	}
+	assert.equal(state.running, false);
+	assert.equal(state.source, "live");
+	assert.equal(state.proposals.length, 1);
+	assert.equal(state.proposals[0]!.keepId, keep.id);
+	assert.equal(state.proposals[0]!.dropId, drop.id);
+
+	const dismissed = await app.request("/api/v1/agent/memory/consolidate/dismiss", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ scope: scopeKey, keepId: keep.id, dropId: drop.id }),
+	});
+	assert.equal(dismissed.status, 200);
+	const dismissedBody = (await dismissed.json()) as { dismissed: boolean };
+	assert.equal(dismissedBody.dismissed, true);
+
+	const after = await app.request(
+		`/api/v1/agent/memory/consolidate/state?scope=${encodeURIComponent(scopeKey)}`,
+	);
+	const afterBody = (await after.json()) as { proposals: unknown[] };
+	assert.equal(afterBody.proposals.length, 0, "忽略过的不再回来");
+	assert.equal(pendingProposalCount(scopeKey), 0);
+});
+
+test("外接记忆库状态：未配置不 spawn，ready=false", async () => {
+	const previousAsk = process.env.PERSONA_MEMORY_ASK;
+	const previousEnabled = process.env.PERSONA_MEMORY_ENABLED;
+	delete process.env.PERSONA_MEMORY_ASK;
+	process.env.PERSONA_MEMORY_ENABLED = "true";
+	try {
+		const app = newApp();
+		const response = await app.request("/api/v1/agent/memory/external");
+		assert.equal(response.status, 200);
+		const body = (await response.json()) as {
+			configured: boolean;
+			ready: boolean;
+			reason: string;
+			provider: { name: string };
+		};
+		assert.equal(body.configured, false);
+		assert.equal(body.ready, false);
+		assert.equal(body.reason, "not_configured");
+		assert.equal(body.provider.name, "一生记忆库");
+	} finally {
+		if (previousAsk === undefined) delete process.env.PERSONA_MEMORY_ASK;
+		else process.env.PERSONA_MEMORY_ASK = previousAsk;
+		if (previousEnabled === undefined) delete process.env.PERSONA_MEMORY_ENABLED;
+		else process.env.PERSONA_MEMORY_ENABLED = previousEnabled;
+	}
+});
+
 // ── 巩固审计（2026-11-10 批 17 §三）────────────────────────
 
 test("巩固审计：pass 只出建议并落 diff；usage 排序 / 未用淘汰 / 库一个字段都不动", async () => {

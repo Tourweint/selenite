@@ -1,0 +1,921 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="paper">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Selenite · 记忆页 · 三版设计</title>
+<style>
+:root {
+  --bg: #fdf9f2;
+  --surface: #fdf9f2;
+  --surface-low: #f7f3eb;
+  --card: #f6f1e7;
+  --card-high: #ede9e0;
+  --text: #2e2b3a;
+  --text-2: #6e6b7e;
+  --text-3: #9a97a5;
+  --outline: #c8c5bc;
+  --divider: rgba(200, 197, 188, .55);
+  --hairline: rgba(46, 43, 58, .07);
+  --accent: #3e4a8c;
+  --accent-soft: #f0ede5;
+  --accent-line: rgba(62, 74, 140, .24);
+  --ok: #1f9d4d;
+  --warn: #b07d2b;
+  --err: #b3564d;
+  --shadow: 0 1px 2px rgba(46, 43, 58, .04);
+  --shadow-float: 0 10px 32px rgba(46, 43, 58, .12), 0 2px 8px rgba(46, 43, 58, .05);
+  --font: "Songti SC", "Noto Serif SC", "Source Han Serif SC", "STSong", "SimSun", "Microsoft YaHei", serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --ease: cubic-bezier(.16, 1, .3, 1);
+  color-scheme: light;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; min-height: 100%; }
+body {
+  background: #f1ece2;
+  color: var(--text);
+  font-family: var(--font);
+  -webkit-font-smoothing: antialiased;
+  padding-bottom: 80px;
+}
+button, input { font: inherit; color: inherit; }
+button { cursor: pointer; }
+svg { display: block; }
+h1, h2, h3, p { margin: 0; }
+
+/* ── 顶部演示条 ─────────────────────────────── */
+.demo-bar {
+  position: sticky; top: 0; z-index: 100;
+  display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+  padding: 12px 26px;
+  background: rgba(253, 249, 242, .9);
+  backdrop-filter: blur(14px);
+  border-bottom: 1px solid var(--hairline);
+}
+.demo-brand { font-size: 13px; font-weight: 600; letter-spacing: .02em; margin-right: 4px; }
+.demo-brand span { color: var(--text-3); font-weight: 400; margin-left: 8px; font-size: 11.5px; }
+.seg { display: inline-flex; gap: 2px; padding: 3px; border-radius: 999px; background: var(--surface-low); }
+.seg button {
+  height: 30px; padding: 0 13px; border: 0; border-radius: 999px;
+  background: transparent; color: var(--text-2); font-size: 12.5px;
+}
+.seg button[aria-pressed="true"] { background: var(--card); color: var(--text); box-shadow: var(--shadow); }
+.demo-state { margin-left: auto; display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--text-3); }
+.demo-state .seg button { height: 26px; padding: 0 10px; font-size: 11.5px; }
+
+/* ── 窗口与设置导航 ─────────────────────────── */
+.stage { max-width: 1180px; margin: 28px auto; padding: 0 24px; }
+.window {
+  display: grid; grid-template-columns: 188px minmax(0, 1fr);
+  min-height: 850px;
+  background: var(--bg);
+  border-radius: 24px;
+  box-shadow: 0 24px 70px rgba(46, 43, 58, .14), 0 4px 16px rgba(46, 43, 58, .06);
+  overflow: hidden;
+}
+.nav { background: var(--surface-low); padding: 26px 14px; display: flex; flex-direction: column; gap: 3px; }
+.nav-cap { padding: 0 10px 12px; font-size: 11px; letter-spacing: .14em; color: var(--text-3); }
+.nav-item { padding: 8px 10px; border-radius: 10px; font-size: 12.5px; color: var(--text-2); }
+.nav-item.on { background: var(--card); color: var(--text); font-weight: 600; }
+.main { padding: 38px 46px 54px; min-width: 0; }
+.ver { max-width: 860px; }
+
+/* ── 通用零件 ───────────────────────────────── */
+.vhead { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
+.vhead h1 { font-size: 22px; font-weight: 600; letter-spacing: .01em; line-height: 1.25; }
+.vsub { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 7px; font-size: 12px; color: var(--text-2); }
+.vsub a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-line); cursor: pointer; }
+.dot { width: 3px; height: 3px; border-radius: 50%; background: var(--text-3); }
+.vhead-actions { display: flex; align-items: center; gap: 8px; flex: none; }
+.btn {
+  height: 32px; padding: 0 13px; display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid transparent; border-radius: 999px; background: var(--card);
+  color: var(--text); font-size: 12.5px; white-space: nowrap;
+}
+.btn:hover { border-color: var(--outline); }
+.btn.primary { background: var(--accent); color: #fff; }
+.btn.primary:hover { filter: brightness(1.07); }
+.btn.ghost { background: transparent; color: var(--text-2); }
+.btn.ghost:hover { background: var(--surface-low); color: var(--text); border-color: transparent; }
+.btn.subtle { background: var(--surface-low); color: var(--text-2); }
+.btn:disabled { opacity: .55; cursor: default; filter: none; }
+.btn .q {
+  width: 15px; height: 15px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center;
+  background: rgba(255, 255, 255, .2); font-size: 9.5px; line-height: 1;
+}
+.btn.ghost .q { background: var(--card-high); color: var(--text-3); }
+.icon-btn {
+  width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center;
+  border: 0; border-radius: 9px; background: transparent; color: var(--text-3);
+}
+.icon-btn:hover { background: var(--surface-low); color: var(--text); }
+.icon-btn svg { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.searchbar {
+  flex: 1; min-width: 0; height: 34px; display: flex; align-items: center; gap: 8px;
+  padding: 0 13px; border-radius: 999px; background: var(--surface-low); color: var(--text-3);
+}
+.searchbar svg { width: 14px; height: 14px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; }
+.searchbar input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; font-size: 12.5px; color: var(--text); }
+.searchbar input::placeholder { color: var(--text-3); }
+.selectpill {
+  height: 34px; padding: 0 12px; display: inline-flex; align-items: center; gap: 6px; flex: none;
+  border-radius: 999px; background: var(--surface-low); color: var(--text-2); font-size: 12px;
+}
+.selectpill svg { width: 12px; height: 12px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; }
+.toolbar { display: flex; align-items: center; gap: 8px; margin: 22px 0 10px; }
+.chev { width: 14px; height: 14px; stroke: var(--text-3); fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; transition: transform .18s var(--ease); }
+.open > * .chev, .open > .ghead .chev { transform: rotate(90deg); }
+
+/* 整理状态（演示条切换） */
+.when-running, .when-pending { display: none; }
+body[data-state="running"] .when-running { display: flex; }
+body[data-state="pending"] .when-pending { display: block; }
+body[data-state="running"] .when-idle { display: none; }
+body[data-state="pending"] .when-idle { display: none; }
+.run-strip {
+  margin-top: 14px; align-items: center; gap: 9px;
+  padding: 11px 14px; border-radius: 13px;
+  background: var(--accent-soft); border: 1px solid var(--accent-line);
+  font-size: 12.5px; color: var(--text-2);
+}
+.spinner {
+  width: 13px; height: 13px; flex: none; border-radius: 50%;
+  border: 2px solid var(--accent-line); border-top-color: var(--accent);
+  animation: spin .9s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.run-strip b { color: var(--text); font-weight: 600; }
+.run-strip .elapsed { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--text-3); font-size: 11.5px; }
+
+/* ── 版 A：档案卡 ───────────────────────────── */
+.a-summary {
+  display: flex; gap: 26px; justify-content: space-between;
+  margin-top: 22px; padding: 18px 20px;
+  background: var(--card); border-radius: 18px; box-shadow: var(--shadow);
+}
+.a-num { display: flex; align-items: baseline; gap: 7px; }
+.a-num b { font-size: 34px; line-height: 1; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+.a-num span { font-size: 12px; color: var(--text-2); }
+.a-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 13px; }
+.a-chip {
+  padding: 3px 9px; border-radius: 999px; background: var(--surface-low);
+  color: var(--text-2); font-size: 11.5px; border: 1px solid transparent;
+}
+.a-chip b { color: var(--text); font-weight: 600; margin-left: 4px; font-variant-numeric: tabular-nums; }
+.a-chip.on { background: var(--accent-soft); border-color: var(--accent-line); color: var(--text); }
+.a-side { flex: none; width: 250px; padding-left: 24px; border-left: 1px solid var(--divider); display: flex; flex-direction: column; gap: 9px; }
+.a-side-line { font-size: 12px; color: var(--text-2); line-height: 1.5; }
+.a-side-line b { color: var(--text); font-weight: 600; }
+.a-audit { font-size: 11.5px; color: var(--text-3); line-height: 1.55; }
+.a-audit em { font-style: normal; color: var(--warn); }
+.prop-card {
+  margin-top: 14px; border: 1px solid var(--accent-line); border-radius: 16px;
+  background: var(--accent-soft); padding: 13px 15px;
+}
+.prop-head { display: flex; align-items: center; gap: 8px; font-size: 12.5px; font-weight: 600; }
+.prop-head .n { font-size: 11px; color: var(--text-2); background: var(--card); border-radius: 999px; padding: 1px 7px; font-weight: 500; }
+.prop-head .more { margin-left: auto; font-size: 11.5px; color: var(--text-2); font-weight: 400; }
+.prop-item { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; gap: 9px; align-items: start; padding: 10px 0 2px; }
+.prop-item + .prop-item { border-top: 1px solid var(--hairline); margin-top: 8px; }
+.ptag { font-size: 10px; line-height: 1.6; text-align: center; border-radius: 999px; border: 1px solid var(--accent-line); color: var(--text-2); }
+.ptag.keep { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 32%, transparent); }
+.ptext { min-width: 0; font-size: 12.5px; line-height: 1.5; }
+.ptext .why { display: block; margin-top: 2px; font-size: 11.5px; color: var(--text-2); }
+.pacts { display: flex; gap: 4px; }
+.pacts .btn { height: 26px; padding: 0 9px; font-size: 11.5px; background: var(--card); }
+.groups { display: flex; flex-direction: column; gap: 5px; margin-top: 6px; }
+.group { border-radius: 14px; background: var(--card); overflow: hidden; }
+.ghead { display: flex; align-items: center; gap: 9px; height: 43px; padding: 0 13px; border-radius: 13px; cursor: pointer; }
+.ghead:hover { background: var(--surface-low); }
+.group.open .ghead { background: var(--surface-low); border-radius: 13px 13px 0 0; }
+.gtitle { font-size: 13px; font-weight: 600; }
+.gcount { padding: 1px 7px; border-radius: 999px; background: var(--bg); color: var(--text-3); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+.ghint { font-size: 11.5px; color: var(--text-3); }
+.ghead .chev { margin-left: auto; }
+.gbody { display: none; background: var(--card); border-radius: 0 0 13px 13px; }
+.group.open .gbody { display: block; }
+.gmore { padding: 9px 14px 11px; font-size: 11.5px; color: var(--text-3); border-top: 1px solid var(--hairline); }
+.gmore a { color: var(--accent); text-decoration: none; cursor: pointer; }
+.mrow { display: flex; align-items: flex-start; gap: 14px; padding: 10px 14px; }
+.mrow + .mrow { border-top: 1px solid var(--divider); }
+.mtext { min-width: 0; flex: 1; font-size: 12.8px; line-height: 1.55; }
+.mtext .why { display: block; margin-top: 2px; font-size: 11.5px; line-height: 1.5; color: var(--text-2); }
+.mmeta { flex: none; padding-top: 1px; font-size: 10.8px; color: var(--text-3); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.mactions { flex: none; display: flex; gap: 1px; opacity: 0; transition: opacity .12s ease; }
+.mrow:hover .mactions { opacity: 1; }
+.a-external { margin-top: 28px; padding-top: 18px; border-top: 1px solid var(--divider); }
+.ext-head { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; }
+.ext-head .status { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
+.ext-head .stext { font-size: 11.5px; font-weight: 400; color: var(--text-3); }
+.ext-meta { margin-top: 5px; font-size: 11.5px; color: var(--text-3); line-height: 1.55; }
+.ext-search { display: flex; gap: 8px; margin-top: 12px; }
+
+/* ── 版 B：两个世界 ─────────────────────────── */
+.b-seg { display: inline-flex; gap: 2px; margin-top: 20px; padding: 3px; background: var(--surface-low); border-radius: 999px; }
+.b-seg button { height: 30px; padding: 0 14px; border: 0; border-radius: 999px; background: transparent; color: var(--text-2); font-size: 12.5px; }
+.b-seg button[aria-pressed="true"] { background: var(--card); color: var(--text); box-shadow: var(--shadow); }
+.b-hero { padding: 28px 2px 8px; }
+.b-hero .big { font-size: 27px; line-height: 1.25; letter-spacing: -.01em; }
+.b-hero .big b { font-size: 40px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.b-hero .sub { margin-top: 7px; font-size: 12.5px; color: var(--text-2); }
+.b-search { display: flex; gap: 8px; margin: 18px 0 6px; }
+.b-block { margin-top: 20px; }
+.b-head { display: flex; align-items: center; gap: 8px; padding-bottom: 8px; border-bottom: 1px solid var(--divider); }
+.b-head h3 { font-size: 12.5px; font-weight: 600; color: var(--text-2); letter-spacing: .02em; }
+.b-head .n { font-size: 10.5px; color: var(--text-3); }
+.b-head .bt { margin-left: auto; font-size: 11px; color: var(--text-3); }
+.b-row { display: flex; align-items: baseline; gap: 14px; padding: 10px 0; border-bottom: 1px solid var(--divider); }
+.b-row:last-child { border-bottom: 0; }
+.b-row .t { flex: 1; min-width: 0; font-size: 12.8px; line-height: 1.55; }
+.b-row .t .why { display: block; margin-top: 2px; font-size: 11.5px; color: var(--text-2); }
+.b-row .m { flex: none; font-size: 10.8px; color: var(--text-3); white-space: nowrap; }
+.b-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 26px; }
+.b-history {
+  width: 100%; display: flex; align-items: center; gap: 12px;
+  margin-top: 24px; padding: 14px 16px; text-align: left;
+  border: 1px solid var(--card-border); border-radius: 14px; background: var(--surface-low);
+}
+.b-history:hover { border-color: var(--outline); }
+.b-history .hh { font-size: 12.5px; font-weight: 600; }
+.b-history .hs { font-size: 11.5px; color: var(--text-3); margin-top: 2px; }
+.b-history .chev { margin-left: auto; }
+.b-history-body { display: none; padding: 0 2px; }
+.b-history.open + .b-history-body { display: block; }
+.b-history.open .chev { transform: rotate(90deg); }
+.b-external-tab { margin-top: 8px; }
+.ext-card { margin-top: 20px; padding: 18px 20px; background: var(--card); border-radius: 18px; box-shadow: var(--shadow); }
+.ext-title-row { display: flex; align-items: center; gap: 9px; }
+.ext-title-row h2 { font-size: 14px; font-weight: 600; }
+.ext-title-row .status { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); }
+.ext-title-row .stext { font-size: 11.5px; color: var(--text-3); }
+.ext-boundary { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 13px; font-size: 11.8px; color: var(--text-2); }
+.ext-boundary b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+.ext-note { margin-top: 8px; font-size: 11.3px; color: var(--text-3); line-height: 1.55; }
+.ext-results { margin-top: 16px; }
+.ext-group { margin-top: 10px; }
+.ext-group h4 { margin: 0 0 6px; font-size: 11.5px; color: var(--text-3); font-weight: 500; }
+.ext-hit { padding: 9px 0; border-top: 1px solid var(--divider); }
+.ext-hit .ht { font-size: 12.5px; line-height: 1.55; }
+.ext-hit .hm { margin-top: 3px; font-size: 10.8px; color: var(--text-3); }
+.ext-foot { margin-top: 12px; font-size: 11px; color: var(--text-3); line-height: 1.6; }
+.export-card { margin-top: 16px; padding: 15px 20px; border: 1px solid var(--card-border); border-radius: 16px; }
+.export-row { display: flex; align-items: center; gap: 14px; }
+.export-row .et { flex: 1; }
+.export-row .et b { font-size: 12.5px; font-weight: 600; }
+.export-row .et p { margin-top: 3px; font-size: 11.5px; color: var(--text-2); line-height: 1.5; }
+.export-stat { margin-top: 9px; font-size: 11px; color: var(--text-3); }
+.switch { width: 36px; height: 20px; border-radius: 999px; border: 2px solid transparent; background: color-mix(in srgb, var(--text-3) 34%, transparent); position: relative; flex: none; padding: 0; }
+.switch::after { content: ""; position: absolute; top: 0; left: 0; width: 16px; height: 16px; border-radius: 50%; background: var(--text-2); transition: transform .15s var(--ease); }
+.switch[aria-checked="true"] { background: var(--accent); }
+.switch[aria-checked="true"]::after { background: #fff; transform: translateX(16px); }
+
+/* ── 版 C：时间轴 ───────────────────────────── */
+.c-meta-line { display: flex; align-items: center; gap: 8px; margin-top: 7px; font-size: 11.8px; color: var(--text-3); }
+body:not([data-state="running"]) .c-meta-line.when-running { display: none; }
+body[data-state="running"] .c-meta-line.when-idle { display: none; }
+.c-filters { display: flex; align-items: center; gap: 2px; flex-wrap: wrap; margin-top: 20px; padding-bottom: 11px; border-bottom: 1px solid var(--divider); }
+.c-chip { padding: 5px 10px; border: 0; border-radius: 999px; background: transparent; color: var(--text-2); font-size: 12px; }
+.c-chip:hover { background: var(--surface-low); color: var(--text); }
+.c-chip[aria-pressed="true"] { background: var(--text); color: var(--bg); }
+.c-search-btn { margin-left: auto; }
+.c-pinned { margin-top: 22px; }
+.c-cap { font-size: 11px; letter-spacing: .1em; color: var(--text-3); }
+.c-pin-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 9px; }
+.c-pin { padding: 10px 12px; border-radius: 12px; background: var(--card); }
+.c-pin .k { font-size: 10.5px; color: var(--text-3); }
+.c-pin .v { margin-top: 3px; font-size: 12.5px; line-height: 1.5; }
+.c-timeline { margin-top: 28px; }
+.c-month { border-bottom: 1px solid var(--divider); }
+.c-mhead { display: flex; align-items: center; gap: 9px; padding: 10px 0; cursor: pointer; }
+.c-mtitle { font-size: 11.5px; letter-spacing: .06em; color: var(--text-2); font-weight: 600; }
+.c-mcount { font-size: 10.5px; color: var(--text-3); }
+.c-mhead .chev { margin-left: auto; }
+.c-month.open .c-mhead .chev { transform: rotate(90deg); }
+.c-mbody { display: none; }
+.c-month.open .c-mbody { display: block; }
+.c-entry { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 14px; padding: 11px 0; border-top: 1px solid var(--hairline); }
+.c-entry time { font-size: 10.8px; color: var(--text-3); font-variant-numeric: tabular-nums; padding-top: 2px; }
+.c-entry .content { font-size: 12.6px; line-height: 1.6; }
+.c-kind { display: inline-block; margin-right: 6px; padding: 0 6px; border: 1px solid var(--divider); border-radius: 999px; font-size: 10px; line-height: 1.7; color: var(--text-3); vertical-align: 1px; }
+.c-fold { display: flex; align-items: center; gap: 8px; margin: 8px 0 12px; padding: 8px 11px; border-radius: 10px; background: var(--surface-low); font-size: 11.5px; color: var(--text-2); }
+.c-fold .el { margin-left: auto; font-size: 10.8px; color: var(--text-3); }
+.c-external { margin-top: 30px; padding-top: 18px; border-top: 1px solid var(--divider); display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.c-external .name { font-size: 12.5px; font-weight: 600; }
+.c-external .stat { font-size: 11.3px; color: var(--text-3); }
+.c-external .btn { margin-left: auto; }
+
+/* ── 悬停说明 ───────────────────────────────── */
+.tip {
+  position: fixed; z-index: 999; max-width: 330px;
+  padding: 8px 11px; border-radius: 11px;
+  background: var(--text); color: var(--bg);
+  font-size: 11.8px; line-height: 1.55;
+  box-shadow: var(--shadow-float); pointer-events: none;
+  animation: tipIn .12s ease-out;
+}
+@keyframes tipIn { from { opacity: 0; transform: translateY(2px); } }
+
+@media (max-width: 980px) {
+  .window { grid-template-columns: 1fr; }
+  .nav { display: none; }
+  .main { padding: 28px 24px 40px; }
+  .a-summary { flex-direction: column; }
+  .a-side { width: auto; padding-left: 0; border-left: 0; border-top: 1px solid var(--divider); padding-top: 12px; }
+  .b-cols, .c-pin-grid { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body data-state="idle">
+
+<div class="demo-bar">
+  <div class="demo-brand">记忆页 · 三版设计 <span>电脑端 · 设置 → 记忆</span></div>
+  <div class="seg" id="version-tabs">
+    <button type="button" data-v="a" aria-pressed="true">A · 档案卡</button>
+    <button type="button" data-v="b" aria-pressed="false">B · 两个世界</button>
+    <button type="button" data-v="c" aria-pressed="false">C · 时间轴</button>
+  </div>
+  <div class="demo-state">
+    整理状态
+    <div class="seg" id="state-tabs">
+      <button type="button" data-s="idle" aria-pressed="true">空闲</button>
+      <button type="button" data-s="running" aria-pressed="false">运行中</button>
+      <button type="button" data-s="pending" aria-pressed="false">有建议</button>
+    </div>
+  </div>
+</div>
+
+<div class="stage">
+  <div class="window">
+    <aside class="nav">
+      <div class="nav-cap">设置</div>
+      <div class="nav-item">外观</div>
+      <div class="nav-item">会话</div>
+      <div class="nav-item">项目</div>
+      <div class="nav-item">归档</div>
+      <div class="nav-item">提醒</div>
+      <div class="nav-item">连接</div>
+      <div class="nav-item">模型</div>
+      <div class="nav-item">服务</div>
+      <div class="nav-item on">记忆</div>
+      <div class="nav-item">人设</div>
+      <div class="nav-item">技能</div>
+      <div class="nav-item">关于</div>
+    </aside>
+
+    <main class="main">
+      <!-- ═══ 版 A ═══ -->
+      <section class="ver" data-ver="a">
+        <div class="vhead">
+          <div>
+            <h1>记忆</h1>
+            <div class="vsub when-idle">
+              <span>它记得 <b>86</b> 件事</span><span class="dot"></span>
+              <span>上次整理 3 天前</span><span class="dot"></span>
+              <a>2 条建议待看</a>
+            </div>
+            <div class="vsub when-running"><span>正在整理记忆…</span></div>
+          </div>
+          <div class="vhead-actions">
+            <button class="btn ghost" type="button" data-tip="从 JSON 文件导入旧记忆。只增不改：重复的会跳过，绝不覆盖已有条目。">导入</button>
+            <button class="btn primary" type="button" data-tip="整理记忆 = 让模型回看最近的记忆和原始对话，找出重复、过时、说法不一致的条目。&#10;&#10;它只给建议：你逐条点「应用」才会把旧的那条标成过时；不会自动删，也没有「全部应用」。">
+              整理记忆 <span class="q">?</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="a-summary">
+          <div>
+            <div class="a-num"><b>86</b><span>条记忆</span></div>
+            <div class="a-chips">
+              <span class="a-chip on">全部<b>86</b></span>
+              <span class="a-chip">偏好<b>8</b></span>
+              <span class="a-chip">打算<b>3</b></span>
+              <span class="a-chip">事实<b>14</b></span>
+              <span class="a-chip">经验<b>5</b></span>
+              <span class="a-chip">人事物<b>12</b></span>
+              <span class="a-chip">经历<b>44</b></span>
+            </div>
+          </div>
+          <div class="a-side">
+            <div class="a-side-line when-idle">上次整理 <b>11-10 22:14</b><br>留下 <b>2 条</b>建议没处理</div>
+            <div class="a-side-line when-running"><b>正在整理</b> · 已 12 秒<br>可以切走，回来自动接上</div>
+            <div class="a-audit">系统自检：<em>2 条</em>说法完全重复 · <em>3 条</em> 90 天没被想起</div>
+          </div>
+        </div>
+
+        <div class="run-strip when-running">
+          <span class="spinner"></span>
+          <span><b>正在整理 86 条记忆</b> · 找重复、找过时、回原始对话找证据</span>
+          <span class="elapsed">已 12s</span>
+        </div>
+
+        <div class="prop-card when-pending">
+          <div class="prop-head">
+            整理建议 <span class="n">2 条</span>
+            <span class="more">11-10 22:14 · 只建议，不会自动改</span>
+          </div>
+          <div class="prop-item">
+            <span class="ptag keep">保留</span>
+            <div class="ptext">
+              汇报先用一句话总结，再说细节。
+              <span class="why">收编：闲聊里说过一次「不爱看长报告」。出处：11-06 的一段对话</span>
+            </div>
+            <div class="pacts"><button class="btn" type="button">应用</button><button class="btn ghost" type="button">忽略</button></div>
+          </div>
+          <div class="prop-item">
+            <span class="ptag keep">保留</span>
+            <div class="ptext">
+              住在杭州，通勤靠地铁。
+              <span class="why">收编：旧条只写了「住在杭州」，新的更完整。出处：10-30 日记</span>
+            </div>
+            <div class="pacts"><button class="btn" type="button">应用</button><button class="btn ghost" type="button">忽略</button></div>
+          </div>
+        </div>
+
+        <div class="toolbar">
+          <div class="searchbar">
+            <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+            <input placeholder="搜记忆内容，比如「猫」「汇报」「跑步」" />
+          </div>
+        </div>
+
+        <div class="groups">
+          <section class="group open" data-kind="preference">
+            <div class="ghead">
+              <span class="gtitle" data-tip="你的喜好与习惯。每轮对话开头都会被想起，永不自动淘汰。">偏好</span>
+              <span class="gcount">8</span>
+              <span class="ghint">每轮都会想起</span>
+              <svg class="chev" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>
+            </div>
+            <div class="gbody">
+              <div class="mrow">
+                <div class="mtext">汇报先用一句话总结，再说细节。<span class="why">Why: 长报告你看到一半就跳过了。</span></div>
+                <div class="mmeta">11-08 · 想起 12 次</div>
+                <div class="mactions"><button class="icon-btn" type="button" title="标为过时">✕</button><button class="icon-btn" type="button" title="删除">⌫</button></div>
+              </div>
+              <div class="mrow">
+                <div class="mtext">不要主动改代码风格，按仓库现有写法来。<span class="why">How: 动别人的文件前先读同目录的三个文件。</span></div>
+                <div class="mmeta">11-06 · 想起 7 次</div>
+                <div class="mactions"><button class="icon-btn" type="button" title="标为过时">✕</button><button class="icon-btn" type="button" title="删除">⌫</button></div>
+              </div>
+              <div class="mrow">
+                <div class="mtext">称呼你时用「你」，不用「您」。</div>
+                <div class="mmeta">10-29 · 想起 21 次</div>
+                <div class="mactions"><button class="icon-btn" type="button" title="标为过时">✕</button><button class="icon-btn" type="button" title="删除">⌫</button></div>
+              </div>
+              <div class="gmore">还有 5 条 · <a>展开全部</a></div>
+            </div>
+          </section>
+
+          <section class="group open" data-kind="intention">
+            <div class="ghead">
+              <span class="gtitle" data-tip="还没兑现的打算。到期后自动变成普通事实，不会一直挂着。">打算</span>
+              <span class="gcount">3</span>
+              <span class="ghint">未兑现的，优先想起</span>
+              <svg class="chev" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>
+            </div>
+            <div class="gbody">
+              <div class="mrow">
+                <div class="mtext">11 月底前把记忆页重做完。</div>
+                <div class="mmeta">11-12 · 还有 17 天</div>
+                <div class="mactions"><button class="icon-btn" type="button" title="标为过时">✕</button><button class="icon-btn" type="button" title="删除">⌫</button></div>
+              </div>
+              <div class="mrow">
+                <div class="mtext">下周开始每天走 8000 步。</div>
+                <div class="mmeta">11-09 · 还有 3 天</div>
+                <div class="mactions"><button class="icon-btn" type="button" title="标为过时">✕</button><button class="icon-btn" type="button" title="删除">⌫</button></div>
+              </div>
+              <div class="gmore">还有 1 条 · <a>展开全部</a></div>
+            </div>
+          </section>
+
+          <section class="group" data-kind="fact">
+            <div class="ghead">
+              <span class="gtitle" data-tip="关于你和你的生活的客观事实。按相关度召回，不会每次都出现。">事实</span>
+              <span class="gcount">14</span>
+              <svg class="chev" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>
+            </div>
+            <div class="gbody">
+              <div class="mrow"><div class="mtext">家里有两只猫，大的叫豆豆。</div><div class="mmeta">11-02 · 想起 6 次</div></div>
+              <div class="mrow"><div class="mtext">住在杭州，通勤靠地铁。</div><div class="mmeta">10-30 · 想起 9 次</div></div>
+              <div class="gmore">还有 12 条 · <a>展开全部</a></div>
+            </div>
+          </section>
+
+          <section class="group" data-kind="experience">
+            <div class="ghead">
+              <span class="gtitle" data-tip="这类活下次可以怎么做。从你的纠正里提炼出来，不会过期。">经验</span>
+              <span class="gcount">5</span>
+              <svg class="chev" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>
+            </div>
+            <div class="gbody">
+              <div class="mrow"><div class="mtext">跨仓库改契约：先写方案，再改两端，最后回写接口文档。</div><div class="mmeta">11-07 · 用过 4 次</div></div>
+              <div class="gmore">还有 4 条 · <a>展开全部</a></div>
+            </div>
+          </section>
+
+          <section class="group" data-kind="entity">
+            <div class="ghead">
+              <span class="gtitle" data-tip="重要的人、项目、东西。聊到相关的就会想起。">人事物</span>
+              <span class="gcount">12</span>
+              <svg class="chev" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>
+            </div>
+            <div class="gbody">
+              <div class="mrow"><div class="mtext">豆豆 · 猫，2019 年抱回来的。</div><div class="mmeta">10-30</div></div>
+              <div class="mrow"><div class="mtext">小周 · 同事，负责后端。</div><div class="mmeta">10-18</div></div>
+              <div class="gmore">还有 10 条 · <a>展开全部</a></div>
+            </div>
+          </section>
+
+          <section class="group" data-kind="episode">
+            <div class="ghead">
+              <span class="gtitle" data-tip="聊过、经历过的事。日常经过，按时间倒序，默认收起；展开才占位置。">经历</span>
+              <span class="gcount">44</span>
+              <span class="ghint">日常经过 · 默认收起</span>
+              <svg class="chev" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>
+            </div>
+            <div class="gbody">
+              <div class="mrow"><div class="mtext">11-13 · 把记忆页整理状态的问题定位了：请求跟着页面走，切页就丢。</div><div class="mmeta">今天</div></div>
+              <div class="mrow"><div class="mtext">11-12 · 和同事把拖了两周的问题定了，方案改成两步走。</div><div class="mmeta">昨天</div></div>
+              <div class="mrow"><div class="mtext">11-10 · 晚上在江边跑了七公里，风很大。</div><div class="mmeta">3 天前</div></div>
+              <div class="gmore">还有 41 条 · <a>按月展开</a></div>
+            </div>
+          </section>
+        </div>
+
+        <div class="a-external">
+          <div class="ext-head">一生记忆库<span class="stext">2020-09 至今 · 100 个事件 / 294 个人物</span></div>
+        </div>
+      </section>
+
+      <!-- ═══ 版 B ═══ -->
+      <section class="ver" data-ver="b" hidden>
+        <div class="vhead">
+          <div>
+            <h1>记忆</h1>
+            <div class="vsub when-idle"><span>它记得 42 件要紧的事</span><span class="dot"></span><span>另外 44 条过往经历，收在下面</span></div>
+            <div class="vsub when-running"><span>正在整理记忆… 已 12 秒</span></div>
+          </div>
+          <div class="vhead-actions">
+            <button class="icon-btn" type="button" title="导入旧记忆" data-tip="从 JSON 文件导入旧记忆。只增不改：重复的跳过，不覆盖已有条目。">
+              <svg viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
+            </button>
+            <button class="btn subtle" type="button" data-tip="整理记忆 = 让模型回看最近的记忆和原始对话，找出重复、过时、说法不一致的条目。它只给建议：你逐条点「应用」才会改；不会自动删。">
+              整理 <span class="q">?</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="b-seg" id="b-seg">
+          <button type="button" data-b="mine" aria-pressed="true">助手记忆</button>
+          <button type="button" data-b="external" aria-pressed="false">一生记忆库</button>
+        </div>
+
+        <div id="b-mine">
+          <div class="b-hero">
+            <div class="big">它记得 <b>42</b> 件要紧的事</div>
+            <div class="sub">偏好、打算、事实、经验、人事物。另外 44 条过往经历，默认收在下面。</div>
+          </div>
+
+          <div class="run-strip when-running">
+            <span class="spinner"></span>
+            <span><b>正在整理</b> · 找出重复和过时的条目</span>
+            <span class="elapsed">已 12s</span>
+          </div>
+
+          <div class="prop-card when-pending">
+            <div class="prop-head">整理建议 <span class="n">2 条</span><span class="more">11-10 22:14</span></div>
+            <div class="prop-item">
+              <span class="ptag keep">保留</span>
+              <div class="ptext">汇报先用一句话总结，再说细节。<span class="why">收编：闲聊里说过一次「不爱看长报告」。</span></div>
+              <div class="pacts"><button class="btn" type="button">应用</button><button class="btn ghost" type="button">忽略</button></div>
+            </div>
+          </div>
+
+          <div class="b-search">
+            <div class="searchbar">
+              <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+              <input placeholder="搜记忆内容" />
+            </div>
+          </div>
+
+          <section class="b-block">
+            <div class="b-head"><h3>偏好</h3><span class="n">8</span><span class="bt">每轮都会想起</span></div>
+            <div class="b-row">
+              <div class="t">汇报先用一句话总结，再说细节。<span class="why">Why: 长报告你看到一半就跳过了。</span></div>
+              <div class="m">11-08 · 想起 12 次</div>
+            </div>
+            <div class="b-row">
+              <div class="t">不要主动改代码风格，按仓库现有写法来。</div>
+              <div class="m">11-06 · 想起 7 次</div>
+            </div>
+            <div class="b-row">
+              <div class="t">称呼你时用「你」，不用「您」。</div>
+              <div class="m">10-29 · 想起 21 次</div>
+            </div>
+            <div class="b-row"><div class="t" style="color:var(--text-3)">还有 5 条偏好</div><div class="m"><a style="color:var(--accent);text-decoration:none">展开</a></div></div>
+          </section>
+
+          <section class="b-block">
+            <div class="b-head"><h3>打算</h3><span class="n">3</span><span class="bt">未兑现的，优先想起</span></div>
+            <div class="b-row">
+              <div class="t">11 月底前把记忆页重做完。</div>
+              <div class="m">还有 17 天</div>
+            </div>
+            <div class="b-row">
+              <div class="t">下周开始每天走 8000 步。</div>
+              <div class="m">还有 3 天</div>
+            </div>
+          </section>
+
+          <div class="b-cols">
+            <section class="b-block">
+              <div class="b-head"><h3>事实</h3><span class="n">14</span></div>
+              <div class="b-row"><div class="t">家里有两只猫，大的叫豆豆。</div><div class="m">11-02</div></div>
+              <div class="b-row"><div class="t">住在杭州，通勤靠地铁。</div><div class="m">10-30</div></div>
+              <div class="b-row"><div class="t" style="color:var(--text-3)">还有 12 条</div></div>
+            </section>
+            <section class="b-block">
+              <div class="b-head"><h3>人事物</h3><span class="n">12</span></div>
+              <div class="b-row"><div class="t">豆豆 · 猫，2019 年抱回来的。</div><div class="m">10-30</div></div>
+              <div class="b-row"><div class="t">小周 · 同事，负责后端。</div><div class="m">10-18</div></div>
+              <div class="b-row"><div class="t" style="color:var(--text-3)">还有 10 条</div></div>
+            </section>
+          </div>
+
+          <section class="b-block">
+            <div class="b-head"><h3>经验</h3><span class="n">5</span><span class="bt">这类活下次怎么做</span></div>
+            <div class="b-row">
+              <div class="t">跨仓库改契约：先写方案，再改两端，最后回写接口文档。</div>
+              <div class="m">11-07 · 用过 4 次</div>
+            </div>
+            <div class="b-row">
+              <div class="t">长任务派出去时，验收标准要写进任务书。</div>
+              <div class="m">11-03 · 用过 2 次</div>
+            </div>
+          </section>
+
+          <button class="b-history" type="button">
+            <div>
+              <div class="hh">过往经历</div>
+              <div class="hs">44 条 · 最近 11-13「把记忆页整理状态的问题定位了」</div>
+            </div>
+            <svg class="chev" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>
+          </button>
+          <div class="b-history-body">
+            <div class="b-row"><div class="t">11-13 · 把记忆页整理状态的问题定位了：请求跟着页面走，切页就丢。</div><div class="m">今天</div></div>
+            <div class="b-row"><div class="t">11-12 · 和同事把拖了两周的问题定了，方案改成两步走。</div><div class="m">昨天</div></div>
+            <div class="b-row"><div class="t">11-10 · 晚上在江边跑了七公里，风很大。</div><div class="m">3 天前</div></div>
+            <div class="b-row"><div class="t" style="color:var(--text-3)">还有 41 条 · 按月展开</div></div>
+          </div>
+        </div>
+
+        <div id="b-external" hidden>
+          <div class="ext-card">
+            <div class="ext-title-row">
+              <h2>一生记忆库</h2>
+              <span class="status"></span><span class="stext">已连接 · 2020-09 至今</span>
+            </div>
+            <div class="ext-boundary">
+              <span><b>100</b> 个事件</span>
+              <span><b>294</b> 个人物</span>
+              <span><b>9621</b> 条证据</span>
+              <span><b>74</b> 个月</span>
+              <span>来源：日记 / 微信 / AI 对话 / 剪贴板 / 语音</span>
+            </div>
+            <div class="ext-note">只读：这里查到的是原始证据，不改你的本机记忆。没查到的月份会如实标出来。</div>
+            <div class="ext-search">
+              <div class="searchbar">
+                <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                <input value="2024 年秋天我在忙什么" />
+              </div>
+              <button class="btn" type="button">查</button>
+            </div>
+            <div class="ext-results">
+              <div class="ext-group">
+                <h4>日记忆 · 2</h4>
+                <div class="ext-hit">
+                  <div class="ht">2024-09-18 · 在准备秋招，白天改简历，晚上做算法题。</div>
+                  <div class="hm">memory_day · 日记忆命中</div>
+                </div>
+                <div class="ext-hit">
+                  <div class="ht">2024-10-03 · 面试完第一轮，感觉一般，回来把项目介绍重写了一遍。</div>
+                  <div class="hm">memory_day · 关键词命中</div>
+                </div>
+              </div>
+              <div class="ext-group">
+                <h4>事件 · 1</h4>
+                <div class="ext-hit">
+                  <div class="ht">秋招 · 2024-09 ~ 2024-11 · 结果：拿到两个 offer</div>
+                  <div class="hm">event · 事件弧线</div>
+                </div>
+              </div>
+              <div class="ext-foot">没查：2019 年以前 · 缺月：2021 全年 · 不确定：2024 年 8 月没有记录</div>
+            </div>
+          </div>
+
+          <div class="export-card">
+            <div class="export-row">
+              <div class="et">
+                <b>对话归档</b>
+                <p>每轮主对话结束后，把原文追加到导出目录，由记忆库那边定期收走。默认关——开了才往外送数据。</p>
+              </div>
+              <button class="switch" type="button" role="switch" aria-checked="false" aria-label="对话归档"></button>
+            </div>
+            <div class="export-stat">已归档 15 轮 · 最近 11-09 21:38 · 等待记忆库手动收走</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ═══ 版 C ═══ -->
+      <section class="ver" data-ver="c" hidden>
+        <div class="vhead">
+          <div>
+            <h1>记忆</h1>
+            <div class="c-meta-line"><span>73 条</span><span class="dot"></span><span>最近更新 11-13 06:20</span><span class="dot"></span><span class="when-idle">上次整理 3 天前</span></div>
+            <div class="c-meta-line when-running"><span class="spinner" style="width:11px;height:11px"></span><span>正在整理… 已 12 秒</span></div>
+          </div>
+          <div class="vhead-actions">
+            <button class="icon-btn" type="button" title="导入旧记忆"><svg viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg></button>
+            <button class="icon-btn" type="button" data-tip="整理记忆 = 回看最近的记忆和原始对话，找出重复、过时、说法不一致的条目。只给建议，你逐条应用才会改；不会自动删。">
+              <svg viewBox="0 0 24 24"><path d="M4 7h16"/><path d="M7 12h10"/><path d="M10 17h4"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="c-filters">
+          <button class="c-chip" data-chip="all" aria-pressed="true" type="button">全部</button>
+          <button class="c-chip" data-chip="preference" aria-pressed="false" type="button">偏好</button>
+          <button class="c-chip" data-chip="intention" aria-pressed="false" type="button">打算</button>
+          <button class="c-chip" data-chip="fact" aria-pressed="false" type="button">事实</button>
+          <button class="c-chip" data-chip="experience" aria-pressed="false" type="button">经验</button>
+          <button class="c-chip" data-chip="entity" aria-pressed="false" type="button">人事物</button>
+          <button class="c-chip" data-chip="episode" aria-pressed="false" type="button">经历</button>
+          <button class="icon-btn c-search-btn" type="button" title="搜索"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg></button>
+        </div>
+
+        <div class="run-strip when-running" style="margin-top:14px">
+          <span class="spinner"></span>
+          <span><b>正在整理</b> · 可以切走，回来自动接上</span>
+          <span class="elapsed">已 12s</span>
+        </div>
+
+        <div class="prop-card when-pending" style="margin-top:14px">
+          <div class="prop-head">整理建议 <span class="n">2 条</span><span class="more">11-10 22:14</span></div>
+          <div class="prop-item">
+            <span class="ptag keep">保留</span>
+            <div class="ptext">汇报先用一句话总结，再说细节。<span class="why">收编：闲聊里说过一次「不爱看长报告」。</span></div>
+            <div class="pacts"><button class="btn" type="button">应用</button><button class="btn ghost" type="button">忽略</button></div>
+          </div>
+        </div>
+
+        <div class="c-pinned">
+          <div class="c-cap">长期记得</div>
+          <div class="c-pin-grid">
+            <div class="c-pin"><div class="k">偏好 · 每轮想起</div><div class="v">汇报先用一句话总结，再说细节。</div></div>
+            <div class="c-pin"><div class="k">打算 · 还有 17 天</div><div class="v">11 月底前把记忆页重做完。</div></div>
+            <div class="c-pin"><div class="k">事实</div><div class="v">家里有两只猫，大的叫豆豆。</div></div>
+            <div class="c-pin"><div class="k">经验</div><div class="v">跨仓库改契约：先写方案，再改两端，最后回写接口文档。</div></div>
+          </div>
+        </div>
+
+        <div class="c-timeline">
+          <div class="c-month open">
+            <div class="c-mhead"><span class="c-mtitle">2026 年 11 月</span><span class="c-mcount">8 条</span><svg class="chev" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></div>
+            <div class="c-mbody">
+              <div class="c-entry"><time>11-13</time><div class="content"><span class="c-kind">经历</span>把记忆页整理状态的问题定位了：请求跟着页面走，切页就丢。</div></div>
+              <div class="c-entry"><time>11-12</time><div class="content"><span class="c-kind">经历</span>和同事把拖了两周的问题定了，方案改成两步走。</div></div>
+              <div class="c-entry"><time>11-12</time><div class="content"><span class="c-kind">打算</span>11 月底前把记忆页重做完。</div></div>
+              <div class="c-entry"><time>11-10</time><div class="content"><span class="c-kind">经历</span>晚上在江边跑了七公里，风很大。</div></div>
+              <div class="c-fold"><span>11-10 · 对话里留下的 3 条</span><span class="el">默认收起 · 展开</span></div>
+              <div class="c-entry"><time>11-08</time><div class="content"><span class="c-kind">偏好</span>汇报先用一句话总结，再说细节。</div></div>
+              <div class="c-entry"><time>11-06</time><div class="content"><span class="c-kind">偏好</span>不要主动改代码风格，按仓库现有写法来。</div></div>
+            </div>
+          </div>
+          <div class="c-month">
+            <div class="c-mhead"><span class="c-mtitle">2026 年 10 月</span><span class="c-mcount">24 条</span><svg class="chev" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></div>
+            <div class="c-mbody">
+              <div class="c-entry"><time>10-30</time><div class="content"><span class="c-kind">经历</span>今天把同步做通了，历史会话能回读。</div></div>
+            </div>
+          </div>
+          <div class="c-month">
+            <div class="c-mhead"><span class="c-mtitle">2026 年 09 月</span><span class="c-mcount">12 条</span><svg class="chev" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></div>
+            <div class="c-mbody"></div>
+          </div>
+        </div>
+
+        <div class="c-external">
+          <span class="status" style="width:6px;height:6px;border-radius:50%;background:var(--ok)"></span>
+          <span class="name">一生记忆库</span>
+          <span class="stat">已连接 · 100 事件 / 294 人物 · 2020-09 至今</span>
+          <button class="btn" type="button">查一件旧事</button>
+        </div>
+      </section>
+    </main>
+  </div>
+</div>
+
+<div class="tip" id="tip" hidden></div>
+
+<script>
+  // ── 版本切换 ────────────────────────────────
+  const versions = [...document.querySelectorAll(".ver")];
+  const versionButtons = [...document.querySelectorAll("#version-tabs [data-v]")];
+  function selectVersion(v) {
+    for (const section of versions) section.hidden = section.dataset.ver !== v;
+    for (const item of versionButtons) item.setAttribute("aria-pressed", String(item.dataset.v === v));
+    positionTipTarget = null;
+    hideTip();
+  }
+  for (const button of versionButtons) {
+    button.addEventListener("click", () => selectVersion(button.dataset.v));
+  }
+  // 方便截图 / 直链：...#a / #b / #c
+  if (["a", "b", "c"].includes(location.hash.replace("#", ""))) {
+    selectVersion(location.hash.replace("#", ""));
+  }
+
+  // ── 整理状态演示 ────────────────────────────
+  const stateButtons = [...document.querySelectorAll("#state-tabs [data-s]")];
+  for (const button of stateButtons) {
+    button.addEventListener("click", () => {
+      document.body.dataset.state = button.dataset.s;
+      for (const item of stateButtons) item.setAttribute("aria-pressed", String(item === button));
+    });
+  }
+
+  // ── 折叠 ────────────────────────────────────
+  for (const head of document.querySelectorAll(".group .ghead")) {
+    head.addEventListener("click", () => head.parentElement.classList.toggle("open"));
+  }
+  for (const head of document.querySelectorAll(".c-mhead")) {
+    head.addEventListener("click", () => head.parentElement.classList.toggle("open"));
+  }
+  const history = document.querySelector(".b-history");
+  history?.addEventListener("click", () => history.classList.toggle("open"));
+
+  // ── B 的两页 ────────────────────────────────
+  const bButtons = [...document.querySelectorAll("#b-seg [data-b]")];
+  for (const button of bButtons) {
+    button.addEventListener("click", () => {
+      const which = button.dataset.b;
+      document.getElementById("b-mine").hidden = which !== "mine";
+      document.getElementById("b-external").hidden = which !== "external";
+      for (const item of bButtons) item.setAttribute("aria-pressed", String(item === button));
+      hideTip();
+    });
+  }
+
+  // ── C 的筛选（只做视觉） ──────────────────────
+  for (const chip of document.querySelectorAll(".c-chip")) {
+    chip.addEventListener("click", () => {
+      for (const item of document.querySelectorAll(".c-chip")) item.setAttribute("aria-pressed", String(item === chip));
+    });
+  }
+
+  // ── 悬停说明 ────────────────────────────────
+  const tip = document.getElementById("tip");
+  let tipTimer = 0;
+  let positionTipTarget = null;
+
+  function hideTip() {
+    clearTimeout(tipTimer);
+    tip.hidden = true;
+  }
+
+  function showTip(target) {
+    const text = target.getAttribute("data-tip");
+    if (!text) return;
+    tip.textContent = text;
+    tip.hidden = false;
+    const box = target.getBoundingClientRect();
+    const tipBox = tip.getBoundingClientRect();
+    let top = box.top - tipBox.height - 9;
+    if (top < 8) top = box.bottom + 9;
+    let left = box.left;
+    if (left + tipBox.width > window.innerWidth - 12) left = window.innerWidth - 12 - tipBox.width;
+    tip.style.left = `${Math.max(12, Math.round(left))}px`;
+    tip.style.top = `${Math.max(12, Math.round(top))}px`;
+    positionTipTarget = target;
+  }
+
+  document.addEventListener("mouseover", (event) => {
+    const target = event.target.closest?.("[data-tip]");
+    if (!target || target === positionTipTarget) return;
+    clearTimeout(tipTimer);
+    tipTimer = setTimeout(() => showTip(target), 180);
+  });
+  document.addEventListener("mouseout", (event) => {
+    const target = event.target.closest?.("[data-tip]");
+    if (!target) return;
+    if (event.relatedTarget && target.contains(event.relatedTarget)) return;
+    positionTipTarget = null;
+    hideTip();
+  });
+  document.addEventListener("click", hideTip);
+  window.addEventListener("scroll", hideTip, true);
+</script>
+</body>
+</html>

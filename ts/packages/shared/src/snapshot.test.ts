@@ -108,7 +108,8 @@ const STEP_SHAPE = {
 	},
 };
 
-/** 上行内容分段（2026-11-08 扫尾批 4a）：text | image，形状对齐 pi-ai。 */
+/** 上行内容分段（2026-11-08 扫尾批 4a）：text | image，形状对齐 pi-ai；
+ *  2026-11-13 附件走路径增加 file（只带路径，不带内容）。 */
 const PART_SHAPE = {
 	kind: "union",
 	of: [
@@ -125,6 +126,16 @@ const PART_SHAPE = {
 				data: { kind: "string" },
 				mimeType: { kind: "string" },
 				type: { kind: "literal", value: "image" },
+			},
+		},
+		{
+			kind: "object",
+			fields: {
+				bytes: { kind: "optional", of: { kind: "number" } },
+				mimeType: { kind: "optional", of: { kind: "string" } },
+				name: { kind: "string" },
+				path: { kind: "string" },
+				type: { kind: "literal", value: "file" },
 			},
 		},
 	],
@@ -153,6 +164,22 @@ const MESSAGE_SHAPE = {
 				},
 			},
 		},
+		// 2026-11-13 附件走路径：用户消息带的文件（只有路径，没有内容）
+		files: {
+			kind: "optional",
+			of: {
+				kind: "array",
+				of: {
+					kind: "object",
+					fields: {
+						bytes: { kind: "optional", of: { kind: "number" } },
+						mimeType: { kind: "optional", of: { kind: "string" } },
+						name: { kind: "string" },
+						path: { kind: "string" },
+					},
+				},
+			},
+		},
 		role: { kind: "enum", values: ["user", "assistant"] },
 		steps: { kind: "optional", of: { kind: "array", of: STEP_SHAPE } },
 		text: { kind: "string" },
@@ -178,6 +205,9 @@ const EXPECTED: Record<string, unknown> = {
 		fields: {
 			conversationId: { kind: "string" },
 			messages: { kind: "array", of: MESSAGE_SHAPE },
+			// 2026-11-13 历史分页（可选，只有分页请求才带）
+			hasMore: { kind: "optional", of: { kind: "boolean" } },
+			nextBefore: { kind: "optional", of: { kind: "string" } },
 		},
 	},
 	ChatRequestSchema: {

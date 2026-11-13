@@ -27,7 +27,7 @@ import {
 	VERIFICATION_IRON_LAW,
 	lifecycleOwnsVerification,
 } from "./turn-gate.ts";
-import { currentProject } from "./shared.ts";
+import { currentProject, sessionBoundCwd } from "./shared.ts";
 import { currentProjectEnabled } from "../projects.ts";
 import { wrapUntrustedObjective } from "./injection-guard.ts";
 import { PERSONA, WORKER_PERSONA, memoryRecallProvider, skillStore } from "./assist.ts";
@@ -88,18 +88,37 @@ export const clarifyContractProvider: InjectionProvider = (ctx) => {
 	return entry("clarify_contract", text, INJECTION_ORDER.clarify_contract, "system");
 };
 
-/** 当前项目：每轮现渲染，不写进对话历史。 */
-export const currentProjectProvider: InjectionProvider = () => {
+/**
+ * 当前项目：每轮现渲染，不写进对话历史。
+ *
+ * 2026-11-13 改为"项目容器"口径：一个项目可以有多个文件夹，主文件夹是**相对路径的唯一基准**，
+ * 其余文件夹一律写绝对路径。同时把"同名文件"这条纪律写进去——一个 Kotlin 手机端 + 一个
+ * harness 放在同一个项目里时，两边都有 README.md / build.gradle，只按文件名找必错。
+ */
+export const currentProjectProvider: InjectionProvider = (ctx) => {
 	if (!currentProjectEnabled()) return undefined;
 	const project = currentProject();
-	const text = project
+	// 会话创建时钉下的文件夹（快照）；换主文件夹不影响老会话，这里要说清楚"你在哪"。
+	const bound = sessionBoundCwd(ctx.conversationId);
+	const roots = project?.roots ?? [];
+	const lines = project
 		? [
-				`当前项目：${project.name}`,
-				`根路径：${project.rootPath}`,
-				"文件操作默认在此项目内。",
-			].join("\n")
-		: "当前无特定项目（杂事模式）。文件操作默认在主工作区。";
-	return entry("current_project", text, INJECTION_ORDER.current_project, "system");
+				`当前项目：${project.name}（${roots.length || 1} 个文件夹）`,
+				`主文件夹：${project.rootPath}`,
+				...(bound && bound !== project.rootPath
+					? [`本会话的工作目录：${bound}（创建时的快照；主文件夹后来改过也不影响本会话）`]
+					: []),
+				...(roots.length > 0
+					? roots.map(
+							(root) =>
+								`- ${root.label}${root.role === "primary" ? "（主）" : ""}：${root.path}`,
+						)
+					: []),
+				"相对路径以主文件夹为基准；要动别的文件夹，写它的绝对路径。",
+				"多个文件夹里可能有同名文件（README.md / build.gradle 之类）：动手前先看路径，别把同名文件当成同一个。",
+			]
+		: ["当前无特定项目（杂事模式）。文件操作默认在主工作区。"];
+	return entry("current_project", lines.join("\n"), INJECTION_ORDER.current_project, "system");
 };
 
 /**

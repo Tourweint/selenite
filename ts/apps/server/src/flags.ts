@@ -54,6 +54,14 @@ export const FLAG_DEFS: FlagDef[] = [
 	{ key: "CURRENT_PROJECT", values: ["true", "false"], defaultValue: "true", hot: true },
 	{ key: "MEMORY_ENABLED", values: ["true", "false"], defaultValue: "true", hot: true },
 	{ key: "MEMORY_EXTRACT", values: ["auto", "llm", "rule"], defaultValue: "auto", hot: true },
+	// 记忆页 A 版（2026-11-13）：前端每次进记忆页懒读，false = 旧页整套 DOM/逻辑。
+	{ key: "MEMORY_PAGE_A", values: ["true", "false"], defaultValue: "true", hot: true },
+	// 整理后台任务（2026-11-13）：false = ?background=1 也同步等待（旧页/旧探针回滚）。
+	{ key: "MEMORY_CONSOLIDATE_JOB", values: ["true", "false"], defaultValue: "true", hot: true },
+	// 规则抽取噪声过滤（2026-11-13）：false = 回到"每句 ≥6 字都记成经历"。
+	{ key: "MEMORY_EXTRACT_NOISE", values: ["true", "false"], defaultValue: "true", hot: false },
+	// 外接记忆库页脚（2026-11-13）：false = 设置页不显示、端点 404。
+	{ key: "MEMORY_EXTERNAL", values: ["true", "false"], defaultValue: "true", hot: true },
 	// persona 记忆库接入（2026-11-09）：读 = persona_recall 工具的显式关闸（默认开，
 	// 但还要求 PERSONA_MEMORY_ASK 配了 ask.py 路径才上架——路径类 env 按白名单纪律不进界面，
 	// 开关文案里写明）；写 = 主对话导出（默认关，对外送数据默认不动）。两个消费处都懒读 env，热生效。
@@ -78,14 +86,30 @@ export const FLAG_DEFS: FlagDef[] = [
 	// 永久删除（2026-11-13 归档管理对齐 ZCode 批A）：端点常挂、消费处每次请求懒读 env，
 	// 所以 hot:true。false = deletion-preview / delete 两端点 400「永久删除已关闭」（回滚开关）。
 	{ key: "CHAT_HARD_DELETE", values: ["true", "false"], defaultValue: "true", hot: true },
+	// 对话流逐字浮现（2026-11-13）：web 每次开新消息懒读（首屏拉一次 flags），
+	// false = 退回旧的整块渲染 + 旧 caret，所以 hot:true。
+	{ key: "CHAT_STREAM_REVEAL", values: ["true", "false"], defaultValue: "true", hot: true },
 	// 自动归档（同批）：调度器每轮懒读（动态开关经 flags 端点的 onChange 接线开停定时器），
 	// 默认关——翻案的是"有这个能力"，不是"替用户做主"。
 	{ key: "ARCHIVE_AUTO_ENABLED", values: ["true", "false"], defaultValue: "false", hot: true },
 	// 自动归档天数：数值型开关（values 留空 + min=1，按 ≥1 整数校验）；每轮懒读，改完下一轮生效。
 	{ key: "ARCHIVE_AUTO_DAYS", values: [], defaultValue: "30", hot: true, min: 1 },
+	// 对话历史分页（2026-11-13）：web 每次 openChat 懒读（同 TASKS 的一次性缓存），
+	// false = 退回一次拉最近 200 条、无上滑加载 + 无日期分隔；服务端同时忽略 page/before 参数。
+	{ key: "CHAT_HISTORY_PAGING_ENABLED", values: ["true", "false"], defaultValue: "true", hot: true },
 ];
 
 const FLAG_BY_KEY = new Map(FLAG_DEFS.map((def) => [def.key, def]));
+
+/**
+ * 对话历史分页开关（2026-11-13）。
+ * 缺省开；显式 false/0/off 才关（与其它"新能力默认开"的开关同口径）。
+ */
+export function chatHistoryPagingEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = env.CHAT_HISTORY_PAGING_ENABLED?.trim().toLowerCase();
+	if (!raw) return true;
+	return raw !== "false" && raw !== "0" && raw !== "off";
+}
 
 export function flagsUiEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
 	return (env.AGENT_FLAGS_UI ?? "").trim().toLowerCase() !== "false";

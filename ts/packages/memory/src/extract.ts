@@ -41,22 +41,96 @@ const NOISE = /^(嗯+|哦+|好的?|行|对|是|在吗|你好|谢谢|哈哈+|ok|o
 const SENTENCE_SPLIT = /[。！？!?\n]+/;
 
 /**
+ * 合成指令前缀（2026-11-13 记忆页 A 版）。
+ *
+ * 这些不是用户对"我这个人/我的生活"的陈述，而是服务端自己注入的续跑指令
+ * （审批通过/拒绝、结构化提问回答、撞上限/防打转话术）。它们落成 episode
+ * 只会让记忆页充满"用户已批准 write：{...}"这类噪声。
+ *
+ * 只认**已知前缀**，不做语义判断——宁少勿误杀，用户真说的话仍按规则保留。
+ */
+const SYNTHETIC_PREFIXES = [
+	"用户已批准",
+	"用户拒绝",
+	"主人回答了你刚才的问题",
+	"本轮工具调用已达上限",
+	"已连续重复完全相同的工具调用",
+	"这个操作在等用户批准",
+	"按这个回答继续",
+];
+
+/** 这条 user 文本是不是服务端注入的合成指令。 */
+export function isSyntheticUserText(text: string): boolean {
+	const trimmed = (text ?? "").trim();
+	if (!trimmed) return false;
+	return SYNTHETIC_PREFIXES.some((prefix) => trimmed.startsWith(prefix));
+}
+
+/** 规则版的命令句开头：用户在对助手下指令，不是记忆。 */
+const COMMAND_START =
+	/^(请|帮我|给我|麻烦|不要|别|直接|用|把|写|改|查|找|跑|运行|执行|生成|总结|翻译|解释|列出|打开|关闭|删除|安装|创建|整理|分析|比较|告诉|回答|说说|回答我|帮我看看)/;
+
+/**
+ * 一句话值不值得当"经历"（2026-11-13）：只做确定性过滤。
+ *
+ * - 问句 / 命令句（"请用中文写一段…"、"不要调用工具"）不进记忆；
+ * - 要有"自己/时间/生活/状态"锚点，或至少不是纯指令；否则一句
+ *   "用三十个字左右回答"也会被当成经历；
+ * - 这条只作用于规则版；`MEMORY_EXTRACT=rule` 仍走旧行为（filterNoise=false）。
+ */
+function worthRemembering(sentence: string): boolean {
+	if (/[?？]$/.test(sentence)) return false;
+	// 句读切分会把问号吃掉；补一道"疑问词收尾"判定，别把"今天天气怎么样"当经历。
+	if (/(吗|呢|么|怎么样|为什么|是什么|干什么|做什么|哪|谁|多少|几点|多久|是不是|能不能|可不可以|有没有)$/.test(sentence)) {
+		return false;
+	}
+	if (COMMAND_START.test(sentence)) return false;
+	if (isSyntheticUserText(sentence)) return false;
+	const anchor =
+		/(我|我们|自己|今天|昨天|前天|刚才|刚刚|最近|上周|上次|去年|今年|这周|这个月|之前|以前|小时候|家里|公司|朋友|同事|晚上|早上|中午|周末|有|是|住在|喜欢|讨厌|打算|准备|养了|生日|过敏|习惯|通常|一般|每次)/;
+	return anchor.test(sentence);
+}
+
+/** 一轮最多落几条规则经历：再多就是把整段提示词抄进记忆。 */
+const MAX_RULE_EPISODES_PER_TURN = 5;
+
+export interface HeuristicExtractorOptions {
+	/**
+	 * 过滤合成指令 / 命令句 / 问句（2026-11-13）。
+	 * 默认 **false** = 保持 2026-11-04 旧行为；由 server 装配层按
+	 * `MEMORY_EXTRACT_NOISE`（默认开）显式传 true。`MEMORY_EXTRACT=rule` 不传 = 旧行为。
+	 */
+	filterNoise?: boolean;
+}
+
+/**
  * 规则版抽取器：
  * 只从**用户说的话**里取，助手说的不记（助手的话是我们自己的产物，
  * 记下来会形成自我强化的回声）。按句切分，过滤寒暄与碎片。
  */
 export class HeuristicExtractor implements Extractor {
+	private readonly filterNoise: boolean;
+
+	constructor(options: HeuristicExtractorOptions = {}) {
+		this.filterNoise = options.filterNoise === true;
+	}
+
 	async extract(input: ExtractInput): Promise<MemoryCandidate[]> {
 		const candidates: MemoryCandidate[] = [];
 		const scope = scopeKey(input.scope);
+		const seen = new Set<string>();
 
 		for (const message of input.messages) {
 			if (message.role !== "user") continue;
+			if (this.filterNoise && isSyntheticUserText(message.content)) continue;
 
 			for (const raw of message.content.split(SENTENCE_SPLIT)) {
 				const sentence = raw.trim();
 				if (sentence.length < 6) continue;
 				if (NOISE.test(sentence)) continue;
+				if (this.filterNoise && !worthRemembering(sentence)) continue;
+				if (seen.has(sentence)) continue;
+				seen.add(sentence);
 
 				candidates.push({
 					// TODO(细节): 区分 fact / entity / preference。
@@ -69,6 +143,9 @@ export class HeuristicExtractor implements Extractor {
 					source: "extract:heuristic",
 					validUntil: null,
 				});
+				if (this.filterNoise && candidates.length >= MAX_RULE_EPISODES_PER_TURN) {
+					return candidates;
+				}
 			}
 		}
 

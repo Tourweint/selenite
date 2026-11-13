@@ -4,15 +4,17 @@ import { dirname } from "node:path";
 import { contentText } from "@earendil-works/pi-ai";
 import {
 	LiveDoc,
+	configure,
 	type Conversation,
 	type ConversationView,
+	type EntryRecord,
 	type LiveState,
 	type SettledSubmissionRecord,
 	type Tx,
 	type ToolRegistration,
 } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
-import { locateEvidence, normalizeForGrounding, type MemoryRecord } from "@lifediary/memory";
+import { locateEvidence, normalizeForGrounding, type MemoryKind, type MemoryRecord } from "@lifediary/memory";
 import type {
 	ChatKind,
 	DelegationPhase,
@@ -22,6 +24,7 @@ import type {
 	TranscriptStep,
 	TurnUsage,
 } from "@lifediary/shared";
+import { parseFileManifest } from "@lifediary/shared";
 import { describeStreamError } from "../stream-error.ts";
 import { approvalStore } from "../approvals.ts";
 import type { OutgoingPart } from "../attachments.ts";
@@ -342,12 +345,21 @@ export async function openChat(
 		const chatKind: NewChatKind = kind ?? "chief";
 		// 项目归属只记普通会话（2026-11-12 归档模块 §5）：执事 / 群 / 任务会话不该被
 		// "项目归档"连带。当前项目每轮现读；项目库坏了只旁路归属，绝不让建会话失败。
+		//
+		// 2026-11-13 会话绑定即快照：这里把"这一刻的主文件夹"钉进 `pi.agent.cwd`。
+		// 之后用户换主文件夹 / 加文件夹都不影响这个会话——它始终在自己的那条路上跑，
+		// 这是"智能体开发时分不清路"的根因修法（cwd 不再是全局单值）。
+		// 只绑 `worker`（开发会话）；`chief` 是总管人格，留在杂事态（方案留了可调口）。
 		let projectId: string | null = null;
+		let projectRoot: string | null = null;
 		if (chatKind === "worker") {
 			try {
-				projectId = projectsStore().getCurrentProject()?.id ?? null;
+				const current = projectsStore().getCurrentProject();
+				projectId = current?.id ?? null;
+				projectRoot = current?.rootPath ?? null;
 			} catch {
 				projectId = null;
+				projectRoot = null;
 			}
 		}
 		const conversation = await harness.createConversation(
@@ -365,6 +377,7 @@ export async function openChat(
 					if (projectId) {
 						const chatProjects = await tx.doc(ChatProjects);
 						chatProjects.byInternal[String(conversationId)] = projectId;
+						if (projectRoot) await configure(tx, conversationId, { cwd: projectRoot });
 					}
 				},
 			},
@@ -1151,6 +1164,8 @@ export interface TranscriptMessage {
 	id?: string;
 	/** 用户消息带的图片（2026-11-08 扫尾批 4a）；文字仍走 `text` */
 	images?: { mimeType: string; data: string }[];
+	/** 用户消息带的文件（2026-11-13 附件走路径）：只有路径，没有内容 */
+	files?: { path: string; name: string; mimeType?: string; bytes?: number }[];
 	/** 这一轮的工作步骤（2026-11-07）；没有工具调用就不带 */
 	steps?: TranscriptStep[];
 	/** 那一轮从提问到收尾的墙钟时长（毫秒） */
@@ -1200,10 +1215,10 @@ function stepDiff(details: unknown): string | undefined {
 }
 
 /**
- * 读会话已有的对话记录。
+ * 把一串**升序**的 durable entry 折叠成对外 transcript 消息。
  *
- * 存在的理由：一轮对话现在可以在**没有客户端看着**的情况下跑完（见 chatStream），
- * 所以客户端下次打开必须能把结果拉回来，否则"关掉界面它照样跑完"对用户没有意义。
+ * 老路径（`readTranscript`）与分页路径（`transcript-page.ts`）共用这一份折叠规则，
+ * 保证"翻到哪一页"和"一次读全量"看到的内容逐字一致。
  *
  * 2026-11-07 起连同**工作过程**一起回放：流式期间的 `tool` 事件只活在当轮 DOM 里，
  * 刷新就没了；而步骤本来就躺在 durable 里（`pi.assistant` 的 toolCall +
@@ -1215,11 +1230,10 @@ function stepDiff(details: unknown): string | undefined {
  * 被中断、始终没等到回答的那一轮没有挂靠点，历史里不回放它的步骤（当轮界面上
  * 仍会显示"已中断生成"，只是不持久化——与那句提示自己的生命周期一致）。
  */
-export async function readTranscript(
-	chat: ResolvedChat,
-	limit = 50,
-): Promise<TranscriptMessage[]> {
-	const view = await chat.conversation.context(CTX);
+export function foldTranscriptEntries(
+	externalId: string,
+	entries: readonly EntryRecord[],
+): TranscriptMessage[] {
 	const messages: TranscriptMessage[] = [];
 
 	/** 本轮的步骤，按 toolCallId 索引；回答落盘时整段挂上去 */
@@ -1229,14 +1243,17 @@ export async function readTranscript(
 	/** 本轮提问的时间（算 workMs 用）；没有 user 开头就留 undefined */
 	let turnStartAt: number | undefined;
 
-	for (const entry of view.entries) {
+	for (const entry of entries) {
 		if (entry.kind === "pi.user") {
 			// 新一轮：上一轮没等到回答的步骤没有挂靠点，直接丢掉（见函数头注释）
 			pending = [];
 			byCallId.clear();
 			const message = entry.model?.[0];
 			if (!message) continue;
-			const text = contentText(message.content).trim();
+			// 2026-11-13 附件走路径：文件清单写在正文第一行，回读时折成 files 并从 text 剥掉
+			const raw = contentText(message.content);
+			const manifest = parseFileManifest(raw);
+			const text = manifest.text.trim();
 			const at = typeof message.timestamp === "number" ? message.timestamp : 0;
 			// 2026-11-08 4a：纯图消息没有文本，也要下发（老逻辑会把它整条丢掉）
 			const parts = Array.isArray(message.content) ? message.content : [];
@@ -1246,15 +1263,16 @@ export async function readTranscript(
 						part.type === "image",
 				)
 				.map((part) => ({ mimeType: part.mimeType, data: part.data }));
-			if (!text && images.length === 0) continue;
+			if (!text && images.length === 0 && manifest.files.length === 0) continue;
 			turnStartAt = at || undefined;
 			const outgoing: TranscriptMessage = {
 				role: "user",
 				text,
 				at,
-				id: messageIdOf(chat.externalId, Number(entry.id)),
+				id: messageIdOf(externalId, Number(entry.id)),
 			};
 			if (images.length > 0) outgoing.images = images;
+			if (manifest.files.length > 0) outgoing.files = manifest.files;
 			messages.push(outgoing);
 			continue;
 		}
@@ -1337,14 +1355,33 @@ export async function readTranscript(
 			if (!slot.settled) slot.step.ok = false;
 		}
 		const lastAt =
-			typeof view.entries.at(-1)?.model?.[0]?.timestamp === "number"
-				? (view.entries.at(-1)?.model?.[0]?.timestamp as number)
+			typeof entries.at(-1)?.model?.[0]?.timestamp === "number"
+				? (entries.at(-1)?.model?.[0]?.timestamp as number)
 				: 0;
 		const outgoing: TranscriptMessage = { role: "assistant", text: "", at: lastAt, steps: pending };
 		if (turnStartAt !== undefined && lastAt > turnStartAt) outgoing.workMs = lastAt - turnStartAt;
 		messages.push(outgoing);
 	}
 
+	return messages;
+}
+
+/**
+ * 读会话已有的对话记录（活跃上下文，取最后 `limit` 条；`limit <= 0` = 全量）。
+ *
+ * 存在的理由：一轮对话现在可以在**没有客户端看着**的情况下跑完（见 chatStream），
+ * 所以客户端下次打开必须能把结果拉回来，否则"关掉界面它照样跑完"对用户没有意义。
+ *
+ * 2026-11-13 起与 `foldTranscriptEntries` 拆开：本函数仍是"整段 context() 读进来再切"，
+ * 给导出 / 搜索 / `/context` 这些**本来就要全量**的路径用；对话流翻历史走
+ * `transcript-page.ts` 的倒序游标分页，不再整段读。
+ */
+export async function readTranscript(
+	chat: ResolvedChat,
+	limit = 50,
+): Promise<TranscriptMessage[]> {
+	const view = await chat.conversation.context(CTX);
+	const messages = foldTranscriptEntries(chat.externalId, view.entries);
 	return limit > 0 ? messages.slice(-limit) : messages;
 }
 
@@ -1813,6 +1850,39 @@ export function chatMetaSummary(): { archived: number } {
 }
 
 /**
+ * 自愈：清掉 chat-meta 里指向**已不存在会话**的条目（2026-11-13）。
+ *
+ * 场景：历史清库（重建 agent.sqlite）只清会话正文，`chat-meta.json` 里的
+ * `archived` / `pins` / `titles` / `archivedAt` 会留下孤儿 id——归档页标题显示
+ * "120"却一条都取不出来（2026-11-13 生产实例实测：120 条归档全部无 durable 映射）。
+ * 正常写入路径不产生孤儿（永久删除会 `purgeChatMetaEntries`），孤儿只来自清库这类运维动作。
+ *
+ * 调用点：启动时一次 + 每次 `listArchivedChats` 前（清库也可能发生在运行期）。
+ * 没有孤儿就不写文件，避免无意义的写放大。返回剔除条数（只进服务端日志，不含内容）。
+ */
+export async function pruneChatMetaOrphans(): Promise<number> {
+	const harness = await getHarness();
+	const chats = await harness.snapshot(Chats, CTX);
+	const live = new Set(Object.keys(chats?.byExternal ?? {}));
+	const meta = readChatMeta();
+	const archived = meta.archived.filter((id) => live.has(id));
+	const pins = meta.pins.filter((id) => live.has(id));
+	const titles = Object.fromEntries(Object.entries(meta.titles).filter(([id]) => live.has(id)));
+	const archivedAt = Object.fromEntries(
+		Object.entries(meta.archivedAt).filter(([id]) => live.has(id)),
+	);
+	const removed =
+		meta.archived.length -
+		archived.length +
+		(meta.pins.length - pins.length) +
+		(Object.keys(meta.titles).length - Object.keys(titles).length);
+	if (removed === 0) return 0;
+	writeChatMeta({ titles, archived, archivedAt, pins });
+	console.log(`[chats] 清理 chat-meta 孤儿条目：${removed} 条`);
+	return removed;
+}
+
+/**
  * 改名表快照（2026-11-04 批次六）：全局审批列表要显示"哪个会话在等"。
  * 只读 chat-meta.json 的 `titles`——它不返回标题以外的任何东西，也不逐会话打开。
  */
@@ -1891,15 +1961,27 @@ export interface MemoryView {
 	createdAt: string;
 	recallCount: number;
 	supersededBy: string | null;
+	/** 上次被召回 / 使用时间（2026-11-13 A 版页脚与行内元信息用；老库为 null）。 */
+	lastRecalledAt: string | null;
+	usageCount: number;
+	/** 意图的到期时间（只有 kind=intention 有意义）。 */
+	expiresAt: string | null;
 }
 
 export interface MemoryOverview {
 	enabled: boolean;
 	/** 抽取档位：llm / rule / auto 实际生效的结果 */
 	extract: string;
+	/** 当前过滤条件下的真实条数（不是本页条数）；2026-11-13 起改口径。 */
 	total: number;
+	/** 兼容旧客户端：同 counts.byKind（真实计数）。 */
 	byKind: Record<string, number>;
+	/** 2026-11-13：真实分类计数 + 已被取代条数。 */
+	counts: { all: number; byKind: Record<string, number>; superseded: number };
 	items: MemoryView[];
+	offset: number;
+	limit: number;
+	hasMore: boolean;
 }
 
 function memoryView(record: MemoryRecord): MemoryView {
@@ -1914,6 +1996,9 @@ function memoryView(record: MemoryRecord): MemoryView {
 		createdAt: record.createdAt,
 		recallCount: record.recallCount,
 		supersededBy: record.supersededBy,
+		lastRecalledAt: record.lastRecalledAt,
+		usageCount: record.usageCount ?? 0,
+		expiresAt: record.expiresAt ?? null,
 	};
 }
 
@@ -1923,27 +2008,66 @@ function memoryView(record: MemoryRecord): MemoryView {
  * `scopes`：主对话看 `global`（偏好 + 日记摄入都在这里），执事看自己的键空间。
  * 不传 = global。刻意**不列 session scope**：那是原始对话的沉淀，条数增长快、
  * 对用户也没有"管理"的意义（真要清理走删会话）。
+ *
+ * 2026-11-13（A 版记忆页）：`q` 正文精确子串、`kinds`/`excludeKinds` 分类过滤、
+ * `offset` 分页；`total` 与 `counts` 是真实计数（不再是本页窗口长度）。
+ * `limit=0` = 只回计数、不回 items（首屏先拉概览，再按分组懒加载）。
  */
-export function memoryOverview(options: { scope?: string; limit?: number } = {}): MemoryOverview {
-	if (!memoryEngine) {
-		return { enabled: false, extract: memoryExtractMode(), total: 0, byKind: {}, items: [] };
-	}
+export function memoryOverview(
+	options: {
+		scope?: string;
+		limit?: number;
+		offset?: number;
+		q?: string;
+		kinds?: MemoryKind[];
+		excludeKinds?: MemoryKind[];
+	} = {},
+): MemoryOverview {
+	const empty = {
+		enabled: false,
+		extract: memoryExtractMode(),
+		total: 0,
+		byKind: {},
+		counts: { all: 0, byKind: {}, superseded: 0 },
+		items: [],
+		offset: 0,
+		limit: 0,
+		hasMore: false,
+	};
+	if (!memoryEngine) return empty;
 	try {
 		const scope = options.scope?.trim() || "global";
-		const records = memoryEngine.list({ scopes: [scope], limit: options.limit ?? 300 });
-		const byKind: Record<string, number> = {};
-		for (const record of records) byKind[record.kind] = (byKind[record.kind] ?? 0) + 1;
+		const q = options.q?.trim().slice(0, 200) || undefined;
+		const offset = Math.max(0, Math.floor(options.offset ?? 0));
+		const limit = Math.max(0, Math.min(2000, Math.floor(options.limit ?? 300)));
+		const browse = memoryEngine.browse({
+			scopes: [scope],
+			...(options.kinds?.length ? { kinds: options.kinds } : {}),
+			...(options.excludeKinds?.length ? { excludeKinds: options.excludeKinds } : {}),
+			...(q ? { q } : {}),
+			offset,
+			limit,
+		});
+		const counts = memoryEngine.counts({
+			scopes: [scope],
+			...(options.excludeKinds?.length ? { excludeKinds: options.excludeKinds } : {}),
+			...(q ? { q } : {}),
+		});
 		return {
 			enabled: true,
-			extract: memoryEngine && preferenceExtractionEnabled() ? "llm" : "rule",
-			total: records.length,
-			byKind,
-			items: records.map(memoryView),
+			extract: preferenceExtractionEnabled() ? "llm" : "rule",
+			total: browse.total,
+			byKind: counts.byKind,
+			counts,
+			items: browse.items.map(memoryView),
+			offset,
+			limit,
+			hasMore: limit > 0 && offset + browse.items.length < browse.total,
 		};
 	} catch (error) {
 		const detail = error instanceof Error ? error.message : String(error);
 		console.warn(`[memory] 概览读取失败: ${detail}`);
-		return { enabled: true, extract: memoryExtractMode(), total: 0, byKind: {}, items: [] };
+		return { ...empty, enabled: true };
 	}
 }
 
@@ -1990,7 +2114,17 @@ export async function readChatStats(
 		const at = typeof message.timestamp === "number" ? message.timestamp : 0;
 		if (entry.kind === "pi.user") {
 			turns += 1;
-			if (!firstText) firstText = contentText(message.content).trim().slice(0, 40);
+			if (!firstText) {
+				// 2026-11-13 附件走路径：清单不是人说的话，侧栏标题要用剥掉清单的正文；
+				// 纯文件消息退回文件名，纯图/纯附件退回「附件」。
+				const parsed = parseFileManifest(contentText(message.content));
+				const plain = parsed.text.trim();
+				firstText = (
+					plain ||
+					parsed.files.map((file) => file.name).join("、") ||
+					"附件"
+				).slice(0, 40);
+			}
 		}
 		if (!createdAt && at) createdAt = at;
 		if (at > lastAt) lastAt = at;
@@ -2069,6 +2203,64 @@ export function archivedChatPairs(
 }
 
 /**
+ * 导出用会话清单（2026-11-13 导出数据升级）。
+ *
+ * 与 `listChats` 的差别只有一处、但很关键：**不排除归档会话**。老导出走 listChats，
+ * 归档过的对话会悄悄消失，而"全部数据"里少了东西连个说明都没有。
+ * 任务专线仍然排除（首句是机器指令，不是用户说过的话，与侧栏口径一致）。
+ * 项目标签按会话归属补上（活跃会话以前没有这个字段）。
+ */
+export async function listChatsForExport(limit = 5000): Promise<ChatIndexEntry[]> {
+	if (!readLlmConfig()) return [];
+	const harness = await getHarness();
+	const chats = await harness.snapshot(Chats, CTX);
+	const meta = readChatMeta();
+	const archived = new Set(meta.archived);
+	const kinds = (await harness.snapshot(ChatKinds, CTX))?.byInternal ?? {};
+	const chatProjects = (await harness.snapshot(ChatProjects, CTX))?.byInternal ?? {};
+
+	const projectNames = new Map<string, string>();
+	if (Object.keys(chatProjects).length > 0) {
+		try {
+			for (const project of projectsStore().listProjects(true)) {
+				projectNames.set(project.id, project.name);
+			}
+		} catch {
+			// 项目库读不出来就不带项目标签，不影响会话本身
+		}
+	}
+
+	const pairs = Object.entries(chats?.byExternal ?? {})
+		.filter(([conversationId]) => !conversationId.startsWith(TASK_CONVERSATION_PREFIX))
+		.slice(-limit);
+	const entries: ChatIndexEntry[] = [];
+
+	for (const [conversationId, internalId] of pairs) {
+		try {
+			const stats = await readChatStats(harness, Number(internalId));
+			if (!stats) continue;
+			const entry = chatEntryOf(conversationId, Number(internalId), stats, meta, kinds);
+			const projectId = chatProjects[String(internalId)];
+			entries.push({
+				...entry,
+				...(archived.has(conversationId)
+					? { archived: true, archivedAt: meta.archivedAt[conversationId] ?? stats.lastAt }
+					: {}),
+				...(projectId && projectNames.get(projectId)
+					? { projectId, projectName: projectNames.get(projectId) }
+					: {}),
+			});
+		} catch (error) {
+			console.warn(
+				`[chats] 导出读取会话 ${conversationId} 失败: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+
+	return entries.sort((a, b) => b.lastAt - a.lastAt);
+}
+
+/**
  * 归档会话清单（2026-11-12 归档模块 §3）。
  *
  * 与 `listChats` 的关键区别：**按 `chat-meta.archived` 的 id 反查**，不走活跃清单的
@@ -2077,6 +2269,13 @@ export function archivedChatPairs(
  */
 export async function listArchivedChats(limit = 200): Promise<ChatIndexEntry[]> {
 	if (!readLlmConfig()) return [];
+	// 先自愈孤儿（2026-11-13）：清库后 chat-meta 里的 id 会指向不存在的会话，
+	// 不剔除的话调用方拿到的 total 是 120、列表是 0 条。没有孤儿时不写文件。
+	await pruneChatMetaOrphans().catch((error) => {
+		console.warn(
+			`[chats] 归档清单自愈失败，按现状返回: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	});
 	const harness = await getHarness();
 	const chats = await harness.snapshot(Chats, CTX);
 	const meta = readChatMeta();

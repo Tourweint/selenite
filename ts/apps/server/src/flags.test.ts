@@ -69,6 +69,10 @@ test("API：GET 列表带 hot/defaultValue，PUT 校验取值，AGENT_FLAGS_UI=f
 	const personaExport = data.flags.find((flag) => flag.key === "PERSONA_EXPORT_ENABLED");
 	assert.equal(personaExport?.hot, true, "导出开关每轮 settled 懒读，热生效");
 	assert.equal(personaExport?.defaultValue, "false", "对外送数据默认不动");
+	// 对话逐字浮现（2026-11-13）：web 开新消息时懒读，默认开；关掉退回旧整块渲染。
+	const streamReveal = data.flags.find((flag) => flag.key === "CHAT_STREAM_REVEAL");
+	assert.equal(streamReveal?.hot, true);
+	assert.equal(streamReveal?.defaultValue, "true");
 
 	const put = await app.request("/api/v1/agent/flags/CHANCELLOR_ENABLED", {
 		method: "PUT",

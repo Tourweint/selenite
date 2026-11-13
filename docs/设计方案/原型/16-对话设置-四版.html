@@ -1,0 +1,1033 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="paper">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Selenite · 对话设置 · 四版</title>
+<style>
+/* ── tokens：与电脑端 paper / indigo 同一套 ───────────────── */
+:root{
+  --bg:#fdf9f2; --surface:#fdf9f2; --surface-low:#f7f3eb;
+  --card:#f6f1e7; --card-high:#ede9e0;
+  --text:#2e2b3a; --text-2:#6e6b7e; --text-3:#9a97a5;
+  --outline:#c8c5bc; --divider:rgba(200,197,188,.55);
+  --accent:#3e4a8c; --accent-soft:color-mix(in srgb,var(--accent) 10%,var(--bg));
+  --ok:#1f9d4d; --err:#b3564d;
+  --composer-border:rgba(46,43,58,.14);
+  --shadow:0 1px 2px rgba(46,43,58,.04);
+  --serif:"Songti SC","Noto Serif SC","Source Han Serif SC","STSong","SimSun","Microsoft YaHei",serif;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  color-scheme:light;
+}
+html[data-theme="indigo"]{
+  --bg:#12141d; --surface:#161922; --surface-low:#191c27;
+  --card:#191c27; --card-high:#212433;
+  --text:#e7e9f2; --text-2:#a5a9ba; --text-3:#6d7183;
+  --outline:#3a3f52; --divider:rgba(255,255,255,.09);
+  --accent:#8b97ea; --accent-soft:color-mix(in srgb,var(--accent) 13%,var(--bg));
+  --ok:#34c268; --err:#e5a9a2;
+  --composer-border:rgba(255,255,255,.14);
+  --shadow:none;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--text);font-family:var(--serif);-webkit-font-smoothing:antialiased;overflow:hidden}
+button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer;text-align:left}
+svg{flex:none}
+[hidden]{display:none !important}
+
+/* ── 控制条 ─────────────────────────────────────────── */
+.bar{height:56px;display:flex;align-items:center;gap:18px;padding:0 18px;border-bottom:1px solid var(--divider);background:var(--bg);position:relative;z-index:10}
+.brand{display:flex;align-items:center;gap:8px;font-size:14px;white-space:nowrap}
+.brand b{font-weight:600;letter-spacing:.02em}
+.brand em{font-style:normal;font-size:11px;color:var(--text-3)}
+.brand .dot{width:7px;height:7px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 4px var(--accent-soft);margin-right:2px}
+.tabs{display:flex;gap:2px;padding:3px;background:var(--card);border-radius:10px}
+.tabs button{height:26px;padding:0 10px;border-radius:7px;font-size:11.5px;color:var(--text-2);white-space:nowrap;transition:background .15s,color .15s}
+.tabs button:hover{color:var(--text)}
+.tabs button.on{background:var(--bg);color:var(--text);box-shadow:var(--shadow)}
+.tools{margin-left:auto;display:flex;align-items:center;gap:12px;font-size:11px;color:var(--text-3);white-space:nowrap}
+.tools label{display:inline-flex;align-items:center;gap:5px;cursor:pointer}
+.tools input{accent-color:var(--accent)}
+
+/* ── 舞台：背景是一段被压暗的聊天 ────────────────────── */
+.stage{position:relative;height:calc(100% - 56px);overflow:hidden}
+.chat{position:absolute;inset:0;display:flex;flex-direction:column;background:var(--bg)}
+.chat-top{height:54px;flex:none;display:flex;align-items:center;gap:10px;padding:0 18px;border-bottom:1px solid var(--divider)}
+.chat-top .back{color:var(--text-3);font-size:15px}
+.chat-title{font-size:14.5px;font-weight:600}
+.chat-sub{font-size:11px;color:var(--text-3)}
+.gear{margin-left:auto;width:28px;height:28px;border-radius:8px;display:grid;place-items:center;background:var(--card);color:var(--text)}
+.gear svg{width:15px;height:15px}
+.chat-body{flex:1;min-height:0;width:100%;max-width:840px;margin:0 auto;padding:30px 30px 0;display:flex;flex-direction:column;gap:22px}
+.msg{max-width:76%;font-size:13.5px;line-height:1.8}
+.msg .who{font-size:11px;color:var(--text-3);margin-bottom:5px}
+.msg.user{align-self:flex-end}
+.msg.user .who{text-align:right}
+.msg.user .bub{background:var(--card);border-radius:12px;padding:10px 14px}
+.msg.ai .bub{padding:0}
+.composer{flex:none;width:min(720px,calc(100% - 60px));margin:26px auto 24px;border:1px solid var(--composer-border);border-radius:16px;padding:13px 15px;display:flex;align-items:center;gap:10px;background:var(--surface);font-size:12.5px;color:var(--text-3)}
+.send{margin-left:auto;width:30px;height:30px;border-radius:9px;background:var(--card);display:grid;place-items:center;color:var(--text-2)}
+.scrim{position:absolute;inset:0;background:rgba(18,16,12,.45);z-index:3}
+html[data-theme="indigo"] .scrim{background:rgba(0,0,0,.58)}
+
+/* ── 抽屉公共骨架 ───────────────────────────────────── */
+.drawer{position:absolute;inset:0 0 0 auto;width:448px;background:var(--surface);border-left:1px solid var(--composer-border);box-shadow:-18px 0 40px -28px rgba(0,0,0,.28);display:flex;flex-direction:column;z-index:4}
+.hd{flex:none;height:54px;display:flex;align-items:center;gap:4px;padding:0 10px 0 8px;border-bottom:1px solid var(--divider)}
+.hd .ttl{flex:1;min-width:0;padding-left:8px;font-size:14.5px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ib{width:32px;height:32px;flex:none;border-radius:8px;display:grid;place-items:center;color:var(--text-3);transition:background .15s,color .15s}
+.ib:hover{background:var(--card);color:var(--text)}
+.ib svg{width:17px;height:17px}
+.body{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain}
+.ic{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
+.mono{font-family:var(--mono);letter-spacing:0}
+.foot{margin-top:26px;font-size:11px;line-height:1.75;color:var(--text-3)}
+
+/* ══════════════════════════════════════════════════════
+   版 A · 一页纸
+   无卡片、无分组底，只有细线和留白；像一页排过版的目录。
+   ══════════════════════════════════════════════════════ */
+.vA .body{padding:0 18px 28px}
+.a-id{display:flex;align-items:center;gap:13px;padding:19px 0 16px;border-bottom:1px solid var(--divider)}
+.a-av{width:42px;height:42px;border-radius:50%;flex:none;background:var(--card-high);display:grid;place-items:center;font-size:16px;letter-spacing:.04em;color:var(--text)}
+.a-id .main{flex:1;min-width:0}
+.a-id b{display:block;font-size:15px;font-weight:600;letter-spacing:.04em}
+.a-id i{display:block;margin-top:3px;font-style:normal;font-size:11.5px;color:var(--text-3)}
+.a-chg{flex:none;font-size:11.5px;color:var(--text-3);border-bottom:1px solid var(--outline);padding-bottom:2px;transition:color .15s}
+.a-chg:hover{color:var(--text)}
+.a-sec{margin-top:27px}
+.a-sec h4{margin:0;font-size:9.5px;font-weight:500;letter-spacing:.12em;color:var(--text-3)}
+.a-row{display:flex;align-items:center;gap:12px;width:calc(100% + 16px);margin:0 -8px;padding:13px 8px;border-bottom:1px solid var(--divider);transition:background .15s}
+.a-row:hover{background:var(--card)}
+.a-ic{flex:none;width:16px;display:grid;place-items:center;color:var(--text-3)}
+.a-main{flex:1;min-width:0}
+.a-t{display:block;font-size:13.5px;font-weight:500}
+.a-s{display:block;margin-top:3px;font-size:11px;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.a-v{flex:none;max-width:190px;font:11.5px var(--serif);color:var(--text-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;letter-spacing:.01em}
+.a-ar{flex:none;color:var(--text-3);opacity:.65}
+.a-ar svg{width:12px;height:12px}
+.a-foot{margin-top:26px;font-size:11px;line-height:1.8;color:var(--text-3)}
+.a-foot a{color:var(--text-2);border-bottom:1px solid var(--divider);padding-bottom:1px}
+
+.a-meta{padding:14px 0 0;font-size:11px;line-height:1.7;color:var(--text-3)}
+.a-tl{display:flex;gap:14px;padding:11px 0;border-bottom:1px solid var(--divider)}
+.a-tl .d{flex:none;width:38px;font:9.5px var(--mono);color:var(--text-3);line-height:1.9;letter-spacing:.02em}
+.a-tl .c{flex:1;min-width:0;font-size:12.5px;line-height:1.7}
+.a-tl .c small{display:block;margin-top:1px;font:9.5px var(--mono);color:var(--text-3)}
+.a-kind{margin-top:20px;font-size:9.5px;letter-spacing:.2em;color:var(--text-3);display:flex;align-items:baseline;gap:8px}
+.a-kind em{font:9.5px var(--mono);font-style:normal;letter-spacing:0}
+.a-mem{padding:10px 0;border-bottom:1px solid var(--divider)}
+.a-mem p{margin:0;font-size:12.5px;line-height:1.7}
+.a-mem small{display:block;margin-top:3px;font:9.5px var(--mono);color:var(--text-3)}
+.a-rule{display:flex;align-items:center;gap:10px;padding:11px 0;border-bottom:1px solid var(--divider)}
+.a-rule .st{flex:none;width:5px;height:5px;border-radius:50%;background:var(--ok)}
+.a-rule .st.off{background:var(--outline)}
+.a-rule .nm{flex:1;min-width:0;font-size:12.5px}
+.a-rule .nm small{display:block;font:9.5px var(--mono);color:var(--text-3);margin-top:2px}
+.a-rule .sm{flex:none;font-size:10px;color:var(--text-3)}
+.a-skill{display:flex;gap:12px;padding:11px 0;border-bottom:1px solid var(--divider)}
+.a-skill .no{flex:none;width:20px;font:9.5px var(--mono);color:var(--text-3);line-height:1.9}
+.a-skill .c{flex:1;min-width:0}
+.a-skill b{display:block;font-size:12.5px;font-weight:500}
+.a-skill span{display:block;margin-top:2px;font-size:11px;color:var(--text-3);line-height:1.6}
+.a-skill small{display:block;margin-top:2px;font:9.5px var(--mono);color:var(--text-3)}
+
+/* A · 模型 / 权限 */
+.a-pick{display:flex;align-items:center;gap:10px;width:100%;padding:13px 8px;margin:0 -8px;border-bottom:1px solid var(--divider);transition:background .15s}
+.a-pick:hover{background:var(--card)}
+.a-pick .k{font-size:11px;color:var(--text-3);width:64px;flex:none}
+.a-pick .v{flex:1;min-width:0;font:12px var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.a-pick .go{flex:none;font-size:10.5px;color:var(--text-3);border-bottom:1px solid var(--divider)}
+.a-chain{display:flex;align-items:center;gap:12px;padding:11px 8px;margin:0 -8px;border-bottom:1px solid var(--divider)}
+.a-chain .no{flex:none;width:14px;font:9.5px var(--mono);color:var(--text-3)}
+.a-chain .c{flex:1;min-width:0}
+.a-chain b{display:block;font:11.5px var(--mono);font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.a-chain small{display:block;margin-top:2px;font-size:10px;color:var(--text-3)}
+.a-chain .ops{flex:none;display:flex;gap:2px;color:var(--text-3)}
+.a-chain .ops span{width:22px;height:22px;display:grid;place-items:center;border-radius:6px}
+.a-chain .ops span:hover{background:var(--card-high);color:var(--text)}
+.a-chain .ops svg{width:12px;height:12px}
+.a-add{display:inline-flex;align-items:center;gap:6px;margin-top:12px;font-size:11.5px;color:var(--text-2);border-bottom:1px solid var(--divider);padding-bottom:3px}
+.a-add svg{width:13px;height:13px}
+.a-opt{display:flex;gap:12px;align-items:flex-start;width:100%;padding:12px 8px;margin:0 -8px;border-bottom:1px solid var(--divider);transition:background .15s}
+.a-opt:hover{background:var(--card)}
+.a-opt .rd{flex:none;width:13px;height:13px;border:1px solid var(--outline);border-radius:50%;margin-top:4px;position:relative}
+.a-opt[aria-checked="true"] .rd{border-color:var(--accent)}
+.a-opt[aria-checked="true"] .rd:after{content:"";position:absolute;inset:3px;border-radius:50%;background:var(--accent)}
+.a-opt .c{flex:1;min-width:0}
+.a-opt b{display:block;font-size:13px;font-weight:500}
+.a-opt span{display:block;margin-top:3px;font-size:11px;color:var(--text-3);line-height:1.6}
+
+/* ══════════════════════════════════════════════════════
+   版 B · 值优先
+   一块「现在」条 + 2×2 数字格；数字才是首页的主角。
+   ══════════════════════════════════════════════════════ */
+.vB .body{padding:0 16px 26px}
+.b-hero{display:flex;align-items:center;gap:12px;padding:18px 2px 15px}
+.b-av{width:42px;height:42px;border-radius:50%;flex:none;background:var(--card-high);display:grid;place-items:center;font-size:16px;letter-spacing:.04em}
+.b-hero .main{flex:1;min-width:0}
+.b-hero b{display:block;font-size:15px;font-weight:600;letter-spacing:.04em}
+.b-hero i{display:block;margin-top:3px;font-style:normal;font-size:11.5px;color:var(--text-3)}
+.b-chg{flex:none;font-size:11px;color:var(--text-3);border-bottom:1px solid var(--outline);padding-bottom:2px}
+.b-band{display:grid;grid-template-columns:1.6fr 1fr;border:1px solid var(--divider);border-radius:14px;overflow:hidden;background:var(--card)}
+.b-cell{display:flex;flex-direction:column;gap:5px;padding:13px 14px 12px;transition:background .15s}
+.b-cell:hover{background:var(--card-high)}
+.b-cell:first-child{border-right:1px solid var(--divider)}
+.b-cell span{font-size:9.5px;letter-spacing:.18em;color:var(--text-3)}
+.b-cell b{font:12.5px var(--serif);font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;letter-spacing:.02em}
+.b-cell i{font-style:normal;font-size:10px;color:var(--text-3)}
+.b-label{display:flex;align-items:baseline;gap:8px;margin:24px 2px 9px;font-size:9.5px;letter-spacing:.12em;color:var(--text-3)}
+.b-label em{font-style:normal;font:9px var(--mono);letter-spacing:.02em;color:var(--text-3)}
+.b-label s{flex:1;height:1px;background:var(--divider);transform:translateY(-3px)}
+.b-tiles{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.b-tile{display:flex;flex-direction:column;gap:1px;padding:12px 13px 11px;background:var(--card);border-radius:12px;transition:background .15s}
+.b-tile:hover{background:var(--card-high)}
+.b-tile span{font-size:10px;letter-spacing:.08em;color:var(--text-3)}
+.b-tile b{font-size:23px;font-weight:500;line-height:1.3;letter-spacing:.01em;font-variant-numeric:tabular-nums}
+.b-tile i{font-style:normal;font-size:10px;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.b-link{display:flex;align-items:center;gap:10px;width:100%;padding:14px 2px;border-bottom:1px solid var(--divider);font-size:13px;transition:color .15s}
+.b-link:hover{color:var(--accent)}
+.b-link span{flex:1}
+.b-link i{font-style:normal;font-size:11px;color:var(--text-3)}
+.b-link svg{width:13px;height:13px;color:var(--text-3)}
+
+.b-tabs{display:flex;gap:2px;padding:3px;background:var(--card);border-radius:10px;margin:13px 0 15px}
+.b-tabs button{flex:1;height:31px;border-radius:7px;font-size:11.5px;color:var(--text-2);display:flex;align-items:center;justify-content:center;gap:5px;transition:background .15s,color .15s}
+.b-tabs button em{font-style:normal;font:9px var(--mono);color:var(--text-3)}
+.b-tabs button.on{background:var(--bg);color:var(--text);box-shadow:var(--shadow)}
+.b-tabs button.on em{color:var(--text-2)}
+.b-note{font-size:10.5px;color:var(--text-3);padding:0 2px 12px;line-height:1.7}
+.b-rec{display:grid;grid-template-columns:42px 1fr;gap:12px;padding:11px 2px;border-bottom:1px solid var(--divider)}
+.b-rec .d{font:9.5px var(--mono);color:var(--text-3);line-height:1.9}
+.b-rec .c{font-size:12.5px;line-height:1.65}
+.b-rec .c small{display:block;margin-top:1px;font:9.5px var(--mono);color:var(--text-3)}
+.b-mem{padding:10px 2px;border-bottom:1px solid var(--divider)}
+.b-mem p{margin:0;font-size:12.5px;line-height:1.65}
+.b-mem .meta{display:flex;gap:6px;align-items:center;margin-top:4px;font:9.5px var(--mono);color:var(--text-3)}
+.b-mem .meta em{font-style:normal;font-size:9.5px;letter-spacing:.1em;color:var(--text-2)}
+.b-rule{display:flex;align-items:center;gap:9px;padding:11px 2px;border-bottom:1px solid var(--divider);font-size:12.5px}
+.b-rule .st{width:5px;height:5px;border-radius:50%;background:var(--ok);flex:none}
+.b-rule .st.off{background:var(--outline)}
+.b-rule .nm{flex:1;min-width:0}
+.b-rule .nm small{display:block;font:9.5px var(--mono);color:var(--text-3);margin-top:2px}
+.b-rule .sm{font-size:10px;color:var(--text-3);flex:none}
+.b-skill{display:flex;align-items:baseline;gap:10px;padding:10px 2px;border-bottom:1px solid var(--divider)}
+.b-skill b{font-size:12.5px;font-weight:500;white-space:nowrap}
+.b-skill span{flex:1;min-width:0;font-size:10.5px;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.b-skill small{font:9.5px var(--mono);color:var(--text-3)}
+
+/* ══════════════════════════════════════════════════════
+   版 C · 册页
+   不用图标，用编号、点线、衬线数字；像一本簿子的目录与内页。
+   ══════════════════════════════════════════════════════ */
+.vC .body{padding:0 22px 30px}
+.c-cover{padding:24px 2px 18px;border-bottom:1px solid var(--divider)}
+.c-eye{font-size:9px;letter-spacing:.32em;color:var(--text-3)}
+.c-name{margin:9px 0 0;font-size:27px;font-weight:500;letter-spacing:.1em;line-height:1.2}
+.c-meta{margin-top:8px;font-size:11px;letter-spacing:.08em;color:var(--text-3)}
+.c-toc{margin-top:26px}
+.c-toc .head{margin:0 0 3px;font-size:9px;letter-spacing:.32em;color:var(--text-3)}
+.c-item{display:flex;align-items:baseline;gap:9px;width:100%;padding:12px 0;border-bottom:1px solid var(--divider);transition:color .15s}
+.c-item:hover{color:var(--accent)}
+.c-no{flex:none;width:19px;font:9px var(--mono);color:var(--text-3);letter-spacing:.04em}
+.c-t{flex:none;font-size:13.5px;letter-spacing:.03em}
+.c-dots{flex:1;min-width:16px;border-bottom:1px dotted var(--outline);transform:translateY(-3px);opacity:.85}
+.c-v{flex:none;max-width:176px;text-align:right;font:10.5px var(--serif);color:var(--text-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.c-fine{margin-top:26px;font-size:10.5px;line-height:1.9;color:var(--text-3);letter-spacing:.02em}
+.c-fine a{color:var(--text-2);border-bottom:1px solid var(--divider);padding-bottom:1px}
+
+.c-sec{margin-top:27px}
+.c-sec-h{display:flex;align-items:baseline;gap:10px;margin:0 0 3px;font-size:9px;letter-spacing:.3em;color:var(--text-3)}
+.c-sec-h b{font:9px var(--mono);letter-spacing:0;color:var(--text-2);font-weight:400}
+.c-sec-h s{flex:1;height:1px;background:var(--divider);transform:translateY(-3px)}
+.c-ledger{display:flex;gap:12px;padding:11px 0;border-bottom:1px solid var(--divider)}
+.c-date{flex:none;width:50px;font:9.5px var(--mono);color:var(--text-3);line-height:1.85;letter-spacing:.02em}
+.c-ledger .c{flex:1;min-width:0;font-size:12.5px;line-height:1.7}
+.c-ledger .c small{display:block;margin-top:1px;font:9.5px var(--mono);color:var(--text-3)}
+.c-mem{display:flex;gap:10px;padding:10px 0;border-bottom:1px solid var(--divider)}
+.c-mark{flex:none;width:19px;height:19px;margin-top:2px;border:1px solid var(--outline);display:grid;place-items:center;font-size:9px;color:var(--text-2);letter-spacing:.05em}
+.c-mem .c{flex:1;min-width:0}
+.c-mem p{margin:0;font-size:12.5px;line-height:1.65}
+.c-mem small{display:block;margin-top:3px;font:9.5px var(--mono);color:var(--text-3)}
+.c-rule{display:flex;align-items:baseline;gap:10px;padding:10px 0;border-bottom:1px solid var(--divider)}
+.c-rule .st{flex:none;width:14px;font:9px var(--mono);color:var(--text-3);letter-spacing:0}
+.c-rule .st.on{color:var(--ok)}
+.c-rule .nm{flex:1;min-width:0;font-size:12.5px}
+.c-rule .nm small{display:block;font-size:10px;color:var(--text-3);margin-top:2px}
+.c-rule .cr{flex:none;font:9.5px var(--mono);color:var(--text-3)}
+.c-skill{display:flex;gap:10px;padding:11px 0;border-bottom:1px solid var(--divider)}
+.c-skill .no{flex:none;width:20px;font:9px var(--mono);color:var(--text-3);line-height:1.95}
+.c-skill .c{flex:1;min-width:0}
+.c-skill b{display:block;font-size:12.5px;font-weight:500}
+.c-skill .file{font:9.5px var(--mono);color:var(--text-3);margin-top:1px;display:block}
+.c-skill span{display:block;margin-top:3px;font-size:11px;color:var(--text-3);line-height:1.6}
+.c-note{padding:13px 0 0;font-size:10.5px;line-height:1.8;color:var(--text-3)}
+.c-pick{display:flex;align-items:baseline;gap:10px;width:100%;padding:13px 0;border-bottom:1px solid var(--divider);transition:color .15s}
+.c-pick:hover{color:var(--accent)}
+.c-pick .k{flex:none;font-size:11px;color:var(--text-3);letter-spacing:.1em;width:56px}
+.c-pick .v{flex:1;min-width:0;font:11px var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.c-pick .go{flex:none;font-size:10px;color:var(--text-3)}
+.c-opt{display:flex;align-items:baseline;gap:10px;width:100%;padding:12px 0;border-bottom:1px solid var(--divider)}
+.c-opt .mk{flex:none;width:13px;font:10px var(--mono);color:var(--text-3)}
+.c-opt .c{flex:1;min-width:0}
+.c-opt b{font-size:13px;font-weight:500;letter-spacing:.03em}
+.c-opt[aria-checked="true"] b{color:var(--accent)}
+.c-opt[aria-checked="true"] .mk{color:var(--accent)}
+.c-opt span{display:block;margin-top:3px;font-size:10.5px;color:var(--text-3);line-height:1.65}
+
+/* ══════════════════════════════════════════════════════
+   版 D · 分组卡（现版精修）
+   保留卡片与图标，只把重复入口合并、把只读内容做摘要。
+   ══════════════════════════════════════════════════════ */
+.vD .body{padding:14px 14px 28px;display:flex;flex-direction:column;gap:12px}
+.d-card{display:flex;flex-direction:column;background:var(--card);border:1px solid var(--card-border,rgba(0,0,0,.06));border-radius:16px;overflow:hidden}
+.d-card>*+*{border-top:1px solid var(--divider)}
+.d-lbl{padding:12px 14px 8px;font-size:10.5px;font-weight:600;letter-spacing:.06em;color:var(--text-3)}
+.d-id{display:flex;align-items:center;gap:12px;width:100%;padding:13px 14px;transition:background .15s}
+.d-id:hover{background:var(--card-high)}
+.d-av{width:40px;height:40px;border-radius:50%;flex:none;background:var(--card-high);display:grid;place-items:center;font-size:15px}
+.d-id .main{flex:1;min-width:0}
+.d-id b{display:block;font-size:14px;font-weight:600}
+.d-id i{display:block;margin-top:2px;font-style:normal;font-size:11.5px;color:var(--text-3)}
+.d-row{display:flex;align-items:center;gap:12px;width:100%;min-height:52px;padding:10px 14px;transition:background .15s}
+.d-row:hover{background:var(--card-high)}
+.d-ic{flex:none;display:grid;place-items:center;color:var(--text-2)}
+.d-ic svg{width:17px;height:17px}
+.d-main{flex:1;min-width:0}
+.d-t{display:block;font-size:13px;font-weight:500}
+.d-s{display:block;margin-top:2px;font-size:11px;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.d-v{flex:none;max-width:150px;font:11.5px var(--serif);color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.d-badge{flex:none;min-width:24px;height:20px;padding:0 6px;border-radius:6px;background:var(--surface-low);color:var(--text-2);font:10px var(--mono);display:grid;place-items:center}
+.d-ar{flex:none;color:var(--text-3)}
+.d-ar svg{width:14px;height:14px}
+.d-note{padding:0 14px 12px;font-size:10.5px;line-height:1.7;color:var(--text-3)}
+.d-sub{display:flex;align-items:center;gap:8px;padding:11px 14px 6px;font-size:10.5px;letter-spacing:.06em;color:var(--text-3)}
+.d-sub .cnt{margin-left:auto;font:9.5px var(--mono);color:var(--text-3)}
+.d-item{display:flex;gap:10px;padding:10px 14px;border-top:1px solid var(--divider)}
+.d-item .dt{flex:none;width:34px;font:9.5px var(--mono);color:var(--text-3);line-height:1.85}
+.d-item .c{flex:1;min-width:0}
+.d-item p{margin:0;font-size:12px;line-height:1.65}
+.d-item small{display:block;margin-top:2px;font:9.5px var(--mono);color:var(--text-3)}
+.d-pill{display:inline-block;margin-left:6px;padding:0 5px;height:15px;line-height:15px;border-radius:4px;background:var(--surface-low);font:9px var(--mono);color:var(--text-3);vertical-align:1px}
+.d-tag{display:inline-block;margin-top:3px;padding:0 5px;height:16px;line-height:16px;border-radius:4px;background:var(--surface-low);font:9px var(--mono);color:var(--text-3)}
+.seg{display:flex;gap:2px;padding:3px;background:var(--surface-low);border:1px solid var(--divider);border-radius:10px}
+.seg button{flex:1;height:30px;border-radius:8px;font-size:11.5px;color:var(--text-2);display:grid;place-items:center;transition:background .15s,color .15s}
+.seg button[aria-checked="true"]{background:var(--card);color:var(--text);box-shadow:var(--shadow)}
+.d-field{display:flex;flex-direction:column;gap:7px;padding:12px 14px}
+.d-field .k{font-size:11.5px;color:var(--text-2)}
+.d-field .hint{font-size:10.5px;line-height:1.6;color:var(--text-3)}
+.d-trigger{display:flex;align-items:center;gap:8px;height:34px;padding:0 10px;border:1px solid var(--outline);border-radius:10px;background:var(--surface);transition:border-color .15s}
+.d-trigger:hover{border-color:var(--text-3)}
+.d-trigger .v{flex:1;min-width:0;font:11.5px var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.d-trigger svg{width:14px;height:14px;color:var(--text-3)}
+.d-chain{display:flex;align-items:center;gap:9px;padding:9px 14px}
+.d-chain .no{flex:none;width:14px;font:9.5px var(--mono);color:var(--text-3)}
+.d-chain .box{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;padding:8px 10px;border:1px solid var(--divider);border-radius:9px;background:var(--surface)}
+.d-chain .box b{font:11px var(--mono);font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.d-chain .box small{font-size:9.5px;color:var(--text-3)}
+.d-chain .ops{flex:none;display:flex;gap:1px;color:var(--text-3)}
+.d-chain .ops span{width:22px;height:22px;display:grid;place-items:center;border-radius:6px}
+.d-chain .ops span:hover{background:var(--card-high);color:var(--text)}
+.d-chain .ops svg{width:12px;height:12px}
+.d-add{display:flex;align-items:center;gap:6px;margin:2px 14px 13px;height:30px;padding:0 10px;border:1px dashed var(--outline);border-radius:9px;font-size:11px;color:var(--text-2);justify-content:center}
+.d-add:hover{border-color:var(--text-3);color:var(--text)}
+.d-add svg{width:13px;height:13px}
+</style>
+</head>
+<body>
+
+<!-- 图标：内联 symbol，全站同口径 -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-cpu" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M15 2v2M15 20v2M2 15h2M2 9h2M20 15h2M20 9h2M9 2v2M9 20v2"/></symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 2 9 5-9 5-9-5 9-5"/><path d="m3 12 9 5 9-5"/><path d="m3 17 9 5 9-5"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+  <symbol id="i-back" viewBox="0 0 24 24"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14M12 5v14"/></symbol>
+  <symbol id="i-up" viewBox="0 0 24 24"><path d="m18 15-6-6-6 6"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="i-history" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></symbol>
+  <symbol id="i-notes" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/></symbol>
+  <symbol id="i-repeat" viewBox="0 0 24 24"><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></symbol>
+  <symbol id="i-book" viewBox="0 0 24 24"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"/></symbol>
+</svg>
+
+<header class="bar">
+  <div class="brand"><span class="dot"></span><b>Selenite</b><em>对话设置 · 四版</em></div>
+  <div class="tabs" id="vtabs">
+    <button data-v="a" class="on">A 一页纸</button>
+    <button data-v="b">B 值优先</button>
+    <button data-v="c">C 册页</button>
+    <button data-v="d">D 分组卡</button>
+  </div>
+  <div class="tabs" id="ptabs">
+    <button data-p="home" class="on">首页</button>
+    <button data-p="model">模型</button>
+    <button data-p="policy">权限</button>
+    <button data-p="files">档案</button>
+  </div>
+  <div class="tools">
+    <span id="vdesc">A · 无卡片，只有细线；档案四类合一页</span>
+    <label><input type="checkbox" id="dark" /> 靛蓝夜</label>
+  </div>
+</header>
+
+<main class="stage">
+  <!-- 背景聊天（只为给抽屉一个真实落点） -->
+  <div class="chat" aria-hidden="true">
+    <div class="chat-top">
+      <span class="back">‹</span>
+      <span class="chat-title">总管</span>
+      <span class="chat-sub">人设 v14 · deepseek-v4.1-flash</span>
+      <span class="gear"><svg class="ic"><use href="#i-settings"/></svg></span>
+    </div>
+    <div class="chat-body">
+      <div class="msg user"><div class="who">你</div><div class="bub">11 月课堂观察表按班级整理一下，缺的列出来。</div></div>
+      <div class="msg ai"><div class="who">总管</div><div class="bub">整理完了：6 个班、148 份，缺 3 份（3 班 2 份、5 班 1 份）。缺失清单单独列了一份，放在「11月课堂观察」里。</div></div>
+      <div class="msg user"><div class="who">你</div><div class="bub">好，顺便把校服收费表也核一遍。</div></div>
+    </div>
+    <div class="composer"><span>继续安排…</span><span class="send">↑</span></div>
+  </div>
+  <div class="scrim"></div>
+
+  <!-- ══════════════ 版 A ══════════════ -->
+  <aside class="drawer vA" data-v="a">
+    <!-- A 首页 -->
+    <div class="screen" data-v="a" data-p="home" style="display:flex;flex-direction:column;flex:1;min-height:0">
+      <div class="hd"><div class="ttl">对话设置</div><button class="ib" aria-label="关闭"><svg class="ic"><use href="#i-x"/></svg></button></div>
+      <div class="body">
+        <div class="a-id">
+          <span class="a-av">总</span>
+          <div class="main"><b>总管</b><i>人设 v14 · 主对话</i></div>
+          <button class="a-chg" data-go="persona">改人设</button>
+        </div>
+
+        <div class="a-sec">
+          <h4>这一位</h4>
+          <button class="a-row" data-go="model">
+            <span class="a-ic"><svg class="ic"><use href="#i-cpu"/></svg></span>
+            <span class="a-main"><span class="a-t">模型</span><span class="a-s">备选 2 条 · 只在试跑与例行任务换</span></span>
+            <span class="a-v mono">deepseek-v4.1-flash</span>
+            <span class="a-ar"><svg class="ic"><use href="#i-chev"/></svg></span>
+          </button>
+          <button class="a-row" data-go="policy">
+            <span class="a-ic"><svg class="ic"><use href="#i-shield"/></svg></span>
+            <span class="a-main"><span class="a-t">权限</span><span class="a-s">动手之前只问重要的</span></span>
+            <span class="a-v">完全访问</span>
+            <span class="a-ar"><svg class="ic"><use href="#i-chev"/></svg></span>
+          </button>
+        </div>
+
+        <div class="a-sec">
+          <h4>档案 · 只读</h4>
+          <button class="a-row" data-go="files">
+            <span class="a-ic"><svg class="ic"><use href="#i-book"/></svg></span>
+            <span class="a-main"><span class="a-t">档案</span><span class="a-s">履历 · 记忆 · 例行规则 · 技能，四处都改不了</span></span>
+            <span class="a-v mono">12 · 47 · 4 · 6</span>
+            <span class="a-ar"><svg class="ic"><use href="#i-chev"/></svg></span>
+          </button>
+        </div>
+
+        <div class="a-sec">
+          <h4>更多</h4>
+          <button class="a-row" data-go="settings">
+            <span class="a-ic"><svg class="ic"><use href="#i-settings"/></svg></span>
+            <span class="a-main"><span class="a-t">全部设置</span><span class="a-s">供应商、密钥、记忆整理、连接手机…</span></span>
+            <span class="a-ar"><svg class="ic"><use href="#i-chev"/></svg></span>
+          </button>
+        </div>
+
+        <p class="a-foot">通知与外观跟随全局设置，这里不再重复一遍。</p>
+      </div>
+    </div>
+
+    <!-- A 模型 -->
+    <div class="screen" data-v="a" data-p="model" style="display:none;flex-direction:column;flex:1;min-height:0">
+      <div class="hd"><button class="ib" data-go="home" aria-label="返回"><svg class="ic"><use href="#i-back"/></svg></button><div class="ttl">模型</div><button class="ib" aria-label="关闭"><svg class="ic"><use href="#i-x"/></svg></button></div>
+      <div class="body">
+        <p class="a-meta">主选对所有对话生效；备选只属于「总管」，只在试跑与例行任务里换。</p>
+        <div class="a-sec">
+          <h4>主选</h4>
+          <button class="a-pick">
+            <span class="k">当前模型</span>
+            <span class="v">deepseek-v4.1-flash</span>
+            <span class="go">更换</span>
+          </button>
+          <p class="a-meta" style="padding-top:8px">百炼 · 切换后下一轮生效。</p>
+        </div>
+        <div class="a-sec">
+          <h4>备选 · 按顺序换</h4>
+          <div class="a-chain">
+            <span class="no">1</span>
+            <span class="c"><b>qwen3-max</b><small>百炼 · 主选没应答时先试它</small></span>
+            <span class="ops"><span><svg class="ic"><use href="#i-up"/></svg></span><span><svg class="ic"><use href="#i-down"/></svg></span><span><svg class="ic"><use href="#i-x"/></svg></span></span>
+          </div>
+          <div class="a-chain">
+            <span class="no">2</span>
+            <span class="c"><b>glm-5.3</b><small>智谱</small></span>
+            <span class="ops"><span><svg class="ic"><use href="#i-up"/></svg></span><span><svg class="ic"><use href="#i-down"/></svg></span><span><svg class="ic"><use href="#i-x"/></svg></span></span>
+          </div>
+          <button class="a-add"><svg class="ic"><use href="#i-plus"/></svg>加一条备选</button>
+        </div>
+        <p class="a-foot">那一轮没应答、且原因可切时，按顺序换下一条重跑。最多 5 条。</p>
+      </div>
+    </div>
+
+    <!-- A 权限 -->
+    <div class="screen" data-v="a" data-p="policy" style="display:none;flex-direction:column;flex:1;min-height:0">
+      <div class="hd"><button class="ib" data-go="home" aria-label="返回"><svg class="ic"><use href="#i-back"/></svg></button><div class="ttl">权限</div><button class="ib" aria-label="关闭"><svg class="ic"><use href="#i-x"/></svg></button></div>
+      <div class="body">
+        <div class="a-sec" style="margin-top:18px">
+          <h4>它能替你动到什么程度</h4>
+          <button class="a-opt" aria-checked="true"><span class="rd"></span><span class="c"><b>完全访问</b><span>能改文件、能跑命令</span></span></button>
+          <button class="a-opt" aria-checked="false"><span class="rd"></span><span class="c"><b>只读</b><span>能看，不改，不跑</span></span></button>
+          <button class="a-opt" aria-checked="false"><span class="rd"></span><span class="c"><b>不跑命令</b><span>改文件可以，命令一律不跑</span></span></button>
+        </div>
+        <div class="a-sec">
+          <h4>动手之前问不问我</h4>
+          <button class="a-opt" aria-checked="false"><span class="rd"></span><span class="c"><b>全部问我</b><span>每个写操作都先停下来</span></span></button>
+          <button class="a-opt" aria-checked="true"><span class="rd"></span><span class="c"><b>只问重要的</b><span>只拦跑命令、派活这类会起执行的动作；改文件自动放行</span></span></button>
+          <button class="a-opt" aria-checked="false"><span class="rd"></span><span class="c"><b>全不问</b><span>只在出错时告诉你</span></span></button>
+        </div>
+        <p class="a-foot">改完立刻生效，没有「保存」这一步。</p>
+      </div>
+    </div>
+
+    <!-- A 档案 -->
+    <div class="screen" data-v="a" data-p="files" style="display:none;flex-direction:column;flex:1;min-height:0">
+      <div class="hd"><button class="ib" data-go="home" aria-label="返回"><svg class="ic"><use href="#i-back"/></svg></button><div class="ttl">档案</div><button class="ib" aria-label="关闭"><svg class="ic"><use href="#i-x"/></svg></button></div>
+      <div class="body">
+        <p class="a-meta">总管 · 只读。要改去人设页与例行任务。</p>
+
+        <div class="a-sec">
+          <h4>工作履历 · 12</h4>
+          <div class="a-tl"><span class="d">11-12</span><div class="c">整理 11 月课堂观察表<small>#A-2043 · 完成 · 结算 2 学分</small></div></div>
+          <div class="a-tl"><span class="d">11-11</span><div class="c">四十五中校服收费表核对<small>#A-2038 · 完成</small></div></div>
+          <div class="a-tl"><span class="d">11-10</span><div class="c">本周周报草稿<small>#A-2021 · 超时重派后完成</small></div></div>
+          <div class="a-tl"><span class="d">11-07</span><div class="c">牛奶订购顺延核对<small>#A-2009 · 完成</small></div></div>
+          <div class="a-tl"><span class="d">11-05</span><div class="c">考研预报名材料清单<small>#A-1996 · 完成</small></div></div>
+        </div>
+
+        <div class="a-sec">
+          <h4>记忆 · 47</h4>
+          <div class="a-kind">偏好 <em>18</em></div>
+          <div class="a-mem"><p>回复不要客套，直接说事，别写「辛苦了」。</p><small>taught · 11-09</small></div>
+          <div class="a-mem"><p>文档默认简体中文，标题用我的原话。</p><small>taught · 11-06</small></div>
+          <div class="a-kind">事实 <em>12</em></div>
+          <div class="a-mem"><p>2027 年 6 月毕业，目标院校含内师大、东北林大、石河子。</p><small>user · 11-03</small></div>
+          <div class="a-kind">经历 <em>9</em></div>
+          <div class="a-mem"><p>10-28 那次派单路径写错，重跑了一遍。</p><small>observed · 10-28</small></div>
+          <div class="a-kind">实体 <em>8</em></div>
+          <div class="a-mem"><p>四十五中 = 教育实习学校，联系人王老师。</p><small>imported · 10-30</small></div>
+        </div>
+
+        <div class="a-sec">
+          <h4>例行规则 · 4</h4>
+          <div class="a-rule"><span class="st"></span><span class="nm">每早日报<small>cron · 0 7 * * *</small></span><span class="sm">新会话</span></div>
+          <div class="a-rule"><span class="st"></span><span class="nm">每周日回顾<small>cron · 0 21 * * 0</small></span><span class="sm">同会话</span></div>
+          <div class="a-rule"><span class="st"></span><span class="nm">派单结算写履历<small>event · task.settled</small></span><span class="sm">同会话</span></div>
+          <div class="a-rule"><span class="st off"></span><span class="nm">月末记忆归档<small>cron · 0 3 1 * *</small></span><span class="sm">停用</span></div>
+        </div>
+
+        <div class="a-sec">
+          <h4>技能 · 6</h4>
+          <div class="a-skill"><span class="no">01</span><div class="c"><b>会议纪要</b><span>按发言人分段，末尾出待办</span><small>meeting-minutes.md · 11-08</small></div></div>
+          <div class="a-skill"><span class="no">02</span><div class="c"><b>表格清洗</b><span>先列字段，再逐列规范化</span><small>excel-clean.md · 11-05</small></div></div>
+          <div class="a-skill"><span class="no">03</span><div class="c"><b>通知起草</b><span>三段式，先结论后时间地点</span><small>notice-draft.md · 10-31</small></div></div>
+          <div class="a-skill"><span class="no">04</span><div class="c"><b>记忆整理</b><span>同类合并，超过 30 天降权</span><small>memory-tidy.md · 10-24</small></div></div>
+        </div>
+
+        <p class="a-foot">这四页都只是看。改人设走上面的身份块，改例行规则去「全部设置 → 例行任务」，删记忆去设置页的记忆区。</p>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ══════════════ 版 B ══════════════ -->
+  <aside class="drawer vB" data-v="b" hidden>
+    <!-- B 首页 -->
+    <div class="screen" data-v="b" data-p="home" style="display:flex;flex-direction:column;flex:1;min-height:0">
+      <div class="hd"><div class="ttl">对话设置</div><button class="ib" aria-label="关闭"><svg class="ic"><use href="#i-x"/></svg></button></div>
+      <div class="body">
+        <div class="b-hero">
+          <span class="b-av">总</span>
+          <div class="main"><b>总管</b><i>人设 v14 · 主对话</i></div>
+          <button class="b-chg" data-go="persona">改人设</button>
+        </div>
+
+        <div class="b-band">
+          <button class="b-cell" data-go="model">
+            <span>模 型</span>
+            <b class="mono">deepseek-v4.1-flash</b>
+            <i>备选 2 条</i>
+          </button>
+          <button class="b-cell" data-go="policy">
+            <span>权 限</span>
+            <b>完全访问</b>
+            <i>只问重要的</i>
+          </button>
+        </div>
+
+        <div class="b-label">档案 · 只读 <s></s> <em>4 类</em></div>
+        <div class="b-tiles">
+          <button class="b-tile" data-go="files"><span>工作履历</span><b>12</b><i>11-12 课堂观察表</i></button>
+          <button class="b-tile" data-go="files"><span>记忆</span><b>47</b><i>偏好「不要客套」</i></button>
+          <button class="b-tile" data-go="files"><span>例行规则</span><b>4</b><i>每早 7:00 日报</i></button>
+          <button class="b-tile" data-go="files"><span>技能</span><b>6</b><i>最近改：会议纪要</i></button>
+        </div>
+
+        <button class="b-link" data-go="persona" style="margin-top:20px"><span>人设</span><i>v14</i><svg class="ic"><use href="#i-chev"/></svg></button>
+        <button class="b-link" data-go="settings"><span>全部设置</span><i>供应商 · 密钥 · 记忆整理</i><svg class="ic"><use href="#i-chev"/></svg></button>
+
+        <p class="foot">通知与外观跟随全局设置。</p>
+      </div>
+    </div>
+
+    <!-- B 模型 -->
+    <div class="screen" data-v="b" data-p="model" style="display:none;flex-direction:column;flex:1;min-height:0">
+      <div class="hd"><button class="ib" data-go="home" aria-label="返回"><svg class="ic"><use href="#i-back"/></svg></button><div class="ttl">模型</div><button class="ib" aria-label="关闭"><svg class="ic"><use href="#i-x"/></svg></button></div>
+      <div class="body">
+        <p class="b-note">主选对所有对话生效；备选只属于「总管」，只在试跑与例行任务里换。</p>
+        <div class="b-label">主选 <s></s></div>
+        <div style="padding:15px 14px;background:var(--card);border-radius:12px">
+          <div style="font-size:9.5px;letter-spacing:.18em;color:var(--text-3)">当前模型</div>
+          <div style="font:15px var(--mono);letter-spacing:-.01em;margin-top:6px">deepseek-v4.1-flash</div>
+          <div style="display:flex;align-items:center;gap:8px;margin-top:10px">
+            <span style="font-size:10.5px;color:var(--text-3);flex:1">百炼 · 下一轮生效</span>
+            <span style="height:28px;padding:0 12px;border:1px solid var(--outline);border-radius:8px;display:grid;place-items:center;font-size:11.5px;color:var(--text-2)">更换</span>
+          </div>
+        </div>
+
+        <div class="b-label">备选 <s></s> <em>2 / 5</em></div>
+        <div class="d-chain" style="padding:0"><span class="no">1</span><span class="box"><b>qwen3-max</b><small>百炼 · 先试它</small></span><span class="ops"><span><svg class="ic"><use href="#i-up"/></svg></span><span><svg class="ic"><use href="#i-down"/></svg></span><span><svg class="ic"><use href="#i-x"/></svg></span></span></div>
+        <div class="d-chain" style="padding:10px 0 0"><span class="no">2</span><span class="box"><b>glm-5.3</b><small>智谱</small></span><span class="ops"><span><svg class="ic"><use href="#i-up"/></svg></span><span><svg class="ic"><use href="#i-down"/></svg></span><span><svg class="ic"><use href="#i-x"/></svg></span></span></div>
+        <button class="d-add" style="margin:12px 0 0"><svg class="ic"><use href="#i-plus"/></svg>加一条备选</button>
+
+        <p class="foot">那一轮没应答、且原因可切时，按顺序换下一条重跑。最多 5 条。</p>
+      </div>
+    </div>
+
+    <!-- B 权限 -->
+    <div class="screen" data-v="b" data-p="policy" style="display:none;flex-direction:column;flex:1;min-height:0">
+      <div class="hd"><button class="ib" data-go="home" aria-label="返回"><svg class="ic"><use href="#i-back"/></svg></button><div class="ttl">权限</div><button class="ib" aria-label="关闭"><svg class="ic"><use href="#i-x"/></svg></button></div>
+      <div class="body">
+        <div class="b-label" style="margin-top:15px">它能替你动到什么程度 <s></s></div>
+        <div style="display:flex;flex-direction:column;gap:7px">
+          <button class="b-tile" aria-checked="true" style="text-align:left;background:var(--card);box-shadow:inset 0 0 0 1px var(--accent)">
+            <span>完全访问</span><b style="font-size:13px;font-weight:500">能改文件、能跑命令</b>
+          </button>
+          <button class="b-tile" style="text-align:left"><span>只读</span><b style="font-size:13px;font-weight:500">能看，不改，不跑</b></button>
+          <button class="b-tile" style="text-align:left"><span>不跑命令</span><b style="font-size:13px;font-weight:500">改文件可以，命令一律不跑</b></button>
+        </div>
+
+        <div class="b-label">动手之前问不问我 <s></s></div>
+        <div class="seg">
+          <button aria-checked="false">全部问我</button>
+          <button aria-checked="true">只问重要的</button>
+          <button aria-checked="false">全不问</button>
+        </div>
+        <p class="foot">只问重要的 = 只拦跑命令、派活这类会起执行的动作；改文件自动放行。改完立刻生效。</p>
+      </div>
+    </div>
+
+    <!-- B 档案：四个分段 + 单栏内容 -->
+    <div class="screen" data-v="b" data-p="files" style="display:none;flex-direction:column;flex:1;min-height:0">
+      <div class="hd"><button class="ib" data-go="home" aria-label="返回"><svg class="ic"><use href="#i-back"/></svg></button><div class="ttl">档案</div><button class="ib" aria-label="关闭"><svg class="ic"><use href="#i-x"/></svg></button></div>
+      <div class="body">
+        <div class="b-tabs" id="btabs">
+          <button data-btab="records" class="on">履历 <em>12</em></button>
+          <button data-btab="memories">记忆 <em>47</em></button>
+          <button data-btab="routines">规则 <em>4</em></button>
+          <button data-btab="skills">技能 <em>6</em></button>
+        </div>
+        <p class="b-note" style="padding-bottom:10px">总管 · 只读。要改去人设页与例行任务。</p>
+
+        <div class="b-panel" data-k="records">
+          <div class="b-rec"><span class="d">11-12</span><div class="c">整理 11 月课堂观察表<small>#A-2043 · 完成 · 结算 2 学分</small></div></div>
+          <div class="b-rec"><span class="d">11-11</span><div class="c">四十五中校服收费表核对<small>#A-2038 · 完成</small></div></div>
+          <div class="b-rec"><span class="d">11-10</span><div class="c">本周周报草稿<small>#A-2021 · 超时重派后完成</small></div></div>
+          <div class="b-rec"><span class="d">11-07</span><div class="c">牛奶订购顺延核对<small>#A-2009 · 完成</small></div></div>
+          <div class="b-rec"><span class="d">11-05</span><div class="c">考研预报名材料清单<small>#A-1996 · 完成</small></div></div>
+        </div>
+
+        <div class="b-panel" data-k="memories" hidden>
+          <div class="b-mem"><p>回复不要客套，直接说事，别写「辛苦了」。</p><div class="meta"><em>偏好</em><span>taught · 11-09</span></div></div>
+          <div class="b-mem"><p>文档默认简体中文，标题用我的原话。</p><div class="meta"><em>偏好</em><span>taught · 11-06</span></div></div>
+          <div class="b-mem"><p>2027 年 6 月毕业，目标院校含内师大、东北林大、石河子。</p><div class="meta"><em>事实</em><span>user · 11-03</span></div></div>
+          <div class="b-mem"><p>10-28 那次派单路径写错，重跑了一遍。</p><div class="meta"><em>经历</em><span>observed · 10-28</span></div></div>
+          <div class="b-mem"><p>四十五中 = 教育实习学校，联系人王老师。</p><div class="meta"><em>实体</em><span>imported · 10-30</span></div></div>
+        </div>
+
+        <div class="b-panel" data-k="routines" hidden>
+          <div class="b-rule"><span class="st"></span><span class="nm">每早日报<small>cron · 0 7 * * *</small></span><span class="sm">新会话</span></div>
+          <div class="b-rule"><span class="st"></span><span class="nm">每周日回顾<small>cron · 0 21 * * 0</small></span><span class="sm">同会话</span></div>
+          <div class="b-rule"><span class="st"></span><span class="nm">派单结算写履历<small>event · task.settled</small></span><span class="sm">同会话</span></div>
+          <div class="b-rule"><span class="st off"></span><span class="nm">月末记忆归档<small>cron · 0 3 1 * *</small></span><span class="sm">停用</span></div>
+        </div>
+
+        <div class="b-panel" data-k="skills" hidden>
+          <div class="b-skill"><b>会议纪要</b><span>按发言人分段，末尾出待办</span><small>11-08</small></div>
+          <div class="b-skill"><b>表格清洗</b><span>先列字段，再逐列规范化</span><small>11-05</small></div>
+          <div class="b-skill"><b>通知起草</b><span>三段式，先结论后时间地点</span><small>10-31</small></div>
+          <div class="b-skill"><b>记忆整理</b><span>同类合并，超过 30 天降权</span><small>10-24</small></div>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ══════════════ 版 C ══════════════ -->
+  <aside class="drawer vC" data-v="c" hidden>
+    <!-- C 首页 -->
+    <div class="screen" data-v="c" data-p="home" style="display:flex;flex-direction:column;flex:1;min-height:0">
+      <div class="hd"><div class="ttl">对话设置</div><button class="ib" aria-label="关闭"><svg class="ic"><use href="#i-x"/></svg></button></div>
+      <div class="body">
+        <div class="c-cover">
+          <div class="c-eye">对 话 设 置</div>
+          <h2 class="c-name">总管</h2>
+          <div class="c-meta">人设 v14 · 主对话 · 自 2026-10 起</div>
+        </div>
+
+        <div class="c-toc">
+          <div class="head">这 一 位</div>
+          <button class="c-item" data-go="model"><span class="c-no">01</span><span class="c-t">模型</span><span class="c-dots"></span><span class="c-v mono">deepseek-v4.1-flash</span></button>
+          <button class="c-item" data-go="policy"><span class="c-no">02</span><span class="c-t">权限</span><span class="c-dots"></span><span class="c-v">完全访问 · 只问重要的</span></button>
+        </div>
+
+        <div class="c-toc">
+          <div class="head">档 案 · 只 读</div>
+          <button class="c-item" data-go="files"><span class="c-no">03</span><span class="c-t">工作履历</span><span class="c-dots"></span><span class="c-v">12 条</span></button>
+          <button class="c-item" data-go="files"><span class="c-no">04</span><span class="c-t">记忆</span><span class="c-dots"></span><span class="c-v">47 条</span></button>
+          <button class="c-item" data-go="files"><span class="c-no">05</span><span class="c-t">例行规则</span><span class="c-dots"></span><span class="c-v">4 条</span></button>
+          <button class="c-item" data-go="files"><span class="c-no">06</span><span class="c-t">技能</span><span class="c-dots"></span><span class="c-v">6 个</span></button>
+        </div>
+
+        <button class="c-item" data-go="persona" style="margin-top:24px"><span class="c-no">07</span><span class="c-t">改人设</span><span class="c-dots"></span><span class="c-v">v14</span></button>
+        <button class="c-item" data-go="settings"><span class="c-no">08</span><span class="c-t">全部设置</span><span class="c-dots"></span><span class="c-v">供应商 · 密钥</span></button>
+
+        <p class="c-fine">通知与外观沿用全局设置，这里只列这一位自己的东西。</p>
+      </div>
+    </div>
+
+    <!-- C 模型 -->
+    <div class="screen" data-v="c" data-p="model" style="display:none;flex-direction:column;flex:1;min-height:0">
+      <div class="hd"><button class="ib" data-go="home" aria-label="返回"><svg class="ic"><use href="#i-back"/></svg></button><div class="ttl">模型</div><button class="ib" aria-label="关闭"><svg class="ic"><use href="#i-x"/></svg></button></div>
+      <div class="body">
+        <p class="c-note">主选对所有对话生效；备选只属于「总管」，只在试跑与例行任务里换。</p>
+        <div class="c-sec" style="margin-top:22px">
+          <div class="c-sec-h"><b>Ⅰ</b> 主 选 <s></s></div>
+          <button class="c-pick"><span class="k">当前</span><span class="v">deepseek-v4.1-flash</span><span class="go">更换</span></button>
+          <p class="c-note">百炼 · 切换后下一轮生效。</p>
+        </div>
+        <div class="c-sec">
+          <div class="c-sec-h"><b>Ⅱ</b> 备 选 <s></s> <b style="color:var(--text-3)">2 / 5</b></div>
+          <div class="c-rule"><span class="st on">●</span><span class="nm">qwen3-max<small>百炼 · 先试它</small></span><span class="cr">01</span></div>
+          <div class="c-rule"><span class="st on">●</span><span class="nm">glm-5.3<small>智谱</small></span><span class="cr">02</span></div>
+          <button class="c-pick" style="padding-top:12px"><span class="k">＋</span><span class="v" style="font-family:var(--serif);font-size:11.5px;color:var(--text-2)">加一条备选</span></button>
+        </div>
+        <p class="c-fine">那一轮没应答、且原因可切时，按顺序换下一条重跑。最多 5 条。</p>
+      </div>
+    </div>
+
+    <!-- C 权限 -->
+    <div class="screen" data-v="c" data-p="policy" style="display:none;flex-direction:column;flex:1;min-height:0">
+      <div class="hd"><button class="ib" data-go="home" aria-label="返回"><svg class="ic"><use href="#i-back"/></svg></button><div class="ttl">权限</div><button class="ib" aria-label="关闭"><svg class="ic"><use href="#i-x"/></svg></button></div>
+      <div class="body">
+        <div class="c-sec" style="margin-top:20px">
+          <div class="c-sec-h"><b>Ⅰ</b> 能 动 到 什 么 程 度 <s></s></div>
+          <button class="c-opt" aria-checked="true"><span class="mk">●</span><span class="c"><b>完全访问</b><span>能改文件、能跑命令</span></span></button>
+          <button class="c-opt" aria-checked="false"><span class="mk">○</span><span class="c"><b>只读</b><span>能看，不改，不跑</span></span></button>
+          <button class="c-opt" aria-checked="false"><span class="mk">○</span><span class="c"><b>不跑命令</b><span>改文件可以，命令一律不跑</span></span></button>
+        </div>
+        <div class="c-sec">
+          <div class="c-sec-h"><b>Ⅱ</b> 动 手 之 前 问 不 问 <s></s></div>
+          <button class="c-opt" aria-checked="false"><span class="mk">○</span><span class="c"><b>全部问我</b><span>每个写操作都先停下来</span></span></button>
+          <button class="c-opt" aria-checked="true"><span class="mk">●</span><span class="c"><b>只问重要的</b><span>只拦跑命令、派活这类会起执行的动作</span></span></button>
+          <button class="c-opt" aria-checked="false"><span class="mk">○</span><span class="c"><b>全不问</b><span>只在出错时告诉你</span></span></button>
+        </div>
+        <p class="c-fine">改完立刻生效，没有「保存」这一步。</p>
+      </div>
+    </div>
+
+    <!-- C 档案：一页看全，四段带编号 -->
+    <div class="screen" data-v="c" data-p="files" style="display:none;flex-direction:column;flex:1;min-height:0">
+      <div class="hd"><button class="ib" data-go="home" aria-label="返回"><svg class="ic"><use href="#i-back"/></svg></button><div class="ttl">档案</div><button class="ib" aria-label="关闭"><svg class="ic"><use href="#i-x"/></svg></button></div>
+      <div class="body">
+        <p class="c-note">总管 · 只读。四处家底都在这一页，改不了。</p>
+
+        <div class="c-sec" style="margin-top:18px">
+          <div class="c-sec-h"><b>Ⅰ</b> 工 作 履 历 <s></s> <b style="color:var(--text-3)">12</b></div>          <div class="c-ledger"><span class="c-date">11-12</span><div class="c">整理 11 月课堂观察表<small>#A-2043 · 完成 · 结算 2 学分</small></div></div>
+          <div class="c-ledger"><span class="c-date">11-11</span><div class="c">四十五中校服收费表核对<small>#A-2038 · 完成</small></div></div>
+          <div class="c-ledger"><span class="c-date">11-10</span><div class="c">本周周报草稿<small>#A-2021 · 超时重派后完成</small></div></div>
+          <div class="c-ledger"><span class="c-date">11-07</span><div class="c">牛奶订购顺延核对<small>#A-2009 · 完成</small></div></div>
+          <div class="c-ledger"><span class="c-date">11-05</span><div class="c">考研预报名材料清单<small>#A-1996 · 完成</small></div></div>
+        </div>
+
+        <div class="c-sec">
+          <div class="c-sec-h"><b>Ⅱ</b> 记 忆 <s></s> <b style="color:var(--text-3)">47</b></div>
+          <div class="c-mem"><span class="c-mark">偏</span><div class="c"><p>回复不要客套，直接说事，别写「辛苦了」。</p><small>偏好 · taught · 11-09</small></div></div>
+          <div class="c-mem"><span class="c-mark">偏</span><div class="c"><p>文档默认简体中文，标题用我的原话。</p><small>偏好 · taught · 11-06</small></div></div>
+          <div class="c-mem"><span class="c-mark">事</span><div class="c"><p>2027 年 6 月毕业，目标院校含内师大、东北林大、石河子。</p><small>事实 · user · 11-03</small></div></div>
+          <div class="c-mem"><span class="c-mark">经</span><div class="c"><p>10-28 那次派单路径写错，重跑了一遍。</p><small>经历 · observed · 10-28</small></div></div>
+          <div class="c-mem"><span class="c-mark">实</span><div class="c"><p>四十五中 = 教育实习学校，联系人王老师。</p><small>实体 · imported · 10-30</small></div></div>
+        </div>
+
+        <div class="c-sec">
+          <div class="c-sec-h"><b>Ⅲ</b> 例 行 规 则 <s></s> <b style="color:var(--text-3)">4</b></div>
+          <div class="c-rule"><span class="st on">●</span><span class="nm">每早日报<small>新会话</small></span><span class="cr">0 7 * * *</span></div>
+          <div class="c-rule"><span class="st on">●</span><span class="nm">每周日回顾<small>同会话</small></span><span class="cr">0 21 * * 0</span></div>
+          <div class="c-rule"><span class="st on">●</span><span class="nm">派单结算写履历<small>同会话 · event</small></span><span class="cr">task.settled</span></div>
+          <div class="c-rule"><span class="st">○</span><span class="nm">月末记忆归档<small>停用</small></span><span class="cr">0 3 1 * *</span></div>
+        </div>
+
+        <div class="c-sec">
+          <div class="c-sec-h"><b>Ⅳ</b> 技 能 <s></s> <b style="color:var(--text-3)">6</b></div>
+          <div class="c-skill"><span class="no">01</span><div class="c"><b>会议纪要</b><span class="file">meeting-minutes.md</span><span>按发言人分段，末尾出待办</span></div></div>
+          <div class="c-skill"><span class="no">02</span><div class="c"><b>表格清洗</b><span class="file">excel-clean.md</span><span>先列字段，再逐列规范化</span></div></div>
+          <div class="c-skill"><span class="no">03</span><div class="c"><b>通知起草</b><span class="file">notice-draft.md</span><span>三段式，先结论后时间地点</span></div></div>
+          <div class="c-skill"><span class="no">04</span><div class="c"><b>记忆整理</b><span class="file">memory-tidy.md</span><span>同类合并，超过 30 天降权</span></div></div>
+        </div>
+
+        <p class="c-fine">改人设回上面的封面行；改例行规则去「全部设置 → 例行任务」；删记忆去设置页的记忆区。</p>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ══════════════ 版 D ══════════════ -->
+  <aside class="drawer vD" data-v="d" hidden>
+    <!-- D 首页 -->
+    <div class="screen" data-v="d" data-p="home" style="display:flex;flex-direction:column;flex:1;min-height:0">
+      <div class="hd"><div class="ttl">对话设置</div><button class="ib" aria-label="关闭"><svg class="ic"><use href="#i-x"/></svg></button></div>
+      <div class="body">
+        <div class="d-card">
+          <button class="d-id" data-go="persona">
+            <span class="d-av">总</span>
+            <span class="main"><b>总管</b><i>人设 v14 · 点头像或名字改</i></span>
+            <span class="d-ar"><svg class="ic"><use href="#i-chev"/></svg></span>
+          </button>
+        </div>
+
+        <div class="d-card">
+          <div class="d-lbl">这一位</div>
+          <button class="d-row" data-go="model">
+            <span class="d-ic"><svg class="ic"><use href="#i-cpu"/></svg></span>
+            <span class="d-main"><span class="d-t">模型</span><span class="d-s">备选 2 条 · 只在试跑与例行任务换</span></span>
+            <span class="d-v mono">deepseek-v4.1-flash</span>
+            <span class="d-ar"><svg class="ic"><use href="#i-chev"/></svg></span>
+          </button>
+          <button class="d-row" data-go="policy">
+            <span class="d-ic"><svg class="ic"><use href="#i-shield"/></svg></span>
+            <span class="d-main"><span class="d-t">权限</span><span class="d-s">动手之前只问重要的</span></span>
+            <span class="d-v">完全访问</span>
+            <span class="d-ar"><svg class="ic"><use href="#i-chev"/></svg></span>
+          </button>
+        </div>
+
+        <div class="d-card">
+          <div class="d-lbl">档案 · 只读</div>
+          <button class="d-row" data-go="files">
+            <span class="d-ic"><svg class="ic"><use href="#i-history"/></svg></span>
+            <span class="d-main"><span class="d-t">工作履历</span><span class="d-s">最近：11-12 整理 11 月课堂观察表</span></span>
+            <span class="d-badge">12</span>
+            <span class="d-ar"><svg class="ic"><use href="#i-chev"/></svg></span>
+          </button>
+          <button class="d-row" data-go="files">
+            <span class="d-ic"><svg class="ic"><use href="#i-notes"/></svg></span>
+            <span class="d-main"><span class="d-t">记忆</span><span class="d-s">最近：偏好「回复不要客套」</span></span>
+            <span class="d-badge">47</span>
+            <span class="d-ar"><svg class="ic"><use href="#i-chev"/></svg></span>
+          </button>
+          <button class="d-row" data-go="files">
+            <span class="d-ic"><svg class="ic"><use href="#i-repeat"/></svg></span>
+            <span class="d-main"><span class="d-t">例行规则</span><span class="d-s">每早 7:00 日报 · 每周日回顾</span></span>
+            <span class="d-badge">4</span>
+            <span class="d-ar"><svg class="ic"><use href="#i-chev"/></svg></span>
+          </button>
+          <button class="d-row" data-go="files">
+            <span class="d-ic"><svg class="ic"><use href="#i-book"/></svg></span>
+            <span class="d-main"><span class="d-t">技能</span><span class="d-s">最近改：会议纪要.md</span></span>
+            <span class="d-badge">6</span>
+            <span class="d-ar"><svg class="ic"><use href="#i-chev"/></svg></span>
+          </button>
+        </div>
+
+        <div class="d-card">
+          <button class="d-row" data-go="settings">
+            <span class="d-ic"><svg class="ic"><use href="#i-settings"/></svg></span>
+            <span class="d-main"><span class="d-t">全部设置</span><span class="d-s">供应商、密钥、记忆整理、连接手机…</span></span>
+            <span class="d-ar"><svg class="ic"><use href="#i-chev"/></svg></span>
+          </button>
+          <div class="d-note">通知与外观跟随全局设置，这里不再单独设。</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- D 模型 -->
+    <div class="screen" data-v="d" data-p="model" style="display:none;flex-direction:column;flex:1;min-height:0">
+      <div class="hd"><button class="ib" data-go="home" aria-label="返回"><svg class="ic"><use href="#i-back"/></svg></button><div class="ttl">模型</div><button class="ib" aria-label="关闭"><svg class="ic"><use href="#i-x"/></svg></button></div>
+      <div class="body">
+        <div class="d-card">
+          <div class="d-lbl">主选模型</div>
+          <div class="d-field">
+            <div class="d-trigger"><span class="v mono">deepseek-v4.1-flash</span><svg class="ic"><use href="#i-down"/></svg></div>
+            <span class="hint">百炼 · 切换后下一轮生效，对所有对话生效。</span>
+          </div>
+        </div>
+        <div class="d-card">
+          <div class="d-lbl">备选模型 · 总管</div>
+          <div class="d-note" style="padding:0 14px 10px">只在试跑与例行任务轮次里生效（主对话不换）：那一轮没应答且原因可切时，按顺序换下一条重跑。最多 5 条。</div>
+          <div class="d-chain"><span class="no">1</span><span class="box"><b>qwen3-max</b><small>百炼 · 先试它</small></span><span class="ops"><span><svg class="ic"><use href="#i-up"/></svg></span><span><svg class="ic"><use href="#i-down"/></svg></span><span><svg class="ic"><use href="#i-x"/></svg></span></span></div>
+          <div class="d-chain"><span class="no">2</span><span class="box"><b>glm-5.3</b><small>智谱</small></span><span class="ops"><span><svg class="ic"><use href="#i-up"/></svg></span><span><svg class="ic"><use href="#i-down"/></svg></span><span><svg class="ic"><use href="#i-x"/></svg></span></span></div>
+          <button class="d-add"><svg class="ic"><use href="#i-plus"/></svg>加一条备选</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- D 权限 -->
+    <div class="screen" data-v="d" data-p="policy" style="display:none;flex-direction:column;flex:1;min-height:0">
+      <div class="hd"><button class="ib" data-go="home" aria-label="返回"><svg class="ic"><use href="#i-back"/></svg></button><div class="ttl">权限</div><button class="ib" aria-label="关闭"><svg class="ic"><use href="#i-x"/></svg></button></div>
+      <div class="body">
+        <div class="d-card">
+          <div class="d-field">
+            <span class="k">它能替你动到什么程度</span>
+            <div class="seg">
+              <button aria-checked="true">完全访问</button>
+              <button aria-checked="false">只读</button>
+              <button aria-checked="false">不跑命令</button>
+            </div>
+            <span class="hint">完全访问 = 能改文件、能跑命令。改完立刻生效。</span>
+          </div>
+          <div class="d-field">
+            <span class="k">动手之前问不问我</span>
+            <div class="seg">
+              <button aria-checked="false">全部问我</button>
+              <button aria-checked="true">只问重要的</button>
+              <button aria-checked="false">全不问</button>
+            </div>
+            <span class="hint">只问重要的 = 只拦跑命令、派活等会起执行的动作；改文件自动放行。</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- D 档案：四段折叠卡 -->
+    <div class="screen" data-v="d" data-p="files" style="display:none;flex-direction:column;flex:1;min-height:0">
+      <div class="hd"><button class="ib" data-go="home" aria-label="返回"><svg class="ic"><use href="#i-back"/></svg></button><div class="ttl">档案</div><button class="ib" aria-label="关闭"><svg class="ic"><use href="#i-x"/></svg></button></div>
+      <div class="body">
+        <div class="d-card">
+          <div class="d-sub">工作履历<span class="cnt">12 条</span></div>
+          <div class="d-item"><span class="dt">11-12</span><div class="c"><p>整理 11 月课堂观察表<small>#A-2043 · 完成 · 2 学分</small></p></div></div>
+          <div class="d-item"><span class="dt">11-11</span><div class="c"><p>四十五中校服收费表核对<small>#A-2038 · 完成</small></p></div></div>
+          <div class="d-item"><span class="dt">11-10</span><div class="c"><p>本周周报草稿<small>#A-2021 · 超时重派后完成</small></p></div></div>
+          <div class="d-item"><span class="dt">11-07</span><div class="c"><p>牛奶订购顺延核对<small>#A-2009 · 完成</small></p></div></div>
+        </div>
+
+        <div class="d-card">
+          <div class="d-sub">记忆<span class="cnt">47 条</span></div>
+          <div class="d-item"><span class="dt">偏好</span><div class="c"><p>回复不要客套，直接说事，别写「辛苦了」<small>taught · 11-09</small></p></div></div>
+          <div class="d-item"><span class="dt">偏好</span><div class="c"><p>文档默认简体中文，标题用我的原话<small>taught · 11-06</small></p></div></div>
+          <div class="d-item"><span class="dt">事实</span><div class="c"><p>2027 年 6 月毕业，目标院校含内师大、东北林大、石河子<small>user · 11-03</small></p></div></div>
+        </div>
+
+        <div class="d-card">
+          <div class="d-sub">例行规则<span class="cnt">4 条</span></div>
+          <div class="d-item"><span class="dt">●</span><div class="c"><p>每早日报<span class="d-pill">cron 0 7 * * *</span><small>启用 · 新会话</small></p></div></div>
+          <div class="d-item"><span class="dt">●</span><div class="c"><p>每周日回顾<span class="d-pill">cron 0 21 * * 0</span><small>启用 · 同会话</small></p></div></div>
+          <div class="d-item"><span class="dt">○</span><div class="c"><p>月末记忆归档<span class="d-pill">cron 0 3 1 * *</span><small>停用</small></p></div></div>
+        </div>
+
+        <div class="d-card">
+          <div class="d-sub">技能<span class="cnt">6 个</span></div>
+          <div class="d-item"><span class="dt">01</span><div class="c"><p>会议纪要<span class="d-pill">.md</span><small>按发言人分段，末尾出待办 · 11-08</small></p></div></div>
+          <div class="d-item"><span class="dt">02</span><div class="c"><p>表格清洗<span class="d-pill">.md</span><small>先列字段，再逐列规范化 · 11-05</small></p></div></div>
+          <div class="d-item"><span class="dt">03</span><div class="c"><p>通知起草<span class="d-pill">.md</span><small>三段式，先结论后时间地点 · 10-31</small></p></div></div>
+        </div>
+
+        <div class="d-note" style="padding:2px 2px 0">这四页都只是看。改人设走上方的身份卡，改例行规则去「全部设置 → 例行任务」，删记忆去设置页的记忆区。</div>
+      </div>
+    </div>
+  </aside>
+</main>
+
+<script>
+const state = { v: "a", p: "home", btab: "records" };
+const PAGES = ["home", "model", "policy", "files"];
+const VERS = ["a", "b", "c", "d"];
+
+const VDESC = {
+  a: "A · 无卡片，只有细线；档案四类合一页",
+  b: "B · 数字先行：家底 2×2；档案分段切换",
+  c: "C · 目录与簿页：零图标、点线索引",
+  d: "D · 分组卡：值右置、档案行带摘要",
+};
+
+function paint() {
+  document.querySelectorAll(".drawer").forEach((d) => {
+    d.hidden = d.dataset.v !== state.v;
+  });
+  document.querySelectorAll(".screen").forEach((s) => {
+    const on = s.dataset.v === state.v && s.dataset.p === state.p;
+    s.style.display = on ? "flex" : "none";
+  });
+  document.querySelectorAll("#vtabs button").forEach((b) => {
+    b.classList.toggle("on", b.dataset.v === state.v);
+  });
+  document.querySelectorAll("#ptabs button").forEach((b) => {
+    b.classList.toggle("on", b.dataset.p === state.p);
+  });
+  document.querySelectorAll("#btabs button").forEach((b) => {
+    b.classList.toggle("on", b.dataset.btab === state.btab);
+  });
+  document.querySelectorAll(".b-panel").forEach((p) => {
+    p.hidden = p.dataset.k !== state.btab;
+  });
+  document.getElementById("vdesc").textContent = VDESC[state.v];
+  const hash = `${state.v}-${state.p}`;
+  if (location.hash.slice(1) !== hash) history.replaceState(null, "", `#${hash}`);
+}
+
+function parseHash() {
+  const m = location.hash.slice(1).match(/^([abcd])-(home|model|policy|files)$/);
+  if (m) {
+    state.v = m[1];
+    state.p = m[2];
+  }
+  paint();
+}
+
+document.addEventListener("click", (event) => {
+  const vBtn = event.target.closest("[data-v]");
+  if (vBtn) {
+    state.v = vBtn.dataset.v;
+    paint();
+    return;
+  }
+  const pBtn = event.target.closest("[data-p]");
+  if (pBtn) {
+    state.p = pBtn.dataset.p;
+    paint();
+    return;
+  }
+  const bBtn = event.target.closest("[data-btab]");
+  if (bBtn) {
+    state.btab = bBtn.dataset.btab;
+    paint();
+    return;
+  }
+  const go = event.target.closest("[data-go]");
+  if (go && PAGES.includes(go.dataset.go)) {
+    state.p = go.dataset.go;
+    paint();
+  }
+});
+
+document.getElementById("dark").addEventListener("change", (event) => {
+  document.documentElement.dataset.theme = event.target.checked ? "indigo" : "paper";
+});
+
+window.addEventListener("hashchange", parseHash);
+parseHash();
+</script>
+</body>
+</html>

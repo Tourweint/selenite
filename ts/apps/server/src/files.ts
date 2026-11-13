@@ -234,16 +234,26 @@ export function mountFiles(app: Hono, deps?: Partial<FilesDeps>): void {
 	const opener: Opener = deps?.open ?? platformOpen;
 
 	/**
-	 * 文件浏览的根（2026-11-12 多根）：带 `projectId` 用该项目自己的根（可以在工作区外），
-	 * 缺省仍是工作区根。`path` 始终是**相对这个根**的路径。
+	 * 文件浏览的根（2026-11-12 多根；2026-11-13 项目容器）：
+	 * - 带 `projectId` 用该项目的根；再带 `rootId` 用该项目里的某个文件夹（附加文件夹要它）；
+	 * - 缺省仍是工作区根。`path` 始终是**相对这个根**的路径。
 	 */
 	const rootFor = (c: Context):
 		| { ok: true; root: string }
 		| { ok: false; error: string; message: string } => {
 		const projectId = c.req.query("projectId")?.trim() || "";
+		const rootId = c.req.query("rootId")?.trim() || "";
 		if (projectId) {
 			const result = storeOf().resolveForUse(projectId);
 			if (!result.ok) return { ok: false, error: "bad_project", message: result.message };
+			if (rootId) {
+				const hit = (result.project.roots ?? []).find((root) => root.id === rootId);
+				if (!hit) return { ok: false, error: "root_not_found", message: "这个项目没有这个文件夹" };
+				if (!existsSync(hit.path)) {
+					return { ok: false, error: "root_missing", message: `文件夹「${hit.label}」的目录不存在了` };
+				}
+				return { ok: true, root: hit.path };
+			}
 			return { ok: true, root: result.project.rootPath };
 		}
 		const root = workspaceRootReal(storeOf());
@@ -256,8 +266,11 @@ export function mountFiles(app: Hono, deps?: Partial<FilesDeps>): void {
 		if (!explorerOpenEnabled()) {
 			return c.json({ error: "explorer_disabled", message: "资源管理器入口已关闭（EXPLORER_OPEN=false）" }, 400);
 		}
-		const body = (await c.req.json().catch(() => ({}))) as { projectId?: unknown } | null;
+		const body = (await c.req.json().catch(() => ({}))) as
+			| { projectId?: unknown; rootId?: unknown }
+			| null;
 		const projectId = typeof body?.projectId === "string" ? body.projectId.trim() : "";
+		const rootId = typeof body?.rootId === "string" ? body.rootId.trim() : "";
 		const store = storeOf();
 		try {
 			let dir: string;
@@ -267,7 +280,22 @@ export function mountFiles(app: Hono, deps?: Partial<FilesDeps>): void {
 				if (!result.ok) {
 					return c.json({ error: "bad_project", message: result.message }, 400);
 				}
-				dir = result.project.rootPath;
+				if (rootId) {
+					// 2026-11-13：侧栏浮卡里每个文件夹各有一个「资源管理器」图标，要按 rootId 直达。
+					const hit = (result.project.roots ?? []).find((root) => root.id === rootId);
+					if (!hit) {
+						return c.json({ error: "root_not_found", message: "这个项目没有这个文件夹" }, 400);
+					}
+					if (!existsSync(hit.path)) {
+						return c.json(
+							{ error: "root_missing", message: `文件夹「${hit.label}」的目录不存在了` },
+							400,
+						);
+					}
+					dir = hit.path;
+				} else {
+					dir = result.project.rootPath;
+				}
 			} else {
 				const root = workspaceRootReal(store);
 				if (!root) {

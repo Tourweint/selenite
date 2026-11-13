@@ -13,6 +13,8 @@ export interface SearchFilter {
 	/** 只在这些 scope 里找 */
 	scopes?: string[];
 	kinds?: MemoryKind[];
+	/** 排除的 kind（2026-11-13 记忆页：设置页不把 work 履历混进"我的记忆"）。 */
+	excludeKinds?: MemoryKind[];
 	/**
 	 * 候选集来源提示（2026-11-04 批次三 A2-F）——**用不用由 store 自己决定**。
 	 *
@@ -21,10 +23,20 @@ export interface SearchFilter {
 	 * 这是"批次一窗口语义不动"的开关点。
 	 */
 	text?: string;
+	/**
+	 * 正文子串过滤（2026-11-13 记忆页搜索）。
+	 *
+	 * 与 `text` 的区别：`text` 是 FTS 候选集提示（可能召回词袋噪声），
+	 * `contains` 是**精确子串**约束（`instr(lower(content), lower(?)) > 0`），
+	 * 给人在设置页搜"猫 / 汇报 / 跑步"用。CJK 不受大小写影响；ASCII 走 lower。
+	 */
+	contains?: string;
 	since?: string;
 	/** 是否返回已被取代的记录。默认 false —— 历史链要能查，但不该污染召回 */
 	includeSuperseded?: boolean;
 	limit?: number;
+	/** 分页偏移（与 limit 同用；0 = 从头）。 */
+	offset?: number;
 }
 
 /** 封顶修剪的可选保护项（2026-11-07）。 */
@@ -56,6 +68,13 @@ export interface MemoryStore {
 	count(scope?: string): number;
 	/** 某个 scope 的条数（2026-11-07 封顶修剪）。 */
 	countByScope(scope: string): number;
+	/**
+	 * 满足过滤条件的条数（2026-11-13 记忆页真实计数）。
+	 * 与 search 同一套 where 条件；不含 limit/offset。
+	 */
+	countMatching(filter: SearchFilter): number;
+	/** 按 kind 分组的条数（同 countMatching 条件；给分类计数片用）。 */
+	countByKind(filter: SearchFilter): Record<string, number>;
 	/** 库里出现过的所有 scope（按前缀挑要修剪的作用域用）。 */
 	listScopes(): string[];
 	/**
@@ -330,12 +349,13 @@ export class SqliteMemoryStore implements MemoryStore {
 	}
 
 	/**
-	 * 窗口 SQL。传了 [ftsMatch] 就用镜像虚表先把候选 id 圈出来。
-	 *
-	 * superseded 的过滤在外层 `superseded_by IS NULL` —— 被取代的记录即使进了镜像也不进候选。
-	 * FTS 命中 0 时这里返回空数组，**回落窗口路径是 retriever 的事**（它知道"0 命中"不是"没记忆"）。
+	 * 窗口 SQL 的 where 收口（2026-11-13）：搜索 / 计数 / 分页共用同一套条件，
+	 * 避免"列表算一套、计数算另一套"漂移。
 	 */
-	private searchRows(filter: SearchFilter, ftsMatch?: string): MemoryRecord[] {
+	private whereOf(
+		filter: SearchFilter,
+		ftsMatch?: string,
+	): { sql: string; params: (string | number)[] } {
 		const where: string[] = [];
 		const params: (string | number)[] = [];
 
@@ -351,6 +371,15 @@ export class SqliteMemoryStore implements MemoryStore {
 			where.push(`kind IN (${filter.kinds.map(() => "?").join(", ")})`);
 			params.push(...filter.kinds);
 		}
+		if (filter.excludeKinds?.length) {
+			where.push(`kind NOT IN (${filter.excludeKinds.map(() => "?").join(", ")})`);
+			params.push(...filter.excludeKinds);
+		}
+		if (filter.contains) {
+			// 精确子串（不是 FTS 词袋候选）：设置页搜索要"搜什么有什么"。
+			where.push("instr(lower(content), lower(?)) > 0");
+			params.push(filter.contains);
+		}
 		if (filter.since) {
 			where.push("created_at >= ?");
 			params.push(filter.since);
@@ -359,14 +388,71 @@ export class SqliteMemoryStore implements MemoryStore {
 			where.push("superseded_by IS NULL");
 		}
 
-		const sql =
-			`SELECT * FROM memories` +
-			(where.length ? ` WHERE ${where.join(" AND ")}` : "") +
-			` ORDER BY created_at DESC` +
-			(filter.limit ? ` LIMIT ${Math.max(1, Math.floor(filter.limit))}` : "");
+		return {
+			sql: where.length ? ` WHERE ${where.join(" AND ")}` : "",
+			params,
+		};
+	}
+
+	/**
+	 * 窗口 SQL。传了 [ftsMatch] 就用镜像虚表先把候选 id 圈出来。
+	 *
+	 * superseded 的过滤在外层 `superseded_by IS NULL` —— 被取代的记录即使进了镜像也不进候选。
+	 * FTS 命中 0 时这里返回空数组，**回落窗口路径是 retriever 的事**（它知道"0 命中"不是"没记忆"）。
+	 */
+	private searchRows(filter: SearchFilter, ftsMatch?: string): MemoryRecord[] {
+		const where = this.whereOf(filter, ftsMatch);
+		const params = [...where.params];
+		let sql = `SELECT * FROM memories${where.sql} ORDER BY created_at DESC`;
+		// limit / offset 用参数绑定，别把用户输入拼进 SQL。
+		const limit =
+			filter.limit === undefined ? 0 : Math.max(0, Math.floor(filter.limit));
+		const offset = Math.max(0, Math.floor(filter.offset ?? 0));
+		if (limit > 0) {
+			sql += " LIMIT ? OFFSET ?";
+			params.push(limit, offset);
+		} else if (offset > 0) {
+			sql += " LIMIT -1 OFFSET ?";
+			params.push(offset);
+		}
 
 		const rows = this.db.prepare(sql).all(...params) as Record<string, unknown>[];
 		return rows.map(rowToRecord);
+	}
+
+	countMatching(filter: SearchFilter): number {
+		const match = this.ftsEnabled && filter.text ? buildFtsMatch(filter.text) : null;
+		const run = (withMatch: boolean): number => {
+			const where = this.whereOf(filter, withMatch ? match ?? undefined : undefined);
+			const row = this.db
+				.prepare(`SELECT COUNT(*) AS n FROM memories${where.sql}`)
+				.get(...where.params) as { n: number };
+			return Number(row.n);
+		};
+		try {
+			return run(Boolean(match));
+		} catch {
+			// MATCH 抛错 → 静默回落无 FTS 条件（与 searchRows 同口径）
+			return run(false);
+		}
+	}
+
+	countByKind(filter: SearchFilter): Record<string, number> {
+		const match = this.ftsEnabled && filter.text ? buildFtsMatch(filter.text) : null;
+		const run = (withMatch: boolean): Record<string, number> => {
+			const where = this.whereOf(filter, withMatch ? match ?? undefined : undefined);
+			const rows = this.db
+				.prepare(`SELECT kind, COUNT(*) AS n FROM memories${where.sql} GROUP BY kind`)
+				.all(...where.params) as Array<{ kind: string; n: number }>;
+			const out: Record<string, number> = {};
+			for (const row of rows) out[String(row.kind)] = Number(row.n);
+			return out;
+		};
+		try {
+			return run(Boolean(match));
+		} catch {
+			return run(false);
+		}
 	}
 
 	patch(id: string, patch: Partial<Omit<MemoryRecord, "id">>): void {
@@ -541,15 +627,42 @@ export class InMemoryStore implements MemoryStore {
 		return row ? { ...row } : undefined;
 	}
 
-	search(filter: SearchFilter): MemoryRecord[] {
-		let rows = [...this.rows.values()];
-		if (filter.scopes?.length) rows = rows.filter((r) => filter.scopes!.includes(r.scope));
-		if (filter.kinds?.length) rows = rows.filter((r) => filter.kinds!.includes(r.kind));
-		if (filter.since) rows = rows.filter((r) => r.createdAt >= filter.since!);
-		if (!filter.includeSuperseded) rows = rows.filter((r) => r.supersededBy === null);
+	private matchesFilter(record: MemoryRecord, filter: SearchFilter): boolean {
+		if (filter.scopes?.length && !filter.scopes.includes(record.scope)) return false;
+		if (filter.kinds?.length && !filter.kinds.includes(record.kind)) return false;
+		if (filter.excludeKinds?.length && filter.excludeKinds.includes(record.kind)) return false;
+		if (filter.contains) {
+			const needle = filter.contains.toLowerCase();
+			if (!record.content.toLowerCase().includes(needle)) return false;
+		}
+		if (filter.since && record.createdAt < filter.since) return false;
+		if (!filter.includeSuperseded && record.supersededBy !== null) return false;
+		return true;
+	}
 
+	search(filter: SearchFilter): MemoryRecord[] {
+		let rows = [...this.rows.values()].filter((row) => this.matchesFilter(row, filter));
 		rows.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+		const offset = Math.max(0, Math.floor(filter.offset ?? 0));
+		if (offset > 0) rows = rows.slice(offset);
 		return filter.limit ? rows.slice(0, filter.limit) : rows;
+	}
+
+	countMatching(filter: SearchFilter): number {
+		let count = 0;
+		for (const row of this.rows.values()) {
+			if (this.matchesFilter(row, filter)) count += 1;
+		}
+		return count;
+	}
+
+	countByKind(filter: SearchFilter): Record<string, number> {
+		const out: Record<string, number> = {};
+		for (const row of this.rows.values()) {
+			if (!this.matchesFilter(row, filter)) continue;
+			out[row.kind] = (out[row.kind] ?? 0) + 1;
+		}
+		return out;
 	}
 
 	patch(id: string, patch: Partial<Omit<MemoryRecord, "id">>): void {

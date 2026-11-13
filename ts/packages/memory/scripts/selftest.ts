@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
 	BasicConsolidator,
+	HeuristicExtractor,
 	IMPORTANCE_CEIL,
 	InMemoryStore,
 	MAX_EXPERIENCES_PER_TURN,
@@ -26,6 +27,7 @@ import {
 	experienceExtractionEnabled,
 	extractionPrompt,
 	groundedInUserText,
+	isSyntheticUserText,
 	idCardValid,
 	luhnValid,
 	memoryRedactEnabled,
@@ -1578,5 +1580,69 @@ try {
 
 	console.log("✓ 证据引文：逐字/转述命中 / 未命中 / 截断 / 标点容忍 / emoji 下标域");
 }
+
+	// 19. 2026-11-13：规则抽取噪声过滤 / 列表真实计数与搜索分页
+	const filteredMessages: ExtractMessage[] = [
+		{ role: "user", content: "用户已批准 `write`：{\"path\":\"x\"}。" },
+		{
+			role: "user",
+			content:
+				"今天和同事把方案定了。请不要改成别的工具。我打算下周开始跑步。今天天气怎么样？家里有两只猫。",
+		},
+	];
+	const filtered = await new HeuristicExtractor({ filterNoise: true }).extract({
+		messages: filteredMessages,
+		scope: { type: "global" },
+		now: new Date(),
+	});
+	const filteredText = filtered.map((candidate) => candidate.content);
+	assert(filtered.length === 3, `噪声过滤后应只留 3 句，实际 ${filtered.length}：${filteredText.join(" / ")}`);
+	assert(
+		filteredText.some((text) => text.includes("今天和同事把方案定了")),
+		"真人经历应保留",
+	);
+	assert(filteredText.some((text) => text.includes("我打算下周开始跑步")), "打算类陈述应保留");
+	assert(!filteredText.some((text) => text.includes("用户已批准")), "合成指令整条跳过");
+	assert(!filteredText.some((text) => text.startsWith("请")), "命令句跳过");
+	assert(!filteredText.some((text) => text.endsWith("？")), "问句跳过");
+	assert(isSyntheticUserText("用户已批准 `write`：{…}"), "合成前缀判定");
+	assert(!isSyntheticUserText("今天和同事把方案定了"), "真人陈述不误判");
+
+	const legacy = await new HeuristicExtractor().extract({
+		messages: filteredMessages,
+		scope: { type: "global" },
+		now: new Date(),
+	});
+	assert(legacy.length > filtered.length, "不传 filterNoise = 旧行为（不过滤）");
+
+	const browseEngine = new MemoryEngine({ store: new InMemoryStore() });
+	const cat = browseEngine.remember({
+		kind: "fact",
+		scope: { type: "global" },
+		content: "搜索分页：家里有两只猫",
+	});
+	browseEngine.remember({ kind: "fact", scope: { type: "global" }, content: "搜索分页：猫叫豆豆" });
+	browseEngine.remember({ kind: "preference", scope: { type: "global" }, content: "搜索分页：汇报先给结论" });
+	browseEngine.remember({ kind: "episode", scope: { type: "global" }, content: "搜索分页：上周去了杭州" });
+	const allCounts = browseEngine.counts({ scopes: ["global"], q: "搜索分页" });
+	assert(allCounts.all === 4, `counts.all 应为 4，实际 ${allCounts.all}`);
+	assert(allCounts.byKind.fact === 2 && allCounts.byKind.preference === 1, "byKind 真实计数");
+	assert(allCounts.superseded === 0, "未取代时 superseded=0");
+	browseEngine.supersede(cat.id, null);
+	const afterSupersede = browseEngine.counts({ scopes: ["global"], q: "搜索分页" });
+	assert(afterSupersede.all === 3 && afterSupersede.superseded === 1, "已被取代只计数、不进 all");
+	const page = browseEngine.browse({
+		scopes: ["global"],
+		kinds: ["fact"],
+		q: "搜索分页",
+		limit: 1,
+		offset: 0,
+	});
+	assert(page.total === 1, "fact 过滤后只剩 1 条活跃（另一条已取代）");
+	assert(page.items.length === 1 && page.items[0]!.kind === "fact", "分页项应为 fact");
+	const emptyPage = browseEngine.browse({ scopes: ["global"], limit: 0 });
+	assert(emptyPage.items.length === 0 && emptyPage.total === 3, "limit=0 只回计数");
+
+	console.log("✓ 噪声过滤：合成指令/命令句/问句不落经历；列表真实计数/搜索/分页");
 
 console.log("✓ 记忆框架自测通过");

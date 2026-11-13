@@ -31,6 +31,16 @@ export function consolidateLlmEnabled(): boolean {
 }
 
 /**
+ * `MEMORY_CONSOLIDATE_JOB`（2026-11-13，回滚开关）：默认开。
+ *
+ * 开 = `POST review?background=1` 立即 202、后台跑，`GET consolidate/state` 可恢复；
+ * 关 = 即使带 `background=1` 也回到同步等待（旧界面/旧探针逐字节兼容）。
+ */
+export function consolidateJobEnabled(): boolean {
+	return !isOff(process.env.MEMORY_CONSOLIDATE_JOB);
+}
+
+/**
  * `MEMORY_IMPORT`（2026-11-08，回滚开关）：`false` / `0` = 导入端点 404、按钮隐藏。默认开。
  */
 export function memoryImportEnabled(): boolean {
@@ -495,6 +505,9 @@ export function applyProposal(scope: string, keepId: string, dropId: string): Ap
 		return { ok: false, status: 404, error: "not_found", message: "记忆不存在" };
 	}
 
+	// 应用过的建议从**内存结果**里摘掉，页面不必等下一轮 state 才消失。
+	forgetProposalInMemory(scope, keepId, dropId);
+
 	// 应用过的建议从待决文件里摘掉：刷新页面再点"整理"不会重复弹同一张卡。
 	// 失败不挡主流程（建议是易失的，取代已经落库）。
 	try {
@@ -576,4 +589,169 @@ export function importMemory(scope: string, items: unknown): ImportResult {
 /** 给探针/测试：当前 scope 的待决建议条数（不返回正文）。 */
 export function pendingProposalCount(scope: string): number {
 	return readPending(proposalsPath())[scope]?.proposals.length ?? 0;
+}
+
+/** 读某个 scope 的待决建议（2026-11-13：页面切走再回来要能看到上次结果）。 */
+export function readPendingProposals(scope: string): PendingEntry | null {
+	const entry = readPending(proposalsPath())[scope];
+	if (!entry) return null;
+	return { generatedAt: entry.generatedAt, proposals: entry.proposals };
+}
+
+// ── 整理任务（2026-11-13，A 版记忆页）────────────────────
+//
+// 为什么要有这一层：整理是一次最长 30s 的模型调用 + 证据扫描。旧实现把结果写进
+// 当时的 DOM，切页/刷新就丢；再点一次就是第二发模型调用。现在：
+//   - 同一 scope 单飞（activeReviews），并发点只返回"已在跑"；
+//   - 完成结果留在内存（lastResults，含 evidence），GET state 可读；
+//   - 进程重启后回落到 `.data/memory-proposals.json`（无 evidence，符合"引文不落盘"）。
+
+interface ActiveReview {
+	startedAt: string;
+	promise: Promise<ReviewResult>;
+}
+
+interface LastReview {
+	generatedAt: string;
+	proposals: ConsolidateProposal[];
+}
+
+export interface ReviewState {
+	scope: string;
+	running: boolean;
+	startedAt: string | null;
+	generatedAt: string | null;
+	proposals: ConsolidateProposal[];
+	/** live = 本次进程结果（含 evidence）；pending = 从待决文件读回（无 evidence）；none = 没有。 */
+	source: "live" | "pending" | "none";
+	error: { at: string; error: string; message: string } | null;
+}
+
+const activeReviews = new Map<string, ActiveReview>();
+const lastResults = new Map<string, LastReview>();
+const lastErrors = new Map<string, { at: string; error: string; message: string }>();
+
+function forgetProposalInMemory(scope: string, keepId: string, dropId: string): boolean {
+	const last = lastResults.get(scope);
+	if (!last) return false;
+	const before = last.proposals.length;
+	last.proposals = last.proposals.filter(
+		(item) => !(item.keepId === keepId && item.dropId === dropId),
+	);
+	return last.proposals.length !== before;
+}
+
+export interface StartReviewOptions {
+	generate?: ReviewGenerator;
+	findEvidence?: EvidenceFinder;
+	/** 成功后跑一次确定性审计（API 层注入，避免本模块 import pass 造成层次反转）。 */
+	onSuccess?: (result: Extract<ReviewResult, { ok: true }>) => void;
+}
+
+export interface ReviewJobHandle {
+	running: true;
+	alreadyRunning: boolean;
+	startedAt: string;
+	promise: Promise<ReviewResult> | null;
+}
+
+/**
+ * 启动一次整理（单飞）。`alreadyRunning=true` 时 `promise` 是既有那一发，
+ * 调用方**不要**等它（后台模式直接 202；同步模式回 409）。
+ */
+export function startReview(scope: string, options: StartReviewOptions = {}): ReviewJobHandle {
+	const active = activeReviews.get(scope);
+	if (active) {
+		return {
+			running: true,
+			alreadyRunning: true,
+			startedAt: active.startedAt,
+			promise: active.promise,
+		};
+	}
+
+	const startedAt = new Date().toISOString();
+	const promise = (async (): Promise<ReviewResult> => {
+		let result: ReviewResult;
+		try {
+			result = await reviewScope(scope, {
+				...(options.generate ? { generate: options.generate } : {}),
+				...(options.findEvidence ? { findEvidence: options.findEvidence } : {}),
+			});
+		} catch (error) {
+			const detail = error instanceof Error ? error.message : String(error);
+			console.warn(`[memory] 整理任务异常: ${detail.slice(0, 200)}`);
+			result = { ok: false, status: 502, error: "llm_failed", message: "整理失败，请稍后重试" };
+		}
+
+		if (result.ok) {
+			lastResults.set(scope, { generatedAt: result.generatedAt, proposals: result.proposals });
+			lastErrors.delete(scope);
+			try {
+				options.onSuccess?.(result);
+			} catch (error) {
+				// 审计失败只影响 diff 文件，不影响已产出的建议
+				const detail = error instanceof Error ? error.message : String(error);
+				console.warn(`[memory] 整理后审计失败: ${detail.slice(0, 200)}`);
+			}
+		} else {
+			lastErrors.set(scope, {
+				at: new Date().toISOString(),
+				error: result.error,
+				message: result.message,
+			});
+		}
+		return result;
+	})().finally(() => {
+		activeReviews.delete(scope);
+	});
+
+	activeReviews.set(scope, { startedAt, promise });
+	return { running: true, alreadyRunning: false, startedAt, promise };
+}
+
+/** 当前 scope 的整理状态（页面切走/刷新后恢复用）。 */
+export function reviewState(scope: string): ReviewState {
+	const active = activeReviews.get(scope);
+	const last = lastResults.get(scope);
+	const pending = readPendingProposals(scope);
+	const proposals = last?.proposals ?? pending?.proposals ?? [];
+	const generatedAt = last?.generatedAt ?? pending?.generatedAt ?? null;
+	const source: ReviewState["source"] = last ? "live" : pending ? "pending" : "none";
+	return {
+		scope,
+		running: Boolean(active),
+		startedAt: active?.startedAt ?? null,
+		generatedAt,
+		proposals,
+		source,
+		error: lastErrors.get(scope) ?? null,
+	};
+}
+
+/** 忽略一条建议：从待决文件与本次进程结果里一起摘掉（不写库、不删记忆）。 */
+export function dismissProposal(scope: string, keepId: string, dropId: string): boolean {
+	if (!keepId || !dropId || keepId === dropId) return false;
+	let removed = forgetProposalInMemory(scope, keepId, dropId);
+
+	try {
+		const path = proposalsPath();
+		const pending = readPending(path);
+		const entry = pending[scope];
+		if (entry) {
+			const before = entry.proposals.length;
+			entry.proposals = entry.proposals.filter(
+				(item) => !(item.keepId === keepId && item.dropId === dropId),
+			);
+			if (entry.proposals.length !== before) {
+				removed = true;
+				writePending(path, pending);
+			}
+		}
+	} catch (error) {
+		console.warn(
+			`[memory] 忽略建议落盘失败: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+	return removed;
 }

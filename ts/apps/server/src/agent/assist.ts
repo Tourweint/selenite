@@ -1,7 +1,7 @@
 import { createMemoryEngine, scopeKey, type MemoryEngine, type MemoryScope } from "@lifediary/memory";
 import { diaryStore } from "../diary.ts";
 import { recentDiaryMemories, syncDiaryToMemory } from "../memory-ingest.ts";
-import { preferenceExtractor } from "../memory-extract.ts";
+import { memoryFallbackExtractor, preferenceExtractor } from "../memory-extract.ts";
 import { INJECTION_ORDER, type InjectionEntry, type InjectionProvider } from "./injection.ts";
 import {
 	COMPANIONS_ENABLED,
@@ -94,14 +94,16 @@ function memoryDecayDaily(): number {
 export const memoryEngine: MemoryEngine | null = (() => {
 	if (process.env.MEMORY_ENABLED === "false") return null;
 	try {
-		const extractor = preferenceExtractor();
+		const extractor = preferenceExtractor() ?? memoryFallbackExtractor();
 		return createMemoryEngine({
 			dbPath: process.env.MEMORY_DB_PATH,
 			candidateFloor: memoryCandidateFloor(),
 			fts: memoryFtsEnabled(),
 			decayDaily: memoryDecayDaily(),
 			// 2026-11-06：不传 = 保持 memory 包的默认（HeuristicExtractor），
-			// 即 `MEMORY_EXTRACT=rule` 与"模型不可用"这两种情况**逐字节回到旧行为**。
+			// 即 `MEMORY_EXTRACT=rule` 逐字节回到旧行为。
+			// 2026-11-13：模型不可用时，若 `MEMORY_EXTRACT_NOISE` 开（默认），
+			// 用带噪声过滤的规则抽取器；关掉 = 不传 = 旧行为。
 			...(extractor ? { extractor } : {}),
 		});
 	} catch (error) {

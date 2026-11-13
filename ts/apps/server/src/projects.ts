@@ -68,28 +68,52 @@ export interface Workspace {
 	createdAt: string;
 }
 
+/** 项目里的一个文件夹（2026-11-13 项目容器）。一个项目恰好一个 `primary`。 */
+export interface ProjectRoot {
+	id: string;
+	projectId: string;
+	/** 显示名；默认目录名，项目内唯一 */
+	label: string;
+	/** realpath 归一后的绝对路径 */
+	path: string;
+	role: "primary" | "extra";
+	/** git 项目的当前 HEAD；非 git 或读不到时为 null（下移到根层，2026-11-13） */
+	vcs: Vcs;
+	head: string | null;
+	createdAt: string;
+}
+
 export interface Project {
 	id: string;
 	workspaceId: string;
 	name: string;
-	/** realpath 归一后的绝对路径 */
+	/**
+	 * **主文件夹**的绝对路径（= `roots` 里 role=primary 那条）。
+	 * 2026-11-13 起它是 `project_roots` 的缓存列：新会话的 cwd、派单的租约根都取它。
+	 * 老字段名保留是为了不动派单 / 文件浏览 / 手机端的读取面。
+	 */
 	rootPath: string;
 	vcs: Vcs;
 	/** git 项目的当前 HEAD；非 git 或读不到时为 null */
 	head: string | null;
 	createdAt: string;
 	archived: boolean;
+	/** 全部文件夹，主文件夹排第一 */
+	roots: ProjectRoot[];
 }
 
 export interface ProjectRef {
 	id: string;
 	name: string;
+	/** 主文件夹（realpath）：派单的租约根 / cwd */
 	rootPath: string;
 	vcs: Vcs;
 	/** 派单这一刻的 HEAD；worktree 基线与合并基线都用它。非 git 为 null。 */
 	head?: string | null;
 	/** 总管给这个项目的数据目录（租约 / worktree），调度器只往里写。 */
 	dataDir?: string;
+	/** 全部文件夹（2026-11-13）；派活侧要按需进去读，不认识的字段自然忽略 */
+	roots?: { id: string; label: string; path: string; role: "primary" | "extra" }[];
 }
 
 export type ProposalStatus = "pending" | "confirmed" | "rejected";
@@ -102,6 +126,8 @@ export interface ProjectProposal {
 	relativePath: string;
 	/** 归一后的绝对路径（确认时才会 mkdir） */
 	rootPath: string;
+	/** 一并登记的附加文件夹（绝对路径，2026-11-13）；确认时逐个复核 */
+	folders: string[];
 	status: ProposalStatus;
 	createdAt: string;
 	decidedAt: string | null;
@@ -135,12 +161,30 @@ CREATE TABLE IF NOT EXISTS projects (
 	archived      INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_projects_root ON projects(root_path);
+-- 2026-11-13 项目容器：一个项目多个文件夹。projects.root_path 退化为 primary 的缓存列，
+-- 真源在这张表；path_norm 是"小写 + 正斜杠"的归一值，唯一索引保证一个文件夹只属于一个项目
+-- （Windows 大小写不敏感，所以不能直接对 path 建唯一索引）。
+CREATE TABLE IF NOT EXISTS project_roots (
+	id          TEXT PRIMARY KEY,
+	project_id  TEXT NOT NULL,
+	label       TEXT NOT NULL,
+	path        TEXT NOT NULL,
+	path_norm   TEXT NOT NULL,
+	role        TEXT NOT NULL DEFAULT 'extra',
+	vcs         TEXT NOT NULL DEFAULT 'none',
+	head        TEXT,
+	created_at  TEXT NOT NULL,
+	position    INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_root_path ON project_roots(path_norm);
+CREATE INDEX IF NOT EXISTS idx_root_project ON project_roots(project_id);
 CREATE TABLE IF NOT EXISTS project_proposals (
 	id            TEXT PRIMARY KEY,
 	workspace_id  TEXT NOT NULL,
 	name          TEXT NOT NULL,
 	relative_path TEXT NOT NULL,
 	root_path     TEXT NOT NULL,
+	folders       TEXT NOT NULL DEFAULT '[]',
 	status        TEXT NOT NULL DEFAULT 'pending',
 	created_at    TEXT NOT NULL,
 	decided_at    TEXT
@@ -203,6 +247,17 @@ function realpathOr(path: string): string {
 
 function sameName(a: string, b: string): boolean {
 	return a.trim().toLowerCase() === b.trim().toLowerCase();
+}
+
+/** 路径的归一键（唯一索引与"同一文件夹"判定共用）：小写 + 正斜杠 + 去尾斜杠。 */
+function normPathKey(path: string): string {
+	return resolve(path).replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+}
+
+/** 文件夹显示名的默认值：目录名（Windows 盘符根退回整条路径）。 */
+function defaultLabel(path: string): string {
+	const base = parse(path).base;
+	return base || path;
 }
 
 /**
@@ -329,13 +384,40 @@ function proposalFromRow(row: Row): ProjectProposal {
 		name: text(row.name),
 		relativePath: text(row.relative_path),
 		rootPath: text(row.root_path),
+		folders: parseFolders(row.folders),
 		status: text(row.status) as ProposalStatus,
 		createdAt: text(row.created_at),
 		decidedAt: row.decided_at === null ? null : text(row.decided_at),
 	};
 }
 
-function projectFromRow(row: Row): Project {
+/** proposal 里的附加文件夹（JSON 数组）；坏数据按空处理，不让一条脏行卡住建项目。 */
+function parseFolders(value: unknown): string[] {
+	if (typeof value !== "string" || !value.trim()) return [];
+	try {
+		const parsed = JSON.parse(value) as unknown;
+		if (!Array.isArray(parsed)) return [];
+		return parsed.filter((item): item is string => typeof item === "string");
+	} catch {
+		return [];
+	}
+}
+
+function rootFromRow(row: Row): ProjectRoot {
+	return {
+		id: text(row.id),
+		projectId: text(row.project_id),
+		label: text(row.label),
+		path: text(row.path),
+		role: text(row.role) === "primary" ? "primary" : "extra",
+		vcs: text(row.vcs) === "git" ? "git" : "none",
+		head: row.head === null || row.head === undefined ? null : text(row.head),
+		createdAt: text(row.created_at),
+	};
+}
+
+/** 只读 projects 行本身；文件夹在 `ProjectsStore#toProject` 里补。 */
+function projectFromRow(row: Row): Omit<Project, "roots"> {
 	return {
 		id: text(row.id),
 		workspaceId: text(row.workspace_id),
@@ -356,8 +438,102 @@ export class ProjectsStore {
 		mkdirSync(dirname(path), { recursive: true });
 		this.db = new DatabaseSync(path);
 		this.db.exec(SCHEMA);
+		// 旧库升到"一个项目多个文件夹"：补列、给每个老项目播一条 primary 根。
+		this.migrate();
 		// 与 SQLite 同级的 data 目录：.data/projects/<id> 放租约与 worktree。
 		this.dataRoot = join(resolve(dirname(path)), "projects");
+	}
+
+	/**
+	 * 结构迁移（2026-11-13，纯增量、跑多少次都安全）：
+	 * 1. `project_proposals.folders` —— 建项目时一并登记的附加文件夹；
+	 * 2. 每个已登记项目若还没有任何根，用它原来的 `root_path` 播一条 `primary`。
+	 *    **只补缺失**：用户已经加过文件夹的项目一条都不动。
+	 */
+	private migrate(): void {
+		const proposalCols = (
+			this.db.prepare("PRAGMA table_info(project_proposals)").all() as Row[]
+		).map((row) => text(row.name));
+		if (!proposalCols.includes("folders")) {
+			this.db.exec("ALTER TABLE project_proposals ADD COLUMN folders TEXT NOT NULL DEFAULT '[]'");
+		}
+		for (const row of this.db.prepare("SELECT * FROM projects").all() as Row[]) {
+			const projectId = text(row.id);
+			const count = this.db
+				.prepare("SELECT COUNT(*) AS n FROM project_roots WHERE project_id = ?")
+				.get(projectId) as Row;
+			if (Number(count?.n ?? 0) > 0) continue;
+			const path = text(row.root_path);
+			this.insertRoot(
+				{
+					id: randomUUID(),
+					projectId,
+					label: defaultLabel(path),
+					path,
+					role: "primary",
+					vcs: text(row.vcs) === "git" ? "git" : "none",
+					head: row.head === null || row.head === undefined ? null : text(row.head),
+					createdAt: text(row.created_at),
+				},
+				0,
+			);
+		}
+	}
+
+	private insertRoot(root: ProjectRoot, position: number): void {
+		// path_norm 有唯一索引：极小概率的并发插入落到这里，翻成业务错误而不是 500。
+		try {
+			this.db
+				.prepare(
+					`INSERT INTO project_roots
+					 (id, project_id, label, path, path_norm, role, vcs, head, created_at, position)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				)
+				.run(
+					root.id,
+					root.projectId,
+					root.label,
+					root.path,
+					normPathKey(root.path),
+					root.role,
+					root.vcs,
+					root.head,
+					root.createdAt,
+					position,
+				);
+		} catch (error) {
+			const detail = error instanceof Error ? error.message : String(error);
+			if (/UNIQUE/i.test(detail)) {
+				throw new ProjectError("duplicate_root", "这个文件夹已经登记过了", 409);
+			}
+			throw error;
+		}
+	}
+
+	/** 某个项目的全部文件夹；主文件夹排第一（稳定给界面与注入用）。 */
+	rootsOf(projectId: string): ProjectRoot[] {
+		const rows = this.db
+			.prepare(
+				`SELECT * FROM project_roots WHERE project_id = ?
+				 ORDER BY CASE role WHEN 'primary' THEN 0 ELSE 1 END, position ASC, created_at ASC`,
+			)
+			.all(projectId) as Row[];
+		return rows.map(rootFromRow);
+	}
+
+	/** projects 行 + 文件夹；`rootPath/vcs/head` 以 primary 为准（缓存列只作回落）。 */
+	private toProject(row: Row): Project {
+		const base = projectFromRow(row);
+		const roots = this.rootsOf(base.id);
+		const primary = roots.find((root) => root.role === "primary");
+		if (!primary) return { ...base, roots };
+		return {
+			...base,
+			roots,
+			rootPath: primary.path,
+			vcs: primary.vcs,
+			head: primary.head,
+		};
 	}
 
 	projectDataDir(projectId: string): string {
@@ -404,7 +580,7 @@ export class ProjectsStore {
 					: "SELECT * FROM projects WHERE archived = 0 ORDER BY created_at ASC",
 			)
 			.all() as Row[];
-		return rows.map(projectFromRow);
+		return rows.map((row) => this.toProject(row));
 	}
 
 	/** 改名（扫尾批 1 A4）：校验口径同建项目，排除自己。只改登记，不动磁盘。 */
@@ -418,32 +594,183 @@ export class ProjectsStore {
 			throw new ProjectError("duplicate_project", `已经有叫「${next}」的项目`);
 		}
 		this.db.prepare("UPDATE projects SET name = ? WHERE id = ?").run(next, id);
-		return { ...projectFromRow(row), name: next };
+		return { ...this.toProject(row), name: next };
 	}
 
 	/**
-	 * 改项目目录（2026-11-12）：只改登记，不动磁盘/文件；vcs 与 head 按新目录重测。
-	 * 校验与新建同口径（已存在、可写、非系统目录、不与其他项目重叠）。
+	 * 改**主文件夹**（2026-11-12 建立"改路径"；2026-11-13 起它改的是 primary 那条根）。
+	 * 只改登记，不动磁盘/文件；vcs 与 head 按新目录重测。
+	 * 校验与新建同口径（已存在、可写、非系统目录、不与其他任何文件夹重叠）。
+	 * **已建会话不受影响**：它们的 cwd 是创建时的快照（改主文件夹只决定之后新建的会话）。
 	 */
 	updateProjectRoot(id: string, rootPath: string): Project {
-		const row = this.db.prepare("SELECT * FROM projects WHERE id = ?").get(id) as Row | undefined;
-		if (!row) throw new ProjectError("not_found", "找不到这个项目", 404);
+		const roots = this.rootsOf(id);
+		const primary = roots.find((root) => root.role === "primary") ?? roots[0];
+		if (!primary) throw new ProjectError("root_not_found", "这个项目还没有文件夹", 404);
 		const realRoot = validateProjectRoot(rootPath);
-		const workspace = this.getWorkspace();
-		assertProjectRootAllowed(realRoot, workspace ? realpathOr(workspace.rootPath) : null);
-		this.assertProjectRootAvailable(realRoot, id);
+		this.assertRootPathAllowed(realRoot, id, primary.id);
 		const { vcs, head } = detectVcs(realRoot);
+		this.db
+			.prepare("UPDATE project_roots SET path = ?, path_norm = ?, vcs = ?, head = ? WHERE id = ?")
+			.run(realRoot, normPathKey(realRoot), vcs, head, primary.id);
 		this.db
 			.prepare("UPDATE projects SET root_path = ?, vcs = ?, head = ? WHERE id = ?")
 			.run(realRoot, vcs, head, id);
-		return { ...projectFromRow(row), rootPath: realRoot, vcs, head };
+		return this.toProject(this.projectRow(id));
+	}
+
+	/** 添加文件夹（2026-11-13）：只改登记，**不建目录**（要求已存在，用户先用资源管理器建好）。 */
+	addRoot(
+		projectId: string,
+		input: { path: string; label?: string; primary?: boolean },
+	): Project {
+		this.projectRow(projectId);
+		const realPath = validateProjectRoot(input.path);
+		this.assertRootPathAllowed(realPath, projectId);
+		const label = this.resolveRootLabel(projectId, input.label, realPath);
+		const roots = this.rootsOf(projectId);
+		// 第一个根必然是主文件夹；显式 primary 则把原来的主降级。
+		const asPrimary = input.primary === true || roots.length === 0;
+		const { vcs, head } = detectVcs(realPath);
+		const root: ProjectRoot = {
+			id: randomUUID(),
+			projectId,
+			label,
+			path: realPath,
+			role: asPrimary ? "primary" : "extra",
+			vcs,
+			head,
+			createdAt: new Date().toISOString(),
+		};
+		if (asPrimary) {
+			for (const old of roots) {
+				if (old.role === "primary") {
+					this.db.prepare("UPDATE project_roots SET role = 'extra' WHERE id = ?").run(old.id);
+				}
+			}
+		}
+		this.insertRoot(root, roots.length);
+		if (asPrimary) this.writePrimaryCache(projectId, realPath, vcs, head);
+		return this.toProject(this.projectRow(projectId));
+	}
+
+	/** 改某个文件夹的路径（2026-11-13）：改到 primary 上时同步缓存列。 */
+	updateRootPath(projectId: string, rootId: string, path: string): Project {
+		const root = this.rootsOf(projectId).find((item) => item.id === rootId);
+		if (!root) throw new ProjectError("root_not_found", "找不到这个文件夹", 404);
+		const realPath = validateProjectRoot(path);
+		this.assertRootPathAllowed(realPath, projectId, rootId);
+		const { vcs, head } = detectVcs(realPath);
+		this.db
+			.prepare("UPDATE project_roots SET path = ?, path_norm = ?, vcs = ?, head = ? WHERE id = ?")
+			.run(realPath, normPathKey(realPath), vcs, head, rootId);
+		if (root.role === "primary") this.writePrimaryCache(projectId, realPath, vcs, head);
+		return this.toProject(this.projectRow(projectId));
+	}
+
+	/** 改某个文件夹的显示名（项目内唯一）。 */
+	renameRoot(projectId: string, rootId: string, label: string): Project {
+		const root = this.rootsOf(projectId).find((item) => item.id === rootId);
+		if (!root) throw new ProjectError("root_not_found", "找不到这个文件夹", 404);
+		const next = this.resolveRootLabel(projectId, label, root.path, rootId);
+		this.db.prepare("UPDATE project_roots SET label = ? WHERE id = ?").run(next, rootId);
+		return this.toProject(this.projectRow(projectId));
 	}
 
 	/**
-	 * 根目录不与其他项目重叠（2026-11-12）：同路径 / 落在别的项目内 / 包含别的项目
-	 * 都拒绝。允许落在工作区根内（那是旧口径的常态），只拦"项目之间"的套娃。
+	 * 把某个文件夹设为主文件夹（2026-11-13）。
+	 * **只影响之后新建的会话**：老会话的 cwd 是创建时的快照，不会跟着挪。
 	 */
-	private assertProjectRootAvailable(realRoot: string, excludeId?: string): void {
+	promoteRoot(projectId: string, rootId: string): Project {
+		const roots = this.rootsOf(projectId);
+		const target = roots.find((item) => item.id === rootId);
+		if (!target) throw new ProjectError("root_not_found", "找不到这个文件夹", 404);
+		if (target.role === "primary") return this.toProject(this.projectRow(projectId));
+		for (const old of roots) {
+			if (old.role === "primary") {
+				this.db.prepare("UPDATE project_roots SET role = 'extra' WHERE id = ?").run(old.id);
+			}
+		}
+		this.db.prepare("UPDATE project_roots SET role = 'primary' WHERE id = ?").run(target.id);
+		this.writePrimaryCache(projectId, target.path, target.vcs, target.head);
+		return this.toProject(this.projectRow(projectId));
+	}
+
+	/**
+	 * 移除一个文件夹（2026-11-13）：只删登记，**不动磁盘**。
+	 * 主文件夹不能直接移除（先把别的设为主）；最后一个文件夹也不能移除（要退场就归档项目）。
+	 */
+	removeRoot(projectId: string, rootId: string): Project {
+		const roots = this.rootsOf(projectId);
+		const target = roots.find((item) => item.id === rootId);
+		if (!target) throw new ProjectError("root_not_found", "找不到这个文件夹", 404);
+		if (roots.length <= 1) {
+			throw new ProjectError("last_root", "项目至少要保留一个文件夹（要退场就归档整个项目）", 409);
+		}
+		if (target.role === "primary") {
+			throw new ProjectError("root_is_primary", "主文件夹不能直接移除，先把另一个设为主", 409);
+		}
+		this.db.prepare("DELETE FROM project_roots WHERE id = ?").run(rootId);
+		return this.toProject(this.projectRow(projectId));
+	}
+
+	private projectRow(id: string): Row {
+		const row = this.db.prepare("SELECT * FROM projects WHERE id = ?").get(id) as Row | undefined;
+		if (!row) throw new ProjectError("not_found", "找不到这个项目", 404);
+		return row;
+	}
+
+	private writePrimaryCache(projectId: string, path: string, vcs: Vcs, head: string | null): void {
+		this.db
+			.prepare("UPDATE projects SET root_path = ?, vcs = ?, head = ? WHERE id = ?")
+			.run(path, vcs, head, projectId);
+	}
+
+	/** 文件夹显示名：缺省取目录名；项目内不能重名。 */
+	private resolveRootLabel(
+		projectId: string,
+		input: string | undefined,
+		path: string,
+		excludeRootId?: string,
+	): string {
+		const wanted = (input ?? "").trim() || defaultLabel(path);
+		if (wanted.length > 40) throw new ProjectError("bad_path", "文件夹名不能超过 40 字");
+		const clash = this.rootsOf(projectId).some(
+			(root) => root.id !== excludeRootId && sameName(root.label, wanted),
+		);
+		if (clash) {
+			throw new ProjectError("duplicate_label", `这个项目里已经有叫「${wanted}」的文件夹`, 409);
+		}
+		return wanted;
+	}
+
+	/**
+	 * 批量登记时的显示名去重（确认 proposal 用）：两个目录恰好同名不该卡住建项目，
+	 * 自动加序号就好；用户显式填名字走 `resolveRootLabel`，重名照样报错。
+	 */
+	private uniqueRootLabel(projectId: string, wanted: string): string {
+		const base = wanted.trim() || "文件夹";
+		const taken = new Set(this.rootsOf(projectId).map((root) => root.label.toLowerCase()));
+		if (!taken.has(base.toLowerCase())) return base;
+		for (let index = 2; index < 100; index += 1) {
+			const candidate = `${base} ${index}`;
+			if (!taken.has(candidate.toLowerCase())) return candidate;
+		}
+		return `${base} ${taken.size + 1}`;
+	}
+
+	/**
+	 * 一个文件夹路径能不能用（2026-11-13 多根）：
+	 * - 不能等于工作区根（工作区不是项目）；
+	 * - 不能是工作区根的祖先（否则整个工作区被裹进一个项目）；
+	 * - 不能与其他**任何**文件夹同路径 / 互相包含（同项目内的两个根也按这条判）。
+	 * 允许落在工作区根内（旧口径的常态），也允许工作区外的绝对路径。
+	 */
+	private assertRootPathAllowed(
+		realRoot: string,
+		excludeProjectId?: string,
+		excludeRootId?: string,
+	): void {
 		const workspace = this.getWorkspace();
 		if (workspace) {
 			const realWorkspace = realpathOr(workspace.rootPath);
@@ -451,33 +778,50 @@ export class ProjectsStore {
 				throw new ProjectError("duplicate_project", "这个目录就是工作区根目录，不用再登记成项目", 409);
 			}
 			if (isInside(realRoot, realWorkspace)) {
+				throw new ProjectError("contains_workspace", "这个目录包含工作区根目录，请选更具体的目录", 409);
+			}
+			// 旧口径（PROJECT_OUTSIDE_WORKSPACE=false）：文件夹必须仍在工作区根内。
+			if (!projectOutsideWorkspaceEnabled() && !isInside(realWorkspace, realRoot)) {
 				throw new ProjectError(
-					"contains_project",
-					"这个目录包含工作区根目录，请选更具体的目录",
-					409,
+					"outside_workspace",
+					"文件夹必须在工作区内（PROJECT_OUTSIDE_WORKSPACE=false 时沿用旧口径）",
 				);
 			}
 		}
-		for (const project of this.listProjects().filter((item) => item.id !== excludeId)) {
-			const existingRoot = realpathOr(project.rootPath);
-			if (samePath(existingRoot, realRoot)) {
-				throw new ProjectError("duplicate_project", `这个目录已经是项目「${project.name}」`, 409);
-			}
-			if (isInside(existingRoot, realRoot)) {
-				throw new ProjectError(
-					"inside_existing_project",
-					`这个目录在项目「${project.name}」内，属于项目内子目录，不需要单独登记`,
-					409,
-				);
-			}
-			if (isInside(realRoot, existingRoot)) {
-				throw new ProjectError(
-					"contains_project",
-					`这个目录包含已登记项目「${project.name}」，请选更具体的目录`,
-					409,
-				);
+		for (const project of this.listProjects()) {
+			for (const root of project.roots) {
+				if (project.id === excludeProjectId && root.id === excludeRootId) continue;
+				const existing = realpathOr(root.path);
+				if (samePath(existing, realRoot)) {
+					throw new ProjectError(
+						"duplicate_root",
+						project.id === excludeProjectId
+							? `这个文件夹已经在项目「${project.name}」里了`
+							: `这个文件夹已经是项目「${project.name}」的「${root.label}」`,
+						409,
+					);
+				}
+				if (isInside(existing, realRoot)) {
+					throw new ProjectError(
+						"inside_existing_project",
+						`这个目录在项目「${project.name}」的「${root.label}」内，属于项目内子目录`,
+						409,
+					);
+				}
+				if (isInside(realRoot, existing)) {
+					throw new ProjectError(
+						"root_overlaps_root",
+						`这个目录包含项目「${project.name}」的「${root.label}」，两个文件夹不能互相套`,
+						409,
+					);
+				}
 			}
 		}
+	}
+
+	/** 旧名保留（新建项目 / 迁移路径仍在用）：语义就是"这个新根不能跟已有文件夹撞"。 */
+	private assertProjectRootAvailable(realRoot: string, excludeId?: string): void {
+		this.assertRootPathAllowed(realRoot, excludeId);
 	}
 
 	/**
@@ -490,7 +834,7 @@ export class ProjectsStore {
 		if (!row) throw new ProjectError("not_found", "找不到这个项目", 404);
 		this.db.prepare("UPDATE projects SET archived = ? WHERE id = ?").run(archived ? 1 : 0, id);
 		if (archived && this.getCurrentProjectId() === id) this.writeCurrentProjectId(null);
-		return { ...projectFromRow(row), archived };
+		return { ...this.toProject(row), archived };
 	}
 
 	/**
@@ -502,6 +846,7 @@ export class ProjectsStore {
 		const row = this.db.prepare("SELECT id FROM projects WHERE id = ?").get(id) as Row | undefined;
 		if (!row) throw new ProjectError("not_found", "找不到这个项目", 404);
 		if (this.getCurrentProjectId() === id) this.writeCurrentProjectId(null);
+		this.db.prepare("DELETE FROM project_roots WHERE project_id = ?").run(id);
 		this.db.prepare("DELETE FROM projects WHERE id = ?").run(id);
 	}
 
@@ -509,11 +854,11 @@ export class ProjectsStore {
 		const value = ref.trim();
 		if (!value) return null;
 		const byId = this.db.prepare("SELECT * FROM projects WHERE id = ?").get(value) as Row | undefined;
-		if (byId) return projectFromRow(byId);
+		if (byId) return this.toProject(byId);
 		const byName = this.db
 			.prepare("SELECT * FROM projects WHERE lower(name) = lower(?) AND archived = 0")
 			.get(value) as Row | undefined;
-		return byName ? projectFromRow(byName) : null;
+		return byName ? this.toProject(byName) : null;
 	}
 
 	/** 当前项目 id（原始值，可能指向已删/已归档/已移出工作区的项目）。 */
@@ -548,7 +893,7 @@ export class ProjectsStore {
 		if (!id) return null;
 		const row = this.db.prepare("SELECT * FROM projects WHERE id = ?").get(id) as Row | undefined;
 		if (!row) return null;
-		const project = projectFromRow(row);
+		const project = this.toProject(row);
 		if (project.archived) return null;
 		// 目录没了就不算"当前项目"：cwd 与系统提示回主工作区，别把失效路径带进下一轮。
 		if (!existsSync(project.rootPath)) return null;
@@ -579,7 +924,7 @@ export class ProjectsStore {
 			? (this.db.prepare("SELECT * FROM projects WHERE id = ?").get(value) as Row | undefined)
 			: undefined;
 		if (!row) throw new ProjectError("unknown_project", "没有这个已登记项目");
-		const project = projectFromRow(row);
+		const project = this.toProject(row);
 		if (project.archived) throw new ProjectError("unknown_project", "这个项目已归档");
 		if (!existsSync(project.rootPath)) {
 			throw new ProjectError("project_missing", `项目「${project.name}」的目录不存在了`);
@@ -637,6 +982,13 @@ export class ProjectsStore {
 				vcs: found.vcs,
 				head,
 				dataDir: this.projectDataDir(found.id),
+				// 多文件夹（2026-11-13）：派活侧按需进各根读，主根仍是 rootPath。
+				roots: found.roots.map((root) => ({
+					id: root.id,
+					label: root.label,
+					path: realpathOr(root.path),
+					role: root.role,
+				})),
 			},
 		};
 	}
@@ -649,7 +1001,7 @@ export class ProjectsStore {
 	 * - 相对路径：按工作区根解析，目录可以还不存在，确认时创建（旧行为）；
 	 * - 绝对路径：必须是已存在的目录；工作区外也允许（多根模型），确认时只登记。
 	 */
-	proposeProject(name: string, pathInput: string): ProjectProposal {
+	proposeProject(name: string, pathInput: string, folders: string[] = []): ProjectProposal {
 		const workspace = this.getWorkspace();
 		if (!workspace) throw new ProjectError("no_workspace", "还没有选定工作区，不能新建项目");
 		const projectName = name.trim();
@@ -676,6 +1028,28 @@ export class ProjectsStore {
 		}
 		this.assertProjectRootAvailable(rootPath);
 
+		// 一并登记的附加文件夹（2026-11-13）：proposal 阶段只复核，**不建目录、不写文件**。
+		const extraFolders: string[] = [];
+		for (const item of folders) {
+			const rawFolder = item.trim();
+			if (!rawFolder) continue;
+			const folder = validateProjectRoot(rawFolder);
+			if (
+				samePath(folder, rootPath) ||
+				isInside(rootPath, folder) ||
+				isInside(folder, rootPath)
+			) {
+				throw new ProjectError("root_overlaps_root", "附加文件夹不能与主文件夹相同或互相包含", 409);
+			}
+			for (const other of extraFolders) {
+				if (samePath(other, folder) || isInside(other, folder) || isInside(folder, other)) {
+					throw new ProjectError("root_overlaps_root", "两个附加文件夹不能相同或互相包含", 409);
+				}
+			}
+			extraFolders.push(folder);
+		}
+		for (const folder of extraFolders) this.assertProjectRootAvailable(folder);
+
 		// 同 name + 同路径的 pending proposal 直接复用，避免重复点击产生多条。
 		const existing = this.db
 			.prepare(
@@ -690,6 +1064,7 @@ export class ProjectsStore {
 			name: projectName,
 			relativePath: absoluteInput ? rootPath : normalize(raw),
 			rootPath,
+			folders: extraFolders,
 			status: "pending",
 			createdAt: new Date().toISOString(),
 			decidedAt: null,
@@ -697,8 +1072,8 @@ export class ProjectsStore {
 		this.db
 			.prepare(
 				`INSERT INTO project_proposals
-				 (id, workspace_id, name, relative_path, root_path, status, created_at, decided_at)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+				 (id, workspace_id, name, relative_path, root_path, folders, status, created_at, decided_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			)
 			.run(
 				proposal.id,
@@ -706,6 +1081,7 @@ export class ProjectsStore {
 				proposal.name,
 				proposal.relativePath,
 				proposal.rootPath,
+				JSON.stringify(proposal.folders),
 				proposal.status,
 				proposal.createdAt,
 				null,
@@ -773,35 +1149,74 @@ export class ProjectsStore {
 
 		const { vcs, head } = detectVcs(realRoot);
 		const now = new Date().toISOString();
-		const project: Project = {
-			id: randomUUID(),
-			workspaceId: workspace.id,
-			name: proposal.name,
-			rootPath: realRoot,
-			vcs,
-			head,
-			createdAt: now,
-			archived: false,
-		};
+
+		// 附加文件夹（2026-11-13）：proposal 阶段已登记，确认时逐个复核真实落点与互不重叠。
+		const extraRoots: string[] = [];
+		for (const item of proposal.folders) {
+			const folder = validateProjectRoot(item);
+			if (
+				samePath(folder, realRoot) ||
+				isInside(realRoot, folder) ||
+				isInside(folder, realRoot)
+			) {
+				throw new ProjectError("root_overlaps_root", "附加文件夹不能与主文件夹相同或互相包含", 409);
+			}
+			for (const other of extraRoots) {
+				if (samePath(other, folder) || isInside(other, folder) || isInside(folder, other)) {
+					throw new ProjectError("root_overlaps_root", "两个附加文件夹不能相同或互相包含", 409);
+				}
+			}
+			extraRoots.push(folder);
+		}
+
+		const projectId = randomUUID();
 		this.db
 			.prepare(
 				`INSERT INTO projects
 				 (id, workspace_id, name, root_path, vcs, head, created_at, archived)
 				 VALUES (?, ?, ?, ?, ?, ?, ?, 0)`,
 			)
-			.run(
-				project.id,
-				project.workspaceId,
-				project.name,
-				project.rootPath,
-				project.vcs,
-				project.head,
-				project.createdAt,
+			.run(projectId, workspace.id, proposal.name, realRoot, vcs, head, now);
+		// 建项目行之后再插根；任何一步失败都撤干净，回到"确认前什么都没发生"。
+		try {
+			this.insertRoot(
+				{
+					id: randomUUID(),
+					projectId,
+					label: defaultLabel(realRoot),
+					path: realRoot,
+					role: "primary",
+					vcs,
+					head,
+					createdAt: now,
+				},
+				0,
 			);
+			extraRoots.forEach((folder, index) => {
+				const detected = detectVcs(folder);
+				this.insertRoot(
+					{
+						id: randomUUID(),
+						projectId,
+						label: this.uniqueRootLabel(projectId, defaultLabel(folder)),
+						path: folder,
+						role: "extra",
+						vcs: detected.vcs,
+						head: detected.head,
+						createdAt: now,
+					},
+					index + 1,
+				);
+			});
+		} catch (error) {
+			this.db.prepare("DELETE FROM project_roots WHERE project_id = ?").run(projectId);
+			this.db.prepare("DELETE FROM projects WHERE id = ?").run(projectId);
+			throw error;
+		}
 		this.db
 			.prepare("UPDATE project_proposals SET status = 'confirmed', decided_at = ? WHERE id = ?")
 			.run(now, proposal.id);
-		return project;
+		return this.toProject(this.projectRow(projectId));
 	}
 
 	rejectProposal(id: string): ProjectProposal {
@@ -930,11 +1345,14 @@ export function workspaceRootsReal(store: ProjectsStore = projectsStore()): stri
 	if (workspace) push(workspace.rootPath);
 	for (const project of store.listProjects()) {
 		if (project.archived) continue;
-		if (!existsSync(project.rootPath)) continue;
-		if (!projectOutsideWorkspaceEnabled()) {
-			if (!realWorkspace || !isInside(realWorkspace, realpathOr(project.rootPath))) continue;
+		// 2026-11-13：边界是"所有项目所有文件夹的并集"（一个项目多个根）。
+		for (const root of project.roots) {
+			if (!existsSync(root.path)) continue;
+			if (!projectOutsideWorkspaceEnabled()) {
+				if (!realWorkspace || !isInside(realWorkspace, realpathOr(root.path))) continue;
+			}
+			push(root.path);
 		}
-		push(project.rootPath);
 	}
 	return roots;
 }
@@ -997,7 +1415,7 @@ export function mountProjects(app: Hono): void {
 		}
 	});
 
-	/** 已登记项目（含目录是否还在、是否仍在当前工作区内）。默认滤掉 archived。 */
+	/** 已登记项目（含文件夹清单、目录是否还在、是否仍在当前工作区内）。默认滤掉 archived。 */
 	app.get("/api/v1/projects", (c) => {
 		try {
 			const store = projectsStore();
@@ -1006,15 +1424,30 @@ export function mountProjects(app: Hono): void {
 			// 归档折叠区要用：?includeArchived=1 才把已归档的一并返回。
 			const includeArchived = c.req.query("includeArchived") === "1";
 			const projects = store.listProjects(includeArchived).map((project) => {
-				const exists = existsSync(project.rootPath);
-				const realRoot = exists ? realpathOr(project.rootPath) : project.rootPath;
+				// 2026-11-13：存在性与内外判定下移到每个文件夹；项目级的 exists
+				// 仍是"主文件夹还在吗"（手机端只认这一个字段，纯增量不破坏它）。
+				const roots = project.roots.map((root) => {
+					const rootExists = existsSync(root.path);
+					const realRoot = rootExists ? realpathOr(root.path) : root.path;
+					return {
+						...root,
+						exists: rootExists,
+						insideWorkspace: Boolean(realWorkspace && isInside(realWorkspace, realRoot)),
+					};
+				});
+				const primary = roots.find((root) => root.role === "primary") ?? roots[0];
 				return {
 					...project,
-					exists,
-					insideWorkspace: Boolean(realWorkspace && isInside(realWorkspace, realRoot)),
+					roots,
+					exists: Boolean(primary?.exists),
+					insideWorkspace: Boolean(primary?.insideWorkspace),
 				};
 			});
-			return c.json({ workspace, projects });
+			// 侧栏要标出"当前选中的项目"，一次请求拿全（纯增量字段，老客户端忽略）。
+			const currentProjectId = currentProjectEnabled()
+				? (store.getCurrentProject()?.id ?? null)
+				: null;
+			return c.json({ workspace, currentProjectId, projects });
 		} catch (error) {
 			return projectError(c, error);
 		}
@@ -1026,16 +1459,84 @@ export function mountProjects(app: Hono): void {
 	 */
 	app.post("/api/v1/projects", async (c) => {
 		const body = (await c.req.json().catch(() => null)) as
-			| { name?: string; path?: string }
+			| { name?: string; path?: string; primaryPath?: string; folders?: unknown }
 			| null;
 		const name = body?.name?.trim();
-		const relativePath = body?.path?.trim();
+		// `primaryPath`（2026-11-13）与旧的 `path` 同义；两者都给时以 primaryPath 为准。
+		const relativePath = body?.primaryPath?.trim() || body?.path?.trim();
 		if (!name || !relativePath) {
 			return c.json({ error: "bad_request", message: "name 与 path 都必填" }, 400);
 		}
+		const folders =
+			Array.isArray(body?.folders)
+				? body!.folders.filter((item): item is string => typeof item === "string")
+				: [];
 		try {
-			const proposal = projectsStore().proposeProject(name, relativePath);
+			const proposal = projectsStore().proposeProject(name, relativePath, folders);
 			return c.json({ ok: true, proposal }, 202);
+		} catch (error) {
+			return projectError(c, error);
+		}
+	});
+
+	// ── 文件夹（2026-11-13 项目容器）：加 / 改路径 / 改名 / 设为主 / 移除 ──────────
+	// 全部只改登记，不动磁盘；主文件夹的 path 变更同步到 projects.root_path 缓存列。
+	app.post("/api/v1/projects/:id/roots", async (c) => {
+		const body = (await c.req.json().catch(() => null)) as
+			| { path?: unknown; label?: unknown; primary?: unknown }
+			| null;
+		if (typeof body?.path !== "string" || !body.path.trim()) {
+			return c.json({ error: "bad_request", message: "path 必填（绝对路径）" }, 400);
+		}
+		try {
+			const project = projectsStore().addRoot(c.req.param("id"), {
+				path: body.path,
+				label: typeof body.label === "string" ? body.label : undefined,
+				primary: body.primary === true,
+			});
+			return c.json({ ok: true, project });
+		} catch (error) {
+			return projectError(c, error);
+		}
+	});
+
+	app.patch("/api/v1/projects/:id/roots/:rootId", async (c) => {
+		const body = (await c.req.json().catch(() => null)) as
+			| { path?: unknown; label?: unknown }
+			| null;
+		const hasPath = typeof body?.path === "string" && Boolean(body.path.trim());
+		const hasLabel = typeof body?.label === "string";
+		if (!hasPath && !hasLabel) {
+			return c.json({ error: "bad_request", message: "path 或 label 至少给一个（字符串）" }, 400);
+		}
+		try {
+			const projectId = c.req.param("id");
+			const rootId = c.req.param("rootId");
+			const store = projectsStore();
+			let project = hasPath
+				? store.updateRootPath(projectId, rootId, body!.path as string)
+				: null;
+			if (hasLabel) project = store.renameRoot(projectId, rootId, body!.label as string);
+			return c.json({ ok: true, project: project ?? store.findProject(projectId) });
+		} catch (error) {
+			return projectError(c, error);
+		}
+	});
+
+	/** 设为主文件夹：**只影响之后新建的会话**，老会话的 cwd 是创建时的快照。 */
+	app.post("/api/v1/projects/:id/roots/:rootId/promote", (c) => {
+		try {
+			const project = projectsStore().promoteRoot(c.req.param("id"), c.req.param("rootId"));
+			return c.json({ ok: true, project });
+		} catch (error) {
+			return projectError(c, error);
+		}
+	});
+
+	app.delete("/api/v1/projects/:id/roots/:rootId", (c) => {
+		try {
+			const project = projectsStore().removeRoot(c.req.param("id"), c.req.param("rootId"));
+			return c.json({ ok: true, project });
 		} catch (error) {
 			return projectError(c, error);
 		}

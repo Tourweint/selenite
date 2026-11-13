@@ -9,8 +9,8 @@ import { attachLocalCredential } from "./auth.ts";
  * 没有跨域 cookie、没有第二份部署。浏览器、桌面壳、（以后）手机 WebView
  * 打开的是同一个地址，看到的是同一份代码。
  *
- * 没有打包步骤：三个文件，改完刷新就见效。真要上框架了再引构建链，
- * 现在这一层不值得。
+ * 没有打包步骤：静态文件（index.html / app.js / stream-reveal.js / style.css），
+ * 改完刷新就见效。真要上框架了再引构建链，现在这一层不值得。
  */
 const WEB_DIR = new URL("../web/", import.meta.url);
 

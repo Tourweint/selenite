@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="paper" data-accent="indigo">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>回答气泡 · 三档效果</title>
+<!-- 直接用生产样式：这里看到的气泡、字体、间距就是页面上的那一份 -->
+<link rel="stylesheet" href="../../../ts/apps/server/web/style.css" />
+<style>
+  /* 只做展台：真实页面里这些由 .main / .scroll 提供，预览里不需要输入框与顶栏 */
+  body { padding: 0; background: var(--bg); }
+  .wrap { max-width: 1000px; margin: 0 auto; padding: 30px 24px 44px; }
+  .head { margin-bottom: 26px; }
+  .head h1 { margin: 0 0 8px; font-family: var(--font-display); font-size: 26px; font-weight: 500; letter-spacing: .02em; }
+  .head p { margin: 0; max-width: 720px; font-size: 12.5px; line-height: 1.8; color: var(--text-2); }
+  .head p b { color: var(--text); font-weight: 600; }
+  .demo { margin-bottom: 30px; }
+  .demo-label {
+    display: flex; align-items: baseline; gap: 10px;
+    padding-left: 22px; margin-bottom: 8px;
+    font-size: 12px; color: var(--text-2);
+  }
+  .demo-label em { font-style: normal; font-size: 11px; color: var(--text-3); }
+  .demo .thread {
+    max-width: var(--thread);
+    padding: 20px 22px 22px;
+    border: 1px solid var(--divider);
+    border-radius: var(--r-md);
+    background: var(--surface);
+  }
+  /* 工具灰块的位置示意：真样式在 E1 落地的补丁里（.tchips*）还没上，这里只用虚线框标位置 */
+  .proc-slot {
+    width: fit-content; max-width: var(--bubble-w, 100%);
+    padding: 3px 10px; border: 1px dashed var(--divider); border-radius: var(--r-full);
+    font-size: 11px; color: var(--text-3);
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="head">
+    <h1>回答气泡 · 三档</h1>
+    <p>同一条 920px 宽的对话列、同一段内容。气泡只包<b>他说的话</b>；工具灰块落在气泡外，
+      阅读顺序是「说一句 → 干几件事 → 再说一句」，所以气泡不会被工具行撑高、挤窄。</p>
+  </div>
+
+  <!-- 现在的排版：回答满宽、文档式 -->
+  <div class="demo">
+    <div class="demo-label">现在（无气泡）<em>回答满宽，工具行夹在段落之间</em></div>
+    <div class="thread">
+      <div class="msg user"><div class="body">11 月课堂观察表按班级整理一下，缺的列补上。</div></div>
+      <div class="msg assistant"><div class="flow">
+        <div class="body"><p>整理完了：6 个班、148 份，缺 5 份（2 班 3 份、4 班 2 份），缺的都是「听课记录」这一列；另外 3 班有 4 份的「班级人数」和花名册对不上，我按花名册改了，回头你看一眼。</p></div>
+        <div class="proc-slot">工具灰块在这里（气泡外）</div>
+        <div class="body">
+          <p>两个办法：</p>
+          <ol>
+            <li>我按名单发提醒，有微信的 12 人先发；</li>
+            <li>剩下的标成「待补」，下周例会一起过。</li>
+          </ol>
+          <div class="table-wrap"><table>
+            <thead><tr><th>班级</th><th>应交</th><th>已交</th><th>缺</th></tr></thead>
+            <tbody>
+              <tr><td>2 班</td><td>26</td><td>23</td><td>3</td></tr>
+              <tr><td>4 班</td><td>24</td><td>22</td><td>2</td></tr>
+            </tbody>
+          </table></div>
+          <p>清单我在 <code>tasks/observe-11.md</code> 里留了一份，回头照着跑就行。</p>
+        </div>
+      </div>
+      <div class="msg-foot"><span class="msg-time">21:04</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 气泡 80%（默认档） -->
+  <div class="demo" data-answer-bubble="1" style="--bubble-w:80%">
+    <div class="demo-label">气泡 · 80%<em>默认档；短回答收成窄泡，长回答到 80% 折行</em></div>
+    <div class="thread">
+      <div class="msg user"><div class="body">11 月课堂观察表按班级整理一下，缺的列补上。</div></div>
+      <div class="msg assistant"><div class="flow">
+        <div class="body"><p>整理完了：6 个班、148 份，缺 5 份（2 班 3 份、4 班 2 份），缺的都是「听课记录」这一列；另外 3 班有 4 份的「班级人数」和花名册对不上，我按花名册改了，回头你看一眼。</p></div>
+        <div class="proc-slot">工具灰块在这里（气泡外）</div>
+        <div class="body">
+          <p>两个办法：</p>
+          <ol>
+            <li>我按名单发提醒，有微信的 12 人先发；</li>
+            <li>剩下的标成「待补」，下周例会一起过。</li>
+          </ol>
+          <div class="table-wrap"><table>
+            <thead><tr><th>班级</th><th>应交</th><th>已交</th><th>缺</th></tr></thead>
+            <tbody>
+              <tr><td>2 班</td><td>26</td><td>23</td><td>3</td></tr>
+              <tr><td>4 班</td><td>24</td><td>22</td><td>2</td></tr>
+            </tbody>
+          </table></div>
+          <p>清单我在 <code>tasks/observe-11.md</code> 里留了一份，回头照着跑就行。</p>
+        </div>
+      </div>
+      <div class="msg-foot"><span class="msg-time">21:04</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 气泡 60%（窄档，看代价） -->
+  <div class="demo" data-answer-bubble="1" style="--bubble-w:60%">
+    <div class="demo-label">气泡 · 60%<em>窄档：宽表要在气泡里横滚，这就是气泡模式的代价</em></div>
+    <div class="thread">
+      <div class="msg user"><div class="body">11 月课堂观察表按班级整理一下，缺的列补上。</div></div>
+      <div class="msg assistant"><div class="flow">
+        <div class="body"><p>整理完了：6 个班、148 份，缺 5 份（2 班 3 份、4 班 2 份），缺的都是「听课记录」这一列；另外 3 班有 4 份的「班级人数」和花名册对不上，我按花名册改了，回头你看一眼。</p></div>
+        <div class="proc-slot">工具灰块在这里（气泡外）</div>
+        <div class="body">
+          <p>两个办法：</p>
+          <ol>
+            <li>我按名单发提醒，有微信的 12 人先发；</li>
+            <li>剩下的标成「待补」，下周例会一起过。</li>
+          </ol>
+          <div class="table-wrap"><table>
+            <thead><tr><th>班级</th><th>应交</th><th>已交</th><th>缺</th></tr></thead>
+            <tbody>
+              <tr><td>2 班</td><td>26</td><td>23</td><td>3</td></tr>
+              <tr><td>4 班</td><td>24</td><td>22</td><td>2</td></tr>
+            </tbody>
+          </table></div>
+          <p>清单我在 <code>tasks/observe-11.md</code> 里留了一份，回头照着跑就行。</p>
+        </div>
+      </div>
+      <div class="msg-foot"><span class="msg-time">21:04</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

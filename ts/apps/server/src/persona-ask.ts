@@ -344,3 +344,111 @@ export function askPersona(
 		});
 	});
 }
+
+// ── 库边界（2026-11-13 记忆页脚）──────────────────────────
+//
+// `ask.py --catalog-only` 是它自带的"库的边界"只读输出（约 2k token 的纯文本）。
+// 只给设置页显示"这个库大概有什么"，不做检索；结果缓存 10 分钟，避免每次进页都起 python。
+
+export interface PersonaCatalogResult {
+	ok: boolean;
+	lines: string[];
+	error?: string;
+}
+
+const CATALOG_CACHE_MS = 10 * 60_000;
+let catalogCache: { key: string; at: number; result: PersonaCatalogResult } | null = null;
+
+export function askPersonaCatalog(deps: PersonaAskDeps = {}): Promise<PersonaCatalogResult> {
+	const env = deps.env ?? process.env;
+	if (!askPersonaAvailable(env) || !personaAskEnabled(env)) {
+		return Promise.resolve({ ok: false, lines: [], error: "not_configured" });
+	}
+	const script = env.PERSONA_MEMORY_ASK!.trim();
+	const python = env.PERSONA_PYTHON?.trim() || "python";
+	const cacheKey = `${script}\u0000${python}`;
+	if (catalogCache && catalogCache.key === cacheKey && Date.now() - catalogCache.at < CATALOG_CACHE_MS) {
+		return Promise.resolve(catalogCache.result);
+	}
+
+	const timeoutMs = deps.timeoutMs ?? PERSONA_ASK_TIMEOUT_MS;
+	const spawnFn = deps.spawnFn ?? spawn;
+	const startedAt = Date.now();
+
+	return new Promise<PersonaCatalogResult>((resolve) => {
+		let settled = false;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		let child: ChildProcess | undefined;
+
+		const finish = (result: PersonaCatalogResult): void => {
+			if (settled) return;
+			settled = true;
+			if (timer) clearTimeout(timer);
+			if (result.ok) {
+				catalogCache = { key: cacheKey, at: Date.now(), result };
+			}
+			console.log(
+				`[persona-catalog] ok=${result.ok} lines=${result.lines.length} ${Date.now() - startedAt}ms`,
+			);
+			resolve(result);
+		};
+
+		try {
+			child = spawnFn(python, [script, "--catalog-only"], {
+				windowsHide: true,
+				stdio: ["ignore", "pipe", "pipe"],
+			});
+		} catch (error) {
+			finish({
+				ok: false,
+				lines: [],
+				error: (error instanceof Error ? error.message : String(error)).slice(0, 120),
+			});
+			return;
+		}
+
+		timer = setTimeout(() => {
+			try {
+				child?.kill();
+			} catch {
+				/* 已退出 */
+			}
+			finish({ ok: false, lines: [], error: "catalog_timeout" });
+		}, timeoutMs);
+
+		const stdout: Buffer[] = [];
+		let stderr = "";
+		child.stdout?.on("data", (chunk: Buffer | string) => {
+			stdout.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+		});
+		child.stderr?.on("data", (chunk: Buffer | string) => {
+			if (stderr.length < STDERR_KEEP) stderr += chunk.toString();
+		});
+		child.once("error", (error: Error) => {
+			finish({ ok: false, lines: [], error: error.message.slice(0, 120) });
+		});
+		child.once("close", (code: number | null) => {
+			if (settled) return;
+			if (code !== 0) {
+				const firstLine = stderr
+					.split(/\r?\n/)
+					.map((line) => line.trim())
+					.find(Boolean)
+					?.slice(0, 120);
+				finish({
+					ok: false,
+					lines: [],
+					error: `catalog_failed（退出码 ${code ?? "unknown"}）${firstLine ? `：${firstLine}` : ""}`,
+				});
+				return;
+			}
+			const lines = Buffer.concat(stdout)
+				.toString("utf8")
+				.split(/\r?\n/)
+				.map((line) => line.trim())
+				.filter(Boolean)
+				.slice(0, 20);
+			finish({ ok: true, lines });
+		});
+	});
+}

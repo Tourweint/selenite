@@ -23,6 +23,7 @@ import {
   cancelReminder,
   chatKindOf,
   chatMetaSummary,
+  pruneChatMetaOrphans,
   chatStream,
   chatTitles,
   contextUsageOf,
@@ -53,13 +54,30 @@ import {
   stopChat,
   usageSummary,
   workerChatEnabled,
+  // 对话历史倒序游标分页（2026-11-13）：/messages 的可选 page/before 走这条。
+  HISTORY_PAGE_DEFAULT,
+  HISTORY_PAGE_MAX,
+  decodeHistoryCursor,
+  readTranscriptPage,
 } from "./agent.ts";
 import {
   assembleUserContent,
   attachmentsEnabled,
   editResendEnabled,
+  fileAttachmentsEnabled,
 } from "./attachments.ts";
+// 浏览器上传的附件落盘（2026-11-13 附件走路径）：壳里走原生选择器，这里只服务浏览器。
+import { saveUploadedAttachment } from "./attachment-files.ts";
 import { createAuthMiddleware } from "./auth.ts";
+// 导出数据打包（2026-11-13）：format=zip 的采集与拼包全在这个模块，端点只管参数与响应头。
+import {
+  buildExportBundle,
+  EXPORT_PART_IDS,
+  ExportTooLargeError,
+  exportBundleEnabled,
+  parseExportImages,
+  parseExportParts,
+} from "./export-bundle.ts";
 import { ChatEventStore, sseSeqEnabled } from "./chat-events.ts";
 // stream_stalled 看门狗（2026-11-09 任务书 T3 §4）：只记账，不改行为、不中断。
 import { stallWatchdog } from "./watchdog.ts";
@@ -69,7 +87,7 @@ import { PairingStore, buildPairUrl, resolvePairBase, pairTwoStepEnabled } from 
 import { pairPage } from "./pair-page.ts";
 import { mountPhoneWorker } from "./phone-worker.ts";
 import { mountProjects, seedDefaultWorkspace } from "./projects.ts";
-import { loadFlagOverrides, mountFlags } from "./flags.ts";
+import { chatHistoryPagingEnabled, loadFlagOverrides, mountFlags } from "./flags.ts";
 // 自动归档调度器（2026-11-13 归档管理对齐 ZCode 批A）：启动 sync 一次，
 // ARCHIVE_AUTO_ENABLED=false（默认）时零行为；flags 端点改开关后由 onChange 动态开停。
 import { autoArchiveScheduler } from "./agent/auto-archive.ts";
@@ -676,6 +694,8 @@ app.post("/api/v1/agent/policy", async (c) => {
     // 2026-11-08 扫尾批 8c：审批形态是 env（不可写），这里只回显，形状与 GET 对齐
     approvalMode: next.approvalMode,
     attachments: attachmentsEnabled(),
+    // 2026-11-13：任意文件（路径引用）与浏览器上传入口；关着时前端只留图片
+    fileAttachments: fileAttachmentsEnabled(),
     editResend: editResendEnabled(),
   });
 });
@@ -685,6 +705,7 @@ function policyProjection() {
   return {
     ...getPolicy(),
     attachments: attachmentsEnabled(),
+    fileAttachments: fileAttachmentsEnabled(),
     editResend: editResendEnabled(),
   };
 }
@@ -891,6 +912,30 @@ app.post("/api/v1/agent/providers/:id/models/detect", async (c) => {
   const result = await detectProviderModel(c.req.param("id"), modelId);
   if (!result.ok) return c.json({ error: result.error, message: result.message }, result.status);
   return c.json(result);
+});
+
+/**
+ * 附件上传（2026-11-13 附件走路径）：浏览器拿不到真实路径，收字节落盘、回服务端路径。
+ *
+ * 壳里不走这里（原生选择器直接给绝对路径，零拷贝）。`AGENT_FILE_ATTACHMENTS=false`
+ * 时整条路由 404，`/agent/policy` 的 `fileAttachments` 同步为 false。
+ * 响应只回路径/名字/字节，不回内容；日志只记数量（见 attachment-files.ts）。
+ */
+app.post("/api/v1/agent/attachments", async (c) => {
+  if (!fileAttachmentsEnabled()) {
+    return c.json(
+      { error: "not_found", message: "文件附件未启用（AGENT_FILE_ATTACHMENTS=false）" },
+      404,
+    );
+  }
+  const body = (await c.req.json().catch(() => null)) as
+    | { name?: unknown; mimeType?: unknown; data?: unknown }
+    | null;
+  const result = saveUploadedAttachment(body ?? {});
+  if (!result.ok) {
+    return c.json({ error: result.error, message: result.message }, result.status);
+  }
+  return c.json({ ok: true, file: result.file });
 });
 
 // 一轮真正收尾的统一动作在 `agent/settled.ts`（2026-11-08 批 10-A 下沉）：
@@ -1173,6 +1218,11 @@ app.post("/api/v1/agent/chat/:conversationId/edit", async (c) => {
  * `sinceSeq`（2026-11-04 seq 方案）：带上后响应多 `fromSeq` + `events`（seq > sinceSeq 的
  * 已落库帧），断线重连的客户端据此补帧。`fromSeq > sinceSeq + 1` = 窗口滑过，须全量重建。
  * 不带时响应形状与改动前完全一致；回滚开关关着时同样忽略。
+ *
+ * 分页（2026-11-13 方案「按天分组·上滑加载」）：可选 `page=1` / `before=<不透明游标>`，
+ * 任一出现即走倒序游标分页 —— 服务端只读这一页 entry，响应多 `hasMore` / `nextBefore`。
+ * **两个参数都不带时行为与改动前逐字一致**（手机端零改动）；`CHAT_HISTORY_PAGING_ENABLED=false`
+ * 时即使带了也忽略，退回老形态。
  */
 app.get("/api/v1/agent/chat/:conversationId/messages", async (c) => {
   if (!readLlmConfig()) return c.json({ messages: [] });
@@ -1180,22 +1230,64 @@ app.get("/api/v1/agent/chat/:conversationId/messages", async (c) => {
   const chat = await openChat(c.req.param("conversationId"));
   if (!chat) return c.json({ error: "unknown_conversation" }, 404);
 
-  const limit = Number(c.req.query("limit") ?? 50);
-  const messages = await readTranscript(chat, Number.isFinite(limit) ? limit : 50);
+  const beforeRaw = c.req.query("before");
+  const paged =
+    chatHistoryPagingEnabled() &&
+    (c.req.query("page") === "1" || (beforeRaw ?? "") !== "");
+
+  let messages: Awaited<ReturnType<typeof readTranscript>>;
+  /** 分页模式才带；空对象 spread 后老响应形状不变 */
+  const pageFields: { hasMore?: boolean; nextBefore?: string } = {};
+  if (paged) {
+    const limitRaw = c.req.query("limit");
+    const limit =
+      limitRaw === undefined || limitRaw === "" ? HISTORY_PAGE_DEFAULT : Number(limitRaw);
+    if (!Number.isInteger(limit) || limit < 1 || limit > HISTORY_PAGE_MAX) {
+      return c.json(
+        { error: "bad_request", message: `limit 必须是 1..${HISTORY_PAGE_MAX} 的整数` },
+        400,
+      );
+    }
+    let beforeMaxEntryId: number | undefined;
+    if ((beforeRaw ?? "") !== "") {
+      const decoded = decodeHistoryCursor(chat.externalId, beforeRaw as string);
+      if (decoded === null) {
+        return c.json({ error: "bad_request", message: "before 游标无效" }, 400);
+      }
+      beforeMaxEntryId = decoded;
+    }
+    const page = await readTranscriptPage(chat, {
+      limit,
+      ...(beforeMaxEntryId === undefined ? {} : { beforeMaxEntryId }),
+    });
+    messages = page.messages;
+    pageFields.hasMore = page.hasMore;
+    if (page.nextBefore) pageFields.nextBefore = page.nextBefore;
+  } else {
+    const limit = Number(c.req.query("limit") ?? 50);
+    messages = await readTranscript(chat, Number.isFinite(limit) ? limit : 50);
+  }
   // 会话种类（2026-11-06 B2）：前端据此恢复"普通 worker / 总管"身份，不按 id 猜
   const chatKind = await chatKindOf(chat);
 
   const sinceRaw = c.req.query("sinceSeq");
   const eventStore = chatEventStoreOf();
   if (sinceRaw === undefined || sinceRaw === "" || !eventStore) {
-    return c.json({ conversationId: chat.externalId, messages, chatKind });
+    return c.json({ conversationId: chat.externalId, messages, chatKind, ...pageFields });
   }
   const sinceSeq = Number(sinceRaw);
   if (!Number.isFinite(sinceSeq) || sinceSeq < 0) {
     return c.json({ error: "bad_request", message: "sinceSeq 必须是非负整数" }, 400);
   }
   const { from, events } = eventStore.replaySince(chat.internalId, Math.floor(sinceSeq));
-  return c.json({ conversationId: chat.externalId, messages, chatKind, fromSeq: from, events });
+  return c.json({
+    conversationId: chat.externalId,
+    messages,
+    chatKind,
+    ...pageFields,
+    fromSeq: from,
+    events,
+  });
 });
 
 /**
@@ -1371,11 +1463,67 @@ app.get("/api/v1/agent/usage", async (c) => {
  * 会话清单复用 listChats（已排除 hide / task-），消息走 §2.2 同一条读取路径，
  * providers 用 modelCatalog 投影（无 keyEnv，密钥永不出内）。
  * 任何一步失败就整体 503，不出半份。
+ *
+ * 2026-11-13 升级：新增 `format=zip`（可选块 / 多文件 / 压缩包，见 export-bundle.ts），
+ * `format=json` 分支逐字节保持原样——老客户端与回滚都靠它。
  */
 const EXPORT_CHAT_LIMIT = 5000;
 const EXPORT_MESSAGE_LIMIT = 500;
 
 app.get("/api/v1/agent/export", async (c) => {
+  const format = (c.req.query("format") ?? "json").trim().toLowerCase();
+
+  if (format === "zip") {
+    // 回滚开关：关 = 这个形态不存在（json 形态不受影响）
+    if (!exportBundleEnabled()) return c.json({ error: "not_found" }, 404);
+
+    const parts = parseExportParts(c.req.query("parts"));
+    if (!parts) {
+      return c.json(
+        {
+          error: "bad_request",
+          message: `parts 只能是 ${EXPORT_PART_IDS.join(" / ")} 里的值，逗号分隔`,
+        },
+        400,
+      );
+    }
+    const images = parseExportImages(c.req.query("images"));
+    if (images === null) {
+      return c.json({ error: "bad_request", message: "images 只能是 0 或 1" }, 400);
+    }
+
+    try {
+      const bundle = await buildExportBundle({ parts, images });
+      const partRows = bundle.manifest["parts"] as { status?: string }[] | undefined;
+      if (partRows?.every((part) => part.status === "failed")) {
+        return c.json({ error: "export_failed", message: "请求的每一块都没读出来" }, 503);
+      }
+
+      // 只记块名 / 条数 / 字节，不含任何对话内容
+      console.log(
+        `[export] zip parts=${parts.join(",")} files=${bundle.files} bytes=${bundle.bytes} partial=${bundle.partial}`,
+      );
+      c.header("Content-Type", "application/zip");
+      c.header("Content-Disposition", `attachment; filename="${bundle.fileName}"`);
+      c.header("Cache-Control", "no-store");
+      c.header("X-Export-Files", String(bundle.files));
+      c.header("X-Export-Bytes", String(bundle.bytes));
+      if (bundle.partial) c.header("X-Export-Partial", "1");
+      return c.body(bundle.buffer as unknown as ArrayBuffer);
+    } catch (error) {
+      if (error instanceof ExportTooLargeError) {
+        return c.json({ error: "export_too_large", message: error.message }, 413);
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[export] zip 失败: ${message}`);
+      return c.json({ error: "export_failed", message }, 503);
+    }
+  }
+
+  if (format !== "json") {
+    return c.json({ error: "bad_request", message: "format 只能是 json 或 zip" }, 400);
+  }
+
   try {
     const catalog = modelCatalog();
     const chats = await listChats(EXPORT_CHAT_LIMIT);
@@ -1402,11 +1550,12 @@ app.get("/api/v1/agent/export", async (c) => {
         id: chat.conversationId,
         title: chat.title || chat.firstText,
         pinned: Boolean(chat.pinned),
-        messages: messages.map(({ role, at, text, images }) => ({
+        messages: messages.map(({ role, at, text, images, files }) => ({
           role,
           at,
           text,
           ...(images ? { images } : {}),
+          ...(files ? { files } : {}),
         })),
       });
     }
@@ -1896,6 +2045,13 @@ serve({ fetch: app.fetch, port }, (info) => {
   autonomyObserver().subscribe();
   // 自动归档调度器（2026-11-13 批A）：ARCHIVE_AUTO_ENABLED=false（默认）时不开定时器，零开销
   autoArchiveScheduler().sync();
+  // chat-meta 自愈（2026-11-13）：清库会在归档/置顶/改名单里留孤儿 id，
+  // 归档页会显示"N 条"却取不出东西。启动时清一次，列归档清单时还会再兜一次。
+  void pruneChatMetaOrphans().catch((error: unknown) => {
+    console.warn(
+      `[chats] 启动自愈 chat-meta 失败: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  });
   // 轮次收尾的观察层口（2026-11-08 批 10-A）：普通轮 / 编辑重发 / 审批续跑共用
   // agent/settled.ts 的同一个 handler。这里注入而不是让 agent/ 反向 import autonomy（会成环）。
   setTurnSettledObserver((conversationId, status, reason) =>

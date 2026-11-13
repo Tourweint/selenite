@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -487,4 +487,39 @@ test("永久删除：预检形状、执行计数、映射与 chat-meta 无残留
   for (const externalId of keptExternalIds) {
     assert.notEqual(await session.openChat(externalId), null);
   }
+});
+
+test("自愈：chat-meta 里指向已不存在会话的孤儿被清掉（清库残留）", async () => {
+  const { externalId } = await createWorkerChat("自愈测试：真实会话");
+  session.archiveChat(externalId);
+
+  // 手工塞孤儿（模拟清库后 chat-meta 没跟着清）：归档 / 置顶 / 改名三处各留一条
+  const metaPath = process.env.AGENT_CHAT_META_PATH as string;
+  const meta = JSON.parse(readFileSync(metaPath, "utf8")) as {
+    titles: Record<string, string>;
+    archived: string[];
+    archivedAt: Record<string, number>;
+    pins: string[];
+  };
+  meta.archived.push("ghost-archived-1", "ghost-archived-2");
+  meta.archivedAt["ghost-archived-1"] = Date.now();
+  meta.pins.push("ghost-pinned-1");
+  meta.titles["ghost-titled-1"] = "已删会话";
+  writeFileSync(metaPath, JSON.stringify(meta, null, 2), "utf8");
+
+  const removed = await session.pruneChatMetaOrphans();
+  assert.equal(removed, 4, "剔除 2 条归档 + 1 条置顶 + 1 条改名");
+
+  const after = JSON.parse(readFileSync(metaPath, "utf8")) as typeof meta;
+  // 前面的用例共用同一个 chat-meta，所以只钉"孤儿被清、真实条目还在"，不断言全数组
+  assert.ok(after.archived.includes(externalId), "真实存在的归档保留");
+  assert.equal(after.archived.includes("ghost-archived-1"), false, "孤儿归档清掉");
+  assert.equal(after.archived.includes("ghost-archived-2"), false, "孤儿归档清掉");
+  assert.equal(after.pins.includes("ghost-pinned-1"), false, "孤儿置顶清掉");
+  assert.equal(after.titles["ghost-titled-1"], undefined, "孤儿改名胜清");
+  assert.equal(after.archivedAt["ghost-archived-1"], undefined, "孤儿归档时间清掉");
+
+  // 幂等：没有孤儿时返回 0，不写文件
+  assert.equal(await session.pruneChatMetaOrphans(), 0);
+  session.unarchiveChat(externalId);
 });

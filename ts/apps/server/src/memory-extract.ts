@@ -16,6 +16,7 @@ import {
 	DialogueExtractor,
 	HeuristicExtractor,
 	experienceExtractionEnabled,
+	isSyntheticUserText,
 	renderTranscript,
 	type ExtractMessage,
 	type Extractor,
@@ -34,6 +35,17 @@ import { currentModels, isFaux, readLlmConfig } from "./provider.ts";
 export function memoryExtractMode(): "auto" | "llm" | "rule" {
 	const raw = (process.env.MEMORY_EXTRACT ?? "").trim().toLowerCase();
 	return raw === "rule" || raw === "llm" ? raw : "auto";
+}
+
+/**
+ * `MEMORY_EXTRACT_NOISE`（2026-11-13，回滚开关）：默认开。
+ *
+ * 开 = 规则抽取过滤审批续跑等合成指令、命令句与问句（`MEMORY_EXTRACT=rule` 不受影响）；
+ * 关 = 回到"用户每句 ≥6 字都记成 episode"的旧行为。
+ */
+export function memoryExtractNoiseEnabled(): boolean {
+	const raw = (process.env.MEMORY_EXTRACT_NOISE ?? "").trim().toLowerCase();
+	return raw !== "false" && raw !== "0" && raw !== "off";
 }
 
 /** 单次偏好抽取的超时。记忆写入是后台动作，宁可丢一轮也不能挂着不结束。 */
@@ -107,7 +119,9 @@ class LayeredExtractor implements Extractor {
 	private readonly judgment = new DialogueExtractor(generateOnce, {
 		experience: experienceExtractionEnabled(),
 	});
-	private readonly fallback = new HeuristicExtractor();
+	private readonly fallback = new HeuristicExtractor({
+		filterNoise: memoryExtractNoiseEnabled(),
+	});
 
 	async extract(input: {
 		messages: ExtractMessage[];
@@ -115,16 +129,24 @@ class LayeredExtractor implements Extractor {
 		now: Date;
 	}): Promise<MemoryCandidate[]> {
 		const started = Date.now();
+		// 合成指令（审批续跑 / 结构化提问回答等）既不该进规则记忆，也不该喂给偏好判断：
+		// 那几句里常带"不要…""继续…"，喂进去只会污染抽取。
+		const messages = memoryExtractNoiseEnabled()
+			? input.messages.filter(
+					(message) => message.role !== "user" || !isSyntheticUserText(message.content),
+				)
+			: input.messages;
+		const cleanInput = messages.length === input.messages.length ? input : { ...input, messages };
 		const [judged, episodes] = await Promise.all([
-			this.judgment.extract(input).catch(() => [] as MemoryCandidate[]),
-			this.fallback.extract(input),
+			this.judgment.extract(cleanInput).catch(() => [] as MemoryCandidate[]),
+			this.fallback.extract(cleanInput),
 		]);
 		// 只记条数与枚举，不记内容（D8）。经验关着时恒为 0，等于旧的"偏好抽取 +N 条"。
 		const preferenceCount = judged.filter((candidate) => candidate.kind === "preference").length;
 		const experienceCount = judged.filter((candidate) => candidate.kind === "experience").length;
 		if (preferenceCount + experienceCount > 0) {
 			console.log(
-				`[memory] 偏好/经验抽取 +${preferenceCount + experienceCount} 条（偏好${preferenceCount}/经验${experienceCount}，${Date.now() - started}ms，输入 ${renderTranscript(input.messages).length} 字）`,
+				`[memory] 偏好/经验抽取 +${preferenceCount + experienceCount} 条（偏好${preferenceCount}/经验${experienceCount}，${Date.now() - started}ms，输入 ${renderTranscript(cleanInput.messages).length} 字）`,
 			);
 		}
 		// 偏好在前：巩固层按顺序处理，同一段话里"偏好"优先占位（DialogueExtractor 已保证，这里兜一层）
@@ -140,6 +162,15 @@ export function preferenceExtractor(): Extractor | null {
 	if (mode === "rule") return null;
 	if (mode === "auto" && (!readLlmConfig() || isFaux())) return null;
 	return new LayeredExtractor();
+}
+
+/**
+ * 模型不可用时的规则兜底（2026-11-13）：只有开了噪声过滤才返回；
+ * `MEMORY_EXTRACT=rule` 仍返回 null（装配层回落到老引擎的旧行为）。
+ */
+export function memoryFallbackExtractor(): Extractor | null {
+	if (memoryExtractMode() === "rule") return null;
+	return memoryExtractNoiseEnabled() ? new HeuristicExtractor({ filterNoise: true }) : null;
 }
 
 /** 供探针/测试：当前会不会真的发模型调用。 */

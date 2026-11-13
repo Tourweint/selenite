@@ -15,6 +15,7 @@ import type { MemoryStore } from "./store.ts";
 import {
 	scopeKey,
 	type InjectOptions,
+	type MemoryKind,
 	type MemoryRecord,
 	type MemoryScope,
 	type RecallHit,
@@ -55,6 +56,24 @@ export interface MemoryEngineOptions {
 }
 
 const DAY_MS = 86_400_000;
+
+/** 列表 / 分组排序：偏好 → 打算 → 事实 → 经验 → 人事物 → 经历 → 履历（2026-11-13 补 experience/work）。 */
+const KIND_RANK: Record<string, number> = {
+	preference: 0,
+	intention: 1,
+	fact: 2,
+	experience: 3,
+	entity: 4,
+	episode: 5,
+	work: 6,
+};
+
+function sortByKind(rows: MemoryRecord[]): MemoryRecord[] {
+	return [...rows].sort((a, b) => {
+		const rank = (KIND_RANK[a.kind] ?? 9) - (KIND_RANK[b.kind] ?? 9);
+		return rank !== 0 ? rank : a.createdAt < b.createdAt ? 1 : -1;
+	});
+}
 
 /** 「也许值得提起」的上限：最多 2 条、每条 ≤80 字（2026-11-10 批 17 §二.1）。 */
 const PROACTIVE_LIMIT = 2;
@@ -382,6 +401,69 @@ export class MemoryEngine {
 	}
 
 	/**
+	 * 设置页的分页浏览（2026-11-13 记忆页 A 版）。
+	 *
+	 * 与 `list()` 的分工：`list` 是"取一窗给旧界面"；这里同时回**真实总数**，
+	 * 支持正文精确子串（`q`）、kind 白/黑名单与 offset，列表页才能做分类计数、
+	 * 搜索与"加载更多"，且不把 limit 之外的数据谎报成总数。
+	 */
+	browse(
+		options: {
+			scopes?: string[];
+			kinds?: MemoryKind[];
+			excludeKinds?: MemoryKind[];
+			q?: string;
+			offset?: number;
+			limit?: number;
+			includeSuperseded?: boolean;
+		} = {},
+	): { items: MemoryRecord[]; total: number } {
+		this.demoteExpiredIntentions(options.scopes ?? [], this.now());
+		const q = options.q?.trim();
+		const filter = {
+			...(options.scopes?.length ? { scopes: options.scopes } : {}),
+			...(options.kinds?.length ? { kinds: options.kinds } : {}),
+			...(options.excludeKinds?.length ? { excludeKinds: options.excludeKinds } : {}),
+			...(q ? { contains: q } : {}),
+			includeSuperseded: options.includeSuperseded ?? false,
+		};
+		const total = this.store.countMatching(filter);
+		const limit =
+			options.limit === undefined
+				? 500
+				: Math.max(0, Math.min(2000, Math.floor(options.limit)));
+		const offset = Math.max(0, Math.floor(options.offset ?? 0));
+		const items =
+			limit <= 0 || total === 0
+				? []
+				: this.store.search({ ...filter, limit, offset });
+		return { items: sortByKind(items), total };
+	}
+
+	/**
+	 * 设置页的真实计数（2026-11-13）：`all` / 分 kind / 已被取代的条数。
+	 *
+	 * `byKind` 忽略调用方的 kind 过滤（分类片要显示每类有多少），但尊重 `q` 与
+	 * `excludeKinds`——搜索时计数跟着搜索走，设置页不把 work 履历算进来。
+	 */
+	counts(
+		options: { scopes?: string[]; q?: string; excludeKinds?: MemoryKind[] } = {},
+	): { all: number; byKind: Record<string, number>; superseded: number } {
+		this.demoteExpiredIntentions(options.scopes ?? [], this.now());
+		const q = options.q?.trim();
+		const base = {
+			...(options.scopes?.length ? { scopes: options.scopes } : {}),
+			...(options.excludeKinds?.length ? { excludeKinds: options.excludeKinds } : {}),
+			...(q ? { contains: q } : {}),
+			includeSuperseded: false,
+		};
+		const all = this.store.countMatching(base);
+		const withSuperseded = this.store.countMatching({ ...base, includeSuperseded: true });
+		const byKind = this.store.countByKind(base);
+		return { all, byKind, superseded: Math.max(0, withSuperseded - all) };
+	}
+
+	/**
 	 * 按 scope 列记忆（设置页列表 / 排查用）。
 	 *
 	 * 默认**不返回已被取代的记录**：页面上列出来的是"现在还算数的记忆"。
@@ -396,18 +478,7 @@ export class MemoryEngine {
 			includeSuperseded: options.includeSuperseded ?? false,
 			limit: Math.max(1, Math.min(2000, options.limit ?? 500)),
 		});
-		const order: Record<string, number> = {
-			preference: 0,
-			intention: 1,
-			fact: 2,
-			experience: 3,
-			entity: 4,
-			episode: 5,
-		};
-		return [...rows].sort((a, b) => {
-			const rank = (order[a.kind] ?? 9) - (order[b.kind] ?? 9);
-			return rank !== 0 ? rank : a.createdAt < b.createdAt ? 1 : -1;
-		});
+		return sortByKind(rows);
 	}
 
 	close(): void {

@@ -6,6 +6,8 @@
  * - 所有网络请求只从这里出去（见 request），别的地方不许自己 fetch。
  */
 
+import { createStreamRevealer } from "./stream-reveal.js";
+
 const KEY_TOKEN = "lifediary.token";
 const KEY_CONV = "lifediary.conversationId";
 
@@ -14,7 +16,6 @@ const el = {
   // E4 侧栏：总管区 / 最近会话折叠 / 执事花名册
   chiefEntry: document.getElementById("chief-entry"),
   chiefAvatar: document.getElementById("chief-avatar"),
-  chiefDot: document.getElementById("chief-dot"),
   chiefCount: document.getElementById("chief-count"),
   // 2026-11-07 侧栏统一批：四个分区共用一套折叠头（.side-sec），
   // 收起态各存一份 localStorage；旧 id（recents/new-chat/side-proj/proj-pill）已从
@@ -38,7 +39,11 @@ const el = {
   projectMenu: document.getElementById("proj-menu"),
   railGroupsMenu: document.getElementById("rail-groups-menu"),
   railPartnersMenu: document.getElementById("rail-partners-menu"),
+  railChatsMenu: document.getElementById("rail-chats-menu"),
+  railTopicsMenu: document.getElementById("rail-topics-menu"),
+  railChiefMenu: document.getElementById("rail-chief-menu"),
   title: document.getElementById("title"),
+  chatHeadAvatar: document.getElementById("chat-head-avatar"),
   thread: document.getElementById("thread"),
   empty: document.getElementById("empty"),
   emptyGreet: document.getElementById("empty-greet"),
@@ -112,8 +117,7 @@ const el = {
   secTopicsToggle: document.getElementById("sec-topics-toggle"),
   topicList: document.getElementById("topic-list"),
   topicsBadge: document.getElementById("topics-badge"),
-  railTasks: document.getElementById("rail-tasks"),
-  railReview: document.getElementById("rail-review"),
+  railChats: document.getElementById("rail-chats"),
   domainsBack: document.getElementById("domains-back"),
   domainsRefresh: document.getElementById("domains-refresh"),
   domainsState: document.getElementById("domains-state"),
@@ -154,13 +158,13 @@ const el = {
   menuBtn: document.getElementById("menu-btn"),
   menuPop: document.getElementById("menu-pop"),
   composerAdd: document.getElementById("composer-add"),
+  composerPlusMenu: document.getElementById("composer-plus-menu"),
   composerFile: document.getElementById("composer-file"),
   composerAttachments: document.getElementById("composer-attachments"),
   lightbox: document.getElementById("lightbox"),
   lightboxImg: document.getElementById("lightbox-img"),
   modelPill: document.getElementById("model-pill"),
   modelPillLabel: document.getElementById("model-pill-label"),
-  modelThink: document.getElementById("model-think"),
   modelMenu: document.getElementById("model-menu"),
   chatSettingsBtn: document.getElementById("chat-settings-btn"),
   chatSettingsDrawer: document.getElementById("chat-settings-drawer"),
@@ -582,15 +586,6 @@ function currentThinking() {
   return THINKING_LEVELS.includes(value) ? value : "off";
 }
 
-/** 模型 pill 上的中性小字：非 off 档才出现（off 是默认，不占视觉）；没配模型也不摆 */
-function syncThinkingPill(catalog = state.modelCatalog) {
-  if (!el.modelThink) return;
-  const level = currentThinking();
-  const visible = level !== "off" && Boolean(catalog && catalog.current);
-  el.modelThink.textContent = visible ? `·${THINKING_LABELS[level]}` : "";
-  el.modelThink.hidden = !visible;
-}
-
 /** 菜单打开时把当前档标在**当前模型**那一行（其它模型的档位未选中） */
 function syncThinkingSegments() {
   if (!el.modelMenu) return;
@@ -617,7 +612,6 @@ function clampThinking(level, levels) {
 async function setThinkingLevel(level) {
   if (!THINKING_LEVELS.includes(level)) return;
   localStorage.setItem(KEY_THINKING, level);
-  syncThinkingPill();
   syncThinkingSegments();
   // 还没有会话就不用下发，第一轮 `start` 回来时补（同原 setMode 的语义）
   if (!state.conversationId) return;
@@ -648,6 +642,58 @@ function groupRouteId() {
   const hash = location.hash.replace(/^#/, "");
   const match = /^\/group\/([A-Za-z0-9-]+)/.exec(hash);
   return match ? match[1] : "";
+}
+
+/* ── 选中态：黄色只表示「你在这里」（2026-11-13 选中态批）────
+ * 轨道圆圈与展开侧栏的行选中共用一份口径：
+ *   普通会话 → 对话；执事专线 → 执事；群列表 / 群会话 → 群组；
+ *   总管会话 → 都不亮（用户拍板：选了总管本身就看得出，不再给黄块）；
+ *   任务 / 回顾 / 搜索 / 领域 / 设置没有对应轨道钮，不亮。
+ * 之前只判 route === "chat"，而总管会话 / 执事专线也走 chat 路由，
+ * 轨道「对话」就一直亮着——用户报的「无论咋着它一直是黄的」就是这里。 */
+function currentRailSection() {
+  const route = currentRoute();
+  if (route === "group") return "groups";
+  if (route !== "chat") return "";
+  const convId = String(state.conversationId || "");
+  if (convId.startsWith("partner-")) return "partners";
+  // 种类优先看会话列表里已知的那条（切会话瞬间 state.chatKind 还是上一条的）
+  const known = state.chats.find((chat) => chat.conversationId === convId);
+  const kind = (known && known.chatKind) || state.chatKind || "";
+  if (kind === "chief") return "";
+  if (kind === "worker") return "chats";
+  // 种类未知（历史还没回读）先不亮，避免总管会话闪一下「对话」
+  return "";
+}
+
+function syncRailCurrent() {
+  const section = currentRailSection();
+  el.railChats?.setAttribute("aria-current", String(section === "chats"));
+  el.railPartners?.setAttribute("aria-current", String(section === "partners"));
+  el.railGroups?.setAttribute("aria-current", String(section === "groups"));
+}
+
+/** 正开着的执事专线（partner-<id>）；群成员私聊 partner-<id>-group-<gid> 不算这条专线 */
+function currentPartnerLineId() {
+  if (currentRoute() !== "chat") return "";
+  const convId = String(state.conversationId || "");
+  if (!convId.startsWith("partner-")) return "";
+  const rest = convId.slice("partner-".length);
+  return rest.includes("-group-") ? "" : rest;
+}
+
+/** 展开侧栏的行选中：执事那一行 / 群那一行；会话行由 renderChats 自己管。 */
+function syncSideRowsCurrent() {
+  const partnerId = currentPartnerLineId();
+  for (const row of el.partnerRoster?.querySelectorAll(".roster-row[data-partner-id]") || []) {
+    if (partnerId && row.dataset.partnerId === partnerId) row.setAttribute("aria-current", "true");
+    else row.removeAttribute("aria-current");
+  }
+  const groupId = currentRoute() === "group" ? groupRouteId() : "";
+  for (const row of el.groupList?.querySelectorAll(".group-row[data-group-id]") || []) {
+    if (groupId && row.dataset.groupId === groupId) row.setAttribute("aria-current", "true");
+    else row.removeAttribute("aria-current");
+  }
 }
 
 /** 任务页的查询参数（ticket / domain / project / sort），路由与筛选共用一份 */
@@ -740,6 +786,8 @@ function applyRoute() {
   if (route === "search") el.searchInput?.focus();
   // 群会话的轮询只在该路由里跑：离开就停（2026-11-08 批三）
   if (route !== "group") stopGroupPulse();
+  // 记忆页整理轮询只在该路由里跑：离开设置页就停（2026-11-13）
+  if (route !== "settings") stopMemoryPolling();
   // 群组侧栏的选中态只在群组路由里成立：离开群组页后「所有群聊」不该还亮着
   // （2026-11-07 修：openGroupsView 只在进群组页时写 aria-current，回对话页就不再有
   // 人复位它，实测高亮会一直挂在那里）。
@@ -749,8 +797,10 @@ function applyRoute() {
   );
   el.toggleSidebar.hidden = route === "settings";
   el.openSettings.setAttribute("aria-current", String(route === "settings"));
-  el.railTasks.setAttribute("aria-current", String(route === "tasks"));
-  el.railReview?.setAttribute("aria-current", String(route === "review"));
+  // 轨道 / 展开侧栏的「你在这里」（2026-11-13 选中态批）：黄色只表示当前所在；
+  // 总管会话刻意不亮任何轨道钮（用户拍板），群组页/群会话亮「群组」。
+  syncRailCurrent();
+  syncSideRowsCurrent();
   if (route === "settings") void renderSettings();
   else if (route === "tasks") openTasks();
   else if (route === "review") openReview();
@@ -794,9 +844,11 @@ const state = {
   stick: true,
   // 待发图片（2026-11-08 扫尾批 4a）：{mimeType, data(裸 base64)}，只存内存，切换会话/发出即清
   pendingImages: [],
-  // 能力投影（GET /agent/policy 的 attachments / editResend / approvalMode）：
+  // 待发文件（2026-11-13 附件走路径）：{path, name, mimeType?, bytes?}，只存路径不存内容
+  pendingFiles: [],
+  // 能力投影（GET /agent/policy 的 attachments / fileAttachments / editResend / approvalMode）：
   // 关着时入口不渲染；审批形态决定审批卡显示倒计时还是「等待处理」
-  capabilities: { attachments: true, editResend: true, approvalMode: "async" },
+  capabilities: { attachments: true, fileAttachments: true, editResend: true, approvalMode: "async" },
   chats: [],
   // 已归档会话计数（GET /agent/chats 的 archived）；会话列表本身不返回它们
   archived: 0,
@@ -820,9 +872,17 @@ const state = {
   tasksFanoutOpen: new Set(),
   // 外部打手过滤（L3）：空 = 不过滤；等于某个 employee 时只留含该执行者的对话卡
   tasksEmployeeFilter: "",
+  // 运行时开关投影：null = 还没拉过；Map(key → flag 行)。只拉一次 GET /api/v1/agent/flags。
+  flagsCache: null,
+  // 对话流逐字浮现（2026-11-13）：null = 开关还没回来，按默认开跑；false 走旧的整块渲染。
+  chatRevealFlag: null,
   // 任务中心重做开关（2026-11-13 批 1）：null = 还没问过；true/false = 已定。
-  // 只拉一次 GET /api/v1/agent/flags，别在每次刷新里重复问。
   tasksRedesignFlag: null,
+  // 对话历史分页开关（2026-11-13）：null = 还没问过；false 走旧的一次拉 200 条。
+  chatPagingFlag: null,
+  // 历史翻页状态（2026-11-13 按天分组·上滑加载）：只对当前会话有效，切会话即重置。
+  // started=false 时滚动监听不触发；cursor=null 且 hasMore=false 表示已经到最早。
+  history: { started: false, cursor: null, hasMore: false, loading: false, pages: 0, top: null },
   // 「等你回话」超过 3 组时的折叠态；只记会话内存（刷新回默认收起）
   tasksNeedsOlderOpen: false,
   // 打手手风琴展开态：Set of employee id，只记会话内存
@@ -1924,21 +1984,43 @@ function waitedText(iso) {
   return `等了 ${Math.floor(hours / 24)} 天`;
 }
 
-/** 回滚开关：null = 还没问过；只问一次，之后记在 state 里 */
+/**
+ * 运行时开关（2026-11-13）：GET /api/v1/agent/flags 只拉一次，按 key 记在 state 里。
+ * 端点不可用 / 没这个键 → 用调用方给的 fallback；不同开关各自决定默认形态。
+ */
+async function ensureFlag(key, fallback) {
+  if (!state.flagsCache) {
+    try {
+      const response = await request("/api/v1/agent/flags", { cache: "no-store" });
+      if (!response.ok) throw new Error(String(response.status));
+      const data = await response.json().catch(() => ({}));
+      const list = Array.isArray(data.flags) ? data.flags : [];
+      state.flagsCache = new Map(
+        list
+          .filter((item) => item && typeof item.key === "string")
+          .map((item) => [item.key, item]),
+      );
+    } catch {
+      state.flagsCache = new Map();
+    }
+  }
+  const flag = state.flagsCache.get(key);
+  return flag ? flag.value !== "false" : fallback;
+}
+
+/** 任务中心回滚开关：null = 还没问过；只问一次，之后记在 state 里 */
 async function ensureTasksRedesignFlag() {
   if (state.tasksRedesignFlag !== null) return state.tasksRedesignFlag;
-  try {
-    const response = await request("/api/v1/agent/flags", { cache: "no-store" });
-    if (!response.ok) throw new Error(String(response.status));
-    const data = await response.json().catch(() => ({}));
-    const list = Array.isArray(data.flags) ? data.flags : [];
-    const flag = list.find((item) => item && item.key === "TASKS_REDESIGN_ENABLED");
-    // 端点不可用 / 没这个键 → 默认新视图（任务书口径：别把新界面误判成旧看板）
-    state.tasksRedesignFlag = flag ? flag.value !== "false" : true;
-  } catch {
-    state.tasksRedesignFlag = true;
-  }
+  // 端点不可用 / 没这个键 → 默认新视图（任务书口径：别把新界面误判成旧看板）
+  state.tasksRedesignFlag = await ensureFlag("TASKS_REDESIGN_ENABLED", true);
   return state.tasksRedesignFlag;
+}
+
+/** 对话历史分页回滚开关（2026-11-13）：false = 一次拉 200 条、无上滑加载、无日期分隔 */
+async function ensureChatPagingFlag() {
+  if (state.chatPagingFlag !== null) return state.chatPagingFlag;
+  state.chatPagingFlag = await ensureFlag("CHAT_HISTORY_PAGING_ENABLED", true);
+  return state.chatPagingFlag;
 }
 
 /** 视图分派：开关说 false 就整套退回旧看板（旧函数与旧 DOM 都还在） */
@@ -3158,8 +3240,9 @@ el.secTasksAll?.addEventListener("click", () => go("tasks"));
 // 项目 ＋（2026-11-07 四改）：两个入口——新建项目 / 添加已有项目
 el.secProjectsAdd?.addEventListener("click", () => openProjectAddMenu());
 
-/* 任务中心的固定入口与交互（只读，不提供改派/停止） */
-el.railTasks.addEventListener("click", () => go("tasks"));
+/* 任务中心的固定入口与交互（只读，不提供改派/停止）。
+   轨道钮 2026-11-13 退役：轨道只镜像展开态分区，任务中心从展开态「对话」分区底部的
+   「打开任务中心 →」进（`#/tasks` 路由不变）。 */
 el.tasksBack.addEventListener("click", () => go("tasks"));
 el.tasksRefresh.addEventListener("click", () => {
   const ticketId = currentTicketId();
@@ -3295,8 +3378,8 @@ el.tasksRedesign?.addEventListener("keydown", (event) => {
   target.click();
 });
 
-/* 今日回顾（2026-11-13 批 1）：日期切换 + 时间线条目回原对话 */
-el.railReview?.addEventListener("click", () => go("review"));
+/* 今日回顾（2026-11-13 批 1）：日期切换 + 时间线条目回原对话。
+   轨道钮同批退役（同上：任务中心的视图，入口在任务页底部的「今日回顾 →」）。 */
 el.reviewBack.addEventListener("click", () => go("tasks"));
 el.reviewRefresh.addEventListener("click", () => {
   void loadTickets({ silent: true, force: true, render: false }).then(() => {
@@ -3583,22 +3666,25 @@ function chatLabel(chat) {
   return chat.title || chat.firstText || "（无标题）";
 }
 
-function renderChats() {
-  el.chats.replaceChildren();
-  const visible = state.chats;
-  // 置顶的排前面（2026-11-04 批次一），段内保持原有顺序（旧→新）；标记走标题前缀，不另起分组栏
-  // partner- 前缀（执事专线 / 群成员会话，2026-11-06 群组方案 §2.2）不进最近会话：
-  // 执事的对话从花名册进，群从群组节进——这里漏过滤会把执事会话当主人会话摆出来（实测踩过）。
-  //
-  // 总管会话（chatKind=chief）也不进这张列表（2026-11-07 用户拍板）：
-  // 「主会话就不要了，总管跟主会话是一个效果，把它从界面上删掉」。
-  // 总管会话仍是真会话、仍能从顶部「总管」条目打开（openChiefChat 读的是 state.chats
-  // 全量，不受这条过滤影响），只是不再作为一条「管不了也删不掉」的行混在最近会话里。
-  const ordered = [...visible]
+/** 最近会话的过滤与排序（展开态「对话」分区与轨道浮卡共用这一份口径）。
+    置顶的排前面（2026-11-04 批次一），段内保持原有顺序（旧→新）；标记走标题前缀，
+    不另起分组栏。partner- 前缀（执事专线 / 群成员会话，2026-11-06 群组方案 §2.2）
+    不进最近会话：执事的对话从花名册进，群从群组节进——这里漏过滤会把执事会话当
+    主人会话摆出来（实测踩过）。总管会话（chatKind=chief）也不进这张列表（2026-11-07
+    用户拍板）：「主会话就不要了，总管跟主会话是一个效果，把它从界面上删掉」。
+    总管会话仍是真会话、仍能从顶部「总管」条目打开（openChiefChat 读的是 state.chats
+    全量，不受这条过滤影响），只是不再作为一条「管不了也删不掉」的行混在最近会话里。 */
+function recentChatsOrdered() {
+  return [...state.chats]
     .filter((chat) => !String(chat.conversationId || "").startsWith("partner-"))
     .filter((chat) => (chat.chatKind || "chief") !== "chief")
     .reverse()
     .sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)));
+}
+
+function renderChats() {
+  el.chats.replaceChildren();
+  const ordered = recentChatsOrdered();
   // 空态（2026-11-07 四改）：会话与任务合并成一块后，空态也只说一句。
   // 这里先不放占位，等任务行也渲染完，由 renderSideListEmpty() 统一判——
   // 否则「没有会话」和「没有在跑的活」会同时出现两行。
@@ -3709,7 +3795,11 @@ function startRename(row, chat) {
         { method: "POST", body: JSON.stringify({ title: value }) },
       ).catch(() => undefined);
       if (chat.conversationId === state.conversationId) {
-        el.title.textContent = value || "新对话";
+        // 总管会话的顶栏是身份（「总管」），不是会话名：改名只进侧栏清单，不动顶栏（2026-11-13）
+        const isChiefChat =
+          !String(chat.conversationId).startsWith("partner-") &&
+          (chat.chatKind || state.chatKind || "chief") === "chief";
+        el.title.textContent = isChiefChat ? chiefDisplayName() : value || "新对话";
       }
     }
     void loadChats();
@@ -4042,7 +4132,7 @@ function syncPartnerDots() {
   }
 }
 
-/** 总管头像 / 名字 / 状态同步到展开条目与收起轨道 */
+/** 总管头像 / 名字 / 状态同步到展开条目与收起轨道（2026-11-13：只画，不再挂编辑语义） */
 function syncChiefAvatar() {
   const chief = state.partners.find((item) => item.id === "chief");
   const name = String(chief?.name || "总管").trim() || "总管";
@@ -4050,18 +4140,51 @@ function syncChiefAvatar() {
   const avatar = chief?.avatar || null;
   if (el.chiefAvatar) {
     paintAvatar(el.chiefAvatar, avatar, name);
-    el.chiefAvatar.setAttribute("aria-label", `编辑${name}头像`);
-    el.chiefAvatar.title = `编辑${name}头像`;
+    el.chiefAvatar.removeAttribute("aria-label");
+    el.chiefAvatar.removeAttribute("title");
   }
   const railSlot = el.railChief?.querySelector(".pt-avatar");
   if (railSlot) paintAvatar(railSlot, avatar, name);
   syncChiefDot();
 }
 
+/** 总管在界面上的名字（用户可能给人设改过名，缺省「总管」） */
+function chiefDisplayName() {
+  const chief = state.partners.find((item) => item.id === "chief");
+  return String(chief?.name || "总管").trim() || "总管";
+}
+
 /** 执事会话表头用名字，不叫“新对话” */
 function partnerDisplayName(partnerId) {
   const partner = state.partners.find((item) => item.id === partnerId);
   return String(partner?.name || "执事").trim() || "执事";
+}
+
+/**
+ * 对话顶栏「跟谁在说话」（2026-11-13）：执事专线摆该执事的头像，名字仍在 #title。
+ *
+ * 口径：头像只属于「某个人」。总管不退化成一张脸——他的名字在这条会话里就是会话自己的
+ * 标题；普通 worker 会话也没有角色。两者都不摆头像，整块收起，标题照旧顶在最左。
+ * 离屏头像与花名册共用同一份 state.partners，花名册晚到 / 重拉（改头像）时由 loadRoster 补同步。
+ */
+function syncChatHeadAvatar() {
+  const host = el.chatHeadAvatar;
+  if (!host) return;
+  const target = csResolveTarget();
+  const partner =
+    target && target !== "chief" ? state.partners.find((item) => item.id === target) : null;
+  if (!partner) {
+    host.hidden = true;
+    host.replaceChildren();
+    host.removeAttribute("title");
+    delete host.dataset.partnerId;
+    return;
+  }
+  const name = partnerDisplayName(target);
+  paintAvatar(host, partner.avatar || null, name);
+  host.hidden = false;
+  host.title = name;
+  host.dataset.partnerId = target;
 }
 
 /**
@@ -4092,14 +4215,8 @@ el.chiefEntry.addEventListener("keydown", (event) => {
   }
 });
 
-// 头像单独是按钮：点它进编辑，不打开会话；键盘事件也不再冒泡到行
-el.chiefAvatar?.addEventListener("click", (event) => {
-  event.stopPropagation();
-  void openEditPartnerModal("chief");
-});
-for (const type of ["keydown", "keyup"]) {
-  el.chiefAvatar?.addEventListener(type, (event) => event.stopPropagation());
-}
+// 2026-11-13：总管头像不再是编辑入口——侧栏只负责「打开会话」，
+// 改头像 / 改名字去右侧对话设置的人设页或设置→执事（用户报「侧栏里能改，跟设置里重复」）。
 
 /* 执事花名册：GET /api/v1/partners（过滤 chief + archived）
    + GET /api/v1/domains（domain → activeTickets）。两个端点各自容错，
@@ -4135,6 +4252,16 @@ async function loadRoster() {
   if (state.conversationId.startsWith("partner-") && currentRoute() === "chat") {
     el.title.textContent = partnerDisplayName(state.conversationId.slice("partner-".length));
   }
+  // 总管的名字也可能在人设里改过：总管会话的表头跟着名册一起刷新（2026-11-13）
+  if (
+    currentRoute() === "chat" &&
+    !state.conversationId.startsWith("partner-") &&
+    (state.chatKind || "chief") === "chief"
+  ) {
+    el.title.textContent = chiefDisplayName();
+  }
+  // 头像与名字同一批到位（2026-11-13）：名册首帧晚到时补脸，改完头像重拉也在这里刷新
+  if (currentRoute() === "chat") syncChatHeadAvatar();
 }
 
 /** 最近一次花名册拿到的「按领域在办单数」：忙因胶囊就地重算用 */
@@ -4183,24 +4310,15 @@ function renderRoster(partners, domainRows, box = el.partnerRoster) {
     row.setAttribute("role", "button");
     row.tabIndex = 0;
     row.title = `${name}${domain ? " · " + domain : ""}`;
+    // 「你在这里」：正开着这条执事专线（2026-11-13 选中态批；折叠卡与展开侧栏共用）
+    if (id === currentPartnerLineId()) row.setAttribute("aria-current", "true");
 
-    const dot = document.createElement("i");
-    dot.className = `status-dot ${partnerDotClass(partner.status)}`;
-    dot.setAttribute("aria-hidden", "true");
-
-    // 头像：有图用 img，没图用名字首字；点它进编辑，不打开会话
-    const avatar = document.createElement("button");
-    avatar.type = "button";
-    avatar.className = "pt-avatar avatar-edit";
-    avatar.title = "编辑头像";
-    avatar.setAttribute("aria-label", `编辑${name}的头像`);
+    // 头像：有图用 img，没图用名字首字。2026-11-13 起只做展示——侧栏里点头像
+    // 跟点名字一样，都只是打开这位执事的会话；改头像 / 改名字去右侧人设页或设置→执事。
+    const avatar = document.createElement("span");
+    avatar.className = "pt-avatar";
+    avatar.setAttribute("aria-hidden", "true");
     paintAvatar(avatar, partner.avatar || null, name);
-    avatar.addEventListener("click", (event) => {
-      event.stopPropagation();
-      void openEditPartnerModal(id);
-    });
-    avatar.addEventListener("keydown", (event) => event.stopPropagation());
-    avatar.addEventListener("keyup", (event) => event.stopPropagation());
 
     const label = document.createElement("span");
     label.className = "roster-name";
@@ -4245,28 +4363,6 @@ function renderRoster(partners, domainRows, box = el.partnerRoster) {
       row.append(dispatch);
     }
 
-    // 员工档案直达（2026-11-09）：小按钮与行尾文件入口同一套 .proj-act 材料，
-    // 内联 Lucide 图标（与全站 37 处同口径），常态就能看见。
-    const profileBtn = document.createElement("button");
-    profileBtn.type = "button";
-    profileBtn.className = "proj-act";
-    profileBtn.style.width = "20px";
-    profileBtn.style.height = "20px";
-    profileBtn.style.opacity = ".7";
-    profileBtn.title = `看${name}的档案`;
-    profileBtn.setAttribute("aria-label", `打开${name}的员工档案`);
-    const profileIco = document.createElement("span");
-    profileIco.className = "proj-act-ico";
-    profileIco.append(csSvg(CS_ICONS.idcard));
-    profileBtn.append(profileIco);
-    profileBtn.addEventListener("click", (event) => {
-      event.stopPropagation();
-      void openPartnerProfile(id);
-    });
-    profileBtn.addEventListener("keydown", (event) => event.stopPropagation());
-    profileBtn.addEventListener("keyup", (event) => event.stopPropagation());
-    row.append(profileBtn);
-
     if (active > 0) {
       // 数字可点 → 任务中心按 domain 筛选（.side-count 与任务中心徽章同款）
       const count = document.createElement("button");
@@ -4279,22 +4375,16 @@ function renderRoster(partners, domainRows, box = el.partnerRoster) {
         location.hash = `#/tasks?domain=${encodeURIComponent(domain)}`;
       });
       row.append(count);
-    } else {
-      const idle = document.createElement("span");
-      idle.className = "roster-idle";
-      // 有忙因胶囊时不写「空闲」：同一行不能两个相反的说法
-      idle.hidden = Boolean(busy);
-      idle.textContent = "空闲";
-      row.append(idle);
     }
 
-    // 状态点固定在最右；本批只调位置，不改 active/archived 的状态来源
-    // 忙因胶囊（批 18 §二）紧挨状态点：忙时才占位，空闲不画（七原则⑥）
+    // 忙因胶囊（批 18 §二）：忙时才占位，空闲不画（七原则⑥）。
+    // 2026-11-13 用户口径：状态点、「空闲」、员工档案小图标一律不摆——
+    // 侧栏这一行只留「谁」和「有什么活」，状态去会话里看。
     const busyChip = document.createElement("span");
     busyChip.className = "roster-busy";
     busyChip.hidden = true;
     paintBusyChip(busyChip, busy);
-    row.append(busyChip, dot);
+    row.append(busyChip);
 
     const open = () => void openPartnerChat(id);
     row.addEventListener("click", open);
@@ -4598,10 +4688,13 @@ function clearThread() {
   topicProposalCards.clear();
   // 错误卡同理（批 32）：报错是"那一条会话里那一轮"的事，不追着人跑
   hideChatError();
-  // 待发图片属于"这一屏的这条会话"：切走就清，别把图带到另一条对话里
-  clearPendingImages();
+  // 待发附件属于"这一屏的这条会话"：切走就清，别把附件带到另一条对话里
+  clearPendingAttachments();
   el.thread.replaceChildren();
   if (el.empty) el.thread.append(el.empty);
+  // 历史分页状态跟着这一屏一起归零（2026-11-13）：旧的 top 节点已随 replaceChildren
+  // 移除，但 state 里还指着它的话，下一次 renderHistoryTop 会去改一个脱离 DOM 的节点。
+  state.history = { started: false, cursor: null, hasMore: false, loading: false, pages: 0, top: null };
   updateHomeMode();
 }
 
@@ -4609,10 +4702,16 @@ function hideEmpty() {
   if (el.empty && el.empty.isConnected) el.empty.remove();
 }
 
-function addMessage(role, text, at, images = []) {
+function addMessage(role, text, at, images = [], options = {}) {
   hideEmpty();
   const wrap = document.createElement("div");
   wrap.className = `msg ${role}`;
+  // 只有"人刚发/刚回"的消息才播入场；历史回读、搜索跳转、补帧重建都不播。
+  // 以前动画直接挂在 .msg.user/.assistant 上，刷新一条 200 条的会话会整屏同时入场。
+  if (options.fresh) {
+    wrap.classList.add("is-new");
+    wrap.addEventListener("animationend", () => wrap.classList.remove("is-new"), { once: true });
+  }
   // 时间戳不摆在脸上，挂在 hover 的 title 里；data-at 留给以后要用的时候
   if (at) {
     wrap.dataset.at = String(at);
@@ -4622,14 +4721,15 @@ function addMessage(role, text, at, images = []) {
   // 助手那一侧多一层「工作过程」（2026-11-07）：思考卡 + 工具步骤 + 派活。
   // 用户消息没有这一层。刻意**不在建消息时就插占位块**——没有工具的轮次
   // 不该多出一条空壳（旧 .acts 靠 :empty 隐藏，这里直接不建）。
+  // 用户消息的附件（图片 + 文件）在文字**上方**（2026-11-13 用户口径）：
+  // 先挂附件再挂 body，flex 列顺序就是「附件 → 我们说的话」。
+  if (role === "user") mountMessageAttachments(wrap, images, options.files);
   const body = document.createElement("div");
   body.className = "body";
   if (role === "user") body.textContent = text;
   else body.innerHTML = renderMarkdown(text);
-  wrap.append(body);
-
-  // 用户消息的图片（2026-11-08 扫尾批 4a）：贴在气泡下方，点开看大图
-  if (role === "user") mountMessageImages(wrap, images);
+  // 纯附件消息没有文字：不挂空 body，附件卡直接贴住气泡（少一格 gap）
+  if (role !== "user" || text) wrap.append(body);
 
   // 回答底下的一条脚注（2026-11-06 建这条线；2026-11-08 图标化）：复制图标 · 用时 · 完成时间。
   // 以前复制按钮浮在右上角、耗时单独 absolute 在右边，两者都对不齐正文；
@@ -4675,31 +4775,71 @@ function addMessage(role, text, at, images = []) {
     foot.append(copy);
   }
 
-  el.thread.append(wrap);
+  // 前插历史（2026-11-13 上滑加载）走 `options.parent`：先渲进 DocumentFragment 再整体插进
+  // thread 顶部，避免逐条 prepend 把顺序弄反；fragment 里也不触发自动滚底。
+  (options.parent || el.thread).append(wrap);
   updateHomeMode();
-  if (state.stick) scrollToEnd();
+  if (!options.parent && state.stick) scrollToEnd();
   return { root: wrap, body, foot };
 }
 
-/* ── 用户消息的图片 / 编辑重发（2026-11-08 扫尾批 4a）────────────
-   图片：base64 data URL 直接渲染（服务端回读同形状），点击开 lightbox。
-   编辑：只给**最后一条 user 消息**入口（方案 §二）；点开是行内输入框，提交后
-   服务端 fork 出新会话，这里 openConversation 接管并无缝补看这一轮。 */
+/* ── 用户消息的附件 / 编辑重发（2026-11-08 扫尾批 4a；2026-11-13 文件走路径）──
+   附件在文字上方（2026-11-13 用户口径）：图片是缩略图（base64 data URL，点击开 lightbox），
+   文件是「图标 + 名字 + 体积」小卡（只有路径，不预览内容）。 */
 
-function mountMessageImages(root, images) {
-  if (!root || !Array.isArray(images) || images.length === 0) return;
-  const host = document.createElement("div");
-  host.className = "msg-images";
-  for (const image of images) {
-    if (!image || !image.data) continue;
-    const img = document.createElement("img");
-    img.src = `data:${image.mimeType || "image/png"};base64,${image.data}`;
-    img.alt = "图片";
-    img.loading = "lazy";
-    img.addEventListener("click", () => openLightbox(img.src));
-    host.append(img);
+/** 文件卡图标（Lucide file），输入框与消息里共用 */
+const ATT_FILE_ICON =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/></svg>';
+
+function formatBytes(bytes) {
+  const value = Number(bytes);
+  if (!Number.isFinite(value) || value < 0) return "";
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function mountMessageAttachments(root, images, files) {
+  if (!root) return;
+  if (Array.isArray(images) && images.length > 0) {
+    const host = document.createElement("div");
+    host.className = "msg-images";
+    for (const image of images) {
+      if (!image || !image.data) continue;
+      const img = document.createElement("img");
+      img.src = `data:${image.mimeType || "image/png"};base64,${image.data}`;
+      img.alt = "图片";
+      img.loading = "lazy";
+      img.addEventListener("click", () => openLightbox(img.src));
+      host.append(img);
+    }
+    if (host.children.length) root.append(host);
   }
-  if (host.children.length) root.append(host);
+  if (Array.isArray(files) && files.length > 0) {
+    const host = document.createElement("div");
+    host.className = "msg-files";
+    for (const file of files) {
+      if (!file || !file.name) continue;
+      const card = document.createElement("div");
+      card.className = "msg-file";
+      if (file.path) card.title = file.path;
+      const icon = document.createElement("span");
+      icon.innerHTML = ATT_FILE_ICON;
+      const main = document.createElement("span");
+      main.className = "msg-file-main";
+      const name = document.createElement("span");
+      name.className = "msg-file-name";
+      name.textContent = file.name;
+      const meta = document.createElement("span");
+      meta.className = "msg-file-meta";
+      meta.textContent =
+        [file.mimeType, formatBytes(file.bytes)].filter(Boolean).join(" · ") || "文件";
+      main.append(name, meta);
+      card.append(icon, main);
+      host.append(card);
+    }
+    if (host.children.length) root.append(host);
+  }
 }
 
 function userActionsOf(root) {
@@ -4781,9 +4921,11 @@ function openInlineEditor(root, text, messageId) {
   if (root.querySelector(":scope > .msg-editor")) return;
   const body = root.querySelector(":scope > .body");
   const images = root.querySelector(":scope > .msg-images");
+  const files = root.querySelector(":scope > .msg-files");
   const actions = root.querySelector(":scope > .msg-user-actions");
   if (body) body.hidden = true;
   if (images) images.hidden = true;
+  if (files) files.hidden = true;
   if (actions) actions.hidden = true;
 
   const editor = document.createElement("div");
@@ -4811,6 +4953,7 @@ function openInlineEditor(root, text, messageId) {
     editor.remove();
     if (body) body.hidden = false;
     if (images) images.hidden = false;
+    if (files) files.hidden = false;
     if (actions) actions.hidden = false;
   };
   cancel.addEventListener("click", close);
@@ -5015,6 +5158,16 @@ function toolIcon(kind) {
     `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" ` +
     `stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">` +
     `${TOOL_ICON_PATHS[kind] || TOOL_ICON_PATHS.tool}</svg>`;
+  return span;
+}
+
+/** 派活行的身份 chip：用领域负责人（domain）首字，替掉通用工具图标。 */
+function domainChip(domain) {
+  const span = document.createElement("span");
+  span.className = "wp-domain";
+  const label = String(domain || "").trim();
+  span.textContent = Array.from(label)[0] || "管";
+  if (label) span.title = label;
   return span;
 }
 
@@ -5342,6 +5495,181 @@ function workPanelFromSteps(root, steps, workMs) {
   return panel;
 }
 
+/**
+ * 一轮工具执行 = 一串小灰块（2026-11-13 用户拍板 E1 方案）。
+ *
+ * 形状：话是正文，工具是灰块，二者交替出现——模型说一句、动一次手、再说一句。
+ * 主界面**不写"几步/几秒"**；步数、耗时、命令、输出、diff 全在点击后的详情里。
+ * 细节形态（内联展开 / 附近小窗）由 `tool-chips.js` 按设置决定，默认内联。
+ *
+ * 用两个元素把一轮串起来：
+ * - `body.seg`：每一段话一个正文段（streamView 绑一段，说完就换下一段）；
+ * - `.tchips`：一组灰块（一次连续动手 = 一组），插在两段话之间。
+ * 收尾后它们按真实顺序留在消息里，不再折成一行。
+ */
+
+/** 一轮里的工具流：按"话 → 灰块 → 话 → 灰块"依次落 DOM。 */
+function createToolFlow(root, options = {}) {
+  const live = options.live === true;
+  let group = null; // 当前这组灰块（createToolChips 的实例）
+  let stepCount = 0;
+
+  const ensureGroup = () => {
+    if (!group) group = createToolChips(root, { live });
+    return group;
+  };
+
+  return {
+    root,
+    /** 工具开始：建组（若尚未建）并推一枚运行中的块。 */
+    start(name, label, args) {
+      const kind = toolKindOf(name);
+      ensureGroup().push({
+        id: name,
+        verb: kind.verb || name,
+        target: label || "",
+        iconSvg:
+          `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" ` +
+          `stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">` +
+          `${TOOL_ICON_PATHS[kind.icon] || TOOL_ICON_PATHS.tool}</svg>`,
+        args,
+        state: "run",
+      });
+      stepCount += 1;
+      return group;
+    },
+    /** 工具结束：定状态、补输出/diff/耗时。 */
+    end(name, ok, output, diff) {
+      if (!group) return;
+      const duration = group.durationOf?.(name);
+      group.settle(name, {
+        state: ok ? "ok" : "err",
+        output,
+        diff,
+        diffSummary: diff ? diffSummaryOf(diff) : "",
+        duration: duration ? shortDuration(duration) : "",
+      });
+    },
+    /**
+     * 一段话结束（工具要动手了）：这组灰块已经落在这里，下一段话要接在它们后面。
+     * 调用方负责在新正文段里继续写；这里只把当前组封口，下一枚块另起一组。
+     */
+    breakGroup() {
+      group?.finish();
+      group = null;
+    },
+    /** 派活这类后台长任务：也是一枚块，标签随进度帧更新。 */
+    track(label, domain) {
+      const kind = toolKindOf("delegate");
+      const chip = ensureGroup().push({
+        id: `delegate:${stepCount}`,
+        verb: kind.verb || "派活",
+        target: domain ? `${domain} · ${label || ""}`.trim() : label || "",
+        iconSvg:
+          `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" ` +
+          `stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">` +
+          `${TOOL_ICON_PATHS[kind.icon] || TOOL_ICON_PATHS.tool}</svg>`,
+        args: label,
+        state: "run",
+      });
+      stepCount += 1;
+      return {
+        row: chip,
+        setLabel(text) {
+          chip.__setTarget?.(text || "");
+        },
+        close(ok, output) {
+          chip.__setState?.(ok ? "ok" : "err");
+          chip.__setDetail?.({ output });
+        },
+        handoff() {
+          chip.__setState?.("back");
+          chip.__setDetail?.({ output: "派单已受理，还在后台继续跑；进度看任务中心。" });
+        },
+      };
+    },
+    /** 一轮收尾：还开着的详情关掉，块留在原地（不再折成一行）。 */
+    finish() {
+      group?.finish();
+      group = null;
+    },
+    setDuration() {
+      /* 不再显示"已工作 Ns · M 步"：总时长由消息脚注承担 */
+    },
+    get count() {
+      return stepCount;
+    },
+  };
+}
+
+/** +A/-M 摘要（和文件汇总卡同一口径：只数改文件的行） */
+function diffSummaryOf(diff) {
+  let add = 0;
+  let del = 0;
+  for (const line of String(diff || "").split("\n")) {
+    if (line.startsWith("+++") || line.startsWith("---")) continue;
+    if (line.startsWith("+")) add += 1;
+    else if (line.startsWith("-")) del += 1;
+  }
+  if (!add && !del) return "";
+  return `+${add} −${del}`;
+}
+
+/**
+ * 历史回读：把服务端下发的一轮 steps 还原成同一形状——
+ * 「说」是正文段，工具是灰块，按真实顺序插在最终回答之前。
+ */
+function toolFlowFromSteps(root, steps, workMs) {
+  if (!Array.isArray(steps) || steps.length === 0) return null;
+  const flow = document.createElement("div");
+  flow.className = "flow";
+  const body = root.querySelector(":scope > .body");
+  if (body) root.insertBefore(flow, body);
+  else root.append(flow);
+  root.classList.add("has-flow");
+
+  const chips = createToolChips(flow, { live: false });
+  let groupOpen = false;
+  const segment = (text) => {
+    if (chips && groupOpen) {
+      chips.finish();
+      groupOpen = false;
+    }
+    const seg = document.createElement("div");
+    seg.className = "body";
+    seg.innerHTML = renderMarkdown(text);
+    flow.append(seg);
+  };
+
+  for (const step of steps) {
+    if (step.name === "say" && step.format === "md") {
+      segment(step.output || "");
+      continue;
+    }
+    const kind = toolKindOf(step.name);
+    chips.push({
+      id: step.name,
+      verb: kind.verb || step.name,
+      target: step.label || "",
+      iconSvg:
+        `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" ` +
+        `stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">` +
+        `${TOOL_ICON_PATHS[kind.icon] || TOOL_ICON_PATHS.tool}</svg>`,
+      args: step.args,
+      state: step.ok === false ? "err" : "ok",
+      output: step.output,
+      diff: step.diff,
+      diffSummary: step.diff ? diffSummaryOf(step.diff) : "",
+      duration: typeof step.ms === "number" ? shortDuration(step.ms) : "",
+    });
+    groupOpen = true;
+  }
+  chips.finish();
+  // 最终回答那段 body 移到 flow 末尾，保持"话在块后"的顺序
+  if (body) flow.append(body);
+  return { flow, workMs };
+}
+
 /* ── 文件变更汇总（2026-11-10 批 33，学 ZCode ConversationFileSummaryPanel）──
  * ZCode 的形状：折叠行「改了 N 个文件 +A -B」，点开逐文件列表（路径 + 每文件 +/-）。
  * 数据源走现成的 edit/write 工具步骤（事件与历史 steps 都带 label=路径、diff），
@@ -5634,6 +5962,9 @@ function scrollToEnd() {
 el.scroll.addEventListener("scroll", () => {
   const distance = el.scroll.scrollHeight - el.scroll.scrollTop - el.scroll.clientHeight;
   state.stick = distance < 80;
+  // 滑到顶附近自动续上一页（2026-11-13 历史分页）。loadOlderMessages 自己挡重复请求，
+  // 切会话/开关关着/已经到最早时它直接返回，不会打扰普通滚动。
+  if (el.scroll.scrollTop < 120) void loadOlderMessages();
 });
 
 /* ── 极简 Markdown ────────────────────────────────────── */
@@ -5711,7 +6042,8 @@ function syncDelegateHint(root, event) {
   let hint = root.querySelector(".delegate-hint");
   if (!hint) {
     hint = document.createElement("div");
-    hint.className = "delegate-hint";
+    hint.className = "delegate-hint is-new";
+    hint.addEventListener("animationend", () => hint.classList.remove("is-new"), { once: true });
     DELEGATE_HINTS.set(hint, new Map());
     root.append(hint);
   }
@@ -6063,11 +6395,194 @@ async function openConversation(conversationId, options) {
   return openChat(conversationId, options);
 }
 
+/* ── 历史分页：按天分组 + 上滑加载（2026-11-13）─────────────
+ *
+ * 打开只回读一页；滚到顶再往前插上一页。日期分隔只做展示，页边界由服务端按"轮"
+ * 和自然日切好——前端不重新分组数据，只按消息的 `at` 决定哪天该画一条日期条。
+ *
+ * 三条不能破的约束：
+ * 1. 前插不重建屏幕：不能复用 openChat/clearThread，否则流式补帧（maxSeq）、审批卡、
+ *    编辑入口全被打断。
+ * 2. 前插后视口停在原处：记录 scrollHeight 差再补 scrollTop，否则人会"被跳走"。
+ * 3. 接缝不重复日期条：新页最后一条和原第一条同一天时，把原来那条日期条拿掉。
+ */
+
+const CHAT_HISTORY_PAGE_SIZE = 50;
+
+/** 单条 transcript 消息的完整渲染（历史回读与分页前插共用；与现场渲染同一套装饰）。 */
+function renderTranscriptMessage(message, options = {}) {
+  const shown = addMessage(
+    message.role === "user" ? "user" : "assistant",
+    message.text,
+    message.at,
+    message.images,
+    { files: message.files, parent: options.parent },
+  );
+  // 可寻址 id（2026-11-08 4a）：编辑重发靠它定位这条 user 消息
+  if (message.role === "user" && message.id) shown.root.dataset.messageId = message.id;
+  if (message.role !== "user") {
+    // 工作过程（2026-11-07）：服务端从 durable 里把这一轮的 toolCall / tool-result
+    // 配成 steps 下发；这里还原成与现场同一块（已收尾、默认折叠）。
+    workPanelFromSteps(shown.root, message.steps, message.workMs);
+    // 文件变更汇总（批 33）：从同一份 steps 收集，与现场同一张卡
+    mountFileSummary(shown.root, collectFileChangesFromSteps(message.steps));
+    // 课题提议卡（2026-11-07 批二）：历史回读也按工具结果重渲，状态由 GET 定
+    for (const step of Array.isArray(message.steps) ? message.steps : []) {
+      if (step && step.name === "propose_topic" && step.output) {
+        mountTopicProposalCard(shown.root, parseTopicProposalOutput(step.output));
+      }
+    }
+    // 历史里的用时（2026-11-06）：服务端已下发 workMs（提问到收尾的墙钟），
+    // 以前只有现场那一轮有耗时，切回来就没了。这里补成同一份脚注。
+    // 完成时间 = 这条消息落盘的时刻（时间戳就是收尾时写的）。
+    if (message.at) markDoneAt(shown.root, message.at);
+    if (typeof message.workMs === "number" && message.workMs > 0) {
+      attachUsage(shown.root, { input: 0, output: 0, cacheRead: 0 }, message.workMs);
+    }
+    // E2 #7：助手正文里以「【需要你】」开头的行加 .attention（只改渲染判断，不改内容）。
+    for (const block of shown.body.children) {
+      if (block.textContent.split("\n").some((line) => line.trimStart().startsWith("【需要你】"))) {
+        block.classList.add("attention");
+      }
+    }
+  }
+  return shown;
+}
+
+/** 把一页消息按天分组渲进 container（升序）；返回这页最后一条的日历日（接缝判断用）。 */
+function renderHistoryMessages(messages, container) {
+  let lastDay = "";
+  for (const message of messages) {
+    const day = dayKeyOfAt(message.at);
+    if (day && day !== lastDay) {
+      const divider = document.createElement("div");
+      divider.className = "msg-day";
+      divider.textContent = dayLabelOf(day);
+      divider.title = day;
+      container.append(divider);
+      lastDay = day;
+    }
+    renderTranscriptMessage(message, { parent: container });
+  }
+  return lastDay;
+}
+
+function clearHistoryTop() {
+  if (state.history.top) state.history.top.remove();
+  state.history.top = null;
+}
+
+/** 顶部那一条：加载中 / 还有更早（可点） / 已经到最早。没有可显示的就整条隐藏。 */
+function renderHistoryTop() {
+  const history = state.history;
+  if (!history.started) {
+    clearHistoryTop();
+    return;
+  }
+  if (!history.top) {
+    const top = document.createElement("div");
+    top.className = "history-top";
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "history-more";
+    more.textContent = "↑ 加载更早的对话";
+    more.addEventListener("click", () => void loadOlderMessages());
+    const loading = document.createElement("span");
+    loading.className = "history-loading";
+    loading.textContent = "正在加载更早的对话…";
+    const start = document.createElement("span");
+    start.className = "history-start";
+    start.textContent = "没有更早的记录了";
+    top.append(more, loading, start);
+    history.top = top;
+    el.thread.prepend(top);
+  }
+  const showMore = history.hasMore && !history.loading;
+  const showLoading = history.loading;
+  // 只有"翻过至少一页"才说"到最早"：短会话首屏不动就挂一句会很吵。
+  const showStart = !history.hasMore && !history.loading && history.pages > 1;
+  history.top.querySelector(".history-more").hidden = !showMore;
+  history.top.querySelector(".history-loading").hidden = !showLoading;
+  history.top.querySelector(".history-start").hidden = !showStart;
+  history.top.hidden = !showMore && !showLoading && !showStart;
+}
+
+/** 上一页前插到 thread 顶部（日期条按天补；视口停在原来看的那条消息上）。 */
+function prependHistoryMessages(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) return;
+  const oldFirst = el.thread.querySelector(":scope > .msg");
+  const oldFirstDay = oldFirst ? dayKeyOfAt(Number(oldFirst.dataset.at || 0)) : "";
+  const prevHeight = el.scroll.scrollHeight;
+  const prevTop = el.scroll.scrollTop;
+
+  const fragment = document.createDocumentFragment();
+  const lastDay = renderHistoryMessages(messages, fragment);
+
+  // 接缝：新页最后一条和原来第一条同一天 → 原来那条前面的日期条属于"这一天开头"，
+  // 现在这一天开头已经挪到新页里了，旧的那条要拿掉。
+  if (oldFirst && oldFirstDay && lastDay === oldFirstDay) {
+    const divider = oldFirst.previousElementSibling;
+    if (divider && divider.classList.contains("msg-day")) divider.remove();
+  }
+
+  const top = state.history.top;
+  const anchorNode = top && top.parentNode === el.thread ? top.nextSibling : el.thread.firstChild;
+  el.thread.insertBefore(fragment, anchorNode);
+  el.scroll.scrollTop = prevTop + (el.scroll.scrollHeight - prevHeight);
+}
+
+/** 往上翻一页。切会话 / 路由变了就丢弃这次结果，绝不把旧页插进新会话。 */
+async function loadOlderMessages() {
+  const history = state.history;
+  const conversationId = state.conversationId;
+  if (!history.started || !history.hasMore || history.loading || !history.cursor || !conversationId) {
+    return;
+  }
+  const token = state.navToken;
+  history.loading = true;
+  renderHistoryTop();
+  try {
+    const response = await request(
+      `/api/v1/agent/chat/${encodeURIComponent(conversationId)}/messages?page=1&limit=${CHAT_HISTORY_PAGE_SIZE}&before=${encodeURIComponent(history.cursor)}`,
+      { cache: "no-store" },
+    );
+    if (state.conversationId !== conversationId || state.navToken !== token) return;
+    if (response.status === 400) {
+      // 游标解不开 = 服务端重启换了密钥 / 令牌变了。不猜、不回退到开屏重载，停下说清楚。
+      history.hasMore = false;
+      history.cursor = null;
+      renderHistoryTop();
+      toast("更早的记录暂时打不开（服务端可能重启过），刷新页面再试");
+      return;
+    }
+    if (!response.ok) throw new Error(String(response.status));
+    const data = await response.json();
+    if (state.conversationId !== conversationId || state.navToken !== token) return;
+    prependHistoryMessages(data.messages);
+    history.cursor = data.nextBefore || null;
+    // 没有游标就不算"还有更早"，避免下一次请求拿 null 拼 URL
+    history.hasMore = Boolean(data.hasMore) && Boolean(history.cursor);
+    history.pages += 1;
+    renderHistoryTop();
+  } catch (error) {
+    if (state.conversationId === conversationId) {
+      const message = error.message === "forbidden" ? "鉴权失败" : error.message;
+      toast(`加载更早的对话失败：${message}`);
+    }
+  } finally {
+    history.loading = false;
+    if (state.conversationId === conversationId) renderHistoryTop();
+  }
+}
+
 async function openChat(conversationId, { anchor = null, deep = false } = {}) {
   const token = ++state.navToken; // 作废还在飞的 open / 上一次 openChat
   const owner = () => token === state.navToken && state.conversationId === conversationId;
   state.conversationId = conversationId;
   localStorage.setItem(KEY_CONV, conversationId);
+  // 选中态先按 id 前缀落位（执事专线立刻亮「执事」；总管要等 chatKind 回读）
+  syncRailCurrent();
+  syncSideRowsCurrent();
   // 切会话先把上一会话的环藏掉（2026-11-13）：/context 回来之前旧数字停在
   // 新会话的角落里，看起来像"上下文没按这个会话加载"。同一会话重开不闪。
   if (el.ctxRing.dataset.conv !== conversationId) el.ctxRing.hidden = true;
@@ -6076,11 +6591,19 @@ async function openChat(conversationId, { anchor = null, deep = false } = {}) {
   renderChats();
   clearThread();
   el.title.textContent = "…";
+  // 顶栏头像跟着会话走（2026-11-13）：换会话先按新 id 摆（执事专线立刻有脸，
+  // 总管 / 普通对话立刻收起），别让上一位的头像挂在新会话的标题旁。
+  syncChatHeadAvatar();
 
   try {
-    // 默认只回读最近 200 条；带锚点却没命中时用 limit=0 整段重来一次（见下面的兜底）
+    // 分页开关（2026-11-13 按天分组·上滑加载）：开 = 只回读一页，往上滑再前插；
+    // 关 = 退回旧的一次 200 条（deep 搜索兜底始终走全量，只有这条路径付全量代价）。
+    const paging = await ensureChatPagingFlag();
+    const pageMode = paging && !deep;
     const response = await request(
-      `/api/v1/agent/chat/${encodeURIComponent(conversationId)}/messages?limit=${deep ? 0 : 200}`,
+      pageMode
+        ? `/api/v1/agent/chat/${encodeURIComponent(conversationId)}/messages?page=1&limit=${CHAT_HISTORY_PAGE_SIZE}`
+        : `/api/v1/agent/chat/${encodeURIComponent(conversationId)}/messages?limit=${deep ? 0 : 200}`,
       { cache: "no-store" },
     );
     if (response.status === 404) {
@@ -6097,43 +6620,21 @@ async function openChat(conversationId, { anchor = null, deep = false } = {}) {
     // 续话身份只认服务端回读（缺字段的旧后端按 chief）；不靠 id 猜。
     const kind = data.chatKind || "chief";
     state.chatKind = kind;
+    // 种类回读后再校一次轨道选中：总管会话要把「对话」熄掉（2026-11-13 选中态批）
+    syncRailCurrent();
     clearThread();
     const messages = data.messages || [];
-    for (const message of messages) {
-      const shown = addMessage(
-        message.role === "user" ? "user" : "assistant",
-        message.text,
-        message.at,
-        message.images,
-      );
-      // 可寻址 id（2026-11-08 4a）：编辑重发靠它定位这条 user 消息
-      if (message.role === "user" && message.id) shown.root.dataset.messageId = message.id;
-      if (message.role !== "user") {
-        // 工作过程（2026-11-07）：服务端从 durable 里把这一轮的 toolCall / tool-result
-        // 配成 steps 下发；这里还原成与现场同一块（已收尾、默认折叠）。
-        workPanelFromSteps(shown.root, message.steps, message.workMs);
-        // 文件变更汇总（批 33）：从同一份 steps 收集，与现场同一张卡
-        mountFileSummary(shown.root, collectFileChangesFromSteps(message.steps));
-        // 课题提议卡（2026-11-07 批二）：历史回读也按工具结果重渲，状态由 GET 定
-        for (const step of Array.isArray(message.steps) ? message.steps : []) {
-          if (step && step.name === "propose_topic" && step.output) {
-            mountTopicProposalCard(shown.root, parseTopicProposalOutput(step.output));
-          }
-        }
-        // 历史里的用时（2026-11-06）：服务端已下发 workMs（提问到收尾的墙钟），
-        // 以前只有现场那一轮有耗时，切回来就没了。这里补成同一份脚注。
-        // 完成时间 = 这条消息落盘的时刻（时间戳就是收尾时写的）。
-        if (message.at) markDoneAt(shown.root, message.at);
-        if (typeof message.workMs === "number" && message.workMs > 0) {
-          attachUsage(shown.root, { input: 0, output: 0, cacheRead: 0 }, message.workMs);
-        }
-        // E2 #7：助手正文里以「【需要你】」开头的行加 .attention（只改渲染判断，不改内容）。
-        for (const block of shown.body.children) {
-          if (block.textContent.split("\n").some((line) => line.trimStart().startsWith("【需要你】"))) {
-            block.classList.add("attention");
-          }
-        }
-      }
+    if (pageMode) {
+      // 只回读了一页：按天分组画出来，顶部挂"加载更早"；往上滑由 scroll 监听续页。
+      renderHistoryMessages(messages, el.thread);
+      state.history.cursor = data.nextBefore || null;
+      state.history.hasMore = Boolean(data.hasMore) && Boolean(state.history.cursor);
+      state.history.pages = 1;
+      state.history.started = true;
+      renderHistoryTop();
+    } else {
+      // 回滚形态（开关关）或 deep 搜索兜底：一次全量/200 条，行为与改动前一致（无日期条）。
+      for (const message of messages) renderTranscriptMessage(message);
     }
     const partnerId = conversationId.startsWith("partner-")
       ? conversationId.slice("partner-".length)
@@ -6141,8 +6642,12 @@ async function openChat(conversationId, { anchor = null, deep = false } = {}) {
     if (partnerId) {
       // 执事专线表头用名字；身份仍以服务端 chatKind 为准，这里只是展示
       el.title.textContent = partnerDisplayName(partnerId);
+    } else if (kind === "chief") {
+      // 总管（2026-11-13 用户口径）：顶栏回答的是「我在跟谁说话」，答的是总管，
+      // 不是「这条会话叫什么」——会话存过什么标题（例如「我的主对话」）不拿到这里来。
+      el.title.textContent = chiefDisplayName();
     } else if (!messages.length) {
-      el.title.textContent = kind === "worker" ? "普通对话" : "新对话";
+      el.title.textContent = "普通对话";
     } else {
       // 改过名的会话用存储标题（GET /chats 已带 title）；没改过名才从首句派生。
       // 不然 openChat 每次都把改名冲掉（顶栏永远是首句前 40 字）。
@@ -6156,8 +6661,8 @@ async function openChat(conversationId, { anchor = null, deep = false } = {}) {
     // 编辑入口只挂在最后一条 user 消息上（2026-11-08 4a）
     syncEditEntry();
     if (!owner()) return { token, conversationId, status: "stale" };
-    // 搜索命中跳回：定位到那一句；最近 200 条里没有 = 它是更早的消息，
-    // 用 limit=0 整段重来一次（只有这条路径付全量代价）。
+    // 搜索命中跳回：定位到那一句；当前页里没有 = 它是更早的消息，
+    // 用 limit=0 整段重来一次（只有这条路径付全量代价，且不启用分页）。
     if (anchor) {
       const located = jumpToAnchor(anchor);
       if (!located && !deep) return openChat(conversationId, { anchor, deep: true });
@@ -6194,10 +6699,13 @@ function startNewChat(kind = "worker") {
   state.conversationId = "";
   localStorage.removeItem(KEY_CONV);
   state.maxSeq = 0; // 新会话没有历史帧（2026-11-04 seq 方案）
+  syncRailCurrent();
+  syncSideRowsCurrent();
   renderChats();
   clearThread();
-  el.title.textContent = state.chatKind === "chief" ? "新对话" : "普通对话";
+  el.title.textContent = state.chatKind === "chief" ? chiefDisplayName() : "普通对话";
   el.title.dataset.chatKind = state.chatKind;
+  syncChatHeadAvatar(); // 新会话没有对手：头像整块收起
   el.ctxRing.hidden = true;
   delete el.ctxRing.dataset.conv;
   el.input.focus();
@@ -6229,8 +6737,13 @@ function setSending(value) {
 }
 
 function syncSendEnabled() {
-  // 纯图片消息也能发（2026-11-08 4a）：有文字或有附件都算"有内容"
-  el.send.disabled = state.sending ? false : !el.input.value.trim() && state.pendingImages.length === 0;
+  // 纯附件消息也能发（2026-11-08 4a 图片；2026-11-13 加入文件）
+  el.send.disabled =
+    state.sending
+      ? false
+      : !el.input.value.trim() &&
+        state.pendingImages.length === 0 &&
+        state.pendingFiles.length === 0;
 }
 
 /* ── 桌面通知（批次二，三时机：完成 / 出错 / 待你处理）──────
@@ -6921,7 +7434,7 @@ async function steerIntoTurn(text) {
     addNotice("这一轮还没跑起来，这句先留在输入框。");
     return;
   }
-  const bubble = addMessage("user", text, Date.now());
+  const bubble = addMessage("user", text, Date.now(), [], { fresh: true });
   try {
     const response = await request("/api/v1/agent/chat", {
       method: "POST",
@@ -7066,7 +7579,7 @@ async function followUp(text) {
     return;
   }
   const conversationId = state.conversationId;
-  const bubble = addMessage("user", text, Date.now());
+  const bubble = addMessage("user", text, Date.now(), [], { fresh: true });
   try {
     const response = await request("/api/v1/agent/chat", {
       method: "POST",
@@ -7103,7 +7616,7 @@ async function followUp(text) {
   }
 }
 
-async function send(text, images = []) {
+async function send(text, images = [], files = []) {
   if (state.sending) return;
   setSending(true);
   state.stopRequested = false;
@@ -7121,20 +7634,32 @@ async function send(text, images = []) {
   // 标题跟着「这一屏的第一句」走，而不是跟着 conversationId 走：
   // mock 模式也会发 start，本地留下的 id 是假的，按 id 判断会一直不更新。
   const firstTurn = !el.thread.querySelector(".msg");
-  addMessage("user", text, Date.now(), images);
-  if (firstTurn) el.title.textContent = (text || "图片").replace(/\s+/g, " ").slice(0, 40);
+  addMessage("user", text, Date.now(), images, { fresh: true, files });
+  if (firstTurn) {
+    el.title.textContent = (text || files[0]?.name || "图片").replace(/\s+/g, " ").slice(0, 40);
+  }
   // 刚发出的这条就是最后一句话：编辑入口跟上去（messageId 在点的时候再补）
   syncEditEntry();
-  const turn = addMessage("assistant", "", Date.now());
+  const turn = addMessage("assistant", "", Date.now(), [], { fresh: true });
   const body = turn.body;
-  const caret = document.createElement("span");
-  caret.className = "caret";
-  body.append(caret);
+  // 逐字浮现（2026-11-13）：旧版每帧整段 innerHTML 会杀掉子节点动画，
+  // 逐字只能靠"只追加、不重建旧 span"的增量渲染（见 stream-reveal.js）。
+  // 关掉开关或系统减少动态效果时退回旧路径，caret 也跟旧路径一起保留。
+  const canReveal = () => state.chatRevealFlag !== false && !noMotion.matches;
+  const streamView = canReveal()
+    ? createStreamRevealer({ body, renderHtml: renderMarkdown, canAnimate: canReveal })
+    : null;
+  const caret = streamView ? null : document.createElement("span");
+  if (caret) {
+    caret.className = "caret";
+    body.append(caret);
+  }
 
   // 思考折叠卡（批次一，对齐 cindy ThinkingCard）：全态默认折叠，
   // 流式中计时跳秒，正文开始后定格。thinking 增量都往同一张卡里追加。
   let thinkEl = null;
   let thinkSummary = null;
+  let thinkLabel = null;
   let thinkBody = null;
   let thinkStartMs = 0;
   let thinkLastMs = 0;
@@ -7142,23 +7667,21 @@ async function send(text, images = []) {
   let answered = false;
 
   // 工作过程块：有工具才建（第一只工具动手时），建了就一直在正文下方。
-  // 运行中默认展开，收尾折成一行——不是先给结论再看过程。
   let work = null;
   const ensureWork = () => {
-    if (!work) work = createWorkPanel(turn.root);
+    if (!work) work = createWorkPanel(turn.root, { live: true });
     return work;
   };
   /**
-   * 说过的话折进工作过程（2026-11-10 批 32，学 ZCode「只留结尾」）：
-   * 工具 start / 派活帧一到，answer 里已累积的中间话就折成一行「说」，
-   * 正文清零等下一段。折叠态与展开态同一个 DOM，点开还是那段原文。
-   * 刻意等"动手"才折：纯说话的轮次一段到底，不折腾。
+   * 说过的话折进工作过程（2026-11-10 批 32）。
+   * 2026-11-13：E1 灰块改造待接，先保持旧行为。
    */
   const foldSpoken = () => {
     const spoken = answer.trim();
     if (!spoken) return;
     ensureWork().say(spoken);
     answer = "";
+    streamView?.reset();
     paint();
   };
   /**
@@ -7175,6 +7698,7 @@ async function send(text, images = []) {
     if (!entry) {
       entry = ensureWork().track(
         `${event.done}/${event.total} ${event.current || event.lastAction || ""}`.trim(),
+        event.domain,
       );
       delegateRows.set(event.ticketId, entry);
     }
@@ -7184,8 +7708,17 @@ async function send(text, images = []) {
     if (thinkEl) return;
     thinkEl = document.createElement("details");
     thinkEl.className = "think";
+    thinkEl.dataset.live = "1";
     thinkSummary = document.createElement("summary");
-    thinkSummary.textContent = "思考中…";
+    // 彗星环 + 扫光文案（2026-11-13，对齐 ZCode 的"工作中"）：只有运行中才转 / 扫，
+    // 定格后收成一行静态的"已思考 Ns"，不在已完成的卡上继续动。
+    const orb = document.createElement("span");
+    orb.className = "think-orb";
+    orb.setAttribute("aria-hidden", "true");
+    thinkLabel = document.createElement("span");
+    thinkLabel.className = "think-label";
+    thinkLabel.textContent = "思考中…";
+    thinkSummary.append(orb, thinkLabel);
     thinkBody = document.createElement("div");
     thinkBody.className = "think-body";
     thinkEl.append(thinkSummary, thinkBody);
@@ -7193,7 +7726,7 @@ async function send(text, images = []) {
     thinkStartMs = Date.now();
     thinkTimer = setInterval(() => {
       if (thinkEl && !answered) {
-        thinkSummary.textContent = `思考中… ${Math.round((Date.now() - thinkStartMs) / 1000)}s`;
+        thinkLabel.textContent = `思考中… ${Math.round((Date.now() - thinkStartMs) / 1000)}s`;
       }
     }, 500);
   };
@@ -7201,7 +7734,8 @@ async function send(text, images = []) {
     if (!thinkEl || answered) return;
     answered = true;
     clearInterval(thinkTimer);
-    thinkSummary.textContent = `已思考 ${Math.max(1, Math.round((thinkLastMs - thinkStartMs) / 1000))}s`;
+    thinkEl.dataset.live = "0";
+    thinkLabel.textContent = `已思考 ${Math.max(1, Math.round((thinkLastMs - thinkStartMs) / 1000))}s`;
   };
 
   let answer = "";
@@ -7211,8 +7745,13 @@ async function send(text, images = []) {
   const paint = () => {
     frame = 0;
     if (!body.isConnected) return;
-    body.innerHTML = renderMarkdown(answer);
-    if (state.sending) body.append(caret);
+    if (streamView) {
+      // 增量更新：旧 span 不重建，新单元只写 transition-delay（见 stream-reveal.js）。
+      streamView.update(answer);
+    } else {
+      body.innerHTML = renderMarkdown(answer);
+      if (state.sending && caret) body.append(caret);
+    }
     if (state.stick) scrollToEnd();
   };
   const schedule = () => {
@@ -7271,20 +7810,28 @@ async function send(text, images = []) {
         ...(state.conversationId
           ? { conversationId: state.conversationId }
           : { chatKind: state.chatKind === "chief" ? "chief" : "worker" }),
-        // 有图才用分段数组；纯文本仍发字符串（老形状，服务端 union 兼容）
+        // 有附件才用分段数组；纯文本仍发字符串（老形状，服务端 union 兼容）
         messages: [
           {
             role: "user",
-            content: images.length
-              ? [
-                  ...(text ? [{ type: "text", text }] : []),
-                  ...images.map((image) => ({
-                    type: "image",
-                    mimeType: image.mimeType,
-                    data: image.data,
-                  })),
-                ]
-              : text,
+            content:
+              images.length || files.length
+                ? [
+                    ...(text ? [{ type: "text", text }] : []),
+                    ...images.map((image) => ({
+                      type: "image",
+                      mimeType: image.mimeType,
+                      data: image.data,
+                    })),
+                    ...files.map((file) => ({
+                      type: "file",
+                      path: file.path,
+                      name: file.name,
+                      ...(file.mimeType ? { mimeType: file.mimeType } : {}),
+                      ...(typeof file.bytes === "number" ? { bytes: file.bytes } : {}),
+                    })),
+                  ]
+                : text,
           },
         ],
       }),
@@ -7296,7 +7843,7 @@ async function send(text, images = []) {
       localStorage.removeItem(KEY_CONV);
       body.remove();
       setSending(false);
-      return send(text, images);
+      return send(text, images, files);
     }
     if (!response.ok || !response.body) {
       body.remove();
@@ -7356,8 +7903,6 @@ async function send(text, images = []) {
             // 这里不再插占位行——两处表头已经是同一件事的第二份说法。
           } else if (event.type === "tool") {
             if (event.status === "start") {
-              // 工具动手前，说过的话先进折叠区（批 32）：正文只留最后一段。
-              // "读过再答"的多段轮次里，第一段话在第一只工具 start 时折走。
               if (answer.trim()) foldSpoken();
               ensureWork().start(event.name, event.label, event.args);
             } else {
@@ -7441,7 +7986,7 @@ async function send(text, images = []) {
         }
       }
     }
-    caret.remove();
+    caret?.remove();
     paint();
     if (!answer.trim() && !noReplyExplained) {
       addError("模型没有返回内容。", { retryable: true });
@@ -7454,7 +7999,7 @@ async function send(text, images = []) {
     }
   } finally {
     setSending(false);
-    caret.remove();
+    caret?.remove();
     endThinkCard();
     clearInterval(thinkTimer);
     if (state.stopRequested) {
@@ -7465,7 +8010,11 @@ async function send(text, images = []) {
       el.thread.append(note);
       if (state.stick) scrollToEnd();
     }
-    if (body.isConnected) body.innerHTML = renderMarkdown(answer);
+    if (body.isConnected) {
+      // 收尾去掉所有 reveal span：正文完整重渲染一次，和 ZCode 结束后切 static 一致。
+      if (streamView) streamView.finish(answer);
+      else body.innerHTML = renderMarkdown(answer);
+    }
     // 收尾：工作过程折成一行「已工作 Ns · M 步」，点开还是刚才那些步骤。
     // 人点了停止 → 标 interrupted（表头写"已中断"），不能画成正常完成。
     // 派活行先 handoff：它不在 open 队列里，finish 不管；没终态帧的说明
@@ -7817,7 +8366,15 @@ async function fetchModelCatalog() {
   return response.json();
 }
 
+/** pill 文字：只留模型名（2026-11-13 用户口径：供应商不必显示，思考档也不再挂小点） */
 function modelLabel(catalog) {
+  const current = catalog && catalog.current;
+  if (!current) return "未配置模型";
+  return current.modelId;
+}
+
+/** 完整标签（供应商 + 模型）：只给悬停 title / 提示用，不进 pill 文字 */
+function modelFullLabel(catalog) {
   const current = catalog && catalog.current;
   if (!current) return "未配置模型";
   const provider = (catalog.providers || []).find((item) => item.id === current.providerId);
@@ -7858,10 +8415,9 @@ function setModelPillLabel(text) {
 function updateModelPill(catalog = state.modelCatalog) {
   if (!el.modelPillLabel) return;
   setModelPillLabel(modelLabel(catalog));
-  syncThinkingPill(catalog);
   if (el.modelPill) {
     el.modelPill.title = catalog && catalog.current
-      ? `当前：${modelLabel(catalog)}（点击切换，下一轮生效）`
+      ? `当前：${modelFullLabel(catalog)} · 思考强度：${THINKING_LABELS[currentThinking()] || "关"}（点击切换，下一轮生效）`
       : "还没有可用的模型";
   }
 }
@@ -8097,23 +8653,30 @@ async function chooseCurrentThinking(level) {
   await setThinkingLevel(level);
 }
 
-/* ── 对话右上角快捷设置（2026-11-07 抽屉改造，替换同日下弹面板）──
- * 右上角图标按钮 → 右侧全高抽屉：首页四行（模型 / 权限档 / 通知 / 全部设置），
- * 控件全在二级页。底层聊天不卸载只挂浮层，滚动位置与输入内容天然保持。
- * 关闭三通道：Esc（输入法豁免）/ X / 点遮罩；关闭动画播完再卸载（照 popTimers 模式）。
- * 模型二级页整体搬入原下弹面板的模型菜单 + 批量加模型，渲染零语义改动。 */
+/* ── 对话右上角快捷设置（2026-11-07 抽屉；2026-11-13 按 B 版重排）──
+ * 右上角图标 → 右侧全高抽屉。2026-11-13 用户口径三条：
+ *   ① 主选模型 / 备选模型两个入口进的是同一页，太绕 → 合成一行「模型」，一页里分两段；
+ *   ② 通知不用单独设，跟随全局 → 抽屉里整条移除，只留一句脚注；
+ *   ③ 权限确实有必要 → 保留一行一页；
+ *   ④ 工作履历 / 记忆 / 例行规则 / 技能四类都改不了 → 只读，合成一页四个分段。
+ * 首页 = 身份 + 模型/权限两个值格 + 四条档案行（条数 + 最近一条）+ 全部设置 + 脚注。
+ * 底层聊天不卸载只挂浮层，滚动位置与输入内容天然保持。
+ * 关闭三通道：Esc（输入法豁免）/ X / 点遮罩；关闭动画播完再卸载（照 popTimers 模式）。 */
 
 const DRAWER_MS = 250;
-let csPage = "home"; // home | persona | model | policy | notify | records | memories | routines | skills
+let csPage = "home"; // home | persona | model | policy | archives
+let csArchiveTab = "records"; // 档案页当前分段：records | memories | routines | skills
 let csTimer = 0;
 let csCatalog = null; // 打开抽屉时现拉的模型目录（同原「每次打开现拉」口径）
 let csPolicy = null;  // 打开抽屉时顺带拉的权限档；失败保持 null（副文本显示 —）
 let csTarget = null;  // 当前对话对应的执事（chief / 某 uuid）；决定「人设」改谁
 let csDetail = null;  // 该执事详情（soul / soulVersion / modelChain）；人设页与备选副文本用
 let csProviders = null; // 供应商全量投影（备选链要 keyEnv；模型目录里没有它）
+let csArchive = null; // { target, memory, routines, skills }：首页条数与档案页共用一份
+let csArchiveJob = null; // { target, promise }：同一目标并行只拉一次
 
-const CS_TIMING_LABEL = { all: "全部", error: "仅出错", attention: "仅待你处理" };
 const CS_POLICY_LABEL = { full: "完全访问", "read-only": "只读", "no-shell": "不跑命令" };
+const CS_APPROVAL_LABEL = { "ask-all": "全部问我", "ask-critical": "只问重要的", none: "全不问" };
 
 function drawerOpen() {
   return Boolean(el.chatSettingsDrawer) && !el.chatSettingsDrawer.hidden &&
@@ -8183,6 +8746,9 @@ async function openDrawerAt(target, page) {
     csTarget = target;
     csPage = page;
     csDetail = null;
+    // 档案数据每次开抽屉现拉：条数可能刚被一轮对话改过，不吃上次的缓存
+    csArchive = null;
+    csArchiveJob = null;
     renderCsPage();
     openDrawer();
     // 权限档 / 人设详情顺带拉；回来若还停在对应页就重渲染补上
@@ -8367,11 +8933,16 @@ function renderCsPage() {
   if (!drawer) return;
   const body = drawer.querySelector(".cs-body");
   const keepScroll = body ? body.scrollTop : 0;
+  // 四个档案页（含花名册「档案」直达传进来的 "records"）统一落到「档案」一页的对应分段，
+  // 页面只有一页、分段记住上次看的是哪一类。
+  if (CS_PROFILE_PAGES[csPage]) {
+    csArchiveTab = csPage;
+    csPage = "archives";
+  }
   if (csPage === "persona") renderCsPersonaPage();
   else if (csPage === "model") renderCsModelPage();
   else if (csPage === "policy") renderCsPolicyPage();
-  else if (csPage === "notify") renderCsNotifyPage();
-  else if (CS_PROFILE_PAGES[csPage]) void renderCsProfilePage(csPage);
+  else if (csPage === "archives") void renderCsArchivesPage();
   else renderCsHome();
   const next = drawer.querySelector(".cs-body");
   if (next) next.scrollTop = csPage === "home" ? keepScroll : 0;
@@ -8455,6 +9026,27 @@ function csIdentityNode(partner) {
   return node;
 }
 
+/** 首页的值格：标签小字 + 值 + 一行副文本（B 版；两块并排，一眼看全「这一位」的两件事） */
+function csTile({ label, value, sub, onClick }) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "cs-tile";
+  const labelNode = document.createElement("span");
+  labelNode.className = "cs-tile-label";
+  labelNode.textContent = label;
+  const valueNode = document.createElement("span");
+  valueNode.className = "cs-tile-value";
+  valueNode.textContent = value;
+  valueNode.title = value;
+  const subNode = document.createElement("span");
+  subNode.className = "cs-tile-sub";
+  subNode.textContent = sub;
+  subNode.title = sub;
+  button.append(labelNode, valueNode, subNode);
+  button.addEventListener("click", onClick);
+  return button;
+}
+
 function renderCsHome() {
   const drawer = el.chatSettingsDrawer;
   if (!drawer) return;
@@ -8463,86 +9055,64 @@ function renderCsHome() {
   body.className = "cs-body";
   body.dataset.cards = ""; // 卡片化排版（群设置共用骨架，不吃这一套）
 
-  const catalog = csCatalog;
-  const current = catalog && catalog.current;
-  const timing = localStorage.getItem(KEY_NOTIFY_TIMING) || "all";
-  const notifyOn = localStorage.getItem(KEY_NOTIFY) === "1";
+  const current = csCatalog && csCatalog.current;
   const partner = state.partners.find((item) => item.id === csTarget) || null;
-  const chain = partner ? partnerModelChain() : [];
+  const chain = csTarget ? partnerModelChain() : [];
+  const archive = csArchive && csArchive.target === csTarget ? csArchive : null;
 
   // 身份块 = 人设入口（点头像/名字整块进去）。它自己就是那一行，
   // 不再另立一条「这个角色 → 人设」——两个入口指同一页，只会让人多点一次。
   // 普通助手会话没有角色可改（人格在服务端），不摆身份块也不摆人设行。
   if (csTarget) body.append(csIdentityNode(partner));
 
-  // 模型卡：主选 + 备选。两者都是同一个角色身上可调的，用户口径是
-  // 「主选模型和备选模型都是在自己已有的这些里调，这俩应该是一样的设置」。
-  const modelCard = csCard("模型");
-  modelCard.append(
-    csRow({
-      icon: "cpu",
-      title: "主选模型",
-      sub: current ? modelLabel(catalog) || current.modelId : "还没有可用模型",
+  // 模型 / 权限 = 两个值格。主选与备选是同一件东西的两段（同一个页面），
+  // 所以首页只留一个「模型」入口，段内的区分交给二级页（2026-11-13 用户口径）。
+  const tiles = document.createElement("div");
+  tiles.className = "cs-tiles";
+  tiles.append(
+    csTile({
+      label: "模型",
+      value: current ? current.modelId : "—",
+      sub: csTarget
+        ? chain.length
+          ? `备选 ${chain.length} 条 · 只在试跑与例行任务换`
+          : "没配备选 · 主对话只有这一条"
+        : "全局模型，所有对话共用",
       onClick: () => {
         csPage = "model";
         renderCsPage();
       },
     }),
-    // 备选链只属于执事：普通助手会话不摆这一行（摆一条点不动的行等于噪声）
-    ...(csTarget
-      ? [
-          csRow({
-            icon: "layers",
-            title: "备选模型",
-            sub: chain.length
-              ? chain.map((item) => item.modelId).join(" → ")
-              : "没配：试跑 / 例行任务失败时不会自动换",
-            onClick: () => {
-              csPage = "model";
-              renderCsPage();
-            },
-          }),
-        ]
-      : []),
-  );
-  body.append(modelCard);
-
-  const agentCard = csCard("助手");
-  agentCard.append(
-    csRow({
-      icon: "shield",
-      title: "权限档",
-      sub: csPolicy && csPolicy.access ? CS_POLICY_LABEL[csPolicy.access] || csPolicy.access : "—",
+    csTile({
+      label: "权限",
+      value: csPolicy && csPolicy.access ? CS_POLICY_LABEL[csPolicy.access] || csPolicy.access : "—",
+      sub:
+        csPolicy && csPolicy.approvalLevel
+          ? `审批 · ${CS_APPROVAL_LABEL[csPolicy.approvalLevel] || csPolicy.approvalLevel}`
+          : "—",
       onClick: () => {
         csPage = "policy";
         renderCsPage();
       },
     }),
-    csRow({
-      icon: "bell",
-      title: "通知",
-      sub: notifyOn ? `开 · ${CS_TIMING_LABEL[timing] || timing}` : "关",
-      onClick: () => {
-        csPage = "notify";
-        renderCsPage();
-      },
-    }),
   );
-  body.append(agentCard);
+  body.append(tiles);
 
-  // 员工档案（2026-11-09）：一个执事的家底一页看全，四个只读页。
-  // 普通助手会话没有角色（csTarget=null），不摆这四行——摆了点进去只有说明，等于噪声
-  // （与「备选模型」「身份块」同口径）。
+  // 员工档案（2026-11-09；2026-11-13 合并成一页四个分段）：四条行显示条数与最近一条，
+  // 点进去落到同一页的对应分段。普通助手会话没有角色（csTarget=null），不摆这组——
+  // 摆了点进去只有说明，等于噪声（与「身份块」同口径）。
   if (csTarget) {
-    const profileCard = csCard("档案");
-    for (const [page, config] of Object.entries(CS_PROFILE_PAGES)) {
+    const profileCard = csCard("档案 · 只读");
+    for (const [key, config] of Object.entries(CS_PROFILE_PAGES)) {
+      const count = archive ? config.count(archive) : null;
       profileCard.append(
         csRow({
           icon: config.icon,
           title: config.title,
-          sub: config.sub,
+          sub: archive ? config.preview(archive) || config.sub : config.sub,
+          value: count == null ? "" : `${count} ${config.unit}`,
           onClick: () => {
-            csPage = page;
+            csPage = key;
             renderCsPage();
           },
         }),
@@ -8551,7 +9121,7 @@ function renderCsHome() {
     body.append(profileCard);
   }
 
-  const allCard = csCard("更多");
+  const allCard = csCard();
   allCard.append(
     csRow({
       icon: "settings",
@@ -8564,19 +9134,30 @@ function renderCsHome() {
     }),
   );
   body.append(allCard);
+
+  // 通知与外观是全局的，抽屉里不再单设（2026-11-13 用户口径）——留一句脚注说明去处
+  const foot = document.createElement("p");
+  foot.className = "cs-note";
+  foot.textContent = "通知与外观跟随全局设置，这里不再重复一遍。";
+  body.append(foot);
+
   drawer.append(body);
+
+  // 条数与「最近一条」首帧还没有：后台拉一次，回来只重画首页（失败就维持静态副文本）
+  if (csTarget && !archive) void csPrimeArchive(csTarget);
 }
 
-/* ── 二级页 · 员工档案（2026-11-09）：一个执事的家底一页看全 ──────
- * 四个**只读**页：工作履历 / 记忆 / 例行规则 / 技能。零新存储，全部复用既有端点 +
- * 本批唯一新端点 GET /api/v1/partners/:id/skills：
+/* ── 二级页 · 员工档案（2026-11-09；2026-11-13 合并成「一页四分段」）──
+ * 用户口径：工作履历 / 记忆 / 例行规则 / 技能四类都改不了 → 只读，但视图要能一页看全。
+ * 所以四个旧页（records / memories / routines / skills）合并成一页四个分段；
+ * 首页四条行仍各自直达对应分段（openPartnerProfile 传的旧页名照旧认，见 renderCsPage）。
+ * 数据三源（零新存储）：
  *   GET /api/v1/agent/memory?scope=partner:<id>&limit=2000 → work 进履历、其余进记忆
  *   GET /api/v1/routines?partnerId=<id>                     → 例行规则
  *   GET /api/v1/partners/:id/skills                        → 技能
  * 刻意只读：编辑仍走人设页三卡（SOUL / 契约 / 目标）与例行任务既有编辑面；
  * 记忆删除 / 整理沿用设置页记忆区，档案页不重复做（避免两处真相）。
- * 总管（chief）记忆在 global，其余在 partner:<id>；普通助手会话没有身份，给说明不摆空数据。
- * 全部复用 csCard / csRow / cs-note / pill-tag 既有类，不动 style.css。
+ * 一次拉全量（首页的条数与「最近一条」也吃这一份），失败只影响本页，不拦抽屉。
  */
 
 /** 档案页的 scope：总管读写 global，执事读写自己的键空间。 */
@@ -8589,69 +9170,19 @@ function csProfileWhen(value) {
   return String(value || "").replace("T", " ").slice(0, 16);
 }
 
-/** 档案页通用行：正文原样（可换行）+ 一行小字（时间 + 徽章）。只读，没有点击行为。 */
-function csProfileRow(content, metaText, badges = []) {
-  const row = document.createElement("div");
-  row.className = "cs-row is-static";
-  row.style.alignItems = "flex-start";
-  const main = document.createElement("span");
-  main.className = "cs-row-main";
-  const text = document.createElement("span");
-  text.className = "cs-row-title";
-  text.style.whiteSpace = "pre-wrap";
-  text.style.overflowWrap = "anywhere";
-  text.textContent = String(content || "");
-  main.append(text);
-  if (metaText || badges.length) {
-    const meta = document.createElement("span");
-    meta.className = "cs-row-sub";
-    meta.style.whiteSpace = "normal";
-    meta.style.overflow = "visible";
-    meta.style.textOverflow = "clip";
-    meta.style.display = "flex";
-    meta.style.flexWrap = "wrap";
-    meta.style.alignItems = "center";
-    meta.style.gap = "6px";
-    meta.style.marginTop = "4px";
-    if (metaText) {
-      const when = document.createElement("span");
-      when.textContent = metaText;
-      meta.append(when);
-    }
-    for (const badge of badges) {
-      if (!badge || !badge.text) continue;
-      const chip = document.createElement("span");
-      chip.className = `pill-tag${badge.tone ? ` ${badge.tone}` : ""}`;
-      chip.style.marginLeft = "0";
-      chip.textContent = badge.text;
-      meta.append(chip);
-    }
-    main.append(meta);
-  }
-  row.append(main);
-  return row;
-}
-
-/** 分组卡：组头中文标签 + 条数徽章，下面逐行 append。 */
-function csProfileGroup(label, count) {
-  const card = csCard();
-  const head = document.createElement("div");
-  head.className = "cs-card-label";
-  head.textContent = label;
-  const chip = document.createElement("span");
-  chip.className = "pill-tag";
-  chip.textContent = String(count);
-  head.append(chip);
-  card.append(head);
-  return card;
-}
-
-/** 空态话术：与 persona 页同一套 cs-note。 */
+/** 档案页通用的空态话术（与 persona 页同一套 cs-note）。 */
 function csProfileEmpty(body, text) {
   const note = document.createElement("p");
   note.className = "cs-note";
   note.textContent = text;
   body.append(note);
+}
+
+/** 一行字截到 n 个字，给首页「最近一条」用（合并空白，多了加省略号）。 */
+function csClip(text, n = 26) {
+  const one = String(text || "").replace(/\s+/g, " ").trim();
+  if (!one) return "";
+  return one.length > n ? `${one.slice(0, n)}…` : one;
 }
 
 /** 记忆 / 履历同源：一次拉全量（2000 是服务端上限），前端按 kind 分拣。 */
@@ -8698,178 +9229,341 @@ function csTriggerText(trigger) {
   return type || JSON.stringify(trigger ?? {});
 }
 
-function csPaintRecords(body, payload, emptyText) {
-  if (payload.disabled) {
-    csProfileEmpty(body, "记忆未启用（服务端 MEMORY_ENABLED=false），看不到工作履历。");
-    return;
-  }
-  const rows = payload.items
-    .filter((item) => item && item.kind === "work")
-    .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))
-    .map((item) =>
-      csProfileRow(item.content, csProfileWhen(item.createdAt), [
-        { text: String(item.source || "work") },
-      ]),
-    );
-  if (!rows.length) {
-    csProfileEmpty(body, emptyText);
-    return;
-  }
-  const card = csProfileGroup("工作履历", rows.length);
-  for (const row of rows) card.append(row);
-  body.append(card);
+/** 三处来源一次拉全：记忆一次（履历与记忆同源）、例行、技能。 */
+async function csLoadArchive(target) {
+  const [memory, routines, skills] = await Promise.all([
+    csLoadProfileMemory(target),
+    csLoadProfileRoutines(target),
+    csLoadProfileSkills(target),
+  ]);
+  return { target, memory, routines, skills };
 }
 
-function csPaintMemories(body, payload, emptyText) {
-  if (payload.disabled) {
-    csProfileEmpty(body, "记忆未启用（服务端 MEMORY_ENABLED=false）。");
-    return;
-  }
-  const items = payload.items.filter((item) => item && item.kind !== "work");
-  if (!items.length) {
-    csProfileEmpty(body, emptyText);
-    return;
-  }
-  const groups = new Map();
-  for (const item of items) {
-    const kind = String(item.kind || "fact");
-    if (!groups.has(kind)) groups.set(kind, []);
-    groups.get(kind).push(item);
-  }
-  // 与设置页记忆列表同一套分组顺序；认不出的 kind 原样排在后面，不谎报成某一类
-  const order = [
-    ...MEMORY_KIND_ORDER.filter((kind) => groups.has(kind)),
-    ...[...groups.keys()].filter((kind) => !MEMORY_KIND_ORDER.includes(kind)),
-  ];
-  for (const kind of order) {
-    const rows = groups.get(kind);
-    const card = csProfileGroup(MEMORY_KIND_LABEL[kind] || kind, rows.length);
-    for (const item of rows) {
-      card.append(
-        csProfileRow(item.content, csProfileWhen(item.createdAt), [
-          { text: String(item.source || "—") },
-        ]),
-      );
-    }
-    body.append(card);
-  }
+/** 同一目标并行只拉一次；首页条数与档案页内容共用这一份。 */
+function csArchiveData(target) {
+  if (csArchive && csArchive.target === target) return Promise.resolve(csArchive);
+  if (csArchiveJob && csArchiveJob.target === target) return csArchiveJob.promise;
+  const promise = csLoadArchive(target).then((data) => {
+    csArchive = data;
+    csArchiveJob = null;
+    return data;
+  });
+  // 失败也要把 job 放掉，否则下一次打开会永远等一个已经失败的 promise
+  promise.catch(() => {
+    csArchiveJob = null;
+  });
+  csArchiveJob = { target, promise };
+  return promise;
 }
 
-function csPaintRoutines(body, routines, emptyText) {
-  if (!routines.length) {
-    csProfileEmpty(body, emptyText);
-    return;
+/** 首页后台预取：回来只重画首页，别把用户已经点开的二级页盖掉。 */
+async function csPrimeArchive(target) {
+  try {
+    await csArchiveData(target);
+  } catch {
+    return; // 拉不到就维持静态副文本，不拦抽屉
   }
-  const card = csProfileGroup("例行规则", routines.length);
-  for (const routine of routines) {
-    const triggers = Array.isArray(routine.triggers) ? routine.triggers : [];
-    const lines = [String(routine.name || "（未命名）"), ...triggers.map(csTriggerText)];
-    card.append(
-      csProfileRow(lines.join("\n"), "", [
-        { text: routine.enabled ? "启用" : "停用", tone: routine.enabled ? "ok" : "" },
-        { text: String(routine.sessionMode || "—") },
-      ]),
-    );
-  }
-  body.append(card);
+  if (drawerOpen() && csPage === "home" && csTarget === target) renderCsHome();
 }
 
-function csPaintSkills(body, skills, emptyText) {
-  if (!skills.length) {
-    csProfileEmpty(body, emptyText);
-    return;
-  }
-  const card = csProfileGroup("技能", skills.length);
-  for (const skill of skills) {
-    const content = [String(skill.name || ""), String(skill.summary || "")]
-      .filter(Boolean)
-      .join("\n");
-    card.append(csProfileRow(content, csProfileWhen(skill.updatedAt)));
-  }
-  body.append(card);
+/** 档案条目按时间倒序（取不到时间的排最后）。 */
+function csByNewest(items) {
+  return (items || [])
+    .filter(Boolean)
+    .slice()
+    .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
 }
 
+function csArchiveWork(data) {
+  if (data.memory.disabled) return [];
+  return csByNewest(data.memory.items.filter((item) => item && item.kind === "work"));
+}
+
+function csArchiveMemories(data) {
+  if (data.memory.disabled) return [];
+  return csByNewest(data.memory.items.filter((item) => item && item.kind !== "work"));
+}
+
+/** 四类档案的分段配置：抽屉首页的四条行与档案页的四个分段共用这一张表。 */
 const CS_PROFILE_PAGES = {
   records: {
     title: "工作履历",
+    tab: "履历",
     icon: "history",
+    unit: "条",
     sub: "结算过的派单台账",
     empty: "还没有结算过的单子——派出去的单完工后会自动记在这里。",
-    load: csLoadProfileMemory,
-    paint: csPaintRecords,
+    count: (data) => (data.memory.disabled ? null : csArchiveWork(data).length),
+    preview: (data) => {
+      if (data.memory.disabled) return "记忆未启用";
+      const latest = csArchiveWork(data)[0];
+      if (!latest) return "还没有";
+      const day = csProfileWhen(latest.createdAt).slice(5, 10);
+      return `最近：${day ? `${day} ` : ""}${csClip(latest.content, 18)}`;
+    },
   },
   memories: {
     title: "记忆",
+    tab: "记忆",
     icon: "notes",
+    unit: "条",
     sub: "偏好 / 事实 / 经历 / 实体",
     empty: "还没有记忆。你教它的话（“记住…”）会落在这里。",
-    load: csLoadProfileMemory,
-    paint: csPaintMemories,
+    count: (data) => (data.memory.disabled ? null : csArchiveMemories(data).length),
+    preview: (data) => {
+      if (data.memory.disabled) return "记忆未启用";
+      const latest = csArchiveMemories(data)[0];
+      if (!latest) return "还没有";
+      const kind = MEMORY_KIND_LABEL[String(latest.kind || "fact")] || String(latest.kind || "fact");
+      return `最近：${kind} · ${csClip(latest.content, 16)}`;
+    },
   },
   routines: {
     title: "例行规则",
+    tab: "规则",
     icon: "repeat",
+    unit: "条",
     sub: "定时 / 事件触发的自主轮",
     empty: "还没有例行规则。",
-    load: csLoadProfileRoutines,
-    paint: csPaintRoutines,
+    count: (data) => data.routines.length,
+    preview: (data) => {
+      const first = data.routines[0];
+      if (!first) return "还没有";
+      const name = String(first.name || "（未命名）");
+      return first.enabled === false ? `${name} · 已停用` : name;
+    },
   },
   skills: {
     title: "技能",
+    tab: "技能",
     icon: "book",
+    unit: "个",
     sub: "家目录里的技能手册",
     empty: "还没有技能文件。",
-    load: csLoadProfileSkills,
-    paint: csPaintSkills,
+    count: (data) => data.skills.length,
+    preview: (data) => {
+      const latest = data.skills
+        .slice()
+        .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))[0];
+      return latest ? `最近改：${String(latest.name || "")}` : "还没有";
+    },
   },
 };
 
-/** 档案四页共用骨架：返回 / 标题 / 无身份说明 / 读取中 / 失败 / 空态 / 内容。 */
-async function renderCsProfilePage(page) {
-  const config = CS_PROFILE_PAGES[page];
+/** 一条只读档案：日期栏（可选）+ 正文 + 一行小字 + 右端值（可选）。 */
+function csArchRow({ date, dot, title, meta, tag, right }) {
+  const row = document.createElement("div");
+  row.className = "cs-arch-row";
+  if (date) {
+    const dateNode = document.createElement("span");
+    dateNode.className = "cs-arch-date";
+    dateNode.textContent = date;
+    row.append(dateNode);
+  }
+  if (dot) {
+    const dotNode = document.createElement("span");
+    dotNode.className = `cs-arch-dot${dot === "off" ? " off" : ""}`;
+    row.append(dotNode);
+  }
+  const main = document.createElement("div");
+  main.className = "cs-arch-main";
+  const text = document.createElement("span");
+  text.className = "cs-arch-text";
+  text.textContent = String(title || "");
+  main.append(text);
+  if (tag || meta) {
+    const metaRow = document.createElement("span");
+    metaRow.className = "cs-arch-meta";
+    if (tag) {
+      const chip = document.createElement("span");
+      chip.className = "pill-tag";
+      chip.textContent = tag;
+      metaRow.append(chip);
+    }
+    if (meta) {
+      const node = document.createElement("span");
+      node.textContent = meta;
+      metaRow.append(node);
+    }
+    main.append(metaRow);
+  }
+  row.append(main);
+  if (right) {
+    const rightNode = document.createElement("span");
+    rightNode.className = "cs-arch-right";
+    rightNode.textContent = right;
+    row.append(rightNode);
+  }
+  return row;
+}
+
+function csPaintArchRecords(panel, data, config) {
+  if (data.memory.disabled) {
+    csProfileEmpty(panel, "记忆未启用（服务端 MEMORY_ENABLED=false），看不到工作履历。");
+    return;
+  }
+  const items = csArchiveWork(data);
+  if (!items.length) {
+    csProfileEmpty(panel, config.empty);
+    return;
+  }
+  for (const item of items) {
+    const when = csProfileWhen(item.createdAt);
+    const source = String(item.source || "");
+    panel.append(
+      csArchRow({
+        date: when.slice(5, 10),
+        title: item.content,
+        meta: [when.slice(11), source && source !== "work" ? source : ""].filter(Boolean).join(" · "),
+      }),
+    );
+  }
+}
+
+function csPaintArchMemories(panel, data, config) {
+  if (data.memory.disabled) {
+    csProfileEmpty(panel, "记忆未启用（服务端 MEMORY_ENABLED=false）。");
+    return;
+  }
+  const items = csArchiveMemories(data);
+  if (!items.length) {
+    csProfileEmpty(panel, config.empty);
+    return;
+  }
+  for (const item of items) {
+    const kind = String(item.kind || "fact");
+    const when = csProfileWhen(item.createdAt).slice(5, 10);
+    panel.append(
+      csArchRow({
+        title: item.content,
+        tag: MEMORY_KIND_LABEL[kind] || kind,
+        meta: [String(item.source || ""), when].filter(Boolean).join(" · "),
+      }),
+    );
+  }
+}
+
+function csPaintArchRoutines(panel, data, config) {
+  if (!data.routines.length) {
+    csProfileEmpty(panel, config.empty);
+    return;
+  }
+  for (const routine of data.routines) {
+    const triggers = Array.isArray(routine.triggers) ? routine.triggers : [];
+    panel.append(
+      csArchRow({
+        dot: routine.enabled ? "on" : "off",
+        title: String(routine.name || "（未命名）"),
+        meta: triggers.map(csTriggerText).join(" / ") || "无触发条件",
+        right: routine.enabled === false ? "停用" : routine.sessionMode === "fresh" ? "新会话" : "同会话",
+      }),
+    );
+  }
+}
+
+function csPaintArchSkills(panel, data, config) {
+  if (!data.skills.length) {
+    csProfileEmpty(panel, config.empty);
+    return;
+  }
+  const skills = data.skills
+    .slice()
+    .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
+  for (const skill of skills) {
+    panel.append(
+      csArchRow({
+        title: String(skill.name || ""),
+        meta: String(skill.summary || ""),
+        right: csProfileWhen(skill.updatedAt).slice(5, 10),
+      }),
+    );
+  }
+}
+
+/**
+ * 档案一页四分段（B 版）：履历 / 记忆 / 规则 / 技能，全部只读。
+ * 分段条上的条数来自同一份数据；首次进入先「读取中」，回来重画整页。
+ */
+async function renderCsArchivesPage() {
   const drawer = el.chatSettingsDrawer;
-  if (!drawer || !config) return;
-  const target = csTarget;
-  drawer.replaceChildren(csHead(config.title, { back: true }));
+  if (!drawer) return;
+  drawer.replaceChildren(csHead("档案", { back: true }));
   const body = document.createElement("div");
   body.className = "cs-body";
-  body.dataset.cards = "";
+  body.dataset.cards = ""; // 卡片化排版（群设置共用骨架，不吃这一套）
   drawer.append(body);
 
-  const note = (text) => {
-    body.replaceChildren();
-    const p = document.createElement("p");
-    p.className = "cs-note";
-    p.textContent = text;
-    body.append(p);
-  };
-
+  const target = csTarget;
   if (!target) {
-    note("这条是普通助手会话，没有可看的员工档案。打开某个执事的会话，或点花名册里的「档案」再看。");
+    csProfileEmpty(
+      body,
+      "这条是普通助手会话，没有可看的员工档案。打开某个执事的会话，或点花名册里的「档案」再看。",
+    );
     return;
   }
   // 花名册直达时目标是显式给的，未必等于当前会话身份；把「这是谁的档案」写清楚，
   // 免得出现「改了别人却以为改的是这个助手」那种谎报（csResolveTarget 注释里的老坑）。
   const partner = state.partners.find((item) => item.id === target) || null;
+  const name = String(partner?.name || "").trim() || (target === "chief" ? "总管" : target);
   const who = document.createElement("p");
   who.className = "cs-note cs-note-top";
-  who.textContent = `档案：${String(partner?.name || "").trim() || (target === "chief" ? "总管" : target)}`;
-  const loading = document.createElement("p");
-  loading.className = "cs-note";
-  loading.textContent = "读取中…";
-  body.append(who, loading);
+  who.textContent = `${name} · 只读。履历是结算过的单子，记忆是它自己攒的；规则在例行任务里改，技能是家目录里的文件。`;
+  body.append(who);
 
-  let payload;
-  try {
-    payload = await config.load(target);
-  } catch (error) {
-    if (error.message !== "forbidden") note(`读取失败：${error.message}`);
+  const data = csArchive && csArchive.target === target ? csArchive : null;
+  const tabs = document.createElement("div");
+  tabs.className = "cs-arch-tabs";
+  tabs.setAttribute("role", "tablist");
+  tabs.setAttribute("aria-label", "档案分段");
+  for (const [key, config] of Object.entries(CS_PROFILE_PAGES)) {
+    const count = data ? config.count(data) : null;
+    const tab = document.createElement("button");
+    tab.type = "button";
+    tab.className = "cs-arch-tab";
+    tab.dataset.tab = key;
+    tab.setAttribute("role", "tab");
+    tab.setAttribute("aria-selected", String(key === csArchiveTab));
+    tab.append(document.createTextNode(config.tab));
+    const num = document.createElement("em");
+    num.textContent = count == null ? "—" : String(count);
+    tab.append(num);
+    tab.addEventListener("click", () => {
+      if (csArchiveTab === key) return;
+      csArchiveTab = key;
+      void renderCsArchivesPage();
+    });
+    tabs.append(tab);
+  }
+  body.append(tabs);
+
+  const panel = document.createElement("div");
+  panel.className = "cs-arch-panel";
+  panel.setAttribute("role", "tabpanel");
+  body.append(panel);
+
+  if (!data) {
+    csProfileEmpty(panel, "读取中…");
+    try {
+      await csArchiveData(target);
+    } catch (error) {
+      if (error.message !== "forbidden") csProfileEmpty(panel, `读取失败：${error.message}`);
+      return;
+    }
+    // 晚到的响应不盖掉用户已经切走的页（同 refreshCsDetail 口径）
+    if (!drawerOpen() || csPage !== "archives" || csTarget !== target) return;
+    void renderCsArchivesPage();
     return;
   }
-  // 晚到的响应不盖掉用户已经切走的页（同 refreshCsDetail 口径）
-  if (!drawerOpen() || csPage !== page || csTarget !== target) return;
-  loading.remove();
-  config.paint(body, payload, config.empty);
+
+  const config = CS_PROFILE_PAGES[csArchiveTab] || CS_PROFILE_PAGES.records;
+  const paint =
+    {
+      records: csPaintArchRecords,
+      memories: csPaintArchMemories,
+      routines: csPaintArchRoutines,
+      skills: csPaintArchSkills,
+    }[csArchiveTab] || csPaintArchRecords;
+  paint(panel, data, config);
 }
 
 /* ── 二级页 · 人设：头像 + 名字 + 正文，一次保存 ──────────────
@@ -9781,13 +10475,15 @@ function csFallbackCard(providers) {
   return card;
 }
 
-/* ── 二级页 · 权限档：三档分段 + 审批三档 + 审批入口 ──
+/* ── 二级页 · 权限（B 版）：三档授权竖排成可读的选项行 + 审批三档分段 ──
    轻量重实现，不复用 loadPolicy（那是 getElementById 硬编码 #policy-switch，
-   与全屏设置页双绑会打架）；GET /agent/policy 读档、POST 回写（2026-11-07 定论）。 */
+   与全屏设置页双绑会打架）；GET /agent/policy 读档、POST 回写（2026-11-07 定论）。
+   2026-11-13：授权三档从「分段按钮」改成「一行一档 + 一句解释」——权限是要看懂才敢选的，
+   三个词并排时「只读」和「不跑命令」的区别得靠猜。审批三档仍用分段（三个词够直白）。 */
 function renderCsPolicyPage() {
   const drawer = el.chatSettingsDrawer;
   if (!drawer) return;
-  drawer.replaceChildren(csHead("权限档", { back: true }));
+  drawer.replaceChildren(csHead("权限", { back: true }));
   const body = document.createElement("div");
   body.className = "cs-body";
   body.dataset.cards = ""; // 卡片化排版（群设置共用骨架，不吃这一套）
@@ -9795,12 +10491,30 @@ function renderCsPolicyPage() {
     <div class="cs-card">
       <div class="cs-field">
         <span class="cs-field-label">它能替你动到什么程度</span>
-        <div class="segmented slide" role="radiogroup" aria-label="权限" id="cs-policy-switch">
-          <button type="button" data-policy="full" aria-checked="false">完全访问</button>
-          <button type="button" data-policy="read-only" aria-checked="false">只读</button>
-          <button type="button" data-policy="no-shell" aria-checked="false">不跑命令</button>
+        <div class="cs-policy-list" role="radiogroup" aria-label="权限" id="cs-policy-switch">
+          <button type="button" class="cs-opt" data-policy="full" aria-checked="false">
+            <span class="cs-opt-main">
+              <span class="cs-opt-title">完全访问</span>
+              <span class="cs-opt-sub">能改文件、能跑命令</span>
+            </span>
+            <span class="cs-opt-dot" aria-hidden="true"></span>
+          </button>
+          <button type="button" class="cs-opt" data-policy="read-only" aria-checked="false">
+            <span class="cs-opt-main">
+              <span class="cs-opt-title">只读</span>
+              <span class="cs-opt-sub">能看，不改，不跑</span>
+            </span>
+            <span class="cs-opt-dot" aria-hidden="true"></span>
+          </button>
+          <button type="button" class="cs-opt" data-policy="no-shell" aria-checked="false">
+            <span class="cs-opt-main">
+              <span class="cs-opt-title">不跑命令</span>
+              <span class="cs-opt-sub">改文件可以，命令一律不跑</span>
+            </span>
+            <span class="cs-opt-dot" aria-hidden="true"></span>
+          </button>
         </div>
-        <span class="cs-hint">完全访问 = 能改文件、能跑命令。改完立刻生效。</span>
+        <span class="cs-hint">改完立刻生效，下一轮起按这一档走。</span>
       </div>
       <div class="cs-field">
         <span class="cs-field-label">动手之前问不问我</span>
@@ -9814,20 +10528,17 @@ function renderCsPolicyPage() {
     </div>`;
   drawer.append(body);
 
-  // 三档分段：mountSegmented/syncSegmented 复用，事件只绑抽屉这一份
+  // 授权三档：选项行自己管选中态（radio），事件只绑抽屉这一份
   const box = body.querySelector("#cs-policy-switch");
   if (box) {
-    mountSegmented(box);
     for (const button of box.querySelectorAll("[data-policy]")) {
       button.setAttribute("aria-checked", String(button.dataset.policy === csPolicy?.access));
     }
-    syncSegmented(box);
     for (const button of box.querySelectorAll("[data-policy]")) {
       button.addEventListener("click", async () => {
         for (const other of box.querySelectorAll("[data-policy]")) {
           other.setAttribute("aria-checked", String(other === button));
         }
-        syncSegmented(box);
         if (csPolicy) csPolicy.access = button.dataset.policy;
         try {
           await request("/api/v1/agent/policy", {
@@ -9836,14 +10547,14 @@ function renderCsPolicyPage() {
           });
         } catch {
           // 写失败：回读服务端真值，撤销乐观切档，避免用户误以为已保存
-          toast("权限档保存失败，请重试");
+          toast("权限保存失败，请重试");
           void refreshCsPolicy();
         }
       });
     }
   }
 
-  // 审批三档（2026-11-08 扫尾批 10-C）：与「权限档」同源 /policy，抽屉里只改确认轴
+  // 审批三档（2026-11-08 扫尾批 10-C）：与「权限」同源 /policy，抽屉里只改确认轴
   const approvalBox = body.querySelector("#cs-policy-approval-level");
   if (approvalBox) {
     mountSegmented(approvalBox);
@@ -9872,81 +10583,6 @@ function renderCsPolicyPage() {
         }
       });
     }
-  }
-}
-
-/* ── 二级页 · 通知：主开关（KEY_NOTIFY，含权限申请）+ 三时机过滤 ──
-   三时机是纯前端 localStorage 过滤：all 放行全部 / error 放行出错+待处理 /
-   attention 只放行待你处理；SSE 帧的 kind 已经够用，不加端点。 */
-function renderCsNotifyPage() {
-  const drawer = el.chatSettingsDrawer;
-  if (!drawer) return;
-  drawer.replaceChildren(csHead("通知", { back: true }));
-  const body = document.createElement("div");
-  body.className = "cs-body";
-  body.dataset.cards = ""; // 卡片化排版（群设置共用骨架，不吃这一套）
-  const notifyOn = localStorage.getItem(KEY_NOTIFY) === "1";
-  const timing = localStorage.getItem(KEY_NOTIFY_TIMING) || "all";
-  const timingRow = (key, sub) => `
-        <button class="cs-row" type="button" data-timing="${key}" role="radio" aria-checked="${key === timing}">
-          <span class="cs-row-main">
-            <span class="cs-row-title">${CS_TIMING_LABEL[key]}</span>
-            <span class="cs-row-sub">${sub}</span>
-          </span>
-          <span class="cs-row-chevron" data-check ${key === timing ? "" : "hidden"}>✓</span>
-        </button>`;
-  body.innerHTML = `
-    <div class="cs-card">
-      <div class="cs-row is-static">
-        <span class="cs-row-main">
-          <span class="cs-row-title">桌面通知</span>
-          <span class="cs-row-sub">回复完成 / 出错 / 待你处理时提醒；窗口正看着这个会话就不打扰</span>
-        </span>
-        ${switchMarkup(notifyOn, { label: "桌面通知", attrs: 'id="cs-notify-switch"' })}
-      </div>
-    </div>
-    <div class="cs-card">
-      <div class="cs-card-label">提醒哪些时机</div>
-      <div id="cs-notify-timing" role="radiogroup" aria-label="提醒时机">
-        ${timingRow("all", "完成、出错、待你处理都提醒")}
-        ${timingRow("error", "出错与待你处理时提醒，完成不打扰")}
-        ${timingRow("attention", "只有等你处理时才提醒")}
-      </div>
-    </div>`;
-  drawer.append(body);
-
-  const notifySwitch = body.querySelector("#cs-notify-switch");
-  // 主开关口径抄全屏设置页（设置-服务分区）：开的时候才请求系统权限；被拒就退回关闭
-  notifySwitch?.addEventListener("click", async () => {
-    const want = notifySwitch.getAttribute("aria-checked") !== "true";
-    if (!want) {
-      localStorage.setItem(KEY_NOTIFY, "0");
-      notifySwitch.setAttribute("aria-checked", "false");
-      return;
-    }
-    if (!("Notification" in window)) {
-      toast("这个环境不支持通知");
-      return;
-    }
-    if (Notification.permission !== "granted") {
-      const permission = await Notification.requestPermission();
-      if (permission !== "granted") {
-        toast("通知权限被拒了，去系统设置里开");
-        return;
-      }
-    }
-    localStorage.setItem(KEY_NOTIFY, "1");
-    notifySwitch.setAttribute("aria-checked", "true");
-  });
-
-  for (const row of body.querySelectorAll("[data-timing]")) {
-    row.addEventListener("click", () => {
-      localStorage.setItem(KEY_NOTIFY_TIMING, row.dataset.timing);
-      for (const other of body.querySelectorAll("[data-timing]")) {
-        other.setAttribute("aria-checked", String(other === row));
-        other.querySelector("[data-check]").hidden = other !== row;
-      }
-    });
   }
 }
 
@@ -9982,8 +10618,16 @@ async function fetchProjectSwitchData() {
       name: project.name || project.id,
       rootPath: project.rootPath || "",
       missing: project.exists === false,
+      // 2026-11-13 项目容器：一个项目多个文件夹，侧栏徽标与浮卡都要用。
+      roots: (Array.isArray(project.roots) ? project.roots : []).map((root) => ({
+        id: root.id,
+        label: root.label || "",
+        path: root.path || "",
+        role: root.role === "primary" ? "primary" : "extra",
+        exists: root.exists !== false,
+      })),
     }));
-  return { workspace, items };
+  return { workspace, currentProjectId: data.currentProjectId || null, items };
 }
 
 function applyProjectData(data) {
@@ -9992,6 +10636,7 @@ function applyProjectData(data) {
   switcher.subCount = data.items.length;
   // 内联列表要行内容：workspace + items 一起记下，syncProjectPill 直接渲染
   switcher.items = data.items;
+  switcher.currentProjectId = data.currentProjectId || null;
   switcher.unavailable = false;
   syncProjectPill();
 }
@@ -10006,6 +10651,8 @@ function applyProjectData(data) {
 function syncProjectRows(items) {
   const box = el.projList;
   if (!box) return;
+  // 列表要重建，挂在 body 上的文件夹浮卡先收掉（它不属于新列表）
+  closeProjectFlyout();
   box.replaceChildren();
   const switcher = state.switcher;
   const hasWorkspace = Boolean(switcher.workspace);
@@ -10039,66 +10686,203 @@ function syncProjectRows(items) {
     return;
   }
 
-  const main = document.createElement("div");
-  main.className = "side-item proj-row is-main";
-  main.title = switcher.workspace.rootPath || "";
-  main.append(projectIcon("main"));
-  const mainName = document.createElement("span");
-  mainName.className = "side-item-label";
-  mainName.textContent = baseNameOf(switcher.workspace.rootPath) || "工作区";
-  main.append(mainName);
-  // 只标「默认」：它和下面项目是平级目录，不是上级
-  const mainTag = document.createElement("span");
-  mainTag.className = "proj-tag";
-  mainTag.textContent = "默认";
-  main.append(mainTag);
-  const mainLabel = baseNameOf(switcher.workspace.rootPath) || "工作区";
-  main.append(
-    projActionButton("browse", "浏览文件", "在界面里看这个目录的文件", () =>
-      openFileBrowser(mainLabel, "", mainLabel),
-    ),
-    projActionButton("explorer", "在资源管理器中打开", "在系统的文件资源管理器里打开这个目录", () =>
-      openExplorerInOs(""),
-    ),
-  );
-  box.append(main);
+  // 2026-11-13：工作区根不再当「项目」分区里的一行。它只服务杂事态——没有名字、
+  // 不能加文件夹、不参与派活，语义上不是项目；位置在 设置 → 项目 的第一块。
 
+  const currentId = String(switcher.currentProjectId || "");
   for (const project of items || []) {
-    const row = document.createElement("div");
-    row.className = "side-item proj-row is-sub";
-    row.title = project.rootPath || project.name;
-    row.append(projectIcon("sub"));
-    const name = document.createElement("span");
-    name.className = "side-item-label";
-    name.textContent = project.name;
-    row.append(name);
-    if (project.missing) {
-      const tag = document.createElement("span");
-      tag.className = "proj-tag is-warn";
-      tag.textContent = "目录不在了";
-      row.append(tag);
-    } else {
-      row.append(
-        projActionButton("browse", "浏览文件", `在界面里看「${project.name}」的文件`, () =>
-          openFileBrowser(project.name, "", project.name, project.id),
-        ),
-        projActionButton("explorer", "在资源管理器中打开", `在系统的文件资源管理器里打开「${project.name}」`, () =>
-          openExplorerInOs(project.id),
-        ),
-      );
-    }
-    box.append(row);
+    box.append(projectRowNode(project, project.id === currentId));
   }
 
   if (!items || !items.length) {
     const empty = document.createElement("div");
     empty.className = "roster-empty";
-    empty.textContent = "还没有项目。用上面的 ＋ 添加一个。";
+    empty.textContent = "还没有项目。点右上角的 ＋ 建一个。";
     box.append(empty);
   }
 
   // 层级说明（2026-11-08 起不再常驻）：解释挪到「项目」分区头的 data-tip，
   // 侧栏不再有常驻小字（2026-11-06 曾压成一行小字，仍天天占位）。
+}
+
+/** 侧栏一行项目（2026-11-13 项目容器）：点行 = 选中（决定下一个新对话落在哪），
+ *  ▾ 展开文件夹清单，＋ 直接在这个项目里新开。行内动作一律是图标按钮。 */
+function projectRowNode(project, current) {
+  const row = document.createElement("div");
+  row.className = "side-item proj-row is-project" + (current ? " is-current" : "");
+  row.dataset.projectId = project.id;
+  row.setAttribute("role", "button");
+  row.tabIndex = 0;
+  row.setAttribute("aria-current", current ? "true" : "false");
+  row.title = project.rootPath || project.name;
+  row.append(projectIcon("sub"));
+
+  const name = document.createElement("span");
+  name.className = "side-item-label";
+  name.textContent = project.name;
+  row.append(name);
+
+  if (project.missing) {
+    const tag = document.createElement("span");
+    tag.className = "proj-tag is-warn";
+    tag.textContent = "丢失";
+    row.append(tag);
+  } else {
+    const count = document.createElement("span");
+    count.className = "proj-count";
+    count.textContent = String(project.roots.length || 1);
+    count.title = `${project.roots.length || 1} 个文件夹`;
+    row.append(count);
+  }
+
+  // 文件夹清单先备好（挂 body，见 toggleProjectFlyout 的说明）
+  const fly = project.roots?.length ? projectFlyout(project) : null;
+
+  const caret = projActionButton("caret", "文件夹清单", "列出这个项目的全部文件夹", () => {
+    if (!fly) return;
+    toggleProjectFlyout(row, caret, fly);
+  });
+  caret.setAttribute("aria-expanded", "false");
+  row.append(
+    caret,
+    projActionButton("plus", "新开对话", `在「${project.name}」里新开一个对话`, () =>
+      void newChatInProject(project.id),
+    ),
+  );
+
+  const select = () => void selectProject(project.id);
+  row.addEventListener("click", (event) => {
+    if (event.target.closest(".proj-act")) return;
+    select();
+  });
+  row.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    if (event.target !== row) return;
+    event.preventDefault();
+    select();
+  });
+  return row;
+}
+
+/**
+ * 文件夹清单浮卡（2026-11-13）。
+ *
+ * 挂 document.body + position:fixed：侧栏每个分区都被 `.side-sec-clip`
+ * 的 overflow:hidden 裁着（那是折叠动画必需的），浮卡留在行内会被整块裁掉。
+ * 点外面 / Esc / 滚动 / 窗口尺寸变化都关，同一时刻只开一张。
+ */
+let projectFlyoutState = null;
+
+function closeProjectFlyout() {
+  const open = projectFlyoutState;
+  if (!open) return;
+  projectFlyoutState = null;
+  open.node.remove();
+  open.row.classList.remove("is-open");
+  open.caret.setAttribute("aria-expanded", "false");
+  document.removeEventListener("pointerdown", open.onDown, true);
+  document.removeEventListener("keydown", open.onKey, true);
+  window.removeEventListener("scroll", closeProjectFlyout, true);
+  window.removeEventListener("resize", closeProjectFlyout);
+}
+
+function toggleProjectFlyout(row, caret, node) {
+  if (projectFlyoutState?.row === row) {
+    closeProjectFlyout();
+    return;
+  }
+  closeProjectFlyout();
+  document.body.append(node);
+  const rect = row.getBoundingClientRect();
+  node.style.left = `${Math.round(Math.max(8, rect.left))}px`;
+  node.style.top = `${Math.round(rect.bottom + 6)}px`;
+  node.style.width = `${Math.round(Math.max(300, rect.width))}px`;
+  row.classList.add("is-open");
+  caret.setAttribute("aria-expanded", "true");
+  const onDown = (event) => {
+    if (!node.contains(event.target)) closeProjectFlyout();
+  };
+  const onKey = (event) => {
+    if (event.key === "Escape") closeProjectFlyout();
+  };
+  document.addEventListener("pointerdown", onDown, true);
+  document.addEventListener("keydown", onKey, true);
+  window.addEventListener("scroll", closeProjectFlyout, true);
+  window.addEventListener("resize", closeProjectFlyout);
+  projectFlyoutState = { row, caret, node, onDown, onKey };
+}
+
+/** 文件夹清单浮卡：每行「主/附 · 名字 · 路径」，右侧两个按钮直达浏览 / 资源管理器。 */
+function projectFlyout(project) {
+  const fly = document.createElement("div");
+  fly.className = "proj-flyout";
+  fly.addEventListener("click", (event) => event.stopPropagation());
+
+  const head = document.createElement("div");
+  head.className = "proj-fly-head";
+  head.textContent = `${project.roots.length} 个文件夹`;
+  fly.append(head);
+
+  for (const root of project.roots) {
+    const line = document.createElement("div");
+    line.className = "proj-fly-row" + (root.role === "primary" ? " is-primary" : "");
+    const top = document.createElement("div");
+    top.className = "proj-fly-top";
+    const dot = document.createElement("span");
+    dot.className = "proj-root-dot";
+    dot.setAttribute("aria-hidden", "true");
+    const label = document.createElement("span");
+    label.className = "proj-fly-label";
+    label.textContent = root.label + (root.role === "primary" ? " · 主" : "");
+    const acts = document.createElement("span");
+    acts.className = "proj-fly-acts";
+    acts.append(
+      projActionButton("browse", "浏览文件", `在界面里看「${root.label}」`, () =>
+        openFileBrowser(`${project.name} / ${root.label}`, "", root.label, project.id, root.id),
+      ),
+      projActionButton("explorer", "在资源管理器中打开", `在资源管理器里打开「${root.label}」`, () =>
+        openExplorerInOs(project.id, root.id),
+      ),
+    );
+    top.append(dot, label, acts);
+    const path = document.createElement("div");
+    path.className = "proj-fly-path is-mono";
+    path.textContent = root.path;
+    path.title = root.path;
+    line.append(top, path);
+    fly.append(line);
+  }
+  return fly;
+}
+
+/** 选中项目 = 决定**下一个新对话**的 cwd（已建会话不动，各自留在创建时的快照里）。 */
+async function selectProject(projectId, options = {}) {
+  try {
+    const response = await request("/api/v1/workspaces/current-project", {
+      method: "PUT",
+      body: JSON.stringify({ projectId }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      toast(projectErrorText(data, response.status));
+      return false;
+    }
+    state.switcher.currentProjectId = projectId;
+    syncProjectRows(state.switcher.items || []);
+    if (!options.silent) toast("已选中：下一个新对话落在这个项目里");
+    void loadChats();
+    return true;
+  } catch (error) {
+    if (error.message !== "forbidden") toast(`没选成：${error.message}`);
+    return false;
+  }
+}
+
+/** 行尾 ＋：先选中再新开——两步都要成，不然新对话会落到上一个项目里。 */
+async function newChatInProject(projectId) {
+  const selected = await selectProject(projectId, { silent: true });
+  if (!selected) return;
+  startNewChat("worker");
 }
 
 /* 收起轨道的项目按钮仍走弹层（72px 放不下内联列表），内容复用同一个总览渲染。
@@ -10128,6 +10912,8 @@ const PROJECT_ICONS = {
     '<path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/><path d="m14 13 2 2-2 2"/><path d="M8 15h4"/>',
   browse:
     '<path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/>',
+  caret: '<path d="m6 9 6 6 6-6"/>',
+  plus: '<path d="M12 5v14"/><path d="M5 12h14"/>',
 };
 
 function projectIcon(kind) {
@@ -10176,13 +10962,16 @@ function projActionButton(icon, label, tip, onClick) {
   return button;
 }
 
-/** 让服务端对本机目录起系统资源管理器（projectId 缺省 = 工作区根）。 */
-async function openExplorerInOs(projectId) {
+/** 让服务端对本机目录起系统资源管理器（projectId / rootId 缺省 = 工作区根）。 */
+async function openExplorerInOs(projectId, rootId = "") {
   try {
+    const body = {};
+    if (projectId) body.projectId = projectId;
+    if (projectId && rootId) body.rootId = rootId;
     const response = await request("/api/v1/workspaces/open-explorer", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(projectId ? { projectId } : {}),
+      body: JSON.stringify(body),
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
@@ -10208,11 +10997,12 @@ const SERVICE_TOO_OLD_HINT = "服务还是旧版本（没有文件/资源管理�
  *  `startRel` 是**相对该根**的路径；`projectId` 为空 = 工作区根，非空 = 项目自己的根
  *  （2026-11-12 多根：项目可以在工作区外，不再用工作区相对路径套）。
  */
-function openFileBrowser(projectName, startRel, rootLabel, projectId = "") {
-  const browser = { name: projectName, rel: startRel || "", projectId };
+function openFileBrowser(projectName, startRel, rootLabel, projectId = "", rootId = "") {
+  const browser = { name: projectName, rel: startRel || "", projectId, rootId };
   const base = rootLabel || projectName;
   const projectQuery = browser.projectId
-    ? `&projectId=${encodeURIComponent(browser.projectId)}`
+    ? `&projectId=${encodeURIComponent(browser.projectId)}` +
+      (browser.rootId ? `&rootId=${encodeURIComponent(browser.rootId)}` : "")
     : "";
   const crumbOf = (rel) => (rel ? `${base}/${rel}` : `${base}/`);
   openModal(`文件 · ${projectName}`, (body) => {
@@ -10351,35 +11141,17 @@ function renderProjectMenu(items) {
   menu.replaceChildren();
   const workspace = state.switcher.workspace;
   const hasWorkspace = Boolean(workspace?.rootPath);
-  const mainLabel = baseNameOf(workspace?.rootPath) || "工作区";
 
-  if (hasWorkspace) {
-    const main = document.createElement("div");
-    main.className = "proj-item is-static is-main";
-    main.title = workspace.rootPath;
-    const mainName = document.createElement("span");
-    mainName.className = "proj-item-name";
-    mainName.textContent = mainLabel;
-    const mainTag = document.createElement("span");
-    mainTag.className = "proj-tag";
-    mainTag.textContent = "默认";
-    main.append(projectIcon("main"), mainName, mainTag);
-    // 文件入口：工作区根行尾「在资源管理器中打开」+「浏览文件」
-    main.append(
-      projActionButton("browse", "浏览文件", "在界面里看这个目录的文件", () =>
-        openFileBrowser(mainLabel, "", mainLabel),
-      ),
-      projActionButton("explorer", "在资源管理器中打开", "在系统的文件资源管理器里打开这个目录", () => openExplorerInOs("")),
-    );
-    menu.append(main);
-  } else {
+  // 2026-11-13：工作区根不再占「项目」列表的一行（它只是杂事态的默认目录，
+  // 不是项目）；位置在 设置 → 项目 的第一块。收起轨道的弹层沿用同一口径。
+  if (!hasWorkspace) {
     const empty = document.createElement("div");
     empty.className = "proj-empty";
     empty.textContent = "还没有工作区。先设置工作区根目录，项目才能登记进来。";
     menu.append(empty);
   }
 
-  if (hasWorkspace && items.length) {
+  if (items.length) {
     const sep = document.createElement("div");
     sep.className = "proj-sep";
     sep.setAttribute("role", "none");
@@ -10395,17 +11167,23 @@ function renderProjectMenu(items) {
     name.className = "proj-item-name";
     name.textContent = project.name;
     row.append(projectIcon("sub"), name);
+    if (project.roots?.length) {
+      const count = document.createElement("span");
+      count.className = "proj-tag";
+      count.textContent = `${project.roots.length} 个文件夹`;
+      row.append(count);
+    }
     if (project.missing) {
       const tag = document.createElement("span");
       tag.className = "proj-tag is-warn";
-      tag.textContent = "目录不在了";
+      tag.textContent = "主文件夹不在了";
       row.append(tag);
     } else {
       row.append(
-        projActionButton("browse", "浏览文件", `在界面里看「${project.name}」的文件`, () =>
+        projActionButton("browse", "浏览文件", `在界面里看「${project.name}」的文件夹`, () =>
           openFileBrowser(project.name, "", project.name, project.id),
         ),
-        projActionButton("explorer", "在资源管理器中打开", `在系统的文件资源管理器里打开「${project.name}」`, () =>
+        projActionButton("explorer", "在资源管理器中打开", `在系统的文件资源管理器里打开「${project.name}」的主文件夹`, () =>
           openExplorerInOs(project.id),
         ),
       );
@@ -11004,9 +11782,10 @@ async function refreshProjectPill() {
 }
 
 /* ── 收起轨道悬停浮卡（2026-11-13）────────────────────────────
- * 收起态悬停 项目 / 群组 / 执事 → 对应总览卡浮到主界面（三张同一套行为）；
- * 点击是同一个开关（键盘 / 触屏路径）。轨道按钮的 title/data-tip 悬停说明
- * 整体退役：悬停出来的就是卡本身，不再有第二层文字。
+ * 收起态悬停 总管 / 执事 / 对话 / 项目 / 群组 / 课题 → 对应卡片浮到主界面，
+ * 顺序与展开态分区一一对应（2026-11-13 用户拍板：任务中心与今日回顾退出轨道）。
+ * 点击是同一个开关（键盘 / 触屏路径；总管头像例外：点击直接开对话，悬停才是卡）。
+ * 轨道按钮的 title/data-tip 悬停说明整体退役：悬停出来的就是卡本身，不再有第二层文字。
  * 与 2026-11-08 当天退役的「侧栏悬停 peek」不是一回事——那次是整块侧栏
  * 扫过就压内容；这里只弹单张小卡，指针离开按钮+卡就收，不留常驻遮盖。
  * 参数：350ms 悬停意图（扫过不弹）；220ms 收起宽限（按钮→卡之间隔着 8px 缝）。 */
@@ -11156,8 +11935,229 @@ function renderRailPartnersCard() {
   renderRoster(state.partners, rosterDomainRows, list);
 }
 
+/** 卡底入口行：与展开态分区底部的 `.sec-foot-link` 同一套皮，可挂多条。 */
+function railCardFoot(items) {
+  const foot = document.createElement("div");
+  foot.className = "proj-foot";
+  for (const [text, onClick] of items) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "sec-foot-link";
+    button.textContent = `${text} `;
+    const arrow = document.createElement("span");
+    arrow.setAttribute("aria-hidden", "true");
+    arrow.textContent = "→";
+    button.append(arrow);
+    button.addEventListener("click", onClick);
+    foot.append(button);
+  }
+  return foot;
+}
+
+/** 总管悬停卡（2026-11-13）：与展开态总管条目同一份信息（头像/名字/总管标记/状态点）。
+    头像按钮的点击仍是直接开对话（与展开态条目一致），卡只做悬停一览 + 底部同一动作。 */
+function renderRailChiefCard() {
+  const menu = el.railChiefMenu;
+  if (!menu) return;
+  menu.replaceChildren();
+  const chief = state.partners.find((partner) => partner && partner.id === "chief") || {};
+  const name = String(chief.name || "总管").trim() || "总管";
+  const list = document.createElement("div");
+  list.className = "roster";
+
+  const row = document.createElement("div");
+  row.className = "side-item roster-row";
+  row.setAttribute("role", "button");
+  row.tabIndex = 0;
+  row.title = name;
+
+  const avatar = document.createElement("span");
+  avatar.className = "pt-avatar";
+  avatar.setAttribute("aria-hidden", "true");
+  paintAvatar(avatar, chief.avatar || null, name);
+
+  const label = document.createElement("span");
+  label.className = "roster-name";
+  label.textContent = name;
+
+  const tag = document.createElement("span");
+  tag.className = "pill-tag";
+  tag.textContent = "总管";
+
+  const dot = document.createElement("i");
+  dot.className = `status-dot ${partnerDotClass(state.chiefStatus || "active")}`;
+  dot.setAttribute("aria-hidden", "true");
+
+  row.append(avatar, label, tag, dot);
+  const open = () => {
+    closeRailCards();
+    openChiefChat();
+  };
+  row.addEventListener("click", open);
+  row.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    open();
+  });
+  list.append(row);
+  menu.append(list, railCardFoot([["打开对话", open]]));
+}
+
+/** 对话悬停卡（2026-11-13）：与展开态「对话」分区同一份最近会话（前 5 条，
+    过滤/排序口径见 recentChatsOrdered）。行点开即进那条对话；卡底保留分区的
+    两个入口（新建 / 搜索），与分区头行尾的两颗按钮一一对应。 */
+function renderRailChatsCard() {
+  const menu = el.railChatsMenu;
+  if (!menu) return;
+  menu.replaceChildren();
+  const list = document.createElement("div");
+  list.className = "roster";
+  menu.append(list);
+  const recent = recentChatsOrdered().slice(0, RECENTS_LIMIT);
+  if (!recent.length) {
+    const empty = document.createElement("div");
+    empty.className = "roster-empty";
+    empty.textContent = "还没有对话。";
+    list.append(empty);
+  }
+  for (const chat of recent) {
+    const row = document.createElement("div");
+    row.className = "side-item roster-row";
+    row.tabIndex = 0;
+    row.setAttribute("role", "button");
+    row.title = `${chatLabel(chat)} · ${chat.turns} 轮${chat.pinned ? " · 已置顶" : ""}`;
+
+    const label = document.createElement("span");
+    label.className = "roster-name";
+    label.textContent = `${chat.pinned ? "★ " : ""}${chatLabel(chat)}`;
+
+    const meta = document.createElement("span");
+    meta.className = "roster-idle";
+    meta.textContent = `${chat.turns} 轮`;
+
+    row.append(label, meta);
+    const open = () => {
+      closeRailCards();
+      void openConversation(chat.conversationId);
+    };
+    row.addEventListener("click", open);
+    row.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      open();
+    });
+    list.append(row);
+  }
+  menu.append(railCardFoot([
+    ["新建对话", () => {
+      closeRailCards();
+      go("chat");
+      startNewChat("worker");
+    }],
+    ["搜索旧对话", () => {
+      closeRailCards();
+      go("search");
+    }],
+  ]));
+}
+
+/** 展开侧栏并落到课题分区；带 topicId 时滚到那条并展开它（时间线按需拉）。
+    轨道课题卡的「点行 / 展开侧栏查看」共用这一条路径（旧轨道钮点击行为原样保留）。 */
+function openTopicsInSidebar(topicId = "") {
+  if (!sidebarOpen()) toggleSidebar();
+  localStorage.setItem("lifediary.side.topics", "open");
+  applySections();
+  void loadTopicsSidebar({ force: true });
+  const section = document.getElementById("sec-topics");
+  if (!section) return;
+  const item = topicId
+    ? section.querySelector(`[data-topic-id="${CSS.escape(topicId)}"]`)
+    : section;
+  item?.scrollIntoView({ block: "nearest" });
+  if (topicId && item && !expandedTopicIds.has(topicId)) {
+    item.querySelector(".topic-row")?.click();
+  }
+}
+
+/** 课题悬停卡（2026-11-13）：进行中课题一览（与展开态分区同一份数据/行皮）；
+    点行 = 展开侧栏定位并展开那条，卡底 = 只落到课题分区。 */
+function renderRailTopicsCard() {
+  const menu = el.railTopicsMenu;
+  if (!menu) return;
+  menu.replaceChildren();
+  const list = document.createElement("div");
+  list.className = "roster";
+  menu.append(list);
+  const ongoing = topicsSidebarList.filter((topic) => topic.status !== "closed");
+  if (!ongoing.length) {
+    const empty = document.createElement("div");
+    empty.className = "roster-empty";
+    empty.textContent = TOPIC_EMPTY_TEXT;
+    list.append(empty);
+  }
+  for (const topic of ongoing) {
+    const row = document.createElement("div");
+    row.className = "side-item roster-row topic-row";
+    row.tabIndex = 0;
+    row.setAttribute("role", "button");
+    row.title = topic.question;
+
+    const label = document.createElement("span");
+    label.className = "roster-name";
+    label.textContent = topic.question;
+
+    const flavor = document.createElement("span");
+    flavor.className = "pill-tag topic-flavor";
+    flavor.dataset.flavor = topic.flavor;
+    flavor.textContent = topic.flavor === "dig" ? "啃题" : "盯梢";
+
+    row.append(label, flavor);
+    if (topic.status === "paused") {
+      const paused = document.createElement("span");
+      paused.className = "topic-paused";
+      paused.textContent = "已暂停";
+      row.append(paused);
+    }
+    const open = () => {
+      closeRailCards();
+      openTopicsInSidebar(topic.id);
+    };
+    row.addEventListener("click", open);
+    row.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      open();
+    });
+    list.append(row);
+  }
+  menu.append(railCardFoot([["展开侧栏查看", () => {
+    closeRailCards();
+    openTopicsInSidebar();
+  }]]));
+}
+
+/** 对话卡的数据现拉一次（卡是「快速跳转」，列表不能比展开态旧）；
+    课题卡同理（旧数据可能已被总管改过节奏）。等回来时指针若已离开就不再弹。 */
+const railChatsShow = attachRailCard(el.railChats, el.railChatsMenu, renderRailChatsCard, {
+  asyncShow: async () => {
+    await loadChats();
+    if (railHover.btn !== el.railChats) return;
+    railCardShow(el.railChats, el.railChatsMenu, renderRailChatsCard);
+  },
+});
+
+const railTopicsShow = attachRailCard(el.railTopics, el.railTopicsMenu, renderRailTopicsCard, {
+  asyncShow: async () => {
+    await loadTopicsSidebar({ force: true });
+    if (topicsSidebarAvailable === false || railHover.btn !== el.railTopics) return;
+    railCardShow(el.railTopics, el.railTopicsMenu, renderRailTopicsCard);
+  },
+});
+
 const railGroupsShow = attachRailCard(el.railGroups, el.railGroupsMenu, renderRailGroupsCard);
 const railPartnersShow = attachRailCard(el.railPartners, el.railPartnersMenu, renderRailPartnersCard);
+// 总管只有悬停卡，点击仍是直接开对话——不需要返回的 show 做开关
+attachRailCard(el.railChief, el.railChiefMenu, renderRailChiefCard);
 
 /** 点击轨道钮 = 同一个开关（悬停已开就收，没开就立刻开，不必等悬停定时）。 */
 function toggleRailCard(btn, menu, build, show) {
@@ -11186,6 +12186,8 @@ el.railProj?.addEventListener("click", () => {
 });
 el.railGroups?.addEventListener("click", () => toggleRailCard(el.railGroups, el.railGroupsMenu, renderRailGroupsCard, railGroupsShow));
 el.railPartners?.addEventListener("click", () => toggleRailCard(el.railPartners, el.railPartnersMenu, renderRailPartnersCard, railPartnersShow));
+el.railChats?.addEventListener("click", () => toggleRailCard(el.railChats, el.railChatsMenu, renderRailChatsCard, railChatsShow));
+el.railTopics?.addEventListener("click", () => toggleRailCard(el.railTopics, el.railTopicsMenu, renderRailTopicsCard, railTopicsShow));
 
 el.modelPill?.addEventListener("click", () => void toggleModelMenu());
 // 菜单里的点击不冒泡到「点外面就关」的判定：点供应商段会就地重渲染，
@@ -11198,19 +12200,23 @@ el.modelMenu?.addEventListener("click", (event) => event.stopPropagation());
 el.chatSettingsBtn?.addEventListener("click", () => void toggleChatSettings());
 el.chatSettingsOverlay?.addEventListener("click", () => closeChatSettings());
 el.groupSettingsOverlay?.addEventListener("click", () => closeGroupSettingsDrawer());
-/* ── 附件（2026-11-08 扫尾批 4a）───────────────────────────
-   三入口：选择器 / 粘贴 / 拖拽。浏览器侧先挡一次（只收图片、单张 ≤8MB、单条 ≤4 张），
-   服务端还会全量复核——契约是公开的，前端校验只为体验，不能当边界。
-   发送时有图才用分段数组；纯文本仍是老形状（shared 的 content union 兼容两态）。
-   不做 blob 存储：base64 直接进服务端会话库（方案登记的已知边界）。 */
+/* ── 附件（2026-11-08 扫尾批 4a 图片；2026-11-13 附件走路径）────────
+   规则只有一条：**只有粘贴的截图内联，其余附件全部只带路径**。
+   - 壳里（window.mygo）「添加图片或文件」走 Shell.SelectFiles 原生多选 → 绝对路径，零拷贝；
+   - 浏览器里选择器 / 拖入 → POST /api/v1/agent/attachments 落盘 → 服务端绝对路径；
+   - 粘贴截图没有路径，仍走内联 base64（模型直接看，比多一次工具轮快）。
+   浏览器侧先挡一次（图片 ≤4 张/8MB、文件 ≤8 个/32MB），服务端还会全量复核。 */
 const MAX_PENDING_IMAGES = 4;
+const MAX_PENDING_FILES = 8;
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_UPLOAD_BYTES = 32 * 1024 * 1024;
 
-function renderPendingImages() {
+function renderPendingAttachments() {
   const host = el.composerAttachments;
   if (!host) return;
   host.replaceChildren();
-  host.hidden = state.pendingImages.length === 0;
+  host.hidden = state.pendingImages.length === 0 && state.pendingFiles.length === 0;
+
   state.pendingImages.forEach((image, index) => {
     const item = document.createElement("div");
     item.className = "composer-att";
@@ -11224,46 +12230,95 @@ function renderPendingImages() {
     remove.textContent = "×";
     remove.addEventListener("click", () => {
       state.pendingImages.splice(index, 1);
-      renderPendingImages();
+      renderPendingAttachments();
       syncSendEnabled();
     });
     item.append(img, remove);
     host.append(item);
   });
+
+  state.pendingFiles.forEach((file, index) => {
+    const item = document.createElement("div");
+    item.className = "composer-att is-file";
+    item.title = file.path || file.name;
+    const icon = document.createElement("span");
+    icon.innerHTML = ATT_FILE_ICON;
+    icon.firstChild?.setAttribute?.("aria-hidden", "true");
+    const main = document.createElement("span");
+    main.className = "composer-att-file-main";
+    const name = document.createElement("span");
+    name.className = "composer-att-file-name";
+    name.textContent = file.name;
+    const meta = document.createElement("span");
+    meta.className = "composer-att-file-meta";
+    meta.textContent = [file.mimeType, formatBytes(file.bytes)].filter(Boolean).join(" · ") || "文件";
+    main.append(name, meta);
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.setAttribute("aria-label", "移除这个文件");
+    remove.title = "移除";
+    remove.textContent = "×";
+    remove.addEventListener("click", () => {
+      state.pendingFiles.splice(index, 1);
+      renderPendingAttachments();
+      syncSendEnabled();
+    });
+    item.append(icon, main, remove);
+    host.append(item);
+  });
 }
 
-function clearPendingImages() {
+function clearPendingAttachments() {
   state.pendingImages = [];
-  renderPendingImages();
+  state.pendingFiles = [];
+  renderPendingAttachments();
   syncSendEnabled();
 }
 
-/** File → {mimeType, data(裸 base64)}；不合法返回 null，太大返回 {error} */
-function readImageFile(file) {
-  return new Promise((resolve) => {
-    if (!file || !file.type || !file.type.startsWith("image/")) {
-      resolve(null);
-      return;
+/** 绝对路径 → 待发文件（壳里原生选择器的产物；name 取 basename，体积由服务端 stat 补） */
+function addPendingPaths(paths) {
+  for (const raw of paths || []) {
+    if (typeof raw !== "string" || !raw.trim()) continue;
+    if (state.pendingFiles.length >= MAX_PENDING_FILES) {
+      toast(`一条消息最多 ${MAX_PENDING_FILES} 个文件`);
+      break;
     }
-    if (file.size > MAX_IMAGE_BYTES) {
-      resolve({ error: "单张图片不能超过 8MB" });
+    const path = raw.trim();
+    if (state.pendingFiles.some((file) => file.path === path)) continue;
+    const name = path.split(/[\\/]/).pop() || path;
+    state.pendingFiles.push({ path, name });
+  }
+  renderPendingAttachments();
+  syncSendEnabled();
+}
+
+/** File → 裸 base64；读不出返回 null */
+function readFileBase64(file) {
+  return new Promise((resolve) => {
+    if (!file) {
+      resolve(null);
       return;
     }
     const reader = new FileReader();
     reader.onload = () => {
       const result = typeof reader.result === "string" ? reader.result : "";
       const comma = result.indexOf(",");
-      if (comma < 0) {
-        resolve(null);
-        return;
-      }
-      resolve({ mimeType: file.type, data: result.slice(comma + 1) });
+      resolve(comma < 0 ? null : result.slice(comma + 1));
     };
     reader.onerror = () => resolve(null);
     reader.readAsDataURL(file);
   });
 }
 
+/** File → {mimeType, data(裸 base64)}；只给粘贴/拖入的图片用 */
+async function readImageFile(file) {
+  if (!file || !file.type || !file.type.startsWith("image/")) return null;
+  if (file.size > MAX_IMAGE_BYTES) return { error: "单张图片不能超过 8MB" };
+  const data = await readFileBase64(file);
+  return data ? { mimeType: file.type, data } : null;
+}
+
+/** 粘贴截图：内联进待发条（没有路径，模型直接看最快） */
 async function addImageFiles(files) {
   const list = [...(files || [])];
   if (!list.length) return;
@@ -11287,8 +12342,124 @@ async function addImageFiles(files) {
     }
     state.pendingImages.push(image);
   }
-  renderPendingImages();
+  renderPendingAttachments();
   syncSendEnabled();
+}
+
+/** 浏览器上传：把字节交给服务端落盘，拿回服务端绝对路径 */
+async function uploadAttachment(file) {
+  if (file.size > MAX_UPLOAD_BYTES) {
+    throw new Error(`${file.name} 超过 ${MAX_UPLOAD_BYTES / 1024 / 1024}MB`);
+  }
+  const data = await readFileBase64(file);
+  if (!data) throw new Error(`读不出 ${file.name}`);
+  const response = await request("/api/v1/agent/attachments", {
+    method: "POST",
+    body: JSON.stringify({
+      name: file.name,
+      ...(file.type ? { mimeType: file.type } : {}),
+      data,
+    }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload.message || payload.error || `HTTP ${response.status}`);
+  }
+  return payload.file;
+}
+
+/** 选择器 / 拖入：文件附件开着就上传拿路径，关着退回老的内联图片 */
+async function addBrowserFiles(files) {
+  const list = [...(files || [])];
+  if (!list.length) return;
+  if (!state.capabilities.attachments) {
+    toast("附件已在服务端关闭（AGENT_ATTACHMENTS=false）");
+    return;
+  }
+  if (!state.capabilities.fileAttachments) {
+    void addImageFiles(list);
+    return;
+  }
+  for (const file of list) {
+    if (state.pendingFiles.length >= MAX_PENDING_FILES) {
+      toast(`一条消息最多 ${MAX_PENDING_FILES} 个文件`);
+      break;
+    }
+    try {
+      const saved = await uploadAttachment(file);
+      if (!saved || typeof saved.path !== "string") continue;
+      if (state.pendingFiles.some((item) => item.path === saved.path)) continue;
+      state.pendingFiles.push({
+        path: saved.path,
+        name: saved.name || file.name,
+        ...(saved.mimeType ? { mimeType: saved.mimeType } : {}),
+        ...(typeof saved.bytes === "number" ? { bytes: saved.bytes } : {}),
+      });
+    } catch (error) {
+      toast(`没上传成：${error.message}`);
+    }
+  }
+  renderPendingAttachments();
+  syncSendEnabled();
+}
+
+/** 加号 →「添加图片或文件」：壳里给路径，浏览器上传 */
+async function pickFiles() {
+  if (!state.capabilities.attachments) {
+    toast("附件已在服务端关闭（AGENT_ATTACHMENTS=false）");
+    return;
+  }
+  if (window.mygo?.call && state.capabilities.fileAttachments) {
+    try {
+      const paths = await shellCall("SelectFiles");
+      if (Array.isArray(paths)) {
+        if (paths.length) addPendingPaths(paths);
+        return; // 用户取消 = 空数组，停在这里，不再弹浏览器选择器
+      }
+    } catch {
+      // 旧壳没这个方法 / Shell 绑定被关：退回浏览器上传
+    }
+  }
+  el.composerFile?.click();
+}
+
+/** 加号 →「截图」：抓一帧屏幕，内联进待发条（不可用的环境不渲染这一项） */
+async function captureScreenshot() {
+  if (!navigator.mediaDevices?.getDisplayMedia) {
+    toast("这个窗口不支持截屏，可以直接粘贴图片");
+    return;
+  }
+  let stream = null;
+  try {
+    stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+    const video = document.createElement("video");
+    video.muted = true;
+    video.playsInline = true;
+    video.srcObject = stream;
+    await new Promise((resolve, reject) => {
+      video.onloadedmetadata = resolve;
+      video.onerror = reject;
+    });
+    await video.play();
+    if (state.pendingImages.length >= MAX_PENDING_IMAGES) {
+      toast(`一条消息最多 ${MAX_PENDING_IMAGES} 张图片`);
+      return;
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext("2d")?.drawImage(video, 0, 0);
+    const dataUrl = canvas.toDataURL("image/png");
+    const comma = dataUrl.indexOf(",");
+    if (comma < 0) return;
+    state.pendingImages.push({ mimeType: "image/png", data: dataUrl.slice(comma + 1) });
+    renderPendingAttachments();
+    syncSendEnabled();
+  } catch {
+    // 用户取消 / 环境不允许：不打扰
+  } finally {
+    for (const track of stream?.getTracks?.() || []) track.stop();
+  }
 }
 
 function openLightbox(src) {
@@ -11305,21 +12476,180 @@ function closeLightbox() {
 
 el.lightbox?.addEventListener("click", closeLightbox);
 
-el.composerAdd?.addEventListener("click", () => {
+/* ── 加号菜单（2026-11-13，抄 ZCode/cindy 的 composer「+」）────────────
+   菜单项按能力现渲染：截图只在 getDisplayMedia 存在时出现；「新建目标」只在有执事身份
+   （总管 / 执事会话）时出现，普通助手会话没有目标位。菜单向上弹，复用 composer-pop 动效。 */
+
+const PLUS_ICONS = {
+  file: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/>',
+  monitor:
+    '<rect width="20" height="14" x="2" y="3" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/>',
+  target:
+    '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/>',
+};
+
+function plusMenuItem(icon, label, onClick) {
+  const item = document.createElement("button");
+  item.type = "button";
+  item.className = "plus-item";
+  item.setAttribute("role", "menuitem");
+  item.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icon}</svg><span></span>`;
+  item.querySelector("span").textContent = label;
+  item.addEventListener("click", onClick);
+  return item;
+}
+
+function renderPlusMenu() {
+  const menu = el.composerPlusMenu;
+  if (!menu) return;
+  menu.replaceChildren();
+  menu.append(
+    plusMenuItem(PLUS_ICONS.file, "添加图片或文件", () => {
+      closePlusMenu();
+      void pickFiles();
+    }),
+  );
+  if (navigator.mediaDevices?.getDisplayMedia) {
+    menu.append(
+      plusMenuItem(PLUS_ICONS.monitor, "截图", () => {
+        closePlusMenu();
+        void captureScreenshot();
+      }),
+    );
+  }
+  if (csResolveTarget()) {
+    const sep = document.createElement("div");
+    sep.className = "plus-sep";
+    menu.append(sep);
+    menu.append(
+      plusMenuItem(PLUS_ICONS.target, "新建目标", () => {
+        closePlusMenu();
+        void openGoalDialog();
+      }),
+    );
+  }
+}
+
+function closePlusMenu() {
+  if (el.composerPlusMenu) closePopover(el.composerPlusMenu, el.composerAdd);
+}
+
+function togglePlusMenu() {
+  if (popoverOpen(el.composerPlusMenu)) {
+    closePlusMenu();
+    return;
+  }
   if (!state.capabilities.attachments) {
     toast("附件已在服务端关闭（AGENT_ATTACHMENTS=false）");
     return;
   }
-  el.composerFile?.click();
-});
+  renderPlusMenu();
+  openPopover(el.composerPlusMenu, el.composerAdd);
+}
+
+/** 新建目标（抄 cindy：+ → 新建目标，输入框里已有的文字作默认目标）。 */
+async function openGoalDialog() {
+  const target = csResolveTarget();
+  if (!target) {
+    toast("普通助手会话没有目标位，到总管或执事会话里设");
+    return;
+  }
+  let current = "";
+  try {
+    const response = await request(`/api/v1/partners/${encodeURIComponent(target)}`, {
+      cache: "no-store",
+    });
+    if (response.ok) {
+      const data = await response.json().catch(() => ({}));
+      current = String(data.currentGoal || "");
+    }
+  } catch {
+    // 读不到就按空目标打开；保存仍走同一个 PATCH
+  }
+  const draft = el.input.value.trim();
+  const owner =
+    state.partners.find((item) => item.id === target)?.name ||
+    (target === "chief" ? "总管" : "这个执事");
+
+  openModal("新建目标", (body) => {
+    body.innerHTML = `
+      <p class="modal-desc">写给「${esc(owner)}」这一阵要奔的方向。保存后每轮都会带上，下一轮起生效。</p>
+      <div class="modal-field">
+        <span>目标</span>
+        <textarea class="modal-input" id="goal-input" rows="4" maxlength="1000"
+                  style="height:auto;min-height:96px;padding:10px;line-height:1.6;resize:vertical"
+                  placeholder="例：这个月把日记 v2 的提醒链路跑通，先不碰其他需求。"></textarea>
+      </div>
+      <p class="modal-hint" id="goal-hint"></p>
+      <div class="modal-actions">
+        <button class="ghost" type="button" data-modal-cancel>取消</button>
+        <button class="ghost" type="button" id="goal-clear">清除目标</button>
+        <button class="modal-primary" type="button" id="goal-save">保存</button>
+      </div>`;
+
+    const input = body.querySelector("#goal-input");
+    const hint = body.querySelector("#goal-hint");
+    const save = body.querySelector("#goal-save");
+    const clear = body.querySelector("#goal-clear");
+    input.value = current || draft;
+    body.querySelector("[data-modal-cancel]")?.addEventListener("click", closeModal);
+
+    const submit = async (goal) => {
+      if (save.disabled) return;
+      save.disabled = true;
+      clear.disabled = true;
+      hint.classList.remove("is-error");
+      hint.textContent = "保存中…";
+      try {
+        const response = await request(`/api/v1/partners/${encodeURIComponent(target)}`, {
+          method: "PATCH",
+          body: JSON.stringify({ currentGoal: goal || null }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          setModalHint(hint, data.message || data.error || `没存成：HTTP ${response.status}`);
+          save.disabled = false;
+          clear.disabled = false;
+          return;
+        }
+        // 目标来自输入框草稿且保存成功：把草稿清掉，别让它连着下一句一起发出去
+        if (!current && draft && goal) {
+          el.input.value = "";
+          resize();
+          syncSendEnabled();
+        }
+        const cached = state.partners.find((item) => item.id === target);
+        if (cached) cached.currentGoal = data.currentGoal ?? goal ?? null;
+        closeModal();
+        toast(goal ? "目标已保存，下一轮起生效" : "目标已清除");
+      } catch (error) {
+        if (error.message === "forbidden") return;
+        setModalHint(hint, `没存成：${error.message}`);
+        save.disabled = false;
+        clear.disabled = false;
+      }
+    };
+
+    save.addEventListener("click", () => void submit(input.value.trim()));
+    clear.addEventListener("click", () => void submit(""));
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+        event.preventDefault();
+        void submit(input.value.trim());
+      }
+    });
+  });
+}
+
+el.composerAdd?.addEventListener("click", () => togglePlusMenu());
 
 el.composerFile?.addEventListener("change", () => {
   const files = el.composerFile.files ? [...el.composerFile.files] : [];
   el.composerFile.value = "";
-  void addImageFiles(files);
+  void addBrowserFiles(files);
 });
 
-// 粘贴图片：输入框里 Ctrl+V 直接进待发条（截图文是最常用的入口）
+// 粘贴图片：输入框里 Ctrl+V 直接进待发条（截图文是最常用的入口；只有这一条路内联）
 el.input.addEventListener("paste", (event) => {
   const items = event.clipboardData?.items;
   if (!items) return;
@@ -11334,7 +12664,7 @@ el.input.addEventListener("paste", (event) => {
   void addImageFiles(files);
 });
 
-// 拖拽：整个 composer 是投放区（只拦 dragover 才收得到 drop）
+// 拖拽：整个 composer 是投放区（只拦 dragover 才收得到 drop）；拖入按「选文件」处理 → 上传
 el.composer.addEventListener("dragover", (event) => {
   if (!state.capabilities.attachments) return;
   if (!event.dataTransfer?.types?.includes("Files")) return;
@@ -11346,7 +12676,7 @@ el.composer.addEventListener("drop", (event) => {
   const files = event.dataTransfer?.files ? [...event.dataTransfer.files] : [];
   if (!files.length) return;
   event.preventDefault();
-  void addImageFiles(files);
+  void addBrowserFiles(files);
 });
 
 /**
@@ -11363,19 +12693,30 @@ async function loadCapabilities() {
     if (!response.ok) return;
     const data = await response.json();
     state.capabilities.attachments = data.attachments !== false;
+    // 2026-11-13：任意文件（路径引用）与浏览器上传入口；关着时只剩图片内联
+    state.capabilities.fileAttachments = data.fileAttachments !== false;
     state.capabilities.editResend = data.editResend !== false;
     state.capabilities.approvalMode = data.approvalMode === "blocking" ? "blocking" : "async";
   } catch {
     return;
   }
   if (el.composerAdd) el.composerAdd.hidden = !state.capabilities.attachments;
-  if (!state.capabilities.attachments) clearPendingImages();
+  // 文件附件关着：选择器退回只认图片（老行为），不让用户选完才报错
+  if (el.composerFile) {
+    if (state.capabilities.fileAttachments) el.composerFile.removeAttribute("accept");
+    else el.composerFile.setAttribute("accept", "image/*");
+  }
+  if (!state.capabilities.attachments) clearPendingAttachments();
   syncEditEntry();
 }
 
 // pill 在右组（D2），不能再用 .composer-tools 判内外：按触发 pill 和菜单自己判
 document.addEventListener("click", (event) => {
   if (!event.target.closest("#model-pill") && !event.target.closest("#model-menu")) closeModelMenu();
+  // 加号菜单（2026-11-13）：触发钮和菜单自己都算里面，点外面才收
+  if (!event.target.closest("#composer-add") && !event.target.closest("#composer-plus-menu")) {
+    closePlusMenu();
+  }
   // 抽屉主选模型弹层（2026-11-08）：点外收起（元素随抽屉重渲，每次现查现判）
   const csPick = document.getElementById("cs-primary-menu");
   if (csPick && !csPick.hidden && !event.target.closest(".cs-model-pick")) {
@@ -11389,7 +12730,7 @@ document.addEventListener("click", (event) => {
   }
   // 技能页筛选/排序下拉（2026-11-13 二轮）：点外面收
   if (!event.target.closest(".sk-select")) closeSkillSelects();
-  // 项目弹层与群组/执事悬停卡：触发钮和卡片自己都算里面，点外才收（2026-11-13）
+  // 项目弹层与轨道悬停卡：触发钮和卡片自己都算里面，点外才收（2026-11-13）
   if (
     !event.target.closest("#proj-pill") &&
     !event.target.closest("#rail-proj") &&
@@ -11397,12 +12738,9 @@ document.addEventListener("click", (event) => {
   ) {
     closeProjectMenu();
   }
-  if (
-    !event.target.closest("#rail-groups") &&
-    !event.target.closest("#rail-groups-menu") &&
-    !event.target.closest("#rail-partners") &&
-    !event.target.closest("#rail-partners-menu")
-  ) {
+  // 轨道悬停卡：整个轨道 + 所有悬停卡都算里面。2026-11-13 轨道对齐后卡从两张变五张，
+  // 原来只白名单 groups/partners 的写法会让点「对话 / 课题 / 总管」时把刚开的卡立刻收掉。
+  if (!event.target.closest("#side-rail") && !event.target.closest(".proj-pop")) {
     closeRailCards();
   }
 });
@@ -11448,6 +12786,7 @@ document.addEventListener("keydown", (event) => {
     return;
   }
   closeModelMenu();
+  closePlusMenu();
   closeChatSettings();
   closeProjectMenu();
   closeRailCards();
@@ -11463,15 +12802,16 @@ el.composer.addEventListener("submit", (event) => {
   const steer = steerNextSubmit;
   steerNextSubmit = false;
   const text = el.input.value.trim();
-  // 图片条（2026-11-08 4a）：纯图消息允许，所以判空要把附件算进去
+  // 附件条（2026-11-08 4a 图片；2026-11-13 文件）：纯附件消息允许，判空要把两者都算进去
   const images = state.pendingImages.slice();
-  if (!text && !images.length) return;
+  const files = state.pendingFiles.slice();
+  if (!text && !images.length && !files.length) return;
   // 手动压缩斜杠命令（扫尾批 1 B1）：只认 /compact 一个，刻意不做通用命令系统。
   // 命中后不作为消息发送、不进历史；剩余文字当作 instructions，wait=1 等结果。
   const compactMatch = /^\/compact\b/i.exec(text);
   if (compactMatch) {
-    if (images.length) {
-      toast("压缩命令不能带图片");
+    if (images.length || files.length) {
+      toast("压缩命令不能带附件");
       return;
     }
     el.input.value = "";
@@ -11482,9 +12822,9 @@ el.composer.addEventListener("submit", (event) => {
   // 忙时两条路（2026-11-07 消息即引导；2026-11-08 扫尾批 8a 改排队落点）：
   //   Ctrl/⌘+Enter = 插话，带 whenBusy=steer 直接投到正在跑的这一轮；
   //   普通 Enter    = 排队，带 whenBusy=followUp 交给服务端落 durable（是下一轮的指令）。
-  // 两条都只走纯文本（附件只在空闲时发，图先留在条上）。
+  // 两条都只走纯文本（附件只在空闲时发，附件先留在条上）。
   if (state.sending) {
-    if (images.length) {
+    if (images.length || files.length) {
       toast("附件消息要等这一轮结束再发");
       return;
     }
@@ -11501,8 +12841,8 @@ el.composer.addEventListener("submit", (event) => {
   }
   el.input.value = "";
   resize();
-  clearPendingImages();
-  void send(text, images);
+  clearPendingAttachments();
+  void send(text, images, files);
 });
 
 /** /compact（扫尾批 1 B1）：调手动压缩端点，等结果后用气泡（toast）提示。 */
@@ -11651,31 +12991,187 @@ el.thread.addEventListener("click", async (event) => {
   }, 1500);
 });
 
-/* ── 全部数据导出（2026-11-05 J1）──────────────────────
-   单对话导出退役，入口挪到设置 → 会话。走 request() 拿 blob（带凭据，
-   403 时能 toast），不裸跳转——裸跳转拿不到错误响应。 */
-async function exportAllData() {
-  try {
-    const response = await request("/api/v1/agent/export", { cache: "no-store" });
-    if (!response.ok) {
-      const detail = await response.json().catch(() => null);
-      throw new Error(detail?.message || `HTTP ${response.status}`);
+/* ── 导出数据（2026-11-05 J1 / 2026-11-13 升级）──────────
+   2026-11-05：一个 JSON 一次性下载，落点由浏览器决定（壳里就是系统下载目录）。
+   2026-11-13：先在弹层里勾"要带哪几块"，服务端打成 zip（一会话一文件夹 + 记忆/内容/团队/配置，
+   包根上有 README.md + manifest.json）；存哪按能力依次退：页面保存框 → 壳的系统另存为 → 下载目录。 */
+
+const EXPORT_PARTS = [
+  {
+    id: "conversations",
+    name: "会话与消息",
+    hint: "每个对话一个文件夹：transcript.md（人读）+ messages.json（机读）",
+  },
+  { id: "memory", name: "记忆", hint: "全部记忆记录（偏好 / 事实 / 打算 / 履历 / 经验）→ records.jsonl" },
+  { id: "library", name: "内容", hint: "项目、课题、日记、例行 → library/" },
+  { id: "team", name: "团队", hint: "执事名册、SOUL 与契约、群组与群消息 → team/" },
+  { id: "config", name: "配置与用量", hint: "供应商（不含密钥）、模型用量、开关现值 → config/" },
+];
+
+/** 过桥传字节的上限（与壳里 shellSaveBytesMax 对齐；超了退回下载目录） */
+const SHELL_SAVE_MAX_BYTES = 96 * 1024 * 1024;
+
+/** 本地时间 → `2026-11-13-1430`，和包里根目录同名 */
+function exportStampOf(date) {
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}`;
+}
+
+function openExportModal() {
+  openModal("导出数据", (body) => {
+    body.innerHTML = `
+      <p class="modal-desc">勾几块打成 zip。解压后每块是独立目录，包根上的 README.md 写清这次导了什么、哪里被截断、刻意没带什么。</p>
+      <div class="export-list">
+        ${EXPORT_PARTS.map(
+          (part) => `<label class="export-part">
+            <input type="checkbox" data-export-part="${part.id}" checked />
+            <span class="export-part-main">
+              <span class="export-part-name">${part.name}</span>
+              <small>${part.hint}</small>
+            </span>
+          </label>`,
+        ).join("")}
+        <label class="export-part export-part-sub" id="export-images-row">
+          <input type="checkbox" id="export-images" checked />
+          <span class="export-part-main">
+            <span class="export-part-name">消息里的图片</span>
+            <small>关掉会小很多；messages.json 里仍记着类型与 sha256</small>
+          </span>
+        </label>
+      </div>
+      <p class="modal-hint" id="export-hint"></p>
+      <div class="modal-actions">
+        <button class="ghost" type="button" data-modal-cancel>取消</button>
+        <button class="modal-primary" id="export-confirm" type="button">导出压缩包</button>
+      </div>`;
+
+    const hint = body.querySelector("#export-hint");
+    const confirm = body.querySelector("#export-confirm");
+    const imagesRow = body.querySelector("#export-images-row");
+    const conversationsBox = body.querySelector('[data-export-part="conversations"]');
+    const syncImagesRow = () => {
+      const on = Boolean(conversationsBox?.checked);
+      imagesRow?.classList.toggle("is-muted", !on);
+      const box = imagesRow?.querySelector("input");
+      if (box) box.disabled = !on;
+    };
+    conversationsBox?.addEventListener("change", syncImagesRow);
+    syncImagesRow();
+    body.querySelector("[data-modal-cancel]")?.addEventListener("click", closeModal);
+
+    confirm?.addEventListener("click", async () => {
+      const parts = EXPORT_PARTS.map((part) => part.id).filter(
+        (id) => body.querySelector(`[data-export-part="${id}"]`)?.checked,
+      );
+      if (parts.length === 0) {
+        setModalHint(hint, "至少选一块。");
+        return;
+      }
+      const images = Boolean(conversationsBox?.checked) && Boolean(body.querySelector("#export-images")?.checked);
+      confirm.disabled = true;
+      setModalHint(hint, "打包中…（会话多的时候要等一会儿）", false);
+      try {
+        const where = await exportBundle(parts, images);
+        if (where === "cancel") {
+          confirm.disabled = false;
+          clearModalHint(hint);
+          return;
+        }
+        closeModal();
+        toast(where === "download" ? "已存到下载目录（这里不能选保存位置）" : "已导出");
+      } catch (error) {
+        confirm.disabled = false;
+        setModalHint(
+          hint,
+          error.message === "forbidden" ? "导出失败：没有访问权限" : `导出失败：${error.message}`,
+        );
+      }
+    });
+  });
+}
+
+/**
+ * 选保存位置。**必须在点击的同一个手势里调**——`showSaveFilePicker` 依赖用户激活，
+ * 等 fetch 回来再弹会被浏览器以 `NotAllowedError` 拒掉，所以先定位置、再取数据。
+ */
+async function pickExportTarget(name) {
+  if (typeof window.showSaveFilePicker === "function") {
+    try {
+      const handle = await window.showSaveFilePicker({
+        suggestedName: name,
+        types: [{ description: "ZIP 压缩包", accept: { "application/zip": [".zip"] } }],
+      });
+      return { kind: "handle", handle };
+    } catch (error) {
+      if (error && error.name === "AbortError") return { kind: "cancel" };
+      // 不支持 / 被策略拒 / 权限不对 → 退到下一种，不在这里报错
     }
-    const blob = await response.blob();
-    const disposition = response.headers.get("content-disposition") || "";
-    const match = disposition.match(/filename="?([^";]+)"?/i);
-    const name =
-      match?.[1] || `selenite-export-${new Date().toISOString().slice(0, 10)}.json`;
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = name;
-    link.click();
-    URL.revokeObjectURL(url);
-    toast("已导出");
-  } catch (error) {
-    toast(error.message === "forbidden" ? "导出失败：没有访问权限" : `导出失败：${error.message}`);
   }
+  return { kind: inShell() ? "shell" : "download" };
+}
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || "");
+      resolve(result.includes(",") ? result.slice(result.indexOf(",") + 1) : result);
+    };
+    reader.onerror = () => reject(reader.error || new Error("读不出导出的包"));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function downloadBlob(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+/** 导出并把返回的 zip 落到用户选的位置；返回最终落点（`cancel` = 用户取消了）。 */
+async function exportBundle(parts, images) {
+  const name = `selenite-export-${exportStampOf(new Date())}.zip`;
+  const target = await pickExportTarget(name);
+  if (target.kind === "cancel") return "cancel";
+
+  const query = new URLSearchParams({
+    format: "zip",
+    parts: parts.join(","),
+    images: images ? "1" : "0",
+  });
+  const response = await request(`/api/v1/agent/export?${query}`, { cache: "no-store" });
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null);
+    throw new Error(detail?.message || `HTTP ${response.status}`);
+  }
+  const blob = await response.blob();
+  if (response.headers.get("x-export-partial") === "1") {
+    toast("部分数据没导出，解压后看 manifest.json 的原因");
+  }
+
+  if (target.kind === "handle") {
+    const writable = await target.handle.createWritable();
+    await writable.write(blob);
+    await writable.close();
+    return "handle";
+  }
+
+  if (target.kind === "shell") {
+    if (blob.size <= SHELL_SAVE_MAX_BYTES) {
+      try {
+        const path = await shellCall("SaveExport", name, await blobToBase64(blob));
+        return path ? "shell" : "cancel";
+      } catch {
+        // 壳还没重编 / 桥没挂：不挡着用户，退到下载目录
+      }
+    }
+  }
+
+  await downloadBlob(blob, name);
+  return "download";
 }
 
 /* ── 收起轨道（2026-11-05 F1 / E4 重排 / 2026-11-07 统一批）──────────
@@ -11689,8 +13185,13 @@ async function exportAllData() {
    （项目弹层、模型 pill、设置页都挂在这段之后），表现成"侧栏按钮全都没用"。
    所以轨道上的入口一律用可选链：HTML 删元素，JS 不该跟着炸。 */
 el.railSettings?.addEventListener("click", () => go("settings"));
-// 总管首字圆钮 → 打开总管会话（与展开态总管条目同一个函数，行为完全一致）
-el.railChief?.addEventListener("click", openChiefChat);
+// 总管首字圆钮 → 打开总管会话（与展开态总管条目同一个函数，行为完全一致）。
+// 2026-11-13：悬停浮一张总管卡（头像/状态/打开对话），点击仍是直接开对话——
+// 先把卡收掉，免得已在对话路由时 hash 没变、applyRoute 不跑而留一张卡在屏上。
+el.railChief?.addEventListener("click", () => {
+  closeRailCards();
+  openChiefChat();
+});
 // 执事轨道钮的点击改挂悬停卡开关（见轨道悬停浮卡段，2026-11-13）——
 // 原「点一下展开侧栏看花名册」退役。
 
@@ -11753,6 +13254,13 @@ const SETTINGS_SECTIONS = [
     id: "service",
     label: "服务",
     icon: '<rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/>',
+  },
+  {
+    id: "usage",
+    label: "用量",
+    // 2026-11-13 从服务页独立：累计 token 一行标签撑不起「总量 / 按模型 / 明细」三层信息。
+    // Lucide chart-column：一眼认出是统计，不用把「用量」读成才懂。
+    icon: '<path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/>',
   },
   {
     id: "memory",
@@ -12260,9 +13768,13 @@ function mountSegmented(root) {
 }
 
 /** 一节 = 标题在卡片外 + 卡片；节距/标题-卡片间距由 .set-sec 定（cindy 的节律） */
-function sectionMarkup(title, body) {
-  return `<section class="set-sec">
-    <h2 class="set-sec-title">${title}</h2>
+/** 分节标题；`action` 是标题右边那一颗钮（同一行，别把动作甩到下一行去）。 */
+function sectionMarkup(title, body, attrs = "", action = "") {
+  const head = action
+    ? `<div class="set-sec-head"><h2 class="set-sec-title">${title}</h2>${action}</div>`
+    : `<h2 class="set-sec-title">${title}</h2>`;
+  return `<section class="set-sec" ${attrs}>
+    ${head}
     ${body}
   </section>`;
 }
@@ -12281,6 +13793,8 @@ function replayPageEnter() {
  */
 async function renderSettings() {
   const page = currentSettingsPage();
+  // 记忆页整理轮询：一离开设置页就停；回来由 wireMemorySettings 重新按服务端状态接上。
+  stopMemoryPolling();
   renderSettingsNav(page);
   el.settingsInner.setAttribute("role", "tabpanel");
   el.settingsInner.setAttribute("aria-labelledby", `settings-tab-${page}`);
@@ -12371,18 +13885,17 @@ async function renderSettings() {
           `<div class="divider"></div>
            ${rowMarkup(
              "归档的会话",
-             state.archived > 0
-               ? `有 ${state.archived} 个会话已归档，数据还在`
-               : "归档的会话都收在归档页",
+             // 只留计数：解释性文字不常驻（界面文案密度口径）
+             state.archived > 0 ? `${state.archived} 个` : "",
              `<button class="ghost" type="button" id="open-archive">打开归档</button>`,
              { inlineHint: true },
            )}`
         }
         <div class="divider"></div>
         ${rowMarkup(
-          "导出全部数据",
-          "会话、消息、供应商配置（不含密钥）打包成 JSON，自己存档或复制",
-          `<button class="ghost" type="button" id="settings-export-all">导出</button>`,
+          "导出数据",
+          "勾选要带哪几块，打成 zip 压缩包；每块是独立目录，包根上有 README 与清单（不含密钥）",
+          `<button class="ghost" type="button" id="settings-export-all">导出…</button>`,
         )}
       </div>`,
     )}
@@ -12390,16 +13903,16 @@ async function renderSettings() {
       "自动归档",
       `<div class="card">
         ${rowMarkup(
-          "自动归档",
+          "自动归档旧会话",
           "",
           switchMarkup(false, { label: "自动归档", attrs: "data-archive-auto-switch" }),
         )}
         <div class="divider"></div>
         ${rowMarkup(
-          "归档天数",
+          "保留天数",
           "",
           `<input class="set-input archive-days" id="archive-auto-days" type="number" min="1" max="365"
-                  value="30" aria-label="自动归档天数" />`,
+                  value="30" aria-label="自动归档保留天数" />`,
         )}
         <div class="divider"></div>
         <div class="row" id="archive-auto-hint-row" hidden><div class="row-main"><div class="row-hint" id="archive-auto-hint"></div></div></div>
@@ -12447,7 +13960,7 @@ async function renderSettings() {
     document.getElementById("open-archive")?.addEventListener("click", () => go("settings", "archive"));
     document
       .getElementById("settings-export-all")
-      ?.addEventListener("click", () => void exportAllData());
+      ?.addEventListener("click", () => openExportModal());
     // 自动归档区（2026-11-13 对齐 ZCode §3）：开关走 toggleFlag（flags 卡同款），
     // 天数是数字输入，单独走 saveAutoArchiveDays（失败回显旧值）。
     const autoSwitch = el.settingsInner.querySelector("[data-archive-auto-switch]");
@@ -12507,8 +14020,9 @@ async function renderSettings() {
         <div class="set-card-body">
           <div class="archive-card-head">
             <div class="archive-filter">
+              <svg class="archive-filter-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
               <input class="set-input" id="archive-filter" type="search" spellcheck="false"
-                     placeholder="按标题或首句筛选" aria-label="筛选已归档的会话" />
+                     placeholder="搜索标题或首句" aria-label="筛选已归档的会话" />
             </div>
             <select class="set-input archive-select" id="archive-sort" aria-label="排序方式">
               <option value="archived">按归档时间</option>
@@ -12525,15 +14039,15 @@ async function renderSettings() {
       </div>`,
     )}
     ${sectionMarkup(
-      `已归档的项目目录<span class="archive-count" id="archive-project-count"></span>`,
+      `<span title="归档只把项目从列表和派活选择里收起；磁盘上的目录和文件一直没动">已归档的项目目录</span><span class="archive-count" id="archive-project-count"></span>`,
       `<div class="card">
         <div class="set-card-body">
-          <div class="set-hint">归档只把项目从列表和派活选择里收起；磁盘上的目录和文件一直没动。</div>
           <div class="proj-list" id="archive-project-list">
             <div class="set-hint">读取中…</div>
           </div>
         </div>
       </div>`,
+      `id="archive-project-section" hidden`,
     )}`;
 
     document
@@ -12650,14 +14164,13 @@ async function renderSettings() {
       }
     }, 100000);
   } else if (page === "service") {
-    // 服务页（2026-11-09 拆分后）：只留服务状态与开关——地址 / 通知 / 鉴权 / 用量 / 运行时 / 高级开关。
-    // 默认模型与供应商双栏在「模型」页；搜索源 2026-11-12 也搬到「模型」页，服务页不再重复。
+    // 服务页（2026-11-09 拆分后；2026-11-13 二次瘦身）：只留服务状态与开关——通知 / 鉴权 / 运行时 / 高级开关。
+    // 2026-11-13 退役的两行：地址（连接页的链路图已经说清，这里只是 location.origin 的复读）、
+    // 累计 token（整块搬去「用量」页——累计、按模型占比、明细三件事，一行标签装不下）。
     const notifyOn = localStorage.getItem(KEY_NOTIFY) === "1";
     el.settingsInner.innerHTML = `${sectionMarkup(
       "服务",
       `<div class="card">
-        ${rowMarkup("地址", "", `<span class="kv" id="svc-address">…</span>`)}
-        <div class="divider"></div>
         <div class="row">
           <div class="row-main">
             <div class="row-label">桌面通知</div>
@@ -12669,16 +14182,13 @@ async function renderSettings() {
           </div>
         </div>
         <div class="divider"></div>
-        ${rowMarkup("鉴权", "", `<span class="kv" id="svc-auth">…</span>`)}
-        <div class="divider"></div>
-        ${rowMarkup("累计 token", "", `<span class="kv" id="svc-usage">…</span>`)}
-        <div class="divider"></div>
-        <details class="td-usage-detail" id="svc-usage-detail">
-          <summary>按模型明细</summary>
-          <div class="td-usage-body" id="svc-usage-models">
-            <div class="row-hint">读取中…</div>
-          </div>
-        </details>
+        ${rowMarkup(
+          "鉴权",
+          // 悬停挂在「鉴权」两个字上：这一行的状态（本机无需配置）本身不需要解释，
+          // 用户真正要问的是"那手机怎么连"——扫码配对走的就是同一套凭据。
+          "扫码配对用的就是这一项：手机 App 扫配对码换一枚设备凭据，不用把令牌抄进手机；本机浏览器直接从这台电脑打开，也不需要令牌。",
+          `<span class="kv" id="svc-auth">…</span>`,
+        )}
       </div>`,
     )}
     ${sectionMarkup(
@@ -12742,6 +14252,28 @@ async function renderSettings() {
     void initRuntimeCard();
     // 高级开关（2026-11-09）：读一次渲染行
     void loadFlagsSettings();
+  } else if (page === "usage") {
+    // 用量页（2026-11-13 从服务页拆出）：累计 / 按模型 / 明细 三张卡，一份数据三个视角。
+    // 版式：累计卡照 ZCode settings/usage-stats 的 lifetime strip（一格一数、发丝竖分隔、数字 tabular）；
+    // 按模型与明细照 Cindy UsageBreakdownTables（色点对图例、占比格带小条、表格右对齐）。
+    // 数据只有 GET /api/v1/agent/usage 一份：durable 的 pi.usage 按会话相加。
+    // 刻意不做：金额（服务端 cost 固定 0，不假装知道价格）、按天曲线（pi.usage 只有累计，没有逐日流水）。
+    el.settingsInner.innerHTML = `${sectionMarkup(
+      "累计用量",
+      `<div class="card use-hero" id="use-hero"><div class="use-loading">读取中…</div></div>`,
+      "",
+      `<button class="ghost" type="button" id="use-refresh">刷新</button>`,
+    )}
+    ${sectionMarkup(
+      "按模型",
+      `<div class="card use-models" id="use-models"><div class="use-loading">读取中…</div></div>`,
+    )}
+    ${sectionMarkup(
+      "明细",
+      `<div class="card use-detail" id="use-detail"><div class="use-loading">读取中…</div></div>`,
+    )}`;
+    document.getElementById("use-refresh")?.addEventListener("click", () => void loadUsagePage());
+    void loadUsagePage();
   } else if (page === "models") {
     // 模型页（2026-11-09 从服务页拆出）：默认模型行 + 供应商双栏。
     // 拆的理由：这两块是"配上游"，跟服务状态（地址/通知/运行时）不是一个话题；
@@ -12765,16 +14297,7 @@ async function renderSettings() {
     )}
     ${sectionMarkup(
       "供应商",
-      `<div class="svc-head">
-        <div class="row-main">
-          <div class="set-hint" id="svc-provider-hint">Key 只留在本机服务端，不进 git、不进日志、不下发手机。</div>
-        </div>
-        <button class="btn-primary" type="button" id="provider-add">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
-          新建供应商
-        </button>
-      </div>
-      <div class="svc-split">
+      `<div class="svc-split">
         <div class="svc-nav" id="provider-list" aria-label="供应商列表">
           <div class="svc-nav-empty">读取中…</div>
         </div>
@@ -12782,6 +14305,11 @@ async function renderSettings() {
           <div class="svc-detail-empty"><div class="set-hint">读取中…</div></div>
         </div>
       </div>`,
+      "",
+      `<button class="btn-primary" type="button" id="provider-add">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+        新建供应商
+      </button>`,
     )}
     ${sectionMarkup(
       "搜索",
@@ -12820,8 +14348,12 @@ async function renderSettings() {
     });
     void loadModelsInfo();
   } else if (page === "memory") {
-    el.settingsInner.innerHTML = memorySettingsMarkup();
-    void wireMemorySettings();
+    // 2026-11-13 A 版：MEMORY_PAGE_A=false 整套退回旧页（旧 DOM / 旧逻辑都还在）。
+    const pageA = await ensureFlag("MEMORY_PAGE_A", true);
+    if (currentSettingsPage() !== "memory") return;
+    el.settingsInner.innerHTML = pageA ? memorySettingsMarkup() : memorySettingsMarkupLegacy();
+    if (pageA) void wireMemorySettings();
+    else void wireMemorySettingsLegacy();
   } else if (page === "partners") {
     el.settingsInner.innerHTML = sectionMarkup(
       "人设",
@@ -13790,6 +15322,10 @@ const FLAG_LABELS = {
   AGENT_EDIT_RESEND: { label: "编辑重发", tip: "自己的消息可以编辑后重发。" },
   CURRENT_PROJECT: { label: "当前项目", tip: "派活按当前项目归属；关掉 = 只有主工作区杂事态。" },
   MEMORY_ENABLED: { label: "记忆", tip: "记忆引擎总闸；关掉后新记忆立即停写，已加载的库要重启才彻底卸下。" },
+  MEMORY_PAGE_A: { label: "记忆页 A 版", tip: "开 = 大字概览 + 分组折叠的新记忆页；关 = 回到旧版记忆列表。改完刷新页面生效。" },
+  MEMORY_CONSOLIDATE_JOB: { label: "整理后台任务", tip: "开 = 点整理后后台跑，切走再回来能接上；关 = 页面同步等结果（旧行为）。" },
+  MEMORY_EXTRACT_NOISE: { label: "记忆噪声过滤", tip: "开 = 审批续跑等系统话术、命令句与问句不再写成经历；关 = 回到旧规则。MEMORY_EXTRACT=rule 不受影响。抽取器在启动时装配，改完重启服务生效。" },
+  MEMORY_EXTERNAL: { label: "一生记忆库入口", tip: "开 = 记忆页底部显示外部记忆库的库边界；关 = 整块不显示。" },
   MINISTER_DISPATCH_AUTHORITY: { label: "执事派发权", tip: "开 = 执事在自己的领域内可以直派活；关 = 全部绕回总管（改动前默认关）。" },
   DEVICE_AUTO_DISPATCH: { label: "设备自动派活", tip: "targetDevice=auto 时自动选设备（主机优先）。" },
   PARTNER_WORK_RECORD: { label: "工作履历", tip: "每单结算给执事落一条履历记录（append-only 台账）。" },
@@ -13811,6 +15347,9 @@ const FLAG_LABELS = {
   ARCHIVE_AUTO_ENABLED: { label: "自动归档", tip: "开启后，没动静的普通会话到天数就自动归档；置顶与运行中的不动。设置→会话 里也有这一区。" },
   ARCHIVE_AUTO_DAYS: { label: "自动归档天数", tip: "没动静多少天算旧会话（1-365），默认 30。" },
   CHAT_HARD_DELETE: { label: "永久删除", tip: "归档页里的永久删除端点总闸；关掉后预检与删除都返回 400，归档/恢复不受影响。默认开。" },
+  CHAT_STREAM_REVEAL: { label: "对话逐字浮现", tip: "流式回答按汉字/英文词淡入，而不是整块蹦出。关 = 退回旧的整块渲染，改完下一轮生效。系统开启「减少动态效果」时自动关闭。" },
+  // 历史分页回滚（2026-11-13）：关 = 一次拉最近 200 条、没有上滑加载与日期分隔。
+  CHAT_HISTORY_PAGING_ENABLED: { label: "对话历史分页", tip: "开 = 打开会话先加载最近一页，往上滑再加载更早的（按天分组、带日期分隔）；关 = 退回一次拉最近 200 条。改完重新打开会话生效。" },
 };
 
 async function loadFlagsSettings() {
@@ -13894,6 +15433,14 @@ async function toggleFlag(key, value, sw, seg) {
         button.setAttribute("aria-checked", String(button.dataset.value === String(value)));
       }
       syncSegmented(seg);
+    }
+    // 对话框的逐字浮现开关下一轮要立刻看到变化，不能等刷新：同步内存投影 + 缓存行。
+    if (key === "CHAT_STREAM_REVEAL") state.chatRevealFlag = String(value) !== "false";
+    // 历史分页同理：下一次 openChat 立刻按新开关走（当前屏幕不重排，避免翻页中被打断）。
+    if (key === "CHAT_HISTORY_PAGING_ENABLED") state.chatPagingFlag = String(value) !== "false";
+    if (state.flagsCache instanceof Map) {
+      const row = state.flagsCache.get(key);
+      state.flagsCache.set(key, { ...(row || { key }), value: String(value), hot: data.hot !== false });
     }
     toast(data.hot ? "已保存，即时生效" : "已保存，重启服务后生效");
   } catch (error) {
@@ -14271,28 +15818,31 @@ document.addEventListener(
   true,
 );
 
-/* ── 记忆设置（2026-11-06；2026-11-08 扫尾批 6 补整理与导入）──
- * 只读列表 + 四个动作：删掉 / 标过时 / 整理记忆 / 导入记忆。刻意不做编辑与搜索：
- *   - 编辑记忆等于让它变成第二个人格，删了重说一遍更干净；
- *   - 千级以内先给分组滚动，真上千再加（同设置页不做全局搜索的口径）。
+/* ── 记忆设置（2026-11-06；2026-11-08 扫尾批 6 补整理与导入；2026-11-13 A 版）──
+ * A 版 = 大字概览 + 分类计数片（唯一筛选）+ 搜索 + 分组折叠 + 可恢复的整理状态。
+ * 旧版整套 DOM/逻辑保留在 *Legacy 函数里，`MEMORY_PAGE_A=false` 时回落。
  * 数据形状见 memory-api.ts：GET /api/v1/agent/memory。
- * 「整理记忆」只出建议，人在卡片上逐条点「应用」才动库（D18）；导入只增不改。 */
+ * 「整理记忆」只出建议，人在卡片上逐条点「应用」才动库（D18）；导入本轮只占位。 */
 
 const MEMORY_KIND_LABEL = {
   preference: "偏好",
   intention: "打算",
   fact: "事实",
+  experience: "经验",
   episode: "经历",
   entity: "人事物",
+  work: "履历",
 };
-const MEMORY_KIND_ORDER = ["preference", "intention", "fact", "entity", "episode"];
+const MEMORY_KIND_ORDER = ["preference", "intention", "fact", "experience", "entity", "episode", "work"];
 /* 组头悬停解释（2026-11-08）：组标题挪到卡片外，"经历是干啥的"这类疑问悬停即答 */
 const MEMORY_KIND_TIPS = {
   preference: "你的喜好与习惯（例如「喜欢简洁的汇报」）。每轮对话开头都会被想起。",
   intention: "还没兑现的打算（例如「下周开始跑步」）。未过期时优先想起；到期后自动变成普通事实。",
   fact: "关于你和你的生活的客观事实（例如「家里有两只猫」），按相关度召回。",
+  experience: "这类活下次可以怎么做。从你的纠正里提炼出来，不会过期。",
   entity: "重要的人、项目、东西的条目，聊到相关的就会想起。",
-  episode: "聊过、经历过的事的记录，帮你想起「上次……」。按相关度召回，不会每次都出现。",
+  episode: "聊过、经历过的事的记录，帮你想起「上次……」。日常经过，默认收起。",
+  work: "派单结算留下的履历，只增不改；员工档案页里看。",
 };
 
 /** 当前查看 / 整理 / 导入的 scope。进页固定回 global，避免下拉与数据不同步。 */
@@ -14300,7 +15850,7 @@ let memoryScope = "global";
 /** 本轮整理的结果计数（应用 / 忽略），只用于结果行。 */
 let memoryReviewStats = { applied: 0, ignored: 0, total: 0 };
 
-function memorySettingsMarkup() {
+function memorySettingsMarkupLegacy() {
   return `${sectionMarkup(
     "记忆",
     `<div class="card">
@@ -14351,7 +15901,7 @@ function memorySettingsMarkup() {
   )}`;
 }
 
-async function wireMemorySettings() {
+async function wireMemorySettingsLegacy() {
   const list = document.getElementById("mem-list");
   const status = document.getElementById("mem-status");
   if (!list || !status) return;
@@ -14794,6 +16344,884 @@ function wireMemoryActions(box) {
   }
 }
 
+/* ── 记忆页 A 版（2026-11-13）──────────────────────────────
+ * 大字概览 + 分类计数片（唯一筛选）+ 搜索 + 分组折叠 + 可恢复的整理状态。
+ * 旧版整套保持原样（*Legacy），`MEMORY_PAGE_A=false` 时回落。
+ * 整理：?background=1 立即 202，页面轮询 /consolidate/state；
+ * 切页回来能看见"正在整理 / 上次建议 / 失败原因"，同一 scope 在跑时不会重复调模型。 */
+
+const MEMORY_A_PAGE_SIZE = 20;
+const MEMORY_A_DEFAULT_OPEN = new Set(["preference", "intention"]);
+
+const memoryPageState = {
+  gen: 0,
+  scope: "global",
+  q: "",
+  kind: "",
+  counts: { all: 0, byKind: {}, superseded: 0 },
+  total: 0,
+  groups: new Map(),
+  status: null,
+  canConsolidate: false,
+  canImport: false,
+  consolidateJob: false,
+  externalLines: [],
+  pollTimer: 0,
+};
+
+function memoryPageAlive(gen) {
+  return (
+    memoryPageState.gen === gen &&
+    currentSettingsPage() === "memory" &&
+    Boolean(document.getElementById("mem-a-groups"))
+  );
+}
+
+function stopMemoryPolling() {
+  if (memoryPageState.pollTimer) {
+    clearInterval(memoryPageState.pollTimer);
+    memoryPageState.pollTimer = 0;
+  }
+}
+
+function startMemoryPolling(gen) {
+  if (memoryPageState.pollTimer) return;
+  if (!memoryPageAlive(gen)) return;
+  memoryPageState.pollTimer = window.setInterval(() => {
+    void loadMemoryReviewState(gen);
+  }, 1500);
+}
+
+function memoryShortDate(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const date = /^\d{4}-\d{2}-\d{2}/.test(raw) ? new Date(`${raw.slice(0, 10)}T00:00:00`) : new Date(raw);
+  if (Number.isNaN(date.getTime())) return raw.slice(0, 10);
+  const now = new Date();
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const dd = String(date.getDate()).padStart(2, "0");
+  return date.getFullYear() === now.getFullYear()
+    ? `${mm}-${dd}`
+    : `${date.getFullYear()}-${mm}-${dd}`;
+}
+
+function memoryStatusTime(value) {
+  const date = new Date(String(value || ""));
+  if (Number.isNaN(date.getTime())) return "";
+  const now = new Date();
+  const hh = String(date.getHours()).padStart(2, "0");
+  const mm = String(date.getMinutes()).padStart(2, "0");
+  return date.toDateString() === now.toDateString()
+    ? `今天 ${hh}:${mm}`
+    : `${memoryShortDate(date.toISOString())} ${hh}:${mm}`;
+}
+
+function memoryElapsedSeconds(value) {
+  const started = Date.parse(String(value || ""));
+  if (Number.isNaN(started)) return 0;
+  return Math.max(0, Math.round((Date.now() - started) / 1000));
+}
+
+function memorySourceLabel(source) {
+  const value = String(source || "");
+  if (value === "diary") return "日记";
+  if (value === "user") return "你说";
+  if (value === "taught") return "你教的";
+  if (value === "imported") return "导入";
+  if (value === "work") return "派单";
+  if (value === "persona") return "长期库";
+  if (value.startsWith("extract")) return "对话";
+  return value || "—";
+}
+
+function memoryGroupOf(kind, total = 0) {
+  let group = memoryPageState.groups.get(kind);
+  if (!group) {
+    group = {
+      items: [],
+      total,
+      loaded: false,
+      loading: false,
+      error: "",
+      open: MEMORY_A_DEFAULT_OPEN.has(kind) || Boolean(memoryPageState.q),
+    };
+    memoryPageState.groups.set(kind, group);
+  }
+  if (total > 0) group.total = total;
+  return group;
+}
+
+function memoryGroupHint(kind) {
+  if (kind === "preference") return "每轮都会想起";
+  if (kind === "intention") return "未兑现的，优先想起";
+  if (kind === "episode") return "日常经过 · 默认收起";
+  return "";
+}
+
+function memorySettingsMarkup() {
+  return sectionMarkup(
+    "记忆",
+    `<div class="card mem-a-overview">
+      <div class="mem-a-overview-main">
+        <div class="mem-a-total"><b id="mem-a-total">—</b><span>条记忆</span></div>
+        <div class="mem-a-chips" id="mem-a-chips"></div>
+      </div>
+      <div class="mem-a-overview-side">
+        <div class="mem-a-status" id="mem-a-status">读取中…</div>
+        <div class="mem-a-audit" id="mem-a-audit" hidden></div>
+      </div>
+    </div>
+    <div class="mem-a-run" id="mem-a-run" hidden>
+      <span class="mem-a-spinner" aria-hidden="true"></span>
+      <span id="mem-a-run-text">正在整理…</span>
+      <span class="mem-a-elapsed" id="mem-a-elapsed"></span>
+    </div>
+    <div class="card mem-a-props" id="mem-a-props-card" hidden>
+      <div class="mem-a-props-head">
+        <span class="mem-a-props-title">整理建议</span>
+        <span class="mem-a-count" id="mem-a-prop-count"></span>
+        <span class="mem-a-prop-note" id="mem-a-prop-note"></span>
+      </div>
+      <div class="mem-a-props-list" id="mem-a-props"></div>
+    </div>
+    <div class="mem-a-toolbar">
+      <label class="mem-a-search">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+        <input id="mem-a-search" type="search" spellcheck="false"
+               placeholder="搜记忆内容，比如「猫」「汇报」「跑步」" aria-label="搜索记忆" />
+      </label>
+      <select class="mem-select" id="mem-scope" aria-label="选择记忆范围">
+        <option value="global">总管（global）</option>
+      </select>
+    </div>
+    <div class="mem-a-groups" id="mem-a-groups"><div class="set-hint">读取中…</div></div>
+    <div class="mem-a-external" id="mem-a-external" hidden>
+      <div class="mem-a-external-main">
+        <div class="mem-a-external-title">一生记忆库</div>
+        <div class="mem-a-external-line" id="mem-a-external-line"></div>
+      </div>
+      <button class="ghost mem-act" type="button" id="mem-a-ext-open" hidden>查看</button>
+    </div>`,
+    "",
+    `<div class="mem-a-head-actions">
+      <button class="ghost mem-act" type="button" id="mem-import" hidden>导入</button>
+      <button class="btn-primary mem-a-consolidate" type="button" id="mem-consolidate" hidden
+        data-tip="整理记忆 = 让模型回看最近的记忆和原始对话，找出重复、过时、说法不一致的条目。&#10;&#10;它只给建议：你逐条点「应用」才会把旧的那条标成过时；不会自动删，也没有「全部应用」。">整理记忆 <span class="mem-a-q" aria-hidden="true">?</span></button>
+    </div>`,
+  );
+}
+
+async function wireMemorySettings() {
+  const gen = ++memoryPageState.gen;
+  stopMemoryPolling();
+  memoryPageState.scope = "global";
+  memoryPageState.q = "";
+  memoryPageState.kind = "";
+  memoryPageState.counts = { all: 0, byKind: {}, superseded: 0 };
+  memoryPageState.total = 0;
+  memoryPageState.groups.clear();
+  memoryPageState.status = null;
+  memoryPageState.externalLines = [];
+
+  const scopeSelect = document.getElementById("mem-scope");
+  if (scopeSelect) {
+    await fillMemoryScopes(scopeSelect);
+    scopeSelect.value = memoryPageState.scope;
+    scopeSelect.addEventListener("change", () => {
+      memoryPageState.scope = scopeSelect.value || "global";
+      memoryPageState.groups.clear();
+      memoryPageState.status = null;
+      clearMemoryProposalCard();
+      void loadMemorySummary(gen);
+      void loadMemoryReviewState(gen);
+    });
+  }
+
+  const search = document.getElementById("mem-a-search");
+  let searchTimer = 0;
+  search?.addEventListener("input", () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      memoryPageState.q = search.value.trim();
+      memoryPageState.groups.clear();
+      void loadMemorySummary(gen);
+    }, 250);
+  });
+
+  document.getElementById("mem-import")?.addEventListener("click", openMemoryImportPlaceholder);
+  document.getElementById("mem-consolidate")?.addEventListener("click", () => {
+    void runMemoryConsolidateA(gen);
+  });
+
+  const chips = document.getElementById("mem-a-chips");
+  chips?.addEventListener("click", (event) => {
+    const button = event.target.closest?.("[data-mem-kind]");
+    if (!button) return;
+    const kind = button.getAttribute("data-mem-kind") || "all";
+    memoryPageState.kind = kind === "all" || kind === memoryPageState.kind ? "" : kind;
+    if (memoryPageState.kind) memoryGroupOf(memoryPageState.kind).open = true;
+    renderMemoryChips();
+    renderMemoryGroups(gen);
+  });
+
+  const groups = document.getElementById("mem-a-groups");
+  groups?.addEventListener("click", (event) => {
+    const head = event.target.closest?.(".mem-a-ghead");
+    if (head) {
+      const kind = head.closest("[data-mem-group]")?.getAttribute("data-mem-group") || "";
+      const group = memoryGroupOf(kind);
+      group.open = !group.open;
+      const section = head.closest(".mem-a-group");
+      section?.classList.toggle("open", group.open);
+      const body = section?.querySelector(".mem-a-gbody");
+      if (group.open) body?.removeAttribute("hidden");
+      else body?.setAttribute("hidden", "true");
+      head.setAttribute("aria-expanded", String(group.open));
+      if (group.open && !group.loaded) void loadMemoryGroup(kind, gen);
+      return;
+    }
+    const more = event.target.closest?.("[data-mem-more]");
+    if (more) {
+      void loadMemoryGroup(more.getAttribute("data-mem-more") || "", gen, { append: true });
+      return;
+    }
+    const supersede = event.target.closest?.("[data-mem-supersede]");
+    if (supersede) {
+      void supersedeMemoryItem(supersede.getAttribute("data-mem-supersede") || "", gen);
+      return;
+    }
+    const forget = event.target.closest?.("[data-mem-forget]");
+    if (forget) void forgetMemoryItem(forget.getAttribute("data-mem-forget") || "", gen);
+  });
+
+  const props = document.getElementById("mem-a-props");
+  props?.addEventListener("click", (event) => {
+    const evidence = event.target.closest?.(".mem-prop-evidence.is-hit[data-conv]");
+    if (evidence) {
+      const conversationId = evidence.getAttribute("data-conv");
+      if (conversationId) void openConversation(conversationId);
+      return;
+    }
+    const apply = event.target.closest?.("[data-prop-apply]");
+    if (apply) {
+      void applyMemoryProposalA(apply.closest(".mem-prop"), gen);
+      return;
+    }
+    const ignore = event.target.closest?.("[data-prop-ignore]");
+    if (ignore) void dismissMemoryProposalA(ignore.closest(".mem-prop"), gen);
+  });
+
+  document.getElementById("mem-a-ext-open")?.addEventListener("click", () => {
+    const lines = memoryPageState.externalLines;
+    openModal("一生记忆库", (body) => {
+      body.innerHTML = `<div class="mem-a-ext-lines">${lines
+        .map((line) => `<p>${esc(line)}</p>`)
+        .join("")}</div>
+        <div class="modal-actions"><button class="modal-primary" type="button" data-modal-ok>知道了</button></div>`;
+      body.querySelector("[data-modal-ok]")?.addEventListener("click", closeModal);
+    });
+  });
+
+  await Promise.all([
+    loadMemorySummary(gen),
+    loadMemoryReviewState(gen),
+    loadMemoryExternal(gen),
+  ]);
+}
+
+function openMemoryImportPlaceholder() {
+  // 导入先占位（2026-11-13 用户拍板）：现在没有统一的记忆格式，等格式定了再接。
+  showAlert("导入记忆", "这块先占个位：目前还没有统一的记忆格式，等格式定了再做。");
+}
+
+async function loadMemorySummary(gen) {
+  const totalEl = document.getElementById("mem-a-total");
+  const chipsEl = document.getElementById("mem-a-chips");
+  if (!totalEl || !chipsEl) return;
+  const scope = memoryPageState.scope;
+  const q = memoryPageState.q;
+  const query = q ? `&q=${encodeURIComponent(q)}` : "";
+  try {
+    const response = await request(
+      `/api/v1/agent/memory?scope=${encodeURIComponent(scope)}&limit=0&excludeKinds=work${query}`,
+      { cache: "no-store" },
+    );
+    if (!memoryPageAlive(gen) || memoryPageState.scope !== scope || memoryPageState.q !== q) return;
+    if (response.status === 404) {
+      totalEl.textContent = "—";
+      chipsEl.replaceChildren();
+      const groups = document.getElementById("mem-a-groups");
+      if (groups) groups.innerHTML = `<div class="set-hint">记忆未启用（服务端 MEMORY_ENABLED=false）。</div>`;
+      return;
+    }
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.message || String(response.status));
+    const counts = data.counts && typeof data.counts === "object"
+      ? data.counts
+      : { all: Number(data.total) || 0, byKind: data.byKind || {}, superseded: 0 };
+    memoryPageState.counts = {
+      all: Number(counts.all) || 0,
+      byKind: counts.byKind && typeof counts.byKind === "object" ? counts.byKind : {},
+      superseded: Number(counts.superseded) || 0,
+    };
+    memoryPageState.total = Number(data.total) || memoryPageState.counts.all;
+    memoryPageState.canConsolidate = data.canConsolidate === true;
+    memoryPageState.canImport = data.canImport === true;
+    memoryPageState.consolidateJob = data.consolidateJob === true;
+    totalEl.textContent = String(memoryPageState.counts.all);
+    updateMemoryControls();
+    renderMemoryChips();
+    renderMemoryGroups(gen);
+  } catch (error) {
+    if (!memoryPageAlive(gen) || memoryPageState.scope !== scope || memoryPageState.q !== q) return;
+    if (error.message === "forbidden") return;
+    totalEl.textContent = "—";
+    chipsEl.replaceChildren();
+    const groups = document.getElementById("mem-a-groups");
+    if (groups) groups.innerHTML = `<div class="set-hint is-error">读不到记忆：${esc(error.message)}</div>`;
+  }
+}
+
+function updateMemoryControls() {
+  const consolidate = document.getElementById("mem-consolidate");
+  const importButton = document.getElementById("mem-import");
+  if (consolidate) consolidate.hidden = !memoryPageState.canConsolidate;
+  if (importButton) importButton.hidden = !memoryPageState.canImport;
+  const running = memoryPageState.status?.running === true;
+  if (consolidate) {
+    consolidate.disabled = running;
+    consolidate.innerHTML = running
+      ? "整理中…"
+      : '整理记忆 <span class="mem-a-q" aria-hidden="true">?</span>';
+  }
+}
+
+function renderMemoryChips() {
+  const box = document.getElementById("mem-a-chips");
+  if (!box) return;
+  const counts = memoryPageState.counts;
+  const parts = [
+    `<button class="mem-a-chip ${memoryPageState.kind ? "" : "on"}" type="button" data-mem-kind="all">全部<b>${counts.all}</b></button>`,
+  ];
+  for (const kind of MEMORY_KIND_ORDER) {
+    if (kind === "work") continue;
+    const count = Number(counts.byKind[kind]) || 0;
+    if (count <= 0 && memoryPageState.kind !== kind) continue;
+    const on = memoryPageState.kind === kind ? "on" : "";
+    parts.push(
+      `<button class="mem-a-chip ${on}" type="button" data-mem-kind="${kind}">${esc(MEMORY_KIND_LABEL[kind] || kind)}<b>${count}</b></button>`,
+    );
+  }
+  box.innerHTML = parts.join("");
+}
+
+function renderMemoryGroups(gen) {
+  const box = document.getElementById("mem-a-groups");
+  if (!box) return;
+  const counts = memoryPageState.counts.byKind;
+  const kinds = memoryPageState.kind
+    ? [memoryPageState.kind]
+    : MEMORY_KIND_ORDER.filter((kind) => kind !== "work" && (Number(counts[kind]) || 0) > 0);
+  if (kinds.length === 0) {
+    box.innerHTML = memoryPageState.q
+      ? `<div class="set-hint">没有匹配「${esc(memoryPageState.q)}」的记忆。</div>`
+      : `<div class="set-hint">还没有记忆。聊几次之后，偏好会自动出现在这里；也可以直接对助手说「记住：……」。</div>`;
+    return;
+  }
+  box.innerHTML = kinds
+    .map((kind) => {
+      const total = Number(counts[kind]) || 0;
+      const group = memoryGroupOf(kind, total);
+      if (memoryPageState.kind === kind) group.open = true;
+      const label = esc(MEMORY_KIND_LABEL[kind] || kind);
+      const tip = MEMORY_KIND_TIPS[kind] || "";
+      const hint = memoryGroupHint(kind);
+      return `<section class="mem-a-group ${group.open ? "open" : ""}" data-mem-group="${kind}">
+        <button class="mem-a-ghead" type="button" aria-expanded="${group.open}">
+          <svg class="mem-a-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+          <span class="mem-a-gtitle"${tip ? ` data-tip="${attr(tip)}"` : ""}>${label}</span>
+          <span class="mem-a-gcount">${total}</span>
+          ${hint ? `<span class="mem-a-ghint">${hint}</span>` : ""}
+        </button>
+        <div class="mem-a-gbody"${group.open ? "" : " hidden"}>${memoryGroupBodyMarkup(group, kind)}</div>
+      </section>`;
+    })
+    .join("");
+  for (const kind of kinds) {
+    const group = memoryGroupOf(kind);
+    if (group.open && !group.loaded && !group.loading) void loadMemoryGroup(kind, gen);
+  }
+}
+
+function memoryGroupBodyMarkup(group, kind) {
+  if (group.loading && group.items.length === 0) return `<div class="set-hint">读取中…</div>`;
+  if (group.error) return `<div class="set-hint is-error">${esc(group.error)}</div>`;
+  if (group.items.length === 0) return `<div class="set-hint">还没有这类记忆。</div>`;
+  const more =
+    group.items.length < group.total
+      ? `<button class="mem-a-more" type="button" data-mem-more="${kind}">还有 ${group.total - group.items.length} 条 · 加载更多</button>`
+      : "";
+  return group.items.map((item) => memoryItemMarkupA(item)).join("") + more;
+}
+
+function renderMemoryGroupBody(kind) {
+  const section = document.querySelector(`.mem-a-group[data-mem-group="${CSS.escape(kind)}"]`);
+  const body = section?.querySelector(".mem-a-gbody");
+  if (!body) return;
+  body.innerHTML = memoryGroupBodyMarkup(memoryGroupOf(kind), kind);
+}
+
+async function loadMemoryGroup(kind, gen, { append = false } = {}) {
+  if (!kind) return;
+  const group = memoryGroupOf(kind);
+  if (group.loading) return;
+  group.loading = true;
+  if (!append) group.error = "";
+  renderMemoryGroupBody(kind);
+  const offset = append ? group.items.length : 0;
+  const scope = memoryPageState.scope;
+  const q = memoryPageState.q;
+  const query = q ? `&q=${encodeURIComponent(q)}` : "";
+  try {
+    const response = await request(
+      `/api/v1/agent/memory?scope=${encodeURIComponent(scope)}&kind=${encodeURIComponent(kind)}&limit=${MEMORY_A_PAGE_SIZE}&offset=${offset}&excludeKinds=work${query}`,
+      { cache: "no-store" },
+    );
+    if (!memoryPageAlive(gen) || memoryPageState.scope !== scope || memoryPageState.q !== q) return;
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.message || String(response.status));
+    const items = Array.isArray(data.items) ? data.items : [];
+    group.items = append ? [...group.items, ...items] : items;
+    group.total = Number(data.total) || group.items.length;
+    group.loaded = true;
+  } catch (error) {
+    if (!memoryPageAlive(gen) || memoryPageState.scope !== scope || memoryPageState.q !== q) return;
+    if (error.message === "forbidden") return;
+    group.error = `读不到记忆：${error.message}`;
+  } finally {
+    group.loading = false;
+    if (memoryPageAlive(gen)) renderMemoryGroupBody(kind);
+  }
+}
+
+function memoryItemMarkupA(item) {
+  const raw = String(item.content || "");
+  const lines = raw.split("\n");
+  let head = lines[0] || "";
+  const extra = lines.slice(1).filter(Boolean);
+  let contentDate = "";
+  if (item.kind === "episode") {
+    const match = /^(\d{4}-\d{2}-\d{2})：\s*/.exec(head);
+    if (match) {
+      contentDate = match[1];
+      head = head.slice(match[0].length);
+    }
+  }
+  const when = memoryShortDate(contentDate || item.createdAt);
+  const source = memorySourceLabel(item.source);
+  const recalled = Number(item.recallCount) > 0 ? ` · 想起 ${Number(item.recallCount)} 次` : "";
+  let expiry = "";
+  if (item.kind === "intention" && item.expiresAt) {
+    const days = Math.ceil((Date.parse(item.expiresAt) - Date.now()) / 86_400_000);
+    if (Number.isFinite(days)) expiry = days >= 0 ? ` · 还有 ${days} 天` : " · 已过期";
+  }
+  return `<div class="mem-a-item" data-memory-id="${esc(item.id)}">
+    <div class="mem-a-item-main">
+      <div class="mem-a-item-text">${esc(head)}</div>
+      ${extra.length ? `<div class="mem-a-item-why">${extra.map((line) => esc(line)).join("<br>")}</div>` : ""}
+      <div class="mem-a-item-meta">${esc(when)} · ${esc(source)}${esc(recalled)}${esc(expiry)}</div>
+    </div>
+    <div class="mem-a-item-actions">
+      <button class="mem-a-icon" type="button" data-mem-supersede="${esc(item.id)}" title="标为过时" aria-label="标为过时">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="m5.6 5.6 12.8 12.8"/></svg>
+      </button>
+      <button class="mem-a-icon" type="button" data-mem-forget="${esc(item.id)}" title="删除" aria-label="删除">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+      </button>
+    </div>
+  </div>`;
+}
+
+async function supersedeMemoryItem(id, gen) {
+  if (!id) return;
+  const ok = await openConfirm({
+    title: "标为过时",
+    message: "把这条标成过时？",
+    detail: "之后不会再被想起，但记录还留着。",
+    confirmText: "标为过时",
+  });
+  if (!ok) return;
+  try {
+    const response = await request(`/api/v1/agent/memory/${encodeURIComponent(id)}/supersede`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    if (!response.ok) throw new Error(String(response.status));
+    toast("已标为过时");
+    await refreshMemoryGroups(gen);
+  } catch (error) {
+    if (error.message !== "forbidden") toast(`操作失败：${error.message}`);
+  }
+}
+
+async function forgetMemoryItem(id, gen) {
+  if (!id) return;
+  const ok = await openConfirm({
+    title: "删除记忆",
+    message: "删掉这条记忆？",
+    detail: "删了就找不回来了。",
+    confirmText: "删除",
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    const response = await request(`/api/v1/agent/memory/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    });
+    if (!response.ok) throw new Error(String(response.status));
+    toast("已删除");
+    await refreshMemoryGroups(gen);
+  } catch (error) {
+    if (error.message !== "forbidden") toast(`删除失败：${error.message}`);
+  }
+}
+
+async function refreshMemoryGroups(gen) {
+  for (const group of memoryPageState.groups.values()) {
+    group.items = [];
+    group.loaded = false;
+    group.loading = false;
+    group.error = "";
+  }
+  await loadMemorySummary(gen);
+}
+
+async function loadMemoryReviewState(gen) {
+  const statusEl = document.getElementById("mem-a-status");
+  if (!statusEl) return;
+  const scope = memoryPageState.scope;
+  try {
+    const response = await request(
+      `/api/v1/agent/memory/consolidate/state?scope=${encodeURIComponent(scope)}`,
+      { cache: "no-store" },
+    );
+    if (!memoryPageAlive(gen) || memoryPageState.scope !== scope) return;
+    if (response.status === 404) {
+      memoryPageState.canConsolidate = false;
+      updateMemoryControls();
+      return;
+    }
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.message || String(response.status));
+    memoryPageState.status = {
+      running: data.running === true,
+      startedAt: data.startedAt || null,
+      generatedAt: data.generatedAt || null,
+      proposals: Array.isArray(data.proposals) ? data.proposals : [],
+      source: data.source || "none",
+      error: data.error || null,
+      audit: data.audit || null,
+    };
+    if (memoryPageState.status.running) startMemoryPolling(gen);
+    else stopMemoryPolling();
+    renderMemoryReviewState();
+  } catch (error) {
+    if (!memoryPageAlive(gen) || error.message === "forbidden") return;
+    statusEl.textContent = `整理状态读取失败：${error.message}`;
+  }
+}
+
+function renderMemoryReviewState() {
+  const status = memoryPageState.status;
+  const statusEl = document.getElementById("mem-a-status");
+  const auditEl = document.getElementById("mem-a-audit");
+  const runEl = document.getElementById("mem-a-run");
+  if (!statusEl) return;
+
+  if (status?.running) {
+    statusEl.textContent = `正在整理… 已 ${memoryElapsedSeconds(status.startedAt)} 秒`;
+  } else if (status?.error) {
+    const pending = status.proposals?.length || 0;
+    const reason = status.error.message || status.error.error || "未知原因";
+    statusEl.textContent = pending
+      ? `${pending} 条旧建议待看 · 上次整理失败：${reason}`
+      : `上次整理失败：${reason}`;
+  } else if (status?.proposals?.length) {
+    statusEl.textContent = `上次整理 ${memoryStatusTime(status.generatedAt)} · ${status.proposals.length} 条建议待看`;
+  } else if (status?.generatedAt) {
+    statusEl.textContent = `上次整理 ${memoryStatusTime(status.generatedAt)} · 暂无待处理建议`;
+  } else {
+    statusEl.textContent = "还没整理过";
+  }
+
+  if (auditEl) {
+    const merged = Array.isArray(status?.audit?.merged) ? status.audit.merged.length : 0;
+    const retired = Array.isArray(status?.audit?.retired) ? status.audit.retired.length : 0;
+    if (merged + retired > 0) {
+      auditEl.hidden = false;
+      auditEl.textContent = `系统自检：${merged} 条完全重复${retired ? ` · ${retired} 条 90 天没用到` : ""}`;
+    } else {
+      auditEl.hidden = true;
+      auditEl.textContent = "";
+    }
+  }
+
+  if (runEl) {
+    runEl.hidden = !status?.running;
+    if (status?.running) {
+      const text = document.getElementById("mem-a-run-text");
+      const elapsed = document.getElementById("mem-a-elapsed");
+      if (text) text.textContent = "正在整理这个范围的记忆 · 找重复、找过时、回原始对话找证据";
+      if (elapsed) elapsed.textContent = `已 ${memoryElapsedSeconds(status.startedAt)}s`;
+    }
+  }
+
+  updateMemoryControls();
+  renderMemoryProposalCards();
+}
+
+function clearMemoryProposalCard() {
+  const card = document.getElementById("mem-a-props-card");
+  const box = document.getElementById("mem-a-props");
+  if (card) card.hidden = true;
+  if (box) box.replaceChildren();
+}
+
+function renderMemoryProposalCards() {
+  const card = document.getElementById("mem-a-props-card");
+  const box = document.getElementById("mem-a-props");
+  const count = document.getElementById("mem-a-prop-count");
+  const note = document.getElementById("mem-a-prop-note");
+  if (!card || !box) return;
+  const proposals = memoryPageState.status?.proposals ?? [];
+  if (!proposals.length) {
+    card.hidden = true;
+    box.replaceChildren();
+    if (count) count.textContent = "";
+    return;
+  }
+  card.hidden = false;
+  if (count) count.textContent = `${proposals.length} 条`;
+  if (note) {
+    note.textContent =
+      memoryPageState.status?.source === "pending"
+        ? "存档建议 · 出处引文不再显示"
+        : "只建议，不会自动改";
+  }
+  box.innerHTML = proposals.map((item) => memoryProposalMarkupA(item)).join("");
+}
+
+function memoryProposalMarkupA(item) {
+  const keep = String(item.keep?.content || item.keepId || "");
+  const drop = String(item.drop?.content || item.dropId || "");
+  const reason = String(item.reason || "");
+  let evidenceBlock = "";
+  if (item.evidence !== undefined) {
+    const ev = item.evidence && typeof item.evidence === "object" ? item.evidence : null;
+    if (ev && ev.text) {
+      evidenceBlock = `<button class="mem-prop-evidence is-hit" type="button"${
+        ev.conversationId ? ` data-conv="${attr(ev.conversationId)}"` : ""
+      } data-tip="原始出处${ev.conversationId ? "，点击跳回原对话" : ""}">${esc(ev.text)}</button>`;
+    } else {
+      evidenceBlock = `<div class="mem-prop-evidence is-miss">未找到原始出处（导入或日记来源的记录不在对话里），不挡应用</div>`;
+    }
+  }
+  return `<div class="mem-prop" data-keep="${esc(item.keepId)}" data-drop="${esc(item.dropId)}">
+    <div class="mem-prop-line"><span class="mem-prop-tag is-keep">保留</span><span class="mem-prop-text">${esc(keep)}</span></div>
+    <div class="mem-prop-line"><span class="mem-prop-tag is-drop">收编</span><span class="mem-prop-text">${esc(drop)}</span></div>
+    ${reason ? `<div class="mem-prop-reason">${esc(reason)}</div>` : ""}
+    ${evidenceBlock}
+    <div class="mem-prop-actions">
+      <button class="ghost mem-act" type="button" data-prop-apply>应用</button>
+      <button class="ghost mem-act" type="button" data-prop-ignore>忽略</button>
+    </div>
+  </div>`;
+}
+
+async function applyMemoryProposalA(card, gen) {
+  if (!card || card.classList.contains("is-done")) return;
+  const keepId = card.getAttribute("data-keep") || "";
+  const dropId = card.getAttribute("data-drop") || "";
+  if (!keepId || !dropId) return;
+  const apply = card.querySelector("[data-prop-apply]");
+  const ignore = card.querySelector("[data-prop-ignore]");
+  if (apply) apply.disabled = true;
+  if (ignore) ignore.disabled = true;
+  try {
+    const response = await request("/api/v1/agent/memory/consolidate/apply", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scope: memoryPageState.scope, keepId, dropId }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.message || String(response.status));
+    card.classList.add("is-done");
+    const actions = card.querySelector(".mem-prop-actions");
+    if (actions) {
+      actions.innerHTML = `<span class="mem-prop-status">已应用${data.alreadyApplied ? "（之前已应用过）" : ""}</span>`;
+    }
+    if (memoryPageState.status?.proposals) {
+      memoryPageState.status.proposals = memoryPageState.status.proposals.filter(
+        (item) => !(item.keepId === keepId && item.dropId === dropId),
+      );
+    }
+    const remaining = memoryPageState.status?.proposals?.length ?? 0;
+    const count = document.getElementById("mem-a-prop-count");
+    if (count) count.textContent = remaining ? `${remaining} 条` : "";
+    if (remaining === 0) clearMemoryProposalCard();
+    else renderMemoryProposalCards();
+    renderMemoryReviewState();
+    await refreshMemoryGroups(gen);
+  } catch (error) {
+    if (error.message !== "forbidden") toast(`应用失败：${error.message}`);
+    if (apply) apply.disabled = false;
+    if (ignore) ignore.disabled = false;
+  }
+}
+
+async function dismissMemoryProposalA(card, gen) {
+  if (!card) return;
+  const keepId = card.getAttribute("data-keep") || "";
+  const dropId = card.getAttribute("data-drop") || "";
+  if (!keepId || !dropId) return;
+  try {
+    const response = await request("/api/v1/agent/memory/consolidate/dismiss", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scope: memoryPageState.scope, keepId, dropId }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.message || String(response.status));
+    card.remove();
+    if (memoryPageState.status?.proposals) {
+      memoryPageState.status.proposals = memoryPageState.status.proposals.filter(
+        (item) => !(item.keepId === keepId && item.dropId === dropId),
+      );
+    }
+    const remaining = memoryPageState.status?.proposals?.length ?? 0;
+    const count = document.getElementById("mem-a-prop-count");
+    if (count) count.textContent = remaining ? `${remaining} 条` : "";
+    if (remaining === 0) clearMemoryProposalCard();
+    if (memoryPageAlive(gen)) renderMemoryReviewState();
+  } catch (error) {
+    if (error.message !== "forbidden") toast(`忽略失败：${error.message}`);
+  }
+}
+
+async function runMemoryConsolidateA(gen) {
+  const scope = memoryPageState.scope;
+  if (memoryPageState.status?.running) {
+    toast("正在整理，等它跑完");
+    return;
+  }
+  if (memoryPageState.status?.proposals?.length) {
+    const ok = await openConfirm({
+      title: "重新整理",
+      message: "重新整理会替换上次还没处理的建议。",
+      detail: "已经应用过的不受影响；旧建议会从待决里清掉。",
+      confirmText: "重新整理",
+    });
+    if (!ok) return;
+  }
+  const button = document.getElementById("mem-consolidate");
+  if (button) {
+    button.disabled = true;
+    button.textContent = "整理中…";
+  }
+  try {
+    const response = await request(
+      `/api/v1/agent/memory/consolidate/review${memoryPageState.consolidateJob ? "?background=1" : ""}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scope }),
+      },
+    );
+    if (response.status === 404) {
+      toast("整理记忆未启用（服务端 MEMORY_CONSOLIDATE_LLM=false）");
+      memoryPageState.canConsolidate = false;
+      updateMemoryControls();
+      return;
+    }
+    const data = await response.json().catch(() => ({}));
+    if (!memoryPageAlive(gen) || memoryPageState.scope !== scope) return;
+    if (response.status === 202) {
+      memoryPageState.status = {
+        running: true,
+        startedAt: data.startedAt || new Date().toISOString(),
+        generatedAt: null,
+        proposals: [],
+        source: "none",
+        error: null,
+        audit: memoryPageState.status?.audit ?? null,
+      };
+      renderMemoryReviewState();
+      startMemoryPolling(gen);
+      return;
+    }
+    if (response.status === 409) {
+      toast("已经在整理了，稍等一下");
+      startMemoryPolling(gen);
+      void loadMemoryReviewState(gen);
+      return;
+    }
+    if (!response.ok) throw new Error(data.message || String(response.status));
+    // MEMORY_CONSOLIDATE_JOB=false / 旧服务端：同步结果直接上屏。
+    memoryPageState.status = {
+      running: false,
+      startedAt: null,
+      generatedAt: data.generatedAt || null,
+      proposals: Array.isArray(data.proposals) ? data.proposals : [],
+      source: "live",
+      error: null,
+      audit: memoryPageState.status?.audit ?? null,
+    };
+    renderMemoryReviewState();
+  } catch (error) {
+    if (error.message !== "forbidden") {
+      toast(`整理失败：${error.message}`);
+      const statusEl = document.getElementById("mem-a-status");
+      if (statusEl) statusEl.textContent = `整理失败：${error.message}`;
+    }
+  } finally {
+    if (memoryPageAlive(gen)) updateMemoryControls();
+  }
+}
+
+async function loadMemoryExternal(gen) {
+  const section = document.getElementById("mem-a-external");
+  if (!section) return;
+  try {
+    const response = await request("/api/v1/agent/memory/external", { cache: "no-store" });
+    if (!memoryPageAlive(gen)) return;
+    if (response.status === 404) {
+      section.hidden = true;
+      return;
+    }
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.message || String(response.status));
+    section.hidden = false;
+    const line = document.getElementById("mem-a-external-line");
+    const open = document.getElementById("mem-a-ext-open");
+    const lines = Array.isArray(data.catalog?.lines) ? data.catalog.lines : [];
+    memoryPageState.externalLines = lines;
+    if (line) {
+      // 页脚只留库的规模；来源/常提的人等细节收进「查看」弹层，别在页面上铺一长行。
+      if (data.ready) line.textContent = (lines[0] || "已连接").split("；")[0];
+      else if (!data.configured) line.textContent = "未连接 · 在 .env 配 PERSONA_MEMORY_ASK 后重启";
+      else if (data.reason === "disabled") line.textContent = "已关闭 · PERSONA_MEMORY_ENABLED=false";
+      else line.textContent = "连不上 · 检查 PERSONA_PYTHON 与 ask.py 路径";
+    }
+    if (open) open.hidden = lines.length <= 1;
+  } catch (error) {
+    if (!memoryPageAlive(gen) || error.message === "forbidden") return;
+    section.hidden = false;
+    const line = document.getElementById("mem-a-external-line");
+    if (line) line.textContent = "读取失败";
+  }
+}
+
 /* 头像预设图库（2026-11-06 落地，2026-11-07 改挂到「人设」弹窗里）：
  * 30 张 PNG（10 男 / 20 女）由 web.ts 的 /assets/preset/:file 白名单路由供图。
  * 原来这里还有一整页「设置 → 头像」（选对象 + 网格 + 上传 + 保存），
@@ -14878,6 +17306,7 @@ function workspaceRowMarkup(workspace) {
         ${inShell() ? '<button class="ghost" type="button" id="workspace-pick">选择</button>' : ""}
         <button class="btn-primary" type="button" id="workspace-save">${hasWorkspace ? "保存" : "设定"}</button>
       </div>
+      <div class="proj-card-note">没有项目时，助手在这里干活。它不是项目（没有名字、不能加文件夹），所以不在下面的列表里。</div>
       <div class="proj-card-hint" id="workspace-hint" hidden></div>
     </div>
   </div>`;
@@ -14928,41 +17357,65 @@ function wireWorkspaceRow(workspace) {
   });
 }
 
-/** 一个项目目录行（2026-11-12）：与工作区根同一种卡片。
- *  活跃态：路径可改，动作只有改名/归档；归档态只在归档页出现，路径只读 + 恢复。 */
+/** 一个项目 = 名字 + 一组文件夹（2026-11-13 项目容器），恰好一个主文件夹。
+ *  文件夹行里的动作**一律是按钮**（`.ghost.is-mini`），不用裸文字当按钮。 */
 function projectCardMarkup(project) {
   const archived = Boolean(project.archived);
   const id = attr(project.id);
+  const roots = Array.isArray(project.roots) ? project.roots : [];
+  const count = roots.length;
   const vcs = project.vcs === "git" ? "git" : "无版本控制";
   const warnings = [
-    project.exists === false ? '<span class="pill-tag warn">目录丢失</span>' : "",
+    project.exists === false ? '<span class="pill-tag warn">主文件夹丢失</span>' : "",
     archived ? '<span class="pill-tag">已归档</span>' : "",
   ]
     .filter(Boolean)
     .join("");
-  const pathCell = archived
-    ? `<span class="proj-card-path is-static" title="${attr(project.rootPath)}">${esc(project.rootPath)}</span>`
-    : `<input class="set-input is-mono proj-path-input" data-project-path="${id}" type="text" spellcheck="false"
-              aria-label="项目目录：${attr(project.name)}" value="${attr(project.rootPath)}" />`;
+  const rows = roots.map((root) => rootRowMarkup(id, root, archived)).join("");
   return `<div class="proj-card${archived ? " is-archived" : ""}" data-project-id="${id}">
     <div class="proj-card-main">
       <div class="proj-card-line">
         <span class="proj-card-title">${esc(project.name)}</span>
-        ${pathCell}
-        <span class="proj-card-vcs">${vcs}</span>
+        <span class="proj-card-meta">${count || 1} 个文件夹 · ${vcs}</span>
         ${warnings}
-        ${archived ? "" : `<button class="btn-primary" type="button" data-project-action="save-path" data-project-id="${id}">保存</button>`}
+        <span class="proj-card-actions">
+          ${
+            archived
+              ? `<button class="ghost" type="button" data-project-action="restore" data-project-id="${id}">恢复</button>`
+              : `<button class="ghost" type="button" data-project-action="add-root" data-project-id="${id}" data-project-name="${attr(project.name)}">添加文件夹</button>
+                 <button class="ghost" type="button" data-project-action="rename" data-project-id="${id}" data-project-name="${attr(project.name)}">改名</button>
+                 <button class="ghost" type="button" data-project-action="archive" data-project-id="${id}" data-project-name="${attr(project.name)}">归档项目</button>`
+          }
+        </span>
       </div>
+      <div class="proj-roots">${rows}</div>
       <div class="proj-card-hint" data-project-hint="${id}" hidden></div>
     </div>
-    <div class="proj-card-actions">
-      ${
-        archived
-          ? `<button class="ghost" type="button" data-project-action="restore" data-project-id="${id}">恢复</button>`
-          : `<button class="ghost" type="button" data-project-action="rename" data-project-id="${id}" data-project-name="${attr(project.name)}">改名</button>
-             <button class="ghost" type="button" data-project-action="archive" data-project-id="${id}" data-project-name="${attr(project.name)}">归档</button>`
-      }
-    </div>
+  </div>`;
+}
+
+/** 一行文件夹：主/附、名字、路径、动作。归档态只读，不给动作。 */
+function rootRowMarkup(projectId, root, archived) {
+  const primary = root.role === "primary";
+  const missing = root.exists === false;
+  const rid = attr(root.id);
+  const acts = archived
+    ? ""
+    : `<span class="proj-root-acts">
+        <button class="ghost is-mini" type="button" data-root-action="path" data-project-id="${projectId}" data-root-id="${rid}">改路径</button>
+        ${
+          primary
+            ? ""
+            : `<button class="ghost is-mini" type="button" data-root-action="promote" data-project-id="${projectId}" data-root-id="${rid}">设为主</button>
+               <button class="ghost is-mini" type="button" data-root-action="remove" data-project-id="${projectId}" data-root-id="${rid}" data-root-label="${attr(root.label)}">移除</button>`
+        }
+      </span>`;
+  return `<div class="proj-root-row${primary ? " is-primary" : ""}" data-root-row="${rid}">
+    <span class="proj-root-dot" aria-hidden="true"></span>
+    <span class="proj-root-label" title="${attr(root.label)}">${esc(root.label)}${primary ? '<span class="proj-tag">主</span>' : ""}</span>
+    <span class="proj-root-path is-mono${missing ? " is-missing" : ""}" title="${attr(root.path)}">${esc(root.path)}</span>
+    ${missing ? '<span class="pill-tag warn">不在了</span>' : ""}
+    ${acts}
   </div>`;
 }
 
@@ -14975,7 +17428,7 @@ function renderProjectList(workspace, projects) {
     ? ""
     : `<div class="set-empty">
         <div class="set-card-title">还没有项目</div>
-        <div class="set-hint">点右上角「添加项目」登记一个已有目录；项目可以在任意位置，不要求在工作区下面。</div>
+        <div class="set-hint">点右上角「添加项目」登记一个已有目录；项目可以在任意位置，不要求在工作区下面。一个项目可以再加多个文件夹，其中一个是主文件夹。</div>
       </div>`;
   // 归档项目不再在这里展开折叠区（2026-11-12 归档模块）：只留一行入口指向归档页。
   box.innerHTML = `${workspaceRowMarkup(workspace)}${active.map(projectCardMarkup).join("")}${empty}
@@ -14991,18 +17444,14 @@ function renderProjectList(workspace, projects) {
     ?.addEventListener("click", () => go("settings", "archive"));
 }
 
-/** 项目卡片动作接线（项目页与归档页共用）：每次 innerHTML 重建后重新挂即可。 */
+/** 项目卡片动作接线（项目页与归档页共用）：每次 innerHTML 重建后重新挂即可。
+ *  `[data-project-action]` 是项目级，`[data-root-action]` 是文件夹行级。 */
 function wireProjectActions(box) {
   for (const button of box.querySelectorAll("[data-project-action]")) {
     button.addEventListener("click", () => {
       const id = button.dataset.projectId || "";
       const name = button.dataset.projectName || "";
       switch (button.dataset.projectAction) {
-        case "save-path": {
-          const input = box.querySelector(`[data-project-path="${id}"]`);
-          void saveProjectPath(id, input);
-          break;
-        }
         case "rename":
           openRenameProjectModal(id, name);
           break;
@@ -15012,42 +17461,214 @@ function wireProjectActions(box) {
         case "restore":
           void doProjectAction(id, "restore");
           break;
+        case "add-root":
+          openAddRootModal(id, name);
+          break;
+      }
+    });
+  }
+  for (const button of box.querySelectorAll("[data-root-action]")) {
+    button.addEventListener("click", () => {
+      const projectId = button.dataset.projectId || "";
+      const rootId = button.dataset.rootId || "";
+      const row = button.closest(".proj-root-row");
+      switch (button.dataset.rootAction) {
+        case "path":
+          if (row) beginRootPathEdit(projectId, rootId, row);
+          break;
+        case "cancel-path":
+          void loadProjectsSettings();
+          break;
+        case "save-path":
+          if (row) void saveRootPath(projectId, rootId, row);
+          break;
+        case "promote":
+          void promoteRoot(projectId, rootId);
+          break;
+        case "remove":
+          confirmRemoveRoot(projectId, rootId, button.dataset.rootLabel || "");
+          break;
       }
     });
   }
 }
 
-/** 改项目目录：只改登记，不动磁盘；接口复核绝对路径、可写、不与其他项目重叠。 */
-async function saveProjectPath(id, input) {
-  const hint = document.querySelector(`[data-project-hint="${id}"]`);
-  const show = (text) => {
-    if (!hint) return;
-    hint.textContent = text;
-    hint.classList.toggle("is-error", Boolean(text));
-    hint.hidden = !text;
-  };
+/** 项目卡片里的行内提示（每个项目一条，不必弹 toast 也能说清错在哪）。 */
+function projectCardHint(projectId, text) {
+  const node = document.querySelector(`[data-project-hint="${projectId}"]`);
+  if (!node) return;
+  node.textContent = text;
+  node.classList.toggle("is-error", Boolean(text));
+  node.hidden = !text;
+}
+
+/** 「改路径」：把这一行的路径换成输入框，并把动作换成「保存 / 取消」两个按钮。
+ *  平时不摆四个输入框——路径只是只读文本，改的时候才切换到编辑态（2026-11-13 定稿）。 */
+function beginRootPathEdit(projectId, rootId, row) {
+  const cell = row.querySelector(".proj-root-path");
+  if (!cell) return;
+  const input = document.createElement("input");
+  input.className = "set-input is-mono proj-path-input is-inline";
+  input.type = "text";
+  input.spellcheck = false;
+  input.value = cell.getAttribute("title") || "";
+  input.setAttribute("aria-label", "文件夹路径");
+  cell.replaceWith(input);
+  const acts = row.querySelector(".proj-root-acts");
+  if (acts) {
+    acts.innerHTML = `<button class="ghost is-mini" type="button" data-root-action="save-path" data-project-id="${attr(projectId)}" data-root-id="${attr(rootId)}">保存</button>
+      <button class="ghost is-mini" type="button" data-root-action="cancel-path">取消</button>`;
+    wireProjectActions(acts);
+  }
+  input.focus();
+  input.select();
+}
+
+/** 改某个文件夹的路径（只改登记，不动磁盘）。 */
+async function saveRootPath(projectId, rootId, row) {
+  const input = row.querySelector("input");
   const value = String(input?.value || "").trim();
   if (!value) {
-    show("填一个绝对路径。");
+    projectCardHint(projectId, "填一个绝对路径。");
     input?.focus();
     return;
   }
-  show("");
+  projectCardHint(projectId, "");
   try {
-    const response = await request(`/api/v1/projects/${encodeURIComponent(id)}`, {
-      method: "PATCH",
-      body: JSON.stringify({ rootPath: value }),
-    });
+    const response = await request(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/roots/${encodeURIComponent(rootId)}`,
+      { method: "PATCH", body: JSON.stringify({ path: value }) },
+    );
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
-      show(projectErrorText(data, response.status));
+      projectCardHint(projectId, projectErrorText(data, response.status));
       return;
     }
-    toast("项目目录已更新");
+    toast("文件夹路径已更新");
     await loadProjectsSettings();
   } catch (error) {
-    if (error.message !== "forbidden") show(`没存成：${error.message}`);
+    if (error.message !== "forbidden") projectCardHint(projectId, `没存成：${error.message}`);
   }
+}
+
+/** 设为主文件夹：只影响之后新建的会话，老会话留在原地（方案 D2）。 */
+async function promoteRoot(projectId, rootId) {
+  try {
+    const response = await request(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/roots/${encodeURIComponent(rootId)}/promote`,
+      { method: "POST" },
+    );
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      projectCardHint(projectId, projectErrorText(data, response.status));
+      return;
+    }
+    toast("已设为主文件夹：之后新建的会话落在它这里，老会话留在原地");
+    await loadProjectsSettings();
+    void refreshProjectPill();
+  } catch (error) {
+    if (error.message !== "forbidden") projectCardHint(projectId, `没成功：${error.message}`);
+  }
+}
+
+/** 移除文件夹（二次确认）：只删登记，磁盘不动。 */
+function confirmRemoveRoot(projectId, rootId, label) {
+  openModal("移除文件夹", (body) => {
+    body.innerHTML = `
+      <p class="modal-desc">从项目里移除「${esc(label || "这个文件夹")}」的登记。<b>磁盘上的目录和文件不动</b>；这个项目里已经建好的会话也不受影响。</p>
+      <div class="modal-actions">
+        <button class="ghost" type="button" data-modal-cancel>取消</button>
+        <button class="modal-danger" type="button" id="root-remove-confirm">移除</button>
+      </div>`;
+    body.querySelector("[data-modal-cancel]")?.addEventListener("click", closeModal);
+    body.querySelector("#root-remove-confirm")?.addEventListener("click", async () => {
+      try {
+        const response = await request(
+          `/api/v1/projects/${encodeURIComponent(projectId)}/roots/${encodeURIComponent(rootId)}`,
+          { method: "DELETE" },
+        );
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          toast(projectErrorText(data, response.status));
+          return;
+        }
+        closeModal();
+        toast("文件夹已从项目里移除");
+        await loadProjectsSettings();
+        void refreshProjectPill();
+      } catch (error) {
+        if (error.message !== "forbidden") toast(`没成功：${error.message}`);
+      }
+    });
+  });
+}
+
+/** 给项目再加一个文件夹（绝对路径；附加文件夹不做 `@别名` 改写）。 */
+function openAddRootModal(projectId, projectName) {
+  openModal("添加文件夹", (body) => {
+    body.innerHTML = `
+      <p class="modal-desc">给「${esc(projectName)}」再加一个文件夹。填<b>绝对路径</b>（目录先在资源管理器里建好）。相对路径只以主文件夹为基准，附加文件夹一律写绝对路径。</p>
+      <label class="modal-field">
+        <span>文件夹路径</span>
+        <div class="proj-add-row">
+          <input class="modal-input is-mono" id="root-add-path" type="text" spellcheck="false" placeholder="例如：<lifediary 手机仓>" />
+          ${inShell() ? '<button class="ghost" type="button" id="root-add-pick">选择</button>' : ""}
+        </div>
+      </label>
+      <label class="modal-field">
+        <span>显示名（可留空）</span>
+        <input class="modal-input" id="root-add-label" type="text" placeholder="默认用目录名" />
+      </label>
+      <p class="modal-hint" id="root-add-hint"></p>
+      <div class="modal-actions">
+        <button class="ghost" type="button" data-modal-cancel>取消</button>
+        <button class="btn-primary" type="button" id="root-add-confirm">添加</button>
+      </div>`;
+    const pathInput = body.querySelector("#root-add-path");
+    const labelInput = body.querySelector("#root-add-label");
+    const hint = body.querySelector("#root-add-hint");
+    const show = (text) => {
+      hint.textContent = text;
+      hint.hidden = !text;
+    };
+    body.querySelector("[data-modal-cancel]")?.addEventListener("click", closeModal);
+    body.querySelector("#root-add-pick")?.addEventListener("click", async () => {
+      const chosen = await selectDirectory();
+      if (!chosen) return;
+      pathInput.value = chosen;
+      show("");
+    });
+    body.querySelector("#root-add-confirm")?.addEventListener("click", async () => {
+      const value = String(pathInput?.value || "").trim();
+      if (!value) {
+        show("填一个绝对路径，或者点「选择」。");
+        pathInput?.focus();
+        return;
+      }
+      show("");
+      const payload = { path: value };
+      const label = String(labelInput?.value || "").trim();
+      if (label) payload.label = label;
+      try {
+        const response = await request(
+          `/api/v1/projects/${encodeURIComponent(projectId)}/roots`,
+          { method: "POST", body: JSON.stringify(payload) },
+        );
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          show(projectErrorText(data, response.status));
+          return;
+        }
+        closeModal();
+        toast("文件夹已加进项目");
+        await loadProjectsSettings();
+        void refreshProjectPill();
+      } catch (error) {
+        if (error.message !== "forbidden") show(`没成功：${error.message}`);
+      }
+    });
+    pathInput?.focus();
+  });
 }
 
 /** 项目恢复后的刷新（归档走确认弹窗，这里只处理恢复）。
@@ -15274,16 +17895,17 @@ function renderArchiveChats() {
   if (countEl) {
     const shown = list.reduce((sum, group) => sum + group.chats.length, 0);
     countEl.textContent = filtered
-      ? `（筛出 ${shown} / ${archiveView.total}）`
-      : `（${archiveView.total}）`;
+      ? `筛出 ${shown} / ${archiveView.total}`
+      : String(archiveView.total);
   }
   if (!archiveView.chats.length) {
-    box.innerHTML = `<div class="archive-empty">还没有归档的会话。在会话列表里点归档图标，就会出现在这里。</div>`;
+    // 空态只说"没有"，操作指引收进标题悬停（界面文案密度口径：解释别常驻）
+    box.innerHTML = `<div class="archive-empty" title="在会话列表里点归档图标，就会出现在这里">还没有归档的会话</div>`;
     return;
   }
   if (!list.length) {
     box.innerHTML = `<div class="archive-empty">${
-      query ? `没有匹配「${esc(query)}」的归档会话。` : "这个项目下没有已归档的会话。"
+      query ? `没有匹配「${esc(query)}」的归档会话` : "这个项目下没有已归档的会话"
     }</div>`;
     return;
   }
@@ -15300,18 +17922,21 @@ function archiveGroupMarkup(group) {
     <div class="archive-group-head">
       <button class="archive-group-toggle" type="button" aria-expanded="${open}"
               data-group-toggle="${attr(group.key)}">
-        <svg class="archive-group-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
-        <span class="archive-group-title">${esc(group.label)}</span>
+        <svg class="archive-group-folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+        <span class="archive-group-title" title="${attr(group.label)}">${esc(group.label)}</span>
         <span class="archive-group-count">${group.chats.length}</span>
+        <svg class="archive-group-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
       </button>
-      <button class="ghost archive-group-restore" type="button" data-group-restore="${attr(group.key)}"
-              title="把这组全部恢复到会话列表">全部取消归档</button>
+      <button class="archive-group-restore" type="button" data-group-restore="${attr(group.key)}"
+              title="全部取消归档" aria-label="把这组会话全部恢复到列表">${ARCHIVE_ICON_UNDO}</button>
     </div>
     ${
       open
         ? `<div class="archive-group-body">
-            ${visible.map(archiveChatRowMarkup).join("")}
-            ${hidden > 0 ? `<button class="ghost archive-more" type="button" data-group-more="${attr(group.key)}">显示更多（还有 ${hidden} 条）</button>` : ""}
+            <div class="archive-group-card">
+              ${visible.map(archiveChatRowMarkup).join("")}
+              ${hidden > 0 ? `<button class="ghost archive-more" type="button" data-group-more="${attr(group.key)}">显示更多（还有 ${hidden} 条）</button>` : ""}
+            </div>
           </div>`
         : ""
     }
@@ -15332,21 +17957,23 @@ function archiveChatRowMarkup(chat) {
   const lastAt = archiveTimeText(chat.lastAt);
   // archivedAt 是归档清单保证的字段；旧数据没有时退回最后一句时间
   const archivedAt = archiveTimeText(chat.archivedAt) || lastAt;
-  const meta = `${turns} 轮${lastAt ? ` · 最后一句 ${lastAt}` : ""}`;
+  // 行里的时间跟排序键一致：按归档时间排就显归档时间，按最后活跃排就显最后活跃
+  const stamp = archiveView.sort === "last" ? lastAt : archivedAt;
+  const stampLabel = archiveView.sort === "last" ? "最后活跃" : "归档于";
+  // 项目名不挂行内 pill：分组头已经是项目名，行里再挂一遍是重复信息
+  const meta = [turns ? `${turns} 轮` : "", stamp ? `${stampLabel} ${stamp}` : ""]
+    .filter(Boolean)
+    .join(" · ");
   return `<div class="archive-row">
     <div class="archive-row-main">
       <div class="archive-row-title" title="${attr(title)}">${esc(title)}</div>
-      <div class="archive-row-meta">
-        <span>${meta}</span>
-        ${chat.projectName ? `<span class="pill-tag">${esc(chat.projectName)}</span>` : ""}
-        ${archivedAt ? `<span class="archive-row-at">归档于 ${archivedAt}</span>` : ""}
-      </div>
+      <div class="archive-row-meta">${esc(meta)}</div>
     </div>
     <div class="archive-row-actions">
-      <button class="archive-act" type="button" data-archive-restore="${id}"
-              title="恢复到列表" aria-label="恢复会话">${ARCHIVE_ICON_UNDO}</button>
       <button class="archive-act is-danger" type="button" data-archive-delete="${id}"
               title="永久删除（不可恢复）" aria-label="永久删除会话">${ARCHIVE_ICON_TRASH}</button>
+      <button class="ghost archive-restore-btn" type="button" data-archive-restore="${id}"
+              title="恢复到列表">恢复</button>
     </div>
   </div>`;
 }
@@ -15392,9 +18019,12 @@ function renderArchiveProjects() {
   const box = document.getElementById("archive-project-list");
   if (!box) return;
   const countEl = document.getElementById("archive-project-count");
-  if (countEl) countEl.textContent = `（${archiveView.projects.length}）`;
+  if (countEl) countEl.textContent = String(archiveView.projects.length);
+  // 没有归档项目时整节收起：空的大卡片白占一屏，项目页底部仍有「已归档的项目目录」入口
+  const section = document.getElementById("archive-project-section");
+  if (section) section.hidden = archiveView.projects.length === 0;
   if (!archiveView.projects.length) {
-    box.innerHTML = `<div class="archive-empty">还没有归档的项目目录。</div>`;
+    box.innerHTML = "";
     return;
   }
   box.innerHTML = archiveView.projects.map(projectCardMarkup).join("");
@@ -16888,51 +19518,264 @@ async function initAutostartRow() {
   });
 }
 
-/** 服务页读数（2026-11-09 拆分后）：地址 / 鉴权 / 用量。默认模型与供应商在「模型」页，走 loadModelsInfo。 */
-async function loadServiceInfo() {
-  const set = (id, text) => {
-    const node = document.getElementById(id);
-    if (node) node.textContent = text;
-  };
-  set("svc-address", location.origin);
-  set("svc-auth", state.token ? "已配置令牌" : "未配置（仅本机）");
+/** 服务页读数（2026-11-09 拆分后；2026-11-13 用量搬走）：只剩鉴权一行。
+ *  「未配置（仅本机）」读起来像缺了一块配置，实际是本机浏览器的正常形态：
+ *  loopback + 本机 cookie 直通，不需要令牌 —— 文案改成「本机无需配置」。
+ *  容器里带了令牌（外面开过、验证过）才显示「已配置令牌」。 */
+function loadServiceInfo() {
+  const node = document.getElementById("svc-auth");
+  if (!node) return;
+  node.textContent = state.token ? "已配置令牌" : "本机无需配置";
+}
 
-  const renderUsageModels = (models) => {
-    const box = document.getElementById("svc-usage-models");
-    if (!box) return;
-    if (!models.length) {
-      box.innerHTML = `<div class="row-hint">还没有按模型的用量。</div>`;
-      return;
-    }
-    box.innerHTML = `<table class="td-usage-table">
-      <thead><tr><th>模型</th><th>input</th><th>output</th><th>cacheRead</th><th>total</th></tr></thead>
-      <tbody>${models
-        .map(
-          (item) => `<tr>
-            <td>${esc(String(item.model ?? ""))}</td>
-            <td>${(item.inputTokens || 0).toLocaleString()}</td>
-            <td>${(item.outputTokens || 0).toLocaleString()}</td>
-            <td>${(item.cacheReadTokens || 0).toLocaleString()}</td>
-            <td>${(item.totalTokens || 0).toLocaleString()}</td>
-          </tr>`,
-        )
-        .join("")}</tbody>
-    </table>`;
-  };
+/* ── 用量页（2026-11-13 从服务页拆出）────────────────────────────
+ * 一张接口、三个视角：累计（总量 + 四项拆解）、按模型（占比条 + 图例）、明细（原始 key 的表）。
+ * 口径写脸上：durable 的 pi.usage 按会话相加 —— 删掉会话，那部分用量也会消失；
+ * 不折算金额（服务端 cost 固定 0）。按天曲线没画：pi.usage 只有累计，没有逐日流水。 */
+const USE_BAR_SLOTS = 4; // 占比条最多画 4 段，剩下的并成「其他」
 
+function fmtTokens(value) {
+  return Number(value || 0).toLocaleString("zh-CN");
+}
+
+/** 占比文案：真 0 显示 0%，非 0 但不到 0.1% 显示 <0.1%——别让大户旁边排出一串 0.0% */
+function fmtShare(part, whole) {
+  if (!whole || !part) return "0%";
+  const pct = (part / whole) * 100;
+  return pct < 0.1 ? "<0.1%" : `${pct.toFixed(1)}%`;
+}
+
+/** 缓存命中率口径：缓存读 ÷（输入 + 缓存读 + 缓存写）。没有分母返回 null，不冒充 0% */
+function cacheHitRate(input, cacheRead, cacheWrite) {
+  const base = Number(input || 0) + Number(cacheRead || 0) + Number(cacheWrite || 0);
+  if (!base) return null;
+  return Number(cacheRead || 0) / base;
+}
+
+/** 模型 key（`provider/model#think-off`）拆成三段：族（去变体）、provider、变体 */
+function splitModelKey(key) {
+  const raw = String(key || "");
+  const hash = raw.indexOf("#");
+  const base = hash === -1 ? raw : raw.slice(0, hash);
+  const variant = hash === -1 ? "" : raw.slice(hash);
+  const slash = base.lastIndexOf("/");
+  return {
+    raw,
+    base,
+    variant,
+    provider: slash === -1 ? "" : base.slice(0, slash),
+    name: slash === -1 ? base : base.slice(slash + 1),
+  };
+}
+
+function isMockModel(base) {
+  return /^faux(\/|$)/.test(String(base || ""));
+}
+
+/** 同一模型的 think 档位并成一行（明细表仍按原始 key 列）；按 total 倒序 */
+function groupUsageFamilies(models) {
+  const families = new Map();
+  for (const item of models) {
+    const parts = splitModelKey(item.model);
+    const family = families.get(parts.base) || {
+      base: parts.base,
+      provider: parts.provider,
+      name: parts.name,
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      total: 0,
+      variants: 0,
+      mock: isMockModel(parts.base),
+    };
+    family.input += item.inputTokens || 0;
+    family.output += item.outputTokens || 0;
+    family.cacheRead += item.cacheReadTokens || 0;
+    family.cacheWrite += item.cacheWriteTokens || 0;
+    family.total += item.totalTokens || 0;
+    family.variants += 1;
+    families.set(parts.base, family);
+  }
+  return [...families.values()].sort((a, b) => b.total - a.total);
+}
+
+/** 名次色阶：第一名走主题色，其余是 text 与卡片底混出的灰阶。
+ *  不引第二套调色板——换主题色整页跟着走，也不跟 --c-secondary / --c-tertiary 打架。 */
+function usageSlotColor(index) {
+  if (index === 0) return "var(--accent)";
+  const stop = [58, 34, 18][index - 1] ?? 6;
+  return `color-mix(in srgb, var(--text) ${stop}%, var(--card))`;
+}
+
+function usageEmptyMarkup(title, hint) {
+  return `<div class="use-empty"><div class="use-empty-title">${title}</div><div class="use-empty-hint">${hint}</div></div>`;
+}
+
+/** 一份 models[] → 三张卡。都写进现成的 id 容器，刷新只重画内容、不重排页面。 */
+function renderUsagePage(models) {
+  const hero = document.getElementById("use-hero");
+  const modelsHost = document.getElementById("use-models");
+  const detail = document.getElementById("use-detail");
+  if (!hero || !modelsHost || !detail) return;
+
+  const sum = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+  for (const item of models) {
+    sum.input += item.inputTokens || 0;
+    sum.output += item.outputTokens || 0;
+    sum.cacheRead += item.cacheReadTokens || 0;
+    sum.cacheWrite += item.cacheWriteTokens || 0;
+    sum.total += item.totalTokens || 0;
+  }
+  if (!sum.total) {
+    const empty = usageEmptyMarkup("还没有用量", "跑一次对话，这里就会出现累计和按模型的数字。");
+    hero.innerHTML = empty;
+    modelsHost.innerHTML = empty;
+    detail.innerHTML = empty;
+    return;
+  }
+
+  const families = groupUsageFamilies(models);
+  const familyIndex = new Map(families.map((family, index) => [family.base, index]));
+  const rate = cacheHitRate(sum.input, sum.cacheRead, sum.cacheWrite);
+  const hasMock = families.some((family) => family.mock);
+
+  const cell = (label, value, tip) => `<div class="use-cell"${tip ? ` data-tip="${attr(tip)}"` : ""}>
+      <div class="use-cell-v">${value}</div>
+      <div class="use-cell-k">${label}</div>
+    </div>`;
+  hero.innerHTML = `
+    <div class="use-total" data-tip="账记在会话上：删掉一个会话，它的用量也会从累计里消失。"><span class="use-total-v">${fmtTokens(sum.total)}</span><span class="use-total-unit">tokens</span><span class="use-count">${families.length} 个模型 · ${models.length} 个档位</span></div>
+    <div class="use-cells">
+      ${cell("输入", fmtTokens(sum.input))}
+      ${cell("输出", fmtTokens(sum.output))}
+      ${cell("缓存读", fmtTokens(sum.cacheRead))}
+      ${cell("缓存写", fmtTokens(sum.cacheWrite))}
+      ${cell("缓存命中", rate === null ? "—" : `${(rate * 100).toFixed(1)}%`, "缓存读 ÷（输入 + 缓存读 + 缓存写）")}
+    </div>
+    <div class="use-foot">来源：本机用量账本（pi.usage），按模型累计，不折算金额。${
+      hasMock ? " faux 是模拟模型（没配真上游时的假回答），那部分不是真实消耗。" : ""
+    }</div>`;
+
+  // 占比条：前 4 名各占一段，长尾并成「其他」——条太碎就不成图了。
+  const slots = families.slice(0, USE_BAR_SLOTS);
+  const rest = families.slice(USE_BAR_SLOTS);
+  const restTotal = rest.reduce((total, family) => total + family.total, 0);
+  const segments = slots.map((family, index) => ({
+    name: family.name,
+    provider: family.provider,
+    variants: family.variants,
+    total: family.total,
+    mock: family.mock,
+    color: usageSlotColor(index),
+  }));
+  if (restTotal) {
+    segments.push({
+      name: `其他 ${rest.length} 个模型`,
+      provider: "",
+      variants: rest.reduce((count, family) => count + family.variants, 0),
+      total: restTotal,
+      mock: false,
+      color: usageSlotColor(USE_BAR_SLOTS),
+    });
+  }
+  const barSegments = segments
+    .map((segment, index) => {
+      const pct = (segment.total / sum.total) * 100;
+      return `<span class="use-bar-seg" data-seg="${index}" style="flex:0 0 ${pct.toFixed(3)}%;background:${segment.color};animation-delay:${index * 60}ms" title="${attr(`${segment.name} · ${fmtTokens(segment.total)} tokens`)}"></span>`;
+    })
+    .join("");
+  const legendRows = segments
+    .map(
+      (segment, index) => `<div class="use-row" data-seg="${index}">
+        <span class="use-dot" style="background:${segment.color}"></span>
+        <span class="use-row-main">
+          <span class="use-row-name">${esc(segment.name)}${segment.mock ? '<span class="use-tag is-mock">模拟</span>' : ""}</span>
+          <span class="use-row-sub">${esc(segment.provider || "本机")}${segment.variants ? ` · ${segment.variants} 个档位` : ""}</span>
+        </span>
+        <span class="use-row-num">${fmtTokens(segment.total)}</span>
+        <span class="use-row-pct">${fmtShare(segment.total, sum.total)}</span>
+      </div>`,
+    )
+    .join("");
+  modelsHost.innerHTML = `
+    <div class="use-bar" role="img" aria-label="按模型占比">${barSegments}</div>
+    <div class="use-legend">${legendRows}</div>
+    <div class="use-foot">同一模型的 think 档位并成一行；分档看下面的明细。</div>`;
+  // 悬停图例行 → 压暗其它段，看清这一行在条上占多宽（指针离开就恢复）
+  const bar = modelsHost.querySelector(".use-bar");
+  modelsHost.querySelectorAll(".use-row").forEach((row) => {
+    row.addEventListener("pointerenter", () => bar?.setAttribute("data-hl", row.dataset.seg || "0"));
+    row.addEventListener("pointerleave", () => bar?.removeAttribute("data-hl"));
+  });
+
+  const sorted = [...models].sort((a, b) => (b.totalTokens || 0) - (a.totalTokens || 0));
+  const tableRows = sorted
+    .map((item) => {
+      const parts = splitModelKey(item.model);
+      const familyIdx = familyIndex.get(parts.base) ?? USE_BAR_SLOTS;
+      const color = usageSlotColor(familyIdx < USE_BAR_SLOTS ? familyIdx : USE_BAR_SLOTS);
+      const itemTotal = item.totalTokens || 0;
+      const itemRate = cacheHitRate(item.inputTokens, item.cacheReadTokens, item.cacheWriteTokens);
+      const share = itemTotal / sum.total;
+      return `<tr>
+        <td class="model">
+          <div class="use-model-line">
+            <span class="use-mono">${esc(parts.base || "未知模型")}</span>
+            ${parts.variant ? `<span class="use-tag">${esc(parts.variant)}</span>` : ""}
+            ${isMockModel(parts.base) ? '<span class="use-tag is-mock">模拟</span>' : ""}
+          </div>
+
+        </td>
+        <td class="num">${fmtTokens(item.inputTokens)}</td>
+        <td class="num">${fmtTokens(item.outputTokens)}</td>
+        <td class="num">${fmtTokens(item.cacheReadTokens)}</td>
+        <td class="num">${fmtTokens(item.cacheWriteTokens)}</td>
+        <td class="num is-strong">${fmtTokens(itemTotal)}</td>
+        <td class="num share"><span class="use-share-bar" style="width:${Math.max(2, share * 46).toFixed(1)}px;background:${color}"></span>${fmtShare(itemTotal, sum.total)}</td>
+        <td class="num is-muted">${itemRate === null ? "—" : `${(itemRate * 100).toFixed(1)}%`}</td>
+      </tr>`;
+    })
+    .join("");
+  detail.innerHTML = `
+    <div class="use-table-wrap">
+      <table class="use-table">
+        <thead><tr>
+          <th scope="col">模型</th>
+          <th scope="col" class="num">输入</th>
+          <th scope="col" class="num">输出</th>
+          <th scope="col" class="num">缓存读</th>
+          <th scope="col" class="num">缓存写</th>
+          <th scope="col" class="num">合计</th>
+          <th scope="col" class="num">占比</th>
+          <th scope="col" class="num">缓存命中</th>
+        </tr></thead>
+        <tbody>${tableRows}</tbody>
+      </table>
+    </div>
+    <div class="use-foot">共 ${sorted.length} 个模型档位；缓存命中率按每一档单独算，不是整表平均。</div>`;
+}
+
+async function loadUsagePage() {
+  const hero = document.getElementById("use-hero");
+  const modelsHost = document.getElementById("use-models");
+  const detail = document.getElementById("use-detail");
+  if (!hero || !modelsHost || !detail) return;
+  const loading = `<div class="use-loading">读取中…</div>`;
+  hero.innerHTML = loading;
+  modelsHost.innerHTML = loading;
+  detail.innerHTML = loading;
+  let data;
   try {
     const response = await request("/api/v1/agent/usage", { cache: "no-store" });
-    const data = await response.json();
-    const models = data.models || [];
-    const total = models.reduce((sum, item) => sum + (item.totalTokens || 0), 0);
-    set("svc-usage", total ? `${total.toLocaleString()} tokens` : "还没有用量");
-    // E2 #5：总数下面可点开的按模型小表，取同一份 models[]（模型/input/output/cacheRead/total）。
-    renderUsageModels(models);
+    data = await response.json();
   } catch {
-    set("svc-usage", "读取失败");
-    const box = document.getElementById("svc-usage-models");
-    if (box) box.innerHTML = `<div class="row-hint">读不到用量明细</div>`;
+    hero.innerHTML = usageEmptyMarkup("读取失败", "服务端没回用量；稍后再点右上角「刷新」。");
+    modelsHost.innerHTML = `<div class="use-loading">—</div>`;
+    detail.innerHTML = `<div class="use-loading">—</div>`;
+    return;
   }
+  renderUsagePage(data.models || []);
 }
 
 /** 模型页读数（2026-11-09 从服务页拆出）：默认模型行 + 供应商双栏。 */
@@ -17349,6 +20192,18 @@ function ensureProviderView() {
   state.providerView = { mode: "form", providerId: preferred.id, templateId: "" };
 }
 
+/** 左栏头像：先按 id 认模板；同一模板建的第二家（id 变成 magpie-2）再按地址 / 名字回认，
+ *  否则它只剩一个首字母，和列表里那家同名同源的认不出是一家的。 */
+function providerBrandIcon(provider) {
+  const direct = PROVIDER_ICONS[provider.id];
+  if (direct) return direct;
+  const matched = templatePlanByBaseUrl(provider.baseUrl);
+  if (matched && PROVIDER_ICONS[matched.template.id]) return PROVIDER_ICONS[matched.template.id];
+  const baseName = String(provider.name || "").replace(/\s+\d+$/, "").trim();
+  const byName = PROVIDER_TEMPLATES.find((template) => template.name === baseName);
+  return (byName && PROVIDER_ICONS[byName.id]) || "";
+}
+
 function renderProviderNav() {
   const nav = document.getElementById("provider-list");
   if (!nav) return;
@@ -17359,7 +20214,7 @@ function renderProviderNav() {
       const selected = view.mode === "form" && view.providerId === provider.id;
       const initial = (provider.name || provider.id || "?").trim().slice(0, 1);
       // 模板出来的供应商用品牌图标（id 就是模板 id）；自己建的仍用首字
-      const icon = PROVIDER_ICONS[provider.id] || "";
+      const icon = providerBrandIcon(provider);
       const modelCount = Array.isArray(provider.models) ? provider.models.length : 0;
       return `<button class="svc-row" type="button" data-provider="${esc(provider.id)}"
         aria-selected="${selected}" title="${attr(
@@ -17372,9 +20227,8 @@ function renderProviderNav() {
       </button>`;
     })
     .join("");
-  nav.innerHTML = `<div class="svc-nav-title">供应商</div>${
-    rows || `<div class="svc-nav-empty">还没有供应商</div>`
-  }`;
+  // 分节标题已经写着「供应商」，列头不再重复一遍（2026-11-13）
+  nav.innerHTML = rows || `<div class="svc-nav-empty">还没有供应商</div>`;
   for (const button of nav.querySelectorAll("[data-provider]")) {
     button.addEventListener("click", () => openProviderForm(button.dataset.provider));
   }
@@ -17551,6 +20405,18 @@ function nextProviderId(name, preferred = "") {
   return `${base}-${index}`;
 }
 
+/** 同一个模板可以建第二家（比如再接一个本地网关的另一档端口）。
+ *  名字重了就给「 2 / 3…」后缀——左栏两行同名、id 又藏起来了，不区分根本点不清谁是谁。 */
+function nextProviderName(name) {
+  const base = String(name || "").trim();
+  if (!base) return base;
+  const used = new Set((state.providers || []).map((provider) => String(provider.name || "").trim()));
+  if (!used.has(base)) return base;
+  let index = 2;
+  while (used.has(`${base} ${index}`)) index += 1;
+  return `${base} ${index}`;
+}
+
 function providerKeyEnv(id) {
   return `LIFEDIARY_KEY_${String(id).toUpperCase().replace(/[^A-Z0-9]/g, "_")}`;
 }
@@ -17567,7 +20433,6 @@ function providerFormMarkup() {
       </button>
       <div class="row-main">
         <div class="set-card-title"><span id="pv-title">供应商</span><span class="pill-tag" id="pv-default" hidden>默认</span></div>
-        <div class="svc-form-id" id="pv-id" hidden></div>
         <div class="set-hint" id="pv-new-hint" hidden></div>
       </div>
     </div>
@@ -17604,26 +20469,20 @@ function providerFormMarkup() {
       <span class="field-hint">这版服务端还没开放密钥直填：变量名填这里，值写进 .env。</span>
     </label>
     <div class="field">
-      <span>模型</span>
-      <div class="svc-models">
-        <div class="svc-models-head">
-          <span class="set-hint">每个模型可单独配置，随供应商一起保存。</span>
-          <button class="ghost svc-model-add" type="button" id="pv-add-model">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
-            添加模型
-          </button>
-        </div>
-        <div class="svc-model-list" id="pv-model-list"></div>
+      <div class="field-head">
+        <span>模型</span>
+        <button class="ghost svc-model-add" type="button" id="pv-add-model">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+          添加模型
+        </button>
       </div>
+      <div class="svc-model-list" id="pv-model-list"></div>
     </div>
     <div class="svc-form-actions">
       <span class="set-hint" id="pv-hint"></span>
-      <button class="btn-primary" type="button" id="pv-save">保存</button>
+      <button class="ghost is-danger" type="button" id="pv-delete" hidden>删除</button>
       <button class="ghost" type="button" id="pv-cancel">取消</button>
-    </div>
-    <div class="svc-danger-zone" id="pv-danger" hidden>
-      <span class="set-hint" id="pv-danger-hint"></span>
-      <button class="ghost is-danger" type="button" id="pv-delete">删除</button>
+      <button class="btn-primary" type="button" id="pv-save">保存</button>
     </div>
   </div>`;
 }
@@ -17640,7 +20499,7 @@ function fillProviderForm(host, provider, template) {
     state.providerPlanId = plans[0] ? plans[0].id : "";
   }
   const plan = templatePlan(template, state.providerPlanId);
-  const name = provider ? provider.name : isTemplate ? template.name : "";
+  const name = provider ? provider.name : isTemplate ? nextProviderName(template.name) : "";
   const baseUrl = provider ? provider.baseUrl : isTemplate ? plan.baseUrl : "";
   const id = provider
     ? provider.id
@@ -17657,21 +20516,15 @@ function fillProviderForm(host, provider, template) {
   if (title) title.textContent = isEdit ? "编辑供应商" : "新建供应商";
   const badge = q("#pv-default");
   if (badge) badge.hidden = !(isEdit && provider.isDefault);
-  const idNode = q("#pv-id");
-  if (idNode) {
-    idNode.hidden = !isEdit;
-    idNode.textContent = isEdit ? `id: ${id}（不能改）` : "";
-  }
   const newHint = q("#pv-new-hint");
   if (newHint) {
-    newHint.hidden = isEdit;
+    // 自建供应商没有可说的：Key 落哪是本机常识，不占一行
+    newHint.hidden = isEdit || !isTemplate;
     if (isTemplate) {
       // 套餐自带清单的不拉；按量没清单的靠保存后拉 /models——先说清楚，别让人以为漏填
       newHint.textContent = (plan.models || []).length
         ? `基于「${templateLabel(template, plan)}」，保存前都能改`
         : `基于「${template.name}」模板：粘上 Key 保存，模型清单自动从上游拉`;
-    } else {
-      newHint.textContent = "填好后保存；Key 只进本机服务端";
     }
   }
 
@@ -17748,17 +20601,13 @@ function fillProviderForm(host, provider, template) {
   // 表单换人时重建模型草稿；同一个人只做原位填值，不动正在编辑的列表
   host.dataset.formFor = isEdit ? `form:${id}` : `new:${isTemplate ? template.id : "custom"}`;
 
-  const danger = q("#pv-danger");
-  if (danger) danger.hidden = !isEdit;
-  if (isEdit) {
-    const dangerHint = q("#pv-danger-hint");
-    if (dangerHint) {
-      dangerHint.textContent = provider.isDefault
-        ? "默认供应商不能删；先把默认模型切到别家。"
-        : "删除后，已有会话下一轮会回退到默认供应商。";
-    }
-    const del = q("#pv-delete");
-    if (del) del.disabled = Boolean(provider.isDefault);
+  const del = q("#pv-delete");
+  if (del) {
+    // 和保存 / 取消同一行（2026-11-13）：删除是这家供应商自己的动作，不再单独占一条危险区
+    del.hidden = !isEdit;
+    del.disabled = false;
+    del.title = "";
+    if (isEdit && provider.isDefault) del.title = "默认供应商不能删；先把默认模型切到别家";
   }
 
   applyProviderSecretMode(host);
@@ -18041,13 +20890,6 @@ function applyProviderSecretMode(host) {
   const envField = host.querySelector("#pv-key-env");
   if (apiField) apiField.hidden = envMode;
   if (envField) envField.hidden = !envMode;
-  // 页头那句也跟着换：env 模式说"只收变量名"，直填模式说"Key 留本机"
-  const head = document.getElementById("svc-provider-hint");
-  if (head) {
-    head.textContent = envMode
-      ? "这版只收环境变量名；值写 .env，界面不存明文。"
-      : "Key 只留在本机服务端，不进 git、不进日志、不下发手机。";
-  }
 }
 
 /* ── 设置 → 模型 → 搜索（2026-11-12 多供应商）────────────
@@ -18461,7 +21303,13 @@ function wireProviderForm(host) {
 
   host.querySelector("#pv-delete")?.addEventListener("click", () => {
     const { provider } = currentProviderFormTarget();
-    if (provider) confirmDeleteProvider(provider);
+    if (!provider) return;
+    // 禁用钮在浏览器里连 tooltip 都不一定弹得出来，把原因写在行内提示里更可靠
+    if (provider.isDefault) {
+      hint("默认供应商不能删；先把默认模型切到别家。");
+      return;
+    }
+    confirmDeleteProvider(provider);
   });
 }
 
@@ -18672,7 +21520,7 @@ function providerFormValues(editingId) {
 function confirmDeleteProvider(provider) {
   openModal("删除供应商", (body) => {
     body.innerHTML = `
-      <p class="modal-desc">删除「${esc(provider.name)}」之后，已有会话下一轮会回退到默认供应商。这个操作不能撤销。</p>
+      <p class="modal-desc">删除「${esc(provider.name)}」之后不能撤销。</p>
       <p class="modal-hint" id="pv-del-hint"></p>
       <div class="modal-actions">
         <button class="ghost" type="button" data-modal-cancel>取消</button>
@@ -20158,6 +23006,10 @@ function renderGroupRows(box, emptyText) {
     row.setAttribute("role", "button");
     row.title = `${group.name} · ${group.members.length} 名成员`;
     row.dataset.groupId = group.id;
+    // 「你在这里」：正开着这个群（2026-11-13 选中态批；折叠卡与展开侧栏共用）
+    if (currentRoute() === "group" && groupRouteId() === group.id) {
+      row.setAttribute("aria-current", "true");
+    }
 
     const avatar = document.createElement("span");
     avatar.className = "pt-avatar";
@@ -20856,16 +23708,26 @@ function groupAuthorKey(message) {
   return message.kind === "system" ? `system:${message.id}` : `${message.authorKind}:${message.authorId ?? message.authorName}`;
 }
 
-function groupDayOf(message) {
-  // 跨天分割按**本地**日历日算：at 是 ISO UTC 串，直接 slice(0,10) 在凌晨时段会标错天（实测踩过）
-  const value = Date.parse(message.at || "");
-  if (!Number.isFinite(value)) return String(message.at || "").slice(0, 10);
+/**
+ * 本地日历日（通用，2026-11-13 从群聊抽出来）：`at` 可以是 epoch 毫秒或 ISO 串。
+ * 解析不了 / 时间戳缺失返回空串——调用方据此跳过日界，不硬编一个 1970 出来。
+ */
+function dayKeyOfAt(at) {
+  const value = typeof at === "number" ? at : Date.parse(String(at || ""));
+  if (!Number.isFinite(value) || value <= 0) return "";
   const d = new Date(value);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
+function groupDayOf(message) {
+  // 跨天分割按**本地**日历日算：at 是 ISO UTC 串，直接 slice(0,10) 在凌晨时段会标错天（实测踩过）
+  const value = Date.parse(message.at || "");
+  if (!Number.isFinite(value)) return String(message.at || "").slice(0, 10);
+  return dayKeyOfAt(value);
+}
+
 /** 日期分割的可读标签（2026-11-08 批三）：今天 / 昨天 / M月D日（跨年才带年份） */
-function groupDayLabel(day) {
+function dayLabelOf(day) {
   const [year, month, date] = String(day || "").split("-").map(Number);
   if (!year || !month || !date) return String(day || "");
   const now = new Date();
@@ -20875,6 +23737,10 @@ function groupDayLabel(day) {
   if (diffDays === 0) return "今天";
   if (diffDays === 1) return "昨天";
   return year === now.getFullYear() ? `${month}月${date}日` : `${year}年${month}月${date}日`;
+}
+
+function groupDayLabel(day) {
+  return dayLabelOf(day);
 }
 
 /** 一条消息的渲染元信息（合并 / 日界判据）：回读与实时追加共用同一份 */
@@ -22519,15 +25385,8 @@ el.secGroupsAdd?.addEventListener("click", () => {
    不必先按顶栏返回键再找入口。 */
 el.secGroupsAll?.addEventListener("click", () => go("groups"));
 
-/* 课题（2026-11-07 批二）：轨道按钮不带独立页面，只负责把展开侧栏打开、
-   把「课题」分区展开并滚到可见处；列表数据顺手现拉一次。 */
-el.railTopics?.addEventListener("click", () => {
-  if (!sidebarOpen()) toggleSidebar();
-  localStorage.setItem("lifediary.side.topics", "open");
-  applySections();
-  document.getElementById("sec-topics")?.scrollIntoView({ block: "nearest" });
-  void loadTopicsSidebar({ force: true });
-});
+/* 课题（2026-11-07 批二 / 2026-11-13 浮卡）：轨道钮点击挂悬停卡开关（见轨道悬停浮卡段）；
+   「展开侧栏落到课题分区」的老行为保留在 openTopicsInSidebar()，入口是卡底那一行。 */
 // 分区头由 SIDE_SECTIONS 的循环统一折叠；这里只补「展开时现拉一次」，不再 toggle。
 el.secTopicsToggle?.addEventListener("click", () => {
   if (!sectionClosed("topics")) void loadTopicsSidebar();
@@ -22541,7 +25400,6 @@ void (async () => {
   applyTheme(currentThemeChoice());
   applyFontSettings(loadFontSettings());
   applyActPref();
-  syncThinkingPill();
   // 侧栏分区折叠态（localStorage）与总管状态点初值
   applySections();
   // 课题区（2026-11-07 批二）：首屏拉一次；404 时整块入口自己退场
@@ -22551,7 +25409,7 @@ void (async () => {
   applySidebarA11y();
   // 没有落盘会话 = 首屏普通 worker 空会话；表头要跟身份一致
   if (!state.conversationId) {
-    el.title.textContent = state.chatKind === "chief" ? "新对话" : "普通对话";
+    el.title.textContent = state.chatKind === "chief" ? chiefDisplayName() : "普通对话";
     el.title.dataset.chatKind = state.chatKind;
   }
 
@@ -22576,6 +25434,10 @@ void (async () => {
 
   await checkHealth();
   await loadChats();
+  // 对话逐字浮现开关（2026-11-13）：首屏拉一次，没回来前按默认开跑。
+  void ensureFlag("CHAT_STREAM_REVEAL", true).then((value) => {
+    state.chatRevealFlag = value;
+  });
   void loadCapabilities(); // 附件 / 编辑重发的开关投影（2026-11-08 4a）
   void loadRoster(); // E4：执事花名册首帧
   void initGroups(); // 群组（2026-11-06 批二）：可用性探测 + 侧栏节首帧
