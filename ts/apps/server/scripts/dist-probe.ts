@@ -69,6 +69,7 @@ async function main(): Promise<void> {
 			LLM_API_KEY: "",
 			AGENT_TOKEN: "",
 			LIFEDIARY_TOKEN: "",
+			AUTONOMY_ENABLED: "false", // 探针显式关（默认已于 2026-11-13 翻成开）
 			NODE_OPTIONS: "",
 		},
 		stdio: ["ignore", "pipe", "pipe"],

@@ -311,6 +311,7 @@ async function startServer(extraEnv: Record<string, string>): Promise<ReturnType
 			PROVIDERS_PATH: join(ROOT, "providers.json"),
 			DELEGATIONS_DB_PATH: join(ROOT, "delegations.sqlite"),
 			AGENT_SSE_SEQ_DB_PATH: join(ROOT, "chat-events.sqlite"),
+			AUTONOMY_ENABLED: "false", // 探针显式关（默认已于 2026-11-13 翻成开）
 			AGENT_APPROVALS_PATH: join(ROOT, "approvals.json"),
 			AGENT_POLICY_PATH: join(ROOT, "policy.json"),
 			PARTNERS_DB_PATH: join(ROOT, "partners.sqlite"),

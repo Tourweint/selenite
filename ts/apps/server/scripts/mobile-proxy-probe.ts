@@ -90,6 +90,7 @@ function startHarness(port: number, relayPort: number, relayToken: string, mobil
 			PROJECTS_DB_PATH: join(TMP, "projects.sqlite"),
 			DIARY_DB_PATH: join(TMP, "diary.sqlite"),
 			AGENT_SSE_SEQ_DB_PATH: join(TMP, "chat-events.sqlite"),
+			AUTONOMY_ENABLED: "false", // 探针显式关（默认已于 2026-11-13 翻成开）
 			PAIRING_STORE_PATH: join(TMP, "pairing.json"),
 			AGENT_CHAT_META_PATH: join(TMP, "chat-meta.json"),
 			AGENT_APPROVALS_PATH: join(TMP, "approvals.json"),

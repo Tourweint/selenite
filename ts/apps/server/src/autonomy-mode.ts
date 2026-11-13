@@ -9,9 +9,10 @@ import type { AutonomyEventType } from "./autonomy-core.ts";
  * 档位判定与观察记录必须能无副作用地单测（与 autonomy-core.ts 同一纪律）。
  *
  * `AUTONOMY_ENABLED`：
- *   - off（缺省 / false / 0）：与改动前逐字节一致，什么都不订阅；
+ *   - off（false / 0，显式关）：什么都不订阅；
  *   - observe：照常订阅、照常判定，但"本来会提醒"只记一条观察记录，**不写会话、不起模型调用**；
- *   - on：完整行为（写会话）。
+ *   - on（缺省）：完整行为（写会话）。
+ * 默认开（2026-11-13 用户拍板：没人盯着跑的轮必须有人兜底提醒）；想关 = 显式设 false / 0。
  * 兼容旧值：true / 1 / 其它非空值一律按 on（老配置不用改）。
  */
 
@@ -25,8 +26,9 @@ const OBSERVE_WINDOW_MS = 24 * 60 * 60_000;
 
 export function autonomyMode(): AutonomyMode {
 	const raw = process.env.AUTONOMY_ENABLED?.trim().toLowerCase();
-	if (!raw || raw === "false" || raw === "0") return "off";
 	if (raw === "observe") return "observe";
+	// 只有显式 false / 0 才关；缺省 = 开（2026-11-13 起默认开，与 autonomy-state.ts 的闸同口径）。
+	if (raw === "false" || raw === "0") return "off";
 	return "on";
 }
 

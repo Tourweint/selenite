@@ -34,8 +34,8 @@ import { partnersStore } from "./partners.ts";
  * 防自叫醒（cindy 的头号坑）：**执事会话（含例行专线）一律不是观察对象**——
  * 执事出错再提醒执事就是自己叫醒自己。v1 没有跟进者，观察对象只剩主人会话。
  *
- * 总开关 `AUTONOMY_ENABLED` 默认 false：false 时 observe() 不订阅、账本不建、
- * sweep 定时器不启、自主轮标记不生效——全部行为为零。
+ * 总开关 `AUTONOMY_ENABLED`（2026-11-13 起默认开；显式 false / 0 关）：off 时 observe() 不订阅、
+ * 账本不建、sweep 定时器不启、自主轮标记不生效——全部行为为零。
  * 2026-11-09 T2 起多一档 `observe`：订阅与判定照旧，但提醒只落
  * `.data/autonomy-observe.jsonl`，**不写会话、不起任何模型调用**——先看它想干什么。
  */

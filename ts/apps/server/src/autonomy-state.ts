@@ -11,10 +11,9 @@
 
 const autonomyTurns = new Set<number>();
 
-/** 总开关（批次C）：`AUTONOMY_ENABLED` 默认 false——关着时自主轮标记永不生效，全部行为为零。 */
+/** 总开关：只有显式 `AUTONOMY_ENABLED=false / 0` 才关——2026-11-13 起默认开（与 autonomy-mode.ts 三档判定同口径），关着时自主轮标记永不生效。 */
 function autonomyGate(): boolean {
 	const raw = process.env.AUTONOMY_ENABLED?.trim().toLowerCase();
-	if (!raw) return false;
 	return raw !== "false" && raw !== "0";
 }
 

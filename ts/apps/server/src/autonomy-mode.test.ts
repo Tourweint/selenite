@@ -30,9 +30,16 @@ function withEnv(value: string | undefined, run: () => void): void {
 	}
 }
 
-test("三档判定：缺省 / false / 0 = off；observe = observe；其余非空 = on", () => {
-	withEnv(undefined, () => assert.equal(autonomyMode(), "off"));
-	for (const value of ["false", "FALSE", "0", "  "]) {
+test("三档判定：缺省 = on（2026-11-13 起默认开）；false / 0 = off；observe = observe；其余非空 = on", () => {
+	withEnv(undefined, () => {
+		assert.equal(autonomyMode(), "on", "缺省 = 开（用户拍板）");
+		assert.equal(autonomyEnabled(), true);
+	});
+	withEnv("  ", () => {
+		assert.equal(autonomyMode(), "on", "空白等价未设");
+		assert.equal(autonomyEnabled(), true);
+	});
+	for (const value of ["false", "FALSE", "0"]) {
 		withEnv(value, () => {
 			assert.equal(autonomyMode(), "off", value);
 			assert.equal(autonomyEnabled(), false, value);

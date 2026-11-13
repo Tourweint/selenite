@@ -57,6 +57,7 @@ function harnessEnv(
 		PROJECTS_DB_PATH: join(TMP, `${tag}-projects.sqlite`),
 		DIARY_DB_PATH: join(TMP, `${tag}-diary.sqlite`),
 		AGENT_SSE_SEQ_DB_PATH: join(TMP, `${tag}-chat-events.sqlite`),
+		AUTONOMY_ENABLED: "false", // 探针显式关（默认已于 2026-11-13 翻成开）
 		PAIRING_STORE_PATH: join(TMP, `${tag}-pairing.json`),
 		AGENT_APPROVALS_PATH: join(TMP, `${tag}-approvals.json`),
 		PROVIDERS_PATH: join(TMP, `${tag}-providers.json`),

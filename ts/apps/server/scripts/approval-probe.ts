@@ -77,6 +77,7 @@ function baseEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
 		AGENT_DB_PATH: DB,
 		MEMORY_ENABLED: "false",
 		AGENT_APPROVALS_PATH: APPROVALS,
+		AUTONOMY_ENABLED: "false", // 探针显式关（默认已于 2026-11-13 翻成开）
 		AGENT_POLICY_PATH: POLICY,
 		AGENT_CHAT_META_PATH: ".data/probe-approval-chat-meta.json",
 		CHANCELLOR_ENABLED: "false",

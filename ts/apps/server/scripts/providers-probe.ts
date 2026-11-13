@@ -164,6 +164,7 @@ function serverEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
 		MEMORY_DB_PATH: MEMORY_DB,
 		MEMORY_ENABLED: "false",
 		CHANCELLOR_ENABLED: "false",
+		AUTONOMY_ENABLED: "false", // 探针显式关（默认已于 2026-11-13 翻成开）
 		JEV_ROUTE: "off",
 		PROVIDERS_PATH: PROVIDERS,
 		MODEL_RUNTIME_PATH: RUNTIME,

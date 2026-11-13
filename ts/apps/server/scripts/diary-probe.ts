@@ -37,6 +37,7 @@ function startServer(): ChildProcess {
 			AGENT_DB_PATH: ".data/probe-diary-agent.sqlite",
 			MEMORY_DB_PATH: ".data/probe-diary-memory.db",
 			DIARY_DB_PATH: DB,
+			AUTONOMY_ENABLED: "false", // 探针显式关（默认已于 2026-11-13 翻成开）
 			NODE_OPTIONS: "",
 		},
 		stdio: ["ignore", "pipe", "pipe"],

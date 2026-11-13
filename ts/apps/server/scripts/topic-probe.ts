@@ -313,8 +313,10 @@ async function startServer(input: {
 			PROJECTS_DB_PATH: join(ROOT, "projects.sqlite"),
 			PROVIDERS_PATH: join(ROOT, "providers.json"),
 			PROVIDER_KEYS_PATH: join(ROOT, "provider-keys.json"),
+			SEARCH_CONFIG_PATH: join(ROOT, "search.json"),
 			DELEGATIONS_DB_PATH: join(ROOT, "delegations.sqlite"),
 			AGENT_SSE_SEQ_DB_PATH: join(ROOT, "chat-events.sqlite"),
+			AUTONOMY_ENABLED: "false", // 探针显式关（默认已于 2026-11-13 翻成开）
 			AGENT_APPROVALS_PATH: join(ROOT, "approvals.json"),
 			AGENT_POLICY_PATH: join(ROOT, "policy.json"),
 			PARTNERS_DB_PATH: join(ROOT, "partners.sqlite"),

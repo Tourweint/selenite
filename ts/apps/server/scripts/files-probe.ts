@@ -46,6 +46,7 @@ function startServer(extraEnv: NodeJS.ProcessEnv = {}): ChildProcess {
 			AGENT_LOCAL_SECRET_PATH: join(FIXTURE, "local-secret"),
 			// 探针绝不往用户桌面弹资源管理器：默认关，只验 400 形态；开启路径单测覆盖
 			EXPLORER_OPEN: "false",
+			AUTONOMY_ENABLED: "false", // 探针显式关（默认已于 2026-11-13 翻成开）
 			NODE_OPTIONS: "",
 			...extraEnv,
 		},

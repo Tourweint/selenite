@@ -42,6 +42,7 @@ function startServer(): ChildProcess {
 			PROVIDERS_PATH: ".data/chain-probe-providers.json",
 			NODE_OPTIONS: "",
 			CHANCELLOR_ENABLED: "true",
+			AUTONOMY_ENABLED: "false", // 探针显式关（默认已于 2026-11-13 翻成开）
 			CHANCELLOR_EMPLOYEE: process.env.CHANCELLOR_EMPLOYEE?.trim() || "native",
 			// 这个探针只验「主 agent 会不会派、 chancellor 能不能干完」；
 			// 项目前置由 src/projects.test.ts 单独覆盖，这里不铺工作区。
