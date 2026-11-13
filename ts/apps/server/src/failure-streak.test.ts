@@ -102,11 +102,14 @@ test("进程内单例可读：failureStreak() 返回同一份状态", () => {
 
 /**
  * 接线守卫（2026-11-10 补全批 12 遗留）：模块再好，没人调用等于没做。
- * 断言 lifecycle.ts 真的把 tool-error / timeout / rejected 三类接上了——
+ * 断言 lifecycle 真的把 tool-error / timeout / rejected 三类接上了——
  * 以后谁把这行删了，这里会红。
+ *
+ * 2026-11-13：lifecycle.ts 按职责拆成 lifecycle-harness.ts + lifecycle-thinking.ts，
+ * 本体只剩纯桶；这三处接线都在 harness 那份（openHarness 里装配的 afterTool），断言改读它。
  */
 test("接线：lifecycle 里 tool-error / timeout / rejected 都真的在记账", () => {
-  const source = readFileSync(new URL("./agent/lifecycle.ts", import.meta.url), "utf8");
+  const source = readFileSync(new URL("./agent/lifecycle-harness.ts", import.meta.url), "utf8");
   assert.ok(source.includes("tool-error"), "afterTool 应记录 tool-error");
   assert.ok(source.includes("isTimeout ? \"timeout\" : \"tool-error\""), "afterTool 应按 isError 分流");
   assert.ok(source.includes("status === \"rejected\" ? \"rejected\" : \"timeout\""), "审批拒绝应记 rejected");
