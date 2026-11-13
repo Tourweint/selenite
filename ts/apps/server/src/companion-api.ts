@@ -43,6 +43,27 @@ import {
 const PARTNER_NAME_LIMIT = 40;
 /** 当前目标上限（2026-11-08 刀二 E4）：不版本化、现取现用，仍给个护栏防无界正文。 */
 const PARTNER_GOAL_LIMIT = 1000;
+/** 口头禅上限（2026-11-12 手机对话身份方案 §四）：按 Unicode code point 计，trim 后判。 */
+const PARTNER_TAGLINE_LIMIT = 40;
+
+/**
+ * `tagline` 槽位校验（POST 建档与 PATCH 共用，口径必须一致）：
+ * 省略 = 不改（undefined）；`null` / 空串（含全空白）= 清除（null）；
+ * 字符串 = trim 后设置，按 Unicode code point ≤40 字（不是 UTF-16 `length`）。
+ * 非法返回中文说明，调用方统一映射 400。
+ */
+function parseTagline(
+	value: unknown,
+): { ok: true; value: string | null | undefined } | { ok: false; message: string } {
+	if (value === undefined) return { ok: true, value: undefined };
+	if (value === null) return { ok: true, value: null };
+	if (typeof value !== "string") return { ok: false, message: "tagline 必须是字符串或 null" };
+	const trimmed = value.trim();
+	if ([...trimmed].length > PARTNER_TAGLINE_LIMIT) {
+		return { ok: false, message: `tagline 不超过 ${PARTNER_TAGLINE_LIMIT} 字` };
+	}
+	return { ok: true, value: trimmed || null };
+}
 
 export function mountCompanions(app: Hono): void {
 	if (!COMPANIONS_ENABLED) return;
@@ -52,7 +73,7 @@ export function mountCompanions(app: Hono): void {
 	// soul（E2 #0）：可选一句话身份，建档成功后落一次自定义版本；纯增量，老客户端不带即用原行为。
 	app.post("/api/v1/partners", async (c) => {
 		const body = (await c.req.json().catch(() => null)) as
-			| { name?: string; domain?: string; soul?: string }
+			| { name?: string; domain?: string; soul?: string; tagline?: unknown }
 			| null;
 		const name = body?.name?.trim() ?? "";
 		if (!name || name.length > PARTNER_NAME_LIMIT) {
@@ -69,6 +90,13 @@ export function mountCompanions(app: Hono): void {
 				400,
 			);
 		}
+		// 口头禅（2026-11-12 手机对话身份方案 §四）：与 PATCH 同一份校验；
+		// 非法在建档之前拦，不留半建的档案（建完再 PATCH 会让新建时填的口头禅丢失）。
+		const taglineParsed = parseTagline(body?.tagline);
+		if (!taglineParsed.ok) {
+			return c.json({ error: "bad_request", message: taglineParsed.message }, 400);
+		}
+		const tagline = taglineParsed.value;
 		const domain = body?.domain?.trim() ?? "";
 		// 2026-11-07：domain 是**可选标签**。不带 domain 也要能建"可派活的执事"，
 		// 不再退化成"普通执事、不参与派单"——这是用户明确反馈的坑：
@@ -78,7 +106,7 @@ export function mountCompanions(app: Hono): void {
 		if (!result.ok) {
 			return c.json({ error: "bad_request", message: result.error }, 400);
 		}
-		const partner: PartnerRow = result.value;
+		let partner: PartnerRow = result.value;
 		// 带 soul 时落一次 v2 自定义版本（把 E1 前端「建完补 PATCH」的两段式收敛成一段）。
 		// bumpSoul 自带同一份上限校验，这里再兜住其它写盘错误，400 口径与 PATCH 一致。
 		if (soul.trim()) {
@@ -88,6 +116,10 @@ export function mountCompanions(app: Hono): void {
 				const detail = error instanceof Error ? error.message : String(error);
 				return c.json({ error: "bad_request", message: detail }, 400);
 			}
+		}
+		// 口头禅：新建行本就是 null；只有给了非空字符串才补一条 UPDATE，不碰身份版本。
+		if (tagline) {
+			partner = store().setTagline(partner.id, tagline) ?? partner;
 		}
 		return c.json({ ok: true, partner: projection(partner) }, 201);
 	});
@@ -259,6 +291,8 @@ export function mountCompanions(app: Hono): void {
 					avatar?: unknown;
 					dispatchAuthority?: unknown;
 					currentGoal?: unknown;
+					tagline?: unknown;
+					diary?: unknown;
 			  }
 			| null;
 		const partner = store().get(id);
@@ -374,6 +408,19 @@ export function mountCompanions(app: Hono): void {
 				return c.json({ error: "bad_request", message: "currentGoal 必须是字符串或 null" }, 400);
 			}
 		}
+		// 口头禅（2026-11-12 手机对话身份方案 §四）：省略 = 不改；null / 空串（含全空白）= 清除；
+		// 字符串 = 设置（trim 后存，按 Unicode code point ≤40 字，不用 UTF-16 length）。
+		// 不版本化——口头禅不是身份，不 bump 版本、不动 SOUL / 契约。
+		const taglineParsed = parseTagline(body?.tagline);
+		if (!taglineParsed.ok) {
+			return c.json({ error: "bad_request", message: taglineParsed.message }, 400);
+		}
+		const tagline = taglineParsed.value;
+		// 日记执事（2026-11-12 日记 v2）：省略 = 不改；true = 设为日记执事（服务端清掉其他执事）；
+		// false = 取消。只接受布尔，不认字符串/数字——避免「true」这种假真值把唯一性搞乱。
+		if (body?.diary !== undefined && typeof body.diary !== "boolean") {
+			return c.json({ error: "bad_request", message: "diary 必须是布尔值" }, 400);
+		}
 
 		// ── 全部合法，开始写 ──
 		if (avatar !== undefined) store().setAvatar(id, avatar);
@@ -412,11 +459,25 @@ export function mountCompanions(app: Hono): void {
 			refreshed = store().setCurrentGoal(id, currentGoal) ?? refreshed;
 		}
 
+		// 口头禅（2026-11-12）：一条 UPDATE，不碰身份版本。省略就完全不写。
+		if (tagline !== undefined) {
+			refreshed = store().setTagline(id, tagline) ?? refreshed;
+		}
+
+		// 日记执事（2026-11-12 日记 v2）：一条事务 UPDATE + 清其他执事。省略就完全不写。
+		if (body?.diary !== undefined) {
+			refreshed = store().setDiary(id, body.diary) ?? refreshed;
+		}
+
 		return c.json({
 			ok: true,
 			partner: projection(refreshed),
-			// 纯增量回显（不进列表投影）：PATCH 后能直接读回设成什么 / 是否清除。
+			// currentGoal 纯增量回显（不进列表投影）：PATCH 后能直接读回设成什么 / 是否清除。
 			currentGoal: refreshed.currentGoal,
+			// tagline 已进 projection（列表与详情都带），这里回显一份，形状与 currentGoal 对齐。
+			tagline: refreshed.tagline,
+			// diary 同样已进 projection；单独回显一份，PATCH 后另一端不用再拉列表。
+			diary: refreshed.diary,
 			...(soulVersion !== null ? { soulVersion } : {}),
 		});
 	});
@@ -756,7 +817,7 @@ function routineProjection(routine: {
 }
 
 /** 对外投影：只给对外字段。canonical 会话的内部自增 id 不出网（对外 id 一律 uuid）。 */
-function projection(partner: { id: string; name: string; status: string; currentVersion: number | null; createdAt: string; updatedAt: string; domain?: string | null; avatar?: string | null; dispatchAuthority?: boolean }) {
+function projection(partner: { id: string; name: string; status: string; currentVersion: number | null; createdAt: string; updatedAt: string; domain?: string | null; avatar?: string | null; dispatchAuthority?: boolean; tagline?: string | null; diary?: boolean }) {
 	return {
 		id: partner.id,
 		name: partner.name,
@@ -770,5 +831,9 @@ function projection(partner: { id: string; name: string; status: string; current
 		...(partner.domain ? { dispatchAuthority: partner.dispatchAuthority } : {}),
 		// 纯增量（2026-11-06 B1）：未设置给 null，前端据此回落名字首字。
 		avatar: partner.avatar ?? null,
+		// 纯增量（2026-11-12 手机对话身份方案 §四）：列表与详情都带；未设置给 null。
+		tagline: partner.tagline ?? null,
+		// 纯增量（2026-11-12 日记 v2）：是否日记执事；旧客户端忽略即可。
+		diary: partner.diary ?? false,
 	};
 }

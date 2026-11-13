@@ -1105,6 +1105,18 @@ export const PartnerProfileSchema = z.object({
 	 */
 	avatar: PartnerAvatarSchema.nullable(),
 	/**
+	 * 口头禅（2026-11-12 手机对话身份方案 §四，纯增量可选）：≤40 字（按 Unicode code point，
+	 * trim 后判）。`null` = 未设置（前端回落默认句）。列表与详情投影都带；不版本化，现取现用。
+	 * 旧客户端忽略未知字段即可。
+	 */
+	tagline: z.string().nullable().optional(),
+	/**
+	 * 日记执事（2026-11-12 日记 v2，纯增量可选）：true = 这个执事负责「和小记聊天」那条日记线。
+	 * 全局至多一个；PATCH 置 true 时服务端把其他执事的 diary 清掉。列表与详情投影都带。
+	 * 旧客户端忽略未知字段即可。
+	 */
+	diary: z.boolean().optional(),
+	/**
 	 * 派发权（2026-11-06 执事派发权开关，纯增量可选）：带 domain 的执事是否作为
 	 * 分管负责人接单。默认关；投影只对带 domain 的执事给，普通执事不带。
 	 * 旧客户端按「忽略未知字段」处理即可。

@@ -138,6 +138,17 @@ export interface PartnerRow {
 	 * 列表形状不变（字段经 shared 暴露在刀三）。空串 / null = 清除。
 	 */
 	currentGoal: string | null;
+	/**
+	 * 口头禅（2026-11-12 手机对话身份方案 §四）：一句常说的话，≤40 字（Unicode code point）。
+	 * **不版本化**（不是身份，不 bump 版本、不动 SOUL / 契约）；null = 未设置。
+	 * 列表与详情投影都带（首页 / 空态零额外请求）。
+	 */
+	tagline: string | null;
+	/**
+	 * 日记执事（2026-11-12 日记 v2）：true = 这个执事是「和小记聊天」那条日记线的固定对象。
+	 * 全局至多一个（写 true 时同事务清掉其他执事）；不版本化，不参与派活路由。
+	 */
+	diary: boolean;
 }
 
 export interface PartnerVersionRow {
@@ -303,7 +314,9 @@ export class PartnersStore {
 				domain          TEXT,
 				avatar          TEXT,
 			dispatch_authority INTEGER NOT NULL DEFAULT 0,
-			current_goal    TEXT
+			current_goal    TEXT,
+			tagline         TEXT,
+			diary           INTEGER NOT NULL DEFAULT 0
 			);
 			CREATE TABLE IF NOT EXISTS partner_versions (
 				partner_id   TEXT NOT NULL,
@@ -394,6 +407,15 @@ export class PartnersStore {
 		// 老记录读出来是 null（= 没设目标），不炸、不补数据、不版本化。
 		if (!columns.some((column) => column.name === "current_goal")) {
 			this.db.exec("ALTER TABLE partners ADD COLUMN current_goal TEXT");
+		}
+		// 口头禅列（2026-11-12 手机对话身份方案 §四）：旧库补 nullable 列，
+		// 老记录读出来是 null（= 没设口头禅），不炸、不补数据、不版本化。
+		if (!columns.some((column) => column.name === "tagline")) {
+			this.db.exec("ALTER TABLE partners ADD COLUMN tagline TEXT");
+		}
+		// 日记执事列（2026-11-12 日记 v2）：旧库补 INTEGER 默认 0；老记录读出来是 false。
+		if (!columns.some((column) => column.name === "diary")) {
+			this.db.exec("ALTER TABLE partners ADD COLUMN diary INTEGER NOT NULL DEFAULT 0");
 		}
 		// 岗位契约快照列（2026-11-08 员工人格化刀一 E1）：旧库补 nullable 列，
 		// 老版本读出来是 null（= 无契约快照），不炸、不补数据、不越权回填。
@@ -561,6 +583,46 @@ export class PartnersStore {
 		this.db
 			.prepare("UPDATE partners SET current_goal = ?, updated_at = ? WHERE id = ?")
 			.run(goal, new Date().toISOString(), id);
+		return this.get(id);
+	}
+
+	/**
+	 * 设置 / 清除口头禅（2026-11-12 手机对话身份方案 §四）：一条 UPDATE 原子落地。
+	 * 形状校验（≤40 字、trim、空 = 清除）在端点；这里假设值已合法。
+	 * 只写 tagline 与 updated_at，不碰身份版本——口头禅不是身份，不 bump。
+	 */
+	setTagline(id: string, tagline: string | null): PartnerRow | null {
+		if (!this.get(id)) return null;
+		this.db
+			.prepare("UPDATE partners SET tagline = ?, updated_at = ? WHERE id = ?")
+			.run(tagline, new Date().toISOString(), id);
+		return this.get(id);
+	}
+
+	/**
+	 * 设置 / 清除日记执事（2026-11-12 日记 v2）：全局至多一个。
+	 * 置 true 时同事务把其他执事的 diary 清掉——不允许两个"日记执事"，也不靠调用方自己保证。
+	 * 不碰身份版本（不是身份）。
+	 */
+	setDiary(id: string, enabled: boolean): PartnerRow | null {
+		if (!this.get(id)) return null;
+		const now = new Date().toISOString();
+		// node:sqlite 的 DatabaseSync 没有 better-sqlite3 的 db.transaction()，显式事务。
+		this.db.exec("BEGIN");
+		try {
+			if (enabled) {
+				this.db
+					.prepare("UPDATE partners SET diary = 0, updated_at = ? WHERE id <> ? AND diary = 1")
+					.run(now, id);
+			}
+			this.db
+				.prepare("UPDATE partners SET diary = ?, updated_at = ? WHERE id = ?")
+				.run(enabled ? 1 : 0, now, id);
+			this.db.exec("COMMIT");
+		} catch (error) {
+			this.db.exec("ROLLBACK");
+			throw error;
+		}
 		return this.get(id);
 	}
 
@@ -1368,6 +1430,9 @@ function toPartner(row: Record<string, unknown>): PartnerRow {
 			row.current_goal === null || row.current_goal === undefined
 				? null
 				: String(row.current_goal),
+		tagline:
+			row.tagline === null || row.tagline === undefined ? null : String(row.tagline),
+		diary: Number(row.diary ?? 0) !== 0,
 	};
 }
 

@@ -229,6 +229,15 @@ async function patch(id: string, body: PatchBody) {
 	return { status: res.status, body: (await res.json()) as Record<string, unknown> };
 }
 
+async function createPartner(body: Record<string, unknown>) {
+	const res = await app.request("/api/v1/partners", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify(body),
+	});
+	return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+}
+
 // ── 测试 ─────────────────────────────────────────────────
 
 test("shared 头像校验：完整块链 / CRC / IDAT / IEND 全过；坏一处就拒", () => {
@@ -443,6 +452,203 @@ test("currentGoal：老库（partners 无 current_goal 列）打开不炸、旧�
 			assert.equal(migrated.get("legacy-goal")?.currentGoal, null, "缺列 = null，不补数据");
 			migrated.setCurrentGoal("legacy-goal", "补一个目标");
 			assert.equal(migrated.get("legacy-goal")?.currentGoal, "补一个目标", "迁移后可写");
+		} finally {
+			migrated.close();
+		}
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+// ── 口头禅（2026-11-12 手机对话身份方案 §四）──────────────
+
+test("tagline：POST 建档时带上 → 响应/列表/详情读回；null/空 = 不设；非法 → 400 且不建档", async () => {
+	const before = store.list().length;
+
+	// 建档时直接带：trim 后落库，响应投影直接可读（手机建档页不用再补 PATCH）
+	const created = await createPartner({ name: "建档带口头禅", tagline: "  交给我吧  " });
+	assert.equal(created.status, 201);
+	const partner = created.body.partner as Record<string, unknown>;
+	assert.equal(partner.tagline, "交给我吧", "POST 响应投影带 tagline");
+	const id = String(partner.id);
+	assert.equal(store.get(id)?.tagline, "交给我吧", "trim 后落库");
+	assert.equal(store.list().length, before + 1, "成功建档只多一条");
+
+	const detail = (await (await app.request(`/api/v1/partners/${id}`)).json()) as {
+		partner?: Record<string, unknown>;
+	};
+	assert.equal(detail.partner?.tagline, "交给我吧", "详情投影带 tagline");
+
+	const list = (await (await app.request("/api/v1/partners")).json()) as {
+		partners?: Array<Record<string, unknown>>;
+	};
+	assert.equal(
+		list.partners?.find((row) => row.id === id)?.tagline,
+		"交给我吧",
+		"列表投影带 tagline",
+	);
+
+	// 不带 / null / 空串 / 全空白：不设，响应与读回都是 null
+	for (const empty of [undefined, null, "", "   "]) {
+		const res = await createPartner({
+			name: `不设口头禅-${String(empty)}`,
+			...(empty === undefined ? {} : { tagline: empty }),
+		});
+		assert.equal(res.status, 201);
+		assert.equal(
+			(res.body.partner as Record<string, unknown>).tagline,
+			null,
+			`tagline=${JSON.stringify(empty)} 不设`,
+		);
+	}
+
+	// 非法类型 / 超长：建档之前 400，档案数不变（不留半建档案）
+	const baseline = store.list().length;
+	for (const bad of [123, true, {}, "x".repeat(41), "😀".repeat(41)]) {
+		const res = await createPartner({ name: "不该建档", tagline: bad });
+		assert.equal(res.status, 400, `tagline=${JSON.stringify(bad)} 应 400`);
+		assert.equal(store.list().length, baseline, "非法 tagline 不建档");
+	}
+});
+
+test("tagline：PATCH 设置 → 列表与详情都带；trim；省略不改；null/空串清除；超长/非法 400 且整批不写", async () => {
+	const id = store.create("口头禅执事").id;
+
+	// 未设置时列表与详情都给 null（字段一定存在，前端不用猜）
+	const initialList = (await (await app.request("/api/v1/partners")).json()) as {
+		partners?: Array<Record<string, unknown>>;
+	};
+	const initialRow = initialList.partners?.find((row) => row.id === id);
+	assert.equal(initialRow?.tagline, null, "列表未设置给 null");
+	const initialDetail = (await (await app.request(`/api/v1/partners/${id}`)).json()) as {
+		partner?: Record<string, unknown>;
+	};
+	assert.equal(initialDetail.partner?.tagline, null, "详情未设置给 null");
+
+	// 设置：trim 后存，PATCH 回显 + 列表 + 详情都读得到
+	const set = await patch(id, { tagline: "  我在呢  " });
+	assert.equal(set.status, 200);
+	assert.equal(set.body.tagline, "我在呢");
+	assert.equal((set.body.partner as Record<string, unknown>).tagline, "我在呢");
+	assert.equal(store.get(id)?.tagline, "我在呢");
+
+	const detail = (await (await app.request(`/api/v1/partners/${id}`)).json()) as {
+		partner?: Record<string, unknown>;
+	};
+	assert.equal(detail.partner?.tagline, "我在呢", "详情投影带 tagline");
+
+	const list = (await (await app.request("/api/v1/partners")).json()) as {
+		partners?: Array<Record<string, unknown>>;
+	};
+	assert.equal(
+		list.partners?.find((row) => row.id === id)?.tagline,
+		"我在呢",
+		"列表投影带 tagline（首页 / 空态零额外请求）",
+	);
+
+	// 省略 = 不改
+	const omit = await patch(id, { name: "改个名" });
+	assert.equal(omit.status, 200);
+	assert.equal(store.get(id)?.tagline, "我在呢");
+
+	// null / 空串 / 全空白 = 清除
+	for (const clear of [null, "", "   "]) {
+		await patch(id, { tagline: "先设一个" });
+		const cleared = await patch(id, { tagline: clear });
+		assert.equal(cleared.status, 200);
+		assert.equal(store.get(id)?.tagline, null, `tagline=${JSON.stringify(clear)} 清除`);
+	}
+
+	// 40 个 emoji = 40 个 code point（UTF-16 length 是 80）：必须收下，证明按 code point 计数
+	const emoji40 = "😀".repeat(40);
+	const boundary = await patch(id, { tagline: emoji40 });
+	assert.equal(boundary.status, 200);
+	assert.equal(store.get(id)?.tagline, emoji40);
+
+	// 非法类型 / 超长 → 400 且整批不写（同批的 name 也不能落地）
+	await patch(id, { tagline: "先设一个" });
+	const before = store.get(id);
+	for (const bad of [123, true, {}, "x".repeat(41), "😀".repeat(41)]) {
+		const res = await patch(id, { name: "不该写入", tagline: bad });
+		assert.equal(res.status, 400, `tagline=${JSON.stringify(bad)} 应 400`);
+		const after = store.get(id);
+		assert.equal(after?.tagline, "先设一个", "400 后旧值不变");
+		assert.equal(after?.name, before?.name, "400 后同批 name 也不写");
+	}
+});
+
+/**
+ * 日记执事（2026-11-12 日记 v2）：全局至多一个。
+ * PATCH 置 true 时服务端同事务清其他执事；false 取消；省略不改；非布尔 400 且整批不写。
+ */
+test("diary：PATCH 置 true 全局唯一（其他执事自动清）；false 取消；省略不改；非布尔 400", async () => {
+	const a = store.create("日记执事甲").id;
+	const b = store.create("日记执事乙").id;
+
+	const setA = await patch(a, { diary: true });
+	assert.equal(setA.status, 200);
+	assert.equal(setA.body.diary, true, "PATCH 回显 diary");
+	assert.equal((setA.body.partner as Record<string, unknown>).diary, true, "partner 投影带 diary");
+	assert.equal(store.get(a)?.diary, true);
+
+	// 列表投影也带
+	const listA = (await (await app.request("/api/v1/partners")).json()) as {
+		partners?: Array<Record<string, unknown>>;
+	};
+	assert.equal(listA.partners?.find((row) => row.id === a)?.diary, true);
+
+	// 置 B = 甲自动清（不允许两个日记执事）
+	const setB = await patch(b, { diary: true });
+	assert.equal(setB.status, 200);
+	assert.equal(store.get(b)?.diary, true);
+	assert.equal(store.get(a)?.diary, false, "全局至多一个：甲自动清");
+
+	// 省略 = 不改
+	await patch(b, { name: "日记执事乙改名" });
+	assert.equal(store.get(b)?.diary, true, "省略 diary 不动");
+
+	// false = 取消
+	await patch(b, { diary: false });
+	assert.equal(store.get(b)?.diary, false);
+
+	// 非布尔 → 400 且整批不写（同批 name 也不能落地）
+	const beforeName = store.get(a)?.name;
+	const bad = await patch(a, { name: "不该写入", diary: "true" });
+	assert.equal(bad.status, 400);
+	assert.equal(store.get(a)?.diary, false, "400 后 diary 不变");
+	assert.equal(store.get(a)?.name, beforeName, "400 后同批 name 不写");
+});
+
+test("tagline：老库（partners 无 tagline 列）打开不炸、旧行读出 null、可写", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "lifediary-tagline-legacy-"));
+	const dbPath = join(dir, "partners.sqlite");
+	try {
+		const { DatabaseSync } = await import("node:sqlite");
+		const legacy = new DatabaseSync(dbPath);
+		legacy.exec(`
+			CREATE TABLE partners (
+				id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active',
+				current_version INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+			);
+		`);
+		const now = new Date().toISOString();
+		legacy
+			.prepare(
+				"INSERT INTO partners (id, name, status, current_version, created_at, updated_at) VALUES (?, ?, 'active', 1, ?, ?)",
+			)
+			.run("legacy-tagline", "老执事", now, now);
+		legacy.close();
+
+		const { PartnersStore } = await import("./partners.ts");
+		const migrated = new PartnersStore(dbPath, join(dir, "homes"));
+		try {
+			assert.equal(migrated.get("legacy-tagline")?.tagline, null, "缺列 = null，不补数据");
+			migrated.setTagline("legacy-tagline", "补一句口头禅");
+			assert.equal(
+				migrated.get("legacy-tagline")?.tagline,
+				"补一句口头禅",
+				"迁移后可写",
+			);
 		} finally {
 			migrated.close();
 		}
