@@ -7,6 +7,7 @@
  * app.js 文末，各模块顶层只做声明、常量与事件监听注册。
  */
 
+import { maybeNotify } from "./chat-notice.js";
 import { fetchModelCatalog, normalizeModelRow, renderModelMenu } from "./hover-tip.js";
 import { esc } from "./markdown.js";
 import { request } from "./net.js";
@@ -145,7 +146,9 @@ function startReminderWatch() {
         const key = `${item.reminderId || item.id}:${due}`;
         if (REMINDER_NOTIFIED_KEYS.has(key)) continue;
         REMINDER_NOTIFIED_KEYS.add(key);
-        notify("定时任务", item.text || "到点了");
+        // 到点弹桌面通知：走 maybeNotify 的统一闸（开关 / 时机 / 可见性），
+        // 没有会话 id 交付，故 convId 传 null——不看会话也照弹，点通知只聚焦窗口。
+        maybeNotify("定时任务", item.text || "到点了", null, "attention");
       }
     } catch {
       /* 离线就等下一次 */

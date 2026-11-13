@@ -8,6 +8,7 @@
  */
 
 import { esc, renderMarkdown } from "./markdown.js";
+import { createToolChips } from "./tool-chips.js";
 import { TOOL_ICON_PATHS, createWorkPanel, shortDuration, toolKindOf } from "./work-panel.js";
 
 function addStepBlock(row, label, text, kind = "pre") {
