@@ -1,7 +1,10 @@
 // 轻量 DOM 冒烟：不引浏览器，用最小假 DOM 跑 memorySettingsMarkup 的纯模板部分，
 // 断言我新增的节点与 id 都存在、且 renderMemoryList 的分组顺序正确。
 import { readFileSync } from "node:fs";
-const js = readFileSync(new URL("../../web/app.js", import.meta.url), "utf8");
+// 2026-11-13：记忆页从 web/app.js 拆出后落在 settings-memory.js。
+// 取的是旧版 A 页模板（函数已改名 memorySettingsMarkupLegacy；新版 A/B 页的
+// memorySettingsMarkup 在 memory-page.js，字段口径不同，不是这份断言的对象）。
+const js = readFileSync(new URL("../../web/settings-memory.js", import.meta.url), "utf8");
 
 function extract(name, kind = "function") {
   const start = js.indexOf(`${kind} ${name}(`);
@@ -16,21 +19,23 @@ function extract(name, kind = "function") {
 }
 
 const esc = (t) => String(t).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+// 与 web/markdown.js 里的 attr 同义：属性值转义（记忆页的 data-tip 用）
+const attr = (text) => esc(String(text ?? "")).replace(/"/g, "&quot;");
 const sectionMarkup = (title, body) => `<section class="set-sec"><h2>${title}</h2>${body}</section>`;
 const rowMarkup = (label, hint, control) => `<div class="row"><div class="row-main"><div class="row-label">${label}</div><div class="row-hint">${hint || ""}</div></div><div class="row-control">${control}</div></div>`;
 
 const consts = js.slice(js.indexOf("const MEMORY_KIND_LABEL"), js.indexOf("function memorySettingsMarkup"));
-const markupSrc = extract("memorySettingsMarkup");
+const markupSrc = extract("memorySettingsMarkupLegacy");
 const renderSrc = extract("renderMemoryList");
 const itemSrc = extract("memoryItemMarkup");
 
 const factory = new Function(
-  "sectionMarkup", "rowMarkup", "esc", "wireMemoryActions",
-  `${consts}\n${markupSrc}\n${renderSrc}\n${itemSrc}\nreturn { memorySettingsMarkup, renderMemoryList };`
+  "sectionMarkup", "rowMarkup", "esc", "attr", "wireMemoryActions",
+  `${consts}\n${markupSrc}\n${renderSrc}\n${itemSrc}\nreturn { memorySettingsMarkupLegacy, renderMemoryList };`
 );
-const api = factory(sectionMarkup, rowMarkup, esc, () => {});
+const api = factory(sectionMarkup, rowMarkup, esc, attr, () => {});
 
-const page = api.memorySettingsMarkup();
+const page = api.memorySettingsMarkupLegacy();
 for (const id of ["mem-status", "mem-extract", "mem-list", "mem-empty"]) {
   if (!page.includes(`id="${id}"`)) throw new Error(`记忆页缺节点 ${id}`);
 }
