@@ -9,7 +9,8 @@
  * 2. **默认关**（`AGENT_READ_ALLOWLIST`，缺省 false）：这是放宽行为，先观望。
  * 3. 任何"不确定"一律返回 false（= 照常问）。白名单只认最朴素的形态。
  *
- * 只认：`bash` / `powershell`、单条命令、字面量路径、全部落在当前工作区内。
+ * 只认：`bash` / `powershell`、单条命令、字面量路径、全部落在已登记根集合内
+ * （工作区根 + 项目根，2026-11-12 多根）。
  * 出现管道 / 重定向 / 命令分隔 / 变量 / 通配 / 反引号 / 子 shell / `~` / `%` 一律不放行。
  */
 
@@ -71,20 +72,20 @@ function unquote(token: string): string {
 }
 
 /**
- * 这条命令是不是"只读且只碰工作区内的路径"。
+ * 这条命令是不是"只读且只碰已登记目录内的路径"。
  *
  * 纯函数：不读全局状态、不碰磁盘以外的环境。入参口径与 `path-guard.ts` 一致
- * （`workspaceRoot` 必须是 realpath；未设工作区传 null → 一律不放行）。
+ * （`workspaceRoots` 必须是 realpath 数组；空数组 → 一律不放行）。
  */
 export function isReadOnlyShellCommand(
 	toolName: string,
 	args: unknown,
-	workspaceRoot: string | null,
+	workspaceRoots: readonly string[],
 	cwd: string,
 ): boolean {
 	if (!SHELL_TOOLS.has(toolName)) return false;
-	// 没有工作区根就无法证明"在自己文件里"，保守照常问。
-	if (!workspaceRoot) return false;
+	// 没有根目录就无法证明"在自己文件里"，保守照常问。
+	if (!workspaceRoots.length) return false;
 
 	const raw = commandOf(args);
 	if (!raw) return false;
@@ -101,13 +102,13 @@ export function isReadOnlyShellCommand(
 	if (!READ_ONLY_COMMANDS.has(head)) return false;
 
 	for (const token of tokens.slice(1)) {
-		// 家目录展开会逃出工作区；`~` 只在开头才有展开语义（8.3 短路径里的 `~1` 不算）。
+		// 家目录展开会逃出根集合；`~` 只在开头才有展开语义（8.3 短路径里的 `~1` 不算）。
 		if (token.startsWith("~")) return false;
 		// 选项与 `--` 分隔符不是路径；选项的取值（如 `-n 100` 的 100）会被当成
-		// 相对路径解析，落在工作区内即放行，越界仍会被下面拦下。
+		// 相对路径解析，落在任一已登记根内即放行，越界仍会被下面拦下。
 		if (token === "--" || token.startsWith("-")) continue;
 		const target = realTargetOf(isAbsolute(token) ? token : resolve(cwd, token));
-		if (!insideOrEqual(workspaceRoot, target)) return false;
+		if (!workspaceRoots.some((root) => insideOrEqual(root, target))) return false;
 	}
 
 	return true;

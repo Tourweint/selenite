@@ -50,7 +50,7 @@ export function judgeToolCapMessage(max: number): string {
  * 不能只靠读代码。第二级纪律与第一级一致：单条、无管道/重定向/通配/命令组合。
  */
 export function judgeBashAllowed(command: string, cwd: string, workspaceRoot: string): boolean {
-	if (isReadOnlyShellCommand("bash", { command }, workspaceRoot, cwd)) return true;
+	if (isReadOnlyShellCommand("bash", { command }, [workspaceRoot], cwd)) return true;
 	return judgeRetestEnabled() && isJudgeRetestCommand(command, workspaceRoot, cwd);
 }
 

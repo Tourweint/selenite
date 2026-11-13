@@ -149,6 +149,24 @@ test("files 列目录：根层屏蔽 .data，其余照常列出", async () => {
 	});
 });
 
+test("files 列目录：带 projectId 可读工作区外的项目根", async () => {
+	await withFixture(async (f) => {
+		const outside = tempDir("outside");
+		try {
+			writeFileSync(join(outside, "note.txt"), "outside");
+			const project = f.store.confirmProposal(f.store.proposeProject("外部项目", outside).id);
+			const response = await f.app.request(
+				`/api/v1/files?projectId=${encodeURIComponent(project.id)}`,
+			);
+			assert.equal(response.status, 200);
+			const data = (await response.json()) as { entries: { name: string }[] };
+			assert.ok(data.entries.some((entry) => entry.name === "note.txt"));
+		} finally {
+			rmSync(outside, { recursive: true, force: true });
+		}
+	});
+});
+
 test("files/content：文本回正文；二进制与超大文件只给元信息", async () => {
 	await withFixture(async (f) => {
 		const text = await f.app.request("/api/v1/files/content?path=readme.md");

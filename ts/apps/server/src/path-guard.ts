@@ -1,12 +1,12 @@
 /**
- * 最大工作区物理边界（2026-11-04 侧边栏工作区与当前项目方案 §2.4）。
+ * 助手物理边界（2026-11-04 单根；2026-11-12 多根）。
  *
- * 只守 `write` / `edit` 的目标路径：**解析后必须落在工作区根内**，越界直接拒绝执行。
- * bash / powershell 不扫命令文本（设计已定，登记为已知边界）——它们的 cwd 已由
- * 会话执行环境圈在工作区内，命令里写绝对路径逃逸由审批兜底。
+ * 只守 `write` / `edit` 的目标路径：**解析后必须落在任一根集合内**（工作区根 + 已登记项目根），
+ * 都不在才硬拒绝。bash / powershell 不扫命令文本（设计已定，登记为已知边界）——它们的 cwd
+ * 已在根集合内，命令里写绝对路径逃逸由审批兜底。
  *
- * 提成纯函数是为了能直接断言：入参只有工具名、参数、工作区根和当前 cwd，
- * 不读全局状态，也不碰磁盘以外的环境（工作区未设时由调用方传 null → 旁路）。
+ * 提成纯函数是为了能直接断言：入参只有工具名、参数、根集合和当前 cwd，
+ * 不读全局状态，也不碰磁盘以外的环境（根集合为空时旁路）。
  */
 
 import { existsSync, realpathSync } from "node:fs";
@@ -71,16 +71,19 @@ export function realTargetOf(target: string): string {
 export interface PathGuardInput {
 	readonly tool: string;
 	readonly args: unknown;
-	/** 最大工作区根的 realpath；null = 未设工作区，守卫旁路 */
-	readonly workspaceRoot: string | null;
+	/**
+	 * 助手可读写的根目录 realpath 列表（2026-11-12 多根：工作区 + 已登记项目）。
+	 * 空数组 = 未配置任何根，守卫旁路（不把没配的人锁死）。
+	 */
+	readonly workspaceRoots: readonly string[];
 	/** 本轮会话执行环境的 cwd（相对路径按它解析） */
 	readonly cwd: string;
 }
 
 /** 越界时返回给模型的 blockReason；放行返回 undefined。 */
 export function pathGuardBlockReason(input: PathGuardInput): string | undefined {
-	const { tool, args, workspaceRoot, cwd } = input;
-	if (!workspaceRoot || !GUARDED_TOOLS.has(tool)) return undefined;
+	const { tool, args, workspaceRoots, cwd } = input;
+	if (!workspaceRoots.length || !GUARDED_TOOLS.has(tool)) return undefined;
 	if (!args || typeof args !== "object") return undefined;
 
 	const values = args as Record<string, unknown>;
@@ -98,6 +101,6 @@ export function pathGuardBlockReason(input: PathGuardInput): string | undefined 
 	if (!path) return undefined;
 
 	const target = realTarget(resolve(cwd, path));
-	if (insideOrEqual(workspaceRoot, target)) return undefined;
-	return `路径越出最大工作区（${workspaceRoot}）：如确需写入外部，请在设置调整工作区或用完全访问档`;
+	if (workspaceRoots.some((root) => insideOrEqual(root, target))) return undefined;
+	return `路径不在已登记的工作区/项目目录内：请到 设置 → 项目 里添加该目录（${workspaceRoots.join("、")}）`;
 }

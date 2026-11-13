@@ -172,7 +172,7 @@ test("项目内子目录不算新项目，项目名不能重复", () => {
 	});
 });
 
-test("派单复核：按名字或 id 都能找到，工作区变更后拒绝", () => {
+test("派单复核：按名字或 id 都能找到，换工作区后项目仍可用（多根）", () => {
 	withStore((store) => {
 		const workspaceA = tempDir("ws-a");
 		const workspaceB = tempDir("ws-b");
@@ -190,14 +190,74 @@ test("派单复核：按名字或 id 都能找到，工作区变更后拒绝", (
 			if (byId.ok) assert.equal(byId.project.rootPath, resolve(project.rootPath));
 
 			store.setWorkspace(workspaceB);
-			const outside = store.resolveForUse("前端");
-			assert.equal(outside.ok, false);
-			if (!outside.ok) assert.match(outside.message, /不在当前工作区/);
+			const after = store.resolveForUse("前端");
+			assert.equal(after.ok, true, "项目是独立的根，换工作区不影响它");
 		} finally {
 			rmSync(workspaceA, { recursive: true, force: true });
 			rmSync(workspaceB, { recursive: true, force: true });
 		}
 	});
+});
+
+test("项目可以在工作区外、路径可改、归档后可恢复", () => {
+	withStore((store) => {
+		const workspace = tempDir("ws");
+		const outside = tempDir("outside");
+		const moved = tempDir("outside-moved");
+		try {
+			store.setWorkspace(workspace);
+			// 不能把工作区根的上层目录登记成项目（包含工作区根，等于把默认目录降级成子目录）
+			assert.throws(() => store.proposeProject("工作区上级", resolve(workspace, "..")), ProjectError);
+			const proposal = store.proposeProject("外部项目", outside);
+			assert.equal(realpathSync(proposal.rootPath), realpathSync(outside));
+			const project = store.confirmProposal(proposal.id);
+			assert.equal(project.rootPath, realpathSync(outside));
+
+			const usable = store.resolveForUse(project.id);
+			assert.equal(usable.ok, true);
+
+			// 改路径：只改登记，磁盘上的旧目录还在
+			const updated = store.updateProjectRoot(project.id, moved);
+			assert.equal(updated.rootPath, realpathSync(moved));
+			assert.equal(existsSync(outside), true);
+
+			// 归档 = 软退场：派单拒绝、当前项目指针清空；恢复后重新可用
+			store.setCurrentProject(project.id);
+			store.setArchived(project.id, true);
+			assert.equal(store.getCurrentProjectId(), null);
+			const archived = store.resolveForUse(project.id);
+			assert.equal(archived.ok, false);
+			if (!archived.ok) assert.match(archived.message, /已归档/);
+			store.setArchived(project.id, false);
+			const restored = store.resolveForUse(project.id);
+			assert.equal(restored.ok, true);
+		} finally {
+			rmSync(workspace, { recursive: true, force: true });
+			rmSync(outside, { recursive: true, force: true });
+			rmSync(moved, { recursive: true, force: true });
+		}
+	});
+});
+
+test("回滚开关：PROJECT_OUTSIDE_WORKSPACE=false 恢复单根口径", () => {
+	const saved = process.env.PROJECT_OUTSIDE_WORKSPACE;
+	process.env.PROJECT_OUTSIDE_WORKSPACE = "false";
+	try {
+		withStore((store) => {
+			const workspace = tempDir("ws");
+			const outside = tempDir("outside");
+			try {
+				store.setWorkspace(workspace);
+				assert.throws(() => store.proposeProject("外部项目", outside), ProjectError);
+			} finally {
+				rmSync(workspace, { recursive: true, force: true });
+				rmSync(outside, { recursive: true, force: true });
+			}
+		});
+	} finally {
+		if (saved === undefined) delete process.env.PROJECT_OUTSIDE_WORKSPACE;
+		else process.env.PROJECT_OUTSIDE_WORKSPACE = saved;
+	}
 });
 
 test("delegate 没有项目时返回 needs_project 与项目清单", () => {

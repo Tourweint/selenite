@@ -24,7 +24,7 @@ writeFileSync(join(outside, "secret.txt"), "nope\n");
 const cwd = work;
 
 function bash(command: string): boolean {
-	return isReadOnlyShellCommand("bash", { command }, work, cwd);
+	return isReadOnlyShellCommand("bash", { command }, [work], cwd);
 }
 
 test.after(() => rmSync(root, { recursive: true, force: true }));
@@ -54,7 +54,12 @@ test("只读白名单：10 个正例（纯读 + 路径在工作区）", () => {
 	for (const command of positives) {
 		assert.equal(bash(command), true, `应放行却拦了：${command}`);
 	}
-	assert.equal(isReadOnlyShellCommand("powershell", { command: "cat notes.md" }, work, cwd), true);
+	assert.equal(isReadOnlyShellCommand("powershell", { command: "cat notes.md" }, [work], cwd), true);
+	// 多根（2026-11-12）：另一个已登记目录里的只读命令也放行。
+	assert.equal(
+		isReadOnlyShellCommand("bash", { command: `cat ${join(outside, "secret.txt")}` }, [work, outside], cwd),
+		true,
+	);
 });
 
 test("只读白名单：15 个反例（管道/重定向/变量/glob/越界/写命令）", () => {
@@ -83,11 +88,11 @@ test("只读白名单：15 个反例（管道/重定向/变量/glob/越界/写�
 });
 
 test("只读白名单：只对 bash / powershell 生效，且必须有工作区根", () => {
-	assert.equal(isReadOnlyShellCommand("write", { command: "cat notes.md" }, work, cwd), false);
-	assert.equal(isReadOnlyShellCommand("read", { command: "cat notes.md" }, work, cwd), false);
+	assert.equal(isReadOnlyShellCommand("write", { command: "cat notes.md" }, [work], cwd), false);
+	assert.equal(isReadOnlyShellCommand("read", { command: "cat notes.md" }, [work], cwd), false);
 	// 未设工作区 → 无法证明"在自己文件里"，保守照常问。
-	assert.equal(isReadOnlyShellCommand("bash", { command: "cat notes.md" }, null, cwd), false);
+	assert.equal(isReadOnlyShellCommand("bash", { command: "cat notes.md" }, [], cwd), false);
 	// 参数不合法 → 不放行。
-	assert.equal(isReadOnlyShellCommand("bash", {}, work, cwd), false);
-	assert.equal(isReadOnlyShellCommand("bash", { command: "   " }, work, cwd), false);
+	assert.equal(isReadOnlyShellCommand("bash", {}, [work], cwd), false);
+	assert.equal(isReadOnlyShellCommand("bash", { command: "   " }, [work], cwd), false);
 });

@@ -52,41 +52,52 @@ export type Opener = (dir: string) => void;
  * Windows 焦点式打开（2026-11-11 用户拍板「直接弹到顶层」）：
  * 服务是无窗口的后台进程，裸 spawn explorer 的窗口会被 Windows 前台规则压在最底层
  * （2026-11-11 实测：裸 spawn 与 Shell COM 裸开都不拿前台）。
- * 这段脚本：Shell.Application COM 开窗 → 轮询拿到新窗口句柄 → SwitchToThisWindow 切前台
- * （2026-11-11 同机实测：切换后连续 6 次采样全在前台，模拟服务端拉起后 1s 内完成）。
+ *
+ * 2026-11-13 提速：以前整条链（PowerShell 启动 → COM 开窗 → 轮询句柄 → 切前台）
+ * 串行跑完窗口才出现，点完要等 1~2s。现在拆成两步并行——
+ *   ① 直接 spawn explorer：~200ms 窗口就出来（用户感知的"慢"大头是等 PowerShell）；
+ *   ② 本脚本并行起 PowerShell，只做「认领 + 切前台」：按 LocationURL 认到
+ *      ①开出的窗口 → SwitchToThisWindow。窗口出现到切前台之间有零点几秒可能垫底，
+ *      终态仍在顶层——这是提速换来的窗口期，实测可接受（2026-11-13）。
  * SwitchToThisWindow 是 user32 未文档化但长期稳定的 API（explorer 任务栏同款），
- * 配 EXPLORER_FOCUS 回滚开关兜底。
+ * 配 EXPLORER_FOCUS 回滚开关兜底（false = 退回裸 spawn，窗口可能垫底）。
  * 必须走 -File 传脚本文件：-EncodedCommand 形态下 Shell COM 开不出窗口
  * （2026-11-11 二分定位：-File ±NonInteractive 都正常，-EncodedCommand 必挂）；
  * 路径经 argv 传入，顺带绕开中文路径的文件编码问题（脚本本体保持纯 ASCII）。
- * spawn 不能带 detached：DETACHED_PROCESS 下 PowerShell 没有控制台直接起不来
+ * 焦点脚本的 spawn 不能带 detached：DETACHED_PROCESS 下 PowerShell 没有控制台直接起不来
  * （2026-11-11 二分定位：windowsHide 单独用正常，detached ± windowsHide 都死）；
  * windowsHide 已给子进程独立隐藏控制台，不会被服务端 Ctrl+C 连带杀掉。
  */
 const WINDOWS_FOCUS_OPEN_PS1 = `param([string]$Dir)
 
 $sh = New-Object -ComObject Shell.Application
-$sh.Open($Dir)
 $uri = ([System.Uri]$Dir).AbsoluteUri
 $h = 0
-for ($i = 0; $i -lt 30; $i++) {
+for ($i = 0; $i -lt 50; $i++) {
   Start-Sleep -Milliseconds 100
   $w = @($sh.Windows() | Where-Object { $_.LocationURL -eq $uri })[0]
   if ($w) { $h = $w.HWND; break }
 }
 if ($h -ne 0) {
-  Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class FgSwitch { [DllImport("user32.dll")] public static extern void SwitchToThisWindow(IntPtr h, bool altTab); }'
-  [FgSwitch]::SwitchToThisWindow([IntPtr]$h, $true)
+  Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class FgSwitch { [DllImport("user32.dll")] public static extern void SwitchToThisWindow(IntPtr h, bool altTab); [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); }'
+  # 窗口刚创建的前几百毫秒可能还在开屏动画，切了会被顶回来——切了就复核，没拿住重试
+  for ($i = 0; $i -lt 6; $i++) {
+    [FgSwitch]::SwitchToThisWindow([IntPtr]$h, $true)
+    Start-Sleep -Milliseconds 120
+    if ([FgSwitch]::GetForegroundWindow() -eq [IntPtr]$h) { break }
+  }
 }
 `;
 
 function platformOpen(dir: string): void {
 	if (process.platform === "win32" && explorerFocusEnabled()) {
+		// ① 先开窗：explorer 自己 spawn，不等 PowerShell。
+		spawn("explorer", [dir], { detached: true, stdio: "ignore" }).unref();
+		// ② 再并行起焦点脚本认领+切前台；脚本落临时目录再 -File 起进程。
 		try {
-			// 脚本每次落临时目录再 -File 起进程；内容纯 ASCII，用户路径不落盘。
 			const scriptPath = join(tmpdir(), "lifediary-open-focus.ps1");
 			writeFileSync(scriptPath, WINDOWS_FOCUS_OPEN_PS1, "utf8");
-			const child = spawn(
+			const focus = spawn(
 				"powershell",
 				[
 					"-NoProfile",
@@ -101,11 +112,11 @@ function platformOpen(dir: string): void {
 				// 不能加 detached（DETACHED_PROCESS 杀死 PowerShell，见上注）；unref 只是不等它。
 				{ stdio: "ignore", windowsHide: true },
 			);
-			child.unref();
-			return;
+			focus.unref();
 		} catch {
-			// 脚本落盘失败（磁盘只读等）→ 落回裸 spawn：窗口还开，只是可能垫底。
+			// 焦点脚本没跑起来（落盘失败等）→ 窗口已经开了，只是可能垫底（=回滚形态）。
 		}
+		return;
 	}
 	const command =
 		process.platform === "win32" ? "explorer" : process.platform === "darwin" ? "open" : "xdg-open";
@@ -130,18 +141,18 @@ function insideOrEqual(root: string, target: string): boolean {
 }
 
 /**
- * 工作区内相对路径 → 已复核的绝对落点。
+ * 根目录内相对路径 → 已复核的绝对落点（2026-11-12 起根可以是工作区根或项目根）。
  * 只做字形校验 + realpath 复核；"必须存在"由调用方按 file / dir 分别断言。
- * 根层 `.data` 在这里拦（根层 = 第一段），项目内嵌套的 .data 不屏蔽
+ * 根层 `.data` 在这里拦（根层 = 第一段），根内嵌套的 .data 不屏蔽
  * （方案口径：屏蔽的是存配置与令牌哈希的根层 .data）。
  */
 export function resolveInsideWorkspace(
-	workspaceRoot: string,
+	rootDir: string,
 	rawPath: string,
 ): { rel: string; target: string } {
 	const raw = rawPath.trim().replace(/\\/g, "/");
 	if (isAbsolute(rawPath.trim()) || /^[a-zA-Z]:/.test(raw)) {
-		throw new FileBrowseError("bad_path", "只接受工作区内的相对路径");
+		throw new FileBrowseError("bad_path", "只接受目录内的相对路径");
 	}
 	const segments = raw.split("/").filter((segment) => segment && segment !== ".");
 	if (segments.some((segment) => segment === "..")) {
@@ -151,14 +162,14 @@ export function resolveInsideWorkspace(
 		throw new FileBrowseError("blocked_path", "这个路径不对外");
 	}
 	const rel = segments.join("/");
-	const target = rel ? resolve(workspaceRoot, rel) : resolve(workspaceRoot);
+	const target = rel ? resolve(rootDir, rel) : resolve(rootDir);
 	if (!existsSync(target)) {
 		throw new FileBrowseError("not_found", "路径不存在", 404);
 	}
 	// realpath 复核：符号链接祖先逃逸在这里拦住。
 	const real = realpathSync(target);
-	if (!insideOrEqual(workspaceRoot, real)) {
-		throw new FileBrowseError("outside_workspace", "路径经 realpath 解析后落在工作区外");
+	if (!insideOrEqual(rootDir, real)) {
+		throw new FileBrowseError("outside_workspace", "路径经 realpath 解析后落在目录外");
 	}
 	return { rel, target: real };
 }
@@ -222,6 +233,24 @@ export function mountFiles(app: Hono, deps?: Partial<FilesDeps>): void {
 	deps?.store ?? projectsStore(); // 懒取全局登记表；单测用 deps.store 注入隔离库
 	const opener: Opener = deps?.open ?? platformOpen;
 
+	/**
+	 * 文件浏览的根（2026-11-12 多根）：带 `projectId` 用该项目自己的根（可以在工作区外），
+	 * 缺省仍是工作区根。`path` 始终是**相对这个根**的路径。
+	 */
+	const rootFor = (c: Context):
+		| { ok: true; root: string }
+		| { ok: false; error: string; message: string } => {
+		const projectId = c.req.query("projectId")?.trim() || "";
+		if (projectId) {
+			const result = storeOf().resolveForUse(projectId);
+			if (!result.ok) return { ok: false, error: "bad_project", message: result.message };
+			return { ok: true, root: result.project.rootPath };
+		}
+		const root = workspaceRootReal(storeOf());
+		if (!root) return { ok: false, error: "no_workspace", message: "还没有选定工作区" };
+		return { ok: true, root };
+	};
+
 	/** 打开资源管理器（桌面端；手机不提供此入口——手机上"打开资源管理器"无意义）。 */
 	app.post("/api/v1/workspaces/open-explorer", async (c) => {
 		if (!explorerOpenEnabled()) {
@@ -233,7 +262,7 @@ export function mountFiles(app: Hono, deps?: Partial<FilesDeps>): void {
 		try {
 			let dir: string;
 			if (projectId) {
-				// 按项目直达自己的根：复用派单同一套复核（存在、非归档、realpath 在工作区内）。
+				// 按项目直达自己的根：复用派单同一套复核（存在、未移除、realpath）。
 				const result = store.resolveForUse(projectId);
 				if (!result.ok) {
 					return c.json({ error: "bad_project", message: result.message }, 400);
@@ -253,13 +282,15 @@ export function mountFiles(app: Hono, deps?: Partial<FilesDeps>): void {
 		}
 	});
 
-	/** 目录列表（只读；path 缺省 = 工作区根）。 */
+	/** 目录列表（只读；path 缺省 = 根目录；projectId 指定项目根）。 */
 	app.get("/api/v1/files", (c) => {
 		if (!fileBrowseEnabled()) return c.notFound();
 		try {
-			const root = workspaceRootReal(storeOf());
-			if (!root) return c.json({ error: "no_workspace", message: "还没有选定工作区" }, 400);
-			const { rel, target } = resolveInsideWorkspace(root, c.req.query("path") ?? "");
+			const resolved = rootFor(c);
+			if (!resolved.ok) {
+				return c.json({ error: resolved.error, message: resolved.message }, 400);
+			}
+			const { rel, target } = resolveInsideWorkspace(resolved.root, c.req.query("path") ?? "");
 			if (!statSync(target).isDirectory()) {
 				return c.json({ error: "bad_path", message: "路径不是目录" }, 400);
 			}
@@ -275,9 +306,11 @@ export function mountFiles(app: Hono, deps?: Partial<FilesDeps>): void {
 	app.get("/api/v1/files/content", async (c) => {
 		if (!fileBrowseEnabled()) return c.notFound();
 		try {
-			const root = workspaceRootReal(storeOf());
-			if (!root) return c.json({ error: "no_workspace", message: "还没有选定工作区" }, 400);
-			const { rel, target } = resolveInsideWorkspace(root, c.req.query("path") ?? "");
+			const resolved = rootFor(c);
+			if (!resolved.ok) {
+				return c.json({ error: resolved.error, message: resolved.message }, 400);
+			}
+			const { rel, target } = resolveInsideWorkspace(resolved.root, c.req.query("path") ?? "");
 			const stat = statSync(target);
 			if (!stat.isFile()) {
 				return c.json({ error: "bad_path", message: "路径不是文件" }, 400);
