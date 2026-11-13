@@ -28,11 +28,27 @@ export interface FlagDef {
 	 * false = 启动时冻结（路由挂载 / 工具注册 / 模块常量），重启后生效。
 	 */
 	hot: boolean;
+	/**
+	 * 数值型开关（2026-11-13 自动归档天数）：`values` 留空且给了 `min` 时，
+	 * 取值按「≥min 的整数」校验，不再查枚举表。只有界面真的要自由数值才用。
+	 */
+	min?: number;
+}
+
+/** 取值校验收口：枚举表命中，或数值型开关按整数 ≥min 校验（loadFlagOverrides / setFlag 共用）。 */
+function flagValueAllowed(def: FlagDef, value: string): boolean {
+	if (def.values.includes(value)) return true;
+	if (def.values.length === 0 && def.min !== undefined) {
+		const parsed = Number(value);
+		return Number.isInteger(parsed) && parsed >= def.min;
+	}
+	return false;
 }
 
 /** 进界面的白名单：只收"用户行为开关"，路径/令牌类一律不收 */
 export const FLAG_DEFS: FlagDef[] = [
-	{ key: "AUTONOMY_ENABLED", values: ["true", "false", "observe"], defaultValue: "false", hot: true },
+	// 自主轮总开关（2026-11-13 起默认开：没人盯着跑的轮要有人兜底提醒+审批收紧；显式 false 才关）。
+	{ key: "AUTONOMY_ENABLED", values: ["true", "false", "observe"], defaultValue: "true", hot: true },
 	{ key: "AGENT_ATTACHMENTS", values: ["true", "false"], defaultValue: "true", hot: true },
 	{ key: "AGENT_EDIT_RESEND", values: ["true", "false"], defaultValue: "true", hot: true },
 	{ key: "CURRENT_PROJECT", values: ["true", "false"], defaultValue: "true", hot: true },
@@ -56,6 +72,17 @@ export const FLAG_DEFS: FlagDef[] = [
 	{ key: "TOPICS_ENABLED", values: ["true", "false"], defaultValue: "true", hot: false },
 	// 结构化提问（2026-11-09）：工具注册在启动时冻结，所以 hot:false。
 	{ key: "AGENT_ASK_USER", values: ["true", "false"], defaultValue: "true", hot: false },
+	// 任务中心重做回滚开关（2026-11-13 批 1）：web 每次进任务中心懒读，
+	// false = 退回旧三列看板（旧渲染函数与旧 DOM 都还在），所以 hot:true。
+	{ key: "TASKS_REDESIGN_ENABLED", values: ["true", "false"], defaultValue: "true", hot: true },
+	// 永久删除（2026-11-13 归档管理对齐 ZCode 批A）：端点常挂、消费处每次请求懒读 env，
+	// 所以 hot:true。false = deletion-preview / delete 两端点 400「永久删除已关闭」（回滚开关）。
+	{ key: "CHAT_HARD_DELETE", values: ["true", "false"], defaultValue: "true", hot: true },
+	// 自动归档（同批）：调度器每轮懒读（动态开关经 flags 端点的 onChange 接线开停定时器），
+	// 默认关——翻案的是"有这个能力"，不是"替用户做主"。
+	{ key: "ARCHIVE_AUTO_ENABLED", values: ["true", "false"], defaultValue: "false", hot: true },
+	// 自动归档天数：数值型开关（values 留空 + min=1，按 ≥1 整数校验）；每轮懒读，改完下一轮生效。
+	{ key: "ARCHIVE_AUTO_DAYS", values: [], defaultValue: "30", hot: true, min: 1 },
 ];
 
 const FLAG_BY_KEY = new Map(FLAG_DEFS.map((def) => [def.key, def]));
@@ -102,7 +129,7 @@ export function loadFlagOverrides(env: NodeJS.ProcessEnv = process.env): number 
 	let applied = 0;
 	for (const [key, value] of Object.entries(map)) {
 		const def = FLAG_BY_KEY.get(key);
-		if (!def || !def.values.includes(value)) {
+		if (!def || !flagValueAllowed(def, value)) {
 			console.warn(`[flags] 跳过无效开关：${key}=${value}`);
 			continue;
 		}
@@ -137,8 +164,10 @@ export function setFlag(
 ): { ok: true; hot: boolean } | { ok: false; status: 400 | 404; message: string } {
 	const def = FLAG_BY_KEY.get(key);
 	if (!def) return { ok: false, status: 404, message: `没有叫 ${key} 的开关` };
-	if (!def.values.includes(value)) {
-		return { ok: false, status: 400, message: `${key} 的取值只能是：${def.values.join(" / ")}` };
+	if (!flagValueAllowed(def, value)) {
+		const allowed =
+			def.values.length > 0 ? `：${def.values.join(" / ")}` : `：≥${def.min ?? 1} 的整数`;
+		return { ok: false, status: 400, message: `${key} 的取值只能是${allowed}` };
 	}
 	const path = flagsPath(env);
 	const map = readOverrideMap(path);
@@ -148,7 +177,14 @@ export function setFlag(
 	return { ok: true, hot: def.hot };
 }
 
-export function mountFlags(app: Hono, deps: { enabled?: boolean } = {}): void {
+export function mountFlags(
+	app: Hono,
+	deps: {
+		enabled?: boolean;
+		/** 开关写成功后的回调（2026-11-13）：自动归档调度器靠它动态开停定时器，否则运行中打开开关要等重启。 */
+		onChange?: (key: string, value: string) => void;
+	} = {},
+): void {
 	if (!(deps.enabled ?? flagsUiEnabled())) return;
 
 	app.get("/api/v1/agent/flags", (c) => c.json(listFlags()));
@@ -163,6 +199,7 @@ export function mountFlags(app: Hono, deps: { enabled?: boolean } = {}): void {
 		if (!result.ok) {
 			return c.json({ error: "bad_request", message: result.message }, result.status);
 		}
+		deps.onChange?.(key, body.value);
 		return c.json({ ok: true, key, value: body.value, hot: result.hot });
 	});
 }

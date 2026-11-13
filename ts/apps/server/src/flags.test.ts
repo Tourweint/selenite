@@ -95,3 +95,37 @@ test("API：GET 列表带 hot/defaultValue，PUT 校验取值，AGENT_FLAGS_UI=f
 	mountFlags(closed, { enabled: false });
 	assert.equal((await closed.request("/api/v1/agent/flags")).status, 404);
 });
+
+test("归档管理三键（2026-11-13 批A）：默认值 / hot 标记 / onChange 回调", async () => {
+	const byKey = new Map(FLAG_DEFS.map((def) => [def.key, def]));
+	const hardDelete = byKey.get("CHAT_HARD_DELETE");
+	assert.equal(hardDelete?.defaultValue, "true", "永久删除默认开（回滚开关）");
+	assert.equal(hardDelete?.hot, true, "端点每次请求懒读 env，改完即生效");
+	const autoEnabled = byKey.get("ARCHIVE_AUTO_ENABLED");
+	assert.equal(autoEnabled?.defaultValue, "false", "自动归档默认关");
+	assert.equal(autoEnabled?.hot, true);
+	const autoDays = byKey.get("ARCHIVE_AUTO_DAYS");
+	assert.equal(autoDays?.defaultValue, "30");
+	assert.equal(autoDays?.hot, true);
+	assert.equal(autoDays?.min, 1, "天数数值型开关，最小 1");
+
+	// onChange：写成功才回调（自动归档调度器靠它动态开停定时器）
+	const seen: string[] = [];
+	const app = new Hono();
+	mountFlags(app, { onChange: (key) => seen.push(key) });
+	const put = await app.request("/api/v1/agent/flags/ARCHIVE_AUTO_ENABLED", {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ value: "true" }),
+	});
+	assert.equal(put.status, 200);
+	assert.deepEqual(seen, ["ARCHIVE_AUTO_ENABLED"]);
+	const badPut = await app.request("/api/v1/agent/flags/ARCHIVE_AUTO_ENABLED", {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ value: "maybe" }),
+	});
+	assert.equal(badPut.status, 400);
+	assert.deepEqual(seen, ["ARCHIVE_AUTO_ENABLED"], "写失败不回调");
+	cleanupEnv(["ARCHIVE_AUTO_ENABLED", "CHAT_HARD_DELETE", "ARCHIVE_AUTO_DAYS"]);
+});

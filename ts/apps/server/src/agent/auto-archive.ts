@@ -1,0 +1,292 @@
+import type { Harness } from "@earendil-works/pi-durable";
+import { LiveDoc } from "@earendil-works/pi-durable";
+import { getHarness } from "./lifecycle.ts";
+import {
+	CTX,
+	Chats,
+	ChatKinds,
+	TASK_CONVERSATION_PREFIX,
+} from "./shared.ts";
+import {
+	archiveChat,
+	chatKindOfInternal,
+	readChatMeta,
+	readChatStats,
+} from "./session.ts";
+
+/**
+ * 自动归档调度器（2026-11-13 归档管理对齐 ZCode 批A，方案 §3）。
+ *
+ * **翻案登记**：2026-11-12 拍板"不做自动过期"，本批翻回"有这个能力，但默认关"——
+ * 开关 `ARCHIVE_AUTO_ENABLED`（默认 false）+ `ARCHIVE_AUTO_DAYS`（默认 30，最小 1），
+ * 都是 hot 开关，每轮懒读。
+ *
+ * **范式**照 autonomy.ts 的 syncSweepTimer（按需开关 + unref）：启动首轮延迟 5 分钟
+ * （setTimeout），之后每小时一轮（setInterval），都 unref。**不走 durable sleepUntil**：
+ * 这是低频清扫型任务，不需要"到点必响"的可靠性，错过一轮下轮补上（差异已登记，
+ * 不动系统架构 §3 的口径——那说的是触发型提醒）。
+ *
+ * **判定**（只收"不动了很久的普通会话"）：
+ *   - 全量枚举 `Chats.byExternal`（**不走 listChats**——它按 limit 截断，要收的恰是
+ *     旧会话，截断会漏）；只取 chatKind=worker（chief 是主对话、`task-` 有自己的
+ *     生命周期、执事与群 `partner-` 不是主人对话，都不收）；
+ *   - `lastAt`（readChatStats 口径，现场重放算）< now - days；
+ *   - 跳过已归档（chat-meta.archived）、跳过置顶（chat-meta.pins）、跳过运行中（pi.live.run）；
+ *   - **每轮上限 50 条**防长阻塞，剩余下轮继续（最旧的优先）。
+ *
+ * 归档动作复用 `archiveChat()`（记 archivedAt）。日志一轮一行：扫描数 / 命中数 /
+ * 跳过原因计数，只记条数与 id 数量，不含标题正文。
+ *
+ * **已知边界（方案登记，如实写）**：不做"归档事件广播"——正在界面里开着的会话被
+ * 自动归档后，要等下次 loadChats 才从列表消失；该会话仍可继续聊（归档不影响正文读写）。
+ */
+
+/** 开关消费处：默认关，只有显式 true/1/on 才开（与 flags defaultValue "false" 同口径）。 */
+export function archiveAutoEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = (env.ARCHIVE_AUTO_ENABLED ?? "").trim().toLowerCase();
+	return raw === "true" || raw === "1" || raw === "on";
+}
+
+/** 天数消费处：非整数 / 小于 1 落回默认 30（与 flags 校验同口径：≥1 的整数）。 */
+export function archiveAutoDays(env: NodeJS.ProcessEnv = process.env): number {
+	const parsed = Number((env.ARCHIVE_AUTO_DAYS ?? "").trim());
+	return Number.isInteger(parsed) && parsed >= 1 ? parsed : 30;
+}
+
+// ── 判定（纯函数，单测直接喂）──────────────────────────────
+
+/** 一条待判定会话的完整快照（sweep 现场算好，判定不看 durable）。 */
+export interface AutoArchiveCandidateInput {
+	externalId: string;
+	/** readChatStats 口径的最后一句时间；空会话（没有轮次）为 null */
+	lastAt: number | null;
+	worker: boolean;
+	archived: boolean;
+	pinned: boolean;
+	busy: boolean;
+}
+
+export interface AutoArchiveSkipCounts {
+	/** 非普通会话（chief / partner / task-） */
+	kind: number;
+	archived: number;
+	pinned: number;
+	/** 没有任何轮次的空会话 */
+	empty: number;
+	/** 还没到天数门槛 */
+	fresh: number;
+	busy: number;
+}
+
+export interface AutoArchiveSelection {
+	/** 命中且按最旧优先排好序（上限在调用处截） */
+	hits: { externalId: string; lastAt: number }[];
+	skipped: AutoArchiveSkipCounts;
+}
+
+/**
+ * 自动归档判定：非 worker → 已归档 → 置顶 → 空会话 → 未到期 → 忙，逐一跳过；
+ * 过了全部关卡的按 lastAt 升序（最旧的先收）。**上限不在纯函数里截**——
+ * 调用方按"上限 50"截取（便于日志里报"命中 X 收 N 剩 M"），单测直接断言顺序。
+ */
+export function selectAutoArchiveCandidates(
+	entries: readonly AutoArchiveCandidateInput[],
+	cutoff: number,
+): AutoArchiveSelection {
+	const skipped: AutoArchiveSkipCounts = { kind: 0, archived: 0, pinned: 0, empty: 0, fresh: 0, busy: 0 };
+	const hits: { externalId: string; lastAt: number }[] = [];
+	for (const entry of entries) {
+		if (!entry.worker) {
+			skipped.kind += 1;
+			continue;
+		}
+		if (entry.archived) {
+			skipped.archived += 1;
+			continue;
+		}
+		if (entry.pinned) {
+			skipped.pinned += 1;
+			continue;
+		}
+		if (entry.lastAt === null) {
+			skipped.empty += 1;
+			continue;
+		}
+		if (entry.lastAt >= cutoff) {
+			skipped.fresh += 1;
+			continue;
+		}
+		if (entry.busy) {
+			skipped.busy += 1;
+			continue;
+		}
+		hits.push({ externalId: entry.externalId, lastAt: entry.lastAt });
+	}
+	hits.sort((a, b) => a.lastAt - b.lastAt);
+	return { hits, skipped };
+}
+
+// ── 调度器 ───────────────────────────────────────────────
+
+const FIRST_RUN_DELAY_MS = 5 * 60_000;
+const SWEEP_INTERVAL_MS = 60 * 60_000;
+/** 每轮归档上限（方案口径）：防长阻塞，剩余下轮继续。 */
+export const AUTO_ARCHIVE_BATCH_LIMIT = 50;
+
+/** 注入缝（生产不传；单测传假 sweep 输入与假 archive，不碰真实 .data 与真实会话）。 */
+export interface AutoArchiveDeps {
+	enabled?: () => boolean;
+	days?: () => number;
+	/** 一轮的实际动作（默认 sweepOnce）；单测可换 */
+	sweep?: () => Promise<void>;
+}
+
+export class AutoArchiveScheduler {
+	private timer: ReturnType<typeof setInterval> | null = null;
+	private firstRun: ReturnType<typeof setTimeout> | null = null;
+	private running = false;
+
+	constructor(private readonly deps: AutoArchiveDeps = {}) {}
+
+	private enabled(): boolean {
+		return (this.deps.enabled ?? archiveAutoEnabled)();
+	}
+
+	/**
+	 * 按需开停定时器（autonomy syncSweepTimer 同款）：开且没定时器才开；
+	 * 关了就清。启动时调一次；flags 端点写 `ARCHIVE_AUTO_*` 后由 onChange 再调一次，
+	 * 运行中开 / 关都当场生效（否则动态开要等重启，hot 就名不副实）。
+	 */
+	sync(): void {
+		const enabled = this.enabled();
+		if (enabled && this.timer === null && this.firstRun === null) {
+			this.firstRun = setTimeout(() => {
+				this.firstRun = null;
+				this.timer = setInterval(() => void this.runSweep(), SWEEP_INTERVAL_MS);
+				this.timer.unref?.();
+				void this.runSweep();
+			}, FIRST_RUN_DELAY_MS);
+			this.firstRun.unref?.();
+			console.log("[auto-archive] 调度器已开：首轮 5 分钟后，之后每小时一轮");
+		} else if (!enabled && (this.timer !== null || this.firstRun !== null)) {
+			this.clearTimers();
+			console.log("[auto-archive] 调度器已关：定时器清掉");
+		}
+	}
+
+	private clearTimers(): void {
+		if (this.timer !== null) {
+			clearInterval(this.timer);
+			this.timer = null;
+		}
+		if (this.firstRun !== null) {
+			clearTimeout(this.firstRun);
+			this.firstRun = null;
+		}
+	}
+
+	private async runSweep(): Promise<void> {
+		// 每轮懒读：动态关掉的下一轮自己把定时器清掉（sync 的兜底路径）
+		if (!this.enabled()) {
+			this.sync();
+			return;
+		}
+		if (this.running) return; // 上一轮还没扫完（理论上不会：一小时一轮）
+		this.running = true;
+		try {
+			await (this.deps.sweep ?? (() => this.sweepOnce()))();
+		} catch (error) {
+			console.warn(
+				`[auto-archive] 本轮扫描失败（下轮照常）: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		} finally {
+			this.running = false;
+		}
+	}
+
+	/** 一轮扫描：全量枚举 → 判定 → 归档（上限 50）。生产路径。 */
+	async sweepOnce(harness?: Harness): Promise<void> {
+		const harnessToUse = harness ?? (await getHarness());
+		const days = archiveAutoDays();
+		const cutoff = Date.now() - days * 86_400_000;
+		const meta = readChatMeta();
+		const archived = new Set(meta.archived);
+		const pins = new Set(meta.pins);
+
+		const chats = await harnessToUse.snapshot(Chats, CTX);
+		const kinds = (await harnessToUse.snapshot(ChatKinds, CTX))?.byInternal ?? {};
+		const byExternal = chats?.byExternal ?? {};
+
+		const entries: AutoArchiveCandidateInput[] = [];
+		let scanned = 0;
+		for (const [externalId, internalRaw] of Object.entries(byExternal)) {
+			scanned += 1;
+			const internalId = Number(internalRaw);
+			const worker =
+				!externalId.startsWith(TASK_CONVERSATION_PREFIX) &&
+				chatKindOfInternal(internalId, kinds) === "worker";
+			let lastAt: number | null = null;
+			let busy = false;
+			if (worker && !archived.has(externalId) && !pins.has(externalId)) {
+				// 贵的判定（重放 context、开 live）只对还没被便宜关卡挡掉的算
+				try {
+					const stats = await readChatStats(harnessToUse, internalId);
+					lastAt = stats ? stats.lastAt : null;
+					if (stats && stats.lastAt < cutoff) {
+						const live = await harnessToUse.snapshot(LiveDoc, internalId as never, CTX).catch(() => null);
+						busy = Boolean(live?.run);
+					}
+				} catch {
+					// 单会话读失败：当空会话跳过，不挡整轮
+					lastAt = null;
+				}
+			}
+			entries.push({
+				externalId,
+				lastAt,
+				worker,
+				archived: archived.has(externalId),
+				pinned: pins.has(externalId),
+				busy,
+			});
+		}
+
+		const { hits, skipped } = selectAutoArchiveCandidates(entries, cutoff);
+		const batch = hits.slice(0, AUTO_ARCHIVE_BATCH_LIMIT);
+		const at = Date.now();
+		for (const hit of batch) archiveChat(hit.externalId, at);
+		console.log(
+			`[auto-archive] 扫描 ${scanned}：命中 ${hits.length}，归档 ${batch.length}` +
+				(hits.length > batch.length ? `（上限 ${AUTO_ARCHIVE_BATCH_LIMIT}，余 ${hits.length - batch.length} 下轮继续）` : "") +
+				`；跳过（非worker ${skipped.kind} / 已归档 ${skipped.archived} / 置顶 ${skipped.pinned} / ` +
+				`空会话 ${skipped.empty} / 未到期 ${skipped.fresh} / 忙 ${skipped.busy}）`,
+		);
+	}
+
+	/** 测试与排查用：定时器状态。 */
+	timerState(): { firstRun: boolean; interval: boolean; running: boolean } {
+		return {
+			firstRun: this.firstRun !== null,
+			interval: this.timer !== null,
+			running: this.running,
+		};
+	}
+
+	/** 测试注入：清定时器。 */
+	resetForTest(): void {
+		this.clearTimers();
+		this.running = false;
+	}
+}
+
+// ── 单例（index.ts 启动时 sync() 一次；flags onChange 再调）──
+let scheduler: AutoArchiveScheduler | null = null;
+
+export function autoArchiveScheduler(deps: AutoArchiveDeps = {}): AutoArchiveScheduler {
+	if (deps.enabled || deps.days || deps.sweep) {
+		// 注入 deps 的新实例（单测用），不换全局单例
+		return new AutoArchiveScheduler(deps);
+	}
+	scheduler ??= new AutoArchiveScheduler();
+	return scheduler;
+}
