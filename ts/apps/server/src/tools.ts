@@ -1821,7 +1821,7 @@ export function createTools(deps: ToolDeps) {
 								result.error,
 								result.message,
 								result.error === "search_not_configured"
-									? "告诉主人去设置里填搜索 key，别用推理冒充搜索。"
+									? "告诉主人去 设置 → 模型 → 搜索 添加搜索源，别用推理冒充搜索。"
 									: undefined,
 							),
 						);

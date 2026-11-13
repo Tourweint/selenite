@@ -4,6 +4,7 @@ import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
+import { SEARCH_VENDORS } from "./search.ts";
 import { TOPIC_DEFAULT_CRON, TOPIC_MAX, TopicsStore } from "./topics.ts";
 
 /**
@@ -12,10 +13,18 @@ import { TOPIC_DEFAULT_CRON, TOPIC_MAX, TopicsStore } from "./topics.ts";
  * 每个用例用独立临时文件，不碰 .data/。
  */
 
+// 搜索门禁读的是 search.json + env：把配置指到不存在的临时路径，
+// 避免开发机 .data/search.json / 其他搜索 key 让「未配置」用例假绿。
+process.env.SEARCH_CONFIG_PATH = join(
+	tmpdir(),
+	`lifediary-topics-search-${randomUUID()}.json`,
+);
+for (const vendor of SEARCH_VENDORS) delete process.env[vendor.keyEnv];
 process.env.DEEPSEEK_SEARCH_API_KEY = "probe-search-key";
 
 after(() => {
 	delete process.env.DEEPSEEK_SEARCH_API_KEY;
+	delete process.env.SEARCH_CONFIG_PATH;
 });
 
 function newStore(): { store: TopicsStore; path: string } {
@@ -105,7 +114,7 @@ test("topics：搜索未配置时开不了课题（提议与确认都拒绝）",
 		assert.equal(again.ok, false);
 		if (!again.ok) {
 			assert.equal(again.reason, "search_not_configured");
-			assert.match(again.message, /DEEPSEEK_SEARCH_API_KEY/);
+			assert.match(again.message, /模型/);
 		}
 		const accepted = store.acceptProposal(proposal.id);
 		assert.equal(accepted.ok, false);

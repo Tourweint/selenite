@@ -220,8 +220,7 @@ export class TopicsStore {
 			return {
 				ok: false,
 				reason: "search_not_configured",
-				message:
-					"搜索还没配置：去 设置 → 服务页 填 DEEPSEEK_SEARCH_API_KEY（可在 .env 直接写）。",
+				message: "搜索还没配置：去 设置 → 模型 → 搜索 添加一个搜索源。",
 			};
 		}
 		const question = normalizeQuestion(input.question);
@@ -285,8 +284,7 @@ export class TopicsStore {
 			return {
 				ok: false,
 				reason: "search_not_configured",
-				message:
-					"搜索还没配置：去 设置 → 服务页 填 DEEPSEEK_SEARCH_API_KEY（可在 .env 直接写）。",
+				message: "搜索还没配置：去 设置 → 模型 → 搜索 添加一个搜索源。",
 			};
 		}
 		const duplicated = this.load().topics.find(

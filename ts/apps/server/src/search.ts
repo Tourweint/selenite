@@ -1,52 +1,56 @@
 /**
- * DeepSeek 搜索适配层（2026-11-07 长期课题跟进 §一）。
+ * 搜索编排（2026-11-07 单一 DeepSeek；2026-11-12 多供应商）。
  *
- * 上游固定 `POST {SEARCH_BASE_URL}/v1/tools/search`，Bearer 认证，
- * 入参 `{ query, count, need_content }`，出参 `results[]`。
+ * 配置在 `search-config.ts`，单源请求/回包在 `search-vendors.ts`。
+ * 本文件只做三件事：
+ *   1. 「有没有可用的搜索」= 课题能否开的硬前提；
+ *   2. 按配置顺序问源，失败 / 零命中就试下一个，第一个有结果的说了算；
+ *   3. 把稳定枚举错误交给 `web_search` 工具与设置页。
  *
- * **明确不做**搜索供应商抽象：要换 / 加搜索源是二期立项（方案 S1）。
- * `SEARCH_BASE_URL` 只给探针把请求指向本地假上游用，是测试开关，不是供应商抽象。
- *
- * 纪律：
- *   - 没配 key 时返回 `search_not_configured`，**不许返回假结果、不许空转**（mock 纪律）；
- *   - 日志最多记 query 字数与结果条数，绝不打印 key / URL / 响应体；
- *   - 上游报错的 message 只写状态码，不带上游返回原文（原文可能含敏感内容）。
+ * 纪律（沿用 2026-11-07）：
+ *   - 没配时返回 `search_not_configured`，**不许返回假结果、不许空转**；
+ *   - 日志最多记 query 字数、源 id、结果条数，绝不打印 key / URL / 响应体；
+ *   - 上游报错的 message 只写状态码或稳定说明，不带上游返回原文。
  */
 
-export interface SearchHit {
-	title: string;
-	url: string;
-	summary: string;
-}
+import {
+	callSearchVendor,
+	type SearchErrorCode,
+	type SearchHit,
+	type SearchVendor,
+	type VendorCallResult,
+} from "./search-vendors.ts";
+import {
+	searchSourceStates,
+	usableSearchSources,
+	type SearchSourceState,
+} from "./search-config.ts";
+
+export type { SearchHit } from "./search-vendors.ts";
+export { SEARCH_VENDORS, searchVendorOf } from "./search-vendors.ts";
 
 export type SearchResult =
 	| { ok: true; hits: SearchHit[] }
 	| {
 			ok: false;
-			error: "search_not_configured" | "upstream_error" | "bad_response";
+			error: "search_not_configured" | SearchErrorCode;
 			message: string;
 	  };
 
-const DEFAULT_BASE_URL = "https://api.deepseek.com";
-const TIMEOUT_MS = 20_000;
 const DEFAULT_COUNT = 5;
 const MAX_COUNT = 10;
 
-const NOT_CONFIGURED_MESSAGE =
-	"搜索还没配置：去 设置 → 服务页 填 DEEPSEEK_SEARCH_API_KEY（可在 .env 直接写）。";
+export const NOT_CONFIGURED_MESSAGE =
+	"搜索还没配置：去 设置 → 模型 → 搜索 添加一个搜索源。";
 
 /** 搜索 key 的 env 变量名（只回变量名，给设置页 / 文档展示用，绝不回值）。 */
-export function searchKeyEnv(): "DEEPSEEK_SEARCH_API_KEY" {
-	return "DEEPSEEK_SEARCH_API_KEY";
+export function searchKeyEnv(): string {
+	return searchSourceStates()[0]?.keyEnv ?? "DEEPSEEK_SEARCH_API_KEY";
 }
 
-/** 搜索是否可用：唯一判据是 key 有值。没有 key 的"每周研究"就是纯推理瞎说（方案 S4）。 */
+/** 搜索是否可用：任一源「该有 key 的有 key、该有地址的有地址」。 */
 export function searchConfigured(): boolean {
-	return Boolean(process.env[searchKeyEnv()]?.trim());
-}
-
-function baseUrl(): string {
-	return process.env.SEARCH_BASE_URL?.trim().replace(/\/+$/, "") || DEFAULT_BASE_URL;
+	return usableSearchSources().length > 0;
 }
 
 /** 把 count 收敛到 1..10；非数字 / 缺省走默认 5。 */
@@ -55,8 +59,23 @@ function normalizeCount(value: number | undefined): number {
 	return Math.min(MAX_COUNT, Math.max(1, Math.floor(value)));
 }
 
+async function askSource(
+	source: SearchSourceState,
+	query: string,
+	count: number,
+): Promise<VendorCallResult> {
+	const key = process.env[source.keyEnv]?.trim() ?? "";
+	return callSearchVendor({
+		vendor: source.vendorInfo,
+		baseUrl: source.baseUrl,
+		key,
+		query,
+		count,
+	});
+}
+
 /**
- * 查一次公开网络资料。
+ * 查一次公开网络资料：按配置顺序试源。
  *
  * 返回结构化结果而不是抛错：调用方（web_search 工具 / 研究回合）要把
  * "没配搜索" 这种可引导的状态原样交给模型，让模型去提示用户配置。
@@ -67,61 +86,57 @@ export async function webSearch(query: string, count?: number): Promise<SearchRe
 		return { ok: false, error: "bad_response", message: "query 不能为空" };
 	}
 	const limit = normalizeCount(count);
-	const key = process.env[searchKeyEnv()]?.trim();
-	if (!key) {
+	const sources = usableSearchSources();
+	if (!sources.length) {
 		return { ok: false, error: "search_not_configured", message: NOT_CONFIGURED_MESSAGE };
 	}
 
-	let response: Response;
-	try {
-		response = await fetch(`${baseUrl()}/v1/tools/search`, {
-			method: "POST",
-			headers: {
-				"Content-Type": "application/json",
-				Authorization: `Bearer ${key}`,
-			},
-			body: JSON.stringify({ query: keyword, count: limit, need_content: true }),
-			signal: AbortSignal.timeout(TIMEOUT_MS),
-		});
-	} catch {
-		// fetch 的错误信息可能带上游地址；只给一个稳定的枚举说明。
-		return { ok: false, error: "upstream_error", message: "搜索服务不可达" };
+	let sawEmpty = false;
+	let lastFailure: { ok: false; error: SearchErrorCode; message: string } | null = null;
+	for (const source of sources) {
+		const result = await askSource(source, keyword, limit);
+		if (result.ok) {
+			// 只记条数 / 字数 / 源 id，不记 query 原文与 URL（2026-11-07 日志纪律）。
+			console.log(`[search] vendor=${source.vendor} q=${keyword.length}字 hits=${result.hits.length}`);
+			if (result.hits.length > 0) return result;
+			sawEmpty = true;
+			continue;
+		}
+		lastFailure = result;
+		console.warn(`[search] vendor=${source.vendor} error=${result.error}`);
 	}
+	// 所有源都合法答了但都没命中：这不是错误，如实回空。
+	if (sawEmpty) return { ok: true, hits: [] };
+	return lastFailure ?? { ok: false, error: "search_not_configured", message: NOT_CONFIGURED_MESSAGE };
+}
 
-	if (!response.ok) {
+/**
+ * 连接测试：指定源就测它，不指定就测第一个可用源。
+ * 与 webSearch 共用适配层；UI 的「测试」按钮走这里，不污染正式搜索的回退顺序。
+ */
+export async function testSearchVendor(vendorId?: string): Promise<SearchResult> {
+	const states = searchSourceStates();
+	const source = vendorId
+		? states.find((state) => state.vendor === vendorId) ?? null
+		: states.find((state) => state.usable) ?? null;
+	if (!source) {
+		return { ok: false, error: "search_not_configured", message: NOT_CONFIGURED_MESSAGE };
+	}
+	if (!source.usable) {
+		const missing = source.vendorInfo.needsUrl && !source.baseUrl ? "地址" : "Key";
 		return {
 			ok: false,
-			error: "upstream_error",
-			message: `搜索服务返回 ${response.status}`,
+			error: "search_not_configured",
+			message: `${source.vendorInfo.name} 还缺${missing}。`,
 		};
 	}
-
-	const data = (await response.json().catch(() => null)) as
-		| { results?: unknown }
-		| null;
-	if (!data || !Array.isArray(data.results)) {
-		return { ok: false, error: "bad_response", message: "搜索服务返回格式异常" };
-	}
-
-	const hits: SearchHit[] = [];
-	for (const item of data.results.slice(0, limit)) {
-		if (!item || typeof item !== "object") continue;
-		const row = item as Record<string, unknown>;
-		hits.push({
-			title: typeof row.title === "string" ? row.title : "",
-			url: typeof row.url === "string" ? row.url : "",
-			summary: typeof row.summary === "string" ? row.summary : "",
-		});
-	}
-	// 只记条数 / 字数，不记 query 原文与 URL（2026-11-07 日志纪律）。
-	console.log(`[search] q=${keyword.length}字 hits=${hits.length}`);
-	return { ok: true, hits };
+	return askSource(source, "连接测试", 1);
 }
 
 /** 工具层注入的形状：测试可替换实现，生产用上面的真函数。 */
 export interface SearchModule {
 	searchConfigured: () => boolean;
-	searchKeyEnv: () => "DEEPSEEK_SEARCH_API_KEY";
+	searchKeyEnv: () => string;
 	webSearch: (query: string, count?: number) => Promise<SearchResult>;
 }
 
@@ -130,3 +145,32 @@ export const searchModule: SearchModule = {
 	searchKeyEnv,
 	webSearch,
 };
+
+/** 给设置页的源状态（不含任何 key 值）。 */
+export function searchSourceSummary(): Array<{
+	vendor: string;
+	name: string;
+	keyEnv: string;
+	hasKey: boolean;
+	baseUrl: string;
+	usable: boolean;
+	keyOptional: boolean;
+	needsUrl: boolean;
+	keyUrl: string;
+	note: string;
+}> {
+	return searchSourceStates().map((state) => ({
+		vendor: state.vendor,
+		name: state.vendorInfo.name,
+		keyEnv: state.keyEnv,
+		hasKey: state.hasKey,
+		baseUrl: state.baseUrl,
+		usable: state.usable,
+		keyOptional: state.vendorInfo.keyOptional === true,
+		needsUrl: state.vendorInfo.needsUrl === true,
+		keyUrl: state.vendorInfo.keyUrl,
+		note: state.vendorInfo.note ?? "",
+	}));
+}
+
+export type { SearchVendor };
