@@ -327,7 +327,7 @@ function observeRoute(conversationId: string, messages: PlainMessage[]): void {
 
 /** 任务通道的上下文：模板已渲染好，参数已从请求里取出来 */
 interface TaskContext {
-	/** 日志/留痕用：`converge@diary_convergence_v2` */
+	/** 日志/留痕用：`weekly@weekly_report_v3` */
 	label: string;
 	/** 渲染完成的整份 prompt（作为 system 段持久化到会话） */
 	prompt: string;

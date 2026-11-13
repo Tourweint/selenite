@@ -4,19 +4,19 @@ import { fileURLToPath } from "node:url";
 /**
  * 任务模板（2026-10-30，设计文档 §4 方案 A：模板上移）。
  *
- * 为什么模板在服务端：日记任务（收敛 / 周报 / 分段 / 题目 / 回忆）原先由 App 把整份 prompt
+ * 为什么模板在服务端：日记任务（周报 / 分段 / 题目 / 回忆）原先由 App 把整份 prompt
  * 塞进 `system` 走"直通"路径 —— 直通不建会话、不落库，那段对话过完即弃。
  * 要让"说过的话"归位 harness（手机只留索引），任务必须走 Agent 通道；
  * 而 Agent 通道只吃最后一条用户消息，所以整份 prompt 必须由服务端按任务名渲染。
  *
  * 形态（本轮自选，理由见变更记录）：
- * - 一份任务 = 一个 `.md` 资产文件，文件名带版本号（`diary_convergence_v2.md`）；
+ * - 一份任务 = 一个 `.md` 资产文件，文件名带版本号（`weekly_report_v3.md`）；
  * - **资产字节与 App 侧 `core/ai/src/main/assets/prompts/` 完全一致**（逐字节复制），
  *   这样"上移"不会偷偷改动 prompt 内容，黄金用例可以直接断言字节相等；
  * - 变量占位是 App 同款 `{{key}}`；与 App 的差别只有一条：**缺变量直接报错**，
  *   因为 App 那边漏注入会留下 `{{x}}` 进模型、很难发现。
  *
- * 版本号 = 文件名去掉 `.md`（`diary_convergence_v2`），回退 = 改一张表 + 文件还在。
+ * 版本号 = 文件名去掉 `.md`（`weekly_report_v3`），回退 = 改一张表 + 文件还在。
  */
 
 const PROMPT_DIR = new URL("../prompts/", import.meta.url);
@@ -41,18 +41,12 @@ export interface TaskSpec {
 	 *
 	 * `"diary"` = 从日记镜像读近 N 天已确认成稿，拼在 instructions 尾部注入。
 	 * 只给「需要知道最近记了什么」的任务：提问、日记回顾。
-	 * 成稿类（收敛/成章/周报/视角/分段）一律不注入——收敛曾把记忆当事实写进草稿。
+	 * 成稿类（成章/周报/视角/分段）一律不注入——收敛曾把记忆当事实写进草稿（2026-11-13 收敛退役）。
 	 */
 	memory?: "diary";
 }
 
 const SPECS: readonly TaskSpec[] = [
-	{
-		name: "converge",
-		asset: "diary_convergence_v2.md",
-		vars: ["user_messages", "entry_types"],
-		input: "请整理成稿",
-	},
 	{
 		// 2026-11-01 v3：周报串联（把上周那一整段回顾当背景喂进来，并要求末尾输出 ▶ 话头），
 		// 回顾页因此只剩一个区块——正文 + 可点的下一句话，不再有独立的「最近 7 天」动作。
@@ -99,12 +93,6 @@ const SPECS: readonly TaskSpec[] = [
 		asset: "entry_view_digest_v1.md",
 		vars: ["original_text"],
 		input: "请照上面的格式输出",
-	},
-	{
-		name: "emotion_deep_dive",
-		asset: "emotion_deep_dive_v1.md",
-		vars: ["recent_messages", "style_constraints"],
-		input: "给我一个往下走一层的问题",
 	},
 	{
 		name: "memory_curation",
@@ -164,7 +152,7 @@ export function taskNames(): string[] {
 	return SPECS.map((spec) => spec.name);
 }
 
-/** 版本标识：`converge@diary_convergence_v2`（日志/留痕用） */
+/** 版本标识：`weekly@weekly_report_v3`（日志/留痕用） */
 export function taskLabel(spec: TaskSpec): string {
 	return `${spec.name}@${spec.asset.replace(/\.md$/, "")}`;
 }
