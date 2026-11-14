@@ -19,6 +19,9 @@ import { dirname } from "node:path";
 const CODE_TTL_SECONDS = Number(process.env.PAIR_CODE_TTL_SECONDS ?? 300);
 const MAX_CODE_ATTEMPTS = 5;
 const MAX_DEVICES = 32;
+/** 「来过、没登记」的凭据留多久、留几枚（2026-11-14 五次打磨） */
+const UNCLAIMED_TTL_MS = 7 * 86_400_000;
+const UNCLAIMED_MAX = 5;
 
 const STORE_PATH =
 	process.env.PAIRING_STORE_PATH?.trim() || ".data/pairing.json";
@@ -38,11 +41,28 @@ interface StoredCode {
 	confirmHash?: string;
 }
 
+/**
+ * 连接方式（2026-11-14）：只由服务端按**这条请求的对端地址**判定，不由手机上报。
+ *
+ * - `usb`：对端是回环（手机经 `adb reverse` 把 127.0.0.1:39847 打到这台电脑）；
+ * - `local`：内网地址（同一 WiFi、USB 共享网络）；
+ * - `direct`：公网地址直连（自己做了端口映射才会出现）。
+ *
+ * 经中继进来的手机**不在这套判定里**：中继投过来的是本进程 AGENT_TOKEN 的内部请求，
+ * 它对应的是中继名册的 deviceId，不是这里的配对 id（两套名册不合并，2026-11-14 拍板）。
+ */
+export type DeviceTransport = "usb" | "local" | "direct";
+
 interface StoredDevice {
 	id: string;
 	name: string;
 	/** sha256(deviceToken) */
 	tokenHash: string;
+	/** 最近一次连进来的方式（2026-11-14）；老记录没有这一位 = 还没连过 */
+	lastTransport?: DeviceTransport;
+	lastTransportAt?: number;
+	/** 三种方式各自最后一次的时刻：页面用它说「上次走数据线（2 小时前）」 */
+	transportAt?: Partial<Record<DeviceTransport, number>>;
 	/** 指纹（2026-11-10 批 26 §四）：sha256(id + tokenHash) 的短摘要，人眼可核。 */
 	fingerprint?: string;
 	/** 键被换过（文件里的 tokenHash 与指纹对不上）：该设备的凭据一律 fail-closed。 */
@@ -55,6 +75,23 @@ interface StoredDevice {
 interface Store {
 	code?: StoredCode;
 	devices: StoredDevice[];
+	/**
+	 * 「来过、但本机没登记」的凭据（2026-11-14 五次打磨）。
+	 *
+	 * 现场：平板手里那枚令牌不是这台机器发的 → 每个请求都 403 → 活口表 5 分钟就把它忘了 →
+	 * 页面上又什么都没有，用户的原话是"我平板明明在线，它就是找不到"。这里把"谁来过"
+	 * 落一笔：只记 sha256 与方式、时间，7 天自然消失，最多 5 枚（陌生扫描器不该把这儿当记事本）。
+	 */
+	unclaimed?: UnclaimedPeer[];
+}
+
+/** 一枚"没登记过、但来敲过门"的凭据：只有哈希，没有名字（名字本来就不存在） */
+interface UnclaimedPeer {
+	/** sha256(token) */
+	hash: string;
+	transport: DeviceTransport;
+	firstAt: number;
+	lastAt: number;
 }
 
 export type RedeemError =
@@ -104,6 +141,16 @@ export function deviceFingerprintEnabled(env: NodeJS.ProcessEnv = process.env): 
 }
 
 /**
+ * 「认领未登记凭据」开关（2026-11-14 五次打磨）：默认开。
+ * `PAIR_ADOPT=false` → 认领端点 404、设备列表不再上报 `unclaimed`，一行 env 退回上一形态。
+ */
+export function pairAdoptEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = (env.PAIR_ADOPT ?? "").trim().toLowerCase();
+	if (!raw) return true;
+	return raw !== "false" && raw !== "0" && raw !== "off";
+}
+
+/**
  * 设备指纹：`sha256("lifediary-device-v1|id|tokenHash")` 前 12 位十六进制，4-4-4 分组。
  *
  * 只回答一个问题——"手机上和电脑上显示的是不是同一台"。48 bit 够人眼核对，
@@ -116,6 +163,14 @@ export function deviceFingerprint(deviceId: string, tokenHash: string): string {
 		.slice(0, 12)
 		.toUpperCase();
 	return `${digest.slice(0, 4)}-${digest.slice(4, 8)}-${digest.slice(8, 12)}`;
+}
+
+/**
+ * 令牌的 sha256（2026-11-14 五次打磨）：其它模块要给"此刻谁在说话"记一笔"这枚凭据是谁的"，
+ * 不必自己再拼一遍（拼错一个字母就永远认不出来）。
+ */
+export function hashToken(token: string): string {
+	return sha256(token);
 }
 
 function sha256(value: string): string {
@@ -324,8 +379,12 @@ export class PairingStore {
 		return this.issueDevice(deviceName, now);
 	}
 
-	/** 设备凭据是否有效（每次请求都会走一次；命中即刷新 lastSeenAt，但最多每分钟落一次盘） */
-	verifyDeviceToken(token: string, now = Date.now()): boolean {
+	/** 设备凭据是否有效（每次请求都会走一次；命中即刷新 lastSeenAt，但最多每分钟落一次盘）
+	 *
+	 * `transport`（2026-11-14）：调用方按对端地址推出来的连接方式。传了就顺手记进设备记录——
+	 * 页面要回答"这台设备是怎么连的、上一次是怎么连的"，而这件事只有服务端看得见。
+	 */
+	verifyDeviceToken(token: string, now = Date.now(), transport?: DeviceTransport): boolean {
 		const hash = sha256(token);
 		let touched = false;
 		for (const device of this.store.devices) {
@@ -338,10 +397,39 @@ export class PairingStore {
 				device.lastSeenAt = now;
 				touched = true;
 			}
+			// 方式每次变了就立刻落盘（不跟着 60s 节流走），否则页面会把"上次走数据线"说成别的
+			if (transport && device.lastTransport !== transport) {
+				device.lastTransport = transport;
+				device.lastTransportAt = now;
+				device.transportAt = { ...device.transportAt, [transport]: now };
+				touched = true;
+			} else if (transport && now - (device.lastTransportAt ?? 0) > 60_000) {
+				device.lastTransportAt = now;
+				device.transportAt = { ...device.transportAt, [transport]: now };
+				touched = true;
+			}
 			if (touched) this.persist();
 			return true;
 		}
 		return false;
+	}
+
+	/** 令牌属于哪台设备（**含已撤销 / 键变更**）。
+	 *
+	 * 只用于展示："它正拿着这枚凭据来敲门，但被拒了"——鉴权结论永远以 `verifyDeviceToken` 为准。
+	 * 返回 null = 这枚令牌不属于本机任何一条记录（外人 / 旧版令牌）。
+	 */
+	identifyDeviceToken(token: string): { id: string; name: string; revoked: boolean } | null {
+		const hash = sha256(token);
+		for (const device of this.store.devices) {
+			if (!hashEquals(device.tokenHash, hash)) continue;
+			return {
+				id: device.id,
+				name: device.name,
+				revoked: Boolean(device.revokedAt) || Boolean(device.keyChangedAt),
+			};
+		}
+		return null;
 	}
 
 	/** 对外设备清单：始终不含 tokenHash；开关关着时连指纹 / 键变更位也不出现（回滚）。 */
@@ -360,6 +448,125 @@ export class PairingStore {
 		device.revokedAt = now;
 		this.persist();
 		return true;
+	}
+
+	/**
+	 * 彻底删掉一条设备记录（2026-11-14 五次打磨）。
+	 *
+	 * 撤销只回答"这枚凭据作废了"，记录本身还留在名册里占一行——用户的原话是"已经移除的
+	 * 平板自检可以删除"。删的是**名册这一条**：它不再出现在设备列表里，也不再参与"同名合并"。
+	 * 只该用在已撤销的旧记录上（活动的设备要先撤销），判断交给调用方。
+	 */
+	removeDevice(id: string): boolean {
+		const before = this.store.devices.length;
+		this.store.devices = this.store.devices.filter((item) => item.id !== id);
+		if (this.store.devices.length === before) return false;
+		this.persist();
+		return true;
+	}
+
+	/**
+	 * 认领一枚"本机没登记、但此刻正连着"的凭据（2026-11-14 五次打磨）。
+	 * 场景：平板手里那枚令牌不是本机发出去的（另一台机器配的 / 中继发的 / 旧库留下的），
+	 * 于是每个请求都 403，页面上只能把它叫"未知凭据"——用户看到的就是"平板明明在线，
+	 * 可列表里没有它"。把它的 sha256 直接登记成一台设备，凭据立刻生效，不用重新扫码。
+	 *
+	 * 安全边界不在这一层：调用方必须自己证明"这枚哈希此刻真在连着"（活口表 + 本机页面）。
+	 * 这里只拒绝两种：已经登记过的哈希（重复认领），和名册已满。
+	 */
+	adoptTokenHash(
+		tokenHash: string,
+		name: string,
+		now = Date.now(),
+	): { id: string; name: string } | "duplicate" | "too_many" {
+		const normalized = tokenHash.trim().toLowerCase();
+		// 只收本进程算出来的形状（64 位 hex）：别的写法一律当"不是这枚凭据"
+		if (!/^[0-9a-f]{64}$/.test(normalized)) return "duplicate";
+		if (this.store.devices.some((item) => hashEquals(item.tokenHash, normalized))) return "duplicate";
+		if (this.store.devices.filter((item) => !item.revokedAt).length >= MAX_DEVICES) return "too_many";
+		const id = randomBytes(8).toString("hex");
+		const device: StoredDevice = {
+			id,
+			name: name.trim().slice(0, 40) || "设备",
+			tokenHash: normalized,
+			createdAt: now,
+			...(deviceFingerprintEnabled() ? { fingerprint: deviceFingerprint(id, normalized) } : {}),
+		};
+		// 已撤销的老记录不清：认领不是"新配对"，没理由顺手把别人的历史抹掉。
+		this.store.devices = [...this.store.devices, device];
+		this.persist();
+		return { id, name: device.name };
+	}
+
+	/**
+	 * 记一笔"这枚没登记的凭据来过"（2026-11-14 五次打磨）。
+	 *
+	 * 每次 403 都会调一次。同一枚 60 秒内不重复落盘（扫描器打过来时别把磁盘写穿）；
+	 * 已登记成设备的哈希不再记；7 天前的自动丢，最多留 5 枚。
+	 */
+	noteUnclaimed(tokenHash: string, transport: DeviceTransport, now = Date.now()): void {
+		const normalized = tokenHash.trim().toLowerCase();
+		if (!/^[0-9a-f]{64}$/.test(normalized)) return;
+		if (this.store.devices.some((item) => hashEquals(item.tokenHash, normalized))) return;
+		const list = this.store.unclaimed ?? [];
+		const cutoff = now - UNCLAIMED_TTL_MS;
+		const trimmed = list.filter((item) => item.lastAt > cutoff);
+		let touched = trimmed.length !== list.length;
+		const index = trimmed.findIndex((item) => item.hash === normalized);
+		if (index >= 0) {
+			const item = trimmed[index]!;
+			if (now - item.lastAt > 60_000 || item.transport !== transport) touched = true;
+			item.lastAt = now;
+			item.transport = transport;
+		} else {
+			trimmed.push({ hash: normalized, transport, firstAt: now, lastAt: now });
+			touched = true;
+		}
+		const kept = trimmed.sort((a, b) => b.lastAt - a.lastAt).slice(0, UNCLAIMED_MAX);
+		if (kept.length !== trimmed.length) touched = true;
+		this.store.unclaimed = kept;
+		if (touched) this.persist();
+	}
+
+	/**
+	 * 「来过、但还没登记」的凭据（页面用它把平板显示出来，而不是一片空白）。
+	 * 只给 8 位短号：认领时按短号回查，完整哈希不出服务端。
+	 */
+	listUnclaimed(
+		now = Date.now(),
+	): Array<{ tokenHint: string; transport: DeviceTransport; firstAt: number; lastAt: number }> {
+		return (this.store.unclaimed ?? [])
+			.filter(
+				(item) =>
+					item.lastAt > now - UNCLAIMED_TTL_MS &&
+					!this.store.devices.some((device) => hashEquals(device.tokenHash, item.hash)),
+			)
+			.sort((a, b) => b.lastAt - a.lastAt)
+			.map((item) => ({
+				tokenHint: item.hash.slice(0, 8),
+				transport: item.transport,
+				firstAt: item.firstAt,
+				lastAt: item.lastAt,
+			}));
+	}
+
+	/** 按短号取回完整哈希（认领用）；取不到返回 null */
+	unclaimedHashByHint(tokenHint: string, now = Date.now()): string | null {
+		const hint = tokenHint.trim().toLowerCase();
+		const match = (this.store.unclaimed ?? []).find(
+			(item) => item.hash.startsWith(hint) && item.lastAt > now - UNCLAIMED_TTL_MS,
+		);
+		return match?.hash ?? null;
+	}
+
+	/** 认领（或它自己变成正式设备）之后，把这枚哈希从"来过"里摘掉 */
+	forgetUnclaimed(tokenHash: string): void {
+		const normalized = tokenHash.trim().toLowerCase();
+		const list = this.store.unclaimed ?? [];
+		const kept = list.filter((item) => item.hash !== normalized);
+		if (kept.length === list.length) return;
+		this.store.unclaimed = kept;
+		this.persist();
 	}
 
 	/** 调试页展示：当前码还剩多少秒（没有可用码返回 0） */

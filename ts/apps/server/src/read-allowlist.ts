@@ -1,13 +1,18 @@
 /**
  * 只读命令白名单（2026-11-09 任务书 T3 §2）。
  *
- * 目的只有一个：**降噪**。"读自己工作区里的文件"不该每次都弹一次审批。
+ * 本文件里有两套口径，别混用：
  *
- * 铁律（改动前先读）：
- * 1. **只能把 `ask` 变 `allow`**。判定顺序固定为
- *    `readOnlyBlockReason()`（拦）→ 审批判定 → 本白名单。白名单永远碰不到 `block`。
- * 2. **默认关**（`AGENT_READ_ALLOWLIST`，缺省 false）：这是放宽行为，先观望。
- * 3. 任何"不确定"一律返回 false（= 照常问）。白名单只认最朴素的形态。
+ * - `isReadOnlyShellCommand`：**降噪**用。只把 `ask` 变 `allow`，永远碰不到 `block`。
+ *   判定顺序固定为 `readOnlyBlockReason()`（拦）→ 审批判定 → 本白名单。
+ *   默认关（`AGENT_READ_ALLOWLIST`，缺省 false）：这是放宽行为，先观望。
+ *
+ * - `isViewOnlyShellCommand`（2026-11-14）：**权限档位**用。它就是
+ *   「只读」「在工作区内修改」两档允许跑的那一小撮——会参与 `block` 判定，
+ *   所以词表更窄、连旗标都要看（`find . -delete`、`rg --pre=./x` 这类
+ *   "看着在查看、其实在动手"的写法一律不算）。回滚开关 `AGENT_READ_VIEW_COMMANDS`。
+ *
+ * 两套共同的保守原则：任何"不确定"一律返回 false。
  *
  * 只认：`bash` / `powershell`、单条命令、字面量路径、全部落在已登记根集合内
  * （工作区根 + 项目根，2026-11-12 多根）。
@@ -55,6 +60,60 @@ export function readAllowlistEnabled(env: Record<string, string | undefined> = p
 	return raw === "1" || raw === "true" || raw === "on";
 }
 
+/**
+ * 「只读 / 在工作区内修改」两档放行查看命令的开关（2026-11-14）。
+ *
+ * **默认开**：只读档连 `ls` 都跑不了，"只读"就名不副实了——那一档的定义是
+ * "能看、能查，只是别动手"。写 `0` / `false` / `off` 回到旧形态：这两档一条命令都不跑。
+ */
+export function viewCommandsInReadTiers(env: Record<string, string | undefined> = process.env): boolean {
+	const raw = env.AGENT_READ_VIEW_COMMANDS?.trim().toLowerCase();
+	return !(raw === "0" || raw === "false" || raw === "off");
+}
+
+/**
+ * 权限档位口径的「查看命令」：比 `READ_ONLY_COMMANDS` 更窄（这一套会参与 block 判定）。
+ *
+ * 与降噪词表的差别：
+ * - 去掉 `sort` / `uniq`（`sort -o` 写盘、`uniq in out` 第二个位置参数就是输出文件）；
+ * - 去掉 `where`（PowerShell 里是 `Where-Object`，语义完全不是"查找文件"）；
+ * - 旗标也看：`find -delete` / `-exec` / `-fprint*`、`rg --pre` 直接把"查看"变成"执行"。
+ */
+export const VIEW_ONLY_COMMANDS: ReadonlySet<string> = new Set([
+	"cat",
+	"type",
+	"head",
+	"tail",
+	"ls",
+	"dir",
+	"grep",
+	"rg",
+	"find",
+	"wc",
+	"stat",
+	"file",
+]);
+
+/** 让"查看"变成"动手"的旗标：按命令归类，命中即拒（`--pre=./x` 会先按 `=` 归一化）。 */
+const DANGEROUS_FLAGS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+	[
+		"find",
+		new Set([
+			"-delete",
+			"-exec",
+			"-execdir",
+			"-ok",
+			"-okdir",
+			"-fprint",
+			"-fprint0",
+			"-fprintf",
+			"-fls",
+			"-files0-from",
+		]),
+	],
+	["rg", new Set(["--pre", "--pre-glob"])],
+]);
+
 function commandOf(args: unknown): string | undefined {
 	if (!args || typeof args !== "object") return undefined;
 	const value = (args as Record<string, unknown>).command;
@@ -71,8 +130,16 @@ function unquote(token: string): string {
 	return token;
 }
 
+/** 去一层引号后的 token 列表；空 token 丢掉。两套口径共用同一套切词。 */
+function tokensOf(raw: string): string[] {
+	return raw
+		.trim()
+		.split(/\s+/)
+		.map(unquote)
+		.filter((token) => token.length > 0);
+}
 /**
- * 这条命令是不是"只读且只碰已登记目录内的路径"。
+ * 这条命令是不是"只读且只碰已登记目录内的路径"（**降噪口径**，只把 ask 降 allow）。
  *
  * 纯函数：不读全局状态、不碰磁盘以外的环境。入参口径与 `path-guard.ts` 一致
  * （`workspaceRoots` 必须是 realpath 数组；空数组 → 一律不放行）。
@@ -91,11 +158,7 @@ export function isReadOnlyShellCommand(
 	if (!raw) return false;
 	if (FORBIDDEN.test(raw)) return false;
 
-	const tokens = raw
-		.trim()
-		.split(/\s+/)
-		.map(unquote)
-		.filter((token) => token.length > 0);
+	const tokens = tokensOf(raw);
 	if (tokens.length === 0) return false;
 
 	const head = basename(tokens[0].replace(/\\/g, "/")).toLowerCase().replace(/\.exe$/, "");
@@ -109,6 +172,60 @@ export function isReadOnlyShellCommand(
 		if (token === "--" || token.startsWith("-")) continue;
 		const target = realTargetOf(isAbsolute(token) ? token : resolve(cwd, token));
 		if (!workspaceRoots.some((root) => insideOrEqual(root, target))) return false;
+	}
+
+	return true;
+}
+
+/**
+ * 权限档位口径：这条命令是不是"纯粹的查看"。
+ *
+ * 与降噪口径相比多守三条：
+ * 1. 词表更窄（见 `VIEW_ONLY_COMMANDS`）；
+ * 2. 旗标要看（见 `DANGEROUS_FLAGS`）——`find . -delete` 是在删文件，不是在看；
+ * 3. 命令词必须是裸名字（`./cat` / `C:\tmp\ls.exe` 一律不算，防止拿同名脚本冒充）。
+ *
+ * 另外补上 cwd 那一格：`ls` / `rg foo` 这种不带路径的写法看的就是 cwd，
+ * 所以 cwd 自身不在已登记根里时，这条命令不算"查看自己家"。空 cwd → false。
+ */
+export function isViewOnlyShellCommand(
+	toolName: string,
+	args: unknown,
+	workspaceRoots: readonly string[],
+	cwd: string,
+): boolean {
+	if (!SHELL_TOOLS.has(toolName)) return false;
+	if (!workspaceRoots.length || !cwd) return false;
+
+	const raw = commandOf(args);
+	if (!raw) return false;
+	if (FORBIDDEN.test(raw)) return false;
+
+	const tokens = tokensOf(raw);
+	if (tokens.length === 0) return false;
+
+	// 只认裸命令名：带路径分隔符的首 token 等于让模型指定可执行文件。
+	if (tokens[0].includes("/") || tokens[0].includes("\\")) return false;
+	const head = tokens[0].toLowerCase().replace(/\.exe$/, "");
+	if (!VIEW_ONLY_COMMANDS.has(head)) return false;
+
+	const banned = DANGEROUS_FLAGS.get(head);
+	let sawPath = false;
+	for (const token of tokens.slice(1)) {
+		if (token.startsWith("~")) return false;
+		// `--pre=./x` 归一化成 `--pre` 再比；旗标按小写比（PowerShell 参数不分大小写）。
+		const flag = token.split("=")[0].toLowerCase();
+		if (banned?.has(flag)) return false;
+		if (token === "--" || token.startsWith("-")) continue;
+		sawPath = true;
+		const target = realTargetOf(isAbsolute(token) ? token : resolve(cwd, token));
+		if (!workspaceRoots.some((root) => insideOrEqual(root, target))) return false;
+	}
+
+	// 一个路径都没给（`ls` / `rg hello` / `find .` 的 `.` 算路径，但 `ls` 不算）——看的是 cwd。
+	if (!sawPath) {
+		const here = realTargetOf(cwd);
+		if (!workspaceRoots.some((root) => insideOrEqual(root, here))) return false;
 	}
 
 	return true;

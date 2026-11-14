@@ -33,14 +33,19 @@ export interface FlagDef {
 	 * 取值按「≥min 的整数」校验，不再查枚举表。只有界面真的要自由数值才用。
 	 */
 	min?: number;
+	/** 数值型开关的上界（2026-11-14 压缩百分比）：给了就按「min–max 的整数」校验。 */
+	max?: number;
 }
 
-/** 取值校验收口：枚举表命中，或数值型开关按整数 ≥min 校验（loadFlagOverrides / setFlag 共用）。 */
+/** 取值校验收口：枚举表命中，或数值型开关按整数 ≥min（≤max）校验（loadFlagOverrides / setFlag 共用）。 */
 function flagValueAllowed(def: FlagDef, value: string): boolean {
 	if (def.values.includes(value)) return true;
 	if (def.values.length === 0 && def.min !== undefined) {
 		const parsed = Number(value);
-		return Number.isInteger(parsed) && parsed >= def.min;
+		if (!Number.isInteger(parsed)) return false;
+		if (parsed < def.min) return false;
+		if (def.max !== undefined && parsed > def.max) return false;
+		return true;
 	}
 	return false;
 }
@@ -97,6 +102,17 @@ export const FLAG_DEFS: FlagDef[] = [
 	// 对话历史分页（2026-11-13）：web 每次 openChat 懒读（同 TASKS 的一次性缓存），
 	// false = 退回一次拉最近 200 条、无上滑加载 + 无日期分隔；服务端同时忽略 page/before 参数。
 	{ key: "CHAT_HISTORY_PAGING_ENABLED", values: ["true", "false"], defaultValue: "true", hot: true },
+	// 上下文压缩（2026-11-14 二次拍板：只留两档，默认按百分比 70%）。
+	// 消费处是 `buildHarnessSettings`（Harness settings 访问器，每次使用现算），所以全 hot：
+	// 改完下一轮就按新档压，不重启。数值型沿用 `values: [] + min` 机制；百分比另给 max，
+	// 5% 以下等于每轮都压、95% 以上等于没有留白给回答。
+	// 保留原文 / 后台提前不在这里——那不是用户能凭直觉调的量，一律吃内核默认（20000 / 32768）。
+	{ key: "AGENT_COMPACT_ENABLED", values: ["true", "false"], defaultValue: "true", hot: true },
+	{ key: "AGENT_COMPACT_TRIGGER_MODE", values: ["percent", "tokens"], defaultValue: "percent", hot: true },
+	// 缺省 70 与 `compaction-settings.ts` 的 DEFAULT_PERCENT 必须一致（界面回显的就是生效值）
+	{ key: "AGENT_COMPACT_TRIGGER_PERCENT", values: [], defaultValue: "70", hot: true, min: 5, max: 95 },
+	// 绝对触发点（K）：留空 = 该档不生效、回落内核默认白；填了就是"到多少 K 压一次"
+	{ key: "AGENT_COMPACT_TRIGGER_K", values: [], defaultValue: "", hot: true, min: 1 },
 ];
 
 const FLAG_BY_KEY = new Map(FLAG_DEFS.map((def) => [def.key, def]));
@@ -188,12 +204,27 @@ export function setFlag(
 ): { ok: true; hot: boolean } | { ok: false; status: 400 | 404; message: string } {
 	const def = FLAG_BY_KEY.get(key);
 	if (!def) return { ok: false, status: 404, message: `没有叫 ${key} 的开关` };
+	const path = flagsPath(env);
+	// 数值型开关的空值 = "回到默认"（2026-11-14 上下文压缩）：删掉覆盖行 + 删 env，
+	// 消费处下一次懒读就拿到"没设"，回落内核默认。枚举型开关没有"空"这一档，照旧拒收。
+	if (value.trim() === "" && def.values.length === 0) {
+		const map = readOverrideMap(path);
+		if (Object.hasOwn(map, key)) {
+			delete map[key];
+			atomicWrite(path, `${JSON.stringify(map, null, "\t")}\n`);
+		}
+		delete env[key];
+		return { ok: true, hot: def.hot };
+	}
 	if (!flagValueAllowed(def, value)) {
 		const allowed =
-			def.values.length > 0 ? `：${def.values.join(" / ")}` : `：≥${def.min ?? 1} 的整数`;
+			def.values.length > 0
+				? `：${def.values.join(" / ")}`
+				: def.max !== undefined
+					? `：${def.min ?? 1}–${def.max} 的整数`
+					: `：≥${def.min ?? 1} 的整数`;
 		return { ok: false, status: 400, message: `${key} 的取值只能是${allowed}` };
 	}
-	const path = flagsPath(env);
 	const map = readOverrideMap(path);
 	map[key] = value;
 	atomicWrite(path, `${JSON.stringify(map, null, "\t")}\n`);

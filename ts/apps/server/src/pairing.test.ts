@@ -257,3 +257,57 @@ test("开关 PAIR_TWO_STEP=false 回滚到单段：默认 true，关掉后 issue
 		rmSync(dir, { recursive: true, force: true });
 	}
 });
+
+/**
+ * 连接方式记录（2026-11-14 连接页两分）：服务端按请求来的地址判定，不由手机上报。
+ * 这里只验存储语义：连上了就记下方式与时刻；方式变了要留旧方式的时刻（页面说"上次走数据线"）。
+ */
+test("连接方式：首次请求记下 local，换成 usb 时保留 local 的时刻", () => {
+	const dir = tempDir("transport");
+	const file = join(dir, "pairing.json");
+	try {
+		const { store, redeemed } = pairOne(file);
+		const t0 = 1_700_000_000_000;
+
+		assert.equal(store.verifyDeviceToken(redeemed.deviceToken, t0, "local"), true);
+		let device = store.listDevices().find((item) => item.id === redeemed.deviceId);
+		assert.equal(device?.lastTransport, "local");
+		assert.equal(device?.lastTransportAt, t0);
+		assert.equal(device?.transportAt?.local, t0);
+
+		// 同一种方式：60 秒内不再落盘，时刻往后推由 lastSeenAt 管
+		assert.equal(store.verifyDeviceToken(redeemed.deviceToken, t0 + 30_000, "local"), true);
+		device = store.listDevices().find((item) => item.id === redeemed.deviceId);
+		assert.equal(device?.lastTransportAt, t0, "同方式 30 秒内不重写时刻");
+
+		// 换方式：当前变 usb，local 的时刻原样留着
+		const t1 = t0 + 120_000;
+		assert.equal(store.verifyDeviceToken(redeemed.deviceToken, t1, "usb"), true);
+		device = store.listDevices().find((item) => item.id === redeemed.deviceId);
+		assert.equal(device?.lastTransport, "usb");
+		assert.equal(device?.lastTransportAt, t1);
+		assert.equal(device?.transportAt?.local, t0, "旧方式时刻保留");
+		assert.equal(device?.transportAt?.usb, t1);
+
+		// 不传方式（老调用面）：只刷新 lastSeenAt，不编一个方式出来
+		assert.equal(store.verifyDeviceToken(redeemed.deviceToken, t1 + 120_000), true);
+		device = store.listDevices().find((item) => item.id === redeemed.deviceId);
+		assert.equal(device?.lastTransport, "usb");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("连接方式：撤销的设备不再记方式（凭据已经失效）", () => {
+	const dir = tempDir("transport-revoked");
+	const file = join(dir, "pairing.json");
+	try {
+		const { store, redeemed } = pairOne(file, "平板");
+		assert.equal(store.revokeDevice(redeemed.deviceId), true);
+		assert.equal(store.verifyDeviceToken(redeemed.deviceToken, 1_700_000_000_000, "local"), false);
+		const device = store.listDevices().find((item) => item.id === redeemed.deviceId);
+		assert.equal(device?.lastTransport, undefined, "被撤销的设备不该再被记成「连过」");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});

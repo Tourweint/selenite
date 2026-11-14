@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { test } from "node:test";
@@ -12,6 +13,7 @@ import {
 	type ApprovalLevel,
 } from "./approval-policy.ts";
 import { approvalRejectedInstruction } from "./agent/turn-gate.ts";
+import { accessBlockReason } from "./agent/policy.ts";
 
 /**
  * 审批判定的三档矩阵（2026-11-08 扫尾批 10-C）。
@@ -163,11 +165,51 @@ test("persona_recall：进 WRITE_TOOLS；ask-all 问、none 放行、不进高�
 	assert.deepEqual(verdict("none", "persona_recall"), { kind: "allow" });
 });
 
-test("persona_recall：read-only 档被 readOnlyBlockReason 拦下", async () => {
-	// policy 的 access 在模块加载时读 env：先设好只读档与不存在 policy.json 的路径，
-	// 再动态 import，避免读到本机 .data/policy.json。
-	process.env.AGENT_TOOL_POLICY = "read-only";
-	process.env.AGENT_POLICY_PATH = join(tmpdir(), "lifediary-approval-policy-no-policy.json");
-	const { readOnlyBlockReason } = await import("./agent/policy.ts");
-	assert.notEqual(readOnlyBlockReason("persona_recall"), undefined, "只读档应拦 persona_recall");
+test("persona_recall：read-only 档被拦下", () => {
+	// 断言纯函数 `accessBlockReason`，不看进程级 `policy.access`：那个值在模块加载时读 env
+	// 与本机 `.data/policy.json`，和别的测试文件同进程跑时会串味（2026-11-14 修）。
+	assert.notEqual(accessBlockReason("read-only", "persona_recall"), undefined, "只读档应拦 persona_recall");
+	assert.equal(accessBlockReason("full", "persona_recall"), undefined, "完全访问档不拦");
+});
+
+// ── 查看命令进权限档（2026-11-14）────────────────────────────
+test("只读 / 在工作区内修改：查看命令放行，动手的命令照旧拦", () => {
+	const root = realpathSync(mkdtempSync(join(tmpdir(), "lh-view-policy-")));
+	writeFileSync(join(root, "a.md"), "x\n");
+	const ctx = { args: { command: "ls -la" }, workspaceRoots: [root], cwd: root };
+	const withCommand = (command: string) => ({ ...ctx, args: { command } });
+	const at = (access: "full" | "read-only" | "no-shell", name: string, c?: typeof ctx) =>
+		accessBlockReason(access, name, c);
+
+	assert.equal(at("read-only", "bash", ctx), undefined, "只读档应放行 ls");
+	assert.equal(at("read-only", "bash", withCommand("cat a.md")), undefined, "只读档应放行 cat");
+	assert.equal(at("read-only", "bash", withCommand("grep -rn hello .")), undefined, "只读档应放行 grep");
+	assert.notEqual(at("read-only", "bash", withCommand("rm -rf .")), undefined, "只读档应拦 rm");
+	assert.notEqual(at("read-only", "bash", withCommand("npm test")), undefined, "只读档应拦 npm test");
+	assert.notEqual(
+		at("read-only", "bash", withCommand("find . -delete")),
+		undefined,
+		"只读档应拦带 -delete 的 find",
+	);
+	assert.notEqual(at("read-only", "write", ctx), undefined, "只读档应拦 write");
+	assert.notEqual(at("read-only", "delegate", ctx), undefined, "只读档应拦 delegate");
+	// 老调用点（没有上下文）→ 保守照旧拦，行为与改动前一致。
+	assert.notEqual(at("read-only", "bash"), undefined, "无上下文时应保守拦截");
+
+	// 在工作区内修改：命令同样只放行查看，文件改不拦（越界归 path-guard）。
+	assert.equal(at("no-shell", "bash", ctx), undefined, "在工作区内修改档应放行查看命令");
+	assert.notEqual(at("no-shell", "bash", withCommand("npm test")), undefined, "在工作区内修改档应拦非查看命令");
+	assert.equal(at("no-shell", "write", ctx), undefined, "在工作区内修改档不拦 write");
+
+	// 完全访问：命令与文件都不拦。
+	assert.equal(at("full", "bash", withCommand("npm test")), undefined, "完全访问档不拦命令");
+	assert.equal(at("full", "write", ctx), undefined, "完全访问档不拦 write");
+
+	// 回滚开关：写 0 后两档回到"一条命令都不跑"。
+	process.env.AGENT_READ_VIEW_COMMANDS = "0";
+	assert.notEqual(at("read-only", "bash", ctx), undefined, "关掉开关后只读档应拦 ls");
+	assert.notEqual(at("no-shell", "bash", ctx), undefined, "关掉开关后中间档应拦 ls");
+	delete process.env.AGENT_READ_VIEW_COMMANDS;
+
+	rmSync(root, { recursive: true, force: true });
 });

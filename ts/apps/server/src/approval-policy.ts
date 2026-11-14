@@ -169,7 +169,7 @@ export type ApprovalVerdict =
 /**
  * 这次工具调用该拦、该问、还是放行。
  *
- * `blockReason` 来自现有的 `readOnlyBlockReason()`：黑名单、只读档、不跑命令档都在这里落地。
+ * `blockReason` 来自现有的 `readOnlyBlockReason()`：黑名单、只读档、在工作区内修改档都在这里落地。
  * 它优先于审批——被策略拦下的调用没有"确认后就能跑"的说法。
  *
  * 三档（2026-11-08 扫尾批 10-C）：

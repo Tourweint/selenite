@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Hono } from "hono";
@@ -30,6 +30,9 @@ process.env.CHIEF_PARTNER = "false";
 process.env.PROJECTS_DB_PATH = join(root, "projects.sqlite");
 process.env.TOPICS_STATE_PATH = join(root, "topics.json");
 process.env.LLM_PROVIDER = "faux";
+// 派活单目录也钉到临时目录：否则采集器会去扫开发机真实的 runs/，夹具就没法控制
+// 「在办的单不收」这条。测试里只放两张假的 ticket.json。
+process.env.CHANCELLOR_WORK_ROOT = join(root, "runs");
 
 const { BACKGROUND_CONTEXT: CTX } = await import("@earendil-works/chord/context");
 const { LiveDoc } = await import("@earendil-works/pi-durable");
@@ -140,30 +143,32 @@ test("archiveAutoEnabled / archiveAutoDays：默认关、默认 30、非法回�
 
 // ── 判定纯函数 ──────────────────────────────────────────
 
-test("判定：非 worker / 已归档 / 置顶 / 空会话 / 未到期 / 忙逐级跳过，命中按最旧优先", () => {
+test("判定：非收集类 / 单还在办 / 已归档 / 置顶 / 空会话 / 未到期 / 忙逐级跳过，命中按最旧优先", () => {
   const now = 1_000_000_000_000;
   const day = 86_400_000;
+  // 2026-11-14：任务专线（task-）按用户口径也收，但只收单已落终态的；worker 与 task 互斥
   const entries = [
-    { externalId: "chief-1", lastAt: now - 40 * day, worker: false, archived: false, pinned: false, busy: false },
-    { externalId: "partner-1", lastAt: now - 40 * day, worker: false, archived: false, pinned: false, busy: false },
-    { externalId: "task-1", lastAt: now - 40 * day, worker: false, archived: false, pinned: false, busy: false },
-    { externalId: "archived-1", lastAt: now - 40 * day, worker: true, archived: true, pinned: false, busy: false },
-    { externalId: "pinned-1", lastAt: now - 40 * day, worker: true, archived: false, pinned: true, busy: false },
-    { externalId: "empty-1", lastAt: null, worker: true, archived: false, pinned: false, busy: false },
-    { externalId: "fresh-1", lastAt: now - 1 * day, worker: true, archived: false, pinned: false, busy: false },
-    { externalId: "busy-1", lastAt: now - 40 * day, worker: true, archived: false, pinned: false, busy: true },
-    { externalId: "old-2", lastAt: now - 50 * day, worker: true, archived: false, pinned: false, busy: false },
-    { externalId: "old-1", lastAt: now - 90 * day, worker: true, archived: false, pinned: false, busy: false },
-    { externalId: "old-3", lastAt: now - 31 * day, worker: true, archived: false, pinned: false, busy: false },
-    { externalId: "edge-1", lastAt: now - 30 * day, worker: true, archived: false, pinned: false, busy: false },
+    { externalId: "chief-1", lastAt: now - 40 * day, worker: false, task: false, ticketSettled: true, archived: false, pinned: false, busy: false },
+    { externalId: "partner-1", lastAt: now - 40 * day, worker: false, task: false, ticketSettled: true, archived: false, pinned: false, busy: false },
+    { externalId: "task-open-1", lastAt: now - 40 * day, worker: false, task: true, ticketSettled: false, archived: false, pinned: false, busy: false },
+    { externalId: "archived-1", lastAt: now - 40 * day, worker: true, task: false, ticketSettled: true, archived: true, pinned: false, busy: false },
+    { externalId: "pinned-1", lastAt: now - 40 * day, worker: true, task: false, ticketSettled: true, archived: false, pinned: true, busy: false },
+    { externalId: "empty-1", lastAt: null, worker: true, task: false, ticketSettled: true, archived: false, pinned: false, busy: false },
+    { externalId: "fresh-1", lastAt: now - 1 * day, worker: true, task: false, ticketSettled: true, archived: false, pinned: false, busy: false },
+    { externalId: "busy-1", lastAt: now - 40 * day, worker: true, task: false, ticketSettled: true, archived: false, pinned: false, busy: true },
+    { externalId: "old-2", lastAt: now - 50 * day, worker: true, task: false, ticketSettled: true, archived: false, pinned: false, busy: false },
+    { externalId: "old-1", lastAt: now - 90 * day, worker: true, task: false, ticketSettled: true, archived: false, pinned: false, busy: false },
+    { externalId: "old-3", lastAt: now - 31 * day, worker: true, task: false, ticketSettled: true, archived: false, pinned: false, busy: false },
+    { externalId: "edge-1", lastAt: now - 30 * day, worker: true, task: false, ticketSettled: true, archived: false, pinned: false, busy: false },
+    { externalId: "task-done-1", lastAt: now - 60 * day, worker: false, task: true, ticketSettled: true, archived: false, pinned: false, busy: false },
   ];
   const { hits, skipped } = autoArchive.selectAutoArchiveCandidates(entries, now - 30 * day);
   assert.deepEqual(
     hits.map((hit) => hit.externalId),
-    ["old-1", "old-2", "old-3"],
-    "只收超过 30 天没动的普通会话，最旧的先；恰好在 30 天线上的不收（< 严格小于）",
+    ["old-1", "task-done-1", "old-2", "old-3"],
+    "收超过 30 天没动的普通对话与已结束的任务专线，最旧的先；恰好在 30 天线上的不收（< 严格小于）",
   );
-  assert.deepEqual(skipped, { kind: 3, archived: 1, pinned: 1, empty: 1, fresh: 2, busy: 1 });
+  assert.deepEqual(skipped, { kind: 2, openTicket: 1, archived: 1, pinned: 1, empty: 1, fresh: 2, busy: 1 });
 });
 
 // ── 调度器定时器（不真等 5 分钟）─────────────────────────
@@ -201,13 +206,30 @@ test("调度器：开关关不开定时器；动态开→挂首轮；动态关�
 
 // ── 真实 sweepOnce（真 Harness + 真临时库）────────────────
 
-test("sweepOnce：老会话收进归档；置顶 / 忙 / 非 worker / 已归档 / 未到期不动；上限 50", async () => {
+test("sweepOnce：老普通对话与已结束的任务专线收进归档；在办单 / 置顶 / 忙 / 非收集类 / 已归档 / 未到期不动；上限 50", async () => {
   const now = Date.now();
   const day = 86_400_000;
 
-  // 会收的：40 天前
-  const old1 = await createWorkerChat("老会话一", now - 40 * day);
+  // 会收的：普通对话（41 / 40 天没动）
+  const old1 = await createWorkerChat("老会话一", now - 41 * day);
   const old2 = await createWorkerChat("老会话二", now - 40 * day);
+
+  // 任务专线三种（2026-11-14 新口径）：单已 done 收；单文件已不在磁盘也收；单还在跑不收
+  const workRoot = process.env.CHANCELLOR_WORK_ROOT!;
+  const writeTicket = (ticketId: string, status: string): void => {
+    mkdirSync(join(workRoot, ticketId), { recursive: true });
+    writeFileSync(join(workRoot, ticketId, "ticket.json"), JSON.stringify({ id: ticketId, status }));
+  };
+  const taskDone = await session.openOrCreateChat("task-AUTO-DONE");
+  await writeUserEntry(taskDone.externalId, "已结束的任务专线", now - 45 * day);
+  writeTicket("AUTO-DONE", "done");
+  const taskGone = await session.openOrCreateChat("task-AUTO-GONE");
+  await writeUserEntry(taskGone.externalId, "单已不在磁盘的任务专线", now - 42 * day);
+  // AUTO-GONE 刻意不落 ticket.json：单办完目录被清掉是常态
+  const taskRunning = await session.openOrCreateChat("task-AUTO-RUN");
+  await writeUserEntry(taskRunning.externalId, "在办的任务专线", now - 40 * day);
+  writeTicket("AUTO-RUN", "running");
+
   // 不收的：各关卡一样一个
   const pinned = await createWorkerChat("置顶会话", now - 40 * day);
   session.pinChat(pinned.externalId, true);
@@ -216,17 +238,15 @@ test("sweepOnce：老会话收进归档；置顶 / 忙 / 非 worker / 已归档 
   const chief = await session.openChat(undefined);
   assert.ok(chief);
   await writeUserEntry(chief.externalId, "总管老对话", now - 40 * day);
-  const taskChat = await session.openOrCreateChat("task-AUTO-1");
-  await writeUserEntry(taskChat.externalId, "任务老专线", now - 40 * day);
   const alreadyArchived = await createWorkerChat("已归档会话", now - 40 * day);
   session.archiveChat(alreadyArchived.externalId, now);
   const fresh = await createWorkerChat("新会话", now);
   const empty = await session.openChat(undefined, undefined, "worker"); // 空会话（无条目）
 
-  // 上限夹具：再铺 51 个老会话（50+2 > 50，命中被截到 50）
+  // 上限夹具：再铺 51 个 35 天没动的普通对话（4 个具名命中 + 51 = 55 > 50，被截到 50）
   const extraOlds: string[] = [];
   for (let index = 0; index < 51; index += 1) {
-    const chat = await createWorkerChat(`上限夹具 ${index}`, now - 40 * day);
+    const chat = await createWorkerChat(`上限夹具 ${index}`, now - 35 * day);
     extraOlds.push(chat.externalId);
   }
 
@@ -236,16 +256,23 @@ test("sweepOnce：老会话收进归档；置顶 / 忙 / 非 worker / 已归档 
   const archived = new Set((meta.archived as string[]) ?? []);
   assert.ok(archived.has(old1.externalId), "老会话被自动归档");
   assert.ok(archived.has(old2.externalId));
+  assert.ok(archived.has(taskDone.externalId), "单已 done 的任务专线也收");
+  assert.ok(archived.has(taskGone.externalId), "单已不在磁盘的任务专线也收");
+  assert.equal(archived.has(taskRunning.externalId), false, "单还在跑的任务专线不收");
   assert.equal(archived.has(pinned.externalId), false, "置顶不动");
   assert.equal(archived.has(busy.externalId), false, "忙不动");
-  assert.equal(archived.has(chief!.externalId), false, "总管不是普通会话，不收");
-  assert.equal(archived.has(taskChat.externalId), false, "task- 专线不收");
+  assert.equal(archived.has(chief!.externalId), false, "总管不是收集类，不收");
   assert.equal(archived.has(alreadyArchived.externalId), true, "已归档保持原样");
   assert.equal(archived.has(fresh.externalId), false, "未到期不动");
   assert.equal(archived.has(empty!.externalId), false, "空会话不动");
 
-  const archivedBySweep = extraOlds.filter((externalId) => archived.has(externalId)).length;
-  assert.equal(archivedBySweep + 2, 50, "本轮总归档数 = 上限 50（53 个命中收 50，余下轮）");
+  // 上限：本轮恰好收 50（4 个具名 + 46 个夹具），加上先前手动归档的 1 条
+  assert.equal(archived.size, 51, "本轮总归档数 = 上限 50");
+  assert.equal(
+    extraOlds.filter((externalId) => archived.has(externalId)).length,
+    46,
+    "最旧的先收：具名 4 条都在批内，夹具按最旧优先占满余下 46 个名额",
+  );
 
   // 忙态夹具清理（不影响断言，只还库一个干净态）
   await setFakeBusy(busy.internalId, false);

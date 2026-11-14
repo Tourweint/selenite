@@ -25,7 +25,8 @@ import { pathGuardBlockReason } from "../path-guard.ts";
 import { askPersona, askPersonaAvailable, personaAskEnabled } from "../persona-ask.ts";
 import { PROGRESS_TOOL_NAME, progressReportAllowed, progressReportEnabled } from "../progress-report.ts";
 import { projectsStore, workspaceRootsReal } from "../projects.ts";
-import { currentModels, readLlmConfig } from "../provider.ts";
+import { currentModels, contextWindowsByRef, readLlmConfig } from "../provider.ts";
+import { compactionSummary, readCompactionConfig } from "../compaction-settings.ts";
 import { isReadOnlyShellCommand, readAllowlistEnabled } from "../read-allowlist.ts";
 import { buildHarnessSettings, reliabilitySummary } from "../reliability.ts";
 import { ReminderTask } from "../reminder.ts";
@@ -566,7 +567,13 @@ async function openHarness(): Promise<Harness> {
 							const relayBlock = relayToolBlockReason(api.conversationId);
 							if (relayBlock) return blocked(relayBlock, "relay", "relay");
 						}
-						const readOnly = readOnlyBlockReason(call.name);
+						// 只读 / 在工作区内修改两档要判命令文本（2026-11-14）：查看类命令放行，
+						// 其余照旧拦。上下文缺一不可——拿不到命令就退回"一律拦"。
+						const readOnly = readOnlyBlockReason(call.name, {
+							args: call.arguments,
+							workspaceRoots: workspaceRootsReal(),
+							cwd: sessionCwd(api.conversationId),
+						});
 						// 自主轮高危审批（批次C C2）：例行轮（autonomyTurns 事实源）里
 						// RISK_TOOLS 一律强制 ask——普通轮行为完全不变（D6 口径不动）。
 						const risk = autonomyRiskVerdict(call.name, autonomous);
@@ -667,7 +674,11 @@ async function openHarness(): Promise<Harness> {
 								: null;
 							if (mode === "async" && grant) {
 								// 命中：批准的调用，复判等待期里可能变了的策略与边界（与旧路径同一口径）
-								const recheck = readOnlyBlockReason(call.name);
+								const recheck = readOnlyBlockReason(call.name, {
+									args: call.arguments,
+									workspaceRoots: workspaceRootsReal(),
+									cwd: sessionCwd(api.conversationId),
+								});
 								if (recheck) return blocked(recheck, "policy", "policy-recheck");
 								const recheckPath = pathGuardBlockReason({
 									tool: call.name,
@@ -713,7 +724,11 @@ async function openHarness(): Promise<Harness> {
 									);
 								}
 								// 批准后复判：等待期间可能被切到只读 / 拉黑 / 换工作区
-								const recheck = readOnlyBlockReason(call.name);
+								const recheck = readOnlyBlockReason(call.name, {
+									args: call.arguments,
+									workspaceRoots: workspaceRootsReal(),
+									cwd: sessionCwd(api.conversationId),
+								});
 								if (recheck) return blocked(recheck, "policy", "policy-recheck");
 								const recheckPath = pathGuardBlockReason({
 									tool: call.name,
@@ -891,13 +906,20 @@ async function openHarness(): Promise<Harness> {
 		registry.install(researchExt);
 	}
 
-	// 可靠性旋钮（2026-11-04 批次一 A4）：全空时 settings 为 undefined，就是"不传"。
-	const settings = buildHarnessSettings(process.env);
+	// 可靠性旋钮（2026-11-04 批次一 A4）：stream / afterFailedRun 不设就不传。
+	// 2026-11-14：settings 从**快照**改成**访问器**——压缩设置改完要下一轮就生效，
+	// 而内核每次使用都重读（`harness.js:123` 实读）。窗口表也每轮现取：换模型 / 加模型后
+	// 百分比才能落到新模型上（`contextWindowsByRef`）。压缩默认就按 70%，所以每次都带。
 	const reliability = reliabilitySummary(process.env);
+	const compaction = compactionSummary(readCompactionConfig(process.env), contextWindowsByRef());
 	console.log(
 		`[可靠性] bash默认超时=${reliability.bashTimeoutS > 0 ? `${reliability.bashTimeoutS}s` : "禁用"} ` +
 			`stream.timeoutMs=${reliability.streamTimeoutMs ?? "未设(SDK默认10min)"} ` +
 			`afterFailedRun=${reliability.afterFailedRun ?? "未设"}`,
+	);
+	console.log(
+		`[压缩] 自动=${compaction.enabled ? "开" : "关"} 触发=${compaction.trigger} ` +
+			`按模型覆盖=${compaction.overridden}`,
 	);
 
 	const harness = await Harness.open(
@@ -916,7 +938,9 @@ async function openHarness(): Promise<Harness> {
 				if (cwd) noteSessionCwd(conversationId, cwd);
 				return new NodeExecutionEnv({ cwd: cwd ?? sessionCwd(conversationId) });
 			},
-			...(settings ? { settings } : {}),
+			// 每次使用现算（不是启动时快照）：压缩旋钮走 flags → env，改完下一轮即生效。
+			// 全默认时返回 undefined，等价于"不传 settings"（构造上不改变行为）。
+			settings: () => buildHarnessSettings(process.env, contextWindowsByRef()),
 			onReport: (error, info) => {
 				const detail = error instanceof Error ? error.message : String(error);
 				console.warn(`[agent] ${info.type}: ${detail}`);

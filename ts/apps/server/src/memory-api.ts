@@ -15,6 +15,9 @@ import {
 	type ReviewGenerator,
 } from "./memory-consolidate.ts";
 import { readConsolidateDiff, runConsolidatePass } from "./memory-consolidate-pass.ts";
+import { listMemoryImportSources, memoryImportSourcesEnabled, runMemoryImportSource } from "./memory-import-sources.ts";
+import { deleteMemoryNightlyTask, memoryNightlyAt, memoryNightlyEnabled, memoryNightlyScopes, nextNightlyAt, restartMemoryNightlyScheduler, setMemoryNightlyAt, setMemoryNightlyTaskEnabled } from "./memory-nightly.ts";
+import { CHIEF_PARTNER_ID, COMPANIONS_ENABLED, partnersStore } from "./partners.ts";
 import { askPersonaAvailable, askPersonaCatalog, personaAskEnabled } from "./persona-ask.ts";
 
 /** 记忆管理端点接受的 kind 全集（2026-11-13：列表过滤与排除都只认这些）。 */
@@ -154,6 +157,95 @@ export function mountMemoryApi(app: Hono, deps: MemoryApiDeps): void {
 			return c.json({ error: "not_found", message: "记忆或替代者不存在" }, 404);
 		}
 		return c.json({ ok: true, superseded: id, byId });
+	});
+
+	// ── 记忆范围清单（2026-11-14）──────────────────────────────
+	// A 版改成"一排人"后，页面一次拿全：我的记忆 + 每个在职执事 + 各自条数。
+	// 只读、只算计数（limit=0），不返回正文；执事列表拿不到时只剩"我的记忆"，不挡页面。
+	app.get("/api/v1/agent/memory/scopes", (c) => {
+		if (!deps.enabled) {
+			return c.json({ error: "memory_disabled", message: "记忆未启用（MEMORY_ENABLED=false）" }, 404);
+		}
+		const scopes: Array<{ scope: string; label: string; count: number; kind: "mine" | "partner" }> = [
+			{
+				scope: "global",
+				label: "我的记忆",
+				// 与列表默认口径一致：work 是履历台账，不算"记忆条数"（否则页签数字比列表多）
+				count: memoryOverview({ scope: "global", limit: 0, excludeKinds: ["work"] }).counts.all,
+				kind: "mine",
+			},
+		];
+		if (COMPANIONS_ENABLED) {
+			try {
+				for (const partner of partnersStore().list()) {
+					if (!partner.id || partner.id === CHIEF_PARTNER_ID) continue;
+					if (partner.status === "archived") continue;
+					const scope = `partner:${partner.id}`;
+					scopes.push({
+						scope,
+						label: partner.name || "执事",
+						count: memoryOverview({ scope, limit: 0, excludeKinds: ["work"] }).counts.all,
+						kind: "partner",
+					});
+				}
+			} catch (error) {
+				// 执事库读不到（还没建 / 迁移中）不影响看自己的记忆
+				console.warn(`[memory] 范围清单读执事失败: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		}
+		return c.json({ ok: true, scopes });
+	});
+
+	// ── 每晚整理（2026-11-14）：定时任务页要看见"谁在什么时候整理记忆" ──
+	// 读 + 单人暂停/启用/删除；真正执行仍是 memory-nightly 的进程内定时器，不在 routine 表里。
+	app.get("/api/v1/agent/memory/nightly", (c) => {
+		if (!deps.enabled) {
+			return c.json({ error: "memory_disabled", message: "记忆未启用（MEMORY_ENABLED=false）" }, 404);
+		}
+		const at = memoryNightlyAt();
+		return c.json({
+			ok: true,
+			enabled: memoryNightlyEnabled(),
+			at,
+			nextAt: nextNightlyAt(new Date(), at).toISOString(),
+			scopes: memoryNightlyScopes(),
+		});
+	});
+	app.patch("/api/v1/agent/memory/nightly", async (c) => {
+		if (!deps.enabled) {
+			return c.json({ error: "memory_disabled", message: "记忆未启用（MEMORY_ENABLED=false）" }, 404);
+		}
+		const body = (await c.req.json().catch(() => null)) as { at?: unknown } | null;
+		if (typeof body?.at !== "string" || !setMemoryNightlyAt(body.at)) {
+			return c.json({ error: "bad_request", message: "时间只能是 HH:MM" }, 400);
+		}
+		restartMemoryNightlyScheduler();
+		const at = memoryNightlyAt();
+		return c.json({ ok: true, at, nextAt: nextNightlyAt(new Date(), at).toISOString() });
+	});
+	app.patch("/api/v1/agent/memory/nightly/:scope", async (c) => {
+		if (!deps.enabled) {
+			return c.json({ error: "memory_disabled", message: "记忆未启用（MEMORY_ENABLED=false）" }, 404);
+		}
+		const body = (await c.req.json().catch(() => null)) as { enabled?: unknown } | null;
+		if (typeof body?.enabled !== "boolean") {
+			return c.json({ error: "bad_request", message: "enabled 只能是 true 或 false" }, 400);
+		}
+		const scope = decodeURIComponent(c.req.param("scope") || "");
+		if (!setMemoryNightlyTaskEnabled(scope, body.enabled)) {
+			return c.json({ error: "not_found", message: "没有这个整理任务" }, 404);
+		}
+		return c.json({ ok: true, scope, enabled: body.enabled });
+	});
+	app.delete("/api/v1/agent/memory/nightly/:scope", (c) => {
+		if (!deps.enabled) {
+			return c.json({ error: "memory_disabled", message: "记忆未启用（MEMORY_ENABLED=false）" }, 404);
+		}
+		const scope = decodeURIComponent(c.req.param("scope") || "");
+		if (!deleteMemoryNightlyTask(scope)) {
+			return c.json({ error: "not_found", message: "没有这个整理任务" }, 404);
+		}
+		return c.json({ ok: true, deleted: scope });
 	});
 
 	// ── 外接记忆库 · 库边界（2026-11-13 A 版页脚）──────────────
@@ -374,5 +466,30 @@ export function mountMemoryApi(app: Hono, deps: MemoryApiDeps): void {
 			skipped: result.skipped,
 			total: result.total,
 		});
+	});
+
+	// ── 导入的本机来源（2026-11-15，方案 docs/设计方案/2026-11-15-记忆导入（接入别家AI的记忆）.md）
+	// 别家 AI 已积累的记忆条目一键并进来。路径白名单在 memory-import-sources.ts，
+	// 客户端只报来源 id，不传路径——防退化成任意文件读取。
+	const sourcesAllowed = () => deps.enabled && memoryImportEnabled() && memoryImportSourcesEnabled();
+	app.get("/api/v1/agent/memory/import/sources", (c) => {
+		if (!deps.enabled) {
+			return c.json({ error: "memory_disabled", message: "记忆未启用（MEMORY_ENABLED=false）" }, 404);
+		}
+		if (!memoryImportEnabled() || !memoryImportSourcesEnabled()) {
+			return c.json({ error: "not_found" }, 404);
+		}
+		return c.json({ ok: true, sources: listMemoryImportSources() });
+	});
+
+	app.post("/api/v1/agent/memory/import/sources/:id", (c) => {
+		if (!sourcesAllowed()) return c.json({ error: "not_found" }, 404);
+		const result = runMemoryImportSource(c.req.param("id"));
+		if (!result.ok) {
+			return c.json({ error: result.error, message: result.message }, (result.status ?? 400) as 400 | 404 | 503);
+		}
+		// 与手工导入同一日志口径：只记条数（D8），不记条目内容
+		console.log(`[memory] 来源导入 source=${c.req.param("id")} 新增=${result.added} 跳过=${result.skipped} 共=${result.total}`);
+		return c.json({ ok: true, source: c.req.param("id"), added: result.added, skipped: result.skipped, total: result.total });
 	});
 }

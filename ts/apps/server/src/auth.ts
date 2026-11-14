@@ -92,6 +92,38 @@ export function isLoopback(c: Context): boolean {
 	}
 }
 
+/** 连接方式（2026-11-14 连接页两分）：只由对端地址推出来，不接受客户端自报。 */
+export type PeerTransport = "local" | "usb" | "direct";
+
+/** 内网 / 链路本地（IPv4 三段私网 + 169.254，IPv6 ULA/link-local；`::ffff:` 映射形式先剥壳） */
+function isPrivateAddress(raw: string): boolean {
+	const address = raw.startsWith("::ffff:") ? raw.slice(7) : raw;
+	if (/^10\./.test(address) || /^192\.168\./.test(address) || /^169\.254\./.test(address)) return true;
+	const match = /^172\.(\d+)\./.exec(address);
+	if (match && Number(match[1]) >= 16 && Number(match[1]) <= 31) return true;
+	// IPv6：fc00::/7（ULA）、fe80::/10（链路本地）
+	return /^f[cd][0-9a-f]{2}:/i.test(address) || /^fe[89ab][0-9a-f]:/i.test(address);
+}
+
+export function peerAddress(c: Context): string | null {
+	try {
+		return getConnInfo(c).remote.address ?? null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * 这条请求算哪种连接：回环 = 数据线/本机转发（`adb reverse`），私网 = 同一 WiFi / USB 共享网络，
+ * 其余 = 公网直连。拿不到对端信息时按 `direct`（最保守的那种说法）。
+ */
+export function peerTransportOf(c: Context): PeerTransport {
+	const address = peerAddress(c);
+	if (!address) return "direct";
+	if (LOCAL_ADDRESSES.has(address)) return "usb";
+	return isPrivateAddress(address) ? "local" : "direct";
+}
+
 /** 定长比较，避免把令牌长度泄露给计时攻击 */
 function safeEqual(a: string, b: string): boolean {
 	const bufferA = Buffer.from(a);
@@ -106,6 +138,23 @@ export interface AuthOptions {
 	 * 不传 = 只认共享令牌。
 	 */
 	verifyDeviceToken?: (token: string) => boolean;
+	/**
+	 * 设备凭据通过时的回调（2026-11-14 连接方式）：带上按对端地址推出来的方式，
+	 * 由调用方记进设备记录（`page` 要显示"它是怎么连的、上次怎么连的"）。
+	 */
+	onDeviceSeen?: (token: string, transport: PeerTransport) => void;
+	/**
+	 * **共享令牌从非本机地址**进来时的回调（2026-11-14）：这是"没走配对、也没走中继"的
+	 * 外部设备（典型：手机里直接填了 AGENT_TOKEN）。它不进任何名册，页面上原本一片空白，
+	 * 用户就会说"平板连上了但我看不到"。这里只记地址类别与时间，不记 IP 明文。
+	 */
+	onForeignPeer?: (info: { transport: PeerTransport; path: string; address: string | null }) => void;
+	/**
+	 * 凭据没过时也会喊一声（2026-11-14 连接页三次打磨）：设备拿着**已撤销 / 未知**的令牌来敲门时，
+	 * 页面上原本什么都看不见——用户看到的是"平板明明在用，列表里却没有它"。
+	 * 这里只上报"有个请求被拒了、对端算哪种方式"，不记 IP 明文、不参与鉴权结论。
+	 */
+	onAuthFail?: (info: { token: string | null; transport: PeerTransport; path: string; address: string | null }) => void;
 }
 
 /** 本机页面加载时发一枚进程内凭据；非本机请求不发光，避免把 cookie 扩散出去。 */
@@ -130,7 +179,16 @@ export function createAuthMiddleware(expectedToken: string | null, options: Auth
 		if (!expectedToken) {
 			if (isLoopback(c)) return next();
 			const provided = bearerOf(c);
-			if (provided && options.verifyDeviceToken?.(provided)) return next();
+			if (provided && options.verifyDeviceToken?.(provided)) {
+				options.onDeviceSeen?.(provided, peerTransportOf(c));
+				return next();
+			}
+			options.onAuthFail?.({
+				token: provided || null,
+				transport: peerTransportOf(c),
+				path: c.req.path,
+				address: peerAddress(c),
+			});
 			return c.body(null, 403);
 		}
 
@@ -139,9 +197,24 @@ export function createAuthMiddleware(expectedToken: string | null, options: Auth
 
 		const provided = bearerOf(c);
 		if (provided) {
-			if (safeEqual(provided, expectedToken)) return next();
-			if (options.verifyDeviceToken?.(provided)) return next();
+			if (safeEqual(provided, expectedToken)) {
+				// 主令牌从外面进来 = 没配对的外部设备（2026-11-14）。本机请求不算。
+				if (!isLoopback(c)) {
+					options.onForeignPeer?.({ transport: peerTransportOf(c), path: c.req.path, address: peerAddress(c) });
+				}
+				return next();
+			}
+			if (options.verifyDeviceToken?.(provided)) {
+				options.onDeviceSeen?.(provided, peerTransportOf(c));
+				return next();
+			}
 		}
+		options.onAuthFail?.({
+			token: provided || null,
+			transport: peerTransportOf(c),
+			path: c.req.path,
+			address: peerAddress(c),
+		});
 		return c.body(null, 403);
 	};
 }

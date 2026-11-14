@@ -22,12 +22,29 @@ import {
  * invoke 超时回执、把 routed 帧分发给上层 handler。通道语义在
  * relay-channels.ts（白名单默认拒绝）；本文件不认识任何业务通道。
  *
+ * 2026-11-14 稳定性补丁（"时而连上时而连不上"）：
+ * ① **应用层心跳**：客户端每 20s 发 `{kind:"ping"}`，中继回 `{kind:"pong"}`
+ *    （hub 早已支持这一帧，老版本中继也认，不需要协议变更）。为什么必须发：
+ *    握手后到下一次调用之间可能几分钟没有出站帧，家用宽带 / 运营商 NAT 对
+ *    "静默长连接"的空闲回收常在 30–90s，连接会被中间设备静默掐掉——表现就是
+ *    连上几十秒又掉。心跳把这条链路从"空闲"变成"有流量"。
+ * ② **半开检测**：45s 没有任何入站 → 判定死链，主动 terminate 重连
+ *    （TCP 半开时 readyState 可能仍显示 OPEN，只等 close 事件会卡很久）。
+ * ③ **断开原因入日志**：close code/reason、存活时长、入站静默时长、下次延迟。
+ *    以前只记"已连接"，掉线原因完全不可见（2026-11-14 日志里 891 行"已连接"、
+ *    零行"断开"就是这个问题）。
+ * ④ 退避加 ±20% 抖动：多设备/多实例同时掉线时不要挤在同一秒重连。
+ *
  * 回滚开关：RELAY_ENABLED=false（默认）→ 不连接、不装通道，回局域网直连形态。
  */
 
 const BACKOFF_BASE_MS = 1_000;
 const BACKOFF_MAX_MS = 30_000;
 const STABLE_RESET_MS = 10_000;
+/** 客户端心跳间隔（远小于运营商 NAT 常见的 30–90s 空闲回收） */
+const HEARTBEAT_MS = 20_000;
+/** 连续这么久没有任何入站帧 = 死链（3 个心跳周期收不到 pong 就该断） */
+const LIVENESS_MS = 45_000;
 
 export interface RelayClientOptions {
 	url: string;
@@ -46,7 +63,22 @@ export interface RelayClientOptions {
 	/** 重连后恢复订阅等状态 */
 	onReconnected?: (deviceId: string) => void;
 	onDisconnected?: () => void;
+	/** 心跳间隔（测试用；默认 HEARTBEAT_MS） */
+	heartbeatMs?: number;
+	/** 入站静默判死阈值（测试用；默认 LIVENESS_MS） */
+	livenessMs?: number;
 	log?: (message: string) => void;
+}
+
+/** 连接面统计（只给状态页看，不含任何令牌） */
+export interface RelayClientStats {
+	connected: boolean;
+	reconnects: number;
+	lastConnectedAt: number | null;
+	lastCloseAt: number | null;
+	lastCloseCode: number | null;
+	lastCloseReason: string;
+	lastPongAt: number | null;
 }
 
 export interface RelayInvokeFailure {
@@ -78,6 +110,15 @@ export class RelayClient {
 	private stopped = false;
 	private connectTimer: ReturnType<typeof setTimeout> | null = null;
 	private openedAt = 0;
+	/** 心跳与存活判定（2026-11-14） */
+	private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+	private lastInboundAt = 0;
+	private reconnects = 0;
+	private lastConnectedAt: number | null = null;
+	private lastCloseAt: number | null = null;
+	private lastCloseCode: number | null = null;
+	private lastCloseReason = "";
+	private lastPongAt: number | null = null;
 	/** 自报身份：进程启动时间，info/probe 用 */
 	readonly startedAt = Date.now();
 
@@ -85,6 +126,19 @@ export class RelayClient {
 
 	get connected(): boolean {
 		return this.ws !== null && this.ws.readyState === 1 && this.deviceId !== null;
+	}
+
+	/** 状态页用：连接面统计（`connected` 是"WS 打开"，不等于"链路是活的"） */
+	get stats(): RelayClientStats {
+		return {
+			connected: this.connected,
+			reconnects: this.reconnects,
+			lastConnectedAt: this.lastConnectedAt,
+			lastCloseAt: this.lastCloseAt,
+			lastCloseCode: this.lastCloseCode,
+			lastCloseReason: this.lastCloseReason,
+			lastPongAt: this.lastPongAt,
+		};
 	}
 
 	get selfDeviceId(): string | null {
@@ -117,6 +171,7 @@ export class RelayClient {
 
 	stop(): void {
 		this.stopped = true;
+		this.stopHeartbeat();
 		if (this.connectTimer) clearTimeout(this.connectTimer);
 		this.connectTimer = null;
 		this.failAllPending("device_offline", "中继连接已停");
@@ -191,6 +246,9 @@ export class RelayClient {
 		let helloDone = false;
 
 		ws.on("open", () => {
+			// NS-01：连接一建立就开始计算"入站静默"，并挂上心跳（见文件头 ①②）。
+			this.lastInboundAt = Date.now();
+			this.startHeartbeat(ws);
 			const hello: RelayHello = {
 				kind: "hello",
 				v: RELAY_PROTOCOL_VERSION,
@@ -204,6 +262,8 @@ export class RelayClient {
 		});
 
 		ws.on("message", (raw: Buffer) => {
+			// 任何入站帧都算"链路活着"（pong / welcome / routed / invoke_result 一律）
+			this.lastInboundAt = Date.now();
 			if (raw.length > RELAY_MAX_FRAME_BYTES) return;
 			let frame: unknown;
 			try {
@@ -220,7 +280,8 @@ export class RelayClient {
 				const stableFor = Date.now() - this.openedAt;
 				this.attempts = stableFor >= STABLE_RESET_MS ? 0 : Math.max(0, this.attempts - 1);
 				this.openedAt = Date.now();
-				this.log(`[relay] 已连接 device=${welcome.deviceId} 名册=${welcome.devices.length}`);
+				this.lastConnectedAt = this.openedAt;
+				this.log(`[relay] 已连接 device=${welcome.deviceId} 名册=${welcome.devices.length}${this.reconnects ? `（第 ${this.reconnects + 1} 次）` : ""}`);
 				this.options.onReconnected?.(welcome.deviceId);
 				return;
 			}
@@ -265,28 +326,86 @@ export class RelayClient {
 				}
 				return;
 			}
+			if (kind === "pong") {
+				// 我们发出去的心跳得到了回应：链路确实是通的（不是 TCP 假活）
+				this.lastPongAt = Date.now();
+				return;
+			}
 			if (kind === "ping") {
 				ws.send(JSON.stringify({ kind: "pong", at: Date.now() }));
 			}
 		});
 
-		ws.on("close", () => {
+		ws.on("close", (code: number, reason: Buffer) => {
+			this.stopHeartbeat();
 			const wasHello = helloDone;
+			const livedMs = this.openedAt ? Date.now() - this.openedAt : 0;
+			const silentMs = this.lastInboundAt ? Date.now() - this.lastInboundAt : 0;
 			if (this.ws === ws) {
 				this.ws = null;
 				this.deviceId = null;
 			}
+			this.lastCloseAt = Date.now();
+			this.lastCloseCode = code;
+			this.lastCloseReason = reason?.toString("utf8").slice(0, 120) ?? "";
 			this.failAllPending("device_offline", wasHello ? "中继连接断开" : "连接未完成握手");
 			if (wasHello) this.options.onDisconnected?.();
-			if (this.stopped) return;
+			if (this.stopped) {
+				this.log(`[relay] 已停止（code=${code}）`);
+				return;
+			}
+			this.reconnects += 1;
 			this.attempts += 1;
-			const delay = Math.min(BACKOFF_BASE_MS * 2 ** (this.attempts - 1), BACKOFF_MAX_MS);
+			const base = Math.min(BACKOFF_BASE_MS * 2 ** (this.attempts - 1), BACKOFF_MAX_MS);
+			// ±20% 抖动：多实例/多设备同时掉线时不要在同一秒挤回来
+			const delay = Math.round(base * (0.8 + Math.random() * 0.4));
+			this.log(
+				`[relay] 断开 code=${code}${this.lastCloseReason ? ` reason=${this.lastCloseReason}` : ""} 存活=${Math.round(livedMs / 1000)}s 入站静默=${Math.round(silentMs / 1000)}s → ${delay}ms 后重连（第 ${this.reconnects} 次）`,
+			);
 			this.scheduleConnect(delay);
 		});
 
 		ws.on("error", () => {
 			/* close 随后必到 */
 		});
+	}
+
+	/**
+	 * 应用层心跳（NS-01）。为什么不是 ws 协议级 ping：
+	 * 协议级 ping 由 `ws` 库自动回 pong，中间的 NAT/代理往往直接吞掉（或提前掐断），
+	 * 只能证明"两个库在对话"；应用层 ping 走的是同一条业务帧路径，能证明"这条链路真能送帧"。
+	 */
+	private startHeartbeat(ws: import("ws").WebSocket): void {
+		this.stopHeartbeat();
+		const interval = this.options.heartbeatMs ?? HEARTBEAT_MS;
+		const liveness = this.options.livenessMs ?? LIVENESS_MS;
+		// 0 = 显式关闭（回滚开关 RELAY_HEARTBEAT_MS=0）：不挂定时器、也不做半开判定
+		if (interval <= 0 || liveness <= 0) return;
+		this.heartbeatTimer = setInterval(() => {
+			if (this.ws !== ws || ws.readyState !== 1) return;
+			const silentMs = Date.now() - this.lastInboundAt;
+			if (silentMs >= liveness) {
+				// 半开死链：发送缓冲里可能还有积压，等 close 事件可能要等到超时。直接掐。
+				this.log(`[relay] 心跳超时（入站静默 ${Math.round(silentMs / 1000)}s）→ 主动重连`);
+				try {
+					ws.terminate();
+				} catch {
+					/* 已在关闭途中 */
+				}
+				return;
+			}
+			try {
+				ws.send(JSON.stringify({ kind: "ping", at: Date.now() }));
+			} catch {
+				/* 发不出去就等 close */
+			}
+		}, interval);
+		this.heartbeatTimer.unref?.();
+	}
+
+	private stopHeartbeat(): void {
+		if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+		this.heartbeatTimer = null;
 	}
 
 	private async dispatch(routed: RelayRouted): Promise<void> {

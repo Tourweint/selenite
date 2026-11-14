@@ -82,6 +82,7 @@ export {
 	projectChatExternalIds,
 	readTranscript,
 	renameChat,
+	rescheduleReminder,
 	restoreArchivedChats,
 	restoreChats,
 	searchTranscripts,

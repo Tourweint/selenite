@@ -20,6 +20,7 @@ import {
 } from "./relay-config.ts";
 import { externalChatIds, sayInConversation } from "./agent.ts";
 import type { ChatIndexEntry } from "./agent.ts";
+import { relayLinkHttpBase, relayOwnerToken } from "./relay-link.ts";
 
 /**
  * 中继的手机代理面（2026-11-05 手机端对接，方案 §四阶段一/二客户端）。
@@ -132,11 +133,13 @@ export function mountRelayMobileProxy(app: Hono, deps: RelayMobileProxyDeps): vo
 		if (!relayMobileProxyEnabled()) return c.json({ error: "not_available" }, 404);
 		const body = (await c.req.json().catch(() => null)) as { relayUrl?: unknown } | null;
 		const requested = typeof body?.relayUrl === "string" ? body.relayUrl.trim() : "";
-		const base = normalizeRelayHttpBase(requested || relayHttpBase());
+		const base = normalizeRelayHttpBase(requested || relayHttpBase() || relayLinkHttpBase());
 		if (!base) {
 			return c.json({ error: "bad_request", message: "中继地址需要 http(s)://host[:端口]" }, 400);
 		}
-		const ownerToken = process.env.RELAY_OWNER_TOKEN?.trim() ?? "";
+		// 2026-11-14：主令牌也认页面里接入时填的那份（`relay-link.json`），
+		// 否则从页面接入的用户一签发加入码就被中继回 403，等于修了第一步、断在第二步。
+		const ownerToken = relayOwnerToken();
 		let response: Response;
 		try {
 			response = await fetch(`${base}/api/relay/join-code`, {
@@ -170,6 +173,47 @@ export function mountRelayMobileProxy(app: Hono, deps: RelayMobileProxyDeps): vo
 		const dataUrl = await QRCode.toDataURL(url, { margin: 1, width: 360 });
 		c.header("Cache-Control", "no-store");
 		return c.json({ joinCode, expiresAt, relayUrl: base, url, dataUrl });
+	});
+
+	// ── 移除经中继进来的设备（2026-11-14）────────────────────────────
+	//
+	// 与加入码同一条纪律：浏览器不直连中继，owner 令牌不下发客户端。这里由 harness 代调
+	// 中继 `POST /api/relay/devices/:id/revoke`——中继侧把凭据作废并踢掉在线连接（4401）。
+	// 之前电脑上只能移除"本地配对"的设备，经中继加进来的手机躺在中继名册里，页面上没有入口。
+	app.post("/api/v1/relay/devices/:id/revoke", async (c) => {
+		if (!relayMobileProxyEnabled()) return c.json({ error: "not_available" }, 404);
+		const client = deps.relayClient();
+		if (!client || !client.connected) {
+			return c.json({ error: "relay_unavailable", message: "中继未连接，暂时移除不了设备" }, 502);
+		}
+		const base = normalizeRelayHttpBase(relayHttpBase() || relayLinkHttpBase());
+		if (!base) return c.json({ error: "bad_request", message: "还没有中继地址" }, 400);
+		const ownerToken = relayOwnerToken();
+		if (!ownerToken) {
+			return c.json({ error: "relay_forbidden", message: "没有 owner 主令牌，改不了中继名册" }, 502);
+		}
+		let response: Response;
+		try {
+			response = await fetch(`${base}/api/relay/devices/${encodeURIComponent(c.req.param("id"))}/revoke`, {
+				method: "POST",
+				headers: { authorization: `Bearer ${ownerToken}` },
+				signal: AbortSignal.timeout(8_000),
+			});
+		} catch {
+			return c.json({ error: "relay_unreachable", message: "连不上中继，检查地址与网络" }, 502);
+		}
+		if (response.status === 403) {
+			return c.json({ error: "relay_forbidden", message: "中继拒绝了 owner 鉴权" }, 502);
+		}
+		if (response.status === 404) {
+			return c.json({ error: "unknown_device", message: "中继名册里没有这台设备（可能已被移除）" }, 404);
+		}
+		if (!response.ok) {
+			return c.json({ error: "relay_error", message: `中继返回 HTTP ${response.status}` }, 502);
+		}
+		// 名册改了，本机快照立刻重拉一次：下一次轮询看到的必须是新名册
+		if (typeof client.refreshDevices === "function") void client.refreshDevices().catch(() => {});
+		return c.json({ ok: true });
 	});
 
 	// 会话列表透传（手机现有 GET /agent/chats 的同形状；不经此端点也能用）

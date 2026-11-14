@@ -3,7 +3,7 @@ import { serve } from "@hono/node-server";
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
 import { streamSSE } from "hono/streaming";
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { hostname } from "node:os";
 import QRCode from "qrcode";
@@ -40,6 +40,7 @@ import {
   preferenceScopeOf,
   readTranscript,
   renameChat,
+  rescheduleReminder,
   restoreArchivedChats,
   sayInChat,
   sayInConversation,
@@ -68,7 +69,7 @@ import {
 } from "./attachments.ts";
 // 浏览器上传的附件落盘（2026-11-13 附件走路径）：壳里走原生选择器，这里只服务浏览器。
 import { saveUploadedAttachment } from "./attachment-files.ts";
-import { createAuthMiddleware } from "./auth.ts";
+import { createAuthMiddleware, isLoopback } from "./auth.ts";
 // 导出数据打包（2026-11-13）：format=zip 的采集与拼包全在这个模块，端点只管参数与响应头。
 import {
   buildExportBundle,
@@ -83,7 +84,14 @@ import { ChatEventStore, sseSeqEnabled } from "./chat-events.ts";
 import { stallWatchdog } from "./watchdog.ts";
 import { mountDiary } from "./diary.ts";
 import { mountOpenAiCompat } from "./openai-compat.ts";
-import { PairingStore, buildPairUrl, resolvePairBase, pairTwoStepEnabled } from "./pairing.ts";
+import {
+  PairingStore,
+  buildPairUrl,
+  hashToken,
+  pairAdoptEnabled,
+  pairTwoStepEnabled,
+  resolvePairBase,
+} from "./pairing.ts";
 import { pairPage } from "./pair-page.ts";
 import { mountPhoneWorker } from "./phone-worker.ts";
 import { mountProjects, seedDefaultWorkspace } from "./projects.ts";
@@ -94,6 +102,9 @@ import { autoArchiveScheduler } from "./agent/auto-archive.ts";
 // 永久删除端点（同批）：mountDurableDelete 挂 deletion-preview / delete 两组路由。
 import { mountDurableDelete } from "./agent/durable-delete.ts";
 import { mountFiles } from "./files.ts";
+// 壁纸（2026-11-14 外观页扩展）：.data/appearance 存一张图 + GET/POST/DELETE 三个端点。
+// AGENT_APPEARANCE_WALLPAPER=0 时整组不挂（界面那块也自己藏掉）。
+import { mountAppearanceWallpaper, wallpaperEnabled } from "./appearance-wallpaper.ts";
 import { mountDelegationApi } from "./delegation-api.ts";
 import { mountCompanions } from "./companion-api.ts";
 import { mountGroups } from "./group-api.ts";
@@ -104,7 +115,7 @@ import { mountTopics } from "./topic-api.ts";
 import { mountSearch } from "./search-api.ts";
 import { COMPANIONS_ENABLED, partnersStore } from "./partners.ts";
 import { ensurePartnerSession } from "./partner-runtime.ts";
-import { setReminderDeliverer } from "./reminder.ts";
+import { nextReminderAt, setReminderDeliverer } from "./reminder.ts";
 import { routineEngine } from "./routines.ts";
 import { watchAllEvents } from "./agent.ts";
 import { autonomyMode, autonomyObserver, observeCount24h } from "./autonomy.ts";
@@ -113,6 +124,7 @@ import { mountApprovalApi } from "./approval-api.ts";
 // 开关沿用 AGENT_BASH_BG_TIMEOUT，关着时整组 404（与 TOPICS/COMPANIONS 同口径）。
 import { mountBgJobs } from "./bg-jobs-api.ts";
 import { mountMemoryApi } from "./memory-api.ts";
+import { startMemoryNightlyScheduler } from "./memory-nightly.ts";
 // 技能管理（2026-11-08 扫尾批 9-S）：设置页「技能」分区的增删改查，写操作锁死在技能目录内。
 // SKILLS_ADMIN=false 时 mountSkills 内部直接返回，整组路由 404（同 TOPICS/COMPANIONS 口径）。
 import { mountSkills } from "./skills-api.ts";
@@ -128,7 +140,18 @@ import {
   deviceAutoDispatchEnabled,
   companionHomeEnabled,
   relayMobileProxyEnabled,
+  relayLinkUiEnabled,
+  normalizeRelayHttpBase,
+  type RelaySettings,
 } from "./relay-config.ts";
+import {
+  clearRelayLink,
+  joinRelay,
+  readRelayLink,
+  relaySettingsFromLink,
+  writeRelayLink,
+  RelayLinkError,
+} from "./relay-link.ts";
 import { companionHomeController, type CompanionHomeController } from "./relay-home.ts";
 import { mountRelayMobileProxy } from "./relay-mobile-proxy.ts";
 import { createMatrixChannels, dispatchRemoteDelegation, listRemoteDelegations } from "./relay-matrix.ts";
@@ -261,8 +284,165 @@ app.use(
 // 凭据两档（2026-10-29 配对）：共享令牌 `AGENT_TOKEN`（命令行/调试）+ 扫码换来的设备凭据。
 // **配对的两个端点必须免鉴权**——手机在配对之前手里还没有任何凭据。
 const pairing = new PairingStore();
+
+/**
+ * 「未配对的外部连接」登记（2026-11-14 连接方式两分）：共享令牌从非本机地址进来的请求。
+ *
+ * 为什么需要它：手机里如果直接填了 `AGENT_TOKEN`（而不是扫码换设备凭据），它既不在本地配对
+ * 名册、也不在中继名册，设置页上就是空白——用户的原话是"我平板在调试，但它还是看不到连接"。
+ * 这里只在内存里留**最近 10 分钟、最多 8 个来源类别**，只记地址类别与时间，不记 IP 明文、
+ * 不落盘（重启即清空，它本来就是"刚刚有人在用"的临时事实）。
+ */
+interface ForeignPeer {
+  address: string;
+  transport: "local" | "usb" | "direct";
+  firstAt: number;
+  lastAt: number;
+  path: string;
+}
+const foreignPeers = new Map<string, ForeignPeer>();
+const FOREIGN_PEER_TTL_MS = 10 * 60_000;
+const FOREIGN_PEER_MAX = 8;
+
+function noteForeignPeer(info: { transport: "local" | "usb" | "direct"; path: string; address: string | null }): void {
+  const now = Date.now();
+  for (const [key, peer] of foreignPeers) {
+    if (now - peer.lastAt > FOREIGN_PEER_TTL_MS) foreignPeers.delete(key);
+  }
+  const address = info.address ?? "unknown";
+  const existing = foreignPeers.get(address);
+  foreignPeers.set(address, {
+    address,
+    transport: info.transport,
+    firstAt: existing?.firstAt ?? now,
+    lastAt: now,
+    path: info.path,
+  });
+  // 上限兜底：只留最近活跃的几条，别让扫描器把内存当记事本
+  if (foreignPeers.size > FOREIGN_PEER_MAX) {
+    const oldest = [...foreignPeers.values()].sort((a, b) => a.lastAt - b.lastAt)[0];
+    if (oldest) foreignPeers.delete(oldest.address);
+  }
+}
+
+/**
+ * 「此刻谁在跟这台机器说话」（2026-11-14 三次打磨）。
+ *
+ * 名册只回答"曾经配对过谁"，不回答"现在谁在用"——平板正连着、但凭据已撤销（或名册里根本没它），
+ * 页面就一片空白，用户看到的是"平板明明在线，列表里没有它"。这里按**设备身份**记一笔：
+ * 认出令牌属于哪台设备（哪怕已撤销）就用它的 id 当 key；主令牌从外部进来、或不认识这枚令牌，
+ * 就用方式 + 地址类别当 key。5 分钟过期，最多 8 条，不存 IP 明文。
+ */
+interface LivePeer {
+  key: string;
+  id: string | null;
+  name: string | null;
+  kind: "device" | "main" | "unknown";
+  revoked: boolean;
+  transport: "local" | "usb" | "direct";
+  path: string;
+  /**
+   * 这枚凭据的 sha256（2026-11-14 五次打磨）：认领要靠它把"此刻正连着的陌生令牌"
+   * 登记成一台设备。只存哈希、不存明文，也不下发给页面（页面只拿前 8 位当短号）。
+   */
+  tokenHash: string | null;
+  firstAt: number;
+  lastAt: number;
+}
+const livePeers = new Map<string, LivePeer>();
+/** 拒绝日志的节流表：同一枚凭据每分钟只留一行，避免扫描器把日志刷爆 */
+const authFailLoggedAt = new Map<string, number>();
+const LIVE_PEER_TTL_MS = 5 * 60_000;
+const LIVE_PEER_MAX = 8;
+
+function noteLivePeer(info: {
+  id: string | null;
+  name: string | null;
+  kind: "device" | "main" | "unknown";
+  revoked: boolean;
+  transport: "local" | "usb" | "direct";
+  path: string;
+  tokenHash?: string | null;
+}): void {
+  const now = Date.now();
+  for (const [key, peer] of livePeers) {
+    if (now - peer.lastAt > LIVE_PEER_TTL_MS) livePeers.delete(key);
+  }
+  const key = info.id ? `device:${info.id}` : `anon:${info.kind}:${info.transport}`;
+  const existing = livePeers.get(key);
+  livePeers.set(key, {
+    key,
+    id: info.id,
+    name: info.name,
+    kind: info.kind,
+    revoked: info.revoked,
+    transport: info.transport,
+    path: info.path,
+    tokenHash: info.tokenHash ?? null,
+    firstAt: existing?.firstAt ?? now,
+    lastAt: now,
+  });
+  if (livePeers.size > LIVE_PEER_MAX) {
+    const oldest = [...livePeers.values()].sort((a, b) => a.lastAt - b.lastAt)[0];
+    if (oldest) livePeers.delete(oldest.key);
+  }
+}
+
 const auth = createAuthMiddleware(process.env.AGENT_TOKEN?.trim() || null, {
   verifyDeviceToken: (token) => pairing.verifyDeviceToken(token),
+  // 第二次调用带上方式：只补记录，鉴权结论已经由上面那次给出（令牌哈希比对是纯计算，够便宜）
+  onDeviceSeen: (token, transport) => {
+    pairing.verifyDeviceToken(token, Date.now(), transport);
+    const who = pairing.identifyDeviceToken(token);
+    if (who) {
+      noteLivePeer({
+        id: who.id,
+        name: who.name,
+        kind: "device",
+        revoked: false,
+        transport,
+        path: "",
+        tokenHash: hashToken(token),
+      });
+    }
+  },
+  onForeignPeer: (info) => {
+    noteForeignPeer(info);
+    noteLivePeer({ id: null, name: null, kind: "main", revoked: false, transport: info.transport, path: info.path });
+  },
+  // 凭据没过也记一笔（2026-11-14 三次打磨）：平板拿着已撤销的令牌来敲门时，
+  // 不加这条页面就什么都看不见，用户只能看到"平板明明在线，列表里没有它"。
+  onAuthFail: (info) => {
+    // 没带任何凭据的请求不记（2026-11-15）：页面自己那次不带 Authorization 的请求也会走到这里，
+    // 记下来就在列表里多一台「3 分钟前回话的未知凭据」——凭空长出来的幽灵设备，用户想认领也无从认领。
+    if (!info.token) return;
+    const who = info.token ? pairing.identifyDeviceToken(info.token) : null;
+    noteLivePeer({
+      id: who?.id ?? null,
+      name: who?.name ?? null,
+      kind: who ? "device" : "unknown",
+      revoked: Boolean(who?.revoked),
+      transport: info.transport,
+      path: info.path,
+      // 没认出来的凭据也留哈希：页面上的「认领」要凭它把这枚令牌登记进来。
+      tokenHash: info.token ? hashToken(info.token) : null,
+    });
+    // 落一笔"这枚没登记的凭据来过"（五次打磨）：活口表 5 分钟就忘，可平板的 App 未必一直在问——
+    // 只靠活口，用户过几分钟再看又是空白。认不出的才记，已撤销的不算（它在名册里有名有姓）。
+    if (!who && info.token && pairAdoptEnabled()) {
+      pairing.noteUnclaimed(hashToken(info.token), info.transport);
+    }
+    // 留一条可追溯的日志（同一枚凭据每 60 秒最多一行）：用户再问"平板明明在线"时，
+    // 这里能直接回答"它到底有没有打到这台机器"。不写 IP、不写令牌。
+    const logKey = who ? `device:${who.id}` : `unknown:${info.transport}`;
+    const nowMs = Date.now();
+    if (nowMs - (authFailLoggedAt.get(logKey) ?? 0) > 60_000) {
+      authFailLoggedAt.set(logKey, nowMs);
+      console.warn(
+        `[auth] 拒绝${who ? `设备「${who.name}」` : "未知凭据"}（${who?.revoked ? "已撤销" : "无匹配记录"}） transport=${info.transport} path=${info.path}`,
+      );
+    }
+  },
 });
 
 // SSE 事件重放库（2026-11-04 seq 方案）。惰性建：回滚开关关着就永远不建库。
@@ -320,6 +500,9 @@ seedDefaultWorkspace();
 // 文件浏览入口（2026-11-06）：open-explorer + files 只读浏览。回滚开关
 // EXPLORER_OPEN=false / FILE_BROWSE=false（方案：docs/设计方案/2026-11-06-文件浏览入口（桌面资源管理器与手机端）.md）。
 mountFiles(app);
+
+// 外观壁纸（2026-11-14）：只负责存图与回传，可见度/模糊在前端。
+if (wallpaperEnabled()) mountAppearanceWallpaper(app);
 
 // 任务中心只读接口（2026-11-03 方案 §5.9）：领域列表 + 单 ticket 明细。
 mountDelegationApi(app);
@@ -388,11 +571,20 @@ app.get("/api/v1/pair/qr", async (c) => {
 
 /** 已配对的设备（桌面设置页要看「有哪些手机连着」）。凭据哈希不外泄。 */
 app.get("/api/v1/pair/devices", (c) => {
-  const devices = pairing.listDevices().map((device) => ({
+  const now = Date.now();
+  const deviceRecords = pairing.listDevices();
+  const devices = deviceRecords.map((device) => ({
     id: device.id,
     name: device.name,
     createdAt: device.createdAt,
     lastSeenAt: device.lastSeenAt ?? null,
+    // 连接方式（2026-11-14 连接页两分）：`online` 是"最近活跃"的近似——本机没有真在线表。
+    // 窗口从 2 分钟放宽到 10 分钟（2026-11-14 二次打磨）：平板明明连着、只是暂时没请求，
+    // 2 分钟就翻成离线，用户看到的是"在线状态乱跳"。前提没变：它只回答"刚还在用、走的哪条路"。
+    online: Boolean(device.lastSeenAt && now - device.lastSeenAt <= 600_000),
+    lastTransport: device.lastTransport ?? null,
+    lastTransportAt: device.lastTransportAt ?? null,
+    transportAt: device.transportAt ?? null,
     revoked: Boolean(device.revokedAt),
     // 人眼可核的指纹 + 键变更位（2026-11-10 批 26 §四）；开关关着时两者都不出现。
     ...(device.fingerprint !== undefined ? { fingerprint: device.fingerprint } : {}),
@@ -400,13 +592,111 @@ app.get("/api/v1/pair/devices", (c) => {
       ? { keyChanged: true, keyChangedAt: device.keyChangedAt }
       : {}),
   }));
-  return c.json({ devices });
+  // 用主令牌直连、没走配对的外部设备（2026-11-14）：不落盘，只报"刚刚有人这样连着"。
+  const unpaired = [...foreignPeers.values()]
+    .sort((a, b) => b.lastAt - a.lastAt)
+    .map((peer) => ({ transport: peer.transport, firstAt: peer.firstAt, lastAt: peer.lastAt, path: peer.path }));
+  // 「此刻谁在说话」（2026-11-14 三次打磨）：名册回答"配过谁"，这里回答"现在谁在用"——
+  // 凭据已撤销也照样列出来（revoked=true），页面才有东西可显示。
+  // 读的时候再剪一次过期（五次打磨）：表只在"有新请求进来"时才顺手清，一台设备停了之后
+  // 最后那条记录会一直躺着，页面就会把它写成"现在在线"——那是假的。
+  const live = [...livePeers.values()]
+    // 名册里已经不存在的设备（删掉记录 / 撤销后又被删）不再算"此刻谁在说话"（五次打磨）：
+    // 那条记录已经没了，画出来的只是一枚幽灵——页面给它套上"未知凭据"的壳，看着像另一台不认识的设备。
+    .filter(
+      (peer) =>
+        !(
+          peer.kind === "device" &&
+          peer.id !== null &&
+          !deviceRecords.some((device) => device.id === peer.id)
+        ),
+    )
+    .filter((peer) => now - peer.lastAt <= LIVE_PEER_TTL_MS)
+    .sort((a, b) => b.lastAt - a.lastAt)
+    .map((peer) => ({
+      id: peer.id,
+      name: peer.name,
+      kind: peer.kind,
+      revoked: peer.revoked,
+      transport: peer.transport,
+      path: peer.path,
+      firstAt: peer.firstAt,
+      lastAt: peer.lastAt,
+      secondsAgo: Math.max(0, Math.round((now - peer.lastAt) / 1000)),
+      // 认领用的短号：只给"认不出的凭据"，且只有 sha256 前 8 位（反推不了令牌）。
+      tokenHint: peer.kind === "unknown" && peer.tokenHash ? peer.tokenHash.slice(0, 8) : null,
+    }));
+  // 「来过、但没登记」的凭据（五次打磨）：活口只回答"这一分钟谁在说话"，它回答
+  // "最近谁来过却一直被拒"——平板隔几分钟才问一次的时候，这一行才是看得见的那一行。
+  const unclaimed = pairAdoptEnabled()
+    ? pairing.listUnclaimed(now).map((item) => ({
+        ...item,
+        secondsAgo: Math.max(0, Math.round((now - item.lastAt) / 1000)),
+      }))
+    : [];
+  return c.json({ devices, unpaired, live, unclaimed });
 });
 
 /** 撤掉一台设备（CORS 只放 GET/POST，所以用 POST 而不是 DELETE） */
 app.post("/api/v1/pair/devices/:id/revoke", (c) => {
   const ok = pairing.revokeDevice(c.req.param("id"));
   return ok ? c.json({ ok: true }) : c.json({ ok: false }, 404);
+});
+
+/**
+ * 彻底删掉一条**已撤销**的设备记录（2026-11-14 五次打磨）。
+ *
+ * 撤销只让凭据作废，记录还在名册里占一行（"已移除 · #xxxx"）。用户想清理这种残壳，
+ * 但删活动设备等于绕过"先撤销"的顺序，所以这里只认 revoked 的记录，别的给 409。
+ */
+app.post("/api/v1/pair/devices/:id/delete", (c) => {
+  const id = c.req.param("id");
+  const record = pairing.listDevices().find((item) => item.id === id);
+  if (!record) return c.json({ error: "unknown_device" }, 404);
+  if (!record.revokedAt) return c.json({ error: "still_active" }, 409);
+  const ok = pairing.removeDevice(id);
+  return ok ? c.json({ ok: true }) : c.json({ error: "unknown_device" }, 404);
+});
+
+/**
+ * 认领一枚"本机没登记、但此刻正连着"的凭据（2026-11-14 五次打磨）。
+ *
+ * 为什么需要：平板手里那枚令牌不是这台机器发的（别处配的 / 中继发的 / 旧库留下的），
+ * 于是每个请求都 403，页面只能把它叫「未知凭据」——"找不到平板"说的就是这件事。
+ * 认领 = 把它的 sha256 登记成一台设备，凭据立刻生效、也立刻能像别人一样"移除"。
+ *
+ * 三条硬口径：
+ * ① **只许本机页面**（`isLoopback`）调：这等于把一枚陌生凭据升级成长期设备，不能从网络上按一下就过；
+ * ② 只认留下的这枚凭据：活口表里 5 分钟内正在说的，或"来过"表里 7 天内的（平板隔几分钟才问一次，
+ *    只认活口会经常"点的时候它刚好没在说话"）；
+ * ③ 页面只拿得到 8 位短号，拿到哈希本体的是服务端自己——网页永远看不到完整凭据指纹。
+ */
+app.post("/api/v1/pair/devices/adopt", async (c) => {
+  if (!pairAdoptEnabled()) return c.json({ error: "not_found" }, 404);
+  if (!isLoopback(c)) return c.json({ error: "forbidden" }, 403);
+  const body = (await c.req.json().catch(() => null)) as { tokenHint?: string; name?: string } | null;
+  const hint = body?.tokenHint?.trim().toLowerCase() ?? "";
+  if (!/^[0-9a-f]{8}$/.test(hint)) return c.json({ error: "bad_request" }, 400);
+  const now = Date.now();
+  const peer = [...livePeers.values()]
+    .filter(
+      (item) =>
+        item.kind === "unknown" &&
+        item.tokenHash &&
+        now - item.lastAt <= LIVE_PEER_TTL_MS &&
+        item.tokenHash.startsWith(hint),
+    )
+    .sort((a, b) => b.lastAt - a.lastAt)[0];
+  const tokenHash = peer?.tokenHash ?? pairing.unclaimedHashByHint(hint, now);
+  if (!tokenHash) return c.json({ error: "peer_gone" }, 404);
+  const result = pairing.adoptTokenHash(tokenHash, body?.name?.trim() || "设备");
+  if (result === "duplicate") return c.json({ error: "duplicate" }, 409);
+  if (result === "too_many") return c.json({ error: "too_many_devices" }, 409);
+  // 这枚"匿名活口"已经有了名字，立刻撤掉，免得列表里同一台设备出现两行（一行有名、一行"未知"）
+  if (peer) livePeers.delete(peer.key);
+  pairing.forgetUnclaimed(tokenHash);
+  console.log(`[pair] 认领了一枚没登记但来过门的凭据 → 设备「${result.name}」`);
+  return c.json({ ok: true, id: result.id, name: result.name });
 });
 
 /** 配对页每次打开都换一枚新码（旧码立即作废，符合"一次性"语义） */
@@ -637,7 +927,7 @@ app.post("/api/v1/agent/chat/:conversationId/pin", async (c) => {
 });
 
 /**
- * 访问档位（2026-11-03）：完全访问 / 只读 / 不跑命令。
+ * 访问档位（2026-11-03）：只读 / 在工作区内修改（内部值 no-shell）/ 完全访问。
  * 改完立刻生效——beforeTool 每次调用都重新判断，不用重启服务。
  *
  * 2026-11-08（扫尾批 4a）：响应顺带投影两个能力开关（`attachments` / `editResend`），
@@ -1704,6 +1994,101 @@ app.get("/api/v1/agent/sessions/search", async (c) => {
   return c.json({ hits: enriched, total: page.total });
 });
 
+/**
+ * 解析提醒的时间规则（2026-11-14）。
+ *
+ * 契约：`repeat` = none / daily / weekly / monthly。
+ * - weekly 需要 `weekdays`（0 = 周日 … 6 = 周六，可多选）；
+ * - monthly 需要 `dayOfMonth`（1–31，小月落到月末）；
+ * - `until` 是区间结束（含当天），仅对周期提醒有意义；一次性提醒忽略。
+ * 时间统一收成 epoch 毫秒，避免客户端和服务端时区口径分叉。
+ */
+type ReminderScheduleBody = {
+  at?: string | number;
+  repeat?: unknown;
+  weekdays?: unknown;
+  dayOfMonth?: unknown;
+  until?: unknown;
+};
+
+function parseReminderTime(value: unknown): number | null {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function parseReminderSchedule(body: ReminderScheduleBody | null):
+  | {
+      at: number;
+      repeat: "none" | "daily" | "weekly" | "monthly";
+      weekdays?: number[];
+      dayOfMonth?: number;
+      until?: number;
+    }
+  | { error: string } {
+  const rawAt = parseReminderTime(body?.at);
+  if (rawAt === null) return { error: "at 需要 ISO 时间或毫秒时间戳" };
+
+  const repeat = body?.repeat === undefined ? "none" : body.repeat;
+  if (repeat !== "none" && repeat !== "daily" && repeat !== "weekly" && repeat !== "monthly") {
+    return { error: "repeat 只能是 none / daily / weekly / monthly" };
+  }
+
+  let weekdays: number[] | undefined;
+  if (repeat === "weekly") {
+    if (!Array.isArray(body?.weekdays) || body.weekdays.length === 0) {
+      return { error: "weekly 需要 weekdays（0 = 周日 … 6 = 周六）" };
+    }
+    const parsed = Array.from(
+      new Set(
+        body.weekdays
+          .map((value) => (typeof value === "number" ? Math.trunc(value) : NaN))
+          .filter((value) => Number.isInteger(value) && value >= 0 && value <= 6),
+      ),
+    ).sort();
+    if (parsed.length === 0) return { error: "weekdays 只能是 0–6" };
+    weekdays = parsed;
+  }
+
+  let dayOfMonth: number | undefined;
+  if (repeat === "monthly") {
+    const parsed = typeof body?.dayOfMonth === "number" ? Math.trunc(body.dayOfMonth) : NaN;
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 31) {
+      return { error: "monthly 需要 dayOfMonth（1–31）" };
+    }
+    dayOfMonth = parsed;
+  }
+
+  let until: number | undefined;
+  if (repeat !== "none" && body?.until !== undefined && body.until !== null) {
+    const parsed = parseReminderTime(body.until);
+    if (parsed === null) return { error: "until 需要 ISO 时间或毫秒时间戳" };
+    until = parsed;
+  }
+
+  let at = rawAt;
+  if (repeat === "none") {
+    if (at <= Date.now()) return { error: "at 已经过去了" };
+  } else {
+    // at 是「几点」的锚点，不是周期提醒的首次日期：按规则推到 now 之后的第一跳。
+    // 这样编辑一条今天已经响过的每日提醒、或 Agent 随手给个 at，也不会先错响一次。
+    const next = nextReminderAt({ text: "", at: rawAt, repeat, weekdays, dayOfMonth });
+    if (next === null) return { error: "这个重复规则找不到下一次触发时间" };
+    if (until !== undefined && next > until) {
+      return { error: "until 之前没有可触发的时间" };
+    }
+    at = next;
+  }
+  if (until !== undefined && until <= at) {
+    return { error: "until 必须晚于第一次触发" };
+  }
+
+  return { at, repeat, weekdays, dayOfMonth, until };
+}
+
 /** 还没响的提醒（读 durable 的任务图） */
 app.get("/api/v1/agent/reminders", async (c) => {
   if (!readLlmConfig()) return c.json({ reminders: [] });
@@ -1713,34 +2098,25 @@ app.get("/api/v1/agent/reminders", async (c) => {
 /**
  * 直接加一个提醒，不经过模型。
  *
- * 2026-11-12 扩展：`repeat: "none"|"daily"`（每天自动续排）、`partnerId`（目标执事）；
+ * 2026-11-12 扩展：`repeat`（每天自动续排）、`partnerId`（目标执事）；
+ * 2026-11-14 扩展：weekly / monthly / `until` 区间（手动图形化创建的三种新规则）。
  * 不传 `partnerId` 时行为与旧版一致（`conversationId` 或默认会话）。
  */
 app.post("/api/v1/agent/reminders", async (c) => {
   const body = (await c.req.json().catch(() => null)) as
-    | {
+    | (ReminderScheduleBody & {
         conversationId?: string;
         text?: string;
-        at?: string | number;
-        repeat?: unknown;
         partnerId?: unknown;
-      }
+      })
     | null;
   const text = body?.text?.trim();
   if (!text || !body?.at) {
     return c.json({ error: "bad_request", message: "需要 text 和 at" }, 400);
   }
-  const at = typeof body.at === "number" ? body.at : Date.parse(body.at);
-  if (!Number.isFinite(at)) {
-    return c.json({ error: "bad_request", message: "at 需要 ISO 时间或毫秒时间戳" }, 400);
-  }
-  if (at <= Date.now()) {
-    return c.json({ error: "bad_request", message: "at 已经过去了" }, 400);
-  }
-  const repeat = body?.repeat === undefined ? "none" : body.repeat;
-  if (repeat !== "none" && repeat !== "daily") {
-    return c.json({ error: "bad_request", message: "repeat 只能是 none / daily" }, 400);
-  }
+  const schedule = parseReminderSchedule(body);
+  if ("error" in schedule) return c.json({ error: "bad_request", message: schedule.error }, 400);
+
   const partnerId =
     typeof body?.partnerId === "string" && body.partnerId.trim()
       ? body.partnerId.trim()
@@ -1751,14 +2127,45 @@ app.post("/api/v1/agent/reminders", async (c) => {
 
   const chat = partnerId
     ? await ensurePartnerSession(partnerId)
-    : await openChat(body.conversationId);
+    : await openChat(body?.conversationId);
   if (!chat) {
     return partnerId
       ? c.json({ error: "partner_not_found", message: "执事不存在或已暂停" }, 404)
       : c.json({ error: "unknown_conversation" }, 404);
   }
-  const taskId = await addReminder(chat, { text, at, repeat, partnerId });
-  return c.json({ ok: true, taskId, conversationId: chat.externalId, repeat, partnerId }, 201);
+  const taskId = await addReminder(chat, { text, ...schedule, partnerId });
+  return c.json(
+    {
+      ok: true,
+      taskId,
+      conversationId: chat.externalId,
+      repeat: schedule.repeat,
+      ...(schedule.weekdays ? { weekdays: schedule.weekdays } : {}),
+      ...(schedule.dayOfMonth ? { dayOfMonth: schedule.dayOfMonth } : {}),
+      ...(schedule.until ? { until: schedule.until } : {}),
+      partnerId,
+    },
+    201,
+  );
+});
+
+/**
+ * 改时间（2026-11-14）：只改时间规则，内容与执事沿用原任务。
+ * 服务端用同一个 `reminderId` 重排，列表不会多出一行"已结束"。
+ */
+app.patch("/api/v1/agent/reminders/:taskId", async (c) => {
+  const taskId = Number(c.req.param("taskId"));
+  if (!Number.isInteger(taskId) || taskId <= 0) {
+    return c.json({ error: "bad_request", message: "taskId 必须是正整数" }, 400);
+  }
+  const body = (await c.req.json().catch(() => null)) as ReminderScheduleBody | null;
+  const schedule = parseReminderSchedule(body);
+  if ("error" in schedule) return c.json({ error: "bad_request", message: schedule.error }, 400);
+  const nextId = await rescheduleReminder(taskId, schedule);
+  if (nextId === null) {
+    return c.json({ error: "not_found", message: "没有这条提醒，或已经结束" }, 404);
+  }
+  return c.json({ ok: true, taskId: nextId, ...schedule });
 });
 
 /** 取消一条提醒（2026-11-12）：每日续排的链在取消当前任务后不再续。 */
@@ -1811,61 +2218,181 @@ async function dispatchRelayHttp(request: RelayHttpRequest): Promise<{ status: n
   return { status: response.status, body: await response.text() };
 }
 
-if (relayEnabled()) {
-  const settings = relaySettings();
-  if (!settings) {
-    console.error("[relay] RELAY_ENABLED 已开但 RELAY_URL / RELAY_TOKEN 未配齐，中继不启动");
-  } else {
-    const deps: RelayChannelDeps = {
-      version: SERVER_VERSION,
-      listChats,
-      resolveInternalId: async (conversationId) => {
-        for (const [internal, external] of await externalChatIds()) {
-          if (external === conversationId) return internal;
-        }
-        return null;
-      },
-      externalOf: async (internalId) => (await externalChatIds()).get(internalId) ?? null,
-      sayInConversation,
-      eventStore: chatEventStoreOf() ?? null,
-      approvals: () => approvalStore(),
-      // 阶段三：降级执事的专线会话拒绝经这台设备代发（fail-closed）
-      chatSendGuard: async (conversationId) => (await homeController?.chatSendGuard(conversationId)) ?? null,
-      // 批H H1：反代通道。开关关着 = 不传执行体 = 通道未注册（invoke 一律 404）。
-      dispatchHttp: relayMobileProxyEnabled() ? dispatchRelayHttp : undefined,
-    };
-    relayChannels = new RelayChannelHub(
-      deps,
-      (dst, channel, payload) => {
-        relayClient?.pushTo(dst, channel, payload);
-      },
-      deviceMatrixEnabled() ? createMatrixChannels() : undefined,
+/** 接入来源：`.env`（部署环境说了算）或 `.data/relay-link.json`（页面里接的）。 */
+let relaySource: "env" | "file" | null = null;
+/** 状态页用的对外 http 地址与设备名（都是可示人的，不含令牌）。 */
+let relayHttpShown = "";
+let relayDeviceShown = "";
+
+/**
+ * 装配并起客户端（2026-11-14 连接页三步方案：从"启动时一次性装配"抽成可重入）。
+ * 页面里「接入中继」换地址时要能停掉旧连接、用新令牌重起——同一进程内完成，不要求重启。
+ *
+ * 注意：`companionHomeController` 没有 stop，周期校准的定时器会留在旧控制器上（unref、
+ * 对已停客户端的调用全在 catch 里）。换地址是低频动作，这里如实不装作清干净了。
+ */
+function startRelayClient(settings: RelaySettings, source: "env" | "file"): void {
+  relayClient?.stop();
+  homeController = null;
+  const deps: RelayChannelDeps = {
+    version: SERVER_VERSION,
+    listChats,
+    resolveInternalId: async (conversationId) => {
+      for (const [internal, external] of await externalChatIds()) {
+        if (external === conversationId) return internal;
+      }
+      return null;
+    },
+    externalOf: async (internalId) => (await externalChatIds()).get(internalId) ?? null,
+    sayInConversation,
+    eventStore: chatEventStoreOf() ?? null,
+    approvals: () => approvalStore(),
+    // 阶段三：降级执事的专线会话拒绝经这台设备代发（fail-closed）
+    chatSendGuard: async (conversationId) => (await homeController?.chatSendGuard(conversationId)) ?? null,
+    // 批H H1：反代通道。开关关着 = 不传执行体 = 通道未注册（invoke 一律 404）。
+    dispatchHttp: relayMobileProxyEnabled() ? dispatchRelayHttp : undefined,
+  };
+  relayChannels = new RelayChannelHub(
+    deps,
+    (dst, channel, payload) => {
+      relayClient?.pushTo(dst, channel, payload);
+    },
+    deviceMatrixEnabled() ? createMatrixChannels() : undefined,
+  );
+  relayClient = new RelayClient({
+    url: settings.url,
+    token: settings.token,
+    deviceName: settings.deviceName,
+    platform: process.platform,
+    version: SERVER_VERSION,
+    capabilities: settings.capabilities,
+    onInvoke: (src, channel, payload) => {
+      if (!relayChannels) throw new Error("中继通道未装配");
+      return relayChannels.handle(src, channel, payload);
+    },
+    // 批H H1：中继反代帧（与 routed 通道并行的另一条入站路）
+    onInvokeHttp: (payload) => {
+      if (!relayChannels) return Promise.resolve({ status: 404, body: JSON.stringify({ error: "not_found" }) });
+      return relayChannels.handleHttpInvoke(payload);
+    },
+    onReconnected: () => {
+      void homeController?.ensureDemotion().catch(() => {});
+    },
+    // RELAY_HEARTBEAT_MS=0 → 不挂心跳（回滚用；默认 20s，见 relay-client.ts 头注）
+    ...(() => {
+      const raw = (process.env.RELAY_HEARTBEAT_MS ?? "").trim();
+      if (!raw) return {};
+      const ms = Number.parseInt(raw, 10);
+      if (!Number.isFinite(ms) || ms <= 0) return { heartbeatMs: 0, livenessMs: 0 };
+      return { heartbeatMs: Math.max(5_000, ms), livenessMs: Math.max(15_000, ms * 2.5) };
+    })(),
+    log: (line) => console.log(line),
+  });
+  relayClient.start();
+  if (companionHomeEnabled()) {
+    homeController = companionHomeController(relayClient);
+    homeController.startPeriodicCheck();
+  }
+  relaySource = source;
+  relayHttpShown = normalizeRelayHttpBase(settings.url);
+  relayDeviceShown = settings.deviceName;
+}
+
+/** 等握手完成（页面点完「接入并连接」要一个确定答复，别让它猜）。 */
+async function waitForRelayConnection(timeoutMs: number): Promise<boolean> {
+  const until = Date.now() + timeoutMs;
+  while (Date.now() < until) {
+    if (relayClient?.connected) return true;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return relayClient?.connected ?? false;
+}
+
+/**
+ * 中继身份独占（2026-11-14 稳定性补丁，NS-02）。
+ *
+ * 一台电脑在中继名册上只有**一个**设备令牌 = 一个 `deviceId`。两个 harness 进程
+ * 同时拿这枚令牌连中继时，中继按"同设备顶替"（4409）把旧连接关掉，于是两边互相
+ * 顶替、每秒断一次、永远握不上手——线上表现就是"电脑时而连上时而连不上"。
+ * 2026-11-14 实测：这台机器上有两个 harness（39847 与 39899 各一个）同时挂着，
+ * `relay/status` 的 `reconnects` 三分钟涨到 85、`lastCloseCode` 全是 4409。
+ *
+ * 这里用一个 pid 文件把"谁来代表这台电脑连中继"钉死：后起的进程发现别人还活着
+ * 就不连中继（服务照常起，只是不当这台设备），并把自己的 pid 报给状态页。
+ * 进程死了（重启、崩溃）pid 失效，下一个进程自动接管——不会永久卡死。
+ */
+const RELAY_IDENTITY_LOCK = ".data/relay-identity.pid";
+let relayBlockedByPid: number | null = null;
+
+function relayIdentityOwner(): number | null {
+  let raw = "";
+  try {
+    raw = readFileSync(RELAY_IDENTITY_LOCK, "utf8").trim();
+  } catch {
+    return null;
+  }
+  const pid = Number.parseInt(raw, 10);
+  if (!Number.isFinite(pid) || pid <= 0) return null;
+  if (pid === process.pid) return null;
+  try {
+    process.kill(pid, 0);
+    return pid; // 活着：身份被别人占着
+  } catch {
+    return null; // 不存在 / 权限不足：视为已失效，允许接管
+  }
+}
+
+/** 拿到身份返回 true；被别人占着返回 false（并记下对方 pid 供状态页显示）。 */
+function claimRelayIdentity(): boolean {
+  // 回滚开关：RELAY_IDENTITY_LOCK=off → 不做互斥（回到"谁先连谁占位、双连互相顶替"的旧形态）
+  if ((process.env.RELAY_IDENTITY_LOCK ?? "").trim().toLowerCase() === "off") {
+    relayBlockedByPid = null;
+    return true;
+  }
+  const owner = relayIdentityOwner();
+  if (owner !== null) {
+    relayBlockedByPid = owner;
+    return false;
+  }
+  relayBlockedByPid = null;
+  try {
+    mkdirSync(".data", { recursive: true });
+    writeFileSync(RELAY_IDENTITY_LOCK, `${process.pid}\n`, { mode: 0o600 });
+  } catch {
+    /* 写不了锁就当没锁：宁可双连也不要因为锁文件起不来 */
+  }
+  return true;
+}
+
+function releaseRelayIdentity(): void {
+  try {
+    const raw = readFileSync(RELAY_IDENTITY_LOCK, "utf8").trim();
+    if (raw === String(process.pid)) rmSync(RELAY_IDENTITY_LOCK, { force: true });
+  } catch {
+    /* 没有锁文件 / 已被别人接管：都不动 */
+  }
+}
+
+// 启动选择：`.env` 配齐优先；否则用页面里接过的；都没有 = 未接入（正常态，不报错）。
+const envRelaySettings = relayEnabled() ? relaySettings() : null;
+if (envRelaySettings || readRelayLink()) {
+  if (!claimRelayIdentity()) {
+    console.error(
+      `[relay] 本机已有一个 harness（pid ${relayBlockedByPid}）在代表这台电脑连中继，本进程不再连——双连会互相顶替（4409）`,
     );
-    relayClient = new RelayClient({
-      url: settings.url,
-      token: settings.token,
-      deviceName: settings.deviceName,
-      platform: process.platform,
-      version: SERVER_VERSION,
-      capabilities: settings.capabilities,
-      onInvoke: (src, channel, payload) => {
-        if (!relayChannels) throw new Error("中继通道未装配");
-        return relayChannels.handle(src, channel, payload);
-      },
-      // 批H H1：中继反代帧（与 routed 通道并行的另一条入站路）
-      onInvokeHttp: (payload) => {
-        if (!relayChannels) return Promise.resolve({ status: 404, body: JSON.stringify({ error: "not_found" }) });
-        return relayChannels.handleHttpInvoke(payload);
-      },
-      onReconnected: () => {
-        void homeController?.ensureDemotion().catch(() => {});
-      },
-      log: (line) => console.log(line),
-    });
-    relayClient.start();
-    if (companionHomeEnabled()) {
-      homeController = companionHomeController(relayClient);
-      homeController.startPeriodicCheck();
+  } else {
+    process.once("exit", releaseRelayIdentity);
+    if (envRelaySettings) {
+      startRelayClient(envRelaySettings, "env");
+    } else {
+      if (relayEnabled()) {
+        console.error("[relay] RELAY_ENABLED 已开但 RELAY_URL / RELAY_TOKEN 未配齐，中继不启动");
+      }
+      const saved = readRelayLink();
+      if (saved) {
+        startRelayClient(relaySettingsFromLink(saved), "file");
+        console.log(`[relay] 按本机保存的接入信息连接 ${saved.base}（设备名 ${saved.deviceName || "默认"}）`);
+      }
     }
   }
 }
@@ -1881,12 +2408,93 @@ mountRelayMobileProxy(app, {
 // 中继状态（只暴露连接面，不暴露令牌与地址里的凭据）
 app.get("/api/v1/relay/status", (c) => {
   return c.json({
-    enabled: relayEnabled(),
+    enabled: relayClient !== null || relayEnabled(),
     connected: relayClient?.connected ?? false,
     deviceId: relayClient?.selfDeviceId ?? null,
+    // 2026-11-14 连接页三步：页面要能区分「没接入 / 接入了但没连上 / 连上了」，
+    // 并且知道该拿哪个地址、哪台设备名示人（都不含令牌）。
+    configured: relayClient !== null,
+    relayUrl: relayHttpShown,
+    deviceName: relayDeviceShown,
+    source: relaySource,
     subscriptionCount: relayChannels?.subscriptionCount ?? 0,
     onlineDevices: relayClient?.devices.length ?? 0,
+    // 2026-11-14 稳定性补丁（NS-02）：本进程没拿到中继身份时，说明同机已有另一个
+    // harness 在代表这台电脑连中继——页面据此提示，而不是让人以为"中继坏了"。
+    blockedByPid: relayBlockedByPid,
+    // 2026-11-14 稳定性补丁：断线原因对页面可见（reconnects/上一个关闭码/最近一次成功连接时间）。
+    // 页面据此把"掉一下又回来"显示成「重连中」，而不是红一下绿一下地闪。
+    ...(relayClient?.stats ?? {}),
   });
+});
+
+/**
+ * 连接页「接入中继」（2026-11-14 连接页三步方案）：
+ * 地址 + 主令牌 → 换本机设备令牌 → 落 `.data/relay-link.json`（0600）→ 热起客户端。
+ *
+ * 为什么让令牌落本机：连接页第一步必须有个能填的地方（之前只认 `.env`，页面上
+ * 就只有一段教程和一个灰按钮）。密钥纪律靠"0600 + 不回显 + 不进日志"守，
+ * 和 `provider-keys.json` 同一套口径。`.env` 里配齐的那份仍然优先，页面不覆盖部署。
+ */
+app.post("/api/v1/relay/link", async (c) => {
+  if (!relayLinkUiEnabled()) return c.json({ error: "not_available" }, 404);
+  const body = (await c.req.json().catch(() => null)) as {
+    address?: unknown;
+    ownerToken?: unknown;
+    deviceName?: unknown;
+  } | null;
+  try {
+    const link = await joinRelay({
+      address: typeof body?.address === "string" ? body.address : "",
+      ownerToken: typeof body?.ownerToken === "string" ? body.ownerToken : "",
+      deviceName: typeof body?.deviceName === "string" ? body.deviceName : "",
+    });
+    writeRelayLink(link);
+    // 身份被别人占着时不能连：双连只会互相顶替（NS-02）
+    if (!claimRelayIdentity()) {
+      return c.json(
+        {
+          error: "relay_busy",
+          message: `本机已有另一个 harness（pid ${relayBlockedByPid}）在连中继；先关掉它，否则两边会互相顶断`,
+        },
+        409,
+      );
+    }
+    startRelayClient(relaySettingsFromLink(link), "file");
+    const connected = await waitForRelayConnection(7_000);
+    return c.json({
+      ok: true,
+      connected,
+      deviceId: relayClient?.selfDeviceId ?? null,
+      relayUrl: link.base,
+      deviceName: link.deviceName,
+    });
+  } catch (error) {
+    if (error instanceof RelayLinkError) {
+      return c.json({ error: error.code, message: error.message }, error.status);
+    }
+    return c.json({ error: "internal", message: error instanceof Error ? error.message : "接入失败" }, 502);
+  }
+});
+
+/** 断开并清掉本机保存的接入信息；`.env` 来源的拒绝（改 `.env` 才是那条路）。 */
+app.post("/api/v1/relay/unlink", (c) => {
+  if (!relayLinkUiEnabled()) return c.json({ error: "not_available" }, 404);
+  if (relaySource === "env") {
+    return c.json(
+      { error: "from_env", message: "中继配置来自 .env；要断开就改 .env 里的 RELAY_ENABLED / RELAY_URL / RELAY_TOKEN" },
+      400,
+    );
+  }
+  relayClient?.stop();
+  relayClient = null;
+  relayChannels = null;
+  homeController = null;
+  relaySource = null;
+  relayHttpShown = "";
+  relayDeviceShown = "";
+  clearRelayLink();
+  return c.json({ ok: true });
 });
 
 // ── 设备矩阵派活（2026-11-05 阶段二）────────────────────────────
@@ -2045,6 +2653,9 @@ serve({ fetch: app.fetch, port }, (info) => {
   autonomyObserver().subscribe();
   // 自动归档调度器（2026-11-13 批A）：ARCHIVE_AUTO_ENABLED=false（默认）时不开定时器，零开销
   autoArchiveScheduler().sync();
+  // 每晚记忆整理（2026-11-14）：每天 03:30 对我 + 各在职执事各跑一次"整理建议"。
+  // 只出建议、不应用；MEMORY_NIGHTLY_REVIEW=false 时不挂定时器。
+  startMemoryNightlyScheduler();
   // chat-meta 自愈（2026-11-13）：清库会在归档/置顶/改名单里留孤儿 id，
   // 归档页会显示"N 条"却取不出东西。启动时清一次，列归档清单时还会再兜一次。
   void pruneChatMetaOrphans().catch((error: unknown) => {

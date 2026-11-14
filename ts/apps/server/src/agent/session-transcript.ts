@@ -5,16 +5,17 @@
  */
 
 import { currentModels, readLlmConfig } from "../provider.ts";
-import { ReminderTask } from "../reminder.ts";
+import { ReminderTask, type ReminderRepeat } from "../reminder.ts";
 import { getHarness } from "./lifecycle.ts";
 import { turnSettledHandler } from "./settled.ts";
-import { CTX, ResolvedChat, TOOL_OUTPUT_LIMIT, toolArgs, toolLabel } from "./shared.ts";
+import { CTX, Chats, ResolvedChat, TOOL_OUTPUT_LIMIT, toolArgs, toolLabel } from "./shared.ts";
 import { contentText } from "@earendil-works/pi-ai";
-import type { Conversation, EntryRecord } from "@earendil-works/pi-durable";
+import type { Message, SystemMessage } from "@earendil-works/pi-ai";
+import type { ContextView, Conversation, EntryRecord } from "@earendil-works/pi-durable";
 import { configure } from "@earendil-works/pi-durable";
 import { TranscriptStep, TurnUsage, parseFileManifest } from "@lifediary/shared";
 import { createHash, randomUUID } from "node:crypto";
-import { externalChatIds } from "./session-open.ts";
+import { externalChatIds, openChat } from "./session-open.ts";
 import { chatStream } from "./session-stream.ts";
 
 export async function continueConversation(conversationId: number, text: string): Promise<void> {
@@ -245,24 +246,116 @@ async function answerText(conversation: Conversation): Promise<string> {
 	return "";
 }
 
+/** 上下文构成标签（2026-11-14，对齐 ZCode「上下文来源」）：前端按 chars 占比画条。 */
+export type ContextSource =
+	| "messages"
+	| "system_prompt"
+	| "skills"
+	| "tool_prompt"
+	| "tool_calls"
+	| "tool_results";
+
+export interface ContextBreakdownItem {
+	readonly source: ContextSource;
+	readonly chars: number;
+}
+
+function textCharsOf(content: unknown): number {
+	if (typeof content === "string") return content.length;
+	if (!Array.isArray(content)) return 0;
+	let total = 0;
+	for (const part of content) {
+		if (!part || typeof part !== "object") continue;
+		const typed = part as { type?: string; text?: unknown };
+		// thinking 不进上下文、image 不计字符：和 ZCode 一样只按「发送出去的字符」分摊
+		if (typed.type === "text" && typeof typed.text === "string") total += typed.text.length;
+	}
+	return total;
+}
+
+/**
+ * 按上下文实文估算构成比例。
+ *
+ * 口径与 ZCode 一致：**按字符数**分摊，不拿 token 数硬凑——used 只用于顶部
+ * 「已用 / 总量」，构成条回答的是「这一窗里什么东西在占地方」。
+ * 技能段由 harness 以 section 名 `skills` 注入，单独拎出来；工具定义取 toolsAdded，
+ * 工具调用取 assistant 的 toolCall 参数，工具结果取 toolResult 正文。
+ */
+export function contextBreakdownOf(view: ContextView): ContextBreakdownItem[] {
+	const totals = new Map<ContextSource, number>();
+	const add = (source: ContextSource, chars: number) => {
+		if (!Number.isFinite(chars) || chars <= 0) return;
+		totals.set(source, (totals.get(source) ?? 0) + chars);
+	};
+	for (const message of view.messages) {
+		if (message.role === "system") {
+			const system = message as SystemMessage;
+			add("system_prompt", textCharsOf(system.content));
+			for (const [name, body] of Object.entries(system.sections ?? {})) {
+				if (!body) continue;
+				add(/skill/i.test(name) ? "skills" : "system_prompt", body.length);
+			}
+			for (const tool of system.toolsAdded ?? []) {
+				// 工具定义在请求里是 JSON schema，大小按序列化后的字符算，贴近实际占用
+				try {
+					add("tool_prompt", JSON.stringify(tool).length);
+				} catch {
+					// 序列化不了就不计，不让一块坏定义把整张卡算成空
+				}
+			}
+			continue;
+		}
+		if (message.role === "user") {
+			add("messages", textCharsOf(message.content));
+			continue;
+		}
+		if (message.role === "assistant") {
+			for (const part of message.content) {
+				if (part.type === "text") {
+					add("messages", textCharsOf([part]));
+				} else if (part.type === "toolCall") {
+					let args = 0;
+					try {
+						args = JSON.stringify(part.arguments ?? {}).length;
+					} catch {
+						args = 0;
+					}
+					add("tool_calls", part.name.length + args);
+				}
+			}
+			continue;
+		}
+		if (message.role === "toolResult") {
+			add("tool_results", textCharsOf(message.content));
+		}
+	}
+	return [...totals.entries()]
+		.map(([source, chars]) => ({ source, chars }))
+		.sort((a, b) => b.chars - a.chars);
+}
+
+function lastTurnUsageOf(view: ContextView): TurnUsage | null {
+	for (let index = view.entries.length - 1; index >= 0; index -= 1) {
+		const entry = view.entries[index];
+		if (!entry || entry.kind !== "pi.assistant") continue;
+		const message = entry.model?.[0] as
+			| { usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number } }
+			| undefined;
+		const usage = message?.usage;
+		if (usage) {
+			return {
+				input: usage.input ?? 0,
+				output: usage.output ?? 0,
+				cacheRead: usage.cacheRead ?? 0,
+			};
+		}
+	}
+	return null;
+}
+
 async function readLastTurnUsage(conversation: Conversation): Promise<TurnUsage | null> {
 	try {
-		const view = await conversation.context(CTX);
-		for (let index = view.entries.length - 1; index >= 0; index -= 1) {
-			const entry = view.entries[index];
-			if (!entry || entry.kind !== "pi.assistant") continue;
-			const message = entry.model?.[0] as
-				| { usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number } }
-				| undefined;
-			const usage = message?.usage;
-			if (usage) {
-				return {
-					input: usage.input ?? 0,
-					output: usage.output ?? 0,
-					cacheRead: usage.cacheRead ?? 0,
-				};
-			}
-		}
+		return lastTurnUsageOf(await conversation.context(CTX));
 	} catch {
 		// 读不到就算了：用量是锦上添花，不该让它影响对话
 	}
@@ -280,9 +373,12 @@ async function logTurnUsage(conversation: Conversation, internalId: number): Pro
 
 export async function contextUsageOf(
 	conversation: Conversation,
-): Promise<{ used: number | null; window: number | null }> {
-	const usage = await readLastTurnUsage(conversation);
-	if (!usage || usage.input <= 0) return { used: null, window: null };
+): Promise<{ used: number | null; window: number | null; breakdown: ContextBreakdownItem[] }> {
+	// 一次读上下文视图：用量取最后一条 assistant 的 usage，构成按同一份实文分摊，
+	// 避免两次读之间刚好落一条新消息、头和身子对不上。
+	const view = await conversation.context(CTX).catch(() => null);
+	const usage = view ? lastTurnUsageOf(view) : null;
+	if (!usage || usage.input <= 0) return { used: null, window: null, breakdown: [] };
 	const windowOf = (provider: string | undefined, modelId: string | undefined): number | null => {
 		if (!provider || !modelId) return null;
 		try {
@@ -301,7 +397,7 @@ export async function contextUsageOf(
 	const window =
 		windowOf(agent?.model?.provider, agent?.model?.modelId) ??
 		windowOf(config?.model.provider, config?.model.modelId);
-	return { used: usage.input, window };
+	return { used: usage.input, window, breakdown: view ? contextBreakdownOf(view) : [] };
 }
 
 export interface UsageSummary {
@@ -339,20 +435,39 @@ export interface ReminderSummary {
 	status: "pending" | "running" | "waiting" | "sleeping" | "completing" | "terminal";
 	text: string;
 	at: number;
-	/** 频率（2026-11-12）：none = 一次性；daily = 每天 */
-	repeat: "none" | "daily";
+	/** 频率（2026-11-14）：none = 一次性；daily = 每天；weekly = 每周几；monthly = 每月几号 */
+	repeat: ReminderRepeat;
+	/** 每周重复的日子（0 = 周日 … 6 = 周六） */
+	weekdays?: number[];
+	/** 每月重复的日子（1–31） */
+	dayOfMonth?: number;
+	/** 区间结束（含当天）；仅 daily 区间用 */
+	until?: number;
 	/** 目标执事（2026-11-12）；null = 建在普通会话里 */
 	partnerId: string | null;
-	until?: number;
-	conversationId: number;
+	/** 对外会话 id（客户端存的是这个） */
+	conversationId: string;
 }
 
 export async function listReminders(): Promise<ReminderSummary[]> {
 	const harness = await getHarness();
-	const inspection = await harness.inspect(CTX);
+	const [inspection, chats] = await Promise.all([harness.inspect(CTX), harness.snapshot(Chats, CTX)]);
+	const externalByInternal = new Map<number, string>();
+	for (const [externalId, internalId] of Object.entries(chats?.byExternal ?? {})) {
+		externalByInternal.set(Number(internalId), externalId);
+	}
 	type Row = {
 		id: number;
-		input: { text: string; at: number; repeat?: "none" | "daily"; reminderId?: string; partnerId?: string | null };
+		input: {
+			text: string;
+			at: number;
+			repeat?: ReminderRepeat;
+			weekdays?: number[];
+			dayOfMonth?: number;
+			until?: number;
+			reminderId?: string;
+			partnerId?: string | null;
+		};
 		conversationId: number;
 		live: boolean;
 		until?: number;
@@ -365,7 +480,10 @@ export async function listReminders(): Promise<ReminderSummary[]> {
 			input: {
 				text: string;
 				at: number;
-				repeat?: "none" | "daily";
+				repeat?: ReminderRepeat;
+				weekdays?: number[];
+				dayOfMonth?: number;
+				until?: number;
 				reminderId?: string;
 				partnerId?: string | null;
 			};
@@ -392,16 +510,22 @@ export async function listReminders(): Promise<ReminderSummary[]> {
 			.sort((a, b) => a.input.at - b.input.at)[0];
 		const chosen = live ?? rows.sort((a, b) => b.input.at - a.input.at)[0];
 		if (!chosen) continue;
+		const repeat = chosen.input.repeat ?? "none";
 		result.push({
 			id: chosen.id,
 			reminderId,
 			status: chosen.live ? (chosen.until === undefined ? "pending" : "sleeping") : "terminal",
 			text: chosen.input.text,
 			at: chosen.input.at,
-			repeat: chosen.input.repeat === "daily" ? "daily" : "none",
+			repeat,
+			...(repeat === "weekly" ? { weekdays: chosen.input.weekdays ?? [] } : {}),
+			...(repeat === "monthly"
+				? { dayOfMonth: chosen.input.dayOfMonth ?? new Date(chosen.input.at).getDate() }
+				: {}),
+			...(chosen.input.until !== undefined ? { until: chosen.input.until } : {}),
 			partnerId: chosen.input.partnerId ?? null,
-			...(chosen.until !== undefined ? { until: chosen.until } : {}),
-			conversationId: chosen.conversationId,
+			conversationId:
+				externalByInternal.get(chosen.conversationId) ?? `#${chosen.conversationId}`,
 		});
 	}
 	return result.sort((a, b) => a.at - b.at);
@@ -409,9 +533,18 @@ export async function listReminders(): Promise<ReminderSummary[]> {
 
 export async function addReminder(
 	chat: ResolvedChat,
-	input: { text: string; at: number; repeat?: "none" | "daily"; partnerId?: string | null },
+	input: {
+		text: string;
+		at: number;
+		repeat?: ReminderRepeat;
+		weekdays?: number[];
+		dayOfMonth?: number;
+		until?: number;
+		partnerId?: string | null;
+		reminderId?: string;
+	},
 ): Promise<number> {
-	const reminderId = randomUUID();
+	const reminderId = input.reminderId ?? randomUUID();
 	const id = await chat.conversation.commit(
 		(tx) =>
 			tx.createTask(
@@ -432,6 +565,42 @@ export async function cancelReminder(taskId: number): Promise<boolean> {
 	const harness = await getHarness();
 	await harness.abortTask(taskId as never, CTX);
 	return true;
+}
+
+/**
+ * 改时间（2026-11-14）：取消原任务，用同一个 `reminderId` 重排一条。
+ *
+ * 为什么不原地改任务：durable 的睡眠状态是提交过的，直接改输入需要内核级支持；
+ * 重排一条同 id 的任务更稳，而且列表按 `reminderId` 归组，不会多出一行"已结束"。
+ * 内容与执事沿用原任务，只有时间规则变。
+ */
+export async function rescheduleReminder(
+	taskId: number,
+	input: {
+		at: number;
+		repeat?: ReminderRepeat;
+		weekdays?: number[];
+		dayOfMonth?: number;
+		until?: number;
+	},
+): Promise<number | null> {
+	const reminders = await listReminders();
+	const origin = reminders.find((reminder) => reminder.id === taskId && reminder.status !== "terminal");
+	if (!origin) return null;
+	const chat = await openChat(origin.conversationId);
+	if (!chat) return null;
+	const harness = await getHarness();
+	await harness.abortTask(taskId as never, CTX);
+	return addReminder(chat, {
+		text: origin.text,
+		at: input.at,
+		repeat: input.repeat ?? "none",
+		weekdays: input.weekdays,
+		dayOfMonth: input.dayOfMonth,
+		until: input.until,
+		partnerId: origin.partnerId,
+		reminderId: origin.reminderId,
+	});
 }
 
 export { STEP_DIFF_LIMIT, STEP_OUTPUT_LIMIT, answerText, clampText, logTurnUsage, readLastTurnUsage, stepDiff };

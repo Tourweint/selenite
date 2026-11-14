@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { WRITE_TOOLS, type ApprovalLevel } from "../approval-policy.ts";
+import { isViewOnlyShellCommand, viewCommandsInReadTiers } from "../read-allowlist.ts";
 import { bashTimeoutSeconds } from "../reliability.ts";
 
 /** full = 全部放行；read-only = 只允许读（写文件/跑命令一律拦住） */
@@ -31,7 +32,9 @@ const POLICY_PATH = process.env.AGENT_POLICY_PATH?.trim() || ".data/policy.json"
 const ACCESS_LABEL: Record<ToolAccess, string> = {
 	full: "完全访问",
 	"read-only": "只读",
-	"no-shell": "不跑命令",
+	// 2026-11-14：对外改叫「在工作区内修改」——这一档真正允许的就是「在工作区/项目里改文件」，
+	// 命令仍然一律拦下（命令文本不做扫描，放开就说不清它到底在哪儿动手）。
+	"no-shell": "在工作区内修改",
 };
 
 function isApprovalLevel(value: unknown): value is ApprovalLevel {
@@ -161,14 +164,48 @@ export const BASH_TIMEOUT_S = bashTimeoutSeconds(process.env);
  *
  * 注意 `delegate` 在 `WRITE_TOOLS` 里：它本身不写文件，但它会起 worker 去写。
  * 不拦它，`AGENT_TOOL_POLICY=read-only` 就是个谎。
+ *
+ * 2026-11-14：`bash` / `powershell` 也在 `WRITE_TOOLS` 里，所以旧版只读档连 `ls` 都跑不了——
+ * 那不是"只读"，是"什么都干不了"。现在两档都先试一次「查看命令」判定
+ * （`isViewOnlyShellCommand`，词表窄 + 看旗标 + 路径限根），命中才放行，其余照旧拦。
+ * 档位仍然单调：只读 ⊂ 在工作区内修改 ⊂ 完全访问。回滚：`AGENT_READ_VIEW_COMMANDS=0`。
+ *
+ * `context` 缺省时**不看查看命令**（保守照旧拦）：老调用点拿不到命令文本与根集合，
+ * 那就没有"它是只读的"这回事。
  */
-export function readOnlyBlockReason(name: string): string | undefined {
-	if (policy.blocked.includes(name)) return `工具 ${name} 已被禁用`;
-	if (policy.access === "read-only" && WRITE_TOOLS.has(name)) {
-		return `当前是「${ACCESS_LABEL["read-only"]}」模式，这个工具被拦下了。需要的话在设置里换档。`;
+export interface ViewCommandContext {
+	readonly args?: unknown;
+	readonly workspaceRoots?: readonly string[];
+	readonly cwd?: string;
+}
+
+/**
+ * 档位本身的判据（**不含黑名单**，黑名单在 `readOnlyBlockReason` 里先判）。
+ *
+ * 提成纯函数是为了能直接断言三档：`policy.access` 是进程级状态，测试里靠 env + 动态 import
+ * 去造，一和其他测试文件同进程跑就会读到本机 `.data/policy.json`（档位串味）。
+ */
+export function accessBlockReason(
+	access: ToolAccess,
+	name: string,
+	context?: ViewCommandContext,
+): string | undefined {
+	const isView =
+		context !== undefined &&
+		viewCommandsInReadTiers() &&
+		isViewOnlyShellCommand(name, context.args, context.workspaceRoots ?? [], context.cwd ?? "");
+	if (access === "read-only" && WRITE_TOOLS.has(name)) {
+		if (isView) return undefined;
+		return `当前是「${ACCESS_LABEL["read-only"]}」模式：这个工具被拦下了（只放行 ls / cat / grep 这类查看命令）。需要的话在设置里换档。`;
 	}
-	if (policy.access === "no-shell" && SHELL_TOOLS.has(name)) {
-		return `当前是「${ACCESS_LABEL["no-shell"]}」模式，不能执行命令。需要的话在设置里换档。`;
+	if (access === "no-shell" && SHELL_TOOLS.has(name)) {
+		if (isView) return undefined;
+		return `当前是「${ACCESS_LABEL["no-shell"]}」档：文件只能改工作区和已登记项目里的，命令只放行查看（ls / cat / grep 这类）。需要的话在设置 → 权限里换档。`;
 	}
 	return undefined;
+}
+
+export function readOnlyBlockReason(name: string, context?: ViewCommandContext): string | undefined {
+	if (policy.blocked.includes(name)) return `工具 ${name} 已被禁用`;
+	return accessBlockReason(policy.access, name, context);
 }

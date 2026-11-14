@@ -1,4 +1,5 @@
 import type { HarnessSettings } from "@earendil-works/pi-durable";
+import { compactionSettings, readCompactionConfig } from "./compaction-settings.ts";
 
 /**
  * 可靠性旋钮（2026-11-04 批次一，A4）。
@@ -14,6 +15,10 @@ import type { HarnessSettings } from "@earendil-works/pi-durable";
  *   afterFailedRun "keep"
  *   restartLimit 5
  * 这些本次不传，吃内核默认；只把两个旋钮显式化（调研方案 §四 A4 的处置表）。
+ *
+ * 2026-11-14：compaction 也进这一层 —— 但它不是又一个 env 直读，而是
+ * `compaction-settings.ts` 的换算结果（百分比 / 绝对 K 要按各模型窗口落地成
+ * `modelOverrides`），这里只负责和 stream / afterFailedRun 拼成一个 HarnessSettings。
  */
 
 type Env = Record<string, string | undefined>;
@@ -54,16 +59,25 @@ export function bashTimeoutSeconds(env: Env): number {
 }
 
 /**
- * env → 内核 settings。全空时返回 `undefined`：干脆不传 settings，
- * "不改变行为"是构造上的保证，不靠"显式值恰好等于默认值"的推理。
+ * env → 内核 settings。
+ *
+ * 2026-11-14 起压缩默认就是"按百分比 70%"（用户拍板），所以 `compaction` **总是**在结果里，
+ * 不再有"全空 → undefined"那条路径；只有 stream / afterFailedRun 仍是"不设就不传"。
+ *
+ * `windows`（2026-11-14）：`${provider}/${modelId} → contextWindow`，压缩的百分比 /
+ * 绝对 K 要按各模型的窗口换算（见 `compaction-settings.ts`）。传空表 = 只有全局 `enabled`，
+ * 百分比 / 绝对 K 都不落地——调用方（装配层）每轮现取，才能"改完下一轮生效"。
  */
-export function buildHarnessSettings(env: Env): HarnessSettings | undefined {
+export function buildHarnessSettings(
+	env: Env,
+	windows: ReadonlyMap<string, number> = new Map(),
+): HarnessSettings {
 	const stream = streamTimeoutMs(env);
 	const failed = afterFailedRun(env);
-	if (stream === undefined && failed === undefined) return undefined;
 	return {
 		...(stream === undefined ? {} : { stream: { timeoutMs: stream } }),
 		...(failed === undefined ? {} : { afterFailedRun: failed }),
+		compaction: compactionSettings(readCompactionConfig(env), windows),
 	};
 }
 

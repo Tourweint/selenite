@@ -100,7 +100,7 @@ import {
 } from "./relay-config.ts";
 import { RelayInvokeError } from "./relay-client.ts";
 import { dispatchRemoteDelegation } from "./relay-matrix.ts";
-import { ReminderTask } from "./reminder.ts";
+import { nextReminderAt, ReminderTask } from "./reminder.ts";
 import type { SkillStore } from "./skills.ts";
 import type { SkillAdviceSaveResult } from "./skill-advice.ts";
 // 课题工具（2026-11-07 长期课题跟进）：存储 / 搜索都从 deps 注入，测试可替换、缺失不注册。
@@ -605,26 +605,89 @@ export function createTools(deps: ToolDeps) {
 		name: "set_reminder",
 		description:
 			"定一个到点提醒。时间写 ISO 8601（带时区），例如 2026-10-29T08:00:00+08:00。" +
-			"提醒会落库，进程重启也不会丢。",
+			"提醒会落库，进程重启也不会丢。要重复时，`at` 只用来定「几点」，服务端会自动推到下一次符合规则的时间，再补 `repeat`：" +
+			"每天 = daily；每周 = weekly + weekdays（0 周日 … 6 周六）；" +
+			"每月 = monthly + dayOfMonth（1–31）。区间结束用 `until`（ISO 8601，含当天）。",
 		parameters: Type.Object({
 			text: Type.String({ description: "到点要提醒的内容" }),
-			at: Type.String({ description: "触发时间，ISO 8601" }),
+			at: Type.String({ description: "第一次触发时间，ISO 8601" }),
+			repeat: Type.Optional(
+				Type.Union(
+					[
+						Type.Literal("none"),
+						Type.Literal("daily"),
+						Type.Literal("weekly"),
+						Type.Literal("monthly"),
+					],
+					{ description: "频率；缺省 = 一次性" },
+				),
+			),
+			weekdays: Type.Optional(
+				Type.Array(Type.Number(), {
+					description: "weekly 用：0 = 周日，1 = 周一 … 6 = 周六，可多选",
+				}),
+			),
+			dayOfMonth: Type.Optional(
+				Type.Number({ description: "monthly 用：1–31；没有这一天的月份按月末算" }),
+			),
+			until: Type.Optional(
+				Type.String({ description: "区间结束日期，ISO 8601（含当天）" }),
+			),
 		}),
 		execute: async (args, api, context) => {
-			const at = Date.parse(args.at);
-			if (Number.isNaN(at)) throw new Error(`时间格式看不懂：${args.at}`);
-			if (at <= api.now()) throw new Error(`这个时间已经过去了：${args.at}`);
+			const rawAt = Date.parse(args.at);
+			if (Number.isNaN(rawAt)) throw new Error(`时间格式看不懂：${args.at}`);
+			const now = api.now();
+			const repeat = args.repeat ?? "none";
+			const weekdays =
+				repeat === "weekly"
+					? Array.from(new Set((args.weekdays ?? []).map((value) => Math.trunc(value)))).filter(
+							(value) => value >= 0 && value <= 6,
+						)
+					: undefined;
+			if (repeat === "weekly" && (!weekdays || weekdays.length === 0)) {
+				throw new Error("每周提醒需要 weekdays（0 周日 … 6 周六）");
+			}
+			const dayOfMonth =
+				repeat === "monthly" && typeof args.dayOfMonth === "number"
+					? Math.trunc(args.dayOfMonth)
+					: undefined;
+			if (repeat === "monthly" && (!dayOfMonth || dayOfMonth < 1 || dayOfMonth > 31)) {
+				throw new Error("每月提醒需要 dayOfMonth（1–31）");
+			}
+			const until = args.until ? Date.parse(args.until) : undefined;
+			if (args.until && Number.isNaN(until)) throw new Error(`until 时间格式看不懂：${args.until}`);
+
+			// `at` 对周期提醒只是「几点」的锚点：按规则推到 now 之后的第一跳，
+			// 否则每周/每月会先按一个不相干的日期错响一次。
+			const at =
+				repeat === "none"
+					? rawAt
+					: nextReminderAt({ text: args.text, at: rawAt, repeat, weekdays, dayOfMonth }, now);
+			if (at === null) throw new Error("这个重复规则找不到下一次触发时间");
+			if (at <= now) throw new Error(`这个时间已经过去了：${args.at}`);
+			if (until !== undefined && until <= at) throw new Error("until 必须晚于第一次触发");
 
 			await api.commit(
 				(tx) =>
 					tx.createTask(
 						ReminderTask,
-						{ text: args.text, at },
+						{ text: args.text, at, repeat, weekdays, dayOfMonth, until },
 						{ ownership: { kind: "conversation" } },
 					),
 				context,
 			);
-			return text(`好，${new Date(at).toLocaleString("zh-CN")} 提醒你：${args.text}`);
+			const label =
+				repeat === "daily"
+					? "每天"
+					: repeat === "weekly"
+						? `每周${weekdays?.map((value) => "日一二三四五六"[value]).join("、") ?? ""}`
+						: repeat === "monthly"
+							? `每月 ${dayOfMonth} 号`
+							: "";
+			return text(
+				`好，${label ? `${label} ` : ""}${new Date(at).toLocaleString("zh-CN")} 提醒你：${args.text}`,
+			);
 		},
 	});
 

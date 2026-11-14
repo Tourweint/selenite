@@ -86,6 +86,16 @@ export function relayHttpBase(env: NodeJS.ProcessEnv = process.env): string {
 	return normalizeRelayHttpBase(env.RELAY_URL ?? "");
 }
 
+/**
+ * 连接页「接入中继」（2026-11-14 连接页三步方案）：允许从页面里填地址与主令牌，
+ * 换回本机设备令牌并热起客户端。默认**开**——关掉即回 2026-11-13 形态
+ * （只认 `.env`，页面上只有教程）：`RELAY_LINK_UI=off`。
+ */
+export function relayLinkUiEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = (env.RELAY_LINK_UI ?? "").trim().toLowerCase();
+	return raw !== "off" && raw !== "false" && raw !== "0";
+}
+
 /** 执事认主机（阶段三）：harness 注册/领取执事归属。依赖中继。 */
 export function companionHomeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
 	const raw = (env.COMPANION_HOME_ENABLED ?? "").trim().toLowerCase();

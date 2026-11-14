@@ -1421,10 +1421,50 @@ export function modelCatalog(): ModelCatalog {
 }
 
 /**
+ * 所有会进会话的模型引用 → 上下文窗口（`${provider}/${modelId}`，2026-11-14）。
+ *
+ * 为什么不能只登记基座：会话里存的模型是**思考变体** `<模型>#think-<档>`
+ * （`openChat` 用 `chatModelRef`），任务专线还会用参数变体 `<模型>#t…th1`；
+ * 内核 `compactionPolicy()` 是按 `${provider}/${modelId}` **精确查表**的
+ * （`compaction.js:194-203`），只登记基座会让百分比 / 绝对 K 对全部会话失效。
+ *
+ * 拿不到文档（faux / 未配置）时返回空表：调用方回落到内核默认白，不假装知道窗口。
+ */
+export function contextWindowsByRef(): Map<string, number> {
+	const out = new Map<string, number>();
+	try {
+		ensureDocument();
+	} catch {
+		return out;
+	}
+	const doc = document;
+	if (!doc) return out;
+	const windowOf = (providerId: string, modelId: string): number => {
+		const entry = doc.providers.find((item) => item.id === providerId);
+		return entry?.modelMeta?.[modelId]?.contextWindow ?? CUSTOM_CONTEXT_WINDOW;
+	};
+	for (const entry of doc.providers) {
+		for (const modelId of entry.models) {
+			const window = windowOf(entry.id, modelId);
+			out.set(`${entry.id}/${modelId}`, window);
+			// 档位变体逐个登记：目录里没注册也没关系，压缩策略不等它注册
+			for (const level of thinkingLevelsFor(entry.id, modelId)) {
+				out.set(`${entry.id}/${modelId}#think-${level}`, window);
+			}
+		}
+	}
+	// 任务派生模型：窗口照抄基座，避免它们落回 16384 的兜底白
+	for (const spec of variantSpecs.values()) {
+		const key = `${spec.providerId}/${spec.id}`;
+		if (!out.has(key)) out.set(key, windowOf(spec.providerId, spec.baseModelId));
+	}
+	return out;
+}
+
+/**
  * composer 的模型行（2026-11-04 思考档位）：`{ id, thinkingLevels }`。
  * 设置页与 POST /agent/model 仍是扁平字符串，别顺手统一——那会破旧字段兼容。
- */
-function catalogOf(entry: ProviderEntry): CatalogProvider {
+ */function catalogOf(entry: ProviderEntry): CatalogProvider {
 	return {
 		id: entry.id,
 		name: entry.name,

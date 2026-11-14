@@ -772,3 +772,25 @@ test("导入：MEMORY_IMPORT=false → 404；坏 body 400", async () => {
 		delete process.env.MEMORY_IMPORT;
 	}
 });
+
+test("范围清单：未开执事时只回我的记忆，条数与列表一致", async () => {
+	const app = newApp();
+	const list = (await (
+		await app.request("/api/v1/agent/memory?scope=global&limit=0&excludeKinds=work")
+	).json()) as {
+		counts: { all: number };
+	};
+	const response = await app.request("/api/v1/agent/memory/scopes");
+	assert.equal(response.status, 200);
+	const body = (await response.json()) as {
+		ok: boolean;
+		scopes: Array<{ scope: string; label: string; count: number; kind: string }>;
+	};
+	assert.equal(body.ok, true);
+	assert.equal(body.scopes.length, 1, "执事关着时只有 global");
+	assert.equal(body.scopes[0]!.scope, "global");
+	assert.equal(body.scopes[0]!.label, "我的记忆");
+	assert.equal(body.scopes[0]!.kind, "mine");
+	assert.equal(body.scopes[0]!.count, list.counts.all);
+});
+
