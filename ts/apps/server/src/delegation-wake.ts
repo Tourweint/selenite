@@ -29,6 +29,7 @@ import {
 } from "./partner-runtime.ts";
 import type { DelegationReport } from "./delegation.ts";
 import { conversationIsBusy } from "./agent/session.ts";
+import { maybeScheduleNudge } from "./partner-proactive.ts";
 
 /** 防抖：同一时刻结算的多张单合成一轮 */
 const DEBOUNCE_MS = 2_000;
@@ -63,6 +64,8 @@ export interface DelegationWakeDeps {
 		prompt: string,
 		opts: PartnerTurnOptions,
 	): Promise<PartnerTurnResult>;
+	/** 批3：唤醒轮成功后的挂念检查（自判 proactivity / 子开关 / 一天一条）。 */
+	nudge?(partnerId: string): Promise<boolean> | void;
 	setTimer(fn: () => void, ms: number): WakeTimerHandle;
 	clearTimer(handle: WakeTimerHandle): void;
 }
@@ -92,6 +95,7 @@ const defaultDeps: DelegationWakeDeps = {
 	ensureSession: (partnerId) => ensurePartnerSession(partnerId),
 	isBusy: (chat) => conversationIsBusy(chat.conversation),
 	runTurn: (partnerId, prompt, opts) => runPartnerTurn(partnerId, prompt, opts),
+	nudge: (partnerId) => maybeScheduleNudge(partnerId),
 	setTimer: (fn, ms) => setTimeout(fn, ms),
 	clearTimer: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
 };
@@ -285,6 +289,13 @@ export async function flushDelegationWake(
 				console.log(
 					`[wake] 会话 ${conversationId} 唤醒轮 ok tickets=${reports.length} 耗时${seconds}s`,
 				);
+				// 批3：这是既有"主动开口时机"之一——唤醒轮成功后再看要不要发一条挂念。
+				// 内部自判模块 / 子开关 / 一天一条；失败只返回 false，不影响唤醒链。
+				try {
+					await deps.nudge?.(partnerId);
+				} catch {
+					// 挂念是增值动作，不外抛
+				}
 			} else {
 				console.warn(
 					`[wake] 会话 ${conversationId} 唤醒轮失败: ${oneLine(result.error ?? "未知错误")}`,

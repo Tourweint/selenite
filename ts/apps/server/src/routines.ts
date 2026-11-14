@@ -37,6 +37,8 @@ import {
 	isReviewRoutine,
 	livingModuleOn,
 } from "./partner-living.ts";
+import { reflectVoiceWeekly } from "./partner-learning.ts";
+import { maybeScheduleNudge } from "./partner-proactive.ts";
 import { runSourceEnabled, type RunSource } from "./run-source.ts";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 
@@ -732,6 +734,13 @@ class RoutineEngine {
 				authority: "autonomous",
 				sessionMode: routine.sessionMode,
 			});
+			// 人格批3：盘点例行跑完 = 既有"主动开口时机"之一。
+			// 学习：用执事自己的模型链把本周统计 + 短例句提炼成规则；挂念：经既有提醒链发一条。
+			// 两者都自判模块开关，失败只 warn；不新造调度。
+			if (result.ok && isReviewRoutine(routine)) {
+				void reflectVoiceWeekly(routine.partnerId);
+				void maybeScheduleNudge(routine.partnerId);
+			}
 			// 人格活模块（2026-11-15 批2）：heart 开着的**盘点例行**才挂"他自己的话"，
 			// 生成结果由 applyRoutineDigest 摘出日记 / 成长笔记；周报一句留在正文末尾。
 			const digest =

@@ -30,6 +30,8 @@ import {
 } from "../partners.ts";
 import { effectivePersonaModules, personaModulesEnabled } from "../partner-persona.ts";
 import { buildLivingSections, type LivingSections } from "../partner-living.ts";
+import { buildLearningSection } from "../partner-learning.ts";
+import { buildProactivitySection } from "../partner-proactive.ts";
 
 /**
  * 执事轮上下文装配（2026-11-08 员工人格化刀一 E1 + E5）。
@@ -420,6 +422,8 @@ const ORDER: Record<string, number> = {
 	partner_brief_card: INJECTION_ORDER.partner_brief_card,
 	partner_attention: INJECTION_ORDER.partner_attention,
 	partner_status: INJECTION_ORDER.partner_status,
+	partner_learning: INJECTION_ORDER.partner_learning,
+	partner_proactivity: INJECTION_ORDER.partner_proactivity,
 	partner_impression: INJECTION_ORDER.partner_impression,
 	partner_mood: INJECTION_ORDER.partner_mood,
 	partner_heart: INJECTION_ORDER.partner_heart,
@@ -571,6 +575,16 @@ export function partnerContextProviders(
 							},
 						}),
 					),
+		// 学习 / 主动性（2026-11-15 批3）：状态段之后、印象之前。
+		// 模块关 / 总开关 false / 内容空 → 各自的 provider 返回 undefined（整段不出现）。
+		() =>
+			personaModulesEnabled() && personaOn("learning") && partner
+				? entry("partner_learning", buildLearningSection(partner, store))
+				: undefined,
+		() =>
+			personaModulesEnabled() && personaOn("proactivity") && partner
+				? entry("partner_proactivity", buildProactivitySection(partner))
+				: undefined,
 		// 活模块三段（2026-11-15 批2）：印象 → 心情 → 心里话，挂在在办段之后。
 		// 模块关 / 空内容 → 各自的 provider 返回 undefined（整段不出现）。
 		// `PARTNER_PERSONA_MODULES=false` 时活模块本来不存在 → 整段不注（不靠 deps 兜）。
@@ -601,6 +615,10 @@ export interface PartnerTurnContext {
 	discipline: string;
 	/** 当前在办段（三项皆空 + 无履历 → null） */
 	status: string | null;
+	/** 表达习惯段（批3；模块关 / 规则空 → null） */
+	learning: string | null;
+	/** 主动一点段（批3；模块关 → null） */
+	proactivity: string | null;
 	/** 印象段（批2；模块关 / 空 → null） */
 	impression: string | null;
 	/** 心情段（批2；模块关 / 初始态 → null） */
@@ -645,6 +663,8 @@ export function buildPartnerTurnContext(
 		goal: byId.get("partner_goal") ?? null,
 		discipline,
 		status: byId.get("partner_status") ?? null,
+		learning: byId.get("partner_learning") ?? null,
+		proactivity: byId.get("partner_proactivity") ?? null,
 		impression: byId.get("partner_impression") ?? null,
 		mood: byId.get("partner_mood") ?? null,
 		heart: byId.get("partner_heart") ?? null,

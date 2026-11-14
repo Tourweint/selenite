@@ -1378,6 +1378,16 @@ export interface PartnerPersonaContents {
 	scenario: PartnerPersonaScenario;
 }
 
+/** 三份静态内容的运行时形状（人设库快照整份保存 / 应用时用）。 */
+export const PartnerPersonaContentsSchema = z
+	.object({
+		style: PartnerPersonaStyleSchema,
+		values: PartnerPersonaValuesSchema,
+		scenario: PartnerPersonaScenarioSchema,
+	})
+	.strict();
+export type PartnerPersonaContentsValue = z.infer<typeof PartnerPersonaContentsSchema>;
+
 /* ── 员工人格 · 活模块（2026-11-15 批2，方案 §六）──
  *
  * 三个活模块各自的家（**不要合并成一份状态**）：
@@ -1503,11 +1513,122 @@ export const PartnerLivingPatchSchema = z
 	.strict();
 export type PartnerLivingPatch = z.infer<typeof PartnerLivingPatchSchema>;
 
-/** 活模块的子开关（`persona_switches` 列）：目前只有"心情是否影响口吻"。 */
+/** 活模块的子开关（`persona_switches` 列）：口吻影响 + 挂念提醒（批3）。 */
 export const PartnerPersonaSwitchesSchema = z
-	.object({ moodAffectTone: z.boolean().optional() })
+	.object({
+		moodAffectTone: z.boolean().optional(),
+		/** 挂念提醒（2026-11-15 批3）：默认关；开 = 允许在既有唤醒时机发一条带身份的挂念。 */
+		nudgeEnabled: z.boolean().optional(),
+	})
 	.strict();
 export type PartnerPersonaSwitches = z.infer<typeof PartnerPersonaSwitchesSchema>;
+
+/* ── 员工人格 · 批3（2026-11-15）：学习 / 主动性 / 人设库 ──
+ *
+ * 三块都默认关，且受 `PARTNER_PERSONA_MODULES` 总开关约束。
+ * 红线：`voice.json` 只存提炼后的规则与 ≤40 字短例句，不存整段对话原文；
+ * 不进日志、不进 export-bundle、不进团队包（团队包本来只搬 SOUL / 契约 / 技能 / 偏好经验）。
+ * 挂念提醒必须带执事身份（正文前缀 `【名字】`），一天最多一条。 */
+
+export const PARTNER_VOICE_LIMITS = {
+	/** 单条表达规则正文上限 */
+	ruleText: 60,
+	/** 短例句上限（硬红线：40 字，不存整段对话） */
+	example: 40,
+	/** 最多保留多少条规则 */
+	rules: 16,
+	/** 最多保留多少条短例句（滚动覆盖最旧） */
+	samples: 8,
+	/** 最多保留多少条黑话 / 新词规则 */
+	jargon: 12,
+} as const;
+
+export const PARTNER_VOICE_RULE_KINDS = [
+	"sentenceLength",
+	"address",
+	"interjection",
+	"jargon",
+] as const;
+export const PartnerVoiceRuleKindSchema = z.enum(PARTNER_VOICE_RULE_KINDS);
+export type PartnerVoiceRuleKind = z.infer<typeof PartnerVoiceRuleKindSchema>;
+
+/** 一条学到的表达习惯（`persona/voice.json` 的 rules 元素）。 */
+export const PartnerVoiceRuleSchema = z
+	.object({
+		kind: PartnerVoiceRuleKindSchema,
+		text: personaText(PARTNER_VOICE_LIMITS.ruleText, "表达习惯"),
+		/** 短例句 ≤40 字；不是整段对话原文。 */
+		example: personaText(PARTNER_VOICE_LIMITS.example, "例句").optional(),
+		at: z.string(),
+	})
+	.strict();
+export type PartnerVoiceRule = z.infer<typeof PartnerVoiceRuleSchema>;
+
+/** 端点 / 档案页的「已学表达习惯」投影（`enabled=false` 时整段为 null）。 */
+export interface PartnerVoiceView {
+	ruleCount: number;
+	/** 黑话 / 新词条数（rules 里 kind=jargon 的数量）。 */
+	jargonCount: number;
+	rules: PartnerVoiceRule[];
+	updatedAt: string | null;
+}
+
+/** 人设库上限：最多 5 份快照；名称 ≤24 字。 */
+export const PARTNER_PROFILE_LIMITS = { count: 5, name: 24 } as const;
+
+/**
+ * 人设库的一份命名快照（`persona/profiles.json` 的 items 元素）。
+ * `contents` 是**保存当时**的整套静态内容；应用 = 整份写回，SOUL 不动。
+ */
+export const PartnerPersonaProfileSnapshotSchema = z
+	.object({
+		id: z.string(),
+		name: personaText(PARTNER_PROFILE_LIMITS.name, "人设名"),
+		createdAt: z.string(),
+		preset: PartnerPersonaPresetSchema,
+		modules: z.record(PartnerPersonaModuleSchema, z.boolean()),
+		contents: PartnerPersonaContentsSchema,
+	})
+	.strict();
+export type PartnerPersonaProfileSnapshot = z.infer<typeof PartnerPersonaProfileSnapshotSchema>;
+
+/** 端点投影里的一份快照摘要（不含 contents：档案页只需要名称 / 预设 / 开关数）。 */
+export interface PartnerPersonaProfileSummary {
+	id: string;
+	name: string;
+	createdAt: string;
+	preset: PartnerPersonaPreset;
+	modules: Record<PartnerPersonaModule, boolean>;
+}
+
+export interface PartnerPersonaProfilesView {
+	limit: number;
+	items: PartnerPersonaProfileSummary[];
+}
+
+/** 挂念提醒的可见状态（`enabled=false` 时整段为 null）。 */
+export interface PartnerProactivityView {
+	nudgeEnabled: boolean;
+	lastNudgeAt: string | null;
+}
+
+/** PUT 人设库动作：一次只做一件（存 / 应用 / 删）。 */
+export const PartnerProfilesActionSchema = z
+	.object({
+		save: z
+			.object({ name: personaText(PARTNER_PROFILE_LIMITS.name, "人设名") })
+			.strict()
+			.optional(),
+		apply: z.object({ id: z.string().min(1).max(64) }).strict().optional(),
+		remove: z.object({ id: z.string().min(1).max(64) }).strict().optional(),
+	})
+	.strict()
+	.refine(
+		(value) =>
+			[value.save, value.apply, value.remove].filter((item) => item !== undefined).length === 1,
+		{ message: "人设库一次只能做一件事（存 / 应用 / 删）" },
+	);
+export type PartnerProfilesAction = z.infer<typeof PartnerProfilesActionSchema>;
 
 /** 端点的活状态投影（GET / PUT 同一份形状；`enabled=false` 时整段为 null）。 */
 export interface PartnerLivingView {
@@ -1554,6 +1675,8 @@ export const PartnerPersonaPatchSchema = z
 			.optional(),
 		/** 活状态手改（2026-11-15 批2）：温度 / 心情 / 近况 / 愿望 / 印象 / 日记。 */
 		living: PartnerLivingPatchSchema.optional(),
+		/** 人设库（2026-11-15 批3）：存一份当前快照 / 应用某份 / 删某份，一次只做一件。 */
+		profiles: PartnerProfilesActionSchema.optional(),
 	})
 	.strict();
 export type PartnerPersonaPatch = z.infer<typeof PartnerPersonaPatchSchema>;
@@ -1568,11 +1691,21 @@ export interface PartnerPersonaView {
 	enabled: boolean;
 	preset: PartnerPersonaPreset;
 	modules: Record<PartnerPersonaModule, boolean>;
-	switches: { moodAffectTone: boolean };
+	switches: { moodAffectTone: boolean; nudgeEnabled: boolean };
 	contents: PartnerPersonaContents;
 	/** 活状态（批2）；`enabled=false` 时为 null（整块隐藏，不假装有状态）。 */
 	living: PartnerLivingView | null;
-	limits: typeof PARTNER_PERSONA_LIMITS & { living: typeof PARTNER_LIVING_LIMITS };
+	/** 学到的表达习惯（批3）；`enabled=false` 时为 null；模块关 = 内容保留、仍回读。 */
+	voice: PartnerVoiceView | null;
+	/** 主动性的挂念状态（批3）；`enabled=false` 时为 null。 */
+	proactivity: PartnerProactivityView | null;
+	/** 人设库（批3）；`enabled=false` 时为 null；模块关 = 内容保留、仍回读。 */
+	profiles: PartnerPersonaProfilesView | null;
+	limits: typeof PARTNER_PERSONA_LIMITS & {
+		living: typeof PARTNER_LIVING_LIMITS;
+		voice: typeof PARTNER_VOICE_LIMITS;
+		profiles: typeof PARTNER_PROFILE_LIMITS;
+	};
 }
 
 export const RoutineTriggerSchema = z.discriminatedUnion("type", [

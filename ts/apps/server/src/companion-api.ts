@@ -6,6 +6,8 @@ import {
 	PARTNER_AVATAR_MAX_DIMENSION,
 	PARTNER_AVATAR_PREFIX,
 	PARTNER_LIVING_LIMITS,
+	PARTNER_PROFILE_LIMITS,
+	PARTNER_VOICE_LIMITS,
 	PartnerAvatarPatchSchema,
 	PARTNER_PERSONA_LIMITS,
 	PartnerPersonaPatchSchema,
@@ -32,6 +34,10 @@ import {
 } from "./partner-persona.ts";
 // 活模块（2026-11-15 批2）：印象 / 心情 / 日记的读写与手改都在 partner-living.ts。
 import { applyLivingPatch, livingView } from "./partner-living.ts";
+// 学习 / 主动性 / 人设库（2026-11-15 批3）
+import { voiceView } from "./partner-learning.ts";
+import { proactivityView } from "./partner-proactive.ts";
+import { applyProfile, profilesView, removeProfile, saveProfile } from "./partner-profiles.ts";
 // 建/停执事的唯一核心实现（批次D D3）：端点与 partner_manage 工具共用，端点只做形状映射。
 import { createMinisterPartner, stopMinisterPartner } from "./partner-manage.ts";
 import { runPartnerTurn, openPartnerConversation } from "./partner-runtime.ts";
@@ -343,6 +349,37 @@ export function mountCompanions(app: Hono): void {
 		}
 		const patch = parsed.data;
 
+		// 人设库（2026-11-15 批3）：一次只做一个动作，且**不与其它人格字段混批**。
+		// 混批会让"保存快照"拍到半新半旧的状态，也会让动作失败时留下已写入的 preset / contents。
+		// UI 也是分开提交的；这里把顺序问题在入口上消掉。
+		if (patch.profiles) {
+			if (
+				patch.preset !== undefined ||
+				patch.modules ||
+				patch.switches ||
+				patch.contents ||
+				patch.living
+			) {
+				return c.json(
+					{
+						error: "bad_request",
+						message: "人设库动作请单独提交（不要和其它人格修改混在一起）",
+					},
+					400,
+				);
+			}
+			const action = patch.profiles;
+			const result = action.save
+				? saveProfile(id, action.save.name, store())
+				: action.apply
+					? applyProfile(id, action.apply.id, store())
+					: removeProfile(id, action.remove?.id ?? "", store());
+			if (!result.ok) {
+				return c.json({ error: "bad_request", message: result.message }, 400);
+			}
+			return c.json(personaView(store().get(id) ?? partner));
+		}
+
 		const preset: PartnerPersonaPreset = patch.preset ?? partner.personaPreset;
 		let modules: Record<PartnerPersonaModule, boolean> = effectivePersonaModules(partner);
 		if (patch.modules || (patch.preset && patch.preset !== partner.personaPreset)) {
@@ -370,6 +407,7 @@ export function mountCompanions(app: Hono): void {
 				return c.json({ error: "bad_request", message: applied.message }, 400);
 			}
 		}
+		// 先落请求里的 preset / modules / switches。人设库动作已在上面单独处理并提前返回。
 		const updated = store().setPersona(id, { preset, modules, switches }) ?? partner;
 		return c.json(personaView(updated));
 	});
@@ -923,12 +961,24 @@ function personaView(partner: PartnerRow): PartnerPersonaView {
 		enabled,
 		preset: enabled ? partner.personaPreset : "work",
 		modules: enabled ? effectivePersonaModules(partner) : defaultPersonaModules("work"),
-		// 子开关（批2）：总开关关着时回默认（口吻影响关），与模块表同一口径。
-		switches: { moodAffectTone: enabled && partner.personaSwitches.moodAffectTone === true },
+		// 子开关（批2 / 批3）：总开关关着时回默认（口吻影响 / 挂念全关），与模块表同一口径。
+		switches: {
+			moodAffectTone: enabled && partner.personaSwitches.moodAffectTone === true,
+			nudgeEnabled: enabled && partner.personaSwitches.nudgeEnabled === true,
+		},
 		contents: readPersonaContents(partnersStore(), partner.id),
 		// 活状态（批2）：总开关关着整段为 null —— 前端整块隐藏，不假装有状态。
 		living: enabled ? livingView(partner, partnersStore()) : null,
-		limits: { ...PARTNER_PERSONA_LIMITS, living: PARTNER_LIVING_LIMITS },
+		// 学习 / 主动性 / 人设库（批3）：总开关关着整段为 null；模块关 = 内容保留、仍回读。
+		voice: enabled ? voiceView(partner, partnersStore()) : null,
+		proactivity: enabled ? proactivityView(partner, partnersStore()) : null,
+		profiles: enabled ? profilesView(partner, partnersStore()) : null,
+		limits: {
+			...PARTNER_PERSONA_LIMITS,
+			living: PARTNER_LIVING_LIMITS,
+			voice: PARTNER_VOICE_LIMITS,
+			profiles: PARTNER_PROFILE_LIMITS,
+		},
 	};
 }
 

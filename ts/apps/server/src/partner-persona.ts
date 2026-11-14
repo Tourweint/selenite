@@ -214,6 +214,25 @@ function mergeContentModule<T extends object>(base: T, patch: T | undefined): T 
 }
 
 /**
+ * 整份替换三份静态内容（人设库应用快照用）。
+ *
+ * 与 `writePersonaContents` 的区别：那个按字段合并（省略不动），这个**逐文件整份覆盖**——
+ * 人设库应用是"回到保存当时"，保存后新加的字段必须一起消失，否则不叫快照。
+ */
+export function replacePersonaContents(
+	store: PersonaStoreLike,
+	partnerId: string,
+	contents: PartnerPersonaContents,
+): void {
+	for (const key of PERSONA_CONTENT_KEYS) {
+		store.atomicWrite(
+			join(personaDirOf(store, partnerId), CONTENT_FILE[key]),
+			`${JSON.stringify(contents[key], null, 2)}\n`,
+		);
+	}
+}
+
+/**
  * 写静态内容（按模块部分更新），返回写完的完整三份。
  * 校验在端点（shared 的 PartnerPersonaPatchSchema 已过一遍）；落盘是整份 JSON 原子写，
  * 单文件远小于 64KB 槽位护栏（字段上限合计不到 10KB）。

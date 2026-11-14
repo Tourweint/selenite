@@ -127,9 +127,10 @@ function toPersonaSwitches(raw: unknown): PartnerPersonaSwitches {
 	}
 	if (!parsed || typeof parsed !== "object") return {};
 	const source = parsed as Record<string, unknown>;
-	return typeof source.moodAffectTone === "boolean"
-		? { moodAffectTone: source.moodAffectTone }
-		: {};
+	const out: PartnerPersonaSwitches = {};
+	if (typeof source.moodAffectTone === "boolean") out.moodAffectTone = source.moodAffectTone;
+	if (typeof source.nudgeEnabled === "boolean") out.nudgeEnabled = source.nudgeEnabled;
+	return out;
 }
 
 /** 人格预设：只认三个枚举值，老库 / 脏值一律回默认 `work`。 */

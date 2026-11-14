@@ -702,8 +702,14 @@ interface PersonaBody {
 	enabled?: boolean;
 	preset?: string;
 	modules?: Record<string, boolean>;
-	switches?: { moodAffectTone?: boolean };
+	switches?: { moodAffectTone?: boolean; nudgeEnabled?: boolean };
 	contents?: { style?: Record<string, unknown>; values?: Record<string, unknown>; scenario?: Record<string, unknown> };
+	voice?: { ruleCount?: number; jargonCount?: number; rules?: Array<{ kind?: string; text?: string }>; updatedAt?: string | null } | null;
+	proactivity?: { nudgeEnabled?: boolean; lastNudgeAt?: string | null } | null;
+	profiles?: {
+		limit?: number;
+		items?: Array<{ id: string; name: string; createdAt: string; preset: string; modules?: Record<string, boolean> }>;
+	} | null;
 	living?: {
 		ownerTier?: string;
 		tierNote?: string | null;
@@ -716,6 +722,8 @@ interface PersonaBody {
 	limits?: {
 		style?: { speakStyle?: number; catchphrases?: { max?: number; each?: number } };
 		living?: { impressionText?: number; diaryText?: number; wishes?: number };
+		voice?: { example?: number; ruleText?: number; rules?: number };
+		profiles?: { count?: number; name?: number };
 	};
 	error?: string;
 	message?: string;
@@ -919,10 +927,81 @@ test("persona 活状态：PARTNER_PERSONA_MODULES=false 时 living 为 null（�
 		).json()) as PersonaBody;
 		assert.equal(body.enabled, false);
 		assert.equal(body.living, null);
+		assert.equal(body.voice, null);
+		assert.equal(body.proactivity, null);
+		assert.equal(body.profiles, null);
 	} finally {
 		if (previous === undefined) delete process.env.PARTNER_PERSONA_MODULES;
 		else process.env.PARTNER_PERSONA_MODULES = previous;
 	}
+});
+
+test("persona 批3：voice / proactivity / profiles 投影；人设库存取应用不改 SOUL", async () => {
+	const partner = store.create("批3执事");
+	const initial = (await (
+		await app.request(`/api/v1/partners/${partner.id}/persona`)
+	).json()) as PersonaBody;
+	assert.equal(initial.voice?.ruleCount, 0);
+	assert.equal(initial.voice?.jargonCount, 0);
+	assert.deepEqual(initial.voice?.rules, []);
+	assert.deepEqual(initial.proactivity, { nudgeEnabled: false, lastNudgeAt: null });
+	assert.deepEqual(initial.profiles, { limit: 5, items: [] });
+	assert.equal(initial.limits?.voice?.example, 40);
+	assert.equal(initial.limits?.profiles?.count, 5);
+	assert.equal(initial.switches?.nudgeEnabled, false);
+
+	const on = (await (
+		await putPersona(partner.id, {
+			modules: { profiles: true, learning: true, proactivity: true },
+			switches: { nudgeEnabled: true },
+			contents: { style: { speakStyle: "短句，先给结论。" } },
+		})
+	).json()) as PersonaBody;
+	assert.equal(on.modules?.profiles, true);
+	assert.equal(on.switches?.nudgeEnabled, true);
+
+	const soulBefore = store.readSoulFromHome(partner.id);
+	const saved = (await (
+		await putPersona(partner.id, { profiles: { save: { name: "工作态" } } })
+	).json()) as PersonaBody;
+	assert.equal(saved.profiles?.items?.length, 1);
+	assert.equal(saved.profiles?.items?.[0]?.name, "工作态");
+	const profileId = saved.profiles?.items?.[0]?.id ?? "";
+	assert.equal("contents" in (saved.profiles?.items?.[0] ?? {}), false, "列表只回摘要");
+
+	// 改内容 → 应用快照 → 回到保存当时；SOUL 不动
+	await putPersona(partner.id, { contents: { style: { speakStyle: "变了。" } } });
+	const applied = (await (
+		await putPersona(partner.id, { profiles: { apply: { id: profileId } } })
+	).json()) as PersonaBody;
+	assert.equal(applied.contents?.style?.speakStyle, "短句，先给结论。");
+	assert.equal(store.readSoulFromHome(partner.id), soulBefore, "应用快照不动 SOUL");
+
+	// 一次只能做一件
+	const two = await putPersona(partner.id, {
+		profiles: { save: { name: "又一份" }, remove: { id: profileId } },
+	});
+	assert.equal(two.status, 400);
+	// 人设库动作不能和 preset / modules / contents 混批（避免半写）
+	const mixed = await putPersona(partner.id, {
+		preset: "work",
+		profiles: { save: { name: "混合" } },
+	});
+	assert.equal(mixed.status, 400);
+	const stillCustom = (await (
+		await app.request(`/api/v1/partners/${partner.id}/persona`)
+	).json()) as PersonaBody;
+	assert.equal(stillCustom.preset, "work", "混批 400 不改预设");
+	assert.equal(stillCustom.profiles?.items?.length, 1, "混批 400 不新增快照");
+
+	// 模块关：动作 400；列表仍回读
+	await putPersona(partner.id, { modules: { profiles: false } });
+	const off = await putPersona(partner.id, { profiles: { remove: { id: profileId } } });
+	assert.equal(off.status, 400);
+	const reread = (await (
+		await app.request(`/api/v1/partners/${partner.id}/persona`)
+	).json()) as PersonaBody;
+	assert.equal(reread.profiles?.items?.length, 1, "模块关内容保留");
 });
 
 test("persona 端点鉴权：没凭据 403 空体", async () => {

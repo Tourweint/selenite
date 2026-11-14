@@ -3,6 +3,7 @@ import type { MemoryScope } from "@lifediary/memory";
 import { chatContentText, type ChatMessage } from "@lifediary/shared";
 import { pruneSessionMemory } from "../memory-prune.ts";
 import { noteTurnSettlement } from "../partner-living.ts";
+import { noteOwnerStyle } from "../partner-learning.ts";
 import { CHIEF_PARTNER_ID, partnersStore } from "../partners.ts";
 import { appendPersonaExport, personaExportEnabled } from "../persona-export.ts";
 import { memoryEngine, preferenceScopeOf } from "./assist.ts";
@@ -80,6 +81,9 @@ export function turnSettledHandler(chat: SettledChat, messages: ChatMessage[]) {
 				const partnerId = partnersStore().canonicalPartnerIdOfSession(chat.internalId);
 				if (partnerId && partnerId !== CHIEF_PARTNER_ID) {
 					noteTurnSettlement({ partnerId, messages: plain });
+					// 学习模块（2026-11-15 批3）：同一判据（canonical 主会话），只取最后一条用户消息做
+					// 确定性统计；settle 档才可能触发放模型提炼。不 await——写盘 / 模型慢了不拖对话。
+					void noteOwnerStyle({ partnerId, messages: plain });
 				}
 			} catch (error) {
 				const detail = error instanceof Error ? error.message : String(error);

@@ -97,6 +97,9 @@ export const INJECTION_ORDER = {
 	partner_brief_card: 280,
 	partner_attention: 290,
 	partner_status: 300,
+	// 学习 / 主动性（2026-11-15 批3）：状态段之后、印象之前
+	partner_learning: 305,
+	partner_proactivity: 306,
 	// 活模块（2026-11-15 批2）：印象 → 心情 → 心里话，挂在在办段之后
 	partner_impression: 310,
 	partner_mood: 320,

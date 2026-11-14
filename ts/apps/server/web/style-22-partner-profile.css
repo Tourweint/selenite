@@ -196,6 +196,16 @@
   font-size: 11.5px; color: var(--text-3);
 }
 
+/* 批3（2026-11-15）：主动性行内嵌「挂念」子开关；学习 / 人设库行内「查看」 */
+.pf-mod-label { flex-wrap: wrap; row-gap: 4px; }
+.pf-mod-sub {
+  display: inline-flex; align-items: center; gap: 4px;
+  margin-left: auto; flex: none;
+}
+.pf-mod-sub-label { font-size: 10.5px; color: var(--text-3); }
+.switch.is-mini { transform: scale(.8); transform-origin: right center; }
+.pf-voice-eg { font-style: normal; color: var(--text-3); }
+
 /* 活状态弹层（印象 / 心情 / 内心生活）：列表与小块 */
 .pf-live-block { margin-top: 12px; }
 .pf-live-block + .pf-live-block { border-top: 1px solid var(--divider); padding-top: 12px; }

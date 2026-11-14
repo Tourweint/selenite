@@ -64,8 +64,9 @@ export interface PartnerRow {
 	 */
 	personaModules: Partial<Record<PartnerPersonaModule, boolean>>;
 	/**
-	 * 人格子开关（2026-11-15 批2）：目前只有 `moodAffectTone`（心情是否影响口吻）。
-	 * 与 14 个模块 id 分开存，别混进 `personaModules`——那是"模块在不在"，这是"模块里的一个旋钮"。
+	 * 人格子开关（2026-11-15 批2 / 批3）：`moodAffectTone`（心情是否影响口吻）与
+	 * `nudgeEnabled`（挂念提醒，默认关）。与 14 个模块 id 分开存，别混进 `personaModules`——
+	 * 那是"模块在不在"，这是"模块里的一个旋钮"。
 	 */
 	personaSwitches: PartnerPersonaSwitches;
 	/**

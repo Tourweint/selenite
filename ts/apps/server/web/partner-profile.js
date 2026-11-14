@@ -34,12 +34,10 @@ import { closeModal, openModal, toast } from "./ui-atoms.js";
 const PF_DOMAIN_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const PF_NAME_LIMIT = 40;
 
-/* ── 人格模块（2026-11-14 员工人格模块 · 批1）────────────────────────────
+/* ── 人格模块（2026-11-14 员工人格模块 · 批1 / 批2 / 批3）────────────────
  *
  * 一个员工 = 必选核心（身份 / 数据红线 / 教诲通道，不可关）+ 可开关模块。
- * 这里只上架**批1 生效**的八个模块；批2（印象 / 心情 / 日记）与批3（学习 / 主动性 / 人设库）
- * 的行不显示——一行写着"即将生效"又点不动，比不显示更吵（用户口径：以简洁为准）。
- * 解释文字不常驻：模块名挂 data-tip，悬停才出（与设置页其它标签同一口径）。
+ * 批1 八个模块、批2 三个活模块、批3 学习 / 主动性 / 人设库；解释文字不常驻（data-tip），
  * 预设三选一 = 一键填开关；开关改完立即 PUT，不回滚草稿（与会话设置里的开关同款）。 */
 
 const PF_PERSONA_MODULES = [
@@ -55,6 +53,10 @@ const PF_PERSONA_MODULES = [
   { id: "impression", name: "印象", tip: "他对你和群里同事的印象，以及「关系温度」五档。结算时只从真发生过的事提炼。", living: "impression" },
   { id: "mood", name: "心情", tip: "此刻状态 + 近况一句。规则可见（被谢 → 愉悦、连败 → 低落、久无单 → 平静），可手改。", living: "mood" },
   { id: "heart", name: "内心生活", tip: "他的日记、周报末尾那句「他自己的话」、成长笔记与愿望。成长笔记永不回写人设。", living: "heart" },
+  // 批3（2026-11-15）：学习只落规则与 ≤40 字例句，不进日志 / 导出；挂念提醒默认关。
+  { id: "learning", name: "学习", tip: "学主人说话习惯与黑话；只存提炼后的规则和 ≤40 字短例句，不进日志 / 导出。", learning: true },
+  { id: "proactivity", name: "主动性", tip: "回答末尾可自然追问；挂念提醒默认关，一天最多一条，且会带上他的名字。", proactive: true },
+  { id: "profiles", name: "人设库", tip: "存整套人格快照（≤5 份），一键切回；应用快照不会改人设正文（SOUL）。", profiles: true },
 ];
 
 const PF_PERSONA_PRESETS = [
@@ -914,6 +916,184 @@ function pfLivingSummary(kind, living) {
   return "—";
 }
 
+/** 批3 三行的状态摘要（学习 / 主动性 / 人设库）。 */
+function pfModuleStatus(module, persona) {
+  if (module.learning) return `${persona.voice?.ruleCount ?? 0} 条表达习惯`;
+  if (module.proactive) return persona.proactivity?.nudgeEnabled ? "挂念提醒开" : "挂念提醒关";
+  if (module.profiles) {
+    const count = persona.profiles?.items?.length ?? 0;
+    return `${count}/${persona.profiles?.limit ?? 5} 份`;
+  }
+  return "";
+}
+
+const PF_PRESET_NAMES = { work: "岗位", companion: "陪伴", custom: "自定义" };
+
+/**
+ * 人设库/学习弹层共用的 PUT：只发 persona 段，返回最新 persona（失败时把话说在 hint）。
+ * 不走 pfWirePersona 的 save 闭包，避免弹层和页面各存一份状态。
+ */
+async function pfPutPersona(partnerId, payload, hint) {
+  try {
+    const response = await request(`/api/v1/partners/${encodeURIComponent(partnerId)}/persona`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      if (hint) {
+        hint.textContent = data.message || data.error || `没存成：HTTP ${response.status}`;
+        hint.classList.add("is-error");
+      }
+      return null;
+    }
+    return data;
+  } catch (error) {
+    if (error.message !== "forbidden" && hint) {
+      hint.textContent = `没存成：${error.message}`;
+      hint.classList.add("is-error");
+    }
+    return null;
+  }
+}
+
+function pfApplyPersonaData(persona, data) {
+  persona.preset = data.preset ?? persona.preset;
+  persona.modules = data.modules ?? persona.modules;
+  persona.contents = data.contents ?? persona.contents;
+  persona.switches = data.switches ?? persona.switches;
+  persona.living = data.living ?? persona.living;
+  persona.voice = data.voice ?? persona.voice;
+  persona.proactivity = data.proactivity ?? persona.proactivity;
+  persona.profiles = data.profiles ?? persona.profiles;
+  return persona;
+}
+
+/** 学习弹层：只读展示已学规则（规则由结算 / 盘点时提炼，不在这里手改）。 */
+function pfOpenVoiceModal(persona) {
+  const voice = persona.voice;
+  openModal(
+    "人格 · 学习",
+    (body) => {
+      body.innerHTML = `
+        <p class="modal-desc">这些是从主人说话里提炼出的表达习惯，只会存规则和 ≤40 字短例句，不存整段对话，也不进日志 / 导出。模型不可用时只保留确定性统计。</p>
+        <div class="pf-live-list" id="pf-voice-list"></div>
+        <p class="modal-hint" id="pf-voice-hint"></p>
+        <div class="modal-actions">
+          <button class="modal-primary" type="button" data-modal-cancel>关闭</button>
+        </div>`;
+      const list = body.querySelector("#pf-voice-list");
+      const rules = voice?.rules ?? [];
+      if (rules.length === 0) {
+        list.innerHTML = `<p class="pf-hint">还没学到。开着他和主人相处一阵，结算时会自己长出来。</p>`;
+      }
+      for (const rule of rules) {
+        const item = document.createElement("div");
+        item.className = "pf-live-item";
+        item.innerHTML = `
+          <div class="pf-live-head">
+            <span>${esc(PF_VOICE_KIND_NAMES[rule.kind] || "表达习惯")}</span>
+            <span class="pf-live-at">${esc(pfShortTime(rule.at))}</span>
+          </div>
+          <p class="pf-live-text">${esc(rule.text)}${rule.example ? `<br><em class="pf-voice-eg">例：${esc(rule.example)}</em>` : ""}</p>`;
+        list.append(item);
+      }
+      body.querySelector("[data-modal-cancel]")?.addEventListener("click", () => closeModal());
+    },
+    { className: "modal-wide" },
+  );
+}
+
+const PF_VOICE_KIND_NAMES = {
+  sentenceLength: "句长",
+  address: "称呼",
+  interjection: "语气词",
+  jargon: "黑话 / 新词",
+};
+
+/** 人设库弹层：存当前整套 / 应用某份 / 删某份。应用快照不碰 SOUL（服务端保证）。 */
+function pfOpenProfilesModal(partnerId, persona, onChanged) {
+  openModal(
+    "人格 · 人设库",
+    (body) => {
+      body.innerHTML = `
+        <p class="modal-desc">快照存的是整套人格（口吻 / 里子 / 处境 + 开关 + 预设）。应用会整份覆盖当前内容，但人设正文（SOUL）一个字节都不动。</p>
+        <div class="pf-live-list" id="pf-profile-list"></div>
+        <label class="modal-field"><span>再存一份当前的（≤${persona.profiles?.limit ?? 5} 份，名称 ≤24 字）</span>
+          <input class="modal-input" id="pf-profile-name" type="text" maxlength="24" placeholder="如：工作态 / 陪伴态" />
+        </label>
+        <p class="modal-hint" id="pf-profile-hint"></p>
+        <div class="modal-actions">
+          <button class="ghost" type="button" data-modal-cancel>关闭</button>
+          <button class="modal-primary" id="pf-profile-save" type="button">存一份</button>
+        </div>`;
+      const hint = body.querySelector("#pf-profile-hint");
+      const list = body.querySelector("#pf-profile-list");
+      const paint = () => {
+        list.replaceChildren();
+        const items = persona.profiles?.items ?? [];
+        if (items.length === 0) {
+          list.innerHTML = `<p class="pf-hint">还没有快照。先配好这一套，再在下面存一份。</p>`;
+          return;
+        }
+        for (const item of items) {
+          const row = document.createElement("div");
+          row.className = "pf-live-item";
+          row.innerHTML = `
+            <div class="pf-live-head">
+              <span>${esc(item.name)}</span>
+              <span class="pf-live-at">${esc(PF_PRESET_NAMES[item.preset] || item.preset)} · ${esc(pfShortTime(item.createdAt))}</span>
+            </div>
+            <div class="pf-live-tools">
+              <button class="pf-mini" type="button" data-pf-apply>应用</button>
+              <button class="pf-mini" type="button" data-pf-remove>删掉</button>
+            </div>`;
+          row.querySelector("[data-pf-apply]").addEventListener("click", async () => {
+            const data = await pfPutPersona(partnerId, { profiles: { apply: { id: item.id } } }, hint);
+            if (!data) return;
+            pfApplyPersonaData(persona, data);
+            closeModal();
+            toast(`已应用「${item.name}」`);
+            onChanged?.();
+          });
+          row.querySelector("[data-pf-remove]").addEventListener("click", async () => {
+            const data = await pfPutPersona(partnerId, { profiles: { remove: { id: item.id } } }, hint);
+            if (!data) return;
+            pfApplyPersonaData(persona, data);
+            paint();
+            onChanged?.();
+          });
+          list.append(row);
+        }
+      };
+      paint();
+      body.querySelector("[data-modal-cancel]")?.addEventListener("click", () => closeModal());
+      body.querySelector("#pf-profile-save")?.addEventListener("click", async () => {
+        const save = body.querySelector("#pf-profile-save");
+        if (save.disabled) return;
+        const name = body.querySelector("#pf-profile-name")?.value.trim() ?? "";
+        if (!name) {
+          hint.textContent = "先给这份人设起个名字";
+          hint.classList.add("is-error");
+          return;
+        }
+        save.disabled = true;
+        hint.textContent = "保存中…";
+        hint.classList.remove("is-error");
+        const data = await pfPutPersona(partnerId, { profiles: { save: { name } } }, hint);
+        save.disabled = false;
+        if (!data) return;
+        pfApplyPersonaData(persona, data);
+        body.querySelector("#pf-profile-name").value = "";
+        hint.textContent = "已存一份。";
+        paint();
+        onChanged?.();
+      });
+    },
+    { className: "modal-wide" },
+  );
+}
+
 async function pfReloadPersona(partnerId) {
   try {
     const response = await request(`/api/v1/partners/${encodeURIComponent(partnerId)}/persona`, {
@@ -1259,6 +1439,46 @@ async function pfWirePersona(root, partnerId) {
         open.textContent = "查看";
         label.append(open);
       }
+      if (module.learning || module.proactive || module.profiles) {
+        // 批3 三行（2026-11-15）：状态摘要 + 查看 / 子开关。
+        const live = document.createElement("span");
+        live.className = "pf-mod-live";
+        live.textContent = pfModuleStatus(module, persona);
+        label.append(live);
+        if (module.learning) {
+          const view = document.createElement("button");
+          view.type = "button";
+          view.className = "pf-mini";
+          view.dataset.pfVoice = "";
+          view.textContent = "查看";
+          label.append(view);
+        }
+        if (module.proactive) {
+          const sub = document.createElement("span");
+          sub.className = "pf-mod-sub";
+          const subLabel = document.createElement("span");
+          subLabel.className = "pf-mod-sub-label";
+          subLabel.textContent = "挂念";
+          const subToggle = document.createElement("button");
+          subToggle.type = "button";
+          subToggle.className = "switch is-mini";
+          subToggle.dataset.pfNudge = "";
+          subToggle.setAttribute("role", "switch");
+          subToggle.setAttribute("aria-label", "挂念提醒");
+          subToggle.setAttribute("aria-checked", String(persona.switches?.nudgeEnabled === true));
+          subToggle.innerHTML = `<span class="switch-thumb" aria-hidden="true"></span>`;
+          sub.append(subLabel, subToggle);
+          label.append(sub);
+        }
+        if (module.profiles) {
+          const view = document.createElement("button");
+          view.type = "button";
+          view.className = "pf-mini";
+          view.dataset.pfProfiles = "";
+          view.textContent = "查看";
+          label.append(view);
+        }
+      }
       const toggle = document.createElement("button");
       toggle.type = "button";
       toggle.className = "switch";
@@ -1292,6 +1512,9 @@ async function pfWirePersona(root, partnerId) {
       persona.contents = data.contents ?? persona.contents;
       persona.switches = data.switches ?? persona.switches;
       persona.living = data.living ?? persona.living;
+      persona.voice = data.voice ?? persona.voice;
+      persona.proactivity = data.proactivity ?? persona.proactivity;
+      persona.profiles = data.profiles ?? persona.profiles;
       paint();
       setHint("已保存，下一轮起用。");
     } catch (error) {
@@ -1312,6 +1535,12 @@ async function pfWirePersona(root, partnerId) {
 
   listBox.addEventListener("click", (event) => {
     if (!persona) return;
+    const nudge = event.target.closest("[data-pf-nudge]");
+    if (nudge) {
+      const next = nudge.getAttribute("aria-checked") !== "true";
+      void save({ switches: { nudgeEnabled: next } }, nudge);
+      return;
+    }
     const toggle = event.target.closest("[data-pf-mod]");
     if (toggle) {
       const next = toggle.getAttribute("aria-checked") !== "true";
@@ -1321,6 +1550,20 @@ async function pfWirePersona(root, partnerId) {
     const edit = event.target.closest("[data-pf-edit]");
     if (edit) {
       pfOpenPersonaEditor(partnerId, persona, edit.dataset.pfEdit, () => paint());
+      return;
+    }
+    const voice = event.target.closest("[data-pf-voice]");
+    if (voice) {
+      pfOpenVoiceModal(persona);
+      return;
+    }
+    const profiles = event.target.closest("[data-pf-profiles]");
+    if (profiles) {
+      if (persona.modules?.profiles !== true) {
+        toast("先打开「人设库」模块");
+        return;
+      }
+      pfOpenProfilesModal(partnerId, persona, () => paint());
       return;
     }
     const living = event.target.closest("[data-pf-living]");
