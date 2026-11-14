@@ -51,6 +51,10 @@ const PF_PERSONA_MODULES = [
   { id: "goal", name: "当前目标", tip: "这一阵在奔什么（人设页「岗位」里的那行）。" },
   { id: "workHistory", name: "履历摘要", tip: "近 10 单完成 / 失败 / 中止的条数，挂在在办段末尾。" },
   { id: "currentWork", name: "在办状态", tip: "在办的单、等你批的、最近一单结果。" },
+  // 批2 活模块（2026-11-15）：关 = 不注入、停止更新，已有内容保留（重开即回）。
+  { id: "impression", name: "印象", tip: "他对你和群里同事的印象，以及「关系温度」五档。结算时只从真发生过的事提炼。", living: "impression" },
+  { id: "mood", name: "心情", tip: "此刻状态 + 近况一句。规则可见（被谢 → 愉悦、连败 → 低落、久无单 → 平静），可手改。", living: "mood" },
+  { id: "heart", name: "内心生活", tip: "他的日记、周报末尾那句「他自己的话」、成长笔记与愿望。成长笔记永不回写人设。", living: "heart" },
 ];
 
 const PF_PERSONA_PRESETS = [
@@ -875,6 +879,324 @@ function pfOpenPersonaEditor(partnerId, persona, moduleKey, onSaved) {
   );
 }
 
+/* ── ①·五 人格模块 · 活状态（2026-11-15 批2）──────────────────
+ *
+ * 三行活模块的展示与手改：印象（温度 + 全部条目）、心情（状态 + 原因 + 近况）、
+ * 内心生活（日记 / 愿望 / 成长笔记）。都走同一个 PUT /persona 的 `living` 段，
+ * 服务端写前过 zod；这里只是前端先拦输入长度，避免填完才被打回。
+ * 刻意不做：数值好感度条、写成长笔记（它是生成的，只读展示）、改 SOUL。 */
+
+const PF_OWNER_TIERS = ["生疏", "认识", "熟络", "亲近", "像家人"];
+const PF_MOODS = ["平静", "愉悦", "低落", "烦躁", "疲惫"];
+
+function pfShortTime(iso) {
+  if (!iso) return "";
+  const date = new Date(iso);
+  if (!Number.isFinite(date.getTime())) return "";
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${date.getMonth() + 1}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function pfLivingSummary(kind, living) {
+  if (!living) return "—";
+  if (kind === "impression") {
+    return `${living.ownerTier} · ${living.impressions.length} 条`;
+  }
+  if (kind === "mood") {
+    const reason = living.mood.reason ? ` · ${living.mood.reason}` : "";
+    const at = pfShortTime(living.mood.updatedAt);
+    return `${living.mood.mood}${reason}${at ? ` · ${at}` : ""}`;
+  }
+  if (kind === "heart") {
+    const preview = living.diary.latestText ? ` · ${living.diary.latestText}` : "";
+    return `日记 ${living.diary.count} 条${preview}`;
+  }
+  return "—";
+}
+
+async function pfReloadPersona(partnerId) {
+  try {
+    const response = await request(`/api/v1/partners/${encodeURIComponent(partnerId)}/persona`, {
+      cache: "no-store",
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+/** 手改活状态的一次 PUT；成功回调 `onOk`（拿到最新 persona），失败把话说在弹层里。 */
+async function pfPutLiving(partnerId, living, hint, onOk) {
+  try {
+    const response = await request(`/api/v1/partners/${encodeURIComponent(partnerId)}/persona`, {
+      method: "PUT",
+      body: JSON.stringify({ living }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      if (hint) {
+        hint.textContent = data.message || data.error || `没存成：HTTP ${response.status}`;
+        hint.classList.add("is-error");
+      }
+      return null;
+    }
+    onOk?.(data);
+    return data;
+  } catch (error) {
+    if (error.message !== "forbidden" && hint) {
+      hint.textContent = `没存成：${error.message}`;
+      hint.classList.add("is-error");
+    }
+    return null;
+  }
+}
+
+/** 印象弹层：温度五档 + 全部条目（可改 / 可删）+ 加一条对主人的印象。 */
+function pfOpenImpressionModal(partnerId, persona, onChanged) {
+  const living = persona.living;
+  if (!living) return;
+  openModal(
+    "人格 · 印象",
+    (body) => {
+      body.innerHTML = `
+        <p class="modal-desc">这些是他对具体的人的真实判断，只从结算时真发生的事提炼。温度只有五档文字；跨档会留一条变化账。</p>
+        <label class="modal-field"><span>关系温度</span>
+          <select class="set-input" id="pf-tier">
+            ${PF_OWNER_TIERS.map((tier) => `<option value="${tier}"${tier === living.ownerTier ? " selected" : ""}>${tier}</option>`).join("")}
+          </select>
+        </label>
+        ${living.tierNote ? `<p class="modal-hint">最近一次变化：${esc(living.tierNote)}</p>` : ""}
+        <div class="pf-live-list" id="pf-imp-list"></div>
+        <label class="modal-field"><span>再加一条对主人的印象（≤120 字）</span>
+          <textarea class="pt-ta" id="pf-imp-new" rows="2" maxlength="120"></textarea>
+        </label>
+        <p class="modal-hint" id="pf-imp-hint"></p>
+        <div class="modal-actions">
+          <button class="ghost" type="button" data-modal-cancel>关闭</button>
+          <button class="modal-primary" id="pf-imp-save" type="button">保存改动</button>
+        </div>`;
+      const hint = body.querySelector("#pf-imp-hint");
+      const list = body.querySelector("#pf-imp-list");
+      const removed = new Set();
+      if (living.impressions.length === 0) {
+        list.innerHTML = `<p class="pf-hint">还没有印象。开着他相处一阵，结算时会自己长出来。</p>`;
+      }
+      for (const entry of living.impressions) {
+        const item = document.createElement("div");
+        item.className = "pf-live-item";
+        item.dataset.id = entry.id;
+        item.innerHTML = `
+          <div class="pf-live-head">
+            <span>对${esc(entry.subjectName)}${entry.tierChange ? ` · 温度到「${esc(entry.tierChange)}」` : ""}</span>
+            <span class="pf-live-at">${esc(pfShortTime(entry.at))}${entry.source === "manual" ? " · 手写" : ""}</span>
+          </div>
+          <textarea class="pt-ta" rows="2" maxlength="120">${esc(entry.text)}</textarea>
+          <div class="pf-live-tools">
+            <button class="pf-mini" type="button" data-pf-drop>删掉这条</button>
+          </div>`;
+        item.querySelector("[data-pf-drop]").addEventListener("click", () => {
+          removed.add(entry.id);
+          item.remove();
+        });
+        list.append(item);
+      }
+      body.querySelector("[data-modal-cancel]")?.addEventListener("click", () => closeModal());
+      body.querySelector("#pf-imp-save")?.addEventListener("click", async () => {
+        const save = body.querySelector("#pf-imp-save");
+        if (save.disabled) return;
+        save.disabled = true;
+        hint.textContent = "保存中…";
+        hint.classList.remove("is-error");
+        // 温度先落（一次可解释的手改事件），再逐条改 / 删，最后加新条目。
+        const tier = body.querySelector("#pf-tier")?.value;
+        if (tier && tier !== living.ownerTier) {
+          await pfPutLiving(partnerId, { ownerTier: tier }, hint);
+        }
+        for (const entry of living.impressions) {
+          const node = list.querySelector(`[data-id="${entry.id}"]`);
+          if (removed.has(entry.id)) {
+            await pfPutLiving(partnerId, { impression: { remove: entry.id } }, hint);
+            continue;
+          }
+          const text = node?.querySelector("textarea")?.value.trim();
+          if (text && text !== entry.text) {
+            await pfPutLiving(partnerId, { impression: { update: { id: entry.id, text } } }, hint);
+          }
+        }
+        const added = body.querySelector("#pf-imp-new")?.value.trim();
+        if (added) {
+          await pfPutLiving(
+            partnerId,
+            { impression: { add: { subject: "owner", text: added.slice(0, 120) } } },
+            hint,
+          );
+        }
+        save.disabled = false;
+        if (hint.classList.contains("is-error")) return;
+        closeModal();
+        toast("印象已保存");
+        onChanged?.();
+      });
+    },
+    { className: "modal-wide" },
+  );
+}
+
+/** 心情弹层：五种枚举 + 原因 + 近况（手改 = manual，规则下次仍可再改）。 */
+function pfOpenMoodModal(partnerId, persona, onChanged) {
+  const living = persona.living;
+  if (!living) return;
+  openModal("人格 · 心情", (body) => {
+    body.innerHTML = `
+      <p class="modal-desc">心情只有五种。规则是可见的：被明确致谢 → 愉悦；连续两单失败或中止 → 低落；72 小时没有新单落账 → 平静。手改随时生效，下一次规则事件仍可以再改。</p>
+      <label class="modal-field"><span>此刻</span>
+        <select class="set-input" id="pf-mood">
+          ${PF_MOODS.map((mood) => `<option value="${mood}"${mood === living.mood.mood ? " selected" : ""}>${mood}</option>`).join("")}
+        </select>
+      </label>
+      <label class="modal-field"><span>原因（≤60 字，可空）</span>
+        <input class="set-input" id="pf-mood-reason" maxlength="60" value="${attr(living.mood.reason)}" />
+      </label>
+      <label class="modal-field"><span>近况一句（≤60 字，可空）</span>
+        <input class="set-input" id="pf-nearby" maxlength="60" value="${attr(living.mood.nearby)}" />
+      </label>
+      <p class="modal-hint" id="pf-mood-hint"></p>
+      <div class="modal-actions">
+        <button class="ghost" type="button" data-modal-cancel>取消</button>
+        <button class="modal-primary" id="pf-mood-save" type="button">保存</button>
+      </div>`;
+    const hint = body.querySelector("#pf-mood-hint");
+    body.querySelector("[data-modal-cancel]")?.addEventListener("click", () => closeModal());
+    body.querySelector("#pf-mood-save")?.addEventListener("click", async () => {
+      const save = body.querySelector("#pf-mood-save");
+      if (save.disabled) return;
+      save.disabled = true;
+      hint.textContent = "保存中…";
+      hint.classList.remove("is-error");
+      const data = await pfPutLiving(
+        partnerId,
+        {
+          mood: body.querySelector("#pf-mood")?.value,
+          moodReason: body.querySelector("#pf-mood-reason")?.value.trim() ?? "",
+          nearby: body.querySelector("#pf-nearby")?.value.trim() ?? "",
+        },
+        hint,
+      );
+      save.disabled = false;
+      if (!data) return;
+      closeModal();
+      toast("心情已保存");
+      onChanged?.();
+    });
+  });
+}
+
+/** 内心生活弹层：愿望清单（可改）+ 日记列表（赞 / 删 / 补一条）+ 成长笔记（只读）。 */
+function pfOpenHeartModal(partnerId, persona, onChanged) {
+  const living = persona.living;
+  if (!living) return;
+  openModal(
+    "人格 · 内心生活",
+    (body) => {
+      body.innerHTML = `
+        <p class="modal-desc">日记与成长笔记是他在盘点时自己写的；你可以点赞、删掉、补一条，但成长笔记不会回写人设正文。</p>
+        <div class="pf-live-block">
+          <div class="pf-live-head"><span>愿望清单（≤${10} 条，每条 ≤40 字）</span></div>
+          <textarea class="pt-ta" id="pf-wishes" rows="4" placeholder="一行一条">${esc(living.wishes.join("\n"))}</textarea>
+          <div class="pf-live-tools"><button class="pf-mini" type="button" id="pf-wishes-save">保存愿望</button></div>
+        </div>
+        <div class="pf-live-block">
+          <div class="pf-live-head"><span>日记（${living.diary.count} 条）</span></div>
+          <div class="pf-live-list" id="pf-diary-list"></div>
+          <label class="modal-field"><span>补一条日记（≤300 字）</span>
+            <textarea class="pt-ta" id="pf-diary-new" rows="2" maxlength="300"></textarea>
+          </label>
+          <div class="pf-live-tools"><button class="pf-mini" type="button" id="pf-diary-add">写进去</button></div>
+        </div>
+        <div class="pf-live-block">
+          <div class="pf-live-head"><span>成长笔记（最近一节，只读）</span></div>
+          <p class="pf-live-text">${living.growth ? esc(living.growth) : "还没有。"}</p>
+        </div>
+        <p class="modal-hint" id="pf-heart-hint"></p>
+        <div class="modal-actions">
+          <button class="modal-primary" type="button" data-modal-cancel>关闭</button>
+        </div>`;
+      const hint = body.querySelector("#pf-heart-hint");
+      const list = body.querySelector("#pf-diary-list");
+      const paintDiary = (entries) => {
+        list.replaceChildren();
+        if (entries.length === 0) {
+          list.innerHTML = `<p class="pf-hint">还没有日记。每周盘点跑完，他会自己写一条。</p>`;
+          return;
+        }
+        for (const entry of entries) {
+          const item = document.createElement("div");
+          item.className = "pf-live-item";
+          item.innerHTML = `
+            <div class="pf-live-head">
+              <span>${esc(pfShortTime(entry.at))}${entry.source === "manual" ? " · 手写" : ""}</span>
+              <span class="pf-live-tools">
+                <button class="pf-mini${entry.liked ? " is-on" : ""}" type="button" data-pf-like>${entry.liked ? "已赞" : "赞"}</button>
+                <button class="pf-mini" type="button" data-pf-del>删</button>
+              </span>
+            </div>
+            <p class="pf-live-text">${esc(entry.text)}</p>`;
+          item.querySelector("[data-pf-like]").addEventListener("click", async () => {
+            const data = await pfPutLiving(
+              partnerId,
+              { diary: entry.liked ? { unlike: entry.id } : { like: entry.id } },
+              hint,
+            );
+            if (data?.living) paintDiary(data.living.diary.entries);
+            onChanged?.();
+          });
+          item.querySelector("[data-pf-del]").addEventListener("click", async () => {
+            const data = await pfPutLiving(partnerId, { diary: { remove: entry.id } }, hint);
+            if (data?.living) paintDiary(data.living.diary.entries);
+            onChanged?.();
+          });
+          list.append(item);
+        }
+      };
+      paintDiary(living.diary.entries);
+      body.querySelector("[data-modal-cancel]")?.addEventListener("click", () => closeModal());
+      body.querySelector("#pf-wishes-save")?.addEventListener("click", async () => {
+        const wishes = String(body.querySelector("#pf-wishes")?.value ?? "")
+          .split(/\r?\n/)
+          .map((item) => item.trim())
+          .filter(Boolean);
+        if (wishes.length > 10 || wishes.some((item) => [...item].length > 40)) {
+          hint.textContent = "愿望最多 10 条、每条不超过 40 字";
+          hint.classList.add("is-error");
+          return;
+        }
+        const data = await pfPutLiving(partnerId, { wishes }, hint);
+        if (data) toast("愿望已保存");
+        onChanged?.();
+      });
+      body.querySelector("#pf-diary-add")?.addEventListener("click", async () => {
+        const text = body.querySelector("#pf-diary-new")?.value.trim();
+        if (!text) return;
+        const data = await pfPutLiving(partnerId, { diary: { add: text } }, hint);
+        if (data?.living) {
+          body.querySelector("#pf-diary-new").value = "";
+          paintDiary(data.living.diary.entries);
+        }
+        onChanged?.();
+      });
+    },
+    { className: "modal-wide" },
+  );
+}
+
+function pfOpenLivingEditor(partnerId, persona, kind, onChanged) {
+  if (kind === "impression") pfOpenImpressionModal(partnerId, persona, onChanged);
+  else if (kind === "mood") pfOpenMoodModal(partnerId, persona, onChanged);
+  else if (kind === "heart") pfOpenHeartModal(partnerId, persona, onChanged);
+}
+
 async function pfWirePersona(root, partnerId) {
   const section = root.querySelector("#pf-persona");
   const presetBox = root.querySelector("#pf-persona-presets");
@@ -924,6 +1246,19 @@ async function pfWirePersona(root, partnerId) {
         edit.textContent = "编辑";
         label.append(edit);
       }
+      if (module.living) {
+        // 活模块这一行（2026-11-15 批2）：一行活状态 + 「查看」手改入口。
+        const live = document.createElement("span");
+        live.className = "pf-mod-live";
+        live.textContent = pfLivingSummary(module.living, persona.living);
+        label.append(live);
+        const open = document.createElement("button");
+        open.type = "button";
+        open.className = "pf-mini";
+        open.dataset.pfLiving = module.living;
+        open.textContent = "查看";
+        label.append(open);
+      }
       const toggle = document.createElement("button");
       toggle.type = "button";
       toggle.className = "switch";
@@ -955,6 +1290,8 @@ async function pfWirePersona(root, partnerId) {
       persona.preset = data.preset ?? persona.preset;
       persona.modules = data.modules ?? persona.modules;
       persona.contents = data.contents ?? persona.contents;
+      persona.switches = data.switches ?? persona.switches;
+      persona.living = data.living ?? persona.living;
       paint();
       setHint("已保存，下一轮起用。");
     } catch (error) {
@@ -984,6 +1321,18 @@ async function pfWirePersona(root, partnerId) {
     const edit = event.target.closest("[data-pf-edit]");
     if (edit) {
       pfOpenPersonaEditor(partnerId, persona, edit.dataset.pfEdit, () => paint());
+      return;
+    }
+    const living = event.target.closest("[data-pf-living]");
+    if (living) {
+      pfOpenLivingEditor(partnerId, persona, living.dataset.pfLiving, () => {
+        void pfReloadPersona(partnerId).then((next) => {
+          if (next) {
+            persona = next;
+            paint();
+          }
+        });
+      });
     }
   });
 

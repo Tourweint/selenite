@@ -378,7 +378,9 @@ export class MemoryEngine {
 				// 不该因为会话记忆封顶被悄悄删掉；过期后它会自己降级为 fact，届时按普通规则走。
 				// experience / work 同样保护（2026-11-10 批 17 §一.3）：经验不衰减；work 是
 				// append-only 台账、有自己的 200 条封顶——都不该被这条通用修剪静默删掉。
-				protectKinds: ["preference", "intention", "experience", "work"],
+				// impression（2026-11-15 批2）同待遇：它有自己的"单对象 20 条"封顶，
+				// 通用修剪若插手会破坏"跨档要有事件记录"的可追溯性。
+				protectKinds: ["preference", "intention", "experience", "work", "impression"],
 				protectReferenced: true,
 			});
 		}

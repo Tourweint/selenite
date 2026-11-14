@@ -29,6 +29,7 @@ import {
 	type PartnersStore,
 } from "../partners.ts";
 import { effectivePersonaModules, personaModulesEnabled } from "../partner-persona.ts";
+import { buildLivingSections, type LivingSections } from "../partner-living.ts";
 
 /**
  * 执事轮上下文装配（2026-11-08 员工人格化刀一 E1 + E5）。
@@ -223,6 +224,11 @@ export interface PartnerContextDeps {
 		stopped: number;
 		total: number;
 	} | null;
+	/**
+	 * 活模块段（2026-11-15 批2）：测试注入已渲染好的三段；不传 = 生产走 partner-living
+	 * 读印象库 / 家目录文件。传 `null` = 明确"没有活内容"（等价空）。
+	 */
+	living?: LivingSections | null;
 }
 
 function readTicketJson(runsDir: string, ticketId: string): Ticket | null {
@@ -414,6 +420,9 @@ const ORDER: Record<string, number> = {
 	partner_brief_card: INJECTION_ORDER.partner_brief_card,
 	partner_attention: INJECTION_ORDER.partner_attention,
 	partner_status: INJECTION_ORDER.partner_status,
+	partner_impression: INJECTION_ORDER.partner_impression,
+	partner_mood: INJECTION_ORDER.partner_mood,
+	partner_heart: INJECTION_ORDER.partner_heart,
 };
 
 /** 纪律段在合并文本里的次序（`buildPartnerDisciplineSection` 靠它拼，测试也照它断言）。 */
@@ -517,6 +526,20 @@ export function partnerContextProviders(
 		return current;
 	};
 
+	// 活模块三段（批2）：一轮只取一次（印象要开库、内心生活要读文件）。
+	// `deps.living` 显式给了就以调用方为准（单测）；没给才走生产读取。
+	let livingLoaded = false;
+	let living: LivingSections | undefined;
+	const livingOf = (): LivingSections | undefined => {
+		if (livingLoaded) return living;
+		livingLoaded = true;
+		living =
+			deps.living !== undefined
+				? (deps.living ?? undefined)
+				: buildLivingSections(partner, store);
+		return living;
+	};
+
 	const providers: InjectionProvider[] = [
 		// 契约取"当前版本快照"；老库/手工放了文件但没快照的，退磁盘当前值。
 		() =>
@@ -548,6 +571,21 @@ export function partnerContextProviders(
 							},
 						}),
 					),
+		// 活模块三段（2026-11-15 批2）：印象 → 心情 → 心里话，挂在在办段之后。
+		// 模块关 / 空内容 → 各自的 provider 返回 undefined（整段不出现）。
+		// `PARTNER_PERSONA_MODULES=false` 时活模块本来不存在 → 整段不注（不靠 deps 兜）。
+		() =>
+			personaModulesEnabled() && personaOn("impression")
+				? entry("partner_impression", livingOf()?.impression)
+				: undefined,
+		() =>
+			personaModulesEnabled() && personaOn("mood")
+				? entry("partner_mood", livingOf()?.mood)
+				: undefined,
+		() =>
+			personaModulesEnabled() && personaOn("heart")
+				? entry("partner_heart", livingOf()?.heart)
+				: undefined,
 	];
 	return providers;
 }
@@ -563,7 +601,13 @@ export interface PartnerTurnContext {
 	discipline: string;
 	/** 当前在办段（三项皆空 + 无履历 → null） */
 	status: string | null;
-	/** 注入模型请求的附加段：契约 + 目标 + 纪律 + 在办（都空 → undefined） */
+	/** 印象段（批2；模块关 / 空 → null） */
+	impression: string | null;
+	/** 心情段（批2；模块关 / 初始态 → null） */
+	mood: string | null;
+	/** 心里话段（批2；愿望与成长笔记都空 → null） */
+	heart: string | null;
+	/** 注入模型请求的附加段：契约 + 目标 + 纪律 + 在办 + 活模块（都空 → undefined） */
 	text: string | undefined;
 }
 
@@ -601,6 +645,9 @@ export function buildPartnerTurnContext(
 		goal: byId.get("partner_goal") ?? null,
 		discipline,
 		status: byId.get("partner_status") ?? null,
+		impression: byId.get("partner_impression") ?? null,
+		mood: byId.get("partner_mood") ?? null,
+		heart: byId.get("partner_heart") ?? null,
 		text: text || undefined,
 	};
 }

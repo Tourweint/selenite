@@ -308,6 +308,10 @@ test("顺序快照：INJECTION_ORDER 是缓存前缀资产（改它 = 有意的�
 		"partner_brief_card",
 		"partner_attention",
 		"partner_status",
+		// 2026-11-15 批2：活模块三段挂在在办之后（印象 → 心情 → 心里话）
+		"partner_impression",
+		"partner_mood",
+		"partner_heart",
 		"task_memory",
 	]);
 	const values = Object.values(INJECTION_ORDER);

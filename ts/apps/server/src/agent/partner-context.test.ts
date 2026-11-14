@@ -810,3 +810,78 @@ test("字段上限：三份 zod schema 在写时拦超限（字 / 条数 / 概�
 	assert.equal(PartnerPersonaScenarioSchema.safeParse({ relations: Array.from({ length: 11 }, () => "x") }).success, false);
 	assert.equal(PartnerPersonaScenarioSchema.safeParse({ relations: [long(61)] }).success, false);
 });
+
+test("活模块注入（批2）：印象 → 心情 → 心里话挂在在办之后；模块关 / 总开关关都不注", () => {
+	const { root, db, homes, workRoot } = tempRoot();
+	const store = new PartnersStore(db, homes);
+	const previous = process.env.PARTNER_PERSONA_MODULES;
+	try {
+		const partner = store.create("小满");
+		store.linkSession({
+			partnerId: partner.id,
+			role: "canonical",
+			routeKey: "canonical",
+			sessionId: 707,
+		});
+		const living = {
+			impression: "【印象】\n- 和主人的关系：熟络",
+			mood: "【此刻状态】\n- 愉悦（刚被谢过）",
+			heart: "【心里话】\n- 想做的事：早点收工",
+		};
+		const deps = { store, workRoot, living };
+
+		// 全开：三段都在，顺序固定在在办段之后
+		store.setPersona(partner.id, {
+			preset: "custom",
+			modules: {
+				...defaultPersonaModules("custom"),
+				impression: true,
+				mood: true,
+				heart: true,
+			},
+		});
+		const all = buildPartnerTurnContext(partner.id, 707, deps);
+		assert.match(all.impression ?? "", /【印象】/);
+		assert.match(all.mood ?? "", /愉悦/);
+		assert.match(all.heart ?? "", /【心里话】/);
+		const text = all.text ?? "";
+		assert.ok(text.indexOf("【印象】") < text.indexOf("【此刻状态】"));
+		assert.ok(text.indexOf("【此刻状态】") < text.indexOf("【心里话】"));
+
+		// 关掉 heart：只有印象与心情
+		store.setPersona(partner.id, {
+			preset: "custom",
+			modules: { ...defaultPersonaModules("custom"), impression: true, mood: true },
+		});
+		const noHeart = buildPartnerTurnContext(partner.id, 707, deps);
+		assert.equal(noHeart.heart, null);
+		assert.ok(!(noHeart.text ?? "").includes("【心里话】"));
+
+		// 全关：三段都不在
+		store.setPersona(partner.id, {
+			preset: "custom",
+			modules: defaultPersonaModules("custom"),
+		});
+		const none = buildPartnerTurnContext(partner.id, 707, deps);
+		assert.equal(none.impression, null);
+		assert.equal(none.mood, null);
+		assert.equal(none.heart, null);
+		assert.ok(!(none.text ?? "").includes("【印象】"));
+
+		// 总开关 false：即使 deps 给了活内容也不注（活模块在旧行为里不存在）
+		process.env.PARTNER_PERSONA_MODULES = "false";
+		store.setPersona(partner.id, {
+			preset: "companion",
+			modules: defaultPersonaModules("companion"),
+		});
+		const legacy = buildPartnerTurnContext(partner.id, 707, deps);
+		assert.equal(legacy.impression, null);
+		assert.equal(legacy.mood, null);
+		assert.equal(legacy.heart, null);
+	} finally {
+		if (previous === undefined) delete process.env.PARTNER_PERSONA_MODULES;
+		else process.env.PARTNER_PERSONA_MODULES = previous;
+		store.close();
+		rmSync(root, { recursive: true, force: true });
+	}
+});

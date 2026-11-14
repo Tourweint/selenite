@@ -5,7 +5,16 @@
  */
 
 import { MemoryScope } from "@lifediary/memory";
-import { PartnerPersonaModuleIds, type PartnerPersonaModule, type PartnerPersonaPreset } from "@lifediary/shared";
+import {
+	PartnerPersonaModuleIds,
+	PARTNER_MOODS,
+	PARTNER_OWNER_TIERS,
+	type PartnerMood,
+	type PartnerOwnerTier,
+	type PartnerPersonaModule,
+	type PartnerPersonaPreset,
+	type PartnerPersonaSwitches,
+} from "@lifediary/shared";
 import { join } from "node:path";
 import { CHIEF_PARTNER_ID, COMPANIONS_ENABLED, chiefPartnerEnabled } from "./partner-contract.ts";
 import type { GroupMessageRow, GroupResponderKind, GroupRow, PartnerRow, PartnerSessionLinkRow, PartnerStatus, RoutineDef, RoutineTrigger } from "./partner-types.ts";
@@ -74,7 +83,53 @@ function toPartner(row: Record<string, unknown>): PartnerRow {
 		diary: Number(row.diary ?? 0) !== 0,
 		personaPreset: toPersonaPreset(row.persona_preset),
 		personaModules: toPersonaModules(row.persona_modules),
+		personaSwitches: toPersonaSwitches(row.persona_switches),
+		ownerTier: toOwnerTier(row.owner_tier),
+		nearby: nullableText(row.nearby),
+		mood: toMood(row.mood),
+		moodReason: nullableText(row.mood_reason),
+		moodUpdatedAt: nullableText(row.mood_updated_at),
+		moodSource: toMoodSource(row.mood_source),
 	};
+}
+
+function nullableText(raw: unknown): string | null {
+	return raw === null || raw === undefined || String(raw) === "" ? null : String(raw);
+}
+
+/** 温度：只认五档；老库 / 脏值一律回初始档 `生疏`。 */
+function toOwnerTier(raw: unknown): PartnerOwnerTier {
+	const value = raw === null || raw === undefined ? "" : String(raw);
+	return (PARTNER_OWNER_TIERS as readonly string[]).includes(value)
+		? (value as PartnerOwnerTier)
+		: "生疏";
+}
+
+/** 心情：只认五种；老库 / 脏值一律回 `平静`。 */
+function toMood(raw: unknown): PartnerMood {
+	const value = raw === null || raw === undefined ? "" : String(raw);
+	return (PARTNER_MOODS as readonly string[]).includes(value) ? (value as PartnerMood) : "平静";
+}
+
+function toMoodSource(raw: unknown): "rule" | "manual" | null {
+	const value = raw === null || raw === undefined ? "" : String(raw);
+	return value === "rule" || value === "manual" ? value : null;
+}
+
+/** 子开关列：只认已登记的键且值为布尔；坏 JSON / 脏值当"没改过"。 */
+function toPersonaSwitches(raw: unknown): PartnerPersonaSwitches {
+	if (raw === null || raw === undefined) return {};
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(String(raw));
+	} catch {
+		return {};
+	}
+	if (!parsed || typeof parsed !== "object") return {};
+	const source = parsed as Record<string, unknown>;
+	return typeof source.moodAffectTone === "boolean"
+		? { moodAffectTone: source.moodAffectTone }
+		: {};
 }
 
 /** 人格预设：只认三个枚举值，老库 / 脏值一律回默认 `work`。 */

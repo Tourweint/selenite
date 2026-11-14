@@ -84,10 +84,14 @@ export class BasicConsolidator implements Consolidator {
 			// 一律跳过查重直接 append，绝不合并 / 强化（"整理纪要"干十次是十条履历）。
 			// intention（2026-11-09 T4 §3）同理：两次「打算」即使同文，也该保留各自的
 			// 时间与有效期；合并会把其中一条的承诺吃掉。
+			// impression（2026-11-15 批2）是带对象维度的事件账：两次被谢是两条事，
+			// 合并会把"次数"吃成一条，温度规则就没法数了。
 			// experience（2026-11-10 批 17 §一.3）反过来：同一套做法再出现一次是"确认"，
 			// 照常合并 / 强化——这是经验层与 work 台账刻意相反的地方。
 			const existing =
-				candidate.kind === "work" || candidate.kind === "intention"
+				candidate.kind === "work" ||
+				candidate.kind === "intention" ||
+				candidate.kind === "impression"
 					? undefined
 					: store
 						.search({ scopes: [candidate.scope], limit: 200 })
@@ -299,10 +303,11 @@ const RETIRE_EXEMPT: ReadonlySet<MemoryKind> = new Set([
 	"experience",
 	"work",
 	"intention",
+	"impression",
 ]);
 
-/** 这些 kind 不参与确定性合并：work 是 append-only，intention 各自有承诺。 */
-const MERGE_EXEMPT: ReadonlySet<MemoryKind> = new Set(["work", "intention"]);
+/** 这些 kind 不参与确定性合并：work 是 append-only，intention 各自有承诺，impression 是可数的事件账。 */
+const MERGE_EXEMPT: ReadonlySet<MemoryKind> = new Set(["work", "intention", "impression"]);
 
 function diffSummary(content: string): string {
 	const flat = content.replace(/\s+/g, " ").trim();

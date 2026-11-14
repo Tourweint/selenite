@@ -2,6 +2,8 @@ import type { SettledSubmissionRecord } from "@earendil-works/pi-durable";
 import type { MemoryScope } from "@lifediary/memory";
 import { chatContentText, type ChatMessage } from "@lifediary/shared";
 import { pruneSessionMemory } from "../memory-prune.ts";
+import { noteTurnSettlement } from "../partner-living.ts";
+import { CHIEF_PARTNER_ID, partnersStore } from "../partners.ts";
 import { appendPersonaExport, personaExportEnabled } from "../persona-export.ts";
 import { memoryEngine, preferenceScopeOf } from "./assist.ts";
 import { TASK_CONVERSATION_PREFIX } from "./shared.ts";
@@ -67,6 +69,22 @@ export function turnSettledHandler(chat: SettledChat, messages: ChatMessage[]) {
 				turnId: String(record.id),
 				...(replyText ? { reply: replyText } : {}),
 			});
+		}
+		// 活模块的结算钩子（2026-11-15 批2）：只认执事的**主会话**（canonical）。
+		// 例行 / 课题专线跑的是提示词不是人在说话，把它的正文当"主人态度"提炼会张冠李戴；
+		// 群成员会话有自己的回合编排（group-runtime），不走这里。
+		// 模块关 / 总管 / 没有可提炼的事 → 内部直接返回，日志只记条数与枚举。
+		// 刻意放在 `memoryEngine` 判空**之前**：印象有自己的库，不依赖记忆引擎开没开。
+		if (record.status === "done") {
+			try {
+				const partnerId = partnersStore().canonicalPartnerIdOfSession(chat.internalId);
+				if (partnerId && partnerId !== CHIEF_PARTNER_ID) {
+					noteTurnSettlement({ partnerId, messages: plain });
+				}
+			} catch (error) {
+				const detail = error instanceof Error ? error.message : String(error);
+				console.warn(`[persona] 结算钩子装配失败（不影响对话）: ${detail.slice(0, 200)}`);
+			}
 		}
 		if (!memoryEngine || record.status !== "done") return;
 		// 任务专线（`task-` 前缀，2026-11-08 扫尾批 8g）不进记忆引擎：就算主人从会话页

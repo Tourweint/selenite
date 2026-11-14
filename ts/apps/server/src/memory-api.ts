@@ -26,6 +26,7 @@ const ALL_MEMORY_KINDS: MemoryKind[] = [
 	"episode",
 	"experience",
 	"work",
+	"impression",
 ];
 
 function parseKindList(raw: string | undefined): MemoryKind[] | null {

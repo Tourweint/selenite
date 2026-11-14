@@ -702,8 +702,21 @@ interface PersonaBody {
 	enabled?: boolean;
 	preset?: string;
 	modules?: Record<string, boolean>;
+	switches?: { moodAffectTone?: boolean };
 	contents?: { style?: Record<string, unknown>; values?: Record<string, unknown>; scenario?: Record<string, unknown> };
-	limits?: { style?: { speakStyle?: number; catchphrases?: { max?: number; each?: number } } };
+	living?: {
+		ownerTier?: string;
+		tierNote?: string | null;
+		mood?: { mood?: string; reason?: string; nearby?: string; updatedAt?: string | null; source?: string | null };
+		impressions?: Array<{ id: string; subject: string; subjectName: string; text: string; source: string }>;
+		diary?: { count?: number; latestText?: string | null; entries?: Array<{ id: string; text: string; liked?: boolean; source?: string }> };
+		wishes?: string[];
+		growth?: string | null;
+	} | null;
+	limits?: {
+		style?: { speakStyle?: number; catchphrases?: { max?: number; each?: number } };
+		living?: { impressionText?: number; diaryText?: number; wishes?: number };
+	};
 	error?: string;
 	message?: string;
 }
@@ -821,6 +834,91 @@ test("PARTNER_PERSONA_MODULES=false：GET 回默认值且 enabled=false，PUT 40
 		const put = await putPersona(partner.id, { preset: "companion" });
 		assert.equal(put.status, 400);
 		assert.match(((await put.json()) as PersonaBody).message ?? "", /PARTNER_PERSONA_MODULES/);
+	} finally {
+		if (previous === undefined) delete process.env.PARTNER_PERSONA_MODULES;
+		else process.env.PARTNER_PERSONA_MODULES = previous;
+	}
+});
+
+test("persona 活状态（批2）：GET 带 living 默认值；PUT 手改心情 / 愿望 / 日记写 manual", async () => {
+	const partner = store.create("活状态执事");
+	const before = (await (
+		await app.request(`/api/v1/partners/${partner.id}/persona`)
+	).json()) as PersonaBody;
+	assert.equal(before.living?.ownerTier, "生疏");
+	assert.equal(before.living?.mood?.mood, "平静");
+	assert.equal(before.living?.mood?.source, null);
+	assert.deepEqual(before.living?.impressions, []);
+	assert.equal(before.living?.diary?.count, 0);
+	assert.deepEqual(before.living?.wishes, []);
+	assert.equal(before.limits?.living?.impressionText, 120);
+	assert.equal(before.switches?.moodAffectTone, false);
+
+	const res = await putPersona(partner.id, {
+		switches: { moodAffectTone: true },
+		living: {
+			ownerTier: "认识",
+			mood: "疲惫",
+			moodReason: "跑了一天",
+			nearby: "在补上周的账",
+			wishes: ["早点收工"],
+			diary: { add: "今天很累，但把账补完了。" },
+		},
+	});
+	assert.equal(res.status, 200);
+	const body = (await res.json()) as PersonaBody;
+	assert.equal(body.switches?.moodAffectTone, true);
+	assert.equal(body.living?.ownerTier, "认识");
+	assert.equal(body.living?.mood?.mood, "疲惫");
+	assert.equal(body.living?.mood?.reason, "跑了一天");
+	assert.equal(body.living?.mood?.source, "manual", "手改写 manual 标记");
+	assert.equal(body.living?.diary?.count, 1);
+	assert.equal(body.living?.diary?.latestText, "今天很累，但把账补完了。");
+	assert.equal(body.living?.diary?.entries?.[0]?.source, "manual");
+	assert.deepEqual(body.living?.wishes, ["早点收工"]);
+
+	// 赞 → 删（只影响展示排序，不做算法）
+	const diaryId = body.living?.diary?.entries?.[0]?.id ?? "";
+	const liked = (await (
+		await putPersona(partner.id, { living: { diary: { like: diaryId } } })
+	).json()) as PersonaBody;
+	assert.equal(liked.living?.diary?.entries?.[0]?.liked, true);
+	const removed = (await (
+		await putPersona(partner.id, { living: { diary: { remove: diaryId } } })
+	).json()) as PersonaBody;
+	assert.equal(removed.living?.diary?.count, 0);
+
+	// 非法值一律 400，且一个字段都不写
+	assert.equal((await putPersona(partner.id, { living: { mood: "开心" } })).status, 400);
+	assert.equal(
+		(await putPersona(partner.id, { living: { wishes: Array.from({ length: 11 }, () => "想") } })).status,
+		400,
+	);
+	assert.equal(
+		(
+			await putPersona(partner.id, {
+				living: { impression: { add: { subject: "owner", text: "字".repeat(121) } } },
+			})
+		).status,
+		400,
+	);
+	const still = (await (
+		await app.request(`/api/v1/partners/${partner.id}/persona`)
+	).json()) as PersonaBody;
+	assert.equal(still.living?.mood?.mood, "疲惫", "400 不写");
+	assert.deepEqual(still.living?.wishes, ["早点收工"]);
+});
+
+test("persona 活状态：PARTNER_PERSONA_MODULES=false 时 living 为 null（整块隐藏）", async () => {
+	const partner = store.create("活状态回滚执事");
+	const previous = process.env.PARTNER_PERSONA_MODULES;
+	process.env.PARTNER_PERSONA_MODULES = "false";
+	try {
+		const body = (await (
+			await app.request(`/api/v1/partners/${partner.id}/persona`)
+		).json()) as PersonaBody;
+		assert.equal(body.enabled, false);
+		assert.equal(body.living, null);
 	} finally {
 		if (previous === undefined) delete process.env.PARTNER_PERSONA_MODULES;
 		else process.env.PARTNER_PERSONA_MODULES = previous;

@@ -190,6 +190,27 @@
 .pf-mod-name:hover { border-bottom-color: var(--outline); }
 .pf-mod .pf-mini { font-size: 11.5px; }
 
+/* 活模块一行（2026-11-15 批2）：状态摘要跟在模块名后，过长就省略 */
+.pf-mod-live {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 11.5px; color: var(--text-3);
+}
+
+/* 活状态弹层（印象 / 心情 / 内心生活）：列表与小块 */
+.pf-live-block { margin-top: 12px; }
+.pf-live-block + .pf-live-block { border-top: 1px solid var(--divider); padding-top: 12px; }
+.pf-live-list { display: flex; flex-direction: column; gap: 8px; max-height: 42vh; overflow: auto; padding-right: 4px; }
+.pf-live-item { border: 1px solid var(--divider); border-radius: var(--r-sm); padding: 8px 10px; }
+.pf-live-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+  font-size: 11.5px; color: var(--text-3); margin-bottom: 4px;
+}
+.pf-live-at { flex: none; font-family: var(--mono); font-size: 10.5px; }
+.pf-live-tools { display: flex; gap: 8px; justify-content: flex-end; margin-top: 4px; }
+.pf-live-item .pt-ta { width: 100%; min-height: 48px; resize: vertical; font-size: 12.5px; }
+.pf-live-text { margin: 0; font-size: 12.5px; color: var(--text-2); white-space: pre-wrap; line-height: 1.6; }
+.pf-live-tools .pf-mini.is-on { color: var(--accent); border-color: var(--accent); }
+
 /* 静态模块编辑弹层（modal-wide 档）：字段一列到底，说明挂在标签右侧 */
 .pf-edit-grid {
   display: flex; flex-direction: column; gap: 12px;

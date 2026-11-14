@@ -8,6 +8,7 @@ import {
 	type ResolvedChat,
 } from "./agent.ts";
 import { GroupRouteError, resolveGroupSpeakers } from "./group-routing.ts";
+import { noteGroupTurn } from "./partner-living.ts";
 import { personaRefreshNeeded, personaSignature } from "./partner-persona.ts";
 import { renderPartnerIdentity } from "./partner-runtime.ts";
 import {
@@ -330,6 +331,24 @@ async function runMemberTurn(
 	}
 
 	const finalText = pieces.join("").trim();
+	// 活模块（2026-11-15 批2）：群回合不经过主会话的结算钩子，被同事点名在这里记一条印象。
+	// 只记"本回合、别人说的、点了我的名"这一种事件；模块关时内部直接返回。
+	if (!aborted) {
+		try {
+			const earlier = store
+				.listGroupMessages(group.id, { limit: 100 })
+				.filter((message) => message.roundId === roundId);
+			noteGroupTurn({
+				partnerId: partner.id,
+				partnerName: partner.name,
+				messages: earlier,
+				store,
+			});
+		} catch (error) {
+			const detail = error instanceof Error ? error.message : String(error);
+			console.warn(`[persona] 群印象钩子装配失败（不影响群回合）: ${detail.slice(0, 200)}`);
+		}
+	}
 	if (aborted) {
 		// 停止：已说出口的半截话也落库（时间线不缺块），剩余队列由外层作废
 		if (finalText) {

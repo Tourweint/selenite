@@ -5,7 +5,13 @@
  */
 
 import { join } from "node:path";
-import type { PartnerPersonaModule, PartnerPersonaPreset } from "@lifediary/shared";
+import type {
+	PartnerMood,
+	PartnerOwnerTier,
+	PartnerPersonaModule,
+	PartnerPersonaPreset,
+	PartnerPersonaSwitches,
+} from "@lifediary/shared";
 
 export type PartnerStatus = "active" | "paused" | "archived";
 
@@ -57,6 +63,27 @@ export interface PartnerRow {
 	 * 同样是状态不是身份：一条 UPDATE 落地，不 bump 版本。
 	 */
 	personaModules: Partial<Record<PartnerPersonaModule, boolean>>;
+	/**
+	 * 人格子开关（2026-11-15 批2）：目前只有 `moodAffectTone`（心情是否影响口吻）。
+	 * 与 14 个模块 id 分开存，别混进 `personaModules`——那是"模块在不在"，这是"模块里的一个旋钮"。
+	 */
+	personaSwitches: PartnerPersonaSwitches;
+	/**
+	 * 关系温度五档（2026-11-15 批2）：`生疏`（默认）/ `认识` / `熟络` / `亲近` / `像家人`。
+	 * **只有文字档位，没有数值**；跨档必须能指到一条带 `tierChange` 的印象记录。
+	 * 不版本化（不是身份），一条 UPDATE 落地。
+	 */
+	ownerTier: PartnerOwnerTier;
+	/** 近况一句（≤60 字）；null = 没写。 */
+	nearby: string | null;
+	/** 心情枚举（五种）；老库存 null，读出来按 `平静` 算。 */
+	mood: PartnerMood;
+	/** 心情原因一句（≤60 字）；null = 没写。 */
+	moodReason: string | null;
+	/** 心情最近一次变化时间（ISO）；null = 从没变过（尚在初始态）。 */
+	moodUpdatedAt: string | null;
+	/** 这条心情是谁写的：`rule`（可见规则）/ `manual`（人改的）；null = 初始态。 */
+	moodSource: "rule" | "manual" | null;
 }
 
 export interface PartnerVersionRow {

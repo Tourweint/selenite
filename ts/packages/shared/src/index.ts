@@ -1378,12 +1378,171 @@ export interface PartnerPersonaContents {
 	scenario: PartnerPersonaScenario;
 }
 
+/* ── 员工人格 · 活模块（2026-11-15 批2，方案 §六）──
+ *
+ * 三个活模块各自的家（**不要合并成一份状态**）：
+ *   - 印象：记忆库 `kind="impression"`，每条带 `subject`（`owner` 或群成员 id）；
+ *   - 心情 / 近况：`partners` 表的列（一条 UPDATE，不版本化）；
+ *   - 内心生活：伙伴家目录 `persona/diary.jsonl` / `growth.md` / `wishes.json`。
+ *
+ * 刻意没有（已登记 `系统架构.md`）：数值好感度（温度只有五档文字）、假装身体的生理状态、
+ * agent 回写 SOUL 本体。上限在这里定义一次，端点 `limits` 原样回给前端。 */
+
+/** 关系温度五档（2026-11-14 拍板：文字档位，不做数值好感度）。顺序即由浅到深。 */
+export const PARTNER_OWNER_TIERS = ["生疏", "认识", "熟络", "亲近", "像家人"] as const;
+export const PartnerOwnerTierSchema = z.enum(PARTNER_OWNER_TIERS);
+export type PartnerOwnerTier = z.infer<typeof PartnerOwnerTierSchema>;
+
+/** 心情枚举（只有这五种；不模拟生理状态，烦躁 / 疲惫只做手改选项，规则不生成）。 */
+export const PARTNER_MOODS = ["平静", "愉悦", "低落", "烦躁", "疲惫"] as const;
+export const PartnerMoodSchema = z.enum(PARTNER_MOODS);
+export type PartnerMood = z.infer<typeof PartnerMoodSchema>;
+
+/** 活内容上限（Unicode code point 计长，与静态模块同一口径）。 */
+export const PARTNER_LIVING_LIMITS = {
+	impressionText: 120,
+	/** 每个对象最多留多少条印象（超出淘汰最旧；跨档记录不淘汰）。 */
+	impressionsPerSubject: 20,
+	nearby: 60,
+	moodReason: 60,
+	diaryText: 300,
+	/** 员工日记最多留多少条（超出淘汰最旧）。 */
+	diaryEntries: 500,
+	weeklyWords: 80,
+	growthNote: 400,
+	wishText: 40,
+	wishes: 10,
+} as const;
+
+/**
+ * 一条印象（记忆库 `kind="impression"` 的正文 JSON）。
+ * `tierChange` = 这条就是温度跨档事件（变化后的档位）；没有它的条目是档内累积。
+ */
+export const PartnerImpressionSchema = z
+	.object({
+		id: z.string(),
+		/** `owner` 或群成员的对外 id（uuid）。 */
+		subject: z.string().min(1).max(64),
+		text: personaText(PARTNER_LIVING_LIMITS.impressionText, "印象"),
+		at: z.string(),
+		source: z.enum(["generated", "manual"]),
+		/** 事件类型：致谢 / 被纠正；普通条目不带。只有前两种由规则生成。 */
+		event: z.enum(["thanks", "correction"]).optional(),
+		tierChange: PartnerOwnerTierSchema.optional(),
+	})
+	.strict();
+export type PartnerImpression = z.infer<typeof PartnerImpressionSchema>;
+
+/** 员工日记一条（`persona/diary.jsonl` 的一行）。`liked` 只影响列表排序，不做算法。 */
+export const PartnerDiaryEntrySchema = z
+	.object({
+		id: z.string(),
+		at: z.string(),
+		text: personaText(PARTNER_LIVING_LIMITS.diaryText, "日记"),
+		source: z.enum(["generated", "manual"]),
+		liked: z.boolean().optional(),
+	})
+	.strict();
+export type PartnerDiaryEntry = z.infer<typeof PartnerDiaryEntrySchema>;
+
+/** 愿望清单（`persona/wishes.json`）：≤10 条 × 每条 ≤40 字。 */
+export const PartnerWishListSchema = z
+	.array(personaText(PARTNER_LIVING_LIMITS.wishText, "愿望"))
+	.max(PARTNER_LIVING_LIMITS.wishes, { message: `愿望最多 ${PARTNER_LIVING_LIMITS.wishes} 条` });
+export type PartnerWishList = z.infer<typeof PartnerWishListSchema>;
+
+/**
+ * PUT `/partners/:id/persona` 的 `living` 段：手改活状态。
+ * 每次只做一个动作（按字段/按条目），避免"整份覆盖"把并发生成的内容冲掉。
+ * 手改一律写 `manual` 标记：印象 / 日记的 source、温度的 tierChange 账都记 manual。
+ */
+export const PartnerLivingPatchSchema = z
+	.object({
+		/** 手改温度 = 一次可解释的跨档事件（写一条带 tierChange 的 manual 印象）。 */
+		ownerTier: PartnerOwnerTierSchema.optional(),
+		nearby: personaText(PARTNER_LIVING_LIMITS.nearby, "近况").optional(),
+		mood: PartnerMoodSchema.optional(),
+		moodReason: personaText(PARTNER_LIVING_LIMITS.moodReason, "心情原因").optional(),
+		/** 整份替换（愿望清单本来就是一份小列表，改哪条都等于整份）。 */
+		wishes: PartnerWishListSchema.optional(),
+		impression: z
+			.union([
+				z
+					.object({
+						add: z
+							.object({ subject: z.string().min(1).max(64), text: personaText(PARTNER_LIVING_LIMITS.impressionText, "印象") })
+							.strict(),
+					})
+					.strict(),
+				z
+					.object({
+						update: z
+							.object({ id: z.string(), text: personaText(PARTNER_LIVING_LIMITS.impressionText, "印象") })
+							.strict(),
+					})
+					.strict(),
+				z.object({ remove: z.string() }).strict(),
+			])
+			.optional(),
+		diary: z
+			.union([
+				z.object({ add: personaText(PARTNER_LIVING_LIMITS.diaryText, "日记") }).strict(),
+				z
+					.object({
+						edit: z
+							.object({ id: z.string(), text: personaText(PARTNER_LIVING_LIMITS.diaryText, "日记") })
+							.strict(),
+					})
+					.strict(),
+				z.object({ like: z.string() }).strict(),
+				z.object({ unlike: z.string() }).strict(),
+				z.object({ remove: z.string() }).strict(),
+			])
+			.optional(),
+	})
+	.strict();
+export type PartnerLivingPatch = z.infer<typeof PartnerLivingPatchSchema>;
+
+/** 活模块的子开关（`persona_switches` 列）：目前只有"心情是否影响口吻"。 */
+export const PartnerPersonaSwitchesSchema = z
+	.object({ moodAffectTone: z.boolean().optional() })
+	.strict();
+export type PartnerPersonaSwitches = z.infer<typeof PartnerPersonaSwitchesSchema>;
+
+/** 端点的活状态投影（GET / PUT 同一份形状；`enabled=false` 时整段为 null）。 */
+export interface PartnerLivingView {
+	ownerTier: PartnerOwnerTier;
+	/** 最近一次跨档事件的说明（来自带 `tierChange` 的印象），没有则 null。 */
+	tierNote: string | null;
+	mood: {
+		mood: PartnerMood;
+		reason: string;
+		nearby: string;
+		updatedAt: string | null;
+		source: "rule" | "manual" | null;
+	};
+	/** 全部印象（按对象分组，单对象 ≤20 条）。`subjectName` 是读取时解析的展示名。 */
+	impressions: Array<PartnerImpression & { subjectName: string }>;
+	diary: {
+		count: number;
+		latestAt: string | null;
+		latestText: string | null;
+		/** 最近 50 条（最早的在前）；"赞 / 删"按 id 操作，不需要一次拉全量。 */
+		entries: PartnerDiaryEntry[];
+	};
+	/** 成长笔记最近一节（`persona/growth.md` 的尾部），没有则 null。 */
+	growth: string | null;
+	wishes: string[];
+}
+
 /** PUT /api/v1/partners/:id/persona 的 body：按模块部分更新（省略 = 不改）。 */
 export const PartnerPersonaPatchSchema = z
 	.object({
 		preset: PartnerPersonaPresetSchema.optional(),
 		/** 只写给出的模块；键必须是 14 个 id 之一，值必须是布尔。 */
 		modules: z.record(PartnerPersonaModuleSchema, z.boolean()).optional(),
+		/** 子开关（2026-11-15 批2）：目前只有 `moodAffectTone`。省略 = 不改。 */
+		switches: PartnerPersonaSwitchesSchema.optional(),
 		/** 只写给出的模块；模块内按**字段**合并（省略的字段不动，空串 = 清空该字段）。 */
 		contents: z
 			.object({
@@ -1393,6 +1552,8 @@ export const PartnerPersonaPatchSchema = z
 			})
 			.strict()
 			.optional(),
+		/** 活状态手改（2026-11-15 批2）：温度 / 心情 / 近况 / 愿望 / 印象 / 日记。 */
+		living: PartnerLivingPatchSchema.optional(),
 	})
 	.strict();
 export type PartnerPersonaPatch = z.infer<typeof PartnerPersonaPatchSchema>;
@@ -1407,8 +1568,11 @@ export interface PartnerPersonaView {
 	enabled: boolean;
 	preset: PartnerPersonaPreset;
 	modules: Record<PartnerPersonaModule, boolean>;
+	switches: { moodAffectTone: boolean };
 	contents: PartnerPersonaContents;
-	limits: typeof PARTNER_PERSONA_LIMITS;
+	/** 活状态（批2）；`enabled=false` 时为 null（整块隐藏，不假装有状态）。 */
+	living: PartnerLivingView | null;
+	limits: typeof PARTNER_PERSONA_LIMITS & { living: typeof PARTNER_LIVING_LIMITS };
 }
 
 export const RoutineTriggerSchema = z.discriminatedUnion("type", [

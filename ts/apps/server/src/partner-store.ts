@@ -5,7 +5,13 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type { PartnerPersonaModule, PartnerPersonaPreset } from "@lifediary/shared";
+import type {
+	PartnerMood,
+	PartnerOwnerTier,
+	PartnerPersonaModule,
+	PartnerPersonaPreset,
+	PartnerPersonaSwitches,
+} from "@lifediary/shared";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -39,7 +45,14 @@ export class PartnersStore {
 			tagline         TEXT,
 			diary           INTEGER NOT NULL DEFAULT 0,
 			persona_preset  TEXT,
-			persona_modules TEXT
+			persona_modules TEXT,
+			persona_switches TEXT,
+			owner_tier      TEXT,
+			nearby          TEXT,
+			mood            TEXT,
+			mood_reason     TEXT,
+			mood_updated_at TEXT,
+			mood_source     TEXT
 			);
 			CREATE TABLE IF NOT EXISTS partner_versions (
 				partner_id   TEXT NOT NULL,
@@ -147,6 +160,21 @@ export class PartnersStore {
 		}
 		if (!columns.some((column) => column.name === "persona_modules")) {
 			this.db.exec("ALTER TABLE partners ADD COLUMN persona_modules TEXT");
+		}
+		// 人格子开关 + 活状态（2026-11-15 批2）：旧库补 nullable 列，老行读 null ——
+		// 子开关按默认关、温度按 `生疏`、心情按 `平静`（`toPartner` 统一兜底）。
+		for (const column of [
+			"persona_switches",
+			"owner_tier",
+			"nearby",
+			"mood",
+			"mood_reason",
+			"mood_updated_at",
+			"mood_source",
+		]) {
+			if (!columns.some((existing) => existing.name === column)) {
+				this.db.exec(`ALTER TABLE partners ADD COLUMN ${column} TEXT`);
+			}
 		}
 		// 岗位契约快照列（2026-11-08 员工人格化刀一 E1）：旧库补 nullable 列，
 		// 老版本读出来是 null（= 无契约快照），不炸、不补数据、不越权回填。
@@ -340,14 +368,69 @@ export class PartnersStore {
 		patch: {
 			preset: PartnerPersonaPreset;
 			modules: Record<PartnerPersonaModule, boolean>;
+			/** 2026-11-15 批2 子开关；省略 = 保持原值（别的调用方零改动）。 */
+			switches?: PartnerPersonaSwitches;
 		},
 	): PartnerRow | null {
-		if (!this.get(id)) return null;
+		const existing = this.get(id);
+		if (!existing) return null;
+		const switches = patch.switches ?? existing.personaSwitches;
 		this.db
 			.prepare(
-				"UPDATE partners SET persona_preset = ?, persona_modules = ?, updated_at = ? WHERE id = ?",
+				"UPDATE partners SET persona_preset = ?, persona_modules = ?, persona_switches = ?, updated_at = ? WHERE id = ?",
 			)
-			.run(patch.preset, JSON.stringify(patch.modules), new Date().toISOString(), id);
+			.run(
+				patch.preset,
+				JSON.stringify(patch.modules),
+				JSON.stringify(switches),
+				new Date().toISOString(),
+				id,
+			);
+		return this.get(id);
+	}
+
+	/**
+	 * 关系温度（2026-11-15 批2）：一条 UPDATE，不版本化。
+	 * 跨档的"可解释事件"由调用方先写进印象账（带 `tierChange` 的记录），这里只落当前档。
+	 */
+	setOwnerTier(id: string, tier: PartnerOwnerTier): PartnerRow | null {
+		if (!this.get(id)) return null;
+		this.db
+			.prepare("UPDATE partners SET owner_tier = ?, updated_at = ? WHERE id = ?")
+			.run(tier, new Date().toISOString(), id);
+		return this.get(id);
+	}
+
+	/**
+	 * 心情 / 近况（2026-11-15 批2）：一条 UPDATE，不版本化。
+	 * 省略的字段保持原值（心情与近况各自可单独改）；`source` 记 `rule` / `manual`。
+	 */
+	setLivingState(
+		id: string,
+		patch: {
+			nearby?: string | null;
+			mood?: PartnerMood;
+			moodReason?: string | null;
+			moodSource?: "rule" | "manual";
+		},
+	): PartnerRow | null {
+		const existing = this.get(id);
+		if (!existing) return null;
+		const touchedMood =
+			patch.mood !== undefined || patch.moodReason !== undefined || patch.moodSource !== undefined;
+		this.db
+			.prepare(
+				"UPDATE partners SET nearby = ?, mood = ?, mood_reason = ?, mood_updated_at = ?, mood_source = ?, updated_at = ? WHERE id = ?",
+			)
+			.run(
+				patch.nearby !== undefined ? patch.nearby : existing.nearby,
+				patch.mood ?? existing.mood,
+				patch.moodReason !== undefined ? patch.moodReason : existing.moodReason,
+				touchedMood ? new Date().toISOString() : existing.moodUpdatedAt,
+				patch.moodSource !== undefined ? patch.moodSource : existing.moodSource,
+				new Date().toISOString(),
+				id,
+			);
 		return this.get(id);
 	}
 

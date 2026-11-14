@@ -11,6 +11,7 @@ import { authorityRecheckEnabled, recheckAuthority } from "./delegation-authorit
 import type { DelegationSenderKind } from "./delegation-messages.ts";
 import { delegationMessages } from "./delegation-messages.ts";
 import { failureStreak, takeoverHintEnabled } from "./failure-streak.ts";
+import { noteWorkSettlementForConversation } from "./partner-living.ts";
 import { WorkStatus } from "./work-record.ts";
 import { DelegationPhase } from "@lifediary/shared";
 import { buildManagerIdentity, formatMessageLine, formatProgressLine, formatReport, truncate } from "./delegation-delegation-kickoff.ts";
@@ -131,6 +132,9 @@ export function startDelegation(
 				const detail = error instanceof Error ? error.message : String(error);
 				console.warn(`[work] 履历落账异常（不影响结算）: ${detail.slice(0, 200)}`);
 			}
+			// 人格活模块（2026-11-15 批2）：连续两单失败 / 中止 → 心情低落（可见规则）。
+			// 与履历落账同一处结算点、同一判据认执事；模块关着时内部直接返回。
+			noteWorkSettlementForConversation(kick.conversationId, workStatus);
 		}
 		// 作废单点 1：已取消的单既不写回会话（不 recordMessage、不发 report），
 		// 也不为它发任何事件（作废单点 4：SSE 不再为该单发事件）。
@@ -219,6 +223,8 @@ export function startDelegation(
 				const detail = recordError instanceof Error ? recordError.message : String(recordError);
 				console.warn(`[work] 履历落账异常（不影响结算）: ${detail.slice(0, 200)}`);
 			}
+			// 同一个结算点（2026-11-15 批2）：派单失败也参与"连续两单没成"的心情规则。
+			noteWorkSettlementForConversation(kick.conversationId, canceled ? "canceled" : "failed");
 		}
 		// 作废单失败也保持静默：不往对话里发 failed 帧、不汇报。
 		if (canceled) return;

@@ -31,6 +31,12 @@ import {
 } from "./routine-conditions.ts";
 import { evaluateRoutineCondition } from "./routine-gate.ts";
 import { routineQuietEnabled } from "./routine-quiet.ts";
+import {
+	PERSONA_DIGEST_INSTRUCTION,
+	applyRoutineDigest,
+	isReviewRoutine,
+	livingModuleOn,
+} from "./partner-living.ts";
 import { runSourceEnabled, type RunSource } from "./run-source.ts";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 
@@ -714,10 +720,25 @@ class RoutineEngine {
 				cursorAt: conditional ? this.cursorOf(routine.id) : undefined,
 				conditional,
 			});
-			const result = await runPartnerTurn(routine.partnerId, prompt, {
+			// 人格活模块（2026-11-15 批2）：heart 开 + 盘点例行 → 提示词末尾加"你自己的记录"段。
+			// 不新造调度：还是这条例行规则、这次触发，只是产出格式多三段。
+			const partnerRow = partnersStore().get(routine.partnerId);
+			const heartDigestWanted =
+				Boolean(partnerRow) && isReviewRoutine(routine) && livingModuleOn(partnerRow!, "heart");
+			const finalPrompt = heartDigestWanted
+				? `${prompt}\n\n${PERSONA_DIGEST_INSTRUCTION}`
+				: prompt;
+			const result = await runPartnerTurn(routine.partnerId, finalPrompt, {
 				authority: "autonomous",
 				sessionMode: routine.sessionMode,
 			});
+			// 人格活模块（2026-11-15 批2）：heart 开着的**盘点例行**才挂"他自己的话"，
+			// 生成结果由 applyRoutineDigest 摘出日记 / 成长笔记；周报一句留在正文末尾。
+			const digest =
+				result.ok && heartDigestWanted
+					? applyRoutineDigest({ partnerId: routine.partnerId, text: result.text ?? "" })
+					: null;
+			const replyText = digest?.text ?? (result.text ?? "");
 			const finished = this.load();
 			const mark = finished.running[routine.id];
 			if (mark?.runId !== runId) return; // 期间被重启结算过，不再覆盖
@@ -731,8 +752,8 @@ class RoutineEngine {
 				run.skipReason = `unattended:${skipped.join(",")}`;
 			}
 			const doneMarker = conditional
-				? extractRoutineDone(result.text ?? "")
-				: { text: result.text ?? "", done: false };
+				? extractRoutineDone(replyText)
+				: { text: replyText, done: false };
 			// ends.after 是 maxRuns 的别名（批 21 §三）：两者同时存在取更小的。
 			const maxRuns = conditional
 				? effectiveMaxRuns(routine.maxRuns, routine.triggers)

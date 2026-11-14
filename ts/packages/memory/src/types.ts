@@ -78,7 +78,17 @@ export type MemoryKind =
 	 * 参与巩固合并（同 scope 规范化等价的经验可合并——与 work 相反）。
 	 * 写入只发生在派单 `done` 且过价值门槛时（见 server 的 work-record.ts），宁缺毋滥。
 	 */
-	| "experience";
+	| "experience"
+	/**
+	 * 印象（2026-11-15 员工人格模块批2）：伙伴对**某个对象**的印象分条。
+	 *
+	 * 与 `fact` 的区别是**带对象维度**（正文 JSON 的 `subject`：`owner` 或群成员 id）
+	 * 以及"只由结算钩子 / 人手写、模型不可伪造"（`remember` 工具的 kind 枚举不含它）。
+	 * 与 `work` 同待遇：append-only、不进语义召回、不衰减、不参与巩固合并；
+	 * 读取走 `store.search({scopes, kinds:["impression"]})` 的结构化查询，
+	 * 单对象 20 条封顶由写入点（server 的 partner-living.ts）自己修剪。
+	 */
+	| "impression";
 
 /**
  * 可信度来源。参考 mnemopi 的 veracity：

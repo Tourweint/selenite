@@ -48,6 +48,13 @@ function partner(over: Partial<PartnerRow> & { id: string; name: string }): Part
 		diary: false,
 		personaPreset: "work",
 		personaModules: {},
+		personaSwitches: {},
+		ownerTier: "生疏",
+		nearby: null,
+		mood: "平静",
+		moodReason: null,
+		moodUpdatedAt: null,
+		moodSource: null,
 		...over,
 	};
 }

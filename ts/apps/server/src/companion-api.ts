@@ -5,6 +5,7 @@ import { inflateSync } from "node:zlib";
 import {
 	PARTNER_AVATAR_MAX_DIMENSION,
 	PARTNER_AVATAR_PREFIX,
+	PARTNER_LIVING_LIMITS,
 	PartnerAvatarPatchSchema,
 	PARTNER_PERSONA_LIMITS,
 	PartnerPersonaPatchSchema,
@@ -29,6 +30,8 @@ import {
 	readPersonaContents,
 	writePersonaContents,
 } from "./partner-persona.ts";
+// 活模块（2026-11-15 批2）：印象 / 心情 / 日记的读写与手改都在 partner-living.ts。
+import { applyLivingPatch, livingView } from "./partner-living.ts";
 // 建/停执事的唯一核心实现（批次D D3）：端点与 partner_manage 工具共用，端点只做形状映射。
 import { createMinisterPartner, stopMinisterPartner } from "./partner-manage.ts";
 import { runPartnerTurn, openPartnerConversation } from "./partner-runtime.ts";
@@ -350,15 +353,24 @@ export function mountCompanions(app: Hono): void {
 					: modules;
 			modules = { ...base, ...(patch.modules ?? {}) };
 		}
+		const switches = { ...partner.personaSwitches, ...(patch.switches ?? {}) };
 
-		// 先落静态内容（每个文件独立原子写），再落库：写盘失败时预设置不动，不留"开关变了内容没变"。
+		// 先落静态内容（每个文件独立原子写），再落活状态，最后落库：
+		// 写盘失败时预设置不动，不留"开关变了内容没变"。
 		try {
 			if (patch.contents) writePersonaContents(store(), id, patch.contents);
 		} catch (error) {
 			const detail = error instanceof Error ? error.message : String(error);
 			return c.json({ error: "bad_request", message: detail }, 400);
 		}
-		const updated = store().setPersona(id, { preset, modules }) ?? partner;
+		// 活状态手改（2026-11-15 批2）：走 partner-living 的同一条路径，写前已过 shared 的 zod。
+		if (patch.living) {
+			const applied = applyLivingPatch(id, patch.living, store());
+			if (!applied.ok) {
+				return c.json({ error: "bad_request", message: applied.message }, 400);
+			}
+		}
+		const updated = store().setPersona(id, { preset, modules, switches }) ?? partner;
 		return c.json(personaView(updated));
 	});
 
@@ -911,8 +923,12 @@ function personaView(partner: PartnerRow): PartnerPersonaView {
 		enabled,
 		preset: enabled ? partner.personaPreset : "work",
 		modules: enabled ? effectivePersonaModules(partner) : defaultPersonaModules("work"),
+		// 子开关（批2）：总开关关着时回默认（口吻影响关），与模块表同一口径。
+		switches: { moodAffectTone: enabled && partner.personaSwitches.moodAffectTone === true },
 		contents: readPersonaContents(partnersStore(), partner.id),
-		limits: PARTNER_PERSONA_LIMITS,
+		// 活状态（批2）：总开关关着整段为 null —— 前端整块隐藏，不假装有状态。
+		living: enabled ? livingView(partner, partnersStore()) : null,
+		limits: { ...PARTNER_PERSONA_LIMITS, living: PARTNER_LIVING_LIMITS },
 	};
 }
 
