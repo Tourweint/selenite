@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Selenite · 启动</title>
+<style>
+/* ── 方案 C「夜航」────────────────────────────────────────
+   主张：启动这一刻是产品唯一「黑下来」的时候，干脆把它当成一次开场。
+   石头 + 光环 + 一道旋转的弧，信息仍然只有一句状态和一行事实。
+   取色严格来自 indigo 主题（--bg #12141d / --c-primary #8b97ea），
+   所以从这张脸切进业务页不会忽然换一个色系。
+   代价：只适用于深色主题；浅色主题下要换成 A 或 B（见 gallery 的备注）。
+   ---------------------------------------------------------------- */
+:root {
+  color-scheme: dark;
+  --bg: #12141d;
+  --backdrop: #0d0f16;
+  --text: #e7e9f2;
+  --text-2: #a5a9ba;
+  --text-3: #6d7183;
+  --primary: #8b97ea;
+  --secondary: #d4b896;
+  --serif: "Songti SC", "Noto Serif SC", "Source Han Serif SC", "STSong", "SimSun", "Microsoft YaHei", serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; margin: 0; }
+html, body { height: 100%; }
+body {
+  background-color: var(--bg);
+  color: var(--text);
+  font-family: var(--serif);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  /* 舞台的底：中间偏上一点冷光，四角压暗，像一盏只照到石头的顶灯。
+     用 background-image 而不是叠一个 fixed 伪元素——定位层会盖在正文上面，
+     把状态字压成灰的。 */
+  background-image:
+    radial-gradient(58% 46% at 50% 40%, rgba(104, 118, 200, .16), transparent 70%),
+    radial-gradient(120% 120% at 50% 50%, transparent 40%, rgba(5, 6, 12, .55) 100%);
+}
+
+.bar {
+  position: fixed; inset: 0 0 auto 0; height: 40px;
+  display: flex; align-items: center;
+  padding: 0 16px 0 14px;
+  background: var(--backdrop);
+  user-select: none;
+  -webkit-app-region: drag;
+}
+.brand { font-size: 13px; font-weight: 600; color: rgba(231, 233, 242, .78); }
+.bar-hint { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--text-3); }
+
+.stage { position: fixed; inset: 40px 0 0; display: grid; place-items: center; padding: 24px; }
+.lock { display: flex; flex-direction: column; align-items: center; }
+
+.field { position: relative; width: clamp(230px, 30vh, 300px); height: clamp(230px, 30vh, 300px); display: grid; place-items: center; }
+
+/* 两道极淡的同心环，错开相位呼吸——是「还在动」的暗示，不是装饰。 */
+.ring { position: absolute; border-radius: 50%; border: 1px solid rgba(139, 151, 234, .16); }
+.ring.r1 { width: 74%; height: 74%; border-color: rgba(139, 151, 234, .22); animation: ping 4.2s cubic-bezier(.25, 0, .25, 1) infinite; }
+.ring.r2 { width: 96%; height: 96%; border-color: rgba(139, 151, 234, .08); animation: ping 4.2s 1.4s cubic-bezier(.25, 0, .25, 1) infinite; }
+@keyframes ping {
+  0%   { opacity: .15; transform: scale(.94); }
+  55%  { opacity: .85; transform: scale(1.02); }
+  100% { opacity: .12; transform: scale(1.06); }
+}
+
+/* 绕石头转的一小段弧：只有 72° 长，转一圈 3.4s。 */
+.arc { position: absolute; width: 100%; height: 100%; }
+.arc circle {
+  fill: none; stroke: var(--primary); stroke-width: 1.25;
+  stroke-opacity: .5; stroke-linecap: round;
+  stroke-dasharray: 96 900;
+  transform-origin: 50% 50%;
+  /* 起始角写进基础样式：动画被关掉时（reduced-motion）弧也停在左上，
+     不会像一圈断掉的线头挂在右下。 */
+  transform: rotate(-38deg);
+  animation: orbit 3.4s linear infinite;
+}
+@keyframes orbit { from { transform: rotate(-38deg); } to { transform: rotate(322deg); } }
+
+.gem-wrap { position: relative; display: grid; place-items: center; }
+/* 冷光雾：石头本身是浅色物体，暗底上容易被读成一张贴纸。
+   先在它后面铺一层白光，边缘才糊得开。 */
+.bloom {
+  position: absolute; width: clamp(190px, 26vh, 260px); height: clamp(190px, 26vh, 260px);
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(198, 210, 255, .20), rgba(139, 151, 234, .10) 38%, transparent 68%);
+  animation: bloom 4.2s cubic-bezier(.4, 0, .2, 1) infinite;
+}
+@keyframes bloom {
+  0%, 100% { opacity: .55; transform: scale(.97); }
+  50%      { opacity: 1;   transform: scale(1.04); }
+}
+.gem {
+  position: relative; display: block;
+  height: clamp(120px, 22vh, 176px); width: auto;
+  filter: drop-shadow(0 0 40px rgba(168, 184, 255, .42))
+          drop-shadow(0 10px 28px rgba(0, 0, 0, .55));
+}
+/* 倒影：玻璃桌上的那一点点回光。裁掉下半截，只留 22px。 */
+.mirror {
+  position: absolute; top: 100%; margin-top: 4px;
+  height: 26px; width: auto; overflow: hidden;
+  display: grid; place-items: start center;
+}
+.mirror img {
+  display: block; height: clamp(120px, 22vh, 176px); width: auto;
+  transform: scaleY(-1); transform-origin: top;
+  opacity: .22; filter: blur(3px);
+  -webkit-mask-image: linear-gradient(180deg, rgba(0, 0, 0, .8), transparent 62%);
+  mask-image: linear-gradient(180deg, rgba(0, 0, 0, .8), transparent 62%);
+}
+/* 冷光从石头的左上方扫过，只在晶体轮廓内（遮罩 = 石头本身）。 */
+.sheen {
+  position: absolute; inset: 0;
+  background: linear-gradient(104deg,
+    transparent 34%, rgba(255, 255, 255, .95) 44%,
+    rgba(168, 184, 255, .6) 52%, transparent 66%);
+  background-size: 240% 100%; background-position: 190% 0;
+  -webkit-mask-image: url("assets/crystal-mark.png");
+  mask-image: url("assets/crystal-mark.png");
+  -webkit-mask-size: contain; mask-size: contain;
+  -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat;
+  -webkit-mask-position: center; mask-position: center;
+  mix-blend-mode: screen; opacity: .9;
+  animation: sweep 4.4s cubic-bezier(.45, 0, .3, 1) infinite;
+}
+@keyframes sweep {
+  0%        { background-position: 190% 0; }
+  46%, 100% { background-position: -90% 0; }
+}
+
+.status {
+  margin-top: 30px;
+  font-size: clamp(15px, 1.9vh + 6px, 17px); letter-spacing: .07em;
+  color: rgba(231, 233, 242, .92);
+  transition: opacity .18s ease;
+}
+.status.dim { opacity: .26; }
+
+.meta {
+  margin-top: 14px;
+  font-family: var(--mono); font-size: 11.5px; color: var(--text-3);
+  letter-spacing: .03em; font-variant-numeric: tabular-nums;
+}
+.meta b { font-weight: 400; color: var(--text-2); }
+
+/* 慢启动：一句话降一档亮度，不改变布局。 */
+.slow {
+  margin-top: 12px; max-width: 36em; text-align: center;
+  font-size: 12.5px; line-height: 1.75; color: var(--text-3);
+  opacity: 0; transform: translateY(-2px);
+  transition: opacity .3s ease, transform .3s ease;
+}
+.slow.on { opacity: 1; transform: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; }
+  .ring, .arc circle, .sheen { animation: none; }
+  .arc circle { stroke-opacity: .35; }
+}
+</style>
+</head>
+<body>
+  <div class="bar">
+    <span class="brand">Selenite</span>
+    <span class="bar-hint" id="bar-hint">启动中</span>
+  </div>
+
+  <div class="stage">
+    <div class="lock">
+      <div class="field">
+        <div class="ring r1"></div>
+        <div class="ring r2"></div>
+        <svg class="arc" viewBox="0 0 200 200" aria-hidden="true"><circle cx="100" cy="100" r="96"/></svg>
+        <div class="gem-wrap">
+          <div class="bloom"></div>
+          <img class="gem" src="assets/crystal-mark.png" alt="" aria-hidden="true">
+          <div class="sheen" aria-hidden="true"></div>
+          <div class="mirror" aria-hidden="true"><img src="assets/crystal-mark.png" alt=""></div>
+        </div>
+      </div>
+
+      <p class="status" id="status">正在唤醒服务</p>
+      <div class="meta" id="meta">探测 <b>1</b> 次 · 已等 <b>0.0</b>s</div>
+      <p class="slow" id="slow">第一次启动要先编译 TypeScript，慢一点是正常的。</p>
+    </div>
+  </div>
+
+<script>
+(function () {
+  var pre = new URLSearchParams(location.search).get("state");
+  var statusEl = document.getElementById("status");
+  var metaEl = document.getElementById("meta");
+  var slowEl = document.getElementById("slow");
+  var barEl = document.getElementById("bar-hint");
+
+  var PHASES = [
+    { at: 0,   text: "正在唤醒服务" },
+    { at: 2.4, text: "载入 node 运行时" },
+    { at: 5.2, text: "连接本地数据" },
+    { at: 8.4, text: "把界面交给你" }
+  ];
+  var t0 = performance.now(), shown = "", step = 0;
+
+  function say(text) {
+    if (text === shown) return;
+    shown = text;
+    statusEl.classList.add("dim");
+    setTimeout(function () { statusEl.textContent = text; statusEl.classList.remove("dim"); }, 180);
+  }
+
+  function tick() {
+    var sec = (performance.now() - t0) / 1000;
+    if (pre === "slow") sec += 9000;
+    for (var i = PHASES.length - 1; i >= 0; i--) if (sec >= PHASES[i].at) { step = i; break; }
+    if (sec < 9) say(PHASES[step].text);
+    metaEl.innerHTML = "探测 <b>" + (1 + Math.floor(sec / 1.5)) + "</b> 次 · 已等 <b>" + sec.toFixed(1) + "</b>s";
+    if (sec >= 9) { if (step < 3) say("再等一会儿"); slowEl.classList.add("on"); barEl.textContent = "较慢"; }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

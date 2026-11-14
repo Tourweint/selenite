@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Selenite · 启动</title>
+<style>
+/* ── 方案 D「轨道」────────────────────────────────────────
+   主张：启动慢是事实，就把它当成一次「进度汇报」画出来。
+   左边四步对应壳里真实发生的四件事（起进程 → 编 tsx → 连库 → 交页面），
+   右边是这几秒里值得看的几行日志。
+   好处：卡住时用户知道卡在哪一步，不用去翻 ts/ 的控制台；
+   坏处：信息密度最高，纸感最弱——它更像一块仪表。
+   ---------------------------------------------------------------- */
+:root {
+  color-scheme: light;
+  --bg: #fdf9f2;
+  --backdrop: #f1ebe0;
+  --card: #f6f1e7;
+  --text: #2e2b3a;
+  --text-2: #6e6b7e;
+  --text-3: #9a97a5;
+  --outline: #c8c5bc;
+  --primary: #3e4a8c;
+  --secondary: #b89b6e;
+  --warn: #b07d2b;
+  --ok: #1f9d4d;
+  --serif: "Songti SC", "Noto Serif SC", "Source Han Serif SC", "STSong", "SimSun", "Microsoft YaHei", serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; margin: 0; }
+html, body { height: 100%; }
+body {
+  background: var(--bg); color: var(--text);
+  font-family: var(--serif); overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+.bar {
+  position: fixed; inset: 0 0 auto 0; height: 40px;
+  display: flex; align-items: center;
+  padding: 0 16px 0 14px;
+  background: var(--backdrop);
+  user-select: none; -webkit-app-region: drag;
+}
+.brand { font-size: 13px; font-weight: 600; }
+.bar-hint {
+  margin-left: auto; font-family: var(--mono); font-size: 11px;
+  color: var(--text-3); font-variant-numeric: tabular-nums;
+}
+
+.stage {
+  position: fixed; inset: 40px 0 0;
+  display: grid; place-items: center; padding: 24px 40px;
+}
+.panel {
+  display: grid;
+  grid-template-columns: minmax(230px, 1fr) minmax(250px, .92fr);
+  gap: clamp(28px, 5vw, 64px);
+  align-items: center;
+  width: min(100%, 860px);
+}
+
+/* ── 左：四步 ── */
+.steps-head {
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .28em;
+  color: var(--text-3); text-indent: .28em; margin-bottom: 22px;
+}
+.rail { position: relative; display: flex; flex-direction: column; gap: 22px; }
+/* 竖线：从第一步的中线拉到最后一行的中线，颜色只有 8% 墨。 */
+.rail::before {
+  content: ""; position: absolute; left: 4.5px; top: 6px; bottom: 28px; width: 1px;
+  background: rgba(46, 43, 58, .18);
+}
+/* 已经走过的那一段竖线：用 scaleY 而不是逐像素算高度——
+   行距随字体缩放会变，百分比不受影响。--p 由 JS 按「走到第几步」写。 */
+.rail::after {
+  content: ""; position: absolute; left: 4.5px; top: 6px; bottom: 28px; width: 1px;
+  background: linear-gradient(180deg, var(--primary), rgba(62, 74, 140, .35));
+  transform-origin: top; transform: scaleY(var(--p, 0));
+  transition: transform .55s cubic-bezier(.2, .8, .2, 1); opacity: .5;
+}
+.step { position: relative; display: grid; grid-template-columns: 10px 1fr; gap: 14px; align-items: start; }
+.dot {
+  margin-top: 5px; width: 10px; height: 10px; border-radius: 50%;
+  border: 1px solid rgba(46, 43, 58, .28); background: var(--bg);
+  position: relative; z-index: 1;
+  transition: border-color .3s ease, background .3s ease, box-shadow .3s ease;
+}
+.step[data-state="active"] .dot {
+  border-color: var(--primary); background: transparent;
+  box-shadow: 0 0 0 0 rgba(62, 74, 140, .28);
+  animation: pulse 1.8s cubic-bezier(.4, 0, .2, 1) infinite;
+}
+.step[data-state="done"] .dot { border-color: var(--primary); background: var(--primary); }
+@keyframes pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(62, 74, 140, .30); }
+  70%  { box-shadow: 0 0 0 9px rgba(62, 74, 140, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(62, 74, 140, 0); }
+}
+.label {
+  font-size: 14.5px; letter-spacing: .02em; line-height: 1.4;
+  color: var(--text-3); transition: color .3s ease;
+}
+.sub {
+  margin-top: 3px; font-family: var(--mono); font-size: 11px; line-height: 1.5;
+  color: var(--text-3); opacity: .75;
+}
+.step[data-state="active"] .label { color: var(--text); }
+.step[data-state="done"] .label { color: var(--text-2); }
+.step[data-state="done"] .sub { opacity: .5; }
+.step[data-state="stall"] .dot { border-color: var(--warn); background: var(--warn); animation: none; }
+.step[data-state="stall"] .label { color: var(--text); }
+.step[data-state="stall"] .sub { color: var(--warn); opacity: 1; }
+
+/* ── 右：日志 ── */
+.logbox {
+  border: 1px solid rgba(46, 43, 58, .12); border-radius: 12px;
+  background: var(--card);
+  padding: 14px 16px;
+  min-height: 150px;
+  display: flex; flex-direction: column;
+}
+.logbox-head {
+  display: flex; align-items: center; gap: 8px;
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .12em;
+  color: var(--text-3); padding-bottom: 10px;
+  border-bottom: 1px solid rgba(46, 43, 58, .08); margin-bottom: 10px;
+}
+.logbox-head i {
+  width: 5px; height: 5px; border-radius: 50%; background: var(--secondary);
+  animation: blink 1.9s steps(2, start) infinite;
+}
+@keyframes blink { 50% { opacity: .2; } }
+.log { flex: 1; display: flex; flex-direction: column; gap: 5px; font-family: var(--mono); font-size: 11.5px; line-height: 1.55; }
+.log .ln { color: var(--text-3); opacity: 0; transform: translateY(2px); transition: opacity .3s ease, transform .3s ease; }
+.log .ln.on { opacity: 1; transform: none; }
+.log .ln b { color: var(--text-3); font-weight: 400; opacity: .7; margin-right: 8px; }
+.log .ln.hot { color: var(--text-2); }
+.log .ln.warn { color: var(--warn); }
+
+.foot {
+  margin-top: 26px; display: flex; align-items: baseline; gap: 12px;
+  font-family: var(--mono); font-size: 11.5px; color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.foot b { font-weight: 400; color: var(--text-2); }
+.foot.slow b { color: var(--warn); }
+
+@media (max-width: 700px) {
+  .panel { grid-template-columns: 1fr; gap: 26px; }
+  .logbox { min-height: 0; }
+  .log .ln:nth-child(-n+2) { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; }
+  .step[data-state="active"] .dot, .logbox-head i { animation: none; }
+  .rail::after { transition: none; }
+}
+</style>
+</head>
+<body>
+  <div class="bar">
+    <span class="brand">Selenite</span>
+    <span class="bar-hint" id="bar-hint">启动中 · 0.0s</span>
+  </div>
+
+  <div class="stage">
+    <div class="panel">
+      <div>
+        <div class="steps-head">本地服务 · 启动</div>
+        <div class="rail" id="rail">
+          <div class="step" data-state="active">
+            <span class="dot"></span>
+            <div><div class="label">唤醒服务进程</div><div class="sub">node · ts/apps/server</div></div>
+          </div>
+          <div class="step">
+            <span class="dot"></span>
+            <div><div class="label">准备运行时</div><div class="sub">tsx 编译 · 首次较慢</div></div>
+          </div>
+          <div class="step">
+            <span class="dot"></span>
+            <div><div class="label">连接本地数据</div><div class="sub">SQLite · 会话与记忆</div></div>
+          </div>
+          <div class="step">
+            <span class="dot"></span>
+            <div><div class="label">打开界面</div><div class="sub">127.0.0.1:8787</div></div>
+          </div>
+        </div>
+        <div class="foot" id="foot">已等 <b id="wait">0.0</b>s · 探测 <b id="probe">1</b> 次</div>
+      </div>
+
+      <div class="logbox">
+        <div class="logbox-head"><i></i>SERVICE LOG</div>
+        <div class="log" id="log">
+          <div class="ln on"><b>0.0s</b>shell ready</div>
+          <div class="ln on"><b>0.0s</b>spawn node apps/server</div>
+          <div class="ln" data-at="1.5"><b>1.5s</b>probe → connection refused</div>
+          <div class="ln" data-at="3.0"><b>3.0s</b>probe → connection refused</div>
+          <div class="ln" data-at="5.2"><b>5.2s</b>tsx compiled, booting</div>
+          <div class="ln" data-at="6.4"><b>6.4s</b>sqlite opened</div>
+          <div class="ln hot" data-at="7.6"><b>7.6s</b>healthz ok</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+/* 预览用时间轴：真实实现里 step 状态由壳 Eval 推（它知道 runtime.Ensure 走到哪、
+   知道每次 waitHealthy 的结果），日志行根本不用画——直接换成服务真吐的几行。 */
+(function () {
+  var pre = new URLSearchParams(location.search).get("state");
+  var steps = Array.prototype.slice.call(document.querySelectorAll("#rail .step"));
+  var rail = document.getElementById("rail");
+  var barEl = document.getElementById("bar-hint");
+  var probeEl = document.getElementById("probe");
+  var waitEl = document.getElementById("wait");
+  var footEl = document.getElementById("foot");
+  var lines = Array.prototype.slice.call(document.querySelectorAll("#log .ln"));
+
+  var t0 = performance.now() - 1000 * (parseFloat(pre2("t")) || 0), lastStep = -1;
+
+  // 预览用：?t=6.5 直接把画面推到第 6.5 秒，方便截某一刻的样子。
+  function pre2(k) { return new URLSearchParams(location.search).get(k); }
+
+  function paint(step) {
+    if (step === lastStep) return;
+    lastStep = step;
+    steps.forEach(function (el, i) {
+      el.dataset.state = i < step ? "done" : (i === step ? "active" : "");
+    });
+    // 竖线走到当前这一行：0 → 1/3 → 2/3 → 1
+    rail.style.setProperty("--p", (step / (steps.length - 1)).toFixed(3));
+  }
+
+  function tick() {
+    var sec = (performance.now() - t0) / 1000;
+    if (pre === "slow") sec += 9000;
+
+    // 真实节奏：0 起进程 / 2.4 运行时 / 5.2 连库 / 8.4 交页面
+    var step = sec < 2.4 ? 0 : sec < 5.2 ? 1 : sec < 8.4 ? 2 : 3;
+    paint(step);
+
+    lines.forEach(function (el) {
+      var at = parseFloat(el.dataset.at || 0);
+      if (sec >= at) el.classList.add("on");
+    });
+
+    if (sec >= 9 && step < 3) {
+      // 慢启动：把「停在第三步」这件事摆到台面上，而不是假装还在跑
+      steps[2].dataset.state = "stall";
+      steps[2].querySelector(".sub").textContent = "仍是 /healthz 未就绪";
+      barEl.textContent = "较慢 · " + sec.toFixed(1) + "s";
+      footEl.classList.add("slow");
+    } else {
+      barEl.textContent = "启动中 · " + sec.toFixed(1) + "s";
+    }
+
+    waitEl.textContent = sec.toFixed(1);
+    probeEl.textContent = String(1 + Math.floor(sec / 1.5));
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

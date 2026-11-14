@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Selenite · 启动</title>
+<style>
+/* ── 方案 A「冷光」────────────────────────────────────────
+   主张：把首页那枚水晶搬到启动页，让它「被点亮」。
+   水晶是产品的唯一视觉符号（首页题头就是它），启动时先亮一次，
+   等窗里铺开纸面时，用户看到的还是同一个东西。
+   状态只写两行：一句人话 + 一行机器事实（探测次数、已等几秒）。
+   颜料全部取自 style-01-tokens.css 的 paper 主题，不新造色。
+   ---------------------------------------------------------------- */
+:root {
+  color-scheme: light;
+  --bg: #fdf9f2;
+  --backdrop: #f1ebe0;
+  --text: #2e2b3a;
+  --text-2: #6e6b7e;
+  --text-3: #9a97a5;
+  --outline: #c8c5bc;
+  --primary: #3e4a8c;
+  --secondary: #b89b6e;
+  --serif: "Songti SC", "Noto Serif SC", "Source Han Serif SC", "STSong", "SimSun", "Microsoft YaHei", serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; margin: 0; }
+html, body { height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--serif);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 自绘标题栏：与业务页同一个 40px 条、同一个底色、同一个品牌字位。
+   启动期间窗口已经不是「一片空白」，人也不会觉得这窗口随时会散架。 */
+.bar {
+  position: fixed; inset: 0 0 auto 0; height: 40px;
+  display: flex; align-items: center;
+  padding: 0 16px 0 14px;
+  background: var(--backdrop);
+  user-select: none;
+  -webkit-app-region: drag;
+}
+.brand { font-size: 13px; font-weight: 600; letter-spacing: .01em; }
+.bar-hint { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--text-3); }
+
+.stage {
+  position: fixed; inset: 40px 0 0;
+  display: grid; place-items: center;
+  padding: 24px;
+}
+
+/* 纵向节奏：石头 → 小字品牌 → 状态 → 主线 → 事实 */
+.lock { display: flex; flex-direction: column; align-items: center; }
+
+.gem-wrap { position: relative; display: grid; place-items: center; }
+/* 石头背后那团光：不用 blur 滤镜，radial-gradient 本身就有衰减，
+   少一层滤镜就少一次 GPU 合成。 */
+.halo {
+  position: absolute; width: clamp(240px, 34vh, 380px); height: clamp(240px, 34vh, 380px);
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(62, 74, 140, .075), rgba(62, 74, 140, .035) 46%, transparent 70%);
+  animation: breathe 3.6s cubic-bezier(.4, 0, .2, 1) infinite;
+}
+@keyframes breathe {
+  0%, 100% { opacity: .55; transform: scale(.96); }
+  50%      { opacity: 1;   transform: scale(1.04); }
+}
+/* 纸面上的一点落影：石头不是浮着的，它坐在纸上。暖灰、贴底、很短。 */
+.shadow {
+  position: absolute; bottom: 2px; width: clamp(50px, 10vh, 78px); height: 8px;
+  border-radius: 50%;
+  background: radial-gradient(ellipse, rgba(74, 70, 90, .20), transparent 72%);
+  filter: blur(2px);
+}
+.gem {
+  position: relative; display: block;
+  height: clamp(112px, 21vh, 172px); width: auto;
+  filter: drop-shadow(0 8px 14px rgba(74, 70, 90, .13));
+}
+/* 一道冷光扫过石头：遮罩用的就是石头本身，所以高光只落在晶体上，
+   不会在周围的纸面上拖出一条白带。 */
+.sheen {
+  position: absolute; inset: 0;
+  background: linear-gradient(105deg,
+    transparent 34%, rgba(255, 255, 255, .92) 45%,
+    rgba(196, 210, 255, .55) 52%, transparent 66%);
+  background-size: 240% 100%;
+  background-position: 190% 0;
+  -webkit-mask-image: url("assets/crystal-mark.png");
+  mask-image: url("assets/crystal-mark.png");
+  -webkit-mask-size: contain; mask-size: contain;
+  -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat;
+  -webkit-mask-position: center; mask-position: center;
+  mix-blend-mode: screen;
+  opacity: .8;
+  animation: sweep 4.8s cubic-bezier(.45, 0, .3, 1) infinite;
+}
+@keyframes sweep {
+  0%        { background-position: 190% 0; }
+  46%, 100% { background-position: -90% 0; }
+}
+
+.word { margin-top: 26px; font-size: 10.5px; letter-spacing: .38em; color: var(--text-3); text-indent: .38em; }
+
+.status {
+  margin-top: 16px;
+  font-size: clamp(15px, 1.9vh + 6px, 18px);
+  line-height: 1.5; letter-spacing: .05em;
+  color: var(--text);
+  transition: opacity .18s ease;
+}
+.status.dim { opacity: .28; }
+/* 句尾那根竖条：不用「…」动画，一呼一吸的短线比三个跳动的点安静。 */
+.caret {
+  display: inline-block; width: 1px; height: 1em; margin-left: 3px;
+  vertical-align: -.12em;
+  background: var(--primary); opacity: .55;
+  animation: blink 1.9s steps(2, start) infinite;
+}
+@keyframes blink { 50% { opacity: .08; } }
+
+/* 主线：一根 1px 的尺，走的是「不确定进度」，不冒充百分比。
+   Wndows 上服务起得慢，假进度条走到 99% 卡住比没有更糟。 */
+.rule { position: relative; margin-top: 24px; width: clamp(160px, 22vw, 230px); height: 1px; background: rgba(46, 43, 58, .18); overflow: hidden; }
+.rule i {
+  position: absolute; top: 0; left: 0; height: 1px; width: 36%;
+  background: linear-gradient(90deg, transparent, var(--primary) 45%, var(--primary) 60%, transparent);
+  opacity: .85;
+  animation: travel 1.9s cubic-bezier(.55, 0, .45, 1) infinite;
+}
+@keyframes travel {
+  0%   { transform: translateX(-105%); }
+  100% { transform: translateX(345%); }
+}
+
+.meta {
+  margin-top: 18px;
+  font-family: var(--mono); font-size: 11.5px; letter-spacing: .02em;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.meta b { font-weight: 400; color: var(--text-2); }
+
+/* 慢启动态（>9s）：多一行解释，不动主体结构，免得画面跳。 */
+.slow {
+  margin-top: 10px; max-width: 34em; text-align: center;
+  font-size: 12.5px; line-height: 1.7; color: var(--text-2);
+  opacity: 0; transform: translateY(-2px);
+  transition: opacity .3s ease, transform .3s ease;
+}
+.slow.on { opacity: 1; transform: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; }
+  .halo, .sheen, .caret, .rule i { animation: none; }
+  .sheen { opacity: .35; }
+}
+</style>
+</head>
+<body>
+  <div class="bar">
+    <span class="brand">Selenite</span>
+    <span class="bar-hint" id="bar-hint">启动中</span>
+  </div>
+
+  <div class="stage">
+    <div class="lock">
+      <div class="gem-wrap">
+        <div class="halo"></div>
+        <div class="shadow" aria-hidden="true"></div>
+        <img class="gem" src="assets/crystal-mark.png" alt="" aria-hidden="true">
+        <div class="sheen" aria-hidden="true"></div>
+      </div>
+
+      <div class="word">SELENITE</div>
+
+      <p class="status" id="status">正在唤醒服务<span class="caret"></span></p>
+      <div class="rule"><i></i></div>
+      <div class="meta" id="meta">探测 <b>1</b> 次 · 已等 <b>0.0</b>s</div>
+      <p class="slow" id="slow">第一次启动要先编译 TypeScript，通常会久一些；它现在还在工作，不用关窗口。</p>
+    </div>
+  </div>
+
+<script>
+/* 预览用状态机：真实实现里这些 phase 由 Go 侧 Eval 推下来（壳知道 25s 的预算、
+   知道有没有真的拉起进程），这里用时间轴假装一遍，节奏与实测一致。
+   模拟的现场：健康探测每 1.5s 一次，首次启动 6–12s 才通。 */
+(function () {
+  var q = new URLSearchParams(location.search);
+  var pre = q.get("state"); // slow：直接看慢启动那一屏
+
+  var statusEl = document.getElementById("status");
+  var metaEl = document.getElementById("meta");
+  var slowEl = document.getElementById("slow");
+  var barEl = document.getElementById("bar-hint");
+
+  var t0 = performance.now();
+  var step = 0;
+  var shown = "正在唤醒服务";
+
+  var PHASES = [
+    { at: 0,    text: "正在唤醒服务" },
+    { at: 2.4,  text: "载入 node 运行时" },
+    { at: 5.2,  text: "连接本地数据" },
+    { at: 8.6,  text: "把界面交给你" }
+  ];
+
+  function say(text) {
+    if (text === shown) return;
+    shown = text;
+    statusEl.classList.add("dim");
+    setTimeout(function () {
+      statusEl.innerHTML = "";
+      statusEl.appendChild(document.createTextNode(text));
+      var caret = document.createElement("span");
+      caret.className = "caret";
+      statusEl.appendChild(caret);
+      statusEl.classList.remove("dim");
+    }, 170);
+  }
+
+  function tick() {
+    var ms = performance.now() - t0;
+    if (pre === "slow") ms += 9000;
+    var sec = ms / 1000;
+
+    for (var i = PHASES.length - 1; i >= 0; i--) {
+      if (sec >= PHASES[i].at) { step = i; break; }
+    }
+    if (sec < 9) say(PHASES[step].text);
+
+    // 探测次数：1.5s 一次，第一次算 1
+    var probes = 1 + Math.floor(sec / 1.5);
+    metaEl.innerHTML = "探测 <b>" + probes + "</b> 次 · 已等 <b>" + sec.toFixed(1) + "</b>s";
+
+    if (sec >= 9) {
+      if (step < 3) say("再等一会儿");
+      slowEl.classList.add("on");
+      barEl.textContent = "较慢";
+    }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

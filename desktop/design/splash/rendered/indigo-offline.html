@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN" data-face="night">
+<head>
+<meta charset="utf-8">
+<title>Selenite</title>
+<style>
+:root {
+  --bg: #fdf9f2; --backdrop: #f1ebe0;
+  --text: #2e2b3a; --text-2: #6e6b7e; --text-3: #9a97a5;
+  --card: #f6f1e7; --line: rgba(46, 43, 58, .14);
+  --primary: #3e4a8c;
+  color-scheme: light;
+}
+html[data-face="night"] {
+  --bg: #12141d; --backdrop: #0d0f16;
+  --text: #e7e9f2; --text-2: #a5a9ba; --text-3: #6d7183;
+  --card: #191c27; --line: rgba(255, 255, 255, .10);
+  --primary: #8b97ea;
+  color-scheme: dark;
+}
+:root {
+  --serif: "Songti SC", "Noto Serif SC", "Source Han Serif SC", "STSong", "SimSun", "Microsoft YaHei", serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; margin: 0; }
+html, body { height: 100%; }
+body {
+  background: var(--bg); color: var(--text);
+  font-family: var(--serif); overflow: auto;
+  -webkit-font-smoothing: antialiased;
+}
+.bar {
+  position: fixed; inset: 0 0 auto 0; height: 40px;
+  display: flex; align-items: center;
+  padding: 0 16px 0 14px;
+  background: var(--backdrop);
+  user-select: none; -webkit-app-region: drag;
+}
+.brand { font-size: 13px; font-weight: 600; }
+.hint { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--text-3); }
+
+/* 顶对齐而不是居中：这段内容是给人读的说明，窗口矮的时候居中会把开头
+   推到可视区上面去，overflow 也滚不回来。 */
+.stage {
+  padding: clamp(48px, 9vh, 96px) 24px 48px;
+}
+.box { width: min(100%, 560px); margin: 0 auto; }
+h1 { font-size: 19px; font-weight: 600; margin-bottom: 10px; letter-spacing: .02em; }
+p { font-size: 13.5px; line-height: 1.8; color: var(--text-2); }
+pre {
+  margin: 14px 0 0; padding: 12px 14px;
+  font-family: var(--mono); font-size: 12.5px; line-height: 1.7;
+  color: var(--text); background: var(--card);
+  border: 1px solid var(--line); border-radius: 10px;
+  overflow-x: auto; white-space: pre-wrap;
+}
+.muted { color: var(--text-3); }
+.step { margin-top: 18px; }
+</style>
+</head>
+<body>
+  <div class="bar">
+    <span class="brand">Selenite</span>
+    <span class="hint">没连上</span>
+  </div>
+
+  <div class="stage">
+    <div class="box">
+      <h1>连不上服务</h1>
+      <p>壳只是客户端，Agent 跑在服务里。这台机器上的服务没起来。</p>
+      <pre>http://127.0.0.1:39847
+probe timeout after 25s</pre>
+      <div class="step">
+        <p class="muted">在 ts/ 下起服务，然后从托盘菜单点「重新连接」：</p>
+        <pre>cd ts
+pnpm dev</pre>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

@@ -293,6 +293,11 @@ func loadService(w *mygo.Window) {
 		if !healthy(base) {
 			// 用户主动停过就别再拉（2026-11-07）：否则点了"停止"再点托盘"重新连接"，
 			// 服务又自己回来了，那个开关等于没有。runtime.Ensure 内部认这个闩。
+			//
+			// 启动页这段时间会干等，所以盯一眼端口：node listen() 成功那一刻，
+			// 是慢启动里唯一一个真能观测、又能说给人听的中间信号（2026-11-14）。
+			stopWatch := watchSplash(w, base)
+			defer stopWatch()
 			runtime.Ensure()
 			budget = 25 * time.Second
 		}
@@ -412,8 +417,9 @@ func showWindow() {
   return typeof window.mygo === "object" && window.mygo !== null;
 };`,
 		},
-		// 跟页面底色一致，免得启动时闪一下白
-		BackgroundColor: "#181818",
+		// 跟启动页的底色一致，免得页面画出来之前先闪一下别的颜色。
+		// 2026-11-14：跟着壳记住的主题走（纸白 / 深靛），不再写死 #181818。
+		BackgroundColor: splashBackground(savedTheme()),
 	})
 	// 页面加载后会把自己的 <title> 同步成窗口标题（服务页面里是 lifediary）。
 	// 壳的标题固定用产品名，不让页面改。

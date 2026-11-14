@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Selenite 启动页 · 四版方案</title>
+<style>
+:root {
+  color-scheme: light;
+  --bg: #f5f1e8;
+  --paper: #fdf9f2;
+  --text: #2e2b3a;
+  --text-2: #6e6b7e;
+  --text-3: #9a97a5;
+  --line: rgba(46, 43, 58, .14);
+  --primary: #3e4a8c;
+  --secondary: #b89b6e;
+  --serif: "Songti SC", "Noto Serif SC", "Source Han Serif SC", "STSong", "SimSun", "Microsoft YaHei", serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; margin: 0; }
+body {
+  background: var(--bg); color: var(--text);
+  font-family: var(--serif); -webkit-font-smoothing: antialiased;
+  padding: 40px clamp(20px, 4vw, 56px) 72px;
+}
+.wrap { max-width: 1380px; margin: 0 auto; }
+
+/* ── 页头 ── */
+.head { display: flex; align-items: flex-end; gap: 20px; padding-bottom: 20px; border-bottom: 1px solid var(--line); }
+.head h1 { font-size: 27px; font-weight: 600; letter-spacing: .01em; line-height: 1.3; }
+.head .tag { margin-left: auto; text-align: right; font-family: var(--mono); font-size: 11px; color: var(--text-3); line-height: 1.8; }
+.sub { margin-top: 12px; font-size: 14px; line-height: 1.9; color: var(--text-2); max-width: 62em; }
+.sub b { font-weight: 600; color: var(--text); }
+
+/* ── 工具条 ── */
+.tools { display: flex; align-items: center; gap: 10px; margin: 26px 0 8px; }
+.tools-label { font-family: var(--mono); font-size: 10.5px; letter-spacing: .2em; color: var(--text-3); }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.seg button {
+  border: 0; background: transparent; padding: 6px 14px; cursor: pointer;
+  font-family: var(--serif); font-size: 12.5px; color: var(--text-2);
+  transition: background .15s ease, color .15s ease;
+}
+.seg button[aria-pressed="true"] { background: var(--primary); color: #fff; }
+.tools-hint { font-size: 12px; color: var(--text-3); }
+
+/* ── 四格 ── */
+.grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 34px 30px; margin-top: 22px; }
+.card { display: flex; flex-direction: column; }
+.card-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; }
+.card-head .k { font-family: var(--mono); font-size: 11px; color: var(--secondary); letter-spacing: .1em; }
+.card-head h2 { font-size: 17px; font-weight: 600; letter-spacing: .02em; }
+.card-head .say { margin-left: auto; font-size: 12px; color: var(--text-3); }
+
+/* 真窗口尺寸的等比缩放：比例 1120×740，只缩放不裁切，
+   所以看到的留白、字号比例跟壳里一致。 */
+.shot {
+  position: relative; border: 1px solid var(--line); border-radius: 12px; overflow: hidden;
+  background: var(--paper); aspect-ratio: 1120 / 740;
+  box-shadow: 0 10px 30px rgba(46, 43, 58, .08);
+}
+.shot iframe {
+  position: absolute; top: 0; left: 0;
+  width: 1120px; height: 740px; border: 0;
+  transform-origin: top left;
+}
+.note { margin-top: 12px; font-size: 12.5px; line-height: 1.8; color: var(--text-2); }
+.note .warn { color: #8a5a17; }
+
+/* ── 对比表 ── */
+.compare { margin-top: 46px; }
+.compare h3 { font-size: 15px; font-weight: 600; letter-spacing: .02em; margin-bottom: 12px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-weight: 600; color: var(--text-2); font-size: 12.5px; }
+td:first-child { color: var(--text-2); width: 9em; }
+td b { font-weight: 600; }
+
+/* ── 落地说明 ── */
+.impl { margin-top: 44px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 26px; }
+.impl div { border-left: 2px solid var(--secondary); padding-left: 14px; }
+.impl h4 { font-size: 13.5px; font-weight: 600; margin-bottom: 6px; }
+.impl p { font-size: 12.5px; line-height: 1.8; color: var(--text-2); }
+
+@media (max-width: 1000px) {
+  .grid, .impl { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="head">
+    <h1>Selenite · 启动页 四版</h1>
+    <div class="tag">lifediary-harness / desktop<br>2026-11-14</div>
+  </header>
+
+  <p class="sub">
+    现在壳里那张 <b>connectingPage</b> 只有一行「正在连接 lifediary 服务」和一个脉冲小蓝点，
+    底色写死 <b>#0f1115</b>——而业务页默认是纸白 <b>#fdf9f2</b>。
+    于是每次启动都这样：<b>黑屏几秒 → 忽然一片白</b>，中间没有任何「它在动」的证据；
+    等超过 10 秒（首次编 tsx 很常见），用户分不清是慢还是死了。
+    四版都想解决这两件事：<b>别闪</b>、<b>让人知道它还在跑</b>。信息源不造假——只给「已等几秒、探测几次、走到哪一步」。
+  </p>
+
+  <div class="tools">
+    <span class="tools-label">看哪种状态</span>
+    <div class="seg" id="states">
+      <button type="button" data-state="normal" aria-pressed="true">正常启动（6–8s 通）</button>
+      <button type="button" data-state="slow" aria-pressed="false">慢启动（超过 9s）</button>
+    </div>
+    <span class="tools-hint">下面的画面是活的：动画在跑，秒数在走。切换会重新加载四个窗口。</span>
+  </div>
+
+  <div class="grid" id="grid">
+    <section class="card" data-file="A-冷光.html">
+      <div class="card-head"><span class="k">A</span><h2>冷光</h2><span class="say">石头被点亮</span></div>
+      <div class="shot"><iframe src="A-冷光.html" loading="lazy" title="方案 A"></iframe></div>
+      <p class="note">把首页题头那枚水晶搬上来，呼吸 + 一道冷光扫过晶面；主线是不确定进度的墨线，不冒充百分比。
+        <span class="warn">代价：比现在多一张 512 图（已裁透明边），要么随壳打包，要么内嵌成 base64。</span></p>
+    </section>
+
+    <section class="card" data-file="B-题头.html">
+      <div class="card-head"><span class="k">B</span><h2>题头</h2><span class="say">一张纸，一句话</span></div>
+      <div class="shot"><iframe src="B-题头.html" loading="lazy" title="方案 B"></iframe></div>
+      <p class="note">没有图形，只有纸、一行宋体、一道从 0 长到满的铜线。元素最少，最不像「程序出错」，切进业务页几乎无跳变。
+        <span class="warn">代价：品牌感最弱，慢启动时可看的信息也最少。</span></p>
+    </section>
+
+    <section class="card" data-file="C-夜航.html">
+      <div class="card-head"><span class="k">C</span><h2>夜航</h2><span class="say">唯一的黑场</span></div>
+      <div class="shot"><iframe src="C-夜航.html" loading="lazy" title="方案 C"></iframe></div>
+      <p class="note">深靛开场：光环呼吸、一小段弧绕石头转。取色就是 indigo 主题，所以从这张脸切进深色业务页是连续的。
+        <span class="warn">代价：只配深色主题；默认纸白主题下用它会「黑一下再白」，正是现在要消灭的那种闪。</span></p>
+    </section>
+
+    <section class="card" data-file="D-轨道.html">
+      <div class="card-head"><span class="k">D</span><h2>轨道</h2><span class="say">四步，一目了然</span></div>
+      <div class="shot"><iframe src="D-轨道.html" loading="lazy" title="方案 D"></iframe></div>
+      <p class="note">左边四步对应壳里真实发生的四件事，右边是这几秒里值得看的日志。卡住时能一眼看出卡在哪一步。
+        <span class="warn">代价：信息密度最高、纸感最弱；日志栏想真有用，得让壳把服务的前几行吐过来。</span></p>
+    </section>
+  </div>
+
+  <section class="compare">
+    <h3>怎么选</h3>
+    <table>
+      <thead>
+        <tr><th>维度</th><th>A 冷光</th><th>B 题头</th><th>C 夜航</th><th>D 轨道</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>第一眼</td><td>认得出是 Selenite</td><td>安静、像书扉页</td><td>有仪式感，最抓眼</td><td>像仪表台，最快理解</td></tr>
+        <tr><td>慢启动时</td><td><b>好</b>：多一行解释</td><td><b>一般</b>：只能说「再等会儿」</td><td><b>好</b>：动画本身耐看</td><td><b>最好</b>：卡在哪一步写出来</td></tr>
+        <tr><td>与主题一致</td><td>纸白 / 白 都行</td><td>纸白 / 白 都行</td><td>只配 indigo / black</td><td>纸白 / 白 都行</td></tr>
+        <tr><td>实现成本</td><td>低（一张图 + 一个遮罩）</td><td><b>最低</b>（纯文字）</td><td>中（SVG 弧 + 三层动效）</td><td>中高（要壳推步骤）</td></tr>
+        <tr><td>最坏情况</td><td>图没打进去就是一块空白</td><td>太素，被误读成加载失败</td><td>浅色用户被黑一下</td><td>步骤是假的就变成撒谎</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="impl">
+    <div>
+      <h4>一、不再闪</h4>
+      <p>底色跟主题走，默认纸白。三版共用同一个 40px 自绘标题栏（同一个 <code>--backdrop</code>、同一个品牌字位），切进业务页时只有内容区变。</p>
+    </div>
+    <div>
+      <h4>二、进度不造假</h4>
+      <p>没有百分比。只有「已等 N 秒 / 探测 M 次」这种能对得上的账，加一条不确定进度的墨线。超过 9 秒换成解释句，不动布局。</p>
+    </div>
+    <div>
+      <h4>三、壳要推状态</h4>
+      <p>现在这张页是死的：<code>LoadHTML</code> 之后只能干等到 <code>waitHealthy</code> 返回。要做 A/C 的换句、D 的步骤，得让 <code>loadService</code> 在探测间隙 <code>Page.Eval</code> 推一次 phase。</p>
+    </div>
+  </section>
+</div>
+
+<script>
+// 等比缩放：容器宽 / 1120，不用 CSS calc 猜。
+function fit() {
+  document.querySelectorAll(".shot").forEach(function (box) {
+    var iframe = box.querySelector("iframe");
+    iframe.style.transform = "scale(" + (box.clientWidth / 1120) + ")";
+  });
+}
+window.addEventListener("resize", fit);
+fit();
+
+// 正常 / 慢启动：改成 iframe 的 src 再重载，四个窗口一起换。
+document.getElementById("states").addEventListener("click", function (e) {
+  var btn = e.target.closest("button");
+  if (!btn) return;
+  this.querySelectorAll("button").forEach(function (b) {
+    b.setAttribute("aria-pressed", String(b === btn));
+  });
+  var slow = btn.dataset.state === "slow";
+  document.querySelectorAll(".card").forEach(function (card) {
+    var iframe = card.querySelector("iframe");
+    iframe.src = card.dataset.file + (slow ? "?state=slow" : "");
+  });
+});
+</script>
+</body>
+</html>
