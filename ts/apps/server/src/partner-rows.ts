@@ -5,6 +5,7 @@
  */
 
 import { MemoryScope } from "@lifediary/memory";
+import { PartnerPersonaModuleIds, type PartnerPersonaModule, type PartnerPersonaPreset } from "@lifediary/shared";
 import { join } from "node:path";
 import { CHIEF_PARTNER_ID, COMPANIONS_ENABLED, chiefPartnerEnabled } from "./partner-contract.ts";
 import type { GroupMessageRow, GroupResponderKind, GroupRow, PartnerRow, PartnerSessionLinkRow, PartnerStatus, RoutineDef, RoutineTrigger } from "./partner-types.ts";
@@ -71,7 +72,34 @@ function toPartner(row: Record<string, unknown>): PartnerRow {
 		tagline:
 			row.tagline === null || row.tagline === undefined ? null : String(row.tagline),
 		diary: Number(row.diary ?? 0) !== 0,
+		personaPreset: toPersonaPreset(row.persona_preset),
+		personaModules: toPersonaModules(row.persona_modules),
 	};
+}
+
+/** 人格预设：只认三个枚举值，老库 / 脏值一律回默认 `work`。 */
+function toPersonaPreset(raw: unknown): PartnerPersonaPreset {
+	const value = raw === null || raw === undefined ? "" : String(raw);
+	return value === "companion" || value === "custom" ? value : "work";
+}
+
+/** 人格开关列：只留 14 个 id 且值为布尔的键；坏 JSON / 脏值当"没显式改过"。 */
+function toPersonaModules(raw: unknown): Partial<Record<PartnerPersonaModule, boolean>> {
+	if (raw === null || raw === undefined) return {};
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(String(raw));
+	} catch {
+		return {};
+	}
+	if (!parsed || typeof parsed !== "object") return {};
+	const source = parsed as Record<string, unknown>;
+	const out: Partial<Record<PartnerPersonaModule, boolean>> = {};
+	for (const id of PartnerPersonaModuleIds) {
+		const value = source[id];
+		if (typeof value === "boolean") out[id] = value;
+	}
+	return out;
 }
 
 function toRoutine(row: Record<string, unknown>): RoutineDef {

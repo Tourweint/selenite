@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import type { PartnerPersonaModule } from "@lifediary/shared";
 import { listManagers } from "../../../../../../chancellor/src/manager/registry.ts";
 import { Store } from "../../../../../../chancellor/src/store.ts";
 import type { Ticket } from "../../../../../../chancellor/src/types.ts";
@@ -27,6 +28,7 @@ import {
 	partnersStore,
 	type PartnersStore,
 } from "../partners.ts";
+import { effectivePersonaModules, personaModulesEnabled } from "../partner-persona.ts";
 
 /**
  * 执事轮上下文装配（2026-11-08 员工人格化刀一 E1 + E5）。
@@ -45,6 +47,12 @@ import {
  *
  * 回滚：`PARTNER_CONTRACT=false` 只关第 2 段；第 3 段是纯装配，没有独立开关
  * （关掉执事能力时整个 hook 不跑）。
+ *
+ * 人格模块开关（2026-11-14 批1）：第 2 段（契约）/ 目标 / 纪律 / 履历摘要 / 在办
+ * 各是一个子开关（`contract` / `goal` / `discipline` / `workHistory` / `currentWork`），
+ * 关 = 这一段不进本轮 system。**主人数据红线永不裁**：`discipline` 关掉时只留红线段；
+ * SOUL（身份节）与 remember / preference 通道不在这套开关里。`PARTNER_PERSONA_MODULES=false`
+ * 时全部按旧行为（谁都不裁）。
  */
 
 // ── 汇报卡三规则（2026-11-10 批 15 §二，全景调研 #41）────────
@@ -200,6 +208,11 @@ export interface PartnerContextDeps {
 	/** 每次扫描每类 runs 目录取多少张单（默认 200；够覆盖"在办 + 最近一单"）。 */
 	ticketLimit?: number;
 	/**
+	 * 人格模块开关（2026-11-14 批1）：`currentWork` 管在办段、`workHistory` 管履历摘要。
+	 * 不传 = 两个都开（旧行为；单测与旧调用方零改动）。
+	 */
+	persona?: { currentWork: boolean; workHistory: boolean };
+	/**
 	 * 该执事近 N 单 work 履历聚合（2026-11-08 刀二 E2）。
 	 * 由装配层（lifecycle）注入 `workSummaryFor`；不传 = 不加履历摘要行
 	 * （单测零副作用，也不去开真实记忆库）。结构化查询，不走语义召回。
@@ -299,6 +312,10 @@ function approvalDetail(record: { tool: string; args: string }): string {
 /**
  * 「当前在办」段（E5）：①未终态的派活单 ②本会话待审批 ③最近一单结果。
  * 三项皆空 → undefined（整段省略）。明细 ≤3 条，超出只报条数。
+ *
+ * 2026-11-14 批1：按人格开关拆两半——`currentWork` 管前三项，`workHistory` 管段尾的
+ * 履历摘要 + 盘点口径。只开履历不开在办时不再拼「【当前在办】」这个空壳头
+ * （有履历没在办的情况下，头与「答不了怎么办」口径都没有意义）。
  */
 export function buildPartnerStatusSection(
 	partnerId: string,
@@ -306,7 +323,9 @@ export function buildPartnerStatusSection(
 	deps: PartnerContextDeps = {},
 ): string | undefined {
 	const store = deps.store ?? partnersStore();
-	const sessionIds = new Set(store.sessionIdsOf(partnerId));
+	const showCurrent = deps.persona?.currentWork ?? true;
+	const showHistory = deps.persona?.workHistory ?? true;
+	const sessionIds = showCurrent ? new Set(store.sessionIdsOf(partnerId)) : new Set<number>();
 	const tickets = sessionIds.size
 		? ticketsOfPartner(deps.workRoot ?? chancellorWorkRoot(), sessionIds, deps.ticketLimit ?? 200)
 		: [];
@@ -316,7 +335,7 @@ export function buildPartnerStatusSection(
 	let approvals: Array<{ tool: string; args: string }> = [];
 	try {
 		const sink = deps.approvals ?? approvalStore();
-		approvals = sink.pendingOf(conversationId);
+		approvals = showCurrent ? sink.pendingOf(conversationId) : [];
 	} catch {
 		// 审批库读不出来不影响其它两项
 		approvals = [];
@@ -325,37 +344,41 @@ export function buildPartnerStatusSection(
 	// 履历摘要（**过去时**）与在办（**现在时**）两层互补别混：
 	// 在办来自 runs 扫描（刀一），履历来自 work 记录的结构化查询（刀二）。
 	// 零记录不加（workSummary 返回 null 或 total=0）。
-	const summary = deps.workSummary?.(partnerId) ?? null;
+	const summary = showHistory ? (deps.workSummary?.(partnerId) ?? null) : null;
 	const workLine =
 		summary && summary.total > 0
 			? `近 10 单：完成 ${summary.done}、失败 ${summary.failed}、中止 ${summary.stopped}`
 			: null;
 
-	if (active.length === 0 && approvals.length === 0 && !last && !workLine) return undefined;
-
-	const lines: string[] = ["【当前在办】"];
-	if (active.length > 0) {
-		lines.push("在办的单：");
-		for (const ticket of active.slice(0, DETAIL_LIMIT)) lines.push(ticketDetail(ticket));
-		if (active.length > DETAIL_LIMIT) lines.push(`（另有 ${active.length - DETAIL_LIMIT} 单在办）`);
-	}
-	if (approvals.length > 0) {
-		lines.push("等你批的：");
-		for (const record of approvals.slice(0, DETAIL_LIMIT)) lines.push(approvalDetail(record));
-		if (approvals.length > DETAIL_LIMIT) {
-			lines.push(`（另有 ${approvals.length - DETAIL_LIMIT} 条待批）`);
+	const lines: string[] = [];
+	// 在办三项都在才算"有在办"：有一项就拼头，一项都没有时连头一起省。
+	if (showCurrent && (active.length > 0 || approvals.length > 0 || last)) {
+		lines.push("【当前在办】");
+		if (active.length > 0) {
+			lines.push("在办的单：");
+			for (const ticket of active.slice(0, DETAIL_LIMIT)) lines.push(ticketDetail(ticket));
+			if (active.length > DETAIL_LIMIT) lines.push(`（另有 ${active.length - DETAIL_LIMIT} 单在办）`);
 		}
+		if (approvals.length > 0) {
+			lines.push("等你批的：");
+			for (const record of approvals.slice(0, DETAIL_LIMIT)) lines.push(approvalDetail(record));
+			if (approvals.length > DETAIL_LIMIT) {
+				lines.push(`（另有 ${approvals.length - DETAIL_LIMIT} 条待批）`);
+			}
+		}
+		if (last) {
+			const label = STATUS_LABEL[last.status] ?? last.status;
+			const detail = last.lastAction ? `：${oneLine(last.lastAction, 80)}` : "";
+			lines.push(`最近一单：${last.id}（${label}）${detail}`);
+		}
+		// 有在办/待批时把「答不了怎么办」的口径带上（B2）：模型只在真有工人等它时才需要它。
+		lines.push("", ATTENTION_REPLY_GUIDANCE);
 	}
-	if (last) {
-		const label = STATUS_LABEL[last.status] ?? last.status;
-		const detail = last.lastAction ? `：${oneLine(last.lastAction, 80)}` : "";
-		lines.push(`最近一单：${last.id}（${label}）${detail}`);
-	}
-	// 有在办/待批时把「答不了怎么办」的口径带上（B2）：模型只在真有工人等它时才需要它。
-	lines.push("", ATTENTION_REPLY_GUIDANCE);
+	if (!lines.length && !workLine) return undefined;
 	// 段末尾挂一行履历摘要 + 周期盘点口径（刀二 E2/E4）：有履历才出现。
 	if (workLine) {
-		lines.push("", workLine, "", WORK_REVIEW_GUIDANCE);
+		if (lines.length) lines.push("");
+		lines.push(workLine, "", WORK_REVIEW_GUIDANCE);
 	}
 	return lines.join("\n");
 }
@@ -418,7 +441,17 @@ function entry(id: string, text: string | undefined): InjectionEntry | undefined
  * persona 段注入**，这里跳过，避免同一段进两遍；普通执事没有 persona 段，在这里补。
  * 答案接地（批 16 §五）不按身份分：谁汇报谁负责。
  */
-function disciplineBlocks(partnerId: string): Array<{ id: string; text: string }> {
+function disciplineBlocks(
+	partnerId: string,
+	includeDiscipline = true,
+): Array<{ id: string; text: string }> {
+	// 主人数据红线（批 21 §七）：数据域分级/提案制/日记不可重写/引原话不打分；
+	// 不按身份分——总管与执事同样面对主人的数据。
+	// 2026-11-14 批1：它是**必选核心**，`discipline` 模块关掉时也只留这一段（永不裁）。
+	const ownerData = ownerDataDisciplineEnabled() ? OWNER_DATA_DISCIPLINE : undefined;
+	if (!includeDiscipline) {
+		return ownerData ? [{ id: "partner_owner_data", text: ownerData }] : [];
+	}
 	const blocks: Array<{ id: string; text: string | undefined }> = [
 		{ id: "partner_verification", text: verificationIronLawFor(partnerId) },
 		{ id: "partner_ruling", text: RULING_DISCIPLINE },
@@ -431,12 +464,7 @@ function disciplineBlocks(partnerId: string): Array<{ id: string; text: string }
 			id: "partner_artifact_handoff",
 			text: artifactHandoffEnabled() ? ARTIFACT_HANDOFF : undefined,
 		},
-		// 主人数据红线（批 21 §七）：数据域分级/提案制/日记不可重写/引原话不打分；
-		// 不按身份分——总管与执事同样面对主人的数据。
-		{
-			id: "partner_owner_data",
-			text: ownerDataDisciplineEnabled() ? OWNER_DATA_DISCIPLINE : undefined,
-		},
+		{ id: "partner_owner_data", text: ownerData },
 		// 汇报卡三规则（批 15 §二）：只给普通执事；总管那条时间线由界面承载，
 		// 加进来会改变总管纪律段的固定字节，故跳过。
 		{
@@ -473,6 +501,12 @@ export function partnerContextProviders(
 	deps: PartnerContextDeps = {},
 ): InjectionProvider[] {
 	const store = deps.store ?? partnersStore();
+	const partner = store.get(partnerId);
+	// 人格开关：`PARTNER_PERSONA_MODULES=false` 或行读不出来 → null = 全部按开（旧行为，谁都不裁）。
+	const personaModules =
+		partner && personaModulesEnabled() ? effectivePersonaModules(partner) : null;
+	const personaOn = (id: PartnerPersonaModule): boolean =>
+		personaModules === null || personaModules[id] === true;
 	let loaded = false;
 	let current: ReturnType<PartnersStore["currentVersion"]> = null;
 	const currentOf = () => {
@@ -486,20 +520,33 @@ export function partnerContextProviders(
 	const providers: InjectionProvider[] = [
 		// 契约取"当前版本快照"；老库/手工放了文件但没快照的，退磁盘当前值。
 		() =>
-			entry(
-				"partner_contract",
-				renderContractSection(
-					currentOf()?.contractSource ?? store.readContractFromHome(partnerId),
-				),
-			),
-		() => entry("partner_goal", buildPartnerGoalSection(partnerId, store)),
-		...disciplineBlocks(partnerId).map((block) => () => entry(block.id, block.text)),
+			personaOn("contract")
+				? entry(
+						"partner_contract",
+						renderContractSection(
+							currentOf()?.contractSource ?? store.readContractFromHome(partnerId),
+						),
+					)
+				: undefined,
+		() =>
+			personaOn("goal") ? entry("partner_goal", buildPartnerGoalSection(partnerId, store)) : undefined,
+		...disciplineBlocks(partnerId, personaOn("discipline")).map(
+			(block) => () => entry(block.id, block.text),
+		),
 		(ctx) =>
-			ctx.dryRun
+			ctx.dryRun || (!personaOn("currentWork") && !personaOn("workHistory"))
 				? undefined
 				: entry(
 						"partner_status",
-						buildPartnerStatusSection(partnerId, conversationId, { ...deps, store }),
+						buildPartnerStatusSection(partnerId, conversationId, {
+							...deps,
+							store,
+							// 只传当前生效的开关；deps 里调用方显式给了 persona 就以调用方为准（单测）。
+							persona: deps.persona ?? {
+								currentWork: personaOn("currentWork"),
+								workHistory: personaOn("workHistory"),
+							},
+						}),
 					),
 	];
 	return providers;

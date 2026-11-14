@@ -1240,6 +1240,177 @@ export const PartnerProfileSchema = z.object({
 });
 export type PartnerProfile = z.infer<typeof PartnerProfileSchema>;
 
+/* ── 员工人格模块（2026-11-14，方案 `docs/设计方案/2026-11-14-员工人格模块（开关化拟人）.md`）──
+ *
+ * 一个员工 = 必选核心（身份节 SOUL / 主人数据红线 / 教诲通道，**不可关**）+ 可开关模块。
+ * 14 个模块 id 一次定全，批次只决定哪些真的注入（批1 生效：expression / values / scenario /
+ * contract / discipline / goal / workHistory / currentWork；impression / mood / heart 批2，
+ * learning / proactivity / profiles 批3）。开关关 = 不进提示词、内容保留。
+ * 字段上限在这里定义一次，服务端写时校验、端点的 `limits` 原样回这一份（前端不另抄数字）。 */
+
+export const PartnerPersonaModuleIds = [
+	"expression",
+	"values",
+	"scenario",
+	"contract",
+	"discipline",
+	"goal",
+	"workHistory",
+	"currentWork",
+	"impression",
+	"mood",
+	"heart",
+	"learning",
+	"proactivity",
+	"profiles",
+] as const;
+export const PartnerPersonaModuleSchema = z.enum(PartnerPersonaModuleIds);
+export type PartnerPersonaModule = z.infer<typeof PartnerPersonaModuleSchema>;
+
+/** 预设：岗位（默认）/ 陪伴 / 自定义。预设只决定开关键，随时可改。 */
+export const PartnerPersonaPresetSchema = z.enum(["work", "companion", "custom"]);
+export type PartnerPersonaPreset = z.infer<typeof PartnerPersonaPresetSchema>;
+
+/** 句长枚举（口吻模块）。 */
+export const PartnerPersonaSentenceLengthSchema = z.enum(["短", "中", "长", "不限"]);
+export type PartnerPersonaSentenceLength = z.infer<typeof PartnerPersonaSentenceLengthSchema>;
+
+/**
+ * 字段上限。数字 = 最多多少**字**（Unicode code point，不是 UTF-16 `length`）；
+ * `{max, each}` = 最多几条 × 每条多少字。端点 GET 原样回这一份，前端据此在前端就拦。
+ */
+export const PARTNER_PERSONA_LIMITS = {
+	style: {
+		speakStyle: 300,
+		catchphrases: { max: 8, each: 24 },
+		taboos: { max: 6, each: 48 },
+		exampleDialogues: { max: 3, each: 400 },
+		altStyle: 300,
+		switchProbability: 100,
+		emojiHabit: 80,
+		openingLine: 120,
+	},
+	values: {
+		cares: 200,
+		bottomLines: 200,
+		fears: 120,
+		likes: { max: 10, each: 30 },
+		dislikes: { max: 10, each: 30 },
+		motivator: 100,
+		valueKeywords: { max: 3, each: 8 },
+	},
+	scenario: {
+		situation: 300,
+		knowledgeBoundary: 300,
+		relations: { max: 10, each: 60 },
+	},
+} as const;
+
+/** 按 Unicode code point 计长的有上限字符串。 */
+function personaText(limit: number, label: string) {
+	return z.string().superRefine((value, ctx) => {
+		if ([...value].length > limit) {
+			ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${label}不超过 ${limit} 字` });
+		}
+	});
+}
+
+/** 有上限的清单：条数 + 每条字数。 */
+function personaList(count: { max: number; each: number }, label: string) {
+	return z
+		.array(personaText(count.each, label))
+		.max(count.max, { message: `${label}最多 ${count.max} 条` });
+}
+
+/** 口吻（静态模块 expression）：全字段可选，空字段不注入。 */
+export const PartnerPersonaStyleSchema = z
+	.object({
+		speakStyle: personaText(PARTNER_PERSONA_LIMITS.style.speakStyle, "说话风格").optional(),
+		sentenceLength: PartnerPersonaSentenceLengthSchema.optional(),
+		catchphrases: personaList(PARTNER_PERSONA_LIMITS.style.catchphrases, "口癖").optional(),
+		taboos: personaList(PARTNER_PERSONA_LIMITS.style.taboos, "忌用语").optional(),
+		exampleDialogues: personaList(PARTNER_PERSONA_LIMITS.style.exampleDialogues, "示例对话").optional(),
+		altStyle: personaText(PARTNER_PERSONA_LIMITS.style.altStyle, "备用风格").optional(),
+		/** 备用风格的切换概率：0–100（%）。只在填了备用风格时才有意义。 */
+		switchProbability: z
+			.number()
+			.int({ message: "切换概率是 0–100 的整数" })
+			.min(0, { message: "切换概率是 0–100 的整数" })
+			.max(PARTNER_PERSONA_LIMITS.style.switchProbability, { message: "切换概率是 0–100 的整数" })
+			.optional(),
+		emojiHabit: personaText(PARTNER_PERSONA_LIMITS.style.emojiHabit, "表情习惯").optional(),
+		openingLine: personaText(PARTNER_PERSONA_LIMITS.style.openingLine, "开场白").optional(),
+	})
+	.strict();
+export type PartnerPersonaStyle = z.infer<typeof PartnerPersonaStyleSchema>;
+
+/** 里子（静态模块 values）：他在乎什么、守什么、怕什么、喜欢什么。 */
+export const PartnerPersonaValuesSchema = z
+	.object({
+		cares: personaText(PARTNER_PERSONA_LIMITS.values.cares, "在乎什么").optional(),
+		bottomLines: personaText(PARTNER_PERSONA_LIMITS.values.bottomLines, "底线").optional(),
+		fears: personaText(PARTNER_PERSONA_LIMITS.values.fears, "怕什么").optional(),
+		likes: personaList(PARTNER_PERSONA_LIMITS.values.likes, "喜好").optional(),
+		dislikes: personaList(PARTNER_PERSONA_LIMITS.values.dislikes, "厌恶").optional(),
+		motivator: personaText(PARTNER_PERSONA_LIMITS.values.motivator, "来劲的事").optional(),
+		valueKeywords: personaList(PARTNER_PERSONA_LIMITS.values.valueKeywords, "关键词").optional(),
+	})
+	.strict();
+export type PartnerPersonaValues = z.infer<typeof PartnerPersonaValuesSchema>;
+
+/** 处境（静态模块 scenario）：眼下在哪、知道什么、和谁什么关系。 */
+export const PartnerPersonaScenarioSchema = z
+	.object({
+		situation: personaText(PARTNER_PERSONA_LIMITS.scenario.situation, "眼下处境").optional(),
+		knowledgeBoundary: personaText(
+			PARTNER_PERSONA_LIMITS.scenario.knowledgeBoundary,
+			"知识边界",
+		).optional(),
+		relations: personaList(PARTNER_PERSONA_LIMITS.scenario.relations, "人物关系").optional(),
+	})
+	.strict();
+export type PartnerPersonaScenario = z.infer<typeof PartnerPersonaScenarioSchema>;
+
+/** 三份静态内容（伙伴家目录 persona/*.json 的形状）。 */
+export interface PartnerPersonaContents {
+	style: PartnerPersonaStyle;
+	values: PartnerPersonaValues;
+	scenario: PartnerPersonaScenario;
+}
+
+/** PUT /api/v1/partners/:id/persona 的 body：按模块部分更新（省略 = 不改）。 */
+export const PartnerPersonaPatchSchema = z
+	.object({
+		preset: PartnerPersonaPresetSchema.optional(),
+		/** 只写给出的模块；键必须是 14 个 id 之一，值必须是布尔。 */
+		modules: z.record(PartnerPersonaModuleSchema, z.boolean()).optional(),
+		/** 只写给出的模块；模块内按**字段**合并（省略的字段不动，空串 = 清空该字段）。 */
+		contents: z
+			.object({
+				style: PartnerPersonaStyleSchema.optional(),
+				values: PartnerPersonaValuesSchema.optional(),
+				scenario: PartnerPersonaScenarioSchema.optional(),
+			})
+			.strict()
+			.optional(),
+	})
+	.strict();
+export type PartnerPersonaPatch = z.infer<typeof PartnerPersonaPatchSchema>;
+
+/**
+ * GET / PUT /api/v1/partners/:id/persona 的响应。
+ * `modules` 永远是**有效开关的完整表**（预设默认 + 行上显式值的合并结果），前端不用自己算。
+ * `enabled` = `PARTNER_PERSONA_MODULES` 开关（false 时前端整块隐藏；字段仍回默认值）。
+ */
+export interface PartnerPersonaView {
+	ok: true;
+	enabled: boolean;
+	preset: PartnerPersonaPreset;
+	modules: Record<PartnerPersonaModule, boolean>;
+	contents: PartnerPersonaContents;
+	limits: typeof PARTNER_PERSONA_LIMITS;
+}
+
 export const RoutineTriggerSchema = z.discriminatedUnion("type", [
 	z.object({ type: z.literal("cron"), expr: z.string() }),
 	z.object({ type: z.literal("interval"), seconds: z.number() }),

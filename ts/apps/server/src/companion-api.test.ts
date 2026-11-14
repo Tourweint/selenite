@@ -694,3 +694,149 @@ test("GET /partners/:id/skills：首行摘要 + mtime，非 md 不收；空目�
 	const missing = await app.request("/api/v1/partners/no-such-partner/skills");
 	assert.equal(missing.status, 404, "未知执事 404");
 });
+
+// ── 员工人格模块端点（2026-11-14 批1）────────────────────────
+
+interface PersonaBody {
+	ok?: boolean;
+	enabled?: boolean;
+	preset?: string;
+	modules?: Record<string, boolean>;
+	contents?: { style?: Record<string, unknown>; values?: Record<string, unknown>; scenario?: Record<string, unknown> };
+	limits?: { style?: { speakStyle?: number; catchphrases?: { max?: number; each?: number } } };
+	error?: string;
+	message?: string;
+}
+
+function putPersona(id: string, body: unknown) {
+	return app.request(`/api/v1/partners/${id}/persona`, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify(body),
+	});
+}
+
+test("GET /partners/:id/persona：默认 work 预设 + 空内容 + 上限原样回传；未知执事 404", async () => {
+	const partner = store.create("人格执事");
+	const res = await app.request(`/api/v1/partners/${partner.id}/persona`);
+	assert.equal(res.status, 200);
+	const body = (await res.json()) as PersonaBody;
+	assert.equal(body.ok, true);
+	assert.equal(body.enabled, true, "缺省开");
+	assert.equal(body.preset, "work");
+	assert.equal(body.modules?.contract, true);
+	assert.equal(body.modules?.goal, true);
+	assert.equal(body.modules?.expression, false, "work 预设静态模块关");
+	assert.deepEqual(body.contents, { style: {}, values: {}, scenario: {} });
+	assert.equal(body.limits?.style?.speakStyle, 300);
+	assert.equal(body.limits?.style?.catchphrases?.max, 8);
+	assert.equal(body.limits?.style?.catchphrases?.each, 24);
+
+	const missing = await app.request("/api/v1/partners/no-such-partner/persona");
+	assert.equal(missing.status, 404);
+});
+
+test("PUT /partners/:id/persona：换预设一键填开关；逐键覆盖；内容按字段合并", async () => {
+	const partner = store.create("人格执事乙");
+	const id = partner.id;
+
+	// 换预设 = 一键填开关（companion：口吻 / 里子 / 处境开，岗位类关）
+	const presetRes = await putPersona(id, { preset: "companion" });
+	assert.equal(presetRes.status, 200);
+	const companion = (await presetRes.json()) as PersonaBody;
+	assert.equal(companion.preset, "companion");
+	assert.equal(companion.modules?.expression, true);
+	assert.equal(companion.modules?.contract, false);
+	assert.equal(companion.modules?.impression, true, "批2 模块先落开关，本批不注入");
+
+	// 逐键覆盖：只改 contract，其它键不动
+	const toggle = (await (await putPersona(id, { modules: { contract: true } })).json()) as PersonaBody;
+	assert.equal(toggle.preset, "companion", "只给 modules 不改预设");
+	assert.equal(toggle.modules?.contract, true);
+	assert.equal(toggle.modules?.expression, true, "没提到的键保持");
+
+	// 内容：按字段合并（先写一句，再补一句，第一句还在）
+	await putPersona(id, { contents: { style: { speakStyle: "短句，先给结论。" } } });
+	const merged = (await (await putPersona(id, { contents: { style: { openingLine: "我来了。" } } })).json()) as PersonaBody;
+	assert.equal(merged.contents?.style?.speakStyle, "短句，先给结论。");
+	assert.equal(merged.contents?.style?.openingLine, "我来了。");
+
+	// 清空一个字段：空串写进去，另一字段不动
+	const cleared = (await (await putPersona(id, { contents: { style: { speakStyle: "" } } })).json()) as PersonaBody;
+	assert.equal(cleared.contents?.style?.speakStyle, "");
+	assert.equal(cleared.contents?.style?.openingLine, "我来了。");
+
+	// 三份内容各自独立落盘（重新 GET 也读得回）
+	const reread = (await (await app.request(`/api/v1/partners/${id}/persona`)).json()) as PersonaBody;
+	assert.deepEqual(reread.contents, cleared.contents);
+});
+
+test("PUT /partners/:id/persona：超限 / 未知模块 / 错类型一律 400，且不写半个字节", async () => {
+	const partner = store.create("人格执事丙");
+	const id = partner.id;
+	await putPersona(id, { contents: { values: { cares: "把活办完。" } } });
+
+	const overLimit = await putPersona(id, { contents: { style: { speakStyle: "字".repeat(301) } } });
+	assert.equal(overLimit.status, 400);
+	assert.match(((await overLimit.json()) as PersonaBody).message ?? "", /不超过 300 字/);
+
+	const tooMany = await putPersona(id, {
+		contents: { values: { likes: Array.from({ length: 11 }, () => "喜欢") } },
+	});
+	assert.equal(tooMany.status, 400);
+
+	const unknownModule = await putPersona(id, { modules: { nope: true } });
+	assert.equal(unknownModule.status, 400);
+
+	const wrongType = await putPersona(id, { modules: { expression: "yes" } });
+	assert.equal(wrongType.status, 400);
+
+	const badProbability = await putPersona(id, { contents: { style: { switchProbability: 101 } } });
+	assert.equal(badProbability.status, 400);
+
+	const unknownTop = await putPersona(id, { vibe: "温柔" });
+	assert.equal(unknownTop.status, 400);
+
+	// 全部 400：之前写进去的内容 / 预设一个都没变
+	const after = (await (await app.request(`/api/v1/partners/${id}/persona`)).json()) as PersonaBody;
+	assert.equal(after.preset, "work");
+	assert.equal(after.modules?.expression, false);
+	assert.equal(after.contents?.values?.cares, "把活办完。");
+	assert.equal(after.contents?.style?.speakStyle, undefined);
+});
+
+test("PARTNER_PERSONA_MODULES=false：GET 回默认值且 enabled=false，PUT 400（端点还在）", async () => {
+	const partner = store.create("人格执事丁");
+	const previous = process.env.PARTNER_PERSONA_MODULES;
+	process.env.PARTNER_PERSONA_MODULES = "false";
+	try {
+		const res = await app.request(`/api/v1/partners/${partner.id}/persona`);
+		assert.equal(res.status, 200);
+		const body = (await res.json()) as PersonaBody;
+		assert.equal(body.enabled, false);
+		assert.equal(body.preset, "work", "关着时模块字段回默认值");
+		assert.equal(body.modules?.contract, true);
+		assert.equal(body.modules?.expression, false);
+
+		const put = await putPersona(partner.id, { preset: "companion" });
+		assert.equal(put.status, 400);
+		assert.match(((await put.json()) as PersonaBody).message ?? "", /PARTNER_PERSONA_MODULES/);
+	} finally {
+		if (previous === undefined) delete process.env.PARTNER_PERSONA_MODULES;
+		else process.env.PARTNER_PERSONA_MODULES = previous;
+	}
+});
+
+test("persona 端点鉴权：没凭据 403 空体", async () => {
+	const partner = store.create("人格执事戊");
+	// 本机凭据落盘也要隔离（auth 首次取 localSecret 时会写这个文件）
+	process.env.AGENT_LOCAL_SECRET_PATH = join(root, "local-secret");
+	const { createAuthMiddleware } = await import("./auth.ts");
+	const secured = new Hono();
+	secured.use("/api/v1/*", createAuthMiddleware("secret-token"));
+	mountCompanions(secured);
+
+	const res = await secured.request(`/api/v1/partners/${partner.id}/persona`);
+	assert.equal(res.status, 403);
+	assert.equal(await res.text(), "");
+});

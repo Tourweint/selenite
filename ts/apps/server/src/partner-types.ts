@@ -5,6 +5,7 @@
  */
 
 import { join } from "node:path";
+import type { PartnerPersonaModule, PartnerPersonaPreset } from "@lifediary/shared";
 
 export type PartnerStatus = "active" | "paused" | "archived";
 
@@ -45,6 +46,17 @@ export interface PartnerRow {
 	 * 全局至多一个（写 true 时同事务清掉其他执事）；不版本化，不参与派活路由。
 	 */
 	diary: boolean;
+	/**
+	 * 人格预设（2026-11-14 员工人格模块 §四）：`work`（默认）/ `companion` / `custom`。
+	 * 只决定模块开关的默认值；**不版本化**（人格模块不是身份，不 bump 版本、不动 SOUL / 契约）。
+	 */
+	personaPreset: PartnerPersonaPreset;
+	/**
+	 * 人格模块开关（2026-11-14）：14 个 id → bool，只存**显式改过**的键；
+	 * 缺省键按 `personaPreset` 的默认值算（`effectivePersonaModules`）。
+	 * 同样是状态不是身份：一条 UPDATE 落地，不 bump 版本。
+	 */
+	personaModules: Partial<Record<PartnerPersonaModule, boolean>>;
 }
 
 export interface PartnerVersionRow {

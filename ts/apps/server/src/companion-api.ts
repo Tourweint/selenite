@@ -6,6 +6,11 @@ import {
 	PARTNER_AVATAR_MAX_DIMENSION,
 	PARTNER_AVATAR_PREFIX,
 	PartnerAvatarPatchSchema,
+	PARTNER_PERSONA_LIMITS,
+	PartnerPersonaPatchSchema,
+	type PartnerPersonaModule,
+	type PartnerPersonaPreset,
+	type PartnerPersonaView,
 } from "@lifediary/shared";
 import {
 	COMPANIONS_ENABLED,
@@ -16,6 +21,14 @@ import {
 	type PartnerStatus,
 	type RoutineTrigger,
 } from "./partners.ts";
+// 人格模块（2026-11-14 批1）：开关算法 / 静态内容读写都在这一层，端点只做形状映射。
+import {
+	defaultPersonaModules,
+	effectivePersonaModules,
+	personaModulesEnabled,
+	readPersonaContents,
+	writePersonaContents,
+} from "./partner-persona.ts";
 // 建/停执事的唯一核心实现（批次D D3）：端点与 partner_manage 工具共用，端点只做形状映射。
 import { createMinisterPartner, stopMinisterPartner } from "./partner-manage.ts";
 import { runPartnerTurn, openPartnerConversation } from "./partner-runtime.ts";
@@ -277,6 +290,76 @@ export function mountCompanions(app: Hono): void {
 			const detail = error instanceof Error ? error.message : String(error);
 			return c.json({ error: "bad_request", message: detail }, 400);
 		}
+	});
+
+	/**
+	 * 员工人格模块（2026-11-14 方案 §四，批1）：读预设 + 有效开关 + 三份静态内容 + 字段上限。
+	 *
+	 * `modules` 永远是**完整有效表**（预设默认 + 行上显式值），前端不用自己算默认。
+	 * `enabled=false`（`PARTNER_PERSONA_MODULES=false`）时模块字段回默认值（work 预设），
+	 * 静态模块也不注入——前端见这一位就整块隐藏（方案 §八）。
+	 * 鉴权同本节其它端点（失败 403 空体）；不存在 → 404。
+	 */
+	app.get("/api/v1/partners/:id/persona", (c) => {
+		const partner = store().get(c.req.param("id"));
+		if (!partner) return c.json({ ok: false, error: "not_found" }, 404);
+		return c.json(personaView(partner));
+	});
+
+	/**
+	 * 写人格模块：body 形状同 GET（`{preset?, modules?, contents?}`），**按模块部分更新**。
+	 *
+	 * - 只给 `preset` → 开关重置成该预设的默认表（换预设 = 一键填开关）；
+	 * - 给了 `modules` → 在当前有效表上逐键覆盖；同时给 `preset` 时先铺预设默认再覆盖；
+	 * - `contents.style/values/scenario` 按**字段**合并（省略字段不动，空串 = 清空该字段）。
+	 *
+	 * 全部过 shared 的 zod（字段上限都在那）；任何一项不合法 → 400 且一个字节都不写。
+	 * `PARTNER_PERSONA_MODULES=false` → 400 带说明（端点还在，功能关着，同 `PARTNER_CONTRACT`）。
+	 * **不版本化**：人格模块不是身份，不 bump `partner_versions`、不动 SOUL / 契约。
+	 */
+	app.put("/api/v1/partners/:id/persona", async (c) => {
+		if (!personaModulesEnabled()) {
+			return c.json(
+				{ error: "bad_request", message: "人格模块未启用（PARTNER_PERSONA_MODULES=false）" },
+				400,
+			);
+		}
+		const id = c.req.param("id");
+		const partner = store().get(id);
+		if (!partner) return c.json({ ok: false, error: "not_found" }, 404);
+		const body = await c.req.json().catch(() => null);
+		const parsed = PartnerPersonaPatchSchema.safeParse(body);
+		if (!parsed.success) {
+			return c.json(
+				{
+					error: "bad_request",
+					message: parsed.error.issues[0]?.message ?? "人格模块内容不合法",
+				},
+				400,
+			);
+		}
+		const patch = parsed.data;
+
+		const preset: PartnerPersonaPreset = patch.preset ?? partner.personaPreset;
+		let modules: Record<PartnerPersonaModule, boolean> = effectivePersonaModules(partner);
+		if (patch.modules || (patch.preset && patch.preset !== partner.personaPreset)) {
+			// 换预设（不给模块）= 直接铺默认表；给了模块 = 在默认表（换预设时）或当前表上逐键覆盖。
+			const base =
+				patch.preset && patch.preset !== partner.personaPreset
+					? defaultPersonaModules(preset)
+					: modules;
+			modules = { ...base, ...(patch.modules ?? {}) };
+		}
+
+		// 先落静态内容（每个文件独立原子写），再落库：写盘失败时预设置不动，不留"开关变了内容没变"。
+		try {
+			if (patch.contents) writePersonaContents(store(), id, patch.contents);
+		} catch (error) {
+			const detail = error instanceof Error ? error.message : String(error);
+			return c.json({ error: "bad_request", message: detail }, 400);
+		}
+		const updated = store().setPersona(id, { preset, modules }) ?? partner;
+		return c.json(personaView(updated));
 	});
 
 	app.patch("/api/v1/partners/:id", async (c) => {
@@ -813,6 +896,23 @@ function routineProjection(routine: {
 		revision: routine.revision,
 		createdAt: routine.createdAt,
 		updatedAt: routine.updatedAt,
+	};
+}
+
+/**
+ * persona 端点的响应投影（GET / PUT 同一份形状）。
+ * 开关关着（`PARTNER_PERSONA_MODULES=false`）时模块字段回默认值：`preset="work"` +
+ * work 预设的开关表——即"没启用过人格模块"的样子，前端据 `enabled=false` 整块隐藏。
+ */
+function personaView(partner: PartnerRow): PartnerPersonaView {
+	const enabled = personaModulesEnabled();
+	return {
+		ok: true,
+		enabled,
+		preset: enabled ? partner.personaPreset : "work",
+		modules: enabled ? effectivePersonaModules(partner) : defaultPersonaModules("work"),
+		contents: readPersonaContents(partnersStore(), partner.id),
+		limits: PARTNER_PERSONA_LIMITS,
 	};
 }
 

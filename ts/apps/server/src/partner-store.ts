@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import type { PartnerPersonaModule, PartnerPersonaPreset } from "@lifediary/shared";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -36,7 +37,9 @@ export class PartnersStore {
 			dispatch_authority INTEGER NOT NULL DEFAULT 0,
 			current_goal    TEXT,
 			tagline         TEXT,
-			diary           INTEGER NOT NULL DEFAULT 0
+			diary           INTEGER NOT NULL DEFAULT 0,
+			persona_preset  TEXT,
+			persona_modules TEXT
 			);
 			CREATE TABLE IF NOT EXISTS partner_versions (
 				partner_id   TEXT NOT NULL,
@@ -136,6 +139,14 @@ export class PartnersStore {
 		// 日记执事列（2026-11-12 日记 v2）：旧库补 INTEGER 默认 0；老记录读出来是 false。
 		if (!columns.some((column) => column.name === "diary")) {
 			this.db.exec("ALTER TABLE partners ADD COLUMN diary INTEGER NOT NULL DEFAULT 0");
+		}
+		// 人格预设 / 开关（2026-11-14 人格模块 §四）：旧库补两个 nullable 列，
+		// 老记录读出来是 null —— 预设按默认 `work`、开关按预设默认算（不是"全关"）。
+		if (!columns.some((column) => column.name === "persona_preset")) {
+			this.db.exec("ALTER TABLE partners ADD COLUMN persona_preset TEXT");
+		}
+		if (!columns.some((column) => column.name === "persona_modules")) {
+			this.db.exec("ALTER TABLE partners ADD COLUMN persona_modules TEXT");
 		}
 		// 岗位契约快照列（2026-11-08 员工人格化刀一 E1）：旧库补 nullable 列，
 		// 老版本读出来是 null（= 无契约快照），不炸、不补数据、不越权回填。
@@ -316,6 +327,27 @@ export class PartnersStore {
 		this.db
 			.prepare("UPDATE partners SET tagline = ?, updated_at = ? WHERE id = ?")
 			.run(tagline, new Date().toISOString(), id);
+		return this.get(id);
+	}
+
+	/**
+	 * 人格预设 + 模块开关（2026-11-14 人格模块 §四）：一条 UPDATE 原子落地。
+	 * 两个值都已是合法形状（端点过 zod、缺省键按预设默认补全后传进来）；
+	 * **不版本化**——人格模块不是身份，不 bump `partner_versions`、不动 SOUL / 契约。
+	 */
+	setPersona(
+		id: string,
+		patch: {
+			preset: PartnerPersonaPreset;
+			modules: Record<PartnerPersonaModule, boolean>;
+		},
+	): PartnerRow | null {
+		if (!this.get(id)) return null;
+		this.db
+			.prepare(
+				"UPDATE partners SET persona_preset = ?, persona_modules = ?, updated_at = ? WHERE id = ?",
+			)
+			.run(patch.preset, JSON.stringify(patch.modules), new Date().toISOString(), id);
 		return this.get(id);
 	}
 

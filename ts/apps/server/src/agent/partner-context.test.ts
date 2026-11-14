@@ -22,6 +22,22 @@ import {
 	partnerContractEnabled,
 	partnerContractTemplate,
 } from "../partners.ts";
+import {
+	PartnerPersonaScenarioSchema,
+	PartnerPersonaStyleSchema,
+	PartnerPersonaValuesSchema,
+	type PartnerPersonaContents,
+} from "@lifediary/shared";
+import {
+	PERSONA_PRESETS,
+	defaultPersonaModules,
+	effectivePersonaModules,
+	personaModulesEnabled,
+	readPersonaContents,
+	renderPersonaBlocks,
+	renderPersonaSection,
+	writePersonaContents,
+} from "../partner-persona.ts";
 
 /**
  * 员工人格化刀一（E1 契约 / E5 状态感 / B2 受阻口径）的最小充分单测。
@@ -478,4 +494,319 @@ test("汇报卡开关：BRIEF_CARD_RULES=false 时纪律段回到改动前", () 
 		if (previous === undefined) delete process.env.BRIEF_CARD_RULES;
 		else process.env.BRIEF_CARD_RULES = previous;
 	}
+});
+
+// ── 员工人格模块（2026-11-14 批1）────────────────────────────
+
+/** 三份静态内容的完整夹具：每个字段都填上，用来断言"全都在"。 */
+const FULL_PERSONA: PartnerPersonaContents = {
+	style: {
+		speakStyle: "短句，先给结论，再给理由。",
+		sentenceLength: "短",
+		catchphrases: ["稳住", "先查"],
+		taboos: ["好的呢", "亲"],
+		exampleDialogues: ["主人：好了吗？\n我：跑通了，三个探针全绿。"],
+		altStyle: "正式汇报时用书面语。",
+		switchProbability: 30,
+		emojiHabit: "几乎不用表情，只在收尾用一个句号。",
+		openingLine: "我来了，先说结论。",
+	},
+	values: {
+		cares: "把活办完，不留半截。",
+		bottomLines: "不编造没查过的事。",
+		fears: "假装知道。",
+		likes: ["安静的下午", "把问题拆小"],
+		dislikes: ["空话", "催"],
+		motivator: "别人说这个不可能的时候。",
+		valueKeywords: ["准确", "克制"],
+	},
+	scenario: {
+		situation: "手上有三个工人，在等两单回执。",
+		knowledgeBoundary: "不知道主人的账户密码，也不该知道。",
+		relations: ["总管：上级，向他汇报", "小记：搭档"],
+	},
+};
+
+test("人格预设：三套默认表逐键定死；work 是建档默认（静态模块关、岗位类开）", () => {
+	const ids = Object.keys(PERSONA_PRESETS.work).sort();
+	assert.equal(ids.length, 14, "14 个模块 id 一次定全");
+	for (const preset of ["work", "companion", "custom"] as const) {
+		assert.deepEqual(
+			Object.keys(PERSONA_PRESETS[preset]).sort(),
+			ids,
+			`${preset} 预设必须覆盖全部 14 个 id`,
+		);
+	}
+
+	// work（默认）：expression / values / scenario 关，岗位类五件开，批2/批3 全关。
+	assert.deepEqual(defaultPersonaModules("work"), {
+		expression: false,
+		values: false,
+		scenario: false,
+		contract: true,
+		discipline: true,
+		goal: true,
+		workHistory: true,
+		currentWork: true,
+		impression: false,
+		mood: false,
+		heart: false,
+		learning: false,
+		proactivity: false,
+		profiles: false,
+	});
+
+	// companion：口吻 / 里子 / 处境 + 目标开；岗位类关（红线不在开关里，照旧注入）。
+	const companion = defaultPersonaModules("companion");
+	for (const id of ["expression", "values", "scenario", "goal"] as const) {
+		assert.equal(companion[id], true, `companion 该开：${id}`);
+	}
+	for (const id of ["contract", "discipline", "workHistory", "currentWork"] as const) {
+		assert.equal(companion[id], false, `companion 该关：${id}`);
+	}
+	// impression / mood / heart 在 schema 里可置 true，但批1 不注入（批2 生效）。
+	for (const id of ["impression", "mood", "heart"] as const) {
+		assert.equal(companion[id], true, `companion 预设先置上：${id}`);
+	}
+
+	// custom：全关起步，只由用户自己开。
+	assert.ok(Object.values(defaultPersonaModules("custom")).every((value) => value === false));
+});
+
+test("人格开关合并：行上显式值覆盖预设默认，缺省键仍按预设算", () => {
+	const partner = { personaPreset: "work" as const, personaModules: { expression: true } };
+	const modules = effectivePersonaModules(partner);
+	assert.equal(modules.expression, true, "显式开覆盖预设的关");
+	assert.equal(modules.contract, true, "没写过的键仍按预设默认");
+	// 脏键 / 非布尔被忽略
+	const dirty = effectivePersonaModules({
+		personaPreset: "work",
+		personaModules: { nope: true, goal: "yes" } as never,
+	});
+	assert.equal(dirty.goal, true, "非布尔被忽略，回落预设");
+	assert.equal((dirty as Record<string, unknown>).nope, undefined, "未知键不进来");
+});
+
+test("静态人格：固定顺序 口吻 → 里子 → 处境，字段齐全；空字段 / 空模块整段跳过", () => {
+	const blocks = renderPersonaBlocks(FULL_PERSONA) ?? "";
+	assert.ok(blocks.startsWith("【口吻】"), "口吻在最前");
+	assert.ok(blocks.includes("【里子】") && blocks.includes("【处境】"));
+	assert.ok(blocks.indexOf("【口吻】") < blocks.indexOf("【里子】"));
+	assert.ok(blocks.indexOf("【里子】") < blocks.indexOf("【处境】"));
+	for (const line of [
+		"说话风格：",
+		"句子长度：短",
+		"口癖：「稳住」「先查」",
+		"忌用语：",
+		"示例对话：",
+		"备用风格：正式汇报时用书面语。（切换概率 30%）",
+		"表情习惯：",
+		"开场白：",
+		"在乎：",
+		"底线：",
+		"怕：",
+		"喜欢：",
+		"厌恶：",
+		"来劲的事：",
+		"关键词：准确、克制",
+		"眼下处境：",
+		"知道与不知道：",
+		"人物关系：",
+	]) {
+		assert.ok(blocks.includes(line), `缺一行：${line}`);
+	}
+
+	// 空字段跳过：只填一句说话风格 → 没有口癖 / 里子 / 处境
+	const onlyStyle = renderPersonaBlocks({
+		style: { speakStyle: "只说实话。" },
+		values: {},
+		scenario: {},
+	});
+	assert.equal(onlyStyle, "【口吻】\n- 说话风格：只说实话。");
+	// 全空 → undefined（不注入空壳标题）
+	assert.equal(renderPersonaBlocks({ style: {}, values: {}, scenario: {} }), undefined);
+	// 备用风格空时，单独一个切换概率不产生孤儿行
+	const altOnly = renderPersonaBlocks({
+		style: { switchProbability: 50 },
+		values: {},
+		scenario: {},
+	});
+	assert.equal(altOnly, undefined);
+});
+
+test("静态人格：关掉的静态模块不读也不渲染；PARTNER_PERSONA_MODULES=false 整段不注入", () => {
+	const { root, db, homes } = tempRoot();
+	const store = new PartnersStore(db, homes);
+	const previous = process.env.PARTNER_PERSONA_MODULES;
+	try {
+		const partner = store.create("阿岚");
+		writePersonaContents(store, partner.id, FULL_PERSONA);
+		assert.equal(readPersonaContents(store, partner.id).style.catchphrases?.length, 2);
+
+		// work 预设：expression / values / scenario 全关 → 内容还在盘上，但一句都不注入。
+		const work = store.get(partner.id);
+		assert.ok(work);
+		assert.equal(renderPersonaSection(store, work), undefined);
+
+		// 只开 expression：只出口吻，里子 / 处境仍不注入。
+		store.setPersona(partner.id, {
+			preset: "work",
+			modules: { ...defaultPersonaModules("work"), expression: true },
+		});
+		const exprOnly = renderPersonaSection(store, store.get(partner.id)!) ?? "";
+		assert.match(exprOnly, /【口吻】/);
+		assert.ok(!exprOnly.includes("【里子】"));
+		assert.ok(!exprOnly.includes("【处境】"));
+
+		// companion：三段全出。
+		store.setPersona(partner.id, {
+			preset: "companion",
+			modules: defaultPersonaModules("companion"),
+		});
+		const full = renderPersonaSection(store, store.get(partner.id)!) ?? "";
+		assert.ok(full.includes("【口吻】") && full.includes("【里子】") && full.includes("【处境】"));
+
+		// 回滚开关：显式 false → 整段不注入（旧行为），内容仍留在盘上。
+		process.env.PARTNER_PERSONA_MODULES = "false";
+		assert.equal(personaModulesEnabled(), false);
+		assert.equal(renderPersonaSection(store, store.get(partner.id)!), undefined);
+		assert.equal(readPersonaContents(store, partner.id).values.cares, FULL_PERSONA.values.cares);
+	} finally {
+		if (previous === undefined) delete process.env.PARTNER_PERSONA_MODULES;
+		else process.env.PARTNER_PERSONA_MODULES = previous;
+		store.close();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("岗位类开关：contract / goal / discipline / workHistory / currentWork 各自能关，红线永不裁", () => {
+	const { root, db, homes, workRoot } = tempRoot();
+	const store = new PartnersStore(db, homes);
+	const previous = process.env.PARTNER_PERSONA_MODULES;
+	try {
+		const partner = store.create("阿岚");
+		store.linkSession({
+			partnerId: partner.id,
+			role: "canonical",
+			routeKey: "canonical",
+			sessionId: 606,
+		});
+		store.bumpContract(partner.id, "## 职责范围\n桌面壳与安装包。");
+		store.setCurrentGoal(partner.id, "本季度把安装包做稳");
+
+		const saved = new Store(workRoot);
+		saved.saveTicket(
+			ticketFixture(workRoot, "T-606", "dispatching", { originConversationId: "606" }),
+		);
+		saved.close();
+
+		const deps = {
+			store,
+			workRoot,
+			approvals: { pendingOf: () => [{ tool: "bash", args: "npm run build" }] },
+			workSummary: () => ({ done: 8, failed: 1, stopped: 1, total: 10 }),
+		};
+
+		// 默认（work 预设）：五段都在
+		const all = buildPartnerTurnContext(partner.id, 606, deps);
+		assert.match(all.contract ?? "", /【岗位契约】/);
+		assert.equal(all.goal, "【当前目标】本季度把安装包做稳");
+		assert.match(all.status ?? "", /【当前在办】/);
+		assert.match(all.status ?? "", /近 10 单：完成 8、失败 1、中止 1/);
+		assert.match(all.discipline, /【验证铁律】/);
+		assert.match(all.discipline, /【主人数据红线】/);
+
+		// 全关（custom 起步）：五段都不在，但纪律只剩红线
+		store.setPersona(partner.id, {
+			preset: "custom",
+			modules: defaultPersonaModules("custom"),
+		});
+		const none = buildPartnerTurnContext(partner.id, 606, deps);
+		assert.equal(none.contract, null);
+		assert.equal(none.goal, null);
+		assert.equal(none.status, null);
+		assert.ok(!(none.text ?? "").includes("【当前在办】"));
+		assert.ok(!(none.text ?? "").includes("【岗位契约】"));
+		assert.equal(none.discipline.includes("【主人数据红线】"), true, "红线不可关");
+		assert.equal(none.discipline.includes("【验证铁律】"), false, "其余纪律随模块关掉");
+		assert.equal(none.text, none.discipline, "关完全部只剩下红线段");
+
+		// 只开 workHistory：只有履历摘要，不拼空壳「【当前在办】」头
+		store.setPersona(partner.id, {
+			preset: "custom",
+			modules: { ...defaultPersonaModules("custom"), workHistory: true },
+		});
+		const historyOnly = buildPartnerTurnContext(partner.id, 606, deps);
+		assert.match(historyOnly.status ?? "", /近 10 单/);
+		assert.ok(!(historyOnly.status ?? "").includes("【当前在办】"));
+
+		// 只开 currentWork：在办段在，履历摘要不在
+		store.setPersona(partner.id, {
+			preset: "custom",
+			modules: { ...defaultPersonaModules("custom"), currentWork: true },
+		});
+		const currentOnly = buildPartnerTurnContext(partner.id, 606, deps);
+		assert.match(currentOnly.status ?? "", /【当前在办】/);
+		assert.ok(!(currentOnly.status ?? "").includes("近 10 单"));
+
+		// 回滚开关：显式 false → 全部按旧行为注入（不读 personaModules）
+		process.env.PARTNER_PERSONA_MODULES = "false";
+		const legacy = buildPartnerTurnContext(partner.id, 606, deps);
+		assert.match(legacy.contract ?? "", /【岗位契约】/);
+		assert.match(legacy.status ?? "", /【当前在办】/);
+		assert.match(legacy.status ?? "", /近 10 单/);
+		assert.match(legacy.discipline, /【验证铁律】/);
+	} finally {
+		if (previous === undefined) delete process.env.PARTNER_PERSONA_MODULES;
+		else process.env.PARTNER_PERSONA_MODULES = previous;
+		store.close();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("字段上限：三份 zod schema 在写时拦超限（字 / 条数 / 概率）", () => {
+	const long = (count: number) => "字".repeat(count);
+	// 口吻
+	assert.equal(PartnerPersonaStyleSchema.safeParse({ speakStyle: long(300) }).success, true);
+	assert.equal(PartnerPersonaStyleSchema.safeParse({ speakStyle: long(301) }).success, false);
+	assert.equal(PartnerPersonaStyleSchema.safeParse({ sentenceLength: "中" }).success, true);
+	assert.equal(PartnerPersonaStyleSchema.safeParse({ sentenceLength: "很长" }).success, false);
+	assert.equal(
+		PartnerPersonaStyleSchema.safeParse({ catchphrases: Array.from({ length: 8 }, () => "好") })
+			.success,
+		true,
+	);
+	assert.equal(
+		PartnerPersonaStyleSchema.safeParse({ catchphrases: Array.from({ length: 9 }, () => "好") })
+			.success,
+		false,
+	);
+	assert.equal(
+		PartnerPersonaStyleSchema.safeParse({ catchphrases: [long(25)] }).success,
+		false,
+		"单条口癖 ≤24 字",
+	);
+	assert.equal(PartnerPersonaStyleSchema.safeParse({ taboos: Array.from({ length: 7 }, () => "x") }).success, false);
+	assert.equal(
+		PartnerPersonaStyleSchema.safeParse({ exampleDialogues: Array.from({ length: 4 }, () => "x") })
+			.success,
+		false,
+	);
+	assert.equal(PartnerPersonaStyleSchema.safeParse({ switchProbability: 0 }).success, true);
+	assert.equal(PartnerPersonaStyleSchema.safeParse({ switchProbability: 100 }).success, true);
+	assert.equal(PartnerPersonaStyleSchema.safeParse({ switchProbability: 101 }).success, false);
+	assert.equal(PartnerPersonaStyleSchema.safeParse({ switchProbability: 10.5 }).success, false);
+	assert.equal(PartnerPersonaStyleSchema.safeParse({ emojiHabit: long(81) }).success, false);
+	assert.equal(PartnerPersonaStyleSchema.safeParse({ openingLine: long(121) }).success, false);
+	assert.equal(PartnerPersonaStyleSchema.safeParse({ speakStyle: "嗯", extra: "多出来的键" }).success, false);
+	// 里子
+	assert.equal(PartnerPersonaValuesSchema.safeParse({ cares: long(201) }).success, false);
+	assert.equal(PartnerPersonaValuesSchema.safeParse({ dislikes: Array.from({ length: 11 }, () => "x") }).success, false);
+	assert.equal(PartnerPersonaValuesSchema.safeParse({ valueKeywords: ["一二三四五六七八"] }).success, true);
+	assert.equal(PartnerPersonaValuesSchema.safeParse({ valueKeywords: ["一二三四五六七八九"] }).success, false);
+	assert.equal(PartnerPersonaValuesSchema.safeParse({ valueKeywords: ["a", "b", "c", "d"] }).success, false);
+	// 处境
+	assert.equal(PartnerPersonaScenarioSchema.safeParse({ situation: long(301) }).success, false);
+	assert.equal(PartnerPersonaScenarioSchema.safeParse({ relations: Array.from({ length: 11 }, () => "x") }).success, false);
+	assert.equal(PartnerPersonaScenarioSchema.safeParse({ relations: [long(61)] }).success, false);
 });

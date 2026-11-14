@@ -11,6 +11,7 @@ import { markAutonomyTurn, unmarkAutonomyTurn } from "./autonomy-state.ts";
 import { nextChainCandidate } from "./model-chain.ts";
 import type { PartnerRow } from "./partners.ts";
 import { COMPANIONS_ENABLED, partnersStore } from "./partners.ts";
+import { personaRefreshNeeded, personaSignature, renderPersonaSection } from "./partner-persona.ts";
 import { ROUTINE_QUIET_INSTRUCTION, assessRoutineOutputGuarded, routineQuietEnabled } from "./routine-quiet.ts";
 import { clearTurnToolErrors, clearUnattendedSkips, markRoutineTurn, takeTurnToolErrors, takeUnattendedSkips, unmarkRoutineTurn } from "./unattended.ts";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -28,6 +29,12 @@ export function partnerCanonicalExternalId(partnerId: string): string {
 export function renderPartnerIdentity(partner: PartnerRow, soulSource: string): string {
 	const store = partnersStore();
 	const sections: string[] = [soulSource.trim()];
+
+	// 静态人格模块（2026-11-14 批1）：口吻 → 里子 → 处境，紧跟在 SOUL 之后。
+	// 它们是"他是谁"的一部分，会话级稳定；空模块 / 空字段整段跳过。
+	// 开关关着 / `PARTNER_PERSONA_MODULES=false` → undefined，instructions 与改动前逐字节一致。
+	const persona = renderPersonaSection(store, partner);
+	if (persona) sections.push(persona);
 
 	const userMd = store.readUserMd(partner.id);
 	if (userMd && userMd.trim()) {
@@ -95,10 +102,16 @@ async function openPartnerSession(partnerId: string): Promise<ResolvedChat | nul
 		});
 	}
 
-	// 身份对齐：appliedVersion ≠ currentVersion 才 configure（改 SOUL 下一轮生效的记账位）
+	// 身份对齐：appliedVersion ≠ currentVersion 才 configure（改 SOUL 下一轮生效的记账位）。
+	// 2026-11-14 批1：人格模块不版本化，另用内容签名判断——改了口吻 / 里子 / 处境（或开关）
+	// 也要在下一轮重配 instructions，否则新填的内容要等下一次 SOUL / 契约变更才生效。
 	const current = store.currentVersion(partnerId);
 	const applied = store.appliedVersionOf(partnerId, chat.internalId);
-	if (current && current.version !== applied) {
+	const personaChanged = personaRefreshNeeded(
+		chat.internalId,
+		personaSignature(store, partner),
+	);
+	if (current && (current.version !== applied || personaChanged)) {
 		await chat.conversation.configure(
 			{ instructions: renderPartnerIdentity(partner, current.soulSource) },
 			CTX,

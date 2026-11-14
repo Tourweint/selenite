@@ -1,0 +1,238 @@
+/*
+ * 人设二级页（C 版，2026-11-14）
+ *
+ * 只服务 #/settings/partners/<id>：#settings-inner.is-partner-profile 时才收窄到 900，
+ * 其余设置分区照旧 1000（.set-page 的既有口径）。
+ * 版式口径：抬头一行身份 → 四段（人设 / 岗位 / 能力 / 档案），每段「标题在卡外 + 一张卡」。
+ */
+
+#settings-inner.is-partner-profile { max-width: 900px; }
+
+/* 2026-11-14：原来这里留 6px 让开 `.set-scroll` 的滚动条槽（gutter 预留的布局宽）。
+   条子隐掉、gutter 也撤了，这道让位变成纯右缩进，右对齐的注脚反而不齐左边——
+   删掉，与其它设置分区同一个 16px 内边距。 */
+.pf { display: flex; flex-direction: column; }
+
+/* 面包屑：与其它设置页的返回一致，轻、不抢抬头 */
+.pf-back {
+  display: inline-flex; align-items: center; gap: 5px;
+  align-self: flex-start; margin: 0 0 14px -4px; padding: 4px 8px 4px 4px;
+  border: 0; border-radius: var(--r-sm); background: none;
+  color: var(--text-3); font-size: 12px; cursor: pointer;
+  transition: background-color .15s ease, color .15s ease;
+}
+.pf-back:hover { background: var(--card); color: var(--text-2); }
+.pf-back svg { width: 13px; height: 13px; }
+
+/* ── 抬头：这个人是谁 ── */
+.pf-hero { display: flex; align-items: center; gap: 20px; padding-bottom: 22px; }
+.pf-ava-wrap { position: relative; flex: none; }
+.pf-ava {
+  width: 72px; height: 72px; padding: 0; overflow: hidden;
+  display: grid; place-content: center;
+  border: 1px solid transparent; border-radius: 50%;
+  background: var(--card-high); color: var(--text-2);
+  font-size: 26px; line-height: 1; cursor: pointer;
+  transition: border-color .15s ease;
+}
+.pf-ava:hover { border-color: var(--accent); }
+.pf-ava img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.pf-ava-chev {
+  position: absolute; right: -3px; bottom: -3px;
+  width: 22px; height: 22px; display: grid; place-content: center;
+  border: 1px solid var(--outline); border-radius: 50%;
+  background: var(--surface); color: var(--text-2);
+  pointer-events: none;
+}
+.pf-ava-chev svg { width: 11px; height: 11px; }
+
+.pf-hero-main { flex: 1; min-width: 0; }
+.pf-title {
+  margin: 0; font-size: 22px; font-weight: 500; line-height: 1.3;
+  color: var(--text); letter-spacing: .01em;
+  overflow-wrap: anywhere;
+}
+.pf-meta {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  margin-top: 7px; font-size: 11.5px; line-height: 1.5; color: var(--text-3);
+}
+.pf-meta .status-dot { margin-right: 1px; }
+.pf-sep { color: var(--outline); }
+.pf-domain-tag { font-family: var(--mono); font-size: 11px; }
+.pf-hero-actions { display: flex; gap: 8px; flex: none; }
+.pf-hero-actions .ghost { height: 30px; }
+
+/* ── 分节 ── */
+.pf-sec { display: flex; flex-direction: column; margin-top: 26px; }
+.pf-sec-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 10px; padding-right: 3px; }
+.pf-sec-title { margin: 0 0 0 2px; font-size: 16px; font-weight: 500; line-height: 1.2; color: var(--text); }
+.pf-sec-note { font-size: 11.5px; color: var(--text-3); text-align: right; }
+
+.pf-panel { padding: 16px 18px 14px; gap: 12px; }
+
+/* ── ① 人设 ── */
+.pf-id-row { display: flex; align-items: flex-end; gap: 14px; }
+.pf-id-row .pf-field { flex: 1 1 160px; }
+.pf-field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.pf-field > span { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-3); }
+.pf-field .set-input { flex: none; width: 100%; height: 32px; font-size: 12.5px; }
+#settings-inner.is-partner-profile .set-input.is-invalid { border-color: var(--c-error); }
+
+/* 极短的注入标记：只标「进不进提示词 / 干什么用」，不写解释句 */
+.pf-tag {
+  display: inline-flex; align-items: center; height: 16px; padding: 0 5px;
+  border-radius: 3px; background: var(--card-high);
+  font-size: 10px; font-style: normal; font-weight: 400; line-height: 1;
+  color: var(--text-3); white-space: nowrap;
+}
+
+.pf-soul-head { display: flex; align-items: center; gap: 7px; margin-top: 2px; }
+.pf-soul-head .pf-block-title { font-size: 12px; }
+.pf-soul {
+  width: 100%; height: 240px; resize: none;
+  padding: 15px 17px;
+  border: 1px solid var(--outline); border-radius: var(--r-md);
+  background: var(--surface); color: var(--text);
+  font-family: inherit; font-size: 13.5px; line-height: 1.95;
+  letter-spacing: .01em; outline: none;
+  transition: border-color .15s ease;
+}
+.pf-soul:focus { border-color: var(--accent); }
+.pf-soul::placeholder { color: var(--text-3); }
+
+.pf-foot { display: flex; align-items: center; gap: 8px; }
+.pf-foot[hidden] { display: none; }
+.pf-foot .ghost, .pf-foot .btn-primary { height: 28px; }
+.pf-foot .ghost:first-of-type { margin-left: auto; }
+.pf-state { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--text-3); }
+.pf-state i { width: 5px; height: 5px; border-radius: 50%; background: var(--outline); flex: none; }
+.pf-state.is-dirty { color: var(--text-2); }
+.pf-state.is-dirty i { background: var(--accent); }
+
+.pf-hint { margin: 0; font-size: 11.5px; line-height: 1.55; color: var(--text-3); }
+.pf-hint.is-error { color: var(--c-error, #b03a2e); }
+.pf-hint:empty { display: none; }
+/* mountChainEditor 自带一条空的 .cs-hint（margin 12/12），在这一页会撑出 41px 空白 */
+#pf-chain .cs-hint:empty { display: none; }
+
+/* ── ② 岗位 ── */
+.pf-block { display: flex; flex-direction: column; gap: 8px; }
+.pf-block-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.pf-block-title { font-size: 13px; font-weight: 500; color: var(--text); }
+.pf-kv { font-family: var(--mono); font-size: 11px; color: var(--text-3); }
+.pf-mini {
+  border: 0; padding: 0 1px; background: none;
+  font-family: inherit; font-size: 11.5px; line-height: 1.4;
+  color: var(--text-3); cursor: pointer;
+  text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px;
+}
+.pf-mini:hover { color: var(--text-2); }
+.pf-div { height: 1px; margin: 2px -18px; background: var(--divider); }
+
+/* 折叠条：岗位契约 / 备选模型 / 例行任务 / 技能共用一套 */
+.pf-fold { border-top: 1px solid var(--divider); }
+.pf-fold:first-child { border-top: 0; }
+.pf-fold > summary {
+  display: flex; align-items: center; gap: 8px; min-height: 40px;
+  list-style: none; cursor: pointer; padding: 2px 0;
+}
+.pf-fold > summary::-webkit-details-marker { display: none; }
+.pf-fold-title { font-size: 13px; font-weight: 500; color: var(--text); }
+.pf-fold > summary:hover .pf-fold-title { color: var(--accent); }
+.pf-fold-chev { margin-left: auto; display: grid; place-content: center; color: var(--text-3); flex: none; }
+.pf-fold-chev svg { width: 12px; height: 12px; transform: rotate(-90deg); transition: transform .15s ease; }
+.pf-fold[open] .pf-fold-chev svg { transform: rotate(0deg); }
+.pf-fold-body { display: flex; flex-direction: column; gap: 10px; padding: 2px 0 10px; }
+.pf-fold-tools { display: flex; justify-content: flex-end; margin-bottom: -4px; }
+
+.pf-contract {
+  width: 100%; height: 300px; resize: none;
+  padding: 14px 16px;
+  border: 1px solid var(--outline); border-radius: var(--r-md);
+  background: var(--surface); color: var(--text);
+  font-family: inherit; font-size: 13px; line-height: 1.85;
+  outline: none; transition: border-color .15s ease;
+}
+.pf-contract:focus { border-color: var(--accent); }
+.pf-contract::placeholder { color: var(--text-3); }
+.pf-foot.is-tight .ghost { height: 26px; padding: 0 10px; font-size: 11.5px; }
+
+.pf-inline { display: flex; align-items: center; gap: 8px; }
+.pf-inline .set-input { flex: 1; height: 32px; }
+.pf-inline .ghost { height: 32px; }
+
+.pf-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 46px; padding: 4px 0; }
+.pf-row + .pf-row { border-top: 1px solid var(--divider); }
+.pf-row-label { font-size: 13px; color: var(--text); }
+
+/* ── ①·五 人格模块（2026-11-14 批1）──
+   预设一行三枚、模块一列开关；解释文字不常驻（data-tip 悬停才出），与设置页其它标签同口径。 */
+/* 作者样式里的 display:flex 会盖掉 UA 的 [hidden]，必须显式让位（否则总开关关着也看得见）。 */
+.pf-sec[hidden] { display: none; }
+.pf-presets { display: flex; flex-wrap: wrap; gap: 6px; }
+.pf-preset {
+  height: 30px; padding: 0 13px;
+  border: 1px solid var(--outline); border-radius: var(--r-sm);
+  background: none; color: var(--text-2);
+  font-family: inherit; font-size: 12.5px; line-height: 1; cursor: pointer;
+  transition: border-color .15s ease, color .15s ease, background-color .15s ease;
+}
+.pf-preset:hover { border-color: var(--text-3); color: var(--text); }
+.pf-preset[aria-pressed="true"] {
+  border-color: var(--accent); color: var(--accent); background: var(--card-high);
+}
+.pf-persona-list { display: flex; flex-direction: column; margin-top: 4px; }
+.pf-mod-label { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.pf-mod-name {
+  font-size: 13px; color: var(--text);
+  border-bottom: 1px dashed transparent; cursor: help;
+}
+.pf-mod-name:hover { border-bottom-color: var(--outline); }
+.pf-mod .pf-mini { font-size: 11.5px; }
+
+/* 静态模块编辑弹层（modal-wide 档）：字段一列到底，说明挂在标签右侧 */
+.pf-edit-grid {
+  display: flex; flex-direction: column; gap: 12px;
+  max-height: 54vh; overflow: auto; padding-right: 4px;
+}
+.pf-edit-grid .modal-field > span { display: flex; align-items: baseline; gap: 8px; }
+.pf-edit-grid .modal-field > span em {
+  font-style: normal; font-size: 10.5px; color: var(--text-3);
+  white-space: nowrap;
+}
+/* 说明挂到最右；字数上限留在标签旁边 */
+.pf-edit-grid .modal-field > span em:last-of-type { margin-left: auto; overflow: hidden; text-overflow: ellipsis; }
+.pf-edit-grid .pt-ta { width: 100%; min-height: 62px; resize: vertical; }
+
+/* ── ③ 能力 ── */
+.pf-new { margin-top: 2px; padding-top: 10px; border-top: 1px solid var(--divider); }
+.pf-new > summary {
+  list-style: none; cursor: pointer;
+  font-size: 12.5px; color: var(--text-2);
+  padding: 2px 0;
+}
+.pf-new > summary::-webkit-details-marker { display: none; }
+.pf-new > summary::before { content: "＋ "; color: var(--text-3); }
+.pf-new[open] > summary::before { content: "－ "; }
+.pf-new > summary:hover { color: var(--text); }
+/* 摘要已经写着「新建例行任务」：里面那层再套一个同名标题和一圈边框，就成了盒中盒 */
+.pf-new .pt-new { border: 0; padding: 0; margin-top: 8px; }
+.pf-new .pt-seg-title { display: none; }
+.pf-new .pt-ta { resize: none; }
+
+.pf-skills { display: flex; flex-direction: column; }
+.pf-skill { display: flex; align-items: baseline; gap: 12px; padding: 7px 0; font-size: 12px; }
+.pf-skill + .pf-skill { border-top: 1px solid var(--divider); }
+.pf-skill-name { flex: none; width: 118px; font-weight: 500; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pf-skill-sum { flex: 1; min-width: 0; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pf-skill-when { flex: none; font-family: var(--mono); font-size: 10.5px; color: var(--text-3); }
+
+/* ── ④ 档案（2026-11-14 已撤）── */
+/* 人设页不再承载履历 / 记忆：统一去设置 → 记忆。 */
+
+/* 窄窗：头像与字段可换行，抬头动作换行 */
+@media (max-width: 720px) {
+  .pf-id-row { flex-wrap: wrap; }
+  .pf-hero { flex-wrap: wrap; }
+  .pf-hero-actions { width: 100%; }
+}

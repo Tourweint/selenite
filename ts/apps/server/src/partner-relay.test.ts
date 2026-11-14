@@ -46,6 +46,8 @@ function partner(over: Partial<PartnerRow> & { id: string; name: string }): Part
 		currentGoal: null,
 		tagline: null,
 		diary: false,
+		personaPreset: "work",
+		personaModules: {},
 		...over,
 	};
 }

@@ -8,6 +8,7 @@ import {
 	type ResolvedChat,
 } from "./agent.ts";
 import { GroupRouteError, resolveGroupSpeakers } from "./group-routing.ts";
+import { personaRefreshNeeded, personaSignature } from "./partner-persona.ts";
 import { renderPartnerIdentity } from "./partner-runtime.ts";
 import {
 	partnersStore,
@@ -453,10 +454,15 @@ async function ensureGroupMemberSession(partnerId: string, groupId: string): Pro
 			sessionId: chat.internalId,
 		});
 	}
-	// 身份对齐：appliedVersion ≠ currentVersion 才 configure（改 SOUL 下一轮生效的记账位）
+	// 身份对齐：appliedVersion ≠ currentVersion 才 configure（改 SOUL 下一轮生效的记账位）。
+	// 人格模块（2026-11-14 批1）不版本化，另用内容签名判断（与专线会话同一套）。
 	const current = store.currentVersion(partnerId);
 	const applied = store.appliedVersionOf(partnerId, chat.internalId);
-	if (current && current.version !== applied) {
+	const personaChanged = personaRefreshNeeded(
+		chat.internalId,
+		personaSignature(store, partner),
+	);
+	if (current && (current.version !== applied || personaChanged)) {
 		await chat.conversation.configure(
 			{ instructions: renderPartnerIdentity(partner, current.soulSource) },
 			CTX,
