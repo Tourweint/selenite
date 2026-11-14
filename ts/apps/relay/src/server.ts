@@ -1,8 +1,10 @@
 import { createServer, type Server } from "node:http";
 import { readFileSync } from "node:fs";
-import { Hono } from "hono";
+import { timingSafeEqual } from "node:crypto";
+import { Hono, type Context } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { getRequestListener } from "@hono/node-server";
+import { getConnInfo } from "@hono/node-server/conninfo";
 import { RELAY_PROTOCOL_VERSION, RelayJoinRequestSchema } from "@lifediary/shared";
 import { WebSocketServer, type WebSocket } from "ws";
 import { RelayHub } from "./hub.ts";
@@ -58,11 +60,39 @@ export function createRelayApp(store: RelayStore, hub: RelayHub): Hono {
 	const bearerOf = (header: string | undefined): string =>
 		header?.startsWith("Bearer ") ? header.slice(7).trim() : "";
 
-	/** owner：显式 RELAY_OWNER_TOKEN 匹配；未配令牌时 loopback 直通（同 AGENT_TOKEN 口径）。 */
-	const isOwner = (c: { req: { header: (k: string) => string | undefined } }): boolean => {
+	/**
+	 * 请求是否来自部署机本机（2026-11-14 修）：
+	 * 旧实现读 `x-forwarded-for` 并在缺头时**兜底成 127.0.0.1**——不带这个头的公网请求
+	 * 会被判成 loopback，`RELAY_OWNER_TOKEN` 没配的中继（默认就是不配）等于对全网开放
+	 * 签发加入码/撤销设备。实测 2026-11-14：本机从公网 `POST /api/relay/join-code` 直接出码。
+	 * 现在只认**真实对端地址**；拿不到（非 Node 请求上下文，如 `app.request` 自测）按
+	 * "非本机"处理，fail-closed。
+	 */
+	const requestIsLoopback = (c: Context): boolean => {
+		try {
+			const info = getConnInfo(c);
+			return isLoopback({ address: info.remote.address });
+		} catch {
+			return false;
+		}
+	};
+
+	/**
+	 * 定长比较（2026-11-14 VPS 加固）：owner 令牌原来用 `===` 比，理论上能按"前缀对了就慢一点"
+	 * 一个字节一个字节地试出来。长度先比再用 timingSafeEqual，和 harness 的 `auth.ts` 同口径。
+	 */
+	const safeEqual = (a: string, b: string): boolean => {
+		const bufferA = Buffer.from(a);
+		const bufferB = Buffer.from(b);
+		if (bufferA.length !== bufferB.length) return false;
+		return timingSafeEqual(bufferA, bufferB);
+	};
+
+	/** owner：显式 RELAY_OWNER_TOKEN 匹配；未配令牌时只有本机直通（同 AGENT_TOKEN 口径）。 */
+	const isOwner = (c: Context): boolean => {
 		const ownerToken = store.ownerToken;
-		if (!ownerToken) return isLoopback({ address: c.req.header("x-forwarded-for") ?? "127.0.0.1" });
-		return bearerOf(c.req.header("authorization")) === ownerToken;
+		if (!ownerToken) return requestIsLoopback(c);
+		return safeEqual(bearerOf(c.req.header("authorization")), ownerToken);
 	};
 
 	/** 设备凭证：deviceToken（verify 命中即刷新 lastSeenAt）。 */
@@ -82,18 +112,32 @@ export function createRelayApp(store: RelayStore, hub: RelayHub): Hono {
 		}),
 	);
 
+	/**
+	 * 极简健康检查（2026-11-14 VPS 加固）：`/api/relay/info` 带着协议版本和名册规模，
+	 * 给监控/探针用的应该是一条"活着就行"的响应。不含版本、不含令牌、不含设备信息。
+	 */
+	app.get("/healthz", (c) => c.json({ ok: true, onlineDevices: hub.onlineCount }));
+
 	// 镜像控制台（2026-11-05 阶段一）：纯静态两件套，token 存 localStorage，
 	// 通道与手机/CLI 控制端同一套白名单语义——这里是"控制端"的活样例。
-	const wwwFile = (name: string): string =>
-		readFileSync(new URL(`../www/${name}`, import.meta.url), "utf8");
+	/** 文件不在（没部署 www）就返回 null：路由回 404，别把 ENOENT 的栈打进 journal。 */
+	const wwwFile = (name: string): string | null => {
+		try {
+			return readFileSync(new URL(`../www/${name}`, import.meta.url), "utf8");
+		} catch {
+			return null;
+		}
+	};
 	const wwwType: Record<string, string> = {
 		"index.html": "text/html; charset=utf-8",
 		"app.js": "text/javascript; charset=utf-8",
 	};
 	for (const name of Object.keys(wwwType)) {
-		app.get(name === "index.html" ? "/" : `/${name}`, (c) =>
-			c.body(wwwFile(name), 200, { "content-type": wwwType[name] }),
-		);
+		app.get(name === "index.html" ? "/" : `/${name}`, (c) => {
+			const body = wwwFile(name);
+			if (body === null) return c.body(null, 404);
+			return c.body(body, 200, { "content-type": wwwType[name] });
+		});
 	}
 
 	// ── 手机经中继（2026-11-11 批R）──────────────────────────────

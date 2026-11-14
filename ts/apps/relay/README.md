@@ -21,7 +21,7 @@
    | --- | --- | --- |
    | `RELAY_PORT` | `8084` | 监听端口 |
    | `RELAY_STORE_PATH` | `.data/relay-state.json` | 名册落点（码与令牌只存 sha256） |
-   | `RELAY_OWNER_TOKEN` | 空（仅 loopback 可管理） | **公网部署必配**：签发加入码 / 撤销设备 / 设主机位都要它 |
+   | `RELAY_OWNER_TOKEN` | 空（仅本机可管理） | **公网部署必配**：签发加入码 / 撤销设备 / 设主机位都要它。2026-11-14 起本机判定改用真实对端地址（不再信任 `x-forwarded-for`），不配令牌 = 只有服务器自己（loopback）能管，电脑端「接入中继」「添加手机」会 403 |
    | `RELAY_CODE_TTL_SECONDS` | `300` | 配对码有效期 |
    | `RELAY_MAX_DEVICES` | `32` | 设备上限 |
    | `RELAY_MOBILE_PROXY_ENABLED` | 开 | `off` = 手机反代与扫码加入整体 404 |
@@ -46,8 +46,30 @@
    WantedBy=multi-user.target
    ```
 
-5. 探活：`curl http://127.0.0.1:8084/api/relay/info`（免鉴权，不含密钥，
-   返回 `{name, protocolVersion, pairing, onlineDevices}`）。
+5. 探活：`curl http://127.0.0.1:8084/healthz`（2026-11-14 新增，`{ok:true, onlineDevices}`，
+   最小响应，给监控用）；要看协议版本用 `curl http://127.0.0.1:8084/api/relay/info`
+   （免鉴权，不含密钥，返回 `{name, protocolVersion, pairing, onlineDevices}`）。
+   没部署 `www/` 时 `GET /` 与 `/app.js` 回 404（不会抛栈刷 journal）。
+
+6. **SSH 只认密钥（2026-11-14 加固，照抄即可）**：先把本机公钥装进
+   `/root/.ssh/authorized_keys`（目录 700、文件 600），**用 `ssh -i` 实连验过**，再写
+   `/etc/ssh/sshd_config.d/99-hardening.conf`：
+
+   ```ini
+   PermitRootLogin prohibit-password
+   PasswordAuthentication no
+   KbdInteractiveAuthentication no
+   X11Forwarding no
+   MaxAuthTries 3
+   LoginGraceTime 30
+   ClientAliveInterval 120
+   ClientAliveCountMax 2
+   ```
+
+   `sshd -t` 通过后 `systemctl reload ssh`；改完必须再用密钥连一次，并用只带密码的客户端
+   确认被拒（防盗锁死）。root 密码换成随机值后写在只有 root 可读的文件里，不进仓库、不进日志。
+   另外把 journal 限一下：`/etc/systemd/journald.conf.d/99-relay.conf` 写
+   `[Journal] SystemMaxUse=200M`；`.data/` 700、状态文件 600。
 
 ## 两端怎么挂上来
 
