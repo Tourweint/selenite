@@ -26,3 +26,6 @@
 @import url("./style-19-topics-review.css");
 @import url("./style-20-tasks-redesign.css");
 @import url("./style-21-answer-memory.css");
+@import url("./style-22-partner-profile.css");
+/* 外观页改版（2026-11-14）：主题缩略卡 + 主题色 + 壁纸。放最后，盖在旧设置页样式之上 */
+@import url("./style-23-appearance.css");

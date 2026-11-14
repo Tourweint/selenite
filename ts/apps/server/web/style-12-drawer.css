@@ -243,7 +243,8 @@
 .cs-arch-right { flex: none; padding-top: 1px; font-size: 11.5px; color: var(--text-3); }
 
 /* 权限三档（B 版）：一行一档 + 一句解释，右侧一个单选点。
-   三个词并排时分不清「只读」与「不跑命令」，所以竖排、每档自带说明。 */
+   并排三个词时「能改」与「能跑」两条轴会混在一起，所以竖排、每档自带说明；
+   从上到下的顺序固定为 只读 → 在工作区内修改 → 完全访问（最放开的压最后一档）。 */
 .cs-policy-list { display: flex; flex-direction: column; gap: 6px; }
 .cs-opt {
   display: flex; align-items: center; gap: 12px;
@@ -424,7 +425,8 @@ select.cs-input:disabled { color: var(--text-3); cursor: default; }
 .provider-opt .model-menu-warn { flex: none; }
 .model-menu-warn { color: var(--c-error); font-size: 10.5px; }
 
-/* 行 = 模型名（左，可点）+ 思考档分段（右），行高 36 / 圆角 8（对齐 CINDY） */
+/* 行 = 模型名（左，可点）；行高 36 / 圆角 8（对齐 CINDY）。
+   2026-11-14：思考强度从「当前行下方」挪到菜单底部常驻条，行统一单行。 */
 .model-row {
   display: flex; align-items: center; gap: 8px;
   min-height: 36px; padding: 3px 4px 3px 10px;
@@ -432,14 +434,6 @@ select.cs-input:disabled { color: var(--text-3); cursor: default; }
   transition: background-color .15s ease;
 }
 .model-row:hover { background: var(--surface-low); }
-/* 当前行（2026-11-05）：档位分段从名字右边挪到下面一行——行宽只由模型名决定，
-   切模型 / 切供应商时行内左右间距不再跳，长名字也不会被分段压出省略号。
-   交互口径不变（D2：分段只属于当前模型行，先选模型再选强度）。 */
-.model-row[data-current="1"] {
-  flex-direction: column; align-items: stretch; gap: 3px;
-  padding: 3px 4px 6px 10px;
-}
-.model-row[data-current="1"] .model-item { flex: none; }
 .model-item {
   display: flex; align-items: center; gap: 6px;
   flex: 1; min-width: 0;
@@ -453,17 +447,37 @@ select.cs-input:disabled { color: var(--text-3); cursor: default; }
 .model-item[aria-checked="true"] { color: var(--accent); font-weight: 600; }
 .model-item[aria-checked="true"] .model-meta { color: var(--accent); }
 
-/* 行内思考档：只渲染该模型 thinkingLevels 里有的档（关 / 低 / 中 / 高），
-   落在当前模型名下方一行。没有已选模型时整段 hidden：先选模型，才谈强度（D2）。 */
+/* 思考强度（2026-11-14）：不再挂在当前模型行里，改成菜单底部常驻一条，带文字标签。
+   sticky 贴底：模型再多、滚动时也一直看得见——「选模型时思考强度要在界面上」。
+   设置页「更换默认模型」的弹层 data-no-thinking，不渲染这一条。 */
+/* 常驻条是 sticky 贴底的，末尾这块空白给最后一行留出滚到条上方的余量 */
+.think-spacer { flex: none; height: 38px; }
+
+.think-foot {
+  position: sticky; bottom: 0; z-index: 1;
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  /* 抵消 .composer-pop 的 6px 内边距，贴住菜单两边；同色外阴影盖住滚动内容的底缝 */
+  margin: 4px -6px -6px; padding: 7px 10px 8px;
+  background: var(--card);
+  border-top: 1px solid var(--composer-border);
+  box-shadow: 0 6px 0 var(--card);
+}
+.think-foot-label {
+  flex: none;
+  font-size: 11.5px; font-weight: 500; color: var(--text-3);
+  letter-spacing: .02em;
+}
+
+/* 行内思考档的壳：关 / 低 / 中 / 高，落在底部条右侧。
+   菜单重渲染会重建分段：出现时轻落 2px 淡入，60ms 后起、与弹层 220ms 同拍收；
+   换档位只改选中态不重建节点，不会反复播 */
 .think-seg {
-  flex: none; align-self: flex-start;
+  flex: none;
   display: inline-flex; align-items: center; gap: 1px;
   padding: 1px;
   border: 1px solid var(--composer-border);
   border-radius: var(--r-sm);
   background: var(--surface-low);
-  /* 菜单重渲染会重建分段：出现时轻落 2px 淡入，60ms 后起、与弹层 220ms 同拍收；
-     换档位只改选中态不重建节点，不会反复播 */
   animation: thinkSegIn 160ms cubic-bezier(.3, .9, .25, 1) 60ms backwards;
 }
 @keyframes thinkSegIn {
@@ -482,6 +496,7 @@ select.cs-input:disabled { color: var(--text-3); cursor: default; }
 .think-opt[aria-pressed="true"] {
   background: var(--card-high);
   color: var(--text);
+  box-shadow: inset 0 0 0 1px var(--outline);
   font-weight: 500;
 }
 .model-menu-empty { padding: 10px; font-size: 12.5px; line-height: 1.5; color: var(--text-3); }

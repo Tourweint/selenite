@@ -172,6 +172,10 @@ el.modalClose?.addEventListener("click", closeModal);
  * 统一确认框（2026-11-13）：替换 window.confirm 的原生小窗。
  * 返回 Promise<boolean>：点确认 = true；取消 / 遮罩 / ✕ / Esc = false。
  * 危险动作（删除、停服）传 danger: true，图标与确认钮走 destructive 色。
+ *
+ * `input`（2026-11-14）：要顺手填一句的场景（比如"认领这台设备，给它起个名"）。
+ * 传 `{ value, placeholder, label, maxLength }` 时确认钮返回**输入框里的字符串**
+ * （取消仍是 false）——调用方用 `if (!结果) return` 就能同时兜住两种情况。
  */
 function openConfirm({
   title,
@@ -180,6 +184,7 @@ function openConfirm({
   confirmText = "确定",
   cancelText = "取消",
   danger = false,
+  input = null,
 }) {
   if (!el.modal) return Promise.resolve(false);
   return new Promise((resolve) => {
@@ -200,18 +205,35 @@ function openConfirm({
               ${detail ? `<p class="modal-hint">${esc(detail)}</p>` : ""}
             </div>
           </div>
+          ${
+            input
+              ? `<div class="modal-field">
+            <span>${esc(input.label || "名字")}</span>
+            <input class="modal-input" data-modal-input type="text" maxlength="${Number(input.maxLength) || 40}"
+                   value="${attr(input.value || "")}" placeholder="${attr(input.placeholder || "")}" spellcheck="false" />
+          </div>`
+              : ""
+          }
           <div class="modal-actions">
             <button class="ghost" type="button" data-modal-cancel>${esc(cancelText)}</button>
             <button class="${danger ? "modal-danger" : "modal-primary"}" type="button" data-modal-confirm>${esc(confirmText)}</button>
           </div>`;
+        const field = body.querySelector("[data-modal-input]");
+        const submit = () => {
+          done(input ? (field?.value || "").trim() : true);
+          closeModal();
+        };
+        field?.addEventListener("keydown", (event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            submit();
+          }
+        });
         body.querySelector("[data-modal-cancel]")?.addEventListener("click", () => {
           done(false);
           closeModal();
         });
-        body.querySelector("[data-modal-confirm]")?.addEventListener("click", () => {
-          done(true);
-          closeModal();
-        });
+        body.querySelector("[data-modal-confirm]")?.addEventListener("click", submit);
       },
       { onClose: () => done(false) },
     );

@@ -40,11 +40,12 @@ const PLUS_ICONS = {
     '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/>',
 };
 
-function plusMenuItem(icon, label, onClick) {
+function plusMenuItem(icon, label, onClick, tip = "") {
   const item = document.createElement("button");
   item.type = "button";
   item.className = "plus-item";
   item.setAttribute("role", "menuitem");
+  if (tip) item.setAttribute("data-tip", tip);
   item.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icon}</svg><span></span>`;
   item.querySelector("span").textContent = label;
   item.addEventListener("click", onClick);
@@ -59,14 +60,14 @@ function renderPlusMenu() {
     plusMenuItem(PLUS_ICONS.file, "添加图片或文件", () => {
       closePlusMenu();
       void pickFiles();
-    }),
+    }, "支持图片和常见文档；也可以把文件直接拖进输入框"),
   );
   if (navigator.mediaDevices?.getDisplayMedia) {
     menu.append(
       plusMenuItem(PLUS_ICONS.monitor, "截图", () => {
         closePlusMenu();
         void captureScreenshot();
-      }),
+      }, "选一块屏幕区域截图；截完自动附到这条消息"),
     );
   }
   if (csResolveTarget()) {
@@ -77,7 +78,7 @@ function renderPlusMenu() {
       plusMenuItem(PLUS_ICONS.target, "新建目标", () => {
         closePlusMenu();
         void openGoalDialog();
-      }),
+      }, "在项目里新建一个目标；后续派活、进度和结果都记在它下面"),
     );
   }
 }

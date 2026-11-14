@@ -288,7 +288,6 @@ function renderTasksMini() {
     row.type = "button";
     row.className = "side-item task-row";
     row.dataset.lamp = card.lamp;
-    row.title = `${card.title || "未命名对话"} · 打开任务中心`;
     const lamp = document.createElement("i");
     lamp.className = "task-lamp";
     lamp.dataset.lamp = card.lamp === "done" ? "run" : card.lamp;

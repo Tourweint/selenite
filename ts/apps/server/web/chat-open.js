@@ -8,7 +8,7 @@
  */
 
 import { addError, attachUsage, collectFileChangesFromSteps, mountFileSummary, scrollToEnd, syncCtxMeter } from "./chat-notice.js";
-import { addMessage, clearThread, markDoneAt, syncEditEntry } from "./chat-thread.js";
+import { addMessage, clearThread, syncEditEntry } from "./chat-thread.js";
 import { renderChats } from "./chats-list.js";
 import { KEY_CONV, el } from "./dom.js";
 import { dayKeyOfAt, dayLabelOf } from "./groups-thread.js";
@@ -101,8 +101,6 @@ function renderTranscriptMessage(message, options = {}) {
     }
     // 历史里的用时（2026-11-06）：服务端已下发 workMs（提问到收尾的墙钟），
     // 以前只有现场那一轮有耗时，切回来就没了。这里补成同一份脚注。
-    // 完成时间 = 这条消息落盘的时刻（时间戳就是收尾时写的）。
-    if (message.at) markDoneAt(shown.root, message.at);
     if (typeof message.workMs === "number" && message.workMs > 0) {
       attachUsage(shown.root, { input: 0, output: 0, cacheRead: 0 }, message.workMs);
     }
@@ -125,7 +123,6 @@ function renderHistoryMessages(messages, container) {
       const divider = document.createElement("div");
       divider.className = "msg-day";
       divider.textContent = dayLabelOf(day);
-      divider.title = day;
       container.append(divider);
       lastDay = day;
     }

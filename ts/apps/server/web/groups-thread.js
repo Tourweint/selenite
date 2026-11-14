@@ -84,7 +84,6 @@ function appendGroupDayDivider(day) {
   const divider = document.createElement("div");
   divider.className = "group-day";
   divider.textContent = groupDayLabel(day);
-  divider.title = day;
   el.groupThread.append(divider);
 }
 

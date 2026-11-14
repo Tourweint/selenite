@@ -218,22 +218,22 @@ function openRenameProjectModal(id, name) {
 function renderProposalList(proposals) {
   const box = document.getElementById("proposal-list");
   if (!box) return;
+  // 2026-11-14：没有待确认请求时整块不出现（以前是一个常驻空卡 + 一句解释，纯占地方）。
   if (!proposals.length) {
-    box.innerHTML = `<div class="set-empty">
-      <div class="set-card-title">没有待确认的请求</div>
-      <div class="set-hint">助理提出新建项目后会出现在这里；确认才建目录、登记。</div>
-    </div>`;
+    box.hidden = true;
+    box.innerHTML = "";
     return;
   }
+  box.hidden = false;
   box.innerHTML = proposals
     .map(
       (proposal) => `<div class="proposal-card">
         <div class="proposal-card-main">
           <div class="proj-card-title">${esc(proposal.name)}</div>
-          <div class="proj-card-path">${esc(proposal.relativePath)} · 确认后才建目录、登记</div>
+          <div class="proj-card-path">${esc(proposal.relativePath)}</div>
         </div>
         <div class="proposal-actions">
-          <button class="ghost" type="button" data-proposal-confirm="${esc(proposal.id)}">确认</button>
+          <button class="btn-primary is-quiet" type="button" data-proposal-confirm="${esc(proposal.id)}">确认</button>
           <button class="ghost" type="button" data-proposal-reject="${esc(proposal.id)}">拒绝</button>
         </div>
       </div>`,

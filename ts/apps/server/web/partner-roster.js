@@ -16,6 +16,7 @@ import { request } from "./net.js";
 import { openCreatePartnerModal } from "./partner-modals.js";
 import { loadRoster, paintBusyChip, partnerBusyOf, partnerDisplayName, rosterDomain } from "./partners-status.js";
 import { currentPartnerLineId, currentRoute, go } from "./route.js";
+import { openSecMenu } from "./sec-menu.js";
 import { cs, drawerOpen, openDrawerAt, refreshCsDetail, renderCsPage } from "./settings-drawer.js";
 import { updateHomeMode } from "./shell.js";
 import { state } from "./state.js";
@@ -61,7 +62,6 @@ function renderRoster(partners, domainRows, box = el.partnerRoster) {
     row.dataset.partnerId = id;
     row.setAttribute("role", "button");
     row.tabIndex = 0;
-    row.title = `${name}${domain ? " · " + domain : ""}`;
     // 「你在这里」：正开着这条执事专线（2026-11-13 选中态批；折叠卡与展开侧栏共用）
     if (id === currentPartnerLineId()) row.setAttribute("aria-current", "true");
 
@@ -427,7 +427,11 @@ function addPartnerOpenError(message, partnerId, canContinue, name, opts = {}) {
   if (currentRoute() === "chat") el.input.focus();
 }
 
-// 分区标题右侧 ＋：复用 E1「新建执事」模态，不重写
-el.partnerAddSide.addEventListener("click", () => openCreatePartnerModal());
+// 分区标题右侧 ⋯（2026-11-14 由 ＋ 改）：菜单只有「新建执事」，复用 E1 模态，不重写
+el.secPartnersMore?.addEventListener("click", () => {
+  openSecMenu(el.secPartnersMore, [
+    { label: "新建执事", run: () => openCreatePartnerModal() },
+  ]);
+});
 
 export { addPartnerOpenError, openConfirmedPartnerCanonical, openPartnerChat, openPartnerProfile, ownsChatResult, partnerConversationExists, partnerConversationId, partnerExistsAfter404, renderRoster, showPartnerOpenFailure, showPartnerOpenFailureCard };

@@ -135,7 +135,7 @@ function renderPartnerList(box, partners) {
       <span class="pt-avatar pt-card-avatar" data-avatar-for="${attr(partner.id)}" aria-hidden="true"></span>
       <div class="pt-card-main">
         <div class="pt-card-name-row">
-          <span class="row-label pt-name">${esc(partner.name || "")}</span>
+          <span class="row-label pt-name" data-tip="${attr(partner.name || "")}：这一份档案管人设版本、领域与运行状态；右侧按钮可编辑、暂停或归档。">${esc(partner.name || "")}</span>
           ${isChief && partner.name !== "总管" ? '<span class="pill-tag">总管</span>' : ""}
           ${ptStatusPill(partner.status)}
           ${ptStatusDot(partner.status, partner.id)}
@@ -158,7 +158,11 @@ function renderPartnerList(box, partners) {
       partner.name || "",
     );
 
-    card.querySelector("[data-pt-edit]")?.addEventListener("click", () => void openEditPartnerModal(partner.id));
+    // 2026-11-14 C 版：改人设改成「点进去换页」（#/settings/partners/<id>），不再开弹窗。
+    // 这里直接改 hash（不走 import，免得与 partner-profile 形成环），hashchange 会重画设置页。
+    card.querySelector("[data-pt-edit]")?.addEventListener("click", () => {
+      location.hash = `#/settings/partners/${encodeURIComponent(partner.id)}`;
+    });
     card.querySelector("[data-pt-run]")?.addEventListener("click", () =>
       openRunPartnerModal(partner.id, partner.name || ""),
     );

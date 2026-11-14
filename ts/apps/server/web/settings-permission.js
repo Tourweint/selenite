@@ -16,8 +16,12 @@ import { toast } from "./ui-atoms.js";
 /* ── 二级页 · 权限（B 版）：三档授权竖排成可读的选项行 + 审批三档分段 ──
    轻量重实现，不复用 loadPolicy（那是 getElementById 硬编码 #policy-switch，
    与全屏设置页双绑会打架）；GET /agent/policy 读档、POST 回写（2026-11-07 定论）。
-   2026-11-13：授权三档从「分段按钮」改成「一行一档 + 一句解释」——权限是要看懂才敢选的，
-   三个词并排时「只读」和「不跑命令」的区别得靠猜。审批三档仍用分段（三个词够直白）。 */
+   2026-11-13：授权三档从「分段按钮」改成「一行一档 + 一句解释」——权限是要看懂才敢选的。
+   2026-11-14：三档改成 只读 / 在工作区内修改 / 完全访问（「只读」与旧的「不跑命令」
+   并成一档：都是「什么都别动」的保守读法；中间档给「只在工作区里改文件」这件事一个名字），
+   竖排从上到下 = 从最保守到最放开，完全访问永远在最后一行。审批三档仍用分段。
+   同日补：两档都放行 ls / cat / grep 这类**查看命令**（服务端 `isViewOnlyShellCommand`），
+   所以副文从「不跑命令」改成「能查 / 命令也只限查看」——文案必须跟闸门的实际行为一致。 */
 function renderCsPolicyPage() {
   const drawer = el.chatSettingsDrawer;
   if (!drawer) return;
@@ -30,24 +34,24 @@ function renderCsPolicyPage() {
       <div class="cs-field">
         <span class="cs-field-label">它能替你动到什么程度</span>
         <div class="cs-policy-list" role="radiogroup" aria-label="权限" id="cs-policy-switch">
-          <button type="button" class="cs-opt" data-policy="full" aria-checked="false">
-            <span class="cs-opt-main">
-              <span class="cs-opt-title">完全访问</span>
-              <span class="cs-opt-sub">能改文件、能跑命令</span>
-            </span>
-            <span class="cs-opt-dot" aria-hidden="true"></span>
-          </button>
           <button type="button" class="cs-opt" data-policy="read-only" aria-checked="false">
             <span class="cs-opt-main">
               <span class="cs-opt-title">只读</span>
-              <span class="cs-opt-sub">能看，不改，不跑</span>
+              <span class="cs-opt-sub">能看、能查（ls / cat / grep 这类查看命令），不改文件</span>
             </span>
             <span class="cs-opt-dot" aria-hidden="true"></span>
           </button>
           <button type="button" class="cs-opt" data-policy="no-shell" aria-checked="false">
             <span class="cs-opt-main">
-              <span class="cs-opt-title">不跑命令</span>
-              <span class="cs-opt-sub">改文件可以，命令一律不跑</span>
+              <span class="cs-opt-title">在工作区内修改</span>
+              <span class="cs-opt-sub">文件只改工作区和项目里的；命令也只限查看</span>
+            </span>
+            <span class="cs-opt-dot" aria-hidden="true"></span>
+          </button>
+          <button type="button" class="cs-opt" data-policy="full" aria-checked="false">
+            <span class="cs-opt-main">
+              <span class="cs-opt-title">完全访问</span>
+              <span class="cs-opt-sub">能改文件、能跑命令</span>
             </span>
             <span class="cs-opt-dot" aria-hidden="true"></span>
           </button>

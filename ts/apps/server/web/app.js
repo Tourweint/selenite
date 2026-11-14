@@ -15,6 +15,7 @@ import "./dom.js";
 import "./theme.js";
 import "./shell.js";
 import "./route.js";
+import "./nav-history.js";
 import "./state.js";
 import "./tasks-model.js";
 import "./tasks-cards.js";
@@ -32,7 +33,7 @@ import "./avatar.js";
 import "./partner-roster.js";
 import "./chat-thread.js";
 import "./tool-flow.js";
-import "./chat-notice.js";
+import { mountCtxCard } from "./chat-notice.js";
 import "./markdown.js";
 import "./chat-open.js";
 import "./composer-send.js";
@@ -43,7 +44,6 @@ import "./hover-tip.js";
 import "./icons.js";
 import "./settings-drawer.js";
 import "./settings-employee.js";
-import "./settings-persona.js";
 import "./settings-contract.js";
 import "./settings-model.js";
 import "./settings-permission.js";
@@ -97,7 +97,8 @@ import { loadChats } from "./chats-list.js";
 import { el } from "./dom.js";
 import { initGroups } from "./groups-base.js";
 import { loadTopicsSidebar } from "./groups-topics.js";
-import { refreshModelPill } from "./hover-tip.js";
+import { adoptAllTitleTips, refreshModelPill, watchTitleAttribute } from "./hover-tip.js";
+import { installNavHistory } from "./nav-history.js";
 import { checkHealth } from "./net.js";
 import { chiefDisplayName, loadRoster, syncChiefDot } from "./partners-status.js";
 import { loadCapabilities } from "./plus-menu.js";
@@ -105,8 +106,6 @@ import { refreshProjectPill } from "./project-modal.js";
 import { applyRoute, currentRoute, go } from "./route.js";
 import { wireSearchPage } from "./search-page.js";
 import { SETTINGS_SECTIONS } from "./settings-base.js";
-import { applyActPref } from "./settings-connection.js";
-import { startReminderWatch } from "./settings-reminders.js";
 import { applySections, applySidebarA11y, syncGreeting, updateHomeMode } from "./shell.js";
 import { state } from "./state.js";
 import { loadTickets } from "./tasks-kanban.js";
@@ -118,11 +117,19 @@ import { applyFontSettings, applyTheme, currentThemeChoice, loadFontSettings } f
 /* ── 启动 ─────────────────────────────────────────────── */
 
 void (async () => {
+  // 悬停提示统一（2026-11-14）：静态 title 收编成 data-tip，之后动态改 title 也接住。
+  // 放在最前：首屏渲染前就把默认小框清掉，用户不会先看到一帧原生的。
+  adoptAllTitleTips();
+  watchTitleAttribute();
+  // 上下文环的容量卡（2026-11-14）：挂上悬停/聚焦/点击，环本身不再走 data-tip
+  mountCtxCard();
+  // 返回上一页 / 前进（2026-11-14）：栈要在首帧路由之前就在，深链（?view=settings）
+  // 进来也算「从对话跨过去的一步」，返回能原路退回。
+  installNavHistory();
   // 显式初始化一次，别指望 HTML 的 disabled 属性活到脚本跑完
   el.send.disabled = true;
   applyTheme(currentThemeChoice());
   applyFontSettings(loadFontSettings());
-  applyActPref();
   // 侧栏分区折叠态（localStorage）与总管状态点初值
   applySections();
   // 课题区（2026-11-07 批二）：首屏拉一次；404 时整块入口自己退场
@@ -176,8 +183,6 @@ void (async () => {
   applyRoute();
   setInterval(checkHealth, 8000);
   setInterval(autoSyncTick, 5000);
-  // 提醒到点（2026-11-12）：服务端没有 push，页面开着就 30s 轮一次；到点弹浏览器通知。
-  startReminderWatch();
   // 审批浮窗（2026-11-08）：全局待审批 5 秒一拉，右下角常驻——人在哪都能当场批
   void refreshApprovalPopups();
   startApprovalPopWatch();

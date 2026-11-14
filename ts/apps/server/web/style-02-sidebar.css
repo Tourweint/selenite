@@ -100,20 +100,22 @@ html[data-sidebar="closed"] .side-rail {
   display: flex; flex-direction: column; align-items: center; gap: 3px;
 }
 
-/* 全局悬停提示（2026-11-08 由轨道 tip 泛化）：data-tip 元素悬停即出，挂 body 下
-   避开一切 overflow 裁切。反色小签、12px 圆角、可换行、纯 opacity 进场（信息不是对象）。 */
+/* 全局悬停提示（2026-11-08 由轨道 tip 泛化；2026-11-14 统一主题）：
+   data-tip 元素悬停即出，挂 body 下避开一切 overflow 裁切。固定黑底白字——
+   不再跟主题变量走（深色主题下 var(--text) 是浅色，会翻成白底黑字，和别处对不上）。
+   12px 圆角、可换行、纯 opacity 进场（信息不是对象）。 */
 .hover-tip {
   position: fixed;
   z-index: 80;
   max-width: min(320px, calc(100vw - 96px));
   padding: 5px 9px;
   border-radius: var(--r-md);
-  background: var(--text);
-  color: var(--bg);
+  background: #191919;
+  color: #f7f7f5;
   font-size: 12px; line-height: 1.45;
   white-space: pre-line;
   pointer-events: none;
-  box-shadow: var(--shadow-menu);
+  box-shadow: 0 6px 22px rgba(0, 0, 0, .22);
   animation: hoverTipIn .12s ease-out;
 }
 @keyframes hoverTipIn { from { opacity: 0; } }

@@ -8,7 +8,6 @@
  */
 
 import { loadOlderMessages, openConversation } from "./chat-open.js";
-import { markDoneAt } from "./chat-thread.js";
 import { send } from "./composer-send.js";
 import { el } from "./dom.js";
 import { request } from "./net.js";
@@ -102,7 +101,6 @@ function mountFileSummary(root, files) {
   head.type = "button";
   head.className = "fsum-head";
   head.setAttribute("aria-expanded", "false");
-  head.title = "点开看动了哪些文件（完整改动在工作过程里）";
   head.append(chevron, title, nums);
   head.addEventListener("click", () => {
     const open = box.dataset.open !== "1";
@@ -246,7 +244,6 @@ function showChatError({ message, detail = "", retryable = false, retryPayload =
   dismiss.type = "button";
   dismiss.className = "ghost chat-error-btn chat-error-close";
   dismiss.setAttribute("aria-label", "关闭");
-  dismiss.title = "关闭";
   dismiss.innerHTML =
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
     'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
@@ -294,13 +291,6 @@ function attachUsage(root, usage, ms) {
   chip.textContent = total > 0
     ? `${total.toLocaleString()} tok${seconds ? ` · ${seconds}` : ""}`
     : seconds;
-  chip.title =
-    total > 0
-      ? `输入 ${input} · 输出 ${output} · 缓存命中 ${usage?.cacheRead || 0} tokens`
-      : "这一轮的用时（历史消息只留时长，不重算 token）";
-
-  // 完成时间：实时那一轮以"拿到 done 的时刻"为准（不是消息创建时刻）
-  markDoneAt(root, Date.now());
 }
 
 function scrollToEnd() {
@@ -353,11 +343,193 @@ function maybeNotify(title, body, convId, kind = "done") {
 const CTX_R = 8.25;
 const CTX_C = 2 * Math.PI * CTX_R;
 
+/* 上下文容量卡（2026-11-14，学 ZCode 的 chat.contextUsage 浮层）：
+   环本身不摆数字，悬停/聚焦/点击时向上弹一张卡——顶部「已用 / 总量（占比）」，
+   中间一条按构成分段的进度条，下面按字符占比列「这一窗里是什么在占地方」。
+   构成来自服务端 /context 新增的 breakdown（按上下文实文计字符，口径同 ZCode）。 */
+const CTX_SOURCE_LABEL = {
+  messages: "消息",
+  system_prompt: "系统提示词",
+  skills: "技能",
+  tool_prompt: "工具定义",
+  tool_calls: "工具调用",
+  tool_results: "工具结果",
+};
+let ctxPayload = null;
+let ctxCard = null;
+let ctxPinned = false;
+let ctxHideTimer = 0;
+
+function ctxPct(used, windowSize) {
+  return Math.min(100, Math.max(0, Math.round((used / windowSize) * 100)));
+}
+
+/** 构成百分比：先取整再用最大余数补足 100，避免 6 段各自四舍五入后合计 101%。 */
+function ctxShares(items, total) {
+  const raw = items.map((item) => (item.chars / total) * 100);
+  const shares = raw.map((value) => Math.floor(value));
+  let left = 100 - shares.reduce((sum, value) => sum + value, 0);
+  const order = raw
+    .map((value, index) => ({ index, fraction: value - Math.floor(value) }))
+    .sort((a, b) => b.fraction - a.fraction);
+  for (let index = 0; index < left; index += 1) {
+    shares[order[index % order.length].index] += 1;
+  }
+  return shares;
+}
+
+function renderCtxCard(payload) {
+  if (!ctxCard || !payload) return;
+  const used = payload.used;
+  const windowSize = payload.window;
+  const pct = payload.pct ?? ctxPct(used, windowSize);
+  const breakdown = (payload.breakdown || []).filter((item) => item && item.chars > 0);
+  const totalChars = breakdown.reduce((sum, item) => sum + item.chars, 0);
+  const shares = totalChars > 0 ? ctxShares(breakdown, totalChars) : [];
+
+  const usage = ctxCard.querySelector(".ctx-card-usage");
+  usage.textContent = `${formatTokenCount(used)} / ${formatTokenCount(windowSize)}（${pct}%）`;
+  ctxCard.querySelector(".ctx-bar-fill").style.width = `${Math.max(pct, pct > 0 ? 1.5 : 0)}%`;
+
+  const fill = ctxCard.querySelector(".ctx-bar-fill");
+  fill.replaceChildren();
+  breakdown.forEach((item, index) => {
+    const segment = document.createElement("span");
+    segment.className = "ctx-seg";
+    segment.style.width = `${(item.chars / totalChars) * 100}%`;
+    segment.style.background = `var(--ctx-seg-${(index % 6) + 1})`;
+    // 下面 legend 已经写了同一个标签与百分比；分段块不再挂 title，
+    // 否则卡片里悬停又会冒一份浏览器默认框。
+    fill.append(segment);
+  });
+
+  const legend = ctxCard.querySelector(".ctx-legend");
+  legend.replaceChildren();
+  breakdown.forEach((item, index) => {
+    const row = document.createElement("li");
+    const dot = document.createElement("span");
+    dot.className = "ctx-dot";
+    dot.style.background = `var(--ctx-seg-${(index % 6) + 1})`;
+    const name = document.createElement("span");
+    name.className = "ctx-name";
+    name.textContent = CTX_SOURCE_LABEL[item.source] || "其他";
+    const percent = document.createElement("span");
+    percent.className = "ctx-percent";
+    percent.textContent = shares[index] === 0 ? "＜1%" : `${shares[index] ?? Math.round((item.chars / totalChars) * 100)}%`;
+    row.append(dot, name, percent);
+    legend.append(row);
+  });
+  legend.hidden = breakdown.length === 0;
+}
+
+function placeCtxCard() {
+  if (!ctxCard || ctxCard.hidden) return;
+  const ring = el.ctxRing.getBoundingClientRect();
+  const box = ctxCard.getBoundingClientRect();
+  const gap = 10;
+  let left = ring.left + ring.width / 2 - box.width / 2;
+  left = Math.min(Math.max(8, left), window.innerWidth - box.width - 8);
+  let top = ring.top - box.height - gap;
+  // 上面放不下就翻到下面；两端都越界时贴住上边
+  if (top < 8) top = Math.min(ring.bottom + gap, window.innerHeight - box.height - 8);
+  ctxCard.style.left = `${Math.round(left)}px`;
+  ctxCard.style.top = `${Math.round(top)}px`;
+}
+
+function ensureCtxCard() {
+  if (ctxCard) return ctxCard;
+  ctxCard = document.createElement("div");
+  ctxCard.className = "ctx-card";
+  ctxCard.setAttribute("role", "dialog");
+  ctxCard.setAttribute("aria-label", "上下文容量");
+  ctxCard.hidden = true;
+  ctxCard.innerHTML = `
+    <div class="ctx-card-head">
+      <span class="ctx-card-title">上下文容量</span>
+      <span class="ctx-card-usage"></span>
+    </div>
+    <div class="ctx-bar" aria-hidden="true"><div class="ctx-bar-fill"></div></div>
+    <ul class="ctx-legend"></ul>`;
+  document.body.append(ctxCard);
+  ctxCard.addEventListener("pointerenter", cancelCtxClose);
+  ctxCard.addEventListener("pointerleave", scheduleCtxClose);
+  return ctxCard;
+}
+
+function cancelCtxClose() {
+  if (ctxHideTimer) {
+    clearTimeout(ctxHideTimer);
+    ctxHideTimer = 0;
+  }
+}
+
+function scheduleCtxClose() {
+  if (ctxPinned) return;
+  cancelCtxClose();
+  ctxHideTimer = setTimeout(() => closeCtxCard(), 140);
+}
+
+function openCtxCard(pin = false) {
+  if (!ctxPayload || ctxPayload.conv !== state.conversationId || el.ctxRing.hidden) return;
+  ensureCtxCard();
+  cancelCtxClose();
+  renderCtxCard(ctxPayload);
+  ctxCard.hidden = false;
+  el.ctxRing.setAttribute("aria-expanded", "true");
+  // 显示之后才量得到高度，位置随即校正
+  placeCtxCard();
+  if (pin) ctxPinned = true;
+}
+
+function closeCtxCard(force = false) {
+  if (ctxPinned && !force) return;
+  cancelCtxClose();
+  ctxPinned = false;
+  if (!ctxCard) return;
+  ctxCard.hidden = true;
+  el.ctxRing.setAttribute("aria-expanded", "false");
+}
+
+function toggleCtxCard() {
+  if (ctxCard && !ctxCard.hidden && ctxPinned) closeCtxCard(true);
+  else openCtxCard(true);
+}
+
+function mountCtxCard() {
+  el.ctxRing.setAttribute("tabindex", "0");
+  el.ctxRing.setAttribute("role", "button");
+  el.ctxRing.setAttribute("aria-haspopup", "dialog");
+  el.ctxRing.setAttribute("aria-expanded", "false");
+  el.ctxRing.addEventListener("pointerenter", () => openCtxCard(false));
+  el.ctxRing.addEventListener("pointerleave", scheduleCtxClose);
+  el.ctxRing.addEventListener("focus", () => openCtxCard(false));
+  el.ctxRing.addEventListener("blur", scheduleCtxClose);
+  el.ctxRing.addEventListener("click", toggleCtxCard);
+  el.ctxRing.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      toggleCtxCard();
+    } else if (event.key === "Escape") {
+      closeCtxCard(true);
+      el.ctxRing.blur();
+    }
+  });
+  document.addEventListener("pointerdown", (event) => {
+    if (!ctxCard || ctxCard.hidden) return;
+    if (el.ctxRing.contains(event.target) || ctxCard.contains(event.target)) return;
+    closeCtxCard(true);
+  });
+  window.addEventListener("resize", placeCtxCard);
+  window.addEventListener("scroll", placeCtxCard, true);
+}
+
 async function syncCtxMeter(stillCurrent = () => true) {
   const convId = state.conversationId;
   if (!stillCurrent()) return;
   if (!convId || currentRoute() !== "chat") {
     el.ctxRing.hidden = true;
+    ctxPayload = null;
+    closeCtxCard(true);
     return;
   }
   try {
@@ -370,14 +542,18 @@ async function syncCtxMeter(stillCurrent = () => true) {
     if (!stillCurrent() || state.conversationId !== convId) return;
     if (!data.used || !data.window) {
       el.ctxRing.hidden = true;
+      ctxPayload = null;
+      closeCtxCard(true);
       return;
     }
     const pct = Math.min(100, Math.max(0, Math.round((data.used / data.window) * 100)));
     el.ctxFill.style.strokeDasharray = `${CTX_C}`;
     el.ctxFill.style.strokeDashoffset = `${CTX_C * (1 - pct / 100)}`;
-    // 数字口径（2026-11-13 用户拍板）：环边**不摆数字**，只留 20×20 的环；
-    // 「用了多少 / 顶了多少 / 最多多少」全部收进悬停，环本身的花费仍按占比画。
-    el.ctxRing.title = `用了 ${formatTokenCount(data.used)} · 顶了 ${pct}% · 最多 ${formatTokenCount(data.window)}`;
+    // 环边不摆数字（2026-11-13 拍板）；2026-11-14 起悬停不再用一句话浮签，
+    // 改为「上下文容量」卡片（占比 + 构成 + 进度条，对齐 ZCode）：数字、构成都在卡里。
+    ctxPayload = { ...data, conv: convId, pct };
+    el.ctxRing.setAttribute("aria-label", `上下文已用 ${formatTokenCount(data.used)} / ${formatTokenCount(data.window)}`);
+    if (ctxCard && !ctxCard.hidden) renderCtxCard(ctxPayload);
     // 阈值：<70% 中性灰；70–90% 警示；>90% 错误
     el.ctxRing.classList.toggle("warn", pct >= 70 && pct <= 90);
     el.ctxRing.classList.toggle("danger", pct > 90);
@@ -385,7 +561,9 @@ async function syncCtxMeter(stillCurrent = () => true) {
     el.ctxRing.hidden = false;
   } catch {
     el.ctxRing.hidden = true;
+    ctxPayload = null;
+    closeCtxCard(true);
   }
 }
 
-export { CTX_C, CTX_R, FILECHANGE_TOOLS, KEY_NOTIFY, KEY_NOTIFY_TIMING, addError, addNotice, attachUsage, collectFileChangesFromSteps, diffStats, fileChangeCollector, hideChatError, maybeNotify, mountFileSummary, scrollToEnd, showChatError, syncCtxMeter };
+export { CTX_C, CTX_R, FILECHANGE_TOOLS, KEY_NOTIFY, KEY_NOTIFY_TIMING, addError, addNotice, attachUsage, collectFileChangesFromSteps, diffStats, fileChangeCollector, hideChatError, maybeNotify, mountCtxCard, mountFileSummary, scrollToEnd, showChatError, syncCtxMeter };

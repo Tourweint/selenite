@@ -80,7 +80,7 @@ function providerFormMarkup() {
         </svg>
       </button>
       <div class="row-main">
-        <div class="set-card-title"><span id="pv-title">供应商</span><span class="pill-tag" id="pv-default" hidden>默认</span></div>
+        <div class="set-card-title" data-tip="供应商的地址与密钥：API Key 只落本机环境变量，不写进档案；标「默认」的是新对话默认用的那家。"><span id="pv-title">供应商</span><span class="pill-tag" id="pv-default" hidden>默认</span></div>
         <div class="set-hint" id="pv-new-hint" hidden></div>
       </div>
     </div>

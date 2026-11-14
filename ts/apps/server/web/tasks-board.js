@@ -23,7 +23,7 @@ function renderSideListEmpty() {
   if (el.chats.querySelector(".chat") || taskRows) return;
   const hint = document.createElement("div");
   hint.className = "chats-empty";
-  hint.textContent = "还没有对话。用 ＋ 新建一条。";
+  hint.textContent = "还没有对话。点「对话」右边的 ⋯ 新建一条。";
   el.chats.append(hint);
 }
 

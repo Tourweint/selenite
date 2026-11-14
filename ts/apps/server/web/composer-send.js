@@ -9,7 +9,7 @@
 
 import { renderApprovalCard } from "./approval-card.js";
 import { addError, addNotice, attachUsage, fileChangeCollector, hideChatError, maybeNotify, mountFileSummary, scrollToEnd, syncCtxMeter } from "./chat-notice.js";
-import { addMessage, markDoneAt, syncEditEntry } from "./chat-thread.js";
+import { addMessage, syncEditEntry } from "./chat-thread.js";
 import { closeChatArchiveConfirm, loadChats, renderChats } from "./chats-list.js";
 import { KEY_CONV, el } from "./dom.js";
 import { renderMarkdown, syncDelegateHint } from "./markdown.js";
@@ -31,7 +31,7 @@ function setSending(value) {
   state.sending = value;
   el.send.classList.toggle("streaming", value);
   el.send.setAttribute("aria-label", value ? "停止" : "发送");
-  el.send.title = value ? "停止" : "";
+  el.send.setAttribute("data-tip", value ? "停止（再点一次或按 Esc）" : "发送（Enter）");
   syncSendEnabled();
   // 归档防误触（2026-11-13）：当前会话开跑/停下时同步侧栏归档图标的禁用态，
   // 只动这一个按钮不重渲染整列（渲染时机在 renderChats，两边口径一致）。
@@ -41,7 +41,7 @@ function setSending(value) {
     );
     if (archive instanceof HTMLButtonElement) {
       archive.disabled = value;
-      archive.title = value ? "会话正在运行，请先停止再归档" : "归档（会话和记忆都还在）";
+      archive.setAttribute("data-tip", value ? "会话正在运行，请先停止再归档" : "归档（会话和记忆都还在）");
       if (value) closeChatArchiveConfirm();
     }
   }
@@ -333,8 +333,7 @@ async function send(text, images = [], files = []) {
           if (card && !card.isConnected) turn.root.before(card);
           maybeNotify("有写操作需要你确认", event.tool || "", state.conversationId, "attention");
         } else if (event.type === "done") {
-          // 补帧拿到的 done 也算收尾：完成时间与用时一起落，不然断线重连后这条没有脚注
-          markDoneAt(turn.root, Date.now());
+          // 补帧拿到的 done 也算收尾：补上用时脚注，断线重连后这条仍有耗时
           attachUsage(turn.root, event.usage || { input: 0, output: 0, cacheRead: 0 }, Date.now() - turnStartMs);
         } else if (event.type === "delegate") {
           applyTicketEvent(event);
@@ -506,9 +505,7 @@ async function send(text, images = [], files = []) {
             } else {
               maybeNotify("Selenite 回复完成", el.title.textContent || "对话", streamConv, "done");
             }
-            // 完成时间先落（finishReason=error 时也要留痕），再落用时；
-            // 模型没回 usage 的轮次至少还有"多久"这一项，不是一片空白。
-            markDoneAt(turn.root, Date.now());
+            // 只落用时；模型没回 usage 的轮次至少还有"多久"这一项，不是一片空白。
             attachUsage(turn.root, event.usage || { input: 0, output: 0, cacheRead: 0 }, Date.now() - turnStartMs);
             void syncCtxMeter();
           } else if (event.type === "unanswered") {

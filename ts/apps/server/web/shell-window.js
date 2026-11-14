@@ -58,7 +58,6 @@ async function syncWindowState() {
   if (maxIcon) maxIcon.toggleAttribute("hidden", maximized);
   if (restoreIcon) restoreIcon.toggleAttribute("hidden", !maximized);
   el.winMax.setAttribute("aria-label", maximized ? "还原窗口" : "最大化窗口");
-  el.winMax.title = maximized ? "还原" : "最大化";
 }
 
 if (shellWindow) {

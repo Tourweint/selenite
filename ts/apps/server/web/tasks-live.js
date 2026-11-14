@@ -11,8 +11,8 @@ import { openConversation } from "./chat-open.js";
 import { el } from "./dom.js";
 import { request } from "./net.js";
 import { loadRoster } from "./partners-status.js";
-import { openProjectAddMenu, setModalHint } from "./project-modal.js";
-import { currentRoute, currentTicketId, go, tasksHash, writeTasksHash } from "./route.js";
+import { openAddProjectModal, openCreateProjectModal, setModalHint } from "./project-modal.js";import { currentRoute, currentTicketId, go, tasksHash, writeTasksHash } from "./route.js";
+import { openSecMenu } from "./sec-menu.js";
 import { state } from "./state.js";
 import { loadProjects, syncTasksBadge } from "./tasks-board.js";
 import { showTicketDetail } from "./tasks-detail.js";
@@ -174,13 +174,28 @@ function autoSyncTick() {
   void loadRoster();
 }
 
-/* 侧栏分区头的入口（2026-11-07 统一批）：
+/* 侧栏分区头的入口（2026-11-07 统一批 / 2026-11-14 ⋯ 菜单）：
    任务中心 —— 「打开任务中心 →」进看板；轨道按钮同。
-   项目 —— ＋ 添加项目（「管理项目 → 设置」行 2026-11-13 退役，管理走设置页侧栏）。
-   会话 —— ＋ 已在上面的 applySections 段注册（新建一轮）。 */
+   项目 —— ⋯ 里的两个入口：新建项目 / 添加已有项目
+   （「管理项目 → 设置」行 2026-11-13 退役，管理走设置页侧栏）。
+   会话 —— ⋯ 已在上面的 applySections 段注册（新建 / 搜索）。 */
 el.secTasksAll?.addEventListener("click", () => go("tasks"));
-// 项目 ＋（2026-11-07 四改）：两个入口——新建项目 / 添加已有项目
-el.secProjectsAdd?.addEventListener("click", () => openProjectAddMenu());
+// 项目 ⋯（2026-11-14 由 ＋ 改）：两个入口——新建项目 / 添加已有项目。
+// 两个动作的区别写进菜单的 hint 行：一个会建目录，一个只登记已有目录。
+el.secProjectsMore?.addEventListener("click", () => {
+  openSecMenu(el.secProjectsMore, [
+    {
+      label: "新建项目",
+      hint: "目录还不存在，确认后建目录并登记",
+      run: () => openCreateProjectModal(),
+    },
+    {
+      label: "添加项目",
+      hint: "目录已经在硬盘上，只登记不新建（任意位置）",
+      run: () => openAddProjectModal(),
+    },
+  ]);
+});
 
 /* 任务中心的固定入口与交互（只读，不提供改派/停止）。
    轨道钮 2026-11-13 退役：轨道只镜像展开态分区，任务中心从展开态「对话」分区底部的

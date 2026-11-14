@@ -14,15 +14,17 @@ import { el } from "./dom.js";
 import { openExportModal } from "./export-data.js";
 import { memorySettingsMarkup, stopMemoryPolling, wireMemorySettings } from "./memory-page.js";
 import { loadPartners, openCreatePartnerModal } from "./partner-modals.js";
+import { renderPartnerProfilePage } from "./partner-profile.js";
 import { openChiefChat } from "./partners-status.js";
 import { resize } from "./plus-menu.js";
 import { openAddProjectModal } from "./project-modal.js";
 import { showProviderTemplates } from "./providers.js";
-import { currentRoute, currentSettingsPage, go } from "./route.js";
+import { currentPartnerProfileId, currentRoute, currentSettingsPage, go } from "./route.js";
 import { openAddSearchSourceModal } from "./search-sources.js";
 import { mountSegmented, replayPageEnter, rowMarkup, sectionMarkup, switchMarkup, syncSegmented } from "./settings-atoms.js";
 import { ACCENTS, renderSettingsNav } from "./settings-base.js";
-import { applyActPref, initRuntimeCard, loadPair, loadRelayStatus, loadServiceInfo, openAddDeviceModal } from "./settings-connection.js";
+import { compactionSectionMarkup, wireCompactionSection } from "./settings-compaction.js";
+import { connRelay, initRuntimeCard, loadPair, loadRelayStatus, loadServiceInfo, openAddDeviceModal, openRelayLinkModal, paintConnStar, unlinkRelay } from "./settings-connection.js";
 import { memorySettingsMarkupLegacy, wireMemorySettingsLegacy } from "./settings-memory.js";
 import { loadProjectsSettings } from "./settings-projects.js";
 import { loadPolicy, loadReminders, openReminderModal, renderDefaultModelRow } from "./settings-reminders.js";
@@ -32,55 +34,74 @@ import { openBulkSkillModal, openCreateSkillChoiceModal } from "./skills-actions
 import { applySkillAdvice, loadSkills, runSkillAdvice } from "./skills-settings.js";
 import { state } from "./state.js";
 import { ensureFlag } from "./tasks-redesign.js";
-import { KEY_ACCENT, KEY_ACTS, KEY_SEND, THEMES, currentThemeChoice, openFontModal, setAccent, setThemeChoice } from "./theme.js";
+import { KEY_ACCENT, KEY_ACCENT_CUSTOM, KEY_SEND, THEMES, currentThemeChoice, openFontModal, setAccent, setThemeChoice, storedAccent } from "./theme.js";
 import { closePopover, toast } from "./ui-atoms.js";
 import { chooseDetailMode, getDetailMode } from "./tool-chips.js";
 
 let pairTimer = 0;
+/** 连接页的中继状态轮询（2026-11-14）：10s 一次，离开这一页就不刷。 */
+let connPollTimer = 0;
 async function renderSettings() {
   const page = currentSettingsPage();
   // 记忆页整理轮询：一离开设置页就停；回来由 wireMemorySettings 重新按服务端状态接上。
   stopMemoryPolling();
+  // 人设二级页会自己收窄内容列；换到别的分区必须摘掉这个标记（同一个 #settings-inner 实例）
+  el.settingsInner.classList.remove("is-partner-profile");
   renderSettingsNav(page);
   el.settingsInner.setAttribute("role", "tabpanel");
   el.settingsInner.setAttribute("aria-labelledby", `settings-tab-${page}`);
 
   if (page === "appearance") {
     const choice = currentThemeChoice();
-    const accent = localStorage.getItem(KEY_ACCENT) || "indigo";
+    const accent = storedAccent();
+    const accentName =
+      accent === "custom"
+        ? (localStorage.getItem(KEY_ACCENT_CUSTOM) || "").toUpperCase()
+        : ACCENTS.find((item) => item.id === accent)?.name || ACCENTS[0].name;
+    const customHex = localStorage.getItem(KEY_ACCENT_CUSTOM) || "#3e4a8c";
     el.settingsInner.innerHTML = sectionMarkup(
       "外观",
       `<div class="card">
-        ${rowMarkup(
-          "主题",
-          "四套色板，点哪套就固定下来（不再跟随系统）",
-          `<div class="theme-picker" role="radiogroup" aria-label="主题">
-             ${THEMES.map(
-               (item) =>
-                 `<button class="theme-choice" type="button" role="radio"
-                    data-theme-choice="${item.id}" aria-checked="${choice === item.id}"
-                    title="${item.name}" aria-label="${item.name}"
-                    style="--tc-bg:${item.bg};--tc-card:${item.card};--tc-accent:${item.accent}">
-                    <span class="theme-chip" aria-hidden="true">
-                      <span class="theme-chip-dot"></span>
-                      <span class="theme-chip-card"></span>
-                    </span>
-                    <span class="theme-name">${item.name}</span>
-                  </button>`,
-             ).join("")}
-           </div>`,
-        )}
+        <div class="row">
+          <div class="row-main">
+            <div class="row-label" title="四套成品配色，各带一套浅/深；点哪套就固定下来（不再跟随系统）">主题</div>
+          </div>
+        </div>
+        <div class="theme-cards" role="radiogroup" aria-label="主题">
+          ${THEMES.map(
+            (item) =>
+              `<button class="theme-card" type="button" role="radio"
+                 data-theme-choice="${item.id}" aria-checked="${choice === item.id}"
+                 title="${item.name}" aria-label="${item.name}"
+                 style="--tc-bg:${item.bg};--tc-side:${item.side};--tc-card:${item.card};--tc-card-high:${item.cardHigh};--tc-outline:${item.outline};--tc-divider:${item.divider};--tc-text:${item.text};--tc-text3:${item.text3};--tc-accent:${item.accent}">
+                 <span class="theme-pv" aria-hidden="true">
+                   <span class="theme-pv-side"><i></i><i></i><i></i></span>
+                   <span class="theme-pv-main"><i class="pv-a"></i><i class="pv-b"></i></span>
+                   <span class="theme-pv-dot"></span>
+                 </span>
+                 <span class="theme-cap"><b>${item.name}</b><em>${item.tag}</em></span>
+                 <span class="theme-card-check" aria-hidden="true">✓</span>
+               </button>`,
+          ).join("")}
+        </div>
         <div class="divider"></div>
         ${rowMarkup(
           "主题色",
-          "三个都取自手机端色板，不另造颜色",
-          `<div class="swatches" role="radiogroup" aria-label="主题色">
-             ${ACCENTS.map(
-               (item) =>
-                 `<button class="swatch" type="button" data-accent-choice="${item.id}"
-                    style="background:${item.chip}" title="${item.name}" aria-label="${item.name}"
-                    aria-checked="${accent === item.id}"></button>`,
-             ).join("")}
+          "十档预设 + 自定义取色；只给链接、运行中、选中态上色，界面底色仍归主题管",
+          `<div class="accent-row">
+             <div class="swatches" role="radiogroup" aria-label="主题色">
+               ${ACCENTS.map(
+                 (item) =>
+                   `<button class="swatch" type="button" data-accent-choice="${item.id}"
+                      style="background:${item.chip}" title="${item.name}" aria-label="${item.name}"
+                      aria-checked="${accent === item.id}"></button>`,
+               ).join("")}
+               <button class="swatch swatch-pick" type="button" data-accent-pick
+                       title="自定义取色" aria-label="自定义取色"
+                       aria-checked="${accent === "custom"}"><i style="background:${customHex}"></i></button>
+               <input type="color" class="accent-picker" data-accent-color value="${customHex}" aria-label="自定义主题色" />
+             </div>
+             <span class="accent-name" data-accent-name>${accentName}</span>
            </div>`,
         )}
         <div class="divider"></div>
@@ -106,8 +127,25 @@ async function renderSettings() {
       button.addEventListener("click", () => setThemeChoice(button.dataset.themeChoice));
     }
     for (const button of el.settingsInner.querySelectorAll("[data-accent-choice]")) {
-      button.addEventListener("click", () => setAccent(button.dataset.accentChoice));
+      button.addEventListener("click", () => {
+        setAccent(button.dataset.accentChoice);
+        // 右边那个名字跟着换（syncThemeControls 只管描边）
+        const name = ACCENTS.find((item) => item.id === button.dataset.accentChoice)?.name;
+        const label = el.settingsInner.querySelector("[data-accent-name]");
+        if (name && label) label.textContent = name;
+      });
     }
+    // 自定义取色：点那个彩色圈开系统色盘，选完即落
+    const pickButton = el.settingsInner.querySelector("[data-accent-pick]");
+    const picker = el.settingsInner.querySelector("[data-accent-color]");
+    pickButton?.addEventListener("click", () => picker?.click());
+    picker?.addEventListener("input", () => {
+      setAccent("custom", picker.value);
+      const chip = pickButton?.querySelector("i");
+      if (chip) chip.style.background = picker.value;
+      const label = el.settingsInner.querySelector("[data-accent-name]");
+      if (label) label.textContent = picker.value.toUpperCase();
+    });
     document.getElementById("font-open")?.addEventListener("click", openFontModal);
     // 工具详情：两档分段，点哪档就落哪档（localStorage，改完下一次点块即生效）
     const detailBox = el.settingsInner.querySelector("[data-tool-detail]")?.closest(".segmented");
@@ -125,7 +163,6 @@ async function renderSettings() {
     }
   } else if (page === "chats") {
     const sendKey = localStorage.getItem(KEY_SEND) || "enter";
-    const showActs = localStorage.getItem(KEY_ACTS) !== "0";
     el.settingsInner.innerHTML = `${sectionMarkup(
       "会话",
       `<div class="card">
@@ -144,20 +181,13 @@ async function renderSettings() {
           }),
         )}
         <div class="divider"></div>
-        ${rowMarkup(
-          "工具活动",
-          "关掉就只看回答，不看「读了哪个文件、跑了什么命令」",
-          switchMarkup(showActs, { label: "显示工具活动", attrs: 'data-acts-switch' }),
-        )}
         ${
           // 入口常驻：N=0 时也让主人知道归档收在哪（方案 §2：会话页只保留入口）
-          `<div class="divider"></div>
-           ${rowMarkup(
+          `${rowMarkup(
              "归档的会话",
-             // 只留计数：解释性文字不常驻（界面文案密度口径）
-             state.archived > 0 ? `${state.archived} 个` : "",
+             // 解释收进悬停，计数也并进去（2026-11-14：这一行原来既没提示、又只在 N>0 时显示数字）
+             `${state.archived > 0 ? `已归档 ${state.archived} 个。` : ""}归档只是把会话从列表里收起：内容与记忆都还在，随时可以恢复，也能在归档页里永久删除。`,
              `<button class="ghost" type="button" id="open-archive">打开归档</button>`,
-             { inlineHint: true },
            )}`
         }
         <div class="divider"></div>
@@ -179,12 +209,18 @@ async function renderSettings() {
         <div class="divider"></div>
         ${rowMarkup(
           "保留天数",
-          "",
+          "多少天没动静算旧（1–365，默认 30）。收两类：普通对话、单已结束的任务专线；总管、执事/群、置顶的、正在跑的一律不动。",
           `<input class="set-input archive-days" id="archive-auto-days" type="number" min="1" max="365"
                   value="30" aria-label="自动归档保留天数" />`,
         )}
-        <div class="divider"></div>
-        <div class="row" id="archive-auto-hint-row" hidden><div class="row-main"><div class="row-hint" id="archive-auto-hint"></div></div></div>
+        ${
+          // 提示行只在有状态/错误时存在；分隔线必须和它同生共死——
+          // 早先两者拆开写，空提示时那根 1px 线就贴在卡片底边上，看起来像两根、颜色还被叠深。
+          `<div id="archive-auto-hint-wrap" hidden>
+             <div class="divider"></div>
+             <div class="row"><div class="row-main"><div class="row-hint" id="archive-auto-hint"></div></div></div>
+           </div>`
+        }
       </div>`,
     )}
     ${sectionMarkup(
@@ -192,11 +228,12 @@ async function renderSettings() {
       `<div class="card">
         ${rowMarkup(
           "Agent 权限",
-          "决定它能替你动到什么程度：完全访问 = 能改文件、能跑命令。改完立刻生效。",
+          "决定它能替你动到什么程度。只读 = 能看能查（ls / cat / grep 这类查看命令），不改文件；在工作区内修改 = 文件只改工作区和项目里的，命令也只限查看；完全访问 = 能改文件、能跑任何命令。改完立刻生效。",
+          // 方向从左到右 = 从最保守到最放开，完全访问恒在右端（2026-11-14）
           `<div class="segmented slide" role="radiogroup" aria-label="权限" id="policy-switch">
-             <button type="button" data-policy="full" aria-checked="false">完全访问</button>
              <button type="button" data-policy="read-only" aria-checked="false">只读</button>
-             <button type="button" data-policy="no-shell" aria-checked="false">不跑命令</button>
+             <button type="button" data-policy="no-shell" aria-checked="false">在工作区内修改</button>
+             <button type="button" data-policy="full" aria-checked="false">完全访问</button>
            </div>`,
         )}
         <div class="divider"></div>
@@ -210,7 +247,8 @@ async function renderSettings() {
            </div>`,
         )}
       </div>`,
-    )}`;
+    )}
+    ${compactionSectionMarkup()}`;
 
     document.getElementById("open-search")?.addEventListener("click", () => go("search"));
     const sendSwitch = el.settingsInner.querySelector("[data-send-key-switch]");
@@ -218,13 +256,6 @@ async function renderSettings() {
       const next = sendSwitch.getAttribute("aria-checked") !== "true";
       sendSwitch.setAttribute("aria-checked", String(next));
       localStorage.setItem(KEY_SEND, next ? "enter" : "mod-enter");
-    });
-    const actsSwitch = el.settingsInner.querySelector("[data-acts-switch]");
-    actsSwitch?.addEventListener("click", () => {
-      const next = actsSwitch.getAttribute("aria-checked") !== "true";
-      actsSwitch.setAttribute("aria-checked", String(next));
-      localStorage.setItem(KEY_ACTS, next ? "1" : "0");
-      applyActPref();
     });
     document.getElementById("open-archive")?.addEventListener("click", () => go("settings", "archive"));
     document
@@ -246,6 +277,8 @@ async function renderSettings() {
     void loadAutoArchiveSettings();
     void loadPolicy();
     void refreshApprovalPopups();
+    // 上下文压缩（2026-11-14）：四个旋钮走 flags；改完下一轮生效
+    wireCompactionSection(el.settingsInner);
   } else if (page === "projects") {
     // 2026-11-12 重做：工作区根与项目目录平级（ZCode 多根语义），同一种行、路径可改；
     // 项目动作只有「改名 / 归档」（归档是软退场，归档页可恢复），不再有「移除/删除」说法。
@@ -262,17 +295,10 @@ async function renderSettings() {
               添加项目
             </button>
           </div>
+          <div id="proposal-list" hidden></div>
           <div class="proj-list" id="project-list">
             <div class="set-hint">读取中…</div>
           </div>
-        </div>
-      </div>`,
-    )}
-    ${sectionMarkup(
-      "待确认的请求",
-      `<div class="card">
-        <div class="set-card-body" id="proposal-list">
-          <div class="set-hint">读取中…</div>
         </div>
       </div>`,
     )}`;
@@ -330,89 +356,81 @@ async function renderSettings() {
       ?.addEventListener("change", () => renderArchiveChats());
     void loadArchivePage();
   } else if (page === "reminders") {
-    // 2026-11-12 重做：这一页的主路径是「跟 Agent 说一句」，不是填表单——和 ZCode 一样，
-    // 定提醒这件事交给会说话的那一方。手动指定时间收进弹窗（自绘日历 + 时段），
-    // 原生 datetime-local 在中文界面里显示 MM/DD/YY，已退役。
-    el.settingsInner.innerHTML = `${sectionMarkup(
-      "提醒",
-      `<div class="card rm-hero">
-        <div class="rm-hero-body">
-          <div class="rm-hero-title" data-tip="说清什么时候、它到时候说什么。到点执事会来找你；右边的日历可以手动定时间。">让执事到点来找你</div>
-          <div class="rm-say">
-            <input class="set-input rm-say-input" id="reminder-say" type="text" maxlength="200"
-                   placeholder="例如：明天早上九点提醒我交房租" aria-label="想提醒什么" />
-            <button class="rm-icon-btn" type="button" id="reminder-manual"
-                    title="手动指定时间" aria-label="手动指定时间">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2v4"/><path d="M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/></svg>
-            </button>
-            <button class="btn-primary rm-say-go" type="button" id="reminder-say-go">交给 Agent</button>
+    // 定时任务页（2026-11-14 合并）：提醒和例行任务本来就是"到点叫一个人"。
+    // 不再分两个页签；所有任务一张清单，建的时候选"只发一句"还是"自动执行"。
+    el.settingsInner.innerHTML = `
+      <h2 class="set-sec-title">定时任务</h2>
+      <section class="set-sec">
+        <div class="card rm-hero">
+          <div class="rm-hero-body">
+            <div class="rm-hero-title">到点叫一个人</div>
+            <div class="rm-hero-actions">
+              <button class="ghost" type="button" id="reminder-manual">手动设置</button>
+              <button class="btn-primary" type="button" id="reminder-say-go">交给 Agent</button>
+            </div>
           </div>
         </div>
-      </div>`,
-    )}
-    ${sectionMarkup(
-      "待触发",
-      `<div class="card" id="reminder-card">
-        <div class="row"><div class="row-main"><div class="row-hint">读取中…</div></div></div>
-      </div>`,
-    )}`;
-    const say = document.getElementById("reminder-say");
+        <div class="card" id="reminder-card">
+          <div class="row"><div class="row-main"><div class="row-hint">读取中…</div></div></div>
+        </div>
+      </section>`;
     const sendToAgent = () => {
-      // 空着点也行：给一句模板，主人在输入框里补完再发
-      const text = say.value.trim() || "明天早上九点提醒我";
+      // 只给一句开头：时间、频率、内容都由 Agent 在对话里问清楚并调工具，界面不替它猜。
       openChiefChat();
-      el.input.value = `帮我定个提醒：${text}`;
+      el.input.value = "帮我定个提醒：";
       resize();
       el.input.focus();
-      toast("已填进输入框——看过没问题就发送");
+      toast("已填好开头——直接发送，剩下的交给 Agent");
     };
     document.getElementById("reminder-say-go")?.addEventListener("click", sendToAgent);
-    say?.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") { event.preventDefault(); sendToAgent(); }
-    });
-    document.getElementById("reminder-manual")?.addEventListener("click", openReminderModal);
+    document.getElementById("reminder-manual")?.addEventListener("click", () => openReminderModal());
     void loadReminders();
   } else if (page === "connect") {
-    // 连接页（2026-11-13 重排）：先链路、再两条路（同一个 WiFi / 中继）、最后设备。
-    // 解释性长句全部收进 tooltip / 教程，行内只留短状态。
+    // 连接页（2026-11-14 重排）：顺序就是操作顺序——状态 → 接入中继 → 手机两条路 → 设备。
+    // 第一步（电脑接中继）必须在这里能填；第二步的按钮永不置灰，没到那一步时文案直接说"先接入"。
     el.settingsInner.innerHTML = `${sectionMarkup(
       "连接状态",
       `<div class="card">
-        <div class="conn-chain">
-          <div class="conn-node"><span class="conn-k">这台电脑</span><span class="conn-v"><i class="status-dot ok"></i>在线</span></div>
-          <span class="conn-link"></span>
-          <div class="conn-node"><span class="conn-k">中继（VPS）</span><span class="conn-v" id="conn-relay"><i class="status-dot idle"></i>读取中</span></div>
-          <span class="conn-link"></span>
-          <div class="conn-node"><span class="conn-k">手机</span><span class="conn-v" id="conn-phones">—</span></div>
-        </div>
+        <div class="conn-star" id="conn-star"></div>
         <div class="conn-hint" id="conn-hint"></div>
-      </div>`,
-    )}
-    ${sectionMarkup(
-      "同一个 WiFi",
-      `<div class="card pair">
-        <div class="pair-info">
-          <div class="row-label" data-tip="手机 App 扫这个码，换一个长期有效的设备凭据——不用把 AGENT_TOKEN 抄到手机上。">扫码连接手机</div>
-          <div class="pair-meta" id="pair-meta">正在取配对码…</div>
-          <button class="ghost" id="pair-refresh" type="button">换一个码</button>
+        <div class="conn-next" id="conn-next" hidden></div>
+        <div class="divider"></div>
+        <div class="row">
+          <div class="row-main">
+            <div class="row-label" data-tip="这台电脑登记到哪：地址是 VPS 的公网地址，主令牌是部署中继时设的 RELAY_OWNER_TOKEN。">中继地址</div>
+            <div class="row-hint" id="relay-link-hint">读取中…</div>
+          </div>
+          <div class="row-control"><button class="btn-primary" type="button" id="relay-link-btn">接入</button></div>
         </div>
-        <img class="pair-qr" id="pair-qr" alt="配对二维码" hidden />
+        <div class="row" id="relay-unlink-row" hidden>
+          <div class="row-main"><div class="row-hint">断开</div></div>
+          <div class="row-control"><button class="ghost" type="button" id="relay-unlink-btn" data-tip="断开后手机就连不到这台电脑；重新接入随时可以。">断开</button></div>
+        </div>
       </div>`,
     )}
     ${sectionMarkup(
-      "不在同一个 WiFi",
+      "本地连接",
       `<div class="card">
         <div class="row">
           <div class="row-main">
-            <div class="row-label" data-tip="经中继出一枚一次性加入码；手机 App 扫码即加入，不同网络、用流量都能连。">经中继添加设备</div>
-            <div class="row-hint" id="relay-method-state">读取中…</div>
+            <div class="row-label" data-tip="同一 WiFi、插数据线、或手机开「USB 共享网络」都算本地。手机 App 扫这个码，换一个长期有效的设备凭据——不用把 AGENT_TOKEN 抄到手机上。">扫码连接手机</div>
           </div>
-          <div class="row-control"><button class="btn-primary" type="button" id="relay-add-device">添加设备</button></div>
+          <div class="row-control"><button class="btn-primary" type="button" id="pair-refresh">显示二维码</button></div>
         </div>
-        <div class="conn-howto" id="conn-howto" hidden>
-          <div class="howto-step"><span class="n">1</span><span>先在一台 VPS 上部署好中继（一次性；命令见仓库 <code>ts/apps/relay/README.md</code>）</span></div>
-          <div class="howto-step"><span class="n">2</span><span>在 .env 填 <code>RELAY_URL</code> 和中继签发的 <code>RELAY_TOKEN</code>，开 <code>RELAY_ENABLED=1</code></span></div>
-          <div class="howto-step"><span class="n">3</span><span>重启服务；上面变成「已连上」后就能加设备</span></div>
+        <div class="pair-qr-box" id="pair-qr-box" hidden>
+          <img class="pair-qr" id="pair-qr" alt="配对二维码" />
+          <div class="pair-meta" id="pair-meta"></div>
+        </div>
+      </div>`,
+    )}
+    ${sectionMarkup(
+      "远程连接",
+      `<div class="card">
+        <div class="row">
+          <div class="row-main">
+            <div class="row-label" data-tip="经中继出一枚一次性加入码；手机 App 扫码即加入，不同网络、用流量都能连。扫完出现在下面「已连接的设备」里。">远程添加手机</div>
+          </div>
+          <div class="row-control"><button class="btn-primary" type="button" id="relay-add-device">添加手机</button></div>
         </div>
       </div>`,
     )}
@@ -421,17 +439,40 @@ async function renderSettings() {
       `<div class="card" id="device-card"></div>`,
     )}`;
     document.getElementById("pair-refresh").addEventListener("click", () => void loadPair());
-    document.getElementById("relay-add-device").addEventListener("click", () => openAddDeviceModal());
-    void loadPair();
+    document.getElementById("relay-link-btn").addEventListener("click", () => openRelayLinkModal());
+    document.getElementById("relay-unlink-btn").addEventListener("click", () => void unlinkRelay());
+    // 没接入时这个按钮不置灰：点了直接开接入弹窗（置灰=死路，用户 2026-11-14 的原话）
+    document.getElementById("relay-add-device").addEventListener("click", () => {
+      if (!connRelay.connected) {
+        openRelayLinkModal();
+        return;
+      }
+      openAddDeviceModal();
+    });
+    // 二维码按需展开（2026-11-15）：本地连接收成一行，进来不再提前取码——每取一次都会换掉上一枚码，
+    // 没打算扫的人不该被消耗掉一枚。
     void loadRelayStatus();
-    void loadDevices();
-    // 配对码是限时的，停在这一页太久就自己换一张，别让人扫到过期码
+    // 星形拓扑的节点来自设备列表（2026-11-14）：先读列表，画完再把星形刷新一次
+    void loadDevices().then(() => paintConnStar());
+    // 配对码是限时的，停在这一页太久就自己换一张，别让人扫到过期码；
+    // 只在二维码展开时才换——收起来的时候换码等于把用户正在用的那枚悄悄作废。
     clearInterval(pairTimer);
     pairTimer = setInterval(() => {
-      if (currentRoute() === "settings" && currentSettingsPage() === "connect" && el.gate.hidden) {
+      const box = document.getElementById("pair-qr-box");
+      if (box && !box.hidden && currentRoute() === "settings" && currentSettingsPage() === "connect" && el.gate.hidden) {
         void loadPair();
       }
     }, 100000);
+    // 中继状态也要自己刷（2026-11-14）：不刷的话中继掉线/重连，页面还停在旧结论上
+    clearInterval(connPollTimer);
+    connPollTimer = setInterval(() => {
+      if (currentRoute() === "settings" && currentSettingsPage() === "connect" && el.gate.hidden) {
+        void loadRelayStatus();
+        // 设备列表跟着一起刷（2026-11-14 连接方式两分）：在线位、最近一次怎么连的都在变，
+        // 只在进页面时读一次的话，"平板刚刚连上"要手动刷新才看得见。
+        void loadDevices().then(() => paintConnStar());
+      }
+    }, 10000);
   } else if (page === "service") {
     // 服务页（2026-11-09 拆分后；2026-11-13 二次瘦身）：只留服务状态与开关——通知 / 鉴权 / 运行时 / 高级开关。
     // 2026-11-13 退役的两行：地址（连接页的链路图已经说清，这里只是 location.origin 的复读）、
@@ -442,8 +483,7 @@ async function renderSettings() {
       `<div class="card">
         <div class="row">
           <div class="row-main">
-            <div class="row-label">桌面通知</div>
-            <div class="row-hint">回复完成 / 出错 / 任务单待你处理时提醒；窗口正看着那个会话就不打扰</div>
+            <div class="row-label" data-tip="回复完成 / 出错 / 任务单待你处理时提醒；窗口正看着那个会话就不打扰。">桌面通知</div>
             <div class="row-hint" id="svc-notify-hint" hidden></div>
           </div>
           <div class="row-control">
@@ -486,7 +526,17 @@ async function renderSettings() {
     )}
     ${sectionMarkup(
       "高级开关",
-      `<div class="card" id="flags-card">
+      // 工具活动从「会话」搬到这里（2026-11-14）：它不是一个偏好，而是复核的凭据——
+      // 回答里少了「读了哪个文件、跑了什么命令」，事后就查不出它到底动过什么。
+      // 所以只报状态、不给开关：灰块没有隐藏路径，才谈得上「事后可复核」。
+      `<div class="card" id="acts-card">
+        ${rowMarkup(
+          "工具活动",
+          "对话里始终显示读了哪个文件、跑了什么命令、花了多久；这一项不提供关闭，要回看结论只能靠它。",
+          `<span class="kv">常开</span>`,
+        )}
+      </div>
+      <div class="card" id="flags-card">
         <div class="row"><div class="row-main"><div class="row-hint">读取中…</div></div></div>
       </div>`,
     )}`;
@@ -624,11 +674,19 @@ async function renderSettings() {
     if (pageA) void wireMemorySettings();
     else void wireMemorySettingsLegacy();
   } else if (page === "partners") {
+    // 2026-11-14 C 版：列表点进去 = 换个页（#/settings/partners/<id>），不再开弹窗。
+    // 弹窗要塞下「它是谁 + 岗位 + 能力 + 档案」四段，只能滚两屏；页面才有地方。
+    const profileId = currentPartnerProfileId();
+    if (profileId) {
+      void renderPartnerProfilePage(profileId);
+      replayPageEnter();
+      return;
+    }
     el.settingsInner.innerHTML = sectionMarkup(
       "人设",
       `<div class="pt-head">
         <div class="row-main">
-          <div class="set-card-title" data-tip="头像和「它是谁」一起改：点「改人设」进弹窗，左边换头像、右边写正文，一次保存。模型候选链与例行任务也在里面。">总管与执事</div>
+          <div class="set-card-title" data-tip="一个执事一份档案：点进去改头像、写人设、定岗位、看能力与档案，一页到底。">总管与执事</div>
         </div>
         <button class="btn-primary" type="button" id="partner-add">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>

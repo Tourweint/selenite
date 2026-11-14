@@ -268,14 +268,7 @@
 .msg-foot .copy-btn.is-done { color: var(--ok); }
 .msg-foot .copy-btn.is-failed { color: var(--c-error); }
 
-.msg-usage,
-.msg-time { line-height: 20px; }
-/* 用时与完成时间之间一条细分隔，视觉上不糊成一坨 */
-.msg-time::before {
-  content: ""; display: inline-block;
-  width: 1px; height: 9px; margin-right: 10px;
-  background: var(--divider); vertical-align: -1px;
-}
+.msg-usage { line-height: 20px; }
 
 .body { min-width: 0; overflow-wrap: anywhere; }
 

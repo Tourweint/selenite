@@ -55,11 +55,8 @@ function addMessage(role, text, at, images = [], options = {}) {
     wrap.classList.add("is-new");
     wrap.addEventListener("animationend", () => wrap.classList.remove("is-new"), { once: true });
   }
-  // 时间戳不摆在脸上，挂在 hover 的 title 里；data-at 留给以后要用的时候
-  if (at) {
-    wrap.dataset.at = String(at);
-    wrap.title = new Date(at).toLocaleString("zh-CN");
-  }
+  // 时间戳只留给 `data-at`（搜索定位要用），不再挂 title 弹悬停框。
+  if (at) wrap.dataset.at = String(at);
 
   // 助手那一侧多一层「工作过程」（2026-11-07）：思考卡 + 工具步骤 + 派活。
   // 用户消息没有这一层。刻意**不在建消息时就插占位块**——没有工具的轮次
@@ -95,7 +92,6 @@ function addMessage(role, text, at, images = [], options = {}) {
     const copy = document.createElement("button");
     copy.type = "button";
     copy.className = "copy-btn";
-    copy.title = "复制";
     copy.setAttribute("aria-label", "复制");
     copy.innerHTML = ICON_COPY;
     copy.addEventListener("click", async () => {
@@ -113,11 +109,11 @@ function addMessage(role, text, at, images = [], options = {}) {
       copy.classList.toggle("is-done", ok);
       copy.classList.toggle("is-failed", !ok);
       copy.innerHTML = ok ? ICON_COPIED : ICON_FAILED;
-      copy.title = ok ? "已复制" : "复制失败";
+      copy.setAttribute("aria-label", ok ? "已复制" : "复制失败");
       setTimeout(() => {
         copy.classList.remove("is-done", "is-failed");
         copy.innerHTML = ICON_COPY;
-        copy.title = "复制";
+        copy.setAttribute("aria-label", "复制");
       }, 1200);
     });
     foot.append(copy);
@@ -406,43 +402,4 @@ async function waitEditedTurn(conversationId) {
   }
 }
 
-/**
- * 在脚注里落完成时间。
- *
- * 刻意不在 addMessage 里写：那一轮刚建出来时只有一个光标，写上去就是
- * "刚开始就完成于 xx:xx"。历史回读（文案已定）走 openChat，现场那一轮
- * 等 done / 收尾再落，两边才会显示真正的收尾时刻。
- *
- * 2026-11-08 用户口径：脚注去文字，只留时刻本体（"完成于"进 title）。
- */
-function markDoneAt(root, ms) {
-  const foot = root?.querySelector?.(".msg-foot");
-  if (!foot) return;
-  let stamp = foot.querySelector('[data-role="done-at"]');
-  if (!stamp) {
-    stamp = document.createElement("span");
-    stamp.className = "msg-time";
-    stamp.dataset.role = "done-at";
-    foot.append(stamp);
-  }
-  stamp.textContent = clockOf(ms);
-  const d = new Date(ms);
-  stamp.title = Number.isFinite(d.getTime())
-    ? `完成于 ${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${clockOf(ms)}`
-    : "";
-}
-
-/** 脚注时间：今天只给 HH:MM，隔天补 M/D——历史会话里"完成于 14:03"没有信息量 */
-function clockOf(ms) {
-  const d = new Date(ms);
-  if (!Number.isFinite(d.getTime())) return "";
-  const hhmm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-  const now = new Date();
-  const sameDay =
-    d.getFullYear() === now.getFullYear() &&
-    d.getMonth() === now.getMonth() &&
-    d.getDate() === now.getDate();
-  return sameDay ? hhmm : `${d.getMonth() + 1}/${d.getDate()} ${hhmm}`;
-}
-
-export { ATT_FILE_ICON, addMessage, clearThread, clockOf, formatBytes, hideEmpty, markDoneAt, mountMessageAttachments, openInlineEditor, resolveMessageId, startEditing, submitEdit, syncEditEntry, userActionsOf, waitEditedTurn };
+export { ATT_FILE_ICON, addMessage, clearThread, formatBytes, hideEmpty, mountMessageAttachments, openInlineEditor, resolveMessageId, startEditing, submitEdit, syncEditEntry, userActionsOf, waitEditedTurn };

@@ -5,14 +5,31 @@
  * 原区间 L3638–L3867。@import 顺序即层叠顺序，改样式只改对应分部。
  */
 /* ── 滚动条 ───────────────────────────────────────────── */
+/*
+ * 2026-11-14 用户：「只在主对话界面保留」。换模型弹层、设置页、侧栏、抽屉、
+ * 任务板、项目弹层……全都在长内容里露着一条灰杠。做法：全局把条子钉成 0 宽，
+ * 只给主对话（#scroll）开回 10px。
+ *
+ * 隐条 ≠ 不能滚：overflow 一个字没动，wheel / 键盘 / 触控板 / 触屏照旧；
+ * 也不能改用 overflow:hidden —— 那会把内容裁掉，不是"不显示条子"。
+ *
+ * #scroll 刻意不写 scrollbar-width：Chromium 里一旦写了非 auto，后面
+ * ::-webkit-scrollbar 的自定义就整段失效，条子会退回系统默认的 15px 宽条。
+ * 其它元素补 scrollbar-width:none 是给非 Chromium 内核（Firefox）兜底——
+ * 那边不认 ::-webkit-scrollbar。
+ */
+*:not(#scroll) { scrollbar-width: none; }
+::-webkit-scrollbar { width: 0; height: 0; }
 
-::-webkit-scrollbar { width: 10px; height: 10px; }
-::-webkit-scrollbar-thumb {
+/* 主对话：唯一留着条子的地方。thumb 用 outline 色、3px 透明边当留白；
+   横向条高 0 —— 对话列自己不横滚，长代码在 <pre> 里各滚各的。 */
+#scroll::-webkit-scrollbar { width: 10px; height: 0; }
+#scroll::-webkit-scrollbar-thumb {
   background: var(--outline);
   border-radius: var(--r-full);
   border: 3px solid transparent; background-clip: content-box;
 }
-::-webkit-scrollbar-track { background: transparent; }
+#scroll::-webkit-scrollbar-track { background: transparent; }
 
 /* 设置页切页由 .set-page.enter 统一负责（150ms fade），不再做分组错峰进场 */
 

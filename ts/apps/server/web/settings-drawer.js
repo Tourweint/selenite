@@ -12,20 +12,17 @@ import { el } from "./dom.js";
 import { fetchModelCatalog, updateModelPill } from "./hover-tip.js";
 import { CS_ICONS } from "./icons.js";
 import { request } from "./net.js";
-import { CS_PROFILE_PAGES, csPrimeArchive, renderCsArchivesPage } from "./settings-employee.js";
 import { renderCsModelPage } from "./settings-model.js";
 import { renderCsPolicyPage } from "./settings-permission.js";
-import { renderCsPersonaPage } from "./settings-persona.js";
 import { state } from "./state.js";
 import { noMotion, toast } from "./ui-atoms.js";
 
 /* ── 对话右上角快捷设置（2026-11-07 抽屉；2026-11-13 按 B 版重排）──
- * 右上角图标 → 右侧全高抽屉。2026-11-13 用户口径三条：
- *   ① 主选模型 / 备选模型两个入口进的是同一页，太绕 → 合成一行「模型」，一页里分两段；
- *   ② 通知不用单独设，跟随全局 → 抽屉里整条移除，只留一句脚注；
- *   ③ 权限确实有必要 → 保留一行一页；
- *   ④ 工作履历 / 记忆 / 例行规则 / 技能四类都改不了 → 只读，合成一页四个分段。
- * 首页 = 身份 + 模型/权限两个值格 + 四条档案行（条数 + 最近一条）+ 全部设置 + 脚注。
+ * 右上角图标 → 右侧全高抽屉。2026-11-14 用户口径：
+ *   ① 身份块只做跳转，点它去「设置 → 人设 → 改人设」，这里不再直接改总管 / 执事；
+ *   ② 工作履历、记忆、例行、技能四类只读档案从抽屉撤出：履历去记忆页，例行/技能留人设页能力；
+ *   ③ 抽屉只留简单设置：模型、权限、全部设置。
+ * 首页 = 身份跳转 + 模型/权限两个值格 + 全部设置。
  * 底层聊天不卸载只挂浮层，滚动位置与输入内容天然保持。
  * 关闭三通道：Esc（输入法豁免）/ X / 点遮罩；关闭动画播完再卸载（照 popTimers 模式）。 */
 
@@ -33,15 +30,15 @@ const DRAWER_MS = 250;
 /* 二级页 / 快捷设置抽屉的页状态：拆成多模块后由四处读写，收进一个对象（ESM 导入的绑定不能赋值）。
    字段沿用原变量名的后半段：csPage → cs.page。 */
 const cs = {
-  page: "home", archiveTab: "records", timer: 0,
+  page: "home", timer: 0,
   catalog: null, policy: null, target: null,
-  detail: null, providers: null, archive: null, archiveJob: null,
+  detail: null, providers: null,
 };
 
 
 
 
-const CS_POLICY_LABEL = { full: "完全访问", "read-only": "只读", "no-shell": "不跑命令" };
+const CS_POLICY_LABEL = { full: "完全访问", "read-only": "只读", "no-shell": "在工作区内修改" };
 const CS_APPROVAL_LABEL = { "ask-all": "全部问我", "ask-critical": "只问重要的", none: "全不问" };
 
 function drawerOpen() {
@@ -99,8 +96,8 @@ function closeChatSettings() {
 
 /**
  * 打开抽屉并落在指定页（2026-11-09 从 toggleChatSettings 抽出）。
- * 目标与页面都由调用方给：常规入口传 csResolveTarget() / home，
- * 花名册「档案」直达传 partnerId / 某个档案页，不靠猜当前会话。
+ * 目标与页面都由调用方给：常规入口传 csResolveTarget() / home。
+ * 2026-11-14：档案页已撤，旧的 records/archives 页面名会落到 home；人设改走设置二级页。
  */
 async function openDrawerAt(target, page) {
   el.chatSettingsBtn.disabled = true;
@@ -112,9 +109,6 @@ async function openDrawerAt(target, page) {
     cs.target = target;
     cs.page = page;
     cs.detail = null;
-    // 档案数据每次开抽屉现拉：条数可能刚被一轮对话改过，不吃上次的缓存
-    cs.archive = null;
-    cs.archiveJob = null;
     renderCsPage();
     openDrawer();
     // 权限档 / 人设详情顺带拉；回来若还停在对应页就重渲染补上
@@ -209,7 +203,6 @@ function csHead(title, { back = false } = {}) {
     backBtn.type = "button";
     backBtn.className = "cs-icon-btn";
     backBtn.setAttribute("aria-label", "返回");
-    backBtn.title = "返回";
     backBtn.append(csSvg(CS_ICONS.back));
     backBtn.addEventListener("click", () => {
       cs.page = "home";
@@ -225,7 +218,6 @@ function csHead(title, { back = false } = {}) {
   closeBtn.type = "button";
   closeBtn.className = "cs-icon-btn";
   closeBtn.setAttribute("aria-label", "关闭");
-  closeBtn.title = "关闭 (Esc)";
   closeBtn.append(csSvg(CS_ICONS.x));
   closeBtn.addEventListener("click", () => closeChatSettings());
   head.append(closeBtn);
@@ -277,16 +269,9 @@ function renderCsPage() {
   if (!drawer) return;
   const body = drawer.querySelector(".cs-body");
   const keepScroll = body ? body.scrollTop : 0;
-  // 四个档案页（含花名册「档案」直达传进来的 "records"）统一落到「档案」一页的对应分段，
-  // 页面只有一页、分段记住上次看的是哪一类。
-  if (CS_PROFILE_PAGES[cs.page]) {
-    cs.archiveTab = cs.page;
-    cs.page = "archives";
-  }
-  if (cs.page === "persona") renderCsPersonaPage();
-  else if (cs.page === "model") renderCsModelPage();
+  // 2026-11-14：对话设置不再承载人设 / 档案编辑；身份块直接跳改人设页，档案去记忆页。
+  if (cs.page === "model") renderCsModelPage();
   else if (cs.page === "policy") renderCsPolicyPage();
-  else if (cs.page === "archives") void renderCsArchivesPage();
   else renderCsHome();
   const next = drawer.querySelector(".cs-body");
   if (next) next.scrollTop = cs.page === "home" ? keepScroll : 0;
@@ -337,7 +322,8 @@ function csIdentityNode(partner) {
   const node = document.createElement("button");
   node.type = "button";
   node.className = "cs-identity";
-  node.title = "改人设（头像 / 名字 / 正文）";
+  node.title = "去人设页改（头像 / 名字 / 正文）";
+  node.setAttribute("role", "link");
 
   const avatar = document.createElement("span");
   avatar.className = "pt-avatar";
@@ -354,7 +340,7 @@ function csIdentityNode(partner) {
   const sub = document.createElement("span");
   sub.className = "cs-identity-sub";
   const version = cs.detail ? cs.detail.soulVersion : partner?.soulVersion;
-  sub.textContent = version != null ? `人设 v${version} · 点头像或名字改` : "还没写过人设 · 点这里写";
+  sub.textContent = version != null ? `人设 v${version} · 去人设页改` : "还没写过人设 · 去人设页写";
   main.append(sub);
   node.append(main);
 
@@ -364,8 +350,10 @@ function csIdentityNode(partner) {
   node.append(chevron);
 
   node.addEventListener("click", () => {
-    cs.page = "persona";
-    renderCsPage();
+    const target = cs.target;
+    if (!target) return;
+    closeChatSettings();
+    location.hash = `#/settings/partners/${encodeURIComponent(target)}`;
   });
   return node;
 }
@@ -402,11 +390,9 @@ function renderCsHome() {
   const current = cs.catalog && cs.catalog.current;
   const partner = state.partners.find((item) => item.id === cs.target) || null;
   const chain = cs.target ? partnerModelChain() : [];
-  const archive = cs.archive && cs.archive.target === cs.target ? cs.archive : null;
 
-  // 身份块 = 人设入口（点头像/名字整块进去）。它自己就是那一行，
-  // 不再另立一条「这个角色 → 人设」——两个入口指同一页，只会让人多点一次。
-  // 普通助手会话没有角色可改（人格在服务端），不摆身份块也不摆人设行。
+  // 身份块只做跳转：点整块去「设置 → 人设 → 改人设」，这一页不再直接改名字 / 正文。
+  // 普通助手会话没有角色可改（人格在服务端），不摆身份块。
   if (cs.target) body.append(csIdentityNode(partner));
 
   // 模型 / 权限 = 两个值格。主选与备选是同一件东西的两段（同一个页面），
@@ -419,9 +405,9 @@ function renderCsHome() {
       value: current ? current.modelId : "—",
       sub: cs.target
         ? chain.length
-          ? `备选 ${chain.length} 条 · 只在试跑与例行任务换`
-          : "没配备选 · 主对话只有这一条"
-        : "全局模型，所有对话共用",
+          ? `备选 ${chain.length} 条`
+          : "没配备选"
+        : "全局模型",
       onClick: () => {
         cs.page = "model";
         renderCsPage();
@@ -442,29 +428,6 @@ function renderCsHome() {
   );
   body.append(tiles);
 
-  // 员工档案（2026-11-09；2026-11-13 合并成一页四个分段）：四条行显示条数与最近一条，
-  // 点进去落到同一页的对应分段。普通助手会话没有角色（csTarget=null），不摆这组——
-  // 摆了点进去只有说明，等于噪声（与「身份块」同口径）。
-  if (cs.target) {
-    const profileCard = csCard("档案 · 只读");
-    for (const [key, config] of Object.entries(CS_PROFILE_PAGES)) {
-      const count = archive ? config.count(archive) : null;
-      profileCard.append(
-        csRow({
-          icon: config.icon,
-          title: config.title,
-          sub: archive ? config.preview(archive) || config.sub : config.sub,
-          value: count == null ? "" : `${count} ${config.unit}`,
-          onClick: () => {
-            cs.page = key;
-            renderCsPage();
-          },
-        }),
-      );
-    }
-    body.append(profileCard);
-  }
-
   const allCard = csCard();
   allCard.append(
     csRow({
@@ -478,17 +441,7 @@ function renderCsHome() {
     }),
   );
   body.append(allCard);
-
-  // 通知与外观是全局的，抽屉里不再单设（2026-11-13 用户口径）——留一句脚注说明去处
-  const foot = document.createElement("p");
-  foot.className = "cs-note";
-  foot.textContent = "通知与外观跟随全局设置，这里不再重复一遍。";
-  body.append(foot);
-
   drawer.append(body);
-
-  // 条数与「最近一条」首帧还没有：后台拉一次，回来只重画首页（失败就维持静态副文本）
-  if (cs.target && !archive) void csPrimeArchive(cs.target);
 }
 
 export { CS_APPROVAL_LABEL, CS_POLICY_LABEL, DRAWER_MS, closeChatSettings, closeDrawer, cs, csCard, csHead, csIdentityNode, csLoadProviders, csResolveTarget, csRow, csSvg, csTile, drawerOpen, openDrawer, openDrawerAt, partnerModelChain, refreshCsDetail, refreshCsPolicy, renderCsHome, renderCsPage, toggleChatSettings };

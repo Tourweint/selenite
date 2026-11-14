@@ -67,7 +67,6 @@ function renderChats() {
     row.className = "chat";
     row.tabIndex = 0;
     row.setAttribute("role", "button");
-    row.title = `${chatLabel(chat)} · ${chat.turns} 轮${chat.pinned ? " · 已置顶" : ""}`;
     row.dataset.conv = chat.conversationId;
     // 选中态只在对话路由里成立（2026-11-07 修）：进了群聊 / 任务页 / 设置页，
     // 这条会话仍是「上次打开的那条」，但屏幕上已经不是它了——继续亮着会把人的

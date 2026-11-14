@@ -13,17 +13,14 @@ import { cs, csHead, drawerOpen, renderCsHome } from "./settings-drawer.js";
 import { MEMORY_KIND_LABEL } from "./settings-memory.js";
 import { state } from "./state.js";
 
-/* ── 二级页 · 员工档案（2026-11-09；2026-11-13 合并成「一页四分段」）──
- * 用户口径：工作履历 / 记忆 / 例行规则 / 技能四类都改不了 → 只读，但视图要能一页看全。
- * 所以四个旧页（records / memories / routines / skills）合并成一页四个分段；
- * 首页四条行仍各自直达对应分段（openPartnerProfile 传的旧页名照旧认，见 renderCsPage）。
+/* ── 员工档案（2026-11-09；2026-11-13 合并成「一页四分段」；2026-11-14 入口撤）──
+ * 2026-11-14：对话设置里的「档案 · 只读」卡撤掉，工作履历并入记忆页；例行/技能本来就在人设页
+ * 「能力」里，记忆本来就在记忆页。这个文件保留为**数据助手**（记忆/履历/例行/技能的读取与
+ * 行渲染），旧一页四分段仍可作为内部视图直接调用，但界面不再挂入口。
  * 数据三源（零新存储）：
  *   GET /api/v1/agent/memory?scope=partner:<id>&limit=2000 → work 进履历、其余进记忆
  *   GET /api/v1/routines?partnerId=<id>                     → 例行规则
  *   GET /api/v1/partners/:id/skills                        → 技能
- * 刻意只读：编辑仍走人设页三卡（SOUL / 契约 / 目标）与例行任务既有编辑面；
- * 记忆删除 / 整理沿用设置页记忆区，档案页不重复做（避免两处真相）。
- * 一次拉全量（首页的条数与「最近一条」也吃这一份），失败只影响本页，不拦抽屉。
  */
 
 /** 档案页的 scope：总管读写 global，执事读写自己的键空间。 */

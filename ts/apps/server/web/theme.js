@@ -9,22 +9,56 @@
 
 import { el } from "./dom.js";
 import { esc } from "./markdown.js";
+import { ACCENTS } from "./settings-base.js";
 import { closeModal, openModal } from "./ui-atoms.js";
 
 /* ── 主题（2026-11-05：四套色板） ─────────────────────── */
 
 const KEY_THEME = "lifediary.theme";
 const KEY_ACCENT = "lifediary.accent";
+const KEY_ACCENT_CUSTOM = "lifediary.accentCustom";
 const KEY_SEND = "lifediary.sendKey";
-const KEY_ACTS = "lifediary.showActs";
+/** 自定义取色：没选过时色盘停在这里（与默认靛蓝同色） */
+const ACCENT_CUSTOM_FALLBACK = "#3e4a8c";
+const DARK_THEME_IDS = ["indigo", "black"];
 
 /* id 与 html[data-theme] 一一对应；预览色写死，不跟当前 token 走。
-   white/black 2026-11-08 柔化（纯白纯黑太刺眼），预览色随 token 同步 */
+   white/black 2026-11-08 柔化（纯白纯黑太刺眼），预览色随 token 同步。
+   2026-11-14 外观页改 A 版（缩略界面卡）：每套多带 tag（名字右边那一个字）和
+   缩略图要用的几档色（侧栏底 / 卡 / 描边 / 分隔 / 正文 / 弱字）。
+   缩略图里的强调点是该主题自带的那一档，不跟当前选的主题色走 —— 它是"这套主题长什么样"，
+   不是"你现在选了哪个强调色"。 */
 const THEMES = [
-  { id: "paper", name: "米黄", bg: "#fdf9f2", card: "#f6f1e7", accent: "#3e4a8c" },
-  { id: "white", name: "暖白", bg: "#fafaf8", card: "#f4f4f1", accent: "#3e4a8c" },
-  { id: "indigo", name: "靛蓝夜", bg: "#12141d", card: "#191c27", accent: "#8b97ea" },
-  { id: "black", name: "炭黑", bg: "#17171a", card: "#1d1d21", accent: "#8b97ea" },
+  {
+    id: "paper", name: "米黄", tag: "纸",
+    bg: "#fdf9f2", side: "#f7f3eb", card: "#f6f1e7", cardHigh: "#ede9e0",
+    outline: "#c8c5bc", divider: "rgba(200,197,188,.55)", text: "#2e2b3a", text3: "#9a97a5",
+    accent: "#3e4a8c",
+  },
+  {
+    id: "white", name: "暖白", tag: "素",
+    bg: "#fafaf8", side: "#f3f3f0", card: "#f4f4f1", cardHigh: "#ededea",
+    outline: "#d7d7d3", divider: "rgba(0,0,0,.10)", text: "#1a1a1e", text3: "#9b9ba4",
+    accent: "#3e4a8c",
+  },
+  {
+    id: "celadon", name: "青瓷", tag: "瓷",
+    bg: "#f1f5f1", side: "#e8eee8", card: "#ebf1ea", cardHigh: "#e0e7df",
+    outline: "#c2cec3", divider: "rgba(30,42,37,.12)", text: "#1e2a25", text3: "#8b9a90",
+    accent: "#3e4a8c",
+  },
+  {
+    id: "indigo", name: "靛蓝夜", tag: "夜",
+    bg: "#12141d", side: "#181b26", card: "#191c27", cardHigh: "#212433",
+    outline: "#3a3f52", divider: "rgba(255,255,255,.09)", text: "#e7e9f2", text3: "#6d7183",
+    accent: "#8b97ea",
+  },
+  {
+    id: "black", name: "炭黑", tag: "炭",
+    bg: "#17171a", side: "#121215", card: "#1d1d21", cardHigh: "#242429",
+    outline: "#3a3a44", divider: "rgba(255,255,255,.12)", text: "#e6e6ea", text3: "#66666f",
+    accent: "#8b97ea",
+  },
 ];
 const THEME_IDS = THEMES.map((item) => item.id);
 
@@ -41,16 +75,82 @@ function applyTheme(choice) {
   document.documentElement.dataset.theme = THEME_IDS.includes(choice) ? choice : "paper";
 }
 
+/** 把当前主题回写给壳（2026-11-14）：下次开窗时启动页要按它铺纸或铺夜。
+ *  壳读不到 WebView 的 localStorage，只能自己记一份。
+ *  普通浏览器里没有 window.mygo，静默跳过；返回的 Promise 失败也不影响这一版。 */
+function tellShellTheme(theme) {
+  try {
+    const bridge = window.mygo;
+    if (!bridge || typeof bridge.call !== "function") return;
+    const result = bridge.call.call(bridge, "Shell.SetTheme", theme);
+    if (result && typeof result.catch === "function") result.catch(() => {});
+  } catch (e) { /* 记不上不影响这一版 */ }
+}
+
 function setThemeChoice(choice) {
   const theme = THEME_IDS.includes(choice) ? choice : "paper";
   localStorage.setItem(KEY_THEME, theme);
   applyTheme(theme);
+  tellShellTheme(theme);
+  // 自定义取色要看当前主题是浅底还是深底来挑那一档，换主题得重算一次
+  applyAccentStyle(storedAccent());
   syncThemeControls();
 }
 
-function setAccent(name) {
-  localStorage.setItem(KEY_ACCENT, name);
-  document.documentElement.dataset.accent = name;
+/** 当前那档主题色（脏值回落靛蓝；custom 也认） */
+function storedAccent() {
+  const stored = localStorage.getItem(KEY_ACCENT);
+  if (stored === "custom") {
+    return localStorage.getItem(KEY_ACCENT_CUSTOM) ? "custom" : "indigo";
+  }
+  return ACCENTS.some((item) => item.id === stored) ? stored : "indigo";
+}
+
+/** 自定义取色（2026-11-14）：预设里没有的色由用户自己挑，写成 <html> 的行内变量。
+ *  浅底用原色 + 白字；夜主题把色提亮一档、容器压深一档，和七档预设同一套口径。 */
+function applyCustomAccent(hex) {
+  const root = document.documentElement;
+  const value = /^#[0-9a-f]{6}$/i.test(hex) ? hex : ACCENT_CUSTOM_FALLBACK;
+  const dark = DARK_THEME_IDS.includes(root.dataset.theme);
+  const pairs = dark
+    ? {
+        "--accent": `color-mix(in srgb, ${value} 62%, #ffffff)`,
+        "--on-accent": `color-mix(in srgb, ${value} 24%, #0a0c12)`,
+        "--accent-container": `color-mix(in srgb, ${value} 24%, var(--bg))`,
+        "--on-accent-container": `color-mix(in srgb, ${value} 72%, #ffffff)`,
+      }
+    : {
+        "--accent": value,
+        "--on-accent": "#ffffff",
+        "--accent-container": `color-mix(in srgb, ${value} 13%, var(--bg))`,
+        "--on-accent-container": `color-mix(in srgb, ${value} 82%, var(--text))`,
+      };
+  for (const [name, computed] of Object.entries(pairs)) root.style.setProperty(name, computed);
+}
+
+/** 把主题色落到 CSS：预设交给 style-01 的 [data-accent] 规则，自定义/回预设时要清行内值。 */
+function applyAccentStyle(accent = storedAccent()) {
+  const root = document.documentElement;
+  root.dataset.accent = accent === "custom" ? "custom" : accent;
+  if (accent === "custom") {
+    applyCustomAccent(localStorage.getItem(KEY_ACCENT_CUSTOM) || ACCENT_CUSTOM_FALLBACK);
+    return;
+  }
+  for (const name of ["--accent", "--on-accent", "--accent-container", "--on-accent-container"]) {
+    root.style.removeProperty(name);
+  }
+}
+
+/** 选主题色：preset id，或传 hex 走自定义那档 */
+function setAccent(name, hex) {
+  if (name === "custom") {
+    const value = /^#[0-9a-f]{6}$/i.test(String(hex || "")) ? String(hex) : ACCENT_CUSTOM_FALLBACK;
+    localStorage.setItem(KEY_ACCENT_CUSTOM, value);
+    localStorage.setItem(KEY_ACCENT, "custom");
+  } else {
+    localStorage.setItem(KEY_ACCENT, ACCENTS.some((item) => item.id === name) ? name : "indigo");
+  }
+  applyAccentStyle(name === "custom" ? "custom" : name);
   syncThemeControls();
 }
 
@@ -59,9 +159,17 @@ function syncThemeControls() {
   for (const button of el.settingsInner.querySelectorAll("[data-theme-choice]")) {
     button.setAttribute("aria-checked", String(button.dataset.themeChoice === choice));
   }
-  const accent = localStorage.getItem(KEY_ACCENT) || "indigo";
+  const accent = storedAccent();
   for (const button of el.settingsInner.querySelectorAll("[data-accent-choice]")) {
     button.setAttribute("aria-checked", String(button.dataset.accentChoice === accent));
+  }
+  // 自定义那个取色圈不在 [data-accent-choice] 里（它开的是系统色盘），单独描一下
+  el.settingsInner
+    .querySelector("[data-accent-pick]")
+    ?.setAttribute("aria-checked", String(accent === "custom"));
+  const chip = el.settingsInner.querySelector("[data-accent-pick] i");
+  if (chip) {
+    chip.style.background = localStorage.getItem(KEY_ACCENT_CUSTOM) || "#3e4a8c";
   }
 }
 
@@ -260,4 +368,4 @@ function openFontModal() {
   );
 }
 
-export { DEFAULT_FONT_SETTINGS, FONT_FAMILIES, FONT_SCOPES, FONT_SIZES, KEY_ACCENT, KEY_ACTS, KEY_FONTS, KEY_SEND, KEY_THEME, THEMES, THEME_IDS, applyFontSettings, applyTheme, currentThemeChoice, fontOptions, fontSizeOptions, loadFontSettings, normalizeFontSettings, openFontModal, readFontForm, saveFontSettings, setAccent, setThemeChoice, syncThemeControls };
+export { ACCENT_CUSTOM_FALLBACK, DEFAULT_FONT_SETTINGS, FONT_FAMILIES, FONT_SCOPES, FONT_SIZES, KEY_ACCENT, KEY_ACCENT_CUSTOM, KEY_FONTS, KEY_SEND, KEY_THEME, THEMES, THEME_IDS, applyAccentStyle, applyFontSettings, applyTheme, currentThemeChoice, fontOptions, fontSizeOptions, loadFontSettings, normalizeFontSettings, openFontModal, readFontForm, saveFontSettings, setAccent, setThemeChoice, storedAccent, syncThemeControls };

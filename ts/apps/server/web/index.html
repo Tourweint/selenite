@@ -8,17 +8,46 @@
 <link rel="stylesheet" href="/assets/style.css" />
 <script>
   // 在样式表应用之前定主题，避免深色用户看到一帧白闪。
-  // 四套：paper（米黄）/ white（纯白）/ indigo（靛蓝夜）/ black（纯黑）。
+  // 五套：paper（米黄）/ white（暖白）/ celadon（青瓷）/ indigo（靛蓝夜）/ black（炭黑）。
   // 旧值迁移：dark → indigo，light / system / 缺失 → paper（2026-11-05 定稿）。
   (function () {
-    var themes = ["paper", "white", "indigo", "black"];
+    var themes = ["paper", "white", "celadon", "indigo", "black"];
     var stored = localStorage.getItem("lifediary.theme");
     var theme = themes.indexOf(stored) >= 0
       ? stored
       : (stored === "dark" ? "indigo" : "paper");
     if (stored !== theme) localStorage.setItem("lifediary.theme", theme);
     document.documentElement.dataset.theme = theme;
-    document.documentElement.dataset.accent = localStorage.getItem("lifediary.accent") || "indigo";
+    // 顺手把主题回写给壳（2026-11-14）：启动页要在业务页起来之前就铺对色，
+    // 而壳读不到 WebView 的 localStorage，只能自己记一份。
+    // 普通浏览器里没有 window.mygo，静默跳过。
+    try {
+      var bridge = window.mygo;
+      if (bridge && typeof bridge.call === "function") {
+        bridge.call.call(bridge, "Shell.SetTheme", theme);
+      }
+    } catch (e) { /* 记不上不影响这一版 */ }
+    // 主题色（2026-11-14 起多一档"自定义"）：预设交给 [data-accent] 的 CSS 规则；
+    // 自定义得在这里把行内变量先写好，否则第一帧会是靛蓝再跳色。
+    var accentChoice = localStorage.getItem("lifediary.accent") || "indigo";
+    document.documentElement.dataset.accent = accentChoice;
+    if (accentChoice === "custom") {
+      var customHex = localStorage.getItem("lifediary.accentCustom") || "#3e4a8c";
+      if (!/^#[0-9a-f]{6}$/i.test(customHex)) customHex = "#3e4a8c";
+      var isDark = theme === "indigo" || theme === "black";
+      var style = document.documentElement.style;
+      if (isDark) {
+        style.setProperty("--accent", "color-mix(in srgb, " + customHex + " 62%, #ffffff)");
+        style.setProperty("--on-accent", "color-mix(in srgb, " + customHex + " 24%, #0a0c12)");
+        style.setProperty("--accent-container", "color-mix(in srgb, " + customHex + " 24%, var(--bg))");
+        style.setProperty("--on-accent-container", "color-mix(in srgb, " + customHex + " 72%, #ffffff)");
+      } else {
+        style.setProperty("--accent", customHex);
+        style.setProperty("--on-accent", "#ffffff");
+        style.setProperty("--accent-container", "color-mix(in srgb, " + customHex + " 13%, var(--bg))");
+        style.setProperty("--on-accent-container", "color-mix(in srgb, " + customHex + " 82%, var(--text))");
+      }
+    }
     if (localStorage.getItem("lifediary.sidebar") === "closed") {
       document.documentElement.dataset.sidebar = "closed";
     }
@@ -34,6 +63,28 @@
     } catch (e) {
       /* 存坏了就按默认（无气泡）走 */
     }
+    // 壁纸（2026-11-14）：同一理由——属性/变量要在样式表之前写好，
+    // 否则设了壁纸的用户每次刷新都会先看到一帧纯色底再跳成壁纸。
+    try {
+      var wall = JSON.parse(localStorage.getItem("lifediary.wallpaper") || "null");
+      if (wall && (wall.source === "paper" || wall.source === "grid" || wall.source === "cloud" || wall.source === "custom")) {
+        var visRaw = Number(wall.visible);
+        var vis = Number.isFinite(visRaw) ? Math.min(100, Math.max(0, Math.round(visRaw))) : 38;
+        var blurRaw = Number(wall.blur);
+        var blur = Number.isFinite(blurRaw) ? Math.min(24, Math.max(0, Math.round(blurRaw))) : 12;
+        document.documentElement.dataset.wallpaper = wall.source;
+        document.documentElement.style.setProperty("--wallpaper-alpha", String(vis / 100));
+        document.documentElement.style.setProperty("--wallpaper-blur", blur + "px");
+        if (wall.source === "custom" && typeof wall.etag === "string" && wall.etag) {
+          document.documentElement.style.setProperty(
+            "--wallpaper-image",
+            'url("/api/v1/appearance/wallpaper?v=' + encodeURIComponent(wall.etag) + '")',
+          );
+        }
+      }
+    } catch (e) {
+      /* 读不出来就按无壁纸走 */
+    }
   })();
 </script>
 </head>
@@ -44,9 +95,25 @@
 <header class="titlebar" id="titlebar">
   <div class="titlebar-brand">Selenite</div>
 
+  <!-- 返回上一页 / 前进（2026-11-14）：位置跟浏览器一致——品牌右边、其它 chrome 左边。
+       壳里没有浏览器的后退按钮也没有工具栏，进整页后只能靠这两枚原路退回。
+       栈在 web/nav-history.js 里；两枚都不可用时整组 hidden，首屏与之前一模一样。 -->
+  <div class="titlebar-nav" id="titlebar-nav" hidden>
+    <button class="icon-btn nav-btn" id="nav-back" type="button" aria-label="返回上一页" disabled>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="m15 18-6-6 6-6"/>
+      </svg>
+    </button>
+    <button class="icon-btn nav-btn" id="nav-forward" type="button" aria-label="前进" disabled>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="m9 18 6-6-6-6"/>
+      </svg>
+    </button>
+  </div>
+
   <!-- 顶部 chrome：侧栏开关（仅聊天页显示）+ 功能菜单 -->
   <div class="chrome">
-    <button class="icon-btn" id="toggle-sidebar" type="button" aria-label="切换侧栏" title="切换侧栏 (Ctrl+B)">
+    <button class="icon-btn" id="toggle-sidebar" type="button" aria-label="切换侧栏">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <rect width="18" height="18" x="3" y="3" rx="2"/>
         <path d="M9 3v18"/>
@@ -70,12 +137,12 @@
   <div class="titlebar-drag" aria-hidden="true"></div>
 
   <div class="window-controls" id="window-controls" hidden>
-    <button class="window-btn" id="win-min" type="button" aria-label="最小化窗口" title="最小化">
+    <button class="window-btn" id="win-min" type="button" aria-label="最小化窗口">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M5 12h14"/>
       </svg>
     </button>
-    <button class="window-btn" id="win-max" type="button" aria-label="最大化窗口" title="最大化">
+    <button class="window-btn" id="win-max" type="button" aria-label="最大化窗口">
       <svg class="ico-max" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <rect width="18" height="18" x="3" y="3" rx="2"/>
       </svg>
@@ -84,7 +151,7 @@
         <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>
       </svg>
     </button>
-    <button class="window-btn close" id="win-close" type="button" aria-label="关闭窗口" title="关闭">
+    <button class="window-btn close" id="win-close" type="button" aria-label="关闭窗口">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M18 6 6 18"/>
         <path d="m6 6 12 12"/>
@@ -155,7 +222,7 @@
            2026-11-13 收窄：整行只有「打开总管会话」一件事——头像不再进编辑，
            改头像 / 改名字一律去右侧对话设置的人设页或设置→执事。 -->
       <div class="side-item chief-entry" id="chief-entry" role="button" tabindex="0"
-           aria-label="总管" title="总管">
+           aria-label="总管">
         <span class="pt-avatar" id="chief-avatar" aria-hidden="true">总</span>
         <span class="roster-name">总管</span>
         <span class="pill-tag">总管</span>
@@ -163,20 +230,21 @@
       </div>
 
       <!-- 分区形态（2026-11-07 四改，用户口径）：
-           **不要箭头**——点整行（图标 + 名称）就是收起/展开；行尾只留一个 ＋。
+           **不要箭头**——点整行（图标 + 名称）就是收起/展开；行尾只留一颗 ⋯（2026-11-14 由 ＋ 改）。
            展开/收起的状态用整行的 hover 底 + 名称颜色表达，不再靠箭头。
            顺序按用户要求：执事在上（紧跟总管），然后是会话/任务、项目、群组。 -->
 
       <!-- 执事（上移到总管之后） -->
       <section class="side-sec is-open" id="sec-partners" data-sec="partners">
         <button class="side-sec-head" id="sec-partners-toggle" type="button" aria-expanded="true"
-                aria-controls="sec-partners-body" data-tip="执事（点一下收起/展开）">
+                aria-controls="sec-partners-body">
           <svg class="sec-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
           <span class="sec-name">执事</span>
           <span class="side-count sec-count" id="partners-badge" hidden></span>
         </button>
-        <button class="sec-add" id="partner-add-side" type="button" aria-label="新建执事" title="新建执事">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+        <button class="sec-more" id="sec-partners-more" type="button"
+                aria-haspopup="menu" aria-expanded="false" aria-label="执事动作">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="2" fill="currentColor"/><circle cx="12" cy="12" r="2" fill="currentColor"/><circle cx="19" cy="12" r="2" fill="currentColor"/></svg>
         </button>
         <div class="side-sec-body" id="sec-partners-body">
           <div class="side-sec-clip">
@@ -188,26 +256,23 @@
       </section>
 
       <!-- 会话 / 任务中心合并（2026-11-07 四改）：两块的实效一样——都是"有哪些对话"。
-           现在一个分区、一个 ＋（新建一条普通对话），列表里同时显示两类行：
+           现在一个分区、一颗 ⋯（菜单里是新建 / 搜索），列表里同时显示两类行：
              会话行    = 普通对话，点进对话；
              任务行    = 有派活的对话，带聚合灯，点进任务中心那张卡。
            会话行在前（最近聊的），任务行殿后（有活的），中间不加分隔条。 -->
       <section class="side-sec is-open" id="sec-chats" data-sec="chats">
         <button class="side-sec-head" id="sec-chats-toggle" type="button" aria-expanded="true"
-                aria-controls="sec-chats-body" data-tip="对话（点一下收起/展开）">
+                aria-controls="sec-chats-body">
           <svg class="sec-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
           <span class="sec-name">对话</span>
           <span class="side-count sec-count" id="tasks-badge" hidden></span>
         </button>
-        <div class="sec-add-wrap">
-          <!-- 搜索（2026-11-12）：独立搜索页的唯一常驻入口；设置 → 会话里还有一个按钮入口 -->
-          <button class="sec-add" id="sec-chats-search" type="button" aria-label="搜索旧对话" title="搜索旧对话">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
-          </button>
-          <button class="sec-add" id="sec-chats-add" type="button" aria-label="新建对话" title="新建对话 (Ctrl+K)">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
-          </button>
-        </div>
+        <!-- 对话：新建 / 搜索都收进这一颗 ⋯（2026-11-14）——
+             原来是一颗放大镜 + 一颗 ＋ 并排，四处分区头各挂一颗 ＋，一列加号太吵。 -->
+        <button class="sec-more" id="sec-chats-more" type="button"
+                aria-haspopup="menu" aria-expanded="false" aria-label="对话动作">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="2" fill="currentColor"/><circle cx="12" cy="12" r="2" fill="currentColor"/><circle cx="19" cy="12" r="2" fill="currentColor"/></svg>
+        </button>
         <div class="side-sec-body" id="sec-chats-body">
           <div class="side-sec-clip">
             <div class="side-sec-inner">
@@ -219,20 +284,17 @@
         </div>
       </section>
 
-      <!-- 项目：行尾 ＋ 给两个入口（新建项目 / 添加已有项目）。 -->
+      <!-- 项目：行尾 ⋯ 给两个入口（新建项目 / 添加已有项目）。 -->
       <section class="side-sec is-open" id="sec-projects" data-sec="projects">
         <button class="side-sec-head" id="sec-projects-toggle" type="button" aria-expanded="true"
-                aria-controls="sec-projects-body"
-                data-tip="项目（点一下收起/展开）· 工作区根是默认目录；项目和它平级，可以放在任意位置。所有已登记目录助手都能读写。">
+                aria-controls="sec-projects-body">
           <svg class="sec-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
           <span class="sec-name" id="sec-projects-name">项目</span>
         </button>
-        <div class="sec-add-wrap">
-          <button class="sec-add" id="sec-projects-add" type="button"
-                  aria-haspopup="menu" aria-expanded="false" aria-label="新建项目" title="新建项目 / 添加项目">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
-          </button>
-        </div>
+        <button class="sec-more" id="sec-projects-more" type="button"
+                aria-haspopup="menu" aria-expanded="false" aria-label="项目动作">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="2" fill="currentColor"/><circle cx="12" cy="12" r="2" fill="currentColor"/><circle cx="19" cy="12" r="2" fill="currentColor"/></svg>
+        </button>
         <div class="side-sec-body" id="sec-projects-body">
           <div class="side-sec-clip">
             <div class="side-sec-inner">
@@ -244,12 +306,13 @@
 
       <section class="side-sec is-open" id="sec-groups" data-sec="groups">
         <button class="side-sec-head" id="sec-groups-toggle" type="button" aria-expanded="true"
-                aria-controls="sec-groups-body" data-tip="群组（点一下收起/展开）" disabled>
+                aria-controls="sec-groups-body" disabled>
           <svg class="sec-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/><path d="M8 12h.01"/><path d="M12 12h.01"/><path d="M16 12h.01"/></svg>
           <span class="sec-name">群组</span>
         </button>
-        <button class="sec-add" id="sec-groups-add" type="button" aria-label="新建群组" title="新建群组" disabled>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+        <button class="sec-more" id="sec-groups-more" type="button"
+                aria-haspopup="menu" aria-expanded="false" aria-label="群组动作" disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="2" fill="currentColor"/><circle cx="12" cy="12" r="2" fill="currentColor"/><circle cx="19" cy="12" r="2" fill="currentColor"/></svg>
         </button>
         <div class="side-sec-body" id="sec-groups-body">
           <div class="side-sec-clip">
@@ -269,7 +332,7 @@
            不改页面路由。空态一句话（见 app.js）。 -->
       <section class="side-sec is-open" id="sec-topics" data-sec="topics">
         <button class="side-sec-head" id="sec-topics-toggle" type="button" aria-expanded="true"
-                aria-controls="sec-topics-body" data-tip="课题（点一下收起/展开）">
+                aria-controls="sec-topics-body">
           <svg class="sec-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m10.065 12.493-6.18 1.318a.934.934 0 0 1-1.108-.702l-.537-2.15a1.07 1.07 0 0 1 .691-1.265l13.504-4.44"/><path d="m13.56 11.747 4.332-.924"/><path d="m16 21-3.105-6.21"/><path d="M16.485 5.94a2 2 0 0 1 1.455-2.425l1.09-.272a1 1 0 0 1 1.212.727l1.515 6.06a1 1 0 0 1-.727 1.213l-1.09.272a2 2 0 0 1-2.425-1.455z"/><path d="m6.158 8.633 1.114 4.456"/><path d="m8 21 3.105-6.21"/><circle cx="12" cy="13" r="2"/></svg>
           <span class="sec-name">课题</span>
           <span class="side-count sec-count" id="topics-badge" hidden></span>
@@ -287,7 +350,7 @@
            2026-11-13 四改：状态文案常驻亮出（用户口径「不放字就不知道点是什么意思」，
            字在点左边）；收起轨道仍无状态。 -->
       <div class="side-foot">
-        <button class="side-item foot-gear" id="open-settings" type="button" aria-label="设置" title="设置">
+        <button class="side-item foot-gear" id="open-settings" type="button" aria-label="设置">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/>
             <circle cx="12" cy="12" r="3"/>
@@ -313,7 +376,7 @@
            （首页四行 + 各二级页，见 app.js 渲染）。与 composer 模型 pill 共用同一套数据与渲染。 -->
       <div class="top-wrap">
         <button class="top-gear" id="chat-settings-btn" type="button" aria-expanded="false"
-                aria-label="对话设置" title="对话设置">
+                aria-label="对话设置">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M20 7h-9"/>
             <path d="M14 17H5"/>
@@ -358,7 +421,7 @@
           <div class="composer-wrap">
             <button class="composer-add" id="composer-add" type="button"
                     aria-label="添加" aria-haspopup="menu" aria-expanded="false"
-                    title="添加：图片、文件、截图、目标">
+                    data-tip="添加：图片、文件、截图、目标">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
             </button>
             <div class="composer-pop plus-menu" id="composer-plus-menu" role="menu" hidden></div>
@@ -368,8 +431,9 @@
         <div class="composer-meta">
           <!-- 上下文环（2026-11-04 从顶栏搬进 composer 右下；2026-11-11 用户拍板挪到
                模型 pill 左边）：只有 20×20 的占比环，**环边不摆数字**（2026-11-13
-               用户拍板）；用了 / 顶了 / 最多全部收进悬停 title -->
-          <span class="ctx-ring" id="ctx-ring" hidden>
+               用户拍板）；2026-11-14 起悬停不再是一句话浮签，改为「上下文容量」卡片
+               （占比 + 构成 + 进度条，学 ZCode），见 chat-notice.js 的 ctx-card。 -->
+          <span class="ctx-ring" id="ctx-ring" aria-label="上下文容量" hidden>
             <svg viewBox="0 0 20 20" aria-hidden="true">
               <circle class="ctx-track" cx="10" cy="10" r="8.25"/>
               <circle class="ctx-fill" id="ctx-fill" cx="10" cy="10" r="8.25"/>
@@ -382,7 +446,7 @@
                D2：pill 挪进右组，菜单仍由包裹层定位（贴着 pill 右上角往上弹）。 -->
           <div class="composer-wrap">
             <button class="composer-pill model-pill" id="model-pill" type="button" aria-haspopup="menu" aria-expanded="false"
-                    title="切换模型（下一轮生效）">
+                    data-tip="切换模型（下一轮生效）">
               <span id="model-pill-label">模型</span>
               <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
             </button>
@@ -406,7 +470,7 @@
   <main class="main settings" id="view-settings" hidden>
     <aside class="set-side">
       <div class="set-head">
-        <button class="set-back" id="close-settings" type="button" aria-label="返回" title="返回 (Esc)">
+        <button class="set-back" id="close-settings" type="button" aria-label="返回">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="m12 19-7-7 7-7"/>
             <path d="M19 12H5"/>
@@ -427,7 +491,7 @@
   <main class="main tasks" id="view-tasks" hidden>
     <header class="tasks-top">
       <div class="tasks-title">
-        <button class="set-back" id="tasks-back" type="button" aria-label="返回任务看板" title="返回任务看板 (Esc)" hidden>
+        <button class="set-back" id="tasks-back" type="button" aria-label="返回任务看板" hidden>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="m12 19-7-7 7-7"/>
             <path d="M19 12H5"/>
@@ -499,7 +563,7 @@
   <main class="main tasks" id="view-review" hidden>
     <header class="tasks-top">
       <div class="tasks-title">
-        <button class="set-back" id="review-back" type="button" aria-label="返回任务中心" title="返回任务中心">
+        <button class="set-back" id="review-back" type="button" aria-label="返回任务中心">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="m12 19-7-7 7-7"/>
             <path d="M19 12H5"/>
@@ -531,7 +595,7 @@
   <main class="main tasks" id="view-domains" hidden>
     <header class="tasks-top">
       <div class="tasks-title">
-        <button class="set-back" id="domains-back" type="button" aria-label="返回对话" title="返回对话 (Esc)">
+        <button class="set-back" id="domains-back" type="button" aria-label="返回对话">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="m12 19-7-7 7-7"/>
             <path d="M19 12H5"/>
@@ -557,7 +621,7 @@
         <!-- 返回键文案按实际行为写（2026-11-07 修）：它的落点一直是「群会话 → 群列表、
              列表 → 对话页」（见 groupsBack 的接线），原来 aria-label/title 写的是
              「返回对话 (Esc)」——两个承诺都不对：没回对话，Esc 也没绑。 -->
-        <button class="set-back" id="groups-back" type="button" aria-label="返回" title="返回">
+        <button class="set-back" id="groups-back" type="button" aria-label="返回">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="m12 19-7-7 7-7"/>
             <path d="M19 12H5"/>
@@ -571,7 +635,7 @@
       <div class="tasks-actions">
         <!-- 群设置（2026-11-07）：纯图标入口，与右上角对话设置同款（.top-gear 几何）。
              文字按钮在群会话顶栏里比标题还抢眼，图标 + title/aria-label 才是正解。 -->
-        <button class="top-gear" id="group-settings-btn" type="button" aria-label="群设置" title="群设置" hidden>
+        <button class="top-gear" id="group-settings-btn" type="button" aria-label="群设置" hidden>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M20 7h-9"/>
             <path d="M14 17H5"/>
@@ -600,7 +664,7 @@
         <div class="group-at-hint" id="group-at-hint" hidden></div>
         <div class="group-composer">
           <div class="group-atpop" id="group-atpop" role="listbox" aria-label="点名候选" hidden></div>
-          <button class="group-at-btn" id="group-at-btn" type="button" aria-label="点名（@）" title="点名 @">
+          <button class="group-at-btn" id="group-at-btn" type="button" aria-label="点名（@）">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <circle cx="12" cy="12" r="4"/>
               <path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8"/>
@@ -626,7 +690,7 @@
   <main class="main search" id="view-search" hidden>
     <header class="search-top">
       <div class="search-title">
-        <button class="set-back" id="search-back" type="button" aria-label="返回对话" title="返回对话 (Esc)">
+        <button class="set-back" id="search-back" type="button" aria-label="返回对话">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="m12 19-7-7 7-7"/>
             <path d="M19 12H5"/>
@@ -680,7 +744,7 @@
   <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="modal-title">
     <div class="modal-head">
       <h2 class="modal-title" id="modal-title"></h2>
-      <button class="modal-x" id="modal-close" type="button" aria-label="关闭" title="关闭 (Esc)">
+      <button class="modal-x" id="modal-close" type="button" aria-label="关闭">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M18 6 6 18"/>
           <path d="m6 6 12 12"/>
@@ -713,6 +777,7 @@
 </div>
 
 <script type="module" src="/assets/bubble-mode.js"></script>
+<script type="module" src="/assets/appearance-wallpaper.js"></script>
 <script type="module" src="/assets/app.js"></script>
 </body>
 </html>

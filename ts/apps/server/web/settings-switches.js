@@ -9,7 +9,7 @@
 
 import { attr, esc } from "./markdown.js";
 import { request } from "./net.js";
-import { mountSegmented, rowMarkup, switchMarkup, syncSegmented } from "./settings-atoms.js";
+import { mountSegmented, rowMarkup, setSwitchChecked, switchMarkup, syncSegmented } from "./settings-atoms.js";
 import { state } from "./state.js";
 import { toast } from "./ui-atoms.js";
 
@@ -60,13 +60,24 @@ const FLAG_LABELS = {
   PERSONA_EXPORT_ENABLED: { label: "对话归档（送）", tip: "每轮主对话聊完后，把你和助手的原话追加进导出目录，由记忆库那边定期收走归档。默认关——开了才往外送数据。" },
   // 归档管理对齐 ZCode（2026-11-13 批A/批B）：开关与天数在 设置→会话 也有独立区，
   // 这里的条目只管通用开关卡（设置→服务）上的可读名。
-  ARCHIVE_AUTO_ENABLED: { label: "自动归档", tip: "开启后，没动静的普通会话到天数就自动归档；置顶与运行中的不动。设置→会话 里也有这一区。" },
+  ARCHIVE_AUTO_ENABLED: { label: "自动归档", tip: "开启后，没动静的普通对话与已结束的任务专线到天数就自动归档；总管、执事/群、置顶与运行中的不动。设置→会话 里也有这一区。" },
   ARCHIVE_AUTO_DAYS: { label: "自动归档天数", tip: "没动静多少天算旧会话（1-365），默认 30。" },
   CHAT_HARD_DELETE: { label: "永久删除", tip: "归档页里的永久删除端点总闸；关掉后预检与删除都返回 400，归档/恢复不受影响。默认开。" },
   CHAT_STREAM_REVEAL: { label: "对话逐字浮现", tip: "流式回答按汉字/英文词淡入，而不是整块蹦出。关 = 退回旧的整块渲染，改完下一轮生效。系统开启「减少动态效果」时自动关闭。" },
   // 历史分页回滚（2026-11-13）：关 = 一次拉最近 200 条、没有上滑加载与日期分隔。
   CHAT_HISTORY_PAGING_ENABLED: { label: "对话历史分页", tip: "开 = 打开会话先加载最近一页，往上滑再加载更早的（按天分组、带日期分隔）；关 = 退回一次拉最近 200 条。改完重新打开会话生效。" },
 };
+
+/** 有专属区块的开关（设置→会话 的自动归档 / 上下文压缩）：通用卡片里不再重复一行。
+ *  不这么做的后果是数值型开关被当成布尔拨杆渲染——它的值永远不是 "true"，拨杆恒为关。 */
+const FLAG_SECTION_KEYS = new Set([
+  "ARCHIVE_AUTO_ENABLED",
+  "ARCHIVE_AUTO_DAYS",
+  "AGENT_COMPACT_ENABLED",
+  "AGENT_COMPACT_TRIGGER_MODE",
+  "AGENT_COMPACT_TRIGGER_PERCENT",
+  "AGENT_COMPACT_TRIGGER_K",
+]);
 
 async function loadFlagsSettings() {
   const card = document.getElementById("flags-card");
@@ -89,6 +100,7 @@ function renderFlagRows(card, flags) {
     return;
   }
   for (const flag of flags) {
+    if (FLAG_SECTION_KEYS.has(flag.key)) continue;
     const meta = FLAG_LABELS[flag.key] || { label: flag.key, tip: "" };
     const hot = flag.hot !== false;
     const valueText =
@@ -152,6 +164,8 @@ async function toggleFlag(key, value, sw, seg) {
     }
     // 对话框的逐字浮现开关下一轮要立刻看到变化，不能等刷新：同步内存投影 + 缓存行。
     if (key === "CHAT_STREAM_REVEAL") state.chatRevealFlag = String(value) !== "false";
+    // 自动归档拨杆同步进快照：下次进「会话」子页直接按它描，不再走一遍回填动画。
+    if (key === "ARCHIVE_AUTO_ENABLED") archiveAutoSnapshot.enabled = String(value) === "true";
     // 历史分页同理：下一次 openChat 立刻按新开关走（当前屏幕不重排，避免翻页中被打断）。
     if (key === "CHAT_HISTORY_PAGING_ENABLED") state.chatPagingFlag = String(value) !== "false";
     if (state.flagsCache instanceof Map) {
@@ -173,9 +187,28 @@ async function toggleFlag(key, value, sw, seg) {
 
 const AUTO_ARCHIVE_DEFAULTS = { ARCHIVE_AUTO_ENABLED: "false", ARCHIVE_AUTO_DAYS: "30" };
 
+/** 本页面进程内最后一次从服务端回读到的档位：进页先按它描，别等请求回来再翻一次。
+ *  设置页每次进子页都重建 DOM，所以 `switchMarkup(false)` 那一版默认态只是占位；
+ *  没有这份快照的话，从别的子页切回来时开关会"关 → 滑到开"走一遍过渡，看着像自己又开了一次。
+ *  服务端仍是唯一真值：回读到不同的值就地纠正，纠正本身不带过渡（见 setSwitchChecked）。 */
+const archiveAutoSnapshot = { enabled: null, days: null };
+
+/** 把开关与天数画成同一份值（程序化回填：一律不滑）。 */
+function paintArchiveAuto(switchEl, daysInput, enabled, daysRaw) {
+  let days = Math.round(Number(daysRaw));
+  if (!Number.isFinite(days) || days <= 0) days = 30;
+  days = Math.min(365, Math.max(1, days));
+  setSwitchChecked(switchEl, enabled === true || enabled === "true");
+  daysInput.value = String(days);
+  daysInput.defaultValue = String(days);
+  syncArchiveAutoTip(days);
+  archiveAutoSnapshot.enabled = enabled === true || enabled === "true";
+  archiveAutoSnapshot.days = days;
+}
+
 /** 标签悬停文案（解释文字不常驻）：天数变化要跟着改 N。 */
 function archiveAutoTip(days) {
-  return `开启后，${days} 天没动静的普通会话自动归档；置顶与运行中的不动。`;
+  return `开启后，${days} 天没动静的普通对话与已结束的任务专线自动归档；总管、执事/群、置顶与运行中的不动。`;
 }
 
 /** 把天数文案挂到「自动归档」那一行的标签上（rowMarkup 生成的 data-tip 位）。 */
@@ -191,34 +224,43 @@ async function loadAutoArchiveSettings() {
   const switchEl = document.querySelector("[data-archive-auto-switch]");
   const daysInput = document.getElementById("archive-auto-days");
   const hint = document.getElementById("archive-auto-hint");
-  const hintRow = document.getElementById("archive-auto-hint-row");
+  const hintWrap = document.getElementById("archive-auto-hint-wrap");
   if (!(switchEl instanceof HTMLElement) || !(daysInput instanceof HTMLInputElement)) return;
+  const hadSnapshot = archiveAutoSnapshot.enabled !== null;
+  const fallbackText = hadSnapshot ? "先按上次读到的值展示" : "先按默认展示";
+  // 同一页面进程里再次进这一页：先按上次回读到的值描好，请求回来只做纠正。
+  // 这一步必须早于 await——晚一步就是让"关"那版占位态先上屏、再滑成"开"。
+  if (hadSnapshot) {
+    paintArchiveAuto(switchEl, daysInput, archiveAutoSnapshot.enabled, archiveAutoSnapshot.days);
+  }
   const values = { ...AUTO_ARCHIVE_DEFAULTS };
+  let known = false;
   try {
     const response = await request("/api/v1/agent/flags", { cache: "no-store" });
     if (response.ok) {
       const data = await response.json().catch(() => ({}));
+      known = true;
       for (const flag of Array.isArray(data.flags) ? data.flags : []) {
         if (flag?.key === "ARCHIVE_AUTO_ENABLED" || flag?.key === "ARCHIVE_AUTO_DAYS") {
           values[flag.key] = String(flag.value || AUTO_ARCHIVE_DEFAULTS[flag.key]);
         }
       }
     } else if (hint) {
-      hint.textContent = `读不到开关（HTTP ${response.status}），先按默认展示。`;
+      hint.textContent = `读不到开关（HTTP ${response.status}），${fallbackText}。`;
     }
   } catch (error) {
     if (error.message === "forbidden") return;
-    if (hint) hint.textContent = `读不到开关，先按默认展示：${error.message}`;
+    if (hint) hint.textContent = `读不到开关，${fallbackText}：${error.message}`;
   }
-  // 提示行只装状态/错误：没话可说就不占一行
-  if (hintRow) hintRow.hidden = !hint?.textContent;
-  let days = Math.round(Number(values.ARCHIVE_AUTO_DAYS));
-  if (!Number.isFinite(days) || days <= 0) days = 30;
-  days = Math.min(365, Math.max(1, days));
-  switchEl.setAttribute("aria-checked", String(values.ARCHIVE_AUTO_ENABLED === "true"));
-  daysInput.value = String(days);
-  daysInput.defaultValue = String(days);
-  syncArchiveAutoTip(days);
+  // 提示行只装状态/错误：没话可说就整块（含分隔线）不占位
+  if (hintWrap) hintWrap.hidden = !hint?.textContent;
+  if (known) {
+    paintArchiveAuto(switchEl, daysInput, values.ARCHIVE_AUTO_ENABLED === "true", values.ARCHIVE_AUTO_DAYS);
+  } else if (!hadSnapshot) {
+    // 从来没读到过：按缺省展示，别让两个控件空着
+    paintArchiveAuto(switchEl, daysInput, false, AUTO_ARCHIVE_DEFAULTS.ARCHIVE_AUTO_DAYS);
+  }
+  // 读过就不回退：读失败时把已知的"开"改回"关"，比停在旧值更糟
 }
 
 async function saveAutoArchiveDays(input) {
@@ -241,6 +283,7 @@ async function saveAutoArchiveDays(input) {
       return;
     }
     input.defaultValue = String(days);
+    archiveAutoSnapshot.days = days;
     toast(data.hot === false ? "已保存，重启服务后生效" : "已保存，即时生效");
   } catch (error) {
     if (error.message !== "forbidden") toast(`没存成：${error.message}`);

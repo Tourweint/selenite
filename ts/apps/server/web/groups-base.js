@@ -59,20 +59,14 @@ async function initGroups() {
 
 function applyGroupsAvailability() {
   const on = groups.available === true;
-  // 侧栏「群组」分区（2026-11-07 统一批）：折叠头 + 行尾 ＋ 是两个独立按钮，
+  // 侧栏「群组」分区（2026-11-07 统一批）：折叠头 + 行尾 ⋯（2026-11-14 由 ＋ 改）是两个独立按钮，
   // 旧的一体式 #side-group 已从 HTML 移除（折叠箭头随四改一并退役）。
   // 入口一起跟可用性走：轨道圆钮（悬停/点开悬停卡，2026-11-13）/ 分区名（进群组页）/
-  // 行尾 ＋（建群）/ 分区底部的「所有群聊」。
-  //
-  // title 只给展开态的三颗（轨道钮 2026-11-13 起不挂任何悬停说明，悬停出卡）。
-  for (const [button, title] of [
-    [el.secGroupsToggle, "群组"],
-    [el.secGroupsAdd, "新建群组"],
-    [el.secGroupsAll, "查看全部群聊"],
-  ]) {
+  // 行尾 ⋯（菜单里建群）/ 分区底部的「所有群聊」。
+  // 2026-11-14 用户口径：分区头、⋯、底部文字入口都不再挂浮签——文字已经自解释。
+  for (const button of [el.secGroupsToggle, el.secGroupsMore, el.secGroupsAll]) {
     if (!button) continue;
     button.disabled = !on;
-    button.title = on ? title : "群组未启用";
   }
   if (el.railGroups) el.railGroups.disabled = !on;
   if (el.groupList) el.groupList.hidden = !on;
@@ -114,14 +108,12 @@ function paintGroupAvatar(host, members) {
     const cell = document.createElement("span");
     cell.className = "gavatar-cell";
     paintAvatar(cell, groupMemberAvatar(member), member.name);
-    cell.title = member.name || "";
     host.append(cell);
   }
   if (all.length > 4) {
     const more = document.createElement("span");
     more.className = "gavatar-cell gavatar-more";
     more.textContent = `+${all.length - 3}`;
-    more.title = `共 ${all.length} 名成员`;
     host.append(more);
   }
 }
@@ -130,7 +122,7 @@ function paintGroupAvatar(host, members) {
  *  行清单抽成 renderGroupRows：收起轨道的群组悬停卡（2026-11-13）渲同一份。 */
 function renderGroupSidebar() {
   if (!el.groupList || groups.available !== true) return;
-  renderGroupRows(el.groupList, "还没有群组。点右边的 ＋ 新建。");
+  renderGroupRows(el.groupList, "还没有群组。点分区右边的 ⋯ → 新建群组。");
 }
 
 function renderGroupRows(box, emptyText) {
@@ -147,7 +139,6 @@ function renderGroupRows(box, emptyText) {
     row.className = "side-item group-row";
     row.tabIndex = 0;
     row.setAttribute("role", "button");
-    row.title = `${group.name} · ${group.members.length} 名成员`;
     row.dataset.groupId = group.id;
     // 「你在这里」：正开着这个群（2026-11-13 选中态批；折叠卡与展开侧栏共用）
     if (currentRoute() === "group" && groupRouteId() === group.id) {

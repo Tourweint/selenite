@@ -133,13 +133,21 @@
 /* 上下文环形指示（2026-11-04 从顶栏搬进 composer 右下，对齐 cindy ContextCapacityRing；
    2026-11-11 挪到模型 pill 左侧；2026-11-13 用户拍板环边不再摆任何数字，
    2026-11-13 二轮：用户说「有点大」，20×20 → 16×16、环高 28 → 24、描边 2.5 → 2.2；
-   「用了 / 顶了 / 最多」全部收进悬停 title；颜色走 currentColor，阈值只换 class。 */
+   2026-11-14 悬停改「上下文容量」卡片（占比 + 构成 + 进度条，学 ZCode）；
+   颜色走 currentColor，阈值只换 class。 */
 .ctx-ring {
   display: inline-flex; align-items: center;
   height: 24px;
   color: var(--text-3);
+  cursor: pointer;
+  border-radius: var(--r-sm);
   transition: color .18s ease;
 }
+.ctx-ring:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: 3px;
+}
+.ctx-ring[aria-expanded="true"] { color: var(--text-2); }
 .ctx-ring[hidden] { display: none; }
 .ctx-ring svg { width: 16px; height: 16px; flex: none; }
 .ctx-track { fill: none; stroke: var(--divider); stroke-width: 2.2; }
@@ -151,6 +159,70 @@
 }
 .ctx-ring.warn { color: var(--warn); }
 .ctx-ring.danger { color: var(--c-error); }
+
+/* 上下文容量卡（2026-11-14，学 ZCode chat.contextUsage 浮层）：
+   fixed 定位贴着环向上弹，320px 一栏——顶部总量、分段进度条、构成清单三块。 */
+.ctx-card {
+  position: fixed;
+  z-index: 70;
+  width: 320px;
+  padding: 13px 14px 12px;
+  background: var(--card);
+  color: var(--text);
+  border: 1px solid var(--composer-border);
+  border-radius: 14px;
+  box-shadow: var(--shadow-menu);
+  font: 12.5px/1.55 var(--font);
+  cursor: default;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.ctx-card-head { display: flex; align-items: baseline; gap: 12px; }
+.ctx-card-title { font-size: 13px; font-weight: 600; letter-spacing: .01em; }
+.ctx-card-usage {
+  margin-left: auto;
+  flex: none;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.ctx-bar {
+  height: 8px;
+  margin-top: 10px;
+  border-radius: var(--r-full);
+  background: var(--chat-inset);
+  overflow: hidden;
+}
+.ctx-bar-fill {
+  display: flex;
+  height: 100%;
+  width: 0;
+  border-radius: inherit;
+  overflow: hidden;
+  transition: width .3s var(--ease-standard);
+}
+.ctx-seg { height: 100%; flex: none; }
+.ctx-legend {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 9px 0 0;
+  border-top: 1px solid var(--divider);
+  display: grid;
+  gap: 6px;
+}
+.ctx-legend li { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.ctx-dot { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+.ctx-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); }
+.ctx-percent {
+  margin-left: auto;
+  flex: none;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
 
 .body code {
   font-family: var(--mono); font-size: 12.8px;

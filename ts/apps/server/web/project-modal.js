@@ -146,81 +146,6 @@ function openAddWorkspaceModal() {
 }
 
 /**
- * 项目 ＋ 的双入口（2026-11-07 四改，用户口径「项目的加号：用于创建新项目或添加子项目」）。
- *
- * 两个动作的区别（服务端已经这么分工，前端只是把它们摆到同一个 ＋ 下）：
- *   · 新建项目 —— 目录还不存在，确认时服务端 mkdir 再登记（POST /projects → confirm）；
- *   · 添加项目 —— 目录已经在硬盘上（多半是已有仓库），只登记、不建目录；可在任意位置。
- * 位置按 ＋ 实测坐标写，右侧放不下就翻到左边；点外面 / Esc 关。
- */
-function closeProjectAddMenu() {
-  const menu = document.getElementById("proj-add-menu");
-  if (!menu) return;
-  menu.remove();
-  el.secProjectsAdd?.setAttribute("aria-expanded", "false");
-}
-
-function openProjectAddMenu() {
-  const button = el.secProjectsAdd;
-  if (!button) return;
-  if (document.getElementById("proj-add-menu")) {
-    closeProjectAddMenu();
-    return;
-  }
-  const menu = document.createElement("div");
-  menu.id = "proj-add-menu";
-  menu.className = "proj-add-menu";
-  menu.setAttribute("role", "menu");
-
-  const make = (label, hint, run) => {
-    const item = document.createElement("button");
-    item.type = "button";
-    item.className = "proj-add-item";
-    item.setAttribute("role", "menuitem");
-    const title = document.createElement("span");
-    title.className = "proj-add-label";
-    title.textContent = label;
-    const sub = document.createElement("span");
-    sub.className = "proj-add-hint";
-    sub.textContent = hint;
-    item.append(title, sub);
-    item.addEventListener("click", () => {
-      closeProjectAddMenu();
-      run();
-    });
-    return item;
-  };
-
-  menu.append(
-    make("新建项目", "目录还不存在，确认后建目录并登记", () => openCreateProjectModal()),
-    make("添加项目", "目录已经在硬盘上，只登记不新建（任意位置）", () => openAddProjectModal()),
-  );
-  document.body.append(menu);
-
-  // 定位：菜单挂在 body 下（不被侧栏 overflow 裁掉），坐标按按钮实测
-  const rect = button.getBoundingClientRect();
-  const width = menu.offsetWidth;
-  const height = menu.offsetHeight;
-  let left = rect.right - width;
-  let top = rect.bottom + 6;
-  if (left < 8) left = 8;
-  if (top + height > window.innerHeight - 8) top = rect.top - height - 6;
-  menu.style.left = `${Math.round(left)}px`;
-  menu.style.top = `${Math.round(Math.max(48, top))}px`;
-  button.setAttribute("aria-expanded", "true");
-
-  // 首次点外面就关；用 setTimeout 避开"打开这一下"自身
-  setTimeout(() => {
-    const onDown = (event) => {
-      if (event.target.closest("#proj-add-menu") || event.target === button) return;
-      closeProjectAddMenu();
-      document.removeEventListener("pointerdown", onDown, true);
-    };
-    document.addEventListener("pointerdown", onDown, true);
-  }, 0);
-}
-
-/**
  * 新建项目（目录不存在）：POST /projects 提交待确认请求 → 立刻 confirm。
  * 与「添加项目」共用同一套校验，差别只在文案与「会把目录建出来」这件事。
  */
@@ -572,4 +497,4 @@ async function refreshProjectPill() {
   }
 }
 
-export { baseNameOf, clearModalHint, closeProjectAddMenu, closeProjectMenu, ensureProjectMenuOpen, isAbsolutePath, openAddProjectModal, openAddWorkspaceModal, openCreateProjectModal, openProjectAddMenu, placeRailMenu, projectAnchor, projectLoading, projectOpenToken, refreshProjectPill, refreshProjectViews, setModalHint };
+export { baseNameOf, clearModalHint, closeProjectMenu, ensureProjectMenuOpen, isAbsolutePath, openAddProjectModal, openAddWorkspaceModal, openCreateProjectModal, placeRailMenu, projectAnchor, projectLoading, projectOpenToken, refreshProjectPill, refreshProjectViews, setModalHint };

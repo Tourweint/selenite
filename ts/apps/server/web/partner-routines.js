@@ -171,7 +171,7 @@ async function ptCreateRoutine(body, partnerId, listBox, hint) {
   }
 }
 
-async function ptRenderRoutineList(box, partnerId) {
+async function ptRenderRoutineList(box, partnerId, options = {}) {
   if (!box) return;
   try {
     const response = await request(`/api/v1/routines?partnerId=${encodeURIComponent(partnerId)}`, { cache: "no-store" });
@@ -180,7 +180,7 @@ async function ptRenderRoutineList(box, partnerId) {
     const routines = data.routines || [];
     box.replaceChildren();
     if (!routines.length) {
-      box.innerHTML = `<div class="set-hint">还没有例行任务，用下面的表单加一条。</div>`;
+      box.innerHTML = `<div class="set-hint">还没有例行任务</div>`;
       return;
     }
     for (const routine of routines) {
@@ -217,7 +217,7 @@ async function ptRenderRoutineList(box, partnerId) {
         void ptToggleHistory(routine.id, historyButton, row.querySelector("[data-pt-runs-for]"));
       });
       row.querySelector("[data-pt-del-routine]")?.addEventListener("click", () =>
-        ptConfirmDeleteRoutine(partnerId, routine.id, routine.name || ""),
+        ptConfirmDeleteRoutine(partnerId, routine.id, routine.name || "", options),
       );
     }
   } catch (error) {
@@ -305,8 +305,19 @@ async function ptLoadRuns(id, box, show) {
   }
 }
 
-function ptConfirmDeleteRoutine(partnerId, routineId, name) {
-  // 单一 modal 宿主：确认弹层会替换编辑模态，答复后重新打开编辑模态（刷新一次详情）
+function ptConfirmDeleteRoutine(partnerId, routineId, name, options = {}) {
+  // 单一 modal 宿主：确认弹层会替换编辑模态，答复后要「回到编辑面」。
+  // 2026-11-14：编辑面从弹窗换成二级页之后，回跳动作由调用方给（onDone），
+  // 没给就退回落旧行为（重开编辑弹窗），弹窗自己那条路径不断。
+  const onDone = typeof options.onDone === "function" ? options.onDone : null;
+  const finish = () => {
+    if (!onDone) {
+      void openEditPartnerModal(partnerId);
+      return;
+    }
+    closeModal();
+    onDone();
+  };
   openModal("删除例行任务", (body) => {
     body.innerHTML = `
       <p class="modal-desc">确定删除「${esc(name)}」？在飞的任务会自动作废（没有取消 API，不残留）。</p>
@@ -314,7 +325,7 @@ function ptConfirmDeleteRoutine(partnerId, routineId, name) {
         <button class="ghost" type="button" data-modal-cancel>取消</button>
         <button class="modal-danger" type="button" id="pt-del-go">删除</button>
       </div>`;
-    body.querySelector("[data-modal-cancel]")?.addEventListener("click", () => void openEditPartnerModal(partnerId));
+    body.querySelector("[data-modal-cancel]")?.addEventListener("click", finish);
     body.querySelector("#pt-del-go")?.addEventListener("click", async (event) => {
       const button = event.currentTarget;
       button.disabled = true;
@@ -327,7 +338,7 @@ function ptConfirmDeleteRoutine(partnerId, routineId, name) {
           return;
         }
         toast("已删除");
-        void openEditPartnerModal(partnerId);
+        finish();
       } catch (error) {
         if (error.message === "forbidden") { closeModal(); return; }
         toast(`没删成：${error.message}`);

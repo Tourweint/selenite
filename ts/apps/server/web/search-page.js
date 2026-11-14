@@ -70,7 +70,8 @@ function wireSearchPage() {
     void runSearchPage(el.searchInput.value.trim());
   });
   el.searchBack?.addEventListener("click", () => go("chat"));
-  el.searchEntry?.addEventListener("click", () => go("search"));
+  // 搜索入口（2026-11-14）：侧栏「对话」分区头原来那颗放大镜收进 ⋯ 菜单，
+  // 菜单项在 shell.js 里注册；这里只保留页面自身的返回与查询逻辑。
   // 首次进页：把空态说明画上（列表区不是模板里写死的）
   renderSearchGroups("", []);
 }

@@ -73,8 +73,8 @@
 .msg.assistant .flow { min-width: 0; }
 
 .tchips-wrap { margin: 2px 0 2px; min-width: 0; }
-/* 设置里关掉「工具活动」：整组灰块隐掉（沿用同一个开关） */
-html[data-acts="0"] .tchips-wrap { display: none !important; }
+/* 工具活动常开（2026-11-14）：不再有「关掉」这一档，原来那条 html[data-acts="0"]
+   隐藏规则一并退役——留着只会让人以为还有开关。 */
 
 .tchips {
   display: flex; flex-wrap: wrap; align-items: center; gap: 5px;

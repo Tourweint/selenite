@@ -13,7 +13,7 @@ import { loadChats } from "./chats-list.js";
 import { attr, esc } from "./markdown.js";
 import { request } from "./net.js";
 import { refreshProjectPill, setModalHint } from "./project-modal.js";
-import { currentSettingsPage, go } from "./route.js";
+import { currentSettingsPage } from "./route.js";
 import { closeModal, inShell, openModal, selectDirectory, toast } from "./ui-atoms.js";
 
 
@@ -46,7 +46,6 @@ function projectErrorText(data, status) {
 
 /** 设置页最近一次读到的工作区；「添加项目」弹层要用它做默认起点。 */
 let settingsWorkspace = null;
-const REPLACE_WORKSPACE_WARNING = "更换根目录会清空当前项目选择（回到主工作区）。";
 
 async function loadProjectsSettings() {
   try {
@@ -74,24 +73,24 @@ async function loadProjectsSettings() {
   }
 }
 
-/** 工作区根行（2026-11-12 与项目行同一种卡片）：路径可改，默认目录用标签标出。 */
+/** 工作区根（2026-11-14 第六版）：标签 + 路径 + 行尾两个按钮（选择目录 / 保存）平级。
+ *  保存是显式动作——换根目录会清空当前项目选择，不能像普通输入框那样失焦就存。
+ *  桌面壳多一个「选择目录」：选完只填进路径，仍然要点保存才生效（避免误改）。
+ *  改过还没存时，下一行出一句浅灰「还没保存」。 */
 function workspaceRowMarkup(workspace) {
   const hasWorkspace = Boolean(workspace);
-  const tip = hasWorkspace
-    ? "工作区根是默认目录。项目和它平级，可以放在任意位置；所有已登记目录助手都能读写。更换根目录会清空当前项目选择（回到主工作区）。"
-    : "还没有设定。先选一个代码目录或空目录；之后可以添加任意位置的项目目录。";
   return `<div class="proj-card is-workspace" id="workspace-card">
     <div class="proj-card-main">
-      <div class="proj-card-line">
-        <span class="proj-card-title" data-tip="${attr(tip)}">工作区根目录</span>
-        <input class="set-input is-mono proj-path-input" id="workspace-path" type="text" spellcheck="false"
-               aria-label="工作区根目录" placeholder="例如：D:/Projects"
+      <div class="proj-ws-row">
+        <span class="proj-ws-label">工作区根目录</span>
+        <input class="proj-ws-path is-mono" id="workspace-path" type="text" spellcheck="false"
+               aria-label="工作区根目录" placeholder="选择一个目录"
                value="${hasWorkspace ? attr(workspace.rootPath) : ""}" />
-        <span class="proj-card-vcs">默认目录</span>
-        ${inShell() ? '<button class="ghost" type="button" id="workspace-pick">选择</button>' : ""}
-        <button class="btn-primary" type="button" id="workspace-save">${hasWorkspace ? "保存" : "设定"}</button>
+        <span class="proj-ws-actions">
+          ${inShell() ? '<button class="btn-primary is-quiet" type="button" id="workspace-pick">选择目录</button>' : ""}
+          <button class="btn-primary" type="button" id="workspace-save">${hasWorkspace ? "保存" : "设定"}</button>
+        </span>
       </div>
-      <div class="proj-card-note">没有项目时，助手在这里干活。它不是项目（没有名字、不能加文件夹），所以不在下面的列表里。</div>
       <div class="proj-card-hint" id="workspace-hint" hidden></div>
     </div>
   </div>`;
@@ -100,30 +99,30 @@ function workspaceRowMarkup(workspace) {
 function wireWorkspaceRow(workspace) {
   const hasWorkspace = Boolean(workspace);
   const input = document.getElementById("workspace-path");
-  const hint = (text) => {
+  const save = document.getElementById("workspace-save");
+  const initial = (input?.value || "").trim();
+  const hint = (text, kind = "error") => {
     const node = document.getElementById("workspace-hint");
     if (!node) return;
     node.textContent = text;
-    node.classList.toggle("is-error", Boolean(text) && text !== REPLACE_WORKSPACE_WARNING);
+    node.classList.toggle("is-error", Boolean(text) && kind === "error");
+    node.classList.toggle("is-info", Boolean(text) && kind === "info");
     node.hidden = !text;
   };
-  // 编辑根目录时才提醒「会清空当前项目选择」——这条直接影响操作后果，值得当面说。
-  const restoreHint = () => hint(hasWorkspace ? REPLACE_WORKSPACE_WARNING : "");
+  const syncDirty = () => {
+    // 按钮一直可点（保存同一路径只是空跑一次），只在改过之后多一句「还没保存」
+    if ((input?.value || "").trim() !== initial) hint("还没保存", "info");
+    else hint("");
+  };
 
-  document.getElementById("workspace-pick")?.addEventListener("click", async () => {
-    const chosen = await selectDirectory();
-    if (!chosen) return; // 取消选择：保留原值
-    input.value = chosen;
-    restoreHint();
-  });
-  input?.addEventListener("input", restoreHint);
-  document.getElementById("workspace-save")?.addEventListener("click", async () => {
-    const value = input.value.trim();
+  const commit = async () => {
+    const value = (input?.value || "").trim();
     if (!value) {
-      hint("填一个绝对路径，或者点「选择」。");
-      input.focus();
+      hint("填一个绝对路径，或者点「选择目录」。");
+      input?.focus();
       return;
     }
+    hint("");
     try {
       const response = await request("/api/v1/workspaces", {
         method: "POST",
@@ -139,37 +138,53 @@ function wireWorkspaceRow(workspace) {
     } catch (error) {
       if (error.message !== "forbidden") hint(`没存成：${error.message}`);
     }
+  };
+
+  document.getElementById("workspace-pick")?.addEventListener("click", async () => {
+    const chosen = await selectDirectory();
+    if (!chosen) return; // 取消选择：保留原值
+    if (input) input.value = chosen;
+    syncDirty();
+    save?.focus();
   });
+  save?.addEventListener("click", () => void commit());
+  input?.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    void commit();
+  });
+  input?.addEventListener("input", syncDirty);
+  syncDirty();
 }
 
 /** 一个项目 = 名字 + 一组文件夹（2026-11-13 项目容器），恰好一个主文件夹。
- *  文件夹行里的动作**一律是按钮**（`.ghost.is-mini`），不用裸文字当按钮。 */
+ *  2026-11-14 第三版：卡头只留一个 ⋯，「添加文件夹 / 重命名 / 归档」全在里面；
+ *  行尾同理（见 rootRowMarkup）。整页只剩「⋯」和编辑态的「保存 / 取消」两种动作长相。 */
 function projectCardMarkup(project) {
   const archived = Boolean(project.archived);
   const id = attr(project.id);
   const roots = Array.isArray(project.roots) ? project.roots : [];
   const count = roots.length;
-  const vcs = project.vcs === "git" ? "git" : "无版本控制";
   const warnings = [
     project.exists === false ? '<span class="pill-tag warn">主文件夹丢失</span>' : "",
     archived ? '<span class="pill-tag">已归档</span>' : "",
   ]
     .filter(Boolean)
     .join("");
-  const rows = roots.map((root) => rootRowMarkup(id, root, archived)).join("");
+  const rows = roots.map((root) => rootRowMarkup(id, root, archived, count)).join("");
   return `<div class="proj-card${archived ? " is-archived" : ""}" data-project-id="${id}">
     <div class="proj-card-main">
       <div class="proj-card-line">
         <span class="proj-card-title">${esc(project.name)}</span>
-        <span class="proj-card-meta">${count || 1} 个文件夹 · ${vcs}</span>
+        <span class="proj-card-meta">${count || 1} 个文件夹</span>
         ${warnings}
         <span class="proj-card-actions">
           ${
             archived
-              ? `<button class="ghost" type="button" data-project-action="restore" data-project-id="${id}">恢复</button>`
-              : `<button class="ghost" type="button" data-project-action="add-root" data-project-id="${id}" data-project-name="${attr(project.name)}">添加文件夹</button>
-                 <button class="ghost" type="button" data-project-action="rename" data-project-id="${id}" data-project-name="${attr(project.name)}">改名</button>
-                 <button class="ghost" type="button" data-project-action="archive" data-project-id="${id}" data-project-name="${attr(project.name)}">归档项目</button>`
+              ? `<button class="btn-primary is-quiet" type="button" data-project-action="restore" data-project-id="${id}">恢复</button>`
+              : `<button class="proj-row-more" type="button" aria-haspopup="menu" aria-expanded="false"
+                         aria-label="项目动作"
+                         data-project-menu data-project-id="${id}" data-project-name="${attr(project.name)}">⋯</button>`
           }
         </span>
       </div>
@@ -179,58 +194,134 @@ function projectCardMarkup(project) {
   </div>`;
 }
 
-/** 一行文件夹：主/附、名字、路径、动作。归档态只读，不给动作。 */
-function rootRowMarkup(projectId, root, archived) {
+/** 一行文件夹：主/附、名字、路径、行尾动作。
+ *  主行只有一个 ⋯（改路径）；附加行多一个常驻「设为主」（切换主文件夹要靠它，藏进菜单里没人找得到），
+ *  外加 ⋯（改路径 / 从项目移除）。 */
+function rootRowMarkup(projectId, root, archived, rootCount = 1) {
   const primary = root.role === "primary";
   const missing = root.exists === false;
   const rid = attr(root.id);
-  const acts = archived
+  const promote =
+    archived || primary
+      ? ""
+      : `<button class="btn-primary is-quiet" type="button" data-root-promote
+                 data-project-id="${projectId}" data-root-id="${rid}" data-root-label="${attr(root.label)}"
+                 title="之后新建的会话在这个文件夹里干活">设为主</button>`;
+  const more = archived
     ? ""
-    : `<span class="proj-root-acts">
-        <button class="ghost is-mini" type="button" data-root-action="path" data-project-id="${projectId}" data-root-id="${rid}">改路径</button>
-        ${
-          primary
-            ? ""
-            : `<button class="ghost is-mini" type="button" data-root-action="promote" data-project-id="${projectId}" data-root-id="${rid}">设为主</button>
-               <button class="ghost is-mini" type="button" data-root-action="remove" data-project-id="${projectId}" data-root-id="${rid}" data-root-label="${attr(root.label)}">移除</button>`
-        }
-      </span>`;
+    : `<button class="proj-row-more" type="button" aria-haspopup="menu" aria-expanded="false"
+               aria-label="文件夹动作"
+               data-root-menu data-project-id="${projectId}" data-root-id="${rid}" data-root-label="${attr(root.label)}"
+               data-root-primary="${primary ? "1" : "0"}" data-root-count="${rootCount}">⋯</button>`;
   return `<div class="proj-root-row${primary ? " is-primary" : ""}" data-root-row="${rid}">
-    <span class="proj-root-dot" aria-hidden="true"></span>
-    <span class="proj-root-label" title="${attr(root.label)}">${esc(root.label)}${primary ? '<span class="proj-tag">主</span>' : ""}</span>
+    <span class="proj-root-label">
+      <span class="proj-root-name" title="${attr(root.label)}">${esc(root.label)}</span>
+      ${primary ? '<span class="proj-tag">主</span>' : ""}
+      ${missing ? '<span class="pill-tag warn">不在了</span>' : ""}
+    </span>
     <span class="proj-root-path is-mono${missing ? " is-missing" : ""}" title="${attr(root.path)}">${esc(root.path)}</span>
-    ${missing ? '<span class="pill-tag warn">不在了</span>' : ""}
-    ${acts}
+    <span class="proj-root-acts">${promote}${more}</span>
   </div>`;
 }
 
 function renderProjectList(workspace, projects) {
   const box = document.getElementById("project-list");
   if (!box) return;
+  closeProjMenu();
   const active = projects.filter((project) => !project.archived);
-  const archivedCount = projects.length - active.length;
   const empty = active.length
     ? ""
-    : `<div class="set-empty">
-        <div class="set-card-title">还没有项目</div>
-        <div class="set-hint">点右上角「添加项目」登记一个已有目录；项目可以在任意位置，不要求在工作区下面。一个项目可以再加多个文件夹，其中一个是主文件夹。</div>
-      </div>`;
-  // 归档项目不再在这里展开折叠区（2026-11-12 归档模块）：只留一行入口指向归档页。
-  box.innerHTML = `${workspaceRowMarkup(workspace)}${active.map(projectCardMarkup).join("")}${empty}
-    <div class="proj-archive-entry">
-      <span>已归档的项目目录（${archivedCount}）</span>
-      <button class="ghost" type="button" id="project-open-archive">查看归档</button>
-    </div>`;
+    : `<div class="set-empty"><div class="set-hint">还没有项目。点右上角「添加项目」。</div></div>`;
+  // 归档项目不出现在这一页（2026-11-14）：它是设置左侧「归档」那一页的事，这里不做入口。
+  box.innerHTML = `${workspaceRowMarkup(workspace)}${active.map(projectCardMarkup).join("")}${empty}`;
 
   wireWorkspaceRow(workspace);
   wireProjectActions(box);
-  document
-    .getElementById("project-open-archive")
-    ?.addEventListener("click", () => go("settings", "archive"));
+}
+
+/* ── 行内 ⋯ 菜单（2026-11-14 按钮统一 B 版）───────────────
+   每行只留一个 28×28 的 ⋯，动作收进菜单。菜单挂 document.body + position:fixed，
+   跟侧栏文件夹浮卡同一个理由：卡片所在容器可能被 overflow 裁掉，挂在行内会被切。
+   点外面 / Esc / 滚动 / 改尺寸都关，同一时刻只开一张。 */
+let projMenuState = null;
+
+function closeProjMenu() {
+  const open = projMenuState;
+  if (!open) return;
+  projMenuState = null;
+  open.node.remove();
+  open.anchor.setAttribute("aria-expanded", "false");
+  document.removeEventListener("pointerdown", open.onDown, true);
+  window.removeEventListener("keydown", open.onKey, true);
+  window.removeEventListener("scroll", closeProjMenu, true);
+  window.removeEventListener("resize", closeProjMenu);
+}
+
+/** items: [{ label, action, danger?, separator?, kbd? }] */
+function openProjMenu(anchor, items, onPick) {
+  if (projMenuState?.anchor === anchor) {
+    closeProjMenu();
+    return;
+  }
+  closeProjMenu();
+  const menu = document.createElement("div");
+  menu.className = "proj-menu";
+  menu.setAttribute("role", "menu");
+  for (const item of items) {
+    if (item.separator) {
+      const sep = document.createElement("span");
+      sep.className = "proj-menu-sep";
+      menu.append(sep);
+    }
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "proj-menu-item" + (item.danger ? " is-danger" : "");
+    button.setAttribute("role", "menuitem");
+    button.append(document.createTextNode(item.label));
+    if (item.kbd) {
+      const kbd = document.createElement("span");
+      kbd.className = "proj-menu-kbd";
+      kbd.textContent = item.kbd;
+      button.append(kbd);
+    }
+    button.addEventListener("click", () => {
+      closeProjMenu();
+      onPick(item.action);
+    });
+    menu.append(button);
+  }
+  document.body.append(menu);
+  const rect = anchor.getBoundingClientRect();
+  const width = menu.offsetWidth;
+  const height = menu.offsetHeight;
+  const left = Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8));
+  let top = rect.bottom + 6;
+  if (top + height > window.innerHeight - 8) top = Math.max(8, rect.top - height - 6);
+  menu.style.left = `${Math.round(left)}px`;
+  menu.style.top = `${Math.round(top)}px`;
+  anchor.setAttribute("aria-expanded", "true");
+  const onDown = (event) => {
+    if (!menu.contains(event.target) && event.target !== anchor) closeProjMenu();
+  };
+  const onKey = (event) => {
+    if (event.key !== "Escape") return;
+    // 设置页自己也监听 Esc（返回上一级）：菜单先吃掉，别一按 Esc 就整页退出
+    event.preventDefault();
+    event.stopPropagation();
+    closeProjMenu();
+  };
+  document.addEventListener("pointerdown", onDown, true);
+  // window 捕获阶段：抢在设置页自己的 Esc（返回上一级）之前，菜单开着时 Esc 只关菜单
+  window.addEventListener("keydown", onKey, true);
+  window.addEventListener("scroll", closeProjMenu, true);
+  window.addEventListener("resize", closeProjMenu);
+  projMenuState = { anchor, node: menu, onDown, onKey };
 }
 
 /** 项目卡片动作接线（项目页与归档页共用）：每次 innerHTML 重建后重新挂即可。
- *  `[data-project-action]` 是项目级，`[data-root-action]` 是文件夹行级。 */
+ *  `[data-project-action]` 是直接按钮（添加文件夹 / 恢复），
+ *  `[data-project-menu]` 与 `[data-root-menu]` 是 ⋯ 菜单的入口，
+ *  `[data-root-action]` 只剩编辑态的两个按钮（保存 / 取消）。 */
 function wireProjectActions(box) {
   for (const button of box.querySelectorAll("[data-project-action]")) {
     button.addEventListener("click", () => {
@@ -252,26 +343,67 @@ function wireProjectActions(box) {
       }
     });
   }
+  for (const button of box.querySelectorAll("[data-project-menu]")) {
+    button.addEventListener("click", () => {
+      const id = button.dataset.projectId || "";
+      const name = button.dataset.projectName || "";
+      openProjMenu(
+        button,
+        [
+          { label: "添加文件夹", action: "add-root" },
+          { label: "重命名项目", action: "rename", separator: true },
+          { label: "归档项目", action: "archive", danger: true },
+        ],
+        (action) => {
+          if (action === "add-root") openAddRootModal(id, name);
+          if (action === "rename") openRenameProjectModal(id, name);
+          if (action === "archive") confirmArchiveProject(id, name);
+        },
+      );
+    });
+  }
+  for (const button of box.querySelectorAll("[data-root-menu]")) {
+    button.addEventListener("click", () => {
+      const projectId = button.dataset.projectId || "";
+      const rootId = button.dataset.rootId || "";
+      const label = button.dataset.rootLabel || "";
+      const primary = button.dataset.rootPrimary === "1";
+      const count = Number(button.dataset.rootCount) || 1;
+      const items = [{ label: "改路径", action: "path", kbd: "⏎" }];
+      // 只剩一个文件夹时不给「移除」：移完这个项目就没有主文件夹了
+      if (!primary && count > 1) {
+        items.push({ label: "从项目移除", action: "remove", separator: true, danger: true });
+      }
+      openProjMenu(button, items, (action) => {
+        const row = button.closest(".proj-root-row");
+        switch (action) {
+          case "path":
+            if (row) beginRootPathEdit(projectId, rootId, row);
+            break;
+          case "remove":
+            confirmRemoveRoot(projectId, rootId, label);
+            break;
+        }
+      });
+    });
+  }
+  // 「设为主」是常驻按钮（切换主文件夹 = 之后新建会话落在哪个目录，不能藏）
+  for (const button of box.querySelectorAll("[data-root-promote]")) {
+    button.addEventListener("click", () => {
+      void promoteRoot(button.dataset.projectId || "", button.dataset.rootId || "");
+    });
+  }
   for (const button of box.querySelectorAll("[data-root-action]")) {
     button.addEventListener("click", () => {
       const projectId = button.dataset.projectId || "";
       const rootId = button.dataset.rootId || "";
       const row = button.closest(".proj-root-row");
       switch (button.dataset.rootAction) {
-        case "path":
-          if (row) beginRootPathEdit(projectId, rootId, row);
-          break;
         case "cancel-path":
           void loadProjectsSettings();
           break;
         case "save-path":
           if (row) void saveRootPath(projectId, rootId, row);
-          break;
-        case "promote":
-          void promoteRoot(projectId, rootId);
-          break;
-        case "remove":
-          confirmRemoveRoot(projectId, rootId, button.dataset.rootLabel || "");
           break;
       }
     });
@@ -287,9 +419,11 @@ function projectCardHint(projectId, text) {
   node.hidden = !text;
 }
 
-/** 「改路径」：把这一行的路径换成输入框，并把动作换成「保存 / 取消」两个按钮。
- *  平时不摆四个输入框——路径只是只读文本，改的时候才切换到编辑态（2026-11-13 定稿）。 */
+/** 「改路径」：把这一行的路径换成输入框，并把行尾的 ⋯ 换成「保存 / 取消」两个按钮。
+ *  平时不摆一堆输入框——路径只是只读文本，改的时候才切换到编辑态（2026-11-13 定稿）。
+ *  2026-11-14：编辑态那一列要装两个按钮，所以给行加 `is-editing`（列宽交给 CSS 改）。 */
 function beginRootPathEdit(projectId, rootId, row) {
+  closeProjMenu();
   const cell = row.querySelector(".proj-root-path");
   if (!cell) return;
   const input = document.createElement("input");
@@ -301,10 +435,11 @@ function beginRootPathEdit(projectId, rootId, row) {
   cell.replaceWith(input);
   const acts = row.querySelector(".proj-root-acts");
   if (acts) {
-    acts.innerHTML = `<button class="ghost is-mini" type="button" data-root-action="save-path" data-project-id="${attr(projectId)}" data-root-id="${attr(rootId)}">保存</button>
-      <button class="ghost is-mini" type="button" data-root-action="cancel-path">取消</button>`;
+    acts.innerHTML = `<button class="btn-primary is-quiet" type="button" data-root-action="save-path" data-project-id="${attr(projectId)}" data-root-id="${attr(rootId)}">保存</button>
+      <button class="ghost" type="button" data-root-action="cancel-path">取消</button>`;
     wireProjectActions(acts);
   }
+  row.classList.add("is-editing");
   input.focus();
   input.select();
 }
@@ -532,4 +667,4 @@ function confirmArchiveProject(id, name) {
   });
 }
 
-export { PROJECT_ERROR_TEXT, REPLACE_WORKSPACE_WARNING, beginRootPathEdit, confirmArchiveProject, confirmRemoveRoot, doProjectAction, loadProjectsSettings, openAddRootModal, projectCardHint, projectCardMarkup, projectErrorText, promoteRoot, renderProjectList, rootRowMarkup, saveRootPath, settingsWorkspace, wireProjectActions, wireWorkspaceRow, workspaceRowMarkup };
+export { PROJECT_ERROR_TEXT, beginRootPathEdit, confirmArchiveProject, closeProjMenu, confirmRemoveRoot, doProjectAction, loadProjectsSettings, openAddRootModal, openProjMenu, projectCardHint, projectCardMarkup, projectErrorText, promoteRoot, renderProjectList, rootRowMarkup, saveRootPath, settingsWorkspace, wireProjectActions, wireWorkspaceRow, workspaceRowMarkup };

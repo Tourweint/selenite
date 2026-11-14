@@ -217,3 +217,37 @@
 }
 .pt-result.is-error { color: var(--c-error); }
 
+/* ── 定时任务页 · 员工的例行任务总览（2026-11-14）────────────
+   只读总览：谁有几条、叫什么、什么时候跑、开没开。改动仍回人设页，
+   所以这里不做开关 / 立即跑，避免同一份规则出现两套可写入口。 */
+.rt-head { display: flex; flex-direction: column; gap: 10px; margin: 0 0 14px; }
+.rt-tabs { align-self: flex-start; }
+.rt-empty { padding: 14px 16px; font-size: 12.5px; color: var(--text-3); }
+.rt-empty.is-error { color: var(--c-error); }
+.rt-group { display: flex; flex-direction: column; }
+.rt-group + .rt-group { margin-top: 4px; border-top: 1px solid var(--divider); }
+.rt-group-head {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 14px 16px 8px;
+}
+.rt-who { font-size: 13.5px; font-weight: 600; color: var(--text); }
+.rt-count { font-size: 11.5px; color: var(--text-3); }
+.rt-open {
+  margin-left: auto; height: 26px; padding: 0 9px;
+  font-size: 11.5px;
+}
+.rt-row {
+  display: flex; align-items: flex-start; gap: 12px;
+  padding: 9px 16px;
+}
+.rt-row + .rt-row { border-top: 1px dashed var(--divider); }
+.rt-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 auto; }
+.rt-name { font-size: 12.8px; line-height: 1.5; color: var(--text); overflow-wrap: anywhere; }
+.rt-meta { font-size: 11.5px; line-height: 1.5; color: var(--text-3); overflow-wrap: anywhere; }
+.rt-state {
+  flex: none; padding: 1px 7px;
+  border: 1px solid var(--divider); border-radius: var(--r-full);
+  font-size: 10.5px; line-height: 1.5; color: var(--text-2);
+}
+.rt-state.is-off { color: var(--text-3); opacity: .75; }
+

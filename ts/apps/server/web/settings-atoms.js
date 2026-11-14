@@ -31,6 +31,22 @@ function switchMarkup(checked, { label, attrs = "" } = {}) {
   </button>`;
 }
 
+/** 程序化回填开关状态（不是用户点的那一下）：默认不跑过渡。
+ *  设置页每次进子页都重建 DOM，先按缺省描一版、等 flags 回来再回填真值——走过渡的话
+ *  每次进页都滑一次，被误读成"它自己又开了一次"。写法同 syncSegmented 的首帧：
+ *  先挂 data-no-anim 关过渡、写值、强制回流，再摘掉，终态就地落地。 */
+function setSwitchChecked(switchEl, checked, { animate = false } = {}) {
+  if (!switchEl) return;
+  if (animate) {
+    switchEl.setAttribute("aria-checked", String(Boolean(checked)));
+    return;
+  }
+  switchEl.setAttribute("data-no-anim", "1");
+  switchEl.setAttribute("aria-checked", String(Boolean(checked)));
+  void switchEl.offsetWidth; // 强制回流：无过渡的终态先落地，摘掉标记时才不会补跑动画
+  switchEl.removeAttribute("data-no-anim");
+}
+
 /*
  * 分段控件共享滑行高亮（2026-11-05 H1）。
  * 结构照 CINDY components/ui/segmented-control.tsx：容器 relative，第一个子元素是
@@ -122,4 +138,4 @@ function replayPageEnter() {
  * 分区 → 子页映射见 SETTINGS_SECTIONS；每个子页内部再按「节」分组。
  */
 
-export { mountSegmented, replayPageEnter, rowMarkup, sectionMarkup, segmentedPlateOf, switchMarkup, syncSegmented };
+export { mountSegmented, replayPageEnter, rowMarkup, sectionMarkup, segmentedPlateOf, setSwitchChecked, switchMarkup, syncSegmented };

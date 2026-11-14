@@ -70,7 +70,6 @@ export function createChip(spec, hooks = {}) {
   if (spec.id) chip.dataset.tool = spec.id;
   chip.setAttribute("aria-haspopup", "dialog");
   chip.setAttribute("aria-expanded", "false");
-  chip.title = "查看细节";
 
   const icon = el("span", "tchip-icon");
   icon.innerHTML = spec.iconSvg || "";

@@ -49,6 +49,10 @@
   z-index: 1;
   pointer-events: none;
 }
+/* 有壁纸时这条衬条必须收起来：它是不透明的 --surface，会在主区底部横出一条没有壁纸的带子
+   （2026-11-14 用户报"壁纸没办法完全覆盖"就是这条）。挡滚动的活由 .thread 的
+   padding-bottom（= 卡高 + 14 + 44）担着，正常滚动文字到不了这条缝。 */
+html[data-wallpaper] .main[data-home]::after { content: none; }
 
 /*
  * 首页态：顶栏让位给全局 chrome，页面中心是「问候 + 大输入框」。
@@ -309,13 +313,14 @@ html[data-route="settings"] .sidebar { display: none; }
 .set-nav button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .set-nav button svg { width: 15px; height: 15px; flex: none; opacity: 0.85; }
 
-/* 内容列：自己滚；scrollbar-gutter 让所有分区预留同一滚动条槽位，
-   窄页不出现「内容忽宽忽窄」 */
+/* 内容列：自己滚。条子隐掉后（2026-11-14）左右内边距改对称 16px：
+   原来右侧多出的 8px 是给 10px 条子做视觉配重，配 scrollbar-gutter: stable
+   让切页不跳宽；条子不画了，这份配重就变成整列左偏 4px。槽位一并撤掉——
+   没有条子可留，留着只会在右边压出一条看不见的空带。 */
 .set-scroll {
   flex: 1; min-width: 0; min-height: 0;
   overflow-y: auto;
-  padding: 0 24px 0 16px;
-  scrollbar-gutter: stable;
+  padding: 0 16px;
 }
 .set-page {
   /* 2026-11-07：内容列从 920 放到 1000。920 在 1440 宽的窗口里右侧留一大条空白，

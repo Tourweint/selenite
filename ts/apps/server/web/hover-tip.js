@@ -15,12 +15,92 @@ import { state } from "./state.js";
 import { closePopover, openPopover, popoverOpen, toast } from "./ui-atoms.js";
 
 /* ── 全局悬停提示（2026-11-08，原「收起轨道 tooltip」泛化）──────────
- * 任何带 data-tip 的元素（轨道按钮 / 侧栏分区头 / 设置页 ⓘ / 记忆组头…）
- * 悬停 ~450ms 后弹出小签，离开即收。Cindy 同款参数：12px 圆角、纯 opacity 进场、无箭头。
+ * 任何带 data-tip 的元素（轨道按钮 / 侧栏分区头 / 设置页标签 / 记忆组头…）
+ * 悬停 ~450ms 后弹出小签，离开即收。12px 圆角、纯 opacity 进场、无箭头。
  * 挂 body 下（fixed 定位）：侧栏收起动画靠 overflow:hidden 裁内容，伪元素会被一起裁掉，
- * 设置页的分区滚动容器同理——fixed + body 挂载躲开一切裁切。 */
+ * 设置页的分区滚动容器同理——fixed + body 挂载躲开一切裁切。
+ *
+ * 2026-11-14 统一口径：界面里所有原生 `title` 一律收编成 data-tip（`adoptTitleTip`）。
+ * 之前 title 与 data-tip 混用，同一个元素会同时弹出浏览器默认小框和这枚浮签
+ * （侧栏「群组」分区头就有 title + data-tip 两份）；现在 title 只当数据源读一次，
+ * 读完即删，页面上只留一种提示。 */
 const TIP_SHOW_DELAY_MS = 450;
 const hoverTipState = { timer: 0, anchor: null };
+
+/** 原生 title → data-tip（一次性收编）。
+ *  - 手写的 data-tip 优先：title 只删不加，别覆盖更长的解释（分区头就是这种形状）。
+ *  - 从 title 自动收编的提示打 `data-tip-auto` 标记：之后 JS 再改 `.title`
+ *    （模型 pill、上下文环、归档按钮都是动态文案）会跟着更新，不会停在旧值。
+ *  - 空 title（如发送键在空闲时 `title=""`）只清不建，避免留下一个空签。 */
+function adoptTitleTip(node) {
+  if (!node || typeof node.getAttribute !== "function" || !node.hasAttribute("title")) return false;
+  const title = (node.getAttribute("title") || "").trim();
+  const authored = node.hasAttribute("data-tip") && node.dataset.tipAuto !== "1";
+  if (title && !authored) {
+    node.setAttribute("data-tip", title);
+    node.dataset.tipAuto = "1";
+  } else if (!title && node.dataset.tipAuto === "1") {
+    node.removeAttribute("data-tip");
+    delete node.dataset.tipAuto;
+  }
+  node.removeAttribute("title");
+  return true;
+}
+
+/** 启动时扫一遍静态 DOM；之后新渲染的节点在悬停/聚焦时按需收编，
+ *  动态改 `.title` 由下面的属性观察器接住。 */
+function adoptAllTitleTips(root = document.body) {
+  if (!root) return 0;
+  let count = 0;
+  if (adoptTitleTip(root)) count += 1;
+  for (const node of root.querySelectorAll?.("[title]") || []) {
+    if (adoptTitleTip(node)) count += 1;
+  }
+  return count;
+}
+
+// 盯 title 属性的变化 + 新插入的子树：都是代码渲染那一刻的少量节点，
+// 不会因为流式输出的文本追加而抖动（纯文本节点直接跳过）。
+// 批次合并到一个微任务里跑：一次历史回读插几百个节点也只扫一遍。
+let titleObserver = null;
+let titleFlushQueued = false;
+const titleInsertQueue = new Set();
+
+function flushInsertedTitles() {
+  titleFlushQueued = false;
+  const batch = [...titleInsertQueue];
+  titleInsertQueue.clear();
+  for (const node of batch) {
+    if (node.isConnected) adoptAllTitleTips(node);
+  }
+}
+
+function watchTitleAttribute() {
+  if (!document.body || typeof MutationObserver === "undefined") return;
+  titleObserver?.disconnect();
+  titleObserver = new MutationObserver((records) => {
+    for (const record of records) {
+      if (record.type === "attributes") {
+        adoptTitleTip(record.target);
+        continue;
+      }
+      for (const added of record.addedNodes) {
+        if (added.nodeType !== 1) continue;
+        titleInsertQueue.add(added);
+      }
+    }
+    if (titleInsertQueue.size && !titleFlushQueued) {
+      titleFlushQueued = true;
+      queueMicrotask(flushInsertedTitles);
+    }
+  });
+  titleObserver.observe(document.body, {
+    attributes: true,
+    attributeFilter: ["title"],
+    childList: true,
+    subtree: true,
+  });
+}
 
 function hideHoverTip() {
   clearTimeout(hoverTipState.timer);
@@ -53,6 +133,8 @@ function showHoverTip(target) {
 }
 
 document.addEventListener("mouseover", (event) => {
+  // 先把这一支上最近的原生 title 收编：浏览器默认小框和浮签不能同时出现
+  adoptTitleTip(event.target.closest?.("[title]"));
   const target = event.target.closest?.("[data-tip]");
   if (!target || target === hoverTipState.anchor) return;
   clearTimeout(hoverTipState.timer);
@@ -67,6 +149,7 @@ document.addEventListener("mouseout", (event) => {
 });
 // 键盘可达：Tab 聚焦立即出（不等延迟），移走即收
 document.addEventListener("focusin", (event) => {
+  adoptTitleTip(event.target.closest?.("[title]"));
   const target = event.target.closest?.("[data-tip]");
   if (target && target !== hoverTipState.anchor) showHoverTip(target);
 });
@@ -132,9 +215,16 @@ function updateModelPill(catalog = state.modelCatalog) {
   if (!el.modelPillLabel) return;
   setModelPillLabel(modelLabel(catalog));
   if (el.modelPill) {
-    el.modelPill.title = catalog && catalog.current
-      ? `当前：${modelFullLabel(catalog)} · 思考强度：${THINKING_LABELS[currentThinking()] || "关"}（点击切换，下一轮生效）`
-      : "还没有可用的模型";
+    // 2026-11-14：全站悬停提示统一走 data-tip；这里仍写 title 会被收编器转过去，
+    // 但直接写 data-tip 更明确，也不再依赖收编时序。
+    if (catalog && catalog.current) {
+      el.modelPill.setAttribute(
+        "data-tip",
+        `当前：${modelFullLabel(catalog)} · 思考强度：${THINKING_LABELS[currentThinking()] || "关"}（点击切换，下一轮生效）`,
+      );
+    } else {
+      el.modelPill.setAttribute("data-tip", "还没有可用的模型");
+    }
   }
 }
 
@@ -186,9 +276,7 @@ function resolveMenuProvider(catalog, providers, preferredId) {
 
 function renderModelMenu(catalog, preferredProviderId, menu = el.modelMenu) {
   if (!menu) return;
-  menu.replaceChildren();
-  const current = catalog.current || null;
-  const level = currentThinking();
+  menu.replaceChildren();  const current = catalog.current || null;
   const providers = menuProviders(catalog);
   if (!providers.length) {
     const row = document.createElement("div");
@@ -210,7 +298,7 @@ function renderModelMenu(catalog, preferredProviderId, menu = el.modelMenu) {
     opt.className = "provider-opt";
     opt.dataset.provider = provider.id;
     opt.setAttribute("aria-pressed", String(provider.id === active.id));
-    opt.title = provider.name || provider.id;
+    opt.setAttribute("data-tip", provider.name || provider.id);
     const name = document.createElement("span");
     name.textContent = provider.name || provider.id;
     opt.append(name);
@@ -239,7 +327,7 @@ function renderModelMenu(catalog, preferredProviderId, menu = el.modelMenu) {
     if (!model) continue;
     const selected = Boolean(current && current.providerId === active.id && current.modelId === model.id);
 
-    // 行 = 模型名（可点，选中行 ✓）；只有当前行额外挂档位分段（2026-11-05）
+    // 行 = 模型名（可点）；思考强度不再挂在行里，统一进菜单底部的常驻条
     const row = document.createElement("div");
     row.className = "model-row";
     // 统一写 "1"/"0"：CSS 当前行样式与 syncThinkingSegments / 焦点回位选择器都按 "1" 找
@@ -253,7 +341,10 @@ function renderModelMenu(catalog, preferredProviderId, menu = el.modelMenu) {
     item.setAttribute("role", "menuitemradio");
     item.setAttribute("aria-checked", String(Boolean(selected)));
     const contextText = model.contextWindow ? formatTokenCount(model.contextWindow) : "";
-    item.title = `${active.name || active.id} · ${model.id}${contextText ? ` · ${contextText} 上下文` : ""}`;
+    item.setAttribute(
+      "data-tip",
+      `${active.name || active.id} · ${model.id}${contextText ? ` · ${contextText} 上下文` : ""}`,
+    );
     const name = document.createElement("span");
     name.className = "model-name";
     name.textContent = model.id;
@@ -265,37 +356,95 @@ function renderModelMenu(catalog, preferredProviderId, menu = el.modelMenu) {
       item.append(meta);
     }
     // 选中行不放 ✓（2026-11-05 用户口径，同 cindy UnifiedModelRow 的裁决）：
-    // 选中态已有强调色 + 加粗 + 档位分段，再挂勾是重复信号
-    // 选中后菜单不关：重渲染出档位分段，接着选强度（D2 的「先选模型再选强度」）
+    // 选中态已有强调色 + 加粗，再挂勾是重复信号
+    // 选中后菜单不关：就地重渲染，档位分段跟着当前模型刷新（D2 的「先选模型再选强度」）
     item.addEventListener("click", () => {
       void chooseModel(active, model.id, model.thinkingLevels, { keepOpen: true, menu });
     });
     row.append(item);
-
-    // 档位分段只属于当前模型（2026-11-05 第二次强调）：非当前行完全不渲染，
-    // 比禁用更干净，也杜绝「先点别家的档位再偷偷切模型」的两段请求。
-    // 2026-11-12：设置页的「更换」弹层标了 data-no-thinking——那里只选模型，
-    // 思考强度是会话级偏好，不属于"换默认模型"这件事。
-    if (selected && menu.dataset.noThinking !== "1") {
-      const seg = document.createElement("div");
-      seg.className = "think-seg";
-      seg.setAttribute("role", "group");
-      seg.setAttribute("aria-label", `${model.id} 的思考强度`);
-      for (const optionLevel of model.thinkingLevels) {
-        const option = document.createElement("button");
-        option.type = "button";
-        option.className = "think-opt";
-        option.dataset.level = optionLevel;
-        option.textContent = THINKING_LABELS[optionLevel];
-        option.title = `思考强度：${THINKING_LABELS[optionLevel]}`;
-        option.setAttribute("aria-pressed", String(level === optionLevel));
-        option.addEventListener("click", () => void chooseCurrentThinking(optionLevel));
-        seg.append(option);
-      }
-      row.append(seg);
-    }
     menu.append(row);
   }
+
+  /* 思考强度（2026-11-14 用户口径：选模型时一定要在这个界面看得见）。
+   * 原来分段只挂在「当前模型那一行」里，浏览别家供应商时整块消失，只剩四个没有标题的
+   * 小按钮；现在改成菜单底部常驻一条，带「思考强度」标签、跟着当前模型的支持域重建。
+   * 位置 sticky 贴底：模型再多也不用滚到底才看得见。设置页的「更换」弹层仍标
+   * data-no-thinking（那里只换默认模型，思考强度是会话级偏好），不进这条。 */
+  const foot = thinkingFoot(catalog, menu);
+  if (foot) {
+    // 常驻条是 sticky 覆盖在滚动口底部的：末尾垫一段等高空白，最后一行才能滚到
+    // 条上方，不会被永久裁掉半行（2026-11-14 实测 7 行时最后一行的下沿被压住）。
+    const spacer = document.createElement("div");
+    spacer.className = "think-spacer";
+    spacer.setAttribute("aria-hidden", "true");
+    spacer.hidden = true;
+    menu.append(spacer, foot);
+    scheduleThinkSpacerSync(menu);
+  }
+}
+
+/** 只有内容真的溢出时才给末尾留白：短菜单不摆一截空档。
+ *  先量「没有 spacer」时是否溢出，再决定显不显示，避免 spacer 自己把高度撑出溢出。 */
+function syncThinkSpacer(menu) {
+  const spacer = menu?.querySelector?.(".think-spacer");
+  if (!spacer || !menu.getClientRects().length) return;
+  spacer.hidden = true;
+  const overflow = menu.scrollHeight > menu.clientHeight + 1;
+  spacer.hidden = !overflow;
+}
+
+function scheduleThinkSpacerSync(menu) {
+  if (!menu || menu.hidden) return;
+  requestAnimationFrame(() => syncThinkSpacer(menu));
+}
+
+/** 当前模型在整份目录里的行：浏览别家供应商时，档位仍按当前模型的支持域画 */
+function findCatalogModel(catalog, current) {
+  if (!current) return null;
+  for (const provider of catalog.providers || []) {
+    for (const raw of provider.models || []) {
+      const model = normalizeModelRow(raw);
+      if (model && model.id === current.modelId) return model;
+    }
+  }
+  return null;
+}
+
+/** 菜单底部的常驻档位条；只有「能调」的模型才出现（单档 / 无档不摆假按钮） */
+function thinkingFoot(catalog, menu) {
+  if (!menu || menu.dataset.noThinking === "1") return null;
+  const model = findCatalogModel(catalog, catalog.current);
+  const levels = model && Array.isArray(model.thinkingLevels) ? model.thinkingLevels : [];
+  if (levels.length < 2) return null;
+  const level = currentThinking();
+
+  const foot = document.createElement("div");
+  foot.className = "think-foot";
+  foot.setAttribute("role", "group");
+  foot.setAttribute("aria-label", "思考强度");
+
+  const label = document.createElement("span");
+  label.className = "think-foot-label";
+  label.textContent = "思考强度";
+  label.setAttribute(
+    "data-tip",
+    "只作用于当前会话：关 = 直接答；低 / 中 / 高 = 让模型多想几步。改完下一轮生效。",
+  );
+
+  const seg = document.createElement("div");
+  seg.className = "think-seg";
+  for (const optionLevel of levels) {
+    const option = document.createElement("button");
+    option.type = "button";
+    option.className = "think-opt";
+    option.dataset.level = optionLevel;
+    option.textContent = THINKING_LABELS[optionLevel];
+    option.setAttribute("aria-pressed", String(level === optionLevel));
+    option.addEventListener("click", () => void chooseCurrentThinking(optionLevel));
+    seg.append(option);
+  }
+  foot.append(label, seg);
+  return foot;
 }
 
 async function toggleModelMenu() {
@@ -312,6 +461,7 @@ async function toggleModelMenu() {
     updateModelPill();
     renderModelMenu(catalog);
     openPopover(el.modelMenu, el.modelPill);
+    scheduleThinkSpacerSync(el.modelMenu);
   } catch (error) {
     if (error.message !== "forbidden") toast("拿不到模型清单");
   } finally {
@@ -363,10 +513,11 @@ async function chooseModel(provider, modelId, levels, { keepOpen = false, menu =
   }
 }
 
-/** 当前模型行内换档：菜单不关，选中态就地刷新 */
+/** 当前模型换档：菜单不关，选中态就地刷新；pill 的悬停文案跟着改（别停在旧档位） */
 async function chooseCurrentThinking(level) {
   if (level === currentThinking()) return;
   await setThinkingLevel(level);
+  updateModelPill();
 }
 
-export { TIP_SHOW_DELAY_MS, chooseCurrentThinking, chooseModel, closeModelMenu, fetchModelCatalog, hideHoverTip, hoverTipState, menuProviders, modelFullLabel, modelLabel, normalizeModelRow, refreshModelPill, renderModelMenu, resolveMenuProvider, setModelPillLabel, showHoverTip, toggleModelMenu, updateModelPill };
+export { TIP_SHOW_DELAY_MS, adoptAllTitleTips, adoptTitleTip, chooseCurrentThinking, chooseModel, closeModelMenu, fetchModelCatalog, findCatalogModel, hideHoverTip, hoverTipState, menuProviders, modelFullLabel, modelLabel, normalizeModelRow, refreshModelPill, renderModelMenu, resolveMenuProvider, setModelPillLabel, showHoverTip, thinkingFoot, toggleModelMenu, updateModelPill, watchTitleAttribute };

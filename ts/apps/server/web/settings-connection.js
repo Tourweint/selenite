@@ -7,24 +7,71 @@
  * app.js 文末，各模块顶层只做声明、常量与事件监听注册。
  */
 
-import { connPhoneCount } from "./approval-pop.js";
+import { ago, connDeviceRows, connPhoneCount } from "./approval-pop.js";
+import { attr, esc } from "./markdown.js";
 import { request } from "./net.js";
 import { state } from "./state.js";
-import { KEY_ACTS } from "./theme.js";
-import { inShell, openConfirm, openModal, showAlert, toast } from "./ui-atoms.js";
+import { closeModal, inShell, openConfirm, openModal, showAlert, toast } from "./ui-atoms.js";
 
 
-/* ── 连接页链路图（2026-11-13）─────────────────────────────
-   「这台电脑 / 中继（VPS）/ 手机」三格 + 一行断点提示。数据两条：
-   /api/v1/relay/status（电脑→中继）与已配对设备数（手机）。 */
-let connRelay = { loaded: false, enabled: false, connected: false };
+/* ── 连接页链路图（2026-11-13，2026-11-14 重排为「电脑 → 中继 → 手机」三步）──
+   链路是单向的：中继是门牌，电脑先登记，手机才有码可扫。所以每一步都得有入口：
+   第一步缺失时，第二步的按钮**不准置灰**——置灰等于死路（用户 2026-11-14：
+   「我不应该在没连上的时候就输入地址吗」）。 */
+let connRelay = {
+  loaded: false,
+  configured: false,
+  connected: false,
+  relayUrl: "",
+  deviceName: "",
+  source: null,
+  peers: 0,
+  peersOnline: 0,
+  // 2026-11-14 稳定性补丁：断线诊断（后端 relay/status 直出）
+  reconnects: 0,
+  lastCloseCode: null,
+  lastCloseAt: null,
+  lastConnectedAt: null,
+  /** 同机另一个 harness 占着中继身份时，这里是它的 pid（后端 NS-02 直出） */
+  blockedByPid: null,
+};
+
+/**
+ * 断线时间的人话。不要用 `ago`（那边是"上次用过"的员工口吻），重连窗口通常几十秒，
+ * 秒级读数才有用——"12 秒前断开"能对上页面 10 秒轮询的跳动。
+ */
+function connAgo(at) {
+  if (!at) return "";
+  const diff = Date.now() - at;
+  if (diff < 60_000) return `${Math.max(1, Math.round(diff / 1000))} 秒前`;
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`;
+  return `${Math.floor(diff / 3_600_000)} 小时前`;
+}
+
+/** 中继关闭码 → 一句人话（不让用户对着 code=4409 猜） */
+function connCloseHint(code) {
+  switch (code) {
+    case 4409:
+      return "另一个同名连接在顶替——多半是重复启动了两个服务";
+    case 4401:
+      return "令牌被中继撤销了，需要重新接入";
+    case 4400:
+      return "协议版本不符，升级中继或本机";
+    case 1013:
+      return "中继过载主动断的，会自动回来";
+    case 1006:
+    case 1001:
+      return "连接被中间网络静默掐断（心跳已在维持）";
+    default:
+      return "";
+  }
+}
 
 async function loadRelayStatus() {
-  const node = document.getElementById("conn-relay");
-  const method = document.getElementById("relay-method-state");
-  const howto = document.getElementById("conn-howto");
-  const addButton = document.getElementById("relay-add-device");
-  if (!node) return;
+  // 2026-11-14 星形拓扑：状态不再写进某个链路图节点（那三个格子没了），
+  // 而是进 connRelay，由 paintConnStar / 各节自己读。
+  const star = document.getElementById("conn-star");
+  if (!star) return;
   let status = null;
   try {
     const response = await request("/api/v1/relay/status", { cache: "no-store" });
@@ -34,79 +81,393 @@ async function loadRelayStatus() {
   }
   connRelay = {
     loaded: status !== null,
-    enabled: status?.enabled === true,
+    configured: status?.configured === true,
     connected: status?.connected === true,
+    relayUrl: status?.relayUrl || "",
+    deviceName: status?.deviceName || "",
+    source: status?.source || null,
+    peers: connRelay.peers,
+    peersOnline: connRelay.peersOnline,
+    reconnects: Number(status?.reconnects) || 0,
+    lastCloseCode: status?.lastCloseCode ?? null,
+    lastCloseAt: status?.lastCloseAt ?? null,
+    lastConnectedAt: status?.lastConnectedAt ?? null,
+    blockedByPid: status?.blockedByPid ?? null,
   };
-  node.innerHTML = connRelay.loaded
-    ? `<i class="status-dot ${connRelay.connected ? "ok" : connRelay.enabled ? "warn" : "idle"}"></i>${
-        connRelay.connected ? "已连上" : connRelay.enabled ? "未连上" : "没开"
-      }`
-    : `<i class="status-dot warn"></i>读不到`;
-  if (method) {
-    method.textContent = connRelay.connected
-      ? "可以出加入码"
-      : connRelay.loaded
-        ? "先让电脑连上中继"
-        : "读不到中继状态";
-  }
-  if (howto) howto.hidden = connRelay.connected;
-  if (addButton) addButton.disabled = !connRelay.connected;
+
+  paintRelaySection();
+  paintNextStep();
   updateConnectionHint();
+  if (connRelay.connected) void loadRelayRoster();
 }
 
-/** 一行断点提示：先报电脑→中继，再报手机数量。 */
-function updateConnectionHint() {
-  const hint = document.getElementById("conn-hint");
-  if (!hint) return;
+/** 「中继」那一节：未接入 = 接入；已接入 = 地址 + 换地址/断开。 */
+function paintRelaySection() {
+  const hint = document.getElementById("relay-link-hint");
+  const button = document.getElementById("relay-link-btn");
+  const unlink = document.getElementById("relay-unlink-row");
+  if (hint) {
+    hint.textContent = connRelay.configured
+      ? `${connRelay.relayUrl || "地址未知"}${connRelay.deviceName ? ` · ${connRelay.deviceName}` : ""}`
+      : "电脑还没接入——填一次地址和主令牌，之后常年挂着";
+  }
+  if (button) button.textContent = connRelay.configured ? "换地址" : "接入";
+  if (unlink) unlink.hidden = !connRelay.configured || connRelay.source === "env";
+  paintConnStar();
+
+  // 2026-11-14 二次打磨：页面里不再重复"经过中继"这种解释——用户原话「经过中继我觉得就是没啥用了」。
+  // 手机上只留一个动作：添加手机。中继通不通由上面的星形中心和 conn-hint 一句话说清。
+  const addButton = document.getElementById("relay-add-device");
+  // 永不置灰：没到这一步时文案变「先接入中继」，点了直接开接入弹窗
+  if (addButton) {
+    addButton.textContent = connRelay.connected ? "添加手机" : "先接入中继";
+    addButton.disabled = false;
+  }
+}
+
+/**
+ * 星形拓扑（2026-11-14，2026-11-14 二次打磨）：中心是全页唯一要回答的问题——「这台电脑
+ * 有没有挂在中继上」；四周是本机和所有已知设备。它不是网状：设备之间没有直连通路，
+ * 线只从中心或本机发出。
+ *
+ * 视觉上的三条规矩（用户这一轮点名的）：
+ * ① 在线状态**不再在圆上飘一个小点**，改成圆本身：在线 = 淡强调色实心 + 强调描边，离线 = 素色。
+ * ② 名字下面跟一枚同色小点（点在前、名字在后），状态读起来是一句话，不是两个图形。
+ * ③ 容器窄的时候不再缩到看不清：SVG 有最小宽度，横向可滚；点一下放大到 1.4 倍，再点收回。
+ */
+function paintConnStar() {
+  const box = document.getElementById("conn-star");
+  if (!box) return;
   if (!connRelay.loaded) {
-    hint.textContent = "正在读取中继状态…";
+    box.innerHTML = "";
     return;
   }
-  if (!connRelay.enabled) {
-    hint.textContent = "电脑没开中继";
+
+  const selfName = connRelay.deviceName || "这台电脑";
+  const nodes = [
+    { name: selfName, initial: "本", self: true, online: true, relay: connRelay.connected, idle: false },
+    // 图只画「经中继的连接」（2026-11-15，用户："上面的图片改一改，只保留和中继连接的内容"）。
+    // 本地直连的设备、没登记而直连的凭据不再进这张图——它们仍在下面的「已连接的设备」里，
+    // 认领也在那里。图只回答一件事：中继这条通路现在长什么样，别把两条通路混在一张图上读。
+    ...(connDeviceRows || [])
+      .filter((row) => row.relayIds.length > 0)
+      .map((row) => ({
+        name: row.name,
+        initial: (row.name || "?").trim().slice(0, 1),
+        self: false,
+        online: row.online,
+        relay: true,
+        idle: row.lastSeenAt ? Date.now() - row.lastSeenAt > 7 * 86_400_000 : false,
+      })),
+  ];
+  const MAX = 8;
+  const shown = nodes.slice(0, MAX);
+  const hidden = nodes.length - shown.length;
+
+  const W = 360;
+  const H = 252;
+  const cx = 180;
+  const cy = 114;
+  const rx = 136;
+  const ry = 84;
+  // 本机固定在左侧（角度 π）；经中继的设备排在右侧、自上而下成一把「扇」。
+  // 本机与它们之间隔着一个中继圆，所以线只从圆心发出——不存在"本机直连设备"那条线了（2026-11-15）。
+  const angles = shown.map(() => Math.PI);
+  const relaySlots = shown
+    .map((node, index) => ({ node, index }))
+    .filter(({ node }) => !node.self);
+  relaySlots.forEach(({ index }, k) => {
+    angles[index] = Math.PI * 1.5 + ((k + 1) / (relaySlots.length + 1)) * Math.PI;
+  });
+  const pointAt = (angle) => ({ x: cx + Math.cos(angle) * rx, y: cy + Math.sin(angle) * ry });
+  const points = angles.map(pointAt);
+
+  const lines = [];
+  const marks = [];
+  const relayUp = connRelay.connected;
+  // 中继没连上时，登记在中继里的设备照样画一条线，但画成灰色虚线：
+  // 名册里有它、这条通路当前不通——比"凭空消失"诚实。
+  const hubStroke = relayUp
+    ? `stroke="var(--accent-line)" stroke-width="1.2"`
+    : `stroke="var(--divider)" stroke-width="1.2" stroke-dasharray="4 3"`;
+  const hubState = relayUp
+    ? "已连上"
+    : connRelay.blockedByPid
+      ? `pid ${connRelay.blockedByPid} 占用`
+      : connRelay.configured
+        ? "重连中"
+        : "未接入";
+
+  // 中心：中继
+  marks.push(
+    `<circle cx="${cx}" cy="${cy}" r="30" fill="${relayUp ? "var(--accent-soft)" : "var(--surface-low)"}" stroke="${
+      relayUp ? "var(--accent-line)" : "var(--divider)"
+    }" stroke-width="1"/>`,
+    `<text x="${cx}" y="${cy - 3}" text-anchor="middle" font-size="12.5" fill="var(--text)">中继</text>`,
+    `<text x="${cx}" y="${cy + 13}" text-anchor="middle" font-size="10" fill="var(--text-3)">${hubState}</text>`,
+  );
+
+  for (let index = 0; index < shown.length; index += 1) {
+    const node = shown[index];
+    const place = points[index];
+    if (node.self && node.relay) {
+      lines.push(`<line x1="${cx - 30}" y1="${cy}" x2="${place.x + 17}" y2="${place.y}" ${hubStroke}/>`);
+    }
+    if (!node.self && node.relay) {
+      lines.push(`<line x1="${cx}" y1="${cy}" x2="${place.x}" y2="${place.y}" ${hubStroke}/>`);
+    }
+    const short = node.name.length > 6 ? `${node.name.slice(0, 6)}…` : node.name;
+    // 名字下面：小点在前、名字在后，读起来是「● 书房主机」。
+    // 宽度要**按字符分别算**再整体居中：汉字约 10.5px，ASCII/数字约 5.6px。
+    // 只用"字数×半宽"估，中英混排（vivo手机）会把点推到很左、看着像飘着（用户 2026-11-14 报的就是这个）。
+    const nameWidth = [...short].reduce(
+      (width, char) => width + (char.codePointAt(0) > 0x2e80 || char === "…" ? 10.5 : 5.6),
+      0,
+    );
+    const DOT_SIZE = 4.8;
+    const DOT_GAP = 5.6;
+    const labelWidth = DOT_SIZE + DOT_GAP + nameWidth;
+    const labelLeft = place.x - labelWidth / 2;
+    const dotX = labelLeft + DOT_SIZE / 2;
+    const textX = labelLeft + DOT_SIZE + DOT_GAP;
+    const dotY = place.y + 29;
+    // 悬停说明走 data-tip（2026-11-14：解释性文字一律搬进浮签，图形上只留名字）
+    const tipParts = [node.name, node.self ? "本机" : ""];
+    if (node.relay) tipParts.push("经中继");
+    tipParts.push(node.online ? "在线" : "离线");
+    if (node.idle) tipParts.push("久未使用");
+    marks.push(
+      `<g data-tip="${attr(tipParts.filter(Boolean).join(" · "))}">` +
+        `<circle cx="${place.x}" cy="${place.y}" r="16" fill="${
+          node.online ? "var(--accent-soft)" : "var(--surface-low)"
+        }" stroke="${node.online ? "var(--accent-line)" : "var(--divider)"}" stroke-width="1"/>` +
+        `<text x="${place.x}" y="${place.y + 4}" text-anchor="middle" font-size="11" fill="${
+          node.online ? "var(--text)" : "var(--text-3)"
+        }">${esc(node.initial)}</text>` +
+        `<circle cx="${dotX}" cy="${dotY - 3.2}" r="${DOT_SIZE / 2}" fill="${
+          node.online ? "var(--ok)" : "var(--text-3)"
+        }"/>` +
+        `<text x="${textX}" y="${dotY}" text-anchor="start" font-size="10.5" fill="${
+          node.online && !node.idle ? "var(--text-2)" : "var(--text-3)"
+        }">${esc(short)}</text></g>`,
+    );
+  }
+
+  box.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="连接拓扑">${lines.join("")}${marks.join("")}${
+    hidden > 0
+      ? `<text x="${W - 12}" y="${H - 8}" text-anchor="end" font-size="10" fill="var(--text-3)">+${hidden} 台未画出</text>`
+      : ""
+  }</svg>`;
+}
+
+/** 链路图下面那一个「下一步」按钮：永远指向还没做的那一步。 */
+function paintNextStep() {
+  const box = document.getElementById("conn-next");
+  if (!box) return;
+  if (!connRelay.loaded) {
+    box.hidden = true;
+    return;
+  }
+  // 被同机另一个 harness 占着中继身份时，这一步不归本进程管（点「接入」只会拿到 409）：
+  // 收起主按钮，让上面那行提示去说"关掉多余的实例"。
+  if (connRelay.blockedByPid) {
+    box.hidden = true;
+    box.innerHTML = "";
+    return;
+  }
+  if (!connRelay.configured) {
+    box.hidden = false;
+    box.innerHTML = `<button class="btn-primary" type="button" id="conn-next-go">接入中继</button>`;
+    box.querySelector("#conn-next-go").addEventListener("click", () => openRelayLinkModal());
     return;
   }
   if (!connRelay.connected) {
-    hint.textContent = "电脑没连上中继";
+    box.hidden = false;
+    box.innerHTML = `<button class="ghost" type="button" id="conn-next-go">重新检测</button>`;
+    box.querySelector("#conn-next-go").addEventListener("click", () => void loadRelayStatus());
     return;
   }
-  hint.textContent = connPhoneCount ? `${connPhoneCount} 台手机已连` : "中继已连上，还没有手机加入";
+  if (!connRelay.peers) {
+    box.hidden = false;
+    box.innerHTML = `<button class="btn-primary" type="button" id="conn-next-go">添加手机</button>`;
+    box.querySelector("#conn-next-go").addEventListener("click", () => openAddDeviceModal());
+    return;
+  }
+  box.hidden = true;
+  box.innerHTML = "";
+}
+
+/** 一行断点提示：只在「这条通路现在不通/有问题」时出现（2026-11-15：连上之后不再铺说明文字）。 */
+function updateConnectionHint() {
+  const hint = document.getElementById("conn-hint");
+  if (!hint) return;
+  const say = (text) => {
+    hint.hidden = false;
+    hint.textContent = text;
+  };
+  if (!connRelay.loaded) {
+    say("正在读取中继状态…");
+    return;
+  }
+  if (connRelay.blockedByPid) {
+    // NS-02：同一台电脑上两个 harness 拿同一枚设备令牌连中继，会互相顶替（4409），
+    // 表现就是"时而连上时而连不上"。这里必须说清是谁占着，别让人去怀疑网络。
+    say(`本机已有一个 harness（pid ${connRelay.blockedByPid}）在代这台电脑连中继，本进程不再连——两个一起连会互相顶断。关掉多余的窗口/终端，再点「重启」只留一个。`);
+    return;
+  }
+  if (!connRelay.configured) {
+    say("电脑还没接入中继——下面「中继地址」一行填一次就行");
+    return;
+  }
+  if (!connRelay.connected) {
+    // 2026-11-14 稳定性补丁：重连不再只写一句"正在重连中继"——把次数、最近断开时间、
+    // 关闭码对应的人话都摆出来，用户看到的就是"掉了一下又回来"，而不是玄学。
+    const at = connRelay.lastCloseAt ? `，${connAgo(connRelay.lastCloseAt)}断开` : "";
+    const why = connCloseHint(connRelay.lastCloseCode);
+    say(`已接入 ${connRelay.relayUrl || "中继"}，正在自动重连（第 ${
+      connRelay.reconnects || 1
+    } 次${at}）${why ? `——${why}` : ""}`);
+    return;
+  }
+  // 中继已连上：图形本身就说明了一切，不再补"几台设备经中继接入"这类解释句。
+  hint.textContent = "";
+  hint.hidden = true;
+}
+
+/* ── 经中继的设备（2026-11-14 二次打磨：只数不列）────────────────────
+   以前这里会把中继名册单独列一遍，结果同一台 vivo 手机在「远程连接」和「已连接的设备」
+   各出现一次（用户原话：「远程连接底下显示的 vivo 手机也没啥用，应该放在已连接设备里头」）。
+   现在这里只回答两个数：几台经中继接入、几台在线；名单统一由「已连接的设备」出。 */
+async function loadRelayRoster() {
+  try {
+    const response = await request("/api/v1/relay/overview", { cache: "no-store" });
+    const data = await response.json();
+    const self = data?.selfDeviceId || "";
+    const devices = (data?.devices || []).filter((device) => device.id !== self);
+    connRelay.peers = devices.length;
+    connRelay.peersOnline = devices.filter((device) => device.online).length;
+  } catch {
+    // 读不到就保持上一次的结论，不把页面清成空白
+  }
+  paintConnStar();
+  updateConnectionHint();
+  paintNextStep();
 }
 
 async function loadPair() {
   const image = document.getElementById("pair-qr");
   const metaEl = document.getElementById("pair-meta");
+  const box = document.getElementById("pair-qr-box");
+  const button = document.getElementById("pair-refresh");
   if (!image) return;
   try {
     const response = await request("/api/v1/pair/qr", { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const data = await response.json();
     image.src = data.dataUrl;
-    image.hidden = false;
+    if (box) box.hidden = false;
+    // 一行式的按钮：第一次是"显示二维码"，出过码之后就是"换一个码"
+    if (button) button.textContent = "换一个码";
     // 原始 url 不再铺在页面上（2026-11-13：一长串没人念得出来），只留机器名与有效期
     if (metaEl) metaEl.textContent = `${data.machineName} · ${Math.round(data.expiresInSeconds / 60)} 分钟内有效`;
   } catch (error) {
     if (error.message === "forbidden") return;
-    if (metaEl) metaEl.textContent = "拿不到配对码，稍后再试";
+    if (metaEl) {
+      if (box) box.hidden = false;
+      metaEl.textContent = "拿不到配对码，稍后再试";
+    }
   }
 }
 
 /**
- * 「添加设备」（2026-11-11 批H H2）：经中继出一枚一次性加入码。
+ * 接入中继（2026-11-14，连接页第一步）：地址 + 主令牌 → 本机自己的设备令牌。
  *
- * 浏览器不直连中继——跨源没开 CORS，owner 令牌也绝不能下发客户端。
- * 这里调 harness 的 `/api/v1/relay/join-code`，由服务端代调中继并生成二维码。
- * 地址默认取 `RELAY_URL` 的对外形态，弹窗里可改（内网/域名对外形态不同）。
- * 手机加没加上不在弹窗里回显：扫完去「已连接的设备」看（同一页下面就是）。
+ * 这一步以前只存在于 `.env`，页面上只有一段教程；结果是"未连上"时用户无处可填，
+ * 出码按钮只能灰着。现在它是最靠前的一个动作，填完就地连上，不用重启。
  */
-function openAddDeviceModal() {
-  openModal("添加设备", (body) => {
+function openRelayLinkModal() {
+  openModal("接入中继", (body) => {
     body.innerHTML = `
       <div class="modal-field">
         <span>中继地址</span>
-        <input class="modal-input" id="relay-join-url" spellcheck="false" autocomplete="off"
-               placeholder="http://<中继地址>:<端口>" aria-label="中继地址" />
+        <input class="modal-input" id="relay-link-url" spellcheck="false" autocomplete="off"
+               placeholder="http://1.2.3.4:8084" aria-label="中继地址" />
       </div>
+      <div class="modal-field">
+        <span>主令牌</span>
+        <input class="modal-input" id="relay-link-token" type="password" autocomplete="off"
+               placeholder="VPS 上的 RELAY_OWNER_TOKEN" aria-label="主令牌" />
+      </div>
+      <div class="modal-field">
+        <span>这台电脑的名字</span>
+        <input class="modal-input" id="relay-link-name" spellcheck="false" autocomplete="off"
+               placeholder="不填就用电脑名" aria-label="设备名" />
+      </div>
+      <div class="modal-hint" id="relay-link-note">
+        主令牌只用来换这台电脑自己的凭据；存在本机，不再显示，也不进日志。
+      </div>
+      <div class="modal-actions">
+        <button class="modal-primary" type="button" id="relay-link-go">接入并连接</button>
+      </div>`;
+    const urlInput = body.querySelector("#relay-link-url");
+    const tokenInput = body.querySelector("#relay-link-token");
+    const nameInput = body.querySelector("#relay-link-name");
+    const note = body.querySelector("#relay-link-note");
+    const go = body.querySelector("#relay-link-go");
+    urlInput.value = connRelay.relayUrl || "";
+    nameInput.value = connRelay.deviceName || "";
+
+    const say = (text, bad = false) => {
+      note.textContent = text;
+      note.classList.toggle("is-error", bad);
+    };
+
+    const submit = async () => {
+      if (go.disabled) return;
+      const address = urlInput.value.trim();
+      const ownerToken = tokenInput.value.trim();
+      if (!address) return say("先填中继地址", true);
+      if (!ownerToken) return say("还缺主令牌：VPS 上的 RELAY_OWNER_TOKEN", true);
+      go.disabled = true;
+      say("正在接入…");
+      try {
+        const response = await request("/api/v1/relay/link", {
+          method: "POST",
+          body: JSON.stringify({ address, ownerToken, deviceName: nameInput.value.trim() }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          say(data.message || `接入失败：HTTP ${response.status}`, true);
+          return;
+        }
+        closeModal();
+        toast(data.connected ? `已接入中继 · ${data.deviceName}` : "已保存接入信息，正在等待连上");
+        void loadRelayStatus();
+      } catch (error) {
+        if (error.message !== "forbidden") say(`接入失败：${error.message}`, true);
+      } finally {
+        go.disabled = false;
+      }
+    };
+
+    go.addEventListener("click", () => void submit());
+    tokenInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") void submit();
+    });
+  });
+}
+
+/**
+ * 「添加手机」：经中继出一枚一次性加入码。
+ *
+ * 浏览器不直连中继——跨源没开 CORS，owner 令牌也绝不能下发客户端。
+ * 这里调 harness 的 `/api/v1/relay/join-code`，由服务端代调中继并生成二维码。
+ * **地址不放在弹窗顶上**（2026-11-14 挪走）：它填的是"手机该往哪连"，不是"电脑该往哪连"，
+ * 放在这里只会让人以为添加设备=输地址。只在"手机连不上"时展开改。
+ */
+function openAddDeviceModal() {
+  openModal("添加手机", (body) => {
+    body.innerHTML = `
       <div class="relay-join">
         <img class="relay-join-qr" id="relay-join-qr" alt="加入二维码" hidden />
         <div class="relay-join-side">
@@ -115,10 +476,18 @@ function openAddDeviceModal() {
           <div class="relay-join-meta" id="relay-join-meta"></div>
         </div>
       </div>
-      <div class="modal-hint" id="relay-join-hint">手机 App 扫上面的码即可加入；加入码只能用一次。</div>
+      <div class="modal-hint" id="relay-join-hint">手机 App 扫上面的码即可加入；加入码只能用一次。扫完在下面「已连接的设备」里能看到它，标明「远程连接（经中继）」。</div>
       <div class="modal-actions">
         <button class="modal-primary" type="button" id="relay-join-refresh">换新码</button>
-      </div>`;
+      </div>
+      <details class="relay-adv">
+        <summary>手机连不上？改对外地址</summary>
+        <div class="modal-field">
+          <span>手机要访问的中继地址</span>
+          <input class="modal-input" id="relay-join-url" spellcheck="false" autocomplete="off"
+                 placeholder="http://<中继地址>:<端口>" aria-label="中继对外地址" />
+        </div>
+      </details>`;
     const urlInput = body.querySelector("#relay-join-url");
     const codeEl = body.querySelector("#relay-join-code");
     const qrEl = body.querySelector("#relay-join-qr");
@@ -147,8 +516,10 @@ function openAddDeviceModal() {
       clearInterval(timer);
       paintLeft();
       timer = setInterval(paintLeft, 1000);
-      hintEl.textContent = "手机 App 扫上面的码即可加入；加入码只能用一次。";
+      hintEl.textContent = "手机 App 扫上面的码即可加入；加入码只能用一次。扫完在下面「已连接的设备」里能看到它，标明「远程连接（经中继）」。";
       hintEl.classList.remove("is-error");
+      // 扫完就能在名册里看见（10 秒轮询，不用手动刷）
+      setTimeout(() => void loadRelayRoster(), 8000);
     };
 
     const load = async () => {
@@ -181,12 +552,6 @@ function openAddDeviceModal() {
     refresh.addEventListener("click", () => void load());
     void load();
   });
-}
-
-/** 工具活动可以整体隐掉（只看回答的那种用法） */
-function applyActPref() {
-  document.documentElement.dataset.acts =
-    localStorage.getItem(KEY_ACTS) === "0" ? "0" : "1";
 }
 
 /* ── 运行时起停（2026-11-07）────────────────────────────────
@@ -377,4 +742,28 @@ function loadServiceInfo() {
   node.textContent = state.token ? "已配置令牌" : "本机无需配置";
 }
 
-export { RUNTIME_LABELS, applyActPref, connRelay, initAutostartRow, initRuntimeCard, loadPair, loadRelayStatus, loadServiceInfo, openAddDeviceModal, paintRuntime, shellCall, showRuntimeCurtain, startRuntimeFromUi, updateConnectionHint };
+/** 断开中继（从页面接入的那份）：停客户端 + 删本地文件。`.env` 来源的由服务端拒绝。 */
+async function unlinkRelay() {
+  const ok = await openConfirm({
+    title: "断开中继",
+    message: "断开这台电脑与中继的连接？",
+    detail: "断掉之后手机就连不到这台电脑；重新接入只需再填一次地址和主令牌。",
+    confirmText: "断开",
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    const response = await request("/api/v1/relay/unlink", { method: "POST" });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      showAlert("没断成", data.message || `HTTP ${response.status}`);
+      return;
+    }
+    toast("已断开中继");
+    void loadRelayStatus();
+  } catch (error) {
+    if (error.message !== "forbidden") showAlert("没断成", error.message);
+  }
+}
+
+export { RUNTIME_LABELS, connRelay, paintConnStar, initAutostartRow, initRuntimeCard, loadPair, loadRelayRoster, loadRelayStatus, loadServiceInfo, openAddDeviceModal, openRelayLinkModal, paintNextStep, paintRelaySection, paintRuntime, shellCall, showRuntimeCurtain, startRuntimeFromUi, unlinkRelay, updateConnectionHint };

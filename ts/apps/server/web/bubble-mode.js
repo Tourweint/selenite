@@ -54,6 +54,16 @@ function applyState(state) {
   }
 }
 
+/** 把滑杆的"已填充"比例写给样式（`--bubble-p`）：轨道两头分别是强调色和中性轨道色。 */
+function syncFill(range) {
+  if (!range) return;
+  const min = Number(range.min);
+  const max = Number(range.max);
+  const value = Number(range.value);
+  const pct = max > min ? ((value - min) / (max - min)) * 100 : 0;
+  range.style.setProperty("--bubble-p", `${Math.min(100, Math.max(0, pct))}%`);
+}
+
 function sectionHtml(state) {
   return `<section class="set-sec" data-bubble-sec>
   <h2 class="set-sec-title">回答</h2>
@@ -100,6 +110,7 @@ function mountSection() {
   const sw = section.querySelector("[data-bubble-switch]");
   const range = section.querySelector("[data-bubble-range]");
   const value = section.querySelector("[data-bubble-val]");
+  syncFill(range);
 
   sw?.addEventListener("click", () => {
     const next = !readState().on;
@@ -115,6 +126,7 @@ function mountSection() {
     const now = readState();
     now.width = clampWidth(range.value);
     if (value) value.textContent = `${now.width}%`;
+    syncFill(range);
     applyState(now);
   });
   // 松手才写盘：拖动过程中不反复写 localStorage

@@ -20,20 +20,21 @@ const el = {
   // 2026-11-07 侧栏统一批：四个分区共用一套折叠头（.side-sec），
   // 收起态各存一份 localStorage；旧 id（recents/new-chat/side-proj/proj-pill）已从
   // HTML 移除，这里一并换掉——留着 null 会在注册监听时炸断整个启动流程。
-  // 分区头 = 整行按钮（点它就收起/展开，2026-11-07 四改去掉了箭头）＋ 行尾一个 ＋。
+  // 分区头 = 整行按钮（点它就收起/展开，2026-11-07 四改去掉了箭头）＋ 行尾一颗 ⋯
+  // （2026-11-14：原来是 ＋，四处并排一列加号；现在统一收进菜单，见 sec-menu.js）。
   secChatsToggle: document.getElementById("sec-chats-toggle"),
   secProjectsToggle: document.getElementById("sec-projects-toggle"),
   secPartnersToggle: document.getElementById("sec-partners-toggle"),
-  secChatsAdd: document.getElementById("sec-chats-add"),
+  secChatsMore: document.getElementById("sec-chats-more"),
   secProjectsName: document.getElementById("sec-projects-name"),
-  secProjectsAdd: document.getElementById("sec-projects-add"),
+  secProjectsMore: document.getElementById("sec-projects-more"),
   projList: document.getElementById("proj-list"),
   secTasksAll: document.getElementById("sec-tasks-all"),
   tasksMini: document.getElementById("tasks-mini"),
-  secGroupsAdd: document.getElementById("sec-groups-add"),
+  secGroupsMore: document.getElementById("sec-groups-more"),
   secGroupsAll: document.getElementById("sec-groups-all"),
   partnersBadge: document.getElementById("partners-badge"),
-  partnerAddSide: document.getElementById("partner-add-side"),
+  secPartnersMore: document.getElementById("sec-partners-more"),
   partnerRoster: document.getElementById("partner-roster"),
   settingsNav: document.getElementById("settings-nav"),
   projectMenu: document.getElementById("proj-menu"),
@@ -43,6 +44,10 @@ const el = {
   railTopicsMenu: document.getElementById("rail-topics-menu"),
   railChiefMenu: document.getElementById("rail-chief-menu"),
   title: document.getElementById("title"),
+  // 标题栏的返回 / 前进（2026-11-14）：栈与显隐规则在 nav-history.js
+  titlebarNav: document.getElementById("titlebar-nav"),
+  navBack: document.getElementById("nav-back"),
+  navForward: document.getElementById("nav-forward"),
   chatHeadAvatar: document.getElementById("chat-head-avatar"),
   thread: document.getElementById("thread"),
   empty: document.getElementById("empty"),
@@ -87,7 +92,6 @@ const el = {
   searchResults: document.getElementById("search-results"),
   searchTitleSub: document.getElementById("search-title-sub"),
   searchScroll: document.getElementById("search-scroll"),
-  searchEntry: document.getElementById("sec-chats-search"),
   groupsBack: document.getElementById("groups-back"),
   groupsState: document.getElementById("groups-state"),
   groupsBody: document.getElementById("groups-body"),

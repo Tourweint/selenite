@@ -240,7 +240,7 @@ function archiveChatRowMarkup(chat) {
     <div class="archive-row-actions">
       <button class="archive-act is-danger" type="button" data-archive-delete="${id}"
               title="永久删除（不可恢复）" aria-label="永久删除会话">${ARCHIVE_ICON_TRASH}</button>
-      <button class="ghost archive-restore-btn" type="button" data-archive-restore="${id}"
+      <button class="btn-primary is-quiet" type="button" data-archive-restore="${id}"
               title="恢复到列表">恢复</button>
     </div>
   </div>`;

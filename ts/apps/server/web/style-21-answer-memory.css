@@ -35,9 +35,51 @@
 /* 脚注（复制 / 用时）贴着气泡内文字的左沿，而不是气泡外框的左沿 */
 [data-answer-bubble="1"] .msg.assistant .msg-foot { margin-left: 14px; }
 
-/* 外观页「回答」那节的宽度滑杆：原生 range + accent-color，不另造控件 */
+/* 外观页「回答」那节的宽度滑杆（2026-11-14 自绘轨道）。
+   原先用原生 range + accent-color：开关一开（disabled 撤掉）轨道就露出引擎自带的深色底，
+   亮色主题下成了一条黑杠，暗色主题下又和卡片底几乎同色。现在轨道与滑块都用主题 token 自己画：
+   左边已填的一截是强调色，右边没填的是中性轨道色——两截都不再交给引擎。
+   `--bubble-p`（0%–100%）由 bubble-mode.js 按当前值写进来，伪元素继承得到它。 */
 .bubble-range-wrap { display: flex; align-items: center; gap: 10px; }
-.bubble-range { width: 128px; accent-color: var(--accent); cursor: pointer; }
+.bubble-range {
+  -webkit-appearance: none; appearance: none;
+  width: 128px; height: 18px;
+  background: transparent; cursor: pointer;
+  --bubble-p: 50%;
+  accent-color: var(--accent); /* 老引擎不认伪元素时的兜底 */
+}
+.bubble-range::-webkit-slider-runnable-track {
+  height: 4px; border-radius: var(--r-full);
+  background: linear-gradient(
+    to right,
+    var(--accent) 0,
+    var(--accent) var(--bubble-p),
+    var(--outline) var(--bubble-p),
+    var(--outline) 100%
+  );
+}
+.bubble-range::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  box-sizing: border-box;
+  width: 13px; height: 13px; margin-top: -4.5px;
+  border: 0; border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .18);
+}
+.bubble-range::-moz-range-track {
+  height: 4px; border-radius: var(--r-full);
+  background: linear-gradient(
+    to right,
+    var(--accent) 0,
+    var(--accent) var(--bubble-p),
+    var(--outline) var(--bubble-p),
+    var(--outline) 100%
+  );
+}
+.bubble-range::-moz-range-thumb {
+  box-sizing: border-box; width: 13px; height: 13px;
+  border: 0; border-radius: 50%; background: var(--accent);
+}
 .bubble-range:disabled { opacity: .45; cursor: default; }
 .bubble-range-val {
   min-width: 34px;
@@ -167,7 +209,7 @@
 }
 .mem-a-group.open .mem-a-chev { transform: rotate(90deg); }
 .mem-a-gtitle { font-size: 13px; font-weight: 600; }
-.mem-a-gtitle[data-tip] { cursor: help; }
+/* 记忆组头的光标不跟 data-tip 变（2026-11-14 统一） */
 .mem-a-gcount {
   padding: 1px 7px; border-radius: var(--r-full);
   background: var(--bg); color: var(--text-3);
@@ -175,6 +217,47 @@
 }
 .mem-a-ghint { font-size: 11.5px; color: var(--text-3); }
 .mem-a-gbody { background: var(--card); }
+
+/* 工作履历：独立一条折叠，和记忆分组同高度；只读，没有删除 / 忽略动作。 */
+.mem-a-work {
+  margin-top: 5px; border-radius: var(--r-md);
+  background: var(--card); overflow: hidden;
+}
+.mem-a-work[hidden] { display: none; }
+.mem-a-work > summary {
+  width: 100%; height: 43px; padding: 0 13px;
+  display: flex; align-items: center; gap: 9px;
+  list-style: none; cursor: pointer;
+  border-radius: var(--r-md);
+}
+.mem-a-work > summary::-webkit-details-marker { display: none; }
+.mem-a-work > summary:hover { background: var(--surface-low); }
+.mem-a-work[open] > summary {
+  background: var(--surface-low);
+  border-radius: var(--r-md) var(--r-md) 0 0;
+}
+.mem-a-work-chev { transition: transform .18s var(--ease); }
+.mem-a-work[open] .mem-a-work-chev { transform: rotate(90deg); }
+.mem-a-work-body { border-top: 1px solid var(--divider); }
+.mem-a-work-row {
+  display: flex; align-items: flex-start; gap: 12px;
+  padding: 9px 14px;
+}
+.mem-a-work-row + .mem-a-work-row { border-top: 1px solid var(--divider); }
+.mem-a-work-date {
+  flex: none; width: 48px; font-size: 10.8px; color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.mem-a-work-text {
+  display: block;
+  font-size: 12.5px; line-height: 1.55; color: var(--text);
+  overflow-wrap: anywhere;
+}
+.mem-a-work-main { min-width: 0; flex: 1 1 auto; display: flex; flex-direction: column; gap: 1px; }
+.mem-a-work-meta {
+  font-size: 11px; line-height: 1.45; color: var(--text-3);
+  overflow-wrap: anywhere;
+}
 
 .mem-a-item {
   display: flex; align-items: flex-start; gap: 14px;
@@ -242,3 +325,59 @@
     border-left: 0; border-top: 1px solid var(--divider); padding-top: 12px;
   }
 }
+
+/* 2026-11-14 一排人：我的记忆在前，各执事在后，各自带条数。多了横向滑，不换行。 */
+.mem-a-people {
+  display: flex; flex-wrap: nowrap; gap: 6px; margin: 0 0 14px;
+  overflow-x: auto; scrollbar-width: none;
+}
+.mem-a-people::-webkit-scrollbar { display: none; }
+.mem-a-person {
+  display: inline-flex; align-items: center; gap: 7px; flex: none; white-space: nowrap;
+  padding: 6px 12px; border: 1px solid transparent; border-radius: var(--r-full);
+  background: var(--surface-low); color: var(--text-2);
+  font: inherit; font-size: 12.5px; line-height: 1.4; cursor: pointer;
+}
+.mem-a-person b {
+  color: var(--text-3); font-size: 11.5px; font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.mem-a-person:hover { color: var(--text); }
+.mem-a-person.on {
+  background: var(--accent-soft); border-color: var(--accent-line); color: var(--text);
+}
+.mem-a-person.on b { color: var(--text); }
+.mem-a-person-tag {
+  padding: 0 5px; border-radius: var(--r-full);
+  background: var(--surface); color: var(--text-3); font-size: 10px; line-height: 1.7;
+}
+
+/* 全部整理时，每条建议标"来自谁" */
+.mem-prop-scope { margin-bottom: 6px; color: var(--text-3); font-size: 11px; }
+
+/* 整理前的小框：选我的 / 某个同事 / 全部 */
+.mem-pick { display: flex; flex-direction: column; }
+.mem-pick-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 11px 4px; border-bottom: 1px solid var(--divider); cursor: pointer;
+}
+.mem-pick-row:last-of-type { border-bottom: 0; }
+.mem-pick-row input { accent-color: var(--accent); }
+.mem-pick-name { flex: 1 1 auto; color: var(--text); font-size: 13px; }
+.mem-pick-row b {
+  color: var(--text-3); font-size: 12px; font-variant-numeric: tabular-nums;
+}
+
+/* 导入弹窗（2026-11-15）：本机来源行 + 文件行，比 mem-pick-row 多一层结果行，无 pointer */
+.mem-import-row {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 11px 4px; border-bottom: 1px solid var(--divider);
+}
+.mem-import-row:last-of-type { border-bottom: 0; }
+.mem-import-info { flex: 1 1 auto; min-width: 0; }
+.mem-import-info .set-hint { margin-top: 2px; }
+.mem-import-row b {
+  color: var(--text-3); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.mem-import-row [data-import-result] { flex: 1 0 100%; font-size: 12px; color: var(--text-3); }
+.mem-import-row [data-import-result]:empty { display: none; }

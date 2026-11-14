@@ -17,6 +17,7 @@ import { GROUP_MEMBER_MAX, GROUP_MEMBER_MIN } from "./groups-thread.js";
 import { loadTopicsSidebar, openGroupChat } from "./groups-topics.js";
 import { request } from "./net.js";
 import { go, groupRouteId } from "./route.js";
+import { openSecMenu } from "./sec-menu.js";
 import { sectionClosed } from "./shell.js";
 import { openConfirm, toast } from "./ui-atoms.js";
 
@@ -387,9 +388,18 @@ el.groupAtBtn?.addEventListener("click", () => {
 // 同一元素上两个 toggleSection 会互相抵消（点一下收起、紧接着又展开），
 // 表现成"群组点了没反应、也没有动画"（2026-11-07 实测踩到）。
 // 进整页的入口都挂在分区体内的链接行 / 群行上。
-el.secGroupsAdd?.addEventListener("click", () => {
-  go("groups");
-  void openCreateGroupModal();
+// 群组 ⋯（2026-11-14 由 ＋ 改）：菜单只有「新建群组」，点开先进群组页再建，
+// 与旧按钮同一路径；群组未启用时整颗按钮 disabled（见 groups-base 的可用性同步）。
+el.secGroupsMore?.addEventListener("click", () => {
+  openSecMenu(el.secGroupsMore, [
+    {
+      label: "新建群组",
+      run: () => {
+        go("groups");
+        void openCreateGroupModal();
+      },
+    },
+  ]);
 });
 /* 「所有群聊」：分区底部那一行（2026-11-07 用户口径「放在群组展开之后的底下，
    不要放在返回之后」）。它只负责去列表态；群会话里点它同样落到 #/groups，

@@ -120,6 +120,15 @@
   --chat-hairline: color-mix(in srgb, var(--text) 9%, transparent);
   --chat-inset: color-mix(in srgb, var(--text) 4%, transparent);
 
+  /* 上下文构成条的分段色（2026-11-14，学 ZCode 的单色阶）：只从一个强调色向卡底
+     混，深浅按占比排序，不新造第二种语义色。 */
+  --ctx-seg-1: color-mix(in srgb, var(--accent) 92%, var(--card));
+  --ctx-seg-2: color-mix(in srgb, var(--accent) 74%, var(--card));
+  --ctx-seg-3: color-mix(in srgb, var(--accent) 56%, var(--card));
+  --ctx-seg-4: color-mix(in srgb, var(--accent) 40%, var(--card));
+  --ctx-seg-5: color-mix(in srgb, var(--accent) 26%, var(--card));
+  --ctx-seg-6: color-mix(in srgb, var(--accent) 16%, var(--card));
+
   /* 主题色的派生档：切主题色时这些会跟着走，不是只换按钮底色 */
   --accent-soft: color-mix(in srgb, var(--accent) 13%, var(--bg));
   --accent-line: color-mix(in srgb, var(--accent) 32%, transparent);
@@ -301,6 +310,63 @@ html[data-theme="black"] {
   color-scheme: dark;
 }
 
+/* ── Celadon：青瓷（2026-11-14 增第五套：淡青瓷纸 + 墨绿字，冷调低饱和） ──
+   与 paper 同一族"浅底纸"，但底子是绿的、字压得更深；强调色仍用靛蓝，
+   所以换到这套只是"换了张纸"，不换整套系统的颜色语言。 */
+html[data-theme="celadon"] {
+  --bg: #f1f5f1;
+  --surface: #f1f5f1;
+  --surface-low: #e8eee8;
+  --card: #ebf1ea;
+  --card-high: #e0e7df;
+  --text: #1e2a25;
+  --text-2: #4c5b53;
+  --text-3: #8b9a90;
+  --outline: #c2cec3;
+  --divider: rgba(30, 42, 37, 0.12);
+
+  /* accent 三档：靛蓝原色在青纸上够对比；容器色改成绿灰，免得整块发蓝 */
+  --c-primary: #3e4a8c;
+  --c-on-primary: #ffffff;
+  --c-primary-container: #dfe7e1;
+  --c-on-primary-container: #1c2b24;
+  --c-secondary: #b89b6e;
+  --c-on-secondary: #ffffff;
+  --c-secondary-container: #eee6d5;
+  --c-on-secondary-container: #42351f;
+  --c-tertiary: #e0a84a;
+  --c-on-tertiary: #ffffff;
+  --c-tertiary-container: #f6ecd2;
+  --c-on-tertiary-container: #55400f;
+  --c-error: #b3564d;
+
+  --code-k: #3e4a8c;
+  --code-s: #8a6d3b;
+  --code-c: #8b9a90;
+  --code-n: #a4761f;
+  --code-a: #5b6b9e;
+
+  --card-border: rgba(30, 42, 37, 0.09);
+  --card-glow: none;
+  --shadow: 0 1px 2px rgba(30, 42, 37, 0.06);
+  --shadow-menu: 0 4px 16px rgba(30, 42, 37, 0.14);
+  --warn: #b07d2b;
+  --ok: #1f9d4d;
+  --composer-pill-bg: rgba(30, 42, 37, 0.06);
+  --composer-border: rgba(30, 42, 37, 0.16);
+
+  --backdrop: #e7eee7;
+  --composer-shadow: 0 10px 28px rgba(30, 42, 37, 0.10);
+  --modal-mask: rgba(20, 28, 24, 0.6);
+
+  /* 对话区中性面：浅底同样用墨色压层 */
+  --chat-bubble: color-mix(in srgb, var(--text) 5%, transparent);
+  --chat-hairline: color-mix(in srgb, var(--text) 9%, transparent);
+  --chat-inset: color-mix(in srgb, var(--text) 4%, transparent);
+
+  color-scheme: light;
+}
+
 /* ── 主题色三选：都来自色板，不新造颜色 ── */
 :root,
 html[data-accent="indigo"] {
@@ -322,6 +388,50 @@ html[data-accent="amber"] {
   --on-accent-container: var(--c-on-tertiary-container);
 }
 
+/*
+ * ── 后加的七档主题色（2026-11-14：用户要"十个左右，或者让自己选"）──
+ * 前 3 档仍从 --c-* 取（手机端色板原色，视觉一个字节都不动）；这 7 档没有对应的
+ * --c-* 槽位，所以直接给成对的四个值：浅底一档（:root 生效），夜主题一档
+ * （只在 indigo / black 两个暗主题下覆盖）。成对写死是为了让"深底换浅色、
+ * 浅底用原色"这条规则不用赌 color-mix 的观感。
+ * 自定义取色不走这里：由 theme.js 写 <html> 上的行内变量（见 applyAccent）。
+ */
+
+/* 玫瑰 */
+html[data-accent="rose"] { --accent: #b4556a; --on-accent: #ffffff; --accent-container: #f6e7ea; --on-accent-container: #3f1b23; }
+html[data-theme="indigo"][data-accent="rose"],
+html[data-theme="black"][data-accent="rose"] { --accent: #e0969f; --on-accent: #1b0e12; --accent-container: #3a2229; --on-accent-container: #fbe4e8; }
+
+/* 松绿 */
+html[data-accent="pine"] { --accent: #3f6f5a; --on-accent: #ffffff; --accent-container: #e2eee7; --on-accent-container: #163026; }
+html[data-theme="indigo"][data-accent="pine"],
+html[data-theme="black"][data-accent="pine"] { --accent: #86b8a0; --on-accent: #0d1a14; --accent-container: #1e3229; --on-accent-container: #dcf0e6; }
+
+/* 石青 */
+html[data-accent="azure"] { --accent: #2f6b8f; --on-accent: #ffffff; --accent-container: #deedf4; --on-accent-container: #0f2b3b; }
+html[data-theme="indigo"][data-accent="azure"],
+html[data-theme="black"][data-accent="azure"] { --accent: #8bb6cd; --on-accent: #0b1720; --accent-container: #1d2e38; --on-accent-container: #dff0f7; }
+
+/* 赭石 */
+html[data-accent="clay"] { --accent: #9c5a3c; --on-accent: #ffffff; --accent-container: #f3e5dd; --on-accent-container: #3a1d10; }
+html[data-theme="indigo"][data-accent="clay"],
+html[data-theme="black"][data-accent="clay"] { --accent: #d59a7d; --on-accent: #1a0f0a; --accent-container: #35241d; --on-accent-container: #f8e6dc; }
+
+/* 藤紫 */
+html[data-accent="lilac"] { --accent: #6b5b95; --on-accent: #ffffff; --accent-container: #ebe6f4; --on-accent-container: #241c3a; }
+html[data-theme="indigo"][data-accent="lilac"],
+html[data-theme="black"][data-accent="lilac"] { --accent: #b3a6d6; --on-accent: #16101f; --accent-container: #2a2438; --on-accent-container: #ece6f8; }
+
+/* 墨灰 */
+html[data-accent="slate"] { --accent: #4a505a; --on-accent: #ffffff; --accent-container: #e8eaed; --on-accent-container: #16191d; }
+html[data-theme="indigo"][data-accent="slate"],
+html[data-theme="black"][data-accent="slate"] { --accent: #b3bac3; --on-accent: #0e1013; --accent-container: #24272c; --on-accent-container: #eceef1; }
+
+/* 珊瑚 */
+html[data-accent="coral"] { --accent: #c06a4f; --on-accent: #ffffff; --accent-container: #f7e7e1; --on-accent-container: #432014; }
+html[data-theme="indigo"][data-accent="coral"],
+html[data-theme="black"][data-accent="coral"] { --accent: #e39c86; --on-accent: #1a0e09; --accent-container: #37241e; --on-accent-container: #fae7e0; }
+
 * { box-sizing: border-box; }
 
 html, body { height: 100%; margin: 0; }
@@ -340,6 +450,27 @@ body {
    */
   padding-top: var(--titlebar-h);
   transition: background-color .18s ease, color .18s ease;
+  /* 2026-11-14 鼠标形态统一：界面是“桌面应用”，标签/按钮/行不该被拖蓝选中。
+     默认光标也钉死箭头——否则同一段文字因为能不能选中，会在箭头与 I 形之间跳。
+     正文、输入框、显式 .selectable 在下面单独放开；群聊正文也保持可复制。 */
+  cursor: default;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* 可选中/可复制的范围（2026-11-14 第二轮收口）：只放输入控件、对话正文和显式 .selectable。
+   之前 `pre/code/kbd` 与 `.is-mono` 是全局放开，设置页里的路径 / 配置片段就跟着能拖蓝，
+   和旁边的标签不一致；现在阅读面统一不可选，要复制就由组件显式加 .selectable。
+   输入框必须保留，否则没法改字、选字。 */
+textarea,
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):not([type="file"]):not([type="button"]):not([type="submit"]):not([type="reset"]),
+[contenteditable="true"],
+#thread .msg .body,
+#group-thread .gmsg-body,
+.selectable {
+  cursor: text;
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 button, input, textarea, select { font: inherit; color: inherit; }

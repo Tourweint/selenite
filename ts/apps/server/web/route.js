@@ -132,7 +132,9 @@ function writeTasksHash(ticket = currentTicketId()) {
 
 /** 设置子页：#/settings/外观 → "appearance"；缺省落「外观」（同 cindy 的 ?tab=） */
 function currentSettingsPage() {
-  const part = location.hash.replace(/^#\/settings\/?/, "").split(/[?#]/)[0];
+  // 二级页也走同一条前缀：#/settings/partners/<id> 仍然算「人设」这个分区，
+  // 具体是谁由 currentPartnerProfileId 再从地址里取（2026-11-14 C 版）。
+  const part = location.hash.replace(/^#\/settings\/?/, "").split(/[?#]/)[0].split("/")[0];
   // 侧栏「全部会话 →」虽已下线（2026-11-07），旧书签 #/settings/sessions 仍要能落地：
   // 分区 id 是 chats，这里做一层别名。
   // 分区 id 其实是 chats；这里做一层别名，不改现有分区与路由体系。
@@ -141,6 +143,15 @@ function currentSettingsPage() {
   // 而不是掉回「外观」——老入口指过来的地方仍然是改头像的地方。
   if (part === "avatars") return "partners";
   return SETTINGS_SECTIONS.some((section) => section.id === part) ? part : "appearance";
+}
+
+/**
+ * #/settings/partners/<id> 里的执事 id；在列表页或别处时返回空串。
+ * 人设二级页（2026-11-14）用它判断「这是详情还是列表」，别处一律空。
+ */
+function currentPartnerProfileId() {
+  const match = /^#\/settings\/partners\/([A-Za-z0-9-]+)/.exec(location.hash);
+  return match ? match[1] : "";
 }
 
 /**
@@ -221,4 +232,4 @@ function applyRoute() {
   }
 }
 
-export { applyRoute, currentPartnerLineId, currentRailSection, currentRoute, currentSettingsPage, currentTicketId, go, groupRouteId, noteRouteChange, syncRailCurrent, syncSideRowsCurrent, tasksHash, tasksParams, writeTasksHash };
+export { applyRoute, currentPartnerLineId, currentPartnerProfileId, currentRailSection, currentRoute, currentSettingsPage, currentTicketId, go, groupRouteId, noteRouteChange, syncRailCurrent, syncSideRowsCurrent, tasksHash, tasksParams, writeTasksHash };

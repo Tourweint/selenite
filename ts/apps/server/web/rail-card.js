@@ -268,7 +268,6 @@ function renderRailChatsCard() {
     row.className = "side-item roster-row";
     row.tabIndex = 0;
     row.setAttribute("role", "button");
-    row.title = `${chatLabel(chat)} · ${chat.turns} 轮${chat.pinned ? " · 已置顶" : ""}`;
 
     const label = document.createElement("span");
     label.className = "roster-name";

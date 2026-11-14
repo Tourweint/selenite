@@ -9,15 +9,17 @@
 
 import { openConversation } from "./chat-open.js";
 import { attr, esc } from "./markdown.js";
-import { applyMemoryProposalA, clearMemoryProposalCard, dismissMemoryProposalA, forgetMemoryItem, loadMemoryExternal, loadMemoryGroup, loadMemoryReviewState, memoryItemMarkupA, runMemoryConsolidateA, supersedeMemoryItem } from "./memory-items.js";
+import { applyMemoryProposalA, clearMemoryProposalCard, dismissMemoryProposalA, forgetMemoryItem, loadMemoryExternal, loadMemoryGroup, loadMemoryReviewState, memoryItemMarkupA, openMemoryConsolidateDialog, supersedeMemoryItem } from "./memory-items.js";
 import { request } from "./net.js";
 import { currentSettingsPage } from "./route.js";
 import { sectionMarkup } from "./settings-atoms.js";
-import { MEMORY_KIND_LABEL, MEMORY_KIND_ORDER, MEMORY_KIND_TIPS, fillMemoryScopes } from "./settings-memory.js";
-import { closeModal, openModal, showAlert } from "./ui-atoms.js";
+import { MEMORY_KIND_LABEL, MEMORY_KIND_ORDER, MEMORY_KIND_TIPS } from "./settings-memory.js";
+import { closeModal, openConfirm, openModal, toast } from "./ui-atoms.js";
 
 /* ── 记忆页 A 版（2026-11-13）──────────────────────────────
  * 大字概览 + 分类计数片（唯一筛选）+ 搜索 + 分组折叠 + 可恢复的整理状态。
+ * 2026-11-14：工作履历从对话设置档案卡搬进来，作为记忆分组下方的一条独立折叠；
+ * 只对 partner scope 显示，不混进「N 条记忆」计数。
  * 旧版整套保持原样（*Legacy），`MEMORY_PAGE_A=false` 时回落。
  * 整理：?background=1 立即 202，页面轮询 /consolidate/state；
  * 切页回来能看见"正在整理 / 上次建议 / 失败原因"，同一 scope 在跑时不会重复调模型。 */
@@ -34,6 +36,10 @@ const memoryPageState = {
   total: 0,
   groups: new Map(),
   status: null,
+  /** 一排人：{ scope, label, count, kind }；null = 还没读回来。 */
+  people: null,
+  /** "全部整理"的聚合状态：{ running, total, done, label, proposals, errors }。 */
+  batch: null,
   canConsolidate: false,
   canImport: false,
   consolidateJob: false,
@@ -143,6 +149,7 @@ function memorySettingsMarkup() {
         <div class="mem-a-audit" id="mem-a-audit" hidden></div>
       </div>
     </div>
+    <div class="mem-a-people" id="mem-a-people" role="tablist" aria-label="选择记忆范围"></div>
     <div class="mem-a-run" id="mem-a-run" hidden>
       <span class="mem-a-spinner" aria-hidden="true"></span>
       <span id="mem-a-run-text">正在整理…</span>
@@ -162,11 +169,17 @@ function memorySettingsMarkup() {
         <input id="mem-a-search" type="search" spellcheck="false"
                placeholder="搜记忆内容，比如「猫」「汇报」「跑步」" aria-label="搜索记忆" />
       </label>
-      <select class="mem-select" id="mem-scope" aria-label="选择记忆范围">
-        <option value="global">总管（global）</option>
-      </select>
     </div>
     <div class="mem-a-groups" id="mem-a-groups"><div class="set-hint">读取中…</div></div>
+    <details class="mem-a-work" id="mem-a-work" hidden>
+      <summary class="mem-a-work-head">
+        <svg class="mem-a-chev mem-a-work-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+        <span class="mem-a-gtitle">工作履历</span>
+        <span class="mem-a-gcount" id="mem-a-work-count">0</span>
+        <span class="mem-a-ghint">派单结算 · 只读</span>
+      </summary>
+      <div class="mem-a-work-body" id="mem-a-work-list"></div>
+    </details>
     <div class="mem-a-external" id="mem-a-external" hidden>
       <div class="mem-a-external-main">
         <div class="mem-a-external-title">一生记忆库</div>
@@ -193,21 +206,19 @@ async function wireMemorySettings() {
   memoryPageState.total = 0;
   memoryPageState.groups.clear();
   memoryPageState.status = null;
+  memoryPageState.people = null;
+  memoryPageState.batch = null;
   memoryPageState.externalLines = [];
 
-  const scopeSelect = document.getElementById("mem-scope");
-  if (scopeSelect) {
-    await fillMemoryScopes(scopeSelect);
-    scopeSelect.value = memoryPageState.scope;
-    scopeSelect.addEventListener("change", () => {
-      memoryPageState.scope = scopeSelect.value || "global";
-      memoryPageState.groups.clear();
-      memoryPageState.status = null;
-      clearMemoryProposalCard();
-      void loadMemorySummary(gen);
-      void loadMemoryReviewState(gen);
-    });
-  }
+  document.getElementById("mem-a-people")?.addEventListener("click", (event) => {
+    const button = event.target.closest?.("[data-mem-scope]");
+    if (!button) return;
+    if (memoryPageState.batch?.running) {
+      toast("正在逐个整理，等它跑完再切");
+      return;
+    }
+    switchMemoryScope(button.getAttribute("data-mem-scope") || "global", gen);
+  });
 
   const search = document.getElementById("mem-a-search");
   let searchTimer = 0;
@@ -220,9 +231,9 @@ async function wireMemorySettings() {
     }, 250);
   });
 
-  document.getElementById("mem-import")?.addEventListener("click", openMemoryImportPlaceholder);
+  document.getElementById("mem-import")?.addEventListener("click", () => void openMemoryImportDialog(gen));
   document.getElementById("mem-consolidate")?.addEventListener("click", () => {
-    void runMemoryConsolidateA(gen);
+    void openMemoryConsolidateDialog(gen);
   });
 
   const chips = document.getElementById("mem-a-chips");
@@ -295,15 +306,280 @@ async function wireMemorySettings() {
   });
 
   await Promise.all([
+    loadMemoryPeople(gen),
     loadMemorySummary(gen),
+    loadMemoryWork(gen),
     loadMemoryReviewState(gen),
     loadMemoryExternal(gen),
   ]);
 }
 
-function openMemoryImportPlaceholder() {
-  // 导入先占位（2026-11-13 用户拍板）：现在没有统一的记忆格式，等格式定了再接。
-  showAlert("导入记忆", "这块先占个位：目前还没有统一的记忆格式，等格式定了再做。");
+/** 导入弹窗（2026-11-15 接上，方案 docs/设计方案/2026-11-15-记忆导入（接入别家AI的记忆）.md）：
+ *  本机来源一键导入 + 通用 JSON 文件导入。全部只增不改、重复跳过，条目都进「我的记忆」——
+ *  别家 AI 记的是用户本人的事，不该塞进某个执事名下。 */
+async function openMemoryImportDialog(gen) {
+  if (memoryPageState.batch?.running || memoryPageState.status?.running) {
+    toast("正在整理，等它跑完");
+    return;
+  }
+  openModal("导入记忆", (body) => {
+    body.innerHTML = `<div class="mem-pick"><p class="set-hint">正在看这台机器上有哪些记忆来源…</p></div>`;
+    void (async () => {
+      let sources = [];
+      try {
+        const response = await request("/api/v1/agent/memory/import/sources", { cache: "no-store" });
+        if (response.status === 404) {
+          body.innerHTML = `<div class="mem-pick"><p class="set-hint">来源扫描未启用（服务端 MEMORY_IMPORT_SOURCES=false）。</p><div class="modal-actions"><button class="ghost" type="button" data-modal-cancel>关闭</button></div></div>`;
+          wireImportDialogChrome(body);
+          return;
+        }
+        if (!response.ok) throw new Error(String(response.status));
+        sources = (await response.json().catch(() => ({})))?.sources || [];
+      } catch (error) {
+        if (error.message === "forbidden") return;
+        body.innerHTML = `<div class="mem-pick"><p class="set-hint">读取来源失败：${esc(error.message)}</p><div class="modal-actions"><button class="ghost" type="button" data-modal-cancel>关闭</button></div></div>`;
+        wireImportDialogChrome(body);
+        return;
+      }
+
+      const rows = sources
+        .map((source) => {
+          const found = Number(source.count) > 0;
+          return `<div class="mem-import-row" data-source="${attr(source.id)}">
+            <div class="mem-import-info">
+              <div class="mem-pick-name">${esc(source.name)}</div>
+              <div class="set-hint">${esc(source.note)}</div>
+            </div>
+            <b>${found ? `${source.count} 条` : "没检测到"}</b>
+            ${found ? `<button class="ghost mem-act" type="button" data-import-source>导入</button>` : ""}
+            <div data-import-result></div>
+          </div>`;
+        })
+        .join("");
+      body.innerHTML = `<div class="mem-pick">
+        <p class="set-hint">别家 AI 在这台机器上留下的记忆，一键并进「我的记忆」。只增不改，重复的自动跳过。</p>
+        ${rows || `<p class="set-hint">这台机器上没检测到可导入的来源。</p>`}
+        <div class="divider"></div>
+        <div class="mem-import-row" data-file-row>
+          <div class="mem-import-info">
+            <div class="mem-pick-name">从文件导入</div>
+            <div class="set-hint">ChatGPT / Claude 这类要手导的记忆，或自己整理的 JSON（数组或 {"items": [...]}）</div>
+          </div>
+          <button class="ghost mem-act" type="button" data-import-file>选文件…</button>
+          <div data-import-result></div>
+        </div>
+        <input type="file" accept=".json,application/json" hidden data-import-input>
+        <div class="modal-actions">
+          <button class="ghost" type="button" data-modal-cancel>关闭</button>
+        </div>
+      </div>`;
+      wireImportDialogChrome(body);
+      wireImportDialogActions(body, gen);
+    })();
+  });
+}
+
+/** 弹窗底部的关闭钮：内容渲染成败都要有。 */
+function wireImportDialogChrome(body) {
+  body.querySelector("[data-modal-cancel]")?.addEventListener("click", closeModal);
+}
+
+/** 来源行与文件行的动作。导完刷新当前列表；来源接口幂等（重复导只会全是跳过）。 */
+function wireImportDialogActions(body, gen) {
+  const fileInput = body.querySelector("[data-import-input]");
+  const resultLine = (row) => row?.querySelector("[data-import-result]");
+
+  fileInput?.addEventListener("change", async () => {
+    const row = body.querySelector("[data-file-row]");
+    const line = resultLine(row);
+    const file = fileInput.files?.[0];
+    fileInput.value = ""; // 允许连续选同一个文件
+    if (!file || !line) return;
+    let items = null;
+    try {
+      const parsed = JSON.parse(await file.text());
+      items = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.items) ? parsed.items : null;
+    } catch {
+      line.textContent = "这个文件不是合法 JSON";
+      return;
+    }
+    if (!items || items.length === 0) {
+      line.textContent = '文件里没有条目：要一个数组，或 {"items": [...]}';
+      return;
+    }
+    const ok = await openConfirm({
+      title: "导入记忆",
+      message: `把 ${items.length} 条记忆导入「我的记忆」？`,
+      detail: "只增不改，重复的会跳过。",
+      confirmText: "导入",
+    });
+    if (!ok) return;
+    line.textContent = "导入中…";
+    try {
+      const response = await request("/api/v1/agent/memory/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scope: "global", items }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (response.status === 404) {
+        line.textContent = "导入未启用（服务端 MEMORY_IMPORT=false）";
+        return;
+      }
+      if (!response.ok) throw new Error(data.message || String(response.status));
+      line.textContent = `新增 ${data.added} 条 / 跳过 ${data.skipped} 条（共 ${data.total} 条）`;
+      toast(`导入完成：新增 ${data.added} 条`);
+      void loadMemorySummary(gen);
+    } catch (error) {
+      if (error.message === "forbidden") return;
+      line.textContent = `失败：${error.message}`;
+    }
+  });
+
+  body.addEventListener("click", async (event) => {
+    const button = event.target.closest?.("[data-import-file]");
+    if (button) {
+      fileInput?.click();
+      return;
+    }
+    const sourceButton = event.target.closest?.("[data-import-source]");
+    if (!sourceButton) return;
+    const row = sourceButton.closest("[data-source]");
+    const id = row?.getAttribute("data-source") || "";
+    const line = resultLine(row);
+    sourceButton.disabled = true;
+    if (line) line.textContent = "导入中…";
+    try {
+      const response = await request(`/api/v1/agent/memory/import/sources/${encodeURIComponent(id)}`, {
+        method: "POST",
+      });
+      const data = await response.json().catch(() => ({}));
+      if (response.status === 404) {
+        if (line) line.textContent = "没检测到这个来源";
+        sourceButton.disabled = false;
+        return;
+      }
+      if (!response.ok) throw new Error(data.message || String(response.status));
+      if (line) line.textContent = `新增 ${data.added} 条 / 跳过 ${data.skipped} 条`;
+      toast(`导入完成：新增 ${data.added} 条`);
+      void loadMemorySummary(gen);
+    } catch (error) {
+      if (error.message === "forbidden") return;
+      if (line) line.textContent = `失败：${error.message}`;
+      sourceButton.disabled = false;
+    }
+  });
+}
+
+/** 一排人：一次请求拿全（我的 + 各在职执事 + 条数）。读不到就只剩"我的记忆"。 */
+async function loadMemoryPeople(gen) {
+  const box = document.getElementById("mem-a-people");
+  if (!box) return;
+  try {
+    const response = await request("/api/v1/agent/memory/scopes", { cache: "no-store" });
+    if (!memoryPageAlive(gen)) return;
+    if (response.status === 404) {
+      // 旧服务端没有 /memory/scopes（网页先于进程更新）：退回"执事列表 + 逐人计数"，
+      // 页面不至于只剩一行"我的记忆"。新服务端上线后这里不会再走到。
+      await loadMemoryPeopleFallback(gen);
+      return;
+    }
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.message || String(response.status));
+    const rows = Array.isArray(data.scopes) ? data.scopes : [];
+    memoryPageState.people = rows
+      .filter((row) => row && typeof row.scope === "string")
+      .map((row) => ({
+        scope: row.scope,
+        label: String(row.label || (row.scope === "global" ? "我的记忆" : "执事")),
+        count: Number(row.count) || 0,
+        kind: row.kind === "partner" ? "partner" : "mine",
+      }));
+    renderMemoryPeople();
+  } catch (error) {
+    if (!memoryPageAlive(gen) || error.message === "forbidden") return;
+    // 范围清单读不到不挡页面：先按"我的记忆"渲染，正文照常加载
+    memoryPageState.people = [];
+    renderMemoryPeople();
+  }
+}
+
+function renderMemoryPeople() {
+  const box = document.getElementById("mem-a-people");
+  if (!box) return;
+  const people = memoryPageState.people;
+  if (!people || people.length === 0) {
+    box.innerHTML = `<button class="mem-a-person on" type="button" data-mem-scope="global" role="tab" aria-selected="true">我的记忆</button>`;
+    return;
+  }
+  box.innerHTML = people
+    .map((person) => {
+      const on = person.scope === memoryPageState.scope;
+      return `<button class="mem-a-person ${on ? "on" : ""}" type="button"
+        data-mem-scope="${attr(person.scope)}" role="tab" aria-selected="${on}">
+        ${esc(person.label)}${person.kind === "partner" ? `<span class="mem-a-person-tag">同事</span>` : ""}<b>${person.count}</b>
+      </button>`;
+    })
+    .join("");
+}
+
+async function scopeCount(scope) {
+  const response = await request(
+    `/api/v1/agent/memory?scope=${encodeURIComponent(scope)}&limit=0&excludeKinds=work`,
+    { cache: "no-store" },
+  );
+  if (!response.ok) return 0;
+  const data = await response.json().catch(() => ({}));
+  const counts = data.counts && typeof data.counts === "object" ? data.counts : {};
+  return Number(counts.all ?? data.total) || 0;
+}
+
+/** 旧服务端兼容：用 /partners + 逐 scope 计数拼出同一份"一排人"。 */
+async function loadMemoryPeopleFallback(gen) {
+  const rows = [{ scope: "global", label: "我的记忆", count: 0, kind: "mine" }];
+  try {
+    const response = await request("/api/v1/partners", { cache: "no-store" });
+    if (response.ok) {
+      const data = await response.json().catch(() => ({}));
+      for (const partner of Array.isArray(data.partners) ? data.partners : []) {
+        if (!partner?.id || partner.id === "chief" || partner.status === "archived") continue;
+        rows.push({
+          scope: `partner:${partner.id}`,
+          label: String(partner.name || "执事"),
+          count: 0,
+          kind: "partner",
+        });
+      }
+    }
+  } catch (error) {
+    if (error.message === "forbidden") return;
+  }
+  for (const row of rows) {
+    if (!memoryPageAlive(gen)) return;
+    row.count = await scopeCount(row.scope);
+  }
+  memoryPageState.people = rows;
+  renderMemoryPeople();
+}
+
+/** 切人：清筛选、清分组、重拉概览与整理状态；全部整理进行中时由调用方拦住。 */
+function switchMemoryScope(scope, gen) {
+  if (!scope || scope === memoryPageState.scope) return;
+  memoryPageState.scope = scope;
+  memoryPageState.q = "";
+  memoryPageState.kind = "";
+  memoryPageState.groups.clear();
+  memoryPageState.status = null;
+  // 单人视图不背"全部整理"的旧汇总；正在跑时上面已经拦住，不会走到这里
+  if (memoryPageState.batch && !memoryPageState.batch.running) memoryPageState.batch = null;
+  const search = document.getElementById("mem-a-search");
+  if (search) search.value = "";
+  clearMemoryProposalCard();
+  renderMemoryPeople();
+  renderMemoryChips();
+  void loadMemorySummary(gen);
+  void loadMemoryWork(gen);
+  void loadMemoryReviewState(gen);
 }
 
 async function loadMemorySummary(gen) {
@@ -341,6 +617,14 @@ async function loadMemorySummary(gen) {
     memoryPageState.canImport = data.canImport === true;
     memoryPageState.consolidateJob = data.consolidateJob === true;
     totalEl.textContent = String(memoryPageState.counts.all);
+    // 搜索时计数是过滤后的，不能拿它覆盖"这个人一共有多少条"
+    if (!q) {
+      const person = memoryPageState.people?.find((item) => item.scope === scope);
+      if (person) {
+        person.count = memoryPageState.counts.all;
+        renderMemoryPeople();
+      }
+    }
     updateMemoryControls();
     renderMemoryChips();
     renderMemoryGroups(gen);
@@ -354,12 +638,71 @@ async function loadMemorySummary(gen) {
   }
 }
 
+async function loadMemoryWork(gen) {
+  const card = document.getElementById("mem-a-work");
+  const countEl = document.getElementById("mem-a-work-count");
+  const list = document.getElementById("mem-a-work-list");
+  if (!card || !countEl || !list) return;
+  const scope = memoryPageState.scope;
+  // work 只落在执事的 partner scope；「我的记忆」没有派单履历，不摆这一块。
+  if (!scope.startsWith("partner:")) {
+    card.hidden = true;
+    list.replaceChildren();
+    return;
+  }
+  card.hidden = false;
+  countEl.textContent = "…";
+  try {
+    const response = await request(
+      `/api/v1/agent/memory?scope=${encodeURIComponent(scope)}&kind=work&limit=200`,
+      { cache: "no-store" },
+    );
+    if (!memoryPageAlive(gen) || memoryPageState.scope !== scope) return;
+    if (response.status === 404) {
+      countEl.textContent = "—";
+      list.innerHTML = `<div class="set-hint">记忆未启用，看不到工作履历。</div>`;
+      return;
+    }
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.message || String(response.status));
+    const items = Array.isArray(data.items) ? data.items.slice() : [];
+    const total = Number(data.total ?? items.length) || 0;
+    countEl.textContent = String(total);
+    if (!items.length) {
+      list.innerHTML = `<div class="set-hint">还没有派单结算</div>`;
+      return;
+    }
+    items.sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+    list.innerHTML = items
+      .map((item) => {
+        const day = memoryShortDate(item.createdAt);
+        const raw = String(item.content || "").replace(/\s+/g, " ").trim();
+        const parts = raw.split("｜");
+        if (parts[0]?.startsWith("work:")) parts.shift();
+        const title = parts.shift() || raw || "（空）";
+        const meta = parts.join(" · ");
+        return `<div class="mem-a-work-row">
+          <span class="mem-a-work-date">${esc(day || "—")}</span>
+          <span class="mem-a-work-main">
+            <span class="mem-a-work-text">${esc(title)}</span>
+            ${meta ? `<span class="mem-a-work-meta">${esc(meta)}</span>` : ""}
+          </span>
+        </div>`;
+      })
+      .join("");
+  } catch (error) {
+    if (!memoryPageAlive(gen) || memoryPageState.scope !== scope || error.message === "forbidden") return;
+    countEl.textContent = "—";
+    list.innerHTML = `<div class="set-hint is-error">工作履历读不到：${esc(error.message)}</div>`;
+  }
+}
+
 function updateMemoryControls() {
   const consolidate = document.getElementById("mem-consolidate");
   const importButton = document.getElementById("mem-import");
   if (consolidate) consolidate.hidden = !memoryPageState.canConsolidate;
   if (importButton) importButton.hidden = !memoryPageState.canImport;
-  const running = memoryPageState.status?.running === true;
+  const running = memoryPageState.status?.running === true || memoryPageState.batch?.running === true;
   if (consolidate) {
     consolidate.disabled = running;
     consolidate.innerHTML = running
@@ -443,4 +786,4 @@ function renderMemoryGroupBody(kind) {
   body.innerHTML = memoryGroupBodyMarkup(memoryGroupOf(kind), kind);
 }
 
-export { MEMORY_A_DEFAULT_OPEN, MEMORY_A_PAGE_SIZE, loadMemorySummary, memoryElapsedSeconds, memoryGroupBodyMarkup, memoryGroupHint, memoryGroupOf, memoryPageAlive, memoryPageState, memorySettingsMarkup, memoryShortDate, memorySourceLabel, memoryStatusTime, openMemoryImportPlaceholder, renderMemoryChips, renderMemoryGroupBody, renderMemoryGroups, startMemoryPolling, stopMemoryPolling, updateMemoryControls, wireMemorySettings };
+export { MEMORY_A_DEFAULT_OPEN, MEMORY_A_PAGE_SIZE, loadMemoryPeople, loadMemorySummary, memoryElapsedSeconds, memoryGroupBodyMarkup, memoryGroupHint, memoryGroupOf, memoryPageAlive, memoryPageState, memorySettingsMarkup, memoryShortDate, memorySourceLabel, memoryStatusTime, openMemoryImportDialog, renderMemoryChips, renderMemoryGroupBody, renderMemoryGroups, renderMemoryPeople, startMemoryPolling, stopMemoryPolling, switchMemoryScope, updateMemoryControls, wireMemorySettings };

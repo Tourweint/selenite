@@ -170,7 +170,7 @@ async function mountChainEditor(host, { partnerId, chain, onSaved }) {
     if (!list.length) {
       const empty = document.createElement("div");
       empty.className = "cs-chain-empty";
-      empty.textContent = "还没有备选。主模型失败时直接报错，不会自动换。";
+      empty.textContent = "还没有备选";
       rowsBox.append(empty);
     } else {
       list.forEach((item, index) => rowsBox.append(chainRow(item, index)));

@@ -1,0 +1,469 @@
+/*
+ * 外观页（2026-11-14）：主题缩略卡 + 主题色 + 壁纸
+ *
+ * 主题那一段原来是四枚 52×34 的小方块 + 名字（style-08 里的 .theme-picker），
+ * 只能看出深浅、看不出材质差别；这里换成四张"缩略界面卡"：侧栏 + 两条气泡 + 一个强调点，
+ * 卡本身铺该主题的 card-high，所以四张卡读起来就是四张纸。
+ *
+ * 壁纸铺在 .main 的 ::before 上（position:absolute + z-index:-1）：
+ * .main 自己是一个 stacking context（position:relative + z-index:1），负层子元素
+ * 画在它背景之上、正文之下——正好是"换掉那张纸、不动气泡和卡片"。
+ * 不往 body / .app 上铺，是因为侧栏和标题栏该保持实色，界面才不糊成一层蒙版。
+ */
+
+/* ── 主题：四张缩略界面卡 ─────────────────────────────── */
+
+.theme-cards {
+  display: grid;
+  /* 五张一排撑满一行（2026-11-14 三改：用户说"这一行大概还能再放一个，放 5 个差不多"）。
+     卡宽 ~177、高 58，比例 3:1，比原来的 233×58 更像一张缩略图。 */
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+  /* 上下都放开：上离"主题"那行、下离分割线各留出空隙 */
+  margin: 12px 16px 18px;
+}
+
+.theme-card {
+  position: relative;
+  display: block;
+  padding: 6px;
+  border: 1px solid var(--tc-outline);
+  border-radius: var(--r-md);
+  background: var(--tc-card-high);
+  text-align: left;
+  transition: border-color .15s ease, box-shadow .15s ease, transform .12s ease;
+}
+.theme-card:hover { border-color: color-mix(in srgb, var(--tc-text) 34%, var(--tc-outline)); }
+.theme-card:active { transform: translateY(1px); }
+.theme-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.theme-card[aria-checked="true"] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+/* 缩略图：左 30% 侧栏垫底、右两条气泡、左下角一个强调点 */
+.theme-pv {
+  position: relative;
+  display: flex;
+  height: 58px;
+  overflow: hidden;
+  border: 1px solid var(--tc-divider);
+  border-radius: 6px;
+  background: var(--tc-bg);
+}
+.theme-pv-side {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 30%;
+  padding: 8px 6px;
+  border-right: 1px solid var(--tc-divider);
+  background: var(--tc-side);
+}
+.theme-pv-side i {
+  display: block;
+  height: 3px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--tc-text3) 75%, transparent);
+}
+.theme-pv-side i:nth-child(1) { width: 82%; background: var(--tc-accent); }
+.theme-pv-side i:nth-child(2) { width: 64%; }
+.theme-pv-side i:nth-child(3) { width: 72%; }
+.theme-pv-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 5px;
+  padding: 9px 7px;
+}
+.theme-pv-main i {
+  display: block;
+  height: 9px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--tc-text) 9%, transparent);
+}
+.theme-pv-main .pv-a { width: 66%; }
+.theme-pv-main .pv-b { width: 46%; align-self: flex-end; }
+.theme-pv-dot {
+  position: absolute;
+  left: calc(30% + 7px);
+  bottom: 6px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--tc-accent);
+}
+
+.theme-cap {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 7px 2px 1px;
+}
+.theme-cap b { font-size: 12.5px; font-weight: 600; color: var(--tc-text); }
+.theme-cap em { font-style: normal; font-size: 10.5px; color: var(--tc-text3); }
+
+.theme-card-check {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 2;
+  display: none;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 10px;
+  line-height: 17px;
+  text-align: center;
+  font-family: system-ui, sans-serif;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .10);
+}
+.theme-card[aria-checked="true"] .theme-card-check { display: block; }
+
+/* ── 主题色：三个点 + 当前那档的名字 ───────────────────── */
+
+.accent-row { display: flex; align-items: center; gap: 10px; }
+/* 色点从方块改成圆点：方块读起来像"按钮"，圆点才是"取色"；
+   选中态只加一圈强调色描边，不换填充（换填充会把颜色本身盖掉） */
+.accent-row .swatch { border-radius: var(--r-full); }
+.accent-row .swatch[aria-checked="true"] {
+  border-color: transparent;
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+/* 十档 + 自定义：一排要点，圆点从 26 收到 22 才排得开（间距也用 7） */
+.accent-row .swatches { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.accent-row .swatch { width: 22px; height: 22px; }
+/* 自定义取色：外圈虚线 + 内圈当前色，点了开系统色盘 */
+.accent-row .swatch-pick {
+  display: grid;
+  place-items: center;
+  padding: 0;
+  background: none;
+  border: 1px dashed color-mix(in srgb, var(--text) 42%, transparent);
+}
+.accent-row .swatch-pick i {
+  width: 10px;
+  height: 10px;
+  border-radius: var(--r-full);
+  display: block;
+}
+/* 真色盘藏在按钮底下：不能 display:none（点了不会弹），只能压成 0 尺寸 */
+.accent-row .accent-picker {
+  position: absolute;
+  width: 1px; height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+.accent-name {
+  min-width: 34px;
+  font-size: 11.5px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── 壁纸 ─────────────────────────────────────────────── */
+
+/* 主区那张纸的底：负层，画在 .main 背景之上、正文之下；inset 负值留给模糊的边料 */
+html[data-wallpaper] .main::before {
+  content: "";
+  position: absolute;
+  inset: -24px;
+  z-index: -1;
+  background: var(--wallpaper-image, none) center / cover no-repeat;
+  opacity: var(--wallpaper-alpha, .38);
+  filter: blur(var(--wallpaper-blur, 0px));
+  pointer-events: none;
+}
+
+/* 内置「宣纸纹」：用当前主题的墨色压出纤维 + 一层很淡的暗角，不挂外部图，
+   切到夜主题也不会突然冒出一块暖白 —— 内置项只改质感，不换色系。
+   注意：模糊会把 1px 纤维糊掉（所以还压了一层大尺度暗角，糊完仍看得出"纸"）。 */
+html[data-wallpaper="paper"] .main::before {
+  /* 内置纹是 1px 纤维，模糊一开就糊成一片灰 —— 所以内置项不吃模糊滑块（滑块在这档是灰的），
+     它的"软"由暗角和大尺度底色负责。 */
+  filter: none;
+  /* 内置纹本身对比就低，同样的可见度它比照片淡一大截：给内置档加一道放大，
+     38% 这条默认值下也真能看出来（2026-11-14：细格 / 云纹第一版淡到看不见） */
+  opacity: min(1, calc(var(--wallpaper-alpha, 0.38) * 2.2));
+  background-image:
+    repeating-linear-gradient(115deg, color-mix(in srgb, var(--text) 6%, transparent) 0 1px, transparent 1px 8px),
+    repeating-linear-gradient(25deg, color-mix(in srgb, var(--text) 5%, transparent) 0 1px, transparent 1px 11px),
+    radial-gradient(125% 100% at 16% 0%, transparent 42%, color-mix(in srgb, var(--text) 8%, transparent) 100%),
+    radial-gradient(125% 100% at 16% 0%, var(--bg) 0%, color-mix(in srgb, var(--text) 4%, var(--bg)) 100%);
+  background-size: auto, auto, cover, cover;
+}
+
+/* 细格：整屏版的方格更大一点（14px），不然满屏 9px 会晃眼 */
+html[data-wallpaper="grid"] .main::before {
+  filter: none;
+  opacity: min(1, calc(var(--wallpaper-alpha, 0.38) * 2.2));
+  background-image:
+    repeating-linear-gradient(0deg, color-mix(in srgb, var(--text) 6%, transparent) 0 1px, transparent 1px 14px),
+    repeating-linear-gradient(90deg, color-mix(in srgb, var(--text) 6%, transparent) 0 1px, transparent 1px 14px),
+    linear-gradient(var(--bg), var(--bg));
+  background-size: auto, auto, cover;
+}
+
+/* 云纹：同一套三层墨晕，整屏拉大尺度 */
+html[data-wallpaper="cloud"] .main::before {
+  filter: none;
+  opacity: min(1, calc(var(--wallpaper-alpha, 0.38) * 2.2));
+  background-image:
+    radial-gradient(62% 70% at 18% 12%, color-mix(in srgb, var(--text) 11%, transparent) 0%, transparent 62%),
+    radial-gradient(56% 66% at 84% 32%, color-mix(in srgb, var(--text) 8%, transparent) 0%, transparent 66%),
+    radial-gradient(74% 84% at 44% 98%, color-mix(in srgb, var(--text) 9%, transparent) 0%, transparent 72%),
+    linear-gradient(var(--bg), var(--bg));
+  background-size: cover;
+}
+
+.wallpapers {
+  display: grid;
+  /* 与主题卡同一节奏：一排 5 格（无 / 宣纸纹 / 细格 / 云纹 / 自定义） */
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+  /* 与 .row 同一套左右内缩：五格与滑杆都不许贴到卡片边框上 */
+  margin: 12px 16px 4px;
+}
+
+.wall-choice {
+  display: block;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--outline);
+  border-radius: var(--r-sm);
+  background: var(--card-high);
+  text-align: left;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.wall-choice:hover { border-color: color-mix(in srgb, var(--text) 40%, var(--outline)); }
+.wall-choice:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.wall-choice[aria-checked="true"] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+/* 预览不贴边：和主题卡一样留 6px，图/纹理都收在一条圆角框里，
+   不然三块壁纸看起来像被裁剩的色块（2026-11-14 用户："把框全占满了，左右至少留点间距"） */
+.wall-thumb {
+  position: relative;
+  display: block;
+  height: 62px;
+  padding: 8px;
+  border-bottom: 1px solid var(--divider);
+}
+.wall-thumb::before {
+  content: "";
+  position: absolute;
+  inset: 8px;
+  border: 1px solid var(--divider);
+  border-radius: 6px;
+  background: var(--surface-low);
+}
+/* 无：斜纹示意"没有图，这里是纯色底"（压到 3%，再高在炭黑下就成了警示条）
+   颜色随主题走：夜主题底下是近黑，浅色主题底下是米灰 */
+.wall-thumb.is-none::before {
+  background: repeating-linear-gradient(135deg,
+    color-mix(in srgb, var(--text) 3%, var(--surface-low)) 0 6px,
+    var(--surface-low) 6px 12px);
+}
+/* 宣纸纹的预览与 .main::before 同一套纤维，看得见才敢点 */
+.wall-thumb.is-paper::before {
+  background-image:
+    repeating-linear-gradient(115deg, color-mix(in srgb, var(--text) 6%, transparent) 0 1px, transparent 1px 8px),
+    repeating-linear-gradient(25deg, color-mix(in srgb, var(--text) 5%, transparent) 0 1px, transparent 1px 11px),
+    radial-gradient(125% 100% at 16% 0%, transparent 42%, color-mix(in srgb, var(--text) 9%, transparent) 100%),
+    radial-gradient(125% 100% at 16% 0%, var(--bg) 0%, color-mix(in srgb, var(--text) 5%, var(--bg)) 100%);
+  background-size: auto, auto, cover, cover;
+}
+/* 细格：素格子纸，横竖各一组 1px 线、间距 9px（2026-11-14 随五格补的第二档内置） */
+.wall-thumb.is-grid::before {
+  background-image:
+    repeating-linear-gradient(0deg, color-mix(in srgb, var(--text) 5%, transparent) 0 1px, transparent 1px 9px),
+    repeating-linear-gradient(90deg, color-mix(in srgb, var(--text) 5%, transparent) 0 1px, transparent 1px 9px),
+    linear-gradient(var(--bg), var(--bg));
+}
+/* 云纹：三层很淡的墨晕叠在纸色上，靠尺度而不是纹理，缩略图和整屏都看得见 */
+.wall-thumb.is-cloud::before {
+  background-image:
+    radial-gradient(62% 70% at 18% 12%, color-mix(in srgb, var(--text) 11%, transparent) 0%, transparent 62%),
+    radial-gradient(56% 66% at 84% 32%, color-mix(in srgb, var(--text) 8%, transparent) 0%, transparent 66%),
+    radial-gradient(74% 84% at 44% 98%, color-mix(in srgb, var(--text) 9%, transparent) 0%, transparent 72%),
+    linear-gradient(var(--bg), var(--bg));
+}
+.wall-thumb.is-custom img {
+  position: absolute;
+  inset: 8px;
+  z-index: 1;
+  display: block;
+  /* 替换元素 width:auto 时吃 intrinsic 尺寸、不理 right/bottom，必须显式换算 */
+  width: calc(100% - 16px);
+  height: calc(100% - 16px);
+  box-sizing: border-box;
+  border: 1px solid var(--divider);
+  border-radius: 5px;
+  object-fit: cover;
+}
+.wall-empty {
+  position: absolute;
+  inset: 8px;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  color: var(--text-3);
+}
+/* 上面给 img / wall-empty 写了 display，会盖掉 [hidden] 的 UA 规则，这里补一道 */
+.wall-thumb [hidden] { display: none !important; }
+
+.wall-cap {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 9px 7px;
+}
+.wall-cap b { font-size: 12px; font-weight: 600; color: var(--text); }
+.wall-cap small { font-size: 10.5px; color: var(--text-3); }
+
+.wall-slider-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+  padding: 0 16px;
+}
+/* 最后一条要离卡片下沿有点空隙，别贴着边 */
+.wall-slider-row:last-child { margin-bottom: 2px; padding-bottom: 14px; }
+.wall-slider-name {
+  width: 52px;
+  flex: none;
+  font-size: 12px;
+  color: var(--text-2);
+}
+/* 与气泡宽度那条同一套自绘轨道：已填那一截走强调色，未填那截走 --outline。
+   2026-11-14 用户两轮意见：打开之后不能是一条黑杠，左边已填入的那截要有颜色。 */
+.wall-range {
+  -webkit-appearance: none; appearance: none;
+  flex: 1;
+  min-width: 80px;
+  height: 18px;
+  background: transparent;
+  cursor: pointer;
+  --wall-p: 0%;
+  accent-color: var(--accent);
+}
+.wall-range::-webkit-slider-runnable-track {
+  height: 4px; border-radius: var(--r-full);
+  background: linear-gradient(
+    to right,
+    var(--accent) 0,
+    var(--accent) var(--wall-p),
+    var(--outline) var(--wall-p),
+    var(--outline) 100%
+  );
+}
+.wall-range::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  box-sizing: border-box;
+  width: 13px; height: 13px; margin-top: -4.5px;
+  border: 0; border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .18);
+}
+.wall-range::-moz-range-track {
+  height: 4px; border-radius: var(--r-full);
+  background: linear-gradient(
+    to right,
+    var(--accent) 0,
+    var(--accent) var(--wall-p),
+    var(--outline) var(--wall-p),
+    var(--outline) 100%
+  );
+}
+.wall-range::-moz-range-thumb {
+  box-sizing: border-box; width: 13px; height: 13px;
+  border: 0; border-radius: 50%; background: var(--accent);
+}
+.wall-range:disabled { opacity: .45; cursor: default; }
+.wall-range-val {
+  min-width: 40px;
+  font-size: 11.5px;
+  color: var(--text-3);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.wall-note-text { font-size: 11.5px; color: var(--text-3); }
+.wall-mini { height: 26px; padding: 0 10px; font-size: 11.5px; }
+.wall-mini + .wall-mini { margin-left: 6px; }
+
+/* ── 壁纸裁剪弹层 ─────────────────────────────────────
+   自定义图是"随手一张照片"，直接 cover 会切掉人头、切掉主体，用户也说不清"到底选中了哪块"。
+   这里给一个和主区同比例的取景框：拖动选位置、滑杆缩放，确定后只把框里那一块裁成新图 ——
+   存下来的图本身就是主区比例，铺上去是"正好铺满"，不会再有第二次裁切。
+   框的宽高由 JS 按窗口和主区比例算好写死，CSS 只管长相。 */
+.crop-overlay {
+  position: fixed; inset: 0; z-index: 60;
+  display: grid; place-items: center;
+  padding: 16px;
+  background: color-mix(in srgb, #000 44%, transparent);
+}
+.crop-card {
+  width: min(760px, 94vw);
+  padding: 16px 16px 14px;
+  display: flex; flex-direction: column; gap: 12px;
+  background: var(--card);
+  border: 1px solid var(--outline);
+  border-radius: var(--r-lg);
+  box-shadow: var(--card-glow);
+}
+.crop-head h3 { margin: 0; font-size: 14px; font-weight: 600; color: var(--text); }
+.crop-head p { margin: 5px 0 0; font-size: 11.5px; line-height: 1.55; color: var(--text-3); }
+.crop-frame {
+  position: relative;
+  align-self: center;
+  overflow: hidden;
+  border-radius: var(--r-sm);
+  background: var(--surface-low);
+  box-shadow: 0 0 0 1px var(--outline);
+  cursor: grab;
+  touch-action: none;
+}
+.crop-frame:active { cursor: grabbing; }
+/* 图片自己铺、自己平移：替换元素不许让 UA 的 max-width 接管，显式写回 auto */
+.crop-frame img {
+  position: absolute; left: 0; top: 0;
+  max-width: none; max-height: none;
+  transform-origin: 0 0;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+/* 三分线：只给方向感，别把图挡脏 */
+.crop-grid {
+  position: absolute; inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(to right, transparent 0 33.2%, rgba(255, 255, 255, .22) 33.2% 33.45%, transparent 33.45% 66.5%, rgba(255, 255, 255, .22) 66.5% 66.75%, transparent 66.75%),
+    linear-gradient(to bottom, transparent 0 33.2%, rgba(255, 255, 255, .22) 33.2% 33.45%, transparent 33.45% 66.5%, rgba(255, 255, 255, .22) 66.5% 66.75%, transparent 66.75%);
+}
+.crop-tools {
+  display: flex; align-items: center; gap: 12px;
+}
+.crop-actions {
+  display: flex; justify-content: flex-end; gap: 8px;
+}
+.crop-actions .btn-primary { height: 30px; padding: 0 14px; font-size: 12px; }
+
+/* 窄窗口：五张主题卡先折成三列、再折成两列，壁纸三格保持一排（更窄就单列） */
+@media (max-width: 1020px) {
+  .theme-cards { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 760px) {
+  .theme-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 560px) {
+  .wallpapers { grid-template-columns: 1fr; }
+}

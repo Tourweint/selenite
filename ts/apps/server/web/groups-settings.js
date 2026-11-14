@@ -127,7 +127,6 @@ function gsHead(title, { back = false } = {}) {
     backBtn.type = "button";
     backBtn.className = "cs-icon-btn";
     backBtn.setAttribute("aria-label", "返回");
-    backBtn.title = "返回";
     backBtn.append(csSvg(CS_ICONS.back));
     backBtn.addEventListener("click", () => {
       gs.page = "home";
@@ -143,7 +142,6 @@ function gsHead(title, { back = false } = {}) {
   closeBtn.type = "button";
   closeBtn.className = "cs-icon-btn";
   closeBtn.setAttribute("aria-label", "关闭");
-  closeBtn.title = "关闭 (Esc)";
   closeBtn.append(csSvg(CS_ICONS.x));
   closeBtn.addEventListener("click", closeGroupSettingsDrawer);
   head.append(closeBtn);

@@ -230,7 +230,7 @@
 .use-cell:first-child { padding-left: 0; }
 .use-cell:last-child { padding-right: 0; }
 .use-cell + .use-cell { border-left: 1px solid var(--divider); }
-.use-cell[data-tip] { cursor: help; }
+/* 用量格的光标不跟 data-tip 变（2026-11-14 统一）：提示出不出，光标都按页面原样 */
 .use-cell-v {
   font-size: 14.5px; font-weight: 500; color: var(--text);
   font-variant-numeric: tabular-nums;

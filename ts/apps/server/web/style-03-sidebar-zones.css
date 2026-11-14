@@ -4,8 +4,8 @@
  * 2026-11-13 从 web/style.css（7,373 行单文件）按分区切出；正文是原文搬运，未改一条规则。
  * 原区间 L686–L1062。@import 顺序即层叠顺序，改样式只改对应分部。
  */
-/* ── 侧栏分区（2026-11-07 四改定稿）────────────────────────
-   一块分区 = 两行网格：[整行折叠按钮] [＋] + [分区体]。
+/* ── 侧栏分区（2026-11-07 四改定稿 / 2026-11-14 行尾改 ⋯）──────────
+   一块分区 = 两行网格：[整行折叠按钮] [⋯] + [分区体]。
    用户口径：「箭头别要了，点击这个框相当于收起或展开，在右边留个加号」。
    所以分区头本身就是按钮（图标 + 名称 + 计数），hover 给一层底；
    折叠状态不靠箭头，靠「展开时有内容、收起时只剩这一行」直接可见。 */
@@ -40,11 +40,14 @@
   flex: none;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-/* 分区头里的计数：紧跟名称，最右边是 ＋ */
+/* 分区头里的计数：紧跟名称，最右边是 ⋯ */
 .sec-count { margin-left: 2px; flex: none; }
-/* 行尾 ＋：24×24 命中区 + 16px 图标 */
-.sec-add-wrap { flex: none; display: flex; align-items: center; }
-.sec-add {
+/* 行尾 ⋯（2026-11-14）：24×24 命中区 + 15px 三个点。
+   用户口径：「右边现在全是加号，改成三个小点点，点开就能选择新建还是搜索，
+   统一放在右边，留三个小点点即可」。
+   原来是每区一颗 ＋（对话还多一颗放大镜），一列四颗同形按钮比名字更抢眼；
+   现在一颗 ⋯ 收住这一区全部动作，颜色压到 text-3，只在 hover / 菜单开着时提亮。 */
+.sec-more {
   flex: none;
   width: 24px; height: 24px; margin-right: 4px; padding: 0;
   display: grid; place-content: center;
@@ -52,9 +55,10 @@
   background: transparent; color: var(--text-2);
   cursor: pointer;
 }
-.sec-add svg { width: 16px; height: 16px; }
-.sec-add:hover:not(:disabled) { background: var(--card-high); color: var(--accent); }
-.sec-add:disabled { opacity: .35; cursor: default; }
+.sec-more svg { width: 15px; height: 15px; }
+.sec-more:hover:not(:disabled),
+.sec-more[aria-expanded="true"] { background: var(--card-high); color: var(--accent); }
+.sec-more:disabled { opacity: .35; cursor: default; }
 /* 分区体：独占第二行，展开/收起走高度动画（2026-11-07 五改）。
  *
  * 为什么用 grid-template-rows 0fr → 1fr：内容高度是变的（会话多了、任务行多了都会长），
@@ -106,29 +110,35 @@
   .side-sec-inner { transition: none; }
 }
 
-/* 项目 ＋ 的双入口菜单（2026-11-07 四改）：挂在 body 下，坐标 JS 写。
-   两行都是「标题 + 一行解释」——用户要区分的是"建新目录"和"登记已有目录"，
-   光两个词（新建项目 / 添加子项目）看不出差别，解释就写在行里。 */
-.proj-add-menu {
+/* 分区头 ⋯ 的菜单（2026-11-14）：挂在 body 下，坐标 JS 写。
+   基础项 = 一行「动作名 + 快捷键」；带 hint 的项（项目：新建 / 添加）多一行解释——
+   这两个动作的区别是"建目录"与"只登记已有目录"，光两个词看不出差别。
+   菜单宽度不写死：按内容撑开，最长的一行决定。 */
+.sec-menu {
   position: fixed;
-  z-index: 45;
-  min-width: 236px; max-width: min(300px, 86vw);
+  z-index: 70;
+  /* 宽度上限贴着 232px 侧栏收：菜单右缘与 ⋯ 对齐后不该探进主区（2026-11-14 实测
+     280px 时左缘被顶到 8px、右缘伸到主区里，视觉上像是从侧栏"漏"出去的） */
+  min-width: 176px; max-width: min(216px, 86vw);
   padding: 4px;
   border: 1px solid var(--composer-border);
   border-radius: var(--r-md);
   background: var(--bg);
   box-shadow: var(--shadow-menu);
 }
-.proj-add-item {
-  display: flex; flex-direction: column; gap: 1px;
+.sec-menu-item {
+  display: flex; align-items: center; gap: 10px;
   width: 100%; padding: 7px 10px;
   border: 0; border-radius: var(--r-sm);
   background: transparent; color: var(--text);
   text-align: left; cursor: pointer;
 }
-.proj-add-item:hover { background: var(--surface-low); }
-.proj-add-label { font-size: 13.5px; font-weight: 600; }
-.proj-add-hint { font-size: 11.5px; color: var(--text-3); line-height: 1.4; }
+.sec-menu-item.is-rich { flex-direction: column; align-items: stretch; gap: 1px; }
+.sec-menu-item:hover:not(:disabled) { background: var(--surface-low); }
+.sec-menu-item:disabled { opacity: .45; cursor: default; }
+.sec-menu-label { flex: 1; min-width: 0; display: block; font-size: 13px; font-weight: 600; }
+.sec-menu-kbd { flex: none; font-size: 11px; color: var(--text-3); }
+.sec-menu-hint { display: block; margin-top: 1px; font-size: 11.5px; font-weight: 400; color: var(--text-3); line-height: 1.4; }
 
 /* 分区底部的「去整页看」链接行：任务中心 / 项目管理各一条 */
 .sec-foot-link {
@@ -206,6 +216,11 @@
 }
 .proj-fly-acts { display: flex; gap: 2px; }
 .proj-fly-acts .proj-act { opacity: .7; }
+/* 主文件夹小圆点（浮卡里用；设置页的文件夹行 2026-11-14 换成左侧 3px 竖条） */
+.proj-root-dot {
+  flex: none; width: 6px; height: 6px; border-radius: 50%;
+  border: 1px solid var(--text-3); background: transparent;
+}
 .proj-fly-row.is-primary .proj-root-dot { background: var(--accent); border-color: var(--accent); }
 .proj-fly-path {
   margin-top: 2px; padding-left: 12px;
@@ -306,6 +321,29 @@
   letter-spacing: .01em;
 }
 .titlebar-drag { flex: 1; align-self: stretch; -webkit-app-region: drag; }
+
+/* 返回上一页 / 前进（2026-11-14）：与 .chrome 同一套尺寸与悬停底色，
+   只是位置在品牌右边（浏览器的位置感）。两枚都不可用时整组 hidden。 */
+.titlebar-nav {
+  display: flex; align-items: center; gap: 2px;
+  margin-left: 10px;
+  -webkit-app-region: no-drag;
+}
+.titlebar-nav .icon-btn {
+  width: 28px; height: 28px;
+  border-radius: var(--r-full);
+  color: var(--text-2);
+  -webkit-app-region: no-drag;
+}
+.titlebar-nav .icon-btn:hover { background: color-mix(in srgb, var(--text) 8%, transparent); color: var(--text); }
+.titlebar-nav .icon-btn svg { width: 15px; height: 15px; }
+/* 不可用的一枚留在原位（不做消失重排）：灰色、不接指针，看得出「这条路现在不通」 */
+.titlebar-nav .icon-btn:disabled {
+  opacity: .34;
+  background: transparent;
+  color: var(--text-3, var(--text-2));
+  pointer-events: none;
+}
 
 .chrome {
   display: flex; align-items: center; gap: 2px;

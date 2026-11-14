@@ -122,7 +122,7 @@ function syncProjectRows(items) {
   if (!items || !items.length) {
     const empty = document.createElement("div");
     empty.className = "roster-empty";
-    empty.textContent = "还没有项目。点右上角的 ＋ 建一个。";
+    empty.textContent = "还没有项目。点分区右边的 ⋯ 建一个。";
     box.append(empty);
   }
 
@@ -156,7 +156,6 @@ function projectRowNode(project, current) {
     const count = document.createElement("span");
     count.className = "proj-count";
     count.textContent = String(project.roots.length || 1);
-    count.title = `${project.roots.length || 1} 个文件夹`;
     row.append(count);
   }
 

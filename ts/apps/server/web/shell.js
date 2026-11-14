@@ -16,6 +16,7 @@ import { resize } from "./plus-menu.js";
 import { closeProjectMenu } from "./project-modal.js";
 import { closeRailCards } from "./rail-card.js";
 import { go } from "./route.js";
+import { closeSecMenu, openSecMenu } from "./sec-menu.js";
 import { state } from "./state.js";
 
 /* ── 侧栏折叠 / 首页态 / 思考强度 ─────────────────────── */
@@ -27,6 +28,8 @@ function sidebarOpen() {
 function toggleSidebar() {
   closeProjectMenu();
   closeRailCards();
+  // 分区 ⋯ 菜单挂在 body 上，收侧栏时它不会跟着走，得显式收掉（2026-11-14）
+  closeSecMenu();
   hideHoverTip();
   const next = sidebarOpen() ? "closed" : "open";
   if (next === "closed") document.documentElement.dataset.sidebar = "closed";
@@ -171,15 +174,13 @@ function currentThinking() {
   return THINKING_LEVELS.includes(value) ? value : "off";
 }
 
-/** 菜单打开时把当前档标在**当前模型**那一行（其它模型的档位未选中） */
+/** 菜单打开时把当前档标在底部常驻条上（2026-11-14：档位从模型行挪到菜单底栏，
+ *  浏览别家供应商时也一直看得见；设置页 no-thinking 的弹层没有这条） */
 function syncThinkingSegments() {
   if (!el.modelMenu) return;
   const level = currentThinking();
-  for (const row of el.modelMenu.querySelectorAll(".model-row")) {
-    const isCurrent = row.dataset.current === "1";
-    for (const option of row.querySelectorAll(".think-opt")) {
-      option.setAttribute("aria-pressed", String(isCurrent && option.dataset.level === level));
-    }
+  for (const option of el.modelMenu.querySelectorAll(".think-foot .think-opt")) {
+    option.setAttribute("aria-pressed", String(option.dataset.level === level));
   }
 }
 
@@ -242,17 +243,27 @@ function toggleSection(sec) {
   applySections();
 }
 
-/* 折叠（2026-11-07 四改，用户口径「箭头别要了，点击这个框相当于收起或展开」）：
-   整行分区头就是那个把手，行尾只留一个 ＋。 */
+/* 分区头的折叠（2026-11-07 四改，用户口径「箭头别要了，点击这个框相当于收起或展开」）：
+   整行分区头就是那个把手，行尾只留一颗 ⋯（2026-11-14 由 ＋ 改）。 */
 for (const sec of SIDE_SECTIONS) {
   document.getElementById(`sec-${sec}-toggle`)?.addEventListener("click", () => toggleSection(sec));
 }
 
-/* 会话区的 ＋（2026-11-07）：顶部「新建对话」退役后，这里是唯一的新建入口。
-   与旧按钮同语义：新开一条普通 worker 会话。 */
-el.secChatsAdd?.addEventListener("click", () => {
-  go("chat");
-  startNewChat("worker");
+/* 「对话」分区的 ⋯（2026-11-14）：原来这里固定一颗 ＋（新建），旁边还有一颗放大镜（搜索）。
+   现在两颗合成一张菜单——新建与搜索都是"对对话列表做的事"，没有理由各占一格。
+   新建语义与旧按钮完全一致：新开一条普通 worker 会话（Ctrl+K 走同一条路）。 */
+el.secChatsMore?.addEventListener("click", () => {
+  openSecMenu(el.secChatsMore, [
+    {
+      label: "新建对话",
+      kbd: "Ctrl+K",
+      run: () => {
+        go("chat");
+        startNewChat("worker");
+      },
+    },
+    { label: "搜索旧对话", run: () => go("search") },
+  ]);
 });
 
 /* ── 收起轨道（2026-11-05 F1 / E4 重排 / 2026-11-07 统一批）──────────

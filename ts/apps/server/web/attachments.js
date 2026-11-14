@@ -41,7 +41,7 @@ function renderPendingAttachments() {
     const remove = document.createElement("button");
     remove.type = "button";
     remove.setAttribute("aria-label", "移除这张图片");
-    remove.title = "移除";
+    remove.setAttribute("data-tip", "移除这张图片");
     remove.textContent = "×";
     remove.addEventListener("click", () => {
       state.pendingImages.splice(index, 1);
@@ -55,7 +55,7 @@ function renderPendingAttachments() {
   state.pendingFiles.forEach((file, index) => {
     const item = document.createElement("div");
     item.className = "composer-att is-file";
-    item.title = file.path || file.name;
+    item.setAttribute("data-tip", file.path || file.name);
     const icon = document.createElement("span");
     icon.innerHTML = ATT_FILE_ICON;
     icon.firstChild?.setAttribute?.("aria-hidden", "true");
@@ -71,7 +71,7 @@ function renderPendingAttachments() {
     const remove = document.createElement("button");
     remove.type = "button";
     remove.setAttribute("aria-label", "移除这个文件");
-    remove.title = "移除";
+    remove.setAttribute("data-tip", "移除这个文件");
     remove.textContent = "×";
     remove.addEventListener("click", () => {
       state.pendingFiles.splice(index, 1);
