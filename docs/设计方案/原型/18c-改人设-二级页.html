@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="paper">
+<head>
+<meta charset="utf-8">
+<title>改人设 · C 二级页</title>
+<style>
+:root{
+  --bg:#fdf9f2; --surface:#fdf9f2; --surface-low:#f7f3eb; --card:#f6f1e7; --card-high:#ede9e0;
+  --text:#2e2b3a; --text-2:#6e6b7e; --text-3:#9a97a5;
+  --outline:#c8c5bc; --divider:rgba(200,197,188,.55);
+  --accent:#3e4a8c; --on-accent:#fff;
+  --backdrop:#f1ebe0;
+  --r-sm:8px; --r-md:12px; --r-lg:16px;
+  --font:"Songti SC","Noto Serif SC","Source Han Serif SC","STSong","SimSun","Microsoft YaHei",serif;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+}
+html[data-theme="indigo"]{
+  --bg:#12141d; --surface:#161922; --surface-low:#181b26; --card:#191c27; --card-high:#212433;
+  --text:#e7e9f2; --text-2:#a5a9ba; --text-3:#6d7183;
+  --outline:#3a3f52; --divider:rgba(255,255,255,.09);
+  --accent:#8b97ea; --on-accent:#101223;
+  --backdrop:#0d0f16;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--backdrop);color:var(--text);font:14px/1.6 var(--font);-webkit-font-smoothing:antialiased;overflow:hidden}
+button,input,textarea{font:inherit;color:inherit}
+button{cursor:pointer;border:0;background:none}
+svg{display:block}
+
+.app{position:fixed;inset:0;display:flex;background:var(--backdrop)}
+.side{width:232px;flex:none;padding:20px 12px;display:flex;flex-direction:column;gap:2px}
+.brand{font-size:13px;font-weight:600;padding:0 10px 14px;display:flex;align-items:center;gap:8px}
+.brand i{width:14px;height:14px;border-radius:4px;background:var(--card-high);display:block}
+.nav-h{font-size:11px;color:var(--text-3);letter-spacing:.16em;padding:6px 10px 8px}
+.nav{display:flex;align-items:center;gap:10px;height:34px;padding:0 10px;border-radius:10px;font-size:12.5px;color:var(--text-2)}
+.nav svg{width:15px;height:15px;opacity:.75}
+.nav.on{background:var(--bg);color:var(--text);box-shadow:0 1px 2px rgba(46,43,58,.05)}
+
+.main{flex:1;min-width:0;background:var(--bg);border-radius:16px 0 0 0;display:flex;flex-direction:column;overflow:hidden}
+.scroll{flex:1;min-height:0;overflow-y:auto;padding:22px 40px 0}
+.col{width:min(100%,760px)}
+
+.crumb{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--text-3);margin-bottom:14px}
+.crumb button{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--text-3);padding:3px 7px 3px 4px;border-radius:7px;margin-left:-4px}
+.crumb button:hover{background:var(--card);color:var(--text-2)}
+.crumb svg{width:13px;height:13px}
+
+.thead{display:flex;align-items:center;gap:14px;margin-bottom:24px}
+.ava-wrap{position:relative;flex:none}
+.ava{width:64px;height:64px;border-radius:50%;background:var(--card-high);display:grid;place-content:center;font-size:20px;color:var(--text-2);border:1px solid transparent}
+.ava:hover{border-color:rgba(62,74,140,.32)}
+.badge{position:absolute;right:-3px;bottom:-3px;width:22px;height:22px;border-radius:50%;background:var(--bg);border:1px solid var(--outline);display:grid;place-content:center;color:var(--text-2)}
+.badge svg{width:11px;height:11px}
+.tmain{flex:1;min-width:0}
+.title-in{width:100%;background:none;border:0;border-bottom:1px dashed transparent;font-size:22px;font-weight:600;line-height:1.35;padding:0 0 2px;color:var(--text)}
+.title-in:hover{border-bottom-color:var(--outline)}
+.title-in:focus{outline:0;border-bottom-color:var(--accent)}
+.tsub{display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--text-3);margin-top:5px}
+.dot{width:5px;height:5px;border-radius:50%;background:#1f9d4d;display:block}
+.tag{font-size:10.5px;color:var(--text-3);border:1px solid var(--divider);border-radius:var(--r-full);padding:1px 7px}
+
+.sec-h{display:flex;align-items:baseline;justify-content:space-between;margin:0 0 8px}
+.sec-t{font-size:12.5px;font-weight:600}
+.sec-s{font-size:11.5px;color:var(--text-3)}
+
+.card{background:var(--card);border:1px solid rgba(46,43,58,.07);border-radius:16px;padding:18px 20px}
+.card.plain{background:transparent;border-color:var(--divider)}
+.card textarea{width:100%;height:300px;resize:none;background:none;border:0;outline:0;
+  font-size:14px;line-height:2.05;color:var(--text);letter-spacing:.01em}
+
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.f{display:flex;flex-direction:column;gap:6px}
+.f label{font-size:11px;color:var(--text-3)}
+.f input{height:36px;padding:0 12px;background:var(--bg);border:1px solid var(--divider);border-radius:10px;font-size:13px;outline:0}
+.f input.mono{font-family:var(--mono);font-size:12px}
+.f input:focus{border-color:var(--accent)}
+.f .note{font-size:11px;color:var(--text-3)}
+
+.adv-card{margin-top:24px;border:1px solid var(--divider);border-radius:16px;overflow:hidden}
+.adv-row{width:100%;display:flex;align-items:center;gap:10px;height:50px;padding:0 18px;font-size:12.5px;color:var(--text);text-align:left}
+.adv-row+.adv-row{border-top:1px solid var(--divider)}
+.adv-row:hover{background:var(--card)}
+.adv-row .sum{margin-left:auto;font-size:11.5px;color:var(--text-3)}
+.adv-row .sum.on{color:var(--text-2)}
+.adv-row svg{width:14px;height:14px;color:var(--text-3)}
+
+.foot{flex:none;border-top:1px solid var(--divider);background:var(--bg);padding:12px 40px 16px}
+.foot-in{width:min(100%,760px);display:flex;align-items:center;gap:12px}
+.state{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--text-3)}
+.state i{width:6px;height:6px;border-radius:50%;background:var(--outline)}
+.state.dirty{color:var(--text-2)}
+.state.dirty i{background:var(--accent)}
+.state .msg{color:var(--text-3)}
+.spacer{flex:1}
+.btn-primary{height:32px;padding:0 16px;border-radius:var(--r-md);background:var(--accent);color:var(--on-accent);font-size:12.5px}
+.ghost{height:32px;padding:0 14px;border:1px solid var(--outline);border-radius:var(--r-md);color:var(--text-2);font-size:12.5px}
+.ghost[disabled]{color:var(--text-3);border-color:var(--divider)}
+.ava img{width:100%;height:100%;object-fit:cover;border-radius:50%;display:block}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="side">
+    <div class="brand"><i></i>Selenite</div>
+    <div class="nav-h">设置</div>
+    <div class="nav">外观</div><div class="nav">会话</div><div class="nav">项目</div><div class="nav">归档</div>
+    <div class="nav">定时任务</div><div class="nav">连接</div><div class="nav">模型</div><div class="nav">服务</div>
+    <div class="nav">用量</div><div class="nav">记忆</div><div class="nav on">人设</div><div class="nav">技能</div><div class="nav">关于</div>
+  </aside>
+
+  <main class="main">
+    <div class="scroll">
+      <div class="col">
+        <div class="crumb">
+          <button aria-label="返回人设列表"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></svg>人设与执事</button>
+        </div>
+
+        <div class="thead">
+          <div class="ava-wrap">
+            <button class="ava" aria-label="更换头像"><img alt="" src="data:image/jpeg;base64,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">
+              <span class="badge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg></span>
+            </button>
+          </div>
+          <div class="tmain">
+            <input class="title-in" value="总管" aria-label="名字">
+            <div class="tsub"><span class="dot"></span><span>运行中</span><span>·</span><span>人设 v14</span><span>·</span><span>上一轮 12 分钟前</span></div>
+          </div>
+        </div>
+
+        <div class="sec-h"><span class="sec-t">它在扮演谁</span><span class="sec-s">126 字 · 每一轮都会带上</span></div>
+        <div class="card">
+          <textarea spellcheck="false" aria-label="人设正文">你是这个家的总管。谁问你什么，先给结论，再给理由；理由不超过两句。
+
+说话用短句，少形容词。不确定就说不知道，别编；要猜就标出来是猜的。
+
+派活之前先看对方手上有没有活。有就等，别催；没有就直接说清楚要什么。
+
+遇到要动文件、跑命令、花钱的事，先说清要做什么，等主人点头。</textarea>
+        </div>
+
+        <div class="sec-h" style="margin-top:24px"><span class="sec-t">名字与领域</span><span class="sec-s">领域只用来分活</span></div>
+        <div class="adv-card" style="margin-top:0"><div class="grid2" style="padding:16px 18px">
+          <div class="f"><label>名字</label><input value="总管"></div>
+          <div class="f"><label>领域标签</label><input class="mono" value="" placeholder="例如 frontend，可留空"></div>
+        </div></div>
+
+        <div class="adv-card">
+          <button class="adv-row"><span>备选模型</span><span class="sum">未配置</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg></button>
+          <button class="adv-row"><span>例行任务</span><span class="sum on">1 条 · 每天 21:30 写日记</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg></button>
+        </div>
+        <div style="height:22px"></div>
+      </div>
+    </div>
+
+    <div class="foot">
+      <div class="foot-in">
+        <div class="state dirty"><i></i>3 处改动未保存<span class="msg">· 保存后下一轮起用</span></div>
+        <div class="spacer"></div>
+        <button class="ghost">撤销改动</button>
+        <button class="btn-primary">保存</button>
+      </div>
+    </div>
+  </main>
+</div>
+</body>
+</html>

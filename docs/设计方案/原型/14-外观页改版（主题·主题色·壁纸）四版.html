@@ -1,0 +1,579 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>外观页改版 · 四版草图（主题 / 主题色 / 壁纸）</title>
+<style>
+  /* 直接用仓库里的四套 token 值（style-01-tokens.css），保证草图与原界面同色。 */
+  .t-paper {
+    --bg:#fdf9f2; --surface-low:#f7f3eb; --card:#f6f1e7; --card-high:#ede9e0;
+    --text:#2e2b3a; --text-2:#6e6b7e; --text-3:#9a97a5; --outline:#c8c5bc;
+    --divider:rgba(200,197,188,.55);
+    --accent:#3e4a8c; --on-accent:#fff; --accent-container:#f0ede5;
+  }
+  .t-white {
+    --bg:#fafaf8; --surface-low:#f3f3f0; --card:#f4f4f1; --card-high:#ededea;
+    --text:#1a1a1e; --text-2:#52525b; --text-3:#9b9ba4; --outline:#d7d7d3;
+    --divider:rgba(0,0,0,.10);
+    --accent:#3e4a8c; --on-accent:#fff; --accent-container:#f0ede5;
+  }
+  .t-indigo {
+    --bg:#12141d; --surface-low:#181b26; --card:#191c27; --card-high:#212433;
+    --text:#e7e9f2; --text-2:#a5a9ba; --text-3:#6d7183; --outline:#3a3f52;
+    --divider:rgba(255,255,255,.09);
+    --accent:#8b97ea; --on-accent:#101223; --accent-container:#262b45;
+  }
+  .t-black {
+    --bg:#17171a; --surface-low:#121215; --card:#1d1d21; --card-high:#242429;
+    --text:#e6e6ea; --text-2:#a0a0aa; --text-3:#66666f; --outline:#3a3a44;
+    --divider:rgba(255,255,255,.12);
+    --accent:#8b97ea; --on-accent:#0a0a12; --accent-container:#232840;
+  }
+  .a-indigo { --accent:#3e4a8c; --on-accent:#fff; --accent-container:#f0ede5; }
+  .a-gold   { --accent:#b89b6e; --on-accent:#fff; --accent-container:#f5edd9; }
+  .a-amber  { --accent:#e0a84a; --on-accent:#5c4210; --accent-container:#fceecb; }
+  .a-indigo-d { --accent:#8b97ea; --on-accent:#101223; --accent-container:#262b45; }
+  .a-gold-d   { --accent:#d4b896; --on-accent:#2b2317; --accent-container:#3a3327; }
+  .a-amber-d  { --accent:#e8c06a; --on-accent:#2b2310; --accent-container:#443a20; }
+
+  * { box-sizing: border-box; }
+  html, body { margin:0; background:#efece5; }
+  body {
+    font-family:"Songti SC","Noto Serif SC","Source Han Serif SC","STSong","SimSun","Microsoft YaHei",serif;
+    color:#2e2b3a; -webkit-font-smoothing:antialiased;
+  }
+  .page { width:1180px; margin:0 auto; padding:40px 0 80px; }
+  .doc-head { margin:0 0 28px 8px; }
+  .doc-head h1 { font-size:22px; font-weight:600; margin:0 0 8px; letter-spacing:.01em; }
+  .doc-head p { margin:0; font-size:13px; line-height:1.7; color:#6e6b7e; max-width:860px; }
+  .doc-head b { color:#2e2b3a; font-weight:600; }
+
+  /* 每版：一块米黄「设置页画布」+ 一行方案说明 */
+  .variant { margin-bottom:44px; }
+  .vhead { display:flex; align-items:baseline; gap:12px; margin:0 0 10px 8px; }
+  .vhead .tag { font-size:11px; letter-spacing:.12em; text-transform:uppercase; color:#9a97a5; }
+  .vhead .name { font-size:16px; font-weight:600; }
+  .vhead .why { font-size:12px; color:#6e6b7e; }
+  .vhead .rec {
+    font-size:11px; padding:2px 8px; border-radius:999px;
+    background:#3e4a8c; color:#fff; letter-spacing:.04em;
+  }
+
+  .canvas {
+    background:#fdf9f2; border-radius:16px; padding:26px 30px 30px;
+    box-shadow:0 1px 2px rgba(46,43,58,.06), 0 12px 32px rgba(46,43,58,.06);
+  }
+  .canvas .sec-title {
+    font-size:14px; font-weight:600; color:#2e2b3a; margin:0 0 12px;
+    letter-spacing:.02em;
+  }
+  .canvas .sec-title + .card { margin-bottom:14px; }
+  .card {
+    background:#f6f1e7; border-radius:16px; padding:16px 18px;
+    border:1px solid transparent;
+  }
+  .card.dark { border-color:rgba(255,255,255,.06); }
+  .row { display:flex; align-items:center; justify-content:space-between; gap:16px; }
+  .row + .row { margin-top:14px; }
+  .lbl { font-size:13px; color:#2e2b3a; }
+  .sub { font-size:11.5px; color:#9a97a5; margin-top:2px; line-height:1.5; }
+
+  /* ── A：缩略界面卡 ─────────────────────────── */
+  .theme-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-top:14px; }
+  .tcard {
+    all:unset; cursor:pointer; display:block; border-radius:12px; padding:7px;
+    background:var(--card-high); border:1px solid var(--outline);
+    position:relative; transition:border-color 120ms, box-shadow 120ms;
+  }
+  .tcard.is-on { border-color:var(--accent); box-shadow:0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent); }
+  .tcard .check {
+    position:absolute; right:10px; top:10px; width:17px; height:17px; border-radius:50%;
+    background:var(--accent); color:var(--on-accent); font-size:10px; line-height:17px;
+    text-align:center; font-family:system-ui,sans-serif;
+    box-shadow:0 1px 2px rgba(46,43,58,.10); z-index:2;
+  }
+  .mini {
+    height:84px; border-radius:8px; background:var(--bg); overflow:hidden;
+    display:flex; border:1px solid var(--divider); position:relative;
+  }
+  .mini .side { width:30%; background:var(--surface-low); border-right:1px solid var(--divider); padding:8px 6px; }
+  .mini .side i { display:block; height:3px; border-radius:2px; background:var(--outline); margin-bottom:5px; }
+  .mini .side i:nth-child(2) { width:70%; }
+  .mini .main { flex:1; padding:9px 8px; display:flex; flex-direction:column; gap:6px; }
+  .mini .b1 { height:9px; width:62%; border-radius:5px; background:color-mix(in srgb, var(--text) 8%, transparent); }
+  .mini .b2 { height:9px; width:44%; border-radius:5px; background:color-mix(in srgb, var(--text) 8%, transparent); align-self:flex-end; }
+  .mini .dot { position:absolute; left:calc(30% + 8px); bottom:8px; width:6px; height:6px; border-radius:50%; background:var(--accent); }
+  .tcap { display:flex; align-items:baseline; gap:6px; margin:8px 2px 2px; }
+  .tcap b { font-size:12.5px; font-weight:600; color:var(--text); }
+  .tcap em { font-style:normal; font-size:10.5px; color:var(--text-3); }
+  .swatches { display:flex; gap:8px; align-items:center; }
+  .sw {
+    all:unset; cursor:pointer; width:26px; height:26px; border-radius:50%;
+    background:var(--accent); position:relative; box-shadow:inset 0 0 0 1px rgba(0,0,0,.06);
+  }
+  .sw.is-on::after {
+    content:""; position:absolute; inset:-4px; border-radius:50%;
+    border:1.5px solid var(--accent);
+  }
+  .sw-name { font-size:11.5px; color:#6e6b7e; margin-left:6px; }
+
+  /* ── B：大预览 + 右侧列表 ───────────────────── */
+  .split { display:grid; grid-template-columns:1.15fr .85fr; gap:14px; align-items:stretch; }
+  .preview {
+    border-radius:12px; background:var(--bg); border:1px solid var(--divider);
+    overflow:hidden; display:flex; min-height:214px;
+  }
+  .preview .side { width:96px; background:var(--surface-low); border-right:1px solid var(--divider); padding:12px 10px; }
+  .preview .side .brand { font-size:11px; font-weight:600; color:var(--text); margin-bottom:12px; }
+  .preview .side .item { display:flex; align-items:center; gap:6px; margin-bottom:9px; }
+  .preview .side .item .ic { width:12px; height:12px; border-radius:3px; background:color-mix(in srgb, var(--text) 10%, transparent); }
+  .preview .side .item .tx { height:3px; border-radius:2px; background:var(--outline); flex:1; }
+  .preview .side .item.on .tx { background:var(--accent); }
+  .preview .main { flex:1; padding:14px 16px; display:flex; flex-direction:column; gap:10px; }
+  .preview .msg { font-size:11.5px; line-height:1.55; color:var(--text); max-width:86%; }
+  .preview .msg.u {
+    align-self:flex-end; background:color-mix(in srgb, var(--text) 8%, transparent);
+    padding:7px 10px; border-radius:10px 10px 3px 10px;
+  }
+  .preview .msg.a { padding:7px 10px; border-radius:10px 10px 10px 3px; background:transparent; border:1px solid var(--divider); }
+  .preview .link { color:var(--accent); text-decoration:underline; text-underline-offset:2px; }
+  .preview .chip { display:inline-flex; align-items:center; gap:5px; font-size:10px; color:var(--text-2); border:1px solid var(--divider); border-radius:999px; padding:3px 8px; }
+  .preview .chip::before { content:""; width:5px; height:5px; border-radius:50%; background:var(--accent); }
+  .preview .composer { margin-top:auto; border:1px solid color-mix(in srgb, var(--text) 14%, transparent); border-radius:10px; padding:8px 10px; font-size:10.5px; color:var(--text-3); display:flex; justify-content:space-between; }
+  .preview .send { color:var(--on-accent); background:var(--accent); border-radius:7px; padding:2px 8px; font-size:10px; }
+
+  .tlist { display:flex; flex-direction:column; gap:8px; }
+  .trow {
+    all:unset; cursor:pointer; display:flex; align-items:center; gap:10px;
+    padding:8px 10px; border-radius:10px; background:var(--surface-low);
+    border:1px solid transparent; position:relative;
+  }
+  .trow.is-on { border-color:var(--accent); background:var(--card-high); }
+  .trow.is-on::before { content:""; position:absolute; left:0; top:8px; bottom:8px; width:2px; border-radius:2px; background:var(--accent); }
+  .strip { width:36px; height:26px; border-radius:6px; overflow:hidden; display:flex; border:1px solid var(--divider); flex:none; }
+  .strip span { flex:1; }
+  .strip .s1 { background:var(--bg); } .strip .s2 { background:var(--card); } .strip .s3 { background:var(--text); }
+  .trow .info { flex:1; min-width:0; }
+  .trow .info b { display:block; font-size:12px; font-weight:600; color:var(--text); }
+  .trow .info em { font-style:normal; font-size:10.5px; color:var(--text-3); }
+  .trow .mode { font-size:10px; color:var(--text-3); border:1px solid var(--divider); border-radius:999px; padding:1px 6px; }
+  .trow .pick { width:14px; height:14px; border-radius:50%; border:1.5px solid var(--outline); flex:none; }
+  .trow.is-on .pick { border-color:var(--accent); background:var(--accent); }
+
+  .mode-sel {
+    display:flex; gap:2px; background:#ede9e0; border-radius:999px; padding:3px;
+    box-shadow:inset 0 0 0 1px #c8c5bc;
+  }
+  .mode-sel button {
+    all:unset; cursor:pointer; font-size:11.5px; padding:5px 14px; border-radius:999px;
+    color:#6e6b7e; text-align:center;
+  }
+  .mode-sel button.on { background:#3e4a8c; color:#fff; box-shadow:0 1px 2px rgba(46,43,58,.10); }
+  .mode-sel button.off { opacity:.5; cursor:default; }
+
+  /* ── C：明暗分段 + 两个家族 ───────────────── */
+  .fam { margin-top:14px; }
+  .fam-head { display:flex; align-items:baseline; gap:8px; margin-bottom:8px; }
+  .fam-head b { font-size:12px; font-weight:600; color:#2e2b3a; }
+  .fam-head em { font-style:normal; font-size:11px; color:#9a97a5; }
+  .fam-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .fam-tile {
+    all:unset; cursor:pointer; display:flex; gap:10px; align-items:center;
+    background:#ede9e0; border:1px solid #c8c5bc; border-radius:12px; padding:8px 10px;
+  }
+  .fam-tile.is-on { border-color:#3e4a8c; box-shadow:0 0 0 2px rgba(62,74,140,.18); }
+  .fam-tile .sw5 { width:52px; height:36px; border-radius:8px; overflow:hidden; display:grid; grid-template-columns:1fr 1fr; grid-template-rows:1fr 1fr; border:1px solid var(--divider); flex:none; }
+  .fam-tile .sw5 span:nth-child(1){background:var(--bg);} .fam-tile .sw5 span:nth-child(2){background:var(--card);}
+  .fam-tile .sw5 span:nth-child(3){background:var(--text);} .fam-tile .sw5 span:nth-child(4){background:var(--accent);}
+  .fam-tile .tx b { display:block; font-size:12px; font-weight:600; color:var(--text); }
+  .fam-tile .tx em { font-style:normal; font-size:10.5px; color:var(--text-3); }
+
+  /* ── D：材质色带 ─────────────────────────── */
+  .band-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin-top:14px; }
+  .band {
+    all:unset; cursor:pointer; border-radius:12px; overflow:hidden; border:1px solid var(--outline);
+    position:relative; display:block;
+  }
+  .band.is-on { border-color:var(--accent); box-shadow:0 0 0 2px color-mix(in srgb, var(--accent) 20%, transparent); }
+  .band .bars { height:78px; display:flex; flex-direction:column; }
+  .band .bars span { display:block; }
+  .band .bars .b1 { flex:1.7; background:var(--bg); } .band .bars .b2 { flex:1; background:var(--card); }
+  .band .bars .b3 { flex:.5; background:var(--text); } .band .bars .b4 { flex:.5; background:var(--accent); }
+  .band .cap { display:flex; align-items:center; justify-content:space-between; padding:6px 8px; background:var(--card); }
+  .band .cap b { font-size:11.5px; font-weight:600; color:var(--text); }
+  .band .cap i { font-style:normal; font-size:10px; color:var(--text-3); }
+  .pillrow { display:flex; gap:8px; }
+  .pill {
+    all:unset; cursor:pointer; display:inline-flex; align-items:center; gap:7px;
+    padding:5px 12px 5px 6px; border-radius:999px; background:var(--accent);
+    color:var(--on-accent); font-size:11.5px;
+  }
+  .pill .dot { width:16px; height:16px; border-radius:50%; background:var(--on-accent); opacity:.85; }
+  .pill.ghost { background:transparent; color:var(--text-2); border:1px solid var(--outline); }
+  .pill.ghost .dot { background:var(--accent); opacity:1; }
+
+  /* ── 壁纸区（新增） ───────────────────────── */
+  .wall-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-top:14px; }
+  .wall {
+    all:unset; cursor:pointer; border-radius:10px; overflow:hidden; border:1px solid #c8c5bc;
+    display:block; background:#ede9e0; position:relative;
+  }
+  .wall.is-on { border-color:#3e4a8c; box-shadow:0 0 0 2px rgba(62,74,140,.18); }
+  .wall .img { height:62px; }
+  .wall .img.none { background:
+      repeating-linear-gradient(135deg, #f3eee4 0 6px, #ece6da 6px 12px); }
+  .wall .img.paper { background:
+      radial-gradient(120% 80% at 20% 0%, #fdf9f2 0%, #f1ead9 60%, #e9e0cd 100%); }
+  .wall .img.scene { background:
+      radial-gradient(60% 90% at 80% 10%, #dfe6f5 0%, #c9d3ea 40%, #b7c3de 70%, #9aa7c4 100%); }
+  .wall .cap { display:flex; align-items:center; justify-content:space-between; padding:6px 9px; font-size:11px; color:#2e2b3a; }
+  .wall .cap small { color:#9a97a5; font-size:10px; }
+  .slider-row { display:flex; align-items:center; gap:12px; margin-top:14px; }
+  .slider-row .sl-lbl { font-size:12px; color:#2e2b3a; width:76px; }
+  .slider-row .track { position:relative; flex:1; height:18px; }
+  .slider-row .track .rail {
+    position:absolute; left:0; right:0; top:50%; height:4px; margin-top:-2px;
+    border-radius:999px; background:#e3dccf;
+  }
+  .slider-row .track .fill {
+    position:absolute; left:0; top:50%; height:4px; margin-top:-2px; border-radius:999px;
+    background:#3e4a8c;
+  }
+  .slider-row .track .thumb {
+    position:absolute; top:50%; width:13px; height:13px; margin-top:-6.5px; margin-left:-6.5px;
+    border-radius:50%; background:#3e4a8c; box-shadow:0 1px 2px rgba(0,0,0,.18);
+  }
+  .slider-row .val { font-size:11px; color:#9a97a5; width:36px; text-align:right; font-variant-numeric:tabular-nums; }
+  .note { margin:12px 8px 0; font-size:11.5px; color:#9a97a5; line-height:1.65; }
+  .legend { display:flex; gap:18px; margin:0 0 10px 8px; font-size:11.5px; color:#6e6b7e; }
+  .legend span::before { content:"·"; margin-right:6px; color:#c8c5bc; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <div class="doc-head">
+    <h1>外观页改版 · 四版草图</h1>
+    <p>四版只改「主题 + 主题色」这一块的长相，部件与配色全部取自仓库现有 token（四套主题、三档强调色），所以看起来就是可落地的东西，不是贴图。最后一块是<b>壁纸</b>——按 Cindy 的能力口径（内置场景 / 自定义图 / 可见度 / 模糊 / 静态或动态）先把版式定下来。</p>
+  </div>
+
+  <div class="legend">
+    <span>四套主题 = 米黄 · 暖白 · 靛蓝夜 · 炭黑</span>
+    <span>三档强调色 = 靛蓝 · 暖金 · 琥珀</span>
+    <span>选中态统一用强调色，不用紫</span>
+  </div>
+
+  <!-- ═══════════════ 方案 A ═══════════════ -->
+  <section class="variant">
+    <div class="vhead">
+      <span class="tag">A</span>
+      <span class="name">缩略界面卡</span>
+      <span class="why">每套主题画一张小界面：侧栏、两条气泡、一个强调点。选中的卡加强调色描边 + 角标对勾。</span>
+    </div>
+    <div class="canvas">
+      <div class="sec-title">外观</div>
+
+      <div class="card">
+        <div class="row">
+          <div>
+            <div class="lbl">主题</div>
+            <div class="sub">四套都是成品配色，切换立刻生效</div>
+          </div>
+        </div>
+        <div class="theme-grid">
+          <button class="tcard is-on t-paper">
+            <span class="check">✓</span>
+            <div class="mini"><div class="side"><i></i><i></i><i></i></div><div class="main"><div class="b1"></div><div class="b2"></div></div><span class="dot"></span></div>
+            <div class="tcap"><b>米黄</b><em>纸</em></div>
+          </button>
+          <button class="tcard t-white">
+            <div class="mini"><div class="side"><i></i><i></i><i></i></div><div class="main"><div class="b1"></div><div class="b2"></div></div><span class="dot"></span></div>
+            <div class="tcap"><b>暖白</b><em>素</em></div>
+          </button>
+          <button class="tcard t-indigo">
+            <div class="mini"><div class="side"><i></i><i></i><i></i></div><div class="main"><div class="b1"></div><div class="b2"></div></div><span class="dot"></span></div>
+            <div class="tcap"><b>靛蓝夜</b><em>夜</em></div>
+          </button>
+          <button class="tcard t-black">
+            <div class="mini"><div class="side"><i></i><i></i><i></i></div><div class="main"><div class="b1"></div><div class="b2"></div></div><span class="dot"></span></div>
+            <div class="tcap"><b>炭黑</b><em>炭</em></div>
+          </button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="row">
+          <div>
+            <div class="lbl">主题色</div>
+            <div class="sub">只给链接、运行中、选中态上色，正文与气泡不上色</div>
+          </div>
+          <div class="swatches">
+            <button class="sw is-on a-indigo" title="靛蓝"></button>
+            <button class="sw a-gold" title="暖金"></button>
+            <button class="sw a-amber" title="琥珀"></button>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ═══════════════ 方案 B ═══════════════ -->
+  <section class="variant">
+    <div class="vhead">
+      <span class="tag">B</span>
+      <span class="name">大预览 + 右侧列表</span>
+      <span class="rec">最接近 Cindy</span>
+      <span class="why">左边一张真实比例的对话预览（就这一套主题 + 这一档强调色），右边四行列表，每行一条三段色带；顶部先选明暗。</span>
+    </div>
+    <div class="canvas">
+      <div class="sec-title">外观</div>
+
+      <div class="card">
+        <div class="row">
+          <div>
+            <div class="lbl">明暗</div>
+            <div class="sub">浅 / 深是主题自带的，跟随系统 = 按系统深浅自动挑一套</div>
+          </div>
+          <div class="mode-sel">
+            <button class="on">浅色</button>
+            <button>深色</button>
+            <button>跟随系统</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="row" style="margin-bottom:12px">
+          <div class="lbl">主题与主题色</div>
+        </div>
+        <div class="split">
+          <div class="preview t-paper a-indigo">
+            <div class="side">
+              <div class="brand">Selenite</div>
+              <div class="item on"><span class="ic"></span><span class="tx"></span></div>
+              <div class="item"><span class="ic"></span><span class="tx"></span></div>
+              <div class="item"><span class="ic"></span><span class="tx"></span></div>
+              <div class="item"><span class="ic"></span><span class="tx"></span></div>
+            </div>
+            <div class="main">
+              <div class="msg u">把这份变更记录里的链接都挑出来</div>
+              <div class="msg a">挑了 3 个，都在 <span class="link">docs/基线文档</span> 里。顺手把失效的那条标出来了。</div>
+              <div class="chip">读了 4 个文件</div>
+              <div class="composer"><span>说点什么…</span><span class="send">发送</span></div>
+            </div>
+          </div>
+
+          <div>
+            <div class="tlist">
+              <button class="trow is-on t-paper a-indigo">
+                <span class="strip"><span class="s1"></span><span class="s2"></span><span class="s3"></span></span>
+                <span class="info"><b>米黄</b><em>奶白纸 + 靛蓝墨</em></span>
+                <span class="pick"></span>
+              </button>
+              <button class="trow t-white">
+                <span class="strip"><span class="s1"></span><span class="s2"></span><span class="s3"></span></span>
+                <span class="info"><b>暖白</b><em>微暖灰白，最素</em></span>
+                <span class="mode">浅</span>
+                <span class="pick"></span>
+              </button>
+              <button class="trow t-indigo">
+                <span class="strip"><span class="s1"></span><span class="s2"></span><span class="s3"></span></span>
+                <span class="info"><b>靛蓝夜</b><em>石墨蓝黑，夜里不刺眼</em></span>
+                <span class="mode">深</span>
+                <span class="pick"></span>
+              </button>
+              <button class="trow t-black">
+                <span class="strip"><span class="s1"></span><span class="s2"></span><span class="s3"></span></span>
+                <span class="info"><b>炭黑</b><em>降对比的炭灰</em></span>
+                <span class="mode">深</span>
+                <span class="pick"></span>
+              </button>
+            </div>
+            <div class="swatches" style="margin-top:12px;justify-content:flex-start">
+              <button class="sw is-on a-indigo" title="靛蓝"></button>
+              <button class="sw a-gold" title="暖金"></button>
+              <button class="sw a-amber" title="琥珀"></button>
+              <span class="sw-name">靛蓝</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════════ 方案 C ═══════════════ -->
+  <section class="variant">
+    <div class="vhead">
+      <span class="tag">C</span>
+      <span class="name">明暗分段 + 两个家族</span>
+      <span class="why">先在浅/深之间选，再在「纸」和「夜」两个家族里挑一张。配色用四个色块托住，不会被当成按钮。</span>
+    </div>
+    <div class="canvas">
+      <div class="sec-title">外观</div>
+
+      <div class="card">
+        <div class="row">
+          <div><div class="lbl">外观模式</div><div class="sub">跟随系统 = 白天用纸，入夜换夜</div></div>
+          <div class="mode-sel">
+            <button class="on">浅色</button>
+            <button>深色</button>
+            <button>跟随系统</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="fam">
+          <div class="fam-head"><b>纸</b><em>暖、低饱和、宋体最舒服的两套</em></div>
+          <div class="fam-grid">
+            <button class="fam-tile is-on">
+              <div class="sw5 t-paper a-indigo"><span></span><span></span><span></span><span></span></div>
+              <div class="tx"><b>米黄</b><em>奶白纸 · 靛蓝墨</em></div>
+            </button>
+            <button class="fam-tile">
+              <div class="sw5 t-white a-indigo"><span></span><span></span><span></span><span></span></div>
+              <div class="tx"><b>暖白</b><em>微暖灰白</em></div>
+            </button>
+          </div>
+        </div>
+        <div class="fam">
+          <div class="fam-head"><b>夜</b><em>深色降对比，长时间看不炸眼</em></div>
+          <div class="fam-grid">
+            <button class="fam-tile">
+              <div class="sw5 t-indigo a-indigo-d"><span></span><span></span><span></span><span></span></div>
+              <div class="tx"><b>靛蓝夜</b><em>石墨蓝黑</em></div>
+            </button>
+            <button class="fam-tile">
+              <div class="sw5 t-black a-indigo-d"><span></span><span></span><span></span><span></span></div>
+              <div class="tx"><b>炭黑</b><em>降对比炭灰</em></div>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="row">
+          <div><div class="lbl">主题色</div><div class="sub">三档都来自色板；深色主题自动提亮一档</div></div>
+          <div class="pillrow">
+            <button class="pill a-indigo"><span class="dot"></span>靛蓝</button>
+            <button class="pill ghost a-gold"><span class="dot"></span>暖金</button>
+            <button class="pill ghost a-amber"><span class="dot"></span>琥珀</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════════ 方案 D ═══════════════ -->
+  <section class="variant">
+    <div class="vhead">
+      <span class="tag">D</span>
+      <span class="name">材质色带</span>
+      <span class="why">不画界面，只把每套主题的四个关键色竖着码成一条色带——看的是"材质"，最短，也最像调色板。</span>
+    </div>
+    <div class="canvas">
+      <div class="sec-title">外观</div>
+
+      <div class="card">
+        <div class="row">
+          <div><div class="lbl">主题</div><div class="sub">从上到下：底 / 卡 / 字 / 强调</div></div>
+          <div class="sub">4 套</div>
+        </div>
+        <div class="band-grid">
+          <button class="band is-on t-paper a-indigo">
+            <div class="bars"><span class="b1"></span><span class="b2"></span><span class="b3"></span><span class="b4"></span></div>
+            <div class="cap"><b>米黄</b><i>纸</i></div>
+          </button>
+          <button class="band t-white a-indigo">
+            <div class="bars"><span class="b1"></span><span class="b2"></span><span class="b3"></span><span class="b4"></span></div>
+            <div class="cap"><b>暖白</b><i>素</i></div>
+          </button>
+          <button class="band t-indigo a-indigo-d">
+            <div class="bars"><span class="b1"></span><span class="b2"></span><span class="b3"></span><span class="b4"></span></div>
+            <div class="cap"><b>靛蓝夜</b><i>夜</i></div>
+          </button>
+          <button class="band t-black a-indigo-d">
+            <div class="bars"><span class="b1"></span><span class="b2"></span><span class="b3"></span><span class="b4"></span></div>
+            <div class="cap"><b>炭黑</b><i>炭</i></div>
+          </button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="row">
+          <div><div class="lbl">主题色</div><div class="sub">选中的这档铺满整条胶囊，名字写在颜色里</div></div>
+          <div class="pillrow">
+            <button class="pill a-indigo"><span class="dot"></span>靛蓝</button>
+            <button class="pill ghost a-gold"><span class="dot"></span>暖金</button>
+            <button class="pill ghost a-amber"><span class="dot"></span>琥珀</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════════ 壁纸（扩展） ═══════════════ -->
+  <section class="variant">
+    <div class="vhead">
+      <span class="tag">NEW</span>
+      <span class="name">壁纸（外观页新增的一块）</span>
+      <span class="rec">按 Cindy 口径</span>
+      <span class="why">三选一（无 / 内置 / 自定义），下面是可见度与模糊两条滑杆——滑杆沿用刚改好的双色轨道。</span>
+    </div>
+    <div class="canvas">
+      <div class="sec-title">外观</div>
+
+      <div class="card">
+        <div class="row" style="margin-bottom:2px">
+          <div>
+            <div class="lbl">壁纸</div>
+            <div class="sub">铺在背景层，气泡与工具块保持不透明，主题色照常压在它上面</div>
+          </div>
+          <div class="sub">PNG · JPG · WebP ≤ 20 MB</div>
+        </div>
+        <div class="wall-grid">
+          <button class="wall">
+            <div class="img none"></div>
+            <div class="cap"><b>无</b><small>纯色底</small></div>
+          </button>
+          <button class="wall is-on">
+            <div class="img paper"></div>
+            <div class="cap"><b>宣纸纹</b><small>内置</small></div>
+          </button>
+          <button class="wall">
+            <div class="img scene"></div>
+            <div class="cap"><b>自定义…</b><small>选一张图</small></div>
+          </button>
+        </div>
+
+        <div class="slider-row">
+          <span class="sl-lbl">可见度</span>
+          <span class="track"><span class="rail"></span><span class="fill" style="width:38%"></span><span class="thumb" style="left:38%"></span></span>
+          <span class="val">38%</span>
+        </div>
+        <div class="slider-row">
+          <span class="sl-lbl">模糊</span>
+          <span class="track"><span class="rail"></span><span class="fill" style="width:26%"></span><span class="thumb" style="left:26%"></span></span>
+          <span class="val">12 px</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="row">
+          <div><div class="lbl">显示</div><div class="sub">动态 = 内置动画场景或自定义视频；窗口隐藏时暂停，跟随系统减弱动效</div></div>
+          <div class="mode-sel">
+            <button class="on">静态</button>
+            <button class="off">动态</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="note">
+    四版都能直接落到现有结构上：A/C/D 只是替换设置页那一行里的分段控件；B 需要新增一个预览面板（纯前端，预览用的就是真实气泡与工具块样式）。壁纸那一块要新增：本地图片选择（壳的路径选择器 / 浏览器上传，两套入口已有）、`--wallpaper-url` 与两条滑杆的 CSS 变量、以及"可见度/模糊"的持久化。
+  </div>
+</div>
+</body>
+</html>

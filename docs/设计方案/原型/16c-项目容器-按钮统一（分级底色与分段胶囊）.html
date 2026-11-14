@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>项目容器 · 按钮统一 C 版（分级底色 + 分段胶囊）</title>
+<style>
+  /* ── Paper token（同 web/style-01-tokens.css）──────────────────────── */
+  :root {
+    --bg: #fdf9f2;
+    --surface: #fdf9f2;
+    --surface-low: #f7f3eb;
+    --card: #f6f1e7;
+    --card-high: #ede9e0;
+    --text: #2e2b3a;
+    --text-2: #6e6b7e;
+    --text-3: #9a97a5;
+    --outline: #c8c5bc;
+    --divider: rgba(200, 197, 188, 0.55);
+    --accent: #3e4a8c;
+    --accent-soft: rgba(62, 74, 140, 0.10);
+    --accent-line: rgba(62, 74, 140, 0.35);
+    --on-accent: #ffffff;
+    --composer-border: rgba(46, 43, 58, 0.14);
+    --error: #b3564d;
+    --warn: #b07d2b;
+    --shadow-menu: 0 4px 16px rgba(46, 43, 58, 0.15);
+    --r-sm: 8px;
+    --r-md: 12px;
+    --r-lg: 16px;
+    --font: "Songti SC", "Noto Serif SC", "Source Han Serif SC", "STSong", "SimSun", "Microsoft YaHei", serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --sidebar: 232px;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--font); font-size: 14px; -webkit-font-smoothing: antialiased; }
+  button { font: inherit; cursor: pointer; }
+
+  /* ════════════════════════════════════════════════════════════════════
+     C 版：用「底色」分主次，行内动作合成一组分段胶囊。
+
+       一级  solid   深靛实底 + 白字   页面唯一主操作（添加项目 / 表单保存）
+       二级  soft    淡靛底 + 靛字     卡片内主操作（添加文件夹）
+       三级  quiet   透明 + 1px 描边   其它卡片动作（改名 / 归档项目 / 查看归档）
+       行内  seg     一整条胶囊，三格   改路径 | 设为主 | 移除（末格红字只在 hover）
+
+     主文件夹整行铺 --surface-low + 左侧 3px 靛条：行本身是"选中的那一行"，
+     不靠行内再加一堆徽标去解释。
+     ════════════════════════════════════════════════════════════════════ */
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    flex: none; white-space: nowrap;
+    border: 1px solid transparent; border-radius: var(--r-md);
+    transition: background-color .15s ease, border-color .15s ease, color .15s ease, filter .15s ease;
+  }
+  .btn.md { height: 34px; padding: 0 14px; font-size: 13px; }
+  .btn.sm { height: 28px; padding: 0 11px; font-size: 12px; }
+
+  .btn.solid { background: var(--accent); color: var(--on-accent); font-weight: 500; }
+  .btn.solid:hover { filter: brightness(1.06); }
+  .btn.soft { background: var(--accent-soft); color: var(--accent); border-color: transparent; font-weight: 500; }
+  .btn.soft:hover { background: rgba(62, 74, 140, 0.16); }
+  .btn.quiet { background: transparent; border-color: var(--outline); color: var(--text-2); }
+  .btn.quiet:hover { background: var(--surface-low); color: var(--text); border-color: var(--text-3); }
+
+  .app {
+    display: grid; grid-template-columns: var(--sidebar) minmax(0, 1fr);
+    grid-template-rows: 40px minmax(0, 1fr); align-content: start; height: 100vh;
+  }
+  .topbar {
+    grid-column: 1 / -1; display: flex; align-items: center; gap: 10px;
+    padding: 0 14px; border-bottom: 1px solid var(--divider);
+    background: var(--surface-low); font-size: 13px; color: var(--text-2);
+  }
+  .topbar .brand { color: var(--text); letter-spacing: .04em; }
+  .topbar .ic { width: 18px; height: 18px; opacity: .5; }
+
+  .side { border-right: 1px solid var(--divider); padding: 10px 0 16px; }
+  .side-sec { padding: 8px 8px 4px; }
+  .side-head { display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 8px; border-radius: var(--r-sm); font-size: 12.5px; color: var(--text-2); }
+  .side-head .name { flex: 1; }
+  .side-head .plus { width: 20px; height: 20px; display: grid; place-content: center; color: var(--text-3); font-size: 13px; }
+  .side-row { display: flex; align-items: center; gap: 6px; height: 30px; padding: 0 8px; border-radius: var(--r-sm); font-size: 12.5px; }
+  .side-row .lbl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .side-row .count { min-width: 16px; height: 15px; padding: 0 5px; display: grid; place-content: center; border-radius: 999px; background: var(--surface-low); color: var(--text-3); font-size: 10px; font-variant-numeric: tabular-nums; }
+  .side-row .act { width: 20px; height: 20px; display: grid; place-content: center; color: var(--text-3); font-size: 12px; border: 0; background: transparent; }
+  .side-row.is-current { background: var(--accent-soft); }
+  .side-icon { width: 18px; height: 18px; flex: none; color: var(--text-3); }
+  .flyout { margin: 6px 8px 4px 26px; padding: 8px; border: 1px solid var(--composer-border); border-radius: var(--r-sm); background: var(--surface); box-shadow: var(--shadow-menu); }
+  .fly-head { padding: 0 4px 6px; font-size: 11px; color: var(--text-3); }
+  .fly-row { display: flex; align-items: center; gap: 6px; padding: 5px 4px; border-radius: var(--r-sm); }
+  .fly-label { flex: 1; min-width: 0; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .fly-path { margin-top: 2px; padding-left: 10px; font-family: var(--mono); font-size: 10.5px; color: var(--text-2); overflow-wrap: anywhere; }
+
+  .main { padding: 28px 26px 40px; overflow: auto; }
+  .main-head { max-width: 980px; margin: 0 auto 18px; display: flex; align-items: baseline; justify-content: space-between; }
+  .main-title { font-size: 13px; font-weight: 500; }
+  .card { max-width: 980px; margin: 0 auto 18px; border: 1px solid var(--composer-border); border-radius: var(--r-lg); background: var(--card); }
+  .card-body { display: flex; flex-direction: column; gap: 14px; padding: 20px 24px; }
+  .card-title { font-size: 13.5px; font-weight: 500; }
+  .hint { font-size: 11.5px; line-height: 1.55; color: var(--text-3); }
+  .input { flex: 1; min-width: 0; height: 34px; padding: 0 10px; border: 1px solid var(--outline); border-radius: var(--r-md); background: var(--surface); color: var(--text); font: inherit; font-size: 12.5px; }
+  .input.mono { font-family: var(--mono); font-size: 12px; }
+  .path-row { display: flex; align-items: center; gap: 8px; }
+  .path-tag { flex: none; font-size: 11.5px; color: var(--text-3); }
+
+  .proj-head { display: flex; align-items: center; gap: 10px; }
+  .proj-name { font-size: 13.5px; font-weight: 500; }
+  .proj-meta { font-size: 11.5px; color: var(--text-3); white-space: nowrap; }
+  .proj-acts { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+
+  /* 文件夹区：一块带描边的"表"，行间只用分隔线；主行整行浅底 */
+  .roots {
+    margin-top: 4px;
+    border: 1px solid var(--divider); border-radius: var(--r-md);
+    background: var(--surface);
+    overflow: hidden;
+  }
+  .root {
+    display: grid;
+    grid-template-columns: 3px minmax(88px, 150px) minmax(0, 1fr) auto;
+    align-items: center; gap: 10px;
+    padding: 8px 12px 8px 0;
+    border-top: 1px solid var(--divider);
+  }
+  .root:first-child { border-top: 0; }
+  .root .bar { height: 100%; min-height: 26px; border-radius: 0; background: transparent; }
+  .root.is-primary { background: var(--surface); }
+  .root.is-primary .bar { background: var(--accent); }
+  .root .label { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12px; }
+  .root .label .nm { flex: 0 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; }
+  .root.is-primary .label { font-weight: 500; }
+  .root .path { font-family: var(--mono); font-size: 11.5px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .root .path.is-missing { color: var(--warn); }
+  .tag { flex: none; padding: 0 5px; height: 16px; display: inline-flex; align-items: center; border-radius: var(--r-sm); background: var(--accent-soft); color: var(--accent); font-size: 10px; line-height: 1; }
+  .tag.warn { background: rgba(176, 125, 43, 0.12); color: var(--warn); }
+  .tag.plain { background: var(--card-high); color: var(--text-3); }
+
+  /* 分段胶囊：一条胶囊装三个动作，末格外加 8px 间距、红字只在 hover */
+  .seg {
+    display: inline-flex; align-items: stretch;
+    height: 26px; flex: none;
+    border: 1px solid var(--outline); border-radius: 999px;
+    background: transparent; overflow: hidden;
+  }
+  .seg button {
+    border: 0; background: transparent; color: var(--text-2);
+    padding: 0 10px; font-size: 11.5px; white-space: nowrap;
+    transition: background-color .14s ease, color .14s ease;
+  }
+  .seg button + button { border-left: 1px solid var(--divider); }
+  .seg button:hover { background: var(--card-high); color: var(--text); }
+  .seg button.is-danger:hover { background: rgba(179, 86, 77, 0.08); color: var(--error); }
+
+  /* 编辑态：同一行，路径变输入，动作区是 保存(soft) + 取消(quiet) */
+  .root-editing .acts { display: flex; align-items: center; gap: 6px; }
+  .root-editing .seg { display: none; }
+  .root-edit-input { height: 26px; padding: 0 8px; border: 1px solid var(--accent-line); border-radius: var(--r-sm); background: var(--surface); color: var(--text); font-family: var(--mono); font-size: 11.5px; outline: none; }
+
+  .spec { max-width: 980px; margin: 22px auto 0; padding: 14px 16px; border: 1px solid var(--divider); border-radius: var(--r-md); background: var(--surface-low); }
+  .spec-title { font-size: 12px; font-weight: 500; color: var(--text-2); margin-bottom: 8px; }
+  .spec-row { display: grid; grid-template-columns: 74px 1fr; gap: 6px 10px; font-size: 11.5px; color: var(--text-2); line-height: 1.7; }
+  .spec-row .k { color: var(--text-3); }
+  .spec-row > span:nth-child(2n) { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="topbar">
+    <span class="brand">Selenite</span>
+    <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M3 9h18"/></svg>
+    <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+  </div>
+
+  <aside class="side">
+    <div class="side-sec"><div class="side-row"><svg class="side-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg><span class="lbl">总管</span></div></div>
+    <div class="side-sec">
+      <div class="side-head"><svg class="side-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="9" cy="9" r="3"/><circle cx="17" cy="11" r="2.4"/><path d="M3 19c1-3 4-4 6-4s5 1 6 4"/></svg><span class="name">执事</span><span class="plus">＋</span></div>
+      <div class="side-row"><span class="lbl" style="padding-left:26px;color:var(--text-2)">阅读助手</span></div>
+    </div>
+    <div class="side-sec">
+      <div class="side-head"><svg class="side-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 6h16v12H4z"/><path d="M8 6v12"/></svg><span class="name">对话</span><span class="plus">＋</span></div>
+      <div class="side-row" style="color:var(--text-3);font-size:11.5px">还没有对话。用 ＋ 新建一条。</div>
+    </div>
+    <div class="side-sec">
+      <div class="side-head"><svg class="side-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg><span class="name">项目</span><span class="plus">＋</span></div>
+      <div class="side-row is-current">
+        <svg class="side-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>
+        <span class="lbl">lifediary-harness</span><span class="count">4</span>
+        <button class="act">▾</button><button class="act">＋</button>
+      </div>
+      <div class="flyout">
+        <div class="fly-head">4 个文件夹</div>
+        <div class="fly-row"><span style="width:3px;height:14px;border-radius:2px;background:var(--accent)"></span><span class="fly-label">app2 · 主</span><button class="btn quiet sm" style="height:24px;padding:0 8px">浏览</button><button class="btn quiet sm" style="height:24px;padding:0 8px">打开</button></div>
+        <div class="fly-path">C:\Users\<user>\AppData\Local\Temp\lifediary-ui-check\app2\sub</div>
+        <div class="fly-row"><span style="width:3px;height:14px;border-radius:2px;background:transparent"></span><span class="fly-label">app1</span><button class="btn quiet sm" style="height:24px;padding:0 8px">浏览</button><button class="btn quiet sm" style="height:24px;padding:0 8px">打开</button></div>
+        <div class="fly-path">C:\Users\<user>\AppData\Local\Temp\lifediary-ui-check\app1</div>
+      </div>
+      <div class="side-row">
+        <svg class="side-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>
+        <span class="lbl">atlas</span><span class="count">2</span><button class="act">▾</button><button class="act">＋</button>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="main-head">
+      <div class="main-title">项目</div>
+      <button class="btn solid md">＋ 添加项目</button>
+    </div>
+
+    <section class="card">
+      <div class="card-body">
+        <div>
+          <div class="card-title">工作区根目录</div>
+          <div class="hint" style="margin-top:4px">没有项目时，助手在这里干活。它不是项目（没有名字、不能加文件夹），所以不在下面的列表里。</div>
+        </div>
+        <div class="path-row">
+          <input class="input mono" value="C:\Users\<user>\AppData\Local\Temp\lifediary-ui-check\ws" />
+          <span class="path-tag">· 默认目录</span>
+          <button class="btn solid md">保存</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-body">
+        <div class="proj-head">
+          <span class="proj-name">lifediary-harness</span>
+          <span class="proj-meta">4 个文件夹 · 无版本控制</span>
+          <div class="proj-acts">
+            <button class="btn soft sm">＋ 添加文件夹</button>
+            <button class="btn quiet sm">改名</button>
+            <button class="btn quiet sm">归档项目</button>
+          </div>
+        </div>
+
+        <div class="roots">
+          <div class="root is-primary">
+            <span class="bar"></span>
+            <span class="label"><span class="nm">app2</span> <span class="tag">主</span></span>
+            <span class="path">C:\Users\<user>\AppData\Local\Temp\lifediary-ui-check\app2\sub</span>
+            <div class="seg"><button>改路径</button></div>
+          </div>
+
+          <div class="root">
+            <span class="bar"></span>
+            <span class="label">app1</span>
+            <span class="path">C:\Users\<user>\AppData\Local\Temp\lifediary-ui-check\app1</span>
+            <div class="seg"><button>改路径</button><button>设为主</button><button class="is-danger">移除</button></div>
+          </div>
+
+          <div class="root root-editing">
+            <span class="bar"></span>
+            <span class="label">备份</span>
+            <input class="root-edit-input" value="C:\Users\<user>\AppData\Local\Temp\lifediary-ui-check\app3" />
+            <div class="acts">
+              <button class="btn soft sm">保存</button>
+              <button class="btn quiet sm">取消</button>
+            </div>
+          </div>
+
+          <div class="root">
+            <span class="bar"></span>
+            <span class="label">old-web <span class="tag warn">目录不在</span></span>
+            <span class="path is-missing"><本地盘>\old-web</span>
+            <div class="seg"><button>改路径</button><button>设为主</button><button class="is-danger">移除</button></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <div class="hint" style="max-width:980px;margin:6px auto 0">已归档的项目目录（0） <button class="btn quiet sm" style="margin-left:6px">查看归档</button></div>
+
+    <div class="spec">
+      <div class="spec-title">C 版：主次靠底色分级，行内三个动作合成一条胶囊</div>
+      <div class="spec-row">
+        <span class="k">一级</span><span><button class="btn solid sm">solid</button> 深靛实底 + 白字，页面唯一（添加项目 / 表单保存）</span>
+        <span class="k">二级</span><span><button class="btn soft sm">soft</button> 淡靛底 + 靛字，卡片内主操作（添加文件夹 / 编辑保存）</span>
+        <span class="k">三级</span><span><button class="btn quiet sm">quiet</button> 描边 + 灰字，其余卡片动作（改名 / 归档项目 / 查看归档）</span>
+        <span class="k">行内</span><span>一条 26px 胶囊装 改路径 | 设为主 | 移除，格间 1px 分隔；移除格只在 hover 变红，不常驻抢眼。<span class="swatch"></span></span>
+        <span class="k">主文件夹</span><span>整行提亮到 --surface + 左侧 3px 靛条通高 + 「主」徽标；只在主行上做这两件事，别的行不加任何徽标。</span>
+        <span class="k">容器</span><span>文件夹区收进一块描边表（radius 12），行间只留分隔线；不再让每一行像独立小卡。</span>
+      </div>
+    </div>
+  </main>
+</div>
+</body>
+</html>
