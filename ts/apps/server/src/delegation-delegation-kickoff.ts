@@ -17,6 +17,7 @@ import { TAKEOVER_HINT } from "./agent/turn-gate.ts";
 import type { DelegationSenderKind } from "./delegation-messages.ts";
 import { CHIEF_PARTNER_ID } from "./partners.ts";
 import { ProjectRef } from "./projects.ts";
+import { taskConversationExternalId } from "./task-conversation.ts";
 import { WorkSettlementInput } from "./work-record.ts";
 import { DelegationPhase } from "@lifediary/shared";
 import path from "node:path";
@@ -79,6 +80,21 @@ export interface DelegationReport {
 	 * 汇报正文与镜像不动；没有任务目录的旧结果缺省无此字段。
 	 */
 	productDirs?: string[];
+	/**
+	 * 失败回执的可续接信息（2026-11-13 工具层结果契约化批次二，ZCode 教训 §1.4：
+	 * 父模型拿不到 agentId，跑几十步的子代理无法续接）。只在 phase = failed / aborted 时带：
+	 * - id：子单号（uuid），GET /api/v1/tickets/:id 可查，父模型可据此查进度 / 续派；
+	 * - conversationId：子单任务专线会话的对外 id（`task-<id>`，确定性；未建过时读详情
+	 *   自然 404，不拉 harness）——续接这个会话就能看到子代理已跑出的过程；
+	 * - partialReport：失败前的最后一行结论（已折行、截到 160 字），交接信息与错误对象分离。
+	 * 交接信息（给模型）与错误对象（给系统）分离：UI / 事件流不多字段，旧客户端忽略即可
+	 * （回执 JSON 旧字段只增不改，手机端零改动）。
+	 */
+	resume?: {
+		id: string;
+		conversationId: string;
+		partialReport: string;
+	};
 }
 
 export interface DelegationMirrorEntry {
@@ -372,6 +388,15 @@ export function formatReport(
 				: phase === "aborted"
 					? `已中断：${result.line}`
 					: `未完成：${result.line}`;
+	// 可续接信息（2026-11-13 批次二）：只挂在失败 / 中断单上；成功与 needs_you 不带（验收口径）。
+	const resume =
+		phase === "failed" || phase === "aborted"
+			? {
+					id: result.ticketId,
+					conversationId: taskConversationExternalId(result.ticketId),
+					partialReport: truncate(result.line, 160),
+				}
+			: undefined;
 	return {
 		ticketId: result.ticketId,
 		domain,
@@ -380,6 +405,7 @@ export function formatReport(
 		...(result.tasks?.some((task) => task.dir)
 			? { productDirs: result.tasks.map((task) => task.dir).filter(Boolean).slice(0, 3) }
 			: {}),
+		...(resume ? { resume } : {}),
 	};
 }
 

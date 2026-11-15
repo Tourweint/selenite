@@ -142,8 +142,13 @@ export function buildWakePrompt(reports: DelegationReport[]): string {
 	const lines = reports.map((report) => {
 		const line = `- 单 ${report.ticketId.slice(0, 6)}（${report.phase}）：${report.text}`;
 		// 批 31：有产物目录才追加落点行；无指针时逐字节与改动前一致。
-		if (!report.productDirs?.length) return line;
-		return `${line}\n  落点：${report.productDirs.join("、")}`;
+		let out = report.productDirs?.length ? `${line}\n  落点：${report.productDirs.join("、")}` : line;
+		// 批次二（2026-11-13 工具层结果契约化）：失败 / 中断单带可续接信息，
+		// 提醒父模型子会话还在、可续接——不强迫，只给指针。
+		if (report.resume) {
+			out += `\n  续接：子单 ${report.resume.id}，子会话 ${report.resume.conversationId} 仍在，已知进展：${report.resume.partialReport}`;
+		}
+		return out;
 	});
 	return [header, ...lines].join("\n");
 }

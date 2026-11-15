@@ -325,6 +325,24 @@ test("formatReport 填充产物指针（批 31）：截 3 个、无目录时缺�
 	assert.equal("productDirs" in emptyDirs, false, "目录全空 → 缺省无字段");
 });
 
+test("formatReport 失败/中断单带 resume（批次二），成功与 needs_you 不带", () => {
+	const uuid = "3f2a91ff-ffff-4fff-8fff-ffffffffffff";
+	const failed = formatReport(result({ ticketId: uuid, status: "failed", line: "编译炸了：第 3 步类型错误" }), "前端");
+	assert.ok(failed.resume, "失败单有 resume");
+	assert.equal(failed.resume?.id, uuid);
+	assert.match(failed.resume?.id ?? "", /^[0-9a-f-]{36}$/i, "resume.id 为 uuid");
+	assert.equal(failed.resume?.conversationId, `task-${uuid}`, "子会话对外 id 是 task-<id>");
+	assert.ok(failed.resume?.partialReport.includes("类型错误"), "partialReport 带失败前已知进展");
+
+	const aborted = formatReport(result({ ticketId: uuid, status: "aborted", line: "被打断" }), "前端");
+	assert.ok(aborted.resume, "中断单同样可续接");
+
+	const done = formatReport(result({ ticketId: uuid, status: "done", line: "好了" }), "前端");
+	assert.equal("resume" in done, false, "成功单无 resume");
+	const needsYou = formatReport(result({ ticketId: uuid, status: "needs_you", line: "问你" }), "前端");
+	assert.equal("resume" in needsYou, false, "needs_you 无 resume");
+});
+
 test("SSE 编解码能往返 delegate / attention 的新字段", () => {
 	const event: ChatEvent = {
 		type: "delegate",

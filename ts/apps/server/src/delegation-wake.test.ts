@@ -147,6 +147,30 @@ test("buildWakePrompt：带产物指针追加落点行，无指针逐字节同�
 	assert.ok(!legacy.includes("\n  落点："), "无指针不出现落点续行（固定头里的「落点」二字除外）");
 });
 
+test("buildWakePrompt：失败单带续接行（批次二），成功单不加", () => {
+	const withResume = buildWakePrompt([
+		{
+			ticketId: "3f2a91ff-ffff-4fff-8fff-ffffffffffff",
+			domain: "前端",
+			phase: "failed",
+			text: "示例失败汇报",
+			resume: {
+				id: "3f2a91ff-ffff-4fff-8fff-ffffffffffff",
+				conversationId: "task-3f2a91ff-ffff-4fff-8fff-ffffffffffff",
+				partialReport: "已完成前两步，第三步类型错误",
+			},
+		},
+	]);
+	assert.ok(
+		withResume.includes("\n  续接：子单 3f2a91ff-ffff-4fff-8fff-ffffffffffff，子会话 task-3f2a91ff-ffff-4fff-8fff-ffffffffffff 仍在，已知进展：已完成前两步"),
+		"续接行带子单号、子会话与部分报告",
+	);
+	const noResume = buildWakePrompt([
+		{ ticketId: "8c04d2", domain: "后端", phase: "done", text: "示例汇报" },
+	]);
+	assert.ok(!noResume.includes("续接："), "成功单不出现续接行");
+});
+
 test("collectPending：取走即清空、同会话合并、跨会话互不串", () => {
 	const store = new Map<number, DelegationReport[]>([
 		[1, [report("a"), report("b")]],
