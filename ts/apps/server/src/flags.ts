@@ -82,6 +82,8 @@ export const FLAG_DEFS: FlagDef[] = [
 	{ key: "CHANCELLOR_ENABLED", values: ["true", "false"], defaultValue: "true", hot: false },
 	// 派活完成即唤醒（2026-11-10 批 29）：消费处每次 flush 懒读 env，所以 hot:true。
 	{ key: "DELEGATION_WAKE_ENABLED", values: ["true", "false"], defaultValue: "true", hot: true },
+	// 工具结果投影总开关（2026-11-13 工具层结果契约化 §5.4 回滚开关 2）：消费处每次 execute 懒读 env，hot:true。
+	{ key: "TOOL_PROJECTION", values: ["true", "false"], defaultValue: "true", hot: true },
 	{ key: "TOPICS_ENABLED", values: ["true", "false"], defaultValue: "true", hot: false },
 	// 结构化提问（2026-11-09）：工具注册在启动时冻结，所以 hot:false。
 	{ key: "AGENT_ASK_USER", values: ["true", "false"], defaultValue: "true", hot: false },

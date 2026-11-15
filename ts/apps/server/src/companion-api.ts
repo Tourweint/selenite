@@ -423,6 +423,7 @@ export function mountCompanions(app: Hono): void {
 					domain?: unknown;
 					avatar?: unknown;
 					dispatchAuthority?: unknown;
+				tool_projection?: unknown;
 					currentGoal?: unknown;
 					tagline?: unknown;
 					diary?: unknown;
@@ -522,6 +523,16 @@ export function mountCompanions(app: Hono): void {
 		if (body?.dispatchAuthority !== undefined && typeof body.dispatchAuthority !== "boolean") {
 			return c.json({ error: "bad_request", message: "dispatchAuthority 必须是布尔值" }, 400);
 		}
+		// 工具结果投影三态（2026-11-13 工具层结果契约化 §5.2）：省略 = 不改；null = 恢复跟随默认；
+		// 1 = 强制开；0 = 强制关。只收这三个值，不认字符串/布尔——避免「false」这种假值把三态搞乱。
+		if (
+			body?.tool_projection !== undefined &&
+			body.tool_projection !== null &&
+			body.tool_projection !== 0 &&
+			body.tool_projection !== 1
+		) {
+			return c.json({ error: "bad_request", message: "tool_projection 必须是 0、1 或 null" }, 400);
+		}
 		// 当前目标（2026-11-08 刀二 E4）：省略 = 不改；null / 空串（含全空白）= 清除；
 		// 字符串 = 设置（trim 后存）。不版本化——目标不是身份，不 bump 版本、不动 SOUL / 契约。
 		let currentGoal: string | null | undefined;
@@ -564,6 +575,10 @@ export function mountCompanions(app: Hono): void {
 		if (!updated) return c.json({ ok: false, error: "not_found" }, 404);
 		// 派发权（2026-11-06）：只对带 domain 的执事有意义；普通执事 400。
 		let refreshed = updated;
+		if (body?.tool_projection !== undefined) {
+			refreshed =
+				store().setToolProjection(id, body.tool_projection as 1 | 0 | null) ?? refreshed;
+		}
 		if (body?.dispatchAuthority !== undefined) {
 			if (!updated.domain) {
 				return c.json({ error: "bad_request", message: "该执事不带 domain，没有派发权可切" }, 400);
@@ -983,7 +998,7 @@ function personaView(partner: PartnerRow): PartnerPersonaView {
 }
 
 /** 对外投影：只给对外字段。canonical 会话的内部自增 id 不出网（对外 id 一律 uuid）。 */
-function projection(partner: { id: string; name: string; status: string; currentVersion: number | null; createdAt: string; updatedAt: string; domain?: string | null; avatar?: string | null; dispatchAuthority?: boolean; tagline?: string | null; diary?: boolean }) {
+function projection(partner: { id: string; name: string; status: string; currentVersion: number | null; createdAt: string; updatedAt: string; domain?: string | null; avatar?: string | null; dispatchAuthority?: boolean; toolProjection?: 1 | 0 | null; tagline?: string | null; diary?: boolean }) {
 	return {
 		id: partner.id,
 		name: partner.name,
@@ -995,6 +1010,8 @@ function projection(partner: { id: string; name: string; status: string; current
 		...(partner.domain ? { domain: partner.domain } : {}),
 		// 派发权（2026-11-06 执事派发权开关，纯增量）：只对带 domain 的执事给，默认关。
 		...(partner.domain ? { dispatchAuthority: partner.dispatchAuthority } : {}),
+		// 工具结果投影三态（2026-11-13 工具层结果契约化 §5.2，纯增量）：null = 跟随默认；旧客户端忽略即可。
+		toolProjection: partner.toolProjection ?? null,
 		// 纯增量（2026-11-06 B1）：未设置给 null，前端据此回落名字首字。
 		avatar: partner.avatar ?? null,
 		// 纯增量（2026-11-12 手机对话身份方案 §四）：列表与详情都带；未设置给 null。

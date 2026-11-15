@@ -203,6 +203,11 @@ function pfMarkup(partnerId, partner, detail) {
   const contractVersion = detail.contractVersion ?? null;
   const goal = detail.currentGoal != null ? String(detail.currentGoal) : "";
   const hasDispatch = typeof partner.dispatchAuthority === "boolean";
+  // 工具结果投影三态（2026-11-13 工具层结果契约化 §5.2）：null = 跟随默认；1 = 强制开；0 = 强制关。
+  const projection = partner.toolProjection === 1 || partner.toolProjection === 0 ? partner.toolProjection : null;
+  const projectionDefaultOn = Boolean(domain);
+  const PROJECTION_LABELS = { 1: "强制开", 0: "强制关", null: `跟随默认${projectionDefaultOn ? "·开" : "·关"}` };
+  const projectionLabel = PROJECTION_LABELS[projection];
   const diary = partner.diary === true;
   const isChief = partnerId === "chief";
   const chain = Array.isArray(detail.modelChain) ? detail.modelChain : [];
@@ -347,6 +352,13 @@ function pfMarkup(partnerId, partner, detail) {
                  </div>`
               : ""
           }
+          <div class="pf-row">
+            <div class="pf-row-label">结果契约 <em class="pf-tag" id="pf-projection-state">${esc(projectionLabel)}</em></div>
+            <button class="switch" type="button" role="switch" id="pf-projection"
+                    aria-checked="${projection === 1 || (projection === null && projectionDefaultOn) ? "true" : "false"}" aria-label="结果契约">
+              <span class="switch-thumb" aria-hidden="true"></span>
+            </button>
+          </div>
           <div class="pf-row">
             <div class="pf-row-label">日记执事</div>
             <button class="switch" type="button" role="switch" id="pf-diary"
@@ -730,6 +742,42 @@ function pfWireSwitches(root, partnerId, partner) {
       if (error.message !== "forbidden") toast(`没切成：${error.message}`);
     } finally {
       dispatch.disabled = false;
+    }
+  });
+
+  // 结果契约三态（2026-11-13 工具层结果契约化 §5.2）：点一下循环 跟随 → 开 → 关 → 跟随。
+  const projection = root.querySelector("#pf-projection");
+  projection?.addEventListener("click", async () => {
+    const current = partner.toolProjection === 1 || partner.toolProjection === 0 ? partner.toolProjection : null;
+    const next = current === null ? 1 : current === 1 ? 0 : null;
+    projection.disabled = true;
+    try {
+      const response = await request(`/api/v1/partners/${encodeURIComponent(partnerId)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ tool_projection: next }),
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        toast(`没切成：${data.message || data.error || response.status}`);
+        return;
+      }
+      partner.toolProjection = next;
+      projection.setAttribute(
+        "aria-checked",
+        next === 1 || (next === null && Boolean(partner.domain)) ? "true" : "false",
+      );
+      const stateLabel = projection.parentElement?.querySelector("#pf-projection-state");
+      if (stateLabel) {
+        stateLabel.textContent =
+          next === 1 ? "强制开" : next === 0 ? "强制关" : `跟随默认${partner.domain ? "·开" : "·关"}`;
+      }
+      const cached = state.partners.find((item) => item.id === partnerId);
+      if (cached) cached.toolProjection = next;
+      toast("结果契约已更新");
+    } catch (error) {
+      if (error.message !== "forbidden") toast(`没切成：${error.message}`);
+    } finally {
+      projection.disabled = false;
     }
   });
 

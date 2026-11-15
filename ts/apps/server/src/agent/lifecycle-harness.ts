@@ -56,6 +56,7 @@ import { contentText } from "@earendil-works/pi-ai";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
+import { setProjectionDeps, wrapShellTool } from "../tool-projection.ts";
 import type { Extension, PromptSection, ToolHookCall } from "@earendil-works/pi-durable";
 import { GenerationTask, Harness, LiveDoc, ToolTask, createRegistry, defineExtension, hook } from "@earendil-works/pi-durable";
 import { mkdirSync } from "node:fs";
@@ -420,8 +421,15 @@ async function openHarness(): Promise<Harness> {
 	const storage = await openNodeSqliteStorage(DB_PATH);
 
 	const registry = createRegistry();
-	// pi 自带的那套读写改跑命令：走执行环境，比我们自己写的完整
-	registry.install(CodingTools);
+	// pi 自带的那套读写改跑命令：走执行环境，比我们自己写的完整。
+	// bash / powershell 换包装版（2026-11-13 工具层结果契约化 §5.1）：注册表只装一份，
+	// 工具清单与顺序不变（保 prompt cache 前缀稳定）；开关关时包装器逐字节透传。
+	registry.install({
+		...CodingTools,
+		tools: CodingTools.tools?.map((tool) =>
+			tool.name === "bash" || tool.name === "powershell" ? wrapShellTool(tool as never) : tool,
+		),
+	});
 	const lifediaryTools = createTools({
 		memory: memoryEngine,
 		scopeOf,
@@ -477,6 +485,28 @@ async function openHarness(): Promise<Harness> {
 			personaAskEnabled() && askPersonaAvailable()
 				? (question, options) => askPersona(question, options)
 				: null,
+	});
+	// 工具结果投影挂载判定依赖（2026-11-13 工具层结果契约化 §5）：store 与 ChatKinds 现查，
+	// tool-projection 只收纯函数。getPartner 读不到（无 partners 行）时按 null 走默认判定。
+	setProjectionDeps({
+		partnerIdOfSession: (sessionId) => {
+			if (!COMPANIONS_ENABLED) return null;
+			try {
+				return partnersStore().partnerIdOfSession(sessionId);
+			} catch {
+				return null;
+			}
+		},
+		getPartner: (id) => partnersStore().get(id),
+		chatKindOf: async (sessionId) => {
+			try {
+				const harness = await getHarness();
+				const kinds = await harness.snapshot(ChatKinds, CTX);
+				return kinds?.byInternal?.[String(sessionId)] ?? null;
+			} catch {
+				return null;
+			}
+		},
 	});
 	registry.install(
 		(lifediaryExt = defineExtension({

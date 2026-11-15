@@ -36,6 +36,11 @@ export interface PartnerRow {
 	 */
 	dispatchAuthority: boolean;
 	/**
+	 * 工具结果投影三态（2026-11-13 工具层结果契约化 §5.2）：null = 跟随默认；1 = 强制开；0 = 强制关。
+	 * **不版本化**（不是身份，同 dispatchAuthority 口径）。
+	 */
+	toolProjection: 1 | 0 | null;
+	/**
 	 * 当前目标（2026-11-08 员工人格化刀二 E4）：这一阵子在奔什么，用户 / 总管可改。
 	 * **不版本化**（不是身份，是现取现用的状态），只进 detail 端点与 PATCH，
 	 * 列表形状不变（字段经 shared 暴露在刀三）。空串 / null = 清除。

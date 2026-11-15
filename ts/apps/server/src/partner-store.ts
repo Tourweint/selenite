@@ -41,6 +41,8 @@ export class PartnersStore {
 				domain          TEXT,
 				avatar          TEXT,
 			dispatch_authority INTEGER NOT NULL DEFAULT 0,
+			// 工具结果投影三态（2026-11-13 工具层结果契约化 §5.2）：NULL = 跟随默认；1 = 强制开；0 = 强制关。
+			tool_projection  INTEGER,
 			current_goal    TEXT,
 			tagline         TEXT,
 			diary           INTEGER NOT NULL DEFAULT 0,
@@ -138,6 +140,11 @@ export class PartnersStore {
 		// 派发权列（2026-11-06 执事派发权开关）：旧库补列，旧记录读出来是 false（默认关）。
 		if (!columns.some((column) => column.name === "dispatch_authority")) {
 			this.db.exec("ALTER TABLE partners ADD COLUMN dispatch_authority INTEGER NOT NULL DEFAULT 0");
+		}
+		// 工具结果投影三态列（2026-11-13 工具层结果契约化 §5.2）：旧库补 nullable 列，
+		// 老记录读出来是 null（= 跟随默认判定）。照 dispatch_authority 的补列先例。
+		if (!columns.some((column) => column.name === "tool_projection")) {
+			this.db.exec("ALTER TABLE partners ADD COLUMN tool_projection INTEGER");
 		}
 		// 当前目标列（2026-11-08 员工人格化刀二 E4）：旧库补 nullable 列，
 		// 老记录读出来是 null（= 没设目标），不炸、不补数据、不版本化。
@@ -329,6 +336,19 @@ export class PartnersStore {
 		this.db
 			.prepare("UPDATE partners SET dispatch_authority = ?, updated_at = ? WHERE id = ?")
 			.run(enabled ? 1 : 0, new Date().toISOString(), id);
+		return this.get(id);
+	}
+
+	/**
+	 * 设置工具结果投影三态（2026-11-13 工具层结果契约化 §5.2）：与 setDispatchAuthority 同构，
+	 * 但值可空——null = 恢复跟随默认（§5.3）。形状归一（非 0/1 一律当 null）在这里收口。
+	 * 不存在返回 null，由调用方映射 404。
+	 */
+	setToolProjection(id: string, value: 1 | 0 | null): PartnerRow | null {
+		if (!this.get(id)) return null;
+		this.db
+			.prepare("UPDATE partners SET tool_projection = ?, updated_at = ? WHERE id = ?")
+			.run(value === 1 || value === 0 ? value : null, new Date().toISOString(), id);
 		return this.get(id);
 	}
 

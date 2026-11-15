@@ -74,6 +74,14 @@ function toPartner(row: Record<string, unknown>): PartnerRow {
 		domain: row.domain === null || row.domain === undefined ? null : String(row.domain),
 		avatar: row.avatar === null || row.avatar === undefined ? null : String(row.avatar),
 		dispatchAuthority: Number(row.dispatch_authority ?? 0) !== 0,
+		toolProjection:
+			row.tool_projection === null || row.tool_projection === undefined
+				? null
+				: Number(row.tool_projection) === 1
+					? 1
+					: Number(row.tool_projection) === 0
+						? 0
+						: null,
 		currentGoal:
 			row.current_goal === null || row.current_goal === undefined
 				? null
