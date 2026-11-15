@@ -11,9 +11,20 @@ import {
 	partnersStore,
 	resolvePartnerScope,
 } from "../partners.ts";
-import { createSkillStore, resolveSkillsDir, type SkillStore } from "../skills.ts";
+import { createSkillStore, resolveSkillsDir, skillsIndexSummaryChars, type SkillStore } from "../skills.ts";
 import { getSkillState, skillStateEnabled } from "../skill-state.ts";
 import { proactiveForTurn } from "../memory-proactive.ts";
+import { memoryInjectDedupeEnabled, memoryInjectLimit, memoryInjectMaxChars } from "../memory-inject.ts";
+import {
+	partnerProjectMemoryEnabled,
+	projectMemoryGateEnabled,
+} from "../partner-contract.ts";
+import {
+	composeProjectRecallScopes,
+	personaProjectIdsOfConversation,
+	projectNameOf,
+	projectScopeOfConversation,
+} from "./project-scope.ts";
 
 /**
  * 派活能力（chancellor）是否装。
@@ -125,21 +136,35 @@ const SKILLS_DIRS: string[] = resolvedSkills.dirs.map((source) => source.dir);
 // 技能启停位（2026-11-09 用户拍板：默认全关，界面上开）。SKILL_STATE=false 逃生门 = 回到全进索引。
 // 注意 getSkillState() 在闭包里懒取（别在模块顶层解构）——首次调用发生在请求期，.env 已就绪。
 const skillVisible = (name: string): boolean =>
-	skillStateEnabled() && getSkillState().isEnabled(name);
+	!skillStateEnabled() || getSkillState().isEnabled(name);
+
+// 2026-11-15 按人可见：全局开 || 该人覆盖开。SKILL_STATE=false 逃生门仍 = 全进索引。
+const skillVisibleFor = (partnerId: string, name: string): boolean =>
+	!skillStateEnabled() || getSkillState().isEnabledFor(partnerId, name);
 
 export const skillStore: SkillStore | null = (() => {
 	// 主对话（总管）技能（批次D D1）：总管技能目录优先、全局 skills/ 兜底，同名时总管覆盖全局
 	// （createSkillStore 对目录数组按先到先得合并）。CHIEF_PARTNER=false 时只留全局目录 = 改动前。
 	if (chiefPartnerEnabled()) {
 		try {
-			return createSkillStore([chiefSkillsDir(), ...SKILLS_DIRS], { visible: skillVisible });
+			return createSkillStore([chiefSkillsDir(), ...SKILLS_DIRS], {
+				visible: skillVisible,
+				visibleFor: skillVisibleFor,
+				// 索引摘要截断（2026-11-15 上下文预算批）：传函数 = 每次首渲染现读 env，
+				// 界面「行为开关」改完，新开的会话立即按新值渲染（老会话按冻结口径不变）。
+				indexSummaryChars: skillsIndexSummaryChars,
+			});
 		} catch (error) {
 			const detail = error instanceof Error ? error.message : String(error);
 			console.warn(`总管技能目录加载失败，回落全局技能: ${detail}`);
 		}
 	}
 	try {
-		return createSkillStore(SKILLS_DIRS, { visible: skillVisible });
+		return createSkillStore(SKILLS_DIRS, {
+			visible: skillVisible,
+			visibleFor: skillVisibleFor,
+			indexSummaryChars: skillsIndexSummaryChars,
+		});
 	} catch (error) {
 		const detail = error instanceof Error ? error.message : String(error);
 		console.warn(`技能目录加载失败，本次无技能可用: ${detail}`);
@@ -209,19 +234,51 @@ export function recallContext(conversationId: number, text: string): string {
 		if (partnersStore().isGroupSession(conversationId)) return "";
 		// 执事会话（批次B B1）：global + 执事键空间 + 本会话三条都进候选；
 		// 键空间过滤是 store 的硬过滤（scope IN），执事键空间外的记录不会被召回。
+		// 项目记忆（2026-11-15 项目记忆方案）：会话归属项目时项目键空间也进候选——
+		// 项目口径只在聊这个项目的会话里浮出来，别的会话零打扰。
+		// 人格挂载（2026-11-15 跟人走立项、同日多挂载方案扩化）：档案勾选的"负责项目"
+		// 对该人格的全部对话生效——但只保证**可达**，不整包搬进上下文：
+		// 绑定项目全权进池；其余挂载项目走 gatedScopes（字面命中才进候选，"聊到才注入"
+		// 是硬规则不是打分巧合）。worker 跟文件夹走（上面的 project），两层互不干扰。
+		// PROJECT_MEMORY_GATE=false 退回"挂载全权进池"（跟人走当日形态）。
 		const partner = partnerScopeOf(conversationId);
+		const project = projectScopeOfConversation(conversationId);
+		const mounted = personaProjectIdsOfConversation(conversationId);
+		// 项目 scope 组装收在纯函数里（可单测）：绑定全权进池，其余挂载走闸门。
+		const boundProjectId = project?.type === "project" ? project.id : null;
+		const { fullKeys: mountedFullKeys, gatedKeys } = composeProjectRecallScopes(
+			boundProjectId,
+			mounted,
+			projectMemoryGateEnabled(),
+		);
+		// 注入预算（2026-11-15 追加批）：原先是 memory 包硬编码的 8 条 / 1200 字，
+		// 偏好攒满 8 条后其余记忆（含项目记忆）一条进不来——默认放宽到 16 条 / 2000 字，
+		// MEMORY_INJECT_LIMIT / MEMORY_INJECT_MAX_CHARS 可调，显式设回 8/1200 即旧形态。
 		return memoryEngine.buildContext(
 			{
 				text,
 				scopes: [
 					"global",
 					...(partner ? [scopeKey(partner)] : []),
+					...(project ? [scopeKey(project)] : []),
+					...mountedFullKeys,
 					scopeKey({ type: "session", id: String(conversationId) }),
 				],
+				...(gatedKeys.length > 0 ? { gatedScopes: gatedKeys } : {}),
+				limit: memoryInjectLimit(),
 			},
 			// 「也许值得提起」（2026-11-10 批 17 §二）：默认关；执事轮不注入，
 			// 免得执事在干活时被旧事带走（总开关与执事判断都在 memory-proactive.ts）。
-			{ proactive: proactiveForTurn(partner !== null) },
+			{
+				proactive: proactiveForTurn(partner !== null),
+				maxChars: memoryInjectMaxChars(),
+				// 召回后去重（2026-11-15）：同一件事的多种说法只留分数最高的一条，
+				// 别让复读占名额。MEMORY_INJECT_DEDUPE=false 一行回滚。
+				dedupe: memoryInjectDedupeEnabled(),
+				// 项目来源的记忆行带项目名（2026-11-15 多挂载）：跨项目候选同池时
+				// 模型才知道这条口径说的是哪个项目。解析不出名字 → 旧格式。
+				scopeLabel: (key) => projectNameOf(key.slice("project:".length)),
+			},
 		);
 	} catch (error) {
 		const detail = error instanceof Error ? error.message : String(error);
@@ -292,10 +349,66 @@ function memoryEntry(text: string): InjectionEntry {
 	};
 }
 
-/** 聊天记忆召回：每轮现算，空串不注（与改造前 `if (memory)` 同口径）。 */
+/**
+ * 聊天记忆召回：每轮现算，空串不注（与改造前 `if (memory)` 同口径）。
+ *
+ * 2026-11-15 人设页打磨二轮：这一位显式关掉「记忆」注入时（`persona_switches.memoryRecallEnabled=false`）
+ * 整段不注——只关"自动带记忆"这一半，`recall` 工具照旧能主动查。解析不到执事（普通会话）
+ * 或读库失败都不拦（宁可按旧行为带上记忆）。
+ */
 export const memoryRecallProvider: InjectionProvider = (ctx) => {
+	if (memoryRecallOff(Number(ctx.conversationId))) return undefined;
 	const text = recallContext(Number(ctx.conversationId), ctx.userText ?? "");
 	return text ? memoryEntry(text) : undefined;
+};
+
+/**
+ * 自动记忆注入是否被关（父子两级，2026-11-16）：
+ *   父 = 全局总闸 `PARTNER_MEMORY_RECALL`（设置 → 插件；关 = 所有会话都不自动带）；
+ *   子 = 该会话所属执事/总管的 `persona_switches.memoryRecallEnabled === false`（默认开）。
+ * 读不到 / 不是执事会话 / 查库失败 → 只受父闸管（宁可按旧行为带上记忆）。
+ */
+function memoryRecallOff(conversationId: number): boolean {
+	if ((process.env.PARTNER_MEMORY_RECALL?.trim() || "true").toLowerCase() === "false") return true;
+	try {
+		const partnerId = partnersStore().partnerIdOfSession(conversationId);
+		if (!partnerId) return false;
+		return partnersStore().get(partnerId)?.personaSwitches.memoryRecallEnabled === false;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * 负责项目索引（2026-11-15 项目记忆多挂载）：一行可达性感知。
+ *
+ * 挂载项目的记忆平时不整包进上下文（聊到才浮出，闸门在 recallContext）——模型得
+ * 先知道"自己负责哪几摊"，才会在该查的时候去 recall、该记的时候指名写。
+ * 一行几十个字，杂事聊天零负担。全名解析不出（项目库没接线 / 项目刚删）就不注。
+ */
+export const projectIndexProvider: InjectionProvider = (ctx) => {
+	if (ctx.group) return undefined;
+	if (!partnerProjectMemoryEnabled()) return undefined;
+	const mounted = personaProjectIdsOfConversation(Number(ctx.conversationId));
+	if (mounted.length === 0) return undefined;
+	const names = mounted
+		.map((id) => projectNameOf(id))
+		.filter((name): name is string => Boolean(name));
+	if (names.length === 0) return undefined;
+	return {
+		id: "project_index",
+		text: [
+			`你负责的项目：${names.join("、")}。`,
+			"聊到哪个项目，相关的项目记忆会自动想起；拿不准就用 recall 主动查。",
+			// 多挂载才需要指名：单挂载时 remember scope=project 自动落到唯一那个。
+			...(mounted.length > 1
+				? ["要记某个项目的口径（怎么构建 / 部署、踩过的坑），用 remember 的 project 参数指名写。"]
+				: []),
+		].join("\n"),
+		order: INJECTION_ORDER.project_index,
+		scope: "turn",
+		channel: "message",
+	};
 };
 
 /**

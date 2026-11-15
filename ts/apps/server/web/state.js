@@ -29,6 +29,9 @@ const state = {
   selfNavHash: "",
   // 正在 open 的执事（防双击；同一个执事并发只发一次）
   partnerOpening: new Set(),
+  // 任务专线会话（2026-11-15 侧栏按创建者分组）：/agent/chats 的增量 tasks 键；
+  // 回滚开关关着 / 老服务端没有该键时为空数组 → 侧栏回旧版平铺
+  taskChats: [],
   sending: false,
   stopRequested: false,
   stick: true,

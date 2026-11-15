@@ -92,18 +92,20 @@
    旧的 .mem-* / .mem-prop-* 继续给旧页和整理建议卡复用。 */
 
 .mem-a-head-actions {
-  display: flex; align-items: center; gap: 6px;
+  display: flex; align-items: center; gap: 8px;
 }
-.mem-a-head-actions .mem-act { font-size: 12px; }
+/* 2026-11-15：导入与整理记忆并排，统一 32px 高 / 12.5px 字 / 12px 横向内边距。
+   只保留“ghost vs 实心”的主次差别，不再让高度和字号各走一套。 */
+.mem-a-head-actions .mem-act,
 .mem-a-consolidate {
-  display: inline-flex; align-items: center; gap: 6px;
-  height: 32px; padding: 0 14px;
+  height: 32px; padding: 0 12px;
+  font-size: 12.5px; border-radius: var(--r-md);
 }
-.mem-a-q {
-  width: 15px; height: 15px; border-radius: 50%;
+.mem-a-head-actions .mem-act {
   display: inline-flex; align-items: center; justify-content: center;
-  background: rgba(255, 255, 255, .20);
-  font-size: 9.5px; line-height: 1;
+}
+.mem-a-consolidate {
+  display: inline-flex; align-items: center;
 }
 
 .mem-a-overview {
@@ -171,7 +173,7 @@
 .mem-a-props-list { display: flex; flex-direction: column; gap: 10px; padding: 10px 16px 14px; }
 .mem-a-props-list .mem-prop { margin: 0; }
 
-.mem-a-toolbar { display: flex; align-items: center; gap: 8px; margin: 20px 0 10px; }
+.mem-a-toolbar { display: flex; align-items: center; gap: 8px; margin: 0 0 10px; }
 .mem-a-search {
   flex: 1 1 auto; min-width: 0; height: 34px;
   display: flex; align-items: center; gap: 8px;
@@ -328,7 +330,8 @@
 
 /* 2026-11-14 一排人：我的记忆在前，各执事在后，各自带条数。多了横向滑，不换行。 */
 .mem-a-people {
-  display: flex; flex-wrap: nowrap; gap: 6px; margin: 0 0 14px;
+  /* 2026-11-15 搜索条上收：边距归零，与上面分类的间距交给 .set-sec 的 14px 统一节奏 */
+  display: flex; flex-wrap: nowrap; gap: 6px; margin: 0;
   overflow-x: auto; scrollbar-width: none;
 }
 .mem-a-people::-webkit-scrollbar { display: none; }
@@ -368,16 +371,145 @@
   color: var(--text-3); font-size: 12px; font-variant-numeric: tabular-nums;
 }
 
-/* 导入弹窗（2026-11-15）：本机来源行 + 文件行，比 mem-pick-row 多一层结果行，无 pointer */
-.mem-import-row {
+/* 导入记忆弹窗（2026-11-15 第二轮）：全量 Agent 清单，勾选小方框 + 底部一键导入 */
+.mem-import-panel { display: flex; flex-direction: column; }
+.mem-import-loading { padding: 4px 0 2px; }
+.mem-import-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 0 0 6px;
+}
+.mem-import-summary { flex: 1 1 auto; color: var(--text-2); font-size: 12.5px; }
+.mem-import-summary b {
+  color: var(--text); font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums;
+}
+.mem-import-summary span { color: var(--text-3); }
+.mem-import-tip { margin: 0 0 10px; }
+.mem-import-empty { margin: 2px 0 4px; }
+.mem-import-sub {
+  display: block; margin: 14px 0 7px;
+  color: var(--text-3); font-size: 11.5px; line-height: 1.5;
+}
+.mem-import-grid {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;
+}
+/* 同一 Agent 的全局/项目来源：折叠成一张组卡，点组头展开，组内再分两张小方框。 */
+.mem-import-family {
+  grid-column: 1 / -1;
+  border: 1px solid var(--divider); border-radius: 10px;
+  background: var(--surface-low); overflow: hidden;
+}
+.mem-import-family-head {
+  list-style: none; display: flex; align-items: center; gap: 8px;
+  min-height: 44px; padding: 9px 11px;
+  cursor: pointer; user-select: none;
+}
+.mem-import-family-head::-webkit-details-marker { display: none; }
+.mem-import-family-head:hover { background: var(--surface); }
+.mem-import-family-chev {
+  flex: none; width: 12px; color: var(--text-3);
+  font-size: 13px; line-height: 1;
+}
+.mem-import-family-chev::before { content: "▸"; }
+.mem-import-family[open] .mem-import-family-chev::before { content: "▾"; }
+.mem-import-family-name {
+  flex: 0 1 auto; min-width: 0;
+  color: var(--text); font-size: 13px; line-height: 1.35; font-weight: 500;
+}
+.mem-import-family-count {
+  flex: none; margin-left: auto;
+  color: var(--text-2); font-size: 11.5px; font-weight: 500;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.mem-import-family-scopes {
+  flex: none; color: var(--text-3); font-size: 11px;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.mem-import-family-body {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;
+  padding: 10px; border-top: 1px solid var(--divider);
+}
+.mem-import-scope-tag {
+  flex: none; display: inline-block; margin-left: 2px; padding: 1px 5px;
+  border: 1px solid var(--divider); border-radius: 999px;
+  background: var(--surface); color: var(--text-3);
+  font-size: 10px; font-weight: 500; line-height: 1.3; white-space: nowrap;
+}
+.mem-import-card {
+  position: relative; display: flex; align-items: flex-start; gap: 9px;
+  padding: 10px 11px; border: 1px solid var(--divider); border-radius: 10px;
+  background: var(--surface-low); cursor: pointer;
+  transition: border-color .12s ease, background .12s ease;
+}
+.mem-import-card:hover { border-color: var(--outline); }
+.mem-import-card.is-on { border-color: var(--accent-line); background: var(--accent-soft); }
+.mem-import-card.is-off {
+  opacity: .58; cursor: default; background: transparent;
+}
+.mem-import-card.is-off:hover { border-color: var(--divider); }
+.mem-import-card input {
+  position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none;
+}
+.mem-import-box {
+  flex: none; position: relative; width: 16px; height: 16px; margin-top: 1px;
+  border: 1px solid var(--outline); border-radius: 5px; background: var(--surface);
+  transition: background .12s ease, border-color .12s ease;
+}
+.mem-import-card.is-on .mem-import-box { background: var(--accent); border-color: var(--accent); }
+.mem-import-card.is-on .mem-import-box::after {
+  content: ""; position: absolute; left: 4.5px; top: 1px;
+  width: 5px; height: 9px;
+  border: 1.5px solid var(--on-accent); border-top: 0; border-left: 0;
+  transform: rotate(42deg);
+}
+.mem-import-card.is-off .mem-import-box { border-color: var(--divider); background: var(--surface-low); }
+.mem-import-card input:focus-visible + .mem-import-box {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+.mem-import-body { display: block; flex: 1 1 auto; min-width: 0; }
+.mem-import-name {
+  display: flex; align-items: baseline; gap: 6px;
+  color: var(--text); font-size: 13px; line-height: 1.35;
+}
+.mem-import-name b {
+  flex: none; margin-left: auto;
+  color: var(--text-3); font-size: 11px; font-weight: 500;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.mem-import-note {
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden; margin-top: 3px;
+  color: var(--text-3); font-size: 11px; line-height: 1.45; word-break: break-word;
+}
+.mem-import-state {
+  display: block; margin-top: 4px;
+  color: var(--text-3); font-size: 11px; line-height: 1.4;
+}
+.mem-import-state.is-error { color: var(--c-error); }
+.mem-import-absent { margin-top: 2px; }
+.mem-import-absent summary {
+  list-style: none; cursor: pointer; user-select: none;
+}
+.mem-import-absent summary::-webkit-details-marker { display: none; }
+.mem-import-absent summary::before {
+  content: "▸"; display: inline-block; width: 12px; color: var(--text-3);
+}
+.mem-import-absent[open] summary::before { content: "▾"; }
+.mem-import-foot {
+  position: sticky; bottom: 0; z-index: 2;
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-  padding: 11px 4px; border-bottom: 1px solid var(--divider);
+  margin: 14px -16px 0; padding: 10px 16px;
+  border-top: 1px solid var(--divider); background: var(--surface);
 }
-.mem-import-row:last-of-type { border-bottom: 0; }
-.mem-import-info { flex: 1 1 auto; min-width: 0; }
-.mem-import-info .set-hint { margin-top: 2px; }
-.mem-import-row b {
-  color: var(--text-3); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap;
+.mem-import-picked {
+  flex: 1 1 auto; min-width: 0;
+  color: var(--text-3); font-size: 11.5px; font-variant-numeric: tabular-nums;
 }
-.mem-import-row [data-import-result] { flex: 1 0 100%; font-size: 12px; color: var(--text-3); }
-.mem-import-row [data-import-result]:empty { display: none; }
+.mem-import-foot .modal-actions { flex: none; margin: 0; }
+
+@media (max-width: 560px) {
+  .mem-import-grid { grid-template-columns: 1fr; }
+  .mem-import-family-body { grid-template-columns: 1fr; }
+  .mem-import-family-head { flex-wrap: wrap; }
+  .mem-import-family-count { margin-left: 20px; }
+  .mem-import-family-scopes { width: 100%; margin-left: 20px; }
+}

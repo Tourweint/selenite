@@ -13,6 +13,7 @@ import { loadPartners } from "./partner-modals.js";
 import { loadRoster, syncChiefAvatar } from "./partners-status.js";
 import { clearModalHint } from "./project-modal.js";
 import { state } from "./state.js";
+import { showRollbackOffer } from "./soul-rollback.js";
 import { toast } from "./ui-atoms.js";
 
 
@@ -219,14 +220,13 @@ function closeAvatarPanel() {
   for (const pop of document.querySelectorAll(".pt-portrait-pop.is-fixed")) pop.remove();
 }
 
-async function ptWireInstructionEditor(body, partnerId, partner, initialSoul, soulVersion) {
+async function ptWireInstructionEditor(body, partnerId, partner, initialSoul) {
   const preview = body.querySelector("#pt-avatar-preview");
   const caption = body.querySelector("#pt-portrait-caption");
   const soulArea = body.querySelector("#pt-soul");
   const hint = body.querySelector("#pt-instr-hint");
   const save = body.querySelector("#pt-instr-save");
   const reset = body.querySelector("#pt-instr-reset");
-  const versionNode = body.querySelector("#pt-soul-version");
   if (!preview || !soulArea) return;
 
   const nameOf = () => String(partner.name || "").trim() || "执事";
@@ -376,9 +376,13 @@ async function ptWireInstructionEditor(body, partnerId, partner, initialSoul, so
       void loadRoster();
       void loadPartners();
       if (!alive()) return;
-      const nextVersion = data.soulVersion ?? soulVersion;
-      if (versionNode && nextVersion != null) versionNode.textContent = `人设 v${nextVersion}`;
-      setHint(data.soulVersion != null ? `已保存为 v${data.soulVersion}，下一轮起用。` : "已保存。");
+      // 快照退役（2026-11-15）：保存成功后给一次「回到上一版」，不展示版本号
+      setHint("已保存，下一轮起用。");
+      showRollbackOffer(hint, partnerId, (restored) => {
+        soulArea.value = restored;
+        soulDraft = restored;
+        setOriginal(avatarDraft, restored);
+      });
       // 用回读值重设基准：把「刚保存的内容」当成新的 original
       avatarDraft = partner.avatar;
       soulDraft = nextSoul;

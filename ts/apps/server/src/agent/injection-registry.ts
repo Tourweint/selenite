@@ -21,7 +21,7 @@ import {
 	turnLimitProvider,
 	verificationIronLawProvider,
 } from "./lifecycle-injections.ts";
-import { memoryRecallProvider, taskMemoryProvider } from "./assist.ts";
+import { memoryRecallProvider, projectIndexProvider, taskMemoryProvider } from "./assist.ts";
 import { partnerContextInjectionProvider } from "./partner-context.ts";
 
 export const INJECTION_REGISTRY: readonly RegisteredInjection[] = [
@@ -38,7 +38,8 @@ export const INJECTION_REGISTRY: readonly RegisteredInjection[] = [
 	{ source: "lifecycle", provider: turnLimitProvider },
 	// 执事上下文（第 5 处 extra.push）的实际段来自 partner-context，单独挂在下面：
 	// 那里按段（契约 / 目标 / 纪律 / 在办）展开，审计粒度更细；live 路径仍拼成一条消息。
-	// ── assist：记忆召回 + 任务近况 ───────────────────────
+	// ── assist：负责项目索引 + 记忆召回 + 任务近况 ───────────────────────
+	{ source: "assist", provider: projectIndexProvider },
 	{ source: "assist", provider: memoryRecallProvider },
 	{ source: "assist", provider: taskMemoryProvider },
 	// ── partner-context：执事轮各段纪律 ───────────────────

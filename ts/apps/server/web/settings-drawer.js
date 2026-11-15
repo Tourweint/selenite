@@ -322,7 +322,7 @@ function csIdentityNode(partner) {
   const node = document.createElement("button");
   node.type = "button";
   node.className = "cs-identity";
-  node.title = "去人设页改（头像 / 名字 / 正文）";
+  node.title = "去编辑这个人（头像 / 名字 / 正文）";
   node.setAttribute("role", "link");
 
   const avatar = document.createElement("span");
@@ -339,8 +339,8 @@ function csIdentityNode(partner) {
   main.append(nameNode);
   const sub = document.createElement("span");
   sub.className = "cs-identity-sub";
-  const version = cs.detail ? cs.detail.soulVersion : partner?.soulVersion;
-  sub.textContent = version != null ? `人设 v${version} · 去人设页改` : "还没写过人设 · 去人设页写";
+  // 快照退役（2026-11-15）：不再展示版本号
+  sub.textContent = "去编辑这个人";
   main.append(sub);
   node.append(main);
 

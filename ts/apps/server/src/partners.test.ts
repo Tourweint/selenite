@@ -10,6 +10,13 @@ import {
 	PARTNER_AVATAR_MAX_BYTES,
 } from "@lifediary/shared";
 import { PARTNER_SLOT_LIMIT, PartnersStore } from "./partners.ts";
+// 人格挂载的纯解析（2026-11-15 跟人走立项、同日多挂载方案扩化）：纯函数收 store，单测直接喂临时库。
+import {
+	composeProjectRecallScopes,
+	personaProjectIdsOfSession,
+	resolveProjectWriteTarget,
+} from "./agent/project-scope.ts";
+import { CHIEF_PARTNER_ID } from "./partner-contract.ts";
 
 /** 一张真实的 1×1 PNG（透明像素）：校验会走签名 / IHDR / 尺寸 / IEND 全链 */
 const VALID_PNG =
@@ -72,7 +79,7 @@ test("执事：创建即建家 + 首个身份版本；SOUL 播种最后写（家
 	}
 });
 
-test("执事：bumpSoul 落新版本快照（旧版本保留），能力随版本延续", () => {
+test("执事：bumpSoul 只写盘 + 计数（快照退役），上一份进 SOUL.prev.md，候选链在 model-chain.json", () => {
 	const { root, db, homes } = tempRoot();
 	const store = new PartnersStore(db, homes);
 	try {
@@ -80,13 +87,13 @@ test("执事：bumpSoul 落新版本快照（旧版本保留），能力随版�
 		store.setModelChain(partner.id, [
 			{ providerId: "p-a", modelId: "m-1", keyEnv: "KEY_A" },
 		]);
-		// setModelChain 自己占一个版本（v2），bumpSoul 再占一个（v3）
+		// setModelChain 自己占一个计数（2），bumpSoul 再占一个（3）
 		const v3 = store.bumpSoul(partner.id, "你是阿岚，改过的身份。");
 		assert.equal(v3, 3);
-		// 旧版本快照还在（演化链可追溯）
-		assert.equal(store.getVersion(partner.id, 1)?.soulSource.includes("阿岚"), true);
-		assert.equal(store.getVersion(partner.id, 3)?.soulSource.includes("改过"), true);
-		// 候选链没被 SOUL 更新冲掉
+		// 上一份在 SOUL.prev.md（2026-11-15 快照退役：单槽，不攒历史）
+		assert.equal(store.readHomeFile(partner.id, "SOUL.prev.md")?.includes("阿岚"), true);
+		assert.equal(store.readSoulFromHome(partner.id)?.includes("改过"), true);
+		// 候选链照常可读（model-chain.json）
 		assert.equal(store.getModelChain(partner.id).length, 1);
 		assert.equal(store.getModelChain(partner.id)[0]?.keyEnv, "KEY_A");
 	} finally {
@@ -379,4 +386,242 @@ test("头像契约：只收有界 PNG；JPEG / 外链 / SVG / 坏 base64 / 超�
 	// 字符串本身超 180000 字符
 	const oversizedChars = `data:image/png;base64,${"A".repeat(180_001)}`;
 	assert.match(partnerAvatarProblem(oversizedChars) ?? "", /字符上限/);
+});
+
+test("项目记忆挂载：设置多个 / 替换 / 清空（2026-11-15 多挂载方案）", () => {
+	const { root, db, homes } = tempRoot();
+	const store = new PartnersStore(db, homes);
+	try {
+		const partner = store.create("小澄");
+		assert.deepEqual(partner.projectIds, [], "新档案默认不挂");
+
+		const attached = store.setProjectIds(partner.id, [
+			"00000000-0000-4000-8000-000000000001",
+			"00000000-0000-4000-8000-000000000002",
+		]);
+		assert.deepEqual(attached?.projectIds, [
+			"00000000-0000-4000-8000-000000000001",
+			"00000000-0000-4000-8000-000000000002",
+		]);
+		assert.deepEqual(store.get(partner.id)?.projectIds, [
+			"00000000-0000-4000-8000-000000000001",
+			"00000000-0000-4000-8000-000000000002",
+		]);
+
+		// 整体替换：数组是全集，不是增量
+		const replaced = store.setProjectIds(partner.id, ["00000000-0000-4000-8000-000000000003"]);
+		assert.deepEqual(replaced?.projectIds, ["00000000-0000-4000-8000-000000000003"]);
+
+		const cleared = store.setProjectIds(partner.id, []);
+		assert.deepEqual(cleared?.projectIds, [], "空数组 = 清空");
+
+		assert.equal(store.setProjectIds("no-such-partner", ["00000000-0000-4000-8000-000000000004"]), null,
+			"档案不存在返回 null（端点层先 404，这里只是兜底）");
+	} finally {
+		store.close();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("项目记忆挂载：detachProject 批量解除（2026-11-15 删除项目登记的连带）", () => {
+	const { root, db, homes } = tempRoot();
+	const store = new PartnersStore(db, homes);
+	try {
+		const project = "00000000-0000-4000-8000-0000000000f1";
+		const other = "00000000-0000-4000-8000-0000000000f2";
+		const a = store.create("小澄");
+		const b = store.create("阿蓝");
+		const c = store.create("未挂的");
+		// a 同时挂两个：detach 只摘指向被删项目的那一个
+		store.setProjectIds(a.id, [project, other]);
+		store.setProjectIds(b.id, [other]);
+		// 总管也挂同一个项目：detach 不挑身份，全摘
+		store.ensureChief("总管");
+		const chief = store.get(CHIEF_PARTNER_ID);
+		assert.ok(chief);
+		store.setProjectIds(CHIEF_PARTNER_ID, [project]);
+		store.setProjectIds(c.id, []);
+
+		assert.equal(store.detachProject(project), 2, "只清指向该项目的，含总管");
+		assert.deepEqual(store.get(a.id)?.projectIds, [other], "只摘那一个，别的保留");
+		assert.deepEqual(store.get(CHIEF_PARTNER_ID)?.projectIds, []);
+		assert.deepEqual(store.get(b.id)?.projectIds, [other], "挂别的项目的不动");
+		assert.deepEqual(store.get(c.id)?.projectIds, []);
+
+		assert.equal(store.detachProject(project), 0, "再解一次 = 0 条（幂等）");
+	} finally {
+		store.close();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("项目记忆挂载：旧库（没有 project_ids 列）自动补列；单值列旧数据搬进数组", () => {
+	const { root, db, homes } = tempRoot();
+	// 先造一张多挂载之前的老库：有单值列 project_id、没有 project_ids
+	const raw = new DatabaseSync(db);
+	raw.exec(`
+			CREATE TABLE IF NOT EXISTS partners (
+				id              TEXT PRIMARY KEY,
+				name            TEXT NOT NULL,
+				status          TEXT NOT NULL DEFAULT 'active',
+				current_version INTEGER,
+				created_at      TEXT NOT NULL,
+				updated_at      TEXT NOT NULL
+			);
+			ALTER TABLE partners ADD COLUMN project_id TEXT;
+	`);
+	const at = new Date().toISOString();
+	raw.prepare(
+		"INSERT INTO partners (id, name, status, created_at, updated_at, project_id) VALUES (?, ?, 'active', ?, ?, ?)",
+	).run("legacy-1", "老执事", at, at, "00000000-0000-4000-8000-0000000000e1");
+	raw.prepare(
+		"INSERT INTO partners (id, name, status, created_at, updated_at) VALUES (?, ?, 'active', ?, ?)",
+	).run("legacy-2", "没挂的老执事", at, at);
+	raw.close();
+
+	const store = new PartnersStore(db, homes);
+	try {
+		const mounted = store.get("legacy-1");
+		assert.ok(mounted, "老记录读得出来");
+		assert.deepEqual(mounted.projectIds, ["00000000-0000-4000-8000-0000000000e1"],
+			"单值旧数据搬进数组");
+		const bare = store.get("legacy-2");
+		assert.ok(bare);
+		assert.deepEqual(bare.projectIds, [], "没挂的老记录 = 空数组");
+	} finally {
+		store.close();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("项目记忆写入解析：指名 → 绑定 → 唯一挂载 → 报错引导（2026-11-15 多挂载）", () => {
+	const atlas = { id: "00000000-0000-4000-8000-0000000000a1", name: "atlas" };
+	const harness = { id: "00000000-0000-4000-8000-0000000000a2", name: "lifediary-harness" };
+
+	// 指名命中：精确（含忽略大小写）→ 直落
+	assert.deepEqual(
+		resolveProjectWriteTarget("atlas", null, [atlas, harness]),
+		{ ok: true, projectId: atlas.id },
+	);
+	assert.deepEqual(
+		resolveProjectWriteTarget("ATLAS", null, [atlas, harness]),
+		{ ok: true, projectId: atlas.id },
+		"忽略大小写唯一命中也算",
+	);
+	// 指名优先于绑定：显式说了写哪个就写哪个
+	assert.deepEqual(
+		resolveProjectWriteTarget("atlas", harness.id, [atlas, harness]),
+		{ ok: true, projectId: atlas.id },
+		"指名优先于会话绑定",
+	);
+	// 指名不在负责清单 → 报错带清单
+	const notMounted = resolveProjectWriteTarget("别的项目", harness.id, [harness]);
+	assert.ok(!notMounted.ok, "指名不在负责清单 → 拒绝");
+	if (!notMounted.ok) {
+		assert.equal(notMounted.code, "project_not_mounted");
+		assert.ok(notMounted.message.includes("lifediary-harness"), "报错列出负责清单");
+	}
+
+	// 不指名：绑定优先（此刻就在这个项目里干活）
+	assert.deepEqual(
+		resolveProjectWriteTarget(undefined, harness.id, [atlas, harness]),
+		{ ok: true, projectId: harness.id },
+	);
+	// 不指名 + 无绑定 + 唯一挂载 → 自动落（单挂载免指名）
+	assert.deepEqual(
+		resolveProjectWriteTarget(undefined, null, [atlas]),
+		{ ok: true, projectId: atlas.id },
+	);
+	// 不指名 + 无绑定 + 多挂载 → 引导指名，报错列清单
+	const ambiguous = resolveProjectWriteTarget(undefined, null, [atlas, harness]);
+	assert.ok(!ambiguous.ok, "多挂载不指名 → 引导指名");
+	if (!ambiguous.ok) {
+		assert.equal(ambiguous.code, "project_ambiguous");
+		assert.ok(ambiguous.message.includes("atlas"), "报错列出全部负责项目");
+	}
+	// 不指名 + 无绑定 + 零挂载 → 引导去挂载
+	const none = resolveProjectWriteTarget(undefined, null, []);
+	assert.ok(!none.ok, "零挂载 → 引导去挂载");
+	if (!none.ok) assert.equal(none.code, "no_project_scope");
+	// 名字两侧空白：trim 后再比
+	assert.deepEqual(
+		resolveProjectWriteTarget(" atlas ", null, [atlas]),
+		{ ok: true, projectId: atlas.id },
+		"指名两侧空白剥掉再匹配",
+	);
+});
+
+test("每轮注入的项目 scope 组装：绑定全权、其余挂载走闸门、重叠去重", () => {
+	const a = "00000000-0000-4000-8000-0000000000b1";
+	const b = "00000000-0000-4000-8000-0000000000b2";
+
+	// 绑定 + 两个挂载（其一就是绑定）：绑定不重复、其余进 gated
+	const both = composeProjectRecallScopes(a, [a, b], true);
+	assert.deepEqual(both.fullKeys, [], "绑定进 scopes 主列，compose 不再返回它");
+	assert.deepEqual(both.gatedKeys, [`project:${b}`], "其余挂载进 gated，且与绑定去重");
+
+	// 闸门关（PROJECT_MEMORY_GATE=false）：挂载并回全权池 = 跟人走当日形态
+	// （绑定的 key 由 recallContext 主列另带，compose 只管挂载部分、与绑定去重）
+	const gateOff = composeProjectRecallScopes(a, [a, b], false);
+	assert.deepEqual(gateOff.fullKeys, [`project:${b}`], "闸门关 = 其余挂载全权进池（绑定主列另带）");
+	assert.deepEqual(gateOff.gatedKeys, []);
+
+	// 无绑定：挂载全走 gated
+	const unbound = composeProjectRecallScopes(null, [a, b], true);
+	assert.deepEqual(unbound.gatedKeys, [`project:${a}`, `project:${b}`]);
+	// 重复挂载 id：去重
+	const duped = composeProjectRecallScopes(null, [a, a], true);
+	assert.deepEqual(duped.gatedKeys, [`project:${a}`]);
+	// 零挂载：两边都空
+	const empty = composeProjectRecallScopes(a, [], true);
+	assert.deepEqual(empty.fullKeys, []);
+	assert.deepEqual(empty.gatedKeys, []);
+});
+
+test("人格挂载解析：链接执事吃自己的挂载（数组），总管主对话吃总管的，worker 谁的都不吃", () => {
+	const { root, db, homes } = tempRoot();
+	const store = new PartnersStore(db, homes);
+	try {
+		const partner = store.create("负责项目的执事");
+		store.setProjectIds(partner.id, ["00000000-0000-4000-8000-00000000000a"]);
+		store.ensureChief("总管");
+		store.setProjectIds(CHIEF_PARTNER_ID, [
+			"00000000-0000-4000-8000-00000000000b",
+			"00000000-0000-4000-8000-00000000000c",
+		]);
+
+		// 执事专线：吃执事自己的挂载
+		store.linkSession({
+			partnerId: partner.id,
+			role: "canonical",
+			routeKey: "canonical",
+			sessionId: 9001,
+		});
+		assert.deepEqual(personaProjectIdsOfSession(store, 9001, "chief"),
+			["00000000-0000-4000-8000-00000000000a"]);
+
+		// 总管主对话（未链接 + kind=chief）：吃总管的挂载（多个全给）
+		assert.deepEqual(personaProjectIdsOfSession(store, 9002, "chief"), [
+			"00000000-0000-4000-8000-00000000000b",
+			"00000000-0000-4000-8000-00000000000c",
+		]);
+
+		// worker（干活会话）：跟文件夹走，谁的挂载都不吃
+		assert.deepEqual(personaProjectIdsOfSession(store, 9003, "worker"), []);
+		// kind 判不出来（缓存未接线）：保守不当 chief
+		assert.deepEqual(personaProjectIdsOfSession(store, 9002, null), []);
+
+		// 执事没挂 → 空数组（不吃总管的）
+		const bare = store.create("没挂的执事");
+		store.linkSession({
+			partnerId: bare.id,
+			role: "canonical",
+			routeKey: "canonical",
+			sessionId: 9004,
+		});
+		assert.deepEqual(personaProjectIdsOfSession(store, 9004, "chief"), []);
+	} finally {
+		store.close();
+		rmSync(root, { recursive: true, force: true });
+	}
 });

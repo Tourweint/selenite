@@ -12,8 +12,11 @@ import { addNotice } from "./chat-notice.js";
 import { attr, esc } from "./markdown.js";
 import { request } from "./net.js";
 import { ptSaveName, ptWireInstructionEditor } from "./partner-editor.js";
+import { PF_PERSONA_EDITORS, pfPersonaFieldMarkup, pfPersonaValue } from "./partner-profile.js";
 import { openRunPartnerModal, ptRenderRoutineList, ptRoutineFormMarkup, ptWireRoutineForm } from "./partner-routines.js";
+import { applyTemplateChain, PARTNER_TEMPLATES, partnerTemplatesEnabled, renderHireWall } from "./partner-templates.js";
 import { loadRoster, syncChiefAvatar } from "./partners-status.js";
+import { openProjMenu } from "./settings-projects.js";
 import { clearModalHint, setModalHint } from "./project-modal.js";
 import { cs } from "./settings-drawer.js";
 import { mountChainEditor } from "./settings-model.js";
@@ -123,6 +126,16 @@ function renderPartnerList(box, partners) {
     empty.querySelector("#partner-empty-add")?.addEventListener("click", () => openCreatePartnerModal());
     return;
   }
+  // 招聘大厅（2026-11-15 执事招聘模板）：默认状态 = 只有总管、执事 0 个——正是新手
+  // "不知道该建什么"的时刻，在最顶上摆模板卡墙。flag 关 → 墙整个摘掉，回旧列表。
+  let hireWall = null;
+  const hasButlers = partners.some((partner) => partner.id !== "chief");
+  if (!hasButlers) {
+    hireWall = document.createElement("div");
+    hireWall.className = "card pt-hire is-loading";
+    hireWall.innerHTML = `<p class="set-hint">招聘大厅…</p>`;
+    box.append(hireWall);
+  }
   for (const partner of partners) {
     const card = document.createElement("div");
     card.className = "card pt-card";
@@ -135,20 +148,17 @@ function renderPartnerList(box, partners) {
       <span class="pt-avatar pt-card-avatar" data-avatar-for="${attr(partner.id)}" aria-hidden="true"></span>
       <div class="pt-card-main">
         <div class="pt-card-name-row">
-          <span class="row-label pt-name" data-tip="${attr(partner.name || "")}：这一份档案管人设版本、领域与运行状态；右侧按钮可编辑、暂停或归档。">${esc(partner.name || "")}</span>
+          <span class="row-label pt-name" data-tip="${attr(partner.name || "")}：这一份档案是「这个人」的全部——人设、岗位、例行任务、技能都在里面；右侧按钮可编辑、暂停或归档。">${esc(partner.name || "")}</span>
           ${isChief && partner.name !== "总管" ? '<span class="pill-tag">总管</span>' : ""}
           ${ptStatusPill(partner.status)}
           ${ptStatusDot(partner.status, partner.id)}
         </div>
         <div class="pt-meta">
-          <span class="kv">人设 v${esc(String(partner.soulVersion ?? "—"))}</span>
-          ${partner.domain ? `<span class="pt-domain kv">领域 · ${esc(String(partner.domain))}</span>` : ""}
         </div>
       </div>
       <div class="pt-actions">
-        <button class="ghost" type="button" data-pt-edit="${attr(partner.id)}">改人设</button>
-        <button class="ghost" type="button" data-pt-run="${attr(partner.id)}" data-pt-run-name="${attr(partner.name || "")}">试跑</button>
-        ${archived ? "" : `<button class="ghost" type="button" data-pt-toggle="${attr(partner.id)}" data-pt-next="${attr(nextStatus)}">${partner.status === "active" ? "暂停" : "恢复"}</button>`}
+        <button class="pt-dots" type="button" data-pt-menu="${attr(partner.id)}"
+                aria-haspopup="menu" aria-expanded="false" data-tip="试跑 / 暂停 / 删除">⋯</button>
       </div>`;
     box.append(card);
     // 头像只走 DOM 属性（不把 data URL 拼进 innerHTML）
@@ -158,20 +168,38 @@ function renderPartnerList(box, partners) {
       partner.name || "",
     );
 
-    // 2026-11-14 C 版：改人设改成「点进去换页」（#/settings/partners/<id>），不再开弹窗。
-    // 这里直接改 hash（不走 import，免得与 partner-profile 形成环），hashchange 会重画设置页。
-    card.querySelector("[data-pt-edit]")?.addEventListener("click", () => {
-      location.hash = `#/settings/partners/${encodeURIComponent(partner.id)}`;
-    });
-    card.querySelector("[data-pt-run]")?.addEventListener("click", () =>
-      openRunPartnerModal(partner.id, partner.name || ""),
-    );
-    if (!archived) {
-      card.querySelector("[data-pt-toggle]")?.addEventListener("click", () => {
-        const button = card.querySelector("[data-pt-toggle]");
-        void ptTogglePartner(partner.id, button.dataset.ptNext, button);
+    // 卡头动作收进 ⋯（2026-11-15 用户口径：试跑/暂停不常驻，删除给入口）。
+    // 菜单复用项目卡的 openProjMenu（挂 body + fixed，不吃容器的 overflow 裁切）。
+    card.querySelector("[data-pt-menu]")?.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const anchor = event.currentTarget;
+      openProjMenu(anchor, [
+        { label: "编辑这个人", action: "edit" },
+        { label: "试跑", action: "run" },
+        ...(archived ? [] : [{ label: partner.status === "active" ? "暂停" : "恢复", action: "toggle" }]),
+        ...(isChief ? [] : [{ label: "删除执事", action: "delete", danger: true, separator: true }]),
+      ], (action) => {
+        if (action === "edit") location.hash = `#/settings/partners/${encodeURIComponent(partner.id)}`;
+        else if (action === "run") openRunPartnerModal(partner.id, partner.name || "");
+        else if (action === "toggle") void ptTogglePartner(partner.id, nextStatus, null);
+        else if (action === "delete") openDeletePartnerModal(partner);
       });
-    }
+    });
+  }
+  if (hireWall) {
+    // flag 懒读：开 → 填墙；关 → 摘掉占位（回旧列表）。晚到时页面已切走就不管了。
+    void partnerTemplatesEnabled().then((on) => {
+      if (!hireWall.isConnected) return;
+      if (!on) {
+        hireWall.remove();
+        return;
+      }
+      renderHireWall(hireWall, (partnerId) => {
+        void loadPartners();
+        void loadRoster();
+        location.hash = `#/settings/partners/${encodeURIComponent(partnerId)}`;
+      });
+    });
   }
 }
 
@@ -193,80 +221,250 @@ async function ptTogglePartner(id, nextStatus, button) {
   }
 }
 
-/* ── 新建执事模态 ────────────────────────────────────── */
+/* ── 删除执事（2026-11-15 用户口径：列表卡 ⋯ 菜单给删除入口）──
+   端点 DELETE /api/v1/partners/:id 早就有（连档案行/版本/会话链接/例行任务/群成员/家目录
+   一起删），UI 一直没有入口。防误触照会话永久删除同一模式：输入名字确认。 */
+function openDeletePartnerModal(partner) {
+  openModal("删除执事", (body) => {
+    body.innerHTML = `
+      <p class="modal-desc">要把 <strong>${esc(partner.name || "")}</strong> 删掉。人设正文、岗位契约、
+      口吻里子处境、技能、记忆、例行任务会跟着一起删，<strong>删了就找不回来</strong>。</p>
+      <div class="modal-field">
+        <span>输入他的名字确认</span>
+        <input class="modal-input" id="pt-del-confirm" type="text" placeholder="${attr(partner.name || "")}" />
+      </div>
+      <p class="modal-hint" id="pt-del-hint"></p>
+      <div class="modal-actions">
+        <button class="ghost" type="button" data-modal-cancel>取消</button>
+        <button class="modal-primary is-danger" id="pt-del-go" type="button" disabled>删除</button>
+      </div>`;
+    const input = body.querySelector("#pt-del-confirm");
+    const hint = body.querySelector("#pt-del-hint");
+    const go = body.querySelector("#pt-del-go");
+    body.querySelector("[data-modal-cancel]")?.addEventListener("click", closeModal);
+    const expected = String(partner.name || "").trim();
+    input.addEventListener("input", () => {
+      go.disabled = input.value.trim() !== expected;
+      clearModalHint(hint);
+    });
+    go.addEventListener("click", async () => {
+      if (go.disabled) return;
+      go.disabled = true;
+      setModalHint(hint, "删除中…", false);
+      try {
+        const response = await request(`/api/v1/partners/${encodeURIComponent(partner.id)}`, {
+          method: "DELETE",
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          setModalHint(hint, data.message || data.error || `没删成：HTTP ${response.status}`, true);
+          go.disabled = false;
+          return;
+        }
+        closeModal();
+        toast(`${partner.name || "执事"} 已删除`);
+        // 正开着的档案页被删了就跳回列表，别留在一个已不存在的人的页面上
+        if (location.hash === `#/settings/partners/${encodeURIComponent(partner.id)}`) {
+          location.hash = "#/settings/partners";
+        }
+        void loadPartners();
+        void loadRoster();
+      } catch (error) {
+        if (error.message === "forbidden") {
+          closeModal();
+          return;
+        }
+        setModalHint(hint, `没删成：${error.message}`, true);
+        go.disabled = false;
+      }
+    });
+  });
+}
+
+/* ── 新建执事模态（2026-11-15 二次重构：宽档 + 详细设置）──
+ *
+ * 用户口径：选模板 = 改个名字就能用；下面的详细设置（身份 / 口吻 / 里子 / 处境 / 契约）
+ * 全部可选——选了模板就按模板预填，想改展开哪块改哪块；空白新建想细配也行。
+ * 字段渲染与校验复用档案页的 PF_PERSONA_EDITORS / pfPersonaFieldMarkup / pfPersonaValue
+ * （ESM 环：partner-profile 也 import 本文件，双方顶层只声明，运行时才互调）。
+ * 提交统一走 applyTemplateChain 四步链：空白新建 = 一个空白伪模板。 */
+
+const PT_BLANK_TPL = {
+	id: "blank",
+	card: "空白",
+	preset: "work",
+	modules: null,
+	identity: "",
+	contract: "",
+	contents: null,
+};
 
 function openCreatePartnerModal() {
-  openModal("新建执事", (body) => {
-    body.innerHTML = `
-      <p class="modal-desc">给执事起个名字就行。领域只是一句备注，可以不填、以后也能改，不影响派活。</p>
+  openModal(
+    "新建执事",
+    (body) => {
+      body.innerHTML = `
+      <p class="modal-desc">挑个模板，改个名字就能用。下面的详细设置都是可选的——选了模板按模板填好，不改就入库。</p>
+      <div class="pt-tpl-strip" id="pt-tpl-strip" hidden>
+        <span class="pt-tpl-strip-label">从模板开始</span>
+        ${PARTNER_TEMPLATES.map((tpl) => `<button class="pt-tpl-chip" type="button" data-pt-tpl="${attr(tpl.id)}" data-tip="${attr(tpl.desc)}">${esc(tpl.card)}</button>`).join("")}
+      </div>
       <div class="modal-field">
         <span>名字（≤40 字）</span>
         <input class="modal-input" id="pt-new-name" type="text" maxlength="40" placeholder="例如：小助手" />
       </div>
-      <div class="modal-field">
-        <span>领域标签（可选）</span>
-        <input class="modal-input is-mono" id="pt-new-domain" type="text" spellcheck="false"
-               placeholder="例如 frontend、写作；不填也行" />
-      </div>
-      <div class="modal-field">
-        <span>一句话身份（可选）</span>
+      <p class="pf-group-title">详细设置（可选）</p>
+      <details class="pf-new">
+        <summary>一句话身份</summary>
         <textarea class="pt-ta" id="pt-new-identity" rows="2" spellcheck="false"
                   placeholder="例如：你是替我整理资料的安静助手"></textarea>
-      </div>
+      </details>
+      <details class="pf-new">
+        <summary>口吻</summary>
+        <div class="pf-edit-grid" id="pt-new-style"></div>
+      </details>
+      <details class="pf-new">
+        <summary>里子</summary>
+        <div class="pf-edit-grid" id="pt-new-values"></div>
+      </details>
+      <details class="pf-new">
+        <summary>处境</summary>
+        <div class="pf-edit-grid" id="pt-new-scenario"></div>
+      </details>
+      <details class="pf-new">
+        <summary>岗位契约</summary>
+        <textarea class="pf-contract" id="pt-new-contract" rows="6" spellcheck="false" aria-label="岗位契约"
+                  placeholder="写清管什么、怎么定、怎么验收、向谁汇报（四节）"></textarea>
+      </details>
       <p class="modal-hint" id="pt-new-hint"></p>
       <div class="modal-actions">
         <button class="ghost" type="button" data-modal-cancel>取消</button>
         <button class="modal-primary" id="pt-new-go" type="button">新建</button>
       </div>`;
 
-    const nameInput = body.querySelector("#pt-new-name");
-    const domainInput = body.querySelector("#pt-new-domain");
-    const identityInput = body.querySelector("#pt-new-identity");
-    const hint = body.querySelector("#pt-new-hint");
-    const go = body.querySelector("#pt-new-go");
-    body.querySelector("[data-modal-cancel]")?.addEventListener("click", closeModal);
+      const nameInput = body.querySelector("#pt-new-name");
+      const identityInput = body.querySelector("#pt-new-identity");
+      const contractInput = body.querySelector("#pt-new-contract");
+      const hint = body.querySelector("#pt-new-hint");
+      const go = body.querySelector("#pt-new-go");
+      const strip = body.querySelector("#pt-tpl-strip");
+      body.querySelector("[data-modal-cancel]")?.addEventListener("click", closeModal);
 
-    const submit = async () => {
-      if (go.disabled) return;
-      const name = nameInput.value.trim();
-      if (!name) { setModalHint(hint, "先起个名字。"); nameInput.focus(); return; }
-      const domain = domainInput.value.trim();
-      const identity = identityInput.value.trim();
-      go.disabled = true;
-      setModalHint(hint, "创建中…", false);
-      try {
-        const response = await request("/api/v1/partners", {
-          method: "POST",
-          // E2 #0：soul 随建档一次提交（后端 bumpSoul 落成 v2 自定义版本），
-          // 收敛掉 E1「建完补 PATCH」的两段式；不带 identity 时请求形状与旧版一致。
-          body: JSON.stringify({
-            name,
-            ...(domain ? { domain } : {}),
-            ...(identity ? { soul: identity } : {}),
-          }),
-        });
-        const data = await response.json().catch(() => ({}));
-        if (!response.ok) {
-          setModalHint(hint, data.message || data.error || `没建成：HTTP ${response.status}`);
+      // 详细设置三块的字段渲染（pf-edit-grid 同款）；选模板时按模板 current 重渲染。
+      const paintBlock = (gridId, editorKey, current) => {
+        const grid = body.querySelector(`#${gridId}`);
+        const editor = PF_PERSONA_EDITORS[editorKey];
+        grid.innerHTML = editor.fields.map((field) => pfPersonaFieldMarkup(field, current ?? {})).join("");
+      };
+      paintBlock("pt-new-style", "style", null);
+      paintBlock("pt-new-values", "values", null);
+      paintBlock("pt-new-scenario", "scenario", null);
+
+      // 模板条（flag 开才显示）。选中 = 名字/身份/口吻里子处境/契约全按模板预填，提交走四步链；
+      // 再点一次同一张卡 = 取消选择，回空白。
+      let selectedTpl = null;
+      strip.hidden = false;
+      void partnerTemplatesEnabled().then((on) => { if (!on) strip.hidden = true; });
+      strip.addEventListener("click", (event) => {
+        const chip = event.target.closest("[data-pt-tpl]");
+        if (!chip) return;
+        const tpl = PARTNER_TEMPLATES.find((item) => item.id === chip.dataset.ptTpl);
+        if (!tpl) return;
+        if (selectedTpl?.id === tpl.id) {
+          selectedTpl = null;
+          chip.setAttribute("aria-pressed", "false");
           return;
         }
-        closeModal();
-        toast("执事已新建");
-        void loadPartners();
-        void loadRoster(); // E4：侧栏花名册同步刷新
-      } catch (error) {
-        if (error.message === "forbidden") { closeModal(); return; }
-        setModalHint(hint, `没建成：${error.message}`);
-      } finally {
-        go.disabled = false;
-      }
-    };
-    go.addEventListener("click", () => void submit());
-    nameInput.addEventListener("input", () => clearModalHint(hint));
-    nameInput.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") { event.preventDefault(); void submit(); }
-    });
-  });
+        selectedTpl = tpl;
+        for (const other of strip.querySelectorAll("[data-pt-tpl]")) {
+          other.setAttribute("aria-pressed", String(other === chip));
+        }
+        if (tpl.name && !nameInput.value.trim()) nameInput.value = tpl.name;
+        identityInput.value = tpl.identity;
+        paintBlock("pt-new-style", "style", tpl.contents?.style ?? null);
+        paintBlock("pt-new-values", "values", tpl.contents?.values ?? null);
+        paintBlock("pt-new-scenario", "scenario", tpl.contents?.scenario ?? null);
+        contractInput.value = tpl.contract ?? "";
+        setModalHint(
+          hint,
+          `已选「${tpl.card}」：详细设置按模板填好了，不改就入库；要改展开对应块。`,
+          false,
+        );
+      });
+
+      // 收集一个内容块：有非空值的块返回 values（供覆盖），全空返回 null（不设）。
+      const collectBlock = (gridId, editorKey) => {
+        const grid = body.querySelector(`#${gridId}`);
+        const fields = PF_PERSONA_EDITORS[editorKey].fields;
+        const values = {};
+        let hasAny = false;
+        for (const field of fields) {
+          const node = grid.querySelector(`[data-pf-field="${field.key}"]`);
+          if (!node) continue;
+          const parsed = pfPersonaValue(field, node.value);
+          if (parsed.problem) {
+            setModalHint(hint, parsed.problem, true);
+            node.focus();
+            return { problem: parsed.problem };
+          }
+          values[field.key] = parsed.value;
+          const v = parsed.value;
+          const filled = Array.isArray(v)
+            ? v.length > 0
+            : v !== undefined && String(v ?? "").trim() !== "" && String(v) !== "不限";
+          if (filled) hasAny = true;
+        }
+        return hasAny ? { value: values } : { value: null };
+      };
+
+      const submit = async () => {
+        if (go.disabled) return;
+        const name = nameInput.value.trim();
+        if (!name) { setModalHint(hint, "先起个名字。"); nameInput.focus(); return; }
+        const identity = identityInput.value.trim();
+        const contract = contractInput.value.trim();
+        const style = collectBlock("pt-new-style", "style");
+        if (style.problem) return;
+        const values = collectBlock("pt-new-values", "values");
+        if (values.problem) return;
+        const scenario = collectBlock("pt-new-scenario", "scenario");
+        if (scenario.problem) return;
+        const contentsOverride = {};
+        if (style.value) contentsOverride.style = style.value;
+        if (values.value) contentsOverride.values = values.value;
+        if (scenario.value) contentsOverride.scenario = scenario.value;
+        const hasDetail =
+          Boolean(identity) || Boolean(contract) || Object.keys(contentsOverride).length > 0;
+
+        go.disabled = true;
+        setModalHint(hint, "创建中…", false);
+        try {
+          const tpl = selectedTpl ?? PT_BLANK_TPL;
+          // 四步链统一入口：模板走模板值 + 弹窗覆盖；空白走 work 预设 + 弹窗内容（有才发）。
+          await applyTemplateChain(tpl, name, {
+            soulOverride: identity,
+            contentsOverride,
+            contractOverride: contract,
+          });
+          closeModal();
+          toast(hasDetail ? "执事已新建，人格已套上" : "执事已新建");
+          void loadPartners();
+          void loadRoster(); // E4：侧栏花名册同步刷新
+        } catch (error) {
+          if (error.message === "forbidden") { closeModal(); return; }
+          setModalHint(hint, `没建成：${error.message}`);
+        } finally {
+          go.disabled = false;
+        }
+      };
+      go.addEventListener("click", () => void submit());
+      nameInput.addEventListener("input", () => clearModalHint(hint));
+      nameInput.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") { event.preventDefault(); void submit(); }
+      });
+    },
+    { className: "modal-wide" },
+  );
 }
 
 /* ── 编辑执事模态（人设（含头像）/ 模型候选链 / 例行任务）──
@@ -316,12 +514,11 @@ function ptBuildEditModal(body, partnerId, detail) {
             <span class="pt-instr-label">它是谁、怎么说话、守什么规矩</span>
             <span class="pt-instr-sub" id="pt-portrait-caption">点头像换一张：30 张预设或本地图片</span>
           </div>
-          <span class="kv" id="pt-soul-version">人设 v${esc(String(detail.soulVersion ?? "—"))}</span>
         </div>
         <textarea class="pt-ta is-soul" id="pt-soul" rows="6" spellcheck="false"
                   aria-label="人设正文"
                   placeholder="例：你叫阿岚，是这个家的管事。说话短、先给结论；不确定就直说，不要编。">${esc(soul)}</textarea>
-        <p class="modal-hint" id="pt-instr-hint">头像和这段正文一起保存，作为新版本生效（下一轮起用）。</p>
+        <p class="modal-hint" id="pt-instr-hint">头像和这段正文一起保存，下一轮起用。</p>
         <div class="pt-actions">
           <button class="ghost" id="pt-instr-reset" type="button" disabled>撤销改动</button>
           <button class="btn-primary" id="pt-instr-save" type="button" disabled>保存人设</button>
@@ -344,9 +541,7 @@ function ptBuildEditModal(body, partnerId, detail) {
           <label class="modal-field">
             <span>领域标签（可选）</span>
             <div class="modal-row">
-              <input class="modal-input is-mono" id="pt-domain" type="text" value="${attr(partner.domain || "")}"
                      placeholder="留空也行，不影响派活" />
-              <button class="ghost" id="pt-domain-save" type="button">保存</button>
             </div>
           </label>
         </div>
@@ -375,26 +570,7 @@ function ptBuildEditModal(body, partnerId, detail) {
   const nameInput = body.querySelector("#pt-name");
   body.querySelector("#pt-name-save")?.addEventListener("click", () => void ptSaveName(partnerId, nameInput));
 
-  // 领域标签（2026-11-07）：可留空、可改。空串 = 清掉标签（回到"普通执事"）。
-  const domainInput = body.querySelector("#pt-domain");
-  body.querySelector("#pt-domain-save")?.addEventListener("click", () => {
-    void (async () => {
-      const value = String(domainInput?.value || "").trim();
-      const res = await request(`/api/v1/partners/${encodeURIComponent(partnerId)}`, {
-        method: "PATCH",
-        body: JSON.stringify({ domain: value }),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        addNotice(data.message || "领域标签没保存成功。");
-        return;
-      }
-      partner.domain = value || null;
-      addNotice(value ? `领域标签已改成 ${value}。` : "领域标签已清空，不影响派活。");
-    })();
-  });
-
-  void ptWireInstructionEditor(body, partnerId, partner, soul, detail.soulVersion ?? null);
+  void ptWireInstructionEditor(body, partnerId, partner, soul);
 
   // 备选链与抽屉的「模型 → 备选模型」共用同一个编辑器（2026-11-07）：
   // 两处都是「从已有模型里选」，不再手打 providerId|modelId|KEY_ENV。

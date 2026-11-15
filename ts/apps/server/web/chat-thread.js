@@ -47,8 +47,12 @@ function hideEmpty() {
 
 function addMessage(role, text, at, images = [], options = {}) {
   hideEmpty();
+  // 2026-11-15 作者标记：非主人来源（`author.kind === "partner"`）不是"我说的话"，
+  // 不占右侧气泡位、不挂 .user（编辑入口按 .msg.user 找，不挂类就天然不可编辑）。
+  const author = options.author && options.author.kind ? options.author : null;
+  const letter = role === "user" && Boolean(author);
   const wrap = document.createElement("div");
-  wrap.className = `msg ${role}`;
+  wrap.className = letter ? "msg letter" : `msg ${role}`;
   // 只有"人刚发/刚回"的消息才播入场；历史回读、搜索跳转、补帧重建都不播。
   // 以前动画直接挂在 .msg.user/.assistant 上，刷新一条 200 条的会话会整屏同时入场。
   if (options.fresh) {
@@ -63,13 +67,17 @@ function addMessage(role, text, at, images = [], options = {}) {
   // 不该多出一条空壳（旧 .acts 靠 :empty 隐藏，这里直接不建）。
   // 用户消息的附件（图片 + 文件）在文字**上方**（2026-11-13 用户口径）：
   // 先挂附件再挂 body，flex 列顺序就是「附件 → 我们说的话」。
-  if (role === "user") mountMessageAttachments(wrap, images, options.files);
+  if (role === "user" && !letter) mountMessageAttachments(wrap, images, options.files);
   const body = document.createElement("div");
   body.className = "body";
   if (role === "user") body.textContent = text;
   else body.innerHTML = renderMarkdown(text);
-  // 纯附件消息没有文字：不挂空 body，附件卡直接贴住气泡（少一格 gap）
-  if (role !== "user" || text) wrap.append(body);
+  if (letter) {
+    mountLetter(wrap, body, author, at);
+  } else if (role !== "user" || text) {
+    // 纯附件消息没有文字：不挂空 body，附件卡直接贴住气泡（少一格 gap）
+    wrap.append(body);
+  }
 
   // 回答底下的一条脚注（2026-11-06 建这条线；2026-11-08 图标化）：复制图标 · 用时 · 完成时间。
   // 以前复制按钮浮在右上角、耗时单独 absolute 在右边，两者都对不齐正文；
@@ -125,6 +133,69 @@ function addMessage(role, text, at, images = [], options = {}) {
   updateHomeMode();
   if (!options.parent && state.stick) scrollToEnd();
   return { root: wrap, body, foot };
+}
+
+/* ── 来信（2026-11-15 作者标记方案 §3.3）──────────────────
+   同事递来的话不是"我说的话"：不占右侧气泡，收成左侧一张卡——抬头写清是谁发来的
+   （名字 · 领域），正文默认只露首行，点开看全文。与 cindy 的 botLetter 同一套口径：
+   右侧只代表主人本人或替主人发的输入。卡片不带 .msg.user，所以没有编辑重发入口。 */
+
+function mountLetter(root, body, author, at) {
+  const card = document.createElement("div");
+  card.className = "letter-card";
+
+  const meta = document.createElement("div");
+  meta.className = "letter-meta";
+  const from = document.createElement("span");
+  from.className = "letter-from";
+  const name = String(author.name || "执事");
+  from.textContent = author.domain
+    ? `执事「${name}」· ${author.domain} 发来`
+    : `执事「${name}」发来`;
+  meta.append(from);
+  const clock = letterClock(at);
+  if (clock) {
+    const when = document.createElement("time");
+    when.className = "letter-when";
+    when.dateTime = new Date(at).toISOString();
+    when.textContent = clock;
+    meta.append(when);
+  }
+  card.append(meta);
+
+  body.classList.add("letter-body");
+  const text = body.textContent || "";
+  const lineCount = text.split("\n").filter((line) => line.trim()).length;
+  // 只有一行且不长：原样摊开，不为了"看起来像卡片"硬加一个展开按钮
+  const collapsible = lineCount > 1 || text.length > 140;
+  if (collapsible) body.classList.add("is-collapsed");
+  card.append(body);
+
+  if (collapsible) {
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "letter-toggle";
+    toggle.textContent = "展开全文";
+    const setOpen = (open) => {
+      body.classList.toggle("is-collapsed", !open);
+      toggle.textContent = open ? "收起" : "展开全文";
+    };
+    toggle.addEventListener("click", (event) => {
+      event.stopPropagation();
+      setOpen(body.classList.contains("is-collapsed"));
+    });
+    card.addEventListener("click", () => setOpen(body.classList.contains("is-collapsed")));
+    card.append(toggle);
+  }
+  root.append(card);
+}
+
+/** 来信抬头的时刻（`14:32`）；时间戳缺失就不显示，不编一个数出来。 */
+function letterClock(at) {
+  if (!at) return "";
+  const date = new Date(at);
+  if (Number.isNaN(date.getTime())) return "";
+  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 }
 
 /* ── 用户消息的附件 / 编辑重发（2026-11-08 扫尾批 4a；2026-11-13 文件走路径）──

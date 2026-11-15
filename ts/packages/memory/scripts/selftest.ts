@@ -24,6 +24,7 @@ import {
 	REDACTED,
 	SqliteMemoryStore,
 	decayedImportance,
+	dedupeRecallHits,
 	experienceExtractionEnabled,
 	extractionPrompt,
 	groundedInUserText,
@@ -1644,5 +1645,217 @@ try {
 	assert(emptyPage.items.length === 0 && emptyPage.total === 3, "limit=0 只回计数");
 
 	console.log("✓ 噪声过滤：合成指令/命令句/问句不落经历；列表真实计数/搜索/分页");
+
+// ── 21. 项目记忆闸门（2026-11-15 项目记忆多挂载）──────────────
+// gated scopes 只从「字面命中」路径进候选、不吃最近窗口："聊到才注入"由这层
+// 保证，不靠打分巧合。四个性质：命中进 / 不命中不出 / 空 text 不出 / 重复 key
+// 以更严的 gated 为准；另测窗口不被 gated 挤占 + 项目归属标注。
+{
+	const DAY = 86_400_000;
+	const at = new Date("2026-06-01T00:00:00.000Z");
+	const ago = (days: number) => new Date(at.getTime() - days * DAY).toISOString();
+	const mainScope = "session:gate-main";
+	const gateScope = scopeKey({ type: "project", id: "33333333-3333-4333-8333-333333333333" });
+	const store = new InMemoryStore();
+	// 主 scope 一条普通记录（走窗口）；gated 两条：一条与查询字面相关、一条无关但
+	// 重要（0.95）且最新（ago(0)）——闸门的意义就是它俩都拦得住后者。
+	store.put(seedRecord("g-main", mainScope, "今天把看板整理了一遍", ago(1), { importance: 0.6 }));
+	store.put(seedRecord("g-hit", gateScope, "atlas 的部署口径是先跑探针", ago(30), { importance: 0.9 }));
+	store.put(seedRecord("g-miss", gateScope, "完全无关的长句子讲的是别的事", ago(0), { importance: 0.95 }));
+	const engine = new MemoryEngine({ store, now: () => at });
+
+	// 查询用 ≥3 字的词块：2 字块切不出 3-gram（FTS 兜底局限，与闸门无关），
+	// 相关性判定本身是 2-gram，两条路径都要真实走通。
+	const hits = engine.recall({
+		text: "部署口径 探针",
+		scopes: [mainScope],
+		gatedScopes: [gateScope],
+		limit: 20,
+	});
+	assert(hits.some((hit) => hit.record.id === "g-hit"), "字面命中的 gated 记录应进候选");
+	assert(
+		!hits.some((hit) => hit.record.id === "g-miss"),
+		"不命中的 gated 记录不许出（再重要再新也不行）",
+	);
+
+	// 对照组：同一条不命中的记录，全权进池（挂载进 scopes = 跟人走当日形态）就出得来
+	const ungated = engine.recall({
+		text: "部署口径 探针",
+		scopes: [mainScope, gateScope],
+		limit: 20,
+	});
+	assert(ungated.some((hit) => hit.record.id === "g-miss"), "对照组：全权进池时出得来（证明是闸门拦的）");
+
+	// 空 text / 切不出关键词：gated 一律不贡献，主 scope 照常走窗口
+	const noKw = engine.recall({
+		text: "。",
+		scopes: [mainScope],
+		gatedScopes: [gateScope],
+		limit: 20,
+	});
+	assert(!noKw.some((hit) => hit.record.scope === gateScope), "切不出关键词时 gated 不贡献");
+	assert(noKw.some((hit) => hit.record.id === "g-main"), "主 scope 照常走窗口");
+
+	// scopes 与 gated 重复 key：以更严的 gated 为准
+	const dup = engine.recall({
+		text: "看板",
+		scopes: [mainScope, gateScope],
+		gatedScopes: [gateScope],
+		limit: 20,
+	});
+	assert(dup.some((hit) => hit.record.id === "g-main"), "主 scope 记录照常召回");
+	assert(!dup.some((hit) => hit.record.id === "g-miss"), "重复 key 以更严的 gated 为准");
+
+	// 窗口不被挤占：主 scope 120 条占满候选窗口（floor=50 只装最新 100 条），
+	// gated 命中的老记录照样进候选——它走文本命中路径，不抢窗口名额。
+	// 夹具用 Sqlite：InMemoryStore 刻意无索引（filter.text 一律忽略），
+	// 文本命中路径只有 FTS 夹具测得出（生产装配就是 SqliteMemoryStore）。
+	const windowStore = new SqliteMemoryStore(":memory:");
+	const wBase = at.getTime() - 200_000;
+	for (let index = 0; index < 120; index += 1) {
+		windowStore.put(
+			seedRecord(
+				`gw-${index}`,
+				mainScope,
+				`第 ${index} 条普通记录`,
+				new Date(wBase + index * 1000).toISOString(),
+				{ importance: 0.3 },
+			),
+		);
+	}
+	windowStore.put(
+		seedRecord("gw-old", gateScope, "部署口径要跑探针再验收", new Date(wBase - 60_000).toISOString(), {
+			importance: 0.9,
+		}),
+	);
+	const wEngine = new MemoryEngine({ store: windowStore, candidateFloor: 50, now: () => at });
+	const wHits = wEngine.recall({
+		text: "部署口径 探针",
+		scopes: [mainScope],
+		gatedScopes: [gateScope],
+		limit: 20,
+	});
+	assert(wHits.some((hit) => hit.record.id === "gw-old"), "gated 命中的窗口外老记录应经文本命中进候选");
+	windowStore.close();
+
+	// 项目归属标注：project 来源的行带项目名；不传 resolver 逐字节回旧格式
+	const labelEngine = new MemoryEngine({ store, now: () => at });
+	const labeledCtx = labelEngine.buildContext(
+		{ text: "部署口径 探针", scopes: [mainScope], gatedScopes: [gateScope], limit: 20 },
+		{ scopeLabel: (key) => (key === gateScope ? "atlas" : null), maxChars: 4000 },
+	);
+	assert(
+		labeledCtx.includes("- [atlas · fact] atlas 的部署口径是先跑探针"),
+		`project 来源的行应带项目标注：${labeledCtx}`,
+	);
+	assert(labeledCtx.includes("- [fact] 今天把看板整理了一遍"), "非 project 来源的行不加标注");
+	const plainCtx = labelEngine.buildContext({
+		text: "部署口径 探针",
+		scopes: [mainScope],
+		gatedScopes: [gateScope],
+		limit: 20,
+	});
+	assert(
+		plainCtx.includes("- [fact] atlas 的部署口径是先跑探针"),
+		"不传 resolver 时逐字节回旧格式",
+	);
+
+	console.log("✓ 项目记忆闸门：命中进 / 不命中不出 / 空 text 不出 / 重复 key 从严 / 窗口不挤占 / 归属标注");
+}
+
+// ── 22. 召回后去重（2026-11-15 上下文预算批）──────────────
+// 同一件事的多种说法在注入前合并成一条；判重是纯规则的（规范化全等 / 包含 / Jaccard），
+// 阈值保守 0.85 —— 宁可漏合并，也不要把两条不同的事合并掉。库一条都不动。
+{
+	const at = new Date("2026-06-01T00:00:00.000Z");
+	const hit = (id: string, content: string, score: number, kind: MemoryRecord["kind"] = "fact") => ({
+		record: seedRecord(id, "global", content, at.toISOString(), { kind }),
+		score,
+	});
+
+	// 22.1 规范化全等（只差句号）→ 合并，保留分高的
+	{
+		const kept = dedupeRecallHits([
+			hit("d1", "部署前要跑探针", 0.9),
+			hit("d2", "部署前要跑探针。", 0.8),
+		]);
+		assert(kept.length === 1 && kept[0]!.record.id === "d1", "规范化全等应合并、保留高分那条");
+	}
+
+	// 22.2 包含关系（短的是长的摘要）→ 合并，保留分高的长条目
+	{
+		const kept = dedupeRecallHits([
+			hit("d3", "atlas 项目的部署口径是：部署前必须先跑探针，再验收", 0.9),
+			hit("d4", "部署前必须先跑探针，再验收", 0.85),
+		]);
+		assert(kept.length === 1 && kept[0]!.record.id === "d3", "整段被包含应判重复");
+	}
+
+	// 22.3 措辞近似（Jaccard ≥ 0.85）→ 合并
+	{
+		const kept = dedupeRecallHits([
+			hit("d5", "整理纪要时先读原文件再改，最后跑一遍探针确认", 0.9),
+			hit("d6", "整理纪要时先读原文件再改，最后跑一遍探针验证", 0.8),
+		]);
+		assert(kept.length === 1, "近似重述应合并");
+	}
+
+	// 22.4 相关但不是同一件事 → 都留
+	{
+		const kept = dedupeRecallHits([
+			hit("d7", "部署前要跑探针", 0.9),
+			hit("d8", "部署脚本要用 node 20 跑", 0.8),
+		]);
+		assert(kept.length === 2, "不同事实不许合并");
+	}
+
+	// 22.5 跨 kind 撞正文 → 都留（一条是结论、一条是做法）
+	{
+		const kept = dedupeRecallHits([
+			hit("d9", "部署前要跑探针再验收", 0.9, "fact"),
+			hit("d10", "部署前要跑探针再验收", 0.8, "experience"),
+		]);
+		assert(kept.length === 2, "跨 kind 不合并");
+	}
+
+	// 22.6 太短的正文不做近似判重（误杀率高）
+	{
+		const kept = dedupeRecallHits([
+			hit("d11", "跑探针", 0.9),
+			hit("d12", "跑探针啊", 0.8),
+		]);
+		assert(kept.length === 2, "短正文不判重");
+	}
+
+	// 22.7 阈值可调：调低后会合并得更多
+	{
+		const pair = [
+			hit("d13", "这个项目的部署流程是先构建再跑探针最后验收", 0.9),
+			hit("d14", "这个项目的部署流程是先构建再跑测试最后验收", 0.8),
+		];
+		assert(dedupeRecallHits(pair).length === 2, "默认 0.85 时这对应保留");
+		assert(dedupeRecallHits(pair, { similarity: 0.6 }).length === 1, "阈值调低后应合并");
+	}
+
+	// 22.8 buildContext 开关：dedupe 关 = 旧行为（两条都出现）；开 = 只出现一条
+	{
+		const store = new InMemoryStore();
+		store.put(seedRecord("b1", "global", "部署前要跑探针", at.toISOString(), { importance: 0.8 }));
+		store.put(seedRecord("b2", "global", "部署前要跑探针。", at.toISOString(), { importance: 0.7 }));
+		const engine = new MemoryEngine({ store, now: () => at });
+		const off = engine.buildContext({ text: "部署 探针", scopes: ["global"] });
+		const on = engine.buildContext({ text: "部署 探针", scopes: ["global"] }, { dedupe: true });
+		assert(
+			(off.match(/部署前要跑探针/g) ?? []).length === 2,
+			"dedupe 关闭时两条都注入（库层旧行为）",
+		);
+		assert(
+			(on.match(/部署前要跑探针/g) ?? []).length === 1,
+			"dedupe 打开后只注入一条",
+		);
+	}
+
+	console.log("✓ 召回后去重：全等 / 包含 / 近似合并，跨 kind 与不同事实保留，阈值可调，开关生效");
+}
 
 console.log("✓ 记忆框架自测通过");

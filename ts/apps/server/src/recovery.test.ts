@@ -18,8 +18,11 @@ import type { ProjectRef, Ticket } from "../../../../../chancellor/src/types.ts"
 import {
 	collectDeadLetters,
 	formatRecoveryLine,
+	redeliverUndeliveredReports,
+	reportRedeliveryEnabled,
 	reportRecoveredTickets,
 	type DeadLetterRecord,
+	type UndeliveredReportRow,
 } from "./recovery-report.ts";
 
 function temp(prefix: string): string {
@@ -491,4 +494,83 @@ test("恢复死信：非终态父单不扫、开关关掉不扫", () => {
 		if (previous === undefined) delete process.env.DELEGATION_RECOVER_REPORT;
 		else process.env.DELEGATION_RECOVER_REPORT = previous;
 	}
+});
+
+// ── 待送达汇报的启动补送（2026-11-15 回信送达兜底，方案 §A.4）──────────
+
+function redeliverDeps(overrides: Partial<Parameters<typeof redeliverUndeliveredReports>[0]> = {}) {
+	const calls: Array<{ conversationId: number; text: string }> = [];
+	const settled: Array<{ id: number; state: 1 | 2 }> = [];
+	const woken: Array<{ conversationId: number; ticketId: string }> = [];
+	const rows: UndeliveredReportRow[] = [
+		{ id: 11, ticketId: "T-1", body: "任务 T-1 的结论", createdAt: "2026-11-15T10:00:00.000Z" },
+		{ id: 12, ticketId: "T-2", body: "任务 T-2 的结论", createdAt: "2026-11-15T10:01:00.000Z" },
+	];
+	const deps = {
+		undelivered: () => rows,
+		hostConversationId: (ticketId: string) => (ticketId === "T-1" ? 7 : null),
+		say: async (conversationId: number, text: string) => {
+			calls.push({ conversationId, text });
+			return true;
+		},
+		settle: (id: number, state: 1 | 2) => settled.push({ id, state }),
+		wake: (conversationId: number, ticketId: string) => {
+			woken.push({ conversationId, ticketId });
+		},
+		phaseOf: (ticketId: string) => (ticketId === "T-1" ? "done" : null),
+		log: (line: string) => console.warn(line),
+		...overrides,
+	};
+	return { deps, calls, settled, woken, rows };
+}
+
+test("补送：解析到宿主的写回并销 1 + 唤醒；解析不到的留 0 下次再试", async () => {
+	const { deps, calls, settled, woken } = redeliverDeps();
+	const sent = await redeliverUndeliveredReports(deps);
+	assert.equal(sent, 1, "只有 T-1 解析到宿主");
+	assert.deepEqual(calls, [{ conversationId: 7, text: "（重启补送）任务 T-1 的结论" }]);
+	assert.deepEqual(settled, [{ id: 11, state: 1 }], "成功行销账，缺宿主的留 0");
+	assert.deepEqual(woken, [{ conversationId: 7, ticketId: "T-1" }], "补送成功即唤醒");
+});
+
+test("补送：会话不存在销 2；写回抛异常留 0；开关关时整段旁路", async () => {
+	const { deps, settled } = redeliverDeps({
+		say: async () => false,
+	});
+	const sent = await redeliverUndeliveredReports(deps);
+	assert.equal(sent, 0);
+	assert.deepEqual(settled, [{ id: 11, state: 2 }], "会话不存在 → 销 2（补送永远不会再成功）");
+	// T-2 解析不到宿主（deps 里 hostConversationId 对它返回 null）：留 0 走 warn 口径
+	assert.deepEqual(
+		(await redeliverUndeliveredReports(deps), settled),
+		settled,
+		"重跑不再送已销账的行",
+	);
+
+	const throwing = redeliverDeps({
+		say: async () => {
+			throw new Error("durable 抖了");
+		},
+	});
+	const thrown = await redeliverUndeliveredReports(throwing.deps);
+	assert.equal(thrown, 0);
+	assert.deepEqual(throwing.settled, [], "异常不销账，下次启动再试");
+
+	process.env.DELEGATION_REPORT_REDELIVERY = "false";
+	try {
+		assert.equal(reportRedeliveryEnabled(), false);
+		assert.equal(await redeliverUndeliveredReports(deps), 0, "开关关 = 回老行为");
+	} finally {
+		delete process.env.DELEGATION_REPORT_REDELIVERY;
+	}
+});
+
+test("补送：脏行与票已清掉的孤儿行直接销 2，不再反复扫", async () => {
+	const { deps, settled } = redeliverDeps({
+		undelivered: () => [{ id: 99, ticketId: "", body: "", createdAt: "" }],
+		ticketExists: () => false,
+	});
+	const sent = await redeliverUndeliveredReports(deps);
+	assert.equal(sent, 0);
+	assert.deepEqual(settled, [{ id: 99, state: 2 }], "脏行销 2");
 });

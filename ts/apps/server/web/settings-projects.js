@@ -30,7 +30,7 @@ const PROJECT_ERROR_TEXT = {
   inside_existing_project: "这个路径已经在某个已登记项目里了，不用重复登记。",
   contains_project: "这个目录包含已登记项目，请选更具体的目录。",
   duplicate_project: "同名或同路径的项目已存在。",
-  project_in_flight: "这个项目还有没跑完的任务，先取消或等任务完结，再归档。",
+  project_in_flight: "这个项目还有没跑完的任务，先取消或等任务完结，再归档或删除登记。",
   unknown_project: "找不到这个项目，刷新后再试。",
   already_decided: "这条请求已经处理过了。",
   not_found: "找不到这条待确认请求，刷新后再试。",
@@ -181,7 +181,9 @@ function projectCardMarkup(project) {
         <span class="proj-card-actions">
           ${
             archived
-              ? `<button class="btn-primary is-quiet" type="button" data-project-action="restore" data-project-id="${id}">恢复</button>`
+              ? `<button class="btn-primary is-quiet" type="button" data-project-action="restore" data-project-id="${id}">恢复</button>
+                 <button class="btn-primary is-quiet is-danger" type="button" data-project-action="delete"
+                         data-project-id="${id}" data-project-name="${attr(project.name)}">删除登记</button>`
               : `<button class="proj-row-more" type="button" aria-haspopup="menu" aria-expanded="false"
                          aria-label="项目动作"
                          data-project-menu data-project-id="${id}" data-project-name="${attr(project.name)}">⋯</button>`
@@ -336,6 +338,9 @@ function wireProjectActions(box) {
           break;
         case "restore":
           void doProjectAction(id, "restore");
+          break;
+        case "delete":
+          confirmDeleteProject(id, name);
           break;
         case "add-root":
           openAddRootModal(id, name);
@@ -667,4 +672,56 @@ function confirmArchiveProject(id, name) {
   });
 }
 
-export { PROJECT_ERROR_TEXT, beginRootPathEdit, confirmArchiveProject, closeProjMenu, confirmRemoveRoot, doProjectAction, loadProjectsSettings, openAddRootModal, openProjMenu, projectCardHint, projectCardMarkup, projectErrorText, promoteRoot, renderProjectList, rootRowMarkup, saveRootPath, settingsWorkspace, wireProjectActions, wireWorkspaceRow, workspaceRowMarkup };
+/** 删除项目登记确认（2026-11-15；入口只在归档页——活跃项目没有删除，先归档再删）：
+ *  只删 SQLite 里的登记行，永久不可恢复；磁盘目录一根手指不动；记忆一条不删；
+ *  挂着这个项目的执事由后端一并解除挂载（响应带回条数）。
+ *  历史会话不删，留在归档里分组「项目已删除」。 */
+function confirmDeleteProject(id, name) {
+  openModal("删除项目登记", (body) => {
+    body.innerHTML = `
+      <p class="modal-desc">永久删除「${esc(name)}」的<b>登记</b>。<b>磁盘上的目录和文件不动，记忆一条不删</b>；历史会话也不删，留在归档里（分组「项目已删除」）。挂着这个项目的执事会一并解除挂载。<b>登记删了不可恢复</b>——重新登记同一个目录会是一个新项目。</p>
+      <p class="modal-hint" id="proj-delete-hint"></p>
+      <div class="modal-actions">
+        <button class="ghost" type="button" data-modal-cancel>取消</button>
+        <button class="modal-danger" type="button" id="proj-delete-confirm">删除登记</button>
+      </div>`;
+    const hint = body.querySelector("#proj-delete-hint");
+    const confirm = body.querySelector("#proj-delete-confirm");
+    body.querySelector("[data-modal-cancel]")?.addEventListener("click", closeModal);
+    confirm?.addEventListener("click", async () => {
+      if (confirm.disabled) return;
+      confirm.disabled = true;
+      try {
+        const response = await request(`/api/v1/projects/${encodeURIComponent(id)}`, {
+          method: "DELETE",
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          setModalHint(hint, projectErrorText(data, response.status));
+          confirm.disabled = false;
+          return;
+        }
+        closeModal();
+        const detached = Number(data.detachedPartners) || 0;
+        toast(
+          detached > 0
+            ? `登记已删除，${detached} 个执事解除挂载（磁盘与记忆保留）`
+            : "登记已删除（磁盘与记忆保留）",
+        );
+        // 入口只在归档页，但接线函数两页共用：按当前页刷新对应那份数据
+        if (currentSettingsPage() === "archive") await loadArchivePage();
+        else await loadProjectsSettings();
+        void refreshProjectPill();
+      } catch (error) {
+        if (error.message === "forbidden") {
+          closeModal();
+          return;
+        }
+        setModalHint(hint, `没删成：${error.message}`);
+        confirm.disabled = false;
+      }
+    });
+  });
+}
+
+export { PROJECT_ERROR_TEXT, beginRootPathEdit, confirmArchiveProject, confirmDeleteProject, closeProjMenu, confirmRemoveRoot, doProjectAction, loadProjectsSettings, openAddRootModal, openProjMenu, projectCardHint, projectCardMarkup, projectErrorText, promoteRoot, renderProjectList, rootRowMarkup, saveRootPath, settingsWorkspace, wireProjectActions, wireWorkspaceRow, workspaceRowMarkup };

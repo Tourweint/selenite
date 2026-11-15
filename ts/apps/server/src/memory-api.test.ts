@@ -787,10 +787,21 @@ test("范围清单：未开执事时只回我的记忆，条数与列表一致",
 		scopes: Array<{ scope: string; label: string; count: number; kind: string }>;
 	};
 	assert.equal(body.ok, true);
-	assert.equal(body.scopes.length, 1, "执事关着时只有 global");
-	assert.equal(body.scopes[0]!.scope, "global");
-	assert.equal(body.scopes[0]!.label, "我的记忆");
-	assert.equal(body.scopes[0]!.kind, "mine");
-	assert.equal(body.scopes[0]!.count, list.counts.all);
+	// 2026-11-15 项目记忆：scope 清单多了项目 tab（有记忆的项目）。执事关着时**执事 tab 必须没有**，
+	// global 永远第一；多余条目只能是 project。外部导入伪 scope 当天撤回（导入条目就落在
+	// global / 项目 scope 里照常显示与召回），不许再下发 __imported__。
+	const partners = body.scopes.filter((row) => row.kind === "partner");
+	assert.equal(partners.length, 0, "执事关着时没有执事 tab");
+	const mine = body.scopes.find((row) => row.kind === "mine");
+	assert.ok(mine, "global（我的记忆）必须在");
+	assert.equal(mine.scope, "global");
+	assert.equal(mine.label, "我的记忆");
+	assert.equal(mine.count, list.counts.all);
+	assert.ok(!body.scopes.some((row) => row.scope === "__imported__"), "外部导入伪 scope 已撤，不该再下发");
+	for (const row of body.scopes) {
+		if (row.scope !== "global") {
+			assert.ok(row.kind === "project", `多出来的只能是项目，来的是 ${row.scope}(${row.kind})`);
+		}
+	}
 });
 

@@ -95,6 +95,13 @@ export interface DelegationReport {
 		conversationId: string;
 		partialReport: string;
 	};
+	/**
+	 * 送达记账行 id（2026-11-15 回信送达兜底，方案 §A）：settle 落 in 留言时的
+	 * delegation_messages 自增 id。reportDelegationResult 写回成功销 1、会话已
+	 * 不存在销 2、写回异常留 0（启动补送兜底）。缺省 = 这份汇报没有待送达行
+	 * （fail 路径 / 重试直报），不参与记账。服务端内部字段，不进对外契约。
+	 */
+	deliveryMessageId?: number;
 }
 
 export interface DelegationMirrorEntry {

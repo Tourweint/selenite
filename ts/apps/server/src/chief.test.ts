@@ -55,13 +55,13 @@ test("总管播种：首次建 chief + SOUL=PERSONA + v1；二次启动不覆盖
 		store.ensureChief(CHIEF_SEED);
 		assert.equal(store.get(CHIEF_PARTNER_ID)?.id, CHIEF_PARTNER_ID, "固定字面量 id = chief");
 		assert.equal(store.readSoulFromHome(CHIEF_PARTNER_ID), CHIEF_SEED, "SOUL 播种 = PERSONA 原文");
-		assert.equal(store.currentVersion(CHIEF_PARTNER_ID)?.soulSource, CHIEF_SEED, "v1 快照 = SOUL");
+		assert.equal(store.get(CHIEF_PARTNER_ID)?.currentVersion, 1, "首启身份计数置 1");
 		assert.ok(existsSync(join(homes, CHIEF_PARTNER_ID, "SOUL.md")), "SOUL 文件已生成");
 		assert.ok(existsSync(join(homes, CHIEF_PARTNER_ID, "skills")), "技能目录已建");
 
-		// 用户改过 SOUL（模拟 PATCH/bumpSoul 推进新版本）
+		// 用户改过 SOUL（模拟 PATCH/bumpSoul 推进保存）
 		store.bumpSoul(CHIEF_PARTNER_ID, "改过的总管身份");
-		assert.equal(store.currentVersion(CHIEF_PARTNER_ID)?.version, 2);
+		assert.equal(store.get(CHIEF_PARTNER_ID)?.currentVersion, 2);
 
 		// 二次启动 = 新的 store 实例、同库同家目录，再用旧 seed 播种：绝不覆盖
 		const restarted = new PartnersStore(db, homes);
@@ -72,7 +72,7 @@ test("总管播种：首次建 chief + SOUL=PERSONA + v1；二次启动不覆盖
 				"改过的总管身份",
 				"二次启动不覆盖改过的 SOUL",
 			);
-			assert.equal(restarted.currentVersion(CHIEF_PARTNER_ID)?.version, 2, "版本不回退");
+			assert.equal(restarted.get(CHIEF_PARTNER_ID)?.currentVersion, 2, "计数不回退");
 		} finally {
 			restarted.close();
 		}

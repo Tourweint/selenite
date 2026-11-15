@@ -26,7 +26,10 @@ const ROOT = mkdtempSync(join(tmpdir(), "lifediary-partner-relay-probe-"));
 let phaseRoot = ROOT;
 /** 阶段序号：只用 ASCII 做目录名，避免各平台文件系统对中文的差异 */
 let labelSlug = 0;
-const RELAY_BODY_HINT = "[来自执事";
+const RELAY_FROM_NAME = "信使甲";
+/** 2026-11-15 作者标记：模型侧那三段说明回读时被剥掉，正文里不该再出现 */
+const RELAY_MODEL_TAG = "[relay hop=1]";
+const RELAY_FROM_TAG = "[来自执事";
 const HOP_BLOCK_HINT = "只允许一跳";
 const CAP_HINT = "上限就是 3 条";
 
@@ -47,6 +50,10 @@ interface Msg {
 	role?: string;
 	text?: string;
 	steps?: Step[];
+	/** 可寻址 id：只有主人自己的输入才有（来信没有 → 不可编辑重发） */
+	id?: string;
+	/** 来信作者（2026-11-15 作者标记） */
+	author?: { kind?: string; id?: string; name?: string; domain?: string; hop?: number };
 }
 
 function stepOutputs(messages: Msg[], tool: string): string[] {
@@ -108,22 +115,39 @@ async function main(): Promise<void> {
 		check("①A 跑一轮 200", aRun.status === 200, `status=${aRun.status}`);
 		const chief = await chiefStream;
 
-		// ①B 的会话里出现包装正文
+		// ①B 的会话里出现这条来信（作者进结构，正文是原话）
 		const bExternal = `partner-${b}`;
-		const landed = await waitFor("B 会话出现递话正文", async () => {
+		const landed = await waitFor("B 会话出现来信", async () => {
 			const messages = await readMessages(bExternal);
-			return userTexts(messages).some(
-				(text) => text.includes(RELAY_BODY_HINT) && text.includes("帮我看下明天上午的日程"),
+			return messages.some(
+				(message) =>
+					message.role === "user" &&
+					message.author?.name === RELAY_FROM_NAME &&
+					String(message.text ?? "").includes("帮我看下明天上午的日程"),
 			);
 		});
 		const bMessages = await readMessages(bExternal);
-		const relayed = userTexts(bMessages).find((text) => text.includes(RELAY_BODY_HINT)) ?? "";
-		check("①A→B 递话落进 B 的会话（真 durable：一条 user 输入）", landed, relayed.slice(0, 40));
+		const relayed =
+			bMessages.find(
+				(message) =>
+					message.role === "user" && message.author?.name === RELAY_FROM_NAME,
+			) ?? ({} as Msg);
 		check(
-			"①包装含 hop 标记 + 来信人 + 主人看不到原文的出口指引",
-			relayed.includes("[relay hop=1]") &&
-				relayed.includes("来自执事 信使甲（inbox）") &&
-				relayed.includes("主人看不到原文"),
+			"①A→B 递话落进 B 的会话（真 durable：一条输入，作者是甲）",
+			landed,
+			String(relayed.text ?? "").slice(0, 40),
+		);
+		// 2026-11-15 口径：作者进结构；模型侧那三段说明剥掉（界面抬头已经写了谁发来的）；
+		// 来信没有可寻址 id → 主人能看不能改。
+		const relayText = String(relayed.text ?? "");
+		check(
+			"①来信带作者结构、剥掉模型侧说明、没有可编辑 id",
+			relayed.author?.kind === "partner" &&
+				relayed.author?.domain === "inbox" &&
+				relayed.id === undefined &&
+				!relayText.includes(RELAY_MODEL_TAG) &&
+				!relayText.includes(RELAY_FROM_TAG),
+			`author=${JSON.stringify(relayed.author)} id=${String(relayed.id)}`,
 		);
 
 		// ①主人对话收到通知（只报谁→谁，不带正文）

@@ -58,7 +58,7 @@ async function main(): Promise<void> {
 			`text=${String(run.body.text ?? "").slice(0, 30)}`,
 		);
 
-		// 改 SOUL：版本推进（磁盘当前值 + 新快照）
+		// 改 SOUL：保存计数推进（2026-11-15 快照退役：计数只是记账位，正文在磁盘）
 		const patched = await api("PATCH", `/api/v1/partners/${partnerId}`, {
 			soul: `你是探针执事，改过的身份。`,
 		});
@@ -67,6 +67,21 @@ async function main(): Promise<void> {
 		check(
 			"改 SOUL 后详情：磁盘当前值已是新版（下一轮生效由 partner-runtime 的版本对齐保证）",
 			String(detail2.body.soul ?? "").includes("改过"),
+		);
+
+		// 回滚到上一份（2026-11-15 快照退役）：单槽交换；再按一次 = 撤销回滚
+		const rolled = await api("POST", `/api/v1/partners/${partnerId}/soul/rollback`, null);
+		check(
+			"回滚 SOUL：回到上一份（播种正文），计数推进到 3",
+			rolled.status === 200 &&
+				String(rolled.body.soul ?? "").includes("探针执事") &&
+				rolled.body.soulVersion === 3,
+			`status=${rolled.status} soulVersion=${rolled.body.soulVersion}`,
+		);
+		const rolledBack = await api("POST", `/api/v1/partners/${partnerId}/soul/rollback`, null);
+		check(
+			"再按一次回滚 = 撤销：SOUL 回到改过的正文",
+			rolledBack.status === 200 && String(rolledBack.body.soul ?? "").includes("改过"),
 		);
 
 		// 候选链：只收 keyEnv 名，带值字段必须 400（密钥纪律）

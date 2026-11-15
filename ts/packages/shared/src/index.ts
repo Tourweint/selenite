@@ -270,6 +270,27 @@ export function parseFileManifest(text: string): { files: TranscriptFile[]; text
 
 
 /**
+ * 一条消息的作者（2026-11-15 作者标记方案 §3.1）。
+ *
+ * **只有非主人来源才带**，主人自己说的话不标——对齐 cindy「本机输入不盖章」：
+ * 右侧默认就是主人，需要标注的只有"不是他说的"。
+ *
+ * 存在意义：作者是结构，不是正文里的一行字。正文会被压缩、改写、转述吃掉，
+ * 这个字段不会。界面靠它决定画在左边还是右边、给不给编辑入口。
+ */
+export const TranscriptAuthorSchema = z.object({
+	/** 目前只有执事间递话一种；工人/群/远端将来要加，按 kind 扩，不改现有形状 */
+	kind: z.enum(["partner"]),
+	/** 执事 uuid（对外 id 一律 uuid） */
+	id: z.string(),
+	name: z.string(),
+	domain: z.string().optional(),
+	/** 递话跳数（通道当前恒 1；留着是为了将来两跳时不必再改形状） */
+	hop: z.number().optional(),
+});
+export type TranscriptAuthor = z.infer<typeof TranscriptAuthorSchema>;
+
+/**
  * 读历史接口的一条记录。
  *
  * 为什么需要它：一轮对话现在**可以在客户端关掉之后继续跑完**，
@@ -305,6 +326,13 @@ export const TranscriptMessageSchema = z.object({
   steps: z.array(TranscriptStepSchema).optional(),
   /** 那一轮从提问到收尾的墙钟时长（毫秒）；有 steps 才可能有 */
   workMs: z.number().optional(),
+  /**
+   * 这条 user 消息是谁发的（2026-11-15 作者标记方案，纯增量，老客户端忽略）。
+   *
+   * 只在**非主人来源**的 user 消息上出现（目前 = 执事间递话）。没有这个字段
+   * 就代表主人本人输入——与 `id`（可编辑重发的寻址）互斥：带 author 的不可编辑。
+   */
+  author: TranscriptAuthorSchema.optional(),
 });
 export type TranscriptMessage = z.infer<typeof TranscriptMessageSchema>;
 
@@ -1204,7 +1232,10 @@ export const PartnerProfileSchema = z.object({
 	id: z.string().uuid(),
 	name: z.string(),
 	status: PartnerStatusSchema,
-	/** 当前生效的身份快照版本号；改 SOUL 下一轮生效（版本化在服务端） */
+	/**
+	 * 身份保存计数（2026-11-15 快照退役：不再对应任何可回看的存档）。
+	 * 每次保存 SOUL / 契约 / 候选链都 +1，只做「改完下一轮生效」的记账位；界面不展示。
+	 */
 	soulVersion: z.number().nullable(),
 	createdAt: z.string(),
 	updatedAt: z.string(),
@@ -1237,6 +1268,16 @@ export const PartnerProfileSchema = z.object({
 	 * 旧客户端按「忽略未知字段」处理即可。
 	 */
 	dispatchAuthority: z.boolean().optional(),
+	/**
+	 * 项目记忆归属（2026-11-15 跟人走方案立项、同日多挂载方案扩化，纯增量可选）：
+	 * uuid 数组 = 这个总管 / 执事负责哪些已登记项目（人设二级页勾选，projects.sqlite
+	 * 的项目 uuid，**挂载 = 可达性**：recall 全部可查、聊到的自动浮出、remember 可指名
+	 * 写入——不是"每轮整包搬进上下文"）。执事自己的 partner: 键空间照旧。
+	 * `PARTNER_PROJECT_MEMORY=false` 时投影整个字段不出现；旧客户端忽略未知字段即可。
+	 * 演进注：上线首日是单值 `projectId`（uuid|null），同日改多数组——字段只活了半天、
+	 * 手机端未消费，直接换名不留旧字段。
+	 */
+	projectIds: z.array(z.string().uuid()).optional(),
 });
 export type PartnerProfile = z.infer<typeof PartnerProfileSchema>;
 
@@ -1267,8 +1308,13 @@ export const PartnerPersonaModuleIds = [
 export const PartnerPersonaModuleSchema = z.enum(PartnerPersonaModuleIds);
 export type PartnerPersonaModule = z.infer<typeof PartnerPersonaModuleSchema>;
 
-/** 预设：岗位（默认）/ 陪伴 / 自定义。预设只决定开关键，随时可改。 */
-export const PartnerPersonaPresetSchema = z.enum(["work", "companion", "custom"]);
+/**
+ * 预设：岗位（默认）/ 陪伴 / 全才（岗位+内心全开）/ 学徒（学习观察型）/ 自定义。
+ * 预设只决定开关键，随时可改；保存时服务端按最终开关表**推导**预设名
+ * （2026-11-15 人设页打磨）：表与某预设一致就标该预设，否则 custom。
+ * `workHistory` / `currentWork` 固定注入（2026-11-15 起不再是闸），不参与推导比较。
+ */
+export const PartnerPersonaPresetSchema = z.enum(["work", "companion", "allrounder", "apprentice", "custom"]);
 export type PartnerPersonaPreset = z.infer<typeof PartnerPersonaPresetSchema>;
 
 /** 句长枚举（口吻模块）。 */
@@ -1513,12 +1559,18 @@ export const PartnerLivingPatchSchema = z
 	.strict();
 export type PartnerLivingPatch = z.infer<typeof PartnerLivingPatchSchema>;
 
-/** 活模块的子开关（`persona_switches` 列）：口吻影响 + 挂念提醒（批3）。 */
+/** 活模块的子开关（`persona_switches` 列）：口吻影响 + 挂念提醒（批3）+ 记忆召回（2026-11-15）。 */
 export const PartnerPersonaSwitchesSchema = z
 	.object({
 		moodAffectTone: z.boolean().optional(),
 		/** 挂念提醒（2026-11-15 批3）：默认关；开 = 允许在既有唤醒时机发一条带身份的挂念。 */
 		nudgeEnabled: z.boolean().optional(),
+		/**
+		 * 记忆召回（2026-11-15 人设页打磨二轮）：默认开（未出现 = 开）。
+		 * `false` = 这一位的会话每轮不再自动带记忆（`recall` 工具仍可主动查）。
+		 * 只管"自动注入"这一半，不动记忆库本身。
+		 */
+		memoryRecallEnabled: z.boolean().optional(),
 	})
 	.strict();
 export type PartnerPersonaSwitches = z.infer<typeof PartnerPersonaSwitchesSchema>;
@@ -1691,7 +1743,8 @@ export interface PartnerPersonaView {
 	enabled: boolean;
 	preset: PartnerPersonaPreset;
 	modules: Record<PartnerPersonaModule, boolean>;
-	switches: { moodAffectTone: boolean; nudgeEnabled: boolean };
+	/** 当前生效的子开关（未写过的按默认值回：挂念默认关、记忆召回默认开）。 */
+	switches: { moodAffectTone: boolean; nudgeEnabled: boolean; memoryRecallEnabled: boolean };
 	contents: PartnerPersonaContents;
 	/** 活状态（批2）；`enabled=false` 时为 null（整块隐藏，不假装有状态）。 */
 	living: PartnerLivingView | null;

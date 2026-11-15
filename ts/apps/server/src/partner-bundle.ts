@@ -160,9 +160,9 @@ export function exportPartnerBundle(
 	const { store, memory } = ctx;
 	const partner = store.get(partnerId);
 	if (!partner) return null;
-	const current = store.currentVersion(partnerId);
-	const soul = store.readSoulFromHome(partnerId) ?? current?.soulSource ?? "";
-	const contract = store.readContractFromHome(partnerId) ?? current?.contractSource ?? "";
+	// 2026-11-15 快照退役：磁盘当前值是唯一事实源。
+	const soul = store.readSoulFromHome(partnerId) ?? "";
+	const contract = store.readContractFromHome(partnerId) ?? "";
 
 	const memories: BundleMemory[] =
 		memory === null

@@ -10,6 +10,7 @@
 import { el } from "./dom.js";
 import { attr, esc } from "./markdown.js";
 import { go } from "./route.js";
+import { sidebarGroupsActiveSync } from "./chats-groups.js";
 import { state } from "./state.js";
 import { renderSideListEmpty } from "./tasks-board.js";
 import { EMPLOYEE_LABEL, STATE_ICON, STATUS_ORDER, TASK_BADGE_STATUSES, relativeTime } from "./tasks-model.js";
@@ -261,6 +262,14 @@ const SIDE_TASKS_LIMIT = 5;
 function renderTasksMini() {
   const box = el.tasksMini;
   if (!box) return;
+  // 分组形态（2026-11-15 侧栏按创建者分组）：任务行都进文件夹了，这里让位清空。
+  // 回滚开关关着时走下面的原版渲染。
+  if (sidebarGroupsActiveSync()) {
+    box.replaceChildren();
+    box.hidden = true;
+    return;
+  }
+  box.hidden = false;
   const { cards, direct } = groupByConversation(state.tickets);
   const alive = (ticket) => TASK_BADGE_STATUSES.has(ticket.status);
   // 固定按最近更新排（不看任务中心的排序/筛选：侧栏要稳定，不该被页面上的筛选带走）

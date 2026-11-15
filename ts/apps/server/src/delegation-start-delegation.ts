@@ -15,7 +15,7 @@ import { noteWorkSettlementForConversation } from "./partner-living.ts";
 import { WorkStatus } from "./work-record.ts";
 import { DelegationPhase } from "@lifediary/shared";
 import { buildManagerIdentity, formatMessageLine, formatProgressLine, formatReport, truncate } from "./delegation-delegation-kickoff.ts";
-import type { DelegationKickoff, DelegationRuntime } from "./delegation-delegation-kickoff.ts";
+import type { DelegationKickoff, DelegationReport, DelegationRuntime } from "./delegation-delegation-kickoff.ts";
 
 export function startDelegation(
 	kick: DelegationKickoff,
@@ -161,7 +161,20 @@ export function startDelegation(
 		}
 		const report = formatReport(result, kick.domain, { takeover });
 		// 结论也落成一条留言：任务详情里 out / in 成对，读起来就是一段经过
-		recordMessage("in", result.line || report.text, { kind: "system", name: "执行端" });
+		// 送达记账（2026-11-15 回信送达兜底）：in 行落库记"待送达"，行 id 随汇报
+		// 交给 reportDelegationResult 销账；终态落盘到写回会话之间进程崩溃的话，
+		// 这行就是启动补送的依据（方案 §A）。
+		const deliveryMessageId = recordMessage(
+			"in",
+			result.line || report.text,
+			{ kind: "system", name: "执行端" },
+			ticketId,
+			{ trackDelivery: true },
+		);
+		const reportWithDelivery: DelegationReport = {
+			...report,
+			...(deliveryMessageId ? { deliveryMessageId } : {}),
+		};
 		// 双写（8g）：REPORT 落 assistant 条目，语义 = 执行端向主人汇报。
 		// 用完整的那句 result.line（留言表同源），不是 80 字截断的 report.text。
 		runtime.mirror?.(ticketId, { kind: "report", text: `【汇报】${result.line || report.text}` });
@@ -192,7 +205,17 @@ export function startDelegation(
 		}
 		// idle = 父单还有子任务没终态，或等下一个触发：只更新事件，不汇报。
 		if (runtime.autoReport && runtime.report && result.status !== "idle") {
-			runtime.report(kick.conversationId, report);
+			runtime.report(kick.conversationId, reportWithDelivery);
+		} else if (deliveryMessageId) {
+			// 按设计没往宿主会话写汇报（idle 中间态 / autoReport 关 / 无 report 通道）：
+			// 这不是"丢了"，销账为跳过，防止启动补送把设计内不发的汇报再发一遍。
+			try {
+				delegationMessages().markDelivery(deliveryMessageId, 2);
+			} catch (error) {
+				runtime.log?.(
+					`[delegate] 送达销账失败（留 0，下次启动重扫）: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
 		}
 	};
 
@@ -272,17 +295,24 @@ export function startDelegation(
 		body: string,
 		sender?: { kind: DelegationSenderKind; name: string },
 		ticket = ticketId,
-	): void => {
-		if (!sender || !ticket) return;
+		options: { trackDelivery?: boolean } = {},
+	): number | undefined => {
+		if (!sender || !ticket) return undefined;
+		let rowId: number | undefined;
 		try {
-			delegationMessages().append({
-				ticketId: ticket,
-				direction,
-				fromKind: sender.kind,
-				fromName: sender.name,
-				body,
-				createdAt: new Date().toISOString(),
-			});
+			rowId = delegationMessages().append(
+				{
+					ticketId: ticket,
+					direction,
+					fromKind: sender.kind,
+					fromName: sender.name,
+					body,
+					createdAt: new Date().toISOString(),
+				},
+				// 送达记账（2026-11-15 回信送达兜底）：只有 settle 的结论文 in 行参与
+				// 补送，落行时先记"待送达"；写回成功由 reportDelegationResult 销账。
+				options.trackDelivery ? { delivered: 0 } : {},
+			);
 		} catch (error) {
 			runtime.log?.(
 				`[delegate] 留言落库失败（不挡派单）：${error instanceof Error ? error.message : String(error)}`,
@@ -296,6 +326,7 @@ export function startDelegation(
 				text: formatMessageLine(sender.name, body),
 			});
 		}
+		return rowId;
 	};
 
 	const projectField = kick.project ? { project: kick.project } : {};

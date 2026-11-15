@@ -19,7 +19,7 @@ import type { GateBlockCategory } from "../gate-audit.ts";
 import { auditGateBlock } from "../gate-audit.ts";
 import { loopGuardEnabled, loopGuardFor, resetLoopGuard } from "../loop-guard.ts";
 import type { RelayDeliverResult, RelaySenderContext } from "../partner-relay.ts";
-import { RELAY_AUTONOMY_BLOCK_MESSAGE, RELAY_CALLER_BLOCK_MESSAGE, RELAY_CHIEF_BLOCK_MESSAGE, RELAY_GROUP_BLOCK_MESSAGE, RELAY_HOP_BLOCK_MESSAGE, RELAY_TOOL_NAME, beginRelayRun, claimRelayTarget, clearRelayTarget, currentRelayRunKey, emitRelayReceipt, isRelayRun, markRelayRun, markRelayTarget, partnerRelayEnabled, partnerRelayReceiptEnabled, relayOutcomeEntry, relaySettledText } from "../partner-relay.ts";
+import { RELAY_AUTONOMY_BLOCK_MESSAGE, RELAY_CALLER_BLOCK_MESSAGE, RELAY_CHIEF_BLOCK_MESSAGE, RELAY_GROUP_BLOCK_MESSAGE, RELAY_HOP_BLOCK_MESSAGE, RELAY_TOOL_NAME, beginRelayRun, claimRelayTarget, clearRelayTarget, currentRelayRunKey, emitRelayReceipt, isRelayRun, markRelayRun, markRelayTarget, partnerRelayEnabled, partnerRelayReceiptEnabled, relayEntryOf, relayOutcomeEntry, relaySettledText } from "../partner-relay.ts";
 import { CHIEF_PARTNER_ID, COMPANIONS_ENABLED, partnersStore } from "../partners.ts";
 import { pathGuardBlockReason } from "../path-guard.ts";
 import { askPersona, askPersonaAvailable, personaAskEnabled } from "../persona-ask.ts";
@@ -28,6 +28,7 @@ import { projectsStore, workspaceRootsReal } from "../projects.ts";
 import { currentModels, contextWindowsByRef, readLlmConfig } from "../provider.ts";
 import { compactionSummary, readCompactionConfig } from "../compaction-settings.ts";
 import { isReadOnlyShellCommand, readAllowlistEnabled } from "../read-allowlist.ts";
+import { noteRequestInjections } from "../context-inspect.ts";
 import { buildHarnessSettings, reliabilitySummary } from "../reliability.ts";
 import { ReminderTask } from "../reminder.ts";
 import { RoutineTask, routineEngine, routineSelfServiceEnabled } from "../routines.ts";
@@ -43,13 +44,14 @@ import { UNATTENDED_SKIP_MESSAGE, isUnattended, noteTurnToolError, noteUnattende
 import { WORLD_STATE_TOOLS, confirmWorldStateEnabled, verifyWorldState, worldStateTarget } from "../world-state.ts";
 import { approvalArgsHash } from "./approval-key.ts";
 import { CHANCELLOR_ENABLED, memoryEngine, scopeOf, skillStore } from "./assist.ts";
+import { setChatKindsSource, setProjectBindingsSource, setProjectLabelResolver } from "./project-scope.ts";
 import { guardRelayDelivery } from "./injection-guard.ts";
 import { collectInjections, guardProvider } from "./injection.ts";
 import { LIFECYCLE_MESSAGE_PROVIDERS, clarifyContractProvider, currentProjectProvider, personaProvider, skillsProvider, topicsProvider, verificationIronLawProvider } from "./lifecycle-injections.ts";
 import { BASH_TIMEOUT_S, approvalMode, policy, readOnlyBlockReason } from "./policy.ts";
 import { markRecoverResume } from "./recover-note.ts";
 import { recallSessionsEnabled, searchSessions } from "./session-search.ts";
-import { CTX, ChatKinds, DB_PATH, emitPhase, emitTool, noteSessionCwd, sessionCwd, toolArgs, toolDiff, toolLabel, toolOutput } from "./shared.ts";
+import { CTX, ChatKinds, ChatProjects, Chats, DB_PATH, emitPhase, emitTool, noteSessionCwd, sessionCwd, toolArgs, toolDiff, toolLabel, toolOutput } from "./shared.ts";
 import { APPROVAL_WAITING_MESSAGE, HARD_STOP_GRACE, LOOP_GUARD_BLOCK_MESSAGE, MAX_TURNS, aborting, limitHits, runTurns, toolsBlocked, waitForApproval } from "./turn-gate.ts";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { contentText } from "@earendil-works/pi-ai";
@@ -238,8 +240,21 @@ async function deliverPartnerRelay(
 		markRelayTarget(sessionId);
 		let submission;
 		try {
+			// 2026-11-15 作者标记：落成 `relay.message` 应用条目（作者进 data），
+			// 落进 `pi.user` 就会被当成主人说的话（方案 §3.2）。开关关时 entry 为 null，
+			// `submit` 逐字节回到 8d 形态。
+			const entry = relayEntryOf({
+				id: sender.partnerId,
+				name: sender.name,
+				domain: sender.domain,
+			});
 			submission = await conversation.submit(
-				{ type: "input", content: guardedBody, whenBusy: "followUp" },
+				{
+					type: "input",
+					content: guardedBody,
+					whenBusy: "followUp",
+					...(entry ? { entry } : {}),
+				},
 				CTX,
 			);
 		} catch (error) {
@@ -421,15 +436,8 @@ async function openHarness(): Promise<Harness> {
 	const storage = await openNodeSqliteStorage(DB_PATH);
 
 	const registry = createRegistry();
-	// pi 自带的那套读写改跑命令：走执行环境，比我们自己写的完整。
-	// bash / powershell 换包装版（2026-11-13 工具层结果契约化 §5.1）：注册表只装一份，
-	// 工具清单与顺序不变（保 prompt cache 前缀稳定）；开关关时包装器逐字节透传。
-	registry.install({
-		...CodingTools,
-		tools: CodingTools.tools?.map((tool) =>
-			tool.name === "bash" || tool.name === "powershell" ? wrapShellTool(tool as never) : tool,
-		),
-	});
+	// pi 自带的那套读写改跑命令：走执行环境，比我们自己写的完整
+	registry.install(CodingTools);
 	const lifediaryTools = createTools({
 		memory: memoryEngine,
 		scopeOf,
@@ -485,6 +493,37 @@ async function openHarness(): Promise<Harness> {
 			personaAskEnabled() && askPersonaAvailable()
 				? (question, options) => askPersona(question, options)
 				: null,
+	});
+	// 会话归属项目（2026-11-15 项目记忆方案）：给 project-scope 注入快照源（零依赖小模块，
+	// assist/lifecycle-harness 都不反向 carry 它——环与测试加载面的坑见该文件头注释）。
+	// getHarness() 惰性取：接线时 harness 还没 open，真正调用时已就绪。
+	setProjectBindingsSource(async () => {
+		const harness = await getHarness();
+		const [chats, bindings] = await Promise.all([
+			harness.snapshot(Chats, CTX),
+			harness.snapshot(ChatProjects, CTX),
+		]);
+		const pairs: Array<readonly [number, string]> = [];
+		for (const [conversationId, internalId] of Object.entries(chats?.byExternal ?? {})) {
+			const projectId = bindings?.byInternal?.[String(internalId)];
+			if (projectId) pairs.push([Number(conversationId), projectId] as const);
+		}
+		return pairs;
+	});
+	// 人格挂载（2026-11-15 项目记忆挂载跟人走方案）：kind 判定快照源。链接执事的会话
+	// 由 partnersStore 现查（sync）；这里只补 chief / worker 的 durable 一半。
+	setChatKindsSource(async () => {
+		const harness = await getHarness();
+		const kinds = await harness.snapshot(ChatKinds, CTX);
+		return { ...(kinds?.byInternal ?? {}) };
+	});
+	// 项目名解析（2026-11-15 项目记忆多挂载）：uuid → 名字，供注入行归属标注与
+	// 负责项目索引。含归档项目（挂载校验口径含归档——记忆还在，名字也该在）。
+	setProjectLabelResolver((projectId) => {
+		const project = projectsStore()
+			.listProjects(true)
+			.find((entry) => entry.id === projectId);
+		return project?.name ?? null;
 	});
 	// 工具结果投影挂载判定依赖（2026-11-13 工具层结果契约化 §5）：store 与 ChatKinds 现查，
 	// tool-projection 只收纯函数。getPartner 读不到（无 partners 行）时按 null 走默认判定。
@@ -907,11 +946,20 @@ async function openHarness(): Promise<Harness> {
 						// 回合上限 / 执事轮上下文。框架负责排序与去重，装配处按收集结果**依次压入**，
 						// 位置与改造前一致（仍是本轮模型请求最前面的几条 system 消息）。
 						// 执事轮输入只在本轮第一次请求时算（used===1），provider 内照旧判定。
-						const extra = collectInjections(LIFECYCLE_MESSAGE_PROVIDERS, {
+						const collected = collectInjections(LIFECYCLE_MESSAGE_PROVIDERS, {
 							conversationId: api.conversationId,
 							turn: used,
 							userText,
-						}).message.map((item) => ({
+						});
+						// 设置 → 上下文只读这份"首轮实文"：记忆召回会回写使用计数，
+						// 读端点不能为了预览重跑，只能记真正发出去的那一轮。
+						if (used === 1) {
+							noteRequestInjections(
+								api.conversationId,
+								collected.message.map((item) => ({ id: item.id, text: item.text })),
+							);
+						}
+						const extra = collected.message.map((item) => ({
 							role: "system" as const,
 							content: item.text,
 							timestamp: Date.now(),

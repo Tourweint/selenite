@@ -43,10 +43,12 @@ export function personaModulesEnabled(env: NodeJS.ProcessEnv = process.env): boo
  * 预设 → 模块开关（2026-11-14 任务书"预设映射"，改动同步 `docs/变更记录/`）。
  *
  * work（建档默认）：只留岗位相关；口吻 / 里子 / 处境关——"干活执事没有情感是设定本身"。
- * companion：口吻 / 里子 / 处境 + 目标开；岗位类（契约 / 纪律 / 履历 / 在办）关，
+ * companion：口吻 / 里子 / 处境 + 目标开；岗位类（契约 / 纪律）关，
  *   **主人数据红线照旧强制注入**（不在开关范围内）。impression / mood / heart 在这里置 true，
  *   但批1 还不注入（批2 生效）。
+ * allrounder / apprentice：2026-11-15 人设页打磨新增（全才 = 岗位+内心全开；学徒 = 学习观察型）。
  * custom：全关起步，用户自己开；服务端只强制红线。
+ * 保存时按最终开关表 `derivePresetFromModules` 推导预设名，预设名与表永远一致。
  */
 export const PERSONA_PRESETS: Record<PartnerPersonaPreset, Record<PartnerPersonaModule, boolean>> = {
 	work: {
@@ -81,6 +83,41 @@ export const PERSONA_PRESETS: Record<PartnerPersonaPreset, Record<PartnerPersona
 		proactivity: false,
 		profiles: false,
 	},
+	// 全才（2026-11-15 人设页打磨）：岗位类 + 口吻 / 里子 / 处境 + 内心三件全开——
+	// 干活也有感情的执事；学习 / 挂念 / 人设库仍默认关（学习存数据、挂念发消息，别默认开）。
+	allrounder: {
+		expression: true,
+		values: true,
+		scenario: true,
+		contract: true,
+		discipline: true,
+		goal: true,
+		workHistory: true,
+		currentWork: true,
+		impression: true,
+		mood: true,
+		heart: true,
+		learning: false,
+		proactivity: false,
+		profiles: false,
+	},
+	// 学徒：在学主人说话习惯的实验位——口吻 / 学习 / 挂念 / 人设库开，其余最小。
+	apprentice: {
+		expression: true,
+		values: false,
+		scenario: false,
+		contract: false,
+		discipline: false,
+		goal: false,
+		workHistory: true,
+		currentWork: true,
+		impression: false,
+		mood: false,
+		heart: false,
+		learning: true,
+		proactivity: true,
+		profiles: true,
+	},
 	custom: {
 		expression: false,
 		values: false,
@@ -109,6 +146,10 @@ export function defaultPersonaModules(
 /**
  * 有效开关 = 预设默认 + 行上显式值。
  * 只认 14 个 id 且值为布尔的键；磁盘被手改成脏值也不让进来。
+ *
+ * `workHistory` / `currentWork` 自 2026-11-15 人设页打磨起**固定注入**（不再是闸）：
+ * 行上显式 `false` 保留在存储里但不再生效——两段都是现查现拼，没活干时整段本来
+ * 就不出现，常开零成本（"记忆全注入"口径）。预设推导也不比较这两个 id。
  */
 export function effectivePersonaModules(row: {
 	personaPreset: PartnerPersonaPreset;
@@ -119,7 +160,33 @@ export function effectivePersonaModules(row: {
 		const value = row.personaModules[id];
 		if (typeof value === "boolean") merged[id] = value;
 	}
+	merged.workHistory = true;
+	merged.currentWork = true;
 	return merged;
+}
+
+/** 固定注入、不再作为闸的两个模块 id（预设推导跳过它们）。 */
+export const PERSONA_FIXED_ON_IDS = ["workHistory", "currentWork"] as const;
+
+/** 参与预设推导比较的模块 id = 全部 id 去掉固定注入的两个。 */
+export const PERSONA_PRESET_MATCH_IDS = PartnerPersonaModuleIds.filter(
+	(id): id is PartnerPersonaModule => !(PERSONA_FIXED_ON_IDS as readonly string[]).includes(id),
+);
+
+/**
+ * 按最终开关表推导预设名（2026-11-15 人设页打磨）：与某张预设表一致就标该预设，
+ * 否则「自定义」。只比较可配置的 12 个 id；`workHistory` / `currentWork` 固定注入不参与。
+ * 预设名从此永远是开关表的真话——改了任一开关自动跳「自定义」，改回来自动跳回预设。
+ */
+export function derivePresetFromModules(
+	modules: Record<PartnerPersonaModule, boolean>,
+): PartnerPersonaPreset {
+	const candidates = ["work", "companion", "allrounder", "apprentice"] as const;
+	for (const preset of candidates) {
+		const table = PERSONA_PRESETS[preset];
+		if (PERSONA_PRESET_MATCH_IDS.every((id) => modules[id] === table[id])) return preset;
+	}
+	return "custom";
 }
 
 /**

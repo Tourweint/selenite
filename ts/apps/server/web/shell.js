@@ -40,8 +40,12 @@ function toggleSidebar() {
 }
 
 /* 隐藏的那一层不能是 Tab 焦点（2026-11-06 C 批）：
-   展开时轨道藏着、收起时 inner 藏着；窄屏（≤800px）CSS 强制只显示 48px 轨道，
-   与 data-sidebar 无关，所以按「实际可见」算，不能只看 dataset。
+   展开时轨道藏着、收起时 inner 藏着。
+   2026-11-15 窄屏改覆盖层：≤800px 不再「强制只显示 48px 轨道、与 data-sidebar 无关」
+   ——那是旧口径，代价是窄屏点展开静默无效（用户报「特别窄展不开」）。现在
+   窄屏收起 = 48px 轨道、展开 = 覆盖面板（样式在 style-11 窄屏块），开合语义
+   与宽屏一致，inert 也归一成按 data-sidebar 算。
+   遮罩只在「窄屏 + 展开」出现：宽屏侧栏常驻，点外不收（旧口径保留）。
    inert 同时挡住鼠标与键盘，比只设 tabindex=-1 少一整套维护。 */
 const NARROW_SIDEBAR = matchMedia("(max-width: 800px)");
 
@@ -52,14 +56,22 @@ function setInert(node, inert) {
 }
 
 function applySidebarA11y() {
-  const narrow = NARROW_SIDEBAR.matches;
-  const railVisible = narrow || !sidebarOpen();
-  const innerVisible = !narrow && sidebarOpen();
-  setInert(el.sideRail, !railVisible);
-  setInert(el.sidebarInner, !innerVisible);
+  const open = sidebarOpen();
+  setInert(el.sideRail, open);
+  setInert(el.sidebarInner, !open);
+  if (el.sidebarScrim) el.sidebarScrim.hidden = !(NARROW_SIDEBAR.matches && open);
 }
 
 NARROW_SIDEBAR.addEventListener("change", applySidebarA11y);
+/* IAB/模拟视口改尺寸不派 matchMedia change（2026-11-15 实测：matches 会更新、
+   CSS 媒体查询也跟着走，事件就是不来），补一个 resize 兜底——applySidebarA11y
+   是幂等同步，多调不伤。 */
+window.addEventListener("resize", applySidebarA11y);
+
+// 窄屏展开态点遮罩 = 收侧栏（宽屏遮罩永远 hidden，走不到这里）
+el.sidebarScrim?.addEventListener("click", () => {
+  if (sidebarOpen()) toggleSidebar();
+});
 
 /* 侧栏悬停浮出（peek）2026-11-08 做过、当天退役（用户拍板"感觉很难受"）：
  * 鼠标扫过左上角就弹一大块面板压内容，且"悬停预览/点击固定"两套逻辑叠着，

@@ -74,7 +74,7 @@ function ticketFixture(
 	} as Ticket;
 }
 
-test("契约：新建执事播种四节标题（决策分级带调查铁律）；改契约 = 双快照 bump，SOUL / 能力延续", () => {
+test("契约：新建执事播种四节标题（决策分级带调查铁律）；改契约 / 改 SOUL 只写盘 + 计数，留上一份可回滚", () => {
 	const { root, db, homes } = tempRoot();
 	const store = new PartnersStore(db, homes);
 	try {
@@ -91,7 +91,8 @@ test("契约：新建执事播种四节标题（决策分级带调查铁律）�
 		assert.match(template, /同一条思路连修 3 次还不行/);
 		assert.match(renderContractSection(template) ?? "", /## 决策分级[\s\S]*自带验收证据/);
 
-		const v1Soul = store.getVersion(partner.id, 1)?.soulSource ?? "";
+		// 2026-11-15 快照退役：改契约 = 写盘 + 计数 +1，SOUL 正文不动、没有快照行。
+		const soulBefore = store.readSoulFromHome(partner.id) ?? "";
 		const contract1 = [
 			"## 职责范围",
 			"负责前端与桌面壳。",
@@ -107,34 +108,40 @@ test("契约：新建执事播种四节标题（决策分级带调查铁律）�
 		].join("\n");
 		const v2 = store.bumpContract(partner.id, contract1);
 		assert.equal(v2, 2);
-		const current2 = store.currentVersion(partner.id);
-		assert.equal(current2?.contractSource, contract1);
-		assert.equal(current2?.soulSource, v1Soul, "改契约不动 SOUL 正文");
+		assert.equal(store.readContractFromHome(partner.id), contract1);
+		assert.equal(store.readSoulFromHome(partner.id), soulBefore, "改契约不动 SOUL 正文");
 
-		// 冻结：v1 的契约快照仍是空模板（演化链可追溯）
-		assert.equal(store.getVersion(partner.id, 1)?.contractSource, partnerContractTemplate());
-
-		// 再改 SOUL：新版本必须把当前契约一起快照过去（一个版本 = 一对）
+		// 改 SOUL：写盘 + 上一份进 SOUL.prev.md（单槽）
 		const v3 = store.bumpSoul(partner.id, "你是小澈，改过的人格。");
 		assert.equal(v3, 3);
-		assert.equal(store.currentVersion(partner.id)?.contractSource, contract1);
+		assert.equal(store.readSoulFromHome(partner.id), "你是小澈，改过的人格。");
+		assert.equal(store.readHomeFile(partner.id, "SOUL.prev.md"), soulBefore);
 
-		// 切模型链同样不冲掉契约
-		const v4 = store.setModelChain(partner.id, [
+		// 回滚 = 与上一份交换；再按一次 = 撤销回滚
+		const rolled = store.rollbackSoul(partner.id);
+		assert.equal(rolled, soulBefore);
+		assert.equal(store.readSoulFromHome(partner.id), soulBefore);
+		assert.equal(store.readHomeFile(partner.id, "SOUL.prev.md"), "你是小澈，改过的人格。");
+		assert.equal(store.get(partner.id)?.currentVersion, 4);
+
+		// 候选链：家目录 model-chain.json 是唯一事实源（不再寄存版本行）
+		const v5 = store.setModelChain(partner.id, [
 			{ providerId: "faux", modelId: "faux", keyEnv: "PROBE_KEY" },
 		]);
-		assert.equal(v4, 4);
-		assert.equal(store.currentVersion(partner.id)?.contractSource, contract1);
+		assert.equal(v5, 5);
+		assert.deepEqual(store.getModelChain(partner.id), [
+			{ providerId: "faux", modelId: "faux", keyEnv: "PROBE_KEY" },
+		]);
 	} finally {
 		store.close();
 		rmSync(root, { recursive: true, force: true });
 	}
 });
 
-test("契约：老库（partner_versions 没有 contract_source 列）打开不炸，旧行读出 null", () => {
+test("老库迁移：partner_versions 整表退役——候选链搬进家目录、表 DROP、计数保留", () => {
 	const { root, db, homes } = tempRoot();
 	try {
-		// 手工造一份改动前的库结构（没有 contract_source）
+		// 手工造一份带版本表的旧库（当前版本行挂着候选链）
 		const legacy = new DatabaseSync(db);
 		legacy.exec(`
 			CREATE TABLE partners (
@@ -143,28 +150,37 @@ test("契约：老库（partner_versions 没有 contract_source 列）打开不�
 			);
 			CREATE TABLE partner_versions (
 				partner_id TEXT NOT NULL, version INTEGER NOT NULL, soul_source TEXT NOT NULL,
-				capabilities TEXT, created_at TEXT NOT NULL, PRIMARY KEY (partner_id, version)
+				contract_source TEXT, capabilities TEXT, created_at TEXT NOT NULL,
+				PRIMARY KEY (partner_id, version)
 			);
 		`);
 		const now = new Date().toISOString();
 		legacy.prepare(
-			"INSERT INTO partners (id, name, status, current_version, created_at, updated_at) VALUES (?, ?, 'active', 1, ?, ?)",
+			"INSERT INTO partners (id, name, status, current_version, created_at, updated_at) VALUES (?, ?, 'active', 3, ?, ?)",
 		).run("legacy-id", "老执事", now, now);
 		legacy.prepare(
-			"INSERT INTO partner_versions (partner_id, version, soul_source, capabilities, created_at) VALUES (?, 1, ?, NULL, ?)",
-		).run("legacy-id", "老身份", now);
+			"INSERT INTO partner_versions (partner_id, version, soul_source, contract_source, capabilities, created_at) VALUES (?, 3, ?, NULL, ?, ?)",
+		).run(
+			"legacy-id",
+			"老身份",
+			JSON.stringify({ modelChain: [{ providerId: "faux", modelId: "faux", keyEnv: "PROBE_KEY" }] }),
+			now,
+		);
 		legacy.close();
 
 		const store = new PartnersStore(db, homes);
 		try {
-			const version = store.currentVersion("legacy-id");
-			assert.ok(version, "旧库打开后仍能读版本");
-			assert.equal(version?.soulSource, "老身份");
-			assert.equal(version?.contractSource, null, "缺列 = null（无契约快照），不补数据");
-			// 迁移补列后新版本能正常带契约
+			const partner = store.get("legacy-id");
+			assert.ok(partner, "旧库打开后档案还在");
+			assert.equal(partner?.currentVersion, 3, "计数保留（下一轮生效的记账位）");
+			assert.deepEqual(store.getModelChain("legacy-id"), [
+				{ providerId: "faux", modelId: "faux", keyEnv: "PROBE_KEY" },
+			], "候选链搬进 model-chain.json");
+			assert.ok(existsSync(join(store.homeOf("legacy-id"), "model-chain.json")));
+			// 表已退役：新保存照常走磁盘 + 计数
 			const next = store.bumpContract("legacy-id", "## 职责范围\n新契约");
-			assert.equal(next, 2);
-			assert.match(store.currentVersion("legacy-id")?.contractSource ?? "", /新契约/);
+			assert.equal(next, 4);
+			assert.equal(store.readContractFromHome("legacy-id"), "## 职责范围\n新契约");
 		} finally {
 			store.close();
 		}
@@ -679,7 +695,7 @@ test("静态人格：关掉的静态模块不读也不渲染；PARTNER_PERSONA_M
 	}
 });
 
-test("岗位类开关：contract / goal / discipline / workHistory / currentWork 各自能关，红线永不裁", () => {
+test("岗位类开关：contract / goal / discipline 能关；在办 / 履历固定注入；红线永不裁", () => {
 	const { root, db, homes, workRoot } = tempRoot();
 	const store = new PartnersStore(db, homes);
 	const previous = process.env.PARTNER_PERSONA_MODULES;
@@ -716,7 +732,8 @@ test("岗位类开关：contract / goal / discipline / workHistory / currentWork
 		assert.match(all.discipline, /【验证铁律】/);
 		assert.match(all.discipline, /【主人数据红线】/);
 
-		// 全关（custom 起步）：五段都不在，但纪律只剩红线
+		// 全关（custom 起步）：契约 / 目标不在，纪律只剩红线；
+		// 在办 / 履历固定注入（2026-11-15 人设页打磨：不再是闸，记忆全注入口径）
 		store.setPersona(partner.id, {
 			preset: "custom",
 			modules: defaultPersonaModules("custom"),
@@ -724,30 +741,20 @@ test("岗位类开关：contract / goal / discipline / workHistory / currentWork
 		const none = buildPartnerTurnContext(partner.id, 606, deps);
 		assert.equal(none.contract, null);
 		assert.equal(none.goal, null);
-		assert.equal(none.status, null);
-		assert.ok(!(none.text ?? "").includes("【当前在办】"));
+		assert.match(none.status ?? "", /【当前在办】/, "在办固定注入");
+		assert.match(none.status ?? "", /近 10 单/, "履历摘要固定注入");
 		assert.ok(!(none.text ?? "").includes("【岗位契约】"));
 		assert.equal(none.discipline.includes("【主人数据红线】"), true, "红线不可关");
 		assert.equal(none.discipline.includes("【验证铁律】"), false, "其余纪律随模块关掉");
-		assert.equal(none.text, none.discipline, "关完全部只剩下红线段");
 
-		// 只开 workHistory：只有履历摘要，不拼空壳「【当前在办】」头
+		// 行上显式 false 也不再生效（存储兼容：旧 companion 行上的 false 照样注入）
 		store.setPersona(partner.id, {
-			preset: "custom",
-			modules: { ...defaultPersonaModules("custom"), workHistory: true },
+			preset: "companion",
+			modules: { ...defaultPersonaModules("companion"), workHistory: false, currentWork: false },
 		});
-		const historyOnly = buildPartnerTurnContext(partner.id, 606, deps);
-		assert.match(historyOnly.status ?? "", /近 10 单/);
-		assert.ok(!(historyOnly.status ?? "").includes("【当前在办】"));
-
-		// 只开 currentWork：在办段在，履历摘要不在
-		store.setPersona(partner.id, {
-			preset: "custom",
-			modules: { ...defaultPersonaModules("custom"), currentWork: true },
-		});
-		const currentOnly = buildPartnerTurnContext(partner.id, 606, deps);
-		assert.match(currentOnly.status ?? "", /【当前在办】/);
-		assert.ok(!(currentOnly.status ?? "").includes("近 10 单"));
+		const forced = buildPartnerTurnContext(partner.id, 606, deps);
+		assert.match(forced.status ?? "", /【当前在办】/);
+		assert.match(forced.status ?? "", /近 10 单/);
 
 		// 回滚开关：显式 false → 全部按旧行为注入（不读 personaModules）
 		process.env.PARTNER_PERSONA_MODULES = "false";

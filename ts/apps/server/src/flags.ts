@@ -72,7 +72,10 @@ export const FLAG_DEFS: FlagDef[] = [
 	// 开关文案里写明）；写 = 主对话导出（默认关，对外送数据默认不动）。两个消费处都懒读 env，热生效。
 	{ key: "PERSONA_MEMORY_ENABLED", values: ["true", "false"], defaultValue: "true", hot: true },
 	{ key: "PERSONA_EXPORT_ENABLED", values: ["true", "false"], defaultValue: "false", hot: true },
-	{ key: "MINISTER_DISPATCH_AUTHORITY", values: ["true", "false"], defaultValue: "false", hot: true },
+	// 执事派发权总闸（2026-11-06）：消费处 `ministerDispatchMasterEnabled()` 缺省就是开
+	// （只有明确 false/0 才关）；`defaultValue` 2026-11-15 从 false 修正为 true，界面不再
+	// 把"实际开着"的开关标成"默认关"。
+	{ key: "MINISTER_DISPATCH_AUTHORITY", values: ["true", "false"], defaultValue: "true", hot: true },
 	{ key: "DEVICE_AUTO_DISPATCH", values: ["true", "false"], defaultValue: "true", hot: true },
 	{ key: "PARTNER_WORK_RECORD", values: ["true", "false"], defaultValue: "true", hot: true },
 	{ key: "SKILLS_ADMIN", values: ["true", "false"], defaultValue: "true", hot: false },
@@ -89,21 +92,30 @@ export const FLAG_DEFS: FlagDef[] = [
 	// 外接 CLI 打手（CodeBuddy / Qoder / Claude Code / Codex / OpenCode）跑自己的工具、
 	// 不经过包装器，**不受此开关影响**。消费处每次 execute 懒读 env，所以 hot:true。
 	{ key: "TOOL_PROJECTION_WORKER", values: ["true", "false"], defaultValue: "true", hot: true },
+	// 记忆召回总闸（2026-11-16 父子关系补齐）：父 = 这一行（所有会话都不再自动带记忆），
+	// 子 = 每位执事/总管人设页的「记忆 + 项目记忆」开关（`persona_switches.memoryRecallEnabled`，
+	// 默认开）。关总闸 = 全部会话只靠 recall 工具主动查；`MEMORY_ENABLED` 管的是记忆库本身
+	// （写与读的能力），这个只管"每轮自动注入"那一半。消费处每次请求懒读 env，所以 hot:true。
+	{ key: "PARTNER_MEMORY_RECALL", values: ["true", "false"], defaultValue: "true", hot: true },
 	{ key: "TOPICS_ENABLED", values: ["true", "false"], defaultValue: "true", hot: false },
 	// 结构化提问（2026-11-09）：工具注册在启动时冻结，所以 hot:false。
 	{ key: "AGENT_ASK_USER", values: ["true", "false"], defaultValue: "true", hot: false },
 	// 任务中心重做回滚开关（2026-11-13 批 1）：web 每次进任务中心懒读，
 	// false = 退回旧三列看板（旧渲染函数与旧 DOM 都还在），所以 hot:true。
 	{ key: "TASKS_REDESIGN_ENABLED", values: ["true", "false"], defaultValue: "true", hot: true },
+	// 侧栏对话按创建者分组（2026-11-15）：false = 服务端不下发 chats 的 tasks 键、
+	// 前端回旧版平铺列表（nav#chats + tasks-mini 三块拼装），所以 hot:true。
+	{ key: "SIDEBAR_TASK_GROUPS", values: ["true", "false"], defaultValue: "true", hot: true },
 	// 永久删除（2026-11-13 归档管理对齐 ZCode 批A）：端点常挂、消费处每次请求懒读 env，
 	// 所以 hot:true。false = deletion-preview / delete 两端点 400「永久删除已关闭」（回滚开关）。
 	{ key: "CHAT_HARD_DELETE", values: ["true", "false"], defaultValue: "true", hot: true },
 	// 对话流逐字浮现（2026-11-13）：web 每次开新消息懒读（首屏拉一次 flags），
 	// false = 退回旧的整块渲染 + 旧 caret，所以 hot:true。
 	{ key: "CHAT_STREAM_REVEAL", values: ["true", "false"], defaultValue: "true", hot: true },
-	// 自动归档（同批）：调度器每轮懒读（动态开关经 flags 端点的 onChange 接线开停定时器），
-	// 默认关——翻案的是"有这个能力"，不是"替用户做主"。
-	{ key: "ARCHIVE_AUTO_ENABLED", values: ["true", "false"], defaultValue: "false", hot: true },
+	// 自动归档（同批）：调度器每轮懒读（动态开关经 flags 端点的 onChange 接线开停定时器）。
+	// 2026-11-15 用户口径：做出来的功能默认就开（"剩下的全开"），只有明确 false/0/off 才关；
+	// 之前"默认关"是怕新装机器替用户做主，现已按用户要求翻成默认开。
+	{ key: "ARCHIVE_AUTO_ENABLED", values: ["true", "false"], defaultValue: "true", hot: true },
 	// 自动归档天数：数值型开关（values 留空 + min=1，按 ≥1 整数校验）；每轮懒读，改完下一轮生效。
 	{ key: "ARCHIVE_AUTO_DAYS", values: [], defaultValue: "30", hot: true, min: 1 },
 	// 对话历史分页（2026-11-13）：web 每次 openChat 懒读（同 TASKS 的一次性缓存），
@@ -120,9 +132,32 @@ export const FLAG_DEFS: FlagDef[] = [
 	{ key: "AGENT_COMPACT_TRIGGER_PERCENT", values: [], defaultValue: "70", hot: true, min: 5, max: 95 },
 	// 绝对触发点（K）：留空 = 该档不生效、回落内核默认白；填了就是"到多少 K 压一次"
 	{ key: "AGENT_COMPACT_TRIGGER_K", values: [], defaultValue: "", hot: true, min: 1 },
+	// 执事招聘模板（2026-11-15）：招聘墙 + 新建弹窗模板条，web 每次渲染列表/弹窗懒读（带模块级缓存）。
+	// false = 空态回旧「新建执事」按钮、新建弹窗无模板条；模板数据是前端常量（web/partner-templates.js）。
+	{ key: "PARTNER_TEMPLATES", values: ["true", "false"], defaultValue: "true", hot: true },
+	// 技能索引摘要截断（2026-11-15 上下文预算批）：开 = 索引每行截到
+	// `SKILLS_INDEX_SUMMARY_CHARS`（默认 120 字），关 = 显示完整摘要。
+	// 索引**按会话冻结**（首轮渲染后不再改），所以改完只影响**新开的会话**——老会话
+	// 保持打开时的索引，这是既有口径（改索引会让已命中的 system 缓存前缀整段作废）。
+	// 消费处是 renderIndex（每次首渲染现读 env），所以标 hot: true（对新会话即时）。
+	{ key: "SKILLS_INDEX_CLIP", values: ["true", "false"], defaultValue: "true", hot: true },
+	// 召回后去重（2026-11-15 上下文预算批）：同一件事的多种说法只注入一条（保留分数最高）。
+	// 消费处 `recallContext` 每轮懒读 env，所以 hot: true，改完下一轮生效。
+	{ key: "MEMORY_INJECT_DEDUPE", values: ["true", "false"], defaultValue: "true", hot: true },
 ];
 
 const FLAG_BY_KEY = new Map(FLAG_DEFS.map((def) => [def.key, def]));
+
+/** 启动装载后每个键当时真正生效的值。用来判断 hot:false 的改动是否还没重启——
+ *  文件里的值和启动时不一样 → 界面标「待重启」；重启装载后两者相等，标自动消失。 */
+const bootValues = new Map<string, string>();
+let bootCaptured = false;
+
+function captureBootValues(env: NodeJS.ProcessEnv): void {
+	if (bootCaptured) return;
+	bootCaptured = true;
+	for (const def of FLAG_DEFS) bootValues.set(def.key, env[def.key]?.trim() || def.defaultValue);
+}
 
 /**
  * 对话历史分页开关（2026-11-13）。
@@ -184,12 +219,21 @@ export function loadFlagOverrides(env: NodeJS.ProcessEnv = process.env): number 
 		applied += 1;
 	}
 	if (applied) console.log(`[flags] 已应用 ${applied} 项界面覆盖（${flagsPath(env)}）`);
+	// 只有主进程启动装载才有"启动值"；测试传临时 env 时不记录，避免跨用例污染。
+	if (env === process.env) captureBootValues(env);
 	return applied;
 }
 
-/** 当前形态：env 现值（缺省回落 defaultValue）+ 是否被文件覆盖过 */
+/** 当前形态：env 现值（缺省回落 defaultValue）+ 是否被文件覆盖过 + 是否待重启 */
 export function listFlags(env: NodeJS.ProcessEnv = process.env): {
-	flags: { key: string; value: string; defaultValue: string; hot: boolean; overridden: boolean }[];
+	flags: {
+		key: string;
+		value: string;
+		defaultValue: string;
+		hot: boolean;
+		overridden: boolean;
+		pendingRestart: boolean;
+	}[];
 } {
 	const map = readOverrideMap(flagsPath(env));
 	return {
@@ -199,6 +243,11 @@ export function listFlags(env: NodeJS.ProcessEnv = process.env): {
 			defaultValue: def.defaultValue,
 			hot: def.hot,
 			overridden: Boolean(map[def.key]),
+			pendingRestart:
+				env === process.env &&
+				!def.hot &&
+				bootCaptured &&
+				(map[def.key] ?? def.defaultValue) !== (bootValues.get(def.key) ?? def.defaultValue),
 		})),
 	};
 }

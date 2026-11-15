@@ -42,9 +42,9 @@ import { buildProactivitySection } from "../partner-proactive.ts";
  *
  * 三段各归各的家（**别合并成一份文本存起来**）：
  *   1. **SOUL**：身份提示词（`renderPartnerIdentity` → configure instructions），
- *      按身份版本冻结，改完下一轮生效。
- *   2. **岗位契约**：同样是身份版本的一部分（`partner_versions.contract_source`），
- *      但**每轮现取**当前版本快照 —— 改契约 bump 版本，下一轮读到新的，当场不变身。
+ *      读家目录磁盘当前值，改完下一轮生效（计数器记账）。
+ *   2. **岗位契约**：读 CONTRACT.md 磁盘当前值 —— 改契约计数 +1，
+ *      下一轮读到新的，当场不变身（2026-11-15 版本快照退役后的口径）。
  *   3. **当前在办**：派活单 / 待审批 / 最近一单，**全部现查现拼、零新存储**。
  *      每次请求都重新算，不写进 transcript（system 消息，与记忆注入同一条通道）。
  *
@@ -520,15 +520,6 @@ export function partnerContextProviders(
 		partner && personaModulesEnabled() ? effectivePersonaModules(partner) : null;
 	const personaOn = (id: PartnerPersonaModule): boolean =>
 		personaModules === null || personaModules[id] === true;
-	let loaded = false;
-	let current: ReturnType<PartnersStore["currentVersion"]> = null;
-	const currentOf = () => {
-		if (!loaded) {
-			current = store.currentVersion(partnerId);
-			loaded = true;
-		}
-		return current;
-	};
 
 	// 活模块三段（批2）：一轮只取一次（印象要开库、内心生活要读文件）。
 	// `deps.living` 显式给了就以调用方为准（单测）；没给才走生产读取。
@@ -545,14 +536,12 @@ export function partnerContextProviders(
 	};
 
 	const providers: InjectionProvider[] = [
-		// 契约取"当前版本快照"；老库/手工放了文件但没快照的，退磁盘当前值。
+		// 契约读磁盘当前值（2026-11-15 快照退役：磁盘是当前值唯一事实源）。
 		() =>
 			personaOn("contract")
 				? entry(
 						"partner_contract",
-						renderContractSection(
-							currentOf()?.contractSource ?? store.readContractFromHome(partnerId),
-						),
+						renderContractSection(store.readContractFromHome(partnerId)),
 					)
 				: undefined,
 		() =>
@@ -646,8 +635,8 @@ export function buildPartnerTurnContext(
 	deps: PartnerContextDeps = {},
 ): PartnerTurnContext {
 	const store = deps.store ?? partnersStore();
-	const current = store.currentVersion(partnerId);
-	const soul = current?.soulSource ?? store.readSoulFromHome(partnerId) ?? "";
+	// SOUL 读磁盘当前值（2026-11-15 快照退役：磁盘是当前值唯一事实源，版本行已 DROP）。
+	const soul = store.readSoulFromHome(partnerId) ?? "";
 	const entries = collectInjections(partnerContextProviders(partnerId, conversationId, deps), {
 		conversationId,
 		partnerId,

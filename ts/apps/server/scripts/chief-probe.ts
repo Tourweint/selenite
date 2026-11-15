@@ -206,7 +206,7 @@ async function main(): Promise<void> {
 			list.status === 200 && !!chief,
 			`status=${list.status} partners=${JSON.stringify(list.body?.partners ?? []).slice(0, 120)}`,
 		);
-		check("chief 带 v1 身份快照", chief?.soulVersion === 1, `soulVersion=${chief?.soulVersion}`);
+		check("chief 身份计数 = 1（2026-11-15 快照退役，计数是记账位）", chief?.soulVersion === 1, `soulVersion=${chief?.soulVersion}`);
 
 		const detail = await api("GET", "/api/v1/partners/chief", null);
 		check(

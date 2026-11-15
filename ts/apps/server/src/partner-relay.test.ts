@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+	RELAY_ENTRY_KIND,
 	RELAY_HOP_TAG,
 	RELAY_MAX_PER_RUN,
 	RELAY_RECEIPT_QUEUED,
@@ -9,13 +10,18 @@ import {
 	claimRelayTarget,
 	clearRelayTarget,
 	currentRelayRunKey,
+	isRelayEntryKind,
 	isRelayRun,
 	markRelayRun,
 	markRelayTarget,
 	partnerRelayEnabled,
+	partnerRelayEnvelopeEnabled,
 	partnerRelayReceiptEnabled,
 	relayBody,
 	relayDeliveredText,
+	relayDisplayText,
+	relayEntryOf,
+	relayFromOf,
 	relayNoticeText,
 	relayOutcomeEntry,
 	relayRunKey,
@@ -42,6 +48,7 @@ function partner(over: Partial<PartnerRow> & { id: string; name: string }): Part
 		updatedAt: "2026-11-08T00:00:00.000Z",
 		domain: null,
 		avatar: null,
+		projectIds: [],
 		dispatchAuthority: false,
 		toolProjection: null,
 		currentGoal: null,
@@ -269,4 +276,58 @@ test("settled 落点：发送方 transcript 记一条 pi.assistant 留言", () =
 	assert.equal(data?.receipt, RELAY_RECEIPT_SETTLED);
 	const text = entry.model?.[0]?.content;
 	assert.ok(JSON.stringify(text).includes("【留言】"));
+});
+
+test("作者标记：递话落成 relay.message 条目，作者与正文同源", () => {
+	const from = { id: "p-1", name: "信使甲", domain: "inbox" };
+	const entry = relayEntryOf(from, 1, {} as NodeJS.ProcessEnv);
+	assert.equal(entry?.kind, RELAY_ENTRY_KIND);
+	// durable 不允许应用条目占 pi. 命名空间（占了会被当成框架条目）
+	assert.ok(!RELAY_ENTRY_KIND.startsWith("pi."));
+	assert.deepEqual(entry?.data, {
+		kind: "partner",
+		id: "p-1",
+		name: "信使甲",
+		domain: "inbox",
+		hop: 1,
+	});
+
+	// 正文抬头与结构说的是同一件事（同一个 from 生成，不许只改一处）
+	const body = relayBody(from, "看下明天的日程");
+	assert.ok(body.includes("来自执事 信使甲（inbox）"));
+	assert.deepEqual(relayFromOf(body), { name: "信使甲", domain: "inbox", hop: 1 });
+
+	assert.ok(isRelayEntryKind(RELAY_ENTRY_KIND));
+	assert.ok(!isRelayEntryKind("pi.user"));
+	assert.ok(!isRelayEntryKind("pi.assistant"));
+});
+
+test("作者标记：没有领域不带 domain；开关关时回到纯文本", () => {
+	const noDomain = relayEntryOf({ id: "p-2", name: "信使乙", domain: null }, 1, {} as NodeJS.ProcessEnv);
+	assert.equal("domain" in (noDomain?.data ?? {}), false);
+	// 正文里没领域时写的是占位词，解析回来不能把它当标签
+	assert.equal(relayFromOf(relayBody({ name: "信使乙", domain: null }, "x"))?.domain, null);
+
+	assert.equal(partnerRelayEnvelopeEnabled({} as NodeJS.ProcessEnv), true);
+	assert.equal(partnerRelayEnvelopeEnabled({ PARTNER_RELAY_ENVELOPE: "off" } as NodeJS.ProcessEnv), false);
+	assert.equal(
+		relayEntryOf(
+			{ id: "p-2", name: "信使乙", domain: null },
+			1,
+			{ PARTNER_RELAY_ENVELOPE: "false" } as NodeJS.ProcessEnv,
+		),
+		null,
+	);
+});
+
+test("来信展示：剥掉模型侧说明与 untrusted 包裹，正文本身不动", () => {
+	const body = relayBody({ name: "信使甲", domain: "inbox" }, "对一下明天上午的口径");
+	assert.equal(relayDisplayText(body), "对一下明天上午的口径");
+	const guarded = `<untrusted_objective>${body}</untrusted_objective>`;
+	assert.equal(relayDisplayText(guarded), "对一下明天上午的口径");
+	// 正文自带换行：只去前后缀，不动中间
+	assert.equal(
+		relayDisplayText(relayBody({ name: "信使甲", domain: null }, "第一行\n第二行")),
+		"第一行\n第二行",
+	);
 });

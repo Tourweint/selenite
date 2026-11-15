@@ -42,12 +42,43 @@
 }
 
 @media (max-width: 800px) {
-  /* 窄屏不留完整侧栏，但保留 48px 收起轨道：新对话 / 任务中心 / 设置
-     都还要能点到（任务中心有侧栏入口，窄屏也不能只剩一个死路）。 */
-  .sidebar,
-  html[data-sidebar="closed"] .sidebar { display: flex; width: 48px; }
+  /* 窄屏侧栏（2026-11-15 改覆盖层）：收起 = 48px 轨道（旧口径不变，
+     新对话 / 任务中心 / 设置都还能点到）；展开 = 浮在主区上面的面板，
+     不再挤占主区宽度。旧做法是把整栏强制钉在 48px、展开按钮静默无效
+     （2026-11-15 用户报「特别窄展不开」后改掉），现在开合语义与宽屏一致，
+     shell.js 的 inert 口径也随之归一。 */
+  .sidebar { display: flex; width: 48px; }
+  /* 收起态钉 48px：展开态选择器同样有 html 级属性权重，closed 必须显式再钉一次
+     （2026-11-15 改写时漏了这条，收起轨从 48 回弹成 72——窄屏 48 是旧口径，保留） */
+  html[data-sidebar="closed"] .sidebar { width: 48px; }
   .sidebar-inner { display: none; }
-  .side-rail { opacity: 1; pointer-events: auto; }
+  html:not([data-sidebar="closed"]) .sidebar {
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    /* 盖过 .main(1)，让标题栏(40)与抽屉(45+)仍在上面 */
+    z-index: 30;
+    width: min(264px, 78vw);
+    background: var(--backdrop);
+    border-right: 1px solid var(--divider);
+    box-shadow: 12px 0 32px rgba(0, 0, 0, .16);
+  }
+  html:not([data-sidebar="closed"]) .sidebar-inner {
+    display: flex;
+    /* 定宽冻结（与宽屏开合同一套做法）：动画期间 inner 已是最终宽度、
+       由 overflow:hidden 裁着露出来，不跟面板宽度重排折行 */
+    width: min(264px, 78vw);
+    opacity: 1;
+    pointer-events: auto;
+  }
+  /* 展开时点旁边先收面板（遮罩显隐由 shell.js 按「窄屏 + 展开」同步；
+     设置路由整页无侧栏，直接不显示） */
+  .sidebar-scrim {
+    position: absolute;
+    inset: 0;
+    z-index: 29;
+    background: rgba(0, 0, 0, .30);
+  }
+  html[data-route="settings"] .sidebar-scrim { display: none; }
   /* 底栏本来就是竖排（齿轮在上、状态点在下），窄屏只需收一点间距 */
   .rail-foot { gap: 2px; }
   .thread { padding: 18px 14px 8px; }

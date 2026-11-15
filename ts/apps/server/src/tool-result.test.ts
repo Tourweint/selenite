@@ -402,6 +402,18 @@ test("remember：成功包成 ok + message，文案与迁移前逐字一致", as
 	assert.equal(out.data.message, "已记住：喜欢乌龙茶");
 });
 
+test("remember：不可挂项目走 err + hint，code 是稳定枚举", async () => {
+	const tools = createTools(deps(REMEMBER_ENGINE));
+	const out = await runToolWithApi(
+		toolNamed(tools, "remember"),
+		{ content: "构建口径", scope: "project" },
+		{ conversationId: 7 },
+	);
+	assert.equal(out.ok, false);
+	assert.equal(out.error?.code, "no_project_scope");
+	assert.ok(out.error?.hint?.includes("普通记忆"), "hint 指下一步");
+});
+
 test("set_reminder：成功包成 ok + message；非法参数走 err 带 hint，不再抛栈", async () => {
 	const tools = createTools(deps({}));
 	const commits: unknown[] = [];

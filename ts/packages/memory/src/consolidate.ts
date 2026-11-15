@@ -141,6 +141,12 @@ export interface ImportEntry {
 	kind?: string;
 	createdAt?: string;
 	importance?: number;
+	/**
+	 * 来源记名（2026-11-15 项目记忆与外部导入区方案）：落 `record.source`。
+	 * 缺省 `"imported"`（老调用零变化）；server 的来源导入传 `import:<sourceId>`，
+	 * 外部导入区按这个前缀分组。
+	 */
+	source?: string;
 }
 
 export interface ImportOutcome {
@@ -164,7 +170,7 @@ const IMPORT_MAX_CHARS = 2000;
  *   - **规范化等价 = 跳过并计数**，不提升 importance、不改任何已有行（import 不出去动别人）；
  *   - 被取代（superseded）的旧记录也算"已经存在"：不把用户明确标过时的内容重新捞回来；
  *   - 同一批内重复（规范化等价）同样跳过，防止一个文件自己踩自己；
- *   - `source` / `veracity` 一律 `imported`，方便日后按来源审计。
+	 *   - `veracity` 一律 `imported`；`source` 用 `entry.source`（缺省 `"imported"`），方便按来源审计。
  *
  * 返回值只带条数和新增的记录对象，不含任何日志输出。
  */
@@ -173,13 +179,17 @@ export function importMemories(
 	scope: string,
 	entries: ImportEntry[],
 	now: Date = new Date(),
+	options: { dedupeScopes?: string[] } = {},
 ): ImportOutcome {
 	const added: MemoryRecord[] = [];
 	let skipped = 0;
 
 	// 一次性把本 scope 的规范化键捞出来（含已被取代的）：导入是批处理，逐条查库会 O(n²)。
+	// 2026-11-15：来源导入允许把 global / project 视作同一个"已有记忆池"，
+	// 避免同一句话从全局和项目各进一份。默认仍只查本 scope，手工导入行为不变。
+	const seenScopes = [...new Set([scope, ...(options.dedupeScopes ?? []).filter(Boolean)])];
 	const seen = new Set<string>();
-	for (const record of store.search({ scopes: [scope], includeSuperseded: true, limit: 100_000 })) {
+	for (const record of store.search({ scopes: seenScopes, includeSuperseded: true, limit: 100_000 })) {
 		seen.add(`${record.kind}\u0000${normalizeContent(record.content)}`);
 	}
 
@@ -215,7 +225,10 @@ export function importMemories(
 			content: text,
 			importance,
 			veracity: "imported" as Veracity,
-			source: "imported",
+			source:
+				typeof entry.source === "string" && entry.source.trim()
+					? entry.source.trim().slice(0, 80)
+					: "imported",
 			createdAt,
 			validUntil: null,
 			supersededBy: null,

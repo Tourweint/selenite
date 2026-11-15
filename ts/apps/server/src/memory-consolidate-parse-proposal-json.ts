@@ -43,13 +43,20 @@ function isOff(raw: string | undefined): boolean {
 }
 
 export function validTargetScope(scope: string): boolean {
-	return scope === "global" || /^partner:[A-Za-z0-9._~%-]{1,80}$/.test(scope);
+	return (
+		scope === "global" ||
+		/^partner:[A-Za-z0-9._~%-]{1,80}$/.test(scope) ||
+		// 项目 scope（2026-11-15 项目记忆方案）：uuid 必须是登记项目，校验在调用方（importMemory）做
+		/^project:[0-9a-f-]{10,64}$/i.test(scope)
+	);
 }
 
 function scopeOf(scope: string): MemoryScope | null {
 	if (scope === "global") return { type: "global" };
 	const match = /^partner:(.+)$/.exec(scope);
-	return match ? { type: "partner", id: match[1]! } : null;
+	if (match) return { type: "partner", id: match[1]! };
+	const project = /^project:(.+)$/.exec(scope);
+	return project ? { type: "project", id: project[1]! } : null;
 }
 
 export const MAX_REVIEW_RECORDS = 200;

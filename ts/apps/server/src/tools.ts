@@ -71,6 +71,14 @@ import { delegationRunSource, runSourceEnabled } from "./run-source.ts";
 import { currentApprovalLevel, currentAuthority } from "./delegation-authority.ts";
 import { isRoutineTurn } from "./unattended.ts";
 import { pruneSessionMemory } from "./memory-prune.ts";
+// 会话归属项目（2026-11-15 项目记忆方案）：remember/recall 的 project scope 解析。
+// 零依赖小模块：不能从这里 carry assist（partner-work 等测试动态 import 本文件时
+// 刻意不起全局记忆引擎，assist 一加载就握住它们的临时目录）。
+import {
+	personaProjectIdsOfConversationAsync,
+	projectIdOfConversation,
+	resolveProjectWriteTarget,
+} from "./agent/project-scope.ts";
 // 工作履历：派单终态结算落一条 work 记录（2026-11-08 刀二 E2）。
 import { recordWorkSettlement } from "./work-record.ts";
 // 技能用量账（2026-11-10 批 17 §四）：skill 工具每取一次手册 +1（旁路审计，失败不挡工具）。
@@ -82,7 +90,9 @@ import { createSendToAgentTool, type PartnerRelayDeps } from "./partner-relay.ts
 import { createReportProgressTool } from "./progress-report.ts";
 import {
 	ProjectError,
+	projectsStore,
 	resolveDelegationProject,
+	type Project,
 	type ProjectRef,
 	type ProjectsStore,
 } from "./projects.ts";
@@ -519,6 +529,28 @@ export function createTools(deps: ToolDeps) {
 						"用户教你规矩（「以后… / 记住… / 下次…」）时为 true：这条会标成 taught 来源。普通事实不填。",
 				}),
 			),
+			// 项目记忆（2026-11-15 项目记忆方案）：scope="project" 把记忆挂到当前会话所属的
+			// 项目上（构建方式 / 部署口径 / 踩过的坑这类只在该项目成立的事）。
+			// 默认 auto = 现行为（执事会话进执事键空间，其余进会话键空间）。
+			// 2026-11-15 多挂载方案：负责多个项目时用 project 参数按名指写。
+			scope: Type.Optional(
+				Type.Union([
+					Type.Literal("auto"),
+					Type.Literal("project"),
+				], {
+					description:
+						"auto=默认归属；project=挂到项目记忆里（只在聊这个项目时被想起）。" +
+						"项目相关的口径（怎么构建、怎么部署、踩过什么坑）用 project。" +
+						"你负责多个项目时，要带 project 参数指名写进哪个。",
+				}),
+			),
+			project: Type.Optional(
+				Type.String({
+					description:
+						"scope=project 时用：项目名（负责项目清单里的名字）。" +
+						"你负责多个项目时必填；只负责一个或会话已绑定项目时不用填。",
+				}),
+			),
 		}),
 		execute: async (args, api) => {
 			const engine = requireMemory();
@@ -533,9 +565,28 @@ export function createTools(deps: ToolDeps) {
 					),
 				);
 			}
+			let scope = scopeOf(api.conversationId);
+			if (args.scope === "project") {
+				// 写入解析（2026-11-15 多挂载方案）：阶梯收在纯函数里（可单测），这里只把
+				// 会话解析成三个入参：显式指名 / 绑定项目 / 负责清单（含项目名）。
+				const bound = await projectIdOfConversation(api.conversationId);
+				const mountedIds = await personaProjectIdsOfConversationAsync(api.conversationId);
+				const registered = projectsStore().listProjects(true);
+				const resolution = resolveProjectWriteTarget(
+					args.project,
+					bound,
+					mountedIds
+						.map((id) => registered.find((entry) => entry.id === id))
+						.filter((entry): entry is Project => Boolean(entry)),
+				);
+				if (!resolution.ok) {
+					return textToolResult(err(resolution.code, resolution.message, resolution.hint));
+				}
+				scope = { type: "project", id: resolution.projectId };
+			}
 			const record = engine.remember({
 				kind: args.kind ?? "fact",
-				scope: scopeOf(api.conversationId),
+				scope,
 				content: args.content,
 				importance: args.importance,
 				// 人自己说的（或当面转述的），可信度最高
@@ -579,9 +630,19 @@ export function createTools(deps: ToolDeps) {
 					),
 				);
 			}
+			// 项目记忆（2026-11-15 项目记忆方案）：会话归属项目时项目键空间也进候选。
+			// 人格挂载（2026-11-15 跟人走立项、同日多挂载方案扩化）：全部负责项目都可查
+			// ——主动查不受注入闸门限制（闸门只管"自动浮出"，不管"伸手去查"）。
+			const projectId = await projectIdOfConversation(api.conversationId);
+			const mountedIds = await personaProjectIdsOfConversationAsync(api.conversationId);
+			const boundKey = projectId ? scopeKey({ type: "project", id: projectId }) : null;
+			const projectKeys = [
+				...(boundKey ? [boundKey] : []),
+				...mountedIds.map((id) => scopeKey({ type: "project", id })),
+			];
 			const hits = engine.recall({
 				text: args.query,
-				scopes: ["global", scopeKey(scopeOf(api.conversationId))],
+				scopes: ["global", ...new Set(projectKeys), scopeKey(scopeOf(api.conversationId))],
 				limit: Math.max(1, Math.min(20, Math.floor(args.limit ?? 5))),
 			});
 			if (hits.length === 0) {
@@ -1359,13 +1420,26 @@ export function createTools(deps: ToolDeps) {
 				parameters: Type.Object({
 					name: Type.String({ description: "技能名，必须是索引里列出的名字" }),
 				}),
-				execute: async (args) => {
-					const manual = skills.manual(args.name);
+				execute: async (args, context) => {
+					// 2026-11-15 按人可见：执事会话用真实 uuid；主对话用 effective（= chief）。
+					// 读不到就当无 partner（只走全局启停位），别让技能工具把整轮弄哑。
+					let partnerId: string | null = null;
+					if (COMPANIONS_ENABLED) {
+						try {
+							partnerId = effectivePartnerIdOfSession(
+								partnersStore(),
+								Number(context.conversationId),
+							);
+						} catch {
+							partnerId = null;
+						}
+					}
+					const manual = skills.manual(args.name, partnerId);
 					if (!manual) {
 						return textToolResult(
 							err(
 								"skill_not_found",
-								`没有叫「${args.name}」的技能。可用：${skills.names().join("、") || "（无）"}`,
+								`没有叫「${args.name}」的技能。可用：${skills.names(partnerId).join("、") || "（无）"}`,
 								"从会话的 skills 索引里挑一个名字再取。",
 							),
 						);

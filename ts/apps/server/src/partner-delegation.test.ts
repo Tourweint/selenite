@@ -95,7 +95,7 @@ test("旧库补列：partners 表缺 domain 时自动 ALTER TABLE，老行按 nu
 	}
 });
 
-test("身份注入查询：soul 取版本快照，不读磁盘当前值", () => {
+test("身份注入查询：soul 读磁盘当前值（2026-11-15 快照退役），未命中领域返回 null", () => {
 	const { db, homes, cleanup } = tempRoot();
 	const store = new PartnersStore(db, homes);
 	try {
@@ -103,12 +103,13 @@ test("身份注入查询：soul 取版本快照，不读磁盘当前值", () => 
 			domain: "finance",
 			soulSeed: "v1 快照正文。",
 		});
-		// 直接改磁盘 SOUL.md，不走 bumpSoul（不产生新版本）——模拟有人手改文件。
-		store.atomicWrite(join(store.homeOf(hand.id), "SOUL.md"), "磁盘被手改了，不该进派单。");
+		// 直接改磁盘 SOUL.md，不走 bumpSoul——磁盘是当前值唯一事实源（手改下一轮生效，
+		// 与详情端点 / 导出 / 问候生成同一口径；原批次D 的「快照优先」随版本表一起退役）。
+		store.atomicWrite(join(store.homeOf(hand.id), "SOUL.md"), "磁盘手改正文。");
 		const hit = partnerIdentityForDomain(store, "finance");
 		assert.ok(hit);
 		assert.equal(hit.name, "阿岚");
-		assert.equal(hit.soul, "v1 快照正文。", "必须取版本快照，不是磁盘当前值");
+		assert.equal(hit.soul, "磁盘手改正文。", "磁盘是当前值唯一事实源");
 		assert.equal(partnerIdentityForDomain(store, "no-such-domain"), null);
 	} finally {
 		store.close();

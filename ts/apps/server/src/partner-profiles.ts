@@ -21,6 +21,7 @@ import {
 } from "@lifediary/shared";
 import { partnersStore, type PartnerRow, type PartnersStore } from "./partners.ts";
 import {
+	derivePresetFromModules,
 	effectivePersonaModules,
 	personaModulesEnabled,
 	readPersonaContents,
@@ -159,8 +160,10 @@ export function applyProfile(
 			personaPreset: item.preset as PartnerPersonaPreset,
 			personaModules: item.modules as Partial<Record<PartnerPersonaModule, boolean>>,
 		});
+		// 预设名以开关表推导为准（2026-11-15 人设页打磨）：旧语义存的快照里 preset 可能
+		// 与 modules 不一致，应用后让预设名回到"表的真话"。
 		const updated = store.setPersona(partnerId, {
-			preset: item.preset,
+			preset: derivePresetFromModules(modules),
 			modules,
 			switches: partner.personaSwitches,
 		});

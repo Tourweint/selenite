@@ -159,6 +159,7 @@ const el = {
   settingsInner: document.getElementById("settings-inner"),
   settingsScroll: document.getElementById("settings-scroll"),
   toggleSidebar: document.getElementById("toggle-sidebar"),
+  sidebarScrim: document.getElementById("sidebar-scrim"),
   menuBtn: document.getElementById("menu-btn"),
   menuPop: document.getElementById("menu-pop"),
   composerAdd: document.getElementById("composer-add"),

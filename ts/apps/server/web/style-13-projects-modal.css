@@ -151,6 +151,9 @@
   /* 压在弹层（proj-pop 9 / composer-pop 40）之上，但在 toast 之下 */
   z-index: 55;
   display: grid; place-items: center;
+  /* 单列必须夹到视口宽：技能列表的 nowrap 摘要会把 auto 列撑到 6000px+，
+     面板被居中到屏幕外，看起来就是「闪一下没了」。 */
+  grid-template-columns: minmax(0, 1fr);
   padding: 0;
 }
 .modal[hidden] { display: none !important; }
@@ -163,8 +166,13 @@
 .modal-panel {
   position: relative; z-index: 1;
   display: flex; flex-direction: column;
+  min-width: 0;
   width: min(420px, calc(100% - 2rem));
-  max-height: calc(100% - 2rem);
+  /* 100% 在 .modal 的 grid auto 行里不解析（modal-import 2026-11-15 实测过的坑）：
+     内容一多面板就撑出视口、底部按钮落在屏幕外。所有弹窗统一用视口单位限高，
+     .modal-body 自己滚（min-height:0 + overflow-y:auto 已有），按钮条 sticky 贴底。 */
+  max-height: calc(100vh - 2rem);
+  max-height: calc(100dvh - 2rem);
   padding: 16px;
   background: var(--surface);
   border: 1px solid var(--card-border);
@@ -182,6 +190,17 @@
 }
 /* 字体弹窗（2026-11-13）：三行「区域 + 字体 + 字号」，560px 够放两列下拉。 */
 .modal-panel.modal-font { width: min(560px, calc(100% - 2rem)); }
+/* 导入记忆（2026-11-15 第二轮）：两列来源小方框，680px 够放 2×300 与两行说明。
+   高度必须用视口单位：.modal 是 grid 容器，子项的百分比 max-height 在 auto 行里不解析，
+   内容一多就把面板撑出屏幕，底部 sticky 一键导入也贴不住（2026-11-15 验收实测）。 */
+.modal-panel.modal-import {
+  width: min(680px, calc(100% - 2rem));
+  max-height: calc(100vh - 2rem);
+  max-height: calc(100dvh - 2rem);
+  /* 底条要贴住面板下沿：面板底部不再留 16px 内边距，
+     footer 的 sticky 边界落在面板内底，按钮才不会被 body 裁掉。 */
+  padding-bottom: 0;
+}
 .modal-head {
   flex: none;
   display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
@@ -202,7 +221,7 @@
 .modal-body {
   display: flex; flex-direction: column; gap: 12px;
   margin-top: 12px;
-  min-height: 0; overflow-y: auto;
+  min-height: 0; min-width: 0; overflow-y: auto;
 }
 .modal-desc {
   margin: 0;
@@ -394,3 +413,22 @@
 }
 .provider-form-actions .row-hint { margin-right: auto; text-align: left; }
 
+
+/* 危险主按钮（2026-11-15 执事删除确认）：同形异色，只换底色与描边 */
+.modal-primary.is-danger {
+  background: var(--c-error);
+  border-color: var(--c-error);
+}
+.modal-primary.is-danger:hover { filter: brightness(1.08); }
+.modal-primary.is-danger:disabled { opacity: .5; filter: none; }
+
+/* 按钮条贴底（2026-11-15 用户口径：展开长内容不许把「保存 / 取消」顶出屏幕）：
+   .modal-body 是滚动容器，actions 在它末尾——sticky 到底部永远可见，
+   背景补面板色，滚动内容从按钮底下穿过不透字。 */
+.modal-actions {
+  position: sticky;
+  bottom: 0;
+  background: var(--surface);
+  padding-top: 6px;
+  margin-top: 0;
+}

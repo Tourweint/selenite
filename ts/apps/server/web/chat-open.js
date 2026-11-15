@@ -83,7 +83,8 @@ function renderTranscriptMessage(message, options = {}) {
     message.text,
     message.at,
     message.images,
-    { files: message.files, parent: options.parent },
+    // 2026-11-15 作者标记：非主人来源的来信靠 author 画成左侧卡片（无 author 就是主人自己说的）
+    { files: message.files, parent: options.parent, author: message.author },
   );
   // 可寻址 id（2026-11-08 4a）：编辑重发靠它定位这条 user 消息
   if (message.role === "user" && message.id) shown.root.dataset.messageId = message.id;

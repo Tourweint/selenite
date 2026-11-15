@@ -14,7 +14,7 @@ import { request } from "./net.js";
 import { currentSettingsPage } from "./route.js";
 import { sectionMarkup } from "./settings-atoms.js";
 import { MEMORY_KIND_LABEL, MEMORY_KIND_ORDER, MEMORY_KIND_TIPS } from "./settings-memory.js";
-import { closeModal, openConfirm, openModal, toast } from "./ui-atoms.js";
+import { closeModal, openModal, toast } from "./ui-atoms.js";
 
 /* ── 记忆页 A 版（2026-11-13）──────────────────────────────
  * 大字概览 + 分类计数片（唯一筛选）+ 搜索 + 分组折叠 + 可恢复的整理状态。
@@ -25,7 +25,9 @@ import { closeModal, openConfirm, openModal, toast } from "./ui-atoms.js";
  * 切页回来能看见"正在整理 / 上次建议 / 失败原因"，同一 scope 在跑时不会重复调模型。 */
 
 const MEMORY_A_PAGE_SIZE = 20;
-const MEMORY_A_DEFAULT_OPEN = new Set(["preference", "intention"]);
+// 所有分组默认收起（2026-11-15 用户拍板，原 preference/intention 默认展开）：
+// 页面只留分组头与计数，展开才按需拉正文；搜索命中时仍会展开（见 memoryGroupOf）。
+const MEMORY_A_DEFAULT_OPEN = new Set();
 
 const memoryPageState = {
   gen: 0,
@@ -105,7 +107,7 @@ function memorySourceLabel(source) {
   if (value === "diary") return "日记";
   if (value === "user") return "你说";
   if (value === "taught") return "你教的";
-  if (value === "imported") return "导入";
+  if (value === "imported" || value.startsWith("import:")) return "导入";
   if (value === "work") return "派单";
   if (value === "persona") return "长期库";
   if (value.startsWith("extract")) return "对话";
@@ -129,10 +131,13 @@ function memoryGroupOf(kind, total = 0) {
   return group;
 }
 
+/** 外部导入区的来源分节（2026-11-15 当天撤回）：导入条目按 kind 落进普通分组，
+ *  条目右上角照常带来源标（memorySourceLabel 把 import:* 标成「导入」），不再单开一区。 */
+
 function memoryGroupHint(kind) {
   if (kind === "preference") return "每轮都会想起";
   if (kind === "intention") return "未兑现的，优先想起";
-  if (kind === "episode") return "日常经过 · 默认收起";
+  // 「日常经过 · 默认收起」2026-11-15 摘掉：所有分组都默认收起了，这句成了废话
   return "";
 }
 
@@ -191,7 +196,7 @@ function memorySettingsMarkup() {
     `<div class="mem-a-head-actions">
       <button class="ghost mem-act" type="button" id="mem-import" hidden>导入</button>
       <button class="btn-primary mem-a-consolidate" type="button" id="mem-consolidate" hidden
-        data-tip="整理记忆 = 让模型回看最近的记忆和原始对话，找出重复、过时、说法不一致的条目。&#10;&#10;它只给建议：你逐条点「应用」才会把旧的那条标成过时；不会自动删，也没有「全部应用」。">整理记忆 <span class="mem-a-q" aria-hidden="true">?</span></button>
+        data-tip="整理记忆 = 让模型回看最近的记忆和原始对话，找出重复、过时、说法不一致的条目。&#10;&#10;它只给建议：你逐条点「应用」才会把旧的那条标成过时；不会自动删，也没有「全部应用」。">整理记忆</button>
     </div>`,
   );
 }
@@ -219,6 +224,42 @@ async function wireMemorySettings() {
     }
     switchMemoryScope(button.getAttribute("data-mem-scope") || "global", gen);
   });
+
+  // 范围 tabs 溢出横滚（2026-11-15 项目记忆之后一排能到 20 个）：滚动条刻意隐藏（A 版口径），
+  // 所以把滚轮直转成横滚、并支持按住拖拽滑动；拖过 6px 就吃掉落点 click，防止拖完误触 tab。
+  const peopleBox = document.getElementById("mem-a-people");
+  if (peopleBox) {
+    peopleBox.addEventListener("wheel", (event) => {
+      if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+      const max = peopleBox.scrollWidth - peopleBox.clientWidth;
+      if (max <= 0) return;
+      event.preventDefault();
+      peopleBox.scrollLeft += event.deltaY;
+    }, { passive: false });
+    let dragFrom = 0, dragStart = 0, dragged = 0;
+    peopleBox.addEventListener("pointerdown", (event) => {
+      if (event.pointerType === "touch") return; // 触屏原生能滑
+      dragFrom = event.clientX;
+      dragStart = peopleBox.scrollLeft;
+      dragged = 0;
+      const onMove = (moveEvent) => {
+        dragged = moveEvent.clientX - dragFrom;
+        if (Math.abs(dragged) > 4) peopleBox.scrollLeft = dragStart - dragged;
+      };
+      const onUp = () => {
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        if (Math.abs(dragged) > 6) {
+          peopleBox.addEventListener("click", (clickEvent) => {
+            clickEvent.stopPropagation();
+            clickEvent.preventDefault();
+          }, { capture: true, once: true });
+        }
+      };
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+    });
+  }
 
   const search = document.getElementById("mem-a-search");
   let searchTimer = 0;
@@ -314,22 +355,24 @@ async function wireMemorySettings() {
   ]);
 }
 
-/** 导入弹窗（2026-11-15 接上，方案 docs/设计方案/2026-11-15-记忆导入（接入别家AI的记忆）.md）：
- *  本机来源一键导入 + 通用 JSON 文件导入。全部只增不改、重复跳过，条目都进「我的记忆」——
- *  别家 AI 记的是用户本人的事，不该塞进某个执事名下。 */
+/** 导入弹窗（2026-11-15 第二轮，方案 docs/设计方案/2026-11-15-记忆导入第二轮（全量来源与勾选批量）.md）：
+ *  所有 Agent 一张清单，有货的勾选后底部一键批量导入；没检测到的只列灰态。
+ *  同一 Agent 的「全局」与「项目」来源合成一个可展开组，不再并排成两张卡。
+ *  文件导入第二轮删除——ChatGPT/Claude 的云端记忆本机本来就没有可读文件，按用户要求
+ *  这两个来源也不再列出。全部只增不改、重复跳过，条目进「我的记忆」或对应项目。 */
 async function openMemoryImportDialog(gen) {
   if (memoryPageState.batch?.running || memoryPageState.status?.running) {
     toast("正在整理，等它跑完");
     return;
   }
   openModal("导入记忆", (body) => {
-    body.innerHTML = `<div class="mem-pick"><p class="set-hint">正在看这台机器上有哪些记忆来源…</p></div>`;
+    body.innerHTML = `<div class="mem-import-loading"><p class="set-hint">正在看这台机器上有哪些 Agent 的记忆…</p></div>`;
     void (async () => {
       let sources = [];
       try {
         const response = await request("/api/v1/agent/memory/import/sources", { cache: "no-store" });
         if (response.status === 404) {
-          body.innerHTML = `<div class="mem-pick"><p class="set-hint">来源扫描未启用（服务端 MEMORY_IMPORT_SOURCES=false）。</p><div class="modal-actions"><button class="ghost" type="button" data-modal-cancel>关闭</button></div></div>`;
+          body.innerHTML = `<div class="mem-import-loading"><p class="set-hint">来源扫描未启用（服务端 MEMORY_IMPORT_SOURCES=false）。</p><div class="modal-actions"><button class="ghost" type="button" data-modal-cancel>关闭</button></div></div>`;
           wireImportDialogChrome(body);
           return;
         }
@@ -337,139 +380,239 @@ async function openMemoryImportDialog(gen) {
         sources = (await response.json().catch(() => ({})))?.sources || [];
       } catch (error) {
         if (error.message === "forbidden") return;
-        body.innerHTML = `<div class="mem-pick"><p class="set-hint">读取来源失败：${esc(error.message)}</p><div class="modal-actions"><button class="ghost" type="button" data-modal-cancel>关闭</button></div></div>`;
+        body.innerHTML = `<div class="mem-import-loading"><p class="set-hint">读取来源失败：${esc(error.message)}</p><div class="modal-actions"><button class="ghost" type="button" data-modal-cancel>关闭</button></div></div>`;
         wireImportDialogChrome(body);
         return;
       }
 
-      const rows = sources
-        .map((source) => {
-          const found = Number(source.count) > 0;
-          return `<div class="mem-import-row" data-source="${attr(source.id)}">
-            <div class="mem-import-info">
-              <div class="mem-pick-name">${esc(source.name)}</div>
-              <div class="set-hint">${esc(source.note)}</div>
-            </div>
-            <b>${found ? `${source.count} 条` : "没检测到"}</b>
-            ${found ? `<button class="ghost mem-act" type="button" data-import-source>导入</button>` : ""}
-            <div data-import-result></div>
-          </div>`;
-        })
-        .join("");
-      body.innerHTML = `<div class="mem-pick">
-        <p class="set-hint">别家 AI 在这台机器上留下的记忆，一键并进「我的记忆」。只增不改，重复的自动跳过。</p>
-        ${rows || `<p class="set-hint">这台机器上没检测到可导入的来源。</p>`}
-        <div class="divider"></div>
-        <div class="mem-import-row" data-file-row>
-          <div class="mem-import-info">
-            <div class="mem-pick-name">从文件导入</div>
-            <div class="set-hint">ChatGPT / Claude 这类要手导的记忆，或自己整理的 JSON（数组或 {"items": [...]}）</div>
-          </div>
-          <button class="ghost mem-act" type="button" data-import-file>选文件…</button>
-          <div data-import-result></div>
+      const available = sources.filter((source) => Number(source.count) > 0);
+      const rest = sources.filter((source) => Number(source.count) <= 0);
+      const total = available.reduce((sum, source) => sum + Number(source.count || 0), 0);
+      const availableMarkup = available.length
+        ? `<div class="mem-import-grid">${importSourceBlocks(available)}</div>`
+        : `<p class="set-hint mem-import-empty">这台机器上没检测到可导入的记忆。下面仍然把支持检测的 Agent 都列出来。</p>`;
+      const restMarkup = rest.length
+        ? `<details class="mem-import-absent" open>
+             <summary class="mem-import-sub">没检测到本地记忆（${rest.length}）</summary>
+             <div class="mem-import-grid">${rest.map((source) => importSourceCard(source)).join("")}</div>
+           </details>`
+        : "";
+
+      body.innerHTML = `<div class="mem-import-panel">
+        <div class="mem-import-head">
+          <div class="mem-import-summary"><b>${available.length}</b> 个来源可用 <span>·</span> 共 <b>${total}</b> 条</div>
+          ${available.length ? `<button class="ghost mem-act" type="button" data-toggle-all>全不选</button>` : ""}
         </div>
-        <input type="file" accept=".json,application/json" hidden data-import-input>
-        <div class="modal-actions">
-          <button class="ghost" type="button" data-modal-cancel>关闭</button>
+        <p class="set-hint mem-import-tip">勾选要并进记忆库的来源。只增不改；本 scope 或其它全局/项目 scope 已有的重复条目自动跳过。</p>
+        ${availableMarkup}
+        ${restMarkup}
+        <div class="mem-import-foot">
+          <div class="mem-import-picked" data-picked>已选 ${available.length} 个 · 约 ${total} 条</div>
+          <div class="modal-actions">
+            <button class="ghost" type="button" data-modal-cancel>关闭</button>
+            <button class="modal-primary" type="button" data-import-selected ${available.length ? "" : "disabled"}>一键导入</button>
+          </div>
         </div>
       </div>`;
       wireImportDialogChrome(body);
       wireImportDialogActions(body, gen);
     })();
-  });
+  }, { className: "modal-import" });
 }
 
-/** 弹窗底部的关闭钮：内容渲染成败都要有。 */
-function wireImportDialogChrome(body) {
+/** 来源 id / 名称里判断是不是项目级记忆：只有 `（项目）` 后缀或明确写「的项目记忆」才算，
+ *  避免把 Qoder CLI 的「跨项目记忆」误判成项目 scope。 */
+function importSourceIsProject(source) {
+  const name = String(source?.name || "");
+  const note = String(source?.note || "");
+  return String(source?.id || "").endsWith("-projects") || /（项目）/.test(name) || /的项目记忆/.test(note);
+}
+
+/** 同一 Agent 的全局/项目来源共用 family：`qoder-cli-projects` → `qoder-cli`。 */
+function importSourceFamily(source) {
+  const id = String(source?.id || "");
+  return id.endsWith("-projects") ? id.slice(0, -"-projects".length) : id;
+}
+
+/** 组头显示名：去掉「（项目）」后缀，组内再用「全局 / 项目」小标签区分。 */
+function importSourceFamilyName(source) {
+  return String(source?.name || "").replace(/（项目）$/, "");
+}
+
+/** 把有货来源按 family 分组；同一 family 同时有全局和项目时才折叠成一张组卡，
+ *  单来源（ZCode、Claude Code 等）保持原样，不为了「统一」多套一层点击。 */
+function importSourceBlocks(sources) {
+  const groups = new Map();
+  for (const source of sources) {
+    const key = importSourceFamily(source);
+    let group = groups.get(key);
+    if (!group) {
+      group = { key, name: importSourceFamilyName(source), all: [], global: [], project: [] };
+      groups.set(key, group);
+    }
+    group.all.push(source);
+    (importSourceIsProject(source) ? group.project : group.global).push(source);
+  }
+  return [...groups.values()]
+    .map((group) =>
+      group.global.length > 0 && group.project.length > 0
+        ? importSourceFamilyMarkup(group)
+        : group.all.map((source) => importSourceCard(source)).join(""),
+    )
+    .join("");
+}
+
+function importSourceFamilyMarkup(group) {
+  const total = group.all.reduce((sum, source) => sum + Number(source.count || 0), 0);
+  const scopeBits = [
+    group.global.length ? `全局 ${group.global.reduce((sum, source) => sum + Number(source.count || 0), 0)}` : "",
+    group.project.length ? `项目 ${group.project.reduce((sum, source) => sum + Number(source.count || 0), 0)}` : "",
+  ].filter(Boolean).join(" · ");
+  return `<details class="mem-import-family" data-family="${attr(group.key)}">
+    <summary class="mem-import-family-head">
+      <span class="mem-import-family-chev" aria-hidden="true"></span>
+      <span class="mem-import-family-name">${esc(group.name)}</span>
+      <span class="mem-import-family-count">${total} 条</span>
+      <span class="mem-import-family-scopes">${esc(scopeBits)}</span>
+    </summary>
+    <div class="mem-import-family-body">${group.all.map((source) => importSourceCard(source, true)).join("")}</div>
+  </details>`;
+}
+
+/** 一个来源一张小方框：复选框 + 名字 + 条数 + 一行说明；count=0 的 disabled 灰态。
+ *  inFamily=true 时去掉名字里的「（项目）」，改用右上角的「全局 / 项目」小标签。 */
+function importSourceCard(source, inFamily = false) {
+  const count = Math.max(0, Number(source.count) || 0);
+  const found = count > 0;
+  const project = importSourceIsProject(source);
+  const name = inFamily ? importSourceFamilyName(source) : String(source.name || "");
+  const badge = found ? `${count} 条` : "没检测到";
+  return `<label class="mem-import-card${found ? " is-on" : " is-off"}${inFamily ? " is-in-family" : ""}" data-source="${attr(source.id)}" data-count="${count}">
+    <input type="checkbox" ${found ? "checked" : "disabled"} data-source-check aria-label="${attr(source.name)}">
+    <span class="mem-import-box" aria-hidden="true"></span>
+    <span class="mem-import-body">
+      <span class="mem-import-name">${esc(name)}${inFamily ? `<span class="mem-import-scope-tag">${project ? "项目" : "全局"}</span>` : ""}<b>${badge}</b></span>
+      <span class="mem-import-note">${esc(source.note)}</span>
+      ${found ? `<span class="mem-import-state" data-import-state></span>` : ""}
+    </span>
+  </label>`;
+}
+
+
+/** 弹窗底部的关闭钮：内容渲染成败都要有。 */function wireImportDialogChrome(body) {
   body.querySelector("[data-modal-cancel]")?.addEventListener("click", closeModal);
 }
 
-/** 来源行与文件行的动作。导完刷新当前列表；来源接口幂等（重复导只会全是跳过）。 */
+/** 勾选 + 一键批量。导完刷新当前列表；来源接口幂等（重复导只会全是跳过）。
+ *  批量 = 按勾选顺序逐个 POST，不新增服务端批处理端点；一个失败不挡后面的。 */
 function wireImportDialogActions(body, gen) {
-  const fileInput = body.querySelector("[data-import-input]");
-  const resultLine = (row) => row?.querySelector("[data-import-result]");
+  const checks = [...body.querySelectorAll("[data-source-check]:not(:disabled)")];
+  const picked = body.querySelector("[data-picked]");
+  const button = body.querySelector("[data-import-selected]");
+  const toggleAll = body.querySelector("[data-toggle-all]");
+  let running = false;
+  let progressText = "";
 
-  fileInput?.addEventListener("change", async () => {
-    const row = body.querySelector("[data-file-row]");
-    const line = resultLine(row);
-    const file = fileInput.files?.[0];
-    fileInput.value = ""; // 允许连续选同一个文件
-    if (!file || !line) return;
-    let items = null;
-    try {
-      const parsed = JSON.parse(await file.text());
-      items = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.items) ? parsed.items : null;
-    } catch {
-      line.textContent = "这个文件不是合法 JSON";
-      return;
+  const update = () => {
+    const selected = checks.filter((input) => input.checked);
+    const total = selected.reduce(
+      (sum, input) => sum + Number(input.closest("[data-source]")?.getAttribute("data-count") || 0),
+      0,
+    );
+    if (picked) {
+      picked.textContent = running
+        ? progressText || "正在导入…"
+        : selected.length
+          ? `已选 ${selected.length} 个来源 · 约 ${total} 条`
+          : "还没勾选来源";
     }
-    if (!items || items.length === 0) {
-      line.textContent = '文件里没有条目：要一个数组，或 {"items": [...]}';
-      return;
-    }
-    const ok = await openConfirm({
-      title: "导入记忆",
-      message: `把 ${items.length} 条记忆导入「我的记忆」？`,
-      detail: "只增不改，重复的会跳过。",
-      confirmText: "导入",
-    });
-    if (!ok) return;
-    line.textContent = "导入中…";
-    try {
-      const response = await request("/api/v1/agent/memory/import", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ scope: "global", items }),
-      });
-      const data = await response.json().catch(() => ({}));
-      if (response.status === 404) {
-        line.textContent = "导入未启用（服务端 MEMORY_IMPORT=false）";
-        return;
-      }
-      if (!response.ok) throw new Error(data.message || String(response.status));
-      line.textContent = `新增 ${data.added} 条 / 跳过 ${data.skipped} 条（共 ${data.total} 条）`;
-      toast(`导入完成：新增 ${data.added} 条`);
-      void loadMemorySummary(gen);
-    } catch (error) {
-      if (error.message === "forbidden") return;
-      line.textContent = `失败：${error.message}`;
-    }
-  });
-
-  body.addEventListener("click", async (event) => {
-    const button = event.target.closest?.("[data-import-file]");
     if (button) {
-      fileInput?.click();
-      return;
+      button.disabled = running || selected.length === 0;
+      button.textContent = running ? "导入中…" : "一键导入";
     }
-    const sourceButton = event.target.closest?.("[data-import-source]");
-    if (!sourceButton) return;
-    const row = sourceButton.closest("[data-source]");
-    const id = row?.getAttribute("data-source") || "";
-    const line = resultLine(row);
-    sourceButton.disabled = true;
-    if (line) line.textContent = "导入中…";
-    try {
-      const response = await request(`/api/v1/agent/memory/import/sources/${encodeURIComponent(id)}`, {
-        method: "POST",
-      });
-      const data = await response.json().catch(() => ({}));
-      if (response.status === 404) {
-        if (line) line.textContent = "没检测到这个来源";
-        sourceButton.disabled = false;
-        return;
-      }
-      if (!response.ok) throw new Error(data.message || String(response.status));
-      if (line) line.textContent = `新增 ${data.added} 条 / 跳过 ${data.skipped} 条`;
-      toast(`导入完成：新增 ${data.added} 条`);
-      void loadMemorySummary(gen);
-    } catch (error) {
-      if (error.message === "forbidden") return;
-      if (line) line.textContent = `失败：${error.message}`;
-      sourceButton.disabled = false;
-    }
+    if (toggleAll) toggleAll.textContent = checks.length > 0 && selected.length === checks.length ? "全不选" : "全选";
+  };
+
+  const panel = body.querySelector(".mem-import-panel") || body;
+  panel.addEventListener("change", (event) => {
+    const input = event.target.closest?.("[data-source-check]");
+    if (!input || input.disabled) return;
+    input.closest("[data-source]")?.classList.toggle("is-on", input.checked);
+    update();
   });
+
+  toggleAll?.addEventListener("click", () => {
+    const allOn = checks.length > 0 && checks.every((input) => input.checked);
+    checks.forEach((input) => {
+      input.checked = !allOn;
+      input.closest("[data-source]")?.classList.toggle("is-on", input.checked);
+    });
+    update();
+  });
+
+  button?.addEventListener("click", async () => {
+    if (running) return;
+    const selected = checks.filter((input) => input.checked);
+    if (selected.length === 0) return;
+    running = true;
+    update();
+    let added = 0;
+    let skipped = 0;
+    let failed = 0;
+
+    for (let index = 0; index < selected.length; index += 1) {
+      const card = selected[index].closest("[data-source]");
+      const id = card?.getAttribute("data-source") || "";
+      const state = card?.querySelector("[data-import-state]");
+      progressText = `正在导入 ${index + 1}/${selected.length}…`;
+      update();
+      if (state) {
+        state.className = "mem-import-state";
+        state.textContent = `导入中…（${index + 1}/${selected.length}）`;
+      }
+      try {
+        const response = await request(`/api/v1/agent/memory/import/sources/${encodeURIComponent(id)}`, {
+          method: "POST",
+        });
+        const data = await response.json().catch(() => ({}));
+        if (response.status === 404) {
+          failed += 1;
+          if (state) {
+            state.textContent = "没检测到这个来源";
+            state.classList.add("is-error");
+          }
+          continue;
+        }
+        if (!response.ok) throw new Error(data.message || String(response.status));
+        added += Number(data.added) || 0;
+        skipped += Number(data.skipped) || 0;
+        if (state) state.textContent = `新增 ${Number(data.added) || 0} · 跳过 ${Number(data.skipped) || 0}`;
+      } catch (error) {
+        if (error.message === "forbidden") {
+          running = false;
+          progressText = "";
+          update();
+          return;
+        }
+        failed += 1;
+        if (state) {
+          state.textContent = `失败：${error.message}`;
+          state.classList.add("is-error");
+        }
+      }
+    }
+
+    running = false;
+    progressText = "";
+    update();
+    if (failed > 0) toast(`导入完成：新增 ${added} 条，${failed} 个来源失败`);
+    else toast(`导入完成：新增 ${added} 条${skipped > 0 ? `，跳过 ${skipped} 条` : ""}`);
+    void loadMemorySummary(gen);
+  });
+
+  update();
 }
+
 
 /** 一排人：一次请求拿全（我的 + 各在职执事 + 条数）。读不到就只剩"我的记忆"。 */
 async function loadMemoryPeople(gen) {
@@ -489,11 +632,14 @@ async function loadMemoryPeople(gen) {
     const rows = Array.isArray(data.scopes) ? data.scopes : [];
     memoryPageState.people = rows
       .filter((row) => row && typeof row.scope === "string")
+      // 外部导入伪 scope（__imported__）2026-11-15 已撤：老服务端可能还下发，直接滤掉
+      .filter((row) => row.scope !== "__imported__")
       .map((row) => ({
         scope: row.scope,
         label: String(row.label || (row.scope === "global" ? "我的记忆" : "执事")),
         count: Number(row.count) || 0,
-        kind: row.kind === "partner" ? "partner" : "mine",
+        // 2026-11-15：kind 扩了 project（项目记忆）
+        kind: ["partner", "project"].includes(row.kind) ? row.kind : "mine",
       }));
     renderMemoryPeople();
   } catch (error) {
@@ -515,9 +661,15 @@ function renderMemoryPeople() {
   box.innerHTML = people
     .map((person) => {
       const on = person.scope === memoryPageState.scope;
+      const badge =
+        person.kind === "partner"
+          ? `<span class="mem-a-person-tag">同事</span>`
+          : person.kind === "project"
+            ? `<span class="mem-a-person-tag">项目</span>`
+            : "";
       return `<button class="mem-a-person ${on ? "on" : ""}" type="button"
         data-mem-scope="${attr(person.scope)}" role="tab" aria-selected="${on}">
-        ${esc(person.label)}${person.kind === "partner" ? `<span class="mem-a-person-tag">同事</span>` : ""}<b>${person.count}</b>
+        ${esc(person.label)}${badge}<b>${person.count}</b>
       </button>`;
     })
     .join("");
@@ -705,9 +857,7 @@ function updateMemoryControls() {
   const running = memoryPageState.status?.running === true || memoryPageState.batch?.running === true;
   if (consolidate) {
     consolidate.disabled = running;
-    consolidate.innerHTML = running
-      ? "整理中…"
-      : '整理记忆 <span class="mem-a-q" aria-hidden="true">?</span>';
+    consolidate.innerHTML = running ? "整理中…" : "整理记忆";
   }
 }
 

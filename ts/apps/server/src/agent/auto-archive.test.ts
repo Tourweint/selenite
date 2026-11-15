@@ -106,18 +106,18 @@ function readMetaFile(): Record<string, unknown> {
 
 // ── 开关与天数（env 懒读）────────────────────────────────
 
-test("archiveAutoEnabled / archiveAutoDays：默认关、默认 30、非法回落", () => {
+test("archiveAutoEnabled / archiveAutoDays：默认开、默认 30、非法回落", () => {
   const saved = { enabled: process.env.ARCHIVE_AUTO_ENABLED, days: process.env.ARCHIVE_AUTO_DAYS };
   try {
     delete process.env.ARCHIVE_AUTO_ENABLED;
     delete process.env.ARCHIVE_AUTO_DAYS;
-    assert.equal(autoArchive.archiveAutoEnabled(), false, "默认关（翻案的是能力，不是替用户做主）");
+    assert.equal(autoArchive.archiveAutoEnabled(), true, "默认开（2026-11-15 用户口径：做出来的功能默认就开）");
     assert.equal(autoArchive.archiveAutoDays(), 30, "默认 30 天");
-    for (const value of ["true", "1", "on"]) {
+    for (const value of ["true", "1", "on", ""]) {
       process.env.ARCHIVE_AUTO_ENABLED = value;
       assert.equal(autoArchive.archiveAutoEnabled(), true, value);
     }
-    for (const value of ["false", "0", "off", ""]) {
+    for (const value of ["false", "0", "off"]) {
       process.env.ARCHIVE_AUTO_ENABLED = value;
       assert.equal(autoArchive.archiveAutoEnabled(), false, value);
     }

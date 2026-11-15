@@ -211,6 +211,11 @@
    数字 tabular）；按模型与明细照 Cindy UsageBreakdownTables（色点对图例、占比格带小条、
    数值右对齐）。配色只用主题变量：第一名走 --accent，其余是 --text 与 --card 的灰阶，
    不引第二套调色板（换主题色整页跟着走）。 */
+/* 区间切换（2026-11-15）：节标题右侧「近 7 天 / 近 30 天 / 全部」+ 刷新同一行。
+   分段按钮压到 24px，与 .ghost 同高度；负外边距沿用 .set-sec-head 的动作对齐口径。 */
+.use-range { display: flex; align-items: center; gap: 10px; }
+.set-sec-head > .use-range { margin-block: -6px; }
+.use-range .segmented button { height: 24px; padding: 0 10px; }
 .use-hero {
   padding: 18px;
   gap: 0;

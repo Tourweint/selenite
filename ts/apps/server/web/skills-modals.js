@@ -143,7 +143,12 @@ async function openEditSkillModal(name, item = null) {
   );
 }
 
-function openCreateSkillModal() {
+/**
+ * 新建技能（全局库）。
+ * options.onCreated(name)：2026-11-15 个人页复用——建完自动只给当前执事打开。
+ * options.existingHint：同名已存在时的提示（个人页指向「设置 → 技能 / 让他自己写」）。
+ */
+function openCreateSkillModal(options = {}) {
   openModal(
     "新建技能",
     (body) => {
@@ -203,7 +208,10 @@ function openCreateSkillModal() {
             cache: "no-store",
           });
           if (exists.ok) {
-            setModalHint(hint, "已有同名技能；要改它请关掉这里、从列表点开编辑。");
+            setModalHint(
+              hint,
+              options.existingHint || "已有同名技能；要改它请关掉这里、从列表点开编辑。",
+            );
             return;
           }
           const response = await request(`/api/v1/agent/skills/${encodeURIComponent(name)}`, {
@@ -218,6 +226,15 @@ function openCreateSkillModal() {
           closeModal();
           toast("技能已新建");
           void loadSkills();
+          // 个人页：建到全局库后，再只给当前这个人开；回调失败不该吞掉"已建成"的事实
+          try {
+            const result = options.onCreated?.(name);
+            if (result && typeof result.catch === "function") {
+              result.catch((error) => console.warn("技能新建回调失败", error));
+            }
+          } catch (error) {
+            console.warn("技能新建回调失败", error);
+          }
         } catch (error) {
           if (error.message === "forbidden") { closeModal(); return; }
           setModalHint(hint, `没建成：${error.message}`);

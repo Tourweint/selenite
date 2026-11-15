@@ -21,9 +21,11 @@ import { openAddProjectModal } from "./project-modal.js";
 import { showProviderTemplates } from "./providers.js";
 import { currentPartnerProfileId, currentRoute, currentSettingsPage, go } from "./route.js";
 import { openAddSearchSourceModal } from "./search-sources.js";
+import { wireDragScroll } from "./scroll-x.js";
 import { mountSegmented, replayPageEnter, rowMarkup, sectionMarkup, switchMarkup, syncSegmented } from "./settings-atoms.js";
 import { ACCENTS, renderSettingsNav } from "./settings-base.js";
 import { compactionSectionMarkup, wireCompactionSection } from "./settings-compaction.js";
+import { contextSettingsMarkup, wireContextSettings } from "./settings-context.js";
 import { connRelay, initRuntimeCard, loadPair, loadRelayStatus, loadServiceInfo, openAddDeviceModal, openRelayLinkModal, paintConnStar, unlinkRelay } from "./settings-connection.js";
 import { memorySettingsMarkupLegacy, wireMemorySettingsLegacy } from "./settings-memory.js";
 import { loadProjectsSettings } from "./settings-projects.js";
@@ -126,6 +128,8 @@ async function renderSettings() {
     for (const button of el.settingsInner.querySelectorAll("[data-theme-choice]")) {
       button.addEventListener("click", () => setThemeChoice(button.dataset.themeChoice));
     }
+    // 五张主题卡一排横滚（2026-11-15）：窄了没有条子，滚轮/按住拖拽补位
+    wireDragScroll(el.settingsInner.querySelector(".theme-cards"));
     for (const button of el.settingsInner.querySelectorAll("[data-accent-choice]")) {
       button.addEventListener("click", () => {
         setAccent(button.dataset.accentChoice);
@@ -204,7 +208,7 @@ async function renderSettings() {
         ${rowMarkup(
           "自动归档旧会话",
           "",
-          switchMarkup(false, { label: "自动归档", attrs: "data-archive-auto-switch" }),
+          switchMarkup(true, { label: "自动归档", attrs: "data-archive-auto-switch" }),
         )}
         <div class="divider"></div>
         ${rowMarkup(
@@ -279,6 +283,10 @@ async function renderSettings() {
     void refreshApprovalPopups();
     // 上下文压缩（2026-11-14）：四个旋钮走 flags；改完下一轮生效
     wireCompactionSection(el.settingsInner);
+  } else if (page === "context") {
+    // 设置 → 上下文（2026-11-16）：只读当前会话的固定前缀；会变部分只报数量。
+    el.settingsInner.innerHTML = contextSettingsMarkup();
+    wireContextSettings();
   } else if (page === "projects") {
     // 2026-11-12 重做：工作区根与项目目录平级（ZCode 多根语义），同一种行、路径可改；
     // 项目动作只有「改名 / 归档」（归档是软退场，归档页可恢复），不再有「移除/删除」说法。
@@ -474,7 +482,8 @@ async function renderSettings() {
       }
     }, 10000);
   } else if (page === "service") {
-    // 服务页（2026-11-09 拆分后；2026-11-13 二次瘦身）：只留服务状态与开关——通知 / 鉴权 / 运行时 / 高级开关。
+    // 服务页（2026-11-09 拆分后；2026-11-13 二次瘦身；2026-11-16 插件拆出）：只留服务自身状态——
+    // 通知 / 鉴权 / 运行时。行为开关整块搬到「插件」页，这一页不再混功能开关。
     // 2026-11-13 退役的两行：地址（连接页的链路图已经说清，这里只是 location.origin 的复读）、
     // 累计 token（整块搬去「用量」页——累计、按模型占比、明细三件事，一行标签装不下）。
     const notifyOn = localStorage.getItem(KEY_NOTIFY) === "1";
@@ -523,22 +532,6 @@ async function renderSettings() {
           </div>
         </div>
       </div>`,
-    )}
-    ${sectionMarkup(
-      "高级开关",
-      // 工具活动从「会话」搬到这里（2026-11-14）：它不是一个偏好，而是复核的凭据——
-      // 回答里少了「读了哪个文件、跑了什么命令」，事后就查不出它到底动过什么。
-      // 所以只报状态、不给开关：灰块没有隐藏路径，才谈得上「事后可复核」。
-      `<div class="card" id="acts-card">
-        ${rowMarkup(
-          "工具活动",
-          "对话里始终显示读了哪个文件、跑了什么命令、花了多久；这一项不提供关闭，要回看结论只能靠它。",
-          `<span class="kv">常开</span>`,
-        )}
-      </div>
-      <div class="card" id="flags-card">
-        <div class="row"><div class="row-main"><div class="row-hint">读取中…</div></div></div>
-      </div>`,
     )}`;
     // 供应商与默认模型已拆到「模型」页（2026-11-09）：服务页只留服务自身的状态与开关。
     // 通知开关（批次二）：开的时候才请求系统权限；被拒就退回关闭并提示
@@ -569,19 +562,33 @@ async function renderSettings() {
     });
     void loadServiceInfo();
     void initRuntimeCard();
-    // 高级开关（2026-11-09）：读一次渲染行
+  } else if (page === "plugins") {
+    // 插件中心（2026-11-16 从服务页拆出，用户口径）：所有行为开关本来就是「做出来的功能」，
+    // 单独一页按「插件」摆卡片墙；服务页只留服务自身状态（通知 / 鉴权 / 运行时）。
+    // 页面不套 `.card`——卡片墙自己铺在设置页背景上，外层再包一层会糊成嵌套卡片。
+    el.settingsInner.innerHTML = sectionMarkup(
+      "插件",
+      `<div id="flags-card"><p class="set-hint">读取中…</p></div>`,
+    );
     void loadFlagsSettings();
   } else if (page === "usage") {
     // 用量页（2026-11-13 从服务页拆出）：累计 / 按模型 / 明细 三张卡，一份数据三个视角。
+    // 2026-11-15 加区间切换：近 7 天 / 近 30 天 / 全部（三档共用一个端点，带 range 参数）。
     // 版式：累计卡照 ZCode settings/usage-stats 的 lifetime strip（一格一数、发丝竖分隔、数字 tabular）；
     // 按模型与明细照 Cindy UsageBreakdownTables（色点对图例、占比格带小条、表格右对齐）。
-    // 数据只有 GET /api/v1/agent/usage 一份：durable 的 pi.usage 按会话相加。
-    // 刻意不做：金额（服务端 cost 固定 0，不假装知道价格）、按天曲线（pi.usage 只有累计，没有逐日流水）。
+    // 金额仍不做（服务端 cost 固定 0，不假装知道价格）；逐日日柱仍不画（区间数字已经够回答"最近用了多少"）。
     el.settingsInner.innerHTML = `${sectionMarkup(
-      "累计用量",
+      "用量",
       `<div class="card use-hero" id="use-hero"><div class="use-loading">读取中…</div></div>`,
       "",
-      `<button class="ghost" type="button" id="use-refresh">刷新</button>`,
+      `<div class="use-range">
+        <div class="segmented slide" id="use-range" role="radiogroup" aria-label="用量统计区间">
+          <button type="button" data-range="7d" aria-checked="false">近 7 天</button>
+          <button type="button" data-range="30d" aria-checked="false">近 30 天</button>
+          <button type="button" data-range="all" aria-checked="false">全部</button>
+        </div>
+        <button class="ghost" type="button" id="use-refresh">刷新</button>
+      </div>`,
     )}
     ${sectionMarkup(
       "按模型",
@@ -591,7 +598,6 @@ async function renderSettings() {
       "明细",
       `<div class="card use-detail" id="use-detail"><div class="use-loading">读取中…</div></div>`,
     )}`;
-    document.getElementById("use-refresh")?.addEventListener("click", () => void loadUsagePage());
     void loadUsagePage();
   } else if (page === "models") {
     // 模型页（2026-11-09 从服务页拆出）：默认模型行 + 供应商双栏。

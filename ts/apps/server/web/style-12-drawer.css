@@ -316,9 +316,10 @@ select.cs-input:disabled { color: var(--text-3); cursor: default; }
 .cs-hint { min-height: 17px; font-size: 12px; line-height: 1.5; color: var(--text-3); overflow-wrap: anywhere; }
 .cs-hint.is-error { color: var(--c-error); }
 
-/* 身份块（首页顶部）：**横排一行**——头像 + 名字/人设版本 + chevron。
+/* 身份块（首页顶部）：**横排一行**——头像 + 名字/去人设页改 + chevron。
    与下面的设置行同一节奏（同样是 52px 量级的一行），只是更醒目一档。
-   2026-11-07 二次修：原来居中竖排的大头像卡片像「个人主页」，占了近 1/5 屏高。 */
+   2026-11-07 二次修：原来居中竖排的大头像卡片像「个人主页」，占了近 1/5 屏高。
+   2026-11-15 快照退役：副行不再展示版本号。 */
 .cs-identity {
   display: flex; align-items: center; gap: 12px;
   width: 100%;

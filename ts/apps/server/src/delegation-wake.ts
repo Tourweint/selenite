@@ -15,11 +15,19 @@
  * 在 `chatStream` 排队之前就生效；若直接提交，用户正在跑的那一轮也会被无人值守策略罩住。
  * 先等空闲再起轮，风险为零（方案 §2.2）。
  *
+ * 送达兜底（2026-11-15，方案 `docs/设计方案/2026-11-15-派活回信送达兜底` §C）：
+ * - pending 队列每次变化原子写 `.data/wake-pending.json`，启动由
+ *   `restoreDelegationWakeQueue` 读回重排——重启不再丢唤醒；
+ * - 忙退避耗尽 / 链保险丝 / 唤醒轮失败从"清空放弃"改为**有限次重排**（10 分钟 × 3 次），
+ *   放弃必留一行日志。翻案登记：批 29 的"耗尽即放弃"按用户"确保收到回信"口径收紧。
+ *
  * 依赖方向：只 import partner-runtime / partners / delegation（类型）/ agent/session，
  * **不 import agent/lifecycle**（lifecycle 反向 import 本模块，再加一条就是明确的环）。
  */
 
 import type { Conversation } from "@earendil-works/pi-durable";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { COMPANIONS_ENABLED, partnersStore } from "./partners.ts";
 import {
 	ensurePartnerSession,
@@ -35,13 +43,17 @@ import { maybeScheduleNudge } from "./partner-proactive.ts";
 const DEBOUNCE_MS = 2_000;
 /** 忙退避间隔：与防抖同值，每 2 秒重查一次 */
 const BUSY_RETRY_MS = 2_000;
-/** 忙退避上限：150 × 2 秒 ≈ 5 分钟；超限放弃（汇报本身已在会话里，不丢） */
+/** 忙退避上限：150 × 2 秒 ≈ 5 分钟；超限不再原地等，改重排（2026-11-15 送达兜底 §C） */
 const MAX_BUSY_RETRIES = 150;
 /**
  * 单次触发链的连续 flush 上限。方案 §2.2 只写了 while，这是实现层保险丝：
  * 唤醒轮自己再派活会产出新汇报，正常是合法链；这个上限只防 `while` 缺陷把进程拖死。
  */
 const MAX_CHAIN_FLUSHES = 5;
+/** 重排间隔（2026-11-15 送达兜底 §C）：耗尽 / 失败后 10 分钟再试一轮。 */
+const REQUEUE_MS = 10 * 60_000;
+/** 连续重排上限：超过就真放弃（正文仍在会话里，损失只是转述轮），防宿主卡死时无限轮询。 */
+const MAX_REQUEUES = 3;
 
 export type WakeTimerHandle = unknown;
 
@@ -85,6 +97,72 @@ const pending = new Map<number, DelegationReport[]>();
 const timers = new Map<number, { handle: WakeTimerHandle; cancel: () => void }>();
 /** 正在 flush 的会话：期间新汇报只追加，不再排定时器（链内会接住） */
 const running = new Set<number>();
+/** 连续重排计数（2026-11-15 送达兜底 §C）：唤醒轮成功即清零 */
+const requeues = new Map<number, number>();
+
+/** 队列文件路径（懒读 env：单测用 AGENT_WAKE_PENDING_PATH 钉到临时目录）。 */
+function wakeQueuePath(): string {
+	return process.env.AGENT_WAKE_PENDING_PATH?.trim() || ".data/wake-pending.json";
+}
+
+/**
+ * 队列落盘（原子写，照 chat-meta 的临时文件 + rename）。落盘失败只 warn——
+ * 它是兜底不是主链路，不能拖累唤醒；失败的最坏结果退回"重启丢唤醒"的旧行为。
+ * 日志纪律：只记条数，不落汇报正文。
+ */
+function persistWakeQueue(): void {
+	try {
+		const entries = [...pending.entries()].map(([conversationId, reports]) => ({
+			conversationId,
+			reports,
+		}));
+		mkdirSync(dirname(resolve(wakeQueuePath())), { recursive: true });
+		const temp = `${wakeQueuePath()}.tmp-${process.pid}-${Date.now()}`;
+		writeFileSync(temp, JSON.stringify({ version: 1, entries }), "utf8");
+		renameSync(temp, wakeQueuePath());
+	} catch (error) {
+		console.warn(
+			`[wake] 唤醒队列落盘失败（不影响本轮唤醒）: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+}
+
+/** 单条待唤醒汇报的最小形状（读回时防脏数据）。 */
+function isReportLike(value: unknown): value is DelegationReport {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		typeof (value as { ticketId?: unknown }).ticketId === "string" &&
+		typeof (value as { text?: unknown }).text === "string"
+	);
+}
+
+/**
+ * 启动恢复（2026-11-15 送达兜底 §C）：读回上一次进程没送完的唤醒队列并重排防抖。
+ * 文件不存在 / 坏了 / 条目脏 → 当空队列，不抛。由 index.ts 启动段调用。
+ */
+export function restoreDelegationWakeQueue(deps: DelegationWakeDeps = defaultDeps): number {
+	try {
+		const parsed = JSON.parse(readFileSync(wakeQueuePath(), "utf8")) as {
+			entries?: Array<{ conversationId?: unknown; reports?: unknown }>;
+		};
+		let restored = 0;
+		for (const entry of Array.isArray(parsed.entries) ? parsed.entries : []) {
+			const conversationId = Number(entry.conversationId);
+			const reports = (Array.isArray(entry.reports) ? entry.reports : []).filter(isReportLike);
+			if (!Number.isFinite(conversationId) || reports.length === 0) continue;
+			pending.set(conversationId, reports);
+			restored += reports.length;
+			if (!timers.has(conversationId) && !running.has(conversationId)) {
+				scheduleFlush(conversationId, deps);
+			}
+		}
+		if (restored > 0) console.log(`[wake] 重启恢复唤醒队列 ${restored} 条`);
+		return restored;
+	} catch {
+		return 0;
+	}
+}
 
 const defaultDeps: DelegationWakeDeps = {
 	wakeEnabled: () => delegationWakeEnabled(),
@@ -171,11 +249,47 @@ export function collectPending(
 
 function clearConversation(conversationId: number): void {
 	pending.delete(conversationId);
+	requeues.delete(conversationId);
 	const timer = timers.get(conversationId);
 	if (timer) {
 		timer.cancel();
 		timers.delete(conversationId);
 	}
+	persistWakeQueue();
+}
+
+/**
+ * 有限次重排（2026-11-15 送达兜底 §C）：忙退避耗尽 / 链保险丝 / 唤醒轮失败时，
+ * 保留 pending 排一个 10 分钟后的重试；连续超过 MAX_REQUEUES 次才真放弃（warn 一行）。
+ * 翻案登记：批 29 的"耗尽即放弃"按用户"确保收到回信"口径收紧为"有限次重排"。
+ */
+function requeueConversation(
+	conversationId: number,
+	deps: DelegationWakeDeps,
+	reason: string,
+): void {
+	const queued = pending.get(conversationId)?.length ?? 0;
+	if (queued === 0) {
+		clearConversation(conversationId);
+		return;
+	}
+	const count = (requeues.get(conversationId) ?? 0) + 1;
+	if (count > MAX_REQUEUES) {
+		console.warn(
+			`[wake] 会话 ${conversationId} 重排 ${MAX_REQUEUES} 次仍未成功（${reason}），放弃唤醒 tickets=${queued}`,
+		);
+		clearConversation(conversationId);
+		return;
+	}
+	requeues.set(conversationId, count);
+	const existing = timers.get(conversationId);
+	if (existing) existing.cancel();
+	const handle = deps.setTimer(() => {
+		timers.delete(conversationId);
+		void flushDelegationWake(conversationId, deps);
+	}, REQUEUE_MS);
+	timers.set(conversationId, { handle, cancel: () => deps.clearTimer(handle) });
+	persistWakeQueue();
 }
 
 function scheduleFlush(conversationId: number, deps: DelegationWakeDeps): void {
@@ -216,6 +330,7 @@ export function wakeOnDelegationReport(
 		const list = pending.get(conversationId);
 		if (list) list.push(report);
 		else pending.set(conversationId, [report]);
+		persistWakeQueue();
 		// 已有定时器 / 正在跑链：只追加，接住由那条链负责
 		if (timers.has(conversationId) || running.has(conversationId)) return;
 		scheduleFlush(conversationId, deps);
@@ -261,11 +376,10 @@ export async function flushDelegationWake(
 			while (await deps.isBusy(chat)) {
 				waits += 1;
 				if (waits > MAX_BUSY_RETRIES) {
-					const count = pending.get(conversationId)?.length ?? 0;
 					console.warn(
-						`[wake] 会话 ${conversationId} 忙超 5 分钟，本次唤醒放弃 tickets=${count}`,
+						`[wake] 会话 ${conversationId} 忙超 5 分钟，改 10 分钟后重试 tickets=${pending.get(conversationId)?.length ?? 0}`,
 					);
-					clearConversation(conversationId);
+					requeueConversation(conversationId, deps, "忙退避耗尽");
 					return;
 				}
 				await sleep(deps, BUSY_RETRY_MS);
@@ -275,13 +389,14 @@ export async function flushDelegationWake(
 			if (queued.length === 0) return;
 			if (rounds >= MAX_CHAIN_FLUSHES) {
 				console.warn(
-					`[wake] 会话 ${conversationId} 连续唤醒超过 ${MAX_CHAIN_FLUSHES} 轮，停止本链 tickets=${queued.length}`,
+					`[wake] 会话 ${conversationId} 连续唤醒超过 ${MAX_CHAIN_FLUSHES} 轮，本链停止改重排 tickets=${queued.length}`,
 				);
-				clearConversation(conversationId);
+				requeueConversation(conversationId, deps, "链保险丝");
 				return;
 			}
 
 			const reports = collectPending(pending, conversationId);
+			persistWakeQueue();
 			rounds += 1;
 			const started = Date.now();
 			const result = await deps.runTurn(partnerId, buildWakePrompt(reports), {
@@ -291,6 +406,9 @@ export async function flushDelegationWake(
 			});
 			const seconds = ((Date.now() - started) / 1000).toFixed(1);
 			if (result.ok) {
+				// 重排计数只在**队列真正清空**时归零：链式唤醒每一轮都是 ok 的，按轮清零
+				// 会让保险丝重排永远攒不起次数（2026-11-15 首轮实现踩过，测试抓的）。
+				if ((pending.get(conversationId)?.length ?? 0) === 0) requeues.delete(conversationId);
 				console.log(
 					`[wake] 会话 ${conversationId} 唤醒轮 ok tickets=${reports.length} 耗时${seconds}s`,
 				);
@@ -305,6 +423,12 @@ export async function flushDelegationWake(
 				console.warn(
 					`[wake] 会话 ${conversationId} 唤醒轮失败: ${oneLine(result.error ?? "未知错误")}`,
 				);
+				// 失败回灌队首 + 重排（2026-11-15 送达兜底 §C.4）：取走的汇报不放回去
+				// 就真丢了；链尾的 finally 看到已有定时器不会重复排。
+				const waiting = pending.get(conversationId) ?? [];
+				pending.set(conversationId, [...reports, ...waiting]);
+				requeueConversation(conversationId, deps, "唤醒轮失败");
+				return;
 			}
 		}
 	} catch (error) {
@@ -319,10 +443,11 @@ export async function flushDelegationWake(
 	}
 }
 
-/** 测试用：清 pending / 定时器 / 运行标记（生产不需要调用）。 */
+/** 测试用：清 pending / 定时器 / 运行标记 / 重排计数（生产不需要调用；不落盘）。 */
 export function resetDelegationWakeState(): void {
 	for (const timer of timers.values()) timer.cancel();
 	timers.clear();
 	pending.clear();
 	running.clear();
+	requeues.clear();
 }

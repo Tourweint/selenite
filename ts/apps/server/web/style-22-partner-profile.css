@@ -61,6 +61,16 @@
 .pf-domain-tag { font-family: var(--mono); font-size: 11px; }
 .pf-hero-actions { display: flex; gap: 8px; flex: none; }
 .pf-hero-actions .ghost { height: 30px; }
+/* 顶栏小图标钮（2026-11-15 人设页打磨：试跑退役、暂停/恢复收成图标；说明进 data-tip） */
+.pf-iconbtn {
+  display: grid; place-content: center;
+  width: 30px; height: 30px; padding: 0;
+  border: 1px solid var(--outline); border-radius: var(--r-sm);
+  background: transparent; color: var(--text-2);
+  cursor: pointer; transition: color .15s ease, border-color .15s ease, background .15s ease;
+}
+.pf-iconbtn:hover { color: var(--text); border-color: var(--text-3); background: var(--surface-low); }
+.pf-iconbtn svg { width: 14px; height: 14px; }
 
 /* ── 分节 ── */
 .pf-sec { display: flex; flex-direction: column; margin-top: 26px; }
@@ -155,6 +165,19 @@
 }
 .pf-contract:focus { border-color: var(--accent); }
 .pf-contract::placeholder { color: var(--text-3); }
+/* 注入预览的原文块（2026-11-15 人设页打磨）：与契约框同族，白空格保留 + 空态弱化 */
+.pf-inject-text {
+  width: 100%; max-height: 340px; overflow: auto;
+  margin: 0; padding: 14px 16px;
+  border: 1px solid var(--outline); border-radius: var(--r-md);
+  background: var(--surface); color: var(--text-2);
+  font-family: var(--mono); font-size: 12px; line-height: 1.8;
+  white-space: pre-wrap; word-break: break-word;
+}
+.pf-inject-text.is-empty { color: var(--text-3); font-family: inherit; font-size: 12.5px; }
+/* 记忆注入说明（没原文可预览，只列三条口径） */
+.pf-inject-list { margin: 10px 0 0; padding-left: 18px; display: flex; flex-direction: column; gap: 7px; }
+.pf-inject-list li { font-size: 12.5px; line-height: 1.7; color: var(--text-2); }
 .pf-foot.is-tight .ghost { height: 26px; padding: 0 10px; font-size: 11.5px; }
 
 .pf-inline { display: flex; align-items: center; gap: 8px; }
@@ -182,6 +205,34 @@
   border-color: var(--accent); color: var(--accent); background: var(--card-high);
 }
 .pf-persona-list { display: flex; flex-direction: column; margin-top: 4px; }
+
+/* ── 模块行卡（2026-11-15 改人设页重构）：9 张可编辑模块一行一卡，
+   名字 + 状态摘要 + （挂念子开关）+ 启停开关；能进编辑层的卡 hover 提示可点。 ── */
+.pf-mod-cards { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.pf-mod-card {
+  display: flex; align-items: center; gap: 12px;
+  border: 1px solid var(--divider); border-radius: var(--r-sm);
+  padding: 10px 14px;
+  transition: border-color .15s ease;
+}
+.pf-mod-card.is-clickable { cursor: pointer; }
+.pf-mod-card.is-clickable:hover { border-color: var(--outline); }
+.pf-mod-card .pf-mod-label { flex: 1; min-width: 0; flex-wrap: nowrap; }
+.pf-mod-sum {
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 11.5px; color: var(--text-3); text-align: right;
+}
+.pf-mod-card .pf-mod-sub { margin-left: 0; }
+/* 注入内容卡右侧的小箭头（2026-11-15 人设页打磨）：只表示"点得开"，零解释字 */
+.pf-mod-chev { flex: none; display: grid; place-content: center; color: var(--text-3); }
+.pf-mod-chev svg { width: 12px; height: 12px; transform: rotate(-90deg); }
+.pf-mod-card.is-clickable:hover .pf-mod-chev { color: var(--text-2); }
+/* 「注入细节」折叠（岗位类注入开关）：比模块卡区低半档视觉 */
+.pf-inject { margin-top: 12px; border-top: 1px solid var(--divider); }
+.pf-inject > summary { padding: 10px 0 2px; }
+.pf-inject .pf-kv { margin-left: 10px; }
+
 .pf-mod-label { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .pf-mod-name {
   font-size: 13px; color: var(--text);
@@ -257,6 +308,10 @@
 .pf-skill-name { flex: none; width: 118px; font-weight: 500; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pf-skill-sum { flex: 1; min-width: 0; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pf-skill-when { flex: none; font-family: var(--mono); font-size: 10.5px; color: var(--text-3); }
+.pf-skill-when .pf-mini { margin-left: 6px; font-family: inherit; }
+/* 2026-11-15 个人技能可见性：全局未开的按人开关 */
+.pf-skill-tools { display: flex; gap: 10px; margin: 8px 0 2px; }
+.pf-skill-switch { flex: none; display: flex; align-items: center; align-self: center; }
 
 /* ── ④ 档案（2026-11-14 已撤）── */
 /* 人设页不再承载履历 / 记忆：统一去设置 → 记忆。 */
@@ -267,3 +322,14 @@
   .pf-hero { flex-wrap: wrap; }
   .pf-hero-actions { width: 100%; }
 }
+
+/* ── 二次卡片化（2026-11-15）：岗位 + 能力并入人格模块 ──
+   组标题只做扫读锚（两字灰字）；关着的卡降半档视觉且不可点开；
+   列表卡的 ⋯ 菜单按钮同款窄ghost。 */
+.pf-group-title {
+  margin: 12px 0 2px;
+  font-size: 10.5px; color: var(--text-3); letter-spacing: .08em;
+}
+.pf-group-title:first-child { margin-top: 4px; }
+.pf-mod-card.is-off { opacity: .55; }
+.pf-mod-card.is-off .pf-mod-card-hint { opacity: 1; }

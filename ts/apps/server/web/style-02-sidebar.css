@@ -325,3 +325,30 @@ html[data-sidebar="closed"] .side-rail {
 /* 状态点在行尾；绿色取 --ok（四套主题都是明确绿），本批不改状态来源 */
 .chief-entry .status-dot { margin-left: 2px; }
 
+
+/* ── 侧栏对话按创建者分文件夹（2026-11-15，方案 2026-11-15-侧栏对话按创建者分组）──
+   其他对话 / 总管 / 各执事一组；组头可收起（localStorage 记忆）。
+   几何对齐 .chat 行与 .side-sec-head 的既有语言：13px 组名、细描边不加底色。 */
+.chat-folder { display: flex; flex-direction: column; gap: 2px; }
+
+.chat-folder-head {
+  display: flex; align-items: center; gap: 6px;
+  width: 100%; height: 28px; padding: 0 6px 0 4px;
+  border: 0; border-radius: var(--r-md);
+  background: transparent; color: var(--text-3);
+  font-size: 12.5px; font-weight: 500;
+  cursor: pointer;
+  letter-spacing: .01em;
+}
+.chat-folder-head:hover { background: var(--card); color: var(--text-2); }
+.chat-folder-chevron { width: 13px; height: 13px; flex: none; transition: transform .15s ease; }
+.chat-folder-head[aria-expanded="false"] .chat-folder-chevron { transform: rotate(-90deg); }
+.chat-folder-name {
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  text-align: left;
+}
+.chat-folder-count { flex: none; font-size: 11.5px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+
+.chat-folder-body { display: flex; flex-direction: column; gap: 2px; }
+.chat-folder-body[hidden] { display: none; }

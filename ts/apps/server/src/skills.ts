@@ -28,15 +28,18 @@ import { fileURLToPath } from "node:url";
  */
 
 export interface SkillStore {
-	/** 全部技能名（`skill` 工具的兜底提示用） */
-	names(): string[];
-	/** 完整手册正文；名字不存在返回 undefined */
-	manual(name: string): string | undefined;
 	/**
-	 * 本会话的技能索引。首轮渲染后按会话冻结；
+	 * 全部技能名（`skill` 工具的兜底提示用）。
+	 * partnerId 给了就按该人过滤（全局开 || 该人覆盖开）；不给 = 只看全局。
+	 */
+	names(partnerId?: string | null): string[];
+	/** 完整手册正文；名字不存在 / 对该人不可见返回 undefined */
+	manual(name: string, partnerId?: string | null): string | undefined;
+	/**
+	 * 本会话的技能索引。首轮渲染后按「会话 + 执事」冻结；
 	 * 没有任何技能时返回 undefined（section 整个省略，别渲染一个空标题）。
 	 */
-	indexFor(conversationId: number): string | undefined;
+	indexFor(conversationId: number, partnerId?: string | null): string | undefined;
 }
 
 /**
@@ -347,13 +350,66 @@ export function findSkillInDir(dir: string, name: string): ScannedSkill | null {
  * 每个名字只认第一个出现它的目录，含格式不对的文件也占位，防全局兜底顶掉总管占位。
  * 单目录形态行为与改动前一致。
  */
+/**
+ * 技能索引摘要截断的**总开关**（2026-11-15 上下文预算批，界面「行为开关」页）。
+ *
+ * `SKILLS_INDEX_CLIP`：缺省开；`false` / `0` / `off` = 关（索引显示完整摘要）。
+ * 关掉等于回到 11-15 之前的形态（索引可能上万字）。只影响索引那一行，
+ * `skill(name)` 取的手册仍是完整正文。
+ */
+export function skillsIndexClipEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = (env.SKILLS_INDEX_CLIP ?? "").trim().toLowerCase();
+	if (!raw) return true;
+	return raw !== "false" && raw !== "0" && raw !== "off";
+}
+
+/**
+ * 技能索引摘要的截断字数（2026-11-15 上下文预算批）。
+ *
+ * 实测：开 19 个技能时索引 3889 字，摘要平均 205 字（最长的 1018 字）；
+ * 索引每轮都在 system 段里，比记忆注入（2000 字）还占地方。截到 120 字后约 2200 字。
+ *
+ * 口径：总开关关 → 0（不截断）；否则缺省 120；`SKILLS_INDEX_SUMMARY_CHARS=0` = 不截断
+ * （一行回滚）；非法值回落默认；clamp `0..2000`。
+ * 只影响索引里那一行，`skill(name)` 取的手册仍是完整正文。
+ */
+export function skillsIndexSummaryChars(env: NodeJS.ProcessEnv = process.env): number {
+	if (!skillsIndexClipEnabled(env)) return 0;
+	const raw = (env.SKILLS_INDEX_SUMMARY_CHARS ?? "").trim();
+	if (!raw) return 120;
+	const value = Number(raw);
+	if (!Number.isFinite(value)) return 120;
+	return Math.min(2000, Math.max(0, Math.round(value)));
+}
+
 export function createSkillStore(
 	dirOrDirs: string | string[],
-	options: { visible?: (name: string) => boolean } = {},
+	options: {
+		visible?: (name: string) => boolean;
+		/** 2026-11-15 按人可见：全局开 || 该人覆盖开。不传 = 回落 visible。 */
+		visibleFor?: (partnerId: string, name: string) => boolean;
+		/**
+		 * 索引里每条摘要最多显示多少字（2026-11-15 上下文预算批）。
+		 * 不传 / 0 = 不截断（旧行为）；正文手册（`manual`）永远不受影响。
+		 * 也收函数：界面「行为开关」页改了总开关后，新会话首渲染现读新值（热生效）。
+		 */
+		indexSummaryChars?: number | (() => number);
+	} = {},
 ): SkillStore | null {
 	const dirs = Array.isArray(dirOrDirs) ? dirOrDirs : [dirOrDirs];
+	/** 每次渲染现算：函数形式读的是当前 env（界面开关改完，新会话立即按新值渲染）。 */
+	const summaryCharsOf = (): number => {
+		const raw =
+			typeof options.indexSummaryChars === "function"
+				? options.indexSummaryChars()
+				: options.indexSummaryChars;
+		return Number.isFinite(raw) && (raw ?? 0) > 0 ? Math.floor(raw as number) : 0;
+	};
 	// 启停位（2026-11-09）：visible 不传 = 全部可见（旧行为）；传了则索引 / 名单 / 取手册都按它过滤
 	const visible = options.visible ?? (() => true);
+	const visibleFor = options.visibleFor;
+	const canSee = (name: string, partnerId?: string | null): boolean =>
+		partnerId && visibleFor ? visibleFor(partnerId, name) : visible(name);
 
 	const skills = new Map<string, { summary: string; manual: string }>();
 	const claimed = new Set<string>();
@@ -370,9 +426,21 @@ export function createSkillStore(
 	}
 	if (skills.size === 0) return null;
 
-	const frozen = new Map<number, string | undefined>();
-	const renderIndex = (): string | undefined => {
-		const lines = [...skills.keys()].filter(visible).map((name) => `- ${name}：${skills.get(name)!.summary}`);
+	const frozen = new Map<string, string | undefined>();
+	const frozenKey = (conversationId: number, partnerId?: string | null) =>
+		`${conversationId}|${partnerId ?? ""}`;
+	const renderIndex = (partnerId?: string | null): string | undefined => {
+		// 摘要截断（2026-11-15 上下文预算批）：技能索引每轮都在 system 里，实测开 19 个技能
+		// 就占 3889 字（摘要平均 205 字，有的写成整段说明）。截断只影响索引里那一行；
+		// 模型真要用手册，`skill(name)` 取到的仍是完整正文（L2），所以信息不丢。
+		const limit = summaryCharsOf();
+		const clip = (summary: string): string => {
+			if (limit <= 0 || summary.length <= limit) return summary;
+			return `${summary.slice(0, limit - 1)}…`;
+		};
+		const lines = [...skills.keys()]
+			.filter((name) => canSee(name, partnerId))
+			.map((name) => `- ${name}：${clip(skills.get(name)!.summary)}`);
 		// 一个可见的都没有：整个 section 省略（接口注释的既有口径），别渲染空标题
 		if (!lines.length) return undefined;
 		return (
@@ -386,12 +454,13 @@ export function createSkillStore(
 	const preview = names.slice(0, 40).join("、") + (names.length > 40 ? `、…（共 ${names.length} 条）` : "");
 	console.log(`[skills] 已加载 ${skills.size} 条技能：${preview}`);
 	return {
-		names: () => [...skills.keys()].filter(visible),
-		manual: (name) => (visible(name) ? skills.get(name)?.manual : undefined),
-		indexFor(conversationId) {
+		names: (partnerId) => [...skills.keys()].filter((name) => canSee(name, partnerId)),
+		manual: (name, partnerId) => (canSee(name, partnerId) ? skills.get(name)?.manual : undefined),
+		indexFor(conversationId, partnerId) {
 			// 全关时渲染结果是 undefined：用 has 判冻，别用 get——undefined 也算"已冻结"
-			if (!frozen.has(conversationId)) frozen.set(conversationId, renderIndex());
-			return frozen.get(conversationId);
+			const key = frozenKey(conversationId, partnerId);
+			if (!frozen.has(key)) frozen.set(key, renderIndex(partnerId));
+			return frozen.get(key);
 		},
 	};
 }

@@ -12,15 +12,94 @@ import { attr, esc } from "./markdown.js";
 import { request } from "./net.js";
 import { loadProviders } from "./providers.js";
 import { loadSearchSources } from "./search-sources.js";
+import { mountSegmented, syncSegmented } from "./settings-atoms.js";
 import { renderDefaultModelRow } from "./settings-reminders.js";
 import { state } from "./state.js";
 
 
 /* ── 用量页（2026-11-13 从服务页拆出）────────────────────────────
  * 一张接口、三个视角：累计（总量 + 四项拆解）、按模型（占比条 + 图例）、明细（原始 key 的表）。
- * 口径写脸上：durable 的 pi.usage 按会话相加 —— 删掉会话，那部分用量也会消失；
- * 不折算金额（服务端 cost 固定 0）。按天曲线没画：pi.usage 只有累计，没有逐日流水。 */
+ * 2026-11-15 加区间：近 7 天 / 近 30 天 / 全部。全部走 durable 的 pi.usage 累计；
+ * 两个近程区间由每条回复自带的 timestamp + usage 还原（服务端 usage-range.ts），
+ * 所以"删掉会话，那部分用量也会消失"这条口径对三档都成立。
+ * 不折算金额（服务端 cost 固定 0）；逐日日柱没画（三个数字能答的问题，不必再上一张图）。 */
 const USE_BAR_SLOTS = 4; // 占比条最多画 4 段，剩下的并成「其他」
+
+const USE_RANGE_KEY = "lifediary.usage.range";
+const USE_RANGES = ["7d", "30d", "all"];
+const USE_RANGE_LABEL = { "7d": "近 7 天", "30d": "近 30 天", all: "全部" };
+/** 两档默认最近 7 天：进页面先看"最近花了多少"，要历史总量再点「全部」。 */
+const USE_RANGE_DEFAULT = "7d";
+
+function readUsageRange() {
+  try {
+    const raw = localStorage.getItem(USE_RANGE_KEY);
+    return USE_RANGES.includes(raw) ? raw : USE_RANGE_DEFAULT;
+  } catch {
+    return USE_RANGE_DEFAULT;
+  }
+}
+
+function writeUsageRange(range) {
+  try {
+    localStorage.setItem(USE_RANGE_KEY, range);
+  } catch {
+    // 存不了就只影响下次进页的默认档，不影响当前这次
+  }
+}
+
+/** 把 aria-checked 与滑行胶囊同步到指定档（DOM 重建后也要能一次对上） */
+function syncUsageRange(root, range) {
+  if (!root) return;
+  for (const button of root.querySelectorAll("button[data-range]")) {
+    button.setAttribute("aria-checked", String(button.dataset.range === range));
+  }
+  syncSegmented(root);
+}
+
+/** 区间控件只在第一次挂监听；页面每次重建 DOM 都会得到一份新的 #use-range */
+function bindUsageRange() {
+  const root = document.getElementById("use-range");
+  if (!root) return;
+  const range = readUsageRange();
+  syncUsageRange(root, range);
+  if (root.dataset.rangeBound === "1") return;
+  root.dataset.rangeBound = "1";
+  mountSegmented(root);
+  document.getElementById("use-refresh")?.addEventListener("click", () => void loadUsagePage());
+  root.addEventListener("click", (event) => {
+    const button = event.target instanceof Element ? event.target.closest("button[data-range]") : null;
+    if (!button || !root.contains(button)) return;
+    const next = button.dataset.range;
+    if (!USE_RANGES.includes(next) || next === readUsageRange()) return;
+    writeUsageRange(next);
+    syncUsageRange(root, next);
+    void loadUsagePage();
+  });
+}
+
+/** 区间起点/终点文案：MM-DD（本地）；终点 = 起点 + days - 1 个自然日 */
+function fmtUsageDay(at) {
+  const date = new Date(at);
+  return `${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function fmtUsageWindowEnd(since, days) {
+  const date = new Date(since);
+  date.setDate(date.getDate() + Math.max(0, days - 1));
+  return fmtUsageDay(date.getTime());
+}
+
+function usageRangeFoot(range, data) {
+  if (range === "all") {
+    return "来源：本机用量账本（pi.usage），按模型累计，不折算金额。";
+  }
+  const days = range === "7d" ? 7 : 30;
+  const span = data.since
+    ? `${fmtUsageDay(data.since)} 至 ${fmtUsageWindowEnd(data.since, days)}`
+    : `近 ${days} 天`;
+  return `${USE_RANGE_LABEL[range]} · ${span} · ${data.activeDays ?? 0} 天有用量。来源：每条回复自带的用量记录，按完成时间归日；删掉会话，那部分用量也会跟着消失。`;
+}
 
 function fmtTokens(value) {
   return Number(value || 0).toLocaleString("zh-CN");
@@ -100,12 +179,16 @@ function usageEmptyMarkup(title, hint) {
   return `<div class="use-empty"><div class="use-empty-title">${title}</div><div class="use-empty-hint">${hint}</div></div>`;
 }
 
-/** 一份 models[] → 三张卡。都写进现成的 id 容器，刷新只重画内容、不重排页面。 */
-function renderUsagePage(models) {
+/** 一份 `{models, range, since, activeDays}` → 三张卡。都写进现成的 id 容器，刷新只重画内容、不重排页面。 */
+function renderUsagePage(data) {
   const hero = document.getElementById("use-hero");
   const modelsHost = document.getElementById("use-models");
   const detail = document.getElementById("use-detail");
   if (!hero || !modelsHost || !detail) return;
+
+  // 兼容旧形态：早期调用只传 models[]；区间信息缺失时按「全部」
+  const models = Array.isArray(data) ? data : data?.models || [];
+  const range = !Array.isArray(data) && USE_RANGES.includes(data?.range) ? data.range : "all";
 
   const sum = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
   for (const item of models) {
@@ -116,7 +199,13 @@ function renderUsagePage(models) {
     sum.total += item.totalTokens || 0;
   }
   if (!sum.total) {
-    const empty = usageEmptyMarkup("还没有用量", "跑一次对话，这里就会出现累计和按模型的数字。");
+    const empty =
+      range === "all"
+        ? usageEmptyMarkup("还没有用量", "跑一次对话，这里就会出现累计和按模型的数字。")
+        : usageEmptyMarkup(
+            "这段时间没有用量",
+            `${USE_RANGE_LABEL[range]}没有记录；切到「全部」可以看到历史累计。`,
+          );
     hero.innerHTML = empty;
     modelsHost.innerHTML = empty;
     detail.innerHTML = empty;
@@ -127,13 +216,18 @@ function renderUsagePage(models) {
   const familyIndex = new Map(families.map((family, index) => [family.base, index]));
   const rate = cacheHitRate(sum.input, sum.cacheRead, sum.cacheWrite);
   const hasMock = families.some((family) => family.mock);
+  const days = range === "7d" ? 7 : range === "30d" ? 30 : 0;
+  const totalTip =
+    range === "all"
+      ? "账记在会话上：删掉一个会话，它的用量也会从累计里消失。"
+      : `只算近 ${days} 个自然日（含今天）内完成的回复；删掉会话，那部分用量也会跟着消失。`;
 
   const cell = (label, value, tip) => `<div class="use-cell"${tip ? ` data-tip="${attr(tip)}"` : ""}>
       <div class="use-cell-v">${value}</div>
       <div class="use-cell-k">${label}</div>
     </div>`;
   hero.innerHTML = `
-    <div class="use-total" data-tip="账记在会话上：删掉一个会话，它的用量也会从累计里消失。"><span class="use-total-v">${fmtTokens(sum.total)}</span><span class="use-total-unit">tokens</span><span class="use-count">${families.length} 个模型 · ${models.length} 个档位</span></div>
+    <div class="use-total" data-tip="${attr(totalTip)}"><span class="use-total-v">${fmtTokens(sum.total)}</span><span class="use-total-unit">tokens</span><span class="use-count">${families.length} 个模型 · ${models.length} 个档位</span></div>
     <div class="use-cells">
       ${cell("输入", fmtTokens(sum.input))}
       ${cell("输出", fmtTokens(sum.output))}
@@ -141,7 +235,7 @@ function renderUsagePage(models) {
       ${cell("缓存写", fmtTokens(sum.cacheWrite))}
       ${cell("缓存命中", rate === null ? "—" : `${(rate * 100).toFixed(1)}%`, "缓存读 ÷（输入 + 缓存读 + 缓存写）")}
     </div>
-    <div class="use-foot">来源：本机用量账本（pi.usage），按模型累计，不折算金额。${
+    <div class="use-foot">${usageRangeFoot(range, Array.isArray(data) ? {} : data || {})}${
       hasMock ? " faux 是模拟模型（没配真上游时的假回答），那部分不是真实消耗。" : ""
     }</div>`;
 
@@ -189,7 +283,9 @@ function renderUsagePage(models) {
   modelsHost.innerHTML = `
     <div class="use-bar" role="img" aria-label="按模型占比">${barSegments}</div>
     <div class="use-legend">${legendRows}</div>
-    <div class="use-foot">同一模型的 think 档位并成一行；分档看下面的明细。</div>`;
+    <div class="use-foot">${
+      range === "all" ? "" : `${USE_RANGE_LABEL[range]} · `
+    }同一模型的 think 档位并成一行；分档看下面的明细。</div>`;
   // 悬停图例行 → 压暗其它段，看清这一行在条上占多宽（指针离开就恢复）
   const bar = modelsHost.querySelector(".use-bar");
   modelsHost.querySelectorAll(".use-row").forEach((row) => {
@@ -241,29 +337,42 @@ function renderUsagePage(models) {
         <tbody>${tableRows}</tbody>
       </table>
     </div>
-    <div class="use-foot">共 ${sorted.length} 个模型档位；缓存命中率按每一档单独算，不是整表平均。</div>`;
+    <div class="use-foot">${
+      range === "all" ? "" : `${USE_RANGE_LABEL[range]} · `
+    }共 ${sorted.length} 个模型档位；缓存命中率按每一档单独算，不是整表平均。</div>`;
 }
+
+/** 连点区间时只让最后一次响应落地（后发的请求可能先回来） */
+let usageLoadSeq = 0;
 
 async function loadUsagePage() {
   const hero = document.getElementById("use-hero");
   const modelsHost = document.getElementById("use-models");
   const detail = document.getElementById("use-detail");
   if (!hero || !modelsHost || !detail) return;
+  bindUsageRange();
+  const range = readUsageRange();
+  const seq = ++usageLoadSeq;
   const loading = `<div class="use-loading">读取中…</div>`;
   hero.innerHTML = loading;
   modelsHost.innerHTML = loading;
   detail.innerHTML = loading;
   let data;
   try {
-    const response = await request("/api/v1/agent/usage", { cache: "no-store" });
+    const response = await request(
+      `/api/v1/agent/usage${range === "all" ? "" : `?range=${range}`}`,
+      { cache: "no-store" },
+    );
     data = await response.json();
   } catch {
+    if (seq !== usageLoadSeq) return;
     hero.innerHTML = usageEmptyMarkup("读取失败", "服务端没回用量；稍后再点右上角「刷新」。");
     modelsHost.innerHTML = `<div class="use-loading">—</div>`;
     detail.innerHTML = `<div class="use-loading">—</div>`;
     return;
   }
-  renderUsagePage(data.models || []);
+  if (seq !== usageLoadSeq) return;
+  renderUsagePage(data);
 }
 
 /** 模型页读数（2026-11-09 从服务页拆出）：默认模型行 + 供应商双栏。 */

@@ -9,6 +9,7 @@ import type { ResolvedChat } from "./agent.ts";
 import { chatStream, configureTaskChat, openOrCreateChat } from "./agent.ts";
 import type { PartnerRow } from "./partners.ts";
 import { CHIEF_PARTNER_ID, COMPANIONS_ENABLED, partnersStore } from "./partners.ts";
+import { isRelayEntryKind } from "./partner-relay.ts";
 import type { ConversationId, Cursor, EntryDraft, JsonObject, Tx } from "@earendil-works/pi-durable";
 import { InboxDoc, SettledSubmissionRecord, defineDoc } from "@earendil-works/pi-durable";
 import { randomUUID } from "node:crypto";
@@ -135,7 +136,15 @@ async function hasDialogueInTx(tx: Tx, conversationId: ConversationId): Promise<
 			200,
 			cursor,
 		);
-		if (page.items.some((entry) => entry.kind === "pi.user" || entry.kind === "pi.assistant")) {
+		if (
+			page.items.some(
+				(entry) =>
+					entry.kind === "pi.user" ||
+					entry.kind === "pi.assistant" ||
+					// 2026-11-15：同事递来的话也算"有过往来"，不然只有来信的会话会被再插一条问候
+					isRelayEntryKind(entry.kind),
+			)
+		) {
 			return true;
 		}
 		cursor = page.next;
@@ -214,7 +223,6 @@ async function generateGreeting(
 	}
 
 	const soul =
-		partnersStore().currentVersion(partnerId)?.soulSource.trim() ||
 		partnersStore().readSoulFromHome(partnerId)?.trim() ||
 		partner.name;
 	try {

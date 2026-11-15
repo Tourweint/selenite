@@ -34,6 +34,14 @@ test("loadFlagOverrides：文件里的合法值覆盖 env，非法键跳过", ()
 	cleanupEnv(["AUTONOMY_ENABLED"]);
 });
 
+test("记忆召回总闸：注册为可热改的行为开关，默认开（父子关系的父）", () => {
+	const def = FLAG_DEFS.find((item) => item.key === "PARTNER_MEMORY_RECALL");
+	assert.ok(def, "总闸必须在行为开关表里");
+	assert.equal(def.defaultValue, "true", "默认开：不带记忆是例外，不是缺省");
+	assert.equal(def.hot, true, "消费处每次请求懒读 env，改完立刻生效");
+	assert.deepEqual(def.values, ["true", "false"]);
+});
+
 test("setFlag：落盘 + 同步写 env（懒读的消费代码当场生效）+ 非法值 400", () => {
 	cleanupEnv(["AGENT_ATTACHMENTS"]);
 	const ok = setFlag("AGENT_ATTACHMENTS", "false");
@@ -106,7 +114,7 @@ test("归档管理三键（2026-11-13 批A）：默认值 / hot 标记 / onChang
 	assert.equal(hardDelete?.defaultValue, "true", "永久删除默认开（回滚开关）");
 	assert.equal(hardDelete?.hot, true, "端点每次请求懒读 env，改完即生效");
 	const autoEnabled = byKey.get("ARCHIVE_AUTO_ENABLED");
-	assert.equal(autoEnabled?.defaultValue, "false", "自动归档默认关");
+	assert.equal(autoEnabled?.defaultValue, "true", "自动归档默认开（2026-11-15 用户口径）");
 	assert.equal(autoEnabled?.hot, true);
 	const autoDays = byKey.get("ARCHIVE_AUTO_DAYS");
 	assert.equal(autoDays?.defaultValue, "30");

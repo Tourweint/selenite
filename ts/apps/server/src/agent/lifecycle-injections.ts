@@ -12,10 +12,16 @@
  * 各段开关、身份分流、冻结 / 现渲染语义一律照搬改造前实现，逐字节不变。
  */
 
-import { INJECTION_ORDER, type InjectionEntry, type InjectionProvider } from "./injection.ts";
+import {
+	INJECTION_ORDER,
+	type InjectionContext,
+	type InjectionEntry,
+	type InjectionProvider,
+} from "./injection.ts";
 import {
 	CHIEF_PARTNER_ID,
 	COMPANIONS_ENABLED,
+	effectivePartnerIdOfSession,
 	partnersStore,
 	resolvePersona,
 } from "../partners.ts";
@@ -32,7 +38,7 @@ import {
 import { currentProject, sessionBoundCwd } from "./shared.ts";
 import { currentProjectEnabled } from "../projects.ts";
 import { wrapUntrustedObjective } from "./injection-guard.ts";
-import { PERSONA, WORKER_PERSONA, memoryRecallProvider, skillStore } from "./assist.ts";
+import { PERSONA, WORKER_PERSONA, memoryRecallProvider, projectIndexProvider, skillStore } from "./assist.ts";
 import { skillSlashOf } from "../skills.ts";
 import { buildPartnerTurnContext } from "./partner-context.ts";
 import { workSummaryFor } from "../work-record.ts";
@@ -51,6 +57,21 @@ function entry(
 /** 非 chief 的执事会话：persona / 验证铁律 / 课题都不由 lifecycle 注（他们走 partner-context）。 */
 function isNonChiefPartner(partnerId: string | null | undefined): boolean {
 	return Boolean(partnerId && partnerId !== CHIEF_PARTNER_ID);
+}
+
+/**
+ * 技能按人可见用的 partnerId（2026-11-15）。
+ * 执事会话直接用 ctx.partnerId；主对话没有链接记录，回落 effectivePartnerIdOfSession（= chief）。
+ * 读不到就按无 partner 处理（只走全局启停位）。
+ */
+function skillPartnerOf(ctx: InjectionContext): string | null {
+	if (ctx.partnerId) return ctx.partnerId;
+	if (!COMPANIONS_ENABLED) return null;
+	try {
+		return effectivePartnerIdOfSession(partnersStore(), Number(ctx.conversationId));
+	} catch {
+		return null;
+	}
 }
 
 // ── B 期：6 个 section ───────────────────────────────────────
@@ -129,7 +150,7 @@ export const currentProjectProvider: InjectionProvider = (ctx) => {
  */
 export const skillsProvider: InjectionProvider = (ctx) => {
 	if (ctx.dryRun) return undefined;
-	const text = skillStore?.indexFor(Number(ctx.conversationId));
+	const text = skillStore?.indexFor(Number(ctx.conversationId), skillPartnerOf(ctx));
 	if (!text) return undefined;
 	return entry("skills", text, INJECTION_ORDER.skills, "system");
 };
@@ -189,7 +210,7 @@ export const LIFECYCLE_SECTION_PROVIDERS: readonly InjectionProvider[] = [
 /** 技能斜杠调用：用户消息以 /技能名 开头 → 手册整份注入本轮。 */
 export const skillSlashProvider: InjectionProvider = (ctx) => {
 	const name = skillSlashOf(ctx.userText ?? "");
-	const manual = name ? skillStore?.manual(name) : undefined;
+	const manual = name ? skillStore?.manual(name, skillPartnerOf(ctx)) : undefined;
 	if (!name || !manual) return undefined;
 	return entry(
 		"skill_slash",
@@ -267,6 +288,7 @@ export const partnerContextProvider: InjectionProvider = (ctx) => {
 
 /** D 期登记表（顺序 = 改造前 extra.push 的先后顺序）。 */
 export const LIFECYCLE_MESSAGE_PROVIDERS: readonly InjectionProvider[] = [
+	projectIndexProvider,
 	memoryRecallProvider,
 	skillSlashProvider,
 	recoverNoteProvider,

@@ -69,6 +69,18 @@
 .ghost:hover { background: var(--card); color: var(--text); }
 .ghost:disabled { color: var(--text-3); cursor: default; }
 
+/* 提示行内的小按钮（2026-11-15 人设停存版本快照：保存后「回到上一版」）。
+ * 与 .ghost 同款观感但压成行内尺寸，跟在提示文字后面。 */
+.hint-rollback {
+  height: 20px; padding: 0 8px;
+  border: 1px solid var(--outline); border-radius: calc(var(--r-md) * 0.8);
+  background: transparent; color: var(--text-2); font-size: 11px;
+  cursor: pointer;
+  transition: background .15s ease, color .15s ease;
+}
+.hint-rollback:hover { background: var(--card); color: var(--text); }
+.hint-rollback:disabled { color: var(--text-3); cursor: default; }
+
 .scroll { overflow-y: auto; min-height: 0; }
 
 .thread {

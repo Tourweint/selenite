@@ -30,6 +30,8 @@ const SKILL_SUMMARY = "探针技能摘要";
 const SKILL_MANUAL = "第一行步骤\n第二行步骤";
 mkdirSync(join(root, "skills"), { recursive: true });
 writeFileSync(join(root, "skills", `${SKILL_NAME}.md`), `${SKILL_SUMMARY}\n${SKILL_MANUAL}\n`, "utf8");
+// 逃生门测试用：默认关着的技能，SKILL_STATE=false 时应重新进索引
+writeFileSync(join(root, "skills", "hidden-skill.md"), "隐藏技能摘要\n隐藏技能正文\n", "utf8");
 writeFileSync(
 	join(root, "skills-state.json"),
 	`${JSON.stringify({ enabled: { [SKILL_NAME]: true } })}\n`,
@@ -186,6 +188,18 @@ test("B: skills —— live 走 indexFor（按会话冻结的同一份），dryR
 	assert.equal(skillsProvider({ ...BASE, conversationId: 99, dryRun: true }), undefined);
 });
 
+test("B: SKILL_STATE=false 逃生门 —— 默认关着的技能也全进索引", () => {
+	const old = process.env.SKILL_STATE;
+	process.env.SKILL_STATE = "false";
+	try {
+		const text = sysText(skillsProvider, { conversationId: 123 });
+		assert.match(text ?? "", /hidden-skill/, "逃生门打开后不再按启停位过滤");
+	} finally {
+		if (old === undefined) delete process.env.SKILL_STATE;
+		else process.env.SKILL_STATE = old;
+	}
+});
+
 test("B: topics —— 无课题时为固定两段（清单 + 嗅探判据）", () => {
 	const text = sysText(topicsProvider, { chatKind: "chief", partnerId: null });
 	assert.match(text ?? "", /^在跟的课题：（暂无）$/m);
@@ -293,6 +307,9 @@ test("顺序快照：INJECTION_ORDER 是缓存前缀资产（改它 = 有意的�
 		"current_project",
 		"skills",
 		"topics",
+		// 2026-11-15 项目记忆多挂载：负责项目索引排在记忆召回之前
+		// （先知道"负责哪几摊"，后面那批记忆行才有归属可对）
+		"project_index",
 		"memory_recall",
 		"skill_slash",
 		"recover_note",

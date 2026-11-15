@@ -50,6 +50,16 @@ export function projectsStore(): ProjectsStore {
 	return store;
 }
 
+/** 测试专用：关掉并清掉单例，下一次 projectsStore() 按当时的 env 重开库（进程内单测换临时库用）。 */
+export function resetProjectsStoreForTest(): void {
+	try {
+		store?.close();
+	} catch {
+		// 库已被关过（前一条测试收尾关了同一个单例）：忽略，只清指针
+	}
+	store = null;
+}
+
 export function defaultWorkspaceRoot(): string | null {
 	const flag = process.env.LIFEDIARY_DEFAULT_WORKSPACE?.trim();
 	if (flag && ["off", "0", "false"].includes(flag.toLowerCase())) return null;
@@ -396,8 +406,13 @@ export function mountProjects(app: Hono): void {
 					400,
 				);
 			}
+			// 连带解除执事挂载（2026-11-15 界面恢复删除入口）：先解除、后删登记，
+			// 顺序反了登记删掉就没人负责清这些悬空引用了。数量带回给界面提示；
+			// 删除失败时挂载已清，但那只是把"指着存活项目的挂载"提前摘掉，重试即成。
+			const { partnersStore } = await import("./partners.ts");
+			const detachedPartners = partnersStore().detachProject(id);
 			projectsStore().deleteProject(id);
-			return c.json({ ok: true, id });
+			return c.json({ ok: true, id, detachedPartners });
 		} catch (error) {
 			return projectError(c, error);
 		}

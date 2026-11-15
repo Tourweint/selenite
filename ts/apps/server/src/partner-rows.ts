@@ -34,8 +34,8 @@ export function ensureChiefPartner(seedSoul: string): void {
 
 export function chiefSoul(store: PartnersStore): string | null {
 	if (!store.get(CHIEF_PARTNER_ID)) return null;
-	const snapshot = store.currentVersion(CHIEF_PARTNER_ID)?.soulSource;
-	const soul = snapshot?.trim() ? snapshot : store.readSoulFromHome(CHIEF_PARTNER_ID);
+	// 2026-11-15 快照退役：磁盘当前值是唯一事实源（原来版本行快照优先、磁盘兜底）。
+	const soul = store.readSoulFromHome(CHIEF_PARTNER_ID);
 	return soul?.trim() ? soul : null;
 }
 
@@ -89,6 +89,7 @@ function toPartner(row: Record<string, unknown>): PartnerRow {
 		tagline:
 			row.tagline === null || row.tagline === undefined ? null : String(row.tagline),
 		diary: Number(row.diary ?? 0) !== 0,
+		projectIds: toProjectIds(row.project_ids),
 		personaPreset: toPersonaPreset(row.persona_preset),
 		personaModules: toPersonaModules(row.persona_modules),
 		personaSwitches: toPersonaSwitches(row.persona_switches),
@@ -103,6 +104,21 @@ function toPartner(row: Record<string, unknown>): PartnerRow {
 
 function nullableText(raw: unknown): string | null {
 	return raw === null || raw === undefined || String(raw) === "" ? null : String(raw);
+}
+
+/**
+ * 项目挂载列（2026-11-15 多挂载方案）：JSON 数组、只留非空字符串；坏 JSON / 脏值
+ * 当"没挂"。store 的 detachProject 也用它读列（同一套解析口径，别处别再抄一份）。
+ */
+function toProjectIds(raw: unknown): string[] {
+	if (raw === null || raw === undefined || String(raw).trim() === "") return [];
+	try {
+		const parsed: unknown = JSON.parse(String(raw));
+		if (!Array.isArray(parsed)) return [];
+		return parsed.filter((item): item is string => typeof item === "string" && item.length > 0);
+	} catch {
+		return [];
+	}
 }
 
 /** 温度：只认五档；老库 / 脏值一律回初始档 `生疏`。 */
@@ -138,13 +154,20 @@ function toPersonaSwitches(raw: unknown): PartnerPersonaSwitches {
 	const out: PartnerPersonaSwitches = {};
 	if (typeof source.moodAffectTone === "boolean") out.moodAffectTone = source.moodAffectTone;
 	if (typeof source.nudgeEnabled === "boolean") out.nudgeEnabled = source.nudgeEnabled;
+	// 记忆召回（2026-11-15 人设页打磨二轮）：只在显式写过时出现；未出现 = 开。
+	if (typeof source.memoryRecallEnabled === "boolean") out.memoryRecallEnabled = source.memoryRecallEnabled;
 	return out;
 }
 
-/** 人格预设：只认三个枚举值，老库 / 脏值一律回默认 `work`。 */
+/**
+ * 人格预设：白名单 = shared 的 `PartnerPersonaPresetSchema`（2026-11-15 人设页打磨
+ * 加全才 / 学徒）；老库 / 脏值一律回默认 `work`。加预设必须同步这里——护栏会吃掉不认的值。
+ */
 function toPersonaPreset(raw: unknown): PartnerPersonaPreset {
 	const value = raw === null || raw === undefined ? "" : String(raw);
-	return value === "companion" || value === "custom" ? value : "work";
+	return value === "companion" || value === "allrounder" || value === "apprentice" || value === "custom"
+		? value
+		: "work";
 }
 
 /** 人格开关列：只留 14 个 id 且值为布尔的键；坏 JSON / 脏值当"没显式改过"。 */
@@ -260,4 +283,4 @@ function defaultSoul(name: string): string {
 	].join("\n");
 }
 
-export { defaultSoul, store, toGroup, toGroupMessage, toLink, toPartner, toRoutine };
+export { defaultSoul, store, toGroup, toGroupMessage, toLink, toPartner, toProjectIds, toRoutine };

@@ -68,9 +68,14 @@ function partnerSkillsIndex(partnerId: string): string | undefined {
 		const summary = raw.split("\n", 1)[0]?.trim() || file.replace(/\.md$/, "");
 		return `- ${file.replace(/\.md$/, "")}：${summary.slice(0, 72)}`;
 	});
-	return ["# 技能索引（完整手册用 partner 技能名取，直接读 skills/<名>.md）", ...lines].join(
-		"\n",
-	);
+	// 2026-11-15 修正：执事会话的 cwd 是当前项目 / 工作区，不是他的家目录，
+	// 原来写「直接读 skills/<名>.md」会让模型在工作区里找错地方（同名还会读到内置手册）。
+	// 索引里给家目录的绝对路径；read 不设路径边界，能直接取。
+	const base = dir.replace(/\\/g, "/").replace(/\/$/, "");
+	return [
+		`# 技能索引（你自带的技能手册。完整正文直接读这个目录下的文件：${base}/<名>.md）`,
+		...lines,
+	].join("\n");
 }
 
 const sessionOpenings = new Map<string, Promise<ResolvedChat | null>>();
@@ -102,21 +107,22 @@ async function openPartnerSession(partnerId: string): Promise<ResolvedChat | nul
 		});
 	}
 
-	// 身份对齐：appliedVersion ≠ currentVersion 才 configure（改 SOUL 下一轮生效的记账位）。
+	// 身份对齐：applied 计数 ≠ 当前计数才 configure（改 SOUL 下一轮生效的记账位）。
 	// 2026-11-14 批1：人格模块不版本化，另用内容签名判断——改了口吻 / 里子 / 处境（或开关）
 	// 也要在下一轮重配 instructions，否则新填的内容要等下一次 SOUL / 契约变更才生效。
-	const current = store.currentVersion(partnerId);
+	// 2026-11-15 快照退役：计数只是记账位，SOUL 正文一律读磁盘当前值。
+	const epoch = partner.currentVersion;
 	const applied = store.appliedVersionOf(partnerId, chat.internalId);
 	const personaChanged = personaRefreshNeeded(
 		chat.internalId,
 		personaSignature(store, partner),
 	);
-	if (current && (current.version !== applied || personaChanged)) {
+	if (epoch != null && (epoch !== applied || personaChanged)) {
 		await chat.conversation.configure(
-			{ instructions: renderPartnerIdentity(partner, current.soulSource) },
+			{ instructions: renderPartnerIdentity(partner, store.readSoulFromHome(partnerId) ?? "") },
 			CTX,
 		);
-		store.setAppliedVersion(partnerId, chat.internalId, current.version);
+		store.setAppliedVersion(partnerId, chat.internalId, epoch);
 	}
 	return chat;
 }
@@ -326,10 +332,11 @@ async function ensureFreshPartnerSession(partnerId: string): Promise<ResolvedCha
 		routeKey: `routine:fresh:${externalId}`,
 		sessionId: chat.internalId,
 	});
-	const current = store.currentVersion(partnerId);
-	if (current) {
+	// 2026-11-15 快照退役：SOUL 读磁盘当前值（计数存在才配，与老口径一致）。
+	const epoch = partner.currentVersion;
+	if (epoch != null) {
 		await chat.conversation.configure(
-			{ instructions: renderPartnerIdentity(partner, current.soulSource) },
+			{ instructions: renderPartnerIdentity(partner, store.readSoulFromHome(partnerId) ?? "") },
 			CTX,
 		);
 	}

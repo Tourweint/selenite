@@ -157,3 +157,89 @@ export function collectDeadLetters(
 
 	return recorded;
 }
+
+// ── 待送达汇报的启动补送（2026-11-15 回信送达兜底，方案 §A.4）──────────
+//
+// 结算链路把 in 留言以 delivered=0 落库、写回会话成功才销账（delegation-messages.ts）。
+// 终态落盘到写回会话之间进程崩溃的话，这行就是补送依据——恢复扫描（inflight 口径）
+// 看不到它们，因为 chancellor 落终态的瞬间就删了 inflight。
+//
+// 口径：补送正文 = 留言表 in 行原文 + 「（重启补送）」前缀；宿主解析失败 warn 后留 0
+// （与 A3b "没有回执 warn 一次"同口径），会话已不存在销 2（补送也不会成功），
+// 写回异常留 0 下次启动再试。开关 DELEGATION_REPORT_REDELIVERY（默认开）。
+
+/** 待送达行（delegation-messages.listUndelivered 的投影，收窄方便注入测试）。 */
+export interface UndeliveredReportRow {
+	id: number;
+	ticketId: string;
+	body: string;
+	createdAt: string;
+}
+
+export interface ReportRedeliveryDeps {
+	undelivered: () => UndeliveredReportRow[];
+	/** 单号 → 宿主会话内部 id；解析不了返回 null。 */
+	hostConversationId: (ticketId: string) => number | null;
+	/**
+	 * 宿主会话还在吗（票目录里的 ticket.json）？false = 票已被清掉，行销 2 不再扫
+	 * （探针残留 / 老单清理后的孤儿行，warn 到天荒地老没有意义）。缺省当存在。
+	 */
+	ticketExists?: (ticketId: string) => boolean;
+	/**
+	 * 往宿主会话写一句话。返回 false = 会话已不存在（sayInConversation 的口径）→
+	 * 行销 2；抛异常 = 写回失败 → 行留 0 下次启动再试。
+	 */
+	say: (conversationId: number, text: string) => boolean | Promise<boolean>;
+	/** 销账：1 = 已送达，2 = 跳过（会话已不存在 / 票已被清掉）。 */
+	settle: (id: number, state: 1 | 2) => void;
+	/** 补送成功后的唤醒（装配层传 wakeOnDelegationReport 的包装）；缺省不唤醒。 */
+	wake?: (conversationId: number, ticketId: string, text: string, phase: string) => void;
+	/** 单号 → 汇报阶段（唤醒提示词用）；解析不了返回 null，缺省无唤醒阶段就不唤醒。 */
+	phaseOf?: (ticketId: string) => string | null;
+	log?: (line: string) => void;
+}
+
+/** 回滚开关：只有明确写 false 才关；不配 = 开。每次调用都读 env，单测可在同进程里切。 */
+export function reportRedeliveryEnabled(): boolean {
+	return (process.env.DELEGATION_REPORT_REDELIVERY?.trim() || "true").toLowerCase() !== "false";
+}
+
+export async function redeliverUndeliveredReports(deps: ReportRedeliveryDeps): Promise<number> {
+	if (!reportRedeliveryEnabled()) return 0;
+	const log = deps.log ?? (() => {});
+	let sent = 0;
+
+	for (const row of deps.undelivered()) {
+		if (!row.ticketId || !row.body) {
+			deps.settle(row.id, 2);
+			continue;
+		}
+		// 票已被清掉的行是孤儿（探针残留 / 老单清理）：销 2 静默，不再每轮 warn
+		if (deps.ticketExists && !deps.ticketExists(row.ticketId)) {
+			deps.settle(row.id, 2);
+			continue;
+		}
+		const conversationId = deps.hostConversationId(row.ticketId);
+		if (conversationId === null) {
+			log(`[补送] 单 ${row.ticketId} 解析不到宿主会话，留待下次启动`);
+			continue;
+		}
+		try {
+			const delivered = await deps.say(conversationId, `（重启补送）${row.body}`);
+			if (delivered === false) {
+				// 会话已不存在：补送永远不会再成功，销 2（与 reportDelegationResult 的 missing 同口径）
+				deps.settle(row.id, 2);
+				continue;
+			}
+			deps.settle(row.id, 1);
+			sent += 1;
+			const phase = deps.phaseOf?.(row.ticketId) ?? null;
+			if (deps.wake && phase) deps.wake(conversationId, row.ticketId, row.body, phase);
+		} catch (error) {
+			const detail = error instanceof Error ? error.message : String(error);
+			log(`[补送] 单 ${row.ticketId} 写回会话失败，留待下次启动: ${detail}`);
+		}
+	}
+
+	return sent;
+}

@@ -50,7 +50,7 @@ function pageLabel(hash) {
   if (hash === "#/groups") return "群组";
   if (hash.startsWith("#/group/")) return "群聊";
   // 人设二级页也算「设置」那一支，但它单独有名，别让人以为返回会掉回哪个分区
-  if (/^#\/settings\/partners\/[A-Za-z0-9-]+/.test(hash)) return "人设页";
+  if (/^#\/settings\/partners\/[A-Za-z0-9-]+/.test(hash)) return "编辑这个人";
   if (hash.startsWith("#/settings")) return "设置";
   return "上一页";
 }

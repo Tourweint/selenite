@@ -12,21 +12,24 @@ import {
 	PARTNER_PERSONA_LIMITS,
 	PartnerPersonaPatchSchema,
 	type PartnerPersonaModule,
-	type PartnerPersonaPreset,
 	type PartnerPersonaView,
 } from "@lifediary/shared";
 import {
 	COMPANIONS_ENABLED,
 	PARTNER_SLOT_LIMIT,
 	partnerContractEnabled,
+	partnerProjectMemoryEnabled,
 	partnersStore,
 	type PartnerRow,
 	type PartnerStatus,
 	type RoutineTrigger,
 } from "./partners.ts";
+// 项目记忆归属（2026-11-15 跟人走方案）：PATCH 校验 uuid 要命中已登记的项目。
+import { projectsStore } from "./project-api.ts";
 // 人格模块（2026-11-14 批1）：开关算法 / 静态内容读写都在这一层，端点只做形状映射。
 import {
 	defaultPersonaModules,
+	derivePresetFromModules,
 	effectivePersonaModules,
 	personaModulesEnabled,
 	readPersonaContents,
@@ -40,6 +43,11 @@ import { proactivityView } from "./partner-proactive.ts";
 import { applyProfile, profilesView, removeProfile, saveProfile } from "./partner-profiles.ts";
 // 建/停执事的唯一核心实现（批次D D3）：端点与 partner_manage 工具共用，端点只做形状映射。
 import { createMinisterPartner, stopMinisterPartner } from "./partner-manage.ts";
+// 注入预览（2026-11-15 人设页打磨）：与真实轮次同一装配函数，不另抄拼装逻辑。
+import { buildPartnerDisciplineSection, buildPartnerStatusSection } from "./agent/partner-context.ts";
+import { workSummaryFor } from "./work-record.ts";
+import { findSkillInDir, resolveSkillsDir } from "./skills.ts";
+import { getSkillState, skillStateEnabled } from "./skill-state.ts";
 import { runPartnerTurn, openPartnerConversation } from "./partner-runtime.ts";
 import { routineEngine } from "./routines.ts";
 // triggers 校验上移到 routine-manage.ts：HTTP 端点与 routine_manage 工具共用一份。
@@ -87,6 +95,9 @@ function parseTagline(
 	return { ok: true, value: trimmed || null };
 }
 
+/** 技能名白名单（与 skills-api.ts / partner_skill_write 同一条正则）。 */
+const PARTNER_SKILL_NAME = /^[a-z0-9][a-z0-9-_]{0,63}$/;
+
 export function mountCompanions(app: Hono): void {
 	if (!COMPANIONS_ENABLED) return;
 	const store = () => partnersStore();
@@ -129,7 +140,7 @@ export function mountCompanions(app: Hono): void {
 			return c.json({ error: "bad_request", message: result.error }, 400);
 		}
 		let partner: PartnerRow = result.value;
-		// 带 soul 时落一次 v2 自定义版本（把 E1 前端「建完补 PATCH」的两段式收敛成一段）。
+		// 带 soul 时直接覆盖播种正文（把 E1 前端「建完补 PATCH」的两段式收敛成一段）；
 		// bumpSoul 自带同一份上限校验，这里再兜住其它写盘错误，400 口径与 PATCH 一致。
 		if (soul.trim()) {
 			try {
@@ -186,6 +197,51 @@ export function mountCompanions(app: Hono): void {
 	});
 
 	/**
+	 * 个人技能可见性（2026-11-15）：全局没开的技能，可以只给某个执事开/关。
+	 * - 全局开 → 409 锁死（所有人都有，个人页不能关）；
+	 * - 只写 `.data/skills-state.json` 的 partners 覆盖层，不改技能文件；
+	 * - 技能不存在 → 404，防止状态里堆无效名字。
+	 * 放在 `/:id` 之前注册：更具体的路径先命中。
+	 */
+	app.put("/api/v1/partners/:id/skills/:name/enabled", async (c) => {
+		const id = c.req.param("id");
+		if (!store().get(id)) return c.json({ ok: false, error: "not_found" }, 404);
+		const name = c.req.param("name");
+		if (!PARTNER_SKILL_NAME.test(name)) {
+			return c.json({ ok: false, error: "bad_request", message: "技能名不合法" }, 400);
+		}
+		const body = (await c.req.json().catch(() => null)) as { enabled?: unknown } | null;
+		if (typeof body?.enabled !== "boolean") {
+			return c.json({ ok: false, error: "bad_request", message: "enabled 必须是布尔值" }, 400);
+		}
+		const state = getSkillState();
+		if (!skillStateEnabled()) {
+			return c.json(
+				{
+					ok: false,
+					error: "locked",
+					message: "技能过滤已关闭，所有人都有；个人不能开关",
+				},
+				409,
+			);
+		}
+		if (state.isEnabled(name)) {
+			return c.json(
+				{
+					ok: false,
+					error: "locked",
+					message: "全局已开启，所有人都有；个人不能关",
+				},
+				409,
+			);
+		}
+		const exists = resolveSkillsDir().dirs.some((source) => findSkillInDir(source.dir, name));
+		if (!exists) return c.json({ ok: false, error: "not_found" }, 404);
+		state.setEnabledFor(id, name, body.enabled);
+		return c.json({ ok: true, partnerId: id, name, enabled: body.enabled });
+	});
+
+	/**
 	 * 团队包导出 / 导入（2026-11-10 批 25 §二）。
 	 *
 	 * 都是**只搬运内容、不迁移运行态**：导出是只读的，导入落成 paused（见 partner-bundle.ts
@@ -229,22 +285,19 @@ export function mountCompanions(app: Hono): void {
 	app.get("/api/v1/partners/:id", (c) => {
 		const partner = store().get(c.req.param("id"));
 		if (!partner) return c.json({ ok: false, error: "not_found" }, 404);
-		const current = store().currentVersion(partner.id);
 		return c.json({
 			ok: true,
 			partner: projection(partner),
-			// SOUL 当前值（磁盘）与版本号一起给：界面编辑 SOUL 改的是磁盘，生效在下一轮
-			soul: store().readSoulFromHome(partner.id) ?? current?.soulSource ?? "",
-			soulVersion: current?.version ?? null,
+			// SOUL 当前值（磁盘）与保存计数一起给：界面编辑 SOUL 改的是磁盘，生效在下一轮。
+			// 2026-11-15 快照退役：soulVersion 只是保存计数 + 下一轮生效记账，不再对应存档。
+			soul: store().readSoulFromHome(partner.id) ?? "",
+			soulVersion: partner.currentVersion,
 			// 岗位契约（2026-11-08 员工人格化刀一 E1）：纯增量字段，关掉开关时两列都不出现；
 			// **列表端点形状不变**（手机端只读列表，不需要正文）。
 			...(partnerContractEnabled()
 				? {
-						contract:
-							store().readContractFromHome(partner.id) ??
-							current?.contractSource ??
-							"",
-						contractVersion: current?.version ?? null,
+						contract: store().readContractFromHome(partner.id) ?? "",
+						contractVersion: partner.currentVersion,
 					}
 				: {}),
 			// 模型候选链（B4）：只含 keyEnv 名，绝不回显任何密钥值
@@ -324,7 +377,8 @@ export function mountCompanions(app: Hono): void {
 	 *
 	 * 全部过 shared 的 zod（字段上限都在那）；任何一项不合法 → 400 且一个字节都不写。
 	 * `PARTNER_PERSONA_MODULES=false` → 400 带说明（端点还在，功能关着，同 `PARTNER_CONTRACT`）。
-	 * **不版本化**：人格模块不是身份，不 bump `partner_versions`、不动 SOUL / 契约。
+	 * **不版本化**：人格模块不是身份，不动 SOUL / 契约、不推身份计数
+	 * （有自己的内容签名记账，见 personaRefreshNeeded）。
 	 */
 	app.put("/api/v1/partners/:id/persona", async (c) => {
 		if (!personaModulesEnabled()) {
@@ -380,16 +434,19 @@ export function mountCompanions(app: Hono): void {
 			return c.json(personaView(store().get(id) ?? partner));
 		}
 
-		const preset: PartnerPersonaPreset = patch.preset ?? partner.personaPreset;
 		let modules: Record<PartnerPersonaModule, boolean> = effectivePersonaModules(partner);
 		if (patch.modules || (patch.preset && patch.preset !== partner.personaPreset)) {
 			// 换预设（不给模块）= 直接铺默认表；给了模块 = 在默认表（换预设时）或当前表上逐键覆盖。
 			const base =
 				patch.preset && patch.preset !== partner.personaPreset
-					? defaultPersonaModules(preset)
+					? defaultPersonaModules(patch.preset)
 					: modules;
 			modules = { ...base, ...(patch.modules ?? {}) };
 		}
+		// 预设名由最终开关表推导（2026-11-15 人设页打磨）：与某张预设表一致就标该预设，
+		// 否则「自定义」。请求里显式给的 preset 只决定"铺哪张默认表"，名字以推导为准——
+		// 预设名从此是开关表的真话（改一个开关自动跳自定义，改回来自动跳回预设）。
+		const preset = derivePresetFromModules(modules);
 		const switches = { ...partner.personaSwitches, ...(patch.switches ?? {}) };
 
 		// 先落静态内容（每个文件独立原子写），再落活状态，最后落库：
@@ -427,6 +484,7 @@ export function mountCompanions(app: Hono): void {
 					currentGoal?: unknown;
 					tagline?: unknown;
 					diary?: unknown;
+					projectIds?: unknown;
 			  }
 			| null;
 		const partner = store().get(id);
@@ -565,6 +623,25 @@ export function mountCompanions(app: Hono): void {
 		if (body?.diary !== undefined && typeof body.diary !== "boolean") {
 			return c.json({ error: "bad_request", message: "diary 必须是布尔值" }, 400);
 		}
+		// 项目记忆挂载（2026-11-15 跟人走立项、同日多挂载方案扩化）：省略 = 不改；
+		// 数组 = 整体替换（去重，每个都必须命中已登记项目（含归档——记忆还在，只是项目
+		// 不再活跃））；空数组 = 清空。不版本化（不是身份，同 currentGoal / tagline 口径）。
+		// 校验在写前拦，防半写。
+		let projectIds: string[] | undefined;
+		if (body?.projectIds !== undefined) {
+			if (!Array.isArray(body.projectIds) || body.projectIds.some((item) => typeof item !== "string")) {
+				return c.json({ error: "bad_request", message: "projectIds 必须是字符串数组" }, 400);
+			}
+			const knownProjects = new Set(projectsStore().listProjects(true).map((project) => project.id));
+			const unknown = body.projectIds.filter((item) => !knownProjects.has(item as string));
+			if (unknown.length > 0) {
+				return c.json(
+					{ error: "bad_request", message: "projectIds 里有不是已登记的项目" },
+					400,
+				);
+			}
+			projectIds = [...new Set(body.projectIds as string[])];
+		}
 
 		// ── 全部合法，开始写 ──
 		if (avatar !== undefined) store().setAvatar(id, avatar);
@@ -573,16 +650,15 @@ export function mountCompanions(app: Hono): void {
 		if (typeof body?.status === "string") patch.status = body.status as PartnerStatus;
 		const updated = store().update(id, patch);
 		if (!updated) return c.json({ ok: false, error: "not_found" }, 404);
-		// 派发权（2026-11-06）：只对带 domain 的执事有意义；普通执事 400。
+		// 派发权（2026-11-06；2026-11-15 放宽）：原先只对带 domain 的执事有意义——那时派活按
+		// domain 找人。现在派活路由按执事 id / 会话链接走（2026-11-07），领域标签退役，
+		// 任何执事都可接派单；minister dispatch 老链路（按 domain）不在此检查内。
 		let refreshed = updated;
 		if (body?.tool_projection !== undefined) {
 			refreshed =
 				store().setToolProjection(id, body.tool_projection as 1 | 0 | null) ?? refreshed;
 		}
 		if (body?.dispatchAuthority !== undefined) {
-			if (!updated.domain) {
-				return c.json({ error: "bad_request", message: "该执事不带 domain，没有派发权可切" }, 400);
-			}
 			refreshed = store().setDispatchAuthority(id, body.dispatchAuthority) ?? updated;
 		}
 
@@ -617,6 +693,11 @@ export function mountCompanions(app: Hono): void {
 			refreshed = store().setDiary(id, body.diary) ?? refreshed;
 		}
 
+		// 项目记忆挂载（2026-11-15 多挂载方案）：一条 UPDATE，不碰身份版本。省略就完全不写。
+		if (projectIds !== undefined) {
+			refreshed = store().setProjectIds(id, projectIds) ?? refreshed;
+		}
+
 		return c.json({
 			ok: true,
 			partner: projection(refreshed),
@@ -626,7 +707,26 @@ export function mountCompanions(app: Hono): void {
 			tagline: refreshed.tagline,
 			// diary 同样已进 projection；单独回显一份，PATCH 后另一端不用再拉列表。
 			diary: refreshed.diary,
+			// projectIds 同上（开关关着时投影与回显都不带）。
+			...(partnerProjectMemoryEnabled() ? { projectIds: refreshed.projectIds } : {}),
 			...(soulVersion !== null ? { soulVersion } : {}),
+		});
+	});
+
+	app.post("/api/v1/partners/:id/soul/rollback", (c) => {
+		const id = c.req.param("id");
+		if (!store().get(id)) return c.json({ ok: false, error: "not_found" }, 404);
+		// 回滚到上一份 SOUL（2026-11-15 人设停存版本快照方案）：
+		// 单槽交换（SOUL.md ↔ SOUL.prev.md），再按一次 = 撤销回滚；计数 +1 维持下一轮生效。
+		// 没有上一份（从未保存过）= 业务拒绝，400 带说明。
+		const restored = store().rollbackSoul(id);
+		if (restored == null) {
+			return c.json({ error: "bad_request", message: "没有上一份可回退：保存过一次才有时" }, 400);
+		}
+		return c.json({
+			ok: true,
+			soul: restored,
+			soulVersion: store().get(id)?.currentVersion ?? null,
 		});
 	});
 
@@ -646,6 +746,41 @@ export function mountCompanions(app: Hono): void {
 			return c.json({ ok: false, error: "not_found" }, 404);
 		}
 		return c.json(result, result.ok ? 200 : 400);
+	});
+
+	/**
+	 * 注入预览（2026-11-15 人设页打磨，只读）：纪律 / 在办 / 履历三段"现在每轮实际注入什么"。
+	 * 与真实轮次走**同一装配函数**（agent/partner-context），不另抄一份拼装逻辑；
+	 * 预览没有会话上下文，在办段的「等你批的」按会话算，这里天然为空（前端弹层里有说明）。
+	 * 读端点不该付审计代价的口径照旧：两段现查现拼（扫 runs + 开 SQLite），点开弹层才调一次。
+	 */
+	app.get("/api/v1/partners/:id/injection-preview", async (c) => {
+		const id = c.req.param("id");
+		const partner = partnersStore().get(id);
+		if (!partner) return c.json({ ok: false, error: "not_found" }, 404);
+		const modules = personaModulesEnabled() ? effectivePersonaModules(partner) : null;
+		const disciplineOn = modules === null || modules.discipline === true;
+		const safe = (fn: () => string | undefined): string | null => {
+			try {
+				return fn() ?? null;
+			} catch {
+				// 预览不许把页面打断：读不出（runs 目录缺失 / 库锁住）就如实说"没有"，不 500。
+				return null;
+			}
+		};
+		return c.json({
+			ok: true,
+			discipline: disciplineOn ? safe(() => buildPartnerDisciplineSection(id)) : null,
+			currentWork: safe(() =>
+				buildPartnerStatusSection(id, 0, { persona: { currentWork: true, workHistory: false } }),
+			),
+			workHistory: safe(() =>
+				buildPartnerStatusSection(id, 0, {
+					persona: { currentWork: false, workHistory: true },
+					workSummary: workSummaryFor,
+				}),
+			),
+		});
 	});
 
 	/**
@@ -976,10 +1111,12 @@ function personaView(partner: PartnerRow): PartnerPersonaView {
 		enabled,
 		preset: enabled ? partner.personaPreset : "work",
 		modules: enabled ? effectivePersonaModules(partner) : defaultPersonaModules("work"),
-		// 子开关（批2 / 批3）：总开关关着时回默认（口吻影响 / 挂念全关），与模块表同一口径。
+		// 子开关（批2 / 批3 / 2026-11-15）：总开关关着时回默认（口吻影响 / 挂念全关），与模块表同一口径。
+		// 记忆召回默认开（未写 = 开），所以这里回的是"当前生效值"。
 		switches: {
 			moodAffectTone: enabled && partner.personaSwitches.moodAffectTone === true,
 			nudgeEnabled: enabled && partner.personaSwitches.nudgeEnabled === true,
+			memoryRecallEnabled: enabled && partner.personaSwitches.memoryRecallEnabled !== false,
 		},
 		contents: readPersonaContents(partnersStore(), partner.id),
 		// 活状态（批2）：总开关关着整段为 null —— 前端整块隐藏，不假装有状态。
@@ -998,7 +1135,7 @@ function personaView(partner: PartnerRow): PartnerPersonaView {
 }
 
 /** 对外投影：只给对外字段。canonical 会话的内部自增 id 不出网（对外 id 一律 uuid）。 */
-function projection(partner: { id: string; name: string; status: string; currentVersion: number | null; createdAt: string; updatedAt: string; domain?: string | null; avatar?: string | null; dispatchAuthority?: boolean; toolProjection?: 1 | 0 | null; tagline?: string | null; diary?: boolean }) {
+function projection(partner: { id: string; name: string; status: string; currentVersion: number | null; createdAt: string; updatedAt: string; domain?: string | null; avatar?: string | null; dispatchAuthority?: boolean; toolProjection?: 1 | 0 | null; tagline?: string | null; diary?: boolean; projectIds?: string[] }) {
 	return {
 		id: partner.id,
 		name: partner.name,
@@ -1008,8 +1145,11 @@ function projection(partner: { id: string; name: string; status: string; current
 		updatedAt: partner.updatedAt,
 		// 纯增量：普通执事不带这个字段（行为零变化），执事带 domain。
 		...(partner.domain ? { domain: partner.domain } : {}),
-		// 派发权（2026-11-06 执事派发权开关，纯增量）：只对带 domain 的执事给，默认关。
-		...(partner.domain ? { dispatchAuthority: partner.dispatchAuthority } : {}),
+		// 派发权（2026-11-06 执事派发权开关，纯增量；2026-11-15 起不再依赖 domain——
+		// 派活路由按执事 id 走，领域标签退役）：默认关。
+		...(typeof partner.dispatchAuthority === "boolean"
+			? { dispatchAuthority: partner.dispatchAuthority }
+			: {}),
 		// 工具结果投影三态（2026-11-13 工具层结果契约化 §5.2，纯增量）：null = 跟随默认；旧客户端忽略即可。
 		toolProjection: partner.toolProjection ?? null,
 		// 纯增量（2026-11-06 B1）：未设置给 null，前端据此回落名字首字。
@@ -1018,5 +1158,8 @@ function projection(partner: { id: string; name: string; status: string; current
 		tagline: partner.tagline ?? null,
 		// 纯增量（2026-11-12 日记 v2）：是否日记执事；旧客户端忽略即可。
 		diary: partner.diary ?? false,
+		// 项目记忆挂载（2026-11-15 跟人走立项、同日多挂载方案扩化，纯增量）：开关关时整字段
+		// 不出现，前端按 `"projectIds" in partner` 判定显隐（同 contractOn 惯例）。
+		...(partnerProjectMemoryEnabled() ? { projectIds: partner.projectIds ?? [] } : {}),
 	};
 }

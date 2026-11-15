@@ -27,7 +27,16 @@ export type MemoryScope =
 	 * 伙伴记忆与主人的记忆**键空间完全隔离**：同一套存储/索引/召回，key 不同互不可见。
 	 * id 是伙伴对外 uuid（partners 表主键），encode 是防 uuid 里的字符捣乱（现 uuid 安全，防御性保留）。
 	 */
-	| { type: "partner"; id: string };
+	| { type: "partner"; id: string }
+	/**
+	 * 某个登记项目的独立键空间（2026-11-15 项目记忆方案）。
+	 *
+	 * id 是项目库（projects.sqlite）里项目的 uuid：项目记忆跟着**已登记的项目**走，
+	 * 不建平行体系。项目软删记忆保留；项目移除后 scope 成孤儿——不可见即无害。
+	 * 召回只在"会话归属该项目"时把这条 scope 加进候选（见 server 的 recallContext），
+	 * 所以项目记忆不会打扰其它会话。
+	 */
+	| { type: "project"; id: string };
 
 export function scopeKey(scope: MemoryScope): string {
 	switch (scope.type) {
@@ -41,6 +50,8 @@ export function scopeKey(scope: MemoryScope): string {
 			return `session:${scope.id}`;
 		case "partner":
 			return `partner:${encodeURIComponent(scope.id)}`;
+		case "project":
+			return `project:${scope.id}`;
 	}
 }
 
@@ -149,6 +160,13 @@ export interface RecallQuery {
 	text: string;
 	/** 优先从这里找 */
 	scopes: string[];
+	/**
+	 * 闸门 scopes（2026-11-15 项目记忆多挂载）：只从「字面命中」路径进候选、
+	 * 不吃最近窗口，且候选须与 text 直接字面相关（复用「也许值得提起」同款判据）；
+	 * text 为空 / 切不出关键词时一律不贡献。"聊到才注入"由这层保证，
+	 * 不靠打分巧合。与 scopes 重复的 key 以更严的 gated 为准（防御，调用方应传不相交两列）。
+	 */
+	gatedScopes?: string[];
 	limit?: number;
 	/** 只召回这个时间点之后创建的 */
 	since?: string;
@@ -169,6 +187,18 @@ export interface InjectOptions {
 	 * （执事轮不传：避免执事跑题）。开关落在 server 的 env，这一层不读环境变量。
 	 */
 	proactive?: boolean;
+	/**
+	 * 项目归属标注（2026-11-15 项目记忆多挂载）：入参是记录的 scope key
+	 * （只有 `project:` 前缀的会来问），返回要显示的名字；返回 null / 不传 =
+	 * 不标注（输出与旧格式逐字节兼容）。engine 不认识项目库，名字由装配层解析。
+	 */
+	scopeLabel?: (scopeKey: string) => string | null;
+	/**
+	 * 召回后去重（2026-11-15 上下文预算批）：同一件事的多种说法只保留分数最高的
+	 * 那条进注入。默认 false = 库层旧行为；server 装配处按 `MEMORY_INJECT_DEDUPE`
+	 * 传 true（默认开）。只影响本轮注入，不动库。
+	 */
+	dedupe?: boolean;
 }
 
 export interface RememberInput {

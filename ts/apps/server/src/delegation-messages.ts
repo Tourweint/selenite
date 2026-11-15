@@ -30,6 +30,14 @@ export type DelegationMessageDirection = "out" | "in" | "system";
 /** 发送者类型。worker 只出现在 in（结论由谁交回）。 */
 export type DelegationSenderKind = "chief" | "partner" | "worker" | "system";
 
+/**
+ * in 留言的送达记账（2026-11-15 回信送达兜底，方案 §A）：
+ * 0 = 待送达（settle 落行时的初态，写回会话成功才销账）；
+ * 1 = 已送达；2 = 跳过（会话已不存在 / 按设计不写回——补送也不会成功，不再扫）。
+ * 老库历史行默认 1，升级不触发批量补送。
+ */
+export type DeliveryState = 0 | 1 | 2;
+
 export interface DelegationMessage {
 	ticketId: string;
 	direction: DelegationMessageDirection;
@@ -57,11 +65,26 @@ export class DelegationMessages {
 				from_kind  TEXT NOT NULL,
 				from_name  TEXT NOT NULL DEFAULT '',
 				body       TEXT NOT NULL,
-				created_at TEXT NOT NULL
+				created_at TEXT NOT NULL,
+				delivered  INTEGER NOT NULL DEFAULT 1
 			);
 			CREATE INDEX IF NOT EXISTS idx_delegation_messages_ticket
 				ON delegation_messages (ticket_id, id);
 		`);
+		this.migrateDeliveredColumn();
+	}
+
+	/**
+	 * 送达记账列（2026-11-15 回信送达兜底）：老库补 `delivered` 列。
+	 * 默认 1 = 已送达——升级时历史留言不触发批量补送；只有结算链路显式写 0 的
+	 * "待送达"行才参与启动扫描。方案见 docs/设计方案/2026-11-15-派活回信送达兜底.
+	 */
+	private migrateDeliveredColumn(): void {
+		const columns = this.db.prepare("PRAGMA table_info(delegation_messages)").all() as Array<
+			Record<string, unknown>
+		>;
+		if (columns.some((column) => column.name === "delivered")) return;
+		this.db.exec("ALTER TABLE delegation_messages ADD COLUMN delivered INTEGER NOT NULL DEFAULT 1");
 	}
 
 	/**
@@ -71,13 +94,15 @@ export class DelegationMessages {
 	 * 那本来就是两条不同时刻的簿记；读侧按 id 排序原样展示。
 	 * 写失败只抛给调用方决定——宿主的派单主链路不该因为簿记失败而中断，
 	 * 所以 `delegation.ts` 那边是 catch 后告警，不是让派单失败。
+	 *
+	 * 返回自增行 id（2026-11-15 送达记账用）；不需要的调用方照旧忽略返回值。
 	 */
-	append(message: DelegationMessage): void {
-		this.db
+	append(message: DelegationMessage, options: { delivered?: DeliveryState } = {}): number {
+		const result = this.db
 			.prepare(
 				`INSERT INTO delegation_messages
-				 (ticket_id, direction, from_kind, from_name, body, created_at)
-				 VALUES (?, ?, ?, ?, ?, ?)`,
+				 (ticket_id, direction, from_kind, from_name, body, created_at, delivered)
+				 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 			)
 			.run(
 				message.ticketId,
@@ -86,7 +111,37 @@ export class DelegationMessages {
 				message.fromName.slice(0, 120),
 				message.body.slice(0, BODY_LIMIT),
 				message.createdAt,
+				options.delivered ?? 1,
 			);
+		return Number(result.lastInsertRowid);
+	}
+
+	/**
+	 * 送达销账（2026-11-15 回信送达兜底）。只对 direction='in' 的行生效——
+	 * out / system 是旁路记录，不参与补送。
+	 */
+	markDelivery(id: number, state: DeliveryState): void {
+		this.db
+			.prepare(
+				`UPDATE delegation_messages SET delivered = ? WHERE id = ? AND direction = 'in'`,
+			)
+			.run(state, id);
+	}
+
+	/** 待送达的结论行（delivered=0），按落库顺序；上限 200 防一次扫爆。 */
+	listUndelivered(): Array<{ id: number; ticketId: string; body: string; createdAt: string }> {
+		const rows = this.db
+			.prepare(
+				`SELECT id, ticket_id, body, created_at FROM delegation_messages
+				 WHERE direction = 'in' AND delivered = 0 ORDER BY id LIMIT 200`,
+			)
+			.all() as Array<Record<string, unknown>>;
+		return rows.map((row) => ({
+			id: Number(row.id ?? 0),
+			ticketId: String(row.ticket_id ?? ""),
+			body: String(row.body ?? ""),
+			createdAt: String(row.created_at ?? ""),
+		}));
 	}
 
 	/** 一张单的全部留言，按落库顺序（先进先出）。没有记录 = 空数组，不是错误。 */

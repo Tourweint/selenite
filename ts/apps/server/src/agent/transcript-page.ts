@@ -1,7 +1,18 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import type { Cursor, EntryRecord } from "@earendil-works/pi-durable";
+import { isRelayEntryKind } from "../partner-relay.ts";
 import { CTX, type ResolvedChat } from "./shared.ts";
 import { foldTranscriptEntries, type TranscriptMessage } from "./session.ts";
+
+/**
+ * 一轮的开头（2026-11-15 作者标记方案 D6）：主人输入，或执事递来的话。
+ *
+ * 递话会触发一整轮 run，所以它必须和 `pi.user` 一样切轮；不切的话来信会和
+ * 上一轮的步骤、上一轮的回答黏在同一轮里。
+ */
+function startsTurn(kind: string): boolean {
+	return kind === "pi.user" || isRelayEntryKind(kind);
+}
 
 /**
  * 对话历史的倒序游标分页（2026-11-13 方案「按天分组·上滑加载」）。
@@ -56,10 +67,10 @@ export function historyDayKeyOf(at: number | undefined): string | null {
 	return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-/** 一轮的提问时间（算日界用）；没有 user 就返回 undefined。 */
+/** 一轮的提问时间（算日界用）；没有 user（或递话条目）就返回 undefined。 */
 function turnStartOf(entries: readonly EntryRecord[]): number | undefined {
 	for (const entry of entries) {
-		if (entry.kind !== "pi.user") continue;
+		if (!startsTurn(entry.kind)) continue;
 		const timestamp = entry.model?.[0]?.timestamp;
 		return typeof timestamp === "number" ? timestamp : undefined;
 	}
@@ -72,7 +83,7 @@ function splitTurns(externalId: string, entries: readonly EntryRecord[]): Turn[]
 	let current: EntryRecord[] = [];
 	for (const entry of entries) {
 		current.push(entry);
-		if (entry.kind !== "pi.user") continue;
+		if (!startsTurn(entry.kind)) continue;
 		turns.push({ entries: current, messages: foldTranscriptEntries(externalId, current) });
 		current = [];
 	}
@@ -103,7 +114,7 @@ export async function readTranscriptPage(
 	let reachedHead = false;
 	let hasMore = false;
 	let cursor: Cursor | undefined;
-	/** 跨 batch 的半轮（倒序累的，等遇到 pi.user 才成轮） */
+	/** 跨 batch 的半轮（倒序累的，等遇到 pi.user / 递话条目才成轮） */
 	let pendingDesc: EntryRecord[] = [];
 
 	scan: while (true) {
@@ -125,9 +136,9 @@ export async function readTranscriptPage(
 			if (entry.head !== undefined) reachedHead = true;
 			pendingDesc.push(entry);
 
-			if (entry.kind !== "pi.user" && !reachedHead) continue;
+			if (!startsTurn(entry.kind) && !reachedHead) continue;
 
-			// 倒序累到一条 pi.user = 这一轮收齐了；翻成升序再折叠
+			// 倒序累到一条 pi.user（或递话条目）= 这一轮收齐了；翻成升序再折叠
 			const turnEntries = pendingDesc.slice().reverse();
 			pendingDesc = [];
 			const turnMessages = foldTranscriptEntries(chat.externalId, turnEntries);

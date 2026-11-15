@@ -53,7 +53,6 @@ function appendCsContractCard(body) {
   }
 
   const contract = String(cs.detail.contract ?? "");
-  const version = cs.detail.contractVersion ?? null;
 
   const card = csCard("岗位契约");
   const desc = document.createElement("div");
@@ -82,7 +81,8 @@ function appendCsContractCard(body) {
   const versionNode = document.createElement("div");
   versionNode.className = "cs-hint";
   versionNode.style.padding = "0 14px";
-  versionNode.textContent = version != null ? `v${version} · 下一轮生效` : "下一轮生效";
+  // 快照退役（2026-11-15）：不再展示版本号，只说生效时机
+  versionNode.textContent = "下一轮生效";
   card.append(versionNode);
 
   const hint = document.createElement("div");
@@ -159,11 +159,10 @@ function appendCsContractCard(body) {
         return;
       }
       original = next;
-      const nextVersion = data.contractVersion ?? version;
       cs.detail.contract = data.contract ?? next;
-      cs.detail.contractVersion = nextVersion;
-      versionNode.textContent = nextVersion != null ? `v${nextVersion} · 下一轮生效` : "下一轮生效";
-      setHint(nextVersion != null ? `已保存为 v${nextVersion}，下一轮生效。` : "已保存，下一轮生效。", false);
+      cs.detail.contractVersion = data.contractVersion ?? cs.detail.contractVersion;
+      versionNode.textContent = "下一轮生效";
+      setHint("已保存，下一轮生效。", false);
       refresh();
     } catch (error) {
       if (error.message === "forbidden") return;

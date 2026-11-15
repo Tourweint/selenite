@@ -18,7 +18,7 @@ import {
 	type ResolvedSkillsDir,
 	type SkillSource,
 } from "./skills.ts";
-import { getSkillState } from "./skill-state.ts";
+import { getSkillState, skillStateEnabled } from "./skill-state.ts";
 import { isSkillStale, readSkillUsage, skillUsageEnabled } from "./skill-usage.ts";
 import {
 	adviceViewOf,
@@ -200,7 +200,7 @@ export function mountSkills(app: Hono, deps: SkillsApiDeps = {}): void {
 				rows.push({
 					name: entry.name,
 					summary: entry.summary,
-					enabled: skillState.isEnabled(entry.name),
+					enabled: !skillStateEnabled() || skillState.isEnabled(entry.name),
 					usageCount: usageOn ? (used?.count ?? 0) : null,
 					stale: usageOn ? isSkillStale(used?.lastUsedAt ?? null, entry.path ? statSync(entry.path).mtime.toISOString() : now.toISOString()) : false,
 					origin: source.origin,
@@ -212,6 +212,12 @@ export function mountSkills(app: Hono, deps: SkillsApiDeps = {}): void {
 
 	app.get("/api/v1/agent/skills", (c) => {
 		const resolved = resolve();
+		// 2026-11-15 个人技能可见性：带 partnerId 时逐项追加"该人是否可用"。
+		// 不带时形状不变（旧客户端/全局设置页原样）。
+		const partnerId = c.req.query("partnerId")?.trim() || null;
+		// SKILL_STATE=false 是"全进索引、不过滤"的逃生门；此时管理面也要显示全员可用，
+		// 否则界面会把实际可见的技能说成关着。
+		const stateOn = skillStateEnabled();
 		// 用量账（2026-11-10 批 17 §四）：每请求读一份；开关关着时整组字段不出现（回滚到旧形状）。
 		const usageOn = skillUsageEnabled();
 		const usage = usageOn ? readSkillUsage() : {};
@@ -225,6 +231,10 @@ export function mountSkills(app: Hono, deps: SkillsApiDeps = {}): void {
 			writable: boolean;
 			form: "flat" | "dir";
 			enabled: boolean;
+			/** 2026-11-15：带 partnerId 时才出现；该人实际可用（全局开 || 按人覆盖开）。 */
+			partnerEnabled?: boolean;
+			/** 2026-11-15：全局没开、但该人单独开。 */
+			partnerOverride?: boolean;
 			/** 2026-11-10 批 17：可选字段，老客户端忽略即可。 */
 			usageCount?: number;
 			lastUsedAt?: string | null;
@@ -255,7 +265,17 @@ export function mountSkills(app: Hono, deps: SkillsApiDeps = {}): void {
 						writable: source.writable,
 						form: entry.form,
 						// 启停位（2026-11-09）：默认全关，界面上逐条/批量开
-						enabled: skillState.isEnabled(entry.name),
+						enabled: stateOn ? skillState.isEnabled(entry.name) : true,
+						...(partnerId
+							? {
+									partnerEnabled: stateOn
+										? skillState.isEnabledFor(partnerId, entry.name)
+										: true,
+									partnerOverride: stateOn
+										? skillState.isOverridden(partnerId, entry.name)
+										: false,
+								}
+							: {}),
 						// 只标记，不删不移；从未用过的以文件 mtime 为基线（新建技能不会一上来就 stale）
 						...(usageOn
 							? { usageCount: used?.count ?? 0, lastUsedAt }

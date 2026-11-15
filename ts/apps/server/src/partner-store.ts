@@ -16,8 +16,8 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { CHIEF_PARTNER_ID, CHIEF_PARTNER_NAME, DEFAULT_DB_PATH, DEFAULT_HOMES_ROOT, PARTNER_SLOT_LIMIT, partnerContractEnabled, partnerContractTemplate } from "./partner-contract.ts";
-import type { GroupMessageRow, GroupRow, ModelChainItemLike, PartnerRow, PartnerSessionLinkRow, PartnerStatus, PartnerVersionRow, RoutineDef, RoutineTrigger } from "./partner-types.ts";
-import { defaultSoul, toGroup, toGroupMessage, toLink, toPartner, toRoutine } from "./partner-rows.ts";
+import type { GroupMessageRow, GroupRow, ModelChainItemLike, PartnerRow, PartnerSessionLinkRow, PartnerStatus, RoutineDef, RoutineTrigger } from "./partner-types.ts";
+import { defaultSoul, toGroup, toGroupMessage, toLink, toPartner, toProjectIds, toRoutine } from "./partner-rows.ts";
 
 export class PartnersStore {
 	private readonly db: DatabaseSync;
@@ -40,12 +40,15 @@ export class PartnersStore {
 				updated_at      TEXT NOT NULL,
 				domain          TEXT,
 				avatar          TEXT,
-			dispatch_authority INTEGER NOT NULL DEFAULT 0,
-			// 工具结果投影三态（2026-11-13 工具层结果契约化 §5.2）：NULL = 跟随默认；1 = 强制开；0 = 强制关。
-			tool_projection  INTEGER,
+				dispatch_authority INTEGER NOT NULL DEFAULT 0,
+				-- 工具结果投影三态（2026-11-13 工具层结果契约化 §5.2）：NULL = 跟随默认；1 = 强制开；0 = 强制关。
+				tool_projection  INTEGER,
 			current_goal    TEXT,
-			tagline         TEXT,
-			diary           INTEGER NOT NULL DEFAULT 0,
+				tagline         TEXT,
+				diary           INTEGER NOT NULL DEFAULT 0,
+				-- 项目记忆挂载（2026-11-15 多挂载方案）：JSON 数组。上线首日的单值列
+				-- project_id 只在旧库存在，migrate() 搬进本列后不再读写。
+				project_ids     TEXT,
 			persona_preset  TEXT,
 			persona_modules TEXT,
 			persona_switches TEXT,
@@ -56,15 +59,8 @@ export class PartnersStore {
 			mood_updated_at TEXT,
 			mood_source     TEXT
 			);
-			CREATE TABLE IF NOT EXISTS partner_versions (
-				partner_id   TEXT NOT NULL,
-				version      INTEGER NOT NULL,
-				soul_source  TEXT NOT NULL,
-				contract_source TEXT,
-				capabilities TEXT,
-				created_at   TEXT NOT NULL,
-				PRIMARY KEY (partner_id, version)
-			);
+			/* partner_versions 表已退役（2026-11-15 人设停存版本快照方案）：快照历史只写不读，
+			 * 新库不再建表；老库启动时由 migrate() 搬走候选链后 DROP。 */
 			CREATE TABLE IF NOT EXISTS partner_session_links (
 				partner_id      TEXT NOT NULL,
 				role            TEXT NOT NULL,
@@ -160,6 +156,23 @@ export class PartnersStore {
 		if (!columns.some((column) => column.name === "diary")) {
 			this.db.exec("ALTER TABLE partners ADD COLUMN diary INTEGER NOT NULL DEFAULT 0");
 		}
+		// 项目记忆挂载列（2026-11-15 多挂载方案）：JSON 数组。上线首日的单值列
+		// project_id（跟人走方案，只活了半天、手机端未消费）搬进本列后不再读写；
+		// 搬家只在"本列刚补上"时做一次，幂等重跑不会拿旧单值覆盖新数组。
+		// 旧列保留不 DROP（SQLite 老库 DROP COLUMN 兼容面，没必要冒险）。
+		if (!columns.some((column) => column.name === "project_ids")) {
+			this.db.exec("ALTER TABLE partners ADD COLUMN project_ids TEXT");
+			if (columns.some((column) => column.name === "project_id")) {
+				const singles = this.db
+					.prepare("SELECT id, project_id FROM partners WHERE project_id IS NOT NULL")
+					.all() as Array<{ id: unknown; project_id: unknown }>;
+				for (const row of singles) {
+					this.db
+						.prepare("UPDATE partners SET project_ids = ? WHERE id = ?")
+						.run(JSON.stringify([String(row.project_id)]), String(row.id));
+				}
+			}
+		}
 		// 人格预设 / 开关（2026-11-14 人格模块 §四）：旧库补两个 nullable 列，
 		// 老记录读出来是 null —— 预设按默认 `work`、开关按预设默认算（不是"全关"）。
 		if (!columns.some((column) => column.name === "persona_preset")) {
@@ -183,14 +196,6 @@ export class PartnersStore {
 				this.db.exec(`ALTER TABLE partners ADD COLUMN ${column} TEXT`);
 			}
 		}
-		// 岗位契约快照列（2026-11-08 员工人格化刀一 E1）：旧库补 nullable 列，
-		// 老版本读出来是 null（= 无契约快照），不炸、不补数据、不越权回填。
-		const versionColumns = this.db.prepare("PRAGMA table_info(partner_versions)").all() as Array<{
-			name?: unknown;
-		}>;
-		if (!versionColumns.some((column) => column.name === "contract_source")) {
-			this.db.exec("ALTER TABLE partner_versions ADD COLUMN contract_source TEXT");
-		}
 		// 例行任务条件门控（2026-11-10 批 13 §四）：旧库补两个 nullable 列，
 		// 老规则读出来是 null（= 无完成条件 / 不限次数），不炸、不补数据。
 		const routineColumns = this.db.prepare("PRAGMA table_info(routines)").all() as Array<{
@@ -201,6 +206,46 @@ export class PartnersStore {
 		}
 		if (!routineColumns.some((column) => column.name === "max_runs")) {
 			this.db.exec("ALTER TABLE routines ADD COLUMN max_runs INTEGER");
+		}
+		// 版本快照表退役（2026-11-15 人设停存版本快照方案）：快照历史只写不读
+		// （2026-11-15 全量消费方核对），唯一还有价值的 capabilities.modelChain 搬到
+		// 执事家目录 model-chain.json，随后整表 DROP。SOUL / CONTRACT 当前值本来就在盘上，
+		// 无数据丢失面；新库从来不会建这张表。
+		if (this.tableExists("partner_versions")) {
+			this.migrateModelChainOutOfVersions();
+			this.db.exec("DROP TABLE partner_versions");
+		}
+	}
+
+	/** sqlite_master 探表：迁移只关心"表在不在"，不用 PRAGMA 逐列看。 */
+	private tableExists(name: string): boolean {
+		const row = this.db
+			.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+			.get(name);
+		return row != null;
+	}
+
+	/** 老库候选链搬家：当前版本行 capabilities.modelChain → 家目录 model-chain.json（幂等，文件已在就跳过）。 */
+	private migrateModelChainOutOfVersions(): void {
+		const partners = this.db.prepare("SELECT id, current_version FROM partners").all() as Array<{
+			id: unknown;
+			current_version: unknown;
+		}>;
+		for (const partner of partners) {
+			if (partner.current_version == null) continue;
+			const row = this.db
+				.prepare("SELECT capabilities FROM partner_versions WHERE partner_id = ? AND version = ?")
+				.get(String(partner.id), Number(partner.current_version)) as { capabilities?: unknown } | undefined;
+			if (!row?.capabilities) continue;
+			try {
+				const parsed = JSON.parse(String(row.capabilities)) as { modelChain?: unknown };
+				if (!Array.isArray(parsed.modelChain) || parsed.modelChain.length === 0) continue;
+				const target = join(this.homeOf(String(partner.id)), "model-chain.json");
+				if (existsSync(target)) continue;
+				this.atomicWrite(target, `${JSON.stringify(parsed.modelChain, null, 2)}\n`);
+			} catch {
+				// capabilities 不是合法 JSON 就当没有候选链，搬家失败不挡启动
+			}
 		}
 	}
 
@@ -218,14 +263,13 @@ export class PartnersStore {
 				"INSERT INTO partners (id, name, status, current_version, created_at, updated_at, domain) VALUES (?, ?, 'active', NULL, ?, ?, ?)",
 			)
 			.run(id, name, now, now, domain);
-		// 建档案即建家 + 首个身份版本：执事生下来就有身份。
+		// 建档案即建家 + 身份计数从 1 起（2026-11-15 快照退役）：执事生下来就有身份。
 		// 执事用「一句话版本」SOUL 播种（批次D D2），普通执事用默认模板。
 		this.ensureHome(id, name, opts?.soulSeed);
-		const soul = this.readSoulFromHome(id) ?? defaultSoul(name);
 		// 岗位契约（2026-11-08 E1）：**只在新建时**播种空模板；存量执事不自动补文件
 		// （不越权——它没见过这份契约，凭空出现一个文件比没有更让人困惑）。
 		this.seedContract(id);
-		this.pushVersion(id, soul, null, this.readContractFromHome(id));
+		this.bumpIdentityEpoch(id);
 		this.ensureHome(id, name, opts?.soulSeed);
 		// 执事：在链接表登记领域路由（role 枚举扩一型 'delegation'）。
 		// 既有 UNIQUE (partner_id, role, route_key) 已覆盖这个组合，无需改约束。
@@ -234,9 +278,10 @@ export class PartnersStore {
 	}
 
 	/**
-	 * 总管专用播种（批次D D1）：固定 id `"chief"`，首次启动建档案 + 家 + v1 身份快照。
-	 * **幂等**：档案 / SOUL.md / 版本任一已存在都不动——二次启动绝不覆盖用户改过的 SOUL
-	 * （含通过 PATCH/bumpSoul 推进过的新版本）。
+	 * 总管专用播种（批次D D1）：固定 id `"chief"`，首次启动建档案 + 家 + 身份计数置 1
+	 * （2026-11-15 快照退役：计数只是「下一轮生效」的记账位，不再落快照）。
+	 * **幂等**：档案 / SOUL.md / 计数任一已存在都不动——二次启动绝不覆盖用户改过的 SOUL
+	 * （含通过 PATCH/bumpSoul 推进过的保存）。
 	 * 播种正文 = 传入的 PERSONA 原文（运行时值），保证首启 persona 与改动前逐字一致。
 	 */
 	ensureChief(seedSoul: string): void {
@@ -249,16 +294,8 @@ export class PartnersStore {
 				.run(CHIEF_PARTNER_ID, CHIEF_PARTNER_NAME, now, now);
 		}
 		this.ensureHome(CHIEF_PARTNER_ID, CHIEF_PARTNER_NAME, seedSoul);
-		if (!this.currentVersion(CHIEF_PARTNER_ID)) {
-			this.pushVersion(
-				CHIEF_PARTNER_ID,
-				this.readSoulFromHome(CHIEF_PARTNER_ID) ?? seedSoul,
-				null,
-				// 总管刻意不播种岗位契约（他是主人本体，不是被派的执事）；
-				// 有人手工放了 CONTRACT.md 才读得到，读不到就是 null。
-				this.readContractFromHome(CHIEF_PARTNER_ID),
-			);
-		}
+		const chief = this.get(CHIEF_PARTNER_ID);
+		if (chief && chief.currentVersion == null) this.bumpIdentityEpoch(CHIEF_PARTNER_ID);
 	}
 
 	get(id: string): PartnerRow | null {
@@ -381,7 +418,7 @@ export class PartnersStore {
 	/**
 	 * 人格预设 + 模块开关（2026-11-14 人格模块 §四）：一条 UPDATE 原子落地。
 	 * 两个值都已是合法形状（端点过 zod、缺省键按预设默认补全后传进来）；
-	 * **不版本化**——人格模块不是身份，不 bump `partner_versions`、不动 SOUL / 契约。
+	 * **不版本化**——人格模块不是身份，不动 SOUL / 契约、不推身份计数。
 	 */
 	setPersona(
 		id: string,
@@ -470,10 +507,10 @@ export class PartnersStore {
 					.prepare("UPDATE partners SET diary = 0, updated_at = ? WHERE id <> ? AND diary = 1")
 					.run(now, id);
 			}
-			this.db
-				.prepare("UPDATE partners SET diary = ?, updated_at = ? WHERE id = ?")
-				.run(enabled ? 1 : 0, now, id);
-			this.db.exec("COMMIT");
+		this.db
+			.prepare("UPDATE partners SET diary = ?, updated_at = ? WHERE id = ?")
+			.run(enabled ? 1 : 0, now, id);
+		this.db.exec("COMMIT");
 		} catch (error) {
 			this.db.exec("ROLLBACK");
 			throw error;
@@ -481,12 +518,47 @@ export class PartnersStore {
 		return this.get(id);
 	}
 
+	/**
+	 * 设置 / 清除项目记忆挂载（2026-11-15 项目记忆多挂载方案）：uuid 数组（[] = 不挂）。
+	 * 项目是否存在由端点层校验（业务 400）；这里只落库。不碰身份版本（不是身份）。
+	 */
+	setProjectIds(id: string, projectIds: string[]): PartnerRow | null {
+		if (!this.get(id)) return null;
+		this.db
+			.prepare("UPDATE partners SET project_ids = ?, updated_at = ? WHERE id = ?")
+			.run(JSON.stringify(projectIds), new Date().toISOString(), id);
+		return this.get(id);
+	}
+
+	/**
+	 * 项目登记删除时的连带解除（2026-11-15 删除项目界面入口恢复）：清掉所有指向
+	 * 该项目的挂载，返回解除条数给界面提示。挂载顺序在端点层保证"先解除、后删登记"——
+	 * 反过来登记删了就没人负责清这些悬空引用了。不碰身份版本（不是身份）。
+	 * 多挂载后挂载是 JSON 数组，SQL 端改不了 JSON：读出来在 JS 里过滤再写回
+	 * （partners 表量级是个位数到几十，全表扫没有压力）。
+	 */
+	detachProject(projectId: string): number {
+		const rows = this.db
+			.prepare("SELECT id, project_ids FROM partners")
+			.all() as Array<{ id: unknown; project_ids: unknown }>;
+		let detached = 0;
+		for (const row of rows) {
+			const ids = toProjectIds(row.project_ids);
+			const next = ids.filter((id) => id !== projectId);
+			if (next.length === ids.length) continue;
+			detached += ids.length - next.length;
+			this.db
+				.prepare("UPDATE partners SET project_ids = ?, updated_at = ? WHERE id = ?")
+				.run(JSON.stringify(next), new Date().toISOString(), String(row.id));
+		}
+		return detached;
+	}
+
 	/** 删除：档案行 + 版本行 + 链接行 + 家目录整体。家目录没了身份就没了，二次确认在端点层。 */
 	delete(id: string): boolean {
 		const existing = this.get(id);
 		if (!existing) return false;
 		this.db.prepare("DELETE FROM partners WHERE id = ?").run(id);
-		this.db.prepare("DELETE FROM partner_versions WHERE partner_id = ?").run(id);
 		this.db.prepare("DELETE FROM partner_session_links WHERE partner_id = ?").run(id);
 		// 例行任务定义跟着走：不清理会留孤儿（任务醒来 runPartnerTurn 报"执事不存在"）
 		this.db.prepare("DELETE FROM routines WHERE partner_id = ?").run(id);
@@ -501,60 +573,21 @@ export class PartnersStore {
 		return true;
 	}
 
-	// ── 身份版本 ─────────────────────────────────────────
+	// ── 身份计数（2026-11-15 快照退役）──────────────────────
 	/**
-	 * 新增一个身份版本（冻结快照），current_version 指过去。
-	 *
-	 * 2026-11-08 员工人格化刀一 E1：一个身份版本 = 当时的 SOUL + CONTRACT 对。
-	 * `contractSource` 缺省 = null（老调用方 / 没有契约的档案），语义等同"该版本没有契约"。
-	 * 改任一文本都要走本函数并带上另一份的当前快照，别只更新一份。
+	 * 身份计数 +1，返回新值。快照退役后它只剩一个活：**「下一轮生效」的记账位**——
+	 * 会话侧比对 `applied_version ≠ current_version` 才重配 instructions。
+	 * 号不再对应任何存档；正文当前值的唯一事实源是家目录文件。
 	 */
-	pushVersion(
-		partnerId: string,
-		soulSource: string,
-		capabilities: string | null,
-		contractSource: string | null = null,
-	): number {
+	private bumpIdentityEpoch(partnerId: string): number {
 		const partner = this.get(partnerId);
 		if (!partner) throw new Error(`执事不存在：${partnerId}`);
 		const version = (partner.currentVersion ?? 0) + 1;
 		const now = new Date().toISOString();
 		this.db
-			.prepare(
-				"INSERT INTO partner_versions (partner_id, version, soul_source, contract_source, capabilities, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-			)
-			.run(partnerId, version, soulSource, contractSource, capabilities, now);
-		this.db
 			.prepare("UPDATE partners SET current_version = ?, updated_at = ? WHERE id = ?")
 			.run(version, now, partnerId);
 		return version;
-	}
-
-	getVersion(partnerId: string, version: number): PartnerVersionRow | null {
-		const row = this.db
-			.prepare(
-				"SELECT * FROM partner_versions WHERE partner_id = ? AND version = ?",
-			)
-			.get(partnerId, version) as Record<string, unknown> | undefined;
-		return row
-			? {
-					partnerId: String(row.partner_id),
-					version: Number(row.version),
-					soulSource: String(row.soul_source ?? ""),
-					contractSource:
-						row.contract_source === null || row.contract_source === undefined
-							? null
-							: String(row.contract_source),
-					capabilities: row.capabilities === null || row.capabilities === undefined ? null : String(row.capabilities),
-					createdAt: String(row.created_at ?? ""),
-				}
-			: null;
-	}
-
-	currentVersion(partnerId: string): PartnerVersionRow | null {
-		const partner = this.get(partnerId);
-		if (!partner?.currentVersion) return null;
-		return this.getVersion(partnerId, partner.currentVersion);
 	}
 
 	// ── 家目录 ───────────────────────────────────────────
@@ -652,55 +685,65 @@ export class PartnersStore {
 	}
 
 	/**
-	 * 改 SOUL.md（磁盘当前值）+ 落新版本快照，返回新版本号。能力（候选链）随版本延续，不被冲掉。
-	 * 2026-11-08 E1：契约快照同时落一份（身份版本 = SOUL + CONTRACT 对），
-	 * 取磁盘当前值（它是"当前值"的家），取不到再退当前快照。
+	 * 改 SOUL.md（磁盘当前值），返回身份计数。快照退役（2026-11-15 方案）：
+	 * 写盘前把当前值存进 `SOUL.prev.md`（单槽），`rollbackSoul` 与它交换；
+	 * 计数只当「下一轮生效」的记账位。
 	 */
 	bumpSoul(partnerId: string, soulSource: string): number {
 		if (!this.get(partnerId)) throw new Error(`执事不存在：${partnerId}`);
-		this.atomicWrite(join(this.homeOf(partnerId), "SOUL.md"), soulSource);
-		const current = this.currentVersion(partnerId);
-		const contract = this.readContractFromHome(partnerId) ?? current?.contractSource ?? null;
-		return this.pushVersion(partnerId, soulSource, current?.capabilities ?? null, contract);
+		const home = this.homeOf(partnerId);
+		const previous = this.readHomeFile(partnerId, "SOUL.md");
+		if (previous != null) this.atomicWrite(join(home, "SOUL.prev.md"), previous);
+		this.atomicWrite(join(home, "SOUL.md"), soulSource);
+		return this.bumpIdentityEpoch(partnerId);
 	}
 
 	/**
-	 * 改 CONTRACT.md（磁盘当前值）+ 落新版本快照，返回新版本号（2026-11-08 E1）。
+	 * 回滚到上一份：SOUL.md 与 SOUL.prev.md **交换**（再按一次 = 撤销回滚），
+	 * 计数 +1 维持「下一轮生效」。没有上一份（从未保存过）返回 null。
+	 */
+	rollbackSoul(partnerId: string): string | null {
+		if (!this.get(partnerId)) throw new Error(`执事不存在：${partnerId}`);
+		const home = this.homeOf(partnerId);
+		const current = this.readHomeFile(partnerId, "SOUL.md");
+		const previous = this.readHomeFile(partnerId, "SOUL.prev.md");
+		if (previous == null) return null;
+		this.atomicWrite(join(home, "SOUL.prev.md"), current ?? "");
+		this.atomicWrite(join(home, "SOUL.md"), previous);
+		this.bumpIdentityEpoch(partnerId);
+		return previous;
+	}
+
+	/**
+	 * 改 CONTRACT.md（磁盘当前值），返回身份计数（2026-11-08 E1）。
 	 *
-	 * 与 bumpSoul 完全同构：调岗是低频慎重的事，但"下一轮生效"的口径与 SOUL 一致——
-	 * 改完不当场变身。SOUL 侧取磁盘当前值（同上），能力随版本延续。
+	 * 调岗是低频慎重的事，但"下一轮生效"的口径与 SOUL 一致——改完不当场变身。
+	 * 刻意不做上一份/回滚（2026-11-15 方案「明确不做」）：低频操作有弹窗确认兜着。
 	 */
 	bumpContract(partnerId: string, contractSource: string): number {
 		if (!this.get(partnerId)) throw new Error(`执事不存在：${partnerId}`);
 		this.atomicWrite(join(this.homeOf(partnerId), "CONTRACT.md"), contractSource);
-		const current = this.currentVersion(partnerId);
-		const soul = this.readSoulFromHome(partnerId) ?? current?.soulSource ?? "";
-		return this.pushVersion(partnerId, soul, current?.capabilities ?? null, contractSource);
+		return this.bumpIdentityEpoch(partnerId);
 	}
 
-	/** 模型候选链（B4）随版本存取；只挂引用不挂值，校验在 model-chain.ts。 */
+	/** 模型候选链（B4）：家目录 `model-chain.json` 是唯一事实源（2026-11-15 从版本行搬家）。 */
 	getModelChain(partnerId: string): ModelChainItemLike[] {
-		const current = this.currentVersion(partnerId);
-		if (!current?.capabilities) return [];
+		const raw = this.readHomeFile(partnerId, "model-chain.json");
+		if (!raw) return [];
 		try {
-			const parsed = JSON.parse(current.capabilities) as { modelChain?: ModelChainItemLike[] };
-			return Array.isArray(parsed.modelChain) ? parsed.modelChain : [];
+			const parsed = JSON.parse(raw) as ModelChainItemLike[] | { modelChain?: ModelChainItemLike[] };
+			const chain = Array.isArray(parsed) ? parsed : parsed.modelChain;
+			return Array.isArray(chain) ? chain : [];
 		} catch {
 			return [];
 		}
 	}
 
 	setModelChain(partnerId: string, chain: ModelChainItemLike[]): number {
-		const current = this.currentVersion(partnerId);
-		// 2026-11-08 E1：切模型也是新身份版本，契约快照跟着延续（不冲成 null）。
-		// 取法同 bumpSoul：磁盘当前值优先，取不到再退当前快照。
-		const contract = this.readContractFromHome(partnerId) ?? current?.contractSource ?? null;
-		return this.pushVersion(
-			partnerId,
-			this.readSoulFromHome(partnerId) ?? "",
-			JSON.stringify({ modelChain: chain }),
-			contract,
-		);
+		// 候选链搬家（2026-11-15）：写家目录文件，不再寄存版本行。
+		// 计数照旧 +1（沿用「切模型也是新身份版本」的旧口径，不改行为只换落点）。
+		this.atomicWrite(join(this.homeOf(partnerId), "model-chain.json"), `${JSON.stringify(chain, null, 2)}\n`);
+		return this.bumpIdentityEpoch(partnerId);
 	}
 
 	// ── 会话链接 ─────────────────────────────────────────

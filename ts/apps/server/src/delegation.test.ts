@@ -469,3 +469,67 @@ test("resumeOnly：续跑被拒不改派新单，也不发失败播报", async (
 	assert.equal(ticketId, "");
 	await assert.rejects(outcome);
 });
+
+// ── 送达记账（2026-11-15 回信送达兜底，方案 §A.2）────────────────
+
+test("settle 落待送达行并把行 id 随汇报带出；idle 单销为跳过", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "lifediary-delivery-"));
+	const realPath = process.env.DELEGATIONS_DB_PATH;
+	process.env.DELEGATIONS_DB_PATH = join(dir, "delegations.sqlite");
+	// 模块级单例要重指到临时库（照上一条留言测试的口径），否则 rm 会被打开的句柄卡住；
+	// import 放 try 外面：try 块里的 const 在 finally 不可见。
+	const { delegationMessages, resetDelegationMessages } = await import("./delegation-messages.ts");
+	resetDelegationMessages(join(dir, "delegations.sqlite"));
+	const reports: DelegationReport[] = [];
+	try {
+		// needs_you（非 idle）：汇报会写回 → in 行留 0，行 id 随 report 带出
+		const { outcome } = startDelegation(
+			{ conversationId: 9, domain: "文档", requirement: "整理变更记录" },
+			{
+				run: fakeRun(
+					(emit) => emit({ type: "ticket", ticketId: "T-delivery", message: "已受理" }),
+					Promise.resolve(
+						result({ ticketId: "T-delivery", status: "needs_you", line: "缺一份素材" }),
+					),
+				),
+				emit: () => undefined,
+				report: (_conversationId, report) => reports.push(report),
+				autoReport: true,
+			},
+		);
+		await outcome;
+		const tracked = reports[0]?.deliveryMessageId;
+		assert.equal(typeof tracked, "number", "汇报带 deliveryMessageId");
+		const undelivered = delegationMessages().listUndelivered();
+		assert.deepEqual(
+			undelivered.map((row) => row.id),
+			[tracked],
+			"in 行留 0，等写回成功销账",
+		);
+		delegationMessages().markDelivery(tracked as number, 1);
+		assert.deepEqual(delegationMessages().listUndelivered(), [], "销账后清零");
+
+		// idle（父单等子单）：按设计不写回 → 行直接销 2，不进补送扫描
+		reports.length = 0;
+		const { outcome: idleOutcome } = startDelegation(
+			{ conversationId: 9, domain: "文档", requirement: "等子单" },
+			{
+				run: fakeRun(
+					(emit) => emit({ type: "ticket", ticketId: "T-idle", message: "已受理" }),
+					Promise.resolve(result({ ticketId: "T-idle", status: "idle", line: "等下一单" })),
+				),
+				emit: () => undefined,
+				report: () => reports.push({} as DelegationReport),
+				autoReport: true,
+			},
+		);
+		await idleOutcome;
+		assert.equal(reports.length, 0, "idle 不发汇报");
+		assert.deepEqual(delegationMessages().listUndelivered(), [], "idle 的行已销为跳过");
+	} finally {
+		resetDelegationMessages();
+		if (realPath === undefined) delete process.env.DELEGATIONS_DB_PATH;
+		else process.env.DELEGATIONS_DB_PATH = realPath;
+		rmSync(dir, { recursive: true, force: true });
+	}
+});

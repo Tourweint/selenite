@@ -80,6 +80,61 @@ export const RELAY_MESSAGE_LIMIT = 4000;
  */
 export const RELAY_HOP_TAG = "[relay hop=1]";
 
+/**
+ * 递话落库时用的条目 kind（2026-11-15 作者标记方案 §3.2）。
+ *
+ * 为什么不是 `pi.user`：`pi.user` 是"主人说的"这个槽位。递话落进去，存储层、回读层、
+ * 界面层就都分不出谁说的了（作者只剩正文里那行字）。`relay.message` 是应用条目
+ * （durable 允许 `entry.kind`，只要不以 `pi.` 开头），作者进 `data`，模型看到的仍是
+ * 一条 user message。
+ *
+ * 连带好处：编辑重发（`syncEditEntry` / `forkForEdit`）只认 `pi.user`，于是同事的话
+ * 天然不可改——这正是"主人能看不能改"的落点。
+ */
+export const RELAY_ENTRY_KIND = "relay.message";
+
+/**
+ * 作者标记开关（方案 D9）：`PARTNER_RELAY_ENVELOPE=false` → 回到 8d 的纯文本形态
+ * （`submit` 不带 `entry`，落成 `pi.user`）。缺省**开**。
+ */
+export function partnerRelayEnvelopeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = env.PARTNER_RELAY_ENVELOPE?.trim().toLowerCase();
+	if (!raw) return true;
+	return raw !== "false" && raw !== "0" && raw !== "off";
+}
+
+/** 这条 kind 是不是"别人递来的话"（回读 / 轮边界 / 问候判定共用这一处口径） */
+export function isRelayEntryKind(kind: string): boolean {
+	return kind === RELAY_ENTRY_KIND;
+}
+
+/**
+ * 递话条目的作者数据 + 条目 draft。
+ *
+ * 与 `relayBody()` 必须从同一个 `from` 生成（方案 §六"正文前缀与结构漂移"）：
+ * 正文里那句 `[来自执事 A（域）]` 给模型看，这里的 `data` 给界面看，说的是同一件事。
+ *
+ * 返回 `entry` 字段该收到的形状；开关关时返回 null（调用方据此原样 `submit`）。
+ */
+export function relayEntryOf(
+	from: { id: string; name: string; domain: string | null },
+	hop: number = 1,
+	env: NodeJS.ProcessEnv = process.env,
+): { kind: string; data: Record<string, string | number> } | null {
+	if (!partnerRelayEnvelopeEnabled(env)) return null;
+	return {
+		kind: RELAY_ENTRY_KIND,
+		data: {
+			kind: "partner",
+			id: from.id,
+			name: from.name,
+			...(from.domain ? { domain: from.domain } : {}),
+			hop,
+		},
+	};
+}
+
+
 /** 被闸门拦下时回给模型的说明（lifecycle 用；措辞与 turn-gate 的拦截话术同风格） */
 export const RELAY_HOP_BLOCK_MESSAGE =
 	"这一轮是由别人递来的话触发的，不能再用 send_to_agent 转手递出去（这条通道只允许一跳）。" +
@@ -262,6 +317,42 @@ export function relayBody(from: RelaySender, message: string): string {
 		`${RELAY_HOP_TAG}[来自执事 ${from.name}（${domain}）] ${message}\n` +
 		"（这是执事间递话，主人看不到原文；需要主人知情或回话请用汇报或主人对话。）"
 	);
+}
+
+/**
+ * 从送达正文里认出发信人（正文前缀是模型侧说明，也是结构缺了时的兜底：
+ * `[relay hop=1][来自执事 信使甲（inbox）]`）。认不出返回 null。
+ */
+export const RELAY_FROM_PATTERN = /\[relay hop=(\d+)\]\[来自执事 (.+?)（(.+?)）\]/;
+
+export function relayFromOf(body: string): { name: string; domain: string | null; hop: number } | null {
+	const hit = RELAY_FROM_PATTERN.exec(body);
+	if (!hit) return null;
+	const name = hit[2]?.trim();
+	if (!name) return null;
+	const domain = hit[3]?.trim();
+	return {
+		name,
+		// 没有领域的执事先前被写成「无领域」，这里按"没有"处理，不把占位词当标签
+		domain: domain && domain !== "无领域" ? domain : null,
+		hop: Number(hit[1]) || 1,
+	};
+}
+
+/**
+ * 展示用正文（2026-11-15 作者标记方案 §3.3）。
+ *
+ * 模型侧那三段说明（hop 标记、来信人、末尾括注）在界面上全是噪声——抬头已经
+ * 写了"谁发来的"。所以回读时把它们剥掉：**存储不动、模型看到的不动，只改展示**。
+ * 送达时的 `untrusted_objective` 包裹同样剥掉（批 21 的注入防线不属于界面语言）。
+ */
+export function relayDisplayText(body: string): string {
+	let text = body.trim();
+	const wrapped = /^<untrusted_objective>([\s\S]*)<\/untrusted_objective>$/.exec(text);
+	if (wrapped) text = wrapped[1]!.trim();
+	text = text.replace(RELAY_FROM_PATTERN, "").trim();
+	text = text.replace(/\n?（这是执事间递话[^）]*）\s*$/, "");
+	return text.trim();
 }
 
 /** 主人时间线上的那一条（正文不展示：只给"谁递给了谁"，点开 B 的会话看原文） */
@@ -473,11 +564,13 @@ export interface RelayDeliverResult {
 	error?: string;
 }
 
-/** 发送方身份（两态回执要知道"跑完后回给谁、回哪条会话"）。 */
+/** 发送方身份（两态回执要知道"跑完后回给谁、回哪条会话"；`domain` 供作者标记）。 */
 export interface RelaySenderContext {
 	conversationId: number;
 	partnerId: string;
 	name: string;
+	/** 发送方的领域标签（作者条目用；没有领域的执事为 null） */
+	domain: string | null;
 }
 
 export interface PartnerRelayDeps {

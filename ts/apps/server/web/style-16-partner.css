@@ -251,3 +251,58 @@
 }
 .rt-state.is-off { color: var(--text-3); opacity: .75; }
 
+
+/* ── 执事招聘模板（2026-11-15）：招聘大厅卡墙（列表里除总管外零执事时）
+   + 新建弹窗顶部的模板快捷条。只吃现有令牌，颜色随主题走。 ── */
+.pt-hire { display: flex; flex-direction: column; gap: 12px; padding: 16px; }
+.pt-hire.is-loading { min-height: 64px; }
+.pt-hire-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.pt-hire-title { font-size: 14px; font-weight: 600; color: var(--text); }
+.pt-hire-sub { font-size: 12px; color: var(--text-3); }
+.pt-hire-list {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px;
+}
+.pt-tpl-card {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 6px;
+  border: 1px solid var(--divider); border-radius: var(--r-sm);
+  background: none; color: var(--text); font-family: inherit; text-align: left;
+  padding: 12px 14px; cursor: pointer;
+  transition: border-color .15s ease, background-color .15s ease;
+}
+.pt-tpl-card:hover { border-color: var(--accent); background: var(--card-high); }
+.pt-tpl-role { font-size: 13px; font-weight: 600; color: var(--text); }
+.pt-tpl-name { font-size: 10.5px; color: var(--text-3); }
+.pt-tpl-desc {
+  font-size: 11.5px; line-height: 1.55; color: var(--text-2);
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+.pt-hire-manual { align-self: flex-start; }
+.pt-tpl-strip {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  margin: 4px 0 10px;
+}
+.pt-tpl-strip[hidden] { display: none; }
+.pt-tpl-strip-label { font-size: 11px; color: var(--text-3); margin-right: 2px; }
+.pt-tpl-chip {
+  height: 26px; padding: 0 11px;
+  border: 1px solid var(--outline); border-radius: var(--r-full);
+  background: none; color: var(--text-2);
+  font-family: inherit; font-size: 12px; line-height: 1; cursor: pointer;
+  transition: border-color .15s ease, color .15s ease, background-color .15s ease;
+}
+.pt-tpl-chip:hover { border-color: var(--text-3); color: var(--text); }
+.pt-tpl-chip[aria-pressed="true"] {
+  border-color: var(--accent); color: var(--accent); background: var(--card-high);
+}
+
+/* 列表卡 ⋯ 按钮（2026-11-15）：试跑 / 暂停 / 删除收进菜单，卡面只剩 改人设 + ⋯ */
+
+/* ⋯ 裸态（2026-11-15 用户口径：不要外框）：透明底无边框，hover 才浮浅底 */
+.pt-dots {
+  min-width: 34px; height: 30px; padding: 0 8px;
+  border: 0; background: none; color: var(--text-2);
+  font-family: inherit; font-size: 15px; line-height: 1; cursor: pointer;
+  border-radius: var(--r-sm);
+  transition: background-color .15s ease, color .15s ease;
+}
+.pt-dots:hover { background: var(--surface-low); color: var(--text); }

@@ -11,6 +11,7 @@ import {
   ChatRequestSchema,
   ThinkingLevelSchema,
   type ChatEvent,
+  type DelegationPhase,
   type FinishReason,
   type ThinkingLevel,
   type TurnUsage,
@@ -97,11 +98,14 @@ import { mountPhoneWorker } from "./phone-worker.ts";
 import { mountProjects, seedDefaultWorkspace } from "./projects.ts";
 import { chatHistoryPagingEnabled, loadFlagOverrides, mountFlags } from "./flags.ts";
 // 自动归档调度器（2026-11-13 归档管理对齐 ZCode 批A）：启动 sync 一次，
-// ARCHIVE_AUTO_ENABLED=false（默认）时零行为；flags 端点改开关后由 onChange 动态开停。
+// ARCHIVE_AUTO_ENABLED=false/0/off 时才零行为（2026-11-15 起默认开）；flags 端点改开关后由 onChange 动态开停。
 import { autoArchiveScheduler } from "./agent/auto-archive.ts";
 // 永久删除端点（同批）：mountDurableDelete 挂 deletion-preview / delete 两组路由。
 import { mountDurableDelete } from "./agent/durable-delete.ts";
 import { mountFiles } from "./files.ts";
+// 设置 → 上下文（2026-11-16）：只读重放当前装配 + 首轮注入实文，不重跑召回。
+import { chatContextInspectEnabled, contextInspectPayloadOf, lastRequestInjectionsOf } from "./context-inspect.ts";
+import { CTX } from "./agent/shared.ts";
 // 壁纸（2026-11-14 外观页扩展）：.data/appearance 存一张图 + GET/POST/DELETE 三个端点。
 // AGENT_APPEARANCE_WALLPAPER=0 时整组不挂（界面那块也自己藏掉）。
 import { mountAppearanceWallpaper, wallpaperEnabled } from "./appearance-wallpaper.ts";
@@ -197,9 +201,16 @@ import {
 } from "./agent/session-search.ts";
 import { chancellorWorkRoot } from "./delegation.ts";
 import { DelegationReceipts } from "./delegation-receipts.ts";
+import { delegationMessages } from "./delegation-messages.ts";
+import { findTicket } from "./delegation-mount.ts";
+import { restoreDelegationWakeQueue, wakeOnDelegationReport } from "./delegation-wake.ts";
+import { listTaskChats } from "./task-chat-index.ts";
+import { sidebarTaskGroupsEnabled } from "./task-chat-owner.ts";
 import {
 	collectDeadLetters,
+	redeliverUndeliveredReports,
 	recoverReportEnabled,
+	reportRedeliveryEnabled,
 	reportRecoveredTickets,
 	type DeadLetterChild,
 } from "./recovery-report.ts";
@@ -855,7 +866,13 @@ app.get("/api/v1/agent/chats", async (c) => {
   const limit = Number(c.req.query("limit") ?? 50);
   const chats = await listChats(Number.isFinite(limit) ? limit : 50);
   // 2026-11-12 归档模块：`removed` → `archived`（计数）。手机端只读 `chats`，改名不断手机。
-  return c.json({ chats, archived: chatMetaSummary().archived });
+  // 2026-11-15 侧栏按创建者分组：增量 `tasks` 键带任务专线会话（手机 / 旧客户端忽略未知键）。
+  // 开关关着不下发——回滚形态双保险（前端回旧版平铺列表）。
+  const body: Record<string, unknown> = { chats, archived: chatMetaSummary().archived };
+  if (sidebarTaskGroupsEnabled()) {
+    body.tasks = await listTaskChats(Number.isFinite(limit) ? limit : 50);
+  }
+  return c.json(body);
 });
 
 /**
@@ -1740,9 +1757,19 @@ app.post("/api/v1/agent/chat/:conversationId/say", async (c) => {
   return c.json({ ok: true, conversationId: chat.externalId }, 201);
 });
 
-/** 用量与花费：按模型累计，来自 durable 自己维护的 pi.usage */
+/**
+ * 用量与花费：按模型累计，来自 durable 自己维护的 pi.usage。
+ *
+ * 2026-11-15 加 `range=7d|30d`：近 N 个自然日（含今天）改用每条 assistant entry
+ * 自带的 `timestamp` + `usage` 还原（pi.usage 只有按会话累计，没有逐日流水）。
+ * 不带 `range` 或值不认识 = 原来的全部累计，旧客户端零改动。
+ */
 app.get("/api/v1/agent/usage", async (c) => {
   if (!readLlmConfig()) return c.json({ models: [] });
+  const range = c.req.query("range")?.trim();
+  if (range === "7d" || range === "30d") {
+    return c.json(await usageSummary({ days: range === "7d" ? 7 : 30 }));
+  }
   return c.json(await usageSummary());
 });
 
@@ -1941,6 +1968,36 @@ app.get("/api/v1/agent/chat/:conversationId/context", async (c) => {
       contextMessageOf(message, slice.from + offset),
     ),
   });
+});
+
+/**
+ * 设置 → 上下文（2026-11-16，接口文档 §2.2.4）。
+ *
+ * 只读：从 conversation.context() 重放当前 system prompt / tools，加上 beforeRequest
+ * 首轮记下的临时注入实文；不重新跑记忆召回（recall 会回写使用计数）。
+ * 回滚：`CHAT_CONTEXT_INSPECT=false` → 404。
+ */
+app.get("/api/v1/agent/chat/:conversationId/context-inspect", async (c) => {
+  if (!chatContextInspectEnabled()) return c.json({ error: "not_found" }, 404);
+  const chat = await openChat(c.req.param("conversationId"));
+  if (!chat) return c.json({ error: "unknown_conversation" }, 404);
+
+  const view = await chat.conversation.context(CTX).catch(() => null);
+  if (!view) return c.json({ error: "context_unavailable" }, 503);
+  const usage = await contextUsageOf(chat.conversation, view).catch(() => null);
+  const chatKind = await chatKindOf(chat).catch(() => null);
+  c.header("cache-control", "no-store");
+  return c.json(
+    contextInspectPayloadOf({
+      conversationId: chat.externalId,
+      title: chatTitles()[chat.externalId] ?? null,
+      chatKind,
+      usage: usage ? { used: usage.used, window: usage.window } : null,
+      view,
+      memoryEnabled: Boolean(memoryEngine),
+      lastInjections: lastRequestInjectionsOf(chat.internalId),
+    }),
+  );
 });
 
 /** 内容级跨会话搜索（批次二）：逐会话 LIKE，q 最少 2 字符（见接口文档 §2.5） */
@@ -2637,12 +2694,16 @@ serve({ fetch: app.fetch, port }, (info) => {
       }
       await reportRecoveries(recovered);
       await recordDeadLetters(recovered);
+      // 补送（2026-11-15 送达兜底）：与恢复扫描独立——没有恢复单也可能有待送达行。
+      await redeliverReports();
     })
     .catch((error: unknown) => {
       console.warn(
         `[恢复] 启动恢复失败（不影响服务）: ${error instanceof Error ? error.message : error}`,
       );
     });
+  // 唤醒队列恢复（2026-11-15 送达兜底 §C）：读回上一次进程没送完的唤醒队列并重排。
+  restoreWakeQueue();
   // 例行任务引擎（2026-11-05 批次B B3）：接全局事件口 + 结算遗留 running。
   // phase/tool 的全局口在 agent.ts，这里喂给引擎；delegation 口引擎自己订。
   if (COMPANIONS_ENABLED) {
@@ -2651,7 +2712,7 @@ serve({ fetch: app.fetch, port }, (info) => {
   }
   // 任务观察层（2026-11-05 批次C C1）：AUTONOMY_ENABLED=false 时 subscribe 内部直接返回（零行为）
   autonomyObserver().subscribe();
-  // 自动归档调度器（2026-11-13 批A）：ARCHIVE_AUTO_ENABLED=false（默认）时不开定时器，零开销
+  // 自动归档调度器（2026-11-13 批A）：ARCHIVE_AUTO_ENABLED=false/0/off 时不开定时器，零开销（2026-11-15 起默认开）
   autoArchiveScheduler().sync();
   // 每晚记忆整理（2026-11-14）：每天 03:30 对我 + 各在职执事各跑一次"整理建议"。
   // 只出建议、不应用；MEMORY_NIGHTLY_REVIEW=false 时不挂定时器。
@@ -2742,6 +2803,77 @@ async function recordDeadLetters(entries: RecoveredTicket[]): Promise<void> {
     );
   } finally {
     receipts.close();
+  }
+}
+
+/**
+ * 待送达汇报的启动补送（2026-11-15 回信送达兜底，方案 §A）。
+ *
+ * 终态落盘到汇报写回之间进程崩溃的话，in 留言停在 delivered=0——恢复扫描
+ * （inflight 口径）看不到它们。这里启动时补送一次：写回成功销 1 并走"完成即唤醒"，
+ * 宿主会话已不存在销 2，写回异常留 0 下次启动再试。留言表 + 任务专线里始终有
+ * 结论原文，补送只是把宿主会话里缺的那份补齐。开关 DELEGATION_REPORT_REDELIVERY。
+ */
+async function redeliverReports(): Promise<void> {
+  if (!reportRedeliveryEnabled() || !readLlmConfig()) return;
+  const receipts = new DelegationReceipts();
+  try {
+    const sent = await redeliverUndeliveredReports({
+      undelivered: () => delegationMessages().listUndelivered(),
+      // 票已被清掉的行（探针残留 / 老单清理）直接销账，不进补送也不反复 warn
+      ticketExists: (ticketId) => findTicket(chancellorWorkRoot(), ticketId) !== null,
+      hostConversationId: (ticketId) => {
+        const receipt = receipts.lookupByTicket(ticketId);
+        if (typeof receipt?.conversationId === "number") return receipt.conversationId;
+        // 回执缺失退 ticket.json：originConversationId 记的是宿主内部 id（数字串）
+        const raw = findTicket(chancellorWorkRoot(), ticketId)?.ticket.originConversationId;
+        return raw !== undefined && raw !== null && /^\d+$/.test(String(raw)) ? Number(raw) : null;
+      },
+      phaseOf: (ticketId) => {
+        const status = String(findTicket(chancellorWorkRoot(), ticketId)?.ticket.status ?? "");
+        if (status === "done" || status === "needs_you" || status === "aborted") return status;
+        return status ? "failed" : null;
+      },
+      // sayInConversation 返回 false = 会话已不存在 → 行销 2（补送永远不会再成功）
+      say: async (conversationId, text) => {
+        const ok = await sayInConversation(conversationId, text);
+        if (!ok) {
+          console.warn(`[补送] 会话 ${conversationId} 已不存在，销账跳过`);
+        }
+        return ok;
+      },
+      settle: (id, state) => delegationMessages().markDelivery(id, state),
+      wake: (conversationId, ticketId, text, phase) => {
+        wakeOnDelegationReport(conversationId, {
+          ticketId,
+          domain: "",
+          phase: phase as DelegationPhase,
+          text: `（重启补送）${text}`,
+        });
+      },
+      log: (line) => console.warn(line),
+    });
+    if (sent > 0) console.log(`[恢复] 补送待送达汇报 ${sent} 条`);
+  } catch (error) {
+    console.warn(
+      `[恢复] 补送扫描失败（不影响服务）: ${error instanceof Error ? error.message : error}`,
+    );
+  } finally {
+    receipts.close();
+  }
+}
+
+/**
+ * 唤醒队列启动恢复（2026-11-15 送达兜底 §C）：读回上一次进程没送完的唤醒队列。
+ * 文件不存在 / 坏了当空队列；开关关着时 flush 的守卫链会自行清空。
+ */
+function restoreWakeQueue(): void {
+  try {
+    restoreDelegationWakeQueue();
+  } catch (error) {
+    console.warn(
+      `[wake] 唤醒队列恢复失败（不影响服务）: ${error instanceof Error ? error.message : error}`,
+    );
   }
 }
 

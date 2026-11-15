@@ -363,6 +363,11 @@
     </div>
   </aside>
 
+  <!-- 窄屏展开侧栏的遮罩（2026-11-15）：≤800px 且侧栏展开时由 shell.js 显隐，
+       点它 = 收侧栏；宽屏永远 hidden（桌面侧栏是常驻的，点外不收）。
+       设置路由整页没有侧栏，样式里 html[data-route="settings"] 下直接 display:none。 -->
+  <div class="sidebar-scrim" id="sidebar-scrim" hidden></div>
+
   <main class="main" id="view-chat">
     <header class="top">
       <!-- 对话对手（2026-11-13）：执事专线显示该执事的头像 + 名字，跟侧栏花名册同一张脸。

@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { beforeEach, test } from "node:test";
+import { readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Conversation } from "@earendil-works/pi-durable";
 import type { DelegationReport } from "./delegation.ts";
 import type { PartnerTurnOptions, PartnerTurnResult } from "./partner-runtime.ts";
@@ -7,12 +10,17 @@ import type { PartnerTurnOptions, PartnerTurnResult } from "./partner-runtime.ts
 /**
  * 派活完成即唤醒（2026-11-10 批 29）单测。
  *
- * 全部用可注入的假 deps + 假时钟：不起服务、不碰 .data、不调模型。
- * 覆盖：提示词固定字节 / collectPending 语义 / 守卫链四关 / 忙退避超限 / 连续 flush 保险丝。
+ * 全部用可注入的假 deps + 假时钟：不起服务、不调模型。
+ * 覆盖：提示词固定字节 / collectPending 语义 / 守卫链四关 / 忙退避超限改重排 /
+ * 连续 flush 保险丝 / 失败回队重排 / 队列落盘与启动恢复（2026-11-15 送达兜底 §C）。
  * 先设 env 再动态 import：delegation-wake 会间接拉起 agent 装配链，避免单测写盘。
  */
 process.env.MEMORY_ENABLED = "false";
 process.env.LLM_PROVIDER = "faux";
+// 队列落盘钉到临时目录（懒读 env）：别把单测的入队写进真实服务的 .data/wake-pending.json
+const WAKE_QUEUE_FILE = join(tmpdir(), `wake-pending-test-${process.pid}.json`);
+process.env.AGENT_WAKE_PENDING_PATH = WAKE_QUEUE_FILE;
+beforeEach(() => rmSync(WAKE_QUEUE_FILE, { force: true }));
 
 const {
 	buildWakePrompt,
@@ -20,6 +28,7 @@ const {
 	delegationWakeEnabled,
 	flushDelegationWake,
 	resetDelegationWakeState,
+	restoreDelegationWakeQueue,
 	wakeOnDelegationReport,
 } = await import("./delegation-wake.ts");
 
@@ -241,7 +250,7 @@ test("防抖合并：同会话 2 秒合成一轮，跨会话各跑各的，quiet
 	);
 });
 
-test("忙退避：假时钟下超 150 次放弃并 warn，不跑唤醒轮", async () => {
+test("忙退避：假时钟下超 150 次不再原地等，改重排；连续 3 次重排后放弃并 warn", async () => {
 	const { deps, clock, calls } = makeDeps({ isBusy: async () => true });
 	const warnings: string[] = [];
 	const original = console.warn;
@@ -258,12 +267,16 @@ test("忙退避：假时钟下超 150 次放弃并 warn，不跑唤醒轮", asyn
 	}
 	assert.equal(calls.length, 0, "一直忙 → 不跑唤醒轮");
 	assert.ok(
-		warnings.some((line) => line.includes("[wake] 会话 21 忙超 5 分钟，本次唤醒放弃 tickets=1")),
-		`warn 口径：${warnings.join(" / ")}`,
+		warnings.some((line) => line.includes("[wake] 会话 21 忙超 5 分钟，改 10 分钟后重试 tickets=1")),
+		`耗尽 warn 口径：${warnings.join(" / ")}`,
+	);
+	assert.ok(
+		warnings.some((line) => line.includes("重排 3 次仍未成功（忙退避耗尽），放弃唤醒 tickets=1")),
+		"重排 3 次后放弃（2026-11-15 送达兜底 §C，翻案批 29 的耗尽即放弃）",
 	);
 });
 
-test("保险丝：连续 flush 超过 5 轮就停，pending 清空", async () => {
+test("保险丝：连续 flush 超过 5 轮就停本链，改重排；重排 3 次后清空", async () => {
 	let depsRef: NonNullable<WakeDeps> | null = null;
 	const { deps, clock, calls } = makeDeps({
 		runTurn: async (partnerId, prompt, opts) => {
@@ -285,14 +298,72 @@ test("保险丝：连续 flush 超过 5 轮就停，pending 清空", async () =>
 	} finally {
 		console.warn = original;
 	}
-	assert.equal(calls.length, 5, "单链最多 5 轮");
+	// 每条链 5 轮；重排 3 次（每次又是一条 5 轮链）后放弃 → 4 × 5 = 20 轮
+	assert.equal(calls.length, 20, "每链 5 轮 × 首链 + 3 次重排链");
 	assert.ok(
 		warnings.some((line) => line.includes("连续唤醒超过 5 轮")),
 		`保险丝 warn：${warnings.join(" / ")}`,
 	);
+	assert.ok(
+		warnings.some((line) => line.includes("重排 3 次仍未成功（链保险丝）")),
+		"重排耗尽后放弃并留一行日志",
+	);
 	// 清空后不在 pending 里留残货：再 flush 一轮也不该跑
 	await flushDelegationWake(31, deps);
-	assert.equal(calls.length, 5, "超限后 pending 已清空");
+	assert.equal(calls.length, 20, "超限后 pending 已清空");
+});
+
+test("唤醒轮失败：取走的汇报回灌队首，10 分钟后重排；连续 3 次失败后放弃", async () => {
+	const { deps, clock, calls } = makeDeps({
+		runTurn: async (partnerId, prompt, opts): Promise<PartnerTurnResult> => {
+			calls.push({ partnerId, prompt, opts });
+			return { ok: false, text: "", error: "上游炸了" };
+		},
+	});
+	const warnings: string[] = [];
+	const original = console.warn;
+	console.warn = (message: string) => {
+		warnings.push(String(message));
+	};
+	try {
+		wakeOnDelegationReport(41, report("t1"), deps);
+		wakeOnDelegationReport(41, report("t2"), deps);
+		const running = flushDelegationWake(41, deps);
+		await clock.runAll();
+		await running;
+	} finally {
+		console.warn = original;
+	}
+	// 首链 1 轮 + 3 次重排链各 1 轮 = 4 次唤醒尝试，每次都带全部两条
+	assert.equal(calls.length, 4, `失败也会重试（2026-11-15 送达兜底 §C.4）`);
+	for (const call of calls) {
+		assert.ok(call.prompt.includes("t1") && call.prompt.includes("t2"), "回灌后两条都在队首");
+	}
+	assert.ok(
+		warnings.some((line) => line.includes("重排 3 次仍未成功（唤醒轮失败）")),
+		`放弃 warn：${warnings.join(" / ")}`,
+	);
+});
+
+test("队列落盘与启动恢复：入队写文件，restore 读回并重排；坏文件当空", async () => {
+	const { deps, clock } = makeDeps();
+	wakeOnDelegationReport(51, report("persisted"), deps);
+	const raw = JSON.parse(readFileSync(WAKE_QUEUE_FILE, "utf8")) as {
+		entries: Array<{ conversationId: number; reports: DelegationReport[] }>;
+	};
+	assert.equal(raw.entries.length, 1, "入队即落盘");
+	assert.equal(raw.entries[0].conversationId, 51);
+
+	// 模拟重启：清内存态后从文件读回
+	resetDelegationWakeState();
+	const restored = restoreDelegationWakeQueue(deps);
+	assert.equal(restored, 1, "读回一条");
+	// 恢复后防抖到点会真正跑唤醒轮
+	await clock.runAll();
+
+	// 坏文件 / 不存在的文件都当空队列，不抛
+	rmSync(WAKE_QUEUE_FILE, { force: true });
+	assert.equal(restoreDelegationWakeQueue(deps), 0);
 });
 
 test("wakeOnDelegationReport 绝不抛：依赖异常静默返回", () => {

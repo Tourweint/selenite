@@ -15,6 +15,28 @@ export function partnerContractEnabled(): boolean {
 	return raw !== "false" && raw !== "0";
 }
 
+/**
+ * 项目记忆跟人走（2026-11-15 项目记忆挂载跟人走方案）：总管 / 执事档案挂项目的记忆层。
+ * `false` / `0` 全链路退回"只有文件夹挂载"的形态：投影不出字段、召回不并、remember 不认。
+ * 文件夹挂载（ChatProjects → 打手会话）不在本开关内——那是上一批已落地的东西。
+ */
+export function partnerProjectMemoryEnabled(): boolean {
+	const raw = process.env.PARTNER_PROJECT_MEMORY?.trim().toLowerCase();
+	if (!raw) return true;
+	return raw !== "false" && raw !== "0";
+}
+
+/**
+ * 注入闸门（2026-11-15 项目记忆多挂载方案）：挂载项目（除会话绑定项目外）只有
+ * 字面命中当前话题的条目才进候选——"聊到才注入"从打分巧合变成硬规则。
+ * `false` / `0` = 挂载项目全权进池（跟人走方案当日的形态），一行回滚。
+ */
+export function projectMemoryGateEnabled(): boolean {
+	const raw = process.env.PROJECT_MEMORY_GATE?.trim().toLowerCase();
+	if (!raw) return true;
+	return raw !== "false" && raw !== "0";
+}
+
 export const PARTNER_CONTRACT_SECTIONS = [
 	"职责范围",
 	"决策分级",

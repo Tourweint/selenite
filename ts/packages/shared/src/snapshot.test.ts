@@ -183,6 +183,20 @@ const MESSAGE_SHAPE = {
 		role: { kind: "enum", values: ["user", "assistant"] },
 		steps: { kind: "optional", of: { kind: "array", of: STEP_SHAPE } },
 		text: { kind: "string" },
+		// 2026-11-15 作者标记：非主人来源的 user 消息带作者（结构与正文分离）
+		author: {
+			kind: "optional",
+			of: {
+				kind: "object",
+				fields: {
+					kind: { kind: "enum", values: ["partner"] },
+					id: { kind: "string" },
+					name: { kind: "string" },
+					domain: { kind: "optional", of: { kind: "string" } },
+					hop: { kind: "optional", of: { kind: "number" } },
+				},
+			},
+		},
 		workMs: { kind: "optional", of: { kind: "number" } },
 	},
 };

@@ -36,6 +36,8 @@
 .btn-primary:disabled { opacity: .5; cursor: default; filter: none; }
 .btn-primary svg { width: 14px; height: 14px; flex: none; }
 .btn-primary.is-quiet { background: var(--accent-container); color: var(--on-accent-container); }
+/* 归档页项目卡的「删除登记」：同 quiet 尺寸，destructive 色（入口只在归档里，2026-11-15） */
+.btn-primary.is-quiet.is-danger { background: var(--c-error); color: var(--bg); }
 
 /* 路径行：输入 + 选择目录 + 保存；窄窗口折行，输入始终占满剩余宽 */
 .set-path-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
@@ -460,3 +462,52 @@
 .proposal-card .proj-card-path { margin-top: 0; }
 .proposal-actions { flex: none; display: flex; gap: 6px; }
 
+
+/* 插件页（原「行为开关」，2026-11-16 从服务页拆出）：照插件中心的卡片墙排。
+   卡面只留名字 + 徽标 + 一句简介 + 控件；完整解释收进标题的 data-tip（全局 hover-tip 小黑块）。
+   页面不再套一层大卡，卡片直接铺在设置页背景上——嵌套卡片会糊成一片。 */
+.flag-intro { padding: 0 2px 14px; }
+.flag-intro-count {
+  font-size: 11.5px; font-weight: 400; color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.flag-section + .flag-section { margin-top: 22px; }
+.flag-group-head { display: flex; align-items: center; gap: 8px; margin: 0 2px 9px; }
+.flag-group-title { font-size: 12px; font-weight: 500; color: var(--text-2); }
+.flag-group-count { font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.flag-group-head::after { content: ""; flex: 1; height: 1px; background: var(--divider); }
+
+.flag-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(245px, 1fr)); gap: 10px; }
+.flag-item { display: flex; flex-direction: column; gap: 7px; height: 132px; padding: 13px 15px; }
+.flag-item-main { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 7px; }
+.flag-item-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.flag-item-name {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 13px; font-weight: 500; color: var(--text);
+}
+.flag-tags { flex: none; display: inline-flex; align-items: center; gap: 4px; margin-left: 0; }
+.flag-tag {
+  display: inline-flex; align-items: center; height: 17px; padding: 0 5px;
+  border-radius: 5px; background: var(--surface-low);
+  font-size: 10.5px; font-weight: 500; line-height: 1;
+  color: var(--text-3);
+}
+.flag-tag.warn { color: var(--warn); }
+.flag-tag.accent { color: var(--accent); }
+.flag-item-brief {
+  flex: 1 1 auto; min-height: 39px;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2;
+  overflow: hidden;
+  font-size: 12px; line-height: 1.55; color: var(--text-2); overflow-wrap: anywhere;
+}
+.flag-item-foot {
+  flex: none; display: flex; align-items: center; justify-content: flex-end;
+  gap: 8px; min-height: 22px;
+}
+/* 三档开关（自主轮 / 记忆提取）在卡里占满整行，中文标签不许被挤成竖排 */
+.flag-item-foot .segmented { flex: 1 1 auto; }
+.flag-item-foot .segmented button { flex: 1 1 0; padding: 0 6px; white-space: nowrap; }
+.flag-foot { margin-top: 18px; padding: 0 2px; font-size: 11.5px; line-height: 1.55; color: var(--text-3); }
+.flag-empty { padding: 14px 16px; }

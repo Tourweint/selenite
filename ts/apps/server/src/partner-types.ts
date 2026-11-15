@@ -58,8 +58,17 @@ export interface PartnerRow {
 	 */
 	diary: boolean;
 	/**
-	 * 人格预设（2026-11-14 员工人格模块 §四）：`work`（默认）/ `companion` / `custom`。
-	 * 只决定模块开关的默认值；**不版本化**（人格模块不是身份，不 bump 版本、不动 SOUL / 契约）。
+	 * 项目记忆挂载（2026-11-15 跟人走立项、同日多挂载方案扩化）：uuid 数组 = 负责的
+	 * 已登记项目（挂载 = 可达性：recall 全部可查、聊到的自动浮出、remember 指名写入），
+	 * 空数组 = 不挂。**不版本化**（不是身份）；解析在 agent/project-scope.ts
+	 * （personaProjectIdsOf*）。演进注：上线首日为单值 projectId（string|null），同日改多数组。
+	 */
+	projectIds: string[];
+	/**
+	 * 人格预设（2026-11-14 员工人格模块 §四；2026-11-15 人设页打磨扩枚举）：
+	 * `work`（默认）/ `companion` / `allrounder` / `apprentice` / `custom`。
+	 * 只决定模块开关的默认值；保存时按最终开关表推导（`derivePresetFromModules`）——
+	 * 名字与表永远一致。**不版本化**（人格模块不是身份，不 bump 版本、不动 SOUL / 契约）。
 	 */
 	personaPreset: PartnerPersonaPreset;
 	/**
@@ -90,22 +99,6 @@ export interface PartnerRow {
 	moodUpdatedAt: string | null;
 	/** 这条心情是谁写的：`rule`（可见规则）/ `manual`（人改的）；null = 初始态。 */
 	moodSource: "rule" | "manual" | null;
-}
-
-export interface PartnerVersionRow {
-	partnerId: string;
-	version: number;
-	/** SOUL.md 正文快照（冻结） */
-	soulSource: string;
-	/**
-	 * CONTRACT.md 正文快照（2026-11-08 员工人格化刀一 E1，冻结）。
-	 * 一个身份版本 = 当时的 SOUL + CONTRACT 对；改任一文本都 bump 版本并落双快照。
-	 * `null` = 该版本没有契约快照（老库 / 总管 / 开关关着时建的家）。
-	 */
-	contractSource: string | null;
-	/** 能力 JSON：模型候选链（B4）+ 预留位；只允许存引用（keyEnv 名），不允许存值 */
-	capabilities: string | null;
-	createdAt: string;
 }
 
 export interface PartnerSessionLinkRow {

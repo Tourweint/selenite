@@ -16,6 +16,7 @@
  */
 
 import { authHeaders } from "./net.js";
+import { wireDragScroll } from "./scroll-x.js";
 import { toast } from "./ui-atoms.js";
 
 const KEY = "lifediary.wallpaper";
@@ -548,6 +549,8 @@ function mountSection() {
 }
 
 function wireSection(section) {
+  // 五格壁纸与主题卡同一套横滚手势（2026-11-15）：滚轮/按住拖拽，窄屏也不折行
+  wireDragScroll(section.querySelector(".wallpapers"));
   for (const tile of section.querySelectorAll("[data-wall]")) {
     tile.addEventListener("click", () => {
       const kind = tile.dataset.wall;

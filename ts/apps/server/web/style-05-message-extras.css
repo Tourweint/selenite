@@ -419,3 +419,36 @@
 /* open 失败卡：重试 / 继续对话并排，窄屏自动折行 */
 .partner-open-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
+/* ── 来信（2026-11-15 作者标记方案 §3.3）──────────────────
+   非主人来源的消息不占右侧气泡位：靠左、与执事的回答同一边，抬头写清是谁发来的。
+   默认只露首行，点开看全文。卡片不带 .msg.user，所以没有编辑重发入口；
+   右侧只代表主人本人或替主人发的输入（cindy botLetter 同一套口径）。 */
+.msg.letter { flex-direction: column; align-items: flex-start; }
+.letter-card {
+  display: flex; flex-direction: column; gap: 4px;
+  max-width: 560px;
+  padding: 8px 12px;
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-left: 2px solid var(--text-3);
+  border-radius: var(--r-sm);
+}
+.letter-card:has(.letter-toggle) { cursor: pointer; }
+.letter-meta { display: flex; align-items: baseline; gap: 8px; font-size: 12px; color: var(--text-3); }
+.letter-from { color: var(--text-2); }
+.letter-when { font-variant-numeric: tabular-nums; }
+.letter-body {
+  font-size: 13.5px; line-height: 1.6; color: var(--text);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+/* 折叠只留一行：用 max-height 而不是 line-clamp，标记里的 pre-wrap 换行才稳 */
+.letter-body.is-collapsed { max-height: 1.65em; overflow: hidden; }
+.letter-toggle {
+  align-self: flex-start;
+  padding: 0; border: 0; background: none;
+  font-size: 12px; color: var(--text-3);
+  cursor: pointer;
+}
+.letter-toggle:hover { color: var(--text); }
+
+

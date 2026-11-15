@@ -33,17 +33,30 @@ process.env.AGENT_SSE_SEQ_DB_PATH = join(root, "chat-events.sqlite");
 process.env.AGENT_POLICY_PATH = join(root, "policy.json");
 process.env.ROUTINES_STATE_PATH = join(root, "routines.json");
 process.env.AUTONOMY_STATE_PATH = join(root, "autonomy-state.json");
+// 2026-11-15 按人技能状态：指到临时文件，绝不碰真实 .data/skills-state.json
+process.env.AGENT_SKILLS_STATE_PATH = join(root, "skills-state.json");
 
 const { Hono } = await import("hono");
 const { mountCompanions } = await import("./companion-api.ts");
+const { mountSkills } = await import("./skills-api.ts");
 const { PARTNER_SLOT_LIMIT, partnersStore } = await import("./partners.ts");
+const { getSkillState } = await import("./skill-state.ts");
 
 const store = partnersStore();
 const app = new Hono();
 mountCompanions(app);
+// 技能管理面单独挂一个 app：GET /agent/skills?partnerId 的按人字段用它验，
+// 不跟执事端点混在同一条路由表里。
+const skillsApp = new Hono();
+mountSkills(skillsApp, { enabled: true });
+
+// 项目记忆归属（2026-11-15 跟人走方案）：PATCH 校验用。PROJECTS_DB_PATH 已指到临时库。
+const { projectsStore } = await import("./project-api.ts");
 
 after(() => {
 	store.close();
+	// 项目记忆归属（2026-11-15）动过项目库：sqlite 句柄不关，Windows 上 rmSync 会 EPERM。
+	projectsStore().close();
 	rmSync(root, { recursive: true, force: true });
 });
 
@@ -215,7 +228,7 @@ function state(id: string) {
 		status: row?.status,
 		soul: store.readSoulFromHome(id),
 		modelChain: store.getModelChain(id),
-		soulVersion: store.currentVersion(id)?.version ?? null,
+		soulVersion: row?.currentVersion ?? null,
 		updatedAt: row?.updatedAt,
 	};
 }
@@ -695,6 +708,102 @@ test("GET /partners/:id/skills：首行摘要 + mtime，非 md 不收；空目�
 	assert.equal(missing.status, 404, "未知执事 404");
 });
 
+test("PUT /partners/:id/skills/:name/enabled：全局关可按人开，全局开 409 锁死", async () => {
+	const partner = store.create("技能开关执事");
+	const state = getSkillState();
+	const endpoint = `/api/v1/partners/${partner.id}/skills/meeting_guide/enabled`;
+
+	// 全局默认全关：可以只给这个执事开
+	const onRes = await app.request(endpoint, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ enabled: true }),
+	});
+	assert.equal(onRes.status, 200);
+	const onBody = (await onRes.json()) as { ok?: boolean; enabled?: boolean; partnerId?: string };
+	assert.equal(onBody.ok, true);
+	assert.equal(onBody.enabled, true);
+	assert.equal(onBody.partnerId, partner.id);
+	assert.equal(state.isEnabledFor(partner.id, "meeting_guide"), true);
+	assert.equal(state.isEnabledFor("someone-else", "meeting_guide"), false, "不影响别人");
+
+	// 关掉 = 删覆盖位
+	const offRes = await app.request(endpoint, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ enabled: false }),
+	});
+	assert.equal(offRes.status, 200);
+	assert.equal(state.isEnabledFor(partner.id, "meeting_guide"), false);
+
+	// 全局开 = 所有人都有，个人页锁死
+	state.setEnabled("meeting_guide", true);
+	const locked = await app.request(endpoint, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ enabled: false }),
+	});
+	assert.equal(locked.status, 409, "全局已开不能按人关");
+	const lockedBody = (await locked.json()) as { error?: string };
+	assert.equal(lockedBody.error, "locked");
+	state.setEnabled("meeting_guide", false);
+
+	// GET /agent/skills?partnerId：按人字段要和 PUT 的结果一致；不带 partnerId 时形状不变
+	const onAgain = await app.request(endpoint, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ enabled: true }),
+	});
+	assert.equal(onAgain.status, 200);
+	const scoped = (await (
+		await skillsApp.request(`/api/v1/agent/skills?partnerId=${encodeURIComponent(partner.id)}`)
+	).json()) as { items?: Array<Record<string, unknown>> };
+	const scopedSkill = scoped.items?.find((item) => item.name === "meeting_guide");
+	assert.equal(scopedSkill?.enabled, false, "全局关");
+	assert.equal(scopedSkill?.partnerEnabled, true, "这个人实际可用");
+	assert.equal(scopedSkill?.partnerOverride, true, "全局没开、该人独开");
+	const globalScoped = (await (await skillsApp.request("/api/v1/agent/skills")).json()) as {
+		items?: Array<Record<string, unknown>>;
+	};
+	const globalSkill = globalScoped.items?.find((item) => item.name === "meeting_guide");
+	assert.equal(globalSkill?.partnerEnabled, undefined, "不带 partnerId 不追加按人字段");
+	assert.equal(globalSkill?.partnerOverride, undefined);
+	await app.request(endpoint, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ enabled: false }),
+	});
+
+	// 边界：未知执事 / 非法名字 / 不存在的技能 / 非布尔 body
+	const noPartner = await app.request(
+		"/api/v1/partners/no-such-partner/skills/meeting_guide/enabled",
+		{
+			method: "PUT",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ enabled: true }),
+		},
+	);
+	assert.equal(noPartner.status, 404);
+	const badName = await app.request(`/api/v1/partners/${partner.id}/skills/Bad%20Name/enabled`, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ enabled: true }),
+	});
+	assert.equal(badName.status, 400);
+	const noSkill = await app.request(`/api/v1/partners/${partner.id}/skills/no_such_skill/enabled`, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ enabled: true }),
+	});
+	assert.equal(noSkill.status, 404);
+	const badBody = await app.request(endpoint, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ enabled: "yes" }),
+	});
+	assert.equal(badBody.status, 400);
+});
+
 // ── 员工人格模块端点（2026-11-14 批1）────────────────────────
 
 interface PersonaBody {
@@ -702,7 +811,7 @@ interface PersonaBody {
 	enabled?: boolean;
 	preset?: string;
 	modules?: Record<string, boolean>;
-	switches?: { moodAffectTone?: boolean; nudgeEnabled?: boolean };
+	switches?: { moodAffectTone?: boolean; nudgeEnabled?: boolean; memoryRecallEnabled?: boolean };
 	contents?: { style?: Record<string, unknown>; values?: Record<string, unknown>; scenario?: Record<string, unknown> };
 	voice?: { ruleCount?: number; jargonCount?: number; rules?: Array<{ kind?: string; text?: string }>; updatedAt?: string | null } | null;
 	proactivity?: { nudgeEnabled?: boolean; lastNudgeAt?: string | null } | null;
@@ -770,11 +879,16 @@ test("PUT /partners/:id/persona：换预设一键填开关；逐键覆盖；内�
 	assert.equal(companion.modules?.contract, false);
 	assert.equal(companion.modules?.impression, true, "批2 模块先落开关，本批不注入");
 
-	// 逐键覆盖：只改 contract，其它键不动
+	// 逐键覆盖：只改 contract，其它键不动；表不再匹配 companion → 预设自动跳「自定义」
+	// （2026-11-15 人设页打磨：预设名按最终开关表推导）
 	const toggle = (await (await putPersona(id, { modules: { contract: true } })).json()) as PersonaBody;
-	assert.equal(toggle.preset, "companion", "只给 modules 不改预设");
+	assert.equal(toggle.preset, "custom", "表不匹配预设 → 自动跳自定义");
 	assert.equal(toggle.modules?.contract, true);
 	assert.equal(toggle.modules?.expression, true, "没提到的键保持");
+
+	// 改回 companion 原样 → 自动跳回 companion
+	const back = (await (await putPersona(id, { modules: { contract: false } })).json()) as PersonaBody;
+	assert.equal(back.preset, "companion", "表回到预设原样 → 自动跳回该预设");
 
 	// 内容：按字段合并（先写一句，再补一句，第一句还在）
 	await putPersona(id, { contents: { style: { speakStyle: "短句，先给结论。" } } });
@@ -991,7 +1105,9 @@ test("persona 批3：voice / proactivity / profiles 投影；人设库存取应�
 	const stillCustom = (await (
 		await app.request(`/api/v1/partners/${partner.id}/persona`)
 	).json()) as PersonaBody;
-	assert.equal(stillCustom.preset, "work", "混批 400 不改预设");
+	// 上面 1062 那步把 profiles / learning / proactivity 开了：开关表已不匹配 work，
+	// 按推导口径（2026-11-15 人设页打磨）预设那时就该已是 custom；混批 400 后保持不变。
+	assert.equal(stillCustom.preset, "custom", "混批 400 不改预设（推导口径下此时应为 custom）");
 	assert.equal(stillCustom.profiles?.items?.length, 1, "混批 400 不新增快照");
 
 	// 模块关：动作 400；列表仍回读
@@ -1002,6 +1118,79 @@ test("persona 批3：voice / proactivity / profiles 投影；人设库存取应�
 		await app.request(`/api/v1/partners/${partner.id}/persona`)
 	).json()) as PersonaBody;
 	assert.equal(reread.profiles?.items?.length, 1, "模块关内容保留");
+});
+
+test("PUT /persona：新预设（全才 / 学徒）铺表；GET 的 preset 与开关表一致", async () => {
+	const partner = store.create("预设执事");
+
+	const allRes = await putPersona(partner.id, { preset: "allrounder" });
+	assert.equal(allRes.status, 200);
+	const all = (await allRes.json()) as PersonaBody;
+	assert.equal(all.preset, "allrounder");
+	assert.equal(all.modules?.expression, true);
+	assert.equal(all.modules?.heart, true);
+	assert.equal(all.modules?.learning, false);
+
+	const appRes = await putPersona(partner.id, { preset: "apprentice" });
+	const apprentice = (await appRes.json()) as PersonaBody;
+	assert.equal(apprentice.preset, "apprentice");
+	assert.equal(apprentice.modules?.learning, true);
+	assert.equal(apprentice.modules?.proactivity, true);
+	assert.equal(apprentice.modules?.contract, false);
+
+	// 在学徒表上关掉学习 → 表不再匹配任何预设 → 自定义
+	const off = (await (
+		await putPersona(partner.id, { modules: { learning: false } })
+	).json()) as PersonaBody;
+	assert.equal(off.preset, "custom");
+});
+
+test("GET /partners/:id/injection-preview：纪律跟随开关；在办 / 履历固定给原文", async () => {
+	const partner = store.create("预览执事");
+
+	// 缺省 work 预设：纪律开 → 给全文（含红线）
+	const onRes = await app.request(`/api/v1/partners/${partner.id}/injection-preview`);
+	assert.equal(onRes.status, 200);
+	const on = (await onRes.json()) as {
+		ok: boolean;
+		discipline: string | null;
+		currentWork: string | null;
+		workHistory: string | null;
+	};
+	assert.equal(on.ok, true);
+	assert.match(on.discipline ?? "", /【主人数据红线】/);
+	// 没活干 / 没履历 → 两段都是 null（前端弹层显示空态说明）
+	assert.equal(on.currentWork, null);
+	assert.equal(on.workHistory, null);
+
+	// 纪律关掉（陪伴预设）→ 纪律段 null；两段在办照旧现拼（仍是空）
+	await putPersona(partner.id, { preset: "companion" });
+	const offRes = await app.request(`/api/v1/partners/${partner.id}/injection-preview`);
+	const off = (await offRes.json()) as { discipline: string | null; currentWork: string | null };
+	assert.equal(off.discipline, null, "纪律关 → 不注入");
+
+	// 不存在 → 404
+	const missing = await app.request("/api/v1/partners/no-such/injection-preview");
+	assert.equal(missing.status, 404);
+});
+
+test("记忆召回子开关：默认开 / 关掉后投影回 false / 放回去回 true", async () => {
+	const partner = store.create("记忆开关执事");
+
+	const initial = (await (
+		await app.request(`/api/v1/partners/${partner.id}/persona`)
+	).json()) as PersonaBody;
+	assert.equal(initial.switches?.memoryRecallEnabled, true, "默认开（未写过）");
+
+	const off = (await (
+		await putPersona(partner.id, { switches: { memoryRecallEnabled: false } })
+	).json()) as PersonaBody;
+	assert.equal(off.switches?.memoryRecallEnabled, false);
+
+	const back = (await (
+		await putPersona(partner.id, { switches: { memoryRecallEnabled: true } })
+	).json()) as PersonaBody;
+	assert.equal(back.switches?.memoryRecallEnabled, true);
 });
 
 test("persona 端点鉴权：没凭据 403 空体", async () => {
@@ -1016,4 +1205,70 @@ test("persona 端点鉴权：没凭据 403 空体", async () => {
 	const res = await secured.request(`/api/v1/partners/${partner.id}/persona`);
 	assert.equal(res.status, 403);
 	assert.equal(await res.text(), "");
+});
+
+// ── 项目记忆挂载（2026-11-15 跟人走立项、同日多挂载方案扩化）──────────────
+
+test("PATCH projectIds：挂多个 / 替换 / 清空 / 投影带字段；未知项目与坏类型 400 不半写", async () => {
+	const partner = store.create("挂项目执事");
+
+	// 校验分支先行：坏类型 / 未知 uuid 都在写之前拦
+	const badType = await patch(partner.id, { projectIds: 123 });
+	assert.equal(badType.status, 400);
+	const badItem = await patch(partner.id, {
+		projectIds: ["00000000-0000-4000-8000-999999999998", 9],
+	});
+	assert.equal(badItem.status, 400);
+	const unknown = await patch(partner.id, {
+		projectIds: ["00000000-0000-4000-8000-999999999999"],
+	});
+	assert.equal(unknown.status, 400);
+	assert.deepEqual(store.get(partner.id)?.projectIds, [], "400 不半写");
+
+	// 造两个真项目（PROJECTS_DB_PATH 已指到临时库；根目录要在工作区里）
+	const projects = projectsStore();
+	const ws = mkdtempSync(join(tmpdir(), "lifediary-pf-proj-ws-"));
+	projects.setWorkspace(ws);
+	const first = projects.confirmProposal(projects.proposeProject("演示项目甲", "demo-a").id);
+	const second = projects.confirmProposal(projects.proposeProject("演示项目乙", "demo-b").id);
+
+	const setBoth = await patch(partner.id, { projectIds: [first.id, second.id, first.id] });
+	assert.equal(setBoth.status, 200);
+	assert.deepEqual(setBoth.body.projectIds, [first.id, second.id], "PATCH 回显去重");
+	const partnerBody = setBoth.body.partner as Record<string, unknown>;
+	assert.deepEqual(partnerBody.projectIds, [first.id, second.id], "投影带字段");
+
+	const reread = await app.request(`/api/v1/partners/${partner.id}`);
+	const rereadBody = (await reread.json()) as { partner: Record<string, unknown> };
+	assert.deepEqual(rereadBody.partner.projectIds, [first.id, second.id], "详情端点带字段");
+
+	// 整体替换：数组是全集，不是增量
+	const replace = await patch(partner.id, { projectIds: [second.id] });
+	assert.equal(replace.status, 200);
+	assert.deepEqual(store.get(partner.id)?.projectIds, [second.id], "整体替换");
+
+	const clear = await patch(partner.id, { projectIds: [] });
+	assert.equal(clear.status, 200);
+	assert.deepEqual(clear.body.projectIds, []);
+	assert.deepEqual((clear.body.partner as Record<string, unknown>).projectIds, []);
+
+	rmSync(ws, { recursive: true, force: true });
+});
+
+test("PARTNER_PROJECT_MEMORY=false：投影与回显整个字段不出现", async () => {
+	const partner = store.create("关开关执事");
+	const prev = process.env.PARTNER_PROJECT_MEMORY;
+	process.env.PARTNER_PROJECT_MEMORY = "false";
+	try {
+		const res = await app.request(`/api/v1/partners/${partner.id}`);
+		const body = (await res.json()) as { partner: Record<string, unknown> };
+		assert.ok(!("projectIds" in body.partner), "开关关：投影不带字段");
+		const patched = await patch(partner.id, { projectIds: [] });
+		assert.equal(patched.status, 200);
+		assert.ok(!("projectIds" in patched.body), "开关关：回显不带字段");
+		assert.deepEqual(store.get(partner.id)?.projectIds, []);
+	} finally {
+		if (prev === undefined) delete process.env.PARTNER_PROJECT_MEMORY;
+		else process.env.PARTNER_PROJECT_MEMORY = prev;
+	}
 });

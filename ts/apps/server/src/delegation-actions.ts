@@ -65,10 +65,22 @@ function defaultRetryRuntime(store: DelegationReceipts): DelegationRuntime {
 		// 回话续跑同样双写进专线（8g）：重试出来的新单也自带同一条单的会话。
 		mirror: taskConversationMirror,
 		// 汇报回原会话是异步动作，懒加载 agent 避免只读接口在启动期拉起整个运行时。
+		// 唤醒（2026-11-15 回信送达兜底 §B）：重试单跑完同样要走"完成即唤醒"——
+		// 以前这里只写汇报不唤醒，而且失败被静默吞掉，重试出来的结果执事永远不知道。
 		report: (conversationId, report) => {
 			void import("./agent.ts")
 				.then((module) => module.reportDelegationResult(conversationId, report))
-				.catch(() => undefined);
+				.then(() =>
+					import("./delegation-wake.ts").then((wake) =>
+						wake.wakeOnDelegationReport(conversationId, report),
+					),
+				)
+				.catch((error) => {
+					// 原始错误只进服务端日志（可能带上游地址）。
+					console.warn(
+						`[delegate] 重试单汇报写回失败: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				});
 		},
 		autoReport: (process.env.DELEGATION_AUTO_REPORT?.trim() || "true").toLowerCase() !== "false",
 		isCanceled: (id) => store.isCanceled(id),

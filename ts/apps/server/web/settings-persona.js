@@ -15,6 +15,7 @@ import { loadRoster, syncChiefAvatar } from "./partners-status.js";
 import { appendCsContractCard, appendCsGoalCard } from "./settings-contract.js";
 import { cs, csCard, csHead, drawerOpen, refreshCsDetail, renderCsPage } from "./settings-drawer.js";
 import { state } from "./state.js";
+import { showRollbackOffer } from "./soul-rollback.js";
 
 /* ── 二级页 · 人设：头像 + 名字 + 正文，一次保存 ──────────────
  * 用户口径（2026-11-07）：「调整人设这里都应该加到右上角这里头」「换头像啥的其实无所谓，
@@ -49,7 +50,6 @@ function renderCsPersonaPage() {
   const partner = state.partners.find((item) => item.id === cs.target) || null;
   const name = String(partner?.name || "").trim() || "总管";
   const soul = cs.detail ? String(cs.detail.soul ?? "") : "";
-  const version = cs.detail ? cs.detail.soulVersion : partner?.soulVersion ?? null;
 
   if (!cs.detail) {
     const loading = document.createElement("p");
@@ -117,7 +117,8 @@ function renderCsPersonaPage() {
   const versionNode = document.createElement("span");
   versionNode.className = "cs-hint";
   versionNode.style.padding = "0";
-  versionNode.textContent = version != null ? `v${version} · 改完下一轮起用` : "改完下一轮起用";
+  // 快照退役（2026-11-15）：不再展示版本号，只说生效时机
+  versionNode.textContent = "改完下一轮起用";
   nameBox.append(versionNode);
   body.append(headCard);
 
@@ -288,9 +289,15 @@ function renderCsPersonaPage() {
         if (data.soulVersion != null) cs.detail.soulVersion = data.soulVersion;
         if (data.partner) cs.detail.partner = { ...(cs.detail.partner || {}), ...data.partner };
       }
-      versionNode.textContent =
-        data.soulVersion != null ? `v${data.soulVersion} · 下一轮起用` : "下一轮起用";
-      hint.textContent = data.soulVersion != null ? `已保存为 v${data.soulVersion}，下一轮起用。` : "已保存。";
+      versionNode.textContent = "下一轮起用";
+      // 快照退役（2026-11-15）：保存成功后给一次「回到上一版」，不展示版本号
+      hint.textContent = "已保存，下一轮起用。";
+      showRollbackOffer(hint, cs.target, (restored) => {
+        soulArea.value = restored;
+        original.soul = restored;
+        if (cs.detail) cs.detail.soul = restored;
+        refresh();
+      });
       syncChiefAvatar();
       void loadRoster();
       refresh();

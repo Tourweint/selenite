@@ -80,6 +80,9 @@ export const INJECTION_ORDER = {
 	skills: 50,
 	topics: 60,
 	// C/D 期：lifecycle beforeRequest 的 5 处消息注入（顺序 = 改造前 push 顺序）
+	// project_index（2026-11-15 项目记忆多挂载）：新净增类，排在记忆召回之前——
+	// 先知道"负责哪些项目"，后面那批记忆行才有归属可对。
+	project_index: 95,
 	memory_recall: 100,
 	skill_slash: 110,
 	recover_note: 120,

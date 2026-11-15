@@ -226,3 +226,70 @@ test("项目归档端点：/archive 主入口与 /remove 别名带 archivedChats
 		else process.env.PROJECT_ARCHIVE_CHATS = savedFlag;
 	}
 });
+
+test("项目删除端点：只删登记 + 连带解除执事挂载（2026-11-15 界面恢复入口）", async () => {
+	const projects = await import("./projects.ts");
+	const { partnersStore } = await import("./partners.ts");
+	const { Hono } = await import("hono");
+	const savedDb = process.env.PROJECTS_DB_PATH;
+	const savedPartners = process.env.PARTNERS_DB_PATH;
+	const savedChancellor = process.env.CHANCELLOR_WORK_ROOT;
+	// 三个落点全部钉进本文件的临时目录：项目登记、执事库、 chancellor 守卫的库
+	// （conn() 会建 <workRoot>../data/chancellor.db，不钉就会写进仓库 cwd）。
+	process.env.PROJECTS_DB_PATH = join(root, "projects-delete.sqlite");
+	process.env.PARTNERS_DB_PATH = join(root, "partners-delete.sqlite");
+	process.env.CHANCELLOR_WORK_ROOT = join(root, "chancellor-runs");
+	const workspace = join(root, "ws-delete");
+	let store: InstanceType<typeof projects.ProjectsStore> | null = null;
+	try {
+		// 上一条端点测试把单例关了：先重置，让本次按上面的临时库重开
+		projects.resetProjectsStoreForTest();
+		mkdirSync(workspace, { recursive: true });
+		store = projects.projectsStore();
+		store.setWorkspace(workspace);
+		const proposal = store.proposeProject("删除登记项目", "demo-delete");
+		const project = store.confirmProposal(proposal.id);
+
+		// 一个执事挂着这个项目，另一个挂着别的：只清指向它的
+		const partner = partnersStore().create("挂着项目的执事");
+		partnersStore().setProjectIds(partner.id, [project.id]);
+		const bystander = partnersStore().create("不相干的执事");
+		partnersStore().setProjectIds(bystander.id, ["00000000-0000-4000-8000-0000000000aa"]);
+
+		const app = new Hono();
+		projects.mountProjects(app);
+
+		const removed = await app.request(`/api/v1/projects/${project.id}`, { method: "DELETE" });
+		assert.equal(removed.status, 200);
+		const removedBody = (await removed.json()) as {
+			ok: boolean;
+			id: string;
+			detachedPartners: number;
+		};
+		assert.equal(removedBody.ok, true);
+		assert.equal(removedBody.id, project.id);
+		assert.equal(removedBody.detachedPartners, 1, "只解除指向这个项目的挂载");
+		assert.deepEqual(partnersStore().get(partner.id)?.projectIds, [], "挂载已清");
+		assert.deepEqual(
+			partnersStore().get(bystander.id)?.projectIds,
+			["00000000-0000-4000-8000-0000000000aa"],
+			"别人的挂载不动",
+		);
+		assert.equal(store.findProject(project.id), null, "登记行已删");
+		assert.equal(projects.projectsStore().listProjects().length, 0);
+
+		const again = await app.request(`/api/v1/projects/${project.id}`, { method: "DELETE" });
+		assert.equal(again.status, 404, "再删一次 → not_found");
+	} finally {
+		// store 就是 projectsStore() 单例本身：reset 统一负责 close + 清 null（不要两次 close）
+		projects.resetProjectsStoreForTest();
+		// partnersStore 是模块级单例：句柄不关，Windows 上 rmSync 会 EPERM
+		partnersStore().close();
+		if (savedDb === undefined) delete process.env.PROJECTS_DB_PATH;
+		else process.env.PROJECTS_DB_PATH = savedDb;
+		if (savedPartners === undefined) delete process.env.PARTNERS_DB_PATH;
+		else process.env.PARTNERS_DB_PATH = savedPartners;
+		if (savedChancellor === undefined) delete process.env.CHANCELLOR_WORK_ROOT;
+		else process.env.CHANCELLOR_WORK_ROOT = savedChancellor;
+	}
+});

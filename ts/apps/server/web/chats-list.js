@@ -8,6 +8,7 @@
  */
 
 import { openConversation, startNewChat } from "./chat-open.js";
+import { renderGroupedChats, refreshSidebarGroupsFlag, sidebarGroupsActiveSync } from "./chats-groups.js";
 import { el } from "./dom.js";
 import { request } from "./net.js";
 import { chiefDisplayName } from "./partners-status.js";
@@ -28,6 +29,9 @@ async function loadChats() {
     const data = await response.json();
     state.chats = data.chats || [];
     state.archived = data.archived || 0;
+    // 2026-11-15 侧栏按创建者分组：任务专线会话清单（增量键，开关关着 / 老服务端没有）
+    state.taskChats = Array.isArray(data.tasks) ? data.tasks : [];
+    await refreshSidebarGroupsFlag();
     renderChats();
   } catch {
     /* 离线时保持旧列表 */
@@ -54,96 +58,110 @@ function recentChatsOrdered() {
     .sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)));
 }
 
+function buildChatRow(chat) {
+  const row = document.createElement("div");
+  row.className = "chat";
+  row.tabIndex = 0;
+  row.setAttribute("role", "button");
+  row.dataset.conv = chat.conversationId;
+  // 选中态只在对话路由里成立（2026-11-07 修）：进了群聊 / 任务页 / 设置页，
+  // 这条会话仍是「上次打开的那条」，但屏幕上已经不是它了——继续亮着会把人的
+  // 位置感带错（截图里群列表旁边还亮着一条会话，看着像同时在两处）。
+  if (chat.conversationId === state.conversationId && currentRoute() === "chat") {
+    row.setAttribute("aria-current", "true");
+  }
+
+  const label = document.createElement("span");
+  label.className = "chat-title";
+  label.textContent = `${chat.pinned ? "★ " : ""}${chatLabel(chat)}`;
+  row.append(label);
+
+  // 悬停才出现：置顶 / 重命名 / 归档。不做下拉菜单，三个图标够了。
+  const actions = document.createElement("span");
+  actions.className = "chat-actions";
+
+  const pin = document.createElement("button");
+  pin.type = "button";
+  pin.className = "chat-act";
+  pin.textContent = "★";
+  pin.title = chat.pinned ? "取消置顶" : "置顶";
+  pin.addEventListener("click", async (event) => {
+    event.stopPropagation();
+    await request(
+      `/api/v1/agent/chat/${encodeURIComponent(chat.conversationId)}/pin`,
+      { method: "POST", body: JSON.stringify({ pinned: !chat.pinned }) },
+    ).catch(() => undefined);
+    await loadChats();
+  });
+
+  const rename = document.createElement("button");
+  rename.type = "button";
+  rename.className = "chat-act";
+  rename.textContent = "✎";
+  rename.title = "重命名";
+  rename.addEventListener("click", (event) => {
+    event.stopPropagation();
+    startRename(row, chat);
+  });
+
+  const archive = document.createElement("button");
+  archive.type = "button";
+  archive.className = "chat-act";
+  // 归档图标（Lucide archive）：✕ 会被读成删除，和「归档」语义相反（2026-11-12）
+  archive.innerHTML =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg>';
+  // 防误触（2026-11-13 对齐 ZCode）：当前会话正在流式输出时图标禁用（title 说明）；
+  // 其余行的忙态界面不知道，由服务端 400 兜底（行内确认条确认后才 POST）。
+  // dataset.chatArchive 给 setSending 用：发送/停止切换时同步这一个按钮，不重渲染整列。
+  archive.dataset.chatArchive = chat.conversationId;
+  const archiveBusy = state.sending && chat.conversationId === state.conversationId;
+  archive.disabled = archiveBusy;
+  archive.title = archiveBusy ? "会话正在运行，请先停止再归档" : "归档（会话和记忆都还在）";
+  archive.setAttribute("aria-label", "归档会话");
+  archive.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (archive.disabled) return;
+    openChatArchiveConfirm(row, chat);
+  });
+
+  actions.append(rename, archive, pin);
+  row.append(actions);
+
+  // 点会话行 = 进这条对话。2026-11-07 修：以前只 openChat、不切路由，
+  // 从群聊 / 任务 / 设置页点过来时内容在背后换了、屏幕还停在原页（用户报的
+  // 「点了群聊之后点对话，界面切换不了」）。统一走 openConversation()，
+  // 与搜索结果、任务卡头、通知点击同一份"先切路由再回读"的口径。
+  row.addEventListener("click", () => void openConversation(chat.conversationId));
+  row.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      void openConversation(chat.conversationId);
+    }
+  });
+  return row;
+}
+
 function renderChats() {
-  el.chats.replaceChildren();
   const ordered = recentChatsOrdered();
+  const rows = ordered.slice(0, RECENTS_LIMIT).map(buildChatRow);
+
+  // 2026-11-15 侧栏按创建者分组：其他对话（普通对话）→ 总管 → 各执事，可收起。
+  // 回滚开关关着 / 服务端没带 tasks 键 / 一条任务都没有 → 原版平铺渲染，一行不差
+  //（没有任务可归时套一层「其他对话」文件夹只是噪音）。
+  if (sidebarGroupsActiveSync() && state.taskChats.length > 0) {
+    renderGroupedChats(rows);
+    renderSideListEmpty();
+    return;
+  }
+
+  el.chats.replaceChildren();
+  if (el.tasksMini) el.tasksMini.hidden = false;
   // 空态（2026-11-07 四改）：会话与任务合并成一块后，空态也只说一句。
   // 这里先不放占位，等任务行也渲染完，由 renderSideListEmpty() 统一判——
   // 否则「没有会话」和「没有在跑的活」会同时出现两行。
 
   // 只展示前 RECENTS_LIMIT 条；更多的在设置→会话里搜（#/settings/chats）。
-  for (const chat of ordered.slice(0, RECENTS_LIMIT)) {
-    const row = document.createElement("div");
-    row.className = "chat";
-    row.tabIndex = 0;
-    row.setAttribute("role", "button");
-    row.dataset.conv = chat.conversationId;
-    // 选中态只在对话路由里成立（2026-11-07 修）：进了群聊 / 任务页 / 设置页，
-    // 这条会话仍是「上次打开的那条」，但屏幕上已经不是它了——继续亮着会把人的
-    // 位置感带错（截图里群列表旁边还亮着一条会话，看着像同时在两处）。
-    if (chat.conversationId === state.conversationId && currentRoute() === "chat") {
-      row.setAttribute("aria-current", "true");
-    }
-
-    const label = document.createElement("span");
-    label.className = "chat-title";
-    label.textContent = `${chat.pinned ? "★ " : ""}${chatLabel(chat)}`;
-    row.append(label);
-
-    // 悬停才出现：置顶 / 重命名 / 归档。不做下拉菜单，三个图标够了。
-    const actions = document.createElement("span");
-    actions.className = "chat-actions";
-
-    const pin = document.createElement("button");
-    pin.type = "button";
-    pin.className = "chat-act";
-    pin.textContent = "★";
-    pin.title = chat.pinned ? "取消置顶" : "置顶";
-    pin.addEventListener("click", async (event) => {
-      event.stopPropagation();
-      await request(
-        `/api/v1/agent/chat/${encodeURIComponent(chat.conversationId)}/pin`,
-        { method: "POST", body: JSON.stringify({ pinned: !chat.pinned }) },
-      ).catch(() => undefined);
-      await loadChats();
-    });
-
-    const rename = document.createElement("button");
-    rename.type = "button";
-    rename.className = "chat-act";
-    rename.textContent = "✎";
-    rename.title = "重命名";
-    rename.addEventListener("click", (event) => {
-      event.stopPropagation();
-      startRename(row, chat);
-    });
-
-    const archive = document.createElement("button");
-    archive.type = "button";
-    archive.className = "chat-act";
-    // 归档图标（Lucide archive）：✕ 会被读成删除，和「归档」语义相反（2026-11-12）
-    archive.innerHTML =
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg>';
-    // 防误触（2026-11-13 对齐 ZCode）：当前会话正在流式输出时图标禁用（title 说明）；
-    // 其余行的忙态界面不知道，由服务端 400 兜底（行内确认条确认后才 POST）。
-    // dataset.chatArchive 给 setSending 用：发送/停止切换时同步这一个按钮，不重渲染整列。
-    archive.dataset.chatArchive = chat.conversationId;
-    const archiveBusy = state.sending && chat.conversationId === state.conversationId;
-    archive.disabled = archiveBusy;
-    archive.title = archiveBusy ? "会话正在运行，请先停止再归档" : "归档（会话和记忆都还在）";
-    archive.setAttribute("aria-label", "归档会话");
-    archive.addEventListener("click", (event) => {
-      event.stopPropagation();
-      if (archive.disabled) return;
-      openChatArchiveConfirm(row, chat);
-    });
-
-    actions.append(rename, archive, pin);
-    row.append(actions);
-
-    // 点会话行 = 进这条对话。2026-11-07 修：以前只 openChat、不切路由，
-    // 从群聊 / 任务 / 设置页点过来时内容在背后换了、屏幕还停在原页（用户报的
-    // 「点了群聊之后点对话，界面切换不了」）。统一走 openConversation()，
-    // 与搜索结果、任务卡头、通知点击同一份"先切路由再回读"的口径。
-    row.addEventListener("click", () => void openConversation(chat.conversationId));
-    row.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        void openConversation(chat.conversationId);
-      }
-    });
-    el.chats.append(row);
-  }
+  for (const row of rows) el.chats.append(row);
   renderSideListEmpty();
 }
 

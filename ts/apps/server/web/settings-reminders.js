@@ -512,7 +512,7 @@ function rmModeOf(item) {
  * 传 `reminder` = 改时间：内容只读、不出现「提醒什么」输入框；
  * 不传 = 新建：内容输入框保留，时间规则用图形化控件选。
  */
-function openReminderModal(reminder = null) {
+function openReminderModal(reminder = null, onDone = null) {
   const memoryEditing = reminder?.kind === "memory";
   const editing = Boolean(reminder && (memoryEditing || reminder.kind === "routine" || reminder.status !== "terminal"));
   const who = reminder?.partnerId
@@ -905,6 +905,7 @@ function openReminderModal(reminder = null) {
             toast("时间已改");
             closeModal();
             void loadReminders();
+            if (typeof onDone === "function") onDone();
           } catch {
             hint.textContent = "没保存：网络请求失败。";
             hint.classList.add("is-error");
@@ -949,6 +950,7 @@ function openReminderModal(reminder = null) {
           closeModal();
           toast(editing ? "时间已改" : "定时任务已添加");
           void loadReminders();
+          if (typeof onDone === "function") onDone();
         } catch (error) {
           if (error.message !== "forbidden") {
             hint.textContent = `没保存：${error.message}`;

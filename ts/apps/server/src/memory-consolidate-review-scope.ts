@@ -8,6 +8,7 @@
 import type { EvidenceHit } from "./agent.ts";
 import { findEvidence, memoryEngine, supersedeMemory } from "./agent.ts";
 import { redactSecrets } from "@lifediary/memory";
+import { projectsStore } from "./projects.ts";
 import { CONSOLIDATE_PROMPT, MAX_REVIEW_RECORDS, generateReview, parseProposalJson, proposalsPath, readPending, renderReviewInput, reviewEvidenceEnabled, reviewModelAvailable, scopeOf, sideOf, validTargetScope, writePending } from "./memory-consolidate-parse-proposal-json.ts";
 import type { ConsolidateProposal, EvidenceFinder, PendingEntry, ReviewGenerator, ReviewResult } from "./memory-consolidate-parse-proposal-json.ts";
 
@@ -197,13 +198,27 @@ export type ImportResult =
 	| { ok: true; scope: string; added: number; skipped: number; total: number }
 	| { ok: false; status: number; error: string; message: string };
 
-export function importMemory(scope: string, items: unknown): ImportResult {
+export function importMemory(
+	scope: string,
+	items: unknown,
+	options: { dedupeScopes?: string[] } = {},
+): ImportResult {
 	if (!memoryEngine) {
 		return { ok: false, status: 404, error: "memory_disabled", message: "记忆未启用（MEMORY_ENABLED=false）" };
 	}
 	const parsedScope = validTargetScope(scope) ? scopeOf(scope) : null;
 	if (!parsedScope) {
-		return { ok: false, status: 400, error: "bad_request", message: "scope 只能是 global 或 partner:<id>" };
+		return { ok: false, status: 400, error: "bad_request", message: "scope 只能是 global、partner:<id> 或 project:<uuid>" };
+	}
+	// 项目 scope 的 uuid 必须是登记项目（2026-11-15 项目记忆方案）：不认识的项目 400，
+	// 防止拼写错误造出一批永远召不回的孤儿记录。
+	if (parsedScope.type === "project") {
+		const known = projectsStore()
+			.listProjects(true)
+			.some((project) => project.id === parsedScope.id);
+		if (!known) {
+			return { ok: false, status: 400, error: "bad_request", message: "project:<uuid> 不是登记的项目" };
+		}
 	}
 	if (!Array.isArray(items)) {
 		return { ok: false, status: 400, error: "bad_request", message: "items 必须是数组" };
@@ -224,10 +239,16 @@ export function importMemory(scope: string, items: unknown): ImportResult {
 			...(typeof row.kind === "string" ? { kind: row.kind } : {}),
 			...(typeof row.createdAt === "string" ? { createdAt: row.createdAt } : {}),
 			...(typeof row.importance === "number" ? { importance: row.importance } : {}),
+			// 来源记名（2026-11-15）：来源导入传 import:<sourceId>，外部导入区按它分组
+			...(typeof row.source === "string" ? { source: row.source } : {}),
 		};
 	});
 
-	const result = memoryEngine.importItems({ scope: parsedScope, items: entries });
+	const result = memoryEngine.importItems({
+		scope: parsedScope,
+		items: entries,
+		...(options.dedupeScopes?.length ? { dedupeScopes: options.dedupeScopes } : {}),
+	});
 	// 只记条数（D8）
 	console.log(
 		`[memory] 导入 scope=${scope} 新增=${result.added.length} 跳过=${result.skipped} 共=${result.total}`,

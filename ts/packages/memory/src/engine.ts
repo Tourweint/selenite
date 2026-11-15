@@ -10,7 +10,7 @@ import {
 } from "./consolidate.ts";
 import { RECALL_BOOST } from "./decay.ts";
 import { HeuristicExtractor, type ExtractMessage, type Extractor } from "./extract.ts";
-import { directlyRelevant, touchRecall, WeightedRetriever, type Retriever } from "./recall.ts";
+import { dedupeRecallHits, directlyRelevant, touchRecall, WeightedRetriever, type Retriever } from "./recall.ts";
 import type { MemoryStore } from "./store.ts";
 import {
 	scopeKey,
@@ -136,12 +136,19 @@ export class MemoryEngine {
 	 * 规范化等价的跳过并计数，绝不动已有行（"只增不改"）。
 	 * scope 走 `scopeKey` 换算，与其它写入路径同一口径。
 	 */
-	importItems(input: { scope: MemoryScope; items: ImportEntry[]; now?: Date }): ImportOutcome {
+	importItems(input: {
+		scope: MemoryScope;
+		items: ImportEntry[];
+		now?: Date;
+		/** 跨 scope 去重池（2026-11-15 来源导入用；不传 = 只查本 scope）。 */
+		dedupeScopes?: string[];
+	}): ImportOutcome {
 		return importMemories(
 			this.store,
 			scopeKey(input.scope),
 			input.items,
 			input.now ?? this.now(),
+			{ ...(input.dedupeScopes ? { dedupeScopes: input.dedupeScopes } : {}) },
 		);
 	}
 
@@ -254,7 +261,10 @@ export class MemoryEngine {
 	buildContext(query: RecallQuery, options: InjectOptions = {}): string {
 		const maxChars = options.maxChars ?? 1200;
 		const at = this.now();
-		const hits = this.recall(query);
+		const recalled = this.recall(query);
+		// 召回后去重（2026-11-15 上下文预算批）：同一件事的多种说法只留分数最高的那条，
+		// 别让复读占掉名额。默认关（库层旧行为），server 装配处按开关传 true。
+		const hits = options.dedupe ? dedupeRecallHits(recalled) : recalled;
 		if (hits.length === 0) return "";
 
 		const preferences = hits.filter((hit) => hit.record.kind === "preference");
@@ -303,31 +313,45 @@ export class MemoryEngine {
 				? one
 				: `${one.slice(0, PROACTIVE_MAX_CHARS - 1)}…`;
 		};
+		// 项目归属标注（2026-11-15 项目记忆多挂载）：project 来源的行带项目名，
+		// 跨项目候选同池时模型才知道这条口径说的是哪个项目。不传 resolver /
+		// 非 project scope 时用旧格式（逐字节兼容）。
+		const labeled = (record: MemoryRecord, body: string): string | null => {
+			const label =
+				options.scopeLabel && record.scope.startsWith("project:")
+					? options.scopeLabel(record.scope)
+					: null;
+			return label ? `- [${label} · ${record.kind}] ${body}` : null;
+		};
 
 		if (preferences.length > 0) {
 			push("【用户偏好】");
 			for (const hit of preferences) {
-				if (!push(`- ${flat(hit.record.content)}`)) break;
+				const body = flat(hit.record.content);
+				if (!push(labeled(hit.record, body) ?? `- ${body}`)) break;
 			}
 		}
 		if (intentions.length > 0) {
 			push("【打算】");
 			for (const hit of intentions) {
-				if (!push(`- ${flat(hit.record.content)}`)) break;
+				const body = flat(hit.record.content);
+				if (!push(labeled(hit.record, body) ?? `- ${body}`)) break;
 			}
 		}
 		if (others.length > 0) {
 			// 只有偏好时不要空标题；只有其它时保持 2026-11-06 之前的形状（逐字节兼容）
 			if (preferences.length > 0 || intentions.length > 0) push("【其它】");
 			for (const hit of others) {
-				if (!push(`- [${hit.record.kind}] ${flat(hit.record.content)}`)) break;
+				const body = flat(hit.record.content);
+				if (!push(labeled(hit.record, body) ?? `- [${hit.record.kind}] ${body}`)) break;
 			}
 		}
 		// 固定放最后：主动提起是"顺带一句"，不该挤掉当轮真正相关的记忆。
 		if (proactive.length > 0) {
 			push("【也许值得提起】");
 			for (const hit of proactive) {
-				if (!push(`- [${hit.record.kind}] ${clipped(hit.record.content)}`)) break;
+				const body = clipped(hit.record.content);
+				if (!push(labeled(hit.record, body) ?? `- [${hit.record.kind}] ${body}`)) break;
 			}
 		}
 		if (lines.length === 0) return "";

@@ -5,6 +5,7 @@
  */
 
 import type { DelegationReport } from "../delegation.ts";
+import { delegationMessages } from "../delegation-messages.ts";
 import { chatModelRef, clampThinkingLevel, currentThinkingLevels, readLlmConfig } from "../provider.ts";
 import { CTX, ResolvedChat } from "./shared.ts";
 import { Context } from "@earendil-works/chord";
@@ -116,18 +117,47 @@ export async function sayInConversation(
 	return true;
 }
 
+/**
+ * 派活汇报写回宿主会话（2026-11-15 送达记账改造，方案见
+ * docs/设计方案/2026-11-15-派活回信送达兜底）。
+ *
+ * 返回送达状态，调用方可以据此记账；不做记账的旧调用方忽略返回值即可：
+ * - `"ok"`：正文已写进宿主会话；
+ * - `"missing"`：宿主会话已不存在（写回永远不会再成功，记账销为"跳过"）；
+ * - `"error"`：写回抛异常（留"待送达"，下次启动由补送扫描兜底）。
+ */
 export async function reportDelegationResult(
 	conversationId: number,
 	report: DelegationReport,
-): Promise<void> {
+): Promise<"ok" | "missing" | "error"> {
 	try {
 		const delivered = await sayInConversation(conversationId, report.text);
 		if (!delivered) {
 			console.warn(`[agent] 任务 ${report.ticketId} 的会话 ${conversationId} 已不存在，跳过汇报`);
+			settleReportDelivery(report, 2);
+			return "missing";
 		}
+		settleReportDelivery(report, 1);
+		return "ok";
 	} catch (error) {
 		const detail = error instanceof Error ? error.message : String(error);
 		console.warn(`[agent] 任务 ${report.ticketId} 写回会话失败: ${detail}`);
+		// 留 0 不销账：正文没写进去，下次启动的补送扫描会再试一次。
+		return "error";
+	}
+}
+
+/** 送达销账（簿记失败只 warn，不拖累汇报主流程）。 */
+function settleReportDelivery(report: DelegationReport, state: 1 | 2): void {
+	if (report.deliveryMessageId == null) return;
+	try {
+		delegationMessages().markDelivery(report.deliveryMessageId, state);
+	} catch (error) {
+		console.warn(
+			`[agent] 任务 ${report.ticketId} 送达销账失败（留待启动重扫）: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		);
 	}
 }
 

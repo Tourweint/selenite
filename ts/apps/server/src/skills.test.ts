@@ -10,6 +10,8 @@ import {
 	createSkillStore,
 	resolveSkillsDir,
 	scanSkillDir,
+	skillsIndexClipEnabled,
+	skillsIndexSummaryChars,
 	type ResolvedSkillsDir,
 } from "./skills.ts";
 
@@ -128,6 +130,97 @@ test("加载器：扁平 .md 与 目录/SKILL.md 两种形态并存，同名时�
 	assert.match(index, /beta：摘要 B/);
 	assert.match(index, /block：多行描述/);
 	assert.doesNotMatch(index, /broken/);
+});
+
+test("索引摘要截断（2026-11-15 上下文预算批）：截断只改索引那一行，正文手册完整", () => {
+	const dir = freshDir("index-clip");
+	const longSummary = "长".repeat(300);
+	mkdirSync(join(dir, "long"));
+	writeFileSync(
+		join(dir, "long", "SKILL.md"),
+		`---\ndescription: ${longSummary}\n---\n完整正文不能被截`,
+	);
+
+	// 传 120：索引行截到 120 字（含省略号），手册仍是全文
+	const clipped = createSkillStore(dir, { indexSummaryChars: 120 });
+	assert.ok(clipped);
+	const line = (clipped.indexFor(1) ?? "")
+		.split("\n")
+		.find((row) => row.startsWith("- long："));
+	assert.ok(line, "索引里应有这条技能");
+	const summary = line.slice("- long：".length);
+	assert.equal(summary.length, 120, "摘要截断到 120 字");
+	assert.ok(summary.endsWith("…"), "截断后带省略号");
+	assert.equal(clipped.manual("long"), "完整正文不能被截", "手册取的是全文，不受截断影响");
+
+	// 0 / 不传 = 不截断（一行回滚 / 旧行为）
+	const off = createSkillStore(dir, { indexSummaryChars: 0 });
+	assert.ok((off?.indexFor(2) ?? "").includes(longSummary), "0 = 不截断");
+	const legacy = createSkillStore(dir);
+	assert.ok((legacy?.indexFor(3) ?? "").includes(longSummary), "不传 = 旧行为不截断");
+
+	// 摘要没超长时原样（不补省略号）
+	mkdirSync(join(dir, "short"));
+	writeFileSync(join(dir, "short", "SKILL.md"), "---\ndescription: 短摘要\n---\n正文");
+	const shortStore = createSkillStore(dir, { indexSummaryChars: 120 });
+	assert.ok((shortStore?.indexFor(4) ?? "").includes("- short：短摘要"));
+});
+
+test("SKILLS_INDEX_SUMMARY_CHARS：默认 120，0 关，非法回落默认，越界 clamp", () => {
+	assert.equal(skillsIndexSummaryChars({} as unknown as NodeJS.ProcessEnv), 120);
+	assert.equal(
+		skillsIndexSummaryChars({ SKILLS_INDEX_SUMMARY_CHARS: "0" } as unknown as NodeJS.ProcessEnv),
+		0,
+	);
+	assert.equal(
+		skillsIndexSummaryChars({ SKILLS_INDEX_SUMMARY_CHARS: "abc" } as unknown as NodeJS.ProcessEnv),
+		120,
+	);
+	assert.equal(
+		skillsIndexSummaryChars({ SKILLS_INDEX_SUMMARY_CHARS: "-5" } as unknown as NodeJS.ProcessEnv),
+		0,
+	);
+	assert.equal(
+		skillsIndexSummaryChars({ SKILLS_INDEX_SUMMARY_CHARS: "99999" } as unknown as NodeJS.ProcessEnv),
+		2000,
+	);
+});
+
+test("SKILLS_INDEX_CLIP 总开关（界面「行为开关」）：关 = 不截断，压过字数配置", () => {
+	const env = (pairs: Record<string, string> = {}): NodeJS.ProcessEnv =>
+		pairs as unknown as NodeJS.ProcessEnv;
+	// 缺省开
+	assert.equal(skillsIndexClipEnabled(env()), true);
+	assert.equal(skillsIndexClipEnabled(env({ SKILLS_INDEX_CLIP: "false" })), false);
+	assert.equal(skillsIndexClipEnabled(env({ SKILLS_INDEX_CLIP: "0" })), false);
+	assert.equal(skillsIndexClipEnabled(env({ SKILLS_INDEX_CLIP: "off" })), false);
+	// 关掉后不管字数配多少都返回 0（不截断）
+	assert.equal(
+		skillsIndexSummaryChars(env({ SKILLS_INDEX_CLIP: "false", SKILLS_INDEX_SUMMARY_CHARS: "120" })),
+		0,
+	);
+	assert.equal(skillsIndexSummaryChars(env({ SKILLS_INDEX_CLIP: "true" })), 120);
+});
+
+test("indexSummaryChars 收函数：每次渲染现读（界面改开关后新会话即时生效）", () => {
+	const dir = freshDir("index-clip-hot");
+	mkdirSync(join(dir, "long"));
+	writeFileSync(
+		join(dir, "long", "SKILL.md"),
+		`---\ndescription: ${"长".repeat(300)}\n---\n正文`,
+	);
+	let limit = 120;
+	const store = createSkillStore(dir, { indexSummaryChars: () => limit });
+	assert.ok(store);
+	const clippedLine = (store.indexFor(1) ?? "").split("\n").find((row) => row.startsWith("- long："))!;
+	assert.equal(clippedLine.slice("- long：".length).length, 120, "首次渲染按 120 截断");
+	// 改成 0 后，新会话（新 conversationId）按新值渲染 → 完整摘要
+	limit = 0;
+	const fullLine = (store.indexFor(2) ?? "").split("\n").find((row) => row.startsWith("- long："))!;
+	assert.ok(fullLine.includes("长".repeat(300)), "开关关掉后新会话显示完整摘要");
+	// 老会话仍按第一次冻结的结果（按会话冻结的既有口径）
+	const oldLine = (store.indexFor(1) ?? "").split("\n").find((row) => row.startsWith("- long："))!;
+	assert.equal(oldLine.slice("- long：".length).length, 120, "老会话保持冻结，不中途改索引");
 });
 
 test("frontmatter 多行块标量：折叠 / 字面 / `-` 变体 / 缩进 / CRLF，块后正文与后续 key 照常", () => {

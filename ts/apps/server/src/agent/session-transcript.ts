@@ -9,12 +9,14 @@ import { ReminderTask, type ReminderRepeat } from "../reminder.ts";
 import { getHarness } from "./lifecycle.ts";
 import { turnSettledHandler } from "./settled.ts";
 import { CTX, Chats, ResolvedChat, TOOL_OUTPUT_LIMIT, toolArgs, toolLabel } from "./shared.ts";
+import { usageInWindow } from "./usage-range.ts";
 import { contentText } from "@earendil-works/pi-ai";
 import type { Message, SystemMessage } from "@earendil-works/pi-ai";
 import type { ContextView, Conversation, EntryRecord } from "@earendil-works/pi-durable";
 import { configure } from "@earendil-works/pi-durable";
-import { TranscriptStep, TurnUsage, parseFileManifest } from "@lifediary/shared";
+import { TranscriptStep, TurnUsage, parseFileManifest, type TranscriptAuthor } from "@lifediary/shared";
 import { createHash, randomUUID } from "node:crypto";
+import { isRelayEntryKind, relayDisplayText, relayFromOf } from "../partner-relay.ts";
 import { externalChatIds, openChat } from "./session-open.ts";
 import { chatStream } from "./session-stream.ts";
 
@@ -65,6 +67,13 @@ export interface TranscriptMessage {
 	steps?: TranscriptStep[];
 	/** 那一轮从提问到收尾的墙钟时长（毫秒） */
 	workMs?: number;
+	/**
+	 * 非主人来源的作者（2026-11-15 作者标记方案）。
+	 *
+	 * 带头 = 这条不是主人说的（目前只有执事间递话）。**与 `id` 互斥**：
+	 * 带 author 的消息不给可寻址 id，于是编辑重发拿不到它（主人能看不能改）。
+	 */
+	author?: TranscriptAuthor;
 }
 
 export function messageIdOf(externalId: string, entryId: number): string {
@@ -90,6 +99,41 @@ function stepDiff(details: unknown): string | undefined {
 	return typeof diff === "string" ? clampText(diff, STEP_DIFF_LIMIT) : undefined;
 }
 
+/**
+ * 从 `relay.message` 条目里还原作者（2026-11-15 作者标记方案 §3.2）。
+ *
+ * 先读结构（`entry.data`，宿主盖章那一份）；结构缺了退回正文前缀——正文前缀是
+ * 给模型看的那一句，随消息本体永远在。两条口径都说不出来时才返回 undefined，
+ * 此时这条来信会掉成"没有作者、也没有 id"的一句话（仍进不了编辑入口）。
+ */
+export function relayAuthorOf(entry: EntryRecord): TranscriptAuthor | undefined {
+	const data = entry.data;
+	if (data && typeof data === "object" && !Array.isArray(data)) {
+		const record = data as Record<string, unknown>;
+		if (record.kind === "partner" && typeof record.name === "string" && record.name) {
+			return {
+				kind: "partner",
+				id: typeof record.id === "string" ? record.id : "",
+				name: record.name,
+				...(typeof record.domain === "string" && record.domain ? { domain: record.domain } : {}),
+				...(typeof record.hop === "number" ? { hop: record.hop } : {}),
+			};
+		}
+	}
+	const message = entry.model?.[0];
+	if (!message) return undefined;
+	const from = relayFromOf(contentText(message.content as Parameters<typeof contentText>[0]));
+	if (!from) return undefined;
+	return {
+		kind: "partner",
+		// 正文里没有 id（前缀只写名字与领域）：结构缺了时作者仍是"那个人"，但不可寻址
+		id: "",
+		name: from.name,
+		...(from.domain ? { domain: from.domain } : {}),
+		hop: from.hop,
+	};
+}
+
 export function foldTranscriptEntries(
 	externalId: string,
 	entries: readonly EntryRecord[],
@@ -104,7 +148,10 @@ export function foldTranscriptEntries(
 	let turnStartAt: number | undefined;
 
 	for (const entry of entries) {
-		if (entry.kind === "pi.user") {
+		// 2026-11-15：递话条目同样是一轮的开头（它触发一轮 run），只是作者不是主人。
+		// 不认它的话，`relay.message` 会落进下面所有分支的 continue 里——整条从历史消失。
+		const isRelay = isRelayEntryKind(entry.kind);
+		if (entry.kind === "pi.user" || isRelay) {
 			// 新一轮：上一轮没等到回答的步骤没有挂靠点，直接丢掉（见函数头注释）
 			pending = [];
 			byCallId.clear();
@@ -113,7 +160,8 @@ export function foldTranscriptEntries(
 			// 2026-11-13 附件走路径：文件清单写在正文第一行，回读时折成 files 并从 text 剥掉
 			const raw = contentText(message.content);
 			const manifest = parseFileManifest(raw);
-			const text = manifest.text.trim();
+			// 2026-11-15：来信展示时剥掉模型侧那三段说明（抬头已写清谁发来的）；存储与模型上下文不动
+			const text = isRelay ? relayDisplayText(manifest.text) : manifest.text.trim();
 			const at = typeof message.timestamp === "number" ? message.timestamp : 0;
 			// 2026-11-08 4a：纯图消息没有文本，也要下发（老逻辑会把它整条丢掉）
 			const parts = Array.isArray(message.content) ? message.content : [];
@@ -125,12 +173,14 @@ export function foldTranscriptEntries(
 				.map((part) => ({ mimeType: part.mimeType, data: part.data }));
 			if (!text && images.length === 0 && manifest.files.length === 0) continue;
 			turnStartAt = at || undefined;
-			const outgoing: TranscriptMessage = {
-				role: "user",
-				text,
-				at,
-				id: messageIdOf(externalId, Number(entry.id)),
-			};
+			const outgoing: TranscriptMessage = { role: "user", text, at };
+			if (isRelay) {
+				// 作者进结构；**不给 id** → 前端拿不到可编辑的锚点（服务端 `forkForEdit` 也只认 pi.user）
+				const author = relayAuthorOf(entry);
+				if (author) outgoing.author = author;
+			} else {
+				outgoing.id = messageIdOf(externalId, Number(entry.id));
+			}
 			if (images.length > 0) outgoing.images = images;
 			if (manifest.files.length > 0) outgoing.files = manifest.files;
 			messages.push(outgoing);
@@ -373,11 +423,14 @@ async function logTurnUsage(conversation: Conversation, internalId: number): Pro
 
 export async function contextUsageOf(
 	conversation: Conversation,
+	// 设置 → 上下文会先读同一份 view（要取 system/tools 原文），传进来复用，
+	// 避免头和身子两次读之间刚好落一条新消息。其它调用方不传，行为不变。
+	view?: ContextView | null,
 ): Promise<{ used: number | null; window: number | null; breakdown: ContextBreakdownItem[] }> {
 	// 一次读上下文视图：用量取最后一条 assistant 的 usage，构成按同一份实文分摊，
 	// 避免两次读之间刚好落一条新消息、头和身子对不上。
-	const view = await conversation.context(CTX).catch(() => null);
-	const usage = view ? lastTurnUsageOf(view) : null;
+	const currentView = view ?? (await conversation.context(CTX).catch(() => null));
+	const usage = currentView ? lastTurnUsageOf(currentView) : null;
 	if (!usage || usage.input <= 0) return { used: null, window: null, breakdown: [] };
 	const windowOf = (provider: string | undefined, modelId: string | undefined): number | null => {
 		if (!provider || !modelId) return null;
@@ -397,7 +450,7 @@ export async function contextUsageOf(
 	const window =
 		windowOf(agent?.model?.provider, agent?.model?.modelId) ??
 		windowOf(config?.model.provider, config?.model.modelId);
-	return { used: usage.input, window, breakdown: view ? contextBreakdownOf(view) : [] };
+	return { used: usage.input, window, breakdown: currentView ? contextBreakdownOf(currentView) : [] };
 }
 
 export interface UsageSummary {
@@ -411,12 +464,43 @@ export interface UsageSummary {
 		cacheWriteTokens: number;
 		totalTokens: number;
 	}[];
+	/** 统计区间：`all` = 全部累计；`7d` / `30d` = 近 N 个自然日（2026-11-15 新增） */
+	range: "all" | "7d" | "30d";
+	/** 区间起点（本地 00:00，epoch ms）；`all` 不带 */
+	since?: number;
+	/** 区间内有消耗的自然日数；`all` 不带 */
+	activeDays?: number;
 }
 
-export async function usageSummary(): Promise<UsageSummary> {
+/**
+ * 用量汇总（2026-11-15 扩区间）。
+ *
+ * - 不带参数 = 原行为：durable 的 `pi.usage` 按会话相加，全部累计。
+ * - `days: 7 | 30` = 近 N 个自然日：`pi.usage` 没有逐日流水，改从每条 assistant entry
+ *   自带的 `timestamp` + `usage` 还原（见 `usage-range.ts` 的口径说明）。
+ */
+export async function usageSummary(options: { days?: number } = {}): Promise<UsageSummary> {
+	const days = options.days;
+	if (typeof days === "number" && Number.isFinite(days) && days > 0) {
+		const window = await usageInWindow(days);
+		return {
+			range: days === 7 ? "7d" : "30d",
+			since: window.since,
+			activeDays: window.activeDays,
+			models: window.models.map((row) => ({
+				model: row.model,
+				inputTokens: row.input,
+				outputTokens: row.output,
+				cacheReadTokens: row.cacheRead,
+				cacheWriteTokens: row.cacheWrite,
+				totalTokens: row.total,
+			})),
+		};
+	}
 	const harness = await getHarness();
 	const state = await harness.usage(CTX);
 	return {
+		range: "all",
 		models: Object.entries(state.models).map(([model, usage]) => ({
 			model,
 			inputTokens: usage.input ?? 0,

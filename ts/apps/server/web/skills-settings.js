@@ -56,6 +56,40 @@ const SKILL_ADVICE_FILTERS = [
 /** 会话级状态：当前建议快照 + 筛选/排序位 + 最近一次列表（供批量确认与重渲染） */
 const skillAdvice = { view: null, filter: "all", sort: "default", items: [], dir: "" };
 
+/** 上一次成功读到的技能列表：设置页来回切时先用它渲染，后台再拉最新。
+ *  只放进程内，不落 localStorage：技能会在磁盘上被别人改，缓存不该跨重启变成真相。 */
+const skillCache = { data: null, advice: null, signature: "" };
+
+function skillPageSignature(data, advice) {
+  try {
+    return JSON.stringify([
+      String(data?.dir || ""),
+      String(data?.origin || ""),
+      Array.isArray(data?.items) ? data.items : [],
+      advice || null,
+    ]);
+  } catch {
+    return "";
+  }
+}
+
+function applySkillPageMeta(data, path) {
+  if (path) {
+    const origin = SKILL_ORIGIN_LABEL[data.origin] || data.origin || "";
+    path.textContent = `位置：${data.dir || "—"}${origin ? `（${origin}）` : ""}`;
+  }
+  skillAdvice.dir = String(data.dir || "");
+}
+
+/** 有缓存就先画：页面不再从「读取中…」开始闪一下；数据回来只在真变了才重画。 */
+function paintSkillCache(box, path) {
+  if (!box || !skillCache.data) return false;
+  applySkillPageMeta(skillCache.data, path);
+  skillAdvice.view = skillCache.advice;
+  renderSkillList(box, skillCache.data.items);
+  return true;
+}
+
 /** 排序选项（2026-11-13 二轮）：分类之外给两种排序；没有建议快照时「Agent 建议」不出现 */
 const SKILL_SORT_OPTIONS = [
   { key: "default", label: "默认排序" },
@@ -220,6 +254,7 @@ async function loadSkills() {
   const path = document.getElementById("skill-path");
   const add = document.getElementById("skill-add");
   if (!box) return;
+  const hadCache = paintSkillCache(box, path);
   try {
     // 建议快照与列表并行取；404（SKILL_ADVICE=false）= 功能整体不出现
     const [response, adviceView] = await Promise.all([
@@ -228,6 +263,9 @@ async function loadSkills() {
     ]);
     const data = await response.json().catch(() => ({}));
     if (response.status === 404) {
+      skillCache.data = null;
+      skillCache.advice = null;
+      skillCache.signature = "";
       if (path) path.textContent = "";
       if (add) add.hidden = true;
       const toolbar = document.getElementById("skill-toolbar");
@@ -238,15 +276,30 @@ async function loadSkills() {
       return;
     }
     if (!response.ok) throw new Error(String(response.status));
-    if (path) {
-      const origin = SKILL_ORIGIN_LABEL[data.origin] || data.origin || "";
-      path.textContent = `位置：${data.dir || "—"}${origin ? `（${origin}）` : ""}`;
-    }
-    skillAdvice.dir = String(data.dir || "");
+    const next = {
+      dir: String(data.dir || ""),
+      origin: data.origin,
+      items: Array.isArray(data.items) ? data.items : [],
+    };
+    const signature = skillPageSignature(next, adviceView);
+    const changed = !hadCache || signature !== skillCache.signature;
+    applySkillPageMeta(next, path);
+    skillCache.data = next;
+    skillCache.advice = adviceView;
+    skillCache.signature = signature;
     skillAdvice.view = adviceView;
-    renderSkillList(box, Array.isArray(data.items) ? data.items : []);
+    // 缓存已经把同一份内容画上去了就不要再拆一次 DOM，避免后台刷新打断滚动/筛选
+    if (changed) renderSkillList(box, next.items);
   } catch (error) {
     if (error.message === "forbidden") return;
+    if (hadCache) {
+      // 后台刷新失败先留着旧内容，只把位置行改成失败提示；总比整页变成错误块好
+      if (path && skillCache.data) {
+        const origin = SKILL_ORIGIN_LABEL[skillCache.data.origin] || skillCache.data.origin || "";
+        path.textContent = `位置：${skillCache.data.dir || "—"}${origin ? `（${origin}）` : ""} · 刷新失败：${error.message}`;
+      }
+      return;
+    }
     box.innerHTML = `<div class="set-hint is-error">读不到技能：${esc(String(error.message))}</div>`;
   }
 }

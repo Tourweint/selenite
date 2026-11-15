@@ -21,8 +21,9 @@ import {
 /**
  * 自动归档调度器（2026-11-13 归档管理对齐 ZCode 批A，方案 §3）。
  *
- * **翻案登记**：2026-11-12 拍板"不做自动过期"，本批翻回"有这个能力，但默认关"——
- * 开关 `ARCHIVE_AUTO_ENABLED`（默认 false）+ `ARCHIVE_AUTO_DAYS`（默认 30，最小 1），
+ * **翻案登记**：2026-11-12 拍板"不做自动过期"，2026-11-13 翻回"有这个能力，但默认关"；
+ * 2026-11-15 用户再拍板"做出来的功能默认就开"，改为**默认开**（只有明确 false/0/off 才关）。
+ * 开关 `ARCHIVE_AUTO_ENABLED`（默认 true）+ `ARCHIVE_AUTO_DAYS`（默认 30，最小 1），
  * 都是 hot 开关，每轮懒读。
  *
  * **范式**照 autonomy.ts 的 syncSweepTimer（按需开关 + unref）：启动首轮延迟 5 分钟
@@ -50,10 +51,10 @@ import {
  * chat-meta（终态单本来也不会再有进度写入了）。
  */
 
-/** 开关消费处：默认关，只有显式 true/1/on 才开（与 flags defaultValue "false" 同口径）。 */
+/** 开关消费处：默认开（2026-11-15 用户口径），只有显式 false/0/off 才关（与 flags defaultValue "true" 同口径）。 */
 export function archiveAutoEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
 	const raw = (env.ARCHIVE_AUTO_ENABLED ?? "").trim().toLowerCase();
-	return raw === "true" || raw === "1" || raw === "on";
+	return raw !== "false" && raw !== "0" && raw !== "off";
 }
 
 /** 天数消费处：非整数 / 小于 1 落回默认 30（与 flags 校验同口径：≥1 的整数）。 */

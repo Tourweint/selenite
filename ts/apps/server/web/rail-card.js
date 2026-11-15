@@ -37,7 +37,8 @@ const RAIL_HOVER_CLOSE_MS = 220;
 const railHover = { openTimer: 0, closeTimer: 0, btn: null, trigger: null, menu: null, suppress: null };
 
 function railHoverArmed() {
-  // 展开态轨道整体 inert（applySidebarA11y）：只有收起/窄屏才出悬停卡
+  // 收起态轨道才可交互（applySidebarA11y）：展开时 inert，窄屏展开也是覆盖层
+  // （2026-11-15）——所以只有收起态出悬停卡，窄屏收起算收起
   return Boolean(el.sideRail) && !el.sideRail.hasAttribute("inert");
 }
 

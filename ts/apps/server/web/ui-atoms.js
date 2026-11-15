@@ -95,7 +95,16 @@ function closePopover(menu, trigger) {
  * 与 composer 的 morph 弹层并存：弹层贴触发点，模态居中，互不影响。 */
 
 const MODAL_MS = 100;
+/** 刚打开的弹层在这么短时间内不接遮罩关闭：双击触发钮时，第二下会落在遮罩上。 */
+const MODAL_GUARD_MS = 500;
+/** 同一落点连点的更长时间保护：慢一点的双击也不会把刚开的弹层关掉。 */
+const MODAL_SAME_POINT_MS = 2000;
+const MODAL_SAME_POINT_PX = 48;
 let modalTimer = 0;
+let modalOpenedAt = 0;
+let modalOpenPoint = null;
+let modalLastClick = null;
+let modalCloseOnMask = true;
 let modalReturnFocus = null;
 /** 关闭回调：确认框靠它在被遮罩 / ✕ / Esc 关掉时 resolve(false)。 */
 let modalOnClose = null;
@@ -104,8 +113,17 @@ function modalOpen() {
   return Boolean(el.modal) && !el.modal.hidden;
 }
 
-function openModal(title, build, { className = "", onClose = null } = {}) {
+// 记录最近一次点击的落点：openModal 用它判断「遮罩这一下是不是刚触发弹层的那只手指」。
+document.addEventListener("click", (event) => {
+  modalLastClick = { x: event.clientX, y: event.clientY, at: Date.now() };
+}, true);
+
+function openModal(title, build, { className = "", onClose = null, closeOnMask = true } = {}) {
   if (!el.modal) return;
+  modalOpenedAt = Date.now();
+  modalCloseOnMask = closeOnMask;
+  modalOpenPoint =
+    modalLastClick && modalOpenedAt - modalLastClick.at < 500 ? modalLastClick : null;
   // 弹窗字体跟当前区域走（2026-11-13 字体设置）：设置页开的弹窗跟随设置区，
   // 对话里开的跟随聊天区，任务 / 搜索 / 群组跟随其他界面。
   el.modal.dataset.scope = currentRoute();
@@ -165,8 +183,28 @@ function closeModal() {
   modalTimer = setTimeout(finish, MODAL_MS);
 }
 
-el.modalMask?.addEventListener("click", closeModal);
-el.modalClose?.addEventListener("click", closeModal);
+el.modalMask?.addEventListener("click", (event) => {
+  if (!modalCloseOnMask) return;
+  const now = Date.now();
+  // 双击触发钮：第一下开弹层，第二下落在刚铺开的遮罩上；同一落点连点不关。
+  if (now - modalOpenedAt < MODAL_GUARD_MS) return;
+  if (
+    modalOpenPoint &&
+    now - modalOpenPoint.at < MODAL_SAME_POINT_MS &&
+    Math.hypot(
+      event.clientX - modalOpenPoint.x,
+      event.clientY - modalOpenPoint.y,
+    ) <= MODAL_SAME_POINT_PX
+  ) {
+    return;
+  }
+  closeModal();
+});
+el.modalClose?.addEventListener("click", () => {
+  // 双击触发钮时，第二下也可能落到弹层右上角的 ✕；刚开时同样不接。
+  if (Date.now() - modalOpenedAt < MODAL_GUARD_MS) return;
+  closeModal();
+});
 
 /**
  * 统一确认框（2026-11-13）：替换 window.confirm 的原生小窗。

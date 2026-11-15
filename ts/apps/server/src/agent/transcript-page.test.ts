@@ -16,6 +16,8 @@ interface FakeEntry {
 	id: number;
 	conversationId: number;
 	kind: string;
+	/** 应用条目的 JSON 负载（2026-11-15 来信的作者进这里） */
+	data?: Record<string, unknown>;
 	model?: readonly {
 		role: string;
 		content: unknown;
@@ -34,6 +36,26 @@ function userEntry(id: number, text: string, at: number): FakeEntry {
 		conversationId: 1,
 		kind: "pi.user",
 		model: [{ role: "user", content: text, timestamp: at }],
+	};
+}
+
+/**
+ * 来信条目（2026-11-15 作者标记方案）：应用 kind + 作者 data + 模型侧带来源前缀的正文。
+ * 形状与 lifecycle `deliverPartnerRelay` 提交的一致。
+ */
+function relayEntry(id: number, text: string, at: number): FakeEntry {
+	return {
+		id,
+		conversationId: 1,
+		kind: "relay.message",
+		data: { kind: "partner", id: "p-a", name: "信使甲", domain: "inbox", hop: 1 },
+		model: [
+			{
+				role: "user",
+				content: `[relay hop=1][来自执事 信使甲（inbox）] ${text}`,
+				timestamp: at,
+			},
+		],
 	};
 }
 
@@ -229,4 +251,60 @@ test("日界键：本地日历日；时间戳缺失不参与日界", () => {
 	assert.equal(day, "2026-11-13");
 	assert.equal(historyDayKeyOf(0), null);
 	assert.equal(historyDayKeyOf(undefined), null);
+});
+
+test("来信：relay.message 自成一轮、带作者、没有可编辑 id", async () => {
+	const at = noonOf(11, 13);
+	const chat = fakeChat([
+		userEntry(1, "你先看下日程", at),
+		assistantEntry(2, "好", at + 1),
+		relayEntry(3, "对一下明天上午的口径", at + 2),
+		assistantEntry(4, "收到", at + 3),
+	]);
+
+	const page = await readTranscriptPage(chat, { limit: 10 });
+	assert.deepEqual(
+		page.messages.map((message) => message.role),
+		["user", "assistant", "user", "assistant"],
+	);
+
+	const letter = page.messages[2]!;
+	// 模型侧前缀不进界面：抬头已经写了谁发来的
+	assert.equal(letter.text, "对一下明天上午的口径");
+	// 作者进结构；不给 id → 编辑重发拿不到锚点（主人能看不能改）
+	assert.deepEqual(letter.author, {
+		kind: "partner",
+		id: "p-a",
+		name: "信使甲",
+		domain: "inbox",
+		hop: 1,
+	});
+	assert.equal(letter.id, undefined);
+
+	// 主人自己那条仍然可寻址、也没有 author
+	assert.ok(page.messages[0]!.id);
+	assert.equal(page.messages[0]!.author, undefined);
+});
+
+test("来信：结构缺了作者时退回正文前缀（仍不给 id）", async () => {
+	const at = noonOf(11, 13);
+	const broken: FakeEntry = {
+		id: 7,
+		conversationId: 1,
+		kind: "relay.message",
+		model: [
+			{
+				role: "user",
+				content: "[relay hop=1][来自执事 信使丙（日程）] 帮我看下周三",
+				timestamp: at,
+			},
+		],
+	};
+	const page = await readTranscriptPage(fakeChat([broken]), { limit: 5 });
+	const letter = page.messages[0]!;
+	assert.equal(letter.text, "帮我看下周三");
+	assert.equal(letter.author?.name, "信使丙");
+	assert.equal(letter.author?.domain, "日程");
+	assert.equal(letter.author?.id, "");
+	assert.equal(letter.id, undefined);
 });

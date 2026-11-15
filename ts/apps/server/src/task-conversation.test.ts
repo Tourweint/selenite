@@ -10,6 +10,7 @@ import {
 	taskKeyedBaselineEnabled,
 } from "./task-conversation.ts";
 import { TASK_CONVERSATION_PREFIX } from "./agent/shared.ts";
+import { dispatchOwnerOf, sidebarTaskGroupsEnabled, taskChatTitle } from "./task-chat-owner.ts";
 
 /**
  * 任务专线（2026-11-08 扫尾批 8g）的纯函数边界。
@@ -87,4 +88,39 @@ test("键控基线开关：默认开；false/0/off 才关", () => {
 	for (const value of ["true", "1", "on"]) {
 		assert.equal(taskKeyedBaselineEnabled({ TASK_KEYED_BASELINE: value }), true, value);
 	}
+});
+
+// ── 侧栏任务行归属与标题（2026-11-15 侧栏对话按创建者分组）──────────
+
+test("归属：partner- 宿主 → 该执事 uuid；其余 / 解析不到 → 总管", () => {
+	assert.deepEqual(dispatchOwnerOf("partner-7f3a-uuid"), {
+		dispatchedBy: "7f3a-uuid",
+		isPartnerHost: true,
+	});
+	assert.deepEqual(dispatchOwnerOf("e55807c3-4fac-49fb-a779-0f1816391d12"), {
+		dispatchedBy: "chief",
+		isPartnerHost: false,
+	});
+	assert.deepEqual(dispatchOwnerOf(null), { dispatchedBy: "chief", isPartnerHost: false });
+	assert.deepEqual(dispatchOwnerOf(""), { dispatchedBy: "chief", isPartnerHost: false });
+});
+
+test("标题：需求首行压空格，空则占位，超 60 字截断加省略号", () => {
+	const NL = String.fromCharCode(10);
+	const TAB = String.fromCharCode(9);
+	assert.equal(taskChatTitle(`把登录页按钮对齐${NL}第二行不要`), "把登录页按钮对齐");
+	assert.equal(taskChatTitle(`  多   空格${TAB}压掉  `), "多 空格 压掉");
+	assert.equal(taskChatTitle(""), "（没有说明）");
+	assert.equal(taskChatTitle(`   ${NL}  `), "（没有说明）");
+	const long = taskChatTitle("甲".repeat(100));
+	assert.equal(long.length, 61, "60 字 + 省略号");
+	assert.ok(long.endsWith("…"));
+});
+
+test("侧栏分组开关：默认开，只有明确 false/0 才关（拼错值不误关）", () => {
+	assert.equal(sidebarTaskGroupsEnabled({}), true, "缺省开");
+	assert.equal(sidebarTaskGroupsEnabled({ SIDEBAR_TASK_GROUPS: "false" }), false);
+	assert.equal(sidebarTaskGroupsEnabled({ SIDEBAR_TASK_GROUPS: "0" }), false);
+	assert.equal(sidebarTaskGroupsEnabled({ SIDEBAR_TASK_GROUPS: "ture" }), true);
+	assert.equal(sidebarTaskGroupsEnabled({ SIDEBAR_TASK_GROUPS: "true" }), true);
 });

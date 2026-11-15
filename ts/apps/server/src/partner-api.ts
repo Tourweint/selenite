@@ -23,7 +23,7 @@ export function partnerIdentityForDomain(
 	if (!id) return null;
 	const partner = store.get(id);
 	if (!partner) return null;
-	const soul = store.currentVersion(id)?.soulSource;
+	const soul = store.readSoulFromHome(id);
 	if (!soul?.trim()) return null;
 	return { name: partner.name, soul };
 }

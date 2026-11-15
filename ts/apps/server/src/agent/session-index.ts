@@ -140,6 +140,7 @@ export function memoryOverview(
 		const q = options.q?.trim().slice(0, 200) || undefined;
 		const offset = Math.max(0, Math.floor(options.offset ?? 0));
 		const limit = Math.max(0, Math.min(2000, Math.floor(options.limit ?? 300)));
+
 		const browse = memoryEngine.browse({
 			scopes: [scope],
 			...(options.kinds?.length ? { kinds: options.kinds } : {}),

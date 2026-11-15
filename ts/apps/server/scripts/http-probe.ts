@@ -455,6 +455,24 @@ try {
 	};
 	check(usage.models.length > 0, "有用量记录", JSON.stringify(usage.models[0]));
 
+	// 2026-11-15 区间切换：近 7 天 / 近 30 天走 assistant entry 的 timestamp 还原。
+	// 探针里刚跑过 faux 轮，回复时间就是现在，所以两档都必须把它算进去。
+	const usage7 = (await (await fetch(`${BASE}/api/v1/agent/usage?range=7d`)).json()) as {
+		range?: string;
+		since?: number;
+		activeDays?: number;
+		models: { model: string; totalTokens: number }[];
+	};
+	check(usage7.range === "7d", "近 7 天：range 回显", String(usage7.range));
+	check(typeof usage7.since === "number", "近 7 天：带窗口起点", String(usage7.since));
+	check(usage7.models.length > 0, "近 7 天：刚跑的对话算进区间", JSON.stringify(usage7.models[0]));
+	const usage30 = (await (await fetch(`${BASE}/api/v1/agent/usage?range=30d`)).json()) as {
+		range?: string;
+		models: { model: string; totalTokens: number }[];
+	};
+	check(usage30.range === "30d", "近 30 天：range 回显", String(usage30.range));
+	check(usage30.models.length > 0, "近 30 天：有用量记录", String(usage30.models.length));
+
 	// ── 5. 提醒 ───────────────────────────────────────
 	// ── 4.5 注入审计端点（2026-11-10 批 26b §二 / 批 27 §四）──────────
 	// 真 HTTP 验：只回元数据、不回正文；批 27 起全部注入都进清单（source 区分来源模块）。
@@ -1203,7 +1221,9 @@ try {
 		"系统提示注入了当前项目（项目名）",
 		insideSystem.includes("当前项目") ? "含当前项目节" : "缺当前项目节",
 	);
-	check(insideSystem.includes("根路径："), "系统提示带项目根路径");
+	// 2026-11-13 项目容器重构后 current_project 节改说「主文件夹：」——断言对齐现状
+	// （旧字符串「根路径：」是 11-13 起的存量红，与本批无关，顺手修掉）
+	check(insideSystem.includes("主文件夹："), "系统提示带项目主文件夹路径");
 
 	// 14.5 路径守卫：越界写被拒（真工具，不是 mock）
 	gateWritePath = GATE_OUTSIDE_FILE;
@@ -2510,10 +2530,58 @@ try {
 
 	const sideChats = (await (await fetch(`${BASE}/api/v1/agent/chats?limit=300`)).json()) as {
 		chats?: Array<{ conversationId?: string }>;
+		tasks?: Array<{
+			conversationId?: string;
+			ticketId?: string;
+			title?: string;
+			status?: string;
+			dispatchedBy?: string;
+		}>;
 	};
 	check(
 		!(sideChats.chats ?? []).some((chat) => chat.conversationId === "task-T-say"),
 		"专线不进侧栏（沿用 task- 前缀过滤）",
+	);
+
+	// ── 18.6 侧栏对话按创建者分组（2026-11-15，接口文档 §2.1）──────
+	// 验：chats 增量 `tasks` 键带任务专线（T-say 已由 18.5 建出）、归属与状态投影正确；
+	// 开关 SIDEBAR_TASK_GROUPS=false → 键消失（回滚形态），恢复 true → 键回来。
+	console.log("\n· 18.6 侧栏对话按创建者分组（tasks 增量键）");
+	const taskEntry = (sideChats.tasks ?? []).find((task) => task.ticketId === "T-say");
+	check(Boolean(taskEntry), "tasks 键含已建专线的单", String(taskEntry?.conversationId));
+	check(
+		taskEntry?.conversationId === "task-T-say",
+		"任务行对外 id = task-<票号>",
+		String(taskEntry?.conversationId),
+	);
+	check(
+		taskEntry?.dispatchedBy === "chief",
+		"宿主不是 partner- 前缀 → 归总管",
+		String(taskEntry?.dispatchedBy),
+	);
+	check(
+		taskEntry?.status === "needs_you",
+		"状态用单上的真实状态（18.5 的 needs_you）",
+		String(taskEntry?.status),
+	);
+	check(
+		typeof taskEntry?.title === "string" && taskEntry.title.length > 0,
+		"标题来自需求原文首行",
+		String(taskEntry?.title),
+	);
+	// 复用 §14 的 putFlag（同一个大函数作用域，不能重名）
+	check((await putFlag("SIDEBAR_TASK_GROUPS", "false")).status === 200, "flags 端点可切回滚开关");
+	const rolledChats = (await (await fetch(`${BASE}/api/v1/agent/chats?limit=50`)).json()) as {
+		tasks?: unknown;
+	};
+	check(!("tasks" in rolledChats), "开关关 → chats 不下发 tasks 键");
+	check((await putFlag("SIDEBAR_TASK_GROUPS", "true")).status === 200, "恢复开关");
+	const restoredChats = (await (await fetch(`${BASE}/api/v1/agent/chats?limit=50`)).json()) as {
+		tasks?: Array<{ ticketId?: string }>;
+	};
+	check(
+		(restoredChats.tasks ?? []).some((task) => task.ticketId === "T-say"),
+		"开关恢复 → tasks 键回来",
 	);
 
 	// ── 19. 忙时投递方式（2026-11-07 消息即引导）────────────────
@@ -2895,7 +2963,7 @@ try {
 	const contractPutBody = (await contractPut.json()) as { contractVersion?: number };
 	check(
 		contractPut.status === 200 && contractPutBody.contractVersion === 2,
-		"PUT 契约：落新版本（与 SOUL 共用版本号，v2）",
+		"PUT 契约：保存计数推进到 2（与 SOUL 共用计数，2026-11-15 快照退役）",
 		String(contractPutBody.contractVersion),
 	);
 

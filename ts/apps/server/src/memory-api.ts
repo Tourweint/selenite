@@ -18,6 +18,7 @@ import { readConsolidateDiff, runConsolidatePass } from "./memory-consolidate-pa
 import { listMemoryImportSources, memoryImportSourcesEnabled, runMemoryImportSource } from "./memory-import-sources.ts";
 import { deleteMemoryNightlyTask, memoryNightlyAt, memoryNightlyEnabled, memoryNightlyScopes, nextNightlyAt, restartMemoryNightlyScheduler, setMemoryNightlyAt, setMemoryNightlyTaskEnabled } from "./memory-nightly.ts";
 import { CHIEF_PARTNER_ID, COMPANIONS_ENABLED, partnersStore } from "./partners.ts";
+import { projectsStore } from "./projects.ts";
 import { askPersonaAvailable, askPersonaCatalog, personaAskEnabled } from "./persona-ask.ts";
 
 /** 记忆管理端点接受的 kind 全集（2026-11-13：列表过滤与排除都只认这些）。 */
@@ -166,7 +167,7 @@ export function mountMemoryApi(app: Hono, deps: MemoryApiDeps): void {
 		if (!deps.enabled) {
 			return c.json({ error: "memory_disabled", message: "记忆未启用（MEMORY_ENABLED=false）" }, 404);
 		}
-		const scopes: Array<{ scope: string; label: string; count: number; kind: "mine" | "partner" }> = [
+		const scopes: Array<{ scope: string; label: string; count: number; kind: "mine" | "partner" | "project" }> = [
 			{
 				scope: "global",
 				label: "我的记忆",
@@ -193,6 +194,20 @@ export function mountMemoryApi(app: Hono, deps: MemoryApiDeps): void {
 				console.warn(`[memory] 范围清单读执事失败: ${error instanceof Error ? error.message : String(error)}`);
 			}
 		}
+		// 项目记忆（2026-11-15 项目记忆方案）：有记忆的项目才列（免得空 tab 一排），
+		// 软删（archived）项目里还存着记忆的也列出来——记忆还在，就该有地方看。
+		try {
+			for (const project of projectsStore().listProjects(true)) {
+				const scope = `project:${project.id}`;
+				const count = memoryOverview({ scope, limit: 0, excludeKinds: ["work"] }).counts.all;
+				if (count <= 0) continue;
+				scopes.push({ scope, label: project.name, count, kind: "project" });
+			}
+		} catch (error) {
+			console.warn(`[memory] 范围清单读项目失败: ${error instanceof Error ? error.message : String(error)}`);
+		}
+		// 外部导入伪 scope（__imported__）2026-11-15 当天撤回：用户拍板「导入了就是自己的记忆」，
+		// 导入条目就落在 global / 项目 scope 里照常显示与召回，不再单开一个查看区。
 		return c.json({ ok: true, scopes });
 	});
 
