@@ -1,0 +1,748 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>来信四版校样</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' fill='%23fdf9f2'/%3E%3Cpath d='M3 7h18v10H3z' fill='none' stroke='%232e2b3a' stroke-width='1.6'/%3E%3Cpath d='M3 7l9 6 9-6' fill='none' stroke='%23b89b6e' stroke-width='1.6'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="https://miaoda.feishu.cn/fonts/css2?family=Noto+Serif+SC:wght@400;500;600&display=swap">
+<style>
+/* ===== 色板：与 lifediary-harness 的 paper 主题同一套 token ===== */
+:root{
+  --bg:#fdf9f2; --surface-low:#f7f3eb; --card:#f6f1e7; --card-high:#ede9e0;
+  --text:#2e2b3a; --text-2:#6e6b7e; --text-3:#9a97a5;
+  --outline:#c8c5bc; --divider:rgba(200,197,188,.55);
+  --gold:#b89b6e; --gold-soft:rgba(184,155,110,.42); --gold-line:rgba(184,155,110,.72);
+  --indigo:#3e4a8c;
+  --chat-bubble:color-mix(in srgb, var(--text) 5%, transparent);
+  --chat-hairline:color-mix(in srgb, var(--text) 9%, transparent);
+  --r-sm:8px; --r-md:12px; --r-lg:16px; --r-xl:24px;
+  --font:"Noto Serif SC","Songti SC","Source Han Serif SC","STSong","SimSun","Microsoft YaHei",serif;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  --dur:200ms; --ease:cubic-bezier(.4,0,.2,1);
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{
+  background:var(--surface-low); color:var(--text); font-family:var(--font);
+  -webkit-font-smoothing:antialiased; font-size:15px; line-height:1.7;
+}
+::selection{background:rgba(184,155,110,.28)}
+
+/* ===== 页头 ===== */
+.masthead{
+  padding:34px 32px 22px; border-bottom:1px solid var(--divider);
+  display:flex; align-items:flex-end; justify-content:space-between; gap:24px; flex-wrap:wrap;
+}
+.masthead h1{font-size:27px; font-weight:600; margin:0 0 6px; letter-spacing:.01em}
+.masthead p{margin:0; font-size:13.5px; color:var(--text-2); max-width:52ch}
+.masthead .tag{
+  font-size:12px; color:var(--text-3); text-align:right; line-height:1.9;
+  font-variant-numeric:tabular-nums; flex:none;
+}
+
+/* ===== 三栏 ===== */
+.desk{
+  display:grid; grid-template-columns:196px minmax(0,1fr) 236px;
+  grid-template-areas:"rail stage notes";
+  gap:0; align-items:start;
+}
+.rail{border-right:1px solid var(--divider); padding:22px 0; position:sticky; top:0}
+.rail h2{
+  font-size:11.5px; font-weight:500; color:var(--text-3); margin:0 0 10px;
+  padding:0 20px; letter-spacing:.08em;
+}
+.tabs{display:flex; flex-direction:column}
+.tab{
+  appearance:none; border:0; background:none; text-align:left; cursor:pointer; user-select:none;
+  font-family:inherit; font-size:13.5px; color:var(--text-2);
+  padding:9px 18px 9px 20px; display:flex; align-items:baseline; gap:9px;
+  border-left:3px solid transparent; transition:color var(--dur) var(--ease);
+}
+.tab b{font-weight:600; color:var(--text-3); font-variant-numeric:tabular-nums; width:11px; flex:none}
+.tab span{min-width:0}
+.tab:hover{color:var(--text)}
+.tab[aria-current="true"]{border-left-color:var(--gold); color:var(--text)}
+.tab[aria-current="true"] b{color:var(--gold)}
+.tab:focus-visible{outline:2px solid var(--indigo); outline-offset:-2px}
+
+.rail-sep{border-top:1px solid var(--divider); margin:16px 20px 14px}
+.controls{padding:0 18px 0 20px; display:flex; flex-direction:column; gap:12px}
+.switch{display:flex; align-items:center; gap:9px; cursor:pointer; font-size:12.5px; color:var(--text-2)}
+.switch input{position:absolute; opacity:0; width:1px; height:1px}
+.track{
+  width:32px; height:18px; border-radius:999px; border:1px solid var(--outline);
+  background:var(--bg); position:relative; flex:none; transition:border-color var(--dur) var(--ease)
+}
+.track::after{
+  content:""; position:absolute; top:2px; left:2px; width:12px; height:12px; border-radius:50%;
+  background:var(--text-3); transition:transform var(--dur) var(--ease), background var(--dur) var(--ease)
+}
+.switch input:checked + .track{border-color:var(--gold)}
+.switch input:checked + .track::after{transform:translateX(14px); background:var(--gold)}
+.switch input:focus-visible + .track{outline:2px solid var(--indigo); outline-offset:2px}
+.switch em{font-style:normal; color:var(--text-3); font-size:11.5px; display:block; line-height:1.5}
+
+.ghost-btn{
+  appearance:none; font-family:inherit; cursor:pointer; font-size:12.5px; color:var(--text);
+  background:var(--bg); border:1px solid var(--chat-hairline); border-radius:var(--r-md);
+  padding:7px 11px; text-align:center; transition:border-color var(--dur) var(--ease)
+}
+.ghost-btn:hover{border-color:var(--outline)}
+.ghost-btn:focus-visible{outline:2px solid var(--indigo); outline-offset:2px}
+
+/* ===== 舞台 ===== */
+.stage{
+  padding:26px 26px 40px; min-width:0; grid-area:stage;
+  display:flex; justify-content:center; align-items:flex-start;
+}
+.win{
+  border:1px solid var(--chat-hairline); border-radius:var(--r-xl); background:var(--bg);
+  overflow:hidden; box-shadow:0 10px 28px rgba(46,43,58,.10);
+  width:100%; max-width:1000px;
+}
+.win-bar{
+  display:flex; align-items:center; gap:12px; padding:10px 16px;
+  border-bottom:1px solid var(--chat-hairline); background:var(--surface-low);
+}
+.win-bar .who{font-size:13px; color:var(--text); min-width:0}
+.win-bar .who em{font-style:normal; color:var(--text-3); font-size:12px; margin-left:7px}
+.win-bar .state{
+  margin-left:auto; font-size:11.5px; color:var(--text-3); font-variant-numeric:tabular-nums; flex:none;
+}
+.dot{width:5px; height:5px; border-radius:50%; background:var(--gold); display:inline-block; margin-right:5px; vertical-align:1px}
+
+/* D 版顶部信封条 */
+.strip{
+  display:none; align-items:center; gap:10px; padding:9px 16px;
+  border-bottom:1px solid var(--chat-hairline); background:var(--card);
+  font-size:12.5px; color:var(--text-2);
+}
+.strip .count{color:var(--text); font-variant-numeric:tabular-nums}
+.strip button{
+  margin-left:auto; appearance:none; border:0; background:none; cursor:pointer;
+  font-family:inherit; font-size:12.5px; color:var(--indigo); padding:2px 4px; border-radius:var(--r-sm)
+}
+.strip button:focus-visible{outline:2px solid var(--indigo); outline-offset:2px}
+.win.v-D .strip{display:flex}
+
+.thread{padding:22px 22px 26px; display:flex; flex-direction:column; gap:20px; min-height:340px}
+.thread.v-B{padding-left:32px; padding-right:32px}
+
+/* 主人：右侧气泡（照 app 的 .msg.user） */
+.msg.owner{display:flex; justify-content:flex-end}
+.msg.owner .body{
+  max-width:480px; padding:10px 14px; background:var(--chat-bubble);
+  border:1px solid var(--chat-hairline); color:var(--text);
+  border-radius:var(--r-lg) var(--r-lg) var(--r-sm) var(--r-lg);
+  font-size:14.5px; line-height:1.68;
+}
+/* 执事回答：左侧无气泡（照 app 的 .msg.assistant） */
+.msg.reply{max-width:660px}
+.msg.reply .body{font-size:14.5px; line-height:1.68}
+.msg.reply .who{
+  font-size:12px; color:var(--text-3); margin-bottom:3px; display:flex; align-items:center; gap:7px;
+}
+.msg.reply .who .avatar{
+  width:18px; height:18px; border-radius:50%; background:var(--card-high);
+  display:grid; place-content:center; font-size:10px; color:var(--text-2); flex:none;
+}
+
+/* ===== A 版：信封条 ===== */
+.msg.letter{display:flex; justify-content:flex-start}
+.letter-card{
+  max-width:560px; background:var(--card); border:1px solid var(--chat-hairline);
+  border-radius:var(--r-md); padding:9px 13px 10px;
+  box-shadow:inset 2px 0 0 var(--gold-line);
+}
+.letter-meta{display:flex; align-items:baseline; gap:10px; font-size:12px; color:var(--text-3)}
+.letter-from{color:var(--text-2)}
+.letter-meta time{margin-left:auto; font-variant-numeric:tabular-nums}
+.letter-body{
+  font-size:13.5px; line-height:1.66; color:var(--text); white-space:pre-wrap; overflow-wrap:anywhere;
+  margin-top:3px;
+}
+.letter-body.clamped{
+  display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; line-clamp:2; overflow:hidden;
+}
+.letter-toggle{
+  appearance:none; border:0; background:none; padding:2px 0 0; cursor:pointer;
+  font-family:inherit; font-size:12px; color:var(--text-3);
+}
+.letter-toggle:hover{color:var(--text)}
+.letter-toggle:focus-visible{outline:2px solid var(--indigo); outline-offset:2px}
+
+/* ===== B 版：引文带 ===== */
+.band{
+  max-width:720px; border-left:2px solid var(--gold-line); padding:1px 0 1px 14px;
+}
+.band .band-from{
+  display:flex; align-items:baseline; gap:9px; font-size:12px; color:var(--text-3);
+  margin-bottom:2px;
+}
+.band .band-from b{font-weight:500; color:var(--text-2)}
+.band .band-from time{font-variant-numeric:tabular-nums}
+.band p{margin:0; font-size:14px; line-height:1.72; color:var(--text); white-space:pre-wrap}
+
+/* ===== 箭头组件（全页唯一来源：一个会转的箭头 + 一个指向箭头） =====
+   收起时箭头朝下（说明"下面还有"），展开时转 180° 朝上（说明"可以收回去"）。
+   转动走 240ms 带一点回弹的曲线；指向箭头在 hover 时前移 2px，说明"这是从别处来的"。 */
+.ico{display:inline-flex; align-items:center; flex:none}
+.ico svg{display:block}
+.arrow{color:var(--text-3); transition:color var(--dur) var(--ease)}
+.arrow.flow{transition:transform 160ms var(--ease), color var(--dur) var(--ease)}
+.arrow.toggle{transition:transform 240ms cubic-bezier(.34,1.4,.64,1), color var(--dur) var(--ease)}
+.arrow.toggle[data-open="1"]{transform:rotate(180deg)}
+
+/* ===== C 版：回执行 ===== */
+.ledger{width:100%; max-width:560px; flex-direction:column; align-items:stretch}
+.ledger-row{
+  appearance:none; width:100%; text-align:left; cursor:pointer; font-family:inherit;
+  display:flex; align-items:center; gap:9px; padding:7px 2px;
+  background:none; border:0; border-bottom:1px solid var(--chat-hairline);
+  border-radius:0; color:var(--text-2); font-size:12.5px;
+  transition:color var(--dur) var(--ease);
+}
+.ledger-row:hover,.ledger-row:hover .arrow{color:var(--text)}
+.ledger-row:hover .arrow.flow{transform:translateX(2px)}
+.ledger-row:focus-visible{outline:2px solid var(--indigo); outline-offset:-1px}
+.ledger-name{color:var(--text); font-size:13px; white-space:nowrap}
+.ledger-time{font-variant-numeric:tabular-nums; color:var(--text-3)}
+.ledger-row .arrow.toggle{margin-left:auto}
+
+/* 展开：0fr → 1fr 的高度动画，不用量像素；收起时不占位、也不画出底边线 */
+.ledger-body{
+  display:grid; grid-template-rows:0fr; opacity:0;
+  transition:grid-template-rows 260ms var(--ease), opacity 200ms var(--ease);
+}
+.ledger-body.open{grid-template-rows:1fr; opacity:1}
+.ledger-inner{overflow:hidden; min-height:0}
+.ledger-inner > .pad{
+  padding:10px 2px 11px 0; border-bottom:1px solid var(--chat-hairline);
+  font-size:14px; line-height:1.72; white-space:pre-wrap; overflow-wrap:anywhere;
+}
+
+/* ===== 抽屉（D 版） ===== */
+.drawer{
+  position:absolute; inset:0 0 0 auto; width:min(392px,86%); background:var(--bg);
+  border-left:1px solid var(--chat-hairline); transform:translateX(102%);
+  transition:transform 240ms var(--ease); display:flex; flex-direction:column; z-index:3;
+}
+.drawer.open{transform:none}
+.drawer-head{
+  display:flex; align-items:baseline; gap:10px; padding:13px 16px;
+  border-bottom:1px solid var(--chat-hairline);
+}
+.drawer-head h3{margin:0; font-size:14px; font-weight:600}
+.drawer-head .meta{font-size:12px; color:var(--text-3)}
+.drawer-head .close{
+  margin-left:auto; appearance:none; border:0; background:none; cursor:pointer;
+  width:26px; height:26px; display:grid; place-content:center; color:var(--text-2);
+  border-radius:var(--r-sm);
+}
+.drawer-head .close:hover{color:var(--text); background:var(--composer-pill, rgba(46,43,58,.06))}
+.drawer-list{overflow:auto; padding:8px 0 16px}
+.drawer-item{padding:11px 16px 13px; border-bottom:1px solid var(--divider)}
+.drawer-item .top{display:flex; align-items:baseline; gap:9px; font-size:12px; color:var(--text-3)}
+.drawer-item .top b{font-weight:500; color:var(--text-2)}
+.drawer-item .top time{margin-left:auto; font-variant-numeric:tabular-nums}
+.drawer-item p{margin:3px 0 0; font-size:13.5px; line-height:1.68; white-space:pre-wrap}
+.scrim{
+  position:absolute; inset:0; background:rgba(46,43,58,.18); opacity:0;
+  pointer-events:none; transition:opacity 240ms var(--ease); z-index:2;
+}
+.scrim.on{opacity:1; pointer-events:auto}
+.win-body{position:relative; min-height:0}
+
+/* T0 的诚实提示 */
+.ghost{
+  margin:2px 0 0; padding:8px 12px; border:1px dashed var(--outline); border-radius:var(--r-md);
+  font-size:12.5px; color:var(--text-2); display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+  animation:none;
+}
+.ghost b{font-weight:500; color:var(--text)}
+.ghost button{
+  margin-left:auto; appearance:none; cursor:pointer; font-family:inherit; font-size:12px;
+  color:var(--indigo); background:none; border:1px solid var(--chat-hairline); border-radius:var(--r-sm);
+  padding:3px 9px;
+}
+.ghost button:hover{border-color:var(--outline)}
+.ghost button:focus-visible{outline:2px solid var(--indigo); outline-offset:2px}
+
+/* 轻事件提示（T1 的"踢一脚"） */
+.pulse{
+  font-size:11.5px; color:var(--text-3); display:flex; align-items:center; gap:6px;
+  padding-left:2px;
+}
+.pulse .dot{animation:blink 900ms ease-out 2}
+@keyframes blink{0%,100%{opacity:.35}50%{opacity:1}}
+@keyframes rise{from{opacity:0; transform:translateY(8px)}to{opacity:1; transform:none}}
+.is-fresh{animation:rise 260ms var(--ease) both}
+
+/* composer 假壳：交代这是"读账本"的界面，不是真输入 */
+.composer{
+  border-top:1px solid var(--chat-hairline); padding:12px 16px; display:flex; gap:10px; align-items:center;
+  background:var(--bg);
+}
+.composer .field{
+  flex:1; min-width:0; border:1px solid var(--chat-hairline); border-radius:var(--r-md);
+  padding:9px 12px; font-size:13px; color:var(--text-3); background:var(--surface-low);
+}
+.composer .send{
+  width:34px; height:34px; border-radius:50%; border:1px solid var(--chat-hairline);
+  background:var(--card); display:grid; place-content:center; color:var(--text-3); flex:none;
+}
+
+/* ===== 右栏注释 ===== */
+.notes{border-left:1px solid var(--divider); padding:26px 22px 40px; position:sticky; top:0; grid-area:notes}
+.notes h2{font-size:13px; font-weight:600; margin:0 0 4px}
+.notes .say{font-size:12px; color:var(--text-3); margin:0 0 16px; line-height:1.6}
+.notes dl{margin:0; display:grid; gap:13px}
+.notes dt{font-size:11.5px; color:var(--text-3); margin:0 0 2px}
+.notes dd{margin:0; font-size:12.5px; line-height:1.66; color:var(--text-2)}
+.notes dd strong{font-weight:500; color:var(--text)}
+.notes .foot{
+  margin-top:18px; padding-top:14px; border-top:1px solid var(--divider);
+  font-size:12px; color:var(--text-3); line-height:1.7;
+}
+
+/* ===== 并排 ===== */
+.spread{display:grid; grid-template-columns:1fr 1fr; gap:20px; max-width:980px}
+.cell{min-width:0}
+.cell h3{margin:0 0 8px; font-size:12.5px; color:var(--text-2); display:flex; gap:8px; align-items:baseline}
+.cell h3 b{font-weight:600; color:var(--gold); font-variant-numeric:tabular-nums}
+.cell .box{
+  border:1px solid var(--chat-hairline); border-radius:var(--r-lg); background:var(--bg);
+  padding:16px 14px; min-height:150px; display:flex; flex-direction:column; gap:12px;
+}
+.cell-note{
+  margin:10px 0 0; font-size:11.5px; color:var(--text-3); line-height:1.6;
+  padding-top:10px; border-top:1px solid var(--divider);
+}
+.ghost-btn[disabled]{
+  color:var(--text-3); border-color:var(--chat-hairline); cursor:not-allowed; background:var(--surface-low);
+}
+
+/* ===== 页脚对比 ===== */
+.footwrap{padding:8px 32px 48px}
+.footwrap h2{font-size:16px; margin:8px 0 12px}
+table{width:100%; border-collapse:collapse; table-layout:fixed; font-size:13px}
+col.c1{width:16%} col.c2{width:30%} col.c3{width:27%} col.c4{width:27%}
+th,td{padding:10px 12px; text-align:left; vertical-align:top; border-bottom:1px solid var(--divider)}
+th{font-size:11.5px; font-weight:500; color:var(--text-3); border-bottom:1px solid var(--outline)}
+td:first-child{font-weight:600}
+td span.muted{color:var(--text-3)}
+.footwrap .last{
+  margin-top:14px; font-size:12.5px; color:var(--text-3); max-width:88ch; line-height:1.7;
+}
+
+@media (prefers-reduced-motion: reduce){
+  *{animation-duration:.01ms!important; animation-iteration-count:1!important; transition-duration:.01ms!important}
+}
+@media (max-width:1100px){
+  .desk{grid-template-columns:1fr; grid-template-areas:"rail" "stage" "notes"}
+  .rail{position:static; border-right:0; border-bottom:1px solid var(--divider); padding-bottom:16px}
+  .tabs{flex-direction:row; flex-wrap:wrap; gap:2px}
+  .tab{border-left:0; border-bottom:3px solid transparent; padding:7px 12px}
+  .tab[aria-current="true"]{border-bottom-color:var(--gold)}
+  .rail-sep{display:none}
+  .controls{flex-direction:row; align-items:center; flex-wrap:wrap}
+  .notes{position:static; border-left:0; border-top:1px solid var(--divider); padding-top:18px}
+  .notes dl{grid-template-columns:1fr 1fr}
+  .spread{grid-template-columns:1fr}
+  .thread{padding:18px 14px}
+  .masthead,.footwrap{padding-left:18px; padding-right:18px}
+}
+</style>
+</head>
+<body>
+
+<header class="masthead">
+  <div>
+    <h1>来信四版校样</h1>
+    <p>同一封执事之间的来信，在同一段对话里画成四种样子。左栏切换版本，中间是模拟会话，右栏是这一版的口径与代价。</p>
+  </div>
+  <div class="tag">
+    数据来自 <span style="font-family:var(--mono)">relay.message</span> 条目<br>
+    <span style="font-family:var(--mono)">author</span> · 甲 / inbox · hop 1
+  </div>
+</header>
+
+<div class="desk">
+
+  <!-- ===== 左栏：版本与推送 ===== -->
+  <aside class="rail">
+    <h2>版本</h2>
+    <nav class="tabs" id="tabs">
+      <button class="tab" type="button" data-v="A" aria-current="true"><b>A</b><span>信封条</span></button>
+      <button class="tab" type="button" data-v="B"><b>B</b><span>引文带</span></button>
+      <button class="tab" type="button" data-v="C"><b>C</b><span>回执行</span></button>
+      <button class="tab" type="button" data-v="D"><b>D</b><span>信箱档</span></button>
+      <button class="tab" type="button" data-v="X"><b>·</b><span>四版并排</span></button>
+    </nav>
+    <div class="rail-sep"></div>
+    <h2>推送</h2>
+    <div class="controls">
+      <label class="switch">
+        <input type="checkbox" id="push" checked>
+        <span class="track"></span>
+        <span>递话落地就踢一脚<em id="pushNote">开 · 正看着会话时来信会自己长出来</em></span>
+      </label>
+      <button class="ghost-btn" type="button" id="deliver">让甲再递一封</button>
+    </div>
+  </aside>
+
+  <!-- ===== 中间：模拟会话 ===== -->
+  <section class="stage" id="stage">
+    <div class="win" id="win">
+      <div class="win-bar">
+        <span class="who">信使乙<em>calendar</em></span>
+        <span class="state" id="state">paper · 920</span>
+      </div>
+      <div class="strip" id="strip">
+        <span><span class="count" id="stripCount">1</span> 封来信</span>
+        <button type="button" id="openDrawer">查看来信</button>
+      </div>
+      <div class="win-body">
+        <div class="thread" id="thread"></div>
+        <div class="scrim" id="scrim"></div>
+        <aside class="drawer" id="drawer" aria-label="来信抽屉">
+          <div class="drawer-head">
+            <h3>来信</h3>
+            <span class="meta" id="drawerMeta">2 封 · 全是回读来的</span>
+            <button class="close" type="button" id="closeDrawer" aria-label="关掉">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+            </button>
+          </div>
+          <div class="drawer-list" id="drawerList"></div>
+        </aside>
+      </div>
+      <div class="composer">
+        <div class="field">跟信使乙说点什么……（这是假输入框，诸版只改来信怎么画）</div>
+        <div class="send" aria-hidden="true">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== 右栏：这一版 ===== -->
+  <aside class="notes" id="notes">
+    <h2 id="noteTitle">A · 信封条</h2>
+    <p class="say" id="noteSay">最省事的一版：卡片让步给"外来"两个字。</p>
+    <dl id="noteList"></dl>
+    <div class="foot">四版都不给来信挂编辑 / 回复按钮——来信没有 <span style="font-family:var(--mono);font-size:11.5px">id</span>，要回话就切到这个执事本身说话。</div>
+  </aside>
+
+</div>
+
+<!-- ===== 页脚：一屏对比 ===== -->
+<section class="footwrap">
+  <h2>一屏看清</h2>
+  <table>
+    <colgroup><col class="c1"><col class="c2"><col class="c3"><col class="c4"></colgroup>
+    <thead><tr><th>版</th><th>一句话</th><th>适合</th><th>代价</th></tr></thead>
+    <tbody>
+      <tr><td>A 信封条</td><td>带底色的卡片，左侧一条金线，抬头写"谁 · 域 发来"。</td><td>来信是偶发插曲，主人扫一眼就过。</td><td>最小：只改样式与折叠阈值。</td></tr>
+      <tr><td>B 引文带</td><td>不要卡片，一条竖线加小字署名，正文可到 720。</td><td>信常两三行、要读完。</td><td>低；但这条不能折叠，且无底色容易混进对方的话。</td></tr>
+      <tr><td>C 回执行</td><td>流里只留一行"信使甲 → 14:32"，右侧箭头一转就展开正文。</td><td>一个会话里连着好几封，只想扫一眼。</td><td>中：要内联展开器；默认看不见正文。</td></tr>
+      <tr><td>D 信箱档</td><td>会话顶部一条"来信 N"，点开抽屉按时间列全部。</td><td>一天好几封，要抽查而不是逐条读。</td><td>最大：先得回答"未读算不算状态"。</td></tr>
+    </tbody>
+  </table>
+  <p class="last">推送那档是另一件事：关掉推送时，来信只在"回读"（刷新、切走再切回）时出现——左栏那个开关演示的就是这个差别。已定 C 版 + 推送开：流里留一行，点开才见正文。</p>
+</section>
+
+<script>
+/* ===== 场景数据：一段真会发生的对话 ===== */
+const BASE = [
+  {kind:"owner", text:"明天上午是不是有个评审？"},
+  {kind:"reply", text:"9:00 评审会，10:30 电话会。评审材料是昨晚发来那版，还差你确认口径。"},
+  {kind:"letter", from:"信使甲", domain:"inbox", at:"14:32", text:"明天 9 点那场按 9 点那版走，下午那版作废；另外周六的体检我请假了，那场你盯着。"},
+  {kind:"reply", text:"收到。周六那场我盯。"}
+];
+
+/* 再递一封时轮着来，两封足够说明"多封"时各版怎么退化 */
+const EXTRA = [
+  {kind:"letter", from:"信使丙", domain:"study", at:"14:41", text:"你那篇开题的文献我过了一遍，缺一条反例，我放在共享目录里了。"},
+  {kind:"letter", from:"信使甲", domain:"inbox", at:"15:06", text:"周六挪到周五了，主人那边我去说，你不用再提。"}
+];
+
+const NOTES = {
+  A:{title:"A · 信封条", say:"最省事的一版：卡片让步给「外来」两个字。",
+     rows:[["抬头","「执事「甲」· inbox 发来 · 14:32」，常驻不折。"],
+           ["何时出现","回读时；推送开着会自己长出来。"],
+           ["代价","最小：改样式与折叠阈值，半天。"],
+           ["会怎么错","卡片底和气泡太像时，「外来」全靠抬头那行字撑着。"]]},
+  B:{title:"B · 引文带", say:"当摘录画，不当消息画：一条竖线，正文能写满。",
+     rows:[["抬头","「甲 · 14:32」+ 左侧 2px 竖线。"],
+           ["何时出现","同上；宽到 720，长文不挤。"],
+           ["代价","低：一个左 border 加一个 flex 行。"],
+           ["会怎么错","这条不能折叠，一折就只剩署名，跟状态提示没区别；无底色还容易混进对方的话。"]]},
+  C:{title:"C · 回执行", say:"扫读优先：流里只留一行，要看再点开。",
+     rows:[["抬头","「信使甲 → 14:32」一行；收件人就是当前这个会话，不必写。"],
+           ["展开","右侧一枚箭头：收起朝下、展开翻 180° 朝上，正文同时撑开。"],
+           ["代价","中：要一个就地展开器；来信没有 id，位置靠时间戳兜。"],
+           ["会怎么错","默认看不见正文，主人容易漏事；箭头语言偏运维，不像家里人在说话。"]]},
+  D:{title:"D · 信箱档", say:"信多到看不完时才有意义：顶部一条，抽屉里翻。",
+     rows:[["抬头","顶部「N 封来信」+ 抽屉里「谁 · 时间 · 全文」。"],
+           ["何时出现","顶部条常驻；抽屉内容同样靠回读。"],
+           ["代价","最大：新视图 + 未读状态 + 与主流的定位联动。"],
+           ["会怎么错","「未读」不落库，刷新后全消失，主人会觉得坏了。"]]},
+  X:{title:"四版并排", say:"同一封信，四种画法。挑一版，或者挑一个组合。",
+     rows:[["看什么","谁在说、什么时候说的、要不要点开。"],
+           ["别混的","四版都必须让「抬头」常驻，折叠只能折正文。"],
+           ["代价","并排只是校样，不落地。"],
+           ["结论","已定 C + 推送：行内只留人名、箭头、时间。"]]}
+};
+
+const state = {version:"C", push:true, items:BASE.slice(), pending:null, extra:0, open:{}, drawer:false};
+
+const $ = (id)=>document.getElementById(id);
+const esc = (s)=>String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+
+/* ===== 四版各自的画法 ===== */
+function letterA(m){
+  const clamp = m.expanded ? "" : " clamped";
+  return `<div class="msg letter">
+    <div class="letter-card">
+      <div class="letter-meta">
+        <span class="letter-from">执事「${esc(m.from)}」· ${esc(m.domain)} 发来</span>
+        <time>${esc(m.at)}</time>
+      </div>
+      <div class="letter-body${clamp}">${esc(m.text)}</div>
+      <button class="letter-toggle" type="button" data-toggle="${esc(m.at)}">${m.expanded?"收起":"展开全文"}</button>
+    </div>
+  </div>`;
+}
+
+function letterB(m){
+  return `<div class="msg letter">
+    <div class="band">
+      <div class="band-from"><b>${esc(m.from)}</b><time>${esc(m.at)}</time></div>
+      <p>${esc(m.text)}</p>
+    </div>
+  </div>`;
+}
+
+/* ===== 箭头组件（全页唯一来源）=====
+   `flow`   ：指向箭头，表示"从别处递过来"，hover 前移 2px；
+   `toggle` ：折叠箭头，收起朝下、展开转 180° 朝上，靠 data-open 切换。
+   两个变体共用同一套 SVG 画法（同 stroke 宽、同圆角），只是路径与动效不同。 */
+const ARROW_PATHS = {
+  flow: '<path d="M2.2 8h10.4"/><path d="M8.6 3.6 13 8l-4.4 4.4"/>',
+  toggle: '<path d="M3.4 6.3 8 10.6l4.6-4.3"/>'
+};
+function arrow(kind, { open = false } = {}){
+  return `<span class="ico arrow ${kind}"${open?' data-open="1"':""} aria-hidden="true">
+    <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${ARROW_PATHS[kind]}</svg>
+  </span>`;
+}
+
+function letterC(m, i = 0){
+  const open = Boolean(state.open[m.at]);
+  const bodyId = `lb-${i}`;
+  return `<div class="msg letter ledger">
+    <button class="ledger-row" type="button" aria-expanded="${open}" aria-controls="${bodyId}" data-ledger="${esc(m.at)}">
+      <span class="ledger-name">${esc(m.from)}</span>
+      ${arrow("flow")}
+      <span class="ledger-time">${esc(m.at)}</span>
+      ${arrow("toggle", { open })}
+    </button>
+    <div class="ledger-body${open?" open":""}" id="${bodyId}" data-open="${open?1:0}">
+      <div class="ledger-inner"><div class="pad">${esc(m.text)}</div></div>
+    </div>
+  </div>`;
+}
+
+function letterD(m){
+  return `<div class="msg letter">
+    <div class="letter-card">
+      <div class="letter-meta">
+        <span class="letter-from">执事「${esc(m.from)}」· ${esc(m.domain)} 发来</span>
+        <time>${esc(m.at)}</time>
+      </div>
+      <div class="letter-body clamped">${esc(m.text)}</div>
+      <button class="letter-toggle" type="button" data-toggle="${esc(m.at)}">展开全文</button>
+    </div>
+  </div>`;
+}
+
+const RENDER_LETTER = {A:letterA, B:letterB, C:letterC, D:letterD};
+
+function renderItem(m, i){
+  if(m.kind === "owner") return `<div class="msg owner"><div class="body">${esc(m.text)}</div></div>`;
+  if(m.kind === "reply") return `<div class="msg reply">
+      <div class="who"><span class="avatar">乙</span>信使乙</div>
+      <div class="body">${esc(m.text)}</div>
+    </div>`;
+  return (RENDER_LETTER[state.version] || letterA)(m, i);
+}
+
+/* ===== 并排视图 ===== */
+function renderSpread(){
+  const letter = state.items.find((m)=>m.kind==="letter");
+  const variants = ["A","B","C","D"];
+  const labels = {A:"信封条", B:"引文带", C:"回执行", D:"信箱档"};
+  const captions = {C:"正文在折叠里，点开才见——并排看不清这一点，单独看 C 版时点一下展开。"};
+  return `<div class="spread">${variants.map((v, vi)=>{
+    const keep = state.version;
+    state.version = v;
+    const html = (RENDER_LETTER[v])({...letter, expanded:false}, vi);
+    state.version = keep;
+    return `<div class="cell">
+      <h3><b>${v}</b>${labels[v]}</h3>
+      <div class="box">${html}${captions[v]?`<p class="cell-note">${captions[v]}</p>`:""}</div>
+    </div>`;
+  }).join("")}</div>`;
+}
+
+/* ===== 主渲染 ===== */
+function render(){
+  const thread = $("thread");
+  $("win").className = "win v-" + state.version;
+
+  if(state.version === "X"){
+    thread.className = "thread";
+    thread.innerHTML = renderSpread();
+  } else {
+    thread.className = "thread v-" + state.version;
+    thread.innerHTML = state.items.map(renderItem).join("");
+    if(state.pending){
+      thread.insertAdjacentHTML("beforeend", `<div class="ghost">
+        <b>这封信服务端已经写进去了</b>，但这会儿看不到——递话只写了账本，没有通知浏览器。
+        <button type="button" id="refetch">刷新再看（回读一页）</button>
+      </div>`);
+    }
+  }
+
+  // 折叠按钮 / 回执行 / 抽屉入口
+  thread.querySelectorAll("[data-toggle]").forEach((btn)=>{
+    btn.addEventListener("click", ()=>{
+      const key = btn.dataset.toggle;
+      const item = state.items.find((m)=>m.kind==="letter" && m.at===key);
+      if(!item) return;
+      item.expanded = !item.expanded;
+      render();
+    });
+  });
+  // 折叠按钮只在真的截断时才出现：两行装得下，就不该有个"展开全文"杵着
+  thread.querySelectorAll(".letter-body.clamped").forEach((el)=>{
+    const btn = el.parentElement && el.parentElement.querySelector(".letter-toggle");
+    if(btn && el.scrollHeight <= el.clientHeight + 1) btn.hidden = true;
+  });
+  // 回执行：就地切换，不重绘节点——否则箭头转不动、正文也长不出来
+  thread.querySelectorAll("[data-ledger]").forEach((btn)=>{
+    btn.addEventListener("click", ()=>{
+      const key = btn.dataset.ledger;
+      const open = btn.getAttribute("aria-expanded") !== "true";
+      state.open[key] = open;
+
+      btn.setAttribute("aria-expanded", String(open));
+      const chev = btn.querySelector(".arrow.toggle");
+      if(chev) chev.dataset.open = open ? "1" : "0";
+      const body = document.getElementById(btn.getAttribute("aria-controls") || "");
+      if(body){
+        body.dataset.open = open ? "1" : "0";
+        body.classList.toggle("open", open);
+      }
+    });
+  });
+  thread.querySelectorAll("[data-drawer]").forEach((btn)=>{
+    btn.addEventListener("click", ()=>toggleDrawer(true));
+  });
+  const refetch = $("refetch");
+  if(refetch) refetch.addEventListener("click", ()=>{
+    if(state.pending){ state.items.push(state.pending); state.pending = null; }
+    render();
+  });
+
+  // D 版顶部条计数
+  const count = state.items.filter((m)=>m.kind==="letter").length;
+  $("stripCount").textContent = String(count);
+  $("drawerMeta").textContent = `${count} 封 · 全是回读来的`;
+  $("drawerList").innerHTML = state.items.filter((m)=>m.kind==="letter").reverse().map((m)=>`
+    <div class="drawer-item">
+      <div class="top"><b>${esc(m.from)}</b><span>${esc(m.domain)}</span><time>${esc(m.at)}</time></div>
+      <p>${esc(m.text)}</p>
+    </div>`).join("");
+
+  // 右栏
+  const note = NOTES[state.version];
+  $("noteTitle").textContent = note.title;
+  $("noteSay").textContent = note.say;
+  $("noteList").innerHTML = note.rows.map(([k,v])=>`<div><dt>${k}</dt><dd>${v}</dd></div>`).join("");
+
+  // 左栏
+  document.querySelectorAll("#tabs .tab").forEach((tab)=>{
+    tab.setAttribute("aria-current", tab.dataset.v === state.version ? "true" : "false");
+  });
+  // 并排视图里"再递一封"无处落脚：先关掉，免得点了像坏了
+  $("deliver").disabled = state.version === "X";
+}
+
+/* ===== 抽屉 ===== */
+function toggleDrawer(open){
+  state.drawer = open;
+  $("drawer").classList.toggle("open", open);
+  $("scrim").classList.toggle("on", open);
+  if(open) $("closeDrawer").focus({preventScroll:true});
+}
+
+/* ===== 推送演示 ===== */
+function nextLetter(){
+  const base = EXTRA[state.extra % EXTRA.length];
+  state.extra += 1;
+  return {...base, expanded:false, at:base.at};
+}
+
+function deliverOne(){
+  if(!state.push){
+    state.pending = nextLetter();
+    render();
+    return;
+  }
+  // T1：先来一条轻事件，再自己回读一页；不猜内容，直接重读
+  const thread = $("thread");
+  if(state.version !== "X"){
+    thread.insertAdjacentHTML("beforeend", `<div class="pulse" id="pulse"><span class="dot"></span>收到「来信」轻事件 · 正在回读一页……</div>`);
+    thread.scrollIntoView({block:"end", behavior:"smooth"});
+  }
+  setTimeout(()=>{
+    state.items.push(nextLetter());
+    render();
+    const last = $("thread").lastElementChild;
+    if(last) last.classList.add("is-fresh");
+  }, 820);
+}
+
+/* ===== 绑定 ===== */
+document.querySelectorAll("#tabs .tab").forEach((tab)=>{
+  tab.addEventListener("click", ()=>{
+    state.version = tab.dataset.v;
+    toggleDrawer(false);
+    render();
+  });
+});
+
+$("push").addEventListener("change", (e)=>{
+  state.push = e.target.checked;
+  $("pushNote").textContent = state.push
+    ? "开 · 正看着会话时来信会自己长出来"
+    : "关 · 只有刷新 / 切走再切回时才看得到";
+  if(!state.push && state.version === "X") state.version = "A";
+  render();
+});
+
+$("deliver").addEventListener("click", deliverOne);
+$("openDrawer").addEventListener("click", ()=>toggleDrawer(true));
+$("closeDrawer").addEventListener("click", ()=>toggleDrawer(false));
+$("scrim").addEventListener("click", ()=>toggleDrawer(false));
+document.addEventListener("keydown", (e)=>{
+  if(e.key === "Escape" && state.drawer) toggleDrawer(false);
+});
+
+/* 只展示"读账本"的界面：滚动到新来信 */
+render();
+</script>
+</body>
+</html>
