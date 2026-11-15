@@ -83,6 +83,7 @@ export const INJECTION_ORDER = {
 	memory_recall: 100,
 	skill_slash: 110,
 	recover_note: 120,
+	turn_limit_approaching: 125,
 	turn_limit: 130,
 	partner_context: 140,
 	// partner-context 内部段（同一次收集内排序，拼成一段消息）

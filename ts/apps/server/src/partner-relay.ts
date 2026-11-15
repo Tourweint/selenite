@@ -12,6 +12,12 @@ import {
 	type PartnersStore,
 } from "./partners.ts";
 import { runIdentityKey as relayRunKey } from "./run-key.ts";
+import { encodeToolResult, err, ok, type ToolResult } from "./tool-result.ts";
+
+/** 统一契约形态的工具输出（批 16 §一，批次三迁 send_to_agent 时接入）：一行 JSON。 */
+function textToolResult<T>(result: ToolResult<T>) {
+	return { output: [{ type: "text" as const, text: encodeToolResult(result) }] };
+}
 
 export { relayRunKey };
 
@@ -515,16 +521,24 @@ export function createSendToAgentTool(deps: PartnerRelayDeps): ToolRegistration 
 		}),
 		execute: async (args, api, context) => {
 			const message = String(args.message ?? "").trim();
-			if (!message) return text("message 不能为空。");
+			if (!message) {
+				return textToolResult(err("empty_message", "message 不能为空。", "用自己的话写一句要递的话。"));
+			}
 			if (message.length > RELAY_MESSAGE_LIMIT) {
-				return text(
-					`这条话 ${message.length} 字，超过 ${RELAY_MESSAGE_LIMIT} 字上限。压缩成要点再发，别整篇转贴。`,
+				return textToolResult(
+					err(
+						"message_too_long",
+						`这条话 ${message.length} 字，超过 ${RELAY_MESSAGE_LIMIT} 字上限。压缩成要点再发，别整篇转贴。`,
+					),
 				);
 			}
 			// 转述别人的递话 = 两跳（方案 §一.4 第一条）
 			if (message.includes(RELAY_HOP_TAG)) {
-				return text(
-					"这条内容里带着别人递话的原文（hop 标记）。不要转述别人的递话——用自己的话说，或者直接回主人。",
+				return textToolResult(
+					err(
+						"hop_tag",
+						"这条内容里带着别人递话的原文（hop 标记）。不要转述别人的递话——用自己的话说，或者直接回主人。",
+					),
 				);
 			}
 
@@ -532,27 +546,44 @@ export function createSendToAgentTool(deps: PartnerRelayDeps): ToolRegistration 
 			const selfId = db.partnerIdOfSession(api.conversationId);
 			const self = selfId ? db.get(selfId) : null;
 			if (!selfId || !self) {
-				return text("这个会话不属于任何执事，不能递话。");
+				return textToolResult(
+					err("not_agent", "这个会话不属于任何执事，不能递话。", "递话只能在执事会话里用。"),
+				);
 			}
 
 			const resolved = resolveRelayTarget(args.target, db.list(), selfId);
-			if (!resolved.ok) return text(resolved.message);
+			if (!resolved.ok) {
+				return textToolResult(
+					err("target_not_found", resolved.message, "用「名字·领域」写全目标，或换个说法再试。"),
+				);
+			}
 
 			// 每 run 上限：run 身份与 turn-gate 同源（beforeRequest 写的 `inputs[0] ?? taskId`）
 			const live = await api.snapshot(LiveDoc, api.conversationId, context);
 			const runKey =
 				currentRelayRunKey(Number(api.conversationId)) ?? relayRunKey(Number(api.conversationId), live);
 			const slot = takeRelaySlot(Number(api.conversationId), runKey);
-			if (!slot.allowed) return text(relayCapMessage());
+			if (!slot.allowed) {
+				return textToolResult(
+					err("relay_cap", relayCapMessage(), "这轮别再递了；实在要递，等下一轮或直接回主人。"),
+				);
+			}
 
 			const from: RelaySender = { name: self.name, domain: self.domain };
 			const delivered = await deps.deliver(resolved.target.id, relayBody(from, message), {
 				conversationId: Number(api.conversationId),
 				partnerId: selfId,
 				name: self.name,
+				domain: self.domain,
 			});
 			if (!delivered.ok) {
-				return text(`没递出去：${delivered.error ?? "未知原因"}`);
+				return textToolResult(
+					err(
+						"deliver_failed",
+						`没递出去：${delivered.error ?? "未知原因"}`,
+						"稍后再试一次；连续失败就去任务中心看对端执事的状态。",
+					),
+				);
 			}
 
 			// 主人知情（方案 §一.6）：只报"谁 → 谁"，不递原文
@@ -560,17 +591,15 @@ export function createSendToAgentTool(deps: PartnerRelayDeps): ToolRegistration 
 
 			// 大实话：对方正忙时这条排在它本轮之后，不是"已经读了"；
 			// 开了两态回执还要说清现在只是 queued（2026-11-10 批 15 §五）。
-			return text(
-				relayDeliveredText(
-					resolved.target.name,
-					delivered.busy === true,
-					partnerRelayReceiptEnabled(),
-				),
+			return textToolResult(
+				ok({
+					message: relayDeliveredText(
+						resolved.target.name,
+						delivered.busy === true,
+						partnerRelayReceiptEnabled(),
+					),
+				}),
 			);
 		},
 	});
-}
-
-function text(value: string) {
-	return { output: [{ type: "text" as const, text: value }] };
 }

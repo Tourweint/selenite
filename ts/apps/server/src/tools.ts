@@ -368,10 +368,6 @@ export function isDeviceWorkerDelegation(
 	return (env.CHANCELLOR_EMPLOYEE ?? "").trim().toLowerCase() === "phone";
 }
 
-function text(value: string) {
-	return { output: [{ type: "text" as const, text: value }] };
-}
-
 /** 统一契约形态的工具输出（批 16 §一）：一行 JSON，只给新工具用。 */
 function textToolResult<T>(result: ToolResult<T>) {
 	return { output: [{ type: "text" as const, text: encodeToolResult(result) }] };
@@ -529,7 +525,13 @@ export function createTools(deps: ToolDeps) {
 			// 群会话不进个人记忆（2026-11-06 群组方案 §2.2）：群里听到的事写进执事私人记忆
 			// 就是串台。模型侧明说原因，别让它对着一个会失败的接口反复重试。
 			if (partnersStore().isGroupSession(api.conversationId)) {
-				return text("群聊里的内容不进个人记忆；需要记住的事请主人在私聊里说。");
+				return textToolResult(
+					err(
+						"group_session",
+						"群聊里的内容不进个人记忆；需要记住的事请主人在私聊里说。",
+						"在私聊里重新说一遍要记的事。",
+					),
+				);
 			}
 			const record = engine.remember({
 				kind: args.kind ?? "fact",
@@ -552,7 +554,7 @@ export function createTools(deps: ToolDeps) {
 			// 写入路径末尾同样按 cap 修剪（只记条数，见 memory-prune.ts）。
 			const pruned = pruneSessionMemory(engine);
 			if (pruned > 0) console.log(`[memory] 会话记忆修剪 -${pruned} 条`);
-			return text(`已记住：${record.content}`);
+			return textToolResult(ok({ message: `已记住：${record.content}` }));
 		},
 	});
 
@@ -636,7 +638,15 @@ export function createTools(deps: ToolDeps) {
 		}),
 		execute: async (args, api, context) => {
 			const rawAt = Date.parse(args.at);
-			if (Number.isNaN(rawAt)) throw new Error(`时间格式看不懂：${args.at}`);
+			if (Number.isNaN(rawAt)) {
+				return textToolResult(
+					err(
+						"bad_at",
+						`时间格式看不懂：${args.at}`,
+						"写 ISO 8601（带时区），例如 2026-10-29T08:00:00+08:00。",
+					),
+				);
+			}
 			const now = api.now();
 			const repeat = args.repeat ?? "none";
 			const weekdays =
@@ -646,17 +656,33 @@ export function createTools(deps: ToolDeps) {
 						)
 					: undefined;
 			if (repeat === "weekly" && (!weekdays || weekdays.length === 0)) {
-				throw new Error("每周提醒需要 weekdays（0 周日 … 6 周六）");
+				return textToolResult(
+					err(
+						"weekdays_required",
+						"每周提醒需要 weekdays（0 周日 … 6 周六）",
+						"weekdays 给 0（周日）到 6（周六）的数字，可多选。",
+					),
+				);
 			}
 			const dayOfMonth =
 				repeat === "monthly" && typeof args.dayOfMonth === "number"
 					? Math.trunc(args.dayOfMonth)
 					: undefined;
 			if (repeat === "monthly" && (!dayOfMonth || dayOfMonth < 1 || dayOfMonth > 31)) {
-				throw new Error("每月提醒需要 dayOfMonth（1–31）");
+				return textToolResult(
+					err(
+						"day_of_month_required",
+						"每月提醒需要 dayOfMonth（1–31）",
+						"dayOfMonth 给 1 到 31 的数字；没有这一天的月份按月末算。",
+					),
+				);
 			}
 			const until = args.until ? Date.parse(args.until) : undefined;
-			if (args.until && Number.isNaN(until)) throw new Error(`until 时间格式看不懂：${args.until}`);
+			if (args.until && Number.isNaN(until)) {
+				return textToolResult(
+					err("bad_until", `until 时间格式看不懂：${args.until}`, "until 也写 ISO 8601，只取日期部分也行。"),
+				);
+			}
 
 			// `at` 对周期提醒只是「几点」的锚点：按规则推到 now 之后的第一跳，
 			// 否则每周/每月会先按一个不相干的日期错响一次。
@@ -664,9 +690,21 @@ export function createTools(deps: ToolDeps) {
 				repeat === "none"
 					? rawAt
 					: nextReminderAt({ text: args.text, at: rawAt, repeat, weekdays, dayOfMonth }, now);
-			if (at === null) throw new Error("这个重复规则找不到下一次触发时间");
-			if (at <= now) throw new Error(`这个时间已经过去了：${args.at}`);
-			if (until !== undefined && until <= at) throw new Error("until 必须晚于第一次触发");
+			if (at === null) {
+				return textToolResult(
+					err("no_next_occurrence", "这个重复规则找不到下一次触发时间", "检查 repeat / weekdays / dayOfMonth 组合是否成立。"),
+				);
+			}
+			if (at <= now) {
+				return textToolResult(
+					err("time_in_past", `这个时间已经过去了：${args.at}`, "给一个未来的时间，或检查时区。"),
+				);
+			}
+			if (until !== undefined && until <= at) {
+				return textToolResult(
+					err("until_before_at", "until 必须晚于第一次触发", "把 until 改到第一次触发之后，或去掉 until。"),
+				);
+			}
 
 			await api.commit(
 				(tx) =>
@@ -685,8 +723,10 @@ export function createTools(deps: ToolDeps) {
 						: repeat === "monthly"
 							? `每月 ${dayOfMonth} 号`
 							: "";
-			return text(
-				`好，${label ? `${label} ` : ""}${new Date(at).toLocaleString("zh-CN")} 提醒你：${args.text}`,
+			return textToolResult(
+				ok({
+					message: `好，${label ? `${label} ` : ""}${new Date(at).toLocaleString("zh-CN")} 提醒你：${args.text}`,
+				}),
 			);
 		},
 	});
@@ -1272,7 +1312,13 @@ export function createTools(deps: ToolDeps) {
 				execute: async (args, api) => {
 					// 与 recall 同款：群聊不走个人记忆。
 					if (partnersStore().isGroupSession(api.conversationId)) {
-						return text("群聊不走个人记忆；答案以群里的聊天记录为准。");
+						return textToolResult(
+							err(
+								"group_session",
+								"群聊不走个人记忆；答案以群里的聊天记录为准。",
+								"按群里的聊天记录回答，不要当这里是私聊。",
+							),
+						);
 					}
 					const limit = Math.max(1, Math.min(20, Math.floor(args.limit ?? 5)));
 					let result: PersonaRecallResult;
@@ -1288,11 +1334,15 @@ export function createTools(deps: ToolDeps) {
 					// 只记字数 / 状态 / 条数，不记 query 原文与正文（日志纪律）。
 					console.log(`[persona_recall] q=${args.query.length}字 ok=${result.ok} hits=${hits}`);
 					if (!result.ok) {
-						return text(
-							"个人记忆库暂时查不了（原因已记日志），你可以说说想确认什么，我换个方式找。",
+						return textToolResult(
+							err(
+								"persona_unavailable",
+								"个人记忆库暂时查不了（原因已记日志），你可以说说想确认什么，我换个方式找。",
+								"稍后重试，或先用 recall 查本地记忆。",
+							),
 						);
 					}
-					return text(renderPersonaAsk(result));
+					return textToolResult(ok({ message: renderPersonaAsk(result) }));
 				},
 			}),
 		);

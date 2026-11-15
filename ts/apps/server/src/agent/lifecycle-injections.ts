@@ -23,7 +23,9 @@ import { clarifyContractEnabled, clarifyContractFor } from "../delegation.ts";
 import { TOPICS_ENABLED, topicsStore } from "../topics.ts";
 import {
 	MAX_TURNS,
+	TURN_LIMIT_APPROACHING_INSTRUCTION,
 	TURN_LIMIT_INSTRUCTION,
+	TURN_LIMIT_WARN_ROUNDS,
 	VERIFICATION_IRON_LAW,
 	lifecycleOwnsVerification,
 } from "./turn-gate.ts";
@@ -213,6 +215,25 @@ export const turnLimitProvider: InjectionProvider = (ctx) => {
 };
 
 /**
+ * 撞上限前提示（2026-11-13 工具层结果契约化批次三 §2.2）：剩最后 5 轮
+ * （turn ∈ [MAX_TURNS-4, MAX_TURNS]）时注一行收尾提示，与硬上限的 turn_limit 不重叠
+ * （MAX_TURNS ≤ 5 时永远不注——小上限下硬提示本身就够了）。
+ */
+export const turnLimitApproachingProvider: InjectionProvider = (ctx) => {
+	const turn = ctx.turn ?? 0;
+	if (!(MAX_TURNS > TURN_LIMIT_WARN_ROUNDS && turn >= MAX_TURNS - (TURN_LIMIT_WARN_ROUNDS - 1) && turn <= MAX_TURNS)) {
+		return undefined;
+	}
+	return entry(
+		"turn_limit_approaching",
+		TURN_LIMIT_APPROACHING_INSTRUCTION,
+		INJECTION_ORDER.turn_limit_approaching,
+		"message",
+		"turn",
+	);
+};
+
+/**
  * 执事轮输入（岗位契约 + 当前在办等）：只在本轮第一次模型请求时算。
  * 档案 / 任务中心读失败只记日志，这一轮少一段状态，但对话不能哑（与改造前同口径）。
  */
@@ -249,6 +270,7 @@ export const LIFECYCLE_MESSAGE_PROVIDERS: readonly InjectionProvider[] = [
 	memoryRecallProvider,
 	skillSlashProvider,
 	recoverNoteProvider,
+	turnLimitApproachingProvider,
 	turnLimitProvider,
 	partnerContextProvider,
 ];

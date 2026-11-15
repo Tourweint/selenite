@@ -53,6 +53,7 @@ const {
 	skillSlashProvider,
 	skillsProvider,
 	topicsProvider,
+	turnLimitApproachingProvider,
 	turnLimitProvider,
 	verificationIronLawProvider,
 } = await import("./lifecycle-injections.ts");
@@ -295,6 +296,7 @@ test("顺序快照：INJECTION_ORDER 是缓存前缀资产（改它 = 有意的�
 		"memory_recall",
 		"skill_slash",
 		"recover_note",
+		"turn_limit_approaching",
 		"turn_limit",
 		"partner_context",
 		"partner_contract",
@@ -378,4 +380,13 @@ test("审计开关 AGENT_INJECTION_AUDIT：默认开，显式 false 关", () => 
 
 test("taskMemoryProvider：审计不跑（会摄入日记镜像）", () => {
 	assert.equal(taskMemoryProvider({ conversationId: 0, dryRun: true }), undefined);
+});
+
+// ── 撞上限前提示（2026-11-13 工具层结果契约化批次三 §2.2）────────────
+
+test("D: 撞上限前提示 —— 剩最后 5 轮（MAX_TURNS-4..MAX_TURNS）注，更早与超限后不注", () => {
+	assert.equal(turnLimitApproachingProvider({ ...BASE, turn: MAX_TURNS - 5 }), undefined, "≤MAX_TURNS-5 不注");
+	assert.match(msgText(turnLimitApproachingProvider, { turn: MAX_TURNS - 4 }), /即将到达轮次上限/);
+	assert.ok(turnLimitApproachingProvider({ ...BASE, turn: MAX_TURNS }), "第 MAX_TURNS 轮仍注");
+	assert.equal(turnLimitApproachingProvider({ ...BASE, turn: MAX_TURNS + 1 }), undefined, "超限后交给硬上限 turn_limit");
 });

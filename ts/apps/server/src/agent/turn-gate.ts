@@ -71,6 +71,15 @@ export const MAX_TURNS = (() => {
 export const TURN_LIMIT_MESSAGE = "工具调用已达到上限，请重新发送请求。";
 
 /**
+ * 撞上限前提示（2026-11-13 工具层结果契约化批次三 §2.2）：剩最后 5 轮时先给模型
+ * 一行收尾提示，别等硬上限才拦——硬上限拦下的是"完全没准备"的半成品。
+ */
+export const TURN_LIMIT_WARN_ROUNDS = 5;
+export const TURN_LIMIT_APPROACHING_INSTRUCTION =
+	`即将到达轮次上限（剩最后 ${TURN_LIMIT_WARN_ROUNDS} 个工具回合）。` +
+	"不要再开新的大步骤，把手头的事做完并汇报结果；做不完的如实说明进展到哪里。";
+
+/**
  * 验证铁律（2026-11-10 批 12 §一.1，按 superpowers verification-before-completion 改写）。
  *
  * 为什么要有这一条：模型最常犯的错不是做错，是**没验就说好**——「应该能过」「上次跑过」

@@ -372,3 +372,99 @@ test("delegate：needs_project 仍在 data（不是 error），候选清单不�
 		else process.env.DELEGATION_PROJECT_REQUIRED = previous;
 	}
 });
+
+// ── 批次三（2026-11-13 工具层结果契约化）：最后 4 个工具迁 ToolResult ──
+
+/** 同 runTool，但允许自定义 api（set_reminder 要 commit / now）。 */
+async function runToolWithApi(
+	tool: Tools[number],
+	args: Record<string, unknown>,
+	api: Record<string, unknown>,
+) {
+	const result = (await tool.execute(args as never, api as never, {} as never)) as {
+		output?: Array<{ type: string; text?: string }>;
+	};
+	const text = (result.output ?? [])
+		.map((item) => (item.type === "text" ? item.text ?? "" : ""))
+		.join("");
+	return JSON.parse(text) as { ok: boolean; data?: any; error?: { code: string; message: string; hint?: string } };
+}
+
+const REMEMBER_ENGINE = {
+	remember: (input: { content: string }) => ({ content: input.content, createdAt: "2026-01-02T03:04:05.000Z" }),
+	recall: () => [MEMORY_HIT],
+} as never;
+
+test("remember：成功包成 ok + message，文案与迁移前逐字一致", async () => {
+	const tools = createTools(deps(REMEMBER_ENGINE));
+	const out = await runToolWithApi(toolNamed(tools, "remember"), { content: "喜欢乌龙茶" }, { conversationId: 7 });
+	assert.equal(out.ok, true);
+	assert.equal(out.data.message, "已记住：喜欢乌龙茶");
+});
+
+test("set_reminder：成功包成 ok + message；非法参数走 err 带 hint，不再抛栈", async () => {
+	const tools = createTools(deps({}));
+	const commits: unknown[] = [];
+	const api = { conversationId: 7, now: () => 1_800_000_000_000, commit: async (change: unknown) => { commits.push(change); } };
+	const okOut = await runToolWithApi(
+		toolNamed(tools, "set_reminder"),
+		{ text: "喝茶", at: "2030-01-01T08:00:00+08:00" },
+		api,
+	);
+	assert.equal(okOut.ok, true);
+	assert.match(okOut.data.message, /提醒你：喝茶/);
+	assert.equal(commits.length, 1, "成功路径照旧建 durable 任务");
+
+	const badAt = await runToolWithApi(
+		toolNamed(tools, "set_reminder"),
+		{ text: "喝茶", at: "明早八点" },
+		api,
+	);
+	assert.equal(badAt.ok, false);
+	assert.equal(badAt.error?.code, "bad_at");
+	assert.ok(badAt.error?.hint?.includes("ISO 8601"));
+
+	const past = await runToolWithApi(
+		toolNamed(tools, "set_reminder"),
+		{ text: "喝茶", at: "2001-01-01T08:00:00+08:00" },
+		api,
+	);
+	assert.equal(past.ok, false);
+	assert.equal(past.error?.code, "time_in_past");
+});
+
+test("persona_recall：检索失败走 err + hint", async () => {
+	const tools = createTools({
+		...(deps({}) as unknown as Record<string, unknown>),
+		personaAsk: async () => ({ ok: false as const, question: "q" }),
+	} as never);
+	const fail = await runToolWithApi(toolNamed(tools, "persona_recall"), { query: "去年" }, { conversationId: 7 });
+	assert.equal(fail.ok, false);
+	assert.equal(fail.error?.code, "persona_unavailable");
+	assert.ok(fail.error?.hint?.includes("recall"));
+});
+
+test("send_to_agent：校验失败走 err 稳定枚举", async () => {
+	const base = deps({}) as unknown as Record<string, unknown>;
+	const tools = createTools({
+		...base,
+		relay: { deliver: async () => ({ ok: true as const, busy: false }) },
+	} as never);
+	const relayTool = toolNamed(tools, "send_to_agent");
+	const empty = await runToolWithApi(relayTool, { target: "小账", message: "  " }, { conversationId: 7 });
+	assert.equal(empty.ok, false);
+	assert.equal(empty.error?.code, "empty_message");
+
+	// 测试环境执事库状态不定（无链接 → not_agent；有链接但没这个执事 → target_not_found）：
+	// 两条都应是 ok:false 的稳定枚举，送达本身在探针里验。
+	const refused = await runToolWithApi(
+		relayTool,
+		{ target: "小账", message: "查好了" },
+		{ conversationId: 7, snapshot: async () => undefined },
+	);
+	assert.equal(refused.ok, false);
+	assert.ok(
+		refused.error?.code === "not_agent" || refused.error?.code === "target_not_found",
+		`实际 ${refused.error?.code}`,
+	);
+});

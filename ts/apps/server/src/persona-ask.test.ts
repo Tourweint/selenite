@@ -256,9 +256,17 @@ async function runPersonaTool(
 	args: Record<string, unknown>,
 ): Promise<string> {
 	const result = await tool.execute(args as never, { conversationId: 1 } as never, {} as never);
-	return (result.output ?? [])
+	const text = (result.output ?? [])
 		.map((item) => (item.type === "text" ? item.text : ""))
 		.join("");
+	// 批次三（2026-11-13 工具层结果契约化）：persona_recall 迁 ToolResult，输出是一行 JSON。
+	// 人读正文仍在 message 里，断言口径不变。
+	const parsed = JSON.parse(text) as {
+		ok: boolean;
+		data?: { message?: string };
+		error?: { message?: string };
+	};
+	return parsed.ok ? (parsed.data?.message ?? "") : (parsed.error?.message ?? text);
 }
 
 function okResult(over: Partial<PersonaAskResult> = {}): PersonaAskResult {
