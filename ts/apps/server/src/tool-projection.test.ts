@@ -178,9 +178,19 @@ test("⑦ 主人/聊天会话（无 partner、kind=chief）→ 默认不开", as
 	assert.equal(await decide(deps({ domain: null, projection: null, kind: "chief" })), false, "无 domain 聊天执事默认不开");
 });
 
-test("⑧ worker 会话 / 带 domain 执事 → 默认开", async () => {
-	assert.equal(await decide(deps({ kind: "worker" })), true);
-	assert.equal(await decide(deps({ domain: "todo", projection: null, kind: "chief" })), true);
+test("⑧ 默认只管打手：worker 按 workerDefault，带 domain 执事不再默认开", async () => {
+	assert.equal(await decide(deps({ kind: "worker" })), true, "workerDefault 缺省 = 开");
+	assert.equal(await decide(deps({ kind: "worker" }), undefined, "false"), false, "workerDefault=false → 关");
+	assert.equal(
+		await decide(deps({ domain: "todo", projection: null, kind: "chief" })),
+		false,
+		"执事会话（带 domain）无显式设置 → 不开（2026-11-16 收窄）",
+	);
+	assert.equal(
+		await decide(deps({ domain: "todo", projection: 1, kind: "chief" })),
+		true,
+		"执事要整理就在个人页显式开（三态 =1）",
+	);
 });
 
 test("⑨ 执事三态压过默认：0 强制关、1 聊天执事也开", async () => {
@@ -191,6 +201,8 @@ test("⑨ 执事三态压过默认：0 强制关、1 聊天执事也开", async 
 test("⑩ TOOL_PROJECTION=false → 一律关；包装器关时逐字节透传", async () => {
 	assert.equal(await decide(deps({ kind: "worker" }), "false"), false);
 	assert.equal(await decide(deps({ domain: "todo" }), "false"), false);
+	assert.equal(await decide(deps({ domain: "todo", projection: 1 }), "false"), false, "总闸关 = 显式开也关");
+	assert.equal(await decide(deps({ kind: "worker" }), "false", "true"), false);
 
 	setProjectionDeps(deps({ projection: 0 }));
 	const inner = shellResult({ exitCode: 1 });
@@ -264,7 +276,11 @@ test("⑭ workerDefault=true（默认）→ 行为与改动前一致", async () 
 	assert.equal(await decide(deps({ kind: "worker" }), undefined, "true"), true);
 	assert.equal(await decide(deps({ kind: "worker" })), true, "不设 env 也是开（默认值不变）");
 	assert.equal(await decide(deps({ kind: "chief" })), false, "打手默认不越界影响主人会话");
-	assert.equal(await decide(deps({ domain: "todo", kind: "chief" }), undefined, "false"), true, "带 domain 的执事会话跟打手开关无关");
+	assert.equal(
+		await decide(deps({ domain: "todo", kind: "chief" }), undefined, "false"),
+		false,
+		"执事会话与打手开关无关：没显式设置就不开",
+	);
 });
 
 test("未装配依赖（setProjectionDeps 之前）→ 判定恒 false，全透传", async () => {

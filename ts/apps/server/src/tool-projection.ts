@@ -191,11 +191,12 @@ export function toolProjectionWorkerEnabled(env: NodeJS.ProcessEnv = process.env
 }
 
 /**
- * 纯判定（§5.2 / §5.3）：
+ * 纯判定（§5.2 / §5.3；2026-11-16 收窄为「只管打手」）：
  * 1. env 总开关关 → false；
  * 2. 执事三态（1 开 / 0 关）压过一切默认；
  * 3. worker / 子单 / 验收子会话走 `workerDefault`（`TOOL_PROJECTION_WORKER`，默认开）；
- * 4. 其余默认：带 domain 的执事会话开，主人会话与聊天型伙伴（无 domain）不开。
+ * 4. 其余默认一律 false：主人会话、执事会话（**带不带 domain 都一样**，执事基本不写代码）、
+ *    聊天型伙伴都不整理；执事要用就在个人页把三态设成 1。
  */
 export function projectionDecision(input: {
 	envEnabled: boolean;
@@ -210,7 +211,8 @@ export function projectionDecision(input: {
 	if (partner?.toolProjection === 1) return true;
 	if (partner?.toolProjection === 0) return false;
 	if (input.chatKind === "worker") return input.workerDefault;
-	if (partner && partner.domain) return true;
+	// 2026-11-16：原「带 domain 的执事会话默认开」已删——执事与总管基本不写代码，
+	// 默认只管打手；执事需要时用三态 1 显式打开。
 	return false;
 }
 
