@@ -178,23 +178,38 @@ export function toolProjectionEnvEnabled(env: NodeJS.ProcessEnv = process.env): 
 }
 
 /**
+ * 打手默认开关 `TOOL_PROJECTION_WORKER`（2026-11-16）：只管**本机内核打手**
+ * （`chatKind === "worker"`：子任务 / 派单执行者）的默认是否整理工具结果。
+ *
+ * 外接 CLI 打手（CodeBuddy / Qoder / Claude Code / Codex / OpenCode）跑自己的工具、
+ * 不经过本层包装器，因此**不受此开关影响**——这不是遗漏，是设计口径。
+ *
+ * 缺省 / 空串 = 开；只有明确 `false` 才关（与 `TOOL_PROJECTION` 同口径）。
+ */
+export function toolProjectionWorkerEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	return (env.TOOL_PROJECTION_WORKER?.trim() || "true").toLowerCase() !== "false";
+}
+
+/**
  * 纯判定（§5.2 / §5.3）：
  * 1. env 总开关关 → false；
  * 2. 执事三态（1 开 / 0 关）压过一切默认；
- * 3. 默认：worker / 子单 / 验收子会话开，带 domain 的执事会话开，
- *    主人会话与聊天型伙伴（无 domain）不开。
+ * 3. worker / 子单 / 验收子会话走 `workerDefault`（`TOOL_PROJECTION_WORKER`，默认开）；
+ * 4. 其余默认：带 domain 的执事会话开，主人会话与聊天型伙伴（无 domain）不开。
  */
 export function projectionDecision(input: {
 	envEnabled: boolean;
 	partnerId: string | null;
 	partner: ProjectionPartnerSlice | null;
 	chatKind: "chief" | "worker" | null;
+	/** 打手会话的默认值（`toolProjectionWorkerEnabled()`）；仅 `chatKind === "worker"` 时生效。 */
+	workerDefault: boolean;
 }): boolean {
 	if (!input.envEnabled) return false;
 	const partner = input.partner;
 	if (partner?.toolProjection === 1) return true;
 	if (partner?.toolProjection === 0) return false;
-	if (input.chatKind === "worker") return true;
+	if (input.chatKind === "worker") return input.workerDefault;
 	if (partner && partner.domain) return true;
 	return false;
 }
@@ -216,6 +231,7 @@ export async function projectionEnabledFor(api: ToolExecutionApi): Promise<boole
 		partnerId,
 		partner: partnerId ? (deps.getPartner(partnerId) ?? null) : null,
 		chatKind: await deps.chatKindOf(conversationId),
+		workerDefault: toolProjectionWorkerEnabled(),
 	});
 }
 

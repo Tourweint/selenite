@@ -7,6 +7,7 @@ import {
 	projectionDecision,
 	setProjectionDeps,
 	toolProjectionEnvEnabled,
+	toolProjectionWorkerEnabled,
 	wrapShellTool,
 	type ProjectionDeps,
 } from "./tool-projection.ts";
@@ -149,20 +150,26 @@ function deps(overrides: {
 	};
 }
 
-async function decide(d: ProjectionDeps, env?: string): Promise<boolean> {
+async function decide(d: ProjectionDeps, env?: string, workerEnv?: string): Promise<boolean> {
 	const prev = process.env.TOOL_PROJECTION;
+	const prevWorker = process.env.TOOL_PROJECTION_WORKER;
 	if (env !== undefined) process.env.TOOL_PROJECTION = env;
 	else delete process.env.TOOL_PROJECTION;
+	if (workerEnv !== undefined) process.env.TOOL_PROJECTION_WORKER = workerEnv;
+	else delete process.env.TOOL_PROJECTION_WORKER;
 	try {
 		return projectionDecision({
 			envEnabled: toolProjectionEnvEnabled(),
 			partnerId: d.partnerIdOfSession(7),
 			partner: d.partnerIdOfSession(7) ? (d.getPartner(d.partnerIdOfSession(7) as string) ?? null) : null,
 			chatKind: await d.chatKindOf(7),
+			workerDefault: toolProjectionWorkerEnabled(),
 		});
 	} finally {
 		if (prev === undefined) delete process.env.TOOL_PROJECTION;
 		else process.env.TOOL_PROJECTION = prev;
+		if (prevWorker === undefined) delete process.env.TOOL_PROJECTION_WORKER;
+		else process.env.TOOL_PROJECTION_WORKER = prevWorker;
 	}
 }
 
@@ -224,6 +231,40 @@ const projected = await wrapped.execute({ command: "grep x f" } as never, projec
 		() => throwing.execute({ command: "sleep" } as never, projectionApi, undefined as never),
 		ABORT_PATTERN as never,
 	);
+});
+
+// ── ⑪~⑭：打手默认开关 TOOL_PROJECTION_WORKER（2026-11-16） ──────────
+
+test("⑪ 打手开关关（workerDefault=false）→ worker 会话不开", async () => {
+	assert.equal(await decide(deps({ kind: "worker" }), undefined, "false"), false);
+	assert.equal(toolProjectionWorkerEnabled({ TOOL_PROJECTION_WORKER: "false" }), false);
+	assert.equal(toolProjectionWorkerEnabled({ TOOL_PROJECTION_WORKER: "0" }), true, "只认字面 false");
+	assert.equal(toolProjectionWorkerEnabled({}), true, "缺省 = 开");
+});
+
+test("⑫ 同场景下执事三态 =1 → 开（三态压过打手默认）", async () => {
+	assert.equal(
+		await decide(deps({ domain: "todo", projection: 1, kind: "worker" }), undefined, "false"),
+		true,
+	);
+	assert.equal(
+		await decide(deps({ domain: "todo", projection: 0, kind: "worker" }), undefined, "true"),
+		false,
+		"三态 =0 也压过打手默认开",
+	);
+});
+
+test("⑬ env 总闸 TOOL_PROJECTION=false → 打手默认开 / 关都一律不开", async () => {
+	assert.equal(await decide(deps({ kind: "worker" }), "false", "true"), false);
+	assert.equal(await decide(deps({ kind: "worker" }), "false", "false"), false);
+	assert.equal(await decide(deps({ domain: "todo", projection: 1, kind: "worker" }), "false", "true"), false);
+});
+
+test("⑭ workerDefault=true（默认）→ 行为与改动前一致", async () => {
+	assert.equal(await decide(deps({ kind: "worker" }), undefined, "true"), true);
+	assert.equal(await decide(deps({ kind: "worker" })), true, "不设 env 也是开（默认值不变）");
+	assert.equal(await decide(deps({ kind: "chief" })), false, "打手默认不越界影响主人会话");
+	assert.equal(await decide(deps({ domain: "todo", kind: "chief" }), undefined, "false"), true, "带 domain 的执事会话跟打手开关无关");
 });
 
 test("未装配依赖（setProjectionDeps 之前）→ 判定恒 false，全透传", async () => {

@@ -84,6 +84,11 @@ export const FLAG_DEFS: FlagDef[] = [
 	{ key: "DELEGATION_WAKE_ENABLED", values: ["true", "false"], defaultValue: "true", hot: true },
 	// 工具结果投影总开关（2026-11-13 工具层结果契约化 §5.4 回滚开关 2）：消费处每次 execute 懒读 env，hot:true。
 	{ key: "TOOL_PROJECTION", values: ["true", "false"], defaultValue: "true", hot: true },
+	// 打手工具结果整理（2026-11-16）：只管**本机内核打手**（chatKind==="worker"）的默认值，
+	// 总闸 `TOOL_PROJECTION` 关时它不生效；执事三态（partners.tool_projection）压过它。
+	// 外接 CLI 打手（CodeBuddy / Qoder / Claude Code / Codex / OpenCode）跑自己的工具、
+	// 不经过包装器，**不受此开关影响**。消费处每次 execute 懒读 env，所以 hot:true。
+	{ key: "TOOL_PROJECTION_WORKER", values: ["true", "false"], defaultValue: "true", hot: true },
 	{ key: "TOPICS_ENABLED", values: ["true", "false"], defaultValue: "true", hot: false },
 	// 结构化提问（2026-11-09）：工具注册在启动时冻结，所以 hot:false。
 	{ key: "AGENT_ASK_USER", values: ["true", "false"], defaultValue: "true", hot: false },
