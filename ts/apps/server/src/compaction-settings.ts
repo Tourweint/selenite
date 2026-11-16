@@ -27,6 +27,7 @@
  */
 
 import type { CompactionPolicy, CompactionSettings } from "@earendil-works/pi-durable";
+import { flagValue } from "./flags.ts";
 
 type Env = Record<string, string | undefined>;
 
@@ -53,7 +54,7 @@ const DEFAULT_PERCENT = 70;
 const MODES: readonly CompactionTriggerMode[] = ["percent", "tokens"];
 
 function trimmed(env: Env, key: string): string {
-	return (env[key] ?? "").trim();
+	return flagValue(key, env as NodeJS.ProcessEnv).trim();
 }
 
 function integer(env: Env, key: string): number | undefined {
@@ -69,8 +70,8 @@ function flagFalse(raw: string): boolean {
 }
 
 /**
- * env → 配置。非法值一律回落（`AGENT_COMPACT_*` 是安全机制的旋钮，
- * 配错了不能变成"永不压缩"或"每轮都压缩"）。
+ * 插件配置 → 配置。非法值一律回落（`AGENT_COMPACT_*` 是安全机制的旋钮，
+ * 配错了不能变成"永不压缩"或"每轮都压缩"）。值来自 flags 层：plugin 读 JSON。
  */
 export function readCompactionConfig(env: Env = process.env): CompactionConfig {
 	const enabledRaw = trimmed(env, "AGENT_COMPACT_ENABLED");

@@ -10,10 +10,12 @@ import {
 	BRIEF_CARD_RULES,
 	briefCardRulesEnabled,
 	buildPartnerDisciplineSection,
+	buildPartnerDisciplineDefault,
 	buildPartnerStatusSection,
 	buildPartnerTurnContext,
 	renderContractSection,
 	splitContractSections,
+	validateDisciplineSource,
 } from "./partner-context.ts";
 import { ATTENTION_REPLY_GUIDANCE } from "../delegation.ts";
 import {
@@ -766,6 +768,53 @@ test("岗位类开关：contract / goal / discipline 能关；在办 / 履历固
 	} finally {
 		if (previous === undefined) delete process.env.PARTNER_PERSONA_MODULES;
 		else process.env.PARTNER_PERSONA_MODULES = previous;
+		store.close();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("纪律覆盖：DISCIPLINE.md 按固定标题替换 / 空节删除；红线固定；清空恢复宿主默认", () => {
+	const { root, db, homes } = tempRoot();
+	const store = new PartnersStore(db, homes);
+	try {
+		const partner = store.create("阿岚");
+		const defaults = buildPartnerDisciplineDefault(partner.id, store);
+		assert.match(defaults, /## 验证铁律/);
+		assert.match(defaults, /## 裁决纪律/);
+		assert.ok(!defaults.includes("【主人数据红线】"), "默认模板不含红线（红线固定另注）");
+
+		store.writeDisciplineToHome(
+			partner.id,
+			"## 验证铁律\n- 先跑我指定的验收脚本，再汇报。\n\n## 裁决纪律\n",
+		);
+		const ctx = buildPartnerTurnContext(partner.id, 0, { store });
+		assert.match(ctx.discipline, /【验证铁律】\n- 先跑我指定的验收脚本，再汇报。/);
+		assert.equal(ctx.discipline.includes("【裁决纪律】"), false, "空节 = 删除该条");
+		assert.match(ctx.discipline, /【主人数据红线】/, "红线始终固定注入");
+		assert.equal(ctx.disciplineFields[0]?.id, "partner_verification");
+		assert.equal(ctx.disciplineFields[0]?.title, "验证铁律");
+		assert.equal(ctx.disciplineFields.length, 8, "七个行为节 + 红线都保留成字段槽位");
+		const rulingField = ctx.disciplineFields.find((field) => field.id === "partner_ruling");
+		assert.ok(rulingField, "删掉的节仍要留在字段表里，默认页才能把它加回来");
+		assert.equal(rulingField?.text, "", "删掉的节正文为空");
+		assert.ok(
+			ctx.disciplineFields.some(
+				(field) => field.id === "partner_owner_data" && field.title === "主人数据红线",
+			),
+			"红线要作为独立只读字段保留，不能从拆节里消失",
+		);
+		assert.equal(
+			validateDisciplineSource("## 主人数据红线\n- 我想改"),
+			"「主人数据红线」由宿主固定注入，不能覆盖；其余纪律可以改",
+		);
+		assert.match(
+			validateDisciplineSource("## 没这个标题\n- x") ?? "",
+			/不认识的纪律标题/,
+		);
+
+		store.writeDisciplineToHome(partner.id, "");
+		assert.match(buildPartnerTurnContext(partner.id, 0, { store }).discipline, /【裁决纪律】/);
+	} finally {
 		store.close();
 		rmSync(root, { recursive: true, force: true });
 	}

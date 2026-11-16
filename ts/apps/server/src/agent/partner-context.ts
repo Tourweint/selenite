@@ -25,6 +25,7 @@ import {
 	CHIEF_PARTNER_ID,
 	PARTNER_CONTRACT_SECTIONS,
 	partnerContractEnabled,
+	partnerDisciplineEditEnabled,
 	partnersStore,
 	type PartnersStore,
 } from "../partners.ts";
@@ -441,6 +442,86 @@ const DISCIPLINE_IDS = [
 	"partner_attention",
 ] as const;
 
+/**
+ * 纪律覆盖文件（`DISCIPLINE.md`，2026-11-16）的固定标题。
+ * 只认这些标题：缺节 = 用宿主默认；空节 = 删掉这条；不认识的标题直接拒。
+ * 主人数据红线不在可覆盖清单里——它始终由宿主常量注入。
+ */
+const DISCIPLINE_TITLE_BY_ID: Record<(typeof DISCIPLINE_IDS)[number], string> = {
+	partner_verification: "验证铁律",
+	partner_ruling: "裁决纪律",
+	partner_work_silence: "干活期间",
+	partner_grounding: "答案接地",
+	partner_artifact_handoff: "产物交接",
+	partner_owner_data: "主人数据红线",
+	partner_brief_card: "汇报卡",
+	partner_attention: "提问纪律",
+};
+const DISCIPLINE_EDITABLE_TITLE_TO_ID = new Map<string, string>(
+	Object.entries(DISCIPLINE_TITLE_BY_ID)
+		.filter(([id]) => id !== "partner_owner_data")
+		.map(([id, title]) => [title, id]),
+);
+
+/** 从一段纪律正文里取 `【标题】`（默认块的第一行）；没有就返回 null。 */
+function disciplineTitleOf(text: string): string | null {
+	return /^【(.+?)】/.exec(text)?.[1] ?? null;
+}
+
+/**
+ * 校验人写的 `DISCIPLINE.md`：只允许固定可覆盖标题；不接受主人数据红线。
+ * 返回 null = 可保存；返回字符串 = 给界面看的拒绝原因。
+ */
+export function validateDisciplineSource(source: string): string | null {
+	const headings = source
+		.split(/\r?\n/)
+		.map((line) => /^##\s+(.+?)\s*$/.exec(line)?.[1] ?? null)
+		.filter((title): title is string => title !== null);
+	if (headings.length === 0) {
+		return "纪律覆盖要用固定二级标题（如「## 验证铁律」），不能是一段没有标题的正文";
+	}
+	for (const title of headings) {
+		if (title === DISCIPLINE_TITLE_BY_ID.partner_owner_data) {
+			return "「主人数据红线」由宿主固定注入，不能覆盖；其余纪律可以改";
+		}
+		if (!DISCIPLINE_EDITABLE_TITLE_TO_ID.has(title)) {
+			return `不认识的纪律标题「${title}」；可用：${[...DISCIPLINE_EDITABLE_TITLE_TO_ID.keys()].join(" / ")}`;
+		}
+	}
+	return null;
+}
+
+/** 解析覆盖文件：标题 → 正文；空节正文为空串（渲染时删掉该条）。 */
+function parseDisciplineOverride(source: string | null | undefined): Map<string, string> | null {
+	if (!source?.trim()) return null;
+	const map = new Map<string, string>();
+	let current: string | null = null;
+	let buffer: string[] = [];
+	const flush = (): void => {
+		if (!current) return;
+		map.set(current, buffer.join("\n").trim());
+		buffer = [];
+	};
+	for (const line of source.split(/\r?\n/)) {
+		const heading = /^##\s+(.+?)\s*$/.exec(line);
+		if (heading) {
+			flush();
+			current = DISCIPLINE_EDITABLE_TITLE_TO_ID.get(heading[1] ?? "") ?? null;
+			continue;
+		}
+		if (current) buffer.push(line);
+	}
+	flush();
+	return map.size > 0 ? map : null;
+}
+
+/** 把覆盖正文套回宿主块的 `【标题】` 形状；正文里重复的标题行去掉。 */
+function renderDisciplineOverride(blockText: string, body: string): string {
+	const title = disciplineTitleOf(blockText) ?? "纪律";
+	const clean = body.replace(/^【(.+?)】\s*/u, "").trim();
+	return `【${title}】\n${clean}`;
+}
+
 function entry(id: string, text: string | undefined): InjectionEntry | undefined {
 	if (!text) return undefined;
 	return { id, text, order: ORDER[id] ?? 0, scope: "session", channel: "message" };
@@ -457,6 +538,8 @@ function entry(id: string, text: string | undefined): InjectionEntry | undefined
 function disciplineBlocks(
 	partnerId: string,
 	includeDiscipline = true,
+	store?: PartnersStore,
+	opts: { ignoreOverrides?: boolean } = {},
 ): Array<{ id: string; text: string }> {
 	// 主人数据红线（批 21 §七）：数据域分级/提案制/日记不可重写/引原话不打分；
 	// 不按身份分——总管与执事同样面对主人的数据。
@@ -465,7 +548,7 @@ function disciplineBlocks(
 	if (!includeDiscipline) {
 		return ownerData ? [{ id: "partner_owner_data", text: ownerData }] : [];
 	}
-	const blocks: Array<{ id: string; text: string | undefined }> = [
+	const defaults: Array<{ id: string; text: string | undefined }> = [
 		{ id: "partner_verification", text: verificationIronLawFor(partnerId) },
 		{ id: "partner_ruling", text: RULING_DISCIPLINE },
 		{ id: "partner_work_silence", text: WORK_SILENCE_DISCIPLINE },
@@ -489,13 +572,52 @@ function disciplineBlocks(
 		},
 		{ id: "partner_attention", text: ATTENTION_ONE_QUESTION },
 	];
-	return blocks.filter((part): part is { id: string; text: string } => Boolean(part.text));
+	const blocks = defaults.filter(
+		(part): part is { id: string; text: string } => Boolean(part.text),
+	);
+	if (opts.ignoreOverrides || !partnerDisciplineEditEnabled()) return blocks;
+
+	const storeForRead = store ?? partnersStore();
+	const overrides = parseDisciplineOverride(storeForRead.readDisciplineFromHome(partnerId));
+	if (!overrides) return blocks;
+	const merged: Array<{ id: string; text: string }> = [];
+	for (const block of blocks) {
+		if (!overrides.has(block.id)) {
+			merged.push(block);
+			continue;
+		}
+		const body = overrides.get(block.id) ?? "";
+		// 空节 = 人明确删掉这一条（不是"回默认"；回默认 = 删掉整个文件/对应标题）。
+		if (!body.trim()) continue;
+		merged.push({ id: block.id, text: renderDisciplineOverride(block.text, body) });
+	}
+	return merged;
 }
 
-export function buildPartnerDisciplineSection(partnerId: string): string {
-	return disciplineBlocks(partnerId)
+export function buildPartnerDisciplineSection(partnerId: string, store?: PartnersStore): string {
+	return disciplineBlocks(partnerId, true, store)
 		.map((block) => block.text)
 		.join("\n\n");
+}
+
+/**
+ * 宿主默认的行为纪律（不含主人数据红线）——给人看的编辑模板。
+ * 只用于档案页；真实注入仍然走 `disciplineBlocks`，避免界面和请求两套拼装逻辑。
+ */
+export function buildPartnerDisciplineDefault(partnerId: string, store?: PartnersStore): string {
+	return disciplineBlocks(partnerId, true, store, { ignoreOverrides: true })
+		.filter((block) => block.id !== "partner_owner_data")
+		.map((block) => {
+			const title = disciplineTitleOf(block.text) ?? "纪律";
+			const body = block.text.replace(/^【(.+?)】\s*\n?/u, "").trim();
+			return `## ${title}\n${body}`;
+		})
+		.join("\n\n");
+}
+
+/** 主人数据红线（固定段）——给档案页只读展示，不参与覆盖。 */
+export function buildPartnerDisciplineRedLine(): string {
+	return ownerDataDisciplineEnabled() ? OWNER_DATA_DISCIPLINE : "";
 }
 
 /**
@@ -546,7 +668,7 @@ export function partnerContextProviders(
 				: undefined,
 		() =>
 			personaOn("goal") ? entry("partner_goal", buildPartnerGoalSection(partnerId, store)) : undefined,
-		...disciplineBlocks(partnerId, personaOn("discipline")).map(
+		...disciplineBlocks(partnerId, personaOn("discipline"), store).map(
 			(block) => () => entry(block.id, block.text),
 		),
 		(ctx) =>
@@ -593,6 +715,15 @@ export function partnerContextProviders(
 	return providers;
 }
 
+export interface PartnerDisciplineField {
+	/** 与 `partnerContextProviders` 的 entry id 对齐，例如 `partner_verification`。 */
+	id: string;
+	/** 纪律块的固定标题（`【验证铁律】` 里的那一段）。 */
+	title: string;
+	/** 原始块正文，带 `【标题】` 第一行；默认页按这个字段单独展示。 */
+	text: string;
+}
+
 export interface PartnerTurnContext {
 	/** 身份正文（当前版本快照）。调用方放进 instructions；这里带出来是为了整体断言。 */
 	soul: string;
@@ -602,6 +733,8 @@ export interface PartnerTurnContext {
 	goal: string | null;
 	/** 纪律段（批 12：验证 / 裁决 / 干活期间 / 提问；批 16：答案接地；固定字节，永远非空） */
 	discipline: string;
+	/** 纪律按固定块拆开（2026-11-16 续）：默认页逐节展示 / 逐节编辑用。 */
+	disciplineFields: PartnerDisciplineField[];
 	/** 当前在办段（三项皆空 + 无履历 → null） */
 	status: string | null;
 	/** 表达习惯段（批3；模块关 / 规则空 → null） */
@@ -642,8 +775,13 @@ export function buildPartnerTurnContext(
 		partnerId,
 	}).message;
 	const byId = new Map(entries.map((item) => [item.id, item.text]));
-	const discipline = DISCIPLINE_IDS.map((id) => byId.get(id))
-		.filter((part): part is string => Boolean(part))
+	const disciplineFields: PartnerDisciplineField[] = DISCIPLINE_IDS.map((id) => {
+		const text = byId.get(id) ?? "";
+		return { id, title: DISCIPLINE_TITLE_BY_ID[id], text };
+	});
+	const discipline = disciplineFields
+		.filter((field) => Boolean(field.text))
+		.map((field) => field.text)
 		.join("\n\n");
 	const text = entries.map((item) => item.text).join("\n\n");
 	return {
@@ -651,6 +789,7 @@ export function buildPartnerTurnContext(
 		contract: byId.get("partner_contract") ?? null,
 		goal: byId.get("partner_goal") ?? null,
 		discipline,
+		disciplineFields,
 		status: byId.get("partner_status") ?? null,
 		learning: byId.get("partner_learning") ?? null,
 		proactivity: byId.get("partner_proactivity") ?? null,

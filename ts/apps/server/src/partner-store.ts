@@ -57,7 +57,9 @@ export class PartnersStore {
 			mood            TEXT,
 			mood_reason     TEXT,
 			mood_updated_at TEXT,
-			mood_source     TEXT
+			mood_source     TEXT,
+			-- 人设页工具勾选（2026-11-16 工具裁剪 B）：JSON 数组，只存被取消的工具名；空 = 全开。
+			disabled_tools  TEXT
 			);
 			/* partner_versions 表已退役（2026-11-15 人设停存版本快照方案）：快照历史只写不读，
 			 * 新库不再建表；老库启动时由 migrate() 搬走候选链后 DROP。 */
@@ -195,6 +197,11 @@ export class PartnersStore {
 			if (!columns.some((existing) => existing.name === column)) {
 				this.db.exec(`ALTER TABLE partners ADD COLUMN ${column} TEXT`);
 			}
+		}
+		// 人设页工具勾选（2026-11-16 工具裁剪 B）：旧库补 nullable 列，老行读出来是 null
+		// （= 没取消任何工具 = 全开），不炸、不补数据、不版本化。照 dispatch_authority 的补列先例。
+		if (!columns.some((column) => column.name === "disabled_tools")) {
+			this.db.exec("ALTER TABLE partners ADD COLUMN disabled_tools TEXT");
 		}
 		// 例行任务条件门控（2026-11-10 批 13 §四）：旧库补两个 nullable 列，
 		// 老规则读出来是 null（= 无完成条件 / 不限次数），不炸、不补数据。
@@ -531,6 +538,20 @@ export class PartnersStore {
 	}
 
 	/**
+	 * 设置工具取消名单（2026-11-16 工具裁剪 B）：一条 UPDATE，只写 disabled_tools 与 updated_at。
+	 * 存"被取消的工具名"而不是"被勾选的"——以后新增工具默认可见。调用方（端点）保证 names
+	 * 已去重且都是已知工具名（sanitizeDisabledTools 收口）。**不版本化**：不 bump 身份计数、
+	 * 不动 SOUL / 契约，也不重启会话（下一轮才生效）。不存在返回 null，由调用方映射 404。
+	 */
+	setDisabledTools(id: string, names: string[]): PartnerRow | null {
+		if (!this.get(id)) return null;
+		this.db
+			.prepare("UPDATE partners SET disabled_tools = ?, updated_at = ? WHERE id = ?")
+			.run(JSON.stringify(names), new Date().toISOString(), id);
+		return this.get(id);
+	}
+
+	/**
 	 * 项目登记删除时的连带解除（2026-11-15 删除项目界面入口恢复）：清掉所有指向
 	 * 该项目的挂载，返回解除条数给界面提示。挂载顺序在端点层保证"先解除、后删登记"——
 	 * 反过来登记删了就没人负责清这些悬空引用了。不碰身份版本（不是身份）。
@@ -657,6 +678,25 @@ export class PartnersStore {
 	 */
 	readContractFromHome(partnerId: string): string | null {
 		return this.readHomeFile(partnerId, "CONTRACT.md");
+	}
+
+	/**
+	 * 执事纪律覆盖当前值（2026-11-16）。缺失 = null（按宿主默认纪律渲染）。
+	 * 只由人写（档案页），模型工具不碰；空内容 = 恢复宿主默认（文件删掉）。
+	 */
+	readDisciplineFromHome(partnerId: string): string | null {
+		return this.readHomeFile(partnerId, "DISCIPLINE.md");
+	}
+
+	/** 写 `DISCIPLINE.md`；空内容删文件，回到宿主默认。与 SOUL / 契约共用 64KB 槽位护栏。 */
+	writeDisciplineToHome(partnerId: string, source: string): void {
+		if (!this.get(partnerId)) throw new Error(`执事不存在：${partnerId}`);
+		const path = join(this.homeOf(partnerId), "DISCIPLINE.md");
+		if (!source.trim()) {
+			rmSync(path, { force: true });
+			return;
+		}
+		this.atomicWrite(path, source);
 	}
 
 	/**

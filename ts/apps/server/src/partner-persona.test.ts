@@ -13,6 +13,7 @@ import {
 	effectivePersonaModules,
 	PERSONA_FIXED_ON_IDS,
 	PERSONA_PRESET_MATCH_IDS,
+	renderPersonaFieldBlocks,
 } from "./partner-persona.ts";
 
 test("derivePresetFromModules：五张表各自自洽（铺默认表就推导回自己）", () => {
@@ -65,4 +66,35 @@ test("workHistory / currentWork 固定注入：行上显式 false 不再生效",
 		assert.equal(modules[id], true, `${id} 固定注入`);
 	}
 	assert.equal(modules.discipline, false, "其余键照旧（companion 纪律关）");
+});
+
+test("身份展示字段：口吻 / 里子 / 处境固定三个槽位；空模块也返回空 text", () => {
+	const store = {
+		homeOf: () => "C:/tmp/persona-home",
+		readHomeFile: (_partnerId: string, relative: string) =>
+			relative.endsWith("style.json")
+				? JSON.stringify({ speakStyle: "说话简短，先给结论。" })
+				: null,
+		atomicWrite: () => {},
+	};
+	const partner = {
+		id: "persona-test",
+		personaPreset: "work" as const,
+		personaModules: { expression: true },
+	};
+	const blocks = renderPersonaFieldBlocks(store, partner);
+	assert.deepEqual(blocks.map((block) => block.id), [
+		"partner_voice",
+		"partner_values",
+		"partner_scenario",
+	]);
+	assert.deepEqual(blocks.map((block) => block.title), [
+		"说话方式（口吻）",
+		"里子",
+		"处境",
+	]);
+	assert.match(blocks[0]!.text, /【口吻】/);
+	assert.match(blocks[0]!.text, /说话简短，先给结论。/);
+	assert.equal(blocks[1]!.text, "", "里子空模块给空 text");
+	assert.equal(blocks[2]!.text, "", "处境空模块给空 text");
 });

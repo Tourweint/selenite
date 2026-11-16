@@ -328,9 +328,10 @@ function delegateDeps(run: unknown, projects: unknown = null) {
 	} as never;
 }
 
-const DELEGATE_TEXT = "已受理：任务单 T-9。它在后台执行，完成后我会汇报；不要等，也不要重复派。";
+const DELEGATE_TEXT =
+	"已派发到 本机内核（pi-durable）：任务单 T-9。它在后台执行，完成后我会汇报；不要等，也不要重复派。";
 
-test("delegate：成功外层是 ok，message 逐字不变，ticketId 在 data", async () => {
+test("delegate：成功外层是 ok，message 带执行器，ticketId 在 data", async () => {
 	const previous = process.env.DELEGATION_PROJECT_REQUIRED;
 	process.env.DELEGATION_PROJECT_REQUIRED = "false";
 	try {

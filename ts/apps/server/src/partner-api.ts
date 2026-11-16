@@ -6,6 +6,7 @@
 
 import { PartnersStore } from "./partner-store.ts";
 import { store } from "./partner-rows.ts";
+import { flagEnabled } from "./flags.ts";
 
 export function delegationSoulSeed(name: string, domain: string): string {
 	// 没有领域标签时（2026-11-07 起 domain 可空）给一句通用身份，不硬编一个领域名——
@@ -29,8 +30,7 @@ export function partnerIdentityForDomain(
 }
 
 export function ministerDispatchMasterEnabled(): boolean {
-	const raw = process.env.MINISTER_DISPATCH_AUTHORITY?.trim().toLowerCase();
-	return raw !== "false" && raw !== "0";
+	return flagEnabled("MINISTER_DISPATCH_AUTHORITY");
 }
 
 export function ministerDispatchAllowed(store: PartnersStore, domain: string): boolean {

@@ -46,9 +46,10 @@ export function noteSessionCwd(conversationId: number | string, cwd?: string | n
 }
 
 /**
- * 本轮会话执行环境的 cwd（2026-11-13）：
+ * 本轮会话执行环境的 cwd（2026-11-13 会话快照；2026-11-16 补工作区兜底）：
  * 1. 这个会话创建时钉下的项目主文件夹（快照优先，换主文件夹不影响老会话）；
- * 2. 没绑定项目的会话（杂事态 / 改动前的旧会话）→ 全局当前项目的主文件夹；
+ * 2. 没绑定项目的会话（杂事态 / 总管 / 改动前的旧会话）→ **主工作区根**
+ *    （用户拍板：普通对话带项目记忆，没选项目就落 <主工作区> 这类默认目录）；
  * 3. 再没有 → `AGENT_WORKDIR`。
  * 快照目录没了（项目硬删 / 盘符变了）就回落，别把失效路径带进下一轮。
  */
@@ -58,7 +59,15 @@ export function sessionCwd(conversationId?: number | string): string {
 		const bound = Number.isFinite(key) ? sessionCwds.get(key) : undefined;
 		if (bound && existsSync(bound)) return bound;
 	}
-	return currentProject()?.rootPath ?? WORKDIR;
+	const projectRoot = currentProject()?.rootPath;
+	if (projectRoot && existsSync(projectRoot)) return projectRoot;
+	try {
+		const workspace = projectsStore().getWorkspace();
+		if (workspace?.rootPath && existsSync(workspace.rootPath)) return workspace.rootPath;
+	} catch {
+		// 项目库坏了退回进程工作目录（与 currentProject() 的降级口径一致）
+	}
+	return WORKDIR;
 }
 
 /** 会话绑定的项目（快照的文件夹，用于注入清单）；没有绑定返回 null。 */

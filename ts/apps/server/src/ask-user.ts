@@ -2,6 +2,7 @@ import { defineTool, type ToolRegistration } from "@earendil-works/pi-durable";
 import { Type } from "@earendil-works/pi-ai";
 import { approvalStore } from "./approvals.ts";
 import { approvalTimeoutSeconds } from "./approval-policy.ts";
+import { flagEnabled } from "./flags.ts";
 import { emitDelegation } from "./delegation.ts";
 import { encodeToolResult, err, ok } from "./tool-result.ts";
 
@@ -30,9 +31,7 @@ export const ASK_USER_OPTIONS_MAX = 3;
 
 /** 工具上架开关（默认 true；false / 0 / off → 不注册 = 一行回滚）。 */
 export function askUserEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	const raw = (env.AGENT_ASK_USER ?? "").trim().toLowerCase();
-	if (raw === "") return true;
-	return !["false", "0", "off"].includes(raw);
+	return flagEnabled("AGENT_ASK_USER", env);
 }
 
 /** 挂起后回给模型的那句话：本轮收尾，别重问、别自己替人答。 */

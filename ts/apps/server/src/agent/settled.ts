@@ -63,7 +63,7 @@ export function turnSettledHandler(chat: SettledChat, messages: ChatMessage[]) {
 			record.status,
 			record.status === "unanswered" ? record.reason : "",
 		);
-		// persona 导出（2026-11-09 批二）：done 轮追加一行；开关默认关，三项会话过滤在模块内。
+		// persona 导出（2026-11-09 批二）：done 轮追加一行；开关默认开（2026-11-16 翻案），三项会话过滤在模块内。
 		// 不 await —— 写盘慢了不拖对话；失败只 warn（导出绝不能打断对话）。
 		if (record.status === "done" && personaExportEnabled()) {
 			appendPersonaExport(chat, plain, undefined, {

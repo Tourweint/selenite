@@ -1,0 +1,732 @@
+{
+	"groups": [
+		{
+			"id": "chat",
+			"title": "对话基本能力",
+			"desc": "对话里能做什么：发图、改话、按项目走、拿不准时让你点选。",
+			"keys": [
+				"AGENT_ATTACHMENTS",
+				"AGENT_EDIT_RESEND",
+				"CURRENT_PROJECT",
+				"AGENT_ASK_USER"
+			]
+		},
+		{
+			"id": "memory",
+			"title": "记忆",
+			"desc": "它怎么从对话里记事、怎么整理、记忆页长什么样。",
+			"keys": [
+				"MEMORY_ENABLED",
+				"MEMORY_EXTRACT",
+				"MEMORY_EXTRACT_NOISE",
+				"MEMORY_CONSOLIDATE_JOB",
+				"MEMORY_PAGE_A",
+				"MEMORY_EXTERNAL",
+				"MEMORY_INJECT_DEDUPE",
+				"PARTNER_MEMORY_RECALL"
+			]
+		},
+		{
+			"id": "persona",
+			"title": "一生记忆库（对外）",
+			"desc": "本机和外部记忆库之间的一进一出。往外送的那一项默认开（2026-11-16 拍板），不想要可关。",
+			"keys": [
+				"PERSONA_MEMORY_ENABLED",
+				"PERSONA_EXPORT_ENABLED",
+				"PERSONA_WRITE_ENABLED"
+			]
+		},
+		{
+			"id": "autonomy",
+			"title": "自主与派活",
+			"desc": "没人盯着时它自己能跑多远、能不能把活派给别人。",
+			"keys": [
+				"AUTONOMY_ENABLED",
+				"CHANCELLOR_ENABLED",
+				"DELEGATION_WAKE_ENABLED",
+				"MINISTER_DISPATCH_AUTHORITY",
+				"ROUTINE_SELF_SERVICE",
+				"DEVICE_AUTO_DISPATCH",
+				"COMPANIONS_ENABLED",
+				"GROUPS_ENABLED",
+				"DELEGATION_PROJECT_MEMORY"
+			]
+		},
+		{
+			"id": "skills",
+			"title": "技能与课题",
+			"desc": "给 AI 的操作手册、执事招聘模板、长期跟进的问题与履历。",
+			"keys": [
+				"SKILLS_ADMIN",
+				"SKILLS_INDEX_CLIP",
+				"PARTNER_TEMPLATES",
+				"TOPICS_ENABLED",
+				"PARTNER_WORK_RECORD"
+			]
+		},
+		{
+			"id": "ui",
+			"title": "任务与界面",
+			"desc": "任务中心、对话观感、历史翻页、永久删除与工具结果，都是「看起来 / 用起来」的开关。",
+			"keys": [
+				"TASKS_REDESIGN_ENABLED",
+				"SIDEBAR_TASK_GROUPS",
+				"CHAT_STREAM_REVEAL",
+				"CHAT_HISTORY_PAGING_ENABLED",
+				"CHAT_HARD_DELETE",
+				"TOOL_PROJECTION",
+				"TOOL_PROJECTION_WORKER"
+			]
+		}
+	],
+	"flags": [
+		{
+			"key": "AUTONOMY_ENABLED",
+			"label": "自主轮",
+			"summary": "定时任务 / 事件唤醒、没人盯着跑的那一轮。关 = 完全不动；只观察 = 照常判定但只记账、不真的做；开 = 真起轮，卡住 / 等你批 / 出错会提醒你，写文件 / 跑命令 / 派活一律先问你。默认开。",
+			"group": "autonomy",
+			"scope": "core",
+			"type": "enum",
+			"values": [
+				"true",
+				"false",
+				"observe"
+			],
+			"choices": [
+				{
+					"value": "false",
+					"label": "关"
+				},
+				{
+					"value": "observe",
+					"label": "只观察"
+				},
+				{
+					"value": "true",
+					"label": "开"
+				}
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "AGENT_ATTACHMENTS",
+			"label": "附件",
+			"summary": "对话里能发图片附件；关掉后分段发送会被拒。默认开，即时生效。",
+			"group": "chat",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "AGENT_EDIT_RESEND",
+			"label": "编辑重发",
+			"summary": "自己发过的消息可以改完再重发；关掉就只剩重新发一条。默认开，即时生效。",
+			"group": "chat",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "CURRENT_PROJECT",
+			"label": "当前项目",
+			"summary": "派活按当前项目归属走；关掉 = 只剩主工作区，不再区分项目。默认开，即时生效。",
+			"group": "chat",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "MEMORY_ENABLED",
+			"label": "记忆总闸",
+			"summary": "记忆引擎的总开关。关掉后新记忆停写、召回与记忆页接口立即停；已经加载进内存的库要重启服务才彻底卸下。启动时本来是关的，再打开要重启才上架。默认开。",
+			"group": "memory",
+			"scope": "core",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "MEMORY_EXTRACT",
+			"label": "记忆提取方式",
+			"summary": "每一轮聊完，怎么从对话里抓「经历」。自动 = 先按规则抓、拿不准才叫模型（默认）；模型 = 每句都让模型判断，准但费额度；规则 = 只按句长 / 关键词抓，免费但粗。改完下一轮生效。",
+			"group": "memory",
+			"type": "enum",
+			"values": [
+				"auto",
+				"llm",
+				"rule"
+			],
+			"choices": [
+				{
+					"value": "auto",
+					"label": "自动"
+				},
+				{
+					"value": "llm",
+					"label": "模型"
+				},
+				{
+					"value": "rule",
+					"label": "规则"
+				}
+			],
+			"defaultValue": "auto",
+			"hot": true,
+			"requires": [
+				"MEMORY_ENABLED"
+			]
+		},
+		{
+			"key": "MEMORY_PAGE_A",
+			"label": "记忆页新版",
+			"summary": "记忆页用大字概览 + 分组折叠；关 = 回到旧版长列表。默认开，改完刷新页面生效。",
+			"group": "memory",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "MEMORY_CONSOLIDATE_JOB",
+			"label": "整理放后台",
+			"summary": "点「整理」后放后台跑，切走再回来还能接上进度；关 = 页面同步等结果（旧行为）。默认开，即时生效。",
+			"group": "memory",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true,
+			"requires": [
+				"MEMORY_ENABLED"
+			]
+		},
+		{
+			"key": "MEMORY_EXTRACT_NOISE",
+			"label": "记忆噪声过滤",
+			"summary": "审批续跑等系统话术、命令行和问句不再被写成「经历」。关 = 回到旧规则（每句 ≥6 字都记）。默认开，重启服务后生效。",
+			"group": "memory",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": false,
+			"requires": [
+				"MEMORY_ENABLED"
+			]
+		},
+		{
+			"key": "MEMORY_EXTERNAL",
+			"label": "外部记忆库入口",
+			"summary": "记忆页底部显示外部记忆库的库边界；关掉整块不显示。默认开，即时生效。",
+			"group": "memory",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true,
+			"requires": [
+				"MEMORY_ENABLED"
+			]
+		},
+		{
+			"key": "PERSONA_MEMORY_ENABLED",
+			"label": "一生记忆库（查）",
+			"summary": "问到很久以前的事、或要原文出处时，去个人记忆库（persona-metric）检索证据。前置条件：.env 里 PERSONA_MEMORY_ASK 要指向 ask.py；没配的话这个开关拨了也不会挂上工具。默认开。",
+			"group": "persona",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "PERSONA_EXPORT_ENABLED",
+			"label": "对话归档（送）",
+			"summary": "每轮主对话聊完，把你和助手的原话追加到导出目录，由记忆库那边定期收走归档。默认开（2026-11-16 拍板：小记每天一问的答案要往记忆库回流）；不想往外送就在这里关。",
+			"group": "persona",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "PERSONA_WRITE_ENABLED",
+			"label": "口述落库（写）",
+			"summary": "主人明确要求时（比如纠正库里记错的旧事），执事经固定脚本把你亲口说的那句话写进一生记忆库的最高优先事实表；每次写都会弹审批，自动提取的记忆绝不往里送。默认关。",
+			"group": "persona",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "false",
+			"hot": true
+		},
+		{
+			"key": "MINISTER_DISPATCH_AUTHORITY",
+			"label": "执事派发权",
+			"summary": "执事在自己的领域内可以直派活；关 = 所有活都绕回总管。默认开（2026-11-15 用户口径），改完即时生效。",
+			"group": "autonomy",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true,
+			"requires": [
+				"COMPANIONS_ENABLED"
+			]
+		},
+		{
+			"key": "DEVICE_AUTO_DISPATCH",
+			"label": "设备自动派活",
+			"summary": "派活时设备选「自动」就替你挑一台（主机优先）。默认开，即时生效。",
+			"group": "autonomy",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "PARTNER_WORK_RECORD",
+			"label": "工作履历",
+			"summary": "每单结算给执事落一条履历记录（只增不改的台账），用来判断谁靠谱。默认开，即时生效。",
+			"group": "skills",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true,
+			"requires": [
+				"MEMORY_ENABLED",
+				"COMPANIONS_ENABLED"
+			]
+		},
+		{
+			"key": "SKILLS_ADMIN",
+			"label": "技能管理",
+			"summary": "设置 → 技能 里增删改技能手册的端点；关掉只能看不能改。默认开，重启服务后生效。",
+			"group": "skills",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": false
+		},
+		{
+			"key": "ROUTINE_SELF_SERVICE",
+			"label": "执事自建巡逻",
+			"summary": "执事能给自己建 / 停例行规则（高危档，第一次要你点头）。默认开，重启服务后生效。",
+			"group": "autonomy",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": false,
+			"requires": [
+				"COMPANIONS_ENABLED"
+			]
+		},
+		{
+			"key": "COMPANIONS_ENABLED",
+			"label": "执事体系",
+			"summary": "执事（伙伴）体系总闸：关掉后不再有执事列表、执事对话与执事派活。默认开，重启服务后生效。",
+			"group": "autonomy",
+			"scope": "core",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": false
+		},
+		{
+			"key": "GROUPS_ENABLED",
+			"label": "群组",
+			"summary": "群聊与值日制的总闸。默认开，重启服务后生效。",
+			"group": "autonomy",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": false,
+			"requires": [
+				"COMPANIONS_ENABLED"
+			]
+		},
+		{
+			"key": "CHANCELLOR_ENABLED",
+			"label": "派活（宰相）",
+			"summary": "派活链路的总闸；关掉 = 回到 8 个基础工具，不能把活分出去。默认开，重启服务后生效。",
+			"group": "autonomy",
+			"scope": "core",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": false
+		},
+		{
+			"key": "DELEGATION_WAKE_ENABLED",
+			"label": "派活完成即唤醒",
+			"summary": "后台任务到终态后，把派活的会话自动叫起来跑一轮、接住结果并向你转述。关 = 只写汇报、不主动开口（改动前的旧行为）。默认开。",
+			"group": "autonomy",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true,
+			"requires": [
+				"COMPANIONS_ENABLED"
+			]
+		},
+		{
+			"key": "TOOL_PROJECTION",
+			"label": "工具结果整理",
+			"summary": "命令行（bash / PowerShell）的结果会被读懂一点：grep 没匹配不算失败、超时统一标记、大输出提示落盘路径。总闸，关 = 所有会话一律原样透传（打手、执事、显式开过的执事都关，回滚用）。默认开，即时生效。默认只对打手生效：执事与总管默认不整理，需要时在执事个人页开。",
+			"group": "ui",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "TOOL_PROJECTION_WORKER",
+			"label": "打手工具结果整理",
+			"summary": "打手的命令行结果默认整理成上面那样（只管子任务 / 派单执行者这类本机内核打手）。执事与总管默认不整理——这是「默认只管打手」的落点，执事要用就在自己的个人页显式开。外接 CLI 打手（CodeBuddy / Qoder / Claude Code / Codex / OpenCode）跑自己的工具、不经过这层，不受开关影响。默认开，即时生效。",
+			"group": "ui",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true,
+			"requires": [
+				"TOOL_PROJECTION"
+			]
+		},
+		{
+			"key": "PARTNER_MEMORY_RECALL",
+			"label": "记忆召回（总闸）",
+			"summary": "每轮对话自动带的记忆（经历 / 事实 / 偏好 / 人和物 + 挂载项目的记忆）。这是总闸：关 = 所有会话都不再自动带，只留 recall 工具主动查。它和「记忆」分组里那些不一样——那些管的是记忆库本身（怎么记、怎么整理），这个只管「每轮自动注入」这一半。每位执事/总管的人设页里还有自己的子开关（按相关度召回），父子都开才带。默认开，即时生效。",
+			"group": "memory",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true,
+			"requires": [
+				"MEMORY_ENABLED"
+			]
+		},
+		{
+			"key": "TOPICS_ENABLED",
+			"label": "长期课题",
+			"summary": "课题户口本 + 每周自动研究：值得长期跟的问题会留档并定期推进。默认开，重启服务后生效。",
+			"group": "skills",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": false
+		},
+		{
+			"key": "AGENT_ASK_USER",
+			"label": "结构化提问",
+			"summary": "助手拿不准时能直接弹选项 / 表单让你点，而不是自己猜；关掉 = 不再提供这个工具。默认开，重启服务后生效。",
+			"group": "chat",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": false
+		},
+		{
+			"key": "TASKS_REDESIGN_ENABLED",
+			"label": "任务中心新版",
+			"summary": "任务中心用「等你回话 / 在跑 / 打手手风琴 / 今日回顾」的新版；关 = 回到旧三列看板。默认开，改完刷新页面生效。",
+			"group": "ui",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "SIDEBAR_TASK_GROUPS",
+			"label": "侧栏按创建者分组",
+			"summary": "侧栏对话按「我 / 各个打手」分开归类；关 = 回到旧版一整条平铺列表。默认开，改完刷新页面生效。",
+			"group": "ui",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "CHAT_HARD_DELETE",
+			"label": "永久删除",
+			"summary": "归档页里「永久删除」的总闸；关掉后预检和删除都返回 400，归档 / 恢复不受影响。默认开，即时生效。",
+			"group": "ui",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "CHAT_STREAM_REVEAL",
+			"label": "对话逐字浮现",
+			"summary": "流式回答按字 / 词淡入，而不是整块蹦出；关 = 退回旧的整块渲染。系统开了「减少动态效果」时会自动关。默认开，下一轮生效。",
+			"group": "ui",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "ARCHIVE_AUTO_ENABLED",
+			"label": "自动归档",
+			"summary": "没动静的普通对话与已结束的任务专线到天数自动归档；总管、执事 / 群、置顶与运行中的不动。设置 → 会话 有专属卡。默认开（2026-11-15 用户口径）。",
+			"group": "archive",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"surface": "settings",
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "ARCHIVE_AUTO_DAYS",
+			"label": "自动归档天数",
+			"summary": "多少天没动静算旧会话（1–365），默认 30。",
+			"group": "archive",
+			"type": "number",
+			"values": [],
+			"surface": "settings",
+			"defaultValue": "30",
+			"min": 1,
+			"hot": true,
+			"requires": [
+				"ARCHIVE_AUTO_ENABLED"
+			]
+		},
+		{
+			"key": "CHAT_HISTORY_PAGING_ENABLED",
+			"label": "对话历史分页",
+			"summary": "打开会话先加载最近一页，往上滑再加载更早的（按天分组、带日期分隔）；关 = 一次拉最近 200 条。默认开，重新打开会话生效。",
+			"group": "ui",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "AGENT_COMPACT_ENABLED",
+			"label": "自动压缩",
+			"summary": "上下文快满时自动压缩旧对话；关 = 不自动压。设置 → 会话 有专属卡。默认开，即时生效。",
+			"group": "compaction",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"surface": "settings",
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "AGENT_COMPACT_TRIGGER_MODE",
+			"label": "压缩触发方式",
+			"summary": "按上下文百分比或按 token 数触发自动压缩。设置 → 会话 有专属卡。",
+			"group": "compaction",
+			"type": "enum",
+			"values": [
+				"percent",
+				"tokens"
+			],
+			"choices": [
+				{
+					"value": "percent",
+					"label": "按百分比"
+				},
+				{
+					"value": "tokens",
+					"label": "按 token 数"
+				}
+			],
+			"surface": "settings",
+			"defaultValue": "percent",
+			"hot": true,
+			"requires": [
+				"AGENT_COMPACT_ENABLED"
+			]
+		},
+		{
+			"key": "AGENT_COMPACT_TRIGGER_PERCENT",
+			"label": "压缩触发百分比",
+			"summary": "上下文用到多少百分比时触发自动压缩（5–95），默认 70。设置 → 会话 有专属卡。",
+			"group": "compaction",
+			"type": "number",
+			"values": [],
+			"surface": "settings",
+			"defaultValue": "70",
+			"min": 5,
+			"max": 95,
+			"hot": true,
+			"requires": [
+				"AGENT_COMPACT_ENABLED"
+			]
+		},
+		{
+			"key": "AGENT_COMPACT_TRIGGER_K",
+			"label": "压缩触发 K",
+			"summary": "按 token 数触发时，到多少 K 压一次；留空 = 该档不生效，回落内核默认。设置 → 会话 有专属卡。",
+			"group": "compaction",
+			"type": "number",
+			"values": [],
+			"surface": "settings",
+			"defaultValue": "",
+			"min": 1,
+			"hot": true,
+			"requires": [
+				"AGENT_COMPACT_ENABLED"
+			]
+		},
+		{
+			"key": "PARTNER_TEMPLATES",
+			"label": "执事招聘模板",
+			"summary": "招聘墙和新建执事弹窗里出现模板条，点一下按模板建人设。关 = 回到旧「新建执事」按钮。默认开，即时生效。",
+			"group": "skills",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true,
+			"requires": [
+				"COMPANIONS_ENABLED"
+			]
+		},
+		{
+			"key": "SKILLS_INDEX_CLIP",
+			"label": "技能索引截断",
+			"summary": "技能索引每行只显示摘要前 120 字（省上下文，实测能省一半）；关 = 显示完整摘要。只影响索引，真调用时读到的仍是完整手册。默认开，只影响新开的会话。",
+			"group": "skills",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "MEMORY_INJECT_DEDUPE",
+			"label": "记忆召回去重",
+			"summary": "每轮挑出来的记忆先合并「同一件事的多种说法」，只注入一条（保留分数最高的）；关 = 召回几条就注入几条。只影响本轮注入，不改记忆库。默认开，下一轮生效。",
+			"group": "memory",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true,
+			"requires": [
+				"MEMORY_ENABLED",
+				"PARTNER_MEMORY_RECALL"
+			]
+		},
+		{
+			"key": "DELEGATION_PROJECT_MEMORY",
+			"label": "派活带项目记忆",
+			"summary": "派出去的工人（native 与外部 CLI）在任务书里带上单子所属项目的长期记忆（16 条 / 2000 字，经拆单器转述，不逐字保证）。只取项目记忆，不带 global / 执事记忆。默认开，即时生效。",
+			"group": "autonomy",
+			"scope": "core",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true,
+			"requires": [
+				"CHANCELLOR_ENABLED"
+			]
+		}
+	]
+}

@@ -6,6 +6,7 @@ import {
 	type MemoryRecord,
 } from "@lifediary/memory";
 import { CHIEF_PARTNER_ID, partnersStore } from "./partners.ts";
+import { flagEnabled } from "./flags.ts";
 
 /**
  * 工作履历的落账与读取（2026-11-08 员工人格化刀二 E2）。
@@ -112,8 +113,7 @@ let store: SqliteMemoryStore | null | undefined;
 
 /** 回滚开关：只有明确写 false/0 才关（与 CHANCELLOR_ENABLED 同读法）。 */
 export function workRecordEnabled(): boolean {
-	const raw = (process.env.PARTNER_WORK_RECORD ?? "").trim().toLowerCase();
-	return raw !== "false" && raw !== "0";
+	return flagEnabled("PARTNER_WORK_RECORD");
 }
 
 function memoryDbPath(): string {

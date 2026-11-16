@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
+import { flagEnabled } from "./flags.ts";
 
 /**
  * 技能库（2026-10-31，App 方案《Agent 化与上下文分层》步骤 2，D4/D5）。
@@ -40,6 +41,12 @@ export interface SkillStore {
 	 * 没有任何技能时返回 undefined（section 整个省略，别渲染一个空标题）。
 	 */
 	indexFor(conversationId: number, partnerId?: string | null): string | undefined;
+	/**
+	 * 预览用：按当前目录 + 该人可见性渲染，不写 `frozen`、不依赖会话。
+	 * 设置页“默认开销”拿它看“新会话的第一轮会读到什么”。
+	 * 旧测试里的最小 SkillStore 可以不带这个方法；生产 store 一定有。
+	 */
+	previewIndex?(partnerId?: string | null): string | undefined;
 }
 
 /**
@@ -358,9 +365,7 @@ export function findSkillInDir(dir: string, name: string): ScannedSkill | null {
  * `skill(name)` 取的手册仍是完整正文。
  */
 export function skillsIndexClipEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	const raw = (env.SKILLS_INDEX_CLIP ?? "").trim().toLowerCase();
-	if (!raw) return true;
-	return raw !== "false" && raw !== "0" && raw !== "off";
+	return flagEnabled("SKILLS_INDEX_CLIP", env);
 }
 
 /**
@@ -389,6 +394,12 @@ export function createSkillStore(
 		/** 2026-11-15 按人可见：全局开 || 该人覆盖开。不传 = 回落 visible。 */
 		visibleFor?: (partnerId: string, name: string) => boolean;
 		/**
+		 * 代码内置技能（2026-11-16 工具裁剪 A）：返回 true 的名字绕过启停位 / 按人可见性，
+		 * 始终进索引、始终能被 skill(name) 取到。默认 () => false = 旧行为零改动。
+		 * 只认调用方传入的代码名单（isCoreSkill），不认技能文件 frontmatter 自封。
+		 */
+		isCore?: (name: string) => boolean;
+		/**
 		 * 索引里每条摘要最多显示多少字（2026-11-15 上下文预算批）。
 		 * 不传 / 0 = 不截断（旧行为）；正文手册（`manual`）永远不受影响。
 		 * 也收函数：界面「行为开关」页改了总开关后，新会话首渲染现读新值（热生效）。
@@ -408,8 +419,11 @@ export function createSkillStore(
 	// 启停位（2026-11-09）：visible 不传 = 全部可见（旧行为）；传了则索引 / 名单 / 取手册都按它过滤
 	const visible = options.visible ?? (() => true);
 	const visibleFor = options.visibleFor;
+	const isCore = options.isCore ?? (() => false);
+	// core 短路：内置技能不受启停位 / 按人可见性影响。索引、names()、manual() 都走这一条，
+	// 三处自动一致（2026-11-16 工具裁剪 A）。
 	const canSee = (name: string, partnerId?: string | null): boolean =>
-		partnerId && visibleFor ? visibleFor(partnerId, name) : visible(name);
+		isCore(name) || (partnerId && visibleFor ? visibleFor(partnerId, name) : visible(name));
 
 	const skills = new Map<string, { summary: string; manual: string }>();
 	const claimed = new Set<string>();
@@ -461,6 +475,10 @@ export function createSkillStore(
 			const key = frozenKey(conversationId, partnerId);
 			if (!frozen.has(key)) frozen.set(key, renderIndex(partnerId));
 			return frozen.get(key);
+		},
+		previewIndex(partnerId) {
+			// 只渲染，不写 frozen：设置页预览不能污染真实会话的首轮快照。
+			return renderIndex(partnerId);
 		},
 	};
 }

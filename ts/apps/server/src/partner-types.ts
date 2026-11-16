@@ -65,6 +65,12 @@ export interface PartnerRow {
 	 */
 	projectIds: string[];
 	/**
+	 * 工具取消名单（2026-11-16 工具裁剪 B）：JSON 数组，只存**被取消**的工具名；
+	 * 空数组 = 全开。存"取消名单"而不是"勾选名单"，以后新增工具默认对所有人可见。
+	 * **不版本化**（不是身份，不 bump 身份版本、不动 SOUL / 契约）。
+	 */
+	disabledTools: string[];
+	/**
 	 * 人格预设（2026-11-14 员工人格模块 §四；2026-11-15 人设页打磨扩枚举）：
 	 * `work`（默认）/ `companion` / `allrounder` / `apprentice` / `custom`。
 	 * 只决定模块开关的默认值；保存时按最终开关表推导（`derivePresetFromModules`）——

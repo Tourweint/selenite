@@ -11,7 +11,7 @@ import { markAutonomyTurn, unmarkAutonomyTurn } from "./autonomy-state.ts";
 import { nextChainCandidate } from "./model-chain.ts";
 import type { PartnerRow } from "./partners.ts";
 import { COMPANIONS_ENABLED, partnersStore } from "./partners.ts";
-import { personaRefreshNeeded, personaSignature, renderPersonaSection } from "./partner-persona.ts";
+import { personaRefreshNeeded, personaSignature, renderPersonaFieldBlocks } from "./partner-persona.ts";
 import { ROUTINE_QUIET_INSTRUCTION, assessRoutineOutputGuarded, routineQuietEnabled } from "./routine-quiet.ts";
 import { clearTurnToolErrors, clearUnattendedSkips, markRoutineTurn, takeTurnToolErrors, takeUnattendedSkips, unmarkRoutineTurn } from "./unattended.ts";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -26,34 +26,75 @@ export function partnerCanonicalExternalId(partnerId: string): string {
 	return `partner-${partnerId}`;
 }
 
-export function renderPartnerIdentity(partner: PartnerRow, soulSource: string): string {
+export interface PartnerIdentityPart {
+	key:
+		| "partner_soul"
+		| "partner_voice"
+		| "partner_values"
+		| "partner_scenario"
+		| "partner_owner_profile"
+		| "partner_skill_index"
+		| "partner_boundary";
+	title: string;
+	text: string;
+}
+
+/**
+ * 身份的可展示字段（2026-11-16 追加）：默认上下文页不再把 SOUL、说话方式、
+ * 里子、处境、主人画像、技能索引、运行边界合成一个 `partner_identity` 大块。
+ * 这里同时产出空字段（text=""），页面才能逐个显示 0 字槽位。
+ *
+ * 真实 instructions 仍走 renderPartnerIdentity：只拼非空段，顺序不变。
+ */
+export function renderPartnerIdentityParts(
+	partner: PartnerRow,
+	soulSource: string,
+): PartnerIdentityPart[] {
 	const store = partnersStore();
-	const sections: string[] = [soulSource.trim()];
-
-	// 静态人格模块（2026-11-14 批1）：口吻 → 里子 → 处境，紧跟在 SOUL 之后。
-	// 它们是"他是谁"的一部分，会话级稳定；空模块 / 空字段整段跳过。
-	// 开关关着 / `PARTNER_PERSONA_MODULES=false` → undefined，instructions 与改动前逐字节一致。
-	const persona = renderPersonaSection(store, partner);
-	if (persona) sections.push(persona);
-
-	const userMd = store.readUserMd(partner.id);
-	if (userMd && userMd.trim()) {
-		sections.push(
-			["# 主人画像（memories/USER.md）", userMd.trim()].join("\n\n"),
-		);
+	const parts: PartnerIdentityPart[] = [
+		{ key: "partner_soul", title: "执事身份 · SOUL", text: soulSource.trim() },
+	];
+	for (const block of renderPersonaFieldBlocks(store, partner)) {
+		parts.push({
+			key: block.id,
+			title: block.title,
+			text: block.text,
+		});
 	}
 
-	const skills = partnerSkillsIndex(partner.id);
-	if (skills) sections.push(skills);
+	const userMd = store.readUserMd(partner.id);
+	parts.push({
+		key: "partner_owner_profile",
+		title: "执事身份 · 主人画像",
+		text: userMd && userMd.trim()
+			? ["# 主人画像（memories/USER.md）", userMd.trim()].join("\n\n")
+			: "",
+	});
 
-	sections.push(
-		[
+	const skills = partnerSkillsIndex(partner.id);
+	parts.push({
+		key: "partner_skill_index",
+		title: "执事身份 · 技能索引",
+		text: skills ?? "",
+	});
+
+	parts.push({
+		key: "partner_boundary",
+		title: "执事身份 · 运行边界",
+		text: [
 			"# 运行边界",
 			"- 你的记忆与技能独立于主人的助手；写文件默认落在你的 workspace/。",
 			"- 需要长期记住的事用 remember（会自动记到你的键空间）；把流程沉淀成技能用 partner_skill_write。",
 		].join("\n"),
-	);
-	return sections.join("\n\n");
+	});
+	return parts;
+}
+
+export function renderPartnerIdentity(partner: PartnerRow, soulSource: string): string {
+	return renderPartnerIdentityParts(partner, soulSource)
+		.map((part) => part.text.trim())
+		.filter(Boolean)
+		.join("\n\n");
 }
 
 function partnerSkillsIndex(partnerId: string): string | undefined {

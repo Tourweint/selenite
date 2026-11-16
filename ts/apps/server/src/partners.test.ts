@@ -10,11 +10,17 @@ import {
 	PARTNER_AVATAR_MAX_BYTES,
 } from "@lifediary/shared";
 import { PARTNER_SLOT_LIMIT, PartnersStore } from "./partners.ts";
+import { toDisabledTools } from "./partner-rows.ts";
 // 人格挂载的纯解析（2026-11-15 跟人走立项、同日多挂载方案扩化）：纯函数收 store，单测直接喂临时库。
 import {
 	composeProjectRecallScopes,
+	isRecallableProjectId,
 	personaProjectIdsOfSession,
+	projectStateOf,
+	recallableProjectIds,
 	resolveProjectWriteTarget,
+	setProjectStateResolver,
+	type ProjectState,
 } from "./agent/project-scope.ts";
 import { CHIEF_PARTNER_ID } from "./partner-contract.ts";
 
@@ -578,6 +584,47 @@ test("每轮注入的项目 scope 组装：绑定全权、其余挂载走闸门�
 	assert.deepEqual(empty.gatedKeys, []);
 });
 
+test("归档 / 删除的项目退出召回库：状态解析、id 过滤、降级口径", () => {
+	const live = "00000000-0000-4000-8000-0000000000c1";
+	const archived = "00000000-0000-4000-8000-0000000000c2";
+	const deleted = "00000000-0000-4000-8000-0000000000c3";
+	const states = new Map<string, ProjectState>([
+		[live, "active"],
+		[archived, "archived"],
+		[deleted, "missing"],
+	]);
+
+	// 未接线 = 旧行为：一律按 active（记忆不能因为一次辅助读取失败就不召回）
+	assert.equal(projectStateOf(archived), "active");
+	assert.equal(isRecallableProjectId(archived), true);
+	const previousFlag = process.env.PROJECT_MEMORY_ACTIVE_ONLY;
+	process.env.PROJECT_MEMORY_ACTIVE_ONLY = "true";
+	try {
+		setProjectStateResolver((id) => states.get(id) ?? "active");
+		assert.equal(projectStateOf(live), "active");
+		assert.equal(projectStateOf(archived), "archived");
+		assert.equal(projectStateOf(deleted), "missing");
+		// 绑定与挂载共用同一判据：只有活着（登记存在且未归档）的项目进召回池
+		assert.deepEqual(recallableProjectIds([live, archived, deleted]), [live]);
+		assert.equal(isRecallableProjectId(archived), false);
+		assert.equal(isRecallableProjectId(deleted), false);
+		// 回滚开关：PROJECT_MEMORY_ACTIVE_ONLY=false = 旧形态，归档项目照旧召回
+		process.env.PROJECT_MEMORY_ACTIVE_ONLY = "false";
+		assert.equal(isRecallableProjectId(archived), true);
+		assert.deepEqual(recallableProjectIds([live, archived, deleted]), [live, archived, deleted]);
+		process.env.PROJECT_MEMORY_ACTIVE_ONLY = "true";
+		// 解析器抛错同样退回 active，不把对话卡住
+		setProjectStateResolver(() => {
+			throw new Error("boom");
+		});
+		assert.equal(projectStateOf(archived), "active");
+	} finally {
+		setProjectStateResolver(null);
+		if (previousFlag === undefined) delete process.env.PROJECT_MEMORY_ACTIVE_ONLY;
+		else process.env.PROJECT_MEMORY_ACTIVE_ONLY = previousFlag;
+	}
+});
+
 test("人格挂载解析：链接执事吃自己的挂载（数组），总管主对话吃总管的，worker 谁的都不吃", () => {
 	const { root, db, homes } = tempRoot();
 	const store = new PartnersStore(db, homes);
@@ -624,4 +671,39 @@ test("人格挂载解析：链接执事吃自己的挂载（数组），总管�
 		store.close();
 		rmSync(root, { recursive: true, force: true });
 	}
+});
+
+test("执事：setDisabledTools 往返 + 坏 JSON 当空 + 不 bump 身份版本（2026-11-16 工具裁剪 B）", () => {
+	const { root, db, homes } = tempRoot();
+	const store = new PartnersStore(db, homes);
+	try {
+		const partner = store.create("工具勾选测试");
+		assert.equal(partner.currentVersion, 1);
+		assert.deepEqual(partner.disabledTools, [], "新档案默认全开");
+
+		const updated = store.setDisabledTools(partner.id, ["write", "delegate"]);
+		assert.ok(updated);
+		assert.deepEqual(updated.disabledTools, ["write", "delegate"]);
+		assert.equal(updated.currentVersion, 1, "只写取消名单，不 bump 身份版本");
+		assert.deepEqual(store.get(partner.id)?.disabledTools, ["write", "delegate"]);
+
+		// 清空 = 全开；仍不 bump 版本（同一行只动两列）
+		const cleared = store.setDisabledTools(partner.id, []);
+		assert.deepEqual(cleared?.disabledTools, []);
+		assert.equal(cleared?.currentVersion, 1);
+
+		assert.equal(store.setDisabledTools("不存在的执事", ["read"]), null);
+	} finally {
+		store.close();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("toDisabledTools：坏 JSON / 非数组 / 非字符串项当空数组（2026-11-16 工具裁剪 B）", () => {
+	for (const dirty of [null, undefined, "", "not-json", "{}", "null", "[1,2]", "[1]"]) {
+		assert.deepEqual(toDisabledTools(dirty), [], `脏值 ${String(dirty)} 当空`);
+	}
+	assert.deepEqual(toDisabledTools('["read","write"]'), ["read", "write"]);
+	assert.deepEqual(toDisabledTools('["", "read"]'), ["read"], "空串项滤掉");
+	assert.deepEqual(toDisabledTools('["read", 3]'), ["read"], "非字符串项滤掉（同 toProjectIds）");
 });

@@ -35,6 +35,7 @@ import {
   listArchivedChats,
   listChats,
   listReminders,
+  missingChats,
   memoryEngine,
   openChat,
   pinChat,
@@ -96,7 +97,7 @@ import {
 import { pairPage } from "./pair-page.ts";
 import { mountPhoneWorker } from "./phone-worker.ts";
 import { mountProjects, seedDefaultWorkspace } from "./projects.ts";
-import { chatHistoryPagingEnabled, loadFlagOverrides, mountFlags } from "./flags.ts";
+import { chatHistoryPagingEnabled, flagEnabled, loadFlagOverrides, mountFlags } from "./flags.ts";
 // 自动归档调度器（2026-11-13 归档管理对齐 ZCode 批A）：启动 sync 一次，
 // ARCHIVE_AUTO_ENABLED=false/0/off 时才零行为（2026-11-15 起默认开）；flags 端点改开关后由 onChange 动态开停。
 import { autoArchiveScheduler } from "./agent/auto-archive.ts";
@@ -105,11 +106,21 @@ import { mountDurableDelete } from "./agent/durable-delete.ts";
 import { mountFiles } from "./files.ts";
 // 设置 → 上下文（2026-11-16）：只读重放当前装配 + 首轮注入实文，不重跑召回。
 import { chatContextInspectEnabled, contextInspectPayloadOf, lastRequestInjectionsOf } from "./context-inspect.ts";
+import { contextDefaultPayload } from "./context-defaults.ts";
+// Worker（普通任务助手）人设：全局一份可编辑，GET/PUT /api/v1/agent/worker-persona；
+// 路由定义收在模块里（可挂载给 HTTP 测试），挂载点放在 context-defaults 附近。
+import { mountWorkerPersonaRoutes } from "./worker-persona.ts";
 import { CTX } from "./agent/shared.ts";
 // 壁纸（2026-11-14 外观页扩展）：.data/appearance 存一张图 + GET/POST/DELETE 三个端点。
 // AGENT_APPEARANCE_WALLPAPER=0 时整组不挂（界面那块也自己藏掉）。
 import { mountAppearanceWallpaper, wallpaperEnabled } from "./appearance-wallpaper.ts";
 import { mountDelegationApi } from "./delegation-api.ts";
+// 执行器设置（2026-11-16 多 CLI 打手适配）：任务中心派活用哪个 CLI + 模型/权限。
+import { mountExecutorApi } from "./executor-mount.ts";
+// 内部质检（2026-11-16）：拆单/验收/目标核对用核心模型，不再借 Qoder CLI。
+import { installInternalAsk } from "./internal-model.ts";
+import { installWorkerPersonaDispatch } from "./worker-persona.ts";
+import { installWorkerToolsDispatch, mountWorkerToolsRoutes } from "./worker-tools.ts";
 import { mountCompanions } from "./companion-api.ts";
 import { mountGroups } from "./group-api.ts";
 // 长期课题（2026-11-07 批次一）：列表 / 详情 / 改节奏 / 暂停 / 关闭 / 立即研究 / 提议确认。
@@ -239,6 +250,27 @@ injectProviderKeys();
 // 界面高级开关（2026-11-09）：.data/agent-flags.json 里用户改过的开关覆盖 env。
 // 必须放在路由挂载之前——挂载期的开关（执事/群组/课题/技能管理）要吃到覆盖值。
 loadFlagOverrides();
+
+// 内部质检模型（2026-11-16）：默认核心 PI；`CHANCELLOR_INTERNAL=qoder` 回旧形态。
+// 必须在任何派活之前注入，崩溃恢复的自动续跑也走同一份内部调用。
+const internalMode = installInternalAsk();
+console.log(
+  `[internal] 拆单/验收/目标核对：${internalMode === "core" ? "核心模型" : "Qoder CLI"}`,
+);
+
+// worker 人设派活注入（2026-11-16 批2）：普通助手那份人设，native 与外部 CLI 同吃。
+// `WORKER_PERSONA_DISPATCH=false` 回滚到无身份的纯 TASK.md。
+const workerPersonaDispatch = installWorkerPersonaDispatch();
+console.log(
+  `[worker-persona] 派活注入人设：${workerPersonaDispatch ? "开（TASK.md「你是谁」段）" : "关（WORKER_PERSONA_DISPATCH=false）"}`,
+);
+
+// native worker 工具面（2026-11-17 批4）：普通助手页勾选的取消名单补集，spawn 换成 --tools。
+// 外部 CLI 不吃这层（用自己的工具）；`WORKER_TOOLS_DISPATCH=false` 回滚全开。
+const workerToolsDispatch = installWorkerToolsDispatch();
+console.log(
+  `[worker-tools] native 工具面勾选：${workerToolsDispatch ? "开（spawn --tools）" : "关（WORKER_TOOLS_DISPATCH=false，全开）"}`,
+);
 
 const app = new Hono();
 
@@ -518,6 +550,9 @@ if (wallpaperEnabled()) mountAppearanceWallpaper(app);
 // 任务中心只读接口（2026-11-03 方案 §5.9）：领域列表 + 单 ticket 明细。
 mountDelegationApi(app);
 
+// 执行器设置（2026-11-16）：派活用哪个 CLI + 各 CLI 的模型/权限；落 .data/executor.json。
+mountExecutorApi(app);
+
 // 执事管理（2026-11-05 批次B B2）：档案 CRUD + 手动跑一轮。开关关着一个路由都不挂（404 = 未启用）。
 mountCompanions(app);
 
@@ -547,7 +582,9 @@ mountFlags(app, {
   },
 });
 // 记忆管理（2026-11-06）：看 / 删 / 标过时。只读列表不碰 durable，删改直接落记忆库。
-mountMemoryApi(app, { enabled: memoryEngine !== null });
+// 2026-11-16：enabled 改成活读函数——运行期关掉记忆总闸后 /memory/* 立即 404；
+// 启动时关着、运行期再打开仍受 memoryEngine=null 限制（要重启才真正上架）。
+mountMemoryApi(app, { enabled: () => memoryEngine !== null && flagEnabled("MEMORY_ENABLED") });
 // 技能管理（2026-11-08 扫尾批 9-S）：目录解析 = AGENT_SKILLS_DIR → 用户目录 → 应用目录兜底。
 // 技能增删只影响下一个会话（D5 既有取舍），UI 文案已如实说明。
 mountSkills(app);
@@ -873,6 +910,30 @@ app.get("/api/v1/agent/chats", async (c) => {
     body.tasks = await listTaskChats(Number.isFinite(limit) ? limit : 50);
   }
   return c.json(body);
+});
+
+/**
+ * 会话存活核对（2026-11-17，手机同步回收）。
+ *
+ * 手机把本地绑定过的 conversationId 发来，只回「已经不在电脑上」的那些（删了 / 归档了 /
+ * 任务专线）。手机据此软删本地映射行——电脑上删掉的对话，手机上不再留着。
+ *
+ * 只查 durable 的会话表与 chat-meta 归档表，**不读正文**（对比 `GET /agent/chats`
+ * 逐会话读 context 的已知代价），可以跟着列表刷新同频调用。
+ * 请求非法 / 空 → `{missing: []}`（宁可少回收，不可误删）。
+ */
+app.post("/api/v1/agent/chats/check", async (c) => {
+	const body = (await c.req.json().catch(() => null)) as { ids?: unknown } | null;
+	const ids = Array.isArray(body?.ids)
+		? [
+				...new Set(
+					body.ids.filter(
+						(id): id is string => typeof id === "string" && id.length > 0 && id.length <= 200,
+					),
+				),
+			].slice(0, 500)
+		: [];
+	return c.json({ missing: await missingChats(ids) });
 });
 
 /**
@@ -1999,6 +2060,34 @@ app.get("/api/v1/agent/chat/:conversationId/context-inspect", async (c) => {
     }),
   );
 });
+
+/**
+ * 设置 → 上下文 · 默认开销（2026-11-16 续）。
+ *
+ * 不创建会话、不读聊天记录：按角色（总管 / 每个活跃执事 / 普通 worker）显式装配
+ * “全新会话会读到的固定前缀”。工具取真实 extension；技能走预览索引不冻结；
+ * 记忆只回预算，不回召回正文。
+ * 回滚同上：`CHAT_CONTEXT_INSPECT=false` → 404。
+ */
+app.get("/api/v1/agent/context-defaults", async (c) => {
+  if (!chatContextInspectEnabled()) return c.json({ error: "not_found" }, 404);
+  const role = c.req.query("role") || undefined;
+  let payload: Awaited<ReturnType<typeof contextDefaultPayload>>;
+  try {
+    payload = await contextDefaultPayload(role);
+  } catch {
+    return c.json({ error: "context_defaults_unavailable" }, 503);
+  }
+  if (!payload) return c.json({ error: "unknown_role" }, 404);
+  c.header("cache-control", "no-store");
+  return c.json(payload);
+});
+
+// Worker 人设 GET/PUT（2026-11-16）：鉴权沿用 /api/v1/* 中间件，不另写。
+mountWorkerPersonaRoutes(app);
+
+// native worker 工具面 GET/PUT（2026-11-17 批4）：普通助手页勾选，仅本机工人。
+mountWorkerToolsRoutes(app);
 
 /** 内容级跨会话搜索（批次二）：逐会话 LIKE，q 最少 2 字符（见接口文档 §2.5） */
 app.get("/api/v1/agent/search", async (c) => {

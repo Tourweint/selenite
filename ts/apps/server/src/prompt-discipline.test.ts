@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -217,7 +217,7 @@ test("装配：执事轮输入含四段纪律；总管轮不重复验证铁律",
 	}
 });
 
-test("delegate 描述：尾部带四行回报与裁决纪律", () => {
+test("delegate 描述：只留指路句，四行回报与裁决纪律全文在 delegate.md 手册里", () => {
 	const scope: MemoryScope = { type: "global" };
 	const skills: SkillStore = { names: () => [], manual: () => undefined, indexFor: () => undefined };
 	const tool = createTools({ memory: null, scopeOf: () => scope, delegate: true, skills }).find(
@@ -225,9 +225,15 @@ test("delegate 描述：尾部带四行回报与裁决纪律", () => {
 	);
 	assert.ok(tool, "delegate 应注册");
 	const description = String(tool.description ?? "");
-	assert.ok(description.includes(REPORT_FOUR_LINES), "四行格式原文被注入");
-	assert.ok(description.includes(RULING_DISCIPLINE), "裁决纪律原文被注入");
-	assert.match(description, /给<你的名字>：/);
+	// 2026-11-16 工具裁剪 A：大段政策挪进内置技能，描述不再逐字重复
+	assert.ok(!description.includes(REPORT_FOUR_LINES), "四行回报原文不再拼进描述");
+	assert.ok(!description.includes(RULING_DISCIPLINE), "裁决纪律原文不再拼进描述");
+	assert.match(description, /第一次派活前先调 skill/, "指路句写明什么时候读手册");
+	assert.match(description, /skill\(\{name:"delegate"\}\)/, "指路句写明工具名与技能名");
+	// 手册是常驻内置技能（core），正文含两段原文
+	const manual = readFileSync(new URL("../skills/delegate.md", import.meta.url), "utf8");
+	assert.ok(manual.includes(REPORT_FOUR_LINES), "四行回报原文在 delegate 手册里");
+	assert.ok(manual.includes(RULING_DISCIPLINE), "裁决纪律原文在 delegate 手册里");
 });
 
 test("formatReport：needs_you 带接管建议时追加；不带时逐字节不变", () => {

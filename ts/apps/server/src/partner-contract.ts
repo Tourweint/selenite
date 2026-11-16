@@ -16,6 +16,17 @@ export function partnerContractEnabled(): boolean {
 }
 
 /**
+ * 执事纪律覆盖（2026-11-16）：宿主默认纪律 + 每执事人工覆盖。
+ * `PARTNER_DISCIPLINE_EDIT=false` / `0`：不读、不写 `DISCIPLINE.md`，纪律回到纯宿主常量。
+ * 默认开；覆盖只由人经档案页写，模型工具不碰这个文件。
+ */
+export function partnerDisciplineEditEnabled(): boolean {
+	const raw = process.env.PARTNER_DISCIPLINE_EDIT?.trim().toLowerCase();
+	if (!raw) return true;
+	return raw !== "false" && raw !== "0";
+}
+
+/**
  * 项目记忆跟人走（2026-11-15 项目记忆挂载跟人走方案）：总管 / 执事档案挂项目的记忆层。
  * `false` / `0` 全链路退回"只有文件夹挂载"的形态：投影不出字段、召回不并、remember 不认。
  * 文件夹挂载（ChatProjects → 打手会话）不在本开关内——那是上一批已落地的东西。
@@ -33,6 +44,18 @@ export function partnerProjectMemoryEnabled(): boolean {
  */
 export function projectMemoryGateEnabled(): boolean {
 	const raw = process.env.PROJECT_MEMORY_GATE?.trim().toLowerCase();
+	if (!raw) return true;
+	return raw !== "false" && raw !== "0";
+}
+
+/**
+ * 归档 / 删除项目退出召回库（2026-11-16 用户拍板）：归档 = 退场，删除 = 登记没了。
+ * 两者的项目记忆都**留在库里**（记忆页照旧能看、能导出），但不再进召回池、也不再接收
+ * 新记忆；恢复归档后自动回来。
+ * `false` / `0` = 旧形态——归档项目照旧召回、照旧接收记忆，一行回滚。
+ */
+export function projectMemoryActiveOnlyEnabled(): boolean {
+	const raw = process.env.PROJECT_MEMORY_ACTIVE_ONLY?.trim().toLowerCase();
 	if (!raw) return true;
 	return raw !== "false" && raw !== "0";
 }

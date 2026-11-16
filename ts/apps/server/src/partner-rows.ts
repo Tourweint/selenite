@@ -90,6 +90,7 @@ function toPartner(row: Record<string, unknown>): PartnerRow {
 			row.tagline === null || row.tagline === undefined ? null : String(row.tagline),
 		diary: Number(row.diary ?? 0) !== 0,
 		projectIds: toProjectIds(row.project_ids),
+		disabledTools: toDisabledTools(row.disabled_tools),
 		personaPreset: toPersonaPreset(row.persona_preset),
 		personaModules: toPersonaModules(row.persona_modules),
 		personaSwitches: toPersonaSwitches(row.persona_switches),
@@ -111,6 +112,22 @@ function nullableText(raw: unknown): string | null {
  * 当"没挂"。store 的 detachProject 也用它读列（同一套解析口径，别处别再抄一份）。
  */
 function toProjectIds(raw: unknown): string[] {
+	if (raw === null || raw === undefined || String(raw).trim() === "") return [];
+	try {
+		const parsed: unknown = JSON.parse(String(raw));
+		if (!Array.isArray(parsed)) return [];
+		return parsed.filter((item): item is string => typeof item === "string" && item.length > 0);
+	} catch {
+		return [];
+	}
+}
+
+/**
+ * 工具取消名单列（2026-11-16 工具裁剪 B）：JSON 数组、只留非空字符串项；
+ * 非数组 / 坏 JSON / 脏值当"没取消"= 全开。与 `toProjectIds` 同一套口径，
+ * 只存被取消的工具名——以后新增工具默认可见，不会因老档案冻结而消失。
+ */
+function toDisabledTools(raw: unknown): string[] {
 	if (raw === null || raw === undefined || String(raw).trim() === "") return [];
 	try {
 		const parsed: unknown = JSON.parse(String(raw));
@@ -283,4 +300,4 @@ function defaultSoul(name: string): string {
 	].join("\n");
 }
 
-export { defaultSoul, store, toGroup, toGroupMessage, toLink, toPartner, toProjectIds, toRoutine };
+export { defaultSoul, store, toDisabledTools, toGroup, toGroupMessage, toLink, toPartner, toProjectIds, toRoutine };

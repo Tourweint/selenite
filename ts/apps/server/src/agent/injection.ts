@@ -52,6 +52,11 @@ export interface InjectionContext {
 	 * 课题不 `drainPendingPushes`（否则审计会吞掉攒着的简报）、技能不冻结索引。
 	 */
 	dryRun?: boolean;
+	/**
+	 * 当前会话可加载的 deferred 工具（agent.deferred：已启用、还没被 tool_search 加载），
+	 * 由 tool_index section 的 render 从 `input.agent.deferred` 现取后放进 ctx，provider 只拼文本。
+	 */
+	deferred?: readonly { name: string; description: string }[];
 }
 
 export type InjectionProvider = (
@@ -79,6 +84,8 @@ export const INJECTION_ORDER = {
 	current_project: 40,
 	skills: 50,
 	topics: 60,
+	// 低频工具索引（C 段）：紧跟 topics、排在消息注入之前；末尾追加，缓存前缀变化一次。
+	tool_index: 70,
 	// C/D 期：lifecycle beforeRequest 的 5 处消息注入（顺序 = 改造前 push 顺序）
 	// project_index（2026-11-15 项目记忆多挂载）：新净增类，排在记忆召回之前——
 	// 先知道"负责哪些项目"，后面那批记忆行才有归属可对。

@@ -18,6 +18,7 @@ import {
 	COMPANIONS_ENABLED,
 	PARTNER_SLOT_LIMIT,
 	partnerContractEnabled,
+	partnerDisciplineEditEnabled,
 	partnerProjectMemoryEnabled,
 	partnersStore,
 	type PartnerRow,
@@ -44,7 +45,13 @@ import { applyProfile, profilesView, removeProfile, saveProfile } from "./partne
 // 建/停执事的唯一核心实现（批次D D3）：端点与 partner_manage 工具共用，端点只做形状映射。
 import { createMinisterPartner, stopMinisterPartner } from "./partner-manage.ts";
 // 注入预览（2026-11-15 人设页打磨）：与真实轮次同一装配函数，不另抄拼装逻辑。
-import { buildPartnerDisciplineSection, buildPartnerStatusSection } from "./agent/partner-context.ts";
+import {
+	buildPartnerDisciplineDefault,
+	buildPartnerDisciplineRedLine,
+	buildPartnerDisciplineSection,
+	buildPartnerStatusSection,
+	validateDisciplineSource,
+} from "./agent/partner-context.ts";
 import { workSummaryFor } from "./work-record.ts";
 import { findSkillInDir, resolveSkillsDir } from "./skills.ts";
 import { getSkillState, skillStateEnabled } from "./skill-state.ts";
@@ -58,6 +65,15 @@ import {
 	importPartnerBundle,
 	partnerBundleEnabled,
 } from "./partner-bundle.ts";
+// 人设页工具勾选（2026-11-16 工具裁剪 B）：目录 / 校验 / 视图都收在 partner-tools.ts。
+import { getHarness } from "./agent/lifecycle.ts";
+import {
+	modelToolCatalog,
+	partnerToolsEnabled,
+	partnerToolsView,
+	sanitizeDisabledTools,
+	toolDependencyError,
+} from "./partner-tools.ts";
 
 /**
  * 执事管理接口（2026-11-05 批次B B2）。
@@ -242,6 +258,66 @@ export function mountCompanions(app: Hono): void {
 	});
 
 	/**
+	 * 人设页工具勾选 · 读目录（2026-11-16 工具裁剪 B）：当前可见性 + 固定分组 + 一行摘要。
+	 * 只读：getHarness() 确保真实 extension 已装（lifediaryExt 由它赋值），没装好 → 503。
+	 * PARTNER_TOOLS_ENABLED=false → 200 空形状（页面据此隐藏整段），不是 404 / 503。
+	 * 放在 `/:id` 之前注册：更具体的路径先命中。
+	 */
+	app.get("/api/v1/partners/:id/tools", async (c) => {
+		const partner = store().get(c.req.param("id"));
+		if (!partner) return c.json({ ok: false, error: "not_found" }, 404);
+		c.header("cache-control", "no-store");
+		if (!partnerToolsEnabled()) {
+			return c.json({ ok: true, enabled: false, disabled: [], groups: [], tools: [] });
+		}
+		try {
+			await getHarness();
+		} catch {
+			return c.json({ error: "tools_unavailable" }, 503);
+		}
+		return c.json({ ok: true, ...partnerToolsView(partner) });
+	});
+
+	/**
+	 * 人设页工具勾选 · 写（2026-11-16 工具裁剪 B）：body `{disabled: string[]}` = 被取消的工具名。
+	 * 校验走 sanitizeDisabledTools（未知名 400、去重、≤64）；只写 disabled_tools 一列，
+	 * 不 bump 身份版本、不重启会话、不影响正在跑的这一轮（下一轮生效）。
+	 * 成功 return 同 GET 的形状，前端直接回填。放在 `/:id` 之前注册。
+	 */
+	app.put("/api/v1/partners/:id/tools", async (c) => {
+		const partner = store().get(c.req.param("id"));
+		if (!partner) return c.json({ ok: false, error: "not_found" }, 404);
+		if (!partnerToolsEnabled()) {
+			return c.json(
+				{ error: "bad_request", message: "工具选择未启用（PARTNER_TOOLS_ENABLED=false）" },
+				400,
+			);
+		}
+		try {
+			await getHarness();
+		} catch {
+			return c.json({ error: "tools_unavailable" }, 503);
+		}
+		const body = (await c.req.json().catch(() => null)) as { disabled?: unknown } | null;
+		const known = new Set(modelToolCatalog().map((tool) => tool.name));
+		const result = sanitizeDisabledTools(body?.disabled, known);
+		if (!result.ok) {
+			return c.json(
+				{ error: "bad_request", message: result.message, ...(result.unknown ? { unknown: result.unknown } : {}) },
+				400,
+			);
+		}
+		// delegate 的描述依赖 skill 读派活手册：只关 skill 不关 delegate 会留下一个坏组合。
+		const dependency = toolDependencyError(result.disabled, known);
+		if (dependency) {
+			return c.json({ error: "bad_request", message: dependency }, 400);
+		}
+		const updated = store().setDisabledTools(partner.id, result.disabled);
+		if (!updated) return c.json({ ok: false, error: "not_found" }, 404);
+		return c.json({ ok: true, ...partnerToolsView(updated) });
+	});
+
+	/**
 	 * 团队包导出 / 导入（2026-11-10 批 25 §二）。
 	 *
 	 * 都是**只搬运内容、不迁移运行态**：导出是只读的，导入落成 paused（见 partner-bundle.ts
@@ -347,6 +423,102 @@ export function mountCompanions(app: Hono): void {
 				ok: true,
 				contract: store().readContractFromHome(id) ?? body.contract,
 				contractVersion,
+			});
+		} catch (error) {
+			const detail = error instanceof Error ? error.message : String(error);
+			return c.json({ error: "bad_request", message: detail }, 400);
+		}
+	});
+
+	/**
+	 * 执事纪律覆盖（2026-11-16）：每执事 `DISCIPLINE.md`，人写、下一轮生效。
+	 * 可改的是行为纪律（验证 / 裁决 / 干活安静 / 答案接地 / 产物交接 / 汇报卡 / 提问）；
+	 * 主人数据红线始终由宿主注入，不在可覆盖清单里。模型工具没有写这个文件的通道。
+	 */
+	app.get("/api/v1/partners/:id/discipline", (c) => {
+		if (!partnerDisciplineEditEnabled()) {
+			return c.json(
+				{ error: "bad_request", message: "纪律覆盖未启用（PARTNER_DISCIPLINE_EDIT=false）" },
+				400,
+			);
+		}
+		const id = c.req.param("id");
+		if (!store().get(id)) return c.json({ ok: false, error: "not_found" }, 404);
+		return c.json({
+			ok: true,
+			editable: true,
+			defaultDiscipline: buildPartnerDisciplineDefault(id),
+			override: store().readDisciplineFromHome(id) ?? null,
+			redLine: buildPartnerDisciplineRedLine(),
+		});
+	});
+
+	app.put("/api/v1/partners/:id/discipline", async (c) => {
+		if (!partnerDisciplineEditEnabled()) {
+			return c.json(
+				{ error: "bad_request", message: "纪律覆盖未启用（PARTNER_DISCIPLINE_EDIT=false）" },
+				400,
+			);
+		}
+		const body = (await c.req.json().catch(() => null)) as { discipline?: unknown } | null;
+		if (typeof body?.discipline !== "string") {
+			return c.json({ error: "bad_request", message: "discipline 必须是字符串" }, 400);
+		}
+		if (Buffer.byteLength(body.discipline, "utf8") > PARTNER_SLOT_LIMIT) {
+			return c.json(
+				{ error: "bad_request", message: `内容超过 ${PARTNER_SLOT_LIMIT} 字节上限（槽位护栏）` },
+				400,
+			);
+		}
+		const id = c.req.param("id");
+		if (!store().get(id)) return c.json({ ok: false, error: "not_found" }, 404);
+		// 清空 textarea = 恢复宿主默认，与 DELETE 同义；不能因为“没有二级标题”被拒。
+		if (!body.discipline.trim()) {
+			try {
+				store().writeDisciplineToHome(id, "");
+				return c.json({
+					ok: true,
+					override: null,
+					defaultDiscipline: buildPartnerDisciplineDefault(id),
+					discipline: buildPartnerDisciplineSection(id),
+				});
+			} catch (error) {
+				const detail = error instanceof Error ? error.message : String(error);
+				return c.json({ error: "bad_request", message: detail }, 400);
+			}
+		}
+		const invalid = validateDisciplineSource(body.discipline);
+		if (invalid) return c.json({ error: "bad_request", message: invalid }, 400);
+		try {
+			store().writeDisciplineToHome(id, body.discipline);
+			return c.json({
+				ok: true,
+				override: store().readDisciplineFromHome(id),
+				defaultDiscipline: buildPartnerDisciplineDefault(id),
+				discipline: buildPartnerDisciplineSection(id),
+			});
+		} catch (error) {
+			const detail = error instanceof Error ? error.message : String(error);
+			return c.json({ error: "bad_request", message: detail }, 400);
+		}
+	});
+
+	app.delete("/api/v1/partners/:id/discipline", (c) => {
+		if (!partnerDisciplineEditEnabled()) {
+			return c.json(
+				{ error: "bad_request", message: "纪律覆盖未启用（PARTNER_DISCIPLINE_EDIT=false）" },
+				400,
+			);
+		}
+		const id = c.req.param("id");
+		if (!store().get(id)) return c.json({ ok: false, error: "not_found" }, 404);
+		try {
+			store().writeDisciplineToHome(id, "");
+			return c.json({
+				ok: true,
+				override: null,
+				defaultDiscipline: buildPartnerDisciplineDefault(id),
+				discipline: buildPartnerDisciplineSection(id),
 			});
 		} catch (error) {
 			const detail = error instanceof Error ? error.message : String(error);

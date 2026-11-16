@@ -11,6 +11,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { insideOrEqual, realTargetOf } from "./path-guard.ts";
+import { flagEnabled } from "./flags.ts";
 import {
 	findSkillInDir,
 	resolveSkillsDir,
@@ -19,6 +20,7 @@ import {
 	type SkillSource,
 } from "./skills.ts";
 import { getSkillState, skillStateEnabled } from "./skill-state.ts";
+import { isCoreSkill } from "./core-skills.ts";
 import { isSkillStale, readSkillUsage, skillUsageEnabled } from "./skill-usage.ts";
 import {
 	adviceViewOf,
@@ -73,9 +75,7 @@ const SKILL_NAME = /^[a-z0-9][a-z0-9-_]{0,63}$/;
 
 /** 回滚开关：false/0/off = 端点不挂（设置页显示未启用），一行退回"只能手工放文件" */
 export function skillsAdminEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	const raw = env.SKILLS_ADMIN?.trim().toLowerCase();
-	if (!raw) return true;
-	return raw !== "false" && raw !== "0" && raw !== "off";
+	return flagEnabled("SKILLS_ADMIN", env);
 }
 
 export interface SkillsApiDeps {
@@ -230,6 +230,8 @@ export function mountSkills(app: Hono, deps: SkillsApiDeps = {}): void {
 			origin: string;
 			writable: boolean;
 			form: "flat" | "dir";
+			/** 2026-11-16 工具裁剪 A：代码内置技能，始终可用、没有启停位。 */
+			core: boolean;
 			enabled: boolean;
 			/** 2026-11-15：带 partnerId 时才出现；该人实际可用（全局开 || 按人覆盖开）。 */
 			partnerEnabled?: boolean;
@@ -256,6 +258,8 @@ export function mountSkills(app: Hono, deps: SkillsApiDeps = {}): void {
 					if (!stat.isFile()) continue;
 					const used = usage[entry.name];
 					const lastUsedAt = used?.lastUsedAt ?? null;
+					// core 只认代码名单（isCoreSkill），不认技能文件 frontmatter 自封。
+					const core = isCoreSkill(entry.name);
 					items.push({
 						name: entry.name,
 						summary: entry.summary,
@@ -264,16 +268,22 @@ export function mountSkills(app: Hono, deps: SkillsApiDeps = {}): void {
 						origin: source.origin,
 						writable: source.writable,
 						form: entry.form,
-						// 启停位（2026-11-09）：默认全关，界面上逐条/批量开
-						enabled: stateOn ? skillState.isEnabled(entry.name) : true,
+						core,
+						// 启停位（2026-11-09）：默认全关，界面上逐条/批量开。
+						// core 没有启停位，一律给 true（即使启停位里没有 / 全关）。
+						enabled: core || (stateOn ? skillState.isEnabled(entry.name) : true),
 						...(partnerId
 							? {
-									partnerEnabled: stateOn
-										? skillState.isEnabledFor(partnerId, entry.name)
-										: true,
-									partnerOverride: stateOn
-										? skillState.isOverridden(partnerId, entry.name)
-										: false,
+									partnerEnabled: core
+										? true
+										: stateOn
+											? skillState.isEnabledFor(partnerId, entry.name)
+											: true,
+									partnerOverride: core
+										? false
+										: stateOn
+											? skillState.isOverridden(partnerId, entry.name)
+											: false,
 								}
 							: {}),
 						// 只标记，不删不移；从未用过的以文件 mtime 为基线（新建技能不会一上来就 stale）
@@ -309,6 +319,13 @@ export function mountSkills(app: Hono, deps: SkillsApiDeps = {}): void {
 		if (!SKILL_NAME.test(name)) {
 			return c.json(
 				{ error: "bad_request", message: "技能名只能是小写字母 / 数字 / 短横线 / 下划线，1-64 字符" },
+				400,
+			);
+		}
+		// 内置技能没有启停位：始终可用，不给关（2026-11-16 工具裁剪 A）。
+		if (isCoreSkill(name)) {
+			return c.json(
+				{ error: "bad_request", message: "系统内置技能，始终可用，不能关闭" },
 				400,
 			);
 		}
@@ -348,7 +365,9 @@ export function mountSkills(app: Hono, deps: SkillsApiDeps = {}): void {
 			for (const entry of scanSkillDir(source.dir)) {
 				if (claimed.has(entry.name)) continue;
 				claimed.add(entry.name);
-				// 与列表同一条管理面规则：白名单外的名字不进管理面，也不被它批量开关
+				// 与列表同一条管理面规则：白名单外的名字不进管理面，也不被它批量开关。
+				// core 不参与全开/全关统计与写入（否则界面显示"已全关"但内置技能还在）。
+				if (isCoreSkill(entry.name)) continue;
 				if (entry.valid && SKILL_NAME.test(entry.name)) names.push(entry.name);
 			}
 		}
@@ -423,6 +442,8 @@ export function mountSkills(app: Hono, deps: SkillsApiDeps = {}): void {
 			}
 			let applied = 0;
 			for (const action of actions) {
+				// core 始终可用：即使快照里出现内置技能，也不写它的启停位（双保险）。
+				if (isCoreSkill(action.name)) continue;
 				const exists = adminSkillNames().includes(action.name);
 				if (!exists) continue;
 				skillState.setEnabled(action.name, action.enabled);

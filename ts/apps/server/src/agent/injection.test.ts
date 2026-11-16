@@ -23,6 +23,8 @@ process.env.PROJECTS_DB_PATH = join(root, "projects.sqlite");
 process.env.MEMORY_ENABLED = "false";
 process.env.AGENT_SKILLS_DIR = join(root, "skills");
 process.env.AGENT_SKILLS_STATE_PATH = join(root, "skills-state.json");
+// 2026-11-16 worker 人设每轮现读：指到临时目录，不碰真实 .data/worker-persona.md
+process.env.WORKER_PERSONA_PATH = join(root, "worker-persona.md");
 delete process.env.AGENT_INJECTION_GUARD;
 
 const SKILL_NAME = "probe-skill";
@@ -54,13 +56,15 @@ const {
 	recoverNoteProvider,
 	skillSlashProvider,
 	skillsProvider,
+	toolIndexProvider,
 	topicsProvider,
 	turnLimitApproachingProvider,
 	turnLimitProvider,
 	verificationIronLawProvider,
 } = await import("./lifecycle-injections.ts");
 const { LIFECYCLE_SECTIONS } = await import("./lifecycle.ts");
-const { PERSONA, WORKER_PERSONA, skillStore, taskMemoryProvider } = await import("./assist.ts");
+const { PERSONA, skillStore, taskMemoryProvider } = await import("./assist.ts");
+const { readWorkerPersona, WORKER_PERSONA_CHAT_TOOLS } = await import("../worker-persona.ts");
 const { buildPartnerTurnContext } = await import("./partner-context.ts");
 const { PartnersStore, partnersStore } = await import("../partners.ts");
 const { MAX_TURNS, TURN_LIMIT_INSTRUCTION, VERIFICATION_IRON_LAW } = await import("./turn-gate.ts");
@@ -138,9 +142,13 @@ test("B: injection_guard 正文 === INJECTION_GUARD（批 A 硬标准不回退�
 	assert.equal(item?.channel, "system");
 });
 
-test("B: persona —— chief 回落 PERSONA，worker 用 WORKER_PERSONA，非 chief 执事不注", () => {
+test("B: persona —— chief 回落 PERSONA，worker 每轮现读人设文件（默认同 WORKER_PERSONA），非 chief 执事不注", () => {
 	assert.equal(sysText(personaProvider, { chatKind: "chief", partnerId: null }), PERSONA);
-	assert.equal(sysText(personaProvider, { chatKind: "worker", partnerId: null }), WORKER_PERSONA);
+	assert.equal(
+		sysText(personaProvider, { chatKind: "worker", partnerId: null }),
+		// 2026-11-16 批2 拆层：正文（共享）+ 会话工具提示（只有会话有这三件工具）
+		readWorkerPersona() + WORKER_PERSONA_CHAT_TOOLS,
+	);
 	assert.equal(personaProvider({ ...BASE, chatKind: "chief", partnerId: "p-1" }), undefined);
 });
 
@@ -209,6 +217,31 @@ test("B: topics —— 无课题时为固定两段（清单 + 嗅探判据）", 
 	assert.equal(topicsProvider({ ...BASE, chatKind: "worker" }), undefined);
 });
 
+test("B: tool_index —— 无可加载 deferred 整段省略；开关关也省略；有列表含名字与提示", () => {
+	assert.equal(toolIndexProvider({ ...BASE, deferred: [] }), undefined, "空列表不造空段");
+	const saved = process.env.AGENT_TOOL_INDEX;
+	process.env.AGENT_TOOL_INDEX = "false";
+	try {
+		assert.equal(
+			toolIndexProvider({
+				...BASE,
+				deferred: [{ name: "routine_manage", description: "自建常驻自主轮。" }],
+			}),
+			undefined,
+			"开关关一行回滚",
+		);
+	} finally {
+		if (saved === undefined) delete process.env.AGENT_TOOL_INDEX;
+		else process.env.AGENT_TOOL_INDEX = saved;
+	}
+	const text = sysText(toolIndexProvider, {
+		deferred: [{ name: "routine_manage", description: "自建常驻自主轮。" }],
+	});
+	assert.match(text ?? "", /^按需工具（初始不加载）：/);
+	assert.match(text ?? "", /- routine_manage：自建常驻自主轮/);
+	assert.match(text ?? "", /tool_search\(\{name\}\)/);
+});
+
 test("B: section 顺序快照（位置 = 数组下标，改序打掉提示词缓存）", () => {
 	assert.deepEqual(
 		LIFECYCLE_SECTIONS.map((section) => section.key),
@@ -218,8 +251,11 @@ test("B: section 顺序快照（位置 = 数组下标，改序打掉提示词缓
 			"clarify_contract",
 			"injection_guard",
 			"current_project",
+			// 2026-11-16：派活执行器知情段（新单派给谁 / 模型 / 权限）。
+			"delegate_executor",
 			"skills",
 			"topics",
+			"tool_index",
 		],
 	);
 });
@@ -235,9 +271,11 @@ test("B: section render 产出与 provider 逐字节一致（框架确实在驱�
 	assert.equal(await render("verification_iron_law"), VERIFICATION_IRON_LAW);
 	assert.equal(await render("clarify_contract"), CLARIFY_CONTRACT);
 	assert.equal(await render("injection_guard"), INJECTION_GUARD);
+	// 当前项目 / 主工作区的文案随工作区是否存在变化（2026-11-16 补主工作区路径），
+	// 这里只钉「框架驱动 == provider 直接调用」，不钉具体文案。
 	assert.equal(
 		await render("current_project"),
-		"当前无特定项目（杂事模式）。文件操作默认在主工作区。",
+		sysText(currentProjectProvider, fakeInput as never),
 	);
 	assert.match((await render("skills")) ?? "", new RegExp(SKILL_NAME));
 	assert.match((await render("topics")) ?? "", /课题嗅探/);
@@ -307,6 +345,8 @@ test("顺序快照：INJECTION_ORDER 是缓存前缀资产（改它 = 有意的�
 		"current_project",
 		"skills",
 		"topics",
+		// 2026-11-16 C 段：低频工具索引紧跟 topics、排在消息注入之前
+		"tool_index",
 		// 2026-11-15 项目记忆多挂载：负责项目索引排在记忆召回之前
 		// （先知道"负责哪几摊"，后面那批记忆行才有归属可对）
 		"project_index",

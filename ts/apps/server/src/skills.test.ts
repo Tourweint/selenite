@@ -27,10 +27,16 @@ import {
  */
 
 let root = "";
+let previousStatePath: string | undefined;
 test.before(() => {
 	root = mkdtempSync(join(tmpdir(), "lifediary-skills-"));
+	// 启停位单例在第一次 mountSkills 时按这个 env 解析；指到临时目录，测试不碰真实 .data。
+	previousStatePath = process.env.AGENT_SKILLS_STATE_PATH;
+	process.env.AGENT_SKILLS_STATE_PATH = join(root, "skills-state.json");
 });
 test.after(() => {
+	if (previousStatePath === undefined) delete process.env.AGENT_SKILLS_STATE_PATH;
+	else process.env.AGENT_SKILLS_STATE_PATH = previousStatePath;
 	if (root) rmSync(root, { recursive: true, force: true });
 });
 
@@ -130,6 +136,21 @@ test("加载器：扁平 .md 与 目录/SKILL.md 两种形态并存，同名时�
 	assert.match(index, /beta：摘要 B/);
 	assert.match(index, /block：多行描述/);
 	assert.doesNotMatch(index, /broken/);
+});
+
+test("previewIndex：按当前可见性现渲染，不把预览结果冻进会话快照（默认开销页用）", () => {
+	const dir = freshDir("preview-no-freeze");
+	writeFileSync(join(dir, "alpha.md"), "摘要 A\n正文 A");
+	let visible = true;
+	const store = createSkillStore(dir, {
+		visibleFor: (_partnerId, _name) => visible,
+	});
+	assert.ok(store);
+	const frozen = store.indexFor(11, "preview-partner") ?? "";
+	assert.match(frozen, /alpha：摘要 A/, "首次 indexFor 按当时可见性冻结");
+	visible = false;
+	assert.equal(store.previewIndex?.("preview-partner"), undefined, "预览按当前可见性现渲染，不读 frozen");
+	assert.match(store.indexFor(11, "preview-partner") ?? "", /alpha：摘要 A/, "indexFor 仍用第一轮快照，未被预览污染");
 });
 
 test("索引摘要截断（2026-11-15 上下文预算批）：截断只改索引那一行，正文手册完整", () => {
@@ -529,4 +550,86 @@ test("技能端点：列表带 usageCount / lastUsedAt；>90 天未用标 stale�
 		else process.env.AGENT_SKILL_USAGE_PATH = previousUsage;
 		delete process.env.SKILL_USAGE;
 	}
+});
+
+/* ── 内置技能 core（2026-11-16 工具裁剪 A）────────────────── */
+
+test("core 名单只认代码常量：delegate 是 core，普通技能不是", async () => {
+	const { CORE_SKILL_NAMES, isCoreSkill } = await import("./core-skills.ts");
+	assert.deepEqual([...CORE_SKILL_NAMES], ["delegate"]);
+	assert.equal(isCoreSkill("delegate"), true);
+	assert.equal(isCoreSkill("normal"), false);
+	assert.equal(isCoreSkill("Delegate"), false, "大小写敏感，不认 frontmatter 自封");
+});
+
+test("createSkillStore + isCore：启停位全关时 core 仍进索引 / names() / 可取手册；普通技能仍不出现", () => {
+	const dir = freshDir("core-store");
+	writeFileSync(join(dir, "delegate.md"), "派活手册摘要\n派活手册正文");
+	writeFileSync(join(dir, "normal.md"), "普通摘要\n普通正文");
+	const store = createSkillStore(dir, {
+		visible: () => false,
+		visibleFor: () => false,
+		isCore: (name) => name === "delegate",
+	});
+	assert.ok(store);
+	// 全局关
+	assert.ok(store.names().includes("delegate"), "core 进 names()");
+	assert.equal(store.names().includes("normal"), false, "普通技能全关不出现");
+	assert.equal(store.manual("delegate"), "派活手册正文", "core 可按名取手册");
+	assert.equal(store.manual("normal"), undefined);
+	assert.match(store.indexFor(1) ?? "", /delegate：派活手册摘要/, "core 进索引");
+	assert.doesNotMatch(store.indexFor(1) ?? "", /normal/);
+	// 带 partnerId（按人可见也关）走同一条短路
+	assert.ok(store.names("p1").includes("delegate"));
+	assert.equal(store.manual("delegate", "p1"), "派活手册正文");
+
+	// 不带 isCore = 旧行为：全关时什么都看不到
+	const legacy = createSkillStore(dir, { visible: () => false, visibleFor: () => false });
+	assert.ok(legacy);
+	assert.deepEqual(legacy.names(), []);
+	assert.equal(legacy.manual("delegate"), undefined);
+	assert.equal(legacy.indexFor(2), undefined);
+});
+
+test("技能端点：core 始终可用（GET core/enabled/partnerEnabled），启停端点 400，enabled-all 跳过 core", async () => {
+	const dir = freshDir("api-core");
+	writeFileSync(join(dir, "delegate.md"), "派活摘要\n派活正文");
+	writeFileSync(join(dir, "normal.md"), "普通摘要\n普通正文");
+	const app = apiApp(dir);
+
+	const list = await json(await app.request("/api/v1/agent/skills?partnerId=p1"));
+	const items = list.items as Array<Record<string, unknown>>;
+	const delegate = items.find((item) => item.name === "delegate")!;
+	assert.equal(delegate.core, true, "GET item 增 core: true");
+	assert.equal(delegate.enabled, true, "即使启停位全关也报 enabled=true");
+	assert.equal(delegate.partnerEnabled, true, "带 partnerId 时 core 也报可用");
+	assert.equal(delegate.partnerOverride, false);
+	const normal = items.find((item) => item.name === "normal")!;
+	assert.equal(normal.core, false);
+	assert.equal(normal.enabled, false, "普通技能默认全关");
+
+	const off = await app.request("/api/v1/agent/skills/delegate/enabled", {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ enabled: false }),
+	});
+	assert.equal(off.status, 400, "core 不能关闭");
+	const offBody = await json(off);
+	assert.equal(offBody.error, "bad_request");
+	assert.match(String(offBody.message), /系统内置技能，始终可用，不能关闭/);
+
+	const allOff = await json(await app.request("/api/v1/agent/skills/enabled-all", {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ enabled: false }),
+	}));
+	assert.equal(allOff.ok, true);
+	assert.equal(allOff.count, 1, "count 只算普通技能，不含 core");
+	const state = JSON.parse(readFileSync(process.env.AGENT_SKILLS_STATE_PATH!, "utf8"));
+	assert.equal(state.enabled?.delegate, undefined, "core 不参与写入");
+
+	// 带 partnerId 的 GET 形状：core 也始终可用
+	const p2 = await json(await app.request("/api/v1/agent/skills?partnerId=p2"));
+	const delegate2 = (p2.items as Array<Record<string, unknown>>).find((item) => item.name === "delegate")!;
+	assert.equal(delegate2.partnerEnabled, true);
 });

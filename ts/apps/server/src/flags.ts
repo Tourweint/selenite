@@ -1,22 +1,45 @@
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
 
 /**
  * 运行时开关层（2026-11-09 用户拍板：设置尽量在界面里控制，不逼人碰服务端 env）。
  *
- * 机制：`.data/agent-flags.json` 存界面改过的开关（{ KEY: "value" }）。
- * - 启动时 `loadFlagOverrides()` 把文件里的值**覆盖写进 process.env**。既有消费代码
- *   全都是函数内懒读 process.env（逐处核对见变更记录），所以覆盖后立即生效，
- *   消费代码一行不用改；env 仍是缺省来源——文件里没写的键完全回到 env 行为（回滚 = 删文件）。
- * - 界面 `PUT /api/v1/agent/flags/:key`：校验后落盘 + 同步写 env。`hot: true` 的开关
- *   当场生效；`hot: false` 的（路由挂载 / 工具注册 / 模块常量在启动时冻结）重启后生效，
- *   文件保证重启后仍是用户选的值。
+ * 清单（2026-11-16 用户拍板：从 JSON 读）：`src/plugins.json` 提供有哪些开关、中文名 /
+ * 说明 / 分组 / 类型 / 档位 / 默认值 / scope / requires；前端不再维护 key、label、group、
+ * choice 四张写死的表。清单是运行期输入：启动时校验，运行中按 mtime + size 重新装载，
+ * 改清单不需要重启（坏清单保留上一版并 warn）。
+ *
+ * 配置（2026-11-16 再续：plugin 以 JSON 为真源）：`.data/agent-flags.json` 存界面改过的值
+ * （{ KEY: "value" }）。`scope=plugin` 的读写在运行时直接走这份 JSON（带 mtime 缓存），
+ * 不再把值写回 process.env；env 只作文件缺省时的部署回落。`scope=core`（记忆总闸 / 执事体系 /
+ * 派活 / 自主轮）仍按部署 env 为主，`setFlag` 保持落盘 + 同步写 env。
+ * `hot: true` 的开关当场生效；`hot: false` 的（路由挂载 / 工具注册 / 模块常量在启动时冻结）
+ * 重启后生效，文件保证重启后仍是用户选的值。
  * - 界面回滚：`AGENT_FLAGS_UI=false` → 端点不挂（GET 留着只读无妨，一并关）。
  *
  * 刻意不做：不在这一层做权限分级（写端点在 /api/v1 鉴权后面，与其它设置同权）；
  * 不做文件锁（单进程 + 原子写足够）。
  */
+
+export type FlagScope = "core" | "plugin";
+export type FlagType = "boolean" | "enum" | "number";
+export type FlagSurface = "flags" | "settings";
+export interface FlagChoice {
+	value: string;
+	label: string;
+}
+export interface FlagGroupDef {
+	id: string;
+	title: string;
+	desc: string;
+	keys: string[];
+}
+interface FlagManifest {
+	groups: FlagGroupDef[];
+	flags: FlagDef[];
+}
 
 export interface FlagDef {
 	key: string;
@@ -28,6 +51,30 @@ export interface FlagDef {
 	 * false = 启动时冻结（路由挂载 / 工具注册 / 模块常量），重启后生效。
 	 */
 	hot: boolean;
+	/** 界面名称 / 卡片说明；从 plugins.json 来，不再写死在前端。 */
+	label?: string;
+	summary?: string;
+	/** 所属分组 id；普通卡必填，专属卡可留空。 */
+	group?: string;
+	/** 控件类型；不写时按 values 推断（true/false = 布尔，其余 = 枚举）。 */
+	type?: FlagType;
+	/** 枚举控件的中文档位；布尔不需要。 */
+	choices?: FlagChoice[];
+	/** flags = 插件页普通卡；settings = 设置 → 会话等专属卡，不在插件页重复。 */
+	surface?: FlagSurface;
+	/**
+	 * `core` = 系统核心：记忆 / 执事体系 / 派活 / 自主轮这类决定子系统边界的开关，
+	 * 默认由部署 env 兜底；界面仍可读写，但前端要打「系统核心」标，不当普通插件。
+	 * `plugin` = 普通功能插件（不写时按这个算）。
+	 */
+	scope?: FlagScope;
+	/**
+	 * 父子门（2026-11-16 用户拍板，非破坏性）：任一父开关为 `false` 时，
+	 * 本项在界面显示「关」、控件锁住、PUT 返回 400 `flag_locked`；
+	 * **本项自己的存储值保留**，父重开就恢复，不清零。
+	 * 允许多父（任一关即锁），也允许嵌套（子本身还可以是别人的父）。
+	 */
+	requires?: string[];
 	/**
 	 * 数值型开关（2026-11-13 自动归档天数）：`values` 留空且给了 `min` 时，
 	 * 取值按「≥min 的整数」校验，不再查枚举表。只有界面真的要自由数值才用。
@@ -50,103 +97,225 @@ function flagValueAllowed(def: FlagDef, value: string): boolean {
 	return false;
 }
 
-/** 进界面的白名单：只收"用户行为开关"，路径/令牌类一律不收 */
-export const FLAG_DEFS: FlagDef[] = [
-	// 自主轮总开关（2026-11-13 起默认开：没人盯着跑的轮要有人兜底提醒+审批收紧；显式 false 才关）。
-	{ key: "AUTONOMY_ENABLED", values: ["true", "false", "observe"], defaultValue: "true", hot: true },
-	{ key: "AGENT_ATTACHMENTS", values: ["true", "false"], defaultValue: "true", hot: true },
-	{ key: "AGENT_EDIT_RESEND", values: ["true", "false"], defaultValue: "true", hot: true },
-	{ key: "CURRENT_PROJECT", values: ["true", "false"], defaultValue: "true", hot: true },
-	{ key: "MEMORY_ENABLED", values: ["true", "false"], defaultValue: "true", hot: true },
-	{ key: "MEMORY_EXTRACT", values: ["auto", "llm", "rule"], defaultValue: "auto", hot: true },
-	// 记忆页 A 版（2026-11-13）：前端每次进记忆页懒读，false = 旧页整套 DOM/逻辑。
-	{ key: "MEMORY_PAGE_A", values: ["true", "false"], defaultValue: "true", hot: true },
-	// 整理后台任务（2026-11-13）：false = ?background=1 也同步等待（旧页/旧探针回滚）。
-	{ key: "MEMORY_CONSOLIDATE_JOB", values: ["true", "false"], defaultValue: "true", hot: true },
-	// 规则抽取噪声过滤（2026-11-13）：false = 回到"每句 ≥6 字都记成经历"。
-	{ key: "MEMORY_EXTRACT_NOISE", values: ["true", "false"], defaultValue: "true", hot: false },
-	// 外接记忆库页脚（2026-11-13）：false = 设置页不显示、端点 404。
-	{ key: "MEMORY_EXTERNAL", values: ["true", "false"], defaultValue: "true", hot: true },
-	// persona 记忆库接入（2026-11-09）：读 = persona_recall 工具的显式关闸（默认开，
-	// 但还要求 PERSONA_MEMORY_ASK 配了 ask.py 路径才上架——路径类 env 按白名单纪律不进界面，
-	// 开关文案里写明）；写 = 主对话导出（默认关，对外送数据默认不动）。两个消费处都懒读 env，热生效。
-	{ key: "PERSONA_MEMORY_ENABLED", values: ["true", "false"], defaultValue: "true", hot: true },
-	{ key: "PERSONA_EXPORT_ENABLED", values: ["true", "false"], defaultValue: "false", hot: true },
-	// 执事派发权总闸（2026-11-06）：消费处 `ministerDispatchMasterEnabled()` 缺省就是开
-	// （只有明确 false/0 才关）；`defaultValue` 2026-11-15 从 false 修正为 true，界面不再
-	// 把"实际开着"的开关标成"默认关"。
-	{ key: "MINISTER_DISPATCH_AUTHORITY", values: ["true", "false"], defaultValue: "true", hot: true },
-	{ key: "DEVICE_AUTO_DISPATCH", values: ["true", "false"], defaultValue: "true", hot: true },
-	{ key: "PARTNER_WORK_RECORD", values: ["true", "false"], defaultValue: "true", hot: true },
-	{ key: "SKILLS_ADMIN", values: ["true", "false"], defaultValue: "true", hot: false },
-	{ key: "ROUTINE_SELF_SERVICE", values: ["true", "false"], defaultValue: "true", hot: false },
-	{ key: "COMPANIONS_ENABLED", values: ["true", "false"], defaultValue: "true", hot: false },
-	{ key: "GROUPS_ENABLED", values: ["true", "false"], defaultValue: "true", hot: false },
-	{ key: "CHANCELLOR_ENABLED", values: ["true", "false"], defaultValue: "true", hot: false },
-	// 派活完成即唤醒（2026-11-10 批 29）：消费处每次 flush 懒读 env，所以 hot:true。
-	{ key: "DELEGATION_WAKE_ENABLED", values: ["true", "false"], defaultValue: "true", hot: true },
-	// 工具结果投影总开关（2026-11-13 工具层结果契约化 §5.4 回滚开关 2）：消费处每次 execute 懒读 env，hot:true。
-	{ key: "TOOL_PROJECTION", values: ["true", "false"], defaultValue: "true", hot: true },
-	// 打手工具结果整理（2026-11-16）：只管**本机内核打手**（chatKind==="worker"）的默认值，
-	// 总闸 `TOOL_PROJECTION` 关时它不生效；执事三态（partners.tool_projection）压过它。
-	// 外接 CLI 打手（CodeBuddy / Qoder / Claude Code / Codex / OpenCode）跑自己的工具、
-	// 不经过包装器，**不受此开关影响**。消费处每次 execute 懒读 env，所以 hot:true。
-	{ key: "TOOL_PROJECTION_WORKER", values: ["true", "false"], defaultValue: "true", hot: true },
-	// 记忆召回总闸（2026-11-16 父子关系补齐）：父 = 这一行（所有会话都不再自动带记忆），
-	// 子 = 每位执事/总管人设页的「记忆 + 项目记忆」开关（`persona_switches.memoryRecallEnabled`，
-	// 默认开）。关总闸 = 全部会话只靠 recall 工具主动查；`MEMORY_ENABLED` 管的是记忆库本身
-	// （写与读的能力），这个只管"每轮自动注入"那一半。消费处每次请求懒读 env，所以 hot:true。
-	{ key: "PARTNER_MEMORY_RECALL", values: ["true", "false"], defaultValue: "true", hot: true },
-	{ key: "TOPICS_ENABLED", values: ["true", "false"], defaultValue: "true", hot: false },
-	// 结构化提问（2026-11-09）：工具注册在启动时冻结，所以 hot:false。
-	{ key: "AGENT_ASK_USER", values: ["true", "false"], defaultValue: "true", hot: false },
-	// 任务中心重做回滚开关（2026-11-13 批 1）：web 每次进任务中心懒读，
-	// false = 退回旧三列看板（旧渲染函数与旧 DOM 都还在），所以 hot:true。
-	{ key: "TASKS_REDESIGN_ENABLED", values: ["true", "false"], defaultValue: "true", hot: true },
-	// 侧栏对话按创建者分组（2026-11-15）：false = 服务端不下发 chats 的 tasks 键、
-	// 前端回旧版平铺列表（nav#chats + tasks-mini 三块拼装），所以 hot:true。
-	{ key: "SIDEBAR_TASK_GROUPS", values: ["true", "false"], defaultValue: "true", hot: true },
-	// 永久删除（2026-11-13 归档管理对齐 ZCode 批A）：端点常挂、消费处每次请求懒读 env，
-	// 所以 hot:true。false = deletion-preview / delete 两端点 400「永久删除已关闭」（回滚开关）。
-	{ key: "CHAT_HARD_DELETE", values: ["true", "false"], defaultValue: "true", hot: true },
-	// 对话流逐字浮现（2026-11-13）：web 每次开新消息懒读（首屏拉一次 flags），
-	// false = 退回旧的整块渲染 + 旧 caret，所以 hot:true。
-	{ key: "CHAT_STREAM_REVEAL", values: ["true", "false"], defaultValue: "true", hot: true },
-	// 自动归档（同批）：调度器每轮懒读（动态开关经 flags 端点的 onChange 接线开停定时器）。
-	// 2026-11-15 用户口径：做出来的功能默认就开（"剩下的全开"），只有明确 false/0/off 才关；
-	// 之前"默认关"是怕新装机器替用户做主，现已按用户要求翻成默认开。
-	{ key: "ARCHIVE_AUTO_ENABLED", values: ["true", "false"], defaultValue: "true", hot: true },
-	// 自动归档天数：数值型开关（values 留空 + min=1，按 ≥1 整数校验）；每轮懒读，改完下一轮生效。
-	{ key: "ARCHIVE_AUTO_DAYS", values: [], defaultValue: "30", hot: true, min: 1 },
-	// 对话历史分页（2026-11-13）：web 每次 openChat 懒读（同 TASKS 的一次性缓存），
-	// false = 退回一次拉最近 200 条、无上滑加载 + 无日期分隔；服务端同时忽略 page/before 参数。
-	{ key: "CHAT_HISTORY_PAGING_ENABLED", values: ["true", "false"], defaultValue: "true", hot: true },
-	// 上下文压缩（2026-11-14 二次拍板：只留两档，默认按百分比 70%）。
-	// 消费处是 `buildHarnessSettings`（Harness settings 访问器，每次使用现算），所以全 hot：
-	// 改完下一轮就按新档压，不重启。数值型沿用 `values: [] + min` 机制；百分比另给 max，
-	// 5% 以下等于每轮都压、95% 以上等于没有留白给回答。
-	// 保留原文 / 后台提前不在这里——那不是用户能凭直觉调的量，一律吃内核默认（20000 / 32768）。
-	{ key: "AGENT_COMPACT_ENABLED", values: ["true", "false"], defaultValue: "true", hot: true },
-	{ key: "AGENT_COMPACT_TRIGGER_MODE", values: ["percent", "tokens"], defaultValue: "percent", hot: true },
-	// 缺省 70 与 `compaction-settings.ts` 的 DEFAULT_PERCENT 必须一致（界面回显的就是生效值）
-	{ key: "AGENT_COMPACT_TRIGGER_PERCENT", values: [], defaultValue: "70", hot: true, min: 5, max: 95 },
-	// 绝对触发点（K）：留空 = 该档不生效、回落内核默认白；填了就是"到多少 K 压一次"
-	{ key: "AGENT_COMPACT_TRIGGER_K", values: [], defaultValue: "", hot: true, min: 1 },
-	// 执事招聘模板（2026-11-15）：招聘墙 + 新建弹窗模板条，web 每次渲染列表/弹窗懒读（带模块级缓存）。
-	// false = 空态回旧「新建执事」按钮、新建弹窗无模板条；模板数据是前端常量（web/partner-templates.js）。
-	{ key: "PARTNER_TEMPLATES", values: ["true", "false"], defaultValue: "true", hot: true },
-	// 技能索引摘要截断（2026-11-15 上下文预算批）：开 = 索引每行截到
-	// `SKILLS_INDEX_SUMMARY_CHARS`（默认 120 字），关 = 显示完整摘要。
-	// 索引**按会话冻结**（首轮渲染后不再改），所以改完只影响**新开的会话**——老会话
-	// 保持打开时的索引，这是既有口径（改索引会让已命中的 system 缓存前缀整段作废）。
-	// 消费处是 renderIndex（每次首渲染现读 env），所以标 hot: true（对新会话即时）。
-	{ key: "SKILLS_INDEX_CLIP", values: ["true", "false"], defaultValue: "true", hot: true },
-	// 召回后去重（2026-11-15 上下文预算批）：同一件事的多种说法只注入一条（保留分数最高）。
-	// 消费处 `recallContext` 每轮懒读 env，所以 hot: true，改完下一轮生效。
-	{ key: "MEMORY_INJECT_DEDUPE", values: ["true", "false"], defaultValue: "true", hot: true },
-];
+/** 进界面的白名单：清单来自 plugins.json；只收"用户行为开关"，路径/令牌类一律不收。
+ *  下面是可热更新的运行时视图；`FLAG_DEFS` / `FLAG_GROUPS` 仍导出，测试与旧调用方无感。 */
+export const FLAG_DEFS: FlagDef[] = [];
+export const FLAG_GROUPS: FlagGroupDef[] = [];
+const FLAG_BY_KEY = new Map<string, FlagDef>();
+const DEFAULT_PLUGIN_MANIFEST_PATH = fileURLToPath(new URL("./plugins.json", import.meta.url));
 
-const FLAG_BY_KEY = new Map(FLAG_DEFS.map((def) => [def.key, def]));
+interface ManifestSnapshot {
+	path: string;
+	mtimeMs: number;
+	size: number;
+}
+let manifestSnapshot: ManifestSnapshot | null = null;
+
+export function pluginManifestPath(env: NodeJS.ProcessEnv = process.env): string {
+	return resolve(env.AGENT_PLUGINS_PATH?.trim() || DEFAULT_PLUGIN_MANIFEST_PATH);
+}
+
+interface LoadedManifest {
+	manifest: FlagManifest;
+	byKey: Map<string, FlagDef>;
+	mtimeMs: number;
+	size: number;
+}
+
+/** plugins.json 是运行期输入：启动即校验「键唯一 / 取值 / 分组引用 / requires 图」；
+ *  运行中读到坏清单时打 warn 并保留上一版，避免一次手滑把服务打挂。 */
+function validateFlagManifest(manifest: FlagManifest): Map<string, FlagDef> {
+	const seenKeys = new Set<string>();
+	for (const def of manifest.flags) {
+		if (!def.key || seenKeys.has(def.key)) throw new Error(`[flags] 清单键重复或为空：${def.key}`);
+		seenKeys.add(def.key);
+		if (def.type && !["boolean", "enum", "number"].includes(def.type)) {
+			throw new Error(`[flags] ${def.key} 的 type 非法：${def.type}`);
+		}
+		if (def.scope && !["core", "plugin"].includes(def.scope)) {
+			throw new Error(`[flags] ${def.key} 的 scope 非法：${def.scope}`);
+		}
+		if (def.surface && !["flags", "settings"].includes(def.surface)) {
+			throw new Error(`[flags] ${def.key} 的 surface 非法：${def.surface}`);
+		}
+		// 数值型开关允许空值 = 回默认；其它项默认值必须能通过正式取值校验。
+		const emptyNumber = def.values.length === 0 && def.defaultValue === "";
+		if (!emptyNumber && !flagValueAllowed(def, def.defaultValue)) {
+			throw new Error(`[flags] ${def.key} 的默认值非法：${def.defaultValue}`);
+		}
+		for (const choice of def.choices ?? []) {
+			if (!def.values.includes(choice.value)) throw new Error(`[flags] ${def.key} 的选项不在 values 里：${choice.value}`);
+			if (!choice.label) throw new Error(`[flags] ${def.key} 的选项缺少中文名：${choice.value}`);
+		}
+	}
+	const byKey = new Map(manifest.flags.map((def) => [def.key, def]));
+	const seenGroups = new Set<string>();
+	const seenGroupKeys = new Set<string>();
+	for (const group of manifest.groups) {
+		if (!group.id || seenGroups.has(group.id)) throw new Error(`[flags] 分组 id 重复或为空：${group.id}`);
+		seenGroups.add(group.id);
+		for (const key of group.keys) {
+			if (!byKey.has(key)) throw new Error(`[flags] 分组 ${group.id} 指向不存在的开关：${key}`);
+			if (seenGroupKeys.has(key)) throw new Error(`[flags] 分组键重复：${key}`);
+			seenGroupKeys.add(key);
+		}
+	}
+	validateFlagRequires(manifest.flags, byKey);
+	return byKey;
+}
+
+/** 校验 requires 图：父键必须存在、不许自指 / 成环。坏配置直接 throw，
+ *  不要留到运行期表现成「某个开关永远锁着」。 */
+function validateFlagRequires(defs: FlagDef[], byKey: Map<string, FlagDef>): void {
+	const done = new Set<string>();
+	const visiting = new Set<string>();
+	const walk = (key: string): void => {
+		if (done.has(key)) return;
+		if (visiting.has(key)) throw new Error(`[flags] requires 成环：${[...visiting, key].join(" → ")}`);
+		const def = byKey.get(key);
+		if (!def) throw new Error(`[flags] requires 指向不存在的开关：${key}`);
+		visiting.add(key);
+		for (const req of def.requires ?? []) {
+			if (!byKey.has(req)) throw new Error(`[flags] ${key} 的 requires 指向不存在的开关：${req}`);
+			walk(req);
+		}
+		visiting.delete(key);
+		done.add(key);
+	};
+	for (const def of defs) walk(def.key);
+}
+
+function loadManifestFile(path: string, initial: boolean): LoadedManifest {
+	let mtimeMs = 0;
+	let size = 0;
+	try {
+		const stat = statSync(path);
+		mtimeMs = stat.mtimeMs;
+		size = stat.size;
+	} catch (error) {
+		if (initial) throw new Error(`[flags] 插件清单不存在：${path}`);
+		throw error;
+	}
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(readFileSync(path, "utf8"));
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		throw new Error(`[flags] 插件清单不是合法 JSON（${path}）：${message}`);
+	}
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+		throw new Error(`[flags] 插件清单根节点必须是对象：${path}`);
+	}
+	const manifest = parsed as FlagManifest;
+	if (!Array.isArray(manifest.flags) || !Array.isArray(manifest.groups)) {
+		throw new Error(`[flags] 插件清单缺少 flags / groups 数组：${path}`);
+	}
+	return { manifest, byKey: validateFlagManifest(manifest), mtimeMs, size };
+}
+
+function applyManifest(loaded: LoadedManifest, path: string): void {
+	FLAG_DEFS.splice(0, FLAG_DEFS.length, ...loaded.manifest.flags);
+	FLAG_GROUPS.splice(0, FLAG_GROUPS.length, ...loaded.manifest.groups);
+	FLAG_BY_KEY.clear();
+	for (const [key, def] of loaded.byKey) FLAG_BY_KEY.set(key, def);
+	manifestSnapshot = { path, mtimeMs: loaded.mtimeMs, size: loaded.size };
+}
+
+/** 运行中按 mtime + size 热更新清单；文件不存在或坏 JSON 时保留上一版。 */
+function refreshManifest(env: NodeJS.ProcessEnv = process.env): void {
+	const path = pluginManifestPath(env);
+	let stat;
+	try {
+		stat = statSync(path);
+	} catch {
+		if (!manifestSnapshot) throw new Error(`[flags] 插件清单不存在：${path}`);
+		return;
+	}
+	if (
+		manifestSnapshot &&
+		manifestSnapshot.path === path &&
+		manifestSnapshot.mtimeMs === stat.mtimeMs &&
+		manifestSnapshot.size === stat.size
+	) {
+		return;
+	}
+	try {
+		applyManifest(loadManifestFile(path, false), path);
+	} catch (error) {
+		console.warn(`[flags] 插件清单加载失败，继续使用上一版：${error instanceof Error ? error.message : String(error)}`);
+	}
+}
+
+const initialManifest = loadManifestFile(DEFAULT_PLUGIN_MANIFEST_PATH, true);
+FLAG_DEFS.push(...initialManifest.manifest.flags);
+FLAG_GROUPS.push(...initialManifest.manifest.groups);
+for (const [key, def] of initialManifest.byKey) FLAG_BY_KEY.set(key, def);
+manifestSnapshot = { path: DEFAULT_PLUGIN_MANIFEST_PATH, mtimeMs: initialManifest.mtimeMs, size: initialManifest.size };
+
+/** 只有进程级 env 或显式指定了配置文件时才读 JSON。
+ *  单测 / 探针传入的普通 env 对象应当保持"纯 env 夹具"语义，不能被开发机真实 `.data` 串味。 */
+function pluginStoreApplies(env: NodeJS.ProcessEnv): boolean {
+	return env === process.env || Boolean(env.AGENT_FLAGS_PATH?.trim());
+}
+
+/** 盘上 / env 里真正存下来的值（不是锁后的展示值）。
+ *  plugin：以 `.data/agent-flags.json` 为真源；文件没写才回 env / 清单默认值。
+ *  core：仍以部署 env 为主（界面覆盖仍由 setFlag 同步进 env，历史行为不变）。 */
+function storedFlagValue(def: FlagDef, env: NodeJS.ProcessEnv): string {
+	if ((def.scope ?? "plugin") === "plugin" && pluginStoreApplies(env)) {
+		const map = readOverrideMap(flagsPath(env));
+		const raw = map[def.key];
+		if (raw !== undefined && flagValueAllowed(def, raw)) return raw;
+	}
+	return env[def.key]?.trim() || def.defaultValue;
+}
+
+/** 给消费代码读原始值（枚举 / 数值型也适用）；plugin 走 JSON，core 走 env。 */
+export function flagValue(key: string, env: NodeJS.ProcessEnv = process.env): string {
+	refreshManifest(env);
+	const def = FLAG_BY_KEY.get(key);
+	return def ? storedFlagValue(def, env) : "";
+}
+
+/** false / 0 / off 都算关（父子门和消费处共用同一份判据）。 */
+function flagIsOff(raw: string): boolean {
+	const value = raw.trim().toLowerCase();
+	return value === "false" || value === "0" || value === "off";
+}
+
+/** 非破坏性父子门的生效值：自己有值，但任一父关着就显示 / 按 `false` 处理。
+ *  存储值一个字都不动，父重开自动恢复。 */
+function effectiveFlagValue(key: string, env: NodeJS.ProcessEnv, stack = new Set<string>()): string {
+	const def = FLAG_BY_KEY.get(key);
+	if (!def) return "false";
+	if (stack.has(key)) return storedFlagValue(def, env); // 图已校验无环，这层只是兜底
+	stack.add(key);
+	const own = storedFlagValue(def, env);
+	if (flagIsOff(own)) return "false";
+	for (const req of def.requires ?? []) {
+		if (flagIsOff(effectiveFlagValue(req, env, stack))) return "false";
+	}
+	return own;
+}
+
+/** 第一个关着的直接父；没有就 null。用于界面文案「由 XX 关闭」。 */
+function lockingFlag(def: FlagDef, env: NodeJS.ProcessEnv): string | null {
+	for (const req of def.requires ?? []) {
+		if (flagIsOff(effectiveFlagValue(req, env))) return req;
+	}
+	return null;
+}
+
+function flagLabel(key: string): string {
+	return FLAG_BY_KEY.get(key)?.label || key;
+}
+
+/** 给消费代码用的活读布尔：父关 / 显式 false / 0 / off 都算关。只适合 true/false 型开关。 */
+export function flagEnabled(key: string, env: NodeJS.ProcessEnv = process.env): boolean {
+	refreshManifest(env);
+	if (!FLAG_BY_KEY.has(key)) return false;
+	return !flagIsOff(effectiveFlagValue(key, env));
+}
 
 /** 启动装载后每个键当时真正生效的值。用来判断 hot:false 的改动是否还没重启——
  *  文件里的值和启动时不一样 → 界面标「待重启」；重启装载后两者相等，标自动消失。 */
@@ -156,7 +325,7 @@ let bootCaptured = false;
 function captureBootValues(env: NodeJS.ProcessEnv): void {
 	if (bootCaptured) return;
 	bootCaptured = true;
-	for (const def of FLAG_DEFS) bootValues.set(def.key, env[def.key]?.trim() || def.defaultValue);
+	for (const def of FLAG_DEFS) bootValues.set(def.key, storedFlagValue(def, env));
 }
 
 /**
@@ -164,9 +333,7 @@ function captureBootValues(env: NodeJS.ProcessEnv): void {
  * 缺省开；显式 false/0/off 才关（与其它"新能力默认开"的开关同口径）。
  */
 export function chatHistoryPagingEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	const raw = env.CHAT_HISTORY_PAGING_ENABLED?.trim().toLowerCase();
-	if (!raw) return true;
-	return raw !== "false" && raw !== "0" && raw !== "off";
+	return flagEnabled("CHAT_HISTORY_PAGING_ENABLED", env);
 }
 
 export function flagsUiEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -177,7 +344,25 @@ export function flagsPath(env: NodeJS.ProcessEnv = process.env): string {
 	return resolve(env.AGENT_FLAGS_PATH?.trim() || ".data/agent-flags.json");
 }
 
+interface OverrideSnapshot {
+	mtimeMs: number;
+	size: number;
+	map: Record<string, string>;
+}
+const overrideCache = new Map<string, OverrideSnapshot>();
+
 function readOverrideMap(path: string): Record<string, string> {
+	let mtimeMs = 0;
+	let size = 0;
+	try {
+		const stat = statSync(path);
+		mtimeMs = stat.mtimeMs;
+		size = stat.size;
+	} catch {
+		/* 文件不存在：按空覆盖走；下次写入后会重新 stat */
+	}
+	const cached = overrideCache.get(path);
+	if (cached && cached.mtimeMs === mtimeMs && cached.size === size) return cached.map;
 	try {
 		const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
 		if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
@@ -185,12 +370,20 @@ function readOverrideMap(path: string): Record<string, string> {
 			for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
 				if (typeof value === "string") out[key] = value;
 			}
+			overrideCache.set(path, { mtimeMs, size, map: out });
 			return out;
 		}
 	} catch {
 		/* 文件不存在 / 坏 JSON：当作没有覆盖 */
 	}
-	return {};
+	const empty: Record<string, string> = {};
+	overrideCache.set(path, { mtimeMs, size, map: empty });
+	return empty;
+}
+
+function writeOverrideMap(path: string, map: Record<string, string>): void {
+	atomicWrite(path, `${JSON.stringify(map, null, "\t")}\n`);
+	overrideCache.delete(path);
 }
 
 function atomicWrite(path: string, content: string): void {
@@ -205,8 +398,11 @@ function atomicWrite(path: string, content: string): void {
 	}
 }
 
-/** 启动装载（index.ts 在 loadEnvFile / injectProviderKeys 之后调一次）：文件覆盖 env */
+/** 启动装载（index.ts 在 loadEnvFile / injectProviderKeys 之后调一次）：
+ *  plugin 以 `.data/agent-flags.json` 为真源，不再把配置写回 env；
+ *  core 仍把文件覆盖写进 env，作为历史部署路径。 */
 export function loadFlagOverrides(env: NodeJS.ProcessEnv = process.env): number {
+	refreshManifest(env);
 	const map = readOverrideMap(flagsPath(env));
 	let applied = 0;
 	for (const [key, value] of Object.entries(map)) {
@@ -215,61 +411,106 @@ export function loadFlagOverrides(env: NodeJS.ProcessEnv = process.env): number 
 			console.warn(`[flags] 跳过无效开关：${key}=${value}`);
 			continue;
 		}
+		if ((def.scope ?? "plugin") !== "core") continue;
 		env[key] = value;
 		applied += 1;
 	}
-	if (applied) console.log(`[flags] 已应用 ${applied} 项界面覆盖（${flagsPath(env)}）`);
+	if (applied) console.log(`[flags] 已应用 ${applied} 项核心覆盖（${flagsPath(env)}）`);
 	// 只有主进程启动装载才有"启动值"；测试传临时 env 时不记录，避免跨用例污染。
 	if (env === process.env) captureBootValues(env);
 	return applied;
 }
 
-/** 当前形态：env 现值（缺省回落 defaultValue）+ 是否被文件覆盖过 + 是否待重启 */
+/** 当前形态：plugin JSON / core env 现值（缺省回落 defaultValue）+ 是否被文件覆盖过 + 是否待重启
+ *  + 父子门（effectiveValue / lockedBy / requires，2026-11-16）
+ *  + 界面元数据（label / summary / group / type / choices / surface）与分层标签（scope）。 */
 export function listFlags(env: NodeJS.ProcessEnv = process.env): {
 	flags: {
 		key: string;
+		label: string;
+		summary: string;
+		group: string;
+		type: FlagType;
+		choices: FlagChoice[];
+		surface: FlagSurface;
 		value: string;
+		effectiveValue: string;
+		lockedBy: string | null;
+		lockedByLabel: string | null;
+		requires: string[];
+		scope: FlagScope;
 		defaultValue: string;
 		hot: boolean;
 		overridden: boolean;
 		pendingRestart: boolean;
 	}[];
+	groups: FlagGroupDef[];
 } {
-	const map = readOverrideMap(flagsPath(env));
+	refreshManifest(env);
+	const map = pluginStoreApplies(env) ? readOverrideMap(flagsPath(env)) : {};
 	return {
-		flags: FLAG_DEFS.map((def) => ({
-			key: def.key,
-			value: env[def.key]?.trim() || def.defaultValue,
-			defaultValue: def.defaultValue,
-			hot: def.hot,
-			overridden: Boolean(map[def.key]),
-			pendingRestart:
-				env === process.env &&
-				!def.hot &&
-				bootCaptured &&
-				(map[def.key] ?? def.defaultValue) !== (bootValues.get(def.key) ?? def.defaultValue),
-		})),
+		groups: FLAG_GROUPS,
+		flags: FLAG_DEFS.map((def) => {
+			const lockedBy = lockingFlag(def, env);
+			const current = storedFlagValue(def, env);
+			return {
+				key: def.key,
+				label: def.label || def.key,
+				summary: def.summary || "",
+				group: def.group || "",
+				type: def.type || (def.values.length === 2 && def.values.includes("true") ? "boolean" : "enum"),
+				choices: def.choices || [],
+				surface: def.surface || "flags",
+				value: current,
+				effectiveValue: lockedBy ? "false" : effectiveFlagValue(def.key, env),
+				lockedBy,
+				lockedByLabel: lockedBy ? flagLabel(lockedBy) : null,
+				requires: def.requires ?? [],
+				scope: def.scope ?? "plugin",
+				defaultValue: def.defaultValue,
+				hot: def.hot,
+				overridden: Boolean(map[def.key]),
+				pendingRestart:
+					env === process.env &&
+					!def.hot &&
+					bootCaptured &&
+					current !== (bootValues.get(def.key) ?? def.defaultValue),
+			};
+		}),
 	};
 }
 
-/** 界面写一个开关：校验 → 落盘 → 同步写 env（懒读的消费代码当场看到） */
+/** 界面写一个开关：校验 → 落盘；plugin 只写 JSON（运行时直读），core 仍同步写 env。 */
 export function setFlag(
 	key: string,
 	value: string,
 	env: NodeJS.ProcessEnv = process.env,
-): { ok: true; hot: boolean } | { ok: false; status: 400 | 404; message: string } {
+): { ok: true; hot: boolean } | { ok: false; status: 400 | 404; code?: "flag_locked"; message: string } {
+	refreshManifest(env);
 	const def = FLAG_BY_KEY.get(key);
 	if (!def) return { ok: false, status: 404, message: `没有叫 ${key} 的开关` };
+	// 父子门（2026-11-16 用户拍板）：父关着时子项只读，存储值保留。
+	// 必须在落盘 / 写 env 之前拦——只在界面灰控件挡不住直接打 API。
+	const lockedBy = lockingFlag(def, env);
+	if (lockedBy) {
+		return {
+			ok: false,
+			status: 400,
+			code: "flag_locked",
+			message: `「${flagLabel(lockedBy)}」关闭时，这个开关不能单独打开；先打开总闸，原设置会保留。`,
+		};
+	}
 	const path = flagsPath(env);
-	// 数值型开关的空值 = "回到默认"（2026-11-14 上下文压缩）：删掉覆盖行 + 删 env，
+	const scope = def.scope ?? "plugin";
+	// 数值型开关的空值 = "回到默认"（2026-11-14 上下文压缩）：删掉覆盖行；core 再删 env，
 	// 消费处下一次懒读就拿到"没设"，回落内核默认。枚举型开关没有"空"这一档，照旧拒收。
 	if (value.trim() === "" && def.values.length === 0) {
 		const map = readOverrideMap(path);
 		if (Object.hasOwn(map, key)) {
 			delete map[key];
-			atomicWrite(path, `${JSON.stringify(map, null, "\t")}\n`);
+			writeOverrideMap(path, map);
 		}
-		delete env[key];
+		if (scope === "core") delete env[key];
 		return { ok: true, hot: def.hot };
 	}
 	if (!flagValueAllowed(def, value)) {
@@ -283,8 +524,8 @@ export function setFlag(
 	}
 	const map = readOverrideMap(path);
 	map[key] = value;
-	atomicWrite(path, `${JSON.stringify(map, null, "\t")}\n`);
-	env[key] = value;
+	writeOverrideMap(path, map);
+	if (scope === "core") env[key] = value;
 	return { ok: true, hot: def.hot };
 }
 
@@ -308,7 +549,7 @@ export function mountFlags(
 		}
 		const result = setFlag(key, body.value);
 		if (!result.ok) {
-			return c.json({ error: "bad_request", message: result.message }, result.status);
+			return c.json({ error: result.code ?? "bad_request", message: result.message }, result.status);
 		}
 		deps.onChange?.(key, body.value);
 		return c.json({ ok: true, key, value: body.value, hot: result.hot });

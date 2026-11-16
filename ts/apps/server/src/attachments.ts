@@ -5,6 +5,7 @@ import {
 	type ContentPart,
 	type TranscriptFile,
 } from "@lifediary/shared";
+import { flagEnabled } from "./flags.ts";
 
 /**
  * 附件能力（2026-11-08 扫尾批 4a 图片；2026-11-13 附件走路径）。
@@ -33,7 +34,7 @@ export type OutgoingPart =
 
 /** `AGENT_ATTACHMENTS=false` → 上行分段请求 400、前端不渲染附件按钮；纯字符串不受影响。 */
 export function attachmentsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	return (env.AGENT_ATTACHMENTS ?? "").trim().toLowerCase() !== "false";
+	return flagEnabled("AGENT_ATTACHMENTS", env);
 }
 
 /** `AGENT_FILE_ATTACHMENTS=false` → 上传端点 404、前端不渲染「任意文件」入口。 */
@@ -43,7 +44,7 @@ export function fileAttachmentsEnabled(env: NodeJS.ProcessEnv = process.env): bo
 
 /** `AGENT_EDIT_RESEND=false` → 编辑重发端点 404、前端不渲染编辑入口。 */
 export function editResendEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	return (env.AGENT_EDIT_RESEND ?? "").trim().toLowerCase() !== "false";
+	return flagEnabled("AGENT_EDIT_RESEND", env);
 }
 
 /**

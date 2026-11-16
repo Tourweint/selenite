@@ -26,7 +26,7 @@
 import type { ModelRef } from "./provider.ts";
 import { currentModels, readLlmConfig } from "./provider.ts";
 
-export type AuxUse = "title" | "compact" | "vision" | "review" | "extract" | "advice";
+export type AuxUse = "title" | "compact" | "vision" | "review" | "extract" | "advice" | "split";
 
 /** 用途清单（文档 / 探针用；新增用途时这里与 `AuxUse` 一起改）。 */
 export const AUX_USES: readonly AuxUse[] = [
@@ -36,6 +36,7 @@ export const AUX_USES: readonly AuxUse[] = [
 	"review",
 	"extract",
 	"advice",
+	"split",
 ];
 
 /**

@@ -9,6 +9,7 @@ import {
 	type GroupRow,
 	type PartnersStore,
 } from "./partners.ts";
+import { flagEnabled } from "./flags.ts";
 
 /**
  * 群组核心（2026-11-07 群组入口统一）：**唯一一份**建群校验与落库实现。
@@ -24,8 +25,7 @@ import {
  */
 
 /** 回滚开关（方案 §2.7）：false = 群端点一个不挂、group_manage 工具不注册 */
-export const GROUPS_ENABLED =
-	(process.env.GROUPS_ENABLED?.trim() || "true").toLowerCase() !== "false";
+export const GROUPS_ENABLED = flagEnabled("GROUPS_ENABLED");
 
 export function groupsAvailable(): boolean {
 	return GROUPS_ENABLED && COMPANIONS_ENABLED;

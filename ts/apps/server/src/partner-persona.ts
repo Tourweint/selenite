@@ -387,6 +387,53 @@ function scenarioLines(scenario: PartnerPersonaScenario): string[] {
 }
 
 /**
+ * 静态人格的可展示字段（2026-11-16 追加）：默认上下文页要把「口吻 / 里子 / 处境」
+ * 从身份大块里拆出来单独成行；空模块也保留 text=""，页面显示 0 字槽位。
+ *
+ * 注意：这里只负责“展示字段”，真实 instructions 仍由 renderPersonaBlocks 按
+ * 空模块 / 空字段跳过，避免给模型带空标题。
+ */
+export interface PersonaFieldBlock {
+	/** 默认页 section key */
+	id: "partner_voice" | "partner_values" | "partner_scenario";
+	/** 页面上的字段名 */
+	title: string;
+	/** 原始块正文（带 `【口吻】` 第一行）；空模块为 "" */
+	text: string;
+}
+
+export function renderPersonaFieldBlocks(
+	store: PersonaStoreLike,
+	partner: {
+		id: string;
+		personaPreset: PartnerPersonaPreset;
+		personaModules: Partial<Record<PartnerPersonaModule, boolean>>;
+	},
+): PersonaFieldBlock[] {
+	const empty: PersonaFieldBlock[] = [
+		{ id: "partner_voice", title: "说话方式（口吻）", text: "" },
+		{ id: "partner_values", title: "里子", text: "" },
+		{ id: "partner_scenario", title: "处境", text: "" },
+	];
+	// 回滚开关关闭 = 静态人格整段不注入；上下文页仍保留三个 0 字槽位。
+	if (!personaModulesEnabled()) return empty;
+	const modules = effectivePersonaModules(partner);
+	const contents = readPersonaContents(store, partner.id);
+	const enabled = (key: PersonaContentKey) => modules[CONTENT_MODULE[key]] === true;
+
+	const style = enabled("style") ? styleLines(contents.style) : [];
+	const values = enabled("values") ? valuesLines(contents.values) : [];
+	const scenario = enabled("scenario") ? scenarioLines(contents.scenario) : [];
+	const block = (heading: string, lines: string[]) =>
+		lines.length ? [`【${heading}】`, ...lines].join("\n") : "";
+	return [
+		{ id: "partner_voice", title: "说话方式（口吻）", text: block("口吻", style) },
+		{ id: "partner_values", title: "里子", text: block("里子", values) },
+		{ id: "partner_scenario", title: "处境", text: block("处境", scenario) },
+	];
+}
+
+/**
  * 静态人格段：固定顺序 **口吻 → 里子 → 处境**，空模块 / 空字段整段 / 整行跳过。
  * 全部为空（或开关关着）→ undefined（instructions 里不留空壳标题）。
  */

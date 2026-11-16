@@ -1,5 +1,6 @@
 import { createMemoryEngine, scopeKey, type MemoryEngine, type MemoryScope } from "@lifediary/memory";
 import { diaryStore } from "../diary.ts";
+import { flagEnabled } from "../flags.ts";
 import { recentDiaryMemories, syncDiaryToMemory } from "../memory-ingest.ts";
 import { memoryFallbackExtractor, preferenceExtractor } from "../memory-extract.ts";
 import { INJECTION_ORDER, type InjectionEntry, type InjectionProvider } from "./injection.ts";
@@ -12,6 +13,7 @@ import {
 	resolvePartnerScope,
 } from "../partners.ts";
 import { createSkillStore, resolveSkillsDir, skillsIndexSummaryChars, type SkillStore } from "../skills.ts";
+import { isCoreSkill } from "../core-skills.ts";
 import { getSkillState, skillStateEnabled } from "../skill-state.ts";
 import { proactiveForTurn } from "../memory-proactive.ts";
 import { memoryInjectDedupeEnabled, memoryInjectLimit, memoryInjectMaxChars } from "../memory-inject.ts";
@@ -19,11 +21,14 @@ import {
 	partnerProjectMemoryEnabled,
 	projectMemoryGateEnabled,
 } from "../partner-contract.ts";
+import { workerPersonaDefault } from "../worker-persona.ts";
 import {
 	composeProjectRecallScopes,
+	isRecallableProjectId,
 	personaProjectIdsOfConversation,
 	projectNameOf,
 	projectScopeOfConversation,
+	recallableProjectIds,
 } from "./project-scope.ts";
 
 /**
@@ -57,13 +62,9 @@ export const PERSONA = [
  * 模型那边照样自称总管、默认维护执事档案。worker 是**普通任务助手**：
  * 不读总管 SOUL、不冒称总管、不建立执事身份，但工具闸门 / 工作区边界 / 审批一条不少。
  */
-export const WORKER_PERSONA = [
-	"你是一个普通任务助手，负责把交到你手上的具体事情办完。",
-	"说话直接、克制、就事论事，给结论也给依据；不冒充总管，也不代表任何执事。",
-	"涉及真实文件、真实数据、真实日程或当前时间的事，必须先用工具去看，不许凭印象回答或编造；看不到就说明缺什么。",
-	"没有预设的私人档案，也不主动建立执事身份。",
-	"需要长期记住的事用 remember；想不起对方说过什么用 recall；要定时提醒用 set_reminder。",
-].join("");
+// 2026-11-16 全局一份可编辑：默认正文的唯一事实源在 worker-persona.ts，
+// 这里保留常量给旧引用 / 测试用，两处不再各写一遍。注入侧每轮现读 readWorkerPersona()。
+export const WORKER_PERSONA = workerPersonaDefault();
 
 /**
  * 新会话能不能开成 worker（2026-11-06 B2 回滚开关）：`WORKER_CHAT_ENABLED=false` 只拦**新建**，
@@ -150,6 +151,7 @@ export const skillStore: SkillStore | null = (() => {
 			return createSkillStore([chiefSkillsDir(), ...SKILLS_DIRS], {
 				visible: skillVisible,
 				visibleFor: skillVisibleFor,
+				isCore: isCoreSkill,
 				// 索引摘要截断（2026-11-15 上下文预算批）：传函数 = 每次首渲染现读 env，
 				// 界面「行为开关」改完，新开的会话立即按新值渲染（老会话按冻结口径不变）。
 				indexSummaryChars: skillsIndexSummaryChars,
@@ -163,6 +165,7 @@ export const skillStore: SkillStore | null = (() => {
 		return createSkillStore(SKILLS_DIRS, {
 			visible: skillVisible,
 			visibleFor: skillVisibleFor,
+			isCore: isCoreSkill,
 			indexSummaryChars: skillsIndexSummaryChars,
 		});
 	} catch (error) {
@@ -227,7 +230,7 @@ export function preferenceScopeOf(conversationId: number): MemoryScope {
 
 /** 召回失败绝不能让对话失败，所以一律吞掉并降级为空上下文。 */
 export function recallContext(conversationId: number, text: string): string {
-	if (!memoryEngine || !text.trim()) return "";
+	if (!flagEnabled("MEMORY_ENABLED") || !memoryEngine || !text.trim()) return "";
 	try {
 		// 群会话不参与记忆引擎（2026-11-06 群组方案 §2.2）：召回整个跳过，
 		// 群聊不写不读个人记忆防串台；群内连续性靠会话历史 + 群时间线本身。
@@ -241,11 +244,15 @@ export function recallContext(conversationId: number, text: string): string {
 		// 绑定项目全权进池；其余挂载项目走 gatedScopes（字面命中才进候选，"聊到才注入"
 		// 是硬规则不是打分巧合）。worker 跟文件夹走（上面的 project），两层互不干扰。
 		// PROJECT_MEMORY_GATE=false 退回"挂载全权进池"（跟人走当日形态）。
+		// 归档 / 删除的项目退出召回库（2026-11-16 用户拍板）：绑定与挂载都可能指向死项目
+		// （归档不摘挂载、删除不清旧会话绑定），装配候选池前统一过活口检查；记忆仍在库里，
+		// 恢复归档后自动回来。
 		const partner = partnerScopeOf(conversationId);
 		const project = projectScopeOfConversation(conversationId);
-		const mounted = personaProjectIdsOfConversation(conversationId);
+		const boundProjectId =
+			project?.type === "project" && isRecallableProjectId(project.id) ? project.id : null;
+		const mounted = recallableProjectIds(personaProjectIdsOfConversation(conversationId));
 		// 项目 scope 组装收在纯函数里（可单测）：绑定全权进池，其余挂载走闸门。
-		const boundProjectId = project?.type === "project" ? project.id : null;
 		const { fullKeys: mountedFullKeys, gatedKeys } = composeProjectRecallScopes(
 			boundProjectId,
 			mounted,
@@ -260,7 +267,9 @@ export function recallContext(conversationId: number, text: string): string {
 				scopes: [
 					"global",
 					...(partner ? [scopeKey(partner)] : []),
-					...(project ? [scopeKey(project)] : []),
+					...(boundProjectId
+						? [scopeKey({ type: "project", id: boundProjectId })]
+						: []),
 					...mountedFullKeys,
 					scopeKey({ type: "session", id: String(conversationId) }),
 				],
@@ -298,6 +307,8 @@ export function recallContext(conversationId: number, text: string): string {
  * 只有"近况"这一小段是新的（§2.3 实测：尾部追加不破坏前缀）。
  */
 export function taskMemoryBlock(days = 3, limit = 12): string {
+	// 总闸关着一律不注入（2026-11-16）：任务通道也不能绕过记忆总闸。
+	if (!flagEnabled("MEMORY_ENABLED")) return "";
 	try {
 		// 2026-10-31 二次收口：**先把镜像里的成稿摄入记忆，再从记忆取**。
 		// 之前这里直接读 diary.sqlite，等于在记忆系统旁边开了条捷径——聊天走记忆、任务读镜像，
@@ -369,7 +380,8 @@ export const memoryRecallProvider: InjectionProvider = (ctx) => {
  * 读不到 / 不是执事会话 / 查库失败 → 只受父闸管（宁可按旧行为带上记忆）。
  */
 function memoryRecallOff(conversationId: number): boolean {
-	if ((process.env.PARTNER_MEMORY_RECALL?.trim() || "true").toLowerCase() === "false") return true;
+	if (!flagEnabled("MEMORY_ENABLED")) return true;
+	if (!flagEnabled("PARTNER_MEMORY_RECALL")) return true;
 	try {
 		const partnerId = partnersStore().partnerIdOfSession(conversationId);
 		if (!partnerId) return false;
@@ -385,11 +397,15 @@ function memoryRecallOff(conversationId: number): boolean {
  * 挂载项目的记忆平时不整包进上下文（聊到才浮出，闸门在 recallContext）——模型得
  * 先知道"自己负责哪几摊"，才会在该查的时候去 recall、该记的时候指名写。
  * 一行几十个字，杂事聊天零负担。全名解析不出（项目库没接线 / 项目刚删）就不注。
+ * 归档 / 删除的项目不列（2026-11-16）：归档=退场，记忆不进召回池，索引里也不该出现。
  */
 export const projectIndexProvider: InjectionProvider = (ctx) => {
+	if (!flagEnabled("MEMORY_ENABLED")) return undefined;
 	if (ctx.group) return undefined;
 	if (!partnerProjectMemoryEnabled()) return undefined;
-	const mounted = personaProjectIdsOfConversation(Number(ctx.conversationId));
+	const mounted = recallableProjectIds(
+		personaProjectIdsOfConversation(Number(ctx.conversationId)),
+	);
 	if (mounted.length === 0) return undefined;
 	const names = mounted
 		.map((id) => projectNameOf(id))

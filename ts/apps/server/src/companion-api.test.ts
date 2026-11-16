@@ -35,12 +35,19 @@ process.env.ROUTINES_STATE_PATH = join(root, "routines.json");
 process.env.AUTONOMY_STATE_PATH = join(root, "autonomy-state.json");
 // 2026-11-15 按人技能状态：指到临时文件，绝不碰真实 .data/skills-state.json
 process.env.AGENT_SKILLS_STATE_PATH = join(root, "skills-state.json");
+// 2026-11-16 Worker 人设：同样指到临时文件，不碰真实 .data/worker-persona.md
+process.env.WORKER_PERSONA_PATH = join(root, "worker-persona.md");
 
 const { Hono } = await import("hono");
 const { mountCompanions } = await import("./companion-api.ts");
 const { mountSkills } = await import("./skills-api.ts");
 const { PARTNER_SLOT_LIMIT, partnersStore } = await import("./partners.ts");
 const { getSkillState } = await import("./skill-state.ts");
+const {
+  mountWorkerPersonaRoutes,
+  workerPersonaDefault,
+  WORKER_PERSONA_LIMIT,
+} = await import("./worker-persona.ts");
 
 const store = partnersStore();
 const app = new Hono();
@@ -49,15 +56,25 @@ mountCompanions(app);
 // 不跟执事端点混在同一条路由表里。
 const skillsApp = new Hono();
 mountSkills(skillsApp, { enabled: true });
+// Worker 人设端点单独挂一条路由表（真 Hono 路由，不是 mock），验 GET/PUT 形状与 400。
+const workerApp = new Hono();
+mountWorkerPersonaRoutes(workerApp);
 
 // 项目记忆归属（2026-11-15 跟人走方案）：PATCH 校验用。PROJECTS_DB_PATH 已指到临时库。
 const { projectsStore } = await import("./project-api.ts");
 
-after(() => {
+after(async () => {
 	store.close();
 	// 项目记忆归属（2026-11-15）动过项目库：sqlite 句柄不关，Windows 上 rmSync 会 EPERM。
 	projectsStore().close();
-	rmSync(root, { recursive: true, force: true });
+	// 工具勾选端点会 getHarness()（真开 durable SQLite）：先交出句柄再删临时目录。
+	const { closeHarnessForMaintenance } = await import("./agent/lifecycle.ts");
+	await closeHarnessForMaintenance().catch(() => undefined);
+	try {
+		rmSync(root, { recursive: true, force: true });
+	} catch {
+		// 极端情况下句柄仍未释放：留着临时目录不挡测试收尾
+	}
 });
 
 // ── 真实 PNG fixture ─────────────────────────────────────
@@ -1174,6 +1191,84 @@ test("GET /partners/:id/injection-preview：纪律跟随开关；在办 / 履历
 	assert.equal(missing.status, 404);
 });
 
+test("纪律覆盖端点：GET 默认 / PUT 覆盖 / 空节删除 / 红线拒绝 / DELETE 恢复", async () => {
+	const partner = store.create("纪律执事");
+	const base = `/api/v1/partners/${partner.id}/discipline`;
+
+	const read = await app.request(base);
+	assert.equal(read.status, 200);
+	const initial = (await read.json()) as {
+		ok: boolean;
+		defaultDiscipline: string;
+		override: string | null;
+		redLine: string;
+	};
+	assert.equal(initial.ok, true);
+	assert.match(initial.defaultDiscipline, /## 验证铁律/);
+	assert.equal(initial.override, null);
+	assert.match(initial.redLine, /【主人数据红线】/);
+
+	const blocked = await app.request(base, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ discipline: "## 主人数据红线\n- 我想改" }),
+	});
+	assert.equal(blocked.status, 400);
+	assert.match(((await blocked.json()) as { message: string }).message, /不能覆盖/);
+
+	const put = await app.request(base, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({
+			discipline: "## 验证铁律\n- 先跑指定验收，再汇报。\n\n## 裁决纪律\n",
+		}),
+	});
+	assert.equal(put.status, 200);
+	assert.match(((await put.json()) as { discipline: string }).discipline, /先跑指定验收/);
+
+	const preview = (await (
+		await app.request(`/api/v1/partners/${partner.id}/injection-preview`)
+	).json()) as { discipline: string | null };
+	assert.match(preview.discipline ?? "", /【验证铁律】\n- 先跑指定验收/);
+	assert.equal((preview.discipline ?? "").includes("【裁决纪律】"), false);
+
+	const restore = await app.request(base, { method: "DELETE" });
+	assert.equal(restore.status, 200);
+	const cleared = (await restore.json()) as { override: string | null; defaultDiscipline: string };
+	assert.equal(cleared.override, null);
+	assert.match(cleared.defaultDiscipline, /## 裁决纪律/);
+
+	// 空 textarea 提交 = 清空覆盖（不是“没有标题”的 400）
+	const clearByPut = await app.request(base, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ discipline: "" }),
+	});
+	assert.equal(clearByPut.status, 200);
+	assert.equal(((await clearByPut.json()) as { override: string | null }).override, null);
+
+	// 回滚开关：三个端点都 400，且不读写覆盖文件
+	const previous = process.env.PARTNER_DISCIPLINE_EDIT;
+	try {
+		process.env.PARTNER_DISCIPLINE_EDIT = "false";
+		for (const method of ["GET", "PUT", "DELETE"] as const) {
+			const res = await app.request(base, {
+				method,
+				...(method === "PUT"
+					? {
+							headers: { "content-type": "application/json" },
+							body: JSON.stringify({ discipline: "## 验证铁律\n- x" }),
+						}
+					: {}),
+			});
+			assert.equal(res.status, 400, `${method} 在开关关闭时 400`);
+		}
+	} finally {
+		if (previous === undefined) delete process.env.PARTNER_DISCIPLINE_EDIT;
+		else process.env.PARTNER_DISCIPLINE_EDIT = previous;
+	}
+});
+
 test("记忆召回子开关：默认开 / 关掉后投影回 false / 放回去回 true", async () => {
 	const partner = store.create("记忆开关执事");
 
@@ -1271,4 +1366,181 @@ test("PARTNER_PROJECT_MEMORY=false：投影与回显整个字段不出现", asyn
 		if (prev === undefined) delete process.env.PARTNER_PROJECT_MEMORY;
 		else process.env.PARTNER_PROJECT_MEMORY = prev;
 	}
+});
+
+// ── 人设页工具勾选（2026-11-16 工具裁剪 B）──────────────────
+
+test("GET /partners/:id/tools：默认全开 + 固定形状 + no-store + 未知执事 404", async () => {
+	const partner = store.create("工具目录执事");
+	const res = await app.request(`/api/v1/partners/${partner.id}/tools`);
+	assert.equal(res.status, 200);
+	assert.equal(res.headers.get("cache-control"), "no-store");
+	const body = (await res.json()) as {
+		ok: boolean;
+		enabled: boolean;
+		disabled: string[];
+		groups: string[];
+		tools: Array<{ name: string; group: string; summary: string; enabled: boolean }>;
+	};
+	assert.equal(body.ok, true);
+	assert.equal(body.enabled, true);
+	assert.deepEqual(body.disabled, []);
+	assert.equal(body.groups.length, 6);
+	assert.ok(body.tools.length > 0, "真实 extension 已装：目录非空");
+	assert.ok(
+		body.tools.every(
+			(tool) =>
+				typeof tool.name === "string" &&
+				tool.name.length > 0 &&
+				typeof tool.group === "string" &&
+				typeof tool.summary === "string" &&
+				tool.enabled === true,
+		),
+		"默认全开：每项 enabled=true 且字段齐全",
+	);
+	const missing = await app.request("/api/v1/partners/no-such-id/tools");
+	assert.equal(missing.status, 404);
+});
+
+test("PUT /partners/:id/tools：未知名 400、保存回读、清空回全开、不 bump 版本", async () => {
+	const partner = store.create("工具勾选执事");
+	const path = `/api/v1/partners/${partner.id}/tools`;
+	const first = await app.request(path);
+	const view = (await first.json()) as {
+		tools: Array<{ name: string; enabled: boolean }>;
+	};
+	const candidate = view.tools[0]!.name;
+
+	const put = (disabled: unknown) =>
+		app.request(path, {
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ disabled }),
+		});
+
+	const bad = await put(["no_such_tool", "another_bad"]);
+	assert.equal(bad.status, 400);
+	const badBody = (await bad.json()) as { message: string; unknown: string[] };
+	assert.match(badBody.message, /未知工具：no_such_tool、another_bad/);
+	assert.deepEqual(badBody.unknown, ["no_such_tool", "another_bad"]);
+	assert.deepEqual(store.get(partner.id)?.disabledTools, [], "400 不写入");
+
+	const notArray = await put("write");
+	assert.equal(notArray.status, 400, "非数组 400");
+
+	// delegate 描述依赖 skill 读手册：只关 skill 不关 delegate 拒（2026-11-16 A+B 联调）。
+	const names = new Set(view.tools.map((tool) => tool.name));
+	if (names.has("delegate") && names.has("skill")) {
+		const dependency = await put(["skill"]);
+		assert.equal(dependency.status, 400);
+		assert.match(((await dependency.json()) as { message: string }).message, /delegate 依赖 skill/);
+		const together = await put(["skill", "delegate"]);
+		assert.equal(together.status, 200, "一起关合法：这个人不派活");
+		await put([]);
+	}
+
+	const saved = await put([candidate, candidate]);
+	assert.equal(saved.status, 200);
+	const savedBody = (await saved.json()) as {
+		disabled: string[];
+		tools: Array<{ name: string; enabled: boolean }>;
+	};
+	assert.deepEqual(savedBody.disabled, [candidate], "重复名去重");
+	assert.equal(savedBody.tools.find((tool) => tool.name === candidate)?.enabled, false);
+	assert.deepEqual(store.get(partner.id)?.disabledTools, [candidate]);
+	assert.equal(store.get(partner.id)?.currentVersion, partner.currentVersion, "不 bump 身份版本");
+
+	const cleared = await put([]);
+	assert.equal(cleared.status, 200);
+	assert.deepEqual(store.get(partner.id)?.disabledTools, [], "空数组 = 全开");
+});
+
+test("PARTNER_TOOLS_ENABLED=false：GET 200 空形状、PUT 400、未知执事仍 404", async () => {
+	const partner = store.create("关工具勾选执事");
+	const prev = process.env.PARTNER_TOOLS_ENABLED;
+	process.env.PARTNER_TOOLS_ENABLED = "false";
+	try {
+		const res = await app.request(`/api/v1/partners/${partner.id}/tools`);
+		assert.equal(res.status, 200);
+		assert.deepEqual(await res.json(), {
+			ok: true,
+			enabled: false,
+			disabled: [],
+			groups: [],
+			tools: [],
+		});
+		const put = await app.request(`/api/v1/partners/${partner.id}/tools`, {
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ disabled: [] }),
+		});
+		assert.equal(put.status, 400);
+		assert.match(((await put.json()) as { message: string }).message, /PARTNER_TOOLS_ENABLED/);
+		const missing = await app.request("/api/v1/partners/no-such-id/tools", {
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ disabled: [] }),
+		});
+		assert.equal(missing.status, 404, "404 优先于开关关的 400");
+	} finally {
+		if (prev === undefined) delete process.env.PARTNER_TOOLS_ENABLED;
+		else process.env.PARTNER_TOOLS_ENABLED = prev;
+	}
+});
+
+// ── Worker 人设端点（2026-11-16，全局一份可编辑）──────────────────────
+test("worker-persona: GET 默认 / PUT 保存 / 空串恢复 / 非字符串与超限 400 / 开关关 400", async () => {
+  const get = () => workerApp.request("/api/v1/agent/worker-persona");
+  const put = (body: unknown) =>
+    workerApp.request("/api/v1/agent/worker-persona", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  const r0 = await get();
+  assert.equal(r0.status, 200);
+  assert.equal(r0.headers.get("cache-control"), "no-store");
+  const d0 = (await r0.json()) as Record<string, unknown>;
+  assert.equal(d0.ok, true);
+  assert.equal(d0.persona, workerPersonaDefault());
+  assert.equal(d0.isDefault, true);
+  assert.equal(d0.editable, true);
+  assert.equal(d0.limit, WORKER_PERSONA_LIMIT);
+  assert.equal(d0.chars, String(d0.persona).length);
+
+  const r1 = await put({ persona: 123 });
+  assert.equal(r1.status, 400);
+  assert.equal(((await r1.json()) as { error: string }).error, "bad_request");
+
+  const text = "你是普通助手，先干活再说话。";
+  const r2 = await put({ persona: text });
+  assert.equal(r2.status, 200);
+  const d2 = (await r2.json()) as Record<string, unknown>;
+  assert.equal(d2.persona, text);
+  assert.equal(d2.isDefault, false);
+  const d2again = (await (await get()).json()) as Record<string, unknown>;
+  assert.equal(d2again.persona, text, "GET 读到刚存的值");
+
+  const r3 = await put({ persona: "" });
+  assert.equal(r3.status, 200);
+  const d3 = (await r3.json()) as Record<string, unknown>;
+  assert.equal(d3.persona, workerPersonaDefault(), "空串 = 恢复默认");
+  assert.equal(d3.isDefault, true);
+
+  const r4 = await put({ persona: "字".repeat(WORKER_PERSONA_LIMIT) });
+  assert.equal(r4.status, 400, "超 8192 字节 → 400");
+
+  const saved = process.env.WORKER_PERSONA_EDIT;
+  process.env.WORKER_PERSONA_EDIT = "false";
+  try {
+    const r5 = await put({ persona: "试试" });
+    assert.equal(r5.status, 400);
+    assert.match(((await r5.json()) as { message: string }).message, /WORKER_PERSONA_EDIT=false/);
+    const dg = (await (await get()).json()) as Record<string, unknown>;
+    assert.equal(dg.editable, false);
+  } finally {
+    if (saved === undefined) delete process.env.WORKER_PERSONA_EDIT;
+    else process.env.WORKER_PERSONA_EDIT = saved;
+  }
 });

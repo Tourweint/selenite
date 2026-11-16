@@ -127,7 +127,7 @@ test("两个回滚开关：默认开，只有显式 false 才关", () => {
 	assert.equal(attachmentsEnabled({}), true);
 	assert.equal(attachmentsEnabled({ AGENT_ATTACHMENTS: "false" }), false);
 	assert.equal(attachmentsEnabled({ AGENT_ATTACHMENTS: "FALSE" }), false);
-	assert.equal(attachmentsEnabled({ AGENT_ATTACHMENTS: "off" }), true);
+	assert.equal(attachmentsEnabled({ AGENT_ATTACHMENTS: "off" }), false);
 
 	assert.equal(editResendEnabled({}), true);
 	assert.equal(editResendEnabled({ AGENT_EDIT_RESEND: "false" }), false);

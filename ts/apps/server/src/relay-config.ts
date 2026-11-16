@@ -1,5 +1,6 @@
 import { hostname } from "node:os";
 import type { RelayClient } from "./relay-client.ts";
+import { flagEnabled } from "./flags.ts";
 
 /**
  * 中继客户端配置（2026-11-05 多端同步方案）。
@@ -34,8 +35,7 @@ export function deviceMatrixEnabled(env: NodeJS.ProcessEnv = process.env): boole
  * 默认 **关**——关时 "auto" 按非法参数拒绝，回到纯点名/本机两态。
  */
 export function deviceAutoDispatchEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	const raw = (env.DEVICE_AUTO_DISPATCH ?? "").trim().toLowerCase();
-	return raw === "1" || raw === "true" || raw === "on";
+	return flagEnabled("DEVICE_AUTO_DISPATCH", env);
 }
 
 /** 自动挑机的单机满载阈值；非法值（含 0 / 负数 / 非数字）回落默认 3。 */
