@@ -69,6 +69,9 @@
   .rm-hero-body { flex-direction: row; align-items: center; justify-content: space-between; padding: 16px 24px; }
 }
 .rm-hero-title { font-size: 13.5px; font-weight: 500; color: var(--text); }
+/* 2026-11-17：说明触发消息隐藏/可见，链接到人设页。桌面限宽避免挤掉按钮。 */
+.rm-hero-note { font-size: 11.5px; line-height: 1.6; color: var(--text-3); max-width: 560px; }
+.rm-hero-note a { color: var(--accent, var(--text)); cursor: pointer; text-decoration: underline; }
 .rm-hero-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .rm-hero-actions .btn-primary, .rm-hero-actions .ghost { height: 36px; }
 @media (max-width: 560px) {
@@ -89,9 +92,12 @@
 .rm-row-main { flex: 1; min-width: 0; }
 .rm-row-text { font-size: 13.5px; font-weight: 500; color: var(--text); overflow-wrap: anywhere; }
 /* 2026-11-17：每行标出触发消息隐藏/可见，两类中途可辨。 */
+.rm-kind {
   display: inline-block; vertical-align: 1px; margin-left: 4px; padding: 1px 7px;
   border-radius: var(--r-full); font-size: 10.5px; font-weight: 500; white-space: nowrap;
 }
+.rm-kind-hidden { background: var(--accent-container); color: var(--on-accent-container); }
+.rm-kind-visible { background: var(--surface-low); color: var(--text-3); }
 .rm-row-meta { margin-top: 4px; font-size: 11.5px; color: var(--text-3); }
 .rm-row.is-off .rm-when-time,
 .rm-row.is-off .rm-row-text { color: var(--text-3); font-weight: 400; }
@@ -144,6 +150,8 @@
 }
 .rm-mode:hover { color: var(--text); }
 .rm-mode.is-on { background: var(--text); color: var(--card); font-weight: 500; }
+/* 2026-11-17 触发消息隐藏/可见 分段下方的一句大白话说明。 */
+.rm-delivery-hint { min-height: 0; margin: -6px 0 0; font-size: 11.5px; line-height: 1.55; color: var(--text-3); }
 .rm-form-cols { display: grid; grid-template-columns: minmax(0, 1fr) 200px; gap: 22px; align-items: start; }
 @media (max-width: 680px) {
   .rm-form-cols { grid-template-columns: 1fr; gap: 14px; }

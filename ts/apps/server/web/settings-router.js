@@ -366,14 +366,15 @@ async function renderSettings() {
       ?.addEventListener("change", () => renderArchiveChats());
     void loadArchivePage();
   } else if (page === "reminders") {
-    // 定时任务页（2026-11-14 合并）：提醒和例行任务本来就是"到点叫一个人"。
-    // 不再分两个页签；所有任务一张清单，建的时候选"只发一句"还是"自动执行"。
+    // 定时任务页（2026-11-14 合并；2026-11-17 加触发消息隐藏/可见）：到点叫一个人。
+    // 一张清单两类：触发消息"对我隐藏"（定时主动轮，走 /reminders）与"可见"（例行任务，走 /routines）。
     el.settingsInner.innerHTML = `
       <h2 class="set-sec-title">定时任务</h2>
       <section class="set-sec">
         <div class="card rm-hero">
           <div class="rm-hero-body">
             <div class="rm-hero-title">到点叫一个人</div>
+            <div class="rm-hero-note">新建时选触发消息「对我隐藏」还是「可见」：隐藏就像它自己主动来找你（看不到你发的那条指令）；可见会留一条你发的触发消息。想指定谁来做，去<a href="#/settings/partners">人设</a>给它设例行任务也行。</div>
             <div class="rm-hero-actions">
               <button class="ghost" type="button" id="reminder-manual">手动设置</button>
               <button class="btn-primary" type="button" id="reminder-say-go">交给 Agent</button>
@@ -387,7 +388,7 @@ async function renderSettings() {
     const sendToAgent = () => {
       // 只给一句开头：时间、频率、内容都由 Agent 在对话里问清楚并调工具，界面不替它猜。
       openChiefChat();
-      el.input.value = "帮我定个提醒：";
+      el.input.value = "帮我定个定时任务（触发消息对我隐藏还是可见，你先问我）：";
       resize();
       el.input.focus();
       toast("已填好开头——直接发送，剩下的交给 Agent");

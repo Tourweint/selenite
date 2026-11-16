@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { contentText } from "@earendil-works/pi-ai";
 import type { Conversation } from "@earendil-works/pi-durable";
 import { redactSecrets } from "@lifediary/memory";
+import { PROACTIVE_HIDDEN_MARKER } from "@lifediary/shared";
 import { CTX, Chats } from "./shared.ts";
 
 /**
@@ -314,10 +315,19 @@ async function readTranscriptSources(reader: SessionReader): Promise<TranscriptS
 				if (entry.kind !== "pi.user" && entry.kind !== "pi.assistant") continue;
 				const message = entry.model?.[0];
 				if (!message) continue;
-				const text = contentText(message.content).trim();
-				if (!text) continue;
-				const at = typeof message.timestamp === "number" ? message.timestamp : 0;
-				lines.push({ role: entry.kind === "pi.user" ? "user" : "assistant", text, at });
+			const text = contentText(message.content).trim();
+			if (!text) continue;
+			// 2026-11-17 定时主动轮的触发指令对用户隐藏：这里绕过 fold 直读 entries，
+			// 必须同判据跳过，否则全局搜索能把"看不见的消息"搜出来。
+			// 标记独立成行即可（前面可能有 autonomous 头）。
+			if (
+				entry.kind === "pi.user" &&
+				text.split("\n").some((line) => line.trim() === PROACTIVE_HIDDEN_MARKER)
+			) {
+				continue;
+			}
+			const at = typeof message.timestamp === "number" ? message.timestamp : 0;
+			lines.push({ role: entry.kind === "pi.user" ? "user" : "assistant", text, at });
 			}
 			if (lines.length === 0) continue;
 			sources.push({

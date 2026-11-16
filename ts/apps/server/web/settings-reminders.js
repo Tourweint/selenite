@@ -257,6 +257,16 @@ function rtScheduleText(triggers) {
   return triggers.map(rtTriggerText).join("；");
 }
 
+/** 定时主动轮（隐藏触发）那类的一句话频率（2026-11-17）。 */
+function rmProactiveScheduleText(reminder) {
+  const repeat = reminder.repeat || "none";
+  if (repeat === "none") return "一次性";
+  if (repeat === "daily") return reminder.until ? "每天（到结束日）" : "每天";
+  if (repeat === "weekly") return rmWeeklyText(reminder.weekdays || []);
+  if (repeat === "monthly") return `每月${reminder.dayOfMonth}号`;
+  return "一次性";
+}
+
 function rmRoutineTriggers(schedule) {
   const date = new Date(schedule.at);
   const minute = date.getMinutes();
@@ -281,12 +291,15 @@ async function loadReminders() {
   const card = document.getElementById("reminder-card");
   if (!card) return;
   try {
-    const [routinesResponse, partnersResponse, memoryResponse] = await Promise.all([
+    const [routinesResponse, remindersResponse, partnersResponse, memoryResponse] = await Promise.all([
       request("/api/v1/routines", { cache: "no-store" }),
+      // 2026-11-17 定时主动轮：这类任务的触发消息对用户隐藏，是另一套端点/数据。
+      request("/api/v1/agent/reminders", { cache: "no-store" }).catch(() => null),
       request("/api/v1/partners", { cache: "no-store" }),
       request("/api/v1/agent/memory/nightly", { cache: "no-store" }),
     ]);
     const routinesData = await routinesResponse.json().catch(() => ({}));
+    const remindersData = remindersResponse ? await remindersResponse.json().catch(() => ({})) : {};
     const partnersData = await partnersResponse.json().catch(() => ({}));
     const memoryData = await memoryResponse.json().catch(() => ({}));
     const partners = partnersData.partners || state.partners || [];
@@ -309,6 +322,23 @@ async function loadReminders() {
         enabled: Boolean(routine.enabled),
         editable: rtScheduleOf(routine) !== null,
         scheduleText: rtScheduleText(triggers),
+      });
+    }
+    // 2026-11-17 定时主动轮：触发消息对用户隐藏的那类。数据本身就是弹窗能认的 schedule 形状。
+    for (const reminder of remindersData.reminders || []) {
+      if (reminder.status === "terminal") continue;
+      all.push({
+        key: `pro-${reminder.id}`,
+        kind: "proactive",
+        id: reminder.id,
+        raw: reminder,
+        title: reminder.text || "未命名",
+        who: whoOf(reminder.partnerId),
+        personKey: reminder.partnerId && reminder.partnerId !== "chief" ? `partner:${reminder.partnerId}` : "chief",
+        at: reminder.at || 0,
+        enabled: true,
+        editable: true,
+        scheduleText: rmProactiveScheduleText(reminder),
       });
     }
     const nightlyAt = Date.parse(memoryData.nextAt || "") || 0;
@@ -398,7 +428,7 @@ async function loadReminders() {
                   `<button class="rm-del" type="button" data-memory-del="${esc(item.memoryScope)}">删除</button>`,
                 );
               }
-              if (item.kind === "run") {
+              if (item.kind === "run" || item.kind === "proactive") {
                 actions.push(`<button class="rm-del" type="button" data-del="${esc(item.key)}">删除</button>`);
               }
               return `${index ? '<div class="divider"></div>' : ""}
@@ -408,7 +438,13 @@ async function loadReminders() {
             <div class="rm-when-time">${esc(timeText)}</div>
           </div>
           <div class="rm-row-main">
-            <div class="rm-row-text">${esc(item.title)}</div>
+            <div class="rm-row-text">${esc(item.title)} ${
+              item.kind === "proactive"
+                ? '<span class="rm-kind rm-kind-hidden">触发消息对我隐藏</span>'
+                : item.kind === "run"
+                  ? '<span class="rm-kind rm-kind-visible">触发消息可见</span>'
+                  : ""
+            }</div>
             <div class="rm-row-meta">${esc(item.who)} · ${item.scheduleText}</div>
           </div>
           <div class="rm-row-actions">${actions.join("")}</div>
@@ -443,6 +479,24 @@ async function loadReminders() {
             id: row.raw.id,
             text: row.raw.name || "未命名",
             partnerId: row.raw.partnerId,
+          });
+          return;
+        }
+        if (row.kind === "proactive") {
+          const raw = row.raw;
+          const schedule = {
+            at: raw.at,
+            repeat: raw.repeat || "none",
+            ...(raw.weekdays ? { weekdays: raw.weekdays } : {}),
+            ...(raw.dayOfMonth ? { dayOfMonth: raw.dayOfMonth } : {}),
+            ...(raw.until ? { until: raw.until } : {}),
+          };
+          openReminderModal({
+            ...schedule,
+            kind: "proactive",
+            id: raw.id,
+            text: raw.text || "未命名",
+            partnerId: raw.partnerId,
           });
           return;
         }
@@ -486,9 +540,11 @@ async function loadReminders() {
         const row = all.find((item) => item.key === button.dataset.del);
         if (!row) return;
         button.disabled = true;
-        await request(`/api/v1/routines/${encodeURIComponent(row.id)}`, { method: "DELETE" }).catch(
-          () => undefined,
-        );
+        const endpoint =
+          row.kind === "proactive"
+            ? `/api/v1/agent/reminders/${encodeURIComponent(row.id)}`
+            : `/api/v1/routines/${encodeURIComponent(row.id)}`;
+        await request(endpoint, { method: "DELETE" }).catch(() => undefined);
         void loadReminders();
       });
     });
@@ -507,14 +563,24 @@ function rmModeOf(item) {
 }
 
 /**
- * 手动加一条 / 改一条（2026-11-14 图形化）。
+ * 手动加一条 / 改一条（2026-11-14 图形化；2026-11-17 加"触发消息隐藏/可见"）。
  *
  * 传 `reminder` = 改时间：内容只读、不出现「提醒什么」输入框；
  * 不传 = 新建：内容输入框保留，时间规则用图形化控件选。
+ *
+ * `reminder.kind` 两种（2026-11-17）：
+ *  - "routine"（默认）= 例行任务，触发消息对用户可见（走 /api/v1/routines）；
+ *  - "proactive" = 定时主动轮，触发指令对用户隐藏、只见对面主动冒一句（走 /api/v1/agent/reminders）。
+ * 新建时由一个分段控件让用户选；编辑时沿用原任务类型、不让人中途换（换了等于删了重建）。
  */
 function openReminderModal(reminder = null, onDone = null) {
   const memoryEditing = reminder?.kind === "memory";
-  const editing = Boolean(reminder && (memoryEditing || reminder.kind === "routine" || reminder.status !== "terminal"));
+  const editing = Boolean(
+    reminder &&
+      (memoryEditing || reminder.kind === "routine" || reminder.kind === "proactive" || reminder.status !== "terminal"),
+  );
+  // 新建时用户选：隐藏触发（定时主动轮）/ 可见触发（例行任务）；编辑时沿用原类型。
+  let delivery = reminder?.kind === "proactive" ? "proactive" : "routine";
   const who = reminder?.partnerId
     ? (state.partners.find((item) => item.id === reminder.partnerId)?.name || "同事")
     : "总管";
@@ -564,6 +630,18 @@ function openReminderModal(reminder = null, onDone = null) {
                      .join("")}
                  </select>
                </div>`
+        }
+        ${
+          !editing
+            ? `<div class="rm-mode-row rm-delivery-row">
+                 <span class="rm-field-label" data-tip="隐藏=对面看起来像自己主动开口，看不到你发的那条触发指令；可见=会看到一条你发的触发消息，适合跟进类任务">触发消息</span>
+                 <div class="rm-modes" role="radiogroup" aria-label="触发消息是否对我隐藏">
+                   <button class="rm-mode" type="button" data-delivery="proactive" role="radio" aria-checked="false" data-tip="对面看起来像自己主动开口，看不到你发的那条指令">对我隐藏</button>
+                   <button class="rm-mode is-on" type="button" data-delivery="routine" role="radio" aria-checked="true" data-tip="会看到一条你发的触发消息，适合跟进类任务">可见</button>
+                 </div>
+               </div>
+               <p class="modal-hint rm-delivery-hint">「对我隐藏」：到点执事自己跑一轮说一句，你看不到那条触发指令，像它主动找你。「可见」：会留一条你发的触发消息，适合需要接着聊的跟进任务。</p>`
+            : ""
         }
         <div class="rm-mode-row">
           <span class="rm-field-label">重复</span>
@@ -777,6 +855,18 @@ function openReminderModal(reminder = null, onDone = null) {
         sync();
       });
 
+      /* ── 触发消息：隐藏 / 可见（2026-11-17）────────── */
+      body.querySelectorAll("[data-delivery]").forEach((button) => {
+        button.addEventListener("click", () => {
+          delivery = button.dataset.delivery;
+          body.querySelectorAll("[data-delivery]").forEach((b) => {
+            const on = b.dataset.delivery === delivery;
+            b.classList.toggle("is-on", on);
+            b.setAttribute("aria-checked", on ? "true" : "false");
+          });
+        });
+      });
+
       /* ── 模式 / 提交 ────────────────────────────────── */
       body.querySelectorAll("[data-mode]").forEach((button) => {
         if (memoryEditing && button.dataset.mode !== "daily") button.disabled = true;
@@ -923,21 +1013,37 @@ function openReminderModal(reminder = null, onDone = null) {
         hint.textContent = editing ? "保存中…" : "添加中…";
         hint.classList.remove("is-error");
         try {
-          const endpoint = editing
-            ? `/api/v1/routines/${encodeURIComponent(reminder.id)}`
-            : "/api/v1/routines";
-          const bodyData = editing
-            ? { triggers: rmRoutineTriggers(schedule) }
-            : {
-                partnerId: target || "chief",
-                name: text.slice(0, 40),
-                prompt: text,
-                triggers: rmRoutineTriggers(schedule),
-                sessionMode: "persistent",
-                enabled: true,
-              };
+          // 2026-11-17：按"触发消息隐藏/可见"分两路。编辑时沿用原类型（不中途换）。
+          const kind = editing ? reminder.kind : delivery;
+          const method = editing ? "PATCH" : "POST";
+          let endpoint;
+          let bodyData;
+          if (kind === "proactive") {
+            // 隐藏触发 → /agent/reminders：这套任务到点跑模型、触发指令对用户隐藏。
+            endpoint = editing
+              ? `/api/v1/agent/reminders/${encodeURIComponent(reminder.id)}`
+              : "/api/v1/agent/reminders";
+            bodyData = editing
+              ? { ...schedule }
+              : { partnerId: target || null, text, ...schedule };
+          } else {
+            // 可见触发 → /routines：例行任务（沿用原逻辑）。
+            endpoint = editing
+              ? `/api/v1/routines/${encodeURIComponent(reminder.id)}`
+              : "/api/v1/routines";
+            bodyData = editing
+              ? { triggers: rmRoutineTriggers(schedule) }
+              : {
+                  partnerId: target || "chief",
+                  name: text.slice(0, 40),
+                  prompt: text,
+                  triggers: rmRoutineTriggers(schedule),
+                  sessionMode: "persistent",
+                  enabled: true,
+                };
+          }
           const response = await request(endpoint, {
-            method: editing ? "PATCH" : "POST",
+            method,
             body: JSON.stringify(bodyData),
           });
           const data = await response.json().catch(() => ({}));

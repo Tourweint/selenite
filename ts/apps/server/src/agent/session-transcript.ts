@@ -14,7 +14,7 @@ import { contentText } from "@earendil-works/pi-ai";
 import type { Message, SystemMessage } from "@earendil-works/pi-ai";
 import type { ContextView, Conversation, EntryRecord } from "@earendil-works/pi-durable";
 import { configure } from "@earendil-works/pi-durable";
-import { TranscriptStep, TurnUsage, parseFileManifest, type TranscriptAuthor } from "@lifediary/shared";
+import { PROACTIVE_HIDDEN_MARKER, TranscriptStep, TurnUsage, parseFileManifest, type TranscriptAuthor } from "@lifediary/shared";
 import { createHash, randomUUID } from "node:crypto";
 import { isRelayEntryKind, relayDisplayText, relayFromOf } from "../partner-relay.ts";
 import { externalChatIds, openChat } from "./session-open.ts";
@@ -159,6 +159,10 @@ export function foldTranscriptEntries(
 			if (!message) continue;
 			// 2026-11-13 附件走路径：文件清单写在正文第一行，回读时折成 files 并从 text 剥掉
 			const raw = contentText(message.content);
+			// 2026-11-17 定时主动轮：带专用标记的触发指令对用户隐藏。只藏这条"用户消息"，
+			// 模型回复照常显示；刻意不在上面 continue（那会连带丢掉回答的步骤与 workMs）。
+			// 标记独立成行即可（runPartnerTurn 会在它前面拼 autonomous 头，故不能只认行首）。
+			const hidden = raw.split("\n").some((line) => line.trim() === PROACTIVE_HIDDEN_MARKER);
 			const manifest = parseFileManifest(raw);
 			// 2026-11-15：来信展示时剥掉模型侧那三段说明（抬头已写清谁发来的）；存储与模型上下文不动
 			const text = isRelay ? relayDisplayText(manifest.text) : manifest.text.trim();
@@ -183,7 +187,8 @@ export function foldTranscriptEntries(
 			}
 			if (images.length > 0) outgoing.images = images;
 			if (manifest.files.length > 0) outgoing.files = manifest.files;
-			messages.push(outgoing);
+			// 隐藏的触发指令不进消息列表；turnStartAt 已记，回答仍挂步骤/workMs。
+			if (!hidden) messages.push(outgoing);
 			continue;
 		}
 

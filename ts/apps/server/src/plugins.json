@@ -44,6 +44,7 @@
 				"AUTONOMY_ENABLED",
 				"CHANCELLOR_ENABLED",
 				"DELEGATION_WAKE_ENABLED",
+				"SCHEDULED_TASK_MODEL_RUN",
 				"MINISTER_DISPATCH_AUTHORITY",
 				"ROUTINE_SELF_SERVICE",
 				"DEVICE_AUTO_DISPATCH",
@@ -416,6 +417,22 @@
 			"key": "DELEGATION_WAKE_ENABLED",
 			"label": "派活完成即唤醒",
 			"summary": "后台任务到终态后，把派活的会话自动叫起来跑一轮、接住结果并向你转述。关 = 只写汇报、不主动开口（改动前的旧行为）。默认开。",
+			"group": "autonomy",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true,
+			"requires": [
+				"COMPANIONS_ENABLED"
+			]
+		},
+		{
+			"key": "SCHEDULED_TASK_MODEL_RUN",
+			"label": "定时主动轮跑模型",
+			"summary": "定时任务到点让目标执事真跑一轮模型、主动说一句，触发指令对你隐藏（看起来像它自己开口）。关 = 回到旧闹钟：到点只写一条写死的提醒消息、不调模型（改动前的旧行为）。默认开。",
 			"group": "autonomy",
 			"type": "boolean",
 			"values": [

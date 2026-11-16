@@ -103,7 +103,9 @@ test("JSON 清单：API 返回名称 / 说明 / 分组 / 档位 / groups，前�
 	assert.equal(data.groups.length, 6);
 	assert.equal(data.groups[0]?.id, "chat");
 	// 数量按清单快照取（并行开发时别人也会往清单加开关，别钉死数字）；
+	// 但要确认本批新增的 SCHEDULED_TASK_MODEL_RUN 确实在册（2026-11-17 定时主动轮）。
 	assert.equal(data.flags.length, listFlags().flags.length);
+	assert.ok(data.flags.some((flag) => flag.key === "SCHEDULED_TASK_MODEL_RUN"));
 	const memory = data.flags.find((flag) => flag.key === "MEMORY_ENABLED");
 	assert.equal(memory?.label, "记忆总闸");
 	assert.equal(memory?.group, "memory");

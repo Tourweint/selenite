@@ -131,6 +131,7 @@ import { mountSearch } from "./search-api.ts";
 import { COMPANIONS_ENABLED, partnersStore } from "./partners.ts";
 import { ensurePartnerSession } from "./partner-runtime.ts";
 import { nextReminderAt, setReminderDeliverer } from "./reminder.ts";
+import { installScheduledRunHandler } from "./scheduled-run-handler.ts";
 import { routineEngine } from "./routines.ts";
 import { watchAllEvents } from "./agent.ts";
 import { autonomyMode, autonomyObserver, observeCount24h } from "./autonomy.ts";
@@ -2745,8 +2746,11 @@ app.post("/api/v1/relay/home/actors/:id/messages", async (c) => {
 
 const port = Number(process.env.PORT ?? 39847);
 
-// 定时任务到点开口（2026-11-13）：提醒任务到点在会话里写一条 assistant 消息，
-// 客户端打开就看到「执事来找你」；用注册回调避免 reminder.ts ↔ lifecycle.ts 循环 import。
+// 定时任务到点投递（2026-11-17 定时主动轮）：
+// - 默认：installScheduledRunHandler 注入"到点跑一轮模型 + 触发消息隐藏"的实现；
+// - 回滚（SCHEDULED_TASK_MODEL_RUN=false）：下面这个旧 deliverer 写一条写死的 assistant 消息。
+// 两路都用注册回调，避免 reminder.ts ↔ lifecycle.ts / agent 循环 import。
+installScheduledRunHandler();
 setReminderDeliverer(async (conversationId, text) => {
   await sayInConversation(conversationId, text);
 });

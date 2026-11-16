@@ -1,4 +1,6 @@
 import { defineTask } from "@earendil-works/pi-durable";
+import { flagEnabled } from "./flags.ts";
+import { invokeScheduledRun } from "./scheduled-run-deliverer.ts";
 
 /**
  * 定时提醒。
@@ -153,12 +155,18 @@ export const ReminderTask = defineTask<
 		// 睡到点为止。返回时睡眠状态已经提交，进程这期间可以死。
 		wait: (task, runtime, context) => runtime.sleepUntil(task.input.at, { phase: "deliver" }, context),
 		deliver: async (task, runtime, context) => {
+			// 2026-11-17 定时主动轮：默认到点让目标执事跑一轮模型（触发消息对用户隐藏）。
+			// SCHEDULED_TASK_MODEL_RUN=false 逐字节回到旧闹钟：写提醒 entry + 写死消息。
+			const runModel = flagEnabled("SCHEDULED_TASK_MODEL_RUN");
 			await runtime.commit(
 				async (tx) => {
-					await tx.appendEntry(runtime.conversationId, {
-						kind: REMINDER_ENTRY_KIND,
-						data: { text: task.input.text, at: task.input.at },
-					});
+					// 旧形态才写提醒 entry（回滚分支）；新形态的"开口"由模型回复承担。
+					if (!runModel) {
+						await tx.appendEntry(runtime.conversationId, {
+							kind: REMINDER_ENTRY_KIND,
+							data: { text: task.input.text, at: task.input.at },
+						});
+					}
 					// 周期提醒：同事务里排下一次（先排再终态，崩在中间最多漏一次，不会断链）。
 					const next = nextReminderAt(task.input, Date.now());
 					if (next !== null) {
@@ -175,9 +183,21 @@ export const ReminderTask = defineTask<
 				},
 				context,
 			);
-			// 到点开口（2026-11-13）：在会话里写一条 assistant 消息，客户端一打开就看到
-			// “执事来找你了”；失败不影响已落的提醒记录与手机本地通知。
-			if (deliverer) {
+			if (runModel) {
+				// 新形态：跑一轮模型（实现由 index.ts 注入，解环）。失败只 warn，不影响续排链。
+				try {
+					await invokeScheduledRun({
+						conversationId: runtime.conversationId,
+						partnerId: task.input.partnerId,
+						text: task.input.text,
+					});
+				} catch (error) {
+					const detail = error instanceof Error ? error.message : String(error);
+					console.warn(`[reminder] 会话 ${runtime.conversationId} 到点跑模型失败: ${detail}`);
+				}
+			} else if (deliverer) {
+				// 回滚形态（2026-11-13）：在会话里写一条 assistant 消息，客户端一打开就看到
+				// “执事来找你了”；失败不影响已落的提醒记录与手机本地通知。
 				try {
 					await deliverer(runtime.conversationId, task.input.text);
 				} catch (error) {

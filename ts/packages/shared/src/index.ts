@@ -9,6 +9,14 @@ export const RoleSchema = z.enum(["system", "user", "assistant"]);
 export type Role = z.infer<typeof RoleSchema>;
 
 /**
+ * 定时主动轮的触发标记（2026-11-17）：触发模型那一轮的指令正文以它开头，
+ * 回读历史时据此把这"一条用户消息"跳过——用户只看到对面主动冒出的一句话。
+ * 是服务端内部常量，不是契约字段；固定字节，不要改（改了历史触发消息会重新显形）。
+ * 刻意不复用 `turnAuthority: autonomous`——那是例行/唤醒共用的自主头，会误伤要保留的路。
+ */
+export const PROACTIVE_HIDDEN_MARKER = "[lifediary.proactive]";
+
+/**
  * 思考强度档（2026-11-04 思考档位方案 D1）。
  *
  * 刻意只做内核档位集的一个子集：`minimal/xhigh/max` 上游没有实证、UI 也没有需求，
