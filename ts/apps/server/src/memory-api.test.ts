@@ -18,9 +18,6 @@ process.env.MEMORY_DB_PATH = join(root, "memory.db");
 process.env.MEMORY_PROPOSALS_PATH = join(root, "memory-proposals.json");
 // 巩固审计 diff 落点（2026-11-10 批 17 §三）：同样隔离
 process.env.MEMORY_CONSOLIDATE_DIFF_PATH = join(root, "memory-consolidate-diff.json");
-// 证据引文（2026-11-10 对标 Anthropic）默认关掉：别让既有用例真去扫跨会话记录；
-// 专测里显式打开（开关是每次请求读的，进程内翻转即可）。
-process.env.MEMORY_REVIEW_EVIDENCE = "false";
 process.env.PROJECTS_DB_PATH = join(root, "projects.sqlite");
 process.env.PROVIDERS_PATH = join(root, "providers.json");
 process.env.DELEGATIONS_DB_PATH = join(root, "delegations.sqlite");
@@ -41,7 +38,6 @@ const { Hono } = await import("hono");
 const { mountMemoryApi } = await import("./memory-api.ts");
 const { memoryEngine } = await import("./agent.ts");
 const { pendingProposalCount } = await import("./memory-consolidate.ts");
-type EvidenceHit = import("./agent.ts").EvidenceHit;
 
 type Generator = (input: { system: string; user: string }) => Promise<string | null>;
 
@@ -181,95 +177,6 @@ function idOf(user: string, content: string): string {
 	assert.ok(line, `输入清单里应包含「${content}」`);
 	return /id=([^\s]+)/.exec(line!)?.[1] ?? "";
 }
-
-test("整理建议带证据引文：命中挂 evidence；查不到 = null；开关关 = 字段不下发", async () => {
-	const engine = memoryEngine!;
-	engine.remember({ kind: "episode", scope: { type: "global" }, content: "证据测试：我先给结论再给细节" });
-	engine.remember({ kind: "fact", scope: { type: "global" }, content: "证据测试：养了一只猫" });
-	const generate: Generator = async ({ user }) =>
-		JSON.stringify({
-			proposals: [
-				{ keepId: idOf(user, "养了一只猫"), dropId: idOf(user, "我先给结论再给细节"), reason: "后者并进前者" },
-			],
-		});
-	// 假证据查找：只有"先给结论"那条命中，另一条没有出处
-	const findEvidence = async (needles: string[]) => {
-		const hits = new Map<string, EvidenceHit>();
-		for (const needle of needles) {
-			if (needle.includes("我先给结论")) {
-				hits.set(needle, { conversationId: "conv-1", at: 1234, role: "user", text: "…我先给结论再给细节…" });
-			}
-		}
-		return hits;
-	};
-
-	// 顶部把开关锁成了 false；这里显式开回来（开关每次请求都读，进程内翻转即可）
-	const previous = process.env.MEMORY_REVIEW_EVIDENCE;
-	process.env.MEMORY_REVIEW_EVIDENCE = "";
-	try {
-		const app = new Hono();
-		mountMemoryApi(app, { enabled: true, generate, findEvidence });
-		const reviewed = await app.request("/api/v1/agent/memory/consolidate/review", {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ scope: "global" }),
-		});
-		assert.equal(reviewed.status, 200);
-		const body = (await reviewed.json()) as {
-			proposals: Array<{ drop: { content: string }; evidence?: { conversationId: string; text: string } | null }>;
-		};
-		assert.equal(body.proposals.length, 1);
-		assert.ok(body.proposals[0]!.evidence, "命中应有证据引文");
-		assert.equal(body.proposals[0]!.evidence!.conversationId, "conv-1");
-		assert.ok(body.proposals[0]!.evidence!.text.includes("先给结论"), "引文应带原文片段");
-
-		// evidence 只进响应、不落待决文件（接口文档 §2.15.1"只存 id/理由/两端正文快照"口径）
-		const pendingRaw = JSON.parse(
-			readFileSync(join(root, "memory-proposals.json"), "utf8"),
-		) as { global?: { proposals: Array<Record<string, unknown>> } };
-		assert.equal(
-			"evidence" in pendingRaw.global!.proposals[0]!,
-			false,
-			"evidence 不应落待决文件",
-		);
-
-		// 查不到 = null，不挡应用（下一单证明 apply 照常）
-		const missGenerate: Generator = async ({ user }) =>
-			JSON.stringify({
-				proposals: [{ keepId: idOf(user, "养了一只猫"), dropId: idOf(user, "我先给结论再给细节"), reason: "并进" }],
-			});
-		const missApp = new Hono();
-		mountMemoryApi(missApp, {
-			enabled: true,
-			generate: missGenerate,
-			findEvidence: async () => new Map(),
-		});
-		const missed = await missApp.request("/api/v1/agent/memory/consolidate/review", {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ scope: "global" }),
-		});
-		assert.equal(missed.status, 200);
-		const missBody = (await missed.json()) as { proposals: Array<{ evidence: string | null }> };
-		assert.equal(missBody.proposals[0]!.evidence, null, "查不到应是 null 而不是缺字段");
-
-		// 开关关掉：字段整个不下发（JSON 序列化丢 undefined）
-		process.env.MEMORY_REVIEW_EVIDENCE = "false";
-		const offApp = new Hono();
-		mountMemoryApi(offApp, { enabled: true, generate, findEvidence });
-		const off = await offApp.request("/api/v1/agent/memory/consolidate/review", {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ scope: "global" }),
-		});
-		assert.equal(off.status, 200);
-		const offBody = (await off.json()) as { proposals: Array<Record<string, unknown>> };
-		assert.equal("evidence" in offBody.proposals[0]!, false, "开关关着时不应出现 evidence 字段");
-	} finally {
-		if (previous === undefined) delete process.env.MEMORY_REVIEW_EVIDENCE;
-		else process.env.MEMORY_REVIEW_EVIDENCE = previous;
-	}
-});
 
 test("整理记忆：只出建议不动库；应用落 supersededBy；忽略无副作用", async () => {
 	const engine = memoryEngine!;
@@ -805,3 +712,70 @@ test("范围清单：未开执事时只回我的记忆，条数与列表一致",
 	}
 });
 
+
+test("拆分长记忆：预览 → 应用 → 原文档案可读，原记录不再出现在列表", async () => {
+	const engine = memoryEngine!;
+	const long = [
+		"2026-11-16 记忆原子化落地：长记忆先写原文档案，再拆成多条原子事实。",
+		"原子必须带 docId 和 quote，quote 必须是原文里的逐字片段。",
+		"原记录不删除，只标记 archivedAt；归档后不再参与召回和默认列表。",
+		"原文档案默认不进每轮注入，需要核对时从记忆页打开。",
+		"导入的新记忆优先使用 frontmatter description，正文进档案。",
+		"拆分只做机械摘要，不调用模型；语义拆分以后单独接，仍然只出建议。",
+		"记忆页把「整理记忆」改成「拆分记忆」，原文档案单独一块，可看不可改。",
+		"拆完以后召回只拿短原子，同样的 2000 字预算能装更多条。",
+	].join("");
+	assert.ok(long.length > 200);
+	const record = engine.remember({ kind: "fact", scope: { type: "global" }, content: long, source: "test" });
+	const app = newApp();
+
+	const preview = await app.request("/api/v1/agent/memory/split/candidates?scope=global");
+	assert.equal(preview.status, 200);
+	const previewBody = (await preview.json()) as {
+		ok: boolean;
+		items: Array<{ id: string; atomCount: number; title: string }>;
+	};
+	assert.ok(previewBody.ok);
+	const candidate = previewBody.items.find((item) => item.id === record.id);
+	assert.ok(candidate, "长记录应进入拆分候选");
+	assert.ok(candidate.atomCount >= 2, "长记录应拆出多条原子");
+
+	const applied = await app.request("/api/v1/agent/memory/split/apply", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ scope: "global", ids: [record.id] }),
+	});
+	assert.equal(applied.status, 200);
+	const appliedBody = (await applied.json()) as {
+		documents: number;
+		atoms: number;
+		archived: number;
+	};
+	assert.equal(appliedBody.documents, 1);
+	assert.equal(appliedBody.archived, 1);
+	assert.ok(appliedBody.atoms >= 2);
+
+	const archived = engine.getRecord(record.id);
+	assert.ok(archived?.archivedAt);
+	assert.ok(archived?.docId);
+
+	const docs = await app.request("/api/v1/agent/memory/documents?scope=global");
+	assert.equal(docs.status, 200);
+	const docsBody = (await docs.json()) as { items: Array<{ id: string; title: string; chars: number }> };
+	const doc = docsBody.items.find((item) => item.id === archived?.docId);
+	assert.ok(doc, "原文档案列表应包含这份原文");
+
+	const docResponse = await app.request(`/api/v1/agent/memory/documents/${encodeURIComponent(doc!.id)}`);
+	assert.equal(docResponse.status, 200);
+	const docBody = (await docResponse.json()) as { document: { content: string } };
+	assert.ok(docBody.document.content.includes("原文档案默认不进每轮注入"));
+
+	const list = await app.request("/api/v1/agent/memory?scope=global&kind=fact&limit=200");
+	const listBody = (await list.json()) as {
+		canSplit: boolean;
+		items: Array<{ id: string; docId: string | null }>;
+	};
+	assert.equal(listBody.canSplit, true);
+	assert.ok(!listBody.items.some((item) => item.id === record.id), "归档长记录不再出现在列表");
+	assert.ok(listBody.items.some((item) => item.docId === doc!.id), "原子应指回原文档案");
+});

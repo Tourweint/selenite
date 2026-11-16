@@ -1,6 +1,7 @@
 import { appendFile, mkdir } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { COMPANIONS_ENABLED, partnersStore, resolvePartnerScope } from "./partners.ts";
+import { flagEnabled } from "./flags.ts";
 import { runtimeModelInfo } from "./provider.ts";
 import { TASK_CONVERSATION_PREFIX } from "./agent/shared.ts";
 
@@ -18,7 +19,8 @@ import { TASK_CONVERSATION_PREFIX } from "./agent/shared.ts";
  * 边界（方案 D-丁 / D-戊 / D-己）：
  *   - 只导主对话：`task-` 专线、群会话、执事会话一律不导（混进主人语料会串人格）；
  *   - 只写自己 `.data` 下的文件，不推 HTTP、不碰 voicevault 进程；
- *   - `PERSONA_EXPORT_ENABLED` 默认关（未配置 / false / 0 都不写），启用要 .env 显式配；
+ *   - `PERSONA_EXPORT_ENABLED` 默认开（2026-11-16 用户翻案，原默认关；插件页「对话归档（送）」可关）：
+ *     未配置按清单默认走，显式 false / 0 / off 一律不写；
  *   - 写失败只 warn，绝不打断对话；日志只记轮数 / 字数 / 文件名，**不记对话原文**。
  *
  * assistant 文本取的是**本轮最终回复**：`settled.ts` 的 `plain` 是请求时刻的消息快照
@@ -78,8 +80,7 @@ export interface PersonaExportDeps {
  * 未配置、空串、false/0/off、拼错的值一律按关处理——对外送数据默认不动。
  */
 export function personaExportEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	const raw = env.PERSONA_EXPORT_ENABLED?.trim().toLowerCase();
-	return raw === "true" || raw === "1" || raw === "on";
+	return flagEnabled("PERSONA_EXPORT_ENABLED", env);
 }
 
 function defaultIsGroupSession(internalId: number): boolean {

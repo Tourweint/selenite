@@ -15,6 +15,7 @@ import type { MemoryStore } from "./store.ts";
 import {
 	scopeKey,
 	type InjectOptions,
+	type MemoryDocument,
 	type MemoryKind,
 	type MemoryRecord,
 	type MemoryScope,
@@ -143,13 +144,38 @@ export class MemoryEngine {
 		/** 跨 scope 去重池（2026-11-15 来源导入用；不传 = 只查本 scope）。 */
 		dedupeScopes?: string[];
 	}): ImportOutcome {
-		return importMemories(
-			this.store,
-			scopeKey(input.scope),
-			input.items,
-			input.now ?? this.now(),
-			{ ...(input.dedupeScopes ? { dedupeScopes: input.dedupeScopes } : {}) },
-		);
+		return this.importItemsToScope(scopeKey(input.scope), input.items, {
+			...(input.now ? { now: input.now } : {}),
+			...(input.dedupeScopes ? { dedupeScopes: input.dedupeScopes } : {}),
+		});
+	}
+
+	/**
+	 * 已换算好的 scope key 直接导入（2026-11-16 原子拆分用）。
+	 * 与 `importItems` 同一套校验 / 去重；拆分的 scope 已经是 store 里的 key。
+	 */
+	importItemsToScope(
+		scope: string,
+		items: ImportEntry[],
+		options: { now?: Date; dedupeScopes?: string[] } = {},
+	): ImportOutcome {
+		return importMemories(this.store, scope, items, options.now ?? this.now(), {
+			...(options.dedupeScopes ? { dedupeScopes: options.dedupeScopes } : {}),
+		});
+	}
+
+	/**
+	 * 归档一条记忆（2026-11-16 原子化）：不删，置 `archivedAt` 后不再进召回 / 默认列表。
+	 * 原文由调用方先写进 `memory_documents`，这里只把原记录退役。
+	 */
+	archive(id: string, docId: string | null = null): MemoryRecord | null {
+		const record = this.store.get(id);
+		if (!record) return null;
+		this.store.patch(id, {
+			archivedAt: this.now().toISOString(),
+			...(docId ? { docId } : {}),
+		});
+		return this.store.get(id) ?? null;
 	}
 
 	/**
@@ -424,6 +450,33 @@ export class MemoryEngine {
 	 */
 	getRecord(id: string): MemoryRecord | undefined {
 		return this.store.get(id);
+	}
+
+	// ── 原文档案（2026-11-16 记忆原子化）──────────────────────
+
+	/** 写入 / 更新一份原文档案。调用方负责先把 content 定好。 */
+	putDocument(document: MemoryDocument): void {
+		this.store.putDocument(document);
+	}
+
+	/** 按 id 取原文档案（含正文）。 */
+	getDocument(id: string): MemoryDocument | undefined {
+		return this.store.getDocument(id);
+	}
+
+	/** 原文档案列表；默认不带正文（列表页只需要 title / chars / 来源）。 */
+	listDocuments(options: { scopes?: string[]; limit?: number; offset?: number; includeContent?: boolean } = {}): MemoryDocument[] {
+		return this.store.searchDocuments({
+			...(options.scopes?.length ? { scopes: options.scopes } : {}),
+			limit: options.limit ?? 100,
+			offset: options.offset ?? 0,
+			...(options.includeContent === undefined ? {} : { includeContent: options.includeContent }),
+		});
+	}
+
+	/** 某个 scope 的原文档案份数。 */
+	countDocuments(scope: string): number {
+		return this.store.countDocuments(scope);
 	}
 
 	/**

@@ -135,6 +135,14 @@ export class BasicConsolidator implements Consolidator {
 
 // ── 已存记忆导入（2026-11-08 扫尾批 6 §三）──────────────────
 
+/** 原文档案（2026-11-16 原子化）：导入时随原子一起落库的长文。 */
+export interface ImportDocument {
+	title?: string;
+	content: string;
+	sourceRef?: string;
+	sha256?: string;
+}
+
 /** 导入单条（已通过 API 层形状校验，这里再做内容校验）。 */
 export interface ImportEntry {
 	text: string;
@@ -147,6 +155,16 @@ export interface ImportEntry {
 	 * 外部导入区按这个前缀分组。
 	 */
 	source?: string;
+	/**
+	 * 原子化的出处（2026-11-16）：`docId` 指向原文档案，`quote` 是原文逐字依据。
+	 * 不传 = 普通导入记录（旧行为）。
+	 */
+	docId?: string;
+	quote?: string;
+	quoteStart?: number;
+	quoteEnd?: number;
+	/** 随这条原子一起落库的原文档案（给新导入用；已存在文档时只传 docId）。 */
+	document?: ImportDocument;
 }
 
 export interface ImportOutcome {
@@ -217,6 +235,28 @@ export function importMemories(
 				? Math.min(1, Math.max(0.1, entry.importance))
 				: IMPORT_DEFAULT_IMPORTANCE;
 		const createdAt = resolveImportedTime(entry.createdAt, now);
+		const source =
+			typeof entry.source === "string" && entry.source.trim()
+				? entry.source.trim().slice(0, 80)
+				: "imported";
+
+		// 原文档案：新导入随原子一起落；只有记录真的会新增时才写，避免重复导入留下孤儿文档。
+		let docId = typeof entry.docId === "string" && entry.docId.trim() ? entry.docId.trim() : null;
+		if (!docId && entry.document && entry.document.content.trim()) {
+			docId = crypto.randomUUID();
+			store.putDocument({
+				id: docId,
+				scope,
+				title: entry.document.title?.trim() || text.slice(0, 40),
+				content: entry.document.content,
+				source,
+				sourceRef: entry.document.sourceRef?.trim() || null,
+				sha256: entry.document.sha256?.trim() || null,
+				chars: entry.document.content.length,
+				createdAt,
+				updatedAt: null,
+			});
+		}
 
 		const record: MemoryRecord = {
 			id: crypto.randomUUID(),
@@ -225,16 +265,24 @@ export function importMemories(
 			content: text,
 			importance,
 			veracity: "imported" as Veracity,
-			source:
-				typeof entry.source === "string" && entry.source.trim()
-					? entry.source.trim().slice(0, 80)
-					: "imported",
+			source,
 			createdAt,
 			validUntil: null,
 			supersededBy: null,
 			recallCount: 0,
 			lastRecalledAt: null,
 			expiresAt: null,
+			docId,
+			quote: typeof entry.quote === "string" && entry.quote.trim() ? entry.quote : null,
+			quoteStart:
+				typeof entry.quoteStart === "number" && Number.isFinite(entry.quoteStart)
+					? Math.max(0, Math.floor(entry.quoteStart))
+					: null,
+			quoteEnd:
+				typeof entry.quoteEnd === "number" && Number.isFinite(entry.quoteEnd)
+					? Math.max(0, Math.floor(entry.quoteEnd))
+					: null,
+			archivedAt: null,
 		};
 		store.put(record);
 		added.push(record);

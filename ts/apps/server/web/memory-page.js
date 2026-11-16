@@ -7,9 +7,9 @@
  * app.js 文末，各模块顶层只做声明、常量与事件监听注册。
  */
 
-import { openConversation } from "./chat-open.js";
+import { el } from "./dom.js";
 import { attr, esc } from "./markdown.js";
-import { applyMemoryProposalA, clearMemoryProposalCard, dismissMemoryProposalA, forgetMemoryItem, loadMemoryExternal, loadMemoryGroup, loadMemoryReviewState, memoryItemMarkupA, openMemoryConsolidateDialog, supersedeMemoryItem } from "./memory-items.js";
+import { applyMemoryProposalA, clearMemoryProposalCard, dismissMemoryProposalA, forgetMemoryItem, loadMemoryExternal, loadMemoryGroup, loadMemoryReviewState, memoryItemMarkupA, openMemoryConsolidateDialog, openMemorySplitDialog, supersedeMemoryItem } from "./memory-items.js";
 import { request } from "./net.js";
 import { currentSettingsPage } from "./route.js";
 import { sectionMarkup } from "./settings-atoms.js";
@@ -44,10 +44,16 @@ const memoryPageState = {
   batch: null,
   canConsolidate: false,
   canImport: false,
+  canSplit: false,
   consolidateJob: false,
+  /** 原文档案列表（拆分后可看，不参与召回） */
+  docs: null,
   externalLines: [],
   pollTimer: 0,
 };
+
+/** 记忆页「回到顶部」按钮的 scroll 监听；随记忆页装卸（离开设置页/重进时摘掉）。 */
+let memoryBacktopHandler = null;
 
 function memoryPageAlive(gen) {
   return (
@@ -61,6 +67,15 @@ function stopMemoryPolling() {
   if (memoryPageState.pollTimer) {
     clearInterval(memoryPageState.pollTimer);
     memoryPageState.pollTimer = 0;
+  }
+}
+
+/** 卸掉「回到顶部」监听。只在记忆页重新装配时调（wireMemorySettings / renderSettings 离页），
+ *  不能塞进 stopMemoryPolling —— 后者每次读整理状态都会调，会把回顶监听一起摘掉。 */
+function stopMemoryBacktop() {
+  if (memoryBacktopHandler) {
+    el.settingsScroll?.removeEventListener("scroll", memoryBacktopHandler);
+    memoryBacktopHandler = null;
   }
 }
 
@@ -135,7 +150,8 @@ function memoryGroupOf(kind, total = 0) {
  *  条目右上角照常带来源标（memorySourceLabel 把 import:* 标成「导入」），不再单开一区。 */
 
 function memoryGroupHint(kind) {
-  if (kind === "preference") return "每轮都会想起";
+  // 偏好不再标「每轮都会想起」：它只是召回时排在前面成段（engine.ts buildContext），
+  // 不进当轮候选集时一样不会带（2026-11-16 用户纠正后摘掉这句解释）。
   if (kind === "intention") return "未兑现的，优先想起";
   // 「日常经过 · 默认收起」2026-11-15 摘掉：所有分组都默认收起了，这句成了废话
   return "";
@@ -185,18 +201,33 @@ function memorySettingsMarkup() {
       </summary>
       <div class="mem-a-work-body" id="mem-a-work-list"></div>
     </details>
+    <details class="mem-a-work mem-a-docs" id="mem-a-docs" hidden>
+      <summary class="mem-a-work-head">
+        <svg class="mem-a-chev mem-a-work-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+        <span class="mem-a-gtitle">原文档案</span>
+        <span class="mem-a-gcount" id="mem-a-docs-count">0</span>
+        <span class="mem-a-ghint">拆分后的原文 · 只读</span>
+      </summary>
+      <div class="mem-a-work-body" id="mem-a-docs-list"></div>
+    </details>
     <div class="mem-a-external" id="mem-a-external" hidden>
       <div class="mem-a-external-main">
         <div class="mem-a-external-title">一生记忆库</div>
         <div class="mem-a-external-line" id="mem-a-external-line"></div>
       </div>
       <button class="ghost mem-act" type="button" id="mem-a-ext-open" hidden>查看</button>
-    </div>`,
+    </div>
+    <button class="mem-a-backtop" type="button" id="mem-a-backtop" hidden
+      aria-label="回到顶部" data-tip="回到顶部">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m18 15-6-6-6 6"/><path d="M12 19V9"/></svg>
+    </button>`,
     "",
     `<div class="mem-a-head-actions">
       <button class="ghost mem-act" type="button" id="mem-import" hidden>导入</button>
-      <button class="btn-primary mem-a-consolidate" type="button" id="mem-consolidate" hidden
-        data-tip="整理记忆 = 让模型回看最近的记忆和原始对话，找出重复、过时、说法不一致的条目。&#10;&#10;它只给建议：你逐条点「应用」才会把旧的那条标成过时；不会自动删，也没有「全部应用」。">整理记忆</button>
+      <button class="ghost mem-act" type="button" id="mem-consolidate" hidden
+        data-tip="整理 = 让辅助模型回看最近的记忆，找出重复、过时、说法不一致的条目。&#10;&#10;它只给建议：你逐条点「应用」才会把旧的那条标成过时；不会自动删，也没有「全部应用」。&#10;&#10;这一步会调用一次辅助模型（单独请求，不占当前对话上下文），会消耗 token。">整理</button>
+      <button class="btn-primary mem-a-split" type="button" id="mem-split" hidden
+        data-tip="拆分记忆 = 把一条超过 200 字、记了很多事的长记忆，拆成几条短原子；完整原文会存进「原文档案」，不删任何东西。&#10;&#10;纯代码拆分，不调用模型、不消耗 token；按文件摘要或正文句子机械切分。">拆分记忆</button>
     </div>`,
   );
 }
@@ -204,6 +235,8 @@ function memorySettingsMarkup() {
 async function wireMemorySettings() {
   const gen = ++memoryPageState.gen;
   stopMemoryPolling();
+  stopMemoryBacktop();
+  wireMemoryBacktop(gen);
   memoryPageState.scope = "global";
   memoryPageState.q = "";
   memoryPageState.kind = "";
@@ -273,6 +306,9 @@ async function wireMemorySettings() {
   });
 
   document.getElementById("mem-import")?.addEventListener("click", () => void openMemoryImportDialog(gen));
+  document.getElementById("mem-split")?.addEventListener("click", () => {
+    void openMemorySplitDialog(gen);
+  });
   document.getElementById("mem-consolidate")?.addEventListener("click", () => {
     void openMemoryConsolidateDialog(gen);
   });
@@ -290,6 +326,11 @@ async function wireMemorySettings() {
 
   const groups = document.getElementById("mem-a-groups");
   groups?.addEventListener("click", (event) => {
+    const doc = event.target.closest?.("[data-mem-doc]");
+    if (doc) {
+      void openMemoryDocument(doc.getAttribute("data-mem-doc") || "");
+      return;
+    }
     const head = event.target.closest?.(".mem-a-ghead");
     if (head) {
       const kind = head.closest("[data-mem-group]")?.getAttribute("data-mem-group") || "";
@@ -318,14 +359,13 @@ async function wireMemorySettings() {
     if (forget) void forgetMemoryItem(forget.getAttribute("data-mem-forget") || "", gen);
   });
 
+  document.getElementById("mem-a-docs-list")?.addEventListener("click", (event) => {
+    const doc = event.target.closest?.("[data-doc-id]");
+    if (doc) void openMemoryDocument(doc.getAttribute("data-doc-id") || "");
+  });
+
   const props = document.getElementById("mem-a-props");
   props?.addEventListener("click", (event) => {
-    const evidence = event.target.closest?.(".mem-prop-evidence.is-hit[data-conv]");
-    if (evidence) {
-      const conversationId = evidence.getAttribute("data-conv");
-      if (conversationId) void openConversation(conversationId);
-      return;
-    }
     const apply = event.target.closest?.("[data-prop-apply]");
     if (apply) {
       void applyMemoryProposalA(apply.closest(".mem-prop"), gen);
@@ -350,9 +390,31 @@ async function wireMemorySettings() {
     loadMemoryPeople(gen),
     loadMemorySummary(gen),
     loadMemoryWork(gen),
+    loadMemoryDocuments(gen),
     loadMemoryReviewState(gen),
     loadMemoryExternal(gen),
   ]);
+}
+
+/** 回到顶部（2026-11-16）：分组/原文档案一展开能滚很长，页内给一枚浮动按钮，
+ *  跟随内容列滚动显隐；点在设置页自己的滚动容器上做 smooth 回顶。 */
+function wireMemoryBacktop(gen) {
+  const button = document.getElementById("mem-a-backtop");
+  const scroll = el.settingsScroll;
+  if (!button || !scroll) return;
+  const update = () => {
+    if (!memoryPageAlive(gen)) return;
+    button.hidden = scroll.scrollTop < 240;
+  };
+  memoryBacktopHandler = update;
+  scroll.addEventListener("scroll", update, { passive: true });
+  button.addEventListener("click", () => {
+    // 直接设 scrollTop：内嵌 webview 里平滑滚动（scrollTo smooth / rAF）都是 no-op，
+    // 一步到顶最可靠；按钮随 scroll 事件自动收起。
+    scroll.scrollTop = 0;
+    update();
+  });
+  update();
 }
 
 /** 导入弹窗（2026-11-15 第二轮，方案 docs/设计方案/2026-11-15-记忆导入第二轮（全量来源与勾选批量）.md）：
@@ -731,6 +793,7 @@ function switchMemoryScope(scope, gen) {
   renderMemoryChips();
   void loadMemorySummary(gen);
   void loadMemoryWork(gen);
+  void loadMemoryDocuments(gen);
   void loadMemoryReviewState(gen);
 }
 
@@ -767,6 +830,7 @@ async function loadMemorySummary(gen) {
     memoryPageState.total = Number(data.total) || memoryPageState.counts.all;
     memoryPageState.canConsolidate = data.canConsolidate === true;
     memoryPageState.canImport = data.canImport === true;
+    memoryPageState.canSplit = data.canSplit === true;
     memoryPageState.consolidateJob = data.consolidateJob === true;
     totalEl.textContent = String(memoryPageState.counts.all);
     // 搜索时计数是过滤后的，不能拿它覆盖"这个人一共有多少条"
@@ -849,15 +913,94 @@ async function loadMemoryWork(gen) {
   }
 }
 
+/** 原文档案（拆分后的长文）：列表只给标题/字数/来源，点开才拉正文。 */
+async function loadMemoryDocuments(gen) {
+  const card = document.getElementById("mem-a-docs");
+  const countEl = document.getElementById("mem-a-docs-count");
+  const list = document.getElementById("mem-a-docs-list");
+  if (!card || !countEl || !list) return;
+  const scope = memoryPageState.scope;
+  card.hidden = false;
+  countEl.textContent = "…";
+  try {
+    const response = await request(
+      `/api/v1/agent/memory/documents?scope=${encodeURIComponent(scope)}&limit=200`,
+      { cache: "no-store" },
+    );
+    if (!memoryPageAlive(gen) || memoryPageState.scope !== scope) return;
+    if (response.status === 404) {
+      card.hidden = true;
+      return;
+    }
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.message || String(response.status));
+    const items = Array.isArray(data.items) ? data.items : [];
+    const total = Number(data.total ?? items.length) || 0;
+    memoryPageState.docs = items;
+    countEl.textContent = String(total);
+    card.hidden = total === 0;
+    if (!items.length) {
+      list.replaceChildren();
+      return;
+    }
+    list.innerHTML = items
+      .map((doc) => {
+        const file = String(doc.sourceRef || "").split(/[\\/]/).pop() || "";
+        return `<button class="mem-a-work-row mem-doc-row" type="button" data-doc-id="${attr(doc.id)}">
+          <span class="mem-a-work-date">${esc(memoryShortDate(doc.createdAt) || "—")}</span>
+          <span class="mem-a-work-main">
+            <span class="mem-a-work-text">${esc(doc.title || "未命名原文")}</span>
+            <span class="mem-a-work-meta">${esc(memorySourceLabel(doc.source))} · ${Number(doc.chars) || 0} 字${file ? ` · ${esc(file)}` : ""}</span>
+          </span>
+        </button>`;
+      })
+      .join("");
+  } catch (error) {
+    if (!memoryPageAlive(gen) || memoryPageState.scope !== scope || error.message === "forbidden") return;
+    countEl.textContent = "—";
+    list.innerHTML = `<div class="set-hint is-error">原文档案读不到：${esc(error.message)}</div>`;
+  }
+}
+
+/** 读一份原文并弹层显示；只读，不提供编辑/删除。 */
+async function openMemoryDocument(id) {
+  if (!id) return;
+  try {
+    const response = await request(`/api/v1/agent/memory/documents/${encodeURIComponent(id)}`, {
+      cache: "no-store",
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.message || String(response.status));
+    const doc = data.document || {};
+    // 原文档案存的是整份文件（含 frontmatter，逐字引文的偏移依赖它）；
+    // 给人阅读时剥掉 frontmatter，别让 name/description/metadata 抢正文的位置。
+    const readable = String(doc.content || "").replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "");
+    openModal(doc.title || "原文", (body) => {
+      body.innerHTML = `<div class="mem-doc-meta">${esc(memorySourceLabel(doc.source))} · ${Number(doc.chars) || 0} 字 · ${esc(memoryShortDate(doc.createdAt) || "")}</div>
+        <pre class="mem-doc-body">${esc(readable)}</pre>
+        <div class="modal-actions"><button class="modal-primary" type="button" data-modal-ok>关闭</button></div>`;
+      body.querySelector("[data-modal-ok]")?.addEventListener("click", closeModal);
+    }, { className: "modal-doc" });
+  } catch (error) {
+    if (error.message !== "forbidden") toast(`原文读不到：${error.message}`);
+  }
+}
+
 function updateMemoryControls() {
   const consolidate = document.getElementById("mem-consolidate");
   const importButton = document.getElementById("mem-import");
+  const split = document.getElementById("mem-split");
   if (consolidate) consolidate.hidden = !memoryPageState.canConsolidate;
   if (importButton) importButton.hidden = !memoryPageState.canImport;
+  if (split) split.hidden = !memoryPageState.canSplit;
   const running = memoryPageState.status?.running === true || memoryPageState.batch?.running === true;
   if (consolidate) {
     consolidate.disabled = running;
-    consolidate.innerHTML = running ? "整理中…" : "整理记忆";
+    consolidate.textContent = running ? "整理中…" : "整理";
+  }
+  if (split) {
+    split.disabled = running;
+    split.textContent = running ? "拆分中…" : "拆分记忆";
   }
 }
 
@@ -936,4 +1079,4 @@ function renderMemoryGroupBody(kind) {
   body.innerHTML = memoryGroupBodyMarkup(memoryGroupOf(kind), kind);
 }
 
-export { MEMORY_A_DEFAULT_OPEN, MEMORY_A_PAGE_SIZE, loadMemoryPeople, loadMemorySummary, memoryElapsedSeconds, memoryGroupBodyMarkup, memoryGroupHint, memoryGroupOf, memoryPageAlive, memoryPageState, memorySettingsMarkup, memoryShortDate, memorySourceLabel, memoryStatusTime, openMemoryImportDialog, renderMemoryChips, renderMemoryGroupBody, renderMemoryGroups, renderMemoryPeople, startMemoryPolling, stopMemoryPolling, switchMemoryScope, updateMemoryControls, wireMemorySettings };
+export { MEMORY_A_DEFAULT_OPEN, MEMORY_A_PAGE_SIZE, loadMemoryDocuments, loadMemoryPeople, loadMemorySummary, memoryElapsedSeconds, memoryGroupBodyMarkup, memoryGroupHint, memoryGroupOf, memoryPageAlive, memoryPageState, memorySettingsMarkup, memoryShortDate, memorySourceLabel, memoryStatusTime, openMemoryImportDialog, renderMemoryChips, renderMemoryGroupBody, renderMemoryGroups, renderMemoryPeople, startMemoryPolling, stopMemoryPolling, switchMemoryScope, updateMemoryControls, wireMemorySettings };

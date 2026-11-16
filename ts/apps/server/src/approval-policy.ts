@@ -48,6 +48,8 @@ import { TOOL_CAPABILITIES, capabilityOf, type ToolCapability } from "./tool-cap
 // routine_manage（2026-11-08 刀二 E4）：执事给自己建 / 停 / 删例行规则 = 新建常驻
 // 自主轮，同样进闸门；`ROUTINE_SELF_SERVICE=false` 时整个工具不上架（一行回滚）。
 // persona_recall（2026-11-09 persona接入批一）：起 python 子进程查 persona-metric，按字面进闸门；命令行拼死（python + 固定脚本），模型自由度只有 query 文本。
+// persona_write（2026-11-17 persona_write 批）：起 python 子进程往主人一生库写 user_statement；
+// 起进程进闸门之外还进高危清单（capability critical）——每写必弹审批，「明确让写了才写」。
 export const WRITE_TOOLS = new Set([
 	"write",
 	"edit",
@@ -60,6 +62,7 @@ export const WRITE_TOOLS = new Set([
 	"group_manage",
 	"routine_manage",
 	"persona_recall",
+	"persona_write",
 ]);
 
 export interface ApprovalPolicy {
@@ -86,6 +89,9 @@ export const DEFAULT_CRITICAL_TOOLS = [
 	"partner_manage",
 	"send_to_agent",
 	"routine_manage",
+	// persona_write（2026-11-17 persona_write 批）：往主人一生库落字，每写必弹审批
+	// （「明确让写了才写」的 enforcement）；与 capability critical 双向断言等值。
+	"persona_write",
 ] as const;
 
 /**

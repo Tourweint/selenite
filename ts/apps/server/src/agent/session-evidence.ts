@@ -1,14 +1,14 @@
 /**
- * 归档列表与检索（列表 / 搜索 / 证据命中）
+ * 归档列表与检索（列表 / 搜索）
  *
  * 2026-11-13 从 session.ts 的 L2262–L2457 整段切出；正文原文搬运，未改一行实现。
+ * 证据引文查找 `findEvidence` 已退役（2026-11-17，方案 docs/设计方案/2026-11-17-整理建议证据引文退役.md）。
  */
 
 import { projectsStore } from "../projects.ts";
 import { readLlmConfig } from "../provider.ts";
 import { getHarness } from "./lifecycle.ts";
 import { CTX, ChatKinds, ChatProjects, Chats } from "./shared.ts";
-import { locateEvidence, normalizeForGrounding } from "@lifediary/memory";
 import { openChat } from "./session-open.ts";
 import { readTranscript } from "./session-transcript.ts";
 import { pruneChatMetaOrphans, readChatMeta } from "./session-meta.ts";
@@ -112,62 +112,4 @@ export async function searchTranscripts(q: string, limit = 20): Promise<SearchHi
 		}
 	}
 	return hits;
-}
-
-export interface EvidenceHit {
-	conversationId: string;
-	at: number;
-	role: "user" | "assistant";
-	text: string;
-}
-
-export async function findEvidence(
-	needles: string[],
-	options: { chatLimit?: number; transcriptLimit?: number } = {},
-): Promise<Map<string, EvidenceHit>> {
-	const found = new Map<string, EvidenceHit>();
-	// 键用原始串；匹配用首行。归一化后不足 4 字的锚点太泛（两个字就能撞上一堆闲聊），直接跳过。
-	const pending = needles.filter(
-		(needle) => typeof needle === "string" && normalizeForGrounding(needle.split("\n")[0] ?? "").length >= 4,
-	);
-	if (pending.length === 0) return found;
-
-	let chats: ChatIndexEntry[];
-	try {
-		chats = await listChats(options.chatLimit ?? 200);
-	} catch {
-		// 列表读不出来 = 这次没证据，建议照常返回
-		return found;
-	}
-
-	for (const chat of chats) {
-		if (pending.length === 0) break;
-		try {
-			const resolved = await openChat(chat.conversationId);
-			if (!resolved) continue;
-			const messages = await readTranscript(resolved, options.transcriptLimit ?? 200);
-			for (const message of messages) {
-				if (pending.length === 0) break;
-				// 逐条剥离已命中的：一条正文只需要一个出处
-				for (let index = pending.length - 1; index >= 0; index -= 1) {
-					const needle = pending[index]!;
-					const snippet = locateEvidence(message.text, needle);
-					if (!snippet) continue;
-					found.set(needle, {
-						conversationId: chat.conversationId,
-						at: message.at,
-						role: message.role,
-						text: snippet,
-					});
-					pending.splice(index, 1);
-				}
-			}
-		} catch (error) {
-			// 单会话读失败不挡整查（与 searchTranscripts 同口径）
-			console.warn(
-				`[evidence] 会话 ${chat.conversationId} 读取失败: ${error instanceof Error ? error.message : String(error)}`,
-			);
-		}
-	}
-	return found;
 }

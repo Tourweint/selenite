@@ -7,7 +7,6 @@
  * app.js 文末，各模块顶层只做声明、常量与事件监听注册。
  */
 
-import { openConversation } from "./chat-open.js";
 import { attr, esc } from "./markdown.js";
 import { request } from "./net.js";
 import { rowMarkup, sectionMarkup } from "./settings-atoms.js";
@@ -32,7 +31,7 @@ const MEMORY_KIND_LABEL = {
 const MEMORY_KIND_ORDER = ["preference", "intention", "fact", "experience", "entity", "episode", "work"];
 /* 组头悬停解释（2026-11-08）：组标题挪到卡片外，"经历是干啥的"这类疑问悬停即答 */
 const MEMORY_KIND_TIPS = {
-  preference: "你的喜好与习惯（例如「喜欢简洁的汇报」）。每轮对话开头都会被想起。",
+  preference: "你的喜好与习惯（例如「喜欢简洁的汇报」）。召回时排在前面成段，不相关时不会带。",
   intention: "还没兑现的打算（例如「下周开始跑步」）。未过期时优先想起；到期后自动变成普通事实。",
   fact: "关于你和你的生活的客观事实（例如「家里有两只猫」），按相关度召回。",
   experience: "这类活下次可以怎么做。从你的纠正里提炼出来，不会过期。",
@@ -52,7 +51,7 @@ function memorySettingsMarkupLegacy() {
     `<div class="card">
       ${rowMarkup(
         "当前状态",
-        "偏好会在每轮对话开头被想起；其余记忆按相关度召回。",
+        "记忆按相关度召回；命中的偏好排在前面成段，不相关时不会带。",
         `<span class="kv" id="mem-status">读取中…</span>`,
       )}
       <div class="divider"></div>
@@ -267,25 +266,11 @@ function memoryProposalMarkup(item) {
   const keep = String(item.keep?.content || item.keepId || "");
   const drop = String(item.drop?.content || item.dropId || "");
   const reason = String(item.reason || "");
-  // 证据引文（2026-11-10 对标 Anthropic「做梦」）：有 = 可点回原对话核对；
-  // null = 没找到（导入 / 日记来源的记录本来就不在对话里），不挡应用；
-  // undefined（服务端开关关着没下发）= 整个块不渲染。
-  let evidenceBlock = "";
-  if (item.evidence !== undefined) {
-    const ev = item.evidence && typeof item.evidence === "object" ? item.evidence : null;
-    if (ev && ev.text) {
-      evidenceBlock = `<button class="mem-prop-evidence is-hit" type="button"${
-        ev.conversationId ? ` data-conv="${attr(ev.conversationId)}"` : ""
-      } data-tip="原始出处${ev.conversationId ? "，点击跳回原对话" : ""}">${esc(ev.text)}</button>`;
-    } else {
-      evidenceBlock = `<div class="mem-prop-evidence is-miss">未找到原始出处（导入或日记来源的记录不在对话里），不挡应用</div>`;
-    }
-  }
+  // 证据引文（原始出处反查）已退役（2026-11-17）：原子化后逐字匹配条条落空，服务端不再下发 evidence。
   return `<div class="mem-prop" data-keep="${esc(item.keepId)}" data-drop="${esc(item.dropId)}">
     <div class="mem-prop-line"><span class="mem-prop-tag is-keep">保留</span><span class="mem-prop-text">${esc(keep)}</span></div>
     <div class="mem-prop-line"><span class="mem-prop-tag is-drop">收编</span><span class="mem-prop-text">${esc(drop)}</span></div>
     ${reason ? `<div class="mem-prop-reason">${esc(reason)}</div>` : ""}
-    ${evidenceBlock}
     <div class="mem-prop-actions">
       <button class="ghost mem-act" type="button" data-prop-apply>应用</button>
       <button class="ghost mem-act" type="button" data-prop-ignore>忽略</button>
@@ -297,11 +282,6 @@ function wireMemoryProposalActions(box) {
   for (const card of box.querySelectorAll(".mem-prop")) {
     const apply = card.querySelector("[data-prop-apply]");
     const ignore = card.querySelector("[data-prop-ignore]");
-    // 证据引文可点回原对话（没有 conversationId 就只是静态片段，点了不动作）
-    card.querySelector(".mem-prop-evidence.is-hit[data-conv]")?.addEventListener("click", (event) => {
-      const conversationId = event.currentTarget?.getAttribute("data-conv");
-      if (conversationId) void openConversation(conversationId);
-    });
     apply?.addEventListener("click", async () => {
       const keepId = card.dataset.keep;
       const dropId = card.dataset.drop;

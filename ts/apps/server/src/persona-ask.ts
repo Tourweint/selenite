@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { flagEnabled } from "./flags.ts";
 
 /**
  * persona-metric 记忆库检索（2026-11-09 persona 接入批一）。
@@ -103,9 +104,7 @@ export interface PersonaAskDeps {
  * 双闸都过才注册工具（见 lifecycle.ts）。
  */
 export function personaAskEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	const raw = env.PERSONA_MEMORY_ENABLED?.trim().toLowerCase();
-	if (!raw) return true;
-	return raw !== "false" && raw !== "0" && raw !== "off";
+	return flagEnabled("PERSONA_MEMORY_ENABLED", env);
 }
 
 /** ask.py 路径与 Python 命令都非空才算可用（默认态未配置 → 工具不上架）。 */

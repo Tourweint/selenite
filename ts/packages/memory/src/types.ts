@@ -140,6 +140,47 @@ export interface MemoryRecord {
 	 */
 	usageCount?: number;
 	lastUsedAt?: string | null;
+	/**
+	 * 原文档案 id（2026-11-16 记忆原子化）。
+	 *
+	 * 非空 = 这条记录是从一份原文里拆出来的原子事实；`quote` 是原文里的逐字依据。
+	 * 原文本体在 `memory_documents`，默认不进召回；原子记录才进召回。
+	 */
+	docId?: string | null;
+	/** 原文里的逐字引文（必须能在 document.content 里找到）。 */
+	quote?: string | null;
+	/** 引文在原文里的字符偏移（可空；有就用于高亮/核对）。 */
+	quoteStart?: number | null;
+	quoteEnd?: number | null;
+	/**
+	 * 归档时间（2026-11-16）。
+	 *
+	 * 非空 = 这条记录不再参与召回与默认列表，但仍保留可查。
+	 * 与 `supersededBy` 的分工：superseded 是"被另一条取代"；archived 是"被拆开/退役"。
+	 * 长记录拆成原子后，原记录走 archived，不删除。
+	 */
+	archivedAt?: string | null;
+}
+
+/**
+ * 原文档案（2026-11-16 记忆原子化）。
+ *
+ * 长文不是记忆：导入的记忆文件、项目 changelog、一次长对话的整理稿都放这里。
+ * 默认不进召回；记忆页可看、可核对、可重新拆。原子记录通过 `docId` 指回它。
+ */
+export interface MemoryDocument {
+	id: string;
+	scope: string;
+	title: string;
+	content: string;
+	/** 来源：`import:<sourceId>` / `conversation` / `manual` … */
+	source: string;
+	/** 文件路径 / 会话 id / 轮次等可回查指针 */
+	sourceRef: string | null;
+	sha256: string | null;
+	chars: number;
+	createdAt: string;
+	updatedAt: string | null;
 }
 
 /** 抽取层产出、尚未入库的候选 */

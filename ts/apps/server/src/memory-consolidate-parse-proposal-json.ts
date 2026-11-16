@@ -13,28 +13,24 @@
  * 原始错误只留摘要（可能带上游地址）。
  */
 
-import type { EvidenceHit } from "./agent.ts";
 import { auxiliaryModel } from "./auxiliary.ts";
 import { currentModels, isFaux, readLlmConfig } from "./provider.ts";
 import { contentText } from "@earendil-works/pi-ai";
 import type { MemoryRecord, MemoryScope } from "@lifediary/memory";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { flagEnabled } from "./flags.ts";
 
 export function consolidateLlmEnabled(): boolean {
 	return !isOff(process.env.MEMORY_CONSOLIDATE_LLM);
 }
 
 export function consolidateJobEnabled(): boolean {
-	return !isOff(process.env.MEMORY_CONSOLIDATE_JOB);
+	return flagEnabled("MEMORY_CONSOLIDATE_JOB");
 }
 
 export function memoryImportEnabled(): boolean {
 	return !isOff(process.env.MEMORY_IMPORT);
-}
-
-export function reviewEvidenceEnabled(): boolean {
-	return !isOff(process.env.MEMORY_REVIEW_EVIDENCE);
 }
 
 function isOff(raw: string | undefined): boolean {
@@ -76,22 +72,14 @@ export interface ConsolidateProposal {
 	dropId: string;
 	reason: string;
 	/** 两端正文随建议一起返回：前端不必再从列表里反查（列表可能只取了前 300 条） */
+	/**
+	 * 两端正文随建议一起返回：前端不必再从列表里反查（列表可能只取了前 300 条）。
+	 * 证据引文 `evidence` 已退役（2026-11-17，方案 docs/设计方案/2026-11-17-整理建议证据引文退役.md）：
+	 * 原子化后 drop 端正文与对话原话不再逐字对应，逐字反查条条落空，整个检测链拆除。
+	 */
 	keep: ProposalSide;
 	drop: ProposalSide;
-	/**
-	 * 证据引文（2026-11-10 对标 Anthropic「做梦」§一）：drop 端正文在**原始对话**里的
-	 * 命中片段，人拍板前可核对"这条记忆当初真是这么说的吗"。
-	 * 开关开着时恒有值（查不到 = null，不挡应用）；`MEMORY_REVIEW_EVIDENCE=false`
-	 * 时整个字段不下发（undefined，JSON 序列化自动丢弃）。
-	 */
-	evidence?: ProposalEvidence | null;
 }
-
-export type ProposalEvidence = EvidenceHit;
-
-export type EvidenceFinder = (
-	needles: string[],
-) => Promise<Map<string, EvidenceHit>>;
 
 export interface ProposalDraft {
 	keepId: string;

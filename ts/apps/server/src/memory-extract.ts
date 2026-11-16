@@ -25,6 +25,7 @@ import {
 } from "@lifediary/memory";
 import { auxiliaryModel } from "./auxiliary.ts";
 import { currentModels, isFaux, readLlmConfig } from "./provider.ts";
+import { flagEnabled, flagValue } from "./flags.ts";
 
 /**
  * `MEMORY_EXTRACT`（2026-11-06，回滚开关）：
@@ -33,7 +34,7 @@ import { currentModels, isFaux, readLlmConfig } from "./provider.ts";
  * - `rule`：**逐字节回到 2026-11-06 之前**（装配处直接用老引擎，连这一层都不进）。
  */
 export function memoryExtractMode(): "auto" | "llm" | "rule" {
-	const raw = (process.env.MEMORY_EXTRACT ?? "").trim().toLowerCase();
+	const raw = flagValue("MEMORY_EXTRACT").trim().toLowerCase();
 	return raw === "rule" || raw === "llm" ? raw : "auto";
 }
 
@@ -44,8 +45,7 @@ export function memoryExtractMode(): "auto" | "llm" | "rule" {
  * 关 = 回到"用户每句 ≥6 字都记成 episode"的旧行为。
  */
 export function memoryExtractNoiseEnabled(): boolean {
-	const raw = (process.env.MEMORY_EXTRACT_NOISE ?? "").trim().toLowerCase();
-	return raw !== "false" && raw !== "0" && raw !== "off";
+	return flagEnabled("MEMORY_EXTRACT_NOISE");
 }
 
 /** 单次偏好抽取的超时。记忆写入是后台动作，宁可丢一轮也不能挂着不结束。 */

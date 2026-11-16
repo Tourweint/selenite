@@ -6,11 +6,12 @@
  */
 
 import { memoryRedactEnabled, redactSecrets } from "./redact.ts";
-import { MemoryRecord } from "./types.ts";
+import { MemoryDocument, MemoryRecord } from "./types.ts";
 import type { InMemoryStoreOptions, MemoryStore, PruneOptions, SearchFilter } from "./store-memory-store.ts";
 
 export class InMemoryStore implements MemoryStore {
 	private readonly rows = new Map<string, MemoryRecord>();
+	private readonly documents = new Map<string, MemoryDocument>();
 	private readonly redact: boolean;
 
 	constructor(options: InMemoryStoreOptions = {}) {
@@ -33,6 +34,11 @@ export class InMemoryStore implements MemoryStore {
 			content,
 			usageCount: record.usageCount ?? 0,
 			lastUsedAt: record.lastUsedAt ?? null,
+			docId: record.docId ?? null,
+			quote: record.quote ?? null,
+			quoteStart: record.quoteStart ?? null,
+			quoteEnd: record.quoteEnd ?? null,
+			archivedAt: record.archivedAt ?? null,
 		});
 	}
 
@@ -50,7 +56,10 @@ export class InMemoryStore implements MemoryStore {
 			if (!record.content.toLowerCase().includes(needle)) return false;
 		}
 		if (filter.since && record.createdAt < filter.since) return false;
+		if (filter.minChars !== undefined && record.content.length < filter.minChars) return false;
+		if (filter.maxChars !== undefined && record.content.length > filter.maxChars) return false;
 		if (!filter.includeSuperseded && record.supersededBy !== null) return false;
+		if (!filter.includeArchived && record.archivedAt) return false;
 		return true;
 	}
 
@@ -97,7 +106,7 @@ export class InMemoryStore implements MemoryStore {
 	}
 
 	countByScope(scope: string): number {
-		return [...this.rows.values()].filter((r) => r.scope === scope).length;
+		return [...this.rows.values()].filter((r) => r.scope === scope && !r.archivedAt).length;
 	}
 
 	listScopes(): string[] {
@@ -111,7 +120,7 @@ export class InMemoryStore implements MemoryStore {
 		const cap = Math.max(0, Math.floor(keep));
 		const kinds = options.kinds;
 		const inScope = [...this.rows.values()].filter(
-			(r) => r.scope === scope && (!kinds?.length || kinds.includes(r.kind)),
+			(r) => r.scope === scope && !r.archivedAt && (!kinds?.length || kinds.includes(r.kind)),
 		);
 		const excess = inScope.length - cap;
 		if (excess <= 0) return 0;
@@ -131,7 +140,42 @@ export class InMemoryStore implements MemoryStore {
 		return victims.length;
 	}
 
+	// ── 原文档案（2026-11-16 记忆原子化）──────────────────────
+
+	putDocument(document: MemoryDocument): void {
+		const content = this.redact ? redactSecrets(document.content) : document.content;
+		this.documents.set(document.id, {
+			...document,
+			content,
+			chars: content.length,
+		});
+	}
+
+	getDocument(id: string): MemoryDocument | undefined {
+		const document = this.documents.get(id);
+		return document ? { ...document } : undefined;
+	}
+
+	searchDocuments(filter: SearchFilter & { includeContent?: boolean }): MemoryDocument[] {
+		let rows = [...this.documents.values()].filter(
+			(document) => !filter.scopes?.length || filter.scopes.includes(document.scope),
+		);
+		rows.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+		const offset = Math.max(0, Math.floor(filter.offset ?? 0));
+		if (offset > 0) rows = rows.slice(offset);
+		const limit = filter.limit === undefined ? rows.length : Math.max(0, Math.floor(filter.limit));
+		rows = rows.slice(0, limit);
+		return filter.includeContent === false
+			? rows.map((document) => ({ ...document, content: "" }))
+			: rows.map((document) => ({ ...document }));
+	}
+
+	countDocuments(scope: string): number {
+		return [...this.documents.values()].filter((document) => document.scope === scope).length;
+	}
+
 	close(): void {
 		this.rows.clear();
+		this.documents.clear();
 	}
 }

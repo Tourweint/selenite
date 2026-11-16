@@ -5,16 +5,14 @@
  * 内含：reviewScope / ApplyResult / applyProposal / MAX_IMPORT_ITEMS …
  */
 
-import type { EvidenceHit } from "./agent.ts";
-import { findEvidence, memoryEngine, supersedeMemory } from "./agent.ts";
-import { redactSecrets } from "@lifediary/memory";
+import { memoryEngine, supersedeMemory } from "./agent.ts";
 import { projectsStore } from "./projects.ts";
-import { CONSOLIDATE_PROMPT, MAX_REVIEW_RECORDS, generateReview, parseProposalJson, proposalsPath, readPending, renderReviewInput, reviewEvidenceEnabled, reviewModelAvailable, scopeOf, sideOf, validTargetScope, writePending } from "./memory-consolidate-parse-proposal-json.ts";
-import type { ConsolidateProposal, EvidenceFinder, PendingEntry, ReviewGenerator, ReviewResult } from "./memory-consolidate-parse-proposal-json.ts";
+import { CONSOLIDATE_PROMPT, MAX_REVIEW_RECORDS, generateReview, parseProposalJson, proposalsPath, readPending, renderReviewInput, reviewModelAvailable, scopeOf, sideOf, validTargetScope, writePending } from "./memory-consolidate-parse-proposal-json.ts";
+import type { ConsolidateProposal, PendingEntry, ReviewGenerator, ReviewResult } from "./memory-consolidate-parse-proposal-json.ts";
 
 export async function reviewScope(
 	scope: string,
-	options: { generate?: ReviewGenerator; findEvidence?: EvidenceFinder } = {},
+	options: { generate?: ReviewGenerator } = {},
 ): Promise<ReviewResult> {
 	if (!memoryEngine) {
 		return { ok: false, status: 404, error: "memory_disabled", message: "记忆未启用（MEMORY_ENABLED=false）" };
@@ -82,27 +80,8 @@ export async function reviewScope(
 		});
 	}
 
-	// 证据引文（2026-11-10 对标 Anthropic「做梦」§一）：给每条建议的 drop 端回原始
-	// 对话找出处，人拍板前可核对"这条记忆当初真是这么说的吗"。
-	// 查不到 = null（不挡应用）；查找失败同样降级为 null——证据缺着比建议发不出去强。
-	// 开关关着时不设置该字段（undefined，JSON 序列化自动丢弃，前端不渲染引文块）。
-	if (reviewEvidenceEnabled() && proposals.length > 0) {
-		const lookup = options.findEvidence ?? findEvidence;
-		let hits: Map<string, EvidenceHit>;
-		try {
-			hits = await lookup(proposals.map((proposal) => proposal.drop.content));
-		} catch (error) {
-			const detail = error instanceof Error ? error.message : String(error);
-			console.warn(`[memory] 证据引文查找失败: ${detail.slice(0, 200)}`);
-			hits = new Map();
-		}
-		for (const proposal of proposals) {
-			const hit = hits.get(proposal.drop.content);
-			// 引文过一遍凭据打码：与记忆正文同一政策——原文片段可能带 sk-…/key=…，
-			// 渲染或转存都不该带（P2-1，验收 2026-11-10）。
-			proposal.evidence = hit ? { ...hit, text: redactSecrets(hit.text) } : null;
-		}
-	}
+	// 证据引文已退役（2026-11-17，方案 docs/设计方案/2026-11-17-整理建议证据引文退役.md）：
+	// 原子化后 drop 端正文与对话原话不再逐字对应，逐字反查条条落空；不再扫跨会话记录。
 
 	const path = proposalsPath();
 	const pending = readPending(path);
@@ -122,9 +101,7 @@ export async function reviewScope(
 
 	// 只记条数 / 耗时，不记正文（D8）
 	console.log(
-		`[memory] 整理建议 scope=${scope} 输入=${records.length} 建议=${proposals.length} 证据=${
-			proposals.filter((proposal) => proposal.evidence).length
-		} ${Date.now() - started}ms`,
+		`[memory] 整理建议 scope=${scope} 输入=${records.length} 建议=${proposals.length} ${Date.now() - started}ms`,
 	);
 
 	return { ok: true, scope, total: records.length, generatedAt, proposals };
@@ -234,6 +211,10 @@ export function importMemory(
 
 	const entries = items.map((item) => {
 		const row = item && typeof item === "object" ? (item as Record<string, unknown>) : {};
+		const doc =
+			row.document && typeof row.document === "object"
+				? (row.document as Record<string, unknown>)
+				: null;
 		return {
 			text: typeof row.text === "string" ? row.text : "",
 			...(typeof row.kind === "string" ? { kind: row.kind } : {}),
@@ -241,6 +222,21 @@ export function importMemory(
 			...(typeof row.importance === "number" ? { importance: row.importance } : {}),
 			// 来源记名（2026-11-15）：来源导入传 import:<sourceId>，外部导入区按它分组
 			...(typeof row.source === "string" ? { source: row.source } : {}),
+			// 原子化（2026-11-16）：摘要 + 原文档案 + 逐字引文
+			...(typeof row.docId === "string" ? { docId: row.docId } : {}),
+			...(typeof row.quote === "string" ? { quote: row.quote } : {}),
+			...(typeof row.quoteStart === "number" ? { quoteStart: row.quoteStart } : {}),
+			...(typeof row.quoteEnd === "number" ? { quoteEnd: row.quoteEnd } : {}),
+			...(doc && typeof doc.content === "string"
+				? {
+						document: {
+							...(typeof doc.title === "string" ? { title: doc.title } : {}),
+							content: doc.content,
+							...(typeof doc.sourceRef === "string" ? { sourceRef: doc.sourceRef } : {}),
+							...(typeof doc.sha256 === "string" ? { sha256: doc.sha256 } : {}),
+						},
+					}
+				: {}),
 		};
 	});
 
@@ -288,7 +284,7 @@ export interface ReviewState {
 	startedAt: string | null;
 	generatedAt: string | null;
 	proposals: ConsolidateProposal[];
-	/** live = 本次进程结果（含 evidence）；pending = 从待决文件读回（无 evidence）；none = 没有。 */
+	/** live = 本次进程结果；pending = 从待决文件读回；none = 没有。 */
 	source: "live" | "pending" | "none";
 	error: { at: string; error: string; message: string } | null;
 }
@@ -311,7 +307,6 @@ function forgetProposalInMemory(scope: string, keepId: string, dropId: string): 
 
 export interface StartReviewOptions {
 	generate?: ReviewGenerator;
-	findEvidence?: EvidenceFinder;
 	/** 成功后跑一次确定性审计（API 层注入，避免本模块 import pass 造成层次反转）。 */
 	onSuccess?: (result: Extract<ReviewResult, { ok: true }>) => void;
 }

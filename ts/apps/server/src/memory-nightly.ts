@@ -1,13 +1,15 @@
 /**
- * 记忆 · 每晚自动整理（2026-11-14）
+ * 记忆 · 每晚自动整理（2026-11-14；2026-11-16 合并"拆分 + 对账"）
  *
- * 用户口径：每天像手动点一次"整理记忆"那样泡一遍，**只出建议**，早上人来点。
+ * 用户口径：每天像手动点一次"整理"那样泡一遍。**机械拆分自动做，语义对账只出建议**：
+ *   - 先拆：把 ≥200 字的长记忆拆成原子，原文进档案（无模型、无损、可回退）；
+ *   - 再对账：重复 / 过时 / 说法冲突只出建议，早上人来点（D18 不变）。
  * 与手动共用同一条 `startReview` 路径（同提示词、同证据、同审计），区别只有触发者：
- *   - global（我的记忆）一次；
+ *   - global（总管 + 我的记忆）一次；
  *   - 每个在职执事各一次（他们的记忆互不可见，不能混在一个 scope 里整理）。
  *
  * 三个硬约束：
- * 1. 不自动应用、不自动删除。D18 不变：应用永远是人逐条点。
+ * 1. 语义改动不自动应用、不自动删除。D18 不变：应用永远是人逐条点。
  * 2. 串行跑（一次一个 scope）。同时打 N 个模型请求既浪费、又容易触发上游限流。
  * 3. 跨重启不重复：当天跑过的日期落 `.data/memory-nightly.json`；服务 03:30 没开着的日子，
  *    启动后补跑一次（`MEMORY_NIGHTLY_REVIEW=false` 可整体关掉）。
@@ -20,16 +22,32 @@ import { dirname, join } from "node:path";
 import { memoryEngine } from "./agent/assist.ts";
 import { consolidateLlmEnabled, reviewModelAvailable, startReview } from "./memory-consolidate.ts";
 import { runConsolidatePass } from "./memory-consolidate-pass.ts";
+import { applySplitPlan, buildSplitPlan, memorySplitEnabled } from "./memory-split.ts";
 import { CHIEF_PARTNER_ID, COMPANIONS_ENABLED, partnersStore } from "./partners.ts";
 
 const DEFAULT_AT = "03:30";
 /** 启动补跑延迟：让服务先完成恢复（恢复扫描/会话自愈）再打模型。 */
 const CATCH_UP_DELAY_MS = 90_000;
 
+interface NightlySplitResult {
+	documents: number;
+	atoms: number;
+	archived: number;
+	skipped: number;
+	failed: number;
+}
+
 interface NightlyState {
 	lastRunDay: string;
 	lastFinishedAt: string | null;
-	lastScopes: Array<{ scope: string; ok: boolean; proposals: number; error?: string }>;
+	lastScopes: Array<{
+		scope: string;
+		ok: boolean;
+		proposals: number;
+		error?: string;
+		/** 2026-11-16：当晚这个 scope 的机械拆分结果（0 = 没有长记忆可拆）。 */
+		split?: NightlySplitResult;
+	}>;
 }
 
 interface TimerHandle {
@@ -42,6 +60,11 @@ let running = false;
 function isOff(raw: string | undefined): boolean {
 	const value = (raw ?? "").trim().toLowerCase();
 	return value === "false" || value === "0" || value === "off";
+}
+
+/** 每晚拆分开关（2026-11-16）：默认开；`MEMORY_NIGHTLY_SPLIT=false/0/off` = 只对账、不拆。 */
+export function memoryNightlySplitEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	return !isOff(env.MEMORY_NIGHTLY_SPLIT);
 }
 
 function atOverridePath(): string {
@@ -235,10 +258,10 @@ export async function runMemoryNightlyReview(now = new Date()): Promise<void> {
 	if (running) return;
 	if (!memoryNightlyEnabled()) return;
 	if (!memoryEngine) return;
-	if (!consolidateLlmEnabled() || !reviewModelAvailable()) {
-		// 没模型就别打四次 503；安静跳过，等模型配好再跑
-		console.log("[memory] 每晚整理跳过：没有可用模型");
-		return;
+	// 拆分不需要模型：没有可用模型也照拆，只是跳过对账。
+	const canReview = consolidateLlmEnabled() && reviewModelAvailable();
+	if (!canReview) {
+		console.log("[memory] 每晚对账跳过：没有可用模型；机械拆分照常跑");
 	}
 	const day = localDayKey(now);
 	const state = readState();
@@ -252,9 +275,54 @@ export async function runMemoryNightlyReview(now = new Date()): Promise<void> {
 		for (const item of nightlyScopes()) {
 			const task = taskState(item.scope, overrides);
 			if (task.deleted || !task.enabled) continue;
-			const job = startReview(item.scope, { onSuccess: () => runConsolidatePass(item.scope) });
+
+			// 1) 机械拆分：长记忆 → 原子 + 原文档案；无模型、无损、幂等。
+			let split: NightlySplitResult | undefined;
+			if (memorySplitEnabled() && memoryNightlySplitEnabled()) {
+				try {
+					const preview = buildSplitPlan(memoryEngine, item.scope);
+					if (preview.plans.length > 0) {
+						split = applySplitPlan(memoryEngine, preview);
+						console.log(
+							`[memory] 每晚拆分 ${item.label} 文档=${split.documents} 原子=${split.atoms} 归档=${split.archived} 跳过=${split.skipped} 失败=${split.failed}`,
+						);
+					}
+				} catch (error) {
+					const detail = error instanceof Error ? error.message : String(error);
+					console.warn(`[memory] 每晚拆分 ${item.label} 失败: ${detail.slice(0, 200)}`);
+				}
+			}
+
+			// 2) 确定性审计：总是跑（不需要模型），只写 diff 建议。
+			let auditOk = true;
+			try {
+				runConsolidatePass(item.scope);
+			} catch (error) {
+				auditOk = false;
+				const detail = error instanceof Error ? error.message : String(error);
+				console.warn(`[memory] 每晚审计 ${item.label} 失败: ${detail.slice(0, 200)}`);
+			}
+
+			// 3) 语义对账：只出建议，人逐条应用（D18）。
+			if (!canReview) {
+				results.push({
+					scope: item.scope,
+					ok: auditOk,
+					proposals: 0,
+					...(auditOk ? {} : { error: "audit_failed" }),
+					...(split ? { split } : {}),
+				});
+				continue;
+			}
+			const job = startReview(item.scope);
 			if (job.alreadyRunning || !job.promise) {
-				results.push({ scope: item.scope, ok: false, proposals: 0, error: "already_running" });
+				results.push({
+					scope: item.scope,
+					ok: false,
+					proposals: 0,
+					error: "already_running",
+					...(split ? { split } : {}),
+				});
 				continue;
 			}
 			const result = await job.promise;
@@ -264,6 +332,7 @@ export async function runMemoryNightlyReview(now = new Date()): Promise<void> {
 				ok: result.ok,
 				proposals,
 				...(result.ok ? {} : { error: result.error }),
+				...(split ? { split } : {}),
 			});
 			console.log(
 				`[memory] 每晚整理 ${item.label} ${result.ok ? `建议=${proposals}` : `失败=${result.error}`} ${Date.now() - started}ms`,
@@ -278,7 +347,10 @@ export async function runMemoryNightlyReview(now = new Date()): Promise<void> {
 		});
 		// 兜底：模型异常时 startReview 会自己记错误，这里只留一行总数
 		const total = results.reduce((sum, item) => sum + item.proposals, 0);
-		console.log(`[memory] 每晚整理结束：${results.length} 个范围，共 ${total} 条建议`);
+		const splitAtoms = results.reduce((sum, item) => sum + (item.split?.atoms ?? 0), 0);
+		console.log(
+			`[memory] 每晚整理结束：${results.length} 个范围，拆出 ${splitAtoms} 条原子，共 ${total} 条建议`,
+		);
 	}
 }
 

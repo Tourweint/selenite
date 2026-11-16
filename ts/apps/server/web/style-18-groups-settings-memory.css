@@ -225,6 +225,8 @@
 .sk-ro { color: var(--text-3); }
 .sk-stale { color: color-mix(in srgb, var(--c-tertiary) 78%, var(--text)); }
 .sk-item-actions { flex: none; display: flex; align-items: center; gap: 2px; }
+/* 内置技能（core）：没有启停位，小字只读标记代替开关（2026-11-16 工具裁剪 A） */
+.sk-core { font-size: 11px; color: var(--text-3); white-space: nowrap; cursor: help; }
 .sk-del {
   width: 24px; height: 24px; padding: 0;
   display: inline-flex; align-items: center; justify-content: center;
@@ -411,24 +413,4 @@
 .mem-prop-reason { font-size: 12px; line-height: 1.5; color: var(--text-2); overflow-wrap: anywhere; }
 .mem-prop-actions { display: flex; align-items: center; gap: 6px; justify-content: flex-end; }
 .mem-prop-status { font-size: 11.5px; color: var(--text-2); }
-/* 证据引文（2026-11-10 对标 Anthropic「做梦」）：建议卡上"当初的原话" */
-.mem-prop-evidence {
-  margin: 2px 0 0 24px;
-  padding: 6px 9px;
-  font-size: 12px; line-height: 1.5;
-  color: var(--text-2);
-  background: var(--card, transparent);
-  border-left: 2px solid var(--outline);
-  border-radius: 0 var(--r-sm) var(--r-sm) 0;
-  overflow-wrap: anywhere;
-  text-align: left;
-}
-.mem-prop-evidence.is-hit {
-  display: block; width: calc(100% - 24px);
-  font-style: italic;
-  color: var(--text);
-  cursor: pointer;
-}
-.mem-prop-evidence.is-hit:hover { border-left-color: var(--c-tertiary, var(--text-3)); }
-.mem-prop-evidence.is-miss { font-size: 11.5px; color: var(--text-3); }
 

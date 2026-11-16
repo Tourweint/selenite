@@ -16,6 +16,8 @@
  * 按需取的，不受这里约束——主动查多查少由模型判断。
  */
 
+import { flagEnabled } from "./flags.ts";
+
 /** 只作边界与默认值，改这里 = 改行为，必须进变更记录。 */
 export const MEMORY_INJECT_DEFAULTS = {
 	/** 每轮注入的记忆条数上限（召回 `limit`）。 */
@@ -57,7 +59,5 @@ export function memoryInjectMaxChars(env: NodeJS.ProcessEnv = process.env): numb
  * `false` / `0` / `off` = 关（回到"召回多少注多少"）。
  */
 export function memoryInjectDedupeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	const raw = (env.MEMORY_INJECT_DEDUPE ?? "").trim().toLowerCase();
-	if (!raw) return true;
-	return raw !== "false" && raw !== "0" && raw !== "off";
+	return flagEnabled("MEMORY_INJECT_DEDUPE", env);
 }

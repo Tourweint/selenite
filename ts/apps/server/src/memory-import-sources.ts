@@ -1,9 +1,11 @@
+import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { MemoryKind } from "@lifediary/memory";
 import { importMemory } from "./memory-consolidate.ts";
+import { stripFrontmatter } from "./memory-frontmatter.ts";
 import { projectsStore, type Project } from "./projects.ts";
 
 /**
@@ -39,6 +41,18 @@ export function memoryImportSourcesEnabled(): boolean {
 	return value !== "false" && value !== "0" && value !== "off";
 }
 
+/**
+ * 导入原子化开关（2026-11-16）：默认开。
+ *
+ * 开 = 有 frontmatter `description` 的文件只收摘要当原子，完整文件进 `memory_documents`；
+ * `false/0/off` = 逐字节回到旧行为（正文整篇当一条记忆，不建文档）。
+ * 只影响**新导入**；已迁移的库不受影响（回滚它 = 从 `.bak-split-*` 恢复）。
+ */
+export function memoryImportAtomicEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const value = (env.MEMORY_IMPORT_ATOMIC ?? "").trim().toLowerCase();
+	return value !== "false" && value !== "0" && value !== "off";
+}
+
 /** 解析器产出：交给 importMemory 的最小形状（项目匹配由 server 统一决策）。 */
 export interface SourceEntry {
 	text: string;
@@ -49,6 +63,15 @@ export interface SourceEntry {
 	projectLabel?: string;
 	/** 项目匹配线索：zcode 给目录名，qoder 给路径 slug */
 	projectHint?: { name?: string; slug?: string };
+	/**
+	 * 原文档案（2026-11-16 原子化）：有 frontmatter `description` 的文件，
+	 * 摘要当原子，完整文件（含正文）落到 memory_documents。
+	 */
+	document?: { title?: string; content: string; sourceRef?: string; sha256?: string };
+	/** 原子在原文里的逐字依据（通常就是 description）。 */
+	quote?: string;
+	quoteStart?: number;
+	quoteEnd?: number;
 }
 
 export interface ImportSourceInfo {
@@ -101,41 +124,6 @@ const PLACEHOLDER_MARKERS = [
 	"待填充",
 	"暂无记录",
 ];
-
-/**
- * 剥 YAML frontmatter，返回（meta 键值对, 正文）。只在首行是 `---` 时剥；
- * 没有或残缺就整个当正文——别家的格式残缺不是咱们的错，能拿多少拿多少。
- *
- * 嵌套键记成 `metadata.type` 这样的点路径（ZCode 记忆的 type 藏在 metadata 下）；
- * YAML 列表项（`- "x"` 行）和折叠续行不匹配键形态，天然忽略。
- */
-function stripFrontmatter(raw: string): { meta: Record<string, string>; body: string } {
-	const lines = raw.split(/\r?\n/);
-	if ((lines[0] ?? "").trim() !== "---") {
-		return { meta: {}, body: raw };
-	}
-	const meta: Record<string, string> = {};
-	let end = -1;
-	let prefix = "";
-	for (let i = 1; i < lines.length; i += 1) {
-		const line = lines[i];
-		if (line.trim() === "---") {
-			end = i;
-			break;
-		}
-		const m = /^(\s*)([A-Za-z_][\w-]*)\s*:\s*(.*)$/.exec(line);
-		if (!m) continue;
-		const [, indent, key, value] = m;
-		if (indent) {
-			if (prefix && value) meta[`${prefix}.${key.toLowerCase()}`] = value.trim().replace(/^["']|["']$/g, "");
-		} else {
-			prefix = key.toLowerCase();
-			if (value) meta[prefix] = value.trim().replace(/^["']|["']$/g, "");
-		}
-	}
-	if (end < 0) return { meta: {}, body: raw };
-	return { meta, body: lines.slice(end + 1).join("\n") };
-}
 
 /** frontmatter 的 type / metadata.type → kind；认不出返回 null。 */
 function kindFromMetaOrNull(meta: Record<string, string>): MemoryKind | null {
@@ -1182,7 +1170,39 @@ function parseSourceFile(item: SourceFile): SourceEntry[] {
 			})
 			.find((value): value is string => Boolean(value)) ?? mtime;
 	const created = metaTime ?? mtime;
-	const text = body.trim() || (meta["description"] ?? "").trim();
+	const description = (meta["description"] ?? "").trim();
+
+	// 2026-11-16 原子化：有 description 的单篇文件，摘要进记忆，正文进原文档案。
+	// 不再把整篇 changelog 当一条 fact（这是记忆库 98% 字数的来源）。
+	if (memoryImportAtomicEnabled() && description && body.trim() && item.splitter === undefined) {
+		const title = (meta["name"] ?? "").trim() || basename(item.file, ".md");
+		let text = description;
+		if (kind === "preference") {
+			const why = /^\*\*Why:?\*\*\s*([\s\S]*?)(?=^\*\*|$)/im.exec(body)?.[1]?.trim() ?? "";
+			const how =
+				/^\*\*How to apply:?\*\*\s*([\s\S]*?)(?=^\*\*|$)/im.exec(body)?.[1]?.trim() ?? "";
+			const extra = [why ? `Why: ${why.replace(/\s+/g, " ")}` : "", how ? `How: ${how.replace(/\s+/g, " ")}` : ""]
+				.filter(Boolean)
+				.join("\n");
+			if (extra && text.length + extra.length + 1 <= 400) text = `${text}\n${extra}`;
+		}
+		const at = raw.indexOf(description);
+		return [{
+			text,
+			kind: classifySourceKind(text, kind, { file: item.file, explicit }),
+			createdAt: created,
+			document: {
+				title,
+				content: raw,
+				sourceRef: item.file,
+				sha256: createHash("sha256").update(raw).digest("hex"),
+			},
+			quote: description,
+			...(at >= 0 ? { quoteStart: at, quoteEnd: at + description.length } : {}),
+		}];
+	}
+
+	const text = body.trim() || description;
 	if (!text) return [];
 
 	const sections =
@@ -1299,7 +1319,19 @@ export function runMemoryImportSource(id: string, home = homedir()): SourceRunRe
 	}
 	// 同一项目标签只匹配一次（几十条同项目的条目不去反复扫项目库）
 	const resolved = new Map<string, string | null>();
-	const groups = new Map<string, { text: string; kind: string; createdAt?: string; source: string }[]>();
+	const groups = new Map<
+		string,
+		{
+			text: string;
+			kind: string;
+			createdAt?: string;
+			source: string;
+			document?: SourceEntry["document"];
+			quote?: string;
+			quoteStart?: number;
+			quoteEnd?: number;
+		}[]
+	>();
 	for (const entry of entries) {
 		let scope = "global";
 		let text = entry.text;
@@ -1316,7 +1348,16 @@ export function runMemoryImportSource(id: string, home = homedir()): SourceRunRe
 			}
 		}
 		const list = groups.get(scope) ?? [];
-		list.push({ text, kind: entry.kind, ...(entry.createdAt ? { createdAt: entry.createdAt } : {}), source: `import:${id}` });
+		list.push({
+			text,
+			kind: entry.kind,
+			...(entry.createdAt ? { createdAt: entry.createdAt } : {}),
+			source: `import:${id}`,
+			...(entry.document ? { document: entry.document } : {}),
+			...(entry.quote ? { quote: entry.quote } : {}),
+			...(entry.quoteStart !== undefined ? { quoteStart: entry.quoteStart } : {}),
+			...(entry.quoteEnd !== undefined ? { quoteEnd: entry.quoteEnd } : {}),
+		});
 		groups.set(scope, list);
 	}
 	let added = 0;

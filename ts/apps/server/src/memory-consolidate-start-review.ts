@@ -5,7 +5,6 @@
  * 内含：startReview / reviewState / dismissProposal
  */
 
-import { findEvidence } from "./agent.ts";
 import { proposalsPath, readPending, writePending } from "./memory-consolidate-parse-proposal-json.ts";
 import type { ReviewResult } from "./memory-consolidate-parse-proposal-json.ts";
 import { activeReviews, forgetProposalInMemory, lastErrors, lastResults, readPendingProposals, reviewScope } from "./memory-consolidate-review-scope.ts";
@@ -28,7 +27,6 @@ export function startReview(scope: string, options: StartReviewOptions = {}): Re
 		try {
 			result = await reviewScope(scope, {
 				...(options.generate ? { generate: options.generate } : {}),
-				...(options.findEvidence ? { findEvidence: options.findEvidence } : {}),
 			});
 		} catch (error) {
 			const detail = error instanceof Error ? error.message : String(error);

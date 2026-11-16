@@ -8,8 +8,9 @@
  */
 
 import { attr, esc } from "./markdown.js";
-import { MEMORY_A_PAGE_SIZE, loadMemorySummary, memoryElapsedSeconds, memoryGroupOf, memoryPageAlive, memoryPageState, memoryShortDate, memorySourceLabel, memoryStatusTime, renderMemoryGroupBody, startMemoryPolling, stopMemoryPolling, switchMemoryScope, updateMemoryControls } from "./memory-page.js";
+import { MEMORY_A_PAGE_SIZE, loadMemoryDocuments, loadMemorySummary, memoryElapsedSeconds, memoryGroupOf, memoryPageAlive, memoryPageState, memoryShortDate, memorySourceLabel, memoryStatusTime, renderMemoryGroupBody, startMemoryPolling, stopMemoryPolling, switchMemoryScope, updateMemoryControls } from "./memory-page.js";
 import { request } from "./net.js";
+import { MEMORY_KIND_LABEL } from "./settings-memory.js";
 import { closeModal, openConfirm, openModal, toast } from "./ui-atoms.js";
 
 async function loadMemoryGroup(kind, gen, { append = false } = {}) {
@@ -73,6 +74,9 @@ function memoryItemMarkupA(item) {
       <div class="mem-a-item-meta">${esc(when)} · ${esc(source)}${esc(recalled)}${esc(expiry)}</div>
     </div>
     <div class="mem-a-item-actions">
+      ${item.docId ? `<button class="mem-a-icon" type="button" data-mem-doc="${esc(item.docId)}" title="看原文" aria-label="看原文">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4h6a4 4 0 0 1 4 4v12a3 3 0 0 0-3-3H2z"/><path d="M22 4h-6a4 4 0 0 0-4 4v12a3 3 0 0 1 3-3h7z"/></svg>
+      </button>` : ""}
       <button class="mem-a-icon" type="button" data-mem-supersede="${esc(item.id)}" title="标为过时" aria-label="标为过时">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="m5.6 5.6 12.8 12.8"/></svg>
       </button>
@@ -272,7 +276,7 @@ function renderMemoryProposalCards() {
     note.textContent = memoryPageState.batch?.proposals?.length
       ? "全部整理 · 只建议，不会自动改"
       : memoryPageState.status?.source === "pending"
-        ? "存档建议 · 出处引文不再显示"
+        ? "存档建议"
         : "只建议，不会自动改";
   }
   box.innerHTML = proposals.map((item) => memoryProposalMarkupA(item)).join("");
@@ -284,23 +288,12 @@ function memoryProposalMarkupA(item) {
   const reason = String(item.reason || "");
   const scope = String(item.scope || memoryPageState.scope);
   const scopeLabel = String(item.scopeLabel || "");
-  let evidenceBlock = "";
-  if (item.evidence !== undefined) {
-    const ev = item.evidence && typeof item.evidence === "object" ? item.evidence : null;
-    if (ev && ev.text) {
-      evidenceBlock = `<button class="mem-prop-evidence is-hit" type="button"${
-        ev.conversationId ? ` data-conv="${attr(ev.conversationId)}"` : ""
-      } data-tip="原始出处${ev.conversationId ? "，点击跳回原对话" : ""}">${esc(ev.text)}</button>`;
-    } else {
-      evidenceBlock = `<div class="mem-prop-evidence is-miss">未找到原始出处（导入或日记来源的记录不在对话里），不挡应用</div>`;
-    }
-  }
+  // 证据引文（原始出处反查）已退役（2026-11-17）：原子化后逐字匹配条条落空，服务端不再下发 evidence。
   return `<div class="mem-prop" data-keep="${esc(item.keepId)}" data-drop="${esc(item.dropId)}" data-scope="${attr(scope)}">
     ${scopeLabel ? `<div class="mem-prop-scope">来自：${esc(scopeLabel)}</div>` : ""}
     <div class="mem-prop-line"><span class="mem-prop-tag is-keep">保留</span><span class="mem-prop-text">${esc(keep)}</span></div>
     <div class="mem-prop-line"><span class="mem-prop-tag is-drop">收编</span><span class="mem-prop-text">${esc(drop)}</span></div>
     ${reason ? `<div class="mem-prop-reason">${esc(reason)}</div>` : ""}
-    ${evidenceBlock}
     <div class="mem-prop-actions">
       <button class="ghost mem-act" type="button" data-prop-apply>应用</button>
       <button class="ghost mem-act" type="button" data-prop-ignore>忽略</button>
@@ -388,6 +381,302 @@ function removeMemoryProposalLocally(keepId, dropId) {
   if (memoryPageState.batch?.proposals) {
     memoryPageState.batch.proposals = memoryPageState.batch.proposals.filter(keep);
   }
+}
+
+/** 拆分长记忆：找当前范围里 >200 字的记忆，预览后一次确认。
+ *  两种模式：代码拆分（免费、按文件摘要/正文句子切）/ 智能拆分（用所选模型拆，一条一次调用）。 */
+async function openMemorySplitDialog(gen) {
+  if (memoryPageState.batch?.running || memoryPageState.status?.running) {
+    toast("正在整理，等它跑完");
+    return;
+  }
+  const scope = memoryPageState.scope;
+  openModal("拆分长记忆", (body) => {
+    body.innerHTML = `<div class="mem-import-loading"><p class="set-hint">正在找超过 200 字的长记忆…</p></div>`;
+    void (async () => {
+      try {
+        const response = await request(
+          `/api/v1/agent/memory/split/candidates?scope=${encodeURIComponent(scope)}`,
+          { cache: "no-store" },
+        );
+        if (response.status === 404) {
+          body.innerHTML = `<div class="mem-split"><p class="set-hint">拆分未启用（服务端 MEMORY_SPLIT=false）。</p><div class="modal-actions"><button class="ghost" type="button" data-modal-cancel>关闭</button></div></div>`;
+          wireSplitDialogChrome(body);
+          return;
+        }
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.message || String(response.status));
+        const items = Array.isArray(data.items) ? data.items : [];
+        if (!items.length) {
+          body.innerHTML = `<div class="mem-split"><p class="set-hint">这个范围没有超过 200 字的长记忆，不需要拆。</p><div class="modal-actions"><button class="ghost" type="button" data-modal-cancel>关闭</button></div></div>`;
+          wireSplitDialogChrome(body);
+          return;
+        }
+        const totalAtoms = items.reduce((sum, item) => sum + (Number(item.atomCount) || 0), 0);
+        body.innerHTML = `<div class="mem-split">
+          <div class="mem-split-modes" role="radiogroup" aria-label="拆分方式">
+            <button class="mem-split-mode is-on" type="button" data-split-mode="code">代码拆分</button>
+            <button class="mem-split-mode" type="button" data-split-mode="smart">智能拆分</button>
+          </div>
+          <p class="set-hint mem-split-note">代码拆分：按文件摘要或正文句子机械切分，<b>不调模型、不花 token</b>。</p>
+          <div class="mem-split-model" id="mem-split-model" hidden></div>
+          <div class="mem-split-summary"><b>${items.length}</b> 条长记忆 · 预计 <b>${totalAtoms}</b> 条原子${Number(data.unmatched) > 0 ? ` · ${Number(data.unmatched)} 条没有源文件，用正文拆` : ""}</div>
+          <div class="mem-split-list">${items.map((item) => splitCandidateMarkup(item)).join("")}</div>
+          <div class="mem-split-foot">
+            <span class="mem-split-picked">已选 ${items.length} 条</span>
+            <div class="modal-actions">
+              <button class="ghost" type="button" data-modal-cancel>取消</button>
+              <button class="modal-primary" type="button" data-split-start>开始拆分</button>
+            </div>
+          </div>
+        </div>`;
+        wireSplitDialogChrome(body);
+
+        const start = body.querySelector("[data-split-start]");
+        const boxes = [...body.querySelectorAll("[data-split-id]")];
+        const note = body.querySelector(".mem-split-note");
+        const modelBox = body.querySelector("#mem-split-model");
+        const modeButtons = [...body.querySelectorAll("[data-split-mode]")];
+        const picked = () => boxes.filter((box) => box.checked);
+        let mode = "code";
+        let modelValue = "";
+
+        const updatePicked = () => {
+          const count = picked().length;
+          const label = body.querySelector(".mem-split-picked");
+          if (label) label.textContent = `已选 ${count} 条`;
+          if (start) start.disabled = count === 0;
+          if (start && mode === "smart") start.textContent = `智能拆分选中 ${count} 条`;
+        };
+
+        const renderModelBox = (models) => {
+          if (!models || models.length === 0) {
+            modelBox.innerHTML = `<p class="set-hint is-error">这台机器还没配可用模型，智能拆分用不了。</p>`;
+            return;
+          }
+          const options = models
+            .map(
+              (entry) =>
+                `<option value="${attr(`${entry.provider}\u0000${entry.modelId}`)}" ${entry.current ? "selected" : ""}>${esc(entry.label)}</option>`,
+            )
+            .join("");
+          modelBox.innerHTML = `<label class="mem-split-model-row">
+              <span>用哪个模型</span>
+              <select id="mem-split-model-select">${options}</select>
+            </label>
+            <p class="set-hint">每条长记忆调用一次模型（独立请求，不占当前对话上下文），会消耗 token。</p>`;
+          const select = modelBox.querySelector("#mem-split-model-select");
+          const first = models.find((entry) => entry.current) ?? models[0];
+          modelValue = `${first.provider}\u0000${first.modelId}`;
+          select?.addEventListener("change", () => {
+            modelValue = select.value;
+          });
+        };
+
+        const setMode = (next) => {
+          mode = next;
+          for (const button of modeButtons) {
+            button.classList.toggle("is-on", button.getAttribute("data-split-mode") === next);
+          }
+          modelBox.hidden = next !== "smart";
+          if (next === "smart") {
+            note.innerHTML = "智能拆分：用所选模型把一条长记忆拆成几条原子，每条都要求原文逐字引文；<b>会消耗 token</b>，先出预览，你确认后才写库。";
+            void loadSplitModels().then(renderModelBox);
+          } else {
+            note.innerHTML = "代码拆分：按文件摘要或正文句子机械切分，<b>不调模型、不花 token</b>。";
+          }
+          updatePicked();
+        };
+        for (const button of modeButtons) {
+          button.addEventListener("click", () => setMode(button.getAttribute("data-split-mode") || "code"));
+        }
+
+        for (const box of boxes) box.addEventListener("change", updatePicked);
+
+        start?.addEventListener("click", async () => {
+          const ids = picked().map((box) => box.getAttribute("data-split-id") || "").filter(Boolean);
+          if (!ids.length) return;
+          start.disabled = true;
+          if (mode === "smart") {
+            start.textContent = "正在让模型拆…";
+            await runSmartSplitPreview(body, scope, ids, modelValue, gen);
+            return;
+          }
+          start.textContent = "拆分中…";
+          try {
+            const applyResponse = await request("/api/v1/agent/memory/split/apply", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ scope, ids }),
+            });
+            const result = await applyResponse.json().catch(() => ({}));
+            if (!applyResponse.ok) throw new Error(result.message || String(applyResponse.status));
+            closeModal();
+            toast(`已拆分 ${Number(result.documents) || 0} 条，新增 ${Number(result.atoms) || 0} 条原子`);
+            await refreshMemoryGroups(gen);
+            void loadMemoryDocuments(gen);
+          } catch (error) {
+            if (error.message !== "forbidden") toast(`拆分失败：${error.message}`);
+            start.disabled = false;
+            start.textContent = "开始拆分";
+          }
+        });
+      } catch (error) {
+        if (error.message === "forbidden") return;
+        body.innerHTML = `<div class="mem-split"><p class="set-hint is-error">读取长记忆失败：${esc(error.message)}</p><div class="modal-actions"><button class="ghost" type="button" data-modal-cancel>关闭</button></div></div>`;
+        wireSplitDialogChrome(body);
+      }
+    })();
+  }, { className: "modal-split" });
+}
+
+/** 智能拆分的模型清单：直接用现有 /agent/model 投影（按供应商分组、带 hasKey）。 */
+async function loadSplitModels() {
+  try {
+    const response = await request("/api/v1/agent/model", { cache: "no-store" });
+    if (!response.ok) return [];
+    const data = await response.json().catch(() => ({}));
+    const current = data?.current || null;
+    const out = [];
+    for (const provider of Array.isArray(data?.providers) ? data.providers : []) {
+      if (provider?.hasKey === false) continue;
+      for (const model of Array.isArray(provider?.models) ? provider.models : []) {
+        const modelId = String(model?.id || "");
+        if (!modelId) continue;
+        const isCurrent = current?.providerId === provider.id && current?.modelId === modelId;
+        out.push({
+          provider: String(provider.id),
+          modelId,
+          label: `${provider.label || provider.id} · ${modelId}`,
+          current: isCurrent,
+        });
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/** 智能拆分：先出预览（不写库），确认后再应用。 */
+async function runSmartSplitPreview(body, scope, ids, modelValue, gen) {
+  const panel = body.querySelector(".mem-split");
+  const list = body.querySelector(".mem-split-list");
+  const foot = body.querySelector(".mem-split-foot");
+  const start = body.querySelector("[data-split-start]");
+  const note = body.querySelector(".mem-split-note");
+  const [provider, modelId] = String(modelValue || "").split("\u0000");
+  const model = provider && modelId ? { provider, modelId } : null;
+  if (note) note.textContent = `正在让模型拆 ${ids.length} 条，每条一次调用，请稍等…`;
+  if (start) {
+    start.disabled = true;
+    start.textContent = "正在拆…";
+  }
+  try {
+    const response = await request("/api/v1/agent/memory/split/smart", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scope, ids, ...(model ? { model } : {}) }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.message || String(response.status));
+    const records = Array.isArray(data.records) ? data.records : [];
+    const usable = records.filter((record) => Array.isArray(record.atoms) && record.atoms.length > 0);
+    if (!usable.length) {
+      if (note) {
+        note.innerHTML = `模型没能拆出可用的原子（${records.length} 条都失败了）。可以换一个模型再试，或改用代码拆分。`;
+      }
+      if (start) {
+        start.disabled = false;
+        start.textContent = "重新智能拆分";
+      }
+      return;
+    }
+    const totalAtoms = usable.reduce((sum, record) => sum + record.atoms.length, 0);
+    list.innerHTML = usable
+      .map((record) => smartSplitPreviewMarkup(record))
+      .join("");
+    if (note) {
+      note.innerHTML = `模型拆出 <b>${totalAtoms}</b> 条原子（${usable.length} 条长记忆）· 用 ${esc(data.model || "所选模型")}；每条都带原文引文，确认后才会写库。`;
+    }
+    if (foot) {
+      foot.innerHTML = `<span class="mem-split-picked">${usable.length} 条待应用</span>
+        <div class="modal-actions">
+          <button class="ghost" type="button" data-modal-cancel>取消</button>
+          <button class="modal-primary" type="button" data-smart-apply>应用这批拆分</button>
+        </div>`;
+      wireSplitDialogChrome(body);
+      foot.querySelector("[data-smart-apply]")?.addEventListener("click", async (event) => {
+        const applyButton = event.currentTarget;
+        applyButton.disabled = true;
+        applyButton.textContent = "应用中…";
+        try {
+          const applyResponse = await request("/api/v1/agent/memory/split/smart/apply", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ scope, records: usable }),
+          });
+          const result = await applyResponse.json().catch(() => ({}));
+          if (!applyResponse.ok) throw new Error(result.message || String(applyResponse.status));
+          closeModal();
+          toast(`已拆分 ${Number(result.documents) || 0} 条，新增 ${Number(result.atoms) || 0} 条原子`);
+          await refreshMemoryGroups(gen);
+          void loadMemoryDocuments(gen);
+        } catch (error) {
+          if (error.message !== "forbidden") toast(`应用失败：${error.message}`);
+          applyButton.disabled = false;
+          applyButton.textContent = "应用这批拆分";
+        }
+      });
+    }
+    void panel;
+  } catch (error) {
+    if (error.message === "forbidden") return;
+    if (note) note.textContent = `智能拆分失败：${error.message}`;
+    if (start) {
+      start.disabled = false;
+      start.textContent = "重新智能拆分";
+    }
+  }
+}
+
+/** 智能拆分预览：一条长记忆 → 它拆出的原子（带引文）。 */
+function smartSplitPreviewMarkup(record) {
+  const kind = MEMORY_KIND_LABEL[record.kind] || record.kind || "记忆";
+  const atoms = Array.isArray(record.atoms) ? record.atoms : [];
+  return `<div class="mem-split-smart">
+    <div class="mem-split-smart-head">
+      <span class="mem-split-title">${esc(record.title || "未命名")}</span>
+      <span class="mem-split-meta">${esc(kind)} · ${Number(record.chars) || 0} 字 → ${atoms.length} 条${Number(record.dropped) > 0 ? ` · 丢弃 ${Number(record.dropped)} 条无引文` : ""}</span>
+    </div>
+    ${atoms
+      .map(
+        (atom) => `<div class="mem-split-atom">
+          <div class="mem-split-atom-text">${esc(atom.content)}</div>
+          <div class="mem-split-atom-quote">引文：${esc(String(atom.quote || "").slice(0, 120))}</div>
+        </div>`,
+      )
+      .join("")}
+  </div>`;
+}
+
+function wireSplitDialogChrome(body) {
+  body.querySelectorAll("[data-modal-cancel]").forEach((button) => {
+    button.addEventListener("click", closeModal);
+  });
+}
+
+function splitCandidateMarkup(item) {
+  const kind = MEMORY_KIND_LABEL[item.kind] || item.kind || "记忆";
+  const samples = Array.isArray(item.samples) ? item.samples : [];
+  return `<label class="mem-split-row">
+    <input type="checkbox" data-split-id="${attr(item.id)}" checked>
+    <span class="mem-split-main">
+      <span class="mem-split-title">${esc(item.title || "未命名")}</span>
+      <span class="mem-split-meta">${esc(kind)} · ${Number(item.chars) || 0} 字 → ${Number(item.atomCount) || 0} 条${item.fallback ? " · 无源文件" : ""}</span>
+      ${samples.length ? `<span class="mem-split-samples">${samples.map((sample) => esc(sample)).join(" / ")}</span>` : ""}
+    </span>
+  </label>`;
 }
 
 /** 整理入口：先问"整理谁的"（我的 / 某个同事 / 全部），再决定跑单人或逐个。 */
@@ -506,7 +795,7 @@ async function runMemoryConsolidateA(gen) {
     const outcome = await startScopeReview(scope);
     if (!memoryPageAlive(gen) || memoryPageState.scope !== scope) return;
     if (outcome.kind === "disabled") {
-      toast("整理记忆未启用（服务端 MEMORY_CONSOLIDATE_LLM=false）");
+      toast("整理未启用（服务端 MEMORY_CONSOLIDATE_LLM=false）");
       memoryPageState.canConsolidate = false;
       updateMemoryControls();
       return;
@@ -663,4 +952,4 @@ async function loadMemoryExternal(gen) {
  * 原来这里还有一整页「设置 → 头像」（选对象 + 网格 + 上传 + 保存），
  * 2026-11-07 合并进人设弹窗后整页删除——头像不是独立设置项，是这个角色的一部分。 */
 
-export { applyMemoryProposalA, clearMemoryProposalCard, dismissMemoryProposalA, forgetMemoryItem, loadMemoryExternal, loadMemoryGroup, loadMemoryReviewState, memoryItemMarkupA, memoryProposalMarkupA, openMemoryConsolidateDialog, refreshMemoryGroups, renderMemoryProposalCards, renderMemoryReviewState, runMemoryConsolidateA, supersedeMemoryItem };
+export { applyMemoryProposalA, clearMemoryProposalCard, dismissMemoryProposalA, forgetMemoryItem, loadMemoryExternal, loadMemoryGroup, loadMemoryReviewState, memoryItemMarkupA, memoryProposalMarkupA, openMemoryConsolidateDialog, openMemorySplitDialog, refreshMemoryGroups, renderMemoryProposalCards, renderMemoryReviewState, runMemoryConsolidateA, supersedeMemoryItem };

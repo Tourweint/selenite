@@ -6,9 +6,9 @@
  */
 
 import { memoryRedactEnabled, redactSecrets } from "./redact.ts";
-import { MemoryRecord } from "./types.ts";
+import { MemoryDocument, MemoryRecord } from "./types.ts";
 import { DatabaseSync } from "node:sqlite";
-import { COLUMNS, FTS_SCHEMA, SCHEMA, buildFtsMatch, rowToRecord } from "./store-memory-store.ts";
+import { COLUMNS, FTS_SCHEMA, SCHEMA, buildFtsMatch, rowToDocument, rowToRecord } from "./store-memory-store.ts";
 import type { MemoryStore, PruneOptions, SearchFilter, SqliteMemoryStoreOptions } from "./store-memory-store.ts";
 
 export class SqliteMemoryStore implements MemoryStore {
@@ -38,6 +38,11 @@ export class SqliteMemoryStore implements MemoryStore {
 			["expires_at", "TEXT"],
 			["usage_count", "INTEGER NOT NULL DEFAULT 0"],
 			["last_used_at", "TEXT"],
+			["doc_id", "TEXT"],
+			["quote", "TEXT"],
+			["quote_start", "INTEGER"],
+			["quote_end", "INTEGER"],
+			["archived_at", "TEXT"],
 		];
 		for (const [name, ddl] of additions) {
 			if (!names.has(name)) this.db.exec(`ALTER TABLE memories ADD COLUMN ${name} ${ddl}`);
@@ -89,7 +94,10 @@ export class SqliteMemoryStore implements MemoryStore {
 				   kind=excluded.kind, scope=excluded.scope, content=excluded.content,
 				   importance=excluded.importance, veracity=excluded.veracity,
 				   source=excluded.source, valid_until=excluded.valid_until,
-				   superseded_by=excluded.superseded_by, expires_at=excluded.expires_at`,
+				   superseded_by=excluded.superseded_by, expires_at=excluded.expires_at,
+				   doc_id=excluded.doc_id, quote=excluded.quote,
+				   quote_start=excluded.quote_start, quote_end=excluded.quote_end,
+				   archived_at=excluded.archived_at`,
 			)
 			.run(
 				record.id,
@@ -107,6 +115,11 @@ export class SqliteMemoryStore implements MemoryStore {
 				record.expiresAt ?? null,
 				record.usageCount ?? 0,
 				record.lastUsedAt ?? null,
+				record.docId ?? null,
+				record.quote ?? null,
+				record.quoteStart ?? null,
+				record.quoteEnd ?? null,
+				record.archivedAt ?? null,
 			);
 		// 镜像维护：put 一律 delete+insert（upsert 可能换了 content）
 		if (this.ftsEnabled) this.replaceFtsRow(record.id, content);
@@ -177,8 +190,19 @@ export class SqliteMemoryStore implements MemoryStore {
 			where.push("created_at >= ?");
 			params.push(filter.since);
 		}
+		if (filter.minChars !== undefined) {
+			where.push("length(content) >= ?");
+			params.push(filter.minChars);
+		}
+		if (filter.maxChars !== undefined) {
+			where.push("length(content) <= ?");
+			params.push(filter.maxChars);
+		}
 		if (!filter.includeSuperseded) {
 			where.push("superseded_by IS NULL");
+		}
+		if (!filter.includeArchived) {
+			where.push("archived_at IS NULL");
 		}
 
 		return {
@@ -264,6 +288,11 @@ export class SqliteMemoryStore implements MemoryStore {
 			expiresAt: "expires_at",
 			usageCount: "usage_count",
 			lastUsedAt: "last_used_at",
+			docId: "doc_id",
+			quote: "quote",
+			quoteStart: "quote_start",
+			quoteEnd: "quote_end",
+			archivedAt: "archived_at",
 		};
 
 		const sets: string[] = [];
@@ -301,7 +330,7 @@ export class SqliteMemoryStore implements MemoryStore {
 
 	countByScope(scope: string): number {
 		const row = this.db
-			.prepare("SELECT COUNT(*) AS n FROM memories WHERE scope = ?")
+			.prepare("SELECT COUNT(*) AS n FROM memories WHERE scope = ? AND archived_at IS NULL")
 			.get(scope) as { n: number };
 		return Number(row.n);
 	}
@@ -328,7 +357,7 @@ export class SqliteMemoryStore implements MemoryStore {
 
 		// 计数条件 = scope +（可选）kind 专属；删除条件在这之上再加保护项。
 		// 不传 kinds 时 countParts 只有 scope = ?，与改动前 countByScope 等价。
-		const countParts: string[] = ["scope = ?"];
+		const countParts: string[] = ["scope = ?", "archived_at IS NULL"];
 		const countParams: (string | number)[] = [scope];
 		const kinds = options.kinds;
 		if (kinds?.length) {
@@ -380,6 +409,67 @@ export class SqliteMemoryStore implements MemoryStore {
 		// 镜像同步：不删的话下次 count 对账会把整表重灌（能自愈，但白做一次全表扫）
 		if (this.ftsEnabled) this.db.prepare("DELETE FROM memory_fts WHERE content_id = ?").run(id);
 		return true;
+	}
+
+	// ── 原文档案（2026-11-16 记忆原子化）──────────────────────
+
+	putDocument(document: MemoryDocument): void {
+		// 原文同样过凭据打码：导入文件的正文可能含密钥，不能借"档案"绕开收口点。
+		const content = this.redact ? redactSecrets(document.content) : document.content;
+		const chars = content.length;
+		this.db
+			.prepare(
+				`INSERT INTO memory_documents (id, scope, title, content, source, source_ref, sha256, chars, created_at, updated_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				 ON CONFLICT(id) DO UPDATE SET
+				   scope=excluded.scope, title=excluded.title, content=excluded.content,
+				   source=excluded.source, source_ref=excluded.source_ref, sha256=excluded.sha256,
+				   chars=excluded.chars, updated_at=excluded.updated_at`,
+			)
+			.run(
+				document.id,
+				document.scope,
+				document.title,
+				content,
+				document.source,
+				document.sourceRef,
+				document.sha256,
+				chars,
+				document.createdAt,
+				document.updatedAt,
+			);
+	}
+
+	getDocument(id: string): MemoryDocument | undefined {
+		const row = this.db
+			.prepare("SELECT * FROM memory_documents WHERE id = ?")
+			.get(id) as Record<string, unknown> | undefined;
+		return row ? rowToDocument(row) : undefined;
+	}
+
+	searchDocuments(filter: SearchFilter & { includeContent?: boolean }): MemoryDocument[] {
+		const where: string[] = [];
+		const params: (string | number)[] = [];
+		if (filter.scopes?.length) {
+			where.push(`scope IN (${filter.scopes.map(() => "?").join(", ")})`);
+			params.push(...filter.scopes);
+		}
+		const sql =
+			`SELECT id, scope, title, ${filter.includeContent === false ? "''" : "content"} AS content, ` +
+			"source, source_ref, sha256, chars, created_at, updated_at " +
+			`FROM memory_documents${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ` +
+			"ORDER BY created_at DESC LIMIT ? OFFSET ?";
+		const limit = Math.max(0, Math.floor(filter.limit ?? 100));
+		const offset = Math.max(0, Math.floor(filter.offset ?? 0));
+		const rows = this.db.prepare(sql).all(...params, limit, offset) as Record<string, unknown>[];
+		return rows.map(rowToDocument);
+	}
+
+	countDocuments(scope: string): number {
+		const row = this.db
+			.prepare("SELECT COUNT(*) AS n FROM memory_documents WHERE scope = ?")
+			.get(scope) as { n: number };
+		return Number(row.n);
 	}
 
 	close(): void {

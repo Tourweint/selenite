@@ -50,11 +50,12 @@ async function waitForFile(path: string): Promise<void> {
 	assert.fail(`等不到导出文件：${path}`);
 }
 
-test("personaExportEnabled：默认关，只有 true/1/on 开", () => {
-	assert.equal(personaExportEnabled({}), false);
-	assert.equal(personaExportEnabled({ PERSONA_EXPORT_ENABLED: "" }), false);
+test("personaExportEnabled：默认开（2026-11-16 翻案），显式 false/0/off 才关", () => {
+	assert.equal(personaExportEnabled({}), true);
+	assert.equal(personaExportEnabled({ PERSONA_EXPORT_ENABLED: "" }), true);
 	assert.equal(personaExportEnabled({ PERSONA_EXPORT_ENABLED: "false" }), false);
 	assert.equal(personaExportEnabled({ PERSONA_EXPORT_ENABLED: "0" }), false);
+	assert.equal(personaExportEnabled({ PERSONA_EXPORT_ENABLED: "off" }), false);
 	assert.equal(personaExportEnabled({ PERSONA_EXPORT_ENABLED: " TRUE " }), true);
 	assert.equal(personaExportEnabled({ PERSONA_EXPORT_ENABLED: "1" }), true);
 	assert.equal(personaExportEnabled({ PERSONA_EXPORT_ENABLED: "on" }), true);
@@ -161,21 +162,26 @@ test("全空轮不写（至少一个字段非空）", async () => {
 	}
 });
 
-test("开关默认关不写；显式 true 才写（同步门面返回值同口径）", async () => {
+test("开关默认开就写（2026-11-16 翻案）；显式 false 不写（同步门面返回值同口径）", async () => {
 	const plain = [{ role: "user", content: "一句话" }];
 	const offDir = tempDir();
 	const onDir = tempDir();
+	const defDir = tempDir();
 	try {
-		assert.equal(appendPersonaExport(CHAT, plain, "m", depsOf(offDir, { env: {} })), 0);
-		assert.equal(await appendPersonaExportAsync(CHAT, plain, "m", depsOf(offDir, { env: {} })), 0);
+		assert.equal(appendPersonaExport(CHAT, plain, "m", depsOf(offDir, { env: { PERSONA_EXPORT_ENABLED: "false" } })), 0);
+		assert.equal(await appendPersonaExportAsync(CHAT, plain, "m", depsOf(offDir, { env: { PERSONA_EXPORT_ENABLED: "false" } })), 0);
 		assert.equal(appendPersonaExport(CHAT, plain, "m", depsOf(onDir)), 1);
 		// 同步门面只排队，写盘异步；等它落一行再断言。
 		await waitForFile(join(onDir, "2026-11.jsonl"));
 		assert.equal(linesOf(join(onDir, "2026-11.jsonl")).length, 1);
-		assert.deepEqual(readdirSync(offDir), [], "默认关不该建文件");
+		// 默认开：空 env（什么都不配）也写一行。
+		assert.equal(await appendPersonaExportAsync(CHAT, plain, "m", depsOf(defDir, { env: {} })), 1);
+		assert.equal(linesOf(join(defDir, "2026-11.jsonl")).length, 1);
+		assert.deepEqual(readdirSync(offDir), [], "显式关不该建文件");
 	} finally {
 		rmSync(offDir, { recursive: true, force: true });
 		rmSync(onDir, { recursive: true, force: true });
+		rmSync(defDir, { recursive: true, force: true });
 	}
 });
 

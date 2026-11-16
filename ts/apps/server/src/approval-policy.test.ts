@@ -172,6 +172,23 @@ test("persona_recall：read-only 档被拦下", () => {
 	assert.equal(accessBlockReason("full", "persona_recall"), undefined, "完全访问档不拦");
 });
 
+// ── persona_write（2026-11-17 persona_write 批）────────────
+test("persona_write：进 WRITE_TOOLS + 高危清单；ask-critical 档每次写都弹审批", () => {
+	assert.ok(WRITE_TOOLS.has("persona_write"), "起 python 子进程的工具必须进闸门");
+	assert.ok(
+		(DEFAULT_CRITICAL_TOOLS as readonly string[]).includes("persona_write"),
+		"往主人一生库落字 = 高危：每次写都要主人点头（「明确让写了才写」的技术 enforcement）",
+	);
+	assert.deepEqual(verdict("ask-all", "persona_write"), { kind: "ask" });
+	assert.deepEqual(verdict("ask-critical", "persona_write"), { kind: "ask" });
+	assert.deepEqual(verdict("none", "persona_write"), { kind: "allow" }, "none 档是用户自己选的全不问，尊重");
+});
+
+test("persona_write：read-only 档被拦下", () => {
+	assert.notEqual(accessBlockReason("read-only", "persona_write"), undefined, "只读档应拦 persona_write");
+	assert.equal(accessBlockReason("full", "persona_write"), undefined, "完全访问档不拦");
+});
+
 // ── 查看命令进权限档（2026-11-14）────────────────────────────
 test("只读 / 在工作区内修改：查看命令放行，动手的命令照旧拦", () => {
 	const root = realpathSync(mkdtempSync(join(tmpdir(), "lh-view-policy-")));

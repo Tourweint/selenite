@@ -5,7 +5,7 @@
  * 内含：SearchFilter / PruneOptions / MemoryStore / COLUMNS …
  */
 
-import { MemoryKind, MemoryRecord } from "./types.ts";
+import { MemoryDocument, MemoryKind, MemoryRecord } from "./types.ts";
 
 export interface SearchFilter {
 	/** 只在这些 scope 里找 */
@@ -32,6 +32,15 @@ export interface SearchFilter {
 	since?: string;
 	/** 是否返回已被取代的记录。默认 false —— 历史链要能查，但不该污染召回 */
 	includeSuperseded?: boolean;
+	/**
+	 * 是否返回已归档（2026-11-16 原子化：长记录拆开后原记录 archived）。
+	 * 默认 false = 召回与默认列表都看不到；原文去 `memory_documents` 看。
+	 */
+	includeArchived?: boolean;
+	/** 正文字数下限（拆分候选扫描用；`>=`）。 */
+	minChars?: number;
+	/** 正文字数上限（拆分候选扫描用；`<=`）。 */
+	maxChars?: number;
 	limit?: number;
 	/** 分页偏移（与 limit 同用；0 = 从头）。 */
 	offset?: number;
@@ -82,6 +91,14 @@ export interface MemoryStore {
 	pruneOldest(scope: string, keep: number, options?: PruneOptions): number;
 	/** 是否真的能做文本检索（2026-11-04 批次三）；内存实现恒 false。 */
 	ftsAvailable(): boolean;
+	/** 原文档案：写入一份（按 id upsert）。 */
+	putDocument(document: MemoryDocument): void;
+	/** 原文档案：按 id 取。 */
+	getDocument(id: string): MemoryDocument | undefined;
+	/** 原文档案：按 scope / 时间列；`includeContent=false` 时 content 置空（列表页省流量）。 */
+	searchDocuments(filter: SearchFilter & { includeContent?: boolean }): MemoryDocument[];
+	/** 原文档案：某个 scope 的份数。 */
+	countDocuments(scope: string): number;
 	close(): void;
 }
 
@@ -101,6 +118,11 @@ const COLUMNS = [
 	"expires_at",
 	"usage_count",
 	"last_used_at",
+	"doc_id",
+	"quote",
+	"quote_start",
+	"quote_end",
+	"archived_at",
 ] as const;
 
 function rowToRecord(row: Record<string, unknown>): MemoryRecord {
@@ -122,6 +144,28 @@ function rowToRecord(row: Record<string, unknown>): MemoryRecord {
 		usageCount: row.usage_count === null || row.usage_count === undefined ? 0 : Number(row.usage_count),
 		lastUsedAt:
 			row.last_used_at === null || row.last_used_at === undefined ? null : String(row.last_used_at),
+		docId: row.doc_id === null || row.doc_id === undefined ? null : String(row.doc_id),
+		quote: row.quote === null || row.quote === undefined ? null : String(row.quote),
+		quoteStart:
+			row.quote_start === null || row.quote_start === undefined ? null : Number(row.quote_start),
+		quoteEnd: row.quote_end === null || row.quote_end === undefined ? null : Number(row.quote_end),
+		archivedAt:
+			row.archived_at === null || row.archived_at === undefined ? null : String(row.archived_at),
+	};
+}
+
+function rowToDocument(row: Record<string, unknown>): MemoryDocument {
+	return {
+		id: String(row.id),
+		scope: String(row.scope),
+		title: row.title === null || row.title === undefined ? "" : String(row.title),
+		content: row.content === null || row.content === undefined ? "" : String(row.content),
+		source: String(row.source),
+		sourceRef: row.source_ref === null || row.source_ref === undefined ? null : String(row.source_ref),
+		sha256: row.sha256 === null || row.sha256 === undefined ? null : String(row.sha256),
+		chars: Number(row.chars ?? 0),
+		createdAt: String(row.created_at),
+		updatedAt: row.updated_at === null || row.updated_at === undefined ? null : String(row.updated_at),
 	};
 }
 
@@ -141,10 +185,29 @@ CREATE TABLE IF NOT EXISTS memories (
 	last_recalled_at TEXT,
 	expires_at       TEXT,
 	usage_count      INTEGER NOT NULL DEFAULT 0,
-	last_used_at     TEXT
+	last_used_at     TEXT,
+	doc_id           TEXT,
+	quote            TEXT,
+	quote_start      INTEGER,
+	quote_end        INTEGER,
+	archived_at      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_memories_scope   ON memories(scope);
 CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at);
+
+CREATE TABLE IF NOT EXISTS memory_documents (
+	id          TEXT PRIMARY KEY,
+	scope       TEXT NOT NULL,
+	title       TEXT,
+	content     TEXT NOT NULL,
+	source      TEXT NOT NULL,
+	source_ref  TEXT,
+	sha256      TEXT,
+	chars       INTEGER NOT NULL DEFAULT 0,
+	created_at  TEXT NOT NULL,
+	updated_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_memory_documents_scope ON memory_documents(scope, created_at);
 `;
 
 const FTS_SCHEMA = `
@@ -191,4 +254,4 @@ export interface InMemoryStoreOptions {
 	redact?: boolean;
 }
 
-export { COLUMNS, FTS_SCHEMA, MAX_FTS_GRAMS, SCHEMA, buildFtsMatch, rowToRecord };
+export { COLUMNS, FTS_SCHEMA, MAX_FTS_GRAMS, SCHEMA, buildFtsMatch, rowToDocument, rowToRecord };
