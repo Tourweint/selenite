@@ -14,8 +14,9 @@ import { gsResponderShort } from "./groups-settings.js";
 import { renderGroupMembersBar, renderGroupTimeline } from "./groups-thread.js";
 import { request } from "./net.js";
 import { groupRouteId } from "./route.js";
+import { openMenuAt } from "./sec-menu.js";
 import { shortDateTime } from "./topic-proposal.js";
-import { toast } from "./ui-atoms.js";
+import { inShell, toast } from "./ui-atoms.js";
 
 
 /* ── 侧栏课题（2026-11-07 批二）──────────────────────────
@@ -81,6 +82,26 @@ function renderTopicSidebar() {
   for (const topic of ongoing) el.topicList.append(buildTopicRow(topic));
 }
 
+/** 右键里的暂停 / 恢复：和详情面板那颗按钮同一口径（PATCH status → 重拉侧栏）。 */
+async function toggleTopicPaused(topic) {
+  const next = topic.status === "paused" ? "active" : "paused";
+  try {
+    const response = await request(`/api/v1/topics/${encodeURIComponent(topic.id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status: next }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      toast(payload.message || "没切成，稍后再试。");
+      return;
+    }
+    toast(next === "paused" ? "已暂停。" : "已恢复。");
+    await loadTopicsSidebar({ force: true });
+  } catch {
+    toast("请求没发出去，检查服务是否在跑。");
+  }
+}
+
 function buildTopicRow(topic) {
   const wrap = document.createElement("div");
   wrap.className = "topic-item";
@@ -133,6 +154,25 @@ function buildTopicRow(topic) {
       detail.hidden = true;
       row.setAttribute("aria-expanded", "false");
     }
+  });
+
+  // 右键（2026-11-16）：展开时间线 / 暂停恢复——后两项原本只在展开后的详情里。
+  row.addEventListener("contextmenu", (event) => {
+    if (!inShell()) return;
+    event.preventDefault();
+    openMenuAt(
+      event.clientX,
+      event.clientY,
+      [
+        { label: detail.hidden ? "展开详情" : "收起详情", run: () => row.click() },
+        {
+          label: topic.status === "paused" ? "恢复研究" : "暂停研究",
+          hint: topic.status === "paused" ? "恢复后按原节奏继续" : "研究记录都留着",
+          run: () => void toggleTopicPaused(topic),
+        },
+      ],
+      topic.question,
+    );
   });
 
   wrap.append(row, detail);

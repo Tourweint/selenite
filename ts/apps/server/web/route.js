@@ -178,7 +178,19 @@ function go(route, page) {
   location.hash = next;
 }
 
+/* 未保存守卫（2026-11-16）：页面可以注册一个同步判断。
+   true = 这次路由切换放行；false = 先别换页，由注册方自己弹「保存 / 不保存 / 取消」。
+   放行一次即卸任：页面若仍是自己会重新注册；用户取消时用 replaceState 把地址改回去，
+   不触发 hashchange，所以草稿不会被重渲染冲掉。 */
+let routeGuard = null;
+
+function setRouteGuard(fn) {
+  routeGuard = typeof fn === "function" ? fn : null;
+}
+
 function applyRoute() {
+  if (routeGuard && !routeGuard()) return;
+  routeGuard = null;
   closeMenu();
   closeProjectMenu();
   closeRailCards();
@@ -232,4 +244,4 @@ function applyRoute() {
   }
 }
 
-export { applyRoute, currentPartnerLineId, currentPartnerProfileId, currentRailSection, currentRoute, currentSettingsPage, currentTicketId, go, groupRouteId, noteRouteChange, syncRailCurrent, syncSideRowsCurrent, tasksHash, tasksParams, writeTasksHash };
+export { applyRoute, currentPartnerLineId, currentPartnerProfileId, currentRailSection, currentRoute, currentSettingsPage, currentTicketId, go, groupRouteId, noteRouteChange, setRouteGuard, syncRailCurrent, syncSideRowsCurrent, tasksHash, tasksParams, writeTasksHash };

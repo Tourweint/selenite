@@ -16,6 +16,7 @@ import "./theme.js";
 import "./shell.js";
 import "./route.js";
 import "./nav-history.js";
+import "./context-menu.js";
 import "./state.js";
 import "./tasks-model.js";
 import "./tasks-cards.js";
@@ -31,7 +32,7 @@ import "./chats-list.js";
 import "./partners-status.js";
 import "./avatar.js";
 import "./partner-roster.js";
-import "./chat-thread.js";
+import { syncEmptyMark } from "./partners-status.js";
 import "./tool-flow.js";
 import { mountCtxCard } from "./chat-notice.js";
 import "./markdown.js";
@@ -141,6 +142,9 @@ void (async () => {
   if (!state.conversationId) {
     el.title.textContent = state.chatKind === "chief" ? chiefDisplayName() : "普通对话";
     el.title.dataset.chatKind = state.chatKind;
+    // 首屏空态的起首图标（2026-11-16）：这条启动路径没有经过 clearThread/startNewChat，
+    // 不在这里补一次，第一屏就只剩水晶、没人回答「在跟谁说话」。
+    syncEmptyMark();
   }
 
   // 深链：`?view=settings`（或 `?view=settings/连接页 id`）落设置页，

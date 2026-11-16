@@ -221,6 +221,9 @@ function sortSkillItems(items) {
 /** 一张技能卡（A+C 版）：名字当主角、建议 = 色点 + 四个字、底部只留用量 + 开关/删除 */
 function buildSkillCard(item, view) {
   const name = String(item.name || "");
+  // 代码内置技能（2026-11-16 工具裁剪 A）：始终可用、没有启停位 → 不渲染可点开关，
+  // 只留一个只读「内置」标记（data-tip 走全局悬停浮签）。其它行布局不变。
+  const core = item.core === true;
   // 只读来源（~/.agents/skills）只展示不给删：那是别的工具的家，改删请去原目录（2026-11-08 批 10-A）
   const readOnly = item.writable === false;
   const originLabel = readOnly ? SKILL_ORIGIN_LABEL[item.origin] || String(item.origin || "") : "";
@@ -282,7 +285,11 @@ function buildSkillCard(item, view) {
     <div class="sk-item-foot">
       <span class="sk-item-meta" title="${attr(metaTip)}">${metaHtml}</span>
       <span class="sk-item-actions">
-        ${switchMarkup(item.enabled === true, { label: `开关 ${name}`, attrs: `data-skill-switch="${attr(name)}"` })}
+        ${
+          core
+            ? `<span class="sk-core" data-tip="系统内置技能，始终可用">内置</span>`
+            : switchMarkup(item.enabled === true, { label: `开关 ${name}`, attrs: `data-skill-switch="${attr(name)}"` })
+        }
         ${
           readOnly
             ? ""

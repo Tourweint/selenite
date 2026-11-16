@@ -51,6 +51,7 @@ const el = {
   chatHeadAvatar: document.getElementById("chat-head-avatar"),
   thread: document.getElementById("thread"),
   empty: document.getElementById("empty"),
+  emptyMark: document.getElementById("empty-mark"),
   emptyGreet: document.getElementById("empty-greet"),
   scroll: document.getElementById("scroll"),
   composer: document.getElementById("composer"),

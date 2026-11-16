@@ -25,7 +25,7 @@ import { closePopover, openPopover, popoverOpen, toast } from "./ui-atoms.js";
  * （侧栏「群组」分区头就有 title + data-tip 两份）；现在 title 只当数据源读一次，
  * 读完即删，页面上只留一种提示。 */
 const TIP_SHOW_DELAY_MS = 450;
-const hoverTipState = { timer: 0, anchor: null };
+const hoverTipState = { timer: 0, anchor: null, x: null, y: null };
 
 /** 原生 title → data-tip（一次性收编）。
  *  - 手写的 data-tip 优先：title 只删不加，别覆盖更长的解释（分区头就是这种形状）。
@@ -106,12 +106,17 @@ function hideHoverTip() {
   clearTimeout(hoverTipState.timer);
   hoverTipState.timer = 0;
   hoverTipState.anchor = null;
+  hoverTipState.x = null;
+  hoverTipState.y = null;
   if (el.hoverTip) el.hoverTip.hidden = true;
 }
 
 function showHoverTip(target) {
   const tipEl = el.hoverTip;
   if (!tipEl || !target) return;
+  // 定时器等待的 450ms 里节点可能被重渲染摘掉；用脱链节点量出来的是 0,0，
+  // 提示就会飘到屏幕左上角——直接不出。
+  if (target.isConnected === false) return;
   const text = target.getAttribute("data-tip");
   if (!text) return;
   // 展开态轨道整体 pointer-events:none；键盘 Tab 进来时也别弹一个看不见的提示
@@ -120,14 +125,25 @@ function showHoverTip(target) {
   hoverTipState.anchor = target;
   tipEl.textContent = text;
   tipEl.hidden = false;
-  const box = target.getBoundingClientRect();
   const tipBox = tipEl.getBoundingClientRect();
-  const gap = 8;
-  // 垂直：默认元素上方，顶上放不下翻到下方；水平：跟元素左缘，右侧贴边兜底
-  let top = box.top - tipBox.height - gap;
-  if (top < 8) top = box.bottom + gap;
-  let left = box.left;
-  if (left + tipBox.width > window.innerWidth - 8) left = window.innerWidth - 8 - tipBox.width;
+  const gap = 10;
+  let top;
+  let left;
+  if (Number.isFinite(hoverTipState.x) && Number.isFinite(hoverTipState.y)) {
+    // 2026-11-16 用户反馈：提示有时离文字很远。宽行/整卡的左缘可能和鼠标停的字隔着半屏，
+    // 所以有鼠标坐标时贴着落点走，不再拿元素的左缘当锚。
+    left = hoverTipState.x - 2;
+    top = hoverTipState.y - tipBox.height - gap;
+    if (top < 8) top = hoverTipState.y + 18;
+    if (left + tipBox.width > window.innerWidth - 8) left = window.innerWidth - 8 - tipBox.width;
+  } else {
+    // 键盘聚焦没有鼠标落点：退回元素矩形（旧行为）
+    const box = target.getBoundingClientRect();
+    top = box.top - tipBox.height - gap;
+    if (top < 8) top = box.bottom + gap;
+    left = box.left;
+    if (left + tipBox.width > window.innerWidth - 8) left = window.innerWidth - 8 - tipBox.width;
+  }
   tipEl.style.left = `${Math.round(Math.max(8, left))}px`;
   tipEl.style.top = `${Math.round(Math.max(8, top))}px`;
 }
@@ -136,7 +152,11 @@ document.addEventListener("mouseover", (event) => {
   // 先把这一支上最近的原生 title 收编：浏览器默认小框和浮签不能同时出现
   adoptTitleTip(event.target.closest?.("[title]"));
   const target = event.target.closest?.("[data-tip]");
-  if (!target || target === hoverTipState.anchor) return;
+  if (!target) return;
+  // 同一元素里从一段文字挪到另一段时也更新落点，提示才不会停在进入元素时的位置
+  hoverTipState.x = event.clientX;
+  hoverTipState.y = event.clientY;
+  if (target === hoverTipState.anchor) return;
   clearTimeout(hoverTipState.timer);
   hoverTipState.timer = setTimeout(() => showHoverTip(target), TIP_SHOW_DELAY_MS);
 });
@@ -151,7 +171,12 @@ document.addEventListener("mouseout", (event) => {
 document.addEventListener("focusin", (event) => {
   adoptTitleTip(event.target.closest?.("[title]"));
   const target = event.target.closest?.("[data-tip]");
-  if (target && target !== hoverTipState.anchor) showHoverTip(target);
+  if (target && target !== hoverTipState.anchor) {
+    // 键盘聚焦没有鼠标落点，别沿用上一次悬停的位置
+    hoverTipState.x = null;
+    hoverTipState.y = null;
+    showHoverTip(target);
+  }
 });
 document.addEventListener("focusout", hideHoverTip);
 // 点了就走：别让提示压在刚打开的弹层/新页面上面；滚动/缩放时锚点已经不对了，直接收

@@ -117,6 +117,34 @@ async function loadPartners() {
 
 function renderPartnerList(box, partners) {
   box.replaceChildren();
+
+  // 普通助手（2026-11-16）：全局一份人设，固定置顶，不是执事行——不进 hasButlers、
+  // 没有 ⋯ / 暂停 / 状态徽章。点进去只改一份正文，所有 worker 下一轮生效。
+  const workerCard = document.createElement("div");
+  workerCard.className = "card pt-card";
+  workerCard.setAttribute("role", "button");
+  workerCard.tabIndex = 0;
+  workerCard.setAttribute("aria-label", "编辑普通助手的人设");
+  workerCard.innerHTML = `
+    <span class="pt-avatar pt-card-avatar" data-worker-avatar aria-hidden="true"></span>
+    <div class="pt-card-main">
+      <div class="pt-card-name-row">
+        <span class="row-label pt-name">普通助手</span>
+        <span class="pill-tag">全部 Worker 共用</span>
+      </div>
+      <div class="pt-meta">所有普通助手会话共用这一份人设，改完下一轮生效</div>
+    </div>`;
+  paintAvatar(workerCard.querySelector("[data-worker-avatar]"), null, "普通助手");
+  const openWorker = () => { location.hash = "#/settings/partners/worker"; };
+  workerCard.addEventListener("click", openWorker);
+  workerCard.addEventListener("keydown", (event) => {
+    if (event.target !== workerCard) return;
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    openWorker();
+  });
+  box.append(workerCard);
+
   if (!partners.length) {
     const empty = document.createElement("div");
     empty.className = "card pt-empty";
@@ -142,23 +170,31 @@ function renderPartnerList(box, partners) {
     const isChief = partner.id === "chief";
     const archived = partner.status === "archived";
     const nextStatus = partner.status === "active" ? "paused" : "active";
+    const openProfile = () => {
+      location.hash = `#/settings/partners/${encodeURIComponent(partner.id)}`;
+    };
+    // 整卡可点（2026-11-16）：头像 / 名字 / 留白都进同一份档案，卡面不再单独放编辑入口。
+    // 用 div + role=button，不把 ⋯ 按钮包进 button（非法嵌套）。
+    card.setAttribute("role", "button");
+    card.tabIndex = 0;
+    card.setAttribute("aria-label", `编辑「${partner.name || "执事"}」的人设`);
     // 卡片形状（2026-11-07 重排）：头像 + 名字/元信息在左，动作在右，一张卡两行。
-    // 原来头像被塞在名字行里、标签和状态点又各占一个位置，一行里五个东西抢视线。
+    // active 不摆状态标签（默认态不值得占位），paused/archived 才标；状态圆点整列去掉。
     card.innerHTML = `
       <span class="pt-avatar pt-card-avatar" data-avatar-for="${attr(partner.id)}" aria-hidden="true"></span>
       <div class="pt-card-main">
         <div class="pt-card-name-row">
-          <span class="row-label pt-name" data-tip="${attr(partner.name || "")}：这一份档案是「这个人」的全部——人设、岗位、例行任务、技能都在里面；右侧按钮可编辑、暂停或归档。">${esc(partner.name || "")}</span>
+          <span class="row-label pt-name" data-tip="点击卡片打开这位执事的人设档案——人设、岗位、例行任务、技能都在里面。">${esc(partner.name || "")}</span>
           ${isChief && partner.name !== "总管" ? '<span class="pill-tag">总管</span>' : ""}
-          ${ptStatusPill(partner.status)}
-          ${ptStatusDot(partner.status, partner.id)}
+          ${partner.status === "active" ? "" : ptStatusPill(partner.status)}
         </div>
         <div class="pt-meta">
         </div>
       </div>
       <div class="pt-actions">
         <button class="pt-dots" type="button" data-pt-menu="${attr(partner.id)}"
-                aria-haspopup="menu" aria-expanded="false" data-tip="试跑 / 暂停 / 删除">⋯</button>
+                aria-haspopup="menu" aria-expanded="false"
+                aria-label="${attr(`${partner.name || "执事"}的更多操作`)}" data-tip="更多操作">⋯</button>
       </div>`;
     box.append(card);
     // 头像只走 DOM 属性（不把 data URL 拼进 innerHTML）
@@ -168,19 +204,31 @@ function renderPartnerList(box, partners) {
       partner.name || "",
     );
 
+    // 卡片自身可键盘聚焦：只有事件目标就是卡片时才吃 Enter/Space。
+    // ⋯ 按钮上的按键（含 Space）让它自己处理，别把菜单操作变成跳转。
+    card.addEventListener("click", (event) => {
+      if (event.target instanceof Element && event.target.closest("button")) return;
+      openProfile();
+    });
+    card.addEventListener("keydown", (event) => {
+      if (event.target !== card) return;
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault(); // Space 默认滚页
+      openProfile();
+    });
+
     // 卡头动作收进 ⋯（2026-11-15 用户口径：试跑/暂停不常驻，删除给入口）。
     // 菜单复用项目卡的 openProjMenu（挂 body + fixed，不吃容器的 overflow 裁切）。
+    // 2026-11-16：整卡已可进档案，菜单去掉重复的「编辑这个人」。
     card.querySelector("[data-pt-menu]")?.addEventListener("click", (event) => {
       event.stopPropagation();
       const anchor = event.currentTarget;
       openProjMenu(anchor, [
-        { label: "编辑这个人", action: "edit" },
         { label: "试跑", action: "run" },
         ...(archived ? [] : [{ label: partner.status === "active" ? "暂停" : "恢复", action: "toggle" }]),
         ...(isChief ? [] : [{ label: "删除执事", action: "delete", danger: true, separator: true }]),
       ], (action) => {
-        if (action === "edit") location.hash = `#/settings/partners/${encodeURIComponent(partner.id)}`;
-        else if (action === "run") openRunPartnerModal(partner.id, partner.name || "");
+        if (action === "run") openRunPartnerModal(partner.id, partner.name || "");
         else if (action === "toggle") void ptTogglePartner(partner.id, nextStatus, null);
         else if (action === "delete") openDeletePartnerModal(partner);
       });

@@ -22,7 +22,12 @@
   align-items: center;
   gap: 14px;
   padding: 14px 16px;
+  /* 整卡可点（2026-11-16）：只示意「能点」，不抬阴影——一屏七八张卡浮起来会晃眼。 */
+  cursor: pointer;
+  transition: border-color .15s ease, background-color .15s ease;
 }
+.pt-card:hover { border-color: var(--outline); background: var(--card-high); }
+.pt-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .pt-card-avatar { width: 40px; height: 40px; font-size: 16px; }
 .pt-card-main { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
 .pt-card-name-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
@@ -295,7 +300,8 @@
   border-color: var(--accent); color: var(--accent); background: var(--card-high);
 }
 
-/* 列表卡 ⋯ 按钮（2026-11-15）：试跑 / 暂停 / 删除收进菜单，卡面只剩 改人设 + ⋯ */
+/* 列表卡 ⋯ 按钮（2026-11-15）：试跑 / 暂停 / 删除收进菜单；2026-11-16 起卡面本身可点，
+   ⋯ 只剩不常驻的动作（菜单里的「编辑这个人」已随整卡可点移除） */
 
 /* ⋯ 裸态（2026-11-15 用户口径：不要外框）：透明底无边框，hover 才浮浅底 */
 .pt-dots {
@@ -306,3 +312,4 @@
   transition: background-color .15s ease, color .15s ease;
 }
 .pt-dots:hover { background: var(--surface-low); color: var(--text); }
+.pt-dots:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }

@@ -42,7 +42,7 @@ function renderCsPersonaPage() {
     const note = document.createElement("p");
     note.className = "cs-note";
     note.textContent =
-      "这条是普通助手会话，它的身份由服务端固定，没有可改的人设。到「全部设置 → 人设」可以改总管和各个执事。";
+      "这条是普通助手会话，所有人设共用一个普通助手：到「全部设置 → 人设 → 普通助手」可以改。";
     body.append(note);
     return;
   }

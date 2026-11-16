@@ -135,10 +135,23 @@
 }
 .sec-menu-item.is-rich { flex-direction: column; align-items: stretch; gap: 1px; }
 .sec-menu-item:hover:not(:disabled) { background: var(--surface-low); }
+/* 键盘 / 程序化聚焦：用底纹表示选中，不要浏览器默认的黑色焦点框
+   （2026-11-16 用户反馈：右键后「全选」被一个黑框框住）。 */
+.sec-menu-item:focus { outline: none; }
+.sec-menu-item:focus-visible { background: var(--surface-low); }
 .sec-menu-item:disabled { opacity: .45; cursor: default; }
 .sec-menu-label { flex: 1; min-width: 0; display: block; font-size: 13px; font-weight: 600; }
 .sec-menu-kbd { flex: none; font-size: 11px; color: var(--text-3); }
 .sec-menu-hint { display: block; margin-top: 1px; font-size: 11.5px; font-weight: 400; color: var(--text-3); line-height: 1.4; }
+/* 右键菜单（2026-11-16）：贴光标，不受 232px 侧栏宽度限制——解释行可以长一点。
+   危险项与分隔线照设置页 .proj-menu 的口径，两处菜单看起来是同一套东西。 */
+.sec-menu.is-context { max-width: min(280px, 86vw); }
+.sec-menu-item.is-danger { color: var(--text-2); }
+.sec-menu-item.is-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--c-error) 9%, var(--surface-low));
+  color: var(--c-error);
+}
+.sec-menu-sep { height: 1px; margin: 4px -2px; background: var(--divider); }
 
 /* 分区底部的「去整页看」链接行：任务中心 / 项目管理各一条 */
 .sec-foot-link {
@@ -185,6 +198,11 @@
 .proj-row:focus-within .proj-act { opacity: 1; }
 /* 行内标注比浮层里的更紧凑：这里每像素都要留给项目名 */
 .proj-row .proj-tag { padding: 0 4px; font-size: 9.5px; line-height: 1.6; }
+
+/* 工作区行（2026-11-16 用户拍板）：不是项目，但要在侧栏看得见；
+   点它 = 回默认对话落点（取消当前项目）。选中态复用 .side-item[aria-current]。 */
+.proj-row.is-workspace { cursor: pointer; }
+.proj-row.is-workspace .proj-ico { color: var(--accent); }
 
 /* 项目行（2026-11-13 项目容器）：点行 = 选中（决定下一个新对话），▾ 展开文件夹清单。 */
 .proj-row.is-project { position: relative; cursor: pointer; }

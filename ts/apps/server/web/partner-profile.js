@@ -31,9 +31,10 @@ import { CS_CONTRACT_TEMPLATE } from "./settings-contract.js";
 import { openReminderModal } from "./settings-reminders.js";
 import { csLoadProfileSkills, csProfileWhen } from "./settings-employee.js";
 import { mountChainEditor } from "./settings-model.js";
+import { applyRoute, setRouteGuard } from "./route.js";
 import { state } from "./state.js";
 import { showRollbackOffer } from "./soul-rollback.js";
-import { closeModal, openModal, toast } from "./ui-atoms.js";
+import { closeModal, openConfirm, openModal, toast } from "./ui-atoms.js";
 
 /* 领域标签的服务端口径（companion-api.ts PATCH）：小写 ASCII + 连字符。
    前端先拦一道，不然用户按旧 placeholder 填「写作」会拿到一句 400。 */
@@ -72,6 +73,76 @@ const PF_PERSONA_PRESETS = [
   { id: "apprentice", name: "学徒", tip: "在学你说话习惯的实验位：口吻 / 学习 / 挂念 / 人设库开，其余最小。" },
   { id: "custom", name: "自定义", tip: "自己配。开关随便摆，服务端只强制数据红线；改了任一开关会自动跳到这档，改回预设的原样会自动跳回去。" },
 ];
+
+/* 预设默认表（2026-11-16 草稿模式）：与服务端 partner-persona.ts 的 `PERSONA_PRESETS` 同步。
+   为什么前端也要一份：点预设必须先把开关画出来，不能等保存才看到结果；服务端仍是最终口径
+   （保存时按最终开关表推导 preset）。改服务端那张表时，这里同步改。 */
+const PF_PERSONA_PRESET_MODULES = {
+  work: {
+    expression: false, values: false, scenario: false,
+    contract: true, discipline: true, goal: true,
+    workHistory: true, currentWork: true,
+    impression: false, mood: false, heart: false,
+    learning: false, proactivity: false, profiles: false,
+  },
+  companion: {
+    expression: true, values: true, scenario: true,
+    contract: false, discipline: false, goal: true,
+    workHistory: false, currentWork: false,
+    impression: true, mood: true, heart: true,
+    learning: false, proactivity: false, profiles: false,
+  },
+  allrounder: {
+    expression: true, values: true, scenario: true,
+    contract: true, discipline: true, goal: true,
+    workHistory: true, currentWork: true,
+    impression: true, mood: true, heart: true,
+    learning: false, proactivity: false, profiles: false,
+  },
+  apprentice: {
+    expression: true, values: false, scenario: false,
+    contract: false, discipline: false, goal: false,
+    workHistory: true, currentWork: true,
+    impression: false, mood: false, heart: false,
+    learning: true, proactivity: true, profiles: true,
+  },
+  custom: {
+    expression: false, values: false, scenario: false,
+    contract: false, discipline: false, goal: false,
+    workHistory: false, currentWork: false,
+    impression: false, mood: false, heart: false,
+    learning: false, proactivity: false, profiles: false,
+  },
+};
+
+/** 预设推导只比较这 12 个（履历 / 在办固定注入，不参与）——与服务端口径一致。 */
+const PF_PERSONA_PRESET_MATCH_IDS = PF_PERSONA_MODULES
+  .map((module) => module.id)
+  .filter((id) => id !== "workHistory" && id !== "currentWork");
+
+/** 按最终开关表推导预设名（与服务端 `derivePresetFromModules` 同一口径）。 */
+function pfDerivePreset(modules) {
+  for (const preset of ["work", "companion", "allrounder", "apprentice"]) {
+    const table = PF_PERSONA_PRESET_MODULES[preset];
+    if (PF_PERSONA_PRESET_MATCH_IDS.every((id) => (modules?.[id] === true) === (table[id] === true))) {
+      return preset;
+    }
+  }
+  return "custom";
+}
+
+/* 当前详情页的未保存守卫（2026-11-16）：给 route.js 与 beforeunload 共用。
+   页面重新渲染会换一个新的；放行导航时守卫自己清空。 */
+let activeProfileGuard = null;
+let pfLeavePromptOpen = false;
+
+/* 刷新 / 关窗：浏览器自己的确认框（文字不可定制），只有草稿脏的时候才拦。
+   页面内切路由由 route.js 的 setRouteGuard + 「保存并退出」弹层负责。 */
+window.addEventListener("beforeunload", (event) => {
+  if (!activeProfileGuard?.isDirty()) return;
+  event.preventDefault();
+  event.returnValue = "";
+});
 
 
 /* 静态模块编辑弹层的字段表：上限数字与 shared 的 PARTNER_PERSONA_LIMITS 对齐，
@@ -279,7 +350,7 @@ function pfMarkup(partnerId, partner, detail) {
     </section>
 
     <!-- ①·六 每轮固定注入（2026-11-15 人设页打磨二轮改名）：100% 每句话都带，不带筛。
-         纪律 / 在办 / 履历（内容改不了，点卡看实际注入原文）+ 负责项目（每轮带一行项目索引）。
+         纪律（默认可看、行为纪律可覆盖；红线固定）/ 在办 / 履历（现查现拼，点卡看实际注入原文）+ 负责项目（每轮带一行项目索引）。
          与下面「按相关度召回」是两种机制，别混：这里是恒定下发，那边是先打分再决定。 -->
     <section class="pf-sec" id="pf-injected">
       <div class="pf-sec-head">
@@ -303,6 +374,17 @@ function pfMarkup(partnerId, partner, detail) {
 
     <!-- ①·七 高级开关（2026-11-15 人设页打磨）：结果整理 + 日记执事另起一块。
          不写"默认全开"——结果整理默认跟随全局（开），日记执事是"全家只有一位"的指派。 -->
+    <!-- ①·六·三 能用的工具（2026-11-16 工具裁剪 B）：逐项勾选这个模型能看到哪些工具。
+         存"取消名单"、默认全开；取消后下一轮起生效。PARTNER_TOOLS_ENABLED=false 时整段隐藏。 -->
+    <section class="pf-sec" id="pf-tools">
+      <div class="pf-sec-head">
+        <h2 class="pf-sec-title" data-tip="勾上 = 他看得到、调得动；取消 = 下一轮起看不到；默认全开">能用的工具</h2>
+      </div>
+      <div class="card pf-panel">
+        <div class="pf-mod-cards" id="pf-tools-cards"></div>
+      </div>
+    </section>
+
     <section class="pf-sec" id="pf-advanced">
       <div class="pf-sec-head">
         <h2 class="pf-sec-title" data-tip="只影响他一个人：结果整理默认跟随全局（开）；日记执事全家只有一位，选了他别人就自动退出">高级开关</h2>
@@ -311,12 +393,20 @@ function pfMarkup(partnerId, partner, detail) {
         <div class="pf-mod-cards" id="pf-advanced-cards"></div>
       </div>
     </section>
+
+    <!-- 统一保存条（2026-11-16）：人格模块 / 高级开关只改草稿，点这里才落库；
+         离开页面前还有未保存改动会弹「保存并退出 / 不保存退出 / 取消」，避免误触后忘掉。 -->
+    <div class="pf-savebar" id="pf-savebar" hidden>
+      <div class="pf-state" id="pf-savebar-state"><i aria-hidden="true"></i><span>没有改动</span></div>
+      <button class="ghost" type="button" id="pf-savebar-reset" disabled>撤销</button>
+      <button class="btn-primary" type="button" id="pf-savebar-save" disabled>保存</button>
+    </div>
   </div>`;
 }
 
 /* ── ① 人设：一次保存 ──────────────────────────────────────── */
 
-function pfWireIdentity(root, partnerId, partner, detail) {
+function pfWireIdentity(root, partnerId, partner, detail, onDirty) {
   const nameInput = root.querySelector("#pf-name");
   const soulArea = root.querySelector("#pf-soul");
   const save = root.querySelector("#pf-save");
@@ -327,7 +417,7 @@ function pfWireIdentity(root, partnerId, partner, detail) {
   const note = root.querySelector("#pf-soul-note");
   const title = root.querySelector("#pf-title");
   const avatarBtn = root.querySelector("#pf-avatar");
-  if (!nameInput || !soulArea || !avatarBtn) return;
+  if (!nameInput || !soulArea || !avatarBtn) return null;
 
   const base = {
     name: String(partner.name || "").trim(),
@@ -360,6 +450,7 @@ function pfWireIdentity(root, partnerId, partner, detail) {
     if (foot) foot.hidden = dirty === 0;
     note.textContent = `${soulArea.value.length} 字`;
     avatarBtn.disabled = saving;
+    onDirty?.();
   };
 
   paintAvatarNow();
@@ -396,33 +487,33 @@ function pfWireIdentity(root, partnerId, partner, detail) {
     refresh();
   });
 
-  reset.addEventListener("click", () => {
+  const resetDraft = () => {
     Object.assign(draft, base);
     nameInput.value = base.name;
     soulArea.value = base.soul;
     paintAvatarNow();
     setHint("");
     refresh();
-  });
+  };
 
-  save.addEventListener("click", async () => {
-    if (saving || decoding) return;
+  const saveNow = async () => {
+    if (saving || decoding) return false;
     const name = draft.name.trim();
     if (!name) {
       setHint("名字不能空。", true);
       nameInput.focus();
-      return;
+      return false;
     }
     if (!draft.soul.trim()) {
       setHint("人设不能是空的。", true);
       soulArea.focus();
-      return;
+      return false;
     }
     const payload = {};
     if (name !== base.name) payload.name = name;
     if (draft.avatar !== base.avatar) payload.avatar = draft.avatar;
     if (draft.soul !== base.soul) payload.soul = draft.soul;
-    if (!Object.keys(payload).length) return;
+    if (!Object.keys(payload).length) return true;
 
     saving = true;
     refresh();
@@ -435,7 +526,7 @@ function pfWireIdentity(root, partnerId, partner, detail) {
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
         setHint(data.message || data.error || `没存成：HTTP ${response.status}`, true);
-        return;
+        return false;
       }
       // 以服务端回读值为新基准：再点保存不会重复提交同样的内容
       base.name = String(data.partner?.name ?? name);
@@ -464,13 +555,27 @@ function pfWireIdentity(root, partnerId, partner, detail) {
         toast("已回到上一版");
       });
       toast("人设已保存");
+      return true;
     } catch (error) {
       if (error.message !== "forbidden") setHint(`没存成：${error.message}`, true);
+      return false;
     } finally {
       saving = false;
       refresh();
     }
+  };
+
+  reset.addEventListener("click", resetDraft);
+  save.addEventListener("click", () => {
+    void saveNow();
   });
+
+  return {
+    isDirty: () => dirtyCount() > 0,
+    dirtyCount,
+    save: saveNow,
+    reset: resetDraft,
+  };
 }
 
 /* ── ②③ 岗位与能力的卡片编辑层（2026-11-15 并入人格模块）──────
@@ -503,18 +608,15 @@ function pfOpenContractEditor(partnerId, detail, onChanged) {
       </div>
       <textarea class="pf-contract" id="pf-contract" rows="9" spellcheck="false" aria-label="岗位契约"
         placeholder="写清管什么、怎么定、怎么验收、向谁汇报">${esc(original)}</textarea>
-      <div class="pf-foot is-tight" id="pf-contract-foot" hidden>
-        <button class="ghost" type="button" id="pf-contract-reset" disabled>撤销</button>
-        <button class="btn-primary" type="button" id="pf-contract-save" disabled>保存</button>
-      </div>
       <p class="modal-hint" id="pf-contract-hint"></p>
       <div class="modal-actions">
         <button class="ghost" type="button" data-modal-cancel>关闭</button>
+        <button class="ghost" type="button" id="pf-contract-reset" disabled>撤销</button>
+        <button class="modal-primary" type="button" id="pf-contract-save" disabled>保存</button>
       </div>`;
     const area = body.querySelector("#pf-contract");
     const save = body.querySelector("#pf-contract-save");
     const reset = body.querySelector("#pf-contract-reset");
-    const foot = body.querySelector("#pf-contract-foot");
     const hint = body.querySelector("#pf-contract-hint");
     const tpl = body.querySelector("#pf-contract-tpl");
     let saving = false;
@@ -522,7 +624,6 @@ function pfOpenContractEditor(partnerId, detail, onChanged) {
       const dirty = area.value !== original;
       save.disabled = saving || !dirty;
       reset.disabled = saving || !dirty;
-      foot.hidden = !dirty;
       if (tpl) tpl.hidden = Boolean(area.value.trim());
     };
     refresh();
@@ -581,18 +682,15 @@ function pfOpenGoalEditor(partnerId, current, onChanged) {
       <p class="modal-desc">这一阵在奔什么。留空 = 清除；写了他每轮都记得。</p>
       <textarea class="pf-contract" id="pf-goal" maxlength="1000" spellcheck="false"
                 placeholder="本季度要奔的事">${esc(original)}</textarea>
-      <div class="pf-foot is-tight" id="pf-goal-foot" hidden>
-        <button class="ghost" type="button" id="pf-goal-reset" disabled>撤销</button>
-        <button class="btn-primary" type="button" id="pf-goal-save" disabled>保存</button>
-      </div>
       <p class="modal-hint" id="pf-goal-hint"></p>
       <div class="modal-actions">
         <button class="ghost" type="button" data-modal-cancel>关闭</button>
+        <button class="ghost" type="button" id="pf-goal-reset" disabled>撤销</button>
+        <button class="modal-primary" type="button" id="pf-goal-save" disabled>保存</button>
       </div>`;
     const input = body.querySelector("#pf-goal");
     const save = body.querySelector("#pf-goal-save");
     const reset = body.querySelector("#pf-goal-reset");
-    const foot = body.querySelector("#pf-goal-foot");
     const hint = body.querySelector("#pf-goal-hint");
     body.querySelector("[data-modal-cancel]")?.addEventListener("click", () => closeModal());
     let saving = false;
@@ -600,7 +698,6 @@ function pfOpenGoalEditor(partnerId, current, onChanged) {
       const dirty = input.value !== original;
       save.disabled = saving || !dirty;
       reset.disabled = saving || !dirty;
-      foot.hidden = !dirty;
     };
     refresh();
     input.addEventListener("input", () => {
@@ -650,58 +747,344 @@ const PF_VIEW_FIELDS = {
   },
 };
 
-/** 纪律专用弹层：原文 + 为什么改不了（用户 2026-11-15 问）。 */
-function pfOpenDisciplineViewer(partnerId) {
-    openModal("纪律 · 为什么改不了", (body) => {
-      body.innerHTML = `
-        <p class="modal-desc">这段是宿主写死的规矩，不是这个人的性格——所以改不了：</p>
-        <ul class="pf-inject-list">
-          <li><b>它是安全边界，不是文案。</b>验证铁律、裁决口径、主人数据红线这些，改了就等于把「什么能做什么不能做」交给模型自己裁。</li>
-          <li><b>固定字节还兼着两件事：</b>上游提示词缓存（每轮逐字节一致才命中）和跨执事一致性（所有执事同一套底线）。</li>
-          <li><b>你自己的规矩写到「岗位契约」里</b>——它每轮也进提示词，而且随你编辑（职责、验收、汇报口径都该写那儿）。</li>
-        </ul>
-        <pre class="pf-inject-text" id="pf-inject-text">读取中…</pre>
-        <div class="modal-actions">
-          <button class="ghost" type="button" data-modal-cancel>关闭</button>
-          <button class="ghost" type="button" id="pf-go-contract">去岗位契约</button>
-        </div>`;
-      const box = body.querySelector("#pf-inject-text");
-      body.querySelector("[data-modal-cancel]")?.addEventListener("click", () => closeModal());
-      body.querySelector("#pf-go-contract")?.addEventListener("click", () => {
-        closeModal();
-        const card = document.querySelector('#pf-persona-cards [data-pf-card=contract]');
-        if (card) card.click();
-      });
-      void (async () => {
-        try {
-          const response = await request(
-            `/api/v1/partners/${encodeURIComponent(partnerId)}/injection-preview`,
-            { cache: "no-store" },
-          );
-          const data = await response.json().catch(() => ({}));
-          if (!response.ok || !data.ok) {
-            throw new Error(data.message || data.error || `HTTP ${response.status}`);
-          }
-          if (!box.isConnected) return;
-          const text = typeof data.discipline === "string" ? data.discipline : "";
-          box.textContent = text.trim() ? text : "纪律模块关着：这段现在不注入（主人数据红线照旧强制，只是不在这段里）。";
-          box.classList.toggle("is-empty", !text.trim());
-        } catch (error) {
-          if (error.message === "forbidden") return;
-          if (!box.isConnected) return;
-          box.textContent = `读不到：${error.message}`;
-          box.classList.add("is-empty");
-        }
-      })();
-    },
-    { className: "modal-wide" },
-  );
+/** 纪律编辑的七个固定节；顺序与宿主注入顺序一致。主人数据红线单独只读。 */
+const PF_DISCIPLINE_SECTIONS = [
+  { key: "partner_verification", title: "验证铁律" },
+  { key: "partner_ruling", title: "裁决纪律" },
+  { key: "partner_work_silence", title: "干活期间" },
+  { key: "partner_grounding", title: "答案接地" },
+  { key: "partner_artifact_handoff", title: "产物交接" },
+  { key: "partner_brief_card", title: "汇报卡" },
+  { key: "partner_attention", title: "提问纪律" },
+];
+const PF_DISCIPLINE_TITLE_SET = new Set(PF_DISCIPLINE_SECTIONS.map((section) => section.title));
+
+/** 把人写的 `DISCIPLINE.md` 按固定标题拆开；未知标题忽略。 */
+function pfParseDisciplineSource(source) {
+  const sections = new Map();
+  let current = null;
+  let buffer = [];
+  const flush = () => {
+    if (!current) return;
+    sections.set(current, buffer.join("\n").trim());
+    buffer = [];
+  };
+  for (const line of String(source || "").split(/\r?\n/)) {
+    const heading = /^##\s+(.+?)\s*$/.exec(line);
+    if (heading) {
+      flush();
+      current = PF_DISCIPLINE_TITLE_SET.has(heading[1]) ? heading[1] : null;
+      continue;
+    }
+    if (current) buffer.push(line);
+  }
+  flush();
+  return sections;
 }
 
-/** 注入预览入口：纪律走专门弹层（带"为什么改不了"），记忆走说明，在办 / 履历走原文。 */
-function pfOpenInjectionViewer(partnerId, kind) {
+/** 序列化覆盖：只写已经覆盖的节；空内容写成空标题（服务端按“删掉这一条”处理）。 */
+function pfSerializeDisciplineSource(sections) {
+  const blocks = [];
+  for (const section of PF_DISCIPLINE_SECTIONS) {
+    if (!sections.has(section.title)) continue;
+    blocks.push(`## ${section.title}\n${sections.get(section.title) || ""}`.trimEnd());
+  }
+  return blocks.join("\n\n");
+}
+
+function pfDisciplineRowMarkup(section, value, hasOverride) {
+  const chars = value.length;
+  return `<section class="pf-disc-section" data-pf-disc-key="${esc(section.key)}" data-pf-disc-title="${esc(section.title)}">
+      <div class="pf-disc-head">
+        <span class="pf-disc-name">${esc(section.title)}</span>
+        <span class="pf-disc-state">${hasOverride ? "覆盖" : "默认"} · ${chars} 字</span>
+      </div>
+      <textarea class="pf-contract pf-disc-text" rows="4" spellcheck="false" aria-label="${esc(section.title)}"
+        placeholder="写这一节的正文">${esc(value)}</textarea>
+      <div class="pf-disc-actions">
+        <button class="pf-mini" type="button" data-pf-disc-restore${hasOverride ? "" : " disabled"}>恢复这一节默认</button>
+        <button class="modal-primary pf-disc-save" type="button" data-pf-disc-save disabled>保存这一节</button>
+      </div>
+    </section>`;
+}
+
+function pfUpdateDisciplineRow(row, value, hasOverride, saving, keepOriginal = false) {
+  const area = row.querySelector("textarea");
+  if (!area) return;
+  area.value = value;
+  if (!keepOriginal) row._pfOriginal = value;
+  const state = row.querySelector(".pf-disc-state");
+  if (state) state.textContent = `${hasOverride ? "覆盖" : "默认"} · ${value.length} 字`;
+  const restore = row.querySelector("[data-pf-disc-restore]");
+  if (restore) restore.disabled = saving || !hasOverride;
+  const save = row.querySelector("[data-pf-disc-save]");
+  if (save) save.disabled = saving || area.value === row._pfOriginal;
+}
+
+function pfRefreshDisciplineRow(row, saving) {
+  const area = row.querySelector("textarea");
+  if (!area) return;
+  const save = row.querySelector("[data-pf-disc-save]");
+  if (save) save.disabled = saving || area.value === row._pfOriginal;
+}
+
+function pfDisciplineRedMarkup(redLine) {
+  return `<section class="pf-disc-section" aria-label="主人数据红线（固定）">
+      <div class="pf-disc-head">
+        <span class="pf-disc-name">主人数据红线</span>
+        <span class="pf-disc-state">固定 · ${redLine.length} 字</span>
+      </div>
+      <pre class="pf-disc-red">${esc(redLine)}</pre>
+    </section>`;
+}
+
+/** 纪律逐节编辑弹层：七个行为节 + 主人数据红线（只读）同在一列，整体交给弹层滚。 */
+function pfOpenDisciplineEditor(partnerId, onChanged) {
+  openModal("纪律", (body) => {
+    body.innerHTML = `
+      <div id="pf-discipline-loading" class="modal-hint">读取中…</div>
+      <div id="pf-discipline-editor" hidden>
+        <div class="pf-disc-list" id="pf-discipline-sections"></div>
+        <p class="modal-hint" id="pf-discipline-hint"></p>
+      </div>
+      <div class="modal-actions">
+        <button class="ghost" type="button" data-modal-cancel>关闭</button>
+        <button class="modal-primary" type="button" id="pf-discipline-save-all" disabled>保存</button>
+      </div>`;
+    const loading = body.querySelector("#pf-discipline-loading");
+    const editor = body.querySelector("#pf-discipline-editor");
+    const list = body.querySelector("#pf-discipline-sections");
+    const hint = body.querySelector("#pf-discipline-hint");
+    const saveAllButton = body.querySelector("#pf-discipline-save-all");
+    let defaults = new Map();
+    let overrides = new Map();
+    let redLine = "";
+    let saving = false;
+
+    const refreshSaveAll = () => {
+      if (!saveAllButton) return;
+      saveAllButton.disabled =
+        saving ||
+        ![...list.querySelectorAll("[data-pf-disc-key]")].some((row) => {
+          const area = row.querySelector("textarea");
+          return area && area.value !== row._pfOriginal;
+        });
+    };
+
+    body.querySelector("[data-modal-cancel]")?.addEventListener("click", () => closeModal());
+    saveAllButton?.addEventListener("click", () => {
+      void saveAllSections();
+    });
+
+    const renderRows = () => {
+      const rows = PF_DISCIPLINE_SECTIONS.map((section) => {
+        const hasOverride = overrides.has(section.title);
+        const value = hasOverride ? overrides.get(section.title) || "" : defaults.get(section.title) || "";
+        return pfDisciplineRowMarkup(section, value, hasOverride);
+      }).join("");
+      list.innerHTML = `${rows}${redLine.trim() ? pfDisciplineRedMarkup(redLine) : ""}`;
+      for (const row of list.querySelectorAll("[data-pf-disc-key]")) {
+        const area = row.querySelector("textarea");
+        if (!area) continue;
+        row._pfOriginal = area.value;
+        area.addEventListener("input", () => {
+          pfRefreshDisciplineRow(row, saving);
+          refreshSaveAll();
+        });
+      }
+      refreshSaveAll();
+    };
+
+    const rowOf = (target) => target?.closest?.("[data-pf-disc-key]") || null;
+    const putSource = async (nextSource, title, successText, { updateAll = false } = {}) => {
+      const response = await request(
+        `/api/v1/partners/${encodeURIComponent(partnerId)}/discipline`,
+        { method: "PUT", body: JSON.stringify({ discipline: nextSource }) },
+      );
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.ok) {
+        throw new Error(data.message || data.error || `HTTP ${response.status}`);
+      }
+      overrides = pfParseDisciplineSource(data.override || "");
+      defaults = pfParseDisciplineSource(data.defaultDiscipline || "");
+      if (updateAll) {
+        for (const row of list.querySelectorAll("[data-pf-disc-key]")) {
+          const rowTitle = row.dataset.pfDiscTitle;
+          const value = overrides.has(rowTitle) ? overrides.get(rowTitle) || "" : defaults.get(rowTitle) || "";
+          pfUpdateDisciplineRow(row, value, overrides.has(rowTitle), saving);
+        }
+      } else {
+        const row = list.querySelector(`[data-pf-disc-title="${esc(title)}"]`);
+        const value = overrides.has(title) ? overrides.get(title) || "" : defaults.get(title) || "";
+        if (row) pfUpdateDisciplineRow(row, value, overrides.has(title), saving);
+      }
+      setModalHint(hint, successText, false);
+      refreshSaveAll();
+      if (typeof onChanged === "function") onChanged();
+    };
+
+    const saveSection = async (row) => {
+      if (saving) return;
+      const title = row?.dataset.pfDiscTitle || "";
+      const area = row?.querySelector("textarea");
+      if (!title || !area || area.value === row._pfOriginal) return;
+      const next = new Map(overrides);
+      next.set(title, area.value.trim());
+      const drafts = new Map();
+      for (const item of list.querySelectorAll("[data-pf-disc-key]")) {
+        const textarea = item.querySelector("textarea");
+        if (textarea) drafts.set(item.dataset.pfDiscTitle, textarea.value);
+      }
+      let ok = false;
+      saving = true;
+      setModalHint(hint, "保存中…", false);
+      for (const item of list.querySelectorAll("[data-pf-disc-save], [data-pf-disc-restore]")) item.disabled = true;
+      if (saveAllButton) saveAllButton.disabled = true;
+      try {
+        await putSource(pfSerializeDisciplineSource(next), title, "已保存这一节，下一轮起用。");
+        ok = true;
+        toast(`已保存「${title}」`);
+      } catch (error) {
+        if (error.message !== "forbidden") setModalHint(hint, `没存成：${error.message}`, true);
+      } finally {
+        saving = false;
+        for (const item of list.querySelectorAll("[data-pf-disc-key]")) {
+          const rowTitle = item.dataset.pfDiscTitle;
+          const keep = !ok || rowTitle !== title;
+          const value = keep
+            ? drafts.get(rowTitle) ?? item.querySelector("textarea")?.value ?? ""
+            : overrides.has(rowTitle)
+              ? overrides.get(rowTitle) || ""
+              : defaults.get(rowTitle) || "";
+          pfUpdateDisciplineRow(item, value, overrides.has(rowTitle), saving, keep);
+        }
+        refreshSaveAll();
+      }
+    };
+
+    const restoreSection = async (row) => {
+      if (saving) return;
+      const title = row?.dataset.pfDiscTitle || "";
+      if (!title || !overrides.has(title)) return;
+      const next = new Map(overrides);
+      next.delete(title);
+      const drafts = new Map();
+      for (const item of list.querySelectorAll("[data-pf-disc-key]")) {
+        const textarea = item.querySelector("textarea");
+        if (textarea) drafts.set(item.dataset.pfDiscTitle, textarea.value);
+      }
+      let ok = false;
+      saving = true;
+      setModalHint(hint, "恢复中…", false);
+      for (const item of list.querySelectorAll("[data-pf-disc-save], [data-pf-disc-restore]")) item.disabled = true;
+      if (saveAllButton) saveAllButton.disabled = true;
+      try {
+        await putSource(pfSerializeDisciplineSource(next), title, "已恢复这一节默认，下一轮起用。");
+        ok = true;
+        toast(`已恢复「${title}」默认`);
+      } catch (error) {
+        if (error.message !== "forbidden") setModalHint(hint, `没恢复成：${error.message}`, true);
+      } finally {
+        saving = false;
+        for (const item of list.querySelectorAll("[data-pf-disc-key]")) {
+          const rowTitle = item.dataset.pfDiscTitle;
+          const keep = !ok || rowTitle !== title;
+          const value = keep
+            ? drafts.get(rowTitle) ?? item.querySelector("textarea")?.value ?? ""
+            : overrides.has(rowTitle)
+              ? overrides.get(rowTitle) || ""
+              : defaults.get(rowTitle) || "";
+          pfUpdateDisciplineRow(item, value, overrides.has(rowTitle), saving, keep);
+        }
+        refreshSaveAll();
+      }
+    };
+
+    /** 底部「保存」：把所有改过的节合并成一次 PUT；单节保存仍可用。 */
+    const saveAllSections = async () => {
+      if (saving) return;
+      const next = new Map(overrides);
+      let changed = 0;
+      for (const row of list.querySelectorAll("[data-pf-disc-key]")) {
+        const area = row.querySelector("textarea");
+        if (!area || area.value === row._pfOriginal) continue;
+        next.set(row.dataset.pfDiscTitle || "", area.value.trim());
+        changed += 1;
+      }
+      if (!changed) return;
+      saving = true;
+      setModalHint(hint, "保存中…", false);
+      for (const item of list.querySelectorAll("[data-pf-disc-save], [data-pf-disc-restore]")) item.disabled = true;
+      if (saveAllButton) saveAllButton.disabled = true;
+      let ok = false;
+      try {
+        await putSource(pfSerializeDisciplineSource(next), "", "已保存全部改动，下一轮起用。", { updateAll: true });
+        ok = true;
+        toast("纪律已保存");
+      } catch (error) {
+        if (error.message !== "forbidden") setModalHint(hint, `没存成：${error.message}`, true);
+      } finally {
+        saving = false;
+        for (const row of list.querySelectorAll("[data-pf-disc-key]")) {
+          const rowTitle = row.dataset.pfDiscTitle;
+          if (ok) {
+            const value = overrides.has(rowTitle) ? overrides.get(rowTitle) || "" : defaults.get(rowTitle) || "";
+            pfUpdateDisciplineRow(row, value, overrides.has(rowTitle), saving);
+          } else {
+            // 没存成：保留用户草稿，只把按钮恢复到可再试
+            pfRefreshDisciplineRow(row, saving);
+            const restore = row.querySelector("[data-pf-disc-restore]");
+            if (restore) restore.disabled = !overrides.has(rowTitle);
+          }
+        }
+        refreshSaveAll();
+      }
+    };
+
+    list.addEventListener("click", (event) => {
+      const row = rowOf(event.target);
+      if (!row) return;
+      if (event.target.closest("[data-pf-disc-save]")) {
+        event.preventDefault();
+        void saveSection(row);
+      } else if (event.target.closest("[data-pf-disc-restore]")) {
+        event.preventDefault();
+        void restoreSection(row);
+      }
+    });
+
+    void (async () => {
+      try {
+        const response = await request(
+          `/api/v1/partners/${encodeURIComponent(partnerId)}/discipline`,
+          { cache: "no-store" },
+        );
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.ok) {
+          throw new Error(data.message || data.error || `HTTP ${response.status}`);
+        }
+        if (!editor.isConnected) return;
+        defaults = pfParseDisciplineSource(data.defaultDiscipline || "");
+        overrides = pfParseDisciplineSource(data.override || "");
+        redLine = String(data.redLine || "");
+        renderRows();
+        if (loading) loading.hidden = true;
+        editor.hidden = false;
+        if (!data.editable) setModalHint(hint, "纪律覆盖当前由服务端关掉了，只能看默认。", true);
+        else setModalHint(hint, "", false);
+      } catch (error) {
+        if (error.message === "forbidden") return;
+        if (!body.isConnected) return;
+        if (loading) loading.textContent = `读不到：${error.message}`;
+      }
+    })();
+  }, { className: "modal-wide" });
+}
+
+/** 注入预览入口：纪律走编辑弹层，记忆走说明，在办 / 履历走原文。 */
+function pfOpenInjectionViewer(partnerId, kind, onChanged) {
   if (kind === "discipline") {
-    pfOpenDisciplineViewer(partnerId);
+    pfOpenDisciplineEditor(partnerId, onChanged);
     return;
   }
   // 记忆不是固定段：每轮按你说的话现查，没有"原文"可预览——如实说明 + 给去记忆页的入口。
@@ -950,11 +1333,11 @@ function pfMemoryTaskOf(nightly, partnerId) {
 
 function pfMemorySummaryOf(nightly, partnerId) {
   const info = pfMemoryTaskOf(nightly, partnerId);
-  if (!info) return "整理记忆读不到";
-  if (!info.task) return "整理记忆已删除";
-  if (!info.master) return "整理记忆总开关关";
-  if (info.task.enabled === false) return "整理记忆已暂停";
-  return `整理记忆 ${info.at}`;
+  if (!info) return "每晚整理读不到";
+  if (!info.task) return "每晚整理已删除";
+  if (!info.master) return "每晚整理总开关关";
+  if (info.task.enabled === false) return "每晚整理已暂停";
+  return `每晚整理 ${info.at}`;
 }
 
 async function pfLoadGlobalSkills(partnerId) {
@@ -1000,7 +1383,7 @@ async function pfOpenRoutinesModal(partnerId, onChanged) {
 
       const paintMemory = () => {
         if (!nightly) {
-          memoryBox.innerHTML = `<p class="pf-hint is-error">读不到整理记忆（记忆功能未启用？）</p>`;
+          memoryBox.innerHTML = `<p class="pf-hint is-error">读不到每晚整理（记忆功能未启用？）</p>`;
           return;
         }
         const info = pfMemoryTaskOf(nightly, partnerId);
@@ -1012,12 +1395,12 @@ async function pfOpenRoutinesModal(partnerId, onChanged) {
               ? "已暂停"
               : `每天 ${info.at}`;
         memoryBox.innerHTML = `
-          <div class="pf-live-head"><span>每晚整理记忆</span><span class="pf-tag">${esc(tag)}</span></div>
-          <p class="pf-hint">到点他会回看自己的记忆和最近的原始对话，找出重复、过时、说法不一致的条目；只出建议，你逐条点应用才会改。改时间改的是全家共用的时刻，所有人一起变。</p>
+          <div class="pf-live-head"><span>每晚整理记忆（拆分 + 对账）</span><span class="pf-tag">${esc(tag)}</span></div>
+          <p class="pf-hint">到点先把自己的长记忆拆成短原子（完整原文存进原文档案，不删除），再回看重复、过时、说法不一致的条目。拆分是机械动作，不需要模型；对账只出建议，你逐条点应用才会改。改时间改的是全家共用的时刻，所有人一起变。</p>
           <div class="pf-live-tools" id="pf-memory-actions"></div>`;
         const tools = memoryBox.querySelector("#pf-memory-actions");
         if (!info?.task) {
-          tools.innerHTML = `<span class="pf-hint">这个人的整理任务已被删除；删除不可恢复。</span>`;
+          tools.innerHTML = `<span class="pf-hint">这个人的每晚整理任务已被删除；删除不可恢复。</span>`;
           return;
         }
         if (!info.master) {
@@ -1033,7 +1416,7 @@ async function pfOpenRoutinesModal(partnerId, onChanged) {
             {
               kind: "memory",
               id: info.scope,
-              text: "整理记忆",
+              text: "每晚整理",
               at: Date.parse(nightly?.nextAt || "") || Date.now(),
               repeat: "daily",
               ...(partnerId === "chief" ? {} : { partnerId }),
@@ -1468,9 +1851,9 @@ function pfOpenPersonaEditor(partnerId, persona, moduleKey, onSaved) {
             hint.classList.add("is-error");
             return;
           }
+          // 草稿模式（2026-11-16）：这里只存内容。preset / modules 是页面上的未保存草稿，
+          // 不能用服务端回读的旧开关把它们冲掉；底部保存时才一起落库。
           persona.contents = data.contents || persona.contents;
-          persona.preset = data.preset || persona.preset;
-          persona.modules = data.modules || persona.modules;
           closeModal();
           onSaved?.(moduleKey, persona.contents?.[moduleKey] || {});
           toast(`${editor.title}已保存`);
@@ -1581,7 +1964,12 @@ async function pfPutPersona(partnerId, payload, hint) {
   }
 }
 
-function pfApplyPersonaData(persona, data) {
+function pfApplyPersonaData(persona, data, keepSwitches = false) {
+  // 草稿模式（2026-11-16）：活状态 / 静态内容弹层只改内容，返回的 preset/modules/switches
+  // 仍是服务端旧值；保留本地未保存的开关，别把页面草稿冲掉。
+  const preset = persona.preset;
+  const modules = persona.modules;
+  const switches = persona.switches;
   persona.preset = data.preset ?? persona.preset;
   persona.modules = data.modules ?? persona.modules;
   persona.contents = data.contents ?? persona.contents;
@@ -1590,6 +1978,11 @@ function pfApplyPersonaData(persona, data) {
   persona.voice = data.voice ?? persona.voice;
   persona.proactivity = data.proactivity ?? persona.proactivity;
   persona.profiles = data.profiles ?? persona.profiles;
+  if (keepSwitches) {
+    persona.preset = preset;
+    persona.modules = modules;
+    persona.switches = switches;
+  }
   return persona;
 }
 
@@ -1675,15 +2068,17 @@ function pfOpenProfilesModal(partnerId, persona, onChanged) {
           row.querySelector("[data-pf-apply]").addEventListener("click", async () => {
             const data = await pfPutPersona(partnerId, { profiles: { apply: { id: item.id } } }, hint);
             if (!data) return;
+            // 应用快照 = 服务端整份替换；通知父层把草稿基线一起换掉。
             pfApplyPersonaData(persona, data);
             closeModal();
             toast(`已应用「${item.name}」`);
-            onChanged?.();
+            onChanged?.(true);
           });
           row.querySelector("[data-pf-remove]").addEventListener("click", async () => {
             const data = await pfPutPersona(partnerId, { profiles: { remove: { id: item.id } } }, hint);
             if (!data) return;
-            pfApplyPersonaData(persona, data);
+            // 只删快照：保留页面里未保存的开关草稿。
+            pfApplyPersonaData(persona, data, true);
             paint();
             onChanged?.();
           });
@@ -1707,7 +2102,8 @@ function pfOpenProfilesModal(partnerId, persona, onChanged) {
         const data = await pfPutPersona(partnerId, { profiles: { save: { name } } }, hint);
         save.disabled = false;
         if (!data) return;
-        pfApplyPersonaData(persona, data);
+        // 只存快照：保留页面里未保存的开关草稿。
+        pfApplyPersonaData(persona, data, true);
         body.querySelector("#pf-profile-name").value = "";
         hint.textContent = "已存一份。";
         paint();
@@ -2001,7 +2397,24 @@ function pfOpenLivingEditor(partnerId, persona, kind, onChanged) {
   else if (kind === "heart") pfOpenHeartModal(partnerId, persona, onChanged);
 }
 
-async function pfWirePersona(root, partnerId, partner, detail) {
+/** 读插件页的父子锁态（2026-11-16）：人设页只关心 effectiveValue / lockedBy；
+ *  端点不可用 / 没令牌就返回空 Map，页面按旧行为不锁。 */
+async function pfLoadPluginFlags() {
+	const rows = new Map();
+	try {
+		const response = await request("/api/v1/agent/flags", { cache: "no-store" });
+		if (!response.ok) return rows;
+		const data = await response.json().catch(() => ({}));
+		for (const flag of Array.isArray(data.flags) ? data.flags : []) {
+			if (flag && typeof flag.key === "string") rows.set(flag.key, flag);
+		}
+	} catch {
+		/* 403 / 网络错误：不锁，照旧可用 */
+	}
+	return rows;
+}
+
+async function pfWirePersona(root, partnerId, partner, detail, onDraftChange) {
   const section = root.querySelector("#pf-persona");
   const presetBox = root.querySelector("#pf-persona-presets");
   const cardsBox = root.querySelector("#pf-persona-cards");
@@ -2016,6 +2429,49 @@ async function pfWirePersona(root, partnerId, partner, detail) {
   let persona = null;
   let personaEnabled = false;
   let saving = false;
+  /** 上一次服务端确认的 persona（草稿的对照）；页面级保存成功后整体替换。 */
+  let baseline = null;
+  const baselinePartner = {
+    toolProjection: partner.toolProjection ?? null,
+    diary: partner.diary === true,
+  };
+  const MODULE_IDS = PF_PERSONA_MODULES.map((module) => module.id);
+  const SWITCH_IDS = ["moodAffectTone", "nudgeEnabled", "memoryRecallEnabled"];
+  const moduleDirty = (id) =>
+    Boolean(persona && baseline) && persona.modules?.[id] !== baseline.modules?.[id];
+  const switchDirty = (key) =>
+    Boolean(persona && baseline) &&
+    Boolean(persona.switches?.[key]) !== Boolean(baseline.switches?.[key]);
+  const dirtyCount = () => {
+    if (!persona || !baseline) return 0;
+    let count = 0;
+    if (persona.preset !== baseline.preset) count += 1;
+    for (const id of MODULE_IDS) if (moduleDirty(id)) count += 1;
+    for (const key of SWITCH_IDS) if (switchDirty(key)) count += 1;
+    if ((partner.toolProjection ?? null) !== baselinePartner.toolProjection) count += 1;
+    if ((partner.diary === true) !== baselinePartner.diary) count += 1;
+    return count;
+  };
+  const notify = () => onDraftChange?.();
+  // 跨层父子门（2026-11-16）：人设页的子开关不在 FLAG_DEFS 里，只能读插件页返回的
+  // effectiveValue / lockedBy，再决定控件锁不锁。读不到就按旧行为（不锁），不挡页面。
+  const pluginFlags = await pfLoadPluginFlags();
+  const PF_PARENT_LABELS = {
+    MEMORY_ENABLED: "记忆总闸",
+    PARTNER_MEMORY_RECALL: "记忆召回（总闸）",
+    TOOL_PROJECTION: "工具结果整理",
+    COMPANIONS_ENABLED: "执事体系",
+  };
+  const flagRowOf = (key) => pluginFlags.get(key);
+  const flagLockOf = (key) => {
+    const row = flagRowOf(key);
+    if (!row) return null;
+    return row.lockedBy || (row.effectiveValue === "false" || row.value === "false" ? key : null);
+  };
+  const flagNameOf = (key) => PF_PARENT_LABELS[key] || key;
+  const memoryRecallLock = flagLockOf("PARTNER_MEMORY_RECALL");
+  const memoryLock = flagLockOf("MEMORY_ENABLED");
+  const projectionLock = flagLockOf("TOOL_PROJECTION");
   // 卡片摘要的异步计数（例行 / 整理记忆 / 技能 / 项目名）：回来就重画一次
   const counts = {
     routineCount: null,
@@ -2034,7 +2490,7 @@ async function pfWirePersona(root, partnerId, partner, detail) {
 
   /* ── 卡片定义 ──
      persona 模块卡：开关 = persona.modules[id]；contract/goal 带编辑弹层，
-     discipline/workHistory/currentWork 是纯注入开关（点卡 = 切开关）。
+     discipline/workHistory/currentWork 是纯注入开关（点卡 = 切开关）；纪律卡另外带编辑层。
      row 卡：开关挂在 partner 行字段（PATCH）；plain 卡：无开关，点开即用。 */
   const mod = (id) => PF_PERSONA_MODULES.find((item) => item.id === id);
 
@@ -2055,6 +2511,8 @@ async function pfWirePersona(root, partnerId, partner, detail) {
 
   const moduleCard = (module) => {
     const on = persona ? persona.modules?.[module.id] === true : null;
+    // 学习模块的父闸是记忆总闸：总闸关着时它不跑，但 persona.modules.learning 的存储值保留。
+    const lock = module.id === "learning" ? memoryLock : null;
     const hasEditor =
       Boolean(module.editable) ||
       Boolean(module.living) ||
@@ -2071,17 +2529,20 @@ async function pfWirePersona(root, partnerId, partner, detail) {
       card.dataset.pfCard = module.id;
     }
     // 关 = 不能改、不进提示词（内容保留）：内容卡降半档视觉，点了说一句
-    if (hasEditor && persona && !on) card.classList.add("is-off");
+    if ((hasEditor && persona && !on) || lock) card.classList.add("is-off");
     const label = document.createElement("div");
     label.className = "pf-mod-label";
     const name = document.createElement("span");
     name.className = "pf-mod-name";
-    name.dataset.tip = module.tip;
+    name.dataset.tip = lock
+      ? `${module.tip} 当前「${flagNameOf(lock)}」关着：显示关、不能打开；原设置保留，总闸重开后恢复。`
+      : module.tip;
     name.textContent = module.name;
     label.append(name);
     const sum = document.createElement("span");
     sum.className = "pf-mod-sum";
-    sum.textContent = moduleSummary(module);
+    const baseSummary = moduleSummary(module);
+    sum.textContent = lock ? `${baseSummary === "—" ? "" : `${baseSummary} · `}关（${flagNameOf(lock)}关闭）` : baseSummary;
     label.append(sum);
     if (persona) {
       const toggle = document.createElement("button");
@@ -2089,7 +2550,11 @@ async function pfWirePersona(root, partnerId, partner, detail) {
       toggle.className = "switch";
       toggle.setAttribute("role", "switch");
       toggle.setAttribute("aria-label", module.name);
-      toggle.setAttribute("aria-checked", String(on === true));
+      toggle.setAttribute("aria-checked", String(lock ? false : on === true));
+      if (lock) {
+        toggle.disabled = true;
+        toggle.setAttribute("aria-disabled", "true");
+      }
       toggle.dataset.pfMod = module.id;
       toggle.innerHTML = `<span class="switch-thumb" aria-hidden="true"></span>`;
       card.append(label, toggle);
@@ -2104,23 +2569,36 @@ async function pfWirePersona(root, partnerId, partner, detail) {
     const card = document.createElement("div");
     card.className = "pf-mod-card is-clickable";
     card.dataset.pfRow = def.id;
+    // 结果整理的父闸 = 插件页 TOOL_PROJECTION；关着时这张行也显示关、不能单独开。
+    const lock = def.id === "projection" ? projectionLock : null;
+    if (lock) {
+      card.classList.add("is-off");
+      card.dataset.pfLocked = "1";
+      card.setAttribute("aria-disabled", "true");
+    }
     const label = document.createElement("div");
     label.className = "pf-mod-label";
     const name = document.createElement("span");
     name.className = "pf-mod-name";
-    name.dataset.tip = def.tip;
+    name.dataset.tip = lock
+      ? `${def.tip} 当前「${flagNameOf(lock)}」关着：显示关、不能单独打开；原设置保留，总闸重开后恢复。`
+      : def.tip;
     name.textContent = def.name;
     label.append(name);
     const sum = document.createElement("span");
     sum.className = "pf-mod-sum";
-    sum.textContent = def.summary();
+    sum.textContent = lock ? `关（${flagNameOf(lock)}关闭）` : def.summary();
     label.append(sum);
     const toggle = document.createElement("button");
     toggle.type = "button";
     toggle.className = "switch";
     toggle.setAttribute("role", "switch");
     toggle.setAttribute("aria-label", def.name);
-    toggle.setAttribute("aria-checked", String(def.checked()));
+    toggle.setAttribute("aria-checked", String(lock ? false : def.checked() === true));
+    if (lock) {
+      toggle.disabled = true;
+      toggle.setAttribute("aria-disabled", "true");
+    }
     toggle.innerHTML = `<span class="switch-thumb" aria-hidden="true"></span>`;
     card.append(label, toggle);
     return card;
@@ -2166,17 +2644,17 @@ async function pfWirePersona(root, partnerId, partner, detail) {
   };
 
   // 每轮固定注入（2026-11-15 打磨二轮命名）：100% 每句话都带，不带筛。
-  // 纪律 / 在办 / 履历内容改不了（宿主固定字节 / 现查现拼），点卡看实际注入原文；
-  // 负责项目在这一区，是因为挂载会让他每轮收到一行项目索引（100%），
+  // 纪律：宿主默认可看、行为纪律可写覆盖；主人数据红线固定。在办 / 履历现查现拼，
+  // 点卡看实际注入原文；负责项目在这一区，是因为挂载会让他每轮收到一行项目索引（100%），
   // 而「项目记忆」是另一件事——那些进下面「按相关度召回」的打分池。
   const VIEW_DEFS = [
     {
       id: "discipline",
       name: "纪律",
-      tip: "验证铁律、裁决口径、干活期间的安静、提问纪律、主人数据红线——宿主写死的规矩，改不了（改了等于把安全边界交给模型自己裁）。自己的规矩写到「岗位契约」里。点开看实际注入原文 + 为什么改不了。",
+      tip: "宿主给了一份默认行为纪律；验证铁律、裁决口径、干活期间的安静、提问纪律等七节在弹层里逐节改，每节单独保存。主人数据红线固定注入，不可覆盖。点开编辑或看默认原文。",
       switchKind: "module",
       switchKey: "discipline",
-      summary: () => (persona ? (persona.modules?.discipline === true ? "开" : "关") : ""),
+      summary: () => (persona ? (persona.modules?.discipline === true ? "开 · 七节" : "关") : ""),
       checked: () => persona?.modules?.discipline === true,
     },
     {
@@ -2240,16 +2718,21 @@ async function pfWirePersona(root, partnerId, partner, detail) {
     const card = document.createElement("div");
     card.className = "pf-mod-card is-clickable";
     card.dataset.pfView = def.id;
+    // 记忆 + 项目记忆：父 = 插件页的记忆召回总闸（它自己还受记忆总闸约束）。
+    const lock = def.switchKey === "memoryRecallEnabled" ? memoryRecallLock : null;
+    if (lock) card.classList.add("is-off");
     const label = document.createElement("div");
     label.className = "pf-mod-label";
     const name = document.createElement("span");
     name.className = "pf-mod-name";
-    name.dataset.tip = def.tip;
+    name.dataset.tip = lock
+      ? `${def.tip} 当前「${flagNameOf(lock)}」关着：显示关、不能单独打开；原设置保留，总闸重开后恢复。`
+      : def.tip;
     name.textContent = def.name;
     label.append(name);
     const sum = document.createElement("span");
     sum.className = "pf-mod-sum";
-    sum.textContent = def.summary();
+    sum.textContent = lock ? `关（${flagNameOf(lock)}关闭）` : def.summary();
     label.append(sum);
     if (def.switchKey && persona) {
       const toggle = document.createElement("button");
@@ -2257,7 +2740,11 @@ async function pfWirePersona(root, partnerId, partner, detail) {
       toggle.className = "switch";
       toggle.setAttribute("role", "switch");
       toggle.setAttribute("aria-label", def.name);
-      toggle.setAttribute("aria-checked", String(def.checked() === true));
+      toggle.setAttribute("aria-checked", String(lock ? false : def.checked() === true));
+      if (lock) {
+        toggle.disabled = true;
+        toggle.setAttribute("aria-disabled", "true");
+      }
       // 开关落点两种：人格模块开关（纪律）/ 人格子开关（记忆召回）
       if (def.switchKind === "persona") toggle.dataset.pfSwitch = def.switchKey;
       else toggle.dataset.pfMod = def.switchKey;
@@ -2405,8 +2892,10 @@ async function pfWirePersona(root, partnerId, partner, detail) {
       pfOpenLivingEditor(partnerId, persona, module.living, () => {
         void pfReloadPersona(partnerId).then((next) => {
           if (next) {
-            persona = next;
+            // 弹层只改活状态：保留页面里还没保存的开关草稿。
+            applyServerPersona(next, true);
             paint();
+            notify();
           }
         });
       });
@@ -2421,35 +2910,121 @@ async function pfWirePersona(root, partnerId, partner, detail) {
         toast("先打开「人设库」模块");
         return;
       }
-      pfOpenProfilesModal(partnerId, persona, () => paint());
+      pfOpenProfilesModal(partnerId, persona, (applied) => {
+        if (applied) {
+          // 应用快照是服务端整份替换：草稿基线跟着换，页面不该显示成"一堆未保存"。
+          baseline = JSON.parse(JSON.stringify(persona));
+        }
+        paint();
+        notify();
+      });
     }
   };
 
-  const save = async (payload, anchor, okText) => {
-    if (saving) return;
+  /**
+   * 接住服务端回读的 persona，作为新基准。
+   * `keepDraft = true` 用于弹层里的即时保存（静态内容 / 活状态）：它们只改内容，
+   * 不能把页面里还没保存的开关草稿冲掉——只把脏字段叠回新基准之上。
+   */
+  const applyServerPersona = (data, keepDraft = false) => {
+    if (!data) return;
+    const keep =
+      keepDraft && persona && baseline
+        ? {
+            preset: persona.preset !== baseline.preset ? persona.preset : undefined,
+            modules: Object.fromEntries(
+              MODULE_IDS.filter((id) => moduleDirty(id)).map((id) => [id, persona.modules[id]]),
+            ),
+            switches: Object.fromEntries(
+              SWITCH_IDS.filter((key) => switchDirty(key)).map((key) => [key, persona.switches?.[key]]),
+            ),
+          }
+        : null;
+    persona = { ...data };
+    baseline = JSON.parse(JSON.stringify(data));
+    if (keep) {
+      if (keep.preset !== undefined) persona.preset = keep.preset;
+      persona.modules = { ...(data.modules || {}), ...keep.modules };
+      persona.switches = { ...(data.switches || {}), ...keep.switches };
+    }
+  };
+
+  /** 页面级保存：一次把人设草稿与高级行开关落库；成功才算干净。 */
+  const savePage = async () => {
+    if (saving || !persona || !baseline) return false;
+    const personaDirty =
+      persona.preset !== baseline.preset ||
+      MODULE_IDS.some((id) => moduleDirty(id)) ||
+      SWITCH_IDS.some((key) => switchDirty(key));
+    const projectionChanged = (partner.toolProjection ?? null) !== baselinePartner.toolProjection;
+    const diaryChanged = (partner.diary === true) !== baselinePartner.diary;
+    if (!personaDirty && !projectionChanged && !diaryChanged) return true;
+
     saving = true;
-    if (anchor) anchor.disabled = true;
-    setHint("");
+    setHint("保存中…");
     try {
-      const response = await request(`/api/v1/partners/${encodeURIComponent(partnerId)}/persona`, {
-        method: "PUT",
-        body: JSON.stringify(payload),
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        setHint(data.message || data.error || `没存成：HTTP ${response.status}`, true);
-        return;
+      if (personaDirty) {
+        const response = await request(`/api/v1/partners/${encodeURIComponent(partnerId)}/persona`, {
+          method: "PUT",
+          body: JSON.stringify({
+            preset: persona.preset,
+            modules: persona.modules,
+            switches: persona.switches,
+          }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || data.ok === false) {
+          setHint(data.message || data.error || `没存成：HTTP ${response.status}`, true);
+          return false;
+        }
+        applyServerPersona(data);
       }
-      persona = pfApplyPersonaData(persona, data);
+      if (projectionChanged || diaryChanged) {
+        const patch = {};
+        if (projectionChanged) patch.tool_projection = partner.toolProjection ?? null;
+        if (diaryChanged) patch.diary = partner.diary === true;
+        const data = await pfPatchPartner(partnerId, patch);
+        if (data.partner) {
+          partner.toolProjection = data.partner.toolProjection ?? null;
+          partner.diary = data.partner.diary === true;
+        }
+        baselinePartner.toolProjection = partner.toolProjection ?? null;
+        baselinePartner.diary = partner.diary === true;
+        const cached = state.partners.find((item) => item.id === partnerId);
+        if (cached) {
+          cached.toolProjection = partner.toolProjection;
+          cached.diary = partner.diary;
+        }
+        // 日记执事是唯一位：开了别人，别人的开关要跟着灭
+        if (partner.diary === true) {
+          for (const item of state.partners) {
+            if (item.id !== partnerId && item.diary) item.diary = false;
+          }
+          void loadRoster();
+        }
+      }
       paint();
-      // 有的动作要额外说一句（如挂念把主动性一起打开了），别被通用文案吃掉
-      setHint(okText || "已保存，下一轮起用。");
+      setHint("已保存，下一轮起用。");
+      return true;
     } catch (error) {
       if (error.message !== "forbidden") setHint(`没存成：${error.message}`, true);
+      return false;
     } finally {
       saving = false;
-      if (anchor?.isConnected) anchor.disabled = false;
+      notify();
     }
+  };
+
+  /** 撤销草稿：开关 / 预设 / 高级行回到上次保存的状态；弹层里已保存的内容不动。 */
+  const discardPage = () => {
+    if (!persona || !baseline) return;
+    persona.preset = baseline.preset;
+    persona.modules = { ...baseline.modules };
+    persona.switches = { ...baseline.switches };
+    partner.toolProjection = baselinePartner.toolProjection;
+    partner.diary = baselinePartner.diary;
+    paint();
+    notify();
   };
 
   presetBox.addEventListener("click", (event) => {
@@ -2457,7 +3032,17 @@ async function pfWirePersona(root, partnerId, partner, detail) {
     if (!button || !persona) return;
     const preset = button.dataset.pfPreset;
     if (preset === persona.preset) return;
-    void save({ preset }, button);
+    // 草稿模式（2026-11-16）：只改本地开关，点底部保存才落库。
+    const table = PF_PERSONA_PRESET_MODULES[preset];
+    persona.preset = preset;
+    if (table) {
+      for (const id of MODULE_IDS) persona.modules[id] = table[id] === true;
+      // 履历 / 在办固定注入（服务端也强制 true），预设表里的 false 不生效。
+      persona.modules.workHistory = true;
+      persona.modules.currentWork = true;
+    }
+    paint();
+    notify();
   });
 
   // 统一委托（2026-11-15 打磨：挂到整页容器上，三个区共用）：
@@ -2475,61 +3060,46 @@ async function pfWirePersona(root, partnerId, partner, detail) {
       if (!persona) return;
       const key = switchEl.dataset.pfSwitch;
       const next = switchEl.getAttribute("aria-checked") !== "true";
-      if (key === "nudgeEnabled" && next) {
-        // 挂念依赖主动性在跑（服务端 nudge 要求 proactivity 模块开）：
-        // 一次 PUT 把两件事一起落，避免"点了没反应"。
-        const patch = { switches: { nudgeEnabled: true } };
-        let okText = "挂念已开：他会在你忙完一轮、或周盘点时提醒一句，一天最多一条。";
-        if (persona.modules?.proactivity !== true) {
-          patch.modules = { proactivity: true };
-          okText = "挂念已开，顺手把「主动性」也打开了——挂念要靠它跑。";
-        }
-        void save(patch, switchEl, okText);
-        return;
+      // 草稿模式：挂念依赖主动性在跑（服务端 nudge 判 proactivity 模块 + 这个子开关），
+      // 点挂念时若主动性关着就一起打开——同一次草稿，保存时一起落。
+      if (key === "nudgeEnabled" && next && persona.modules?.proactivity !== true) {
+        persona.modules.proactivity = true;
+        persona.preset = pfDerivePreset(persona.modules);
       }
-      void save({ switches: { [key]: next } }, switchEl);
+      persona.switches = { ...(persona.switches || {}), [key]: next };
+      paint();
+      notify();
       return;
     }
     const toggle = event.target.closest("[data-pf-mod]");
     if (toggle) {
       if (!persona) return;
       const next = toggle.getAttribute("aria-checked") !== "true";
-      void save({ modules: { [toggle.dataset.pfMod]: next } }, toggle);
+      const id = toggle.dataset.pfMod;
+      persona.modules[id] = next;
+      // 改任一开关都按最终表推导预设（与服务端保存时同一口径），页面上的高亮不会说谎。
+      persona.preset = pfDerivePreset(persona.modules);
+      paint();
+      notify();
       return;
     }
     const rowEl = event.target.closest("[data-pf-row]");
     if (rowEl) {
+      if (rowEl.dataset.pfLocked === "1") {
+        setHint(`「${flagNameOf(projectionLock)}」关闭时，结果整理显示关且不能单独打开；原设置保留。`, true);
+        return;
+      }
       const def = ROW_DEFS[rowEl.dataset.pfRow];
       if (!def) return;
-      const cardNode = rowEl;
-      cardNode.style.pointerEvents = "none";
-      try {
-        if (def.id === "projection") {
-          // 两态（2026-11-15 人设页打磨）：开（跟随全局默认）↔ 关（只他一个回原始结果）。
-          // 行上仍存三态值：关 = 0，开回跟随 = null；1（强制开）不再从界面产生。
-          const next = partner.toolProjection === 0 ? null : 0;
-          const data = await pfPatchPartner(partnerId, { tool_projection: next });
-          partner.toolProjection = data.partner?.toolProjection ?? next;
-          const cached = state.partners.find((item) => item.id === partnerId);
-          if (cached) cached.toolProjection = partner.toolProjection;
-        } else if (def.id === "diary") {
-          const next = partner.diary !== true;
-          const data = await pfPatchPartner(partnerId, { diary: next });
-          partner.diary = data.partner?.diary ?? next;
-          // 日记执事是唯一位：开了别人，别人的开关要跟着灭
-          if (next) {
-            for (const item of state.partners) {
-              if (item.id !== partnerId && item.diary) item.diary = false;
-            }
-          }
-          void loadRoster();
-        }
-        paint();
-      } catch (error) {
-        if (error.message !== "forbidden") toast(`没切成：${error.message}`);
-      } finally {
-        cardNode.style.pointerEvents = "";
+      // 草稿模式（2026-11-16）：先只改本地值，点底部保存才 PATCH。
+      if (def.id === "projection") {
+        // 两态：开（跟随全局默认）↔ 关（只他一个回原始结果）；行上仍是三态值：关 = 0，开回 null。
+        partner.toolProjection = partner.toolProjection === 0 ? null : 0;
+      } else if (def.id === "diary") {
+        partner.diary = partner.diary !== true;
       }
+      paint();
+      notify();
       return;
     }
     const plainEl = event.target.closest("[data-pf-plain]");
@@ -2554,16 +3124,35 @@ async function pfWirePersona(root, partnerId, partner, detail) {
     }
     const viewEl = event.target.closest("[data-pf-view]");
     if (viewEl) {
-      pfOpenInjectionViewer(partnerId, viewEl.dataset.pfView);
+      pfOpenInjectionViewer(partnerId, viewEl.dataset.pfView, () => paint());
       return;
     }
     const cardEl = event.target.closest("[data-pf-card]");
     if (!cardEl) return;
     const module = mod(cardEl.dataset.pfCard);
     if (!module) return;
-    // 关 = 不能改（内容保留）：点了说一句，不开编辑层（人格模块卡墙里每张卡都带编辑层）
+    // 学习模块：记忆总闸关着时先别开编辑层，显示关且不能动。
+    if (module.id === "learning" && memoryLock) {
+      setHint(`「${flagNameOf(memoryLock)}」关闭时，「学习」显示关且不能打开；原设置保留。`, true);
+      return;
+    }
+    // 关 = 不能改（内容保留）：点了弹一枚小窗问要不要打开，不再只在页脚留一行字
     if (persona && persona.modules?.[module.id] !== true) {
-      setHint(`先打开「${module.name}」再改内容。`, true);
+      void openConfirm({
+        title: `「${module.name}」还关着`,
+        message: "打开之后才能改内容；关着改了也不进提示词。",
+        confirmText: "打开并编辑",
+        cancelText: "先不",
+      }).then((ok) => {
+        if (!ok) return;
+        // 草稿模式：先只把开关打开（底部保存才落库），再进编辑层；
+        // 编辑层保存内容时会保留这个未保存的开关（applyServerPersona 的 keepDraft）。
+        persona.modules[module.id] = true;
+        persona.preset = pfDerivePreset(persona.modules);
+        paint();
+        notify();
+        openModuleCard(module);
+      });
       return;
     }
     openModuleCard(module);
@@ -2584,7 +3173,7 @@ async function pfWirePersona(root, partnerId, partner, detail) {
     if (!response.ok || !data.ok) throw new Error(String(response.status));
     // 晚到的响应不盖掉用户已经切走的页
     if (pfRouteId() !== partnerId) return;
-    persona = data;
+    applyServerPersona(data);
     personaEnabled = data.enabled === true;
     if (!personaEnabled) {
       // 总开关关着（PARTNER_PERSONA_MODULES=false）：老行为"谁也不裁"——
@@ -2593,14 +3182,272 @@ async function pfWirePersona(root, partnerId, partner, detail) {
       setHint("人格模块总开关关着（高级开关 PARTNER_PERSONA_MODULES=false）：内容照旧注入，卡片只管编辑。");
     }
     paint();
+    notify();
   } catch (error) {
-    if (error.message === "forbidden") return;
-    if (pfRouteId() !== partnerId) return;
-    setHint(`人格模块读不到：${error.message}（岗位与能力照常可用）`, true);
+    if (error.message !== "forbidden" && pfRouteId() === partnerId) {
+      setHint(`人格模块读不到：${error.message}（岗位与能力照常可用）`, true);
+    }
   }
+  return {
+    isDirty: () => dirtyCount() > 0,
+    dirtyCount,
+    save: savePage,
+    discard: discardPage,
+  };
+}
+
+/* ── ① 能用的工具（2026-11-16 工具裁剪 B）─────────────────────
+ * 按人勾选模型可见工具：存"取消名单"、默认全开，取消后下一轮起生效。
+ * 数据与弹层都现拉 GET /partners/:id/tools（不拿页面加载时的旧数据）：
+ * 页面加载拉一次更新卡片计数，点卡再拉一次打开弹层。 */
+
+const PF_TOOLS_PATH = (partnerId) => `/api/v1/partners/${encodeURIComponent(partnerId)}/tools`;
+
+async function pfFetchTools(partnerId) {
+  const response = await request(PF_TOOLS_PATH(partnerId), { cache: "no-store" });
+  if (!response.ok) throw new Error(String(response.status));
+  const data = await response.json().catch(() => ({}));
+  if (data.ok === false) throw new Error(data.error || String(response.status));
+  return data;
+}
+
+async function pfOpenToolsModal(root, partnerId, onSaved) {
+  const partnerName = root.querySelector("#pf-title")?.textContent?.trim() || "这个人";
+  openModal("工具 · " + partnerName, async (body) => {
+    body.innerHTML = `
+      <div class="pf-tool-groups" id="pf-tools-groups"><p class="modal-hint">读取中…</p></div>
+      <p class="pf-hint" id="pf-tools-hint"></p>
+      <div class="modal-actions">
+        <button class="ghost" type="button" data-modal-cancel>关闭</button>
+        <button class="ghost" type="button" id="pf-tools-all">全选</button>
+        <button class="ghost" type="button" id="pf-tools-none">全不选</button>
+        <button class="btn-primary" type="button" id="pf-tools-save" disabled>保存</button>
+      </div>`;
+    const groupsBox = body.querySelector("#pf-tools-groups");
+    const hint = body.querySelector("#pf-tools-hint");
+    const save = body.querySelector("#pf-tools-save");
+    body.querySelector("[data-modal-cancel]")?.addEventListener("click", () => closeModal());
+
+    let initialDisabled = [];
+    let view = null;
+    // 保存按钮只在"勾选态相对打开时变了"才亮；全选 / 全不选也走这条。
+    const markDirty = () => {
+      const disabled = [...groupsBox.querySelectorAll("input[data-tool]:not(:checked)")]
+        .map((input) => input.dataset.tool);
+      const changed =
+        disabled.length !== initialDisabled.length ||
+        disabled.some((name) => !initialDisabled.includes(name));
+      save.disabled = !changed;
+    };
+
+    // 弹层打开时现拉一次：页面加载后可能有别的设备改过，别用旧数据。
+    try {
+      view = await pfFetchTools(partnerId);
+    } catch (error) {
+      if (error.message !== "forbidden") setModalHint(hint, `读不到工具目录：${error.message}`, true);
+      save.disabled = true;
+      return;
+    }
+    if (view.enabled === false) {
+      groupsBox.innerHTML = `<p class="modal-hint">工具选择未启用（PARTNER_TOOLS_ENABLED=false）。</p>`;
+      save.disabled = true;
+      return;
+    }
+
+    initialDisabled = Array.isArray(view.disabled) ? [...view.disabled] : [];
+    const byGroup = new Map();
+    for (const tool of Array.isArray(view.tools) ? view.tools : []) {
+      if (!tool || typeof tool.name !== "string") continue;
+      const group = typeof tool.group === "string" ? tool.group : "其他";
+      if (!byGroup.has(group)) byGroup.set(group, []);
+      byGroup.get(group).push(tool);
+    }
+    const order = Array.isArray(view.groups) && view.groups.length ? view.groups : [...byGroup.keys()];
+    const html = [];
+    for (const group of order) {
+      const items = byGroup.get(group);
+      if (!items || !items.length) continue;
+      html.push(`<div class="pf-tool-group"><div class="pf-tool-group-title">${esc(group)}</div>`);
+      for (const tool of items) {
+        html.push(`<label class="pf-tool-row">
+          <input type="checkbox" data-tool="${attr(tool.name)}"${tool.enabled === true ? " checked" : ""} />
+          <span class="pf-tool-name">${esc(tool.name)}</span>
+          <span class="pf-tool-sum">${esc(String(tool.summary || ""))}</span>
+        </label>`);
+      }
+      html.push(`</div>`);
+    }
+    groupsBox.innerHTML = html.join("") || `<p class="modal-hint">没有可用的模型工具。</p>`;
+    groupsBox.addEventListener("change", markDirty);
+
+    body.querySelector("#pf-tools-all")?.addEventListener("click", () => {
+      for (const input of groupsBox.querySelectorAll("input[data-tool]")) input.checked = true;
+      markDirty();
+    });
+    body.querySelector("#pf-tools-none")?.addEventListener("click", () => {
+      for (const input of groupsBox.querySelectorAll("input[data-tool]")) input.checked = false;
+      markDirty();
+    });
+
+    save.addEventListener("click", async () => {
+      if (save.disabled) return;
+      save.disabled = true;
+      setModalHint(hint, "保存中…", false);
+      try {
+        // 收集**未勾选**的名字 = 取消名单；空数组 = 全开（恢复默认）。
+        const disabled = [...groupsBox.querySelectorAll("input[data-tool]:not(:checked)")]
+          .map((input) => input.dataset.tool);
+        const response = await request(PF_TOOLS_PATH(partnerId), {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ disabled }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || data.ok !== true) throw new Error(data.message || String(response.status));
+        toast("已保存，下一轮生效");
+        closeModal();
+        if (typeof onSaved === "function") onSaved(data);
+      } catch (error) {
+        if (error.message !== "forbidden") setModalHint(hint, `没存成：${error.message}`, true);
+        save.disabled = false;
+      }
+    });
+  }, { className: "modal-wide" });
+}
+
+async function pfWireTools(root, partnerId) {
+  const section = root.querySelector("#pf-tools");
+  const cards = root.querySelector("#pf-tools-cards");
+  if (!section || !cards) return;
+
+  const card = document.createElement("div");
+  card.className = "pf-mod-card is-clickable";
+  card.dataset.pfToolsCard = "1";
+  card.innerHTML = `<div class="pf-mod-label">
+    <span class="pf-mod-name" data-tip="勾上 = 他看得到、调得动；取消 = 下一轮起看不到；默认全开">工具</span>
+    <span class="pf-mod-sum" id="pf-tools-sum">读取中…</span>
+  </div>`;
+  const chev = document.createElement("span");
+  chev.className = "pf-mod-chev";
+  chev.setAttribute("aria-hidden", "true");
+  chev.innerHTML = PF_CHEV;
+  card.append(chev);
+  cards.replaceChildren(card);
+
+  const sum = card.querySelector("#pf-tools-sum");
+  const paint = (view, errorText) => {
+    if (errorText) {
+      sum.classList.add("is-error");
+      sum.textContent = errorText;
+      return;
+    }
+    sum.classList.remove("is-error");
+    const tools = Array.isArray(view.tools) ? view.tools : [];
+    const on = tools.filter((tool) => tool.enabled === true).length;
+    sum.textContent = `已开 ${on} / ${tools.length}`;
+  };
+
+  try {
+    const view = await pfFetchTools(partnerId);
+    if (pfRouteId() !== partnerId) return;
+    if (view.enabled === false) {
+      section.hidden = true; // 总开关关着：整段隐藏（data-tip 也不用解释）
+      return;
+    }
+    section.hidden = false;
+    paint(view);
+  } catch (error) {
+    if (error.message === "forbidden" || pfRouteId() !== partnerId) return;
+    // 失败给一句原因 + 可重试：点击卡片会再拉一次 GET 开弹层。
+    paint(null, `读不到工具目录：${error.message}（点击重试）`);
+  }
+
+  card.addEventListener("click", () => {
+    void pfOpenToolsModal(root, partnerId, (view) => {
+      if (pfRouteId() === partnerId) paint(view);
+    });
+  });
 }
 
 /* ── 页面装配 ─────────────────────────────────────────────── */
+
+/**
+ * 离开页面时的三选一（2026-11-16 用户口径：「还没保存，是否保存并退出？」）。
+ *
+ * - 取消 / 点遮罩 / Esc：用 replaceState 把地址改回详情页——**不触发 hashchange**，
+ *   所以页面不重渲染，草稿原样保留；
+ * - 不保存退出：丢掉草稿后放行；
+ * - 保存并退出：保存成功才放行；失败留在弹层里，给一句原因。
+ */
+function pfPromptLeave({ partnerId, dirtyCount, save, discard }) {
+  if (pfLeavePromptOpen) return;
+  pfLeavePromptOpen = true;
+  const ownHash = pfHash(partnerId);
+  let decided = false;
+  openModal(
+    "还没保存",
+    (body) => {
+      body.innerHTML = `
+        <p class="modal-desc">这个页面还有 ${dirtyCount} 处改动没保存。是否保存并退出？</p>
+        <p class="modal-hint" id="pf-leave-hint"></p>
+        <div class="modal-actions">
+          <button class="ghost" type="button" data-leave-cancel>取消</button>
+          <button class="ghost" type="button" data-leave-discard>不保存退出</button>
+          <button class="modal-primary" type="button" data-leave-save>保存并退出</button>
+        </div>`;
+      const hint = body.querySelector("#pf-leave-hint");
+      const cancel = body.querySelector("[data-leave-cancel]");
+      const discardBtn = body.querySelector("[data-leave-discard]");
+      const saveBtn = body.querySelector("[data-leave-save]");
+      cancel?.addEventListener("click", () => {
+        decided = true;
+        closeModal();
+        state.selfNavHash = "";
+        if (location.hash !== ownHash) history.replaceState(null, "", ownHash);
+      });
+      discardBtn?.addEventListener("click", () => {
+        decided = true;
+        discard();
+        closeModal();
+        applyRoute();
+      });
+      saveBtn?.addEventListener("click", async () => {
+        if (saveBtn.disabled) return;
+        saveBtn.disabled = true;
+        discardBtn.disabled = true;
+        cancel.disabled = true;
+        if (hint) {
+          hint.textContent = "保存中…";
+          hint.classList.remove("is-error");
+        }
+        const ok = await save();
+        if (!ok) {
+          if (hint) {
+            hint.textContent = "没存成，先别退出；改一下再试。";
+            hint.classList.add("is-error");
+          }
+          saveBtn.disabled = false;
+          discardBtn.disabled = false;
+          cancel.disabled = false;
+          return;
+        }
+        decided = true;
+        closeModal();
+        applyRoute();
+      });
+    },
+    {
+      onClose: () => {
+        pfLeavePromptOpen = false;
+        // 点遮罩 / Esc 关掉 = 取消：还留在详情页，地址要改回来。
+        if (!decided && location.hash !== ownHash) {
+          state.selfNavHash = "";
+          history.replaceState(null, "", ownHash);
+        }
+      },
+    },
+  );
+}
 
 async function renderPartnerProfilePage(partnerId) {
   const root = el.settingsInner;
@@ -2632,6 +3479,11 @@ async function renderPartnerProfilePage(partnerId) {
   });
   // 试跑按钮退役（2026-11-15 人设页打磨）：列表页 ⋯ 菜单还有入口；顶栏只留暂停/恢复小图标钮。
   root.querySelector("#pf-pause")?.addEventListener("click", () => {
+    // 暂停会整页重渲染（状态变了要重画），草稿会被冲掉：有未保存改动就先拦一下。
+    if (activeProfileGuard?.isDirty()) {
+      toast("先保存或撤销改动，再暂停/恢复");
+      return;
+    }
     const next = partner.status === "active" ? "paused" : "active";
     const button = root.querySelector("#pf-pause");
     void ptTogglePartner(partnerId, next, button).then(() => {
@@ -2639,10 +3491,76 @@ async function renderPartnerProfilePage(partnerId) {
     });
   });
 
-  pfWireIdentity(root, partnerId, partner, detail);
+  // 页面级草稿（2026-11-16）：人格模块 / 高级开关只改本地，点底部保存才落库。
+  let identityCtl = null;
+  let personaCtl = null;
+  let savingAll = false;
+  const bar = root.querySelector("#pf-savebar");
+  const barState = root.querySelector("#pf-savebar-state");
+  const barSave = root.querySelector("#pf-savebar-save");
+  const barReset = root.querySelector("#pf-savebar-reset");
+  const pageDirty = () => (identityCtl?.dirtyCount() ?? 0) + (personaCtl?.dirtyCount() ?? 0);
+  const anyDirty = () => pageDirty() > 0;
+  const refreshBar = () => {
+    if (!bar) return;
+    const count = pageDirty();
+    bar.hidden = count === 0;
+    if (barSave) barSave.disabled = savingAll || count === 0;
+    if (barReset) barReset.disabled = savingAll || count === 0;
+    barState?.classList.toggle("is-dirty", count > 0);
+    const label = barState?.querySelector("span");
+    if (label) label.textContent = count ? `${count} 处改动未保存` : "没有改动";
+  };
+  const saveDraft = async () => {
+    if (savingAll) return false;
+    savingAll = true;
+    refreshBar();
+    let ok = true;
+    if (identityCtl?.isDirty()) ok = await identityCtl.save();
+    if (ok && personaCtl?.isDirty()) ok = await personaCtl.save();
+    savingAll = false;
+    refreshBar();
+    return ok;
+  };
+  const discardDraft = () => {
+    identityCtl?.reset();
+    personaCtl?.discard();
+    refreshBar();
+  };
+  barSave?.addEventListener("click", () => {
+    void saveDraft();
+  });
+  barReset?.addEventListener("click", discardDraft);
+
+  identityCtl = pfWireIdentity(root, partnerId, partner, detail, refreshBar);
   // 岗位与能力已并入人格模块卡片区（2026-11-15 二次重构）：契约/目标/项目/三开关/备选链/
   // 例行/技能全部由 pfWirePersona 统一画卡、弹层编辑。
-  void pfWirePersona(root, partnerId, partner, detail);
+  void pfWirePersona(root, partnerId, partner, detail, refreshBar).then((ctl) => {
+    personaCtl = ctl || null;
+    refreshBar();
+  });
+  // 人设页工具勾选（2026-11-16 工具裁剪 B）：总管（partnerId === "chief"）同样显示，不特殊隐藏。
+  void pfWireTools(root, partnerId);
+
+  /* 离开守卫（2026-11-16）：路由切换先经过 route.js；有草稿就弹三选一。
+     放行一次即卸任（route.js 负责），同页重渲染会由本次 render 重新注册。 */
+  activeProfileGuard = { isDirty: anyDirty };
+  setRouteGuard(() => {
+    const ownHash = pfHash(partnerId);
+    if (!anyDirty()) {
+      activeProfileGuard = null;
+      return true;
+    }
+    // 同页重渲染（地址已经是这一页）：不弹"离开"提示，但也别重渲染把草稿冲掉。
+    if (location.hash === ownHash) return false;
+    void pfPromptLeave({
+      partnerId,
+      dirtyCount: pageDirty(),
+      save: saveDraft,
+      discard: discardDraft,
+    });
+    return false;
+  });
 }
 
 /** 面包屑回列表（离开详情页时把窄栏标记摘掉由下一页自己管） */

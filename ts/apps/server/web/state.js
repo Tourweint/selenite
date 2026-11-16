@@ -76,8 +76,9 @@ const state = {
   // 历史翻页状态（2026-11-13 按天分组·上滑加载）：只对当前会话有效，切会话即重置。
   // started=false 时滚动监听不触发；cursor=null 且 hasMore=false 表示已经到最早。
   history: { started: false, cursor: null, hasMore: false, loading: false, pages: 0, top: null },
-  // 「等你回话」超过 3 组时的折叠态；只记会话内存（刷新回默认收起）
-  tasksNeedsOlderOpen: false,
+  // 「等你回话」按派活人分组后，每个人「还有更早的」展开态：
+  // Set of person key（`c:chief` / `p:<partnerId>`），只记会话内存（刷新回默认收起）
+  tasksNeedsOlderOpen: new Set(),
   // 打手手风琴展开态：Set of employee id，只记会话内存
   tasksHitterOpen: new Set(),
   // 是否已经替用户默认展开过一次第一个在跑的打手（之后用户的开关说了算）

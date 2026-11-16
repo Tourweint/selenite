@@ -40,6 +40,7 @@ function compactionSectionMarkup() {
         "上下文到了下面这个点，先压成摘要再接着跑这一轮；关掉后只能手动 /compact。",
         switchMarkup(true, { label: "自动压缩", attrs: "data-compact-enabled" }),
       )}
+      <div class="compact-lock set-hint" data-compact-lock hidden>自动压缩关闭时，下面两行不生效；重新打开后按原值恢复。</div>
       <div class="divider"></div>
       ${rowMarkup(
         "按什么算",
@@ -86,6 +87,7 @@ async function loadCompactionSettings(root = document) {
   const modeEl = box.querySelector("[data-compact-mode]");
   const percentEl = box.querySelector("#compact-percent");
   const triggerEl = box.querySelector("#compact-trigger-k");
+  const lockEl = box.querySelector("[data-compact-lock]");
   if (!modeEl) return;
 
   const values = {};
@@ -103,16 +105,21 @@ async function loadCompactionSettings(root = document) {
     if (error.message === "forbidden") return;
   }
 
+  const enabledOn = (values[COMPACT_KEYS.enabled] || "true") !== "false";
   if (switchEl) {
-    switchEl.setAttribute("aria-checked", String((values[COMPACT_KEYS.enabled] || "true") !== "false"));
+    switchEl.setAttribute("aria-checked", String(enabledOn));
   }
+  if (lockEl) lockEl.hidden = enabledOn;
   const modeRaw = values[COMPACT_KEYS.mode] || "percent";
   const mode = modeRaw === "tokens" ? "tokens" : "percent";
   // 按钮上是给人看的写法（token），存的是枚举（tokens）
   const buttonValue = mode === "tokens" ? "token" : "percent";
   for (const button of modeEl.querySelectorAll("button")) {
     button.setAttribute("aria-checked", String(button.dataset.value === buttonValue));
+    button.disabled = !enabledOn;
   }
+  if (percentEl instanceof HTMLInputElement) percentEl.disabled = !enabledOn;
+  if (triggerEl instanceof HTMLInputElement) triggerEl.disabled = !enabledOn;
   mountSegmented(modeEl);
   syncSegmented(modeEl);
   syncCompactUnits(box, mode);
@@ -198,6 +205,8 @@ function wireCompactionSection(root = document) {
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data.message || `HTTP ${response.status}`);
       toast(data.hot === false ? "已保存，重启服务后生效" : "已保存，下一轮生效");
+      // 父开关一动，档位 / 数值输入的锁态要立刻跟着变。
+      await loadCompactionSettings(document);
     } catch (error) {
       switchEl.setAttribute("aria-checked", String(!next));
       if (error.message !== "forbidden") toast(`没存成：${error.message}`);

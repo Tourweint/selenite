@@ -81,11 +81,20 @@ html[data-wallpaper] .main[data-home]::after { content: none; }
   .main[data-home="1"] .composer { border-radius: 48px; }
 }
 
+/* 占位文案的竖向位置（2026-11-16 用户反馈，第二版）：
+   同心口径 = 内外留白取同一个 gap、内圈与外圈弧心重合，不是「在区域里居中」。
+   落在这一行字上：textarea 的左右内边距是 8（加上卡内边距 11，字的左沿 19），
+   上内边距就取同一个 8 —— 字块四边留白一致，左上角弧与卡片外弧同心。
+   第一版按「输入区正中」放到 54px，比原来贴顶多了 30px，用户判为「太靠下」，已撤回。
+   textarea 不再被 flex 拉满：拉满时文字永远从盒顶起排，盒里多高都空在字下面；
+   盒子只包住自己这一行（8 上 + 一行 + 8 左右），首页那档高度由 min-height 84 守住。 */
 .composer textarea {
-  flex: 1; min-height: 24px; max-height: 200px;
+  flex: 0 0 auto;
+  min-height: 32px; max-height: 200px;
   /* 左右各进 8px：文字/占位符与左下 + 图标列对齐（11 + 8 = 19px），
-     也别贴着卡片圆角内侧起字（2026-11-04 用户反馈） */
-  padding: 0 8px;
+     也别贴着卡片圆角内侧起字（2026-11-04 用户反馈）；上与左右同值 = 同心。
+     下边不留：多行时最后一行到工具行的 6px 间距由 gap 给。 */
+  padding: 8px 8px 0;
   background: transparent;
   border: 0;
   border-radius: 0;

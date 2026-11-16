@@ -16,11 +16,11 @@ import { request } from "./net.js";
 import { openCreatePartnerModal } from "./partner-modals.js";
 import { loadRoster, paintBusyChip, partnerBusyOf, partnerDisplayName, rosterDomain } from "./partners-status.js";
 import { currentPartnerLineId, currentRoute, go } from "./route.js";
-import { openSecMenu } from "./sec-menu.js";
+import { openSecMenu, openMenuAt } from "./sec-menu.js";
 import { cs, drawerOpen, openDrawerAt, refreshCsDetail, renderCsPage } from "./settings-drawer.js";
 import { updateHomeMode } from "./shell.js";
 import { state } from "./state.js";
-import { toast } from "./ui-atoms.js";
+import { inShell, toast } from "./ui-atoms.js";
 
 /** 花名册渲染：box 缺省 = 展开侧栏的花名册；收起轨道的悬停卡传自己的容器
  *  （2026-11-13）——同一份行渲染（头像/领域/派发权/在办单/忙因），行为也一致。 */
@@ -145,6 +145,27 @@ function renderRoster(partners, domainRows, box = el.partnerRoster) {
         event.preventDefault();
         open();
       }
+    });
+    // 右键（2026-11-16）：开对话 / 档案页 / 看这个领域的任务单。
+    row.addEventListener("contextmenu", (event) => {
+      if (!inShell()) return;
+      event.preventDefault();
+      const items = [
+        { label: "打开对话", run: open },
+        { label: "人设档案", hint: "开对话并落到右侧的档案页", run: () => void openPartnerProfile(id, "records") },
+      ];
+      if (domain) {
+        items.push(
+          { separator: true },
+          {
+            label: `看「${domain}」的任务`,
+            run: () => {
+              location.hash = `#/tasks?domain=${encodeURIComponent(domain)}`;
+            },
+          },
+        );
+      }
+      openMenuAt(event.clientX, event.clientY, items, name);
     });
     box.append(row);
   }

@@ -148,6 +148,78 @@ function partnerDisplayName(partnerId) {
 }
 
 /**
+ * 普通 worker 会话的固定称呼（2026-11-16）。
+ *
+ * 这一档此前没有名字：work 走常量 WORKER_PERSONA，不在 partners 表里，没有 name 也没有
+ * 头像，界面只能落到「普通对话」这个种类词。空态要写「在跟 X 说话」，就必须先有个 X。
+ * 只改这一行就换名字；若以后要让它像执事一样可改（进 partners 表），那属于存储结构改动。
+ */
+const WORKER_DISPLAY_NAME = "助手";
+
+/**
+ * 「这一屏在跟谁说话」——只回答身份，不回答会话名。
+ *
+ * 会话名在 #title，会随首句自动变（composer-send.js 第一轮写首句前 40 字），
+ * 首页态那条顶栏还是 display:none，所以空态要自己算一份身份。
+ * partner- 前缀当场就能定（执事专线），worker / chief 看回读来的 state.chatKind
+ * ——缺字段的老会话按 chief，与 openChat 的口径一致。
+ */
+function chatIdentityName() {
+  const id = String(state.conversationId || "");
+  if (id.startsWith("partner-")) return partnerDisplayName(id.slice("partner-".length));
+  if ((state.chatKind || "chief") === "worker") return WORKER_DISPLAY_NAME;
+  return chiefDisplayName();
+}
+
+/**
+ * 空态起首那枚图标画谁（2026-11-16 四版）：有脸画脸，没脸画水晶。
+ *
+ * 名字写在句子里试过三版都被否（小字标签 / 「我是 X。」/ 「名字 · 话」），
+ * 用户的判断是「图片比较直观」——把人直接放在图标上，比在句子里加一个词更快。
+ * worker 不是某个人（不在 partners 表、没有头像），返回 null，回落成项目水晶。
+ */
+function chatIdentityFace() {
+  const id = String(state.conversationId || "");
+  if (id.startsWith("partner-")) {
+    const partnerId = id.slice("partner-".length);
+    const partner = state.partners.find((item) => item.id === partnerId);
+    return { avatar: String(partner?.avatar || ""), name: partnerDisplayName(partnerId) };
+  }
+  if ((state.chatKind || "chief") === "worker") return null;
+  const chief = state.partners.find((item) => item.id === "chief");
+  return { avatar: String(chief?.avatar || ""), name: chiefDisplayName() };
+}
+
+const CRYSTAL_MARK_SRC = "/assets/crystal-mark.png";
+
+/**
+ * 把空态左首那枚图标换成当前身份的头像（2026-11-16 四版）。
+ *
+ * 传 null = 强制回水晶：clearThread 里先重置，免得切会话时还挂着上一个人的脸。
+ * 头像晚到（花名册比会话慢）由 loadRoster 末尾补一次，不靠首帧。
+ */
+function syncEmptyMark(face = chatIdentityFace()) {
+  const host = el.emptyMark;
+  if (!host) return;
+  const avatar = String(face?.avatar || "");
+  const img = document.createElement("img");
+  img.decoding = "async";
+  img.alt = "";
+  if (avatar) {
+    img.src = avatar;
+    host.dataset.kind = "face";
+    if (face?.name) host.setAttribute("aria-label", `在跟 ${face.name} 说话`);
+    else host.removeAttribute("aria-label");
+  } else {
+    img.src = CRYSTAL_MARK_SRC;
+    img.setAttribute("aria-hidden", "true");
+    host.dataset.kind = "mark";
+    host.removeAttribute("aria-label");
+  }
+  host.replaceChildren(img);
+}
+
+/**
  * 对话顶栏「跟谁在说话」（2026-11-13）：执事专线摆该执事的头像，名字仍在 #title。
  *
  * 口径：头像只属于「某个人」。总管不退化成一张脸——他的名字在这条会话里就是会话自己的
@@ -249,10 +321,12 @@ async function loadRoster() {
   }
   // 头像与名字同一批到位（2026-11-13）：名册首帧晚到时补脸，改完头像重拉也在这里刷新
   if (currentRoute() === "chat") syncChatHeadAvatar();
+  // 空态那枚图标同理（2026-11-16）：首屏先画了水晶，头像这会儿才到，补一次
+  if (currentRoute() === "chat") syncEmptyMark();
 }
 
 /* 最近一次花名册的领域行与在办单数：忙因胶囊就地重算、执事悬停卡现渲都用这份；
    拆成多模块后 loadRoster 与 renderRoster 分别写一个字段，故收进对象。 */
 const rosterDomain = { active: new Map(), rows: [] };
 
-export { chiefDisplayName, loadRoster, openChiefChat, paintBusyChip, partnerBusyOf, partnerDisplayName, partnerPendingCounts, rosterDomain, syncChatHeadAvatar, syncChiefAvatar, syncChiefDot, syncPartnerDots, syncRosterBusy };
+export { chiefDisplayName, chatIdentityFace, chatIdentityName, loadRoster, openChiefChat, paintBusyChip, partnerBusyOf, partnerDisplayName, partnerPendingCounts, rosterDomain, syncChatHeadAvatar, syncChiefAvatar, syncChiefDot, syncEmptyMark, syncPartnerDots, syncRosterBusy, WORKER_DISPLAY_NAME };

@@ -218,6 +218,9 @@
   font-size: 10.5px; font-variant-numeric: tabular-nums;
 }
 .mem-a-ghint { font-size: 11.5px; color: var(--text-3); }
+/* 展开的分组正文不加内层滚动（2026-11-16）：同日上下文页已定「外面继续滚」，
+   这里若套内层框，滚轮会被困住、还得一格格翻出去，比整页长条更难用。
+   长条问题交给页内「回到顶部」按钮解决。 */
 .mem-a-gbody { background: var(--card); }
 
 /* 工作履历：独立一条折叠，和记忆分组同高度；只读，没有删除 / 忽略动作。 */
@@ -512,4 +515,110 @@
   .mem-import-family-head { flex-wrap: wrap; }
   .mem-import-family-count { margin-left: 20px; }
   .mem-import-family-scopes { width: 100%; margin-left: 20px; }
+}
+/* 拆分长记忆（2026-11-16）：预览列表 + 原文档案 */
+.mem-split { display: flex; flex-direction: column; gap: 10px; }
+.mem-split-summary { color: var(--text-2); font-size: 12.5px; }
+.mem-split-summary b {
+  color: var(--text); font-size: 14px; font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.mem-split-list {
+  display: flex; flex-direction: column;
+  max-height: min(56vh, 480px); overflow: auto;
+  border-top: 1px solid var(--divider);
+  border-bottom: 1px solid var(--divider);
+}
+.mem-split-row {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 10px 4px; border-bottom: 1px solid var(--divider);
+  cursor: pointer;
+}
+.mem-split-row:last-child { border-bottom: 0; }
+.mem-split-row input { margin-top: 3px; accent-color: var(--accent); }
+.mem-split-main { min-width: 0; flex: 1 1 auto; display: flex; flex-direction: column; gap: 2px; }
+.mem-split-title { color: var(--text); font-size: 12.8px; line-height: 1.45; overflow-wrap: anywhere; }
+.mem-split-meta { color: var(--text-3); font-size: 11px; font-variant-numeric: tabular-nums; }
+.mem-split-samples { color: var(--text-2); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.mem-split-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.mem-split-picked { color: var(--text-3); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.mem-doc-row {
+  width: 100%; border: 0; background: transparent;
+  font: inherit; text-align: left; cursor: pointer;
+}
+.mem-doc-row:hover { background: var(--surface-low); }
+.mem-doc-meta { margin-bottom: 8px; color: var(--text-3); font-size: 11.5px; }
+.mem-doc-body {
+  margin: 0; padding: 10px 12px;
+  max-height: min(60vh, 520px); overflow: auto;
+  border-radius: var(--r-sm); background: var(--surface-low);
+  color: var(--text); font: inherit; font-size: 12.5px; line-height: 1.6;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+
+/* 回到顶部（2026-11-16）：分组 / 原文档案展开后能滚很长，页内给一枚浮动钮。
+   fixed 贴在视口右下、设置内容列一侧；hidden 由滚动位置切换。 */
+.mem-a-backtop {
+  position: fixed; right: 30px; bottom: 30px; z-index: 55;
+  width: 38px; height: 38px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--outline); border-radius: var(--r-full);
+  background: var(--card-high); color: var(--text-2);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, .18);
+  cursor: pointer;
+  transition: color .15s ease, transform .15s ease, opacity .15s ease;
+}
+.mem-a-backtop[hidden] { display: none; }
+.mem-a-backtop:hover { color: var(--accent); transform: translateY(-2px); }
+.mem-a-backtop:active { transform: translateY(0); }
+.mem-a-backtop svg { width: 17px; height: 17px; }
+@media (max-width: 640px) {
+  .mem-a-backtop { right: 16px; bottom: 18px; }
+}
+
+/* 拆分方式切换 + 智能拆分预览（2026-11-16） */
+.mem-split-modes {
+  display: inline-flex; gap: 2px; padding: 2px;
+  border-radius: var(--r-full); background: var(--surface-low);
+  align-self: flex-start;
+}
+.mem-split-mode {
+  padding: 5px 12px; border: 0; border-radius: var(--r-full);
+  background: transparent; color: var(--text-2);
+  font: inherit; font-size: 12px; line-height: 1.4; cursor: pointer;
+}
+.mem-split-mode:hover { color: var(--text); }
+.mem-split-mode.is-on {
+  background: var(--card); color: var(--text);
+  box-shadow: 0 1px 2px rgb(0 0 0 / .06);
+}
+.mem-split-note b { color: var(--text-2); font-weight: 600; }
+.mem-split-model {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 9px 11px; border-radius: var(--r-md); background: var(--surface-low);
+}
+.mem-split-model-row {
+  display: flex; align-items: center; gap: 10px;
+  color: var(--text-2); font-size: 12px;
+}
+.mem-split-model-row select {
+  flex: 1 1 auto; min-width: 0;
+  padding: 5px 8px; border-radius: var(--r-sm);
+  border: 1px solid var(--divider); background: var(--card);
+  color: var(--text); font: inherit; font-size: 12px;
+}
+.mem-split-smart {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 10px 4px; border-bottom: 1px solid var(--divider);
+}
+.mem-split-smart:last-child { border-bottom: 0; }
+.mem-split-smart-head { display: flex; flex-direction: column; gap: 2px; }
+.mem-split-atom {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 7px 9px; border-radius: var(--r-sm); background: var(--surface-low);
+}
+.mem-split-atom-text { color: var(--text); font-size: 12.5px; line-height: 1.5; overflow-wrap: anywhere; }
+.mem-split-atom-quote {
+  color: var(--text-3); font-size: 11px; line-height: 1.45;
+  overflow-wrap: anywhere;
 }

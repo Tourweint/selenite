@@ -12,7 +12,9 @@ import { paintAvatar } from "./avatar.js";
 import { el } from "./dom.js";
 import { groupMemberAvatarOf } from "./groups-thread.js";
 import { request } from "./net.js";
-import { currentRoute, groupRouteId } from "./route.js";
+import { currentRoute, go, groupRouteId } from "./route.js";
+import { openMenuAt } from "./sec-menu.js";
+import { inShell } from "./ui-atoms.js";
 
 
 /* ── 群组（2026-11-06 群组方案批二）────────────────────────
@@ -168,6 +170,20 @@ function renderGroupRows(box, emptyText) {
         event.preventDefault();
         open();
       }
+    });
+    // 右键（2026-11-16）：开这个群 / 去群列表。群设置仍在群会话顶栏的齿轮里。
+    row.addEventListener("contextmenu", (event) => {
+      if (!inShell()) return;
+      event.preventDefault();
+      openMenuAt(
+        event.clientX,
+        event.clientY,
+        [
+          { label: "打开群聊", run: open },
+          { label: "所有群聊", run: () => go("groups") },
+        ],
+        group.name,
+      );
     });
     box.append(row);
   }

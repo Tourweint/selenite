@@ -22,6 +22,25 @@
   overscroll-behavior: contain;
 }
 
+/* 主工作区（2026-11-16）：不是项目，单独一块放在列表最上面。
+   之前用户「看不到它在哪里」——这里给名字 + 路径，点它去更换目录。 */
+.proj-ws {
+  display: flex; flex-direction: column; gap: 2px;
+  width: 100%; margin: 0 0 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--card-border); border-radius: var(--r-sm);
+  background: var(--surface-low);
+  color: var(--text); text-align: left; cursor: pointer;
+}
+.proj-ws:hover { background: var(--card-high); }
+.proj-ws:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 1px; }
+.proj-ws-label { font-size: 10.5px; color: var(--text-3); }
+.proj-ws-name { font-size: 13px; font-weight: 600; }
+.proj-ws-path {
+  min-width: 0; font-size: 11px; color: var(--text-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
 .proj-item {
   display: flex; align-items: center; gap: 6px;
   width: 100%; height: 32px; padding: 0 10px;

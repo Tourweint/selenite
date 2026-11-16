@@ -194,10 +194,18 @@ function applySkillAdvice() {
     const hint = body.querySelector("#sk-apply-hint");
     const go = body.querySelector("#sk-apply-go");
     body.querySelector("[data-modal-cancel]")?.addEventListener("click", closeModal);
+    // 内置技能没有启停位：请求前过滤掉 core 名字（服务端 advice 端点也会跳，双保险）。
+    const isCore = (name) =>
+      skillAdvice.items.some((item) => item.name === name && item.core === true);
     const actions = [
-      ...plan.toOn.map((name) => ({ name, enabled: true })),
-      ...plan.toOff.map((name) => ({ name, enabled: false })),
+      ...plan.toOn.filter((name) => !isCore(name)).map((name) => ({ name, enabled: true })),
+      ...plan.toOff.filter((name) => !isCore(name)).map((name) => ({ name, enabled: false })),
     ];
+    if (!actions.length) {
+      closeModal();
+      toast("这些技能都是系统内置的，始终可用，不用调整");
+      return;
+    }
     go.addEventListener("click", async () => {
       if (go.disabled) return;
       go.disabled = true;

@@ -17,158 +17,14 @@ import { state } from "./state.js";
 import { toast } from "./ui-atoms.js";
 
 /* ── 高级开关（2026-11-09）：服务端 env 行为开关搬进界面 ──────────
- * 数据面：GET/PUT /api/v1/agent/flags（服务端 .data/agent-flags.json 覆盖 env，见 flags.ts）。
+ * 清单 / 中文名 / 简介 / 分组 / 档位：服务端 `src/plugins.json`（2026-11-16 改从 JSON 读）；
+ * 值：`GET/PUT /api/v1/agent/flags`（`.data/agent-flags.json` 覆盖 env，见 flags.ts）。
  * hot=true 改完即时生效；hot=false（路由挂载/工具注册类，启动时冻结）重启后生效——
  * toast 与悬停提示都写明，不装即时。密钥/路径/令牌类 env 不进这张表（密钥纪律）。 */
 
 /** 多档开关的选项（键不在表里 = 布尔开关）。value 是写进 env 的真值，label 给人看。 */
-const FLAG_CHOICES = {
-  MEMORY_EXTRACT: [
-    { value: "auto", label: "自动" },
-    { value: "llm", label: "模型" },
-    { value: "rule", label: "规则" },
-  ],
-  AUTONOMY_ENABLED: [
-    { value: "false", label: "关" },
-    { value: "observe", label: "只观察" },
-    { value: "true", label: "开" },
-  ],
-};
-
-/**
- * 开关的人话说明（2026-11-15 用户口径：看不懂是干啥的、要中文、要写详细）。
- * `summary` 常驻在行内（不再只塞悬停）：写清「它是什么 / 开与关差在哪 / 默认是什么 / 何时生效」。
- * 键按 FLAG_GROUPS 分组渲染；表里没有的键按原 key 兜底，不允许再出现只有英文的裸行。
- */
-const FLAG_LABELS = {
-  // ── 对话基本能力 ──
-  AGENT_ATTACHMENTS: { label: "附件", summary: "对话里能发图片附件；关掉后分段发送会被拒。默认开，即时生效。" },
-  AGENT_EDIT_RESEND: { label: "编辑重发", summary: "自己发过的消息可以改完再重发；关掉就只剩重新发一条。默认开，即时生效。" },
-  CURRENT_PROJECT: { label: "当前项目", summary: "派活按当前项目归属走；关掉 = 只剩主工作区，不再区分项目。默认开，即时生效。" },
-  AGENT_ASK_USER: { label: "结构化提问", summary: "助手拿不准时能直接弹选项 / 表单让你点，而不是自己猜；关掉 = 不再提供这个工具。默认开，重启服务后生效。" },
-
-  // ── 记忆 ──
-  MEMORY_ENABLED: { label: "记忆总闸", summary: "记忆引擎的总开关。关掉后新记忆立即停写；已经加载进内存的库要重启服务才彻底卸下（重启前召回 / 整理仍可用）。反过来，启动时关着再打开也要重启才真正上架。默认开。" },
-  MEMORY_EXTRACT: { label: "记忆提取方式", summary: "每一轮聊完，怎么从对话里抓「经历」。自动 = 先按规则抓、拿不准才叫模型（默认）；模型 = 每句都让模型判断，准但费额度；规则 = 只按句长 / 关键词抓，免费但粗。改完下一轮生效。" },
-  MEMORY_EXTRACT_NOISE: { label: "记忆噪声过滤", summary: "审批续跑等系统话术、命令行和问句不再被写成「经历」。关 = 回到旧规则（每句 ≥6 字都记）。默认开，重启服务后生效。" },
-  MEMORY_CONSOLIDATE_JOB: { label: "整理放后台", summary: "点「整理」后放后台跑，切走再回来还能接上进度；关 = 页面同步等结果（旧行为）。默认开，即时生效。" },
-  MEMORY_PAGE_A: { label: "记忆页新版", summary: "记忆页用大字概览 + 分组折叠；关 = 回到旧版长列表。默认开，改完刷新页面生效。" },
-  MEMORY_EXTERNAL: { label: "外部记忆库入口", summary: "记忆页底部显示外部记忆库的库边界；关掉整块不显示。默认开，即时生效。" },
-  MEMORY_INJECT_DEDUPE: { label: "记忆召回去重", summary: "每轮挑出来的记忆先合并「同一件事的多种说法」，只注入一条（保留分数最高的）；关 = 召回几条就注入几条。只影响本轮注入，不改记忆库。默认开，下一轮生效。" },
-
-  // ── 一生记忆库（对外一进一出）──
-  PERSONA_MEMORY_ENABLED: { label: "一生记忆库（查）", summary: "问到很久以前的事、或要原文出处时，去个人记忆库（persona-metric）检索证据。前置条件：.env 里 PERSONA_MEMORY_ASK 要指向 ask.py；没配的话这个开关拨了也不会挂上工具。默认开。" },
-  PERSONA_EXPORT_ENABLED: { label: "对话归档（送）", summary: "每轮主对话聊完，把你和助手的原话追加到导出目录，由记忆库那边定期收走归档。默认关——这是唯一会把数据往本机之外送的开关，要用才开。" },
-
-  // ── 自主与派活 ──
-  AUTONOMY_ENABLED: { label: "自主轮", summary: "定时任务 / 事件唤醒、没人盯着跑的那一轮。关 = 完全不动；只观察 = 照常判定但只记账、不真的做；开 = 真起轮，卡住 / 等你批 / 出错会提醒你，写文件 / 跑命令 / 派活一律先问你。默认开。" },
-  CHANCELLOR_ENABLED: { label: "派活（宰相）", summary: "派活链路的总闸；关掉 = 回到 8 个基础工具，不能把活分出去。默认开，重启服务后生效。" },
-  DELEGATION_WAKE_ENABLED: { label: "派活完成即唤醒", summary: "后台任务到终态后，把派活的会话自动叫起来跑一轮、接住结果并向你转述。关 = 只写汇报、不主动开口（改动前的旧行为）。默认开。" },
-  MINISTER_DISPATCH_AUTHORITY: { label: "执事派发权", summary: "执事在自己的领域内可以直派活；关 = 所有活都绕回总管。默认开（2026-11-15 用户口径），改完即时生效。" },
-  ROUTINE_SELF_SERVICE: { label: "执事自建巡逻", summary: "执事能给自己建 / 停例行规则（高危档，第一次要你点头）。默认开，重启服务后生效。" },
-  DEVICE_AUTO_DISPATCH: { label: "设备自动派活", summary: "派活时设备选「自动」就替你挑一台（主机优先）。默认开，即时生效。" },
-  COMPANIONS_ENABLED: { label: "执事体系", summary: "执事（伙伴）体系总闸：关掉后不再有执事列表、执事对话与执事派活。默认开，重启服务后生效。" },
-  GROUPS_ENABLED: { label: "群组", summary: "群聊与值日制的总闸。默认开，重启服务后生效。" },
-
-  // ── 技能与课题 ──
-  SKILLS_ADMIN: { label: "技能管理", summary: "设置 → 技能 里增删改技能手册的端点；关掉只能看不能改。默认开，重启服务后生效。" },
-  SKILLS_INDEX_CLIP: { label: "技能索引截断", summary: "技能索引每行只显示摘要前 120 字（省上下文，实测能省一半）；关 = 显示完整摘要。只影响索引，真调用时读到的仍是完整手册。默认开，只影响新开的会话。" },
-  PARTNER_TEMPLATES: { label: "执事招聘模板", summary: "招聘墙和新建执事弹窗里出现模板条，点一下按模板建人设。关 = 回到旧「新建执事」按钮。默认开，即时生效。" },
-  TOPICS_ENABLED: { label: "长期课题", summary: "课题户口本 + 每周自动研究：值得长期跟的问题会留档并定期推进。默认开，重启服务后生效。" },
-  PARTNER_WORK_RECORD: { label: "工作履历", summary: "每单结算给执事落一条履历记录（只增不改的台账），用来判断谁靠谱。默认开，即时生效。" },
-
-  // ── 任务与界面 ──
-  TASKS_REDESIGN_ENABLED: { label: "任务中心新版", summary: "任务中心用「等你回话 / 在跑 / 打手手风琴 / 今日回顾」的新版；关 = 回到旧三列看板。默认开，改完刷新页面生效。" },
-  SIDEBAR_TASK_GROUPS: { label: "侧栏按创建者分组", summary: "侧栏对话按「我 / 各个打手」分开归类；关 = 回到旧版一整条平铺列表。默认开，改完刷新页面生效。" },
-  CHAT_STREAM_REVEAL: { label: "对话逐字浮现", summary: "流式回答按字 / 词淡入，而不是整块蹦出；关 = 退回旧的整块渲染。系统开了「减少动态效果」时会自动关。默认开，下一轮生效。" },
-  CHAT_HISTORY_PAGING_ENABLED: { label: "对话历史分页", summary: "打开会话先加载最近一页，往上滑再加载更早的（按天分组、带日期分隔）；关 = 一次拉最近 200 条。默认开，重新打开会话生效。" },
-  CHAT_HARD_DELETE: { label: "永久删除", summary: "归档页里「永久删除」的总闸；关掉后预检和删除都返回 400，归档 / 恢复不受影响。默认开，即时生效。" },
-  TOOL_PROJECTION: { label: "工具结果整理", summary: "命令行（bash / PowerShell）的结果会被读懂一点：grep 没匹配不算失败、超时统一标记、大输出提示落盘路径。总闸，关 = 所有会话一律原样透传（打手、执事、显式开过的执事都关，回滚用）。默认开，即时生效。默认只对打手生效：执事与总管默认不整理，需要时在执事个人页开。" },
-  TOOL_PROJECTION_WORKER: { label: "打手工具结果整理", summary: "打手的命令行结果默认整理成上面那样（只管子任务 / 派单执行者这类本机内核打手）。执事与总管默认不整理——这是「默认只管打手」的落点，执事要用就在自己的个人页显式开。外接 CLI 打手（CodeBuddy / Qoder / Claude Code / Codex / OpenCode）跑自己的工具、不经过这层，不受开关影响。默认开，即时生效。" },
-  PARTNER_MEMORY_RECALL: { label: "记忆召回（总闸）", summary: "每轮对话自动带的记忆（经历 / 事实 / 偏好 / 人和物 + 挂载项目的记忆）。这是总闸：关 = 所有会话都不再自动带，只留 recall 工具主动查。它和「记忆」分组里那些不一样——那些管的是记忆库本身（怎么记、怎么整理），这个只管「每轮自动注入」这一半。每位执事/总管的人设页里还有自己的子开关（按相关度召回），父子都开才带。默认开，即时生效。" },
-
-  // 归档与压缩：数值型 / 有专属卡，通用卡里不再重复一行（见 FLAG_SECTION_KEYS）。
-  ARCHIVE_AUTO_ENABLED: { label: "自动归档", summary: "没动静的普通对话与已结束的任务专线到天数自动归档；总管、执事 / 群、置顶与运行中的不动。设置 → 会话 有专属卡。默认开（2026-11-15 用户口径）。" },
-  ARCHIVE_AUTO_DAYS: { label: "自动归档天数", summary: "多少天没动静算旧会话（1–365），默认 30。" },
-};
-
-/** 分组（2026-11-15）：一屏里按「管什么」分开，别让人从上到下猜 29 个开关的关系。 */
-const FLAG_GROUPS = [
-  {
-    id: "chat",
-    title: "对话基本能力",
-    desc: "对话里能做什么：发图、改话、按项目走、拿不准时让你点选。",
-    keys: ["AGENT_ATTACHMENTS", "AGENT_EDIT_RESEND", "CURRENT_PROJECT", "AGENT_ASK_USER"],
-  },
-  {
-    id: "memory",
-    title: "记忆",
-    desc: "它怎么从对话里记事、怎么整理、记忆页长什么样。",
-    keys: [
-      "MEMORY_ENABLED",
-      "MEMORY_EXTRACT",
-      "MEMORY_EXTRACT_NOISE",
-      "MEMORY_CONSOLIDATE_JOB",
-      "MEMORY_PAGE_A",
-      "MEMORY_EXTERNAL",
-      "MEMORY_INJECT_DEDUPE",
-      "PARTNER_MEMORY_RECALL",
-    ],
-  },
-  {
-    id: "persona",
-    title: "一生记忆库（对外）",
-    desc: "本机和外部记忆库之间的一进一出。往外送数据的那一项默认关。",
-    keys: ["PERSONA_MEMORY_ENABLED", "PERSONA_EXPORT_ENABLED"],
-  },
-  {
-    id: "autonomy",
-    title: "自主与派活",
-    desc: "没人盯着时它自己能跑多远、能不能把活派给别人。",
-    keys: [
-      "AUTONOMY_ENABLED",
-      "CHANCELLOR_ENABLED",
-      "DELEGATION_WAKE_ENABLED",
-      "MINISTER_DISPATCH_AUTHORITY",
-      "ROUTINE_SELF_SERVICE",
-      "DEVICE_AUTO_DISPATCH",
-      "COMPANIONS_ENABLED",
-      "GROUPS_ENABLED",
-    ],
-  },
-  {
-    id: "skills",
-    title: "技能与课题",
-    desc: "给 AI 的操作手册、执事招聘模板、长期跟进的问题与履历。",
-    keys: ["SKILLS_ADMIN", "SKILLS_INDEX_CLIP", "PARTNER_TEMPLATES", "TOPICS_ENABLED", "PARTNER_WORK_RECORD"],
-  },
-  {
-    id: "ui",
-    title: "任务与界面",
-    desc: "任务中心、对话观感、历史翻页、永久删除与工具结果，都是「看起来 / 用起来」的开关。",
-    keys: [
-      "TASKS_REDESIGN_ENABLED",
-      "SIDEBAR_TASK_GROUPS",
-      "CHAT_STREAM_REVEAL",
-      "CHAT_HISTORY_PAGING_ENABLED",
-      "CHAT_HARD_DELETE",
-      "TOOL_PROJECTION",
-      "TOOL_PROJECTION_WORKER",
-    ],
-  },
-];
-
-/** 有专属区块的开关（设置→会话 的自动归档 / 上下文压缩）：通用卡片里不再重复一行。
- *  不这么做的后果是数值型开关被当成布尔拨杆渲染——它的值永远不是 "true"，拨杆恒为关。 */
-const FLAG_SECTION_KEYS = new Set([
-  "ARCHIVE_AUTO_ENABLED",
-  "ARCHIVE_AUTO_DAYS",
-  "AGENT_COMPACT_ENABLED",
-  "AGENT_COMPACT_TRIGGER_MODE",
-  "AGENT_COMPACT_TRIGGER_PERCENT",
-  "AGENT_COMPACT_TRIGGER_K",
-]);
-
+/** 插件清单、中文名、简介、分组、档位全部来自服务端 plugins.json（GET /agent/flags）；
+ *  前端不再维护 key / label / group / choice 四张表。2026-11-16 用户拍板：从 JSON 清单读。 */
 async function loadFlagsSettings() {
   const card = document.getElementById("flags-card");
   if (!card) return;
@@ -176,30 +32,49 @@ async function loadFlagsSettings() {
     const response = await request("/api/v1/agent/flags", { cache: "no-store" });
     if (!response.ok) throw new Error(String(response.status));
     const data = await response.json().catch(() => ({}));
-    renderFlagRows(card, Array.isArray(data.flags) ? data.flags : []);
+    renderFlagRows(
+      card,
+      Array.isArray(data.flags) ? data.flags : [],
+      Array.isArray(data.groups) ? data.groups : [],
+    );
   } catch (error) {
     if (error.message === "forbidden") return;
     card.innerHTML = `<div class="card flag-empty"><p class="set-hint">读不到开关：${esc(String(error.message))}</p></div>`;
   }
 }
 
-/** 把 env 值翻成人话（布尔只有开/关，多档走 FLAG_CHOICES 的中文 label）。 */
-function flagValueText(key, value) {
-  const choices = FLAG_CHOICES[key];
-  if (choices) return choices.find((choice) => choice.value === value)?.label || value;
+/** 把值翻成人话：布尔只有开 / 关，多档用服务端清单里的 choices。 */
+function flagValueText(flag, value) {
+  const choices = Array.isArray(flag?.choices) ? flag.choices : [];
+  if (choices.length) return choices.find((choice) => choice.value === value)?.label || value;
   if (value === "true") return "开";
   if (value === "false") return "关";
   return value || "未设";
 }
 
-/** 卡片徽标只标「例外」：默认关、待重启、已改。默认开是多数派，页首已写总数。
+/** 父键的中文名：优先用服务端返回的 lockedByLabel，其次查本次清单缓存，不露 env key。 */
+function flagParentLabel(key) {
+  const row = state.flagsCache instanceof Map ? state.flagsCache.get(key) : null;
+  return row?.label || key;
+}
+
+/** 卡片徽标只标「例外」：默认关、待重启、已改、随总闸关闭。默认开是多数派，页首已写总数。
  *  「待重启」只在 hot:false 的改动还没被进程装载时出现（服务端 pendingRestart）；重启后自动消失，
  *  不再像旧版那样对所有 hot:false 开关常驻「需重启」——那个字与"这次是否生效"无关。
  *  「已改」看当前值是否真的和默认不同，不看文件里有没有历史覆盖行（覆盖行可能只是测试留下的）。 */
 function flagTags(flag) {
   const tags = [];
-  if (flag.defaultValue === "false") tags.push(`<span class="flag-tag">默认${esc(flagValueText(flag.key, flag.defaultValue))}</span>`);
+  const locked = Boolean(flag.lockedBy);
+  // 2026-11-16 用户拍板「一套展示、两层存储」：core 仍可拨，但明确标成系统核心，
+  // 不跟普通插件混成一类；加载逻辑不拆，仍是同一份 GET /agent/flags。
+  if (flag.scope === "core") {
+    tags.push(
+      '<span class="flag-tag core" data-tip="系统核心：服务端环境配置是缺省；这里改的值会保存，重启后仍保持。">系统核心</span>',
+    );
+  }
+  if (flag.defaultValue === "false") tags.push(`<span class="flag-tag">默认${esc(flagValueText(flag, flag.defaultValue))}</span>`);
   if (flag.pendingRestart) tags.push('<span class="flag-tag warn">待重启</span>');
+  if (locked) tags.push(`<span class="flag-tag warn" data-tip="「${attr(flag.lockedByLabel || flagParentLabel(flag.lockedBy))}」关闭时，这项显示关、拨不动；它自己的存储值保留，总闸重开后恢复。">随总闸关闭</span>`);
   else if (flag.value !== flag.defaultValue) tags.push('<span class="flag-tag accent">已改</span>');
   return tags.length ? `<span class="flag-tags">${tags.join("")}</span>` : "";
 }
@@ -213,20 +88,30 @@ function flagBrief(summary) {
 /** 一张开关卡（2026-11-15 二版）：照「插件中心」的卡片墙排——名字 + 徽标 + 两行简介 + 控件；
  *  完整说明收进名字的 data-tip（和设置页其它标签同一套小黑块），不再把长段正文铺在卡面上。 */
 function flagCardMarkup(flag) {
-  const meta = FLAG_LABELS[flag.key] || { label: flag.key, summary: "" };
-  // 多档开关（2026-11-09 T2）：AUTONOMY_ENABLED 有 observe 档，布尔开关表达不了，
-  // 与 MEMORY_EXTRACT 同用 segmented；标签写人话，不暴露 env 原值。
-  const choices = FLAG_CHOICES[flag.key];
-  const control = choices
-    ? `<div class="segmented" role="radiogroup" aria-label="${attr(meta.label)}" data-flag-select="${attr(flag.key)}">
-         ${choices.map((choice) => `<button type="button" data-value="${attr(choice.value)}" aria-checked="${flag.value === choice.value}">${esc(choice.label)}</button>`).join("")}
-       </div>`
-    : switchMarkup(flag.value === "true", {
-        label: meta.label,
-        attrs: `data-flag-switch="${attr(flag.key)}"`,
-      });
-  return `<div class="card flag-item">
-    <div class="flag-item-main" data-tip="${attr(meta.summary)}">
+  const meta = { label: flag.label || flag.key, summary: flag.summary || "" };
+  const locked = Boolean(flag.lockedBy);
+  const effective = flag.effectiveValue ?? flag.value;
+  // 多档开关：服务端清单给 choices；没有 choices 的按布尔拨杆画。
+  const choices = Array.isArray(flag.choices) ? flag.choices : [];
+  const lockedSwitch = switchMarkup(false, {
+    label: meta.label,
+    attrs: `data-flag-switch="${attr(flag.key)}" disabled aria-disabled="true"`,
+  });
+  const control = locked
+    ? lockedSwitch
+    : choices.length
+      ? `<div class="segmented" role="radiogroup" aria-label="${attr(meta.label)}" data-flag-select="${attr(flag.key)}">
+           ${choices.map((choice) => `<button type="button" data-value="${attr(choice.value)}" aria-checked="${effective === choice.value}">${esc(choice.label)}</button>`).join("")}
+         </div>`
+      : switchMarkup(effective === "true", {
+          label: meta.label,
+          attrs: `data-flag-switch="${attr(flag.key)}"`,
+        });
+  const tip = locked
+    ? `${meta.summary} 当前由「${flag.lockedByLabel || flagParentLabel(flag.lockedBy)}」关闭：显示关、拨不动；它自己的存储值保留，总闸重开后恢复。`
+    : meta.summary;
+  return `<div class="card flag-item${locked ? " is-locked" : ""}${flag.scope === "core" ? " is-core" : ""}">
+    <div class="flag-item-main" data-tip="${attr(tip)}">
       <div class="flag-item-head">
         <div class="flag-item-name">${esc(meta.label)}</div>
         ${flagTags(flag)}
@@ -237,26 +122,34 @@ function flagCardMarkup(flag) {
   </div>`;
 }
 
-function renderFlagRows(card, flags) {
+function renderFlagRows(card, flags, groups) {
   card.replaceChildren();
   if (!flags.length) {
     card.innerHTML = `<div class="card flag-empty"><p class="set-hint">这台服务端没开放开关（AGENT_FLAGS_UI=false）。</p></div>`;
     return;
   }
-  const visible = flags.filter((flag) => !FLAG_SECTION_KEYS.has(flag.key));
+  // 整份服务端行存在 state 里：父开关切换后要扫 requires 决定是否整页回读，
+  // 也顺手让其它页的 ensureFlag 拿到 effective 口径。
+  state.flagsCache = new Map(
+    flags
+      .filter((flag) => flag && typeof flag.key === "string")
+      .map((flag) => [flag.key, flag]),
+  );
+  const visible = flags.filter((flag) => flag.surface !== "settings");
   const byKey = new Map(visible.map((flag) => [flag.key, flag]));
   const defaultOff = visible.filter((flag) => flag.defaultValue === "false").length;
-  const currentOff = visible.filter((flag) => flag.value === "false").length;
+  const currentOff = visible.filter((flag) => (flag.effectiveValue ?? flag.value) === "false").length;
+  const lockedCount = visible.filter((flag) => flag.lockedBy).length;
   // 页首只留一行计数，不铺解释性长文：这一页是干什么的，名字和卡片简介已经说清了。
   card.insertAdjacentHTML(
     "beforeend",
     `<div class="flag-intro">
-      <span class="flag-intro-count">${visible.length} 个插件 · ${visible.length - defaultOff} 默认开 / ${defaultOff} 默认关 · 当前 ${visible.length - currentOff} 开 / ${currentOff} 关</span>
+      <span class="flag-intro-count">${visible.length} 个插件 · ${visible.length - defaultOff} 默认开 / ${defaultOff} 默认关 · 当前 ${visible.length - currentOff} 开 / ${currentOff} 关${lockedCount ? ` · ${lockedCount} 个随总闸关闭` : ""}</span>
     </div>`,
   );
   // 工具活动不再单列一行（2026-11-15 用户口径：常开、平时不会去动它，条目可以删）：
   // 它确实是常开的复核凭据，但不是一个可配置项；压到卡尾一句话，既不占一行，也不丢这个事实。
-  const grouped = new Set(FLAG_GROUPS.flatMap((group) => group.keys));
+  const groupDefs = Array.isArray(groups) ? groups : [];
   const paintGroup = (title, desc, items) => {
     const section = document.createElement("section");
     section.className = "flag-section";
@@ -269,16 +162,23 @@ function renderFlagRows(card, flags) {
     for (const flag of items) grid.insertAdjacentHTML("beforeend", flagCardMarkup(flag));
     card.append(section);
   };
-  for (const group of FLAG_GROUPS) {
-    const items = group.keys.map((key) => byKey.get(key)).filter(Boolean);
-    if (items.length) paintGroup(group.title, group.desc, items);
+  if (!groupDefs.length) {
+    // 清单缺 groups 时也不能让开关消失：按一整个兜底组列出来。
+    paintGroup("插件", "服务端清单没有返回分组。", visible);
+  } else {
+    const grouped = new Set(groupDefs.flatMap((group) => (Array.isArray(group.keys) ? group.keys : [])));
+    for (const group of groupDefs) {
+      const groupKeys = Array.isArray(group.keys) ? group.keys : [];
+      const items = groupKeys.map((key) => byKey.get(key)).filter(Boolean);
+      if (items.length) paintGroup(group.title, group.desc, items);
+    }
+    // 兜底分组：清单里新增的键哪怕还没归组，也必须出现在界面上（不能变成「拨不到」）。
+    const rest = visible.filter((flag) => !grouped.has(flag.key));
+    if (rest.length) paintGroup("其他", "还没归组的开关；先按原样列出来，等下次整理。", rest);
   }
-  // 兜底分组：flags.ts 以后新加的键哪怕还没归组，也必须出现在界面上（不能变成「拨不到」）。
-  const rest = visible.filter((flag) => !grouped.has(flag.key));
-  if (rest.length) paintGroup("其他", "还没归组的开关；先按原样列出来，等下次整理。", rest);
   card.insertAdjacentHTML(
     "beforeend",
-    `<div class="flag-foot"><strong>工具活动常开</strong>：对话里始终显示读了哪个文件、跑了什么命令、花了多久；不提供关闭，用来事后复核它到底动过什么。<br>密钥 / 路径 / 令牌类 env 刻意不上面板——那些是部署配置，不是日常开关；要改请走 .env。</div>`,
+    `<div class="flag-foot"><strong>工具活动常开</strong>：对话里始终显示读了哪个文件、跑了什么命令、花了多久；不提供关闭，用来事后复核它到底动过什么。<br>带「系统核心」的开关由服务端环境配置兜底，其余是普通功能插件；密钥 / 路径 / 令牌类 env 刻意不上面板——那些是部署配置，不是日常开关，要改请走 .env。</div>`,
   );
   for (const sw of card.querySelectorAll("[data-flag-switch]")) {
     sw.addEventListener("click", () => {
@@ -329,7 +229,17 @@ async function toggleFlag(key, value, sw, seg) {
     if (key === "CHAT_HISTORY_PAGING_ENABLED") state.chatPagingFlag = String(value) !== "false";
     if (state.flagsCache instanceof Map) {
       const row = state.flagsCache.get(key);
-      state.flagsCache.set(key, { ...(row || { key }), value: String(value), hot: data.hot !== false });
+      state.flagsCache.set(key, {
+        ...(row || { key }),
+        value: String(value),
+        effectiveValue: String(value),
+        hot: data.hot !== false,
+      });
+      // 父开关一动，所有 requires 里带它的子卡都要改显示 / 锁态；整页回读一次最省心。
+      const hasChildren = [...state.flagsCache.values()].some(
+        (item) => Array.isArray(item.requires) && item.requires.includes(key),
+      );
+      if (hasChildren && document.getElementById("flags-card")) void loadFlagsSettings();
     }
     toast(data.hot ? "已保存，即时生效" : "已保存，重启服务后生效");
   } catch (error) {
@@ -393,6 +303,7 @@ async function loadAutoArchiveSettings() {
     paintArchiveAuto(switchEl, daysInput, archiveAutoSnapshot.enabled, archiveAutoSnapshot.days);
   }
   const values = { ...AUTO_ARCHIVE_DEFAULTS };
+  const rows = new Map();
   let known = false;
   try {
     const response = await request("/api/v1/agent/flags", { cache: "no-store" });
@@ -402,6 +313,7 @@ async function loadAutoArchiveSettings() {
       for (const flag of Array.isArray(data.flags) ? data.flags : []) {
         if (flag?.key === "ARCHIVE_AUTO_ENABLED" || flag?.key === "ARCHIVE_AUTO_DAYS") {
           values[flag.key] = String(flag.value || AUTO_ARCHIVE_DEFAULTS[flag.key]);
+          rows.set(flag.key, flag);
         }
       }
     } else if (hint) {
@@ -415,6 +327,19 @@ async function loadAutoArchiveSettings() {
   if (hintWrap) hintWrap.hidden = !hint?.textContent;
   if (known) {
     paintArchiveAuto(switchEl, daysInput, values.ARCHIVE_AUTO_ENABLED === "true", values.ARCHIVE_AUTO_DAYS);
+    const daysRow = rows.get("ARCHIVE_AUTO_DAYS");
+    const locked = Boolean(daysRow?.lockedBy);
+    daysInput.disabled = locked;
+    daysInput.setAttribute("aria-disabled", String(locked));
+    // 这页的全局 tooltip 会剥掉原生 title，说明挂 data-tip（悬停可见）。
+    if (locked) {
+      daysInput.setAttribute(
+        "data-tip",
+        `「${daysRow.lockedByLabel || daysRow.lockedBy}」关闭时，保留天数不生效；重新打开后按原值恢复。`,
+      );
+    } else {
+      daysInput.removeAttribute("data-tip");
+    }
   } else if (!hadSnapshot) {
     // 从来没读到过：按缺省展示，别让两个控件空着（2026-11-15 起自动归档缺省开）
     paintArchiveAuto(switchEl, daysInput, AUTO_ARCHIVE_DEFAULTS.ARCHIVE_AUTO_ENABLED === "true", AUTO_ARCHIVE_DEFAULTS.ARCHIVE_AUTO_DAYS);
@@ -451,4 +376,4 @@ async function saveAutoArchiveDays(input) {
   }
 }
 
-export { AUTO_ARCHIVE_DEFAULTS, FLAG_CHOICES, FLAG_LABELS, archiveAutoTip, loadAutoArchiveSettings, loadFlagsSettings, renderFlagRows, saveAutoArchiveDays, syncArchiveAutoTip, toggleFlag };
+export { AUTO_ARCHIVE_DEFAULTS, archiveAutoTip, loadAutoArchiveSettings, loadFlagsSettings, renderFlagRows, saveAutoArchiveDays, syncArchiveAutoTip, toggleFlag };

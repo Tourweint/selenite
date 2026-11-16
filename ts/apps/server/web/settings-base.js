@@ -76,6 +76,13 @@ const SETTINGS_SECTIONS = [
     icon: '<path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/>',
   },
   {
+    id: "executor",
+    label: "派活",
+    desc: "任务中心派给哪个 CLI、用什么模型与权限",
+    // Lucide terminal 0.468：提示符 + 一行命令 = 外接 CLI 打手
+    icon: '<path d="m4 17 6-6-6-6"/><path d="M12 19h8"/>',
+  },
+  {
     id: "connect",
     label: "连接",
     desc: "手机 / 平板配对与链路：本地直连或经中继",

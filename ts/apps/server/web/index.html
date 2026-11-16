@@ -392,13 +392,26 @@
       </div>
     </header>
 
+    <!-- 回到底部（2026-11-16）：往上翻超过一屏时浮在输入卡上方，一步回到最新消息。
+         显隐由 chat-notice.js 的滚动监听控制（离底部 > 300px 显示）。 -->
+    <button class="chat-backbottom" type="button" id="chat-backbottom" hidden
+      aria-label="回到底部" data-tip="回到底部">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/><path d="M12 5v10"/></svg>
+    </button>
+
     <div class="scroll" id="scroll">
       <div class="thread" id="thread">
         <div class="empty" id="empty">
-          <!-- 首页标识（2026-11-07 改横排）：项目水晶与问候语左右并置，像一枚印在纸上的题头。
-               水晶无背景框，光晕由 CSS 滤镜给。 -->
-          <img class="empty-mark" src="/assets/crystal-mark.png" alt="" aria-hidden="true">
-          <p class="empty-greet" id="empty-greet">说吧，我在。</p>
+          <!-- 起首图标（2026-11-16 四版）：原来是固定的项目水晶，现在由身份决定——
+               执事 / 总管有头像就画头像，worker 不是某个人，回到水晶（见 partners-status.js 的 chatIdentityFace）。
+               这里的 img 只是 JS 跑起来之前的首帧占位。 -->
+          <span class="empty-mark" id="empty-mark"><img src="/assets/crystal-mark.png" alt="" aria-hidden="true"></span>
+          <div class="empty-text">
+            <!-- 空态只有一句话（2026-11-16 四版）：身份搬到图标上之后，这里不再写名字。
+                 前三版都在这句上做文章（小字标签 / 「我是 X。」/ 「名字 · 话」），都被否；
+                 用户的原话是「图片比较直观」。 -->
+            <p class="empty-greet" id="empty-greet">说吧，我在。</p>
+          </div>
         </div>
       </div>
     </div>

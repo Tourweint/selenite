@@ -22,6 +22,8 @@ import { closeModal, openModal, toast } from "./ui-atoms.js";
  * skill 工具取手册是即时的（关了立刻取不到）。 */
 
 async function toggleSkillEnabled(name, enabled, sw) {
+  // 内置技能没有启停位：UI 已不渲染开关，这里再挡一层（服务端也会回 400）。
+  if (skillAdvice.items.some((item) => item.name === name && item.core === true)) return;
   if (sw) sw.disabled = true;
   try {
     const response = await request(
