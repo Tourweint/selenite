@@ -42,6 +42,10 @@ const REGISTERED_ORDER = [
 	"routine_manage",
 	"web_search",
 	"propose_topic",
+	// tool_search（2026-11-16 工具裁剪 C 段新增，2026-11-17 补钉清单）：deferred 工具按需
+	// 加载的搜索入口，注册在末位——不动既有顺序，既有前缀不受影响；新工具本身换前缀
+	// 已在 docs/变更记录/2026-11-16-工具裁剪（delegate 手册与工具勾选）.md 交代。
+	"tool_search",
 ];
 
 const CACHE_WARNING =
