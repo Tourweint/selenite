@@ -90,6 +90,12 @@ interface TicketSummary {
 	conversationTitle: string | null;
 	/** 负责这张单的总管名：ticket.options.domain → partners 表 name。直派/查不到 → null。 */
 	chiefName: string | null;
+	/**
+	 * 派活人（2026-11-16 任务中心分人）：originConversationId → 执事专线；
+	 * 总管会话 / 查不到 → `{ id: null, name: "总管", kind: "chief" }`。
+	 * 纯增量字段：老客户端忽略即可。
+	 */
+	dispatcher: { id: string | null; name: string; kind: "chief" | "partner" };
 	/** 作废位（扫尾批 1 A1）：harness 侧不再搬运这张单的结果。 */
 	canceled: boolean;
 	/** 多副本归并（批 19 §五）：同一 requestId 的单共用这个值；没有 requestId → null。 */

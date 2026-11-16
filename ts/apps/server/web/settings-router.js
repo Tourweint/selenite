@@ -15,6 +15,7 @@ import { openExportModal } from "./export-data.js";
 import { memorySettingsMarkup, stopMemoryPolling, wireMemorySettings } from "./memory-page.js";
 import { loadPartners, openCreatePartnerModal } from "./partner-modals.js";
 import { renderPartnerProfilePage } from "./partner-profile.js";
+import { renderWorkerProfilePage } from "./worker-profile.js";
 import { openChiefChat } from "./partners-status.js";
 import { resize } from "./plus-menu.js";
 import { openAddProjectModal } from "./project-modal.js";
@@ -27,6 +28,7 @@ import { ACCENTS, renderSettingsNav } from "./settings-base.js";
 import { compactionSectionMarkup, wireCompactionSection } from "./settings-compaction.js";
 import { contextSettingsMarkup, wireContextSettings } from "./settings-context.js";
 import { connRelay, initRuntimeCard, loadPair, loadRelayStatus, loadServiceInfo, openAddDeviceModal, openRelayLinkModal, paintConnStar, unlinkRelay } from "./settings-connection.js";
+import { executorSectionMarkup, wireExecutorSettings } from "./settings-executor.js";
 import { memorySettingsMarkupLegacy, wireMemorySettingsLegacy } from "./settings-memory.js";
 import { loadProjectsSettings } from "./settings-projects.js";
 import { loadPolicy, loadReminders, openReminderModal, renderDefaultModelRow } from "./settings-reminders.js";
@@ -270,7 +272,7 @@ async function renderSettings() {
     const autoSwitch = el.settingsInner.querySelector("[data-archive-auto-switch]");
     autoSwitch?.addEventListener("click", () => {
       const next = autoSwitch.getAttribute("aria-checked") !== "true";
-      void toggleFlag("ARCHIVE_AUTO_ENABLED", next, autoSwitch);
+      void toggleFlag("ARCHIVE_AUTO_ENABLED", next, autoSwitch).then(() => loadAutoArchiveSettings());
     });
     document
       .getElementById("archive-auto-days")
@@ -393,6 +395,11 @@ async function renderSettings() {
     document.getElementById("reminder-say-go")?.addEventListener("click", sendToAgent);
     document.getElementById("reminder-manual")?.addEventListener("click", () => openReminderModal());
     void loadReminders();
+  } else if (page === "executor") {
+    // 派活（2026-11-16 多 CLI 打手适配）：选任务中心用哪个 CLI + 各 CLI 的模型/权限。
+    // 数据走 GET/PUT /api/v1/agent/executor；落 .data/executor.json，下一次派活生效。
+    el.settingsInner.innerHTML = executorSectionMarkup();
+    void wireExecutorSettings();
   } else if (page === "connect") {
     // 连接页（2026-11-14 重排）：顺序就是操作顺序——状态 → 接入中继 → 手机两条路 → 设备。
     // 第一步（电脑接中继）必须在这里能填；第二步的按钮永不置灰，没到那一步时文案直接说"先接入"。
@@ -683,6 +690,12 @@ async function renderSettings() {
     // 2026-11-14 C 版：列表点进去 = 换个页（#/settings/partners/<id>），不再开弹窗。
     // 弹窗要塞下「它是谁 + 岗位 + 能力 + 档案」四段，只能滚两屏；页面才有地方。
     const profileId = currentPartnerProfileId();
+    // 普通助手是全局一份人设，不是执事档案：不请求 /partners/worker。
+    if (profileId === "worker") {
+      void renderWorkerProfilePage();
+      replayPageEnter();
+      return;
+    }
     if (profileId) {
       void renderPartnerProfilePage(profileId);
       replayPageEnter();

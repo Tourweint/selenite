@@ -117,6 +117,34 @@ function chiefNamesLoader(): (domain: string | null | undefined) => string | nul
 	};
 }
 
+/**
+ * 派活人（2026-11-16 任务中心分人）：originConversationId 是宿主内部会话 id（数字串），
+ * 经 partner_session_links 反查执事专线；查不到 / 总管会话 / 系统自动派单 → 总管。
+ * 花名册读不出来也按总管兜底——这张单本身不能因为分人失败而不显示。
+ */
+function dispatcherOf(
+	ticket: Ticket | null,
+): { id: string | null; name: string; kind: "chief" | "partner" } {
+	const raw = ticket?.originConversationId;
+	const text = raw === null || raw === undefined ? "" : String(raw).trim();
+	if (/^\d+$/.test(text)) {
+		try {
+			const partnerId = partnersStore().partnerIdOfSession(Number(text));
+			if (partnerId) {
+				const partner = partnersStore().get(partnerId);
+				return {
+					id: partnerId,
+					name: (partner?.name ?? "").trim() || "执事",
+					kind: "partner",
+				};
+			}
+		} catch {
+			// 花名册读不出来按总管兜底，不让任务列表失败
+		}
+	}
+	return { id: null, name: "总管", kind: "chief" };
+}
+
 async function summarizeTickets(
 	runsDir: string,
 	domain: string | null,
@@ -151,6 +179,7 @@ async function summarizeTickets(
 				waitingOn: ticket?.waitingOn ?? null,
 				conversationId: ticket ? await conversationIdOf(ticket, loadExternal) : null,
 				chiefName: chiefNameOf(ticket?.options.domain),
+				dispatcher: dispatcherOf(ticket),
 				// 多副本归并（批 19 §五）：requestId 就是 groupId；开关关 / 没 requestId → null。
 				groupId: fanoutGroupEnabled()
 					? String(ticket?.idempotencyKey ?? "").trim() || null

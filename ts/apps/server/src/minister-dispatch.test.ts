@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -124,9 +124,12 @@ test("ministerDispatchAllowed：默认关、开了放行、查无执事不放行
 test("ministerDispatchAllowed：env 总闸关 = 一律不放行（回滚开关）", () => {
 	const ctx = tempStore();
 	const saved = process.env.MINISTER_DISPATCH_AUTHORITY;
+	const savedPath = process.env.AGENT_FLAGS_PATH;
 	try {
 		const minister = ctx.store.create("小明", { domain: "frontend" });
 		ctx.store.setDispatchAuthority(minister.id, true);
+		process.env.AGENT_FLAGS_PATH = join(ctx.root, "flags.json");
+		writeFileSync(process.env.AGENT_FLAGS_PATH, "{}", "utf8");
 		process.env.MINISTER_DISPATCH_AUTHORITY = "false";
 		assert.equal(ministerDispatchAllowed(ctx.store, "frontend"), false);
 		assert.equal(ministerDispatchMasterEnabled(), false);
@@ -138,6 +141,8 @@ test("ministerDispatchAllowed：env 总闸关 = 一律不放行（回滚开关�
 	} finally {
 		if (saved === undefined) delete process.env.MINISTER_DISPATCH_AUTHORITY;
 		else process.env.MINISTER_DISPATCH_AUTHORITY = saved;
+		if (savedPath === undefined) delete process.env.AGENT_FLAGS_PATH;
+		else process.env.AGENT_FLAGS_PATH = savedPath;
 		ctx.cleanup();
 	}
 });

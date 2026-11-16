@@ -196,7 +196,7 @@ test("collectPending：取走即清空、同会话合并、跨会话互不串", 
 	assert.deepEqual(collectPending(store, 3), [], "没有 pending → 空数组");
 });
 
-test("delegationWakeEnabled：默认开，只有明确 false 才关", () => {
+test("delegationWakeEnabled：默认开，false / 0 / off 都关", () => {
 	const env: NodeJS.ProcessEnv = {};
 	assert.equal(delegationWakeEnabled(env), true, "不配 = 开");
 	env.DELEGATION_WAKE_ENABLED = "false";
@@ -204,7 +204,9 @@ test("delegationWakeEnabled：默认开，只有明确 false 才关", () => {
 	env.DELEGATION_WAKE_ENABLED = " FALSE ";
 	assert.equal(delegationWakeEnabled(env), false, "大小写与空白不敏感");
 	env.DELEGATION_WAKE_ENABLED = "0";
-	assert.equal(delegationWakeEnabled(env), true, "0 不是 false（与 partners.ts:40 同口径）");
+	assert.equal(delegationWakeEnabled(env), false, "0 也算关");
+	env.DELEGATION_WAKE_ENABLED = "off";
+	assert.equal(delegationWakeEnabled(env), false, "off 也算关");
 	env.DELEGATION_WAKE_ENABLED = "bogus";
 	assert.equal(delegationWakeEnabled(env), true, "拼错值不误关");
 });

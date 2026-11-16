@@ -29,6 +29,7 @@ import type { Conversation } from "@earendil-works/pi-durable";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { COMPANIONS_ENABLED, partnersStore } from "./partners.ts";
+import { flagEnabled } from "./flags.ts";
 import {
 	ensurePartnerSession,
 	runPartnerTurn,
@@ -88,7 +89,7 @@ export interface DelegationWakeDeps {
  * 写成函数而不是模块常量：flags 里标了 hot，设置页切了要立即生效。
  */
 export function delegationWakeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	return (env.DELEGATION_WAKE_ENABLED?.trim() || "true").toLowerCase() !== "false";
+	return flagEnabled("DELEGATION_WAKE_ENABLED", env);
 }
 
 /** 待唤醒的汇报，按会话合并；取走即清空 */

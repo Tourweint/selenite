@@ -6,8 +6,10 @@
  */
 
 import { ChancellorEvent, ChancellorRequest, TicketResult } from "../../../../../chancellor/src/index.ts";
+import type { EmployeeProfile } from "../../../../../chancellor/src/types.ts";
 import { TAKEOVER_HINT } from "./agent/turn-gate.ts";
 import { authorityRecheckEnabled, recheckAuthority } from "./delegation-authority.ts";
+import { executorForDelegation, type ExecutorKind } from "./executor-config.ts";
 import type { DelegationSenderKind } from "./delegation-messages.ts";
 import { delegationMessages } from "./delegation-messages.ts";
 import { failureStreak, takeoverHintEnabled } from "./failure-streak.ts";
@@ -25,6 +27,8 @@ export function startDelegation(
 	outcome: Promise<TicketResult>;
 	/** 续跑被拒、已改派新单（单号对不上，不能当成续跑成功）。 */
 	fellBack: boolean;
+	/** 新单实际用的执行器（2026-11-16）：续跑不返回，沿用原单。 */
+	executor?: { employee: ExecutorKind; profile: EmployeeProfile };
 } {
 	let ticketId = "";
 	let total = 0;
@@ -278,8 +282,22 @@ export function startDelegation(
 		}
 	};
 
+	let dispatchedExecutor: { employee: ExecutorKind; profile: EmployeeProfile } | null = null;
+
 	const launch = (request: ChancellorRequest): { id: string; promise: Promise<TicketResult> } => {
-		const promise = runtime.run(request, { onEvent: translate });
+		// 2026-11-16 多 CLI：每次派单懒读执行器设置，新单带上 employee / profile。
+		// 续跑时 chancellor 按 ticket.employee 与原单快照走，这两个字段不会改派。
+		const executor = executorForDelegation();
+		// 只有新单才把执行器回传给工具层；续跑沿用原单，不在结果里谎报当前默认。
+		if (!request.resumeTicketId) dispatchedExecutor = executor;
+		const promise = runtime.run(
+			{
+				...request,
+				employee: executor.employee,
+				employeeProfile: executor.profile,
+			},
+			{ onEvent: translate },
+		);
 		// 这里必须同步读：run 的同步段已经把单号发出来了。
 		return { id: ticketId, promise };
 	};
@@ -415,5 +433,10 @@ export function startDelegation(
 		accepted.promise.then(settle).catch((error: unknown) => fail(error, accepted.id));
 	}
 
-	return { ticketId, outcome: accepted.promise, fellBack };
+	return {
+		ticketId,
+		outcome: accepted.promise,
+		fellBack,
+		...(dispatchedExecutor ? { executor: dispatchedExecutor } : {}),
+	};
 }
