@@ -1196,7 +1196,8 @@ try {
 	const reselectAfterRestore = await putCurrentProject(projectId);
 	check(reselectAfterRestore.status === 200, "恢复后可再次选中", String(reselectAfterRestore.status));
 
-	// 14.4 系统提示注入 + 工作区内写入放行（相对路径按项目根解析）
+	// 14.4 系统提示注入 + 工作区内写入放行（相对路径按当前项目根解析，2026-11-16 起
+	// 提示里同时带主工作区路径与已登记项目清单）
 	gateWritePath = GATE_INSIDE_REL;
 	gateRequests.length = 0;
 	const insideRun = await chat({ messages: [{ role: "user", content: "在项目里写个文件" }] });
@@ -1221,9 +1222,15 @@ try {
 		"系统提示注入了当前项目（项目名）",
 		insideSystem.includes("当前项目") ? "含当前项目节" : "缺当前项目节",
 	);
-	// 2026-11-13 项目容器重构后 current_project 节改说「主文件夹：」——断言对齐现状
-	// （旧字符串「根路径：」是 11-13 起的存量红，与本批无关，顺手修掉）
 	check(insideSystem.includes("主文件夹："), "系统提示带项目主文件夹路径");
+	check(
+		insideSystem.includes("主工作区：") && insideSystem.includes(WORKSPACE_A),
+		"系统提示带主工作区路径（2026-11-16）",
+	);
+	check(
+		insideSystem.includes("已登记项目") && insideSystem.includes(GATE_PROJECT_DIR),
+		"系统提示带已登记项目清单（名字 + 路径）",
+	);
 
 	// 14.5 路径守卫：越界写被拒（真工具，不是 mock）
 	gateWritePath = GATE_OUTSIDE_FILE;
@@ -1442,7 +1449,8 @@ try {
 	check(hideAliasResponse.status === 200, "/hide 兼容别名仍可用");
 	await archiveOne(archiveChatId, "unarchive");
 
-	// 项目连带：当前项目仍选中；新建 worker 会话会记 projectId
+	// 项目连带：当前项目仍选中；新建 worker 会话会记 projectId（2026-11-16 用户拍板
+	// 普通对话就是 worker、必须带项目记忆，所以归属与连带恢复）
 	const ownedChatRun = await chat({
 		chatKind: "worker",
 		messages: [{ role: "user", content: "项目归档连带探针" }],
@@ -2326,9 +2334,16 @@ try {
 	domainStore.close();
 	const seededChiefName = "探针总管";
 	const partnerStore = new PartnersStore(PARTNER_DB, PARTNER_HOMES);
-	partnerStore.create(seededChiefName, {
+	const seededPartner = partnerStore.create(seededChiefName, {
 		domain: "probe-domain",
 		soulSeed: "探针播种的领域执事",
+	});
+	// 把来源会话链成这条执事的专线：dispatcher 应该认出「派活人 = 该执事」。
+	partnerStore.linkSession({
+		partnerId: seededPartner.id,
+		role: "canonical",
+		routeKey: "canonical",
+		sessionId: Number(internalId),
 	});
 	partnerStore.close();
 
@@ -2338,9 +2353,22 @@ try {
 			conversationId: string | null;
 			conversationTitle: string | null;
 			chiefName: string | null;
+			dispatcher?: { id: string | null; name: string; kind: "chief" | "partner" };
 		}>;
 	};
 	const ticketRows = new Map(ticketsJson.tickets.map((ticket) => [ticket.id, ticket]));
+	check(
+		ticketRows.get("T-source")?.dispatcher?.kind === "partner" &&
+			ticketRows.get("T-source")?.dispatcher?.name === seededChiefName,
+		"dispatcher = 派活执事（originConversationId 反查）",
+		JSON.stringify(ticketRows.get("T-source")?.dispatcher),
+	);
+	check(
+		ticketRows.get("T-orphan")?.dispatcher?.kind === "chief" &&
+			ticketRows.get("T-orphan")?.dispatcher?.name === "总管",
+		"没有来源对话的单兜底总管",
+		JSON.stringify(ticketRows.get("T-orphan")?.dispatcher),
+	);
 	check(
 		ticketRows.get("T-source")?.conversationId === sourceConversationId,
 		"首层单的 conversationId = 发起对话 uuid",
@@ -3193,6 +3221,10 @@ try {
 		COMPANIONS_ENABLED: "true",
 		PARTNER_GREETING_ENABLED: "false",
 		AGENT_SSE_SEQ_DB_PATH: SEQ_DB,
+		// 2026-11-16 C 段：routine_manage 在低频清单里（注册成 deferred，要先 tool_search 加载）。
+		// 这一节验的是「上架 / 回滚」语义，不是按需加载路径——关掉工具索引让它照旧常驻，
+		// 按需加载另有专门的探针（tool-index 单测 + 隔离实例 context-inspect 实测）。
+		AGENT_TOOL_INDEX: "false",
 		LLM_FAUX_TOOL: "routine_manage",
 		LLM_FAUX_ARGS: JSON.stringify({
 			action: "create",
@@ -3777,6 +3809,48 @@ try {
 		ssOk.status === 200 && Array.isArray(ssBody.hits),
 		"sessions/search 正常查询 → 200 {hits:[]}",
 		`${ssOk.status} ${JSON.stringify(ssBody).slice(0, 60)}`,
+	);
+
+	// ── 32. 会话存活核对（2026-11-17，手机同步回收）──
+	// 只验端点契约：不存在的 id / 任务专线进 missing 且去重、空与垃圾请求回空不 500。
+	// 「在表里但没有内容的空会话也算不在」需要真会话才能造，语义由代码 + 实机联调守住。
+	console.log("\n· 32. 会话存活核对 /agent/chats/check（手机同步回收）");
+	const checkGone = await fetch(`${BASE}/api/v1/agent/chats/check`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ ids: ["does-not-exist", "does-not-exist", "task-42"] }),
+	});
+	const checkGoneBody = (await checkGone.json()) as { missing?: string[] };
+	check(
+		checkGone.status === 200 &&
+			Array.isArray(checkGoneBody.missing) &&
+			checkGoneBody.missing.includes("does-not-exist") &&
+			checkGoneBody.missing.includes("task-42") &&
+			checkGoneBody.missing.filter((id) => id === "does-not-exist").length === 1,
+		"不存在的 id / 任务专线 → missing 且去重",
+		`${checkGone.status} ${JSON.stringify(checkGoneBody).slice(0, 80)}`,
+	);
+	const checkEmpty = await fetch(`${BASE}/api/v1/agent/chats/check`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ ids: [] }),
+	});
+	const checkEmptyBody = (await checkEmpty.json()) as { missing?: unknown[] };
+	check(
+		checkEmpty.status === 200 && Array.isArray(checkEmptyBody.missing) && checkEmptyBody.missing.length === 0,
+		"空请求 → {missing:[]}",
+		String(checkEmpty.status),
+	);
+	const checkJunk = await fetch(`${BASE}/api/v1/agent/chats/check`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: "not-json",
+	});
+	const checkJunkBody = (await checkJunk.json()) as { missing?: unknown[] };
+	check(
+		checkJunk.status === 200 && Array.isArray(checkJunkBody.missing) && checkJunkBody.missing.length === 0,
+		"垃圾 body → {missing:[]}（不 500）",
+		String(checkJunk.status),
 	);
 
 } finally {

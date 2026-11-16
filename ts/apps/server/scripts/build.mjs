@@ -65,6 +65,11 @@ await build({
 	},
 });
 
+// 插件清单是运行期输入（flags.ts 用 import.meta.url 相对读）：必须跟着 bundle 落到同一层
+await cp(join(ROOT, "src", "plugins.json"), join(DIST, "src", "plugins.json"));
+const manifest = await stat(join(DIST, "src", "plugins.json")).catch(() => null);
+if (!manifest?.isFile()) throw new Error("插件清单没复制成功：dist/src/plugins.json");
+
 // 入口壳：`node dist/index.js` 与文档/探针口径一致，真正执行的是 src/index.js
 await writeFile(
 	join(DIST, "index.js"),
@@ -86,3 +91,4 @@ console.log(
 	`build: ${BUNDLE} (${(size / 1024 / 1024).toFixed(1)} MiB, target ${nodeTarget})`,
 );
 console.log(`build: 资源已按相对位复制 → ${RESOURCES.map((d) => `dist/${d}`).join("、")}`);
+console.log("build: 插件清单已复制 → dist/src/plugins.json");
