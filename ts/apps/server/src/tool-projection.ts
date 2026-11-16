@@ -23,6 +23,7 @@ import type {
 	ToolExecutionResult,
 	ToolRegistration,
 } from "@earendil-works/pi-durable";
+import { flagEnabled } from "./flags.ts";
 
 /** 内核 bash / powershell 的 structuredOutput 形状（@earendil-works/pi-durable tools/bash）。 */
 interface ShellStructuredOutput {
@@ -174,7 +175,7 @@ export interface ProjectionDeps {
 
 /** 回滚开关 `TOOL_PROJECTION=false`：判定恒 false，全部会话透传原结果（能力整体下线）。 */
 export function toolProjectionEnvEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	return (env.TOOL_PROJECTION?.trim() || "true").toLowerCase() !== "false";
+	return flagEnabled("TOOL_PROJECTION", env);
 }
 
 /**
@@ -187,7 +188,7 @@ export function toolProjectionEnvEnabled(env: NodeJS.ProcessEnv = process.env): 
  * 缺省 / 空串 = 开；只有明确 `false` 才关（与 `TOOL_PROJECTION` 同口径）。
  */
 export function toolProjectionWorkerEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	return (env.TOOL_PROJECTION_WORKER?.trim() || "true").toLowerCase() !== "false";
+	return flagEnabled("TOOL_PROJECTION_WORKER", env);
 }
 
 /**

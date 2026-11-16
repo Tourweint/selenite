@@ -250,7 +250,7 @@ const projected = await wrapped.execute({ command: "grep x f" } as never, projec
 test("⑪ 打手开关关（workerDefault=false）→ worker 会话不开", async () => {
 	assert.equal(await decide(deps({ kind: "worker" }), undefined, "false"), false);
 	assert.equal(toolProjectionWorkerEnabled({ TOOL_PROJECTION_WORKER: "false" }), false);
-	assert.equal(toolProjectionWorkerEnabled({ TOOL_PROJECTION_WORKER: "0" }), true, "只认字面 false");
+	assert.equal(toolProjectionWorkerEnabled({ TOOL_PROJECTION_WORKER: "0" }), false, "0 也算关");
 	assert.equal(toolProjectionWorkerEnabled({}), true, "缺省 = 开");
 });
 

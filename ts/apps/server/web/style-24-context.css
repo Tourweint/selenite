@@ -6,10 +6,28 @@
  * 分段色直接复用 style-01 的 --ctx-seg-* 单色阶，不新造语义色。
  */
 
-/* ── 标题行：会话选择 + 刷新 ─────────────────────────── */
+/* ── 标题行：视图切换 + 会话/角色选择 + 刷新 ─────────── */
 .ctx-toolbar {
   display: flex; align-items: center; gap: 8px; min-width: 0;
   flex-wrap: nowrap;
+}
+.ctx-mode {
+  flex: 0 0 auto;
+  display: inline-flex; gap: 2px; padding: 2px;
+  border-radius: var(--r-full);
+  background: var(--surface-low);
+}
+.ctx-mode button {
+  height: 27px; padding: 0 10px;
+  border: 0; border-radius: var(--r-full);
+  background: transparent; color: var(--text-2);
+  font-size: 12px; line-height: 1; white-space: nowrap; cursor: pointer;
+  transition: background-color .16s var(--ease-standard), color .16s var(--ease-standard);
+}
+.ctx-mode button:hover { color: var(--text); }
+.ctx-mode button[aria-checked="true"] {
+  background: var(--card-high); color: var(--text);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .10), inset 0 0 0 1px var(--card-border);
 }
 .ctx-select {
   flex: 0 1 240px; width: 240px; min-width: 150px; height: 32px;
@@ -17,6 +35,7 @@
   border-radius: var(--r-full);
   font-size: 12.5px;
 }
+.ctx-select[hidden] { display: none; }
 .ctx-refresh {
   flex: 0 0 auto; height: 32px;
   padding-inline: 12px;
@@ -145,7 +164,7 @@
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-size: 12px; color: var(--text-3);
 }
-.ctx-item-chars {
+.ctx-item-tokens {
   flex: 0 0 auto;
   font-size: 11.5px; color: var(--text-3);
   font-variant-numeric: tabular-nums;
@@ -159,6 +178,9 @@
 
 .ctx-item-body { padding: 0 16px 14px; }
 .ctx-item-body[hidden] { display: none; }
+.ctx-edit-row { padding: 0 16px 10px; }
+.ctx-edit-row .ctx-link { font-size: 12px; }
+.ctx-discipline-fixed { margin-top: 8px; }
 
 .ctx-text {
   margin: 0; padding: 12px 14px;
@@ -168,8 +190,17 @@
   font-family: var(--mono);
   font-size: 12px; line-height: 1.65;
   white-space: pre-wrap; overflow-wrap: anywhere;
-  max-height: 440px; overflow: auto;
-  overscroll-behavior: contain;
+  /* 2026-11-16 用户口径：展开后交给设置页整页滚动，卡里不再套一层滚动条。
+     原来的 max-height:440 + overflow:auto + overscroll-behavior:contain 会把滚轮
+     困在内层——鼠标停在技能索引上，外面怎么滚都不动。 */
+}
+
+.ctx-empty-field {
+  padding: 12px 14px;
+  border-radius: var(--r-md);
+  background: var(--surface-low);
+  color: var(--text-3);
+  font-size: 12px; line-height: 1.6;
 }
 
 /* ── 徽标 / 说明 / 空态 ─────────────────────────────── */
@@ -190,6 +221,13 @@
 .ctx-badge.is-turn {
   background: var(--accent-soft); color: var(--accent);
 }
+.ctx-badge.is-editable {
+  background: var(--accent-soft); color: var(--accent);
+}
+.ctx-badge.is-empty {
+  background: transparent; color: var(--text-3);
+  box-shadow: inset 0 0 0 1px var(--divider);
+}
 
 .ctx-note {
   padding: 11px 16px 13px;
@@ -204,13 +242,25 @@
 }
 .ctx-link:hover { color: var(--text); }
 
+/* 记忆卡的预算行（2026-11-16 用户反馈：底下那条线又深又重——默认开销模式下它就是
+   整张卡的底边，一条深线横切圆角；会话模式下它又贴着召回条目，同样显眼）。
+   分隔线改成：后面还接着内容时才画、左右收进 16px 与卡片圆角脱开、颜色降到
+   --divider 的一半——读起来是一条折痕，不是一根横杠。 */
 .ctx-meta-row {
+  position: relative;
   display: flex; align-items: center; justify-content: space-between;
   gap: 10px; flex-wrap: wrap;
   padding: 11px 16px;
-  border-bottom: 1px solid var(--divider);
+  border-bottom: 0;
   font-size: 12px; color: var(--text-3);
   font-variant-numeric: tabular-nums;
+}
+.ctx-meta-row:not(:last-child)::after {
+  content: "";
+  position: absolute; left: 16px; right: 16px; bottom: 0;
+  height: 1px;
+  background: color-mix(in srgb, var(--divider) 50%, transparent);
+  pointer-events: none;
 }
 .ctx-meta-row + .ctx-item { border-bottom: 0; }
 
@@ -258,6 +308,7 @@
 }
 
 @media (max-width: 640px) {
+  .ctx-toolbar { flex-wrap: wrap; }
   .ctx-hero-top { gap: 12px; }
   .ctx-hero-side { min-width: 0; text-align: left; }
   .ctx-meter { justify-content: flex-start; }

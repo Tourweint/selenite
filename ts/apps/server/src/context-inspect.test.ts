@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { ContextView } from "@earendil-works/pi-durable";
+import type { ContextView, Conversation } from "@earendil-works/pi-durable";
+import { contextUsageOf } from "./agent/session-transcript.ts";
 import {
 	chatContextInspectEnabled,
 	clearRequestInjections,
@@ -9,6 +10,7 @@ import {
 	lastRequestInjectionsOf,
 	noteRequestInjections,
 } from "./context-inspect.ts";
+import { estimateTokens } from "./token-estimate.ts";
 
 /**
  * 设置 → 上下文（2026-11-16）。
@@ -36,6 +38,15 @@ test("开关：默认开，只有显式 false 才关", () => {
 	assert.equal(chatContextInspectEnabled({ CHAT_CONTEXT_INSPECT: "false" }), false);
 });
 
+test("token 估算：中文一字一 token，ASCII 四字符一 token，空串为 0", () => {
+	assert.equal(estimateTokens(""), 0);
+	assert.equal(estimateTokens("人设"), 2);
+	assert.equal(estimateTokens("abcd"), 1);
+	assert.equal(estimateTokens("abcdefgh"), 2);
+	// 混合：两个汉字 + 8 个 ASCII = 2 + 2
+	assert.equal(estimateTokens("汉字abcdefgh"), 4);
+});
+
 test("固定块：section 按名覆盖；skills 单拎；工具与字符数对齐", () => {
 	const view = viewOf([
 		{
@@ -61,14 +72,99 @@ test("固定块：section 按名覆盖；skills 单拎；工具与字符数对�
 		],
 	);
 	assert.equal(out.system.chars, "底稿".length + "新人设".length + "验证".length);
+	assert.equal(
+		out.system.tokens,
+		estimateTokens("底稿") + estimateTokens("新人设") + estimateTokens("验证"),
+	);
+	assert.ok(out.system.sections.every((section) => section.tokens > 0));
 	// skills 不进系统提示词块
 	assert.equal(out.system.sections.some((section) => section.key === "skills"), false);
 	assert.equal(out.skills.count, 2);
 	assert.equal(out.skills.chars, "- 写周报：把本周的事写清楚\n- 查资料：先搜再答".length);
+	assert.equal(out.skills.tokens, estimateTokens("- 写周报：把本周的事写清楚\n- 查资料：先搜再答"));
 	assert.equal(out.tools.count, 1);
 	assert.equal(out.tools.items[0].name, "bash");
 	assert.ok(out.tools.items[0].schema.includes('"command"'));
 	assert.equal(out.tools.chars, JSON.stringify(tool).length);
+	assert.equal(out.tools.items[0].tokens, estimateTokens(JSON.stringify(tool)));
+	assert.equal(out.tools.tokens, out.tools.items[0].tokens);
+});
+
+test("执事纪律拆节：每节独立命名并可编辑；主人数据红线单独只读", () => {
+	const out = contextInspectViewOf(
+		viewOf([
+			{
+				role: "system",
+				content: "",
+				sections: {
+					partner_verification: "【验证铁律】\n先跑脚本",
+					partner_ruling: "【裁决纪律】\n先调查",
+					partner_owner_data: "【主人数据红线】\n只追加",
+				},
+				timestamp: 0,
+			},
+		]),
+	);
+	const verification = out.system.sections.find((section) => section.key === "partner_verification");
+	assert.equal(verification?.label, "执事纪律 · 验证铁律");
+	assert.equal(verification?.editable, true);
+	assert.equal(
+		out.system.sections.find((section) => section.key === "partner_ruling")?.label,
+		"执事纪律 · 裁决纪律",
+	);
+	const ownerData = out.system.sections.find((section) => section.key === "partner_owner_data");
+	assert.equal(ownerData?.label, "执事纪律 · 主人数据红线");
+	assert.equal(ownerData?.editable, undefined, "红线不标可编辑");
+});
+
+test("执事身份拆节：说话方式单独命名；SOUL / 边界等七节各自成行", () => {
+	const out = contextInspectViewOf(
+		viewOf([
+			{
+				role: "system",
+				content: "",
+				sections: {
+					partner_soul: "我是阿岚",
+					partner_voice: "",
+					partner_values: "",
+					partner_scenario: "",
+					partner_owner_profile: "主人画像",
+					partner_skill_index: "",
+					partner_boundary: "运行边界",
+				},
+				timestamp: 0,
+			},
+		]),
+	);
+	assert.deepEqual(
+		out.system.sections.map((section) => [section.key, section.label]),
+		[
+			["partner_soul", "执事身份 · SOUL"],
+			["partner_voice", "执事人设 · 说话方式（口吻）"],
+			["partner_values", "执事人设 · 里子"],
+			["partner_scenario", "执事人设 · 处境"],
+			["partner_owner_profile", "执事身份 · 主人画像"],
+			["partner_skill_index", "执事身份 · 技能索引"],
+			["partner_boundary", "执事身份 · 运行边界"],
+		],
+	);
+	const voice = out.system.sections.find((section) => section.key === "partner_voice");
+	assert.equal(voice?.empty, true, "说话方式为空也保留槽位");
+	assert.equal(voice?.chars, 0);
+});
+
+test("空字段：text 为空也保留一行并标记 empty（默认页用来显示 0 字槽位）", () => {
+	const out = contextInspectViewOf(
+		viewOf([
+			{ role: "system", content: "", sections: { persona: "人设", empty_slot: "" }, timestamp: 0 },
+		]),
+	);
+	const empty = out.system.sections.find((section) => section.key === "empty_slot");
+	assert.ok(empty, "空字符串 section 不应被丢掉");
+	assert.equal(empty.text, "");
+	assert.equal(empty.chars, 0);
+	assert.equal(empty.empty, true);
+	assert.equal(out.system.sections.find((section) => section.key === "persona")?.empty, undefined);
 });
 
 test("会变部分：只计条数与字符，不搬正文", () => {
@@ -86,10 +182,19 @@ test("会变部分：只计条数与字符，不搬正文", () => {
 			{ role: "toolResult", content: [{ type: "text", text: "a.ts\nb.ts" }] },
 		]),
 	);
-	assert.deepEqual(out.changing.messages, { count: 2, chars: "你好".length + "我看看".length });
+	assert.deepEqual(out.changing.messages, {
+		count: 2,
+		chars: "你好".length + "我看看".length,
+		tokens: estimateTokens("你好") + estimateTokens("我看看"),
+	});
 	assert.equal(out.changing.toolCalls.count, 1);
 	assert.ok(out.changing.toolCalls.chars > 0);
-	assert.deepEqual(out.changing.toolResults, { count: 1, chars: "a.ts\nb.ts".length });
+	assert.ok(out.changing.toolCalls.tokens > 0);
+	assert.deepEqual(out.changing.toolResults, {
+		count: 1,
+		chars: "a.ts\nb.ts".length,
+		tokens: estimateTokens("a.ts\nb.ts"),
+	});
 });
 
 test("注入记录：每会话只留最新一轮；空记录也能覆盖旧记忆", () => {
@@ -117,6 +222,24 @@ test("注入记录：超过 64 个会话按 LRU 丢最旧", () => {
 	clearRequestInjections();
 });
 
+test("上下文已用：input + cacheRead + cacheWrite（命中缓存不低报）", async () => {
+	const view = {
+		messages: [],
+		entries: [
+			{
+				kind: "pi.assistant",
+				model: [{ usage: { input: 120, output: 30, cacheRead: 5000, cacheWrite: 200 } }],
+			},
+		],
+	} as unknown as ContextView;
+	const conversation = {
+		context: async () => view,
+		agent: async () => null,
+	} as unknown as Conversation;
+	const out = await contextUsageOf(conversation, view);
+	assert.equal(out.used, 5320);
+});
+
 test("响应：记忆只取 memory_recall，其它注入列 id 与字数；无记录为 null", () => {
 	const base = {
 		conversationId: "uuid",
@@ -142,6 +265,7 @@ test("响应：记忆只取 memory_recall，其它注入列 id 与字数；无�
 		at: 400,
 		items: 0,
 		chars: 0,
+		tokens: 0,
 		text: "",
 		others: [],
 	});
@@ -158,6 +282,9 @@ test("响应：记忆只取 memory_recall，其它注入列 id 与字数；无�
 	});
 	assert.equal(recalled.memory.last?.items, 2);
 	assert.equal(recalled.memory.last?.chars, "- 你爱吃面\n- 你在呼和浩特".length);
-	assert.deepEqual(recalled.memory.last?.others, [{ id: "project_index", chars: "项目索引".length }]);
+	assert.equal(recalled.memory.last?.tokens, estimateTokens("- 你爱吃面\n- 你在呼和浩特"));
+	assert.deepEqual(recalled.memory.last?.others, [
+		{ id: "project_index", chars: "项目索引".length, tokens: estimateTokens("项目索引") },
+	]);
 	assert.equal(recalled.updatedAt, 500);
 });

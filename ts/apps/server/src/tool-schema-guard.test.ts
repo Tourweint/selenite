@@ -27,6 +27,9 @@ const REGISTERED_ORDER = [
 	"set_reminder",
 	"recall_sessions",
 	"persona_recall",
+	// persona_write（2026-11-17 persona_write 批）：插在 persona_recall 之后；
+	// 前缀资产变动已在变更记录里交代（新工具注册本身就换前缀）。
+	"persona_write",
 	"skill",
 	"send_to_agent",
 	"delegate",
@@ -66,6 +69,8 @@ function fullTools() {
 		skills: SKILLS,
 		recallSessions: async () => [],
 		personaAsk: async () => ({ ok: true, question: "stub" }),
+		// persona 写入（2026-11-17 persona_write 批）：条件注册，快照要覆盖它。
+		personaWrite: async () => ({ ok: true }),
 		relay: { deliver: async () => ({ ok: false, error: "stub" }) },
 		progressReport: true,
 		partners: true,

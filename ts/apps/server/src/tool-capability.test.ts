@@ -45,10 +45,14 @@ const EXPECTED_TOOLS = [
 	"propose_topic",
 	"send_to_agent",
 	"persona_recall",
+	// 2026-11-17 persona_write 批：写一生库（主人明确让写才用，critical 审批）
+	"persona_write",
 	"ask_user",
 	"report_progress",
 	// 批 30 修订：save_skill_advice（SKILL_ADVICE 开时上架；能力表已登记）
 	"save_skill_advice",
+	// 2026-11-16 C 段：tool_search（createTools 末尾注册，非 deferred）
+	"tool_search",
 ].sort();
 
 function registeredToolNames(): string[] {
@@ -60,6 +64,8 @@ function registeredToolNames(): string[] {
 			relay: { deliver: async () => ({ ok: false, error: "stub" }) },
 			routineSelfService: true,
 			scheduleRoutine: async () => undefined,
+			// persona 写入（2026-11-17 persona_write 批）：能力表登记了就得有注册覆盖，桩不落盘。
+			personaWrite: async () => ({ ok: true }),
 			// persona 检索（2026-11-09 批一）：条件注册，给个不落盘替身把全集覆盖进来。
 			personaAsk: async () => ({ ok: true, question: "stub" }),
 			skillAdviceSave: () => ({ ok: true, saved: 0, kept: 0 }),

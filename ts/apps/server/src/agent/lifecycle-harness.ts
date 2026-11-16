@@ -23,6 +23,7 @@ import { RELAY_AUTONOMY_BLOCK_MESSAGE, RELAY_CALLER_BLOCK_MESSAGE, RELAY_CHIEF_B
 import { CHIEF_PARTNER_ID, COMPANIONS_ENABLED, partnersStore } from "../partners.ts";
 import { pathGuardBlockReason } from "../path-guard.ts";
 import { askPersona, askPersonaAvailable, personaAskEnabled } from "../persona-ask.ts";
+import { personaWrite, personaWriteEnabled, writePersonaAvailable } from "../persona-write.ts";
 import { PROGRESS_TOOL_NAME, progressReportAllowed, progressReportEnabled } from "../progress-report.ts";
 import { projectsStore, workspaceRootsReal } from "../projects.ts";
 import { currentModels, contextWindowsByRef, readLlmConfig } from "../provider.ts";
@@ -37,6 +38,8 @@ import { searchModule } from "../search.ts";
 import { makeSkillAdviceSaver, skillAdviceEnabled, skillAdvicePath } from "../skill-advice.ts";
 import { mirrorTaskNotice, taskConversationMirror } from "../task-conversation.ts";
 import { capabilityOf } from "../tool-capability.ts";
+import { markDeferred } from "../tool-index.ts";
+import { disabledToolsOfConversation } from "../tool-visibility.ts";
 import { createTools } from "../tools.ts";
 import { TopicTask } from "../topic-runtime.ts";
 import { TOPICS_ENABLED, topicsStore } from "../topics.ts";
@@ -44,10 +47,11 @@ import { UNATTENDED_SKIP_MESSAGE, isUnattended, noteTurnToolError, noteUnattende
 import { WORLD_STATE_TOOLS, confirmWorldStateEnabled, verifyWorldState, worldStateTarget } from "../world-state.ts";
 import { approvalArgsHash } from "./approval-key.ts";
 import { CHANCELLOR_ENABLED, memoryEngine, scopeOf, skillStore } from "./assist.ts";
-import { setChatKindsSource, setProjectBindingsSource, setProjectLabelResolver } from "./project-scope.ts";
+import { executorLine } from "../executor-config.ts";
+import { setChatKindsSource, setProjectBindingsSource, setProjectLabelResolver, setProjectStateResolver } from "./project-scope.ts";
 import { guardRelayDelivery } from "./injection-guard.ts";
 import { collectInjections, guardProvider } from "./injection.ts";
-import { LIFECYCLE_MESSAGE_PROVIDERS, clarifyContractProvider, currentProjectProvider, personaProvider, skillsProvider, topicsProvider, verificationIronLawProvider } from "./lifecycle-injections.ts";
+import { LIFECYCLE_MESSAGE_PROVIDERS, clarifyContractProvider, currentProjectProvider, personaProvider, skillsProvider, toolIndexProvider, topicsProvider, verificationIronLawProvider } from "./lifecycle-injections.ts";
 import { BASH_TIMEOUT_S, approvalMode, policy, readOnlyBlockReason } from "./policy.ts";
 import { markRecoverResume } from "./recover-note.ts";
 import { recallSessionsEnabled, searchSessions } from "./session-search.ts";
@@ -405,6 +409,12 @@ export const LIFECYCLE_SECTIONS: readonly PromptSection[] = [
 			collectInjections([currentProjectProvider], { conversationId: input.conversationId })
 				.system[0]?.text,
 	},
+	// 当前派活执行器（2026-11-16）：让总管/执事能回答“会派给谁、什么模型、什么权限”。
+	// 读 .data/executor.json；设置变了这一行跟着变，前缀缓存失效一次是用户主动改的预期。
+	{
+		key: "delegate_executor",
+		render: () => (CHANCELLOR_ENABLED ? executorLine() : undefined),
+	},
 	// L1 技能索引（2026-10-31 方案 D5）：按会话冻结（provider 内部走 indexFor）。
 	{
 		key: "skills",
@@ -426,6 +436,24 @@ export const LIFECYCLE_SECTIONS: readonly PromptSection[] = [
 			}).system[0]?.text;
 		},
 	},
+	// 低频工具索引（2026-11-16 C 段）：末尾追加，打掉一次缓存是预期；列的是"这一轮还能加载"的
+	// deferred（agent.deferred 已排除已加载的），所以 tool_search 加载后本段自然变短。
+	// 人设页取消勾选的也要剔掉：内核的 deferred 是「延迟 − 已 offer」，被 remove 的延迟工具
+	// 仍留在 deferred 里，光靠 modelTools.remove 管不到这段清单。
+	{
+		key: "tool_index",
+		render: async (input) => {
+			const conversationId = Number(input.conversationId);
+			const chatKind = await chatKindOfSection(input);
+			const disabled = disabledToolsOfConversation(conversationId, chatKind);
+			return collectInjections([toolIndexProvider], {
+				conversationId: input.conversationId,
+				deferred: (input.agent?.deferred ?? [])
+					.filter((tool) => !disabled.has(tool.name))
+					.map((tool) => ({ name: tool.name, description: tool.description })),
+			}).system[0]?.text;
+		},
+	},
 ];
 
 async function openHarness(): Promise<Harness> {
@@ -438,7 +466,7 @@ async function openHarness(): Promise<Harness> {
 	const registry = createRegistry();
 	// pi 自带的那套读写改跑命令：走执行环境，比我们自己写的完整
 	registry.install(CodingTools);
-	const lifediaryTools = createTools({
+	const raw = createTools({
 		memory: memoryEngine,
 		scopeOf,
 		skills: skillStore,
@@ -493,7 +521,17 @@ async function openHarness(): Promise<Harness> {
 			personaAskEnabled() && askPersonaAvailable()
 				? (question, options) => askPersona(question, options)
 				: null,
+		// persona 写入（2026-11-17 persona_write 批）：主人明确让写才往大记忆库落字。
+		// 双闸：PERSONA_WRITE_ENABLED（默认关）+ repair.py 路径（PERSONA_REPAIR 或 ask.py 同目录）。
+		// 审批由 capability critical 承担（每写必弹审批）；不传 = persona_write 不上架，一行回滚。
+		personaWrite:
+			personaWriteEnabled() && writePersonaAvailable()
+				? (input) => personaWrite(input)
+				: null,
 	});
+	// 低频工具索引（C 段）：只在清单内工具上补 deferred，浅拷贝、不改原对象、不动注册顺序。
+	// tool_search 是 createTools 末尾追加的，名字不在清单里，原样通过。
+	const lifediaryTools = markDeferred(raw);
 	// 会话归属项目（2026-11-15 项目记忆方案）：给 project-scope 注入快照源（零依赖小模块，
 	// assist/lifecycle-harness 都不反向 carry 它——环与测试加载面的坑见该文件头注释）。
 	// getHarness() 惰性取：接线时 harness 还没 open，真正调用时已就绪。
@@ -524,6 +562,13 @@ async function openHarness(): Promise<Harness> {
 			.listProjects(true)
 			.find((entry) => entry.id === projectId);
 		return project?.name ?? null;
+	});
+	// 项目存活判定（2026-11-16 归档 / 删除项目退出召回库）：三条召回入口装配候选池前
+	// 都先问这里。findProject 按 id 查（含归档行）——归档 → archived，登记没了 → missing。
+	setProjectStateResolver((projectId) => {
+		const project = projectsStore().findProject(projectId);
+		if (!project) return "missing";
+		return project.archived ? "archived" : "active";
 	});
 	// 工具结果投影挂载判定依赖（2026-11-13 工具层结果契约化 §5）：store 与 ChatKinds 现查，
 	// tool-projection 只收纯函数。getPartner 读不到（无 partners 行）时按 null 走默认判定。

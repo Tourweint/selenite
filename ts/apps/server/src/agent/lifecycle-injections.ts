@@ -12,6 +12,7 @@
  * 各段开关、身份分流、冻结 / 现渲染语义一律照搬改造前实现，逐字节不变。
  */
 
+import { basename } from "node:path";
 import {
 	INJECTION_ORDER,
 	type InjectionContext,
@@ -36,13 +37,15 @@ import {
 	lifecycleOwnsVerification,
 } from "./turn-gate.ts";
 import { currentProject, sessionBoundCwd } from "./shared.ts";
-import { currentProjectEnabled } from "../projects.ts";
+import { currentProjectEnabled, projectsStore } from "../projects.ts";
 import { wrapUntrustedObjective } from "./injection-guard.ts";
-import { PERSONA, WORKER_PERSONA, memoryRecallProvider, projectIndexProvider, skillStore } from "./assist.ts";
+import { PERSONA, memoryRecallProvider, projectIndexProvider, skillStore } from "./assist.ts";
+import { readWorkerPersona, WORKER_PERSONA_CHAT_TOOLS } from "../worker-persona.ts";
 import { skillSlashOf } from "../skills.ts";
 import { buildPartnerTurnContext } from "./partner-context.ts";
 import { workSummaryFor } from "../work-record.ts";
 import { takeRecoverNote } from "./recover-note.ts";
+import { toolIndexEnabled, toolIndexText } from "../tool-index.ts";
 
 function entry(
 	id: string,
@@ -84,7 +87,12 @@ function skillPartnerOf(ctx: InjectionContext): string | null {
  */
 export const personaProvider: InjectionProvider = (ctx) => {
 	if (isNonChiefPartner(ctx.partnerId)) return undefined;
-	const text = ctx.chatKind === "worker" ? WORKER_PERSONA : resolvePersona(partnersStore, PERSONA);
+	// 2026-11-16 worker 人设全局一份、每轮现读：改完下一轮生效；其它分支不动。
+	// 同日批2 拆层：正文（共享层，派活同吃）+ 会话工具提示（只有会话有这三件工具）。
+	const text =
+		ctx.chatKind === "worker"
+			? readWorkerPersona() + WORKER_PERSONA_CHAT_TOOLS
+			: resolvePersona(partnersStore, PERSONA);
 	return entry("persona", text, INJECTION_ORDER.persona, "system");
 };
 
@@ -112,11 +120,14 @@ export const clarifyContractProvider: InjectionProvider = (ctx) => {
 };
 
 /**
- * 当前项目：每轮现渲染，不写进对话历史。
+ * 当前项目 / 主工作区：每轮现渲染，不写进对话历史。
  *
- * 2026-11-13 改为"项目容器"口径：一个项目可以有多个文件夹，主文件夹是**相对路径的唯一基准**，
- * 其余文件夹一律写绝对路径。同时把"同名文件"这条纪律写进去——一个 Kotlin 手机端 + 一个
- * harness 放在同一个项目里时，两边都有 README.md / build.gradle，只按文件名找必错。
+ * 2026-11-16 定稿：普通对话就是 worker，**必须带项目记忆**，所以继续跟随「当前项目」；
+ * 同时把**主工作区路径**写进提示（之前只说过"文件操作默认在主工作区"，路径从未出现过）。
+ * 没选项目 → 落主工作区（杂事态）；已登记项目全列（项目少，名字 + 主文件夹路径）。
+ *
+ * 2026-11-13 项目容器口径：一个项目可以有多个文件夹，主文件夹是相对路径的唯一基准，
+ * 其余文件夹一律写绝对路径；同名文件纪律一并保留。
  */
 export const currentProjectProvider: InjectionProvider = (ctx) => {
 	if (!currentProjectEnabled()) return undefined;
@@ -124,23 +135,58 @@ export const currentProjectProvider: InjectionProvider = (ctx) => {
 	// 会话创建时钉下的文件夹（快照）；换主文件夹不影响老会话，这里要说清楚"你在哪"。
 	const bound = sessionBoundCwd(ctx.conversationId);
 	const roots = project?.roots ?? [];
-	const lines = project
-		? [
-				`当前项目：${project.name}（${roots.length || 1} 个文件夹）`,
-				`主文件夹：${project.rootPath}`,
-				...(bound && bound !== project.rootPath
-					? [`本会话的工作目录：${bound}（创建时的快照；主文件夹后来改过也不影响本会话）`]
-					: []),
-				...(roots.length > 0
-					? roots.map(
-							(root) =>
-								`- ${root.label}${root.role === "primary" ? "（主）" : ""}：${root.path}`,
-						)
-					: []),
-				"相对路径以主文件夹为基准；要动别的文件夹，写它的绝对路径。",
-				"多个文件夹里可能有同名文件（README.md / build.gradle 之类）：动手前先看路径，别把同名文件当成同一个。",
-			]
-		: ["当前无特定项目（杂事模式）。文件操作默认在主工作区。"];
+	let workspacePath: string | null = null;
+	const projectLines: string[] = [];
+	try {
+		const store = projectsStore();
+		workspacePath = store.getWorkspace()?.rootPath ?? null;
+		for (const entry of store.listProjects()) {
+			const entryRoots = entry.roots ?? [];
+			const primary = entryRoots.find((root) => root.role === "primary") ?? entryRoots[0];
+			if (!primary) continue;
+			projectLines.push(`- ${entry.name}：${primary.path}`);
+			for (const root of entryRoots) {
+				if (root === primary) continue;
+				projectLines.push(`  - ${root.label}：${root.path}`);
+			}
+		}
+	} catch {
+		// 项目库坏了不阻塞对话：只注入已知的部分
+	}
+	const lines: string[] = [];
+	if (workspacePath) {
+		lines.push(`主工作区：${basename(workspacePath) || "工作区"}（${workspacePath}）`);
+	}
+	lines.push(
+		project
+			? `当前项目：${project.name}（${roots.length || 1} 个文件夹）`
+			: "当前无特定项目（杂事模式）。文件操作默认在主工作区。",
+	);
+	if (project) {
+		lines.push(`主文件夹：${project.rootPath}`);
+		if (bound && bound !== project.rootPath) {
+			lines.push(
+				`本会话的工作目录：${bound}（创建时的快照；主文件夹后来改过也不影响本会话）`,
+			);
+		}
+		lines.push(
+			...roots.map(
+				(root) => `- ${root.label}${root.role === "primary" ? "（主）" : ""}：${root.path}`,
+			),
+		);
+		lines.push("相对路径以主文件夹为基准；要动别的文件夹，写它的绝对路径。");
+	} else if (bound) {
+		lines.push(`本会话的工作目录：${bound}（创建时的快照）`);
+		lines.push("相对路径以本会话的工作目录为基准。");
+	} else if (workspacePath) {
+		lines.push("相对路径以主工作区为基准。");
+	}
+	if (projectLines.length > 0) {
+		lines.push("已登记项目（需要时用绝对路径）：", ...projectLines);
+		lines.push(
+			"多个文件夹里可能有同名文件（README.md / build.gradle 之类）：动手前先看路径，别把同名文件当成同一个。",
+		);
+	}
 	return entry("current_project", lines.join("\n"), INJECTION_ORDER.current_project, "system");
 };
 
@@ -195,6 +241,17 @@ export const topicsProvider: InjectionProvider = (ctx) => {
 	return entry("topics", lines.join("\n"), INJECTION_ORDER.topics, "system");
 };
 
+/**
+ * 低频工具索引（2026-11-16 C 段）：只列当前会话还能加载的 deferred（render 从 agent.deferred 取来）。
+ * 开关关 / 一个都没有 → 整段省略（不造空段）。末尾追加，位置由 lifecycle sections 数组决定。
+ */
+export const toolIndexProvider: InjectionProvider = (ctx) => {
+	if (!toolIndexEnabled()) return undefined;
+	const text = toolIndexText(ctx.deferred ?? []);
+	if (!text) return undefined;
+	return entry("tool_index", text, INJECTION_ORDER.tool_index, "system");
+};
+
 /** B 期登记表（顺序 = lifecycle sections 数组下标顺序；section 物理位置不由它决定）。 */
 export const LIFECYCLE_SECTION_PROVIDERS: readonly InjectionProvider[] = [
 	personaProvider,
@@ -203,6 +260,7 @@ export const LIFECYCLE_SECTION_PROVIDERS: readonly InjectionProvider[] = [
 	currentProjectProvider,
 	skillsProvider,
 	topicsProvider,
+	toolIndexProvider,
 ];
 
 // ── D 期：5 处 extra.push（channel: "message"）────────────────

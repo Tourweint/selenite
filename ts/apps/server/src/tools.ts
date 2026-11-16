@@ -20,6 +20,7 @@ import {
 } from "./partner-manage.ts";
 import { defineTool, type ToolRegistration } from "@earendil-works/pi-durable";
 import { askUserEnabled, createAskUserTool } from "./ask-user.ts";
+import { executorSummary } from "./executor-config.ts";
 import { scopeKey, type MemoryEngine, type MemoryKind, type MemoryScope } from "@lifediary/memory";
 // 群组核心（2026-11-07）：建群校验与落库的唯一实现，HTTP 端点共用同一份。
 import {
@@ -41,7 +42,6 @@ import {
 	validateDomain,
 } from "../../../../../chancellor/src/manager/registry.ts";
 import {
-	REPORT_FOUR_LINES,
 	WORK_REVIEW_GUIDANCE,
 	chancellorWorkRoot,
 	emitDelegation,
@@ -52,8 +52,14 @@ import {
 } from "./delegation.ts";
 // 证据裁判（2026-11-10 批 14）：验收 fail 时起 read-only 子会话，结论回传 chancellor 返工判定。
 import { withDelegationJudge } from "./delegation-judge.ts";
-// 裁决纪律（2026-11-10 批 12 §一.2）：与执事轮输入同一份文本，接在 delegate 描述尾部。
-import { RULING_DISCIPLINE } from "./agent/turn-gate.ts";
+// 派活注入项目记忆（2026-11-16）：系统内 native 与外部 CLI 都只读 TASK.md，
+// 记忆只能随 requirement 送过去；只取单子所属项目的 scope。
+import {
+	appendDelegationProjectMemory,
+	delegationProjectMemoryText,
+} from "./delegation-project-memory.ts";
+// 四行回报（REPORT_FOUR_LINES）与裁决纪律（RULING_DISCIPLINE）的全文已挪进内置技能
+// skills/delegate.md（2026-11-16 工具裁剪 A），这里不再 import、不再拼进描述尾部。
 // 执事自建巡逻核心（2026-11-08 刀二 E4）：与 HTTP 端点共用校验 / 归属 / 上限。
 import {
 	defaultRoutineManageContext,
@@ -75,8 +81,11 @@ import { pruneSessionMemory } from "./memory-prune.ts";
 // 零依赖小模块：不能从这里 carry assist（partner-work 等测试动态 import 本文件时
 // 刻意不起全局记忆引擎，assist 一加载就握住它们的临时目录）。
 import {
+	isRecallableProjectId,
 	personaProjectIdsOfConversationAsync,
 	projectIdOfConversation,
+	projectMemoryStateOf,
+	recallableProjectIds,
 	resolveProjectWriteTarget,
 } from "./agent/project-scope.ts";
 // 工作履历：派单终态结算落一条 work 记录（2026-11-08 刀二 E2）。
@@ -122,6 +131,8 @@ import type { SessionSearchHit } from "./agent/session-search.ts";
 // 工具返回统一契约（2026-11-10 批 16 §一；批 18 §五迁入只读四件）：
 // 已迁 = recall_sessions / ask_user / report_progress / recall / web_search / propose_topic / skill。
 import { encodeToolResult, err, ok, type ToolResult } from "./tool-result.ts";
+import { isDeferredTool, toolIndexEnabled } from "./tool-index.ts";
+import { disabledToolsOfConversation } from "./tool-visibility.ts";
 
 /**
  * 我们自己的工具。
@@ -307,6 +318,17 @@ export interface ToolDeps {
 	 */
 	personaAsk?:
 		| ((question: string, options?: { limit?: number }) => Promise<PersonaRecallResult>)
+		| null;
+	/**
+	 * persona-metric 记忆库写入（2026-11-17 persona_write 批）：传了才注册 `persona_write`。
+	 * 装配层按 `PERSONA_WRITE_ENABLED`（默认关）与 repair.py 路径（PERSONA_REPAIR 或
+	 * PERSONA_MEMORY_ASK 同目录推导）双闸决定传不传。语义=主人**明确让写**才把他的原话
+	 * 记进大记忆库的 user_statement（自动提取的记忆不送）；审批走 capability critical。
+	 */
+	personaWrite?:
+		| ((
+				input: { body: string; why: string; about?: string; tag?: string },
+		  ) => Promise<{ ok: boolean; line?: string; statementId?: string; error?: string }>)
 		| null;
 	/**
 	 * 自建巡逻（2026-11-08 刀二 E4）：为 true 时 `routine_manage` 工具上架。
@@ -582,6 +604,24 @@ export function createTools(deps: ToolDeps) {
 				if (!resolution.ok) {
 					return textToolResult(err(resolution.code, resolution.message, resolution.hint));
 				}
+				// 归档 / 删除的项目不再接收新记忆（2026-11-16 用户拍板）：写进去也召回不到，
+				// 等于死账。归档期间不给写；恢复归档后照常写。删除的按"登记没了"提示。
+				const state = projectMemoryStateOf(resolution.projectId);
+				if (state !== "active") {
+					const name = registered.find((entry) => entry.id === resolution.projectId)?.name;
+					const label = name ? `「${name}」` : "这个项目";
+					return textToolResult(
+						err(
+							"project_inactive",
+							state === "archived"
+								? `${label}已归档，不再接收新的项目记忆（归档期间写进去的也召回不到）。`
+								: `${label}已经不在项目登记里，不能再写项目记忆。`,
+							state === "archived"
+								? "先恢复项目再记；或者把这条记成普通记忆（不带 scope 参数）。"
+								: "把这条记成普通记忆（不带 scope 参数）。",
+						),
+					);
+				}
 				scope = { type: "project", id: resolution.projectId };
 			}
 			const record = engine.remember({
@@ -635,10 +675,14 @@ export function createTools(deps: ToolDeps) {
 			// ——主动查不受注入闸门限制（闸门只管"自动浮出"，不管"伸手去查"）。
 			const projectId = await projectIdOfConversation(api.conversationId);
 			const mountedIds = await personaProjectIdsOfConversationAsync(api.conversationId);
-			const boundKey = projectId ? scopeKey({ type: "project", id: projectId }) : null;
+			// 归档 / 删除的项目退出召回库（2026-11-16 用户拍板）：主动查也不放行——
+			// 规则是"不进召回库"，不是"只是不自动注入"。
+			const boundProjectId = projectId && isRecallableProjectId(projectId) ? projectId : null;
+			const liveMountedIds = recallableProjectIds(mountedIds);
+			const boundKey = boundProjectId ? scopeKey({ type: "project", id: boundProjectId }) : null;
 			const projectKeys = [
 				...(boundKey ? [boundKey] : []),
-				...mountedIds.map((id) => scopeKey({ type: "project", id })),
+				...liveMountedIds.map((id) => scopeKey({ type: "project", id })),
 			];
 			const hits = engine.recall({
 				text: args.query,
@@ -667,12 +711,12 @@ export function createTools(deps: ToolDeps) {
 	const remind = defineTool({
 		name: "set_reminder",
 		description:
-			"定一个到点提醒。时间写 ISO 8601（带时区），例如 2026-10-29T08:00:00+08:00。" +
-			"提醒会落库，进程重启也不会丢。要重复时，`at` 只用来定「几点」，服务端会自动推到下一次符合规则的时间，再补 `repeat`：" +
+			"定一个定时任务：到点让目标执事自己跑一轮、主动来说一句（触发指令对你隐藏，看起来像它主动开口）。时间写 ISO 8601（带时区），例如 2026-10-29T08:00:00+08:00。" +
+			"任务会落库，进程重启也不会丢。要重复时，`at` 只用来定「几点」，服务端会自动推到下一次符合规则的时间，再补 `repeat`：" +
 			"每天 = daily；每周 = weekly + weekdays（0 周日 … 6 周六）；" +
 			"每月 = monthly + dayOfMonth（1–31）。区间结束用 `until`（ISO 8601，含当天）。",
 		parameters: Type.Object({
-			text: Type.String({ description: "到点要提醒的内容" }),
+			text: Type.String({ description: "到点要让执事做的事（它会据此现场说一句，不是照念这段）" }),
 			at: Type.String({ description: "第一次触发时间，ISO 8601" }),
 			repeat: Type.Optional(
 				Type.Union(
@@ -868,42 +912,25 @@ export function createTools(deps: ToolDeps) {
 	const delegate = defineTool({
 		name: "delegate",
 		description:
-			"把一件需要多步动手的活派给外面的工人（领域负责人/执行者）去做。" +
-			"适合：要改多个文件、要跑命令、要查证之后再动手的任务；" +
-			"**以及在手机上操作 App**——打开某个 App、点按钮、输入文字、翻页、看屏幕上显示了什么。" +
+			// 2026-11-16 工具裁剪 A：任务书四段 / steps 完整规则 / need_input 处理 / resume 全部细节 /
+			// 四行回报 / 裁决纪律 / 设备 caveat 全文已挪进内置技能 skills/delegate.md，描述只留
+			// 「何时用、怎么调」+ 指路句（技能默认全关，delegate 是 core，始终可取）。
+			"把一件需要多步动手的活派给外面的工人（领域负责人/执行者）。" +
+			"适合：改多个文件、跑命令、查证之后再动手；**以及在手机上操作 App**（打开 App、点按钮、输入文字、翻页、看屏幕）。" +
 			"不适合：回答问题、闲聊、一次 read 就能答的事、需要边做边问对方的事。" +
-			"**派出去后会立即返回任务单号，不会占住这一轮对话；后台跑完会有一条汇报写进会话。**" +
-			"所以返回后直接告诉用户「已派发，完成后会汇报」即可，不要等结果、不要反复查询、不要重复派。" +
-			"填 `domain` 把活交给对应领域的负责人。**领域名必须是小写 ASCII**（小写字母、数字、连字符，如 `frontend` / `desktop-shell`）；" +
+			"**派出去立即返回任务单号、后台汇报；不要等结果、不要反复查询、不要重复派**；" +
+			"返回后告诉用户「已派发，完成后会汇报」。" +
+			"填 `domain` 把活交给对应领域负责人。**领域名必须是小写 ASCII**（小写字母、数字、连字符，如 `frontend` / `desktop-shell`）；" +
 			`当前已有领域：${domainList()}。不填则按旧路径直接派 worker。` +
-			"**派新活时必须带 `project`（已登记的项目名或 id）**；手机/设备 worker 这类" +
-			"不落本机磁盘的活可省 `project`（设备活豁免）；本机活没有可用项目时会返回 " +
-			"`{\"error\":\"needs_project\"}` 并列出已有项目——先问用户要建哪个项目，" +
+			"**新活必须带 `project`**（已登记的项目名或 id）；手机/设备 worker 这类不落本机磁盘的活可省 `project`（设备活豁免）；" +
+			"本机活没有可用项目会返回 `{\"error\":\"needs_project\"}` 并列出已有项目——先问用户要建哪个，" +
 			"用 `propose_project` 提交、等用户在设置里确认，再派。" +
-			"如果上一轮派出去的活卡住了、你问了用户一个问题、用户刚回答了你，用 `resume: true` 接着原单跑：" +
-			"`requirement` 里只写用户的那句回答（比如「验证码 1234」），不要重述整个任务，" +
-			"**更不要重新派**——重派会让对方从头再做一遍。" +
-			"对方在回答你上一轮的问题时，他这句话本身就是要交回去的内容：直接拿它调 resume，" +
-			"不要再反问一遍，也不要自己替它把剩下的事做完。" +
-			"会话里没有可续的单时会按新活派，并在结果里告诉你。" +
-			"**注意（只讲文件路径，不是能力限制）**：工人写文件时用相对路径（如 `summary.md`），" +
-			"不要指定工作目录之外的绝对路径；产物最后落在 chancellor 的 runs/<ticket>/ 下，不在你指定的绝对位置。" +
-			"工人在手机上干活时，它看到的是手机屏幕、点的是手机上的按钮——**它碰不到你电脑上的文件**；" +
-			"反过来，它交回来的是一句话，不是手机里的截图或文件。" +
-			// 2026-11-08 员工人格化刀一 E1 消费点 2（任务书四段）：描述层给口径，参数结构不变。
-			"**任务书按四段写**：目标 / 怎么算好 / 可自主范围 / 必须请示。" +
-			"你若带「岗位契约」，后两段直接按契约的「决策分级」「验收标准」填写；没有契约就按常理写清边界。" +
-			// 2026-11-09 保证实现纵深 §2.2：计划附件与任务书四段并列，不替换。
-			"**多步活要写 `steps`**：一件事如果有 ≥3 个动作、或者要跨文件改，就用 steps 列出可核对的动作序列" +
-			"（≤12 条，每条一句话说清做什么、怎么算做到）；一句话就能说完的小活不写。" +
-			"工人回报「需要你」（need_input / need_decision / need_action）时，答得了就答；" +
-			"一时答不了，明确告诉它「这一项先跳过，继续其余部分，这项回头再补」，别让整单停在一件小事上。" +
-			// 2026-11-10 批 12 §一.3：四行回报口径随派活一起交待下去，别让工人交流水账。
-			"**派活前告诉工人按四行回报**（回报开头写「给<你的名字>：」，不要把任务原样发回给派活的人）：\n" +
-			REPORT_FOUR_LINES +
-			// 2026-11-10 批 12 §一.2：四停之外自己裁决、记一行账，别反复请示。
-			"\n\n" +
-			RULING_DISCIPLINE,
+			"上一轮派出去的活卡住 / 你问过用户、用户刚回答了，用 `resume: true` 接着原单跑：" +
+			"`requirement` 里只写用户那句回答，不要重述、**更不要重新派**。" +
+			"多步活写 `steps`（≤12 条）。" +
+			"**注意**：写文件用相对路径，产物落在 chancellor 的 runs/<ticket>/ 下；" +
+			"手机工人碰不到你电脑上的文件，交回来的是一句话。" +
+			'**第一次派活前先调 skill({name:"delegate"}) 读完整手册**：任务书四段 / steps / resume / 四行回报 / 裁决纪律。',
 		parameters: Type.Object({
 			requirement: Type.String({
 				description:
@@ -1094,6 +1121,14 @@ export function createTools(deps: ToolDeps) {
 				}
 			}
 
+			// 派活注入项目记忆（2026-11-16）：只拼进交给 chancellor 的 requirement，
+			// **不参与上面的幂等指纹**——同一请求不能因为记忆更新而变成"内容不同"。
+			// 记忆库读不出来 / 开关关着 → 空串，requirement 原样。
+			const delegationRequirement = appendDelegationProjectMemory(
+				args.requirement,
+				delegationProjectMemoryText(deps.memory, project, args.requirement),
+			);
+
 			// 幂等回执（方案 §5.1）：新派先落回执再入队；续跑不建新单，
 			// 只补一行 `resume:<原单id>:<次数>` 的会话映射（见下方受理之后那段）。
 			const receipts = resumeTicketId === undefined ? receiptsOf(deps) : null;
@@ -1158,11 +1193,11 @@ export function createTools(deps: ToolDeps) {
 			}
 
 			// 立即受理：同步拿到任务单号，后台跑完再发事件/回灌。
-			const { ticketId, outcome, fellBack } = startDelegation(
+			const { ticketId, outcome, fellBack, executor } = startDelegation(
 				{
 					conversationId,
 					domain,
-					requirement: args.requirement,
+					requirement: delegationRequirement,
 					resumeTicketId,
 					project,
 					...(steps ? { steps } : {}),
@@ -1263,21 +1298,26 @@ export function createTools(deps: ToolDeps) {
 
 			const ticket = ticketId ? { ticketId } : {};
 			const domainField = domain ? { domain } : {};
+			const executorText = executor
+				? executorSummary(executor.employee, executor.profile)
+				: "";
 			if (noTicket) {
 				return delegateResult(
 					`${fallbackNotice}已按新活派：任务单 ${ticketId || "(受理中)"}` +
-						`${domain ? `（领域：${domain}）` : ""}。它在后台执行，完成后我会汇报。`,
+						`${domain ? `（领域：${domain}）` : ""}${executorText ? `；交给 ${executorText}` : ""}。` +
+						"它在后台执行，完成后我会汇报。",
 					{ ...ticket, ...domainField },
 				);
 			}
 			if (resumeTicketId) {
 				return delegateResult(
-					`${fallbackNotice}已把回答交回原单 ${ticketId}，它继续在后台跑，完成后我会汇报。`,
+					`${fallbackNotice}已把回答交回原单 ${ticketId}（续跑沿用原单的工人），它继续在后台跑，完成后我会汇报。`,
 					ticket,
 				);
 			}
 			return delegateResult(
-				`${fallbackNotice}已受理：任务单 ${ticketId || "(受理中)"}${domain ? `（领域：${domain}）` : ""}。` +
+				`${fallbackNotice}${executorText ? `已派发到 ${executorText}` : "已受理"}：` +
+					`任务单 ${ticketId || "(受理中)"}${domain ? `（领域：${domain}）` : ""}。` +
 					"它在后台执行，完成后我会汇报；不要等，也不要重复派。",
 				{ ...ticket, ...domainField },
 			);
@@ -1404,6 +1444,55 @@ export function createTools(deps: ToolDeps) {
 						);
 					}
 					return textToolResult(ok({ message: renderPersonaAsk(result) }));
+				},
+			}),
+		);
+	}
+
+	// persona-metric 记忆库写入（2026-11-17 persona_write 批）：条件注册，不进基线。
+	// 双闸：PERSONA_WRITE_ENABLED（默认关）+ repair.py 路径可用；审批由 capability
+	// `needsApproval:"critical"` 承担——每次写都弹审批，主人点确认才落字（「明确让写了才写」）。
+	// 回滚：lifecycle 不传 deps.personaWrite → 这里整块不执行。
+	if (deps.personaWrite) {
+		const personaWrite = deps.personaWrite;
+		tools.push(
+			defineTool({
+				name: "persona_write",
+				description:
+					"把主人**明确要求写进个人记忆库**的一条事实（通常是纠正：库里的旧记录错了，主人给出对的版本）" +
+					"送进主人的一生记忆库，作为最高优先的「用户亲口确认」，检索时压过库里的模型推断。" +
+					"三条铁律：①只在主人明确说「记进记忆库 / 写进记忆库 / 纠正记忆库」时才用，" +
+					"平时的记忆走 remember，**绝不**把自动提取的内容往这里送；" +
+					"②body 一字不动存主人的原话，不总结不改写；" +
+					"③每次写入都会弹审批，主人点了才真正落字。",
+				parameters: Type.Object({
+					body: Type.String({ description: "主人的原话，一字不改（例如：「住院的是我姥姥，不是我妈」）" }),
+					why: Type.String({ description: "为什么写这条（比如「主人纠正库里记错的主体」），会进改动留痕账" }),
+					about: Type.Optional(
+						Type.String({ description: "这件事发生在什么时候（YYYY-MM 或 YYYY-MM-DD），不知道就不传" }),
+					),
+					tag: Type.Optional(Type.String({ description: "小标签，比如「时间修正」「错认主体」" })),
+				}),
+				execute: async (args) => {
+					const result = await personaWrite(args);
+					// 只记状态与字数，不记 body 原文（日志纪律）。
+					console.log(
+						`[persona_write] body=${[...args.body].length}字 ok=${result.ok}`,
+					);
+					if (!result.ok) {
+						return textToolResult(
+							err(
+								"persona_write_failed",
+								result.error ?? "记忆库写入没成功（原因已记日志）。",
+								"把失败原因转告主人；不要编造「已经写入」。可以稍后重试。",
+							),
+						);
+					}
+					return textToolResult(
+						ok({
+							message: `已写进记忆库${result.statementId ? `（留痕 id：${result.statementId}）` : ""}。检索时会以「用户亲口确认」的身份压过库里的旧推断。`,
+						}),
+					);
 				},
 			}),
 		);
@@ -2103,6 +2192,63 @@ export function createTools(deps: ToolDeps) {
 								"确认之前不要把它当成已经在跟的课题。",
 						}),
 					);
+				},
+			}),
+		);
+	}
+
+	// 低频工具索引（2026-11-16 C 段）：默认开。末尾追加，既有工具的注册顺序一个不动
+	// （注册顺序是缓存前缀资产）。只有确实存在「会被标 deferred」的工具时才注册，
+	// 免得工具面本就没有低频工具时凭空多一个 tool_search。
+	if (toolIndexEnabled() && tools.some((tool) => isDeferredTool(tool.name))) {
+		tools.push(
+			defineTool({
+				name: "tool_search",
+				description:
+					"按名字取一个低频工具的完整定义并加载它。系统提示词里的「按需工具」清单只给名字和一句话；" +
+					"要用其中某个工具，先调本工具，下一轮起它就能正常调用。只接受清单里出现过的名字。",
+				parameters: Type.Object({
+					name: Type.String({ description: "工具名，必须是「按需工具」清单里列出的名字" }),
+				}),
+				execute: async (args, api, context) => {
+					const name = String(args.name ?? "").trim();
+					// 当前会话的真实 agent：deferred = 已启用、还没加载的延迟工具，
+					// 天然随勾选变化，也天然排除已经加载进 tools 的那些（不新加全局可变状态）。
+					const agent = await api.agent(context);
+					// 人设页取消勾选的工具不允许被加载：内核的 deferred 是「延迟 − 已 offer」，
+					// 取消勾选只是不 offer，它仍留在 deferred 里，所以这里要按名单再挡一层。
+					const disabled = disabledToolsOfConversation(Number(api.conversationId));
+					const available = agent.deferred.filter(
+						(tool) => tool.name === name && !disabled.has(tool.name),
+					);
+					if (available.length === 0) {
+						const names = agent.deferred
+							.filter((tool) => !disabled.has(tool.name))
+							.map((tool) => tool.name);
+						return {
+							...textToolResult(
+								err(
+									"tool_not_loaded",
+									`工具 ${name || "(空)"} 不在可加载清单里，没有加载任何工具。`,
+									names.length
+										? `当前可加载：${names.join("、")}`
+										: "当前没有可加载的按需工具。",
+								),
+							),
+							isError: true,
+						};
+					}
+					const tool = available[0]!;
+					const text = [
+						tool.name,
+						tool.description,
+						`参数：${JSON.stringify(tool.parameters)}`,
+						"已加载，下一轮起可直接调用。",
+					].join("\n");
+					return {
+						output: [{ type: "text" as const, text }],
+						control: { addTools: [name] },
+					};
 				},
 			}),
 		);

@@ -11,6 +11,7 @@
 import { contentText, getCurrentSystemMessage } from "@earendil-works/pi-ai";
 import type { ContextView } from "@earendil-works/pi-durable";
 import { memoryInjectLimit, memoryInjectMaxChars } from "./memory-inject.ts";
+import { estimateTokens } from "./token-estimate.ts";
 
 export type ContextSectionStability = "fixed" | "session" | "turn";
 
@@ -19,19 +20,27 @@ export interface ContextSectionView {
 	label: string;
 	stability: ContextSectionStability;
 	chars: number;
+	/** 估算 token（见 token-estimate.ts）；页面主数字。 */
+	tokens: number;
 	text: string;
+	/** 可编辑的段（默认页的岗位契约 / 当前目标 / 纪律逐节；红线除外）：页面给“可编辑”徽标。 */
+	editable?: boolean;
+	/** 空槽位：text 为空、chars 0，仍作为一行展示，但不计真实文本。 */
+	empty?: boolean;
 }
 
 export interface ContextToolView {
 	name: string;
 	description: string;
 	chars: number;
+	tokens: number;
 	schema: string;
 }
 
 export interface ContextCountView {
 	count: number;
 	chars: number;
+	tokens: number;
 }
 
 export interface ContextInspectView {
@@ -39,15 +48,18 @@ export interface ContextInspectView {
 		content: string;
 		sections: ContextSectionView[];
 		chars: number;
+		tokens: number;
 	};
 	tools: {
 		count: number;
 		chars: number;
+		tokens: number;
 		items: ContextToolView[];
 	};
 	skills: {
 		count: number;
 		chars: number;
+		tokens: number;
 		text: string;
 	};
 	changing: {
@@ -81,21 +93,60 @@ export interface ContextInspectPayload extends ContextInspectView {
 			at: number;
 			items: number;
 			chars: number;
+			tokens: number;
 			text: string;
-			others: { id: string; chars: number }[];
+			others: { id: string; chars: number; tokens: number }[];
 		} | null;
 	};
 	updatedAt: number;
 }
 
 /** 一个段落的中文名 + 稳定性；`skills` 单独成块，不在这里露。 */
-const SECTION_META: Record<string, { label: string; stability: ContextSectionStability }> = {
-	persona: { label: "人设", stability: "fixed" },
+const SECTION_META: Record<
+	string,
+	{ label: string; stability: ContextSectionStability; editable?: boolean }
+> = {
+	persona: { label: "人设", stability: "fixed", editable: true },
 	verification_iron_law: { label: "验证铁律", stability: "fixed" },
 	clarify_contract: { label: "开工前问清", stability: "fixed" },
 	injection_guard: { label: "注入防线", stability: "fixed" },
-	current_project: { label: "当前项目", stability: "turn" },
-	topics: { label: "课题", stability: "turn" },
+	current_project: { label: "当前项目", stability: "turn", editable: true },
+	topics: { label: "课题", stability: "turn", editable: true },
+	// 默认开销里的执事：身份是 instructions，岗位契约/纪律是 extra system message；
+	// 这里各给一个可读的名字，避免页面上出现裸 key。
+	partner_identity: { label: "执事身份", stability: "fixed" },
+	partner_soul: { label: "执事身份 · SOUL", stability: "fixed" },
+	partner_voice: { label: "执事人设 · 说话方式（口吻）", stability: "fixed" },
+	partner_values: { label: "执事人设 · 里子", stability: "fixed" },
+	partner_scenario: { label: "执事人设 · 处境", stability: "fixed" },
+	partner_owner_profile: { label: "执事身份 · 主人画像", stability: "fixed" },
+	partner_skill_index: { label: "执事身份 · 技能索引", stability: "fixed" },
+	partner_boundary: { label: "执事身份 · 运行边界", stability: "fixed" },
+	partner_context: { label: "执事上下文", stability: "fixed" },
+	// 默认页按 PartnerTurnContext 的真实字段拆开：契约四节、目标、纪律分别成行。
+	// 契约四节是 CONTRACT.md 的四个固定二级标题，不是从一段文本里随手切出来的。
+	partner_contract_scope: { label: "岗位契约 · 职责范围", stability: "fixed", editable: true },
+	partner_contract_decision: { label: "岗位契约 · 决策分级", stability: "fixed", editable: true },
+	partner_contract_acceptance: { label: "岗位契约 · 验收标准", stability: "fixed", editable: true },
+	partner_contract_report: { label: "岗位契约 · 汇报对象", stability: "fixed", editable: true },
+	partner_goal: { label: "当前目标", stability: "turn", editable: true },
+	// 纪律按固定块拆开（2026-11-16 续）：默认页逐节展示，逐节可改；
+	// 主人数据红线单独一行、只读，避免把“安全边界”混进可编辑的行为纪律里。
+	partner_verification: { label: "执事纪律 · 验证铁律", stability: "fixed", editable: true },
+	partner_ruling: { label: "执事纪律 · 裁决纪律", stability: "fixed", editable: true },
+	partner_work_silence: { label: "执事纪律 · 干活期间", stability: "fixed", editable: true },
+	partner_grounding: { label: "执事纪律 · 答案接地", stability: "fixed", editable: true },
+	partner_artifact_handoff: { label: "执事纪律 · 产物交接", stability: "fixed", editable: true },
+	partner_brief_card: { label: "执事纪律 · 汇报卡", stability: "fixed", editable: true },
+	partner_attention: { label: "执事纪律 · 提问纪律", stability: "fixed", editable: true },
+	partner_owner_data: { label: "执事纪律 · 主人数据红线", stability: "fixed" },
+	partner_discipline: { label: "执事纪律（合并）", stability: "fixed", editable: true },
+	partner_learning: { label: "表达习惯", stability: "session" },
+	partner_proactivity: { label: "主动性", stability: "session" },
+	partner_status: { label: "当前在办", stability: "turn" },
+	partner_impression: { label: "印象", stability: "session" },
+	partner_mood: { label: "心情", stability: "session" },
+	partner_heart: { label: "心里话", stability: "session" },
 };
 
 const SKILL_SECTION_KEYS = new Set(["skills", "skill"]);
@@ -153,7 +204,10 @@ function sectionView(key: string, text: string): ContextSectionView {
 		label: meta?.label ?? key,
 		stability: meta?.stability ?? "fixed",
 		chars: countString(text),
+		tokens: estimateTokens(text),
 		text,
+		...(meta?.editable ? { editable: true } : {}),
+		...(text.length === 0 ? { empty: true } : {}),
 	};
 }
 
@@ -178,6 +232,7 @@ export function contextInspectViewOf(view: ContextView): ContextInspectView {
 	const sections: ContextSectionView[] = [];
 	let skillsText = "";
 	let systemChars = countString(baseContent);
+	let systemTokens = estimateTokens(baseContent);
 
 	for (const [key, value] of Object.entries(current?.sections ?? {})) {
 		if (value === null) continue;
@@ -188,6 +243,7 @@ export function contextInspectViewOf(view: ContextView): ContextInspectView {
 		const section = sectionView(key, value);
 		sections.push(section);
 		systemChars += section.chars;
+		systemTokens += section.tokens;
 	}
 
 	const tools = (current?.toolsAdded ?? []).map((tool) => {
@@ -196,6 +252,7 @@ export function contextInspectViewOf(view: ContextView): ContextInspectView {
 			name: tool.name,
 			description: tool.description,
 			chars: compact.length,
+			tokens: estimateTokens(compact),
 			schema: JSON.stringify(
 				{ name: tool.name, description: tool.description, parameters: tool.parameters },
 				null,
@@ -205,9 +262,9 @@ export function contextInspectViewOf(view: ContextView): ContextInspectView {
 	});
 
 	const changing = {
-		messages: { count: 0, chars: 0 },
-		toolCalls: { count: 0, chars: 0 },
-		toolResults: { count: 0, chars: 0 },
+		messages: { count: 0, chars: 0, tokens: 0 },
+		toolCalls: { count: 0, chars: 0, tokens: 0 },
+		toolResults: { count: 0, chars: 0, tokens: 0 },
 	};
 
 	for (const message of view.messages) {
@@ -215,6 +272,7 @@ export function contextInspectViewOf(view: ContextView): ContextInspectView {
 			const text = contentText(message.content);
 			changing.messages.count += 1;
 			changing.messages.chars += countString(text);
+			changing.messages.tokens += estimateTokens(text);
 			continue;
 		}
 		if (message.role === "assistant") {
@@ -222,14 +280,15 @@ export function contextInspectViewOf(view: ContextView): ContextInspectView {
 			if (text) {
 				changing.messages.count += 1;
 				changing.messages.chars += countString(text);
+				changing.messages.tokens += estimateTokens(text);
 			}
 			const blocks = Array.isArray(message.content) ? message.content : [];
 			for (const block of blocks) {
 				if (block.type !== "toolCall") continue;
+				const args = JSON.stringify({ name: block.name, arguments: block.arguments });
 				changing.toolCalls.count += 1;
-				changing.toolCalls.chars += countString(
-					JSON.stringify({ name: block.name, arguments: block.arguments }),
-				);
+				changing.toolCalls.chars += countString(args);
+				changing.toolCalls.tokens += estimateTokens(args);
 			}
 			continue;
 		}
@@ -237,14 +296,20 @@ export function contextInspectViewOf(view: ContextView): ContextInspectView {
 			const text = contentText(message.content);
 			changing.toolResults.count += 1;
 			changing.toolResults.chars += countString(text);
+			changing.toolResults.tokens += estimateTokens(text);
 		}
 	}
 
-	const skillChars = countString(skillsText);
+	const skillsChars = countString(skillsText);
 	return {
-		system: { content: baseContent, sections, chars: systemChars },
-		tools: { count: tools.length, chars: tools.reduce((sum, tool) => sum + tool.chars, 0), items: tools },
-		skills: { count: skillCount(skillsText), chars: skillChars, text: skillsText },
+		system: { content: baseContent, sections, chars: systemChars, tokens: systemTokens },
+		tools: {
+			count: tools.length,
+			chars: tools.reduce((sum, tool) => sum + tool.chars, 0),
+			tokens: tools.reduce((sum, tool) => sum + tool.tokens, 0),
+			items: tools,
+		},
+		skills: { count: skillCount(skillsText), chars: skillsChars, tokens: estimateTokens(skillsText), text: skillsText },
 		changing,
 	};
 }
@@ -267,7 +332,11 @@ export function contextInspectPayloadOf(input: {
 	const recallText = recall?.text ?? "";
 	const others = (last?.items ?? [])
 		.filter((item) => item.id !== "memory_recall")
-		.map((item) => ({ id: item.id, chars: countString(item.text) }));
+		.map((item) => ({
+			id: item.id,
+			chars: countString(item.text),
+			tokens: estimateTokens(item.text),
+		}));
 
 	return {
 		conversationId: input.conversationId,
@@ -279,15 +348,16 @@ export function contextInspectPayloadOf(input: {
 			enabled: input.memoryEnabled,
 			limit: memoryInjectLimit(env),
 			maxChars: memoryInjectMaxChars(env),
-			last: last
-				? {
-						at: last.at,
-						items: recallText ? memoryItemCount(recallText) : 0,
-						chars: countString(recallText),
-						text: recallText,
-						others,
-					}
-				: null,
+				last: last
+					? {
+							at: last.at,
+							items: recallText ? memoryItemCount(recallText) : 0,
+							chars: countString(recallText),
+							tokens: estimateTokens(recallText),
+							text: recallText,
+							others,
+						}
+					: null,
 		},
 		updatedAt: input.now ?? Date.now(),
 	};

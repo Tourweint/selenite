@@ -163,6 +163,17 @@ export const TOOL_CAPABILITIES: Record<string, ToolCapability> = {
 		concurrentSafe: true,
 		notes: "按需取技能手册正文，纯读。",
 	},
+	// 低频工具索引（2026-11-16 C 段）：只改会话工具面，不进 WRITE_TOOLS。
+	tool_search: {
+		name: "tool_search",
+		readOnly: true,
+		destructive: false,
+		sideEffectScope: "none",
+		riskLevel: "low",
+		needsApproval: "never",
+		concurrentSafe: true,
+		notes: "只把已注册的延迟工具加载进本会话工具面；不动工作区、不起进程、不写盘。",
+	},
 	partner_skill_write: {
 		name: "partner_skill_write",
 		readOnly: false,
@@ -214,6 +225,16 @@ export const TOOL_CAPABILITIES: Record<string, ToolCapability> = {
 		needsApproval: "never",
 		concurrentSafe: true,
 		notes: "经固定 ask.py 起 python 子进程查 persona 记忆库；命令拼死、argv 传参，只读查询但按硬约束进闸门，不进高危清单。",
+	},
+	persona_write: {
+		name: "persona_write",
+		readOnly: false,
+		destructive: true,
+		sideEffectScope: "external",
+		riskLevel: "high",
+		needsApproval: "critical",
+		concurrentSafe: true,
+		notes: "经固定 repair.py 起 python 子进程往主人一生库写 user_statement（主人明确让写才用）；每写必弹审批（critical），命令拼死、argv 传参，按硬约束进 WRITE_TOOLS + 高危清单。",
 	},
 
 	// ── 课题 / 搜索 / 递话 ─────────────────────────────────

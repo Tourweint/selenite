@@ -384,7 +384,10 @@ export function contextBreakdownOf(view: ContextView): ContextBreakdownItem[] {
 		.sort((a, b) => b.chars - a.chars);
 }
 
-function lastTurnUsageOf(view: ContextView): TurnUsage | null {
+/** 本地读数多带一个缓存写入：上下文用量要把它算进完整 prompt，但 SSE 契约里的 TurnUsage 不变。 */
+type LocalTurnUsage = TurnUsage & { cacheWrite: number };
+
+function lastTurnUsageOf(view: ContextView): LocalTurnUsage | null {
 	for (let index = view.entries.length - 1; index >= 0; index -= 1) {
 		const entry = view.entries[index];
 		if (!entry || entry.kind !== "pi.assistant") continue;
@@ -397,6 +400,7 @@ function lastTurnUsageOf(view: ContextView): TurnUsage | null {
 				input: usage.input ?? 0,
 				output: usage.output ?? 0,
 				cacheRead: usage.cacheRead ?? 0,
+				cacheWrite: usage.cacheWrite ?? 0,
 			};
 		}
 	}
@@ -431,7 +435,11 @@ export async function contextUsageOf(
 	// 避免两次读之间刚好落一条新消息、头和身子对不上。
 	const currentView = view ?? (await conversation.context(CTX).catch(() => null));
 	const usage = currentView ? lastTurnUsageOf(currentView) : null;
-	if (!usage || usage.input <= 0) return { used: null, window: null, breakdown: [] };
+	// 上下文已用 = 完整 prompt token。pi-ai 的 input 是「未命中缓存」的部分：
+	// OpenAI 系 = prompt_tokens - cached - write；Anthropic 的 input_tokens 也不含 cache。
+	// 只取 input 会在命中缓存时严重低报，全命中时甚至变成 0（ring 直接消失）。
+	const used = usage ? usage.input + usage.cacheRead + usage.cacheWrite : 0;
+	if (!usage || used <= 0) return { used: null, window: null, breakdown: [] };
 	const windowOf = (provider: string | undefined, modelId: string | undefined): number | null => {
 		if (!provider || !modelId) return null;
 		try {
@@ -450,7 +458,7 @@ export async function contextUsageOf(
 	const window =
 		windowOf(agent?.model?.provider, agent?.model?.modelId) ??
 		windowOf(config?.model.provider, config?.model.modelId);
-	return { used: usage.input, window, breakdown: currentView ? contextBreakdownOf(currentView) : [] };
+	return { used, window, breakdown: currentView ? contextBreakdownOf(currentView) : [] };
 }
 
 export interface UsageSummary {
