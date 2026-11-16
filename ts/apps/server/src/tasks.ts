@@ -61,18 +61,8 @@ const SPECS: readonly TaskSpec[] = [
 		vars: ["entry_text"],
 		input: "请按上面的格式只输出 JSON",
 	},
-	{
-		name: "interview",
-		asset: "recall_interview_v2.md",
-		vars: ["last_session_digest", "recent_messages"],
-		input: "继续引导下一句",
-	},
-	{
-		name: "chapter",
-		asset: "recall_chapter_v2.md",
-		vars: ["user_messages"],
-		input: "请整理成章",
-	},
+	// 2026-11-17 回忆模式退役：`interview` / `chapter` 两张任务表删除
+	// （App 侧入口与开场白逻辑同日删除，用户拍板「以后直接跟小记聊」）。
 	{
 		name: "question",
 		asset: "question_generation_v1.md",

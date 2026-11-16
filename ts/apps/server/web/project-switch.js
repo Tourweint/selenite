@@ -7,15 +7,16 @@
  * app.js 文末，各模块顶层只做声明、常量与事件监听注册。
  */
 
-import { startNewChat } from "./chat-open.js";
 import { loadChats } from "./chats-list.js";
 import { el } from "./dom.js";
 import { request } from "./net.js";
 import { openFileBrowser } from "./project-browser.js";
-import { closeProjectMenu, openAddWorkspaceModal, refreshProjectPill } from "./project-modal.js";
+import { baseNameOf, closeProjectMenu, openAddWorkspaceModal, refreshProjectPill } from "./project-modal.js";
+import { go } from "./route.js";
+import { openMenuAt } from "./sec-menu.js";
 import { projectErrorText } from "./settings-projects.js";
 import { state } from "./state.js";
-import { toast } from "./ui-atoms.js";
+import { inShell, toast } from "./ui-atoms.js";
 
 /* ── 侧栏项目面板（2026-11-04 建，2026-11-06 改为总览）────
  * 展开态 pill 与收起轨道按钮是同一份弹层、同一个渲染函数。
@@ -114,7 +115,29 @@ function syncProjectRows(items) {
   // 2026-11-13：工作区根不再当「项目」分区里的一行。它只服务杂事态——没有名字、
   // 不能加文件夹、不参与派活，语义上不是项目；位置在 设置 → 项目 的第一块。
 
+  // 2026-11-16 用户拍板：工作区要在侧栏看得见（<主工作区> 这类默认目录）——
+  // 它不是项目，单独一行、带「工作区」标签；点它 = 回工作区（取消当前项目），
+  // 没选项目的普通对话就落这里。
   const currentId = String(switcher.currentProjectId || "");
+  const workspacePath = String(switcher.workspace?.rootPath || "");
+  if (workspacePath) {
+    const wsRow = document.createElement("button");
+    wsRow.type = "button";
+    wsRow.className = "side-item proj-row is-workspace" + (currentId ? "" : " is-current");
+    wsRow.title = `${workspacePath}（普通对话的默认落点）`;
+    wsRow.setAttribute("aria-current", currentId ? "false" : "true");
+    wsRow.append(projectIcon("main"));
+    const wsName = document.createElement("span");
+    wsName.className = "side-item-label";
+    wsName.textContent = baseNameOf(workspacePath) || "工作区";
+    const wsTag = document.createElement("span");
+    wsTag.className = "proj-tag";
+    wsTag.textContent = "工作区";
+    wsRow.append(wsName, wsTag);
+    wsRow.addEventListener("click", () => void selectProject(null));
+    box.append(wsRow);
+  }
+
   for (const project of items || []) {
     box.append(projectRowNode(project, project.id === currentId));
   }
@@ -167,12 +190,9 @@ function projectRowNode(project, current) {
     toggleProjectFlyout(row, caret, fly);
   });
   caret.setAttribute("aria-expanded", "false");
-  row.append(
-    caret,
-    projActionButton("plus", "新开对话", `在「${project.name}」里新开一个对话`, () =>
-      void newChatInProject(project.id),
-    ),
-  );
+  // 2026-11-16 对话归主工作区：行尾不再有「新开对话」——普通对话固定落主工作区，
+  // 项目只负责「看」（文件 / 任务 / 历史）。要干活走任务中心派活。
+  row.append(caret);
 
   const select = () => void selectProject(project.id);
   row.addEventListener("click", (event) => {
@@ -184,6 +204,21 @@ function projectRowNode(project, current) {
     if (event.target !== row) return;
     event.preventDefault();
     select();
+  });
+  // 右键（2026-11-16）：查看 / 去设置页管理。新建对话的入口已退役。
+  row.addEventListener("contextmenu", (event) => {
+    if (!inShell()) return;
+    event.preventDefault();
+    openMenuAt(
+      event.clientX,
+      event.clientY,
+      [
+        { label: "查看此项目", hint: "文件 / 任务 / 历史都以它为准", disabled: current, run: select },
+        { separator: true },
+        { label: "项目设置", hint: "改名 / 归档 / 管理文件夹", run: () => go("settings", "projects") },
+      ],
+      project.name,
+    );
   });
   return row;
 }
@@ -279,7 +314,11 @@ function projectFlyout(project) {
   return fly;
 }
 
-/** 选中项目 = 决定**下一个新对话**的 cwd（已建会话不动，各自留在创建时的快照里）。 */
+/**
+ * 选中项目 = 记住「上次查看的项目」（2026-11-16 对话归主工作区）。
+ * 它只影响文件浏览器 / 项目弹层 / 任务筛选；**不再决定任何对话落点**——
+ * 普通新建对话固定落主工作区，`PUT /workspaces/current-project` 降级为 UI 状态。
+ */
 async function selectProject(projectId, options = {}) {
   try {
     const response = await request("/api/v1/workspaces/current-project", {
@@ -293,20 +332,20 @@ async function selectProject(projectId, options = {}) {
     }
     state.switcher.currentProjectId = projectId;
     syncProjectRows(state.switcher.items || []);
-    if (!options.silent) toast("已选中：下一个新对话落在这个项目里");
+    if (!options.silent) {
+      if (!projectId) {
+        toast("已回到工作区（普通对话的默认落点）");
+      } else {
+        const project = (state.switcher.items || []).find((item) => item.id === projectId);
+        toast(project ? `已切换到「${project.name}」` : "已切换项目");
+      }
+    }
     void loadChats();
     return true;
   } catch (error) {
     if (error.message !== "forbidden") toast(`没选成：${error.message}`);
     return false;
   }
-}
-
-/** 行尾 ＋：先选中再新开——两步都要成，不然新对话会落到上一个项目里。 */
-async function newChatInProject(projectId) {
-  const selected = await selectProject(projectId, { silent: true });
-  if (!selected) return;
-  startNewChat("worker");
 }
 
 /* 收起轨道的项目按钮仍走弹层（72px 放不下内联列表），内容复用同一个总览渲染。
@@ -337,7 +376,6 @@ const PROJECT_ICONS = {
   browse:
     '<path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/>',
   caret: '<path d="m6 9 6 6 6-6"/>',
-  plus: '<path d="M12 5v14"/><path d="M5 12h14"/>',
 };
 
 function projectIcon(kind) {
@@ -422,4 +460,4 @@ const SERVICE_TOO_OLD_HINT = "服务还是旧版本（没有文件/资源管理�
  *  （2026-11-12 多根：项目可以在工作区外，不再用工作区相对路径套）。
  */
 
-export { PROJECT_ICONS, PROJECT_UNAVAILABLE_HINT, SERVICE_TOO_OLD_HINT, applyProjectData, closeProjectFlyout, fetchProjectSwitchData, newChatInProject, openExplorerInOs, projActionButton, projectFlyout, projectFlyoutState, projectIcon, projectRowNode, selectProject, syncProjectPill, syncProjectRows, syncRailProject, toggleProjectFlyout };
+export { PROJECT_ICONS, PROJECT_UNAVAILABLE_HINT, SERVICE_TOO_OLD_HINT, applyProjectData, closeProjectFlyout, fetchProjectSwitchData, openExplorerInOs, projActionButton, projectFlyout, projectFlyoutState, projectIcon, projectRowNode, selectProject, syncProjectPill, syncProjectRows, syncRailProject, toggleProjectFlyout };

@@ -8,7 +8,7 @@ import { DatabaseSync } from "node:sqlite";
  * 把收到的请求体记下来，逐条断言；再由它回一段固定的 SSE。
  *
  * 覆盖：
- *   1. 三个任务（weekly / segment / interview）各自落成一条 durable 会话，且能回读；
+ *   1. 三个任务（weekly / segment / question）各自落成一条 durable 会话，且能回读；
  *   2. 参数透传生效（假上游看到的 body 里就有）；
  *   3. system 段 = 服务端渲染的模板（不是客户端给的、也不是人格）；
  *   4. 任务会话没有工具（`tools` 为空或缺失）；
@@ -210,8 +210,6 @@ const VARS: Record<string, Record<string, string>> = {
 		previous_week_context: "上周回顾：把方案重写了一遍。",
 	},
 	segment: { entry_text: "今天把方案重写了一遍。" },
-	interview: { last_session_digest: "", recent_messages: "" },
-	chapter: { user_messages: "- 那年夏天" },
 	question: { tone: "温和", question_length: "一句话", depth: "浅" },
 };
 
@@ -219,8 +217,6 @@ const VARS: Record<string, Record<string, string>> = {
 const PARAMS: Record<string, { temperature?: number; max_tokens?: number; response_format?: unknown }> = {
 	weekly: { temperature: 0.5, max_tokens: 4000 },
 	segment: { temperature: 0.2, max_tokens: 3000, response_format: { type: "json_object" } },
-	interview: { temperature: 0.6, max_tokens: 2000 },
-	chapter: { temperature: 0.6, max_tokens: 4000 },
 	question: { temperature: 0.8, max_tokens: 2000 },
 };
 
@@ -264,7 +260,7 @@ try {
 	// ── 1. 三个任务：各自一条会话、可回读、参数透传 ──────────
 	console.log("\n· 1. 三个任务各跑一遍（X-Task → Agent 会话 → 落库 → 回读）");
 	const anchors: Record<string, string> = {};
-	for (const name of ["weekly", "segment", "interview"] as const) {
+	for (const name of ["weekly", "segment", "question"] as const) {
 		const spec = allTasks().find((task) => task.name === name);
 		if (!spec) {
 			check(false, `${name} 在任务表里`, "tasks.ts 缺这张表");

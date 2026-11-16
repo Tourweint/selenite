@@ -9,7 +9,7 @@
 
 import { paintAvatar, partnerDotClass } from "./avatar.js";
 import { openConversation, startNewChat } from "./chat-open.js";
-import { RECENTS_LIMIT, chatLabel, loadChats, recentChatsOrdered } from "./chats-list.js";
+import { RECENTS_LIMIT, attachChatContextMenu, chatLabel, loadChats, recentChatsOrdered } from "./chats-list.js";
 import { el } from "./dom.js";
 import { groups, renderGroupRows } from "./groups-base.js";
 import { closeGroupSettingsDrawer } from "./groups-settings.js";
@@ -289,6 +289,9 @@ function renderRailChatsCard() {
       event.preventDefault();
       open();
     });
+    // 右键菜单与展开侧栏同一份（2026-11-16）：对象还是同一条会话
+    row.dataset.conv = chat.conversationId;
+    attachChatContextMenu(row, chat, { onOpen: open, compact: true });
     list.append(row);
   }
   menu.append(railCardFoot([

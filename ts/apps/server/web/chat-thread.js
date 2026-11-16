@@ -16,6 +16,7 @@ import { setSending } from "./composer-send.js";
 import { el } from "./dom.js";
 import { renderMarkdown } from "./markdown.js";
 import { request } from "./net.js";
+import { syncEmptyMark } from "./partners-status.js";
 import { updateHomeMode } from "./shell.js";
 import { state } from "./state.js";
 import { topicProposalCards } from "./topic-proposal.js";
@@ -35,6 +36,9 @@ function clearThread() {
   clearPendingAttachments();
   el.thread.replaceChildren();
   if (el.empty) el.thread.append(el.empty);
+  // 起首图标先重置成水晶，由调用方在身份确定后补画（startNewChat / openChat 回读 chatKind 之后）；
+  // 不重置的话切会话的第一帧还挂着上一个人的脸
+  syncEmptyMark(null);
   // 历史分页状态跟着这一屏一起归零（2026-11-13）：旧的 top 节点已随 replaceChildren
   // 移除，但 state 里还指着它的话，下一次 renderHistoryTop 会去改一个脱离 DOM 的节点。
   state.history = { started: false, cursor: null, hasMore: false, loading: false, pages: 0, top: null };

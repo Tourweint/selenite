@@ -9,7 +9,9 @@ import { OutgoingPart } from "../attachments.ts";
 import type { DelegationEvent } from "../delegation.ts";
 import { watchDelegation } from "../delegation.ts";
 import { watchChiefNotice, watchRelayReceipt } from "../partner-relay.ts";
-import { COMPANIONS_ENABLED } from "../partners.ts";
+import { CHIEF_PARTNER_ID, COMPANIONS_ENABLED, partnersStore } from "../partners.ts";
+import { applyPartnerToolSelection } from "../partner-tools.ts";
+import { noteSessionChatKind } from "../tool-visibility.ts";
 import { describeStreamError } from "../stream-error.ts";
 import { getHarness } from "./lifecycle.ts";
 import type { ToolEvent, TurnPhase } from "./shared.ts";
@@ -340,6 +342,24 @@ export async function* chatStream(
 
 		// 提交前先看这轮是不是真的在跑：插话只对"正在跑的这一轮"有意义
 		const busyBeforeSubmit = await conversationIsBusy(input.conversation);
+
+		// 人设页工具勾选（2026-11-16 工具裁剪 B）：下一轮起生效；worker / task 不参与。
+		// 总管主会话 / 执事专线 / 执事群会话 / 例行会话都走 chatStream，一处覆盖。
+		// chatKindOfInternal 需要 ChatKinds 快照（上面 kindsForNotice 已取），读不到按非 chief 处理。
+		// 解析出来的种类顺手记进进程内表：tool_search 执行期拿不到 ChatKinds 快照，
+		// 靠这份记录才能判出"这条是总管主对话"，从而读到总管行的取消名单（2026-11-16 C 段）。
+		try {
+			const linked = partnersStore().partnerIdOfSession(conversationId);
+			const kind = linked
+				? "partner"
+				: chatKindOfInternal(conversationId, kindsForNotice?.byInternal ?? {});
+			noteSessionChatKind(conversationId, kind);
+			const ownerId = linked ?? (kind === "chief" ? CHIEF_PARTNER_ID : null);
+			const owner = ownerId ? partnersStore().get(ownerId) : null;
+			if (owner) await applyPartnerToolSelection(input.conversation, owner);
+		} catch {
+			// 工具面读不到不该挡对话
+		}
 
 		const submission = await input.conversation.submit(
 			// 产品承诺（2026-11-09 T2 §5）：人的消息永远插得上话——忙时 followUp

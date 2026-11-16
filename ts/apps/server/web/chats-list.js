@@ -13,9 +13,10 @@ import { el } from "./dom.js";
 import { request } from "./net.js";
 import { chiefDisplayName } from "./partners-status.js";
 import { currentRoute } from "./route.js";
+import { openMenuAt } from "./sec-menu.js";
 import { state } from "./state.js";
 import { renderSideListEmpty } from "./tasks-board.js";
-import { toast } from "./ui-atoms.js";
+import { inShell, toast } from "./ui-atoms.js";
 
 /* ── 会话列表 ─────────────────────────────────────────── */
 
@@ -58,6 +59,15 @@ function recentChatsOrdered() {
     .sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)));
 }
 
+/** 置顶 / 取消置顶：行内星标与右键菜单共用一份实现。 */
+async function toggleChatPin(chat) {
+  await request(
+    `/api/v1/agent/chat/${encodeURIComponent(chat.conversationId)}/pin`,
+    { method: "POST", body: JSON.stringify({ pinned: !chat.pinned }) },
+  ).catch(() => undefined);
+  await loadChats();
+}
+
 function buildChatRow(chat) {
   const row = document.createElement("div");
   row.className = "chat";
@@ -87,11 +97,7 @@ function buildChatRow(chat) {
   pin.title = chat.pinned ? "取消置顶" : "置顶";
   pin.addEventListener("click", async (event) => {
     event.stopPropagation();
-    await request(
-      `/api/v1/agent/chat/${encodeURIComponent(chat.conversationId)}/pin`,
-      { method: "POST", body: JSON.stringify({ pinned: !chat.pinned }) },
-    ).catch(() => undefined);
-    await loadChats();
+    await toggleChatPin(chat);
   });
 
   const rename = document.createElement("button");
@@ -138,7 +144,47 @@ function buildChatRow(chat) {
       void openConversation(chat.conversationId);
     }
   });
+  // 右键（2026-11-16）：三个悬停图标收进一张小菜单；实现与图标按钮同一份。
+  // 收起轨道的会话浮卡也复用这一份（attachChatContextMenu）。
+  attachChatContextMenu(row, chat);
   return row;
+}
+
+/**
+ * 给会话行挂右键菜单。收起轨道的浮卡行不是 buildChatRow 建的，
+ * 但对象还是同一条会话——菜单内容与行为保持一致。
+ * @param {HTMLElement} row
+ * @param {any} chat
+ * @param {{ onOpen?: (() => void) | null, compact?: boolean }} [options]
+ */
+function attachChatContextMenu(row, chat, options = {}) {
+  row.addEventListener("contextmenu", (event) => {
+    // Web 端不拦原生右键（用户 2026-11-16 口径）；壳里才挂自绘菜单
+    if (!inShell()) return;
+    if (event.target instanceof Element && event.target.closest("input, textarea, [contenteditable]")) return;
+    event.preventDefault();
+    const open = () => (options.onOpen ? options.onOpen() : void openConversation(chat.conversationId));
+    const archiveBusy = state.sending && chat.conversationId === state.conversationId;
+    const items = [{ label: "打开", run: open }];
+    // 收起轨道的浮卡是临时预览：点菜单时浮卡就开始退场，行内改名 / 行内归档确认
+    // 没法留在屏上。浮卡里只给不依赖行 DOM 的两项，展开侧栏里才是完整菜单。
+    if (!options.compact) {
+      items.push(
+        { label: "重命名", run: () => startRename(row, chat) },
+        { label: chat.pinned ? "取消置顶" : "置顶", run: () => void toggleChatPin(chat) },
+        { separator: true },
+        {
+          label: "归档",
+          hint: archiveBusy ? "会话正在运行，先停止再归档" : "会话和记忆都还在",
+          disabled: archiveBusy,
+          run: () => openChatArchiveConfirm(row, chat),
+        },
+      );
+    } else {
+      items.push({ label: chat.pinned ? "取消置顶" : "置顶", run: () => void toggleChatPin(chat) });
+    }
+    openMenuAt(event.clientX, event.clientY, items, chatLabel(chat));
+  });
 }
 
 function renderChats() {
@@ -269,4 +315,4 @@ async function confirmChatArchive(chat) {
   }
 }
 
-export { RECENTS_LIMIT, chatArchiveConfirm, chatLabel, closeChatArchiveConfirm, confirmChatArchive, loadChats, openChatArchiveConfirm, recentChatsOrdered, renderChats, startRename };
+export { RECENTS_LIMIT, attachChatContextMenu, chatArchiveConfirm, chatLabel, closeChatArchiveConfirm, confirmChatArchive, loadChats, openChatArchiveConfirm, recentChatsOrdered, renderChats, startRename };

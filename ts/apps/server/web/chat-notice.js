@@ -297,12 +297,24 @@ function scrollToEnd() {
   el.scroll.scrollTop = el.scroll.scrollHeight;
 }
 
+/** 回到底部按钮（2026-11-16）：离底部超过一屏才露出来，点一下跳回最新。
+ *  显隐挂在既有滚动监听上（同一份 distance，不另起监听）；首页态没有消息，永不显示。 */
+const chatBackbottom = document.getElementById("chat-backbottom");
+
 el.scroll.addEventListener("scroll", () => {
   const distance = el.scroll.scrollHeight - el.scroll.scrollTop - el.scroll.clientHeight;
   state.stick = distance < 80;
+  if (chatBackbottom && el.viewChat?.dataset.home !== "1") {
+    chatBackbottom.hidden = distance < 300;
+  }
   // 滑到顶附近自动续上一页（2026-11-13 历史分页）。loadOlderMessages 自己挡重复请求，
   // 切会话/开关关着/已经到最早时它直接返回，不会打扰普通滚动。
   if (el.scroll.scrollTop < 120) void loadOlderMessages();
+});
+
+chatBackbottom?.addEventListener("click", () => {
+  scrollToEnd();
+  chatBackbottom.hidden = true;
 });
 
 /* ── 桌面通知（批次二，三时机：完成 / 出错 / 待你处理）──────

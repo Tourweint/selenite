@@ -11,6 +11,8 @@
 
 /** 与 `agent/session-index.ts` 的 `PARTNER_CONVERSATION_PREFIX` 同值；这里复制一份是
  *  为了让本模块零依赖（那边在 agent 层，import 会连带拉起重装配）。 */
+import { flagEnabled } from "./flags.ts";
+
 const PARTNER_CONVERSATION_PREFIX = "partner-";
 
 export function dispatchOwnerOf(hostExternalId: string | null): {
@@ -43,6 +45,5 @@ export function taskChatTitle(prompt: string): string {
  * false 时 `/agent/chats` 不下发 `tasks` 键（回滚形态）。
  */
 export function sidebarTaskGroupsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	const raw = (env.SIDEBAR_TASK_GROUPS ?? "").trim().toLowerCase();
-	return raw !== "false" && raw !== "0";
+	return flagEnabled("SIDEBAR_TASK_GROUPS", env);
 }

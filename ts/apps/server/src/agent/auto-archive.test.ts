@@ -294,7 +294,7 @@ test("flags 端点写 ARCHIVE_AUTO_DAYS：数值校验走 min=1（PUT 0 拒、PU
     body: JSON.stringify({ value: "7" }),
   });
   assert.equal(good.status, 200);
-  assert.equal(process.env.ARCHIVE_AUTO_DAYS, "7", "懒读消费处当场生效");
+  assert.equal(autoArchive.archiveAutoDays(), 7, "懒读消费处当场从 JSON 读到新值");
   const junk = await app.request("/api/v1/agent/flags/ARCHIVE_AUTO_DAYS", {
     method: "PUT",
     headers: { "content-type": "application/json" },

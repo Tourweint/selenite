@@ -32,6 +32,20 @@ import { el } from "./dom.js";
 const MAX_DEPTH = 40;
 const KEY_NAV_OFF = "lifediary.navBack";
 
+/* 刷新快捷键（2026-11-16）：壳（WebView2）里浏览器加速键默认是关的——MyGo 0.7.3 只在
+   DevTools 开启时才打开 AreBrowserAcceleratorKeysEnabled，所以生产壳里 Ctrl+R / F5
+   本来就不生效。原生右键菜单关掉之后，把「刷新」这条常用动作由页面自己兜住：
+   浏览器里与默认行为等价，壳里则补上。 */
+window.addEventListener("keydown", (event) => {
+  if (event.defaultPrevented || event.repeat) return;
+  const key = event.key.toLowerCase();
+  const ctrlR = event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey && key === "r";
+  const f5 = event.key === "F5" && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey;
+  if (!ctrlR && !f5) return;
+  event.preventDefault();
+  location.reload();
+});
+
 /** 走过的页（栈顶 = 当前页）；每一项就是一个 hash 串 */
 const trail = [];
 /** 返回出来之后还能前进回去的页（栈顶 = 最近一次返回走掉的那页） */

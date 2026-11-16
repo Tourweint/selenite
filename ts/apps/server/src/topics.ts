@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { dirname } from "node:path";
 import { nextCronFire } from "./cron.ts";
 import { searchConfigured } from "./search.ts";
+import { flagEnabled } from "./flags.ts";
 
 /**
  * 课题存储 + 纯逻辑（2026-11-07 长期课题跟进 §二）。
@@ -21,10 +22,7 @@ export const TOPIC_PROPOSAL_TTL_MS = 72 * 60 * 60_000;
 export const TOPIC_DEFAULT_CRON = "0 9 * * 1";
 
 /** 回滚开关（照 tools.ts 的 envFlag 口径：只有明确 false/0 才关）。 */
-export const TOPICS_ENABLED = (() => {
-	const raw = process.env.TOPICS_ENABLED?.trim().toLowerCase();
-	return !raw || (raw !== "false" && raw !== "0");
-})();
+export const TOPICS_ENABLED = flagEnabled("TOPICS_ENABLED");
 
 export type TopicFlavor = "watch" | "dig";
 export type TopicStatus = "active" | "paused" | "closed";

@@ -15,6 +15,7 @@ import type { MemoryKind, MemoryRecord } from "@lifediary/memory";
 import { parseFileManifest } from "@lifediary/shared";
 import { chatKindOfInternal } from "./session-open.ts";
 import { archiveChat, readChatMeta } from "./session-meta.ts";
+import { missingChatIds } from "./chats-check.ts";
 import type { ChatIndexEntry, ChatMeta } from "./session-meta.ts";
 
 export function chatTitles(): Record<string, string> {
@@ -77,6 +78,12 @@ export interface MemoryView {
 	usageCount: number;
 	/** 意图的到期时间（只有 kind=intention 有意义）。 */
 	expiresAt: string | null;
+	/** 原子化（2026-11-16）：原文档案 id；非空表示这条是拆出来的原子。 */
+	docId: string | null;
+	/** 原子在原文里的逐字依据。 */
+	quote: string | null;
+	/** 归档时间；列表默认不返回已归档，老客户端忽略即可。 */
+	archivedAt: string | null;
 }
 
 export interface MemoryOverview {
@@ -110,6 +117,9 @@ function memoryView(record: MemoryRecord): MemoryView {
 		lastRecalledAt: record.lastRecalledAt,
 		usageCount: record.usageCount ?? 0,
 		expiresAt: record.expiresAt ?? null,
+		docId: record.docId ?? null,
+		quote: record.quote ?? null,
+		archivedAt: record.archivedAt ?? null,
 	};
 }
 
@@ -275,6 +285,45 @@ export async function listChats(limit = 50): Promise<ChatIndexEntry[]> {
 	}
 
 	return entries.sort((a, b) => b.lastAt - a.lastAt);
+}
+
+/**
+ * 会话存活核对（2026-11-17，手机同步回收）：只回「已经不在电脑上」的 id。
+ *
+ * 两段判定：
+ * 1. 便宜的三类（不在会话表 / 已归档 / 任务专线）走 `chats-check.ts` 的纯函数；
+ * 2. 剩下的逐个看**有没有内容**——与 `listChats` 的可见性同口径（`readChatStats` 为 null =
+ *    `turns == 0` 的空会话 = 列表里根本不出现）。2026-11-17 实机联调补：手机侧存的是"用户发过话"
+ *    的行，而 durable 里可能只剩一条没有消息的空壳（首轮中断 / 旧客户端残留），
+ *    只按会话表判定会让这些行永远留在手机上——正是用户要清掉的那批。
+ *
+ * 读失败（异常）不判死：宁可少回收，等下一次同步再试。LLM 未配置时返回 `[]`
+ * 而不是「全部都不在」——列表接口此时也是空的，按空列表回收会把手机清单清空。
+ */
+export async function missingChats(ids: readonly string[]): Promise<string[]> {
+	if (!readLlmConfig()) return [];
+	if (ids.length === 0) return [];
+	const harness = await getHarness();
+	const chats = await harness.snapshot(Chats, CTX);
+	const byExternal = chats?.byExternal ?? {};
+	const missing = missingChatIds(ids, {
+		byExternal,
+		archived: new Set(readChatMeta().archived),
+		taskPrefix: TASK_CONVERSATION_PREFIX,
+	});
+	const gone = new Set(missing);
+	for (const id of ids) {
+		if (gone.has(id)) continue;
+		const internalId = byExternal[id];
+		let stats: ChatStats | null;
+		try {
+			stats = await readChatStats(harness, Number(internalId));
+		} catch {
+			continue; // 读不出来 = 不确定，留给下次同步
+		}
+		if (!stats) missing.push(id);
+	}
+	return missing;
 }
 
 export function archivedChatPairs(

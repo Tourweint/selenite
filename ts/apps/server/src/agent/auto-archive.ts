@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { listManagers } from "../../../../../../chancellor/src/manager/registry.ts";
 import { TERMINAL_TICKET_STATUS } from "../delegation-receipts.ts";
+import { flagEnabled, flagValue } from "../flags.ts";
 import { getHarness } from "./lifecycle.ts";
 import {
 	CTX,
@@ -53,13 +54,12 @@ import {
 
 /** 开关消费处：默认开（2026-11-15 用户口径），只有显式 false/0/off 才关（与 flags defaultValue "true" 同口径）。 */
 export function archiveAutoEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	const raw = (env.ARCHIVE_AUTO_ENABLED ?? "").trim().toLowerCase();
-	return raw !== "false" && raw !== "0" && raw !== "off";
+	return flagEnabled("ARCHIVE_AUTO_ENABLED", env);
 }
 
 /** 天数消费处：非整数 / 小于 1 落回默认 30（与 flags 校验同口径：≥1 的整数）。 */
 export function archiveAutoDays(env: NodeJS.ProcessEnv = process.env): number {
-	const parsed = Number((env.ARCHIVE_AUTO_DAYS ?? "").trim());
+	const parsed = Number(flagValue("ARCHIVE_AUTO_DAYS", env).trim());
 	return Number.isInteger(parsed) && parsed >= 1 ? parsed : 30;
 }
 

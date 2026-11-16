@@ -7,13 +7,14 @@
 import { accessSync, constants, existsSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, parse, relative, resolve } from "node:path";
+import { flagEnabled } from "./flags.ts";
 
 const DEFAULT_DB_PATH = ".data/projects.sqlite";
 
 const CURRENT_PROJECT_KEY = "current_project_id";
 
 export function currentProjectEnabled(): boolean {
-	return (process.env.CURRENT_PROJECT?.trim() || "true").toLowerCase() !== "false";
+	return flagEnabled("CURRENT_PROJECT");
 }
 
 export function projectOutsideWorkspaceEnabled(): boolean {

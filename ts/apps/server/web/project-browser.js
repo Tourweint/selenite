@@ -9,8 +9,8 @@
 
 import { el } from "./dom.js";
 import { request } from "./net.js";
-import { closeProjectMenu, openAddProjectModal, openAddWorkspaceModal } from "./project-modal.js";
-import { SERVICE_TOO_OLD_HINT, openExplorerInOs, projActionButton, projectIcon } from "./project-switch.js";
+import { baseNameOf, closeProjectMenu, openAddProjectModal, openAddWorkspaceModal } from "./project-modal.js";
+import { SERVICE_TOO_OLD_HINT, openExplorerInOs, projActionButton, projectIcon, selectProject } from "./project-switch.js";
 import { state } from "./state.js";
 import { openModal } from "./ui-atoms.js";
 
@@ -158,6 +158,31 @@ function renderProjectMenu(items) {
   menu.replaceChildren();
   const workspace = state.switcher.workspace;
   const hasWorkspace = Boolean(workspace?.rootPath);
+
+  // 2026-11-16 用户拍板：工作区要在弹层里看得见（<主工作区> 这类默认目录）——
+  // 它不是项目；点它 = 回工作区（取消当前项目），和展开态侧栏那一行同一语义。
+  if (hasWorkspace) {
+    const ws = document.createElement("button");
+    ws.type = "button";
+    ws.className = "proj-ws";
+    ws.title = `${workspace.rootPath}（普通对话的默认落点）`;
+    const label = document.createElement("span");
+    label.className = "proj-ws-label";
+    label.textContent = "主工作区 · 默认对话";
+    const name = document.createElement("span");
+    name.className = "proj-ws-name";
+    name.textContent = baseNameOf(workspace.rootPath) || "工作区";
+    const path = document.createElement("span");
+    path.className = "proj-ws-path is-mono";
+    path.textContent = workspace.rootPath;
+    path.title = workspace.rootPath;
+    ws.append(label, name, path);
+    ws.addEventListener("click", () => {
+      closeProjectMenu();
+      void selectProject(null);
+    });
+    menu.append(ws);
+  }
 
   // 2026-11-13：工作区根不再占「项目」列表的一行（它只是杂事态的默认目录，
   // 不是项目）；位置在 设置 → 项目 的第一块。收起轨道的弹层沿用同一口径。

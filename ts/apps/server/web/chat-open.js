@@ -13,7 +13,7 @@ import { renderChats } from "./chats-list.js";
 import { KEY_CONV, el } from "./dom.js";
 import { dayKeyOfAt, dayLabelOf } from "./groups-thread.js";
 import { request } from "./net.js";
-import { chiefDisplayName, partnerDisplayName, syncChatHeadAvatar } from "./partners-status.js";
+import { chiefDisplayName, partnerDisplayName, syncChatHeadAvatar, syncEmptyMark } from "./partners-status.js";
 import { go, syncRailCurrent, syncSideRowsCurrent } from "./route.js";
 import { state } from "./state.js";
 import { ensureChatPagingFlag } from "./tasks-redesign.js";
@@ -321,6 +321,8 @@ async function openChat(conversationId, { anchor = null, deep = false } = {}) {
       el.title.textContent = known || (first ? first.text.slice(0, 40) : "对话");
     }
     el.title.dataset.chatKind = kind;
+    // 起首图标等 chatKind 回读之后才画（空态那一段 clearThread 里先重置成水晶，见 syncEmptyMark）
+    syncEmptyMark();
     state.stick = true;
     scrollToEnd();
     // 编辑入口只挂在最后一条 user 消息上（2026-11-08 4a）
@@ -370,6 +372,8 @@ function startNewChat(kind = "worker") {
   clearThread();
   el.title.textContent = state.chatKind === "chief" ? chiefDisplayName() : "普通对话";
   el.title.dataset.chatKind = state.chatKind;
+  // 新建 / 换身份时 state 已经定好，可以直接画起首图标
+  syncEmptyMark();
   syncChatHeadAvatar(); // 新会话没有对手：头像整块收起
   el.ctxRing.hidden = true;
   delete el.ctxRing.dataset.conv;

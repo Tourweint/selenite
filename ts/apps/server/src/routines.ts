@@ -10,6 +10,7 @@ import {
 	type RoutineDef,
 	type RoutineTrigger,
 } from "./partners.ts";
+import { flagEnabled } from "./flags.ts";
 import { ensurePartnerSession, runPartnerTurn } from "./partner-runtime.ts";
 import {
 	buildRoutinePrompt,
@@ -75,8 +76,7 @@ const PROMPT_LIMIT = 100_000;
  */
 export function routineSelfServiceEnabled(): boolean {
 	if (!COMPANIONS_ENABLED) return false;
-	const raw = (process.env.ROUTINE_SELF_SERVICE ?? "").trim().toLowerCase();
-	return raw !== "false" && raw !== "0";
+	return flagEnabled("ROUTINE_SELF_SERVICE");
 }
 
 /**

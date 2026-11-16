@@ -125,17 +125,23 @@ const EMPLOYEE_LABEL = {
   "qoder-intl": "Qoder 国际",
   "qoder-cn": "Qoder 国内",
   codebuddy: "CodeBuddy",
+  "claude-code": "Claude Code",
+  codex: "Codex",
+  opencode: "OpenCode",
   mcp: "MCP",
   phone: "手机",
   native: "原生",
   manager: "总管",
 };
 
-/** 外部打手区固定四张（L3）：id 就是 ticket.employee 的字面值 */
+/** 外部打手区固定卡（2026-11-16 补三档 CLI）：id 就是 ticket.employee 的字面值 */
 const TASK_HITTERS = [
   { id: "codebuddy", label: "CodeBuddy" },
   { id: "qoder-intl", label: "Qoder 国际" },
   { id: "qoder-cn", label: "Qoder 国内" },
+  { id: "claude-code", label: "Claude Code" },
+  { id: "codex", label: "Codex" },
+  { id: "opencode", label: "OpenCode" },
   { id: "phone", label: "手机" },
 ];
 

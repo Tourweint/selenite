@@ -1,5 +1,9 @@
 import { scopeKey, type MemoryScope } from "@lifediary/memory";
-import { CHIEF_PARTNER_ID, partnerProjectMemoryEnabled } from "../partner-contract.ts";
+import {
+	CHIEF_PARTNER_ID,
+	partnerProjectMemoryEnabled,
+	projectMemoryActiveOnlyEnabled,
+} from "../partner-contract.ts";
 import { partnersStore } from "../partners.ts";
 import type { PartnersStore } from "../partner-store.ts";
 
@@ -59,6 +63,54 @@ export function projectNameOf(projectId: string): string | null {
 	} catch {
 		return null;
 	}
+}
+
+/**
+ * 项目存活判定（2026-11-16 归档 / 删除项目退出召回库，用户拍板）。
+ *
+ * 归档 / 删除只影响**召回**，不影响存储：记忆仍留在库里、记忆页照旧能看能导出；
+ * 恢复归档后自动回到召回池（这是过滤，不是删数据）。
+ *
+ * 三条召回入口都要过这道闸：每轮注入（recallContext）、recall 工具、负责项目索引。
+ * 旧会话的 durable 绑定（ChatProjects）与人格挂载（partner.projectIds）都可能指向
+ * 死项目——归档不摘挂载、删除也不清旧会话绑定，所以必须在装配候选池时现查。
+ *
+ * 解析器由 lifecycle-harness 接线（同 setProjectLabelResolver 惯例）；本模块零重依赖。
+ * 未接线 / 抛错一律按 "active"（退回旧行为）——记忆永远不能因为一次辅助读取失败就不召回。
+ */
+export type ProjectState = "active" | "archived" | "missing";
+
+type ProjectStateResolver = (projectId: string) => ProjectState;
+
+let projectStateResolver: ProjectStateResolver | null = null;
+
+export function setProjectStateResolver(resolver: ProjectStateResolver | null): void {
+	projectStateResolver = resolver;
+}
+
+/** 同步取项目状态；未接线 / 抛错 → "active"（旧行为，见上）。 */
+export function projectStateOf(projectId: string): ProjectState {
+	try {
+		return projectStateResolver?.(projectId) ?? "active";
+	} catch {
+		return "active";
+	}
+}
+
+/** 记忆闸看到的状态：`PROJECT_MEMORY_ACTIVE_ONLY=false` 时一律 "active"（旧形态，一行回滚）。 */
+export function projectMemoryStateOf(projectId: string): ProjectState {
+	if (!projectMemoryActiveOnlyEnabled()) return "active";
+	return projectStateOf(projectId);
+}
+
+/** 只有"登记存在且未归档"的项目才进召回池；归档 / 删除一律剔除。 */
+export function isRecallableProjectId(projectId: string): boolean {
+	return projectMemoryStateOf(projectId) === "active";
+}
+
+/** 过滤一批项目 id（绑定 / 挂载），保持顺序；纯过滤，不动存储。 */
+export function recallableProjectIds(ids: readonly string[]): string[] {
+	return ids.filter((id) => isRecallableProjectId(id));
 }
 
 // ── 项目记忆写入解析（2026-11-15 多挂载方案）────────────────

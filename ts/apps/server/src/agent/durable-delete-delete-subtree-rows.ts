@@ -8,10 +8,10 @@
 import type { ChatStats } from "./session.ts";
 import { SqliteExecutor } from "@earendil-works/chord/sqlite";
 import type { NodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
+import { flagEnabled } from "../flags.ts";
 
 export function chatHardDeleteEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	const raw = (env.CHAT_HARD_DELETE ?? "").trim().toLowerCase();
-	return raw !== "false" && raw !== "0" && raw !== "off";
+	return flagEnabled("CHAT_HARD_DELETE", env);
 }
 
 export type DeletionBlockedReason = "not-archived" | "kind" | "busy";

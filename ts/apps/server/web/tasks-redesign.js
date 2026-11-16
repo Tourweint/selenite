@@ -86,7 +86,7 @@ async function ensureFlag(key, fallback) {
     }
   }
   const flag = state.flagsCache.get(key);
-  return flag ? flag.value !== "false" : fallback;
+  return flag ? (flag.effectiveValue ?? flag.value) !== "false" : fallback;
 }
 
 /** 任务中心回滚开关：null = 还没问过；只问一次，之后记在 state 里 */
@@ -126,6 +126,9 @@ function aliveTicketCount() {
 /**
  * 「等你回话」分组：一条对话一组，外加单级 needs_you 直派单。
  * 组按「等最久」升序（组内最早一条 needs_you 的 updated_at），组内按时间正序。
+ *
+ * 2026-11-16 任务中心分人：每组带派活人（`ticket.dispatcher`，服务端由
+ * originConversationId 反查；旧服务端没有这个字段时按总管兜底）与项目名。
  */
 function needsYouGroups(cards, direct) {
   const groups = [];
@@ -140,6 +143,8 @@ function needsYouGroups(cards, direct) {
       title: card.title || "未命名对话",
       tickets,
       oldest: tickets[0].updated_at || card.updated_at || "",
+      dispatcher: dispatcherOfTicket(tickets[0]),
+      project: projectOfTicket(tickets[0]),
     });
   }
   for (const ticket of direct) {
@@ -149,10 +154,60 @@ function needsYouGroups(cards, direct) {
       title: briefText(ticket.prompt, TK2_BRIEF_MAX) || "直接派出的单",
       tickets: [ticket],
       oldest: ticket.updated_at || "",
+      dispatcher: dispatcherOfTicket(ticket),
+      project: projectOfTicket(ticket),
     });
   }
   groups.sort((a, b) => String(a.oldest || "").localeCompare(String(b.oldest || "")));
   return groups;
+}
+
+/** 派活人兜底（旧服务端 / 旧单没有 dispatcher 字段）：按总管算。 */
+function dispatcherOfTicket(ticket) {
+  const dispatcher = ticket?.dispatcher;
+  if (dispatcher && typeof dispatcher.name === "string" && dispatcher.name.trim()) {
+    return {
+      id: typeof dispatcher.id === "string" ? dispatcher.id : null,
+      name: dispatcher.name.trim(),
+      kind: dispatcher.kind === "partner" ? "partner" : "chief",
+    };
+  }
+  return { id: null, name: "总管", kind: "chief" };
+}
+
+function projectOfTicket(ticket) {
+  return typeof ticket?.project === "string" ? ticket.project.trim() : "";
+}
+
+/** 派活人分桶 key：总管固定 `c:chief`，执事 `p:<id>`（同 id 合并）。 */
+function personKeyOf(dispatcher) {
+  return dispatcher.kind === "partner" && dispatcher.id
+    ? `p:${dispatcher.id}`
+    : "c:chief";
+}
+
+/** 按派活人分桶：总管排第一，其余按名字（中文排序）。 */
+function personBuckets(groups) {
+  const buckets = new Map();
+  for (const group of groups) {
+    const key = personKeyOf(group.dispatcher);
+    let bucket = buckets.get(key);
+    if (!bucket) {
+      bucket = {
+        key,
+        name: group.dispatcher.name,
+        kind: group.dispatcher.kind,
+        groups: [],
+      };
+      buckets.set(key, bucket);
+    }
+    bucket.groups.push(group);
+  }
+  return [...buckets.values()].sort((a, b) => {
+    if (a.key === "c:chief") return -1;
+    if (b.key === "c:chief") return 1;
+    return a.name.localeCompare(b.name, "zh-CN");
+  });
 }
 
 /**
@@ -173,27 +228,38 @@ function needsZoneHtml(groups, running) {
   const total = groups.reduce((sum, group) => sum + group.tickets.length, 0);
   const head = `<div class="tk2-np-h">
       <h2>等你回话</h2><span class="tk2-cnt">${total}</span>
-      <span class="tk2-hint">都是总管转给你的，点「去处理」回到那条对话</span>
+      <span class="tk2-hint">按派活人分组，点「去处理」回到那条对话</span>
     </div>`;
   if (!groups.length) {
     return `<section class="tk2-needs">${head}<p class="tk2-needs-empty">都回完了，${
       running ? `执事们在跑 ${running} 件事。` : "都在歇着。"
     }</p></section>`;
   }
-  // 超过 3 组：前 3 组常驻，更早的收进折叠条（展开态只记会话内存）
-  const first = groups.slice(0, TK2_NEEDS_SOFT_LIMIT);
-  const rest = groups.slice(TK2_NEEDS_SOFT_LIMIT);
+  // 2026-11-16 任务中心分人：总管一块、各执事各一块；每个人的「更早的」独立折叠。
+  return `<section class="tk2-needs">${head}${personBuckets(groups)
+    .map(personZoneHtml)
+    .join("")}</section>`;
+}
+
+function personZoneHtml(bucket) {
+  const count = bucket.groups.reduce((sum, group) => sum + group.tickets.length, 0);
+  const head = `<div class="tk2-sec-h tk2-person-h">
+      <span>${esc(bucket.name)}</span><span class="tk2-sec-cnt">${count}</span><span class="tk2-sec-ln"></span>
+    </div>`;
+  const first = bucket.groups.slice(0, TK2_NEEDS_SOFT_LIMIT);
+  const rest = bucket.groups.slice(TK2_NEEDS_SOFT_LIMIT);
+  const open = state.tasksNeedsOlderOpen.has(bucket.key);
   const older = rest.length
-    ? `<button class="tk2-more" type="button" data-needs-more aria-expanded="${
-        state.tasksNeedsOlderOpen ? "true" : "false"
+    ? `<button class="tk2-more" type="button" data-needs-more="${attr(bucket.key)}" aria-expanded="${
+        open ? "true" : "false"
       }">
         <span class="tk2-more-caret" aria-hidden="true">▸</span>还有 ${rest.length} 条更早的
       </button>
-      <div class="tk2-older"${state.tasksNeedsOlderOpen ? "" : " hidden"}>${rest
+      <div class="tk2-older"${open ? "" : " hidden"}>${rest
         .map(needsGroupHtml)
         .join("")}</div>`
     : "";
-  return `<section class="tk2-needs">${head}${first.map(needsGroupHtml).join("")}${older}</section>`;
+  return `<div class="tk2-person">${head}${first.map(needsGroupHtml).join("")}${older}</div>`;
 }
 
 function needsGroupHtml(group) {
@@ -207,7 +273,9 @@ function needsGroupHtml(group) {
       <span class="tk2-ava ${avatarTone(group.conversationId || title)}">${esc(firstChar(title, "总"))}</span>
       <div class="tk2-ng-bd">
         <h3>${esc(title)}</h3>
-        <p><b>${esc(waitedText(group.oldest))}</b> · ${group.tickets.length} 条</p>
+        <p><b>${esc(waitedText(group.oldest))}</b> · ${group.tickets.length} 条${
+          group.project ? ` · ${esc(group.project)}` : ""
+        }</p>
       </div>
       ${action}
     </div>
@@ -217,16 +285,20 @@ function needsGroupHtml(group) {
 
 function needsBubbleHtml(ticket) {
   const quote = needsQuoteOf(ticket);
-  const chief = quote.source === "prompt";
-  const who = chief
-    ? `<b>总管</b> · 派活说明`
+  const dispatcher = dispatcherOfTicket(ticket);
+  // 有 prompt 摘要 = 派活人写了说明（2026-11-16 起不再一律写死「总管」——执事也会派活）；
+  // 没有摘要 = 系统代发，身份诚实，不冒称任何人。
+  const fromHuman = quote.source === "prompt";
+  const who = fromHuman
+    ? `<b>${esc(dispatcher.name)}</b> · 派活说明`
     : `<span class="tk2-sys-tag">系统代发</span> · 这张单在等你`;
+  const avatar = fromHuman ? esc(firstChar(dispatcher.name, "谁")) : "系";
   const conversationId = ticketConversationId(ticket);
   const open = conversationId
     ? ` data-open-conv="${attr(conversationId)}" role="button" tabindex="0" title="点开回到这条对话"`
     : ` data-ticket-open="${attr(ticket.id)}" role="button" tabindex="0" title="这张单没有来源对话，点开看单"`;
   return `<div class="tk2-msg"${open}>
-    <span class="tk2-msg-ava${chief ? "" : " sys"}">${chief ? "总" : "系"}</span>
+    <span class="tk2-msg-ava${fromHuman ? "" : " sys"}">${avatar}</span>
     <div class="tk2-msg-bd">
       <p class="tk2-who">${who}</p>
       <p class="tk2-quote">${quote.source === "none" ? esc(quote.text) : `「${esc(quote.text)}」`}</p>
@@ -259,11 +331,15 @@ function runBlockHtml(cards, running) {
       const ticket = headlineTicketOf(card);
       const [label] = (ticket && TASK_STATUS[ticket.status]) || ["执行中", "run"];
       const lamp = card.lamp === "fail" ? "fail" : "run";
+      // 2026-11-16 任务中心分人：小卡带「项目 · 派活人」，窄屏由 CSS 省略号收尾。
+      const meta = [label, projectOfTicket(ticket), dispatcherOfTicket(ticket).name]
+        .filter(Boolean)
+        .join(" · ");
       return `<button class="tk2-mini" type="button" data-lamp="${lamp}" data-open-conv="${attr(card.conversationId)}" title="回到这条对话">
         <span class="tk2-ava sm ${avatarTone(card.conversationId)}">${esc(firstChar(card.title, "对"))}</span>
         <span class="tk2-mini-bd">
           <span class="tk2-mini-title">${esc(card.title || "未命名对话")}</span>
-          <span class="tk2-mini-sub"><i aria-hidden="true"></i>${esc(label)} · ${esc(relativeTime(card.updated_at))}</span>
+          <span class="tk2-mini-sub"><i aria-hidden="true"></i><span class="tk2-mini-meta">${esc(meta)} · ${esc(relativeTime(card.updated_at))}</span></span>
         </span>
       </button>`;
     })
@@ -276,6 +352,9 @@ const HITTER_BADGE = {
   codebuddy: ["CB", "cb"],
   "qoder-intl": ["QI", "qi"],
   "qoder-cn": ["QC", "qc"],
+  "claude-code": ["CC", "cb"],
+  codex: ["CX", "qi"],
+  opencode: ["OC", "qc"],
   phone: ["手", "mg"],
 };
 
@@ -418,8 +497,11 @@ el.tasksRedesign?.addEventListener("click", (event) => {
     if (ticketId) location.hash = tasksHash({ ticket: ticketId });
     return;
   }
-  if (event.target.closest("[data-needs-more]")) {
-    state.tasksNeedsOlderOpen = !state.tasksNeedsOlderOpen;
+  const more = event.target.closest("[data-needs-more]");
+  if (more) {
+    const person = more.dataset.needsMore || "c:chief";
+    if (state.tasksNeedsOlderOpen.has(person)) state.tasksNeedsOlderOpen.delete(person);
+    else state.tasksNeedsOlderOpen.add(person);
     renderTasksRedesign();
     return;
   }
