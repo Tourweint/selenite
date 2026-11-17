@@ -5,8 +5,8 @@
  * 内含：startDelegation
  */
 
-import { ChancellorEvent, ChancellorRequest, TicketResult } from "../../../../../chancellor/src/index.ts";
-import type { EmployeeProfile } from "../../../../../chancellor/src/types.ts";
+import { ChancellorEvent, ChancellorRequest, TicketResult } from "../../../packages/chancellor/src/index.ts";
+import type { EmployeeProfile } from "../../../packages/chancellor/src/types.ts";
 import { TAKEOVER_HINT } from "./agent/turn-gate.ts";
 import { authorityRecheckEnabled, recheckAuthority } from "./delegation-authority.ts";
 import { executorForDelegation, type ExecutorKind } from "./executor-config.ts";

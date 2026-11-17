@@ -45,31 +45,31 @@ import {
 	QODER_BIN,
 	QODER_CN_BIN,
 	QODER_CN_MODEL,
-} from "../../../../../chancellor/src/config.ts";
-import { resolveCliLauncher } from "../../../../../chancellor/src/employee/cli.ts";
+} from "../../../packages/chancellor/src/config.ts";
+import { resolveCliLauncher } from "../../../packages/chancellor/src/employee/cli.ts";
 import {
 	type ClaudeCall,
 	runClaude,
-} from "../../../../../chancellor/src/employee/claude.ts";
+} from "../../../packages/chancellor/src/employee/claude.ts";
 import {
 	type CodexCall,
 	runCodex,
-} from "../../../../../chancellor/src/employee/codex.ts";
+} from "../../../packages/chancellor/src/employee/codex.ts";
 import {
 	type CodeBuddyCall,
 	runCodeBuddy,
-} from "../../../../../chancellor/src/employee/codebuddy.ts";
+} from "../../../packages/chancellor/src/employee/codebuddy.ts";
 import {
 	type OpencodeCall,
 	runOpencode,
-} from "../../../../../chancellor/src/employee/opencode.ts";
+} from "../../../packages/chancellor/src/employee/opencode.ts";
 import {
 	type QoderCall,
 	resolveQoderBinary,
 	runQoderCn,
 	runQoderIntl,
-} from "../../../../../chancellor/src/employee/qoder.ts";
-import type { ExternalCliResult } from "../../../../../chancellor/src/types.ts";
+} from "../../../packages/chancellor/src/employee/qoder.ts";
+import type { ExternalCliResult } from "../../../packages/chancellor/src/types.ts";
 import type { SelectableExecutorKind } from "./executor-config.ts";
 
 export interface ProbeResult {

@@ -20,7 +20,7 @@ import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node
 import { dirname } from "node:path";
 import type { Hono } from "hono";
 import { flagEnabled } from "./flags.ts";
-import { setWorkerPersonaSource } from "../../../../../chancellor/src/worker-persona-source.ts";
+import { setWorkerPersonaSource } from "../../../packages/chancellor/src/worker-persona-source.ts";
 
 /** 默认正文（共享层）：只有身份与作风，工具提示不在这里。 */
 const WORKER_PERSONA_DEFAULT_TEXT = [

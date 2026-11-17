@@ -17,7 +17,7 @@
  * 回滚：`SIDEBAR_TASK_GROUPS=false`（flags）→ 端点不下发 `tasks` 键。
  */
 
-import type { Ticket } from "../../../../../chancellor/src/types.ts";
+import type { Ticket } from "../../../packages/chancellor/src/types.ts";
 import { externalChatIds, getHarness } from "./agent.ts";
 import { readChatMeta } from "./agent/session-meta.ts";
 import { PARTNER_CONVERSATION_PREFIX, readChatStats } from "./agent/session-index.ts";

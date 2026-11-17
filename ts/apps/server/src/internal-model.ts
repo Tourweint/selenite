@@ -10,9 +10,9 @@
  */
 
 import { contentText } from "@earendil-works/pi-ai";
-import type { QoderCall } from "../../../../../chancellor/src/dispatch.ts";
-import { setInternalAsk } from "../../../../../chancellor/src/index.ts";
-import type { QoderResult } from "../../../../../chancellor/src/types.ts";
+import type { QoderCall } from "../../../packages/chancellor/src/dispatch.ts";
+import { setInternalAsk } from "../../../packages/chancellor/src/index.ts";
+import type { QoderResult } from "../../../packages/chancellor/src/types.ts";
 import { currentModels, isFaux, readLlmConfig } from "./provider.ts";
 import { flagValue } from "./flags.ts";
 

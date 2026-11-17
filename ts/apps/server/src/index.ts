@@ -261,7 +261,7 @@ import {
 	reportRecoveredTickets,
 	type DeadLetterChild,
 } from "./recovery-report.ts";
-import { recoverDelegations, type RecoveredTicket } from "../../../../../chancellor/src/index.ts";
+import { recoverDelegations, type RecoveredTicket } from "../../../packages/chancellor/src/index.ts";
 // 恢复注记（2026-11-09 任务书 T3 §5）：只有进程内记账，无存储依赖。
 import { markRecoverResume, recoverNoteEnabled } from "./agent/recover-note.ts";
 // 注入审计（2026-11-10 批 26b §二）：只回元数据、不回正文的框架注入清单。
@@ -269,8 +269,8 @@ import { auditInjections, injectionAuditEnabled } from "./agent/injection.ts";
 import { INJECTION_REGISTRY } from "./agent/injection-registry.ts";
 // 错误分类（2026-11-10 批 32）：上游/模型错误 → 脱敏短句 + 稳定 code，给前端错误卡。
 import { describeStreamError } from "./stream-error.ts";
-import { Store } from "../../../../../chancellor/src/store.ts";
-import { listManagers } from "../../../../../chancellor/src/manager/registry.ts";
+import { Store } from "../../../packages/chancellor/src/store.ts";
+import { listManagers } from "../../../packages/chancellor/src/manager/registry.ts";
 
 // Node 20.12+ 自带 .env 加载；文件不存在时静默跳过，不让本地启动被环境文件卡住。
 try {

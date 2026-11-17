@@ -12,7 +12,7 @@ import type {
 	ChancellorOptions,
 	ChancellorRequest,
 	TicketResult,
-} from "../../../../../chancellor/src/index.ts";
+} from "../../../packages/chancellor/src/index.ts";
 import type { DelegationEvent } from "../src/delegation.ts";
 
 const temp = mkdtempSync(join(tmpdir(), "lifediary-concurrent-"));

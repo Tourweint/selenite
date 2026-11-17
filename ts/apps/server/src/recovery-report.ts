@@ -1,4 +1,4 @@
-import type { RecoveredTicket } from "../../../../../chancellor/src/index.ts";
+import type { RecoveredTicket } from "../../../packages/chancellor/src/index.ts";
 import { truncate } from "./delegation.ts";
 import { TERMINAL_TICKET_STATUS } from "./delegation-receipts.ts";
 

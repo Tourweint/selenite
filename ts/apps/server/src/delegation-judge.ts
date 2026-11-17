@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { isAbsolute, resolve } from "node:path";
 import type { ToolRegistration } from "@earendil-works/pi-durable";
 import { CodingTools, createBashTool } from "@earendil-works/pi-durable/tools";
-import type { JudgeFn, JudgeInput, JudgeVerdictKind } from "../../../../../chancellor/src/types.ts";
+import type { JudgeFn, JudgeInput, JudgeVerdictKind } from "../../../packages/chancellor/src/types.ts";
 import { wrapUntrustedObjective } from "./agent/injection-guard.ts";
 import { CTX } from "./agent/shared.ts";
 import { insideOrEqual, realTargetOf } from "./path-guard.ts";

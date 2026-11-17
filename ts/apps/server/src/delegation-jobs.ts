@@ -4,8 +4,8 @@
  * 2026-11-13 从 delegation-api.ts 的 L261–L366 整段切出；正文原文搬运，未改一行实现。
  */
 
-import { Store } from "../../../../../chancellor/src/store.ts";
-import { Ticket } from "../../../../../chancellor/src/types.ts";
+import { Store } from "../../../packages/chancellor/src/store.ts";
+import { Ticket } from "../../../packages/chancellor/src/types.ts";
 import { DelegationMessages } from "./delegation-messages.ts";
 import { DelegationReceipts } from "./delegation-receipts.ts";
 import type { RunSource } from "./run-source.ts";

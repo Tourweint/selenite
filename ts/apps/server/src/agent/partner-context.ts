@@ -1,9 +1,9 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { PartnerPersonaModule } from "@lifediary/shared";
-import { listManagers } from "../../../../../../chancellor/src/manager/registry.ts";
-import { Store } from "../../../../../../chancellor/src/store.ts";
-import type { Ticket } from "../../../../../../chancellor/src/types.ts";
+import { listManagers } from "../../../../packages/chancellor/src/manager/registry.ts";
+import { Store } from "../../../../packages/chancellor/src/store.ts";
+import type { Ticket } from "../../../../packages/chancellor/src/types.ts";
 import { approvalStore } from "../approvals.ts";
 import { TERMINAL_TICKET_STATUS } from "../delegation-receipts.ts";
 import {

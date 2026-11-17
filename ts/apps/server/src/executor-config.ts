@@ -24,7 +24,7 @@ import { dirname, resolve } from "node:path";
 import type {
   EmployeePermission,
   EmployeeProfile,
-} from "../../../../../chancellor/src/types.ts";
+} from "../../../packages/chancellor/src/types.ts";
 
 export const EXECUTOR_KINDS = [
   "native",

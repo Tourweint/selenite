@@ -43,15 +43,15 @@ pnpm dev            # http://127.0.0.1:39847
 ts/
 ├── packages/shared/     契约 + SSE 编解码（服务端与客户端共用）
 ├── packages/memory/     记忆四层：存储 / 抽取 / 巩固 / 召回
+├── packages/chancellor/ 派活侧执行器（delegate 落点：拆单 / 派工 / 外雇 CLI / 验收裁判）
 ├── apps/server/         Hono + SSE，持有 LLM key，装配 Harness
 ├── apps/relay/          自建中继（哑路由 + 名册 + 扫码加入；部署口径见其 README）
 └── README.md            ← 从这里开始
 ```
 
 桌面壳在 `desktop/`（Go，基于 [egoist/mygo](https://github.com/egoist/mygo) 框架）。
-派活侧执行器模块（chancellor）与原生 Android 手机端是独立仓库，未随本项目开源；
-`delegate` 派活能力依赖 chancellor 模块（服务端源码 import 了它，缺了起不来），
-对话、记忆、工具、技能、中继不依赖它。
+派活侧执行器模块已随本仓开源（`ts/packages/chancellor/`）；
+原生 Android 手机端是独立仓库，未随本项目开源——没有它时桌面端与网页端全部可用。
 
 内核是 npm 上的 **pi-durable**（MIT，锁 1.4.0，不 vendored）。
 2026-10-28 从 pi-agent-core 0.78.1 换过来 —— 那条线上游已经删了，

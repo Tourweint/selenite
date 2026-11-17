@@ -7,15 +7,15 @@ import {
 	isCliSuccess,
 	parseCliStdout,
 	STDIN_PROMPT_THRESHOLD,
-} from "../../../../../chancellor/src/employee/cli.ts";
+} from "../../../packages/chancellor/src/employee/cli.ts";
 import {
 	EXTERNAL_CLI_ORDER,
 	selectExternalCli,
-} from "../../../../../chancellor/src/employee/external.ts";
+} from "../../../packages/chancellor/src/employee/external.ts";
 import {
 	buildQoderInvocation,
 	resolveQoderBinary,
-} from "../../../../../chancellor/src/employee/qoder.ts";
+} from "../../../packages/chancellor/src/employee/qoder.ts";
 
 function call(prompt: string, tools: "none" | "all" = "all") {
 	return {

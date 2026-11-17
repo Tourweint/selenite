@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { ChancellorEvent, TicketResult } from "../../../../../chancellor/src/index.ts";
+import type { ChancellorEvent, TicketResult } from "../../../packages/chancellor/src/index.ts";
 import {
 	authorityRank,
 	authorityRecheckEnabled,

@@ -11,7 +11,7 @@ import {
 	parseShimNodeEntry,
 	resolveCodeBuddyLauncher,
 	STDIN_PROMPT_THRESHOLD,
-} from "../../../../../chancellor/src/employee/codebuddy.ts";
+} from "../../../packages/chancellor/src/employee/codebuddy.ts";
 
 /** 与真实 `--output-format json` 同形：数组，最后一项 type=result。 */
 function realShape(patch: Record<string, unknown> = {}): string {

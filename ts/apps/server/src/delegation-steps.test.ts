@@ -8,10 +8,10 @@ import {
 	DELEGATION_STEP_MAX_CHARS,
 	normalizeDelegationSteps,
 } from "./delegation.ts";
-import { intake } from "../../../../../chancellor/src/intake.ts";
-import { appendPlanSteps } from "../../../../../chancellor/src/plan.ts";
-import { Store } from "../../../../../chancellor/src/store.ts";
-import type { Ticket } from "../../../../../chancellor/src/types.ts";
+import { intake } from "../../../packages/chancellor/src/intake.ts";
+import { appendPlanSteps } from "../../../packages/chancellor/src/plan.ts";
+import { Store } from "../../../packages/chancellor/src/store.ts";
+import type { Ticket } from "../../../packages/chancellor/src/types.ts";
 
 /**
  * 计划附件（2026-11-09 保证实现纵深 §2）：delegate 参数校验 + 落点 + 规划器可见。

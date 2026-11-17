@@ -2,7 +2,7 @@ import {
 	archiveManager,
 	DOMAIN_PATTERN,
 	ensureManager,
-} from "../../../../../chancellor/src/manager/registry.ts";
+} from "../../../packages/chancellor/src/manager/registry.ts";
 import { chancellorWorkRoot } from "./delegation.ts";
 import {
 	delegationSoulSeed,

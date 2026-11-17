@@ -5,7 +5,7 @@ import {
   type PhoneResult,
   type PhoneTask,
   type PhoneTransport,
-} from "../../../../../chancellor/src/index.ts";
+} from "../../../packages/chancellor/src/index.ts";
 
 /**
  * 手机 worker 的电脑侧（2026-11-02 契约）。

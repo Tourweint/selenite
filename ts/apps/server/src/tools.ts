@@ -35,12 +35,12 @@ import {
 // 跑的是 .ts 源码，装进 node_modules 后 node 不会给里面的 .ts 剥类型
 // （ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING），所以不能走 file: 依赖。
 // 只有这一处引用它，挪仓库时改这一行。
-import { runChancellor } from "../../../../../chancellor/src/index.ts";
+import { runChancellor } from "../../../packages/chancellor/src/index.ts";
 import {
 	DOMAIN_PATTERN,
 	listManagers,
 	validateDomain,
-} from "../../../../../chancellor/src/manager/registry.ts";
+} from "../../../packages/chancellor/src/manager/registry.ts";
 import {
 	WORK_REVIEW_GUIDANCE,
 	chancellorWorkRoot,

@@ -36,6 +36,7 @@
 ```text
 ts/packages/shared/     契约单文件：请求 / 事件 Zod schema + SSE 编解码（服务端与手机端共用）
 ts/packages/memory/     记忆四层：存储 / 抽取 / 巩固 / 召回
+ts/packages/chancellor/ 派活侧执行器（2026-11-18 从独立私有仓 vendor 进本仓）
 ts/apps/server/         Hono + SSE + 装配（agent.ts 是核心：Harness / 会话 / 闸门 / 派活）
 ts/apps/server/skills/  技能手册 *.md（文件名 = 技能名，第 1 行 = 索引用摘要）
 ts/apps/relay/          自建中继（哑路由 + 名册 + 加入码；部署口径见 ts/apps/relay/README.md）
@@ -43,7 +44,8 @@ desktop/                Lifediary 桌面壳（Go）
 docs/                   基线文档（现行口径）/ 设计方案（设计期）/ 变更记录（落地期）
 ```
 
-外部仓库：手机端 `lifediary`（Kotlin/Compose）、派活侧 `chancellor`——都是独立私有仓库，不在本仓开源范围。
+外部仓库：手机端 `lifediary`（Kotlin/Compose，独立私有仓库）。派活侧 chancellor 原为独立私有仓，
+2026-11-18 开源拍板"只发一个仓库"后 vendor 进 `ts/packages/chancellor/`（旧仓封存为参考）。
 **依赖方向单向**：`shared` ← `memory` ← `server`。`shared` 不 import 包内实现，`memory` 不 import `server`。
 
 ## 硬约束

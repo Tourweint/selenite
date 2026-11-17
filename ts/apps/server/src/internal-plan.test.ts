@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { setInternalAsk } from "../../../../../chancellor/src/index.ts";
-import { planTicket } from "../../../../../chancellor/src/plan.ts";
-import type { Ticket } from "../../../../../chancellor/src/types.ts";
+import { setInternalAsk } from "../../../packages/chancellor/src/index.ts";
+import { planTicket } from "../../../packages/chancellor/src/plan.ts";
+import type { Ticket } from "../../../packages/chancellor/src/types.ts";
 
 test("planTicket 用注入的内部 ask（不再走 Qoder）", async () => {
 	let calls = 0;

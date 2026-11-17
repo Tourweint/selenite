@@ -11,7 +11,7 @@ import type {
 	ChancellorOptions,
 	ChancellorRequest,
 	TicketResult,
-} from "../../../../../chancellor/src/index.ts";
+} from "../../../packages/chancellor/src/index.ts";
 import {
 	startDelegation,
 	watchDelegation,

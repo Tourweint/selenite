@@ -18,7 +18,7 @@ import type {
 	ChancellorEvent,
 	ChancellorRequest,
 	TicketResult,
-} from "../../../../../chancellor/src/index.ts";
+} from "../../../packages/chancellor/src/index.ts";
 
 function result(overrides: Partial<TicketResult> = {}): TicketResult {
 	return {
@@ -541,7 +541,7 @@ test("按单指定的工作目录与权限档会进 ChancellorRequest（2026-11-
 			conversationId: 11,
 			domain: "文档",
 			requirement: "在子目录里改一个文件",
-			workDir: "D:\\Projects\\projects\\lifediary-harness\\docs",
+			workDir: "<repo>\\docs",
 			employeePermission: "read",
 		},
 		{
@@ -556,7 +556,7 @@ test("按单指定的工作目录与权限档会进 ChancellorRequest（2026-11-
 		},
 	);
 	assert.equal(ticketId, "T-wd");
-	assert.equal(seen?.workDir, "D:\\Projects\\projects\\lifediary-harness\\docs");
+	assert.equal(seen?.workDir, "<repo>\\docs");
 	// 权限档覆盖执行器设置里的默认值，其余执行器字段照带
 	assert.equal(seen?.employeeProfile?.permission, "read");
 });
@@ -569,7 +569,7 @@ test("续跑不带按单目录与权限（沿用原单快照）", async () => {
 			domain: "文档",
 			requirement: "验证码 1234",
 			resumeTicketId: "T-old",
-			workDir: "D:\\Projects\\projects\\lifediary-harness\\docs",
+			workDir: "<repo>\\docs",
 			employeePermission: "full",
 		},
 		{

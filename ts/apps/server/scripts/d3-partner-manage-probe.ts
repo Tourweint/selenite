@@ -8,7 +8,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { listManagers } from "../../../../../chancellor/src/manager/registry.ts";
+import { listManagers } from "../../../packages/chancellor/src/manager/registry.ts";
 
 /**
  * 总管管执事探针（批次D D3）：faux + 真起服务 + 真 HTTP + 真一轮对话。

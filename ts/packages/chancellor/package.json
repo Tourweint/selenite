@@ -1,0 +1,23 @@
+{
+	"name": "@lifediary/chancellor",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"main": "./src/index.ts",
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"scripts": {
+		"typecheck": "tsc --noEmit"
+	},
+	"dependencies": {
+		"@earendil-works/chord": "1.4.0",
+		"@earendil-works/pi-ai": "1.4.0",
+		"@earendil-works/pi-durable": "1.4.0",
+		"@modelcontextprotocol/sdk": "^1.32.2"
+	},
+	"devDependencies": {
+		"@types/node": "^22.13.0",
+		"typescript": "^5.9.0"
+	}
+}

@@ -9,9 +9,9 @@ import {
 	projectAcceptanceChecks,
 	projectTicketBgJobs,
 } from "./delegation-api.ts";
-import { ensureManager } from "../../../../../chancellor/src/manager/registry.ts";
-import { Store } from "../../../../../chancellor/src/store.ts";
-import type { Ticket } from "../../../../../chancellor/src/types.ts";
+import { ensureManager } from "../../../packages/chancellor/src/manager/registry.ts";
+import { Store } from "../../../packages/chancellor/src/store.ts";
+import type { Ticket } from "../../../packages/chancellor/src/types.ts";
 
 function temp(prefix: string): string {
 	return mkdtempSync(join(tmpdir(), `lifediary-${prefix}-`));

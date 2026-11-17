@@ -2,7 +2,7 @@ import type { Harness } from "@earendil-works/pi-durable";
 import { LiveDoc } from "@earendil-works/pi-durable";
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { listManagers } from "../../../../../../chancellor/src/manager/registry.ts";
+import { listManagers } from "../../../../packages/chancellor/src/manager/registry.ts";
 import { TERMINAL_TICKET_STATUS } from "../delegation-receipts.ts";
 import { flagEnabled, flagValue } from "../flags.ts";
 import { getHarness } from "./lifecycle.ts";

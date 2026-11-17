@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { MemoryScope } from "@lifediary/memory";
-import type { ChancellorEvent, ChancellorRequest, TicketResult } from "../../../../../chancellor/src/index.ts";
+import type { ChancellorEvent, ChancellorRequest, TicketResult } from "../../../packages/chancellor/src/index.ts";
 import type { SkillStore } from "./skills.ts";
 import { createTools } from "./tools.ts";
 import {

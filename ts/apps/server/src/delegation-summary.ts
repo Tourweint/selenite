@@ -4,11 +4,11 @@
  * 2026-11-13 从 delegation-api.ts 的 L367–L643 整段切出；正文原文搬运，未改一行实现。
  */
 
-import { JUDGE_FILE } from "../../../../../chancellor/src/index.ts";
-import { judgeCallsOf } from "../../../../../chancellor/src/judge.ts";
-import { listManagers } from "../../../../../chancellor/src/manager/registry.ts";
-import { Store, TicketRow } from "../../../../../chancellor/src/store.ts";
-import { Ticket } from "../../../../../chancellor/src/types.ts";
+import { JUDGE_FILE } from "../../../packages/chancellor/src/index.ts";
+import { judgeCallsOf } from "../../../packages/chancellor/src/judge.ts";
+import { listManagers } from "../../../packages/chancellor/src/manager/registry.ts";
+import { Store, TicketRow } from "../../../packages/chancellor/src/store.ts";
+import { Ticket } from "../../../packages/chancellor/src/types.ts";
 import { DelegationReceipts, TERMINAL_TICKET_STATUS } from "./delegation-receipts.ts";
 import type { DelegationRuntime } from "./delegation.ts";
 import { partnersStore } from "./partners.ts";

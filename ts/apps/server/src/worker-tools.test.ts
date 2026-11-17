@@ -18,7 +18,7 @@ import {
 import {
   setWorkerToolsSource,
   workerAllowedTools,
-} from "../../../../../chancellor/src/worker-tools-source.ts";
+} from "../../../packages/chancellor/src/worker-tools-source.ts";
 
 const root = mkdtempSync(join(tmpdir(), "lifediary-worker-tools-"));
 const env = { WORKER_TOOLS_PATH: join(root, "worker-tools.json") };

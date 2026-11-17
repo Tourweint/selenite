@@ -11,10 +11,10 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { prepareTaskWorktree, removeWorktree } from "../../../../../chancellor/src/isolation.ts";
-import { recoverDelegations, type RecoveredTicket } from "../../../../../chancellor/src/index.ts";
-import { readJson, Store } from "../../../../../chancellor/src/store.ts";
-import type { ProjectRef, Ticket } from "../../../../../chancellor/src/types.ts";
+import { prepareTaskWorktree, removeWorktree } from "../../../packages/chancellor/src/isolation.ts";
+import { recoverDelegations, type RecoveredTicket } from "../../../packages/chancellor/src/index.ts";
+import { readJson, Store } from "../../../packages/chancellor/src/store.ts";
+import type { ProjectRef, Ticket } from "../../../packages/chancellor/src/types.ts";
 import {
 	collectDeadLetters,
 	formatRecoveryLine,

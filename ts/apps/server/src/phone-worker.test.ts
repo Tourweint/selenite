@@ -3,8 +3,8 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { test } from "node:test";
 import { Hono } from "hono";
 import { inactiveReason, mountPhoneWorker, phoneEnsureActive } from "./phone-worker.ts";
-import { phoneTransport } from "../../../../../chancellor/src/employee/phone.ts";
-import type { PhoneTask } from "../../../../../chancellor/src/employee/phone.ts";
+import { phoneTransport } from "../../../packages/chancellor/src/employee/phone.ts";
+import type { PhoneTask } from "../../../packages/chancellor/src/employee/phone.ts";
 
 /**
  * 手机 worker 执行前重验（2026-11-10 批 26 §一）。

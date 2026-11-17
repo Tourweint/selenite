@@ -16,7 +16,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { inflateRawSync } from "node:zlib";
-import type { Ticket } from "../../../../../chancellor/src/types.ts";
+import type { Ticket } from "../../../packages/chancellor/src/types.ts";
 
 const PORT = Number(process.env.PROBE_PORT ?? 8098);
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -2369,7 +2369,7 @@ try {
 	// 探针只借一次映射；不关掉的话 Windows 上 finally 删不掉服务端库（句柄还在）。
 	await (await getHarness()).close(BACKGROUND_CONTEXT);
 
-	const { Store } = await import("../../../../../chancellor/src/store.ts");
+	const { Store } = await import("../../../packages/chancellor/src/store.ts");
 	const { DelegationReceipts } = await import("../src/delegation-receipts.ts");
 	const nowIso = new Date().toISOString();
 	const fixture = (id: string, extra: Record<string, unknown> = {}) =>
@@ -2427,7 +2427,7 @@ try {
 	receipts.close();
 
 	// 领域单：chiefName 按 ticket.options.domain 反查 partners 表的执事名（L1 §2.2）。
-	const { ensureManager } = await import("../../../../../chancellor/src/manager/registry.ts");
+	const { ensureManager } = await import("../../../packages/chancellor/src/manager/registry.ts");
 	const { PartnersStore } = await import("../src/partners.ts");
 	const domainRunsDir = ensureManager(TICKETS_ROOT, "probe-domain").runs_dir;
 	const domainStore = new Store(domainRunsDir);

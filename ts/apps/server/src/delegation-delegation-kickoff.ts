@@ -12,8 +12,8 @@
  * "工具钩子写、对话流读"的一对多通道。只是借传输，与派活语义无关。
  */
 
-import { ChancellorEvent, ChancellorRequest, TicketResult } from "../../../../../chancellor/src/index.ts";
-import type { EmployeeProfile } from "../../../../../chancellor/src/types.ts";
+import { ChancellorEvent, ChancellorRequest, TicketResult } from "../../../packages/chancellor/src/index.ts";
+import type { EmployeeProfile } from "../../../packages/chancellor/src/types.ts";
 import { TAKEOVER_HINT } from "./agent/turn-gate.ts";
 import type { DelegationSenderKind } from "./delegation-messages.ts";
 import { CHIEF_PARTNER_ID } from "./partners.ts";

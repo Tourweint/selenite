@@ -4,10 +4,10 @@
  * 2026-11-13 从 delegation-api.ts 的 L1053–L1243 整段切出；正文原文搬运，未改一行实现。
  */
 
-import { runChancellor } from "../../../../../chancellor/src/index.ts";
-import { listManagers } from "../../../../../chancellor/src/manager/registry.ts";
-import { Store } from "../../../../../chancellor/src/store.ts";
-import { Ticket } from "../../../../../chancellor/src/types.ts";
+import { runChancellor } from "../../../packages/chancellor/src/index.ts";
+import { listManagers } from "../../../packages/chancellor/src/manager/registry.ts";
+import { Store } from "../../../packages/chancellor/src/store.ts";
+import { Ticket } from "../../../packages/chancellor/src/types.ts";
 import { currentApprovalLevel, currentAuthority } from "./delegation-authority.ts";
 import { withDelegationJudge } from "./delegation-judge.ts";
 import { DelegationReceipts, TERMINAL_TICKET_STATUS, requestFingerprint } from "./delegation-receipts.ts";

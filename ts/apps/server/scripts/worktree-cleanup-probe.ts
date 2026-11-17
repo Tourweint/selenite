@@ -18,12 +18,12 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { recoverDelegations } from "../../../../../chancellor/src/index.ts";
-import { startInflight, readInflight, inflightPath } from "../../../../../chancellor/src/inflight.ts";
-import { taskDirName } from "../../../../../chancellor/src/dispatch.ts";
-import { runScheduledTasks } from "../../../../../chancellor/src/scheduler.ts";
-import { Store } from "../../../../../chancellor/src/store.ts";
-import type { PlannedTask, ProjectRef, Task, Ticket, TaskRun } from "../../../../../chancellor/src/types.ts";
+import { recoverDelegations } from "../../../packages/chancellor/src/index.ts";
+import { startInflight, readInflight, inflightPath } from "../../../packages/chancellor/src/inflight.ts";
+import { taskDirName } from "../../../packages/chancellor/src/dispatch.ts";
+import { runScheduledTasks } from "../../../packages/chancellor/src/scheduler.ts";
+import { Store } from "../../../packages/chancellor/src/store.ts";
+import type { PlannedTask, ProjectRef, Task, Ticket, TaskRun } from "../../../packages/chancellor/src/types.ts";
 
 process.env.LLM_PROVIDER = "faux";
 process.env.CHANCELLOR_LLM_PROVIDER = "faux";

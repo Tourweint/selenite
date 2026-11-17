@@ -12,7 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { LeaseManager } from "../../../../../chancellor/src/lease.ts";
+import { LeaseManager } from "../../../packages/chancellor/src/lease.ts";
 import {
 	changedDeclaredPaths,
 	collectTaskChanges,
@@ -22,19 +22,19 @@ import {
 	snapshotDeclaredPaths,
 	snapshotFileFor,
 	writePathSnapshot,
-} from "../../../../../chancellor/src/isolation.ts";
-import { coveredByAny } from "../../../../../chancellor/src/paths.ts";
-import { runScheduledTasks } from "../../../../../chancellor/src/scheduler.ts";
-import { reviewTask } from "../../../../../chancellor/src/review.ts";
-import { taskDirName } from "../../../../../chancellor/src/dispatch.ts";
-import { Store } from "../../../../../chancellor/src/store.ts";
+} from "../../../packages/chancellor/src/isolation.ts";
+import { coveredByAny } from "../../../packages/chancellor/src/paths.ts";
+import { runScheduledTasks } from "../../../packages/chancellor/src/scheduler.ts";
+import { reviewTask } from "../../../packages/chancellor/src/review.ts";
+import { taskDirName } from "../../../packages/chancellor/src/dispatch.ts";
+import { Store } from "../../../packages/chancellor/src/store.ts";
 import type {
 	PlannedTask,
 	ProjectRef,
 	Task,
 	TaskRun,
 	Ticket,
-} from "../../../../../chancellor/src/types.ts";
+} from "../../../packages/chancellor/src/types.ts";
 
 function temp(prefix: string): string {
 	return mkdtempSync(join(tmpdir(), `lifediary-${prefix}-`));

@@ -7,16 +7,16 @@ import {
 	buildClaudeInvocation,
 	isClaudeSuccess,
 	parseClaudeStdout,
-} from "../../../../../chancellor/src/employee/claude.ts";
+} from "../../../packages/chancellor/src/employee/claude.ts";
 import {
 	buildCodexInvocation,
 	parseCodexStdout,
-} from "../../../../../chancellor/src/employee/codex.ts";
+} from "../../../packages/chancellor/src/employee/codex.ts";
 import {
 	buildOpencodeInvocation,
 	parseOpencodeStdout,
-} from "../../../../../chancellor/src/employee/opencode.ts";
-import { resolveCliLauncher } from "../../../../../chancellor/src/employee/cli.ts";
+} from "../../../packages/chancellor/src/employee/opencode.ts";
+import { resolveCliLauncher } from "../../../packages/chancellor/src/employee/cli.ts";
 
 /* ── Claude Code ─────────────────────────────────────────── */
 

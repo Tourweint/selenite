@@ -21,10 +21,10 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, fauxProvider } from "@earendil-works/pi-ai";
 import { createRegistry, Harness, type ConversationId } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { ensureManager, readManagerMeta } from "../../../../../chancellor/src/manager/registry.ts";
+import { ensureManager, readManagerMeta } from "../../../packages/chancellor/src/manager/registry.ts";
 
 const WORKER_MAIN = fileURLToPath(
-	new URL("../../../../../chancellor/src/worker-main.ts", import.meta.url),
+	new URL("../../../packages/chancellor/src/worker-main.ts", import.meta.url),
 );
 const WINDOW = 8000;
 const THRESHOLD = Math.floor(WINDOW * 0.6); // 4800

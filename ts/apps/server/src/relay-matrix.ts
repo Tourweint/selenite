@@ -5,8 +5,8 @@ import {
 	type DelegationPhase,
 	type RemoteDelegationStatus,
 } from "@lifediary/shared";
-import type { Ticket } from "../../../../../chancellor/src/types.ts";
-import { runChancellor } from "../../../../../chancellor/src/index.ts";
+import type { Ticket } from "../../../packages/chancellor/src/types.ts";
+import { runChancellor } from "../../../packages/chancellor/src/index.ts";
 // agent.ts 经 tools.ts → 本文件被静态可达（arch-guard 等测试要先设 env 再加载 agent），
 // 因此这里只做函数内懒加载，不建立模块级依赖（依赖方向纪律）。
 import type { ResolvedChat } from "./agent.ts";

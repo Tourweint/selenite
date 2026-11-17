@@ -4,10 +4,10 @@
  * 2026-11-13 从 delegation-api.ts 的 L644–L1052 整段切出；正文原文搬运，未改一行实现。
  */
 
-import { judgeEnabled } from "../../../../../chancellor/src/judge.ts";
-import { listManagers } from "../../../../../chancellor/src/manager/registry.ts";
-import { Store } from "../../../../../chancellor/src/store.ts";
-import { Ticket } from "../../../../../chancellor/src/types.ts";
+import { judgeEnabled } from "../../../packages/chancellor/src/judge.ts";
+import { listManagers } from "../../../packages/chancellor/src/manager/registry.ts";
+import { Store } from "../../../packages/chancellor/src/store.ts";
+import { Ticket } from "../../../packages/chancellor/src/types.ts";
 import { bashJobsDir, listBgJobs } from "./bash-background.ts";
 import { DelegationReceipts, TERMINAL_TICKET_STATUS } from "./delegation-receipts.ts";
 import { chancellorWorkRoot, startDelegation } from "./delegation.ts";

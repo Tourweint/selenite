@@ -4,7 +4,7 @@ import { join } from "node:path";
 import {
 	runQoderCn,
 	runQoderIntl,
-} from "../../../../../chancellor/src/employee/qoder.ts";
+} from "../../../packages/chancellor/src/employee/qoder.ts";
 
 /**
  * 真跑一次 Qoder 适配器的最小任务（纯问答，不写文件）。

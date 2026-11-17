@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { Type } from "@earendil-works/pi-ai";
 import type { ToolRegistration } from "@earendil-works/pi-durable";
-import type { JudgeInput } from "../../../../../chancellor/src/types.ts";
+import type { JudgeInput } from "../../../packages/chancellor/src/types.ts";
 import { WRITE_TOOLS } from "./approval-policy.ts";
 import {
 	JUDGE_SESSION_PREFIX,

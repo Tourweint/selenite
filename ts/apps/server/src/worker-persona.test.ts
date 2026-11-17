@@ -22,7 +22,7 @@ import {
 import {
   setWorkerPersonaSource,
   workerPersonaText,
-} from "../../../../../chancellor/src/worker-persona-source.ts";
+} from "../../../packages/chancellor/src/worker-persona-source.ts";
 
 const root = mkdtempSync(join(tmpdir(), "lifediary-worker-persona-"));
 const FILE = join(root, "worker-persona.md");

@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
-import { Store } from "../../../../../../chancellor/src/store.ts";
-import type { Ticket } from "../../../../../../chancellor/src/types.ts";
+import { Store } from "../../../../packages/chancellor/src/store.ts";
+import type { Ticket } from "../../../../packages/chancellor/src/types.ts";
 import {
 	BRIEF_CARD_RULES,
 	briefCardRulesEnabled,

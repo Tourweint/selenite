@@ -6,8 +6,8 @@ import {
 	lastFailReason,
 	renderAcceptLimitLine,
 	shouldStartRepair,
-} from "../../../../../chancellor/src/repair.ts";
-import type { Review, TaskRun } from "../../../../../chancellor/src/types.ts";
+} from "../../../packages/chancellor/src/repair.ts";
+import type { Review, TaskRun } from "../../../packages/chancellor/src/types.ts";
 
 /**
  * 验收「核对-修复」循环（2026-11-09 §1）：纯逻辑在这里断言，

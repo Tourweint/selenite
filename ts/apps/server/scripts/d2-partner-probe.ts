@@ -9,12 +9,12 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { listManagers } from "../../../../../chancellor/src/manager/registry.ts";
+import { listManagers } from "../../../packages/chancellor/src/manager/registry.ts";
 import type {
 	ChancellorEvent,
 	ChancellorRequest,
 	TicketResult,
-} from "../../../../../chancellor/src/index.ts";
+} from "../../../packages/chancellor/src/index.ts";
 import { buildManagerIdentity, startDelegation } from "../src/delegation.ts";
 
 /**
@@ -258,7 +258,7 @@ async function main(): Promise<void> {
 		let fauxResult: TicketResult | null = null;
 		let fauxError = "";
 		try {
-			const { runChancellor } = await import("../../../../../chancellor/src/index.ts");
+			const { runChancellor } = await import("../../../packages/chancellor/src/index.ts");
 			fauxResult = await runChancellor({
 				requirement: "报个平安",
 				domain: DOMAIN,

@@ -1,7 +1,7 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runCodeBuddy } from "../../../../../chancellor/src/employee/codebuddy.ts";
+import { runCodeBuddy } from "../../../packages/chancellor/src/employee/codebuddy.ts";
 
 /**
  * 真跑一次 CodeBuddy 适配器的最小任务：不经过拆单/验收，只看

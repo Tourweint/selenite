@@ -20,9 +20,9 @@ import crypto from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { recoverDelegations } from "../../../../../chancellor/src/index.ts";
-import { isPidAlive, LeaseManager, releaseStaleLeases } from "../../../../../chancellor/src/lease.ts";
-import { inflightPath, readInflight, startInflight } from "../../../../../chancellor/src/inflight.ts";
+import { recoverDelegations } from "../../../packages/chancellor/src/index.ts";
+import { isPidAlive, LeaseManager, releaseStaleLeases } from "../../../packages/chancellor/src/lease.ts";
+import { inflightPath, readInflight, startInflight } from "../../../packages/chancellor/src/inflight.ts";
 
 let failures = 0;
 function check(ok: boolean, label: string, detail = ""): void {

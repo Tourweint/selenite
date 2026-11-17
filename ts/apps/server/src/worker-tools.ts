@@ -23,7 +23,7 @@ import {
   WORKER_TOOL_NAMES,
   effectiveWorkerTools,
   setWorkerToolsSource,
-} from "../../../../../chancellor/src/worker-tools-source.ts";
+} from "../../../packages/chancellor/src/worker-tools-source.ts";
 
 /** 给人看的目录（canonical 的中文名与边界；工具集本身以 chancellor 为准，server 不新增）。 */
 export const WORKER_TOOL_CATALOG: ReadonlyArray<{

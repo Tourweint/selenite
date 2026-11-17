@@ -9,12 +9,12 @@ import {
 	archiveManager,
 	ensureManager,
 	listManagers,
-} from "../../../../../chancellor/src/manager/registry.ts";
+} from "../../../packages/chancellor/src/manager/registry.ts";
 import type {
 	ChancellorEvent,
 	ChancellorRequest,
 	TicketResult,
-} from "../../../../../chancellor/src/index.ts";
+} from "../../../packages/chancellor/src/index.ts";
 import {
 	buildManagerIdentity,
 	MANAGER_SOUL_LIMIT_BYTES,

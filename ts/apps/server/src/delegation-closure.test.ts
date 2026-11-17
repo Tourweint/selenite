@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { enforceChildClosure } from "../../../../../chancellor/src/stage.ts";
-import type { Ticket } from "../../../../../chancellor/src/types.ts";
+import { enforceChildClosure } from "../../../packages/chancellor/src/stage.ts";
+import type { Ticket } from "../../../packages/chancellor/src/types.ts";
 
 function child(id: string, status: Ticket["status"], error: string | null = null): Ticket {
 	return {

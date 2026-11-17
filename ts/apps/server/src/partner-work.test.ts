@@ -8,7 +8,7 @@ import type {
 	ChancellorEvent,
 	ChancellorRequest,
 	TicketResult,
-} from "../../../../../chancellor/src/index.ts";
+} from "../../../packages/chancellor/src/index.ts";
 import type { WorkSettlementInput } from "./work-record.ts";
 
 /**
