@@ -1455,6 +1455,70 @@ test("PUT /partners/:id/tools：未知名 400、保存回读、清空回全开�
 	assert.deepEqual(store.get(partner.id)?.disabledTools, [], "空数组 = 全开");
 });
 
+test("PUT /partners/:id/tools：常驻名单回读 / 非按需 400 / 不带 promoted 不清空 / tool_search 守卫（2026-11-17）", async () => {
+	const partner = store.create("常驻名单执事");
+	const path = `/api/v1/partners/${partner.id}/tools`;
+	const view = (await (await app.request(path)).json()) as {
+		tools: Array<{ name: string; deferred: boolean; promoted: boolean }>;
+	};
+	const deferred = view.tools.filter((tool) => tool.deferred).map((tool) => tool.name);
+	if (deferred.length === 0) return; // 环境里没有按需工具（AGENT_TOOL_INDEX 关）就不测这条
+	const name = deferred[0]!;
+
+	const put = (body: unknown) =>
+		app.request(path, {
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(body),
+		});
+
+	// 提升：保存回读 + 视图逐项 promoted
+	const promoted = await put({ disabled: [], promoted: [name] });
+	assert.equal(promoted.status, 200);
+	const promotedBody = (await promoted.json()) as {
+		promoted: string[];
+		tools: Array<{ name: string; promoted: boolean }>;
+	};
+	assert.deepEqual(promotedBody.promoted, [name]);
+	assert.equal(promotedBody.tools.find((tool) => tool.name === name)?.promoted, true);
+	assert.deepEqual(store.get(partner.id)?.promotedTools, [name]);
+
+	// 旧形状（只有 disabled）：不改常驻名单
+	const legacy = await put({ disabled: [] });
+	assert.equal(legacy.status, 200);
+	assert.deepEqual(store.get(partner.id)?.promotedTools, [name], "不带 promoted = 不动原名单");
+
+	// 非按需工具不能提升
+	const nonDeferred = view.tools.find((tool) => !tool.deferred)?.name;
+	if (nonDeferred) {
+		const bad = await put({ disabled: [], promoted: [nonDeferred] });
+		assert.equal(bad.status, 400);
+		assert.match(((await bad.json()) as { message: string }).message, /只能提升按需工具/);
+	}
+
+	// 未知工具 400
+	const unknown = await put({ disabled: [], promoted: ["no_such_tool"] });
+	assert.equal(unknown.status, 400);
+	assert.match(((await unknown.json()) as { message: string }).message, /未知工具/);
+
+	// 取消与提升冲突 400
+	const conflict = await put({ disabled: [name], promoted: [name] });
+	assert.equal(conflict.status, 400);
+	assert.match(((await conflict.json()) as { message: string }).message, /不能设为常驻/);
+
+	// tool_search 是唯一入口：取消它 400
+	if (view.tools.some((tool) => tool.name === "tool_search")) {
+		const guard = await put({ disabled: ["tool_search"] });
+		assert.equal(guard.status, 400);
+		assert.match(((await guard.json()) as { message: string }).message, /tool_search 是按需工具的唯一入口/);
+	}
+
+	// 收回：空数组 = 全部按需
+	const cleared = await put({ disabled: [], promoted: [] });
+	assert.equal(cleared.status, 200);
+	assert.deepEqual(store.get(partner.id)?.promotedTools, []);
+});
+
 test("PARTNER_TOOLS_ENABLED=false：GET 200 空形状、PUT 400、未知执事仍 404", async () => {
 	const partner = store.create("关工具勾选执事");
 	const prev = process.env.PARTNER_TOOLS_ENABLED;
@@ -1466,6 +1530,7 @@ test("PARTNER_TOOLS_ENABLED=false：GET 200 空形状、PUT 400、未知执事�
 			ok: true,
 			enabled: false,
 			disabled: [],
+			promoted: [],
 			groups: [],
 			tools: [],
 		});

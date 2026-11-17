@@ -411,6 +411,34 @@ export class SqliteMemoryStore implements MemoryStore {
 		return true;
 	}
 
+	/**
+	 * 整体改挂 scope（2026-11-17 项目合并/记忆迁移）。
+	 *
+	 * 刻意用两条 `UPDATE ... SET scope` 而不是"读出来逐条 put"：
+	 * - `memory_fts` 只镜像 content / content_id，不含 scope → 不需要重灌；
+	 * - 逐条 put 会按新默认值重写缺省列，等于借搬家改数据。
+	 * `superseded_by` 存的是记录 id，同一 scope 整体搬走后引用仍然有效。
+	 */
+	moveScope(from: string, to: string): { records: number; documents: number } {
+		if (!from || !to || from === to) return { records: 0, documents: 0 };
+		const records = Number(
+			this.db.prepare("UPDATE memories SET scope = ? WHERE scope = ?").run(to, from).changes,
+		);
+		const documents = Number(
+			this.db.prepare("UPDATE memory_documents SET scope = ? WHERE scope = ?").run(to, from).changes,
+		);
+		return { records, documents };
+	}
+
+	/** 软封存一个 scope（写 archived_at）：行还在，默认列表与召回都看不到。 */
+	archiveScope(scope: string): number {
+		if (!scope) return 0;
+		const result = this.db
+			.prepare("UPDATE memories SET archived_at = ? WHERE scope = ? AND archived_at IS NULL")
+			.run(new Date().toISOString(), scope);
+		return Number(result.changes);
+	}
+
 	// ── 原文档案（2026-11-16 记忆原子化）──────────────────────
 
 	putDocument(document: MemoryDocument): void {

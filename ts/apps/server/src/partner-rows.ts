@@ -90,7 +90,8 @@ function toPartner(row: Record<string, unknown>): PartnerRow {
 			row.tagline === null || row.tagline === undefined ? null : String(row.tagline),
 		diary: Number(row.diary ?? 0) !== 0,
 		projectIds: toProjectIds(row.project_ids),
-		disabledTools: toDisabledTools(row.disabled_tools),
+		disabledTools: toToolNames(row.disabled_tools),
+		promotedTools: toToolNames(row.promoted_tools),
 		personaPreset: toPersonaPreset(row.persona_preset),
 		personaModules: toPersonaModules(row.persona_modules),
 		personaSwitches: toPersonaSwitches(row.persona_switches),
@@ -123,11 +124,11 @@ function toProjectIds(raw: unknown): string[] {
 }
 
 /**
- * 工具取消名单列（2026-11-16 工具裁剪 B）：JSON 数组、只留非空字符串项；
- * 非数组 / 坏 JSON / 脏值当"没取消"= 全开。与 `toProjectIds` 同一套口径，
- * 只存被取消的工具名——以后新增工具默认可见，不会因老档案冻结而消失。
+ * 工具名单列（2026-11-16 工具裁剪 B；2026-11-17 常驻名单共用）：JSON 数组、只留非空字符串项；
+ * 非数组 / 坏 JSON / 脏值当"空名单"（取消名单 → 全开；常驻名单 → 全按需）。与 `toProjectIds`
+ * 同一套口径。两列（disabled_tools / promoted_tools）共用一份解析，别处别再抄。
  */
-function toDisabledTools(raw: unknown): string[] {
+function toToolNames(raw: unknown): string[] {
 	if (raw === null || raw === undefined || String(raw).trim() === "") return [];
 	try {
 		const parsed: unknown = JSON.parse(String(raw));
@@ -137,6 +138,9 @@ function toDisabledTools(raw: unknown): string[] {
 		return [];
 	}
 }
+
+/** 旧名（导出面与测试在用）：取消名单的解析就是上面那份，保留别名不另写一套。 */
+const toDisabledTools = toToolNames;
 
 /** 温度：只认五档；老库 / 脏值一律回初始档 `生疏`。 */
 function toOwnerTier(raw: unknown): PartnerOwnerTier {
@@ -300,4 +304,4 @@ function defaultSoul(name: string): string {
 	].join("\n");
 }
 
-export { defaultSoul, store, toDisabledTools, toGroup, toGroupMessage, toLink, toPartner, toProjectIds, toRoutine };
+export { defaultSoul, store, toDisabledTools, toGroup, toGroupMessage, toLink, toPartner, toProjectIds, toRoutine, toToolNames };

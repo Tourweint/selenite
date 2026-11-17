@@ -5,6 +5,7 @@
  * 证据引文查找 `findEvidence` 已退役（2026-11-17，方案 docs/设计方案/2026-11-17-整理建议证据引文退役.md）。
  */
 
+import { partnersStore } from "../partners.ts";
 import { projectsStore } from "../projects.ts";
 import { readLlmConfig } from "../provider.ts";
 import { getHarness } from "./lifecycle.ts";
@@ -30,6 +31,8 @@ export async function listArchivedChats(limit = 200): Promise<ChatIndexEntry[]> 
 	// 种类表读一次（与 listChats 同口径）
 	const kinds = (await harness.snapshot(ChatKinds, CTX))?.byInternal ?? {};
 	const chatProjects = (await harness.snapshot(ChatProjects, CTX))?.byInternal ?? {};
+	// 链接表一次取快照（2026-11-17 批1）：与 listChats 同口径，chatEntryOf 自己不查库
+	const links = partnersStore().sessionLinksMap();
 	const byExternal = chats?.byExternal ?? {};
 
 	const projectNames = new Map<string, string>();
@@ -52,7 +55,7 @@ export async function listArchivedChats(limit = 200): Promise<ChatIndexEntry[]> 
 			const projectId = chatProjects[String(internalId)];
 			const projectName = projectId ? projectNames.get(projectId) : undefined;
 			entries.push({
-				...chatEntryOf(conversationId, internalId, stats, meta, kinds),
+				...chatEntryOf(conversationId, internalId, stats, meta, kinds, links.get(internalId)),
 				archived: true,
 				// 旧数据没有归档时间：按方案回退到最后一句时间（不是 0，排序才有意义）
 				archivedAt: meta.archivedAt[conversationId] ?? stats.lastAt,

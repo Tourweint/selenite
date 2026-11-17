@@ -167,7 +167,7 @@ test("空字段：text 为空也保留一行并标记 empty（默认页用来显
 	assert.equal(out.system.sections.find((section) => section.key === "persona")?.empty, undefined);
 });
 
-test("会变部分：只计条数与字符，不搬正文", () => {
+test("会变部分：只计条数与字符；条目按真实顺序给出可读正文", () => {
 	const out = contextInspectViewOf(
 		viewOf([
 			{ role: "system", content: "", sections: {} },
@@ -179,7 +179,7 @@ test("会变部分：只计条数与字符，不搬正文", () => {
 					{ type: "toolCall", id: "t1", name: "bash", arguments: { command: "ls" } },
 				],
 			},
-			{ role: "toolResult", content: [{ type: "text", text: "a.ts\nb.ts" }] },
+			{ role: "toolResult", toolName: "bash", content: [{ type: "text", text: "a.ts\nb.ts" }] },
 		]),
 	);
 	assert.deepEqual(out.changing.messages, {
@@ -195,6 +195,41 @@ test("会变部分：只计条数与字符，不搬正文", () => {
 		chars: "a.ts\nb.ts".length,
 		tokens: estimateTokens("a.ts\nb.ts"),
 	});
+	// 2026-11-17：正文条目（系统消息不进条目，其余按消息顺序）
+	assert.deepEqual(
+		out.entries.map((entry) => [entry.kind, entry.label, entry.index]),
+		[
+			["user", "用户", 1],
+			["assistant", "助手", 2],
+			["toolCall", "bash", 2],
+			["toolResult", "bash", 3],
+		],
+	);
+	assert.equal(out.entries[0]?.text, "你好");
+	assert.equal(out.entries[3]?.text, "a.ts\nb.ts");
+	assert.ok(out.entries[2]?.text.includes('"command"'), "调用正文是 pretty 参数");
+	// 组内相加 = changing 口径
+	assert.equal(
+		out.entries.filter((entry) => entry.kind === "toolResult").reduce((sum, entry) => sum + entry.tokens, 0),
+		out.changing.toolResults.tokens,
+	);
+});
+
+test("会话条目：超过 4000 字截断正文，token / 字数仍按全文算", () => {
+	const long = "字".repeat(4001);
+	const out = contextInspectViewOf(
+		viewOf([
+			{ role: "system", content: "", sections: {} },
+			{ role: "user", content: long },
+		]),
+	);
+	const entry = out.entries[0];
+	assert.equal(entry?.kind, "user");
+	assert.equal(entry?.truncated, true);
+	assert.equal(entry?.text.length, 4000);
+	assert.equal(entry?.chars, 4001);
+	assert.equal(entry?.tokens, 4001);
+	assert.equal(out.changing.messages.chars, 4001, "计数仍按全文");
 });
 
 test("注入记录：每会话只留最新一轮；空记录也能覆盖旧记忆", () => {
@@ -284,7 +319,12 @@ test("响应：记忆只取 memory_recall，其它注入列 id 与字数；无�
 	assert.equal(recalled.memory.last?.chars, "- 你爱吃面\n- 你在呼和浩特".length);
 	assert.equal(recalled.memory.last?.tokens, estimateTokens("- 你爱吃面\n- 你在呼和浩特"));
 	assert.deepEqual(recalled.memory.last?.others, [
-		{ id: "project_index", chars: "项目索引".length, tokens: estimateTokens("项目索引") },
+		{
+			id: "project_index",
+			chars: "项目索引".length,
+			tokens: estimateTokens("项目索引"),
+			text: "项目索引",
+		},
 	]);
 	assert.equal(recalled.updatedAt, 500);
 });

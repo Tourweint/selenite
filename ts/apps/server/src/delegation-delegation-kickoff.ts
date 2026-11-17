@@ -13,6 +13,7 @@
  */
 
 import { ChancellorEvent, ChancellorRequest, TicketResult } from "../../../../../chancellor/src/index.ts";
+import type { EmployeeProfile } from "../../../../../chancellor/src/types.ts";
 import { TAKEOVER_HINT } from "./agent/turn-gate.ts";
 import type { DelegationSenderKind } from "./delegation-messages.ts";
 import { CHIEF_PARTNER_ID } from "./partners.ts";
@@ -185,6 +186,16 @@ export interface DelegationKickoff {
 	 * 已由 `normalizeDelegationSteps` 校验；缺省 = 旧行为（不落字段、不进提示词）。
 	 */
 	steps?: string[];
+	/**
+	 * 这张单在哪个目录里干活（2026-11-17）。绝对路径，已由 delegate 工具校验
+	 * （存在 + 是目录 + 落在已登记根内）。只对新派生效；续跑沿用原单快照。
+	 */
+	workDir?: string;
+	/**
+	 * 这张单的工具权限档（2026-11-17）。覆盖执行器设置里的默认 permission，
+	 * 与 `employee` / `model` 一样落进 ticket 快照；不传 = 跟随全局默认。
+	 */
+	employeePermission?: EmployeeProfile["permission"];
 	/**
 	 * 只续跑、不许改派（2026-11-08 扫尾批 8g 任务回话）。
 	 *

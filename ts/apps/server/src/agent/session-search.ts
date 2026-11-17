@@ -4,6 +4,7 @@ import type { Conversation } from "@earendil-works/pi-durable";
 import { redactSecrets } from "@lifediary/memory";
 import { PROACTIVE_HIDDEN_MARKER } from "@lifediary/shared";
 import { CTX, Chats } from "./shared.ts";
+import { stripScheduledRunHeader } from "../scheduled-run-context.ts";
 
 /**
  * 会话考古：跨会话检索 transcript（2026-11-09 T4 §4）。
@@ -315,17 +316,20 @@ async function readTranscriptSources(reader: SessionReader): Promise<TranscriptS
 				if (entry.kind !== "pi.user" && entry.kind !== "pi.assistant") continue;
 				const message = entry.model?.[0];
 				if (!message) continue;
-			const text = contentText(message.content).trim();
-			if (!text) continue;
+			const raw = contentText(message.content).trim();
+			if (!raw) continue;
 			// 2026-11-17 定时主动轮的触发指令对用户隐藏：这里绕过 fold 直读 entries，
 			// 必须同判据跳过，否则全局搜索能把"看不见的消息"搜出来。
 			// 标记独立成行即可（前面可能有 autonomous 头）。
 			if (
 				entry.kind === "pi.user" &&
-				text.split("\n").some((line) => line.trim() === PROACTIVE_HIDDEN_MARKER)
+				raw.split("\n").some((line) => line.trim() === PROACTIVE_HIDDEN_MARKER)
 			) {
 				continue;
 			}
+			// 可见的定时轮只索引用户写的那段指令，不把模型侧技术头带进搜索结果。
+			const text = entry.kind === "pi.user" ? stripScheduledRunHeader(raw) : raw;
+			if (!text) continue;
 			const at = typeof message.timestamp === "number" ? message.timestamp : 0;
 			lines.push({ role: entry.kind === "pi.user" ? "user" : "assistant", text, at });
 			}

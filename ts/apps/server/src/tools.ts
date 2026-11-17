@@ -95,11 +95,14 @@ import { recordSkillUse } from "./skill-usage.ts";
 // 执事间递话（2026-11-08 扫尾批 8d）：通道与工具定义在 partner-relay.ts，
 // 送达函数由装配层注入（本文件不持有 harness）。
 import { createSendToAgentTool, type PartnerRelayDeps } from "./partner-relay.ts";
+// 派活按单指定工作目录 / 权限档的回滚开关（2026-11-17）
+import { delegateWorkdirEnabled } from "./flags.ts";
 // agent 中途播报（2026-11-10 批 13 §三）：工具定义在 progress-report.ts，送达走 delegation 通道。
 import { createReportProgressTool } from "./progress-report.ts";
 import {
 	ProjectError,
 	projectsStore,
+	resolveChatDir,
 	resolveDelegationProject,
 	type Project,
 	type ProjectRef,
@@ -132,6 +135,7 @@ import type { SessionSearchHit } from "./agent/session-search.ts";
 // 已迁 = recall_sessions / ask_user / report_progress / recall / web_search / propose_topic / skill。
 import { encodeToolResult, err, ok, type ToolResult } from "./tool-result.ts";
 import { isDeferredTool, toolIndexEnabled } from "./tool-index.ts";
+import { recordToolLoad } from "./tool-usage.ts";
 import { disabledToolsOfConversation } from "./tool-visibility.ts";
 
 /**
@@ -988,6 +992,21 @@ export function createTools(deps: ToolDeps) {
 						"验收项会在任务详情里单独列出，不要和动作混在一句里。",
 				}),
 			),
+			workdir: Type.Optional(
+				Type.String({
+					description:
+						"这张单在哪个目录里干活。可以是绝对路径，也可以是相对项目主文件夹的路径；" +
+						"必须落在已登记的项目 / 主工作区内（登记表外的一律拒绝）。" +
+						"不填 = 项目主文件夹。续跑（resume）时不生效，沿用原单目录。",
+				}),
+			),
+			permission: Type.Optional(
+				Type.Union([Type.Literal("read"), Type.Literal("edit"), Type.Literal("full")], {
+					description:
+						"这张单的工具权限档：read=只读、edit=可改文件、full=可跑任意命令。只对 Claude / Codex / OpenCode 执行器生效；" +
+						"不填 = 跟随设置里「派活」的默认档。续跑不生效。",
+				}),
+			),
 		}),
 		execute: async (args, api, context) => {
 			// 派活的进度和「需要你」要能实时到客户端，否则那几分钟界面是死的。
@@ -1121,6 +1140,20 @@ export function createTools(deps: ToolDeps) {
 				}
 			}
 
+			// 工作目录（2026-11-17）：总管按单指定，不填 = 项目主文件夹。
+			// 只对新派生效（续跑沿用原单快照）；必须落在已登记项目 / 主工作区内，
+			// 登记表之外的路径直接拒绝建单——那是"目录越界"，不是能力限制。
+			let workDir: string | undefined;
+			const rawWorkDir = (args.workdir ?? "").trim();
+			const workdirOn = delegateWorkdirEnabled();
+			if (resumeTicketId === undefined && rawWorkDir && workdirOn) {
+				const store = deps.projects ?? projectsStore();
+				const base = project?.rootPath ?? store.getWorkspace()?.rootPath;
+				const pick = resolveChatDir(rawWorkDir, store, base);
+				if (!pick.ok) return textToolResult(ok({ error: "bad_workdir", message: pick.message }));
+				workDir = pick.pick.path;
+			}
+
 			// 派活注入项目记忆（2026-11-16）：只拼进交给 chancellor 的 requirement，
 			// **不参与上面的幂等指纹**——同一请求不能因为记忆更新而变成"内容不同"。
 			// 记忆库读不出来 / 开关关着 → 空串，requirement 原样。
@@ -1202,6 +1235,9 @@ export function createTools(deps: ToolDeps) {
 					project,
 					...(steps ? { steps } : {}),
 					...(requestId ? { requestId } : {}),
+					// 工作目录与权限档（2026-11-17）：只写进新单；续跑由 chancellor 沿用原单。
+					...(workdirOn && workDir ? { workDir } : {}),
+					...(workdirOn && args.permission ? { employeePermission: args.permission } : {}),
 					// 执事在自己领域内直派（2026-11-07）：不带 managers 就是既有分管路径
 					...(requestFields.managers === false ? { managers: false as const } : {}),
 					// 派活留言（2026-11-07）：谁在什么身份下说的这句话，落进任务详情
@@ -2239,6 +2275,9 @@ export function createTools(deps: ToolDeps) {
 						};
 					}
 					const tool = available[0]!;
+					// 工具用量账（2026-11-17）：记一次"被搜出来"——loads ≠ count，
+					// 加载了没调用也留痕，这正是"被藏起来但老被要用"的信号。
+					recordToolLoad(name);
 					const text = [
 						tool.name,
 						tool.description,

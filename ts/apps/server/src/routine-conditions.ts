@@ -178,10 +178,21 @@ export interface CursorAdvanceInput {
 	quiet: boolean;
 	/** 本轮被无人值守跳过的工具数（>0 = 没跑全） */
 	skippedToolCount: number;
+	/**
+	 * 本轮报过错的工具数（>0 = 没跑成；2026-11-17）。
+	 * 读失败在这种情况下会被压成"非 quiet"，但产出仍可能是空串——
+	 * 不把这种情况记成"已经看过"，否则下一轮就再也发现不了这次失败。
+	 */
+	toolErrorCount?: number;
 }
 
 export function shouldAdvanceCursor(input: CursorAdvanceInput): boolean {
-	return input.ok && !input.quiet && input.skippedToolCount === 0;
+	return (
+		input.ok &&
+		!input.quiet &&
+		input.skippedToolCount === 0 &&
+		(input.toolErrorCount ?? 0) === 0
+	);
 }
 
 // ── 事件触发器的三件门（2026-11-10 批 15 §一，全景调研 #29）────

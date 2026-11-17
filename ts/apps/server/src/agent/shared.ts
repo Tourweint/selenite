@@ -136,6 +136,27 @@ export const ChatProjects = defineDoc<{ byInternal: Record<string, string> }>({
 	checkpointWhen: () => false,
 });
 
+/**
+ * 分支来源（2026-11-17 从回答分支）：对外会话 id → 来源快照，只用于展示与回跳。
+ *
+ * `source` = 来源会话的对外 id；`at` = 分支创建时间；`atMessageId` = 分叉点那条
+ * assistant 消息的可寻址 id（2026-11-17 画板批新增，纯增量；老数据没有）。
+ * 刻意不参与历史解析：不设 durable `parent`（设了历史会在两条会话里各出现一遍），
+ * 只用这张文档记来源。新库 / 旧库都靠 durable 的文档迁移，不需要 ALTER。
+ */
+export const ChatOrigins = defineDoc<{
+	byExternal: Record<
+		string,
+		{ source: string; sourceTitle?: string; at: number; atMessageId?: string }
+	>;
+}>({
+	kind: "lifediary.chat-origins",
+	version: 1,
+	scope: "session",
+	initial: () => ({ byExternal: {} }),
+	checkpointWhen: () => false,
+});
+
 export interface ResolvedChat {
 	conversation: Conversation;
 	/** 对外 id，客户端存的是这个 */

@@ -198,6 +198,8 @@ const MESSAGE_SHAPE = {
 			},
 		},
 		workMs: { kind: "optional", of: { kind: "number" } },
+		// 2026-11-17 消息时刻：assistant 的收尾时间（at 是请求开始）
+		endedAt: { kind: "optional", of: { kind: "number" } },
 	},
 };
 
@@ -230,6 +232,8 @@ const EXPECTED: Record<string, unknown> = {
 			// 2026-11-06 侧栏调整 B2：新会话种类（续话带不匹配值 → 400）
 			chatKind: { kind: "optional", of: { kind: "enum", values: ["chief", "worker"] } },
 			conversationId: { kind: "optional", of: { kind: "string" } },
+			// 2026-11-17 新建 worker 会话直接指定工作目录（纯增量）
+			dirPath: { kind: "optional", of: { kind: "string" } },
 			messages: {
 				kind: "array",
 				of: {

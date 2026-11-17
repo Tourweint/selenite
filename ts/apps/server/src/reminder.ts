@@ -1,5 +1,6 @@
 import { defineTask } from "@earendil-works/pi-durable";
 import { flagEnabled } from "./flags.ts";
+import { recordReminderRun } from "./reminder-runs.ts";
 import { invokeScheduledRun } from "./scheduled-run-deliverer.ts";
 
 /**
@@ -14,6 +15,24 @@ import { invokeScheduledRun } from "./scheduled-run-deliverer.ts";
 
 /** 频率（2026-11-14）：none = 一次性；daily = 每天；weekly = 每周几；monthly = 每月几号。 */
 export type ReminderRepeat = "none" | "daily" | "weekly" | "monthly";
+
+/**
+ * 触发指令的可见性（2026-11-17 定时任务重做）。
+ *
+ * hidden = 默认/旧行为：触发指令带 `[lifediary.proactive]` 标记，回读时整条对用户隐藏，
+ * 会话里只见模型回复（"像 TA 主动找我"）。
+ * visible = 触发指令就是用户写的那段话，回读时保留（技术透明头另由展示层剥掉）。
+ */
+export type ReminderVisibility = "hidden" | "visible";
+
+export function reminderVisibilityOf(value: unknown): ReminderVisibility {
+	return value === "visible" ? "visible" : "hidden";
+}
+
+/** 缺省 = 启用；只有显式 false 才是暂停（旧数据没有这个字段）。 */
+export function reminderEnabledOf(value: unknown): boolean {
+	return value !== false;
+}
 
 export interface ReminderInput {
 	/** 提醒内容 */
@@ -35,6 +54,13 @@ export interface ReminderInput {
 	reminderId?: string;
 	/** 目标执事（2026-11-12）：任务建在该执事会话；仅作展示与追溯。 */
 	partnerId?: string | null;
+	/**
+	 * 暂停（2026-11-17 定时任务重做）：false = 到点只续排、不跑模型也不写旧提醒。
+	 * 缺省 = 启用。一次性任务没有可恢复的持久定义，UI 不提供暂停。
+	 */
+	enabled?: boolean;
+	/** 触发指令可见性（2026-11-17）；缺省 hidden，保持旧行为。 */
+	visibility?: ReminderVisibility;
 }
 
 /** 提醒写进会话时用的 entry 类型，客户端按它渲染 */
@@ -158,10 +184,14 @@ export const ReminderTask = defineTask<
 			// 2026-11-17 定时主动轮：默认到点让目标执事跑一轮模型（触发消息对用户隐藏）。
 			// SCHEDULED_TASK_MODEL_RUN=false 逐字节回到旧闹钟：写提醒 entry + 写死消息。
 			const runModel = flagEnabled("SCHEDULED_TASK_MODEL_RUN");
+			// 2026-11-17 定时任务重做：暂停 = 到点只续排，不跑模型、不写旧提醒。
+			// 一次性任务没有下一跳，暂停后会静默终止（UI 不提供一次性暂停）。
+			const enabled = reminderEnabledOf(task.input.enabled);
+			const visible = reminderVisibilityOf(task.input.visibility) === "visible";
 			await runtime.commit(
 				async (tx) => {
 					// 旧形态才写提醒 entry（回滚分支）；新形态的"开口"由模型回复承担。
-					if (!runModel) {
+					if (!runModel && enabled) {
 						await tx.appendEntry(runtime.conversationId, {
 							kind: REMINDER_ENTRY_KIND,
 							data: { text: task.input.text, at: task.input.at },
@@ -183,17 +213,39 @@ export const ReminderTask = defineTask<
 				},
 				context,
 			);
+			if (!enabled) return;
 			if (runModel) {
 				// 新形态：跑一轮模型（实现由 index.ts 注入，解环）。失败只 warn，不影响续排链。
 				try {
-					await invokeScheduledRun({
+					const result = await invokeScheduledRun({
 						conversationId: runtime.conversationId,
 						partnerId: task.input.partnerId,
 						text: task.input.text,
+						visible,
 					});
+					if (result && task.input.reminderId) {
+						recordReminderRun({
+							reminderId: task.input.reminderId,
+							partnerId: task.input.partnerId ?? null,
+							trigger: "scheduled",
+							status: result.ok ? "success" : "failed",
+							at: task.input.at,
+							summary: result.ok ? result.text : "这一轮没跑完（详情看服务端日志）",
+						});
+					}
 				} catch (error) {
 					const detail = error instanceof Error ? error.message : String(error);
 					console.warn(`[reminder] 会话 ${runtime.conversationId} 到点跑模型失败: ${detail}`);
+					if (task.input.reminderId) {
+						recordReminderRun({
+							reminderId: task.input.reminderId,
+							partnerId: task.input.partnerId ?? null,
+							trigger: "scheduled",
+							status: "failed",
+							at: task.input.at,
+							summary: "这一轮没跑完（详情看服务端日志）",
+						});
+					}
 				}
 			} else if (deliverer) {
 				// 回滚形态（2026-11-13）：在会话里写一条 assistant 消息，客户端一打开就看到

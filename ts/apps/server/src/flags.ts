@@ -340,6 +340,20 @@ export function flagsUiEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
 	return (env.AGENT_FLAGS_UI ?? "").trim().toLowerCase() !== "false";
 }
 
+/**
+ * 新建对话直接选目录（2026-11-17）。
+ * 缺省开；显式 false 时 `dirPath` 一律 400，回到"只认当前项目主文件夹"的旧口径。
+ * 不传 `dirPath` 的请求本来就与旧行为逐字节一致，所以关掉只是拦掉新参数。
+ */
+export function chatDirPickEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	return (env.CHAT_DIR_PICK ?? "").trim().toLowerCase() !== "false";
+}
+
+/** 派活按单指定工作目录 / 工具权限（2026-11-17）。缺省开；显式 false 时两个字段收下但不生效。 */
+export function delegateWorkdirEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	return (env.DELEGATE_WORKDIR ?? "").trim().toLowerCase() !== "false";
+}
+
 export function flagsPath(env: NodeJS.ProcessEnv = process.env): string {
 	return resolve(env.AGENT_FLAGS_PATH?.trim() || ".data/agent-flags.json");
 }

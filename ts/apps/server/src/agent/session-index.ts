@@ -5,6 +5,8 @@
  */
 
 import { memoryExtractMode, preferenceExtractionEnabled } from "../memory-extract.ts";
+import { partnersStore } from "../partners.ts";
+import type { PartnerSessionLinkRow } from "../partner-types.ts";
 import { projectsStore } from "../projects.ts";
 import { readLlmConfig } from "../provider.ts";
 import { memoryEngine } from "./assist.ts";
@@ -60,6 +62,31 @@ export async function archiveChatsOfProject(projectId: string): Promise<number> 
 	const at = Date.now();
 	for (const externalId of externalIds) archiveChat(externalId, at);
 	return externalIds.length;
+}
+
+/**
+ * 把某个项目下的会话改挂到另一个项目（2026-11-17 项目合并）。
+ *
+ * 只改 `ChatProjects.byInternal` 的映射，**不动会话本身、不碰消息、不改标题**。
+ * 与归档不同：这里不区分 task-/partner- 前缀，全部改挂——项目合并后这些会话的
+ * 记忆键空间本来就该跟着目标项目走。
+ */
+export async function rebindChatsOfProject(sourceProjectId: string, targetProjectId: string): Promise<number> {
+	if (!sourceProjectId || !targetProjectId || sourceProjectId === targetProjectId) return 0;
+	const harness = await getHarness();
+	const chatProjects = await harness.snapshot(ChatProjects, CTX);
+	let rebound = 0;
+	for (const [internalId, mappedProjectId] of Object.entries(chatProjects?.byInternal ?? {})) {
+		if (mappedProjectId === sourceProjectId) rebound += 1;
+	}
+	if (rebound === 0) return 0;
+	await harness.commit(async (tx) => {
+		const projects = await tx.doc(ChatProjects);
+		for (const [internalId, mappedProjectId] of Object.entries(projects.byInternal ?? {})) {
+			if (mappedProjectId === sourceProjectId) projects.byInternal[internalId] = targetProjectId;
+		}
+	}, CTX);
+	return rebound;
 }
 
 export interface MemoryView {
@@ -199,6 +226,14 @@ export interface ChatStats {
 	lastAt: number;
 }
 
+/**
+ * 空会话零值兜底（2026-11-17 复核修正）：`readChatStats` 对 turns=0 的会话返回 null
+ * （新建副会话还没发第一条消息；canonical 只有问候也是 assistant、不计 turns）。
+ * 对"明确请求且确实存在于 Chats 的 id"用零值照常出条目，保留 title / pinned / link；
+ * `listChats` 的活跃清单仍默认跳过空壳（includeEmpty=false）。
+ */
+const ZERO_CHAT_STATS: ChatStats = { firstText: "", turns: 0, createdAt: 0, lastAt: 0 };
+
 export async function readChatStats(
 	harness: HarnessHandle,
 	internalId: number,
@@ -236,12 +271,19 @@ export async function readChatStats(
 	return { firstText, turns, createdAt, lastAt };
 }
 
+type SessionLinkHint = {
+	partnerId: string;
+	role: PartnerSessionLinkRow["role"];
+	routeKey: string | null;
+};
+
 function chatEntryOf(
 	conversationId: string,
 	internalId: number,
 	stats: ChatStats,
 	meta: ChatMeta,
 	kinds: Record<string, "chief" | "worker">,
+	link?: SessionLinkHint,
 ): ChatIndexEntry {
 	return {
 		conversationId,
@@ -252,10 +294,22 @@ function chatEntryOf(
 		chatKind: chatKindOfInternal(internalId, kinds),
 		...(meta.titles[conversationId] ? { title: meta.titles[conversationId] } : {}),
 		...(meta.pins.includes(conversationId) ? { pinned: true } : {}),
+		// 归属链接（2026-11-17 批1）：调用方一次取快照后逐条传入，chatEntryOf 自己不查库。
+		...(link
+			? {
+					partnerId: link.partnerId,
+					sessionRole: link.role,
+					isCanonical: link.role === "canonical",
+				}
+			: {}),
 	};
 }
 
-export async function listChats(limit = 50): Promise<ChatIndexEntry[]> {
+/**
+ * 列活跃会话。`includeEmpty=true` 时对 turns=0 的会话也用零值出条目（2026-11-17 复核修正，
+ * 给 chief 选择器用）——默认 false，既有调用方行为逐字节不变。
+ */
+export async function listChats(limit = 50, includeEmpty = false): Promise<ChatIndexEntry[]> {
 	if (!readLlmConfig()) return [];
 	const harness = await getHarness();
 	const chats = await harness.snapshot(Chats, CTX);
@@ -265,6 +319,8 @@ export async function listChats(limit = 50): Promise<ChatIndexEntry[]> {
 	const archived = new Set(meta.archived);
 	// 种类表读一次（2026-11-06 B2）：逐会话查库会把列表代价再放大一倍
 	const kinds = (await harness.snapshot(ChatKinds, CTX))?.byInternal ?? {};
+	// 链接表一次取快照（2026-11-17 批1）：50 条会话逐条查会变成 N+1
+	const links = partnersStore().sessionLinksMap();
 	const pairs = Object.entries(chats?.byExternal ?? {})
 		.filter(([conversationId]) => !conversationId.startsWith(TASK_CONVERSATION_PREFIX))
 		.filter(([conversationId]) => !archived.has(conversationId))
@@ -274,8 +330,17 @@ export async function listChats(limit = 50): Promise<ChatIndexEntry[]> {
 	for (const [conversationId, internalId] of pairs) {
 		try {
 			const stats = await readChatStats(harness, Number(internalId));
-			if (!stats) continue;
-			entries.push(chatEntryOf(conversationId, Number(internalId), stats, meta, kinds));
+			if (!stats && !includeEmpty) continue;
+			entries.push(
+				chatEntryOf(
+					conversationId,
+					Number(internalId),
+					stats ?? ZERO_CHAT_STATS,
+					meta,
+					kinds,
+					links.get(Number(internalId)),
+				),
+			);
 		} catch (error) {
 			// 单个会话读失败不该让整张索引失败（重装场景下可能是残留的空会话）
 			console.warn(
@@ -285,6 +350,48 @@ export async function listChats(limit = 50): Promise<ChatIndexEntry[]> {
 	}
 
 	return entries.sort((a, b) => b.lastAt - a.lastAt);
+}
+
+/**
+ * 按给定对外 id 取会话索引条目（2026-11-17 批1，给 /partners/:id/sessions 用）。
+ * 按传入顺序返回；不存在的 id 跳过；已归档的也跳过（与活跃清单同口径）；同样带 link 字段。
+ * 这样列表端点不用 `listChats(limit)`——后者会按 lastAt 截断，可能把老 canonical 丢掉。
+ * 对 turns=0 的会话用零值兜底（2026-11-17 复核修正）：空副会话 / 只有问候的 canonical 也要能出现在选择器里。
+ */
+export async function chatIndexEntriesOf(ids: readonly string[]): Promise<ChatIndexEntry[]> {
+	if (!readLlmConfig()) return [];
+	if (ids.length === 0) return [];
+	const harness = await getHarness();
+	const chats = await harness.snapshot(Chats, CTX);
+	const meta = readChatMeta();
+	const archived = new Set(meta.archived);
+	const kinds = (await harness.snapshot(ChatKinds, CTX))?.byInternal ?? {};
+	const links = partnersStore().sessionLinksMap();
+	const entries: ChatIndexEntry[] = [];
+	for (const conversationId of ids) {
+		const internalId = chats?.byExternal?.[conversationId];
+		if (internalId === undefined || archived.has(conversationId)) continue;
+		try {
+			// 明确请求的 id 已在 Chats 里：turns=0 也照常出条目（零值兜底），
+			// 否则新建的空副会话 / 只有问候的 canonical 在选择器里看不见。
+			const stats = (await readChatStats(harness, Number(internalId))) ?? ZERO_CHAT_STATS;
+			entries.push(
+				chatEntryOf(
+					conversationId,
+					Number(internalId),
+					stats,
+					meta,
+					kinds,
+					links.get(Number(internalId)),
+				),
+			);
+		} catch (error) {
+			console.warn(
+				`[chats] 读取会话 ${conversationId} 失败: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+	return entries;
 }
 
 /**
@@ -347,6 +454,7 @@ export async function listChatsForExport(limit = 5000): Promise<ChatIndexEntry[]
 	const archived = new Set(meta.archived);
 	const kinds = (await harness.snapshot(ChatKinds, CTX))?.byInternal ?? {};
 	const chatProjects = (await harness.snapshot(ChatProjects, CTX))?.byInternal ?? {};
+	const links = partnersStore().sessionLinksMap();
 
 	const projectNames = new Map<string, string>();
 	if (Object.keys(chatProjects).length > 0) {
@@ -368,7 +476,14 @@ export async function listChatsForExport(limit = 5000): Promise<ChatIndexEntry[]
 		try {
 			const stats = await readChatStats(harness, Number(internalId));
 			if (!stats) continue;
-			const entry = chatEntryOf(conversationId, Number(internalId), stats, meta, kinds);
+			const entry = chatEntryOf(
+				conversationId,
+				Number(internalId),
+				stats,
+				meta,
+				kinds,
+				links.get(Number(internalId)),
+			);
 			const projectId = chatProjects[String(internalId)];
 			entries.push({
 				...entry,

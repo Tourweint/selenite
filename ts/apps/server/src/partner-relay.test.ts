@@ -50,6 +50,7 @@ function partner(over: Partial<PartnerRow> & { id: string; name: string }): Part
 		avatar: null,
 		projectIds: [],
 		disabledTools: [],
+		promotedTools: [],
 		dispatchAuthority: false,
 		toolProjection: null,
 		currentGoal: null,

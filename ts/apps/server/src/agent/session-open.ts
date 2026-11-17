@@ -7,6 +7,7 @@
 import { auxPinnedModelId, auxiliaryEnabled } from "../auxiliary.ts";
 import { COMPANIONS_ENABLED, partnersStore } from "../partners.ts";
 import { projectsStore } from "../projects.ts";
+import type { ChatDirPick } from "../projects.ts";
 import { chatModelRef, clampThinkingLevel, currentThinkingLevels, isFaux, levelFromModelId, readLlmConfig } from "../provider.ts";
 import { markTaskSession } from "../unattended.ts";
 import { getHarness, lifediaryExt, rememberLevel, researchExt, stickyThinkingLevel } from "./lifecycle.ts";
@@ -196,6 +197,7 @@ export async function openChat(
 	externalId: string | undefined,
 	modelRef?: { provider: string; modelId: string },
 	kind?: NewChatKind,
+	dir?: ChatDirPick,
 ): Promise<ResolvedChat | null> {
 	const harness = await getHarness();
 	const config = readLlmConfig();
@@ -217,13 +219,20 @@ export async function openChat(
 		let projectId: string | null = null;
 		let projectRoot: string | null = null;
 		if (chatKind === "worker") {
-			try {
-				const current = projectsStore().getCurrentProject();
-				projectId = current?.id ?? null;
-				projectRoot = current?.rootPath ?? null;
-			} catch {
-				projectId = null;
-				projectRoot = null;
+			// 2026-11-17：新建时直接选了目录 → 用目录（项目归属由目录反推，可能为空）；
+			// 没选 → 沿用「当前项目主文件夹」的旧口径。
+			if (dir) {
+				projectId = dir.projectId;
+				projectRoot = dir.path;
+			} else {
+				try {
+					const current = projectsStore().getCurrentProject();
+					projectId = current?.id ?? null;
+					projectRoot = current?.rootPath ?? null;
+				} catch {
+					projectId = null;
+					projectRoot = null;
+				}
 			}
 		}
 		const conversation = await harness.createConversation(
@@ -241,8 +250,9 @@ export async function openChat(
 					if (projectId) {
 						const chatProjects = await tx.doc(ChatProjects);
 						chatProjects.byInternal[String(conversationId)] = projectId;
-						if (projectRoot) await configure(tx, conversationId, { cwd: projectRoot });
 					}
+					// cwd 与项目绑定分开（2026-11-17）：只选目录、推不出项目时也要落 cwd
+					if (projectRoot) await configure(tx, conversationId, { cwd: projectRoot });
 				},
 			},
 			CTX,

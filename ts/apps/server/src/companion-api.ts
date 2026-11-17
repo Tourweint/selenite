@@ -67,11 +67,21 @@ import {
 } from "./partner-bundle.ts";
 // 人设页工具勾选（2026-11-16 工具裁剪 B）：目录 / 校验 / 视图都收在 partner-tools.ts。
 import { getHarness } from "./agent/lifecycle.ts";
+// 副会话选择器（2026-11-17 批1）：列/建会话只在这里做 HTTP 形状映射，
+// 真正的身份对齐与链接登记在 partner-runtime 一侧。
+import { externalChatIds, listChats, openChat } from "./agent.ts";
+import type { ResolvedChat } from "./agent.ts";
+import { chatIndexEntriesOf } from "./agent/session-index.ts";
+import { renameChat } from "./agent/session-meta.ts";
+import { sideSessionsEnabled } from "./partner-session-role.ts";
+import { createPartnerSideSession } from "./partner-runtime-run-partner-turn.ts";
 import {
 	modelToolCatalog,
 	partnerToolsEnabled,
 	partnerToolsView,
+	promotedConflictError,
 	sanitizeDisabledTools,
+	sanitizePromotedTools,
 	toolDependencyError,
 } from "./partner-tools.ts";
 
@@ -268,7 +278,7 @@ export function mountCompanions(app: Hono): void {
 		if (!partner) return c.json({ ok: false, error: "not_found" }, 404);
 		c.header("cache-control", "no-store");
 		if (!partnerToolsEnabled()) {
-			return c.json({ ok: true, enabled: false, disabled: [], groups: [], tools: [] });
+			return c.json({ ok: true, enabled: false, disabled: [], promoted: [], groups: [], tools: [] });
 		}
 		try {
 			await getHarness();
@@ -279,10 +289,16 @@ export function mountCompanions(app: Hono): void {
 	});
 
 	/**
-	 * 人设页工具勾选 · 写（2026-11-16 工具裁剪 B）：body `{disabled: string[]}` = 被取消的工具名。
-	 * 校验走 sanitizeDisabledTools（未知名 400、去重、≤64）；只写 disabled_tools 一列，
-	 * 不 bump 身份版本、不重启会话、不影响正在跑的这一轮（下一轮生效）。
-	 * 成功 return 同 GET 的形状，前端直接回填。放在 `/:id` 之前注册。
+	 * 人设页工具勾选 · 写（2026-11-16 工具裁剪 B；2026-11-17 扩常驻名单）：
+	 * body `{disabled: string[], promoted?: string[]}`。
+	 *   - `disabled` = 被取消的工具名（必填，空数组 = 全开 = 恢复默认）；
+	 *   - `promoted` = 被提升成常驻的**按需**工具名（可选；**不带这个字段 = 不改原名单**，
+	 *     旧客户端保存勾选时不会顺手清掉提升）。带 = 全量替换，空数组 = 全部收回按需。
+	 * 校验：sanitizeDisabledTools / sanitizePromotedTools（未知名 400、非按需工具 400、去重、≤64）；
+	 * 取消与提升冲突 → 400；依赖收口见 toolDependencyError。
+	 * 只写 partners 的 disabled_tools / promoted_tools 两列 + updated_at，**不 bump 身份版本、
+	 * 不重启会话、不影响正在跑的这一轮（下一轮生效）**；成功返回**同 GET 的形状**供前端回填。
+	 * 放在 `/:id` 之前注册。
 	 */
 	app.put("/api/v1/partners/:id/tools", async (c) => {
 		const partner = store().get(c.req.param("id"));
@@ -298,8 +314,12 @@ export function mountCompanions(app: Hono): void {
 		} catch {
 			return c.json({ error: "tools_unavailable" }, 503);
 		}
-		const body = (await c.req.json().catch(() => null)) as { disabled?: unknown } | null;
-		const known = new Set(modelToolCatalog().map((tool) => tool.name));
+		const body = (await c.req.json().catch(() => null)) as
+			| { disabled?: unknown; promoted?: unknown }
+			| null;
+		const catalog = modelToolCatalog();
+		const known = new Set(catalog.map((tool) => tool.name));
+		const deferred = new Set(catalog.filter((tool) => tool.deferred === true).map((tool) => tool.name));
 		const result = sanitizeDisabledTools(body?.disabled, known);
 		if (!result.ok) {
 			return c.json(
@@ -307,12 +327,32 @@ export function mountCompanions(app: Hono): void {
 				400,
 			);
 		}
+		// 不带 promoted 字段 = 不改原名单（旧客户端 / 只改勾选的场景）。
+		const hasPromoted = body !== null && Object.prototype.hasOwnProperty.call(body, "promoted");
+		let promoted: string[] | null = null;
+		if (hasPromoted) {
+			const promotedResult = sanitizePromotedTools(body?.promoted, deferred, known);
+			if (!promotedResult.ok) {
+				return c.json(
+					{
+						error: "bad_request",
+						message: promotedResult.message,
+						...(promotedResult.unknown ? { unknown: promotedResult.unknown } : {}),
+					},
+					400,
+				);
+			}
+			promoted = promotedResult.promoted;
+			const conflict = promotedConflictError(promoted, result.disabled);
+			if (conflict) return c.json({ error: "bad_request", message: conflict }, 400);
+		}
 		// delegate 的描述依赖 skill 读派活手册：只关 skill 不关 delegate 会留下一个坏组合。
 		const dependency = toolDependencyError(result.disabled, known);
 		if (dependency) {
 			return c.json({ error: "bad_request", message: dependency }, 400);
 		}
-		const updated = store().setDisabledTools(partner.id, result.disabled);
+		let updated = store().setDisabledTools(partner.id, result.disabled);
+		if (promoted !== null) updated = store().setPromotedTools(partner.id, promoted);
 		if (!updated) return c.json({ ok: false, error: "not_found" }, 404);
 		return c.json({ ok: true, ...partnerToolsView(updated) });
 	});
@@ -995,6 +1035,99 @@ export function mountCompanions(app: Hono): void {
 		return c.json({ ok: false, error: "greeting_failed" }, 503);
 	});
 
+	/**
+	 * 一人多会话 · 列会话（2026-11-17 批1，给选择器用）。
+	 *
+	 * 执事：canonical（sessionIdOfPartner → 对外 id）+ 所有 side 链接的 routeKey，
+	 * 用 chatIndexEntriesOf 一次取标题 / 时间 / 轮数，canonical 永远第一，其余按 lastAt 倒序；
+	 * 已归档的不返回。总管：没有链接，直接列 chatKind=chief 且非 partner- 前缀的会话。
+	 * 开关关 → 400（不列、不建；已存在的仍可按 id 从 /agent/chat 续）。
+	 */
+	app.get("/api/v1/partners/:id/sessions", async (c) => {
+		if (!sideSessionsEnabled()) return c.json({ error: "side_sessions_disabled" }, 400);
+		const id = c.req.param("id");
+		if (id === "chief") {
+			// includeEmpty=true：只为拿到「刚建且命名过」的空会话；无名空壳仍不进选择器，
+			// 否则历史里 21 条 turns=0 的会话会刷成一片「新会话」（2026-11-17 浏览器验收修正）。
+			const sessions = (await listChats(200, true))
+				.filter((chat) => chat.chatKind === "chief" && !chat.conversationId.startsWith("partner-"))
+				.filter((chat) => chat.turns > 0 || Boolean(chat.title))
+				.sort((a, b) => b.lastAt - a.lastAt)
+				.map((chat) => ({
+					conversationId: chat.conversationId,
+					role: "chief" as const,
+					...(chat.title ? { title: chat.title } : {}),
+					firstText: chat.firstText,
+					lastAt: chat.lastAt,
+					turns: chat.turns,
+					...(chat.pinned ? { pinned: true } : {}),
+				}));
+			return c.json({ ok: true, partnerId: "chief", kind: "chief", sessions });
+		}
+		const partner = store().get(id);
+		if (!partner) return c.json({ error: "not_found" }, 404);
+		if (partner.status !== "active") return c.json({ error: "partner_inactive" }, 409);
+		const canonicalInternalId = store().sessionIdOfPartner(id);
+		const externalById = await externalChatIds();
+		const canonicalId =
+			canonicalInternalId != null ? externalById.get(canonicalInternalId) : undefined;
+		const sideIds = store()
+			.sideLinksOf(id)
+			.map((link) => link.routeKey)
+			.filter((routeKey): routeKey is string => Boolean(routeKey));
+		const entries = await chatIndexEntriesOf([
+			...(canonicalId ? [canonicalId] : []),
+			...sideIds,
+		]);
+		const canonicalEntry = canonicalId ? entries.find((e) => e.conversationId === canonicalId) : undefined;
+		const ordered = [
+			...(canonicalEntry ? [canonicalEntry] : []),
+			...entries
+				.filter((entry) => entry.conversationId !== canonicalId)
+				.sort((a, b) => b.lastAt - a.lastAt),
+		];
+		const sessions = ordered.map((entry) => ({
+			conversationId: entry.conversationId,
+			role: entry.conversationId === canonicalId ? ("canonical" as const) : ("side" as const),
+			...(entry.title ? { title: entry.title } : {}),
+			firstText: entry.firstText,
+			lastAt: entry.lastAt,
+			turns: entry.turns,
+			...(entry.pinned ? { pinned: true } : {}),
+		}));
+		return c.json({ ok: true, partnerId: id, kind: "partner", sessions });
+	});
+
+	/**
+	 * 一人多会话 · 新建会话（2026-11-17 批1）。**不发送问候语、不写任何消息**。
+	 * 执事建 `partner-<id>-side-<token>` 并登记 side 链接；总管建普通 chief 会话、不建链接。
+	 * body `{title?}`（≤80 字）写进 chat-meta.titles（改名走 session-meta 的 renameChat）。
+	 */
+	app.post("/api/v1/partners/:id/sessions", async (c) => {
+		if (!sideSessionsEnabled()) return c.json({ error: "side_sessions_disabled" }, 400);
+		const body = (await c.req.json().catch(() => null)) as { title?: unknown } | null;
+		const title = typeof body?.title === "string" ? body.title.trim() : undefined;
+		if (title !== undefined && [...title].length > 80) {
+			return c.json({ error: "bad_title" }, 400);
+		}
+		const id = c.req.param("id");
+		let chat: ResolvedChat | null;
+		let role: "chief" | "side";
+		if (id === "chief") {
+			chat = await openChat(undefined, undefined, "chief");
+			role = "chief";
+		} else {
+			const partner = store().get(id);
+			if (!partner) return c.json({ error: "not_found" }, 404);
+			if (partner.status !== "active") return c.json({ error: "partner_inactive" }, 409);
+			chat = await createPartnerSideSession(id);
+			role = "side";
+		}
+		if (!chat) return c.json({ error: "session_unavailable" }, 503);
+		if (title) renameChat(chat.externalId, title);
+		return c.json({ ok: true, conversationId: chat.externalId, role });
+	});
+
 	// ── 例行任务（批次B B3）──────────────────────────────
 	app.post("/api/v1/routines", async (c) => {
 		const body = (await c.req.json().catch(() => null)) as
@@ -1046,11 +1179,21 @@ export function mountCompanions(app: Hono): void {
 		const body = (await c.req.json().catch(() => null)) as
 			| { name?: string; prompt?: string; triggers?: RoutineTrigger[]; sessionMode?: string; enabled?: boolean }
 			| null;
+		// 2026-11-17 定时任务重做：内容现在能从界面改，长度/空值按 POST 同口径先拦一道。
+		if (body?.name !== undefined && (typeof body.name !== "string" || !body.name.trim() || body.name.trim().length > 40)) {
+			return c.json({ error: "bad_request", message: "name 必填且不超过 40 字" }, 400);
+		}
+		if (
+			body?.prompt !== undefined &&
+			(typeof body.prompt !== "string" || !body.prompt.trim() || body.prompt.length > 100_000)
+		) {
+			return c.json({ error: "bad_request", message: "prompt 必填且不超过 100k" }, 400);
+		}
 		if (body?.triggers !== undefined && validateTriggers(body.triggers)) {
 			return c.json({ error: "bad_request", message: validateTriggers(body.triggers) }, 400);
 		}
 		const routine = store().updateRoutine(id, {
-			...(body?.name !== undefined ? { name: body.name } : {}),
+			...(body?.name !== undefined ? { name: body.name.trim() } : {}),
 			...(body?.prompt !== undefined ? { prompt: body.prompt } : {}),
 			...(body?.triggers !== undefined ? { triggers: body.triggers } : {}),
 			...(body?.sessionMode !== undefined ? { sessionMode: body.sessionMode === "fresh" ? "fresh" : "persistent" } : {}),
@@ -1251,6 +1394,8 @@ function routineProjection(routine: {
 	id: string;
 	partnerId: string;
 	name: string;
+	/** 2026-11-17 定时任务重做：列表回指令全文，前端才能编辑内容（≤100k，按人规则数有上限） */
+	prompt: string;
 	triggers: RoutineTrigger[];
 	sessionMode: string;
 	enabled: boolean;
@@ -1262,6 +1407,7 @@ function routineProjection(routine: {
 		id: routine.id,
 		partnerId: routine.partnerId,
 		name: routine.name,
+		prompt: routine.prompt,
 		triggers: routine.triggers,
 		sessionMode: routine.sessionMode,
 		enabled: routine.enabled,

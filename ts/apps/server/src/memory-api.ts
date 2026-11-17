@@ -22,6 +22,7 @@ import { CHIEF_PARTNER_ID, COMPANIONS_ENABLED, partnersStore } from "./partners.
 import { projectsStore } from "./projects.ts";
 import { askPersonaAvailable, askPersonaCatalog, personaAskEnabled } from "./persona-ask.ts";
 import { flagEnabled } from "./flags.ts";
+import { memoryScopeMoveEnabled, moveScopeChecked } from "./memory-scope-move.ts";
 
 /** 记忆管理端点接受的 kind 全集（2026-11-13：列表过滤与排除都只认这些）。 */
 const ALL_MEMORY_KINDS: MemoryKind[] = [
@@ -412,7 +413,12 @@ export function mountMemoryApi(app: Hono, deps: MemoryApiDeps): void {
 		if (!enabled()) {
 			return c.json({ error: "memory_disabled", message: "记忆未启用（MEMORY_ENABLED=false）" }, 404);
 		}
-		const scopes: Array<{ scope: string; label: string; count: number; kind: "mine" | "partner" | "project" }> = [
+		const scopes: Array<{
+			scope: string;
+			label: string;
+			count: number;
+			kind: "mine" | "partner" | "project" | "orphan";
+		}> = [
 			{
 				scope: "global",
 				label: "我的记忆",
@@ -451,9 +457,58 @@ export function mountMemoryApi(app: Hono, deps: MemoryApiDeps): void {
 		} catch (error) {
 			console.warn(`[memory] 范围清单读项目失败: ${error instanceof Error ? error.message : String(error)}`);
 		}
+		// 孤儿 scope（2026-11-17 项目合并与记忆迁移）：项目登记已硬删，记忆还在。
+		// 之前它们"不可见即无害"= 永久封存；这里让它们至少可读、可整理、可迁走。
+		// label 只能给 uuid 前缀——项目行没了，名字无处可取（刻意不建墓碑表）。
+		try {
+			const known = new Set(projectsStore().listProjects(true).map((project) => project.id));
+			const orphans = (memoryEngine?.listScopes() ?? [])
+				.filter((scope) => scope.startsWith("project:"))
+				.map((scope) => ({ scope, projectId: scope.slice("project:".length) }))
+				.filter((item) => !known.has(item.projectId))
+				.sort((a, b) => a.scope.localeCompare(b.scope));
+			for (const orphan of orphans) {
+				const count = memoryOverview({
+					scope: orphan.scope,
+					limit: 0,
+					excludeKinds: ["work"],
+				}).counts.all;
+				if (count <= 0) continue;
+				scopes.push({
+					scope: orphan.scope,
+					label: `已删除的项目 · ${orphan.projectId.slice(0, 8)}`,
+					count,
+					kind: "orphan",
+				});
+			}
+		} catch (error) {
+			console.warn(`[memory] 孤儿 scope 扫描失败: ${error instanceof Error ? error.message : String(error)}`);
+		}
 		// 外部导入伪 scope（__imported__）2026-11-15 当天撤回：用户拍板「导入了就是自己的记忆」，
 		// 导入条目就落在 global / 项目 scope 里照常显示与召回，不再单开一个查看区。
 		return c.json({ ok: true, scopes });
+	});
+
+	// ── 记忆迁移（2026-11-17 项目合并与记忆迁移）──────────────
+	// 把一个 scope 的记忆整体改挂到另一个 scope：孤儿记忆归位 / 并入活项目 / 收进我的记忆。
+	// 纯机械搬家：不去重（那是「整理」的职责）、不调模型、不动 superseded 引用。
+	app.post("/api/v1/agent/memory/scope/move", async (c) => {
+		if (!enabled()) {
+			return c.json({ error: "memory_disabled", message: "记忆未启用（MEMORY_ENABLED=false）" }, 404);
+		}
+		if (!memoryScopeMoveEnabled()) {
+			return c.json({ error: "move_disabled", message: "记忆迁移未启用（MEMORY_SCOPE_MOVE=false）" }, 404);
+		}
+		const body = (await c.req.json().catch(() => null)) as
+			| { from?: unknown; to?: unknown }
+			| null;
+		const from = typeof body?.from === "string" ? body.from.trim() : "";
+		const to = typeof body?.to === "string" ? body.to.trim() : "";
+		const result = moveScopeChecked(from, to);
+		if (!result.ok) {
+			return c.json({ error: result.error, message: result.message }, result.status);
+		}
+		return c.json({ ok: true, from, to, records: result.records, documents: result.documents });
 	});
 
 	// ── 每晚整理（2026-11-14）：定时任务页要看见"谁在什么时候整理记忆" ──

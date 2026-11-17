@@ -803,6 +803,7 @@ class RoutineEngine {
 					ok: result.ok,
 					quiet: result.quiet === true,
 					skippedToolCount: skipped.length,
+					toolErrorCount: toolErrors.length,
 				}) &&
 				routineQuietEnabled()
 			) {

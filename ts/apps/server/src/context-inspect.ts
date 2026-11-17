@@ -43,6 +43,30 @@ export interface ContextCountView {
 	tokens: number;
 }
 
+/**
+ * 会话里的一条可读内容（2026-11-17 重画）：用户 / 助手 / 工具调用 / 工具结果。
+ * 页面按 `index` 排真实顺序；正文单条截断，避免把整份文件搬进设置页。
+ */
+export type ContextEntryKind = "user" | "assistant" | "toolCall" | "toolResult";
+
+export interface ContextEntryView {
+	kind: ContextEntryKind;
+	/** 行名：用户 / 助手 / 工具名。 */
+	label: string;
+	/** 在 `view.messages` 里的序号（从 0 起），页面显示 #n 保住顺序。 */
+	index: number;
+	/** 截断前的真实字符数。 */
+	chars: number;
+	/** 截断前的估算 token。 */
+	tokens: number;
+	/** 正文 / 参数 JSON；超长时截断。 */
+	text: string;
+	truncated?: boolean;
+}
+
+/** 单条正文上限：工具结果可能是整份文件，设置页不跟着变长。 */
+export const MAX_CONTEXT_ENTRY_CHARS = 4000;
+
 export interface ContextInspectView {
 	system: {
 		content: string;
@@ -67,6 +91,8 @@ export interface ContextInspectView {
 		toolCalls: ContextCountView;
 		toolResults: ContextCountView;
 	};
+	/** 会话正文条目（按 view.messages 的真实顺序）；默认开销版为空数组。 */
+	entries: ContextEntryView[];
 }
 
 /** 进程内只留最新一轮的注入实文；不落盘、不进日志。 */
@@ -95,7 +121,7 @@ export interface ContextInspectPayload extends ContextInspectView {
 			chars: number;
 			tokens: number;
 			text: string;
-			others: { id: string; chars: number; tokens: number }[];
+			others: { id: string; chars: number; tokens: number; text: string; truncated?: boolean }[];
 		} | null;
 	};
 	updatedAt: number;
@@ -111,6 +137,10 @@ const SECTION_META: Record<
 	clarify_contract: { label: "开工前问清", stability: "fixed" },
 	injection_guard: { label: "注入防线", stability: "fixed" },
 	current_project: { label: "当前项目", stability: "turn", editable: true },
+	// 2026-11-17：此前这三个 key 没有中文名，页面直接显示英文裸 key。
+	delegate_executor: { label: "派活执行器", stability: "fixed" },
+	tool_index: { label: "低频工具索引", stability: "fixed" },
+	instructions: { label: "执事说明", stability: "fixed" },
 	topics: { label: "课题", stability: "turn", editable: true },
 	// 默认开销里的执事：身份是 instructions，岗位契约/纪律是 extra system message；
 	// 这里各给一个可读的名字，避免页面上出现裸 key。
@@ -217,6 +247,12 @@ function skillCount(text: string): number {
 	return lines.length || (text.trim() ? 1 : 0);
 }
 
+/** 单条正文截断：超过上限只留前 4000 字，token / 字数仍按全文算。 */
+function clipEntryText(text: string): { text: string; truncated: boolean } {
+	if (text.length <= MAX_CONTEXT_ENTRY_CHARS) return { text, truncated: false };
+	return { text: text.slice(0, MAX_CONTEXT_ENTRY_CHARS), truncated: true };
+}
+
 function memoryItemCount(text: string): number {
 	const lines = text.split(/\r?\n/).filter((line) => /^\s*[-*]\s+/.test(line));
 	return lines.length || 1;
@@ -266,14 +302,35 @@ export function contextInspectViewOf(view: ContextView): ContextInspectView {
 		toolCalls: { count: 0, chars: 0, tokens: 0 },
 		toolResults: { count: 0, chars: 0, tokens: 0 },
 	};
+	// 2026-11-17：一遍遍历同时产出「会变计数」与可读条目，避免两套口径漂移。
+	const entries: ContextEntryView[] = [];
+	const pushEntry = (
+		kind: ContextEntryKind,
+		label: string,
+		index: number,
+		text: string,
+		metricText: string = text,
+	): void => {
+		const clipped = clipEntryText(text || "");
+		entries.push({
+			kind,
+			label,
+			index,
+			chars: countString(metricText),
+			tokens: estimateTokens(metricText),
+			text: clipped.text,
+			...(clipped.truncated ? { truncated: true } : {}),
+		});
+	};
 
-	for (const message of view.messages) {
+	view.messages.forEach((message, index) => {
 		if (message.role === "user") {
 			const text = contentText(message.content);
 			changing.messages.count += 1;
 			changing.messages.chars += countString(text);
 			changing.messages.tokens += estimateTokens(text);
-			continue;
+			if (text) pushEntry("user", "用户", index, text);
+			return;
 		}
 		if (message.role === "assistant") {
 			const text = contentText(message.content);
@@ -281,6 +338,7 @@ export function contextInspectViewOf(view: ContextView): ContextInspectView {
 				changing.messages.count += 1;
 				changing.messages.chars += countString(text);
 				changing.messages.tokens += estimateTokens(text);
+				pushEntry("assistant", "助手", index, text);
 			}
 			const blocks = Array.isArray(message.content) ? message.content : [];
 			for (const block of blocks) {
@@ -289,16 +347,19 @@ export function contextInspectViewOf(view: ContextView): ContextInspectView {
 				changing.toolCalls.count += 1;
 				changing.toolCalls.chars += countString(args);
 				changing.toolCalls.tokens += estimateTokens(args);
+				// 计数按紧凑 JSON（与 changing 同口径），正文给 pretty 参数供人读。
+				pushEntry("toolCall", block.name || "工具调用", index, JSON.stringify(block.arguments ?? {}, null, 2), args);
 			}
-			continue;
+			return;
 		}
 		if (message.role === "toolResult") {
 			const text = contentText(message.content);
 			changing.toolResults.count += 1;
 			changing.toolResults.chars += countString(text);
 			changing.toolResults.tokens += estimateTokens(text);
+			pushEntry("toolResult", message.toolName || "工具结果", index, text);
 		}
-	}
+	});
 
 	const skillsChars = countString(skillsText);
 	return {
@@ -311,6 +372,7 @@ export function contextInspectViewOf(view: ContextView): ContextInspectView {
 		},
 		skills: { count: skillCount(skillsText), chars: skillsChars, tokens: estimateTokens(skillsText), text: skillsText },
 		changing,
+		entries,
 	};
 }
 
@@ -332,11 +394,16 @@ export function contextInspectPayloadOf(input: {
 	const recallText = recall?.text ?? "";
 	const others = (last?.items ?? [])
 		.filter((item) => item.id !== "memory_recall")
-		.map((item) => ({
-			id: item.id,
-			chars: countString(item.text),
-			tokens: estimateTokens(item.text),
-		}));
+		.map((item) => {
+			const clipped = clipEntryText(item.text || "");
+			return {
+				id: item.id,
+				chars: countString(item.text || ""),
+				tokens: estimateTokens(item.text || ""),
+				text: clipped.text,
+				...(clipped.truncated ? { truncated: true } : {}),
+			};
+		});
 
 	return {
 		conversationId: input.conversationId,

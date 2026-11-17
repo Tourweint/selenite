@@ -7,7 +7,9 @@ import {
 	modelToolCatalog,
 	partnerToolsEnabled,
 	PARTNER_TOOL_GROUPS,
+	promotedConflictError,
 	sanitizeDisabledTools,
+	sanitizePromotedTools,
 	toolDependencyError,
 	toolGroupOf,
 	toolSummaryOf,
@@ -27,8 +29,8 @@ function tool(name: string, extra: Record<string, unknown> = {}): ToolRegistrati
 	} as unknown as ToolRegistration;
 }
 
-function partnerWith(disabledTools: string[]): PartnerRow {
-	return { id: "p-1", name: "测试执事", disabledTools } as unknown as PartnerRow;
+function partnerWith(disabledTools: string[], promotedTools: string[] = []): PartnerRow {
+	return { id: "p-1", name: "测试执事", disabledTools, promotedTools } as unknown as PartnerRow;
 }
 
 /** 假 conversation：agent() 返回给定工具，configure() 记录每次调用。 */
@@ -132,6 +134,42 @@ test("toolDependencyError：只关 skill 不关 delegate 拒；一起关 / 无�
 	assert.equal(toolDependencyError(["skill", "delegate"], known), null);
 	assert.equal(toolDependencyError(["read"], known), null);
 	assert.equal(toolDependencyError(["skill"], new Set(["read"])), null);
+});
+
+test("toolDependencyError：取消 tool_search 一律拒（按需工具的唯一入口）；目录里没有它就不管", () => {
+	assert.match(
+		toolDependencyError(["tool_search"], new Set(["tool_search", "read"])) ?? "",
+		/tool_search 是按需工具的唯一入口/,
+	);
+	assert.equal(toolDependencyError(["tool_search"], new Set(["read"])), null);
+});
+
+// ── 常驻名单（2026-11-17 按人常驻）────────────────────
+
+test("sanitizePromotedTools：只接受按需工具；未知名 / 非按需 / 非数组都拒；去重", () => {
+	const deferred = new Set(["routine_manage", "propose_topic"]);
+	const known = new Set(["routine_manage", "propose_topic", "read"]);
+	assert.deepEqual(sanitizePromotedTools(["routine_manage", "routine_manage"], deferred, known), {
+		ok: true,
+		promoted: ["routine_manage"],
+	});
+	assert.deepEqual(sanitizePromotedTools([], deferred, known), { ok: true, promoted: [] });
+	assert.equal(sanitizePromotedTools(null, deferred, known).ok, false);
+	assert.equal(sanitizePromotedTools("routine_manage", deferred, known).ok, false);
+	assert.equal(sanitizePromotedTools([1], deferred, known).ok, false);
+	assert.equal(sanitizePromotedTools(new Array(65).fill("routine_manage"), deferred, known).ok, false);
+	const unknown = sanitizePromotedTools(["nope"], deferred, known);
+	assert.equal(unknown.ok, false);
+	if (!unknown.ok) assert.match(unknown.message, /未知工具：nope/);
+	const notDeferred = sanitizePromotedTools(["read"], deferred, known);
+	assert.equal(notDeferred.ok, false);
+	if (!notDeferred.ok) assert.match(notDeferred.message, /只能提升按需工具：read/);
+});
+
+test("promotedConflictError：取消与提升撞在同一个工具 → 拒；各管各的放行", () => {
+	assert.match(promotedConflictError(["routine_manage"], ["routine_manage"]) ?? "", /不能设为常驻/);
+	assert.equal(promotedConflictError(["routine_manage"], ["read"]), null);
+	assert.equal(promotedConflictError([], []), null);
 });
 
 // ── 运行时应用 ────────────────────────────────────────
@@ -248,6 +286,76 @@ test("applyPartnerToolSelection：deferred 集合无变化且未被取消时不�
 	const conversation = fakeConversation([tool("read")], calls);
 	await applyPartnerToolSelection(conversation, partnerWith([]), pool);
 	assert.equal(calls.length, 0, "全开且没有已加载 deferred → 不写");
+});
+
+// ── 按人常驻（2026-11-17）──────────────────────────────
+
+test("applyPartnerToolSelection：提升的按需工具写进 add（没加载过也常驻）", async () => {
+	const deferred = tool("routine_manage", { deferred: true });
+	const pool = [tool("read"), deferred];
+	const calls: unknown[] = [];
+	// 只加载了 read，deferred 从未经过 tool_search；提升后应该一直 offered。
+	const conversation = fakeConversation([tool("read")], calls);
+	await applyPartnerToolSelection(
+		conversation,
+		partnerWith([], ["routine_manage"]),
+		pool,
+	);
+	assert.equal(calls.length, 1);
+	const change = calls[0] as { modelTools: { add?: ToolRegistration[] } };
+	assert.deepEqual(change.modelTools.add?.map((item) => item.name), ["routine_manage"]);
+});
+
+test("applyPartnerToolSelection：已提升且当前已 offer → 不写（集合相同）", async () => {
+	const deferred = tool("routine_manage", { deferred: true });
+	const pool = [tool("read"), deferred];
+	const calls: unknown[] = [];
+	const conversation = fakeConversation([tool("read"), deferred], calls);
+	await applyPartnerToolSelection(
+		conversation,
+		partnerWith([], ["routine_manage"]),
+		pool,
+	);
+	assert.equal(calls.length, 0);
+});
+
+test("applyPartnerToolSelection：取消压过提升（端点已挡冲突，运行时兜底）", async () => {
+	const deferred = tool("routine_manage", { deferred: true });
+	const pool = [tool("read"), deferred];
+	const calls: unknown[] = [];
+	const conversation = fakeConversation([tool("read"), deferred], calls);
+	await applyPartnerToolSelection(
+		conversation,
+		partnerWith(["routine_manage"], ["routine_manage"]),
+		pool,
+	);
+	assert.equal(calls.length, 1);
+	const change = calls[0] as {
+		modelTools: { add?: ToolRegistration[]; remove?: ToolRegistration[] };
+	};
+	assert.deepEqual(change.modelTools.remove?.map((item) => item.name), ["routine_manage"]);
+	assert.equal(change.modelTools.add, undefined, "被取消的不能同时进 add");
+});
+
+test("applyPartnerToolSelection：收回提升对已 offer 的会话不生效（与 tool_search 加载同语义）", async () => {
+	const deferred = tool("routine_manage", { deferred: true });
+	const pool = [tool("read"), deferred];
+	const calls: unknown[] = [];
+	// 边界（2026-11-17 登记）：内核只认「延迟 − 已 offer」，区分不出"被搜索加载"和"被人提升"。
+	// 所以已经 offer 的 deferred 收回提升后仍留着——和 tool_search 加载过的一样不可逆；
+	// 收回只对还没 offer 它过的会话（新会话）生效。
+	const conversation = fakeConversation([tool("read"), deferred], calls);
+	await applyPartnerToolSelection(conversation, partnerWith([]), pool);
+	assert.equal(calls.length, 0, "已 offer 的会话：收回提升不改写");
+});
+
+test("applyPartnerToolSelection：新会话收回提升 → 照样不写（本来就没 offer 它）", async () => {
+	const deferred = tool("routine_manage", { deferred: true });
+	const pool = [tool("read"), deferred];
+	const calls: unknown[] = [];
+	const conversation = fakeConversation([tool("read")], calls);
+	await applyPartnerToolSelection(conversation, partnerWith([]), pool);
+	assert.equal(calls.length, 0);
 });
 
 test("partnerToolsEnabled：false / 0 / off 关，缺省 / 其它开", () => {

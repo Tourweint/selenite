@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import type { ToolRegistration } from "@earendil-works/pi-durable";
 import {
@@ -8,6 +11,17 @@ import {
 	toolIndexEnabled,
 	toolIndexText,
 } from "./tool-index.ts";
+
+/**
+ * 名单现在住 `.data/tool-pool.json`（2026-11-17 全局工具池）：测试必须钉到临时路径，
+ * 否则开发机上真实保存过的工具池会把断言带偏。
+ */
+const root = mkdtempSync(join(tmpdir(), "lifediary-tool-index-"));
+const missing = { AGENT_TOOL_POOL_PATH: join(root, "missing.json") } as NodeJS.ProcessEnv;
+
+test.after(() => {
+	rmSync(root, { recursive: true, force: true });
+});
 
 function tool(name: string): ToolRegistration {
 	return {
@@ -39,16 +53,16 @@ test("toolIndexEnabled：缺省开；false / 0 / off（大小写空白不敏感�
 	assert.equal(toolIndexEnabled({ AGENT_TOOL_INDEX: " off " }), false);
 });
 
-test("isDeferredTool：名单内且开关开才为真", () => {
-	assert.equal(isDeferredTool("routine_manage", true), true);
-	assert.equal(isDeferredTool("send_to_agent", true), true);
-	assert.equal(isDeferredTool("read", true), false);
-	assert.equal(isDeferredTool("routine_manage", false), false);
+test("isDeferredTool：名单内且开关开才为真（文件缺失 = 代码默认）", () => {
+	assert.equal(isDeferredTool("routine_manage", true, missing), true);
+	assert.equal(isDeferredTool("send_to_agent", true, missing), true);
+	assert.equal(isDeferredTool("read", true, missing), false);
+	assert.equal(isDeferredTool("routine_manage", false, missing), false);
 });
 
 test("markDeferred：只给名单内工具加属性、不改原对象、保持顺序", () => {
 	const tools = [tool("read"), tool("routine_manage"), tool("write"), tool("send_to_agent")];
-	const marked = markDeferred(tools, true);
+	const marked = markDeferred(tools, true, missing);
 	assert.deepEqual(
 		marked.map((item) => item.name),
 		["read", "routine_manage", "write", "send_to_agent"],
@@ -64,13 +78,29 @@ test("markDeferred：只给名单内工具加属性、不改原对象、保持�
 
 test("markDeferred：关时一个都不加", () => {
 	const tools = [tool("routine_manage"), tool("read")];
-	const marked = markDeferred(tools, false);
+	const marked = markDeferred(tools, false, missing);
 	assert.deepEqual(
 		marked.map((item) => item.name),
 		["routine_manage", "read"],
 	);
 	assert.equal(marked[0]?.deferred, undefined);
 	assert.equal(marked[0], tools[0]);
+});
+
+test("markDeferred：配置文件覆盖默认名单（2026-11-17 全局工具池）", () => {
+	const custom = join(root, "custom.json");
+	writeFileSync(custom, JSON.stringify({ deferred: ["read", "web_search"] }), "utf8");
+	const env = { AGENT_TOOL_POOL_PATH: custom } as NodeJS.ProcessEnv;
+	const tools = [tool("read"), tool("routine_manage"), tool("web_search")];
+	const marked = markDeferred(tools, true, env);
+	assert.equal(marked[0]?.deferred, true, "配置里的 read 变成按需");
+	assert.equal(marked[1]?.deferred, undefined, "默认名单里的 routine_manage 不再按需");
+	assert.equal(marked[2]?.deferred, true);
+
+	const empty = join(root, "empty.json");
+	writeFileSync(empty, JSON.stringify({ deferred: [] }), "utf8");
+	const none = markDeferred(tools, true, { AGENT_TOOL_POOL_PATH: empty } as NodeJS.ProcessEnv);
+	assert.equal(none.every((item) => item.deferred === undefined), true, "空数组 = 全部常驻");
 });
 
 test("toolIndexText：空列表 undefined；有列表含标题、每个名字与提示句", () => {

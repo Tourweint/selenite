@@ -5,7 +5,13 @@
  */
 
 import { currentModels, readLlmConfig } from "../provider.ts";
-import { ReminderTask, type ReminderRepeat } from "../reminder.ts";
+import {
+	ReminderTask,
+	reminderEnabledOf,
+	reminderVisibilityOf,
+	type ReminderRepeat,
+	type ReminderVisibility,
+} from "../reminder.ts";
 import { getHarness } from "./lifecycle.ts";
 import { turnSettledHandler } from "./settled.ts";
 import { CTX, Chats, ResolvedChat, TOOL_OUTPUT_LIMIT, toolArgs, toolLabel } from "./shared.ts";
@@ -15,7 +21,7 @@ import type { Message, SystemMessage } from "@earendil-works/pi-ai";
 import type { ContextView, Conversation, EntryRecord } from "@earendil-works/pi-durable";
 import { configure } from "@earendil-works/pi-durable";
 import { PROACTIVE_HIDDEN_MARKER, TranscriptStep, TurnUsage, parseFileManifest, type TranscriptAuthor } from "@lifediary/shared";
-import { createHash, randomUUID } from "node:crypto";
+import { stripScheduledRunHeader } from "../scheduled-run-context.ts";import { createHash, randomUUID } from "node:crypto";
 import { isRelayEntryKind, relayDisplayText, relayFromOf } from "../partner-relay.ts";
 import { externalChatIds, openChat } from "./session-open.ts";
 import { chatStream } from "./session-stream.ts";
@@ -55,7 +61,9 @@ export interface TranscriptMessage {
 	/** 消息时间，epoch 毫秒 */
 	at: number;
 	/**
-	 * 可寻址 id（2026-11-08 扫尾批 4a）：只给 user 消息，编辑重发拿它指位置。
+	 * 可寻址 id（2026-11-08 扫尾批 4a；2026-11-17 批3a 扩到 assistant）：
+	 * user 与 assistant 都给——编辑重发拿 user 的 id 指位置，`POST .../branches` 拿 assistant 的
+	 * id 指定从哪条回答分叉。带 `author` 的来信仍不给（主人能看不能改）。
 	 * uuid 形状、不含 durable 内部自增 id（见 {@link messageIdOf}）。
 	 */
 	id?: string;
@@ -67,6 +75,11 @@ export interface TranscriptMessage {
 	steps?: TranscriptStep[];
 	/** 那一轮从提问到收尾的墙钟时长（毫秒） */
 	workMs?: number;
+	/**
+	 * 这条 assistant 消息的收尾时刻（epoch 毫秒，2026-11-17，纯增量）。
+	 * `at` 是这次请求的开始；回答下方显示的是"几点答完"，按 `at + durationMs` 算。
+	 */
+	endedAt?: number;
 	/**
 	 * 非主人来源的作者（2026-11-15 作者标记方案）。
 	 *
@@ -134,11 +147,23 @@ export function relayAuthorOf(entry: EntryRecord): TranscriptAuthor | undefined 
 	};
 }
 
+/**
+ * 回合投影（对话正文与画板共用）。
+ *
+ * `includeHidden`（2026-11-17 画板批，**只给画板用**）：定时主动轮的触发指令默认整条
+ * 不 push（会话里看不到）；画板要按回合画卡，必须知道"这一轮从哪开始"，否则隐藏轮的
+ * 回答会被并进上一轮。打开后隐藏轮以 `hidden: true` + 空正文下发，`/messages` 端点
+ * 永远不传，线上形状不变。
+ */
+export type FoldedTranscriptMessage = TranscriptMessage & { hidden?: boolean };
+
 export function foldTranscriptEntries(
 	externalId: string,
 	entries: readonly EntryRecord[],
-): TranscriptMessage[] {
-	const messages: TranscriptMessage[] = [];
+	options: { includeHidden?: boolean } = {},
+): FoldedTranscriptMessage[] {
+	const includeHidden = options.includeHidden === true;
+	const messages: FoldedTranscriptMessage[] = [];
 
 	/** 本轮的步骤，按 toolCallId 索引；回答落盘时整段挂上去 */
 	let pending: TranscriptStep[] = [];
@@ -165,7 +190,11 @@ export function foldTranscriptEntries(
 			const hidden = raw.split("\n").some((line) => line.trim() === PROACTIVE_HIDDEN_MARKER);
 			const manifest = parseFileManifest(raw);
 			// 2026-11-15：来信展示时剥掉模型侧那三段说明（抬头已写清谁发来的）；存储与模型上下文不动
-			const text = isRelay ? relayDisplayText(manifest.text) : manifest.text.trim();
+			// 2026-11-17：定时轮（例行/可见主动轮）的技术头也是给模型看的，回读时剥掉，
+			// 只留用户写的那段指令；隐藏触发整条不 push（见下）。
+			const text = isRelay
+				? relayDisplayText(manifest.text)
+				: stripScheduledRunHeader(manifest.text.trim());
 			const at = typeof message.timestamp === "number" ? message.timestamp : 0;
 			// 2026-11-08 4a：纯图消息没有文本，也要下发（老逻辑会把它整条丢掉）
 			const parts = Array.isArray(message.content) ? message.content : [];
@@ -188,7 +217,9 @@ export function foldTranscriptEntries(
 			if (images.length > 0) outgoing.images = images;
 			if (manifest.files.length > 0) outgoing.files = manifest.files;
 			// 隐藏的触发指令不进消息列表；turnStartAt 已记，回答仍挂步骤/workMs。
+			// 画板（includeHidden）要把这一轮保留成"无正文的起点"，否则回答会并进上一轮。
 			if (!hidden) messages.push(outgoing);
+			else if (includeHidden) messages.push({ ...outgoing, text: "", hidden: true });
 			continue;
 		}
 
@@ -247,6 +278,11 @@ export function foldTranscriptEntries(
 		const text = contentText(message.content).trim();
 		if (!text) continue;
 		const outgoing: TranscriptMessage = { role: "assistant", text, at };
+		// 批3a：assistant 也带可寻址 id（分支端点靠它定位分叉点）；relay 来信才互斥不给。
+		outgoing.id = messageIdOf(externalId, Number(entry.id));
+		// 收尾时刻（2026-11-17，纯增量）：`at` 是这次请求的开始，回答下方要显示的是
+		// "几点答完"。与 workMs 同源（at + durationMs），读不到 durationMs 的旧记录退回 at。
+		if (endedAt > 0) outgoing.endedAt = endedAt;
 		if (pending.length > 0) {
 			// 没配到结果的（中断 / 崩在工具里）在这里定案：ok=false，避免历史把它画成成功。
 			// 判据是 settled 而不是"有没有输出"——成功的 `read` 也可能一字不吐。
@@ -274,6 +310,11 @@ export function foldTranscriptEntries(
 				? (entries.at(-1)?.model?.[0]?.timestamp as number)
 				: 0;
 		const outgoing: TranscriptMessage = { role: "assistant", text: "", at: lastAt, steps: pending };
+		// 同样给可寻址 id（客户端不用，但分支端点要能指到它；正文为空时会被拒绝分叉）。
+		const lastEntryId = entries.at(-1)?.id;
+		if (lastEntryId !== undefined) outgoing.id = messageIdOf(externalId, Number(lastEntryId));
+		// 只有步骤、没有正文的收尾轮：没有 durationMs 可加，收尾时刻就是最后一条的时间。
+		if (lastAt > 0) outgoing.endedAt = lastAt;
 		if (turnStartAt !== undefined && lastAt > turnStartAt) outgoing.workMs = lastAt - turnStartAt;
 		messages.push(outgoing);
 	}
@@ -544,6 +585,10 @@ export interface ReminderSummary {
 	partnerId: string | null;
 	/** 对外会话 id（客户端存的是这个） */
 	conversationId: string;
+	/** 2026-11-17 定时任务重做：暂停标记；缺省 true（旧任务没有这个字段）。 */
+	enabled: boolean;
+	/** 2026-11-17：触发指令可见性；缺省 hidden（旧行为）。 */
+	visibility: ReminderVisibility;
 }
 
 export async function listReminders(): Promise<ReminderSummary[]> {
@@ -564,6 +609,8 @@ export async function listReminders(): Promise<ReminderSummary[]> {
 			until?: number;
 			reminderId?: string;
 			partnerId?: string | null;
+			enabled?: boolean;
+			visibility?: ReminderVisibility;
 		};
 		conversationId: number;
 		live: boolean;
@@ -583,6 +630,8 @@ export async function listReminders(): Promise<ReminderSummary[]> {
 				until?: number;
 				reminderId?: string;
 				partnerId?: string | null;
+				enabled?: boolean;
+				visibility?: ReminderVisibility;
 			};
 			conversationId: number;
 		};
@@ -623,9 +672,73 @@ export async function listReminders(): Promise<ReminderSummary[]> {
 			partnerId: chosen.input.partnerId ?? null,
 			conversationId:
 				externalByInternal.get(chosen.conversationId) ?? `#${chosen.conversationId}`,
+			enabled: reminderEnabledOf(chosen.input.enabled),
+			visibility: reminderVisibilityOf(chosen.input.visibility),
 		});
 	}
 	return result.sort((a, b) => a.at - b.at);
+}
+
+/** 内部用：按 durable 任务 id 取一条提醒的完整输入（内部自增 id 不对外）。 */
+export interface ReminderTaskDetail {
+	id: number;
+	reminderId: string;
+	/** 内部会话 id；仅供服务端解析目标执事，不经 HTTP 下发 */
+	conversationId: number;
+	text: string;
+	at: number;
+	repeat: ReminderRepeat;
+	weekdays?: number[];
+	dayOfMonth?: number;
+	until?: number;
+	partnerId: string | null;
+	enabled: boolean;
+	visibility: ReminderVisibility;
+	live: boolean;
+}
+
+export async function reminderTaskById(taskId: number): Promise<ReminderTaskDetail | null> {
+	const harness = await getHarness();
+	const inspection = await harness.inspect(CTX);
+	for (const task of inspection.tasks) {
+		if (task.record.kind !== ReminderTask.definition.name) continue;
+		const record = task.record as unknown as {
+			id: number;
+			input: {
+				text: string;
+				at: number;
+				repeat?: ReminderRepeat;
+				weekdays?: number[];
+				dayOfMonth?: number;
+				until?: number;
+				reminderId?: string;
+				partnerId?: string | null;
+				enabled?: boolean;
+				visibility?: ReminderVisibility;
+			};
+			conversationId: number;
+		};
+		if (Number(record.id) !== taskId) continue;
+		const repeat = record.input.repeat ?? "none";
+		return {
+			id: Number(record.id),
+			reminderId: record.input.reminderId ?? `legacy-${record.id}`,
+			conversationId: record.conversationId,
+			text: record.input.text,
+			at: record.input.at,
+			repeat,
+			...(repeat === "weekly" ? { weekdays: record.input.weekdays ?? [] } : {}),
+			...(repeat === "monthly"
+				? { dayOfMonth: record.input.dayOfMonth ?? new Date(record.input.at).getDate() }
+				: {}),
+			...(record.input.until !== undefined ? { until: record.input.until } : {}),
+			partnerId: record.input.partnerId ?? null,
+			enabled: reminderEnabledOf(record.input.enabled),
+			visibility: reminderVisibilityOf(record.input.visibility),
+			live: task.state.kind !== "blocked",
+		};
+	}
+	return null;
 }
 
 export async function addReminder(
@@ -639,6 +752,8 @@ export async function addReminder(
 		until?: number;
 		partnerId?: string | null;
 		reminderId?: string;
+		enabled?: boolean;
+		visibility?: ReminderVisibility;
 	},
 ): Promise<number> {
 	const reminderId = input.reminderId ?? randomUUID();
@@ -665,11 +780,12 @@ export async function cancelReminder(taskId: number): Promise<boolean> {
 }
 
 /**
- * 改时间（2026-11-14）：取消原任务，用同一个 `reminderId` 重排一条。
+ * 改时间 / 改内容（2026-11-14，2026-11-17 扩 text/enabled/visibility）：
+ * 取消原任务，用同一个 `reminderId` 重排一条。
  *
  * 为什么不原地改任务：durable 的睡眠状态是提交过的，直接改输入需要内核级支持；
  * 重排一条同 id 的任务更稳，而且列表按 `reminderId` 归组，不会多出一行"已结束"。
- * 内容与执事沿用原任务，只有时间规则变。
+ * 没传的字段沿用原任务（执事固定；内容/暂停/可见性可改）。
  */
 export async function rescheduleReminder(
 	taskId: number,
@@ -679,6 +795,9 @@ export async function rescheduleReminder(
 		weekdays?: number[];
 		dayOfMonth?: number;
 		until?: number;
+		text?: string;
+		enabled?: boolean;
+		visibility?: ReminderVisibility;
 	},
 ): Promise<number | null> {
 	const reminders = await listReminders();
@@ -689,7 +808,7 @@ export async function rescheduleReminder(
 	const harness = await getHarness();
 	await harness.abortTask(taskId as never, CTX);
 	return addReminder(chat, {
-		text: origin.text,
+		text: input.text?.trim() || origin.text,
 		at: input.at,
 		repeat: input.repeat ?? "none",
 		weekdays: input.weekdays,
@@ -697,6 +816,8 @@ export async function rescheduleReminder(
 		until: input.until,
 		partnerId: origin.partnerId,
 		reminderId: origin.reminderId,
+		enabled: input.enabled ?? origin.enabled,
+		visibility: input.visibility ?? origin.visibility,
 	});
 }
 

@@ -432,6 +432,82 @@ export class ProjectsStore {
 		this.db.prepare("DELETE FROM projects WHERE id = ?").run(id);
 	}
 
+	/**
+	 * 合并登记（2026-11-17 项目合并与记忆迁移）：把 `sourceId` 的文件夹全部调到
+	 * `targetId` 名下，然后删掉 source 的登记行。**只动登记表**——记忆/会话/执事挂载
+	 * 由调用方先搬（三库无法一起事务，见方案 §3.4）。
+	 *
+	 * 规则：
+	 * - 目标必须存在且未归档；源和目标不能是同一个项目。
+	 * - 源文件夹与目标已有文件夹**同路径** → 跳过（目标已覆盖，不重复登记）；
+	 * - 与目标文件夹**互相包含** → 409 `root_overlaps_root`，在写之前就拒（不静默丢根）。
+	 * - 调过来的文件夹一律是 `extra`（目标的主文件夹不动）；label 重名自动加序号。
+	 * - 当前项目指针若指着源 → 改指目标（合并后源已经不存在了）。
+	 *
+	 * 返回实际调过去的根数与被跳过的同路径根数，供调用方如实回报。
+	 */
+	mergeInto(sourceId: string, targetId: string): { rootsMoved: number; rootsSkipped: number } {
+		if (sourceId === targetId) {
+			throw new ProjectError("bad_request", "不能把项目合并到它自己", 400);
+		}
+		const source = this.db.prepare("SELECT * FROM projects WHERE id = ?").get(sourceId) as Row | undefined;
+		if (!source) throw new ProjectError("not_found", "找不到要合并的项目", 404);
+		const target = this.db.prepare("SELECT * FROM projects WHERE id = ?").get(targetId) as Row | undefined;
+		if (!target) throw new ProjectError("not_found", "找不到合并目标项目", 404);
+		if (Number(target.archived) === 1) {
+			throw new ProjectError("target_archived", "合并目标已归档，先恢复再合并", 409);
+		}
+
+		const sourceRoots = this.rootsOf(sourceId);
+		const targetRoots = this.rootsOf(targetId);
+		const skipped: string[] = [];
+		const moving: ProjectRoot[] = [];
+		for (const root of sourceRoots) {
+			const realRoot = realpathOr(root.path);
+			const same = targetRoots.find((item) => {
+				const existing = realpathOr(item.path);
+				return existing !== null && realRoot !== null && samePath(existing, realRoot);
+			});
+			if (same) {
+				skipped.push(root.id);
+				continue;
+			}
+			for (const item of targetRoots) {
+				const existing = realpathOr(item.path);
+				if (!existing || !realRoot) continue;
+				if (isInside(existing, realRoot) || isInside(realRoot, existing)) {
+					throw new ProjectError(
+						"root_overlaps_root",
+						`「${root.label}」与目标项目的「${item.label}」互相包含，不能合并`,
+						409,
+					);
+				}
+			}
+			moving.push(root);
+		}
+
+		this.db.exec("BEGIN IMMEDIATE");
+		try {
+			for (const rootId of skipped) {
+				this.db.prepare("DELETE FROM project_roots WHERE id = ?").run(rootId);
+			}
+			for (const [index, root] of moving.entries()) {
+				this.db
+					.prepare(
+						"UPDATE project_roots SET project_id = ?, role = 'extra', label = ?, position = ? WHERE id = ?",
+					)
+					.run(targetId, this.uniqueRootLabel(targetId, root.label), targetRoots.length + index, root.id);
+			}
+			if (this.getCurrentProjectId() === sourceId) this.writeCurrentProjectId(targetId);
+			this.db.prepare("DELETE FROM projects WHERE id = ?").run(sourceId);
+			this.db.exec("COMMIT");
+		} catch (error) {
+			this.db.exec("ROLLBACK");
+			throw error;
+		}
+		return { rootsMoved: moving.length, rootsSkipped: skipped.length };
+	}
+
 	findProject(ref: string): Project | null {
 		const value = ref.trim();
 		if (!value) return null;

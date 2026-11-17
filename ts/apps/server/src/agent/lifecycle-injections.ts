@@ -36,12 +36,13 @@ import {
 	VERIFICATION_IRON_LAW,
 	lifecycleOwnsVerification,
 } from "./turn-gate.ts";
-import { currentProject, sessionBoundCwd } from "./shared.ts";
+import { currentProject, sessionBoundCwd, sessionCwd } from "./shared.ts";
 import { currentProjectEnabled, projectsStore } from "../projects.ts";
 import { wrapUntrustedObjective } from "./injection-guard.ts";
 import { PERSONA, memoryRecallProvider, projectIndexProvider, skillStore } from "./assist.ts";
 import { readWorkerPersona, WORKER_PERSONA_CHAT_TOOLS } from "../worker-persona.ts";
 import { skillSlashOf } from "../skills.ts";
+import { recordSkillUse } from "../skill-usage.ts";
 import { buildPartnerTurnContext } from "./partner-context.ts";
 import { workSummaryFor } from "../work-record.ts";
 import { takeRecoverNote } from "./recover-note.ts";
@@ -120,6 +121,15 @@ export const clarifyContractProvider: InjectionProvider = (ctx) => {
 };
 
 /**
+ * Windows 路径比较：斜杠 / 反斜杠、盘符大小写都不算差异。
+ * 只为判断「会话 cwd 是不是主工作区」，不参与任何路径拼接。
+ */
+function samePath(a: string, b: string): boolean {
+	const norm = (p: string) => p.replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
+	return norm(a) === norm(b);
+}
+
+/**
  * 当前项目 / 主工作区：每轮现渲染，不写进对话历史。
  *
  * 2026-11-16 定稿：普通对话就是 worker，**必须带项目记忆**，所以继续跟随「当前项目」；
@@ -153,7 +163,35 @@ export const currentProjectProvider: InjectionProvider = (ctx) => {
 	} catch {
 		// 项目库坏了不阻塞对话：只注入已知的部分
 	}
+	// 执事 / 例行轮（2026-11-17）：默认目录是主工作区，不跟界面里的「当前项目」。
+	// 注意：默认目录只是相对路径基准，**不是边界**——勾选项目只决定记忆召回，
+	// 能去哪些目录由 path-guard 的「主工作区 + 所有非归档项目根」决定。
+	// 判据是「会话实际 cwd 是不是主工作区」——执事轮跑在 task- 会话里，
+	// partnerId 解析不到（实测 fresh 轮注入走了 chief 分支，说"相对路径以主文件夹为基准"，
+	// 和它真正的 cwd 直接打架），认"谁是会话"不如认"它到底在哪"。
+	const boundIsWorkspace = bound !== null && workspacePath !== null && samePath(bound, workspacePath);
+	const partnerSession = isNonChiefPartner(ctx.partnerId) || boundIsWorkspace;
 	const lines: string[] = [];
+	if (partnerSession) {
+		if (workspacePath) {
+			lines.push(`主工作区：${basename(workspacePath) || "工作区"}（${workspacePath}）`);
+		}
+		const workDir = bound ?? workspacePath ?? sessionCwd(ctx.conversationId);
+		lines.push(`本会话的默认目录：${workDir}（相对路径按它解析；它不是边界）`);
+		lines.push(
+			"你能去的目录不止这一个：主工作区和下面所有已登记项目都在文件范围里，直接用绝对路径过去就行。",
+		);
+		lines.push(
+			"设置里勾选的项目只决定「记忆能不能召回」，不限制你能去哪些目录——这两件事是分开的。",
+		);
+		if (projectLines.length > 0) {
+			lines.push("全部已登记项目（都能去）：", ...projectLines);
+			lines.push(
+				"多个文件夹里可能有同名文件（README.md / build.gradle 之类）：动手前先看路径，别把同名文件当成同一个。",
+			);
+		}
+		return entry("current_project", lines.join("\n"), INJECTION_ORDER.current_project, "system");
+	}
 	if (workspacePath) {
 		lines.push(`主工作区：${basename(workspacePath) || "工作区"}（${workspacePath}）`);
 	}
@@ -270,6 +308,9 @@ export const skillSlashProvider: InjectionProvider = (ctx) => {
 	const name = skillSlashOf(ctx.userText ?? "");
 	const manual = name ? skillStore?.manual(name, skillPartnerOf(ctx)) : undefined;
 	if (!name || !manual) return undefined;
+	// 斜杠调用也计数（2026-11-17 补漏）：skill 工具取手册已记，这条路此前漏计。
+	// 审计（dryRun = injection-preview）不记账，别让预览污染用量账。
+	if (!ctx.dryRun) recordSkillUse(name);
 	return entry(
 		"skill_slash",
 		`【技能调用 · ${name}】\n${manual}\n（用户消息开头的 /${name} 就是调用这份手册；其余文字是这一轮的指令。）`,

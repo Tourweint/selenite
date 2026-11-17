@@ -71,6 +71,13 @@ export interface PartnerRow {
 	 */
 	disabledTools: string[];
 	/**
+	 * 按人常驻名单（2026-11-17 按人常驻方案）：JSON 数组，只存被提升成常驻的
+	 * **deferred** 工具名；空数组 = 全部按需（= 现状）。运行时由
+	 * `applyPartnerToolSelection` 写进会话 `modelTools.add`（内核「延迟 − 已 offer」，
+	 * 进了 add 就等于常驻），下一轮生效、不重启。**不版本化**（不是身份）。
+	 */
+	promotedTools: string[];
+	/**
 	 * 人格预设（2026-11-14 员工人格模块 §四；2026-11-15 人设页打磨扩枚举）：
 	 * `work`（默认）/ `companion` / `allrounder` / `apprentice` / `custom`。
 	 * 只决定模块开关的默认值；保存时按最终开关表推导（`derivePresetFromModules`）——
@@ -111,9 +118,11 @@ export interface PartnerSessionLinkRow {
 	partnerId: string;
 	/**
 	 * `delegation` = 执事的领域路由（批次D D2），这类链接没有宿主会话，sessionId 为占位 0；
-	 * `group` = 执事在某群的成员会话（2026-11-06 群组方案），routeKey = `group:<群id>`。
+	 * `group` = 执事在某群的成员会话（2026-11-06 群组方案），routeKey = `group:<群id>`；
+	 * `side` = 可交互的副会话（2026-11-17 一人多会话），routeKey = 副会话外部 id
+	 *   （`partner-<id>-side-<8位hex>`）。副会话共用同一份人设，但不参与三条自动流程。
 	 */
-	role: "canonical" | "routine" | "topic" | "delegation" | "group";
+	role: "canonical" | "routine" | "topic" | "delegation" | "group" | "side";
 	routeKey: string | null;
 	/** durable 内部自增会话 id（不外泄） */
 	sessionId: number;

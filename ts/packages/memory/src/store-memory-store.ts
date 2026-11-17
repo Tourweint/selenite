@@ -89,6 +89,16 @@ export interface MemoryStore {
 	 * 返回实际删除条数（只给调用方记数用，不含任何正文）。
 	 */
 	pruneOldest(scope: string, keep: number, options?: PruneOptions): number;
+	/**
+	 * 把 `from` 的全部记忆与原文档案整体改挂到 `to`（2026-11-17 项目合并/记忆迁移）。
+	 *
+	 * 纯搬家：不合并重复、不改 kind、不动 superseded 引用（引用存的是记录 id）。
+	 * **FTS 不用重灌**：`memory_fts` 只镜像 content 与 content_id，不含 scope。
+	 * 返回搬走的行数，供调用方如实回报（不做"搬了 0 条算成功"的掩盖）。
+	 */
+	moveScope(from: string, to: string): { records: number; documents: number };
+	/** 把某个 scope 的全部记忆软封存（写 archived_at；行还在，可再被 move 取走）。 */
+	archiveScope(scope: string): number;
 	/** 是否真的能做文本检索（2026-11-04 批次三）；内存实现恒 false。 */
 	ftsAvailable(): boolean;
 	/** 原文档案：写入一份（按 id upsert）。 */

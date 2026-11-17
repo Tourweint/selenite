@@ -1,3 +1,4 @@
+import { contentText } from "@earendil-works/pi-ai";
 import { getConnInfo } from "@hono/node-server/conninfo";
 import { serve } from "@hono/node-server";
 import { Hono, type Context } from "hono";
@@ -41,6 +42,7 @@ import {
   pinChat,
   preferenceScopeOf,
   readTranscript,
+  reminderTaskById,
   renameChat,
   rescheduleReminder,
   restoreArchivedChats,
@@ -63,6 +65,8 @@ import {
   decodeHistoryCursor,
   readTranscriptPage,
 } from "./agent.ts";
+// 会话画板（2026-11-17 画板批）：只读投影 + 单条消息详情；开关 CHAT_MAP_ENABLED。
+import { buildChatMap, chatMapEnabled, readSingleTranscriptMessage } from "./agent/chat-map.ts";
 import {
   assembleUserContent,
   attachmentsEnabled,
@@ -96,8 +100,20 @@ import {
 } from "./pairing.ts";
 import { pairPage } from "./pair-page.ts";
 import { mountPhoneWorker } from "./phone-worker.ts";
-import { mountProjects, seedDefaultWorkspace } from "./projects.ts";
-import { chatHistoryPagingEnabled, flagEnabled, loadFlagOverrides, mountFlags } from "./flags.ts";
+import { mountProjects, projectsStore, resolveChatDir, seedDefaultWorkspace, type ChatDirPick } from "./projects.ts";
+import { chatDirPickEnabled, chatHistoryPagingEnabled, flagEnabled, loadFlagOverrides, mountFlags } from "./flags.ts";
+import { toolUsageEnabled, toolUsageRows } from "./tool-usage.ts";
+// 全局工具池（2026-11-17 设置→工具页）：目录与摘要复用 partner-tools，避免另抄一份。
+import { modelToolCatalog, toolSummaryOf } from "./partner-tools.ts";
+import { toolIndexEnabled } from "./tool-index.ts";
+import { mountToolPoolRoutes } from "./tool-pool.ts";
+// 一轮对话时间线（2026-11-17）：按 SSE 流 id 把工具/闸门/回合/token/收尾串成一条账。
+import {
+	beginTurn,
+	readTurnTimeline,
+	recordTimelineEvent,
+	turnTimelineEnabled,
+} from "./turn-timeline.ts";
 // 自动归档调度器（2026-11-13 归档管理对齐 ZCode 批A）：启动 sync 一次，
 // ARCHIVE_AUTO_ENABLED=false/0/off 时才零行为（2026-11-15 起默认开）；flags 端点改开关后由 onChange 动态开停。
 import { autoArchiveScheduler } from "./agent/auto-archive.ts";
@@ -110,7 +126,19 @@ import { contextDefaultPayload } from "./context-defaults.ts";
 // Worker（普通任务助手）人设：全局一份可编辑，GET/PUT /api/v1/agent/worker-persona；
 // 路由定义收在模块里（可挂载给 HTTP 测试），挂载点放在 context-defaults 附近。
 import { mountWorkerPersonaRoutes } from "./worker-persona.ts";
-import { CTX } from "./agent/shared.ts";
+import {
+  ChatOrigins,
+  ChatProjects,
+  Chats as ChatsDoc,
+  ChatKinds as ChatKindsDoc,
+  CTX,
+} from "./agent/shared.ts";
+// 从回答分支（2026-11-17 批3a）：复制计划是纯函数，真正的 append 在 init / commit 事务里做。
+import { planBranchCopy, type BranchPlan } from "./agent/branch-copy.ts";
+import { conversationIsBusy } from "./agent/session-stream.ts";
+import { messageIdOf } from "./agent/session-transcript.ts";
+import { createPartnerSideSession } from "./partner-runtime-run-partner-turn.ts";
+import type { Tx } from "@earendil-works/pi-durable";
 // 壁纸（2026-11-14 外观页扩展）：.data/appearance 存一张图 + GET/POST/DELETE 三个端点。
 // AGENT_APPEARANCE_WALLPAPER=0 时整组不挂（界面那块也自己藏掉）。
 import { mountAppearanceWallpaper, wallpaperEnabled } from "./appearance-wallpaper.ts";
@@ -130,6 +158,13 @@ import { mountTopics } from "./topic-api.ts";
 import { mountSearch } from "./search-api.ts";
 import { COMPANIONS_ENABLED, partnersStore } from "./partners.ts";
 import { ensurePartnerSession } from "./partner-runtime.ts";
+// 定时任务重做（2026-11-17）：暂停/可见性归一 + 执行历史存储 + 立即跑回调。
+import { reminderEnabledOf, reminderVisibilityOf, type ReminderRepeat, type ReminderVisibility } from "./reminder.ts";
+import { listReminderRuns, recordReminderRun } from "./reminder-runs.ts";
+import { invokeScheduledRun } from "./scheduled-run-deliverer.ts";
+// 一人多会话批1（2026-11-17）：续话按链接角色分流，side 不再折回 canonical。
+import { partnerContinuePlan, sideSessionsEnabled } from "./partner-session-role.ts";
+import { alignPartnerSideSession } from "./partner-runtime-run-partner-turn.ts";
 import { nextReminderAt, setReminderDeliverer } from "./reminder.ts";
 import { installScheduledRunHandler } from "./scheduled-run-handler.ts";
 import { routineEngine } from "./routines.ts";
@@ -1076,6 +1111,8 @@ function policyProjection() {
     attachments: attachmentsEnabled(),
     fileAttachments: fileAttachmentsEnabled(),
     editResend: editResendEnabled(),
+    // 会话画板（2026-11-17）：前端据此决定会话顶栏要不要挂「会话地图」。
+    chatMap: chatMapEnabled(),
   };
 }
 
@@ -1350,11 +1387,29 @@ app.post("/api/v1/agent/chat", async (c) => {
       400,
     );
   }
+  // 新建时直接选目录（2026-11-17）：只认新建分支；续话带目录一概拒——
+  // cwd 是创建时的快照，中途换目录会让模型前后的相对路径指向两个地方。
+  let chatDir: ChatDirPick | undefined;
+  if (request.dirPath && chatDirPickEnabled()) {
+    if (requestedId) {
+      return c.json(
+        { error: "bad_dir", message: "已有会话不能改工作目录；换目录请新建会话" },
+        400,
+      );
+    }
+    if (request.chatKind !== "worker") {
+      return c.json({ error: "bad_dir", message: "只有 worker 会话需要工作目录" }, 400);
+    }
+    const pick = resolveChatDir(request.dirPath, projectsStore());
+    if (!pick.ok) return c.json({ error: "bad_dir", message: pick.message }, 400);
+    chatDir = pick.pick;
+  }
   let chat = await openChat(
     requestedId,
     undefined,
     // 种类只在新建分支采用：续话不能靠这个字段改身份（下面另有不匹配校验）
     requestedId ? undefined : request.chatKind,
+    chatDir,
   ).catch((error: unknown) => {
     console.error(`[chat] 打开会话失败: ${error instanceof Error ? error.message : String(error)}`);
     return null;
@@ -1373,24 +1428,45 @@ app.post("/api/v1/agent/chat", async (c) => {
       );
     }
     // 主聊天续执事专线（2026-11-06 B2）：提交前对齐身份；暂停/归档不许继续跑。
-    // 对齐在 partner-runtime（agent.ts 不能反向 import 它），这里只做装配。
+    // 2026-11-17 批1：按链接角色分流——side 对齐这条副会话本身，不再折回 canonical；
+    // canonical / group / routine 仍走原来的 partnerIdOfSession → ensurePartnerSession。
     if (kind === "partner" && COMPANIONS_ENABLED) {
-      const partnerId = partnersStore().partnerIdOfSession(chat.internalId);
-      if (partnerId) {
-        const aligned = await ensurePartnerSession(partnerId).catch(() => null);
-        if (!aligned) {
+      const store = partnersStore();
+      const link = store.linkOfSession(chat.internalId);
+      const plan = partnerContinuePlan(link?.role ?? null, sideSessionsEnabled());
+      if (plan === "side") {
+        const ok = await alignPartnerSideSession(chat, link!.partnerId).catch(() => false);
+        if (!ok) {
           return c.json(
             { error: "partner_inactive", message: "执事当前是暂停或归档状态，先恢复再继续" },
             409,
           );
         }
-        chat = aligned;
+      } else if (plan === "reject") {
+        return c.json({ error: "side_session_disabled", message: "副会话已关闭" }, 409);
+      } else {
+        const partnerId = store.partnerIdOfSession(chat.internalId);
+        if (partnerId) {
+          const aligned = await ensurePartnerSession(partnerId).catch(() => null);
+          if (!aligned) {
+            return c.json(
+              { error: "partner_inactive", message: "执事当前是暂停或归档状态，先恢复再继续" },
+              409,
+            );
+          }
+          chat = aligned;
+        }
       }
     }
   }
 
   return streamSSE(c, async (stream) => {
     const id = crypto.randomUUID();
+
+    // 时间线账（2026-11-17）：把本轮单号登记给内部会话 id，钩子按内部 id 挂事件。
+    // 与 SSE start/done.id 是同一个 uuid——日志和对外帧共用单号，搜一个号看全一轮。
+    beginTurn(chat.internalId, id);
+    recordTimelineEvent({ turnId: id, conversationId: chat.internalId, kind: "start" });
 
     // seq 链（2026-11-04 seq 方案）：先落库再外发。落库失败的帧不外发——
     // 宁可客户端重拉，也不发"承诺过却补不回来"的帧。开关关着时 store 为空，退回直发。
@@ -1465,6 +1541,12 @@ app.post("/api/v1/agent/chat", async (c) => {
         // 本轮 token 用量（内部事件）：不单独发帧，挂到收尾的 done.usage 上
         if (event.type === "usage") {
           turnUsage = event.usage;
+          recordTimelineEvent({
+            turnId: id,
+            conversationId: chat.internalId,
+            kind: "usage",
+            count: event.usage.input + event.usage.output + event.usage.cacheRead,
+          });
           continue;
         }
         // 工具调用撞上限 / 一轮没给出回答（批 32）：都透成 error 帧。
@@ -1473,6 +1555,13 @@ app.post("/api/v1/agent/chat", async (c) => {
         streamEnd = "error";
         const described =
           event.type === "unanswered" ? { code: event.code, detail: event.detail } : {};
+        // 时间线只记错误类别枚举（event.code 已脱敏），detail 正文绝不入账。
+        recordTimelineEvent({
+          turnId: id,
+          conversationId: chat.internalId,
+          kind: "error",
+          name: event.type === "unanswered" ? event.code : "stream_error",
+        });
         await send({
           type: "error",
           message: event.message,
@@ -1482,6 +1571,8 @@ app.post("/api/v1/agent/chat", async (c) => {
     } catch (error) {
       streamEnd = "error";
       const detail = error instanceof Error ? error.message : String(error);
+      // 时间线只记错误类别枚举，绝不记原始 message（可能带上游地址 / key 片段）。
+      recordTimelineEvent({ turnId: id, conversationId: chat.internalId, kind: "error", name: "model_error" });
       // 原始错误只进服务端日志：里面可能带上游地址甚至 key 片段。
       console.error(`[chat ${id}] 生成失败: ${detail}`);
       // 这里的 detail 是异常 message（服务端内部错误，非上游原文），照旧脱敏后下发
@@ -1502,6 +1593,15 @@ app.post("/api/v1/agent/chat", async (c) => {
       ...(turnUsage ? { usage: turnUsage } : {}),
     }).catch(() => undefined);
 
+    // 时间线收尾：结束状态 + 字数 + 耗时（都是枚举/数字，无正文）。
+    recordTimelineEvent({
+      turnId: id,
+      conversationId: chat.internalId,
+      kind: "done",
+      name: streamEnd,
+      ms: Date.now() - startedAt,
+      chars,
+    });
     // 只记行数/字数/耗时 —— 日志里绝不出现对话内容。
     console.log(
       `[chat ${id}] stream=${streamEnd} chars=${chars} ms=${Date.now() - startedAt}`,
@@ -1579,6 +1679,212 @@ app.post("/api/v1/agent/chat/:conversationId/edit", async (c) => {
 });
 
 /**
+ * 从回答分支（2026-11-17 批3a）：把复制计划逐条 append 到新会话。
+ *
+ * compaction 的 `head` / `edits[].target` 在计划里已摘掉、只留下标映射；这里维护
+ * `复制下标 → 真实新 id`，追加到一条就回填它们。前向 head（真实 compaction）已在计划里
+ * 展平成普通摘要条目，不在这里处理。不设 durable parent（设了历史会在源与副本各出现一遍），
+ * 来源只写 ChatOrigins。
+ */
+/**
+ * 分支来源 / 副本标题的兜底（2026-11-17 批3b 验收补）：源会话没改过名时，
+ * `chatTitles()` 是空的；取第一条用户消息首行，别让来源行只能写「一条会话」。
+ */
+function firstUserLineOf(
+  entries: ReadonlyArray<{ kind: string; model?: readonly unknown[] }>,
+): string {
+  for (const entry of entries) {
+    if (entry.kind !== "pi.user") continue;
+    const message = entry.model?.[0] as { content?: unknown } | undefined;
+    const text = message
+      ? contentText(message.content as Parameters<typeof contentText>[0]).trim()
+      : "";
+    if (text) return text.split(/\r?\n/, 1)[0].slice(0, 40);
+  }
+  return "";
+}
+
+async function appendBranchEntries(tx: Tx, destinationId: number, plan: BranchPlan): Promise<void> {
+  const headRemaps = new Map(plan.headRemaps.map((item) => [item.entryIndex, item.headIndex]));
+  const editRemaps = new Map<number, Array<{ editIndex: number; targetIndex: number }>>();
+  for (const item of plan.editRemaps) {
+    const list = editRemaps.get(item.entryIndex) ?? [];
+    list.push({ editIndex: item.editIndex, targetIndex: item.targetIndex });
+    editRemaps.set(item.entryIndex, list);
+  }
+  const newIds: number[] = [];
+  for (let index = 0; index < plan.entries.length; index += 1) {
+    const draft: Record<string, unknown> = { ...plan.entries[index] };
+    // EntryDraft 不接受源会话分配的身份字段
+    delete draft.id;
+    delete draft.conversationId;
+    delete draft.byTaskId;
+    const headRemap = headRemaps.get(index);
+    if (headRemap !== undefined) {
+      const headId = newIds[headRemap];
+      if (headId !== undefined) draft.head = headId;
+      else delete draft.head;
+    }
+    const edits = editRemaps.get(index);
+    if (edits && Array.isArray(draft.edits)) {
+      // 先克隆再改，别动计划对象；目标新 id 尚不存在（被丢弃 / 顺序异常）就删掉这条 edit。
+      const cloned = (draft.edits as Array<Record<string, unknown>>).map((edit) => ({ ...edit }));
+      const drop = new Set<number>();
+      for (const { editIndex, targetIndex } of edits) {
+        const targetId = newIds[targetIndex];
+        if (targetId === undefined) drop.add(editIndex);
+        else cloned[editIndex].target = targetId;
+      }
+      const kept = cloned.filter((_, editIndex) => !drop.has(editIndex));
+      if (kept.length > 0) draft.edits = kept;
+      else delete draft.edits;
+    }
+    const appended = await tx.appendEntry(destinationId as never, draft as never);
+    newIds[index] = Number(appended.id);
+  }
+}
+
+/**
+ * `POST .../chat/:conversationId/branches`，body `{ atMessageId, title? }`（2026-11-17 批3a）。
+ *
+ * 从某条**助手回答**另开一支：复制源会话从 1 到该回答的全部条目（usage 清零、
+ * compaction head 重映射）到一条新会话；源会话只读、不改。
+ * 执事会话的新分支 = 同一人设下的 side 会话（走 createPartnerSideSession，身份/记忆/项目照旧）；
+ * worker / chief 则建一条独立会话并继承种类 / 项目 / 工作目录 / 模型。
+ * 返回 `{ok:true, conversationId, entries}`；不写消息、不跑模型（分叉点就是最后一条）。
+ */
+app.post("/api/v1/agent/chat/:conversationId/branches", async (c) => {
+  const body = (await c.req.json().catch(() => null)) as
+    | { atMessageId?: unknown; title?: unknown }
+    | null;
+  const atMessageId = typeof body?.atMessageId === "string" ? body.atMessageId.trim() : "";
+  if (!atMessageId) {
+    return c.json({ error: "bad_request", message: "需要 atMessageId" }, 400);
+  }
+  const title = typeof body?.title === "string" ? body.title.trim().slice(0, 80) : "";
+
+  const chat = await openChat(c.req.param("conversationId"));
+  if (!chat) return c.json({ error: "unknown_conversation" }, 404);
+  if (await conversationIsBusy(chat.conversation)) {
+    return c.json({ error: "conversation_busy", message: "这一轮还在跑，等它结束再分叉" }, 409);
+  }
+
+  const view = await chat.conversation.context(CTX);
+  const index = view.entries.findIndex(
+    (entry) =>
+      entry.kind === "pi.assistant" &&
+      messageIdOf(chat.externalId, Number(entry.id)) === atMessageId,
+  );
+  if (index < 0) {
+    return c.json({ error: "branch_point_not_found", message: "这条回答不在这个会话里" }, 400);
+  }
+  const planned = planBranchCopy(view.entries as Parameters<typeof planBranchCopy>[0], index);
+  if (!planned.ok) {
+    const errorOf = {
+      not_assistant: "branch_point_not_found",
+      empty: "branch_point_empty",
+      too_large: "branch_too_large",
+    } as const;
+    return c.json({ error: errorOf[planned.reason], message: planned.message }, 400);
+  }
+
+  const harness = await getHarness();
+  const sourceAgent = await chat.conversation.agent(CTX);
+  // 来源标题：用户改过名优先；没改过取首句首行（否则来源行只能写「一条会话」）。
+  const sourceTitle = chatTitles()[chat.externalId] || firstUserLineOf(view.entries) || undefined;
+  const origin = {
+    source: chat.externalId,
+    ...(sourceTitle ? { sourceTitle } : {}),
+    at: Date.now(),
+    // 分叉点（2026-11-17 画板批）：画板靠它把副本的第一张问卡挂回母会话那张答卡；
+    // 老数据没有这个字段，画板按时间戳兜底。
+    atMessageId,
+  };
+  const link = partnersStore().linkOfSession(chat.internalId);
+  // 群成员 / 例行 / 课题专线不能分支：落到下面的 worker/chief 会把它复制成一条总管会话，
+  // 身份（群成员轮次 / 例行归属）就丢了（2026-11-17 批3b）。
+  if (link && link.role !== "canonical" && link.role !== "side") {
+    return c.json({ error: "branch_not_supported", message: "这类会话不能分支" }, 400);
+  }
+  const isPartnerLine = link && (link.role === "canonical" || link.role === "side");
+
+  // 执事分支 = 新建 side：插件关时必须明确说"副会话已关闭"，不能落到看似的 partner_inactive。
+  if (isPartnerLine && !sideSessionsEnabled()) {
+    return c.json({ error: "side_sessions_disabled", message: "副会话已关闭" }, 400);
+  }
+
+  let destinationId: string;
+  if (isPartnerLine && link) {
+    // 执事：同一人设下新建 side 会话（内部已对齐身份、钉工作目录、登记链接）
+    const dest = await createPartnerSideSession(link.partnerId);
+    if (!dest) {
+      return c.json({ error: "partner_inactive", message: "执事当前不可用，先恢复再分叉" }, 409);
+    }
+    destinationId = dest.externalId;
+    await dest.conversation.commit(async (tx) => {
+      await appendBranchEntries(tx, Number(dest.conversation.id), planned.plan);
+      const origins = await tx.doc(ChatOrigins);
+      origins.byExternal[dest.externalId] = origin;
+    }, CTX);
+  } else {
+    // worker / chief：新建独立会话，init 同一事务里落映射表 + 复制条目 + 来源
+    const externalId = crypto.randomUUID();
+    const kind = (await chatKindOf(chat)) === "worker" ? "worker" : "chief";
+    const sourceProjectId =
+      kind === "worker"
+        ? (await harness.snapshot(ChatProjects, CTX))?.byInternal?.[String(chat.internalId)]
+        : undefined;
+    const init = async (tx: Tx, conversationId: number) => {
+      const chats = await tx.doc(ChatsDoc);
+      chats.byExternal[externalId] = Number(conversationId);
+      const kinds = await tx.doc(ChatKindsDoc);
+      kinds.byInternal[String(conversationId)] = kind;
+      if (sourceProjectId) {
+        const projects = await tx.doc(ChatProjects);
+        projects.byInternal[String(conversationId)] = sourceProjectId;
+      }
+      await appendBranchEntries(tx, conversationId, planned.plan);
+      const origins = await tx.doc(ChatOrigins);
+      origins.byExternal[externalId] = origin;
+    };
+    const conversation = await harness.createConversation(
+      {
+        ownership: { kind: "ownerless" },
+        // 同模型（含思考档后缀），不回到默认模型
+        agent: { model: sourceAgent.model },
+        init,
+      },
+      CTX,
+    );
+    destinationId = externalId;
+    // cwd 继承：读得到才写（与 openChat 的会话绑定即快照同口径）
+    if (sourceAgent.cwd) {
+      try {
+        await conversation.configure({ cwd: sourceAgent.cwd }, CTX);
+      } catch (error) {
+        console.warn(
+          `[branch] 工作目录继承失败，按回落处理: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  }
+
+  // 副本默认带「副本 · <来源标题>」，否则列表里两条会话同名，只能靠来源行分。
+  renameChat(destinationId, title || `副本 · ${sourceTitle || "一条会话"}`);
+  console.log(
+    `[branch] ${chat.externalId} → ${destinationId}：复制 ${planned.plan.count} 条` +
+      (planned.plan.flattenedCompaction
+        ? `，展平前向压缩 ${planned.plan.flattenedCompaction} 条`
+        : "") +
+      (planned.plan.droppedCompaction
+        ? `，丢弃失效压缩 ${planned.plan.droppedCompaction} 条`
+        : "") +
+      (planned.plan.editRemaps.length ? `，重映射上下文覆盖 ${planned.plan.editRemaps.length} 条` : ""),
+  );
+  return c.json({ ok: true, conversationId: destinationId, entries: planned.plan.count });
+});
+
+/**
  * 读会话历史。
  *
  * 一轮对话现在可以在没有客户端看着的情况下跑完，所以客户端下次打开必须能把结果拉回来 ——
@@ -1638,11 +1944,19 @@ app.get("/api/v1/agent/chat/:conversationId/messages", async (c) => {
   }
   // 会话种类（2026-11-06 B2）：前端据此恢复"普通 worker / 总管"身份，不按 id 猜
   const chatKind = await chatKindOf(chat);
+  // 分支来源（2026-11-17 批3b，纯增量）：只有副本会话才有；分页 / 全量与补帧两条路都带。
+  const origin = (await (await getHarness()).snapshot(ChatOrigins, CTX))?.byExternal?.[chat.externalId];
 
   const sinceRaw = c.req.query("sinceSeq");
   const eventStore = chatEventStoreOf();
   if (sinceRaw === undefined || sinceRaw === "" || !eventStore) {
-    return c.json({ conversationId: chat.externalId, messages, chatKind, ...pageFields });
+    return c.json({
+      conversationId: chat.externalId,
+      messages,
+      chatKind,
+      ...pageFields,
+      ...(origin ? { origin } : {}),
+    });
   }
   const sinceSeq = Number(sinceRaw);
   if (!Number.isFinite(sinceSeq) || sinceSeq < 0) {
@@ -1654,9 +1968,41 @@ app.get("/api/v1/agent/chat/:conversationId/messages", async (c) => {
     messages,
     chatKind,
     ...pageFields,
+    ...(origin ? { origin } : {}),
     fromSeq: from,
     events,
   });
+});
+
+/**
+ * 会话画板（2026-11-17 画板批，方案 `docs/设计方案/2026-11-17-会话画板（单会话回合卡）.md`）。
+ *
+ * `GET .../chat/:conversationId/map`：一次回根会话 + 全部后代（来源链向上找根、向下 BFS），
+ * 每节点带「分叉点之后」的回合预览。只读，不写布局、不改会话。
+ * `CHAT_MAP_ENABLED=false` → 404（一行回滚；前端按钮同时按 /agent/policy 的 chatMap 收起）。
+ */
+app.get("/api/v1/agent/chat/:conversationId/map", async (c) => {
+  if (!chatMapEnabled()) {
+    return c.json({ error: "chat_map_disabled", message: "会话地图已关闭" }, 404);
+  }
+  const map = await buildChatMap(c.req.param("conversationId"));
+  if (!map) return c.json({ error: "unknown_conversation" }, 404);
+  return c.json(map);
+});
+
+/**
+ * 画板详情：按可寻址 id 取单条消息全文（地图接口只回 1200 字预览）。
+ * 与 /messages 同一套回合投影，隐藏的定时触发不在列表里，因此也取不到（口径一致）。
+ */
+app.get("/api/v1/agent/chat/:conversationId/messages/:messageId", async (c) => {
+  if (!chatMapEnabled()) {
+    return c.json({ error: "chat_map_disabled", message: "会话地图已关闭" }, 404);
+  }
+  const chat = await openChat(c.req.param("conversationId"));
+  if (!chat) return c.json({ error: "unknown_conversation" }, 404);
+  const message = await readSingleTranscriptMessage(chat, c.req.param("messageId"));
+  if (!message) return c.json({ error: "unknown_message" }, 404);
+  return c.json({ message });
 });
 
 /**
@@ -1833,6 +2179,44 @@ app.get("/api/v1/agent/usage", async (c) => {
     return c.json(await usageSummary({ days: range === "7d" ? 7 : 30 }));
   }
   return c.json(await usageSummary());
+});
+
+/**
+ * 工具用量（2026-11-17，方案 docs/设计方案/2026-11-17-工具调用计数.md）：
+ * 每个工具真实执行的次数（成败分桶）+ 被 tool_search 按需加载的次数，
+ * 全部累计、无区间——给"按使用频率动态调整上下文"当数据底座。
+ * 开关 TOOL_USAGE=false → 404（前端据此整卡隐藏），与账本停记同一行回滚。
+ */
+app.get("/api/v1/agent/tool-usage", (c) => {
+  if (!toolUsageEnabled()) return c.json({ error: "tool_usage_disabled" }, 404);
+  return c.json({ tools: toolUsageRows() });
+});
+
+/**
+ * 全局工具池（2026-11-17 设置→工具页）：哪些工具进"按需"池（初始不进前缀，
+ * 由 tool_search 按需加载），其余全部常驻。目录 / 分组 / 摘要复用 partner-tools，
+ * 定义大小与 token 口径同上下文页（紧凑 JSON + estimateTokens）。
+ *
+ * **生效边界**：deferred 是工具注册期属性，PUT 只写 `.data/tool-pool.json`，
+ * 必须重启服务（重开 Harness）才生效；GET 用 `restartPending` 告诉前端"已保存待重启"。
+ */
+mountToolPoolRoutes(app, {
+  catalog: () => modelToolCatalog(),
+  summaryOf: toolSummaryOf,
+  indexEnabled: () => toolIndexEnabled(),
+});
+
+/**
+ * 一轮对话的时间线（2026-11-17）：按 SSE 流 id（`turnId`，即 /chat 的 start/done.id）
+ * 把该轮的工具调用 / 闸门拦截 / 模型回合 / token 用量 / 收尾聚合成一条时间线。
+ * 只返回脱敏字段（枚举 / 计数 / 字数 / 耗时），不含任何对话正文或内部 id。
+ * 开关 TURN_TIMELINE=false → 404（与账本停记同一行回滚）。
+ */
+app.get("/api/v1/agent/turn-timeline", (c) => {
+  if (!turnTimelineEnabled()) return c.json({ error: "turn_timeline_disabled" }, 404);
+  const turnId = c.req.query("turnId")?.trim();
+  if (!turnId) return c.json({ error: "bad_request", message: "缺少 turnId" }, 400);
+  return c.json({ turnId, events: readTurnTimeline(turnId) });
 });
 
 /**
@@ -2236,10 +2620,13 @@ function parseReminderSchedule(body: ReminderScheduleBody | null):
   return { at, repeat, weekdays, dayOfMonth, until };
 }
 
-/** 还没响的提醒（读 durable 的任务图） */
+/** 还没响的提醒（读 durable 的任务图）；`includePaused=1` 才带暂停中的任务。 */
 app.get("/api/v1/agent/reminders", async (c) => {
   if (!readLlmConfig()) return c.json({ reminders: [] });
-  return c.json({ reminders: await listReminders() });
+  const reminders = await listReminders();
+  // 2026-11-17：手机端不传这个参数 → 继续只同步真会响的；桌面设置页传 1 才能看到暂停项。
+  const includePaused = c.req.query("includePaused") === "1";
+  return c.json({ reminders: includePaused ? reminders : reminders.filter((item) => item.enabled) });
 });
 
 /**
@@ -2255,11 +2642,26 @@ app.post("/api/v1/agent/reminders", async (c) => {
         conversationId?: string;
         text?: string;
         partnerId?: unknown;
+        enabled?: unknown;
+        visibility?: unknown;
       })
     | null;
   const text = body?.text?.trim();
   if (!text || !body?.at) {
     return c.json({ error: "bad_request", message: "需要 text 和 at" }, 400);
+  }
+  if (text.length > 100_000) {
+    return c.json({ error: "bad_request", message: "text 超过 100k 上限" }, 400);
+  }
+  if (body?.enabled !== undefined && typeof body.enabled !== "boolean") {
+    return c.json({ error: "bad_request", message: "enabled 必须是布尔值" }, 400);
+  }
+  if (
+    body?.visibility !== undefined &&
+    body.visibility !== "hidden" &&
+    body.visibility !== "visible"
+  ) {
+    return c.json({ error: "bad_request", message: "visibility 只能是 hidden / visible" }, 400);
   }
   const schedule = parseReminderSchedule(body);
   if ("error" in schedule) return c.json({ error: "bad_request", message: schedule.error }, 400);
@@ -2280,7 +2682,15 @@ app.post("/api/v1/agent/reminders", async (c) => {
       ? c.json({ error: "partner_not_found", message: "执事不存在或已暂停" }, 404)
       : c.json({ error: "unknown_conversation" }, 404);
   }
-  const taskId = await addReminder(chat, { text, ...schedule, partnerId });
+  const enabled = reminderEnabledOf(body?.enabled);
+  const visibility = reminderVisibilityOf(body?.visibility);
+  const taskId = await addReminder(chat, {
+    text,
+    ...schedule,
+    partnerId,
+    enabled,
+    visibility,
+  });
   return c.json(
     {
       ok: true,
@@ -2291,28 +2701,156 @@ app.post("/api/v1/agent/reminders", async (c) => {
       ...(schedule.dayOfMonth ? { dayOfMonth: schedule.dayOfMonth } : {}),
       ...(schedule.until ? { until: schedule.until } : {}),
       partnerId,
+      enabled,
+      visibility,
     },
     201,
   );
 });
 
 /**
- * 改时间（2026-11-14）：只改时间规则，内容与执事沿用原任务。
+ * 改一条提醒（2026-11-14 只改时间；2026-11-17 扩内容 / 暂停 / 可见性）。
  * 服务端用同一个 `reminderId` 重排，列表不会多出一行"已结束"。
+ * 只给 `text` / `enabled` / `visibility` 时沿用原时间规则；给 `at` 才按新规则归一化。
  */
 app.patch("/api/v1/agent/reminders/:taskId", async (c) => {
   const taskId = Number(c.req.param("taskId"));
   if (!Number.isInteger(taskId) || taskId <= 0) {
     return c.json({ error: "bad_request", message: "taskId 必须是正整数" }, 400);
   }
-  const body = (await c.req.json().catch(() => null)) as ReminderScheduleBody | null;
-  const schedule = parseReminderSchedule(body);
-  if ("error" in schedule) return c.json({ error: "bad_request", message: schedule.error }, 400);
-  const nextId = await rescheduleReminder(taskId, schedule);
+  const body = (await c.req.json().catch(() => null)) as
+    | (ReminderScheduleBody & {
+        text?: unknown;
+        enabled?: unknown;
+        visibility?: unknown;
+      })
+    | null;
+  if (body?.text !== undefined && (typeof body.text !== "string" || !body.text.trim())) {
+    return c.json({ error: "bad_request", message: "text 必须是非空字符串" }, 400);
+  }
+  if (typeof body?.text === "string" && body.text.length > 100_000) {
+    return c.json({ error: "bad_request", message: "text 超过 100k 上限" }, 400);
+  }
+  if (body?.enabled !== undefined && typeof body.enabled !== "boolean") {
+    return c.json({ error: "bad_request", message: "enabled 必须是布尔值" }, 400);
+  }
+  if (
+    body?.visibility !== undefined &&
+    body.visibility !== "hidden" &&
+    body.visibility !== "visible"
+  ) {
+    return c.json({ error: "bad_request", message: "visibility 只能是 hidden / visible" }, 400);
+  }
+
+  const origin = (await listReminders()).find(
+    (item) => item.id === taskId && item.status !== "terminal",
+  );
+  if (!origin) {
+    return c.json({ error: "not_found", message: "没有这条提醒，或已经结束" }, 404);
+  }
+
+  let schedule: {
+    at: number;
+    repeat: ReminderRepeat;
+    weekdays?: number[];
+    dayOfMonth?: number;
+    until?: number;
+  };
+  if (body?.at !== undefined) {
+    const parsed = parseReminderSchedule(body);
+    if ("error" in parsed) return c.json({ error: "bad_request", message: parsed.error }, 400);
+    schedule = parsed;
+  } else {
+    schedule = {
+      at: origin.at,
+      repeat: origin.repeat,
+      ...(origin.weekdays ? { weekdays: origin.weekdays } : {}),
+      ...(origin.dayOfMonth ? { dayOfMonth: origin.dayOfMonth } : {}),
+      ...(origin.until !== undefined ? { until: origin.until } : {}),
+    };
+  }
+
+  const text = typeof body?.text === "string" ? body.text.trim() : origin.text;
+  const enabled = body?.enabled === undefined ? origin.enabled : Boolean(body.enabled);
+  const visibility: ReminderVisibility =
+    body?.visibility === undefined ? origin.visibility : reminderVisibilityOf(body.visibility);
+  const nextId = await rescheduleReminder(taskId, {
+    ...schedule,
+    text,
+    enabled,
+    visibility,
+  });
   if (nextId === null) {
     return c.json({ error: "not_found", message: "没有这条提醒，或已经结束" }, 404);
   }
-  return c.json({ ok: true, taskId: nextId, ...schedule });
+  return c.json({
+    ok: true,
+    taskId: nextId,
+    text,
+    enabled,
+    visibility,
+    repeat: schedule.repeat,
+    at: schedule.at,
+    ...(schedule.weekdays ? { weekdays: schedule.weekdays } : {}),
+    ...(schedule.dayOfMonth ? { dayOfMonth: schedule.dayOfMonth } : {}),
+    ...(schedule.until !== undefined ? { until: schedule.until } : {}),
+  });
+});
+
+/**
+ * 立即跑一次（2026-11-17 定时任务重做）：手动触发一轮，不动定时链。
+ * `SCHEDULED_TASK_MODEL_RUN=false`（回滚形态）时拒绝——那套形态本来就不调模型。
+ */
+app.post("/api/v1/agent/reminders/:taskId/run_now", async (c) => {
+  if (!flagEnabled("SCHEDULED_TASK_MODEL_RUN")) {
+    return c.json(
+      { error: "bad_request", message: "定时任务当前是回滚形态（不调模型），不能立即跑" },
+      400,
+    );
+  }
+  const taskId = Number(c.req.param("taskId"));
+  if (!Number.isInteger(taskId) || taskId <= 0) {
+    return c.json({ error: "bad_request", message: "taskId 必须是正整数" }, 400);
+  }
+  const task = await reminderTaskById(taskId);
+  if (!task || !task.live) {
+    return c.json({ error: "not_found", message: "没有这条提醒，或已经结束" }, 404);
+  }
+  const result = await invokeScheduledRun({
+    conversationId: task.conversationId,
+    partnerId: task.partnerId,
+    text: task.text,
+    visible: task.visibility === "visible",
+  });
+  if (!result) {
+    return c.json(
+      { error: "run_unavailable", message: "到点执行器未装配，稍后再试" },
+      503,
+    );
+  }
+  recordReminderRun({
+    reminderId: task.reminderId,
+    partnerId: task.partnerId,
+    trigger: "manual",
+    status: result.ok ? "success" : "failed",
+    at: task.at,
+    summary: result.ok ? result.text : "这一轮没跑完（详情看服务端日志）",
+  });
+  return c.json(
+    {
+      ok: result.ok,
+      text: result.text ?? "",
+      ...(result.ok ? {} : { error: result.error ?? "这一轮没跑完" }),
+    },
+    result.ok ? 200 : 400,
+  );
+});
+
+/** 某条提醒的执行历史（2026-11-17）：按稳定 reminderId 归组，重排后仍能查到。 */
+app.get("/api/v1/agent/reminders/:reminderId/runs", (c) => {
+  const reminderId = c.req.param("reminderId").trim();
+  if (!reminderId) return c.json({ error: "bad_request", message: "reminderId 不能为空" }, 400);
+  return c.json({ ok: true, runs: listReminderRuns(reminderId) });
 });
 
 /** 取消一条提醒（2026-11-12）：每日续排的链在取消当前任务后不再续。 */

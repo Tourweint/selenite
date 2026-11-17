@@ -59,7 +59,9 @@ export class PartnersStore {
 			mood_updated_at TEXT,
 			mood_source     TEXT,
 			-- 人设页工具勾选（2026-11-16 工具裁剪 B）：JSON 数组，只存被取消的工具名；空 = 全开。
-			disabled_tools  TEXT
+			disabled_tools  TEXT,
+			-- 按人常驻（2026-11-17）：JSON 数组，只存被提升的 deferred 工具名；空 = 全按需。
+			promoted_tools TEXT
 			);
 			/* partner_versions 表已退役（2026-11-15 人设停存版本快照方案）：快照历史只写不读，
 			 * 新库不再建表；老库启动时由 migrate() 搬走候选链后 DROP。 */
@@ -202,6 +204,10 @@ export class PartnersStore {
 		// （= 没取消任何工具 = 全开），不炸、不补数据、不版本化。照 dispatch_authority 的补列先例。
 		if (!columns.some((column) => column.name === "disabled_tools")) {
 			this.db.exec("ALTER TABLE partners ADD COLUMN disabled_tools TEXT");
+		}
+		// 按人常驻（2026-11-17）：旧库补 nullable 列，老行读 null = 全按需（现状），不炸、不补数据。
+		if (!columns.some((column) => column.name === "promoted_tools")) {
+			this.db.exec("ALTER TABLE partners ADD COLUMN promoted_tools TEXT");
 		}
 		// 例行任务条件门控（2026-11-10 批 13 §四）：旧库补两个 nullable 列，
 		// 老规则读出来是 null（= 无完成条件 / 不限次数），不炸、不补数据。
@@ -552,6 +558,20 @@ export class PartnersStore {
 	}
 
 	/**
+	 * 设置按人常驻名单（2026-11-17 按人常驻方案）：一条 UPDATE，只写 promoted_tools 与
+	 * updated_at。存"被提升成常驻的 deferred 工具名"，空数组 = 全部按需（= 现状）。
+	 * 调用方（端点）保证去重、都是已知 deferred 工具、且不与取消名单冲突。
+	 * **不版本化**、不重启会话；下一轮由 applyPartnerToolSelection 写进 modelTools.add。
+	 */
+	setPromotedTools(id: string, names: string[]): PartnerRow | null {
+		if (!this.get(id)) return null;
+		this.db
+			.prepare("UPDATE partners SET promoted_tools = ?, updated_at = ? WHERE id = ?")
+			.run(JSON.stringify(names), new Date().toISOString(), id);
+		return this.get(id);
+	}
+
+	/**
 	 * 项目登记删除时的连带解除（2026-11-15 删除项目界面入口恢复）：清掉所有指向
 	 * 该项目的挂载，返回解除条数给界面提示。挂载顺序在端点层保证"先解除、后删登记"——
 	 * 反过来登记删了就没人负责清这些悬空引用了。不碰身份版本（不是身份）。
@@ -573,6 +593,35 @@ export class PartnersStore {
 				.run(JSON.stringify(next), new Date().toISOString(), String(row.id));
 		}
 		return detached;
+	}
+
+	/**
+	 * 把挂载从源项目改挂到目标项目（2026-11-17 项目合并）。
+	 *
+	 * 与 `detachProject` 同一套"读出来在 JS 里改再写回"（JSON 数组 SQL 端改不了）。
+	 * 去重：原本同时挂了两边的执事，合并后只挂一条。返回改动的挂载条数。
+	 */
+	reparentProject(sourceProjectId: string, targetProjectId: string): number {
+		if (!sourceProjectId || !targetProjectId || sourceProjectId === targetProjectId) return 0;
+		const rows = this.db
+			.prepare("SELECT id, project_ids FROM partners")
+			.all() as Array<{ id: unknown; project_ids: unknown }>;
+		let reparented = 0;
+		for (const row of rows) {
+			const ids = toProjectIds(row.project_ids);
+			if (!ids.includes(sourceProjectId)) continue;
+			const next: string[] = [];
+			for (const id of ids) {
+				const mapped = id === sourceProjectId ? targetProjectId : id;
+				if (next.includes(mapped)) continue;
+				next.push(mapped);
+			}
+			reparented += 1;
+			this.db
+				.prepare("UPDATE partners SET project_ids = ?, updated_at = ? WHERE id = ?")
+				.run(JSON.stringify(next), new Date().toISOString(), String(row.id));
+		}
+		return reparented;
 	}
 
 	/** 删除：档案行 + 版本行 + 链接行 + 家目录整体。家目录没了身份就没了，二次确认在端点层。 */
@@ -913,6 +962,61 @@ export class PartnersStore {
 		return rows
 			.map((row) => Number(row.session_id))
 			.filter((id) => Number.isInteger(id) && id > 0);
+	}
+
+	/** 按内部会话 id 反查链接（任意 role）；多行时取 created_at 最早一条。没有 = null。 */
+	linkOfSession(sessionId: number): PartnerSessionLinkRow | null {
+		const row = this.db
+			.prepare(
+				"SELECT * FROM partner_session_links WHERE session_id = ? AND session_id > 0 ORDER BY created_at LIMIT 1",
+			)
+			.get(sessionId) as Record<string, unknown> | undefined;
+		return row ? toLink(row) : null;
+	}
+
+	/** 某执事的全部副会话链接，按 created_at 升序。 */
+	sideLinksOf(partnerId: string): PartnerSessionLinkRow[] {
+		const rows = this.db
+			.prepare(
+				"SELECT * FROM partner_session_links WHERE partner_id = ? AND role = 'side' AND session_id > 0 ORDER BY created_at",
+			)
+			.all(partnerId) as Array<Record<string, unknown>>;
+		return rows.map(toLink);
+	}
+
+	/**
+	 * 一次取全表链接（session_id > 0），给 /agent/chats 批量标注用，避免 N+1。
+	 * 同一 session 有多行时取 created_at 最早的一条（与 linkOfSession 同口径）。
+	 */
+	sessionLinksMap(): Map<
+		number,
+		{ partnerId: string; role: PartnerSessionLinkRow["role"]; routeKey: string | null }
+	> {
+		const rows = this.db
+			.prepare(
+				"SELECT partner_id, role, route_key, session_id FROM partner_session_links WHERE session_id > 0 ORDER BY created_at",
+			)
+			.all() as Array<{
+			partner_id: unknown;
+			role: unknown;
+			route_key: unknown;
+			session_id: unknown;
+		}>;
+		const map = new Map<
+			number,
+			{ partnerId: string; role: PartnerSessionLinkRow["role"]; routeKey: string | null }
+		>();
+		for (const row of rows) {
+			const sessionId = Number(row.session_id);
+			if (!Number.isInteger(sessionId) || sessionId <= 0 || map.has(sessionId)) continue;
+			map.set(sessionId, {
+				partnerId: String(row.partner_id),
+				role: String(row.role) as PartnerSessionLinkRow["role"],
+				routeKey:
+					row.route_key === null || row.route_key === undefined ? null : String(row.route_key),
+			});
+		}
+		return map;
 	}
 
 	/**

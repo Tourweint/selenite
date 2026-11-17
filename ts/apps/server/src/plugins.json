@@ -50,7 +50,8 @@
 				"DEVICE_AUTO_DISPATCH",
 				"COMPANIONS_ENABLED",
 				"GROUPS_ENABLED",
-				"DELEGATION_PROJECT_MEMORY"
+				"DELEGATION_PROJECT_MEMORY",
+				"PARTNER_SIDE_SESSIONS"
 			]
 		},
 		{
@@ -743,6 +744,22 @@
 			"hot": true,
 			"requires": [
 				"CHANCELLOR_ENABLED"
+			]
+		},
+		{
+			"key": "PARTNER_SIDE_SESSIONS",
+			"label": "副会话（一人多聊）",
+			"summary": "每个执事/总管除了主对话，还能另开多条副会话：人设、记忆、项目照旧共用，但派活唤醒、定时提醒、人格结算仍然只落主对话。默认开，即时生效。",
+			"group": "autonomy",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true,
+			"requires": [
+				"COMPANIONS_ENABLED"
 			]
 		}
 	]

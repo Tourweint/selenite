@@ -74,6 +74,10 @@ function startServer(extraEnv: NodeJS.ProcessEnv = {}): ChildProcess {
 			// 审批 / 闸门审计（2026-11-09）：同样隔离，绝不碰真实 .data/approvals.json
 			AGENT_APPROVALS_PATH: ".data/probe-http-approvals.json",
 			AGENT_GATE_AUDIT_PATH: ".data/probe-http-gate-blocks.jsonl",
+			// 工具用量账（2026-11-17）：§16 的 faux 轮会真执行 recall，计数只落探针文件
+			AGENT_TOOL_USAGE_PATH: ".data/probe-http-tool-usage.json",
+			// 一轮时间线账（2026-11-17）：faux 轮会写 start/round/done，只落探针文件
+			AGENT_TURN_TIMELINE_PATH: ".data/probe-http-turn-timeline.jsonl",
 			NODE_OPTIONS: "",
 			// 配对库隔离（批 26 §四的指纹探针会真的配对一台设备）：绝不碰真实 .data/pairing.json
 			PAIRING_STORE_PATH: ".data/probe-http-pairing.json",
@@ -103,6 +107,8 @@ async function waitForReady(): Promise<void> {
 
 interface ChatResult {
 	conversationId?: string;
+	/** SSE start/done.id：本轮单号，时间线账按它聚合（2026-11-17）。 */
+	turnId?: string;
 	text: string;
 	events: string[];
 	done: boolean;
@@ -155,9 +161,13 @@ async function chat(body: unknown): Promise<{ status: number; result: ChatResult
 			text?: string;
 			message?: string;
 			conversationId?: string;
+			id?: string;
 		};
 		result.events.push(payload.type);
-		if (payload.type === "start") result.conversationId = payload.conversationId;
+		if (payload.type === "start") {
+			result.conversationId = payload.conversationId;
+			result.turnId = payload.id;
+		}
 		if (payload.type === "delta") result.text += payload.text ?? "";
 		if (payload.type === "error") result.error = payload.message;
 		if (payload.type === "done") result.done = true;
@@ -542,7 +552,72 @@ try {
 	};
 	const daily = withDaily.reminders.find((row) => row.text === "每天写日记");
 	check(Boolean(daily && daily.repeat === "daily"), "提醒带 repeat=daily", JSON.stringify(daily));
-	const cancelled = await fetch(`${BASE}/api/v1/agent/reminders/${daily!.id}`, { method: "DELETE" });
+
+	// 2026-11-17 定时任务重做：内容 / 可见性 / 暂停 / 立即跑 / 历史。
+	const findDaily = async () => {
+		const data = (await (
+			await fetch(`${BASE}/api/v1/agent/reminders?includePaused=1`)
+		).json()) as {
+			reminders: {
+				id: number;
+				reminderId: string;
+				text: string;
+				enabled: boolean;
+				visibility: string;
+			}[];
+		};
+		return data.reminders.find((row) => row.reminderId === daily!.reminderId) ?? null;
+	};
+	const patchDaily = async (body: Record<string, unknown>) =>
+		fetch(`${BASE}/api/v1/agent/reminders/${(await findDaily())!.id}`, {
+			method: "PATCH",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(body),
+		});
+	let dailyTask = await findDaily();
+	check(
+		dailyTask?.enabled === true && dailyTask?.visibility === "hidden",
+		"旧任务默认启用 + 触发隐藏",
+		JSON.stringify(dailyTask),
+	);
+	const textEdit = await patchDaily({ text: "每天写日记（改内容）" });
+	check(textEdit.status === 200, "PATCH 改内容成功", String(textEdit.status));
+	dailyTask = await findDaily();
+	check(dailyTask?.text === "每天写日记（改内容）", "内容已改且时间规则沿用", JSON.stringify(dailyTask));
+	const visibleEdit = await patchDaily({ visibility: "visible" });
+	check(visibleEdit.status === 200, "PATCH 改可见性成功", String(visibleEdit.status));
+	dailyTask = await findDaily();
+	check(dailyTask?.visibility === "visible", "可见性已改", JSON.stringify(dailyTask));
+	const pauseEdit = await patchDaily({ enabled: false });
+	check(pauseEdit.status === 200, "PATCH 暂停成功", String(pauseEdit.status));
+	const defaultList = (await (await fetch(`${BASE}/api/v1/agent/reminders`)).json()) as {
+		reminders: { reminderId: string }[];
+	};
+	check(
+		!defaultList.reminders.some((row) => row.reminderId === daily!.reminderId),
+		"暂停任务不进默认列表（手机不同步）",
+	);
+	dailyTask = await findDaily();
+	check(dailyTask?.enabled === false, "includePaused=1 能看到暂停任务", JSON.stringify(dailyTask));
+	const resumeEdit = await patchDaily({ enabled: true });
+	check(resumeEdit.status === 200, "PATCH 启用成功", String(resumeEdit.status));
+	dailyTask = await findDaily();
+	check(dailyTask?.enabled === true, "暂停后可恢复", JSON.stringify(dailyTask));
+	const runNow = await fetch(`${BASE}/api/v1/agent/reminders/${dailyTask!.id}/run_now`, {
+		method: "POST",
+	});
+	const runData = (await runNow.json().catch(() => ({}))) as { ok?: boolean };
+	check(runNow.ok && runData.ok === true, "立即跑成功", JSON.stringify(runData));
+	const runs = (await (
+		await fetch(`${BASE}/api/v1/agent/reminders/${encodeURIComponent(daily!.reminderId)}/runs`)
+	).json()) as { runs: { status: string; trigger: string }[] };
+	check(
+		runs.runs.some((run) => run.trigger === "manual" && run.status === "success"),
+		"执行历史有手动成功一笔",
+		JSON.stringify(runs.runs[0]),
+	);
+
+	const cancelled = await fetch(`${BASE}/api/v1/agent/reminders/${dailyTask!.id}`, { method: "DELETE" });
 	check(cancelled.status === 200, "取消提醒成功", String(cancelled.status));
 	const afterCancel = (await (await fetch(`${BASE}/api/v1/agent/reminders`)).json()) as {
 		reminders: { reminderId: string }[];
@@ -788,6 +863,50 @@ try {
 		"新一轮拿到了新预算（不是直接被拒）",
 		afterLimit.result.events.join(","),
 	);
+
+	// 工具用量账（2026-11-17）：§10 的 faux 轮真执行了 recall，应已进账。
+	// 账本是探针隔离文件（AGENT_TOOL_USAGE_PATH），不碰真实 .data/tool-usage.json。
+	const toolUsage = (await (await fetch(`${BASE}/api/v1/agent/tool-usage`)).json()) as {
+		tools?: Array<{ name: string; count: number; err: number; loads: number; lastUsedAt: string | null }>;
+	};
+	const recallRow = toolUsage.tools?.find((row) => row.name === "recall");
+	check(
+		(recallRow?.count ?? 0) >= 1 && recallRow?.err === 0,
+		"工具用量账记到了 faux 真执行的 recall（成功，无失败）",
+		JSON.stringify(toolUsage.tools?.slice(0, 5)),
+	);
+	check(recallRow?.loads === 0, "recall 是常驻工具，loads 应为 0");
+	check(
+		toolUsage.tools?.every((row) => typeof row.name === "string" && row.count >= 0) === true,
+		"端点投影形状正确（name/count/err/loads/lastUsedAt）",
+	);
+	check(
+		toolUsage.tools?.every((row, index, all) => index === 0 || (all[index - 1]?.count ?? 0) >= row.count) ===
+			true,
+		"端点按执行次数降序",
+	);
+
+	// 一轮时间线账（2026-11-17）：§10 的 faux 轮带 recall，按 start.id 应能聚合出
+	// start / round / tool / done 等脱敏节点；内部 conversationId 不出现在投影里。
+	const probeTurnId = limited.result.turnId;
+	if (probeTurnId) {
+		const tl = (await (
+			await fetch(`${BASE}/api/v1/agent/turn-timeline?turnId=${encodeURIComponent(probeTurnId)}`)
+		).json()) as { turnId?: string; events?: Array<Record<string, unknown>> };
+		const kinds = (tl.events ?? []).map((e) => e.kind);
+		check(tl.turnId === probeTurnId && kinds.includes("start") && kinds.includes("done"),
+			"时间线按单号聚合出 start/done", kinds.join(","));
+		check(kinds.includes("tool") && kinds.includes("round"),
+			"时间线含工具调用与模型回合节点", kinds.join(","));
+		check(
+			(tl.events ?? []).every((e) => !("conversationId" in e) && !("text" in e) && !("args" in e)),
+			"时间线投影无内部 id / 对话正文 / 工具参数",
+		);
+	} else {
+		check(false, "faux 轮应带 start.id 作为 turnId");
+	}
+	const tlNoId = await fetch(`${BASE}/api/v1/agent/turn-timeline`);
+	check(tlNoId.status === 400, "时间线端点缺 turnId → 400");
 
 	// ── 11. 运行时切模型（2026-11-04，接口文档 §2.8）──
 	// faux / mock 没有可切的真实模型 → 400；真实配置下可切、可持久、可一键回滚。
@@ -3268,13 +3387,36 @@ try {
 	);
 	const routinesOn = (await (
 		await fetch(`${BASE}/api/v1/routines?partnerId=${contractPartnerId}`)
-	).json()) as { routines?: Array<{ name?: string; partnerId?: string }> };
+	).json()) as {
+		routines?: Array<{ id?: string; name?: string; partnerId?: string; prompt?: string }>;
+	};
+	const ruleRow = (routinesOn.routines ?? []).find(
+		(row) => row.name === "每周五自己盘点" && row.partnerId === contractPartnerId,
+	);
 	check(
-		(routinesOn.routines ?? []).some(
-			(row) => row.name === "每周五自己盘点" && row.partnerId === contractPartnerId,
-		),
+		Boolean(ruleRow),
 		"执事在自己的会话里真建出规则，且落到自己名下",
 		`${routinesOn.routines?.length ?? 0} 条`,
+	);
+	check(
+		typeof ruleRow?.prompt === "string" && ruleRow.prompt.length > 0,
+		"例行规则列表带 prompt（前端才能编辑内容）",
+		JSON.stringify(ruleRow?.prompt),
+	);
+	const promptEdit = await fetch(`${BASE}/api/v1/routines/${ruleRow!.id}`, {
+		method: "PATCH",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ prompt: "改过的盘点指令（2026-11-17 探针）" }),
+	});
+	check(promptEdit.status === 200, "PATCH 改例行指令内容成功", String(promptEdit.status));
+	const routinesAfterEdit = (await (
+		await fetch(`${BASE}/api/v1/routines?partnerId=${contractPartnerId}`)
+	).json()) as { routines?: Array<{ prompt?: string }> };
+	check(
+		(routinesAfterEdit.routines ?? []).some(
+			(row) => row.prompt === "改过的盘点指令（2026-11-17 探针）",
+		),
+		"改完能读回新指令",
 	);
 	const ruleCountOn = routinesOn.routines?.length ?? 0;
 
@@ -3853,6 +3995,371 @@ try {
 		String(checkJunk.status),
 	);
 
+	// ── 33. 一人多会话（2026-11-17 批1 + 复核修正）──────────────
+	// 副会话列 / 建 / 续话不折回 canonical + 开关回滚。
+	// §18 起探针进程把 COMPANIONS_ENABLED 置了 false（为了 import agent 不碰执事库），
+	// 这里必须显式打开；startServer 继承 process.env。
+	console.log("\n· 33. 一人多会话：副会话列/建/续话 + 开关回滚");
+	server.kill();
+	await sleep(800);
+	server = startServer({ COMPANIONS_ENABLED: "true", PARTNER_SIDE_SESSIONS: "true" });
+	await waitForReady();
+
+	const sidePartnerCreated = await fetch(`${BASE}/api/v1/partners`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ name: "副会话探针" }),
+	});
+	const sidePartnerBody = (await sidePartnerCreated.json()) as {
+		ok?: boolean;
+		partner?: { id?: string };
+	};
+	const sidePartnerId = sidePartnerBody.partner?.id ?? "";
+	check(
+		sidePartnerCreated.status === 201 && Boolean(sidePartnerId),
+		"播种一个用来验副会话的执事",
+		`${sidePartnerCreated.status} ${sidePartnerId}`,
+	);
+
+	// 打开 canonical：问候是 assistant、不计 turns——正好验空壳兜底
+	await fetch(`${BASE}/api/v1/partners/${sidePartnerId}/open`, { method: "POST" });
+	const listBefore = await fetch(`${BASE}/api/v1/partners/${sidePartnerId}/sessions`);
+	const listBeforeBody = (await listBefore.json()) as {
+		ok?: boolean;
+		kind?: string;
+		sessions?: Array<{ conversationId?: string; role?: string }>;
+	};
+	const canonicalId = `partner-${sidePartnerId}`;
+	check(
+		listBefore.status === 200 &&
+			listBeforeBody.ok === true &&
+			listBeforeBody.kind === "partner" &&
+			(listBeforeBody.sessions ?? []).some(
+				(s) => s.conversationId === canonicalId && s.role === "canonical",
+			),
+		"GET sessions：至少返回 canonical（只有问候也可见）",
+		`${listBefore.status} ${JSON.stringify(listBeforeBody).slice(0, 120)}`,
+	);
+
+	const sideCreated = await fetch(`${BASE}/api/v1/partners/${sidePartnerId}/sessions`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ title: "副会话探针标题" }),
+	});
+	const sideCreatedBody = (await sideCreated.json()) as {
+		ok?: boolean;
+		conversationId?: string;
+		role?: string;
+	};
+	const sideConversationId = sideCreatedBody.conversationId ?? "";
+	check(
+		sideCreated.status === 200 &&
+			sideCreatedBody.ok === true &&
+			sideConversationId.includes("-side-") &&
+			sideCreatedBody.role === "side",
+		"POST sessions：conversationId 含 -side-",
+		`${sideCreated.status} ${sideConversationId}`,
+	);
+
+	const listAfter = await fetch(`${BASE}/api/v1/partners/${sidePartnerId}/sessions`);
+	const listAfterBody = (await listAfter.json()) as {
+		sessions?: Array<{ conversationId?: string; role?: string; turns?: number }>;
+	};
+	const sideEntry = (listAfterBody.sessions ?? []).find(
+		(s) => s.conversationId === sideConversationId,
+	);
+	check(
+		listAfter.status === 200 &&
+			sideEntry !== undefined &&
+			sideEntry.role === "side" &&
+			sideEntry.turns === 0,
+		"再 GET：新建的空副会话也在列表里（turns=0 零值兜底）",
+		`${listAfter.status} ${JSON.stringify(listAfterBody).slice(0, 160)}`,
+	);
+
+	const sideContinue = await chatRaw({
+		conversationId: sideConversationId,
+		messages: [{ role: "user", content: "副会话续话探针" }],
+	});
+	check(
+		sideContinue.status === 200 && sideContinue.conversationId === sideConversationId,
+		"续副会话：SSE start.conversationId = 副会话 id（不折回 canonical）",
+		`${sideContinue.status} ${sideContinue.conversationId ?? ""}`,
+	);
+
+	// 开关关：列 400、续话 409（用带 body 的直连，顺带验 error 枚举）
+	server.kill();
+	await sleep(800);
+	server = startServer({ COMPANIONS_ENABLED: "true", PARTNER_SIDE_SESSIONS: "false" });
+	await waitForReady();
+	const offList = await fetch(`${BASE}/api/v1/partners/${sidePartnerId}/sessions`);
+	const offListBody = (await offList.json()) as { error?: string };
+	check(
+		offList.status === 400 && offListBody.error === "side_sessions_disabled",
+		"PARTNER_SIDE_SESSIONS=false：GET sessions → 400 side_sessions_disabled",
+		`${offList.status} ${offListBody.error ?? ""}`,
+	);
+	const offContinue = await fetch(`${BASE}/api/v1/agent/chat`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({
+			conversationId: sideConversationId,
+			messages: [{ role: "user", content: "开关关后续话" }],
+		}),
+	});
+	const offContinueBody = (await offContinue.json()) as { error?: string };
+	check(
+		offContinue.status === 409 && offContinueBody.error === "side_session_disabled",
+		"PARTNER_SIDE_SESSIONS=false：续副会话 → 409 side_session_disabled",
+		`${offContinue.status} ${offContinueBody.error ?? ""}`,
+	);
+
+	// ── 34. 从回答分支（2026-11-17 批3a）────────────────────
+	// 复制引擎 + POST /agent/chat/:id/branches。worker 分支验内容/种类/项目归属，
+	// 执事分支验落到同一人设的 side 会话；忙态依赖假上游闸，这里只验 400。
+	console.log("\n· 34. 从回答分支：复制引擎 + 分支端点");
+	type BranchMsg = { role?: string; text?: string; id?: string };
+	type BranchHistory = { messages?: BranchMsg[]; chatKind?: string };
+	server.kill();
+	await sleep(800);
+	const branchWs = resolve(".data/probe-http-branch-ws");
+	rmSync(branchWs, { recursive: true, force: true });
+	server = startServer({
+		COMPANIONS_ENABLED: "true",
+		PARTNER_SIDE_SESSIONS: "true",
+		LIFEDIARY_DEFAULT_WORKSPACE: branchWs,
+	});
+	await waitForReady();
+
+	// 建项目并设为当前：worker 源会话带项目归属，副本必须继承。
+	const branchProposal = await fetch(`${BASE}/api/v1/projects`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ name: "分支探针项目", path: "branch-probe-project" }),
+	});
+	const branchProposalId =
+		((await branchProposal.json()) as { proposal?: { id?: string } }).proposal?.id ?? "";
+	const branchConfirm = await fetch(
+		`${BASE}/api/v1/projects/${encodeURIComponent(branchProposalId)}/confirm`,
+		{ method: "POST" },
+	);
+	const branchProjectId =
+		((await branchConfirm.json()) as { project?: { id?: string } }).project?.id ?? "";
+	check(Boolean(branchProjectId), "分支探针：登记一个项目", branchProjectId);
+	await fetch(`${BASE}/api/v1/workspaces/current-project`, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ projectId: branchProjectId }),
+	});
+
+	// 一条 worker 会话跑两轮
+	const branchSource = await chat({
+		messages: [{ role: "user", content: "分支探针第一句" }],
+		chatKind: "worker",
+	});
+	const branchSourceId = branchSource.result.conversationId ?? "";
+	check(Boolean(branchSourceId), "分支探针：新建 worker 源会话", branchSourceId);
+	await chat({ conversationId: branchSourceId, messages: [{ role: "user", content: "分支探针第二句" }] });
+
+	const sourceMessages = (await (
+		await fetch(`${BASE}/api/v1/agent/chat/${encodeURIComponent(branchSourceId)}/messages`)
+	).json()) as BranchHistory;
+	const firstAssistant = (sourceMessages.messages ?? []).find(
+		(m) => m.role === "assistant" && m.id,
+	) as { id: string } | undefined;
+	check(Boolean(firstAssistant?.id), "assistant 消息带可寻址 id", firstAssistant?.id ?? "无");
+
+	const branchResp = await fetch(
+		`${BASE}/api/v1/agent/chat/${encodeURIComponent(branchSourceId)}/branches`,
+		{
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ atMessageId: firstAssistant?.id ?? "" }),
+		},
+	);
+	const branchBody = (await branchResp.json()) as {
+		ok?: boolean;
+		conversationId?: string;
+		entries?: number;
+		error?: string;
+	};
+	const branchDestId = branchBody.conversationId ?? "";
+	check(
+		branchResp.status === 200 &&
+			branchBody.ok === true &&
+			Boolean(branchDestId) &&
+			branchDestId !== branchSourceId,
+		"POST branches：200 且返回新会话 id",
+		`${branchResp.status} ${branchDestId} entries=${branchBody.entries ?? "?"}`,
+	);
+
+	const destMessages = (await (
+		await fetch(`${BASE}/api/v1/agent/chat/${encodeURIComponent(branchDestId)}/messages`)
+	).json()) as BranchHistory;
+	const destList = destMessages.messages ?? [];
+	check(
+		destList.length === 2 &&
+			destList[0]?.role === "user" &&
+			destList[1]?.role === "assistant" &&
+			destList[0]?.text === "分支探针第一句",
+		"副本只含分叉点之前的第一轮（不含第二轮）",
+		`${destList.length} 条`,
+	);
+	check(destMessages.chatKind === "worker", "副本种类 = worker", String(destMessages.chatKind));
+
+	// ── 会话画板（2026-11-17 画板批）：树装配 + 分叉点 + 单条消息详情 ──
+	// 给副本补一轮自己的话，地图里它应该只画分叉点之后这一轮。
+	await chat({ conversationId: branchDestId, messages: [{ role: "user", content: "副本自己的第三轮" }] });
+	type MapNode = {
+		id?: string;
+		root?: boolean;
+		branchable?: boolean;
+		missing?: boolean;
+		startTurn?: number;
+		branchFrom?: { conversationId?: string; turnIndex?: number } | null;
+		turns?: Array<{ index?: number; question?: { text?: string }; answer?: { text?: string; id?: string } }>;
+	};
+	type MapPayload = { rootId?: string; nodes?: MapNode[]; truncated?: boolean };
+	const mapResp = await fetch(
+		`${BASE}/api/v1/agent/chat/${encodeURIComponent(branchSourceId)}/map`,
+	);
+	const sourceMap = (await mapResp.json()) as MapPayload;
+	const sourceNode = (sourceMap.nodes ?? []).find((node) => node.id === branchSourceId);
+	const destNode = (sourceMap.nodes ?? []).find((node) => node.id === branchDestId);
+	check(
+		mapResp.status === 200 &&
+			sourceMap.rootId === branchSourceId &&
+			Boolean(sourceNode) &&
+			Boolean(destNode),
+		"GET map：200、根 = 源会话、根与副本都在树里",
+		`${mapResp.status} root=${sourceMap.rootId ?? "?"} nodes=${(sourceMap.nodes ?? []).length}`,
+	);
+	check(
+		(sourceNode?.turns ?? []).length === 2 && sourceNode?.root === true,
+		"地图根节点：两轮都在",
+		`${(sourceNode?.turns ?? []).length} 轮`,
+	);
+	check(
+		destNode?.branchFrom?.conversationId === branchSourceId &&
+			destNode?.branchFrom?.turnIndex === 0 &&
+			destNode?.startTurn === 1 &&
+			(destNode?.turns ?? []).length === 1 &&
+			destNode?.turns?.[0]?.index === 1 &&
+			destNode?.turns?.[0]?.question?.text === "副本自己的第三轮",
+		"地图副本节点：只画分叉点之后的新回合，挂回母会话第 0 轮",
+		`branchFrom=${JSON.stringify(destNode?.branchFrom ?? null)} start=${destNode?.startTurn ?? "?"} turns=${(destNode?.turns ?? []).length}`,
+	);
+	const destMapResp = await fetch(
+		`${BASE}/api/v1/agent/chat/${encodeURIComponent(branchDestId)}/map`,
+	);
+	const destMap = (await destMapResp.json()) as MapPayload;
+	check(
+		destMapResp.status === 200 && destMap.rootId === branchSourceId,
+		"从副本进地图：根沿来源链向上找到源会话",
+		`${destMapResp.status} root=${destMap.rootId ?? "?"}`,
+	);
+	const detailResp = await fetch(
+		`${BASE}/api/v1/agent/chat/${encodeURIComponent(branchSourceId)}/messages/${encodeURIComponent(firstAssistant?.id ?? "")}`,
+	);
+	const detailBody = (await detailResp.json().catch(() => ({}))) as {
+		message?: { text?: string; role?: string };
+	};
+	check(
+		detailResp.status === 200 && detailBody.message?.role === "assistant" && Boolean(detailBody.message?.text),
+		"地图详情：按 messageId 取回单条回答全文",
+		`${detailResp.status} ${String(detailBody.message?.text ?? "").slice(0, 20)}`,
+	);
+
+	// 项目归属：归档副本后从归档清单回读 projectId（活跃清单不带该字段）
+	await fetch(`${BASE}/api/v1/agent/chat/${encodeURIComponent(branchDestId)}/archive`, {
+		method: "POST",
+	});
+	const branchArchived = (await (await fetch(`${BASE}/api/v1/agent/chats/archived`)).json()) as {
+		chats?: Array<{ conversationId?: string; projectId?: string }>;
+	};
+	const archivedBranch = (branchArchived.chats ?? []).find(
+		(item) => item.conversationId === branchDestId,
+	);
+	check(
+		archivedBranch?.projectId === branchProjectId,
+		"副本继承源会话的项目归属",
+		`${archivedBranch?.projectId ?? "无"} / ${branchProjectId}`,
+	);
+
+	const sourceAgain = (await (
+		await fetch(`${BASE}/api/v1/agent/chat/${encodeURIComponent(branchSourceId)}/messages`)
+	).json()) as BranchHistory;
+	check(
+		(sourceAgain.messages ?? []).length === (sourceMessages.messages ?? []).length,
+		"源会话消息数不变（复制不改源）",
+		`${(sourceAgain.messages ?? []).length} 条`,
+	);
+
+	// 执事分支：canonical 的一条 assistant → 同人设 side
+	const branchPartner = await fetch(`${BASE}/api/v1/partners`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ name: "分支探针执事" }),
+	});
+	const branchPartnerId =
+		((await branchPartner.json()) as { partner?: { id?: string } }).partner?.id ?? "";
+	await fetch(`${BASE}/api/v1/partners/${encodeURIComponent(branchPartnerId)}/open`, {
+		method: "POST",
+	});
+	const partnerHistory = (await (
+		await fetch(
+			`${BASE}/api/v1/agent/chat/${encodeURIComponent(`partner-${branchPartnerId}`)}/messages`,
+		)
+	).json()) as BranchHistory;
+	const partnerAssistant = (partnerHistory.messages ?? []).find(
+		(m) => m.role === "assistant" && m.id,
+	) as { id: string } | undefined;
+	check(Boolean(partnerAssistant?.id), "执事 canonical 的 assistant 有 id", partnerAssistant?.id ?? "无");
+	const partnerBranch = await fetch(
+		`${BASE}/api/v1/agent/chat/${encodeURIComponent(`partner-${branchPartnerId}`)}/branches`,
+		{
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ atMessageId: partnerAssistant?.id ?? "" }),
+		},
+	);
+	const partnerBranchBody = (await partnerBranch.json()) as {
+		ok?: boolean;
+		conversationId?: string;
+	};
+	check(
+		partnerBranch.status === 200 &&
+			Boolean(partnerBranchBody.conversationId?.includes("-side-")),
+		"执事分支：新 id 含 -side-",
+		`${partnerBranch.status} ${partnerBranchBody.conversationId ?? ""}`,
+	);
+	const partnerSessions = (await (
+		await fetch(`${BASE}/api/v1/partners/${encodeURIComponent(branchPartnerId)}/sessions`)
+	).json()) as { sessions?: Array<{ conversationId?: string; role?: string }> };
+	check(
+		(partnerSessions.sessions ?? []).some(
+			(item) => item.conversationId === partnerBranchBody.conversationId && item.role === "side",
+		),
+		"执事分支出现在该执事的会话列表（role=side）",
+		JSON.stringify(partnerSessions.sessions ?? []).slice(0, 120),
+	);
+
+	// 错误码：不存在的分叉点 → 400；忙态依赖假上游闸，未在此节测
+	const badBranch = await fetch(
+		`${BASE}/api/v1/agent/chat/${encodeURIComponent(branchSourceId)}/branches`,
+		{
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ atMessageId: "not-a-real-message-id" }),
+		},
+	);
+	const badBranchBody = (await badBranch.json()) as { error?: string };
+	check(
+		badBranch.status === 400 && badBranchBody.error === "branch_point_not_found",
+		"不存在的 atMessageId → 400 branch_point_not_found",
+		`${badBranch.status} ${badBranchBody.error ?? ""}`,
+	);
+
 } finally {
 	server.kill();
 	await sleep(300);
@@ -3871,6 +4378,7 @@ try {
 		[WORKSPACE_B, { recursive: true, force: true }],
 		[GATE_OUTSIDE_DIR, { recursive: true, force: true }],
 		[".data/probe-http-default-ws", { recursive: true, force: true }],
+		[".data/probe-http-branch-ws", { recursive: true, force: true }],
 		[".data/probe-http-flags.json", { force: true }],
 		[".data/probe-http-skill-state.json", { force: true }],
 		[".data/probe-http-gate-providers.json", { force: true }],

@@ -32,6 +32,14 @@ export interface ChatIndexEntry {
 	archivedAt?: number;
 	projectId?: string;
 	projectName?: string;
+	/**
+	 * 会话归属链接（2026-11-17 一人多会话批1，纯增量）：
+	 * `partnerId` = 归属执事 id（无链接的总管 / worker 会话不返回）；
+	 * `sessionRole` = 链接角色；`isCanonical` 仅 canonical 为 true。
+	 */
+	partnerId?: string;
+	sessionRole?: "canonical" | "routine" | "topic" | "delegation" | "group" | "side";
+	isCanonical?: boolean;
 }
 
 export interface ChatMeta {

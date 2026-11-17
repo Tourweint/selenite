@@ -6,11 +6,11 @@ export { applyChatMode, chatKindOf, chatKindOfInternal, configureJudgeChat, conf
 export type { CompactTaskId } from "./session-open.ts";
 export { chatStream, conversationIsBusy, stopChat } from "./session-stream.ts";
 export type { ChatStreamEvent, ChatStreamInput } from "./session-stream.ts";
-export { addReminder, cancelReminder, contextUsageOf, continueConversation, foldTranscriptEntries, listReminders, messageIdOf, readTranscript, rescheduleReminder, usageSummary } from "./session-transcript.ts";
-export type { ReminderSummary, TranscriptMessage, UsageSummary } from "./session-transcript.ts";
+export { addReminder, cancelReminder, contextUsageOf, continueConversation, foldTranscriptEntries, listReminders, messageIdOf, readTranscript, reminderTaskById, rescheduleReminder, usageSummary } from "./session-transcript.ts";
+export type { ReminderSummary, ReminderTaskDetail, TranscriptMessage, UsageSummary } from "./session-transcript.ts";
 export { archiveChat, archiveChatGuarded, chatMetaSummary, hideChat, pinChat, pruneChatMetaOrphans, purgeChatMetaEntries, readChatMeta, renameChat, restoreArchivedChats, restoreChats, unarchiveChat } from "./session-meta.ts";
 export type { ChatIndexEntry, ChatMeta } from "./session-meta.ts";
-export { archiveChatsOfProject, archivedChatPairs, chatTitles, forgetMemory, listChats, listChatsForExport, memoryOverview, missingChats, projectChatExternalIds, readChatStats, supersedeMemory } from "./session-index.ts";
+export { archiveChatsOfProject, archivedChatPairs, chatTitles, forgetMemory, listChats, listChatsForExport, memoryOverview, missingChats, projectChatExternalIds, readChatStats, rebindChatsOfProject, supersedeMemory } from "./session-index.ts";
 export type { ChatStats, MemoryOverview, MemoryView } from "./session-index.ts";
 export { listArchivedChats, searchTranscripts } from "./session-evidence.ts";
 export type { SearchHit } from "./session-evidence.ts";

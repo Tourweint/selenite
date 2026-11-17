@@ -25,6 +25,12 @@ export function projectArchiveChatsEnabled(): boolean {
 	return (process.env.PROJECT_ARCHIVE_CHATS?.trim() || "true").toLowerCase() !== "false";
 }
 
+/** 项目合并开关（2026-11-17 项目合并与记忆迁移）：`PROJECT_MERGE=false` → 端点 404、菜单不渲染。 */
+export function projectMergeEnabled(): boolean {
+	const value = (process.env.PROJECT_MERGE ?? "").trim().toLowerCase();
+	return value !== "false" && value !== "0" && value !== "off";
+}
+
 export type Vcs = "git" | "none";
 
 export interface Workspace {

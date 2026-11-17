@@ -222,6 +222,15 @@ test("分页：工具轮整轮保留（step 不跨页丢）", async () => {
 	assert.equal(page.messages[1]!.steps?.[0]?.ok, true);
 });
 
+test("消息时刻：assistant 带收尾时刻（at + durationMs），user 不带", async () => {
+	const at = noonOf(11, 13);
+	const chat = fakeChat([userEntry(1, "问一句", at), assistantEntry(2, "答一句", at + 100)]);
+	const page = await readTranscriptPage(chat, { limit: 5 });
+	assert.equal(page.messages[0]!.endedAt, undefined);
+	// assistantEntry 的 timestamp 是请求开始，durationMs = 10 → 收尾 = at + 100 + 10
+	assert.equal(page.messages[1]!.endedAt, at + 110);
+});
+
 test("分页：遇到最新 head 标记就停，压缩前的旧段不翻出来", async () => {
 	const day = noonOf(11, 13);
 	const entries: FakeEntry[] = [

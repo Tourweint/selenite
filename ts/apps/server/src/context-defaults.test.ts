@@ -51,13 +51,13 @@ after(() => {
  * 默认开销的完整字段清单（2026-11-16）：
  * 不管总管 / 执事 / worker，页面都按同一份清单显示；不适用字段保留 0 字槽位。
  */
-test("完整清单：固定 29 个字段，缺的补空；已有内容原位保留", () => {
+test("完整清单：固定 30 个字段（含 2026-11-16 C 段的 tool_index），缺的补空；已有内容原位保留", () => {
 	const sections = completeDefaultSections([
 		{ key: "persona", text: "总管人设" },
 		{ key: "partner_voice", text: "" },
 		{ key: "topics", text: "课题正文" },
 	]);
-	assert.equal(DEFAULT_SECTION_KEYS.length, 29, "2026-11-16 C 段：末尾加了 tool_index");
+	assert.equal(DEFAULT_SECTION_KEYS.length, 30, "2026-11-16 C 段：末尾加了 tool_index（旧断言停在 29）");
 	assert.deepEqual(
 		sections.map((section) => section.key),
 		[...DEFAULT_SECTION_KEYS],

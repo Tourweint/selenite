@@ -480,6 +480,10 @@ test("游标：只有产出被保留（非 quiet、非 skipped、成功）才推
 	assert.equal(shouldAdvanceCursor({ ...base, quiet: true }), false, "quiet 不推进");
 	assert.equal(shouldAdvanceCursor({ ...base, skippedToolCount: 1 }), false, "跳步不推进");
 	assert.equal(shouldAdvanceCursor({ ...base, ok: false }), false, "失败（含读失败）不推进");
+	// 2026-11-17：报错但产出为空时会被压成「非 quiet」，不能因此把这次失败记成"看过"
+	assert.equal(shouldAdvanceCursor({ ...base, toolErrorCount: 1 }), false, "工具报错不推进");
+	// 无报错的正常轮不受影响
+	assert.equal(shouldAdvanceCursor({ ...base, toolErrorCount: 0 }), true);
 });
 
 test("提示词：[上次看到这里] 只在有游标且有条件门控时出现", () => {

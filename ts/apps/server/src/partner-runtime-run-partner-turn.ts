@@ -7,12 +7,17 @@
 
 import type { ResolvedChat } from "./agent.ts";
 import { chatStream, openOrCreateChat } from "./agent.ts";
+import { sayInConversation } from "./agent/lifecycle.ts";
+import { sessionCwd } from "./agent/shared.ts";
 import { markAutonomyTurn, unmarkAutonomyTurn } from "./autonomy-state.ts";
 import { nextChainCandidate } from "./model-chain.ts";
-import type { PartnerRow } from "./partners.ts";
+import type { PartnerRow, PartnersStore } from "./partners.ts";
 import { COMPANIONS_ENABLED, partnersStore } from "./partners.ts";
+import { sideSessionsEnabled } from "./partner-session-role.ts";
+import { projectsStore } from "./projects.ts";
 import { personaRefreshNeeded, personaSignature, renderPersonaFieldBlocks } from "./partner-persona.ts";
 import { ROUTINE_QUIET_INSTRUCTION, assessRoutineOutputGuarded, routineQuietEnabled } from "./routine-quiet.ts";
+import { SCHEDULED_RUN_HEADER } from "./scheduled-run-context.ts";
 import { clearTurnToolErrors, clearUnattendedSkips, markRoutineTurn, takeTurnToolErrors, takeUnattendedSkips, unmarkRoutineTurn } from "./unattended.ts";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { SettledSubmissionRecord } from "@earendil-works/pi-durable";
@@ -24,6 +29,11 @@ const CTX = BACKGROUND_CONTEXT;
 
 export function partnerCanonicalExternalId(partnerId: string): string {
 	return `partner-${partnerId}`;
+}
+
+/** 副会话对外 id（2026-11-17 一人多会话）：token 由调用方给（8 位小写 hex）。 */
+export function partnerSideExternalId(partnerId: string, token: string): string {
+	return `partner-${partnerId}-side-${token}`;
 }
 
 export interface PartnerIdentityPart {
@@ -121,14 +131,108 @@ function partnerSkillsIndex(partnerId: string): string | undefined {
 
 const sessionOpenings = new Map<string, Promise<ResolvedChat | null>>();
 
-export function ensurePartnerSession(partnerId: string): Promise<ResolvedChat | null> {
-	const inflight = sessionOpenings.get(partnerId);
+/**
+ * 执事会话的默认目录（2026-11-17）：钉在主工作区，不跟随界面里的「当前项目」。
+ *
+ * 注意语义：这只是**相对路径的默认基准**，不是文件边界。path-guard 的根集合一直是
+ * 「主工作区 + 所有非归档项目根」，勾选项目（`projectIds`）只决定记忆能不能召回，
+ * 不限制能去哪些目录——两件事故意分开（用户 2026-11-17 拍板）。
+ *
+ * 缘由：`currentProject` 是全局单值，点一下项目选择就换；执事的例行轮每轮现读它，
+ * 一次手滑的「选中项目」就能把 08:30 的问安跑到别的仓库里去（2026-11-17 实测：
+ * 注入 student-milk-order → `read("workspace")` 拼成 ...\student-milk-order\workspace）。
+ * 会话自己的 `pi.agent.cwd` 优先于全局回落，所以这里配一次就固定住了。
+ *
+ * 回滚：`PARTNER_CWD_WORKSPACE=false` → 不钉，回到「跟随当前项目 / 主工作区」的旧形态。
+ */
+function partnerCwdPinEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = (env.PARTNER_CWD_WORKSPACE ?? "").trim().toLowerCase();
+	if (!raw) return true;
+	return raw !== "false" && raw !== "0" && raw !== "off";
+}
+
+async function pinPartnerWorkspace(chat: ResolvedChat): Promise<void> {
+	if (!partnerCwdPinEnabled()) return;
+	try {
+		const root = projectsStore().getWorkspace()?.rootPath?.trim();
+		if (!root) return;
+		const agent = await chat.conversation.agent(CTX);
+		// 已对齐就不写库：旧会话被项目污染（或从没配过）才配置一次
+		if (agent.cwd === root) return;
+		await chat.conversation.configure({ cwd: root }, CTX);
+	} catch (error) {
+		// 配不上不该让这一轮跑不起来：退回旧的 cwd 回落（只记 warn）
+		console.warn(
+			`[partner] 工作目录钉不住，按回落处理: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+}
+
+/**
+ * 例行轮兜底消息（2026-11-17）：工具报错 + 产出为空时，服务端自己补一句
+ * 「这轮没跑成、我在哪个目录」。
+ *
+ * 现场：08:30 那轮 `read` 失败，模型回 `[[no-update]]`；安静契约被压成「非安静」，
+ * 但正文是空串——主人那边一片空白，既没招呼也没错误。宁可多说一句，
+ * 也不把「读失败」藏起来。
+ *
+ * 回滚：`ROUTINE_ERROR_NOTE=false`。
+ */
+function routineErrorNoteEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = (env.ROUTINE_ERROR_NOTE ?? "").trim().toLowerCase();
+	if (!raw) return true;
+	return raw !== "false" && raw !== "0" && raw !== "off";
+}
+
+function routineErrorNote(tools: string[], conversationId: number): string {
+	const cwd = sessionCwd(conversationId);
+	let workspace = "";
+	try {
+		workspace = projectsStore().getWorkspace()?.rootPath?.trim() || "";
+	} catch {
+		workspace = "";
+	}
+	const where =
+		workspace && workspace !== cwd
+			? `我现在的工作目录是 ${cwd}，主工作区是 ${workspace}。`
+			: `我现在的工作目录是 ${cwd}。`;
+	return `这一轮没跑成：${tools.join("、")} 报错了。${where}如果是目录不对，你换回来我就重新试。`;
+}
+
+export function ensurePartnerSession(partnerId: string): Promise<ResolvedChat | null> {	const inflight = sessionOpenings.get(partnerId);
 	if (inflight) return inflight;
 	const opening = openPartnerSession(partnerId).finally(() => {
 		sessionOpenings.delete(partnerId);
 	});
 	sessionOpenings.set(partnerId, opening);
 	return opening;
+}
+
+/**
+ * 身份对齐（2026-11-17 批1 从 openPartnerSession 原样抽出，行为不变）：
+ * applied 计数 ≠ 当前计数才 configure（改 SOUL 下一轮生效的记账位）。
+ * 人格模块不版本化，另用内容签名判断——改了口吻 / 里子 / 处境（或开关）也要在下一轮
+ * 重配 instructions。快照退役后计数只是记账位，SOUL 正文一律读磁盘当前值。
+ * canonical 与 side 会话共用同一段逻辑，副会话才会跟着 SOUL / 口吻更新。
+ */
+async function alignPartnerSession(
+	chat: ResolvedChat,
+	partner: PartnerRow,
+	store: PartnersStore,
+): Promise<void> {
+	const epoch = partner.currentVersion;
+	const applied = store.appliedVersionOf(partner.id, chat.internalId);
+	const personaChanged = personaRefreshNeeded(
+		chat.internalId,
+		personaSignature(store, partner),
+	);
+	if (epoch != null && (epoch !== applied || personaChanged)) {
+		await chat.conversation.configure(
+			{ instructions: renderPartnerIdentity(partner, store.readSoulFromHome(partner.id) ?? "") },
+			CTX,
+		);
+		store.setAppliedVersion(partner.id, chat.internalId, epoch);
+	}
 }
 
 async function openPartnerSession(partnerId: string): Promise<ResolvedChat | null> {
@@ -148,24 +252,50 @@ async function openPartnerSession(partnerId: string): Promise<ResolvedChat | nul
 		});
 	}
 
-	// 身份对齐：applied 计数 ≠ 当前计数才 configure（改 SOUL 下一轮生效的记账位）。
-	// 2026-11-14 批1：人格模块不版本化，另用内容签名判断——改了口吻 / 里子 / 处境（或开关）
-	// 也要在下一轮重配 instructions，否则新填的内容要等下一次 SOUL / 契约变更才生效。
-	// 2026-11-15 快照退役：计数只是记账位，SOUL 正文一律读磁盘当前值。
-	const epoch = partner.currentVersion;
-	const applied = store.appliedVersionOf(partnerId, chat.internalId);
-	const personaChanged = personaRefreshNeeded(
-		chat.internalId,
-		personaSignature(store, partner),
-	);
-	if (epoch != null && (epoch !== applied || personaChanged)) {
-		await chat.conversation.configure(
-			{ instructions: renderPartnerIdentity(partner, store.readSoulFromHome(partnerId) ?? "") },
-			CTX,
-		);
-		store.setAppliedVersion(partnerId, chat.internalId, epoch);
-	}
+	// canonical 的身份对齐抽成 alignPartnerSession，副会话复用同一段逻辑（行为不变）。
+	await alignPartnerSession(chat, partner, store);
+	await pinPartnerWorkspace(chat);
 	return chat;
+}
+
+/**
+ * 新建一条副会话（2026-11-17 批1）：不写消息、不发问候。
+ * 开关关 / 执事不存在 / 非 active → null。极端 id 碰撞只换一次 token，不写复杂重试。
+ */
+export async function createPartnerSideSession(partnerId: string): Promise<ResolvedChat | null> {
+	if (!COMPANIONS_ENABLED || !sideSessionsEnabled()) return null;
+	const store = partnersStore();
+	const partner = store.get(partnerId);
+	if (!partner || partner.status !== "active") return null;
+
+	const token = randomUUID().slice(0, 8);
+	let externalId = partnerSideExternalId(partnerId, token);
+	let chat = await openOrCreateChat(externalId);
+	if (store.findSessionLink(partnerId, "side", externalId)) {
+		// 极小概率撞到已用过的 id：换一个 token 重来一次（INSERT OR IGNORE 兜住并发）
+		const retryToken = randomUUID().slice(0, 8);
+		externalId = partnerSideExternalId(partnerId, retryToken);
+		chat = await openOrCreateChat(externalId);
+	}
+	store.linkSession({
+		partnerId,
+		role: "side",
+		routeKey: externalId,
+		sessionId: chat.internalId,
+	});
+	await alignPartnerSession(chat, partner, store);
+	await pinPartnerWorkspace(chat);
+	return chat;
+}
+
+/** /agent/chat 续副会话时调用：重新对齐身份 + 钉工作目录；执事失效 → false。 */
+export async function alignPartnerSideSession(chat: ResolvedChat, partnerId: string): Promise<boolean> {
+	const store = partnersStore();
+	const partner = store.get(partnerId);
+	if (!partner || partner.status !== "active") return false;
+	await alignPartnerSession(chat, partner, store);
+	await pinPartnerWorkspace(chat);
+	return true;
 }
 
 export interface PartnerTurnOptions {
@@ -232,9 +362,9 @@ export async function runPartnerTurn(
 	const quietEligible = (opts.quiet ?? (authority === "autonomous")) && routineQuietEnabled();
 	// 文本头（透明性）：模型知道这一轮是谁发起的；判定事实源在 autonomy-state.ts。
 	// 例行轮尾部多一行"没内容就回标记"的出口（固定字节，见 routine-quiet.ts）。
+	// 2026-11-17：头常量抽到 scheduled-run-context.ts，回读展示/搜索侧要剥掉同一串字节。
 	const body = authority === "autonomous"
-		? `[Scheduled run context]
-turnAuthority: autonomous
+		? `${SCHEDULED_RUN_HEADER}
 
 ${text}${quietEligible ? `\n\n${ROUTINE_QUIET_INSTRUCTION}` : ""}`
 		: text;
@@ -298,6 +428,19 @@ ${text}${quietEligible ? `\n\n${ROUTINE_QUIET_INSTRUCTION}` : ""}`
 			? assessRoutineOutputGuarded(joined, toolErrors.length)
 			: { quiet: false, text: joined };
 		const skipped = takeUnattendedSkips(chat.internalId);
+		// 兜底（2026-11-17）：工具报错 + 正文为空 = 这一轮什么都没跑成。
+		// 安静契约已被压成「非安静」，但产出是空串；服务端补一句，别让主人只看到空白。
+		if (toolErrors.length > 0 && !verdict.text.trim() && routineErrorNoteEnabled()) {
+			const note = routineErrorNote(toolErrors, chat.internalId);
+			try {
+				await sayInConversation(chat.internalId, note);
+			} catch (error) {
+				console.warn(
+					`[routine] 兜底消息没写进去: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+			return { ok: true, text: note, skipped, toolErrors };
+		}
 		return verdict.quiet
 			? { ok: true, text: verdict.text, quiet: true, skipped }
 			: {
@@ -381,6 +524,7 @@ async function ensureFreshPartnerSession(partnerId: string): Promise<ResolvedCha
 			CTX,
 		);
 	}
+	await pinPartnerWorkspace(chat);
 	return chat;
 }
 

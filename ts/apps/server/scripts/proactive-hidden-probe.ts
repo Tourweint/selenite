@@ -51,6 +51,7 @@ function startServer(extraEnv: Record<string, string>): ChildProcess {
 			AGENT_GATE_AUDIT_PATH: `${PFX}-gate.jsonl`,
 			AUTONOMY_OBSERVE_PATH: `${PFX}-autonomy.jsonl`,
 			PAIRING_STORE_PATH: `${PFX}-pairing.json`,
+			REMINDER_RUNS_STATE_PATH: `${PFX}-reminder-runs.json`,
 			ATTACHMENTS_DIR: `${PFX}-attachments`,
 			CURRENT_PROJECT: "",
 			AUTONOMY_ENABLED: "false",
@@ -111,12 +112,15 @@ async function readChiefTranscript(): Promise<TranscriptMessage[]> {
 	return tr.messages ?? [];
 }
 
-async function phase(runModel: "true" | "false"): Promise<void> {
-	console.log(`\n=== 相位 SCHEDULED_TASK_MODEL_RUN=${runModel} ===`);
+async function phase(
+	runModel: "true" | "false",
+	visibility: "hidden" | "visible" = "hidden",
+): Promise<void> {
+	console.log(`\n=== 相位 SCHEDULED_TASK_MODEL_RUN=${runModel} · visibility=${visibility} ===`);
 	for (const suffix of [
 		"-agent.sqlite", "-memory.db", "-projects.sqlite", "-chat-meta.json", "-providers.json",
 		"-partners.sqlite", "-flags.json", "-skill-state.json", "-policy.json", "-local-secret",
-		"-approvals.json", "-gate.jsonl", "-autonomy.jsonl", "-pairing.json",
+		"-approvals.json", "-gate.jsonl", "-autonomy.jsonl", "-pairing.json", "-reminder-runs.json",
 	]) {
 		try {
 			rmSync(`${PFX}${suffix}`, { force: true, recursive: true });
@@ -140,22 +144,40 @@ async function phase(runModel: "true" | "false"): Promise<void> {
 		const created = await fetch(`${BASE}/api/v1/agent/reminders`, {
 			method: "POST",
 			headers: authHeaders(),
-			body: JSON.stringify({ text: "到点自主播报：今天没什么事", at, partnerId: "chief" }),
+			body: JSON.stringify({
+				text: "到点自主播报：今天没什么事",
+				at,
+				partnerId: "chief",
+				visibility,
+			}),
 		});
 		check(created.status === 201, "定时任务创建成功", String(created.status));
 
 		await sleep(8_000); // 等触发 + 模型跑完
 
 		const messages = await readChiefTranscript();
-		const hasTrigger = messages.some((m) => m.role === "user" && m.text.includes("[lifediary.proactive]"));
-		const hasAssistant = messages.some((m) => m.role === "assistant" && m.text.length > 0);
+		const userMessages = messages.filter((message) => message.role === "user");
+		const hasTrigger = userMessages.some((message) => message.text.includes("[lifediary.proactive]"));
+		const hasVisibleInstruction = userMessages.some((message) =>
+			message.text.includes("到点自主播报：今天没什么事"),
+		);
+		const leaksHeader = userMessages.some((message) =>
+			message.text.includes("[Scheduled run context]"),
+		);
+		const hasAssistant = messages.some((message) => message.role === "assistant" && message.text.length > 0);
 		const hasFallbackWrite = messages.some(
-			(m) => m.role === "assistant" && m.text.includes("到点自主播报：今天没什么事"),
+			(message) => message.role === "assistant" && message.text.includes("到点自主播报：今天没什么事"),
 		);
 
 		if (runModel === "true") {
-			check(!hasTrigger, "新行为：触发指令对用户隐藏（回读无 user 触发消息）");
-			check(hasAssistant, "新行为：到点冒出一条模型回复");
+			if (visibility === "visible") {
+				check(hasVisibleInstruction, "可见触发：用户指令留在会话里");
+				check(!hasTrigger, "可见触发：不带隐藏标记");
+				check(!leaksHeader, "可见触发：技术头已剥掉（回读只有用户指令）");
+			} else {
+				check(!hasTrigger, "隐藏触发：触发指令对用户隐藏（回读无 user 触发消息）");
+			}
+			check(hasAssistant, "到点冒出一条模型回复");
 		} else {
 			check(hasFallbackWrite, "回滚行为：到点写一条写死的提醒消息（逐字含原文）");
 		}
@@ -172,6 +194,7 @@ process.on("exit", () => {
 async function main(): Promise<void> {
 	try {
 		await phase("true");
+		await phase("true", "visible");
 		await phase("false");
 	} catch (error) {
 		console.error("探针异常:", error);

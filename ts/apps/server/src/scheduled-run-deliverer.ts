@@ -15,9 +15,21 @@ export interface ScheduledRunInput {
 	partnerId: string | null | undefined;
 	/** 到点要说的话（原提醒正文） */
 	text: string;
+	/**
+	 * 触发指令是否对用户可见（2026-11-17 定时任务重做）。
+	 * false/缺省 = 加 `[lifediary.proactive]` 隐藏标记（旧行为）；true = 原样保留。
+	 */
+	visible?: boolean;
 }
 
-export type ScheduledRunHandler = (input: ScheduledRunInput) => Promise<void>;
+/** 一轮跑完的结果；`invokeScheduledRun` 把它原样交给调用方记账/回 HTTP。 */
+export interface ScheduledRunResult {
+	ok: boolean;
+	text?: string;
+	error?: string;
+}
+
+export type ScheduledRunHandler = (input: ScheduledRunInput) => Promise<ScheduledRunResult | void>;
 
 let handler: ScheduledRunHandler | null = null;
 
@@ -27,7 +39,9 @@ export function setScheduledRunHandler(fn: ScheduledRunHandler | null): void {
 }
 
 /** reminder.deliver 到点调用；未注入（测试/未装配）时静默返回，不抛。 */
-export async function invokeScheduledRun(input: ScheduledRunInput): Promise<void> {
+export async function invokeScheduledRun(
+	input: ScheduledRunInput,
+): Promise<ScheduledRunResult | void> {
 	if (!handler) return;
-	await handler(input);
+	return handler(input);
 }

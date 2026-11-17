@@ -4,27 +4,24 @@
  * 单独成模块的理由：归属判定是开关无关的纯逻辑，单测要能直接测；
  * 放进 `task-chat-index.ts` 会连带拉起 agent 装配（单测会碰真实存储）。
  *
- * 口径：宿主会话对外 id 以 `partner-` 开头 → 该执事 uuid；其余（总管主会话 /
- * 普通对话 / 解析不到的旧单）→ `"chief"`。真实派活落进 ticket.json 的是宿主
- * **内部数字 id**，调用方先用 Chats.byExternal 换成对外 id 再进来。
+ * 口径：宿主会话对外 id 是 `partner-<id>` / `partner-<id>-side-<hex>` /
+ * `partner-<id>-group-<gid>` → 该执事 uuid（走 partner-session-role 的解析器，
+ * partnerId 含 `-` 也不会被拆错）；其余（总管主会话 / 普通对话 / 解析不到的旧单）
+ * → `"chief"`。真实派活落进 ticket.json 的是宿主**内部数字 id**，调用方先用
+ * Chats.byExternal 换成对外 id 再进来。
  */
 
-/** 与 `agent/session-index.ts` 的 `PARTNER_CONVERSATION_PREFIX` 同值；这里复制一份是
- *  为了让本模块零依赖（那边在 agent 层，import 会连带拉起重装配）。 */
 import { flagEnabled } from "./flags.ts";
-
-const PARTNER_CONVERSATION_PREFIX = "partner-";
+// 对外 id 解析收在纯函数模块（2026-11-17 一人多会话）：canonical / side / group 三种
+// partner- 前缀都归到真正的 partnerId；顺手修掉群会话被当成 `<id>-group-<gid>` 的旧 bug。
+import { parsePartnerExternalId } from "./partner-session-role.ts";
 
 export function dispatchOwnerOf(hostExternalId: string | null): {
 	dispatchedBy: string;
 	isPartnerHost: boolean;
 } {
-	if (hostExternalId && hostExternalId.startsWith(PARTNER_CONVERSATION_PREFIX)) {
-		return {
-			dispatchedBy: hostExternalId.slice(PARTNER_CONVERSATION_PREFIX.length),
-			isPartnerHost: true,
-		};
-	}
+	const parsed = parsePartnerExternalId(hostExternalId);
+	if (parsed) return { dispatchedBy: parsed.partnerId, isPartnerHost: true };
 	return { dispatchedBy: "chief", isPartnerHost: false };
 }
 

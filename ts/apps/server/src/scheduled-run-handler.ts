@@ -19,13 +19,14 @@ function resolvePartnerId(input: ScheduledRunInput): string {
 	return fromSession ?? CHIEF_PARTNER_ID;
 }
 
-/** 装配注入：到点让目标执事跑一轮自主模型，触发指令带隐藏标记。 */
+/** 装配注入：到点让目标执事跑一轮自主模型；可见触发原样保留，隐藏触发加标记。 */
 export function installScheduledRunHandler(): void {
 	setScheduledRunHandler(async (input) => {
 		const partnerId = resolvePartnerId(input);
-		// 触发指令：隐藏标记 + 原提醒正文。runPartnerTurn 会再拼 autonomous 透明头，
-		// 两者并存——模型靠 autonomous 头知道"自主"，折叠层靠这个标记知道"隐藏"。
-		const prompt = `${PROACTIVE_HIDDEN_MARKER}\n${input.text}`;
+		// 触发指令：默认加隐藏标记；2026-11-17 定时任务重做后，手动新建可选"可见"，
+		// 这时正文就是用户写的那段话。runPartnerTurn 会再拼 autonomous 透明头，
+		// 模型靠它知道"自主"；隐藏/可见只影响回读展示，不影响模型上下文。
+		const prompt = input.visible ? input.text : `${PROACTIVE_HIDDEN_MARKER}\n${input.text}`;
 		const result = await runPartnerTurn(partnerId, prompt, {
 			authority: "autonomous",
 			sessionMode: "persistent",
@@ -36,5 +37,7 @@ export function installScheduledRunHandler(): void {
 		if (!result.ok) {
 			console.warn(`[scheduled-run] 会话 ${input.conversationId} 到点跑模型失败: ${result.error ?? "未知原因"}`);
 		}
+		// 把结果交回 reminder.deliver / run_now 端点记账；错误原文只留在上面的服务端日志。
+		return { ok: result.ok, text: result.text, error: result.ok ? undefined : "这一轮没跑完" };
 	});
 }

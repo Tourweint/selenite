@@ -6,4 +6,5 @@ export { ProjectError, currentProjectEnabled, isInside, projectArchiveChatsEnabl
 export type { Project, ProjectProposal, ProjectRef, ProjectRoot, ProposalStatus, Vcs, Workspace } from "./project-types.ts";
 export { resolveProjectPath } from "./project-rows.ts";
 export { ProjectsStore } from "./project-store.ts";
-export { defaultWorkspaceRoot, mountProjects, projectsStore, resetProjectsStoreForTest, resolveDelegationProject, seedDefaultWorkspace, workspaceRootReal, workspaceRootsReal } from "./project-api.ts";
+export { defaultWorkspaceRoot, mountProjects, projectsStore, resetProjectsStoreForTest, resolveChatDir, resolveDelegationProject, seedDefaultWorkspace, workspaceRootReal, workspaceRootsReal } from "./project-api.ts";
+export type { ChatDirPick } from "./project-api.ts";

@@ -140,6 +140,14 @@ export const ChatRequestSchema = z.object({
 	 */
 	chatKind: NewChatKindSchema.optional(),
 	/**
+	 * 新建 worker 对话时直接指定工作目录（2026-11-17）。
+	 *
+	 * 只在不带 `conversationId` 且 `chatKind=worker` 时生效：
+	 * 服务端校验「存在 + 是目录 + 落在已登记根内」，反推所属项目（推不出就只绑目录）。
+	 * 不传 = 沿用旧行为（当前项目主文件夹 → 主工作区）。
+	 */
+	dirPath: z.string().min(1).max(1024).optional(),
+	/**
 	 * 忙时投递方式（2026-11-07 消息即引导，纯增量）。
 	 *
 	 * - `followUp`（缺省）：排到本轮结束后，作为下一轮；等于改动前的行为。
@@ -334,6 +342,14 @@ export const TranscriptMessageSchema = z.object({
   steps: z.array(TranscriptStepSchema).optional(),
   /** 那一轮从提问到收尾的墙钟时长（毫秒）；有 steps 才可能有 */
   workMs: z.number().optional(),
+  /**
+   * 这条 assistant 消息的**收尾时刻**（epoch 毫秒，2026-11-17，纯增量）。
+   *
+   * `at` 是"这次请求开始"的时间，回答下方要显示"几点答完"就得看这个字段：
+   * 服务端按 `at + durationMs` 算（与 `workMs` 的收尾口径同源），读不到 `durationMs`
+   * 的旧记录退回 `at`。只挂在 assistant 上；老客户端忽略即可。
+   */
+  endedAt: z.number().optional(),
   /**
    * 这条 user 消息是谁发的（2026-11-15 作者标记方案，纯增量，老客户端忽略）。
    *

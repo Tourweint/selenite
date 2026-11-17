@@ -288,13 +288,18 @@ export function startDelegation(
 		// 2026-11-16 多 CLI：每次派单懒读执行器设置，新单带上 employee / profile。
 		// 续跑时 chancellor 按 ticket.employee 与原单快照走，这两个字段不会改派。
 		const executor = executorForDelegation();
+		// 2026-11-17：按单指定的权限档只覆盖**新单**；续跑沿用原单快照，不在这里改。
+		const profile: EmployeeProfile =
+			!request.resumeTicketId && kick.employeePermission
+				? { ...executor.profile, permission: kick.employeePermission }
+				: executor.profile;
 		// 只有新单才把执行器回传给工具层；续跑沿用原单，不在结果里谎报当前默认。
-		if (!request.resumeTicketId) dispatchedExecutor = executor;
+		if (!request.resumeTicketId) dispatchedExecutor = { employee: executor.employee, profile };
 		const promise = runtime.run(
 			{
 				...request,
 				employee: executor.employee,
-				employeeProfile: executor.profile,
+				employeeProfile: profile,
 			},
 			{ onEvent: translate },
 		);
@@ -382,6 +387,8 @@ export function startDelegation(
 				...idempotency,
 				// 计划附件（2026-11-09 §2）：只有新派带；续跑沿用原单，不覆盖。
 				...(kick.steps && kick.steps.length > 0 ? { steps: kick.steps } : {}),
+				// 工作目录（2026-11-17）：只有新派带；续跑沿用原单快照。
+				...(kick.workDir ? { workDir: kick.workDir } : {}),
 				// 来源对话只透传（2026-11-05 跨仓契约）：chancellor 落 ticket.json，
 				// 子单从父单继承；这里给内部会话 id 的字符串形式，接口层再换对外 uuid。
 				originConversationId: String(kick.conversationId),
@@ -407,6 +414,8 @@ export function startDelegation(
 				...projectField,
 				...idempotency,
 				...(kick.steps && kick.steps.length > 0 ? { steps: kick.steps } : {}),
+				// 回退重派也是一张新单：工作目录照传。
+				...(kick.workDir ? { workDir: kick.workDir } : {}),
 				originConversationId: String(kick.conversationId),
 			});
 		}

@@ -39,6 +39,8 @@ import { makeSkillAdviceSaver, skillAdviceEnabled, skillAdvicePath } from "../sk
 import { mirrorTaskNotice, taskConversationMirror } from "../task-conversation.ts";
 import { capabilityOf } from "../tool-capability.ts";
 import { markDeferred } from "../tool-index.ts";
+import { recordToolUse } from "../tool-usage.ts";
+import { recordTimelineEvent } from "../turn-timeline.ts";
 import { disabledToolsOfConversation } from "../tool-visibility.ts";
 import { createTools } from "../tools.ts";
 import { TopicTask } from "../topic-runtime.ts";
@@ -63,13 +65,63 @@ import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { setProjectionDeps, wrapShellTool } from "../tool-projection.ts";
-import type { Extension, PromptSection, ToolHookCall } from "@earendil-works/pi-durable";
+import type { Extension, PromptSection, ToolExecutionResult, ToolHookCall } from "@earendil-works/pi-durable";
 import { GenerationTask, Harness, LiveDoc, ToolTask, createRegistry, defineExtension, hook } from "@earendil-works/pi-durable";
 import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { reportDelegationResult, sayInChat, sayInConversation, switchThinkingOnTool } from "./lifecycle-thinking.ts";
 
 setApprovalLevelSource(() => policy.approvalLevel);
+
+/**
+ * 路径类工具报错的兜底提示（2026-11-17）。
+ *
+ * 现场：`read(path: "workspace")` 按会话 cwd（当时是某个项目目录）解析，ENOENT 之后
+ * 模型拿不到"主工作区在哪"的线索，直接放弃并回了 `[[no-update]]`——主人既没收到
+ * 招呼，也看不到它读错了地方。这里把事实补回给模型：相对路径解析到了哪、主工作区
+ * 的绝对路径是什么。**不替模型改路径**，也不把失败改成成功。
+ *
+ * 回滚：`PARTNER_PATH_HINT=false`。
+ */
+function pathFailureHint(
+	call: ToolHookCall,
+	result: ToolExecutionResult,
+	conversationId: number,
+): ToolExecutionResult | undefined {
+	const raw = (process.env.PARTNER_PATH_HINT ?? "").trim().toLowerCase();
+	if (raw === "false" || raw === "0" || raw === "off") return undefined;
+	if (call.name !== "read" && call.name !== "write" && call.name !== "edit") return undefined;
+	if (result.isError !== true) return undefined;
+	const blocks = Array.isArray(result.output) ? result.output : [];
+	const text = contentText(blocks as Parameters<typeof contentText>[0]);
+	if (!/ENOENT|no such file or directory/i.test(text)) return undefined;
+	const target = (call.arguments as { path?: unknown }).path;
+	if (typeof target !== "string") return undefined;
+	const trimmed = target.trim();
+	if (!trimmed || isAbsolute(trimmed) || /^[a-zA-Z]:[\\/]/.test(trimmed) || trimmed.startsWith("\\\\")) {
+		return undefined;
+	}
+	let workspace: string | null = null;
+	try {
+		workspace = projectsStore().getWorkspace()?.rootPath?.trim() || null;
+	} catch {
+		workspace = null;
+	}
+	const cwd = sessionCwd(conversationId);
+	const lines = [
+		`[路径提示] 相对路径 "${trimmed}" 按本会话工作目录解析成：${join(cwd, trimmed)}`,
+		`本会话工作目录：${cwd}`,
+	];
+	if (workspace) {
+		lines.push(
+			`主工作区是 ${workspace}：要读主工作区本身，直接写这个绝对路径，不要写 "${trimmed}"。`,
+		);
+	}
+	return {
+		...result,
+		output: [{ type: "text", text: `${text}\n\n${lines.join("\n")}` }],
+	};
+}
 
 async function abortRun(conversationId: number): Promise<void> {
 	try {
@@ -614,6 +666,13 @@ async function openHarness(): Promise<Harness> {
 								category,
 								source,
 							});
+							// 时间线：按内部会话 id 反查本轮单号，只记工具名 + 闸门类别 + 拦下标记。
+							recordTimelineEvent({
+								conversationId: api.conversationId,
+								kind: "gate",
+								name: category,
+								ok: false,
+							});
 							return { block: reason };
 						};
 						if (toolsBlocked.has(api.conversationId)) {
@@ -934,7 +993,9 @@ async function openHarness(): Promise<Harness> {
 								backgrounded = replacedResult(moved.message);
 							}
 						}
-						const finalResult = backgrounded ?? result;
+						// 路径类报错补事实（2026-11-17）：只给 cwd / 主工作区，不改路径、不改成败
+						const hinted = backgrounded === undefined ? pathFailureHint(call, result, api.conversationId) : undefined;
+						const finalResult = backgrounded ?? hinted ?? result;
 						emitPhase(api.conversationId, "thinking");
 						emitTool(api.conversationId, {
 							name: call.name,
@@ -944,7 +1005,20 @@ async function openHarness(): Promise<Harness> {
 							// 编辑类工具带 diff（批 33）：现场工具行与文件汇总和历史 steps 同一份事实
 							...toolDiff(finalResult),
 						});
-						return backgrounded;
+						// 工具用量账（2026-11-17）：只计模型真实发起并执行完的调用
+						//（被闸门拦下 / 校验失败不经 afterTool，见内核 tool.js call phase 提前 settle）；
+						// 成败分桶给"按频率动态调整上下文"当数据底座，写失败只 warn 不挡主流程。
+						if (call.parent === undefined) {
+							recordToolUse(call.name, finalResult.isError !== true);
+							// 时间线：只记工具名 + 成败，不记 output / diff / 参数。
+							recordTimelineEvent({
+								conversationId: api.conversationId,
+								kind: "tool",
+								name: call.name,
+								ok: finalResult.isError !== true,
+							});
+						}
+						return backgrounded ?? hinted;
 					},
 				}),
 				// 每次请求前：注入记忆 + 数这是本轮的第几个工具回合
@@ -959,6 +1033,12 @@ async function openHarness(): Promise<Harness> {
 						const key = runIdentityKey(api.conversationId, live);
 						const used = (runTurns.get(key) ?? 0) + 1;
 						runTurns.set(key, used);
+						// 时间线：一个模型请求 = 一个工具回合，只记回合序号（不记 userText）。
+						recordTimelineEvent({
+							conversationId: api.conversationId,
+							kind: "round",
+							count: used,
+						});
 
 						// 执事间递话（2026-11-08 扫尾批 8d）：把 run 身份记给通道，并认领
 						// "这一轮由递话触发"的一次性标记。认领放在这里而不是 beforeTool，

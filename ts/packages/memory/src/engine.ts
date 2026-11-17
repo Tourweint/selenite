@@ -443,6 +443,29 @@ export class MemoryEngine {
 	}
 
 	/**
+	 * 整体改挂 scope（2026-11-17 项目合并/记忆迁移）。
+	 *
+	 * 这一层只拒绝"空 / 自己搬自己"，**不认 scope 白名单**：
+	 * 哪些 scope 合法（项目必须已登记之类）只有服务端知道，判定留在 API 层。
+	 */
+	moveScope(from: string, to: string): { records: number; documents: number } {
+		const source = from.trim();
+		const target = to.trim();
+		if (!source || !target || source === target) return { records: 0, documents: 0 };
+		return this.store.moveScope(source, target);
+	}
+
+	/** 把一个 scope 全部软封存（写 archived_at）；返回封存条数。 */
+	archiveScope(scope: string): number {
+		return this.store.archiveScope(scope.trim());
+	}
+
+	/** 库里出现过的所有 scope（2026-11-17 孤儿识别：与登记项目求差集）。 */
+	listScopes(): string[] {
+		return this.store.listScopes();
+	}
+
+	/**
 	 * 按 id 取一条（2026-11-08 扫尾批 6 整理建议的"应用"用）。
 	 *
 	 * 与 `list()` 的区别：不受列表窗口 / 条数上限影响，也**包含已被取代的**——

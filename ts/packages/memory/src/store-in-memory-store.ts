@@ -140,6 +140,35 @@ export class InMemoryStore implements MemoryStore {
 		return victims.length;
 	}
 
+	moveScope(from: string, to: string): { records: number; documents: number } {
+		if (!from || !to || from === to) return { records: 0, documents: 0 };
+		let records = 0;
+		for (const [id, row] of this.rows) {
+			if (row.scope !== from) continue;
+			this.rows.set(id, { ...row, scope: to });
+			records += 1;
+		}
+		let documents = 0;
+		for (const [id, document] of this.documents) {
+			if (document.scope !== from) continue;
+			this.documents.set(id, { ...document, scope: to });
+			documents += 1;
+		}
+		return { records, documents };
+	}
+
+	archiveScope(scope: string): number {
+		if (!scope) return 0;
+		const at = new Date().toISOString();
+		let archived = 0;
+		for (const [id, row] of this.rows) {
+			if (row.scope !== scope || row.archivedAt) continue;
+			this.rows.set(id, { ...row, archivedAt: at });
+			archived += 1;
+		}
+		return archived;
+	}
+
 	// ── 原文档案（2026-11-16 记忆原子化）──────────────────────
 
 	putDocument(document: MemoryDocument): void {

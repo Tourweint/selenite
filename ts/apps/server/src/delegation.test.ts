@@ -533,3 +533,56 @@ test("settle 落待送达行并把行 id 随汇报带出；idle 单销为跳过"
 		rmSync(dir, { recursive: true, force: true });
 	}
 });
+
+test("按单指定的工作目录与权限档会进 ChancellorRequest（2026-11-17）", async () => {
+	let seen: ChancellorRequest | undefined;
+	const { ticketId } = startDelegation(
+		{
+			conversationId: 11,
+			domain: "文档",
+			requirement: "在子目录里改一个文件",
+			workDir: "D:\\Projects\\projects\\lifediary-harness\\docs",
+			employeePermission: "read",
+		},
+		{
+			run: (request, options) => {
+				seen = request;
+				options.onEvent?.({ type: "ticket", ticketId: "T-wd", message: "已受理" });
+				return Promise.resolve(result({ ticketId: "T-wd" }));
+			},
+			emit: () => undefined,
+			report: () => undefined,
+			autoReport: false,
+		},
+	);
+	assert.equal(ticketId, "T-wd");
+	assert.equal(seen?.workDir, "D:\\Projects\\projects\\lifediary-harness\\docs");
+	// 权限档覆盖执行器设置里的默认值，其余执行器字段照带
+	assert.equal(seen?.employeeProfile?.permission, "read");
+});
+
+test("续跑不带按单目录与权限（沿用原单快照）", async () => {
+	let seen: ChancellorRequest | undefined;
+	startDelegation(
+		{
+			conversationId: 12,
+			domain: "文档",
+			requirement: "验证码 1234",
+			resumeTicketId: "T-old",
+			workDir: "D:\\Projects\\projects\\lifediary-harness\\docs",
+			employeePermission: "full",
+		},
+		{
+			run: (request, options) => {
+				seen = request;
+				options.onEvent?.({ type: "ticket", ticketId: "T-old", message: "已受理" });
+				return Promise.resolve(result({ ticketId: "T-old" }));
+			},
+			emit: () => undefined,
+			report: () => undefined,
+			autoReport: false,
+		},
+	);
+	assert.equal(seen?.resumeTicketId, "T-old");
+	assert.equal(seen?.employeeProfile?.permission, undefined, "续跑不覆盖权限档");
+});
