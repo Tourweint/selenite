@@ -15,7 +15,7 @@
  *  ② 抽屉里所有行都贴着左右边缘排、行间只有 hover 没有分割，像一份没排过版的清单。
  *     现按设置页的语言重画：内容区 16px 内边距 + 圆角卡（.cs-card）分行，行间 1px 分割，
  *     卡与卡之间 10px 呼吸；图标 18px 起、标题 14px、副文本 12px，与设置页同一档。 */
-.top-wrap { flex: none; }
+.top-wrap { flex: none; display: flex; align-items: center; gap: 4px; }
 .top-gear {
   display: inline-flex; align-items: center; justify-content: center;
   width: 28px; height: 28px; padding: 0;

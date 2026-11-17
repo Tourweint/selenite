@@ -164,7 +164,10 @@ html[data-sidebar="closed"] .side-rail {
 .chat {
   display: flex; align-items: center; gap: 4px;
   width: 100%; padding: 8px 6px 8px 12px;
-  border-radius: var(--r-md);
+  /* 2026-11-17：会话行原来 r-md（12px 圆角），与执事/群组/项目行的 r-full 胶囊
+     选中框形状不一致（用户指出"对话一个方框、执事一个胶囊"）。侧栏可点行统一胶囊，
+     选中底纹与内描边本来就和 .side-item[aria-current] 一样，只差这个圆角。 */
+  border-radius: var(--r-full);
   background: transparent; color: var(--text-2);
   /* 2026-11-07 二改：会话行 13 → 14px，与分区头同一档（用户要求整体调大） */
   font-size: 14px; line-height: 1.45;
@@ -195,6 +198,47 @@ html[data-sidebar="closed"] .side-rail {
 .chat-act:hover { background: var(--card-high); color: var(--text); }
 .chat-act svg { width: 13px; height: 13px; }
 
+/* 一人多会话（2026-11-17 批2）：花名册 / 总管条目的「选择会话」小图标。
+   与 .chat-act 同款 hover 才出现、键盘 focus-visible 可见；图标走 currentColor，四套主题通用。 */
+.roster-sessions,
+.chief-sessions {
+  flex: none; width: 20px; height: 20px; padding: 0;
+  display: grid; place-content: center;
+  border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--text-3);
+  visibility: hidden; opacity: 0;
+  transition: opacity .12s ease, visibility .12s ease;
+}
+.roster-row:hover .roster-sessions,
+.roster-row:focus-within .roster-sessions,
+.chief-entry:hover .chief-sessions,
+.chief-entry:focus-within .chief-sessions {
+  visibility: visible; opacity: 1;
+}
+.roster-sessions:hover,
+.chief-sessions:hover { background: var(--card-high); color: var(--text); }
+.roster-sessions:focus-visible,
+.chief-sessions:focus-visible { visibility: visible; opacity: 1; outline: 2px solid var(--accent); }
+.roster-sessions svg,
+.chief-sessions svg { width: 13px; height: 13px; }
+
+/* 会话选择器弹层：一列会话行 + 底部新建按钮（沿用弹层的描边 / 主题令牌） */
+.ps-list { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 12px; max-height: 320px; overflow-y: auto; }
+.ps-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  width: 100%; min-height: 38px; padding: 8px 12px;
+  border: 1px solid var(--outline); border-radius: var(--r-md);
+  background: transparent; color: var(--text-2); text-align: left; cursor: pointer;
+}
+.ps-row:hover:not(:disabled) { background: var(--card-high); color: var(--text); }
+.ps-row[aria-current="true"] {
+  border-color: var(--accent); background: var(--accent-soft); color: var(--accent); cursor: default;
+}
+.ps-row.ps-main { border-color: var(--accent); }
+.ps-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ps-meta { flex: none; font-size: 11px; color: var(--text-3); }
+.ps-create { width: 100%; }
+
 .chat-rename {
   width: 100%; height: 26px; padding: 0 6px;
   background: var(--bg);
@@ -218,6 +262,10 @@ html[data-sidebar="closed"] .side-rail {
   background: transparent; color: var(--text-2);
   /* 2026-11-07 二改：13 → 14px（侧栏整体放大一档，与分区头对齐） */
   font-size: 14px; font-weight: 400;
+  /* 2026-11-17：行是 <button> 时 UA 默认 text-align:center，会把「工作区」这类
+     flex:1 标签的文字居中（项目行是 div 所以没事）。侧栏行一律左对齐，
+     与 .proj-item / .sec-foot-link 同口径。 */
+  text-align: left;
 }
 .side-item:hover { background: var(--card); color: var(--text); }
 .side-item[aria-current="true"] {

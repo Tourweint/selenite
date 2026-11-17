@@ -20,18 +20,19 @@ import { openChiefChat } from "./partners-status.js";
 import { resize } from "./plus-menu.js";
 import { openAddProjectModal } from "./project-modal.js";
 import { showProviderTemplates } from "./providers.js";
-import { currentPartnerProfileId, currentRoute, currentSettingsPage, go } from "./route.js";
+import { currentAgentTab, currentPartnerProfileId, currentRoute, currentSettingsPage, go } from "./route.js";
 import { openAddSearchSourceModal } from "./search-sources.js";
 import { wireDragScroll } from "./scroll-x.js";
 import { mountSegmented, replayPageEnter, rowMarkup, sectionMarkup, switchMarkup, syncSegmented } from "./settings-atoms.js";
-import { ACCENTS, renderSettingsNav } from "./settings-base.js";
+import { ACCENTS, AGENT_TABS, agentTabsMarkup, renderSettingsNav } from "./settings-base.js";
 import { compactionSectionMarkup, wireCompactionSection } from "./settings-compaction.js";
 import { contextSettingsMarkup, wireContextSettings } from "./settings-context.js";
+import { toolPoolMarkup, wireToolPool } from "./settings-tools.js";
 import { connRelay, initRuntimeCard, loadPair, loadRelayStatus, loadServiceInfo, openAddDeviceModal, openRelayLinkModal, paintConnStar, unlinkRelay } from "./settings-connection.js";
 import { executorSectionMarkup, wireExecutorSettings } from "./settings-executor.js";
 import { memorySettingsMarkupLegacy, wireMemorySettingsLegacy } from "./settings-memory.js";
 import { loadProjectsSettings } from "./settings-projects.js";
-import { loadPolicy, loadReminders, openReminderModal, renderDefaultModelRow } from "./settings-reminders.js";
+import { loadPolicy, loadReminders, openScheduledTaskModal, renderDefaultModelRow } from "./settings-reminders.js";
 import { loadAutoArchiveSettings, loadFlagsSettings, saveAutoArchiveDays, toggleFlag } from "./settings-switches.js";
 import { loadModelsInfo, loadUsagePage } from "./settings-usage.js";
 import { openBulkSkillModal, openCreateSkillChoiceModal } from "./skills-actions.js";
@@ -45,6 +46,20 @@ import { chooseDetailMode, getDetailMode } from "./tool-chips.js";
 let pairTimer = 0;
 /** 连接页的中继状态轮询（2026-11-14）：10s 一次，离开这一页就不刷。 */
 let connPollTimer = 0;
+
+/**
+ * Agent 分区顶部 tab 的接线（2026-11-17）。
+ * 点击切到该 tab 保留的旧子路由；切页本身由 applyRoute → renderSettings 接手，
+ * 所以这里不直接重画（同一 hash 再点也由 go 早退）。
+ */
+function wireAgentTabs() {
+  for (const button of el.settingsInner.querySelectorAll("[data-agent-tab]")) {
+    const tab = AGENT_TABS.find((item) => item.id === button.dataset.agentTab);
+    if (!tab) continue;
+    button.addEventListener("click", () => go("settings", tab.route));
+  }
+}
+
 async function renderSettings() {
   const page = currentSettingsPage();
   // 记忆页整理轮询：一离开设置页就停；回来由 wireMemorySettings 重新按服务端状态接上。
@@ -168,6 +183,9 @@ async function renderSettings() {
       mountSegmented(detailBox);
     }
   } else if (page === "chats") {
+    // 2026-11-18 归档并入本页（用户口径：设置分区太多）：上半是行为设置，
+    // 底部「自动归档 → 已归档的会话 → 已归档的项目目录」收成一个归档组。
+    // 旧路由 #/settings/archive 由 SETTINGS_ALIASES 别名到 chats，老书签不空页。
     const sendKey = localStorage.getItem(KEY_SEND) || "enter";
     el.settingsInner.innerHTML = `${sectionMarkup(
       "会话",
@@ -187,46 +205,11 @@ async function renderSettings() {
           }),
         )}
         <div class="divider"></div>
-        ${
-          // 入口常驻：N=0 时也让主人知道归档收在哪（方案 §2：会话页只保留入口）
-          `${rowMarkup(
-             "归档的会话",
-             // 解释收进悬停，计数也并进去（2026-11-14：这一行原来既没提示、又只在 N>0 时显示数字）
-             `${state.archived > 0 ? `已归档 ${state.archived} 个。` : ""}归档只是把会话从列表里收起：内容与记忆都还在，随时可以恢复，也能在归档页里永久删除。`,
-             `<button class="ghost" type="button" id="open-archive">打开归档</button>`,
-           )}`
-        }
-        <div class="divider"></div>
         ${rowMarkup(
           "导出数据",
           "勾选要带哪几块，打成 zip 压缩包；每块是独立目录，包根上有 README 与清单（不含密钥）",
           `<button class="ghost" type="button" id="settings-export-all">导出…</button>`,
         )}
-      </div>`,
-    )}
-    ${sectionMarkup(
-      "自动归档",
-      `<div class="card">
-        ${rowMarkup(
-          "自动归档旧会话",
-          "",
-          switchMarkup(true, { label: "自动归档", attrs: "data-archive-auto-switch" }),
-        )}
-        <div class="divider"></div>
-        ${rowMarkup(
-          "保留天数",
-          "多少天没动静算旧（1–365，默认 30）。收两类：普通对话、单已结束的任务专线；总管、执事/群、置顶的、正在跑的一律不动。",
-          `<input class="set-input archive-days" id="archive-auto-days" type="number" min="1" max="365"
-                  value="30" aria-label="自动归档保留天数" />`,
-        )}
-        ${
-          // 提示行只在有状态/错误时存在；分隔线必须和它同生共死——
-          // 早先两者拆开写，空提示时那根 1px 线就贴在卡片底边上，看起来像两根、颜色还被叠深。
-          `<div id="archive-auto-hint-wrap" hidden>
-             <div class="divider"></div>
-             <div class="row"><div class="row-main"><div class="row-hint" id="archive-auto-hint"></div></div></div>
-           </div>`
-        }
       </div>`,
     )}
     ${sectionMarkup(
@@ -254,72 +237,33 @@ async function renderSettings() {
         )}
       </div>`,
     )}
-    ${compactionSectionMarkup()}`;
-
-    document.getElementById("open-search")?.addEventListener("click", () => go("search"));
-    const sendSwitch = el.settingsInner.querySelector("[data-send-key-switch]");
-    sendSwitch?.addEventListener("click", () => {
-      const next = sendSwitch.getAttribute("aria-checked") !== "true";
-      sendSwitch.setAttribute("aria-checked", String(next));
-      localStorage.setItem(KEY_SEND, next ? "enter" : "mod-enter");
-    });
-    document.getElementById("open-archive")?.addEventListener("click", () => go("settings", "archive"));
-    document
-      .getElementById("settings-export-all")
-      ?.addEventListener("click", () => openExportModal());
-    // 自动归档区（2026-11-13 对齐 ZCode §3）：开关走 toggleFlag（flags 卡同款），
-    // 天数是数字输入，单独走 saveAutoArchiveDays（失败回显旧值）。
-    const autoSwitch = el.settingsInner.querySelector("[data-archive-auto-switch]");
-    autoSwitch?.addEventListener("click", () => {
-      const next = autoSwitch.getAttribute("aria-checked") !== "true";
-      void toggleFlag("ARCHIVE_AUTO_ENABLED", next, autoSwitch).then(() => loadAutoArchiveSettings());
-    });
-    document
-      .getElementById("archive-auto-days")
-      ?.addEventListener("change", (event) => {
-        const input = event.currentTarget;
-        if (input instanceof HTMLInputElement) void saveAutoArchiveDays(input);
-      });
-    void loadAutoArchiveSettings();
-    void loadPolicy();
-    void refreshApprovalPopups();
-    // 上下文压缩（2026-11-14）：四个旋钮走 flags；改完下一轮生效
-    wireCompactionSection(el.settingsInner);
-  } else if (page === "context") {
-    // 设置 → 上下文（2026-11-16）：只读当前会话的固定前缀；会变部分只报数量。
-    el.settingsInner.innerHTML = contextSettingsMarkup();
-    wireContextSettings();
-  } else if (page === "projects") {
-    // 2026-11-12 重做：工作区根与项目目录平级（ZCode 多根语义），同一种行、路径可改；
-    // 项目动作只有「改名 / 归档」（归档是软退场，归档页可恢复），不再有「移除/删除」说法。
-    el.settingsInner.innerHTML = `${sectionMarkup(
-      "项目",
+    ${compactionSectionMarkup()}
+    ${sectionMarkup(
+      "自动归档",
       `<div class="card">
-        <div class="set-card-body">
-          <div class="set-card-head">
-            <div class="row-main">
-              <div class="set-card-title" data-tip="工作区根是默认目录；项目和它平级，可以放在任意位置。所有已登记目录助手都能读写。">工作区与项目</div>
-            </div>
-            <button class="btn-primary" type="button" id="project-add">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
-              添加项目
-            </button>
-          </div>
-          <div id="proposal-list" hidden></div>
-          <div class="proj-list" id="project-list">
-            <div class="set-hint">读取中…</div>
-          </div>
-        </div>
+        ${rowMarkup(
+          "自动归档旧会话",
+          "",
+          switchMarkup(true, { label: "自动归档", attrs: "data-archive-auto-switch" }),
+        )}
+        <div class="divider"></div>
+        ${rowMarkup(
+          "保留天数",
+          "多少天没动静算旧（1–365，默认 30）。收两类：普通对话、单已结束的任务专线；总管、执事/群、置顶的、正在跑的一律不动。",
+          `<input class="set-input archive-days" id="archive-auto-days" type="number" min="1" max="365"
+                  value="30" aria-label="自动归档保留天数" />`,
+        )}
+        ${
+          // 提示行只在有状态/错误时存在；分隔线必须和它同生共死——
+          // 早先两者拆开写，空提示时那根 1px 线就贴在卡片底边上，看起来像两根、颜色还被叠深。
+          `<div id="archive-auto-hint-wrap" hidden>
+             <div class="divider"></div>
+             <div class="row"><div class="row-main"><div class="row-hint" id="archive-auto-hint"></div></div></div>
+           </div>`
+        }
       </div>`,
-    )}`;
-    document.getElementById("project-add")?.addEventListener("click", () => openAddProjectModal());
-    void loadProjectsSettings();
-  } else if (page === "archive") {
-    // 2026-11-12 归档模块：会话与项目目录两类软对象收在一页。
-    // 2026-11-13 对齐 ZCode（方案 §1）：会话卡重做成「归档管理」形态——
-    // 按项目分组折叠卡 + 组级恢复 + 排序/项目筛选 + 50 条递增；
-    // 行内动作 = 恢复 + 永久删除（弹窗确认）。页级「全部恢复」退役（组级恢复取代之）。
-    el.settingsInner.innerHTML = `${sectionMarkup(
+    )}
+    ${sectionMarkup(
       `已归档的会话<span class="archive-count" id="archive-chat-count"></span>`,
       `<div class="card">
         <div class="set-card-body">
@@ -355,6 +299,35 @@ async function renderSettings() {
       `id="archive-project-section" hidden`,
     )}`;
 
+    document.getElementById("open-search")?.addEventListener("click", () => go("search"));
+    const sendSwitch = el.settingsInner.querySelector("[data-send-key-switch]");
+    sendSwitch?.addEventListener("click", () => {
+      const next = sendSwitch.getAttribute("aria-checked") !== "true";
+      sendSwitch.setAttribute("aria-checked", String(next));
+      localStorage.setItem(KEY_SEND, next ? "enter" : "mod-enter");
+    });
+    document
+      .getElementById("settings-export-all")
+      ?.addEventListener("click", () => openExportModal());
+    // 自动归档区（2026-11-13 对齐 ZCode §3）：开关走 toggleFlag（flags 卡同款），
+    // 天数是数字输入，单独走 saveAutoArchiveDays（失败回显旧值）。
+    const autoSwitch = el.settingsInner.querySelector("[data-archive-auto-switch]");
+    autoSwitch?.addEventListener("click", () => {
+      const next = autoSwitch.getAttribute("aria-checked") !== "true";
+      void toggleFlag("ARCHIVE_AUTO_ENABLED", next, autoSwitch).then(() => loadAutoArchiveSettings());
+    });
+    document
+      .getElementById("archive-auto-days")
+      ?.addEventListener("change", (event) => {
+        const input = event.currentTarget;
+        if (input instanceof HTMLInputElement) void saveAutoArchiveDays(input);
+      });
+    void loadAutoArchiveSettings();
+    void loadPolicy();
+    void refreshApprovalPopups();
+    // 上下文压缩（2026-11-14）：四个旋钮走 flags；改完下一轮生效
+    wireCompactionSection(el.settingsInner);
+    // 归档管理（2026-11-18 从独立分区并进来）：筛选三件套变化就重画列表
     document
       .getElementById("archive-filter")
       ?.addEventListener("input", () => renderArchiveChats());
@@ -365,16 +338,95 @@ async function renderSettings() {
       .getElementById("archive-project")
       ?.addEventListener("change", () => renderArchiveChats());
     void loadArchivePage();
+  } else if (page === "agent") {
+    // Agent 合并分区（2026-11-17 用户口径）：人设 / 上下文 / 工具 / 派活 四页收成一个分区，
+    // 左栏只占一行，内容顶部用四分段 tab 切换。
+    // 四个旧子路由（partners / context / tools / executor）原样保留为各 tab 的地址：
+    // 老书签、抽屉「去编辑这个人」、上下文页里的人设跳转都不用改，tab 由 hash 认。
+    const tab = currentAgentTab();
+    if (tab === "personas") {
+      const profileId = currentPartnerProfileId();
+      // 普通助手是全局一份人设，不是执事档案：不请求 /partners/worker。
+      if (profileId === "worker") {
+        void renderWorkerProfilePage();
+        replayPageEnter();
+        return;
+      }
+      // 二级页（#/settings/partners/<id>）是钻进某个人的档案：自带返回键，不挂 tab 条。
+      if (profileId) {
+        void renderPartnerProfilePage(profileId);
+        replayPageEnter();
+        return;
+      }
+      el.settingsInner.innerHTML = agentTabsMarkup(tab) + sectionMarkup(
+        "人设",
+        `<div class="pt-head">
+          <div class="row-main">
+            <div class="set-card-title" data-tip="一个执事一份档案：点进去改头像、写人设、定岗位、看能力与档案，一页到底。">总管与执事</div>
+          </div>
+          <button class="btn-primary" type="button" id="partner-add">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+            新建执事
+          </button>
+        </div>
+        <div class="pt-list" id="partner-list">
+          <div class="set-hint">读取中…</div>
+        </div>`,
+      );
+      document.getElementById("partner-add")?.addEventListener("click", () => openCreatePartnerModal());
+      void loadPartners();
+    } else if (tab === "context") {
+      // 设置 → Agent → 上下文（2026-11-16）：只读当前会话的固定前缀；会变部分只报数量。
+      el.settingsInner.innerHTML = agentTabsMarkup(tab) + contextSettingsMarkup();
+      wireContextSettings();
+    } else if (tab === "tools") {
+      // 设置 → Agent → 工具（2026-11-17）：全局工具池，统一决定每个工具是常驻还是按需。
+      // 写的是 .data/tool-pool.json；deferred 是注册期属性，保存后需重启服务生效。
+      el.settingsInner.innerHTML = agentTabsMarkup(tab) + toolPoolMarkup();
+      wireToolPool();
+    } else {
+      // 派活（2026-11-16 多 CLI 打手适配）：选任务中心用哪个 CLI + 各 CLI 的模型/权限。
+      // 数据走 GET/PUT /api/v1/agent/executor；落 .data/executor.json，下一次派活生效。
+      el.settingsInner.innerHTML = agentTabsMarkup(tab) + executorSectionMarkup();
+      void wireExecutorSettings();
+    }
+    wireAgentTabs();
+  } else if (page === "projects") {
+    // 2026-11-12 重做：工作区根与项目目录平级（ZCode 多根语义），同一种行、路径可改；
+    // 项目动作只有「改名 / 归档」（归档是软退场，归档页可恢复），不再有「移除/删除」说法。
+    el.settingsInner.innerHTML = `${sectionMarkup(
+      "项目",
+      `<div class="card">
+        <div class="set-card-body">
+          <div class="set-card-head">
+            <div class="row-main">
+              <div class="set-card-title" data-tip="工作区根是默认目录；项目和它平级，可以放在任意位置。所有已登记目录助手都能读写。">工作区与项目</div>
+            </div>
+            <button class="btn-primary" type="button" id="project-add">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+              添加项目
+            </button>
+          </div>
+          <div id="proposal-list" hidden></div>
+          <div class="proj-list" id="project-list">
+            <div class="set-hint">读取中…</div>
+          </div>
+        </div>
+      </div>`,
+    )}`;
+    document.getElementById("project-add")?.addEventListener("click", () => openAddProjectModal());
+    void loadProjectsSettings();
   } else if (page === "reminders") {
-    // 定时任务页（2026-11-14 合并；2026-11-17 加触发消息隐藏/可见）：到点叫一个人。
-    // 一张清单两类：触发消息"对我隐藏"（定时主动轮，走 /reminders）与"可见"（例行任务，走 /routines）。
+    // 定时任务页（2026-11-17 重做）：一张清单、一个编辑器、一套友好触发词。
+    // 手动新建统一走 /agent/reminders（可见/隐藏只是显示方式，手机本地闹钟继续有效）；
+    // Agent 建的高级例行规则也在同一张清单里，内容可改、高级触发只读。
     el.settingsInner.innerHTML = `
       <h2 class="set-sec-title">定时任务</h2>
       <section class="set-sec">
         <div class="card rm-hero">
           <div class="rm-hero-body">
-            <div class="rm-hero-title">到点叫一个人</div>
-            <div class="rm-hero-note">新建时选触发消息「对我隐藏」还是「可见」：隐藏就像它自己主动来找你（看不到你发的那条指令）；可见会留一条你发的触发消息。想指定谁来做，去<a href="#/settings/partners">人设</a>给它设例行任务也行。</div>
+            <div class="rm-hero-title">到点让 TA 自己跑一轮</div>
+            <div class="rm-hero-note">内容是一段可编辑的指令：到点后 TA 会拿它自己起一轮，能查就查、能做就做，然后把结果回在你们的主会话；做不了会回一句。触发消息可以选「像 TA 主动找我」（只看到回复），也可以选「留一条我发的指令」（会话里看得到你写的那段）。</div>
             <div class="rm-hero-actions">
               <button class="ghost" type="button" id="reminder-manual">手动设置</button>
               <button class="btn-primary" type="button" id="reminder-say-go">交给 Agent</button>
@@ -388,19 +440,14 @@ async function renderSettings() {
     const sendToAgent = () => {
       // 只给一句开头：时间、频率、内容都由 Agent 在对话里问清楚并调工具，界面不替它猜。
       openChiefChat();
-      el.input.value = "帮我定个定时任务（触发消息对我隐藏还是可见，你先问我）：";
+      el.input.value = "帮我定个定时任务（触发消息要可见还是像你主动找我，你先问我）：";
       resize();
       el.input.focus();
       toast("已填好开头——直接发送，剩下的交给 Agent");
     };
     document.getElementById("reminder-say-go")?.addEventListener("click", sendToAgent);
-    document.getElementById("reminder-manual")?.addEventListener("click", () => openReminderModal());
+    document.getElementById("reminder-manual")?.addEventListener("click", () => openScheduledTaskModal());
     void loadReminders();
-  } else if (page === "executor") {
-    // 派活（2026-11-16 多 CLI 打手适配）：选任务中心用哪个 CLI + 各 CLI 的模型/权限。
-    // 数据走 GET/PUT /api/v1/agent/executor；落 .data/executor.json，下一次派活生效。
-    el.settingsInner.innerHTML = executorSectionMarkup();
-    void wireExecutorSettings();
   } else if (page === "connect") {
     // 连接页（2026-11-14 重排）：顺序就是操作顺序——状态 → 接入中继 → 手机两条路 → 设备。
     // 第一步（电脑接中继）必须在这里能填；第二步的按钮永不置灰，没到那一步时文案直接说"先接入"。
@@ -489,59 +536,69 @@ async function renderSettings() {
         void loadDevices().then(() => paintConnStar());
       }
     }, 10000);
-  } else if (page === "service") {
-    // 服务页（2026-11-09 拆分后；2026-11-13 二次瘦身；2026-11-16 插件拆出）：只留服务自身状态——
-    // 通知 / 鉴权 / 运行时。行为开关整块搬到「插件」页，这一页不再混功能开关。
-    // 2026-11-13 退役的两行：地址（连接页的链路图已经说清，这里只是 location.origin 的复读）、
-    // 累计 token（整块搬去「用量」页——累计、按模型占比、明细三件事，一行标签装不下）。
+    // 服务与关于并进来（2026-11-18 用户口径：设置分区太多；旧路由 /service、/about
+    // 由 SETTINGS_ALIASES 别名到 connect）。顺序 = 先「这台电脑怎么连」，再「它怎么跑」，
+    // 关于这张小卡收尾。服务页 2026-11-13 退役的两行（地址、累计 token）不复活：
+    // 地址在连接状态的链路图里，token 在「用量」页。
+    // 上面连接部分的 DOM 与监听都已就位，这里往后追加节点不打扰它们。
     const notifyOn = localStorage.getItem(KEY_NOTIFY) === "1";
-    el.settingsInner.innerHTML = `${sectionMarkup(
-      "服务",
-      `<div class="card">
-        <div class="row">
-          <div class="row-main">
-            <div class="row-label" data-tip="回复完成 / 出错 / 任务单待你处理时提醒；窗口正看着那个会话就不打扰。">桌面通知</div>
-            <div class="row-hint" id="svc-notify-hint" hidden></div>
+    el.settingsInner.insertAdjacentHTML(
+      "beforeend",
+      `${sectionMarkup(
+        "服务",
+        `<div class="card">
+          <div class="row">
+            <div class="row-main">
+              <div class="row-label" data-tip="回复完成 / 出错 / 任务单待你处理时提醒；窗口正看着那个会话就不打扰。">桌面通知</div>
+              <div class="row-hint" id="svc-notify-hint" hidden></div>
+            </div>
+            <div class="row-control">
+              ${switchMarkup(notifyOn, { label: "桌面通知", attrs: 'data-notify-switch' })}
+            </div>
           </div>
-          <div class="row-control">
-            ${switchMarkup(notifyOn, { label: "桌面通知", attrs: 'data-notify-switch' })}
+          <div class="divider"></div>
+          ${rowMarkup(
+            "鉴权",
+            // 悬停挂在「鉴权」两个字上：这一行的状态（本机无需配置）本身不需要解释，
+            // 用户真正要问的是"那手机怎么连"——扫码配对走的就是同一套凭据。
+            "扫码配对用的就是这一项：手机 App 扫配对码换一枚设备凭据，不用把令牌抄进手机；本机浏览器直接从这台电脑打开，也不需要令牌。",
+            `<span class="kv" id="svc-auth">…</span>`,
+          )}
+        </div>`,
+      )}
+      ${sectionMarkup(
+        "运行时",
+        `<div class="card" id="runtime-card">
+          ${rowMarkup(
+            "Node 服务",
+            "桌面壳拉起来的那个进程。停掉之后手机连接、提醒、例行任务都会断；历史不会丢，启动即可恢复。",
+            `<div class="runtime-actions">
+               <span class="kv" id="runtime-state">读取中…</span>
+               <button class="btn-primary" type="button" id="runtime-start" hidden>启动</button>
+               <button class="ghost" type="button" id="runtime-restart" hidden>重启</button>
+               <button class="ghost is-danger" type="button" id="runtime-stop" hidden>停止</button>
+             </div>`,
+          )}
+          <div class="divider" id="autostart-divider" hidden></div>
+          <div class="row" id="autostart-row" hidden>
+            <div class="row-main">
+              <div class="row-label" data-tip="登录 Windows 时自动启动 Selenite；服务仍由壳拉起，和这里的起停互不影响。">开机自启</div>
+            </div>
+            <div class="row-control">
+              ${switchMarkup(false, { label: "开机自启", attrs: "data-autostart-switch" })}
+            </div>
           </div>
-        </div>
-        <div class="divider"></div>
-        ${rowMarkup(
-          "鉴权",
-          // 悬停挂在「鉴权」两个字上：这一行的状态（本机无需配置）本身不需要解释，
-          // 用户真正要问的是"那手机怎么连"——扫码配对走的就是同一套凭据。
-          "扫码配对用的就是这一项：手机 App 扫配对码换一枚设备凭据，不用把令牌抄进手机；本机浏览器直接从这台电脑打开，也不需要令牌。",
-          `<span class="kv" id="svc-auth">…</span>`,
-        )}
-      </div>`,
-    )}
-    ${sectionMarkup(
-      "运行时",
-      `<div class="card" id="runtime-card">
-        ${rowMarkup(
-          "Node 服务",
-          "桌面壳拉起来的那个进程。停掉之后手机连接、提醒、例行任务都会断；历史不会丢，启动即可恢复。",
-          `<div class="runtime-actions">
-             <span class="kv" id="runtime-state">读取中…</span>
-             <button class="btn-primary" type="button" id="runtime-start" hidden>启动</button>
-             <button class="ghost" type="button" id="runtime-restart" hidden>重启</button>
-             <button class="ghost is-danger" type="button" id="runtime-stop" hidden>停止</button>
-           </div>`,
-        )}
-        <div class="divider" id="autostart-divider" hidden></div>
-        <div class="row" id="autostart-row" hidden>
-          <div class="row-main">
-            <div class="row-label" data-tip="登录 Windows 时自动启动 Selenite；服务仍由壳拉起，和这里的起停互不影响。">开机自启</div>
-          </div>
-          <div class="row-control">
-            ${switchMarkup(false, { label: "开机自启", attrs: "data-autostart-switch" })}
-          </div>
-        </div>
-      </div>`,
-    )}`;
-    // 供应商与默认模型已拆到「模型」页（2026-11-09）：服务页只留服务自身的状态与开关。
+        </div>`,
+      )}
+      ${sectionMarkup(
+        "关于",
+        `<div class="card">
+          ${rowMarkup("Selenite", "一个人用的 Agent。记录是重点场景，但不是边界。", `<span class="kv">0.1.0</span>`)}
+          <div class="divider"></div>
+          ${rowMarkup("界面", "与手机端同一套配色；改完刷新就生效，没有构建步骤。", `<span class="kv">web/</span>`)}
+        </div>`,
+      )}`,
+    );
     // 通知开关（批次二）：开的时候才请求系统权限；被拒就退回关闭并提示
     const notifySwitch = el.settingsInner.querySelector("[data-notify-switch]");
     notifySwitch?.addEventListener("click", async () => {
@@ -606,6 +663,8 @@ async function renderSettings() {
       "明细",
       `<div class="card use-detail" id="use-detail"><div class="use-loading">读取中…</div></div>`,
     )}`;
+    // 工具调用统计已挪到「设置 → 工具」（2026-11-17 用户拍板：用量统一放在工具页，
+    // 用量页只留模型 token 三张卡）。端点 /agent/tool-usage 保留，工具页与人设页在读。
     void loadUsagePage();
   } else if (page === "models") {
     // 模型页（2026-11-09 从服务页拆出）：默认模型行 + 供应商双栏。
@@ -687,38 +746,6 @@ async function renderSettings() {
     el.settingsInner.innerHTML = pageA ? memorySettingsMarkup() : memorySettingsMarkupLegacy();
     if (pageA) void wireMemorySettings();
     else void wireMemorySettingsLegacy();
-  } else if (page === "partners") {
-    // 2026-11-14 C 版：列表点进去 = 换个页（#/settings/partners/<id>），不再开弹窗。
-    // 弹窗要塞下「它是谁 + 岗位 + 能力 + 档案」四段，只能滚两屏；页面才有地方。
-    const profileId = currentPartnerProfileId();
-    // 普通助手是全局一份人设，不是执事档案：不请求 /partners/worker。
-    if (profileId === "worker") {
-      void renderWorkerProfilePage();
-      replayPageEnter();
-      return;
-    }
-    if (profileId) {
-      void renderPartnerProfilePage(profileId);
-      replayPageEnter();
-      return;
-    }
-    el.settingsInner.innerHTML = sectionMarkup(
-      "人设",
-      `<div class="pt-head">
-        <div class="row-main">
-          <div class="set-card-title" data-tip="一个执事一份档案：点进去改头像、写人设、定岗位、看能力与档案，一页到底。">总管与执事</div>
-        </div>
-        <button class="btn-primary" type="button" id="partner-add">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
-          新建执事
-        </button>
-      </div>
-      <div class="pt-list" id="partner-list">
-        <div class="set-hint">读取中…</div>
-      </div>`,
-    );
-    document.getElementById("partner-add")?.addEventListener("click", () => openCreatePartnerModal());
-    void loadPartners();
   } else if (page === "skills") {
     el.settingsInner.innerHTML = `${sectionMarkup(
       "技能",
@@ -757,16 +784,9 @@ async function renderSettings() {
       if (button) applySkillAdvice();
     });
     void loadSkills();
-  } else {
-    el.settingsInner.innerHTML = sectionMarkup(
-      "关于",
-      `<div class="card">
-        ${rowMarkup("Selenite", "一个人用的 Agent。记录是重点场景，但不是边界。", `<span class="kv">0.1.0</span>`)}
-        <div class="divider"></div>
-        ${rowMarkup("界面", "与手机端同一套配色；改完刷新就生效，没有构建步骤。", `<span class="kv">web/</span>`)}
-      </div>`,
-    );
   }
+  // 刻意没有兜底 else：currentSettingsPage() 只会返回上面这些 id（未知 hash 落「外观」）。
+  // 旧的「未知页显示关于」在 2026-11-18 关于并入「本机」后不再成立，留着反而骗人。
 
   replayPageEnter();
 }

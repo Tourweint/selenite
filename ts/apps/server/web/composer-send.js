@@ -8,13 +8,15 @@
  */
 
 import { renderApprovalCard } from "./approval-card.js";
+import { chatProjectPayload, clearChatProject } from "./chat-project.js";
 import { addError, addNotice, attachUsage, fileChangeCollector, hideChatError, maybeNotify, mountFileSummary, scrollToEnd, syncCtxMeter } from "./chat-notice.js";
-import { addMessage, syncEditEntry } from "./chat-thread.js";
+import { addMessage, stampMessageClock, syncEditEntry } from "./chat-thread.js";
 import { closeChatArchiveConfirm, loadChats, renderChats } from "./chats-list.js";
 import { KEY_CONV, el } from "./dom.js";
 import { renderMarkdown, syncDelegateHint } from "./markdown.js";
 import { request } from "./net.js";
-import { syncChiefDot } from "./partners-status.js";
+import { parsePartnerExternalId } from "./partner-sessions.js";
+import { partnerDisplayName, syncChiefDot } from "./partners-status.js";
 import { resize } from "./plus-menu.js";
 import { currentThinking, setThinkingLevel } from "./shell.js";
 import { state } from "./state.js";
@@ -143,7 +145,16 @@ async function send(text, images = [], files = []) {
   const firstTurn = !el.thread.querySelector(".msg");
   addMessage("user", text, Date.now(), images, { fresh: true, files });
   if (firstTurn) {
-    el.title.textContent = (text || files[0]?.name || "图片").replace(/\s+/g, " ").slice(0, 40);
+    const label = (text || files[0]?.name || "图片").replace(/\s+/g, " ").slice(0, 40);
+    const parsed = parsePartnerExternalId(state.conversationId);
+    if (parsed?.role === "side") {
+      // 副会话顶栏是「人设名 · 会话标题」：首句只换标题部分，别把人设前缀冲掉
+      // （canonical 有 loadRoster 兜底，副会话没有，必须在这里保住）。
+      el.title.textContent = `${partnerDisplayName(parsed.partnerId)} · ${label}`;
+    } else if (parsed?.role !== "canonical") {
+      // canonical 保持现状不动；worker / chief / 无 partner 维持原逻辑
+      el.title.textContent = label;
+    }
   }
   // 刚发出的这条就是最后一句话：编辑入口跟上去（messageId 在点的时候再补）
   syncEditEntry();
@@ -195,16 +206,10 @@ async function send(text, images = [], files = []) {
     segmentClosed = true;
   };
 
-  // 思考折叠卡（批次一，对齐 cindy ThinkingCard）：全态默认折叠，
-  // 流式中计时跳秒，正文开始后定格。thinking 增量都往同一张卡里追加。
-  let thinkEl = null;
-  let thinkSummary = null;
-  let thinkLabel = null;
-  let thinkBody = null;
-  let thinkStartMs = 0;
-  let thinkLastMs = 0;
-  let thinkTimer = 0;
-  let answered = false;
+  // 思考块（2026-11-17 用户口径）：不再是消息顶上那张展开式折叠卡，
+  // 而是和工具同款的一枚灰块——位置就是它真正发生的地方，正文进详情面板，
+  // 主界面只写「思考」，不写秒数（和工具块同一条规矩）。
+  let think = null;
 
   // 工具流：有工具才建（第一只工具动手时）。它把灰块插在 .flow 里，
   // 顺序就是"话 → 块 → 话"；主界面不写步数/耗时，细节点块看（tool-chips.js）。
@@ -214,13 +219,16 @@ async function send(text, images = [], files = []) {
     return work;
   };
   /**
-   * 工具要动手了：当前这段话封口，灰块接在它后面。
+   * 要动手 / 要动脑了（工具、派活、思考）：当前这段话封口，灰块接在它后面。
    * 不再把中间话折进面板（批 32 的「只留结尾」在 E1 下退役）——
    * E1 要的就是"说过的话留在正文、动手缩成小块"的交替阅读。
    */
-  const breakForTool = () => {
+  const breakForWork = () => {
+    // 真动手了就不再算"在想"：思考块在这一刻定格，用时只算思考本身，
+    // 不把后面的工具执行时间也算进去（不然一枚"思考 40s"其实是慢在工具上）。
+    endThink();
     ensureWork();
-    // 连续动第二次手（中间没说话）：留在同一组灰块里，别把一动手拆成一行一枚。
+    // 连续动第二次（中间没说话）：留在同一组灰块里，别把一动手拆成一行一枚。
     if (segmentClosed) return;
     closeSegment();
     // 另起一组：start() 的灰块接在这段话后面。
@@ -246,38 +254,17 @@ async function send(text, images = [], files = []) {
     }
     return entry;
   };
-  const ensureThinkCard = () => {
-    if (thinkEl) return;
-    thinkEl = document.createElement("details");
-    thinkEl.className = "think";
-    thinkEl.dataset.live = "1";
-    thinkSummary = document.createElement("summary");
-    // 彗星环 + 扫光文案（2026-11-13，对齐 ZCode 的"工作中"）：只有运行中才转 / 扫，
-    // 定格后收成一行静态的"已思考 Ns"，不在已完成的卡上继续动。
-    const orb = document.createElement("span");
-    orb.className = "think-orb";
-    orb.setAttribute("aria-hidden", "true");
-    thinkLabel = document.createElement("span");
-    thinkLabel.className = "think-label";
-    thinkLabel.textContent = "思考中…";
-    thinkSummary.append(orb, thinkLabel);
-    thinkBody = document.createElement("div");
-    thinkBody.className = "think-body";
-    thinkEl.append(thinkSummary, thinkBody);
-    turn.root.prepend(thinkEl);
-    thinkStartMs = Date.now();
-    thinkTimer = setInterval(() => {
-      if (thinkEl && !answered) {
-        thinkLabel.textContent = `思考中… ${Math.round((Date.now() - thinkStartMs) / 1000)}s`;
-      }
-    }, 500);
+  /** 思考开始：当前话段封口，思考块接在它后面（和工具动手同一套排序规则）。 */
+  const beginThink = () => {
+    if (think) return;
+    breakForWork();
+    think = ensureWork().think();
   };
-  const endThinkCard = () => {
-    if (!thinkEl || answered) return;
-    answered = true;
-    clearInterval(thinkTimer);
-    thinkEl.dataset.live = "0";
-    thinkLabel.textContent = `已思考 ${Math.max(1, Math.round((thinkLastMs - thinkStartMs) / 1000))}s`;
+  /** 思考定型：补上「用时」，正文留在详情里；一路没等到正文的也照实收尾。 */
+  const endThink = () => {
+    if (!think) return;
+    think.finish();
+    think = null;
   };
 
   let answer = "";
@@ -335,6 +322,8 @@ async function send(text, images = [], files = []) {
         } else if (event.type === "done") {
           // 补帧拿到的 done 也算收尾：补上用时脚注，断线重连后这条仍有耗时
           attachUsage(turn.root, event.usage || { input: 0, output: 0, cacheRead: 0 }, Date.now() - turnStartMs);
+          // 收尾时刻（2026-11-17）：和主链路一致，补帧到的 done 也把"几点答完"落上去
+          stampMessageClock(turn.root, Date.now());
         } else if (event.type === "delegate") {
           applyTicketEvent(event);
         }
@@ -350,7 +339,7 @@ async function send(text, images = [], files = []) {
       body: JSON.stringify({
         ...(state.conversationId
           ? { conversationId: state.conversationId }
-          : { chatKind: state.chatKind === "chief" ? "chief" : "worker" }),
+          : { chatKind: state.chatKind === "chief" ? "chief" : "worker", ...chatProjectPayload() }),
         // 有附件才用分段数组；纯文本仍发字符串（老形状，服务端 union 兼容）
         messages: [
           {
@@ -418,6 +407,8 @@ async function send(text, images = [], files = []) {
             state.conversationId = event.conversationId;
             streamConv = event.conversationId;
             localStorage.setItem(KEY_CONV, event.conversationId);
+            // 会话已落盘：cwd 定死了，「选项目」pill 收起来（2026-11-17）
+            clearChatProject();
             renderChats();
             // 新会话（或重启后的旧会话）要立刻出现在侧栏里——
             // 以前只靠页面加载时拉一次，新建会话要等到重载才可见，置顶/重命名都够不着
@@ -425,11 +416,9 @@ async function send(text, images = [], files = []) {
             // 新会话建好了，把当前思考档补发给它（off 是服务端默认，不用发）
             if (currentThinking() !== "off") void setThinkingLevel(currentThinking());
           } else if (event.type === "thinking") {
-            // 思考正文增量（批次一）：进折叠卡。占位行没有了——
-            // 「在想」这件事由思考卡自己的表头表达（2026-11-07）
-            ensureThinkCard();
-            thinkLastMs = Date.now();
-            thinkBody.textContent += event.text || "";
+            // 思考正文增量：进思考块（和工具同款灰块），详情里滚动看全文
+            beginThink();
+            think.append(event.text || "");
             if (state.stick) scrollToEnd();
           } else if (event.type === "notice") {
             // 系统提示行（2026-11-07 消息即引导）：插话/排队的诚实回执。
@@ -439,15 +428,15 @@ async function send(text, images = [], files = []) {
             // 工具动过手之后来的第一句话：另起一段正文，接在灰块后面。
             ensureSegment();
             answer += event.text;
-            endThinkCard();
+            endThink();
             schedule();
           } else if (event.type === "progress") {
-            // 「在想」由思考卡表头表达；「在动手」由工具灰块表达。
-            // 这里不再插占位行——两处表头已经是同一件事的第二份说法。
+            // 「在想」由思考块表达（跑动中的 accent + 扫光）；「在动手」由工具灰块表达。
+            // 这里不再插占位行——同一件事不给第二份说法。
           } else if (event.type === "tool") {
             if (event.status === "start") {
               // 工具动手：当前话段封口，灰块接在它后面（话留在正文，不折叠）。
-              breakForTool();
+              breakForWork();
               ensureWork().start(event.name, event.label, event.args);
             } else {
               ensureWork().end(event.name, event.ok !== false, event.output, event.diff);
@@ -462,7 +451,7 @@ async function send(text, images = [], files = []) {
             // 派活也是一枚灰块：和工具在同一组里，不另起一行飘在正文上方。
             // 行的生死跟 phase 走：终态帧（done / needs_you / aborted / failed）
             // 一定有一帧，到了就收行；还在跑的由收尾 handoff 兜底（见 delegateRows）。
-            breakForTool();
+            breakForWork();
             const row = delegateRowOf(event);
             row.setLabel(`${event.done}/${event.total} ${event.current || event.lastAction || ""}`.trim());
             if (event.phase === "done" || event.phase === "needs_you") {
@@ -507,6 +496,9 @@ async function send(text, images = [], files = []) {
             }
             // 只落用时；模型没回 usage 的轮次至少还有"多久"这一项，不是一片空白。
             attachUsage(turn.root, event.usage || { input: 0, output: 0, cacheRead: 0 }, Date.now() - turnStartMs);
+            // 收尾时刻（2026-11-17）：脚注最右那枚 `14:03` 的回答侧就是这里写的；
+            // 用时仍按客户端墙钟算，与历史里服务端的 endedAt 口径一致（at + durationMs）。
+            stampMessageClock(turn.root, Date.now());
             void syncCtxMeter();
           } else if (event.type === "unanswered") {
             // 后端明确说「这次没能生成回复」：用它的文案与脱敏 detail（批 32），
@@ -542,8 +534,7 @@ async function send(text, images = [], files = []) {
   } finally {
     setSending(false);
     caret?.remove();
-    endThinkCard();
-    clearInterval(thinkTimer);
+    endThink();
     if (state.stopRequested) {
       // 人的明确中断：给一行痕迹，区别于"模型自己没话说"（批次一）
       const note = document.createElement("div");

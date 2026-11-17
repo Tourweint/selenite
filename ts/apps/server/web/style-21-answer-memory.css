@@ -29,8 +29,8 @@
   border-radius: var(--r-lg) var(--r-lg) var(--r-lg) var(--r-sm);
   font-size: 14.5px; line-height: 1.6;
 }
-/* 思考卡与工具块跟着气泡的宽度走，左沿才对得齐；不跟就成了一条比气泡宽的黑边 */
-[data-answer-bubble="1"] .msg.assistant .think,
+/* 工具块（2026-11-17 起思考块也在这个容器里）跟着气泡的宽度走，左沿才对得齐；
+   不跟就成了一条比气泡宽的黑边 */
 [data-answer-bubble="1"] .msg.assistant .tchips-wrap { max-width: var(--bubble-w, 80%); }
 /* 脚注（复制 / 用时）贴着气泡内文字的左沿，而不是气泡外框的左沿 */
 [data-answer-bubble="1"] .msg.assistant .msg-foot { margin-left: 14px; }

@@ -97,7 +97,9 @@ export function buildDetailCard(spec, { onClose } = {}) {
   const state = el(
     "span",
     "tdetail-state",
-    spec.state === "run" ? "运行中" : spec.state === "err" ? "失败" : spec.state === "back" ? "后台继续" : "完成",
+    spec.state === "run"
+      ? spec.kind === "think" ? "思考中" : "运行中"
+      : spec.state === "err" ? "失败" : spec.state === "back" ? "后台继续" : "完成",
   );
   const close = el("button", "tdetail-close", "×");
   close.type = "button";
@@ -117,11 +119,27 @@ export function buildDetailCard(spec, { onClose } = {}) {
     rows.append(row);
   };
   const args = String(spec.args || "").trim();
-  // read/write 这类工具的 args 是 JSON，不假装它是 shell 命令。
-  addRow(/^[{[]/.test(args) ? "参数" : "命令", spec.command || args || spec.target);
+  // 思考块没有命令：正文就是它本身，一行行数对它没意义。
+  if (spec.kind !== "think") {
+    // read/write 这类工具的 args 是 JSON，不假装它是 shell 命令。
+    addRow(/^[{[]/.test(args) ? "参数" : "命令", spec.command || args || spec.target);
+  }
   addRow("用时", spec.duration);
   addRow("改动", spec.diffSummary);
   if (rows.children.length) card.append(rows);
+
+  if (spec.kind === "think") {
+    // 思考正文：和输出同一套限高，边想边长也只动面板内部。
+    // 小标题用「过程」而不是「思考」——卡头已经写着思考，重复一遍只是噪音。
+    card.append(el("div", "tdetail-label", "过程"));
+    const pre = el(
+      "pre",
+      spec.output ? "tdetail-pre" : "tdetail-pre tdetail-wait",
+      spec.output || (spec.state === "run" ? "还在想，内容出来会补在这里。" : "这段没留下正文。"),
+    );
+    card.append(pre);
+    return card;
+  }
 
   if (spec.diff) {
     card.append(el("div", "tdetail-label", "diff"));
@@ -284,6 +302,28 @@ export function createToolChips(host, options = {}) {
         renderVisibility();
       };
       chip.__setDetail = (patch) => Object.assign(record, patch);
+      // 思考正文在流：只改已打开面板里的那段文本，不重建卡——
+      // 重建会把滚动位置和用户选中的文字一起冲掉。
+      chip.__streamText = (text) => {
+        record.output = text;
+        if (openChip !== chip) return;
+        const pre = (openPanel || popover)?.querySelector(".tdetail-pre");
+        if (!pre) return;
+        pre.classList.remove("tdetail-wait");
+        pre.textContent = text || "还在想，内容出来会补在这里。";
+        pre.scrollTop = pre.scrollHeight; // 边想边看最新一句
+      };
+      // 已打开的面板按最新 record 重画一次（终态补用时；流式中走 __streamText）。
+      chip.__refresh = () => {
+        if (openChip !== chip) return;
+        const card = buildDetailCard(record, { onClose: closeDetail });
+        if (openPanel) {
+          openPanel.querySelector(".tdetail-card")?.replaceWith(card);
+        } else if (popover) {
+          popover.querySelector(".tdetail-card")?.replaceWith(card);
+          placePopover(chip, popover);
+        }
+      };
       line.append(chip);
       chips.push(chip);
       specs.set(record.id || String(chips.length), record);
@@ -303,15 +343,9 @@ export function createToolChips(host, options = {}) {
       if (!chip) return;
       Object.assign(chip.__spec, patch);
       chip.dataset.state = patch.state || (patch.ok === false ? "err" : "ok");
-      if (openChip === chip) {
-        const card = buildDetailCard(chip.__spec, { onClose: closeDetail });
-        if (openPanel) {
-          openPanel.querySelector(".tdetail-card")?.replaceWith(card);
-        } else if (popover) {
-          popover.querySelector(".tdetail-card")?.replaceWith(card);
-          placePopover(chip, popover);
-        }
-      }
+      // 详情的状态文案读 spec.state：补回去，别让块上画着"失败"、面板里还写"运行中"。
+      chip.__spec.state = chip.dataset.state;
+      chip.__refresh?.();
     },
     /** 中间话折走后清空：下一段重新开始排块。 */
     reset() {

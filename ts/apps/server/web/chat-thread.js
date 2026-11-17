@@ -9,13 +9,16 @@
 
 import { approvalCards } from "./approval-card.js";
 import { clearPendingAttachments, openLightbox } from "./attachments.js";
+import { branchErrorText } from "./branch.js";
 import { hideChatError, scrollToEnd } from "./chat-notice.js";
 import { openChat, openConversation } from "./chat-open.js";
 import { loadChats } from "./chats-list.js";
 import { setSending } from "./composer-send.js";
 import { el } from "./dom.js";
 import { renderMarkdown } from "./markdown.js";
+import { setMessageClock } from "./msg-clock.js";
 import { request } from "./net.js";
+import { parsePartnerExternalId } from "./partner-sessions.js";
 import { syncEmptyMark } from "./partners-status.js";
 import { updateHomeMode } from "./shell.js";
 import { state } from "./state.js";
@@ -49,6 +52,22 @@ function hideEmpty() {
   if (el.empty && el.empty.isConnected) el.empty.remove();
 }
 
+/**
+ * 这一屏能不能从回答分支（2026-11-17 批3b）：
+ * worker / chief 显示；执事 canonical / side 仅插件开时显示；group / task- 等不显示。
+ */
+function canBranchHere() {
+  const id = String(state.conversationId || "");
+  if (!id) return false;
+  const parsed = parsePartnerExternalId(id);
+  if (parsed) {
+    if (parsed.role !== "canonical" && parsed.role !== "side") return false;
+    return state.sideSessionsEnabled === true;
+  }
+  if (id.startsWith("task-")) return false;
+  return true;
+}
+
 function addMessage(role, text, at, images = [], options = {}) {
   hideEmpty();
   // 2026-11-15 作者标记：非主人来源（`author.kind === "partner"`）不是"我说的话"，
@@ -66,7 +85,8 @@ function addMessage(role, text, at, images = [], options = {}) {
   // 时间戳只留给 `data-at`（搜索定位要用），不再挂 title 弹悬停框。
   if (at) wrap.dataset.at = String(at);
 
-  // 助手那一侧多一层「工作过程」（2026-11-07）：思考卡 + 工具步骤 + 派活。
+  // 助手那一侧多一层「工作过程」（2026-11-07）：思考块 + 工具步骤 + 派活，
+  // 2026-11-17 起思考也是同一排灰块（见 tool-flow.js）。
   // 用户消息没有这一层。刻意**不在建消息时就插占位块**——没有工具的轮次
   // 不该多出一条空壳（旧 .acts 靠 :empty 隐藏，这里直接不建）。
   // 用户消息的附件（图片 + 文件）在文字**上方**（2026-11-13 用户口径）：
@@ -83,9 +103,15 @@ function addMessage(role, text, at, images = [], options = {}) {
     wrap.append(body);
   }
 
-  // 回答底下的一条脚注（2026-11-06 建这条线；2026-11-08 图标化）：复制图标 · 用时 · 完成时间。
+  // 消息时刻（2026-11-17 晚间口径）：只留回答的收尾时刻，且在脚注里 hover 才出现。
+  // 用户自己的消息不再显示时刻（气泡下方那一行已经够挤，发消息的人也不关心自己几点发的）。
+  // 来信有自己的抬头时间（letter-when），不重复。
+  let clock = null;
+
+  // 回答底下的一条脚注（2026-11-06 建这条线；2026-11-08 图标化；2026-11-17 定稿）：
+  // 复制图标 · 收尾时刻 · 用时，三项都只在 hover / 聚焦时出现，平时整条脚注是空的。
   // 以前复制按钮浮在右上角、耗时单独 absolute 在右边，两者都对不齐正文；
-  // 现在统一收进正文下方的 .msg-foot，hover 才出现。复制从文字改 Lucide 图标
+  // 现在统一收进正文下方的 .msg-foot。复制从文字改 Lucide 图标
   // （2026-11-08 用户口径：脚注要简洁，能图标就别文字），反馈用图标互换。
   let foot = null;
   if (role === "assistant") {
@@ -100,6 +126,10 @@ function addMessage(role, text, at, images = [], options = {}) {
     );
     const ICON_COPIED = footSvg('<path d="M20 6 9 17l-5-5"/>');
     const ICON_FAILED = footSvg('<path d="M18 6 6 18"/><path d="m6 6 12 12"/>');
+    // 从这里分支（2026-11-17 批3b）：Lucide git-branch，与复制同一套脚注图标
+    const ICON_BRANCH = footSvg(
+      '<line x1="6" x2="6" y1="3" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>',
+    );
 
     const copy = document.createElement("button");
     copy.type = "button";
@@ -129,6 +159,58 @@ function addMessage(role, text, at, images = [], options = {}) {
       }, 1200);
     });
     foot.append(copy);
+
+    // 「从这里分支」：只在有正文的回答、且这一屏支持分支时出现（空壳 / 群 / task 不挂）。
+    if (text.trim() && canBranchHere()) {
+      const branch = document.createElement("button");
+      branch.type = "button";
+      branch.className = "branch-btn";
+      branch.setAttribute("aria-label", "从这里分支");
+      branch.title = "从这里分支";
+      branch.innerHTML = ICON_BRANCH;
+      branch.addEventListener("click", async () => {
+        if (branch.disabled) return;
+        branch.disabled = true;
+        try {
+          const id = wrap.dataset.messageId || (await resolveMessageId(wrap));
+          if (!id) {
+            toast("这条回答还没落盘，稍后再试");
+            return;
+          }
+          const response = await request(
+            `/api/v1/agent/chat/${encodeURIComponent(state.conversationId)}/branches`,
+            {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ atMessageId: id }),
+            },
+          );
+          const data = await response.json().catch(() => ({}));
+          if (!response.ok || !data.conversationId) {
+            toast(branchErrorText(data.error));
+            return;
+          }
+          toast("已另开一支");
+          void openChat(data.conversationId);
+          void loadChats().catch(() => undefined);
+        } catch (error) {
+          toast(error.message === "forbidden" ? "鉴权失败" : branchErrorText(""));
+        } finally {
+          branch.disabled = false;
+        }
+      });
+      foot.append(branch);
+    }
+
+    // 回答的收尾时刻（2026-11-17 晚间口径）：紧挨复制图标，鼠标移到这条回答上才淡入，
+    // 不常显、不钉最右。流式期间还不知道几点答完，先留空节点，
+    // `done` 到了由 composer-send 调 stampMessageClock 落笔。
+    clock = document.createElement("time");
+    clock.className = "msg-clock";
+    clock.hidden = true;
+    foot.append(clock);
+    const clockAt = Number(options.clockAt);
+    if (Number.isFinite(clockAt) && clockAt > 0) setMessageClock(clock, clockAt);
   }
 
   // 前插历史（2026-11-13 上滑加载）走 `options.parent`：先渲进 DocumentFragment 再整体插进
@@ -136,7 +218,16 @@ function addMessage(role, text, at, images = [], options = {}) {
   (options.parent || el.thread).append(wrap);
   updateHomeMode();
   if (!options.parent && state.stick) scrollToEnd();
-  return { root: wrap, body, foot };
+  return { root: wrap, body, foot, clock };
+}
+
+/**
+ * 回答的收尾时刻（2026-11-17）：流式期间只有开始时间，拿到 `done` 才补上"几点答完"。
+ * 幂等——重放 / 补帧重复调用只是把同一个值再写一遍。
+ */
+function stampMessageClock(root, at = Date.now()) {
+  const clock = root?.querySelector(".msg-clock") ?? null;
+  return setMessageClock(clock, at);
 }
 
 /* ── 来信（2026-11-15 作者标记方案 §3.3）──────────────────
@@ -293,8 +384,10 @@ function syncEditEntry() {
 }
 
 /**
- * 现场刚发出去的消息没有 messageId（SSE 不带它，契约没动）。点编辑时再拉一次历史，
- * 按"从末尾对齐"把 id 写回所有用户气泡——limit 截断的是最早的部分，末尾一定对得上。
+ * 现场刚发出去的消息没有 messageId（SSE 不带它，契约没动）。点编辑 / 分支时再拉一次历史，
+ * 按"从末尾对齐"把 id 写回对风气泡——limit 截断的是最早的部分，末尾一定对得上。
+ * 2026-11-17 批3b：从"只回填 user"扩成按角色回填（user / assistant 各自对齐）；
+ * `.msg.letter`（来信）不是 `.msg.user`、且来信本身没有 id，两边自然排除。
  */
 async function resolveMessageId(root) {
   const conversationId = state.conversationId;
@@ -306,13 +399,16 @@ async function resolveMessageId(root) {
     );
     if (!response.ok) return "";
     const data = await response.json();
-    const userMessages = (data.messages || []).filter((message) => message.role === "user");
-    const roots = [...el.thread.querySelectorAll(".msg.user")];
-    const count = Math.min(roots.length, userMessages.length);
-    for (let offset = 1; offset <= count; offset += 1) {
-      const node = roots[roots.length - offset];
-      const message = userMessages[userMessages.length - offset];
-      if (node && message?.id) node.dataset.messageId = message.id;
+    const all = (data.messages || []).filter((message) => message.id);
+    for (const role of ["user", "assistant"]) {
+      const messages = all.filter((message) => message.role === role);
+      const roots = [...el.thread.querySelectorAll(`.msg.${role}`)];
+      const count = Math.min(roots.length, messages.length);
+      for (let offset = 1; offset <= count; offset += 1) {
+        const node = roots[roots.length - offset];
+        const message = messages[messages.length - offset];
+        if (node && message?.id) node.dataset.messageId = message.id;
+      }
     }
     return root.dataset.messageId || "";
   } catch {
@@ -477,4 +573,4 @@ async function waitEditedTurn(conversationId) {
   }
 }
 
-export { ATT_FILE_ICON, addMessage, clearThread, formatBytes, hideEmpty, mountMessageAttachments, openInlineEditor, resolveMessageId, startEditing, submitEdit, syncEditEntry, userActionsOf, waitEditedTurn };
+export { ATT_FILE_ICON, addMessage, clearThread, formatBytes, hideEmpty, mountMessageAttachments, openInlineEditor, resolveMessageId, stampMessageClock, startEditing, submitEdit, syncEditEntry, userActionsOf, waitEditedTurn };

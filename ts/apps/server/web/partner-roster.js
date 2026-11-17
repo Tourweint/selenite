@@ -12,12 +12,14 @@ import { scrollToEnd } from "./chat-notice.js";
 import { openChat } from "./chat-open.js";
 import { hideEmpty } from "./chat-thread.js";
 import { el } from "./dom.js";
+import { CS_ICONS } from "./icons.js";
 import { request } from "./net.js";
 import { openCreatePartnerModal } from "./partner-modals.js";
+import { openPartnerSessions } from "./partner-sessions-ui.js";
 import { loadRoster, paintBusyChip, partnerBusyOf, partnerDisplayName, rosterDomain } from "./partners-status.js";
 import { currentPartnerLineId, currentRoute, go } from "./route.js";
 import { openSecMenu, openMenuAt } from "./sec-menu.js";
-import { cs, drawerOpen, openDrawerAt, refreshCsDetail, renderCsPage } from "./settings-drawer.js";
+import { cs, csSvg, drawerOpen, openDrawerAt, refreshCsDetail, renderCsPage } from "./settings-drawer.js";
 import { updateHomeMode } from "./shell.js";
 import { state } from "./state.js";
 import { inShell, toast } from "./ui-atoms.js";
@@ -137,6 +139,24 @@ function renderRoster(partners, domainRows, box = el.partnerRoster) {
     busyChip.hidden = true;
     paintBusyChip(busyChip, busy);
     row.append(busyChip);
+
+    // 副会话选择器入口（2026-11-17 批2）：插件关时不渲染；点击不触发行本身的 openPartnerChat。
+    if (state.sideSessionsEnabled) {
+      const sessionsBtn = document.createElement("button");
+      sessionsBtn.type = "button";
+      sessionsBtn.className = "roster-sessions";
+      sessionsBtn.setAttribute("aria-label", "选择会话");
+      sessionsBtn.title = "选择会话";
+      sessionsBtn.append(csSvg(CS_ICONS.layers));
+      sessionsBtn.addEventListener("click", (event) => {
+        event.stopPropagation();
+        event.preventDefault();
+        openPartnerSessions(id);
+      });
+      // 回车落在按钮上时也别冒泡到行的 keydown（否则会连带打开 canonical）
+      sessionsBtn.addEventListener("keydown", (event) => event.stopPropagation());
+      row.append(sessionsBtn);
+    }
 
     const open = () => void openPartnerChat(id);
     row.addEventListener("click", open);

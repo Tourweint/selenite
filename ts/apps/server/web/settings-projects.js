@@ -357,11 +357,13 @@ function wireProjectActions(box) {
         [
           { label: "添加文件夹", action: "add-root" },
           { label: "重命名项目", action: "rename", separator: true },
+          { label: "合并到另一个项目", action: "merge" },
           { label: "归档项目", action: "archive", danger: true },
         ],
         (action) => {
           if (action === "add-root") openAddRootModal(id, name);
           if (action === "rename") openRenameProjectModal(id, name);
+          if (action === "merge") void confirmMergeProject(id, name);
           if (action === "archive") confirmArchiveProject(id, name);
         },
       );
@@ -614,7 +616,8 @@ async function doProjectAction(id, action) {
         ? "项目已恢复；它的会话仍在归档里，需要单独恢复"
         : "已更新",
     );
-    if (currentSettingsPage() === "archive") await loadArchivePage();
+    // 归档管理 2026-11-18 并进会话页：归档列表的刷新守卫跟着改认 chats
+    if (currentSettingsPage() === "chats") await loadArchivePage();
     else await loadProjectsSettings();
     void loadChats();
   } catch (error) {
@@ -657,7 +660,8 @@ function confirmArchiveProject(id, name) {
             ? `项目已归档，${archivedChats} 个会话一起归档`
             : "项目已归档（磁盘目录保留）",
         );
-        if (currentSettingsPage() === "archive") await loadArchivePage();
+        // 归档管理 2026-11-18 并进会话页：归档列表的刷新守卫跟着改认 chats
+    if (currentSettingsPage() === "chats") await loadArchivePage();
         else await loadProjectsSettings();
         void loadChats();
       } catch (error) {
@@ -679,7 +683,15 @@ function confirmArchiveProject(id, name) {
 function confirmDeleteProject(id, name) {
   openModal("删除项目登记", (body) => {
     body.innerHTML = `
-      <p class="modal-desc">永久删除「${esc(name)}」的<b>登记</b>。<b>磁盘上的目录和文件不动，记忆一条不删</b>；历史会话也不删，留在归档里（分组「项目已删除」）。挂着这个项目的执事会一并解除挂载。<b>登记删了不可恢复</b>——重新登记同一个目录会是一个新项目。</p>
+      <p class="modal-desc">永久删除「${esc(name)}」的<b>登记</b>。<b>磁盘上的目录和文件不动</b>；历史会话不删，留在归档里（分组「项目已删除」）。挂着这个项目的执事会一并解除挂载。<b>登记删了不可恢复</b>——重新登记同一个目录会是一个新项目。</p>
+      <div class="modal-field"><span>这个项目的记忆</span>
+        <select class="modal-input" id="proj-delete-memory">
+          <option value="keep">保留（成为孤儿记忆，之后可再迁走）</option>
+          <option value="archive">一并封存（不删，只是不再出现）</option>
+          <option value="move">迁移到另一个范围</option>
+        </select>
+      </div>
+      <select class="modal-input" id="proj-delete-target" hidden></select>
       <p class="modal-hint" id="proj-delete-hint"></p>
       <div class="modal-actions">
         <button class="ghost" type="button" data-modal-cancel>取消</button>
@@ -687,14 +699,52 @@ function confirmDeleteProject(id, name) {
       </div>`;
     const hint = body.querySelector("#proj-delete-hint");
     const confirm = body.querySelector("#proj-delete-confirm");
+    const memorySelect = body.querySelector("#proj-delete-memory");
+    const targetSelect = body.querySelector("#proj-delete-target");
     body.querySelector("[data-modal-cancel]")?.addEventListener("click", closeModal);
+
+    // 选「迁移」时才去读目标清单（少打一次请求；读失败也让用户能退回保留/封存）
+    memorySelect?.addEventListener("change", async () => {
+      if (!targetSelect) return;
+      if (memorySelect.value !== "move") {
+        targetSelect.hidden = true;
+        return;
+      }
+      targetSelect.hidden = false;
+      targetSelect.innerHTML = `<option value="">正在读取…</option>`;
+      try {
+        const response = await request("/api/v1/projects", { cache: "no-store" });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.message || String(response.status));
+        const rows = (Array.isArray(data.projects) ? data.projects : []).filter((project) => project.id !== id);
+        targetSelect.innerHTML = [
+          `<option value="global">我的记忆（全局）</option>`,
+          ...rows.map(
+            (project) => `<option value="${attr(`project:${project.id}`)}">${esc(project.name)}</option>`,
+          ),
+        ].join("");
+      } catch (error) {
+        targetSelect.innerHTML = `<option value="">读不到项目列表</option>`;
+        setModalHint(hint, `读不到项目列表：${error.message}`);
+      }
+    });
+
     confirm?.addEventListener("click", async () => {
       if (confirm.disabled) return;
+      const memory = memorySelect?.value || "keep";
+      const into = targetSelect?.value || "";
+      if (memory === "move" && !into) {
+        setModalHint(hint, "先选一个迁移目标（项目或我的记忆）");
+        return;
+      }
       confirm.disabled = true;
       try {
-        const response = await request(`/api/v1/projects/${encodeURIComponent(id)}`, {
-          method: "DELETE",
-        });
+        const query = new URLSearchParams({ memory });
+        if (memory === "move") query.set("into", into);
+        const response = await request(
+          `/api/v1/projects/${encodeURIComponent(id)}?${query.toString()}`,
+          { method: "DELETE" },
+        );
         const data = await response.json().catch(() => ({}));
         if (!response.ok) {
           setModalHint(hint, projectErrorText(data, response.status));
@@ -703,13 +753,21 @@ function confirmDeleteProject(id, name) {
         }
         closeModal();
         const detached = Number(data.detachedPartners) || 0;
+        const moved = Number(data.memory?.records) || 0;
+        const memoryNote =
+          memory === "move"
+            ? `记忆已迁移 ${moved} 条`
+            : memory === "archive"
+              ? "记忆已封存"
+              : "记忆保留为孤儿";
         toast(
           detached > 0
-            ? `登记已删除，${detached} 个执事解除挂载（磁盘与记忆保留）`
-            : "登记已删除（磁盘与记忆保留）",
+            ? `登记已删除，${detached} 个执事解除挂载（磁盘保留）· ${memoryNote}`
+            : `登记已删除（磁盘保留）· ${memoryNote}`,
         );
         // 入口只在归档页，但接线函数两页共用：按当前页刷新对应那份数据
-        if (currentSettingsPage() === "archive") await loadArchivePage();
+        // 归档管理 2026-11-18 并进会话页：归档列表的刷新守卫跟着改认 chats
+    if (currentSettingsPage() === "chats") await loadArchivePage();
         else await loadProjectsSettings();
         void refreshProjectPill();
       } catch (error) {
@@ -723,5 +781,87 @@ function confirmDeleteProject(id, name) {
     });
   });
 }
+
+/**
+ * 合并项目（2026-11-17 项目合并与记忆迁移）：把当前项目并进另一个**活**项目。
+ *
+ * 服务端顺序是「先搬后删」，跨库无事务；失败可能部分完成，但搬的动作幂等，
+ * 再点一次就能补齐。界面把这一点如实写在弹窗里（不假装是原子的）。
+ */
+async function confirmMergeProject(id, name) {
+  let targets = [];
+  try {
+    const response = await request("/api/v1/projects", { cache: "no-store" });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.message || String(response.status));
+    targets = (Array.isArray(data.projects) ? data.projects : []).filter((project) => project.id !== id);
+  } catch (error) {
+    toast(`读不到项目列表：${error.message}`);
+    return;
+  }
+  if (targets.length === 0) {
+    toast("没有别的项目可以合并（先建一个目标项目）");
+    return;
+  }
+  openModal("合并项目", (body) => {
+    body.innerHTML = `
+      <p class="modal-desc">把「${esc(name)}」并进另一个项目：<b>文件夹登记、会话归属、执事挂载、记忆全部转过去，然后删掉这个项目的登记</b>。磁盘目录一个都不动。</p>
+      <p class="modal-hint">跨三个库执行，不是一次原子操作；万一中途失败，再点一次就能补齐（已经搬过的不会重复搬）。</p>
+      <div class="modal-field"><span>并进</span>
+        <select class="modal-input" id="proj-merge-target">
+          ${targets
+            .map((project) => `<option value="${attr(project.id)}">${esc(project.name)}</option>`)
+            .join("")}
+        </select>
+      </div>
+      <p class="modal-hint" id="proj-merge-hint"></p>
+      <div class="modal-actions">
+        <button class="ghost" type="button" data-modal-cancel>取消</button>
+        <button class="modal-danger" type="button" id="proj-merge-confirm">合并</button>
+      </div>`;
+    const hint = body.querySelector("#proj-merge-hint");
+    const confirm = body.querySelector("#proj-merge-confirm");
+    const select = body.querySelector("#proj-merge-target");
+    body.querySelector("[data-modal-cancel]")?.addEventListener("click", closeModal);
+    confirm?.addEventListener("click", async () => {
+      if (confirm.disabled) return;
+      const into = select?.value || "";
+      if (!into) return;
+      confirm.disabled = true;
+      confirm.textContent = "合并中…";
+      try {
+        const response = await request(`/api/v1/projects/${encodeURIComponent(id)}/merge`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ into }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          setModalHint(hint, projectErrorText(data, response.status));
+          confirm.disabled = false;
+          confirm.textContent = "合并";
+          return;
+        }
+        closeModal();
+        toast(
+          `已合并：文件夹 ${Number(data.rootsMoved) || 0} 个、会话 ${Number(data.chatsRebound) || 0} 条、记忆 ${Number(data.memory?.records) || 0} 条`,
+        );
+        // 归档管理 2026-11-18 并进会话页：归档列表的刷新守卫跟着改认 chats
+    if (currentSettingsPage() === "chats") await loadArchivePage();
+        else await loadProjectsSettings();
+        void refreshProjectPill();
+      } catch (error) {
+        if (error.message === "forbidden") {
+          closeModal();
+          return;
+        }
+        setModalHint(hint, `没合并成：${error.message}`);
+        confirm.disabled = false;
+        confirm.textContent = "合并";
+      }
+    });
+  });
+}
+
 
 export { PROJECT_ERROR_TEXT, beginRootPathEdit, confirmArchiveProject, confirmDeleteProject, closeProjMenu, confirmRemoveRoot, doProjectAction, loadProjectsSettings, openAddRootModal, openProjMenu, projectCardHint, projectCardMarkup, projectErrorText, promoteRoot, renderProjectList, rootRowMarkup, saveRootPath, settingsWorkspace, wireProjectActions, wireWorkspaceRow, workspaceRowMarkup };

@@ -607,7 +607,7 @@ function ptBuildEditModal(body, partnerId, detail) {
 
       <div class="pt-seg">
         <div class="pt-seg-head">
-          <span class="pt-seg-title">例行任务</span>
+          <span class="pt-seg-title">定时任务</span>
           <button class="ghost" id="pt-routine-refresh" type="button">刷新</button>
         </div>
         <div class="pt-routine-list" id="pt-routine-list"><div class="set-hint">读取中…</div></div>

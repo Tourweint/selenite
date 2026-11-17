@@ -90,7 +90,8 @@
   color: var(--text); font-variant-numeric: tabular-nums;
 }
 .rm-row-main { flex: 1; min-width: 0; }
-.rm-row-text { font-size: 13.5px; font-weight: 500; color: var(--text); overflow-wrap: anywhere; }
+.rm-row-text { display: flex; align-items: center; gap: 2px; min-width: 0; font-size: 13.5px; font-weight: 500; color: var(--text); }
+.rm-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 2026-11-17：每行标出触发消息隐藏/可见，两类中途可辨。 */
 .rm-kind {
   display: inline-block; vertical-align: 1px; margin-left: 4px; padding: 1px 7px;
@@ -99,6 +100,17 @@
 .rm-kind-hidden { background: var(--accent-container); color: var(--on-accent-container); }
 .rm-kind-visible { background: var(--surface-low); color: var(--text-3); }
 .rm-row-meta { margin-top: 4px; font-size: 11.5px; color: var(--text-3); }
+/* 2026-11-17 定时任务重做：行里露出指令预览，点历史就地展开执行记录。 */
+.rm-instr {
+  margin-top: 3px; font-size: 11.5px; line-height: 1.5; color: var(--text-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.rm-runs { padding: 8px 16px 12px; border-top: 1px solid var(--line, var(--surface-low)); background: var(--surface-low); }
+.rm-run { display: flex; align-items: baseline; gap: 10px; padding: 4px 0; font-size: 11.5px; color: var(--text-2); }
+.rm-run + .rm-run { border-top: 1px dashed var(--line, rgba(127, 127, 127, .18)); }
+.rm-run-trigger { flex: none; color: var(--text-3); }
+.rm-run-summary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rm-run-time { flex: none; color: var(--text-3); font-variant-numeric: tabular-nums; }
 .rm-row.is-off .rm-when-time,
 .rm-row.is-off .rm-row-text { color: var(--text-3); font-weight: 400; }
 .rm-state {
@@ -107,12 +119,17 @@
   font-size: 11px; line-height: 1.4;
 }
 .rm-state.is-off { background: var(--surface-low); color: var(--text-3); }
-.rm-row-actions { flex: none; display: flex; align-items: center; gap: 6px; margin-left: 8px; }
+.rm-row-actions {
+  flex: none; display: flex; align-items: center; justify-content: flex-end;
+  flex-wrap: wrap; gap: 6px; row-gap: 4px; margin-left: 8px;
+}
 .rm-edit, .rm-del {
   flex: none; border: 1px solid var(--text-3); background: var(--card); padding: 6px 12px;
   font-size: 12px; font-weight: 500; color: var(--text-2); cursor: pointer; border-radius: var(--r-full);
 }
 .rm-edit:hover, .rm-del:hover { color: var(--text); background: var(--surface-low); border-color: var(--text); }
+.rm-edit:disabled { opacity: .45; cursor: default; }
+.rm-edit:disabled:hover { color: var(--text-2); background: var(--card); border-color: var(--text-3); }
 .rm-del:hover { color: var(--danger, #b4443c); border-color: currentColor; background: transparent; }
 .rm-empty { padding: 18px 16px; font-size: 12.5px; color: var(--text-3); }
 .rm-filter-bar {
@@ -134,6 +151,8 @@
 .modal-panel.modal-reminder .modal-primary:hover { opacity: .88; }
 .rm-form { display: flex; flex-direction: column; gap: 16px; }
 .rm-field { display: flex; flex-direction: column; gap: 7px; }
+.rm-textarea { min-height: 96px; resize: vertical; line-height: 1.6; padding: 10px 12px; }
+.rm-text-hint { margin-top: 2px; }
 .rm-field-label { font-size: 11.5px; color: var(--text-3); }
 .rm-subject { display: flex; flex-direction: column; gap: 6px; }
 .rm-subject-text { font-size: 13.5px; font-weight: 500; color: var(--text); overflow-wrap: anywhere; }
@@ -573,4 +592,39 @@
   .executor-card .row { flex-wrap: wrap; }
   .executor-model-row { flex-wrap: wrap; }
   .executor-model-box { flex: 1 1 100%; max-width: none; }
+}
+
+/* ── Agent 合并分区（2026-11-17）────────────────────────
+   左栏四个分区（人设 / 上下文 / 工具 / 派活）收成一行，内容顶部用这条四分段切换。
+   形态沿用抽屉档案分段（.cs-arch-tabs）的语言：浅底轨道 + 选中项卡片底；
+   宽度只包住四个 tab，不铺满内容列——设置页是一列行，铺满会读成筛选器。 */
+.set-tabs {
+  display: flex; gap: 2px; padding: 3px;
+  width: fit-content; max-width: 100%;
+  margin-bottom: 18px;
+  background: var(--surface-low);
+  border: 1px solid var(--card-border);
+  border-radius: var(--r-md);
+}
+.set-tab {
+  flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  height: 30px; padding: 0 18px;
+  border: 0; border-radius: calc(var(--r-md) - 2px);
+  background: transparent; color: var(--text-3);
+  font-size: 12.5px; white-space: nowrap; cursor: pointer;
+  transition: background .14s ease, color .14s ease;
+}
+.set-tab:hover { color: var(--text); }
+.set-tab[aria-selected="true"] {
+  background: var(--card); color: var(--text); font-weight: 500;
+  box-shadow: var(--shadow);
+}
+.set-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* tab 条占了 :first-child，第一节的“贴顶”要让给它下面的节（否则多出 18px 空档） */
+.set-tabs + .set-sec { padding-top: 0; }
+
+@media (max-width: 800px) {
+  .set-tabs { width: 100%; }
+  .set-tab { flex: 1 1 0; min-width: 0; padding: 0 8px; }
 }

@@ -380,6 +380,19 @@
       <!-- 对话现场快捷设置（2026-11-07 抽屉改造）：右上角图标按钮，点击从右侧滑入全高抽屉
            （首页四行 + 各二级页，见 app.js 渲染）。与 composer 模型 pill 共用同一套数据与渲染。 -->
       <div class="top-wrap">
+        <!-- 会话地图（2026-11-17 画板批）：这条会话的回合卡与分支。能力投影说没有时由
+             chat-map.js 收起（CHAT_MAP_ENABLED=false）。 -->
+        <button class="top-gear" id="chat-map-btn" type="button" aria-label="会话地图"
+                data-tip="会话地图：回合与分支">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="6" cy="6" r="2.4"/>
+            <circle cx="18" cy="6" r="2.4"/>
+            <circle cx="12" cy="18" r="2.4"/>
+            <path d="M8.4 6h7.2"/>
+            <path d="M7.2 8.2 10.8 15.8"/>
+            <path d="M16.8 8.2 13.2 15.8"/>
+          </svg>
+        </button>
         <button class="top-gear" id="chat-settings-btn" type="button" aria-expanded="false"
                 aria-label="对话设置">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -444,6 +457,19 @@
             </button>
             <div class="composer-pop plus-menu" id="composer-plus-menu" role="menu" hidden></div>
           </div>
+          <!-- 对话选项目（2026-11-17）：加号旁边。新建 worker 会话时点它选项目，
+               项目 = 这个会话的工作目录（项目主文件夹）；不选 = 跟随「当前项目」。
+               它只定 cwd，不定记忆注入——记忆看设置里勾选的项目。 -->
+          <div class="composer-wrap">
+            <button class="composer-pill project-pill" id="chat-project-pill" type="button" hidden
+                    aria-haspopup="menu" aria-expanded="false"
+                    data-tip="这个对话属于哪个项目（决定工作目录）">
+              <svg class="project-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+              <span class="project-pill-label" id="chat-project-pill-label">选项目</span>
+              <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+            </button>
+            <div class="composer-pop project-menu" id="chat-project-menu" role="menu" hidden></div>
+          </div>
         </div>
 
         <div class="composer-meta">
@@ -480,6 +506,49 @@
         </div>
       </div>
     </form>
+
+    <!-- 会话画板（2026-11-17 画板批）：整块盖在对话页上，路由 #/map/<id>。
+         卡片/连线/相机全由 chat-map.js 画；这里只留骨架。
+         详情抽屉在 map-body 里，是画布的兄弟节点（窄屏时 CSS 改成浮层）。 -->
+    <section class="map-shell" id="chat-map" aria-label="会话地图">
+      <header class="map-top">
+        <div class="map-top-left">
+          <button class="map-back" id="map-back" type="button" aria-label="回到对话"
+                  data-tip="回到对话">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></svg>
+          </button>
+          <div class="map-heading">
+            <div class="map-title-row">
+              <span class="map-tab">MAP</span>
+              <h1 class="map-title" id="map-title">会话地图</h1>
+            </div>
+            <p class="map-sub" id="map-sub"></p>
+          </div>
+        </div>
+        <div class="map-actions">
+          <button class="map-btn" id="map-refresh" type="button" data-tip="重新拉取并清掉手动位置">整理</button>
+          <button class="map-btn" id="map-focus" type="button" data-tip="把当前会话最后一轮居中">定位</button>
+          <span class="map-zoom" id="map-zoom">100%</span>
+        </div>
+      </header>
+      <div class="map-body">
+        <div class="map-viewport" id="map-viewport">
+          <div class="map-content" id="map-content">
+            <svg class="map-edges" id="map-edges" aria-hidden="true"></svg>
+            <div class="map-cards" id="map-cards"></div>
+          </div>
+          <div class="map-state" id="map-state" hidden></div>
+        </div>
+        <aside class="map-inspector" id="map-inspector" hidden aria-label="回合详情">
+          <header class="map-inspector-head">
+            <div class="map-inspector-meta" id="map-inspector-meta"></div>
+            <button class="map-inspector-close" id="map-inspector-close" type="button" aria-label="关闭">×</button>
+          </header>
+          <div class="map-inspector-scroll" id="map-inspector-scroll"></div>
+          <footer class="map-inspector-actions" id="map-inspector-actions"></footer>
+        </aside>
+      </div>
+    </section>
   </main>
 
   <!-- 设置页（2026-11-03 对齐 cindy 的分层结构）：

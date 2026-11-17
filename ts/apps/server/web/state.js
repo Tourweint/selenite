@@ -41,7 +41,7 @@ const state = {
   pendingFiles: [],
   // 能力投影（GET /agent/policy 的 attachments / fileAttachments / editResend / approvalMode）：
   // 关着时入口不渲染；审批形态决定审批卡显示倒计时还是「等待处理」
-  capabilities: { attachments: true, fileAttachments: true, editResend: true, approvalMode: "async" },
+  capabilities: { attachments: true, fileAttachments: true, editResend: true, approvalMode: "async", chatMap: true },
   chats: [],
   // 已归档会话计数（GET /agent/chats 的 archived）；会话列表本身不返回它们
   archived: 0,
@@ -67,6 +67,9 @@ const state = {
   tasksEmployeeFilter: "",
   // 运行时开关投影：null = 还没拉过；Map(key → flag 行)。只拉一次 GET /api/v1/agent/flags。
   flagsCache: null,
+  // 副会话入口（2026-11-17 批2）：花名册首次加载时读 PARTNER_SIDE_SESSIONS 写这里；
+  // 缺省 false（读取失败 / 字段缺失按关处理），true 才渲染「选择会话」按钮。
+  sideSessionsEnabled: false,
   // 对话流逐字浮现（2026-11-13）：null = 开关还没回来，按默认开跑；false 走旧的整块渲染。
   chatRevealFlag: null,
   // 任务中心重做开关（2026-11-13 批 1）：null = 还没问过；true/false = 已定。

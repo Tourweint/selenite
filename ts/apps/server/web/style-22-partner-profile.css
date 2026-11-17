@@ -370,6 +370,16 @@
 .pf-tool-row input[type="checkbox"] { flex: none; width: 14px; height: 14px; margin: 0; accent-color: var(--accent); cursor: pointer; }
 .pf-tool-name { flex: none; width: 150px; font-family: var(--mono); font-size: 11.5px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pf-tool-sum { flex: 1; min-width: 0; font-size: 11.5px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 按需 / 常驻（2026-11-17 按人常驻）：一行右侧两枚只读信息 + 一枚可点的胶囊。
+   胶囊放在 label 里，点击由 JS 拦掉默认行为（否则会连带勾/取消勾）。 */
+.pf-tool-use { flex: none; font-size: 10.5px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.pf-tool-mode {
+  flex: none; padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--chat-hairline);
+  font-size: 10.5px; color: var(--text-3); cursor: pointer; user-select: none;
+}
+.pf-tool-mode:hover { background: var(--card-high); }
+.pf-tool-mode[data-on="1"] { color: var(--accent); border-color: var(--accent-line); }
 
 /* Worker 人设页（2026-11-16）：正文卡底部那句只读说明。其余全复用 pf-* / pt-card。 */
 .wf-note { margin: 10px 0 0; font-size: 11.5px; color: var(--text-3); }

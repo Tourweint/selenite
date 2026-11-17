@@ -90,6 +90,8 @@ import "./groups-composer.js";
 import "./groups-create.js";
 import "./groups-settings.js";
 import "./groups-settings-panels.js";
+// 会话画板（2026-11-17 画板批）：路由 #/map/<id>、顶栏入口、画布交互都在这一个模块里
+import "./chat-map.js";
 
 // 启动代码用到、来自各模块的绑定
 import { refreshApprovalPopups, startApprovalPopWatch } from "./approval-pop.js";
@@ -106,7 +108,7 @@ import { loadCapabilities } from "./plus-menu.js";
 import { refreshProjectPill } from "./project-modal.js";
 import { applyRoute, currentRoute, go } from "./route.js";
 import { wireSearchPage } from "./search-page.js";
-import { SETTINGS_SECTIONS } from "./settings-base.js";
+import { AGENT_TABS, SETTINGS_ALIASES, SETTINGS_SECTIONS } from "./settings-base.js";
 import { applySections, applySidebarA11y, syncGreeting, updateHomeMode } from "./shell.js";
 import { state } from "./state.js";
 import { loadTickets } from "./tasks-kanban.js";
@@ -154,7 +156,13 @@ void (async () => {
     if (deepView.startsWith("settings")) {
       if (currentRoute() !== "settings") {
         const sub = deepView.slice("settings".length).replace(/^\//, "");
-        go("settings", SETTINGS_SECTIONS.some((section) => section.id === sub) ? sub : undefined);
+        // 旧深链（?view=settings/context 等）也要继续落对页：合并后的分区（Agent）与
+        // 别名账（archive/service/about…）都算已知，渲染时由 currentSettingsPage() 认回落点。
+        const known =
+          SETTINGS_SECTIONS.some((section) => section.id === sub) ||
+          AGENT_TABS.some((tab) => tab.route === sub) ||
+          sub in SETTINGS_ALIASES;
+        go("settings", known ? sub : undefined);
       }
     } else {
       go("chat");

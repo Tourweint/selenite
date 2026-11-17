@@ -12,10 +12,11 @@ import { openDomains } from "./domains.js";
 import { stopGroupPulse } from "./groups-base.js";
 import { openGroupsView } from "./groups-topics.js";
 import { hideHoverTip } from "./hover-tip.js";
+import { partnerIdOfConversation } from "./partner-sessions.js";
 import { stopMemoryPolling } from "./memory-page.js";
 import { closeProjectMenu } from "./project-modal.js";
 import { closeRailCards } from "./rail-card.js";
-import { SETTINGS_SECTIONS } from "./settings-base.js";
+import { AGENT_TABS, SETTINGS_ALIASES, SETTINGS_SECTIONS } from "./settings-base.js";
 import { renderSettings } from "./settings-router.js";
 import { closeMenu } from "./shell.js";
 import { state } from "./state.js";
@@ -33,9 +34,18 @@ function currentRoute() {
   if (hash.startsWith("/review")) return "review";
   if (hash.startsWith("/tasks")) return "tasks";
   if (hash.startsWith("/domains")) return "domains";
+  // 会话画板（2026-11-17 画板批）：#/map/<会话 id>，只画这一条会话的回合与分支
+  if (hash.startsWith("/map/")) return "map";
   // 群组两条路由（2026-11-06 群组方案批二）：#/groups 列表、#/group/<id> 会话视图
   if (hash === "/groups" || hash.startsWith("/group/")) return "group";
   return "chat";
+}
+
+/** #/map/<id> 里的会话 id；不在画板路由时返回空 */
+function mapRouteId() {
+  const hash = location.hash.replace(/^#/, "");
+  const match = /^\/map\/([A-Za-z0-9._-]+)/.exec(hash);
+  return match ? decodeURIComponent(match[1]) : "";
 }
 
 /** #/group/<id> 里的群 id；不在群会话路由时返回空 */
@@ -55,12 +65,13 @@ function groupRouteId() {
 function currentRailSection() {
   const route = currentRoute();
   if (route === "group") return "groups";
-  if (route !== "chat") return "";
-  const convId = String(state.conversationId || "");
+  // 画板是"这条会话的另一个视图"：轨道高亮与对话页同一套口径
+  if (route !== "chat" && route !== "map") return "";
+  const convId = String(route === "map" ? mapRouteId() : state.conversationId || "");
   if (convId.startsWith("partner-")) return "partners";
   // 种类优先看会话列表里已知的那条（切会话瞬间 state.chatKind 还是上一条的）
   const known = state.chats.find((chat) => chat.conversationId === convId);
-  const kind = (known && known.chatKind) || state.chatKind || "";
+  const kind = (known && known.chatKind) || (route === "chat" ? state.chatKind : "") || "";
   if (kind === "chief") return "";
   if (kind === "worker") return "chats";
   // 种类未知（历史还没回读）先不亮，避免总管会话闪一下「对话」
@@ -74,13 +85,11 @@ function syncRailCurrent() {
   el.railGroups?.setAttribute("aria-current", String(section === "groups"));
 }
 
-/** 正开着的执事专线（partner-<id>）；群成员私聊 partner-<id>-group-<gid> 不算这条专线 */
+/** 正开着的执事专线：canonical / side 都返回真正 partnerId；群成员会话返回 ""（保持现状）。 */
 function currentPartnerLineId() {
-  if (currentRoute() !== "chat") return "";
-  const convId = String(state.conversationId || "");
-  if (!convId.startsWith("partner-")) return "";
-  const rest = convId.slice("partner-".length);
-  return rest.includes("-group-") ? "" : rest;
+  const route = currentRoute();
+  if (route !== "chat" && route !== "map") return "";
+  return partnerIdOfConversation(route === "map" ? mapRouteId() : state.conversationId);
 }
 
 /** 展开侧栏的行选中：执事那一行 / 群那一行；会话行由 renderChats 自己管。 */
@@ -130,18 +139,36 @@ function writeTasksHash(ticket = currentTicketId()) {
   history.replaceState(null, "", `${location.pathname}${location.search}${next}`);
 }
 
+/** 设置子路由的第一段：#/settings/partners/chief → "partners"；空/未知就是空串。 */
+function settingsRoutePart() {
+  return location.hash.replace(/^#\/settings\/?/, "").split(/[?#]/)[0].split("/")[0];
+}
+
+/** Agent 合并分区（2026-11-17）：四个旧子路由 → 四个 tab。
+    注意只在**调用时**读 AGENT_TABS：route.js 与 settings-base.js 是循环引用，
+    模块顶层去 map 它会在另一条 import 顺序上撞 TDZ（见文件头）。 */
+function agentTabOfRoute(part) {
+  return AGENT_TABS.find((tab) => tab.route === part)?.id || "";
+}
+
+/**
+ * 当前落在 Agent 分区的哪个 tab：人设 / 上下文 / 工具 / 派活。
+ * 认四个旧子路由（tab 切换直接复用它们，老书签不用改）；其余情况落第一个 tab（人设）。
+ */
+function currentAgentTab() {
+  return agentTabOfRoute(settingsRoutePart()) || AGENT_TABS[0].id;
+}
+
 /** 设置子页：#/settings/外观 → "appearance"；缺省落「外观」（同 cindy 的 ?tab=） */
 function currentSettingsPage() {
   // 二级页也走同一条前缀：#/settings/partners/<id> 仍然算「人设」这个分区，
   // 具体是谁由 currentPartnerProfileId 再从地址里取（2026-11-14 C 版）。
-  const part = location.hash.replace(/^#\/settings\/?/, "").split(/[?#]/)[0].split("/")[0];
-  // 侧栏「全部会话 →」虽已下线（2026-11-07），旧书签 #/settings/sessions 仍要能落地：
-  // 分区 id 是 chats，这里做一层别名。
-  // 分区 id 其实是 chats；这里做一层别名，不改现有分区与路由体系。
-  if (part === "sessions") return "chats";
-  // 2026-11-07：头像并入「人设」后，旧书签 / 旧链接的 #/settings/avatars 落到 partners，
-  // 而不是掉回「外观」——老入口指过来的地方仍然是改头像的地方。
-  if (part === "avatars") return "partners";
+  const part = settingsRoutePart();
+  // 旧分区 id 走别名账（2026-11-18 合并后：archive→chats、service/about→connect；
+  // sessions、avatars 是更早的两层旧书签）。落对原来的去处，别掉回「外观」。
+  const alias = SETTINGS_ALIASES[part];
+  if (alias) return alias;
+  if (agentTabOfRoute(part)) return "agent";
   return SETTINGS_SECTIONS.some((section) => section.id === part) ? part : "appearance";
 }
 
@@ -199,7 +226,7 @@ function applyRoute() {
   // 设置页是独立整页：侧栏不占位，侧栏开关只在设置页之外出现；
   // 任务中心保留侧栏（入口就在侧栏底部，也能顺手回对话）。
   document.documentElement.dataset.route = route;
-  el.viewChat.hidden = route !== "chat";
+  el.viewChat.hidden = route !== "chat" && route !== "map";
   el.viewSettings.hidden = route !== "settings";
   el.viewTasks.hidden = route !== "tasks";
   el.viewReview.hidden = route !== "review";
@@ -230,18 +257,26 @@ function applyRoute() {
   else if (route === "review") openReview();
   else if (route === "domains") openDomains();
   else if (route === "group") void openGroupsView();
-  else el.input.focus();
+  else if (route === "map") {
+    // 画板自己管焦点与数据加载（chat-map.js 听 hashchange）；
+    // 这里只保证不把光标塞进被盖住的输入框。
+  } else el.input.focus();
   // 会话行的选中态跟着路由走（2026-11-07）：renderChats 里判了 currentRoute()，
   // 但进群组/任务/设置时不一定会重绘列表——离开对话页就在这里把高亮摘掉，
   // 回对话页再按当前会话补回来。不重排 DOM，只改属性。
-  if (route !== "chat") {
+  if (route !== "chat" && route !== "map") {
     for (const row of el.chats?.querySelectorAll('.chat[aria-current="true"]') || []) {
       row.removeAttribute("aria-current");
     }
   } else {
-    const current = el.chats?.querySelector(`.chat[data-conv="${CSS.escape(state.conversationId)}"]`);
+    const convId = route === "map" ? mapRouteId() : state.conversationId;
+    // 画板可能深链到另一条会话：先把不属于当前地址的高亮摘掉，别让旧行留在选中态
+    for (const row of el.chats?.querySelectorAll('.chat[aria-current="true"]') || []) {
+      if (row.dataset.conv !== convId) row.removeAttribute("aria-current");
+    }
+    const current = el.chats?.querySelector(`.chat[data-conv="${CSS.escape(convId)}"]`);
     if (current && !current.hasAttribute("aria-current")) current.setAttribute("aria-current", "true");
   }
 }
 
-export { applyRoute, currentPartnerLineId, currentPartnerProfileId, currentRailSection, currentRoute, currentSettingsPage, currentTicketId, go, groupRouteId, noteRouteChange, setRouteGuard, syncRailCurrent, syncSideRowsCurrent, tasksHash, tasksParams, writeTasksHash };
+export { applyRoute, currentAgentTab, currentPartnerLineId, currentPartnerProfileId, currentRailSection, currentRoute, currentSettingsPage, currentTicketId, go, groupRouteId, mapRouteId, noteRouteChange, setRouteGuard, syncRailCurrent, syncSideRowsCurrent, tasksHash, tasksParams, writeTasksHash };

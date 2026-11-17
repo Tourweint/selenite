@@ -50,11 +50,17 @@ const SETTINGS_SECTIONS = [
     icon: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
   },
   {
-    id: "context",
-    label: "上下文",
-    desc: "每轮先读到的系统提示词、工具、技能与记忆",
-    // Lucide layers-3：三层叠片，表示"一轮一轮压上去的固定前缀"。
-    icon: '<path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 12.18-8.58 3.91a2 2 0 0 1-1.66 0L2 12.18"/><path d="m22 17.18-8.58 3.91a2 2 0 0 1-1.66 0L2 17.18"/>',
+    /**
+     * Agent 合并分区（2026-11-17 用户口径）：人设 / 上下文 / 工具 / 派活 四页收成一个入口，
+     * 左栏只占一行，内容顶部用一条四分段 tab 切换。四页原来的 hash 各自保留
+     * （#/settings/partners、/context、/tools、/executor），老书签与跨页跳转不用改；
+     * 分区 → tab 的映射表在下面 AGENT_TABS，currentSettingsPage() 把四个旧 id 都认成 agent。
+     * Lucide bot：机器人头 = 「这个 Agent 本身」，比四个旧图标里任何一个都更像总入口。
+     */
+    id: "agent",
+    label: "Agent",
+    desc: "人设、上下文、工具与派活：发出去的那条消息由谁、带什么、谁来干",
+    icon: '<path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/>',
   },
   {
     id: "projects",
@@ -63,30 +69,23 @@ const SETTINGS_SECTIONS = [
     icon: '<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>',
   },
   {
-    id: "archive",
-    label: "归档",
-    desc: "已归档的会话：可恢复，也可永久删除",
-    // Lucide archive：会话与项目目录共用同一个「收起、可恢复」的说法（2026-11-12 归档模块）
-    icon: '<rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/>',
-  },
-  {
     id: "reminders",
     label: "定时任务",
     desc: "周期任务与到点提醒；页面开着才有桌面通知",
     icon: '<path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/>',
   },
   {
-    id: "executor",
-    label: "派活",
-    desc: "任务中心派给哪个 CLI、用什么模型与权限",
-    // Lucide terminal 0.468：提示符 + 一行命令 = 外接 CLI 打手
-    icon: '<path d="m4 17 6-6-6-6"/><path d="M12 19h8"/>',
-  },
-  {
+    /**
+     * 本机合并分区（2026-11-18 用户口径）：连接 + 服务 + 关于 三页收成一个入口——
+     * 配对/中继/设备、通知/鉴权、Node 运行时、版本，说的都是「这台电脑这件事」。
+     * 三页竖排一页（连接是操作顺序流，服务与关于只是几张小卡，不值得再挂 tab）。
+     * id 保留 connect：连接页的两个轮询守卫、旧书签都不用动；旧 /service、/about 由
+     * SETTINGS_ALIASES 别名到这里。Lucide monitor：这台机器本身。
+     */
     id: "connect",
-    label: "连接",
-    desc: "手机 / 平板配对与链路：本地直连或经中继",
-    icon: '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
+    label: "本机",
+    desc: "连接手机 / 平板、通知与鉴权、Node 运行时、版本",
+    icon: '<rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/>',
   },
   {
     id: "models",
@@ -94,12 +93,6 @@ const SETTINGS_SECTIONS = [
     desc: "默认模型、供应商与 API Key",
     // Lucide sparkles 0.468 完整五图元：模型/生成的通用记号（2026-11-09 从服务页拆出）
     icon: '<path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/><path d="M20 3v4"/><path d="M22 5h-4"/><path d="M4 17v2"/><path d="M5 18H3"/>',
-  },
-  {
-    id: "service",
-    label: "服务",
-    desc: "桌面通知、鉴权与运行时",
-    icon: '<rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/>',
   },
   {
     id: "plugins",
@@ -124,16 +117,8 @@ const SETTINGS_SECTIONS = [
     // 内部的沟回才是让它在 15px 下仍认得出是「脑」的部分。
     icon: '<path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/><path d="M17.599 6.5a3 3 0 0 0 .399-1.375"/><path d="M6.003 5.125A3 3 0 0 0 6.401 6.5"/><path d="M3.477 10.896a4 4 0 0 1 .585-.396"/><path d="M19.938 10.5a4 4 0 0 1 .585.396"/><path d="M6 18a4 4 0 0 1-1.967-.516"/><path d="M19.967 17.484A4 4 0 0 1 18 18"/>',
   },
-  // 2026-11-07：「头像」不再单开分区——头像并进「人设」（执事页的编辑弹窗），
-  // 因为它和 SOUL 回答的是同一个问题「这个角色是谁」。旧路由 #/settings/avatars
-  // 由 currentSettingsPage() 做别名落到 partners，老书签不会 404 成空页。
-  {
-    id: "partners",
-    label: "人设",
-    desc: "总管 / 执事 / 领域负责人的设定与头像",
-    // Lucide user-round-pen 族：人形 + 笔，表示「改这个角色的设定」
-    icon: '<circle cx="10" cy="8" r="5"/><path d="M2 21a8 8 0 0 1 12.9-6.3"/><path d="M18 15l3 3-6 6-3.5.5.5-3.5z"/>',
-  },
+  // 2026-11-17：「人设」并入 Agent 分区（见上）；旧路由 #/settings/partners 仍可达，
+  // 由 currentSettingsPage() 别名到 agent、currentAgentTab() 认回「人设」这个 tab。
   {
     id: "skills",
     label: "技能",
@@ -141,13 +126,46 @@ const SETTINGS_SECTIONS = [
     // 2026-11-08 扫尾批 9-S：技能 = 给 AI 的操作手册，用 book-open 比拼图更贴"手册"这件事
     icon: '<path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/>',
   },
-  {
-    id: "about",
-    label: "关于",
-    desc: "版本、开源协议与致谢",
-    icon: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
-  },
 ];
+
+/**
+ * Agent 分区里的四个 tab（2026-11-17 合并）。
+ *
+ * `id` 是 tab 标识（currentAgentTab() 的返回值），`route` 是它保留的**旧设置子路由**：
+ * tab 切换就是切到那条旧 hash，这样老书签、抽屉里的「去编辑这个人」、上下文页里的人设链接
+ * 全都不用改。顺序 = 左到右：先「是谁」，再「看到什么 / 能用什么」，最后「活派给谁」。
+ * 第一个 tab 是人设，也是 #/settings/agent（不带子路由）的默认落点。
+ */
+const AGENT_TABS = [
+  { id: "personas", label: "人设", route: "partners" },
+  { id: "context", label: "上下文", route: "context" },
+  { id: "tools", label: "工具", route: "tools" },
+  { id: "executor", label: "派活", route: "executor" },
+];
+
+/**
+ * 旧分区 id → 现在的落点（合并后的别名账，currentSettingsPage() 与 app.js 深链共用一份）。
+ * 2026-11-07 sessions→chats、avatars→agent；2026-11-18 归档并入会话、服务与关于并入本机。
+ * 别名只管「落到哪个分区」，具体 tab / 子页由各自的判断函数再从 hash 认。
+ */
+const SETTINGS_ALIASES = {
+  sessions: "chats",
+  avatars: "agent",
+  archive: "chats",
+  service: "connect",
+  about: "connect",
+};
+
+/** 内容顶部的四分段 tab。切页由 wireAgentTabs() 接线（点击走 go → hash 子路由）。 */
+function agentTabsMarkup(activeTab) {
+  return `<div class="set-tabs" role="tablist" aria-label="Agent 分区">
+    ${AGENT_TABS.map(
+      (tab) =>
+        `<button class="set-tab" type="button" role="tab"
+           data-agent-tab="${tab.id}" aria-selected="${tab.id === activeTab}">${tab.label}</button>`,
+    ).join("")}
+  </div>`;
+}
 
 /**
  * 设置页左侧分区导航：点击真切页（hash 子路由），一次只渲染当前分区。
@@ -197,4 +215,4 @@ function markQuery(text, query) {
   return out + esc(raw.slice(from));
 }
 
-export { ACCENTS, DEFAULT_CUSTOM_ACCENT, SETTINGS_SECTIONS, markQuery, renderSettingsNav };
+export { ACCENTS, AGENT_TABS, DEFAULT_CUSTOM_ACCENT, SETTINGS_ALIASES, SETTINGS_SECTIONS, agentTabsMarkup, markQuery, renderSettingsNav };

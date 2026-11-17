@@ -9,6 +9,7 @@
 
 import { groups } from "./groups-base.js";
 import { request } from "./net.js";
+import { parsePartnerExternalId } from "./partner-sessions.js";
 import { state } from "./state.js";
 
 /* ── 审批卡片（批次二 A1）：写类工具要人确认 ─────────────
@@ -61,9 +62,9 @@ function approvalSourceLabel(conversationId) {
     return [group?.name ? `群「${group.name}」` : "群聊", memberName].filter(Boolean).join(" · ");
   }
   if (value.startsWith("task-")) return "";
-  if (value.startsWith("partner-")) {
-    return approvalPartnerName(value.slice("partner-".length)) || "执事";
-  }
+  // canonical / side 都解析出真正的 partnerId（不能 slice——副会话会切出 id-side-token）。
+  const parsed = parsePartnerExternalId(value);
+  if (parsed) return approvalPartnerName(parsed.partnerId) || "执事";
   return "总管";
 }
 

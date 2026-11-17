@@ -31,3 +31,7 @@
 @import url("./style-23-appearance.css");
 /* 设置 → 上下文（2026-11-16）：放在最后，只新增 .ctx-*，不改旧页 */
 @import url("./style-24-context.css");
+/* 设置 → 工具（2026-11-17 全局工具池）：只补两处，表格复用 .use-* */
+@import url("./style-25-tools.css");
+/* 会话画板（2026-11-17）：只新增 .map-*，作用域限定在 html[data-route="map"] */
+@import url("./style-26-chat-map.css");

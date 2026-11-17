@@ -51,6 +51,11 @@
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   flex: 1; min-width: 0;
 }
+/* 一人多会话（2026-11-17 批2）：执事 canonical / side 会话的顶栏标题可点开选择器；
+   worker / chief 不加这个类，现有行为不变。 */
+.top h1.is-session-picker { cursor: pointer; }
+.top h1.is-session-picker:hover { color: var(--text); }
+.top h1.is-session-picker:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 /* 顶栏「我在跟谁说话」（2026-11-13）：头像贴标题左侧，只在执事专线出现。
    尺寸比群组顶栏（30px）小一号——这里的标题是 13px 的浅色会话名，不是 14px 的群名，
    头像跟着字号走才不头重；无头像时整块收起，标题仍顶在最左（与改造前一致）。 */
@@ -59,6 +64,16 @@
   flex: 1; min-width: 0;
 }
 .chat-head-avatar { width: 26px; height: 26px; font-size: 12px; }
+
+/* 分支来源行（2026-11-17 批3b）：副本会话顶部一行小字，点击回原会话；不占太多高度 */
+#branch-origin {
+  padding: 4px 24px 0;
+  font-size: 11.5px; line-height: 1.4;
+  color: var(--text-3);
+  cursor: pointer;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#branch-origin:hover { color: var(--text); }
 
 .ghost {
   height: 28px; padding: 0 12px;
@@ -225,16 +240,21 @@
 .msg.assistant { flex-direction: column; gap: 8px; position: relative; }
 
 /* 历史分页（2026-11-13 按天分组·上滑加载）：
-   日期分隔条与群聊 .group-day 同一套视觉，避免两处日历口径又长歪；
-   顶部一行只在"还有更早 / 正在加载 / 已到最早"时出现。 */
+   日期分隔条与群聊 .group-day 同一套视觉，避免两处日历口径又长歪。
+   2026-11-17 晚间改：原来左右两条线各占半屏，像一条硬切的表格线；
+   现在只留两截 56px 的短线，向日期方向渐显、向外渐隐，日期本身缩小到 11px 并放宽字距——
+   靠留白分开两天，不靠线。 */
 .msg-day {
-  text-align: center; font-size: 12px; color: var(--text-3);
-  margin: 4px 0 2px;
-  display: flex; align-items: center; gap: 12px;
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  margin: 20px 0 10px;
+  font-size: 11px; letter-spacing: .12em;
+  color: var(--text-3);
 }
 .msg-day::before, .msg-day::after {
-  content: ""; flex: 1; height: 1px; background: var(--divider);
+  content: ""; flex: 0 0 56px; height: 1px;
 }
+.msg-day::before { background: linear-gradient(90deg, transparent, var(--divider)); }
+.msg-day::after { background: linear-gradient(90deg, var(--divider), transparent); }
 .history-top {
   display: flex; justify-content: center; align-items: center;
   min-height: 24px; margin: -4px 0 -6px;
@@ -287,29 +307,74 @@
   display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px;
   min-height: 20px; margin-top: 2px;
   font-size: 11px; color: var(--text-3);
-  opacity: 0; pointer-events: none;
+  pointer-events: none;
+}
+/* 2026-11-17 晚间口径：回答脚注整条平时是空的——复制、收尾时刻、用时三项都 hover / 聚焦才淡入。
+   时刻不再常显、不再 `margin-left:auto` 钉最右，而是紧挨复制图标；用户消息不显示时刻。 */
+.msg-foot .copy-btn,
+.msg-foot .branch-btn,
+.msg-usage,
+.msg.assistant .msg-clock {
+  opacity: 0;
   transition: opacity .15s ease;
 }
-.msg.assistant:hover .msg-foot,
-.msg-foot:focus-within { opacity: 1; pointer-events: auto; }
-/* 键盘用户不必靠 hover 才能摸到复制 */
-.msg.assistant:focus-within .msg-foot { opacity: 1; pointer-events: auto; }
+.msg-foot .copy-btn,
+.msg-foot .branch-btn,
+.msg-usage { pointer-events: none; }
+.msg.assistant:hover .msg-foot .copy-btn,
+.msg.assistant:hover .msg-foot .branch-btn,
+.msg.assistant:hover .msg-usage,
+.msg.assistant:hover .msg-clock,
+.msg.assistant:focus-within .msg-foot .copy-btn,
+.msg.assistant:focus-within .msg-foot .branch-btn,
+.msg.assistant:focus-within .msg-usage,
+.msg.assistant:focus-within .msg-clock,
+.msg-foot:focus-within .copy-btn,
+.msg-foot:focus-within .branch-btn,
+.msg-foot:focus-within .msg-usage,
+.msg-foot:focus-within .msg-clock {
+  opacity: 1;
+}
+.msg.assistant:hover .msg-foot .copy-btn,
+.msg.assistant:hover .msg-foot .branch-btn,
+.msg.assistant:hover .msg-usage,
+.msg.assistant:focus-within .msg-foot .copy-btn,
+.msg.assistant:focus-within .msg-foot .branch-btn,
+.msg.assistant:focus-within .msg-usage,
+.msg-foot:focus-within .copy-btn,
+.msg-foot:focus-within .branch-btn,
+.msg-foot:focus-within .msg-usage {
+  pointer-events: auto;
+}
 
 /* 复制按钮（2026-11-08 图标化）：Lucide copy 内联 13px，无框无底，hover 才有淡底；
    成功变 ✓（--ok）、失败变 ×（--c-error），1.2s 后由 JS 换回复制图标 */
-.msg-foot .copy-btn {
+.msg-foot .copy-btn,
+.msg-foot .branch-btn {
   width: 24px; height: 20px; padding: 0;
   display: grid; place-content: center;
   border: 0; border-radius: var(--r-sm);
   background: transparent; color: var(--text-3);
   transition: color .15s ease, background .15s ease;
 }
-.msg-foot .copy-btn svg { width: 13px; height: 13px; }
-.msg-foot .copy-btn:hover { color: var(--text); background: var(--card-high); }
+.msg-foot .copy-btn svg,
+.msg-foot .branch-btn svg { width: 13px; height: 13px; }
+.msg-foot .copy-btn:hover,
+.msg-foot .branch-btn:hover { color: var(--text); background: var(--card-high); }
+.msg-foot .branch-btn:disabled { opacity: .4; cursor: default; }
 .msg-foot .copy-btn.is-done { color: var(--ok); }
 .msg-foot .copy-btn.is-failed { color: var(--c-error); }
 
 .msg-usage { line-height: 20px; }
+
+/* 消息时刻（2026-11-17 晚）：只在回答脚注里，紧挨复制图标，hover 才出现。
+   口径对齐 ZCode——今天 HH:mm、昨天带"昨天"、同年更早"11月16日"、跨年才带年份。
+   11px 数字等宽，别用气泡色。 */
+.msg-clock {
+  font-size: 11px; line-height: 20px; color: var(--text-3);
+  font-variant-numeric: tabular-nums; letter-spacing: .02em;
+}
+.msg-clock[hidden] { display: none; }
 
 .body { min-width: 0; overflow-wrap: anywhere; }
 

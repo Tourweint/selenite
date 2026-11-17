@@ -61,6 +61,7 @@ function pageLabel(hash) {
   if (hash.startsWith("#/tasks")) return "任务中心";
   if (hash.startsWith("#/review")) return "今日回顾";
   if (hash.startsWith("#/domains")) return "领域";
+  if (hash.startsWith("#/map/")) return "会话地图";
   if (hash === "#/groups") return "群组";
   if (hash.startsWith("#/group/")) return "群聊";
   // 人设二级页也算「设置」那一支，但它单独有名，别让人以为返回会掉回哪个分区

@@ -9,6 +9,8 @@
 
 import { addBrowserFiles, addImageFiles, captureScreenshot, clearPendingAttachments, closeLightbox, pickFiles } from "./attachments.js";
 import { startNewChat } from "./chat-open.js";
+// 会话画板（2026-11-17）：能力投影决定顶栏入口挂不挂；这里只做一次同步
+import { syncChatMapEntry } from "./chat-map.js";
 import { syncEditEntry } from "./chat-thread.js";
 import { followUp, send, syncSendEnabled } from "./composer-send.js";
 import { el } from "./dom.js";
@@ -250,9 +252,12 @@ async function loadCapabilities() {
     state.capabilities.fileAttachments = data.fileAttachments !== false;
     state.capabilities.editResend = data.editResend !== false;
     state.capabilities.approvalMode = data.approvalMode === "blocking" ? "blocking" : "async";
+    // 会话画板（2026-11-17）：缺字段按开处理（老服务端不挡）
+    state.capabilities.chatMap = data.chatMap !== false;
   } catch {
     return;
   }
+  syncChatMapEntry();
   if (el.composerAdd) el.composerAdd.hidden = !state.capabilities.attachments;
   // 文件附件关着：选择器退回只认图片（老行为），不让用户选完才报错
   if (el.composerFile) {

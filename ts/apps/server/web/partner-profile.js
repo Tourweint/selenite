@@ -28,7 +28,7 @@ import { openCreateSkillModal } from "./skills-modals.js";
 import { setModalHint } from "./project-modal.js";
 import { switchMarkup } from "./settings-atoms.js";
 import { CS_CONTRACT_TEMPLATE } from "./settings-contract.js";
-import { openReminderModal } from "./settings-reminders.js";
+import { openScheduledTaskModal } from "./settings-reminders.js";
 import { csLoadProfileSkills, csProfileWhen } from "./settings-employee.js";
 import { mountChainEditor } from "./settings-model.js";
 import { applyRoute, setRouteGuard } from "./route.js";
@@ -1352,21 +1352,21 @@ async function pfLoadGlobalSkills(partnerId) {
   }
 }
 
-/** 例行任务弹层：整理记忆 + 他自己的 routine 列表（列表与新建表单组件原样复用）。 */
+/** 定时任务弹层：整理记忆 + 这个人的 routines / reminders（清单与编辑器两页共用）。 */
 async function pfOpenRoutinesModal(partnerId, onChanged) {
   let nightly = await pfLoadMemoryNightly();
 
   openModal(
-    "例行任务",
+    "定时任务",
     (body) => {
       body.innerHTML = `
-      <p class="modal-desc">定时跑的活：到点他自己是发起人，动作都带他的名字。</p>
+      <p class="modal-desc">到点让 TA 自己跑一轮的活：内容、时间、暂停都能改；例行规则与手动新建的任务在同一张清单。</p>
       <div class="pf-live-block" id="pf-memory-task"></div>
       <div class="pf-live-block">
-        <div class="pf-live-head"><span>他自己的例行任务</span><span class="pf-tag" id="pf-routine-count"></span></div>
+        <div class="pf-live-head"><span>他自己的定时任务</span><span class="pf-tag" id="pf-routine-count"></span></div>
         <div class="pt-routine-list" id="pf-routines"><p class="pf-hint">读取中…</p></div>
         <details class="pf-new">
-          <summary>新建例行任务</summary>
+          <summary>新建定时任务</summary>
           ${ptRoutineFormMarkup()}
         </details>
       </div>`;
@@ -1412,14 +1412,21 @@ async function pfOpenRoutinesModal(partnerId, onChanged) {
         timeButton.className = "pf-mini";
         timeButton.textContent = "改时间";
         timeButton.addEventListener("click", () => {
-          openReminderModal(
+          openScheduledTaskModal(
             {
-              kind: "memory",
-              id: info.scope,
-              text: "每晚整理",
-              at: Date.parse(nightly?.nextAt || "") || Date.now(),
-              repeat: "daily",
-              ...(partnerId === "chief" ? {} : { partnerId }),
+              mode: "edit",
+              item: {
+                kind: "memory",
+                id: info.scope,
+                memoryScope: info.scope,
+                partnerId: partnerId === "chief" ? "chief" : partnerId,
+                title: "整理记忆",
+                instruction: "整理记忆",
+                nextAt: Date.parse(nightly?.nextAt || "") || Date.now(),
+                enabled: info.task.enabled !== false,
+                visibility: "",
+                raw: info.task,
+              },
             },
             () => {
               void pfOpenRoutinesModal(partnerId, onChanged);
@@ -1441,7 +1448,7 @@ async function pfOpenRoutinesModal(partnerId, onChanged) {
             const next = await pfLoadMemoryNightly();
             if (next) nightly = next;
             paintMemory();
-            report(listBox.querySelectorAll(".pt-routine").length);
+            report(listBox.querySelectorAll(".rm-item").length);
           } catch (error) {
             if (error.message !== "forbidden") toast(`没改到：${error.message}`);
             toggleButton.disabled = false;
@@ -1451,15 +1458,18 @@ async function pfOpenRoutinesModal(partnerId, onChanged) {
       };
       paintMemory();
 
-      ptWireRoutineForm(body, partnerId, listBox);
+      ptWireRoutineForm(body, partnerId, listBox, {
+        // 编辑器换掉了当前弹层：保存/删完后重新打开这张任务清单，卡片计数也一并刷新。
+        onChanged: () => void pfOpenRoutinesModal(partnerId, onChanged),
+      });
       const render = () =>
         ptRenderRoutineList(listBox, partnerId, {
-          // 删完就地重拉列表并刷新卡片摘要（不再整页重画：弹层还开着）
-          onDone: () => void render(),
-        }).then(() => {
-          const count = listBox.querySelectorAll(".pt-routine").length;
-          if (countTag) countTag.textContent = `${count} 条`;
-          report(count);
+          // 列表自己在改动后重拉；这里只回报计数（不再整页重画，弹层还开着）。
+          onCount: (count) => {
+            if (countTag) countTag.textContent = `${count} 条`;
+            report(count);
+          },
+          onChanged: () => void pfOpenRoutinesModal(partnerId, onChanged),
         });
       void render();
       body.querySelector("[data-modal-cancel]")?.addEventListener("click", () => closeModal());
@@ -1767,8 +1777,11 @@ async function pfOpenSkillsModal(partnerId, onChanged) {
 
 /** 卡片摘要的异步计数（例行 / 整理记忆 / 技能 / 项目名）：先画"读取中…"，回来就地改字。 */
 async function pfPrefetchCardSummaries(partnerId, partner, apply) {
-  const [routinesRes, skills, projectsRes, nightly, globalSkills] = await Promise.all([
+  const [routinesRes, remindersRes, skills, projectsRes, nightly, globalSkills] = await Promise.all([
     request(`/api/v1/routines?partnerId=${encodeURIComponent(partnerId)}`, { cache: "no-store" })
+      .then((r) => r.json())
+      .catch(() => null),
+    request("/api/v1/agent/reminders?includePaused=1", { cache: "no-store" })
       .then((r) => r.json())
       .catch(() => null),
     csLoadProfileSkills(partnerId).catch(() => null),
@@ -1778,8 +1791,16 @@ async function pfPrefetchCardSummaries(partnerId, partner, apply) {
     pfLoadMemoryNightly(),
     pfLoadGlobalSkills(partnerId),
   ]);
+  const routineCount = Array.isArray(routinesRes?.routines) ? routinesRes.routines.length : null;
+  const reminderCount = Array.isArray(remindersRes?.reminders)
+    ? remindersRes.reminders.filter((reminder) => {
+        if (reminder.status === "terminal") return false;
+        if (partnerId === "chief") return !reminder.partnerId || reminder.partnerId === "chief";
+        return reminder.partnerId === partnerId;
+      }).length
+    : 0;
   apply({
-    routineCount: Array.isArray(routinesRes?.routines) ? routinesRes.routines.length : null,
+    routineCount: routineCount === null ? null : routineCount + reminderCount,
     memorySummary: pfMemorySummaryOf(nightly, partnerId),
     skillCount: Array.isArray(skills) ? skills.length : null,
     globalSkillTotal: Array.isArray(globalSkills) ? globalSkills.length : null,
@@ -2780,8 +2801,8 @@ async function pfWirePersona(root, partnerId, partner, detail, onDraftChange) {
     },
     routines: {
       id: "routines",
-      name: "例行任务",
-      tip: "定时跑的活：到点他自己发起一轮。每晚「整理记忆」也在他名下，但它单独调度，不在这张规则列表里。",
+      name: "定时任务",
+      tip: "到点让 TA 自己跑一轮的活：内容、时间、暂停都能改。每晚「整理记忆」也在他名下，但它单独调度，不在这张任务列表里。",
       summary: () =>
         counts.routineCount == null
           ? "读取中…"
@@ -3229,18 +3250,36 @@ async function pfOpenToolsModal(root, partnerId, onSaved) {
     body.querySelector("[data-modal-cancel]")?.addEventListener("click", () => closeModal());
 
     let initialDisabled = [];
+    let initialPromoted = [];
     let view = null;
-    // 保存按钮只在"勾选态相对打开时变了"才亮；全选 / 全不选也走这条。
+    // 常驻提升（2026-11-17）：按需工具可以被人点成常驻（下一轮起就在工具面里，不用再搜）。
+    const promotedSet = new Set();
+    // 保存按钮只在"勾选态 / 常驻态相对打开时变了"才亮；全选 / 全不选也走这条。
     const markDirty = () => {
       const disabled = [...groupsBox.querySelectorAll("input[data-tool]:not(:checked)")]
         .map((input) => input.dataset.tool);
-      const changed =
+      const promoted = [...promotedSet];
+      const disabledChanged =
         disabled.length !== initialDisabled.length ||
         disabled.some((name) => !initialDisabled.includes(name));
-      save.disabled = !changed;
+      const promotedChanged =
+        promoted.length !== initialPromoted.length ||
+        promoted.some((name) => !initialPromoted.includes(name));
+      save.disabled = !disabledChanged && !promotedChanged;
     };
 
     // 弹层打开时现拉一次：页面加载后可能有别的设备改过，别用旧数据。
+    // 用量账并行拉（2026-11-17）：给"该不该提升"一个看得见的判据；读不到就不显示，不挡保存。
+    let usageByName = new Map();
+    const usagePromise = request("/api/v1/agent/tool-usage", { cache: "no-store" })
+      .then(async (response) => {
+        if (!response.ok) return;
+        const data = await response.json().catch(() => ({}));
+        for (const row of Array.isArray(data?.tools) ? data.tools : []) {
+          if (row && typeof row.name === "string") usageByName.set(row.name, row);
+        }
+      })
+      .catch(() => undefined);
     try {
       view = await pfFetchTools(partnerId);
     } catch (error) {
@@ -3255,6 +3294,8 @@ async function pfOpenToolsModal(root, partnerId, onSaved) {
     }
 
     initialDisabled = Array.isArray(view.disabled) ? [...view.disabled] : [];
+    initialPromoted = Array.isArray(view.promoted) ? [...view.promoted] : [];
+    for (const name of initialPromoted) promotedSet.add(name);
     const byGroup = new Map();
     for (const tool of Array.isArray(view.tools) ? view.tools : []) {
       if (!tool || typeof tool.name !== "string") continue;
@@ -3264,21 +3305,73 @@ async function pfOpenToolsModal(root, partnerId, onSaved) {
     }
     const order = Array.isArray(view.groups) && view.groups.length ? view.groups : [...byGroup.keys()];
     const html = [];
+    // 用量文案：用过 N 次；被搜出来过再补一句（帮人判断"藏错了"还是"该关掉"）。
+    const usageText = (name) => {
+      const row = usageByName.get(name);
+      if (!row || typeof row.count !== "number") return "";
+      const bits = [`用过 ${row.count} 次`];
+      if (row.loads > 0) bits.push(`搜出 ${row.loads} 次`);
+      return bits.join(" · ");
+    };
     for (const group of order) {
       const items = byGroup.get(group);
       if (!items || !items.length) continue;
       html.push(`<div class="pf-tool-group"><div class="pf-tool-group-title">${esc(group)}</div>`);
       for (const tool of items) {
+        const deferred = tool.deferred === true;
+        const usage = deferred ? usageText(tool.name) : "";
         html.push(`<label class="pf-tool-row">
           <input type="checkbox" data-tool="${attr(tool.name)}"${tool.enabled === true ? " checked" : ""} />
           <span class="pf-tool-name">${esc(tool.name)}</span>
           <span class="pf-tool-sum">${esc(String(tool.summary || ""))}</span>
+          ${usage ? `<span class="pf-tool-use">${esc(usage)}</span>` : ""}
+          ${deferred ? `<span class="pf-tool-mode" role="button" tabindex="0" data-mode-for="${attr(tool.name)}" data-on="${promotedSet.has(tool.name) ? "1" : "0"}" data-tip="按需 = 初始不进请求，模型要用得先 tool_search；常驻 = 每轮都带完整定义（多花前缀 token）">${promotedSet.has(tool.name) ? "常驻" : "按需"}</span>` : ""}
         </label>`);
       }
       html.push(`</div>`);
     }
     groupsBox.innerHTML = html.join("") || `<p class="modal-hint">没有可用的模型工具。</p>`;
+    // 用量账晚到也不影响：回来后才把数字补进已渲染的行（不重画，避免打断已做的勾选）。
+    void usagePromise.then(() => {
+      for (const chip of groupsBox.querySelectorAll(".pf-tool-mode")) {
+        const name = chip.dataset.modeFor;
+        const text = usageText(name);
+        if (!text) continue;
+        const row = chip.closest(".pf-tool-row");
+        if (!row || row.querySelector(".pf-tool-use")) continue;
+        const use = document.createElement("span");
+        use.className = "pf-tool-use";
+        use.textContent = text;
+        row.insertBefore(use, chip);
+      }
+    });
     groupsBox.addEventListener("change", markDirty);
+    // 点「按需 / 常驻」胶囊：切这个人的提升状态（不碰勾选；下一轮生效）。
+    const togglePromoted = (chip) => {
+      if (!chip || !chip.dataset.modeFor) return;
+      const name = chip.dataset.modeFor;
+      const next = !promotedSet.has(name);
+      if (next) promotedSet.add(name);
+      else promotedSet.delete(name);
+      chip.dataset.on = next ? "1" : "0";
+      chip.textContent = next ? "常驻" : "按需";
+      markDirty();
+    };
+    groupsBox.addEventListener("click", (event) => {
+      const chip = event.target instanceof Element ? event.target.closest(".pf-tool-mode") : null;
+      if (!chip || !groupsBox.contains(chip)) return;
+      // 行是 label：不拦一下会把点击变成"勾/取消勾"。
+      event.preventDefault();
+      event.stopPropagation();
+      togglePromoted(chip);
+    });
+    groupsBox.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      const chip = event.target instanceof Element ? event.target.closest(".pf-tool-mode") : null;
+      if (!chip || !groupsBox.contains(chip)) return;
+      event.preventDefault();
+      togglePromoted(chip);
+    });
 
     body.querySelector("#pf-tools-all")?.addEventListener("click", () => {
       for (const input of groupsBox.querySelectorAll("input[data-tool]")) input.checked = true;
@@ -3300,7 +3393,8 @@ async function pfOpenToolsModal(root, partnerId, onSaved) {
         const response = await request(PF_TOOLS_PATH(partnerId), {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ disabled }),
+          // promoted 一起提交（2026-11-17）：服务端按"带了就全量替换"处理。
+          body: JSON.stringify({ disabled, promoted: [...promotedSet] }),
         });
         const data = await response.json().catch(() => ({}));
         if (!response.ok || data.ok !== true) throw new Error(data.message || String(response.status));

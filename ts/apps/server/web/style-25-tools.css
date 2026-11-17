@@ -1,0 +1,41 @@
+/* 设置 → 工具（2026-11-17 全局工具池；同日版式调整）
+   - 三列（定义 / 用量 / 池）居中；
+   - 行可点开看说明原文：小箭头 + 缩进引用块；
+   - 页面解释性文字收进标题/表头的 data-tip，页面上只留待重启状态。 */
+.tool-pool-sum { margin-top: 3px; font-size: 11px; line-height: 1.5; color: var(--text-3); }
+.tool-pool-actions { display: flex; align-items: center; gap: 8px; }
+.set-sec-head > .tool-pool-actions { margin-block: -6px; }
+
+.tool-pool-table th.tool-pool-col,
+.tool-pool-table td.tool-pool-col { text-align: center; white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+.tool-pool-row { cursor: pointer; }
+.tool-pool-row:hover td { background: var(--card-high); }
+.tool-pool-caret {
+  flex: none; display: inline-block; width: 11px;
+  color: var(--text-3); font-size: 12px; line-height: 1;
+  transition: transform var(--dur-fast) var(--ease-standard);
+}
+.tool-pool-row.is-open .tool-pool-caret { transform: rotate(90deg); }
+/* 展开时主行不留分隔线，让"行 + 详情"看起来是一块 */
+.tool-pool-row.is-open td { border-bottom-color: transparent; }
+
+.tool-pool-detail td { padding-top: 0; padding-bottom: 14px; }
+.tool-pool-detail-block + .tool-pool-detail-block { margin-top: 10px; }
+.tool-pool-detail-label {
+  margin-bottom: 4px; font-size: 10.5px; color: var(--text-3); letter-spacing: .08em;
+}
+.tool-pool-desc {
+  max-height: 260px; overflow: auto; padding-left: 12px;
+  border-left: 2px solid var(--chat-hairline);
+  font-size: 11.5px; line-height: 1.7; color: var(--text-2);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+/* 参数 JSON：等宽、可滚，别把整页撑开 */
+.tool-pool-params {
+  margin: 0; padding: 8px 10px; max-height: 220px; overflow: auto;
+  border-left: 2px solid var(--chat-hairline);
+  background: var(--surface-low); border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  font-family: var(--mono); font-size: 11px; line-height: 1.6; color: var(--text-2);
+  white-space: pre; overflow-wrap: normal;
+}

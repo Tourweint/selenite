@@ -261,36 +261,33 @@ function hideChatError() {
 }
 
 /**
- * 消息级用时/token（批次一）：hover 才出现，落在正文下方的脚注里。
- * 2026-11-06 从「右侧浮层」改成脚注的一部分：复制 · 用时 · 完成时间同一行，
- * 不再各自 absolute 定位（那样永远跟正文右边缘对不齐）。
+ * 消息级用时（批次一；2026-11-17 晚间改）：脚注里只留秒数，不再显示 token。
+ * token 数对"这一轮等了多久"没有帮助，反而把 11px 的脚注撑成两截数字。
+ * 与复制图标、收尾时刻同一行，三者都 hover 才出现。
  *
- * 两路数据源共用：现场那一轮给 `usage + 墙钟`（两个数字都显示），
- * 历史回读只给 `workMs`（没有 token 可读，就只显示用时，不编 0 tok）。
+ * 两路数据源共用：现场那一轮给 `usage + 墙钟`，历史回读只给 `workMs`；
+ * 现在只看墙钟——没有耗时就不挂这条。
  */
-function attachUsage(root, usage, ms) {
-  const input = usage?.input || 0;
-  const output = usage?.output || 0;
-  const total = input + output;
+function attachUsage(root, _usage, ms) {
   const hasDuration = typeof ms === "number" && ms > 0;
-  if (!root.isConnected || (total <= 0 && !hasDuration)) return;
+  if (!root.isConnected || !hasDuration) return;
   const foot = root.querySelector(".msg-foot");
   if (!foot) return;
     let chip = foot.querySelector(".msg-usage");
     if (!chip) {
       chip = document.createElement("span");
       chip.className = "msg-usage";
-      // 复制按钮恒在最前，其余按「用时 · 完成时间」顺排。
-      // （2026-11-07 修：原来 insertBefore(copy.nextSibling || firstChild) 在复制按钮
-      //   是末节点时会回落到 firstChild——chip 反而插到它前面去了。）
-      const copy = foot.querySelector(".copy-btn");
-      if (copy) copy.after(chip);
-      else foot.prepend(chip);
+      // 复制按钮 → 收尾时刻 → 用时。时刻是 2026-11-17 晚加的，插在复制后面；
+      // 用时排在它后面，所以找时刻节点当锚，别再用 copy.nextSibling。
+      const clock = foot.querySelector(".msg-clock");
+      if (clock) clock.after(chip);
+      else {
+        const copy = foot.querySelector(".copy-btn");
+        if (copy) copy.after(chip);
+        else foot.prepend(chip);
+      }
     }
-  const seconds = hasDuration ? `${(ms / 1000).toFixed(1)}s` : "";
-  chip.textContent = total > 0
-    ? `${total.toLocaleString()} tok${seconds ? ` · ${seconds}` : ""}`
-    : seconds;
+  chip.textContent = `${(ms / 1000).toFixed(1)}s`;
 }
 
 function scrollToEnd() {

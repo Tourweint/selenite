@@ -12,6 +12,7 @@ import { el } from "./dom.js";
 import { fetchModelCatalog, updateModelPill } from "./hover-tip.js";
 import { CS_ICONS } from "./icons.js";
 import { request } from "./net.js";
+import { parsePartnerExternalId } from "./partner-sessions.js";
 import { renderCsModelPage } from "./settings-model.js";
 import { renderCsPolicyPage } from "./settings-permission.js";
 import { state } from "./state.js";
@@ -300,13 +301,9 @@ function csCard(label) {
  *    却以为改的是当前这个助手」这种谎报。
  */
 function csResolveTarget() {
-  const id = state.conversationId || "";
-  if (id.startsWith("partner-")) {
-    const rest = id.slice("partner-".length);
-    const groupAt = rest.indexOf("-group-");
-    const partnerId = groupAt >= 0 ? rest.slice(0, groupAt) : rest;
-    return partnerId || null;
-  }
+  // canonical / side / group 都解析到真正 partnerId（group 保持现状：还是该成员）。
+  const parsed = parsePartnerExternalId(state.conversationId);
+  if (parsed) return parsed.partnerId || null;
   // 身份以服务端回读的 chatKind 为准（缺字段的旧会话按 chief，保住老数据）
   return state.chatKind === "worker" ? null : "chief";
 }

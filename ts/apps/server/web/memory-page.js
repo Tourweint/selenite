@@ -223,6 +223,8 @@ function memorySettingsMarkup() {
     </button>`,
     "",
     `<div class="mem-a-head-actions">
+      <button class="ghost mem-act" type="button" id="mem-migrate" hidden
+        data-tip="迁移 = 把这个范围的记忆整体搬到另一个项目或「我的记忆」。只搬家，不去重、不调模型；搬迁后原范围就空了。">迁移</button>
       <button class="ghost mem-act" type="button" id="mem-import" hidden>导入</button>
       <button class="ghost mem-act" type="button" id="mem-consolidate" hidden
         data-tip="整理 = 让辅助模型回看最近的记忆，找出重复、过时、说法不一致的条目。&#10;&#10;它只给建议：你逐条点「应用」才会把旧的那条标成过时；不会自动删，也没有「全部应用」。&#10;&#10;这一步会调用一次辅助模型（单独请求，不占当前对话上下文），会消耗 token。">整理</button>
@@ -306,6 +308,9 @@ async function wireMemorySettings() {
   });
 
   document.getElementById("mem-import")?.addEventListener("click", () => void openMemoryImportDialog(gen));
+  document.getElementById("mem-migrate")?.addEventListener("click", () => {
+    void openMemoryMigrateDialog(gen);
+  });
   document.getElementById("mem-split")?.addEventListener("click", () => {
     void openMemorySplitDialog(gen);
   });
@@ -415,6 +420,102 @@ function wireMemoryBacktop(gen) {
     update();
   });
   update();
+}
+
+/**
+ * 迁移记忆（2026-11-17 项目合并与记忆迁移）：把当前 scope 整体搬到另一个项目或「我的记忆」。
+ *
+ * 只对 `project:` scope 显示（活项目与孤儿都能搬）。目标列表来自 `/api/v1/projects`（不含归档）：
+ * 搬到归档项目等于搬进另一次封存，界面不给这个选项。
+ * 服务端是纯搬家（不去重、不调模型）；搬完后源 scope 就空了，页面顺势切到目标范围。
+ */
+async function openMemoryMigrateDialog(gen) {
+  const from = memoryPageState.scope;
+  if (!from.startsWith("project:")) return;
+  if (memoryPageState.batch?.running || memoryPageState.status?.running) {
+    toast("正在整理，等它跑完");
+    return;
+  }
+  let projects = [];
+  try {
+    const response = await request("/api/v1/projects", { cache: "no-store" });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.message || String(response.status));
+    projects = Array.isArray(data.projects) ? data.projects : [];
+  } catch (error) {
+    if (error.message === "forbidden") return;
+    toast(`读不到项目列表：${error.message}`);
+    return;
+  }
+  const currentProjectId = from.slice("project:".length);
+  const options = [
+    `<option value="global">我的记忆（全局）</option>`,
+    ...projects
+      .filter((project) => project.id !== currentProjectId)
+      .map((project) => `<option value="${attr(`project:${project.id}`)}">${esc(project.name)}</option>`),
+  ].join("");
+  const fromLabel = memoryPageState.people?.find((person) => person.scope === from)?.label || "当前范围";
+
+  openModal("迁移记忆", (body) => {
+    body.innerHTML = `
+      <p class="modal-desc">把「${esc(fromLabel)}」里的记忆整体搬到另一个范围。<b>只搬家，不删、不去重</b>；搬完原范围就空了，重复内容之后可以用「整理」处理。</p>
+      <div class="modal-field"><span>搬到</span>
+        <select class="modal-input" id="mem-migrate-target">${options}</select>
+      </div>
+      <p class="modal-hint" id="mem-migrate-hint"></p>
+      <div class="modal-actions">
+        <button class="ghost" type="button" data-modal-cancel>取消</button>
+        <button class="btn-primary" type="button" id="mem-migrate-confirm">开始迁移</button>
+      </div>`;
+    const hint = body.querySelector("#mem-migrate-hint");
+    const confirm = body.querySelector("#mem-migrate-confirm");
+    const select = body.querySelector("#mem-migrate-target");
+    body.querySelector("[data-modal-cancel]")?.addEventListener("click", closeModal);
+    confirm?.addEventListener("click", async () => {
+      if (confirm.disabled) return;
+      const to = select?.value || "";
+      if (!to) return;
+      confirm.disabled = true;
+      confirm.textContent = "迁移中…";
+      try {
+        const response = await request("/api/v1/agent/memory/scope/move", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ from, to }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          if (hint) {
+            hint.textContent = data.message || `迁移失败：HTTP ${response.status}`;
+            hint.classList.add("is-error");
+          }
+          confirm.disabled = false;
+          confirm.textContent = "开始迁移";
+          return;
+        }
+        closeModal();
+        toast(`已迁移 ${Number(data.records) || 0} 条记忆`);
+        if (memoryPageAlive(gen)) {
+          // 源已空：先刷新「一排人」的计数（孤儿 tab 可能因此消失），再切到目标范围看结果
+          await loadMemoryPeople(gen);
+          if (!memoryPageAlive(gen)) return;
+          if (to !== memoryPageState.scope) switchMemoryScope(to, gen);
+          else void loadMemorySummary(gen);
+        }
+      } catch (error) {
+        if (error.message === "forbidden") {
+          closeModal();
+          return;
+        }
+        if (hint) {
+          hint.textContent = `迁移失败：${error.message}`;
+          hint.classList.add("is-error");
+        }
+        confirm.disabled = false;
+        confirm.textContent = "开始迁移";
+      }
+    });
+  });
 }
 
 /** 导入弹窗（2026-11-15 第二轮，方案 docs/设计方案/2026-11-15-记忆导入第二轮（全量来源与勾选批量）.md）：
@@ -700,8 +801,8 @@ async function loadMemoryPeople(gen) {
         scope: row.scope,
         label: String(row.label || (row.scope === "global" ? "我的记忆" : "执事")),
         count: Number(row.count) || 0,
-        // 2026-11-15：kind 扩了 project（项目记忆）
-        kind: ["partner", "project"].includes(row.kind) ? row.kind : "mine",
+        // 2026-11-15：kind 扩了 project（项目记忆）；2026-11-17 扩 orphan（已删除项目的孤儿记忆）
+        kind: ["partner", "project", "orphan"].includes(row.kind) ? row.kind : "mine",
       }));
     renderMemoryPeople();
   } catch (error) {
@@ -728,7 +829,9 @@ function renderMemoryPeople() {
           ? `<span class="mem-a-person-tag">同事</span>`
           : person.kind === "project"
             ? `<span class="mem-a-person-tag">项目</span>`
-            : "";
+            : person.kind === "orphan"
+              ? `<span class="mem-a-person-tag">已删除</span>`
+              : "";
       return `<button class="mem-a-person ${on ? "on" : ""}" type="button"
         data-mem-scope="${attr(person.scope)}" role="tab" aria-selected="${on}">
         ${esc(person.label)}${badge}<b>${person.count}</b>
@@ -990,9 +1093,12 @@ function updateMemoryControls() {
   const consolidate = document.getElementById("mem-consolidate");
   const importButton = document.getElementById("mem-import");
   const split = document.getElementById("mem-split");
+  const migrate = document.getElementById("mem-migrate");
   if (consolidate) consolidate.hidden = !memoryPageState.canConsolidate;
   if (importButton) importButton.hidden = !memoryPageState.canImport;
   if (split) split.hidden = !memoryPageState.canSplit;
+  // 迁移只对项目 scope 有意义（活项目与孤儿都能搬）；global / 执事不给这个入口。
+  if (migrate) migrate.hidden = !memoryPageState.scope.startsWith("project:");
   const running = memoryPageState.status?.running === true || memoryPageState.batch?.running === true;
   if (consolidate) {
     consolidate.disabled = running;

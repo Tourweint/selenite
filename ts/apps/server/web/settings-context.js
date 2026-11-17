@@ -1,49 +1,86 @@
 /**
- * 设置 → 上下文（2026-11-16）
+ * 设置 → 上下文（2026-11-16 起，2026-11-17 重画）
  *
- * 只读展示当前会话每轮开头那四块：系统提示词 / 工具定义 / 技能 / 记忆。
- * 会变的部分单独一块，只报数量；正文不搬到设置页。
- * 口径与端点见 docs/设计方案/2026-11-16-设置上下文页（固定前缀查看）.md。
+ * 一页 = 一条请求装了什么，画成“棋盘”：
+ *   - 顶部：总量 + 真实用量 + 384 格棋盘（每格 ≈1/384 请求，按组上色）+ 可点的组标签；
+ *   - 点格子或标签 → 浮起一张卡片，里面是该组的逐条内容，点条目读原文；
+ *   - 当前会话：只画已经进请求的东西；默认开销：把全部可注入字段（含 0）画进来，0 的行点开写「当前没有开销」。
+ * 口径见 docs/设计方案/2026-11-17-上下文页重画（已注入视图）.md。
+ *
+ * 这一页**不提供编辑**：纪律 / 契约的编辑入口在执事档案页（#/settings/partners/<id>），
+ * 这里只留一个跳过去的链接（2026-11-17 用户拍板：能改就全改，不如不在这里改）。
  */
 
 import { esc } from "./markdown.js";
 import { request } from "./net.js";
-import { currentRoute, go } from "./route.js";
+import { parsePartnerExternalId } from "./partner-sessions.js";
+import { currentRoute } from "./route.js";
 import { sectionMarkup } from "./settings-atoms.js";
 import { state } from "./state.js";
-import { closeModal, openModal, toast } from "./ui-atoms.js";
 
-const KIND_LABEL = { chief: "总管", worker: "普通", partner: "执事" };
 const STABILITY = {
 	fixed: { label: "固定", cls: "is-fixed" },
 	session: { label: "按会话冻结", cls: "is-session" },
 	turn: { label: "每轮现算", cls: "is-turn" },
 };
+const ENTRY_TAG = { toolCall: "调用", toolResult: "结果" };
 
-/** 默认页逐节显示的纪律；顺序与宿主注入顺序一致。window 端只允许改这七节。 */
-const DISCIPLINE_EDIT_SECTIONS = [
-	{ key: "partner_verification", title: "验证铁律" },
-	{ key: "partner_ruling", title: "裁决纪律" },
-	{ key: "partner_work_silence", title: "干活期间" },
-	{ key: "partner_grounding", title: "答案接地" },
-	{ key: "partner_artifact_handoff", title: "产物交接" },
-	{ key: "partner_brief_card", title: "汇报卡" },
-	{ key: "partner_attention", title: "提问纪律" },
-];
-const DISCIPLINE_TITLE_BY_KEY = new Map(DISCIPLINE_EDIT_SECTIONS.map((item) => [item.key, item.title]));
-const DISCIPLINE_ORDER = DISCIPLINE_EDIT_SECTIONS.map((item) => item.title);
-const DISCIPLINE_TITLE_SET = new Set(DISCIPLINE_ORDER);
+/** 棋盘：32 列 × 12 行 = 384 格，每格 ≈0.26% 的请求。 */
+const WAFFLE_COLS = 32;
+const WAFFLE_ROWS = 12;
+const WAFFLE_CELLS = WAFFLE_COLS * WAFFLE_ROWS;
+
+/** 浮层卡片单条正文上限与页面一致：超长只在卡片里说“已截断”。 */
+const POP_TEXT_MAX = 3000;
 
 let contextSeq = 0;
 /** session = 看一条当前会话；default = 看每个角色的默认开销（不需要聊天）。 */
 let contextMode = "session";
+/** 最近一次画出来的东西：浮层卡片直接复用，不另算一遍。 */
+let currentParts = [];
+let currentGroups = [];
+let currentData = null;
+let currentBase = 0;
+let popTimer = 0;
 
-function chatKindLabel(chat) {
-	if (chat?.chatKind && KIND_LABEL[chat.chatKind]) return KIND_LABEL[chat.chatKind];
-	const id = String(chat?.conversationId || "");
-	if (id.startsWith("partner-")) return "执事";
-	if (id.startsWith("task-")) return "任务";
-	return "会话";
+/**
+ * 棋盘的基准（只影响「当前会话」）：
+ * - composition：384 格 = 这一条请求本身，看到的是组成占比（默认，因为窗口通常远大于请求）；
+ * - window：384 格 = 上下文窗口，没画到的格子就是没用到的余量。
+ * 选择记在 localStorage，跟着设置页的重渲染走。
+ */
+const WAFFLE_SCALE_KEY = "lifediary.ctxScale";
+
+function readWaffleScale() {
+	try {
+		return localStorage.getItem(WAFFLE_SCALE_KEY) === "window" ? "window" : "composition";
+	} catch {
+		return "composition";
+	}
+}
+
+let waffleScale = readWaffleScale();
+
+/** 执事会话的 conversationId：canonical / side 都解析出真正的 partnerId；默认开销同口径。 */
+function partnerIdOfChat(chat) {
+	return parsePartnerExternalId(chat?.conversationId)?.partnerId || "";
+}
+
+function partnerName(partnerId) {
+	const partner = (state.partners || []).find((item) => item && item.id === partnerId);
+	return partner?.name || "";
+}
+
+/**
+ * 会话在页面上的名字：和「默认开销」的角色选择器保持一致——
+ * 执事会话就是执事的名字（不是“未命名会话”），总管 / worker 用角色名。
+ */
+function chatLabel(chat) {
+	const partnerId = partnerIdOfChat(chat);
+	if (partnerId) return partnerName(partnerId) || chat?.title || "执事";
+	if (chat?.chatKind === "chief") return "总管";
+	if (chat?.chatKind === "worker") return "普通 worker";
+	return chat?.title || "会话";
 }
 
 function chatChoices() {
@@ -51,8 +88,11 @@ function chatChoices() {
 		.filter((chat) => chat && chat.conversationId)
 		.slice()
 		.sort((left, right) => (right.lastAt || 0) - (left.lastAt || 0));
+	// 2026-11-17：只有一条真实会话都没有时才用兜底的「当前会话」。
+	// 有真实会话时不把它插进列表：当前打开的可能是一条还没落库的空会话，
+	// 选中它只会得到「当前没有开销」，看不出这一页有什么用。
 	const current = state.conversationId;
-	if (current && !rows.some((chat) => chat.conversationId === current)) {
+	if (!rows.length && current) {
 		rows.unshift({
 			conversationId: current,
 			title: "当前会话",
@@ -79,12 +119,6 @@ function defaultRoleChoices() {
 	}
 	roles.push({ id: "worker", label: "普通 worker" });
 	return roles;
-}
-
-/** 默认页的执事 id：只给 partner: 前缀的角色；总管 / worker 没有可编辑契约。 */
-function partnerIdOfRole(role) {
-	if (!role || role.kind !== "partner" || typeof role.id !== "string") return "";
-	return role.id.startsWith("partner:") ? role.id.slice("partner:".length) : "";
 }
 
 function roleOptionMarkup(roles, selected) {
@@ -124,58 +158,60 @@ function fmtAt(at) {
 	return `${date.getMonth() + 1}-${String(date.getDate()).padStart(2, "0")} ${time}`;
 }
 
-function firstLine(text, max = 88) {
-	const line = String(text || "").replace(/\s+/g, " ").trim();
-	return line.length > max ? `${line.slice(0, max)}…` : line;
-}
-
 function badgeMarkup(stability) {
 	const meta = STABILITY[stability] || STABILITY.fixed;
 	return `<span class="ctx-badge ${meta.cls}">${meta.label}</span>`;
 }
 
-function extraBadgeMarkup(editable, empty) {
-	return `${editable ? '<span class="ctx-badge is-editable">可编辑</span>' : ""}${empty ? '<span class="ctx-badge is-empty">空字段</span>' : ""}`;
-}
+const CHEVRON =
+	'<svg class="ctx-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>';
 
-function textBlock(text) {
-	return `<pre class="ctx-text">${esc(text || "")}</pre>`;
-}
-
-function itemMarkup({ name, badge = "", desc = "", tokens = 0, body = "", nameClass = "", toolKey = "", editable = false, empty = false, editKey = "", editPartner = "", editTitle = "" }) {
-	const editRow = editKey
-		? `<div class="ctx-edit-row"><button class="ctx-link" type="button" data-ctx-discipline="${esc(editKey)}" data-ctx-discipline-partner="${esc(editPartner)}" data-ctx-discipline-title="${esc(editTitle)}">改这一节</button></div>`
-		: "";
-	return `<div class="ctx-item"${toolKey ? ` data-tool-key="${esc(toolKey.toLowerCase())}" data-tool-tokens="${tokens}"` : ""}>
-    <button class="ctx-item-head" type="button" data-ctx-toggle aria-expanded="false">
-      <span class="ctx-item-name ${nameClass}">${name}</span>
-      ${badge}${extraBadgeMarkup(editable, empty)}
-      <span class="ctx-item-desc">${desc}</span>
-      <span class="ctx-item-tokens">${fmtTokens(tokens)} token</span>
-      <svg class="ctx-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+/** 一行 = 名字 + 徽标 + token；点开是原文，空行点开是「当前没有开销」。 */
+function rowMarkup(row) {
+	const seq = row.seq ? `<span class="ctx-row-seq">${esc(row.seq)}</span>` : "";
+	const tag = row.tag ? `<span class="ctx-row-tag">${esc(row.tag)}</span>` : "";
+	const mono = row.mono ? " is-mono" : "";
+	const text = String(row.text || "");
+	const clipped = text.length > POP_TEXT_MAX;
+	let body;
+	if (row.text) {
+		body = `<pre class="ctx-text">${esc(clipped ? text.slice(0, POP_TEXT_MAX) : text)}</pre>${
+			clipped || row.truncated
+				? `<div class="ctx-trunc">${row.truncated ? "服务端已截断" : "卡片只显示前 3,000 字"} · 共 ${fmtNum(
+						row.chars || text.length,
+					)} 字</div>`
+				: ""
+		}`;
+	} else if (row.note) {
+		body = `<div class="ctx-item-note">${esc(row.note)}</div>`;
+	} else {
+		body = `<div class="ctx-item-empty">当前没有开销</div>`;
+	}
+	return `<div class="ctx-row">
+    <button class="ctx-row-head" type="button" data-ctx-row aria-expanded="false">
+      ${seq}<span class="ctx-row-name${mono}">${esc(row.name)}</span>${tag}${
+				row.stability ? badgeMarkup(row.stability) : ""
+			}
+      <span class="ctx-row-tokens">${fmtTokens(row.tokens)} token</span>
+      ${CHEVRON}
     </button>
-    ${editRow}
-    <div class="ctx-item-body" hidden>${body}</div>
+    <div class="ctx-row-body" hidden>${body}</div>
   </div>`;
 }
 
-function emptyMarkup(text) {
-	return `<div class="ctx-empty">${text}</div>`;
-}
-
-function loadingMarkup() {
-	return `<div class="ctx-loading">读取中…</div>`;
-}
-
 function toolbarMarkup(mode, choices, selected, roles, role) {
+	// 同名会话（同一个执事的两条会话）才补时间，避免两条“小记”分不清。
+	const names = choices.map((chat) => chatLabel(chat));
+	const duplicated = names.some((name, index) => names.indexOf(name) !== index);
 	const options = choices.length
 		? choices
-				.map(
-					(chat) =>
-						`<option value="${esc(chat.conversationId)}"${chat.conversationId === selected ? " selected" : ""}>${esc(
-							(chat.title || "未命名会话").slice(0, 48),
-						)} · ${chatKindLabel(chat)}</option>`,
-				)
+				.map((chat, index) => {
+					const name = names[index];
+					const label = duplicated ? `${name} · ${fmtAt(chat.lastAt)}` : name;
+					return `<option value="${esc(chat.conversationId)}"${
+						chat.conversationId === selected ? " selected" : ""
+					}>${esc(label)}</option>`;
+				})
 				.join("")
 		: `<option value="">还没有会话</option>`;
 	return `<div class="ctx-toolbar">
@@ -185,23 +221,38 @@ function toolbarMarkup(mode, choices, selected, roles, role) {
     </div>
     <select class="set-input ctx-select" id="ctx-chat" ${mode === "session" && choices.length ? "" : "hidden"} ${choices.length ? "" : "disabled"} aria-label="选择要查看上下文的会话">${options}</select>
     <select class="set-input ctx-select" id="ctx-role" ${mode === "default" ? "" : "hidden"} aria-label="选择要查看默认开销的角色">${roleOptionMarkup(roles, role)}</select>
+    <div class="ctx-mode ctx-scale" role="radiogroup" aria-label="棋盘的基准" ${mode === "session" ? "" : "hidden"}>
+      <button type="button" data-ctx-scale="composition" aria-checked="${waffleScale === "composition"}" title="每格 = 请求里的一份，看到的是组成占比">占比</button>
+      <button type="button" data-ctx-scale="window" aria-checked="${waffleScale === "window"}" title="每格 = 上下文窗口的一份，空着的就是没用到的">窗口</button>
+    </div>
     <button class="ghost ctx-refresh" type="button" id="ctx-refresh">刷新</button>
   </div>`;
+}
+
+/** 棋盘格子在骨架里一次建好（384 个），之后只改颜色——这样数字一变是“变色动画”而不是整块重画。 */
+function waffleMarkup() {
+	const cells = [];
+	for (let index = 0; index < WAFFLE_CELLS; index += 1) {
+		cells.push(`<span class="ctx-cell" data-cell="${index}"></span>`);
+	}
+	return `<div class="ctx-waffle" id="ctx-waffle" role="img" aria-label="请求内容的格子图，每格约 0.26%">${cells.join(
+		"",
+	)}</div>`;
 }
 
 function heroMarkup() {
 	return `<div class="card ctx-hero" id="ctx-hero">
     <div class="ctx-hero-top">
       <div class="ctx-hero-copy">
-        <div class="ctx-total"><b id="ctx-total">—</b><span>token · 固定前缀</span></div>
+        <div class="ctx-total"><b id="ctx-total">—</b><span id="ctx-total-unit">token · 已注入</span></div>
         <div class="ctx-sub" id="ctx-sub">选择会话后读取…</div>
       </div>
       <div class="ctx-hero-side">
         <div class="ctx-meter" id="ctx-meter"><span class="ctx-meter-label">上一轮</span><b>—</b></div>
       </div>
     </div>
-    <div class="ctx-stack" id="ctx-stack"><span class="ctx-stack-empty"></span></div>
-    <ul class="ctx-legend" id="ctx-legend"></ul>
+    ${`<div class="ctx-hero-body">${waffleMarkup()}<div class="ctx-chips" id="ctx-chips"></div></div>`}
+    <div class="ctx-note" id="ctx-note" hidden></div>
   </div>`;
 }
 
@@ -219,85 +270,197 @@ function contextSettingsMarkup() {
 	contextMode = hasRealChats ? "session" : "default";
 	const roles = defaultRoleChoices();
 	const selectedRole = roles[0]?.id || "chief";
-	const hasChat = contextMode === "default" || Boolean(selected);
 	return `<div id="ctx-content" data-mode="${contextMode}">
-    ${sectionMarkup("上下文", heroMarkup(), "", toolbarMarkup(contextMode, choices, selected, roles, selectedRole))}
     ${sectionMarkup(
-			"系统提示词",
-			`<div class="card" id="ctx-system">${hasChat ? loadingMarkup() : emptyMarkup("还没有会话，先聊一轮再来。")}</div>`,
-			'id="ctx-sec-system"',
-			`<div class="ctx-head-actions"><span class="ctx-count" id="ctx-system-count"></span><button class="ghost" type="button" data-ctx-toggle-all="system">展开全部</button></div>`,
-		)}
-    ${sectionMarkup(
-			"工具定义",
-			`<div class="card" id="ctx-tools">${hasChat ? loadingMarkup() : emptyMarkup("还没有会话，先聊一轮再来。")}</div>`,
-			'id="ctx-sec-tools"',
-			`<div class="ctx-head-actions">
-         <input class="set-input ctx-filter" id="ctx-tool-filter" type="search" placeholder="筛工具名或说明" aria-label="筛选工具" />
-         <span class="ctx-count" id="ctx-tools-count"></span>
-         <button class="ghost" type="button" data-ctx-toggle-all="tools">展开全部</button>
-       </div>`,
-		)}
-    ${sectionMarkup(
-			"技能",
-			`<div class="card" id="ctx-skills">${hasChat ? loadingMarkup() : emptyMarkup("还没有会话，先聊一轮再来。")}</div>`,
-			'id="ctx-sec-skills"',
-			`<div class="ctx-head-actions"><span class="ctx-count" id="ctx-skills-count"></span><button class="ghost" type="button" data-ctx-go="skills">管理技能</button></div>`,
-		)}
-    ${sectionMarkup(
-			"记忆",
-			`<div class="card" id="ctx-memory">${hasChat ? loadingMarkup() : emptyMarkup("还没有会话，先聊一轮再来。")}</div>`,
-			'id="ctx-sec-memory"',
-			`<div class="ctx-head-actions"><span class="ctx-count" id="ctx-memory-count"></span><button class="ghost" type="button" data-ctx-go="memory">管理记忆</button></div>`,
-		)}
-    ${sectionMarkup(
-			"会变的部分",
-			`<div class="card ctx-change-card" id="ctx-changing">${hasChat ? loadingMarkup() : emptyMarkup("还没有会话，先聊一轮再来。")}</div>`,
-			'id="ctx-sec-changing"',
+			"上下文",
+			`${toolbarMarkup(contextMode, choices, selected, roles, selectedRole)}${heroMarkup()}`,
 		)}
   </div>`;
 }
 
-function setCount(id, text) {
-	const node = document.getElementById(id);
-	if (node) node.textContent = text;
+/** 当前会话的分段：六块都算进总量（这才是这一条请求的真实体积）。 */
+function sessionParts(data) {
+	const last = data.memory.last;
+	const injectTokens =
+		(last ? Number(last.tokens || 0) : 0) +
+		(last?.others ?? []).reduce((sum, item) => sum + Number(item.tokens || 0), 0);
+	return [
+		{ key: "system", label: "系统提示词", tokens: Number(data.system.tokens || 0) },
+		{ key: "tools", label: "工具定义", tokens: Number(data.tools.tokens || 0) },
+		{ key: "skills", label: "技能", tokens: Number(data.skills.tokens || 0) },
+		{ key: "inject", label: "临时注入", tokens: injectTokens },
+		{
+			key: "conversation",
+			label: "对话",
+			tokens: Number(data.changing?.messages?.tokens || 0) + Number(data.changing?.toolCalls?.tokens || 0),
+		},
+		{ key: "toolResults", label: "工具结果", tokens: Number(data.changing?.toolResults?.tokens || 0) },
+	];
+}
+
+function defaultParts(data) {
+	return [
+		{ key: "system", label: "系统提示词", tokens: Number(data.system.tokens || 0) },
+		{ key: "tools", label: "工具定义", tokens: Number(data.tools.tokens || 0) },
+		{ key: "skills", label: "技能", tokens: Number(data.skills.tokens || 0) },
+		{ key: "memory", label: "记忆", tokens: 0, note: `预算 ${fmtNum(data.memory.limit)} 条 / ${fmtNum(data.memory.maxChars)} 字` },
+	];
+}
+
+/**
+ * 「窗口」视图里给“没用到的余量”留的**固定面积**：384 格的 30%。
+ * 参考 magpie 的做法——真实窗口通常远大于一条请求（1M 里用 6K 只有 0.6%），
+ * 按真比例画出来几乎空图，看不出各组的大小；固定留一块余量，已用的部分反而看得清。
+ * 面积是示意的，数字还是真的（图例写真实剩余 token，右上角写真实占用率）。
+ */
+const WAFFLE_RESERVED_CELLS = 115;
+
+/** 余量格子数：组成视图为 0；窗口视图取“固定 30%”与“真实剩余”的较小者（用到 70% 以上时按真的画）。 */
+function waffleEmptyCells(parts, base) {
+	const sum = parts.reduce((total, part) => total + Number(part.tokens || 0), 0);
+	const baseTokens = Number(base) || 0;
+	if (baseTokens <= sum) return 0;
+	const honest = Math.max(0, Math.round((1 - sum / baseTokens) * WAFFLE_CELLS));
+	return Math.min(WAFFLE_RESERVED_CELLS, honest);
+}
+
+/**
+ * 384 格的分配：组间按占比取整（最大余数补齐），每组至少一格。
+ * `budget` = 允许画的格子数（窗口视图扣掉余量那一条）。
+ * 返回每格属于哪个组；空字符串 = 空格子（余量，或总量为 0）。
+ */
+function wafflePlan(parts, budget) {
+	const shown = parts.filter((part) => Number(part.tokens) > 0);
+	const plan = [];
+	if (!shown.length) return new Array(WAFFLE_CELLS).fill("");
+	const sum = shown.reduce((total, part) => total + Number(part.tokens), 0) || 1;
+	const slots = Math.max(shown.length, Math.min(WAFFLE_CELLS, Number(budget) || WAFFLE_CELLS));
+	const want = shown.map((part) => (Number(part.tokens) / sum) * slots);
+	const got = want.map((value) => Math.max(1, Math.floor(value)));
+	let left = slots - got.reduce((total, value) => total + value, 0);
+	const order = want.map((value, index) => [value - Math.floor(value), index]).sort((a, b) => b[0] - a[0]);
+	for (let index = 0; left > 0; index = (index + 1) % order.length, left -= 1) got[order[index][1]] += 1;
+	for (let index = got.length - 1; left < 0 && index >= 0; index -= 1) {
+		while (left < 0 && got[index] > 1) {
+			got[index] -= 1;
+			left += 1;
+		}
+	}
+	shown.forEach((part, index) => {
+		for (let cell = 0; cell < got[index]; cell += 1) plan.push(part.key);
+	});
+	while (plan.length < WAFFLE_CELLS) plan.push("");
+	return plan;
+}
+
+/**
+ * 列数只能取 384 的约数，行数才是整数——否则最后一行会剩下几个空格子，
+ * 深浅两档配色本来就接近底色，那一排空格看着像“这一组突然变长”。
+ * 取“格子宽度不低于 13px 的最大列数”，宽窗口格子接近正方，窄窗口自动多排几行。
+ */
+const WAFFLE_COL_CHOICES = [96, 64, 48, 32, 24, 16, 12, 8];
+
+function fitWaffleColumns() {
+	const grid = document.getElementById("ctx-waffle");
+	if (!grid) return;
+	const width = grid.clientWidth;
+	if (!width) return;
+	let cols = 8;
+	for (const candidate of WAFFLE_COL_CHOICES) {
+		if (width / candidate >= 13) {
+			cols = candidate;
+			break;
+		}
+	}
+	if (grid.dataset.cols === String(cols)) return;
+	grid.dataset.cols = String(cols);
+	grid.style.gridTemplateColumns = `repeat(${cols}, minmax(0, 1fr))`;
+}
+
+function paintWaffle(parts, base) {
+	const grid = document.getElementById("ctx-waffle");
+	if (!grid) return;
+	fitWaffleColumns();
+	const empty = waffleEmptyCells(parts, base);
+	const plan = wafflePlan(parts, WAFFLE_CELLS - empty);
+	const colors = new Map(parts.map((part, index) => [part.key, index + 1]));
+	const cells = grid.children;
+	for (let index = 0; index < WAFFLE_CELLS; index += 1) {
+		const cell = cells[index];
+		if (!(cell instanceof HTMLElement)) continue;
+		const key = plan[index] || "";
+		cell.dataset.group = key;
+		// 只改颜色类：颜色有 transition，数据一变就是渐变，不是闪一下。
+		const color = colors.get(key) || 0;
+		cell.className = `ctx-cell${color ? ` is-g${color}` : ""}${key ? "" : " is-free"}`;
+	}
+}
+
+function renderChips(parts, total, windowInfo) {
+	const box = document.getElementById("ctx-chips");
+	if (!box) return;
+	const shown = parts.filter((part) => Number(part.tokens) > 0 || part.note);
+	box.innerHTML = shown
+		.map((part, index) => {
+			const color = parts.indexOf(part) + 1;
+			const meta = part.note
+				? part.note
+				: `${fmtTokens(part.tokens)} · ${total > 0 ? Math.round((part.tokens / total) * 100) : 0}%`;
+			return `<button class="ctx-chip" type="button" data-ctx-open="${esc(part.key)}" data-ctx-chip="${esc(
+				part.key,
+			)}"><span class="ctx-dot" style="background:var(--ctx-g${((color - 1) % 6) + 1})"></span><span class="ctx-chip-name">${esc(
+				part.label,
+			)}</span><span class="ctx-chip-num">${meta}</span></button>`;
+		})
+		.join("");
+	// 窗口视图才需要解释“那些空格子是什么”：就是还没用到的余量，点不开。
+	// 面积固定留 30%（示意），数字写真实剩余。
+	if (windowInfo && windowInfo.window > windowInfo.used) {
+		const unused = windowInfo.window - windowInfo.used;
+		box.insertAdjacentHTML(
+			"beforeend",
+			`<div class="ctx-chip is-unused" title="棋盘里固定留三分之一表示没用到的余量，面积是示意的；真实剩余 ${fmtNum(
+				unused,
+			)} token"><span class="ctx-dot"></span><span class="ctx-chip-name">未使用</span><span class="ctx-chip-num">${fmtTokens(
+				unused,
+			)}</span></div>`,
+		);
+	}
+	if (total > 0) {
+		box.insertAdjacentHTML(
+			"beforeend",
+			`<button class="ctx-chip is-all" type="button" data-ctx-open="__all"><span class="ctx-chip-name">全部</span><span class="ctx-chip-num">${shown.length} 组</span></button>`,
+		);
+	}
 }
 
 function renderHero(data) {
 	const isDefault = Boolean(data.default);
-	const memoryTokens = data.memory.last?.tokens ?? 0;
-	const parts = [
-		{ key: "system", label: "系统提示词", tokens: data.system.tokens, note: "" },
-		{ key: "tools", label: "工具定义", tokens: data.tools.tokens, note: "" },
-		{ key: "skills", label: "技能", tokens: data.skills.tokens, note: "" },
-		{
-			key: "memory",
-			label: "记忆",
-			tokens: memoryTokens,
-			note: isDefault ? `预算 ${fmtNum(data.memory.limit)} 条` : "",
-		},
-	];
+	const parts = isDefault ? defaultParts(data) : sessionParts(data);
+	currentParts = parts;
 	const total = parts.reduce((sum, part) => sum + part.tokens, 0);
+
 	const totalNode = document.getElementById("ctx-total");
 	if (totalNode) totalNode.textContent = total > 0 ? `≈${fmtNum(total)}` : "—";
+	const unit = document.getElementById("ctx-total-unit");
+	if (unit) unit.textContent = isDefault ? "token · 默认基线" : "token · 已注入";
 
 	const sub = document.getElementById("ctx-sub");
 	if (sub) {
 		const memoryText = isDefault
-			? `记忆预算 ${fmtNum(data.memory.limit)} 条 / ${fmtNum(data.memory.maxChars)} 字`
+			? ""
 			: data.memory.enabled
-				? data.memory.last
-					? data.memory.last.items > 0
-						? `记忆 ${data.memory.last.items} 条`
-						: "记忆未召回"
-					: "记忆待下一轮"
-				: "记忆未启用";
+				? data.memory.last?.items > 0
+					? ` · 记忆 ${data.memory.last.items} 条`
+					: ""
+				: " · 记忆未启用";
+		const conversationText = isDefault ? "" : ` · 对话 ${(data.entries || []).length} 条`;
 		sub.textContent =
 			total > 0
 				? isDefault
-					? `${data.role?.label || "默认"} · 系统 ${data.system.sections.length + 1} 个字段 · 工具 ${data.tools.count} 个 · 技能 ${data.skills.count} 个 · ${memoryText}`
-					: `系统 ${data.system.sections.length + 1} 段 · 工具 ${data.tools.count} 个 · 技能 ${data.skills.count} 个 · ${memoryText}`
-				: "这个会话还没有可读的上下文";
+					? `${data.role?.label || "默认"} · 系统 ${data.system.sections.length} 个字段 · 工具 ${data.tools.count} 个 · 技能 ${data.skills.count} 个`
+					: `${data.chatKind === "partner" ? "执事会话" : "会话"} · 系统 ${data.system.sections.length} 段 · 工具 ${data.tools.count} 个 · 技能 ${data.skills.count} 个${memoryText}${conversationText}`
+				: "当前没有开销";
 	}
 
 	const meter = document.getElementById("ctx-meter");
@@ -315,443 +478,352 @@ function renderHero(data) {
 		}
 	}
 
-	const stack = document.getElementById("ctx-stack");
-	const legend = document.getElementById("ctx-legend");
-	if (stack) {
-		stack.innerHTML =
-			total > 0
-				? parts
-						.filter((part) => part.tokens > 0)
-						.map(
-							(part) =>
-								`<span class="ctx-seg" style="width:${(part.tokens / total) * 100}%;background:var(--ctx-seg-${parts.indexOf(part) + 1})"></span>`,
-						)
-						.join("")
-				: `<span class="ctx-stack-empty"></span>`;
+	// 棋盘基准：会话版可以切成“按窗口”（余量留白），默认开销永远按组成占比。
+	const usedTokens = Number(data.usage?.used);
+	const windowTokens = Number(data.usage?.window);
+	const windowInfo =
+		!isDefault && Number.isFinite(usedTokens) && usedTokens > 0 && Number.isFinite(windowTokens) && windowTokens > 0
+			? { used: usedTokens, window: windowTokens }
+			: null;
+	const scaleMode = !isDefault && waffleScale === "window" && windowInfo && windowInfo.window > total ? "window" : "composition";
+	// 没跑过一轮（没有 usage）就没有窗口数：这时把「窗口」这个选项置灰，别让人选了却画不出来。
+	for (const button of document.querySelectorAll("[data-ctx-scale]")) {
+		const isWindow = button.dataset.ctxScale === "window";
+		button.setAttribute("aria-checked", String(button.dataset.ctxScale === scaleMode));
+		button.disabled = isWindow && (!windowInfo || Boolean(isDefault));
 	}
-	if (legend) {
-		legend.innerHTML =
-			total > 0
-				? parts
-						.map(
-							(part, index) =>
-								`<li><span class="ctx-dot" style="background:var(--ctx-seg-${(index % 6) + 1})"></span><span class="ctx-name">${part.label}</span><span class="ctx-num">${part.note ? esc(part.note) : `${fmtTokens(part.tokens)} token · ${Math.round((part.tokens / total) * 100)}%`}</span></li>`,
-						)
-						.join("")
-				: "";
+	const root = document.getElementById("ctx-content");
+	if (root) root.dataset.scale = scaleMode;
+	const grid = document.getElementById("ctx-waffle");
+	if (grid) {
+		grid.setAttribute(
+			"aria-label",
+			scaleMode === "window"
+				? "上下文占用格子图：已用的按占比铺满，没用到的余量固定留一块"
+				: "请求组成格子图：每格约这一条请求的 0.26%",
+		);
 	}
+
+	paintWaffle(parts, scaleMode === "window" ? windowInfo.window : total);
+	currentBase = scaleMode === "window" ? windowInfo.window : total;
+	renderChips(parts, total, scaleMode === "window" ? windowInfo : null);
 	return total;
 }
 
-function parseDisciplineSource(source) {
-	const sections = new Map();
-	let current = null;
-	let buffer = [];
-	const flush = () => {
-		if (current) sections.set(current, buffer.join("\n").trim());
-		buffer = [];
-	};
-	for (const line of String(source || "").split(/\r?\n/)) {
-		const heading = /^##\s+(.+?)\s*$/.exec(line);
-		if (heading) {
-			flush();
-			const title = heading[1] || "";
-			current = DISCIPLINE_TITLE_SET.has(title) ? title : null;
-			continue;
+/** 分组列表：两个模式同一套，差别只在“哪些行在”和“0 怎么办”。 */
+function buildGroups(data) {
+	const isDefault = Boolean(data.default);
+	const groups = [];
+
+	// 1) 临时注入：只有会话版有；服务端只在真跑过一轮时才有记录。
+	if (!isDefault) {
+		const rows = [];
+		const last = data.memory.last;
+		if (data.memory.enabled && last) {
+			if (last.text) rows.push({ name: "记忆召回", tokens: last.tokens, text: last.text, stability: "turn" });
+			for (const other of last.others || []) {
+				rows.push({
+					name: other.id,
+					tokens: other.tokens,
+					text: other.text || "",
+					chars: other.chars,
+					truncated: other.truncated,
+					mono: true,
+				});
+			}
 		}
-		if (current) buffer.push(line);
+		const visible = rows.filter((row) => Number(row.tokens) > 0);
+		if (visible.length) {
+			groups.push({
+				key: "inject",
+				label: "临时注入",
+				count: `${visible.length} 条`,
+				tokens: visible.reduce((sum, row) => sum + Number(row.tokens || 0), 0),
+				rows: visible,
+			});
+		}
 	}
-	flush();
-	return sections;
+
+	// 2) 系统提示词：会话版藏 0，默认版全列。系统底稿（system.content）不再单独占一行。
+	const systemRows = [];
+	for (const section of data.system.sections || []) {
+		if (!isDefault && Number(section.tokens) <= 0) continue;
+		systemRows.push({
+			name: section.label,
+			tokens: section.tokens,
+			text: section.empty ? "" : section.text,
+			stability: section.stability,
+		});
+	}
+	if (systemRows.length) {
+		groups.push({
+			key: "system",
+			label: "系统提示词",
+			count: `${systemRows.length} ${isDefault ? "个字段" : "段"}`,
+			tokens: Number(data.system.tokens || 0),
+			rows: systemRows,
+		});
+	}
+
+	// 3) 工具定义：只有名字与 token，描述不进页面（展开才是真实 JSON Schema）。
+	const toolRows = (data.tools.items || []).map((tool) => ({
+		name: tool.name,
+		tokens: tool.tokens,
+		text: tool.schema,
+		mono: true,
+	}));
+	if (toolRows.length) {
+		groups.push({
+			key: "tools",
+			label: "工具定义",
+			count: `${data.tools.count} 个`,
+			tokens: Number(data.tools.tokens || 0),
+			rows: toolRows,
+		});
+	}
+
+	// 4) 技能：索引一段，属于系统消息里的一节。
+	if (data.skills.text) {
+		groups.push({
+			key: "skills",
+			label: "技能",
+			count: `${data.skills.count} 个技能`,
+			tokens: Number(data.skills.tokens || 0),
+			rows: [
+				{ name: "技能索引", tokens: data.skills.tokens, text: data.skills.text, stability: isDefault ? "fixed" : "session" },
+			],
+		});
+	}
+
+	// 5) 对话与工具：已经进请求的每一条，按真实顺序；默认版没有会话就没有这一组。
+	if (!isDefault) {
+		const entryRows = (data.entries || []).map((entry, position) => ({
+			name: entry.label,
+			tokens: entry.tokens,
+			text: entry.text,
+			chars: entry.chars,
+			truncated: entry.truncated,
+			// 序号按“已经进请求的条目”从 1 数，不按消息下标（否则第一条从 #2 开始，看着像丢了）。
+			seq: `#${position + 1}`,
+			tag: ENTRY_TAG[entry.kind] || "",
+		}));
+		if (entryRows.length) {
+			groups.push({
+				key: "conversation",
+				label: "对话与工具",
+				count: `${entryRows.length} 条`,
+				tokens: entryRows.reduce((sum, row) => sum + Number(row.tokens || 0), 0),
+				rows: entryRows,
+			});
+		}
+	}
+
+	// 6) 记忆：默认版只有预算，没有行；给浮层一个“记忆预算”卡片。
+	if (isDefault && data.memory.enabled) {
+		groups.push({
+			key: "memory",
+			label: "记忆",
+			count: "预算",
+			tokens: 0,
+			rows: [
+				{
+					name: "召回预算",
+					tokens: 0,
+					text: "",
+					note: `每轮最多 ${fmtNum(data.memory.limit)} 条 / ${fmtNum(data.memory.maxChars)} 字；默认开销按全新会话算，不含真实召回。`,
+				},
+			],
+		});
+	}
+
+	return groups;
 }
 
-function serializeDisciplineSource(sections) {
-	return DISCIPLINE_ORDER
-		.filter((title) => sections.has(title))
-		.map((title) => `## ${title}\n${String(sections.get(title) || "").trim()}`.trim())
-		.join("\n\n");
+/** 浮层里的一组：组头 + 行。 */
+function groupSectionMarkup(group, color) {
+	return `<div class="ctx-pop-group">
+    <div class="ctx-pop-group-head">
+      <span class="ctx-dot" style="background:var(--ctx-g${((color - 1) % 6) + 1})"></span>
+      <b>${esc(group.label)}</b>
+      <span class="ctx-pop-group-num">${esc(group.count)} · ${fmtTokens(group.tokens)} token</span>
+    </div>
+    <div class="ctx-group-body">${group.rows.map(rowMarkup).join("")}</div>
+  </div>`;
+}
+
+function ensurePopover() {
+	let pop = document.getElementById("ctx-pop");
+	if (pop) return pop;
+	const host = document.getElementById("ctx-content");
+	if (!host) return null;
+	pop = document.createElement("div");
+	pop.id = "ctx-pop";
+	pop.className = "ctx-pop";
+	pop.hidden = true;
+	pop.setAttribute("role", "dialog");
+	pop.setAttribute("aria-modal", "false");
+	host.append(pop);
+	pop.addEventListener("click", (event) => {
+		const target = event.target instanceof Element ? event.target : null;
+		if (!target) return;
+		if (target.closest("[data-ctx-pop-close]")) {
+			closePopover();
+			return;
+		}
+		const rowHead = target.closest("[data-ctx-row]");
+		if (rowHead) toggleRow(rowHead);
+	});
+	return pop;
 }
 
 /**
- * 默认页逐节编辑：只改当前标题，其他已覆盖的节原样保留。
- * 没有覆盖时只写这一节，不把整份宿主默认抄成覆盖文件。
+ * 从格子 / 标签下面浮起一张卡片：先量尺寸再定位，默认贴在触发点下方，
+ * 下面没地方就翻到上方；transform-origin 落在触发点上，缩放看起来是从那块长出来的。
  */
-function openDisciplineEditor(partnerId, key, title) {
-	if (!partnerId || !DISCIPLINE_TITLE_BY_KEY.has(key)) return;
-	openModal(`改纪律 · ${title}`, (body) => {
-		body.innerHTML = `
-      <div id="ctx-disc-loading" class="modal-hint">读取中…</div>
-      <div id="ctx-disc-editor" hidden>
-        <textarea class="pf-contract" id="ctx-disc-text" rows="10" spellcheck="false" aria-label="纪律这一节"></textarea>
-        <p class="modal-hint" id="ctx-disc-hint"></p>
-        <div id="ctx-disc-red" hidden>
-          <p class="pf-inject-readonly-title">主人数据红线（固定）</p>
-          <pre class="pf-inject-text" id="ctx-disc-red-text"></pre>
-        </div>
-        <div class="modal-actions">
-          <button class="ghost" type="button" data-modal-cancel>关闭</button>
-          <button class="ghost" type="button" id="ctx-disc-reset" disabled>撤销</button>
-          <button class="ghost" type="button" id="ctx-disc-restore" disabled>恢复这一节默认</button>
-          <button class="btn-primary" type="button" id="ctx-disc-save" disabled>保存</button>
-        </div>
-      </div>`;
-		const loading = body.querySelector("#ctx-disc-loading");
-		const editor = body.querySelector("#ctx-disc-editor");
-		const area = body.querySelector("#ctx-disc-text");
-		const hint = body.querySelector("#ctx-disc-hint");
-		const red = body.querySelector("#ctx-disc-red");
-		const redText = body.querySelector("#ctx-disc-red-text");
-		const save = body.querySelector("#ctx-disc-save");
-		const reset = body.querySelector("#ctx-disc-reset");
-		const restore = body.querySelector("#ctx-disc-restore");
-		let sections = new Map();
-		let original = "";
-		let saving = false;
-		let loaded = false;
-		const setHint = (text, bad = false) => {
-			if (!hint) return;
-			hint.textContent = text || "";
-			hint.classList.toggle("is-bad", Boolean(bad));
-		};
-		const refresh = () => {
-			const dirty = Boolean(area) && area.value !== original;
-			if (save) save.disabled = !loaded || saving || !dirty;
-			if (reset) reset.disabled = !loaded || saving || !dirty;
-			if (restore) restore.disabled = !loaded || saving || !sections.has(title);
-		};
-		const saveSource = async (source, successMessage) => {
-			if (saving) return;
-			saving = true;
-			setHint("保存中…");
-			refresh();
-			try {
-				const response = source.trim()
-					? await request(`/api/v1/partners/${encodeURIComponent(partnerId)}/discipline`, {
-							method: "PUT",
-							body: JSON.stringify({ discipline: source }),
-							cache: "no-store",
-						})
-					: await request(`/api/v1/partners/${encodeURIComponent(partnerId)}/discipline`, {
-							method: "DELETE",
-							cache: "no-store",
-						});
-				const data = await response.json().catch(() => ({}));
-				if (!response.ok || !data.ok) {
-					throw new Error(data.message || data.error || `HTTP ${response.status}`);
-				}
-				toast(successMessage);
-				closeModal();
-				void loadContext();
-			} catch (error) {
-				setHint(`没存成：${error instanceof Error ? error.message : String(error)}`, true);
-				saving = false;
-				refresh();
-			}
-		};
-		body.querySelector("[data-modal-cancel]")?.addEventListener("click", () => closeModal());
-		area?.addEventListener("input", () => {
-			setHint("");
-			refresh();
+function openPopover(anchor, { title, color, meta, body, footer = "" }) {
+	const pop = ensurePopover();
+	const host = document.getElementById("ctx-content");
+	if (!pop || !host || !anchor) return;
+	clearTimeout(popTimer);
+	pop.innerHTML = `<div class="ctx-pop-head">
+      <span class="ctx-dot" style="background:var(--ctx-g${((Number(color) - 1) % 6) + 1})"></span>
+      <b>${esc(title)}</b>
+      <span class="ctx-pop-meta">${meta}</span>
+      <button class="ctx-pop-close" type="button" data-ctx-pop-close aria-label="关闭">×</button>
+    </div>
+    <div class="ctx-pop-body">${body}</div>
+    ${footer ? `<div class="ctx-note">${footer}</div>` : ""}`;
+	pop.hidden = false;
+	pop.classList.remove("is-open");
+	pop.style.visibility = "hidden";
+	const hostRect = host.getBoundingClientRect();
+	const rect = anchor.getBoundingClientRect();
+	const width = pop.offsetWidth || 380;
+	const height = pop.offsetHeight || 320;
+	let left = rect.left - hostRect.left + rect.width / 2 - width / 2;
+	left = Math.max(10, Math.min(hostRect.width - width - 10, left));
+	const below = rect.bottom - hostRect.top + 10;
+	const flip = hostRect.top + below + height > window.innerHeight - 10;
+	const top = Math.max(10, flip ? rect.top - hostRect.top - height - 10 : below);
+	const originX = Math.max(8, Math.min(width - 8, rect.left + rect.width / 2 - hostRect.left - left));
+	pop.style.left = `${Math.round(left)}px`;
+	pop.style.top = `${Math.round(top)}px`;
+	pop.style.transformOrigin = `${Math.round(originX)}px ${flip ? Math.round(height) : 0}px`;
+	pop.style.visibility = "";
+	// 量完尺寸后强制一次 layout，让 transition 从“缩着”的那一帧开始；
+	// 不用 requestAnimationFrame：标签页不在前台时 rAF 会被节流，浮层会一直停在 opacity 0。
+	void pop.offsetWidth;
+	pop.classList.add("is-open");
+}
+
+function closePopover() {
+	const pop = document.getElementById("ctx-pop");
+	if (!pop || pop.hidden) return;
+	pop.classList.remove("is-open");
+	clearTimeout(popTimer);
+	popTimer = setTimeout(() => {
+		pop.hidden = true;
+	}, 170);
+}
+
+function openGroup(key, anchor) {
+	if (key === "__all") {
+		const total = currentParts.reduce((sum, part) => sum + part.tokens, 0);
+		const body = currentGroups
+			.map((group) => groupSectionMarkup(group, currentParts.findIndex((part) => part.key === group.key) + 1))
+			.join("");
+		openPopover(anchor, {
+			title: "全部内容",
+			color: 1,
+			meta: `${currentGroups.length} 组 · ${fmtTokens(total)} token`,
+			body: body || `<div class="ctx-item-empty">当前没有开销</div>`,
 		});
-		reset?.addEventListener("click", () => {
-			if (!area) return;
-			area.value = original;
-			setHint("");
-			refresh();
-		});
-		restore?.addEventListener("click", () => {
-			if (!sections.has(title)) {
-				setHint("这一节本来就在用宿主默认。");
-				return;
-			}
-			const next = new Map(sections);
-			next.delete(title);
-			void saveSource(serializeDisciplineSource(next), `已恢复「${title}」的宿主默认`);
-		});
-		save?.addEventListener("click", () => {
-			if (!area || !loaded) return;
-			const next = new Map(sections);
-			// 显式保留标题（正文可为空）：空节 = 删除这一条，而不是回默认。
-			next.set(title, area.value.trim());
-			void saveSource(serializeDisciplineSource(next), area.value.trim() ? "纪律这一节已保存" : "已清空这一节覆盖");
-		});
-		void (async () => {
-			try {
-				const response = await request(`/api/v1/partners/${encodeURIComponent(partnerId)}/discipline`, {
-					cache: "no-store",
-				});
-				const data = await response.json().catch(() => ({}));
-				if (!response.ok || !data.ok) {
-					throw new Error(data.message || data.error || `HTTP ${response.status}`);
-				}
-				if (!data.editable) {
-					throw new Error("纪律覆盖未启用（PARTNER_DISCIPLINE_EDIT=false）");
-				}
-				const override = String(data.override || "");
-				const fallback = String(data.defaultDiscipline || "");
-				sections = parseDisciplineSource(override);
-				const defaultSections = parseDisciplineSource(fallback);
-				original = sections.get(title) ?? defaultSections.get(title) ?? "";
-				if (area) area.value = original;
-				if (data.redLine && red && redText) {
-					red.hidden = false;
-					redText.textContent = String(data.redLine);
-				}
-				loaded = true;
-				if (loading) loading.hidden = true;
-				if (editor) editor.hidden = false;
-				refresh();
-			} catch (error) {
-				if (loading) loading.textContent = `读取失败：${error instanceof Error ? error.message : String(error)}`;
-			}
-		})();
+		return;
+	}
+	const group = currentGroups.find((item) => item.key === key);
+	const index = currentParts.findIndex((part) => part.key === key);
+	const part = currentParts[index];
+	const tokens = group?.tokens ?? part?.tokens ?? 0;
+	// 0 token 的组（默认开销里的“记忆：预算 16 条”）不列一堆 0，只留一句话。
+	const rows = Array.isArray(group?.rows) ? group.rows : [];
+	const allZero = rows.every((row) => !Number(row.tokens));
+	// 组名 + 数量 + token；0 token 的组用 it 自己的说明（如预算）代替“0 token”，避免“预算 · 0 token · 预算…”。
+	const meta = tokens === 0 && part?.note ? part.note : `${group?.count ? `${esc(group.count)} · ` : ""}${fmtTokens(tokens)} token`;
+	openPopover(anchor, {
+		title: group?.label || part?.label || key,
+		color: index + 1,
+		meta,
+		body:
+			group && !allZero
+				? rows.map((row) => rowMarkup(row)).join("")
+				: `<div class="ctx-item-empty">当前没有开销</div>`,
 	});
 }
 
-function renderSystem(data) {
-	const card = document.getElementById("ctx-system");
-	if (!card) return;
-	const partnerId = data.default ? partnerIdOfRole(data.role) : "";
-	const items = [];
-	// 系统底稿也是系统提示词的一层：空的时候不能整行消失，
-	// 否则用户会以为“没有这个字段”，而不是“这个字段是 0 token”。
-	const base = data.system.content || "";
-	// 服务端只给 system.tokens 总数；底稿这一行用它减掉各 section（每段各自向上取整）。
-	const baseTokens =
-		Number(data.system.tokens || 0) -
-		data.system.sections.reduce((sum, section) => sum + Number(section.tokens || 0), 0);
-	items.push(
-		itemMarkup({
-			name: "系统底稿",
-			badge: badgeMarkup("fixed"),
-			desc: "",
-			tokens: Math.max(0, baseTokens),
-			empty: !base,
-			body: base ? textBlock(base) : "",
-		}),
-	);
-	for (const section of data.system.sections) {
-		const empty = Boolean(section.empty);
-		const editKey = partnerId && DISCIPLINE_TITLE_BY_KEY.has(section.key) ? section.key : "";
-		const editTitle = editKey ? DISCIPLINE_TITLE_BY_KEY.get(editKey) : "";
-		items.push(
-			itemMarkup({
-				name: esc(section.label),
-				badge: badgeMarkup(section.stability),
-				desc: esc(section.key),
-				tokens: section.tokens,
-				editable: Boolean(section.editable),
-				empty,
-				editKey,
-				editPartner: partnerId,
-				editTitle,
-				body: empty ? "" : textBlock(section.text),
-			}),
-		);
-	}
-	setCount("ctx-system-count", `${items.length} ${data.default ? "个字段" : "段"} · ${fmtTokens(data.system.tokens)} token`);
-	const editLink = partnerId
-		? `<div class="ctx-note"><button class="ctx-link" type="button" data-ctx-partner="${esc(partnerId)}">去档案页逐节改</button></div>`
-		: "";
-	card.innerHTML = items.length
-		? `${items.join("")}${editLink}`
-		: emptyMarkup(data.default ? "这个角色还没有系统提示词段。" : "这个会话还没有系统提示词段。");
-}
+let currentPartnerIdValue = "";
 
-function renderTools(data) {
-	const card = document.getElementById("ctx-tools");
-	if (!card) return;
-	card.dataset.toolCount = String(data.tools.count);
-	card.dataset.toolTokens = String(data.tools.tokens);
-	const items = data.tools.items.map((tool) =>
-		itemMarkup({
-			name: esc(tool.name),
-			badge: "",
-			desc: esc(firstLine(tool.description)),
-			tokens: tool.tokens,
-			body: textBlock(tool.schema),
-			nameClass: "ctx-mono",
-			toolKey: `${tool.name} ${tool.description}`,
-		}),
-	);
-	card.innerHTML = items.length
-		? `${items.join("")}<div class="ctx-empty ctx-filter-empty" id="ctx-tools-empty" hidden>没有匹配的工具，换个词试试。</div>`
-		: emptyMarkup(data.default ? "这个角色没有挂工具。" : "这个会话没有挂工具（或工具投影还没生成）。");
-	applyToolFilter(document.getElementById("ctx-tool-filter")?.value || "");
-}
-
-function renderSkills(data) {
-	const card = document.getElementById("ctx-skills");
-	if (!card) return;
-	setCount("ctx-skills-count", `${data.skills.count} 个 · ${fmtTokens(data.skills.tokens)} token`);
-	card.innerHTML = data.skills.text
-		? `${itemMarkup({
-				name: "技能索引",
-				badge: badgeMarkup(data.default ? "fixed" : "session"),
-				desc: `${data.skills.count} 个技能`,
-				tokens: data.skills.tokens,
-				body: textBlock(data.skills.text),
-			})}`
-		: emptyMarkup(data.default ? "这个角色当前没有可见技能。" : "当前会话没有启用任何技能。");
-}
-
-function renderMemory(data) {
-	const card = document.getElementById("ctx-memory");
-	if (!card) return;
-	const isDefault = Boolean(data.default);
-	const last = data.memory.last;
-	setCount(
-		"ctx-memory-count",
-		isDefault
-			? `预算 ${fmtNum(data.memory.limit)} 条`
-			: last
-				? `${last.items} 条 · ${fmtTokens(last.tokens)} token`
-				: "待下一轮",
-	);
-	const meta = `<div class="ctx-meta-row">
-      <span>预算 ${fmtNum(data.memory.limit)} 条 / ${fmtNum(data.memory.maxChars)} 字</span>
-      ${last ? `<span>上一次注入 ${fmtAt(last.at)}</span>` : ""}
-    </div>`;
-	if (!data.memory.enabled) {
-		card.innerHTML = `${meta}${emptyMarkup("记忆未启用。")}`;
+function renderNote() {
+	const note = document.getElementById("ctx-note");
+	if (!note) return;
+	const partnerId = currentPartnerIdValue;
+	if (!partnerId) {
+		note.hidden = true;
+		note.innerHTML = "";
 		return;
 	}
-	if (isDefault) {
-		card.innerHTML = `${meta}`;
-		return;
-	}
-	if (!last) {
-		card.innerHTML = `${meta}${emptyMarkup("本轮尚未注入记忆。")}`;
-		return;
-	}
-	if (!last.text) {
-		card.innerHTML = `${meta}${emptyMarkup("上一轮没有召回记忆。")}`;
-		return;
-	}
-	card.innerHTML = `${meta}${itemMarkup({
-		name: "本轮召回的记忆",
-		badge: badgeMarkup("turn"),
-		desc: "按本轮用户消息临时插入",
-		tokens: last.tokens,
-		body: textBlock(last.text),
-	})}`;
-}
-
-function renderChanging(data) {
-	const card = document.getElementById("ctx-changing");
-	if (!card) return;
-	const changing = data.changing;
-	const others = data.memory.last?.others ?? [];
-	const otherMarkup = others.length
-		? `<div class="ctx-other"><span class="ctx-other-label">另注入</span>${others
-				.map((item) => `<span class="ctx-chip">${esc(item.id)} · ${fmtTokens(item.tokens)} token</span>`)
-				.join("")}</div>`
-		: "";
-	card.innerHTML = `<div class="ctx-change-grid">
-      <div class="ctx-change-cell"><b>${fmtNum(changing.messages.count)}</b><span>对话消息 · ${fmtTokens(changing.messages.tokens)} token</span></div>
-      <div class="ctx-change-cell"><b>${fmtNum(changing.toolCalls.count)}</b><span>工具调用 · ${fmtTokens(changing.toolCalls.tokens)} token</span></div>
-      <div class="ctx-change-cell"><b>${fmtNum(changing.toolResults.count)}</b><span>工具结果 · ${fmtTokens(changing.toolResults.tokens)} token</span></div>
-    </div>
-    ${otherMarkup}`;
-}
-
-function syncRoleOptions(roles, selected) {
-	const select = document.getElementById("ctx-role");
-	if (!(select instanceof HTMLSelectElement) || !Array.isArray(roles) || roles.length === 0) return;
-	const current = roles.some((role) => role.id === selected) ? selected : roles[0].id;
-	select.innerHTML = roleOptionMarkup(roles, current);
+	note.hidden = false;
+	note.innerHTML = `这个执事的人设、纪律与岗位契约在档案页改：<button class="ctx-link" type="button" data-ctx-partner="${esc(
+		partnerId,
+	)}">去 ${esc(partnerName(partnerId) || "档案页")}</button>`;
 }
 
 function renderContext(data) {
-	const isDefault = Boolean(data.default);
-	if (isDefault) {
+	currentData = data;
+	if (data.default) {
 		syncRoleOptions(data.roles, data.role?.id);
+		currentPartnerIdValue = String(data.role?.id || "").startsWith("partner:")
+			? String(data.role.id).slice("partner:".length)
+			: "";
+	} else {
+		const chat = (state.chats || []).find((item) => item && item.conversationId === data.conversationId);
+		currentPartnerIdValue = partnerIdOfChat(chat) || partnerIdOfChat({ conversationId: data.conversationId });
 	}
+	currentGroups = buildGroups(data);
 	const total = renderHero(data);
-	const isEmpty = total <= 0;
-	for (const id of ["ctx-sec-system", "ctx-sec-tools", "ctx-sec-skills", "ctx-sec-memory", "ctx-sec-changing"]) {
-		const section = document.getElementById(id);
-		if (section) section.hidden = isEmpty;
-	}
-	if (isEmpty) {
-		for (const id of ["ctx-system-count", "ctx-tools-count", "ctx-skills-count", "ctx-memory-count"]) {
-			setCount(id, "");
-		}
-		return;
-	}
-	renderSystem(data);
-	renderTools(data);
-	renderSkills(data);
-	renderMemory(data);
-	if (isDefault) {
-		const changing = document.getElementById("ctx-sec-changing");
-		if (changing) changing.hidden = true;
-		return;
-	}
-	renderChanging(data);
+	renderNote();
+	if (total <= 0) return;
 }
 
-function applyToolFilter(raw) {
-	const query = String(raw || "").trim().toLowerCase();
-	const card = document.getElementById("ctx-tools");
-	if (!card) return;
-	let shown = 0;
-	let tokens = 0;
-	for (const item of card.querySelectorAll(".ctx-item[data-tool-key]")) {
-		const hay = item.dataset.toolKey || "";
-		const visible = !query || hay.includes(query);
-		item.hidden = !visible;
-		if (visible) {
-			shown += 1;
-			tokens += Number(item.dataset.toolTokens) || 0;
-		}
-	}
-	const totalCount = Number(card.dataset.toolCount) || 0;
-	const totalTokens = Number(card.dataset.toolTokens) || 0;
-	setCount(
-		"ctx-tools-count",
-		query
-			? `筛出 ${shown} / ${totalCount} 个 · ${fmtTokens(tokens)} token`
-			: `${totalCount} 个 · ${fmtTokens(totalTokens)} token`,
-	);
-	const empty = document.getElementById("ctx-tools-empty");
-	if (empty) empty.hidden = !query || shown > 0;
-}
-
-function resetHero(message, hint = "") {
+function resetHero(message) {
 	const totalNode = document.getElementById("ctx-total");
 	if (totalNode) totalNode.textContent = "—";
 	const sub = document.getElementById("ctx-sub");
 	if (sub) sub.textContent = message;
-	const stack = document.getElementById("ctx-stack");
-	if (stack) stack.innerHTML = `<span class="ctx-stack-empty"></span>`;
-	const legend = document.getElementById("ctx-legend");
-	if (legend) legend.innerHTML = "";
+	const chips = document.getElementById("ctx-chips");
+	if (chips) chips.innerHTML = "";
+	const waffle = document.getElementById("ctx-waffle");
+	if (waffle) {
+		for (const cell of waffle.children) {
+			if (cell instanceof HTMLElement) {
+				cell.dataset.group = "";
+				cell.className = "ctx-cell is-free";
+			}
+		}
+	}
 	const meter = document.getElementById("ctx-meter");
 	if (meter) meter.innerHTML = `<span class="ctx-meter-label">上一轮</span><b>—</b>`;
+	const note = document.getElementById("ctx-note");
+	if (note) note.hidden = true;
 }
 
 function setLoading() {
-	const isDefault = contextMode === "default";
-	resetHero(isDefault ? "读取默认开销…" : "读取中…");
-	for (const id of ["ctx-system-count", "ctx-tools-count", "ctx-skills-count", "ctx-memory-count"]) {
-		setCount(id, "");
-	}
-	for (const id of ["ctx-system", "ctx-tools", "ctx-skills", "ctx-memory", "ctx-changing"]) {
-		const card = document.getElementById(id);
-		if (card) card.innerHTML = loadingMarkup();
-	}
+	resetHero(contextMode === "default" ? "读取默认开销…" : "读取中…");
 }
 
-function showError(message, hint = "") {
-	resetHero(message, hint);
-	for (const id of ["ctx-sec-system", "ctx-sec-tools", "ctx-sec-skills", "ctx-sec-memory", "ctx-sec-changing"]) {
-		const section = document.getElementById(id);
-		if (section) section.hidden = true;
-	}
-	for (const id of ["ctx-system-count", "ctx-tools-count", "ctx-skills-count", "ctx-memory-count"]) {
-		setCount(id, "");
-	}
+function showError(message) {
+	resetHero(message);
+	const chips = document.getElementById("ctx-chips");
+	if (chips) chips.innerHTML = `<span class="ctx-empty-inline">${esc(message)}</span>`;
 }
 
 async function loadContext() {
@@ -762,7 +834,7 @@ async function loadContext() {
 		const role = document.getElementById("ctx-role");
 		const roleId = role instanceof HTMLSelectElement ? role.value : "chief";
 		if (!roleId) {
-			showError("还没有可选角色。", "等执事花名册加载后再试，或刷新页面。");
+			showError("还没有可选角色。");
 			return;
 		}
 		url = `/api/v1/agent/context-defaults?role=${encodeURIComponent(roleId)}`;
@@ -771,31 +843,22 @@ async function loadContext() {
 		if (!(select instanceof HTMLSelectElement)) return;
 		const conversationId = select.value;
 		if (!conversationId) {
-			showError("还没有会话，先聊一轮再来。", "也可以切到“默认开销”，不聊天就能看固定前缀。");
+			showError("还没有会话，先聊一轮再来。");
 			return;
 		}
 		url = `/api/v1/agent/chat/${encodeURIComponent(conversationId)}/context-inspect`;
 	}
+	closePopover();
 	setLoading();
 	try {
 		const response = await request(url, { cache: "no-store" });
 		if (seq !== contextSeq) return;
 		if (response.status === 404) {
-			showError(
-				isDefault
-					? "默认开销读不到（可能功能被关掉了，或角色已不存在）。"
-					: "这个会话读不到上下文（可能没启用，或会话已不存在）。",
-				isDefault
-					? "可以刷新重试；如果还不行，检查 CHAT_CONTEXT_INSPECT 是否被关掉。"
-					: "可以刷新重试；如果所有会话都这样，检查 CHAT_CONTEXT_INSPECT 是否被关掉。",
-			);
+			showError(isDefault ? "默认开销读不到。" : "这个会话读不到上下文。");
 			return;
 		}
 		if (!response.ok) {
-			showError(
-				isDefault ? `默认开销读取失败（HTTP ${response.status}）。` : `读取失败（HTTP ${response.status}）。`,
-				isDefault ? "点刷新重试；持续失败去设置 → 服务看运行状态。" : "点刷新重试；持续失败去设置 → 服务看运行状态。",
-			);
+			showError(`读取失败（HTTP ${response.status}）。`);
 			return;
 		}
 		const data = await response.json();
@@ -804,31 +867,7 @@ async function loadContext() {
 	} catch (error) {
 		if (seq !== contextSeq) return;
 		const detail = error instanceof Error ? error.message : String(error);
-		showError(
-			detail === "forbidden" ? "这个令牌没被接受。" : isDefault ? "服务暂时连不上。" : "服务暂时连不上。",
-			detail === "forbidden"
-				? "检查本机令牌或配对状态。"
-				: isDefault
-					? "检查服务是否在运行，稍后刷新。"
-					: "检查服务是否在运行，稍后刷新。",
-		);
-	}
-}
-
-function toggleAll(button) {
-	const group = button.dataset.ctxToggleAll;
-	const card = document.getElementById(group === "system" ? "ctx-system" : "ctx-tools");
-	if (!card) return;
-	const open = button.textContent !== "收起全部";
-	button.textContent = open ? "收起全部" : "展开全部";
-	for (const item of card.querySelectorAll(".ctx-item")) {
-		if (item.hidden) continue;
-		const head = item.querySelector(".ctx-item-head");
-		const body = item.querySelector(".ctx-item-body");
-		if (!head || !body) continue;
-		head.setAttribute("aria-expanded", String(open));
-		body.hidden = !open;
-		item.classList.toggle("is-open", open);
+		showError(detail === "forbidden" ? "这个令牌没被接受。" : "服务暂时连不上。");
 	}
 }
 
@@ -840,11 +879,45 @@ function setMode(mode) {
 	for (const button of document.querySelectorAll("[data-ctx-mode]")) {
 		button.setAttribute("aria-checked", String(button.dataset.ctxMode === mode));
 	}
+	const unit = document.getElementById("ctx-total-unit");
+	if (unit) unit.textContent = mode === "default" ? "token · 默认基线" : "token · 已注入";
 	const chat = document.getElementById("ctx-chat");
 	if (chat) chat.hidden = mode !== "session";
 	const role = document.getElementById("ctx-role");
 	if (role) role.hidden = mode !== "default";
+	const scale = document.querySelector(".ctx-scale");
+	if (scale) scale.hidden = mode !== "session";
+	closePopover();
 	void loadContext();
+}
+
+function toggleRow(button) {
+	const row = button.closest(".ctx-row");
+	const body = row?.querySelector(".ctx-row-body");
+	if (!row || !body) return;
+	const open = button.getAttribute("aria-expanded") !== "true";
+	button.setAttribute("aria-expanded", String(open));
+	body.hidden = !open;
+	row.classList.toggle("is-open", open);
+}
+
+/** 悬停某组：格子与标签一起亮，其它的压暗——比单纯一个图例更容易看出“这块属于谁”。 */
+function focusGroup(key) {
+	// 0 token 的组（默认开销里的「记忆」）在棋盘上根本没有格子：这时只亮标签，
+	// 不能把整张图都压暗，否则看着像所有块都被取消选中了。
+	const cells = document.querySelectorAll(".ctx-cell");
+	const painted = Boolean(key) && Array.from(cells).some((cell) => cell.dataset.group === key);
+	const waffle = document.getElementById("ctx-waffle");
+	if (waffle) {
+		if (key && painted) waffle.dataset.f = key;
+		else delete waffle.dataset.f;
+	}
+	for (const cell of cells) {
+		cell.classList.toggle("is-focus", painted && cell.dataset.group === key);
+	}
+	for (const chip of document.querySelectorAll("[data-ctx-chip]")) {
+		chip.classList.toggle("is-focus", chip.dataset.ctxChip === key);
+	}
 }
 
 function wireClicks() {
@@ -858,34 +931,32 @@ function wireClicks() {
 			setMode(modeButton.dataset.ctxMode);
 			return;
 		}
-		const disciplineButton = target.closest("[data-ctx-discipline]");
-		if (disciplineButton) {
-			openDisciplineEditor(
-				disciplineButton.dataset.ctxDisciplinePartner || "",
-				disciplineButton.dataset.ctxDiscipline || "",
-				disciplineButton.dataset.ctxDisciplineTitle || "",
-			);
+		const scaleButton = target.closest("[data-ctx-scale]");
+		if (scaleButton) {
+			const value = scaleButton.dataset.ctxScale === "window" ? "window" : "composition";
+			if (value !== waffleScale) {
+				waffleScale = value;
+				try {
+					localStorage.setItem(WAFFLE_SCALE_KEY, value);
+				} catch {
+					/* 存不进去也不影响这一次怎么画 */
+				}
+				for (const button of document.querySelectorAll("[data-ctx-scale]")) {
+					button.setAttribute("aria-checked", String(button.dataset.ctxScale === value));
+				}
+				closePopover();
+				if (currentData) renderHero(currentData);
+			}
 			return;
 		}
-		const toggle = target.closest("[data-ctx-toggle]");
-		if (toggle) {
-			const item = toggle.closest(".ctx-item");
-			const body = item?.querySelector(".ctx-item-body");
-			if (!item || !body) return;
-			const open = toggle.getAttribute("aria-expanded") !== "true";
-			toggle.setAttribute("aria-expanded", String(open));
-			body.hidden = !open;
-			item.classList.toggle("is-open", open);
+		const openButton = target.closest("[data-ctx-open]");
+		if (openButton) {
+			openGroup(openButton.dataset.ctxOpen || "", openButton);
 			return;
 		}
-		const toggleAllButton = target.closest("[data-ctx-toggle-all]");
-		if (toggleAllButton) {
-			toggleAll(toggleAllButton);
-			return;
-		}
-		const goButton = target.closest("[data-ctx-go]");
-		if (goButton) {
-			go("settings", goButton.dataset.ctxGo);
+		const cell = target.closest(".ctx-cell");
+		if (cell && cell.dataset.group) {
+			openGroup(cell.dataset.group, cell);
 			return;
 		}
 		const partnerButton = target.closest("[data-ctx-partner]");
@@ -894,6 +965,25 @@ function wireClicks() {
 			if (partnerId) location.hash = `#/settings/partners/${encodeURIComponent(partnerId)}`;
 			return;
 		}
+		// 点浮层外面 = 收起来
+		const pop = document.getElementById("ctx-pop");
+		if (pop && !pop.hidden && !pop.contains(target)) closePopover();
+	});	root.addEventListener("pointerover", (event) => {
+		const target = event.target instanceof Element ? event.target : null;
+		const cell = target?.closest(".ctx-cell");
+		if (cell?.dataset.group) {
+			focusGroup(cell.dataset.group);
+			return;
+		}
+		const chip = target?.closest("[data-ctx-chip]");
+		if (chip) focusGroup(chip.dataset.ctxChip || "");
+	});
+	root.addEventListener("pointerout", (event) => {
+		const target = event.target instanceof Element ? event.target : null;
+		if (!(target?.closest(".ctx-cell") || target?.closest("[data-ctx-chip]"))) return;
+		const related = event.relatedTarget instanceof Element ? event.relatedTarget : null;
+		if (related?.closest("[data-ctx-chip]") || related?.closest(".ctx-cell")) return;
+		focusGroup("");
 	});
 	const select = document.getElementById("ctx-chat");
 	if (select instanceof HTMLSelectElement) {
@@ -903,11 +993,39 @@ function wireClicks() {
 	if (role instanceof HTMLSelectElement) {
 		role.addEventListener("change", () => void loadContext());
 	}
-	const filter = document.getElementById("ctx-tool-filter");
-	if (filter instanceof HTMLInputElement) {
-		filter.addEventListener("input", () => applyToolFilter(filter.value));
-	}
 	document.getElementById("ctx-refresh")?.addEventListener("click", () => void loadContext());
+	// 全局监听只挂一次：设置页会反复重渲染，重复挂会攒出一堆同样的回调。
+	if (!globalWired) {
+		globalWired = true;
+		document.addEventListener("keydown", (event) => {
+			if (event.key === "Escape") closePopover();
+		});
+		// 卡片外面的任何点击（包括设置页侧栏、顶栏）都要收起来；页面内那一处监听只管卡片自身。
+		document.addEventListener("pointerdown", (event) => {
+			const pop = document.getElementById("ctx-pop");
+			if (!pop || pop.hidden) return;
+			const target = event.target instanceof Element ? event.target : null;
+			if (!target) return;
+			if (pop.contains(target)) return;
+			if (target.closest(".ctx-cell") || target.closest("[data-ctx-open]")) return;
+			closePopover();
+		});
+		window.addEventListener("resize", closePopover);
+		// 窗口变宽/变窄时列数要重排，否则格子会被拉成横条。
+		window.addEventListener("resize", () => {
+			fitWaffleColumns();
+			if (Array.isArray(currentParts) && currentParts.length) paintWaffle(currentParts, currentBase);
+		});
+	}
+}
+
+let globalWired = false;
+
+function syncRoleOptions(roles, selected) {
+	const select = document.getElementById("ctx-role");
+	if (!(select instanceof HTMLSelectElement) || !Array.isArray(roles) || roles.length === 0) return;
+	const current = roles.some((role) => role.id === selected) ? selected : roles[0].id;
+	select.innerHTML = roleOptionMarkup(roles, current);
 }
 
 function wireContextSettings() {

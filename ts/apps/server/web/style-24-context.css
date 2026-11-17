@@ -1,15 +1,26 @@
 /*
- * 设置 → 上下文（2026-11-16）
+ * 设置 → 上下文（2026-11-16，2026-11-17 重画）
  *
- * 形态：顶部一张固定前缀总览（总量 + 按四块切的分段条 + 图例 + 真实用量），
- * 下面四张可展开读原文的卡，最后一张只报数量的“会变的部分”。
- * 分段色直接复用 style-01 的 --ctx-seg-* 单色阶，不新造语义色。
+ * 形态：一张卡 = 总量 + 上一轮真实用量 + 32×12 的“棋盘”（每格 ≈0.26% 的请求，按组上色）
+ *      + 可点的组标签；点格子或标签浮起一张卡片，里面逐条读原文。
+ * 配色：不再用单色阶的 6 段（分块看不清），改成设计系统里已经有的
+ *      primary / tertiary / secondary + 三种混色，深浅与色相都拉开。
  */
+
+:root {
+  --ctx-g1: var(--c-primary);
+  --ctx-g2: var(--c-tertiary);
+  --ctx-g3: var(--c-secondary);
+  --ctx-g4: color-mix(in srgb, var(--c-primary) 52%, var(--surface));
+  --ctx-g5: color-mix(in srgb, var(--c-tertiary) 50%, var(--surface));
+  --ctx-g6: color-mix(in srgb, var(--c-secondary) 50%, var(--surface));
+}
 
 /* ── 标题行：视图切换 + 会话/角色选择 + 刷新 ─────────── */
 .ctx-toolbar {
   display: flex; align-items: center; gap: 8px; min-width: 0;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
 }
 .ctx-mode {
   flex: 0 0 auto;
@@ -30,33 +41,28 @@
   box-shadow: 0 1px 2px rgba(0, 0, 0, .10), inset 0 0 0 1px var(--card-border);
 }
 .ctx-select {
-  flex: 0 1 240px; width: 240px; min-width: 150px; height: 32px;
+  flex: 1 1 240px; width: auto; min-width: 172px; max-width: 320px; height: 32px;
   padding: 0 10px;
   border-radius: var(--r-full);
   font-size: 12.5px;
+  text-overflow: ellipsis;
 }
 .ctx-select[hidden] { display: none; }
+/* 棋盘的基准开关：只在「当前会话」出现，比视图切换再小一号 */
+.ctx-scale { flex: 0 0 auto; }
+.ctx-scale[hidden] { display: none; }
+.ctx-scale button {
+  padding: 0 8px;
+  font-size: 11.5px;
+}
 .ctx-refresh {
   flex: 0 0 auto; height: 32px;
   padding-inline: 12px;
   white-space: nowrap;
 }
 
-.ctx-head-actions {
-  display: flex; align-items: center; justify-content: flex-end;
-  flex-wrap: wrap; gap: 8px; min-width: 0;
-}
-.ctx-count {
-  font-size: 11.5px; color: var(--text-2); white-space: nowrap;
-  font-variant-numeric: tabular-nums;
-}
-.ctx-filter {
-  flex: 0 1 180px; width: 180px; height: 28px;
-  padding: 0 10px; border-radius: var(--r-full);
-  font-size: 12px;
-}
-
 /* ── 顶部总览 ───────────────────────────────────────── */
+#ctx-content { position: relative; }
 .ctx-hero { padding: 18px 18px 14px; }
 
 .ctx-hero-top {
@@ -64,9 +70,6 @@
   gap: 24px; flex-wrap: wrap;
 }
 .ctx-hero-copy { min-width: 0; }
-.ctx-eyebrow {
-  font-size: 11px; color: var(--text-3); letter-spacing: .04em;
-}
 .ctx-total {
   display: flex; align-items: baseline; gap: 8px;
   margin-top: 3px;
@@ -81,125 +84,239 @@
   margin-top: 5px;
   font-size: 12.5px; line-height: 1.55; color: var(--text-2);
 }
-.ctx-hero-side {
-  flex: 0 0 auto; min-width: 150px; text-align: right;
-}
+.ctx-hero-side { flex: 0 0 auto; min-width: 150px; text-align: right; }
 .ctx-meter {
   display: flex; align-items: baseline; justify-content: flex-end;
   gap: 6px; flex-wrap: wrap;
 }
 .ctx-meter-label { font-size: 11px; color: var(--text-3); }
-.ctx-meter b {
-  font-size: 15px; font-weight: 550;
-  font-variant-numeric: tabular-nums;
-}
+.ctx-meter b { font-size: 15px; font-weight: 550; font-variant-numeric: tabular-nums; }
 .ctx-meter-unit { font-size: 11.5px; color: var(--text-3); }
-.ctx-meter-hint {
-  margin-top: 2px; font-size: 11.5px; color: var(--text-3);
+
+/* ── 棋盘 + 图例左右并排 ──────────────────────────────
+   384 格，列数由 JS 按宽度取 384 的约数（行数才不会是零碎一截）；
+   512 宽时 32 列 × 12 行、格子 14×16 近正方；图例竖排在右侧，每行对着一种颜色。 */
+.ctx-hero-body {
+  display: flex; align-items: flex-start; gap: 20px;
+  margin: 16px 0 12px;
+}
+.ctx-waffle {
+  flex: 0 0 auto;
+  display: grid;
+  width: min(512px, 100%);
+  grid-template-columns: repeat(32, minmax(0, 1fr));
+  grid-auto-rows: 16px;
+  gap: 2px;
+}
+.ctx-cell {
+  border-radius: 3px;
+  background: var(--surface-low);
+  transition: background-color .38s var(--ease-standard), opacity .22s var(--ease-standard),
+    transform .22s var(--ease-standard);
+}
+.ctx-cell.is-free { background: transparent; }
+/* 「窗口」基准下空格子就是没用到的余量：给一层极淡的底，让它看得出是格子而不是洞 */
+#ctx-content[data-scale="window"] .ctx-cell.is-free { background: color-mix(in srgb, var(--text) 7%, transparent); }
+.ctx-scale button:disabled { color: var(--text-3); opacity: .5; cursor: default; }
+.ctx-scale button:disabled[aria-checked="true"] { box-shadow: none; background: transparent; }
+.ctx-cell.is-g1 { background: var(--ctx-g1); }
+.ctx-cell.is-g2 { background: var(--ctx-g2); }
+.ctx-cell.is-g3 { background: var(--ctx-g3); }
+.ctx-cell.is-g4 { background: var(--ctx-g4); }
+.ctx-cell.is-g5 { background: var(--ctx-g5); }
+.ctx-cell.is-g6 { background: var(--ctx-g6); }
+/* 悬停某组：这一组亮、其它压暗 + 略微放大，一眼看出“这块属于谁” */
+.ctx-waffle[data-f] .ctx-cell { opacity: .5; }
+.ctx-waffle[data-f] .ctx-cell.is-focus { opacity: 1; transform: scale(1.06); }
+
+/* ── 图例（也是可点的入口：点一行看这一组全部条目）────────── */
+.ctx-chips {
+  flex: 0 1 336px;
+  max-width: 336px;
+  min-width: 168px;
+  display: flex; flex-direction: column;
+  gap: 1px;
+  padding-top: 1px;
+}
+.ctx-chip {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; height: 30px; padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text);
+  font: inherit; text-align: left; cursor: pointer;
+  transition: background-color .16s var(--ease-standard), border-color .16s var(--ease-standard);
+}
+.ctx-chip:hover { background: var(--surface-low); }
+.ctx-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.ctx-chip.is-focus { background: var(--surface-low); border-color: transparent; }
+/* 图例与卡片头的色块比聊天里的通知条稍大一号，和格子对得上 */
+.ctx-chips .ctx-dot, .ctx-pop-head .ctx-dot { width: 10px; height: 10px; border-radius: 3px; }
+
+.ctx-chip-name { font-size: 12.5px; }
+.ctx-chip-num {
+  margin-left: auto;
+  font-size: 11px; color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.ctx-chip.is-all {
+  margin-top: 4px;
+  background: transparent; border-color: transparent;
+  color: var(--text-3);
+}
+.ctx-chip.is-all:hover { background: var(--surface-low); color: var(--text-2); }
+/* 「未使用」只是个图例，不是入口 */
+.ctx-chip.is-unused {
+  cursor: default; color: var(--text-3);
+}
+.ctx-chip.is-unused:hover { background: transparent; }
+.ctx-chip.is-unused .ctx-dot {
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+  box-shadow: inset 0 0 0 1px var(--card-border);
 }
 
-.ctx-stack {
-  display: flex; gap: 3px;
-  height: 9px; margin: 17px 0 11px;
-  border-radius: var(--r-full);
-  overflow: hidden;
-  background: var(--surface-low);
-}
-.ctx-stack .ctx-seg {
-  height: 100%; min-width: 2px; border-radius: 2px;
-}
-.ctx-stack-empty {
-  display: block; width: 100%; height: 100%;
-  background: var(--surface-low);
-}
-
-.ctx-legend {
-  list-style: none; display: flex; flex-wrap: wrap;
-  gap: 6px 18px; margin: 0; padding: 0;
-}
-.ctx-legend li {
-  display: flex; align-items: center; gap: 6px;
+.ctx-empty-inline {
+  display: inline-flex; align-items: center;
   font-size: 12px; color: var(--text-2);
 }
-.ctx-dot {
-  width: 7px; height: 7px; border-radius: 50%; flex: none;
+
+/* ── 浮层卡片：从触发点长出来，收起时缩回去 ─────────── */
+.ctx-pop {
+  position: absolute;
+  z-index: 40;
+  width: min(440px, calc(100vw - 28px));
+  max-height: 62vh;
+  display: flex; flex-direction: column;
+  border: 1px solid var(--card-border);
+  border-radius: var(--r-lg);
+  background: var(--card-high);
+  box-shadow: var(--shadow-menu);
+  color: var(--text);
+  overflow: hidden;
+  opacity: 0;
+  transform: scale(.955) translateY(-6px);
+  transition: opacity .16s var(--ease-standard), transform .2s var(--ease-decelerate);
+  will-change: transform, opacity;
 }
-.ctx-legend .ctx-name { color: var(--text); }
-.ctx-legend .ctx-num {
-  color: var(--text-3); font-variant-numeric: tabular-nums;
+.ctx-pop.is-open { opacity: 1; transform: none; }
+.ctx-pop[hidden] { display: none; }
+
+.ctx-pop-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 12px 12px 10px 14px;
+  border-bottom: 1px solid var(--divider);
+  flex: 0 0 auto;
+}
+.ctx-pop-head b { font-size: 13px; font-weight: 600; }
+.ctx-pop-meta {
+  flex: 1 1 auto; text-align: right;
+  font-size: 11px; color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ctx-pop-close {
+  flex: 0 0 auto;
+  width: 24px; height: 24px;
+  border: 0; border-radius: var(--r-full);
+  background: transparent; color: var(--text-2);
+  font-size: 15px; line-height: 1; cursor: pointer;
+  transition: background-color .15s var(--ease-standard), color .15s var(--ease-standard);
+}
+.ctx-pop-close:hover { background: var(--surface-low); color: var(--text); }
+
+.ctx-pop-body {
+  padding: 4px 0 8px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.ctx-pop-group + .ctx-pop-group { border-top: 1px solid var(--divider); }
+.ctx-pop-group-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 12px 14px 6px;
+}
+.ctx-pop-group-head b { font-size: 12.5px; }
+.ctx-pop-group-num {
+  flex: 1 1 auto; text-align: right;
+  font-size: 11px; color: var(--text-3);
+  font-variant-numeric: tabular-nums;
 }
 
-.ctx-hero-note {
-  margin-top: 13px; padding-top: 11px;
-  border-top: 1px solid var(--divider);
-  font-size: 12px; line-height: 1.55; color: var(--text-2);
-}
-.set-sec[hidden] { display: none; }
+/* ── 一行：名字 + 序号/标签 + token；点开是原文 ─────── */
+.ctx-group-body { padding-bottom: 4px; }
+.ctx-row { border-top: 1px solid color-mix(in srgb, var(--divider) 55%, transparent); }
+.ctx-row:first-child { border-top: 0; }
 
-/* ── 可展开的段 / 工具行 ─────────────────────────────── */
-.ctx-item { border-bottom: 1px solid var(--divider); }
-.ctx-item:last-of-type { border-bottom: 0; }
-.ctx-item[hidden] { display: none; }
-
-.ctx-item-head {
-  display: flex; align-items: center; gap: 9px;
-  width: 100%; min-height: 50px;
-  padding: 11px 16px;
+.ctx-row-head {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; min-height: 40px;
+  padding: 8px 14px;
   border: 0; background: transparent; color: var(--text);
   text-align: left; cursor: pointer;
   transition: background-color .15s var(--ease-standard);
 }
-.ctx-item-head:hover { background: var(--card-high); }
-.ctx-item-head:focus-visible {
-  outline: 2px solid var(--accent); outline-offset: -2px;
-}
-.ctx-item-name {
-  flex: 0 0 auto; max-width: 36%;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-size: 13px; font-weight: 500;
-}
-.ctx-mono { font-family: var(--mono); font-size: 12.5px; }
-.ctx-item-desc {
-  flex: 1 1 auto; min-width: 0;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-size: 12px; color: var(--text-3);
-}
-.ctx-item-tokens {
-  flex: 0 0 auto;
-  font-size: 11.5px; color: var(--text-3);
+.ctx-row-head:hover { background: var(--surface-low); }
+.ctx-row-head:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.ctx-row-seq {
+  flex: 0 0 auto; min-width: 24px;
+  font-family: var(--mono); font-size: 10.5px;
+  color: var(--text-3);
   font-variant-numeric: tabular-nums;
 }
+.ctx-row-name {
+  flex: 0 1 auto; max-width: 52%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 12.5px;
+}
+.ctx-row-name.is-mono { font-family: var(--mono); font-size: 12px; }
+.ctx-row-tag {
+  flex: 0 0 auto;
+  padding: 0 6px;
+  border-radius: var(--r-full);
+  background: var(--surface-low); color: var(--text-3);
+  font-size: 10.5px; line-height: 17px;
+}
+.ctx-row-tokens {
+  flex: 1 1 auto; text-align: right;
+  font-size: 11px; color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.ctx-row-body { padding: 0 14px 12px; }
+.ctx-row-body[hidden] { display: none; }
+.ctx-row.is-open .ctx-chevron { transform: rotate(180deg); }
+
 .ctx-chevron {
   flex: 0 0 auto; width: 14px; height: 14px;
   color: var(--text-3);
-  transition: transform .16s var(--ease-standard);
+  transition: transform .18s var(--ease-standard);
 }
-.ctx-item.is-open .ctx-chevron { transform: rotate(180deg); }
-
-.ctx-item-body { padding: 0 16px 14px; }
-.ctx-item-body[hidden] { display: none; }
-.ctx-edit-row { padding: 0 16px 10px; }
-.ctx-edit-row .ctx-link { font-size: 12px; }
-.ctx-discipline-fixed { margin-top: 8px; }
 
 .ctx-text {
-  margin: 0; padding: 12px 14px;
+  margin: 0; padding: 11px 12px;
   border-radius: var(--r-md);
   background: var(--surface-low);
   color: var(--text-2);
   font-family: var(--mono);
   font-size: 12px; line-height: 1.65;
   white-space: pre-wrap; overflow-wrap: anywhere;
-  /* 2026-11-16 用户口径：展开后交给设置页整页滚动，卡里不再套一层滚动条。
-     原来的 max-height:440 + overflow:auto + overscroll-behavior:contain 会把滚轮
-     困在内层——鼠标停在技能索引上，外面怎么滚都不动。 */
 }
-
-.ctx-empty-field {
-  padding: 12px 14px;
+.ctx-trunc { margin-top: 7px; font-size: 11.5px; color: var(--text-3); }
+/* 0 token 的行点开只有一句：不写解释，只说明这里没有东西。 */
+.ctx-item-empty {
+  padding: 10px 12px;
   border-radius: var(--r-md);
   background: var(--surface-low);
   color: var(--text-3);
+  font-size: 12px;
+}
+.ctx-item-note {
+  padding: 10px 12px;
+  border-radius: var(--r-md);
+  background: var(--surface-low);
+  color: var(--text-2);
   font-size: 12px; line-height: 1.6;
 }
 
@@ -211,30 +328,15 @@
   font-size: 10.5px; line-height: 1.5;
   white-space: nowrap;
 }
-.ctx-badge.is-fixed {
-  background: var(--surface-low); color: var(--text-3);
-}
-.ctx-badge.is-session {
-  background: var(--c-secondary-container);
-  color: var(--c-on-secondary-container);
-}
-.ctx-badge.is-turn {
-  background: var(--accent-soft); color: var(--accent);
-}
-.ctx-badge.is-editable {
-  background: var(--accent-soft); color: var(--accent);
-}
-.ctx-badge.is-empty {
-  background: transparent; color: var(--text-3);
-  box-shadow: inset 0 0 0 1px var(--divider);
-}
+.ctx-badge.is-fixed { background: var(--surface-low); color: var(--text-3); }
+.ctx-badge.is-session { background: var(--c-secondary-container); color: var(--c-on-secondary-container); }
+.ctx-badge.is-turn { background: var(--accent-soft); color: var(--accent); }
 
 .ctx-note {
-  padding: 11px 16px 13px;
+  padding: 11px 14px 12px;
   border-top: 1px solid var(--divider);
   font-size: 12px; line-height: 1.55; color: var(--text-2);
 }
-.ctx-note:first-child { border-top: 0; }
 .ctx-link {
   padding: 0; border: 0; background: none;
   color: var(--accent); font: inherit; cursor: pointer;
@@ -242,78 +344,20 @@
 }
 .ctx-link:hover { color: var(--text); }
 
-/* 记忆卡的预算行（2026-11-16 用户反馈：底下那条线又深又重——默认开销模式下它就是
-   整张卡的底边，一条深线横切圆角；会话模式下它又贴着召回条目，同样显眼）。
-   分隔线改成：后面还接着内容时才画、左右收进 16px 与卡片圆角脱开、颜色降到
-   --divider 的一半——读起来是一条折痕，不是一根横杠。 */
-.ctx-meta-row {
-  position: relative;
-  display: flex; align-items: center; justify-content: space-between;
-  gap: 10px; flex-wrap: wrap;
-  padding: 11px 16px;
-  border-bottom: 0;
-  font-size: 12px; color: var(--text-3);
-  font-variant-numeric: tabular-nums;
-}
-.ctx-meta-row:not(:last-child)::after {
-  content: "";
-  position: absolute; left: 16px; right: 16px; bottom: 0;
-  height: 1px;
-  background: color-mix(in srgb, var(--divider) 50%, transparent);
-  pointer-events: none;
-}
-.ctx-meta-row + .ctx-item { border-bottom: 0; }
-
-.ctx-empty,
-.ctx-loading {
-  padding: 18px 16px;
-  font-size: 12.5px; line-height: 1.6; color: var(--text-2);
-}
-.ctx-loading { opacity: .72; }
-
-/* ── 会变的部分 ─────────────────────────────────────── */
-.ctx-change-card { padding: 14px 16px; }
-.ctx-change-grid {
-  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
-}
-.ctx-change-cell {
-  min-width: 0; padding: 11px 12px;
-  border-radius: var(--r-md);
-  background: var(--surface-low);
-}
-.ctx-change-cell b {
-  display: block;
-  font-size: 19px; font-weight: 600; line-height: 1.2;
-  font-variant-numeric: tabular-nums;
-}
-.ctx-change-cell span {
-  display: block; margin-top: 2px;
-  font-size: 11.5px; color: var(--text-3);
-  font-variant-numeric: tabular-nums;
-}
-.ctx-other {
-  display: flex; align-items: center; flex-wrap: wrap;
-  gap: 6px; margin-top: 12px;
-}
-.ctx-other-label { font-size: 11.5px; color: var(--text-3); }
-.ctx-chip {
-  padding: 2px 8px; border-radius: var(--r-full);
-  background: var(--surface-low); color: var(--text-2);
-  font-family: var(--mono); font-size: 11px;
-}
-.ctx-change-note {
-  margin-top: 12px;
-  font-size: 12px; line-height: 1.55; color: var(--text-3);
-}
-
 @media (max-width: 640px) {
+  /* 2026-11-17：窄屏下三个控件留在同一行——先前的 100% 下拉会把「刷新」挤到第三行，
+     整条工具栏看起来像竖着堆起来的。 */
   .ctx-toolbar { flex-wrap: wrap; }
+  .ctx-select { flex: 1 1 auto; min-width: 0; max-width: none; width: auto; }
   .ctx-hero-top { gap: 12px; }
   .ctx-hero-side { min-width: 0; text-align: left; }
   .ctx-meter { justify-content: flex-start; }
-  .ctx-select { flex: 1 1 100%; width: 100%; }
-  .ctx-head-actions { justify-content: flex-start; }
-  .ctx-item-name { max-width: 46%; }
-  .ctx-change-grid { grid-template-columns: 1fr; }
+  .ctx-hero-body { flex-direction: column; gap: 12px; }
+  .ctx-waffle { width: 100%; }
+  .ctx-row-name { max-width: 46%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ctx-cell, .ctx-chip, .ctx-pop, .ctx-chevron { transition: none; }
+  .ctx-cell.is-focus { transform: none; }
 }

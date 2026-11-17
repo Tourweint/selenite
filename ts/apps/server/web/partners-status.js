@@ -7,15 +7,17 @@
  * app.js 文末，各模块顶层只做声明、常量与事件监听注册。
  */
 
-import { parseGroupMemberConversation } from "./approval-card.js";
 import { approvalPopItems, approvalPopKnown } from "./approval-pop.js";
 import { paintAvatar, partnerDotClass } from "./avatar.js";
-import { openChat, startNewChat } from "./chat-open.js";
+import { openChat, startNewChat, syncTitleSessionAffordance } from "./chat-open.js";
 import { el } from "./dom.js";
+import { CS_ICONS } from "./icons.js";
 import { request } from "./net.js";
 import { renderRoster } from "./partner-roster.js";
+import { partnerIdOfConversation, parsePartnerExternalId } from "./partner-sessions.js";
+import { ensureSideSessionsFlag, openPartnerSessions } from "./partner-sessions-ui.js";
 import { currentRoute, go } from "./route.js";
-import { csResolveTarget } from "./settings-drawer.js";
+import { csResolveTarget, csSvg } from "./settings-drawer.js";
 import { state } from "./state.js";
 
 /* ── 忙因胶囊（2026-11-10 批 18 §二）────────────────────────
@@ -25,17 +27,14 @@ import { state } from "./state.js";
  * 拿不到待办快照时**不猜**「不在等审批」，降级成只分忙/空闲（七原则⑤诚实状态）。
  */
 
-/** 某执事挂着的待办条数（主会话 `partner-<id>` 与群成员轮 `partner-<id>-group-<g>` 都算） */
+/** 某执事挂着的待办条数（canonical / side / 群成员轮都算到这个执事头上） */
 function partnerPendingCounts(partnerId) {
   let approvals = 0;
   let questions = 0;
-  const self = `partner-${partnerId}`;
   for (const item of approvalPopItems) {
-    const conversationId = String(item?.conversationId || "");
-    const owner =
-      conversationId === self
-        ? partnerId
-        : (parseGroupMemberConversation(conversationId)?.partnerId || "");
+    // 用解析器取真正的 partnerId：canonical / side / group 都算到该执事头上。
+    // 不能用 partnerIdOfConversation —— 它对 group 返回 ""（那是专线选中态的口径）。
+    const owner = parsePartnerExternalId(item?.conversationId)?.partnerId || "";
     if (owner !== partnerId) continue;
     if (item.kind === "ask_user" || item.tool === "ask_user") questions += 1;
     else approvals += 1;
@@ -135,6 +134,30 @@ function syncChiefAvatar() {
   syncChiefDot();
 }
 
+/** 总管条目的「选择会话」按钮（2026-11-17 批2）：插件关时整枚不挂，开时点它不开主会话。 */
+function syncChiefSessionsButton() {
+  if (!el.chiefEntry) return;
+  let btn = el.chiefEntry.querySelector(".chief-sessions");
+  if (!state.sideSessionsEnabled) {
+    if (btn) btn.remove();
+    return;
+  }
+  if (btn) return;
+  btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "chief-sessions";
+  btn.setAttribute("aria-label", "选择会话");
+  btn.title = "选择会话";
+  btn.append(csSvg(CS_ICONS.layers));
+  btn.addEventListener("click", (event) => {
+    event.stopPropagation();
+    event.preventDefault();
+    openPartnerSessions("chief");
+  });
+  btn.addEventListener("keydown", (event) => event.stopPropagation());
+  el.chiefEntry.append(btn);
+}
+
 /** 总管在界面上的名字（用户可能给人设改过名，缺省「总管」） */
 function chiefDisplayName() {
   const chief = state.partners.find((item) => item.id === "chief");
@@ -165,8 +188,8 @@ const WORKER_DISPLAY_NAME = "助手";
  * ——缺字段的老会话按 chief，与 openChat 的口径一致。
  */
 function chatIdentityName() {
-  const id = String(state.conversationId || "");
-  if (id.startsWith("partner-")) return partnerDisplayName(id.slice("partner-".length));
+  const partnerId = partnerIdOfConversation(state.conversationId);
+  if (partnerId) return partnerDisplayName(partnerId);
   if ((state.chatKind || "chief") === "worker") return WORKER_DISPLAY_NAME;
   return chiefDisplayName();
 }
@@ -179,9 +202,8 @@ function chatIdentityName() {
  * worker 不是某个人（不在 partners 表、没有头像），返回 null，回落成项目水晶。
  */
 function chatIdentityFace() {
-  const id = String(state.conversationId || "");
-  if (id.startsWith("partner-")) {
-    const partnerId = id.slice("partner-".length);
+  const partnerId = partnerIdOfConversation(state.conversationId);
+  if (partnerId) {
     const partner = state.partners.find((item) => item.id === partnerId);
     return { avatar: String(partner?.avatar || ""), name: partnerDisplayName(partnerId) };
   }
@@ -255,11 +277,16 @@ function syncChatHeadAvatar() {
 function openChiefChat() {
   // 只认 chatKind=chief 的历史（缺字段的旧会话按 chief，保住老数据）；
   // 不靠 partner- 前缀之外的东西猜身份。没有就新开一条总管会话。
+  // 2026-11-17 修真 bug：原实现 .reverse() 再取 [0]，实际打开的是**最旧**一条。
+  // state.chats 已是服务端 lastAt 倒序；这里按「置顶优先，其次 lastAt 最新」明确取第一条。
   const ordered = state.chats
     .filter((chat) => !String(chat.conversationId || "").startsWith("partner-"))
     .filter((chat) => (chat.chatKind || "chief") === "chief")
-    .reverse()
-    .sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)));
+    .sort(
+      (a, b) =>
+        Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) ||
+        Number(b.lastAt) - Number(a.lastAt),
+    );
   const recent = ordered[0];
   go("chat");
   if (recent) void openChat(recent.conversationId);
@@ -283,6 +310,15 @@ el.chiefEntry.addEventListener("keydown", (event) => {
 async function loadRoster() {
   const box = el.partnerRoster;
   if (!box) return;
+  // 副会话入口开关：花名册首次加载取一次（缓存进 state.flagsCache），失败按关处理。
+  state.sideSessionsEnabled = await ensureSideSessionsFlag();
+  // 开关晚到：openChat 可能先于花名册跑完，这里补一次顶栏可点态。
+  const identityNow = parsePartnerExternalId(state.conversationId);
+  syncTitleSessionAffordance(
+    identityNow && (identityNow.role === "canonical" || identityNow.role === "side")
+      ? identityNow.partnerId
+      : "",
+  );
   let partners = null;
   let domains = [];
   try {
@@ -306,10 +342,22 @@ async function loadRoster() {
     Array.isArray(domains) ? domains : [],
   );
   syncChiefAvatar();
+  syncChiefSessionsButton();
   syncPartnerDots();
-  // 名册晚于会话加载时，把执事专线的表头补成名字（之前只有占位「执事」）
-  if (state.conversationId.startsWith("partner-") && currentRoute() === "chat") {
-    el.title.textContent = partnerDisplayName(state.conversationId.slice("partner-".length));
+  // 名册晚于会话加载时，把执事表头补成名字（canonical 与 side 都要）：
+  // side 的首帧可能先用占位「执事」拼了「执事 · 标题」，这里用标题尾巴重建。
+  const identity = parsePartnerExternalId(state.conversationId);
+  if (identity && currentRoute() === "chat") {
+    if (identity.role === "canonical") {
+      el.title.textContent = partnerDisplayName(identity.partnerId);
+    } else if (identity.role === "side") {
+      const known = state.chats.find(
+        (chat) => chat.conversationId === state.conversationId,
+      )?.title;
+      const tail = known || el.title.textContent.split(" · ").slice(1).join(" · ") || "新会话";
+      el.title.textContent = `${partnerDisplayName(identity.partnerId)} · ${tail}`;
+    }
+    syncTitleSessionAffordance(identity.partnerId);
   }
   // 总管的名字也可能在人设里改过：总管会话的表头跟着名册一起刷新（2026-11-13）
   if (
@@ -329,4 +377,4 @@ async function loadRoster() {
    拆成多模块后 loadRoster 与 renderRoster 分别写一个字段，故收进对象。 */
 const rosterDomain = { active: new Map(), rows: [] };
 
-export { chiefDisplayName, chatIdentityFace, chatIdentityName, loadRoster, openChiefChat, paintBusyChip, partnerBusyOf, partnerDisplayName, partnerPendingCounts, rosterDomain, syncChatHeadAvatar, syncChiefAvatar, syncChiefDot, syncEmptyMark, syncPartnerDots, syncRosterBusy, WORKER_DISPLAY_NAME };
+export { chiefDisplayName, chatIdentityFace, chatIdentityName, loadRoster, openChiefChat, paintBusyChip, partnerBusyOf, partnerDisplayName, partnerPendingCounts, rosterDomain, syncChatHeadAvatar, syncChiefAvatar, syncChiefDot, syncChiefSessionsButton, syncEmptyMark, syncPartnerDots, syncRosterBusy, WORKER_DISPLAY_NAME };

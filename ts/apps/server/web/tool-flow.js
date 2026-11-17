@@ -72,6 +72,40 @@ function createToolFlow(root, options = {}) {
       stepCount += 1;
       return group;
     },
+    /**
+     * 思考段（2026-11-17 用户口径：和工具同款灰块）。
+     * 排在它真正发生的位置（通常是一组里最前面），图标 sparkles、动词「思考」；
+     * 正文进详情（限高、内部滚动），主界面照样不写秒数。
+     * 返回句柄：`append(增量)` 追加正文，`finish()` 定格并补「用时」。
+     */
+    think() {
+      const id = `think:${stepCount}`;
+      stepCount += 1;
+      // 定格要落到**创建它的那一组**上：中间被 breakGroup 切走也不能丢了终态。
+      const owner = ensureGroup();
+      const chip = owner.push({
+        id,
+        verb: "思考",
+        iconSvg: toolIconSvg("think"),
+        state: "run",
+        kind: "think",
+      });
+      const startedAt = performance.now();
+      let text = "";
+      return {
+        append(delta) {
+          text += delta || "";
+          chip.__streamText?.(text);
+        },
+        finish() {
+          owner.settle(id, {
+            state: "ok",
+            output: text,
+            duration: shortDuration(performance.now() - startedAt),
+          });
+        },
+      };
+    },
     end(name, ok, output, diff) {
       if (!group) return;
       const duration = group.durationOf?.(name);

@@ -25,7 +25,10 @@ import { closePopover, openPopover, popoverOpen, toast } from "./ui-atoms.js";
  * （侧栏「群组」分区头就有 title + data-tip 两份）；现在 title 只当数据源读一次，
  * 读完即删，页面上只留一种提示。 */
 const TIP_SHOW_DELAY_MS = 450;
-const hoverTipState = { timer: 0, anchor: null, x: null, y: null };
+// 指针按下后这段时间内的 focusin 算「点出来的焦点」，不弹提示（键盘 Tab 不会先有 pointerdown）。
+// 2026-11-17 用户反馈：点击时小黑块会冒出来闪一下——点按钮会聚焦，focusin 分支把它当键盘聚焦了。
+const POINTER_FOCUS_GUARD_MS = 600;
+const hoverTipState = { timer: 0, anchor: null, x: null, y: null, pointerDownAt: 0, pressedAnchor: null };
 
 /** 原生 title → data-tip（一次性收编）。
  *  - 手写的 data-tip 优先：title 只删不加，别覆盖更长的解释（分区头就是这种形状）。
@@ -151,25 +154,54 @@ function showHoverTip(target) {
 document.addEventListener("mouseover", (event) => {
   // 先把这一支上最近的原生 title 收编：浏览器默认小框和浮签不能同时出现
   adoptTitleTip(event.target.closest?.("[title]"));
+  // 指针已经离开「刚点过」的元素：解除抑制，回到普通悬停
+  const pressed = hoverTipState.pressedAnchor;
+  if (pressed && (!pressed.isConnected || !pressed.contains(event.target))) {
+    hoverTipState.pressedAnchor = null;
+  }
   const target = event.target.closest?.("[data-tip]");
   if (!target) return;
   // 同一元素里从一段文字挪到另一段时也更新落点，提示才不会停在进入元素时的位置
   hoverTipState.x = event.clientX;
   hoverTipState.y = event.clientY;
+  // 点过的元素，指针离开前不再弹：点击的目的是操作，不是读解释。
+  // 否则点完鼠标还停在原处，轻微挪动会重新起 450ms 计时，提示又自己冒出来。
+  if (hoverTipState.pressedAnchor) {
+    clearTimeout(hoverTipState.timer);
+    hoverTipState.timer = 0;
+    return;
+  }
   if (target === hoverTipState.anchor) return;
   clearTimeout(hoverTipState.timer);
   hoverTipState.timer = setTimeout(() => showHoverTip(target), TIP_SHOW_DELAY_MS);
 });
 document.addEventListener("mouseout", (event) => {
+  // 指针彻底离开按下的元素（或移出窗口）：解除抑制
+  const pressed = hoverTipState.pressedAnchor;
+  if (pressed && (!event.relatedTarget || !pressed.contains(event.relatedTarget))) {
+    hoverTipState.pressedAnchor = null;
+  }
   const target = event.target.closest?.("[data-tip]");
   if (!target) return;
   // 同一元素内部挪动（穿过 svg/文字）不算离开
   if (event.relatedTarget && target.contains(event.relatedTarget)) return;
   hideHoverTip();
 });
-// 键盘可达：Tab 聚焦立即出（不等延迟），移走即收
+/* 指针按下就收（2026-11-17）：原来只收在 click 上，但 mousedown 的默认动作会先给按钮
+ * 聚焦，focusin 的「键盘可达」分支立刻弹提示，按住到松开之间就闪一下。
+ * 这里同时记住按下的是哪个提示元素：点完指针常还停在原地，离开它之前不再弹。 */
+document.addEventListener("pointerdown", (event) => {
+  hoverTipState.pointerDownAt = Date.now();
+  hoverTipState.pressedAnchor = event.target instanceof Element ? event.target.closest("[data-tip]") : null;
+  hideHoverTip();
+}, true);
+// 右键菜单弹出的同一刻也收（pointerdown 已收一次，这里是兜底：部分场景只来 contextmenu）
+document.addEventListener("contextmenu", hideHoverTip);
+// 键盘可达：Tab 聚焦立即出（不等延迟），移走即收。
+// 鼠标/触屏点出来的焦点不走这条，判据是刚发生过 pointerdown。
 document.addEventListener("focusin", (event) => {
   adoptTitleTip(event.target.closest?.("[title]"));
+  if (Date.now() - hoverTipState.pointerDownAt < POINTER_FOCUS_GUARD_MS) return;
   const target = event.target.closest?.("[data-tip]");
   if (target && target !== hoverTipState.anchor) {
     // 键盘聚焦没有鼠标落点，别沿用上一次悬停的位置

@@ -7,12 +7,16 @@
  * app.js 文末，各模块顶层只做声明、常量与事件监听注册。
  */
 
+import { formatBranchOrigin } from "./branch.js";
 import { addError, attachUsage, collectFileChangesFromSteps, mountFileSummary, scrollToEnd, syncCtxMeter } from "./chat-notice.js";
+import { clearChatProject, syncChatProjectPill } from "./chat-project.js";
 import { addMessage, clearThread, syncEditEntry } from "./chat-thread.js";
 import { renderChats } from "./chats-list.js";
 import { KEY_CONV, el } from "./dom.js";
 import { dayKeyOfAt, dayLabelOf } from "./groups-thread.js";
 import { request } from "./net.js";
+import { partnerSessionLabel, parsePartnerExternalId } from "./partner-sessions.js";
+import { openPartnerSessions } from "./partner-sessions-ui.js";
 import { chiefDisplayName, partnerDisplayName, syncChatHeadAvatar, syncEmptyMark } from "./partners-status.js";
 import { go, syncRailCurrent, syncSideRowsCurrent } from "./route.js";
 import { state } from "./state.js";
@@ -20,6 +24,67 @@ import { ensureChatPagingFlag } from "./tasks-redesign.js";
 import { toolFlowFromSteps } from "./tool-flow.js";
 import { loadPendingApprovals, mountTopicProposalCard, parseTopicProposalOutput } from "./topic-proposal.js";
 import { toast } from "./ui-atoms.js";
+
+/* ── 分支来源行（2026-11-17 批3b）───────────────────────
+ * 新会话顶部一行小声的来源；只在副本会话出现，点击回原会话。
+ * 节点在模块初始化时创建并插在 thread 之前（不改 index.html，避开在途改动）。 */
+const originBar = document.createElement("div");
+originBar.id = "branch-origin";
+originBar.className = "branch-origin";
+originBar.hidden = true;
+el.thread?.before(originBar);
+
+function renderBranchOrigin(origin) {
+  const formatted = formatBranchOrigin(origin);
+  if (!formatted) {
+    originBar.hidden = true;
+    originBar.replaceChildren();
+    originBar.removeAttribute("title");
+    originBar.onclick = null;
+    return;
+  }
+  // textContent：来源标题来自用户命名，绝不拼 HTML
+  originBar.textContent = formatted.text;
+  originBar.title = "回到原会话";
+  originBar.hidden = false;
+  originBar.onclick = () => {
+    if (formatted.source && formatted.source !== state.conversationId) {
+      void openChat(formatted.source);
+    }
+  };
+}
+
+/* ── 会话选择器入口（2026-11-17 批2）─────────────────────
+ * 顶栏标题只在执事 canonical / side 会话可点；worker / chief 行为不变。
+ * 当前会话用 state.conversationId 精确解析，不靠前缀 slice。 */
+function syncTitleSessionAffordance(partnerId) {
+  const show = Boolean(partnerId && state.sideSessionsEnabled);
+  el.title.classList.toggle("is-session-picker", show);
+  if (show) {
+    el.title.title = "选择会话";
+    el.title.tabIndex = 0;
+    el.title.setAttribute("role", "button");
+  } else {
+    el.title.removeAttribute("title");
+    el.title.removeAttribute("tabindex");
+    el.title.removeAttribute("role");
+  }
+}
+
+function openCurrentSessionPicker() {
+  if (!state.sideSessionsEnabled) return;
+  const parsed = parsePartnerExternalId(state.conversationId);
+  if (parsed && (parsed.role === "canonical" || parsed.role === "side")) {
+    openPartnerSessions(parsed.partnerId);
+  }
+}
+el.title?.addEventListener("click", openCurrentSessionPicker);
+el.title?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    openCurrentSessionPicker();
+  }
+});
 
 /* ── 打开会话 ─────────────────────────────────────────── */
 
@@ -84,7 +149,14 @@ function renderTranscriptMessage(message, options = {}) {
     message.at,
     message.images,
     // 2026-11-15 作者标记：非主人来源的来信靠 author 画成左侧卡片（无 author 就是主人自己说的）
-    { files: message.files, parent: options.parent, author: message.author },
+    // 2026-11-17 消息时刻：只有回答显示收尾时刻（endedAt，服务端 = at + durationMs）；
+    // 用户消息不显示时刻（晚间口径），这里不再给它传 clockAt
+    {
+      files: message.files,
+      parent: options.parent,
+      author: message.author,
+      clockAt: message.role === "user" ? undefined : message.endedAt || message.at,
+    },
   );
   // 可寻址 id（2026-11-08 4a）：编辑重发靠它定位这条 user 消息
   if (message.role === "user" && message.id) shown.root.dataset.messageId = message.id;
@@ -255,6 +327,8 @@ async function openChat(conversationId, { anchor = null, deep = false } = {}) {
   state.maxSeq = 0;
   renderChats();
   clearThread();
+  // 来源行在 thread 之外，切会话先收起；拿到回读数据后按 origin 再摆。
+  renderBranchOrigin(null);
   el.title.textContent = "…";
   // 顶栏头像跟着会话走（2026-11-13）：换会话先按新 id 摆（执事专线立刻有脸，
   // 总管 / 普通对话立刻收起），别让上一位的头像挂在新会话的标题旁。
@@ -282,11 +356,15 @@ async function openChat(conversationId, { anchor = null, deep = false } = {}) {
     const data = await response.json();
     // 这中间用户又切了别的会话：旧历史不许覆盖新会话的屏幕
     if (!owner()) return { token, conversationId, status: "stale" };
+    // 分支来源行（2026-11-17 批3b）：副本会话才有；分页 / 全量两条路共用这份 data。
+    renderBranchOrigin(data.origin || null);
     // 续话身份只认服务端回读（缺字段的旧后端按 chief）；不靠 id 猜。
     const kind = data.chatKind || "chief";
     state.chatKind = kind;
     // 种类回读后再校一次轨道选中：总管会话要把「对话」熄掉（2026-11-13 选中态批）
     syncRailCurrent();
+    // 已经落盘的会话不再显示「选项目」（cwd 早在建会话时就定了）
+    clearChatProject();
     clearThread();
     const messages = data.messages || [];
     if (pageMode) {
@@ -301,12 +379,23 @@ async function openChat(conversationId, { anchor = null, deep = false } = {}) {
       // 回滚形态（开关关）或 deep 搜索兜底：一次全量/200 条，行为与改动前一致（无日期条）。
       for (const message of messages) renderTranscriptMessage(message);
     }
-    const partnerId = conversationId.startsWith("partner-")
-      ? conversationId.slice("partner-".length)
-      : "";
+    const parsed = parsePartnerExternalId(conversationId);
+    const partnerId =
+      parsed && (parsed.role === "canonical" || parsed.role === "side") ? parsed.partnerId : "";
     if (partnerId) {
-      // 执事专线表头用名字；身份仍以服务端 chatKind 为准，这里只是展示
-      el.title.textContent = partnerDisplayName(partnerId);
+      if (parsed.role === "side") {
+        // 副会话：人设名 · 会话标题（空会话 = 「新会话」）。副会话不进「最近会话」，
+        // state.chats 里没有它，标题从这一轮回读的首句与轮数现算，语义同 partnerSessionLabel。
+        const known = state.chats.find((chat) => chat.conversationId === conversationId);
+        const first = messages.find((message) => message.role === "user");
+        el.title.textContent = `${partnerDisplayName(partnerId)} · ${partnerSessionLabel(
+          known || { firstText: first?.text || "", turns: messages.filter((m) => m.role === "user").length },
+        )}`;
+      } else {
+        // canonical：表头仍只显示人设名（现状不变）
+        el.title.textContent = partnerDisplayName(partnerId);
+      }
+      syncTitleSessionAffordance(partnerId);
     } else if (kind === "chief") {
       // 总管（2026-11-13 用户口径）：顶栏回答的是「我在跟谁说话」，答的是总管，
       // 不是「这条会话叫什么」——会话存过什么标题（例如「我的主对话」）不拿到这里来。
@@ -320,6 +409,7 @@ async function openChat(conversationId, { anchor = null, deep = false } = {}) {
       const first = messages.find((message) => message.role === "user");
       el.title.textContent = known || (first ? first.text.slice(0, 40) : "对话");
     }
+    if (!partnerId) syncTitleSessionAffordance("");
     el.title.dataset.chatKind = kind;
     // 起首图标等 chatKind 回读之后才画（空态那一段 clearThread 里先重置成水晶，见 syncEmptyMark）
     syncEmptyMark();
@@ -369,15 +459,20 @@ function startNewChat(kind = "worker") {
   syncRailCurrent();
   syncSideRowsCurrent();
   renderChats();
+  renderBranchOrigin(null); // 新会话不是副本，来源行收起来
   clearThread();
   el.title.textContent = state.chatKind === "chief" ? chiefDisplayName() : "普通对话";
+  syncTitleSessionAffordance("");
   el.title.dataset.chatKind = state.chatKind;
   // 新建 / 换身份时 state 已经定好，可以直接画起首图标
   syncEmptyMark();
+  // 新建 worker 会话时露出「选项目」pill（2026-11-17）；总管 / 续话不收
+  clearChatProject();
+  void syncChatProjectPill();
   syncChatHeadAvatar(); // 新会话没有对手：头像整块收起
   el.ctxRing.hidden = true;
   delete el.ctxRing.dataset.conv;
   el.input.focus();
 }
 
-export { CHAT_HISTORY_PAGE_SIZE, clearHistoryTop, jumpToAnchor, loadOlderMessages, openChat, openConversation, prependHistoryMessages, renderHistoryMessages, renderHistoryTop, renderTranscriptMessage, startNewChat };
+export { CHAT_HISTORY_PAGE_SIZE, clearHistoryTop, jumpToAnchor, loadOlderMessages, openChat, openConversation, prependHistoryMessages, renderHistoryMessages, renderHistoryTop, renderTranscriptMessage, startNewChat, syncTitleSessionAffordance };

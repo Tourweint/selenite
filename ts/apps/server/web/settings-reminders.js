@@ -1,20 +1,20 @@
 /**
- * 定时任务页（员工例行任务 + 每晚整理记忆）
+ * 定时任务页 + 统一编辑器（2026-11-17 重做）
  *
  * 2026-11-13 从 web/app.js（25,467 行单文件）按职责拆出；正文是原文搬运，未改写行为。
- * 2026-11-14 手动创建重做：滚轮时间 + 图形化日期，支持单日 / 区间 / 每天 / 每周 / 每月，
- * 并给已排好的任务提供「改时间」（只改时间，不改内容）。
+ * 2026-11-14 手动创建重做：滚轮时间 + 图形化日期，支持单日 / 区间 / 每天 / 每周 / 每月。
  * 2026-11-14 合并「定时任务」页：一张清单；每条任务只记目标（总管 / 员工）、提示词和时间。
- * 到点把提示词发给目标，目标起一轮再回话；不再分「只发一句 / 自动执行」。
+ * 2026-11-17 重做：定时任务页与人设页共用同一张清单 + 同一个编辑器（openScheduledTaskModal）；
+ * 手动新建统一走 reminders（保住手机本地闹钟），例行规则在同一清单里只读高级触发、内容可改；
+ * 提醒补齐编辑内容 / 暂停 / 立即跑 / 历史 / 触发可见性。
  * 原文件只有一个作用域、函数互调没有固定方向，拆开后模块之间必然互相 import（环）。
  * ESM 允许循环引用，前提是模块顶层求值时不向别的模块取值；本层把启动代码全放在入口
  * app.js 文末，各模块顶层只做声明、常量与事件监听注册。
  */
 
 import { fetchModelCatalog, normalizeModelRow, renderModelMenu } from "./hover-tip.js";
-import { esc } from "./markdown.js";
+import { attr, esc } from "./markdown.js";
 import { request } from "./net.js";
-import { ptHumanizeTrigger } from "./partner-modals.js";
 import { mountSegmented, syncSegmented } from "./settings-atoms.js";
 import { KEY_MODEL_PROVIDER } from "./shell.js";
 import { state } from "./state.js";
@@ -113,11 +113,34 @@ function rmWeeklyText(weekdays) {
   return `每周${values.map((value) => RM_WEEK_SHORT[value]).join("、")}`;
 }
 
-/* 总览里不摊 cron 原文：只给一句人话。cron 的星期数字也翻成中文。 */
+/* 总览里不摊 cron 原文：只给一句人话。cron 的星期数字也翻成中文。纯文本，调用方负责 esc。 */
 const RT_WEEK = ["日", "一", "二", "三", "四", "五", "六"];
 function rtTriggerText(trigger) {
   if (!trigger) return "—";
-  if (trigger.type !== "cron") return ptHumanizeTrigger(trigger);
+  // 2026-11-17：这里不能再借 partner-modals 的 ptHumanizeTrigger（会成环），
+  // 非 cron 三型自己翻人话；interval/event 也是 Agent 建的合法高级触发。
+  if (trigger.type === "interval") {
+    const seconds = Number(trigger.seconds) || 0;
+    const minutes = seconds / 60;
+    return Number.isInteger(minutes) && minutes > 0 ? `每 ${minutes} 分钟` : `每 ${seconds} 秒`;
+  }
+  if (trigger.type === "once") {
+    const at = trigger.at ? new Date(trigger.at) : null;
+    const shown =
+      at && !Number.isNaN(at.getTime()) ? at.toLocaleString("zh-CN") : String(trigger.at || "");
+    return `一次性 · ${shown}`;
+  }
+  if (trigger.type === "event") {
+    const kind = String(trigger.kind || "");
+    const matchText =
+      trigger.match && Object.keys(trigger.match).length
+        ? Object.entries(trigger.match)
+            .map(([key, value]) => `${key}=${value}`)
+            .join(", ")
+        : "";
+    return `事件 · ${kind}${matchText ? `（${matchText}）` : ""}`;
+  }
+  if (trigger.type !== "cron") return "—";
   const parts = String(trigger.expr || "").trim().split(/\s+/);
   let human = "按 cron 定时";
   if (parts.length === 5) {
@@ -134,7 +157,7 @@ function rtTriggerText(trigger) {
     else if (dom !== "*") human = `每月 ${dom} 日 ${clock}`;
     else if (dow !== "*") human = `每周${week} ${clock}`;
   }
-  return esc(human);
+  return human;
 }
 
 /* ── 定时任务清单（2026-11-14 合并）──────────────────────
@@ -196,9 +219,9 @@ function rtNextAt(triggers, from = Date.now()) {
     else if (trigger?.type === "once") {
       const at = new Date(trigger.at).getTime();
       if (Number.isFinite(at) && at > from) next = at;
-    } else if (trigger?.type === "interval") {
-      next = from + Math.max(60, Number(trigger.seconds) || 60) * 1000;
     }
+    // interval / event 没有从列表可算准确的下一次（真实下一跳在 durable 任务里），
+    // 不拿 now+间隔冒充；行里只显示「每 N 分钟 / 事件 · …」。
     if (Number.isFinite(next) && (best === null || next < best)) best = next;
   }
   return best;
@@ -239,18 +262,19 @@ function rtScheduleText(triggers) {
     if (trigger?.type === "once") return "一次性";
     if (trigger?.type === "cron") {
       const [mi, hr, dom, mon, dow] = String(trigger.expr || "").trim().split(/\s+/);
+      const endText = trigger.ends?.at ? `（到 ${rmShortDate(trigger.ends.at)}）` : "";
       if (/^\d+$/.test(mi || "") && /^\d+$/.test(hr || "")) {
         if (dom !== "*" && mon === "*" && dow === "*" && /^\d+$/.test(dom || "")) {
-          return `每月${dom}号`;
+          return `每月${dom}号${endText}`;
         }
         if (dow !== "*" && dom === "*" && mon === "*") {
           const week = dow
             .split(",")
             .map((value) => (/^\d+$/.test(value) ? RT_WEEK[Number(value)] || value : value))
             .join("、");
-          return `每周${week}`;
+          return `每周${week}${endText}`;
         }
-        if (dom === "*" && dow === "*" && mon === "*") return "每天";
+        if (dom === "*" && dow === "*" && mon === "*") return `每天${endText}`;
       }
     }
   }
@@ -287,14 +311,443 @@ function rmRoutineTriggers(schedule) {
   return [{ type: "once", at: date.toISOString() }];
 }
 
+/** 改时间时保留高级触发里与时间无关的附加条件（if / ends.after）。 */
+function rmMergeTriggerExtras(trigger, original) {
+  const next = { ...trigger };
+  if (original?.if) next.if = original.if;
+  const ends = { ...(original?.ends || {}), ...(trigger.ends || {}) };
+  if (Object.keys(ends).length > 0) next.ends = ends;
+  return next;
+}
+
+/* ── 统一定时任务清单（2026-11-17 定时任务重做）──────────────
+ * 定时任务页与人设页共用：routine（Agent/高级规则）、reminder（手动新建/主动轮）、
+ * memory（每晚整理）三种来源先归一成同一种 item，再画同一套行。
+ * 行动作按 kind 路由到各自端点；历史也各取各的，但长得一样。 */
+
+const TASK_RUN_STATUS = {
+  success: { text: "成功", cls: "" },
+  failed: { text: "失败", cls: "warn" },
+  interrupted: { text: "中断", cls: "warn" },
+  skipped: { text: "跳过", cls: "" },
+  running: { text: "运行中", cls: "" },
+  queued: { text: "排队", cls: "" },
+};
+
+function taskTitleOf(text, limit = 40) {
+  const line = String(text || "")
+    .split(/\r?\n/)
+    .map((value) => value.trim())
+    .find(Boolean) || "";
+  return line.slice(0, limit) || "未命名";
+}
+
+function taskPersonOf(partnerId, nameById) {
+  if (!partnerId || partnerId === "chief") return { key: "chief", label: "总管" };
+  return { key: `partner:${partnerId}`, label: nameById.get(partnerId) || "同事" };
+}
+
+function taskPersonLabel(partnerId) {
+  if (!partnerId || partnerId === "chief") return "总管";
+  return state.partners.find((item) => item.id === partnerId)?.name || "同事";
+}
+
+function routineTaskItem(routine, nameById) {
+  const person = taskPersonOf(routine.partnerId, nameById);
+  const triggers = Array.isArray(routine.triggers) ? routine.triggers : [];
+  return {
+    key: `routine-${routine.id}`,
+    kind: "routine",
+    id: routine.id,
+    partnerId: routine.partnerId,
+    personKey: person.key,
+    who: person.label,
+    title: routine.name || taskTitleOf(routine.prompt),
+    instruction: routine.prompt || "",
+    // 老服务端（未重启）不返回 prompt：先锁编辑，避免空正文覆盖掉原指令。
+    promptMissing: typeof routine.prompt !== "string",
+    scheduleText: rtScheduleText(triggers),
+    nextAt: rtNextAt(triggers),
+    enabled: Boolean(routine.enabled),
+    visibility: "visible",
+    canPause: true,
+    canRunNow: true,
+    canHistory: true,
+    canDelete: true,
+    raw: routine,
+  };
+}
+
+function reminderTaskItem(reminder, nameById) {
+  const person = taskPersonOf(reminder.partnerId, nameById);
+  const repeat = reminder.repeat || "none";
+  return {
+    key: `reminder-${reminder.reminderId}`,
+    kind: "reminder",
+    id: reminder.id,
+    reminderId: reminder.reminderId,
+    partnerId: reminder.partnerId,
+    personKey: person.key,
+    who: person.label,
+    title: taskTitleOf(reminder.text),
+    instruction: reminder.text || "",
+    scheduleText: rmProactiveScheduleText(reminder),
+    nextAt: Number(reminder.at || 0),
+    enabled: reminder.enabled !== false,
+    visibility: reminder.visibility === "visible" ? "visible" : "hidden",
+    // 一次性提醒没有可恢复的持久定义：暂停等于静默终止，UI 不提供。
+    canPause: repeat !== "none",
+    canRunNow: true,
+    canHistory: true,
+    canDelete: true,
+    raw: reminder,
+  };
+}
+
+function memoryTaskItem(item, memoryData, nameById) {
+  const scope = String(item.scope || "");
+  const partnerId = scope === "global" ? "chief" : scope.startsWith("partner:") ? scope.slice(8) : null;
+  const person = taskPersonOf(partnerId, nameById);
+  return {
+    key: `memory-${scope}`,
+    kind: "memory",
+    id: scope,
+    memoryScope: scope,
+    partnerId,
+    personKey: person.key,
+    who: scope === "global" ? "总管" : item.label || person.label,
+    title: "整理记忆",
+    instruction: "把长记忆拆成短原子（原文存进原文档案），再回看重复、过时、说法不一致的条目；只出建议，你点应用才改。",
+    scheduleText: `每天 ${memoryData.at || "03:30"}`,
+    nextAt: Date.parse(memoryData.nextAt || "") || 0,
+    enabled: Boolean(memoryData.enabled) && item.enabled !== false,
+    visibility: "",
+    // 总开关关着时单个任务改不了；开着就能暂停/启用。
+    canPause: Boolean(memoryData.enabled),
+    canRunNow: false,
+    canHistory: false,
+    canDelete: true,
+    raw: item,
+  };
+}
+
+function taskRunTime(run) {
+  const at = run.endedAt || run.startedAt || (run.at ? new Date(run.at).toISOString() : "");
+  const date = at ? new Date(at) : null;
+  return date && !Number.isNaN(date.getTime()) ? date.toLocaleString("zh-CN") : "";
+}
+
+function taskTriggerText(run) {
+  if (run.trigger === "manual") return "手动";
+  if (run.trigger === "scheduled") return "按计划";
+  return String(run.trigger || "");
+}
+
+function renderTaskRuns(box, runs) {
+  const list = (Array.isArray(runs) ? runs : []).slice(0, 10);
+  if (list.length === 0) {
+    box.innerHTML = `<div class="set-hint">还没有执行记录。</div>`;
+    return;
+  }
+  box.innerHTML = list
+    .map((run) => {
+      const info = TASK_RUN_STATUS[run.status] || { text: run.status || "未知", cls: "" };
+      const summary = String(run.summary || "").replace(/\s+/g, " ").trim().slice(0, 200);
+      return `<div class="rm-run">
+        <span class="pill-tag ${info.cls}">${esc(info.text)}</span>
+        <span class="rm-run-trigger">${esc(taskTriggerText(run))}</span>
+        <span class="rm-run-summary">${esc(summary || "—")}</span>
+        <span class="rm-run-time">${esc(taskRunTime(run))}</span>
+      </div>`;
+    })
+    .join("");
+}
+
+function taskDeleteEndpoint(item) {
+  if (item.kind === "memory") {
+    return `/api/v1/agent/memory/nightly/${encodeURIComponent(item.memoryScope)}`;
+  }
+  if (item.kind === "reminder") {
+    return `/api/v1/agent/reminders/${encodeURIComponent(item.id)}`;
+  }
+  return `/api/v1/routines/${encodeURIComponent(item.id)}`;
+}
+
+function taskRunsEndpoint(item) {
+  if (item.kind === "reminder") {
+    return `/api/v1/agent/reminders/${encodeURIComponent(item.reminderId)}/runs`;
+  }
+  return `/api/v1/routines/${encodeURIComponent(item.id)}/runs`;
+}
+
+function confirmDeleteTask(item, onChanged) {
+  openModal("删除定时任务", (body) => {
+    body.innerHTML = `
+      <p class="modal-desc">确定删除「${esc(item.title)}」？提醒任务会取消后续续排；例行规则的在飞任务醒来会自动作废。</p>
+      <div class="modal-actions">
+        <button class="ghost" type="button" data-modal-cancel>取消</button>
+        <button class="modal-danger" type="button" id="task-del-go">删除</button>
+      </div>`;
+    body.querySelector("[data-modal-cancel]")?.addEventListener("click", closeModal);
+    body.querySelector("#task-del-go")?.addEventListener("click", async (event) => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      try {
+        const response = await request(taskDeleteEndpoint(item), { method: "DELETE" });
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          toast(`没删成：${data.message || data.error || response.status}`);
+          button.disabled = false;
+          return;
+        }
+        toast("已删除");
+        closeModal();
+        if (typeof onChanged === "function") onChanged();
+      } catch (error) {
+        if (error.message !== "forbidden") toast(`没删成：${error.message}`);
+        button.disabled = false;
+      }
+    });
+  });
+}
+
+/**
+ * 一张清单的渲染与动作（2026-11-17）。
+ * `items` 由三个 XxxTaskItem 归一；`options.onChanged` 在删/暂停/编辑后由调用方重拉。
+ */
+function renderScheduledTaskList(box, items, options = {}) {
+  if (!box) return;
+  const all = [...items];
+  const onChanged = typeof options.onChanged === "function" ? options.onChanged : null;
+  all.sort((a, b) => {
+    if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
+    return (a.nextAt || Number.MAX_SAFE_INTEGER) - (b.nextAt || Number.MAX_SAFE_INTEGER);
+  });
+
+  if (all.length === 0) {
+    box.innerHTML = `<div class="rm-empty">${esc(options.emptyText || "还没有定时任务")}</div>`;
+    return;
+  }
+
+  const people = new Map();
+  for (const item of all) {
+    const found = people.get(item.personKey);
+    if (found) found.count += 1;
+    else people.set(item.personKey, { key: item.personKey, label: item.who, count: 1 });
+  }
+
+  let filter = "all";
+  if (options.showFilter !== false && people.size > 1) {
+    const filterKey = options.filterKey || "reminderFilter";
+    const saved = state[filterKey] || "all";
+    filter = saved === "all" || people.has(saved) ? saved : "all";
+    state[filterKey] = filter;
+  }
+  const visible = filter === "all" ? all : all.filter((item) => item.personKey === filter);
+  const list = visible.slice(0, 30);
+  const byKey = new Map(list.map((item) => [item.key, item]));
+
+  const filterBar =
+    options.showFilter !== false && people.size > 1
+      ? `<div class="rm-filter-bar">
+          <span class="rm-filter-label">按人筛选</span>
+          <select class="rm-filter-select" id="scheduled-task-filter" aria-label="按人筛选">
+            <option value="all"${filter === "all" ? " selected" : ""}>全部人 (${all.length})</option>
+            ${[...people.values()]
+              .map(
+                (item) =>
+                  `<option value="${attr(item.key)}"${filter === item.key ? " selected" : ""}>${esc(
+                    item.label,
+                  )} (${item.count})</option>`,
+              )
+              .join("")}
+          </select>
+        </div>`
+      : "";
+
+  box.innerHTML =
+    filterBar +
+    (list.length
+      ? list
+          .map((item, index) => {
+            const dayText = item.enabled ? (item.nextAt ? rmDateText(item.nextAt) : "—") : "已停";
+            const timeText = item.enabled && item.nextAt ? rmTimeText(item.nextAt) : "";
+            const badge =
+              item.kind === "memory"
+                ? '<span class="rm-kind">每晚整理</span>'
+                : item.visibility === "hidden"
+                  ? '<span class="rm-kind rm-kind-hidden">触发隐藏</span>'
+                  : '<span class="rm-kind rm-kind-visible">触发可见</span>';
+            const actions = [];
+            if (item.kind === "memory") {
+              actions.push(`<button class="rm-edit" type="button" data-act="edit">改时间</button>`);
+              if (item.canPause) {
+                actions.push(
+                  `<button class="rm-edit" type="button" data-act="toggle">${item.enabled ? "暂停" : "启用"}</button>`,
+                );
+              }
+              actions.push(`<button class="rm-del" type="button" data-act="delete">删除</button>`);
+            } else {
+              const editLocked = item.kind === "routine" && item.promptMissing === true;
+              actions.push(
+                `<button class="rm-edit" type="button" data-act="edit"${
+                  editLocked
+                    ? ' disabled title="服务端还没重启，读不到指令正文；重启后再编辑，避免空正文覆盖"'
+                    : ""
+                }>编辑</button>`,
+              );
+              if (item.canPause) {
+                actions.push(
+                  `<button class="rm-edit" type="button" data-act="toggle">${item.enabled ? "暂停" : "启用"}</button>`,
+                );
+              }
+              actions.push(`<button class="rm-edit" type="button" data-act="run">立即跑</button>`);
+              if (item.canHistory) {
+                actions.push(`<button class="rm-edit" type="button" data-act="history">历史</button>`);
+              }
+              actions.push(`<button class="rm-del" type="button" data-act="delete">删除</button>`);
+            }
+            const full = String(item.instruction || "").replace(/\s+/g, " ").trim();
+            const preview = full.slice(0, 120);
+            const metaExtra = `${!item.enabled && item.kind !== "memory" ? " · 已暂停" : ""}${
+              item.promptMissing ? " · 服务端待重启" : ""
+            }`;
+            return `${index ? '<div class="divider"></div>' : ""}
+        <div class="rm-item" data-task-key="${attr(item.key)}">
+          <div class="rm-row${item.enabled ? "" : " is-off"}">
+            <div class="rm-when">
+              <div class="rm-when-day">${esc(dayText)}</div>
+              <div class="rm-when-time">${esc(timeText)}</div>
+            </div>
+            <div class="rm-row-main">
+              <div class="rm-row-text"><span class="rm-title" title="${attr(item.title)}">${esc(item.title)}</span>${badge}</div>
+              <div class="rm-row-meta">${esc(item.who)} · ${esc(item.scheduleText)}${esc(metaExtra)}</div>
+              ${
+                preview
+                  ? `<div class="rm-instr" title="${attr(full)}">指令：${esc(preview)}${full.length > preview.length ? "…" : ""}</div>`
+                  : ""
+              }
+            </div>
+            <div class="rm-row-actions">${actions.join("")}</div>
+          </div>
+          <div class="rm-runs" hidden></div>
+        </div>`;
+          })
+          .join("")
+      : `<div class="rm-empty">这个人还没有任务</div>`) +
+    (visible.length > list.length
+      ? `<div class="divider"></div><div class="rm-more">还有 ${visible.length - list.length} 条</div>`
+      : "");
+
+  box.querySelector("#scheduled-task-filter")?.addEventListener("change", (event) => {
+    state[options.filterKey || "reminderFilter"] = event.target.value;
+    renderScheduledTaskList(box, all, options);
+  });
+
+  box.querySelectorAll("[data-act]").forEach((button) => {
+    const key = button.closest("[data-task-key]")?.dataset.taskKey;
+    const item = key ? byKey.get(key) : null;
+    if (!item) return;
+    button.addEventListener("click", async () => {
+      if (button.dataset.act === "edit") {
+        if (item.promptMissing) {
+          toast("服务端还没重启，读不到指令正文；先重启再编辑，避免空正文覆盖");
+          return;
+        }
+        openScheduledTaskModal({ mode: "edit", item }, onChanged);
+        return;
+      }
+      if (button.dataset.act === "delete") {
+        confirmDeleteTask(item, onChanged);
+        return;
+      }
+      if (button.dataset.act === "history") {
+        const runsBox = button.closest(".rm-item")?.querySelector(".rm-runs");
+        if (!runsBox) return;
+        if (!runsBox.hidden) {
+          runsBox.hidden = true;
+          button.textContent = "历史";
+          return;
+        }
+        runsBox.hidden = false;
+        button.textContent = "收起";
+        runsBox.innerHTML = `<div class="set-hint">读取中…</div>`;
+        try {
+          const response = await request(taskRunsEndpoint(item), { cache: "no-store" });
+          const data = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(data.message || String(response.status));
+          renderTaskRuns(runsBox, data.runs);
+        } catch (error) {
+          if (error.message !== "forbidden") {
+            runsBox.innerHTML = `<div class="set-hint is-error">读不到历史：${esc(error.message)}</div>`;
+          }
+        }
+        return;
+      }
+      if (button.dataset.act === "toggle") {
+        button.disabled = true;
+        try {
+          const next = !item.enabled;
+          const endpoint =
+            item.kind === "memory"
+              ? `/api/v1/agent/memory/nightly/${encodeURIComponent(item.memoryScope)}`
+              : item.kind === "reminder"
+                ? `/api/v1/agent/reminders/${encodeURIComponent(item.id)}`
+                : `/api/v1/routines/${encodeURIComponent(item.id)}`;
+          const response = await request(endpoint, {
+            method: "PATCH",
+            body: JSON.stringify({ enabled: next }),
+          });
+          const data = await response.json().catch(() => ({}));
+          if (!response.ok) {
+            toast(`没切换：${data.message || data.error || response.status}`);
+            button.disabled = false;
+            return;
+          }
+          toast(next ? "已启用" : "已暂停");
+          if (onChanged) onChanged();
+        } catch (error) {
+          if (error.message !== "forbidden") toast(`没切换：${error.message}`);
+          button.disabled = false;
+        }
+        return;
+      }
+      if (button.dataset.act === "run") {
+        const original = button.textContent;
+        button.disabled = true;
+        button.textContent = "跑中…";
+        try {
+          const endpoint =
+            item.kind === "reminder"
+              ? `/api/v1/agent/reminders/${encodeURIComponent(item.id)}/run_now`
+              : `/api/v1/routines/${encodeURIComponent(item.id)}/run_now`;
+          const response = await request(endpoint, { method: "POST" });
+          const data = await response.json().catch(() => ({}));
+          if (!response.ok || !data.ok) {
+            toast(`没跑成：${data.message || data.error || response.status}`);
+          } else {
+            toast("已跑完一轮");
+            if (onChanged) onChanged();
+          }
+        } catch (error) {
+          if (error.message !== "forbidden") toast(`没跑成：${error.message}`);
+        } finally {
+          button.disabled = false;
+          button.textContent = original;
+        }
+      }
+    });
+  });
+}
+
 async function loadReminders() {
   const card = document.getElementById("reminder-card");
   if (!card) return;
   try {
     const [routinesResponse, remindersResponse, partnersResponse, memoryResponse] = await Promise.all([
       request("/api/v1/routines", { cache: "no-store" }),
-      // 2026-11-17 定时主动轮：这类任务的触发消息对用户隐藏，是另一套端点/数据。
-      request("/api/v1/agent/reminders", { cache: "no-store" }).catch(() => null),
+      // includePaused=1：桌面清单要看到暂停项；手机端不传，继续只同步真会响的。
+      request("/api/v1/agent/reminders?includePaused=1", { cache: "no-store" }).catch(() => null),
       request("/api/v1/partners", { cache: "no-store" }),
       request("/api/v1/agent/memory/nightly", { cache: "no-store" }),
     ]);
@@ -304,249 +757,22 @@ async function loadReminders() {
     const memoryData = await memoryResponse.json().catch(() => ({}));
     const partners = partnersData.partners || state.partners || [];
     const nameById = new Map(partners.map((item) => [item.id, item.name || item.id]));
-    const whoOf = (partnerId) => (partnerId ? (nameById.get(partnerId) || "同事") : "总管");
 
-    const all = [];
+    const items = [];
     for (const routine of routinesData.routines || []) {
-      const triggers = Array.isArray(routine.triggers) ? routine.triggers : [];
-      const nextAt = rtNextAt(triggers);
-      all.push({
-        key: `run-${routine.id}`,
-        kind: "run",
-        id: routine.id,
-        raw: routine,
-        title: routine.name || "未命名",
-        who: whoOf(routine.partnerId),
-        personKey: routine.partnerId && routine.partnerId !== "chief" ? `partner:${routine.partnerId}` : "chief",
-        at: nextAt || 0,
-        enabled: Boolean(routine.enabled),
-        editable: rtScheduleOf(routine) !== null,
-        scheduleText: rtScheduleText(triggers),
-      });
+      items.push(routineTaskItem(routine, nameById));
     }
-    // 2026-11-17 定时主动轮：触发消息对用户隐藏的那类。数据本身就是弹窗能认的 schedule 形状。
     for (const reminder of remindersData.reminders || []) {
       if (reminder.status === "terminal") continue;
-      all.push({
-        key: `pro-${reminder.id}`,
-        kind: "proactive",
-        id: reminder.id,
-        raw: reminder,
-        title: reminder.text || "未命名",
-        who: whoOf(reminder.partnerId),
-        personKey: reminder.partnerId && reminder.partnerId !== "chief" ? `partner:${reminder.partnerId}` : "chief",
-        at: reminder.at || 0,
-        enabled: true,
-        editable: true,
-        scheduleText: rmProactiveScheduleText(reminder),
-      });
+      items.push(reminderTaskItem(reminder, nameById));
     }
-    const nightlyAt = Date.parse(memoryData.nextAt || "") || 0;
     for (const item of memoryData.scopes || []) {
-      all.push({
-        key: `mem-${item.scope}`,
-        kind: "memory",
-        id: item.scope,
-        raw: item,
-        title: "整理记忆",
-        who: item.scope === "global" ? "总管" : item.label || "同事",
-        personKey: item.scope === "global" ? "chief" : item.scope,
-        at: nightlyAt,
-        enabled: Boolean(memoryData.enabled) && item.enabled !== false,
-        editable: true,
-        scheduleText: `每天 ${memoryData.at || "03:30"}`,
-        memoryScope: item.scope,
-      });
+      items.push(memoryTaskItem(item, memoryData, nameById));
     }
-
-    if (!all.length) {
-      card.innerHTML = `<div class="rm-empty">还没有定时任务</div>`;
-      return;
-    }
-
-    all.sort((a, b) => {
-      if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
-      return (a.at || Number.MAX_SAFE_INTEGER) - (b.at || Number.MAX_SAFE_INTEGER);
-    });
-    const personMap = new Map();
-    for (const item of all) {
-      const found = personMap.get(item.personKey);
-      if (found) found.count += 1;
-      else personMap.set(item.personKey, { key: item.personKey, label: item.who, count: 1 });
-    }
-    const people = [...personMap.values()];
-    const savedFilter = state.reminderFilter || "all";
-    const filter =
-      savedFilter === "all" || people.some((item) => item.key === savedFilter) ? savedFilter : "all";
-    state.reminderFilter = filter;
-    const visible = filter === "all" ? all : all.filter((item) => item.personKey === filter);
-    const list = visible.slice(0, 30);
-    const filterBar =
-      people.length > 1
-        ? `<div class="rm-filter-bar">
-            <span class="rm-filter-label">按人筛选</span>
-            <select class="rm-filter-select" id="reminder-filter" aria-label="按人筛选">
-              <option value="all"${filter === "all" ? " selected" : ""}>全部人 (${all.length})</option>
-              ${people
-                .map(
-                  (item) =>
-                    `<option value="${esc(item.key)}"${filter === item.key ? " selected" : ""}>${esc(
-                      item.label,
-                    )} (${item.count})</option>`,
-                )
-                .join("")}
-            </select>
-          </div>`
-        : "";
-    card.innerHTML =
-      filterBar +
-      (list.length
-        ? list
-            .map((item, index) => {
-              const dayText = item.enabled ? (item.at ? rmDateText(item.at) : "—") : "已停";
-              const timeText = item.enabled && item.at ? rmTimeText(item.at) : "";
-              const actions = [];
-              if (item.editable) {
-                actions.push(`<button class="rm-edit" type="button" data-edit="${esc(item.key)}">改时间</button>`);
-              }
-              if (item.kind === "run") {
-                actions.push(
-                  `<button class="rm-edit" type="button" data-toggle="${esc(item.id)}" data-enabled="${
-                    item.enabled ? "1" : "0"
-                  }">${item.enabled ? "暂停" : "启用"}</button>`,
-                );
-              }
-              if (item.kind === "memory") {
-                if (memoryData.enabled) {
-                  actions.push(
-                    `<button class="rm-edit" type="button" data-memory-toggle="${esc(item.memoryScope)}" data-enabled="${
-                      item.enabled ? "1" : "0"
-                    }">${item.enabled ? "暂停" : "启用"}</button>`,
-                  );
-                }
-                actions.push(
-                  `<button class="rm-del" type="button" data-memory-del="${esc(item.memoryScope)}">删除</button>`,
-                );
-              }
-              if (item.kind === "run" || item.kind === "proactive") {
-                actions.push(`<button class="rm-del" type="button" data-del="${esc(item.key)}">删除</button>`);
-              }
-              return `${index ? '<div class="divider"></div>' : ""}
-        <div class="rm-row${item.enabled ? "" : " is-off"}">
-          <div class="rm-when">
-            <div class="rm-when-day">${esc(dayText)}</div>
-            <div class="rm-when-time">${esc(timeText)}</div>
-          </div>
-          <div class="rm-row-main">
-            <div class="rm-row-text">${esc(item.title)} ${
-              item.kind === "proactive"
-                ? '<span class="rm-kind rm-kind-hidden">触发消息对我隐藏</span>'
-                : item.kind === "run"
-                  ? '<span class="rm-kind rm-kind-visible">触发消息可见</span>'
-                  : ""
-            }</div>
-            <div class="rm-row-meta">${esc(item.who)} · ${item.scheduleText}</div>
-          </div>
-          <div class="rm-row-actions">${actions.join("")}</div>
-        </div>`;
-            })
-            .join("")
-        : `<div class="rm-empty">这个人还没有任务</div>`) +
-      (visible.length > list.length
-        ? `<div class="divider"></div><div class="rm-more">还有 ${visible.length - list.length} 条</div>`
-        : "");
-
-    card.querySelectorAll("[data-edit]").forEach((button) => {
-      button.addEventListener("click", () => {
-        const row = all.find((item) => item.key === button.dataset.edit);
-        if (!row) return;
-        if (row.kind === "memory") {
-          openReminderModal({
-            kind: "memory",
-            id: row.memoryScope,
-            text: "整理记忆",
-            at: row.at,
-            repeat: "daily",
-          });
-          return;
-        }
-        if (row.kind === "run") {
-          const schedule = rtScheduleOf(row.raw);
-          if (!schedule) return;
-          openReminderModal({
-            ...schedule,
-            kind: "routine",
-            id: row.raw.id,
-            text: row.raw.name || "未命名",
-            partnerId: row.raw.partnerId,
-          });
-          return;
-        }
-        if (row.kind === "proactive") {
-          const raw = row.raw;
-          const schedule = {
-            at: raw.at,
-            repeat: raw.repeat || "none",
-            ...(raw.weekdays ? { weekdays: raw.weekdays } : {}),
-            ...(raw.dayOfMonth ? { dayOfMonth: raw.dayOfMonth } : {}),
-            ...(raw.until ? { until: raw.until } : {}),
-          };
-          openReminderModal({
-            ...schedule,
-            kind: "proactive",
-            id: raw.id,
-            text: raw.text || "未命名",
-            partnerId: raw.partnerId,
-          });
-          return;
-        }
-      });
-    });
-    card.querySelector("#reminder-filter")?.addEventListener("change", (event) => {
-      state.reminderFilter = event.target.value;
-      void loadReminders();
-    });
-    card.querySelectorAll("[data-memory-toggle]").forEach((button) => {
-      button.addEventListener("click", async () => {
-        button.disabled = true;
-        await request(`/api/v1/agent/memory/nightly/${encodeURIComponent(button.dataset.memoryToggle)}`, {
-          method: "PATCH",
-          body: JSON.stringify({ enabled: button.dataset.enabled !== "1" }),
-        }).catch(() => undefined);
-        void loadReminders();
-      });
-    });
-    card.querySelectorAll("[data-memory-del]").forEach((button) => {
-      button.addEventListener("click", async () => {
-        button.disabled = true;
-        await request(`/api/v1/agent/memory/nightly/${encodeURIComponent(button.dataset.memoryDel)}`, {
-          method: "DELETE",
-        }).catch(() => undefined);
-        void loadReminders();
-      });
-    });
-    card.querySelectorAll("[data-toggle]").forEach((button) => {
-      button.addEventListener("click", async () => {
-        button.disabled = true;
-        await request(`/api/v1/routines/${encodeURIComponent(button.dataset.toggle)}`, {
-          method: "PATCH",
-          body: JSON.stringify({ enabled: button.dataset.enabled !== "1" }),
-        }).catch(() => undefined);
-        void loadReminders();
-      });
-    });
-    card.querySelectorAll("[data-del]").forEach((button) => {
-      button.addEventListener("click", async () => {
-        const row = all.find((item) => item.key === button.dataset.del);
-        if (!row) return;
-        button.disabled = true;
-        const endpoint =
-          row.kind === "proactive"
-            ? `/api/v1/agent/reminders/${encodeURIComponent(row.id)}`
-            : `/api/v1/routines/${encodeURIComponent(row.id)}`;
-        await request(endpoint, { method: "DELETE" }).catch(() => undefined);
-        void loadReminders();
-      });
+    renderScheduledTaskList(card, items, {
+      showFilter: true,
+      emptyText: "还没有定时任务",
+      onChanged: () => void loadReminders(),
     });
   } catch {
     card.innerHTML = `<div class="row"><div class="row-main">
@@ -562,111 +788,186 @@ function rmModeOf(item) {
   return "once";
 }
 
+function taskPartnerIdOf(spec, item) {
+  const value = spec?.partnerId ?? item?.partnerId ?? "chief";
+  return value && value !== "null" ? value : "chief";
+}
+
 /**
- * 手动加一条 / 改一条（2026-11-14 图形化；2026-11-17 加"触发消息隐藏/可见"）。
+ * 统一编辑器（2026-11-17 定时任务重做）。
  *
- * 传 `reminder` = 改时间：内容只读、不出现「提醒什么」输入框；
- * 不传 = 新建：内容输入框保留，时间规则用图形化控件选。
+ * spec:
+ *   `{ mode:"create", partnerId?, lockPartner? }` —— 新建一律走 reminders（保住手机本地闹钟）；
+ *   `{ mode:"edit", item }` —— item 由 XxxTaskItem 归一。
  *
- * `reminder.kind` 两种（2026-11-17）：
- *  - "routine"（默认）= 例行任务，触发消息对用户可见（走 /api/v1/routines）；
- *  - "proactive" = 定时主动轮，触发指令对用户隐藏、只见对面主动冒一句（走 /api/v1/agent/reminders）。
- * 新建时由一个分段控件让用户选；编辑时沿用原任务类型、不让人中途换（换了等于删了重建）。
+ * 编辑三种：
+ *   - reminder：内容 / 时间 / 触发可见性（PATCH /agent/reminders/:id，同 reminderId 重排）；
+ *   - routine ：内容 / 名称 / 会话方式；简单触发可改时间，复杂触发只读；
+ *   - memory  ：只改时间（每晚整理是全家共用时刻）。
  */
-function openReminderModal(reminder = null, onDone = null) {
-  const memoryEditing = reminder?.kind === "memory";
-  const editing = Boolean(
-    reminder &&
-      (memoryEditing || reminder.kind === "routine" || reminder.kind === "proactive" || reminder.status !== "terminal"),
+function openScheduledTaskModal(spec = null, onDone = null) {
+  const item = spec?.mode === "edit" ? spec.item : null;
+  const kind = item?.kind ?? "create";
+  const memoryEditing = kind === "memory";
+  const routineEditing = kind === "routine";
+  const reminderEditing = kind === "reminder";
+  const editing = Boolean(item);
+  const partnerId = taskPartnerIdOf(spec, item);
+  const partnerName = taskPersonLabel(partnerId);
+  const lockPartner = spec?.lockPartner === true || editing;
+  const raw = item?.raw ?? {};
+  const initialText = String(
+    item?.instruction ?? (routineEditing ? raw.prompt ?? "" : raw.text ?? "") ?? "",
   );
-  // 新建时用户选：隐藏触发（定时主动轮）/ 可见触发（例行任务）；编辑时沿用原类型。
-  let delivery = reminder?.kind === "proactive" ? "proactive" : "routine";
-  const who = reminder?.partnerId
-    ? (state.partners.find((item) => item.id === reminder.partnerId)?.name || "同事")
-    : "总管";
-  const initialAt = Number(reminder?.at || 0) || rmAt(
-    new Date(rmStartOfDay(Date.now()).getTime() + RM_DAY_MS),
-    9,
-    0,
-  );
+  const initialName = routineEditing ? String(raw.name || "") : "";
+  let visibility = reminderEditing && item?.visibility === "hidden" ? "hidden" : "visible";
+  let sessionMode = routineEditing && raw.sessionMode === "fresh" ? "fresh" : "persistent";
+
+  const routineSchedule = routineEditing ? rtScheduleOf(raw) : null;
+  const reminderSchedule = reminderEditing
+    ? {
+        at: Number(raw.at || item?.nextAt || 0),
+        repeat: raw.repeat || "none",
+        ...(raw.weekdays ? { weekdays: raw.weekdays } : {}),
+        ...(raw.dayOfMonth ? { dayOfMonth: raw.dayOfMonth } : {}),
+        ...(raw.until ? { until: raw.until } : {}),
+      }
+    : null;
+  const scheduleBase = memoryEditing
+    ? { at: Number(item?.nextAt || 0) || rmNextDaily(3, 30), repeat: "daily" }
+    : routineEditing
+      ? routineSchedule
+      : reminderSchedule;
+  // 复杂触发（interval / event / 多触发器 / 已过去的一次性）：只改内容，时间只读。
+  const scheduleLocked = routineEditing && routineSchedule === null;
+  let scheduleUnlocked = !scheduleLocked;
+
+  const initialAt =
+    (scheduleBase?.at && Number(scheduleBase.at) > 0 ? Number(scheduleBase.at) : 0) ||
+    rmAt(new Date(rmStartOfDay(Date.now()).getTime() + RM_DAY_MS), 9, 0);
   const initialDate = rmStartOfDay(initialAt);
   const initialTime = new Date(initialAt);
   const pick = {
     date: initialDate,
     hour: initialTime.getHours(),
     minute: initialTime.getMinutes(),
-    end: reminder?.until ? rmStartOfDay(reminder.until) : null,
+    end: scheduleBase?.until ? rmStartOfDay(scheduleBase.until) : null,
     weekdays:
-      reminder?.weekdays?.length
-        ? [...reminder.weekdays]
-        : [initialDate.getDay()],
-    dayOfMonth: reminder?.dayOfMonth || initialDate.getDate(),
-    mode: reminder ? rmModeOf(reminder) : "once",
+      scheduleBase?.weekdays?.length ? [...scheduleBase.weekdays] : [initialDate.getDay()],
+    dayOfMonth: scheduleBase?.dayOfMonth || initialDate.getDate(),
+    mode: memoryEditing ? "daily" : scheduleBase ? rmModeOf(scheduleBase) : "once",
   };
   let view = new Date(initialDate.getFullYear(), initialDate.getMonth(), 1);
+  const title = memoryEditing ? "改时间" : editing ? "编辑定时任务" : "新建定时任务";
+  const targetOptions = state.partners
+    .filter((entry) => entry.id !== "chief" && entry.status === "active")
+    .map(
+      (entry) =>
+        `<option value="${attr(entry.id)}"${entry.id === partnerId ? " selected" : ""}>${esc(
+          entry.name || entry.id,
+        )}</option>`,
+    )
+    .join("");
+  const partnerControl =
+    lockPartner || editing
+      ? `<div class="rm-subject"><span class="rm-field-label">到点叫谁</span>
+           <div class="rm-subject-text">${esc(partnerName)}</div></div>`
+      : `<div class="rm-field">
+           <span class="rm-field-label">到点叫谁</span>
+           <select class="modal-input" id="reminder-target">
+             <option value="chief"${partnerId === "chief" ? " selected" : ""}>总管</option>
+             ${targetOptions}
+           </select>
+         </div>`;
 
   openModal(
-    editing ? "改时间" : "新建定时任务",
+    title,
     (body) => {
       body.innerHTML = `
       <div class="rm-form">
         ${
-          editing
-            ? `<div class="rm-subject"><span class="rm-field-label">到点叫谁</span>
-                 <div class="rm-subject-text">${esc(who)}</div></div>
-               <div class="rm-subject"><span class="rm-field-label">做什么</span>
-                 <div class="rm-subject-text">${esc(reminder.text || "提醒")}</div></div>`
-            : `<div class="rm-field">
-                 <span class="rm-field-label">到点做什么</span>
-                 <input class="modal-input" id="reminder-text" type="text" maxlength="200" placeholder="例如：提醒我记日记" />
-               </div>
-               <div class="rm-field">
-                 <span class="rm-field-label">到点叫谁</span>
-                 <select class="modal-input" id="reminder-target">
-                   <option value="">总管</option>
-                   ${state.partners
-                     .filter((item) => item.id !== "chief")
-                     .map((item) => `<option value="${esc(item.id)}">${esc(item.name || item.id)}</option>`)
-                     .join("")}
-                 </select>
-               </div>`
+          memoryEditing
+            ? `<div class="rm-subject"><span class="rm-field-label">做什么</span>
+                 <div class="rm-subject-text">整理记忆（拆分 + 对账；只出建议，你点应用才改）</div></div>`
+            : `${
+              routineEditing
+                ? `<div class="rm-field">
+                     <span class="rm-field-label">名称（≤40 字，可不填）</span>
+                     <input class="modal-input" id="reminder-name" type="text" maxlength="40" value="${attr(initialName)}" placeholder="留空就用指令开头" />
+                   </div>`
+                : ""
+            }
+            <div class="rm-field">
+              <span class="rm-field-label">到点做什么</span>
+              <textarea class="modal-input rm-textarea" id="reminder-text" rows="4" maxlength="100000" placeholder="例如：用你自己的话跟我说一句早安；先看一眼今天有没有要提醒我的事">${esc(initialText)}</textarea>
+              <p class="modal-hint rm-text-hint">到点后，${esc(partnerName)} 会拿这段话自己跑一轮：能查就查、能做就做，然后把结果回在你们的主会话；做不了会回一句。不是照念这段话。第一次可以先点「立即跑」试一次。</p>
+            </div>`
+        }
+        ${partnerControl}
+        ${
+          memoryEditing
+            ? ""
+            : routineEditing
+              ? `<div class="rm-mode-row">
+                   <span class="rm-field-label">触发消息</span>
+                   <div class="rm-subject-text">可见（到点会留一条你发的指令）</div>
+                 </div>`
+              : `<div class="rm-mode-row rm-delivery-row">
+                   <span class="rm-field-label" data-tip="隐藏=看不到你发的那条指令，只看到 TA 自己说的一句；可见=会话里留一条你写的触发消息">触发消息</span>
+                   <div class="rm-modes" role="radiogroup" aria-label="触发消息是否可见">
+                     <button class="rm-mode${visibility === "hidden" ? " is-on" : ""}" type="button" data-visibility="hidden" role="radio" aria-checked="${visibility === "hidden"}" data-tip="看不到你发的指令，只看到 TA 自己说的一句">像 TA 主动找我</button>
+                     <button class="rm-mode${visibility === "visible" ? " is-on" : ""}" type="button" data-visibility="visible" role="radio" aria-checked="${visibility === "visible"}" data-tip="会话里留一条你写的触发指令，做完再回你">留一条我发的指令</button>
+                   </div>
+                 </div>
+                 <p class="modal-hint rm-delivery-hint">「像 TA 主动找我」：只看到回复；「留一条我发的指令」：会话里能看到你写的这段话，适合需要接着聊的跟进任务。</p>`
         }
         ${
-          !editing
-            ? `<div class="rm-mode-row rm-delivery-row">
-                 <span class="rm-field-label" data-tip="隐藏=对面看起来像自己主动开口，看不到你发的那条触发指令；可见=会看到一条你发的触发消息，适合跟进类任务">触发消息</span>
-                 <div class="rm-modes" role="radiogroup" aria-label="触发消息是否对我隐藏">
-                   <button class="rm-mode" type="button" data-delivery="proactive" role="radio" aria-checked="false" data-tip="对面看起来像自己主动开口，看不到你发的那条指令">对我隐藏</button>
-                   <button class="rm-mode is-on" type="button" data-delivery="routine" role="radio" aria-checked="true" data-tip="会看到一条你发的触发消息，适合跟进类任务">可见</button>
-                 </div>
-               </div>
-               <p class="modal-hint rm-delivery-hint">「对我隐藏」：到点执事自己跑一轮说一句，你看不到那条触发指令，像它主动找你。「可见」：会留一条你发的触发消息，适合需要接着聊的跟进任务。</p>`
+          scheduleLocked
+            ? `<div class="rm-field" id="reminder-lock">
+                 <span class="rm-field-label">什么时候</span>
+                 <div class="rm-subject-text">${esc(item?.scheduleText || "高级触发")}</div>
+                 <p class="modal-hint">这是 Agent 建的高级触发（interval / event / 复杂 cron）。这里只改内容；要改触发请交给 Agent，或点下面改成按时间。</p>
+                 <div><button class="ghost" id="reminder-unlock" type="button">改成按时间</button></div>
+               </div>`
             : ""
         }
-        <div class="rm-mode-row">
-          <span class="rm-field-label">重复</span>
-          <div class="rm-modes" role="radiogroup" aria-label="重复方式">
-            <button class="rm-mode" type="button" data-mode="once" role="radio">单日</button>
-            <button class="rm-mode" type="button" data-mode="range" role="radio">区间</button>
-            <button class="rm-mode" type="button" data-mode="daily" role="radio">每天</button>
-            <button class="rm-mode" type="button" data-mode="weekly" role="radio">每周</button>
-            <button class="rm-mode" type="button" data-mode="monthly" role="radio">每月</button>
+        <div id="reminder-schedule" ${scheduleLocked ? "hidden" : ""}>
+          <div class="rm-mode-row">
+            <span class="rm-field-label">重复</span>
+            <div class="rm-modes" role="radiogroup" aria-label="重复方式">
+              <button class="rm-mode" type="button" data-mode="once" role="radio">单日</button>
+              <button class="rm-mode" type="button" data-mode="range" role="radio">区间</button>
+              <button class="rm-mode" type="button" data-mode="daily" role="radio">每天</button>
+              <button class="rm-mode" type="button" data-mode="weekly" role="radio">每周</button>
+              <button class="rm-mode" type="button" data-mode="monthly" role="radio">每月</button>
+            </div>
           </div>
-        </div>
-        <div class="rm-form-cols">
-          <div class="rm-field rm-date-field">
-            <span class="rm-field-label" id="reminder-date-label">哪一天</span>
-            <div class="rm-date" id="reminder-date"></div>
-          </div>
-          <div class="rm-field rm-time-field">
-            <span class="rm-field-label">几点</span>
-            <div class="rm-wheel" id="reminder-wheel" role="group" aria-label="时间">
-              <div class="rm-wheel-col" data-wheel="hour" aria-label="小时"></div>
-              <span class="rm-wheel-mark">:</span>
-              <div class="rm-wheel-col" data-wheel="minute" aria-label="分钟"></div>
+          <div class="rm-form-cols">
+            <div class="rm-field rm-date-field">
+              <span class="rm-field-label" id="reminder-date-label">哪一天</span>
+              <div class="rm-date" id="reminder-date"></div>
+            </div>
+            <div class="rm-field rm-time-field">
+              <span class="rm-field-label">几点</span>
+              <div class="rm-wheel" id="reminder-wheel" role="group" aria-label="时间">
+                <div class="rm-wheel-col" data-wheel="hour" aria-label="小时"></div>
+                <span class="rm-wheel-mark">:</span>
+                <div class="rm-wheel-col" data-wheel="minute" aria-label="分钟"></div>
+              </div>
             </div>
           </div>
         </div>
+        ${
+          routineEditing
+            ? `<div class="rm-mode-row">
+                 <span class="rm-field-label">会话</span>
+                 <div class="rm-modes" role="radiogroup" aria-label="会话方式">
+                   <button class="rm-mode${sessionMode === "persistent" ? " is-on" : ""}" type="button" data-session="persistent" role="radio" aria-checked="${sessionMode === "persistent"}">接着聊</button>
+                   <button class="rm-mode${sessionMode === "fresh" ? " is-on" : ""}" type="button" data-session="fresh" role="radio" aria-checked="${sessionMode === "fresh"}">每次新开</button>
+                 </div>
+               </div>`
+            : ""
+        }
         <p class="modal-hint rm-hint" id="reminder-hint"></p>
         <div class="modal-actions">
           <button class="ghost" type="button" data-modal-cancel>取消</button>
@@ -680,6 +981,7 @@ function openReminderModal(reminder = null, onDone = null) {
       const hint = body.querySelector("#reminder-hint");
       const confirm = body.querySelector("#reminder-confirm");
       const textInput = body.querySelector("#reminder-text");
+      const nameInput = body.querySelector("#reminder-name");
       const targetSelect = body.querySelector("#reminder-target");
 
       /* ── 滚轮 ───────────────────────────────────────── */
@@ -855,15 +1157,43 @@ function openReminderModal(reminder = null, onDone = null) {
         sync();
       });
 
-      /* ── 触发消息：隐藏 / 可见（2026-11-17）────────── */
-      body.querySelectorAll("[data-delivery]").forEach((button) => {
+      /* ── 触发消息：可见 / 隐藏（2026-11-17）────────── */
+      body.querySelectorAll("[data-visibility]").forEach((button) => {
         button.addEventListener("click", () => {
-          delivery = button.dataset.delivery;
-          body.querySelectorAll("[data-delivery]").forEach((b) => {
-            const on = b.dataset.delivery === delivery;
+          visibility = button.dataset.visibility === "hidden" ? "hidden" : "visible";
+          body.querySelectorAll("[data-visibility]").forEach((b) => {
+            const on = b.dataset.visibility === visibility;
             b.classList.toggle("is-on", on);
             b.setAttribute("aria-checked", on ? "true" : "false");
           });
+        });
+      });
+
+      /* ── 会话方式：接着聊 / 每次新开（仅例行规则）────────── */
+      body.querySelectorAll("[data-session]").forEach((button) => {
+        button.addEventListener("click", () => {
+          sessionMode = button.dataset.session === "fresh" ? "fresh" : "persistent";
+          body.querySelectorAll("[data-session]").forEach((b) => {
+            const on = b.dataset.session === sessionMode;
+            b.classList.toggle("is-on", on);
+            b.setAttribute("aria-checked", on ? "true" : "false");
+          });
+        });
+      });
+
+      /* ── 高级触发的「改成按时间」：解锁图形化控件 ─────────── */
+      body.querySelector("#reminder-unlock")?.addEventListener("click", () => {
+        scheduleUnlocked = true;
+        body.querySelector("#reminder-lock")?.setAttribute("hidden", "");
+        body.querySelector("#reminder-schedule")?.removeAttribute("hidden");
+        renderDate();
+        paintWheel();
+        sync();
+        requestAnimationFrame(() => {
+          for (const { name, column } of wheelColumns) {
+            column.scrollTop = pick[name] * RM_ITEM_H;
+          }
+          paintWheel();
         });
       });
 
@@ -920,8 +1250,9 @@ function openReminderModal(reminder = null, onDone = null) {
 
       body.querySelector("[data-modal-cancel]")?.addEventListener("click", closeModal);
       textInput?.addEventListener("input", sync);
+      // 多行指令：Enter 换行，Ctrl/⌘+Enter 才提交（旧单行输入框的 Enter 提交会误伤长指令）。
       textInput?.addEventListener("keydown", (event) => {
-        if (event.key === "Enter") {
+        if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
           event.preventDefault();
           void submit();
         }
@@ -950,23 +1281,25 @@ function openReminderModal(reminder = null, onDone = null) {
       };
 
       async function submit() {
-        if (!editing && !(textInput?.value || "").trim()) {
+        const text = textInput ? textInput.value.trim() : String(item?.instruction || "");
+        if (!memoryEditing && !text) {
           hint.textContent = "先写点到点做什么。";
           hint.classList.add("is-error");
-          textInput.focus();
+          textInput?.focus();
           return;
         }
-        if (pick.mode === "weekly" && pick.weekdays.length === 0) {
+        if (scheduleUnlocked && pick.mode === "weekly" && pick.weekdays.length === 0) {
           hint.textContent = "至少选一个星期几。";
           hint.classList.add("is-error");
           return;
         }
-        if (pick.mode === "range" && !pick.end) {
+        if (scheduleUnlocked && pick.mode === "range" && !pick.end) {
           hint.textContent = "再选一个结束日期。";
           hint.classList.add("is-error");
           return;
         }
         if (
+          scheduleUnlocked &&
           pick.mode === "range" &&
           rmStartOfDay(pick.end).getTime() <= rmStartOfDay(pick.date).getTime()
         ) {
@@ -974,8 +1307,6 @@ function openReminderModal(reminder = null, onDone = null) {
           hint.classList.add("is-error");
           return;
         }
-        const text = editing ? reminder.text : textInput.value.trim();
-        const target = targetSelect?.value || "";
         if (memoryEditing) {
           confirm.disabled = true;
           hint.textContent = "保存中…";
@@ -994,8 +1325,8 @@ function openReminderModal(reminder = null, onDone = null) {
             }
             toast("时间已改");
             closeModal();
-            void loadReminders();
             if (typeof onDone === "function") onDone();
+            else void loadReminders();
           } catch {
             hint.textContent = "没保存：网络请求失败。";
             hint.classList.add("is-error");
@@ -1003,8 +1334,9 @@ function openReminderModal(reminder = null, onDone = null) {
           }
           return;
         }
-        const schedule = payload();
-        if (!schedule.at || schedule.at <= Date.now()) {
+
+        const schedule = scheduleUnlocked ? payload() : null;
+        if (scheduleUnlocked && (!schedule.at || schedule.at <= Date.now())) {
           hint.textContent = "这个时间已经过去了。";
           hint.classList.add("is-error");
           return;
@@ -1013,37 +1345,39 @@ function openReminderModal(reminder = null, onDone = null) {
         hint.textContent = editing ? "保存中…" : "添加中…";
         hint.classList.remove("is-error");
         try {
-          // 2026-11-17：按"触发消息隐藏/可见"分两路。编辑时沿用原类型（不中途换）。
-          const kind = editing ? reminder.kind : delivery;
-          const method = editing ? "PATCH" : "POST";
           let endpoint;
           let bodyData;
-          if (kind === "proactive") {
-            // 隐藏触发 → /agent/reminders：这套任务到点跑模型、触发指令对用户隐藏。
-            endpoint = editing
-              ? `/api/v1/agent/reminders/${encodeURIComponent(reminder.id)}`
-              : "/api/v1/agent/reminders";
-            bodyData = editing
-              ? { ...schedule }
-              : { partnerId: target || null, text, ...schedule };
+          if (!editing) {
+            // 手动新建统一走 reminders：可见/隐藏只是显示方式，手机本地闹钟继续有效。
+            endpoint = "/api/v1/agent/reminders";
+            bodyData = {
+              partnerId: (targetSelect?.value || partnerId) || "chief",
+              text,
+              ...schedule,
+              visibility,
+            };
+          } else if (routineEditing) {
+            // 例行规则：内容/名称/会话方式总能改；时间只在简单触发时能改。
+            endpoint = `/api/v1/routines/${encodeURIComponent(item.id)}`;
+            bodyData = {
+              name: (nameInput?.value || "").trim() || taskTitleOf(text),
+              prompt: text,
+              sessionMode,
+            };
+            if (scheduleUnlocked) {
+              const original =
+                Array.isArray(raw.triggers) && raw.triggers.length === 1 ? raw.triggers[0] : null;
+              bodyData.triggers = rmRoutineTriggers(schedule).map((trigger) =>
+                rmMergeTriggerExtras(trigger, original),
+              );
+            }
           } else {
-            // 可见触发 → /routines：例行任务（沿用原逻辑）。
-            endpoint = editing
-              ? `/api/v1/routines/${encodeURIComponent(reminder.id)}`
-              : "/api/v1/routines";
-            bodyData = editing
-              ? { triggers: rmRoutineTriggers(schedule) }
-              : {
-                  partnerId: target || "chief",
-                  name: text.slice(0, 40),
-                  prompt: text,
-                  triggers: rmRoutineTriggers(schedule),
-                  sessionMode: "persistent",
-                  enabled: true,
-                };
+            // 提醒：改内容/时间/可见性；同 reminderId 重排，历史不断。
+            endpoint = `/api/v1/agent/reminders/${encodeURIComponent(item.id)}`;
+            bodyData = { ...schedule, text, visibility };
           }
           const response = await request(endpoint, {
-            method,
+            method: editing ? "PATCH" : "POST",
             body: JSON.stringify(bodyData),
           });
           const data = await response.json().catch(() => ({}));
@@ -1054,9 +1388,9 @@ function openReminderModal(reminder = null, onDone = null) {
             return;
           }
           closeModal();
-          toast(editing ? "时间已改" : "定时任务已添加");
-          void loadReminders();
+          toast(editing ? "已保存" : "定时任务已添加");
           if (typeof onDone === "function") onDone();
+          else void loadReminders();
         } catch (error) {
           if (error.message !== "forbidden") {
             hint.textContent = `没保存：${error.message}`;
@@ -1080,6 +1414,38 @@ function openReminderModal(reminder = null, onDone = null) {
       });
     },
     { className: "modal-reminder" },
+  );
+}
+
+/**
+ * 旧调用点兼容（2026-11-17）：把老 shape 映射到统一编辑器。
+ * 新代码直接调 openScheduledTaskModal；这个壳只为还没改到的入口不炸。
+ */
+function openReminderModal(reminder = null, onDone = null) {
+  if (!reminder) {
+    openScheduledTaskModal({ mode: "create" }, onDone);
+    return;
+  }
+  const kind =
+    reminder.kind === "routine" ? "routine" : reminder.kind === "memory" ? "memory" : "reminder";
+  openScheduledTaskModal(
+    {
+      mode: "edit",
+      item: {
+        kind,
+        id: reminder.id,
+        reminderId: reminder.reminderId,
+        partnerId: reminder.partnerId,
+        title: reminder.title || reminder.name || reminder.text || "定时任务",
+        instruction: reminder.prompt || reminder.text || "",
+        scheduleText: "",
+        nextAt: reminder.at,
+        enabled: reminder.enabled !== false,
+        visibility: reminder.kind === "proactive" ? "hidden" : "visible",
+        raw: reminder.raw ?? reminder,
+      },
+    },
+    onDone,
   );
 }
 
@@ -1219,4 +1585,18 @@ function renderDefaultModelRow(catalog) {
   };
 }
 
-export { loadPolicy, loadReminders, openReminderModal, renderDefaultModelRow, rmDateText, rmDayDiff, rmStartOfDay, rmTimeText };
+export {
+  loadPolicy,
+  loadReminders,
+  memoryTaskItem,
+  openReminderModal,
+  openScheduledTaskModal,
+  reminderTaskItem,
+  renderDefaultModelRow,
+  renderScheduledTaskList,
+  routineTaskItem,
+  rmDateText,
+  rmDayDiff,
+  rmStartOfDay,
+  rmTimeText,
+};

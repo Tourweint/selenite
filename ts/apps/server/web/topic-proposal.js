@@ -240,7 +240,8 @@ async function hydrateTopicProposalCard(card) {
         link.type = "button";
         link.className = "attention-link topic-proposal-link";
         link.textContent = "去设置里配搜索";
-        link.addEventListener("click", () => go("settings", "service"));
+        link.addEventListener("click", () => // 服务 2026-11-18 并进「本机」（connect）：跳转跟着改
+        go("settings", "connect"));
         note?.append(document.createTextNode(" "), link);
       }
     } catch {

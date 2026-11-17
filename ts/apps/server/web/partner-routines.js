@@ -2,6 +2,8 @@
  * 例行任务 + 试跑
  *
  * 2026-11-13 从 web/app.js（25,467 行单文件）按职责拆出；正文是原文搬运，未改写行为。
+ * 2026-11-17 定时任务重做：例行列表与提醒共用 renderScheduledTaskList（同一套行/动作/历史），
+ * 新建走 openScheduledTaskModal —— 不再暴露 cron / interval / once / event 原始字段。
  * 原文件只有一个作用域、函数互调没有固定方向，拆开后模块之间必然互相 import（环）。
  * ESM 允许循环引用，前提是模块顶层求值时不向别的模块取值；本层把启动代码全放在入口
  * app.js 文末，各模块顶层只做声明、常量与事件监听注册。
@@ -12,6 +14,13 @@ import { request } from "./net.js";
 import { PT_RUN_STATUS, openEditPartnerModal, ptHumanizeTrigger } from "./partner-modals.js";
 import { clearModalHint, setModalHint } from "./project-modal.js";
 import { mountSegmented, syncSegmented } from "./settings-atoms.js";
+import {
+  openScheduledTaskModal,
+  reminderTaskItem,
+  renderScheduledTaskList,
+  routineTaskItem,
+} from "./settings-reminders.js";
+import { state } from "./state.js";
 import { closeModal, openModal, toast } from "./ui-atoms.js";
 
 
@@ -20,94 +29,26 @@ import { closeModal, openModal, toast } from "./ui-atoms.js";
 function ptRoutineFormMarkup() {
   return `
     <div class="pt-new">
-      <div class="pt-seg-title">新建例行任务</div>
-      <label class="modal-field">
-        <span>名称（≤40 字）</span>
-        <input class="modal-input" id="pt-r-name" type="text" maxlength="40" placeholder="例如：每晚整理" />
-      </label>
-      <label class="modal-field">
-        <span>指令 prompt</span>
-        <textarea class="pt-ta" id="pt-r-prompt" rows="3" spellcheck="false" placeholder="到点要它做什么"></textarea>
-      </label>
-      <div class="modal-field">
-        <span>触发器类型</span>
-        <div class="segmented slide" id="pt-r-trigger" role="radiogroup" aria-label="触发器类型">
-          <button type="button" data-trigger="cron" aria-checked="true">cron</button>
-          <button type="button" data-trigger="interval" aria-checked="false">interval</button>
-          <button type="button" data-trigger="once" aria-checked="false">once</button>
-          <button type="button" data-trigger="event" aria-checked="false">event</button>
-        </div>
-      </div>
-      <div class="modal-field pt-trigger-input" data-trigger-input="cron">
-        <span>cron 原文（5 段：分 时 日 月 周）</span>
-        <input class="modal-input is-mono" id="pt-r-cron" type="text" spellcheck="false" placeholder="30 21 * * *" />
-      </div>
-      <div class="modal-field pt-trigger-input" data-trigger-input="interval" hidden>
-        <span>间隔秒数（≥60）</span>
-        <input class="modal-input is-mono" id="pt-r-interval" type="number" min="60" placeholder="3600" />
-      </div>
-      <div class="modal-field pt-trigger-input" data-trigger-input="once" hidden>
-        <span>一次性时间</span>
-        <input class="modal-input" id="pt-r-once" type="datetime-local" />
-      </div>
-      <div class="modal-field pt-trigger-input" data-trigger-input="event" hidden>
-        <span>事件 kind</span>
-        <select class="modal-input" id="pt-r-kind">
-          <option value="delegation">delegation</option>
-          <option value="tool">tool</option>
-          <option value="phase">phase</option>
-        </select>
-        <span>match（可选，单行 k=v，多组用逗号）</span>
-        <input class="modal-input is-mono" id="pt-r-match" type="text" spellcheck="false" placeholder="phase=done" />
-      </div>
-      <div class="pt-mode-row">
-        <span class="set-hint">会话方式</span>
-        <button class="switch" id="pt-r-mode" type="button" role="switch" aria-checked="false" aria-label="每次新开">
-          <span class="switch-thumb" aria-hidden="true"></span>
-        </button>
-        <span class="set-hint" id="pt-r-mode-label">接着聊</span>
-      </div>
+      <div class="pt-seg-title">新建定时任务</div>
+      <p class="set-hint">到点后 TA 会拿你写的指令自己跑一轮；内容、时间、暂停都能创建后再改。</p>
       <div class="pt-actions">
-        <button class="btn-primary" id="pt-r-create" type="button">新建例行任务</button>
+        <button class="btn-primary" id="pt-r-new" type="button">手动设置</button>
       </div>
-      <p class="modal-hint" id="pt-r-hint"></p>
     </div>`;
 }
 
-function ptWireRoutineForm(body, partnerId, listBox) {
-  const seg = body.querySelector("#pt-r-trigger");
-  if (seg) mountSegmented(seg);
-  const showTrigger = (type) => {
-    for (const node of body.querySelectorAll("[data-trigger-input]")) {
-      node.hidden = node.dataset.triggerInput !== type;
-    }
-  };
-  showTrigger("cron");
-  for (const button of seg ? seg.querySelectorAll("[data-trigger]") : []) {
-    button.addEventListener("click", () => {
-      for (const other of seg.querySelectorAll("[data-trigger]")) {
-        other.setAttribute("aria-checked", String(other === button));
-      }
-      syncSegmented(seg);
-      showTrigger(button.dataset.trigger);
+function ptWireRoutineForm(body, partnerId, listBox, options = {}) {
+  body.querySelector("#pt-r-new")?.addEventListener("click", () => {
+    openScheduledTaskModal({ mode: "create", partnerId, lockPartner: true }, () => {
+      // 编辑器会替换当前弹层：有回调就交回调用方重开任务清单，没有就退回旧的重拉列表。
+      if (typeof options.onChanged === "function") options.onChanged();
+      else void ptRenderRoutineList(listBox, partnerId);
     });
-  }
-
-  const mode = body.querySelector("#pt-r-mode");
-  const modeLabel = body.querySelector("#pt-r-mode-label");
-  mode?.addEventListener("click", () => {
-    const next = mode.getAttribute("aria-checked") !== "true";
-    mode.setAttribute("aria-checked", String(next));
-    if (modeLabel) modeLabel.textContent = next ? "每次新开" : "接着聊";
   });
-
-  const hint = body.querySelector("#pt-r-hint");
-  body.querySelector("#pt-r-create")?.addEventListener("click", () =>
-    void ptCreateRoutine(body, partnerId, listBox, hint),
-  );
-  body.querySelector("#pt-r-name")?.addEventListener("input", () => clearModalHint(hint));
 }
 
+// 2026-11-17：旧页内表单（cron/interval/once/event 原文）退役，统一走 openScheduledTaskModal。
+// 以下 ptCreateRoutine 不再有调用点，暂留只为旧引用不炸；不要在新代码里接它。
 async function ptCreateRoutine(body, partnerId, listBox, hint) {
   const name = body.querySelector("#pt-r-name")?.value.trim() || "";
   const prompt = body.querySelector("#pt-r-prompt")?.value || "";
@@ -174,55 +115,43 @@ async function ptCreateRoutine(body, partnerId, listBox, hint) {
 async function ptRenderRoutineList(box, partnerId, options = {}) {
   if (!box) return;
   try {
-    const response = await request(`/api/v1/routines?partnerId=${encodeURIComponent(partnerId)}`, { cache: "no-store" });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(String(response.status));
-    const routines = data.routines || [];
-    box.replaceChildren();
-    if (!routines.length) {
-      box.innerHTML = `<div class="set-hint">还没有例行任务</div>`;
-      return;
-    }
-    for (const routine of routines) {
-      const row = document.createElement("div");
-      row.className = "pt-routine";
-      const triggers = Array.isArray(routine.triggers) ? routine.triggers : [];
-      row.innerHTML = `
-        <div class="pt-routine-head">
-          <span class="row-label">${esc(routine.name || "")}</span>
-          <div class="pt-routine-actions">
-            <button class="switch" type="button" role="switch" aria-label="启用"
-                    aria-checked="${routine.enabled ? "true" : "false"}" data-pt-enabled="${attr(routine.id)}">
-              <span class="switch-thumb" aria-hidden="true"></span>
-            </button>
-            <button class="ghost" type="button" data-pt-run-now="${attr(routine.id)}">立即跑</button>
-            <button class="ghost" type="button" data-pt-history="${attr(routine.id)}">展开历史</button>
-            <button class="ghost" type="button" data-pt-del-routine="${attr(routine.id)}" data-pt-del-name="${attr(routine.name || "")}">删除</button>
-          </div>
-        </div>
-        <div class="row-hint pt-trigger">${triggers.length ? triggers.map(ptHumanizeTrigger).join("；") : "—"}</div>
-        <div class="pt-runs" data-pt-runs-for="${attr(routine.id)}" hidden></div>`;
-      box.append(row);
-
-      row.querySelector("[data-pt-enabled]")?.addEventListener("click", () => {
-        const sw = row.querySelector("[data-pt-enabled]");
-        void ptToggleRoutine(routine.id, sw);
-      });
-      row.querySelector("[data-pt-run-now]")?.addEventListener("click", () => {
-        const runButton = row.querySelector("[data-pt-run-now]");
-        void ptRunNow(routine.id, runButton, row.querySelector("[data-pt-runs-for]"));
-      });
-      row.querySelector("[data-pt-history]")?.addEventListener("click", () => {
-        const historyButton = row.querySelector("[data-pt-history]");
-        void ptToggleHistory(routine.id, historyButton, row.querySelector("[data-pt-runs-for]"));
-      });
-      row.querySelector("[data-pt-del-routine]")?.addEventListener("click", () =>
-        ptConfirmDeleteRoutine(partnerId, routine.id, routine.name || "", options),
-      );
-    }
+    const [routinesResponse, remindersResponse] = await Promise.all([
+      request(`/api/v1/routines?partnerId=${encodeURIComponent(partnerId)}`, { cache: "no-store" }),
+      request("/api/v1/agent/reminders?includePaused=1", { cache: "no-store" }).catch(() => null),
+    ]);
+    const routinesData = await routinesResponse.json().catch(() => ({}));
+    if (!routinesResponse.ok) throw new Error(String(routinesResponse.status));
+    const remindersData = remindersResponse ? await remindersResponse.json().catch(() => ({})) : {};
+    const nameById = new Map(
+      (state.partners || []).map((entry) => [entry.id, entry.name || entry.id]),
+    );
+    const routines = Array.isArray(routinesData.routines) ? routinesData.routines : [];
+    const reminders = (Array.isArray(remindersData.reminders) ? remindersData.reminders : []).filter(
+      (reminder) => {
+        if (reminder.status === "terminal") return false;
+        if (partnerId === "chief") return !reminder.partnerId || reminder.partnerId === "chief";
+        return reminder.partnerId === partnerId;
+      },
+    );
+    const items = [
+      ...routines.map((routine) => routineTaskItem(routine, nameById)),
+      ...reminders.map((reminder) => reminderTaskItem(reminder, nameById)),
+    ];
+    renderScheduledTaskList(box, items, {
+      showFilter: false,
+      emptyText: "还没有定时任务",
+      onChanged:
+        typeof options.onChanged === "function"
+          ? options.onChanged
+          : () => {
+              void ptRenderRoutineList(box, partnerId, options);
+              if (typeof options.onDone === "function") options.onDone();
+            },
+    });
+    if (typeof options.onCount === "function") options.onCount(items.length);
   } catch (error) {
     if (error.message === "forbidden") return;
-    box.innerHTML = `<div class="set-hint is-error">读不到例行任务：${esc(error.message)}</div>`;
+    box.innerHTML = `<div class="set-hint is-error">读不到定时任务：${esc(error.message)}</div>`;
   }
 }
 
