@@ -7,6 +7,12 @@
  */
 
 import { contentText } from "@earendil-works/pi-ai";
+import { flagEnabled } from "../flags.ts";
+
+/** 会话分叉回滚开关（2026-11-18 抠进插件清单）：`false` / `0` / `off` → 分支端点 404、前端按 /agent/policy 的 chatBranch 收起「从这里分支」。默认开。 */
+export function chatBranchEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	return flagEnabled("CHAT_BRANCH_ENABLED", env);
+}
 
 export interface BranchPlan {
 	/** 已处理：usage 全 0、compaction head / edits.target 待回填；按原顺序，可直接喂给 tx.appendEntry。 */

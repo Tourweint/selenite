@@ -16,6 +16,7 @@
  */
 
 import type { TranscriptMessage } from "./agent/session.ts";
+import { flagEnabled } from "./flags.ts";
 
 /** 默认包含的轮数（一轮 = 一条 user 消息 + 其后到下一问之前的回答） */
 export const HANDOFF_DEFAULT_TURNS = 30;
@@ -66,7 +67,7 @@ export interface HandoffDocument {
  * 回滚开关：默认开；只有显式 `false` 才关（关 = 端点 404，与其它能力端点同口径）。
  */
 export function chatExportHandoffEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	return (env.CHAT_EXPORT_HANDOFF ?? "").trim().toLowerCase() !== "false";
+	return flagEnabled("CHAT_EXPORT_HANDOFF", env);
 }
 
 /** `limit` 解析：未传 = 30；必须是 1–200 的整数，否则 null（调用方 400）。 */

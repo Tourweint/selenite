@@ -40,10 +40,10 @@ function messages(): TranscriptMessage[] {
 	];
 }
 
-test("开关：默认开，只有显式 false 才关", () => {
+test("开关：默认开，false / 0 / off 才关（2026-11-18 起走插件清单统一口径）", () => {
 	assert.equal(chatExportHandoffEnabled({}), true);
 	assert.equal(chatExportHandoffEnabled({ CHAT_EXPORT_HANDOFF: "" }), true);
-	assert.equal(chatExportHandoffEnabled({ CHAT_EXPORT_HANDOFF: "0" }), true);
+	assert.equal(chatExportHandoffEnabled({ CHAT_EXPORT_HANDOFF: "0" }), false);
 	assert.equal(chatExportHandoffEnabled({ CHAT_EXPORT_HANDOFF: "false" }), false);
 	assert.equal(chatExportHandoffEnabled({ CHAT_EXPORT_HANDOFF: "FALSE" }), false);
 });

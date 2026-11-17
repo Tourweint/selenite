@@ -19,14 +19,14 @@ import {
   writeExecutorConfig,
 } from "./executor-config.ts";
 import { probeExecutor, probeNeedsThrottle } from "./executor-probe.ts";
+import { flagEnabled } from "./flags.ts";
 
 /** 检测按钮的简单节流：同一个进程 3 秒内只跑一次，避免连点起一堆 CLI。 */
 let lastProbeAt = 0;
 
 /** 回滚开关：`EXECUTOR_PROBE=false/0/off` 时检测端点返回 400，不 spawn 任何 CLI。 */
 function probeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  const raw = (env.EXECUTOR_PROBE ?? "").trim().toLowerCase();
-  return !["false", "0", "off"].includes(raw);
+  return flagEnabled("EXECUTOR_PROBE", env);
 }
 
 export function mountExecutorApi(app: Hono): void {

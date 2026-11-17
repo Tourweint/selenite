@@ -134,7 +134,7 @@ import {
   CTX,
 } from "./agent/shared.ts";
 // 从回答分支（2026-11-17 批3a）：复制计划是纯函数，真正的 append 在 init / commit 事务里做。
-import { planBranchCopy, type BranchPlan } from "./agent/branch-copy.ts";
+import { chatBranchEnabled, planBranchCopy, type BranchPlan } from "./agent/branch-copy.ts";
 import { conversationIsBusy } from "./agent/session-stream.ts";
 import { messageIdOf } from "./agent/session-transcript.ts";
 import { createPartnerSideSession } from "./partner-runtime-run-partner-turn.ts";
@@ -1113,6 +1113,8 @@ function policyProjection() {
     editResend: editResendEnabled(),
     // 会话画板（2026-11-17）：前端据此决定会话顶栏要不要挂「会话地图」。
     chatMap: chatMapEnabled(),
+    // 会话分叉（2026-11-17 批3b；2026-11-18 抠进插件清单）：前端据此决定回答脚注要不要挂「从这里分支」。
+    chatBranch: chatBranchEnabled(),
   };
 }
 
@@ -1754,6 +1756,10 @@ async function appendBranchEntries(tx: Tx, destinationId: number, plan: BranchPl
  * 返回 `{ok:true, conversationId, entries}`；不写消息、不跑模型（分叉点就是最后一条）。
  */
 app.post("/api/v1/agent/chat/:conversationId/branches", async (c) => {
+  // 会话分叉回滚开关（2026-11-18 插件清单）：false → 404；前端按 /agent/policy 的 chatBranch 收起入口。
+  if (!chatBranchEnabled()) {
+    return c.json({ error: "chat_branch_disabled", message: "会话分叉已关闭（CHAT_BRANCH_ENABLED=false）" }, 404);
+  }
   const body = (await c.req.json().catch(() => null)) as
     | { atMessageId?: unknown; title?: unknown }
     | null;

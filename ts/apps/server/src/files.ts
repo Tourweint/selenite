@@ -26,6 +26,7 @@ import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import type { Context, Hono } from "hono";
+import { flagEnabled } from "./flags.ts";
 import type { FileEntry } from "@lifediary/shared";
 import { projectsStore, workspaceRootReal, type ProjectsStore } from "./projects.ts";
 
@@ -33,7 +34,7 @@ import { projectsStore, workspaceRootReal, type ProjectsStore } from "./projects
 const MAX_CONTENT_BYTES = 512 * 1024;
 
 export function fileBrowseEnabled(): boolean {
-	return (process.env.FILE_BROWSE?.trim() || "true").toLowerCase() !== "false";
+	return flagEnabled("FILE_BROWSE");
 }
 
 export function explorerOpenEnabled(): boolean {

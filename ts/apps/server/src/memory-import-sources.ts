@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
+import { flagEnabled } from "./flags.ts";
 import { DatabaseSync } from "node:sqlite";
 import type { MemoryKind } from "@lifediary/memory";
 import { importMemory } from "./memory-consolidate.ts";
@@ -37,8 +38,7 @@ import { projectsStore, type Project } from "./projects.ts";
 
 /** 来源开关：默认开；`MEMORY_IMPORT_SOURCES=false/0/off` 时两端点 404、按钮不渲染。 */
 export function memoryImportSourcesEnabled(): boolean {
-	const value = (process.env.MEMORY_IMPORT_SOURCES ?? "").trim().toLowerCase();
-	return value !== "false" && value !== "0" && value !== "off";
+	return flagEnabled("MEMORY_IMPORT_SOURCES");
 }
 
 /**

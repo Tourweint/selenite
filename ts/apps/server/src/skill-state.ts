@@ -1,5 +1,6 @@
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { flagEnabled } from "./flags.ts";
 
 /**
  * 技能启停位（2026-11-09 用户拍板：技能库默认**全关**，界面上逐条/批量开关）。
@@ -52,7 +53,7 @@ export function skillStatePath(env: NodeJS.ProcessEnv = process.env): string {
 
 /** 旧的"全部进索引"行为逃生门（正常情况不用） */
 export function skillStateEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	return (env.SKILL_STATE ?? "").trim().toLowerCase() !== "false";
+	return flagEnabled("SKILL_STATE", env);
 }
 
 function readBoolMap(value: unknown): Record<string, boolean> {

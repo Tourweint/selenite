@@ -11,9 +11,11 @@
  *   - 群会话本来就不走记忆引擎，不在这里判断。
  */
 
-/** 主动提起总开关（默认关）。 */
+import { flagValue } from "./flags.ts";
+
+/** 主动提起总开关（默认关）：观望型能力保持严格 opt-in——只有显式 true / 1 / on 才开，拼错不开。 */
 export function memoryProactiveEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	const raw = (env.MEMORY_PROACTIVE ?? "").trim().toLowerCase();
+	const raw = flagValue("MEMORY_PROACTIVE", env).trim().toLowerCase();
 	return raw === "true" || raw === "1" || raw === "on";
 }
 

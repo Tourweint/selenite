@@ -53,12 +53,13 @@ function hideEmpty() {
 }
 
 /**
- * 这一屏能不能从回答分支（2026-11-17 批3b）：
+ * 这一屏能不能从回答分支（2026-11-17 批3b；2026-11-18 起还看插件清单的 chatBranch 能力投影）：
  * worker / chief 显示；执事 canonical / side 仅插件开时显示；group / task- 等不显示。
  */
 function canBranchHere() {
   const id = String(state.conversationId || "");
   if (!id) return false;
+  if (state.capabilities?.chatBranch === false) return false;
   const parsed = parsePartnerExternalId(id);
   if (parsed) {
     if (parsed.role !== "canonical" && parsed.role !== "side") return false;

@@ -14,7 +14,9 @@
 				"SEARCH_MULTI_VENDOR",
 				"PROJECT_OUTSIDE_WORKSPACE",
 				"PROJECT_MERGE",
-				"PROJECT_ARCHIVE_CHATS"
+				"PROJECT_ARCHIVE_CHATS",
+				"CHAT_BRANCH_ENABLED",
+				"CHAT_EXPORT_HANDOFF"
 			]
 		},
 		{
@@ -36,7 +38,11 @@
 				"AGENT_RECALL_SESSIONS",
 				"AGENT_SESSIONS_SEARCH",
 				"MEMORY_NIGHTLY_REVIEW",
-				"MEMORY_NIGHTLY_SPLIT"
+				"MEMORY_NIGHTLY_SPLIT",
+				"MEMORY_PROACTIVE",
+				"MEMORY_SPLIT",
+				"MEMORY_IMPORT_SOURCES",
+				"AGENT_VERIFIED_ANSWER"
 			]
 		},
 		{
@@ -75,7 +81,10 @@
 				"DELEGATE_WORKDIR",
 				"EXECUTOR_MODEL_CACHE",
 				"ROUTINE_CONDITIONAL",
-				"AGENT_TOOL_POLICY"
+				"AGENT_TOOL_POLICY",
+				"EXECUTOR_PROBE",
+				"CHANCELLOR_INTERNAL",
+				"AGENT_PROGRESS_REPORT"
 			]
 		},
 		{
@@ -100,7 +109,8 @@
 				"TOPICS_ENABLED",
 				"PARTNER_WORK_RECORD",
 				"SKILL_ADVICE",
-				"SKILL_USAGE"
+				"SKILL_USAGE",
+				"SKILL_STATE"
 			]
 		},
 		{
@@ -121,7 +131,9 @@
 				"CHAT_CONTEXT_LOOKUP",
 				"AGENT_APPEARANCE_WALLPAPER",
 				"AGENT_TOOL_INDEX",
-				"TASK_AS_CONVERSATION"
+				"TASK_AS_CONVERSATION",
+				"EXPORT_BUNDLE",
+				"FILE_BROWSE"
 			]
 		}
 	],
@@ -1356,6 +1368,187 @@
 			"key": "SKILL_USAGE",
 			"label": "技能用量记账",
 			"summary": "技能被调用时记一笔用量账（90 天没用标 stale 就靠它）；关 = 不计数。默认开，即时生效。",
+			"group": "skills",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "CHAT_BRANCH_ENABLED",
+			"label": "会话分叉",
+			"summary": "从一个回答另开一支：复制到那一刻为止的历史开新会话，来源行挂回分叉点（画板能画车道）。关 = 分支端点 404、回答脚注不挂「从这里分支」。默认开，即时生效。",
+			"group": "chat",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "CHAT_EXPORT_HANDOFF",
+			"label": "导出接续文件",
+			"summary": "把当前会话整理成「接续文件」：角色说明 + 记忆摘要 + 最近 N 轮原文，粘给任何 AI 都能接着聊（服务端不落盘）。关 = 端点 404。默认开，即时生效。",
+			"group": "chat",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "EXPORT_BUNDLE",
+			"label": "会话打包导出",
+			"summary": "把会话按部件（正文 / 记忆 / 团队 / 配置等）打成一个 zip 包导出（上限 256MB）。关 = 打包端点 404。默认开，即时生效。",
+			"group": "ui",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "FILE_BROWSE",
+			"label": "文件浏览",
+			"summary": "工作区内文件列表与正文读取的浏览端点（桌面 / 手机端的文件浏览入口走这里）。关 = files 两个端点 404。默认开，即时生效。",
+			"group": "ui",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "MEMORY_PROACTIVE",
+			"label": "记忆主动提起",
+			"summary": "聊到相关话题时把一条旧记忆主动端上来（观望型能力，开了每轮多一次召回判定）。前置：记忆总闸。默认关，下一轮生效。",
+			"group": "memory",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"requires": [
+				"MEMORY_ENABLED"
+			],
+			"defaultValue": "false",
+			"hot": true
+		},
+		{
+			"key": "MEMORY_SPLIT",
+			"label": "长记忆拆分",
+			"summary": "记忆页「拆分」按钮：把长条记忆按句 / 按描述拆成原子短条，原文完整保留（预览后应用）。关 = 拆分端点 404。前置：记忆总闸。默认开，即时生效。",
+			"group": "memory",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"requires": [
+				"MEMORY_ENABLED"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "MEMORY_IMPORT_SOURCES",
+			"label": "记忆导入来源",
+			"summary": "记忆页的导入弹窗：从多来源扫描、批量勾选导入。关 = 导入端点 404、按钮不渲染。前置：记忆总闸。默认开，即时生效。",
+			"group": "memory",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"requires": [
+				"MEMORY_ENABLED"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "AGENT_VERIFIED_ANSWER",
+			"label": "答案沉淀",
+			"summary": "结构化提问的答复是人亲口确认过的事实：写一条 fact 记忆，同一个问题下次不再问（群会话不落）。关 = 一条都不写。前置：记忆总闸。默认开，即时生效。",
+			"group": "memory",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"requires": [
+				"MEMORY_ENABLED"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "EXECUTOR_PROBE",
+			"label": "执行器检测",
+			"summary": "设置 → Agent → 派活 的「检测」按钮：真 spawn 一次外接 CLI 验证模型清单（显式人工点击，耗少量额度）。关 = 检测端点 400，不 spawn 任何 CLI。前置：派活总闸。默认开，即时生效。",
+			"group": "autonomy",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"requires": [
+				"CHANCELLOR_ENABLED"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "CHANCELLOR_INTERNAL",
+			"label": "内部质检模型",
+			"summary": "拆单 / 验收 / 目标核对谁来判：核心 = 宿主当前模型一次纯文本请求（缺省）；qoder = 借外部 CLI（回滚旧形态）。进程启动装配一次——重启服务后生效。",
+			"group": "autonomy",
+			"type": "enum",
+			"values": [
+				"core",
+				"qoder"
+			],
+			"choices": [
+				{
+					"value": "core",
+					"label": "核心模型"
+				},
+				{
+					"value": "qoder",
+					"label": "外部 CLI"
+				}
+			],
+			"defaultValue": "core",
+			"hot": false
+		},
+		{
+			"key": "AGENT_PROGRESS_REPORT",
+			"label": "进度汇报工具",
+			"summary": "给跑长活的 Agent 上架 report_progress：干到节点中途播报一句（同一轮最多 3 条，超限给引导话术不算错）。关 = 工具不上架。默认开，即时生效。",
+			"group": "autonomy",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "SKILL_STATE",
+			"label": "技能启停位",
+			"summary": "技能页的启停开关真正生效：关掉的技能不进索引。关掉本开关 = 回到「全部进索引、不过滤」的旧行为（逃生门）。只影响新开的会话。",
 			"group": "skills",
 			"type": "boolean",
 			"values": [

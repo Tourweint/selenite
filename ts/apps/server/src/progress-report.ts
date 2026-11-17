@@ -2,6 +2,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { LiveDoc, defineTool, type ToolRegistration } from "@earendil-works/pi-durable";
 import { CHIEF_PARTNER_ID, partnersStore } from "./partners.ts";
 import { emitDelegation } from "./delegation.ts";
+import { flagEnabled } from "./flags.ts";
 import { isTaskSession } from "./unattended.ts";
 import { encodeToolResult, err, ok, type ToolResult } from "./tool-result.ts";
 import { runIdentityKey as progressRunKey } from "./run-key.ts";
@@ -31,9 +32,7 @@ export const PROGRESS_MAX_PER_RUN = 3;
 
 /** 回滚开关：默认开；`AGENT_PROGRESS_REPORT=false` / `0` / `off` → 工具不上架。 */
 export function progressReportEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	const raw = (env.AGENT_PROGRESS_REPORT ?? "").trim().toLowerCase();
-	if (!raw) return true;
-	return raw !== "false" && raw !== "0" && raw !== "off";
+	return flagEnabled("AGENT_PROGRESS_REPORT", env);
 }
 
 /** 超限时的引导话术（不是错误：本轮还能继续做别的）。 */

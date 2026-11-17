@@ -1,6 +1,7 @@
 import type { MemoryEngine } from "@lifediary/memory";
 import { memoryEngine, scopeOf } from "./agent/assist.ts";
 import { partnersStore } from "./partners.ts";
+import { flagEnabled } from "./flags.ts";
 
 /**
  * 答案沉淀（2026-11-10 批 19 §二；全景调研二 §六）。
@@ -15,9 +16,7 @@ import { partnersStore } from "./partners.ts";
 
 /** 回滚开关：默认开；`AGENT_VERIFIED_ANSWER=false` → 一条都不写（逐字节回到改动前）。 */
 export function verifiedAnswerEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	const raw = (env.AGENT_VERIFIED_ANSWER ?? "").trim().toLowerCase();
-	if (!raw) return true;
-	return !["false", "0", "off"].includes(raw);
+	return flagEnabled("AGENT_VERIFIED_ANSWER", env);
 }
 
 /** 从 pending 的 args 摘要里取问题原文（坏 JSON / 缺字段 → 空串，不猜）。 */

@@ -8,6 +8,7 @@
 import type { ChatIndexEntry, TranscriptMessage } from "./agent.ts";
 import type { ZipEntry } from "./zip.ts";
 import { buildZip } from "./zip.ts";
+import { flagEnabled } from "./flags.ts";
 
 export const EXPORT_PART_IDS = ["conversations", "memory", "library", "team", "config"] as const;
 
@@ -31,7 +32,7 @@ export const EXPORT_MAX_BYTES = (() => {
 })();
 
 export function exportBundleEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	return (env.EXPORT_BUNDLE ?? "").trim().toLowerCase() !== "false";
+	return flagEnabled("EXPORT_BUNDLE", env);
 }
 
 export function parseExportParts(raw: string | undefined): ExportPartId[] | null {

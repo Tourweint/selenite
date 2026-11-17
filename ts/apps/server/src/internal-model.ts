@@ -14,6 +14,7 @@ import type { QoderCall } from "../../../../../chancellor/src/dispatch.ts";
 import { setInternalAsk } from "../../../../../chancellor/src/index.ts";
 import type { QoderResult } from "../../../../../chancellor/src/types.ts";
 import { currentModels, isFaux, readLlmConfig } from "./provider.ts";
+import { flagValue } from "./flags.ts";
 
 export type InternalMode = "core" | "qoder";
 
@@ -24,9 +25,7 @@ const SYSTEM_PROMPT =
 export function chancellorInternalMode(
 	env: NodeJS.ProcessEnv = process.env,
 ): InternalMode {
-	return (env.CHANCELLOR_INTERNAL ?? "").trim().toLowerCase() === "qoder"
-		? "qoder"
-		: "core";
+	return flagValue("CHANCELLOR_INTERNAL", env) === "qoder" ? "qoder" : "core";
 }
 
 /** 进程启动一次：把核心调用注入 chancellor；qoder 模式注入 null（回到默认）。 */

@@ -23,6 +23,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
+import { flagEnabled } from "./flags.ts";
 import type { MemoryEngine, MemoryKind, MemoryRecord } from "@lifediary/memory";
 import { stripFrontmatter } from "./memory-frontmatter.ts";
 
@@ -43,8 +44,7 @@ const SPLIT_KINDS: ReadonlySet<MemoryKind> = new Set(["fact", "episode", "prefer
 
 /** 拆分开关：`MEMORY_SPLIT=false` / `0` / `off` 时端点 404。 */
 export function memorySplitEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	const value = (env.MEMORY_SPLIT ?? "").trim().toLowerCase();
-	return value !== "false" && value !== "0" && value !== "off";
+	return flagEnabled("MEMORY_SPLIT", env);
 }
 
 export interface SplitAtomDraft {
