@@ -14,6 +14,7 @@ import { nextChainCandidate } from "./model-chain.ts";
 import type { PartnerRow, PartnersStore } from "./partners.ts";
 import { COMPANIONS_ENABLED, partnersStore } from "./partners.ts";
 import { sideSessionsEnabled } from "./partner-session-role.ts";
+import { flagEnabled } from "./flags.ts";
 import { projectsStore } from "./projects.ts";
 import { personaRefreshNeeded, personaSignature, renderPersonaFieldBlocks } from "./partner-persona.ts";
 import { ROUTINE_QUIET_INSTRUCTION, assessRoutineOutputGuarded, routineQuietEnabled } from "./routine-quiet.ts";
@@ -539,9 +540,7 @@ const GREETING_REQUIREMENTS = [
 const GREETING_REQUEST = "请按上面的要求，现在写下这句开场问候。";
 
 export function partnerGreetingEnabled(): boolean {
-	const raw = process.env.PARTNER_GREETING_ENABLED?.trim().toLowerCase();
-	if (!raw) return true;
-	return raw !== "false" && raw !== "0";
+	return flagEnabled("PARTNER_GREETING_ENABLED");
 }
 
 export type PartnerGreetingOutcome = "sent" | "existing" | "skipped" | "disabled";

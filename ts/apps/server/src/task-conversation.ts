@@ -27,13 +27,13 @@ import type { EntryDraft } from "@earendil-works/pi-durable";
 import type { ResolvedChat } from "./agent.ts";
 import type { DelegationMirrorEntry } from "./delegation.ts";
 import { TASK_CONVERSATION_PREFIX } from "./agent/shared.ts";
+import { flagEnabled } from "./flags.ts";
 
 const CTX = BACKGROUND_CONTEXT;
 
 /** 回滚开关：缺省开；`false` / `0` / `off` 时整体旁路。 */
 export function taskAsConversationEnabled(): boolean {
-	const raw = (process.env.TASK_AS_CONVERSATION?.trim() || "true").toLowerCase();
-	return raw !== "false" && raw !== "0" && raw !== "off";
+	return flagEnabled("TASK_AS_CONVERSATION");
 }
 
 /**

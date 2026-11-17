@@ -12,6 +12,7 @@ import { contentText, getCurrentSystemMessage } from "@earendil-works/pi-ai";
 import type { ContextView } from "@earendil-works/pi-durable";
 import { memoryInjectLimit, memoryInjectMaxChars } from "./memory-inject.ts";
 import { estimateTokens } from "./token-estimate.ts";
+import { flagEnabled } from "./flags.ts";
 
 export type ContextSectionStability = "fixed" | "session" | "turn";
 
@@ -219,8 +220,7 @@ export function clearRequestInjections(): void {
 
 /** `CHAT_CONTEXT_INSPECT=false` 一行回滚；缺省 / 其它值 = 开。 */
 export function chatContextInspectEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	const raw = (env.CHAT_CONTEXT_INSPECT ?? "").trim().toLowerCase();
-	return raw !== "false";
+	return flagEnabled("CHAT_CONTEXT_INSPECT", env);
 }
 
 function countString(text: string): number {

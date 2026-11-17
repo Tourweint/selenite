@@ -5,14 +5,13 @@
  */
 
 import { join } from "node:path";
+import { flagEnabled } from "./flags.ts";
 
 export const COMPANIONS_ENABLED =
 	(process.env.COMPANIONS_ENABLED?.trim() || "true").toLowerCase() !== "false";
 
 export function partnerContractEnabled(): boolean {
-	const raw = process.env.PARTNER_CONTRACT?.trim().toLowerCase();
-	if (!raw) return true;
-	return raw !== "false" && raw !== "0";
+	return flagEnabled("PARTNER_CONTRACT");
 }
 
 /**
@@ -21,9 +20,7 @@ export function partnerContractEnabled(): boolean {
  * 默认开；覆盖只由人经档案页写，模型工具不碰这个文件。
  */
 export function partnerDisciplineEditEnabled(): boolean {
-	const raw = process.env.PARTNER_DISCIPLINE_EDIT?.trim().toLowerCase();
-	if (!raw) return true;
-	return raw !== "false" && raw !== "0";
+	return flagEnabled("PARTNER_DISCIPLINE_EDIT");
 }
 
 /**
@@ -32,9 +29,7 @@ export function partnerDisciplineEditEnabled(): boolean {
  * 文件夹挂载（ChatProjects → 打手会话）不在本开关内——那是上一批已落地的东西。
  */
 export function partnerProjectMemoryEnabled(): boolean {
-	const raw = process.env.PARTNER_PROJECT_MEMORY?.trim().toLowerCase();
-	if (!raw) return true;
-	return raw !== "false" && raw !== "0";
+	return flagEnabled("PARTNER_PROJECT_MEMORY");
 }
 
 /**
@@ -43,9 +38,7 @@ export function partnerProjectMemoryEnabled(): boolean {
  * `false` / `0` = 挂载项目全权进池（跟人走方案当日的形态），一行回滚。
  */
 export function projectMemoryGateEnabled(): boolean {
-	const raw = process.env.PROJECT_MEMORY_GATE?.trim().toLowerCase();
-	if (!raw) return true;
-	return raw !== "false" && raw !== "0";
+	return flagEnabled("PROJECT_MEMORY_GATE");
 }
 
 /**
@@ -55,9 +48,7 @@ export function projectMemoryGateEnabled(): boolean {
  * `false` / `0` = 旧形态——归档项目照旧召回、照旧接收记忆，一行回滚。
  */
 export function projectMemoryActiveOnlyEnabled(): boolean {
-	const raw = process.env.PROJECT_MEMORY_ACTIVE_ONLY?.trim().toLowerCase();
-	if (!raw) return true;
-	return raw !== "false" && raw !== "0";
+	return flagEnabled("PROJECT_MEMORY_ACTIVE_ONLY");
 }
 
 export const PARTNER_CONTRACT_SECTIONS = [

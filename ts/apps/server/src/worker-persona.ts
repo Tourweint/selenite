@@ -19,6 +19,7 @@
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Hono } from "hono";
+import { flagEnabled } from "./flags.ts";
 import { setWorkerPersonaSource } from "../../../../../chancellor/src/worker-persona-source.ts";
 
 /** 默认正文（共享层）：只有身份与作风，工具提示不在这里。 */
@@ -81,8 +82,7 @@ export function writeWorkerPersona(text: string, env: NodeJS.ProcessEnv = proces
 
 /** 缺省 = 开；false / 0 / off（大小写不敏感）→ 关。 */
 export function workerPersonaEditEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  const raw = (env.WORKER_PERSONA_EDIT ?? "").trim().toLowerCase();
-  return raw !== "false" && raw !== "0" && raw !== "off";
+  return flagEnabled("WORKER_PERSONA_EDIT", env);
 }
 
 /**
@@ -90,8 +90,7 @@ export function workerPersonaEditEnabled(env: NodeJS.ProcessEnv = process.env): 
  * `WORKER_PERSONA_DISPATCH=false/0/off` 回滚到"TASK.md 不出人设段"的旧形态。
  */
 export function workerPersonaDispatchEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  const raw = (env.WORKER_PERSONA_DISPATCH ?? "").trim().toLowerCase();
-  return raw !== "false" && raw !== "0" && raw !== "off";
+  return flagEnabled("WORKER_PERSONA_DISPATCH", env);
 }
 
 /**

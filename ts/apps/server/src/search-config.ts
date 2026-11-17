@@ -12,6 +12,7 @@
 
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { flagEnabled } from "./flags.ts";
 import {
 	SEARCH_VENDORS,
 	searchVendorOf,
@@ -46,8 +47,7 @@ export function searchConfigPath(): string {
 
 /** 多源回滚开关：`false`/`0`/`off` = 只认 DeepSeek 一条旧路（search.json 里的其他源不读不写）。 */
 export function multiVendorSearchEnabled(): boolean {
-	const value = process.env.SEARCH_MULTI_VENDOR?.trim().toLowerCase();
-	return !(value === "false" || value === "0" || value === "off");
+	return flagEnabled("SEARCH_MULTI_VENDOR");
 }
 
 function validBaseUrl(value: string): boolean {

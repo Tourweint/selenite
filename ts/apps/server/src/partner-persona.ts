@@ -31,12 +31,11 @@ import {
 	type PartnerPersonaValues,
 } from "@lifediary/shared";
 import { join } from "node:path";
+import { flagEnabled } from "./flags.ts";
 
 /** 回滚开关：默认开；`PARTNER_PERSONA_MODULES=false` → 不读开关、不注静态模块、端点回默认值。 */
 export function personaModulesEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	const raw = (env.PARTNER_PERSONA_MODULES ?? "").trim().toLowerCase();
-	if (!raw) return true;
-	return raw !== "false" && raw !== "0" && raw !== "off";
+	return flagEnabled("PARTNER_PERSONA_MODULES", env);
 }
 
 /**

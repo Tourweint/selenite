@@ -20,6 +20,7 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { memoryEngine } from "./agent/assist.ts";
+import { flagEnabled } from "./flags.ts";
 import { consolidateLlmEnabled, reviewModelAvailable, startReview } from "./memory-consolidate.ts";
 import { runConsolidatePass } from "./memory-consolidate-pass.ts";
 import { applySplitPlan, buildSplitPlan, memorySplitEnabled } from "./memory-split.ts";
@@ -57,14 +58,9 @@ interface TimerHandle {
 let timer: ReturnType<typeof setTimeout> | null = null;
 let running = false;
 
-function isOff(raw: string | undefined): boolean {
-	const value = (raw ?? "").trim().toLowerCase();
-	return value === "false" || value === "0" || value === "off";
-}
-
 /** 每晚拆分开关（2026-11-16）：默认开；`MEMORY_NIGHTLY_SPLIT=false/0/off` = 只对账、不拆。 */
 export function memoryNightlySplitEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	return !isOff(env.MEMORY_NIGHTLY_SPLIT);
+	return flagEnabled("MEMORY_NIGHTLY_SPLIT", env);
 }
 
 function atOverridePath(): string {
@@ -108,7 +104,7 @@ export function setMemoryNightlyAt(at: string): boolean {
 }
 
 export function memoryNightlyEnabled(): boolean {
-	return !isOff(process.env.MEMORY_NIGHTLY_REVIEW);
+	return flagEnabled("MEMORY_NIGHTLY_REVIEW");
 }
 
 export function memoryNightlyAt(): string {

@@ -18,6 +18,7 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { Hono } from "hono";
+import { flagEnabled } from "./flags.ts";
 import {
   WORKER_TOOL_NAMES,
   effectiveWorkerTools,
@@ -58,8 +59,7 @@ export function workerToolsPath(env: NodeJS.ProcessEnv = process.env): string {
 
 /** 缺省 = 开；false / 0 / off（大小写不敏感）→ 关（不推来源 = 全开）。 */
 export function workerToolsDispatchEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  const raw = (env.WORKER_TOOLS_DISPATCH ?? "").trim().toLowerCase();
-  return raw !== "false" && raw !== "0" && raw !== "off";
+  return flagEnabled("WORKER_TOOLS_DISPATCH", env);
 }
 
 function readDisabledList(path: string): string[] {

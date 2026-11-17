@@ -15,6 +15,7 @@
 import type { ChatKind } from "@lifediary/shared";
 import { partnersStore } from "../partners.ts";
 import { sideSessionsEnabled } from "../partner-session-role.ts";
+import { flagEnabled } from "../flags.ts";
 import type { ResolvedChat } from "./shared.ts";
 import { CTX, ChatOrigins } from "./shared.ts";
 import { getHarness } from "./lifecycle.ts";
@@ -97,8 +98,7 @@ export interface ChatMapPayload {
 
 /** 回滚开关：`CHAT_MAP_ENABLED=false|0|off` → 端点 404、前端按钮不挂。默认开。 */
 export function chatMapEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	const value = env.CHAT_MAP_ENABLED?.trim().toLowerCase();
-	return value !== "false" && value !== "0" && value !== "off";
+	return flagEnabled("CHAT_MAP_ENABLED", env);
 }
 
 function preview(text: string, limit: number): string {

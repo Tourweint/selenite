@@ -8,7 +8,13 @@
 				"AGENT_ATTACHMENTS",
 				"AGENT_EDIT_RESEND",
 				"CURRENT_PROJECT",
-				"AGENT_ASK_USER"
+				"AGENT_ASK_USER",
+				"AGENT_FILE_ATTACHMENTS",
+				"CHAT_DIR_PICK",
+				"SEARCH_MULTI_VENDOR",
+				"PROJECT_OUTSIDE_WORKSPACE",
+				"PROJECT_MERGE",
+				"PROJECT_ARCHIVE_CHATS"
 			]
 		},
 		{
@@ -23,7 +29,14 @@
 				"MEMORY_PAGE_A",
 				"MEMORY_EXTERNAL",
 				"MEMORY_INJECT_DEDUPE",
-				"PARTNER_MEMORY_RECALL"
+				"PARTNER_MEMORY_RECALL",
+				"PARTNER_PROJECT_MEMORY",
+				"PROJECT_MEMORY_GATE",
+				"PROJECT_MEMORY_ACTIVE_ONLY",
+				"AGENT_RECALL_SESSIONS",
+				"AGENT_SESSIONS_SEARCH",
+				"MEMORY_NIGHTLY_REVIEW",
+				"MEMORY_NIGHTLY_SPLIT"
 			]
 		},
 		{
@@ -51,7 +64,29 @@
 				"COMPANIONS_ENABLED",
 				"GROUPS_ENABLED",
 				"DELEGATION_PROJECT_MEMORY",
-				"PARTNER_SIDE_SESSIONS"
+				"PARTNER_SIDE_SESSIONS",
+				"PARTNER_PERSONA_MODULES",
+				"PARTNER_CONTRACT",
+				"PARTNER_DISCIPLINE_EDIT",
+				"PARTNER_LEARNING_FREQUENCY",
+				"PARTNER_GREETING_ENABLED",
+				"DEVICE_MATRIX_ENABLED",
+				"COMPANION_HOME_ENABLED",
+				"DELEGATE_WORKDIR",
+				"EXECUTOR_MODEL_CACHE",
+				"ROUTINE_CONDITIONAL",
+				"AGENT_TOOL_POLICY"
+			]
+		},
+		{
+			"id": "worker",
+			"title": "普通助手（工人）",
+			"desc": "干活工人的会话与共享人设：能不能开普通助手、人设与工具面怎么进任务书。",
+			"keys": [
+				"WORKER_CHAT_ENABLED",
+				"WORKER_PERSONA_EDIT",
+				"WORKER_PERSONA_DISPATCH",
+				"WORKER_TOOLS_DISPATCH"
 			]
 		},
 		{
@@ -63,7 +98,9 @@
 				"SKILLS_INDEX_CLIP",
 				"PARTNER_TEMPLATES",
 				"TOPICS_ENABLED",
-				"PARTNER_WORK_RECORD"
+				"PARTNER_WORK_RECORD",
+				"SKILL_ADVICE",
+				"SKILL_USAGE"
 			]
 		},
 		{
@@ -77,7 +114,14 @@
 				"CHAT_HISTORY_PAGING_ENABLED",
 				"CHAT_HARD_DELETE",
 				"TOOL_PROJECTION",
-				"TOOL_PROJECTION_WORKER"
+				"TOOL_PROJECTION_WORKER",
+				"CHAT_MAP_ENABLED",
+				"TOOL_USAGE",
+				"CHAT_CONTEXT_INSPECT",
+				"CHAT_CONTEXT_LOOKUP",
+				"AGENT_APPEARANCE_WALLPAPER",
+				"AGENT_TOOL_INDEX",
+				"TASK_AS_CONVERSATION"
 			]
 		}
 	],
@@ -761,6 +805,565 @@
 			"requires": [
 				"COMPANIONS_ENABLED"
 			]
+		},
+		{
+			"key": "AGENT_FILE_ATTACHMENTS",
+			"label": "文件附件",
+			"summary": "对话里除了图片还能发任意文件：上传落在服务端 .data/attachments，消息里带绝对路径，durable 只存路径。关 = 上传端点 404、前端不渲染「任意文件」入口。默认开，即时生效。",
+			"group": "chat",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "CHAT_DIR_PICK",
+			"label": "新建对话选目录",
+			"summary": "新建对话时可以直接选一个目录，不必先登记成项目；关 = dirPath 一律 400，回到只认当前项目主文件夹的旧口径。不传目录的请求与旧行为逐字节一致。默认开，即时生效。",
+			"group": "chat",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "SEARCH_MULTI_VENDOR",
+			"label": "搜索多源回退",
+			"summary": "搜索按设置 → 模型 → 搜索 里配置的源有序回退（search.json + 旧 env key 兼容）；关 = 只认 DeepSeek 一条旧路，加的源不读不写、保存多源配置 400。默认开，即时生效。",
+			"group": "chat",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "PROJECT_OUTSIDE_WORKSPACE",
+			"label": "项目任意位置",
+			"summary": "项目可以登记在工作区之外的任意位置，所有登记根共同构成 Agent 的读写边界；关 = 项目必须在工作区内。默认开，即时生效。",
+			"group": "chat",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"requires": [
+				"CURRENT_PROJECT"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "PROJECT_MERGE",
+			"label": "项目合并",
+			"summary": "把一个项目并进另一个项目：会话跟过去、记忆 scope 原地搬迁不重抓；关 = 合并端点 404、项目菜单不渲染。默认开，即时生效。",
+			"group": "chat",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"requires": [
+				"CURRENT_PROJECT"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "PROJECT_ARCHIVE_CHATS",
+			"label": "项目归档并会话",
+			"summary": "归档项目时把项目里的会话一起归档；关 = 只归档项目本体，会话留在原处。默认开，即时生效。",
+			"group": "chat",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"requires": [
+				"CURRENT_PROJECT"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "PARTNER_PROJECT_MEMORY",
+			"label": "负责项目（记忆跟人走）",
+			"summary": "总管/执事档案上挂「负责项目」，该人格的全部对话并进项目记忆键空间：召回并、remember 认项目名、投影出负责项目字段；关 = 全链路退回只有文件夹挂载的形态。默认开，即时生效。",
+			"group": "memory",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "PROJECT_MEMORY_GATE",
+			"label": "项目记忆聊到才注入",
+			"summary": "挂载项目（除会话绑定项目外）只有字面命中当前话题的条目才进召回候选——「聊到才注入」从打分巧合变成硬规则；关 = 挂载项目全权进池（跟人走方案当日的形态）。默认开，即时生效。",
+			"group": "memory",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "PROJECT_MEMORY_ACTIVE_ONLY",
+			"label": "归档项目退出召回",
+			"summary": "归档/删除的项目退出召回池、也不再接收新记忆；记忆本体一条不删（记忆页照旧能看），恢复归档自动回来；关 = 归档项目照旧召回、照旧接收。默认开，即时生效。",
+			"group": "memory",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "AGENT_RECALL_SESSIONS",
+			"label": "旧事检索工具",
+			"summary": "把「找旧会话原文」作为工具上架给模型（问到很久以前的事时它自己查）；关 = 工具不上架，模型侧 tool_unavailable。默认开，即时生效。",
+			"group": "memory",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "AGENT_SESSIONS_SEARCH",
+			"label": "会话搜索端点",
+			"summary": "会话页「找旧事」的只读搜索端点；关 = 整组 404。刻意与上一项分开：关模型工具不等于关界面找旧事。默认开，即时生效。",
+			"group": "memory",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "MEMORY_NIGHTLY_REVIEW",
+			"label": "每晚整理",
+			"summary": "每晚（默认 03:30）自动跑一轮记忆整理：拆分建议 + 审计，只写建议不自动应用，早上到记忆页看。关 = 夜间任务不跑。默认开，即时生效。",
+			"group": "memory",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"requires": [
+				"MEMORY_ENABLED"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "MEMORY_NIGHTLY_SPLIT",
+			"label": "每晚自动拆分",
+			"summary": "每晚整理里带「长记忆拆分」：长条按句/按描述拆成原子短条（建议制，预览后应用）；关 = 只对账、不拆。默认开，即时生效。",
+			"group": "memory",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"requires": [
+				"MEMORY_NIGHTLY_REVIEW"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "WORKER_CHAT_ENABLED",
+			"label": "普通助手会话",
+			"summary": "能新建「普通助手」会话；关 = 只拦新建，已经落盘的 worker 保持原身份、不会被重解释。默认开，即时生效。",
+			"group": "worker",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "WORKER_PERSONA_EDIT",
+			"label": "工人人设可编辑",
+			"summary": "设置 → 人设顶部「普通助手」卡可以编辑全局一份的共享人设（.data/worker-persona.md，每轮现读）；关 = 保存端点 400，人设只读。默认开，即时生效。",
+			"group": "worker",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "WORKER_PERSONA_DISPATCH",
+			"label": "派活带工人人设",
+			"summary": "派活任务书（TASK.md）带上共享人设的「你是谁」段；关 = 不推来源，TASK.md 不出人设段。重启服务后生效。",
+			"group": "worker",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"requires": [
+				"CHANCELLOR_ENABLED"
+			],
+			"defaultValue": "true",
+			"hot": false
+		},
+		{
+			"key": "WORKER_TOOLS_DISPATCH",
+			"label": "派活下发工具面",
+			"summary": "派活时按 worker 页勾选的工具面给执行器下发 --tools；关 = 不推，外部 CLI 全开、native 用自己的默认面。重启服务后生效。",
+			"group": "worker",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"requires": [
+				"CHANCELLOR_ENABLED"
+			],
+			"defaultValue": "true",
+			"hot": false
+		},
+		{
+			"key": "PARTNER_PERSONA_MODULES",
+			"label": "人格模块",
+			"summary": "执事/总管档案页的人格模块卡（心情·温度·印象·学习·主动性·内心等）：开着按人勾选、勾了才进提示词；关 = 模块字段全部回默认（work 预设）、档案接口 400，回到全开旧行为。默认开，即时生效。",
+			"group": "autonomy",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"requires": [
+				"COMPANIONS_ENABLED"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "PARTNER_CONTRACT",
+			"label": "岗位契约注入",
+			"summary": "执事人设里「岗位契约」小节每轮固定注入（干什么/不干什么）；关 = 契约小节不进提示词，其余注入不动。默认开，即时生效。",
+			"group": "autonomy",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"requires": [
+				"COMPANIONS_ENABLED"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "PARTNER_DISCIPLINE_EDIT",
+			"label": "纪律覆盖",
+			"summary": "宿主默认纪律之外，允许给单个执事人工覆盖纪律（档案页写 DISCIPLINE.md）；关 = 不读不写覆盖文件，纪律回到纯宿主常量。覆盖只由人经档案页写，模型工具不碰这个文件。默认开，即时生效。",
+			"group": "autonomy",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"requires": [
+				"COMPANIONS_ENABLED"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "PARTNER_LEARNING_FREQUENCY",
+			"label": "学习反思频率",
+			"summary": "执事「学习」模块什么时候反思提炼：每周 = 只在既有周盘点跑完后提炼（省额度）；结算 = 每单结算钩子里按 N 轮抽查一次（勤，费模型）。拼错/空值按每周。默认每周，下一轮生效。",
+			"group": "autonomy",
+			"type": "enum",
+			"values": [
+				"weekly",
+				"settle"
+			],
+			"choices": [
+				{
+					"value": "weekly",
+					"label": "每周盘点时"
+				},
+				{
+					"value": "settle",
+					"label": "结算时抽查"
+				}
+			],
+			"requires": [
+				"MEMORY_ENABLED",
+				"PARTNER_PERSONA_MODULES"
+			],
+			"defaultValue": "weekly",
+			"hot": true
+		},
+		{
+			"key": "PARTNER_GREETING_ENABLED",
+			"label": "执事主动问候",
+			"summary": "新建执事（或该执事首次开口）时主动写一句开场问候；关 = 不写，会话空着开始。默认开，即时生效。",
+			"group": "autonomy",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"requires": [
+				"COMPANIONS_ENABLED"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "DEVICE_MATRIX_ENABLED",
+			"label": "设备矩阵派活",
+			"summary": "delegate 可以点名远端设备派活（依赖中继）；关 = 远端设备不接单（remote_disabled）。默认关，即时生效。",
+			"group": "autonomy",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"requires": [
+				"CHANCELLOR_ENABLED"
+			],
+			"defaultValue": "false",
+			"hot": true
+		},
+		{
+			"key": "COMPANION_HOME_ENABLED",
+			"label": "执事认主机",
+			"summary": "执事在多设备间登记/领取归属主机（依赖中继）；关 = 不挂这层，执事不认主机。默认关，即时生效。",
+			"group": "autonomy",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"requires": [
+				"COMPANIONS_ENABLED"
+			],
+			"defaultValue": "false",
+			"hot": true
+		},
+		{
+			"key": "DELEGATE_WORKDIR",
+			"label": "派活指定目录与工具",
+			"summary": "派单可以带工作目录与工具权限：工人在指定目录干活、只拿勾选的工具；关 = 两个字段收下但不生效，回到只认当前项目的旧口径。默认开，即时生效。",
+			"group": "autonomy",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"requires": [
+				"CHANCELLOR_ENABLED"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "EXECUTOR_MODEL_CACHE",
+			"label": "执行器模型清单缓存",
+			"summary": "外接 CLI 的模型清单拉一次缓存 24 小时，补刀文件不缓存、改了立即生效；关 = 每次真拉（慢，几秒），但永远新鲜。默认开，即时生效。",
+			"group": "autonomy",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"requires": [
+				"CHANCELLOR_ENABLED"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "ROUTINE_CONDITIONAL",
+			"label": "例行条件触发器",
+			"summary": "例行任务支持条件触发器：模型声明「完成条件已达成」才算完；关 = 只按时间表跑的旧口径。默认开，即时生效。",
+			"group": "autonomy",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"requires": [
+				"AUTONOMY_ENABLED"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "AGENT_TOOL_POLICY",
+			"label": "工具写权限",
+			"summary": "工具闸门的权限档：全部 = 照常；禁命令行 = bash/PowerShell 不可用；只读 = 会写文件/起进程/派活的工具全拦。工具注册在启动时冻结——改完重启服务生效。",
+			"group": "autonomy",
+			"type": "enum",
+			"values": [
+				"full",
+				"no-shell",
+				"read-only"
+			],
+			"choices": [
+				{
+					"value": "full",
+					"label": "全部工具"
+				},
+				{
+					"value": "no-shell",
+					"label": "禁命令行"
+				},
+				{
+					"value": "read-only",
+					"label": "只读"
+				}
+			],
+			"scope": "core",
+			"defaultValue": "full",
+			"hot": false
+		},
+		{
+			"key": "CHAT_MAP_ENABLED",
+			"label": "会话画板",
+			"summary": "会话详情里的画板：一条会话的回合卡 + 分支车道，点卡看单条消息原文（只读投影）；关 = 端点 404、入口按钮不挂。默认开，即时生效。",
+			"group": "ui",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "TOOL_USAGE",
+			"label": "工具调用记账",
+			"summary": "每个工具调用记一笔用量账（次数/错误/按需加载/最近使用），设置 → 用量 第四张卡看；关 = 不记账、端点 404、整卡隐藏。默认开，即时生效。",
+			"group": "ui",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "CHAT_CONTEXT_INSPECT",
+			"label": "注入视图（上下文页）",
+			"summary": "设置 → 上下文按「实际注入」看原文与 token（和真实装配同一个函数）；关 = 检查端点 404，页面只剩估算。默认开，即时生效。",
+			"group": "ui",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "CHAT_CONTEXT_LOOKUP",
+			"label": "对话内回看",
+			"summary": "会话里可以回看某条消息前后的原文（默认前后各 5 条，一次最多 50）；关 = 端点 404。默认开，即时生效。",
+			"group": "ui",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "AGENT_APPEARANCE_WALLPAPER",
+			"label": "壁纸",
+			"summary": "外观页可以设置壁纸（服务端落盘 .data/appearance）；关 = 整组路由不挂，界面那块自己藏掉。重启服务后生效。",
+			"group": "ui",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": false
+		},
+		{
+			"key": "AGENT_TOOL_INDEX",
+			"label": "工具索引（工具池页）",
+			"summary": "按需工具池的总闸：开着才有 deferred 池、tool_search 与设置 → 工具 页；关 = 工具全量常驻注册、整页只读。工具注册在启动时冻结——改完重启服务生效。",
+			"group": "ui",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": false
+		},
+		{
+			"key": "TASK_AS_CONVERSATION",
+			"label": "任务即会话",
+			"summary": "后台任务专线落成会话（能续聊、进侧栏、按创建者分组）；关 = 整体旁路，回到旧任务卡形态。默认开，即时生效。",
+			"group": "ui",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "SKILL_ADVICE",
+			"label": "技能分类建议",
+			"summary": "技能页有「让 Agent 评估」入口：跳总管预填提示词，评估结果经工具落盘待采纳；关 = 路由不挂，回到纯手工启停。重启服务后生效。",
+			"group": "skills",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": false
+		},
+		{
+			"key": "SKILL_USAGE",
+			"label": "技能用量记账",
+			"summary": "技能被调用时记一笔用量账（90 天没用标 stale 就靠它）；关 = 不计数。默认开，即时生效。",
+			"group": "skills",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
 		}
 	]
 }

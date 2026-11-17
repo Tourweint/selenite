@@ -16,6 +16,7 @@
  */
 
 import type { ToolRegistration } from "@earendil-works/pi-durable";
+import { flagEnabled } from "./flags.ts";
 import { toolSummaryOf } from "./partner-tools.ts";
 import {
 	DEFAULT_DEFERRED_TOOL_NAMES,
@@ -26,14 +27,11 @@ import {
 /** 代码默认名单（旧名保留：测试与文档在引用；实际生效值由 `tool-pool.json` 覆盖）。 */
 export const DEFERRED_TOOL_NAMES: ReadonlySet<string> = new Set(DEFAULT_DEFERRED_TOOL_NAMES);
 
-const OFF_VALUES = new Set(["false", "0", "off"]);
-
 /** AGENT_TOOL_INDEX：false / 0 / off（大小写、空白不敏感）= 关；缺省 / 其它 = 开。 */
 export function toolIndexEnabled(
-	env: Record<string, string | undefined> = process.env,
+	env: NodeJS.ProcessEnv = process.env,
 ): boolean {
-	const raw = String(env.AGENT_TOOL_INDEX ?? "").trim().toLowerCase();
-	return !OFF_VALUES.has(raw);
+	return flagEnabled("AGENT_TOOL_INDEX", env);
 }
 
 /** 名字在当前按需名单里、且开关开 → 这个工具应当以 deferred 形态注册 / 可被 tool_search 加载。 */

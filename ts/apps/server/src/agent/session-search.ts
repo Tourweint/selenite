@@ -5,6 +5,7 @@ import { redactSecrets } from "@lifediary/memory";
 import { PROACTIVE_HIDDEN_MARKER } from "@lifediary/shared";
 import { CTX, Chats } from "./shared.ts";
 import { stripScheduledRunHeader } from "../scheduled-run-context.ts";
+import { flagEnabled } from "../flags.ts";
 
 /**
  * 会话考古：跨会话检索 transcript（2026-11-09 T4 §4）。
@@ -75,9 +76,7 @@ export const SNIPPET_MAX_CHARS = 200;
  * 与 `send_to_agent` 的回滚形态一致（模型侧 tool_unavailable，一行回滚）。
  */
 export function recallSessionsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	const raw = env.AGENT_RECALL_SESSIONS?.trim().toLowerCase();
-	if (!raw) return true;
-	return raw !== "false" && raw !== "0" && raw !== "off";
+	return flagEnabled("AGENT_RECALL_SESSIONS", env);
 }
 
 /**
@@ -87,9 +86,7 @@ export function recallSessionsEnabled(env: NodeJS.ProcessEnv = process.env): boo
  * 刻意与 `AGENT_RECALL_SESSIONS` 分开：关模型工具不等于要关掉界面「找旧事」。
  */
 export function sessionSearchApiEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	const raw = env.AGENT_SESSIONS_SEARCH?.trim().toLowerCase();
-	if (!raw) return true;
-	return raw !== "false" && raw !== "0" && raw !== "off";
+	return flagEnabled("AGENT_SESSIONS_SEARCH", env);
 }
 
 /**

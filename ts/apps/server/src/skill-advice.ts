@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { flagEnabled } from "./flags.ts";
 
 /**
  * 技能分类建议（2026-11-10 批 30）：Agent 给技能分三栏 + 预计使用频率，**人确认后**才改启停。
@@ -47,9 +48,7 @@ export function skillAdvicePath(env: NodeJS.ProcessEnv = process.env): string {
 
 /** 回滚开关：false/0/off = 端点不挂（设置页不显示评估入口），一行退回纯手工启停 */
 export function skillAdviceEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	const raw = env.SKILL_ADVICE?.trim().toLowerCase();
-	if (!raw) return true;
-	return raw !== "false" && raw !== "0" && raw !== "off";
+	return flagEnabled("SKILL_ADVICE", env);
 }
 
 const BUCKETS: readonly SkillAdviceBucket[] = ["keep", "scene", "skip"];

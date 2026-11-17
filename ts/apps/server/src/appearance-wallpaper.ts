@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { Hono } from "hono";
+import { flagEnabled } from "./flags.ts";
 
 /**
  * 壁纸（2026-11-14 外观页扩展）：把一张图存成本地文件，界面按 `--wallpaper-image` 铺在主区那张纸上。
@@ -37,9 +38,7 @@ export interface WallpaperState {
 }
 
 export function wallpaperEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	const raw = (env.AGENT_APPEARANCE_WALLPAPER ?? "").trim().toLowerCase();
-	if (!raw) return true;
-	return raw !== "false" && raw !== "0" && raw !== "off";
+	return flagEnabled("AGENT_APPEARANCE_WALLPAPER", env);
 }
 
 export function wallpaperDir(env: NodeJS.ProcessEnv = process.env): string {

@@ -71,9 +71,7 @@ export const WORKER_PERSONA = workerPersonaDefault();
  * 已经落盘的 worker 保持原身份（不把旧 worker 重解释成总管）。默认启用。
  */
 export function workerChatEnabled(): boolean {
-	const raw = process.env.WORKER_CHAT_ENABLED?.trim().toLowerCase();
-	if (!raw) return true;
-	return raw !== "false" && raw !== "0";
+	return flagEnabled("WORKER_CHAT_ENABLED");
 }
 
 // ── 记忆 ─────────────────────────────────────────────────

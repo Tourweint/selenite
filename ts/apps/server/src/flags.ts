@@ -346,12 +346,12 @@ export function flagsUiEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
  * 不传 `dirPath` 的请求本来就与旧行为逐字节一致，所以关掉只是拦掉新参数。
  */
 export function chatDirPickEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	return (env.CHAT_DIR_PICK ?? "").trim().toLowerCase() !== "false";
+	return flagEnabled("CHAT_DIR_PICK", env);
 }
 
 /** 派活按单指定工作目录 / 工具权限（2026-11-17）。缺省开；显式 false 时两个字段收下但不生效。 */
 export function delegateWorkdirEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	return (env.DELEGATE_WORKDIR ?? "").trim().toLowerCase() !== "false";
+	return flagEnabled("DELEGATE_WORKDIR", env);
 }
 
 export function flagsPath(env: NodeJS.ProcessEnv = process.env): string {

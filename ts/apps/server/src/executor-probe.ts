@@ -33,6 +33,7 @@ import {
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { flagEnabled } from "./flags.ts";
 import process from "node:process";
 import {
 	CLAUDE_BIN,
@@ -177,8 +178,7 @@ interface ModelCacheEntry {
 }
 
 function modelCacheEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	const raw = (env.EXECUTOR_MODEL_CACHE ?? "").trim().toLowerCase();
-	return !["false", "0", "off"].includes(raw);
+	return flagEnabled("EXECUTOR_MODEL_CACHE", env);
 }
 
 function modelCachePath(env: NodeJS.ProcessEnv = process.env): string {

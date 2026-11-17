@@ -18,17 +18,16 @@ export function currentProjectEnabled(): boolean {
 }
 
 export function projectOutsideWorkspaceEnabled(): boolean {
-	return (process.env.PROJECT_OUTSIDE_WORKSPACE?.trim() || "true").toLowerCase() !== "false";
+	return flagEnabled("PROJECT_OUTSIDE_WORKSPACE");
 }
 
 export function projectArchiveChatsEnabled(): boolean {
-	return (process.env.PROJECT_ARCHIVE_CHATS?.trim() || "true").toLowerCase() !== "false";
+	return flagEnabled("PROJECT_ARCHIVE_CHATS");
 }
 
 /** 项目合并开关（2026-11-17 项目合并与记忆迁移）：`PROJECT_MERGE=false` → 端点 404、菜单不渲染。 */
 export function projectMergeEnabled(): boolean {
-	const value = (process.env.PROJECT_MERGE ?? "").trim().toLowerCase();
-	return value !== "false" && value !== "0" && value !== "off";
+	return flagEnabled("PROJECT_MERGE");
 }
 
 export type Vcs = "git" | "none";

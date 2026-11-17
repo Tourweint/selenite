@@ -66,11 +66,12 @@ test("requires 图：父键都存在且不成环（含多父 / 嵌套）", () =>
 	assert.deepEqual(byKey.get("AGENT_COMPACT_TRIGGER_PERCENT")?.requires, ["AGENT_COMPACT_ENABLED"]);
 });
 
-test("scope：系统核心 = 记忆 / 执事体系 / 宰相 / 自主轮，其余默认普通插件", () => {
+test("scope：系统核心 = 记忆 / 执事体系 / 宰相 / 自主轮 / 工具权限，其余默认普通插件", () => {
 	const coreKeys = FLAG_DEFS.filter((def) => def.scope === "core")
 		.map((def) => def.key)
 		.sort();
 	assert.deepEqual(coreKeys, [
+		"AGENT_TOOL_POLICY",
 		"AUTONOMY_ENABLED",
 		"CHANCELLOR_ENABLED",
 		"COMPANIONS_ENABLED",
@@ -81,6 +82,7 @@ test("scope：系统核心 = 记忆 / 执事体系 / 宰相 / 自主轮，其余
 	const rows = new Map(listFlags(env).flags.map((flag) => [flag.key, flag]));
 	assert.equal(rows.get("MEMORY_ENABLED")?.scope, "core");
 	assert.equal(rows.get("COMPANIONS_ENABLED")?.scope, "core");
+	assert.equal(rows.get("AGENT_TOOL_POLICY")?.scope, "core", "工具写权限是安全边界，标系统核心");
 	assert.equal(rows.get("TOOL_PROJECTION")?.scope, "plugin");
 	assert.equal(rows.get("PARTNER_TEMPLATES")?.scope, "plugin");
 });
@@ -100,7 +102,7 @@ test("JSON 清单：API 返回名称 / 说明 / 分组 / 档位 / groups，前�
 			surface: string;
 		}[];
 	};
-	assert.equal(data.groups.length, 6);
+	assert.equal(data.groups.length, 7);
 	assert.equal(data.groups[0]?.id, "chat");
 	// 数量按清单快照取（并行开发时别人也会往清单加开关，别钉死数字）；
 	// 但要确认本批新增的 SCHEDULED_TASK_MODEL_RUN 确实在册（2026-11-17 定时主动轮）。

@@ -14,6 +14,7 @@
 
 import { join } from "node:path";
 import { contentText } from "@earendil-works/pi-ai";
+import { flagValue } from "./flags.ts";
 import {
 	PARTNER_VOICE_LIMITS,
 	PartnerVoiceRuleSchema,
@@ -40,9 +41,7 @@ export type LearningFrequency = "weekly" | "settle";
  * 拼错 / 空值按 weekly（不因拼错就频繁烧模型）。
  */
 export function learningFrequency(env: NodeJS.ProcessEnv = process.env): LearningFrequency {
-	return (env.PARTNER_LEARNING_FREQUENCY ?? "").trim().toLowerCase() === "settle"
-		? "settle"
-		: "weekly";
+	return flagValue("PARTNER_LEARNING_FREQUENCY", env) === "settle" ? "settle" : "weekly";
 }
 
 /**

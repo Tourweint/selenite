@@ -39,7 +39,7 @@ export function attachmentsEnabled(env: NodeJS.ProcessEnv = process.env): boolea
 
 /** `AGENT_FILE_ATTACHMENTS=false` → 上传端点 404、前端不渲染「任意文件」入口。 */
 export function fileAttachmentsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	return (env.AGENT_FILE_ATTACHMENTS ?? "").trim().toLowerCase() !== "false";
+	return flagEnabled("AGENT_FILE_ATTACHMENTS", env);
 }
 
 /** `AGENT_EDIT_RESEND=false` → 编辑重发端点 404、前端不渲染编辑入口。 */

@@ -10,6 +10,7 @@
  */
 
 import type { TranscriptMessage } from "./agent/session.ts";
+import { flagEnabled } from "./flags.ts";
 
 /** 默认半径（前后各 5 条） */
 export const CONTEXT_DEFAULT_RADIUS = 5;
@@ -18,7 +19,7 @@ export const CONTEXT_MAX_RADIUS = 50;
 
 /** 回滚开关：默认开；只有显式 `false` 才关（关 = 端点 404）。 */
 export function chatContextLookupEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	return (env.CHAT_CONTEXT_LOOKUP ?? "").trim().toLowerCase() !== "false";
+	return flagEnabled("CHAT_CONTEXT_LOOKUP", env);
 }
 
 /** `radius` 解析：未传 = 5；必须是 0–50 的整数，否则 null（调用方 400）。 */

@@ -17,6 +17,7 @@
  */
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { flagEnabled } from "./flags.ts";
 
 export interface ToolUsageEntry {
 	/** 真实执行次数（成败都算）。 */
@@ -30,9 +31,7 @@ export interface ToolUsageEntry {
 
 /** 回滚开关：`false` / `0` / `off` = 不记账。 */
 export function toolUsageEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	const raw = (env.TOOL_USAGE ?? "").trim().toLowerCase();
-	if (!raw) return true;
-	return raw !== "false" && raw !== "0" && raw !== "off";
+	return flagEnabled("TOOL_USAGE", env);
 }
 
 /** 用量账落点；探针用 env 与真实 `.data` 隔离。 */

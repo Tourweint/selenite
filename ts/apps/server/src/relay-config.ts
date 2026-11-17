@@ -26,8 +26,7 @@ export function relayEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
 
 /** 设备矩阵（阶段二）：delegate 可点名远端设备。依赖中继。 */
 export function deviceMatrixEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	const raw = (env.DEVICE_MATRIX_ENABLED ?? "").trim().toLowerCase();
-	return raw === "1" || raw === "true" || raw === "on";
+	return flagEnabled("DEVICE_MATRIX_ENABLED", env);
 }
 
 /**
@@ -98,8 +97,7 @@ export function relayLinkUiEnabled(env: NodeJS.ProcessEnv = process.env): boolea
 
 /** 执事认主机（阶段三）：harness 注册/领取执事归属。依赖中继。 */
 export function companionHomeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	const raw = (env.COMPANION_HOME_ENABLED ?? "").trim().toLowerCase();
-	return raw === "1" || raw === "true" || raw === "on";
+	return flagEnabled("COMPANION_HOME_ENABLED", env);
 }
 
 export function relayCapabilities(env: NodeJS.ProcessEnv = process.env): string[] {

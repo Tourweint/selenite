@@ -13,6 +13,7 @@
  */
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { flagEnabled } from "./flags.ts";
 
 export interface SkillUsageEntry {
 	count: number;
@@ -24,9 +25,7 @@ export const SKILL_STALE_DAYS = 90;
 
 /** 回滚开关：`false` / `0` / `off` = 不计数。 */
 export function skillUsageEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	const raw = (env.SKILL_USAGE ?? "").trim().toLowerCase();
-	if (!raw) return true;
-	return raw !== "false" && raw !== "0" && raw !== "off";
+	return flagEnabled("SKILL_USAGE", env);
 }
 
 /** 用量账落点；探针用 env 与真实 `.data` 隔离。 */

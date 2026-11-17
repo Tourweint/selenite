@@ -11,6 +11,8 @@
  * 提示词与 run 记录回到改动前（回滚一行 env）。
  */
 
+import { flagEnabled } from "./flags.ts";
+
 /** 模型声明"完成条件已达成"的固定标记（回复最后单独一行）。 */
 export const ROUTINE_DONE_MARKER = "[[routine-done]]";
 
@@ -18,9 +20,7 @@ export type RoutineOutcome = "success" | "quiet" | "skipped" | "failed" | "done"
 
 /** 回滚开关：默认开；只有明确写 false / 0 / off 才关。 */
 export function routineConditionalEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	const raw = (env.ROUTINE_CONDITIONAL ?? "").trim().toLowerCase();
-	if (!raw) return true;
-	return raw !== "false" && raw !== "0" && raw !== "off";
+	return flagEnabled("ROUTINE_CONDITIONAL", env);
 }
 
 export interface RoutinePromptInput {
