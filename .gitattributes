@@ -1,0 +1,4 @@
+# git 钩子与 shell 脚本必须 LF，否则 Windows 上 `bad interpreter: /bin/bash^M`。
+# core.autocrlf=true 的开发机上尤其需要钉死（2026-11-17 提交门禁）。
+.githooks/* text eol=lf
+*.sh text eol=lf

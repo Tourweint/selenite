@@ -11,7 +11,8 @@
     "typecheck": "node node_modules/typescript/bin/tsc --noEmit",
     "smoke": "pnpm --filter @lifediary/server smoke",
     "probe": "pnpm --filter @lifediary/server durable && pnpm --filter @lifediary/server exec tsx scripts/thinking-probe.ts",
-    "memtest": "pnpm --filter @lifediary/memory selftest"
+    "memtest": "pnpm --filter @lifediary/memory selftest",
+    "hooks:install": "bash ../scripts/install-hooks.sh"
   },
   "pnpm": {
     "onlyBuiltDependencies": ["esbuild"]

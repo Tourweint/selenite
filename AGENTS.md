@@ -69,19 +69,16 @@ docs/                   基线文档（现行口径）/ 设计方案（设计期
 
 ## 验证
 
-按改动范围跑**最小充分**验证，并如实报告没跑的那部分（命令都在 `ts/` 下）：
+**提交自动守一道**：`git commit` 触发本地 pre-commit 钩子跑契约形状快照（守"契约只有一份"），
+红了提交失败、`--no-verify` 可跳过。它是本地钩子、不是 CI，只守契约这一道，**不替代**下面的按需验证。
 
-| 改动 | 跑什么 |
-|---|---|
-| 任意 TS | `pnpm typecheck` |
-| 内核语义（提交 / 流式 / 闸门 / 睡眠 / 重启续跑） | `pnpm probe` |
-| HTTP 与契约 | `pnpm --filter @lifediary/server http` |
-| 供应商配置 / 切模型 | `pnpm --filter @lifediary/server providers` |
-| 日记镜像 / 任务 / 手机 worker | `... diary` / `... tasks` / `... phone` |
-| 记忆四层 | `pnpm memtest` |
-| 单元测试 | `pnpm --filter @lifediary/server test` |
+改了就补跑对应那条（命令都在 `ts/` 下；没跑的如实说）：
+- 任意 TS → `pnpm typecheck`
+- 内核语义 / HTTP 契约 → `pnpm probe` / `pnpm --filter @lifediary/server http`
+- 供应商 / 记忆四层 / 日记任务手机 → `... providers` / `pnpm memtest` / `... diary`·`... tasks`·`... phone`
+- 全套单测 → `pnpm --filter @lifediary/server test`
 
-探针都是"真起服务 + 真 HTTP"，不是 mock 单测；改了对应链路就要重跑并**看输出**，不要只看 exit code。
+探针都是"真起服务 + 真 HTTP"，不是 mock 单测；改了对应链路要重跑并**看输出**，不要只看 exit code。
 
 ## 完成标准
 

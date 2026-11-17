@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# 提交前体检（2026-11-17，方案 docs/设计方案/2026-11-17-可观测与提交门禁.md）。
+#
+# 定位：这是"安检"不是"门禁"——-light by design。仓库多会话并行改同文件，
+# 别人的在途坏代码会把全量 typecheck/test 染红，硬拦会逼大家天天 --no-verify，
+# 钩子就形同虚设。所以只做一件事：跑契约形状快照（snapshot.test.ts），守住
+# "契约只有一份"。它只读 shared 的 Zod 形状、确定性、秒级，几乎不被并行碰。
+#
+# typecheck 与工具顺序守卫（tool-schema-guard）只告警不阻断——它们最容易被在途
+# 代码污染；全量单测 / probe / http / memtest 一律不进钩子，留在手动验收（AGENTS.md §验证）。
+#
+# 跳过：git commit --no-verify（git 原生，pre-commit 会被跳过）。
+# 依赖缺失（干净 clone 未装依赖）：告警放行，不卡死提交。
+
+set -u
+ROOT="$(git rev-parse --show-toplevel)"
+TS_DIR="$ROOT/ts"
+
+cd "$TS_DIR" || { echo "[pre-commit] 找不到 ts/ 目录，放行"; exit 0; }
+
+# 工具链探测：没有本地 tsx 就告警放行（依赖没装不代表代码有问题）
+if [ ! -x "node_modules/.bin/tsx" ]; then
+  echo "[pre-commit] 未检测到 ts/node_modules/.bin/tsx（依赖未安装？），跳过契约体检"
+  exit 0
+fi
+
+echo "[pre-commit] 契约形状快照 shared/snapshot.test.ts ..."
+if node_modules/.bin/tsx --test packages/shared/src/snapshot.test.ts >/tmp/lifediary-precommit-snapshot.$$ 2>&1; then
+  echo "[pre-commit] 契约快照 ✓"
+else
+  echo "[pre-commit] 契约快照 ✗ 失败，阻断提交（--no-verify 可跳过）："
+  cat /tmp/lifediary-precommit-snapshot.$$
+  rm -f /tmp/lifediary-precommit-snapshot.$$
+  exit 1
+fi
+rm -f /tmp/lifediary-precommit-snapshot.$$
+
+# typecheck 只告警不阻断（多会话在途代码会误杀，交给手动验证）
+if [ -x "node_modules/.bin/tsc" ]; then
+  if ! node_modules/.bin/tsc --noEmit >/tmp/lifediary-precommit-tsc.$$ 2>&1; then
+    echo "[pre-commit] ⚠ typecheck 未通过（仅告警、不阻断；可能是他人在途改动）："
+    head -20 /tmp/lifediary-precommit-tsc.$$
+  fi
+  rm -f /tmp/lifediary-precommit-tsc.$$
+fi
+
+exit 0
