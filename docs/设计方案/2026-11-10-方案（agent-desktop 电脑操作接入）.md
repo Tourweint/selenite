@@ -85,7 +85,7 @@
 
 ## 落地清单（执行时照此勾）
 
-- [ ] **S1 拷手册**：`cp -r D:/Projects/reference/agent-desktop/skills/agent-desktop ~/.agents/skills/agent-desktop`
+- [ ] **S1 拷手册**：`cp -r <reference>/agent-desktop/skills/agent-desktop ~/.agents/skills/agent-desktop`
       （真实目录含 references/；**拷贝不建符号链接**——符号链接会被设置页挡，真目录才可能进管理列表）。
 - [ ] **V1 技能链识别**：真代码 + 真用户目录 `createSkillStore(resolveSkillsDir().dirs)`：
       agent-desktop 在索引、L1 行为取 frontmatter description（官方是 YAML `>` 多行 description，

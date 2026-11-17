@@ -39,11 +39,11 @@ ts/packages/memory/     记忆四层：存储 / 抽取 / 巩固 / 召回
 ts/apps/server/         Hono + SSE + 装配（agent.ts 是核心：Harness / 会话 / 闸门 / 派活）
 ts/apps/server/skills/  技能手册 *.md（文件名 = 技能名，第 1 行 = 索引用摘要）
 ts/apps/relay/          自建中继（哑路由 + 名册 + 加入码；部署口径见 ts/apps/relay/README.md）
-desktop/                MyGo 桌面壳（Go）
+desktop/                Lifediary 桌面壳（Go）
 docs/                   基线文档（现行口径）/ 设计方案（设计期）/ 变更记录（落地期）
 ```
 
-外部仓库：手机端 `<lifediary 手机仓>`（Kotlin/Compose）、派活侧 `<chancellor>`。
+外部仓库：手机端 `lifediary`（Kotlin/Compose）、派活侧 `chancellor`——都是独立私有仓库，不在本仓开源范围。
 **依赖方向单向**：`shared` ← `memory` ← `server`。`shared` 不 import 包内实现，`memory` 不 import `server`。
 
 ## 硬约束

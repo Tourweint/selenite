@@ -76,11 +76,12 @@ const server = startServer();
 
 // 默认这个任务要读 6 份设计方案、提炼、再写一份文件——不是一条命令能答的，
 // 主 agent 要么自己啃很久，要么派出去。用 `CHAIN_PROMPT` 可以换。
+// chancellor 是独立私有仓，本机路径用 PROBE_CHANCELLOR_ROOT 传入，不写死。
+const CH_ROOT = process.env.PROBE_CHANCELLOR_ROOT ?? "<chancellor 仓路径（设 PROBE_CHANCELLOR_ROOT）>";
 const PROMPT =
 	process.env.CHAIN_PROMPT?.trim() ||
-	"读 <chancellor>/docs/设计方案 下所有 .md 文件，" +
-		"把里面提到的「踩过的坑 / 失败教训」提炼成一份清单，写到 " +
-		"<chancellor>/PITFALLS.md，每条注明来自哪个文件。要真读，不要猜。";
+	`读 ${CH_ROOT}/docs/设计方案 下所有 .md 文件，` +
+		`把里面提到的「踩过的坑 / 失败教训」提炼成一份清单，写到 ${CH_ROOT}/PITFALLS.md，每条注明来自哪个文件。要真读，不要猜。`;
 
 try {
 	await waitForReady();

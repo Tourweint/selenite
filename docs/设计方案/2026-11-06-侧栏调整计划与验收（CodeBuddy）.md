@@ -31,7 +31,7 @@
 - CiNDY apps/desktop/src/renderer/components/sidebar/Sidebar.tsx:124–148：内容层定宽避免展开收起时连续文字重排。参考思路，不直接照搬其三态与宽度。
 - CiNDY apps/desktop/src/main/maker-ipc/botInvitation.ts:330–359：邀请后生成身份化问候；固定 clientId、队列凭据与 ready 状态防重，toolsDisabled=true。不是已证实的“首次点击”触发；本项目按用户要求改为首次点击触发。
 
-以上 web/ 与 src/ 均相对 ts/apps/server/；CiNDY 根为 D:/Projects/reference/cindy。
+以上 web/ 与 src/ 均相对 ts/apps/server/；CiNDY 根为 <reference>/cindy。
 
 ## 执行分批
 
@@ -130,4 +130,4 @@ CodeBuddy 完成后交回修改文件、测试命令及输出、服务启动方�
 
 ## CodeBuddy 调用约束
 
-按用户提供的 D:/Projects/docs/CLI工具更新/非交互模式调用说明.md：codebuddy -p 配合 -y、--model deepseek-v4.1-flash、--output-format json；NO_PROXY=127.0.0.1,localhost，stdin 为 /dev/null。先记录当前 git status，仅在明确范围内写文件；不改权限配置、不使用沙箱环境变量绕过检查、不提交、不推送、不删除用户数据。核对实际产物和 permission_denials，拒绝或结果不确定时不得声称完成。
+按用户提供的 <local-docs>/CLI工具更新/非交互模式调用说明.md：codebuddy -p 配合 -y、--model deepseek-v4.1-flash、--output-format json；NO_PROXY=127.0.0.1,localhost，stdin 为 /dev/null。先记录当前 git status，仅在明确范围内写文件；不改权限配置、不使用沙箱环境变量绕过检查、不提交、不推送、不删除用户数据。核对实际产物和 permission_denials，拒绝或结果不确定时不得声称完成。

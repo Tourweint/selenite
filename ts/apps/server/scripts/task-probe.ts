@@ -40,8 +40,8 @@ const DIARY_DB = ".data/probe-task-diary.sqlite";
 /** 供应商配置探针独立文件（播种会写它） */
 const PROVIDERS_DB = ".data/probe-task-providers.json";
 
-/** App 仓库的 prompt 资产目录（黄金用例的对照源；跨仓只读） */
-const APP_PROMPTS_DIR = "<lifediary 手机仓>/core/ai/src/main/assets/prompts";
+/** App 仓库的 prompt 资产目录（黄金用例的对照源；跨仓只读；本机路径用 PROBE_APP_PROMPTS_DIR 传入） */
+const APP_PROMPTS_DIR = process.env.PROBE_APP_PROMPTS_DIR ?? "<手机仓 core/ai 的 prompts 资产目录>";
 
 let failures = 0;
 let skips = 0;

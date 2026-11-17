@@ -21,6 +21,22 @@
 - 工具要能**写**（只读的 Agent 记不下东西）
 - 交互成本要**极低**（随手一句就能记，否则没人用）
 
+## 快速上手
+
+```bash
+# 依赖：Node 20+、pnpm
+cd ts
+pnpm install
+
+# 不配任何 key 也能跑：走 mock 流，整条 HTTP 链路是真实的
+cd apps/server
+cp .env.example .env
+pnpm dev            # http://127.0.0.1:39847
+```
+
+要接真实模型，在 `.env` 里填 `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL`（OpenAI 兼容端点都行）。
+`LLM_PROVIDER=faux` 是中间态：真实会话落库 + 假模型，用来不花钱验链路。
+
 ## 结构
 
 ```
@@ -31,6 +47,11 @@ ts/
 ├── apps/relay/          自建中继（哑路由 + 名册 + 扫码加入；部署口径见其 README）
 └── README.md            ← 从这里开始
 ```
+
+桌面壳在 `desktop/`（Go，基于 [egoist/mygo](https://github.com/egoist/mygo) 框架）。
+派活侧执行器模块（chancellor）与原生 Android 手机端是独立仓库，未随本项目开源；
+`delegate` 派活能力依赖 chancellor 模块（服务端源码 import 了它，缺了起不来），
+对话、记忆、工具、技能、中继不依赖它。
 
 内核是 npm 上的 **pi-durable**（MIT，锁 1.4.0，不 vendored）。
 2026-10-28 从 pi-agent-core 0.78.1 换过来 —— 那条线上游已经删了，
