@@ -1,4 +1,4 @@
-# desktop —— lifediary 桌面壳
+# Selenite 桌面壳（desktop）
 
 **壳不是宿主，是客户端。** 它只做两件事：确认服务在跑、把服务给的界面显示出来。
 Agent、记忆、会话全在 `../ts/apps/server`（Node，`:39847`），这里不碰业务。
