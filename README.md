@@ -57,6 +57,34 @@ ts/
 2026-10-28 从 pi-agent-core 0.78.1 换过来 —— 那条线上游已经删了，
 新家把会话存储、崩溃恢复、压缩、定时任务、权限钩子都包了。
 
+## 依赖与参考
+
+内核与硬依赖（都是现成开源件，本仓不 vendor 内核）：
+
+| 件 | 是什么 | 在本仓的位置 |
+|---|---|---|
+| [pi-durable](https://www.npmjs.com/package/@earendil-works/pi-durable)（MIT） | 持久会话/任务/文档运行时：存储、崩溃恢复、压缩、定时任务、权限钩子 | server 直接依赖，锁 1.4.0 |
+| [pi-ai](https://www.npmjs.com/package/@earendil-works/pi-ai) | 统一 LLM API（模型发现 + 供应商配置） | server / chancellor |
+| [chord](https://www.npmjs.com/package/@earendil-works/chord) | 跨进程对象运行时（契约、存储、worker、HTTP） | chancellor |
+| [mygo](https://github.com/egoist/mygo) | Go 桌面壳框架 | `desktop/` |
+| [MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk) | Model Context Protocol 客户端 | chancellor 的 mcp 雇员通道 |
+| [opencode](https://github.com/anomalyco/opencode)、[codex](https://github.com/openai/codex)、Claude Code、Qoder、CodeBuddy | 外部 CLI 执行器 | 派活的外雇工人（`ts/packages/chancellor/src/employee/`） |
+
+设计期参考项目（本机参考副本，多数未公开；变更记录/设计方案里的 `<reference>\xxx` 占位符指的就是它们）：
+
+| 项目 | 本仓借了什么 |
+|---|---|
+| [dsh-synapse](https://github.com/Tourweint/dsh-synapse)（自己的另一份公开工程） | 会话画板（回合卡 + 分支车道）的交互参照 |
+| cindy | 自建中继蓝本（哑路由、凭证只存哈希）与设置页交互 |
+| ZCode | 工具执行流灰块、错误卡、中间话折叠、归档管理的交互参照 |
+| DS-Bot / Kun / agent-autoloop / deepseek-harness / open-claude-ui | 多 Agent 结构与派活链路的调研对标 |
+| oh-my-pi / pi-main | pi 生态上游源码（pi-agent-core → pi-durable 迁移线的考察） |
+| magpie | 供应商模板的品牌图标（lobe-icons 那套）与交互 |
+| agent-desktop | 电脑操作（窗口/键鼠）技能手册的体例与接入方式 |
+| Grok Bot 小镇 | 员工招聘模板的体例（`docs/员工模板-我的执事.md` 已注明） |
+
+占位符对照（开源脱敏时替换掉的本机路径）：`<repo>`=本仓根、`<chancellor>`=ts/packages/chancellor（2026-11-18 已 vendor 进本仓）、`<lifediary 手机仓>`=未开源的 Android 端、`<主工作区>`=用户自选的工作区根目录、`<VPS_IP>` 等=已清除的基础设施信息。
+
 ## 状态
 
 | 能力 | 状态 |
