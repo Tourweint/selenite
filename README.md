@@ -1,4 +1,4 @@
-# lifediary-harness
+# Selenite
 
 **一个人的通用 Agent。** 跑在自己机器上：模型、记忆、会话、密钥都不外流。
 
