@@ -593,9 +593,9 @@ async function renderSettings() {
       ${sectionMarkup(
         "关于",
         `<div class="card">
-          ${rowMarkup("Selenite", "一个人用的 Agent。记录是重点场景，但不是边界。", `<span class="kv">0.1.0</span>`)}
+          ${rowMarkup("Selenite", "一个跑在自己机器上的通用 Agent：记日记、读文件、跑命令、派活。数据、记忆和密钥都留在本机；除了你自己配的模型接口，没有云端。", `<span class="kv">0.1.0</span>`, { inlineHint: true })}
           <div class="divider"></div>
-          ${rowMarkup("界面", "与手机端同一套配色；改完刷新就生效，没有构建步骤。", `<span class="kv">web/</span>`)}
+          ${rowMarkup("开源", "MIT 许可。用法与架构见项目 README 和 docs/ 下的文档。", `<span class="kv">MIT</span>`, { inlineHint: true })}
         </div>`,
       )}`,
     );
