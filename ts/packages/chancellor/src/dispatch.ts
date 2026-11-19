@@ -21,6 +21,7 @@ import type {
   WorkerReport,
   WorkerStatus,
 } from "./types.ts";
+import type { WorkerEscalation } from "./escalation-payload.ts";
 
 // qoder 调用搬进了雇员实现；这里保留旧导出，拆单/验收/目标核对一行都不用改。
 export { runQoder, type QoderCall } from "./employee/mercenary.ts";
@@ -43,6 +44,11 @@ export interface DispatchOptions {
   resumeAnswer?: string;
   /** 隔离执行的项目副本 / 项目根；不传就是老行为（task 目录即工作目录）。 */
   workDir?: string;
+  /**
+   * worker 跑动中的决策上报回调（2026-11-19 批2）。只对 native worker 生效
+   * （stderr 结构行）；不传 = 旧行为。chancellor 不解读内容，只透传给雇员。
+   */
+  onEscalation?: (escalation: WorkerEscalation) => void;
   /** 测试注入：给假雇员；默认按 kind 建真雇员。 */
   employeeFactory?: (kind: WorkerKind) => Employee;
 }
@@ -163,6 +169,9 @@ export async function dispatchTask(
       : {}),
     // 模型 / 权限：建单快照或当前派单参数；没有就不传，雇员回落到 env 缺省。
     ...(options.employeeProfile ? { settings: options.employeeProfile } : {}),
+    // 决策上报（2026-11-19 批2）：native worker 跑动中的上报经 stderr 结构行回到这里，
+    // 再沿 onEscalation 上送；续跑（resume）同样带上。
+    ...(options.onEscalation ? { onEscalation: options.onEscalation } : {}),
   };
   const response =
     resumeAnswer === undefined

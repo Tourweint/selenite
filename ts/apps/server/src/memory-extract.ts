@@ -28,15 +28,29 @@ import { currentModels, isFaux, readLlmConfig } from "./provider.ts";
 import { flagEnabled, flagValue } from "./flags.ts";
 
 /**
- * `MEMORY_EXTRACT`（2026-11-06，回滚开关）：
+ * `MEMORY_EXTRACT`（2026-11-06，回滚开关；2026-11-18 加 `off` 档）：
  * - `auto`（默认）：有可用模型 → 偏好走 LLM、其余走规则；模型不可用 → 全走规则；
  * - `llm`：同上但**不因模型不可用而退化**（拿不到就不写偏好），用于验收"LLM 档到底抽到了什么"；
- * - `rule`：**逐字节回到 2026-11-06 之前**（装配处直接用老引擎，连这一层都不进）。
+ * - `rule`：**逐字节回到 2026-11-06 之前**（装配处直接用老引擎，连这一层都不进）；
+ * - `off`：**不自动抽取新记忆**（no-op 抽取器）；召回 / 记忆页 / 手动 remember / 导入照常。
+ *
+ * 抽取器在记忆引擎装配时取一次（`agent/assist.ts` 的 `memoryEngine` 是模块级常量），
+ * 所以改档实际要重启服务；清单里这个开关是 `hot:false`。
  */
-export function memoryExtractMode(): "auto" | "llm" | "rule" {
-	const raw = flagValue("MEMORY_EXTRACT").trim().toLowerCase();
+export type MemoryExtractMode = "auto" | "llm" | "rule" | "off";
+
+export function memoryExtractMode(env: NodeJS.ProcessEnv = process.env): MemoryExtractMode {
+	const raw = flagValue("MEMORY_EXTRACT", env).trim().toLowerCase();
+	if (raw === "off") return "off";
 	return raw === "rule" || raw === "llm" ? raw : "auto";
 }
+
+/** `off` 档用的空抽取器：一轮跑完不产生任何候选，别的写入路径不受影响。 */
+export const NOOP_EXTRACTOR: Extractor = {
+	async extract(): Promise<MemoryCandidate[]> {
+		return [];
+	},
+};
 
 /**
  * `MEMORY_EXTRACT_NOISE`（2026-11-13，回滚开关）：默认开。
@@ -159,17 +173,19 @@ class LayeredExtractor implements Extractor {
  */
 export function preferenceExtractor(): Extractor | null {
 	const mode = memoryExtractMode();
-	if (mode === "rule") return null;
+	if (mode === "off" || mode === "rule") return null;
 	if (mode === "auto" && (!readLlmConfig() || isFaux())) return null;
 	return new LayeredExtractor();
 }
 
 /**
  * 模型不可用时的规则兜底（2026-11-13）：只有开了噪声过滤才返回；
- * `MEMORY_EXTRACT=rule` 仍返回 null（装配层回落到老引擎的旧行为）。
+ * `MEMORY_EXTRACT=rule` 仍返回 null（装配层回落到老引擎的旧行为）；
+ * `MEMORY_EXTRACT=off` 也返回 null（装配层换 no-op 抽取器，不回落老引擎）。
  */
 export function memoryFallbackExtractor(): Extractor | null {
-	if (memoryExtractMode() === "rule") return null;
+	const mode = memoryExtractMode();
+	if (mode === "off" || mode === "rule") return null;
 	return memoryExtractNoiseEnabled() ? new HeuristicExtractor({ filterNoise: true }) : null;
 }
 

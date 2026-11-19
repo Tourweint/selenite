@@ -23,6 +23,7 @@ import {
 	openSync,
 	readFileSync,
 	renameSync,
+	statSync,
 	writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
@@ -109,6 +110,71 @@ export function summarizeCommand(command: string): string {
 	return flat.length > SUMMARY_LIMIT ? `${flat.slice(0, SUMMARY_LIMIT)}…` : flat;
 }
 
+// ── 完成即唤醒 / 输出变化检测（2026-11-19 唤醒管道批3）────────────────────
+//
+// 转后台只解决"命令不死"，完成只写记录不开轮 —— 模型永远看不到结果，直到下次
+// 有人说话。本节给装配层三样东西：回滚开关 / 载荷形状 / 输出变化检测的参数。
+// 检测与投递分离：watch 只认字节与间隔，投信封由装配层（agent/lifecycle-harness）
+// 经 delegation-wake 走泛化管道 —— 本模块不 import 唤醒侧，保持叶子。
+
+/** 完成唤醒信封的载荷：命令摘要 + 终态 + 尾部输出（≤400 字，装配层用 tailForWake 截）。 */
+export interface BgJobWakePayload {
+	jobId: string;
+	commandSummary: string;
+	/** done / failed = 终态；running = 输出变化（仍在跑，exitCode 恒 null） */
+	status: "done" | "failed" | "running";
+	exitCode: number | null;
+	tail: string;
+}
+
+/** 唤醒载荷里尾部输出的字数上限（方案 §2：沿用 bg log 管理面可见口径的收紧版）。 */
+export const BG_WAKE_TAIL_CHARS = 400;
+
+/**
+ * 完成唤醒开关（回滚形态）：`BG_JOB_WAKE_ENABLED=false` → 回"只写记录不开轮"
+ * （改动前行为）。只有明确 false / 0 / off 才关，拼错值不会误关（照
+ * bashBackgroundEnabled 的读法，方向相反：这是"新能力默认开"的开关）。
+ */
+export function bgJobWakeEnabled(env: Record<string, string | undefined> = process.env): boolean {
+	const raw = env.BG_JOB_WAKE_ENABLED?.trim().toLowerCase();
+	return !(raw === "false" || raw === "0" || raw === "off");
+}
+
+/**
+ * 输出变化检测的间隔秒数：`BG_JOB_WATCH_INTERVAL_S`，**默认 0 = 关（仅完成唤醒）**。
+ * 非法值（非整数 / 负数）一律回落 0，不猜。
+ */
+export function bgJobWatchIntervalSeconds(
+	env: Record<string, string | undefined> = process.env,
+): number {
+	const raw = env.BG_JOB_WATCH_INTERVAL_S?.trim();
+	if (!raw) return 0;
+	const seconds = Number(raw);
+	if (!Number.isFinite(seconds) || seconds <= 0) return 0;
+	return Math.floor(seconds);
+}
+
+/** 唤醒载荷的尾部输出：保留**末尾** ≤400 字（尾部输出的信息量在结尾）。 */
+export function tailForWake(text: string): string {
+	const flat = text.trim();
+	return flat.length > BG_WAKE_TAIL_CHARS ? flat.slice(-BG_WAKE_TAIL_CHARS) : flat;
+}
+
+/** 完成回调里直接可用的唤醒载荷（装配层 onFinished / onOutputChange 调它）。 */
+export function bgJobWakePayload(
+	record: BgJobRecord,
+	logTail: string,
+	status: BgJobWakePayload["status"],
+): BgJobWakePayload {
+	return {
+		jobId: record.id,
+		commandSummary: record.commandSummary,
+		status,
+		exitCode: status === "running" ? null : (record.exitCode ?? null),
+		tail: tailForWake(logTail),
+	};
+}
+
 function readIndex(path: string): BgJobRecord[] {
 	try {
 		const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
@@ -140,6 +206,15 @@ function tailOf(logPath: string): string {
 		return text.length > LOG_TAIL_CHARS ? text.slice(-LOG_TAIL_CHARS) : text;
 	} catch {
 		return "";
+	}
+}
+
+/** 日志当前字节数（读不到 = 0：文件被删/还没写出都按"没有新字节"处理）。 */
+function fileSizeOf(path: string): number {
+	try {
+		return statSync(path).size;
+	} catch {
+		return 0;
 	}
 }
 
@@ -274,9 +349,16 @@ export interface MoveToBackgroundInput {
 	timeoutSeconds: number;
 	/** 任务结束时的回调：拿到终态记录 + 日志尾部（由装配层回灌会话） */
 	onFinished?: (record: BgJobRecord, logTail: string) => void;
+	/**
+	 * 输出变化回调（批3）：运行中日志有**新字节**且距上次触发 ≥ watch 间隔时触发
+	 *（拿到当时的 running 记录 + 日志尾部）。间隔 0 / 未提供 = 不监听（仅完成唤醒）。
+	 */
+	onOutputChange?: (record: BgJobRecord, logTail: string) => void;
 	/** 测试注入；缺省 `.data/bg-jobs` */
 	dir?: string;
 	env?: Record<string, string | undefined>;
+	/** 测试注入；缺省读 `BG_JOB_WATCH_INTERVAL_S`（0 = 关） */
+	watchIntervalSeconds?: number;
 }
 
 export interface MovedJob {
@@ -288,8 +370,10 @@ export interface MovedJob {
 }
 
 /**
- * 起一个 detached 子进程继续跑同一条命令。**同步返回** id，兑现由 `onFinished` 收。
- * 进程随父进程退出不受影响（detached + unref）：后台就是后台。
+ * 起一个后台子进程继续跑同一条命令。**同步返回** id，兑现由 `onFinished` 收。
+ * 进程随父进程退出不受影响（POSIX detached + unref；Windows 靠进程天然不随父死）：
+ * 后台就是后台。批3 注：Windows 上 detached 会砍掉 stdio 继承（日志恒空），
+ * 故只在 POSIX 标 detached —— 见 spawn 处注释。
  */
 export function moveToBackground(input: MoveToBackgroundInput): MovedJob {
 	const dir = input.dir ?? bashJobsDir();
@@ -312,7 +396,12 @@ export function moveToBackground(input: MoveToBackgroundInput): MovedJob {
 		cwd: input.cwd,
 		// 后台与前台同权限边界：继承同一个进程环境（测试可叠加几个无害变量）。
 		env: { ...process.env, ...(input.env ?? {}) },
-		detached: true,
+		// detached 只保留在 POSIX（进程组长，kill -pid 靠它）。Windows 的 DETACHED_PROCESS
+		// 会让子进程拿不到任何 stdio 句柄——日志恒空（2026-11-19 批3 实测：跑完 exit 0、
+		// 文件 0 字节），完成唤醒的尾部与输出变化检测都建立在这个文件上，守不住。
+		// Windows 不标 detached 子进程照样活过父进程退出（实测探针：父 exit 后仍写日志），
+		// kill 走 taskkill /T /F，也不依赖组长身份。
+		detached: process.platform !== "win32",
 		stdio: ["ignore", fd, fd],
 		windowsHide: true,
 	});
@@ -320,8 +409,36 @@ export function moveToBackground(input: MoveToBackgroundInput): MovedJob {
 	// 管理面只认本进程起的活进程（kill 端点据此判断归属）。
 	if (child.pid !== undefined) liveJobs.set(id, child);
 
+	// 输出变化检测（批3，ZCode 式）：定时看日志文件有没有长出新字节，长了就投一次。
+	// 监听就挂在本闭包里（不建独立注册表）：finish 撤定时器 = 进程结束即撤，
+	// 卸载同理由 close/error 事件兜住。日志内容只经回调回会话，不进服务端日志。
+	const watchInterval =
+		input.watchIntervalSeconds ?? bgJobWatchIntervalSeconds();
+	let watchTimer: ReturnType<typeof setInterval> | null = null;
+	if (watchInterval > 0 && input.onOutputChange) {
+		let lastSeenBytes = fileSizeOf(logPath);
+		watchTimer = setInterval(() => {
+			const size = fileSizeOf(logPath);
+			if (size <= lastSeenBytes) return;
+			lastSeenBytes = size;
+			try {
+				input.onOutputChange?.(record, tailOf(logPath));
+			} catch (error) {
+				console.warn(
+					`[bg-job ${id}] 输出变化回调失败: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+		}, Math.max(1, Math.round(watchInterval * 1000)));
+		// 后台就是后台：定时器不许把父进程吊住（与 child.unref 同一口径）。
+		watchTimer.unref?.();
+	}
+
 	const finish = (exitCode: number | null, status: BgJobRecord["status"]): void => {
 		liveJobs.delete(id);
+		if (watchTimer) {
+			clearInterval(watchTimer);
+			watchTimer = null;
+		}
 		const done: BgJobRecord = { ...record, endedAt: new Date().toISOString(), exitCode, status };
 		try {
 			upsertRecord(index, done);

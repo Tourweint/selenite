@@ -901,6 +901,8 @@ function delegateEventFields(event: DelegationEvent): Record<string, string> {
 	}
 	// 中途播报（批13 §三）不是可触发事件：给一个中性字段，别被当成审批。
 	if (event.type === "notice") return { type: "notice" };
+	// 决策上报（批2）不是可触发事件：同 notice，中性字段。
+	if (event.type === "escalation") return { type: "notice" };
 	return { type: "approval", tool: event.tool };
 }
 

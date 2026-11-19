@@ -11,6 +11,7 @@ import type {
   Ticket,
   WorkerKind,
 } from "./types.ts";
+import type { WorkerEscalation } from "./escalation-payload.ts";
 import { dispatchTask, taskDirName, type DispatchOptions } from "./dispatch.ts";
 import { MAX_PARALLEL_TASKS, TASK_ISOLATION } from "./config.ts";
 import { LeaseManager } from "./lease.ts";
@@ -65,6 +66,11 @@ export interface ScheduleOptions {
   /** 模型 / 权限（2026-11-16）；不传 = 各 CLI 的 env 缺省。 */
   employeeProfile?: EmployeeProfile;
   emit: (event: ChancellorEvent) => void;
+  /**
+   * worker 跑动中的决策上报回调（2026-11-19 批2）：scheduler 原样递给每张任务，
+   * 由 chancellor 入口层统一发射 escalation 事件；不传 = 旧行为。
+   */
+  onEscalation?: (escalation: WorkerEscalation) => void;
   /** 已完成任务（resume 时从磁盘还原）。 */
   initialRuns?: TaskRun[];
   /** 只跑这些 seq（resume 用）；不传为全部。 */
@@ -160,6 +166,7 @@ export async function runScheduledTasks(options: ScheduleOptions): Promise<Sched
             employeeKind,
             ...(employeeProfile ? { employeeProfile } : {}),
             runner,
+            ...(options.onEscalation ? { onEscalation: options.onEscalation } : {}),
             gitIsolated,
             resumeWorktreePath: options.resumeWorktrees?.get(seq),
             resumeSnapshot: options.resumeSnapshots?.get(seq),
@@ -249,11 +256,13 @@ interface ExecuteOptions {
   employeeKind: WorkerKind;
   employeeProfile?: EmployeeProfile;
   runner: TaskRunner;
+  /** worker 跑动中的决策上报（批2）；经 dispatchExtra 原样递给雇员。 */
+  onEscalation?: (escalation: WorkerEscalation) => void;
   gitIsolated: boolean;
   dispatchExtra?: DispatchOptions;
   /** 崩溃恢复：指定就复用这个副本，而不是重新检出。 */
   resumeWorktreePath?: string;
-  /** 崩溃恢复：读回的执行前快照；给了就不再重新拍。 */
+  /** 崩溃恢复：读回的执行前快照。 */
   resumeSnapshot?: SnapshotResult;
 }
 
@@ -272,6 +281,8 @@ export async function runSingleTask(options: {
   employeeProfile?: EmployeeProfile;
   completedRuns: TaskRun[];
   resumeAnswer?: string;
+  /** worker 跑动中的决策上报（批2）：续跑的单也要能上报。 */
+  onEscalation?: (escalation: WorkerEscalation) => void;
   /** 崩溃恢复：接着用上次保留下来的副本。 */
   resumeWorktreePath?: string;
   /** 崩溃恢复：读回的执行前快照。 */
@@ -289,6 +300,7 @@ export async function runSingleTask(options: {
       employeeKind: options.employeeKind,
       ...(options.employeeProfile ? { employeeProfile: options.employeeProfile } : {}),
       runner: dispatchTask,
+      ...(options.onEscalation ? { onEscalation: options.onEscalation } : {}),
       gitIsolated: TASK_ISOLATION === "worktree" && isGitProject(options.project),
       ...(options.resumeWorktreePath
         ? { resumeWorktreePath: options.resumeWorktreePath }
@@ -380,6 +392,7 @@ async function executeTask(
     const run = await runner(ticket, task, seq, ticketDir, signal, deps, {
       ...options.dispatchExtra,
       employeeKind,
+      ...(options.onEscalation ? { onEscalation: options.onEscalation } : {}),
       ...(options.employeeProfile ? { employeeProfile: options.employeeProfile } : {}),
       ...(workDir ? { workDir } : {}),
     });

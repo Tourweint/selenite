@@ -6,12 +6,12 @@
  */
 
 import { loadChats } from "./chats-list.js";
-import { openChat, syncTitleSessionAffordance } from "./chat-open.js";
+import { openChat, startNewChat, syncTitleSessionAffordance } from "./chat-open.js";
 import { request } from "./net.js";
 import { go } from "./route.js";
 import { state } from "./state.js";
 import { closeModal, modalOpen, openModal, toast } from "./ui-atoms.js";
-import { partnerSessionLabel } from "./partner-sessions.js";
+import { buildSessionTree, partnerSessionLabel } from "./partner-sessions.js";
 
 const SIDE_SESSIONS_KEY = "PARTNER_SIDE_SESSIONS";
 
@@ -142,15 +142,40 @@ async function createSession(partnerId) {
   }
 }
 
-/** 选择器行：当前会话精确按 conversationId 匹配（不靠前缀猜）。 */
-function sessionRow(session, { main = false } = {}) {
+const TRASH_ICON =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg>';
+
+/** 选择器行：当前会话精确按 conversationId 匹配（不靠前缀猜）。
+ *  2026-11-18：包一层 .ps-item，垃圾桶是行的兄弟（button 不能套 button）；
+ *  有 origin 的副本名前置「↳」，配合缩进表达"挂在母会话下面"。 */
+function sessionRow(
+  session,
+  {
+    main = false,
+    deletable = false,
+    onDelete = null,
+    onOpen = null,
+    currentId = "",
+    disableCurrent = true,
+  } = {},
+) {
+  const item = document.createElement("div");
+  item.className = "ps-item";
+
   const row = document.createElement("button");
   row.type = "button";
   row.className = `ps-row${main ? " ps-main" : ""}`;
   const name = document.createElement("span");
   name.className = "ps-name";
+  if (session.origin && !main) {
+    const mark = document.createElement("span");
+    mark.className = "ps-branch-mark";
+    mark.setAttribute("aria-hidden", "true");
+    mark.textContent = "↳";
+    name.append(mark);
+  }
   // 主行固定叫「主对话」：服务端首句可能是 [Scheduled run context] 这类系统指令原文，不该当标题。
-  name.textContent = main ? "主对话" : partnerSessionLabel(session);
+  name.append(document.createTextNode(main ? "主对话" : partnerSessionLabel(session)));
   row.append(name);
   const turns = Number(session.turns) || 0;
   if (main || turns > 0) {
@@ -162,32 +187,98 @@ function sessionRow(session, { main = false } = {}) {
       : `${turns} 轮 · ${relativeTime(session.lastAt)}`;
     row.append(meta);
   }
-  if (session.conversationId === state.conversationId) {
+  if (currentId && session.conversationId === currentId) {
     row.setAttribute("aria-current", "true");
-    row.disabled = true;
+    row.disabled = disableCurrent;
   }
-  row.addEventListener("click", () => openExistingConversation(session.conversationId));
-  return row;
+  row.addEventListener("click", () => {
+    if (typeof onOpen === "function") onOpen(session);
+    else openExistingConversation(session.conversationId);
+  });
+  item.append(row);
+
+  if (deletable && typeof onDelete === "function") {
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "ps-del";
+    del.innerHTML = TRASH_ICON;
+    del.setAttribute("aria-label", "删除这条分支会话");
+    del.setAttribute("data-tip", "删除这条分支会话（不可恢复）");
+    del.addEventListener("click", (event) => {
+      event.stopPropagation();
+      onDelete(session);
+    });
+    item.append(del);
+  }
+  return item;
 }
 
-function renderSessionRows(body, data, partnerId, isChief) {
+/** 打开到哪儿（2026-11-18）：同一个选择器既能去对话，也能直接切会话地图。
+ *  两个位置固定（去对话 / 看地图），不随当前档位换顺序——人的肌肉记忆比 autoFocus 重要。 */
+function renderDestinationControl(body, destination, onChange) {
+  const row = document.createElement("div");
+  row.className = "ps-mode";
+  const label = document.createElement("span");
+  label.className = "ps-mode-label";
+  label.textContent = "打开到";
+  row.append(label);
+  for (const [value, text] of [["chat", "去对话"], ["map", "看地图"]]) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "ps-mode-btn";
+    btn.textContent = text;
+    btn.setAttribute("aria-pressed", String(destination === value));
+    btn.addEventListener("click", () => {
+      if (destination !== value) onChange(value);
+    });
+    row.append(btn);
+  }
+  body.append(row);
+}
+
+/** 当前地图路由里的会话 id（不在地图页 = 空串）。 */
+function mapRouteIdFromHash() {
+  const match = /^#\/map\/([A-Za-z0-9._-]+)/.exec(location.hash);
+  return match ? decodeURIComponent(match[1]) : "";
+}
+
+/** 选择器里「看地图」：关弹层 → 换地图路由；同一条会话就只关弹层。 */
+function openMapConversation(conversationId) {
+  if (!conversationId) return;
+  closeModal();
+  const hash = `#/map/${encodeURIComponent(conversationId)}`;
+  if (location.hash === hash) return;
+  location.hash = hash;
+  void loadChats().catch(() => undefined);
+}
+
+function renderSessionRows(
+  body,
+  data,
+  partnerId,
+  isChief,
+  { onDelete = null, destination = "chat", onDestinationChange = null } = {},
+) {
   const sessions = Array.isArray(data?.sessions) ? data.sessions : [];
-  const desc = document.createElement("p");
-  desc.className = "modal-desc";
-  desc.textContent = isChief
-    ? "总管没有链接表：第一条是主对话，其余是副会话（按最近使用排序）。"
-    : "人设、记忆与项目照旧共用；选一条继续，或新建一条。";
-  body.append(desc);
+  const manage = Boolean(data?.sessionManage);
+  renderDestinationControl(body, destination, onDestinationChange || (() => {}));
 
   const list = document.createElement("div");
   list.className = "ps-list";
+  const currentId = destination === "map" ? mapRouteIdFromHash() : state.conversationId;
+  const onOpen = (session) => {
+    if (destination === "map") openMapConversation(session.conversationId);
+    else openExistingConversation(session.conversationId);
+  };
 
-  // 主对话：执事取 canonical；没开过就走 /open。总管取服务端排好序的第一条；
+  // 主对话：执事取 canonical；没开过就走 /open。总管取第一条**没有来源**的会话
+  // （2026-11-18：分支副本可能比主对话更近，按 lastAt 的第一条不一定是根）；
   // 一条都没有时，点主对话 = 新建 chief 会话。
-  const main = isChief ? sessions[0] : sessions.find((item) => item?.role === "canonical");
-  if (main) {
-    list.append(sessionRow(main, { main: true }));
-  } else {
+  const main = isChief
+    ? sessions.find((item) => !item?.origin) || sessions[0]
+    : sessions.find((item) => item?.role === "canonical");
+
+  const appendPendingMain = () => {
     const pending = document.createElement("button");
     pending.type = "button";
     pending.className = "ps-row ps-main";
@@ -197,11 +288,40 @@ function renderSessionRows(body, data, partnerId, isChief) {
       else void openPartnerMain(partnerId);
     });
     list.append(pending);
-  }
+  };
 
-  // 副会话：执事取 role=side；总管取除第一条以外的 chief 会话，顺序照服务端。
-  const sides = isChief ? sessions.slice(1) : sessions.filter((item) => item?.role === "side");
-  for (const session of sides) list.append(sessionRow(session));
+  if (!manage) {
+    // 回滚形态（PARTNER_SESSION_MANAGE=false）：与服务端旧列表逐行一致，不缩进、不带删除。
+    if (main) list.append(sessionRow(main, { main: true, onOpen, currentId }));
+    else appendPendingMain();
+    for (const session of sessions) {
+      if (main && session.conversationId === main.conversationId) continue;
+      list.append(sessionRow(session, { onOpen, currentId }));
+    }
+  } else {
+    if (!main) appendPendingMain();
+    // 二级缩进：副本按 origin.source 挂到母会话下面；母会话不在列表里就当顶层。
+    const appendTree = (nodes, container) => {
+      for (const node of nodes) {
+        const isMain = Boolean(main && node.session.conversationId === main.conversationId);
+        const item = sessionRow(node.session, {
+          main: isMain,
+          deletable: Boolean(node.session.deletable),
+          onDelete,
+          onOpen,
+          currentId,
+        });
+        container.append(item);
+        if (node.children.length > 0) {
+          const group = document.createElement("div");
+          group.className = "ps-children";
+          appendTree(node.children, group);
+          item.append(group);
+        }
+      }
+    };
+    appendTree(buildSessionTree(sessions), list);
+  }
   body.append(list);
 
   const create = document.createElement("button");
@@ -212,51 +332,191 @@ function renderSessionRows(body, data, partnerId, isChief) {
   body.append(create);
 }
 
-/** 入口：花名册 / 总管条目 / 对话顶栏共用。 */
-function openPartnerSessions(partnerId) {
+/** 删除确认视图：占用同一个弹层 body（openModal 不支持叠加，不能另开一个）。 */
+function renderDeleteConfirm(body, session, { onCancel, onConfirm }) {
+  body.replaceChildren();
+  const title = partnerSessionLabel(session);
+  const desc = document.createElement("p");
+  desc.className = "modal-desc";
+  desc.textContent = `永久删除「${title}」？这条会话的对话记录会一起删掉，不可恢复。`;
+  const note = document.createElement("p");
+  note.className = "modal-hint";
+  note.textContent = "只删这条会话的对话记录；人设、记忆与项目不受影响。";
+  const hint = document.createElement("p");
+  hint.className = "modal-hint is-error";
+  hint.hidden = true;
+
+  const actions = document.createElement("div");
+  actions.className = "modal-actions";
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "ghost";
+  cancel.textContent = "取消";
+  cancel.addEventListener("click", () => onCancel());
+  const del = document.createElement("button");
+  del.type = "button";
+  del.className = "modal-danger";
+  del.textContent = "删除";
+  del.addEventListener("click", async () => {
+    del.disabled = true;
+    cancel.disabled = true;
+    hint.hidden = true;
+    try {
+      await onConfirm();
+    } catch (error) {
+      hint.textContent =
+        error.message === "forbidden"
+          ? "鉴权失败"
+          : error.message || "删除没成功，稍后再试";
+      hint.hidden = false;
+      del.disabled = false;
+      cancel.disabled = false;
+    }
+  });
+  actions.append(cancel, del);
+  body.append(desc, note, hint, actions);
+}
+
+async function fetchSessions(partnerId) {
+  const response = await request(`/api/v1/partners/${encodeURIComponent(partnerId)}/sessions`, {
+    cache: "no-store",
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(data.message || data.error || `读取会话失败：HTTP ${response.status}`);
+    error.status = response.status;
+    error.code = data.error;
+    throw error;
+  }
+  return data;
+}
+
+async function deleteBranchSession(partnerId, session) {
+  const response = await request(
+    `/api/v1/partners/${encodeURIComponent(partnerId)}/sessions/${encodeURIComponent(session.conversationId)}/delete`,
+    { method: "POST" },
+  );
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.message || data.error || `删除没成功：HTTP ${response.status}`);
+  }
+  return data;
+}
+
+/** 删掉当前正在看的会话后往哪走：执事回主对话；总管回到第一条剩余会话，没有就新开。 */
+function openAfterDeleted(partnerId, isChief, data, deletedId) {
+  if (!isChief) {
+    void openPartnerMain(partnerId);
+    return;
+  }
+  const remaining = (data?.sessions || []).filter((item) => item.conversationId !== deletedId);
+  const main = remaining.find((item) => !item?.origin) || remaining[0];
+  if (main) openExistingConversation(main.conversationId);
+  else startNewChat("chief");
+}
+
+/** 入口：花名册 / 总管条目 / 对话顶栏 / 地图顶栏共用。
+ *  `target` 决定选择一条已有会话后落到哪：`chat` 或 `map`；不传时跟随当前页面——
+ *  在地图页点任何执事的「选择会话」默认就是「看地图」，在对话页默认「去对话」。 */
+function openPartnerSessions(partnerId, { target } = {}) {
   if (!partnerId) return;
   const gen = ++pickerGeneration;
   const isChief = partnerId === "chief";
   const name = displayNameOf(partnerId);
+  const initialTarget =
+    target === "map" || target === "chat"
+      ? target
+      : document.documentElement.dataset.route === "map"
+        ? "map"
+        : "chat";
+  let destination = initialTarget;
   openModal(`${name}的会话`, (body) => {
     const loading = document.createElement("p");
     loading.className = "modal-desc";
     loading.textContent = "正在读取会话…";
     body.append(loading);
+    // 弹层内所有 await 都先判 generation + 弹层是否还开着：过期响应一律丢弃。
+    const stale = () => gen !== pickerGeneration || !modalOpen();
+    let current = null;
+
+    const render = () => {
+      if (!current) return;
+      body.replaceChildren();
+      renderSessionRows(body, current, partnerId, isChief, {
+        destination,
+        onDestinationChange: (next) => {
+          destination = next === "map" ? "map" : "chat";
+          render();
+          body.querySelector('.ps-mode-btn[aria-pressed="true"]')?.focus();
+        },
+        onDelete: (session) => {
+          renderDeleteConfirm(body, session, {
+            onCancel: render,
+            onConfirm: async () => {
+              await deleteBranchSession(partnerId, session);
+              toast("已删除");
+              await loadChats().catch(() => undefined);
+              // 删的是当前地图：落到主对话的地图（没有就回对话），不然地图会 404。
+              if (destination === "map" && session.conversationId === mapRouteIdFromHash()) {
+                const remaining = (current.sessions || []).filter(
+                  (item) => item.conversationId !== session.conversationId,
+                );
+                const fallback = remaining.find((item) => !item?.origin) || remaining[0];
+                closeModal();
+                if (fallback) {
+                  location.hash = `#/map/${encodeURIComponent(fallback.conversationId)}`;
+                } else if (isChief) {
+                  startNewChat("chief");
+                } else {
+                  void openPartnerMain(partnerId);
+                }
+                return;
+              }
+              // 删的是当前正在看的会话：弹层收起，切回主对话（不然屏幕上还是已删内容）。
+              if (destination === "chat" && session.conversationId === state.conversationId) {
+                closeModal();
+                openAfterDeleted(partnerId, isChief, current, session.conversationId);
+                return;
+              }
+              // 已经删成功：列表刷新失败只提示，不把确认按钮放回去（再点就是 404）。
+              try {
+                const next = await fetchSessions(partnerId);
+                if (stale()) return;
+                current = next;
+                render();
+              } catch {
+                if (stale()) return;
+                closeModal();
+                toast("已删除，但列表刷新失败，重开一次就能看到");
+              }
+            },
+          });
+        },
+      });
+    };
+
     void (async () => {
-      // 每次 await 之后、动弹层之前都先判 generation：过期请求一律丢弃。
-      const stale = () => gen !== pickerGeneration || !modalOpen();
-      let response;
       try {
-        response = await request(`/api/v1/partners/${encodeURIComponent(partnerId)}/sessions`, {
-          cache: "no-store",
-        });
+        const data = await fetchSessions(partnerId);
+        if (stale()) return;
+        current = data;
+        body.replaceChildren();
+        render();
+        // 位置固定后第一个按钮不一定是当前档：把焦点放到真正生效的那个上。
+        body.querySelector('.ps-mode-btn[aria-pressed="true"]')?.focus();
       } catch (error) {
         if (stale()) return;
-        closeModal();
-        toast(error.message === "forbidden" ? "鉴权失败" : "读取会话失败，稍后再试");
-        return;
-      }
-      if (stale()) return;
-      if (response.status === 400) {
-        const data = await response.json().catch(() => ({}));
-        if (stale()) return;
-        if (data.error === "side_sessions_disabled") {
+        if (error.status === 400 && error.code === "side_sessions_disabled") {
           onSideSessionsDisabled();
           return;
         }
-      }
-      if (!response.ok) {
-        const data = await response.json().catch(() => ({}));
-        if (stale()) return;
         closeModal();
-        toast(data.message || data.error || "读取会话失败，稍后再试");
-        return;
+        toast(
+          error.message === "forbidden"
+            ? "鉴权失败"
+            : error.message || "读取会话失败，稍后再试",
+        );
       }
-      const data = await response.json().catch(() => ({}));
-      if (stale()) return;
-      body.replaceChildren();
-      renderSessionRows(body, data, partnerId, isChief);
     })();
   });
 }

@@ -302,6 +302,41 @@ function inShell() {
   }
 }
 
+/* ── 原生弹出层（2026-11-19 批1）────────────────────────────
+ * 悬停提示与右键菜单交给壳的 flyout 画（desktop/popovers.go）。
+ * 探测一次缓存：普通浏览器没有 window.mygo，老壳没有 Capabilities 这个方法，
+ * 都落 false 走 DOM 旧路；壳侧回滚开关 LIFEDIARY_NATIVE_POPOVERS=off 也是
+ * 走 false（Capabilities 报 nativePopups=false）。调用中途失败（壳刚翻开关、
+ * 壳重启动过旧版）用 markNativePopupsBroken 粘性关掉，本次会话不再试原生。 */
+let nativePopupsReadyFlag = false;
+let nativePopupsBroken = false;
+let nativePopupsCache = null;
+
+function shellNativePopups() {
+  if (!inShell() || typeof window.mygo?.call !== "function") return Promise.resolve(false);
+  if (!nativePopupsCache) {
+    nativePopupsCache = window.mygo.call
+      .call(window.mygo, "Shell.Capabilities")
+      .then((caps) => Boolean(caps && caps.nativePopups))
+      .catch(() => false);
+  }
+  return nativePopupsCache;
+}
+
+/** 同步读当前探测结果：模块加载即预热，探测回来之前是 false（先走 DOM，几毫秒的事）。 */
+function nativePopupsReady() {
+  return !nativePopupsBroken && nativePopupsReadyFlag;
+}
+
+/** 原生调用失败后粘性关掉：本次会话全走 DOM，不再反复试错。 */
+function markNativePopupsBroken() {
+  nativePopupsBroken = true;
+}
+
+shellNativePopups().then((ok) => {
+  nativePopupsReadyFlag = ok;
+});
+
 /** Shell.SelectDirectory 的返回值兼容：字符串 / {path} / JSON 字符串都能吃下 */
 function shellPathValue(value) {
   if (typeof value === "string") {
@@ -340,4 +375,4 @@ async function selectDirectory() {
   }
 }
 
-export { MODAL_MS, POP_MS, closeModal, closePopover, inShell, modalOnClose, modalOpen, modalReturnFocus, modalTimer, noMotion, openConfirm, openModal, openPopover, popTimers, popoverOpen, selectDirectory, shellPathValue, showAlert, toast, toastTimer };
+export { MODAL_MS, POP_MS, closeModal, closePopover, inShell, markNativePopupsBroken, modalOnClose, modalOpen, modalReturnFocus, modalTimer, nativePopupsReady, noMotion, openConfirm, openModal, openPopover, popTimers, popoverOpen, selectDirectory, shellPathValue, showAlert, toast, toastTimer };

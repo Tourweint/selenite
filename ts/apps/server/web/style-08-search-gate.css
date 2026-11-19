@@ -253,35 +253,8 @@ mark {
 }
 .swatch[aria-checked="true"] { border-color: var(--text); }
 
-/* 二维码：左文字右码，别让它一个人占满一屏 */
-.pair {
-  display: flex; align-items: center; justify-content: center; gap: 32px; padding: 16px;
-  /* 2026-11-13：与 .card 同元素时（class="card pair"）会被 .card 的 column 顶掉，显式横排；
-     二维码贴最右会隔出一大段空白，所以内容整组居中（左文字右码） */
-  flex-direction: row;
-}
-.pair-info {
-  flex: none; max-width: 420px;
-  display: flex; flex-direction: column; align-items: flex-start; gap: 6px;
-}
-.pair-qr {
-  flex: none;
-  width: 164px; height: 164px;
-  padding: 8px;
-  background: #ffffff;
-  border-radius: var(--r-md);
-}
-/* 2026-11-15：本地连接收成和「远程添加手机」一样的一行，二维码改按需展开（点一行就够，不占半屏） */
-.pair-qr-box {
-  display: flex; flex-direction: column; align-items: center; gap: 8px;
-  padding: 4px 16px 16px;
-}
-.pair-qr-box[hidden] { display: none; }
-.pair-url {
-  font-family: var(--mono); font-size: 11.5px; color: var(--text-2);
-  word-break: break-all; line-height: 1.5;
-}
-.pair-meta { font-size: 11.5px; color: var(--text-3); }
+/* 二维码：2026-11-18 起本地配对码也搬进「添加手机」浮层，与远程加入码同一套
+   `.relay-join*`（左码右字）；页面里不再有内联的 `.pair*` 块，旧规则已删。 */
 
 /* 连接页链路图（2026-11-13）：这台电脑 → 中继（VPS）→ 手机，三格 + 一行断点提示。
    与手机端中继页同一套语言：状态点 + 两三个字的短词，不铺解释性句子。 */
@@ -346,8 +319,9 @@ mark {
   white-space: nowrap;
 }
 /* 星形拓扑（2026-11-14）：中继在中心，设备在四周；不再是三格链路图。
-   不提供放大（用户 2026-11-14：「把放大取消掉吧，不用放大了」），SVG 直接按容器宽度铺满。 */
-.conn-star { max-width: 720px; margin: 0 auto; padding: 8px 10px 0; }
+   不提供放大（用户 2026-11-14：「把放大取消掉吧，不用放大了」），SVG 直接按容器宽度铺满。
+   2026-11-18：显式 width:100%——它是 flex 列里的项，只写 margin:0 auto 会按内容宽度收缩到 300px。 */
+.conn-star { width: 100%; max-width: 720px; margin: 0 auto; padding: 8px 10px 0; }
 .conn-star svg { display: block; width: 100%; height: auto; }
 .conn-star svg text { font-family: inherit; }
 .relay-adv { margin-top: 4px; font-size: 12px; color: var(--text-3); }
@@ -394,6 +368,28 @@ mark {
   letter-spacing: .5px; word-break: break-all; color: var(--text);
 }
 .relay-join-meta { font-size: 11.5px; color: var(--text-3); }
+
+/* 添加手机浮层（2026-11-18）：本地 / 远程在同一张卡里二选一。
+   顶部是整条等宽分段，底下常驻一段「什么时候用哪个」——两种连接的适用场景写在卡里，
+   不再靠页面上的两行猜（用户口径：标注出它们不一样，并说清什么时候用哪个）。 */
+.phone-mode { display: flex; width: 100%; }
+.phone-mode button { flex: 1 1 0; }
+.phone-pane,
+.phone-gate,
+.phone-pane-body { display: flex; flex-direction: column; gap: 12px; }
+.phone-pane[hidden],
+.phone-gate[hidden],
+.phone-pane-body[hidden] { display: none; }
+.phone-when {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--card-border);
+  border-radius: var(--r-md);
+  background: var(--surface-low);
+}
+.phone-when-title { font-size: 11px; font-weight: 500; letter-spacing: .04em; color: var(--text-3); }
+.phone-when-row { display: flex; gap: 8px; font-size: 11.5px; line-height: 1.55; color: var(--text-2); }
+.phone-when-row b { flex: none; width: 62px; font-weight: 500; color: var(--text); }
 
 /* 右值：只在真的放不下时才断行（break-all 会把 127.0.0.1 拆成两截） */
 .kv {

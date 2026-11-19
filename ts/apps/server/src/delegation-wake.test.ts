@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { beforeEach, test } from "node:test";
-import { readFileSync, rmSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Conversation } from "@earendil-works/pi-durable";
 import type { DelegationReport } from "./delegation.ts";
+import type { BgJobWakePayload } from "./bash-background.ts";
 import type { PartnerTurnOptions, PartnerTurnResult } from "./partner-runtime.ts";
 
 /**
@@ -23,13 +24,19 @@ process.env.AGENT_WAKE_PENDING_PATH = WAKE_QUEUE_FILE;
 beforeEach(() => rmSync(WAKE_QUEUE_FILE, { force: true }));
 
 const {
+	buildAgentMessageWakePrompt,
+	buildBgJobWakePrompt,
+	buildEnvelopeWakePrompt,
 	buildWakePrompt,
 	collectPending,
 	delegationWakeEnabled,
 	flushDelegationWake,
 	resetDelegationWakeState,
 	restoreDelegationWakeQueue,
+	wakeOnAgentMessage,
+	wakeOnBgJobFinish,
 	wakeOnDelegationReport,
+	wakePipelineV2Enabled,
 } = await import("./delegation-wake.ts");
 
 type WakeDeps = Parameters<typeof wakeOnDelegationReport>[2];
@@ -87,6 +94,9 @@ function makeDeps(overrides: Partial<NonNullable<WakeDeps>> = {}): {
 		wakeEnabled: () => true,
 		companionsEnabled: () => true,
 		partnerIdOfSession: () => "partner-1",
+		// 批3：新来源的归属解析缺省同执事（既有 delegation 用例不触碰这两个 dep）
+		partnerIdOfAnySession: () => "partner-1",
+		sessionIdOfPartner: () => 11,
 		partnerStatus: () => "active",
 		ensureSession: async () => ({ conversation: {} as Conversation }),
 		isBusy: async () => false,
@@ -108,6 +118,7 @@ function report(ticketId: string, phase: DelegationReport["phase"] = "done"): De
 beforeEach(() => {
 	resetDelegationWakeState();
 	delete process.env.DELEGATION_WAKE_ENABLED;
+	delete process.env.WAKE_PIPELINE_V2;
 });
 
 test("buildWakePrompt：固定头逐字、单号截 6 位、多单合并", () => {
@@ -375,4 +386,244 @@ test("wakeOnDelegationReport 绝不抛：依赖异常静默返回", () => {
 		},
 	});
 	assert.doesNotThrow(() => wakeOnDelegationReport(41, report("t"), deps));
+});
+
+// ── 批3（2026-11-19 唤醒管道通用化）：信封三来源 / 按 targetPartnerId 路由 ──
+
+/** 批3 测试用：一份最小 bgjob 载荷。 */
+function bgPayload(overrides: Partial<BgJobWakePayload> = {}): BgJobWakePayload {
+	return {
+		jobId: "bg-t-1",
+		commandSummary: "long task",
+		status: "done",
+		exitCode: 0,
+		tail: "tail line",
+		...overrides,
+	};
+}
+
+test("wakePipelineV2Enabled：默认开，false / 0 / off 都关，拼错值不误关", () => {
+	const env: NodeJS.ProcessEnv = {};
+	assert.equal(wakePipelineV2Enabled(env), true, "不配 = 开");
+	env.WAKE_PIPELINE_V2 = "false";
+	assert.equal(wakePipelineV2Enabled(env), false);
+	env.WAKE_PIPELINE_V2 = "0";
+	assert.equal(wakePipelineV2Enabled(env), false);
+	env.WAKE_PIPELINE_V2 = "off";
+	assert.equal(wakePipelineV2Enabled(env), false);
+	env.WAKE_PIPELINE_V2 = "bogus";
+	assert.equal(wakePipelineV2Enabled(env), true, "拼错值不误关");
+});
+
+test("buildBgJobWakePrompt：固定头 + 终态行带退出码 + 尾部段；running 不带退出码、无尾部不渲染", () => {
+	const done = buildBgJobWakePrompt([
+		bgPayload({ jobId: "bg-abc-123456", commandSummary: "npm run build", tail: "built ok" }),
+	]);
+	assert.ok(
+		done.startsWith("[Background job wake context]\nturnAuthority: autonomous"),
+		"固定头逐字节",
+	);
+	assert.ok(done.includes("- 任务 bg-abc-123456（done，退出码 0）：npm run build"));
+	assert.ok(done.includes("  尾部输出：\nbuilt ok"));
+	const running = buildBgJobWakePrompt([bgPayload({ status: "running", exitCode: null, tail: "" })]);
+	assert.ok(running.includes("（还在跑）：long task"), "running 状态不带退出码");
+	assert.ok(!running.includes("尾部输出："), "无 tail 不渲染尾部段");
+	const failed = buildBgJobWakePrompt([bgPayload({ status: "failed", exitCode: null, tail: "boom" })]);
+	assert.ok(failed.includes("（failed，退出码 未知）：long task"));
+});
+
+test("buildEnvelopeWakePrompt：纯 delegation 批逐字节同旧提示词；混批按来源分节", () => {
+	const pure = buildEnvelopeWakePrompt([
+		{ source: "delegation", targetPartnerId: "partner-1", payload: report("a") },
+	]);
+	assert.equal(pure, buildWakePrompt([report("a")]), "纯 delegation 批逐字节走旧提示词（回归底线）");
+	const mixed = buildEnvelopeWakePrompt([
+		{ source: "delegation", targetPartnerId: "p", payload: report("a") },
+		{ source: "bgjob", targetPartnerId: "p", payload: bgPayload({ jobId: "bg-1" }) },
+	]);
+	assert.ok(mixed.includes("[Delegation wake context]"), "混批保留 delegation 节");
+	assert.ok(mixed.includes("[Background job wake context]"), "混批追加 bgjob 节");
+	assert.ok(
+		mixed.indexOf("[Delegation wake context]") < mixed.indexOf("[Background job wake context]"),
+		"delegation 节在前",
+	);
+});
+
+test("wakeOnBgJobFinish：按发起会话的执事路由（不锁 canonical 键），prompt 带 bg 段", async () => {
+	const { deps, clock, calls } = makeDeps({
+		partnerIdOfAnySession: (conversationId) => (conversationId === 77 ? "partner-bg" : null),
+		partnerIdOfSession: () => null, // delegation 的 canonical 锁关着也不影响 bgjob 路由
+	});
+	wakeOnBgJobFinish(
+		77,
+		bgPayload({ jobId: "bg-r-1", commandSummary: "long task", exitCode: 3, tail: "err line" }),
+		deps,
+	);
+	await clock.runAll();
+	assert.equal(calls.length, 1);
+	assert.equal(calls[0]!.partnerId, "partner-bg", "bgjob 按 targetPartnerId 路由");
+	assert.ok(calls[0]!.prompt.includes("[Background job wake context]"));
+	assert.ok(calls[0]!.prompt.includes("- 任务 bg-r-1（done，退出码 3）：long task"));
+	assert.ok(calls[0]!.prompt.includes("err line"), "尾部输出进会话输入");
+	assert.deepEqual(
+		calls[0]!.opts,
+		{ authority: "autonomous", quiet: false, sessionMode: "persistent" },
+		"唤醒轮同样带 quiet=false / autonomous / persistent",
+	);
+});
+
+test("wakeOnBgJobFinish 守卫：停用 / 解析不出归属 / V2 关 → 都不投", async () => {
+	// 执事停用（入队即拦）
+	{
+		const { deps, clock, calls } = makeDeps({
+			partnerIdOfAnySession: () => "partner-bg",
+			partnerStatus: (partnerId) => (partnerId === "partner-bg" ? "stopped" : null),
+		});
+		wakeOnBgJobFinish(5, bgPayload(), deps);
+		assert.equal(clock.size, 0, "停用执事不排定时器");
+		await flushDelegationWake(5, deps);
+		assert.equal(calls.length, 0);
+	}
+	// 解析不出归属（普通 worker 对话没有执事链接）
+	{
+		const { deps, clock, calls } = makeDeps({ partnerIdOfAnySession: () => null });
+		wakeOnBgJobFinish(5, bgPayload(), deps);
+		assert.equal(clock.size, 0);
+		await flushDelegationWake(5, deps);
+		assert.equal(calls.length, 0, "无主会话不投");
+	}
+	// WAKE_PIPELINE_V2=false：回 delegation-only 路径
+	{
+		process.env.WAKE_PIPELINE_V2 = "false";
+		try {
+			const { deps, clock, calls } = makeDeps({ partnerIdOfAnySession: () => "partner-bg" });
+			wakeOnBgJobFinish(5, bgPayload(), deps);
+			assert.equal(clock.size, 0, "V2 关不排定时器");
+			await flushDelegationWake(5, deps);
+			assert.equal(calls.length, 0);
+		} finally {
+			delete process.env.WAKE_PIPELINE_V2;
+		}
+	}
+});
+
+test("wakeOnBgJobFinish：入队后执事被停用 → flush 时重查存在性，清空不跑", async () => {
+	let status = "active";
+	const { deps, clock, calls } = makeDeps({
+		partnerIdOfAnySession: () => "partner-bg",
+		partnerStatus: () => status,
+	});
+	wakeOnBgJobFinish(9, bgPayload(), deps);
+	assert.equal(clock.size, 1, "入队时还是 active");
+	status = "stopped";
+	await flushDelegationWake(9, deps);
+	assert.equal(calls.length, 0, "每次 flush 都重查（守卫语义同 delegation）");
+});
+
+test("wakeOnAgentMessage：按对端执事路由（入队键 = 对端 canonical 主会话）；无会话 / V2 关不投", async () => {
+	const { deps, clock, calls } = makeDeps({
+		sessionIdOfPartner: (partnerId) => (partnerId === "partner-b" ? 42 : null),
+	});
+	wakeOnAgentMessage(
+		"partner-b",
+		{ fromPartnerId: "partner-a", fromName: "信使甲", fromDomain: "inbox", text: "对一下口径" },
+		deps,
+	);
+	assert.equal(clock.size, 1, "对端有会话 → 排防抖");
+	await clock.runAll();
+	assert.equal(calls.length, 1);
+	assert.equal(calls[0]!.partnerId, "partner-b");
+	assert.ok(calls[0]!.prompt.includes("[Agent message wake context]"));
+	assert.ok(calls[0]!.prompt.includes("来自执事 信使甲（inbox）：对一下口径"));
+
+	// 对端还没有会话：不投（送达侧自己会报"还没有自己的会话"）
+	const none = makeDeps({ sessionIdOfPartner: () => null });
+	wakeOnAgentMessage(
+		"partner-b",
+		{ fromPartnerId: "a", fromName: "甲", fromDomain: null, text: "x" },
+		none.deps,
+	);
+	assert.equal(none.clock.size, 0, "对端没有会话不投");
+
+	// V2 关：全部不投
+	process.env.WAKE_PIPELINE_V2 = "false";
+	try {
+		const off = makeDeps();
+		wakeOnAgentMessage(
+			"partner-b",
+			{ fromPartnerId: "a", fromName: "甲", fromDomain: null, text: "x" },
+			off.deps,
+		);
+		assert.equal(off.clock.size, 0, "V2 关不投");
+	} finally {
+		delete process.env.WAKE_PIPELINE_V2;
+	}
+});
+
+test("混批：delegation 与 bgjob 同会话合并一轮，prompt 既有汇报段也有任务段", async () => {
+	const { deps, clock, calls } = makeDeps({ partnerIdOfAnySession: () => "partner-1" });
+	wakeOnDelegationReport(33, report("mix-a"), deps);
+	wakeOnBgJobFinish(33, bgPayload({ jobId: "bg-mix-1", status: "failed", exitCode: 2, tail: "boom" }), deps);
+	assert.equal(clock.size, 1, "同会话一个防抖定时器");
+	await clock.runAll();
+	assert.equal(calls.length, 1);
+	assert.ok(calls[0]!.prompt.includes("单 mix-a（done）：汇报-mix-a"), "delegation 段在");
+	assert.ok(calls[0]!.prompt.includes("- 任务 bg-mix-1（failed，退出码 2）：long task"), "bgjob 段在");
+});
+
+test("队列落盘与启动恢复（批3）：新形状 envelopes 恢复后照常路由；旧形状 reports 读回不炸", async () => {
+	// 新形状：bgjob 入队落 envelopes 字段，重启读回重排
+	const { deps, clock, calls } = makeDeps({ partnerIdOfAnySession: () => "partner-bg" });
+	wakeOnBgJobFinish(88, bgPayload({ jobId: "bg-p-1", commandSummary: "persisted", tail: "t" }), deps);
+	const raw = JSON.parse(readFileSync(WAKE_QUEUE_FILE, "utf8")) as {
+		entries: Array<Record<string, unknown>>;
+	};
+	assert.equal(raw.entries.length, 1, "入队即落盘");
+	assert.equal(raw.entries[0]!.conversationId, 88);
+	assert.ok(Array.isArray(raw.entries[0]!.envelopes), "新形状落 envelopes 字段");
+
+	resetDelegationWakeState();
+	assert.equal(restoreDelegationWakeQueue(deps), 1, "读回一条信封");
+	await clock.runAll();
+	assert.equal(calls.length, 1, "恢复后防抖到点真跑");
+	assert.equal(calls[0]!.partnerId, "partner-bg");
+
+	// 旧形状：手工写一份批3 前的文件（reports 字段），读回不炸、照常跑 delegation 提示词
+	resetDelegationWakeState();
+	writeFileSync(
+		WAKE_QUEUE_FILE,
+		JSON.stringify({
+			version: 1,
+			entries: [
+				{
+					conversationId: 51,
+					reports: [{ ticketId: "legacy", domain: "前端", phase: "done", text: "旧文件里的汇报" }],
+				},
+			],
+		}),
+		"utf8",
+	);
+	const legacy = makeDeps();
+	assert.equal(restoreDelegationWakeQueue(legacy.deps), 1, "旧形状恢复一条");
+	await legacy.clock.runAll();
+	assert.equal(legacy.calls.length, 1);
+	assert.ok(
+		legacy.calls[0]!.prompt.includes("单 legacy（done）：旧文件里的汇报"),
+		"旧记录走 delegation 提示词",
+	);
+});
+
+test("wakeOnBgJobFinish / wakeOnAgentMessage 绝不抛：依赖异常静默返回", () => {
+	const { deps } = makeDeps({
+		partnerIdOfAnySession: () => {
+			throw new Error("store 挂了");
+		},
+		sessionIdOfPartner: () => {
+			throw new Error("store 挂了");
+		},
+	});
+	assert.doesNotThrow(() => wakeOnBgJobFinish(41, bgPayload(), deps));
+	assert.doesNotThrow(() =>
+		wakeOnAgentMessage("partner-b", { fromPartnerId: "a", fromName: "甲", fromDomain: null, text: "x" }, deps),
+	);
 });

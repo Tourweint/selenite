@@ -21,7 +21,7 @@ import { applyCancelProjection, deadLetterStore, messagesOf, runSourceOfTicket }
 import type { TicketLocation, TicketSummary } from "./delegation-jobs.ts";
 import { chiefNamesLoader, conversationIdOf, conversationTitlesLoader, externalChatIdsLoader, judgeCallsOfTicket, summarizeFanoutGroup, summarizeTickets } from "./delegation-summary.ts";
 import type { DelegationApiOptions } from "./delegation-summary.ts";
-import { cancelTicketAction, defaultRetryRuntime, internalConversationId, retryTicketAction } from "./delegation-actions.ts";
+import { cancelTicketAction, defaultRetryRuntime, forwardWorkerMessageAction, internalConversationId, retryTicketAction } from "./delegation-actions.ts";
 
 export function mountDelegationApi(app: Hono, opts: DelegationApiOptions = {}): void {
 	const workRootOf = (): string => path.resolve(opts.workRoot ?? chancellorWorkRoot());
@@ -272,6 +272,35 @@ export function mountDelegationApi(app: Hono, opts: DelegationApiOptions = {}): 
 			return c.json(result.body, result.status);
 		});
 	}
+
+	// ── worker 插话通道（2026-11-19 插话统一 批1）────────────
+	// 人的插话入口：把一条消息经 native 通道转给**正在跑**的 worker 子进程。
+	// mode 默认 steer（插进当前轮）；回滚 WORKER_STEER_ENABLED=false → 端点 400
+	// （通道下架但路由保留——404 是"没有这个功能"，400 是"功能被关了"，两者分开）。
+	// 外部 CLI 打手没有注入口，命中时 400 worker_not_running（边界如实写）。
+	app.post("/api/v1/agent/delegations/:ticketId/message", async (c) => {
+		const body = (await c.req.json().catch(() => null)) as
+			| { mode?: unknown; text?: unknown }
+			| null;
+		const text = typeof body?.text === "string" ? body.text.trim() : "";
+		if (!text) return c.json({ ok: false, error: "bad_request", message: "需要 text" }, 400);
+		const mode =
+			body?.mode === undefined || body.mode === null
+				? "steer"
+				: body.mode === "steer" || body.mode === "followUp"
+					? body.mode
+					: null;
+		if (mode === null) {
+			return c.json({ ok: false, error: "bad_request", message: "mode 只能是 steer / followUp" }, 400);
+		}
+		const result = await forwardWorkerMessageAction(
+			workRootOf(),
+			c.req.param("ticketId"),
+			{ mode, text },
+			null,
+		);
+		return c.json(result.body, result.status);
+	});
 
 	// ── 任务回话（2026-11-08 扫尾批 8g）──────────────────────
 	// 一次 POST 驱动两件事：① 以用户条目写进 `task-<票号>` 专线（忙时 followUp）；

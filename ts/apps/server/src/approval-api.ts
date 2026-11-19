@@ -8,6 +8,7 @@ import {
 	askUserAnsweredInstruction,
 } from "./agent/turn-gate.ts";
 import { approvalStore } from "./approvals.ts";
+import { onAskAnswered } from "./escalation.ts";
 import { readLlmConfig } from "./provider.ts";
 import { questionOfArgs, recordVerifiedAnswer } from "./verified-answer.ts";
 import { snapshotPath } from "./world-state.ts";
@@ -177,14 +178,21 @@ export function mountApprovalApi(app: Hono): void {
 		if (!record) return c.json({ ok: false, error: "unknown_approval" }, 404);
 		// 幂等：重复答复不重复续跑
 		if (wasPending && record.status === "answered") {
-			// 答案沉淀（2026-11-10 批 19 §二）：人亲口答过的问题下次不用再问。
-			// 只落记忆，不改答复语义；群会话与开关关闭都在 recordVerifiedAnswer 内旁路。
-			recordVerifiedAnswer({
-				conversationId: record.conversationId,
-				question: questionOfArgs(before.args),
-				answer: record.answer ?? answer,
-			});
-			void continueConversation(record.conversationId, askUserAnsweredInstruction(answer));
+			// 决策上报升级链（2026-11-19 批2）：这张 ask 卡是工人上报升级给主人的，
+			// 答复要经批1 插话通道直接投回 worker（复用 /answer 一个答复口，不造第二套问答）；
+			// 就不再给总管续跑一轮（总管已把拍板权交出，再续只会重复作答）。
+			// 不在关联表里 → 普通提问，走既有续跑。
+			const escalationHandled = await onAskAnswered(callId, answer);
+			if (!escalationHandled) {
+				// 答案沉淀（2026-11-10 批 19 §二）：人亲口答过的问题下次不用再问。
+				// 只落记忆，不改答复语义；群会话与开关关闭都在 recordVerifiedAnswer 内旁路。
+				recordVerifiedAnswer({
+					conversationId: record.conversationId,
+					question: questionOfArgs(before.args),
+					answer: record.answer ?? answer,
+				});
+				void continueConversation(record.conversationId, askUserAnsweredInstruction(answer));
+			}
 		}
 		return c.json({ ok: true, status: record.status });
 	});

@@ -121,20 +121,70 @@ function updateHomeMode() {
 
 /*
  * 首页问候语按时间段换（2026-11-07 用户提议）：同一句话见多了就变成了墙纸，
- * 早晚各一句能把「现在是什么时候」这层意思带进来，也顺带提醒这是个会等你的东西。
+ * 换着说能把「现在是什么时候」这层意思带进来，也顺带提醒这是个会等你的东西。
  *
  * 分四段，边界取大多数人的作息而不是整点（凌晨归到夜里，不是「早上」）：
  *   05–10 早 / 10–18 白天 / 18–23 晚 / 23–05 夜。
- * 每段两句，轮换而不是随机：随机会在刷新时跳到另一句，看起来像出错；
- * 按「当天第几段」取模，同一天同一段里刷新、重开都是同一句，跨段才换。
+ *
+ * 每段六句，句式混着来（问句 / 陈述 / 观察 / 邀请），别一段全是同一种问法；
+ * 句尾标点是文案的一部分，照原样保留（「这么晚还没睡。」的句号不能删）。
+ *
+ * 选句（2026-11-18 丰富句池 + 由轮换改洗牌）：按段做种子把句序洗成一套固定
+ * 乱序，日子顺着往前走、一轮用完从头再来——跨天像随机换句，但同一天同一段
+ * 里刷新、重开都是同一句，不会随刷新跳变（2026-11-07 定下的底线，仍然守）；
+ * 洗牌顺序保证一轮之内句句不重，所以也不会连着两天撞同一句。
  *
  * 文案口径与原来那句一致：短、第一人称、不催不迎，也不提模型和功能。
  */
 const GREETING_SLOTS = [
-  { from: 5, key: "morning", lines: ["早，今天想从哪儿开始？", "醒得早，想法大概也清楚。"] },
-  { from: 10, key: "day", lines: ["说吧，我在。", "手上的事，说来听听。"] },
-  { from: 18, key: "evening", lines: ["忙完了？慢慢说。", "天黑了，正好收个尾。"] },
-  { from: 23, key: "night", lines: ["这么晚还没睡。", "夜里的想法，往往更要紧。"] },
+  {
+    from: 5,
+    key: "morning",
+    lines: [
+      "早，今天想从哪儿开始？",
+      "醒得早，想法大概也清楚。",
+      "一天刚开始，节奏你来定。",
+      "刚醒就开始想事了？",
+      "先说今天最惦记的那件。",
+      "趁着刚醒，把脑子里的事倒出来。",
+    ],
+  },
+  {
+    from: 10,
+    key: "day",
+    lines: [
+      "说吧，我在。",
+      "手上的事，说来听听。",
+      "正事闲话都行，随你。",
+      "事情办到哪儿了？",
+      "在想什么？说出来一起理理。",
+      "白天还长，不急着说重点。",
+    ],
+  },
+  {
+    from: 18,
+    key: "evening",
+    lines: [
+      "忙完了？慢慢说。",
+      "天黑了，正好收个尾。",
+      "今天过得怎么样，挑几件讲讲。",
+      "到了松口气的时候了。",
+      "晚饭吃了没？",
+      "今晚的时间归你。",
+    ],
+  },
+  {
+    from: 23,
+    key: "night",
+    lines: [
+      "这么晚还没睡。",
+      "夜里的想法，往往更要紧。",
+      "还醒着？正好，我也在。",
+      "睡前有什么想说的，说吧。",
+      "夜里安静，适合把话摊开。",
+      "想睡就睡，这些话不会跑。",
+    ],
+  },
 ];
 
 function greetingSlot(date = new Date()) {
@@ -147,21 +197,62 @@ function greetingSlot(date = new Date()) {
   return slot;
 }
 
-/** 同一天同一段固定一句：用本地日期序号 + 段序号做种子，跨段/跨天才换 */
+/** FNV-1a 散列：同样两个数永远出同一个值——问候语当固定种子用，不用 Math.random */
+function greetingHash(a, b) {
+  let h = 2166136261;
+  h = Math.imul(h ^ a, 16777619);
+  h = Math.imul(h ^ b, 16777619);
+  return h >>> 0;
+}
+
+/** 同一段固定一套洗好的句序（按段做种子）：看起来是乱序，其实一轮之内句句不重 */
+function greetingOrder(slotIndex, length) {
+  const order = Array.from({ length }, (_, i) => i);
+  for (let i = length - 1; i > 0; i--) {
+    const j = greetingHash(slotIndex, i) % (i + 1);
+    [order[i], order[j]] = [order[j], order[i]];
+  }
+  return order;
+}
+
+/** 同一天同一段固定一句：按天序号在洗好的句序里往前走，跨段/跨天才换 */
 function greetingLine(date = new Date()) {
   const slot = greetingSlot(date);
   const dayIndex = Math.floor(
     (date.getTime() - date.getTimezoneOffset() * 60_000) / 86_400_000,
   );
   const slotIndex = GREETING_SLOTS.indexOf(slot);
-  return slot.lines[(dayIndex + slotIndex) % slot.lines.length];
+  const order = greetingOrder(slotIndex, slot.lines.length);
+  return slot.lines[order[dayIndex % slot.lines.length]];
 }
 
-/** 把当前该显示的那句写进 #empty-greet；不换 DOM 结构，只改文本 */
+/* 换句动画（2026-11-19 用户提议）：旧句淡出、新句淡入，不是一闪一换。
+   时长跟 style-04-chat-base.css 里 .empty-greet 的 opacity 过渡是一对，改要一起改；
+   reduced-motion 走 ui-atoms 同款姿势：CSS 关过渡，JS 直接切文本不绕弯。 */
+const GREET_OUT_MS = 280;
+const noMotion = matchMedia("(prefers-reduced-motion: reduce)");
+let greetingSwapToken = 0;
+
+function swapGreetingText(line) {
+  const node = el.emptyGreet;
+  if (noMotion.matches) {
+    node.textContent = line;
+    return;
+  }
+  const token = ++greetingSwapToken;
+  node.classList.add("greet-out"); // 旧句淡出
+  setTimeout(() => {
+    if (token !== greetingSwapToken) return; // 又有新句接手了，文本归它写
+    node.textContent = line;
+    node.classList.remove("greet-out"); // 新句淡入
+  }, GREET_OUT_MS);
+}
+
+/** 把当前该显示的那句写进 #empty-greet；不换 DOM 结构，变了才换文本、换文本就带淡出淡入 */
 function syncGreeting(date = new Date()) {
   if (!el.emptyGreet) return;
   const line = greetingLine(date);
-  if (el.emptyGreet.textContent !== line) el.emptyGreet.textContent = line;
+  if (el.emptyGreet.textContent !== line) swapGreetingText(line);
 }
 
 const KEY_THINKING = "lifediary.thinking";

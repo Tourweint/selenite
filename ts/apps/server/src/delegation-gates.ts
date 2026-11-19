@@ -21,6 +21,18 @@ export function fanoutGroupEnabled(env: NodeJS.ProcessEnv = process.env): boolea
 	return raw !== "false" && raw !== "0" && raw !== "off";
 }
 
+/**
+ * worker 插话通道（2026-11-19 插话统一 批1）。缺省开；
+ * `WORKER_STEER_ENABLED=false` / `0` / `off` → 通道下架：
+ * `POST /agent/delegations/:ticketId/message` 一律 400、`send_to_agent` 不注入
+ * mode 参数与单号目标（工具保持改动前的形态），native 子进程照常起跑。
+ */
+export function workerSteerEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = (env.WORKER_STEER_ENABLED ?? "").trim().toLowerCase();
+	if (!raw) return true;
+	return raw !== "false" && raw !== "0" && raw !== "off";
+}
+
 export interface TicketGate {
 	name: string;
 	passed: boolean;

@@ -60,6 +60,12 @@ export interface FlagDef {
 	type?: FlagType;
 	/** 枚举控件的中文档位；布尔不需要。 */
 	choices?: FlagChoice[];
+	/**
+	 * 多档插件的「关」是哪个取值（2026-11-18）：界面据此画开关（开 = 其余档位，关 = 这个值）。
+	 * 关不一定是布尔 false——`CHANCELLOR_INTERNAL` 的关是 `qoder`（外部 CLI），
+	 * `AGENT_TOOL_POLICY` 的关是 `full`（完全访问）。必须在 `values` 里。
+	 */
+	offValue?: string;
 	/** flags = 插件页普通卡；settings = 设置 → 会话等专属卡，不在插件页重复。 */
 	surface?: FlagSurface;
 	/**
@@ -146,6 +152,10 @@ function validateFlagManifest(manifest: FlagManifest): Map<string, FlagDef> {
 		for (const choice of def.choices ?? []) {
 			if (!def.values.includes(choice.value)) throw new Error(`[flags] ${def.key} 的选项不在 values 里：${choice.value}`);
 			if (!choice.label) throw new Error(`[flags] ${def.key} 的选项缺少中文名：${choice.value}`);
+		}
+		// 关值必须是正式取值：界面会把它写进 PUT，消费处也会拿它比较，错一个字符就是假开关。
+		if (def.offValue !== undefined && !def.values.includes(def.offValue)) {
+			throw new Error(`[flags] ${def.key} 的 offValue 不在 values 里：${def.offValue}`);
 		}
 	}
 	const byKey = new Map(manifest.flags.map((def) => [def.key, def]));
@@ -349,6 +359,15 @@ export function chatDirPickEnabled(env: NodeJS.ProcessEnv = process.env): boolea
 	return flagEnabled("CHAT_DIR_PICK", env);
 }
 
+/**
+ * 会话工作归属标签（2026-11-18）。
+ * 缺省开：worker 会话回读带 `chatWorkdir`，前端在输入框左下角常显只读标签；
+ * 显式 false：服务端不下发该字段、policy 投影为 false，前端收起标签。
+ */
+export function chatProjectLabelEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	return flagEnabled("CHAT_PROJECT_LABEL", env);
+}
+
 /** 派活按单指定工作目录 / 工具权限（2026-11-17）。缺省开；显式 false 时两个字段收下但不生效。 */
 export function delegateWorkdirEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
 	return flagEnabled("DELEGATE_WORKDIR", env);
@@ -446,6 +465,7 @@ export function listFlags(env: NodeJS.ProcessEnv = process.env): {
 		group: string;
 		type: FlagType;
 		choices: FlagChoice[];
+		offValue?: string;
 		surface: FlagSurface;
 		value: string;
 		effectiveValue: string;
@@ -474,6 +494,7 @@ export function listFlags(env: NodeJS.ProcessEnv = process.env): {
 				group: def.group || "",
 				type: def.type || (def.values.length === 2 && def.values.includes("true") ? "boolean" : "enum"),
 				choices: def.choices || [],
+				...(def.offValue ? { offValue: def.offValue } : {}),
 				surface: def.surface || "flags",
 				value: current,
 				effectiveValue: lockedBy ? "false" : effectiveFlagValue(def.key, env),

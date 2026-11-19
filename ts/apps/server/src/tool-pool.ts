@@ -23,7 +23,8 @@ import type { Hono } from "hono";
 import type { ToolRegistration } from "@earendil-works/pi-durable";
 import { estimateTokens } from "./token-estimate.ts";
 
-/** 代码默认的按需名单（2026-11-16 C 段用户拍板的 8 个）。文件缺失时用它。 */
+/** 代码默认的按需名单（2026-11-16 C 段用户拍板的 8 个；批2 追加 respond_escalation；
+ *  批4 追加 save_reminder_advice）。文件缺失时用它。 */
 export const DEFAULT_DEFERRED_TOOL_NAMES: readonly string[] = [
 	"routine_manage",
 	"partner_manage",
@@ -33,6 +34,10 @@ export const DEFAULT_DEFERRED_TOOL_NAMES: readonly string[] = [
 	"propose_project",
 	"propose_topic",
 	"send_to_agent",
+	// 决策上报答复（2026-11-19 批2）：只在唤醒轮用得上，初始不进请求、不打缓存前缀。
+	"respond_escalation",
+	// 提醒沉淀落盘（2026-11-19 批4）：只有入口发起蒸馏那轮用得上，初始不进请求。
+	"save_reminder_advice",
 ];
 
 /** `tool_search` 是加载按需工具的唯一入口：把它自己放进按需池 = 所有按需工具永久不可达。 */

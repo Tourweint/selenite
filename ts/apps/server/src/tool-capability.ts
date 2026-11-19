@@ -281,6 +281,19 @@ export const TOOL_CAPABILITIES: Record<string, ToolCapability> = {
 		notes: "向用户提问并等回答；不改任何外部状态，但一轮里只能挂一个提问。",
 	},
 
+	// ── 决策上报答复（2026-11-19 批2：worker→总管→用户上报链）──
+	respond_escalation: {
+		name: "respond_escalation",
+		readOnly: false,
+		destructive: false,
+		sideEffectScope: "none",
+		riskLevel: "low",
+		needsApproval: "never",
+		concurrentSafe: false,
+		notes:
+			"答复工人上报：经批1 插话通道投一条答复回 worker，或把问题升级成 ask 卡；不写盘、不起进程、不派活。",
+	},
+
 	// ── 中途播报（2026-11-10 批 13 §三）──────────────────────
 	report_progress: {
 		name: "report_progress",
@@ -303,6 +316,18 @@ export const TOOL_CAPABILITIES: Record<string, ToolCapability> = {
 		// 批 30 修订：只写建议快照（.data/skills-advice.json），不碰启停位——
 		// 采纳是人的动作（设置页 PUT）。原子写，坏不了技能目录。
 		notes: "技能分类建议落盘：写建议快照；启停位不动，采纳由人在设置页决定。",
+	},
+	// 提醒沉淀（2026-11-19 批4）：只写建议快照（.data/reminder-advice.json），不碰记忆库——
+	// 偏好写入只发生在人采纳时（记忆页 PUT，D18：只建议、人采纳）。
+	save_reminder_advice: {
+		name: "save_reminder_advice",
+		readOnly: false,
+		destructive: false,
+		sideEffectScope: "workspace",
+		riskLevel: "low",
+		needsApproval: "never",
+		concurrentSafe: false,
+		notes: "提醒沉淀建议落盘：写建议快照；记忆库不动，采纳由人在记忆页决定。",
 	},
 };
 

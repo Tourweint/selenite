@@ -115,13 +115,15 @@ function drawToolPool() {
       </tr>
       <tr class="tool-pool-detail" data-detail-for="${attr(tool.name)}"${open ? "" : " hidden"}>
         <td colspan="4">
-          <div class="tool-pool-detail-block">
-            <div class="tool-pool-detail-label">说明原文</div>
-            <div class="tool-pool-desc">${esc(full)}</div>
-          </div>
-          <div class="tool-pool-detail-block">
-            <div class="tool-pool-detail-label">参数（JSON Schema）</div>
-            <pre class="tool-pool-params">${esc(params)}</pre>
+          <div class="tool-pool-detail-inner">
+            <div class="tool-pool-detail-block">
+              <div class="tool-pool-detail-label">说明原文</div>
+              <div class="tool-pool-desc">${esc(full)}</div>
+            </div>
+            <div class="tool-pool-detail-block">
+              <div class="tool-pool-detail-label">参数（JSON Schema）</div>
+              <pre class="tool-pool-params">${esc(params)}</pre>
+            </div>
           </div>
         </td>
       </tr>`;
@@ -196,6 +198,54 @@ async function loadToolPool() {
   }
 }
 
+/**
+ * 展开 / 收起的过渡（2026-11-18 用户口径：不要求流式，渐显 + 高度撑开就够）。
+ * 动的是详情行里的 `.tool-pool-detail-inner`，不是 `<tr>`：表格行本身不能可靠地做
+ * 高度过渡。动画只走一遍、**不写内联终态**——结束时自然回落到 CSS 的真实高度与透明度，
+ * 不必依赖 onfinish 清理，动画对象被取消也不会留下「高度 0、内容看不见」的坏状态。
+ * 收起才需要 onfinish 把整行藏掉；万一它没跑到（页面被挂起），留下的也只是完整内容。
+ * 连点先取消上一段，不叠动画。
+ */
+const detailAnimations = new WeakMap();
+
+function setRowOpen(detail, open) {
+  const inner = detail.querySelector(".tool-pool-detail-inner");
+  if (!inner) {
+    detail.hidden = !open;
+    return;
+  }
+  const previous = detailAnimations.get(inner);
+  if (previous) previous.cancel();
+  // 先让行可见（收起动画要从有高度开始量）
+  if (open) detail.hidden = false;
+
+  const reduce = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (reduce) {
+    if (!open) detail.hidden = true;
+    return;
+  }
+
+  const full = inner.scrollHeight;
+  const from = open ? 0 : full;
+  const to = open ? full : 0;
+  // fill: forwards —— 动画跑完先保住终态（撑开的高度 / 收起的 0 高度），
+  // 等 onfinish 再把控制权交回 CSS；这样 onfinish 晚一拍也不会闪回旧高度。
+  const animation = inner.animate(
+    [
+      { height: `${from}px`, opacity: open ? 0 : 1 },
+      { height: `${to}px`, opacity: open ? 1 : 0 },
+    ],
+    { duration: 220, easing: "cubic-bezier(.2, .8, .2, 1)", fill: "forwards" },
+  );
+  detailAnimations.set(inner, animation);
+  animation.onfinish = () => {
+    // 先藏行再取消动画：同一任务内完成，中间不会有一次「高度回到完整值」的绘制
+    if (!open) detail.hidden = true;
+    animation.cancel();
+    detailAnimations.delete(inner);
+  };
+}
+
 /** 展开 / 收起一行：只动这一行 + 它的详情行，不重画整表。 */
 function toggleRow(card, row) {
   const name = row.dataset.toolRow;
@@ -207,7 +257,7 @@ function toggleRow(card, row) {
   else state.open.delete(name);
   row.classList.toggle("is-open", open);
   row.setAttribute("aria-expanded", open ? "true" : "false");
-  detail.hidden = !open;
+  setRowOpen(detail, open);
 }
 
 function wireToolPool() {
@@ -255,7 +305,7 @@ function wireToolPool() {
       if (!response.ok || data.ok !== true) throw new Error(data.message || String(response.status));
       applyPayload(data);
       drawToolPool();
-      setPending(pendingTextOf(data) || "已保存。重启服务后生效（设置 → 服务 → 重启）。");
+      setPending(pendingTextOf(data) || "已保存。重启服务后生效（设置 → 本机 → Node 服务 → 重启）。");
     } catch (error) {
       if (error.message !== "forbidden") setPending(`没存成：${error.message}`);
       syncDirty();

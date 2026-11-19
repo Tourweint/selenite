@@ -178,10 +178,11 @@ export function createAskUserTool(): ToolRegistration {
 		name: ASK_USER_TOOL_NAME,
 		description:
 			"向用户提一个结构化问题，等他回答后再继续。只在**真有分叉**时问：" +
-			"比如两条都合理的路线要人选、缺一个只有他知道的事实、要不要动一件不可逆的事。" +
-			"**一次只问一个**；选项给 2-3 个互斥项，recommended 填你建议的下标（可选）。" +
-			"**能从文件 / 记忆 / 工具查到的事实先自己查，别问人**；也不要拿它问确认（要批准的操作走审批）。" +
-			"如果用户的回答会影响整张任务单，用 delegate 的 resume 把答复交回去。",
+			"两条都合理的路线要人选、缺一个只有他知道的事实、要不要动一件不可逆的事。" +
+			// 选项 / recommended 的格式只在参数里（2026-11-18 去重）。
+			"**一次只问一个**；**能从文件 / 记忆 / 工具查到的事实先自己查，别问人**；" +
+			"也不要拿它问确认（要批准的操作走审批）。" +
+			"用户的回答会影响整张任务单时，用 delegate 的 resume 把答复交回去。",
 		parameters: Type.Object({
 			question: Type.String({
 				description: `要问的一句话，≤${ASK_USER_QUESTION_MAX} 字`,

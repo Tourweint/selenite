@@ -297,8 +297,13 @@ export async function searchSessionsPage(
 	return searchTranscriptPage(await readTranscriptSources(reader), query, options, now);
 }
 
-/** 把 durable 的全部会话读成可检索行（逐会话打开；读失败跳过，不挡整查）。 */
-async function readTranscriptSources(reader: SessionReader): Promise<TranscriptSource[]> {
+/**
+ * 把 durable 的全部会话读成可检索行（逐会话打开；读失败跳过，不挡整查）。
+ *
+ * 2026-11-19 批4 起导出：提醒沉淀（reminder-distill.ts）复用同一份读取逻辑
+ * （跳过隐藏轮、剥定时头、标题脱敏），不另抄一份——两处口径分叉就是 bug。
+ */
+export async function readTranscriptSources(reader: SessionReader): Promise<TranscriptSource[]> {
 	const chats = await reader.snapshot(Chats, CTX);
 	const titles = readChatTitles();
 	const sources: TranscriptSource[] = [];

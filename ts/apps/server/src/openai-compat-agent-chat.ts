@@ -100,7 +100,9 @@ import type { OpenAiChatRequest, PlainMessage, TaskContext } from "./openai-comp
 					event.type === "notice" ||
 					// 审批（2026-11-04 批次二）：手机不进聊天流，审批走全局待办轮询
 					// （GET /agent/approvals 不带 conversationId），非流式响应不注入审批正文。
-					event.type === "approval"
+					event.type === "approval" ||
+					// 决策上报（2026-11-19 批2）：OpenAI 兼容层没有上报卡，跳过（同 attention 口径）。
+					event.type === "escalation"
 				) {
 					continue;
 				}
@@ -228,6 +230,8 @@ import type { OpenAiChatRequest, PlainMessage, TaskContext } from "./openai-comp
 					});
 					continue;
 				}
+				// 决策上报（2026-11-19 批2）：OpenAI 兼容层没有上报卡，跳过（同 attention 口径）。
+				if (event.type === "escalation") continue;
 				const content = event.type === "delta" ? event.text : event.message;
 				await stream.writeSSE({
 					data: JSON.stringify({

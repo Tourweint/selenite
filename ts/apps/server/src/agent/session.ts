@@ -10,7 +10,7 @@ export { addReminder, cancelReminder, contextUsageOf, continueConversation, fold
 export type { ReminderSummary, ReminderTaskDetail, TranscriptMessage, UsageSummary } from "./session-transcript.ts";
 export { archiveChat, archiveChatGuarded, chatMetaSummary, hideChat, pinChat, pruneChatMetaOrphans, purgeChatMetaEntries, readChatMeta, renameChat, restoreArchivedChats, restoreChats, unarchiveChat } from "./session-meta.ts";
 export type { ChatIndexEntry, ChatMeta } from "./session-meta.ts";
-export { archiveChatsOfProject, archivedChatPairs, chatTitles, forgetMemory, listChats, listChatsForExport, memoryOverview, missingChats, projectChatExternalIds, readChatStats, rebindChatsOfProject, supersedeMemory } from "./session-index.ts";
-export type { ChatStats, MemoryOverview, MemoryView } from "./session-index.ts";
+export { archiveChatsOfProject, archivedChatPairs, chatTitles, chatWorkdirOf, forgetMemory, listChats, listChatsForExport, memoryOverview, missingChats, projectChatExternalIds, readChatStats, rebindChatsOfProject, supersedeMemory } from "./session-index.ts";
+export type { ChatStats, ChatWorkdir, ChatWorkdirKind, MemoryOverview, MemoryView } from "./session-index.ts";
 export { listArchivedChats, searchTranscripts } from "./session-evidence.ts";
 export type { SearchHit } from "./session-evidence.ts";

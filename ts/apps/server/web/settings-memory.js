@@ -174,7 +174,7 @@ async function loadMemoryScope() {
 
     const items = Array.isArray(data.items) ? data.items : [];
     status.textContent = items.length > 0 ? `${items.length} 条` : "空";
-    if (extract) extract.textContent = data.extract === "llm" ? "模型 + 规则" : "规则";
+    if (extract) extract.textContent = data.extract === "off" ? "不抽取" : data.extract === "llm" ? "模型 + 规则" : "规则";
     if (items.length === 0) {
       list.replaceChildren();
       if (empty) {

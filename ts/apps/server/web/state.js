@@ -39,9 +39,9 @@ const state = {
   pendingImages: [],
   // 待发文件（2026-11-13 附件走路径）：{path, name, mimeType?, bytes?}，只存路径不存内容
   pendingFiles: [],
-  // 能力投影（GET /agent/policy 的 attachments / fileAttachments / editResend / approvalMode / chatMap / chatBranch）：
+  // 能力投影（GET /agent/policy 的 attachments / fileAttachments / editResend / approvalMode / chatMap / chatBranch / chatProjectLabel）：
   // 关着时入口不渲染；审批形态决定审批卡显示倒计时还是「等待处理」
-  capabilities: { attachments: true, fileAttachments: true, editResend: true, approvalMode: "async", chatMap: true, chatBranch: true },
+  capabilities: { attachments: true, fileAttachments: true, editResend: true, approvalMode: "async", chatMap: true, chatBranch: true, chatProjectLabel: true },
   chats: [],
   // 已归档会话计数（GET /agent/chats 的 archived）；会话列表本身不返回它们
   archived: 0,

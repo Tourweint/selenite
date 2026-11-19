@@ -116,7 +116,8 @@ test("native 不往派单里塞 profile（模型由启动 env 决定，2026-11-1
 		CHANCELLOR_EMPLOYEE: "native",
 		EXECUTOR_CONFIG_PATH: tempPath(),
 	};
-	assert.deepEqual(executorForDelegation(env), { employee: "native", profile: {} });
+	// 批2：executorForDelegation 带质检方式（缺省 internal）。
+	assert.deepEqual(executorForDelegation(env), { employee: "native", profile: {}, qa: "internal" });
 });
 
 test("批1：native 填了模型 → 进建单快照；留空 → 不带（回落启动 env）", () => {
@@ -128,10 +129,11 @@ test("批1：native 填了模型 → 进建单快照；留空 → 不带（回�
 	assert.deepEqual(executorForDelegation(env), {
 		employee: "native",
 		profile: { model: "deepseek-v4.1-flash" },
+		qa: "internal",
 	});
 	// 留空 = 显式"跟随启动 env"，空串原样带上，native.ts 不做覆盖
 	writeExecutorConfig({ employee: "native", profiles: { native: { model: "" } } }, env);
-	assert.deepEqual(executorForDelegation(env), { employee: "native", profile: { model: "" } });
+	assert.deepEqual(executorForDelegation(env), { employee: "native", profile: { model: "" }, qa: "internal" });
 });
 
 test("phone 由 env 指定时视图锁定并说明原因", () => {

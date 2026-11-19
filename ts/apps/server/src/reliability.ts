@@ -59,10 +59,21 @@ export function bashTimeoutSeconds(env: Env): number {
 }
 
 /**
+ * 插话消费模式（2026-11-19 插话统一 批1）：缺省 `"all"`——同一轮的多条插话全部生效
+ * （用户拍板：多条插话都要生效）。回滚 env：`AGENT_STEERING_MODE=one-at-a-time`
+ * → 回内核缺省的单条消费。认不出 / 未设都按 "all"。
+ */
+export function steeringMode(env: Env): "all" | "one-at-a-time" {
+	const value = (env.AGENT_STEERING_MODE ?? "").trim().toLowerCase();
+	return value === "one-at-a-time" ? "one-at-a-time" : "all";
+}
+
+/**
  * env → 内核 settings。
  *
  * 2026-11-14 起压缩默认就是"按百分比 70%"（用户拍板），所以 `compaction` **总是**在结果里，
  * 不再有"全空 → undefined"那条路径；只有 stream / afterFailedRun 仍是"不设就不传"。
+ * 2026-11-19 起 `steeringMode` 也总是带着：插话统一后缺省 "all"（多条全生效）。
  *
  * `windows`（2026-11-14）：`${provider}/${modelId} → contextWindow`，压缩的百分比 /
  * 绝对 K 要按各模型的窗口换算（见 `compaction-settings.ts`）。传空表 = 只有全局 `enabled`，
@@ -77,6 +88,7 @@ export function buildHarnessSettings(
 	return {
 		...(stream === undefined ? {} : { stream: { timeoutMs: stream } }),
 		...(failed === undefined ? {} : { afterFailedRun: failed }),
+		steeringMode: steeringMode(env),
 		compaction: compactionSettings(readCompactionConfig(env), windows),
 	};
 }

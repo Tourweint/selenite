@@ -67,7 +67,25 @@ export type DelegationEvent =
 	 * 只借本通道送到**正在流式的那条会话**（conversationId 就是发射方），
 	 * 与派活进度同款：进程内轻事件，没开流就收不到、不落盘。
 	 */
-	| { type: "notice"; text: string };
+	| { type: "notice"; text: string }
+	/**
+	 * worker 决策上报（2026-11-19 批2：worker→总管→用户上报链）。
+	 *
+	 * native worker 跑动中调 `escalate` 上报一个要拍板的事，chancellor 原样透传上来。
+	 * 借本通道送到**派活方会话**出上报卡；路由（唤醒总管 / 升级用户 / 限流）在
+	 * escalation.ts。与 attention 的分工：那个是 worker 退场后从 REPORT 读出的终态
+	 * 问题，这个是跑动中的实时上报，worker 不退场、等插话答复继续跑。
+	 */
+	| {
+			type: "escalation";
+			ticketId: string;
+			domain: string;
+			escalationId: string;
+			question: string;
+			context: string;
+			options?: string[];
+			urgency: "low" | "normal" | "high";
+	  };
 
 export interface DelegationReport {
 	ticketId: string;

@@ -1,3 +1,4 @@
+import type { WorkerEscalation } from "./native.ts";
 import type {
   EmployeeCapabilities,
   EmployeeKind,
@@ -40,6 +41,14 @@ export interface EmployeeTask {
    * 只有外部 CLI 读；缺省 = 各 CLI 的 env 缺省。
    */
   settings?: EmployeeProfile;
+  /**
+   * worker 跑动中的决策上报回调（2026-11-19 批2：worker→总管→用户上报链）。
+   *
+   * 只有本机 native worker 有这条实时通道（stderr 结构行，见 escalation-payload.ts）；
+   * 外部 CLI / MCP / 手机没有，缺省不传 = 旧行为。回调失败由 native.ts 兜住，
+   * 不拖垮 worker 本体；上报链的路由 / 限流都在宿主侧，chancellor 只透传。
+   */
+  onEscalation?: (escalation: WorkerEscalation) => void;
 }
 
 export interface EmployeeOutcome {

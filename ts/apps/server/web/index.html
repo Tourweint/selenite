@@ -166,7 +166,7 @@
          72px 轨 + 40×40 圆钮，顺序 = 展开态分区的镜像：
          总管（首字圆钮）→ 执事 → 对话 → 项目 → 群组 → 课题 → 底部齿轮。
          任务中心 / 今日回顾不进轨道（2026-11-13 用户拍板）：入口留在展开态「对话」分区底部的
-         「打开任务中心 →」和任务页里的「今日回顾 →」。
+         「打开任务中心 →」和任务中心右列的「今日回顾」卡（2026-11-18：底部文字链接退役）。
          2026-11-07：顶部「新建对话」退役（新建入口在展开态「对话」分区头的 ＋）；
          2026-11-08：状态点退役（收起态只留齿轮，服务状态看顶栏状态灯）。
          项目按钮仍用弹层（72px 放不下内联列表），展开态则是内联分区。 -->
@@ -457,18 +457,14 @@
             </button>
             <div class="composer-pop plus-menu" id="composer-plus-menu" role="menu" hidden></div>
           </div>
-          <!-- 对话选项目（2026-11-17）：加号旁边。新建 worker 会话时点它选项目，
-               项目 = 这个会话的工作目录（项目主文件夹）；不选 = 跟随「当前项目」。
-               它只定 cwd，不定记忆注入——记忆看设置里勾选的项目。 -->
+          <!-- 对话工作归属（2026-11-18 从「选项目」改为只读常显）：加号旁边。
+               新建 worker 会话跟着左侧侧栏的当前项目/工作区；发出第一条后冻结为创建时快照。
+               总管 / 执事 / 任务专线不显示。只展示归属，不在输入框里改。 -->
           <div class="composer-wrap">
-            <button class="composer-pill project-pill" id="chat-project-pill" type="button" hidden
-                    aria-haspopup="menu" aria-expanded="false"
-                    data-tip="这个对话属于哪个项目（决定工作目录）">
+            <span class="composer-pill project-pill is-static" id="chat-project-pill" hidden>
               <svg class="project-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
-              <span class="project-pill-label" id="chat-project-pill-label">选项目</span>
-              <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
-            </button>
-            <div class="composer-pop project-menu" id="chat-project-menu" role="menu" hidden></div>
+              <span class="project-pill-label" id="chat-project-pill-label">工作区</span>
+            </span>
           </div>
         </div>
 
@@ -518,14 +514,11 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></svg>
           </button>
           <div class="map-heading">
-            <div class="map-title-row">
-              <span class="map-tab">MAP</span>
-              <h1 class="map-title" id="map-title">会话地图</h1>
-            </div>
-            <p class="map-sub" id="map-sub"></p>
+            <h1 class="map-title" id="map-title">会话地图</h1>
           </div>
         </div>
         <div class="map-actions">
+          <button class="map-btn" id="map-switch" type="button" data-tip="切换另一条会话的地图">切换</button>
           <button class="map-btn" id="map-refresh" type="button" data-tip="重新拉取并清掉手动位置">整理</button>
           <button class="map-btn" id="map-focus" type="button" data-tip="把当前会话最后一轮居中">定位</button>
           <span class="map-zoom" id="map-zoom">100%</span>
@@ -609,7 +602,7 @@
       <div class="tasks-state" id="tasks-state" hidden></div>
       <div class="tasks-body" id="tasks-body">
         <!-- 任务中心重做 v1（2026-11-13 批 1）：默认视图。宽屏双列（左 7fr / 右 5fr），
-             窄屏单列，顺序 = 等你回话 → 在跑 → 打手 → 底部链接。
+             窄屏单列，顺序 = 等你回话 → 在跑 → 打手 → 今日回顾卡。
              四块内容全由 app.js 的 renderTasksRedesign() 现算，容器只留空。 -->
         <div class="tk2" id="tasks-redesign" hidden>
           <div class="tk2-cols">
@@ -622,7 +615,6 @@
               <div id="tk2-recap"></div>
             </div>
           </div>
-          <p class="tk2-foot"><a href="#/review">今日回顾：今天都干了啥 →</a></p>
         </div>
 
         <!-- 旧三列看板（2026-11-04 / L3）：整套留在位不删。
@@ -644,8 +636,9 @@
     </div>
   </main>
 
-  <!-- 今日回顾（2026-11-13 批 1）：#/review 独立视图。
+  <!-- 今日回顾（2026-11-13 批 1 / 2026-11-18 重做）：#/review 独立视图。
        数据 = GET /api/v1/tickets 按 updated_at 分日，无新接口；默认今天。
+       版式 = 日期头 + 当日概览 + 上午/下午/晚上分组的流水；空态也在 rv-tl 里。
        汇总只用单列表现算的数字（派活 / 完结对话 / 出错 / 等你回话）。 -->
   <main class="main tasks" id="view-review" hidden>
     <header class="tasks-top">
@@ -666,10 +659,9 @@
       <div class="tasks-state" id="review-state" hidden></div>
       <div class="tasks-body" id="review-body" hidden>
         <div class="rv-wrap">
-          <nav class="rv-pager" id="rv-pager" aria-label="选择日期"></nav>
+          <nav class="rv-daynav" id="rv-pager" aria-label="选择日期"></nav>
           <section class="rv-sum" id="rv-sum"></section>
           <section class="rv-tl" id="rv-tl"></section>
-          <p class="rv-foot">每天零点翻新一天。都不看了就早点休息。</p>
         </div>
       </div>
     </div>

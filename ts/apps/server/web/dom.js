@@ -55,7 +55,6 @@ const el = {
   emptyGreet: document.getElementById("empty-greet"),
   chatProjectPill: document.getElementById("chat-project-pill"),
   chatProjectPillLabel: document.getElementById("chat-project-pill-label"),
-  chatProjectMenu: document.getElementById("chat-project-menu"),
   scroll: document.getElementById("scroll"),
   composer: document.getElementById("composer"),
   chatError: document.getElementById("chat-error"),

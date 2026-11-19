@@ -29,15 +29,17 @@ function archiveDeleteBlockedText(blocked) {
       ? "这个会话已不在归档里（可能刚被恢复）。先归档才能永久删除。"
       : reason === "busy"
         ? "会话正在运行，请先停止再删除。"
-        : reason === "chief"
-          ? "总管会话不能永久删除。"
-          : reason === "task"
-            ? "任务会话不能永久删除。"
-            : reason === "partner"
-              ? "执事与群会话不能永久删除。"
-              : reason === "kind"
-                ? "只允许删除普通会话。"
-                : "现在不能删除这个会话。";
+        : reason === "has-branches"
+          ? "这条会话下面还有分支，先删子分支再删它。"
+          : reason === "chief"
+            ? "总管会话不能永久删除。"
+            : reason === "task"
+              ? "任务会话不能永久删除。"
+              : reason === "partner"
+                ? "执事与群会话不能永久删除。"
+                : reason === "kind"
+                  ? "只允许删除普通会话或执事副会话。"
+                  : "现在不能删除这个会话。";
   return detail ? `${base}（${detail}）` : base;
 }
 

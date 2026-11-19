@@ -14,7 +14,7 @@ export function chatHardDeleteEnabled(env: NodeJS.ProcessEnv = process.env): boo
 	return flagEnabled("CHAT_HARD_DELETE", env);
 }
 
-export type DeletionBlockedReason = "not-archived" | "kind" | "busy";
+export type DeletionBlockedReason = "not-archived" | "kind" | "busy" | "has-branches";
 
 export interface DeletionBlocked {
 	reason: DeletionBlockedReason;

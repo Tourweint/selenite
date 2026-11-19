@@ -211,6 +211,13 @@
   color: var(--text);
   /* 中文不需要靠断词换行，一句话要么整行，要么在标点处断 */
   word-break: keep-all;
+  /* 换句淡出淡入（2026-11-19）：加 .greet-out 落 0、摘掉回 1，
+     类由 shell.js 的 swapGreetingText 驱动；时长与那边 GREET_OUT_MS 一对，改要一起改 */
+  transition: opacity .28s ease;
+}
+.empty p.empty-greet.greet-out { opacity: 0; }
+@media (prefers-reduced-motion: reduce) {
+  .empty p.empty-greet { transition: none; }
 }
 
 .hints { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }

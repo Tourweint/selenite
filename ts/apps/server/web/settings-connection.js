@@ -10,6 +10,7 @@
 import { ago, connDeviceRows, connPhoneCount } from "./approval-pop.js";
 import { attr, esc } from "./markdown.js";
 import { request } from "./net.js";
+import { mountSegmented, syncSegmented } from "./settings-atoms.js";
 import { state } from "./state.js";
 import { closeModal, inShell, openConfirm, openModal, showAlert, toast } from "./ui-atoms.js";
 
@@ -114,15 +115,8 @@ function paintRelaySection() {
   if (button) button.textContent = connRelay.configured ? "换地址" : "接入";
   if (unlink) unlink.hidden = !connRelay.configured || connRelay.source === "env";
   paintConnStar();
-
-  // 2026-11-14 二次打磨：页面里不再重复"经过中继"这种解释——用户原话「经过中继我觉得就是没啥用了」。
-  // 手机上只留一个动作：添加手机。中继通不通由上面的星形中心和 conn-hint 一句话说清。
-  const addButton = document.getElementById("relay-add-device");
-  // 永不置灰：没到这一步时文案变「先接入中继」，点了直接开接入弹窗
-  if (addButton) {
-    addButton.textContent = connRelay.connected ? "添加手机" : "先接入中继";
-    addButton.disabled = false;
-  }
+  // 2026-11-18：添加手机合成一个入口，按钮不再随中继状态改文案——
+  // 中继通不通由星形中心与 conn-hint 说清，远程面板自己会在没接入时给「接入中继」。
 }
 
 /**
@@ -164,20 +158,25 @@ function paintConnStar() {
   const shown = nodes.slice(0, MAX);
   const hidden = nodes.length - shown.length;
 
-  const W = 360;
-  const H = 252;
-  const cx = 180;
-  const cy = 114;
-  const rx = 136;
-  const ry = 84;
-  // 本机固定在左侧（角度 π）；经中继的设备排在右侧、自上而下成一把「扇」。
+  // 2026-11-18：画布从 360×252 改成 720×240 的宽画布。并卡之后图在 980px 的内容列里只占 300px，
+  // 两侧空得像没画完；宽画布按 1:1 铺开（文字仍是 10.5–12.5px 的正常字号），
+  // 本机在左、中继居中、经中继的设备在右侧成扇——横向把「通路」这件事读明白。
+  const W = 720;
+  const H = 240;
+  const cx = 360;
+  const cy = 120;
+  const rx = 300;
+  const ry = 85;
+  // 本机固定在左侧（角度 π）；经中继的设备以水平方向为轴、在右半圈对称成扇。
   // 本机与它们之间隔着一个中继圆，所以线只从圆心发出——不存在"本机直连设备"那条线了（2026-11-15）。
+  // 2026-11-18：原先从 1.5π 起算，只有一台设备时它总在右上角、图的下半张一直空着；
+  // 对称扇让一台时落在正中（本机 ← 中继 → 手机 一条横线），多台时上下均匀铺开。
   const angles = shown.map(() => Math.PI);
   const relaySlots = shown
     .map((node, index) => ({ node, index }))
     .filter(({ node }) => !node.self);
   relaySlots.forEach(({ index }, k) => {
-    angles[index] = Math.PI * 1.5 + ((k + 1) / (relaySlots.length + 1)) * Math.PI;
+    angles[index] = ((k + 0.5) / relaySlots.length - 0.5) * Math.PI;
   });
   const pointAt = (angle) => ({ x: cx + Math.cos(angle) * rx, y: cy + Math.sin(angle) * ry });
   const points = angles.map(pointAt);
@@ -290,7 +289,7 @@ function paintNextStep() {
   if (!connRelay.peers) {
     box.hidden = false;
     box.innerHTML = `<button class="btn-primary" type="button" id="conn-next-go">添加手机</button>`;
-    box.querySelector("#conn-next-go").addEventListener("click", () => openAddDeviceModal());
+    box.querySelector("#conn-next-go").addEventListener("click", () => openAddPhoneModal("local"));
     return;
   }
   box.hidden = true;
@@ -354,28 +353,27 @@ async function loadRelayRoster() {
   paintNextStep();
 }
 
-async function loadPair() {
-  const image = document.getElementById("pair-qr");
-  const metaEl = document.getElementById("pair-meta");
-  const box = document.getElementById("pair-qr-box");
-  const button = document.getElementById("pair-refresh");
+/**
+ * 本地配对码（2026-11-18 从页面内联改成「添加手机」浮层里的一个面板）：
+ * 读 `/api/v1/pair/qr`，填二维码与机器名。只动浮层内的节点，页面本体不再有二维码盒子。
+ * 原始 url 不铺在界面上（2026-11-13：一长串没人念得出来），只留机器名与有效期。
+ */
+async function loadLocalPair(root) {
+  const image = root?.querySelector("#phone-local-qr");
+  const nameEl = root?.querySelector("#phone-local-name");
+  const metaEl = root?.querySelector("#phone-local-meta");
   if (!image) return;
   try {
     const response = await request("/api/v1/pair/qr", { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const data = await response.json();
     image.src = data.dataUrl;
-    if (box) box.hidden = false;
-    // 一行式的按钮：第一次是"显示二维码"，出过码之后就是"换一个码"
-    if (button) button.textContent = "换一个码";
-    // 原始 url 不再铺在页面上（2026-11-13：一长串没人念得出来），只留机器名与有效期
-    if (metaEl) metaEl.textContent = `${data.machineName} · ${Math.round(data.expiresInSeconds / 60)} 分钟内有效`;
+    image.hidden = false;
+    if (nameEl) nameEl.textContent = data.machineName || "这台电脑";
+    if (metaEl) metaEl.textContent = `${Math.round((data.expiresInSeconds || 0) / 60)} 分钟内有效 · 扫完即配对`;
   } catch (error) {
     if (error.message === "forbidden") return;
-    if (metaEl) {
-      if (box) box.hidden = false;
-      metaEl.textContent = "拿不到配对码，稍后再试";
-    }
+    if (metaEl) metaEl.textContent = "拿不到配对码，稍后再试";
   }
 }
 
@@ -458,53 +456,125 @@ function openRelayLinkModal() {
 }
 
 /**
- * 「添加手机」：经中继出一枚一次性加入码。
+ * 「添加手机」（2026-11-18 合并）：本地扫码配对与经中继远程加入，做成同一张浮起来的卡。
  *
- * 浏览器不直连中继——跨源没开 CORS，owner 令牌也绝不能下发客户端。
- * 这里调 harness 的 `/api/v1/relay/join-code`，由服务端代调中继并生成二维码。
+ * 原来页面里是两行（扫码连接手机 / 远程添加手机），说的却是同一件事——把一台手机挂到
+ * 这台电脑上；本地那张二维码还内联在卡片里，和远程的弹窗形态也不一致。用户口径：
+ * 两个「添加手机」合并，在卡里选本地还是远程，底下写清什么时候用哪个。
+ *
+ * 本地 = 同一 WiFi / 数据线 / USB 共享网络，扫配对码换设备凭据，不走中继；
+ * 远程 = 经中继出一次性加入码，人在外面、手机用流量也能连——前提是电脑已接入中继。
+ *
+ * 浏览器不直连中继——跨源没开 CORS，owner 令牌也绝不能下发客户端；
+ * 远程这条仍由 harness 的 `/api/v1/relay/join-code` 代调中继并生成二维码。
  * **地址不放在弹窗顶上**（2026-11-14 挪走）：它填的是"手机该往哪连"，不是"电脑该往哪连"，
  * 放在这里只会让人以为添加设备=输地址。只在"手机连不上"时展开改。
  */
-function openAddDeviceModal() {
+function openAddPhoneModal(mode = "local") {
   openModal("添加手机", (body) => {
     body.innerHTML = `
-      <div class="relay-join">
-        <img class="relay-join-qr" id="relay-join-qr" alt="加入二维码" hidden />
-        <div class="relay-join-side">
-          <div class="relay-join-label">加入码</div>
-          <div class="relay-join-code" id="relay-join-code">正在取码…</div>
-          <div class="relay-join-meta" id="relay-join-meta"></div>
+      <div class="segmented slide phone-mode" id="phone-mode" role="radiogroup" aria-label="连接方式">
+        <button type="button" data-phone-mode="local" aria-checked="${mode !== "remote"}">本地连接</button>
+        <button type="button" data-phone-mode="remote" aria-checked="${mode === "remote"}">远程连接</button>
+      </div>
+      <div class="phone-pane" data-phone-pane="local" ${mode === "remote" ? "hidden" : ""}>
+        <div class="relay-join">
+          <img class="relay-join-qr" id="phone-local-qr" alt="本地配对二维码" hidden />
+          <div class="relay-join-side">
+            <div class="relay-join-label">本机</div>
+            <div class="relay-join-code" id="phone-local-name">正在取名…</div>
+            <div class="relay-join-meta" id="phone-local-meta"></div>
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button class="modal-primary" type="button" id="phone-local-refresh">换新码</button>
         </div>
       </div>
-      <div class="modal-hint" id="relay-join-hint">手机 App 扫上面的码即可加入；加入码只能用一次。扫完在下面「已连接的设备」里能看到它，标明「远程连接（经中继）」。</div>
-      <div class="modal-actions">
-        <button class="modal-primary" type="button" id="relay-join-refresh">换新码</button>
-      </div>
-      <details class="relay-adv">
-        <summary>手机连不上？改对外地址</summary>
-        <div class="modal-field">
-          <span>手机要访问的中继地址</span>
-          <input class="modal-input" id="relay-join-url" spellcheck="false" autocomplete="off"
-                 placeholder="http://<中继地址>:<端口>" aria-label="中继对外地址" />
+      <div class="phone-pane" data-phone-pane="remote" ${mode === "remote" ? "" : "hidden"}>
+        <div class="phone-gate" id="phone-remote-gate" hidden>
+          <div class="modal-hint" id="phone-remote-gate-hint"></div>
+          <div class="modal-actions">
+            <button class="modal-primary" type="button" id="phone-remote-gate-go">接入中继</button>
+          </div>
         </div>
-      </details>`;
-    const urlInput = body.querySelector("#relay-join-url");
-    const codeEl = body.querySelector("#relay-join-code");
-    const qrEl = body.querySelector("#relay-join-qr");
-    const metaEl = body.querySelector("#relay-join-meta");
-    const hintEl = body.querySelector("#relay-join-hint");
-    const refresh = body.querySelector("#relay-join-refresh");
+        <div class="phone-pane-body" id="phone-remote-body">
+          <div class="relay-join">
+            <img class="relay-join-qr" id="phone-remote-qr" alt="远程加入二维码" hidden />
+            <div class="relay-join-side">
+              <div class="relay-join-label">加入码</div>
+              <div class="relay-join-code" id="phone-remote-code">正在取码…</div>
+              <div class="relay-join-meta" id="phone-remote-meta"></div>
+            </div>
+          </div>
+          <div class="modal-hint" id="phone-remote-hint"></div>
+          <div class="modal-actions">
+            <button class="modal-primary" type="button" id="phone-remote-refresh">换新码</button>
+          </div>
+          <details class="relay-adv">
+            <summary>手机连不上？改对外地址</summary>
+            <div class="modal-field">
+              <span>手机要访问的中继地址</span>
+              <input class="modal-input" id="phone-remote-url" spellcheck="false" autocomplete="off"
+                     placeholder="http://<中继地址>:<端口>" aria-label="中继对外地址" />
+            </div>
+          </details>
+        </div>
+      </div>
+      <div class="phone-when">
+        <div class="phone-when-title">什么时候用哪个</div>
+        <div class="phone-when-row"><b>本地连接</b><span>手机就在这台电脑跟前：连同一个 WiFi、插数据线，或手机开「USB 共享网络」。局域网内直连——最快，也不占中继。</span></div>
+        <div class="phone-when-row"><b>远程连接</b><span>人不在电脑边，或手机在用流量 / 别的网络：经中继找回来。电脑要先接入中继。</span></div>
+        <div class="phone-when-row"><b>两种都配过</b><span>同一网络下自动走本地，出门才走中继——不用每次重扫。</span></div>
+      </div>`;
+
+    const modeBox = body.querySelector("#phone-mode");
+    const panes = [...body.querySelectorAll("[data-phone-pane]")];
+    const localPane = body.querySelector('[data-phone-pane="local"]');
+    const localQr = body.querySelector("#phone-local-qr");
+
+    // 本地：进来就取一次码；开着这张卡且停在本地面板时，每 100 秒换一张
+    //（和 2026-11-15 的规矩一致：只在真正看着二维码时才换，别把没在看的码悄悄作废）。
+    body.querySelector("#phone-local-refresh").addEventListener("click", () => void loadLocalPair(body));
+    const localTimer = setInterval(() => {
+      // 弹窗关掉后 body 会被清空：定时器自己收尾，别留着空转
+      if (!localQr.isConnected) { clearInterval(localTimer); return; }
+      if (localPane.hidden) return;
+      void loadLocalPair(body);
+    }, 100000);
+
+    // 远程：中继没连上就先给「接入中继 / 重新检测」这一步（置灰=死路，永远给按钮）
+    const gate = body.querySelector("#phone-remote-gate");
+    const gateHint = body.querySelector("#phone-remote-gate-hint");
+    const gateGo = body.querySelector("#phone-remote-gate-go");
+    const remoteBody = body.querySelector("#phone-remote-body");
+    const urlInput = body.querySelector("#phone-remote-url");
+    const codeEl = body.querySelector("#phone-remote-code");
+    const qrEl = body.querySelector("#phone-remote-qr");
+    const metaEl = body.querySelector("#phone-remote-meta");
+    const hintEl = body.querySelector("#phone-remote-hint");
+    const refresh = body.querySelector("#phone-remote-refresh");
     let expiresAt = 0;
-    let timer = 0;
+    let leftTimer = 0;
+    let remoteLoaded = false;
 
     const paintLeft = () => {
-      // 弹窗关掉后 body 会被清空：定时器自己收尾，别留着空转
-      if (!codeEl.isConnected) { clearInterval(timer); return; }
+      if (!codeEl.isConnected) { clearInterval(leftTimer); return; }
       const left = Math.max(0, expiresAt - Date.now());
       if (!left) { metaEl.textContent = "已过期，点「换新码」"; return; }
       const minutes = Math.floor(left / 60000);
       const seconds = Math.floor((left % 60000) / 1000);
       metaEl.textContent = `${minutes}:${String(seconds).padStart(2, "0")} 后过期 · 只能用一次`;
+    };
+
+    const paintGate = () => {
+      const ready = Boolean(connRelay.connected);
+      gate.hidden = ready;
+      remoteBody.hidden = !ready;
+      if (ready) return;
+      gateHint.textContent = connRelay.configured
+        ? "中继地址已经填好，但此刻还没连上（正在自动重连）；连上后才能取加入码。"
+        : "远程连接要先让这台电脑接入中继：填一次地址和主令牌，之后常年挂着。";
+      gateGo.textContent = connRelay.configured ? "重新检测" : "接入中继";
     };
 
     const render = (data) => {
@@ -513,18 +583,22 @@ function openAddDeviceModal() {
       qrEl.src = data.dataUrl;
       qrEl.hidden = false;
       expiresAt = Number(data.expiresAt) || 0;
-      clearInterval(timer);
+      clearInterval(leftTimer);
       paintLeft();
-      timer = setInterval(paintLeft, 1000);
-      hintEl.textContent = "手机 App 扫上面的码即可加入；加入码只能用一次。扫完在下面「已连接的设备」里能看到它，标明「远程连接（经中继）」。";
+      leftTimer = setInterval(paintLeft, 1000);
+      // 2026-11-18 用户口径：取到码就不再铺解释句（「扫这个码加入、只能用一次」都是废话，
+      // 过期时间在 meta 行里）；这一行只留给「正在取码 / 取码失败」。
+      hintEl.textContent = "";
+      hintEl.hidden = true;
       hintEl.classList.remove("is-error");
       // 扫完就能在名册里看见（10 秒轮询，不用手动刷）
       setTimeout(() => void loadRelayRoster(), 8000);
     };
 
-    const load = async () => {
+    const loadJoin = async () => {
       if (refresh.disabled) return;
       refresh.disabled = true;
+      hintEl.hidden = false;
       hintEl.textContent = "正在取码…";
       hintEl.classList.remove("is-error");
       try {
@@ -534,6 +608,7 @@ function openAddDeviceModal() {
         });
         const data = await response.json().catch(() => ({}));
         if (!response.ok) {
+          hintEl.hidden = false;
           hintEl.textContent = data.message || `取码失败：HTTP ${response.status}`;
           hintEl.classList.add("is-error");
           return;
@@ -541,6 +616,7 @@ function openAddDeviceModal() {
         render(data);
       } catch (error) {
         if (error.message !== "forbidden") {
+          hintEl.hidden = false;
           hintEl.textContent = `取码失败：${error.message}`;
           hintEl.classList.add("is-error");
         }
@@ -549,8 +625,45 @@ function openAddDeviceModal() {
       }
     };
 
-    refresh.addEventListener("click", () => void load());
-    void load();
+    const ensureRemote = () => {
+      paintGate();
+      if (!connRelay.connected || remoteLoaded) return;
+      remoteLoaded = true;
+      void loadJoin();
+    };
+
+    const showMode = (next) => {
+      for (const button of modeBox.querySelectorAll("[data-phone-mode]")) {
+        button.setAttribute("aria-checked", String(button.dataset.phoneMode === next));
+      }
+      syncSegmented(modeBox);
+      for (const pane of panes) pane.hidden = pane.dataset.phonePane !== next;
+      if (next === "remote") ensureRemote();
+      // 切回来立刻换一张：停在远程面板时本地码不轮换，切回来可能已经过了 5 分钟有效期。
+      if (next === "local") void loadLocalPair(body);
+    };
+
+    for (const button of modeBox.querySelectorAll("[data-phone-mode]")) {
+      button.addEventListener("click", () => showMode(button.dataset.phoneMode));
+    }
+    mountSegmented(modeBox);
+    if (mode === "remote") ensureRemote();
+    else void loadLocalPair(body);
+
+    gateGo.addEventListener("click", async () => {
+      if (connRelay.configured) {
+        await loadRelayStatus();
+        paintGate();
+        if (connRelay.connected && !remoteLoaded) {
+          remoteLoaded = true;
+          void loadJoin();
+        }
+        return;
+      }
+      openRelayLinkModal();
+    });
+    refresh.addEventListener("click", () => void loadJoin());
+    void paintGate();
   });
 }
 
@@ -766,4 +879,4 @@ async function unlinkRelay() {
   }
 }
 
-export { RUNTIME_LABELS, connRelay, paintConnStar, initAutostartRow, initRuntimeCard, loadPair, loadRelayRoster, loadRelayStatus, loadServiceInfo, openAddDeviceModal, openRelayLinkModal, paintNextStep, paintRelaySection, paintRuntime, shellCall, showRuntimeCurtain, startRuntimeFromUi, unlinkRelay, updateConnectionHint };
+export { RUNTIME_LABELS, connRelay, paintConnStar, initAutostartRow, initRuntimeCard, loadLocalPair, loadRelayRoster, loadRelayStatus, loadServiceInfo, openAddPhoneModal, openRelayLinkModal, paintNextStep, paintRelaySection, paintRuntime, shellCall, showRuntimeCurtain, startRuntimeFromUi, unlinkRelay, updateConnectionHint };

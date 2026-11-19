@@ -15,6 +15,7 @@
 import { fetchModelCatalog, normalizeModelRow, renderModelMenu } from "./hover-tip.js";
 import { attr, esc } from "./markdown.js";
 import { request } from "./net.js";
+import { openSecMenu } from "./sec-menu.js";
 import { mountSegmented, syncSegmented } from "./settings-atoms.js";
 import { KEY_MODEL_PROVIDER } from "./shell.js";
 import { state } from "./state.js";
@@ -511,9 +512,126 @@ function confirmDeleteTask(item, onChanged) {
   });
 }
 
+/** 打开编辑器；老服务端没返回 prompt 时先拦住，避免空正文覆盖原指令。 */
+function openTaskEditor(item, onChanged) {
+  if (item.kind === "routine" && item.promptMissing === true) {
+    toast("服务端还没重启，读不到指令正文；先重启再编辑，避免空正文覆盖");
+    return;
+  }
+  openScheduledTaskModal({ mode: "edit", item }, onChanged);
+}
+
+function taskToggleEndpoint(item) {
+  if (item.kind === "memory") {
+    return `/api/v1/agent/memory/nightly/${encodeURIComponent(item.memoryScope)}`;
+  }
+  if (item.kind === "reminder") {
+    return `/api/v1/agent/reminders/${encodeURIComponent(item.id)}`;
+  }
+  return `/api/v1/routines/${encodeURIComponent(item.id)}`;
+}
+
+async function taskToggleEnabled(item, onChanged) {
+  const next = !item.enabled;
+  try {
+    const response = await request(taskToggleEndpoint(item), {
+      method: "PATCH",
+      body: JSON.stringify({ enabled: next }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      toast(`没切换：${data.message || data.error || response.status}`);
+      return;
+    }
+    toast(next ? "已启用" : "已暂停");
+    if (onChanged) onChanged();
+  } catch (error) {
+    if (error.message !== "forbidden") toast(`没切换：${error.message}`);
+  }
+}
+
+async function taskRunNow(item, onChanged) {
+  // 菜单点完就收了，补一条「跑中」回执（旧版靠按钮文字变化）。
+  toast("正在跑一轮…");
+  try {
+    const endpoint =
+      item.kind === "reminder"
+        ? `/api/v1/agent/reminders/${encodeURIComponent(item.id)}/run_now`
+        : `/api/v1/routines/${encodeURIComponent(item.id)}/run_now`;
+    const response = await request(endpoint, { method: "POST" });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok) {
+      toast(`没跑成：${data.message || data.error || response.status}`);
+      return;
+    }
+    toast("已跑完一轮");
+    if (onChanged) onChanged();
+  } catch (error) {
+    if (error.message !== "forbidden") toast(`没跑成：${error.message}`);
+  }
+}
+
+/** 历史就地展开；再点一次收起（菜单项文案跟着当前状态变）。 */
+async function taskToggleHistory(item, itemNode) {
+  const runsBox = itemNode?.querySelector(".rm-runs");
+  if (!runsBox) return;
+  if (!runsBox.hidden) {
+    runsBox.hidden = true;
+    return;
+  }
+  runsBox.hidden = false;
+  runsBox.innerHTML = `<div class="set-hint">读取中…</div>`;
+  try {
+    const response = await request(taskRunsEndpoint(item), { cache: "no-store" });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.message || String(response.status));
+    renderTaskRuns(runsBox, data.runs);
+  } catch (error) {
+    if (error.message !== "forbidden") {
+      runsBox.innerHTML = `<div class="set-hint is-error">读不到历史：${esc(error.message)}</div>`;
+    }
+  }
+}
+
+/** 行右侧 ⋯ 的菜单项（2026-11-18）：常驻按钮全部收进这里，行本身点开就是编辑。 */
+function taskMenuItems(item, itemNode, onChanged) {
+  const runsBox = itemNode?.querySelector(".rm-runs");
+  const editLocked = item.kind === "routine" && item.promptMissing === true;
+  const items = [
+    item.kind === "memory"
+      ? { label: "改时间", run: () => openTaskEditor(item, onChanged) }
+      : {
+          label: "编辑",
+          ...(editLocked
+            ? { hint: "服务端还没重启，读不到指令正文", disabled: true }
+            : {}),
+          run: () => openTaskEditor(item, onChanged),
+        },
+  ];
+  if (item.canPause) {
+    items.push({
+      label: item.enabled ? "暂停" : "启用",
+      run: () => void taskToggleEnabled(item, onChanged),
+    });
+  }
+  if (item.canRunNow) {
+    items.push({ label: "立即跑", run: () => void taskRunNow(item, onChanged) });
+  }
+  if (item.canHistory) {
+    items.push({
+      label: runsBox && !runsBox.hidden ? "收起历史" : "历史",
+      run: () => void taskToggleHistory(item, itemNode),
+    });
+  }
+  items.push({ separator: true });
+  items.push({ label: "删除", danger: true, run: () => confirmDeleteTask(item, onChanged) });
+  return items;
+}
+
 /**
  * 一张清单的渲染与动作（2026-11-17）。
  * `items` 由三个 XxxTaskItem 归一；`options.onChanged` 在删/暂停/编辑后由调用方重拉。
+ * 2026-11-18：行内不再铺动作按钮/类型徽章/指令预览——整行点开就是编辑，其余动作进右侧 ⋯。
  */
 function renderScheduledTaskList(box, items, options = {}) {
   if (!box) return;
@@ -572,63 +690,26 @@ function renderScheduledTaskList(box, items, options = {}) {
           .map((item, index) => {
             const dayText = item.enabled ? (item.nextAt ? rmDateText(item.nextAt) : "—") : "已停";
             const timeText = item.enabled && item.nextAt ? rmTimeText(item.nextAt) : "";
-            const badge =
-              item.kind === "memory"
-                ? '<span class="rm-kind">每晚整理</span>'
-                : item.visibility === "hidden"
-                  ? '<span class="rm-kind rm-kind-hidden">触发隐藏</span>'
-                  : '<span class="rm-kind rm-kind-visible">触发可见</span>';
-            const actions = [];
-            if (item.kind === "memory") {
-              actions.push(`<button class="rm-edit" type="button" data-act="edit">改时间</button>`);
-              if (item.canPause) {
-                actions.push(
-                  `<button class="rm-edit" type="button" data-act="toggle">${item.enabled ? "暂停" : "启用"}</button>`,
-                );
-              }
-              actions.push(`<button class="rm-del" type="button" data-act="delete">删除</button>`);
-            } else {
-              const editLocked = item.kind === "routine" && item.promptMissing === true;
-              actions.push(
-                `<button class="rm-edit" type="button" data-act="edit"${
-                  editLocked
-                    ? ' disabled title="服务端还没重启，读不到指令正文；重启后再编辑，避免空正文覆盖"'
-                    : ""
-                }>编辑</button>`,
-              );
-              if (item.canPause) {
-                actions.push(
-                  `<button class="rm-edit" type="button" data-act="toggle">${item.enabled ? "暂停" : "启用"}</button>`,
-                );
-              }
-              actions.push(`<button class="rm-edit" type="button" data-act="run">立即跑</button>`);
-              if (item.canHistory) {
-                actions.push(`<button class="rm-edit" type="button" data-act="history">历史</button>`);
-              }
-              actions.push(`<button class="rm-del" type="button" data-act="delete">删除</button>`);
-            }
-            const full = String(item.instruction || "").replace(/\s+/g, " ").trim();
-            const preview = full.slice(0, 120);
             const metaExtra = `${!item.enabled && item.kind !== "memory" ? " · 已暂停" : ""}${
               item.promptMissing ? " · 服务端待重启" : ""
             }`;
             return `${index ? '<div class="divider"></div>' : ""}
         <div class="rm-item" data-task-key="${attr(item.key)}">
-          <div class="rm-row${item.enabled ? "" : " is-off"}">
+          <div class="rm-row${item.enabled ? "" : " is-off"}" role="button" tabindex="0"
+               aria-label="${attr(`编辑「${item.title}」`)}">
             <div class="rm-when">
               <div class="rm-when-day">${esc(dayText)}</div>
               <div class="rm-when-time">${esc(timeText)}</div>
             </div>
             <div class="rm-row-main">
-              <div class="rm-row-text"><span class="rm-title" title="${attr(item.title)}">${esc(item.title)}</span>${badge}</div>
+              <div class="rm-row-text"><span class="rm-title" title="${attr(item.title)}">${esc(item.title)}</span></div>
               <div class="rm-row-meta">${esc(item.who)} · ${esc(item.scheduleText)}${esc(metaExtra)}</div>
-              ${
-                preview
-                  ? `<div class="rm-instr" title="${attr(full)}">指令：${esc(preview)}${full.length > preview.length ? "…" : ""}</div>`
-                  : ""
-              }
             </div>
-            <div class="rm-row-actions">${actions.join("")}</div>
+            <div class="rm-row-actions">
+              <button class="rm-dots" type="button" data-act="menu"
+                      aria-haspopup="menu" aria-expanded="false"
+                      aria-label="${attr(`「${item.title}」的更多操作`)}" data-tip="更多操作">⋯</button>
+            </div>
           </div>
           <div class="rm-runs" hidden></div>
         </div>`;
@@ -644,98 +725,27 @@ function renderScheduledTaskList(box, items, options = {}) {
     renderScheduledTaskList(box, all, options);
   });
 
-  box.querySelectorAll("[data-act]").forEach((button) => {
-    const key = button.closest("[data-task-key]")?.dataset.taskKey;
-    const item = key ? byKey.get(key) : null;
+  // 行本身就是编辑入口（2026-11-18）：点空白/文字/时间都打开编辑器；
+  // ⋯ 只收不常驻的动作。键位只认行自己（内部按钮的 Enter/Space 归按钮）。
+  box.querySelectorAll("[data-task-key]").forEach((itemNode) => {
+    const item = byKey.get(itemNode.dataset.taskKey);
     if (!item) return;
-    button.addEventListener("click", async () => {
-      if (button.dataset.act === "edit") {
-        if (item.promptMissing) {
-          toast("服务端还没重启，读不到指令正文；先重启再编辑，避免空正文覆盖");
-          return;
-        }
-        openScheduledTaskModal({ mode: "edit", item }, onChanged);
-        return;
-      }
-      if (button.dataset.act === "delete") {
-        confirmDeleteTask(item, onChanged);
-        return;
-      }
-      if (button.dataset.act === "history") {
-        const runsBox = button.closest(".rm-item")?.querySelector(".rm-runs");
-        if (!runsBox) return;
-        if (!runsBox.hidden) {
-          runsBox.hidden = true;
-          button.textContent = "历史";
-          return;
-        }
-        runsBox.hidden = false;
-        button.textContent = "收起";
-        runsBox.innerHTML = `<div class="set-hint">读取中…</div>`;
-        try {
-          const response = await request(taskRunsEndpoint(item), { cache: "no-store" });
-          const data = await response.json().catch(() => ({}));
-          if (!response.ok) throw new Error(data.message || String(response.status));
-          renderTaskRuns(runsBox, data.runs);
-        } catch (error) {
-          if (error.message !== "forbidden") {
-            runsBox.innerHTML = `<div class="set-hint is-error">读不到历史：${esc(error.message)}</div>`;
-          }
-        }
-        return;
-      }
-      if (button.dataset.act === "toggle") {
-        button.disabled = true;
-        try {
-          const next = !item.enabled;
-          const endpoint =
-            item.kind === "memory"
-              ? `/api/v1/agent/memory/nightly/${encodeURIComponent(item.memoryScope)}`
-              : item.kind === "reminder"
-                ? `/api/v1/agent/reminders/${encodeURIComponent(item.id)}`
-                : `/api/v1/routines/${encodeURIComponent(item.id)}`;
-          const response = await request(endpoint, {
-            method: "PATCH",
-            body: JSON.stringify({ enabled: next }),
-          });
-          const data = await response.json().catch(() => ({}));
-          if (!response.ok) {
-            toast(`没切换：${data.message || data.error || response.status}`);
-            button.disabled = false;
-            return;
-          }
-          toast(next ? "已启用" : "已暂停");
-          if (onChanged) onChanged();
-        } catch (error) {
-          if (error.message !== "forbidden") toast(`没切换：${error.message}`);
-          button.disabled = false;
-        }
-        return;
-      }
-      if (button.dataset.act === "run") {
-        const original = button.textContent;
-        button.disabled = true;
-        button.textContent = "跑中…";
-        try {
-          const endpoint =
-            item.kind === "reminder"
-              ? `/api/v1/agent/reminders/${encodeURIComponent(item.id)}/run_now`
-              : `/api/v1/routines/${encodeURIComponent(item.id)}/run_now`;
-          const response = await request(endpoint, { method: "POST" });
-          const data = await response.json().catch(() => ({}));
-          if (!response.ok || !data.ok) {
-            toast(`没跑成：${data.message || data.error || response.status}`);
-          } else {
-            toast("已跑完一轮");
-            if (onChanged) onChanged();
-          }
-        } catch (error) {
-          if (error.message !== "forbidden") toast(`没跑成：${error.message}`);
-        } finally {
-          button.disabled = false;
-          button.textContent = original;
-        }
-      }
+    const row = itemNode.querySelector(".rm-row");
+    const menuButton = itemNode.querySelector("[data-act='menu']");
+    row?.addEventListener("click", (event) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest("button, a")) return;
+      openTaskEditor(item, onChanged);
+    });
+    row?.addEventListener("keydown", (event) => {
+      if (event.target !== row) return;
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      openTaskEditor(item, onChanged);
+    });
+    menuButton?.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openSecMenu(menuButton, taskMenuItems(item, itemNode, onChanged));
     });
   });
 }

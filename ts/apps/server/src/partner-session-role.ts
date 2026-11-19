@@ -15,6 +15,14 @@ export function sideSessionsEnabled(env: NodeJS.ProcessEnv = process.env): boole
 	return flagEnabled("PARTNER_SIDE_SESSIONS", env);
 }
 
+/**
+ * 分支会话管理开关（2026-11-18）：选择器缩进 + 删除 side/分支副本。
+ * 默认开；父闸 `PARTNER_SIDE_SESSIONS` 关时本开关也视为关（flagEnabled 的父子门）。
+ */
+export function partnerSessionManageEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	return flagEnabled("PARTNER_SESSION_MANAGE", env);
+}
+
 export interface ParsedPartnerSessionId {
 	partnerId: string;
 	role: "canonical" | "side" | "group";

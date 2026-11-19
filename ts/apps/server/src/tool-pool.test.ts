@@ -32,7 +32,7 @@ test.after(() => {
 	rmSync(root, { recursive: true, force: true });
 });
 
-test("缺文件 / 坏 JSON / deferred 不是数组 → 回落代码默认 8 个", () => {
+test("缺文件 / 坏 JSON / deferred 不是数组 → 回落代码默认名单", () => {
 	assert.deepEqual(readDeferredToolNames(env), [...DEFAULT_DEFERRED_TOOL_NAMES]);
 	writeFileSync(path, "not json", "utf8");
 	assert.deepEqual(readDeferredToolNames(env), [...DEFAULT_DEFERRED_TOOL_NAMES]);

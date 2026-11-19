@@ -985,6 +985,19 @@ export class PartnersStore {
 	}
 
 	/**
+	 * 删除一条副会话链接（2026-11-18 分支会话删除）。
+	 * 只删 `role = 'side'`：canonical / routine / topic / group / delegation 不能从这里消失。
+	 * 返回受影响行数；没有命中 = 0（删除幂等，端点不把它当失败）。
+	 */
+	deleteSideLinkBySessionId(sessionId: number): number {
+		if (!Number.isInteger(sessionId) || sessionId <= 0) return 0;
+		const info = this.db
+			.prepare("DELETE FROM partner_session_links WHERE session_id = ? AND role = 'side'")
+			.run(sessionId);
+		return Number(info.changes ?? 0);
+	}
+
+	/**
 	 * 一次取全表链接（session_id > 0），给 /agent/chats 批量标注用，避免 N+1。
 	 * 同一 session 有多行时取 created_at 最早的一条（与 linkOfSession 同口径）。
 	 */

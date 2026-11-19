@@ -21,8 +21,14 @@
  * - 忙退避耗尽 / 链保险丝 / 唤醒轮失败从"清空放弃"改为**有限次重排**（10 分钟 × 3 次），
  *   放弃必留一行日志。翻案登记：批 29 的"耗尽即放弃"按用户"确保收到回信"口径收紧。
  *
- * 依赖方向：只 import partner-runtime / partners / delegation（类型）/ agent/session，
- * **不 import agent/lifecycle**（lifecycle 反向 import 本模块，再加一条就是明确的环）。
+ * 依赖方向：只 import partner-runtime / partners / delegation（类型）/ agent/session
+ * / bash-background（类型，批3 载荷形状），**不 import agent/lifecycle**
+ * （lifecycle 反向 import 本模块，再加一条就是明确的环）。
+ *
+ * 批3（2026-11-19 唤醒管道通用化与后台任务接线）：信封从"派活汇报专属"泛化为
+ * `{source, targetPartnerId, payload}` 三来源（delegation / bgjob / agent-message）。
+ * delegation 路径行为逐字节不变（回归 = 既有单测全绿）；新来源按 targetPartnerId
+ * 路由 + 通用存在性检查，总闸 `WAKE_PIPELINE_V2=false` 全部不投（回 delegation-only）。
  */
 
 import type { Conversation } from "@earendil-works/pi-durable";
@@ -37,6 +43,7 @@ import {
 	type PartnerTurnResult,
 } from "./partner-runtime.ts";
 import type { DelegationReport } from "./delegation.ts";
+import type { BgJobWakePayload } from "./bash-background.ts";
 import { conversationIsBusy } from "./agent/session.ts";
 import { maybeScheduleNudge } from "./partner-proactive.ts";
 
@@ -58,6 +65,56 @@ const MAX_REQUEUES = 3;
 
 export type WakeTimerHandle = unknown;
 
+// ── 泛化信封（批3）────────────────────────────────────────────
+//
+// 管道本体（防抖 / 忙退避 / 落盘恢复 / 重排 / 链保险丝）不问来源，只认信封。
+// delegation 载荷仍是 DelegationReport（旧形状）；bgjob / agent-message 载荷见各自接口。
+
+/** 唤醒来源：delegation=派活汇报（批29 旧）；bgjob=后台任务终态/输出变化；agent-message=执事间递话。 */
+export type WakeSource = "delegation" | "bgjob" | "agent-message";
+
+/** agent-message 信封载荷：谁递了什么话。 */
+export interface AgentMessageWakePayload {
+	fromPartnerId: string;
+	fromName: string;
+	fromDomain: string | null;
+	text: string;
+	/**
+	 * worker 决策上报（2026-11-19 批2）专用的附加字段：kind=escalation 时其余字段
+	 * 必齐，唤醒提示词改走上报纪律（respond_escalation），不再是"用 send_to_agent 回话"。
+	 * 不带 kind 的载荷与批3 前逐字节一致。
+	 */
+	kind?: "escalation";
+	escalationId?: string;
+	ticketId?: string;
+	question?: string;
+	context?: string;
+	options?: string[];
+	urgency?: "low" | "normal" | "high";
+}
+
+/** 泛化唤醒信封（批3）。targetPartnerId = 唤醒轮要落的执事；delegation 的路由仍以 canonical 复查为准。 */
+export type WakeEnvelope =
+	| { source: "delegation"; targetPartnerId: string; payload: DelegationReport }
+	| { source: "bgjob"; targetPartnerId: string; payload: BgJobWakePayload }
+	| { source: "agent-message"; targetPartnerId: string; payload: AgentMessageWakePayload };
+
+function isDelegationEnvelope(
+	envelope: WakeEnvelope,
+): envelope is Extract<WakeEnvelope, { source: "delegation" }> {
+	return envelope.source === "delegation";
+}
+
+/**
+ * 唤醒管道 v2 总闸（批3 回滚开关）：`WAKE_PIPELINE_V2=false` → bgjob / agent-message
+ * 来源**全部不投**（delegation 照旧，回批3 前的 delegation-only 路径）。
+ * 读法照 delegationWakeEnabled：只有明确 false / 0 / off 才关，拼错值不会误关。
+ */
+export function wakePipelineV2Enabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = env.WAKE_PIPELINE_V2?.trim().toLowerCase();
+	return !(raw === "false" || raw === "0" || raw === "off");
+}
+
 /**
  * 可注入的内部参数（默认全走真实实现）。单测用假时钟 / 假执事库驱动，
  * 不需要起服务、也不碰磁盘。
@@ -69,6 +126,17 @@ export interface DelegationWakeDeps {
 	companionsEnabled(): boolean;
 	/** 只认 canonical 主会话（`canonicalPartnerIdOfSession`），群 / 专线链接返回 null */
 	partnerIdOfSession(conversationId: number): string | null;
+	/**
+	 * 批3：任意 role 链接的归属解析（`partnerIdOfSession`，"这条会话归谁"）。
+	 * bgjob 的起点：命令在哪个会话跑的，就找哪个会话的执事（唤醒轮仍落 canonical 主会话）。
+	 * 缺省未注入 = 解析不了 → 不投（新来源只有装配层真实链路会用）。
+	 */
+	partnerIdOfAnySession?(conversationId: number): string | null;
+	/**
+	 * 批3：对端执事 canonical 主会话的内部 id（`sessionIdOfPartner`）；还没建过会话 = null。
+	 * agent-message 入队键用。缺省未注入 = 解析不了 → 不投。
+	 */
+	sessionIdOfPartner?(partnerId: string): number | null;
 	partnerStatus(partnerId: string): string | null;
 	ensureSession(partnerId: string): Promise<{ conversation: Conversation } | null>;
 	isBusy(chat: { conversation: Conversation }): Promise<boolean>;
@@ -92,8 +160,8 @@ export function delegationWakeEnabled(env: NodeJS.ProcessEnv = process.env): boo
 	return flagEnabled("DELEGATION_WAKE_ENABLED", env);
 }
 
-/** 待唤醒的汇报，按会话合并；取走即清空 */
-const pending = new Map<number, DelegationReport[]>();
+/** 待唤醒的信封（批3 泛化；delegation 载荷仍是 DelegationReport），按会话合并；取走即清空 */
+const pending = new Map<number, WakeEnvelope[]>();
 /** 每会话最多一个防抖定时器 */
 const timers = new Map<number, { handle: WakeTimerHandle; cancel: () => void }>();
 /** 正在 flush 的会话：期间新汇报只追加，不再排定时器（链内会接住） */
@@ -109,17 +177,17 @@ function wakeQueuePath(): string {
 /**
  * 队列落盘（原子写，照 chat-meta 的临时文件 + rename）。落盘失败只 warn——
  * 它是兜底不是主链路，不能拖累唤醒；失败的最坏结果退回"重启丢唤醒"的旧行为。
- * 日志纪律：只记条数，不落汇报正文。
+ * 日志纪律：只记条数，不落汇报正文（信封载荷同待遇，只落盘不进日志）。
  */
 function persistWakeQueue(): void {
 	try {
-		const entries = [...pending.entries()].map(([conversationId, reports]) => ({
+		const entries = [...pending.entries()].map(([conversationId, envelopes]) => ({
 			conversationId,
-			reports,
+			envelopes,
 		}));
 		mkdirSync(dirname(resolve(wakeQueuePath())), { recursive: true });
 		const temp = `${wakeQueuePath()}.tmp-${process.pid}-${Date.now()}`;
-		writeFileSync(temp, JSON.stringify({ version: 1, entries }), "utf8");
+		writeFileSync(temp, JSON.stringify({ version: 2, entries }), "utf8");
 		renameSync(temp, wakeQueuePath());
 	} catch (error) {
 		console.warn(
@@ -138,21 +206,65 @@ function isReportLike(value: unknown): value is DelegationReport {
 	);
 }
 
+/** 单条信封的最小形状（读回时防脏数据；载荷按来源分查）。 */
+function isEnvelopeLike(value: unknown): value is WakeEnvelope {
+	if (typeof value !== "object" || value === null) return false;
+	const source = (value as { source?: unknown }).source;
+	const targetPartnerId = (value as { targetPartnerId?: unknown }).targetPartnerId;
+	if (typeof targetPartnerId !== "string" || targetPartnerId.length === 0) return false;
+	const payload = (value as { payload?: unknown }).payload;
+	if (typeof payload !== "object" || payload === null) return false;
+	if (source === "delegation") return isReportLike(payload);
+	if (source === "bgjob") {
+		const bg = payload as { jobId?: unknown; commandSummary?: unknown; tail?: unknown };
+		return typeof bg.jobId === "string" && typeof bg.commandSummary === "string" && typeof bg.tail === "string";
+	}
+	if (source === "agent-message") {
+		const message = payload as { fromName?: unknown; text?: unknown };
+		return typeof message.fromName === "string" && typeof message.text === "string";
+	}
+	return false;
+}
+
 /**
  * 启动恢复（2026-11-15 送达兜底 §C）：读回上一次进程没送完的唤醒队列并重排防抖。
  * 文件不存在 / 坏了 / 条目脏 → 当空队列，不抛。由 index.ts 启动段调用。
+ *
+ * 批3 兼容两种形状：`reports`（批3 前的 delegation 旧文件，包回 delegation 信封，
+ * 行为不变）与 `envelopes`（泛化信封）。读旧形状不炸。
  */
 export function restoreDelegationWakeQueue(deps: DelegationWakeDeps = defaultDeps): number {
 	try {
 		const parsed = JSON.parse(readFileSync(wakeQueuePath(), "utf8")) as {
-			entries?: Array<{ conversationId?: unknown; reports?: unknown }>;
+			entries?: Array<{ conversationId?: unknown; reports?: unknown; envelopes?: unknown }>;
 		};
 		let restored = 0;
 		for (const entry of Array.isArray(parsed.entries) ? parsed.entries : []) {
 			const conversationId = Number(entry.conversationId);
+			if (!Number.isFinite(conversationId)) continue;
+			// 新形状（批3）：泛化信封，恢复后照常按 source 分支路由
+			if (Array.isArray(entry.envelopes)) {
+				const envelopes = entry.envelopes.filter(isEnvelopeLike);
+				if (envelopes.length === 0) continue;
+				pending.set(conversationId, envelopes);
+				restored += envelopes.length;
+				if (!timers.has(conversationId) && !running.has(conversationId)) {
+					scheduleFlush(conversationId, deps);
+				}
+				continue;
+			}
+			// 旧形状（批3 前）：delegation 汇报，包回信封（targetPartnerId 由 flush 时的
+			// canonical 复查现算，落盘里留空即可——delegation 路由从不读这个字段）
 			const reports = (Array.isArray(entry.reports) ? entry.reports : []).filter(isReportLike);
-			if (!Number.isFinite(conversationId) || reports.length === 0) continue;
-			pending.set(conversationId, reports);
+			if (reports.length === 0) continue;
+			pending.set(
+				conversationId,
+				reports.map((report) => ({
+					source: "delegation" as const,
+					targetPartnerId: "",
+					payload: report,
+				})),
+			);
 			restored += reports.length;
 			if (!timers.has(conversationId) && !running.has(conversationId)) {
 				scheduleFlush(conversationId, deps);
@@ -170,6 +282,8 @@ const defaultDeps: DelegationWakeDeps = {
 	companionsEnabled: () => COMPANIONS_ENABLED,
 	partnerIdOfSession: (conversationId) =>
 		partnersStore().canonicalPartnerIdOfSession(conversationId),
+	partnerIdOfAnySession: (conversationId) => partnersStore().partnerIdOfSession(conversationId),
+	sessionIdOfPartner: (partnerId) => partnersStore().sessionIdOfPartner(partnerId),
 	partnerStatus: (partnerId) => partnersStore().get(partnerId)?.status ?? null,
 	ensureSession: (partnerId) => ensurePartnerSession(partnerId),
 	isBusy: (chat) => conversationIsBusy(chat.conversation),
@@ -197,6 +311,32 @@ function guardPartner(
 	if (!deps.companionsEnabled()) return null;
 	const partnerId = deps.partnerIdOfSession(conversationId);
 	if (partnerId === null) return null;
+	if (deps.partnerStatus(partnerId) !== "active") return null;
+	return partnerId;
+}
+
+/**
+ * flush 时的信封守卫（批3）：按 source 分支。
+ *
+ * - delegation（含混批 / 空批）：仍走 guardPartner，锁 canonical 主会话（批 29 语义不动）。
+ *   混批只可能发生在 canonical 主会话上——delegation 入队时已过 canonical 锁，
+ *   bgjob 的 targetPartnerId 必然同执事，以 canonical 口径判整批是安全的。
+ * - bgjob / agent-message：按 targetPartnerId 路由 + 通用存在性检查
+ *   （partnerStatus 查无此人返回 null、停用不是 active，都不投）。
+ *   `WAKE_PIPELINE_V2=false` → 新来源全部不投（回 delegation-only 路径）。
+ */
+function guardWake(
+	conversationId: number,
+	envelopes: WakeEnvelope[],
+	deps: DelegationWakeDeps,
+): string | null {
+	if (envelopes.length === 0 || envelopes.some(isDelegationEnvelope)) {
+		return guardPartner(conversationId, deps);
+	}
+	if (!wakePipelineV2Enabled()) return null;
+	const partnerId = envelopes[0]!.targetPartnerId;
+	if (!partnerId) return null;
+	if (envelopes.some((envelope) => envelope.targetPartnerId !== partnerId)) return null;
 	if (deps.partnerStatus(partnerId) !== "active") return null;
 	return partnerId;
 }
@@ -233,19 +373,135 @@ export function buildWakePrompt(reports: DelegationReport[]): string {
 }
 
 /**
- * 取走即清空（纯函数，单测直接调）。没有该会话的 pending → 空数组。
+ * bgjob 唤醒提示词（批3，固定字节可单测）。信封只递纸条不代写：命令摘要 / 终态 /
+ * 尾部输出是原料，说不说、怎么说由执事自己定（dim 教训）。尾部 ≤400 字由装配层
+ * 的 tailForWake 保证，这里原样渲染。
  */
-export function collectPending(
-	store: Map<number, DelegationReport[]>,
+export function buildBgJobWakePrompt(payloads: BgJobWakePayload[]): string {
+	const header = [
+		"[Background job wake context]",
+		"turnAuthority: autonomous",
+		"",
+		"以下后台任务刚到终态或有新输出。逐条接住：",
+		"- 完成了：一句话说清结果与落点；",
+		"- 失败了：说清原因与下一步建议；",
+		"- 还在跑、只是有新输出的：看一眼尾部，判断要不要跟进，不必复述全文。",
+		"不要重复执行同样的命令。没有要补充的就一句话收尾。",
+		"",
+		"本批任务：",
+	].join("\n");
+	const lines = payloads.map((payload) => {
+		const state =
+			payload.status === "running"
+				? "还在跑"
+				: `${payload.status}，退出码 ${payload.exitCode ?? "未知"}`;
+		const head = `- 任务 ${payload.jobId}（${state}）：${payload.commandSummary}`;
+		return payload.tail ? `${head}\n  尾部输出：\n${payload.tail}` : head;
+	});
+	return [header, ...lines].join("\n");
+}
+
+/**
+ * agent-message 唤醒提示词（批3，固定字节可单测）。
+ * 批2（决策上报链）接入第一个调用方：worker 的 escalation 走 agent-message 信封
+ * 唤醒派活方执事，payload.kind=escalation 时换上报纪律段（respond_escalation）。
+ */
+export function buildAgentMessageWakePrompt(payloads: AgentMessageWakePayload[]): string {
+	const escalations = payloads.filter((payload) => payload.kind === "escalation");
+	if (escalations.length === payloads.length && escalations.length > 0) {
+		return buildEscalationWakePrompt(escalations);
+	}
+	const header = [
+		"[Agent message wake context]",
+		"turnAuthority: autonomous",
+		"",
+		"你不在时，别的执事给你递了话。逐条接住：",
+		"- 要动手的：自己安排；",
+		"- 要回话的：用 send_to_agent 回给对方；",
+		"- 要主人知情的：在回复里说清楚。",
+		"不要把原文整段转述给主人。",
+		"",
+		"来信：",
+	].join("\n");
+	const lines = payloads.map((payload) => {
+		const domain = payload.fromDomain?.trim() || "无领域";
+		return `- 来自执事 ${payload.fromName}（${domain}）：${payload.text}`;
+	});
+	return [header, ...lines].join("\n");
+}
+
+/**
+ * worker 决策上报的唤醒提示词（批2，固定字节可单测）。
+ *
+ * 派活方执事（或总管）收到后自己跑一轮决定答不答得了：
+ * - 答得了 → respond_escalation {ticketId, action:"answer", answer}；
+ * - 答不了（要花钱 / 主人私事 / 自己没上下文）→ action:"escalate" 升级给主人。
+ * 工具在按需池里：没加载先 tool_search。全程不要直接给 worker 发消息
+ * （send_to_agent 对非来源会话会被拒），答复只走 respond_escalation。
+ */
+export function buildEscalationWakePrompt(payloads: AgentMessageWakePayload[]): string {
+	const header = [
+		"[Escalation wake context]",
+		"turnAuthority: autonomous",
+		"",
+		"你派出去的工人上报了一个要拍板 / 要问人的问题，等你的答复才继续干活。逐条处理：",
+		"- 你能拍板的：用 respond_escalation 答复（action=\"answer\"），答复要具体到工人能直接照做；",
+		"- 答不了的（要花钱 / 主人的私事 / 你没有上下文）：respond_escalation（action=\"escalate\"）升级给主人，不要硬答；",
+		"- respond_escalation 在按需工具池里，没加载就先 tool_search({name:\"respond_escalation\"})。",
+		"不要用 send_to_agent 直接给工人发消息（会被拒），也不要重复派单。",
+		"",
+		"本批上报：",
+	].join("\n");
+	const lines = payloads.map((payload) => {
+		const domain = payload.fromDomain?.trim() || "无领域";
+		const head = `- 单 ${payload.ticketId ?? "?"}（${domain}，紧急度 ${payload.urgency ?? "normal"}）：${payload.question ?? payload.text}`;
+		const context = payload.context ? `\n  背景：${payload.context}` : "";
+		const options =
+			payload.options && payload.options.length > 0
+				? `\n  候选：${payload.options.join(" / ")}`
+				: "";
+		return `${head}${context}${options}`;
+	});
+	return [header, ...lines].join("\n");
+}
+
+/**
+ * 一批信封 → 唤醒提示词（批3）。纯 delegation 批逐字节走 buildWakePrompt（回归底线）；
+ * 混批 / 纯新来源按来源分节拼接，每节自带固定头。
+ */
+export function buildEnvelopeWakePrompt(envelopes: WakeEnvelope[]): string {
+	const delegationPayloads = envelopes.filter(isDelegationEnvelope).map((e) => e.payload);
+	const bgPayloads = envelopes
+		.filter((e): e is Extract<WakeEnvelope, { source: "bgjob" }> => e.source === "bgjob")
+		.map((e) => e.payload);
+	const messagePayloads = envelopes
+		.filter((e): e is Extract<WakeEnvelope, { source: "agent-message" }> => e.source === "agent-message")
+		.map((e) => e.payload);
+	if (bgPayloads.length === 0 && messagePayloads.length === 0) {
+		return buildWakePrompt(delegationPayloads);
+	}
+	const sections: string[] = [];
+	if (delegationPayloads.length > 0) sections.push(buildWakePrompt(delegationPayloads));
+	if (bgPayloads.length > 0) sections.push(buildBgJobWakePrompt(bgPayloads));
+	if (messagePayloads.length > 0) sections.push(buildAgentMessageWakePrompt(messagePayloads));
+	return sections.join("\n\n");
+}
+
+/**
+ * 取走即清空（纯函数，单测直接调）。没有该会话的 pending → 空数组。
+ * 批3 泛化为信封类型参数：delegation 测试仍可用 `Map<number, DelegationReport[]>` 直调。
+ */
+export function collectPending<T>(
+	store: Map<number, T[]>,
 	conversationId: number,
-): DelegationReport[] {
-	const reports = store.get(conversationId);
-	if (!reports || reports.length === 0) {
+): T[] {
+	const items = store.get(conversationId);
+	if (!items || items.length === 0) {
 		store.delete(conversationId);
 		return [];
 	}
 	store.delete(conversationId);
-	return reports;
+	return items;
 }
 
 function clearConversation(conversationId: number): void {
@@ -315,11 +571,28 @@ function oneLine(text: string): string {
 	return text.replace(/\s+/g, " ").trim().slice(0, 200);
 }
 
+/** 入队共享段（批3）：追加信封 → 落盘 → 没有定时器 / 链在跑就排一个 2 秒防抖。 */
+function enqueueWake(
+	conversationId: number,
+	envelope: WakeEnvelope,
+	deps: DelegationWakeDeps,
+): void {
+	const list = pending.get(conversationId);
+	if (list) list.push(envelope);
+	else pending.set(conversationId, [envelope]);
+	persistWakeQueue();
+	// 已有定时器 / 正在跑链：只追加，接住由那条链负责
+	if (timers.has(conversationId) || running.has(conversationId)) return;
+	scheduleFlush(conversationId, deps);
+}
+
 /**
  * 派活汇报写回后的唤醒触发（fire-and-forget）。
  *
  * **绝不抛**：调用方在汇报回调里，唤醒出错不能拖累汇报。守卫不过 = 静默返回（= 改动前行为）。
- * 通过守卫后把汇报追加进 pending，该会话没有定时器就排一个 2 秒防抖。
+ * 通过守卫后把汇报**包成 delegation 信封**追加进 pending（批3），该会话没有定时器就排一个
+ * 2 秒防抖。路由语义不变：flush 时仍按 canonical 复查，信封里的 targetPartnerId 不参与
+ * delegation 的路由判断。
  */
 export function wakeOnDelegationReport(
 	conversationId: number,
@@ -327,14 +600,74 @@ export function wakeOnDelegationReport(
 	deps: DelegationWakeDeps = defaultDeps,
 ): void {
 	try {
-		if (guardPartner(conversationId, deps) === null) return;
-		const list = pending.get(conversationId);
-		if (list) list.push(report);
-		else pending.set(conversationId, [report]);
-		persistWakeQueue();
-		// 已有定时器 / 正在跑链：只追加，接住由那条链负责
-		if (timers.has(conversationId) || running.has(conversationId)) return;
-		scheduleFlush(conversationId, deps);
+		const partnerId = guardPartner(conversationId, deps);
+		if (partnerId === null) return;
+		enqueueWake(
+			conversationId,
+			{ source: "delegation", targetPartnerId: partnerId, payload: report },
+			deps,
+		);
+	} catch {
+		// 唤醒是增值动作，任何异常都不外抛
+	}
+}
+
+/**
+ * 后台任务完成 / 输出变化的唤醒触发（批3，fire-and-forget，绝不抛）。
+ *
+ * 目标 = 发起该命令的会话所属执事（任意 role 链接都算归属，`partnerIdOfAnySession`），
+ * 唤醒轮落在该执事的 canonical 主会话（flush 时 ensureSession 负责取/补建）。
+ * 命令在无主会话（普通 worker 对话）里跑的：解析不出执事 → 不投，只保留既有的
+ * "写记录"行为。守卫（存在性 / WAKE_PIPELINE_V2）flush 时还会重查一遍。
+ */
+export function wakeOnBgJobFinish(
+	conversationId: number,
+	payload: BgJobWakePayload,
+	deps: DelegationWakeDeps = defaultDeps,
+): void {
+	try {
+		if (!wakePipelineV2Enabled()) return;
+		if (!deps.companionsEnabled()) return;
+		const partnerId = deps.partnerIdOfAnySession?.(conversationId) ?? null;
+		if (partnerId === null) return;
+		if (deps.partnerStatus(partnerId) !== "active") return;
+		enqueueWake(
+			conversationId,
+			{ source: "bgjob", targetPartnerId: partnerId, payload },
+			deps,
+		);
+	} catch {
+		// 唤醒是增值动作，任何异常都不外抛
+	}
+}
+
+/**
+ * agent→agent 递话的唤醒触发（批3 信封形状；**当前无调用方**）。
+ *
+ * 2026-11-19 核实：send_to_agent 的送达本身已能开轮（durable submit 空闲即 startRun、
+ * 忙时进 inbox followUp 本轮边界自动续跑），到达路径只剩"对端还没有会话"一个空缺，
+ * 由装配层 deliverPartnerRelay 补建会话解决——所以这条来源本批不接线。入口与
+ * 提示词保留，给后续批次做确定性接线（例如递话失败后的兜底唤醒）。
+ *
+ * 入队键 = 对端 canonical 主会话的内部 id（`sessionIdOfPartner`）；对端还没有会话时
+ * 不投（递话通道自己会报"还没有自己的会话"，与改动前一致）。
+ */
+export function wakeOnAgentMessage(
+	targetPartnerId: string,
+	payload: AgentMessageWakePayload,
+	deps: DelegationWakeDeps = defaultDeps,
+): void {
+	try {
+		if (!wakePipelineV2Enabled()) return;
+		if (!deps.companionsEnabled()) return;
+		if (deps.partnerStatus(targetPartnerId) !== "active") return;
+		const sessionId = deps.sessionIdOfPartner?.(targetPartnerId) ?? null;
+		if (sessionId === null) return;
+		enqueueWake(
+			sessionId,
+			{ source: "agent-message", targetPartnerId, payload },
+			deps,
+		);
 	} catch {
 		// 唤醒是增值动作，任何异常都不外抛
 	}
@@ -361,7 +694,8 @@ export async function flushDelegationWake(
 	try {
 		let rounds = 0;
 		for (;;) {
-			const partnerId = guardPartner(conversationId, deps);
+			// 批3：守卫按 source 分支（delegation 仍锁 canonical，新来源按 targetPartnerId 路由）
+			const partnerId = guardWake(conversationId, pending.get(conversationId) ?? [], deps);
 			if (partnerId === null) {
 				clearConversation(conversationId);
 				return;
@@ -396,11 +730,11 @@ export async function flushDelegationWake(
 				return;
 			}
 
-			const reports = collectPending(pending, conversationId);
+			const envelopes = collectPending(pending, conversationId);
 			persistWakeQueue();
 			rounds += 1;
 			const started = Date.now();
-			const result = await deps.runTurn(partnerId, buildWakePrompt(reports), {
+			const result = await deps.runTurn(partnerId, buildEnvelopeWakePrompt(envelopes), {
 				authority: "autonomous",
 				quiet: false,
 				sessionMode: "persistent",
@@ -411,7 +745,7 @@ export async function flushDelegationWake(
 				// 会让保险丝重排永远攒不起次数（2026-11-15 首轮实现踩过，测试抓的）。
 				if ((pending.get(conversationId)?.length ?? 0) === 0) requeues.delete(conversationId);
 				console.log(
-					`[wake] 会话 ${conversationId} 唤醒轮 ok tickets=${reports.length} 耗时${seconds}s`,
+					`[wake] 会话 ${conversationId} 唤醒轮 ok tickets=${envelopes.length} 耗时${seconds}s`,
 				);
 				// 批3：这是既有"主动开口时机"之一——唤醒轮成功后再看要不要发一条挂念。
 				// 内部自判模块 / 子开关 / 一天一条；失败只返回 false，不影响唤醒链。
@@ -424,10 +758,10 @@ export async function flushDelegationWake(
 				console.warn(
 					`[wake] 会话 ${conversationId} 唤醒轮失败: ${oneLine(result.error ?? "未知错误")}`,
 				);
-				// 失败回灌队首 + 重排（2026-11-15 送达兜底 §C.4）：取走的汇报不放回去
+				// 失败回灌队首 + 重排（2026-11-15 送达兜底 §C.4）：取走的信封不放回去
 				// 就真丢了；链尾的 finally 看到已有定时器不会重复排。
 				const waiting = pending.get(conversationId) ?? [];
-				pending.set(conversationId, [...reports, ...waiting]);
+				pending.set(conversationId, [...envelopes, ...waiting]);
 				requeueConversation(conversationId, deps, "唤醒轮失败");
 				return;
 			}

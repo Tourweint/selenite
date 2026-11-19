@@ -8,6 +8,7 @@
  */
 
 import { loadChats } from "./chats-list.js";
+import { syncChatProjectPill } from "./chat-project.js";
 import { el } from "./dom.js";
 import { request } from "./net.js";
 import { openFileBrowser } from "./project-browser.js";
@@ -65,6 +66,8 @@ function applyProjectData(data) {
   switcher.currentProjectId = data.currentProjectId || null;
   switcher.unavailable = false;
   syncProjectPill();
+  // 新建对话的只读归属标签跟着侧栏数据走（2026-11-18）
+  syncChatProjectPill();
 }
 
 /**
@@ -190,8 +193,8 @@ function projectRowNode(project, current) {
     toggleProjectFlyout(row, caret, fly);
   });
   caret.setAttribute("aria-expanded", "false");
-  // 2026-11-16 对话归主工作区：行尾不再有「新开对话」——普通对话固定落主工作区，
-  // 项目只负责「看」（文件 / 任务 / 历史）。要干活走任务中心派活。
+  // 2026-11-16：行尾不再有「新开对话」——普通对话跟随「当前项目」，要换项目先点行选中、
+  // 再到「对话」分区新建；项目行只负责「看」（文件 / 任务 / 历史）。
   row.append(caret);
 
   const select = () => void selectProject(project.id);
@@ -315,9 +318,9 @@ function projectFlyout(project) {
 }
 
 /**
- * 选中项目 = 记住「上次查看的项目」（2026-11-16 对话归主工作区）。
- * 它只影响文件浏览器 / 项目弹层 / 任务筛选；**不再决定任何对话落点**——
- * 普通新建对话固定落主工作区，`PUT /workspaces/current-project` 降级为 UI 状态。
+ * 选中项目 = 决定**下一个新 worker 对话**的项目归属（普通对话跟随「当前项目」；
+ * 没选项目 = 落主工作区）。已落盘会话的归属是创建时快照，不受这里的切换影响。
+ * 文件浏览器 / 项目弹层 / 任务筛选也跟当前项目走。
  */
 async function selectProject(projectId, options = {}) {
   try {
@@ -332,6 +335,8 @@ async function selectProject(projectId, options = {}) {
     }
     state.switcher.currentProjectId = projectId;
     syncProjectRows(state.switcher.items || []);
+    // 新建态的只读归属标签跟着左侧选择变（2026-11-18）
+    syncChatProjectPill();
     if (!options.silent) {
       if (!projectId) {
         toast("已回到工作区（普通对话的默认落点）");

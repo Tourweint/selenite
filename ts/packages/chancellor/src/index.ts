@@ -352,6 +352,14 @@ export async function runChancellor(
       employeeKind: employee,
       ...(storedProfile ? { employeeProfile: storedProfile } : {}),
       emit: (event) => emit({ ...event, ticketId: ticket.id }),
+      // 决策上报（2026-11-19 批2）：worker 跑动中的 escalation 原样包成事件推给宿主；
+      // 路由 / 限流 / 答复都在宿主侧，chancellor 只透传。
+      onEscalation: (escalation) =>
+        emit({
+          type: "escalation",
+          ticketId: ticket.id,
+          escalation,
+        }),
     });
 
     return await finishRuns({
@@ -365,6 +373,8 @@ export async function runChancellor(
       repair: repairSlot,
       // 证据裁判（2026-11-10 批 14）：宿主注入的能力；chancellor 只在验收 fail 时用。
       ...(opts.judge ? { judge: opts.judge } : {}),
+      // 质检方式（2026-11-19 批2）：宿主从派活设置透传，只影响新单。
+      ...(req.qaWorker === true ? { qaWorker: true } : {}),
     });
   };
 
@@ -479,6 +489,8 @@ interface FinishRunsContext {
   repair?: { requested?: { reviews: Review[]; runs: TaskRun[]; judgeReason?: string } };
   /** 证据裁判（2026-11-10 批 14）：只由宿主注入；不传 = 旧行为。 */
   judge?: JudgeFn;
+  /** 质检方式（2026-11-19 批2）：true = 验收改派质检 worker；不传 = 内部请求（现状）。 */
+  qaWorker?: boolean;
 }
 
 /** 派活之后的统一收口：短接结论、验收、整体目标核对。首跑和 resume 共用。 */
@@ -512,7 +524,12 @@ async function finishRuns(ctx: FinishRunsContext): Promise<TicketResult> {
         slug: run.task.slug,
         message: `验收 ${run.dirName}`,
       });
-      review = await reviewTask(run, ticket, signal);
+      // 质检方式（2026-11-19 批2）：qaWorker=true 时验收改派质检 worker；
+      // 关 / 未注入实现时 reviewTask 内部回落内部请求，与改动前一致。
+      review = await reviewTask(run, ticket, signal, {}, {
+        ...(ctx.qaWorker ? { qaWorker: true } : {}),
+        total: tasks.length,
+      });
     }
     reviews.push(review);
     store.saveReview(review);
@@ -1391,6 +1408,13 @@ async function resumeTicket(
       ...(profile ? { employeeProfile: profile } : {}),
       completedRuns: runs,
       resumeAnswer: answer,
+      // 续跑的单也要能上报（批2）：同一张单的宿主连接还在。
+      onEscalation: (escalation) =>
+        emit({
+          type: "escalation",
+          ticketId: ticket.id,
+          escalation,
+        }),
       ...(previousInflight?.worktrees.find((item) => item.seq === row.seq)
         ? {
             resumeWorktreePath: previousInflight.worktrees.find(

@@ -12,6 +12,7 @@ import { openConversation } from "./chat-open.js";
 import { attr, esc } from "./markdown.js";
 import { request } from "./net.js";
 import { syncRosterBusy } from "./partners-status.js";
+import { openAddPhoneModal } from "./settings-connection.js";
 import { state } from "./state.js";
 import { openConfirm, showAlert, toast } from "./ui-atoms.js";
 
@@ -566,7 +567,7 @@ async function loadDevices() {
     const tip = stale
       ? "它来过这台电脑，但手里那枚凭据不是这里发的，所以一直被拒。现在它没在说话，行里的时间是它最后一次回话。认领后这枚凭据立刻生效，它再来就正常了。"
       : entry.kind === "main"
-        ? "用主令牌直连的设备：它其实能用，只是没走扫码配对——所以这里只有连接方式，没有名字和 ID。让它扫一次上方的本地连接码，就能变成正常一行。"
+        ? "用主令牌直连的设备：它其实能用，只是没走扫码配对——所以这里只有连接方式，没有名字和 ID。让它扫一次上方「添加手机」里本地连接出的码，就能变成正常一行。"
         : revoked
           ? "它的凭据已经撤销，请求被拒；重新扫一次码就能回来。"
           : "它正连着这台电脑，但手里那枚凭据不是这里发的（别处配的 / 中继发的 / 旧库留下的），所以每个请求都被拒。认领 = 把这枚凭据登记成本机设备，立刻生效，不用重新扫码。";
@@ -576,7 +577,7 @@ async function loadDevices() {
       entry.kind === "unknown" && entry.tokenHint
         ? `<button class="ghost" type="button" data-adopt="${esc(entry.tokenHint)}" data-name="${esc(label)}" data-tip="把这枚凭据登记成一台设备，给它起个名字。认领后它就正常了，也随时能移除。">认领</button>`
         : entry.kind === "main"
-          ? `<button class="ghost" type="button" data-pair="1" data-tip="让它扫一次上方的本地连接码，换一枚自己的设备凭据——之后就不用把主令牌留在设备里了。">去配对</button>`
+          ? `<button class="ghost" type="button" data-pair="1" data-tip="让它扫一次上方「添加手机」里本地连接出的码，换一枚自己的设备凭据——之后就不用把主令牌留在设备里了。">去配对</button>`
           : "";
     rows.push(`<div class="row">
       <div class="row-main">
@@ -608,7 +609,7 @@ async function loadDevices() {
   if (!rows.length) {
     card.innerHTML = `<div class="row"><div class="row-main">
       <div class="row-label">还没有设备连进来</div>
-      <div class="row-hint">上面「本地连接」扫一次码，或「远程连接」点「添加手机」加一台</div>
+      <div class="row-hint">上面「添加手机」点开，选本地或远程加一台</div>
     </div></div>`;
     return;
   }
@@ -627,12 +628,10 @@ async function loadDevices() {
   for (const button of card.querySelectorAll("[data-adopt]")) {
     button.addEventListener("click", () => void adoptPeer(button.dataset.adopt || "", button));
   }
-  // 用主令牌直连的设备：唯一正经出路是让它扫码。点了就把上面那张本地连接卡的码换新并滚到眼前。
+  // 用主令牌直连的设备：唯一正经出路是让它扫码，直接开「添加手机」的本地面板
+  //（2026-11-18 合并后本地/远程在同一张浮层卡里，不再有页面内联二维码可滚过去）。
   for (const button of card.querySelectorAll("[data-pair]")) {
-    button.addEventListener("click", () => {
-      document.getElementById("pair-refresh")?.click();
-      document.getElementById("pair-qr")?.scrollIntoView({ block: "center", behavior: "smooth" });
-    });
+    button.addEventListener("click", () => openAddPhoneModal("local"));
   }
 }
 

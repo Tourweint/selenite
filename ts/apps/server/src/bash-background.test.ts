@@ -4,7 +4,11 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+	BG_WAKE_TAIL_CHARS,
 	bashBackgroundEnabled,
+	bgJobWakeEnabled,
+	bgJobWatchIntervalSeconds,
+	bgJobWakePayload,
 	killBgJob,
 	listBgJobs,
 	moveToBackground,
@@ -12,6 +16,7 @@ import {
 	readBgJobLog,
 	replacedResult,
 	summarizeCommand,
+	tailForWake,
 	timeoutSecondsFromResult,
 	type BgJobRecord,
 } from "./bash-background.ts";
@@ -252,4 +257,96 @@ test("索引裁剪：超限时只删最旧的已结束条目，在跑的与日�
 	assert.deepEqual(kept.sort(), ["bg-new-333333", "bg-old-111111", "bg-run-000000"].sort());
 	assert.equal(readFileSync(join(dir, "bg-old-222222.log"), "utf8"), "x", "日志文件不删");
 	assert.equal(pruneBgIndex(dir, 3), 0, "没超限时不动");
+});
+
+// ── 完成即唤醒 / 输出变化检测（2026-11-19 唤醒管道批3）────────────────────
+
+test("唤醒开关与间隔：BG_JOB_WAKE_ENABLED 默认开；间隔缺省 0（关）、非法回落 0", () => {
+	assert.equal(bgJobWakeEnabled({}), true, "不配 = 开（新能力默认开）");
+	assert.equal(bgJobWakeEnabled({ BG_JOB_WAKE_ENABLED: "false" }), false);
+	assert.equal(bgJobWakeEnabled({ BG_JOB_WAKE_ENABLED: "0" }), false);
+	assert.equal(bgJobWakeEnabled({ BG_JOB_WAKE_ENABLED: "off" }), false);
+	assert.equal(bgJobWakeEnabled({ BG_JOB_WAKE_ENABLED: "TRUE" }), true);
+	assert.equal(bgJobWakeEnabled({ BG_JOB_WAKE_ENABLED: "bogus" }), true, "拼错值不误关");
+
+	assert.equal(bgJobWatchIntervalSeconds({}), 0, "缺省 0 = 仅完成唤醒");
+	assert.equal(bgJobWatchIntervalSeconds({ BG_JOB_WATCH_INTERVAL_S: "0" }), 0);
+	assert.equal(bgJobWatchIntervalSeconds({ BG_JOB_WATCH_INTERVAL_S: "-3" }), 0, "负数回落 0");
+	assert.equal(bgJobWatchIntervalSeconds({ BG_JOB_WATCH_INTERVAL_S: "abc" }), 0, "非法回落 0");
+	assert.equal(bgJobWatchIntervalSeconds({ BG_JOB_WATCH_INTERVAL_S: "10" }), 10);
+	assert.equal(bgJobWatchIntervalSeconds({ BG_JOB_WATCH_INTERVAL_S: "2.9" }), 2, "向下取整");
+});
+
+test("唤醒载荷：尾部保留末尾 ≤400 字；running 恒无退出码", () => {
+	assert.equal(BG_WAKE_TAIL_CHARS, 400);
+	const long = Array.from({ length: 50 }, (_, index) => `line-${index}`).join("\n");
+	const tail = tailForWake(long);
+	assert.ok(tail.length <= 400, `尾部应 ≤400 字，实际 ${tail.length}`);
+	assert.ok(tail.endsWith("line-49"), "保留末尾（尾部输出的信息量在结尾）");
+	assert.equal(tailForWake("short"), "short");
+	assert.equal(tailForWake("  padded  "), "padded", "先去首尾空白再截");
+
+	const record: BgJobRecord = {
+		id: "bg-w-1",
+		commandSummary: "npm run build",
+		startedAt: "2026-11-19T00:00:00.000Z",
+		status: "done",
+		exitCode: 0,
+		endedAt: "2026-11-19T00:01:00.000Z",
+	};
+	const payload = bgJobWakePayload(record, long, "done");
+	assert.equal(payload.jobId, "bg-w-1");
+	assert.equal(payload.commandSummary, "npm run build");
+	assert.equal(payload.status, "done");
+	assert.equal(payload.exitCode, 0);
+	assert.ok(payload.tail.length <= 400);
+	const running = bgJobWakePayload(record, "x", "running");
+	assert.equal(running.status, "running");
+	assert.equal(running.exitCode, null, "running 恒无退出码");
+});
+
+test("输出变化检测：间隔 1s + 渐进输出 → 运行中触发一次变化回调；完成恰一次收口", async () => {
+	const dir = tempDir();
+	const changes: Array<{ id: string; tail: string; at: number }> = [];
+	const finished = new Promise<{ id: string; status: string; at: number }>((resolve) => {
+		moveToBackground({
+			// 渐进输出：约 0.4s 间隔打 4 行，~1.6s 收尾——1s 的检测间隔只够赶上一拍
+			command: 'node -e "let n=0; const iv=setInterval(()=>{n++; console.log(100+n); if(n>=4) clearInterval(iv);},400)"',
+			cwd: process.cwd(),
+			timeoutSeconds: 1,
+			dir,
+			watchIntervalSeconds: 1,
+			onOutputChange: (record, logTail) =>
+				changes.push({ id: record.id, tail: logTail, at: Date.now() }),
+			onFinished: (record) => resolve({ id: record.id, status: record.status, at: Date.now() }),
+		});
+	});
+	const result = await finished;
+	// 给"完成收口后漏网的一拍"留观察窗口：检测定时器必须在收口时撤干净
+	await new Promise((resolve) => setTimeout(resolve, 400));
+	assert.equal(result.status, "done");
+	assert.ok(changes.length >= 1, `运行中触发过变化回调（实际 ${changes.length} 次）`);
+	for (const change of changes) {
+		assert.equal(change.id, result.id);
+		assert.ok(change.tail.includes("101"), "变化回调带日志尾部");
+		assert.equal(change.at < result.at, true, "变化回调先于完成收口");
+	}
+});
+
+test("输出变化检测：间隔 0（默认关）→ 全程只完成收口，不触发变化回调", async () => {
+	const dir = tempDir();
+	const changes: string[] = [];
+	const finished = new Promise<string>((resolve) => {
+		moveToBackground({
+			command: 'node -e "console.log(7)"',
+			cwd: process.cwd(),
+			timeoutSeconds: 1,
+			dir,
+			watchIntervalSeconds: 0,
+			onOutputChange: (record) => changes.push(record.id),
+			onFinished: (record) => resolve(record.status),
+		});
+	});
+	assert.equal(await finished, "done");
+	assert.equal(changes.length, 0, "间隔 0 = 仅完成唤醒");
 });

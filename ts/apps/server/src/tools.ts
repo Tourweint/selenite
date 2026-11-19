@@ -20,6 +20,7 @@ import {
 } from "./partner-manage.ts";
 import { defineTool, type ToolRegistration } from "@earendil-works/pi-durable";
 import { askUserEnabled, createAskUserTool } from "./ask-user.ts";
+import { createRespondEscalationTool, respondEscalationAvailable } from "./escalation.ts";
 import { executorSummary } from "./executor-config.ts";
 import { scopeKey, type MemoryEngine, type MemoryKind, type MemoryScope } from "@lifediary/memory";
 // 群组核心（2026-11-07）：建群校验与落库的唯一实现，HTTP 端点共用同一份。
@@ -125,6 +126,7 @@ import { dispatchRemoteDelegation } from "./relay-matrix.ts";
 import { nextReminderAt, ReminderTask } from "./reminder.ts";
 import type { SkillStore } from "./skills.ts";
 import type { SkillAdviceSaveResult } from "./skill-advice.ts";
+import { SAVE_REMINDER_ADVICE_DESCRIPTION, type ReminderAdviceSaveResult } from "./reminder-advice.ts";
 // 课题工具（2026-11-07 长期课题跟进）：存储 / 搜索都从 deps 注入，测试可替换、缺失不注册。
 import { TOPICS_ENABLED, type TopicsStore } from "./topics.ts";
 import type { SearchModule } from "./search.ts";
@@ -361,6 +363,13 @@ export interface ToolDeps {
 	 * 实现由 lifecycle 注入（包住 skill-advice.ts 的清洗与原子写），tools 不碰文件系统。
 	 */
 	skillAdviceSave?: ((items: Record<string, string[]>) => SkillAdviceSaveResult) | null;
+	/**
+	 * 提醒沉淀建议落盘（2026-11-19 批4）：传了才注册 `save_reminder_advice`。
+	 * 装配层按 `REMINDER_DISTILL_ENABLED`（默认开）决定传不传——不传 = 工具不上架（一行回滚）。
+	 * 实现由 lifecycle 注入（包住 reminder-advice.ts 的清洗与原子写），tools 不碰文件系统。
+	 * 收集端（reminder-distill.ts）与采纳端点共用同一开关。
+	 */
+	reminderAdviceSave?: ((items: string[]) => ReminderAdviceSaveResult) | null;
 	mirrorTaskNotice?: (conversationId: number, text: string) => void;
 }
 
@@ -512,19 +521,15 @@ export function createTools(deps: ToolDeps) {
 		name: "remember",
 		description:
 			"把一件事写进长期记忆，以后每次对话都可能被想起来。" +
-			"适合：对方的偏好、家人朋友宠物、长期目标、重要经历。" +
+			"适合：偏好、家人朋友宠物、长期目标、重要经历；不适合：一次性琐事、马上会变的信息。" +
 			// 2026-11-09 T4 §3：前瞻意图单独一类，带有效期；过期自动降级为事实。
-			"对方说「我打算 / 我准备 / 下周开始……」这类还没发生的计划时用 kind=intention，" +
-			"并尽量给 expiresInDays——到期后它自动变成普通事实，不会一直挂在「打算」里。" +
-			"不适合：一次性的琐事、马上就会变的信息。" +
-			// 2026-11-08 员工人格化刀一 E3：被教诲必须落成偏好，不能只在当下照做。
-			// 偏好层有"永不删"保护（记忆巩固的 protectKinds），教过的话不会被衰减掉。
-			"**用户用「以后 / 记住 / 下次」这类话纠正你、或给你立规矩时，必须立刻用本工具记一条 " +
-			"kind=preference、taught=true 的记忆**——不要只在这一次照做，也不要只是口头答应；" +
-			"记的是那条规矩本身（做什么 / 不做什么），不是这次对话的经过。" +
-			// 2026-11-08 员工人格化刀三 E3：教诲分两层，规矩与方法不互斥。
-			"若教的是方法 / 步骤（「这类活怎么做」）而非规矩，在具备 partner_skill_write 工具时另写成技能文件沉淀；" +
-			"规矩本身仍落 preference。两件事不互斥：规矩进偏好（永不删），方法进技能（按需取用）。",
+			"还没发生的计划（「我打算 / 下周开始…」）用 kind=intention，并尽量给 expiresInDays（到期自动降级为事实）。" +
+			// 2026-11-08 员工人格化刀一 E3：被教诲必须落成偏好，不能只在当下照做
+			//（偏好层有"永不删"保护，教过的话不会被衰减掉）。
+			"**用户用「以后 / 记住 / 下次」立规矩时，必须立刻记一条 kind=preference、taught=true**：" +
+			"记的是规矩本身（做什么 / 不做什么），不是这次对话的经过。" +
+			// 2026-11-08 刀三 E3：教诲分两层，规矩与方法不互斥：规矩进偏好（永不删），方法进技能（按需取用）。
+			"教的是方法 / 步骤而非规矩时，另写成技能文件（partner_skill_write）；规矩本身仍落 preference。",
 		parameters: Type.Object({
 			content: Type.String({ description: "要记住的内容，一句话，用第三人称或原话" }),
 			kind: Type.Optional(
@@ -551,25 +556,23 @@ export function createTools(deps: ToolDeps) {
 			// 不需要改记忆 schema；巩固 / 召回都不按 source 分支，写进去只是留审计线索。
 			taught: Type.Optional(
 				Type.Boolean({
-					description:
-						"用户教你规矩（「以后… / 记住… / 下次…」）时为 true：这条会标成 taught 来源。普通事实不填。",
+					description: "用户立规矩（「以后… / 记住…」）时为 true：这条标成 taught 来源。普通事实不填。",
 				}),
 			),
 			// 项目记忆（2026-11-15 项目记忆方案）：scope="project" 把记忆挂到当前会话所属的
 			// 项目上（构建方式 / 部署口径 / 踩过的坑这类只在该项目成立的事）。
 			// 默认 auto = 现行为（执事会话进执事键空间，其余进会话键空间）。
 			// 2026-11-15 多挂载方案：负责多个项目时用 project 参数按名指写。
-			scope: Type.Optional(
-				Type.Union([
-					Type.Literal("auto"),
-					Type.Literal("project"),
-				], {
-					description:
-						"auto=默认归属；project=挂到项目记忆里（只在聊这个项目时被想起）。" +
-						"项目相关的口径（怎么构建、怎么部署、踩过什么坑）用 project。" +
-						"你负责多个项目时，要带 project 参数指名写进哪个。",
-				}),
-			),
+				scope: Type.Optional(
+					Type.Union([
+						Type.Literal("auto"),
+						Type.Literal("project"),
+					], {
+						description:
+							"auto=默认归属；project=挂到项目记忆里（只在聊这个项目时被想起）。" +
+							"项目相关的口径（怎么构建、怎么部署、踩过什么坑）用 project。",
+					}),
+				),
 			project: Type.Optional(
 				Type.String({
 					description:
@@ -715,10 +718,10 @@ export function createTools(deps: ToolDeps) {
 	const remind = defineTool({
 		name: "set_reminder",
 		description:
-			"定一个定时任务：到点让目标执事自己跑一轮、主动来说一句（触发指令对你隐藏，看起来像它主动开口）。时间写 ISO 8601（带时区），例如 2026-10-29T08:00:00+08:00。" +
-			"任务会落库，进程重启也不会丢。要重复时，`at` 只用来定「几点」，服务端会自动推到下一次符合规则的时间，再补 `repeat`：" +
-			"每天 = daily；每周 = weekly + weekdays（0 周日 … 6 周六）；" +
-			"每月 = monthly + dayOfMonth（1–31）。区间结束用 `until`（ISO 8601，含当天）。",
+			"定一个定时任务：到点让目标执事自己跑一轮、主动来说一句（触发指令对你隐藏，看起来像它主动开口）。" +
+			"时间写 ISO 8601 带时区（如 2026-10-29T08:00:00+08:00）；任务落库，进程重启不丢。" +
+			"要重复时补 `repeat`（daily / weekly+weekdays / monthly+dayOfMonth，格式见参数）；" +
+			"此时 `at` 只定「几点」，服务端自动推到下一次符合规则的时间；区间结束用 `until`。",
 		parameters: Type.Object({
 			text: Type.String({ description: "到点要让执事做的事（它会据此现场说一句，不是照念这段）" }),
 			at: Type.String({ description: "第一次触发时间，ISO 8601" }),
@@ -916,24 +919,18 @@ export function createTools(deps: ToolDeps) {
 	const delegate = defineTool({
 		name: "delegate",
 		description:
-			// 2026-11-16 工具裁剪 A：任务书四段 / steps 完整规则 / need_input 处理 / resume 全部细节 /
-			// 四行回报 / 裁决纪律 / 设备 caveat 全文已挪进内置技能 skills/delegate.md，描述只留
-			// 「何时用、怎么调」+ 指路句（技能默认全关，delegate 是 core，始终可取）。
+			// 2026-11-16 裁剪 A：政策全文挪进 skills/delegate.md。2026-11-18 去重二刀：
+			// 领域名规则与清单只在 domain 参数、resume 怎么填只在 requirement 参数、
+			// steps 规则只在 steps 参数；描述只留「何时用、怎么调」+ 指路句
+			//（delegate 是 core 技能，始终可取）。
 			"把一件需要多步动手的活派给外面的工人（领域负责人/执行者）。" +
-			"适合：改多个文件、跑命令、查证之后再动手；**以及在手机上操作 App**（打开 App、点按钮、输入文字、翻页、看屏幕）。" +
-			"不适合：回答问题、闲聊、一次 read 就能答的事、需要边做边问对方的事。" +
-			"**派出去立即返回任务单号、后台汇报；不要等结果、不要反复查询、不要重复派**；" +
-			"返回后告诉用户「已派发，完成后会汇报」。" +
-			"填 `domain` 把活交给对应领域负责人。**领域名必须是小写 ASCII**（小写字母、数字、连字符，如 `frontend` / `desktop-shell`）；" +
-			`当前已有领域：${domainList()}。不填则按旧路径直接派 worker。` +
-			"**新活必须带 `project`**（已登记的项目名或 id）；手机/设备 worker 这类不落本机磁盘的活可省 `project`（设备活豁免）；" +
-			"本机活没有可用项目会返回 `{\"error\":\"needs_project\"}` 并列出已有项目——先问用户要建哪个，" +
-			"用 `propose_project` 提交、等用户在设置里确认，再派。" +
-			"上一轮派出去的活卡住 / 你问过用户、用户刚回答了，用 `resume: true` 接着原单跑：" +
-			"`requirement` 里只写用户那句回答，不要重述、**更不要重新派**。" +
-			"多步活写 `steps`（≤12 条）。" +
-			"**注意**：写文件用相对路径，产物落在 chancellor 的 runs/<ticket>/ 下；" +
-			"手机工人碰不到你电脑上的文件，交回来的是一句话。" +
+			"适合：改多个文件、跑命令、查证之后再动手、在手机上操作 App；" +
+			"不适合：闲聊、一次 read 就能答的事、需要边做边问对方的事。" +
+			"**派出去立即返回任务单号、后台汇报，不要等结果、不要重复派**；告诉用户「已派发，完成后会汇报」。" +
+			"**新活必须带 `project`**（已登记项目名或 id；手机/设备活豁免）；" +
+			"没有可用项目会返回 needs_project 和项目清单——先问用户、用 `propose_project` 提交、等确认再派。" +
+			"上一轮的活卡住、或用户刚回答了你问的问题，用 `resume: true` 接原单跑，**不要重新派**。" +
+			"**注意**：写文件用相对路径；手机工人碰不到你电脑上的文件，交回来的是一句话。" +
 			'**第一次派活前先调 skill({name:"delegate"}) 读完整手册**：任务书四段 / steps / resume / 四行回报 / 裁决纪律。',
 		parameters: Type.Object({
 			requirement: Type.String({
@@ -972,8 +969,7 @@ export function createTools(deps: ToolDeps) {
 			),
 			resume: Type.Optional(
 				Type.Boolean({
-					description:
-						"接着上一张单跑（上次派出去的活卡住了、你问了用户、用户刚回答时用）。不填 = 新派一件。",
+					description: "续跑上一张单（触发时机见描述；requirement 只写用户那句回答）。不填 = 新派一件。",
 				}),
 			),
 			requestId: Type.Optional(
@@ -1496,11 +1492,9 @@ export function createTools(deps: ToolDeps) {
 				name: "persona_write",
 				description:
 					"把主人**明确要求写进个人记忆库**的一条事实（通常是纠正：库里的旧记录错了，主人给出对的版本）" +
-					"送进主人的一生记忆库，作为最高优先的「用户亲口确认」，检索时压过库里的模型推断。" +
-					"三条铁律：①只在主人明确说「记进记忆库 / 写进记忆库 / 纠正记忆库」时才用，" +
-					"平时的记忆走 remember，**绝不**把自动提取的内容往这里送；" +
-					"②body 一字不动存主人的原话，不总结不改写；" +
-					"③每次写入都会弹审批，主人点了才真正落字。",
+					"送进一生记忆库，作为最高优先的「用户亲口确认」，检索时压过库里的模型推断。" +
+					"三条铁律：①只在主人明确说「记进 / 写进 / 纠正记忆库」时才用，平时的记忆走 remember，" +
+					"**绝不**把自动提取的内容往这里送；②body 一字不动存原话；③每次写入都会弹审批，主人点了才落字。",
 				parameters: Type.Object({
 					body: Type.String({ description: "主人的原话，一字不改（例如：「住院的是我姥姥，不是我妈」）" }),
 					why: Type.String({ description: "为什么写这条（比如「主人纠正库里记错的主体」），会进改动留痕账" }),
@@ -1633,6 +1627,11 @@ export function createTools(deps: ToolDeps) {
 	// 它不写盘、不起进程，因此不在 WRITE_TOOLS / 高危清单里。
 	if (askUserEnabled()) tools.push(createAskUserTool());
 
+	// 决策上报答复（2026-11-19 批2）：总管 / 派活方执事对 worker 的 escalation 给结论。
+	// 上架双闸（CHANCELLOR_ENABLED + ESCALATION_CHAIN_ENABLED），关任一个整件不上架 =
+	// 回滚形态；按需池默认成员（tool-pool），初始不进请求、不打上游 prompt cache。
+	if (respondEscalationAvailable()) tools.push(createRespondEscalationTool());
+
 	// agent 中途播报（2026-11-10 批 13 §三）：装配层显式传 progressReport 才上架
 	// （AGENT_PROGRESS_REPORT=false / 0 / off → 不上架，一行回滚）。
 	// 它不写盘、不起进程：不进 WRITE_TOOLS / 高危清单，只登记能力声明。
@@ -1719,10 +1718,8 @@ export function createTools(deps: ToolDeps) {
 			defineTool({
 				name: "partner_manage",
 				description:
-					"总管管理执事（chancellor 分管宰相）：create 建一个、stop 停一个、list 列出全部、set_dispatch 切某个执事的派发权（是否作为分管负责人接单，默认关）。" +
-					"只有总管 / 主对话能用；执事自己的执事会话不能管理执事。" +
-					"create 的 domain 是之后派活用的领域名，必须是小写 ASCII（小写字母、数字、连字符，如 frontend / desktop-shell），" +
-					"name 是展示名（中文随意）。建好后用 delegate(domain=<domain>) 把活派给它。",
+					"总管管理执事：create 建一个、stop 停一个、list 列出全部、set_dispatch 切某个执事的派发权（是否作为分管负责人接单，默认关）。" +
+					"只有总管 / 主对话能用。建好后用 delegate(domain=<domain>) 或直接按名字把活派给它。",
 				parameters: Type.Object({
 					action: Type.Unsafe<"create" | "stop" | "list" | "set_dispatch">({
 						type: "string",
@@ -1867,10 +1864,8 @@ export function createTools(deps: ToolDeps) {
 			defineTool({
 				name: "group_manage",
 				description:
-					"总管管理群组（执事群聊）：create 建一个群、list 列出全部群。" +
-					"只有总管 / 主对话能用；执事自己的会话不能建群。" +
-					"成员用**名字**指定（2–6 位），必须是已有执事；值日执事不 @ 时回话，" +
-					"缺省取第一位成员。建好后说话不 @ 就发给值日，@名字 就点名。",
+					"总管管理群组（执事群聊）：create 建一个群、list 列出全部群；只有总管 / 主对话能用。" +
+					"成员用**名字**指定（个数与值日缺省见参数）。建好后说话不 @ 就发给值日，@名字 就点名。",
 				parameters: Type.Object({
 					action: Type.Unsafe<"create" | "list">({
 						type: "string",
@@ -1994,9 +1989,8 @@ export function createTools(deps: ToolDeps) {
 				description:
 					"管理**你自己**的例行规则（到点自动跑一轮）：create 建、disable 停用、enable 启用、delete 删除。" +
 					"只能动自己名下的规则，动别人的一律当找不到；每个执事最多 10 条活动规则。" +
-					"create 需要 name（≤40 字）、prompt（这一轮要做什么）、triggers（cron 五段 / interval≥60s / once ISO / event）、sessionMode（persistent 复用会话 / fresh 每轮全新），" +
-					"可选 untilNote（完成条件，一句话；每轮跑完由你判断达成没有，达成即自动停用、保留历史）与 maxRuns（跑满 N 次自动停）。" +
-					"其余动作带 id。例：主人说「你每周五自己盘点」，就用 create 建一条 cron「0 18 * * 5」的周盘点规则。\n" +
+					"create 的 name / prompt / triggers / sessionMode 与可选 untilNote、maxRuns 的格式见参数；其余动作带 id。" +
+					"例：主人说「你每周五自己盘点」，就用 create 建一条 cron「0 18 * * 5」的周盘点规则。\n" +
 					WORK_REVIEW_GUIDANCE,
 				parameters: Type.Object({
 					action: Type.Unsafe<RoutineManageAction>({
@@ -2226,6 +2220,42 @@ export function createTools(deps: ToolDeps) {
 							message:
 								"已提交待确认：用户确认后才会建课题并开始按节奏研究；" +
 								"确认之前不要把它当成已经在跟的课题。",
+						}),
+					);
+				},
+			}),
+		);
+	}
+
+	// 提醒沉淀建议落盘（2026-11-19 批4）：装配层显式传 deps.reminderAdviceSave 才上架
+	//（REMINDER_DISTILL_ENABLED=false → 不传 = 不上架）。流程照技能评估批 30：记忆页 /
+	// 人设页入口 → 预填提示词跳总管 → 总管合并同类蒸馏 → 本工具把候选教诲写进建议快照
+	//（.data/reminder-advice.json）→ 主人回记忆页逐条采纳才写偏好（D18：只建议、人采纳）。
+	// 按需池默认成员（tool-pool）：初始不进请求，不打上游 prompt cache。
+	if (deps.reminderAdviceSave) {
+		const saveReminderAdvice = deps.reminderAdviceSave;
+		tools.push(
+			defineTool({
+				name: "save_reminder_advice",
+				description: SAVE_REMINDER_ADVICE_DESCRIPTION,
+				parameters: Type.Object({
+					items: Type.Array(Type.String(), {
+						minItems: 1,
+						maxItems: 30,
+						description:
+							"蒸馏后的教诲条目，每条一句规矩（做什么 / 不做什么），≤200 字；" +
+							"同一个意思已合并、一次性语境已去掉",
+					}),
+				}),
+				execute: async (args) => {
+					const result = saveReminderAdvice(args.items);
+					if (!result.ok) {
+						return textToolResult(err(result.error, result.message, result.hint));
+					}
+					return textToolResult(
+						ok({
+							saved: result.saved,
+							message: `已存 ${result.saved} 条沉淀建议。主人会回设置 → 记忆页逐条采纳；采纳之前不会写进偏好。`,
 						}),
 					);
 				},

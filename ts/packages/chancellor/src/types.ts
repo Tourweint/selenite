@@ -43,6 +43,19 @@ export interface WorkerAttention {
   kind: AttentionKind;
 }
 
+/**
+ * worker 跑动中的决策上报（2026-11-19 批2：worker→总管→用户上报链）。
+ * 形状与 escalate 工具参数同构；序列化 / 解析在 escalation-payload.ts，
+ * 这里放类型是因为 ChancellorEvent / EmployeeTask 都要引用它。
+ */
+export interface WorkerEscalation {
+  escalationId: string;
+  question: string;
+  context: string;
+  options?: string[];
+  urgency: "low" | "normal" | "high";
+}
+
 export type Verdict = "pass" | "fail" | "blocked";
 
 /**
@@ -414,6 +427,12 @@ export interface ChancellorRequest {
    * 只影响新单；不传 = 项目主文件夹；gitIsolated 时仍以 worktree 为准。
    */
   workDir?: string;
+  /**
+   * 质检方式（2026-11-19 批2，派活设置「质检方式」透传）：true = worker 自报完成后
+   * 不走内部一次请求验收，改派一单质检 worker（templates/qa.md，走既有派单器）。
+   * 只影响新单；false / 不传 = 内部请求（现状）。续跑沿用现状。
+   */
+  qaWorker?: boolean;
 }
 
 export type ChancellorEventType =
@@ -425,7 +444,9 @@ export type ChancellorEventType =
   | "task-waiting"
   | "reviewing"
   | "goal"
-  | "finished";
+  | "finished"
+  /** worker 跑动中的决策上报（2026-11-19 批2）：escalation 专用类型。 */
+  | "escalation";
 
 export interface ChancellorEvent {
   type: ChancellorEventType;
@@ -437,6 +458,8 @@ export interface ChancellorEvent {
   total?: number;
   /** 任务在等哪个文件租约（task-waiting 事件带）。 */
   waitingOn?: string;
+  /** 只有 escalation 事件带：上报的原始载荷（2026-11-19 批2，宿主照搬进对外事件）。 */
+  escalation?: WorkerEscalation;
 }
 
 export interface ChancellorTaskResult {

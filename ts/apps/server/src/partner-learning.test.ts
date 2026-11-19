@@ -237,6 +237,8 @@ test("纯函数：deriveVoiceRules 不丢历史黑话；voiceView 计数；settl
 	assert.equal(LEARNING_REFRESH_EVERY, 5);
 	assert.equal(learningFrequency({}), "weekly");
 	assert.equal(learningFrequency({ PARTNER_LEARNING_FREQUENCY: "settle" }), "settle");
+	assert.equal(learningFrequency({ PARTNER_LEARNING_FREQUENCY: "off" }), "off", "2026-11-18 关档：不做模型反思");
+	assert.equal(learningFrequency({ PARTNER_LEARNING_FREQUENCY: "nonsense" }), "weekly", "拼错按每周");
 	const view = voiceView(makePartner("计数执事"), store);
 	assert.equal(view.ruleCount, 0);
 	assert.equal(view.updatedAt, null);

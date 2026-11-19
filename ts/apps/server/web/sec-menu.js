@@ -28,8 +28,53 @@
 
 /** @typedef {{ label?: string, hint?: string, kbd?: string, disabled?: boolean, danger?: boolean, separator?: boolean, run?: () => void }} SecMenuItem */
 
+import { markNativePopupsBroken, nativePopupsReady } from "./ui-atoms.js";
+
 /** @type {null | { button: HTMLElement | null, menu: HTMLElement, onDown: (event: PointerEvent) => void, onScroll: () => void, onResize: () => void, onKey: (event: KeyboardEvent) => void }} */
 let openState = null;
+
+/** 让壳画菜单（2026-11-19 批1，desktop/popovers.go）：true=壳接了。
+ *  业务闭包不过桥：桥上只过显示字段，壳阻塞到用户选完、resolve 所选序号，
+ *  这里再本地跑对应的 run。序号 -1 = 用户按掉（外点击 / Esc），什么都不做。
+ *  壳侧出错（开关刚翻走、壳退回旧版）→ markNativePopupsBroken 粘性关原生，
+ *  本次会话全走 DOM；当次先走 domFallback 兜底，不让人点了个寂寞。 */
+function shellShowMenu(anchor, placement, items, domFallback, onDone) {
+  const bridge = window.mygo;
+  if (typeof bridge?.call !== "function") return false;
+  const runs = [];
+  const payload = items.map((item) => {
+    if (item.separator) {
+      runs.push(null);
+      return { separator: true };
+    }
+    runs.push(typeof item.run === "function" ? item.run : null);
+    return {
+      label: item.label || "",
+      hint: item.hint || "",
+      kbd: item.kbd || "",
+      danger: item.danger === true,
+      disabled: item.disabled === true,
+    };
+  });
+  try {
+    const result = bridge.call.call(bridge, "Shell.ShowMenu", { anchor, placement, items: payload });
+    if (result && typeof result.then === "function") {
+      result
+        .then((chosen) => {
+          if (Number.isInteger(chosen) && chosen >= 0 && chosen < runs.length) runs[chosen]?.();
+          onDone?.();
+        })
+        .catch(() => {
+          markNativePopupsBroken();
+          onDone?.();
+          domFallback?.();
+        });
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function closeSecMenu() {
   if (!openState) return;
@@ -185,6 +230,26 @@ function openSecMenu(button, items) {
   closeSecMenu();
   if (same) return;
 
+  // 原生菜单（2026-11-19 批1）：锚 ⋯ 按钮矩形、右缘对齐（bottom-end）、Gap 6，
+  // 与 web 版 placeSecMenu 的定位口径一致；翻转 / 越界壳自己处理。
+  // Windows 上外点击只关菜单不穿透，所以「再点一下 ⋯」是按下即关、不会重开。
+  if (nativePopupsReady()) {
+    const rect = button.getBoundingClientRect();
+    button.setAttribute("aria-expanded", "true");
+    const ok = shellShowMenu(
+      { x: Math.round(rect.left), y: Math.round(rect.top), width: Math.round(rect.width), height: Math.round(rect.height) },
+      "bottom-end",
+      items,
+      () => openSecMenu(button, items),
+      () => {
+        // 菜单关了（选中或按掉都算）：把 ⋯ 的展开态还原
+        if (button.isConnected) button.setAttribute("aria-expanded", "false");
+      },
+    );
+    if (ok) return;
+    button.setAttribute("aria-expanded", "false");
+  }
+
   const menu = buildMenu(items, button.getAttribute("aria-label") || "分区动作");
   document.body.append(menu);
   placeSecMenu(menu, button);
@@ -206,6 +271,20 @@ function openSecMenu(button, items) {
 function openMenuAt(x, y, items, label = "操作") {
   if (!items.length) return;
   closeSecMenu();
+
+  // 原生菜单（2026-11-19 批1）：贴光标零尺寸锚点、bottom-start、Gap 2，
+  // 与 web 版 placeSecMenuAtPoint 的定位口径一致。输入框右键（context-menu.js）、
+  // 侧栏行菜单、选中文字复制都从这里走，一处分叉整族原生化。
+  if (nativePopupsReady()) {
+    const ok = shellShowMenu(
+      { x: Math.round(x), y: Math.round(y), width: 0, height: 0 },
+      "bottom-start",
+      items,
+      () => openMenuAt(x, y, items, label),
+    );
+    if (ok) return;
+  }
+
   const menu = buildMenu(items, label);
   menu.classList.add("is-context");
   document.body.append(menu);

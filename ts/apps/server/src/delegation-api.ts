@@ -9,4 +9,4 @@ export type { AcceptanceCheck, AcceptanceCheckStatus, ActionStatus, TicketAction
 export { applyCancelProjection } from "./delegation-jobs.ts";
 export type { DelegationApiOptions } from "./delegation-summary.ts";
 export { mountDelegationApi } from "./delegation-mount.ts";
-export { cancelTicketAction, projectHasInFlightTickets, retryTicketAction } from "./delegation-actions.ts";
+export { cancelTicketAction, forwardWorkerMessageAction, projectHasInFlightTickets, retryTicketAction } from "./delegation-actions.ts";

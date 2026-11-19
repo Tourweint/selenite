@@ -25,6 +25,7 @@ import {
   cancelReminder,
   chatKindOf,
   chatMetaSummary,
+  chatWorkdirOf,
   pruneChatMetaOrphans,
   chatStream,
   chatTitles,
@@ -101,7 +102,7 @@ import {
 import { pairPage } from "./pair-page.ts";
 import { mountPhoneWorker } from "./phone-worker.ts";
 import { mountProjects, projectsStore, resolveChatDir, seedDefaultWorkspace, type ChatDirPick } from "./projects.ts";
-import { chatDirPickEnabled, chatHistoryPagingEnabled, flagEnabled, loadFlagOverrides, mountFlags } from "./flags.ts";
+import { chatDirPickEnabled, chatHistoryPagingEnabled, chatProjectLabelEnabled, flagEnabled, loadFlagOverrides, mountFlags } from "./flags.ts";
 import { toolUsageEnabled, toolUsageRows } from "./tool-usage.ts";
 // 全局工具池（2026-11-17 设置→工具页）：目录与摘要复用 partner-tools，避免另抄一份。
 import { modelToolCatalog, toolSummaryOf } from "./partner-tools.ts";
@@ -143,6 +144,8 @@ import type { Tx } from "@earendil-works/pi-durable";
 // AGENT_APPEARANCE_WALLPAPER=0 时整组不挂（界面那块也自己藏掉）。
 import { mountAppearanceWallpaper, wallpaperEnabled } from "./appearance-wallpaper.ts";
 import { mountDelegationApi } from "./delegation-api.ts";
+import { initEscalationRouting, mountEscalationApi } from "./escalation-api.ts";
+import { mountQaRunner } from "./qa-bridge.ts";
 // 执行器设置（2026-11-16 多 CLI 打手适配）：任务中心派活用哪个 CLI + 模型/权限。
 import { mountExecutorApi } from "./executor-mount.ts";
 // 内部质检（2026-11-16）：拆单/验收/目标核对用核心模型，不再借 Qoder CLI。
@@ -179,6 +182,10 @@ import { startMemoryNightlyScheduler } from "./memory-nightly.ts";
 // 技能管理（2026-11-08 扫尾批 9-S）：设置页「技能」分区的增删改查，写操作锁死在技能目录内。
 // SKILLS_ADMIN=false 时 mountSkills 内部直接返回，整组路由 404（同 TOPICS/COMPANIONS 口径）。
 import { mountSkills } from "./skills-api.ts";
+// 提醒沉淀（2026-11-19 批4）：候选收集（reminder-distill）与建议快照 / 采纳（reminder-advice）。
+// REMINDER_DISTILL_ENABLED=false 时两组路由各回 404（= 未启用）。
+import { mountReminderCandidates } from "./reminder-distill.ts";
+import { mountReminderAdvice } from "./reminder-advice.ts";
 import { mountWeb } from "./web.ts";
 import { mountWorkerShell } from "./worker-shell.ts";
 import { syncDiaryToMemory } from "./memory-ingest.ts";
@@ -586,6 +593,16 @@ if (wallpaperEnabled()) mountAppearanceWallpaper(app);
 // 任务中心只读接口（2026-11-03 方案 §5.9）：领域列表 + 单 ticket 明细。
 mountDelegationApi(app);
 
+// 决策上报链（2026-11-19 批2）：上报卡动作（总管代答 / 升级给用户）+ 活跃上报列表。
+// 挂 /api/v1/* 之下走同一道鉴权中间件（批1 教训：裸路径 = 无鉴权注入口）；
+// ESCALATION_CHAIN_ENABLED=false 时路由 400 escalation_disabled（回滚形态）。
+mountEscalationApi(app);
+// 上报路由订阅（watchAllDelegationEvents）：注册 / 限流 / 唤醒总管。幂等，启动调一次。
+initEscalationRouting();
+// 质检 worker（2026-11-19 批2）：宿主侧派单实现注入 chancellor 的 QaRunner 缝；
+// 派活设置选「派质检 worker」时验收分支才会用到，平时注入是零成本。
+mountQaRunner();
+
 // 执行器设置（2026-11-16）：派活用哪个 CLI + 各 CLI 的模型/权限；落 .data/executor.json。
 mountExecutorApi(app);
 
@@ -624,6 +641,17 @@ mountMemoryApi(app, { enabled: () => memoryEngine !== null && flagEnabled("MEMOR
 // 技能管理（2026-11-08 扫尾批 9-S）：目录解析 = AGENT_SKILLS_DIR → 用户目录 → 应用目录兜底。
 // 技能增删只影响下一个会话（D5 既有取舍），UI 文案已如实说明。
 mountSkills(app);
+
+// 提醒沉淀（2026-11-19 批4）：候选收集（0 token）+ 建议快照 / 采纳。
+// 挂 /api/v1/* 之下走同一道鉴权中间件；REMINDER_DISTILL_ENABLED=false 两组都 404。
+// engine 活读（同 mountMemoryApi）：记忆总闸关着时 ②③ 段为空、采纳 400 memory_disabled。
+mountReminderCandidates(app, {
+  reader: () => getHarness(),
+  engine: () => (flagEnabled("MEMORY_ENABLED") ? memoryEngine : null),
+});
+mountReminderAdvice(app, {
+  engine: () => (flagEnabled("MEMORY_ENABLED") ? memoryEngine : null),
+});
 
 // 界面（2026-11-03）：原来那张 M0 调试页换成了真界面，仍然是同源静态文件。
 // 桌面壳和浏览器打开的都是这个 `/`。
@@ -1115,6 +1143,8 @@ function policyProjection() {
     chatMap: chatMapEnabled(),
     // 会话分叉（2026-11-17 批3b；2026-11-18 抠进插件清单）：前端据此决定回答脚注要不要挂「从这里分支」。
     chatBranch: chatBranchEnabled(),
+    // 会话工作归属标签（2026-11-18）：前端据此决定输入框左下角要不要显示只读项目/工作区。
+    chatProjectLabel: chatProjectLabelEnabled(),
   };
 }
 
@@ -1505,7 +1535,9 @@ app.post("/api/v1/agent/chat", async (c) => {
         // 带图才给 parts；纯文本仍走字符串（老链路形状不变）
         ...(assembled.value.parts ? { parts: assembled.value.parts } : {}),
         requestId: request.requestId,
-        // 忙时投递方式（2026-11-07 消息即引导）：不传 = followUp，等于改动前的排队
+        // 忙时投递方式（2026-11-07 消息即引导；2026-11-19 插话统一 批1 改缺省）：
+        // 不传 = 服务端缺省 steer（插进当前轮），AGENT_STEER_DEFAULT=false 回排队旧口径；
+        // 客户端显式传值时按传的算，缺省值收口在 userInputSubmission。
         ...(request.whenBusy ? { whenBusy: request.whenBusy } : {}),
         // 记忆挂在"这一轮真的结束"上，不挂在"这条流结束"上：
         // 用户关掉界面之后它还会跑完，那一轮的记忆照样得写。
@@ -1524,6 +1556,8 @@ app.post("/api/v1/agent/chat", async (c) => {
           // 把多张单分开归并；老客户端按 type 分发，认不出的类型直接忽略。
           event.type === "delegate" ||
           event.type === "attention" ||
+          // 决策上报（2026-11-19 批2）：worker 跑动中 escalate，派活方会话出上报卡
+          event.type === "escalation" ||
           // 审批（2026-11-04 批次二）：写类工具等客户端答复，属纯增量事件
           event.type === "approval" ||
           // 思考正文增量（2026-11-04 批次一），同属纯增量事件
@@ -1952,6 +1986,10 @@ app.get("/api/v1/agent/chat/:conversationId/messages", async (c) => {
   const chatKind = await chatKindOf(chat);
   // 分支来源（2026-11-17 批3b，纯增量）：只有副本会话才有；分页 / 全量与补帧两条路都带。
   const origin = (await (await getHarness()).snapshot(ChatOrigins, CTX))?.byExternal?.[chat.externalId];
+  // 会话工作归属（2026-11-18，纯增量）：只给普通 worker 会话，输入框左下角只读标签用。
+  // 开关关着 = 不下发（回滚到旧响应形状）；总管 / 执事 / 任务专线不带。
+  const chatWorkdir =
+    chatKind === "worker" && chatProjectLabelEnabled() ? await chatWorkdirOf(chat) : null;
 
   const sinceRaw = c.req.query("sinceSeq");
   const eventStore = chatEventStoreOf();
@@ -1962,6 +2000,7 @@ app.get("/api/v1/agent/chat/:conversationId/messages", async (c) => {
       chatKind,
       ...pageFields,
       ...(origin ? { origin } : {}),
+      ...(chatWorkdir ? { chatWorkdir } : {}),
     });
   }
   const sinceSeq = Number(sinceRaw);
@@ -1975,6 +2014,7 @@ app.get("/api/v1/agent/chat/:conversationId/messages", async (c) => {
     chatKind,
     ...pageFields,
     ...(origin ? { origin } : {}),
+    ...(chatWorkdir ? { chatWorkdir } : {}),
     fromSeq: from,
     events,
   });

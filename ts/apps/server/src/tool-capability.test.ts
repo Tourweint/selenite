@@ -48,12 +48,16 @@ const EXPECTED_TOOLS = [
 	// 2026-11-17 persona_write 批：写一生库（主人明确让写才用，critical 审批）
 	"persona_write",
 	"ask_user",
+	// 2026-11-19 批2 决策上报链：respond_escalation（按需池默认成员）
+	"respond_escalation",
 	"report_progress",
-	// 批 30 修订：save_skill_advice（SKILL_ADVICE 开时上架；能力表已登记）
-	"save_skill_advice",
-	// 2026-11-16 C 段：tool_search（createTools 末尾注册，非 deferred）
-	"tool_search",
-].sort();
+		// 批 30 修订：save_skill_advice（SKILL_ADVICE 开时上架；能力表已登记）
+		"save_skill_advice",
+		// 2026-11-19 批4 提醒沉淀：save_reminder_advice（REMINDER_DISTILL_ENABLED 开时上架）
+		"save_reminder_advice",
+		// 2026-11-16 C 段：tool_search（createTools 末尾注册，非 deferred）
+		"tool_search",
+	].sort();
 
 function registeredToolNames(): string[] {
 	const tools = createTools(
@@ -68,7 +72,9 @@ function registeredToolNames(): string[] {
 			personaWrite: async () => ({ ok: true }),
 			// persona 检索（2026-11-09 批一）：条件注册，给个不落盘替身把全集覆盖进来。
 			personaAsk: async () => ({ ok: true, question: "stub" }),
-			skillAdviceSave: () => ({ ok: true, saved: 0, kept: 0 }),
+				skillAdviceSave: () => ({ ok: true, saved: 0, kept: 0 }),
+				// 提醒沉淀落盘（2026-11-19 批4）：条件注册，给个不落盘替身把全集覆盖进来。
+				reminderAdviceSave: () => ({ ok: true, saved: 0 }),
 			// 中途播报（2026-11-10 批 13）：条件注册，显式开才上架。
 			progressReport: true,
 		}),

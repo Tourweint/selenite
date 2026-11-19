@@ -27,6 +27,13 @@ import { toast } from "./ui-atoms.js";
 
 /* ── 消息渲染 ─────────────────────────────────────────── */
 
+/**
+ * 插话标记（2026-11-19 插话统一 批1）：忙时 steer 提交的文本，服务端在进内核前
+ * 于最前面加了这一行标记（agent/session-stream.ts）。渲染处检测该前缀：剥掉标记行、
+ * 换成「插话」徽标（tk-badge 同款皮）。现场乐观气泡没有标记，回读归位后自动对齐。
+ */
+const STEER_MARK = "[插话]";
+
 function clearThread() {
   // 切会话/新建时把审批卡片的倒计时停掉，免得旧卡在后面空转
   for (const { timer } of approvalCards.values()) clearInterval(timer);
@@ -93,9 +100,24 @@ function addMessage(role, text, at, images = [], options = {}) {
   // 用户消息的附件（图片 + 文件）在文字**上方**（2026-11-13 用户口径）：
   // 先挂附件再挂 body，flex 列顺序就是「附件 → 我们说的话」。
   if (role === "user" && !letter) mountMessageAttachments(wrap, images, options.files);
+  // 插话徽标（2026-11-19 插话统一）：检测 [插话] 前缀 → 剥掉标记行、挂「插话」徽标。
+  // 来信（letter）没有这个语义；其它角色的正文不参与检测。
+  const steerMarked =
+    role === "user" && !letter && typeof text === "string" && text.startsWith(STEER_MARK)
+      ? text.slice(STEER_MARK.length).replace(/^[ \t]*\r?\n/, "")
+      : null;
+  if (steerMarked !== null) {
+    const mark = document.createElement("div");
+    mark.className = "msg-steer";
+    const badge = document.createElement("span");
+    badge.className = "tk-badge";
+    badge.textContent = "插话";
+    mark.append(badge);
+    wrap.append(mark);
+  }
   const body = document.createElement("div");
   body.className = "body";
-  if (role === "user") body.textContent = text;
+  if (role === "user") body.textContent = steerMarked ?? text;
   else body.innerHTML = renderMarkdown(text);
   if (letter) {
     mountLetter(wrap, body, author, at);

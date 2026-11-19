@@ -42,7 +42,7 @@ const { LiveDoc } = await import("@earendil-works/pi-durable");
 const session = await import("./session.ts");
 const lifecycle = await import("./lifecycle.ts");
 const durableDelete = await import("./durable-delete.ts");
-const { Chats, ChatKinds, ChatProjects } = await import("./shared.ts");
+const { Chats, ChatKinds, ChatOrigins, ChatProjects } = await import("./shared.ts");
 const { openNodeSqliteDatabase } = await import("@earendil-works/pi-durable/storage/sqlite/node");
 
 after(async () => {
@@ -313,6 +313,47 @@ test("预检 blocked：not-archived（门槛第一）；kind（chief / task- / p
     assert.deepEqual(busyPreview.preview.subtree, []);
   }
   await setFakeBusy(busyTarget.internalId, false);
+});
+
+test("归档页永久删除：放行 side 副会话、清链接；有未归档子分支先拦", async () => {
+  const partners = await import("../partners.ts");
+  const store = partners.partnersStore();
+  const partner = store.create("副会话删除执事");
+  const chat = await createWorkerChat("归档副会话");
+  store.linkSession({
+    partnerId: partner.id,
+    role: "side",
+    routeKey: chat.externalId,
+    sessionId: chat.internalId,
+  });
+  session.archiveChat(chat.externalId, 500);
+
+  const preview = await durableDelete.previewChatDeletion(chat.externalId);
+  assert.ok(preview.ok);
+  if (!preview.ok) return;
+  assert.equal(preview.preview.blocked, undefined, "side 副会话不应被 kind 挡住");
+
+  // 先造一条未归档子分支：应被 has-branches 拦下
+  const harness = await lifecycle.getHarness();
+  await harness.commit(async (tx) => {
+    const origins = await tx.doc(ChatOrigins);
+    origins.byExternal["side-child-probe"] = { source: chat.externalId, at: Date.now() };
+  }, CTX);
+  const blockedPreview = await durableDelete.previewChatDeletion(chat.externalId);
+  assert.ok(blockedPreview.ok);
+  if (blockedPreview.ok) {
+    assert.equal(blockedPreview.preview.blocked?.reason, "has-branches");
+  }
+  // 撤掉子分支再删
+  await harness.commit(async (tx) => {
+    const origins = await tx.doc(ChatOrigins);
+    delete origins.byExternal["side-child-probe"];
+  }, CTX);
+
+  const result = await durableDelete.deleteChatForever(chat.externalId);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(await session.openChat(chat.externalId), null, "会话应已删");
+  assert.equal(store.linkOfSession(chat.internalId), null, "side 链接应清掉");
 });
 
 test("端点：未知名 404；开关关 400「永久删除已关闭」；删除 blocked 400", async () => {

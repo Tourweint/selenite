@@ -12,7 +12,7 @@ import { request } from "./net.js";
 import { formatTokenCount } from "./providers.js";
 import { KEY_MODEL_PROVIDER, KEY_THINKING, THINKING_LABELS, THINKING_LEVELS, clampThinking, currentThinking, setThinkingLevel } from "./shell.js";
 import { state } from "./state.js";
-import { closePopover, openPopover, popoverOpen, toast } from "./ui-atoms.js";
+import { closePopover, markNativePopupsBroken, nativePopupsReady, openPopover, popoverOpen, toast } from "./ui-atoms.js";
 
 /* ── 全局悬停提示（2026-11-08，原「收起轨道 tooltip」泛化）──────────
  * 任何带 data-tip 的元素（轨道按钮 / 侧栏分区头 / 设置页标签 / 记忆组头…）
@@ -28,7 +28,7 @@ const TIP_SHOW_DELAY_MS = 450;
 // 指针按下后这段时间内的 focusin 算「点出来的焦点」，不弹提示（键盘 Tab 不会先有 pointerdown）。
 // 2026-11-17 用户反馈：点击时小黑块会冒出来闪一下——点按钮会聚焦，focusin 分支把它当键盘聚焦了。
 const POINTER_FOCUS_GUARD_MS = 600;
-const hoverTipState = { timer: 0, anchor: null, x: null, y: null, pointerDownAt: 0, pressedAnchor: null };
+const hoverTipState = { timer: 0, anchor: null, x: null, y: null, pointerDownAt: 0, pressedAnchor: null, nativeShown: false };
 
 /** 原生 title → data-tip（一次性收编）。
  *  - 手写的 data-tip 优先：title 只删不加，别覆盖更长的解释（分区头就是这种形状）。
@@ -111,12 +111,48 @@ function hideHoverTip() {
   hoverTipState.anchor = null;
   hoverTipState.x = null;
   hoverTipState.y = null;
+  // 原生提示还开着就收壳那枚（2026-11-19 批1）；scroll/resize 高频收口也走这里
+  if (hoverTipState.nativeShown) {
+    hoverTipState.nativeShown = false;
+    shellHideTip();
+  }
   if (el.hoverTip) el.hoverTip.hidden = true;
 }
 
+/** 让壳收提示：火后不理，失败不打扰（探测过的壳才会走到这）。 */
+function shellHideTip() {
+  const bridge = window.mygo;
+  if (typeof bridge?.call !== "function") return;
+  try {
+    const result = bridge.call.call(bridge, "Shell.HideTip");
+    if (result && typeof result.catch === "function") result.catch(() => {});
+  } catch { /* 桥不在：随它 */ }
+}
+
+/** 让壳画提示（desktop/popovers.go 的 flyout）：true=壳接了。
+ *  锚点口径与 web 定位算法一致——有鼠标落点贴光标（零尺寸矩形），键盘聚焦
+ *  贴元素矩形；翻转、夹边、伸出窗口边缘都是壳的事（2026-11-16 的落点反馈
+ *  在原生侧同口径成立）。 */
+function shellShowTip(target, text) {
+  const bridge = window.mygo;
+  if (typeof bridge?.call !== "function") return false;
+  const box = target.getBoundingClientRect();
+  const anchor = Number.isFinite(hoverTipState.x) && Number.isFinite(hoverTipState.y)
+    ? { x: Math.round(hoverTipState.x), y: Math.round(hoverTipState.y), width: 0, height: 0 }
+    : { x: Math.round(box.left), y: Math.round(box.top), width: Math.round(box.width), height: Math.round(box.height) };
+  try {
+    const result = bridge.call.call(bridge, "Shell.ShowTip", { anchor, tip: text });
+    if (result && typeof result.catch === "function") {
+      result.catch(() => markNativePopupsBroken());
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function showHoverTip(target) {
-  const tipEl = el.hoverTip;
-  if (!tipEl || !target) return;
+  if (!target) return;
   // 定时器等待的 450ms 里节点可能被重渲染摘掉；用脱链节点量出来的是 0,0，
   // 提示就会飘到屏幕左上角——直接不出。
   if (target.isConnected === false) return;
@@ -126,6 +162,15 @@ function showHoverTip(target) {
   const rail = target.closest(".side-rail");
   if (rail && getComputedStyle(rail).pointerEvents === "none") return;
   hoverTipState.anchor = target;
+  // 原生弹出层（2026-11-19 批1）：壳里画 flyout，页面不再建 DOM 小黑签。
+  // 不依赖 el.hoverTip 存在——原生路不需要 DOM 签。
+  // 探测说有但调用没成（老壳刚被换回、开关刚翻走）就粘性回 DOM 路。
+  if (nativePopupsReady() && shellShowTip(target, text)) {
+    hoverTipState.nativeShown = true;
+    return;
+  }
+  const tipEl = el.hoverTip;
+  if (!tipEl) return;
   tipEl.textContent = text;
   tipEl.hidden = false;
   const tipBox = tipEl.getBoundingClientRect();

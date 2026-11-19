@@ -11,8 +11,10 @@ import { addBrowserFiles, addImageFiles, captureScreenshot, clearPendingAttachme
 import { startNewChat } from "./chat-open.js";
 // 会话画板（2026-11-17）：能力投影决定顶栏入口挂不挂；这里只做一次同步
 import { syncChatMapEntry } from "./chat-map.js";
+// 工作归属标签（2026-11-18）：能力投影关着时收起输入框左下角的只读标签
+import { syncChatProjectPill } from "./chat-project.js";
 import { syncEditEntry } from "./chat-thread.js";
-import { followUp, send, syncSendEnabled } from "./composer-send.js";
+import { busyWhenSteerDefault, followUp, send, syncSendEnabled } from "./composer-send.js";
 import { el } from "./dom.js";
 import { closeGroupSettingsDrawer, groupSettingsOpen } from "./groups-settings.js";
 import { closeModelMenu } from "./hover-tip.js";
@@ -254,10 +256,13 @@ async function loadCapabilities() {
     state.capabilities.approvalMode = data.approvalMode === "blocking" ? "blocking" : "async";
     // 会话画板（2026-11-17）：缺字段按开处理（老服务端不挡）
     state.capabilities.chatMap = data.chatMap !== false;
+    // 工作归属标签（2026-11-18）：缺字段按开处理
+    state.capabilities.chatProjectLabel = data.chatProjectLabel !== false;
   } catch {
     return;
   }
   syncChatMapEntry();
+  syncChatProjectPill();
   if (el.composerAdd) el.composerAdd.hidden = !state.capabilities.attachments;
   // 文件附件关着：选择器退回只认图片（老行为），不让用户选完才报错
   if (el.composerFile) {
@@ -377,24 +382,23 @@ el.composer.addEventListener("submit", (event) => {
     void runCompactCommand(text.slice(compactMatch[0].length).trim());
     return;
   }
-  // 忙时两条路（2026-11-07 消息即引导；2026-11-08 扫尾批 8a 改排队落点）：
-  //   Ctrl/⌘+Enter = 插话，带 whenBusy=steer 直接投到正在跑的这一轮；
-  //   普通 Enter    = 排队，带 whenBusy=followUp 交给服务端落 durable（是下一轮的指令）。
+  // 忙时投递（2026-11-07 消息即引导；2026-11-19 插话统一改缺省）：
+  //   默认（插件卡「忙时消息」开）= 插话，带 whenBusy=steer 直接投到正在跑的这一轮；
+  //   插件卡切「排队」      = 旧行为，带 whenBusy=followUp 交给服务端落 durable（下一轮的指令）。
+  //   Ctrl/⌘+Enter 保留不删：忙时显式指定插话（与默认档同义的快捷键）。
   // 两条都只走纯文本（附件只在空闲时发，附件先留在条上）。
   if (state.sending) {
     if (images.length || files.length) {
       toast("附件消息要等这一轮结束再发");
       return;
     }
-    if (steer) {
-      el.input.value = "";
-      resize();
-      void steerIntoTurn(text);
-      return;
-    }
     el.input.value = "";
     resize();
-    void followUp(text);
+    void (async () => {
+      // 插话意图（Ctrl/⌘+Enter）优先；普通 Enter 读插件卡档位（缺省插话）
+      if (steer || (await busyWhenSteerDefault())) await steerIntoTurn(text);
+      else await followUp(text);
+    })();
     return;
   }
   el.input.value = "";

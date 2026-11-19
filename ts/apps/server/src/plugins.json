@@ -11,6 +11,8 @@
 				"AGENT_ASK_USER",
 				"AGENT_FILE_ATTACHMENTS",
 				"CHAT_DIR_PICK",
+				"CHAT_PROJECT_LABEL",
+				"AGENT_STEER_DEFAULT",
 				"SEARCH_MULTI_VENDOR",
 				"PROJECT_OUTSIDE_WORKSPACE",
 				"PROJECT_MERGE",
@@ -42,7 +44,8 @@
 				"MEMORY_PROACTIVE",
 				"MEMORY_SPLIT",
 				"MEMORY_IMPORT_SOURCES",
-				"AGENT_VERIFIED_ANSWER"
+				"AGENT_VERIFIED_ANSWER",
+				"REMINDER_DISTILL_ENABLED"
 			]
 		},
 		{
@@ -71,6 +74,7 @@
 				"GROUPS_ENABLED",
 				"DELEGATION_PROJECT_MEMORY",
 				"PARTNER_SIDE_SESSIONS",
+				"PARTNER_SESSION_MANAGE",
 				"PARTNER_PERSONA_MODULES",
 				"PARTNER_CONTRACT",
 				"PARTNER_DISCIPLINE_EDIT",
@@ -141,7 +145,7 @@
 		{
 			"key": "AUTONOMY_ENABLED",
 			"label": "自主轮",
-			"summary": "定时任务 / 事件唤醒、没人盯着跑的那一轮。关 = 完全不动；只观察 = 照常判定但只记账、不真的做；开 = 真起轮，卡住 / 等你批 / 出错会提醒你，写文件 / 跑命令 / 派活一律先问你。默认开。",
+			"summary": "定时任务 / 事件唤醒、没人盯着跑的那一轮；关 = 完全不动。只观察 = 照常判定但只记账、不真的做；开 = 真起轮，卡住 / 等你批 / 出错会提醒你，写文件 / 跑命令 / 派活一律先问你。默认开。",
 			"group": "autonomy",
 			"scope": "core",
 			"type": "enum",
@@ -164,6 +168,7 @@
 					"label": "开"
 				}
 			],
+			"offValue": "false",
 			"defaultValue": "true",
 			"hot": true
 		},
@@ -223,15 +228,20 @@
 		{
 			"key": "MEMORY_EXTRACT",
 			"label": "记忆提取方式",
-			"summary": "每一轮聊完，怎么从对话里抓「经历」。自动 = 先按规则抓、拿不准才叫模型（默认）；模型 = 每句都让模型判断，准但费额度；规则 = 只按句长 / 关键词抓，免费但粗。改完下一轮生效。",
+			"summary": "每一轮聊完，怎么从对话里抓「经历」；关 = 不自动抽取新记忆。开 = 自动 / 模型 / 规则：自动 = 先按规则抓、拿不准才叫模型（默认）；模型 = 每句都让模型判断，准但费额度；规则 = 只按句长 / 关键词抓，免费但粗。关掉只停自动抽取，召回 / 记忆页 / 手动 remember / 导入不受影响。抽取器在记忆引擎装配时取一次，改完重启服务后生效。",
 			"group": "memory",
 			"type": "enum",
 			"values": [
+				"off",
 				"auto",
 				"llm",
 				"rule"
 			],
 			"choices": [
+				{
+					"value": "off",
+					"label": "关"
+				},
 				{
 					"value": "auto",
 					"label": "自动"
@@ -245,8 +255,9 @@
 					"label": "规则"
 				}
 			],
+			"offValue": "off",
 			"defaultValue": "auto",
-			"hot": true,
+			"hot": false,
 			"requires": [
 				"MEMORY_ENABLED"
 			]
@@ -819,6 +830,22 @@
 			]
 		},
 		{
+			"key": "PARTNER_SESSION_MANAGE",
+			"label": "分支会话管理",
+			"summary": "选择器里把分支副本缩进挂在母会话下面，并允许直接删除 side 副会话 / 总管分支副本（有子分支的先拦下）。关 = 回到平铺列表、没有删除按钮、删除端点 400。默认开，即时生效。",
+			"group": "autonomy",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true,
+			"requires": [
+				"PARTNER_SIDE_SESSIONS"
+			]
+		},
+		{
 			"key": "AGENT_FILE_ATTACHMENTS",
 			"label": "文件附件",
 			"summary": "对话里除了图片还能发任意文件：上传落在服务端 .data/attachments，消息里带绝对路径，durable 只存路径。关 = 上传端点 404、前端不渲染「任意文件」入口。默认开，即时生效。",
@@ -841,6 +868,33 @@
 				"true",
 				"false"
 			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "CHAT_PROJECT_LABEL",
+			"label": "显示对话所属项目",
+			"summary": "普通 worker 对话在输入框左下角常显创建时的工作归属（项目名 / 工作区 / 目录，只读）。关 = 服务端不下发 chatWorkdir，前端收起这个标签（不恢复旧的输入框选项目菜单）。默认开，即时生效。",
+			"group": "chat",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "AGENT_STEER_DEFAULT",
+			"label": "忙时消息",
+			"summary": "这一轮还在跑时，你新发的消息怎么投：开 = 插话（默认）——直接插进当前轮，消息带「插话」标记，没赶上边界会如实回执；关 = 排队——等这一轮收尾再开始（旧行为）。Ctrl/⌘+Enter 始终是插话。即时生效。",
+			"group": "chat",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"offValue": "false",
 			"defaultValue": "true",
 			"hot": true
 		},
@@ -1111,14 +1165,19 @@
 		{
 			"key": "PARTNER_LEARNING_FREQUENCY",
 			"label": "学习反思频率",
-			"summary": "执事「学习」模块什么时候反思提炼：每周 = 只在既有周盘点跑完后提炼（省额度）；结算 = 每单结算钩子里按 N 轮抽查一次（勤，费模型）。拼错/空值按每周。默认每周，下一轮生效。",
+			"summary": "执事「学习」模块的反思频率；关 = 不做模型反思提炼。开 = 每周盘点后提炼（省额度）/ 结算时每 N 轮抽查（勤，费模型）。关掉只停模型反思，句长 / 称呼等确定性统计照常记录，已有规则照常注入。拼错 / 空值按每周。默认每周，下一轮生效。",
 			"group": "autonomy",
 			"type": "enum",
 			"values": [
+				"off",
 				"weekly",
 				"settle"
 			],
 			"choices": [
+				{
+					"value": "off",
+					"label": "关"
+				},
 				{
 					"value": "weekly",
 					"label": "每周盘点时"
@@ -1128,6 +1187,7 @@
 					"label": "结算时抽查"
 				}
 			],
+			"offValue": "off",
 			"requires": [
 				"MEMORY_ENABLED",
 				"PARTNER_PERSONA_MODULES"
@@ -1233,8 +1293,8 @@
 		},
 		{
 			"key": "AGENT_TOOL_POLICY",
-			"label": "工具写权限",
-			"summary": "工具闸门的权限档：全部 = 照常；禁命令行 = bash/PowerShell 不可用；只读 = 会写文件/起进程/派活的工具全拦。工具注册在启动时冻结——改完重启服务生效。",
+			"label": "工具权限限制",
+			"summary": "工具闸门的权限限制；关 = 完全访问（不限）。开 = 选一档限制：禁命令行 = bash / PowerShell 不可用；只读 = 会写文件 / 起进程 / 派活的工具全拦。工具注册在启动时冻结——改完重启服务后生效。",
 			"group": "autonomy",
 			"type": "enum",
 			"values": [
@@ -1256,6 +1316,7 @@
 					"label": "只读"
 				}
 			],
+			"offValue": "full",
 			"scope": "core",
 			"defaultValue": "full",
 			"hot": false
@@ -1494,6 +1555,19 @@
 			"hot": true
 		},
 		{
+			"key": "REMINDER_DISTILL_ENABLED",
+			"label": "提醒沉淀",
+			"summary": "记忆页「沉淀提醒」：代码从最近 30 天确定性收集你反复说的提醒（0 token），跳总管蒸馏成教诲建议，你逐条采纳才写进偏好。关 = 入口与候选/建议端点 404、save_reminder_advice 不上架。重启服务后生效。",
+			"group": "memory",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": false
+		},
+		{
 			"key": "EXECUTOR_PROBE",
 			"label": "执行器检测",
 			"summary": "设置 → Agent → 派活 的「检测」按钮：真 spawn 一次外接 CLI 验证模型清单（显式人工点击，耗少量额度）。关 = 检测端点 400，不 spawn 任何 CLI。前置：派活总闸。默认开，即时生效。",
@@ -1512,7 +1586,7 @@
 		{
 			"key": "CHANCELLOR_INTERNAL",
 			"label": "内部质检模型",
-			"summary": "拆单 / 验收 / 目标核对谁来判：核心 = 宿主当前模型一次纯文本请求（缺省）；qoder = 借外部 CLI（回滚旧形态）。进程启动装配一次——重启服务后生效。",
+			"summary": "拆单 / 验收 / 目标核对谁来判；开 = 核心模型，关 = 外部 CLI（qoder）。开用宿主当前模型做一次纯文本请求（缺省）；关是回滚旧形态。进程启动装配一次——改完重启服务后生效。",
 			"group": "autonomy",
 			"type": "enum",
 			"values": [
@@ -1529,6 +1603,7 @@
 					"label": "外部 CLI"
 				}
 			],
+			"offValue": "qoder",
 			"defaultValue": "core",
 			"hot": false
 		},

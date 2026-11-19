@@ -15,7 +15,6 @@ import { esc } from "./markdown.js";
 import { request } from "./net.js";
 import { parsePartnerExternalId } from "./partner-sessions.js";
 import { currentRoute } from "./route.js";
-import { sectionMarkup } from "./settings-atoms.js";
 import { state } from "./state.js";
 
 const STABILITY = {
@@ -270,11 +269,12 @@ function contextSettingsMarkup() {
 	contextMode = hasRealChats ? "session" : "default";
 	const roles = defaultRoleChoices();
 	const selectedRole = roles[0]?.id || "chief";
+	// 2026-11-18：四张导航卡已经写着「上下文」，节标题不再重复一遍；
+	// 工具栏自带「当前会话 / 默认开销」两个模式，直接当这一页的入口。
 	return `<div id="ctx-content" data-mode="${contextMode}">
-    ${sectionMarkup(
-			"上下文",
-			`${toolbarMarkup(contextMode, choices, selected, roles, selectedRole)}${heroMarkup()}`,
-		)}
+    <section class="set-sec">
+      ${toolbarMarkup(contextMode, choices, selected, roles, selectedRole)}${heroMarkup()}
+    </section>
   </div>`;
 }
 

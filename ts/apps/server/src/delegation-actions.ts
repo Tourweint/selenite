@@ -5,11 +5,14 @@
  */
 
 import { runChancellor } from "../../../packages/chancellor/src/index.ts";
+import { abortNativeWorker, forwardNativeWorkerMessage, WorkerNotRunningError } from "../../../packages/chancellor/src/employee/native.ts";
 import { listManagers } from "../../../packages/chancellor/src/manager/registry.ts";
 import { Store } from "../../../packages/chancellor/src/store.ts";
 import { Ticket } from "../../../packages/chancellor/src/types.ts";
 import { currentApprovalLevel, currentAuthority } from "./delegation-authority.ts";
 import { withDelegationJudge } from "./delegation-judge.ts";
+import { workerSteerEnabled } from "./delegation-gates.ts";
+import { deadLetterStore } from "./delegation-jobs.ts";
 import { DelegationReceipts, TERMINAL_TICKET_STATUS, requestFingerprint } from "./delegation-receipts.ts";
 import type { DelegationRuntime } from "./delegation.ts";
 import { chancellorWorkRoot, emitDelegation, startDelegation } from "./delegation.ts";
@@ -113,6 +116,20 @@ export function cancelTicketAction(
 			};
 		}
 		store.cancelTicket(ticketId, internalConversationId(found.ticket, ticketId, store));
+		// 决策上报/续行（2026-11-19 批2）：worker 可能正挂起等上报答复 / 预算内续轮。
+		// 作废位在服务端的簿记库里，worker 自己查不到——推送一条终止帧（复用批1
+		// stdin 通道，不发明第二条），让它停止续行与等待、收完已受理的提交就退。
+		// 失败（不在跑 / 执行器不是本机 native）只记一行，不影响作废本身。
+		try {
+			abortNativeWorker(ticketId);
+			console.log(`[ticket] 作废终止帧已发 ticket=${ticketId.slice(0, 12)}`);
+		} catch (error) {
+			console.log(
+				`[ticket] 作废终止帧未发（worker 不在跑或非本机 native）ticket=${ticketId.slice(0, 12)}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+		}
 		return { status: 200, body: { ok: true, status: "canceled" } };
 	} finally {
 		found.store.close();
@@ -211,6 +228,92 @@ export function projectHasInFlightTickets(workRoot: string, projectId: string): 
 		}
 	}
 	return false;
+}
+
+/**
+ * worker 插话转发（2026-11-19 插话统一 批1）。
+ *
+ * 把一条消息经 native 通道递给**正在跑**的 worker 子进程（`forwardNativeWorkerMessage`
+ * → 子进程 stdin 一行 JSON → durable `conversation.submit`）。语义与会话侧 steer 一致：
+ * mode=steer 插进当前轮（正文带 `[插话]` 标记行），followUp 排到本轮收尾之后。
+ *
+ * 发言权沿用任务专线口径：HTTP 端点（人/设备）与 `/tickets/:id/say` 同一道 API 鉴权，
+ * 不另查会话；agent 调用方（`send_to_agent`）传 `senderConversationId`，必须是这张单
+ * 的来源会话才能插话。`WORKER_STEER_ENABLED=false` 时通道整体下架（一律 400）。
+ * 外部 CLI 执行器没有注入口，如实报 `worker_not_running`（明确不做，见方案 §6）。
+ */
+export async function forwardWorkerMessageAction(
+	workRoot: string,
+	ticketId: string,
+	input: { mode: "steer" | "followUp"; text: string },
+	senderConversationId: number | null = null,
+): Promise<{ status: 202 | 400 | 404; body: Record<string, unknown> }> {
+	if (!workerSteerEnabled()) {
+		return {
+			status: 400,
+			body: {
+				ok: false,
+				error: "worker_steer_disabled",
+				message: "worker 插话通道已下架（WORKER_STEER_ENABLED=false）",
+			},
+		};
+	}
+	const found = findTicket(workRoot, ticketId);
+	if (!found) return { status: 404, body: { ok: false, error: "not_found" } };
+	try {
+		const ticketIdFound = found.ticket.id;
+		let canceled = false;
+		try {
+			canceled = deadLetterStore().isCanceled(ticketIdFound);
+		} catch {
+			/* 簿记库挂了不挡插话判定 */
+		}
+		if (canceled) {
+			return {
+				status: 400,
+				body: { ok: false, error: "ticket_canceled", message: "这张单已作废，插话不会送到执行端" },
+			};
+		}
+		if (senderConversationId !== null) {
+			const host = internalConversationId(found.ticket, ticketIdFound, deadLetterStore());
+			if (host === null || host !== senderConversationId) {
+				return {
+					status: 400,
+					body: {
+						ok: false,
+						error: "not_authorized",
+						message: "这张单不是从你的会话派出去的，不能插话；想让打手改道请在派单会话里说",
+					},
+				};
+			}
+		}
+		// 插话标记（2026-11-19 插话统一 批1）：只标 steer——模型据此知道这是半路引导；
+		// followUp 是"下一轮再说"，不加标记。
+		const text = input.mode === "steer" ? `[插话]\n${input.text}` : input.text;
+		try {
+			forwardNativeWorkerMessage(ticketIdFound, { mode: input.mode, text });
+		} catch (error) {
+			if (error instanceof WorkerNotRunningError) {
+				return {
+					status: 400,
+					body: {
+						ok: false,
+						error: "worker_not_running",
+						message:
+							"这张单的打手现在没在跑：只有正在跑的本机 native 打手才收得到插话（外部 CLI 打手没有注入口）",
+					},
+				};
+			}
+			throw error;
+		}
+		// 日志只记单号 / 字数 / 模式，不记正文（日志不含对话内容）。
+		console.log(
+			`[ticket] 插话 ticket=${ticketIdFound.slice(0, 12)} chars=${input.text.length} mode=${input.mode}`,
+		);
+		return { status: 202, body: { ok: true, ticketId: ticketIdFound, mode: input.mode, status: "accepted" } };
+	} finally {
+		found.store.close();
+	}
 }
 
 export { defaultRetryRuntime, internalConversationId, toProjectRef };

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  buildSessionTree,
   parsePartnerExternalId,
   partnerIdOfConversation,
   partnerSessionLabel,
@@ -40,4 +41,37 @@ test("partnerSessionLabel：title 优先；turns=0 → 新会话；有 firstText
   assert.equal(partnerSessionLabel({ firstText: "今天怎么样", turns: 0 }), "新会话");
   assert.equal(partnerSessionLabel({ turns: 0 }), "新会话");
   assert.equal(partnerSessionLabel({}), "新会话");
+});
+
+test("buildSessionTree：副本挂到母会话下，母会话缺失 / 环都退回顶层", () => {
+  const canonical = { conversationId: "c", role: "canonical", lastAt: 300 };
+  const child = { conversationId: "b", role: "side", lastAt: 200, origin: { source: "c" } };
+  const grandchild = { conversationId: "a", role: "side", lastAt: 100, origin: { source: "b" } };
+  const orphan = { conversationId: "x", role: "side", lastAt: 50, origin: { source: "gone" } };
+
+  const tree = buildSessionTree([canonical, child, grandchild, orphan]);
+  assert.deepEqual(
+    tree.map((node) => node.session.conversationId),
+    ["c", "x"],
+    "母会话在顶层；来源缺失的副本不装成别人的孩子",
+  );
+  const c = tree[0];
+  assert.equal(c.children.length, 1);
+  assert.equal(c.children[0].session.conversationId, "b");
+  assert.equal(c.children[0].children[0].session.conversationId, "a");
+
+  // 自环 / 互环：不能无限递归，节点也不能重复出现
+  const self = { conversationId: "s", role: "side", lastAt: 1, origin: { source: "s" } };
+  const a = { conversationId: "a", role: "side", lastAt: 1, origin: { source: "b" } };
+  const b = { conversationId: "b", role: "side", lastAt: 1, origin: { source: "a" } };
+  const flat = buildSessionTree([self, a, b]);
+  const seen = [];
+  const walk = (nodes) => {
+    for (const node of nodes) {
+      seen.push(node.session.conversationId);
+      walk(node.children);
+    }
+  };
+  walk(flat);
+  assert.deepEqual(seen.sort(), ["a", "b", "s"]);
 });

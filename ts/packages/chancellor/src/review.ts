@@ -5,6 +5,7 @@ import type { QoderCall } from "./dispatch.ts";
 import { askInternal } from "./internal.ts";
 import { changedDeclaredPaths, snapshotDeclaredPaths } from "./isolation.ts";
 import { extractJsonBlock } from "./plan.ts";
+import { buildQaRequirement, parseQaConclusion, qaRunnerAvailable, runQaTicket } from "./qa.ts";
 import { isInside, listFiles } from "./store.ts";
 import type { QoderResult, Review, TaskRun, Ticket, Verdict } from "./types.ts";
 
@@ -13,6 +14,14 @@ export type MechanicalResult = { ok: true } | { ok: false; reason: string };
 /** 测试注入：默认真起 qoder；确定性用例用它固定 verdict。 */
 export interface ReviewDeps {
   ask?: (call: QoderCall) => Promise<QoderResult>;
+}
+
+/** 质检 worker 分支的选项（2026-11-19 批2）；缺省 = 内部请求（现状）。 */
+export interface ReviewOptions {
+  /** 派活设置选了「派质检 worker」时为 true（宿主经 ChancellorRequest.qaWorker 透传）。 */
+  qaWorker?: boolean;
+  /** 这张单拆出的任务总数（质检任务书里的 {TOTAL}）。 */
+  total?: number;
 }
 
 /** 手机单降级成汇报验收时落的 warning（review.json 里可查）。 */
@@ -35,6 +44,7 @@ export async function reviewTask(
   ticket: Ticket,
   signal?: AbortSignal,
   deps: ReviewDeps = {},
+  options: ReviewOptions = {},
 ): Promise<Review> {
   const base = { ticket_id: run.ticketId, seq: run.seq, slug: run.task.slug };
 
@@ -170,6 +180,13 @@ export async function reviewTask(
   const note = report
     ? null
     : `REPORT.md 契约无法解析（${run.reportError ?? "未知"}），改读原文判断`;
+  // 质检 worker（2026-11-19 批2）：本来要跑「内部一次请求」验收的地方，改派一单
+  // 质检工人（templates/qa.md，走既有派单器）。方式关 / 宿主没注入实现 → 原路径，
+  // 与改动前逐字节一致（回滚形态）。边界：声明了 writes 且机械核对通过的任务
+  // 今天就不跑内部请求，这里同样不跑质检——两种方式语义对齐。
+  if (options.qaWorker === true && qaRunnerAvailable()) {
+    return reviewWithQaWorker(run, ticket, options.total ?? 1, effectiveWarnings);
+  }
   return reviewWithLlm(
     run,
     ticket,
@@ -180,6 +197,48 @@ export async function reviewTask(
     reportOnly,
     deps,
   );
+}
+
+/**
+ * 质检 worker 验收：派一单质检工人（宿主注入的 qaRunner），读它的结论行定判定。
+ * 结论行解析在 qa.ts；没给出结论 / 派单失败都判 blocked 交人——质检自身不可用
+ * 时不冒充验收通过，也不冒充失败（blocked = needs_you，与验收异常同一老通道）。
+ */
+async function reviewWithQaWorker(
+  run: TaskRun,
+  ticket: Ticket,
+  total: number,
+  warnings: string[],
+): Promise<Review> {
+  const base = { ticket_id: run.ticketId, seq: run.seq, slug: run.task.slug };
+  const baseWithWarnings = () =>
+    warnings.length > 0 ? { ...base, warnings } : { ...base };
+  try {
+    const qaReport = await runQaTicket(buildQaRequirement({ run, ticket, total }));
+    const conclusion = parseQaConclusion(qaReport);
+    if (!conclusion) {
+      return {
+        ...baseWithWarnings(),
+        verdict: "blocked",
+        reason: "质检 worker 没给出结论行（DONE / CONTINUE / BLOCKED），按未验收交人",
+        stage: "llm",
+      };
+    }
+    return {
+      ...baseWithWarnings(),
+      verdict: conclusion.verdict,
+      reason: conclusion.reason,
+      stage: "llm",
+    };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return {
+      ...baseWithWarnings(),
+      verdict: "blocked",
+      reason: `质检 worker 派单失败（不是原 worker 的问题）：${detail}`,
+      stage: "llm",
+    };
+  }
 }
 
 const CONTENT_LIMIT = 2048;

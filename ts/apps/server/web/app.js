@@ -200,7 +200,8 @@ void (async () => {
   startApprovalPopWatch();
   // 问候语跨段自动换（2026-11-07）：窗口常开着过夜也不能一直挂着「晚安」。
   // 一分钟查一次就够——换段是整点的事，没人会盯着这一秒；
-  // 只改文本、不重建 DOM，所以不会打断动画，也不会闪。
+  // 换句带淡出淡入（2026-11-19，见 shell.js 的 swapGreetingText）：只改文本、
+  // 不重建 DOM，动画从头到尾是它自己的事，不会闪、也不会被打断。
   setInterval(() => {
     if (el.viewChat.dataset.home === "1") syncGreeting();
   }, 60_000);

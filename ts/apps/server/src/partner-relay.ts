@@ -586,6 +586,20 @@ export interface PartnerRelayDeps {
 		body: string,
 		sender: RelaySenderContext,
 	) => Promise<RelayDeliverResult>;
+	/**
+	 * worker 插话通道（2026-11-19 插话统一 批1）：传了才给 `send_to_agent` 加
+	 * `mode` 参数与单号目标——target 写单号（ticketId）时经 native 通道转发给
+	 * 正在跑的打手。不传 = 工具保持改动前的逐字节形态（回滚：WORKER_STEER_ENABLED
+	 * =false 时不注入）。返回的 `error` / `message` 原样进工具回执。
+	 */
+	workerSteer?: {
+		forward: (
+			ticketId: string,
+			mode: "steer" | "followUp",
+			text: string,
+			senderConversationId: number,
+		) => Promise<{ ok: boolean; error?: string; message?: string }>;
+	};
 }
 
 /**
@@ -597,20 +611,45 @@ export interface PartnerRelayDeps {
  */
 export function createSendToAgentTool(deps: PartnerRelayDeps): ToolRegistration {
 	const store = () => (deps.store ?? partnersStore)();
+	// worker 插话通道（2026-11-19 插话统一 批1）：没注入 = 工具保持改动前的形态
+	//（无 mode 参数、target 不认单号）——这就是 WORKER_STEER_ENABLED=false 的回滚形态。
+	const steer = deps.workerSteer ?? null;
 
 	return defineTool({
 		name: RELAY_TOOL_NAME,
-		description:
-			"给另一位执事递一条话（只送到对方的会话里，主人看不到原文）。" +
-			"适合：把自己查到的事交给对口的执事、跟对方对一下口径。" +
-			"target 写执事的名字或领域；重名时用「名字·领域」。" +
-			"一次只说一件事、一条话别拆成好几条（每轮最多 3 条）；" +
-			"收到别人递来的话那一轮不能再往外递。",
+		// 描述变更（2026-11-19 插话统一 批1）：注入 worker 插话通道时补一句"单号=给打手插话"。
+		// 描述与注册顺序是缓存前缀资产，变更记录由验收方统一写。
+		description: steer
+			? "给另一位执事递一条话（只送到对方的会话里，主人看不到原文）。" +
+				"适合：把自己查到的事交给对口的执事、跟对方对一下口径。" +
+				"target 写执事的名字或领域；重名时用「名字·领域」。" +
+				"要给正在跑的本机打手（native worker）半路补话，target 写它的单号（ticketId，如 t-20261119-143052-ab12），mode=steer 插进它当前这一轮（默认）、followUp 排到它本轮收尾之后；没在跑的打手收不到。" +
+				"一次只说一件事、一条话别拆成好几条（每轮最多 3 条）；" +
+				"收到别人递来的话那一轮不能再往外递。"
+			: "给另一位执事递一条话（只送到对方的会话里，主人看不到原文）。" +
+				"适合：把自己查到的事交给对口的执事、跟对方对一下口径。" +
+				"target 写执事的名字或领域；重名时用「名字·领域」。" +
+				"一次只说一件事、一条话别拆成好几条（每轮最多 3 条）；" +
+				"收到别人递来的话那一轮不能再往外递。",
 		parameters: Type.Object({
-			target: Type.String({ description: "执事的名字或领域（重名用「名字·领域」）" }),
+			target: steer
+				? Type.String({
+						description: "执事的名字或领域（重名用「名字·领域」）；给正在跑的打手插话写单号（ticketId）",
+					})
+				: Type.String({ description: "执事的名字或领域（重名用「名字·领域」）" }),
 			message: Type.String({
 				description: `要递的话，用自己的话写，不超过 ${RELAY_MESSAGE_LIMIT} 字`,
 			}),
+			// mode（2026-11-19 插话统一 批1）：只对"单号目标"生效——默认 steer。
+			...(steer
+				? {
+						mode: Type.Optional(
+							Type.Union([Type.Literal("steer"), Type.Literal("followUp")], {
+								description: "给打手插话的投递方式：steer=插进它当前轮（默认）；followUp=排到它本轮收尾后",
+							}),
+						),
+					}
+				: {}),
 		}),
 		execute: async (args, api, context) => {
 			const message = String(args.message ?? "").trim();
@@ -646,6 +685,44 @@ export function createSendToAgentTool(deps: PartnerRelayDeps): ToolRegistration 
 
 			const resolved = resolveRelayTarget(args.target, db.list(), selfId);
 			if (!resolved.ok) {
+				// 单号目标（2026-11-19 插话统一 批1）：执事名对不上时，target 若是单号
+				// 就转 worker 插话通道（mode 默认 steer）。发言权 / 在跑与否的判定都在
+				// 转发侧（forwardWorkerMessageAction），错误原样回报给模型。
+				if (steer && resolved.reason === "missing") {
+					const live = await api.snapshot(LiveDoc, api.conversationId, context);
+					const runKey =
+						currentRelayRunKey(Number(api.conversationId)) ?? relayRunKey(Number(api.conversationId), live);
+					const slot = takeRelaySlot(Number(api.conversationId), runKey);
+					if (!slot.allowed) {
+						return textToolResult(
+							err("relay_cap", relayCapMessage(), "这轮别再插了；实在要插，等下一轮。"),
+						);
+					}
+					const mode = args.mode === "followUp" ? "followUp" : "steer";
+					const forwarded = await steer.forward(
+						String(args.target ?? "").trim(),
+						mode,
+						message,
+						Number(api.conversationId),
+					);
+					if (!forwarded.ok) {
+						return textToolResult(
+							err(
+								forwarded.error ?? "steer_failed",
+								forwarded.message ?? "插话没递出去。",
+								"确认单号写对了、打手正在跑；已经收尾的单走 resume（delegate resume）而不是插话。",
+							),
+						);
+					}
+					return textToolResult(
+						ok({
+							message:
+								mode === "steer"
+									? "已递给打手：这张单的下一个边界会带上这条话（带 [插话] 标记）。"
+									: "已排进打手本轮之后的队列，它收尾后接着看。",
+						}),
+					);
+				}
 				return textToolResult(
 					err("target_not_found", resolved.message, "用「名字·领域」写全目标，或换个说法再试。"),
 				);

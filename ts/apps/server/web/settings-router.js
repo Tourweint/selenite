@@ -28,7 +28,7 @@ import { ACCENTS, AGENT_TABS, agentTabsMarkup, renderSettingsNav } from "./setti
 import { compactionSectionMarkup, wireCompactionSection } from "./settings-compaction.js";
 import { contextSettingsMarkup, wireContextSettings } from "./settings-context.js";
 import { toolPoolMarkup, wireToolPool } from "./settings-tools.js";
-import { connRelay, initRuntimeCard, loadPair, loadRelayStatus, loadServiceInfo, openAddDeviceModal, openRelayLinkModal, paintConnStar, unlinkRelay } from "./settings-connection.js";
+import { initRuntimeCard, loadRelayStatus, loadServiceInfo, openAddPhoneModal, openRelayLinkModal, paintConnStar, unlinkRelay } from "./settings-connection.js";
 import { executorSectionMarkup, wireExecutorSettings } from "./settings-executor.js";
 import { memorySettingsMarkupLegacy, wireMemorySettingsLegacy } from "./settings-memory.js";
 import { loadProjectsSettings } from "./settings-projects.js";
@@ -43,7 +43,6 @@ import { KEY_ACCENT, KEY_ACCENT_CUSTOM, KEY_SEND, THEMES, currentThemeChoice, op
 import { closePopover, toast } from "./ui-atoms.js";
 import { chooseDetailMode, getDetailMode } from "./tool-chips.js";
 
-let pairTimer = 0;
 /** 连接页的中继状态轮询（2026-11-14）：10s 一次，离开这一页就不刷。 */
 let connPollTimer = 0;
 
@@ -358,20 +357,18 @@ async function renderSettings() {
         replayPageEnter();
         return;
       }
+      // 标题不再重复 tab 名的「人设」：四张导航卡已经说了这是哪一页，
+      // 这里只留内容自己的名字「总管与执事」+ 新建动作（2026-11-18）。
       el.settingsInner.innerHTML = agentTabsMarkup(tab) + sectionMarkup(
-        "人设",
-        `<div class="pt-head">
-          <div class="row-main">
-            <div class="set-card-title" data-tip="一个执事一份档案：点进去改头像、写人设、定岗位、看能力与档案，一页到底。">总管与执事</div>
-          </div>
-          <button class="btn-primary" type="button" id="partner-add">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
-            新建执事
-          </button>
-        </div>
-        <div class="pt-list" id="partner-list">
+        `<span data-tip="一个执事一份档案：点进去改头像、写人设、定岗位、看能力与档案，一页到底。">总管与执事</span>`,
+        `<div class="pt-list" id="partner-list">
           <div class="set-hint">读取中…</div>
         </div>`,
+        "",
+        `<button class="btn-primary" type="button" id="partner-add">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+          新建执事
+        </button>`,
       );
       document.getElementById("partner-add")?.addEventListener("click", () => openCreatePartnerModal());
       void loadPartners();
@@ -425,8 +422,7 @@ async function renderSettings() {
       <section class="set-sec">
         <div class="card rm-hero">
           <div class="rm-hero-body">
-            <div class="rm-hero-title">到点让 TA 自己跑一轮</div>
-            <div class="rm-hero-note">内容是一段可编辑的指令：到点后 TA 会拿它自己起一轮，能查就查、能做就做，然后把结果回在你们的主会话；做不了会回一句。触发消息可以选「像 TA 主动找我」（只看到回复），也可以选「留一条我发的指令」（会话里看得到你写的那段）。</div>
+            <div class="rm-hero-title" data-tip="内容是一段可编辑的指令：到点后 TA 会拿它自己起一轮，能查就查、能做就做，然后把结果回在你们的主会话；做不了会回一句。触发消息可以选「像 TA 主动找我」（只看到回复），也可以选「留一条我发的指令」（会话里看得到你写的那段）。&#10;&#10;点一行就能改；暂停、立即跑、历史、删除在右边的 ⋯ 里。">到点让 TA 自己跑一轮</div>
             <div class="rm-hero-actions">
               <button class="ghost" type="button" id="reminder-manual">手动设置</button>
               <button class="btn-primary" type="button" id="reminder-say-go">交给 Agent</button>
@@ -449,10 +445,15 @@ async function renderSettings() {
     document.getElementById("reminder-manual")?.addEventListener("click", () => openScheduledTaskModal());
     void loadReminders();
   } else if (page === "connect") {
-    // 连接页（2026-11-14 重排）：顺序就是操作顺序——状态 → 接入中继 → 手机两条路 → 设备。
-    // 第一步（电脑接中继）必须在这里能填；第二步的按钮永不置灰，没到那一步时文案直接说"先接入"。
+    // 本机页（2026-11-18 收口）：七节七卡并成三节三卡——用户口径「分得特别碎，块也比较小」。
+    // ① 连接：星图（回答"挂没挂上中继"）+ 中继地址 + 扫码（本地）+ 添加手机（远程）。
+    //    这四块本来就是同一条操作链（状态 → 接入 → 手机两条路），收进一张卡后不再被三个小标题切碎。
+    // ② 已连接的设备：行数会变，单独一节；塞进连接卡会被读成操作流程的一部分。
+    // ③ 服务与关于：通知 / 鉴权 / 运行时 / 开机自启 / 版本许可，都是「这台电脑怎么跑」。
+    // 旧路由 /service、/about 由 SETTINGS_ALIASES 别名到 connect，老书签不空页。
+    const notifyOn = localStorage.getItem(KEY_NOTIFY) === "1";
     el.settingsInner.innerHTML = `${sectionMarkup(
-      "连接状态",
+      "连接",
       `<div class="card">
         <div class="conn-star" id="conn-star"></div>
         <div class="conn-hint" id="conn-hint"></div>
@@ -469,63 +470,74 @@ async function renderSettings() {
           <div class="row-main"><div class="row-hint">断开</div></div>
           <div class="row-control"><button class="ghost" type="button" id="relay-unlink-btn" data-tip="断开后手机就连不到这台电脑；重新接入随时可以。">断开</button></div>
         </div>
-      </div>`,
-    )}
-    ${sectionMarkup(
-      "本地连接",
-      `<div class="card">
+        <div class="divider"></div>
         <div class="row">
           <div class="row-main">
-            <div class="row-label" data-tip="同一 WiFi、插数据线、或手机开「USB 共享网络」都算本地。手机 App 扫这个码，换一个长期有效的设备凭据——不用把 AGENT_TOKEN 抄到手机上。">扫码连接手机</div>
+            <div class="row-label" data-tip="两种方式都是把一台手机挂到这台电脑上：本地 = 同一 WiFi / 数据线 / USB 共享网络，扫码即连、不走中继；远程 = 经中继，人在外面、手机用流量也能连。点开在卡片里选。">添加手机</div>
+            <div class="row-hint">本地：同一 WiFi / 数据线 · 远程：经中继</div>
           </div>
-          <div class="row-control"><button class="btn-primary" type="button" id="pair-refresh">显示二维码</button></div>
-        </div>
-        <div class="pair-qr-box" id="pair-qr-box" hidden>
-          <img class="pair-qr" id="pair-qr" alt="配对二维码" />
-          <div class="pair-meta" id="pair-meta"></div>
-        </div>
-      </div>`,
-    )}
-    ${sectionMarkup(
-      "远程连接",
-      `<div class="card">
-        <div class="row">
-          <div class="row-main">
-            <div class="row-label" data-tip="经中继出一枚一次性加入码；手机 App 扫码即加入，不同网络、用流量都能连。扫完出现在下面「已连接的设备」里。">远程添加手机</div>
-          </div>
-          <div class="row-control"><button class="btn-primary" type="button" id="relay-add-device">添加手机</button></div>
+          <div class="row-control"><button class="btn-primary" type="button" id="add-phone-btn">添加手机</button></div>
         </div>
       </div>`,
     )}
     ${sectionMarkup(
       "已连接的设备",
       `<div class="card" id="device-card"></div>`,
+    )}
+    ${sectionMarkup(
+      "服务与关于",
+      `<div class="card" id="runtime-card">
+        <div class="row">
+          <div class="row-main">
+            <div class="row-label" data-tip="回复完成 / 出错 / 任务单待你处理时提醒；窗口正看着那个会话就不打扰。">桌面通知</div>
+            <div class="row-hint" id="svc-notify-hint" hidden></div>
+          </div>
+          <div class="row-control">
+            ${switchMarkup(notifyOn, { label: "桌面通知", attrs: 'data-notify-switch' })}
+          </div>
+        </div>
+        <div class="divider"></div>
+        ${rowMarkup(
+          "鉴权",
+          // 悬停挂在「鉴权」两个字上：这一行的状态（本机无需配置）本身不需要解释，
+          // 用户真正要问的是"那手机怎么连"——扫码配对走的就是同一套凭据。
+          "扫码配对用的就是这一项：手机 App 扫配对码换一枚设备凭据，不用把令牌抄进手机；本机浏览器直接从这台电脑打开，也不需要令牌。",
+          `<span class="kv" id="svc-auth">…</span>`,
+        )}
+        <div class="divider"></div>
+        ${rowMarkup(
+          "Node 服务",
+          "桌面壳拉起来的那个进程。停掉之后手机连接、提醒、例行任务都会断；历史不会丢，启动即可恢复。",
+          `<div class="runtime-actions">
+             <span class="kv" id="runtime-state">读取中…</span>
+             <button class="btn-primary" type="button" id="runtime-start" hidden>启动</button>
+             <button class="ghost" type="button" id="runtime-restart" hidden>重启</button>
+             <button class="ghost is-danger" type="button" id="runtime-stop" hidden>停止</button>
+           </div>`,
+        )}
+        <div class="divider" id="autostart-divider" hidden></div>
+        <div class="row" id="autostart-row" hidden>
+          <div class="row-main">
+            <div class="row-label" data-tip="登录 Windows 时自动启动 Selenite；服务仍由壳拉起，和这里的起停互不影响。">开机自启</div>
+          </div>
+          <div class="row-control">
+            ${switchMarkup(false, { label: "开机自启", attrs: "data-autostart-switch" })}
+          </div>
+        </div>
+        <div class="divider"></div>
+        ${rowMarkup("Selenite", "一个跑在自己机器上的通用 Agent：记日记、读文件、跑命令、派活。数据、记忆和密钥都留在本机；除了你自己配的模型接口，没有云端。MIT 许可，用法与架构见项目 README 和 docs/ 下的文档。", `<span class="kv">0.1.0</span>`)}
+      </div>`,
     )}`;
-    document.getElementById("pair-refresh").addEventListener("click", () => void loadPair());
+    // 添加手机（2026-11-18 合并）：本地 / 远程收进同一张浮层卡，默认落在本地；
+    // 远程面板自己判断中继有没有连上（没连上给「接入中继」，不置灰）。
+    document.getElementById("add-phone-btn").addEventListener("click", () => openAddPhoneModal("local"));
     document.getElementById("relay-link-btn").addEventListener("click", () => openRelayLinkModal());
     document.getElementById("relay-unlink-btn").addEventListener("click", () => void unlinkRelay());
-    // 没接入时这个按钮不置灰：点了直接开接入弹窗（置灰=死路，用户 2026-11-14 的原话）
-    document.getElementById("relay-add-device").addEventListener("click", () => {
-      if (!connRelay.connected) {
-        openRelayLinkModal();
-        return;
-      }
-      openAddDeviceModal();
-    });
-    // 二维码按需展开（2026-11-15）：本地连接收成一行，进来不再提前取码——每取一次都会换掉上一枚码，
-    // 没打算扫的人不该被消耗掉一枚。
     void loadRelayStatus();
     // 星形拓扑的节点来自设备列表（2026-11-14）：先读列表，画完再把星形刷新一次
     void loadDevices().then(() => paintConnStar());
-    // 配对码是限时的，停在这一页太久就自己换一张，别让人扫到过期码；
-    // 只在二维码展开时才换——收起来的时候换码等于把用户正在用的那枚悄悄作废。
-    clearInterval(pairTimer);
-    pairTimer = setInterval(() => {
-      const box = document.getElementById("pair-qr-box");
-      if (box && !box.hidden && currentRoute() === "settings" && currentSettingsPage() === "connect" && el.gate.hidden) {
-        void loadPair();
-      }
-    }, 100000);
+    // 配对码的自动轮换跟着浮层走（2026-11-18）：本地面板开着时每 100 秒换一张，
+    // 逻辑在 openAddPhoneModal 里，页面不再需要守着一个内联二维码盒子。
     // 中继状态也要自己刷（2026-11-14）：不刷的话中继掉线/重连，页面还停在旧结论上
     clearInterval(connPollTimer);
     connPollTimer = setInterval(() => {
@@ -536,69 +548,8 @@ async function renderSettings() {
         void loadDevices().then(() => paintConnStar());
       }
     }, 10000);
-    // 服务与关于并进来（2026-11-18 用户口径：设置分区太多；旧路由 /service、/about
-    // 由 SETTINGS_ALIASES 别名到 connect）。顺序 = 先「这台电脑怎么连」，再「它怎么跑」，
-    // 关于这张小卡收尾。服务页 2026-11-13 退役的两行（地址、累计 token）不复活：
-    // 地址在连接状态的链路图里，token 在「用量」页。
-    // 上面连接部分的 DOM 与监听都已就位，这里往后追加节点不打扰它们。
-    const notifyOn = localStorage.getItem(KEY_NOTIFY) === "1";
-    el.settingsInner.insertAdjacentHTML(
-      "beforeend",
-      `${sectionMarkup(
-        "服务",
-        `<div class="card">
-          <div class="row">
-            <div class="row-main">
-              <div class="row-label" data-tip="回复完成 / 出错 / 任务单待你处理时提醒；窗口正看着那个会话就不打扰。">桌面通知</div>
-              <div class="row-hint" id="svc-notify-hint" hidden></div>
-            </div>
-            <div class="row-control">
-              ${switchMarkup(notifyOn, { label: "桌面通知", attrs: 'data-notify-switch' })}
-            </div>
-          </div>
-          <div class="divider"></div>
-          ${rowMarkup(
-            "鉴权",
-            // 悬停挂在「鉴权」两个字上：这一行的状态（本机无需配置）本身不需要解释，
-            // 用户真正要问的是"那手机怎么连"——扫码配对走的就是同一套凭据。
-            "扫码配对用的就是这一项：手机 App 扫配对码换一枚设备凭据，不用把令牌抄进手机；本机浏览器直接从这台电脑打开，也不需要令牌。",
-            `<span class="kv" id="svc-auth">…</span>`,
-          )}
-        </div>`,
-      )}
-      ${sectionMarkup(
-        "运行时",
-        `<div class="card" id="runtime-card">
-          ${rowMarkup(
-            "Node 服务",
-            "桌面壳拉起来的那个进程。停掉之后手机连接、提醒、例行任务都会断；历史不会丢，启动即可恢复。",
-            `<div class="runtime-actions">
-               <span class="kv" id="runtime-state">读取中…</span>
-               <button class="btn-primary" type="button" id="runtime-start" hidden>启动</button>
-               <button class="ghost" type="button" id="runtime-restart" hidden>重启</button>
-               <button class="ghost is-danger" type="button" id="runtime-stop" hidden>停止</button>
-             </div>`,
-          )}
-          <div class="divider" id="autostart-divider" hidden></div>
-          <div class="row" id="autostart-row" hidden>
-            <div class="row-main">
-              <div class="row-label" data-tip="登录 Windows 时自动启动 Selenite；服务仍由壳拉起，和这里的起停互不影响。">开机自启</div>
-            </div>
-            <div class="row-control">
-              ${switchMarkup(false, { label: "开机自启", attrs: "data-autostart-switch" })}
-            </div>
-          </div>
-        </div>`,
-      )}
-      ${sectionMarkup(
-        "关于",
-        `<div class="card">
-          ${rowMarkup("Selenite", "一个跑在自己机器上的通用 Agent：记日记、读文件、跑命令、派活。数据、记忆和密钥都留在本机；除了你自己配的模型接口，没有云端。", `<span class="kv">0.1.0</span>`, { inlineHint: true })}
-          <div class="divider"></div>
-          ${rowMarkup("开源", "MIT 许可。用法与架构见项目 README 和 docs/ 下的文档。", `<span class="kv">MIT</span>`, { inlineHint: true })}
-        </div>`,
-      )}`,
-    );
+    // 服务页 2026-11-13 退役的两行（地址、累计 token）不复活：地址在连接卡上方，
+    // token 在「用量」页。2026-11-18 起服务 / 运行时 / 关于与连接同页（见上面的三节口径）。
     // 通知开关（批次二）：开的时候才请求系统权限；被拒就退回关闭并提示
     const notifySwitch = el.settingsInner.querySelector("[data-notify-switch]");
     notifySwitch?.addEventListener("click", async () => {
@@ -791,4 +742,4 @@ async function renderSettings() {
   replayPageEnter();
 }
 
-export { pairTimer, renderSettings };
+export { renderSettings };

@@ -16,12 +16,18 @@ Agent、记忆、会话全在 `../ts/apps/server`（Node，`:39847`），这里�
 - 托盘：显示窗口 / 重新连接 / 退出
 - **关窗 = 隐藏**，服务不停（手机还要连、提醒还要跑）
 - 服务没起来时给一页说明，而不是 WebView 的默认错误页
+- **原生弹出层（2026-11-19 批1）**：悬停提示与右键菜单族（`openMenuAt` / `openSecMenu`）
+  改由壳的 MyGo flyout（`popovers.go`）GPU 自绘——独立小窗、贴页面坐标、能伸出窗口边缘、
+  外点击只关不穿透。页面启动探一次 `Shell.Capabilities()`，普通浏览器 / 老壳 / 调用失败
+  都自动回 DOM 旧路；业务闭包不过桥（壳只回所选序号）。方案与真机验收记录见
+  `../docs/设计方案/2026-11-19-壳弹出层原生化（mygo ui 接管悬停提示与右键菜单）.md`，
+  长期口径见 `../docs/基线文档/系统架构.md` §6.3。
 
 ## 前置
 
 | | |
 |---|---|
-| Go | **1.27.3+**（MyGo v0.7.3 的 `go.mod` 硬要求，不是建议版本） |
+| Go | **1.27.3+**（MyGo v0.10.0 的 `go.mod` 硬要求，不是建议版本） |
 | WebView2 | Windows 11 自带；Win10 需要装运行时 |
 | 服务 | `cd ../ts && pnpm dev` |
 
@@ -70,6 +76,18 @@ go build -ldflags="-H windowsgui -X main.version=$(git describe --tags --always)
 ```powershell
 $env:LIFEDIARY_BASE_URL='http://127.0.0.1:9000'
 ```
+
+壳自己的开关（环境变量）：
+
+| | |
+|---|---|
+| `LIFEDIARY_BASE_URL` | 服务地址（默认 `http://127.0.0.1:39847`） |
+| `LIFEDIARY_SERVER_DIR` | 服务目录（默认按壳的兄弟目录找） |
+| `LIFEDIARY_SHELL_BINDINGS` | `off` = 整组 `Shell` 绑定不挂（页面退化成手输路径） |
+| `LIFEDIARY_SHELL_WATCH` | `off` = 关掉服务失联自动重拉守护 |
+| `LIFEDIARY_NATIVE_POPOVERS` | `off` = 原生弹出层回滚开关：Capabilities 报 `nativePopups=false`，页面全量回 DOM 旧路（回滚不等于改代码） |
+| `LIFEDIARY_THEME` | 显式指定壳记住的主题（paper/white/indigo/black/celadon），调试取色用 |
+| `LIFEDIARY_THEME_FILE` | 主题记忆文件落点（测试用） |
 
 ## 已验证
 

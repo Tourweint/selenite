@@ -8,12 +8,9 @@
    只吃现有令牌：--card / --surface-low / --divider / --outline / --text-* /
    --mono / --accent / --c-error / --r-*。所有颜色随四套主题走，不硬编码色值。 */
 
-.pt-head {
-  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
-  margin-bottom: 14px;
-}
 /* 列表（2026-11-07）：一张卡一行、卡片间距 10px。原来一列堆三行（名字行 / 元信息 / 动作），
-   信息密度低且视觉上"三个小块"叠在一起，就是用户说的方框不正常。 */
+   信息密度低且视觉上"三个小块"叠在一起，就是用户说的方框不正常。
+   2026-11-18：「总管与执事」标题与新建按钮并进 sectionMarkup 的节头，.pt-head 退役。 */
 .pt-list { display: flex; flex-direction: column; gap: 10px; }
 
 .pt-card {

@@ -112,6 +112,20 @@ export type ChatStreamEvent =
 			/** 自主轮标记（批次C C2）：例行轮的审批卡；对外契约见 shared ChatEvent（纯增量） */
 			origin?: "autonomous";
 	  }
+	/**
+	 * worker 决策上报（2026-11-19 批2）：跑动中 escalate，派活方会话出上报卡。
+	 * 形状对外契约见 shared ChatEvent 的 escalation 成员；路由在 escalation.ts。
+	 */
+	| {
+			type: "escalation";
+			ticketId: string;
+			domain: string;
+			escalationId: string;
+			question: string;
+			context: string;
+			options?: string[];
+			urgency: "low" | "normal" | "high";
+	  }
 	| { type: "turnLimit"; message: string }
 	/**
 	 * 这一轮跑完了但没有回答（模型报错、被策略拦下等）。
@@ -361,10 +375,32 @@ export async function* chatStream(
 			// 工具面读不到不该挡对话
 		}
 
+		// 插话标记（2026-11-19 插话统一 批1）：忙时 steer 的提交，文本最前面加一行
+		// `[插话]`——模型知道这是半路引导，历史 / 回放可见，前端检测该前缀渲染徽标。
+		// 标记进消息文本、不做内核元数据改造，durable 重放天然存活。
+		// 空闲提交不加（那不是插话，是新的一轮）；诚实回执（notice.steer）保持不变。
+		const steerMarked: ChatStreamInput = (() => {
+			if (input.whenBusy !== "steer" || !busyBeforeSubmit) return input;
+			const MARK = "[插话]";
+			if (input.parts && input.parts.length > 0) {
+				const parts = [...input.parts];
+				const firstText = parts.findIndex((part) => part.type === "text");
+				if (firstText >= 0) {
+					const part = parts[firstText] as { type: "text"; text: string };
+					parts[firstText] = { ...part, text: `${MARK}\n${part.text}` };
+				} else {
+					parts.unshift({ type: "text", text: MARK } as (typeof parts)[number]);
+				}
+				return { ...input, parts };
+			}
+			return { ...input, text: `${MARK}\n${input.text}` };
+		})();
+
 		const submission = await input.conversation.submit(
-			// 产品承诺（2026-11-09 T2 §5）：人的消息永远插得上话——忙时 followUp
-			// 排队到本轮收尾，不拒、不丢。缺省值写死在 userInputSubmission，不靠内核默认。
-			userInputSubmission(input),
+			// 产品承诺（2026-11-09 T2 §5；2026-11-19 插话统一 批1 改口径）：人的消息永远
+			// 插得上话——忙时 steer 插进当前轮，不拒、不丢；没赶上边界就如实回执。
+			// 缺省值收口在 userInputSubmission，不靠内核默认。
+			userInputSubmission(steerMarked),
 			CTX,
 		);
 
@@ -467,6 +503,22 @@ export async function* chatStream(
 						// agent 中途播报（2026-11-10 批 13 §三）：只送到当前这条流，
 						// 没开流就收不到、不落盘（不伪造主人的时间线）。
 						yield { type: "notice", text: delegation.text };
+					} else if (delegation.type === "escalation") {
+						// worker 决策上报（2026-11-19 批2）：派活方会话出上报卡。
+						// 与 attention 同款借道：进度通道只是传输，形状独立（带 escalationId /
+						// context / options / urgency），路由（唤醒总管 / 升级用户）在 escalation.ts。
+						yield {
+							type: "escalation",
+							ticketId: delegation.ticketId,
+							domain: delegation.domain,
+							escalationId: delegation.escalationId,
+							question: delegation.question,
+							context: delegation.context,
+							...(delegation.options && delegation.options.length > 0
+								? { options: delegation.options }
+								: {}),
+							urgency: delegation.urgency,
+						};
 					} else {
 						yield {
 							type: "approval",

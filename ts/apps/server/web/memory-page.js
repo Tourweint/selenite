@@ -11,6 +11,8 @@ import { el } from "./dom.js";
 import { attr, esc } from "./markdown.js";
 import { applyMemoryProposalA, clearMemoryProposalCard, dismissMemoryProposalA, forgetMemoryItem, loadMemoryExternal, loadMemoryGroup, loadMemoryReviewState, memoryItemMarkupA, openMemoryConsolidateDialog, openMemorySplitDialog, supersedeMemoryItem } from "./memory-items.js";
 import { request } from "./net.js";
+// 提醒沉淀（2026-11-19 批4）：入口动作与建议卡（采纳/忽略）走同一个轻模块。
+import { runReminderDistill } from "./reminder-distill.js";
 import { currentSettingsPage } from "./route.js";
 import { sectionMarkup } from "./settings-atoms.js";
 import { MEMORY_KIND_LABEL, MEMORY_KIND_ORDER, MEMORY_KIND_TIPS } from "./settings-memory.js";
@@ -178,11 +180,19 @@ function memorySettingsMarkup() {
     </div>
     <div class="card mem-a-props" id="mem-a-props-card" hidden>
       <div class="mem-a-props-head">
-        <span class="mem-a-props-title">整理建议</span>
+        <span class="mem-a-props-title" data-tip="整理 = 让模型回看最近的记忆，找出重复、过时、说法不一致的条目。它只给建议：你逐条点「应用」才会把旧的那条标成过时；不会自动改，也没有「全部应用」。">整理建议</span>
         <span class="mem-a-count" id="mem-a-prop-count"></span>
         <span class="mem-a-prop-note" id="mem-a-prop-note"></span>
       </div>
       <div class="mem-a-props-list" id="mem-a-props"></div>
+    </div>
+    <div class="card mem-a-props" id="mem-a-remcard" hidden>
+      <div class="mem-a-props-head">
+        <span class="mem-a-props-title" data-tip="沉淀建议 = 总管把你反复说的提醒蒸馏出来的教诲候选。点「采纳」才写进偏好（永不删）；「忽略」只是从清单划掉，不写库。">沉淀建议</span>
+        <span class="mem-a-count" id="mem-a-rem-count"></span>
+        <span class="mem-a-prop-note">总管蒸馏 · 你逐条采纳</span>
+      </div>
+      <div class="mem-a-props-list" id="mem-a-rem-list"></div>
     </div>
     <div class="mem-a-toolbar">
       <label class="mem-a-search">
@@ -223,6 +233,8 @@ function memorySettingsMarkup() {
     </button>`,
     "",
     `<div class="mem-a-head-actions">
+      <button class="ghost mem-act" type="button" id="mem-distill" hidden
+        data-tip="沉淀提醒 = 代码先从最近 30 天收集你反复说过的话（0 token），跳总管蒸馏成教诲建议；你回这里逐条采纳才写进偏好（永不删）。">沉淀提醒</button>
       <button class="ghost mem-act" type="button" id="mem-migrate" hidden
         data-tip="迁移 = 把这个范围的记忆整体搬到另一个项目或「我的记忆」。只搬家，不去重、不调模型；搬迁后原范围就空了。">迁移</button>
       <button class="ghost mem-act" type="button" id="mem-import" hidden>导入</button>
@@ -380,6 +392,20 @@ async function wireMemorySettings() {
     if (ignore) void dismissMemoryProposalA(ignore.closest(".mem-prop"), gen);
   });
 
+  // 提醒沉淀（2026-11-19 批4）：入口 + 建议卡的采纳 / 忽略。
+  document.getElementById("mem-distill")?.addEventListener("click", (event) => {
+    void runReminderDistill(event.currentTarget);
+  });
+  const remList = document.getElementById("mem-a-rem-list");
+  remList?.addEventListener("click", (event) => {
+    const adopt = event.target.closest?.("[data-rem-adopt]");
+    const dismiss = adopt ? null : event.target.closest?.("[data-rem-dismiss]");
+    if (!adopt && !dismiss) return;
+    const text = (adopt || dismiss)?.closest("[data-rem-item]")?.getAttribute("data-rem-item") || "";
+    if (!text) return;
+    void applyReminderAdviceRow(adopt ? "adopt" : "dismiss", text, gen);
+  });
+
   document.getElementById("mem-a-ext-open")?.addEventListener("click", () => {
     const lines = memoryPageState.externalLines;
     openModal("一生记忆库", (body) => {
@@ -398,7 +424,84 @@ async function wireMemorySettings() {
     loadMemoryDocuments(gen),
     loadMemoryReviewState(gen),
     loadMemoryExternal(gen),
+    loadMemoryReminderAdvice(gen),
   ]);
+}
+
+/* ── 提醒沉淀（2026-11-19 批4）──────────────────────────────
+ * 入口（mem-distill）动作在 web/reminder-distill.js（与设置抽屉人设页共用）；
+ * 这里只管两件界面的事：入口显隐（跟建议端点是否 404 走）与建议卡（采纳/忽略）。
+ * 建议端点是轻文件读（.data/reminder-advice.json），跟其它并行加载一起拉，不加重页面。 */
+
+/** 待采纳建议卡 + 入口显隐：404（REMINDER_DISTILL_ENABLED=false）→ 都不出现。 */
+async function loadMemoryReminderAdvice(gen) {
+  const card = document.getElementById("mem-a-remcard");
+  const distill = document.getElementById("mem-distill");
+  if (!card && !distill) return;
+  try {
+    const response = await request("/api/v1/agent/reminder-advice", { cache: "no-store" });
+    if (!memoryPageAlive(gen)) return;
+    if (response.status === 404) {
+      if (distill) distill.hidden = true;
+      if (card) card.hidden = true;
+      return;
+    }
+    if (distill) distill.hidden = false;
+    const data = await response.json().catch(() => ({}));
+    const items = Array.isArray(data.items) ? data.items : [];
+    const count = document.getElementById("mem-a-rem-count");
+    const list = document.getElementById("mem-a-rem-list");
+    if (!card || !items.length) {
+      if (card) card.hidden = true;
+      if (list) list.replaceChildren();
+      if (count) count.textContent = "";
+      return;
+    }
+    card.hidden = false;
+    if (count) count.textContent = `${items.length} 条`;
+    if (list) {
+      list.innerHTML = items
+        .map((text) => `<div class="mem-prop" data-rem-item="${attr(String(text))}">
+          <div class="mem-prop-line"><span class="mem-prop-tag is-keep">建议</span><span class="mem-prop-text">${esc(String(text))}</span></div>
+          <div class="mem-prop-actions">
+            <button class="ghost mem-act" type="button" data-rem-adopt>采纳</button>
+            <button class="ghost mem-act" type="button" data-rem-dismiss>忽略</button>
+          </div>
+        </div>`)
+        .join("");
+    }
+  } catch (error) {
+    if (!memoryPageAlive(gen) || error.message === "forbidden") return;
+    // 读失败不挡页面：卡片收起，入口照常（收集端点可能仍是好的）
+    if (card) card.hidden = true;
+  }
+}
+
+/** 采纳 / 忽略一条沉淀建议。采纳 = 服务端写偏好（taught，永不删）；忽略 = 只从清单划掉。 */
+async function applyReminderAdviceRow(action, text, gen) {
+  try {
+    const response = await request("/api/v1/agent/reminder-advice", {
+      method: "PUT",
+      body: JSON.stringify({ actions: [{ text, action }] }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      toast(data.message || `没存成：HTTP ${response.status}`);
+      // 400 多半是清单变了（总管重新蒸馏过 / 之前已点过）：刷新一份新的
+      if (response.status === 400) void loadMemoryReminderAdvice(gen);
+      return;
+    }
+    if (action === "adopt") {
+      toast(Number(data.duplicates) > 0 ? "这条已经在偏好里了，已从清单划掉" : "已采纳：写进偏好（永不删），下一轮召回可见");
+    } else {
+      toast("已忽略");
+    }
+    void loadMemorySummary(gen);
+    void loadMemoryReminderAdvice(gen);
+  } catch (error) {
+    if (error.message === "forbidden") return;
+    toast(`没存成：${error.message}`);
+  }
 }
 
 /** 回到顶部（2026-11-16）：分组/原文档案一展开能滚很长，页内给一枚浮动按钮，

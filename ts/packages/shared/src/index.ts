@@ -148,13 +148,15 @@ export const ChatRequestSchema = z.object({
 	 */
 	dirPath: z.string().min(1).max(1024).optional(),
 	/**
-	 * 忙时投递方式（2026-11-07 消息即引导，纯增量）。
+	 * 忙时投递方式（2026-11-07 消息即引导，纯增量；2026-11-19 插话统一改缺省）。
 	 *
-	 * - `followUp`（缺省）：排到本轮结束后，作为下一轮；等于改动前的行为。
-	 * - `steer`：插进**当前这一轮**，模型下一步就能看到。
+	 * - `steer`（缺省，2026-11-19 插话统一 批1 起）：插进**当前这一轮**，模型下一步就能看到；
+	 *   多条插话全部生效（内核 steeringMode="all"）；忙时 steer 的提交正文第一行带 `[插话]` 标记。
+	 * - `followUp`：排到本轮结束后，作为下一轮（改动前缺省；现降级为插件卡"忙时消息"档位）。
 	 *
 	 * 这是"请求"不是"保证"：本轮没有可插的边界（例如已经收尾）时内核会落到队列，
-	 * 服务端照实发一条 `notice`，不把"受理"说成"已插入"。老客户端不传 = 行为不变。
+	 * 服务端照实发一条 `notice`，不把"受理"说成"已插入"。不传该字段 = 跟随服务端缺省
+	 * （回滚 `AGENT_STEER_DEFAULT=false` 时缺省回 `followUp`）。
 	 */
 	whenBusy: z.enum(["steer", "followUp"]).optional(),
 });
@@ -652,6 +654,30 @@ export type ChatEvent =
 			deadlineAt: string;
 			/** 自主轮标记（2026-11-05 批次C C2）：例行任务轮的审批卡；纯增量，老客户端忽略 */
 			origin?: "autonomous";
+			seq?: number;
+	  }
+	/**
+	 * 决策上报（2026-11-19 批2：worker→总管→用户上报链）。
+	 *
+	 * native worker 跑动中调 `escalate` 工具上报一个要拍板 / 要问的事，宿主把它
+	 * 投到**派活方会话**出上报卡。与 `attention` 的分工：attention 是 worker 退场后
+	 * 从 REPORT.md 读出的终态问题；escalation 是**跑动中**的实时上报，worker 不退场，
+	 * 答复经插话通道（steer）回到 worker 继续跑。老客户端按 `type` 分发，认不出就忽略。
+	 */
+	| {
+			type: "escalation";
+			ticketId: string;
+			domain: string;
+			/** 上报 id（worker 侧生成的 uuid）；路由 / 答复端点用它寻址 */
+			escalationId: string;
+			/** 要拍板 / 要问的那一句话 */
+			question: string;
+			/** worker 补充的背景（为什么问、已经试过什么） */
+			context: string;
+			/** worker 给的候选答案；没有就不带 */
+			options?: string[];
+			/** 紧急度：worker 自报；路由只透出不改判 */
+			urgency: "low" | "normal" | "high";
 			seq?: number;
 	  };
 

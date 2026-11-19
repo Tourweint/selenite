@@ -32,3 +32,49 @@ export function partnerSessionLabel(session) {
   const turns = Number(session?.turns) || 0;
   return (turns > 0 && firstText) || "新会话";
 }
+
+/**
+ * 把选择器列表按 `origin.source` 建成二级树（2026-11-18）。
+ *
+ * - 母会话在列表里 → 副本挂到 `children`；母会话不在（已归档 / 已删）→ 副本留在顶层；
+ * - 保持服务端给的顺序（canonical 第一、其余 lastAt 倒序），不重排；
+ * - 环（A→B→A）兜底：先遍历到的那个当根，其余已访问节点不再重复挂。
+ * 纯函数，无 DOM；UI 只负责按 children 递归渲染。
+ */
+export function buildSessionTree(sessions) {
+  const list = Array.isArray(sessions) ? sessions.filter((item) => item && item.conversationId) : [];
+  const byId = new Map(list.map((session) => [session.conversationId, session]));
+  const childrenOf = new Map();
+  const roots = [];
+  for (const session of list) {
+    const parentId = String(session?.origin?.source || "");
+    const parent = parentId && parentId !== session.conversationId ? byId.get(parentId) : null;
+    if (!parent) {
+      roots.push(session);
+      continue;
+    }
+    const children = childrenOf.get(parentId) || [];
+    children.push(session);
+    childrenOf.set(parentId, children);
+  }
+
+  const visited = new Set();
+  const build = (session) => {
+    visited.add(session.conversationId);
+    const children = (childrenOf.get(session.conversationId) || [])
+      .filter((child) => !visited.has(child.conversationId))
+      .map(build);
+    return { session, children };
+  };
+
+  const tree = [];
+  for (const root of roots) {
+    if (visited.has(root.conversationId)) continue;
+    tree.push(build(root));
+  }
+  // 环兜底：没有任何根时，按原顺序把还没访问过的节点当根。
+  for (const session of list) {
+    if (!visited.has(session.conversationId)) tree.push(build(session));
+  }
+  return tree;
+}

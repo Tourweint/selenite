@@ -12,6 +12,8 @@ import { el } from "./dom.js";
 import { request } from "./net.js";
 import { openAvatarPanel } from "./partner-editor.js";
 import { loadRoster, syncChiefAvatar } from "./partners-status.js";
+// 提醒沉淀（2026-11-19 批4）：人设页同款入口（收集-蒸馏-采纳流与记忆页共用一份）。
+import { runReminderDistill } from "./reminder-distill.js";
 import { appendCsContractCard, appendCsGoalCard } from "./settings-contract.js";
 import { cs, csCard, csHead, drawerOpen, refreshCsDetail, renderCsPage } from "./settings-drawer.js";
 import { state } from "./state.js";
@@ -164,6 +166,23 @@ function renderCsPersonaPage() {
   actions.append(reset, save);
   soulCard.append(actions);
   body.append(soulCard);
+
+  // 提醒沉淀入口（2026-11-19 批4）：低频动作，小按钮一行；流程与记忆页同一份
+  //（收集候选 → 确认弹窗 → 跳总管预填蒸馏）。采纳在设置 → 记忆页，这里不重复摆卡片。
+  const distillRow = document.createElement("div");
+  distillRow.className = "cs-hint";
+  distillRow.style.cssText = "display:flex;align-items:center;gap:12px;padding:2px 14px 0;";
+  const distillBtn = document.createElement("button");
+  distillBtn.type = "button";
+  distillBtn.className = "ghost";
+  distillBtn.id = "cs-reminder-distill";
+  distillBtn.textContent = "沉淀我的提醒";
+  distillBtn.title = "从最近 30 天收集你反复说的提醒（0 token），去总管处蒸馏成教诲建议；采纳才写进偏好";
+  distillBtn.addEventListener("click", () => void runReminderDistill(distillBtn));
+  const distillNote = document.createElement("span");
+  distillNote.textContent = "反复教过的规矩，蒸馏成教诲；采纳才写进偏好。";
+  distillRow.append(distillBtn, distillNote);
+  body.append(distillRow);
 
   // 岗位契约 / 当前目标：与 SOUL 同一套卡片语言，各自独立保存（2026-11-08 员工人格化刀三）
   appendCsContractCard(body);

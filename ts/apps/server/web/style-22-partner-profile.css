@@ -294,6 +294,9 @@
 }
 .pf-live-at { flex: none; font-family: var(--mono); font-size: 10.5px; }
 .pf-live-tools { display: flex; gap: 8px; justify-content: flex-end; margin-top: 4px; }
+/* 每晚整理块（2026-11-18）：标签与 ⋯ 同一行贴右，跟任务清单的行尾动作一致 */
+.pf-memory-tail { display: flex; align-items: center; gap: 4px; }
+.pf-memory-tail .rm-dots { height: 24px; min-width: 26px; padding: 0 6px; font-size: 14px; margin: -5px 0; }
 .pf-live-item .pt-ta { width: 100%; min-height: 48px; resize: vertical; font-size: 12.5px; }
 .pf-live-text { margin: 0; font-size: 12.5px; color: var(--text-2); white-space: pre-wrap; line-height: 1.6; }
 .pf-live-tools .pf-mini.is-on { color: var(--accent); border-color: var(--accent); }

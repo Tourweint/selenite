@@ -100,6 +100,26 @@ export function startDelegation(
 			case "goal":
 				emitProgress("reviewing", "核对结论");
 				break;
+			// worker 决策上报（2026-11-19 批2）：原样发到派活方会话出上报卡；
+			// 路由（唤醒总管 / 升级用户 / 限流）由 escalation.ts 的全局订阅接手，
+			// 这里只管"事件到会话"这一跳。
+			case "escalation":
+				if (event.escalation) {
+					if (runtime.isCanceled?.(event.ticketId)) break;
+					runtime.emit(kick.conversationId, {
+						type: "escalation",
+						ticketId: event.ticketId,
+						domain: kick.domain,
+						escalationId: event.escalation.escalationId,
+						question: event.escalation.question,
+						context: event.escalation.context,
+						...(event.escalation.options && event.escalation.options.length > 0
+							? { options: event.escalation.options }
+							: {}),
+						urgency: event.escalation.urgency,
+					});
+				}
+				break;
 			default:
 				break;
 		}
@@ -354,6 +374,9 @@ export function startDelegation(
 
 	const projectField = kick.project ? { project: kick.project } : {};
 	const idempotency = kick.requestId ? { idempotencyKey: kick.requestId } : {};
+	// 质检方式（2026-11-19 批2）：新派带进 ChancellorRequest（只影响新单）。
+	// 懒读一次（executor-config 有 mtime 缓存）；launch() 里的 executor 读不受影响。
+	const qaForNewTickets = executorForDelegation().qa;
 	// 授权重验（批 19 §六）：续跑前把"受理时的审批档位"和"现在的档位"对一遍。
 	// **不阻断**：更严 / 读不到都只记一行 warning；档位变了不是撤销授权。
 	if (kick.resumeTicketId && authorityRecheckEnabled() && runtime.authorityAtAccept) {
@@ -379,20 +402,22 @@ export function startDelegation(
 		kick.resumeTicketId
 			? { resumeTicketId: kick.resumeTicketId, answer: kick.requirement }
 			: {
-				requirement: kick.requirement,
-				...(kick.domain ? { domain: kick.domain } : {}),
-				...(managerIdentity ? { managerIdentity } : {}),
-				...managerSwitch,
-				...projectField,
-				...idempotency,
-				// 计划附件（2026-11-09 §2）：只有新派带；续跑沿用原单，不覆盖。
-				...(kick.steps && kick.steps.length > 0 ? { steps: kick.steps } : {}),
-				// 工作目录（2026-11-17）：只有新派带；续跑沿用原单快照。
-				...(kick.workDir ? { workDir: kick.workDir } : {}),
-				// 来源对话只透传（2026-11-05 跨仓契约）：chancellor 落 ticket.json，
-				// 子单从父单继承；这里给内部会话 id 的字符串形式，接口层再换对外 uuid。
-				originConversationId: String(kick.conversationId),
-			},
+					requirement: kick.requirement,
+					...(kick.domain ? { domain: kick.domain } : {}),
+					...(managerIdentity ? { managerIdentity } : {}),
+					...managerSwitch,
+					...projectField,
+					...idempotency,
+					// 计划附件（2026-11-09 §2）：只有新派带；续跑沿用原单，不覆盖。
+					...(kick.steps && kick.steps.length > 0 ? { steps: kick.steps } : {}),
+					// 工作目录（2026-11-17）：只有新派带；续跑沿用原单快照。
+					...(kick.workDir ? { workDir: kick.workDir } : {}),
+					// 质检方式（2026-11-19 批2）：只有新派带；续跑沿用现状（内部请求）。
+					...(qaForNewTickets === "qa-worker" ? { qaWorker: true } : {}),
+					// 来源对话只透传（2026-11-05 跨仓契约）：chancellor 落 ticket.json，
+					// 子单从父单继承；这里给内部会话 id 的字符串形式，接口层再换对外 uuid。
+					originConversationId: String(kick.conversationId),
+				},
 	);
 	let accepted = first;
 	let fellBack = false;
@@ -416,6 +441,8 @@ export function startDelegation(
 				...(kick.steps && kick.steps.length > 0 ? { steps: kick.steps } : {}),
 				// 回退重派也是一张新单：工作目录照传。
 				...(kick.workDir ? { workDir: kick.workDir } : {}),
+				// 质检方式（批2）：回退重派同为新单，照带。
+				...(qaForNewTickets === "qa-worker" ? { qaWorker: true } : {}),
 				originConversationId: String(kick.conversationId),
 			});
 		}

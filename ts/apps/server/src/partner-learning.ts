@@ -32,16 +32,19 @@ export const LEARNING_REFRESH_EVERY = 5;
 /** 注入时最多给几条规则（再多就变成提示词灌水）。 */
 const INJECT_RULES_MAX = 6;
 
-export type LearningFrequency = "weekly" | "settle";
+export type LearningFrequency = "weekly" | "settle" | "off";
 
 /**
  * 反思频率（env `PARTNER_LEARNING_FREQUENCY`）：
  * - `weekly`（缺省）：只在既有周盘点跑完后提炼；
- * - `settle`：结算钩子里每 N 轮抽查一次。
+ * - `settle`：结算钩子里每 N 轮抽查一次；
+ * - `off`（2026-11-18）：不做模型反思提炼；确定性统计（句长 / 称呼 / 语气词）与已有规则注入照常。
  * 拼错 / 空值按 weekly（不因拼错就频繁烧模型）。
  */
 export function learningFrequency(env: NodeJS.ProcessEnv = process.env): LearningFrequency {
-	return flagValue("PARTNER_LEARNING_FREQUENCY", env) === "settle" ? "settle" : "weekly";
+	const raw = flagValue("PARTNER_LEARNING_FREQUENCY", env).trim().toLowerCase();
+	if (raw === "off") return "off";
+	return raw === "settle" ? "settle" : "weekly";
 }
 
 /**

@@ -36,6 +36,8 @@ const DEFAULT_CUSTOM_ACCENT = "#3e4a8c";
 
 // 每项 icon 是 Lucide 0.468 官方图标的内部图元（24 视框，外层 svg 统一给属性），
 // 不再只存一条 path：Lucide 里 bells/server 等多图元图标拼不出来。
+// 2026-11-18：本表只是**注册表**（id / label / icon / desc），不再决定左栏顺序；
+// 顺序与分组在下面 SETTINGS_GROUPS 里。
 const SETTINGS_SECTIONS = [
   {
     id: "appearance",
@@ -137,10 +139,34 @@ const SETTINGS_SECTIONS = [
  * 第一个 tab 是人设，也是 #/settings/agent（不带子路由）的默认落点。
  */
 const AGENT_TABS = [
-  { id: "personas", label: "人设", route: "partners" },
-  { id: "context", label: "上下文", route: "context" },
-  { id: "tools", label: "工具", route: "tools" },
-  { id: "executor", label: "派活", route: "executor" },
+  {
+    id: "personas",
+    label: "人设",
+    blurb: "是谁",
+    route: "partners",
+    icon: '<circle cx="12" cy="8" r="5"/><path d="M20 21a8 8 0 0 0-16 0"/>',
+  },
+  {
+    id: "context",
+    label: "上下文",
+    blurb: "看到什么",
+    route: "context",
+    icon: '<path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/>',
+  },
+  {
+    id: "tools",
+    label: "工具",
+    blurb: "能做什么",
+    route: "tools",
+    icon: '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
+  },
+  {
+    id: "executor",
+    label: "派活",
+    blurb: "谁去干",
+    route: "executor",
+    icon: '<path d="M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z"/><path d="m21.854 2.147-10.94 10.939"/>',
+  },
 ];
 
 /**
@@ -156,41 +182,84 @@ const SETTINGS_ALIASES = {
   about: "connect",
 };
 
-/** 内容顶部的四分段 tab。切页由 wireAgentTabs() 接线（点击走 go → hash 子路由）。 */
+/**
+ * 内容顶部的四分区导航（2026-11-18 改版）。
+ *
+ * 四张卡是「这个 Agent 的四个侧面」：是谁 / 看到什么 / 能做什么 / 谁去干。
+ * 每张卡 = 图标 + 名称 + 一句两三个字的注脚；选中卡走强调色描边 + 图标底，
+ * 不再是四个挤在一起的小文字按钮。点击仍由 wireAgentTabs() 接（走旧 hash 子路由）。
+ */
 function agentTabsMarkup(activeTab) {
   return `<div class="set-tabs" role="tablist" aria-label="Agent 分区">
     ${AGENT_TABS.map(
       (tab) =>
         `<button class="set-tab" type="button" role="tab"
-           data-agent-tab="${tab.id}" aria-selected="${tab.id === activeTab}">${tab.label}</button>`,
+           data-agent-tab="${tab.id}" aria-selected="${tab.id === activeTab}">
+           <span class="set-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${tab.icon}</svg></span>
+           <span class="set-tab-text">
+             <span class="set-tab-label">${tab.label}</span>
+             <span class="set-tab-blurb">${tab.blurb}</span>
+           </span>
+         </button>`,
     ).join("")}
   </div>`;
 }
 
 /**
+ * 左栏一级菜单的分组与顺序（2026-11-18 用户口径：把一级菜单的排序理一理）。
+ *
+ * 分组只决定**怎么读**，不决定权限或路由：三个标题把 11 项分成
+ * 「日常（每天碰的界面与工作流）/ Agent（这个 Agent 本身）/ 系统（计量、开关与这台机器）」。
+ * 数组顺序 = 显示顺序；SETTINGS_SECTIONS 退成纯注册表（id / label / icon / desc）。
+ * 新加分区忘了写进这里也不会消失：会落在末尾的「其他」组里（见 renderSettingsNav）。
+ */
+const SETTINGS_GROUPS = [
+  { label: "日常", ids: ["appearance", "chats", "projects", "reminders"] },
+  { label: "Agent", ids: ["agent", "models", "skills", "memory"] },
+  { label: "系统", ids: ["usage", "plugins", "connect"] },
+];
+
+/**
  * 设置页左侧分区导航：点击真切页（hash 子路由），一次只渲染当前分区。
  * 形态同 cindy 的 SettingsSidebarNav：36px 胶囊行 + 15px 图标，选中走中性底。
+ * 2026-11-18 起按 SETTINGS_GROUPS 分组，组前一行小标题；标题只当分隔，不可点。
  */
 function renderSettingsNav(page) {
   el.settingsNav.replaceChildren();
   el.settingsNav.setAttribute("role", "tablist");
-  for (const section of SETTINGS_SECTIONS) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.id = `settings-tab-${section.id}`;
-    button.dataset.section = section.id;
-    // 左栏分区不做悬停浮签（2026-11-14 用户拍板：没人会看，标签本身已经说清去哪）。
-    // 左栏分区不做悬停浮签（用户 2026-11-14 口径：「没人会看」）；
-    // desc 仍留在分区表里，留给以后可能用到的说明文案。
-    button.setAttribute("role", "tab");
-    button.setAttribute("aria-selected", String(section.id === page));
-    button.setAttribute("aria-controls", "settings-inner");
-    button.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${section.icon}</svg><span>${section.label}</span>`;
-    button.addEventListener("click", () => {
-      // 同页再点不重渲染（cindy 同款早退）；跨页改 hash，applyRoute 接手渲染
-      if (section.id !== page) go("settings", section.id);
-    });
-    el.settingsNav.append(button);
+  const sectionById = new Map(SETTINGS_SECTIONS.map((section) => [section.id, section]));
+  const groups = SETTINGS_GROUPS.map((group) => ({ ...group }));
+  const ungrouped = SETTINGS_SECTIONS.filter(
+    (section) => !groups.some((group) => group.ids.includes(section.id)),
+  );
+  if (ungrouped.length) groups.push({ label: "其他", ids: ungrouped.map((section) => section.id) });
+
+  for (const group of groups) {
+    const caption = document.createElement("div");
+    caption.className = "set-nav-group";
+    // tablist 里只该有 tab；标题是纯展示，交给读屏跳过
+    caption.setAttribute("role", "presentation");
+    caption.textContent = group.label;
+    el.settingsNav.append(caption);
+    for (const id of group.ids) {
+      const section = sectionById.get(id);
+      if (!section) continue; // 分组表写错 id 时不静默丢项：其余照常渲染
+      const button = document.createElement("button");
+      button.type = "button";
+      button.id = `settings-tab-${section.id}`;
+      button.dataset.section = section.id;
+      // 左栏分区不做悬停浮签（2026-11-14 用户拍板：没人会看，标签本身已经说清去哪）。
+      // desc 仍留在分区表里，留给以后可能用到的说明文案。
+      button.setAttribute("role", "tab");
+      button.setAttribute("aria-selected", String(section.id === page));
+      button.setAttribute("aria-controls", "settings-inner");
+      button.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${section.icon}</svg><span>${section.label}</span>`;
+      button.addEventListener("click", () => {
+        // 同页再点不重渲染（cindy 同款早退）；跨页改 hash，applyRoute 接手渲染
+        if (section.id !== page) go("settings", section.id);
+      });
+      el.settingsNav.append(button);
+    }
   }
 }
 

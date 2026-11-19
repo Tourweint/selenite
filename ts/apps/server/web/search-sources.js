@@ -49,7 +49,7 @@ async function fetchSearchSourceState() {
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.message || `HTTP ${response.status}`);
   if (!Array.isArray(data.sources) || !Array.isArray(data.vendors)) {
-    throw new Error("服务端还是旧版本：去 设置 → 服务 点「重启」，再刷新这一页。");
+    throw new Error("服务端还是旧版本：去 设置 → 本机 点「重启」，再刷新这一页。");
   }
   return data;
 }

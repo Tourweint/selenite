@@ -9,7 +9,7 @@
 
 import { formatBranchOrigin } from "./branch.js";
 import { addError, attachUsage, collectFileChangesFromSteps, mountFileSummary, scrollToEnd, syncCtxMeter } from "./chat-notice.js";
-import { clearChatProject, syncChatProjectPill } from "./chat-project.js";
+import { clearChatProject, setChatWorkdir, syncChatProjectPill } from "./chat-project.js";
 import { addMessage, clearThread, syncEditEntry } from "./chat-thread.js";
 import { renderChats } from "./chats-list.js";
 import { KEY_CONV, el } from "./dom.js";
@@ -317,6 +317,8 @@ async function openChat(conversationId, { anchor = null, deep = false } = {}) {
   const owner = () => token === state.navToken && state.conversationId === conversationId;
   state.conversationId = conversationId;
   localStorage.setItem(KEY_CONV, conversationId);
+  // 归属标签先收起：上一条会话的项目不能挂在新会话上；回读后再按 chatWorkdir 画。
+  clearChatProject();
   // 选中态先按 id 前缀落位（执事专线立刻亮「执事」；总管要等 chatKind 回读）
   syncRailCurrent();
   syncSideRowsCurrent();
@@ -363,8 +365,8 @@ async function openChat(conversationId, { anchor = null, deep = false } = {}) {
     state.chatKind = kind;
     // 种类回读后再校一次轨道选中：总管会话要把「对话」熄掉（2026-11-13 选中态批）
     syncRailCurrent();
-    // 已经落盘的会话不再显示「选项目」（cwd 早在建会话时就定了）
-    clearChatProject();
+    // 工作归属（2026-11-18）：服务端回读创建时快照；旧后端没有该字段 → 不显示。
+    setChatWorkdir(data.chatWorkdir ?? null);
     clearThread();
     const messages = data.messages || [];
     if (pageMode) {
@@ -466,7 +468,7 @@ function startNewChat(kind = "worker") {
   el.title.dataset.chatKind = state.chatKind;
   // 新建 / 换身份时 state 已经定好，可以直接画起首图标
   syncEmptyMark();
-  // 新建 worker 会话时露出「选项目」pill（2026-11-17）；总管 / 续话不收
+  // 新建 worker 会话：归属标签回到「跟着左侧当前选择」（2026-11-18 只读常显）
   clearChatProject();
   void syncChatProjectPill();
   syncChatHeadAvatar(); // 新会话没有对手：头像整块收起

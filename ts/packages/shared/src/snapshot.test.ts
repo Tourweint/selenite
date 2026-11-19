@@ -312,6 +312,8 @@ const ALL_EVENT_TYPES = [
 	"attention",
 	"approval",
 	"notice",
+	// 2026-11-19 批2：worker 决策上报（跑动中 escalate，答复走插话回投）
+	"escalation",
 ] as const satisfies readonly ChatEventType[];
 
 type Listed = (typeof ALL_EVENT_TYPES)[number];
@@ -332,6 +334,16 @@ const SAMPLES: ChatEvent[] = [
 	{ type: "attention", ticketId: "t1", domain: "d", kind: "need_input", question: "q?" },
 	{ type: "approval", callId: "a1", tool: "bash", args: "{}", deadlineAt: "2026-11-04T00:00:00Z" },
 	{ type: "notice", text: "「阅读助手」当前不可用，跳过" },
+	{
+		type: "escalation",
+		ticketId: "t1",
+		domain: "d",
+		escalationId: "e1",
+		question: "目录结构要 A 还是 B？",
+		context: "两种都可行，工时相同",
+		options: ["A", "B"],
+		urgency: "normal",
+	},
 ];
 
 test("ChatEvent 全部成员都有代表性样例，编码回读后 type 都在清单里", () => {

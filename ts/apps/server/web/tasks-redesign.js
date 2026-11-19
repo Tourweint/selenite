@@ -16,7 +16,7 @@ import { state } from "./state.js";
 import { conversationTickets, employeeName, groupByConversation, hideTasksState, ticketConversationId, workRowsOf } from "./tasks-cards.js";
 import { loadTickets, renderBoard } from "./tasks-kanban.js";
 import { TASK_BADGE_STATUSES, TASK_HITTERS, TASK_STATUS, relativeTime } from "./tasks-model.js";
-import { renderReview, reviewStatsOf, shiftDayKey, todayKey } from "./tasks-review.js";
+import { daySubtitle, dayTitle, renderReview, reviewStatsOf, shiftDayKey, todayKey } from "./tasks-review.js";
 
 /* ── 任务中心重做 v1（2026-11-13 批 1）──────────────────────
  * 版式 = 原型 09/10/12 拍板稿：等你回话大区 + 在跑小卡 + 打手手风琴 + 今日回顾卡。
@@ -433,12 +433,16 @@ function hittersBlockHtml() {
   return `${head}<section class="tk2-hits">${rows}</section>`;
 }
 
-/** 今日回顾卡（右列）：三个有据数字 + 入口 */
+/** 今日回顾卡（右列）：今天的日期 + 三个有据数字，整张卡就是入口 */
 function recapCardHtml() {
-  const stats = reviewStatsOf(todayKey());
+  const key = todayKey();
+  const stats = reviewStatsOf(key);
   return `<a class="tk2-recap" href="#/review">
-    <h3><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4"/><path d="M8 2v4"/><path d="M3 10h18"/></svg>今日回顾</h3>
-    <p>下班前看看今天都干了啥</p>
+    <div class="tk2-recap-top">
+      <h3><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4"/><path d="M8 2v4"/><path d="M3 10h18"/></svg>今日回顾</h3>
+      <span class="tk2-recap-go" aria-hidden="true">›</span>
+    </div>
+    <p class="tk2-recap-day">${esc(dayTitle(key))} · ${esc(daySubtitle(key))}</p>
     <div class="tk2-recap-nums">
       <div><b>${stats.dispatched}</b><span>次派活</span></div>
       <div><b>${stats.done}</b><span>完结对话</span></div>
@@ -538,11 +542,13 @@ el.reviewBody?.addEventListener("click", (event) => {
     if (!delta) return;
     state.reviewDay = shiftDayKey(state.reviewDay || todayKey(), delta);
     renderReview();
+    el.reviewScroll.scrollTop = 0; // 换了一天就从头看，别停在昨天的位置
     return;
   }
   if (event.target.closest("[data-day-today]")) {
     state.reviewDay = todayKey();
     renderReview();
+    el.reviewScroll.scrollTop = 0;
     return;
   }
   const conversation = event.target.closest("[data-open-conv]");

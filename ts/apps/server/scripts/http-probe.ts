@@ -53,6 +53,8 @@ function startServer(extraEnv: NodeJS.ProcessEnv = {}): ChildProcess {
 			AGENT_CHAT_META_PATH: ".data/probe-http-chat-meta.json",
 			// 显式清空：别让开发机上的 env 混进探针（§15 会单独打开 false）
 			CURRENT_PROJECT: "",
+			// 工作归属标签（2026-11-18）：§14.7 要断言 chatWorkdir，别被开发机 env 关掉
+			CHAT_PROJECT_LABEL: "",
 			// 播种会写 providers.json；探针必须隔离，别碰真实 .data
 			PROVIDERS_PATH: ".data/probe-http-providers.json",
 			// 执事库 / 家目录隔离：§18 会播种一个带 domain 的执事，绝不能碰真实 .data/partners.sqlite
@@ -1576,6 +1578,18 @@ try {
 	});
 	const ownedChatId = ownedChatRun.result.conversationId ?? "";
 	check(Boolean(ownedChatId), "在当前项目下建一条普通会话", String(ownedChatRun.status));
+	// 工作归属（2026-11-18）：worker 会话回读要带项目名，前端输入框左下角只读标签用它
+	const ownedChatMeta = (await (
+		await fetch(`${BASE}/api/v1/agent/chat/${ownedChatId}/messages?limit=1`)
+	).json()) as {
+		chatWorkdir?: { kind?: string; name?: string; path?: string; projectId?: string };
+	};
+	check(
+		ownedChatMeta.chatWorkdir?.kind === "project" &&
+			ownedChatMeta.chatWorkdir?.name === GATE_PROJECT_NAME,
+		"worker 会话回读带工作归属（项目名）",
+		JSON.stringify(ownedChatMeta.chatWorkdir),
+	);
 	const archiveProjectResponse = await fetch(`${BASE}/api/v1/projects/${projectId}/archive`, {
 		method: "POST",
 	});
@@ -4063,7 +4077,14 @@ try {
 
 	const listAfter = await fetch(`${BASE}/api/v1/partners/${sidePartnerId}/sessions`);
 	const listAfterBody = (await listAfter.json()) as {
-		sessions?: Array<{ conversationId?: string; role?: string; turns?: number }>;
+		sessionManage?: boolean;
+		sessions?: Array<{
+			conversationId?: string;
+			role?: string;
+			turns?: number;
+			deletable?: boolean;
+			origin?: { source?: string };
+		}>;
 	};
 	const sideEntry = (listAfterBody.sessions ?? []).find(
 		(s) => s.conversationId === sideConversationId,
@@ -4075,6 +4096,54 @@ try {
 			sideEntry.turns === 0,
 		"再 GET：新建的空副会话也在列表里（turns=0 零值兜底）",
 		`${listAfter.status} ${JSON.stringify(listAfterBody).slice(0, 160)}`,
+	);
+	check(
+		listAfterBody.sessionManage === true && sideEntry?.deletable === true,
+		"列表带 sessionManage / deletable（分支会话管理默认开）",
+		`manage=${listAfterBody.sessionManage} deletable=${sideEntry?.deletable}`,
+	);
+
+	// 删分支/副会话（2026-11-18）：建一条一次性的，删掉后列表不再出现；canonical 拒绝。
+	const disposableCreated = await fetch(`${BASE}/api/v1/partners/${sidePartnerId}/sessions`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ title: "删除探针" }),
+	});
+	const disposableBody = (await disposableCreated.json()) as { conversationId?: string };
+	const disposableId = disposableBody.conversationId ?? "";
+	const disposableDeleted = await fetch(
+		`${BASE}/api/v1/partners/${sidePartnerId}/sessions/${encodeURIComponent(disposableId)}/delete`,
+		{ method: "POST" },
+	);
+	const disposableDeletedBody = (await disposableDeleted.json()) as {
+		ok?: boolean;
+		deleted?: { conversations?: number };
+	};
+	check(
+		disposableDeleted.status === 200 &&
+			disposableDeletedBody.ok === true &&
+			Number(disposableDeletedBody.deleted?.conversations) >= 1,
+		"删除副会话：200 + deleted.conversations ≥ 1",
+		`${disposableDeleted.status} ${JSON.stringify(disposableDeletedBody).slice(0, 120)}`,
+	);
+	const listAfterDelete = await fetch(`${BASE}/api/v1/partners/${sidePartnerId}/sessions`);
+	const listAfterDeleteBody = (await listAfterDelete.json()) as {
+		sessions?: Array<{ conversationId?: string }>;
+	};
+	check(
+		!(listAfterDeleteBody.sessions ?? []).some((s) => s.conversationId === disposableId),
+		"删除后选择器不再列出这条会话",
+		`${listAfterDelete.status}`,
+	);
+	const canonicalDelete = await fetch(
+		`${BASE}/api/v1/partners/${sidePartnerId}/sessions/${encodeURIComponent(canonicalId)}/delete`,
+		{ method: "POST" },
+	);
+	const canonicalDeleteBody = (await canonicalDelete.json()) as { error?: string };
+	check(
+		canonicalDelete.status === 409 && canonicalDeleteBody.error === "not_side_session",
+		"删 canonical 主对话 → 409 not_side_session",
+		`${canonicalDelete.status} ${canonicalDeleteBody.error ?? ""}`,
 	);
 
 	const sideContinue = await chatRaw({

@@ -82,7 +82,7 @@ test("scope：系统核心 = 记忆 / 执事体系 / 宰相 / 自主轮 / 工具
 	const rows = new Map(listFlags(env).flags.map((flag) => [flag.key, flag]));
 	assert.equal(rows.get("MEMORY_ENABLED")?.scope, "core");
 	assert.equal(rows.get("COMPANIONS_ENABLED")?.scope, "core");
-	assert.equal(rows.get("AGENT_TOOL_POLICY")?.scope, "core", "工具写权限是安全边界，标系统核心");
+	assert.equal(rows.get("AGENT_TOOL_POLICY")?.scope, "core", "工具权限限制是安全边界，标系统核心");
 	assert.equal(rows.get("TOOL_PROJECTION")?.scope, "plugin");
 	assert.equal(rows.get("PARTNER_TEMPLATES")?.scope, "plugin");
 });
@@ -99,6 +99,7 @@ test("JSON 清单：API 返回名称 / 说明 / 分组 / 档位 / groups，前�
 			summary: string;
 			group: string;
 			choices: { value: string; label: string }[];
+			offValue?: string;
 			surface: string;
 		}[];
 	};
@@ -115,8 +116,14 @@ test("JSON 清单：API 返回名称 / 说明 / 分组 / 档位 / groups，前�
 	const extract = data.flags.find((flag) => flag.key === "MEMORY_EXTRACT");
 	assert.deepEqual(
 		extract?.choices.map((choice) => choice.label),
-		["自动", "模型", "规则"],
+		["关", "自动", "模型", "规则"],
+		"2026-11-18 加 off 档：多档插件也有开关",
 	);
+	assert.equal(extract?.offValue, "off");
+	const toolPolicy = data.flags.find((flag) => flag.key === "AGENT_TOOL_POLICY");
+	assert.equal(toolPolicy?.offValue, "full", "工具权限的关 = 完全访问（既有档位）");
+	const internal = data.flags.find((flag) => flag.key === "CHANCELLOR_INTERNAL");
+	assert.equal(internal?.offValue, "qoder", "内部质检的关 = 外部 CLI（既有档位）");
 	const archiveDays = data.flags.find((flag) => flag.key === "ARCHIVE_AUTO_DAYS");
 	assert.equal(archiveDays?.surface, "settings", "专属卡不在插件页重复");
 	assert.deepEqual(

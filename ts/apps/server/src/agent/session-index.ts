@@ -10,8 +10,11 @@ import type { PartnerSessionLinkRow } from "../partner-types.ts";
 import { projectsStore } from "../projects.ts";
 import { readLlmConfig } from "../provider.ts";
 import { memoryEngine } from "./assist.ts";
+import { resolveChatWorkdir } from "./chat-workdir.ts";
+import type { ChatWorkdir } from "./chat-workdir.ts";
 import { getHarness } from "./lifecycle.ts";
-import { CTX, ChatKinds, ChatProjects, Chats, TASK_CONVERSATION_PREFIX } from "./shared.ts";
+import { CTX, ChatKinds, ChatProjects, Chats, TASK_CONVERSATION_PREFIX, sessionCwd } from "./shared.ts";
+import type { ResolvedChat } from "./shared.ts";
 import { contentText } from "@earendil-works/pi-ai";
 import type { MemoryKind, MemoryRecord } from "@lifediary/memory";
 import { parseFileManifest } from "@lifediary/shared";
@@ -87,6 +90,38 @@ export async function rebindChatsOfProject(sourceProjectId: string, targetProjec
 		}
 	}, CTX);
 	return rebound;
+}
+
+export type { ChatWorkdir, ChatWorkdirKind } from "./chat-workdir.ts";
+
+/**
+ * 读一条会话的工作归属。只读 durable / 项目库，不写、不改会话。
+ *
+ * cwd 的真源是 `pi.agent.cwd`（创建时快照）；读不到时：
+ * - 有项目绑定 → 用项目主文件夹（**不要**用 `sessionCwd()` 的运行期回落，
+ *   那会把“当前项目”误当成创建时归属）；
+ * - 没项目绑定 → 用 `sessionCwd()`（老会话 / 任务会话的实际运行目录）。
+ */
+export async function chatWorkdirOf(chat: ResolvedChat): Promise<ChatWorkdir | null> {
+	const harness = await getHarness();
+	const [agent, snapshot] = await Promise.all([
+		chat.conversation.agent(CTX).catch(() => null),
+		harness.snapshot(ChatProjects, CTX),
+	]);
+	const projectId = snapshot?.byInternal?.[String(chat.internalId)] ?? null;
+	let project: { id: string; name: string; rootPath: string } | null = null;
+	let workspaceRoot: string | null = null;
+	try {
+		const store = projectsStore();
+		const found = projectId ? store.findProject(projectId) : null;
+		if (found) project = { id: found.id, name: found.name, rootPath: found.rootPath };
+		workspaceRoot = store.getWorkspace()?.rootPath ?? null;
+	} catch {
+		// 项目库坏了只影响这个标签，不影响会话读写
+	}
+	const snapshotCwd = typeof agent?.cwd === "string" ? agent.cwd.trim() : "";
+	const cwd = snapshotCwd || (project ? null : sessionCwd(chat.internalId));
+	return resolveChatWorkdir({ cwd, project, workspaceRoot });
 }
 
 export interface MemoryView {

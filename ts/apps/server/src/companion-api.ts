@@ -72,8 +72,10 @@ import { getHarness } from "./agent/lifecycle.ts";
 import { externalChatIds, listChats, openChat } from "./agent.ts";
 import type { ResolvedChat } from "./agent.ts";
 import { chatIndexEntriesOf } from "./agent/session-index.ts";
-import { renameChat } from "./agent/session-meta.ts";
-import { sideSessionsEnabled } from "./partner-session-role.ts";
+import { renameChat, readChatMeta } from "./agent/session-meta.ts";
+import { partnerSessionManageEnabled, sideSessionsEnabled } from "./partner-session-role.ts";
+import { deletePartnerSession } from "./agent/partner-session-delete.ts";
+import { CTX, ChatOrigins } from "./agent/shared.ts";
 import { createPartnerSideSession } from "./partner-runtime-run-partner-turn.ts";
 import {
 	modelToolCatalog,
@@ -123,6 +125,85 @@ function parseTagline(
 
 /** 技能名白名单（与 skills-api.ts / partner_skill_write 同一条正则）。 */
 const PARTNER_SKILL_NAME = /^[a-z0-9][a-z0-9-_]{0,63}$/;
+
+/** 分支来源（ChatOrigins.byExternal 的值）；给选择器展示用，不派生 branchFrom（那要算回合，列表不付）。 */
+interface SessionOriginView {
+	source: string;
+	sourceTitle?: string;
+	at: number;
+	atMessageId?: string;
+}
+
+/** 读不到（未配模型 / 存储抖动）就按"没有分支"处理：列表照常出，缩进退化成平铺。 */
+async function readChatOriginsSafe(): Promise<Record<string, SessionOriginView>> {
+	try {
+		const snapshot = await (await getHarness()).snapshot(ChatOrigins, CTX);
+		return snapshot?.byExternal ?? {};
+	} catch {
+		return {};
+	}
+}
+
+/**
+ * 沿 ChatOrigins 往下收集分支后代（2026-11-18）：side 列表原本只认链接表，
+ * 万一某条老分支没有 side 链接，它会出现在画板里、却不出现在选择器里——删除时
+ * 又会以"有子分支"挡住母会话，变成隐形死结。这里把可达的后代一并带上。
+ */
+function originDescendants(
+	roots: readonly string[],
+	origins: Record<string, SessionOriginView>,
+): string[] {
+	const known = new Set(roots);
+	const extra: string[] = [];
+	let frontier = [...roots];
+	while (frontier.length > 0) {
+		const next: string[] = [];
+		for (const id of frontier) {
+			for (const [childId, origin] of Object.entries(origins)) {
+				if (origin.source !== id || known.has(childId)) continue;
+				known.add(childId);
+				extra.push(childId);
+				next.push(childId);
+			}
+		}
+		frontier = next;
+	}
+	return extra;
+}
+
+/**
+ * 选择器会话补两个派生字段（2026-11-18）：
+ * - `origin`：分支副本的来源，前端据此缩进挂在母会话下面；
+ * - `deletable`：这个列表里能不能直接删（执事 side / 总管带来源的副本，且没有**未归档**子分支）。
+ * 开关关时 deletable 全 false，前端不再渲染删除入口；列表形状保持兼容。
+ */
+function decorateSessionBranchInfo<T extends { conversationId: string; role: string }>(
+	sessions: readonly T[],
+	origins: Record<string, SessionOriginView>,
+	manage: boolean,
+	archived: readonly string[] = [],
+): Array<T & { origin?: SessionOriginView; deletable: boolean }> {
+	const archivedSet = new Set(archived);
+	const childCount = new Map<string, number>();
+	for (const [childId, origin] of Object.entries(origins)) {
+		// 已归档的子分支不挡删除：它已经从选择器消失，留着只会在恢复后变成一条独立副会话。
+		if (archivedSet.has(childId)) continue;
+		childCount.set(origin.source, (childCount.get(origin.source) ?? 0) + 1);
+	}
+	return sessions.map((session) => {
+		const origin = origins[session.conversationId];
+		const deletable =
+			manage &&
+			session.role !== "canonical" &&
+			(session.role === "side" || Boolean(origin)) &&
+			!childCount.has(session.conversationId);
+		return {
+			...session,
+			...(origin ? { origin } : {}),
+			deletable,
+		};
+	});
+}
 
 export function mountCompanions(app: Hono): void {
 	if (!COMPANIONS_ENABLED) return;
@@ -1045,6 +1126,9 @@ export function mountCompanions(app: Hono): void {
 	 */
 	app.get("/api/v1/partners/:id/sessions", async (c) => {
 		if (!sideSessionsEnabled()) return c.json({ error: "side_sessions_disabled" }, 400);
+		const manage = partnerSessionManageEnabled();
+		const origins = await readChatOriginsSafe();
+		const archived = readChatMeta().archived;
 		const id = c.req.param("id");
 		if (id === "chief") {
 			// includeEmpty=true：只为拿到「刚建且命名过」的空会话；无名空壳仍不进选择器，
@@ -1062,7 +1146,13 @@ export function mountCompanions(app: Hono): void {
 					turns: chat.turns,
 					...(chat.pinned ? { pinned: true } : {}),
 				}));
-			return c.json({ ok: true, partnerId: "chief", kind: "chief", sessions });
+			return c.json({
+				ok: true,
+				partnerId: "chief",
+				kind: "chief",
+				sessionManage: manage,
+				sessions: decorateSessionBranchInfo(sessions, origins, manage, archived),
+			});
 		}
 		const partner = store().get(id);
 		if (!partner) return c.json({ error: "not_found" }, 404);
@@ -1075,10 +1165,9 @@ export function mountCompanions(app: Hono): void {
 			.sideLinksOf(id)
 			.map((link) => link.routeKey)
 			.filter((routeKey): routeKey is string => Boolean(routeKey));
-		const entries = await chatIndexEntriesOf([
-			...(canonicalId ? [canonicalId] : []),
-			...sideIds,
-		]);
+		// 链接表之外再沿 ChatOrigins 补可达后代：老分支缺链接时也能在选择器里被看到/删掉。
+		const baseIds = [...(canonicalId ? [canonicalId] : []), ...sideIds];
+		const entries = await chatIndexEntriesOf([...baseIds, ...originDescendants(baseIds, origins)]);
 		const canonicalEntry = canonicalId ? entries.find((e) => e.conversationId === canonicalId) : undefined;
 		const ordered = [
 			...(canonicalEntry ? [canonicalEntry] : []),
@@ -1095,7 +1184,13 @@ export function mountCompanions(app: Hono): void {
 			turns: entry.turns,
 			...(entry.pinned ? { pinned: true } : {}),
 		}));
-		return c.json({ ok: true, partnerId: id, kind: "partner", sessions });
+		return c.json({
+			ok: true,
+			partnerId: id,
+			kind: "partner",
+			sessionManage: manage,
+			sessions: decorateSessionBranchInfo(sessions, origins, manage, archived),
+		});
 	});
 
 	/**
@@ -1126,6 +1221,25 @@ export function mountCompanions(app: Hono): void {
 		if (!chat) return c.json({ error: "session_unavailable" }, 503);
 		if (title) renameChat(chat.externalId, title);
 		return c.json({ ok: true, conversationId: chat.externalId, role });
+	});
+
+	/**
+	 * 一人多会话 · 删除分支/副会话（2026-11-18，方案 docs/设计方案/2026-11-18-分支会话删除与选择器二级菜单.md）。
+	 *
+	 * 永久删除，不走归档。只允许执事 `role=side` 与总管带 ChatOrigins 的分支副本；
+	 * canonical / 总管第一行 / 普通 worker 仍走归档页那条两段式链路。
+	 * 有子分支先拦下（400 has_branches），不做级联。
+	 */
+	app.post("/api/v1/partners/:id/sessions/:conversationId/delete", async (c) => {
+		if (!sideSessionsEnabled()) return c.json({ error: "side_sessions_disabled" }, 400);
+		const result = await deletePartnerSession(
+			c.req.param("id"),
+			c.req.param("conversationId"),
+		);
+		if (!result.ok) {
+			return c.json({ error: result.error, message: result.message }, result.status);
+		}
+		return c.json({ ok: true, conversationId: result.conversationId, deleted: result.deleted });
 	});
 
 	// ── 例行任务（批次B B3）──────────────────────────────

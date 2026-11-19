@@ -10,10 +10,11 @@ import { approvalStore } from "../approvals.ts";
 import { ASK_USER_TOOL_NAME, ASK_USER_WAITING_MESSAGE, askUserEnabled, createAskUserPending } from "../ask-user.ts";
 import { autonomyEscalationBlockReason, autonomyRiskVerdict } from "../autonomy-risk.ts";
 import { isAutonomyTurn } from "../autonomy-state.ts";
-import { bashBackgroundEnabled, moveToBackground, replacedResult, timeoutSecondsFromResult } from "../bash-background.ts";
+import { bashBackgroundEnabled, bgJobWakeEnabled, bgJobWakePayload, moveToBackground, replacedResult, timeoutSecondsFromResult } from "../bash-background.ts";
 import { setApprovalLevelSource } from "../delegation-authority.ts";
-import { wakeOnDelegationReport } from "../delegation-wake.ts";
-import { emitDelegation } from "../delegation.ts";
+import { workerSteerEnabled } from "../delegation-gates.ts";
+import { wakeOnBgJobFinish, wakeOnDelegationReport } from "../delegation-wake.ts";
+import { chancellorWorkRoot, emitDelegation } from "../delegation.ts";
 import { failureStreak } from "../failure-streak.ts";
 import type { GateBlockCategory } from "../gate-audit.ts";
 import { auditGateBlock } from "../gate-audit.ts";
@@ -21,6 +22,7 @@ import { loopGuardEnabled, loopGuardFor, resetLoopGuard } from "../loop-guard.ts
 import type { RelayDeliverResult, RelaySenderContext } from "../partner-relay.ts";
 import { RELAY_AUTONOMY_BLOCK_MESSAGE, RELAY_CALLER_BLOCK_MESSAGE, RELAY_CHIEF_BLOCK_MESSAGE, RELAY_GROUP_BLOCK_MESSAGE, RELAY_HOP_BLOCK_MESSAGE, RELAY_TOOL_NAME, beginRelayRun, claimRelayTarget, clearRelayTarget, currentRelayRunKey, emitRelayReceipt, isRelayRun, markRelayRun, markRelayTarget, partnerRelayEnabled, partnerRelayReceiptEnabled, relayEntryOf, relayOutcomeEntry, relaySettledText } from "../partner-relay.ts";
 import { CHIEF_PARTNER_ID, COMPANIONS_ENABLED, partnersStore } from "../partners.ts";
+import { ensurePartnerSession } from "../partner-runtime.ts";
 import { pathGuardBlockReason } from "../path-guard.ts";
 import { askPersona, askPersonaAvailable, personaAskEnabled } from "../persona-ask.ts";
 import { personaWrite, personaWriteEnabled, writePersonaAvailable } from "../persona-write.ts";
@@ -36,6 +38,11 @@ import { RoutineTask, routineEngine, routineSelfServiceEnabled } from "../routin
 import { runIdentityKey } from "../run-key.ts";
 import { searchModule } from "../search.ts";
 import { makeSkillAdviceSaver, skillAdviceEnabled, skillAdvicePath } from "../skill-advice.ts";
+import {
+	makeReminderAdviceSaver,
+	reminderAdviceEnabled,
+	reminderAdvicePath,
+} from "../reminder-advice.ts";
 import { mirrorTaskNotice, taskConversationMirror } from "../task-conversation.ts";
 import { capabilityOf } from "../tool-capability.ts";
 import { markDeferred } from "../tool-index.ts";
@@ -278,12 +285,21 @@ async function deliverPartnerRelay(
 	const guardedBody = guardRelayDelivery(body);
 	const target = partnersStore().get(targetPartnerId);
 	if (!target) return { ok: false, error: "这位执事已经不在了" };
-	const sessionId = partnersStore().sessionIdOfPartner(targetPartnerId);
+	let sessionId = partnersStore().sessionIdOfPartner(targetPartnerId);
 	if (sessionId === null) {
-		return {
-			ok: false,
-			error: `「${target.name}」还没有自己的会话——先在侧栏点开它一次，再递话`,
-		};
+		// 批3 补空缺会话（2026-11-19 唤醒管道批 §4）：送达本身已能开轮（durable submit
+		// 空闲即 startRun / 忙时 inbox followUp，核实结论见 delegation-wake.wakeOnAgentMessage
+		// 的注释），到达路径的空缺只剩"对端还没有会话"。不再要求主人先点开一次：
+		// ensurePartnerSession 补建 canonical 主会话（对齐身份 + 钉工作区，不发问候），
+		// 建不起来（执事未启用 / 模型未配置）才回错。
+		const ensured = await ensurePartnerSession(targetPartnerId);
+		sessionId = ensured ? partnersStore().sessionIdOfPartner(targetPartnerId) : null;
+		if (sessionId === null) {
+			return {
+				ok: false,
+				error: `「${target.name}」的会话建不起来（执事未启用或模型未配置）`,
+			};
+		}
 	}
 	try {
 		const harness = await getHarness();
@@ -540,9 +556,38 @@ async function openHarness(): Promise<Harness> {
 		search: searchModule,
 		// 执事间递话（2026-11-08 扫尾批 8d）：执事能力 + 通道开关**双闸**，
 		// 关任一个 → `send_to_agent` 不上架（模型侧 tool_unavailable = 本批的回滚形态）。
+		// worker 插话通道（2026-11-19 插话统一 批1）：WORKER_STEER_ENABLED=false 时
+		// 不注入 workerSteer → send_to_agent 保持改动前的形态（无 mode 参数、不认单号）。
+		// 转发实现懒加载 delegation-actions：避免装配期静态拉起整条派单模块图。
 		relay:
 			COMPANIONS_ENABLED && partnerRelayEnabled()
-				? { deliver: deliverPartnerRelay }
+				? {
+						deliver: deliverPartnerRelay,
+						...(workerSteerEnabled()
+							? {
+									workerSteer: {
+										forward: (ticketId, mode, text, senderConversationId) =>
+											import("../delegation-actions.ts")
+												.then(({ forwardWorkerMessageAction }) =>
+													forwardWorkerMessageAction(
+														chancellorWorkRoot(),
+														ticketId,
+														{ mode, text },
+														senderConversationId,
+													),
+												)
+												.then((result) => {
+													const body = result.body as {
+														ok?: boolean;
+														error?: string;
+														message?: string;
+													};
+													return { ok: body.ok === true, error: body.error, message: body.message };
+												}),
+									},
+								}
+							: {}),
+					}
 				: null,
 		// 自建巡逻（2026-11-08 刀二 E4）：ROUTINE_SELF_SERVICE=false → 工具不上架；
 		// 上架时把排链函数注入工具，避免 tools.ts 反向 import routines.ts 绕成环。
@@ -558,6 +603,10 @@ async function openHarness(): Promise<Harness> {
 		// 不上架。评估在总管对话里做（设置页预填提示词 → 总管逐条评估 → 本工具写快照），
 		// 快照路径与 skills-api 的 advice 端点同一个文件（skillAdvicePath）。
 		skillAdviceSave: skillAdviceEnabled() ? makeSkillAdviceSaver(skillAdvicePath()) : null,
+		// 提醒沉淀建议落盘（2026-11-19 批4）：REMINDER_DISTILL_ENABLED=false → save_reminder_advice
+		// 不上架。流程照批 30：记忆页/人设页入口预填提示词 → 总管蒸馏 → 本工具写快照，
+		// 人在记忆页逐条采纳才写偏好（D18）。快照路径与 reminder-advice 端点同一个文件。
+		reminderAdviceSave: reminderAdviceEnabled() ? makeReminderAdviceSaver(reminderAdvicePath()) : null,
 		// 会话考古（2026-11-09 T4 §4）：默认开；AGENT_RECALL_SESSIONS=false → 不传，
 		// `recall_sessions` 整块不注册（模型侧 tool_unavailable，一行回滚）。
 		// 用 getHarness() 惰性取：createTools 执行时 harness 还没 open，真正调用时已就绪。
@@ -983,11 +1032,33 @@ async function openHarness(): Promise<Harness> {
 									timeoutSeconds: timeoutS,
 									onFinished: (record, logTail) => {
 										const tail = logTail.trim();
+										// 既有行为（批3 前）：只写记录不开轮。
 										void sayInConversation(
 											api.conversationId,
 											`后台任务 ${record.id} 已结束（退出码 ${record.exitCode ?? "未知"}）。` +
 												(tail ? `\n最后一段输出：\n${tail}` : ""),
 										).catch(() => undefined);
+										// 批3（唤醒管道）：完成即唤醒——在写记录之外投一条 bgjob 信封，
+										// 唤醒轮落在发起会话所属执事的 canonical 主会话。信封只递原料
+										//（命令摘要 / 退出码 / 尾部 ≤400 字），说不说由执事自己定。
+										// 回滚：BG_JOB_WAKE_ENABLED=false → 只写记录（改动前行为）；
+										// WAKE_PIPELINE_V2=false → 信封在管道口被拦（delegation 照旧）。
+										if (bgJobWakeEnabled()) {
+											wakeOnBgJobFinish(
+												api.conversationId,
+												bgJobWakePayload(record, tail, record.status === "done" ? "done" : "failed"),
+											);
+										}
+									},
+									// 批3：运行中输出变化检测（ZCode 式）。间隔 BG_JOB_WATCH_INTERVAL_S
+									// （默认 0=关，仅完成唤醒）；检测在 bash-background，投递走同一入口。
+									// 尾部摘要只进会话输入（唤醒轮提示词），服务端日志不落它。
+									onOutputChange: (record, logTail) => {
+										if (!bgJobWakeEnabled()) return;
+										wakeOnBgJobFinish(
+											api.conversationId,
+											bgJobWakePayload(record, logTail, "running"),
+										);
 									},
 								});
 								backgrounded = replacedResult(moved.message);

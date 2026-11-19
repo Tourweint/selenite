@@ -20,6 +20,7 @@ import { paintAvatar } from "./avatar.js";
 import { el } from "./dom.js";
 import { attr, esc } from "./markdown.js";
 import { request } from "./net.js";
+import { openSecMenu } from "./sec-menu.js";
 import { openAvatarPanel } from "./partner-editor.js";
 import { PT_STATUS, ptTogglePartner } from "./partner-modals.js";
 import { ptRenderRoutineList, ptRoutineFormMarkup, ptWireRoutineForm } from "./partner-routines.js";
@@ -1394,24 +1395,24 @@ async function pfOpenRoutinesModal(partnerId, onChanged) {
             : info.task.enabled === false
               ? "已暂停"
               : `每天 ${info.at}`;
-        memoryBox.innerHTML = `
-          <div class="pf-live-head"><span>每晚整理记忆（拆分 + 对账）</span><span class="pf-tag">${esc(tag)}</span></div>
-          <p class="pf-hint">到点先把自己的长记忆拆成短原子（完整原文存进原文档案，不删除），再回看重复、过时、说法不一致的条目。拆分是机械动作，不需要模型；对账只出建议，你逐条点应用才会改。改时间改的是全家共用的时刻，所有人一起变。</p>
-          <div class="pf-live-tools" id="pf-memory-actions"></div>`;
-        const tools = memoryBox.querySelector("#pf-memory-actions");
+        // 说明收进标题悬停；动作只留一颗 ⋯，跟下面那张清单同一形态（2026-11-18）。
+        const tip =
+          "到点先把自己的长记忆拆成短原子（完整原文存进原文档案，不删除），再回看重复、过时、说法不一致的条目。拆分是机械动作，不需要模型；对账只出建议，你逐条点应用才会改。改时间改的是全家共用的时刻，所有人一起变。";
+        const head = (tail) =>
+          `<div class="pf-live-head"><span data-tip="${attr(tip)}">每晚整理记忆（拆分 + 对账）</span>${tail}</div>`;
         if (!info?.task) {
-          tools.innerHTML = `<span class="pf-hint">这个人的每晚整理任务已被删除；删除不可恢复。</span>`;
+          memoryBox.innerHTML = `${head(`<span class="pf-tag">${esc(tag)}</span>`)}<p class="pf-hint">这个人的每晚整理任务已被删除；删除不可恢复。</p>`;
           return;
         }
         if (!info.master) {
-          tools.innerHTML = `<span class="pf-hint">每晚整理的总开关关着，单个任务改不了。</span>`;
+          memoryBox.innerHTML = `${head(`<span class="pf-tag">${esc(tag)}</span>`)}<p class="pf-hint">每晚整理的总开关关着，单个任务改不了。</p>`;
           return;
         }
-        const timeButton = document.createElement("button");
-        timeButton.type = "button";
-        timeButton.className = "pf-mini";
-        timeButton.textContent = "改时间";
-        timeButton.addEventListener("click", () => {
+        memoryBox.innerHTML = head(
+          `<span class="pf-memory-tail"><span class="pf-tag">${esc(tag)}</span><span id="pf-memory-actions"></span></span>`,
+        );
+        const tools = memoryBox.querySelector("#pf-memory-actions");
+        const openTimeEditor = () => {
           openScheduledTaskModal(
             {
               mode: "edit",
@@ -1432,13 +1433,8 @@ async function pfOpenRoutinesModal(partnerId, onChanged) {
               void pfOpenRoutinesModal(partnerId, onChanged);
             },
           );
-        });
-        const toggleButton = document.createElement("button");
-        toggleButton.type = "button";
-        toggleButton.className = "pf-mini";
-        toggleButton.textContent = info.task.enabled === false ? "启用" : "暂停";
-        toggleButton.addEventListener("click", async () => {
-          toggleButton.disabled = true;
+        };
+        const toggleMemory = async () => {
           try {
             const response = await request(
               `/api/v1/agent/memory/nightly/${encodeURIComponent(info.scope)}`,
@@ -1451,10 +1447,27 @@ async function pfOpenRoutinesModal(partnerId, onChanged) {
             report(listBox.querySelectorAll(".rm-item").length);
           } catch (error) {
             if (error.message !== "forbidden") toast(`没改到：${error.message}`);
-            toggleButton.disabled = false;
           }
+        };
+        // 2026-11-18：跟下面那张清单同一形态——动作收进右侧 ⋯，不再并排两颗文字按钮。
+        const actions = document.createElement("button");
+        actions.type = "button";
+        actions.className = "rm-dots";
+        actions.textContent = "⋯";
+        actions.setAttribute("aria-haspopup", "menu");
+        actions.setAttribute("aria-expanded", "false");
+        actions.setAttribute("aria-label", "每晚整理的更多操作");
+        actions.setAttribute("data-tip", "更多操作");
+        actions.addEventListener("click", () => {
+          openSecMenu(actions, [
+            { label: "改时间", run: openTimeEditor },
+            {
+              label: info.task.enabled === false ? "启用" : "暂停",
+              run: () => void toggleMemory(),
+            },
+          ]);
         });
-        tools.append(timeButton, toggleButton);
+        tools.append(actions);
       };
       paintMemory();
 

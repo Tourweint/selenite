@@ -10,17 +10,23 @@
 .tool-pool-table td.tool-pool-col { text-align: center; white-space: nowrap; font-variant-numeric: tabular-nums; }
 
 .tool-pool-row { cursor: pointer; }
-.tool-pool-row:hover td { background: var(--card-high); }
+/* 悬停不铺灰底（2026-11-18 用户口径）：只提亮工具名和箭头，别给整行盖一块灰色方框。 */
+.tool-pool-row:hover .use-mono { color: var(--text); }
+.tool-pool-row:hover .tool-pool-caret { color: var(--text-2); }
+/* 池胶囊的悬停也不铺底，只改字色——同一页里别再出现灰色小方块。 */
+.tool-pool-table .pf-tool-mode:hover { background: transparent; color: var(--accent); }
 .tool-pool-caret {
   flex: none; display: inline-block; width: 11px;
   color: var(--text-3); font-size: 12px; line-height: 1;
-  transition: transform var(--dur-fast) var(--ease-standard);
+  transition: transform var(--dur-fast) var(--ease-standard), color .15s ease;
 }
 .tool-pool-row.is-open .tool-pool-caret { transform: rotate(90deg); }
 /* 展开时主行不留分隔线，让"行 + 详情"看起来是一块 */
 .tool-pool-row.is-open td { border-bottom-color: transparent; }
 
-.tool-pool-detail td { padding-top: 0; padding-bottom: 14px; }
+/* 详情的上下留白放在内层：外层 td 贴零，撑开/收起的动画量到的就是含留白的整块 */
+.tool-pool-detail td { padding-top: 0; padding-bottom: 0; }
+.tool-pool-detail-inner { overflow: hidden; padding-bottom: 14px; }
 .tool-pool-detail-block + .tool-pool-detail-block { margin-top: 10px; }
 .tool-pool-detail-label {
   margin-bottom: 4px; font-size: 10.5px; color: var(--text-3); letter-spacing: .08em;

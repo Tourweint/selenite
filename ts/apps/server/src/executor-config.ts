@@ -25,6 +25,8 @@ import type {
   EmployeePermission,
   EmployeeProfile,
 } from "../../../packages/chancellor/src/types.ts";
+import type { QaMode } from "../../../packages/chancellor/src/qa.ts";
+import { qaModeFromEnv } from "../../../packages/chancellor/src/qa.ts";
 
 export const EXECUTOR_KINDS = [
   "native",
@@ -148,12 +150,16 @@ export const EXECUTOR_KIND_INFO: ExecutorKindInfo[] = [
 export interface ExecutorConfig {
   employee: ExecutorKind;
   profiles: Partial<Record<ExecutorKind, EmployeeProfile>>;
+  /** 质检方式（2026-11-19 批2）：internal=内部一次请求（现状默认）；qa-worker=派质检 worker。 */
+  qa: QaMode;
 }
 
 export interface ExecutorView {
   enabled: boolean;
   employee: ExecutorKind;
   profiles: Partial<Record<ExecutorKind, EmployeeProfile>>;
+  /** 质检方式（批2）：界面「设置 → 派活」的选择器回显。 */
+  qa: QaMode;
   kinds: ExecutorKindInfo[];
   /** true = 当前执行器来自部署 env 的 phone / mcp，界面选择不生效。 */
   locked: boolean;
@@ -241,7 +247,7 @@ export function writeExecutorConfig(
 /** 派单要用的执行器与参数；新单把它放进 ChancellorRequest。 */
 export function executorForDelegation(
   env: NodeJS.ProcessEnv = process.env,
-): { employee: ExecutorKind; profile: EmployeeProfile } {
+): { employee: ExecutorKind; profile: EmployeeProfile; qa: QaMode } {
   const config = readExecutorConfig(env);
   const raw = config.profiles[config.employee] ?? {};
   const profile: EmployeeProfile = {};
@@ -250,7 +256,7 @@ export function executorForDelegation(
   // worker 子进程回落启动 env（CHANCELLOR_LLM_MODEL / LLM_MODEL）。
   if (raw.model !== undefined) profile.model = raw.model;
   if (raw.permission !== undefined) profile.permission = raw.permission;
-  return { employee: config.employee, profile };
+  return { employee: config.employee, profile, qa: config.qa };
 }
 
 /** 端点视图：配置 + 控件元数据 + 锁定原因。 */
@@ -261,6 +267,7 @@ export function executorView(env: NodeJS.ProcessEnv = process.env): ExecutorView
     enabled: executorConfigEnabled(env),
     employee: config.employee,
     profiles: config.profiles,
+    qa: config.qa,
     kinds: EXECUTOR_KIND_INFO,
     locked,
     ...(locked
@@ -376,6 +383,10 @@ export function parseExecutorInput(
       }
     }
   }
+  // 质检方式（2026-11-19 批2）：可选，认不出的值当场拒（不静默回退）。
+  if (input.qa !== undefined && input.qa !== "internal" && input.qa !== "qa-worker") {
+    return { ok: false, message: "qa 必须是 internal（内部一次请求）/ qa-worker（派质检 worker）之一" };
+  }
   return { ok: true, value: input };
 }
 
@@ -387,6 +398,7 @@ function mergeInput(
   if (!isRecord(input)) return current;
   return {
     employee: input.employee ?? current.employee,
+    qa: input.qa ?? current.qa,
     profiles: {
       ...current.profiles,
       ...(isRecord(input.profiles) ? input.profiles : {}),
@@ -404,6 +416,11 @@ function normalizeConfig(
     typeof source.employee === "string" && isExecutorKind(source.employee)
       ? source.employee
       : envKind;
+  // 质检方式（批2）：文件里显式写的优先；没有回落 env（CHANCELLOR_QA_MODE，缺省 internal）。
+  const qa: QaMode =
+    source.qa === "qa-worker" || source.qa === "internal"
+      ? source.qa
+      : qaModeFromEnv(env);
   const rawProfiles = isRecord(source.profiles) ? source.profiles : {};
 
   const profiles: Partial<Record<ExecutorKind, EmployeeProfile>> = {};
@@ -422,7 +439,7 @@ function normalizeConfig(
     if (permission !== undefined) profile.permission = permission;
     profiles[kind] = profile;
   }
-  return { employee, profiles };
+  return { employee, qa, profiles };
 }
 
 function envEmployee(env: NodeJS.ProcessEnv): ExecutorKind {

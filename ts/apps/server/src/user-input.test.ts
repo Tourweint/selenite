@@ -1,19 +1,26 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { DEFAULT_USER_INPUT_WHEN_BUSY, userInputSubmission } from "./agent/user-input.ts";
+import { DEFAULT_USER_INPUT_WHEN_BUSY, defaultUserInputWhenBusy, userInputSubmission } from "./agent/user-input.ts";
 
 /**
- * 产品承诺（2026-11-09 T2 §5）：人的消息永远插得上话。
- * 这里只钉"入队形状"：缺省 followUp（排队到本轮收尾）、原文与 parts 不丢。
- * 真正的排队/落库仍是 durable 的职责（http 探针 §19 已覆盖 whenBusy 契约）。
+ * 产品承诺（2026-11-09 T2 §5 立此；2026-11-19 插话统一 批1 改口径）：人的消息永远插得上话。
+ * 这里只钉"入队形状"：缺省 steer（插进当前轮，2026-11-19 改）、原文与 parts 不丢。
+ * 真正的插话/排队/落库仍是 durable 的职责（http 探针 §19 已覆盖 whenBusy 契约）。
  */
 
-test("缺省 whenBusy = followUp（忙时排队，不拒）", () => {
-	assert.equal(DEFAULT_USER_INPUT_WHEN_BUSY, "followUp");
+test("缺省 whenBusy = steer（忙时插话，不拒；2026-11-19 插话统一改缺省）", () => {
+	assert.equal(DEFAULT_USER_INPUT_WHEN_BUSY, "steer");
 	const body = userInputSubmission({ text: "在吗" });
-	assert.equal(body.whenBusy, "followUp");
+	assert.equal(body.whenBusy, "steer");
 	assert.equal(body.type, "input");
 	assert.equal(body.content, "在吗");
+});
+
+test("回滚开关：AGENT_STEER_DEFAULT=false → 缺省回 followUp（改动前口径）", () => {
+	assert.equal(defaultUserInputWhenBusy({ AGENT_STEER_DEFAULT: "false" }), "followUp");
+	assert.equal(defaultUserInputWhenBusy({ AGENT_STEER_DEFAULT: "0" }), "followUp");
+	assert.equal(defaultUserInputWhenBusy({}), "steer");
+	assert.equal(defaultUserInputWhenBusy({ AGENT_STEER_DEFAULT: "true" }), "steer");
 });
 
 test("客户端明确要 steer 时不被改写", () => {

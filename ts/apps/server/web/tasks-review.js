@@ -52,6 +52,26 @@ function dayLabel(key) {
   return `${month}-${day}`;
 }
 
+const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+
+/** 日期头的主标题：11月18日；跨年才补年份（翻旧账时不能只写 11月18日） */
+function dayTitle(key) {
+  const [year, month, day] = String(key || todayKey()).split("-").map(Number);
+  const head = `${month || 1}月${day || 1}日`;
+  return year && year !== new Date().getFullYear() ? `${year}年${head}` : head;
+}
+
+/** 日期头的副标题：周二 · 今天 / 周一 · 昨天 / 周二 */
+function daySubtitle(key) {
+  const [year, month, day] = String(key || todayKey()).split("-").map(Number);
+  const date = new Date(year || 1970, (month || 1) - 1, day || 1);
+  const weekday = WEEKDAYS[date.getDay()] || "";
+  const today = todayKey();
+  if (key === today) return weekday ? `${weekday} · 今天` : "今天";
+  if (key === shiftDayKey(today, -1)) return weekday ? `${weekday} · 昨天` : "昨天";
+  return weekday;
+}
+
 /** 时间线只给 HH:MM（跨天由日期切换负责，不在这里补日期） */
 function reviewClockOf(value) {
   if (!value) return "—";
@@ -152,33 +172,82 @@ function reviewEntriesOf(key) {
     });
   }
   for (const group of entries) {
-    if (group.kind === "done") group.note = `${group.count} 次派活完成 · 点开回原对话`;
+    if (group.kind === "done") group.note = `${group.count} 次派活完成`;
   }
   entries.sort((a, b) => String(a.at || "").localeCompare(String(b.at || "")));
   return entries;
 }
 
-function reviewEntryHtml(entry) {
+/** 流水一行：时间 / 状态图标 / 标题 + 一句出处 / 可回原对话才给箭头。
+ *  完结、派活、出错都能回原对话；直派单没有来源对话，整行只读。 */
+function reviewRowHtml(entry) {
   const icon =
     entry.kind === "done"
       ? `<span class="rv-ic done" aria-hidden="true">✓</span>`
       : entry.kind === "ask"
-        ? `<span class="rv-ic ask" aria-hidden="true">总</span>`
+        ? `<span class="rv-ic ask" aria-hidden="true">问</span>`
         : entry.kind === "fail"
           ? `<span class="rv-ic fail" aria-hidden="true">!</span>`
           : `<span class="tk2-tool ${hitterTone(entry.employee)}">${esc(hitterBadge(entry.employee))}</span>`;
-  // 完结/派活/出错都能回原对话；直派单没有对话，卡片保持只读
   const clickable = Boolean(entry.conversationId);
-  const attrs = clickable
-    ? ` data-open-conv="${attr(entry.conversationId)}" role="button" tabindex="0" title="点开回原对话"`
-    : ` title="这张单没有来源对话"`;
-  return `<div class="rv-entry" data-kind="${attr(entry.kind)}">
-    <span class="rv-dot" aria-hidden="true"></span>
-    <span class="rv-tm">${esc(reviewClockOf(entry.at))}</span>
-    <div class="rv-card${entry.kind === "done" ? " dim" : ""}${clickable ? " link" : ""}"${attrs}>
-      <div class="rv-r1">${icon}<h3>${esc(entry.title)}</h3></div>
-      <p class="rv-r2">${esc(entry.note)}</p>
+  const body = `<span class="rv-tm">${esc(reviewClockOf(entry.at))}</span>
+      ${icon}
+      <span class="rv-bd"><b>${esc(entry.title)}</b><em>${esc(entry.note)}</em></span>
+      <span class="rv-go" aria-hidden="true">${clickable ? "›" : ""}</span>`;
+  if (!clickable) return `<div class="rv-row static" title="这张单没有来源对话">${body}</div>`;
+  return `<button class="rv-row" type="button" data-open-conv="${attr(entry.conversationId)}" title="点开回原对话">${body}</button>`;
+}
+
+/** 日期头：大日期 + 周几/今天昨天 + 回到今天 + 前后一天 */
+function reviewDaynavHtml(key, today) {
+  const prevKey = shiftDayKey(key, -1);
+  const nextKey = shiftDayKey(key, 1);
+  const nextDisabled = nextKey > today;
+  return `<div class="rv-day-copy">
+      <h2>${esc(dayTitle(key))}</h2>
+      <p>${esc(daySubtitle(key))}</p>
     </div>
+    <div class="rv-day-actions">
+      ${key === today ? "" : `<button class="rv-today-btn" type="button" data-day-today>回到今天</button>`}
+      <div class="rv-day-btns">
+        <button class="rv-day-btn" type="button" data-day-shift="-1" title="看 ${esc(dayLabel(prevKey))}" aria-label="前一天">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+        </button>
+        <button class="rv-day-btn" type="button" data-day-shift="1" title="看 ${esc(dayLabel(nextKey))}" aria-label="后一天"${nextDisabled ? " disabled" : ""}>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+        </button>
+      </div>
+    </div>`;
+}
+
+/** 当日概览：左边一个主数字（派了多少单），右边三个结果数字 */
+function reviewHeroHtml(key, stats) {
+  const today = key === todayKey();
+  const leadLabel = today ? "今天派出" : "这天派出";
+  return `<div class="rv-hero">
+    <div class="rv-lead">
+      <span class="rv-lead-label">${leadLabel}</span>
+      <b>${stats.dispatched}</b>
+      <span class="rv-lead-unit">单</span>
+    </div>
+    <div class="rv-split">
+      <div class="${stats.done ? "done" : "zero"}"><b>${stats.done}</b><span>件收了尾</span></div>
+      <div class="${stats.needs ? "ask" : "zero"}"><b>${stats.needs}</b><span>条等你回话</span></div>
+      <div class="${stats.failed ? "fail" : "zero"}"><b>${stats.failed}</b><span>单出了错</span></div>
+    </div>
+  </div>`;
+}
+
+/** 空态：没有单的日子也长得像一页纸，而不是一片白 */
+function reviewEmptyHtml(key) {
+  const today = key === todayKey();
+  return `<div class="rv-empty">
+    <span class="rv-empty-ic" aria-hidden="true">
+      <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4"/><path d="M8 2v4"/><path d="M3 10h18"/></svg>
+    </span>
+    <h3>${today ? "今天还没有派过活" : "这天没有记录"}</h3>
+    <p>${today ? "派出去的单会按天记在这里。" : "换一天看看，或者去任务中心派一单。"}</p>
+    ${today ? `<a class="rv-empty-go" href="#/tasks">去任务中心</a>` : ""}
   </div>`;
 }
 
@@ -188,39 +257,15 @@ function renderReview() {
   if (!state.reviewDay) state.reviewDay = today;
   if (String(state.reviewDay) > today) state.reviewDay = today; // 不看未来
   const key = state.reviewDay;
-  const prevKey = shiftDayKey(key, -1);
-  const nextKey = shiftDayKey(key, 1);
-  const nextDisabled = nextKey > today || !ticketsOfDay(nextKey).length;
-
-  el.reviewTitleSub.textContent = key === today ? "" : dayLabel(key);
-  el.rvPager.innerHTML = `
-    <button type="button" data-day-shift="-1" title="看 ${esc(dayLabel(prevKey))}">‹ 前一天</button>
-    ${key === today ? "" : `<span class="rv-day-tag">${esc(dayLabel(key))}</span>`}
-    <button type="button" data-day-today class="${key === today ? "cur" : ""}"${
-      key === today ? ' aria-current="date"' : ""
-    }>今天 · ${esc(dayLabel(today))}</button>
-    <button type="button" data-day-shift="1" title="看 ${esc(dayLabel(nextKey))}"${
-      nextDisabled ? " disabled" : ""
-    }>后一天 ›</button>`;
-
   const stats = reviewStatsOf(key);
-  el.rvSum.innerHTML = [
-    ["次派活", stats.dispatched, ""],
-    ["完结对话", stats.done, "done"],
-    ["出错", stats.failed, "fail"],
-    ["等你回话", stats.needs, "ask"],
-  ]
-    .map(
-      ([label, value, tone]) =>
-        `<div class="rv-n${tone ? ` ${tone}` : ""}"><b>${value}</b><span>${label}</span></div>`,
-    )
-    .join("");
-
   const entries = reviewEntriesOf(key);
+
+  el.reviewTitleSub.textContent = stats.dispatched ? `${stats.dispatched} 单` : "";
+  el.rvPager.innerHTML = reviewDaynavHtml(key, today);
+  el.rvSum.innerHTML = entries.length ? reviewHeroHtml(key, stats) : "";
+
   if (!entries.length) {
-    el.rvTl.innerHTML = `<p class="rv-empty">${
-      state.tickets.length ? "这天没有记录。" : "还没有派过活。派出去的单会按天记在这里。"
-    }</p>`;
+    el.rvTl.innerHTML = reviewEmptyHtml(key);
   } else {
     // 06 / 12 / 18 切上午·下午·晚上；0~6 点归晚上
     const buckets = { am: [], pm: [], night: [] };
@@ -232,7 +277,10 @@ function renderReview() {
     el.rvTl.innerHTML = REVIEW_GROUPS.map((group) => {
       const items = buckets[group.id];
       if (!items.length) return "";
-      return `<div class="rv-grp">${group.label}</div>${items.map(reviewEntryHtml).join("")}`;
+      return `<section class="rv-grp">
+        <div class="rv-grp-h"><span>${group.label}</span><span class="rv-grp-ln"></span></div>
+        <div class="rv-rows">${items.map(reviewRowHtml).join("")}</div>
+      </section>`;
     }).join("");
   }
 
@@ -251,4 +299,4 @@ function openReview() {
   });
 }
 
-export { REVIEW_GROUPS, dayKeyOf, dayLabel, dayRowsOf, openReview, renderReview, reviewClockOf, reviewEntriesOf, reviewEntryHtml, reviewStatsOf, shiftDayKey, ticketsOfDay, todayKey };
+export { REVIEW_GROUPS, dayKeyOf, dayLabel, dayRowsOf, daySubtitle, dayTitle, openReview, renderReview, reviewClockOf, reviewEntriesOf, reviewRowHtml, reviewStatsOf, shiftDayKey, ticketsOfDay, todayKey };

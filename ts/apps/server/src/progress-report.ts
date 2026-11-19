@@ -104,10 +104,10 @@ export function createReportProgressTool(deps: ProgressReportDeps = {}): ToolReg
 		name: PROGRESS_TOOL_NAME,
 		description:
 			"长任务做到一半时，主动对主人说一句进展（**不会结束本轮**）。" +
-			"适合：跨了好几步、要跑好几分钟的活，中间有一句值得让人先知道的话（" +
-			"「已经定位到问题，正在改」「前两步做完，第三步要再等一会儿」）。" +
-			`每次不超过 ${PROGRESS_MESSAGE_LIMIT} 字，一条说一件事；每轮最多 ${PROGRESS_MAX_PER_RUN} 条，` +
-			"超了就合并成一条。**不适合**：一句话就能汇报完的短活、纯寒暄、把最终结论拆成好几条。" +
+			"适合：跨了好几步、要跑好几分钟的活，中间有一句值得让人先知道的话（如「已经定位到问题，正在改」）。" +
+			// 字数上限只在 message 参数里；每轮条数上限只有这里有，保留数字。
+			"不适合：一句话就能汇报完的短活、纯寒暄；一条说一件事，" +
+			`每轮最多 ${PROGRESS_MAX_PER_RUN} 条，超了就合并成一条。` +
 			"这句话会出现在主人正在看的对话流里；没开流就收不到，也不会补写历史。",
 		parameters: Type.Object({
 			message: Type.String({

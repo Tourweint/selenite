@@ -43,8 +43,10 @@ const pendingLists = new Set();
 let openMenu = null;
 
 export function executorSectionMarkup() {
+  // 2026-11-18：四张导航卡已经写着「派活」，节标题改成这一页真正的对象「执行器」，
+  // 不再和 tab 名重复。
   return sectionMarkup(
-    "派活",
+    "执行器",
     `<div class="card">
       <div class="row">
         <div class="row-main">
@@ -53,6 +55,17 @@ export function executorSectionMarkup() {
         </div>
         <div class="row-control">
           <select class="set-input executor-select" id="executor-kind" aria-label="默认派给谁" disabled></select>
+        </div>
+      </div>
+      <div class="row">
+        <div class="row-main">
+          <div class="row-label" data-tip="工人自报完成后怎么验收：内部一次请求 = chancellor 内部一次纯文本请求判（现状，默认）；派质检 worker = 再派一单质检工人，亲自验证产物后给 DONE / CONTINUE / BLOCKED 结论（更可靠，多花一单的工时）。换方式只影响新单。">质检方式</div>
+        </div>
+        <div class="row-control">
+          <select class="set-input executor-select" id="executor-qa" aria-label="质检方式" disabled>
+            <option value="internal">内部一次请求（现状）</option>
+            <option value="qa-worker">派质检 worker（新）</option>
+          </select>
         </div>
       </div>
     </div>
@@ -64,6 +77,7 @@ export function executorSectionMarkup() {
 
 export async function wireExecutorSettings() {
   const select = document.getElementById("executor-kind");
+  const qaSelect = document.getElementById("executor-qa");
   const profiles = document.getElementById("executor-profiles");
   const hint = document.getElementById("executor-hint");
   const save = document.getElementById("executor-save");
@@ -105,6 +119,11 @@ export async function wireExecutorSettings() {
     }
     select.value = data.employee;
     select.disabled = data.locked === true || data.enabled === false;
+    // 质检方式（批2）：回显 + 随派活设置一起禁用/启用。
+    if (qaSelect) {
+      qaSelect.value = data.qa === "qa-worker" ? "qa-worker" : "internal";
+      qaSelect.disabled = data.enabled === false;
+    }
     save.disabled = true;
     setHint("");
 
@@ -223,10 +242,17 @@ export async function wireExecutorSettings() {
     if (!current) return;
     markDirty();
   });
+  if (qaSelect) {
+    qaSelect.addEventListener("change", () => {
+      if (!current) return;
+      markDirty();
+    });
+  }
 
   save.addEventListener("click", async () => {
     if (!current || dirty === false) return;
     const payload = { employee: select.value, profiles: {} };
+    if (qaSelect) payload.qa = qaSelect.value === "qa-worker" ? "qa-worker" : "internal";
     for (const kind of current.kinds.filter((item) => item.selectable)) {
       // native 也存 model（2026-11-16 批1）：留空 = 跟随启动 env，native.ts 不做覆盖。
       const input = document.querySelector(`[data-model="${cssEscape(kind.id)}"]`);

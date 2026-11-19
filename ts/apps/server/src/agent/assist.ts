@@ -2,7 +2,7 @@ import { createMemoryEngine, scopeKey, type MemoryEngine, type MemoryScope } fro
 import { diaryStore } from "../diary.ts";
 import { flagEnabled } from "../flags.ts";
 import { recentDiaryMemories, syncDiaryToMemory } from "../memory-ingest.ts";
-import { memoryFallbackExtractor, preferenceExtractor } from "../memory-extract.ts";
+import { NOOP_EXTRACTOR, memoryExtractMode, memoryFallbackExtractor, preferenceExtractor } from "../memory-extract.ts";
 import { INJECTION_ORDER, type InjectionEntry, type InjectionProvider } from "./injection.ts";
 import {
 	COMPANIONS_ENABLED,
@@ -104,7 +104,10 @@ function memoryDecayDaily(): number {
 export const memoryEngine: MemoryEngine | null = (() => {
 	if (process.env.MEMORY_ENABLED === "false") return null;
 	try {
-		const extractor = preferenceExtractor() ?? memoryFallbackExtractor();
+		const extractor =
+			memoryExtractMode() === "off"
+				? NOOP_EXTRACTOR
+				: (preferenceExtractor() ?? memoryFallbackExtractor());
 		return createMemoryEngine({
 			dbPath: process.env.MEMORY_DB_PATH,
 			candidateFloor: memoryCandidateFloor(),
@@ -114,6 +117,7 @@ export const memoryEngine: MemoryEngine | null = (() => {
 			// 即 `MEMORY_EXTRACT=rule` 逐字节回到旧行为。
 			// 2026-11-13：模型不可用时，若 `MEMORY_EXTRACT_NOISE` 开（默认），
 			// 用带噪声过滤的规则抽取器；关掉 = 不传 = 旧行为。
+			// 2026-11-18：`off` 档显式传 no-op 抽取器，不写新记忆；不能靠不传（那会回落旧引擎继续抽）。
 			...(extractor ? { extractor } : {}),
 		});
 	} catch (error) {

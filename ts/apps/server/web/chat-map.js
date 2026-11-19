@@ -13,8 +13,10 @@
 import { branchErrorText } from "./branch.js";
 import { openConversation } from "./chat-open.js";
 import { loadChats } from "./chats-list.js";
-import { attr, esc, renderMarkdown } from "./markdown.js";
+import { esc, renderMarkdown } from "./markdown.js";
 import { request } from "./net.js";
+import { openPartnerSessions } from "./partner-sessions-ui.js";
+import { partnerIdOfConversation } from "./partner-sessions.js";
 import { state } from "./state.js";
 import { toast } from "./ui-atoms.js";
 
@@ -34,15 +36,17 @@ const ZOOM_TAU = 90;
 const ZOOM_SETTLE = 0.0015;
 const VIEWPORT_MARGIN = 700;
 const POS_KEY = "lifediary.chatmap.positions.v1";
+// 收起状态（2026-11-18）：副本收起后只留第一张问卡，整条后代不画。
+const COLLAPSE_KEY = "lifediary.chatmap.collapsed.v1";
 
 /* ── 元素 ────────────────────────────────────────────── */
 
 const shell = document.getElementById("chat-map");
 const titleEl = document.getElementById("map-title");
-const subEl = document.getElementById("map-sub");
 const backBtn = document.getElementById("map-back");
 const refreshBtn = document.getElementById("map-refresh");
 const focusBtn = document.getElementById("map-focus");
+const switchBtn = document.getElementById("map-switch");
 const zoomEl = document.getElementById("map-zoom");
 const viewport = document.getElementById("map-viewport");
 const content = document.getElementById("map-content");
@@ -67,8 +71,10 @@ const mapState = {
   cardById: new Map(),
   nodeById: new Map(),
   nodes: [],
+  visibleNodes: [],
   lanes: new Map(),
   positions: loadPositions(),
+  collapsed: loadCollapsed(),
   activeNodeId: "",
   selectedCardId: "",
   camera: { x: 0, y: 0 },
@@ -113,6 +119,23 @@ function savePositions() {
     localStorage.setItem(POS_KEY, JSON.stringify(raw));
   } catch {
     // 隐私模式 / 配额满：只丢排版，不挡画板
+  }
+}
+
+function loadCollapsed() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(COLLAPSE_KEY) || "[]");
+    return new Set(Array.isArray(raw) ? raw.filter((id) => typeof id === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function saveCollapsed() {
+  try {
+    localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...mapState.collapsed]));
+  } catch {
+    // 同 savePositions：只丢收起状态，不挡画板
   }
 }
 
@@ -179,6 +202,7 @@ function clearMap() {
   mapState.cardById.clear();
   mapState.nodeById.clear();
   mapState.nodes = [];
+  mapState.visibleNodes = [];
   mapState.lanes.clear();
   mapState.mounted.forEach((node) => node.remove());
   mapState.mounted.clear();
@@ -186,6 +210,11 @@ function clearMap() {
   mapState.edgeByCard.clear();
   cardsEl?.replaceChildren();
   edgesEl?.replaceChildren();
+  viewport?.removeAttribute("data-tip");
+  if (switchBtn) {
+    switchBtn.hidden = true;
+    switchBtn.removeAttribute("data-tip");
+  }
   hideInspector();
 }
 
@@ -211,11 +240,12 @@ async function loadMap(id) {
             : `读不到地图：HTTP ${response.status}`;
       showState(message, true);
       titleEl.textContent = "会话地图";
-      subEl.textContent = "";
       return;
     }
     mapState.data = data;
     mapState.activeNodeId = (data.nodes || []).some((node) => node.id === id) ? id : data.rootId;
+    // 打开谁的图就把谁和祖先放出来：收起状态不能把当前会话藏掉。
+    expandAncestorsOf(mapState.activeNodeId, data.nodes || []);
     buildModel();
     renderMap();
     requestAnimationFrame(() => focusActive(true));
@@ -252,6 +282,20 @@ function assignLanes(nodes) {
   return lanes;
 }
 
+/** 打开某条会话的地图时，把它自己和祖先从收起集合里放出来（否则定位不到它）。 */
+function expandAncestorsOf(nodeId, nodes) {
+  const byId = new Map((nodes || []).map((node) => [node.id, node]));
+  let current = nodeId;
+  let changed = false;
+  const seen = new Set();
+  while (current && !seen.has(current)) {
+    seen.add(current);
+    if (mapState.collapsed.delete(current)) changed = true;
+    current = byId.get(current)?.origin?.source || "";
+  }
+  if (changed) saveCollapsed();
+}
+
 function questionTextOf(turn) {
   if (turn.question.hidden) return "自动一轮（定时触发）";
   if (turn.question.text) return turn.question.text;
@@ -268,22 +312,66 @@ function answerTextOf(turn) {
 function buildModel() {
   const data = mapState.data;
   if (!data) return;
-  mapState.nodes = Array.isArray(data.nodes) ? data.nodes : [];
-  mapState.nodeById = new Map(mapState.nodes.map((node) => [node.id, node]));
-  mapState.lanes = assignLanes(mapState.nodes);
+  const nodes = Array.isArray(data.nodes) ? data.nodes : [];
+  mapState.nodes = nodes;
+  mapState.nodeById = new Map(nodes.map((node) => [node.id, node]));
+  // 已删 / 已归档的收起项不再留着（下次还在地图里出现会莫名其妙是收起的）。
+  for (const id of [...mapState.collapsed]) {
+    if (!mapState.nodeById.has(id)) mapState.collapsed.delete(id);
+  }
+
+  // 子链（只看 ChatOrigins 来源，不看 durable parent）
+  const childrenOf = new Map();
+  for (const node of nodes) {
+    const parent = node.origin?.source;
+    if (!parent || parent === node.id) continue;
+    const list = childrenOf.get(parent) || [];
+    list.push(node.id);
+    childrenOf.set(parent, list);
+  }
+
+  const rootId = data.rootId;
+  const hidden = new Set();
+  const hideSubtree = (id) => {
+    for (const childId of childrenOf.get(id) || []) {
+      if (hidden.has(childId)) continue;
+      hidden.add(childId);
+      hideSubtree(childId);
+    }
+  };
+  // 非根的空分支 / 已归档 / 已丢失：整支不画。
+  // 用户口径（2026-11-18）：删掉的、刚建还没说话的新分支都不该占画板。
+  for (const node of nodes) {
+    if (node.id === rootId) continue;
+    const empty = (node.turns || []).length === 0;
+    if (node.archived || node.missing || empty) {
+      hidden.add(node.id);
+      hideSubtree(node.id);
+    }
+  }
+  // 收起的副本：自己留第一张问卡，后代整支不画。
+  for (const id of mapState.collapsed) {
+    if (id === rootId || hidden.has(id)) continue;
+    hideSubtree(id);
+  }
+
+  const visibleNodes = nodes.filter((node) => !hidden.has(node.id));
+  mapState.visibleNodes = visibleNodes;
+  mapState.lanes = assignLanes(visibleNodes);
 
   const cards = [];
   const byId = new Map();
   const nodeCards = new Map();
 
-  for (const node of mapState.nodes) {
+  for (const node of visibleNodes) {
     const lane = mapState.lanes.get(node.id) ?? 0;
     const laneTop = ROOT_Y + lane * LANE_STEP;
+    const collapsed = node.id !== rootId && mapState.collapsed.has(node.id);
+    const turns = collapsed ? (node.turns || []).slice(0, 1) : node.turns || [];
     const list = [];
     let prevAnswer = null;
-    for (const turn of node.turns || []) {
+    for (const turn of turns) {
       const questionId = `${node.id}:t${turn.index}:q`;
-      const answerId = `${node.id}:t${turn.index}:a`;
       const question = {
         id: questionId,
         key: questionId,
@@ -299,7 +387,15 @@ function buildModel() {
         natural: { x: ROOT_X, y: laneTop },
         position: { x: ROOT_X, y: laneTop },
         pinned: false,
+        collapsible: node.id !== rootId && prevAnswer === null,
+        collapsed,
       };
+      cards.push(question);
+      byId.set(question.id, question);
+      list.push(question);
+      // 收起只留第一张问卡：答卡不进模型，点卡片看详情仍能读到完整问答。
+      if (collapsed) break;
+      const answerId = `${node.id}:t${turn.index}:a`;
       const answer = {
         id: answerId,
         key: answerId,
@@ -315,41 +411,20 @@ function buildModel() {
         natural: { x: ROOT_X, y: laneTop + CARD_H + PAIR_GAP },
         position: { x: ROOT_X, y: laneTop + CARD_H + PAIR_GAP },
         pinned: false,
+        collapsible: false,
+        collapsed: false,
       };
       question.answerCard = answer;
-      cards.push(question, answer);
-      byId.set(question.id, question);
+      cards.push(answer);
       byId.set(answer.id, answer);
-      list.push(question, answer);
+      list.push(answer);
       prevAnswer = answer;
-    }
-    if (list.length === 0) {
-      // 空分支（分叉后还没说话）：放一张占位卡，点开继续
-      const placeholder = {
-        id: `${node.id}:empty`,
-        key: `${node.id}:empty`,
-        nodeId: node.id,
-        turnIndex: -1,
-        role: "empty",
-        turn: null,
-        node,
-        laneTop,
-        parentId: null,
-        answerCard: null,
-        questionCard: null,
-        natural: { x: ROOT_X, y: laneTop },
-        position: { x: ROOT_X, y: laneTop },
-        pinned: false,
-      };
-      cards.push(placeholder);
-      byId.set(placeholder.id, placeholder);
-      list.push(placeholder);
     }
     nodeCards.set(node.id, list);
   }
 
   // 分叉卡挂回母会话那张答卡（找不到就退到母会话第一张卡，再找不到就自由漂浮）
-  for (const node of mapState.nodes) {
+  for (const node of visibleNodes) {
     const list = nodeCards.get(node.id);
     if (!list || list.length === 0) continue;
     const first = list[0];
@@ -403,62 +478,20 @@ function buildModel() {
   mapState.cardById = byId;
 }
 
-/* ── 渲染：车道标签 / 卡片 / 连线 ───────────────────── */
+/* ── 渲染：卡片 / 连线 ───────────────────────────────── */
 
-function laneLabelText(node) {
-  const prefix = node.root ? "主线" : "分支";
-  const title = node.title || "一条会话";
-  return `${prefix} · ${title}`;
-}
-
-function renderLaneLabels() {
-  for (const node of mapState.nodes) {
-    const lane = mapState.lanes.get(node.id) ?? 0;
-    const label = document.createElement("button");
-    label.type = "button";
-    label.className = "map-lane-label" + (node.id === mapState.activeNodeId ? " is-active" : "");
-    label.dataset.nodeId = node.id;
-    label.textContent = laneLabelText(node);
-    label.title = "进入这条会话";
-    label.style.transform = `translate(${ROOT_X}px, ${ROOT_Y + lane * LANE_STEP - 28}px)`;
-    label.addEventListener("click", (event) => {
-      event.stopPropagation();
-      void openConversation(node.id);
-    });
-    content.append(label);
-  }
-}
+const BRANCH_ICON =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2.4"/><circle cx="18" cy="6" r="2.4"/><circle cx="12" cy="18" r="2.4"/><path d="M8.4 6h7.2"/><path d="M7.2 8.2 10.8 15.8"/><path d="M16.8 8.2 13.2 15.8"/></svg>';
 
 function createCardEl(card) {
   const article = document.createElement("article");
-  const kindClass =
-    card.role === "question" ? "is-question" : card.role === "empty" ? "is-empty" : "is-answer";
+  const kindClass = card.role === "question" ? "is-question" : "is-answer";
   article.className = `map-card ${kindClass}`;
   article.dataset.cardId = card.id;
   article.dataset.nodeId = card.nodeId;
   article.style.transform = `translate(${Math.round(card.position.x)}px, ${Math.round(card.position.y)}px)`;
   article.style.width = `${CARD_W}px`;
   article.style.height = `${CARD_H}px`;
-
-  if (card.role === "empty") {
-    const missing = Boolean(card.node.missing);
-    article.innerHTML = `
-      <div class="map-card-head">
-        <span class="map-card-kind">${missing ? "已删除" : card.node.root ? "空会话" : "空分支"}</span>
-      </div>
-      <p class="map-card-text is-empty">${
-        missing
-          ? "这条会话在库里已经打不开。"
-          : card.node.root
-            ? "这条会话还没有回合，点开开始聊。"
-            : "分叉后还没说话，点开继续。"
-      }</p>
-      <div class="map-card-foot">
-        <span class="map-card-meta">${esc(card.node.origin?.sourceTitle || card.node.title || "副本")}</span>
-        ${missing ? "" : `<button class="map-card-act" type="button" data-act="enter" aria-label="进入会话">进入</button>`}
-      </div>`;
-    return article;
-  }
 
   const turn = card.turn;
   const isQuestion = card.role === "question";
@@ -469,22 +502,30 @@ function createCardEl(card) {
     isQuestion && turn.question.hidden ? `<span class="map-card-chip">自动</span>` : "",
     !isQuestion && tools ? `<span class="map-card-chip">工具 ${tools}</span>` : "",
     !isQuestion && !turn.answer ? `<span class="map-card-chip is-muted">未答</span>` : "",
+    card.node.archived ? `<span class="map-card-chip is-muted">已归档</span>` : "",
+    card.collapsed ? `<span class="map-card-chip is-muted">已收起</span>` : "",
   ]
     .filter(Boolean)
     .join("");
   const text = isQuestion ? questionTextOf(turn) : answerTextOf(turn);
   const textClass = !isQuestion && !turn.answer ? " is-empty" : "";
   const branchable = !isQuestion && Boolean(turn.answer?.id) && card.node.branchable;
+  const headTools = [
+    branchable
+      ? `<button class="map-tool" type="button" data-act="branch" data-tip="从这里另开一支" aria-label="从这里另开一支">${BRANCH_ICON}</button>`
+      : "",
+    card.collapsible
+      ? `<button class="map-tool is-toggle" type="button" data-act="toggle" data-tip="${card.collapsed ? "展开这支" : "收起这支"}" aria-label="${card.collapsed ? "展开这支" : "收起这支"}">${card.collapsed ? "+" : "−"}</button>`
+      : "",
+  ]
+    .filter(Boolean)
+    .join("");
   article.innerHTML = `
-    <div class="map-card-head">${chips}</div>
-    <p class="map-card-text${textClass}" title="${attr(text.slice(0, 120))}">${esc(text)}</p>
-    <div class="map-card-foot">
-      <span class="map-card-meta">${esc(card.node.title.slice(0, 18))}</span>
-      <span class="map-card-actions">
-        <button class="map-card-act" type="button" data-act="enter">进入</button>
-        ${branchable ? `<button class="map-card-act is-branch" type="button" data-act="branch">分支</button>` : ""}
-      </span>
-    </div>`;
+    <div class="map-card-head">
+      <span class="map-card-chips">${chips}</span>
+      ${headTools ? `<span class="map-card-tools">${headTools}</span>` : ""}
+    </div>
+    <p class="map-card-text${textClass}">${esc(text)}</p>`;
   return article;
 }
 
@@ -602,11 +643,9 @@ function refreshEdgesFor(cardIds) {
 
 function renderMap() {
   if (!content) return;
-  content.querySelectorAll(".map-lane-label").forEach((node) => node.remove());
   mapState.mounted.forEach((node) => node.remove());
   mapState.mounted.clear();
   cardsEl.replaceChildren();
-  renderLaneLabels();
   renderEdges();
   updateHeader();
   updateTransform();
@@ -765,12 +804,6 @@ function onCardPointerDown(event) {
   if (event.target.closest("button")) return;
   const card = mapState.cardById.get(element.dataset.cardId);
   if (!card) return;
-  if (card.role === "empty") {
-    // 空分支卡没有可拖的内容：直接进会话（会话已删则只提示，不跳空白页）
-    if (card.node.missing) toast("这条会话已经打不开");
-    else void openConversation(card.nodeId);
-    return;
-  }
   event.preventDefault();
   mapState.drag = {
     card,
@@ -863,7 +896,6 @@ function onPointerUp(event) {
 function onViewportPointerDown(event) {
   if (event.button !== 0) return;
   if (event.target.closest?.(".map-card")) return;
-  if (event.target.closest?.(".map-lane-label")) return;
   event.preventDefault();
   mapState.pan = {
     startX: event.clientX,
@@ -897,9 +929,6 @@ function selectCard(cardId) {
   for (const [id, element] of mapState.mounted) {
     element.classList.toggle("is-selected", id === cardId);
   }
-  document.querySelectorAll(".map-lane-label").forEach((label) => {
-    label.classList.toggle("is-active", label.dataset.nodeId === mapState.activeNodeId);
-  });
   renderInspector();
 }
 
@@ -922,11 +951,6 @@ function sectionHtml(label, html, extraClass = "") {
 function renderInspector() {
   const card = mapState.cardById.get(mapState.selectedCardId);
   if (!card || !inspector) return;
-  if (card.role === "empty") {
-    hideInspector();
-    void openConversation(card.nodeId);
-    return;
-  }
   inspector.hidden = false;
   const turn = card.turn;
   const meta = [
@@ -1055,15 +1079,39 @@ async function branchFromCard(card) {
 
 /* ── 顶栏 ────────────────────────────────────────────── */
 
+/** 当前地图能切到哪个会话选择器：执事 → 该执事；总管 → chief；普通对话 → 空。 */
+function mapSwitchPartnerId() {
+  const id = mapState.activeNodeId || mapState.routeId;
+  if (!id) return "";
+  const node = mapState.nodeById.get(id);
+  if (node?.chatKind === "chief") return "chief";
+  if (node?.chatKind === "partner") return partnerIdOfConversation(id);
+  return "";
+}
+
+function syncMapSwitchButton() {
+  if (!switchBtn) return;
+  const partnerId = mapSwitchPartnerId();
+  switchBtn.hidden = !partnerId;
+  if (!partnerId) return;
+  const node = mapState.nodeById.get(mapState.activeNodeId || mapState.routeId);
+  switchBtn.setAttribute(
+    "data-tip",
+    `切换另一条会话的地图${node?.title ? `（当前：${node.title}）` : ""}`,
+  );
+}
+
 function updateHeader() {
   const data = mapState.data;
   if (!data) return;
   const root = mapState.nodeById.get(data.rootId);
-  const turns = mapState.cards.filter((card) => card.role !== "empty").length / 2;
-  const branches = Math.max(0, mapState.nodes.length - 1);
+  const turns = mapState.cards.filter((card) => card.role === "question").length;
+  const branches = Math.max(0, (mapState.visibleNodes?.length ?? mapState.nodes.length) - 1);
   if (titleEl) titleEl.textContent = "会话地图";
-  if (subEl) {
-    subEl.textContent = [
+  // 会话标题 + 轮数/分支数不再常驻顶栏：鼠标停到画布上时，由全局黑底小签显示
+  // （2026-11-18 用户口径：解释性文字收进悬停）。
+  if (viewport) {
+    const tip = [
       root?.title || "一条会话",
       `${Math.round(turns)} 轮`,
       `${branches} 条分支`,
@@ -1071,10 +1119,23 @@ function updateHeader() {
     ]
       .filter(Boolean)
       .join(" · ");
+    viewport.setAttribute("data-tip", tip);
   }
+  syncMapSwitchButton();
 }
 
 /* ── 事件接线 / 路由入口 ─────────────────────────────── */
+
+/** 收起 / 展开一支副本（2026-11-18）：收起只留第一张问卡，后代整支不画。 */
+function toggleCollapsed(nodeId) {
+  const rootId = mapState.data?.rootId;
+  if (!nodeId || nodeId === rootId) return;
+  if (mapState.collapsed.has(nodeId)) mapState.collapsed.delete(nodeId);
+  else mapState.collapsed.add(nodeId);
+  saveCollapsed();
+  buildModel();
+  renderMap();
+}
 
 cardsEl?.addEventListener("pointerdown", onCardPointerDown);
 cardsEl?.addEventListener("dblclick", (event) => {
@@ -1089,8 +1150,8 @@ cardsEl?.addEventListener("click", (event) => {
   const element = button.closest(".map-card");
   const card = element ? mapState.cardById.get(element.dataset.cardId) : null;
   if (!card) return;
-  if (button.dataset.act === "enter") void openConversation(card.nodeId);
-  else if (button.dataset.act === "branch") void branchFromCard(card);
+  if (button.dataset.act === "branch") void branchFromCard(card);
+  else if (button.dataset.act === "toggle") toggleCollapsed(card.nodeId);
 });
 viewport?.addEventListener("pointerdown", onViewportPointerDown);
 viewport?.addEventListener("wheel", onWheel, { passive: false });
@@ -1107,9 +1168,16 @@ window.addEventListener("resize", () => {
 });
 
 focusBtn?.addEventListener("click", () => focusActive(false));
+switchBtn?.addEventListener("click", () => {
+  const partnerId = mapSwitchPartnerId();
+  if (!partnerId) return;
+  openPartnerSessions(partnerId, { target: "map" });
+});
 refreshBtn?.addEventListener("click", () => {
   mapState.positions.clear();
   savePositions();
+  mapState.collapsed.clear();
+  saveCollapsed();
   mapState.data = null;
   const id = mapState.routeId || mapRouteId();
   if (id) void loadMap(id);

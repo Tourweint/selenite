@@ -8,7 +8,7 @@
  */
 
 import { renderApprovalCard } from "./approval-card.js";
-import { chatProjectPayload, clearChatProject } from "./chat-project.js";
+import { freezeChatProjectLabel } from "./chat-project.js";
 import { addError, addNotice, attachUsage, fileChangeCollector, hideChatError, maybeNotify, mountFileSummary, scrollToEnd, syncCtxMeter } from "./chat-notice.js";
 import { addMessage, stampMessageClock, syncEditEntry } from "./chat-thread.js";
 import { closeChatArchiveConfirm, loadChats, renderChats } from "./chats-list.js";
@@ -27,6 +27,26 @@ import { noMotion } from "./ui-atoms.js";
 import { createToolFlow } from "./tool-flow.js";
 
 /* ── 发送 ─────────────────────────────────────────────── */
+
+/**
+ * 上报卡动作（2026-11-19 批2）：POST /api/v1/agent/escalations/:ticketId/route。
+ * action=chief → 重新唤起总管代答轮；action=user → 问题转成 ask 卡在会话里等主人答。
+ * 返回是否成功；失败时调用方把按钮恢复可点并如实报错（不留一个永远转圈的按钮）。
+ */
+async function routeEscalation(ticketId, action) {
+  try {
+    const response = await request(
+      `/api/v1/agent/escalations/${encodeURIComponent(ticketId)}/route`,
+      { method: "POST", body: JSON.stringify({ action }) },
+    );
+    if (response.ok) return true;
+    addError(response.status === 404 ? "这条上报已经不在等处理了。" : "上报路由失败，请稍后再试。");
+    return false;
+  } catch {
+    addError("上报路由失败（网络错误），请稍后再试。");
+    return false;
+  }
+}
 
 /** 发送/停止同槽（cindy SendButton）：流式时同一个按钮变成停止，必须保持可点 */
 function setSending(value) {
@@ -61,13 +81,39 @@ function syncSendEnabled() {
         state.pendingFiles.length === 0;
 }
 
-/* ── 忙时排队（扫尾批 8a：插话队列服务端化）──────────────
-   语义没变：忙时按下的 Enter 仍是"下一轮的指令"（whenBusy=followUp）。变的是落点——
-   以前先塞进浏览器内存里的本地数组、本轮结束后由前端补发（刷新即丢），
-   现在直接提交给服务端，内核写进 durable 的 inbox（2026-11-07 消息即引导批起的
-   既有能力），刷新 / 断线后话还在，按提交顺序被消费。
-   前端只是视图，不造第二份事实：排队状态以 transcript 里的条目为准。 */
+/* ── 忙时投递（2026-11-07 消息即引导；扫尾批 8a 服务端化；2026-11-19 插话统一改缺省）──
+   忙时按下的 Enter 现在默认是"插进当前轮"（whenBusy=steer，读插件卡「忙时消息」档）；
+   插件卡切"排队"时回到旧行为（whenBusy=followUp，是下一轮的指令）。两条路都是直接
+   提交给服务端，内核写进 durable 的 inbox，刷新 / 断线后话还在，按提交顺序被消费。
+   前端只是视图，不造第二份事实：插话 / 排队状态以 transcript 里的条目为准。 */
 let pendingFollowUps = 0;
+
+/**
+ * 忙时投递档（2026-11-19 插话统一 批1）：插件卡「忙时消息」（AGENT_STEER_DEFAULT）。
+ * 开（默认）= 忙时消息插进当前轮（steer）；关 = 排队（followUp，改动前口径）。
+ * flags 清单拉一次进 state.flagsCache（与设置页同源）；设置页改档会更新 flagsCache，
+ * 下次发送现读，即时生效。端点不可用 / 没这个键 → 按插话（默认值语义）。
+ */
+async function busyWhenSteerDefault() {
+  if (!state.flagsCache) {
+    try {
+      const response = await request("/api/v1/agent/flags", { cache: "no-store" });
+      if (!response.ok) throw new Error(String(response.status));
+      const data = await response.json().catch(() => ({}));
+      const list = Array.isArray(data.flags) ? data.flags : [];
+      state.flagsCache = new Map(
+        list
+          .filter((item) => item && typeof item.key === "string")
+          .map((item) => [item.key, item]),
+      );
+    } catch {
+      state.flagsCache = new Map();
+    }
+  }
+  const flag = state.flagsCache.get("AGENT_STEER_DEFAULT");
+  if (!flag) return true;
+  return (flag.effectiveValue ?? flag.value) !== "false";
+}
 
 /**
  * 忙时排队提交（2026-11-08 扫尾批 8a）。
@@ -319,6 +365,24 @@ async function send(text, images = [], files = []) {
           const card = renderApprovalCard({ ...event, conversationId: state.conversationId });
           if (card && !card.isConnected) turn.root.before(card);
           maybeNotify("有写操作需要你确认", event.tool || "", state.conversationId, "attention");
+        } else if (event.type === "escalation") {
+          // 决策上报补帧（批2）：只补卡与状态，不再起动作请求（活跃集服务端有账）。
+          applyTicketEvent({ ...event, phase: "needs_you" });
+          const card = document.createElement("div");
+          card.className = "attention escalation";
+          const label = document.createElement("p");
+          label.className = "attention-text";
+          label.textContent = `【工人上报】${event.question || "它在等一个决定。"}`;
+          card.append(label);
+          if (event.ticketId) {
+            const link = document.createElement("a");
+            link.className = "attention-link";
+            link.href = `#/tasks?ticket=${encodeURIComponent(event.ticketId)}`;
+            link.textContent = "去任务中心看";
+            card.append(link);
+          }
+          turn.root.before(card);
+          maybeNotify("工人上报了一个问题", event.question || "", state.conversationId, "attention");
         } else if (event.type === "done") {
           // 补帧拿到的 done 也算收尾：补上用时脚注，断线重连后这条仍有耗时
           attachUsage(turn.root, event.usage || { input: 0, output: 0, cacheRead: 0 }, Date.now() - turnStartMs);
@@ -339,7 +403,7 @@ async function send(text, images = [], files = []) {
       body: JSON.stringify({
         ...(state.conversationId
           ? { conversationId: state.conversationId }
-          : { chatKind: state.chatKind === "chief" ? "chief" : "worker", ...chatProjectPayload() }),
+          : { chatKind: state.chatKind === "chief" ? "chief" : "worker" }),
         // 有附件才用分段数组；纯文本仍发字符串（老形状，服务端 union 兼容）
         messages: [
           {
@@ -404,11 +468,13 @@ async function send(text, images = [], files = []) {
             state.maxSeq = event.seq;
           }
           if (event.type === "start") {
+            // 新会话才冻结归属：续话的 workdir 由 openChat 回读，不能拿当前侧栏选择顶替
+            const wasNew = !state.conversationId;
             state.conversationId = event.conversationId;
             streamConv = event.conversationId;
             localStorage.setItem(KEY_CONV, event.conversationId);
-            // 会话已落盘：cwd 定死了，「选项目」pill 收起来（2026-11-17）
-            clearChatProject();
+            // 会话已落盘：把这一刻的项目/工作区冻结成只读标签（2026-11-18）
+            if (wasNew) freezeChatProjectLabel();
             renderChats();
             // 新会话（或重启后的旧会话）要立刻出现在侧栏里——
             // 以前只靠页面加载时拉一次，新建会话要等到重载才可见，置顶/重命名都够不着
@@ -486,6 +552,66 @@ async function send(text, images = [], files = []) {
             if (card && !card.isConnected) body.before(card);
             maybeNotify("有写操作需要你确认", event.tool || "", streamConv, "attention");
             if (state.stick) scrollToEnd();
+          } else if (event.type === "escalation") {
+            // worker 决策上报（批2）：复用 attention 同款皮，两个动作按钮
+            // （总管代答 / 升级给用户）走上报路由端点；升级给主人的问题卡
+            // 走 ask_user 现有渲染（approval-card / 全局待办），不另造样式。
+            applyTicketEvent({ ...event, phase: "needs_you" });
+            const card = document.createElement("div");
+            card.className = "attention escalation";
+            const label = document.createElement("p");
+            label.className = "attention-text";
+            const urgencyLabel = event.urgency === "high" ? "（紧急）" : "";
+            label.textContent = `【工人上报${urgencyLabel}】${event.question || "它在等一个决定。"}`;
+            card.append(label);
+            if (event.context) {
+              const contextLine = document.createElement("p");
+              contextLine.className = "attention-text";
+              contextLine.style.cssText = "opacity:.75;font-size:.92em";
+              contextLine.textContent = `背景：${event.context}`;
+              card.append(contextLine);
+            }
+            if (Array.isArray(event.options) && event.options.length > 0) {
+              const optionsLine = document.createElement("p");
+              optionsLine.className = "attention-text";
+              optionsLine.style.cssText = "opacity:.75;font-size:.92em";
+              optionsLine.textContent = `候选：${event.options.join(" / ")}`;
+              card.append(optionsLine);
+            }
+            const actions = document.createElement("div");
+            actions.style.cssText = "display:flex;gap:8px;margin-top:6px";
+            const chiefButton = document.createElement("button");
+            chiefButton.type = "button";
+            chiefButton.className = "attention-link";
+            chiefButton.textContent = "总管代答";
+            chiefButton.addEventListener("click", async () => {
+              chiefButton.disabled = true;
+              const okRoute = await routeEscalation(event.ticketId, "chief");
+              if (okRoute) chiefButton.textContent = "已叫总管来答";
+              else chiefButton.disabled = false;
+            });
+            const userButton = document.createElement("button");
+            userButton.type = "button";
+            userButton.className = "attention-link";
+            userButton.textContent = "升级给我";
+            userButton.addEventListener("click", async () => {
+              userButton.disabled = true;
+              const okRoute = await routeEscalation(event.ticketId, "user");
+              if (okRoute) userButton.textContent = "已升级，等你答";
+              else userButton.disabled = false;
+            });
+            actions.append(chiefButton, userButton);
+            card.append(actions);
+            if (event.ticketId) {
+              const link = document.createElement("a");
+              link.className = "attention-link";
+              link.href = `#/tasks?ticket=${encodeURIComponent(event.ticketId)}`;
+              link.textContent = "去任务中心看";
+              card.append(link);
+            }
+            body.before(card);
+            maybeNotify("工人上报了一个问题", event.question || "", streamConv, "attention");
+            if (state.stick) scrollToEnd();
           } else if (event.type === "done") {
             sawDone = true;
             if (event.finishReason === "error" && !answer) {
@@ -558,4 +684,4 @@ async function send(text, images = [], files = []) {
   }
 }
 
-export { followUp, pendingFollowUps, send, setSending, syncSendEnabled };
+export { busyWhenSteerDefault, followUp, pendingFollowUps, send, setSending, syncSendEnabled };

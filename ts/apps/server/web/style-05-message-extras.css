@@ -43,6 +43,10 @@
 }
 .msg-file-meta { font-size: 11px; color: var(--text-3); }
 
+/* 插话徽标（2026-11-19 插话统一）：忙时 steer 的消息回读后带 [插话] 前缀，
+   渲染时剥掉前缀换成这枚徽标；皮用任务中心的 tk-badge，不另造样式。 */
+.msg-steer { display: flex; justify-content: flex-end; }
+
 .msg-user-actions {
   display: flex; justify-content: flex-end; gap: 6px;
   min-height: 20px;

@@ -235,17 +235,28 @@
 /* ── 今日回顾卡（右列入口） ─────────────────────────── */
 .tk2-recap {
   display: block;
-  padding: 13px 15px;
-  border: 1px solid var(--card-border); border-radius: var(--r-lg);
-  background: var(--card);
+  padding: 14px 16px 15px;
+  border: 1px solid color-mix(in srgb, var(--accent) 12%, transparent);
+  border-radius: var(--r-lg);
+  background-color: var(--card);
+  background-image: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--accent) 7%, transparent),
+    transparent 58%
+  );
   color: var(--text); text-decoration: none;
   box-shadow: var(--card-glow);
-  transition: background-color .18s ease, transform .15s ease;
+  transition: background-color .18s ease, transform .15s ease, border-color .18s ease;
 }
-.tk2-recap:hover { transform: translateY(-1px); background: var(--card-high); }
+.tk2-recap:hover {
+  transform: translateY(-1px);
+  background-color: var(--card-high);
+  border-color: color-mix(in srgb, var(--accent) 26%, transparent);
+}
 .tk2-recap:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 1px; }
+.tk2-recap-top { display: flex; align-items: center; gap: 8px; }
 .tk2-recap h3 {
-  margin: 0; display: flex; align-items: center; gap: 8px;
+  flex: 1; margin: 0; display: flex; align-items: center; gap: 8px;
   font-size: 13px; font-weight: 600; color: var(--text);
 }
 .tk2-recap h3 svg {
@@ -253,114 +264,203 @@
   stroke: var(--accent); fill: none; stroke-width: 1.8;
   stroke-linecap: round; stroke-linejoin: round;
 }
-.tk2-recap p { margin: 6px 0 0; font-size: 11.5px; color: var(--text-3); }
-.tk2-recap-nums { display: flex; gap: 16px; margin-top: 9px; }
+.tk2-recap-go {
+  font-size: 16px; line-height: 1; color: var(--text-3);
+  transition: transform .18s ease, color .18s ease;
+}
+.tk2-recap:hover .tk2-recap-go { color: var(--accent); transform: translateX(2px); }
+.tk2-recap-day { margin: 6px 0 0; font-size: 11.5px; color: var(--text-3); }
+.tk2-recap-nums {
+  display: flex;
+  margin-top: 11px; padding-top: 11px;
+  border-top: 1px solid var(--divider);
+}
+.tk2-recap-nums > div { flex: 1; min-width: 0; }
+.tk2-recap-nums > div + div {
+  padding-left: 14px; margin-left: 14px;
+  border-left: 1px solid var(--divider);
+}
 .tk2-recap-nums b {
   display: block;
-  font-size: 16px; font-weight: 700; line-height: 1.2; color: var(--text);
+  font-size: 17px; font-weight: 700; line-height: 1.2; color: var(--text);
   font-variant-numeric: tabular-nums;
 }
 .tk2-recap-nums span { font-size: 10.5px; color: var(--text-3); }
 
 /* ── 今日回顾（独立视图 #/review） ─────────────────────
- * 版式依据原型 11：摘要数字 + 按上午/下午/晚上分组的时间线。
- * 时间线只用 ticket.updated_at；「改了 N 个文件」没有数据源，不做。 */
-.rv-wrap { max-width: 760px; margin: 0 auto; }
+ * 2026-11-18 重做：日报版式 = 日期头 + 当日概览 + 上午/下午/晚上分组的流水。
+ * 数据仍是 GET /tickets 按 updated_at 分日现算；流水条目就是 task 单本身，
+ * 没有 changedPaths 之类字段就不编「改了 N 个文件」。 */
+.rv-wrap { max-width: 820px; margin: 0 auto; }
 
-.rv-pager {
-  display: flex; align-items: center; gap: 4px;
-  width: fit-content; margin-bottom: 16px; padding: 3px;
-  border: 1px solid var(--card-border); border-radius: var(--r-md);
-  background: var(--card);
+/* 日期头：大日期 + 周几/今天昨天 + 回到今天 + 前后一天 */
+.rv-daynav {
+  display: flex; align-items: flex-end; justify-content: space-between; gap: 16px;
+  margin-bottom: 16px;
 }
-.rv-pager button {
-  padding: 5px 12px;
-  border: none; border-radius: var(--r-sm);
-  background: none; color: var(--text-2);
-  font-size: 12px; cursor: pointer;
-  transition: background-color .18s ease, color .18s ease;
-}
-.rv-pager button:hover:not([disabled]):not(.cur) { background: var(--card-high); }
-.rv-pager button.cur { background: var(--accent); color: var(--on-accent); font-weight: 600; }
-.rv-pager button[disabled] { color: var(--text-3); opacity: .5; cursor: default; }
-.rv-day-tag {
-  padding: 0 6px;
-  font-size: 11.5px; color: var(--text-3);
+.rv-day-copy h2 {
+  margin: 0;
+  font-size: 25px; font-weight: 700; line-height: 1.15; color: var(--text);
   font-variant-numeric: tabular-nums;
 }
-
-.rv-sum {
-  display: flex; flex-wrap: wrap; gap: 22px;
-  padding: 2px 4px 16px; margin-bottom: 18px;
-  border-bottom: 1px solid var(--divider);
+.rv-day-copy p { margin: 5px 0 0; font-size: 12px; color: var(--text-3); }
+.rv-day-actions { display: flex; align-items: center; gap: 8px; flex: none; }
+.rv-day-btns { display: flex; gap: 4px; }
+.rv-today-btn, .rv-day-btn {
+  border: 1px solid var(--card-border); border-radius: var(--r-md);
+  background: var(--card); color: var(--text-2);
+  transition: background-color .18s ease, color .18s ease, border-color .18s ease;
 }
-.rv-n b {
+.rv-today-btn { padding: 6px 12px; font-size: 11.5px; cursor: pointer; }
+.rv-today-btn:hover { background: var(--card-high); color: var(--text); }
+.rv-day-btn {
+  width: 31px; height: 31px;
+  display: grid; place-items: center;
+  cursor: pointer;
+}
+.rv-day-btn:hover:not([disabled]) { background: var(--card-high); color: var(--text); }
+.rv-day-btn[disabled] { opacity: .38; cursor: default; }
+.rv-day-btn svg {
+  width: 15px; height: 15px;
+  fill: none; stroke: currentColor; stroke-width: 1.8;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+.rv-today-btn:focus-visible, .rv-day-btn:focus-visible {
+  outline: 2px solid var(--accent-line); outline-offset: 1px;
+}
+
+/* 当日概览：左边一个主数字（派了多少单），右边三个结果数字 */
+.rv-sum { margin-bottom: 22px; }
+.rv-sum:empty { display: none; }
+.rv-hero {
+  display: flex; align-items: center; gap: 24px;
+  padding: 18px 22px;
+  border: 1px solid color-mix(in srgb, var(--accent) 12%, transparent);
+  border-radius: var(--r-lg);
+  background-color: var(--card);
+  background-image: linear-gradient(
+    120deg,
+    color-mix(in srgb, var(--accent) 7%, transparent),
+    transparent 58%
+  );
+  box-shadow: var(--card-glow);
+}
+.rv-lead { display: flex; align-items: baseline; gap: 7px; flex: none; }
+.rv-lead-label { font-size: 12.5px; color: var(--text-2); }
+.rv-lead b {
+  font-size: 40px; font-weight: 700; line-height: .95; color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+.rv-lead-unit { font-size: 12.5px; color: var(--text-3); }
+.rv-split { display: flex; flex: 1; min-width: 0; }
+.rv-split > div { flex: 1; min-width: 0; padding-left: 20px; border-left: 1px solid var(--divider); }
+.rv-split b {
   display: block;
-  font-size: 20px; font-weight: 700; line-height: 1.2; color: var(--text);
+  font-size: 19px; font-weight: 700; line-height: 1.2; color: var(--text);
   font-variant-numeric: tabular-nums;
 }
-.rv-n span { font-size: 11px; color: var(--text-3); }
-.rv-n.ask b { color: var(--warn); }
-.rv-n.done b { color: var(--ok); }
-.rv-n.fail b { color: var(--c-error); }
+.rv-split span { font-size: 11px; color: var(--text-3); }
+.rv-split .done b { color: var(--ok); }
+.rv-split .ask b { color: var(--warn); }
+.rv-split .fail b { color: var(--c-error); }
+.rv-split .zero b { color: var(--text-3); font-weight: 600; }
 
-.rv-tl { position: relative; padding-left: 52px; }
-.rv-tl::before {
-  content: ""; position: absolute; left: 41px; top: 6px; bottom: 6px;
-  width: 1px; background: var(--divider);
+/* 流水：按上午 / 下午 / 晚上分组，每组一张卡、行间一条发丝线 */
+.rv-tl { display: flex; flex-direction: column; gap: 18px; }
+.rv-grp-h {
+  display: flex; align-items: center; gap: 10px;
+  margin: 0 2px 8px;
+  font-size: 12px; font-weight: 600; color: var(--text-2);
 }
-.rv-grp {
-  position: relative; left: -52px; width: 32px;
-  margin: 14px 0 10px;
-  text-align: right;
-  font-size: 11px; letter-spacing: .2em; color: var(--text-3);
+.rv-grp-ln { flex: 1; height: 1px; background: var(--divider); opacity: .6; }
+.rv-rows {
+  border: 1px solid var(--card-border); border-radius: var(--r-lg);
+  background: var(--card);
+  box-shadow: var(--card-glow);
+  overflow: hidden;
 }
-.rv-entry { position: relative; margin-bottom: 9px; }
-.rv-dot {
-  position: absolute; left: -15px; top: 15px;
-  width: 9px; height: 9px; z-index: 1;
-  border: 2px solid var(--text-3); border-radius: var(--r-full);
-  background: var(--bg);
+.rv-row {
+  display: grid; grid-template-columns: 42px 22px minmax(0, 1fr) 14px;
+  align-items: center; column-gap: 12px;
+  width: 100%; padding: 11px 14px;
+  border: none; background: none;
+  color: var(--text); text-align: left;
+  font: inherit;
 }
-.rv-entry[data-kind="done"] .rv-dot { border-color: var(--ok); background: var(--ok); }
-.rv-entry[data-kind="run"] .rv-dot { border-color: var(--c-primary); animation: breathe 2.4s ease-in-out infinite; }
-.rv-entry[data-kind="ask"] .rv-dot { border-color: var(--warn); }
-.rv-entry[data-kind="fail"] .rv-dot { border-color: var(--c-error); }
+.rv-row + .rv-row { border-top: 1px solid var(--divider); }
+button.rv-row { cursor: pointer; transition: background-color .15s ease; }
+button.rv-row:hover { background: var(--card-high); }
+button.rv-row:focus-visible { outline: 2px solid var(--accent-line); outline-offset: -2px; }
 .rv-tm {
-  position: absolute; left: -56px; top: 14px; width: 32px;
-  text-align: right;
-  font-size: 10.5px; color: var(--text-3);
+  font-size: 11px; color: var(--text-3); text-align: right;
   font-variant-numeric: tabular-nums;
 }
-.rv-card {
-  padding: 10px 14px;
-  border: 1px solid var(--card-border); border-radius: var(--r-md);
-  background: var(--card);
-  transition: background-color .18s ease, transform .15s ease;
-}
-.rv-card.link { cursor: pointer; }
-.rv-card.link:hover { transform: translateY(-1px); background: var(--card-high); }
-.rv-card.link:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 1px; }
-.rv-card.dim { opacity: .72; }
-.rv-card.dim:hover { opacity: 1; }
-.rv-r1 { display: flex; align-items: center; gap: 9px; }
-.rv-r1 h3 {
-  flex: 1; min-width: 0; margin: 0;
+.rv-bd { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.rv-bd b {
   font-size: 13px; font-weight: 600; color: var(--text);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.rv-ic {
-  width: 18px; height: 18px; flex: none;
-  display: grid; place-items: center;
-  border-radius: var(--r-full);
-  font-size: 10px; font-weight: 700;
+.rv-bd em {
+  font-style: normal;
+  font-size: 11.5px; color: var(--text-3);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.rv-ic.done { background: color-mix(in srgb, var(--ok) 16%, var(--card)); color: var(--ok); }
+.rv-go {
+  font-size: 15px; line-height: 1; color: var(--text-3); opacity: .5;
+  transition: opacity .15s ease, transform .15s ease, color .15s ease;
+}
+button.rv-row:hover .rv-go,
+button.rv-row:focus-visible .rv-go { opacity: 1; color: var(--accent); transform: translateX(2px); }
+.rv-row.static { cursor: default; }
+.rv-ic {
+  width: 22px; height: 22px;
+  display: grid; place-items: center;
+  border-radius: 8px;
+  font-size: 10px; font-weight: 700;
+  flex: none;
+}
+.rv-ic.done { background: color-mix(in srgb, var(--ok) 14%, var(--card)); color: var(--ok); }
 .rv-ic.ask { background: var(--c-tertiary-container); color: var(--warn); }
-.rv-ic.fail { background: color-mix(in srgb, var(--c-error) 16%, var(--card)); color: var(--c-error); }
-.rv-r2 { margin: 4px 0 0; font-size: 12px; line-height: 1.5; color: var(--text-2); }
-.rv-empty { margin: 8px 0; font-size: 12.5px; color: var(--text-3); }
-.rv-foot { margin-top: 30px; text-align: center; font-size: 11.5px; color: var(--text-3); }
+.rv-ic.fail { background: color-mix(in srgb, var(--c-error) 14%, var(--card)); color: var(--c-error); }
+
+/* 空态：没有单的日子也长得像一页纸，而不是一片白 */
+.rv-empty {
+  display: flex; flex-direction: column; align-items: center;
+  padding: 56px 20px 48px;
+  border: 1px dashed var(--divider); border-radius: var(--r-lg);
+  background: color-mix(in srgb, var(--card) 45%, transparent);
+  text-align: center;
+}
+.rv-empty-ic {
+  width: 46px; height: 46px; margin-bottom: 14px;
+  display: grid; place-items: center;
+  border-radius: 14px;
+  background: var(--accent-soft); color: var(--accent);
+}
+.rv-empty-ic svg {
+  width: 22px; height: 22px;
+  fill: none; stroke: currentColor; stroke-width: 1.6;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+.rv-empty h3 { margin: 0; font-size: 14px; font-weight: 600; color: var(--text-2); }
+.rv-empty p { margin: 6px 0 0; font-size: 12px; color: var(--text-3); }
+.rv-empty-go {
+  margin-top: 16px; padding: 6px 14px;
+  border: 1px solid var(--card-border); border-radius: var(--r-md);
+  background: var(--card); color: var(--text-2);
+  font-size: 12px; text-decoration: none;
+  transition: background-color .18s ease, color .18s ease;
+}
+.rv-empty-go:hover { background: var(--card-high); color: var(--text); }
+
+@media (max-width: 640px) {
+  .rv-daynav { align-items: center; flex-wrap: wrap; }
+  .rv-day-copy h2 { font-size: 21px; }
+  .rv-hero { flex-direction: column; align-items: stretch; gap: 16px; padding: 16px 18px; }
+  .rv-split > div:first-child { padding-left: 0; border-left: none; }
+  .rv-row { grid-template-columns: 36px 22px minmax(0, 1fr); column-gap: 10px; padding: 10px 12px; }
+  .rv-go { display: none; }
+}
 
 /* 宽屏双列（E2）：左 7fr = 等你回话 + 在跑；右 5fr = 打手 + 今日回顾卡。
    本体顺序写在上面，媒体查询排最后（历史教训：先写媒体查询会被后面的本体规则盖掉）。 */

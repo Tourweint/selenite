@@ -35,6 +35,10 @@ const REGISTERED_ORDER = [
 	"delegate",
 	"propose_project",
 	"ask_user",
+	// respond_escalation（2026-11-19 批2 决策上报链）：插在 ask_user 之后；
+	// 默认按需（tool-pool 名单），常驻形态才进前缀——前缀资产变动由验收方在
+	// docs/变更记录/ 交代（工具描述原文见 escalation.ts 的 RESPOND_ESCALATION_DESCRIPTION）。
+	"respond_escalation",
 	"report_progress",
 	"partner_skill_write",
 	"partner_manage",
@@ -45,6 +49,11 @@ const REGISTERED_ORDER = [
 	// tool_search（2026-11-16 工具裁剪 C 段新增，2026-11-17 补钉清单）：deferred 工具按需
 	// 加载的搜索入口，注册在末位——不动既有顺序，既有前缀不受影响；新工具本身换前缀
 	// 已在 docs/变更记录/2026-11-16-工具裁剪（delegate 手册与工具勾选）.md 交代。
+	// save_reminder_advice（2026-11-19 批4 提醒沉淀）：插在 tool_search 之前（tools.ts
+	// 末段、tool_search 块之前注册）；默认按需（tool-pool 名单），常驻形态才进前缀——
+	// 前缀资产变动由验收方在 docs/变更记录/ 交代（描述原文见 reminder-advice.ts 的
+	// SAVE_REMINDER_ADVICE_DESCRIPTION）。
+	"save_reminder_advice",
 	"tool_search",
 ];
 
@@ -76,6 +85,8 @@ function fullTools() {
 		// persona 写入（2026-11-17 persona_write 批）：条件注册，快照要覆盖它。
 		personaWrite: async () => ({ ok: true }),
 		relay: { deliver: async () => ({ ok: false, error: "stub" }) },
+		// 提醒沉淀落盘（2026-11-19 批4）：条件注册，给个不落盘替身把顺序快照覆盖进来。
+		reminderAdviceSave: () => ({ ok: true, saved: 0 }),
 		progressReport: true,
 		partners: true,
 		groups: true,

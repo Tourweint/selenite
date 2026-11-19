@@ -21,15 +21,18 @@ import (
 	"strings"
 )
 
-// 四套主题，与 style-01-tokens.css 的 html[data-theme] 一一对应。
+// 五套主题，与 style-01-tokens.css 的 html[data-theme] 一一对应。
+// 2026-11-19 补 celadon（青瓷，2026-11-14 页面侧加的第五套）：此前壳不认识它，
+// SetTheme 存不了、原生弹出层（popovers.go）也取不到色，只能落 paper 兜底。
 const (
-	themePaper  = "paper"
-	themeWhite  = "white"
-	themeIndigo = "indigo"
-	themeBlack  = "black"
+	themePaper   = "paper"
+	themeWhite   = "white"
+	themeIndigo  = "indigo"
+	themeBlack   = "black"
+	themeCeladon = "celadon"
 )
 
-// themeKnown 判断一个字符串是不是四套之一；大小写与空白都容忍，
+// themeKnown 判断一个字符串是不是五套之一；大小写与空白都容忍，
 // 因为这个文件谁都可能写（页面、手改、旧版本）。
 func themeKnown(name string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(name)) {
@@ -41,6 +44,8 @@ func themeKnown(name string) (string, bool) {
 		return themeIndigo, true
 	case themeBlack:
 		return themeBlack, true
+	case themeCeladon:
+		return themeCeladon, true
 	}
 	return "", false
 }
@@ -116,6 +121,9 @@ func saveTheme(name string) error {
 func splashBackground(name string) string {
 	if themeIsDark(name) {
 		return "#12141d"
+	}
+	if name == themeCeladon {
+		return "#f1f5f1"
 	}
 	return "#fdf9f2"
 }

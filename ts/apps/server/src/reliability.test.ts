@@ -1,13 +1,27 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { bashTimeoutSeconds, buildHarnessSettings } from "./reliability.ts";
+import { bashTimeoutSeconds, buildHarnessSettings, steeringMode } from "./reliability.ts";
 
 /** 只看 stream / afterFailedRun 两个旋钮：压缩自 2026-11-14 起总是带着（默认 70%），
- *  这几条测试只关心"不设就不传"，所以把 compaction 剥掉再比。 */
+ *  steeringMode 自 2026-11-19 插话统一起也总是带着（缺省 "all"）。
+ *  这几条测试只关心"不设就不传"，所以把这两个总是存在的键剥掉再比。 */
 function knobsOnly(env: Record<string, string | undefined>) {
-	const { compaction, ...rest } = buildHarnessSettings(env);
+	const { compaction, steeringMode: _steeringMode, ...rest } = buildHarnessSettings(env);
 	return rest;
 }
+
+test("steeringMode：缺省 all（多条插话全生效）；one-at-a-time 回单条（回滚）", () => {
+	assert.equal(steeringMode({}), "all");
+	assert.equal(buildHarnessSettings({}).steeringMode, "all");
+	for (const bad of ["", "bogus", "ALL"]) {
+		assert.equal(steeringMode({ AGENT_STEERING_MODE: bad }), "all");
+	}
+	assert.equal(steeringMode({ AGENT_STEERING_MODE: "one-at-a-time" }), "one-at-a-time");
+	assert.equal(
+		buildHarnessSettings({ AGENT_STEERING_MODE: "one-at-a-time" }).steeringMode,
+		"one-at-a-time",
+	);
+});
 
 test("settings：env 全空时只有压缩默认（stream / afterFailedRun 不传）", () => {
 	assert.deepEqual(knobsOnly({}), {});
