@@ -16,16 +16,11 @@ import { dispatchTask, taskDirName, type DispatchOptions } from "./dispatch.ts";
 import { MAX_PARALLEL_TASKS, TASK_ISOLATION } from "./config.ts";
 import { LeaseManager } from "./lease.ts";
 import {
-  changedDeclaredPaths,
   collectTaskChanges,
   isGitProject,
   mergeTaskChanges,
   prepareTaskWorktree,
   removeWorktree,
-  snapshotDeclaredPaths,
-  snapshotFileFor,
-  writePathSnapshot,
-  type SnapshotResult,
   type TaskWorktree,
 } from "./isolation.ts";
 import { coveredByAny, normalizeProjectPath } from "./paths.ts";
@@ -40,7 +35,7 @@ import {
   collectArtifactContents,
   filterArtifacts,
   formatArtifactContents,
-} from "./review.ts";
+} from "./artifacts.ts";
 
 /**
  * 依赖感知并行调度（2026-11-03 方案 §5.2 / §5.4）。
@@ -81,11 +76,6 @@ export interface ScheduleOptions {
   maxParallel?: number;
   /** 崩溃恢复：按 seq 接着用上次保留下来的 worktree 半成品。 */
   resumeWorktrees?: Map<number, string>;
-  /**
-   * 崩溃恢复：按 seq 读回上次执行前落下的快照。
-   * 有快照的任务续跑时直接拿它做「执行前」状态，不再重新拍一张。
-   */
-  resumeSnapshots?: Map<number, SnapshotResult>;
 }
 
 export interface ScheduleResult {
@@ -169,7 +159,7 @@ export async function runScheduledTasks(options: ScheduleOptions): Promise<Sched
             ...(options.onEscalation ? { onEscalation: options.onEscalation } : {}),
             gitIsolated,
             resumeWorktreePath: options.resumeWorktrees?.get(seq),
-            resumeSnapshot: options.resumeSnapshots?.get(seq),
+
           },
           [...runs],
         ).then((result) => ({ seq, result })),
@@ -262,8 +252,6 @@ interface ExecuteOptions {
   dispatchExtra?: DispatchOptions;
   /** 崩溃恢复：指定就复用这个副本，而不是重新检出。 */
   resumeWorktreePath?: string;
-  /** 崩溃恢复：读回的执行前快照。 */
-  resumeSnapshot?: SnapshotResult;
 }
 
 /**
@@ -285,8 +273,6 @@ export async function runSingleTask(options: {
   onEscalation?: (escalation: WorkerEscalation) => void;
   /** 崩溃恢复：接着用上次保留下来的副本。 */
   resumeWorktreePath?: string;
-  /** 崩溃恢复：读回的执行前快照。 */
-  resumeSnapshot?: SnapshotResult;
 }): Promise<TaskExecutorResult> {
   const ticketDir = options.store.ticketDir(options.ticket.id);
   return executeTask(
@@ -304,9 +290,6 @@ export async function runSingleTask(options: {
       gitIsolated: TASK_ISOLATION === "worktree" && isGitProject(options.project),
       ...(options.resumeWorktreePath
         ? { resumeWorktreePath: options.resumeWorktreePath }
-        : {}),
-      ...(options.resumeSnapshot
-        ? { resumeSnapshot: options.resumeSnapshot }
         : {}),
       ...(options.resumeAnswer !== undefined
         ? { dispatchExtra: { resumeAnswer: options.resumeAnswer } }
@@ -328,7 +311,6 @@ async function executeTask(
     : [];
   let lease: LeaseManager | null = null;
   let worktree: TaskWorktree | null = null;
-  let snapshotBefore: SnapshotResult | null = null;
 
   try {
     if (project && writes.length > 0) {
@@ -373,22 +355,6 @@ async function executeTask(
     }
 
     const deps = buildDependencies(task, completedRuns, project?.rootPath);
-    // 验收以项目工作区为准：执行前先给声明路径拍快照。
-    // 续跑时优先用上次落盘的那张（崩溃前发生的写入也算这个任务做的），
-    // 没有才重新拍一张；新拍的快照立即落盘，进程被杀后还能读回来。
-    if (project && writes.length > 0) {
-      snapshotBefore = options.resumeSnapshot ?? snapshotDeclaredPaths(project.rootPath, writes);
-      if (!options.resumeSnapshot) {
-        writePathSnapshot(snapshotFileFor(path.join(ticketDir, dirName)), {
-          ticketId: ticket.id,
-          seq,
-          slug: task.slug,
-          createdAt: new Date().toISOString(),
-          coarse: snapshotBefore.coarse,
-          entries: snapshotBefore.entries,
-        });
-      }
-    }
     const run = await runner(ticket, task, seq, ticketDir, signal, deps, {
       ...options.dispatchExtra,
       employeeKind,
@@ -427,17 +393,6 @@ async function executeTask(
       removeWorktree(project.rootPath, worktree.path);
       clearInflightWorktree(ticketDir, seq);
       worktree = null;
-    }
-    // 验收以项目工作区实际内容为准：这里只记「声明路径里真正变了」的，
-    // 越权/合并失败已经由上面的 failRun 兜住。
-    if (project && snapshotBefore) {
-      // 第二次快照拿第一次当 previous：没动过的文件只比 mtime+size，不重读内容。
-      const after = snapshotDeclaredPaths(project.rootPath, writes, {
-        previous: snapshotBefore.entries,
-      });
-      run.changedPaths = changedDeclaredPaths(snapshotBefore.entries, after.entries);
-      run.snapshotBefore = snapshotBefore.entries;
-      run.snapshotCoarse = snapshotBefore.coarse || after.coarse;
     }
     // 失败副本刻意保留：负责人能进去看现场；下一条同 seq 任务开工时会先清掉。
 

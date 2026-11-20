@@ -7,7 +7,7 @@
  * app.js 文末，各模块顶层只做声明、常量与事件监听注册。
  */
 
-import { attr, esc } from "./markdown.js";
+import { esc } from "./markdown.js";
 
 /* ── 任务中心（2026-11-04） ────────────────────────────────
  * 只读看板。数据：GET /api/v1/tickets（列表）与 GET /api/v1/tickets/:id（详情）。
@@ -50,29 +50,12 @@ const SUBTASK_STATUS = {
   dropped: ["已移除", "idle"],
 };
 
-const VERDICT_LABEL = {
-  pass: ["通过", "done"],
-  fail: ["未通过", "fail"],
-  blocked: ["受阻", "ask"],
-};
-
 /**
- * 验收阶段名（2026-11-10 批 18 §一）：服务端存的是 process/report/artifacts/llm
- * 这样的内部枚举，界面上说人话（面板七原则③）。
+ * 任务阶段条（2026-11-10 批 18 §1.1；2026-11-19 删掉验收层，去掉「验收」段）：
+ * 受理 → 规划 → 执行 → 完成。只用 ticket.status 推导；终态失败 / 中止 / 作废
+ * **不猜**走到哪一步（返回 -1，只把各阶段画成暗色，真实状态由状态片说）。
  */
-const REVIEW_STAGE_LABEL = {
-  process: "过程",
-  report: "汇报",
-  artifacts: "产物",
-  llm: "模型",
-};
-
-/**
- * 任务阶段条（2026-11-10 批 18 §1.1）：受理 → 规划 → 执行 → 验收 → 完成。
- * 只用 ticket.status 推导，不新增字段；终态失败 / 中止 / 作废**不猜**走到哪一步
- * （返回 -1，只把五个阶段画成暗色，真实状态由状态片说）。
- */
-const TICKET_STAGES = ["受理", "规划", "执行", "验收", "完成"];
+const TICKET_STAGES = ["受理", "规划", "执行", "完成"];
 const TICKET_STAGE_OF_STATUS = {
   received: 0,
   planning: 1,
@@ -80,8 +63,7 @@ const TICKET_STAGE_OF_STATUS = {
   dispatching: 2,
   idle: 2,
   needs_you: 2,
-  reviewing: 3,
-  done: 4,
+  done: 3,
 };
 
 function ticketStageIndex(status) {
@@ -89,33 +71,15 @@ function ticketStageIndex(status) {
   return Number.isInteger(index) ? index : -1;
 }
 
-function ticketStagesHtml(status, repairRound) {
+function ticketStagesHtml(status) {
   const index = ticketStageIndex(status);
   const nodes = TICKET_STAGES.map((label, i) => {
     const stateOf = i < index ? "done" : i === index ? "now" : "todo";
     return `<li class="td-stage-node" data-state="${stateOf}">${esc(label)}</li>`;
   }).join("");
-  const round = Number(repairRound) > 0 ? Number(repairRound) : 0;
   return `<div class="td-stages-wrap">
       <ol class="td-stages"${index >= 0 ? ` data-stage="${index}"` : ' data-stage="none"'}>${nodes}</ol>
-      ${round > 0 ? `<span class="td-round" title="这张单已经自动返工过的轮次">返工 ${round} 轮</span>` : ""}
     </div>`;
-}
-
-/** 过程关口（2026-11-10 批 19 §四）：阶段条下方的小徽章；没有 gates 就不渲染。 */
-function ticketGatesHtml(gates) {
-  const list = (Array.isArray(gates) ? gates : []).filter(
-    (gate) => gate && typeof gate.name === "string" && gate.name.trim(),
-  );
-  if (!list.length) return "";
-  return `<div class="td-gates" aria-label="过程关口">${list
-    .map(
-      (gate) =>
-        `<span class="td-gate" data-state="${gate.passed === true ? "pass" : "fail"}"${
-          gate.note ? ` title="${attr(gate.note)}"` : ""
-        }>${esc(gate.name)}</span>`,
-    )
-    .join("")}</div>`;
 }
 
 /** 雇员对外只说「执行者」，类型作为后缀（L3 补齐 qoder 国际/国内、原生、总管） */
@@ -236,4 +200,4 @@ function stalenessHint(status, iso) {
   return Date.now() - stamp > STALE_TICKET_MS ? STALE_TICKET_HINT : "";
 }
 
-export { BADGE_POLL_MS, EMPLOYEE_LABEL, PHASE_STATUS, REVIEW_STAGE_LABEL, STALE_TICKET_HINT, STALE_TICKET_MS, STATE_ICON, STATUS_ORDER, SUBTASK_STATUS, TASKS_POLL_MS, TASK_BADGE_STATUSES, TASK_COLUMNS, TASK_HITTERS, TASK_STATUS, TICKET_STAGES, TICKET_STAGE_OF_STATUS, VERDICT_LABEL, employeeText, relativeTime, stalenessHint, statusError, ticketGatesHtml, ticketStageIndex, ticketStagesHtml };
+export { BADGE_POLL_MS, EMPLOYEE_LABEL, PHASE_STATUS, STALE_TICKET_HINT, STALE_TICKET_MS, STATE_ICON, STATUS_ORDER, SUBTASK_STATUS, TASKS_POLL_MS, TASK_BADGE_STATUSES, TASK_COLUMNS, TASK_HITTERS, TASK_STATUS, TICKET_STAGES, TICKET_STAGE_OF_STATUS, employeeText, relativeTime, stalenessHint, statusError, ticketStageIndex, ticketStagesHtml };

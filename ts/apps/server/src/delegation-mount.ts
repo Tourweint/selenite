@@ -4,7 +4,6 @@
  * 2026-11-13 从 delegation-api.ts 的 L644–L1052 整段切出；正文原文搬运，未改一行实现。
  */
 
-import { judgeEnabled } from "../../../packages/chancellor/src/judge.ts";
 import { listManagers } from "../../../packages/chancellor/src/manager/registry.ts";
 import { Store } from "../../../packages/chancellor/src/store.ts";
 import { Ticket } from "../../../packages/chancellor/src/types.ts";
@@ -15,11 +14,11 @@ import { appendTaskEvent, getTaskConversation, setTaskBaselineProvider, submitTa
 import { Hono } from "hono";
 import fs from "node:fs";
 import path from "node:path";
-import { acceptanceChecksEnabled, buildTicketGates, delegationCancelEnabled, fanoutGroupEnabled, ticketGatesEnabled } from "./delegation-gates.ts";
-import { CANCEL_TERMINAL_STATUSES, projectAcceptanceChecks, projectTicketBgJobs, ticketBgJobsEnabled } from "./delegation-checks.ts";
+import { delegationCancelEnabled, fanoutGroupEnabled } from "./delegation-gates.ts";
+import { CANCEL_TERMINAL_STATUSES, projectTicketBgJobs, ticketBgJobsEnabled } from "./delegation-checks.ts";
 import { applyCancelProjection, deadLetterStore, messagesOf, runSourceOfTicket } from "./delegation-jobs.ts";
 import type { TicketLocation, TicketSummary } from "./delegation-jobs.ts";
-import { chiefNamesLoader, conversationIdOf, conversationTitlesLoader, externalChatIdsLoader, judgeCallsOfTicket, summarizeFanoutGroup, summarizeTickets } from "./delegation-summary.ts";
+import { chiefNamesLoader, conversationIdOf, conversationTitlesLoader, externalChatIdsLoader, summarizeFanoutGroup, summarizeTickets } from "./delegation-summary.ts";
 import type { DelegationApiOptions } from "./delegation-summary.ts";
 import { cancelTicketAction, defaultRetryRuntime, forwardWorkerMessageAction, internalConversationId, retryTicketAction } from "./delegation-actions.ts";
 
@@ -174,24 +173,9 @@ export function mountDelegationApi(app: Hono, opts: DelegationApiOptions = {}): 
 			}
 			const projected = applyCancelProjection(ticketView, canceled);
 			const runSource = runSourceOfTicket(found.ticket.id);
-			// 过程关口（批 19 §四）：只读 reviews / judge.json / repairRound 三处落盘事实；
-			// 开关关着就不出现这个键（前端零影响）。
-			const reviews = found.store.reviewsOf(found.ticket.id);
-			const gates = ticketGatesEnabled()
-				? buildTicketGates({
-						reviews,
-						judgeCalls: judgeCallsOfTicket(found.store, found.ticket.id),
-						repairRound: found.ticket.repairRound,
-						judgeOn: judgeEnabled(),
-					})
-				: null;
 			const groupId = fanoutGroupEnabled()
 				? String(found.ticket.idempotencyKey ?? "").trim() || null
 				: null;
-			// 验收项逐项投影（批 23 §一）：只认 steps 里 `验：` 开头的项；没有 = 不带键。
-			const acceptanceChecks = acceptanceChecksEnabled()
-				? projectAcceptanceChecks(found.ticket.steps, reviews)
-				: [];
 			// 后台任务投影（批 23 §二）：只列该单时间窗口内的摘要，日志正文另走 bg-jobs 端点。
 			const bgJobs = ticketBgJobsEnabled()
 				? (() => {
@@ -214,10 +198,6 @@ export function mountDelegationApi(app: Hono, opts: DelegationApiOptions = {}): 
 				...(runSource ? { runSource } : {}),
 				// 多副本归并（批 19 §五）：同 requestId 的单带同一个 groupId。
 				...(groupId ? { groupId } : {}),
-				// 过程关口（批 19 §四）：过了哪些关，纯投影。
-				...(gates ? { gates } : {}),
-				// 验收项逐项状态（批 23 §一）：开关关 / 没有 `验：` 项时**不出现**。
-				...(acceptanceChecks.length > 0 ? { acceptanceChecks } : {}),
 				// 后台任务摘要（批 23 §二）：开关关 / 窗口内没有时**不出现**（正文在 /bg-jobs/:id/log）。
 				...(bgJobs.length > 0 ? { bgJobs } : {}),
 				cancelEnabled: delegationCancelEnabled(),
@@ -229,15 +209,11 @@ export function mountDelegationApi(app: Hono, opts: DelegationApiOptions = {}): 
 				messages: messagesOf(found.ticket.id),
 				// 路径只给相对项目信息，不把 workRoot 绝对路径下发给客户端。
 				project: found.ticket.options.project ?? null,
-				// 计划附件与返工轮次（2026-11-09 §2.3 / §1.5）：可选字段，不出现 = 前端零影响。
+				// 计划附件（2026-11-09 §2.3）：可选字段，不出现 = 前端零影响。
 				...(Array.isArray(found.ticket.steps) && found.ticket.steps.length > 0
 					? { steps: found.ticket.steps }
 					: {}),
-				...(typeof found.ticket.repairRound === "number" && found.ticket.repairRound > 0
-					? { repairRound: found.ticket.repairRound }
-					: {}),
 				tasks: found.store.tasksOf(found.ticket.id),
-				reviews,
 				children: found.store.childrenOf(found.ticket.id).map((child) => ({
 					id: child.id,
 					status: child.status,

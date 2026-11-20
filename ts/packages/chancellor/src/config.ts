@@ -162,8 +162,17 @@ export function resolveProfile(
   kind: WorkerKind,
   profile?: EmployeeProfile,
 ): EmployeeProfile {
-  // native / mcp / phone 不吃 profile：别把空 model / 固定权限塞进 ticket 快照。
-  if (kind === "native" || kind === "mcp" || kind === "phone") return {};
+  // mcp / phone 是部署形态，不吃 profile：别把空 model / 固定权限塞进 ticket 快照。
+  if (kind === "mcp" || kind === "phone") return {};
+  // native 只吃 model / modelRoute（2026-11-19 模型分工）：过去这里直接返回 {}，
+  // 把 executor 设置里填的工人模型丢掉了；留空仍然不覆盖 worker 的 env 缺省。
+  if (kind === "native") {
+    const model = profile?.model !== undefined ? profile.model.trim() : "";
+    const out: EmployeeProfile = {};
+    if (model) out.model = model;
+    if (profile?.modelRoute && model) out.modelRoute = profile.modelRoute;
+    return out;
+  }
   const fallback = defaultProfileFor(kind);
   const model =
     profile?.model !== undefined ? profile.model.trim() : fallback.model ?? "";
@@ -199,6 +208,14 @@ export function profileEnv(
     if (profile.model !== undefined) env.CHANCELLOR_MODEL = profile.model;
   } else if (kind === "qoder-cn") {
     if (profile.model !== undefined) env.CHANCELLOR_QODER_CN_MODEL = profile.model;
+  } else if (kind === "native") {
+    // 2026-11-19 模型分工：分管宰相子进程里再派 native 子单，模型路由只能走 env 继承。
+    if (profile.model !== undefined) env.CHANCELLOR_LLM_MODEL = profile.model;
+    if (profile.modelRoute) {
+      env.CHANCELLOR_LLM_BASE_URL = profile.modelRoute.baseUrl;
+      const key = process.env[profile.modelRoute.keyEnv]?.trim();
+      if (key) env.CHANCELLOR_LLM_API_KEY = key;
+    }
   }
   return env;
 }
@@ -217,16 +234,6 @@ export const PLAN_TIMEOUT_MS = readEnvInt("CHANCELLOR_PLAN_TIMEOUT_MS", 180_000)
 
 /** 单个 worker 超时，默认 10 分钟。 */
 export const WORKER_TIMEOUT_MS = readEnvInt("CHANCELLOR_WORKER_TIMEOUT_MS", 10 * 60_000);
-
-/** 验收超时。 */
-export const REVIEW_TIMEOUT_MS = readEnvInt("CHANCELLOR_REVIEW_TIMEOUT_MS", 180_000);
-
-/**
- * 手机单按汇报验收（2026-11-04 批次八）：默认 true，跳过项目文件对比，
- * 交给 LLM 读 REPORT / result.md 定夺。false 时恢复旧行为
- * （无快照 blocked、0 变更 fail）。只控 review 这一处，不回滚拆单时的 writes 置空。
- */
-export const REVIEW_TRUST_REPORT = readBool(process.env.REVIEW_TRUST_REPORT, true);
 
 /**
  * 下游提示里注入「上游已验收落盘的产物路径清单」（2026-11-08 扫尾批 8e）。
@@ -266,15 +273,6 @@ export const TASK_ISOLATION: "worktree" | "direct" =
 
 /** 租约心跳间隔。 */
 export const LEASE_HEARTBEAT_MS = readEnvInt("CHANCELLOR_LEASE_HEARTBEAT_MS", 30_000);
-
-/**
- * 目录指纹的粗判阈值（2026-11-04）：一个 `dir/**` 下的文件数超过它时，
- * 不再读内容算 sha1，只用 mtime+size 比对，并在验收 warnings 里明说。
- */
-export const SNAPSHOT_COARSE_FILE_LIMIT = readEnvInt(
-  "CHANCELLOR_SNAPSHOT_COARSE_FILE_LIMIT",
-  2000,
-);
 
 /** 心跳停多久算持有者已死；默认两个心跳周期 + 宽限。 */
 export const LEASE_STALE_MS = readEnvInt("CHANCELLOR_LEASE_STALE_MS", 5 * 60_000);

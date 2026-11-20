@@ -69,3 +69,41 @@ test("childEnvWithModel：settings.model 非空覆盖 CHANCELLOR_LLM_MODEL；留
   assert.equal(childEnvWithModel(undefined, base), base);
   assert.equal(childEnvWithModel({}, base), base);
 });
+
+test("childEnvWithModel：模型路由带 baseUrl + key（2026-11-19 模型分工）", () => {
+  const base = { LLM_MODEL: "base-model", PROVIDER_KEY: "sk-test", OTHER: "1" };
+  assert.deepEqual(
+    childEnvWithModel(
+      {
+        model: "work-model",
+        modelRoute: { baseUrl: "https://provider.example/v1", keyEnv: "PROVIDER_KEY" },
+      },
+      base,
+    ),
+    {
+      LLM_MODEL: "base-model",
+      PROVIDER_KEY: "sk-test",
+      OTHER: "1",
+      CHANCELLOR_LLM_MODEL: "work-model",
+      CHANCELLOR_LLM_BASE_URL: "https://provider.example/v1",
+      CHANCELLOR_LLM_API_KEY: "sk-test",
+    },
+  );
+  // keyEnv 没有值：只带地址，不伪造 key（worker-main 自己回落 LLM_API_KEY）。
+  assert.deepEqual(
+    childEnvWithModel(
+      {
+        model: "work-model",
+        modelRoute: { baseUrl: "https://provider.example/v1", keyEnv: "MISSING_KEY" },
+      },
+      base,
+    ),
+    {
+      LLM_MODEL: "base-model",
+      PROVIDER_KEY: "sk-test",
+      OTHER: "1",
+      CHANCELLOR_LLM_MODEL: "work-model",
+      CHANCELLOR_LLM_BASE_URL: "https://provider.example/v1",
+    },
+  );
+});

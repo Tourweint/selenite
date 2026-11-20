@@ -94,12 +94,6 @@ export function startDelegation(
 				// 租约没拿到：任务没启动，不算完成；把等待对象带给前端。
 				emitProgress("running", event.message ?? current, event.waitingOn);
 				break;
-			case "reviewing":
-				emitProgress("reviewing", "核对");
-				break;
-			case "goal":
-				emitProgress("reviewing", "核对结论");
-				break;
 			// worker 决策上报（2026-11-19 批2）：原样发到派活方会话出上报卡；
 			// 路由（唤醒总管 / 升级用户 / 限流）由 escalation.ts 的全局订阅接手，
 			// 这里只管"事件到会话"这一跳。
@@ -374,9 +368,6 @@ export function startDelegation(
 
 	const projectField = kick.project ? { project: kick.project } : {};
 	const idempotency = kick.requestId ? { idempotencyKey: kick.requestId } : {};
-	// 质检方式（2026-11-19 批2）：新派带进 ChancellorRequest（只影响新单）。
-	// 懒读一次（executor-config 有 mtime 缓存）；launch() 里的 executor 读不受影响。
-	const qaForNewTickets = executorForDelegation().qa;
 	// 授权重验（批 19 §六）：续跑前把"受理时的审批档位"和"现在的档位"对一遍。
 	// **不阻断**：更严 / 读不到都只记一行 warning；档位变了不是撤销授权。
 	if (kick.resumeTicketId && authorityRecheckEnabled() && runtime.authorityAtAccept) {
@@ -413,7 +404,6 @@ export function startDelegation(
 					// 工作目录（2026-11-17）：只有新派带；续跑沿用原单快照。
 					...(kick.workDir ? { workDir: kick.workDir } : {}),
 					// 质检方式（2026-11-19 批2）：只有新派带；续跑沿用现状（内部请求）。
-					...(qaForNewTickets === "qa-worker" ? { qaWorker: true } : {}),
 					// 来源对话只透传（2026-11-05 跨仓契约）：chancellor 落 ticket.json，
 					// 子单从父单继承；这里给内部会话 id 的字符串形式，接口层再换对外 uuid。
 					originConversationId: String(kick.conversationId),
@@ -442,7 +432,6 @@ export function startDelegation(
 				// 回退重派也是一张新单：工作目录照传。
 				...(kick.workDir ? { workDir: kick.workDir } : {}),
 				// 质检方式（批2）：回退重派同为新单，照带。
-				...(qaForNewTickets === "qa-worker" ? { qaWorker: true } : {}),
 				originConversationId: String(kick.conversationId),
 			});
 		}

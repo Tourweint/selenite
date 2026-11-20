@@ -1,4 +1,5 @@
-import type { Review, TaskRun } from "./types.ts";
+import { classifyRun, runReason } from "./stage.ts";
+import type { TaskRun } from "./types.ts";
 
 /** 一行汇报里不允许出现换行和绝对路径。 */
 export function sanitizeLine(text: string, max = 120): string {
@@ -9,7 +10,7 @@ export function sanitizeLine(text: string, max = 120): string {
 
 export interface LineInput {
   total: number;
-  reviews: Review[];
+  runs: TaskRun[];
 }
 
 /** 截断并去掉句尾标点，避免和模板自带的句号叠成「。。」。 */
@@ -18,31 +19,30 @@ function clean(text: string, max: number): string {
 }
 
 export function renderResultLine(input: LineInput): string {
-  const failed = input.reviews.filter((review) => review.verdict !== "pass");
-  const passed = input.reviews.length - failed.length;
+  const ok = input.runs.filter((run) => {
+    const stage = classifyRun(run);
+    return stage === "ready" || stage === "dropped";
+  });
+  const stuck = input.runs.filter((run) => {
+    const stage = classifyRun(run);
+    return stage !== "ready" && stage !== "dropped";
+  });
 
-  if (failed.length === 0 && input.reviews.length === input.total && input.total > 0) {
-    const summary = input.reviews
-      .map((review) => clean(review.reason, 80))
+  if (stuck.length === 0) {
+    const summary = ok
+      .map((run) => clean(runReason(run), 80))
       .filter(Boolean)
       .join("；");
-    return `✓ ${passed}/${input.total} 过。${summary ? `${summary}。` : "全部完成。"}`;
+    return `✓ ${ok.length}/${input.total} 过。${summary ? `${summary}。` : "全部完成。"}`;
   }
 
-  const stuck = failed
+  const detail = stuck
     .slice(0, 3)
-    .map(
-      (review) =>
-        `[${String(review.seq).padStart(2, "0")}-${review.slug}]：${clean(review.reason, 80)}`,
-    )
+    .map((run) => `${runTag(run)}：${clean(runReason(run), 80)}`)
     .join("；");
-  // 只有「核对器没给出结论」这种 blocked 才用 ⚠ 提醒人看；worker 自己卡住仍按原来的 ✗。
-  const hasHardFail = failed.some((review) => review.verdict === "fail");
-  const hasCheckerAnomaly = failed.some(
-    (review) => review.verdict === "blocked" && review.stage === "llm",
-  );
-  const mark = passed > 0 || (!hasHardFail && hasCheckerAnomaly) ? "⚠" : "✗";
-  return `${mark} ${passed}/${input.total} 过。卡在 ${stuck || "未知原因"}。`;
+  // 有部分完成就用 ⚠ 提醒人看；全没完成按硬失败 ✗。
+  const mark = ok.length > 0 ? "⚠" : "✗";
+  return `${mark} ${ok.length}/${input.total} 过。卡在 ${detail || "未知原因"}。`;
 }
 
 function runTag(run: TaskRun): string {
@@ -75,7 +75,7 @@ export function renderAttentionLine(runs: TaskRun[]): string {
   return `⚠ 需要你：${collapseQuestion(first.question)}${extra}`;
 }
 
-/** waiting 是「干完一轮，等下一个触发」，不验收也不核对。 */
+/** waiting 是「干完一轮，等下一个触发」。 */
 export function renderIdleLine(runs: TaskRun[]): string {
   const waiting = runs.filter((run) => run.report?.status === "waiting");
   const detail = waiting
@@ -107,32 +107,6 @@ export function renderDryLine(titles: string[]): string {
 
 export function renderAbortedLine(completed: number): string {
   return `已停止。已完成 ${completed} 个，其余中断。`;
-}
-
-export function renderGoalFailureLine(reason: string): string {
-  return `✗ 各任务都过了，但整体没达到你要的结果：${clean(reason, 160)}。`;
-}
-
-export function renderGoalInconclusiveLine(ticketId: string): string {
-  return `⚠ 各任务都过了，但整体核对没做成（核对器输出异常）。活可能干完了，看一眼：runs/${ticketId}`;
-}
-
-/**
- * 裁判改判（2026-11-10 批 14）：验收说没过，裁判自己查完说达成。
- * 必须带"已记警告"——这是**推翻验收**，人要能回查（judge.json 里有证据）。
- */
-export function renderJudgeDoneLine(reason: string): string {
-  return `✓ 验收没过，但裁判查过后认定已达成：${clean(reason, 160)}（已记警告，可回查 judge.json）`;
-}
-
-/** 裁判判 blocked：缺信息 / 缺授权，只有人能推进。 */
-export function renderJudgeBlockedLine(reason: string): string {
-  return `⚠ 验收没过，裁判也卡住了：${clean(reason, 160)}`;
-}
-
-/** 裁判判 wait：在等外部条件，不是活没干完。 */
-export function renderJudgeWaitLine(reason: string): string {
-  return `⏸ 验收没过，裁判说在等外部条件：${clean(reason, 160)}`;
 }
 
 export function renderErrorLine(ticketId: string, error: string): string {

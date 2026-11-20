@@ -96,18 +96,29 @@ export function abortNativeWorker(ticketId: string): void {
 }
 
 /**
- * native 的模型覆盖（2026-11-16 通用 worker 配置统一 批1）：
+ * native 的模型覆盖（2026-11-16 通用 worker 配置统一 批1；2026-11-19 加模型路由）：
  * 建单快照 `settings.model` 非空时，给 worker 子进程带 `CHANCELLOR_LLM_MODEL`，
- * worker-main 优先读它（其后才是 LLM_MODEL / 默认）。留空 = 不覆盖，回落启动 env——
- * 与"执行器设置里 native 模型框留空"是同一条语义。纯函数，单测直接喂。
+ * worker-main 优先读它（其后才是 LLM_MODEL / 默认）。留空 = 不覆盖，回落启动 env。
+ *
+ * `settings.modelRoute`（2026-11-19 模型分工）存在时再带 baseUrl + key：
+ * 宿主已按已连接供应商解析好，key 从 base env 的 `keyEnv` 变量现取——
+ * 只有变量名进 ticket 快照，密钥值不落盘。纯函数，单测直接喂。
  */
 export function childEnvWithModel(
   settings: EmployeeTask["settings"],
   base: NodeJS.ProcessEnv,
 ): NodeJS.ProcessEnv {
   const model = settings?.model?.trim();
-  if (!model) return base;
-  return { ...base, CHANCELLOR_LLM_MODEL: model };
+  const route = settings?.modelRoute;
+  if (!model && !route) return base;
+  const env: NodeJS.ProcessEnv = { ...base };
+  if (model) env.CHANCELLOR_LLM_MODEL = model;
+  if (route) {
+    env.CHANCELLOR_LLM_BASE_URL = route.baseUrl;
+    const key = base[route.keyEnv]?.trim();
+    if (key) env.CHANCELLOR_LLM_API_KEY = key;
+  }
+  return env;
 }
 
 /**

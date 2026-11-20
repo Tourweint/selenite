@@ -11,7 +11,6 @@ import { runChancellor } from "../../../packages/chancellor/src/index.ts";
 // 因此这里只做函数内懒加载，不建立模块级依赖（依赖方向纪律）。
 import type { ResolvedChat } from "./agent.ts";
 // 证据裁判（2026-11-10 批 14）：本机受理的远程单同样带裁判。
-import { withDelegationJudge } from "./delegation-judge.ts";
 import {
 	autoRequestId,
 	DelegationReceipts,
@@ -403,8 +402,6 @@ function phaseOfTicket(ticket: Ticket | null, receiptOutcome: string): Delegatio
 		case "planned":
 		case "dispatching":
 			return "running";
-		case "reviewing":
-			return "reviewing";
 		case "done":
 			return "done";
 		case "needs_you":
@@ -485,7 +482,7 @@ export function createMatrixChannels(): MatrixChannels {
 					run: (request, options) =>
 						runChancellor(
 							{ ...request, workRoot: chancellorWorkRoot() },
-							withDelegationJudge(options),
+							options,
 						),
 					// 锚点会话里也发事件（本机任务中心可见）；不写锚点汇报——
 					// 汇报经 status 轮询回发起端（方案 §四阶段二）。

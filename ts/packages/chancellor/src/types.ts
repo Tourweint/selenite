@@ -3,7 +3,6 @@ export type TicketStatus =
   | "planning"
   | "planned"
   | "dispatching"
-  | "reviewing"
   | "done"
   | "needs_you"
   | "idle"
@@ -17,7 +16,6 @@ export type TicketOutcomeStatus = "done" | "needs_you" | "failed" | "idle" | "ab
 export type TicketStage =
   | "person/answer"
   | "person/blocked"
-  | "review"
   | "idle"
   | "failed"
   | "done"
@@ -56,21 +54,6 @@ export interface WorkerEscalation {
   urgency: "low" | "normal" | "high";
 }
 
-export type Verdict = "pass" | "fail" | "blocked";
-
-/**
- * 一个声明路径的指纹（2026-11-04）：`size + mtimeMs` 先筛，疑似变化才算 sha1。
- * 目录过大退化到粗判时没有 `hash`，只剩元数据。
- */
-export interface FileFingerprint {
-  size: number;
-  mtimeMs: number;
-  hash?: string;
-}
-
-/** 执行前的声明路径快照；key 是相对项目根的 posix 路径，缺失即「不存在」。 */
-export type PathSnapshot = Record<string, FileFingerprint>;
-
 /**
  * 干活的是谁：原生 pi-durable 实例、外部 CLI（qoder / CodeBuddy / Claude Code /
  * Codex / OpenCode）、MCP 服务器、手机，或分管宰相。
@@ -95,13 +78,19 @@ export type WorkerKind = Exclude<EmployeeKind, "manager">;
 export type EmployeePermission = "read" | "edit" | "full";
 
 /**
- * 一次派单的雇员参数（2026-11-16 多 CLI 适配）。
+ * 一次派单的雇员参数（2026-11-16 多 CLI 适配；2026-11-19 加 native 模型路由）。
  * 模型留空 = 不传参数，跟随 CLI 自己的配置；权限缺省 = full。
  * CodeBuddy / Qoder 只读 model，权限固定全权。
  */
 export interface EmployeeProfile {
   model?: string;
   permission?: EmployeePermission;
+  /**
+   * 本机 native 工人的模型路由（2026-11-19 模型分工）：
+   * 从宿主已连接供应商解析出的 baseUrl + key 环境变量名；外部 CLI 不读。
+   * `keyEnv` 只是变量名，密钥值仍只在宿主 env 里，spawn 子进程时取。
+   */
+  modelRoute?: { baseUrl: string; keyEnv: string };
 }
 
 /** 雇员的产物形态；规划器据此写 done_when，验收仍只认任务目录。 */
@@ -222,11 +211,6 @@ export interface Ticket {
    * 只落 ticket.json 并进规划器提示词，不参与验收判定。
    */
   steps?: string[];
-  /**
-   * 返工轮次（2026-11-09 §1.2）：这张单已经自动修过第几轮（0/缺省 = 没返工）。
-   * 与生命周期无关，只记事实；宿主与看板据此展示。
-   */
-  repairRound?: number;
 }
 
 export interface Task {
@@ -316,17 +300,11 @@ export interface TaskRun {
   stderrTail: string;
   /** 实际执行的工作目录（worktree 或项目根）；老数据没有。 */
   workDir?: string;
-  /** 执行后项目工作区里实际变更的声明路径（相对项目根，posix）；验收以此为准。 */
+  /** 执行后 worktree 里实际变更的路径（相对项目根，posix）；供下游依赖任务参考。 */
   changedPaths?: string[];
-  /** 执行前快照；从磁盘续跑时由 snapshot-before.json 读回，供严格前后对比。 */
-  snapshotBefore?: PathSnapshot;
-  /** 执行前/后快照是否因目录过大退化成了 mtime+size 粗判。 */
-  snapshotCoarse?: boolean;
   /** 隔离/合并阶段判失败的原因；有值即视为 processOk=false。 */
   failure?: string | null;
 }
-
-export type ReviewStage = "process" | "report" | "artifacts" | "llm";
 
 /** 分管宰相这一轮的结论；落在 plan.json 的 manager 块里。 */
 export interface ManagerRunRecord {
@@ -341,17 +319,6 @@ export interface ManagerRunRecord {
   /** 复用时的历史消息数。 */
   history: number | null;
   error: string | null;
-}
-
-export interface Review {
-  ticket_id: string;
-  seq: number;
-  slug: string;
-  verdict: Verdict;
-  reason: string;
-  stage: ReviewStage;
-  /** 不影响判定、但需要让人看到的校对提示（比如 artifacts 对不上）。 */
-  warnings?: string[];
 }
 
 export interface PlanAttempt {
@@ -427,12 +394,6 @@ export interface ChancellorRequest {
    * 只影响新单；不传 = 项目主文件夹；gitIsolated 时仍以 worktree 为准。
    */
   workDir?: string;
-  /**
-   * 质检方式（2026-11-19 批2，派活设置「质检方式」透传）：true = worker 自报完成后
-   * 不走内部一次请求验收，改派一单质检 worker（templates/qa.md，走既有派单器）。
-   * 只影响新单；false / 不传 = 内部请求（现状）。续跑沿用现状。
-   */
-  qaWorker?: boolean;
 }
 
 export type ChancellorEventType =
@@ -442,8 +403,6 @@ export type ChancellorEventType =
   | "task-start"
   | "task-done"
   | "task-waiting"
-  | "reviewing"
-  | "goal"
   | "finished"
   /** worker 跑动中的决策上报（2026-11-19 批2）：escalation 专用类型。 */
   | "escalation";
@@ -490,113 +449,11 @@ export interface TicketResult {
   attention?: WorkerAttention;
   /** 只有 --dry 时有值：拆出但尚未执行的任务。 */
   plannedTasks?: PlannedTaskInfo[];
-  /**
-   * 返工轮次（2026-11-09 §1.5）：这张单最终是第几轮修复的结论（0/缺省 = 没返工）。
-   * 宿主只透出，不改判定。
-   */
-  repairRound?: number;
-}
-
-/** 达成 / 有结论但没达成 / 核对器没给出结论。 */
-export type GoalOutcome =
-  | { satisfied: true; reason: string }
-  | { satisfied: false; reason: string }
-  | { satisfied: false; inconclusive: true; reason: string };
-
-export interface GoalCheckResult {
-  satisfied: boolean;
-  reason: string;
-  aborted: boolean;
-  /** true 表示核对器输出异常、没给出结论，不是「没达成」。 */
-  inconclusive: boolean;
-}
-
-/** 裁判四态（2026-11-10 批 14 §2.3）：与 opencode /goal 对齐后裁剪。 */
-export type JudgeVerdictKind = "done" | "continue" | "blocked" | "wait";
-
-/**
- * 裁判看到的任务材料（2026-11-10 批 14 §2.2）。
- *
- * **执行者自报不是证据**：`reportSummary` 只作为"它说它做了"的参考，
- * 裁判必须自己用工具查到东西才能给 done。`changedPaths` 由验收快照给出，
- * 是落盘事实（`changedDetected=false` 表示老数据没检测）。
- */
-export interface JudgeTaskMaterial {
-  seq: number;
-  slug: string;
-  title: string;
-  doneWhen: string;
-  writes: string[];
-  changedPaths: string[];
-  changedDetected: boolean;
-  reportStatus: string | null;
-  reportSummary: string | null;
-  reportError: string | null;
-  employee: string;
-}
-
-/** 交给宿主侧裁判（read-only 子会话）的全部输入。 */
-export interface JudgeInput {
-  ticketId: string;
-  /** 用户原话；宿主侧用 `<untrusted_objective>` 包裹后再进提示词。 */
-  prompt: string;
-  /** 计划附件（可核对动作序列）；没有就是空数组。 */
-  steps: string[];
-  /** 读哪里：项目根（合并后的状态）；无项目时是任务单目录。 */
-  cwd: string;
-  /** 验收为什么判没通过（review 原话 / 目标核对原话）。 */
-  failureReason: string;
-  tasks: JudgeTaskMaterial[];
-  reviews: Array<{ seq: number; slug: string; verdict: string; reason: string }>;
-  /** 一次裁判最多几次工具调用（宿主结构性执行，chancellor 只透传）。 */
-  maxTools: number;
-}
-
-/**
- * 裁判结论。`ok=false` 表示裁判没给出可用结论（调用失败 / 输出坏了 / 被中止）——
- * 这时**不改结局**，按原有失败路径走。裁判是补强，不是新的单点故障。
- */
-export interface JudgeOutcome {
-  ok: boolean;
-  verdict?: JudgeVerdictKind;
-  evidence: string[];
-  reason: string;
-  toolsUsed: number;
-  aborted?: boolean;
-  error?: string;
-}
-
-export type JudgeFn = (input: JudgeInput, signal?: AbortSignal) => Promise<JudgeOutcome>;
-
-/** judge.json 里的一次裁判记录（事实源：人可复核为什么改判）。 */
-export interface JudgeCallRecord {
-  round: number;
-  /** 实际生效的四态；`error` = 没给出结论（也记一笔，便于看裁判是否在报错）。 */
-  verdict: JudgeVerdictKind | "error";
-  /** 裁判原始四态（降级 / 连续同因改判前）。 */
-  raw_verdict: JudgeVerdictKind | "error";
-  reason: string;
-  evidence: string[];
-  tools_used: number;
-  warnings: string[];
-  error?: string;
-  created_at: string;
-}
-
-export interface JudgeFile {
-  ticket: string;
-  calls: JudgeCallRecord[];
 }
 
 export interface ChancellorOptions {
   onEvent?: (event: ChancellorEvent) => void;
   signal?: AbortSignal;
-  /**
-   * 证据裁判（2026-11-10 批 14）：验收判 fail 时由宿主起一个 read-only 子会话，
-   * 自己读工作区后给四态结论。不传 = 没有裁判（与旧行为一致）；传了也要
-   * `DELEGATION_JUDGE=true` 才会被调用。chancellor 不 import 宿主，只用这个缝。
-   */
-  judge?: JudgeFn;
 }
 
 export type EventSink = (event: ChancellorEvent) => void;

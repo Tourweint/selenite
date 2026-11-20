@@ -1,6 +1,4 @@
 import type {
-  GoalCheckResult,
-  Review,
   TaskRun,
   Ticket,
   TicketOutcomeStatus,
@@ -50,18 +48,53 @@ export function classifyRun(run: TaskRun): RunStage {
   }
 }
 
-export type BeforeReviewDecision =
+/** 任务结果的一句话原因（汇报行 / 任务中心共用；2026-11-19 起是唯一来源）。 */
+export function runReason(run: TaskRun): string {
+  if (run.aborted) return "已停止";
+  if (run.timedOut) return "worker 超时被杀";
+  if (!run.processOk) return run.processError ?? "worker 进程失败";
+  if (run.exitCode !== 0) {
+    const detail = run.stderrTail ? `；stderr 尾部：${tail(run.stderrTail, 200)}` : "";
+    return `worker 退出码 ${run.exitCode === null ? "null" : run.exitCode}${detail}`;
+  }
+  if (!run.reportExists) return "REPORT.md 缺失（退出码 0 也不算完成）";
+  const report = run.report;
+  if (!report) return `REPORT.md 契约无法解析（${run.reportError ?? "未知"}）`;
+  switch (report.status) {
+    case "blocked":
+      return report.attention
+        ? `需要你（${report.attention.kind}）：${report.attention.question}`
+        : report.summary || "worker 报告 blocked";
+    case "failed":
+      return report.summary || "worker 报告 failed";
+    case "progress":
+      return `只报了进度，没有最终结论：${report.summary}`;
+    case "waiting":
+      return `waiting：${report.summary || "等下一个触发"}`;
+    case "dropped":
+      return `无需处理：${report.summary || "worker 判断这活不需要做"}`;
+    case "ready":
+      return report.summary || "完成";
+  }
+}
+
+function tail(text: string, max: number): string {
+  return text.length <= max ? text : text.slice(-max);
+}
+
+export type RunOutcomeDecision =
   | { kind: "aborted" }
   | { kind: "needs_you"; stage: "person/answer" | "person/blocked"; runs: TaskRun[] }
   | { kind: "failed"; runs: TaskRun[] }
   | { kind: "idle"; runs: TaskRun[] }
-  | { kind: "review"; ready: TaskRun[]; dropped: TaskRun[] };
+  | { kind: "done"; runs: TaskRun[] };
 
 /**
- * 验收前的分流。硬失败排在「等人」前面：一个真失败不能被另一个待回答的问题盖住。
- * 只有整单没有硬失败时，才按 person/answer -> person/blocked -> idle 的顺序看。
+ * 任务终态分流（2026-11-19 删掉验收层后）：只认执行事实，不再有审批/返工/裁判。
+ * 硬失败排在「等人」前面：一个真失败不能被另一个待回答的问题盖住。
+ * ready / dropped 都是 done（dropped = worker 判断这活不需要做）。
  */
-export function decideBeforeReview(runs: TaskRun[]): BeforeReviewDecision {
+export function decideOutcome(runs: TaskRun[]): RunOutcomeDecision {
   const groups = new Map<RunStage, TaskRun[]>();
   for (const run of runs) {
     const stage = classifyRun(run);
@@ -89,29 +122,7 @@ export function decideBeforeReview(runs: TaskRun[]): BeforeReviewDecision {
   const idle = of("idle");
   if (idle.length > 0) return { kind: "idle", runs: idle };
 
-  return { kind: "review", ready: of("ready"), dropped: of("dropped") };
-}
-
-/** 全是 dropped 时没有可验收的活，也不该跑整体目标核对。 */
-export function needsGoalCheck(runs: TaskRun[]): boolean {
-  return runs.some((run) => classifyRun(run) === "ready");
-}
-
-export function decideAfterReview(
-  reviews: Review[],
-  goal: GoalCheckResult | null,
-): { status: TicketOutcomeStatus; stage: TicketStage } {
-  // 真失败优先；核对器没结论只在没有硬失败时才算「等人」。
-  if (reviews.some((review) => review.verdict === "fail")) {
-    return { status: "failed", stage: "failed" };
-  }
-  if (reviews.some((review) => review.verdict === "blocked")) {
-    return { status: "needs_you", stage: "person/blocked" };
-  }
-  if (goal === null) return { status: "done", stage: "done" };
-  if (goal.inconclusive) return { status: "needs_you", stage: "person/blocked" };
-  if (!goal.satisfied) return { status: "failed", stage: "failed" };
-  return { status: "done", stage: "done" };
+  return { kind: "done", runs: [...of("ready"), ...of("dropped")] };
 }
 
 export interface ManagerDecision {

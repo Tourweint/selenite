@@ -6,7 +6,6 @@ import { test } from "node:test";
 import { Hono } from "hono";
 import {
 	mountDelegationApi,
-	projectAcceptanceChecks,
 	projectTicketBgJobs,
 } from "./delegation-api.ts";
 import { ensureManager } from "../../../packages/chancellor/src/manager/registry.ts";
@@ -365,58 +364,6 @@ test("详情：启用时带回 taskConversationEnabled 与确定性专线 id", a
 	}
 });
 
-test("过程关口：reviews + 返工轮投影；开关关掉不带 gates", async () => {
-	const root = temp("api-gates");
-	try {
-		const workRoot = join(root, "runs");
-		const store = new Store(workRoot);
-		store.saveTicket(makeTicket("T-gates", workRoot, { repairRound: 2 }));
-		store.saveReview({
-			ticket_id: "T-gates",
-			seq: 1,
-			slug: "01-write",
-			verdict: "pass",
-			reason: "文件已改",
-			stage: "artifacts",
-		});
-		store.saveReview({
-			ticket_id: "T-gates",
-			seq: 2,
-			slug: "02-test",
-			verdict: "fail",
-			reason: "测试没过",
-			stage: "process",
-		});
-		store.close();
-
-		const app = new Hono();
-		mountDelegationApi(app, { workRoot });
-
-		const response = await app.request("/api/v1/tickets/T-gates");
-		assert.equal(response.status, 200);
-		const body = (await response.json()) as {
-			gates?: Array<{ name: string; passed: boolean; note?: string }>;
-		};
-		assert.deepEqual(body.gates, [
-			{ name: "验收：01-write", passed: true, note: "文件已改" },
-			{ name: "验收：02-test", passed: false, note: "测试没过" },
-			{ name: "返工", passed: true, note: "已返工 2 轮" },
-		]);
-
-		const saved = process.env.TICKET_GATES;
-		process.env.TICKET_GATES = "false";
-		try {
-			const off = await app.request("/api/v1/tickets/T-gates");
-			const offBody = (await off.json()) as Record<string, unknown>;
-			assert.equal("gates" in offBody, false, "开关关掉详情不带 gates");
-		} finally {
-			if (saved === undefined) delete process.env.TICKET_GATES;
-			else process.env.TICKET_GATES = saved;
-		}
-	} finally {
-		rmSync(root, { recursive: true, force: true });
-	}
-});
 
 test("多副本对齐：同 requestId 的单在列表/详情共用 groupId；开关关掉不出现", async () => {
 	const root = temp("api-fanout");
@@ -563,99 +510,6 @@ test("多副本聚合：2 个副本 1 个完成 → pending；全完成 → sett
 		} catch {
 			/* 句柄由 OS 在进程退出时回收 */
 		}
-	}
-});
-
-// ── 验收项逐项投影（2026-11-10 批 23 §一）────────────────────
-
-test("验收项：只认 `验：` 前缀（半角冒号同样认），状态只按 reviews 判", () => {
-	const checks = projectAcceptanceChecks(
-		["读 src/a.ts", "验：npm test 全绿", " 验: 类型检查 0 错 "],
-		[
-			{ slug: "01-write", verdict: "pass" },
-			{ slug: "02-test", verdict: "pass" },
-		],
-	);
-	assert.deepEqual(checks, [
-		{ text: "npm test 全绿", status: "passed" },
-		{ text: "类型检查 0 错", status: "passed" },
-	]);
-
-	// 没写前缀的普通动作不算验收项。
-	assert.deepEqual(projectAcceptanceChecks(["读 a.ts", "改 b.ts"], [{ verdict: "pass" }]), []);
-	// 不是数组 / 空步骤照样安全。
-	assert.deepEqual(projectAcceptanceChecks(undefined, []), []);
-});
-
-test("验收项：有 fail 全部 failed；没有 reviews → unknown 并写清原因", () => {
-	const steps = ["验：npm test 全绿", "验：页面能打开"];
-
-	const failed = projectAcceptanceChecks(steps, [
-		{ slug: "01-write", verdict: "pass" },
-		{ slug: "02-test", verdict: "fail" },
-	]);
-	assert.deepEqual(failed, [
-		{ text: "npm test 全绿", status: "failed", note: "验收未通过：02-test" },
-		{ text: "页面能打开", status: "failed", note: "验收未通过：02-test" },
-	]);
-
-	// 没有验收记录 = 逐项未知，不编造"通过"。
-	const unknown = projectAcceptanceChecks(steps, []);
-	assert.equal(unknown.length, 2);
-	for (const check of unknown) {
-		assert.equal(check.status, "unknown");
-		assert.match(check.note ?? "", /没有验收记录/);
-	}
-
-	// blocked 既不等于 fail 也不等于 pass：如实 unknown。
-	const blocked = projectAcceptanceChecks(["验：发布"], [{ slug: "03-ship", verdict: "blocked" }]);
-	assert.equal(blocked[0]?.status, "unknown");
-	assert.match(blocked[0]?.note ?? "", /blocked/);
-});
-
-test("验收项：详情带 acceptanceChecks；开关关掉不带这个键", async () => {
-	const root = temp("api-acceptance");
-	try {
-		const workRoot = join(root, "runs");
-		const store = new Store(workRoot);
-		store.saveTicket(
-			makeTicket("T-acc", workRoot, {
-				status: "done",
-				steps: ["读 a.ts", "验：npm test 全绿"],
-			}),
-		);
-		store.saveReview({
-			ticket_id: "T-acc",
-			seq: 1,
-			slug: "01-write",
-			verdict: "pass",
-			reason: "ok",
-			stage: "artifacts",
-		});
-		store.close();
-
-		const app = new Hono();
-		mountDelegationApi(app, { workRoot });
-
-		const body = (await (await app.request("/api/v1/tickets/T-acc")).json()) as {
-			acceptanceChecks?: Array<{ text: string; status: string; note?: string }>;
-		};
-		assert.deepEqual(body.acceptanceChecks, [{ text: "npm test 全绿", status: "passed" }]);
-
-		const saved = process.env.DELEGATION_ACCEPTANCE_CHECKS;
-		process.env.DELEGATION_ACCEPTANCE_CHECKS = "false";
-		try {
-			const off = (await (await app.request("/api/v1/tickets/T-acc")).json()) as Record<
-				string,
-				unknown
-			>;
-			assert.equal("acceptanceChecks" in off, false, "开关关掉详情不带 acceptanceChecks");
-		} finally {
-			if (saved === undefined) delete process.env.DELEGATION_ACCEPTANCE_CHECKS;
-			else process.env.DELEGATION_ACCEPTANCE_CHECKS = saved;
-		}
-	} finally {
-		rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 	}
 });
 

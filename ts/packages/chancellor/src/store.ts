@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { PlannedTask, Review, Task, Ticket, TicketStatus } from "./types.ts";
+import type { PlannedTask, Task, Ticket, TicketStatus } from "./types.ts";
 
 export interface TicketRow {
   id: string;
@@ -29,12 +29,6 @@ export interface TicketProgress {
 /** 心跳类更新的最小落盘间隔；动作或等待对象变了则立刻写。 */
 const PROGRESS_WRITE_MS = 10_000;
 
-/**
- * 执行前快照的文件名（2026-11-04）：落在每个 task 目录里，崩溃恢复按 ticketId/seq 读回。
- * 放在这里是为了让 shell 与 isolation、review 共用同一个名字，避免三处各写一份字符串。
- */
-export const SNAPSHOT_FILE = "snapshot-before.json";
-
 const TERMINAL_STATUSES = new Set<TicketStatus>([
   "done",
   "needs_you",
@@ -44,7 +38,6 @@ const TERMINAL_STATUSES = new Set<TicketStatus>([
 ]);
 
 /** 这些终态不会再沿用执行前快照续跑，可以把残留的快照清掉。needs_you / idle 留给续跑。 */
-const NON_RESUMABLE_STATUSES = new Set<TicketStatus>(["done", "failed", "aborted"]);
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS tickets (
@@ -67,16 +60,6 @@ CREATE TABLE IF NOT EXISTS tasks (
   status TEXT NOT NULL,
   employee TEXT,
   updated_at TEXT NOT NULL,
-  PRIMARY KEY (ticket_id, seq)
-);
-CREATE TABLE IF NOT EXISTS reviews (
-  ticket_id TEXT NOT NULL,
-  seq INTEGER NOT NULL,
-  slug TEXT NOT NULL,
-  verdict TEXT NOT NULL,
-  reason TEXT NOT NULL,
-  stage TEXT NOT NULL,
-  created_at TEXT NOT NULL,
   PRIMARY KEY (ticket_id, seq)
 );
 `;
@@ -152,8 +135,6 @@ export class Store {
     if (TERMINAL_STATUSES.has(status)) {
       fs.rmSync(path.join(this.ticketDir(ticket.id), "inflight.json"), { force: true });
     }
-    // 不会再续跑的终态把 task 目录里的执行前快照一并清掉；needs_you / idle 要留给续跑。
-    if (NON_RESUMABLE_STATUSES.has(status)) clearTaskSnapshots(this.ticketDir(ticket.id));
   }
 
   /**
@@ -187,16 +168,6 @@ export class Store {
     writeJson(path.join(this.ticketDir(ticket.id), "ticket.json"), ticket);
   }
 
-  /**
-   * 返工轮重跑前清掉上一轮的任务行与验收行（2026-11-09 §1）。
-   * 明文任务目录由 index.ts 归档；这里只清 sqlite 索引，否则新计划任务数变少时
-   * 详情会混进上一轮的残留行。ticket 行不动（同一张单）。
-   */
-  resetRoundRows(ticketId: string): void {
-    this.conn().prepare("DELETE FROM tasks WHERE ticket_id = ?").run(ticketId);
-    this.conn().prepare("DELETE FROM reviews WHERE ticket_id = ?").run(ticketId);
-  }
-
   saveTask(task: Task): void {    this.conn()
       .prepare(
         `INSERT INTO tasks (ticket_id, seq, slug, title, dir, status, employee, updated_at)
@@ -218,29 +189,6 @@ export class Store {
         task.status,
         task.employee,
         task.updated_at,
-      );
-  }
-
-  saveReview(review: Review): void {
-    this.conn()
-      .prepare(
-        `INSERT INTO reviews (ticket_id, seq, slug, verdict, reason, stage, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(ticket_id, seq) DO UPDATE SET
-           slug = excluded.slug,
-           verdict = excluded.verdict,
-           reason = excluded.reason,
-           stage = excluded.stage,
-           created_at = excluded.created_at`,
-      )
-      .run(
-        review.ticket_id,
-        review.seq,
-        review.slug,
-        review.verdict,
-        review.reason,
-        review.stage,
-        new Date().toISOString(),
       );
   }
 
@@ -309,13 +257,6 @@ export class Store {
       if (ticket) tickets.push(ticket);
     }
     return tickets;
-  }
-
-  reviewsOf(ticketId: string): Review[] {
-    const rows = this.conn()
-      .prepare("SELECT * FROM reviews WHERE ticket_id = ? ORDER BY seq")
-      .all(ticketId);
-    return rows as unknown as Review[];
   }
 
   /** db 丢了或为空时，从 runs/ 的明文记录重建索引。 */
@@ -396,10 +337,6 @@ export class Store {
          employee = excluded.employee,
          updated_at = excluded.updated_at`,
     );
-    const insertReview = db.prepare(
-      `INSERT INTO reviews (ticket_id, seq, slug, verdict, reason, stage, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    );
 
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
@@ -420,43 +357,32 @@ export class Store {
       );
 
       const plan = readJson<{ tasks?: PlannedTask[] }>(path.join(dir, "plan.json"));
-      const reviewFile = readJson<{ reviews?: Review[] }>(path.join(dir, "review.json"));
-      const reviews = reviewFile?.reviews ?? [];
       const tasks = plan?.tasks ?? [];
+      // 2026-11-19 起没有验收：任务行状态直接由单据状态还原。
+      const taskStatus =
+        ticket.status === "done"
+          ? "passed"
+          : ticket.status === "failed"
+            ? "failed"
+            : ticket.status === "idle"
+              ? "waiting"
+              : ticket.status === "needs_you" || ticket.status === "aborted"
+                ? "blocked"
+                : "pending";
 
       tasks.forEach((task, index) => {
         const seq = index + 1;
-        const review = reviews.find((item) => item.seq === seq);
-        const status = review
-          ? review.verdict === "pass"
-            ? "passed"
-            : review.verdict === "fail"
-              ? "failed"
-              : "blocked"
-          : "pending";
         insertTask.run(
           ticket.id,
           seq,
           task.slug,
           task.title,
           `${String(seq).padStart(2, "0")}-${task.slug}`,
-          status,
+          taskStatus,
           ticket.employee ?? null,
           ticket.updated_at,
         );
       });
-
-      for (const review of reviews) {
-        insertReview.run(
-          review.ticket_id || ticket.id,
-          review.seq,
-          review.slug,
-          review.verdict,
-          review.reason,
-          review.stage,
-          ticket.updated_at,
-        );
-      }
     }
   }
 }
@@ -466,18 +392,6 @@ export function ensureDir(dir: string): void {
 }
 
 /** 清掉这张单所有 task 目录里的执行前快照；目录读不到就当没事。 */
-export function clearTaskSnapshots(ticketDir: string): void {
-  let entries: fs.Dirent[];
-  try {
-    entries = fs.readdirSync(ticketDir, { withFileTypes: true });
-  } catch {
-    return;
-  }
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    fs.rmSync(path.join(ticketDir, entry.name, SNAPSHOT_FILE), { force: true });
-  }
-}
 
 export function writeJson(file: string, value: unknown): void {
   ensureDir(path.dirname(file));

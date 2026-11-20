@@ -4,8 +4,6 @@
  * 2026-11-13 从 delegation-api.ts 的 L367–L643 整段切出；正文原文搬运，未改一行实现。
  */
 
-import { JUDGE_FILE } from "../../../packages/chancellor/src/index.ts";
-import { judgeCallsOf } from "../../../packages/chancellor/src/judge.ts";
 import { listManagers } from "../../../packages/chancellor/src/manager/registry.ts";
 import { Store, TicketRow } from "../../../packages/chancellor/src/store.ts";
 import { Ticket } from "../../../packages/chancellor/src/types.ts";
@@ -262,21 +260,6 @@ function summarizeFanoutGroup(
 	};
 }
 
-function judgeCallsOfTicket(store: Store, ticketId: string): Array<{
-	round?: unknown;
-	verdict?: unknown;
-	reason?: unknown;
-}> {
-	try {
-		const file = JSON.parse(
-			fs.readFileSync(path.join(store.ticketDir(ticketId), JUDGE_FILE), "utf8"),
-		) as Parameters<typeof judgeCallsOf>[0];
-		return judgeCallsOf(file) as Array<{ round?: unknown; verdict?: unknown; reason?: unknown }>;
-	} catch {
-		return [];
-	}
-}
-
 export interface DelegationApiOptions {
 	workRoot?: string;
 	store?: DelegationReceipts;
@@ -285,5 +268,5 @@ export interface DelegationApiOptions {
 	sayRuntime?: () => DelegationRuntime;
 }
 
-export { chiefNamesLoader, conversationIdOf, conversationTitlesLoader, externalChatIdsLoader, judgeCallsOfTicket, readTicketJson, resolveConversationId, summarizeFanoutGroup, summarizeTickets };
+export { chiefNamesLoader, conversationIdOf, conversationTitlesLoader, externalChatIdsLoader, readTicketJson, resolveConversationId, summarizeFanoutGroup, summarizeTickets };
 export type { FanoutGroupSummary };

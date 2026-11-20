@@ -10,7 +10,6 @@ import { listManagers } from "../../../packages/chancellor/src/manager/registry.
 import { Store } from "../../../packages/chancellor/src/store.ts";
 import { Ticket } from "../../../packages/chancellor/src/types.ts";
 import { currentApprovalLevel, currentAuthority } from "./delegation-authority.ts";
-import { withDelegationJudge } from "./delegation-judge.ts";
 import { workerSteerEnabled } from "./delegation-gates.ts";
 import { deadLetterStore } from "./delegation-jobs.ts";
 import { DelegationReceipts, TERMINAL_TICKET_STATUS, requestFingerprint } from "./delegation-receipts.ts";
@@ -62,7 +61,7 @@ function defaultRetryRuntime(store: DelegationReceipts): DelegationRuntime {
 		run: (request, options) =>
 			runChancellor(
 				{ ...request, workRoot: chancellorWorkRoot() },
-				withDelegationJudge(options),
+				options,
 			),
 		emit: emitDelegation,
 		// 回话续跑同样双写进专线（8g）：重试出来的新单也自带同一条单的会话。

@@ -15,7 +15,7 @@ import { go } from "./route.js";
 import { state } from "./state.js";
 import { ticketActionButtons } from "./tasks-board.js";
 import { hideTasksState } from "./tasks-cards.js";
-import { REVIEW_STAGE_LABEL, SUBTASK_STATUS, TASK_STATUS, VERDICT_LABEL, employeeText, relativeTime, stalenessHint, statusError, ticketGatesHtml, ticketStagesHtml } from "./tasks-model.js";
+import { SUBTASK_STATUS, TASK_STATUS, employeeText, relativeTime, stalenessHint, statusError, ticketStagesHtml } from "./tasks-model.js";
 import { toast } from "./ui-atoms.js";
 
 async function showTicketDetail(ticketId) {
@@ -101,12 +101,6 @@ function renderTicketDetail(data, fallbackId) {
       ? ticket.steps
       : [];
   const stepIndex = steps.length > 0 ? Math.min(passed, steps.length - 1) : -1;
-  // 返工轮次（§1.5）：可选字段，缺省 0 = 不显示。
-  const repairRound = Number.isInteger(data.repairRound)
-    ? data.repairRound
-    : Number.isInteger(ticket.repairRound)
-      ? ticket.repairRound
-      : 0;
 
   const taskRows = tasks.length
     ? tasks
@@ -137,32 +131,6 @@ function renderTicketDetail(data, fallbackId) {
       </section>`
     : "";
 
-  // 验收证据（2026-11-10 批 18 §1.2）：逐条 verdict / reason / 是哪个任务 / 哪一类核对。
-  // 以前只留最近 6 条且标题写总数——数字和列表长度对不上（七原则②），现在列表照单全收。
-  // 改动的路径在 run.json 的 changedPaths，详情端点没有投影；本批不加字段，
-  // 所以这里不编结构化路径（artifacts 阶段的 reason 里本来就带着路径清单）。
-  const taskBySeq = new Map(tasks.map((task) => [Number(task.seq), task]));
-  const reviewRows = reviews.length
-    ? `<section class="td-section">
-        <h3>验收证据<span>${reviews.length}</span></h3>
-        ${reviews
-          .map((review) => {
-            const [label, tone] = VERDICT_LABEL[review.verdict] || [review.verdict || "", "idle"];
-            const task = taskBySeq.get(Number(review.seq));
-            const taskTitle = String(task?.title || task?.slug || review.slug || "").trim();
-            const stage = REVIEW_STAGE_LABEL[review.stage] || "验收";
-            return `<div class="td-review">
-              <div class="td-review-top">
-                <span class="tk-chip" data-tone="${tone}">${esc(label)}</span>
-                <span class="td-review-task">${esc(taskTitle || "（未找到对应任务）")}</span>
-                <span class="td-stage">${esc(stage)}</span>
-              </div>
-              <p>${esc(review.reason || "（没有说明）")}</p>
-            </div>`;
-          })
-          .join("")}
-      </section>`
-    : "";
 
   // 迟到的回报（E2 #2）：父单终态后才回来的子单结果，只读记账，不自动并入。
   // 空数组整节不渲染；每行照 reviewRows 的写法：子单 id · 状态 pill · note · 时间。
@@ -247,7 +215,6 @@ function renderTicketDetail(data, fallbackId) {
           <summary>
             <span class="td-step-label">现在到哪一步</span>
             <span class="td-step-now">第 ${stepIndex + 1}/${steps.length} 步：${esc(steps[stepIndex] || "")}</span>
-            ${repairRound > 0 ? `<span class="td-step-round">返工第 ${repairRound} 轮</span>` : ""}
           </summary>
           <ol class="td-step-list">
             ${steps.map((step) => `<li>${esc(step)}</li>`).join("")}
@@ -264,8 +231,7 @@ function renderTicketDetail(data, fallbackId) {
         <span class="td-time">${esc(relativeTime(ticket.updated_at))}${esc(stalenessHint(ticket.status, ticket.updated_at))}</span>
       </div>
       <h2 class="td-prompt">${esc(String(ticket.prompt || "").trim() || "（没有说明）")}</h2>
-      ${ticketStagesHtml(ticket.status, repairRound)}
-      ${ticketGatesHtml(data.gates)}
+      ${ticketStagesHtml(ticket.status)}
       ${stepsSection}
       <div class="td-meta">
         <span>任务 <b>${passed}/${total}</b></span>
@@ -285,7 +251,6 @@ function renderTicketDetail(data, fallbackId) {
       <ul class="td-tasks">${taskRows}</ul>
     </section>
     ${childRows}
-    ${reviewRows}
     ${deadLetterRows}
     ${messageRows}
   `;

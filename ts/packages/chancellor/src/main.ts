@@ -23,7 +23,6 @@ import type {
   ChancellorRequest,
   ManagerRunRecord,
   PlannedTask,
-  Review,
   Ticket,
 } from "./types.ts";
 
@@ -298,46 +297,25 @@ function cmdShow(rest: string[]): number {
     return EXIT_OK;
   }
 
-  const reviewFile = readJson<{ reviews?: Review[]; aborted?: boolean }>(
-    path.join(dir, "review.json"),
-  );
   const tasks = plan.tasks ?? [];
   process.stdout.write(`## 任务（${tasks.length}）\n`);
   tasks.forEach((task, index) => {
     const seq = index + 1;
     const dirName = `${String(seq).padStart(2, "0")}-${task.slug}`;
-    const review = reviewFile?.reviews?.find((item) => item.seq === seq);
     const row = taskRows.find((item) => item.seq === seq);
     const employee = row?.employee ?? ticket.employee ?? null;
     process.stdout.write(
       `${dirName}  ${formatEmployee(employee).padEnd(9)}  ${
-        review ? review.verdict : "未验收"
+        row?.status ?? "pending"
       }  ${task.title}\n`,
     );
     if (Array.isArray(task.dependsOn) && task.dependsOn.length > 0) {
       process.stdout.write(`  依赖：${task.dependsOn.join("、")}\n`);
     }
-    if (review) process.stdout.write(`  理由：${review.reason}\n`);
     const files = listFiles(path.join(dir, dirName));
     process.stdout.write(`  文件：${files.map((file) => file.path).join("、") || "（空）"}\n`);
   });
-  const goal = readJson<{
-    satisfied?: boolean;
-    inconclusive?: boolean;
-    reason?: string;
-    aborted?: boolean;
-  }>(path.join(dir, "goal.json"));
-  if (goal) {
-    const verdict = goal.aborted
-      ? "已停止"
-      : goal.inconclusive
-        ? "inconclusive（核对器输出异常，没给出结论）"
-        : goal.satisfied
-          ? "satisfied"
-          : "not satisfied";
-    process.stdout.write(`\n## 整体目标核对\n${verdict}\n理由：${goal.reason ?? "（无）"}\n`);
-  }
-  if (reviewFile?.aborted) {
+  if (ticket.status === "aborted") {
     process.stdout.write("\n（这单被中止过）\n");
   }
   return EXIT_OK;
@@ -584,7 +562,7 @@ function printUsage(): void {
   CHANCELLOR_MCP_TOKEN       MCP Bearer 令牌
   CHANCELLOR_MCP_TOOL        指定任务提交工具（Mika 为 mika_run_task）；不给时只有单工具才自动挑
   CHANCELLOR_MCP_TASK_BUDGET_MS  一个 Mika 任务最多等多久（默认 10 分钟）
-  CHANCELLOR_PLAN_TIMEOUT_MS / CHANCELLOR_WORKER_TIMEOUT_MS / CHANCELLOR_REVIEW_TIMEOUT_MS
+  CHANCELLOR_PLAN_TIMEOUT_MS / CHANCELLOR_WORKER_TIMEOUT_MS
   MANAGER_CONTEXT_WINDOW         负责人上下文窗口（默认 131072）
   MANAGER_CONTEXT_ROTATE_RATIO   到窗口这个比例自动换段/压缩（默认 0.60）
   DELEGATION_RESUME_POLICY       崩溃恢复：auto-before-merge（默认）/ always-ask / never
