@@ -48,8 +48,8 @@ test("encodeToolResult：同输入逐字节相同，且能原样解回来", () =
 });
 
 /**
- * 迁移后的四个只读工具（2026-11-10 批 18 §五）：`recall` / `web_search` /
- * `propose_topic` / `skill` 的外层必须是 `ToolResult`，人读的 `message` 逐字不变。
+ * 迁移后的三个只读工具（2026-11-10 批 18 §五）：`recall` / `web_search` / `skill`
+ * 的外层必须是 `ToolResult`，人读的 `message` 逐字不变。
  * 这里断言"包对了 + 文案没动"，工具自身的业务规则仍由各自模块负责。
  */
 
@@ -113,27 +113,6 @@ function deps(memory: unknown): Parameters<typeof createTools>[0] {
 							hits: [{ title: "标题", url: "https://example.com/a", summary: "摘要" }],
 						},
 		},
-		topics: {
-			proposeTopic: (input: { question: string }) => {
-				if (input.question === "已在跟") {
-					return {
-						ok: false as const,
-						reason: "exists" as const,
-						existingTopicId: "topic-1",
-						message: "这个课题已经在跟了，不用重复提。",
-					};
-				}
-				return {
-					ok: true as const,
-					proposal: {
-						id: "proposal-1",
-						question: input.question,
-						flavor: "watch",
-						cron: "0 9 * * 1",
-					},
-				};
-			},
-		} as never,
 	};
 }
 
@@ -182,34 +161,6 @@ test("web_search：上游错误走 err，code 用适配层的稳定枚举", asyn
 	assert.equal(out.error?.code, "search_not_configured");
 	assert.match(out.error?.message ?? "", /^搜索还没配置：/);
 	assert.ok(out.error?.hint, "没配搜索要告诉模型下一步");
-});
-
-test("propose_topic：成功保留 proposal 字段，message 不变", async () => {
-	const tools = createTools(deps({ recall: () => [] }));
-	const out = await runTool(toolNamed(tools, "propose_topic"), {
-		question: "长期盯一下茶价",
-		flavor: "watch",
-	});
-	assert.equal(out.ok, true);
-	assert.equal(out.data.proposalId, "proposal-1");
-	assert.equal(out.data.flavor, "watch");
-	assert.equal(out.data.cron, "0 9 * * 1");
-	assert.match(out.data.message, /^已提交待确认：/);
-});
-
-test("propose_topic：失败走 err，已在跟的 id 进 hint；参数校验也是 err", async () => {
-	const tools = createTools(deps({ recall: () => [] }));
-	const exists = await runTool(toolNamed(tools, "propose_topic"), {
-		question: "已在跟",
-		flavor: "dig",
-	});
-	assert.equal(exists.ok, false);
-	assert.equal(exists.error?.code, "exists");
-	assert.equal(exists.error?.message, "这个课题已经在跟了，不用重复提。");
-	assert.match(exists.error?.hint ?? "", /topic-1/);
-
-	const empty = await runTool(toolNamed(tools, "propose_topic"), { question: "  ", flavor: "watch" });
-	assert.deepEqual(empty, { ok: false, error: { code: "question_empty", message: "question 不能为空" } });
 });
 
 /**
@@ -333,7 +284,10 @@ const DELEGATE_TEXT =
 
 test("delegate：成功外层是 ok，message 带执行器，ticketId 在 data", async () => {
 	const previous = process.env.DELEGATION_PROJECT_REQUIRED;
+	const previousFollow = process.env.EXECUTOR_NATIVE_FOLLOW_DEFAULT;
 	process.env.DELEGATION_PROJECT_REQUIRED = "false";
+	// 2026-11-19 模型分工：测试不依赖宿主机已连接的模型；回到旧的 env 缺省形态。
+	process.env.EXECUTOR_NATIVE_FOLLOW_DEFAULT = "false";
 	try {
 		const tools = createTools(
 			delegateDeps(async (_request: unknown, options: { onEvent?: (event: unknown) => void }) => {
@@ -348,6 +302,8 @@ test("delegate：成功外层是 ok，message 带执行器，ticketId 在 data",
 	} finally {
 		if (previous === undefined) delete process.env.DELEGATION_PROJECT_REQUIRED;
 		else process.env.DELEGATION_PROJECT_REQUIRED = previous;
+		if (previousFollow === undefined) delete process.env.EXECUTOR_NATIVE_FOLLOW_DEFAULT;
+		else process.env.EXECUTOR_NATIVE_FOLLOW_DEFAULT = previousFollow;
 	}
 });
 

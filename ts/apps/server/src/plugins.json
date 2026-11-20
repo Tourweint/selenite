@@ -18,7 +18,8 @@
 				"PROJECT_MERGE",
 				"PROJECT_ARCHIVE_CHATS",
 				"CHAT_BRANCH_ENABLED",
-				"CHAT_EXPORT_HANDOFF"
+				"CHAT_EXPORT_HANDOFF",
+				"USER_PROFILE_ENABLED"
 			]
 		},
 		{
@@ -104,13 +105,12 @@
 		},
 		{
 			"id": "skills",
-			"title": "技能与课题",
-			"desc": "给 AI 的操作手册、执事招聘模板、长期跟进的问题与履历。",
+			"title": "技能与履历",
+			"desc": "给 AI 的操作手册、执事招聘模板与履历。",
 			"keys": [
 				"SKILLS_ADMIN",
 				"SKILLS_INDEX_CLIP",
 				"PARTNER_TEMPLATES",
-				"TOPICS_ENABLED",
 				"PARTNER_WORK_RECORD",
 				"SKILL_ADVICE",
 				"SKILL_USAGE",
@@ -132,6 +132,8 @@
 				"CHAT_MAP_ENABLED",
 				"TOOL_USAGE",
 				"CHAT_CONTEXT_INSPECT",
+				"CHAT_CACHE_STATS",
+				"PROMPT_TAIL_INJECTION",
 				"CHAT_CONTEXT_LOOKUP",
 				"AGENT_APPEARANCE_WALLPAPER",
 				"AGENT_TOOL_INDEX",
@@ -557,19 +559,6 @@
 			"requires": [
 				"MEMORY_ENABLED"
 			]
-		},
-		{
-			"key": "TOPICS_ENABLED",
-			"label": "长期课题",
-			"summary": "课题户口本 + 每周自动研究：值得长期跟的问题会留档并定期推进。默认开，重启服务后生效。",
-			"group": "skills",
-			"type": "boolean",
-			"values": [
-				"true",
-				"false"
-			],
-			"defaultValue": "true",
-			"hot": false
 		},
 		{
 			"key": "AGENT_ASK_USER",
@@ -1361,6 +1350,32 @@
 			"hot": true
 		},
 		{
+			"key": "CHAT_CACHE_STATS",
+			"label": "请求缓存统计（上下文页）",
+			"summary": "设置 → 上下文列出该会话最近 500 条模型请求的缓存命中率（每页 100 条），点开看当时的固定前缀与消息；关 = 两个端点 404、页面不画这一块。默认开，即时生效。",
+			"group": "ui",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "PROMPT_TAIL_INJECTION",
+			"label": "动态注入走尾部（缓存前缀）",
+			"summary": "记忆召回 / 当前项目 / 执事上下文等动态内容以 user 消息追加在请求尾部，固定前缀只在用户改配置时变，缓存命中最好；关 = 回到旧形态（system 拼在请求最前面，每条用户消息都会让整段前缀作废）。默认开，即时生效。",
+			"group": "ui",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
 			"key": "CHAT_CONTEXT_LOOKUP",
 			"label": "对话内回看",
 			"summary": "会话里可以回看某条消息前后的原文（默认前后各 5 条，一次最多 50）；关 = 端点 404。默认开，即时生效。",
@@ -1625,6 +1640,19 @@
 			"label": "技能启停位",
 			"summary": "技能页的启停开关真正生效：关掉的技能不进索引。关掉本开关 = 回到「全部进索引、不过滤」的旧行为（逃生门）。只影响新开的会话。",
 			"group": "skills",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "USER_PROFILE_ENABLED",
+			"label": "关于我",
+			"summary": "全局一份的主人固定档案（.data/user-profile.md）每轮作为系统提示词注入给会读它的 Agent；关 = 整段不注、设置页只读。普通 worker 与派活工人固定不读。默认开，即时生效。",
+			"group": "chat",
 			"type": "boolean",
 			"values": [
 				"true",

@@ -256,7 +256,7 @@ async function listModels(employee: SelectableExecutorKind): Promise<ProbeResult
 		return {
 			ok: true,
 			models: [],
-			message: "本机内核不在这里探测；模型由启动 env（LLM_MODEL）决定。",
+			message: "本机内核不在这里探测；干活模型在派活设置里选，留空跟随默认模型。",
 		};
 	}
 	if (employee === "opencode") {
@@ -516,7 +516,7 @@ async function probeModel(
 					? await runQoderCn(qoderCall)
 					: await runQoderIntl(qoderCall);
 		} else {
-			return { ok: true, message: "本机内核不在这里探测；模型由启动 env（LLM_MODEL）决定。" };
+			return { ok: true, message: "本机内核不在这里探测；干活模型在派活设置里选，留空跟随默认模型。" };
 		}
 		return classify(employee, result);
 	} finally {

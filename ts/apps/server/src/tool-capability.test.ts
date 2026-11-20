@@ -42,7 +42,6 @@ const EXPECTED_TOOLS = [
 	"group_manage",
 	"routine_manage",
 	"web_search",
-	"propose_topic",
 	"send_to_agent",
 	"persona_recall",
 	// 2026-11-17 persona_write 批：写一生库（主人明确让写才用，critical 审批）

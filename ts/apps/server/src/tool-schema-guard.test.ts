@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { MemoryScope } from "@lifediary/memory";
 import type { SkillStore } from "./skills.ts";
-import type { TopicsStore } from "./topics.ts";
 import type { SearchModule } from "./search.ts";
 
 /**
@@ -45,7 +44,6 @@ const REGISTERED_ORDER = [
 	"group_manage",
 	"routine_manage",
 	"web_search",
-	"propose_topic",
 	// tool_search（2026-11-16 工具裁剪 C 段新增，2026-11-17 补钉清单）：deferred 工具按需
 	// 加载的搜索入口，注册在末位——不动既有顺序，既有前缀不受影响；新工具本身换前缀
 	// 已在 docs/变更记录/2026-11-16-工具裁剪（delegate 手册与工具勾选）.md 交代。
@@ -65,14 +63,12 @@ const CACHE_WARNING =
 process.env.AGENT_ASK_USER = "true";
 process.env.COMPANIONS_ENABLED = "true";
 process.env.GROUPS_ENABLED = "true";
-process.env.TOPICS_ENABLED = "true";
 
 const { createTools } = await import("./tools.ts");
 
 const SCOPE: MemoryScope = { type: "global" };
 const SKILLS: SkillStore = { names: () => [], manual: () => undefined, indexFor: () => undefined };
 // 只为了让条件注册成立，执行期不会被调到。
-const TOPICS = {} as unknown as TopicsStore;
 const SEARCH = {} as unknown as SearchModule;
 
 function fullTools() {
@@ -91,7 +87,6 @@ function fullTools() {
 		partners: true,
 		groups: true,
 		routineSelfService: true,
-		topics: TOPICS,
 		search: SEARCH,
 	});
 }

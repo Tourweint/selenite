@@ -147,8 +147,8 @@ test("toolDependencyError：取消 tool_search 一律拒（按需工具的唯一
 // ── 常驻名单（2026-11-17 按人常驻）────────────────────
 
 test("sanitizePromotedTools：只接受按需工具；未知名 / 非按需 / 非数组都拒；去重", () => {
-	const deferred = new Set(["routine_manage", "propose_topic"]);
-	const known = new Set(["routine_manage", "propose_topic", "read"]);
+	const deferred = new Set(["routine_manage", "propose_project"]);
+	const known = new Set(["routine_manage", "propose_project", "read"]);
 	assert.deepEqual(sanitizePromotedTools(["routine_manage", "routine_manage"], deferred, known), {
 		ok: true,
 		promoted: ["routine_manage"],

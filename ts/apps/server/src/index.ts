@@ -43,6 +43,7 @@ import {
   pinChat,
   preferenceScopeOf,
   readTranscript,
+  rememberLevel,
   reminderTaskById,
   renameChat,
   rescheduleReminder,
@@ -50,6 +51,7 @@ import {
   sayInChat,
   sayInConversation,
   seedChiefPartner,
+  sessionModelInfo,
   setTurnSettledObserver,
   startChatCompaction,
   turnSettledHandler,
@@ -67,7 +69,12 @@ import {
   readTranscriptPage,
 } from "./agent.ts";
 // 会话画板（2026-11-17 画板批）：只读投影 + 单条消息详情；开关 CHAT_MAP_ENABLED。
-import { buildChatMap, chatMapEnabled, readSingleTranscriptMessage } from "./agent/chat-map.ts";
+import {
+  buildChatMap,
+  chatMapEnabled,
+  loadChatMapTurns,
+  readSingleTranscriptMessage,
+} from "./agent/chat-map.ts";
 import {
   assembleUserContent,
   attachmentsEnabled,
@@ -123,16 +130,20 @@ import { mountDurableDelete } from "./agent/durable-delete.ts";
 import { mountFiles } from "./files.ts";
 // 设置 → 上下文（2026-11-16）：只读重放当前装配 + 首轮注入实文，不重跑召回。
 import { chatContextInspectEnabled, contextInspectPayloadOf, lastRequestInjectionsOf } from "./context-inspect.ts";
+import { cacheStatsEnabled, requestContextOf, requestStatsOf } from "./request-stats.ts";
 import { contextDefaultPayload } from "./context-defaults.ts";
 // Worker（普通任务助手）人设：全局一份可编辑，GET/PUT /api/v1/agent/worker-persona；
 // 路由定义收在模块里（可挂载给 HTTP 测试），挂载点放在 context-defaults 附近。
 import { mountWorkerPersonaRoutes } from "./worker-persona.ts";
+// 关于我（2026-11-19）：全局一份 + 每 Agent 读取开关，GET/PUT /api/v1/agent/user-profile。
+import { mountUserProfileRoutes } from "./user-profile.ts";
 import {
   ChatOrigins,
   ChatProjects,
   Chats as ChatsDoc,
   ChatKinds as ChatKindsDoc,
   CTX,
+  noteSessionFiles,
 } from "./agent/shared.ts";
 // 从回答分支（2026-11-17 批3a）：复制计划是纯函数，真正的 append 在 init / commit 事务里做。
 import { chatBranchEnabled, planBranchCopy, type BranchPlan } from "./agent/branch-copy.ts";
@@ -145,7 +156,6 @@ import type { Tx } from "@earendil-works/pi-durable";
 import { mountAppearanceWallpaper, wallpaperEnabled } from "./appearance-wallpaper.ts";
 import { mountDelegationApi } from "./delegation-api.ts";
 import { initEscalationRouting, mountEscalationApi } from "./escalation-api.ts";
-import { mountQaRunner } from "./qa-bridge.ts";
 // 执行器设置（2026-11-16 多 CLI 打手适配）：任务中心派活用哪个 CLI + 模型/权限。
 import { mountExecutorApi } from "./executor-mount.ts";
 // 内部质检（2026-11-16）：拆单/验收/目标核对用核心模型，不再借 Qoder CLI。
@@ -154,10 +164,7 @@ import { installWorkerPersonaDispatch } from "./worker-persona.ts";
 import { installWorkerToolsDispatch, mountWorkerToolsRoutes } from "./worker-tools.ts";
 import { mountCompanions } from "./companion-api.ts";
 import { mountGroups } from "./group-api.ts";
-// 长期课题（2026-11-07 批次一）：列表 / 详情 / 改节奏 / 暂停 / 关闭 / 立即研究 / 提议确认。
-// TOPICS_ENABLED=false 时 mountTopics 内部直接返回，整组路由 404（同 COMPANIONS 口径）。
-import { mountTopics } from "./topic-api.ts";
-// 搜索配置（2026-11-07 长期课题跟进 S2）：设置页直填 DeepSeek 搜索 key + 连接测试。
+// 搜索配置（2026-11-07，2026-11-12 多供应商）：设置页配搜索源 + 连接测试。
 import { mountSearch } from "./search-api.ts";
 import { COMPANIONS_ENABLED, partnersStore } from "./partners.ts";
 import { ensurePartnerSession } from "./partner-runtime.ts";
@@ -175,12 +182,12 @@ import { watchAllEvents } from "./agent.ts";
 import { autonomyMode, autonomyObserver, observeCount24h } from "./autonomy.ts";
 import { mountApprovalApi } from "./approval-api.ts";
 // bash 后台任务管理面（2026-11-10 批 21 §二）：列表 / 日志尾部 / kill。
-// 开关沿用 AGENT_BASH_BG_TIMEOUT，关着时整组 404（与 TOPICS/COMPANIONS 同口径）。
+// 开关沿用 AGENT_BASH_BG_TIMEOUT，关着时整组 404（与 COMPANIONS 同口径）。
 import { mountBgJobs } from "./bg-jobs-api.ts";
 import { mountMemoryApi } from "./memory-api.ts";
 import { startMemoryNightlyScheduler } from "./memory-nightly.ts";
 // 技能管理（2026-11-08 扫尾批 9-S）：设置页「技能」分区的增删改查，写操作锁死在技能目录内。
-// SKILLS_ADMIN=false 时 mountSkills 内部直接返回，整组路由 404（同 TOPICS/COMPANIONS 口径）。
+// SKILLS_ADMIN=false 时 mountSkills 内部直接返回，整组路由 404（同 COMPANIONS 口径）。
 import { mountSkills } from "./skills-api.ts";
 // 提醒沉淀（2026-11-19 批4）：候选收集（reminder-distill）与建议快照 / 采纳（reminder-advice）。
 // REMINDER_DISTILL_ENABLED=false 时两组路由各回 404（= 未启用）。
@@ -216,8 +223,12 @@ import { createMatrixChannels, dispatchRemoteDelegation, listRemoteDelegations }
 import { RelayInvokeError } from "./relay-client.ts";
 import { approvalStore } from "./approvals.ts";
 import {
+  chatModelRefFor,
+  chatSessionModelEnabled,
+  clampThinkingLevel,
   currentThinkingLevels,
   detectProviderModel,
+  isFaux,
   modelCatalog,
   providerCatalog,
   readLlmConfig,
@@ -227,6 +238,7 @@ import {
   scheduleThinkingProbe,
   setProviderSecret,
   setRuntimeModel,
+  thinkingLevelsFor,
 } from "./provider.ts";
 import { injectProviderKeys } from "./provider-secrets.ts";
 // 会话导出「接续文件」（2026-11-10 批 20 §一）：拼接是纯函数，正文只在响应体里出现。
@@ -291,7 +303,7 @@ try {
 injectProviderKeys();
 
 // 界面高级开关（2026-11-09）：.data/agent-flags.json 里用户改过的开关覆盖 env。
-// 必须放在路由挂载之前——挂载期的开关（执事/群组/课题/技能管理）要吃到覆盖值。
+// 必须放在路由挂载之前——挂载期的开关（执事/群组/技能管理）要吃到覆盖值。
 loadFlagOverrides();
 
 // 内部质检模型（2026-11-16）：默认核心 PI；`CHANCELLOR_INTERNAL=qoder` 回旧形态。
@@ -599,9 +611,6 @@ mountDelegationApi(app);
 mountEscalationApi(app);
 // 上报路由订阅（watchAllDelegationEvents）：注册 / 限流 / 唤醒总管。幂等，启动调一次。
 initEscalationRouting();
-// 质检 worker（2026-11-19 批2）：宿主侧派单实现注入 chancellor 的 QaRunner 缝；
-// 派活设置选「派质检 worker」时验收分支才会用到，平时注入是零成本。
-mountQaRunner();
 
 // 执行器设置（2026-11-16）：派活用哪个 CLI + 各 CLI 的模型/权限；落 .data/executor.json。
 mountExecutorApi(app);
@@ -613,11 +622,7 @@ mountCompanions(app);
 // GROUPS_ENABLED / COMPANIONS_ENABLED 任一关着一个路由都不挂（404 = 未启用）。
 mountGroups(app);
 
-// 长期课题（2026-11-07 长期课题跟进）：课题户口本 + 提议确认 + 研究回合。
-// 开关关着一个路由都不挂（404 = 未启用）；研究闹钟由 agent 里注册的 TopicTask 负责。
-mountTopics(app);
-
-// 搜索配置：课题研究的硬前提（没 key 时 propose_topic / 研究回合都会拒绝）。
+// 搜索配置：模型工具 web_search 与设置页搜索源共用这层（未配源时工具返回引导错误）。
 mountSearch(app);
 
 // 审批答复（2026-11-04 批次二）：待批列表 + 幂等答复。开关关着时列表恒为空。
@@ -1170,22 +1175,93 @@ app.post("/api/v1/agent/chat/:conversationId/mode", async (c) => {
       400,
     );
   }
+  const chat = await openChat(c.req.param("conversationId"));
+  if (!chat) return c.json({ error: "unknown_conversation" }, 404);
+  // 2026-11-19 会话级模型切换：支持域按**本会话模型**算，不再按全局默认。
+  // 回滚开关关掉时回到全局模型的支持域。
+  const info = chatSessionModelEnabled() ? await sessionModelInfo(chat) : null;
+  const supported = info?.levels ?? currentThinkingLevels();
   // 支持域不在 = 上游大概率 400（medium 对 glm-5.3 实测如此）；在入口说清楚，别让它变成一次失败的生成
-  const supported = currentThinkingLevels();
   if (!supported.includes(level)) {
     return c.json(
       {
         error: "bad_request",
-        message: `当前模型不支持思考档 ${level}；支持：${supported.join(" / ")}`,
+        message: `当前会话模型不支持思考档 ${level}；支持：${supported.join(" / ")}`,
       },
       400,
     );
   }
 
+  await applyChatMode(chat, level);
+  const applied = await sessionModelInfo(chat);
+  return c.json({ ok: true, thinking: applied?.thinking ?? level });
+});
+
+/**
+ * 本会话切模型（2026-11-19 会话级模型切换）：只改这一条会话，不写全局默认。
+ *
+ * body `{ providerId, modelId, thinking? }`；`thinking` 缺省 = 保留会话当前档位，
+ * 再按新模型支持域 clamp。下一轮生效；忙时也照常受理（configure 作用于下一轮）。
+ */
+app.post("/api/v1/agent/chat/:conversationId/model", async (c) => {
+  if (!readLlmConfig()) return c.json({ ok: false, reason: "llm_not_configured" }, 503);
+  const body = (await c.req.json().catch(() => null)) as
+    | { providerId?: unknown; modelId?: unknown; thinking?: unknown; mode?: unknown }
+    | null;
+  const providerId =
+    typeof body?.providerId === "string" ? body.providerId.trim() : "";
+  const modelId = typeof body?.modelId === "string" ? body.modelId.trim() : "";
+  if (!providerId || !modelId) {
+    return c.json(
+      { error: "bad_request", message: "需要 providerId 和 modelId" },
+      400,
+    );
+  }
+  if (isFaux()) {
+    return c.json(
+      { error: "faux", message: "faux 是假模型，没有可切换的真实模型" },
+      400,
+    );
+  }
+  if (!chatSessionModelEnabled()) {
+    return c.json(
+      {
+        error: "session_model_disabled",
+        message: "会话级模型切换已关闭（CHAT_SESSION_MODEL=false）；请用设置 → 模型的全局默认",
+      },
+      400,
+    );
+  }
   const chat = await openChat(c.req.param("conversationId"));
   if (!chat) return c.json({ error: "unknown_conversation" }, 404);
-  await applyChatMode(chat, level);
-  return c.json({ ok: true, thinking: level });
+  const info = await sessionModelInfo(chat);
+  const levels = thinkingLevelsFor(providerId, modelId);
+  const requested = parseThinkingLevel(body);
+  const level = clampThinkingLevel(requested ?? info?.thinking ?? "off", levels);
+  let target: { provider: string; modelId: string };
+  try {
+    target = chatModelRefFor(providerId, modelId, level);
+  } catch (error) {
+    return c.json(
+      {
+        error: "bad_model",
+        message: error instanceof Error ? error.message : "模型不可用",
+      },
+      400,
+    );
+  }
+  await chat.conversation.configure({ model: target }, CTX);
+  rememberLevel(chat.internalId, level);
+  console.log(
+    `[model] 会话 ${chat.internalId} 切到 ${providerId}/${modelId}（档位 ${level}）`,
+  );
+  return c.json({
+    ok: true,
+    provider: providerId,
+    model: modelId,
+    thinking: level,
+    thinkingLevels: levels,
+  });
 });
 
 /**
@@ -1250,8 +1326,32 @@ app.get("/healthz", (c) => {
 /**
  * composer 投影（2026-11-04 批次五，接口文档 §2.8）：当前选择 + 可选供应商。
  * 刻意不含 baseUrl / keyEnv：那是设置页的投影，composer 不需要上游地址。
+ *
+ * 2026-11-19 会话级模型切换：带 `?chat=<对外会话 id>` 时，`current / thinking`
+ * 返回**这条会话**的模型与档位；不带 = 全局默认（设置页默认模型卡继续用）。
  */
-app.get("/api/v1/agent/model", (c) => c.json(modelCatalog()));
+app.get("/api/v1/agent/model", async (c) => {
+  const catalog = modelCatalog();
+  const sessionModel = chatSessionModelEnabled();
+  const chatId = c.req.query("chat")?.trim();
+  if (!chatId) return c.json({ ...catalog, sessionModel });
+  const chat = await openChat(chatId);
+  if (!chat) return c.json({ error: "unknown_conversation" }, 404);
+  // 回滚开关关掉时，带 chat 也只回全局投影；前端据此把 pill 切回全局模式。
+  if (!sessionModel) {
+    return c.json({ ...catalog, default: catalog.current, session: false, sessionModel });
+  }
+  const info = await sessionModelInfo(chat);
+  return c.json({
+    ...catalog,
+    current: info ? { providerId: info.provider, modelId: info.modelId } : catalog.current,
+    thinking: info?.thinking ?? null,
+    thinkingLevels: info?.levels ?? [],
+    default: catalog.current,
+    session: Boolean(info),
+    sessionModel,
+  });
+});
 
 /**
  * 运行时切换模型（2026-11-04，接口文档 §2.8）：改的是选择，env / 文件是默认；
@@ -1436,9 +1536,31 @@ app.post("/api/v1/agent/chat", async (c) => {
     if (!pick.ok) return c.json({ error: "bad_dir", message: pick.message }, 400);
     chatDir = pick.pick;
   }
+  // 2026-11-19 会话级模型切换：新建会话可带一次模型选择；不传 = 服务端读全局默认。
+  // 续话带 model 忽略（已有会话请走 POST /agent/chat/:id/model），不隐式改这条会话。
+  let initialModel: { provider: string; modelId: string } | undefined;
+  if (!requestedId && request.model && !isFaux() && chatSessionModelEnabled()) {
+    const levels = thinkingLevelsFor(request.model.providerId, request.model.modelId);
+    const level = clampThinkingLevel(request.model.thinking ?? "off", levels);
+    try {
+      initialModel = chatModelRefFor(
+        request.model.providerId,
+        request.model.modelId,
+        level,
+      );
+    } catch (error) {
+      return c.json(
+        {
+          error: "bad_model",
+          message: error instanceof Error ? error.message : "模型不可用",
+        },
+        400,
+      );
+    }
+  }
   let chat = await openChat(
     requestedId,
-    undefined,
+    initialModel,
     // 种类只在新建分支采用：续话不能靠这个字段改身份（下面另有不匹配校验）
     requestedId ? undefined : request.chatKind,
     chatDir,
@@ -1527,6 +1649,18 @@ app.post("/api/v1/agent/chat", async (c) => {
     let turnUsage: TurnUsage | undefined;
 
     await send({ type: "start", id, conversationId: chat.externalId });
+
+    // 受限档下 read 也限根（2026-11-20），但用户附上来的文件必须能读：
+    // 当前消息 + 上行历史里的附件路径记进本会话白名单（只放行 read，不放行写）。
+    noteSessionFiles(chat.internalId, [
+      ...(assembled.value.files ?? []).map((file) => file.path),
+      // 上行历史里的文件在 content 分段里（`type: "file"`），没有顶层 files 字段
+      ...request.messages.flatMap((message) =>
+        typeof message.content === "string"
+          ? []
+          : message.content.flatMap((part) => (part.type === "file" ? [part.path] : [])),
+      ),
+    ]);
 
     try {
       for await (const event of chatStream({
@@ -1841,7 +1975,7 @@ app.post("/api/v1/agent/chat/:conversationId/branches", async (c) => {
     atMessageId,
   };
   const link = partnersStore().linkOfSession(chat.internalId);
-  // 群成员 / 例行 / 课题专线不能分支：落到下面的 worker/chief 会把它复制成一条总管会话，
+  // 群成员 / 例行专线不能分支：落到下面的 worker/chief 会把它复制成一条总管会话，
   // 身份（群成员轮次 / 例行归属）就丢了（2026-11-17 批3b）。
   if (link && link.role !== "canonical" && link.role !== "side") {
     return c.json({ error: "branch_not_supported", message: "这类会话不能分支" }, 400);
@@ -2021,19 +2155,37 @@ app.get("/api/v1/agent/chat/:conversationId/messages", async (c) => {
 });
 
 /**
- * 会话画板（2026-11-17 画板批，方案 `docs/设计方案/2026-11-17-会话画板（单会话回合卡）.md`）。
+ * 会话画板（2026-11-17 画板批，方案 `docs/设计方案/2026-11-17-会话画板（单会话回合卡）.md`；
+ * 2026-11-19 折叠批 `docs/设计方案/2026-11-19-会话地图折叠（长会话窗口与逐段展开）.md`）。
  *
- * `GET .../chat/:conversationId/map`：一次回根会话 + 全部后代（来源链向上找根、向下 BFS），
- * 每节点带「分叉点之后」的回合预览。只读，不写布局、不改会话。
+ * `GET .../chat/:conversationId/map?turns=N`：一次回根会话 + 全部后代（来源链向上找根、向下 BFS），
+ * 每节点只带最近 N 轮（缺省 10，夹在 1–100）与窗口元数据。只读，不写布局、不改会话。
  * `CHAT_MAP_ENABLED=false` → 404（一行回滚；前端按钮同时按 /agent/policy 的 chatMap 收起）。
  */
 app.get("/api/v1/agent/chat/:conversationId/map", async (c) => {
   if (!chatMapEnabled()) {
     return c.json({ error: "chat_map_disabled", message: "会话地图已关闭" }, 404);
   }
-  const map = await buildChatMap(c.req.param("conversationId"));
+  const map = await buildChatMap(c.req.param("conversationId"), { window: c.req.query("turns") });
   if (!map) return c.json({ error: "unknown_conversation" }, 404);
   return c.json(map);
+});
+
+/**
+ * 画板逐段展开（2026-11-19 折叠批）：只取一条会话 `[floor, before)` 的最后 `limit` 轮。
+ * `floor` = 节点 `startTurn`（前端传，服务端只夹取；分支不会展开到复制前缀里）。
+ */
+app.get("/api/v1/agent/chat/:conversationId/map/turns", async (c) => {
+  if (!chatMapEnabled()) {
+    return c.json({ error: "chat_map_disabled", message: "会话地图已关闭" }, 404);
+  }
+  const slice = await loadChatMapTurns(c.req.param("conversationId"), {
+    floor: c.req.query("floor"),
+    before: c.req.query("before"),
+    limit: c.req.query("limit"),
+  });
+  if (!slice) return c.json({ error: "unknown_conversation" }, 404);
+  return c.json(slice);
 });
 
 /**
@@ -2058,11 +2210,11 @@ app.get("/api/v1/agent/chat/:conversationId/messages/:messageId", async (c) => {
  * 框架当前接管的注入清单（`source` 区分 `lifecycle` / `assist` / `partner-context`）。
  * **只回元数据、不回正文**（`length` 是正文字符数），所以即便正文是固定提示词也不会从这里泄露。
  *
- * 开关 `AGENT_INJECTION_AUDIT`（默认开；显式 `false` → 404，一行回滚，与 TOPICS/导出同口径）。
+ * 开关 `AGENT_INJECTION_AUDIT`（默认开；显式 `false` → 404，一行回滚，与导出同口径）。
  *
  * 会尽量把会话解析成内部 id / 种类 / 执事，好让 persona、执事纪律这些"按身份分流"的条目
  * 与真实一轮一致；解析不到（未配置 LLM / 会话不存在）就按原始 id 出清单，绝不 500。
- * `dryRun` 保证读端点无副作用：课题不吞简报、技能不冻结索引、任务近况不摄入日记；
+ * `dryRun` 保证读端点无副作用：技能不冻结索引、任务近况不摄入日记；
  * 执事「当前在办」也不列（它要扫 runs/ 目录 + 开 SQLite，付不起这份代价）。
  */
 app.get("/api/v1/agent/chat/:conversationId/injections", async (c) => {
@@ -2071,12 +2223,15 @@ app.get("/api/v1/agent/chat/:conversationId/injections", async (c) => {
   let conversationId: number | string = raw;
   let chatKind: "chief" | "worker" | null = null;
   let partnerId: string | null = null;
+  let group = false;
   try {
     const chat = await openChat(raw);
     if (chat) {
       conversationId = chat.internalId;
       chatKind = (await chatKindOf(chat)) === "worker" ? "worker" : "chief";
       partnerId = COMPANIONS_ENABLED ? partnersStore().partnerIdOfSession(chat.internalId) : null;
+      // 部分生命周期注入对群会话整段跳过；审计也要用同一口径，否则会列出真实请求里没有的段。
+      group = COMPANIONS_ENABLED ? partnersStore().isGroupSession(chat.internalId) : false;
     }
   } catch {
     // 解析失败 = 只按原始 id 出静态清单（诊断端点不能因为会话读不到就 500）
@@ -2086,6 +2241,7 @@ app.get("/api/v1/agent/chat/:conversationId/injections", async (c) => {
       conversationId,
       chatKind,
       partnerId,
+      group,
       dryRun: true,
     }),
   );
@@ -2493,6 +2649,38 @@ app.get("/api/v1/agent/chat/:conversationId/context-inspect", async (c) => {
 });
 
 /**
+ * 设置 → 上下文 · 请求缓存统计（2026-11-19，接口文档 §2.2.6/§2.2.7）。
+ *
+ * 不落新存储：从 durable 的 `pi.assistant` entry 还原最近的模型请求。
+ * `page` 从 1 起；`pageSize` 上限 100；保留窗口默认 500 条（方案 §3.3）。
+ * 回滚：`CHAT_CACHE_STATS=false` → 两个端点 404。
+ */
+app.get("/api/v1/agent/chat/:conversationId/requests", async (c) => {
+  if (!chatContextInspectEnabled() || !cacheStatsEnabled()) return c.json({ error: "not_found" }, 404);
+  const chat = await openChat(c.req.param("conversationId"));
+  if (!chat) return c.json({ error: "unknown_conversation" }, 404);
+  const page = Number(c.req.query("page") ?? "1");
+  const pageSize = Number(c.req.query("pageSize") ?? "100");
+  const payload = await requestStatsOf(chat.conversation, CTX, chat.externalId, { page, pageSize });
+  c.header("cache-control", "no-store");
+  return c.json(payload);
+});
+
+app.get("/api/v1/agent/chat/:conversationId/requests/:entryId/context", async (c) => {
+  if (!chatContextInspectEnabled() || !cacheStatsEnabled()) return c.json({ error: "not_found" }, 404);
+  const entryId = Number(c.req.param("entryId"));
+  if (!Number.isFinite(entryId) || entryId <= 0) {
+    return c.json({ error: "bad_request", message: "entryId 必须是正整数" }, 400);
+  }
+  const chat = await openChat(c.req.param("conversationId"));
+  if (!chat) return c.json({ error: "unknown_conversation" }, 404);
+  const payload = await requestContextOf(chat.conversation, CTX, chat.externalId, entryId);
+  if (!payload) return c.json({ error: "unknown_request" }, 404);
+  c.header("cache-control", "no-store");
+  return c.json(payload);
+});
+
+/**
  * 设置 → 上下文 · 默认开销（2026-11-16 续）。
  *
  * 不创建会话、不读聊天记录：按角色（总管 / 每个活跃执事 / 普通 worker）显式装配
@@ -2516,6 +2704,9 @@ app.get("/api/v1/agent/context-defaults", async (c) => {
 
 // Worker 人设 GET/PUT（2026-11-16）：鉴权沿用 /api/v1/* 中间件，不另写。
 mountWorkerPersonaRoutes(app);
+
+// 关于我 GET/PUT（2026-11-19）：全局一份 + 每 Agent 读取开关；鉴权同上。
+mountUserProfileRoutes(app);
 
 // native worker 工具面 GET/PUT（2026-11-17 批4）：普通助手页勾选，仅本机工人。
 mountWorkerToolsRoutes(app);

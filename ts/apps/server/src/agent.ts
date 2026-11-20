@@ -2,7 +2,7 @@
 //
 // 依赖方向：shared ← policy / assist / turn-gate ← lifecycle ← session ← 本文件。
 // 引用方（index / approval-api / group-runtime / autonomy / memory-* / partner-runtime /
-// relay-* / openai-compat / routines / topic-runtime / delegation-api）的 import 一律不动。
+// relay-* / openai-compat / routines / delegation-api）的 import 一律不动。
 
 export {
 	getPolicy,
@@ -42,6 +42,7 @@ export type { SettledChat, TurnSettledObserver } from "./agent/settled.ts";
 
 export {
 	getHarness,
+	rememberLevel,
 	reportDelegationResult,
 	sayInChat,
 	sayInConversation,
@@ -62,7 +63,6 @@ export {
 	pruneChatMetaOrphans,
 	chatStream,
 	chatTitles,
-	configureResearchChat,
 	configureJudgeChat,
 	configureTaskChat,
 	contextUsageOf,
@@ -89,6 +89,7 @@ export {
 	restoreArchivedChats,
 	restoreChats,
 	searchTranscripts,
+	sessionModelInfo,
 	startChatCompaction,
 	stopChat,
 	supersedeMemory,

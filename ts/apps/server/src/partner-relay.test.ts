@@ -17,6 +17,8 @@ import {
 	partnerRelayEnabled,
 	partnerRelayEnvelopeEnabled,
 	partnerRelayReceiptEnabled,
+	partnerRelaySteerEnabled,
+	partnerRelayWhenBusy,
 	relayBody,
 	relayDeliveredText,
 	relayDisplayText,
@@ -237,6 +239,19 @@ test("回执开关：默认开；false/0/off 才关", () => {
 	assert.equal(partnerRelayReceiptEnabled({ PARTNER_RELAY_RECEIPT: "0" }), false);
 	assert.equal(partnerRelayReceiptEnabled({ PARTNER_RELAY_RECEIPT: "off" }), false);
 	assert.equal(partnerRelayReceiptEnabled({ PARTNER_RELAY_RECEIPT: "true" }), true);
+});
+
+// ── 批5（2026-11-19）：递话忙时一律 steer，可回滚 followUp ──
+
+test("递话忙时投递：默认 steer；PARTNER_RELAY_STEER=false 回 followUp（逐字节回滚）", () => {
+	assert.equal(partnerRelaySteerEnabled({}), true, "不配 = steer");
+	assert.equal(partnerRelayWhenBusy({}), "steer");
+	for (const off of ["false", "0", "off", " FALSE "]) {
+		assert.equal(partnerRelaySteerEnabled({ PARTNER_RELAY_STEER: off }), false, `关值 ${off}`);
+		assert.equal(partnerRelayWhenBusy({ PARTNER_RELAY_STEER: off }), "followUp");
+	}
+	assert.equal(partnerRelaySteerEnabled({ PARTNER_RELAY_STEER: "bogus" }), true, "拼错值不误关");
+	assert.equal(partnerRelayWhenBusy({ PARTNER_RELAY_STEER: "bogus" }), "steer");
 });
 
 test("queued 文案：开关关着逐字节等于旧文案（回滚口径）", () => {

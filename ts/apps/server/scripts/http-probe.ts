@@ -83,6 +83,8 @@ function startServer(extraEnv: NodeJS.ProcessEnv = {}): ChildProcess {
 			NODE_OPTIONS: "",
 			// 配对库隔离（批 26 §四的指纹探针会真的配对一台设备）：绝不碰真实 .data/pairing.json
 			PAIRING_STORE_PATH: ".data/probe-http-pairing.json",
+			// 关于我（2026-11-19 §35）：正文落点隔离，别写真实 .data/user-profile.md
+			USER_PROFILE_PATH: ".data/probe-http-user-profile.md",
 			...extraEnv,
 		},
 		stdio: ["ignore", "pipe", "pipe"],
@@ -244,6 +246,8 @@ const GATE_PROJECT_DIR = join(WORKSPACE_A, GATE_PROJECT_REL);
 const GATE_INSIDE_REL = "inside-guard.txt";
 const GATE_OUTSIDE_DIR = resolve(".data/probe-http-outside");
 const GATE_OUTSIDE_FILE = join(GATE_OUTSIDE_DIR, "escape.txt");
+/** 完全访问档的根外写入（2026-11-20：full 不再过路径闸门） */
+const GATE_OUTSIDE_FULL_FILE = join(GATE_OUTSIDE_DIR, "full-escape.txt");
 /** 闸门审计 / 审批落点（2026-11-09）：与 startServer 的 env 一致，探针隔离 */
 const GATE_AUDIT_FILE = ".data/probe-http-gate-blocks.jsonl";
 const APPROVALS_FILE = ".data/probe-http-approvals.json";
@@ -499,10 +503,10 @@ try {
 		JSON.stringify(injectionIds),
 	);
 	check(
-		["persona", "injection_guard", "current_project", "topics"].every((id) =>
+		["persona", "injection_guard", "current_project_live"].every((id) =>
 			injectionIds.includes(id),
 		),
-		"section 注入都在清单里",
+		"section / 动态注入都在清单里（2026-11-19：当前项目拆成 live 段）",
 		JSON.stringify(injectionIds),
 	);
 	const injRow = injections.find((row) => row.id === "injection_guard") ?? {};
@@ -1196,6 +1200,11 @@ try {
 			.filter((message) => message.role === "system")
 			.map((message) => contentTextOf(message.content))
 			.join("\n");
+	// 2026-11-19 前缀锁定：当前项目改成尾部 user 注入，查正文要看全部消息。
+	const allMessagesOf = (body: Record<string, unknown>) =>
+		messagesOf(body)
+			.map((message) => contentTextOf(message.content))
+			.join("\n");
 
 	// 14.1 建工作区 → 登记项目
 	const workspaceSet = await setWorkspace(WORKSPACE_A);
@@ -1338,12 +1347,13 @@ try {
 		"放行时没有越界提示",
 	);
 	const insideSystem = systemMessagesOf(insideBody);
+	const insideAll = allMessagesOf(insideBody);
 	check(
-		insideSystem.includes(`当前项目：${GATE_PROJECT_NAME}`),
-		"系统提示注入了当前项目（项目名）",
-		insideSystem.includes("当前项目") ? "含当前项目节" : "缺当前项目节",
+		insideAll.includes(`当前项目：${GATE_PROJECT_NAME}`),
+		"当前项目（项目名）在尾部动态注入里（2026-11-19 前缀锁定）",
+		insideAll.includes("当前项目") ? "含当前项目节" : "缺当前项目节",
 	);
-	check(insideSystem.includes("主文件夹："), "系统提示带项目主文件夹路径");
+	check(insideAll.includes("主文件夹："), "主文件夹路径在尾部动态注入里");
 	check(
 		insideSystem.includes("主工作区：") && insideSystem.includes(WORKSPACE_A),
 		"系统提示带主工作区路径（2026-11-16）",
@@ -1353,7 +1363,16 @@ try {
 		"系统提示带已登记项目清单（名字 + 路径）",
 	);
 
-	// 14.5 路径守卫：越界写被拒（真工具，不是 mock）
+	// 14.5 路径守卫：越界写被拒（真工具，不是 mock）。
+	// 2026-11-20：完全访问不再过闸门，越界拦截改用受限档验（inside 写入仍放行），
+	// 14.5.2 再切回 full 验“完全访问真的不设限”。
+	const setAccess = (access: string) =>
+		fetch(`${BASE}/api/v1/agent/policy`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ access }),
+		});
+	check((await setAccess("no-shell")).status === 200, "切档 no-shell（验越界拦截）");
 	gateWritePath = GATE_OUTSIDE_FILE;
 	gateRequests.length = 0;
 	const outsideRun = await chat({ messages: [{ role: "user", content: "写到工作区外面去" }] });
@@ -1388,6 +1407,19 @@ try {
 		`${auditRows.length} 行`,
 	);
 	check(!auditRaw.includes("escape.txt"), "闸门审计不含参数 / 目标路径");
+
+	// 14.5.2 完全访问：文件工具不再过路径闸门（2026-11-20 用户拍板）
+	check((await setAccess("full")).status === 200, "切回 full");
+	rmSync(GATE_OUTSIDE_FULL_FILE, { force: true });
+	gateWritePath = GATE_OUTSIDE_FULL_FILE;
+	gateRequests.length = 0;
+	const fullOutsideRun = await chat({ messages: [{ role: "user", content: "完全访问写到工作区外面" }] });
+	check(
+		fullOutsideRun.status === 200 && fullOutsideRun.result.done,
+		"完全访问越界写这一轮跑完",
+		fullOutsideRun.result.events.join(","),
+	);
+	check(existsSync(GATE_OUTSIDE_FULL_FILE), "完全访问：根外写入放行", GATE_OUTSIDE_FULL_FILE);
 
 	// ── 14.6 拒绝带反馈 + ask_user（2026-11-09 §3 / §4，真 pending / 真续跑）──
 	console.log("\n· 14.6 拒绝带反馈 + 结构化提问（ask_user）");
@@ -1895,8 +1927,8 @@ try {
 	gateRequests.length = 0;
 	await chat({ messages: [{ role: "user", content: "回滚形态还能正常聊" }] });
 	check(
-		!systemMessagesOf(gateRequests.at(-1)?.body ?? {}).includes("当前项目："),
-		"回滚时系统提示不注入当前项目节",
+		!allMessagesOf(gateRequests.at(-1)?.body ?? {}).includes("当前项目："),
+		"回滚时提问里不注入当前项目节（含尾部动态注入）",
 	);
 	// ── 16. 密钥直填（2026-11-05 H2，接口文档 §2.10）──
 	console.log("\n· 16. 密钥直填：PUT secret → 密钥文件 + 热注入");
@@ -2526,7 +2558,7 @@ try {
 		childDetail.ticket !== undefined && !("originConversationId" in childDetail.ticket),
 		"详情不下发内部 id 原文",
 	);
-	// 计划附件 / 返工轮次（2026-11-09 §2.3 / §1.5）：有则下发，无则不出现。
+	// 计划附件（2026-11-09 §2.3）：有则下发，无则不出现；repairRound 随验收层于 2026-11-19 删除。
 	const stepsDetail = (await (await fetch(`${BASE}/api/v1/tickets/T-steps`)).json()) as {
 		steps?: string[];
 		repairRound?: number;
@@ -2539,7 +2571,11 @@ try {
 		"详情下发 steps（顺序原样）",
 		JSON.stringify(stepsDetail.steps),
 	);
-	check(stepsDetail.repairRound === 1, "详情下发 repairRound", String(stepsDetail.repairRound));
+	check(
+		!("repairRound" in stepsDetail),
+		"验收层删除后详情不再下发 repairRound",
+		String(stepsDetail.repairRound),
+	);
 	const plainDetail = (await (await fetch(`${BASE}/api/v1/tickets/T-child`)).json()) as Record<
 		string,
 		unknown
@@ -4285,10 +4321,13 @@ try {
 		branchable?: boolean;
 		missing?: boolean;
 		startTurn?: number;
+		windowStart?: number;
+		totalTurns?: number;
+		hasEarlier?: boolean;
 		branchFrom?: { conversationId?: string; turnIndex?: number } | null;
 		turns?: Array<{ index?: number; question?: { text?: string }; answer?: { text?: string; id?: string } }>;
 	};
-	type MapPayload = { rootId?: string; nodes?: MapNode[]; truncated?: boolean };
+	type MapPayload = { rootId?: string; nodes?: MapNode[]; truncated?: boolean; window?: number };
 	const mapResp = await fetch(
 		`${BASE}/api/v1/agent/chat/${encodeURIComponent(branchSourceId)}/map`,
 	);
@@ -4337,6 +4376,41 @@ try {
 		detailResp.status === 200 && detailBody.message?.role === "assistant" && Boolean(detailBody.message?.text),
 		"地图详情：按 messageId 取回单条回答全文",
 		`${detailResp.status} ${String(detailBody.message?.text ?? "").slice(0, 20)}`,
+	);
+	// 窗口 / 折叠（2026-11-19）：默认只回最近 N 轮；窗口前的一段另走 /map/turns。
+	const windowMapResp = await fetch(
+		`${BASE}/api/v1/agent/chat/${encodeURIComponent(branchSourceId)}/map?turns=1`,
+	);
+	const windowMap = (await windowMapResp.json()) as MapPayload;
+	const windowNode = (windowMap.nodes ?? []).find((node) => node.id === branchSourceId);
+	check(
+		windowMapResp.status === 200 &&
+			windowMap.window === 1 &&
+			(windowNode?.turns ?? []).length === 1 &&
+			windowNode?.windowStart === 1 &&
+			windowNode?.totalTurns === 2 &&
+			windowNode?.hasEarlier === true,
+		"地图窗口：?turns=1 只回最后一轮，并标出更早",
+		`${windowMapResp.status} window=${windowMap.window ?? "?"} start=${windowNode?.windowStart ?? "?"} total=${windowNode?.totalTurns ?? "?"}`,
+	);
+	const earlierResp = await fetch(
+		`${BASE}/api/v1/agent/chat/${encodeURIComponent(branchSourceId)}/map/turns?floor=0&before=1&limit=1`,
+	);
+	const earlierBody = (await earlierResp.json()) as {
+		turns?: Array<{ index?: number; question?: { text?: string } }>;
+		windowStart?: number;
+		hasEarlier?: boolean;
+		totalTurns?: number;
+	};
+	check(
+		earlierResp.status === 200 &&
+			(earlierBody.turns ?? []).length === 1 &&
+			earlierBody.turns?.[0]?.index === 0 &&
+			earlierBody.windowStart === 0 &&
+			earlierBody.hasEarlier === false &&
+			earlierBody.totalTurns === 2,
+		"地图逐段展开：取到窗口之前的一段，标到最早",
+		`${earlierResp.status} turns=${(earlierBody.turns ?? []).length} start=${earlierBody.windowStart ?? "?"}`,
 	);
 
 	// 项目归属：归档副本后从归档清单回读 projectId（活跃清单不带该字段）
@@ -4429,6 +4503,246 @@ try {
 		`${badBranch.status} ${badBranchBody.error ?? ""}`,
 	);
 
+	// ── 35. 关于我（2026-11-19）：全局一份 + 每 Agent 开关 + system 段注入 ──
+	// 验四件事：正文读写 / 开关落库 / 真轮次的注入段 / worker 会话不读。
+	console.log("\n· 35. 关于我：全局固定注入 + 每 Agent 开关");
+	const upGet = await fetch(`${BASE}/api/v1/agent/user-profile`);
+	const upEmpty = (await upGet.json()) as {
+		ok?: boolean;
+		enabled?: boolean;
+		editable?: boolean;
+		chars?: number;
+		limit?: number;
+		workerReads?: boolean;
+		agents?: Array<{ id?: string; kind?: string; read?: boolean }>;
+	};
+	check(
+		upGet.status === 200 &&
+			upEmpty.ok === true &&
+			upEmpty.enabled === true &&
+			upEmpty.editable === true &&
+			upEmpty.chars === 0 &&
+			upEmpty.limit === 8192 &&
+			upEmpty.workerReads === false,
+		"GET：缺省空正文、可编辑、上限 8192、workerReads=false",
+		`${upGet.status} enabled=${upEmpty.enabled} chars=${upEmpty.chars}`,
+	);
+	check(
+		(upEmpty.agents ?? []).some((agent) => agent.id === "chief" && agent.kind === "chief" && agent.read === true),
+		"GET：agents 里总管在、默认读",
+		JSON.stringify(upEmpty.agents ?? []).slice(0, 120),
+	);
+
+	const upText = "我常用语音输入，文字里可能有识别错字：先按意思理解，不确定再问。";
+	const upPut = await fetch(`${BASE}/api/v1/agent/user-profile`, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ content: upText }),
+	});
+	const upSaved = (await upPut.json()) as { ok?: boolean; content?: string; chars?: number };
+	check(
+		upPut.status === 200 && upSaved.content === upText && upSaved.chars === upText.length,
+		"PUT：写入正文并回读一致",
+		`${upPut.status} chars=${upSaved.chars}`,
+	);
+
+	const upTooLong = await fetch(`${BASE}/api/v1/agent/user-profile`, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ content: "字".repeat(3000) }),
+	});
+	check(upTooLong.status === 400, "PUT：超过 8192 字节 → 400", String(upTooLong.status));
+
+	// 上下文默认页（总管）应带上这一段；worker 角色保留 0 字槽位。
+	const upChiefCtx = (await (
+		await fetch(`${BASE}/api/v1/agent/context-defaults?role=chief`)
+	).json()) as { system?: { sections?: Array<{ key?: string; chars?: number; empty?: boolean }> } };
+	const upChiefSection = (upChiefCtx.system?.sections ?? []).find((item) => item.key === "user_profile");
+	check(
+		Boolean(upChiefSection) && (upChiefSection?.chars ?? 0) > upText.length,
+		"默认开销（总管）：user_profile 段有内容",
+		`chars=${upChiefSection?.chars ?? 0}`,
+	);
+	const upWorkerCtx = (await (
+		await fetch(`${BASE}/api/v1/agent/context-defaults?role=worker`)
+	).json()) as { system?: { sections?: Array<{ key?: string; chars?: number; empty?: boolean }> } };
+	const upWorkerSection = (upWorkerCtx.system?.sections ?? []).find((item) => item.key === "user_profile");
+	check(
+		upWorkerSection?.empty === true && (upWorkerSection?.chars ?? -1) === 0,
+		"默认开销（worker）：user_profile 是 0 字槽位",
+		`chars=${upWorkerSection?.chars ?? -1}`,
+	);
+
+	// 真轮次：主对话（chief）的注入表里应有 user_profile，且排在 persona 之后。
+	const upChiefChat = await chat({ messages: [{ role: "user", content: "关于我探针第一句" }] });
+	const upChiefId = upChiefChat.result.conversationId ?? "";
+	const upChiefInj = (await (
+		await fetch(`${BASE}/api/v1/agent/chat/${encodeURIComponent(upChiefId)}/injections`)
+	).json()) as Array<{ id?: string; channel?: string; length?: number }>;
+	const upPersonaAt = upChiefInj.findIndex((item) => item.id === "persona");
+	const upProfileAt = upChiefInj.findIndex((item) => item.id === "user_profile");
+	check(
+		upProfileAt >= 0 && upPersonaAt >= 0 && upProfileAt === upPersonaAt + 1,
+		"主对话真轮次：user_profile 紧跟 persona",
+		`persona=${upPersonaAt} user_profile=${upProfileAt}`,
+	);
+	check(
+		(upChiefInj[upProfileAt]?.length ?? 0) > upText.length &&
+			upChiefInj[upProfileAt]?.channel === "system",
+		"注入段是 system、正文非空",
+		`channel=${upChiefInj[upProfileAt]?.channel} length=${upChiefInj[upProfileAt]?.length}`,
+	);
+
+	// worker 会话固定不读。
+	const upWorkerChat = await chat({
+		messages: [{ role: "user", content: "关于我探针 worker 一句" }],
+		chatKind: "worker",
+	});
+	const upWorkerId = upWorkerChat.result.conversationId ?? "";
+	const upWorkerInj = (await (
+		await fetch(`${BASE}/api/v1/agent/chat/${encodeURIComponent(upWorkerId)}/injections`)
+	).json()) as Array<{ id?: string }>;
+	check(
+		!upWorkerInj.some((item) => item.id === "user_profile"),
+		"worker 会话：不注入 user_profile",
+		upWorkerInj.map((item) => item.id).join(","),
+	);
+
+	// 每 Agent 开关：关掉总管 → 主对话不再注入；开回来 → 恢复。
+	const upOff = await fetch(`${BASE}/api/v1/agent/user-profile/agents/chief`, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ read: false }),
+	});
+	const upOffBody = (await upOff.json()) as { agents?: Array<{ id?: string; read?: boolean }> };
+	check(
+		upOff.status === 200 &&
+			(upOffBody.agents ?? []).some((agent) => agent.id === "chief" && agent.read === false),
+		"PUT agents/chief {read:false}：落库并回显",
+		String(upOff.status),
+	);
+	const upOffChat = await chat({ messages: [{ role: "user", content: "关掉之后再说一句" }] });
+	const upOffId = upOffChat.result.conversationId ?? "";
+	const upOffInj = (await (
+		await fetch(`${BASE}/api/v1/agent/chat/${encodeURIComponent(upOffId)}/injections`)
+	).json()) as Array<{ id?: string }>;
+	check(
+		!upOffInj.some((item) => item.id === "user_profile"),
+		"总管关掉开关：主对话不再注入",
+		upOffInj.map((item) => item.id).join(","),
+	);
+	await fetch(`${BASE}/api/v1/agent/user-profile/agents/chief`, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ read: true }),
+	});
+
+	// 错误码：worker 没有开关（400）、未知 id 404。
+	const upWorkerSwitch = await fetch(`${BASE}/api/v1/agent/user-profile/agents/worker`, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ read: false }),
+	});
+	check(upWorkerSwitch.status === 400, "agents/worker → 400（固定不读，没有开关）", String(upWorkerSwitch.status));
+	const upUnknownSwitch = await fetch(`${BASE}/api/v1/agent/user-profile/agents/no-such-agent`, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ read: false }),
+	});
+	check(upUnknownSwitch.status === 404, "未知 Agent → 404", String(upUnknownSwitch.status));
+
+	// 清空正文 = 删文件、回到不注入。
+	const upClear = await fetch(`${BASE}/api/v1/agent/user-profile`, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ content: "" }),
+	});
+	const upCleared = (await upClear.json()) as { content?: string; chars?: number };
+	check(upClear.status === 200 && upCleared.content === "" && upCleared.chars === 0, "PUT 空串：清空正文", String(upCleared.chars));
+
+	// ── §36 请求与缓存（2026-11-19）────────────────────────
+	// 两轮真实 faux 请求：列表要能还原请求，两轮的固定前缀指纹必须相同
+	// （2026-11-19 前缀锁定：动态注入走尾部 user，不再追加 pi.system 补丁）。
+	{
+		const rcFirstChat = await chat({ messages: [{ role: "user", content: "缓存统计探针第一句" }] });
+		const rcId = rcFirstChat.result.conversationId ?? "";
+		check(Boolean(rcId), "§36 探针会话建立", rcId);
+		await chat({
+			conversationId: rcId,
+			messages: [{ role: "user", content: "缓存统计探针第二句" }],
+		});
+		const rcStatsRes = await fetch(
+			`${BASE}/api/v1/agent/chat/${encodeURIComponent(rcId)}/requests?page=1&pageSize=100`,
+		);
+		const rcStats = (await rcStatsRes.json()) as {
+			total?: number;
+			page?: number;
+			pages?: number;
+			max?: number;
+			summary?: { requests?: number; hitRate?: number };
+			items?: Array<{ entryId?: number; hitRate?: number; promptTokens?: number }>;
+		};
+		check(
+			rcStatsRes.status === 200 && (rcStats.total ?? 0) >= 2,
+			"§36 请求列表：两轮后至少两条请求",
+			`status=${rcStatsRes.status} total=${rcStats.total} page=${rcStats.page} pages=${rcStats.pages}`,
+		);
+		check(
+			(rcStats.items ?? []).every(
+				(item) => typeof item.hitRate === "number" && typeof item.promptTokens === "number",
+			) && (rcStats.items ?? []).length > 0,
+			"§36 每行带 prompt / 命中率",
+			JSON.stringify((rcStats.items ?? [])[0] ?? null).slice(0, 120),
+		);
+		check(
+			(rcStats.summary?.requests ?? 0) >= 2 && typeof rcStats.summary?.hitRate === "number",
+			"§36 汇总带请求数与加权命中率",
+			`requests=${rcStats.summary?.requests} hitRate=${rcStats.summary?.hitRate}`,
+		);
+		const rcItems = rcStats.items ?? [];
+		if (rcItems.length >= 2) {
+			const rcDetail = async (entryId: number) =>
+				(await (
+					await fetch(
+						`${BASE}/api/v1/agent/chat/${encodeURIComponent(rcId)}/requests/${entryId}/context`,
+					)
+				).json()) as {
+					request?: { entryId?: number };
+					context?: { system?: { sections?: unknown[] } };
+					system?: { hash?: string };
+					compare?: { systemChanged?: boolean; toolsChanged?: boolean } | null;
+					note?: string;
+				};
+			const rcNewest = await rcDetail(Number(rcItems[0].entryId));
+			const rcOlder = await rcDetail(Number(rcItems[1].entryId));
+			check(
+				rcNewest.request?.entryId === rcItems[0].entryId &&
+					(rcNewest.context?.system?.sections ?? []).length > 0,
+				"§36 单条详情：重放固定前缀",
+				`sections=${(rcNewest.context?.system?.sections ?? []).length}`,
+			);
+			check(
+				Boolean(rcNewest.system?.hash) && rcNewest.system?.hash === rcOlder.system?.hash,
+				"§36 两轮之间固定前缀指纹不变（没有 pi.system 补丁）",
+				`newest=${rcNewest.system?.hash} older=${rcOlder.system?.hash}`,
+			);
+			check(
+				rcNewest.compare?.systemChanged === false && rcNewest.compare?.toolsChanged === false,
+				"§36 详情对比：system 与工具面都没变",
+				JSON.stringify(rcNewest.compare ?? null).slice(0, 120),
+			);
+			check(
+				typeof rcNewest.note === "string" && rcNewest.note.length > 0,
+				"§36 详情带「临时注入不在存档里」说明",
+				"",
+			);
+		}
+		const rcMissing = await fetch(
+			`${BASE}/api/v1/agent/chat/${encodeURIComponent(rcId)}/requests/999999999/context`,
+		);
+		check(rcMissing.status === 404, "§36 非请求 entry → 404", String(rcMissing.status));
+	}
+
 } finally {
 	server.kill();
 	await sleep(300);
@@ -4473,6 +4787,11 @@ try {
 		[".data/probe-http-pairing.json.tmp", { force: true }],
 		[".data/probe-http-pairing-2step.json", { force: true }],
 		[".data/probe-http-pairing-2step.json.tmp", { force: true }],
+		// 关于我（2026-11-19 §35）：正文文件只在探针目录里
+		[".data/probe-http-user-profile.md", { force: true }],
+		// 工具用量账（2026-11-17 §16 断言 err === 0）：不清会把上一轮的失败次数带进来，
+		// 第二次跑必红——探针必须可重复跑，这里补上清理。
+		[".data/probe-http-tool-usage.json", { force: true }],
 	];
 	for (const [path, options] of leftovers) {
 		try {

@@ -32,13 +32,12 @@ function tool(name: string): ToolRegistration {
 	} as unknown as ToolRegistration;
 }
 
-test("DEFERRED_TOOL_NAMES：固定名单（批4 起 10 个：+save_reminder_advice）", () => {
+test("DEFERRED_TOOL_NAMES：固定名单（批4 起 9 个：+save_reminder_advice）", () => {
 	assert.deepEqual([...DEFERRED_TOOL_NAMES].sort(), [
 		"group_manage",
 		"partner_manage",
 		"partner_skill_write",
 		"propose_project",
-		"propose_topic",
 		// 2026-11-19 批2 决策上报链：只在唤醒轮用得上，默认按需。
 		"respond_escalation",
 		"routine_manage",
