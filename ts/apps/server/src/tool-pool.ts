@@ -32,7 +32,6 @@ export const DEFAULT_DEFERRED_TOOL_NAMES: readonly string[] = [
 	"save_skill_advice",
 	"partner_skill_write",
 	"propose_project",
-	"propose_topic",
 	"send_to_agent",
 	// 决策上报答复（2026-11-19 批2）：只在唤醒轮用得上，初始不进请求、不打缓存前缀。
 	"respond_escalation",

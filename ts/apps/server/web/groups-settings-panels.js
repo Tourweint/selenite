@@ -14,11 +14,10 @@ import { clearGroupAtHint, closeGroupAtPop, groupAt, pickGroupAt, resizeGroupInp
 import { openCreateGroupModal } from "./groups-create.js";
 import { closeGroupSettingsDrawer, groupSettingsOpen, gs, gsHead, openGroupSettingsDrawer, renderGroupSettings } from "./groups-settings.js";
 import { GROUP_MEMBER_MAX, GROUP_MEMBER_MIN } from "./groups-thread.js";
-import { loadTopicsSidebar, openGroupChat } from "./groups-topics.js";
+import { openGroupChat } from "./groups-list.js";
 import { request } from "./net.js";
 import { go, groupRouteId } from "./route.js";
 import { openSecMenu } from "./sec-menu.js";
-import { sectionClosed } from "./shell.js";
 import { openConfirm, toast } from "./ui-atoms.js";
 
 function renderGroupSettingsMembers(drawer) {
@@ -405,12 +404,5 @@ el.secGroupsMore?.addEventListener("click", () => {
    不要放在返回之后」）。它只负责去列表态；群会话里点它同样落到 #/groups，
    不必先按顶栏返回键再找入口。 */
 el.secGroupsAll?.addEventListener("click", () => go("groups"));
-
-/* 课题（2026-11-07 批二 / 2026-11-13 浮卡）：轨道钮点击挂悬停卡开关（见轨道悬停浮卡段）；
-   「展开侧栏落到课题分区」的老行为保留在 openTopicsInSidebar()，入口是卡底那一行。 */
-// 分区头由 SIDE_SECTIONS 的循环统一折叠；这里只补「展开时现拉一次」，不再 toggle。
-el.secTopicsToggle?.addEventListener("click", () => {
-  if (!sectionClosed("topics")) void loadTopicsSidebar();
-});
 
 export { confirmDeleteGroup, fetchPartnerOptions, patchGroup, renderGroupSettingsMembers, renderGroupSettingsReply };

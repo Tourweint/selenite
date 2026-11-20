@@ -103,7 +103,6 @@ const TOOL_GROUP_OF: Record<string, string> = {
 	// 派活与任务
 	delegate: "派活与任务",
 	propose_project: "派活与任务",
-	propose_topic: "派活与任务",
 	routine_manage: "派活与任务",
 	set_reminder: "派活与任务",
 	report_progress: "派活与任务",

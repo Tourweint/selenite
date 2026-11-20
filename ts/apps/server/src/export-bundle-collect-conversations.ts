@@ -12,7 +12,6 @@ import { listFlags } from "./flags.ts";
 import { COMPANIONS_ENABLED, partnersStore } from "./partners.ts";
 import { projectsStore } from "./projects.ts";
 import { modelCatalog, readLlmConfig } from "./provider.ts";
-import { topicsStore } from "./topics.ts";
 import { MemoryRecord } from "@lifediary/memory";
 import { createHash } from "node:crypto";
 import { EXPORT_MESSAGE_LIMIT, EXPORT_PART_LABELS, MEMORY_SCOPE_LIMIT, chatTitleOf, decodeBase64, emptyPart, imageExtension, isoOrNull, jsonFile, jsonlFile, localStamp, projectOf, renderMessagesJson, renderTranscriptMarkdown, shortError, slugifyTitle } from "./export-bundle-compose-bundle.ts";
@@ -211,14 +210,6 @@ function collectLibrary(): BundlePart {
 	}
 
 	try {
-		const topics = topicsStore().list();
-		files.push(jsonFile("library/topics.json", { topics }));
-		counts.topics = topics.length;
-	} catch (error) {
-		notes.push(`课题读失败：${shortError(error)}`);
-	}
-
-	try {
 		const diary = diaryStore();
 		const total = diary.count();
 		const entries = diary.list(total + 1);
@@ -236,7 +227,7 @@ function collectLibrary(): BundlePart {
 		notes.push(`例行读失败：${shortError(error)}`);
 	}
 
-	const hasAny = (counts.projects ?? 0) + (counts.topics ?? 0) + (counts.diary ?? 0) + (counts.routines ?? 0) > 0;
+	const hasAny = (counts.projects ?? 0) + (counts.diary ?? 0) + (counts.routines ?? 0) > 0;
 	return {
 		id: "library",
 		label: EXPORT_PART_LABELS.library,

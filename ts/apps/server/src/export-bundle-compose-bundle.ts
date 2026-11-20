@@ -17,7 +17,7 @@ export type ExportPartId = (typeof EXPORT_PART_IDS)[number];
 export const EXPORT_PART_LABELS: Record<ExportPartId, string> = {
 	conversations: "会话与消息",
 	memory: "记忆",
-	library: "内容（项目/课题/日记/例行）",
+	library: "内容（项目/日记/例行）",
 	team: "团队（执事/群组）",
 	config: "配置与用量",
 };
@@ -336,7 +336,6 @@ export function composeBundle(
 			{ what: "任务专线会话（task- 前缀）", why: "首句是机器指令，不是用户说过的话（与侧栏口径一致）" },
 			{ what: "供应商密钥 / 配对码 / 设备令牌 / 服务端日志", why: "不该随档案外流" },
 			{ what: "提醒（reminder）", why: "运行中的排程，不是档案" },
-			{ what: "课题的待确认提案", why: "只是还没接受的卡片，48 小时后自然过期" },
 		],
 		redactions: ["provider keyEnv 之外的任何密钥值", "配对码", "设备令牌", "日志"],
 	};

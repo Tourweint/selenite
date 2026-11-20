@@ -24,7 +24,7 @@ const EXPORT_PARTS = [
     hint: "每个对话一个文件夹：transcript.md（人读）+ messages.json（机读）",
   },
   { id: "memory", name: "记忆", hint: "全部记忆记录（偏好 / 事实 / 打算 / 履历 / 经验）→ records.jsonl" },
-  { id: "library", name: "内容", hint: "项目、课题、日记、例行 → library/" },
+  { id: "library", name: "内容", hint: "项目、日记、例行 → library/" },
   { id: "team", name: "团队", hint: "执事名册、SOUL 与契约、群组与群消息 → team/" },
   { id: "config", name: "配置与用量", hint: "供应商（不含密钥）、模型用量、开关现值 → config/" },
 ];

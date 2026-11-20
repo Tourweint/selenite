@@ -52,7 +52,6 @@ import {
 	type DelegationReport,
 } from "./delegation.ts";
 // 证据裁判（2026-11-10 批 14）：验收 fail 时起 read-only 子会话，结论回传 chancellor 返工判定。
-import { withDelegationJudge } from "./delegation-judge.ts";
 // 派活注入项目记忆（2026-11-16）：系统内 native 与外部 CLI 都只读 TASK.md，
 // 记忆只能随 requirement 送过去；只取单子所属项目的 scope。
 import {
@@ -127,14 +126,13 @@ import { nextReminderAt, ReminderTask } from "./reminder.ts";
 import type { SkillStore } from "./skills.ts";
 import type { SkillAdviceSaveResult } from "./skill-advice.ts";
 import { SAVE_REMINDER_ADVICE_DESCRIPTION, type ReminderAdviceSaveResult } from "./reminder-advice.ts";
-// 课题工具（2026-11-07 长期课题跟进）：存储 / 搜索都从 deps 注入，测试可替换、缺失不注册。
-import { TOPICS_ENABLED, type TopicsStore } from "./topics.ts";
+// 搜索工具（2026-11-07 建；2026-11-20 与课题开关解耦）：从 deps 注入，测试可替换、缺失不注册。
 import type { SearchModule } from "./search.ts";
 // 会话考古（2026-11-09 T4 §4）：检索实现留在 agent/session-search.ts（只依赖 shared），
 // 这里只收注入函数，避免 tools.ts 反向 import session.ts 绕成环。
 import type { SessionSearchHit } from "./agent/session-search.ts";
 // 工具返回统一契约（2026-11-10 批 16 §一；批 18 §五迁入只读四件）：
-// 已迁 = recall_sessions / ask_user / report_progress / recall / web_search / propose_topic / skill。
+// 已迁 = recall_sessions / ask_user / report_progress / recall / web_search / skill。
 import { encodeToolResult, err, ok, type ToolResult } from "./tool-result.ts";
 import { isDeferredTool, toolIndexEnabled } from "./tool-index.ts";
 import { recordToolLoad } from "./tool-usage.ts";
@@ -297,12 +295,7 @@ export interface ToolDeps {
 	groupContext?: () => GroupContext;
 	/** 派单回执表；不传用默认 `.data/delegations.sqlite`。测试可注入临时库。 */
 	receipts?: DelegationReceipts | null;
-	/**
-	 * 课题存储（2026-11-07 长期课题跟进）。可选注入：为 null / 缺省时
-	 * `propose_topic` 与 `web_search` 都不注册（研究回合也拿不到搜索）。
-	 */
-	topics?: TopicsStore | null;
-	/** 搜索适配层（2026-11-07）。测试注入假上游；缺省时不注册课题工具。 */
+	/** 搜索适配层（2026-11-07）。测试注入假上游；缺省时不注册 `web_search`。 */
 	search?: SearchModule | null;
 	/**
 	 * 执事间递话（2026-11-08 扫尾批 8d）：传了才注册 `send_to_agent`。
@@ -1245,11 +1238,11 @@ export function createTools(deps: ToolDeps) {
 					run: (request, options) =>
 						run(
 							{ ...request, workRoot: chancellorWorkRoot() },
-							withDelegationJudge({
+							{
 								...options,
 								// 后台执行不能挂本轮对话的 abortSignal：用户这一轮结束不该杀掉任务。
 								...(asyncMode ? {} : { signal: context.abortSignal }),
-							}),
+							},
 						),
 					emit: emitDelegation,
 					report: deps.reportDelegation,
@@ -2098,19 +2091,15 @@ export function createTools(deps: ToolDeps) {
 		);
 	}
 
-	// 课题（2026-11-07 长期课题跟进 §五）：`web_search` + `propose_topic`。
-	// TOPICS_ENABLED=false 或依赖缺失 → 两个都不注册（一行回滚）。
+	// 搜索（2026-11-07 建；2026-11-20 从课题开关解耦）：有搜索适配层就注册。
 	// web_search 是纯网络读，**不进 WRITE_TOOLS**（approval-policy.ts 不动）。
-	const topicsDeps = TOPICS_ENABLED ? deps.topics ?? null : null;
-	const searchDeps = TOPICS_ENABLED ? deps.search ?? null : null;
-	if (topicsDeps && searchDeps) {
-		const topics = topicsDeps;
-		const search = searchDeps;
+	const search = deps.search ?? null;
+	if (search) {
 		tools.push(
 			defineTool({
 				name: "web_search",
 				description:
-					"查公开网络资料拿事实（新闻、行情、论文、文档、政策），适合课题研究与需要实时性的问题。" +
+					"查公开网络资料拿事实（新闻、行情、论文、文档、政策），适合需要实时性或外部资料的问题。" +
 					"不适合：内部文件（用 read）、闲聊、以及一次搜索就能答完却反复搜；一次能答就别多搜。",
 				parameters: Type.Object({
 					query: Type.String({ description: "搜索关键词或一句话问题" }),
@@ -2142,84 +2131,6 @@ export function createTools(deps: ToolDeps) {
 							message: result.hits
 								.map((hit) => `${hit.title || "（无标题）"} — ${hit.url}\n${hit.summary}`)
 								.join("\n\n"),
-						}),
-					);
-				},
-			}),
-			defineTool({
-				name: "propose_topic",
-				description:
-					"提议长期跟进一个课题。判据（从严，四条都满足才提）：开放性问题；今天给不了定论；" +
-					"值得隔几天回头看；用户显出兴趣。**只提交待确认的提议，不创建课题**——" +
-					"用户确认后才会建课题并开始按节奏研究。同一话题别重复提；用户直说「长期跟进 / 每周研究一下」时也用它。",
-				parameters: Type.Object({
-					question: Type.String({ description: "一句话问题，不超过 200 字" }),
-					flavor: Type.Unsafe<"watch" | "dig">({
-						type: "string",
-						enum: ["watch", "dig"],
-						description:
-							"watch=盯梢型（盯政策/价格/论文/动态，重点看和上次比变了什么）；" +
-							"dig=啃题型（搞懂一个大问题，每次往下啃一小块）",
-					}),
-					cron: Type.Optional(
-						Type.String({
-							description: "研究节奏，5 段 cron（分 时 日 月 周），默认「0 9 * * 1」= 每周一 09:00",
-						}),
-					),
-					origin: Type.Optional(
-						Type.Unsafe<"user" | "proposal">({
-							type: "string",
-							enum: ["user", "proposal"],
-							description:
-								"user=用户明确要求长期跟进；proposal=你自己嗅探到的（默认 proposal）",
-						}),
-					),
-				}),
-				execute: async (args, api) => {
-					// 群会话不进课题（与 remember 同口径）：群里提的题不属于任何一个人的长期目标。
-					if (partnersStore().isGroupSession(api.conversationId)) {
-						return textToolResult(
-							err(
-								"group_session",
-								"群聊里不提课题；要长期跟进的事请主人在私聊里说。",
-								"等主人在私聊里说，不要在这里建课题。",
-							),
-						);
-					}
-					const question = args.question.trim();
-					if (!question) return textToolResult(err("question_empty", "question 不能为空"));
-					if (question.length > 200) {
-						return textToolResult(
-							err("question_too_long", "question 不超过 200 字", "把问题压成一句再提。"),
-						);
-					}
-					const result = topics.proposeTopic({
-						question,
-						flavor: args.flavor,
-						...(args.cron ? { cron: args.cron } : {}),
-						origin: args.origin === "user" ? "user" : "proposal",
-					});
-					if (!result.ok) {
-						// 已在跟的题把 id 放进 hint（ToolError 没有给业务字段留位置，别为它改契约）
-						return textToolResult(
-							err(
-								result.reason,
-								result.message,
-								result.existingTopicId
-									? `已在跟的课题 id：${result.existingTopicId}（别重复提）`
-									: undefined,
-							),
-						);
-					}
-					return textToolResult(
-						ok({
-							proposalId: result.proposal.id,
-							question: result.proposal.question,
-							flavor: result.proposal.flavor,
-							cron: result.proposal.cron,
-							message:
-								"已提交待确认：用户确认后才会建课题并开始按节奏研究；" +
-								"确认之前不要把它当成已经在跟的课题。",
 						}),
 					);
 				},

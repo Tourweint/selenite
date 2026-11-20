@@ -28,7 +28,6 @@ process.env.PARTNERS_DB_PATH = join(root, "partners.sqlite");
 process.env.PARTNER_HOMES_ROOT = join(root, "partner-homes");
 process.env.CHIEF_PARTNER = "false";
 process.env.PROJECTS_DB_PATH = join(root, "projects.sqlite");
-process.env.TOPICS_STATE_PATH = join(root, "topics.json");
 process.env.LLM_PROVIDER = "faux";
 // 派活单目录也钉到临时目录：否则采集器会去扫开发机真实的 runs/，夹具就没法控制
 // 「在办的单不收」这条。测试里只放两张假的 ticket.json。

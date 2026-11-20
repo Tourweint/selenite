@@ -17,8 +17,8 @@
  *
  * 迁移进度（2026-11-10 批 25 核对）：
  *   - **写类全部迁完**：`propose_project` / `partner_skill_write` / `partner_manage` /
- *     `group_manage` / `routine_manage` 在本批迁完（批 25 §一）；`delegate` 在批 23b、
- *     `propose_topic` 在批 18。业务分支（`needs_project`、候选清单、部分成功）仍留在
+ *     `group_manage` / `routine_manage` 在本批迁完（批 25 §一）；`delegate` 在批 23b。
+ *     业务分支（`needs_project`、候选清单、部分成功）仍留在
  *     `data`，只有参数非法 / 越权 / 存储失败才走 `err`。
  *   - **已迁（只读）**：`recall_sessions` / `ask_user` / `report_progress` /
  *     `recall` / `web_search` / `skill`（批 18）。

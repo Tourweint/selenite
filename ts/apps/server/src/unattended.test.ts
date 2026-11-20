@@ -67,7 +67,7 @@ test("isUnattended：例行轮 / 自主轮 / task- 会话 / AGENT_UNATTENDED=1 �
 
 test("三态：纯读 allow / 花钱与要批准 skip / 扩权 deny", () => {
 	// 纯读 / 只写内部状态
-	for (const name of ["read", "recall", "remember", "skill", "web_search", "propose_topic"]) {
+	for (const name of ["read", "recall", "remember", "skill", "web_search"]) {
 		assert.equal(resolveUnattendedVerdict(name), "allow", `${name} 应放行`);
 	}
 	// 写盘 / 起进程 / 派活 / 花钱 / 提问

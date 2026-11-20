@@ -55,7 +55,7 @@ export const TOOL_CAPABILITIES: Record<string, ToolCapability> = {
 		riskLevel: "low",
 		needsApproval: "never",
 		concurrentSafe: true,
-		notes: "读文件，纯读；工作区边界由 path-guard 之外的既有语义兜。",
+		notes: "读文件，纯读；受限两档（只读 / 在工作区内修改）也走 path-guard 限根，完全访问不限（2026-11-20）。",
 	},
 	write: {
 		name: "write",
@@ -237,7 +237,7 @@ export const TOOL_CAPABILITIES: Record<string, ToolCapability> = {
 		notes: "经固定 repair.py 起 python 子进程往主人一生库写 user_statement（主人明确让写才用）；每写必弹审批（critical），命令拼死、argv 传参，按硬约束进 WRITE_TOOLS + 高危清单。",
 	},
 
-	// ── 课题 / 搜索 / 递话 ─────────────────────────────────
+	// ── 搜索 / 递话 ───────────────────────────────────────
 	web_search: {
 		name: "web_search",
 		readOnly: true,
@@ -247,16 +247,6 @@ export const TOOL_CAPABILITIES: Record<string, ToolCapability> = {
 		needsApproval: "never",
 		concurrentSafe: true,
 		notes: "纯网络读；出网但无本地副作用。",
-	},
-	propose_topic: {
-		name: "propose_topic",
-		readOnly: false,
-		destructive: false,
-		sideEffectScope: "memory",
-		riskLevel: "low",
-		needsApproval: "never",
-		concurrentSafe: true,
-		notes: "只写内部课题提议表；语义同 remember，不进闸门。",
 	},
 	send_to_agent: {
 		name: "send_to_agent",

@@ -13,19 +13,17 @@ import { RECENTS_LIMIT, attachChatContextMenu, chatLabel, loadChats, recentChats
 import { el } from "./dom.js";
 import { groups, renderGroupRows } from "./groups-base.js";
 import { closeGroupSettingsDrawer } from "./groups-settings.js";
-import { TOPIC_EMPTY_TEXT, expandedTopicIds, loadTopicsSidebar, topicsSidebarAvailable, topicsSidebarList } from "./groups-topics.js";
 import { toggleModelMenu } from "./hover-tip.js";
 import { renderRoster } from "./partner-roster.js";
 import { openChiefChat, rosterDomain } from "./partners-status.js";
 import { closeProjectMenu, ensureProjectMenuOpen, placeRailMenu } from "./project-modal.js";
 import { go } from "./route.js";
 import { closeChatSettings, toggleChatSettings } from "./settings-drawer.js";
-import { applySections, sidebarOpen, toggleSidebar } from "./shell.js";
 import { state } from "./state.js";
 import { closePopover, openPopover, popoverOpen } from "./ui-atoms.js";
 
 /* ── 收起轨道悬停浮卡（2026-11-13）────────────────────────────
- * 收起态悬停 总管 / 执事 / 对话 / 项目 / 群组 / 课题 → 对应卡片浮到主界面，
+ * 收起态悬停 总管 / 执事 / 对话 / 项目 / 群组 → 对应卡片浮到主界面，
  * 顺序与展开态分区一一对应（2026-11-13 用户拍板：任务中心与今日回顾退出轨道）。
  * 点击是同一个开关（键盘 / 触屏路径；总管头像例外：点击直接开对话，悬停才是卡）。
  * 轨道按钮的 title/data-tip 悬停说明整体退役：悬停出来的就是卡本身，不再有第二层文字。
@@ -307,96 +305,12 @@ function renderRailChatsCard() {
   ]));
 }
 
-/** 展开侧栏并落到课题分区；带 topicId 时滚到那条并展开它（时间线按需拉）。
-    轨道课题卡的「点行 / 展开侧栏查看」共用这一条路径（旧轨道钮点击行为原样保留）。 */
-function openTopicsInSidebar(topicId = "") {
-  if (!sidebarOpen()) toggleSidebar();
-  localStorage.setItem("lifediary.side.topics", "open");
-  applySections();
-  void loadTopicsSidebar({ force: true });
-  const section = document.getElementById("sec-topics");
-  if (!section) return;
-  const item = topicId
-    ? section.querySelector(`[data-topic-id="${CSS.escape(topicId)}"]`)
-    : section;
-  item?.scrollIntoView({ block: "nearest" });
-  if (topicId && item && !expandedTopicIds.has(topicId)) {
-    item.querySelector(".topic-row")?.click();
-  }
-}
-
-/** 课题悬停卡（2026-11-13）：进行中课题一览（与展开态分区同一份数据/行皮）；
-    点行 = 展开侧栏定位并展开那条，卡底 = 只落到课题分区。 */
-function renderRailTopicsCard() {
-  const menu = el.railTopicsMenu;
-  if (!menu) return;
-  menu.replaceChildren();
-  const list = document.createElement("div");
-  list.className = "roster";
-  menu.append(list);
-  const ongoing = topicsSidebarList.filter((topic) => topic.status !== "closed");
-  if (!ongoing.length) {
-    const empty = document.createElement("div");
-    empty.className = "roster-empty";
-    empty.textContent = TOPIC_EMPTY_TEXT;
-    list.append(empty);
-  }
-  for (const topic of ongoing) {
-    const row = document.createElement("div");
-    row.className = "side-item roster-row topic-row";
-    row.tabIndex = 0;
-    row.setAttribute("role", "button");
-    row.title = topic.question;
-
-    const label = document.createElement("span");
-    label.className = "roster-name";
-    label.textContent = topic.question;
-
-    const flavor = document.createElement("span");
-    flavor.className = "pill-tag topic-flavor";
-    flavor.dataset.flavor = topic.flavor;
-    flavor.textContent = topic.flavor === "dig" ? "啃题" : "盯梢";
-
-    row.append(label, flavor);
-    if (topic.status === "paused") {
-      const paused = document.createElement("span");
-      paused.className = "topic-paused";
-      paused.textContent = "已暂停";
-      row.append(paused);
-    }
-    const open = () => {
-      closeRailCards();
-      openTopicsInSidebar(topic.id);
-    };
-    row.addEventListener("click", open);
-    row.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter" && event.key !== " ") return;
-      event.preventDefault();
-      open();
-    });
-    list.append(row);
-  }
-  menu.append(railCardFoot([["展开侧栏查看", () => {
-    closeRailCards();
-    openTopicsInSidebar();
-  }]]));
-}
-
-/** 对话卡的数据现拉一次（卡是「快速跳转」，列表不能比展开态旧）；
-    课题卡同理（旧数据可能已被总管改过节奏）。等回来时指针若已离开就不再弹。 */
+/** 对话卡的数据现拉一次（卡是「快速跳转」，列表不能比展开态旧）。等回来时指针若已离开就不再弹。 */
 const railChatsShow = attachRailCard(el.railChats, el.railChatsMenu, renderRailChatsCard, {
   asyncShow: async () => {
     await loadChats();
     if (railHover.btn !== el.railChats) return;
     railCardShow(el.railChats, el.railChatsMenu, renderRailChatsCard);
-  },
-});
-
-const railTopicsShow = attachRailCard(el.railTopics, el.railTopicsMenu, renderRailTopicsCard, {
-  asyncShow: async () => {
-    await loadTopicsSidebar({ force: true });
-    if (topicsSidebarAvailable === false || railHover.btn !== el.railTopics) return;
-    railCardShow(el.railTopics, el.railTopicsMenu, renderRailTopicsCard);
   },
 });
 
@@ -433,7 +347,6 @@ el.railProj?.addEventListener("click", () => {
 el.railGroups?.addEventListener("click", () => toggleRailCard(el.railGroups, el.railGroupsMenu, renderRailGroupsCard, railGroupsShow));
 el.railPartners?.addEventListener("click", () => toggleRailCard(el.railPartners, el.railPartnersMenu, renderRailPartnersCard, railPartnersShow));
 el.railChats?.addEventListener("click", () => toggleRailCard(el.railChats, el.railChatsMenu, renderRailChatsCard, railChatsShow));
-el.railTopics?.addEventListener("click", () => toggleRailCard(el.railTopics, el.railTopicsMenu, renderRailTopicsCard, railTopicsShow));
 
 el.modelPill?.addEventListener("click", () => void toggleModelMenu());
 // 菜单里的点击不冒泡到「点外面就关」的判定：点供应商段会就地重渲染，
@@ -447,4 +360,4 @@ el.chatSettingsBtn?.addEventListener("click", () => void toggleChatSettings());
 el.chatSettingsOverlay?.addEventListener("click", () => closeChatSettings());
 el.groupSettingsOverlay?.addEventListener("click", () => closeGroupSettingsDrawer());
 
-export { RAIL_HOVER_CLOSE_MS, RAIL_HOVER_OPEN_MS, attachRailCard, closeRailCards, openTopicsInSidebar, railCardFoot, railCardShow, railChatsShow, railGroupsShow, railHover, railHoverArmed, railPartnersShow, railProjectShow, railTopicsShow, renderRailChatsCard, renderRailChiefCard, renderRailGroupsCard, renderRailPartnersCard, renderRailTopicsCard, scheduleRailCard, scheduleRailCardClose, toggleRailCard };
+export { RAIL_HOVER_CLOSE_MS, RAIL_HOVER_OPEN_MS, attachRailCard, closeRailCards, railCardFoot, railCardShow, railChatsShow, railGroupsShow, railHover, railHoverArmed, railPartnersShow, railProjectShow, renderRailChatsCard, renderRailChiefCard, renderRailGroupsCard, renderRailPartnersCard, scheduleRailCard, scheduleRailCardClose, toggleRailCard };

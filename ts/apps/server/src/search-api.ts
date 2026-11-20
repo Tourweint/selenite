@@ -18,9 +18,9 @@ import {
 } from "./search-config.ts";
 
 /**
- * 搜索源配置接口（2026-11-07 长期课题跟进 S2；2026-11-12 多供应商，web 专用）。
+ * 搜索源配置接口（2026-11-07 建；2026-11-12 多供应商，web 专用）。
  *
- * 注册形态照 group-api / topic-api：只做 HTTP 形状映射，鉴权走 index.ts 的全局中间件。
+ * 注册形态照 group-api：只做 HTTP 形状映射，鉴权走 index.ts 的全局中间件。
  * 落点拆两处（各有分工）：
  *   - `.data/search.json`：用哪些源、顺序、地址覆盖（本文件经 search-config 读写）；
  *   - `.data/provider-keys.json`：key（与供应商密钥同一份，按 vendor.keyEnv 取 env）。

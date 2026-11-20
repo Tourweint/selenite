@@ -11,7 +11,7 @@ import { paintAvatar } from "./avatar.js";
 import { el } from "./dom.js";
 import { groupMemberAvatar, groups, initGroups } from "./groups-base.js";
 import { confirmDeleteGroup, renderGroupSettingsMembers, renderGroupSettingsReply } from "./groups-settings-panels.js";
-import { openGroupChat } from "./groups-topics.js";
+import { openGroupChat } from "./groups-list.js";
 import { CS_ICONS } from "./icons.js";
 import { request } from "./net.js";
 import { csSvg } from "./settings-drawer.js";

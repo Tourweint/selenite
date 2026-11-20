@@ -33,7 +33,6 @@ process.env.PARTNERS_DB_PATH = join(root, "partners.sqlite");
 process.env.PARTNER_HOMES_ROOT = join(root, "partner-homes");
 process.env.CHIEF_PARTNER = "false";
 process.env.PROJECTS_DB_PATH = join(root, "projects.sqlite");
-process.env.TOPICS_STATE_PATH = join(root, "topics.json");
 // 只为 readLlmConfig() 不空：faux 假模型，条目全走 write submission，零模型调用
 process.env.LLM_PROVIDER = "faux";
 

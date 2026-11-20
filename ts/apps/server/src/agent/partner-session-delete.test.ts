@@ -26,7 +26,6 @@ process.env.PARTNERS_DB_PATH = join(root, "partners.sqlite");
 process.env.PARTNER_HOMES_ROOT = join(root, "partner-homes");
 process.env.CHIEF_PARTNER = "false";
 process.env.PROJECTS_DB_PATH = join(root, "projects.sqlite");
-process.env.TOPICS_STATE_PATH = join(root, "topics.json");
 process.env.COMPANIONS_ENABLED = "true";
 process.env.PARTNER_SIDE_SESSIONS = "true";
 process.env.PARTNER_SESSION_MANAGE = "true";

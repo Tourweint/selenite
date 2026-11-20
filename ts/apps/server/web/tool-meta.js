@@ -17,8 +17,6 @@ const TOOL_KINDS = {
   skill: { icon: "skill", verb: "技能" },
   delegate: { icon: "delegate", verb: "派活" },
   propose_project: { icon: "project", verb: "提议项目" },
-  // 长期课题（2026-11-07 批二）：提议卡与搜索都进工作过程
-  propose_topic: { icon: "project", verb: "提议课题" },
   web_search: { icon: "search", verb: "搜索" },
   partner_manage: { icon: "delegate", verb: "执事" },
   partner_skill_write: { icon: "skill", verb: "执事技能" },
