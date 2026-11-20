@@ -83,6 +83,18 @@ html[data-route="map"] .map-shell { display: flex; }
   transition: background .12s ease, color .12s ease;
 }
 .map-btn:hover { background: var(--card); color: var(--text); }
+/* 窗口下拉（2026-11-19 折叠批）：默认只画最近 N 轮 */
+.map-window {
+  height: 26px;
+  padding: 0 4px;
+  border: 1px solid var(--outline);
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--text-2);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.map-window:hover { background: var(--card); color: var(--text); }
 .map-zoom {
   min-width: 38px;
   text-align: right;
@@ -276,6 +288,28 @@ html[data-route="map"] .map-shell { display: flex; }
 .map-card.is-question .map-card-text { font-weight: 600; }
 .map-card-text.is-empty { color: var(--text-3); font-weight: 400; }
 
+/* 折叠卡（2026-11-19）：窗口前面还没放出来的回合；虚线、不可拖、点开往前放一段 */
+.map-card.is-fold {
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--text) 24%, transparent);
+  background: color-mix(in srgb, var(--card) 34%, var(--surface));
+  box-shadow: none;
+  cursor: pointer;
+}
+.map-card.is-fold:hover {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--outline));
+  box-shadow: none;
+}
+.map-card.is-fold .map-card-kind {
+  background: transparent;
+  border: 1px dashed color-mix(in srgb, var(--text) 26%, transparent);
+}
+.map-card.is-fold .map-card-text {
+  color: var(--text-2);
+  font-weight: 500;
+  -webkit-line-clamp: 2;
+}
+
 /* 空态 / 读不到 */
 .map-state {
   position: absolute;
@@ -378,4 +412,8 @@ html[data-route="map"] .map-shell { display: flex; }
     z-index: 6;
     box-shadow: -12px 0 32px rgba(46, 43, 58, .14);
   }
+}
+
+@media (max-width: 640px) {
+  .map-window { display: none; }
 }

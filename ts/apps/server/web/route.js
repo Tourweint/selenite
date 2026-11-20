@@ -10,7 +10,7 @@
 import { el } from "./dom.js";
 import { openDomains } from "./domains.js";
 import { stopGroupPulse } from "./groups-base.js";
-import { openGroupsView } from "./groups-topics.js";
+import { openGroupsView } from "./groups-list.js";
 import { hideHoverTip } from "./hover-tip.js";
 import { partnerIdOfConversation } from "./partner-sessions.js";
 import { stopMemoryPolling } from "./memory-page.js";

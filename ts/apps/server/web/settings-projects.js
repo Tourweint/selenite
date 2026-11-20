@@ -13,6 +13,7 @@ import { loadChats } from "./chats-list.js";
 import { attr, esc } from "./markdown.js";
 import { request } from "./net.js";
 import { refreshProjectPill, setModalHint } from "./project-modal.js";
+import { isResearchProject, toggleResearchProject } from "./research-tag.js";
 import { currentSettingsPage } from "./route.js";
 import { closeModal, inShell, openModal, selectDirectory, toast } from "./ui-atoms.js";
 
@@ -168,6 +169,9 @@ function projectCardMarkup(project) {
   const warnings = [
     project.exists === false ? '<span class="pill-tag warn">主文件夹丢失</span>' : "",
     archived ? '<span class="pill-tag">已归档</span>' : "",
+    !archived && isResearchProject(project.id)
+      ? '<span class="proj-tag is-research" title="本机界面标记，不影响项目本身">研究</span>'
+      : "",
   ]
     .filter(Boolean)
     .join("");
@@ -356,12 +360,21 @@ function wireProjectActions(box) {
         button,
         [
           { label: "添加文件夹", action: "add-root" },
+          {
+            label: isResearchProject(id) ? "取消「研究」标记" : "标记为研究项目",
+            action: "research",
+          },
           { label: "重命名项目", action: "rename", separator: true },
           { label: "合并到另一个项目", action: "merge" },
           { label: "归档项目", action: "archive", danger: true },
         ],
         (action) => {
           if (action === "add-root") openAddRootModal(id, name);
+          if (action === "research") {
+            const on = toggleResearchProject(id);
+            void loadProjectsSettings();
+            toast(on ? "已标记为研究项目（只在本机界面显示）" : "已取消研究标记");
+          }
           if (action === "rename") openRenameProjectModal(id, name);
           if (action === "merge") void confirmMergeProject(id, name);
           if (action === "archive") confirmArchiveProject(id, name);

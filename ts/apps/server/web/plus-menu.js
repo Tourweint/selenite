@@ -29,7 +29,7 @@ import { refreshSkillSuggest } from "./skill-picker.js";
 import { closeSkillSelects } from "./skills-list.js";
 import { state } from "./state.js";
 import { KEY_SEND } from "./theme.js";
-import { steerIntoTurn } from "./topic-proposal.js";
+import { steerIntoTurn } from "./turn-reconcile.js";
 import { closeModal, closePopover, modalOpen, openModal, openPopover, popoverOpen, toast } from "./ui-atoms.js";
 
 /* ── 加号菜单（2026-11-13，抄 ZCode/cindy 的 composer「+」）────────────
@@ -302,7 +302,7 @@ document.addEventListener("click", (event) => {
     closeProjectMenu();
   }
   // 轨道悬停卡：整个轨道 + 所有悬停卡都算里面。2026-11-13 轨道对齐后卡从两张变五张，
-  // 原来只白名单 groups/partners 的写法会让点「对话 / 课题 / 总管」时把刚开的卡立刻收掉。
+  // 原来只白名单 groups/partners 的写法会让点「对话 / 总管」时把刚开的卡立刻收掉。
   if (!event.target.closest("#side-rail") && !event.target.closest(".proj-pop")) {
     closeRailCards();
   }

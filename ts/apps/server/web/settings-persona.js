@@ -247,7 +247,11 @@ function renderCsPersonaPage() {
     refresh();
   });
   soulArea.addEventListener("input", () => {
-    hint.textContent = "";
+    // 待保存时先说清代价：只有总管人设进 system 固定前缀。
+    hint.textContent =
+      cs.target === "chief" && soulArea.value !== original.soul
+        ? "保存后下一轮起用；总管人设在固定前缀里，本会话下一次请求会重建一次。换风格/立场建议开新会话：旧回答还在历史里。"
+        : "";
     hint.classList.remove("is-error");
     refresh();
   });
@@ -298,6 +302,7 @@ function renderCsPersonaPage() {
         return;
       }
       // 基准推进到服务端回读值：再点保存不会重复提交同样内容
+      const soulChanged = nextSoul !== original.soul;
       original.name = nextName;
       original.soul = nextSoul;
       original.avatar = avatarDraft;
@@ -310,7 +315,11 @@ function renderCsPersonaPage() {
       }
       versionNode.textContent = "下一轮起用";
       // 快照退役（2026-11-15）：保存成功后给一次「回到上一版」，不展示版本号
-      hint.textContent = "已保存，下一轮起用。";
+      // 只有总管的人设进 system 固定前缀；执事 SOUL 走每轮尾部消息，不改前缀（别误报缓存）。
+      hint.textContent =
+        soulChanged && cs.target === "chief"
+          ? "已保存，下一轮起用。总管人设在固定前缀里，本会话下次请求会重建一次（缓存掉一截属正常）。"
+          : "已保存，下一轮起用。";
       showRollbackOffer(hint, cs.target, (restored) => {
         soulArea.value = restored;
         original.soul = restored;

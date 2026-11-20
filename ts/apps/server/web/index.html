@@ -164,7 +164,7 @@
   <aside class="sidebar">
     <!-- 收起轨道（2026-11-05 F1 / E4 重排 / E5 对齐 / 2026-11-07 统一批 / 2026-11-13 对齐展开侧栏）：
          72px 轨 + 40×40 圆钮，顺序 = 展开态分区的镜像：
-         总管（首字圆钮）→ 执事 → 对话 → 项目 → 群组 → 课题 → 底部齿轮。
+         总管（首字圆钮）→ 执事 → 对话 → 项目 → 群组 → 底部齿轮。
          任务中心 / 今日回顾不进轨道（2026-11-13 用户拍板）：入口留在展开态「对话」分区底部的
          「打开任务中心 →」和任务中心右列的「今日回顾」卡（2026-11-18：底部文字链接退役）。
          2026-11-07：顶部「新建对话」退役（新建入口在展开态「对话」分区头的 ＋）；
@@ -198,12 +198,6 @@
       <button class="rail-btn" id="rail-groups" type="button"
               aria-label="群组" aria-haspopup="menu" aria-expanded="false" disabled>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/><path d="M8 12h.01"/><path d="M12 12h.01"/><path d="M16 12h.01"/></svg>
-      </button>
-      <!-- 长期课题（2026-11-07 批二 / 2026-11-13 浮卡）：列表与时间线在展开态分区；
-           轨道悬停浮进行中课题卡，点行 / 卡底入口展开侧栏落到对应位置。 -->
-      <button class="rail-btn" id="rail-topics" type="button"
-              aria-label="课题" aria-haspopup="menu" aria-expanded="false">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m10.065 12.493-6.18 1.318a.934.934 0 0 1-1.108-.702l-.537-2.15a1.07 1.07 0 0 1 .691-1.265l13.504-4.44"/><path d="m13.56 11.747 4.332-.924"/><path d="m16 21-3.105-6.21"/><path d="M16.485 5.94a2 2 0 0 1 1.455-2.425l1.09-.272a1 1 0 0 1 1.212.727l1.515 6.06a1 1 0 0 1-.727 1.213l-1.09.272a2 2 0 0 1-2.425-1.455z"/><path d="m6.158 8.633 1.114 4.456"/><path d="m8 21 3.105-6.21"/><circle cx="12" cy="13" r="2"/></svg>
       </button>
       <div class="rail-flex" aria-hidden="true"></div>
       <!-- 收起态底部（2026-11-08）：只留齿轮；状态点退役，服务状态看顶栏状态灯。 -->
@@ -323,25 +317,6 @@
                    展开着群组就能直接进列表，群会话里也不必先返回再找。 -->
               <button class="sec-foot-link" id="sec-groups-all" type="button">所有群聊 <span aria-hidden="true">→</span></button>
               </div>
-          </div>
-        </div>
-      </section>
-
-      <!-- 长期课题（2026-11-07 批二）：与执事 / 群组同一套分区外壳。
-           列表 = 进行中课题（题目 + 口味 + 下次研究）；点开一行在行内展开时间线与操作，
-           不改页面路由。空态一句话（见 app.js）。 -->
-      <section class="side-sec is-open" id="sec-topics" data-sec="topics">
-        <button class="side-sec-head" id="sec-topics-toggle" type="button" aria-expanded="true"
-                aria-controls="sec-topics-body">
-          <svg class="sec-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m10.065 12.493-6.18 1.318a.934.934 0 0 1-1.108-.702l-.537-2.15a1.07 1.07 0 0 1 .691-1.265l13.504-4.44"/><path d="m13.56 11.747 4.332-.924"/><path d="m16 21-3.105-6.21"/><path d="M16.485 5.94a2 2 0 0 1 1.455-2.425l1.09-.272a1 1 0 0 1 1.212.727l1.515 6.06a1 1 0 0 1-.727 1.213l-1.09.272a2 2 0 0 1-2.425-1.455z"/><path d="m6.158 8.633 1.114 4.456"/><path d="m8 21 3.105-6.21"/><circle cx="12" cy="13" r="2"/></svg>
-          <span class="sec-name">课题</span>
-          <span class="side-count sec-count" id="topics-badge" hidden></span>
-        </button>
-        <div class="side-sec-body" id="sec-topics-body">
-          <div class="side-sec-clip">
-            <div class="side-sec-inner">
-              <div class="roster topic-roster" id="topic-list" aria-label="课题列表"></div>
-            </div>
           </div>
         </div>
       </section>
@@ -518,6 +493,14 @@
           </div>
         </div>
         <div class="map-actions">
+          <select class="map-window" id="map-window" aria-label="默认显示的最近轮数"
+                  data-tip="只画最近多少轮；更早的在车道左端折叠，点一次往前放一段">
+            <option value="5">最近 5 轮</option>
+            <option value="10" selected>最近 10 轮</option>
+            <option value="15">最近 15 轮</option>
+            <option value="20">最近 20 轮</option>
+            <option value="30">最近 30 轮</option>
+          </select>
           <button class="map-btn" id="map-switch" type="button" data-tip="切换另一条会话的地图">切换</button>
           <button class="map-btn" id="map-refresh" type="button" data-tip="重新拉取并清掉手动位置">整理</button>
           <button class="map-btn" id="map-focus" type="button" data-tip="把当前会话最后一轮居中">定位</button>
@@ -797,13 +780,12 @@
      弹层放进去会被一起裁掉。位置由 JS 按触发元素实测写入，动效沿用 .composer-pop。 -->
 <div class="proj-pop composer-pop" id="proj-menu" role="menu" aria-label="项目" hidden></div>
 
-<!-- 收起轨道悬停卡（2026-11-13）：总管 / 执事 / 对话 / 群组 / 课题，与项目弹层同一套壳与动效。
+<!-- 收起轨道悬停卡（2026-11-13）：总管 / 执事 / 对话 / 群组，与项目弹层同一套壳与动效。
      内容由 JS 现渲（与展开态分区同一份渲染函数），悬停 ~350ms 浮出、离开即收。 -->
 <div class="proj-pop composer-pop" id="rail-chief-menu" role="menu" aria-label="总管" hidden></div>
 <div class="proj-pop composer-pop" id="rail-groups-menu" role="menu" aria-label="群组" hidden></div>
 <div class="proj-pop composer-pop" id="rail-partners-menu" role="menu" aria-label="执事" hidden></div>
 <div class="proj-pop composer-pop" id="rail-chats-menu" role="menu" aria-label="对话" hidden></div>
-<div class="proj-pop composer-pop" id="rail-topics-menu" role="menu" aria-label="课题" hidden></div>
 
 <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 

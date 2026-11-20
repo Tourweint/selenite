@@ -8,13 +8,15 @@
  * - inline：在那一行下面原地展开（对应 ZCode 的 Collapsible 做法）；
  * - popover：灰块旁边弹一张小卡，点外面 / Esc / 滚动关闭。
  *
- * 两条硬约束（用户 2026-11-13 明确提的）：
+ * 两条硬约束：
  * 1. **详情面板限高**：输出/思考再多也不许无限撑开，超出部分面板内部滚动。
- * 2. **块太多先收起**：超过 MAX_VISIBLE 个时只留前几个，其余收进「+N」，点开才铺。
+ * 2. **最多一行**（2026-11-19 用户改口径）：一行装得下就全部摊开，装不下才收进「+N」。
+ *
+ * 判定方式换过一次：以前数**块数**（MAX_VISIBLE=8），但块宽是随内容变的，
+ * 写死个数跟真实排布对不上——8 枚短块能挤两行、5 枚长块第一行就满了。
+ * 现在量**真实宽度**：加起来塞得进容器就摆全部，塞不进就退到一行成立为止。
  */
 
-/** 主界面最多直接显示的块数；多出来的收进「+N」。 */
-const MAX_VISIBLE_CHIPS = 8;
 /** 详情面板最大高度（px）：超过就在面板里滚，不撑正文。 */
 const DETAIL_MAX_HEIGHT = 260;
 
@@ -59,6 +61,49 @@ function el(tag, className, text) {
 }
 
 /**
+ * 一行里留几枚灰块（纯函数，排版和单测共用）。
+ *
+ * flex 换行是"整块下落"：块不会被压缩，所以"能不能排在一行"等价于
+ * 所有要显示的块宽 + 间隙不越界。容差 0.5px 防亚像素宽度在临界点上反复跳。
+ *
+ * @param {object} input
+ * @param {number[]} input.widths 每枚的真实像素宽（按当前容器量出来）
+ * @param {number} input.containerWidth 这一行的可用宽（.tchips 的 clientWidth）
+ * @param {number} [input.gap] 块间距，取 CSS 的 columnGap
+ * @param {number} [input.moreWidth] 「+N」按钮的宽（按最宽编号量）
+ * @param {number[]} [input.pinned] 运行中的块下标：不能被「+N」收走
+ * @returns {{keep:number, folded:boolean}} keep=显示前几枚；folded=是否收了尾巴
+ */
+export function planRowChips({ widths, containerWidth, gap = 5, moreWidth = 0, pinned = [] }) {
+  const n = widths.length;
+  if (!n) return { keep: 0, folded: false };
+  const all = widths.reduce((sum, width) => sum + width, 0) + gap * (n - 1);
+  // 容器还没量出来（未挂载 / 宽度 0）：先按"不收起"处理，等 ResizeObserver 再来一次。
+  if (!containerWidth || all <= containerWidth + 0.5) return { keep: n, folded: false };
+
+  // 放不下：先把「+N」的位置让出来，再一枚枚往前退，退到一行成立为止。
+  for (let keep = n - 1; keep >= 0; keep -= 1) {
+    const shown = widths.slice(0, keep);
+    for (const index of pinned) {
+      if (index >= keep && index < n) shown.push(widths[index]);
+    }
+    if (!shown.length) continue;
+    const total = shown.reduce((sum, width) => sum + width, 0) + moreWidth + gap * shown.length;
+    if (total <= containerWidth + 0.5) return { keep, folded: true };
+  }
+  // 窄到连一枚都放不下：只留「+N」，运行中的那枚照旧显示（宁可两行也不藏掉"现在在干嘛"）。
+  return { keep: 0, folded: true };
+}
+
+/** 取容器当前的块间距（CSS 里写的是 5px；量出来更稳，主题若改这里跟着走）。 */
+function gapOf(node) {
+  const css = getComputedStyle(node);
+  const raw = css.columnGap && css.columnGap !== "normal" ? css.columnGap : css.gap;
+  const value = parseFloat(raw);
+  return Number.isFinite(value) ? value : 0;
+}
+
+/**
  * 一枚灰块的 DOM。
  * @param {object} spec {id, verb, target, iconSvg, diff, state}
  * @param {object} hooks {onOpen(spec, chip), onClose(), canOpen}
@@ -68,17 +113,23 @@ export function createChip(spec, hooks = {}) {
   chip.type = "button";
   chip.dataset.state = spec.state || "run";
   if (spec.id) chip.dataset.tool = spec.id;
+  // 块类别落进 DOM（2026-11-20）：CSS 只给「思考」这种在跑时换成转圈环，
+  // 别的工具块仍用原来的扫光，不动它们的观感。
+  if (spec.kind) chip.dataset.kind = spec.kind;
   chip.setAttribute("aria-haspopup", "dialog");
   chip.setAttribute("aria-expanded", "false");
+  // 块上只写"干了哪类事"（读取 / 执行 / 思考…），具体命令和路径不进正文：
+  // 一条命令一个长目标会把块撑到 200px，十几个就铺满屏（2026-11-19 用户口径）。
+  // 完整目标留在这里的 title 和点开后的详情里，两处都不占版面。
+  chip.title = `${spec.verb || ""}${spec.target ? ` · ${spec.target}` : ""}`;
 
   const icon = el("span", "tchip-icon");
   icon.innerHTML = spec.iconSvg || "";
   const verb = el("span", "tchip-verb", spec.verb || "");
-  const target = el("span", "tchip-target", spec.target || "");
   const check = el("span", "tchip-check");
   check.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m20 6-11 11-5-5"/></svg>';
   const sweep = el("span", "tchip-sweep");
-  chip.append(icon, verb, target, check, sweep);
+  chip.append(icon, verb, check, sweep);
 
   chip.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -173,13 +224,34 @@ export function createToolChips(host, options = {}) {
   const more = el("button", "tchips-more");
   more.type = "button";
   more.hidden = true;
+  // 一轮跑完的折叠条（2026-11-19 用户口径：工作执行完默认收起）：
+  // 整组收成一枚「工作 N 步」，点开才铺。跑的过程中不出现，进度该看得到。
+  // 显隐不靠 hidden：它跟块行各自占一个 grid 槽位，收起/展开是高度过渡。
+  const fold = el("button", "tchips-fold");
+  fold.type = "button";
+  const foldText = el("span", "tchips-fold-text");
+  fold.innerHTML =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>';
+  fold.append(foldText);
   const inlineHost = el("div", "tchips-inline");
-  wrap.append(line, more, inlineHost);
+  // 「+N」跟着块一起排在 .tchips 里（2026-11-19）：以前它是 wrap 的兄弟节点，
+  // 一折叠就必然掉到第二行——用户要去掉的正是这多出来的一行。
+  // 折叠条也排在这一行末尾：收起时正文里只剩这枚「工作 N 步」，不额外占一行。
+  line.append(more, fold);
+  // 整条块行包一层：收起/展开时对它做高度过渡（行数会变，量真实高度比猜 max-height 准）。
+  const row = el("div", "tchips-row");
+  row.append(line);
+  wrap.append(row, inlineHost);
   host.append(wrap);
 
   const chips = [];
   const specs = new Map();
   let expanded = false;
+  // 整组收起（跑完的默认形态）：只留一枚折叠条，块全部不进正文。
+  let collapsed = false;
+  // 这组是否已经收尾过：决定点「收起」是回到折叠条，还是回到一行。
+  let finished = false;
   let openChip = null;
   let openPanel = null;
   let popover = null;
@@ -256,50 +328,180 @@ export function createToolChips(host, options = {}) {
     });
   };
 
-  const renderVisibility = () => {
-    const limit = expanded ? chips.length : MAX_VISIBLE_CHIPS;
-    let hidden = 0;
-    chips.forEach((chip, index) => {
-      // 运行中的那块永远可见：它是"现在在干嘛"，不能被 +N 收起来。
-      const show = index < limit || chip.dataset.state === "run";
-      chip.hidden = !show;
-      if (!show) hidden += 1;
-    });
-    if (hidden > 0) {
-      more.hidden = false;
-      more.textContent = `+${hidden}`;
-      more.title = `还有 ${hidden} 个工具调用，点开看`;
-      more.setAttribute("aria-label", `还有 ${hidden} 个工具调用`);
-    } else if (expanded) {
-      more.hidden = false;
-      more.textContent = "收起";
-    } else {
-      more.hidden = true;
-    }
+  /**
+   * 折叠条的文案。
+   * 2026-11-19 用户口径（第三版）：收起后不按"工具调用"记账，按"工作了几步"——
+   * 思考和执行是同一件事的两半（想一下、做一下、再想、再做），分开数会让人以为
+   * 思考不算工作量。点开仍是逐段真实顺序，不合并。
+   * 收起态不染红：失败是展开后才该看的事，这一枚只负责"点开看"。
+   */
+  const syncFold = () => {
+    foldText.textContent = `工作 ${chips.length} 步`;
+    fold.title = "展开这一轮的完整过程";
+    fold.setAttribute("aria-label", `展开这一轮的 ${chips.length} 步`);
   };
+
+  /** 收起/展开时给整条块行做高度过渡；行数会变，只能量真实高度（max-height 猜不准）。 */
+  const animateRow = (mutate) => {
+    const from = row.getBoundingClientRect().height;
+    mutate();
+    const to = row.getBoundingClientRect().height;
+    if (!from || Math.abs(to - from) < 1) return;
+    row.animate(
+      [{ height: `${from}px` }, { height: `${to}px` }],
+      { duration: 240, easing: "cubic-bezier(0, 0, .2, 1)" },
+    );
+  };
+
+  /**
+   * 收尾排版：一行装得下就全摊，装不下就收进「+N」。
+   *
+   * 只在动画帧里量一次（流式时 push 很密集，每枚都量会把布局反复推翻）；
+   * 量的都是真实宽度——块宽随目标文本变，任何写死的个数都对不上。
+   */
+  let layoutQueued = false;
+  // 上一帧是不是收起态：只在状态切换时播高度过渡，流式新增块不该跟着动。
+  let wasCollapsed = false;
+  const queueLayout = () => {
+    if (layoutQueued) return;
+    layoutQueued = true;
+    requestAnimationFrame(() => {
+      layoutQueued = false;
+      layoutRow();
+    });
+  };
+
+  const layoutRow = () => {
+    if (!chips.length) {
+      more.hidden = true;
+      fold.hidden = true;
+      wasCollapsed = false;
+      return;
+    }
+    const changed = collapsed !== wasCollapsed;
+    wasCollapsed = collapsed;
+
+    const apply = () => {
+      // 整组收起（收尾后的默认形态）：正文里只剩一枚「工作 N 步」。
+      // 思考和执行一起收（2026-11-19 用户口径）：它们是一件事的两半，
+      // 单把思考留在外面反而把"想一下做一下"的节奏拆成了两处；
+      // 点开就是逐段的真实顺序。
+      if (collapsed) {
+        for (const chip of chips) chip.hidden = true;
+        more.hidden = true;
+        fold.hidden = false;
+        syncFold();
+        return;
+      }
+      fold.hidden = true;
+      // 展开态是用户点名要"看全部"：多行正是他要的，别在这里按一行收回去。
+      if (expanded) {
+        for (const chip of chips) chip.hidden = false;
+        more.hidden = false;
+        more.textContent = "收起";
+        more.title = "收起这一轮的步骤";
+        more.setAttribute("aria-label", "收起步骤");
+        return;
+      }
+      const width = line.clientWidth;
+      // 还没挂到页面上（历史回读先建后插）：让 ResizeObserver 的首次回调来接。
+      if (!width) {
+        for (const chip of chips) chip.hidden = false;
+        more.hidden = true;
+        return;
+      }
+      for (const chip of chips) chip.hidden = false;
+      const widths = chips.map((chip) => chip.getBoundingClientRect().width);
+      const pinned = [];
+      chips.forEach((chip, index) => {
+        // 运行中的那块永远可见：它是"现在在干嘛"，不能被 +N 收起来。
+        if (chip.dataset.state === "run") pinned.push(index);
+      });
+      // 「+N」的宽随数字位数变（+12 比 +7 宽）。先按最宽的估，
+      // 估完拿真实的收起枚数再量一轮——不然会白少放一枚。
+      const measureMore = (label) => {
+        more.hidden = false;
+        more.textContent = label;
+        return more.getBoundingClientRect().width;
+      };
+      const gap = gapOf(line);
+      let moreWidth = measureMore(`+${chips.length}`);
+      let plan = planRowChips({ widths, containerWidth: width, gap, moreWidth, pinned });
+      for (let round = 0; round < 3 && plan.folded; round += 1) {
+        const label = `+${chips.length - plan.keep}`;
+        const actual = measureMore(label);
+        if (actual >= moreWidth) break;
+        moreWidth = actual;
+        const next = planRowChips({ widths, containerWidth: width, gap, moreWidth, pinned });
+        if (next.keep <= plan.keep) break;
+        plan = next;
+      }
+
+      chips.forEach((chip, index) => {
+        chip.hidden = plan.folded && index >= plan.keep && !pinned.includes(index);
+      });
+      if (!plan.folded) {
+        more.hidden = true;
+        return;
+      }
+      const rest = chips.filter((chip) => chip.hidden).length;
+      more.hidden = false;
+      more.textContent = `+${rest}`;
+      more.title = `还有 ${rest} 步，点开看`;
+      more.setAttribute("aria-label", `还有 ${rest} 步`);
+    };
+
+    if (changed) animateRow(apply);
+    else apply();
+  };
+
+  // 容器宽度变了（窗口缩放 / 侧栏开合 / 气泡宽度滑杆）→ 这一行能放几枚跟着变。
+  let resizeObserver = null;
+  if (typeof ResizeObserver === "function") {
+    resizeObserver = new ResizeObserver(() => queueLayout());
+    resizeObserver.observe(line);
+  }
 
   more.addEventListener("click", (event) => {
     event.stopPropagation();
-    expanded = !expanded;
-    renderVisibility();
+    if (expanded) {
+      // 「收起」两档：已经收尾的组收回折叠条；还在跑的只回到一行（+N）。
+      expanded = false;
+      if (finished && chips.length > 1) collapsed = true;
+    } else {
+      expanded = true;
+      collapsed = false;
+    }
+    queueLayout();
+  });
+
+  fold.addEventListener("click", (event) => {
+    event.stopPropagation();
+    // 点开就是看全部：跟「+N」点开同一个形态，不给第三种中间态。
+    collapsed = false;
+    expanded = true;
+    queueLayout();
   });
 
   return {
     root: wrap,
     /** 工具开始：加一枚运行中的灰块。 */
     push(spec) {
+      // 上一次撤空了这组（见 remove）：再用时把容器放回来。
+      wrap.hidden = false;
       const record = Object.assign({ startedAt: performance.now() }, spec);
       const chip = createChip(record, { onOpen: openDetail });
       chip.__spec = record;
       // 派活行要随进度帧改标签/状态：块自己带三个小口子，不把整个 spec 暴露给调用方。
       chip.__setTarget = (text) => {
         record.target = text;
-        chip.querySelector(".tchip-target").textContent = text;
+        // 目标不再画在块上，只更新悬停提示（宽度不变，不必重排）。
+        chip.title = `${record.verb || ""}${text ? ` · ${text}` : ""}`;
       };
       chip.__setState = (state) => {
         record.state = state;
         chip.dataset.state = state;
-        renderVisibility();
+        queueLayout();
       };
       chip.__setDetail = (patch) => Object.assign(record, patch);
       // 思考正文在流：只改已打开面板里的那段文本，不重建卡——
@@ -324,10 +526,11 @@ export function createToolChips(host, options = {}) {
           placePopover(chip, popover);
         }
       };
-      line.append(chip);
+      // 「+N」要永远排在最后一枚后面，所以插到它前面而不是整条尾巴。
+      line.insertBefore(chip, more);
       chips.push(chip);
       specs.set(record.id || String(chips.length), record);
-      renderVisibility();
+      queueLayout();
       return chip;
     },
     /** 取某个工具已跑的毫秒数（现场用来算详情里的"用时"）。 */
@@ -336,6 +539,22 @@ export function createToolChips(host, options = {}) {
       if (!record) return 0;
       if (typeof record.ms === "number") return record.ms;
       return Math.max(0, performance.now() - (record.startedAt || 0));
+    },
+    /**
+     * 撤掉一枚块（2026-11-20）：发消息时先立的「思考」转圈占位，如果一路没等到
+     * 真思考正文，进入正文 / 收尾时整枚撤掉，别在历史里留一枚空块。
+     * 组空了就把整条块行藏起来——否则正文前会留一道空行。
+     */
+    remove(id) {
+      const index = chips.findIndex((item) => item.__spec && item.__spec.id === id);
+      if (index < 0) return;
+      const chip = chips[index];
+      if (openChip === chip) closeDetail();
+      chip.remove();
+      chips.splice(index, 1);
+      specs.delete(chip.__spec?.id || id);
+      if (!chips.length) wrap.hidden = true;
+      queueLayout();
     },
     /** 工具结束：定状态、补结果。`patch` 可带 output / diff / diffSummary / duration / state。 */
     settle(id, patch = {}) {
@@ -346,19 +565,32 @@ export function createToolChips(host, options = {}) {
       // 详情的状态文案读 spec.state：补回去，别让块上画着"失败"、面板里还写"运行中"。
       chip.__spec.state = chip.dataset.state;
       chip.__refresh?.();
+      // 不再是"运行中"了，pinned 名单就变了：这一行该收几枚得重算。
+      queueLayout();
     },
     /** 中间话折走后清空：下一段重新开始排块。 */
     reset() {
       closeDetail();
       chips.length = 0;
       specs.clear();
-      line.replaceChildren();
+      // 「+N」现在住在 .tchips 里，清空时得把它留下，否则整条行连同按钮一起没了。
+      line.replaceChildren(more, fold);
+      more.hidden = true;
+      fold.hidden = true;
       inlineHost.replaceChildren();
       expanded = false;
-      renderVisibility();
+      collapsed = false;
+      finished = false;
+      wasCollapsed = false;
     },
-    /** 一轮收尾：还开着的详情关掉；没等到结果的运行块标失败（不能画成成功）。 */
-    finish() {
+    /**
+     * 一轮收尾：还开着的详情关掉；没等到结果的运行块标失败（不能画成成功）。
+     *
+     * `collapse` 默认 true（2026-11-19）：整轮跑完后整组收成一枚折叠条。
+     * 段间切组传 false——那会儿下一枚工具马上就要动手，进度得看得见。
+     */
+    finish(options = {}) {
+      const collapse = options.collapse !== false;
       closeDetail();
       for (const chip of chips) {
         // 派活是后台长任务：可能跨过这一组、跨过这一轮，不能因为封组就判失败；
@@ -368,7 +600,14 @@ export function createToolChips(host, options = {}) {
           chip.dataset.state = "err";
         }
       }
-      renderVisibility();
+      finished = true;
+      // 只有一枚块不值得再折一层：它本身就一行，收起来只是多点一下。
+      collapsed = collapse && chips.length > 1;
+      if (collapsed) {
+        expanded = false;
+        syncFold();
+      }
+      queueLayout();
     },
     closeDetail,
   };

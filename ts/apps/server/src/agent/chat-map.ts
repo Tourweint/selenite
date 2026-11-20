@@ -4,12 +4,14 @@
  * 只读投影，不改会话、不跑模型、不写布局（布局在前端 localStorage）。
  * 作用域写死在参数里：一个根会话 id，不接受工作区 / 会话列表。
  *
- * 两个契约端点（`index.ts` 挂载）：
- *   GET /api/v1/agent/chat/:conversationId/map
- *   GET /api/v1/agent/chat/:conversationId/messages/:messageId   （详情取全文）
+ * 三个契约端点（`index.ts` 挂载）：
+ *   GET /api/v1/agent/chat/:conversationId/map?turns=N              （每个节点只回最近 N 轮）
+ *   GET /api/v1/agent/chat/:conversationId/map/turns?floor=&before=&limit=  （逐段往前展开）
+ *   GET /api/v1/agent/chat/:conversationId/messages/:messageId     （详情取全文）
  *
  * 参照 dsh-synapse 的投影口径：一问一答两张卡、工具只计数、分支挂回分叉那一轮。
- * 本文件的前半段（`projectChatMapTurns` / `resolveBranchStart`）是纯函数，单测直接 import。
+ * 本文件的前半段（`projectChatMapTurns` / `resolveBranchStart` / `windowChatMapTurns` /
+ * `earlierChatMapTurns`）是纯函数，单测直接 import。
  */
 
 import type { ChatKind } from "@lifediary/shared";
@@ -30,8 +32,10 @@ import {
 
 /** 一张画布最多装多少条会话（根 + 后代）；超了标 truncated，不悄悄丢。 */
 export const CHAT_MAP_MAX_NODES = 24;
-/** 每条会话最多回多少轮（超了取最后 N 轮）。 */
-export const CHAT_MAP_MAX_TURNS = 400;
+/** 画板默认只画每条会话最近多少轮（2026-11-19 折叠批；前端可经 `?turns=` 覆盖）。 */
+export const CHAT_MAP_DEFAULT_WINDOW = 10;
+/** 单次请求最多取多少轮（初始窗口与逐段展开共用上界）。 */
+export const CHAT_MAP_MAX_WINDOW = 100;
 /** 卡片预览长度：问句短、回答长；详情再取全文。 */
 export const CHAT_MAP_QUESTION_PREVIEW = 400;
 export const CHAT_MAP_ANSWER_PREVIEW = 1200;
@@ -84,8 +88,14 @@ export interface ChatMapNode {
 	origin?: ChatMapOrigin;
 	/** 分叉点：母会话 id + 母会话里的绝对轮次；找不到就是 null。 */
 	branchFrom: { conversationId: string; turnIndex: number } | null;
-	/** 本节点第一张卡对应的绝对轮次（调试 / 前端兜底用）。 */
+	/** 本节点第一张卡对应的绝对轮次（分支 = 分叉点之后第一轮；也是逐段展开的 floor）。 */
 	startTurn: number;
+	/** 本次下发窗口第一轮的绝对轮次；没有回合时等于 startTurn / totalTurns。 */
+	windowStart: number;
+	/** 这条会话的总轮次（绝对，含复制前缀）。 */
+	totalTurns: number;
+	/** 窗口前面还有没有自己的回合（分叉点之后、窗口之前）。 */
+	hasEarlier: boolean;
 	updatedAt?: number;
 	turns: ChatMapTurn[];
 }
@@ -93,12 +103,77 @@ export interface ChatMapNode {
 export interface ChatMapPayload {
 	rootId: string;
 	nodes: ChatMapNode[];
+	/** 只在节点数超过 CHAT_MAP_MAX_NODES 时为 true；回合窗口是正常视图，不算截断。 */
 	truncated: boolean;
+	/** 本次应用的窗口大小（回显 `?turns=`，前端用它做逐段展开的步长）。 */
+	window: number;
 }
 
 /** 回滚开关：`CHAT_MAP_ENABLED=false|0|off` → 端点 404、前端按钮不挂。默认开。 */
 export function chatMapEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
 	return flagEnabled("CHAT_MAP_ENABLED", env);
+}
+
+function asTurnIndex(value: unknown, fallback: number): number {
+	if (value === undefined || value === null || value === "") return fallback;
+	const parsed = typeof value === "number" ? value : Number.parseInt(String(value), 10);
+	if (!Number.isFinite(parsed)) return fallback;
+	return Math.trunc(parsed);
+}
+
+/** 窗口大小：缺省 10，夹在 1–100（`?turns=` / `?limit=` 共用）。 */
+export function clampMapWindow(value: unknown, fallback = CHAT_MAP_DEFAULT_WINDOW): number {
+	const parsed = asTurnIndex(value, fallback);
+	return Math.max(1, Math.min(CHAT_MAP_MAX_WINDOW, parsed));
+}
+
+export interface ChatMapTurnWindow {
+	turns: ChatMapTurn[];
+	/** 这条会话自己的回合起点（分支 = 分叉点之后第一轮）。 */
+	startTurn: number;
+	windowStart: number;
+	totalTurns: number;
+	hasEarlier: boolean;
+}
+
+/** 初始窗口：取 [startTurn, total) 的最后 N 轮，并回窗口元数据。 */
+export function windowChatMapTurns(
+	turns: readonly ChatMapTurn[],
+	startTurn: number,
+	window: number,
+): ChatMapTurnWindow {
+	const totalTurns = turns.length;
+	const start = Math.max(0, Math.min(totalTurns, asTurnIndex(startTurn, 0)));
+	const size = clampMapWindow(window);
+	const windowStart = Math.max(start, totalTurns - size);
+	return {
+		turns: turns.slice(windowStart),
+		startTurn: start,
+		windowStart: turns[windowStart]?.index ?? windowStart,
+		totalTurns,
+		hasEarlier: windowStart > start,
+	};
+}
+
+/** 逐段展开：取 [floor, before) 的最后 limit 轮；before 缺省/越界时取到会话末尾。 */
+export function earlierChatMapTurns(
+	turns: readonly ChatMapTurn[],
+	floor: number,
+	before: number,
+	limit: number,
+): ChatMapTurnWindow {
+	const totalTurns = turns.length;
+	const start = Math.max(0, Math.min(totalTurns, asTurnIndex(floor, 0)));
+	const edge = Math.max(start, Math.min(totalTurns, asTurnIndex(before, totalTurns)));
+	const size = clampMapWindow(limit);
+	const windowStart = Math.max(start, edge - size);
+	return {
+		turns: turns.slice(windowStart, edge),
+		startTurn: start,
+		windowStart: turns[windowStart]?.index ?? windowStart,
+		totalTurns,
+		hasEarlier: windowStart > start,
+	};
 }
 
 function preview(text: string, limit: number): string {
@@ -207,7 +282,7 @@ function sessionRoleOf(link: { role?: string } | null): "canonical" | "side" | n
 
 /**
  * 与 `POST /chat/:id/branches` / 会话页 `canBranchHere()` 同一套判据：
- * 执事 canonical / side 看副会话开关；群 / 例行 / 课题 / 派活（有非 canonical/side 链接）不能分；
+ * 执事 canonical / side 看副会话开关；群 / 例行 / 派活（有非 canonical/side 链接）不能分；
  * 无链接的普通会话与总管可以分，task- 专线除外。
  */
 function branchableOf(externalId: string, link: { role?: string } | null): boolean {
@@ -247,6 +322,9 @@ async function loadNode(
 		archived: archivedIds.includes(externalId),
 		branchFrom: null,
 		startTurn: 0,
+		windowStart: 0,
+		totalTurns: 0,
+		hasEarlier: false,
 		...(origin ? { origin } : {}),
 	};
 
@@ -290,9 +368,13 @@ async function loadNode(
  * 读一条会话的整棵树：请求的会话先向上走到顶（来源链），再从顶向下 BFS。
  * 请求的会话不存在 → null（端点回 404）；根不存在但子会话还在 → 根节点标 missing。
  */
-export async function buildChatMap(requestedId: string): Promise<ChatMapPayload | null> {
+export async function buildChatMap(
+	requestedId: string,
+	options: { window?: unknown } = {},
+): Promise<ChatMapPayload | null> {
 	const requested = await openChat(requestedId);
 	if (!requested) return null;
+	const window = clampMapWindow(options.window);
 
 	const harness = await getHarness();
 	const origins = ((await harness.snapshot(ChatOrigins, CTX))?.byExternal ?? {}) as Record<
@@ -348,27 +430,21 @@ export async function buildChatMap(requestedId: string): Promise<ChatMapPayload 
 		fullTurnsById.set(id, loaded.fullTurns);
 		const node = loaded.node;
 
-		if (origin && !node.missing) {
-			const parentId = origin.source;
-			const parentTurns = fullTurnsById.get(parentId) ?? null;
-			const { start, branchTurn } = resolveBranchStart(origin, parentTurns, loaded.fullTurns);
-			node.branchFrom = branchTurn === null ? null : { conversationId: parentId, turnIndex: branchTurn };
-			node.startTurn = start;
-			let visible = loaded.fullTurns.slice(start);
-			if (visible.length > CHAT_MAP_MAX_TURNS) {
-				visible = visible.slice(-CHAT_MAP_MAX_TURNS);
-				node.startTurn = loaded.fullTurns.length - visible.length;
-				truncated = true;
+		if (!node.missing) {
+			const parentTurns = origin ? (fullTurnsById.get(origin.source) ?? null) : null;
+			const { start, branchTurn } = origin
+				? resolveBranchStart(origin, parentTurns, loaded.fullTurns)
+				: { start: 0, branchTurn: null };
+			if (origin) {
+				node.branchFrom =
+					branchTurn === null ? null : { conversationId: origin.source, turnIndex: branchTurn };
 			}
-			node.turns = visible;
-		} else if (!node.missing) {
-			let visible = loaded.fullTurns;
-			if (visible.length > CHAT_MAP_MAX_TURNS) {
-				visible = visible.slice(-CHAT_MAP_MAX_TURNS);
-				node.startTurn = loaded.fullTurns.length - visible.length;
-				truncated = true;
-			}
-			node.turns = visible;
+			const windowed = windowChatMapTurns(loaded.fullTurns, start, window);
+			node.startTurn = windowed.startTurn;
+			node.windowStart = windowed.windowStart;
+			node.totalTurns = windowed.totalTurns;
+			node.hasEarlier = windowed.hasEarlier;
+			node.turns = windowed.turns;
 		}
 
 		nodes.push(node);
@@ -377,7 +453,35 @@ export async function buildChatMap(requestedId: string): Promise<ChatMapPayload 
 		}
 	}
 
-	return { rootId, nodes, truncated };
+	return { rootId, nodes, truncated, window };
+}
+
+export interface ChatMapTurnsPayload extends ChatMapTurnWindow {
+	nodeId: string;
+}
+
+/**
+ * 画板逐段展开（2026-11-19 折叠批）：只取一条会话 [floor, before) 的最后 limit 轮。
+ *
+ * `floor` 由前端传节点的 `startTurn`（分支只展开自己的回合）；服务端只夹到 [0, total]，
+ * 不重新解分叉——省一次母会话全文读取。这不是数据边界：同一客户端本来就能读这条会话全文。
+ */
+export async function loadChatMapTurns(
+	conversationId: string,
+	options: { floor?: unknown; before?: unknown; limit?: unknown } = {},
+): Promise<ChatMapTurnsPayload | null> {
+	const chat = await openChat(conversationId);
+	if (!chat) return null;
+	const view = await chat.conversation.context(CTX);
+	const messages = foldTranscriptEntries(chat.externalId, view.entries, { includeHidden: true });
+	const turns = projectChatMapTurns(messages);
+	const windowed = earlierChatMapTurns(
+		turns,
+		asTurnIndex(options.floor, 0),
+		asTurnIndex(options.before, turns.length),
+		clampMapWindow(options.limit),
+	);
+	return { nodeId: conversationId, ...windowed };
 }
 
 /** 画板详情：按可寻址 id 取单条消息（隐藏的定时触发不返回，和正文口径一致）。 */

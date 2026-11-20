@@ -110,12 +110,66 @@ if (typeof ResizeObserver === "function" && el.composer) {
   }).observe(el.composer);
 }
 
-function updateHomeMode() {
+/**
+ * 会话载入期锁住首页态（2026-11-19 用户报）：openChat 一进来就要 clearThread
+ * （停旧审批计时器、清附件），线程一空就会被 updateHomeMode 判成首页态，输入框
+ * 先抬到中间；历史异步回来又判回对话态，输入框再落回底部——从设置/任务/画板
+ * 回到对话、点侧栏切会话都能看到那一下「先在中间、再被快速拉下来」的位移。
+ * 载入期改为保持对话态贴底、关掉位移过渡（样式见 style-07-composer.css），
+ * 历史画完由 endHomeSettle 结算一次。
+ * 锁带 token（沿用 state.navToken）：并发 / 被顶掉的旧 openChat 收尾不会拆新请求的锁。
+ */
+let homeSettleToken = null;
+
+function beginHomeSettle(token) {
+  homeSettleToken = token;
+  el.viewChat.dataset.homeLock = "1";
+  el.viewChat.dataset.homeSettling = "1";
+  // 贴底是对话态的形态；空会话等结算时再一步落到中间（不走动画）
+  el.viewChat.dataset.home = "0";
+}
+
+function endHomeSettle(token) {
+  if (homeSettleToken !== token) return;
+  homeSettleToken = null;
+  delete el.viewChat.dataset.homeLock;
+  // 历史画完这一下也不走动画（空会话要一步落位）
+  updateHomeMode({ animate: false });
+  delete el.viewChat.dataset.homeSettling;
+}
+
+/** 放弃载入锁（新建会话时用）：不管手里是哪次 openChat 的锁，立即按当前线程结算。
+ *  新建会话不该等一条已被顶掉的 openChat 收尾才把输入框抬回中间。 */
+function cancelHomeSettle() {
+  if (homeSettleToken === null && !el.viewChat.dataset.homeLock) return;
+  homeSettleToken = null;
+  delete el.viewChat.dataset.homeLock;
+  delete el.viewChat.dataset.homeSettling;
+  updateHomeMode();
+}
+
+/**
+ * 判首页态并落位。`animate: false` = 这次落位不播位移过渡（载入历史 / 首屏结算用）；
+ * 只有用户发第一句话这种「真·首页 → 对话」才该看到下滑。
+ * 关过渡靠一次强制 reflow 钉住：同一任务里改两次属性，浏览器只做一次样式计算，
+ * 不加 reflow 直接删属性会把这次位移重新变成动画。
+ * 不用 rAF：后台 / 不可见窗口的帧回调会被节流甚至不跑，属性会一直挂着。
+ */
+function updateHomeMode({ animate = true } = {}) {
+  // 会话历史还在路上：空 / 非空尚未确定，别先抬到中间再落回去（见 beginHomeSettle）
+  if (el.viewChat.dataset.homeLock) return;
   const home = !el.thread.querySelector(".msg");
-  el.viewChat.dataset.home = home ? "1" : "0";
+  const next = home ? "1" : "0";
+  const changed = el.viewChat.dataset.home !== next;
+  if (!animate && changed) el.viewChat.dataset.homeSettling = "1";
+  el.viewChat.dataset.home = next;
   if (home) {
     measureHomeOffset();
     syncGreeting();
+  }
+  if (!animate && changed) {
+    void el.composer.offsetHeight;
+    delete el.viewChat.dataset.homeSettling;
   }
 }
 
@@ -304,10 +358,24 @@ async function setThinkingLevel(level) {
   syncThinkingSegments();
   // 还没有会话就不用下发，第一轮 `start` 回来时补（同原 setMode 的语义）
   if (!state.conversationId) return;
-  await request(`/api/v1/agent/chat/${encodeURIComponent(state.conversationId)}/mode`, {
-    method: "POST",
-    body: JSON.stringify({ thinking: level }),
-  }).catch(() => undefined);
+  try {
+    const response = await request(
+      `/api/v1/agent/chat/${encodeURIComponent(state.conversationId)}/mode`,
+      {
+        method: "POST",
+        body: JSON.stringify({ thinking: level }),
+      },
+    );
+    if (!response.ok) return;
+    const data = await response.json().catch(() => ({}));
+    // 2026-11-19：档位按本会话模型支持域 clamp；服务端说实际用了哪档，pill 就显示哪档。
+    if (typeof data?.thinking === "string" && data.thinking !== level) {
+      localStorage.setItem(KEY_THINKING, data.thinking);
+      syncThinkingSegments();
+    }
+  } catch {
+    /* 静默：下一轮 ensureConversationModel 还会按会话模型再 clamp 一次 */
+  }
 }
 
 /* ── 侧栏按「人」重排（E4）：总管区 / 执事花名册 ───────────
@@ -320,7 +388,7 @@ const KEY_RECENTS = "lifediary.chief.recents"; // 旧键：只读迁移，不再
 /* 侧栏分区折叠（2026-11-07 统一批）：会话 / 任务中心 / 项目 / 执事 / 群组共用一套。
    键 `lifediary.side.<sec>`，值 open|closed，默认展开。
    旧的 lifediary.chief.recents 只作为「会话」分区的初始值读一次，之后各存各的。 */
-const SIDE_SECTIONS = ["partners", "chats", "projects", "groups", "topics"];
+const SIDE_SECTIONS = ["partners", "chats", "projects", "groups"];
 
 function sectionClosed(sec) {
   const stored = localStorage.getItem(`lifediary.side.${sec}`);
@@ -399,4 +467,4 @@ for (const hint of document.querySelectorAll("[data-hint]")) {
   });
 }
 
-export { GREETING_SLOTS, KEY_MODEL_PROVIDER, KEY_RECENTS, KEY_THINKING, LEGACY_KEY_MODE, NARROW_SIDEBAR, SIDE_SECTIONS, THINKING_LABELS, THINKING_LEVELS, applySections, applySidebarA11y, clampThinking, closeMenu, currentThinking, greetingLine, greetingSlot, measureHomeOffset, sectionClosed, setInert, setMenuOpen, setThinkingLevel, sidebarOpen, syncGreeting, syncThinkingSegments, toggleSection, toggleSidebar, updateHomeMode };
+export { GREETING_SLOTS, KEY_MODEL_PROVIDER, KEY_RECENTS, KEY_THINKING, LEGACY_KEY_MODE, NARROW_SIDEBAR, SIDE_SECTIONS, THINKING_LABELS, THINKING_LEVELS, applySections, applySidebarA11y, beginHomeSettle, cancelHomeSettle, clampThinking, closeMenu, currentThinking, endHomeSettle, greetingLine, greetingSlot, measureHomeOffset, sectionClosed, setInert, setMenuOpen, setThinkingLevel, sidebarOpen, syncGreeting, syncThinkingSegments, toggleSection, toggleSidebar, updateHomeMode };

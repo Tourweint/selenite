@@ -155,9 +155,9 @@
 .cs-row-chevron { flex: none; display: inline-flex; color: var(--text-3); }
 .cs-row-chevron svg { width: 15px; height: 15px; }
 
-/* 首页的值格（2026-11-13 B 版）：模型 / 权限并排两块，值先行，副文本压在下面。
-   两格等宽，值最长是模型 id（16px 会在 190px 里截断，title 里留全名）。 */
-.cs-tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+/* 首页的值格（2026-11-13 B 版；2026-11-19 模型入口退役）：
+   非执事只剩「权限」一格，auto-fit 让它占满；执事是「权限 + 备选模型」两格等宽。 */
+.cs-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(0, 1fr)); gap: 10px; }
 .cs-tile {
   display: flex; flex-direction: column; align-items: flex-start; gap: 4px;
   min-width: 0;

@@ -75,6 +75,12 @@
 }
 .proj-tag.is-warn { color: var(--warn); border-color: var(--warn); }
 .proj-tag.is-idle { color: var(--text-3); }
+/* 项目「研究」标记（2026-11-20）：纯前端 localStorage，只是视觉标记。 */
+.proj-tag.is-research {
+  color: var(--accent);
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
 
 /* 主项目与子项目之间的分隔线：两段不是同一类信息 */
 .proj-sep { height: 1px; margin: 4px 6px; background: var(--composer-border); }

@@ -39,7 +39,6 @@ import "./markdown.js";
 import "./chat-open.js";
 import "./composer-send.js";
 import "./approval-card.js";
-import "./topic-proposal.js";
 import "./ui-atoms.js";
 import "./hover-tip.js";
 import "./icons.js";
@@ -84,7 +83,7 @@ import "./partner-modals.js";
 import "./partner-editor.js";
 import "./partner-routines.js";
 import "./groups-base.js";
-import "./groups-topics.js";
+import "./groups-list.js";
 import "./groups-thread.js";
 import "./groups-composer.js";
 import "./groups-create.js";
@@ -99,7 +98,6 @@ import { openChat, startNewChat } from "./chat-open.js";
 import { loadChats } from "./chats-list.js";
 import { el } from "./dom.js";
 import { initGroups } from "./groups-base.js";
-import { loadTopicsSidebar } from "./groups-topics.js";
 import { adoptAllTitleTips, refreshModelPill, watchTitleAttribute } from "./hover-tip.js";
 import { installNavHistory } from "./nav-history.js";
 import { checkHealth } from "./net.js";
@@ -135,8 +133,6 @@ void (async () => {
   applyFontSettings(loadFontSettings());
   // 侧栏分区折叠态（localStorage）与总管状态点初值
   applySections();
-  // 课题区（2026-11-07 批二）：首屏拉一次；404 时整块入口自己退场
-  void loadTopicsSidebar();
   syncChiefDot();
   // 隐藏层不作为 Tab 焦点：首帧按真实可见性定（窄屏只看轨道）
   applySidebarA11y();
@@ -187,7 +183,9 @@ void (async () => {
   // 侧栏项目区：拿不到工作区就保持隐藏（没根目录谈何项目）
   void refreshProjectPill();
   if (state.conversationId) await openChat(state.conversationId);
-  updateHomeMode();
+  // 首屏落位不走动画（2026-11-19）：刷新后输入框应该已经在最终位置，
+  // 而不是从底部升到中间 / 从中间落回底部。
+  updateHomeMode({ animate: false });
   // 侧栏「任务中心」的进行中徽标：静默拉一次，读不到就只当没有；
   // 之后由 autoSyncTick 低频兜底（看板 20s / 对话页 60s），SSE 事件到达时直接增量更新。
   void loadTickets({ silent: true, render: false });

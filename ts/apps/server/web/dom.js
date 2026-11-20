@@ -41,7 +41,6 @@ const el = {
   railGroupsMenu: document.getElementById("rail-groups-menu"),
   railPartnersMenu: document.getElementById("rail-partners-menu"),
   railChatsMenu: document.getElementById("rail-chats-menu"),
-  railTopicsMenu: document.getElementById("rail-topics-menu"),
   railChiefMenu: document.getElementById("rail-chief-menu"),
   title: document.getElementById("title"),
   // 标题栏的返回 / 前进（2026-11-14）：栈与显隐规则在 nav-history.js
@@ -119,11 +118,6 @@ const el = {
   secGroupsToggle: document.getElementById("sec-groups-toggle"),
   railGroups: document.getElementById("rail-groups"),
   groupList: document.getElementById("group-list"),
-  // 长期课题（2026-11-07 批二）：轨道入口 + 展开态分区
-  railTopics: document.getElementById("rail-topics"),
-  secTopicsToggle: document.getElementById("sec-topics-toggle"),
-  topicList: document.getElementById("topic-list"),
-  topicsBadge: document.getElementById("topics-badge"),
   railChats: document.getElementById("rail-chats"),
   domainsBack: document.getElementById("domains-back"),
   domainsRefresh: document.getElementById("domains-refresh"),

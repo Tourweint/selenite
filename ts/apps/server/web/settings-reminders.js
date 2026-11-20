@@ -1585,6 +1585,8 @@ function renderDefaultModelRow(catalog) {
       // 放进"换默认模型"里会被当成模型属性）。chooseModel 的 keepOpen 重渲染
       // 读同一个 dataset，所以这条标记会一直生效到菜单关闭。
       menu.dataset.noThinking = "1";
+      // 2026-11-19：设置页这个是**全局默认**，不是本会话；chooseModel 按 scope 分流。
+      menu.dataset.scope = "global";
       renderModelMenu(fresh, localStorage.getItem(KEY_MODEL_PROVIDER), menu);
       openPopover(menu, change);
     } catch (error) {

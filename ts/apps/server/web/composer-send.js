@@ -14,6 +14,7 @@ import { addMessage, stampMessageClock, syncEditEntry } from "./chat-thread.js";
 import { closeChatArchiveConfirm, loadChats, renderChats } from "./chats-list.js";
 import { KEY_CONV, el } from "./dom.js";
 import { renderMarkdown, syncDelegateHint } from "./markdown.js";
+import { refreshModelPill } from "./hover-tip.js";
 import { request } from "./net.js";
 import { parsePartnerExternalId } from "./partner-sessions.js";
 import { partnerDisplayName, syncChiefDot } from "./partners-status.js";
@@ -22,7 +23,7 @@ import { currentThinking, setThinkingLevel } from "./shell.js";
 import { state } from "./state.js";
 import { createStreamRevealer } from "./stream-reveal.js";
 import { applyTicketEvent } from "./tasks-live.js";
-import { loadPendingApprovals, mountTopicProposalCard, parseTopicProposalOutput, scheduleTurnReconcile } from "./topic-proposal.js";
+import { loadPendingApprovals, scheduleTurnReconcile } from "./turn-reconcile.js";
 import { noMotion } from "./ui-atoms.js";
 import { createToolFlow } from "./tool-flow.js";
 
@@ -213,6 +214,16 @@ async function send(text, images = [], files = []) {
   turn.root.insertBefore(flow, turn.foot);
   let body = turn.body;
   flow.append(body);
+  /**
+   * 卡片挂在回答上方（attention / approval / escalation 共用）。
+   * 当前话段可能已经被灰块封口：2026-11-20 起发消息就先立思考块，空 body 会被
+   * closeSegment 撤掉——这时退回插在整个 flow 前面，否则卡片挂到脱链节点上，静默丢掉。
+   */
+  const insertAboveAnswer = (card) => {
+    if (!card || card.isConnected) return;
+    if (body.isConnected) body.before(card);
+    else flow.before(card);
+  };
 
   // 逐字浮现（2026-11-13）：旧版每帧整段 innerHTML 会杀掉子节点动画，
   // 逐字只能靠"只追加、不重建旧 span"的增量渲染（见 stream-reveal.js）。
@@ -256,6 +267,10 @@ async function send(text, images = [], files = []) {
   // 而是和工具同款的一枚灰块——位置就是它真正发生的地方，正文进详情面板，
   // 主界面只写「思考」，不写秒数（和工具块同一条规矩）。
   let think = null;
+  // 这枚思考块有没有收到过真思考正文（2026-11-20）：发消息时就先立一枚"转圈"的
+  // 思考块占住位置（连接上游也算在想）；如果一路只有连接、模型没吐思考正文，
+  // 进入正文 / 收尾时把它撤掉，别在历史里留一枚空的「思考」。
+  let thinkHasText = false;
 
   // 工具流：有工具才建（第一只工具动手时）。它把灰块插在 .flow 里，
   // 顺序就是"话 → 块 → 话"；主界面不写步数/耗时，细节点块看（tool-chips.js）。
@@ -306,11 +321,17 @@ async function send(text, images = [], files = []) {
     breakForWork();
     think = ensureWork().think();
   };
-  /** 思考定型：补上「用时」，正文留在详情里；一路没等到正文的也照实收尾。 */
+  /**
+   * 思考定型：补上「用时」，正文留在详情里。
+   * 2026-11-20：没有真思考正文的那一枚直接撤掉——它只是连接期的转圈占位，
+   * 不能当成"思考过"留在历史里（思考关着时每轮都会多一枚空块）。
+   */
   const endThink = () => {
     if (!think) return;
-    think.finish();
+    if (thinkHasText) think.finish();
+    else think.drop();
     think = null;
+    thinkHasText = false;
   };
 
   let answer = "";
@@ -397,13 +418,32 @@ async function send(text, images = [], files = []) {
     }
   };
 
+  // 一发出去就把「思考」立起来转圈（2026-11-20 用户口径）：连上游、等第一个字
+  // 也算在想，别让人对着一只空泡乱点。真思考到了继承这一枚（beginThink 已存在就返回），
+  // 没有思考正文就由 endThink 撤掉（见上面）。
+  beginThink();
+  if (state.stick) scrollToEnd();
+
   try {
     const response = await request("/api/v1/agent/chat", {
       method: "POST",
       body: JSON.stringify({
         ...(state.conversationId
           ? { conversationId: state.conversationId }
-          : { chatKind: state.chatKind === "chief" ? "chief" : "worker" }),
+          : {
+              chatKind: state.chatKind === "chief" ? "chief" : "worker",
+              // 2026-11-19 会话级模型切换：新会话屏选的模型只带这一次；
+              // 不传 = 服务端读全局默认。已有会话走 POST /agent/chat/:id/model。
+              ...(state.pendingModel
+                ? {
+                    model: {
+                      providerId: state.pendingModel.providerId,
+                      modelId: state.pendingModel.modelId,
+                      thinking: currentThinking(),
+                    },
+                  }
+                : {}),
+            }),
         // 有附件才用分段数组；纯文本仍发字符串（老形状，服务端 union 兼容）
         messages: [
           {
@@ -474,16 +514,29 @@ async function send(text, images = [], files = []) {
             streamConv = event.conversationId;
             localStorage.setItem(KEY_CONV, event.conversationId);
             // 会话已落盘：把这一刻的项目/工作区冻结成只读标签（2026-11-18）
-            if (wasNew) freezeChatProjectLabel();
+            if (wasNew) {
+              freezeChatProjectLabel();
+              // 2026-11-19 会话级模型切换：新会话已用 pending / 全局模型建好。
+              // 先把思考档补发（off 是服务端默认），再让 pill 拉服务端实际的模型 / 档位。
+              state.pendingModel = null;
+              void (async () => {
+                if (currentThinking() !== "off") {
+                  await setThinkingLevel(currentThinking()).catch(() => undefined);
+                }
+                if (state.conversationId === event.conversationId) {
+                  await refreshModelPill(state.conversationId);
+                }
+              })();
+            }
             renderChats();
             // 新会话（或重启后的旧会话）要立刻出现在侧栏里——
             // 以前只靠页面加载时拉一次，新建会话要等到重载才可见，置顶/重命名都够不着
             void loadChats();
-            // 新会话建好了，把当前思考档补发给它（off 是服务端默认，不用发）
-            if (currentThinking() !== "off") void setThinkingLevel(currentThinking());
           } else if (event.type === "thinking") {
-            // 思考正文增量：进思考块（和工具同款灰块），详情里滚动看全文
+            // 思考正文增量：进思考块（和工具同款灰块），详情里滚动看全文。
+            // 2026-11-20：真有思考正文才把这枚块留下；发消息时那枚只负责转圈。
             beginThink();
+            if (event.text) thinkHasText = true;
             think.append(event.text || "");
             if (state.stick) scrollToEnd();
           } else if (event.type === "notice") {
@@ -507,10 +560,6 @@ async function send(text, images = [], files = []) {
             } else {
               ensureWork().end(event.name, event.ok !== false, event.output, event.diff);
               if (event.diff) fileChanges.add(event.name, event.label, event.diff);
-              // 课题提议（2026-11-07 批二）：结果落在该条工具消息处（对话末尾自然出现）
-              if (event.name === "propose_topic" && event.ok !== false) {
-                mountTopicProposalCard(turn.root, parseTopicProposalOutput(event.output));
-              }
             }
             if (state.stick) scrollToEnd();
           } else if (event.type === "delegate") {
@@ -543,13 +592,13 @@ async function send(text, images = [], files = []) {
               link.textContent = "去任务中心处理";
               card.append(link);
             }
-            body.before(card);
+            insertAboveAnswer(card);
             maybeNotify("有任务单需要你处理", event.question || "", streamConv, "attention");
             if (state.stick) scrollToEnd();
           } else if (event.type === "approval") {
             // 写类工具要确认（批次二）：卡片挂在回答气泡上方，和 attention 同一套视觉
             const card = renderApprovalCard({ ...event, conversationId: streamConv });
-            if (card && !card.isConnected) body.before(card);
+            insertAboveAnswer(card);
             maybeNotify("有写操作需要你确认", event.tool || "", streamConv, "attention");
             if (state.stick) scrollToEnd();
           } else if (event.type === "escalation") {
@@ -609,7 +658,7 @@ async function send(text, images = [], files = []) {
               link.textContent = "去任务中心看";
               card.append(link);
             }
-            body.before(card);
+            insertAboveAnswer(card);
             maybeNotify("工人上报了一个问题", event.question || "", streamConv, "attention");
             if (state.stick) scrollToEnd();
           } else if (event.type === "done") {

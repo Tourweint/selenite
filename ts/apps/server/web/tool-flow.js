@@ -50,10 +50,15 @@ function diffSummaryOf(diff) {
 function createToolFlow(root, options = {}) {
   const live = options.live === true;
   let group = null; // 当前这组灰块（createToolChips 的实例）
+  // 这轮出现过的所有组：收尾时要一起收（中间被 breakGroup 切走的组也得塌下去）。
+  const groups = [];
   let stepCount = 0;
 
   const ensureGroup = () => {
-    if (!group) group = createToolChips(root, { live });
+    if (!group) {
+      group = createToolChips(root, { live });
+      groups.push(group);
+    }
     return group;
   };
 
@@ -76,7 +81,8 @@ function createToolFlow(root, options = {}) {
      * 思考段（2026-11-17 用户口径：和工具同款灰块）。
      * 排在它真正发生的位置（通常是一组里最前面），图标 sparkles、动词「思考」；
      * 正文进详情（限高、内部滚动），主界面照样不写秒数。
-     * 返回句柄：`append(增量)` 追加正文，`finish()` 定格并补「用时」。
+     * 返回句柄：`append(增量)` 追加正文，`finish()` 定格并补「用时」，
+     * `drop()` 撤掉这枚块（2026-11-20：发消息时先立的转圈占位，没等到思考正文就撤）。
      */
     think() {
       const id = `think:${stepCount}`;
@@ -104,6 +110,9 @@ function createToolFlow(root, options = {}) {
             duration: shortDuration(performance.now() - startedAt),
           });
         },
+        drop() {
+          owner.remove(id);
+        },
       };
     },
     end(name, ok, output, diff) {
@@ -119,7 +128,8 @@ function createToolFlow(root, options = {}) {
     },
     /** 一段话结束（工具要动手了）：这组灰块封口，下一段话接在它们后面。 */
     breakGroup() {
-      group?.finish();
+      // 不收起：下一枚工具马上就要动手，进度得留在正文里。
+      group?.finish({ collapse: false });
       group = null;
     },
     /** 派活这类后台长任务：也是一枚块，标签随进度帧更新。 */
@@ -150,7 +160,8 @@ function createToolFlow(root, options = {}) {
       };
     },
     finish() {
-      group?.finish();
+      // 一轮真的结束：这条消息里的每一组都收起，只留各自的「N 个工具调用」。
+      for (const item of groups) item.finish({ collapse: true });
       group = null;
     },
     get count() {
@@ -175,9 +186,10 @@ function toolFlowFromSteps(root, steps) {
   // 每组工具一块自己的 .tchips：中间夹了「说」就另起一组，顺序才是真实的
   // "话 → 块 → 话 → 块"。只用一个实例会把第二组块也塞回第一组里。
   let chips = null;
+  const groups = [];
   const segment = (text) => {
     if (chips) {
-      chips.finish();
+      chips.finish({ collapse: false });
       chips = null;
     }
     const seg = document.createElement("div");
@@ -191,8 +203,14 @@ function toolFlowFromSteps(root, steps) {
       segment(step.output || "");
       continue;
     }
-    if (!chips) chips = createToolChips(flow, { live: false });
-    const kind = toolKindOf(step.name);
+    if (!chips) {
+      chips = createToolChips(flow, { live: false });
+      groups.push(chips);
+    }
+    // 回读里的思考步（2026-11-19）：和现场同一枚「思考」块，
+    // 不参与「N 个工具调用」的收起，翻旧会话也看得到想了什么。
+    const isThink = step.name === "think";
+    const kind = isThink ? { icon: "think", verb: "思考" } : toolKindOf(step.name);
     chips.push({
       id: step.name,
       verb: kind.verb || step.name,
@@ -204,9 +222,11 @@ function toolFlowFromSteps(root, steps) {
       diff: step.diff,
       diffSummary: step.diff ? diffSummaryOf(step.diff) : "",
       duration: typeof step.ms === "number" ? shortDuration(step.ms) : "",
+      ...(isThink ? { kind: "think" } : {}),
     });
   }
-  chips?.finish();
+  // 回读的每一轮都已经是"跑完"的状态：所有组收起，别让旧会话一打开满屏块。
+  for (const item of groups) item.finish({ collapse: true });
   // 最终回答那段 body 移到 flow 末尾，保持"话在块后"的顺序
   if (body) flow.append(body);
   return flow;

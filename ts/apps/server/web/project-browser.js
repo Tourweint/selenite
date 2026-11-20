@@ -11,6 +11,7 @@ import { el } from "./dom.js";
 import { request } from "./net.js";
 import { baseNameOf, closeProjectMenu, openAddProjectModal, openAddWorkspaceModal } from "./project-modal.js";
 import { SERVICE_TOO_OLD_HINT, openExplorerInOs, projActionButton, projectIcon, selectProject } from "./project-switch.js";
+import { isResearchProject, researchTagNode } from "./research-tag.js";
 import { state } from "./state.js";
 import { openModal } from "./ui-atoms.js";
 
@@ -209,6 +210,7 @@ function renderProjectMenu(items) {
     name.className = "proj-item-name";
     name.textContent = project.name;
     row.append(projectIcon("sub"), name);
+    if (isResearchProject(project.id)) row.append(researchTagNode());
     if (project.roots?.length) {
       const count = document.createElement("span");
       count.className = "proj-tag";

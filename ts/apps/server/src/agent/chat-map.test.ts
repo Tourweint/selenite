@@ -2,9 +2,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
 	CHAT_MAP_ANSWER_PREVIEW,
+	CHAT_MAP_MAX_WINDOW,
 	chatMapEnabled,
+	clampMapWindow,
+	earlierChatMapTurns,
 	projectChatMapTurns,
 	resolveBranchStart,
+	windowChatMapTurns,
 	type ChatMapTurn,
 } from "./chat-map.ts";
 import type { FoldedTranscriptMessage } from "./session-transcript.ts";
@@ -145,4 +149,73 @@ test("画板开关：缺省开，false/0/off 关（回滚 = 一行 env）", () =
 	assert.equal(chatMapEnabled(env("0") as NodeJS.ProcessEnv), false);
 	assert.equal(chatMapEnabled(env("off") as NodeJS.ProcessEnv), false);
 	assert.equal(chatMapEnabled(env("  FALSE ") as NodeJS.ProcessEnv), false);
+});
+
+function turnsOf(count: number): ChatMapTurn[] {
+	return Array.from({ length: count }, (_, index) => turn(index, `问${index}`, 1000 + index));
+}
+
+test("窗口：默认只取最近 N 轮，回窗口起点与更早标记", () => {
+	const windowed = windowChatMapTurns(turnsOf(25), 0, 10);
+	assert.equal(windowed.totalTurns, 25);
+	assert.equal(windowed.startTurn, 0);
+	assert.equal(windowed.windowStart, 15);
+	assert.equal(windowed.turns.length, 10);
+	assert.equal(windowed.turns[0]?.index, 15);
+	assert.equal(windowed.hasEarlier, true);
+});
+
+test("窗口：分支从分叉点之后算，复制前缀不算自己的回合", () => {
+	const fromBranch = windowChatMapTurns(turnsOf(25), 3, 10);
+	assert.equal(fromBranch.startTurn, 3);
+	assert.equal(fromBranch.windowStart, 15);
+	assert.equal(fromBranch.hasEarlier, true);
+	const whole = windowChatMapTurns(turnsOf(25), 3, 100);
+	assert.equal(whole.windowStart, 3);
+	assert.equal(whole.turns.length, 22);
+	assert.equal(whole.hasEarlier, false);
+	const short = windowChatMapTurns(turnsOf(25), 20, 10);
+	assert.equal(short.windowStart, 20);
+	assert.equal(short.turns.length, 5);
+	assert.equal(short.hasEarlier, false);
+});
+
+test("逐段展开：取 [floor, before) 的最后 limit 轮，一段一段往前", () => {
+	const turns = turnsOf(25);
+	const page1 = earlierChatMapTurns(turns, 0, 15, 10);
+	assert.equal(page1.windowStart, 5);
+	assert.equal(page1.turns.length, 10);
+	assert.equal(page1.turns[0]?.index, 5);
+	assert.equal(page1.hasEarlier, true);
+	const page2 = earlierChatMapTurns(turns, 0, 5, 10);
+	assert.equal(page2.windowStart, 0);
+	assert.equal(page2.turns.length, 5);
+	assert.equal(page2.hasEarlier, false);
+	const branch = earlierChatMapTurns(turns, 3, 15, 10);
+	assert.equal(branch.windowStart, 5);
+	assert.equal(branch.hasEarlier, true);
+	const branchEnd = earlierChatMapTurns(turns, 3, 5, 10);
+	assert.equal(branchEnd.windowStart, 3);
+	assert.equal(branchEnd.turns.length, 2);
+	assert.equal(branchEnd.hasEarlier, false);
+});
+
+test("逐段展开：before 越界取到末尾，非法参数不炸", () => {
+	const turns = turnsOf(25);
+	const beyond = earlierChatMapTurns(turns, 0, 999, 10);
+	assert.equal(beyond.windowStart, 15);
+	assert.equal(beyond.turns.length, 10);
+	const beforeStart = earlierChatMapTurns(turns, 10, 3, 10);
+	assert.equal(beforeStart.windowStart, 10);
+	assert.equal(beforeStart.turns.length, 0);
+	assert.equal(beforeStart.hasEarlier, false);
+});
+
+test("窗口大小：缺省 10，夹在 1–100，非法值回落默认", () => {
+	assert.equal(clampMapWindow(undefined), 10);
+	assert.equal(clampMapWindow("abc"), 10);
+	assert.equal(clampMapWindow("7"), 7);
+	assert.equal(clampMapWindow(0), 1);
+	assert.equal(clampMapWindow(-5), 1);
+	assert.equal(clampMapWindow(1000), CHAT_MAP_MAX_WINDOW);
 });

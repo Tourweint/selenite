@@ -13,16 +13,18 @@ import { clearChatProject, setChatWorkdir, syncChatProjectPill } from "./chat-pr
 import { addMessage, clearThread, syncEditEntry } from "./chat-thread.js";
 import { renderChats } from "./chats-list.js";
 import { KEY_CONV, el } from "./dom.js";
+import { refreshModelPill } from "./hover-tip.js";
 import { dayKeyOfAt, dayLabelOf } from "./groups-thread.js";
 import { request } from "./net.js";
 import { partnerSessionLabel, parsePartnerExternalId } from "./partner-sessions.js";
 import { openPartnerSessions } from "./partner-sessions-ui.js";
 import { chiefDisplayName, partnerDisplayName, syncChatHeadAvatar, syncEmptyMark } from "./partners-status.js";
 import { go, syncRailCurrent, syncSideRowsCurrent } from "./route.js";
+import { beginHomeSettle, cancelHomeSettle, endHomeSettle } from "./shell.js";
 import { state } from "./state.js";
 import { ensureChatPagingFlag } from "./tasks-redesign.js";
 import { toolFlowFromSteps } from "./tool-flow.js";
-import { loadPendingApprovals, mountTopicProposalCard, parseTopicProposalOutput } from "./topic-proposal.js";
+import { loadPendingApprovals } from "./turn-reconcile.js";
 import { toast } from "./ui-atoms.js";
 
 /* ── 分支来源行（2026-11-17 批3b）───────────────────────
@@ -166,12 +168,6 @@ function renderTranscriptMessage(message, options = {}) {
     toolFlowFromSteps(shown.root, message.steps);
     // 文件变更汇总（批 33）：从同一份 steps 收集，与现场同一张卡
     mountFileSummary(shown.root, collectFileChangesFromSteps(message.steps));
-    // 课题提议卡（2026-11-07 批二）：历史回读也按工具结果重渲，状态由 GET 定
-    for (const step of Array.isArray(message.steps) ? message.steps : []) {
-      if (step && step.name === "propose_topic" && step.output) {
-        mountTopicProposalCard(shown.root, parseTopicProposalOutput(step.output));
-      }
-    }
     // 历史里的用时（2026-11-06）：服务端已下发 workMs（提问到收尾的墙钟），
     // 以前只有现场那一轮有耗时，切回来就没了。这里补成同一份脚注。
     if (typeof message.workMs === "number" && message.workMs > 0) {
@@ -316,6 +312,8 @@ async function openChat(conversationId, { anchor = null, deep = false } = {}) {
   const token = ++state.navToken; // 作废还在飞的 open / 上一次 openChat
   const owner = () => token === state.navToken && state.conversationId === conversationId;
   state.conversationId = conversationId;
+  // 打开已有会话 = 放弃新会话屏上还没发出去的临时选择。
+  state.pendingModel = null;
   localStorage.setItem(KEY_CONV, conversationId);
   // 归属标签先收起：上一条会话的项目不能挂在新会话上；回读后再按 chatWorkdir 画。
   clearChatProject();
@@ -328,6 +326,9 @@ async function openChat(conversationId, { anchor = null, deep = false } = {}) {
   // seq 游标跟着会话走：切会话就是重新全量回读，游标归零（2026-11-04 seq 方案）。
   state.maxSeq = 0;
   renderChats();
+  // 载入期锁住首页态判定（2026-11-19）：清线程后先保持贴底，历史画完再结算。
+  // 不加锁的话，线程一空就会被判成首页态，输入框先抬到中间、再随历史落回底部。
+  beginHomeSettle(token);
   clearThread();
   // 来源行在 thread 之外，切会话先收起；拿到回读数据后按 origin 再摆。
   renderBranchOrigin(null);
@@ -363,6 +364,8 @@ async function openChat(conversationId, { anchor = null, deep = false } = {}) {
     // 续话身份只认服务端回读（缺字段的旧后端按 chief）；不靠 id 猜。
     const kind = data.chatKind || "chief";
     state.chatKind = kind;
+    // 2026-11-19 会话级模型切换：pill 跟这条会话的模型 / 档位走，不再显示全局默认。
+    void refreshModelPill(conversationId);
     // 种类回读后再校一次轨道选中：总管会话要把「对话」熄掉（2026-11-13 选中态批）
     syncRailCurrent();
     // 工作归属（2026-11-18）：服务端回读创建时快照；旧后端没有该字段 → 不显示。
@@ -448,6 +451,8 @@ async function openChat(conversationId, { anchor = null, deep = false } = {}) {
     }
     return { token, conversationId, status: "error", applied: true };
   } finally {
+    // 历史画完（或失败 / 被顶掉）再结算首页态；stale 时会自行忽略（token 不匹配）
+    endHomeSettle(token);
     if (owner()) void syncCtxMeter(owner);
   }
 }
@@ -456,6 +461,9 @@ function startNewChat(kind = "worker") {
   state.navToken += 1;
   state.chatKind = kind === "chief" ? "chief" : "worker";
   state.conversationId = "";
+  // 新会话屏的模型选择是本地 pending，回到新会话就清掉；pill 回到全局默认。
+  state.pendingModel = null;
+  void refreshModelPill("");
   localStorage.removeItem(KEY_CONV);
   state.maxSeq = 0; // 新会话没有历史帧（2026-11-04 seq 方案）
   syncRailCurrent();
@@ -463,6 +471,8 @@ function startNewChat(kind = "worker") {
   renderChats();
   renderBranchOrigin(null); // 新会话不是副本，来源行收起来
   clearThread();
+  // 新建会话不等任何在途 openChat 的载入锁：清完线程立刻按空态结算（抬回中间）
+  cancelHomeSettle();
   el.title.textContent = state.chatKind === "chief" ? chiefDisplayName() : "普通对话";
   syncTitleSessionAffordance("");
   el.title.dataset.chatKind = state.chatKind;

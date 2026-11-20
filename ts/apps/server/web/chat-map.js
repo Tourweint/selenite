@@ -38,6 +38,10 @@ const VIEWPORT_MARGIN = 700;
 const POS_KEY = "lifediary.chatmap.positions.v1";
 // 收起状态（2026-11-18）：副本收起后只留第一张问卡，整条后代不画。
 const COLLAPSE_KEY = "lifediary.chatmap.collapsed.v1";
+// 窗口 / 折叠（2026-11-19）：默认只画最近 N 轮；更早的折在车道左端，点一次往前放一段。
+const WINDOW_KEY = "lifediary.chatmap.window.v1";
+const WINDOW_OPTIONS = [5, 10, 15, 20, 30];
+const DEFAULT_WINDOW = 10;
 
 /* ── 元素 ────────────────────────────────────────────── */
 
@@ -48,6 +52,7 @@ const refreshBtn = document.getElementById("map-refresh");
 const focusBtn = document.getElementById("map-focus");
 const switchBtn = document.getElementById("map-switch");
 const zoomEl = document.getElementById("map-zoom");
+const windowSelect = document.getElementById("map-window");
 const viewport = document.getElementById("map-viewport");
 const content = document.getElementById("map-content");
 const edgesEl = document.getElementById("map-edges");
@@ -67,6 +72,7 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 const mapState = {
   routeId: "",
   data: null,
+  window: loadWindowSetting(),
   cards: [],
   cardById: new Map(),
   nodeById: new Map(),
@@ -136,6 +142,32 @@ function saveCollapsed() {
     localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...mapState.collapsed]));
   } catch {
     // 同 savePositions：只丢收起状态，不挡画板
+  }
+}
+
+function loadWindowSetting() {
+  try {
+    const value = Number.parseInt(localStorage.getItem(WINDOW_KEY) || "", 10);
+    return WINDOW_OPTIONS.includes(value) ? value : DEFAULT_WINDOW;
+  } catch {
+    return DEFAULT_WINDOW;
+  }
+}
+
+function saveWindowSetting(value) {
+  try {
+    localStorage.setItem(WINDOW_KEY, String(value));
+  } catch {
+    // 同 savePositions：只丢偏好，不挡画板
+  }
+}
+
+/** 顶栏下拉跟当前窗口对齐；服务端夹到别的值时保持原选项（前端只送选项内的值）。 */
+function syncWindowSelect() {
+  if (!windowSelect) return;
+  const value = String(mapState.window);
+  if ([...windowSelect.options].some((option) => option.value === value)) {
+    windowSelect.value = value;
   }
 }
 
@@ -225,9 +257,10 @@ async function loadMap(id) {
   clearMap();
   showState("读地图中…");
   try {
-    const response = await request(`/api/v1/agent/chat/${encodeURIComponent(id)}/map`, {
-      cache: "no-store",
-    });
+    const response = await request(
+      `/api/v1/agent/chat/${encodeURIComponent(id)}/map?turns=${encodeURIComponent(mapState.window)}`,
+      { cache: "no-store" },
+    );
     if (token !== mapState.loadToken) return;
     const data = await response.json().catch(() => ({}));
     if (token !== mapState.loadToken) return;
@@ -242,6 +275,9 @@ async function loadMap(id) {
       titleEl.textContent = "会话地图";
       return;
     }
+    const appliedWindow = Number(data.window);
+    if (Number.isFinite(appliedWindow) && appliedWindow > 0) mapState.window = appliedWindow;
+    syncWindowSelect();
     mapState.data = data;
     mapState.activeNodeId = (data.nodes || []).some((node) => node.id === id) ? id : data.rootId;
     // 打开谁的图就把谁和祖先放出来：收起状态不能把当前会话藏掉。
@@ -362,30 +398,72 @@ function buildModel() {
   const cards = [];
   const byId = new Map();
   const nodeCards = new Map();
+  const windowStep = Math.max(1, Number(mapState.data?.window) || mapState.window || DEFAULT_WINDOW);
 
   for (const node of visibleNodes) {
     const lane = mapState.lanes.get(node.id) ?? 0;
     const laneTop = ROOT_Y + lane * LANE_STEP;
     const collapsed = node.id !== rootId && mapState.collapsed.has(node.id);
     const turns = collapsed ? (node.turns || []).slice(0, 1) : node.turns || [];
+    const startTurn = Number.isFinite(Number(node.startTurn)) ? Number(node.startTurn) : 0;
+    const firstIndex = Number(turns[0]?.index);
+    const windowStart = Number.isFinite(Number(node.windowStart))
+      ? Number(node.windowStart)
+      : Number.isFinite(firstIndex)
+        ? firstIndex
+        : startTurn;
+    const earlier = Math.max(0, windowStart - startTurn);
     const list = [];
     let prevAnswer = null;
+    // 折叠卡（2026-11-19）：窗口前面还有这条会话自己的回合时，放在车道最左端。
+    // 与回合卡同尺寸，连线几何不变；不可拖、不落盘、不进详情。
+    const foldX = ROOT_X + Math.max(0, windowStart - 1) * X_STEP;
+    const foldCard =
+      !collapsed && node.hasEarlier === true && turns.length > 0 && earlier > 0
+        ? {
+            id: `${node.id}:fold`,
+            key: `${node.id}:fold`,
+            nodeId: node.id,
+            role: "fold",
+            turnIndex: Math.max(0, windowStart - 1),
+            turn: null,
+            node,
+            laneTop,
+            parentId: null,
+            answerCard: null,
+            questionCard: null,
+            natural: { x: foldX, y: laneTop },
+            position: { x: foldX, y: laneTop },
+            pinned: false,
+            collapsible: false,
+            collapsed: false,
+            earlier,
+            step: Math.min(earlier, windowStep),
+          }
+        : null;
+    if (foldCard) {
+      cards.push(foldCard);
+      byId.set(foldCard.id, foldCard);
+      list.push(foldCard);
+    }
     for (const turn of turns) {
-      const questionId = `${node.id}:t${turn.index}:q`;
+      const turnIndex = Number.isFinite(Number(turn.index)) ? Number(turn.index) : 0;
+      const questionId = `${node.id}:t${turnIndex}:q`;
+      const naturalX = ROOT_X + turnIndex * X_STEP;
       const question = {
         id: questionId,
         key: questionId,
         nodeId: node.id,
-        turnIndex: turn.index,
+        turnIndex,
         role: "question",
         turn,
         node,
         laneTop,
-        parentId: prevAnswer ? prevAnswer.id : null,
+        parentId: prevAnswer ? prevAnswer.id : foldCard ? foldCard.id : null,
         answerCard: null,
         questionCard: null,
-        natural: { x: ROOT_X, y: laneTop },
-        position: { x: ROOT_X, y: laneTop },
+        natural: { x: naturalX, y: laneTop },
+        position: { x: naturalX, y: laneTop },
         pinned: false,
         collapsible: node.id !== rootId && prevAnswer === null,
         collapsed,
@@ -395,12 +473,12 @@ function buildModel() {
       list.push(question);
       // 收起只留第一张问卡：答卡不进模型，点卡片看详情仍能读到完整问答。
       if (collapsed) break;
-      const answerId = `${node.id}:t${turn.index}:a`;
+      const answerId = `${node.id}:t${turnIndex}:a`;
       const answer = {
         id: answerId,
         key: answerId,
         nodeId: node.id,
-        turnIndex: turn.index,
+        turnIndex,
         role: "answer",
         turn,
         node,
@@ -408,8 +486,8 @@ function buildModel() {
         parentId: questionId,
         answerCard: null,
         questionCard: question,
-        natural: { x: ROOT_X, y: laneTop + CARD_H + PAIR_GAP },
-        position: { x: ROOT_X, y: laneTop + CARD_H + PAIR_GAP },
+        natural: { x: naturalX, y: laneTop + CARD_H + PAIR_GAP },
+        position: { x: naturalX, y: laneTop + CARD_H + PAIR_GAP },
         pinned: false,
         collapsible: false,
         collapsed: false,
@@ -423,7 +501,8 @@ function buildModel() {
     nodeCards.set(node.id, list);
   }
 
-  // 分叉卡挂回母会话那张答卡（找不到就退到母会话第一张卡，再找不到就自由漂浮）
+  // 分叉卡挂回母会话那张答卡（找不到就退到母会话第一张卡，再找不到就自由漂浮）。
+  // 有折叠卡时车道头是折叠卡：分叉线先落到折叠卡，再由它接到第一张可见问卡。
   for (const node of visibleNodes) {
     const list = nodeCards.get(node.id);
     if (!list || list.length === 0) continue;
@@ -440,7 +519,8 @@ function buildModel() {
     first.parentId = anchor ? anchor.id : null;
   }
 
-  // 自然坐标：从父卡往右一格；父卡被拖过也不影响自然链（与 dsh-synapse 同口径）
+  // 自然坐标：按绝对轮次铺（2026-11-19 折叠批）——展开更早的回合时已加载卡片不位移；
+  // 分支自己的轮次与母会话复制前缀对齐，所以第一张问卡仍落在分叉答卡右边一格。
   for (const card of cards) {
     if (card.role === "answer") {
       card.natural = {
@@ -449,15 +529,18 @@ function buildModel() {
       };
       continue;
     }
-    const parent = card.parentId ? byId.get(card.parentId) : null;
     card.natural = {
-      x: parent ? parent.natural.x + X_STEP : ROOT_X,
+      x: ROOT_X + card.turnIndex * X_STEP,
       y: card.laneTop,
     };
   }
 
-  // 落地坐标：手动位置优先；答卡跟着自己的问卡走；其余用自然坐标
+  // 落地坐标：手动位置优先；答卡跟着自己的问卡走；折叠卡只用自然坐标（不可拖、不落盘）
   for (const card of cards) {
+    if (card.role === "fold") {
+      card.position = { x: card.natural.x, y: card.natural.y };
+      continue;
+    }
     const saved = mapState.positions.get(card.key);
     if (saved) {
       card.position = { x: saved.x, y: saved.y };
@@ -483,7 +566,36 @@ function buildModel() {
 const BRANCH_ICON =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2.4"/><circle cx="18" cy="6" r="2.4"/><circle cx="12" cy="18" r="2.4"/><path d="M8.4 6h7.2"/><path d="M7.2 8.2 10.8 15.8"/><path d="M16.8 8.2 13.2 15.8"/></svg>';
 
+/** 折叠卡（2026-11-19）：代表窗口前面还没放出来的回合；点卡片或右上角 + 往前放一段。 */
+function createFoldCardEl(card) {
+  const article = document.createElement("article");
+  article.className = "map-card is-fold";
+  article.dataset.cardId = card.id;
+  article.dataset.nodeId = card.nodeId;
+  article.style.transform = `translate(${Math.round(card.position.x)}px, ${Math.round(card.position.y)}px)`;
+  article.style.width = `${CARD_W}px`;
+  article.style.height = `${CARD_H}px`;
+  const loading = Boolean(card.node?.foldLoading);
+  const step = Math.max(1, Number(card.step) || DEFAULT_WINDOW);
+  const label = loading ? "展开中…" : `往前放 ${step} 轮`;
+  const body = loading ? "展开中…" : `点开往前放 ${step} 轮`;
+  article.innerHTML = `
+    <div class="map-card-head">
+      <span class="map-card-chips">
+        <span class="map-card-kind">折叠</span>
+        <span class="map-card-turn">更早 ${card.earlier} 轮</span>
+      </span>
+      <span class="map-card-tools">
+        <button class="map-tool is-toggle" type="button" data-act="expand"
+                data-tip="${label}" aria-label="${label}">+</button>
+      </span>
+    </div>
+    <p class="map-card-text${loading ? " is-empty" : ""}">${body}</p>`;
+  return article;
+}
+
 function createCardEl(card) {
+  if (card.role === "fold") return createFoldCardEl(card);
   const article = document.createElement("article");
   const kindClass = card.role === "question" ? "is-question" : "is-answer";
   article.className = `map-card ${kindClass}`;
@@ -804,6 +916,8 @@ function onCardPointerDown(event) {
   if (event.target.closest("button")) return;
   const card = mapState.cardById.get(element.dataset.cardId);
   if (!card) return;
+  // 折叠卡不是回合卡：不拖、不选中；click 里展开。
+  if (card.role === "fold") return;
   event.preventDefault();
   mapState.drag = {
     card,
@@ -924,6 +1038,10 @@ function onWheel(event) {
 function selectCard(cardId) {
   const card = mapState.cardById.get(cardId);
   if (!card) return;
+  if (card.role === "fold") {
+    void expandEarlier(card.nodeId);
+    return;
+  }
   mapState.selectedCardId = cardId;
   mapState.activeNodeId = card.nodeId;
   for (const [id, element] of mapState.mounted) {
@@ -1105,7 +1223,11 @@ function updateHeader() {
   const data = mapState.data;
   if (!data) return;
   const root = mapState.nodeById.get(data.rootId);
-  const turns = mapState.cards.filter((card) => card.role === "question").length;
+  const totalTurns = Number(root?.totalTurns);
+  // 窗口化后画布上只有最近 N 轮；悬停提示报整条主线的总轮次。
+  const turns = Number.isFinite(totalTurns)
+    ? totalTurns
+    : mapState.cards.filter((card) => card.role === "question").length;
   const branches = Math.max(0, (mapState.visibleNodes?.length ?? mapState.nodes.length) - 1);
   if (titleEl) titleEl.textContent = "会话地图";
   // 会话标题 + 轮数/分支数不再常驻顶栏：鼠标停到画布上时，由全局黑底小签显示
@@ -1137,6 +1259,64 @@ function toggleCollapsed(nodeId) {
   renderMap();
 }
 
+/**
+ * 逐段往前展开（2026-11-19 折叠批）：只取这条会话窗口前的一段，不重拉整张地图。
+ * 步长 = 当前窗口 N；`floor` = 节点的 startTurn（分支不会展开到复制前缀里）。
+ */
+async function expandEarlier(nodeId) {
+  const node = mapState.nodeById.get(nodeId);
+  if (!node || !node.hasEarlier || node.foldLoading) return;
+  const turns = Array.isArray(node.turns) ? node.turns : [];
+  const first = turns[0];
+  const before = Number.isFinite(Number(first?.index))
+    ? Number(first.index)
+    : Number(node.totalTurns) || 0;
+  const floor = Number.isFinite(Number(node.startTurn)) ? Number(node.startTurn) : 0;
+  if (before <= floor) return;
+  const limit = Math.max(1, Number(mapState.data?.window) || mapState.window || DEFAULT_WINDOW);
+  const token = mapState.loadToken;
+
+  node.foldLoading = true;
+  buildModel();
+  renderMap();
+
+  try {
+    const response = await request(
+      `/api/v1/agent/chat/${encodeURIComponent(nodeId)}/map/turns` +
+        `?floor=${floor}&before=${before}&limit=${limit}`,
+      { cache: "no-store" },
+    );
+    if (token !== mapState.loadToken) return;
+    const data = await response.json().catch(() => ({}));
+    if (token !== mapState.loadToken) return;
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+
+    const older = Array.isArray(data.turns) ? data.turns : [];
+    const have = new Set(turns.map((turn) => turn.index));
+    const fresh = older.filter((turn) => !have.has(turn.index));
+    if (fresh.length === 0) {
+      // 服务端说没有更早的了（或参数没取到）：停住，别让折叠卡一直可点。
+      node.hasEarlier = false;
+    } else {
+      node.turns = [...fresh, ...turns].sort((left, right) => left.index - right.index);
+      node.windowStart = Number.isFinite(Number(data.windowStart))
+        ? Number(data.windowStart)
+        : (node.turns[0]?.index ?? 0);
+      node.totalTurns = Number.isFinite(Number(data.totalTurns))
+        ? Number(data.totalTurns)
+        : node.totalTurns;
+      node.hasEarlier = data.hasEarlier === true;
+    }
+  } catch {
+    if (token === mapState.loadToken) toast("展开失败，稍后再试");
+  } finally {
+    if (token !== mapState.loadToken) return;
+    node.foldLoading = false;
+    buildModel();
+    renderMap();
+  }
+}
+
 cardsEl?.addEventListener("pointerdown", onCardPointerDown);
 cardsEl?.addEventListener("dblclick", (event) => {
   const element = event.target.closest?.(".map-card");
@@ -1145,13 +1325,18 @@ cardsEl?.addEventListener("dblclick", (event) => {
 });
 cardsEl?.addEventListener("click", (event) => {
   const button = event.target.closest?.("button[data-act]");
-  if (!button) return;
-  event.stopPropagation();
-  const element = button.closest(".map-card");
+  const element = (button || event.target).closest?.(".map-card");
   const card = element ? mapState.cardById.get(element.dataset.cardId) : null;
-  if (!card) return;
-  if (button.dataset.act === "branch") void branchFromCard(card);
-  else if (button.dataset.act === "toggle") toggleCollapsed(card.nodeId);
+  if (button) {
+    if (!card) return;
+    event.stopPropagation();
+    if (button.dataset.act === "branch") void branchFromCard(card);
+    else if (button.dataset.act === "toggle") toggleCollapsed(card.nodeId);
+    else if (button.dataset.act === "expand") void expandEarlier(card.nodeId);
+    return;
+  }
+  // 点折叠卡本体也展开（折叠卡没有详情）。
+  if (card?.role === "fold") void expandEarlier(card.nodeId);
 });
 viewport?.addEventListener("pointerdown", onViewportPointerDown);
 viewport?.addEventListener("wheel", onWheel, { passive: false });
@@ -1183,7 +1368,18 @@ refreshBtn?.addEventListener("click", () => {
   if (id) void loadMap(id);
 });
 
+// 窗口下拉（2026-11-19）：默认只画最近 N 轮；改完重拉地图（展开状态跟着重来）。
+windowSelect?.addEventListener("change", () => {
+  const next = Number.parseInt(windowSelect.value, 10);
+  const value = WINDOW_OPTIONS.includes(next) ? next : DEFAULT_WINDOW;
+  mapState.window = value;
+  saveWindowSetting(value);
+  const id = mapState.routeId || mapRouteId();
+  if (id) void loadMap(id);
+});
+
 // 首帧就按能力投影收起入口（loadCapabilities 回来后会再调一次）
+syncWindowSelect();
 syncChatMapEntry();
 
 // 路由自己收：`#/map/<id>` 进出都靠 hashchange；首帧深链再补一次

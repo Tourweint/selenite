@@ -13,6 +13,7 @@ import { el } from "./dom.js";
 import { request } from "./net.js";
 import { openFileBrowser } from "./project-browser.js";
 import { baseNameOf, closeProjectMenu, openAddWorkspaceModal, refreshProjectPill } from "./project-modal.js";
+import { isResearchProject, researchTagNode, toggleResearchProject } from "./research-tag.js";
 import { go } from "./route.js";
 import { openMenuAt } from "./sec-menu.js";
 import { projectErrorText } from "./settings-projects.js";
@@ -173,6 +174,9 @@ function projectRowNode(project, current) {
   name.textContent = project.name;
   row.append(name);
 
+  // 「研究」标记（2026-11-20）：纯前端 localStorage，只是给长期研究项目一个视觉标记。
+  if (isResearchProject(project.id)) row.append(researchTagNode());
+
   if (project.missing) {
     const tag = document.createElement("span");
     tag.className = "proj-tag is-warn";
@@ -216,9 +220,16 @@ function projectRowNode(project, current) {
       event.clientX,
       event.clientY,
       [
-        { label: "查看此项目", hint: "文件 / 任务 / 历史都以它为准", disabled: current, run: select },
-        { separator: true },
-        { label: "项目设置", hint: "改名 / 归档 / 管理文件夹", run: () => go("settings", "projects") },
+        // 2026-11-20：三项都去掉解释行，也不留分隔条（菜单只有三项，隔开会显得断档）。
+        { label: "查看此项目", disabled: current, run: select },
+        {
+          label: isResearchProject(project.id) ? "取消「研究」标记" : "标记为研究项目",
+          run: () => {
+            toggleResearchProject(project.id);
+            syncProjectRows(state.switcher.items || []);
+          },
+        },
+        { label: "项目设置", run: () => go("settings", "projects") },
       ],
       project.name,
     );

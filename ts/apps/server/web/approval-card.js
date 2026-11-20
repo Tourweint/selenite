@@ -48,7 +48,7 @@ function groupProjectionById(groupId) {
 /**
  * 审批来源标签（2026-11-08 批三）：「来自 <会话或群名> · <执事名>」。
  * 只写能反查到的：群成员会话 → 群名 + 成员名；执事专线 → 执事名；主对话 → 总管。
- * task- 前缀（自主轮/课题专线）与查不到的一律返回空串——如实不显示，不猜。
+ * task- 前缀（自主轮专线）与查不到的一律返回空串——如实不显示，不猜。
  */
 function approvalSourceLabel(conversationId) {
   const value = String(conversationId || "");

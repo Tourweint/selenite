@@ -484,7 +484,12 @@ function pfWireIdentity(root, partnerId, partner, detail, onDirty) {
   });
   soulArea.addEventListener("input", () => {
     draft.soul = soulArea.value;
-    setHint("");
+    // 待保存时先说清代价：只有总管人设进 system 固定前缀。
+    setHint(
+      partnerId === "chief" && draft.soul !== base.soul
+        ? "保存后下一轮起用；总管人设在固定前缀里，本会话下一次请求会重建一次。换风格/立场建议开新会话：旧回答还在历史里。"
+        : "",
+    );
     refresh();
   });
 
@@ -547,7 +552,12 @@ function pfWireIdentity(root, partnerId, partner, detail, onDirty) {
       syncChiefAvatar();
       void loadRoster();
       // 快照退役（2026-11-15）：保存成功后给一次「回到上一版」，不展示版本号
-      setHint("已保存，下一轮起用。");
+      // 只有总管的人设进 system 固定前缀；执事 SOUL 走每轮尾部消息，不改前缀（别误报缓存）。
+      setHint(
+        payload.soul !== undefined && partnerId === "chief"
+          ? "已保存，下一轮起用。总管人设在固定前缀里，本会话下次请求会重建一次（缓存掉一截属正常）。"
+          : "已保存，下一轮起用。",
+      );
       showRollbackOffer(hint, partnerId, (restored) => {
         base.soul = restored;
         draft.soul = restored;
@@ -1159,7 +1169,8 @@ async function pfOpenProjectEditor(partnerId, partner, onChanged) {
   const attached = Array.isArray(partner.projectIds) ? partner.projectIds : [];
   openModal("负责项目", async (body) => {
     body.innerHTML = `
-      <p class="modal-desc">挂上项目 = 两件事：①他每轮固定收到一行「你负责的项目：…」（和纪律一样，100% 每句话都带）；②这些项目的记忆进召回池，按你这轮说的话打分，够相关的才浮出。执事自己的私人记忆照旧。</p>
+      <p class="modal-desc">挂上项目只影响记忆，不限定他能改哪些目录：①他每轮固定收到一行「你负责的项目：…」（和纪律一样，100% 每句话都带）；②这些项目的记忆进召回池，按你这轮说的话打分，够相关的才浮出；往项目记忆里写也只写进挂上的这些项目。执事自己的私人记忆照旧。</p>
+      <p class="modal-hint">总管 / 执事对所有已登记的工作区 / 项目本来就能读写（文件边界是登记根并集）；派出去的 worker 才由单子绑定的项目限定，一个单子只在一个项目里动。</p>
       <p class="modal-hint" id="pf-project-line" hidden></p>
       <div class="export-list" id="pf-project-list"><label class="export-part"><input type="checkbox" disabled /><span class="export-part-main"><span class="export-part-name">读取中…</span></span></label></div>
       <p class="modal-hint" id="pf-project-hint"></p>
@@ -2800,7 +2811,7 @@ async function pfWirePersona(root, partnerId, partner, detail, onDraftChange) {
     project: {
       id: "project",
       name: "负责项目",
-      tip: "挂一个项目带来两件事：①每轮固定收到一行「你负责的项目：…」（100% 注入）；②这些项目的记忆进召回池，按你这轮的话打分，相关的才浮出。总闸是部署配置 PARTNER_PROJECT_MEMORY，不在插件页（缺省开）。",
+      tip: "只管记忆，不限定他能改哪些目录：挂上项目 = ①每轮固定收到一行「你负责的项目：…」（100% 注入）；②这些项目的记忆进召回池，按你这轮的话打分。所有已登记的工作区 / 项目本来就都能读写（文件边界是登记根并集），挂不挂都一样；派出去的 worker 才按单子绑定的项目限定在单个项目里。总闸是部署配置 PARTNER_PROJECT_MEMORY，不在插件页（缺省开）。",
       summary: () =>
         (Array.isArray(partner.projectIds) && partner.projectIds.length
           ? counts.projectName || "挂着"

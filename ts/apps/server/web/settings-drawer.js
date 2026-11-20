@@ -103,9 +103,9 @@ function closeChatSettings() {
 async function openDrawerAt(target, page) {
   el.chatSettingsBtn.disabled = true;
   try {
-    // 每次打开都现拉：不缓存陈旧目录（同模型菜单口径）
-    cs.catalog = await fetchModelCatalog();
-    state.modelCatalog = cs.catalog;
+    // 每次打开都现拉：不缓存陈旧目录（同模型菜单口径）。
+    // 2026-11-19：带当前会话，抽屉不再把 pill 重置成全局默认。
+    state.modelCatalog = await fetchModelCatalog(state.conversationId || "");
     updateModelPill();
     cs.target = target;
     cs.page = page;
@@ -384,7 +384,6 @@ function renderCsHome() {
   body.className = "cs-body";
   body.dataset.cards = ""; // 卡片化排版（群设置共用骨架，不吃这一套）
 
-  const current = cs.catalog && cs.catalog.current;
   const partner = state.partners.find((item) => item.id === cs.target) || null;
   const chain = cs.target ? partnerModelChain() : [];
 
@@ -392,24 +391,11 @@ function renderCsHome() {
   // 普通助手会话没有角色可改（人格在服务端），不摆身份块。
   if (cs.target) body.append(csIdentityNode(partner));
 
-  // 模型 / 权限 = 两个值格。主选与备选是同一件东西的两段（同一个页面），
-  // 所以首页只留一个「模型」入口，段内的区分交给二级页（2026-11-13 用户口径）。
+  // 2026-11-19 会话级模型切换：模型选择在输入框左下角的 pill 里；
+  // 右上角不再有「主选模型」。这里只留权限 + 执事的备选模型（自动重试）。
   const tiles = document.createElement("div");
   tiles.className = "cs-tiles";
   tiles.append(
-    csTile({
-      label: "模型",
-      value: current ? current.modelId : "—",
-      sub: cs.target
-        ? chain.length
-          ? `备选 ${chain.length} 条`
-          : "没配备选"
-        : "全局模型",
-      onClick: () => {
-        cs.page = "model";
-        renderCsPage();
-      },
-    }),
     csTile({
       label: "权限",
       value: cs.policy && cs.policy.access ? CS_POLICY_LABEL[cs.policy.access] || cs.policy.access : "—",
@@ -423,6 +409,19 @@ function renderCsHome() {
       },
     }),
   );
+  if (cs.target) {
+    tiles.append(
+      csTile({
+        label: "备选模型",
+        value: chain.length ? `${chain.length} 条` : "未配置",
+        sub: "主模型不可用时自动重试",
+        onClick: () => {
+          cs.page = "model";
+          renderCsPage();
+        },
+      }),
+    );
+  }
   body.append(tiles);
 
   const allCard = csCard();

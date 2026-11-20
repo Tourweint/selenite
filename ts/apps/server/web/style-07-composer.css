@@ -73,6 +73,14 @@ html[data-wallpaper] .main[data-home]::after { content: none; }
   font-size: 16px;
 }
 
+/* 切会话的载入期（2026-11-19 用户报）：openChat 先清线程，历史还没回来。
+   这段时间输入卡保持贴底、且不播位移动画——否则它先按空会话抬到中间，
+   等历史回来又被落回底部，就是那下「先在中间、再被快速拉下来」。
+   结算由 shell.js 的 endHomeSettle 做，属性只在载入期挂着。 */
+.main[data-home-settling] .composer { transition: none; }
+/* 空态问候同理先不画：历史回来之前不知道这是不是空会话，避免问候闪一下 */
+.main[data-home-lock] .empty { display: none; }
+
 /* 超椭圆（2026-11-04 界面 v2，ZCode 同款策略）：支持的浏览器半径翻倍 + squircle，
    视觉圆度与 16/24 的普通圆角接近；不支持就维持上面的 16 / 24 渐进回退。
    pill、弹层等小半径元素不加。 */

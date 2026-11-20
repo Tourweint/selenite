@@ -20,16 +20,29 @@ let approvalPopKnown = false;
 
 /* ── 审批浮窗（2026-11-08）：人在别的会话/别的页也能当场批 ─────────
  * 全局待审批 5 秒一拉，一份数据多处分用（浮窗 / 群胶囊）。浮窗只弹「当前看不见的」：
- * 当前会话已有的对话流卡、点过「忽略」的都不重复。同屏最多 3 张，余下收成一行计数。
+ * 当前会话已有的对话流卡、点过「忽略」的都不重复。
+ * 2026-11-19 起不再一次摊三张：一件直接摊开，多件收成一行「有 N 个问题等你」，点开才是列表。
  * 原设置页「待处理审批」块与抽屉入口退役：bury 在设置里难找，审批不点头 agent 就干等。 */
 const APPROVAL_POP_POLL_MS = 5000;
-const APPROVAL_POP_MAX = 3;
 const APPROVAL_POP_X =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
 let approvalPopTimer = 0;
 let approvalPopTicker = 0;
 let approvalPopItems = [];
 const approvalPopDismissed = new Set(); // 本次会话期内点过「忽略」的 callId
+/* 2026-11-19（浮窗闪烁 / 溢出批）：
+ * - 轮询 5 秒回来一次，内容没变就不重建 DOM——旧写法每轮 replaceChildren 一次，
+ *   等于整叠卡重播 hoverTipIn 淡入（就是那个闪），顺带冲掉正在打的草稿与光标；
+ * - 草稿按 callId 记着：真要重画时把没发出去的字放回去；
+ * - 只有真正新来的那张卡播入场动画，老卡不再重播。 */
+const approvalPopDrafts = new Map(); // callId → 正在打的回答（没发出去之前一直在）
+const approvalPopShown = new Set(); // 上一帧真画出来的 callId
+let approvalPopSignature = "";
+/* 2026-11-19（收成一行批，用户口径）：
+ * 一个待办 → 直接摊开那张卡；多个 → 只留一行「有 N 个问题等你」，
+ * 点开是列表，列表里点某一条就地展开成卡（可当场答），答完/忽略自动回列表。 */
+let approvalPopExpanded = false;
+let approvalPopActiveCallId = "";
 
 function approvalPopHost() {
   let host = document.getElementById("approval-popups");
@@ -58,30 +71,201 @@ function approvalPopRemainText(deadlineAt) {
   return left > 0 ? `剩余 ${left} 秒，超时按拒绝处理` : "已超时";
 }
 
+/** 这一批卡的内容指纹：轮询回来一模一样就一个节点都别动 */
+function approvalPopFingerprint(items) {
+  return items
+    .map((item) =>
+      [
+        item.callId,
+        item.tool || "",
+        item.kind || "",
+        item.origin || "",
+        item.deadlineAt || "",
+        item.conversationId || "",
+        item.args || "",
+      ].join("\u0001"),
+    )
+    .join("\u0002");
+}
+
+/** 重画前记下焦点：正在这张卡里打字，画完让光标回到原处 */
+function approvalPopFocusSnapshot() {
+  const host = approvalPopHost();
+  const active = document.activeElement;
+  if (!active || !host.contains(active)) return null;
+  const card = active.closest(".approval-pop");
+  const callId = card?.dataset.callId || "";
+  if (!callId) return null;
+  const area = active.tagName === "TEXTAREA" ? active : null;
+  return {
+    callId,
+    area: Boolean(area),
+    start: area ? area.selectionStart : 0,
+    end: area ? area.selectionEnd : 0,
+  };
+}
+
+function restoreApprovalPopFocus(host, snapshot) {
+  if (!snapshot) return;
+  const card = [...host.querySelectorAll(".approval-pop")].find(
+    (node) => node.dataset.callId === snapshot.callId,
+  );
+  if (!card) return;
+  const target = snapshot.area ? card.querySelector("textarea") : card;
+  if (!target || typeof target.focus !== "function") return;
+  target.focus({ preventScroll: true });
+  if (snapshot.area && typeof target.setSelectionRange === "function") {
+    try {
+      target.setSelectionRange(snapshot.start, snapshot.end);
+    } catch {
+      // 选区越界（草稿没了）就停在末尾，不为它报错
+    }
+  }
+}
+
+/** 草稿随卡走：重画后把同一张卡上没发出去的字放回去 */
+function bindApprovalPopDraft(area, callId) {
+  if (!area || !callId) return;
+  const saved = approvalPopDrafts.get(callId);
+  if (saved) area.value = saved;
+  area.addEventListener("input", () => {
+    approvalPopDrafts.set(callId, area.value);
+  });
+}
+
+/** 列表里一行的问题口径：提问卡给问题正文，审批给「要执行 X」 */
+function approvalPopItemText(item) {
+  if (item.tool === "ask_user" || item.kind === "ask_user") {
+    return parseAskUserPayload(item.args).question || "（问题正文缺失）";
+  }
+  return `要执行 ${item.tool || "工具"}，需要你确认`;
+}
+
+/** 多待办时的汇总条：一行「有 N 个问题等你」，点开才摊列表 */
+function approvalPopSummaryCard(items, firstTime) {
+  // 文案按内容如实：全是提问才叫「问题」，混着写操作审批就叫「事」——不把审批冒充成提问
+  const allQuestions = items.every((item) => item.tool === "ask_user" || item.kind === "ask_user");
+  const label = allQuestions ? `有 ${items.length} 个问题等你` : `有 ${items.length} 件事等你处理`;
+  const card = document.createElement("div");
+  card.className = "approval-pop approval-pop-summary";
+  // 已经上过屏的那一版不重播淡入（同单卡口径）；第一次出现才让浏览器播
+  if (!firstTime) card.classList.add("is-static");
+  card.setAttribute("role", "button");
+  card.setAttribute("tabindex", "0");
+  card.setAttribute("aria-expanded", approvalPopExpanded ? "true" : "false");
+  card.setAttribute("title", approvalPopExpanded ? "收起列表" : "点开看是哪几个");
+  card.innerHTML = `
+    <div class="approval-pop-head">
+      <span class="approval-pop-tool">${label}</span>
+      <span class="approval-pop-caret" aria-hidden="true">${approvalPopExpanded ? "▾" : "▸"}</span>
+    </div>`;
+  const toggle = () => {
+    approvalPopExpanded = !approvalPopExpanded;
+    renderApprovalPopups();
+  };
+  card.addEventListener("click", toggle);
+  card.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    toggle();
+  });
+  return card;
+}
+
+/** 展开态下的问题列表：一行一个问题（来源 + 摘要），点一行就地摊开那张卡 */
+function approvalPopListCard(items) {
+  const list = document.createElement("div");
+  list.className = "approval-pop-list";
+  for (const item of items) {
+    const source = approvalSourceLabel(item.conversationId) || item.chatTitle || "未命名会话";
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "approval-pop-item";
+    row.dataset.callId = item.callId;
+    row.title = "点开处理这一条";
+    row.innerHTML = `<span class="approval-pop-item-source">${esc(source)}</span>
+      <span class="approval-pop-item-text">${esc(approvalPopItemText(item))}</span>`;
+    row.addEventListener("click", () => {
+      approvalPopActiveCallId = item.callId;
+      approvalPopExpanded = true;
+      renderApprovalPopups();
+    });
+    list.append(row);
+  }
+  return list;
+}
+
+/** 就地摊开的那张卡补一个「‹ 列表」：答题不是唯一出路，先能退回去 */
+function attachApprovalPopBack(card, count) {
+  const head = card.querySelector(".approval-pop-head");
+  if (!head) return;
+  const back = document.createElement("button");
+  back.type = "button";
+  back.className = "approval-pop-back";
+  back.textContent = `‹ 列表（${count}）`;
+  back.title = "回到问题列表";
+  back.addEventListener("click", (event) => {
+    event.stopPropagation();
+    approvalPopActiveCallId = "";
+    renderApprovalPopups();
+  });
+  head.prepend(back);
+}
+
 function renderApprovalPopups() {
   const host = approvalPopHost();
   const visible = approvalPopItems.filter(approvalPopVisible);
-  host.replaceChildren();
-  if (!visible.length) {
-    host.hidden = true;
+  // 摊开的那条已经不在清单里（答完 / 被忽略 / 服务端已决）→ 退回列表
+  const active = approvalPopActiveCallId
+    ? visible.find((item) => item.callId === approvalPopActiveCallId) || null
+    : null;
+  if (!active) approvalPopActiveCallId = "";
+  // 回到一件或清零时把列表收起来：下一批新问题该从折叠态开始，不能自己弹开
+  if (visible.length < 2) approvalPopExpanded = false;
+  const fingerprint = `${approvalPopFingerprint(visible)}\u0003${approvalPopExpanded ? "1" : "0"}\u0003${approvalPopActiveCallId}`;
+  // 内容与展开态都没变：只保证倒计时表针在跑，DOM 一个节点都不动（不重建 = 不闪、不丢草稿）
+  if (host.dataset.painted === "1" && fingerprint === approvalPopSignature) {
+    host.hidden = !visible.length;
     syncApprovalPopTicker();
     return;
   }
-  host.hidden = false;
-  for (const item of visible.slice(0, APPROVAL_POP_MAX)) host.append(approvalPopupCard(item));
-  if (visible.length > APPROVAL_POP_MAX) {
-    const more = document.createElement("div");
-    more.className = "approval-pop-more";
-    more.textContent = `还有 ${visible.length - APPROVAL_POP_MAX} 条待处理`;
-    host.append(more);
+  const focus = approvalPopFocusSnapshot();
+  const previous = new Set(approvalPopShown);
+  approvalPopSignature = fingerprint;
+  host.replaceChildren();
+  host.hidden = !visible.length;
+  approvalPopShown.clear();
+  if (visible.length) {
+    if (active) {
+      // 多待办里点开的那一条：就地摊成卡，带「‹ 列表」
+      const card = approvalPopupCard(active);
+      if (previous.has(active.callId)) card.classList.add("is-static");
+      attachApprovalPopBack(card, visible.length);
+      approvalPopShown.add(active.callId);
+      host.append(card);
+    } else if (visible.length === 1) {
+      // 只有一件：直接摊开，不折（用户口径：一个就直接展示）
+      const card = approvalPopupCard(visible[0]);
+      if (previous.has(visible[0].callId)) card.classList.add("is-static");
+      approvalPopShown.add(visible[0].callId);
+      host.append(card);
+    } else {
+      // 多件：只留一行计数，点开才是列表
+      host.append(approvalPopSummaryCard(visible, previous.size === 0));
+      if (approvalPopExpanded) host.append(approvalPopListCard(visible));
+      for (const item of visible) approvalPopShown.add(item.callId);
+    }
   }
+  host.dataset.painted = "1";
   syncApprovalPopTicker();
+  restoreApprovalPopFocus(host, focus);
 }
 
 function approvalPopupCard(item) {
   const source = approvalSourceLabel(item.conversationId) || item.chatTitle || "未命名会话";
   const card = document.createElement("div");
   card.className = "approval-pop";
+  card.dataset.callId = item.callId;
   if (item.tool === "ask_user" || item.kind === "ask_user") {
     return askUserPopupCard(card, item, source);
   }
@@ -113,8 +297,10 @@ function approvalPopupCard(item) {
     const input = card.querySelector("[data-pop-feedback] textarea");
     void decideGlobalApproval(item.callId, "reject", input ? input.value : "");
   });
+  bindApprovalPopDraft(card.querySelector("[data-pop-feedback] textarea"), item.callId);
   card.querySelector(".approval-pop-close")?.addEventListener("click", () => {
     approvalPopDismissed.add(item.callId);
+    approvalPopDrafts.delete(item.callId);
     renderApprovalPopups();
   });
   // 点卡片跳到那条会话（按钮上的点击不算）
@@ -158,8 +344,10 @@ function askUserPopupCard(card, item, source) {
     const input = card.querySelector(".approval-feedback textarea");
     void answerGlobalQuestion(item.callId, input ? input.value : "");
   });
+  bindApprovalPopDraft(card.querySelector(".approval-feedback textarea"), item.callId);
   card.querySelector(".approval-pop-close")?.addEventListener("click", () => {
     approvalPopDismissed.add(item.callId);
+    approvalPopDrafts.delete(item.callId);
     renderApprovalPopups();
   });
   return card;
@@ -247,6 +435,7 @@ async function decideGlobalApproval(callId, decision, feedback = "") {
     // 浮窗同步（2026-11-08）：把已答复的从待弹清单里去掉立刻重画，
     // 不等下一轮 5 秒轮询——批完还挂着一张可再点的卡会误导
     approvalPopItems = approvalPopItems.filter((item) => item.callId !== callId);
+    approvalPopDrafts.delete(callId);
     renderApprovalPopups();
   } catch (error) {
     if (error.message !== "forbidden") toast(`答复失败：${error.message}`);
@@ -275,6 +464,7 @@ async function answerGlobalQuestion(callId, text) {
       approvalCards.delete(callId);
     }
     approvalPopItems = approvalPopItems.filter((item) => item.callId !== callId);
+    approvalPopDrafts.delete(callId);
     renderApprovalPopups();
   } catch (error) {
     if (error.message !== "forbidden") toast(`答复失败：${error.message}`);
@@ -744,4 +934,4 @@ let connDeviceRows = [];
 /** 名册外、但此刻真在说话的身份（未配对的直连 / 认不出的凭据）：星形也要把它们画出来 */
 let connLiveOnly = [];
 
-export { APPROVAL_POP_MAX, APPROVAL_POP_POLL_MS, APPROVAL_POP_X, ago, answerGlobalQuestion, approvalPopDismissed, approvalPopHost, approvalPopItems, approvalPopKnown, approvalPopRemainText, approvalPopTicker, approvalPopTimer, approvalPopVisible, approvalPopupCard, askUserPopupCard, connDeviceRows, connLiveOnly, connPhoneCount, decideGlobalApproval, loadDevices, refreshApprovalPopups, renderApprovalPopups, startApprovalPopWatch, syncApprovalPopTicker };
+export { APPROVAL_POP_POLL_MS, APPROVAL_POP_X, ago, answerGlobalQuestion, approvalPopDismissed, approvalPopHost, approvalPopItems, approvalPopKnown, approvalPopRemainText, approvalPopTicker, approvalPopTimer, approvalPopVisible, approvalPopupCard, askUserPopupCard, connDeviceRows, connLiveOnly, connPhoneCount, decideGlobalApproval, loadDevices, refreshApprovalPopups, renderApprovalPopups, startApprovalPopWatch, syncApprovalPopTicker };

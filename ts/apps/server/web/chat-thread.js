@@ -22,7 +22,6 @@ import { parsePartnerExternalId } from "./partner-sessions.js";
 import { syncEmptyMark } from "./partners-status.js";
 import { updateHomeMode } from "./shell.js";
 import { state } from "./state.js";
-import { topicProposalCards } from "./topic-proposal.js";
 import { toast } from "./ui-atoms.js";
 
 /* ── 消息渲染 ─────────────────────────────────────────── */
@@ -38,8 +37,6 @@ function clearThread() {
   // 切会话/新建时把审批卡片的倒计时停掉，免得旧卡在后面空转
   for (const { timer } of approvalCards.values()) clearInterval(timer);
   approvalCards.clear();
-  // 课题提议卡跟审批卡同命运：换会话后旧卡不再属于这一屏
-  topicProposalCards.clear();
   // 错误卡同理（批 32）：报错是"那一条会话里那一轮"的事，不追着人跑
   hideChatError();
   // 待发附件属于"这一屏的这条会话"：切走就清，别把附件带到另一条对话里

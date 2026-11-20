@@ -8,7 +8,7 @@
  */
 
 import { el } from "./dom.js";
-import { fetchModelCatalog, updateModelPill } from "./hover-tip.js";
+import { fetchModelCatalog, refreshModelPill } from "./hover-tip.js";
 import { esc } from "./markdown.js";
 import { request } from "./net.js";
 import { setModalHint } from "./project-modal.js";
@@ -399,7 +399,8 @@ async function reloadAfterProviderChange() {
   try {
     state.modelCatalog = await fetchModelCatalog();
     renderDefaultModelRow(state.modelCatalog);
-    updateModelPill();
+    // 2026-11-19：默认模型行读全局；pill 读当前会话，别把会话模型盖成全局。
+    void refreshModelPill();
   } catch {
     /* 读不到就保留旧显示 */
   }
