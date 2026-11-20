@@ -78,6 +78,12 @@ export interface PartnerRow {
 	 */
 	promotedTools: string[];
 	/**
+	 * 是否读取全局「关于我」（2026-11-19）：`false` = 不读；`true` / 缺省 = 读。
+	 * 存 `partners.user_profile_read`（1 / NULL = 读，0 = 不读）。**不版本化**（不是身份）；
+	 * 普通 worker 不在这张表上，固定不读、没有开关。
+	 */
+	userProfileRead?: boolean;
+	/**
 	 * 人格预设（2026-11-14 员工人格模块 §四；2026-11-15 人设页打磨扩枚举）：
 	 * `work`（默认）/ `companion` / `allrounder` / `apprentice` / `custom`。
 	 * 只决定模块开关的默认值；保存时按最终开关表推导（`derivePresetFromModules`）——

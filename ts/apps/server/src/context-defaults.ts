@@ -20,7 +20,7 @@ import {
   clarifyContractProvider,
   currentProjectProvider,
   personaProvider,
-  topicsProvider,
+  userProfileProvider,
   verificationIronLawProvider,
 } from "./agent/lifecycle-injections.ts";
 import { buildPartnerTurnContext, splitContractSections } from "./agent/partner-context.ts";
@@ -110,17 +110,18 @@ function roleOf(roleId: string | undefined, roles: ContextDefaultRole[]): Contex
  * 履历）不在这里，仍由「会变的部分」另块提示。
  *
  * 顺序也是页面的顺序：角色人设 → 通用规则 → 执事身份七节 → 岗位契约 → 目标 →
- * 纪律八节 → 表达习惯 / 主动性 → 注入防线 / 当前项目 / 课题。
+ * 纪律八节 → 表达习惯 / 主动性 → 注入防线 / 当前项目。
  */
 export const DEFAULT_SECTION_KEYS = [
   "persona",
+  // 关于我（2026-11-19）：全局固定背景，紧跟 persona；worker / 群会话为 0 字槽位。
+  "user_profile",
   "verification_iron_law",
   "clarify_contract",
   "partner_soul",
   "partner_voice",
   "partner_values",
   "partner_scenario",
-  "partner_owner_profile",
   "partner_skill_index",
   "partner_boundary",
   "partner_contract_scope",
@@ -142,7 +143,6 @@ export const DEFAULT_SECTION_KEYS = [
   "current_project",
   // 2026-11-16 多 CLI：当前派活执行器（新单派给谁 / 模型 / 权限）。
   "delegate_executor",
-  "topics",
   // 2026-11-16 C 段：低频工具索引段，排在末尾（缓存前缀变化一次）。
   "tool_index",
 ] as const;
@@ -295,15 +295,14 @@ function buildDefaultSections(
     }
   }
 
+  // 关于我（2026-11-19）：与真实装配走同一个 provider；执事看自己的开关，总管回落 chief，
+  // worker 由 provider 直接跳过（这里仍保留 0 字槽位，页面能看见"这个角色不读"）。
+  pushField(sections, "user_profile", providerText(userProfileProvider, baseCtx));
+
   pushField(sections, "injection_guard", providerText(guardProvider, baseCtx));
   pushField(sections, "current_project", providerText(currentProjectProvider, baseCtx));
   // 当前派活执行器（2026-11-16）：与 live 系统提示同一行；默认开销页也要能看见。
   pushSection(sections, "delegate_executor", CHANCELLOR_ENABLED ? executorLine() : null);
-
-  // 课题只给总管 / 主对话；worker 与执事不注。dryRun 保证不会 drain 待推送简报。
-  if (role.kind === "chief") {
-    pushField(sections, "topics", providerText(topicsProvider, baseCtx));
-  }
 
   // 低频工具索引（C 段）：算进默认基线，让默认开销页看到"新会话初始会读到什么"。
   // 工具面本身仍不含 deferred（defaultTools 过滤），这里只是把索引段的字节数记进来。

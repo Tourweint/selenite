@@ -60,9 +60,11 @@ export class PartnersStore {
 			mood_source     TEXT,
 			-- 人设页工具勾选（2026-11-16 工具裁剪 B）：JSON 数组，只存被取消的工具名；空 = 全开。
 			disabled_tools  TEXT,
-			-- 按人常驻（2026-11-17）：JSON 数组，只存被提升的 deferred 工具名；空 = 全按需。
-			promoted_tools TEXT
-			);
+				-- 按人常驻（2026-11-17）：JSON 数组，只存被提升的 deferred 工具名；空 = 全按需。
+				promoted_tools TEXT,
+				-- 关于我（2026-11-19）：1 / NULL = 读全局「关于我」，0 = 不读。不版本化。
+				user_profile_read INTEGER NOT NULL DEFAULT 1
+				);
 			/* partner_versions 表已退役（2026-11-15 人设停存版本快照方案）：快照历史只写不读，
 			 * 新库不再建表；老库启动时由 migrate() 搬走候选链后 DROP。 */
 			CREATE TABLE IF NOT EXISTS partner_session_links (
@@ -208,6 +210,11 @@ export class PartnersStore {
 		// 按人常驻（2026-11-17）：旧库补 nullable 列，老行读 null = 全按需（现状），不炸、不补数据。
 		if (!columns.some((column) => column.name === "promoted_tools")) {
 			this.db.exec("ALTER TABLE partners ADD COLUMN promoted_tools TEXT");
+		}
+		// 关于我读取开关（2026-11-19）：旧库补列，默认 1 = 读（新能力净增类默认开）；
+		// 不版本化、不补数据。普通 worker 不在这张表，固定不读。
+		if (!columns.some((column) => column.name === "user_profile_read")) {
+			this.db.exec("ALTER TABLE partners ADD COLUMN user_profile_read INTEGER NOT NULL DEFAULT 1");
 		}
 		// 例行任务条件门控（2026-11-10 批 13 §四）：旧库补两个 nullable 列，
 		// 老规则读出来是 null（= 无完成条件 / 不限次数），不炸、不补数据。
@@ -568,6 +575,19 @@ export class PartnersStore {
 		this.db
 			.prepare("UPDATE partners SET promoted_tools = ?, updated_at = ? WHERE id = ?")
 			.run(JSON.stringify(names), new Date().toISOString(), id);
+		return this.get(id);
+	}
+
+	/**
+	 * 设置「关于我」读取开关（2026-11-19）：一条 UPDATE，只写 user_profile_read 与 updated_at。
+	 * `true` = 读（1），`false` = 不读（0）。**不版本化**（不是身份），不动 SOUL / 契约，
+	 * 下一轮注入生效（provider 每轮现读）。不存在返回 null，由端点映射 404。
+	 */
+	setUserProfileRead(id: string, read: boolean): PartnerRow | null {
+		if (!this.get(id)) return null;
+		this.db
+			.prepare("UPDATE partners SET user_profile_read = ?, updated_at = ? WHERE id = ?")
+			.run(read ? 1 : 0, new Date().toISOString(), id);
 		return this.get(id);
 	}
 

@@ -9,6 +9,7 @@
 
 import { loadDevices, refreshApprovalPopups } from "./approval-pop.js";
 import { loadArchivePage, renderArchiveChats } from "./archive-page.js";
+import { aboutMeMarkup, wireAboutMe } from "./settings-about-me.js";
 import { KEY_NOTIFY } from "./chat-notice.js";
 import { el } from "./dom.js";
 import { openExportModal } from "./export-data.js";
@@ -216,7 +217,7 @@ async function renderSettings() {
       `<div class="card">
         ${rowMarkup(
           "Agent 权限",
-          "决定它能替你动到什么程度。只读 = 能看能查（ls / cat / grep 这类查看命令），不改文件；在工作区内修改 = 文件只改工作区和项目里的，命令也只限查看；完全访问 = 能改文件、能跑任何命令。改完立刻生效。",
+          "决定它能替你动到什么程度。只读 = 能看能查（ls / cat / grep 这类查看命令），不改文件，查看也限工作区和项目里；在工作区内修改 = 文件读写和查看都限工作区和项目里，命令只放行查看类；完全访问 = 文件读写和命令都不受工作区限制。改完立刻生效。",
           // 方向从左到右 = 从最保守到最放开，完全访问恒在右端（2026-11-14）
           `<div class="segmented slide" role="radiogroup" aria-label="权限" id="policy-switch">
              <button type="button" data-policy="read-only" aria-checked="false">只读</button>
@@ -388,6 +389,11 @@ async function renderSettings() {
       void wireExecutorSettings();
     }
     wireAgentTabs();
+  } else if (page === "about-me") {
+    // 关于我（2026-11-19）：全局一份主人档案 + 每 Agent 读取开关。
+    // 正文每轮现读，改完下一轮生效；上下文页的 `user_profile` 段显示实际注入。
+    el.settingsInner.innerHTML = aboutMeMarkup();
+    void wireAboutMe();
   } else if (page === "projects") {
     // 2026-11-12 重做：工作区根与项目目录平级（ZCode 多根语义），同一种行、路径可改；
     // 项目动作只有「改名 / 归档」（归档是软退场，归档页可恢复），不再有「移除/删除」说法。

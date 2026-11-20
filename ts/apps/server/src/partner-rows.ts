@@ -92,6 +92,10 @@ function toPartner(row: Record<string, unknown>): PartnerRow {
 		projectIds: toProjectIds(row.project_ids),
 		disabledTools: toToolNames(row.disabled_tools),
 		promotedTools: toToolNames(row.promoted_tools),
+		// 关于我（2026-11-19）：1 / NULL = 读；0 = 不读。缺列 / 脏值按读处理（默认开）。
+		userProfileRead: row.user_profile_read === null || row.user_profile_read === undefined
+			? true
+			: Number(row.user_profile_read) !== 0,
 		personaPreset: toPersonaPreset(row.persona_preset),
 		personaModules: toPersonaModules(row.persona_modules),
 		personaSwitches: toPersonaSwitches(row.persona_switches),

@@ -65,6 +65,17 @@ const SETTINGS_SECTIONS = [
     icon: '<path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/>',
   },
   {
+    /**
+     * 关于我（2026-11-19）：全局一份的主人档案，每轮作为 system 段注入给会读它的 Agent。
+     * 不是记忆（不参与召回）、不是人设（不改 SOUL）；编辑入口与「谁读」开关都在这一页。
+     */
+    id: "about-me",
+    label: "关于我",
+    desc: "称呼、输入习惯、说话禁忌：全局一份，按 Agent 开关读取",
+    // Lucide user-round：一个人 = 主人自己的固定档案。
+    icon: '<circle cx="12" cy="8" r="5"/><path d="M20 21a8 8 0 0 0-16 0"/>',
+  },
+  {
     id: "projects",
     label: "项目",
     desc: "工作区与项目容器：一个项目可以带多个文件夹",
@@ -215,7 +226,7 @@ function agentTabsMarkup(activeTab) {
  */
 const SETTINGS_GROUPS = [
   { label: "日常", ids: ["appearance", "chats", "projects", "reminders"] },
-  { label: "Agent", ids: ["agent", "models", "skills", "memory"] },
+  { label: "Agent", ids: ["agent", "about-me", "models", "skills", "memory"] },
   { label: "系统", ids: ["usage", "plugins", "connect"] },
 ];
 
