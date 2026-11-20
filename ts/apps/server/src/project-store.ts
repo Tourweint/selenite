@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { dirname, join, normalize, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { CURRENT_PROJECT_KEY, DEFAULT_DB_PATH, ProjectError, SCHEMA, assertProjectRootAllowed, assertWritableDir, currentProjectEnabled, defaultLabel, isAbsolutePathInput, isInside, normPathKey, projectOutsideWorkspaceEnabled, realTargetForCreate, realpathOr, sameName, samePath, text, validateProjectRoot, validateWorkspaceRoot } from "./project-types.ts";
+import { CURRENT_PROJECT_KEY, DEFAULT_DB_PATH, ProjectError, SCHEMA, assertProjectRootAllowed, assertWritableDir, currentProjectEnabled, defaultLabel, isAbsolutePathInput, isInside, normPathKey, projectOutsideWorkspaceEnabled, projectRestoreOverlapCheckEnabled, realTargetForCreate, realpathOr, sameName, samePath, text, validateProjectRoot, validateWorkspaceRoot } from "./project-types.ts";
 import type { Project, ProjectProposal, ProjectRef, ProjectRoot, ProposalStatus, Row, Vcs, Workspace } from "./project-types.ts";
 import { detectVcs, projectFromRow, proposalFromRow, resolveProjectPath, rootFromRow } from "./project-rows.ts";
 
@@ -407,6 +407,33 @@ export class ProjectsStore {
 	}
 
 	/**
+	 * 恢复前的文件夹重叠复核（2026-11-20）：归档项目不参与重叠校验，归档期间别人可能把
+	 * 它的子目录 / 父目录登记成了项目；恢复时必须按**活跃项目逐根**再判一次，否则会造出
+	 * 两个互相包含的活跃项目。只判别的活跃项目（自己还是归档态，不在 `listProjects()` 里）；
+	 * 目录不在 / 不可达的根跳过（它本来就不进根集合，恢复后项目卡会提示「目录不在」）。
+	 *
+	 * 冲突统一收成 `restore_conflict`：界面把它当“无法恢复”的提示，服务端 message 说清
+	 * 跟哪个项目、哪个文件夹撞了。
+	 */
+	private assertRestorable(id: string): void {
+		const project = this.toProject(this.projectRow(id));
+		for (const root of project.roots) {
+			const realRoot = realpathOr(root.path);
+			if (!realRoot) continue;
+			try {
+				this.assertRootPathAllowed(realRoot, id, root.id);
+			} catch (error) {
+				if (!(error instanceof ProjectError)) throw error;
+				throw new ProjectError(
+					"restore_conflict",
+					`无法恢复项目「${project.name}」：文件夹「${root.label}」${error.message}。先调整其中一个再恢复。`,
+					409,
+				);
+			}
+		}
+	}
+
+	/**
 	 * 归档 / 恢复（2026-11-07 建立；2026-11-12 起统一叫「归档」）：软退场，只改 archived 位。
 	 * 会话的连带归档不在这里做——那是 HTTP 层调 `archiveChatsOfProject` 的事
 	 * （避免 projects ↔ session 的顶层依赖环）。
@@ -414,6 +441,7 @@ export class ProjectsStore {
 	setArchived(id: string, archived: boolean): Project {
 		const row = this.db.prepare("SELECT * FROM projects WHERE id = ?").get(id) as Row | undefined;
 		if (!row) throw new ProjectError("not_found", "找不到这个项目", 404);
+		if (!archived && projectRestoreOverlapCheckEnabled()) this.assertRestorable(id);
 		this.db.prepare("UPDATE projects SET archived = ? WHERE id = ?").run(archived ? 1 : 0, id);
 		if (archived && this.getCurrentProjectId() === id) this.writeCurrentProjectId(null);
 		return { ...this.toProject(row), archived };

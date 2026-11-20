@@ -37,21 +37,21 @@ function renderCsPolicyPage() {
           <button type="button" class="cs-opt" data-policy="read-only" aria-checked="false">
             <span class="cs-opt-main">
               <span class="cs-opt-title">只读</span>
-              <span class="cs-opt-sub">能看、能查（ls / cat / grep 这类查看命令），不改文件</span>
+              <span class="cs-opt-sub">能看、能查（ls / cat / grep 这类查看命令），不改文件；查看限工作区和项目里</span>
             </span>
             <span class="cs-opt-dot" aria-hidden="true"></span>
           </button>
           <button type="button" class="cs-opt" data-policy="no-shell" aria-checked="false">
             <span class="cs-opt-main">
               <span class="cs-opt-title">在工作区内修改</span>
-              <span class="cs-opt-sub">文件只改工作区和项目里的；命令也只限查看</span>
+              <span class="cs-opt-sub">文件读写和查看都限工作区和项目里；命令只放行查看类</span>
             </span>
             <span class="cs-opt-dot" aria-hidden="true"></span>
           </button>
           <button type="button" class="cs-opt" data-policy="full" aria-checked="false">
             <span class="cs-opt-main">
               <span class="cs-opt-title">完全访问</span>
-              <span class="cs-opt-sub">能改文件、能跑命令</span>
+              <span class="cs-opt-sub">文件读写和命令都不受工作区限制</span>
             </span>
             <span class="cs-opt-dot" aria-hidden="true"></span>
           </button>

@@ -46,6 +46,40 @@ export function noteSessionCwd(conversationId: number | string, cwd?: string | n
 }
 
 /**
+ * 会话里用户附上来的文件路径（2026-11-20 权限三档收口）。
+ *
+ * 受限档（只读 / 在工作区内修改）下 `read` 也限根，但附件是用户主动递给你看的，
+ * 必须放行。这里只记路径、不读内容；随当前消息与上行历史 `content` 里的
+ * `type:"file"` 分段反复补齐，进程内缓存（重启后由下一次上行历史重新填）。
+ */
+const sessionFiles = new Map<number, Set<string>>();
+/** 单会话上限：附件很多的老会话也不至于把内存撑起来（超出按插入顺序丢最老的）。 */
+const SESSION_FILES_MAX = 1024;
+
+export function noteSessionFiles(conversationId: number | string, paths: readonly string[]): void {
+	const key = Number(conversationId);
+	if (!Number.isFinite(key)) return;
+	const clean = paths.map((path) => path.trim()).filter(Boolean);
+	if (!clean.length) return;
+	const files = sessionFiles.get(key) ?? new Set<string>();
+	for (const path of clean) files.add(path);
+	while (files.size > SESSION_FILES_MAX) {
+		const oldest = files.values().next().value;
+		if (oldest === undefined) break;
+		files.delete(oldest);
+	}
+	sessionFiles.set(key, files);
+}
+
+/** 读权限守卫用的附件白名单（只给 `read` 用，写操作不享受这个例外）。 */
+export function sessionFilesOf(conversationId?: number | string): string[] {
+	if (conversationId === undefined) return [];
+	const key = Number(conversationId);
+	if (!Number.isFinite(key)) return [];
+	return [...(sessionFiles.get(key) ?? [])];
+}
+
+/**
  * 本轮会话执行环境的 cwd（2026-11-13 会话快照；2026-11-16 补工作区兜底）：
  * 1. 这个会话创建时钉下的项目主文件夹（快照优先，换主文件夹不影响老会话）；
  * 2. 没绑定项目的会话（杂事态 / 总管 / 改动前的旧会话）→ **主工作区根**

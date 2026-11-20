@@ -30,6 +30,16 @@ export function projectMergeEnabled(): boolean {
 	return flagEnabled("PROJECT_MERGE");
 }
 
+/**
+ * 恢复归档前的文件夹重叠复核（2026-11-20）。默认开；
+ * `PROJECT_RESTORE_OVERLAP_CHECK=0/false/off` 回到“恢复不复查”（归档期间根被别人占用也能恢复）。
+ * 刻意不走 flagEnabled：这是回滚微开关，不进插件页。
+ */
+export function projectRestoreOverlapCheckEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = env.PROJECT_RESTORE_OVERLAP_CHECK?.trim().toLowerCase();
+	return !(raw === "0" || raw === "false" || raw === "off");
+}
+
 export type Vcs = "git" | "none";
 
 export interface Workspace {

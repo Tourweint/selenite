@@ -596,3 +596,104 @@ test("项目容器：加文件夹 / 设为主 / 移除的口径", () => {
 		rmSync(root, { recursive: true, force: true });
 	}
 });
+
+test("多文件夹项目的重叠按根两两判：跨项目的同路径 / 祖先 / 后代都拒", () => {
+	withStore((store) => {
+		const root = tempDir("multi-overlap");
+		try {
+			const workspace = join(root, "ws");
+			const holder = join(root, "holder");
+			const mainDir = join(holder, "main");
+			const extraDir = join(root, "extra");
+			const childOfMain = join(mainDir, "child");
+			const childOfExtra = join(extraDir, "child");
+			const separate = join(root, "separate");
+			for (const dir of [workspace, mainDir, childOfMain, extraDir, childOfExtra, separate]) {
+				mkdirSync(dir, { recursive: true });
+			}
+			store.setWorkspace(workspace);
+			// A 有两个根：mainDir（主）+ extraDir（附加）
+			const a = store.confirmProposal(store.proposeProject("项目A", mainDir).id);
+			store.addRoot(a.id, { path: extraDir, label: "第二文件夹" });
+
+			// B 占 A 主根的子孙 / 祖先 / 同路径：三种都拒
+			assert.throws(
+				() => store.proposeProject("项目B", childOfMain),
+				(error) => error instanceof ProjectError && error.code === "inside_existing_project",
+			);
+			assert.throws(
+				() => store.proposeProject("项目B", holder),
+				(error) => error instanceof ProjectError && error.code === "root_overlaps_root",
+			);
+			assert.throws(
+				() => store.proposeProject("项目B", mainDir),
+				(error) => error instanceof ProjectError && error.code === "duplicate_root",
+			);
+			// 换到 A 的第二个根，规则同样成立（多文件夹不削弱边界）
+			assert.throws(
+				() => store.proposeProject("项目B", childOfExtra),
+				(error) => error instanceof ProjectError && error.code === "inside_existing_project",
+			);
+			assert.throws(
+				() => store.proposeProject("项目B", extraDir),
+				(error) => error instanceof ProjectError && error.code === "duplicate_root",
+			);
+
+			// 与两个根都不重叠 → 正常登记
+			const b = store.confirmProposal(store.proposeProject("项目B", separate).id);
+			assert.equal(b.roots.length, 1);
+			// 反向（给 B 追加 A 的子目录）同样拒
+			assert.throws(
+				() => store.addRoot(b.id, { path: childOfMain }),
+				(error) => error instanceof ProjectError && error.code === "inside_existing_project",
+			);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+});
+
+test("恢复归档前逐根复核重叠：多根任一冲突整单 409，回滚开关放行", () => {
+	withStore((store) => {
+		const root = tempDir("restore-overlap");
+		try {
+			const workspace = join(root, "ws");
+			const mainDir = join(root, "main");
+			const extraDir = join(root, "extra");
+			const childOfExtra = join(extraDir, "child");
+			for (const dir of [workspace, mainDir, extraDir, childOfExtra]) {
+				mkdirSync(dir, { recursive: true });
+			}
+			store.setWorkspace(workspace);
+			const project = store.confirmProposal(store.proposeProject("父项目", mainDir).id);
+			store.addRoot(project.id, { path: extraDir, label: "第二文件夹" });
+			// 归档后根不参与重叠校验：子目录可以被别人登记
+			store.setArchived(project.id, true);
+			store.confirmProposal(store.proposeProject("子项目", childOfExtra).id);
+
+			// 恢复：主根不冲突、第二个根冲突 → 整单拒（逐根判，任一根冲突都不放行）
+			assert.throws(
+				() => store.setArchived(project.id, false),
+				(error) =>
+					error instanceof ProjectError &&
+					error.code === "restore_conflict" &&
+					error.status === 409 &&
+					/无法恢复项目「父项目」/.test(error.message) &&
+					/第二文件夹/.test(error.message) &&
+					/子项目/.test(error.message),
+			);
+
+			// 回滚开关：跳过复核，恢复成功（回到 2026-11-20 前）
+			const previous = process.env.PROJECT_RESTORE_OVERLAP_CHECK;
+			process.env.PROJECT_RESTORE_OVERLAP_CHECK = "0";
+			try {
+				assert.equal(store.setArchived(project.id, false).archived, false);
+			} finally {
+				if (previous === undefined) delete process.env.PROJECT_RESTORE_OVERLAP_CHECK;
+				else process.env.PROJECT_RESTORE_OVERLAP_CHECK = previous;
+			}
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+});

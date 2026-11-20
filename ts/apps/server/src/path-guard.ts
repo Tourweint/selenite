@@ -1,21 +1,47 @@
 /**
- * 助手物理边界（2026-11-04 单根；2026-11-12 多根）。
+ * 助手物理边界（2026-11-04 单根；2026-11-12 多根；2026-11-20 按权限档收口）。
  *
- * 只守 `write` / `edit` 的目标路径：**解析后必须落在任一根集合内**（工作区根 + 已登记项目根），
- * 都不在才硬拒绝。bash / powershell 不扫命令文本（设计已定，登记为已知边界）——它们的 cwd
- * 已在根集合内，命令里写绝对路径逃逸由审批兜底。
+ * 目标路径**解析后必须落在任一根集合内**（工作区根 + 已登记项目根），都不在才硬拒绝。
+ * 守哪些工具按档位分：
+ *   - `full`（完全访问）：write / edit / read 全部直接放行（`AGENT_FULL_ACCESS_PATH_GUARD=1` 可回滚）；
+ *   - `read-only` / `no-shell`：write / edit 限根；`read` 也限根（`AGENT_READ_PATH_GUARD=0` 可回滚）。
+ * bash / powershell 不扫命令文本（设计已定，登记为已知边界）——它们的 cwd 已在根集合内，
+ * 命令里写绝对路径逃逸由审批兜底。
  *
- * 提成纯函数是为了能直接断言：入参只有工具名、参数、根集合和当前 cwd，
+ * 提成纯函数是为了能直接断言：入参只有工具名、参数、根集合、当前 cwd 和档位，
  * 不读全局状态，也不碰磁盘以外的环境（根集合为空时旁路）。
  */
 
 import { existsSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
-const GUARDED_TOOLS = new Set(["write", "edit"]);
-/** pi 的 write / edit 都用 `path`；留两个别名给未来工具，不改变当前语义 */
+/** 受限两档下守的文件工具（read 是否受守还看档位与开关，见下方分支）。 */
+const GUARDED_TOOLS = new Set(["write", "edit", "read"]);
+/** pi 的 write / edit / read 都用 `path`；留两个别名给未来工具，不改变当前语义 */
 const PATH_KEYS = ["path", "file_path", "filePath"];
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
+
+/** 与 `agent/policy.ts` 的 `ToolAccess` 同值；这里只读字面量，避免低层模块反向依赖。 */
+export type GuardAccess = "full" | "read-only" | "no-shell";
+
+/**
+ * 完全访问档是否仍过路径闸门（回滚开关，2026-11-20）。
+ * 缺省 off = 完全访问不再限根；`AGENT_FULL_ACCESS_PATH_GUARD=1/true/on` 回到旧形态
+ * （write/edit 限根、read 不限）。
+ */
+export function fullAccessPathGuardEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = env.AGENT_FULL_ACCESS_PATH_GUARD?.trim().toLowerCase();
+	return raw === "1" || raw === "true" || raw === "on";
+}
+
+/**
+ * 受限两档（只读 / 在工作区内修改）是否把 `read` 也限根（2026-11-20）。
+ * 缺省 on；`AGENT_READ_PATH_GUARD=0/false/off` 回到旧形态（read 不过闸门）。
+ */
+export function readToolPathGuardEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = env.AGENT_READ_PATH_GUARD?.trim().toLowerCase();
+	return !(raw === "0" || raw === "false" || raw === "off");
+}
 
 function samePath(a: string, b: string): boolean {
 	const left = resolve(a);
@@ -78,12 +104,29 @@ export interface PathGuardInput {
 	readonly workspaceRoots: readonly string[];
 	/** 本轮会话执行环境的 cwd（相对路径按它解析） */
 	readonly cwd: string;
+	/**
+	 * 当前权限档（2026-11-20）。缺省按受限档处理（最保守）；
+	 * `full` 且没开 `AGENT_FULL_ACCESS_PATH_GUARD` 时整个守卫旁路。
+	 */
+	readonly access?: GuardAccess;
+	/**
+	 * 用户在本会话里附上来的文件绝对路径（2026-11-20）。**只对 `read` 生效**：
+	 * 附件是用户主动递给你看的，不属于越界；write/edit 不享受这个例外。
+	 */
+	readonly allowedFiles?: readonly string[];
 }
 
 /** 越界时返回给模型的 blockReason；放行返回 undefined。 */
 export function pathGuardBlockReason(input: PathGuardInput): string | undefined {
-	const { tool, args, workspaceRoots, cwd } = input;
-	if (!workspaceRoots.length || !GUARDED_TOOLS.has(tool)) return undefined;
+	const { tool, args, workspaceRoots, cwd, access, allowedFiles } = input;
+	const full = access === "full";
+	// 完全访问 = 不受文件权限约束（2026-11-20 用户拍板）；回滚开关让它回到旧的限根形态。
+	if (full && !fullAccessPathGuardEnabled()) return undefined;
+	if (!GUARDED_TOOLS.has(tool)) return undefined;
+	// 回滚形态下完全访问仍守 write/edit，但 read 保持旧行为（不限根）。
+	if (full && tool === "read") return undefined;
+	if (tool === "read" && !readToolPathGuardEnabled()) return undefined;
+	if (!workspaceRoots.length) return undefined;
 	if (!args || typeof args !== "object") return undefined;
 
 	const values = args as Record<string, unknown>;
@@ -101,6 +144,10 @@ export function pathGuardBlockReason(input: PathGuardInput): string | undefined 
 	if (!path) return undefined;
 
 	const target = realTarget(resolve(cwd, path));
+	// 用户附上来的文件：read 放行（只按“同一个文件”判，不给它所在的目录开口子）。
+	if (tool === "read" && allowedFiles?.length) {
+		if (allowedFiles.some((file) => samePath(realTarget(resolve(cwd, file)), target))) return undefined;
+	}
 	if (workspaceRoots.some((root) => insideOrEqual(root, target))) return undefined;
 	return `路径不在已登记的工作区/项目目录内：请到 设置 → 项目 里添加该目录（${workspaceRoots.join("、")}）`;
 }
