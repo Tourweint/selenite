@@ -296,7 +296,7 @@ test("search：Exa 用 x-api-key，读 results[].text", async () => {
 	}
 });
 
-test("search：元宝搜索读 Response.Pages 的 JSON 字符串，Cnt 取 10", async () => {
+test("search：元宝搜索读 Response.Pages 的 JSON 字符串（字段实际是小写），Cnt 取 10", async () => {
 	process.env.YUANBAO_SEARCH_API_KEY = "yuanbao-key";
 	const stub = await startStub((_req, res) => {
 		res.setHeader("Content-Type", "application/json");
@@ -304,10 +304,19 @@ test("search：元宝搜索读 Response.Pages 的 JSON 字符串，Cnt 取 10", 
 			JSON.stringify({
 				Response: {
 					Pages: [
+						// 2026-11-19 实测回包形状：键是小写
 						JSON.stringify({
-							Title: "元宝结果",
-							URL: "https://yuanbao.example/a",
-							Passage: "元宝摘要",
+							title: "元宝结果",
+							url: "https://yuanbao.example/a",
+							passage: "元宝摘要",
+							content: "元宝正文",
+							site: "示例站",
+						}),
+						// 大写形状也认（文档示例 / 旧实现按大写写）
+						JSON.stringify({
+							Title: "旧格式结果",
+							URL: "https://yuanbao.example/b",
+							Passage: "旧格式摘要",
 						}),
 					],
 				},
@@ -316,10 +325,14 @@ test("search：元宝搜索读 Response.Pages 的 JSON 字符串，Cnt 取 10", 
 	});
 	writeConfig([{ vendor: "yuanbao", baseUrl: stub.url }]);
 	try {
-		const result = await webSearch("查一下", 1);
+		const result = await webSearch("查一下", 2);
 		assert.equal(result.ok, true);
 		if (!result.ok) return;
+		assert.equal(result.hits.length, 2);
+		assert.equal(result.hits[0]?.title, "元宝结果");
 		assert.equal(result.hits[0]?.summary, "元宝摘要");
+		assert.equal(result.hits[1]?.title, "旧格式结果");
+		assert.equal(result.hits[1]?.url, "https://yuanbao.example/b");
 		assert.equal(stub.requests[0]?.path, "/SearchPro");
 		const sent = JSON.parse(stub.requests[0]?.body ?? "{}") as { Query?: string; Cnt?: number };
 		assert.equal(sent.Query, "查一下");

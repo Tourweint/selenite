@@ -363,13 +363,17 @@ function readYuanbaoPages(root: Record<string, unknown>): SearchHit[] | null {
 			row = null;
 		}
 		if (!row) continue;
-		const url = text(row.URL);
+		// 2026-11-19 实测：页内字段实际是小写（title/url/passage/content），
+		// 文档示例与旧测试是按大写写的。这里统一折成小写读，两种大小写都认。
+		const fields = new Map(Object.entries(row).map(([key, value]) => [key.toLowerCase(), value]));
+		const url = text(fields.get("url"));
 		if (!url) continue;
-		// Passage 是标准摘要；只有标题时用 Content（针对 query 的摘要）
-		let summary = plainText(text(row.Passage));
-		if (!summary || summary === plainText(text(row.Title))) summary = plainText(text(row.Content));
+		// passage 是标准摘要；只有标题时用 content（针对 query 的摘要）
+		const title = text(fields.get("title"));
+		let summary = plainText(text(fields.get("passage")));
+		if (!summary || summary === plainText(title)) summary = plainText(text(fields.get("content")));
 		hits.push({
-			title: clipText(plainText(text(row.Title)) || url, 300),
+			title: clipText(plainText(title) || url, 300),
 			url,
 			summary: clipText(summary, 2000),
 		});

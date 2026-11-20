@@ -91,7 +91,6 @@ function buildSearchSourceRow(source, index, total) {
   row.dataset.vendor = source.vendor;
   const missingAddress = source.needsUrl && !source.baseUrl;
   const missing = !source.usable;
-  const status = missing ? (missingAddress ? "缺地址" : "缺 Key") : source.keyOptional ? "免 Key" : "已配置";
   const keyPlaceholder = source.hasKey
     ? "已配置，留空不改"
     : source.keyOptional
@@ -100,12 +99,12 @@ function buildSearchSourceRow(source, index, total) {
   row.innerHTML = `
     <span class="src-order" aria-hidden="true">${index + 1}</span>
     <div class="src-main">
-      <div class="src-name">${esc(source.name || vendor?.name || source.vendor)}${
-        source.keyUrl
-          ? ` <a class="src-get" href="${attr(source.keyUrl)}" target="_blank" rel="noreferrer">${source.vendor === "searxng" ? "文档" : "Key"} ↗</a>`
+      <div class="src-name">${esc(source.name || vendor?.name || source.vendor)}</div>
+      ${
+        missing
+          ? `<div class="src-sub is-error">${missingAddress ? "缺地址" : "缺 Key"} · <span class="src-env">${esc(source.keyEnv)}</span></div>`
           : ""
-      }</div>
-      <div class="src-sub${missing ? " is-error" : ""}">${esc(status)} · <span class="src-env">${esc(source.keyEnv)}</span></div>
+      }
     </div>
     <div class="src-inputs">
       ${
