@@ -117,6 +117,17 @@ export const NewChatKindSchema = ChatKindSchema.exclude(["partner"]);
 export type NewChatKind = z.infer<typeof NewChatKindSchema>;
 
 /**
+ * 新建会话时客户端可带的一次模型选择（2026-11-19 会话级模型切换，纯增量）。
+ * 只在不带 `conversationId` 时采用；不传 = 服务端读当前全局默认。
+ */
+export const ChatModelSelectionSchema = z.object({
+	providerId: z.string().min(1).max(128),
+	modelId: z.string().min(1).max(200),
+	thinking: ThinkingLevelSchema.optional(),
+});
+export type ChatModelSelection = z.infer<typeof ChatModelSelectionSchema>;
+
+/**
  * 上行请求。这里**故意**没有 userId：身份走鉴权头，不信任客户端自报。
  *
  * `conversationId` 的语义：**不带 = 新建会话**，服务端生成并在 `start` 事件里返回；
@@ -159,6 +170,12 @@ export const ChatRequestSchema = z.object({
 	 * （回滚 `AGENT_STEER_DEFAULT=false` 时缺省回 `followUp`）。
 	 */
 	whenBusy: z.enum(["steer", "followUp"]).optional(),
+	/**
+	 * 新建会话的初始模型（2026-11-19 会话级模型切换，纯增量）：
+	 * 只在不带 `conversationId` 时采用；不传 = 读当前全局默认。
+	 * 已有会话请走 `POST /agent/chat/:conversationId/model`，这里传了会被忽略。
+	 */
+	model: ChatModelSelectionSchema.optional(),
 });
 export type ChatRequest = z.infer<typeof ChatRequestSchema>;
 

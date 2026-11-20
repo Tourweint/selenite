@@ -247,6 +247,21 @@ const EXPECTED: Record<string, unknown> = {
 			requestId: { kind: "optional", of: { kind: "string" } },
 			// 2026-11-07 消息即引导：忙时投递方式（steer 插进当前轮 / followUp 排队）
 			whenBusy: { kind: "optional", of: { kind: "enum", values: ["steer", "followUp"] } },
+			// 2026-11-19 会话级模型切换：新建会话可带一次模型选择（纯增量）
+			model: {
+				kind: "optional",
+				of: {
+					kind: "object",
+					fields: {
+						modelId: { kind: "string" },
+						providerId: { kind: "string" },
+						thinking: {
+							kind: "optional",
+							of: { kind: "enum", values: ["off", "low", "medium", "high"] },
+						},
+					},
+				},
+			},
 		},
 	},
 };
