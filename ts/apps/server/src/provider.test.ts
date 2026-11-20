@@ -214,6 +214,16 @@ test("重启（注册表重建）后目录内模型的派生变体可直接解�
 			| undefined;
 		assert.equal(derived?.samplingParams?.model, "mB", "派生变体把 model 盖回真实模型名");
 
+		// 2026-11-19 会话级模型切换：指定模型的变体派生 / 可用性判定。
+		assert.deepEqual(
+			fresh.chatModelRefFor("alpha", "mB", "low"),
+			{ provider: "alpha", modelId: "mB#think-low" },
+		);
+		assert.equal(fresh.modelAvailable("alpha", "mB#think-off"), true);
+		assert.equal(fresh.modelAvailable("alpha", "mB"), true);
+		assert.equal(fresh.modelAvailable("alpha", "nope"), false);
+		assert.equal(fresh.modelAvailable("missing", "mB"), false);
+
 		// 回滚开关：false 时跳过预注册，回到懒注册旧行为（方案 §六 / 接口文档 §6）
 		process.env.MODEL_VARIANT_PRESEEDED = "false";
 		const rolledBack = await import(`./provider.ts?preseed-off=${Date.now()}`);

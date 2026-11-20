@@ -261,8 +261,23 @@ document.addEventListener("click", hideHoverTip);
 window.addEventListener("resize", hideHoverTip);
 window.addEventListener("scroll", hideHoverTip, true);
 
-async function fetchModelCatalog() {
-  const response = await request("/api/v1/agent/model", { cache: "no-store" });
+/**
+ * 模型目录投影。
+ * - 不传 `chat`：全局默认（设置页默认模型卡 / 供应商变化后的刷新）；
+ * - 传 `chat`：这条会话自己的模型 + 档位（2026-11-19 会话级模型切换）。
+ */
+async function fetchModelCatalog(chatId = "") {
+  const query = chatId ? `?chat=${encodeURIComponent(chatId)}` : "";
+  const response = await request(`/api/v1/agent/model${query}`, { cache: "no-store" });
+  // 群聊 / 特殊会话不是普通 durable 会话：查不到就退回全局投影，别让 pill / 抽屉打不开。
+  if (response.status === 404 && chatId) {
+    const fallback = await request("/api/v1/agent/model", { cache: "no-store" });
+    if (!fallback.ok) throw new Error(`HTTP ${fallback.status}`);
+    const body = await fallback.json();
+    // 查不到这条会话（群聊 / 特殊会话）：明确标成"非本会话"，pill 走全局切换。
+    body.session = false;
+    return body;
+  }
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.json();
 }
@@ -330,9 +345,26 @@ function updateModelPill(catalog = state.modelCatalog) {
   }
 }
 
-async function refreshModelPill() {
+async function refreshModelPill(chatId = state.conversationId || "") {
   try {
-    state.modelCatalog = await fetchModelCatalog();
+    const catalog = await fetchModelCatalog(chatId);
+    // 切会话是异步的：旧会话的响应不许盖到新会话的 pill 上。
+    if (chatId !== (state.conversationId || "")) return;
+    // 新会话屏：本地 pending 选择优先于全局默认（还没落盘，服务端不知道它）。
+    // 回滚 CHAT_SESSION_MODEL=false 时 sessionModel=false，pill 回到全局。
+    if (
+      !chatId &&
+      state.pendingModel &&
+      catalog.sessionModel !== false &&
+      catalog.session !== false
+    ) {
+      catalog.current = { ...state.pendingModel };
+    }
+    // 2026-11-19：档位是会话级的；服务端返回什么，pill 就显示什么。
+    if (typeof catalog?.thinking === "string") {
+      localStorage.setItem(KEY_THINKING, catalog.thinking);
+    }
+    state.modelCatalog = catalog;
     updateModelPill();
   } catch (error) {
     if (error.message !== "forbidden") updateModelPill(null);
@@ -556,10 +588,22 @@ async function toggleModelMenu() {
     return;
   }
   el.modelPill.disabled = true;
+  const chatId = state.conversationId || "";
   try {
-    // 每次打开都现拉：不缓存陈旧目录（审查 S2）
-    const catalog = await fetchModelCatalog();
+    // 每次打开都现拉：不缓存陈旧目录（审查 S2）；带 chat = 本会话模型。
+    const catalog = await fetchModelCatalog(chatId);
+    if (chatId !== (state.conversationId || "")) return;
+    if (!chatId && state.pendingModel) {
+      catalog.current = { ...state.pendingModel };
+    }
+    if (typeof catalog?.thinking === "string") {
+      localStorage.setItem(KEY_THINKING, catalog.thinking);
+    }
     state.modelCatalog = catalog;
+    // 回滚 CHAT_SESSION_MODEL=false 时服务端回 sessionModel:false；群聊 / 特殊会话回 session:false。
+    // 两种都让 pill 回到旧的全局切换。
+    el.modelMenu.dataset.scope =
+      catalog.sessionModel === false || catalog.session === false ? "global" : "session";
     updateModelPill();
     renderModelMenu(catalog);
     openPopover(el.modelMenu, el.modelPill);
@@ -571,31 +615,100 @@ async function toggleModelMenu() {
   }
 }
 
+/**
+ * 选一个模型。scope（2026-11-19 会话级模型切换）：
+ * - session：只改当前会话；新会话屏还没有 id，先记 pendingModel，随第一条消息建会话；
+ * - global：设置页默认模型卡（写 `.data/runtime.json`，只影响之后新建的会话）。
+ * 菜单宿主上的 `data-scope` 决定走哪条；缺省 global。
+ */
 async function chooseModel(provider, modelId, levels, { keepOpen = false, menu = null } = {}) {
   if (!keepOpen) closeModelMenu();
+  const host = menu || el.modelMenu;
+  const scope = host?.dataset.scope === "session" ? "session" : "global";
   try {
-    const response = await request("/api/v1/agent/model", {
-      method: "POST",
-      body: JSON.stringify({ providerId: provider.id, modelId }),
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      toast(`没切成：${data.message || data.error || `HTTP ${response.status}`}`);
-      return false;
+    let providerId = provider.id;
+    let selectedId = modelId;
+
+    if (scope === "session" && state.conversationId) {
+      const response = await request(
+        `/api/v1/agent/chat/${encodeURIComponent(state.conversationId)}/model`,
+        {
+          method: "POST",
+          body: JSON.stringify({ providerId: provider.id, modelId }),
+        },
+      );
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        toast(`没切成：${data.message || data.error || `HTTP ${response.status}`}`);
+        return false;
+      }
+      providerId = data.provider || provider.id;
+      selectedId = data.model || modelId;
+      state.modelCatalog = {
+        ...(state.modelCatalog || {}),
+        current: { providerId, modelId: selectedId },
+        ...(typeof data.thinking === "string" ? { thinking: data.thinking } : {}),
+        ...(Array.isArray(data.thinkingLevels) && data.thinkingLevels.length
+          ? { thinkingLevels: data.thinkingLevels }
+          : {}),
+      };
+      // 服务端按新模型支持域 clamp 了档位；pill 跟着显示实际值。
+      if (typeof data.thinking === "string") {
+        localStorage.setItem(KEY_THINKING, data.thinking);
+      }
+      updateModelPill();
+      toast(
+        provider.hasKey === false
+          ? "已切换；该供应商缺 API Key，聊天前请在服务端环境设置对应变量"
+          : `下一轮起这条会话用 ${provider.name || providerId} · ${selectedId}`,
+      );
+    } else if (scope === "session") {
+      // 新会话屏：先记本地，不发全局；第一条消息建会话时随 ChatRequest.model 带上。
+      state.pendingModel = { providerId: provider.id, modelId };
+      state.modelCatalog = {
+        ...(state.modelCatalog || {}),
+        current: { providerId, modelId },
+      };
+      // 新模型支持域决定 pill 上可选的思考档；选不了就落回 ≤ 当前档。
+      if (Array.isArray(levels) && levels.length) {
+        localStorage.setItem(KEY_THINKING, clampThinking(currentThinking(), levels));
+      }
+      updateModelPill();
+      toast(
+        provider.hasKey === false
+          ? "新会话将使用该模型；它缺 API Key，聊天前请在服务端环境设置对应变量"
+          : `新会话将使用 ${provider.name || provider.id} · ${modelId}`,
+      );
+    } else {
+      // 全局默认：设置页默认模型卡 / 兼容旧入口。
+      const response = await request("/api/v1/agent/model", {
+        method: "POST",
+        body: JSON.stringify({ providerId: provider.id, modelId }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        toast(`没切成：${data.message || data.error || `HTTP ${response.status}`}`);
+        return false;
+      }
+      providerId = data.provider || provider.id;
+      selectedId = data.model || modelId;
+      state.modelCatalog = {
+        ...(state.modelCatalog || {}),
+        current: { providerId, modelId: selectedId },
+      };
+      // 服务端换模型会把不支持的档位落回 ≤ 当前档（off 兜底），本地跟着对齐。
+      if (Array.isArray(levels) && levels.length) {
+        localStorage.setItem(KEY_THINKING, clampThinking(currentThinking(), levels));
+      }
+      updateModelPill();
+      toast(
+        provider.hasKey === false
+          ? "已切换；该供应商缺 API Key，聊天前请在服务端环境设置对应变量"
+          : `下一轮起用 ${provider.name || providerId} · ${selectedId}`,
+      );
     }
-    const providerId = data.provider || provider.id;
-    state.modelCatalog = {
-      ...(state.modelCatalog || {}),
-      current: { providerId, modelId: data.model || modelId },
-    };
-    // 服务端换模型会把不支持的档位落回 ≤ 当前档（off 兜底），本地跟着对齐。
-    // levels 缺省（模型不在清单里、支持域未知）就不动本地档——宁可保留也不静默清成 off
-    if (Array.isArray(levels) && levels.length) {
-      localStorage.setItem(KEY_THINKING, clampThinking(currentThinking(), levels));
-    }
-    updateModelPill();
+
     // 菜单没关就就地重渲染：✓ 挪到新行、档位分段出现（D2：先选模型再选强度）
-    const host = menu || el.modelMenu;
     if (keepOpen && host) {
       renderModelMenu(state.modelCatalog, providerId, host);
       // 重渲染把刚点的按钮换掉了：焦点跟到新行，键盘 Tab 能直接进档位
@@ -603,11 +716,6 @@ async function chooseModel(provider, modelId, levels, { keepOpen = false, menu =
     }
     // 宿主同步钩子（2026-11-08）：抽屉主选的触发钮靠 modelchange 把名字跟上去
     host?.dispatchEvent(new CustomEvent("modelchange", { bubbles: true }));
-    toast(
-      provider.hasKey === false
-        ? "已切换；该供应商缺 API Key，聊天前请在服务端环境设置对应变量"
-        : `下一轮起用 ${provider.name || providerId} · ${modelId}`,
-    );
     return true;
   } catch (error) {
     if (error.message !== "forbidden") toast(`没切成：${error.message}`);

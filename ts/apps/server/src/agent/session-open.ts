@@ -8,11 +8,10 @@ import { auxPinnedModelId, auxiliaryEnabled } from "../auxiliary.ts";
 import { COMPANIONS_ENABLED, partnersStore } from "../partners.ts";
 import { projectsStore } from "../projects.ts";
 import type { ChatDirPick } from "../projects.ts";
-import { chatModelRef, clampThinkingLevel, currentThinkingLevels, isFaux, levelFromModelId, readLlmConfig } from "../provider.ts";
+import { chatModelRef, chatModelRefFor, chatSessionModelEnabled, clampThinkingLevel, currentThinkingLevels, isFaux, levelFromModelId, modelAvailable, readLlmConfig, thinkingLevelsFor } from "../provider.ts";
 import { markTaskSession } from "../unattended.ts";
-import { getHarness, lifediaryExt, rememberLevel, researchExt, stickyThinkingLevel } from "./lifecycle.ts";
+import { getHarness, lifediaryExt, rememberLevel, stickyThinkingLevel } from "./lifecycle.ts";
 import { CTX, ChatKinds, ChatProjects, Chats, ResolvedChat, TASK_CONVERSATION_PREFIX } from "./shared.ts";
-import { CodingTools } from "@earendil-works/pi-durable/tools";
 import type { Conversation, ToolRegistration, Tx } from "@earendil-works/pi-durable";
 import { configure } from "@earendil-works/pi-durable";
 import { ChatKind, NewChatKind, ThinkingLevel } from "@lifediary/shared";
@@ -20,19 +19,63 @@ import { randomUUID } from "node:crypto";
 import { conversationIsBusy } from "./session-stream.ts";
 import { messageIdOf } from "./session-transcript.ts";
 
+export interface SessionModelInfo {
+	/** 供应商 id */
+	provider: string;
+	/** 基座模型 id（去掉 `#think-…` / `#t…` 后缀） */
+	modelId: string;
+	/** 当前思考档（已落到支持域内） */
+	thinking: ThinkingLevel;
+	/** 该模型支持的思考档 */
+	levels: ThinkingLevel[];
+}
+
+/**
+ * 会话当前模型的投影（2026-11-19 会话级模型切换）：
+ * 模型 pill、右上角、/mode、切模型端点共用这一份解析。
+ * 会话没有模型引用 → null（调用方回退全局默认）。
+ */
+export async function sessionModelInfo(chat: ResolvedChat): Promise<SessionModelInfo | null> {
+	const agent = await chat.conversation.agent(CTX).catch(() => null);
+	const current = agent?.model ?? null;
+	if (!current) return null;
+	const modelId = current.modelId.split("#")[0] ?? current.modelId;
+	const levels = thinkingLevelsFor(current.provider, modelId);
+	const previous =
+		levelFromModelId(current.modelId) ??
+		stickyThinkingLevel(chat.internalId) ??
+		"off";
+	return {
+		provider: current.provider,
+		modelId,
+		thinking: clampThinkingLevel(previous, levels),
+		levels,
+	};
+}
+
 export async function applyChatMode(chat: ResolvedChat, level: ThinkingLevel): Promise<void> {
+	// 回滚开关关掉时按全局模型的支持域，不看会话模型。
+	const info = chatSessionModelEnabled() ? await sessionModelInfo(chat) : null;
 	const config = readLlmConfig();
-	if (!config) return;
-	const target0 = clampThinkingLevel(level, currentThinkingLevels());
+	if (!info && !config) return;
+	// 2026-11-19：档位按**本会话模型**的支持域校验；没有会话模型才回全局默认。
+	const provider = info?.provider ?? config!.model.provider;
+	const modelId = info?.modelId ?? config!.model.modelId;
+	const levels = info?.levels ?? currentThinkingLevels();
+	const target0 = clampThinkingLevel(level, levels);
 	if (target0 !== level) {
 		console.log(
 			`[agent] 会话 ${chat.internalId} 档位 ${level} 不在当前模型支持域，落回 ${target0}`,
 		);
 	}
-	const target = chatModelRef(target0);
+	const target = chatModelRefFor(provider, modelId, target0);
 	const agent = await chat.conversation.agent(CTX);
-	// 供应商与模型都要比：同名模型跨供应商是另一个上游，不能算"没变"（审查 S1）
-	if (agent.model?.provider === target.provider && agent.model?.modelId === target.modelId) return;
+	// 供应商与模型都要比：同名模型跨供应商是另一个上游，不能算"没变"（审查 S1）。
+	// faux 下变体 id 不变，但档位仍要记账——否则下一次 sessionModelInfo 会读回旧档。
+	if (agent.model?.provider === target.provider && agent.model?.modelId === target.modelId) {
+		rememberLevel(chat.internalId, target0);
+		return;
+	}
 	await chat.conversation.configure({ model: target }, CTX);
 	rememberLevel(chat.internalId, target0);
 	console.log(
@@ -103,24 +146,6 @@ export async function configureTaskChat(
 	);
 }
 
-export async function configureResearchChat(
-	chat: ResolvedChat,
-	prompt: string,
-): Promise<void> {
-	const tools = [
-		...(CodingTools.tools ?? []).filter((tool) => tool.name === "read"),
-		...(researchExt?.tools ?? []),
-	];
-	await chat.conversation.configure(
-		{
-			instructions: prompt,
-			tools,
-			...(lifediaryExt ? { extensions: { remove: [lifediaryExt] } } : {}),
-		},
-		CTX,
-	);
-}
-
 export async function configureJudgeChat(
 	chat: ResolvedChat,
 	prompt: string,
@@ -138,26 +163,24 @@ export async function configureJudgeChat(
 	);
 }
 
-async function syncConversationModel(
+/**
+ * 回滚路径（`CHAT_SESSION_MODEL=false`）：恢复 2026-11-19 之前的旧行为——
+ * 每轮把会话对齐到当前全局默认。只改回 `ensureConversationModel` 的分支，
+ * 端点 / 前端由同一个开关挡住（见 index.ts / hover-tip.js）。
+ */
+async function alignConversationToGlobal(
 	conversation: Conversation,
 	internalId: number,
+	config: NonNullable<ReturnType<typeof readLlmConfig>>,
+	current: { provider: string; modelId: string } | null,
+	previous: ThinkingLevel,
 ): Promise<void> {
-	const config = readLlmConfig();
-	if (!config || isFaux()) return;
-	const current = await conversation
-		.agent(CTX)
-		.then((agent) => agent.model ?? null)
-		.catch(() => null);
-	// 档位来源：引用里的后缀（含旧 `#think-on` = high）> 进程内粘性 > 默认 off
-	const previous =
-		(current ? levelFromModelId(current.modelId) : null) ??
-		stickyThinkingLevel(internalId) ??
-		"off";
 	const level = clampThinkingLevel(previous, currentThinkingLevels());
 	try {
-		// 已经是当前供应商 + 当前模型：不用动。只比 modelId 会把
-		// "同名模型换供应商"当成没变，切换就成了空操作（审查 S1）
-		if (current?.provider === config.model.provider && current.modelId.split("#")[0] === config.model.modelId) {
+		if (
+			current?.provider === config.model.provider &&
+			current.modelId.split("#")[0] === config.model.modelId
+		) {
 			return;
 		}
 		const target = chatModelRef(level);
@@ -172,17 +195,15 @@ async function syncConversationModel(
 			`[model] 会话 ${internalId} 对齐到 ${config.model.provider}/${config.model.modelId}（档位 ${level}）`,
 		);
 	} catch (error) {
-		// 旧会话引用的供应商可能已被删：**真回退默认供应商**，不能继续拿旧引用打 404（审查 S4）
+		// 旧会话引用的供应商可能已被删：真回退默认供应商（审查 S4）
 		console.warn(
 			`[model] 会话 ${internalId} 对齐失败，回退默认供应商: ${error instanceof Error ? error.message : String(error)}`,
 		);
 		try {
-			const fallback = {
-				provider: config.model.provider,
-				modelId: config.model.modelId,
-			};
-			await conversation.configure({ model: fallback }, CTX);
-			console.log(`[model] 会话 ${internalId} 已回退到 ${fallback.provider}/${fallback.modelId}`);
+			await conversation.configure(
+				{ model: { provider: config.model.provider, modelId: config.model.modelId } },
+				CTX,
+			);
 		} catch (fallbackError) {
 			console.warn(
 				`[model] 会话 ${internalId} 回退默认供应商也失败: ${
@@ -190,6 +211,95 @@ async function syncConversationModel(
 				}`,
 			);
 		}
+	}
+}
+
+/**
+ * 会话模型**只修复、不对齐**（2026-11-19 会话级模型切换）。
+ *
+ * 语义变化：全局默认只在建会话时读一次；之后就归会话自己。
+ * 每轮开跑前仍调一次，但正常路径是零 configure：
+ *   - 会话有模型且目录里可用 → 不动（变体缺失会补注册）；
+ *   - 档位不在该模型支持域 → 只 clamp 档位，不换模型；
+ *   - 模型 / 供应商被删 → 回退到当前全局默认（这是修复，不是"跟新全局"）。
+ * 回滚：`CHAT_SESSION_MODEL=false` 回到旧的全对齐行为。
+ */
+async function ensureConversationModel(
+	conversation: Conversation,
+	internalId: number,
+): Promise<void> {
+	const config = readLlmConfig();
+	if (!config || isFaux()) return;
+	const current = await conversation
+		.agent(CTX)
+		.then((agent) => agent.model ?? null)
+		.catch(() => null);
+	// 档位来源：引用里的后缀（含旧 `#think-on` = high）> 进程内粘性 > 默认 off
+	const previous =
+		(current ? levelFromModelId(current.modelId) : null) ??
+		stickyThinkingLevel(internalId) ??
+		"off";
+
+	if (!chatSessionModelEnabled()) {
+		await alignConversationToGlobal(conversation, internalId, config, current, previous);
+		return;
+	}
+
+	if (current && modelAvailable(current.provider, current.modelId)) {
+		// 任务专线的参数变体（`<模型>#t…`）不是思考变体：不要拿它做档位归一化，
+		// 否则会把任务采样参数换成 thinking 变体。只有无后缀 / `#think-` 才归我们修。
+		const marker = current.modelId.includes("#")
+			? current.modelId.slice(current.modelId.indexOf("#") + 1)
+			: "";
+		if (marker && !marker.startsWith("think-")) return;
+		const baseModelId = current.modelId.split("#")[0] ?? current.modelId;
+		const levels = thinkingLevelsFor(current.provider, baseModelId);
+		const level = clampThinkingLevel(previous, levels);
+		try {
+			const target = chatModelRefFor(current.provider, baseModelId, level);
+			// 只比 modelId 会把"同名模型换供应商"当成没变（审查 S1），供应商也要比。
+			if (current.provider === target.provider && current.modelId === target.modelId) return;
+			await conversation.configure({ model: target }, CTX);
+			rememberLevel(internalId, level);
+			if (level !== previous) {
+				console.log(
+					`[model] 会话 ${internalId} 的档位 ${previous} 不在模型支持域，落回 ${level}`,
+				);
+			}
+			console.log(
+				`[model] 会话 ${internalId} 修复模型引用 → ${target.provider}/${target.modelId}`,
+			);
+			return;
+		} catch (error) {
+			console.warn(
+				`[model] 会话 ${internalId} 的模型引用修复失败，回退全局默认: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+		}
+	}
+
+	// 没有模型 / 模型已被删 / 修复失败：回退当前全局默认。
+	const levels = thinkingLevelsFor(config.model.provider, config.model.modelId);
+	const level = clampThinkingLevel(previous, levels);
+	try {
+		const target = chatModelRefFor(config.model.provider, config.model.modelId, level);
+		await conversation.configure({ model: target }, CTX);
+		rememberLevel(internalId, level);
+		if (level !== previous) {
+			console.log(
+				`[model] 会话 ${internalId} 的档位 ${previous} 不在回退模型支持域，落回 ${level}`,
+			);
+		}
+		console.log(
+			`[model] 会话 ${internalId} 没有可用模型，回退到 ${target.provider}/${target.modelId}（档位 ${level}）`,
+		);
+	} catch (error) {
+		console.warn(
+			`[model] 会话 ${internalId} 回退全局默认失败: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		);
 	}
 }
 
@@ -408,4 +518,4 @@ export async function forkForEdit(
 	};
 }
 
-export { compactModelIgnoredWarned, syncConversationModel, warnCompactModelIgnored };
+export { compactModelIgnoredWarned, ensureConversationModel, warnCompactModelIgnored };

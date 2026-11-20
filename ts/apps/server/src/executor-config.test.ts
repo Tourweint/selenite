@@ -109,31 +109,98 @@ test("PUT 校验：手机/MCP 不可从界面选；权限与模型类型不对 4
 		).ok,
 		true,
 	);
+	// 2026-11-19：native 的 providerId 可选；形状不对 400。
+	assert.equal(
+		parseExecutorInput(
+			{
+				employee: "native",
+				profiles: { native: { model: "cheap", providerId: "bailian" } },
+			},
+			current,
+		).ok,
+		true,
+	);
+	assert.equal(
+		parseExecutorInput(
+			{ employee: "native", profiles: { native: { providerId: 1 } } },
+			current,
+		).ok,
+		false,
+	);
 });
 
-test("native 不往派单里塞 profile（模型由启动 env 决定，2026-11-16 核实）", () => {
+test("native 留空 = 跟随默认（2026-11-19 模型分工）：模型 + 供应商路由进建单快照", () => {
 	const env = {
 		CHANCELLOR_EMPLOYEE: "native",
 		EXECUTOR_CONFIG_PATH: tempPath(),
 	};
-	// 批2：executorForDelegation 带质检方式（缺省 internal）。
-	assert.deepEqual(executorForDelegation(env), { employee: "native", profile: {}, qa: "internal" });
+	const out = executorForDelegation(env, {
+		currentModel: () => ({ provider: "bailian", modelId: "cheap-fast" }),
+		modelRoute: () => ({ baseUrl: "https://provider.example/v1", keyEnv: "PROVIDER_KEY" }),
+	});
+	assert.deepEqual(out, {
+		employee: "native",
+		profile: {
+			model: "cheap-fast",
+			modelRoute: { baseUrl: "https://provider.example/v1", keyEnv: "PROVIDER_KEY" },
+		},
+	});
 });
 
-test("批1：native 填了模型 → 进建单快照；留空 → 不带（回落启动 env）", () => {
+test("native 显式模型优先于默认；providerId 决定路由", () => {
 	const env = { EXECUTOR_CONFIG_PATH: tempPath() };
 	writeExecutorConfig(
-		{ employee: "native", profiles: { native: { model: "deepseek-v4.1-flash" } } },
+		{
+			employee: "native",
+			profiles: {
+				native: { model: "work-model", providerId: "other" },
+			},
+		},
 		env,
 	);
+	let asked: { providerId: string | null; modelId: string } | null = null;
+	const out = executorForDelegation(env, {
+		currentModel: () => ({ provider: "bailian", modelId: "default-model" }),
+		modelRoute: (providerId, modelId) => {
+			asked = { providerId, modelId };
+			return { baseUrl: "https://other.example/v1", keyEnv: "OTHER_KEY" };
+		},
+	});
+	assert.deepEqual(asked, { providerId: "other", modelId: "work-model" });
+	assert.deepEqual(out.profile, {
+		model: "work-model",
+		modelRoute: { baseUrl: "https://other.example/v1", keyEnv: "OTHER_KEY" },
+	});
+});
+
+test("EXECUTOR_NATIVE_FOLLOW_DEFAULT=false：native 留空回到启动 env（旧行为）", () => {
+	const env = {
+		EXECUTOR_CONFIG_PATH: tempPath(),
+		EXECUTOR_NATIVE_FOLLOW_DEFAULT: "false",
+	};
+	// 文件里没有 native 模型 → 不传递任何 model（worker 回落 CHANCELLOR_LLM_MODEL / LLM_MODEL）。
+	assert.deepEqual(executorForDelegation(env, {
+		currentModel: () => ({ provider: "bailian", modelId: "default-model" }),
+	}), { employee: "native", profile: {} });
+
+	// 显式空串仍原样带上：语义是"不做覆盖"。
+	writeExecutorConfig({ employee: "native", profiles: { native: { model: "" } } }, env);
 	assert.deepEqual(executorForDelegation(env), {
 		employee: "native",
-		profile: { model: "deepseek-v4.1-flash" },
-		qa: "internal",
+		profile: { model: "" },
 	});
-	// 留空 = 显式"跟随启动 env"，空串原样带上，native.ts 不做覆盖
-	writeExecutorConfig({ employee: "native", profiles: { native: { model: "" } } }, env);
-	assert.deepEqual(executorForDelegation(env), { employee: "native", profile: { model: "" }, qa: "internal" });
+});
+
+test("native 显式模型找不到供应商：只带模型名（回落启动 env 的地址 / key）", () => {
+	const env = { EXECUTOR_CONFIG_PATH: tempPath() };
+	writeExecutorConfig(
+		{ employee: "native", profiles: { native: { model: "unknown-model" } } },
+		env,
+	);
+	assert.deepEqual(
+		executorForDelegation(env, { modelRoute: () => null }),
+		{ employee: "native", profile: { model: "unknown-model" } },
+	);
 });
 
 test("phone 由 env 指定时视图锁定并说明原因", () => {
@@ -184,6 +251,22 @@ test("端点：GET 读当前值，PUT 写文件并返回新视图；非法值 40
 		assert.equal(after.profiles.codex.model, "gpt-x");
 		assert.equal(after.profiles.codex.permission, "edit");
 
+		// 2026-11-19 模型分工：native 的 providerId 能写能读；空串 = 不保留。
+		const putNative = await app.request("/api/v1/agent/executor", {
+			method: "PUT",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				employee: "native",
+				profiles: { native: { model: "cheap", providerId: "bailian" } },
+			}),
+		});
+		assert.equal(putNative.status, 200);
+		const nativeView = (await putNative.json()) as {
+			profiles: Record<string, { model?: string; providerId?: string }>;
+		};
+		assert.equal(nativeView.profiles.native.model, "cheap");
+		assert.equal(nativeView.profiles.native.providerId, "bailian");
+
 		const bad = await app.request("/api/v1/agent/executor", {
 			method: "PUT",
 			headers: { "content-type": "application/json" },
@@ -199,6 +282,11 @@ test("端点：GET 读当前值，PUT 写文件并返回新视图；非法值 40
 });
 
 test("executorSummary / executorLine：派活的人和用户都能看到执行器/模型/权限", () => {
+	assert.equal(
+		executorSummary("native", { model: "cheap" }),
+		"本机内核（pi-durable，模型 cheap）",
+	);
+	assert.equal(executorSummary("native", {}), "本机内核（pi-durable）");
 	assert.equal(
 		executorSummary("claude-code", { model: "opus", permission: "full" }),
 		"Claude Code（模型 opus，权限 全权）",
@@ -222,4 +310,21 @@ test("executorSummary / executorLine：派活的人和用户都能看到执行�
 	assert.match(line, /可改/);
 	assert.match(line, /派活默认交给/);
 	assert.match(line, /换默认只影响新单/);
+
+	// native 的三种口径（2026-11-19 模型分工）：跟随默认 / 显式 / 回滚。
+	const nativeEnv = { EXECUTOR_CONFIG_PATH: tempPath() };
+	writeExecutorConfig({ employee: "native", profiles: { native: { model: "" } } }, nativeEnv);
+	assert.match(
+		executorLine(nativeEnv, {
+			currentModel: () => ({ provider: "bailian", modelId: "cheap" }),
+		}),
+		/干活模型跟随默认（cheap）/,
+	);
+	writeExecutorConfig({ employee: "native", profiles: { native: { model: "work" } } }, nativeEnv);
+	assert.match(executorLine(nativeEnv), /干活模型 work/);
+	writeExecutorConfig({ employee: "native", profiles: { native: { model: "" } } }, nativeEnv);
+	assert.match(
+		executorLine({ ...nativeEnv, EXECUTOR_NATIVE_FOLLOW_DEFAULT: "false" }),
+		/干活模型跟随启动 env/,
+	);
 });

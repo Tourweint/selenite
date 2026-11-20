@@ -17,6 +17,7 @@ import {
 	parseOpencodeStdout,
 } from "../../../packages/chancellor/src/employee/opencode.ts";
 import { resolveCliLauncher } from "../../../packages/chancellor/src/employee/cli.ts";
+import { profileEnv, resolveProfile } from "../../../packages/chancellor/src/config.ts";
 
 /* ── Claude Code ─────────────────────────────────────────── */
 
@@ -277,4 +278,45 @@ test("shim：.cmd 指向 .exe 时直接起 exe；指向 .js 时用 node 起", ()
 	const nodeLauncher = resolveCliLauncher(jsCmd);
 	assert.equal(nodeLauncher.command, process.execPath);
 	assert.deepEqual(nodeLauncher.prefixArgs, [js]);
+});
+
+/* ── native 模型（2026-11-19 模型分工）────────────────────── */
+
+test("resolveProfile：native 保留 model / modelRoute，空 model 不塞 profile", () => {
+	const route = { baseUrl: "https://provider.example/v1", keyEnv: "PROVIDER_KEY" };
+	assert.deepEqual(
+		resolveProfile("native", { model: " work-model ", modelRoute: route }),
+		{ model: "work-model", modelRoute: route },
+	);
+	assert.deepEqual(resolveProfile("native", { model: "" }), {});
+	assert.deepEqual(resolveProfile("native", { modelRoute: route }), {});
+	// 外部 CLI 的语义不变：显式模型 + 权限原样合并。
+	assert.deepEqual(
+		resolveProfile("claude-code", { model: "opus", permission: "read" }),
+		{ model: "opus", permission: "read" },
+	);
+});
+
+test("profileEnv：native 把模型路由翻成子进程 env；key 从宿主 env 现取", () => {
+	const prev = process.env.PROVIDER_KEY;
+	process.env.PROVIDER_KEY = "sk-test";
+	try {
+		assert.deepEqual(
+			profileEnv("native", {
+				model: "work-model",
+				modelRoute: {
+					baseUrl: "https://provider.example/v1",
+					keyEnv: "PROVIDER_KEY",
+				},
+			}),
+			{
+				CHANCELLOR_LLM_MODEL: "work-model",
+				CHANCELLOR_LLM_BASE_URL: "https://provider.example/v1",
+				CHANCELLOR_LLM_API_KEY: "sk-test",
+			},
+		);
+	} finally {
+		if (prev === undefined) delete process.env.PROVIDER_KEY;
+		else process.env.PROVIDER_KEY = prev;
+	}
 });

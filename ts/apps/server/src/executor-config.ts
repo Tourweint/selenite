@@ -10,10 +10,17 @@
  * 现有任务中心没有"这张单选谁"的交互；先把用户要的"设置里能选"做对。
  * 建单时把 employee / profile 交给 chancellor，续跑按原单快照走——换默认只影响新单。
  *
+ * 模型分工（2026-11-19）：规划 / 对话仍用 `readLlmConfig()` 的默认模型；
+ * 本机内核（native）派活工人单独一条"干活模型"，留空 = 跟随默认
+ * （`EXECUTOR_NATIVE_FOLLOW_DEFAULT=false` 回滚到启动 env），非空 = 单独模型。
+ * 显式模型按 `providerId`（或模型 id）解析到已连接供应商，带 `modelRoute` 给 worker；
+ * 这样跨供应商不再只吃启动 env 的百炼。
+ *
  * 刻意不做：
  * - 不在这里探测 CLI 登录状态 / 版本（会拖慢设置页；失败由任务中心的汇报如实显示）；
- * - 模型清单不进页自动拉：probe 端点（executor-probe.ts）只在用户点箭头 / 点检测时跑；
- *   模型是自由文本，留空 = 跟随该 CLI 自己的配置。
+ * - 外部 CLI 的模型清单不进页自动拉：probe 端点（executor-probe.ts）只在用户点箭头 /
+ *   点检测时跑；模型是自由文本，留空 = 跟随该 CLI 自己的配置。
+ *   native 的清单来自已连接供应商目录，同样不 spawn CLI。
  *
  * 界面措辞（2026-11-16 用户口径）：不叫「执行器」——它就是一个普通工人，
  * 界面与系统提示统一说「默认派给谁 / 派活默认交给」。
@@ -25,8 +32,7 @@ import type {
   EmployeePermission,
   EmployeeProfile,
 } from "../../../packages/chancellor/src/types.ts";
-import type { QaMode } from "../../../packages/chancellor/src/qa.ts";
-import { qaModeFromEnv } from "../../../packages/chancellor/src/qa.ts";
+import { providerCatalog, readLlmConfig } from "./provider.ts";
 
 export const EXECUTOR_KINDS = [
   "native",
@@ -77,8 +83,11 @@ export const EXECUTOR_KIND_INFO: ExecutorKindInfo[] = [
     label: "本机内核（pi-durable）",
     selectable: true,
     permissions: null,
-    modelHint: "留空跟随启动 env（LLM_MODEL）；例如 deepseek-v4.1-flash",
-    note: "不是外部 CLI；模型留空走启动 env（默认 deepseek-v4.1-flash），填了则派活的 native 工人用该模型（仍走百炼兼容端点）。",
+    modelHint: "留空跟随默认模型；例如 deepseek-v4.1-flash",
+    note:
+      "不是外部 CLI；留空 = 本机派活工人跟随 设置 → 模型 的默认模型，" +
+      "选一个 = 工人单独用那个模型（可以更便宜 / 更快）。模型来自已连接供应商，" +
+      "跨供应商时按该供应商的 baseURL + key 走；权限由本机内核权限策略管。",
   },
   {
     id: "codebuddy",
@@ -147,25 +156,41 @@ export const EXECUTOR_KIND_INFO: ExecutorKindInfo[] = [
   },
 ];
 
+/**
+ * 执行器 profile 的界面/文件形状：chancellor 的 EmployeeProfile + 仅 native 用的
+ * 供应商 id（2026-11-19 模型分工）。`providerId` 只用来把干活模型解析到 baseUrl/keyEnv，
+ * 不会作为密钥或进程参数下发。
+ */
+export interface ExecutorProfile extends EmployeeProfile {
+  providerId?: string;
+}
+
 export interface ExecutorConfig {
   employee: ExecutorKind;
-  profiles: Partial<Record<ExecutorKind, EmployeeProfile>>;
-  /** 质检方式（2026-11-19 批2）：internal=内部一次请求（现状默认）；qa-worker=派质检 worker。 */
-  qa: QaMode;
+  profiles: Partial<Record<ExecutorKind, ExecutorProfile>>;
 }
 
 export interface ExecutorView {
   enabled: boolean;
   employee: ExecutorKind;
-  profiles: Partial<Record<ExecutorKind, EmployeeProfile>>;
-  /** 质检方式（批2）：界面「设置 → 派活」的选择器回显。 */
-  qa: QaMode;
+  profiles: Partial<Record<ExecutorKind, ExecutorProfile>>;
   kinds: ExecutorKindInfo[];
   /** true = 当前执行器来自部署 env 的 phone / mcp，界面选择不生效。 */
   locked: boolean;
   lockedReason?: string;
   /** 当前生效的配置文件路径（排障用；不含密钥）。 */
   path: string;
+}
+
+/** 派单时解析 native 干活模型的外部依赖（单测注入，生产走 provider.ts）。 */
+export interface ExecutorDispatchDeps {
+  /** 当前运行时主选；缺省读 `.data/runtime.json`。 */
+  currentModel?: () => { provider: string; modelId: string } | null;
+  /** 已连接供应商里找模型路由；缺省读 providers.json + env key。 */
+  modelRoute?: (
+    providerId: string | null,
+    modelId: string,
+  ) => { baseUrl: string; keyEnv: string } | null;
 }
 
 interface CacheEntry {
@@ -244,19 +269,114 @@ export function writeExecutorConfig(
   return config;
 }
 
-/** 派单要用的执行器与参数；新单把它放进 ChancellorRequest。 */
+/**
+ * 回滚开关（2026-11-19 模型分工）：false/0/off = native 模型框留空时回到旧行为
+ * （不覆盖 worker 的启动 env）；默认开 = 留空跟随运行时默认模型。
+ */
+export function executorNativeFollowsDefault(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const raw = (env.EXECUTOR_NATIVE_FOLLOW_DEFAULT ?? "").trim().toLowerCase();
+  return !["false", "0", "off"].includes(raw);
+}
+
+/** 当前运行时主选（设置 → 模型的默认模型）；读不到 = null（faux / 未配置）。 */
+function currentRuntimeModel(): { provider: string; modelId: string } | null {
+  try {
+    const model = readLlmConfig()?.model ?? null;
+    // faux 是假模型，native worker 自己也会走 faux；不要把它写进建单快照当"干活模型"。
+    if (!model || model.provider === "faux") return null;
+    return model;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 已连接供应商里找模型路由（2026-11-19）：返回 baseUrl + keyEnv。
+ * 选择顺序：显式 providerId > 当前默认供应商 > 第一家含该模型的供应商。
+ * key 只认宿主 env 有没有值；没有就不要把子进程指向一个没钥匙的供应商。
+ */
+function providerRouteFor(
+  providerId: string | null,
+  modelId: string,
+): { baseUrl: string; keyEnv: string } | null {
+  try {
+    const catalog = providerCatalog();
+    const candidates = catalog.providers.filter((provider) =>
+      provider.models.includes(modelId),
+    );
+    const preferred = providerId?.trim() || readLlmConfig()?.model.provider || "";
+    const chosen =
+      (preferred
+        ? candidates.find((provider) => provider.id === preferred)
+        : undefined) ?? candidates[0];
+    if (!chosen) return null;
+    if (!process.env[chosen.keyEnv]?.trim()) {
+      console.warn(
+        `[executor] 干活模型 ${modelId} 的供应商 ${chosen.id} 没有 key（${chosen.keyEnv}），回落启动 env`,
+      );
+      return null;
+    }
+    return { baseUrl: chosen.baseUrl, keyEnv: chosen.keyEnv };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * native 的干活模型解析（2026-11-19 模型分工）：
+ * 显式 model > 运行时默认（开关开）> 不覆盖（开关关 / 无可选模型）。
+ * 返回值 null = 不覆盖 worker 的启动 env。
+ */
+function resolveNativeWorkProfile(
+  raw: ExecutorProfile,
+  env: NodeJS.ProcessEnv,
+  deps: ExecutorDispatchDeps,
+): { model: string; route?: { baseUrl: string; keyEnv: string } } | null {
+  const routeOf = deps.modelRoute ?? providerRouteFor;
+  const explicit = (raw.model ?? "").trim();
+  if (explicit) {
+    const route = routeOf(raw.providerId?.trim() || null, explicit);
+    return { model: explicit, ...(route ? { route } : {}) };
+  }
+  if (!executorNativeFollowsDefault(env)) return null;
+  const current = (deps.currentModel ?? currentRuntimeModel)();
+  if (!current) return null;
+  const route = routeOf(current.provider, current.modelId);
+  return { model: current.modelId, ...(route ? { route } : {}) };
+}
+
+/**
+ * 派单要用的执行器与参数；新单把它放进 ChancellorRequest。
+ *
+ * native（2026-11-19 模型分工）：
+ * - 显式模型 = 干活模型（可跨供应商，带 modelRoute）；
+ * - 留空 = 跟随设置 → 模型的默认模型（`EXECUTOR_NATIVE_FOLLOW_DEFAULT=false` 回滚到旧 env 行为）；
+ * - 外部 CLI 语义不变：显式 model / permission 原样带上，留空跟随各自 CLI 配置。
+ */
 export function executorForDelegation(
   env: NodeJS.ProcessEnv = process.env,
-): { employee: ExecutorKind; profile: EmployeeProfile; qa: QaMode } {
+  deps: ExecutorDispatchDeps = {},
+): { employee: ExecutorKind; profile: EmployeeProfile } {
   const config = readExecutorConfig(env);
   const raw = config.profiles[config.employee] ?? {};
   const profile: EmployeeProfile = {};
-  // 显式带上空串：它表示"跟随 CLI 自己的配置"，不能回落成 env 里的默认模型。
-  // native 同走这条路（2026-11-16 批1）：model 留空时 native.ts 不做 env 覆盖，
-  // worker 子进程回落启动 env（CHANCELLOR_LLM_MODEL / LLM_MODEL）。
-  if (raw.model !== undefined) profile.model = raw.model;
-  if (raw.permission !== undefined) profile.permission = raw.permission;
-  return { employee: config.employee, profile, qa: config.qa };
+  if (config.employee === "native") {
+    const work = resolveNativeWorkProfile(raw, env, deps);
+    if (work) {
+      profile.model = work.model;
+      if (work.route) profile.modelRoute = work.route;
+    } else if (raw.model !== undefined) {
+      // 回滚模式：保留显式空串，语义回到“worker 不覆盖启动 env”。
+      profile.model = raw.model;
+    }
+  } else {
+    // 显式带上空串：它表示"跟随 CLI 自己的配置"，不能回落成 env 里的默认模型。
+    if (raw.model !== undefined) profile.model = raw.model;
+    if (raw.permission !== undefined) profile.permission = raw.permission;
+  }
+  return { employee: config.employee, profile };
 }
 
 /** 端点视图：配置 + 控件元数据 + 锁定原因。 */
@@ -267,7 +387,6 @@ export function executorView(env: NodeJS.ProcessEnv = process.env): ExecutorView
     enabled: executorConfigEnabled(env),
     employee: config.employee,
     profiles: config.profiles,
-    qa: config.qa,
     kinds: EXECUTOR_KIND_INFO,
     locked,
     ...(locked
@@ -304,7 +423,10 @@ function executorPermissionText(
  * 总管/执事靠它回答“会派给谁、什么模型、什么权限”。
  * 措辞说「默认派给谁」不说「执行器」——用户口径：它就是一个普通工人（2026-11-16）。
  */
-export function executorLine(env: NodeJS.ProcessEnv = process.env): string {
+export function executorLine(
+  env: NodeJS.ProcessEnv = process.env,
+  deps: ExecutorDispatchDeps = {},
+): string {
   const view = executorView(env);
   const label = executorLabel(view.employee);
   if (view.locked) {
@@ -314,8 +436,20 @@ export function executorLine(env: NodeJS.ProcessEnv = process.env): string {
     );
   }
   if (view.employee === "native") {
+    const picked = (view.profiles.native?.model ?? "").trim();
+    let modelText: string;
+    if (picked) {
+      modelText = `干活模型 ${picked}`;
+    } else if (executorNativeFollowsDefault(env)) {
+      const current = (deps.currentModel ?? currentRuntimeModel)();
+      modelText = current
+        ? `干活模型跟随默认（${current.modelId}）`
+        : "干活模型跟随默认";
+    } else {
+      modelText = "干活模型跟随启动 env";
+    }
     return (
-      "派活默认交给：本机内核（模型跟随 设置 → 模型 的主选；权限由本机内核权限策略管）。" +
+      `派活默认交给：本机内核（${modelText}；权限由本机内核权限策略管）。` +
       "换默认只影响新单；续跑沿用原单的工人。"
     );
   }
@@ -334,7 +468,11 @@ export function executorSummary(
   profile: EmployeeProfile,
 ): string {
   const label = executorLabel(employee);
-  if (employee === "native") return label;
+  if (employee === "native") {
+    // 2026-11-19：干活模型随派单快照解析好了就如实说；没带（回滚模式）保持原文案。
+    const model = profile.model?.trim();
+    return model ? `本机内核（pi-durable，模型 ${model}）` : label;
+  }
   if (employee === "phone" || employee === "mcp") return label;
   const model = profile.model?.trim();
   const info = EXECUTOR_KIND_INFO.find((kind) => kind.id === employee);
@@ -381,11 +519,16 @@ export function parseExecutorInput(
           message: `profiles.${kind}.permission 必须是 read / edit / full`,
         };
       }
+      // 2026-11-19 模型分工：只有 native 用 providerId（供应商 id，不是密钥）。
+      if (raw.providerId !== undefined) {
+        if (typeof raw.providerId !== "string") {
+          return { ok: false, message: `profiles.${kind}.providerId 必须是字符串` };
+        }
+        if (raw.providerId.trim().length > 100) {
+          return { ok: false, message: `profiles.${kind}.providerId 太长（≤100 字符）` };
+        }
+      }
     }
-  }
-  // 质检方式（2026-11-19 批2）：可选，认不出的值当场拒（不静默回退）。
-  if (input.qa !== undefined && input.qa !== "internal" && input.qa !== "qa-worker") {
-    return { ok: false, message: "qa 必须是 internal（内部一次请求）/ qa-worker（派质检 worker）之一" };
   }
   return { ok: true, value: input };
 }
@@ -398,7 +541,6 @@ function mergeInput(
   if (!isRecord(input)) return current;
   return {
     employee: input.employee ?? current.employee,
-    qa: input.qa ?? current.qa,
     profiles: {
       ...current.profiles,
       ...(isRecord(input.profiles) ? input.profiles : {}),
@@ -416,14 +558,9 @@ function normalizeConfig(
     typeof source.employee === "string" && isExecutorKind(source.employee)
       ? source.employee
       : envKind;
-  // 质检方式（批2）：文件里显式写的优先；没有回落 env（CHANCELLOR_QA_MODE，缺省 internal）。
-  const qa: QaMode =
-    source.qa === "qa-worker" || source.qa === "internal"
-      ? source.qa
-      : qaModeFromEnv(env);
   const rawProfiles = isRecord(source.profiles) ? source.profiles : {};
 
-  const profiles: Partial<Record<ExecutorKind, EmployeeProfile>> = {};
+  const profiles: Partial<Record<ExecutorKind, ExecutorProfile>> = {};
   for (const kind of EXECUTOR_KINDS) {
     if (kind === "phone" || kind === "mcp") continue;
     const fallback = envProfile(kind, env);
@@ -434,12 +571,17 @@ function normalizeConfig(
     const permission = hasOwn(rawProfile, "permission")
       ? readPermission(rawProfile.permission, fallback.permission ?? "full")
       : fallback.permission;
-    const profile: EmployeeProfile = {};
+    const profile: ExecutorProfile = {};
     if (model !== undefined) profile.model = model;
     if (permission !== undefined) profile.permission = permission;
+    // 2026-11-19 模型分工：native 的供应商 id 只在这里保留；其它档忽略。
+    if (kind === "native" && hasOwn(rawProfile, "providerId")) {
+      const providerId = normalizeProviderId(rawProfile.providerId);
+      if (providerId) profile.providerId = providerId;
+    }
     profiles[kind] = profile;
   }
-  return { employee, qa, profiles };
+  return { employee, profiles };
 }
 
 function envEmployee(env: NodeJS.ProcessEnv): ExecutorKind {
@@ -491,6 +633,11 @@ function envProfile(kind: ExecutorKind, env: NodeJS.ProcessEnv): EmployeeProfile
 
 function normalizeModel(raw: unknown): string | undefined {
   return typeof raw === "string" ? raw.trim().slice(0, 200) : undefined;
+}
+
+/** native 的供应商 id（2026-11-19）：只保留形状，不校验是否存在（供应商被删也不能炸配置）。 */
+function normalizeProviderId(raw: unknown): string | undefined {
+  return typeof raw === "string" ? raw.trim().slice(0, 100) || undefined : undefined;
 }
 
 function readPermission(

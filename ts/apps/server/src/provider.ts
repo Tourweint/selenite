@@ -16,6 +16,7 @@ import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completio
 import { ThinkingLevelSchema, type ThinkingLevel } from "@lifediary/shared";
 import { z } from "zod";
 import { KEY_ENV_PATTERN, removeProviderKeys, writeProviderKey } from "./provider-secrets.ts";
+import { swapWebSearchTool } from "./server-tool-support.ts";
 
 /**
  * 模型接入（2026-11-04 批次五重写）。
@@ -485,8 +486,9 @@ export function variantPreseedEnabled(): boolean {
  * 变体随注册表重建确定性预注册（2026-11-07 扫尾批 2 / A2，方案 §二 主修）。
  *
  * 会话创建把派生变体 id（`<模型>#think-<档>`）写进 durable 会话并持久化；重启后注册表
- * 只剩基础模型，且旧会话 resume 不重走创建路径、`syncConversationModel` 在"仍是当前模型"
- * 时也不再调 `chatModelRef`，于是变体无人注册 → 内核 `Model ... is not available`。
+ * 只剩基础模型，且旧会话 resume 不重走创建路径；只有聊天流里的 `ensureConversationModel`
+ * 修复路径会补注册，任务专线 / 直接 configure 的入口不会 → 变体无人注册 →
+ * 内核 `Model ... is not available`。
  * 这里在每次重建时按目录把该注册的变体一次性补齐：
  *   - `#think-off` 恒注册（创建路径对任何模型都用它）；
  *   - 其余档按该模型生效支持域（声明优先 / 缺省 off-low-high），不承载模型不支持的参数。
@@ -562,6 +564,46 @@ function buildModel(entry: ProviderEntry, modelId: string): Model<"openai-comple
 	};
 }
 
+/**
+ * 服务端联网工具注入（2026-11-19）。
+ *
+ * 只在「白名单端点 + 白名单模型」上生效（判定见 `server-tool-support.ts`）：
+ * 命中时把 function 版 `web_search` 换成 DeepSeek 的 `deepseek_web_search`，
+ * 搜索改由服务端执行，客户端不再跑工具调用（也就没有第二轮模型往返）。
+ *
+ * 为什么走 `onPayload`：pi-ai 的 openai-completions 在请求发出前会调它，
+ * 这是不 fork 库就能改 `tools` 的唯一口子（`dist/api/openai-completions.js:188`）。
+ *
+ * 三条纪律：
+ *   - 原有 tools 里没有 `web_search` 就不注入——尊重「搜索被禁用」的既有语义；
+ *   - 非白名单端点一个字节都不动（百炼会 400，部分中转会静默丢弃）；
+ *   - 日志只记 providerId，不记 query 与响应体。
+ */
+export function buildApi(): ReturnType<typeof openAICompletionsApi> {
+	const base = openAICompletionsApi();
+	return {
+		...base,
+		stream: (model: any, context: any, options: any) =>
+			base.stream(model, context, {
+				...options,
+				onPayload: async (params: any, current: any) => {
+					const next = ((options?.onPayload ? await options.onPayload(params, current) : undefined) ?? params) as {
+						tools?: unknown[];
+					};
+					const tools = Array.isArray(next.tools) ? next.tools : [];
+					const swap = swapWebSearchTool(tools, current?.baseUrl ?? "", current?.id ?? "");
+					if (swap.swapped) {
+						next.tools = swap.tools;
+						console.log(
+							`[server-tools] ${current?.id} → deepseek_web_search（${swap.providerId}），替换本地 web_search`,
+						);
+					}
+					return next;
+				},
+			}),
+	} as ReturnType<typeof openAICompletionsApi>;
+}
+
 function buildProvider(entry: ProviderEntry): Provider {
 	const models = entry.models.map((modelId) => buildModel(entry, modelId));
 	for (const spec of variantSpecs.values()) {
@@ -582,7 +624,7 @@ function buildProvider(entry: ProviderEntry): Provider {
 		// 每次解析都读 env：换 key 不用重启，也永远不会把值写进配置
 		auth: { apiKey: envApiKeyAuth(`${entry.name} API key`, [entry.keyEnv]) },
 		models,
-		api: openAICompletionsApi(),
+		api: buildApi(),
 	});
 }
 
@@ -770,22 +812,64 @@ export function readLlmConfig(): LlmConfig | null {
  * `model` 盖回真实模型名（派生 id 漏到上游就 404）。
  * 支持域校验在调用方（/mode 直接 400；X-Mode / D3 按 `clampThinkingLevel` 落回）。
  */
+/**
+ * 会话级模型切换的回滚开关（2026-11-19）：false/0/off = 回到旧的全局对齐行为
+ * （每轮把会话拉到当前全局默认）；默认开 = 会话自己记模型、主模型只在建会话时读一次。
+ * 消费处每轮懒读，改完重启也不影响已存配置。
+ */
+export function chatSessionModelEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = (env.CHAT_SESSION_MODEL ?? "").trim().toLowerCase();
+	return !["false", "0", "off"].includes(raw);
+}
+
 export function chatModelRef(thinking: ThinkingLevel): ModelRef {
 	const config = readLlmConfig();
 	if (!config) throw new Error("LLM 未配置");
-	if (isFaux()) return config.model;
+	return chatModelRefFor(config.model.provider, config.model.modelId, thinking);
+}
 
-	const { provider, modelId } = config.model;
-	const spec = thinkingVariantSpec(provider, modelId, thinking);
-	const key = variantKey(provider, spec.id);
+/**
+ * 指定模型的思考变体引用（2026-11-19 会话级模型切换）。
+ *
+ * 和 `chatModelRef` 同一套派生 / 注册逻辑，只是模型不再取全局选择：
+ * 会话自己的模型、新会话请求里带的模型都从这里进 durable。
+ * 基座不在目录里 → 抛错，调用方转 400 / 回退，不静默换模型。
+ */
+export function chatModelRefFor(
+	providerId: string,
+	modelId: string,
+	thinking: ThinkingLevel,
+): ModelRef {
+	if (isFaux()) return { provider: providerId, modelId };
+	const baseModelId = modelId.split("#")[0] ?? modelId;
+	const spec = thinkingVariantSpec(providerId, baseModelId, thinking);
+	const key = variantKey(providerId, spec.id);
 	if (!variantSpecs.has(key)) {
-		const base = currentModels().getModel(provider, modelId);
-		if (!base) throw new Error("聊天模型不在目录里，无法派生思考变体");
+		const base = currentModels().getModel(providerId, baseModelId);
+		if (!base) {
+			throw new Error(`聊天模型不在目录里：${providerId}/${baseModelId}`);
+		}
 		registerVariantSpec(spec);
 		revision += 1;
 		currentModels(); // 立刻把新变体发布进单例
 	}
-	return { provider, modelId: spec.id };
+	return { provider: providerId, modelId: spec.id };
+}
+
+/**
+ * 模型在目录里是否可用（2026-11-19 会话级模型切换的修复判定）：
+ * 精确变体在 / 基座在都算可用；变体缺失会在 `chatModelRefFor` 里补注册。
+ */
+export function modelAvailable(providerId: string, modelId: string): boolean {
+	try {
+		const baseModelId = modelId.split("#")[0] ?? modelId;
+		const models = currentModels();
+		return Boolean(
+			models.getModel(providerId, modelId) ?? models.getModel(providerId, baseModelId),
+		);
+	} catch {
+		return false;
+	}
 }
 
 /** 某模型支持的思考档：providers.json 声明优先，缺省 `["off","low","high"]` */

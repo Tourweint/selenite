@@ -39,6 +39,12 @@ let dirty = false;
 const modelLists = new Map();
 /** 清单请求去重（同一 kind 并发只发一次）。 */
 const pendingLists = new Set();
+/**
+ * 本机内核的干活模型清单（2026-11-19 模型分工）：来自服务端已连接供应商目录，
+ * 不是 CLI 探测。`entries` = [{ providerId, providerName, modelId, hasKey }]。
+ */
+let nativeCatalog = null;
+let nativeCatalogPending = false;
 /** 当前打开的 { menu, kind }；面板挂在 body 下，关 = 藏起来。 */
 let openMenu = null;
 
@@ -57,17 +63,6 @@ export function executorSectionMarkup() {
           <select class="set-input executor-select" id="executor-kind" aria-label="默认派给谁" disabled></select>
         </div>
       </div>
-      <div class="row">
-        <div class="row-main">
-          <div class="row-label" data-tip="工人自报完成后怎么验收：内部一次请求 = chancellor 内部一次纯文本请求判（现状，默认）；派质检 worker = 再派一单质检工人，亲自验证产物后给 DONE / CONTINUE / BLOCKED 结论（更可靠，多花一单的工时）。换方式只影响新单。">质检方式</div>
-        </div>
-        <div class="row-control">
-          <select class="set-input executor-select" id="executor-qa" aria-label="质检方式" disabled>
-            <option value="internal">内部一次请求（现状）</option>
-            <option value="qa-worker">派质检 worker（新）</option>
-          </select>
-        </div>
-      </div>
     </div>
     <div class="executor-profiles" id="executor-profiles"></div>`,
     "",
@@ -77,11 +72,13 @@ export function executorSectionMarkup() {
 
 export async function wireExecutorSettings() {
   const select = document.getElementById("executor-kind");
-  const qaSelect = document.getElementById("executor-qa");
   const profiles = document.getElementById("executor-profiles");
   const hint = document.getElementById("executor-hint");
   const save = document.getElementById("executor-save");
   if (!select || !profiles || !hint || !save) return;
+  // 每次进页现拉本机模型清单：供应商可能刚改过。
+  nativeCatalog = null;
+  nativeCatalogPending = false;
 
   /** 行内小字只放状态与报错；解释一律进 data-tip。 */
   const setHint = (text) => {
@@ -119,11 +116,6 @@ export async function wireExecutorSettings() {
     }
     select.value = data.employee;
     select.disabled = data.locked === true || data.enabled === false;
-    // 质检方式（批2）：回显 + 随派活设置一起禁用/启用。
-    if (qaSelect) {
-      qaSelect.value = data.qa === "qa-worker" ? "qa-worker" : "internal";
-      qaSelect.disabled = data.enabled === false;
-    }
     save.disabled = true;
     setHint("");
 
@@ -139,6 +131,11 @@ export async function wireExecutorSettings() {
     profiles.innerHTML = selectable
       .map((kind) => profileCard(kind, data.profiles?.[kind.id] || {}, kind.id === data.employee))
       .join("");
+    // native 的供应商 id 挂在 input 上（2026-11-19）；保存时原样带回，回显时用来对勾。
+    for (const input of profiles.querySelectorAll("[data-model]")) {
+      const kind = input.dataset.model || "";
+      if (kind === "native") input.dataset.providerId = data.profiles?.[kind]?.providerId || "";
+    }
     for (const seg of profiles.querySelectorAll(".segmented")) mountSegmented(seg);
     for (const seg of profiles.querySelectorAll("[data-perm]")) {
       for (const button of seg.querySelectorAll("button")) {
@@ -153,6 +150,8 @@ export async function wireExecutorSettings() {
     }
     for (const input of profiles.querySelectorAll("[data-model]")) {
       input.addEventListener("input", () => {
+        // 手打模型名 = 供应商不再确定；从清单点选时会在 dispatch 之后补回 providerId。
+        if (input.dataset.model === "native") delete input.dataset.providerId;
         markDirty();
         // 面板开着时把输入当筛选词用
         if (openMenu?.kind === input.dataset.model) renderModelMenu(input.dataset.model);
@@ -242,22 +241,17 @@ export async function wireExecutorSettings() {
     if (!current) return;
     markDirty();
   });
-  if (qaSelect) {
-    qaSelect.addEventListener("change", () => {
-      if (!current) return;
-      markDirty();
-    });
-  }
 
   save.addEventListener("click", async () => {
     if (!current || dirty === false) return;
     const payload = { employee: select.value, profiles: {} };
-    if (qaSelect) payload.qa = qaSelect.value === "qa-worker" ? "qa-worker" : "internal";
     for (const kind of current.kinds.filter((item) => item.selectable)) {
-      // native 也存 model（2026-11-16 批1）：留空 = 跟随启动 env，native.ts 不做覆盖。
+      // native 也存 model（2026-11-16 批1）；2026-11-19 起留空 = 跟随默认模型，
+      // 选中清单里的模型时再带供应商 id（只给服务端解析 baseUrl/keyEnv 用）。
       const input = document.querySelector(`[data-model="${cssEscape(kind.id)}"]`);
       const seg = document.querySelector(`[data-perm="${cssEscape(kind.id)}"]`);
       const profile = { model: input?.value ?? "" };
+      if (kind.id === "native") profile.providerId = input?.dataset.providerId || "";
       const checked = seg?.querySelector('button[aria-checked="true"]');
       if (checked?.dataset.value) profile.permission = checked.dataset.value;
       payload.profiles[kind.id] = profile;
@@ -295,8 +289,55 @@ export async function wireExecutorSettings() {
 
 /* ---- 模型清单下拉（面板挂 body，fixed 定位绕开 .card 的 overflow 裁切） ---- */
 
+/** 本机内核的清单来自已连接供应商目录（`GET /agent/model`），不 spawn CLI。 */
+async function ensureNativeCatalog() {
+  if (nativeCatalog || nativeCatalogPending) return;
+  nativeCatalogPending = true;
+  try {
+    const response = await request("/api/v1/agent/model", { cache: "no-store" });
+    if (!response.ok) throw new Error(String(response.status));
+    const body = await response.json().catch(() => ({}));
+    const providers = Array.isArray(body.providers) ? body.providers : [];
+    const entries = [];
+    for (const provider of providers) {
+      if (!provider || !Array.isArray(provider.models)) continue;
+      for (const raw of provider.models) {
+        const modelId = typeof raw === "string" ? raw : raw?.id;
+        if (typeof modelId !== "string" || !modelId) continue;
+        entries.push({
+          providerId: String(provider.id || ""),
+          providerName: String(provider.name || provider.id || ""),
+          modelId,
+          hasKey: provider.hasKey !== false,
+        });
+      }
+    }
+    nativeCatalog = {
+      entries,
+      current: body.current || null,
+      message: entries.length ? "" : "还没有已连接的模型：先到设置 → 模型里配供应商",
+    };
+  } catch (error) {
+    nativeCatalog = {
+      entries: [],
+      current: null,
+      message:
+        error.message === "forbidden"
+          ? "没有权限读取模型清单"
+          : "取清单失败，稍后再试",
+    };
+  } finally {
+    nativeCatalogPending = false;
+    if (openMenu?.kind === "native") renderModelMenu("native");
+  }
+}
+
 /** 拉清单（空 model = 只列清单，不真调模型）；同一 kind 并发去重。 */
 async function ensureList(kind) {
+  if (kind === "native") {
+    void ensureNativeCatalog();
+    return;
+  }
   if (modelLists.has(kind) || pendingLists.has(kind)) return;
   pendingLists.add(kind);
   try {
@@ -355,6 +396,10 @@ function closeModelMenu() {
 function renderModelMenu(kind) {
   const menu = document.querySelector(`[data-model-menu="${cssEscape(kind)}"]`);
   if (!menu || menu.hidden) return;
+  if (kind === "native") {
+    renderNativeModelMenu(menu);
+    return;
+  }
   const input = document.querySelector(`[data-model="${cssEscape(kind)}"]`);
   const entry = modelLists.get(kind);
   menu.replaceChildren();
@@ -405,6 +450,107 @@ function renderModelMenu(kind) {
     menu.append(row);
   }
   if (filtered.length > shown.length) {
+    menu.append(menuNote(`只显示前 ${shown.length} 个；在上面的输入框打字筛选`));
+  }
+}
+
+/**
+ * 本机内核的模型清单（2026-11-19 模型分工）：
+ * 第一行「跟随默认模型」= 留空；其余行来自已连接供应商，点选后把 providerId 记到 input 上。
+ */
+function renderNativeModelMenu(menu) {
+  const input = document.querySelector('[data-model="native"]');
+  menu.replaceChildren();
+  const note = document.createElement("div");
+  note.className = "executor-model-note";
+  if (!nativeCatalog) {
+    note.textContent = "取清单中…";
+    menu.append(note);
+    return;
+  }
+  const filter = (input?.value ?? "").trim().toLowerCase();
+  const entries = nativeCatalog.entries.filter((entry) => {
+    if (!filter) return true;
+    return (
+      entry.modelId.toLowerCase().includes(filter) ||
+      entry.providerName.toLowerCase().includes(filter)
+    );
+  });
+  const shown = entries.slice(0, 800);
+  note.textContent = filter
+    ? `匹配 ${entries.length} / ${nativeCatalog.entries.length} 个`
+    : nativeCatalog.entries.length
+      ? `共 ${nativeCatalog.entries.length} 个已连接模型`
+      : nativeCatalog.message || "还没有已连接的模型";
+  menu.append(note);
+
+  if (!filter) {
+    const follow = document.createElement("div");
+    follow.className = "model-row";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "model-item";
+    button.setAttribute("role", "option");
+    const selected = (input?.value ?? "").trim() === "";
+    button.setAttribute("aria-checked", String(selected));
+    const name = document.createElement("span");
+    name.className = "model-name";
+    name.textContent = "跟随默认模型";
+    const meta = document.createElement("span");
+    meta.className = "model-meta";
+    meta.textContent = nativeCatalog.current?.modelId || "设置 → 模型";
+    button.append(name, meta);
+    button.addEventListener("click", () => {
+      if (input) {
+        input.value = "";
+        delete input.dataset.providerId;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      closeModelMenu();
+    });
+    follow.append(button);
+    menu.append(follow);
+  }
+
+  if (nativeCatalog.entries.length > 0 && entries.length === 0) {
+    menu.append(menuNote("没有匹配的模型名"));
+    return;
+  }
+  const pickedModel = (input?.value ?? "").trim();
+  const pickedProvider = input?.dataset.providerId || "";
+  for (const entry of shown) {
+    const row = document.createElement("div");
+    row.className = "model-row";
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "model-item";
+    item.setAttribute("role", "option");
+    const selected =
+      entry.modelId === pickedModel &&
+      (!pickedProvider || entry.providerId === pickedProvider);
+    item.setAttribute("aria-checked", String(selected));
+    const name = document.createElement("span");
+    name.className = "model-name";
+    name.textContent = entry.modelId;
+    const meta = document.createElement("span");
+    meta.className = "model-meta";
+    meta.textContent = entry.hasKey
+      ? entry.providerName
+      : `${entry.providerName} · 无 key`;
+    item.append(name, meta);
+    item.addEventListener("click", () => {
+      if (input) {
+        input.value = entry.modelId;
+        // dispatch 的 input 监听会清掉 providerId（手打语义）；点选之后再补回来。
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dataset.providerId = entry.providerId;
+      }
+      closeModelMenu();
+    });
+    row.append(item);
+    menu.append(row);
+  }
+  if (entries.length > shown.length) {
     menu.append(menuNote(`只显示前 ${shown.length} 个；在上面的输入框打字筛选`));
   }
 }
@@ -470,18 +616,20 @@ function profileCard(kind, profile, isCurrent) {
     : `<div class="divider"></div>
        <div class="row">
          <div class="row-main">
-           <div class="row-label" data-tip="${attr(kind.note || "")}">权限</div>
+           <div class="row-label" data-tip="${attr(
+             kind.id === "native"
+               ? "权限由本机内核权限策略管（设置 → 权限）。"
+               : kind.note || "",
+           )}">权限</div>
          </div>
          <div class="row-control"><span class="set-hint">${esc(
            kind.id === "native" ? "本机策略管" : "固定全权",
          )}</span></div>
        </div>`;
 
-  // 卡片标题的解释（额度 / 边界 / 留空语义）全收进 data-tip，不常驻
+  // 卡片标题的解释（额度 / 边界 / 留空语义）全收进 data-tip，不常驻。
+  // native 的留空语义由服务端 kind.note 给（2026-11-19 模型分工），别在两端各写一份。
   const labelTips = [];
-  if (kind.id === "native") {
-    labelTips.push("不是外部 CLI；模型留空走启动 env（LLM_MODEL，默认 deepseek-v4.1-flash），填了则 native 工人用该模型；权限由本机内核权限策略管。");
-  }
   if (kind.note) labelTips.push(kind.note);
   if (kind.id !== "native") labelTips.push("模型留空 = 跟随该 CLI 自己的配置。");
 
@@ -497,9 +645,13 @@ function profileCard(kind, profile, isCurrent) {
                  <div class="executor-model-box" data-model-box="${attr(kind.id)}">
                    <input class="set-input executor-model" data-model="${attr(kind.id)}"
                           value="${attr(profile.model ?? "")}"
-                          placeholder="${attr(kind.modelHint || "留空跟随启动 env")}"
+                          placeholder="留空跟随默认模型"
                           aria-label="${attr(kind.label)} 的模型"
                           autocomplete="off" spellcheck="false" />
+                   <button class="executor-model-toggle" type="button" data-model-toggle="${attr(kind.id)}"
+                           aria-label="展开本机内核的模型清单"
+                           data-tip="从已连接的供应商里选干活模型；第一行「跟随默认模型」= 跟设置 → 模型的默认。在输入框打字可筛选">${ARROW_SVG}</button>
+                   <div class="executor-model-menu" data-model-menu="${attr(kind.id)}" hidden></div>
                  </div>
                </div>`
             : `<div class="executor-model-row">

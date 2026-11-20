@@ -22,7 +22,7 @@ import { contentText } from "@earendil-works/pi-ai";
 import type { Conversation, ConversationView, LiveState, SettledSubmissionRecord } from "@earendil-works/pi-durable";
 import { LiveDoc } from "@earendil-works/pi-durable";
 import { DelegationPhase, StreamErrorCode, TurnUsage } from "@lifediary/shared";
-import { chatKindOfInternal, syncConversationModel } from "./session-open.ts";
+import { chatKindOfInternal, ensureConversationModel } from "./session-open.ts";
 import { answerText, logTurnUsage, readLastTurnUsage } from "./session-transcript.ts";
 
 export type ChatStreamEvent =
@@ -343,8 +343,8 @@ export async function* chatStream(
 	});
 
 	try {
-		// 运行时切模型后，还停在旧模型上的会话在这轮开跑前对齐过去（接口文档 §2.8）
-		await syncConversationModel(input.conversation, conversationId);
+		// 2026-11-19 会话级模型切换：这里只修复坏引用，不再把会话对齐到全局默认。
+		await ensureConversationModel(input.conversation, conversationId);
 		watch.start(async (value) => {
 			rollSegment(value);
 			offer(partialOf(value));

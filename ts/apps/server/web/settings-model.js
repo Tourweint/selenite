@@ -1,134 +1,36 @@
 /**
- * 二级页 · 模型
+ * 二级页 · 备选模型（2026-11-19 会话级模型切换）
  *
  * 2026-11-13 从 web/app.js（25,467 行单文件）按职责拆出；正文是原文搬运，未改写行为。
  * 原文件只有一个作用域、函数互调没有固定方向，拆开后模块之间必然互相 import（环）。
  * ESM 允许循环引用，前提是模块顶层求值时不向别的模块取值；本层把启动代码全放在入口
  * app.js 文末，各模块顶层只做声明、常量与事件监听注册。
+ *
+ * 2026-11-19：右上角不再有「主选模型」——本会话模型统一在输入框左下角的 pill 里切；
+ * 这一页只保留执事的备选链（自动重试）。
  */
 
 import { el } from "./dom.js";
-import { fetchModelCatalog, menuProviders, normalizeModelRow, renderModelMenu } from "./hover-tip.js";
+import { fetchModelCatalog, menuProviders, normalizeModelRow } from "./hover-tip.js";
 import { CS_ICONS } from "./icons.js";
 import { request } from "./net.js";
 import { cs, csCard, csHead, csLoadProviders, csSvg, partnerModelChain } from "./settings-drawer.js";
-import { KEY_MODEL_PROVIDER } from "./shell.js";
 import { state } from "./state.js";
-import { closePopover, openPopover, popoverOpen } from "./ui-atoms.js";
 
-/* ── 二级页 · 模型：主选 + 备选同页 ─────────────────────────
- * 用户口径（2026-11-07）：「选模型那个功能，应该跟设置里那个是一个方法吧」
- *   「调整人设、调整模型（主选模型和备选模型），都是在自己已有的这些里调，这俩应该是一样的设置」。
- *
- * 所以这一页是**同一个角色**的两件模型设置，共用一份「已有模型」清单：
- *   ① 主选：全局运行时模型（POST /agent/model，下一轮生效）——与 composer pill、
- *      设置→模型的默认模型行是同一个接口、同一套目录，不另造一份；
- *   ② 备选：这个执事的候选链（PATCH /partners/:id { modelChain }）——只在主模型
- *      「没应答且原因可切」时按链往下换，keyEnv 只填变量名（密钥纪律）。
- * 两段都从**已有**模型里选（选项来自 /agent/model），不再要求手打
- * providerId|modelId|KEY_ENV_NAME。批量加模型卡退役（2026-11-08 用户口径：
- * 「模型肯定是能出现的，手输兜底没用」）——加模型的正式入口在 设置 → 模型。 */
+/* ── 二级页 · 备选模型（2026-11-19 会话级模型切换）─────────────
+ * 主模型（本会话模型）现在统一在输入框左下角的 pill 里切；右上角不再放第二份。
+ * 这一页只保留执事的备选链（PATCH /partners/:id { modelChain }）：
+ * 主模型不可用时，在试跑 / 例行任务轮次里按顺序自动重试；keyEnv 只填变量名。
+ * 备选链编辑器与设置弹窗 / 人设页共用（mountChainEditor）。 */
 function renderCsModelPage() {
   const drawer = el.chatSettingsDrawer;
-  const catalog = cs.catalog;
-  if (!drawer || !catalog) return;
-  drawer.replaceChildren(csHead("模型", { back: true }));
+  if (!drawer) return;
+  drawer.replaceChildren(csHead("备选模型", { back: true }));
   const body = document.createElement("div");
   body.className = "cs-body";
   body.dataset.cards = ""; // 卡片化排版（群设置共用骨架，不吃这一套）
   drawer.append(body);
-  const providers = menuProviders(catalog);
-  body.append(csModelWho());
-  body.append(csPrimaryCard(providers, catalog.current || null));
-  // 备选链挂在执事身上；普通助手会话没有链可配，不摆这张卡
-  if (cs.target) body.append(csFallbackCard(providers));
-}
-
-/** 这页改的是谁：避免在执事会话里以为改了执事、其实改的是全局主选 */
-function csModelWho() {
-  const partner = state.partners.find((item) => item.id === cs.target);
-  const name = String(partner?.name || "").trim() || "总管";
-  const node = document.createElement("p");
-  node.className = "cs-note";
-  node.style.padding = "0 2px 2px";
-  node.textContent = `主选对所有对话生效；备选只属于「${name}」。`;
-  return node;
-}
-
-/** ① 主选：与设置页「默认模型」同一个接口（POST /agent/model），只是换成下拉 */
-function csPrimaryCard(providers, current) {
-  const card = csCard("主选模型");
-  const field = document.createElement("div");
-  field.className = "cs-field";
-  field.innerHTML = `
-    <div class="cs-model-pick">
-      <button type="button" class="cs-input cs-model-trigger" id="cs-primary-trigger"
-              aria-haspopup="menu" aria-expanded="false">
-        <span class="cs-model-label" id="cs-primary-label"></span>
-        <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
-      </button>
-      <div class="model-menu composer-pop cs-model-menu" id="cs-primary-menu" role="menu" hidden></div>
-    </div>
-    <span class="cs-hint" id="cs-primary-hint">切换后下一轮生效。</span>`;
-  card.append(field);
-  const trigger = field.querySelector("#cs-primary-trigger");
-  const label = field.querySelector("#cs-primary-label");
-  const menu = field.querySelector("#cs-primary-menu");
-  const hint = field.querySelector("#cs-primary-hint");
-
-  const paintLabel = () => {
-    const cur = state.modelCatalog?.current || current || null;
-    label.textContent = cur ? cur.modelId : "还没选模型";
-    label.title = cur ? `${cur.providerId} · ${cur.modelId}` : "";
-  };
-  paintLabel();
-
-  if (!providers.length) {
-    trigger.disabled = true;
-    label.textContent = "还没有可选模型";
-    hint.textContent = "配好供应商后这里就有清单了。";
-    return card;
-  }
-
-  trigger.addEventListener("click", async () => {
-    if (popoverOpen(menu)) {
-      closePopover(menu, trigger);
-      return;
-    }
-    trigger.disabled = true;
-    try {
-      // 每次打开都现拉：不缓存陈旧目录（同 composer 菜单，审查 S2）
-      const catalog = await fetchModelCatalog();
-      cs.catalog = catalog;
-      state.modelCatalog = catalog;
-      renderModelMenu(catalog, localStorage.getItem(KEY_MODEL_PROVIDER), menu);
-      openPopover(menu, trigger);
-    } catch (error) {
-      if (error.message !== "forbidden") {
-        hint.textContent = "拿不到模型清单，稍后再试。";
-        hint.classList.add("is-error");
-      }
-    } finally {
-      trigger.disabled = false;
-    }
-  });
-
-  // 当前模型不在清单里（供应商被删 / 模型下线）：触发钮照常显示它，提示里说明，
-  // 用户从菜单里选一个就换掉了（不再造一条原生 select 的占位 option）
-  if (current) {
-    const inCatalog = providers.some(
-      (provider) =>
-        provider.id === current.providerId &&
-        provider.models.some((raw) => normalizeModelRow(raw)?.id === current.modelId),
-    );
-    if (!inCatalog) {
-      label.title = `${current.providerId} · ${current.modelId}（当前，已不在清单）`;
-      hint.textContent = "当前模型已不在清单里，打开上面选一个换掉。";
-    }
-  }
-  // chooseModel 成功后会在菜单宿主上派发 modelchange（冒泡）：触发钮名字跟上去
-  menu.addEventListener("modelchange", paintLabel);
-  return card;
+  body.append(csFallbackCard());
 }
 
 /**
@@ -343,7 +245,7 @@ async function mountChainEditor(host, { partnerId, chain, onSaved }) {
 }
 
 /** 抽屉里的「备选模型」卡片：外层说明 + 共用编辑器 */
-function csFallbackCard(providers) {
+function csFallbackCard() {
   const card = csCard("备选模型");
   const note = document.createElement("div");
   note.className = "cs-note";
@@ -352,7 +254,7 @@ function csFallbackCard(providers) {
     // 生效范围按代码实况写：链只在执事的试跑与例行任务轮次里走
     // （partner-runtime.runPartnerTurn → nextChainCandidate）；主对话的 chatStream 不读链。
     // 写成「主模型失败就自动换」是虚假承诺，用户会以为聊天也有兜底。
-    ? "只在试跑与例行任务轮次里生效（主对话不换）：那一轮没应答且原因可切时，按顺序换下一条重跑。最多 5 条。"
+    ? "主模型不可用时，只在试跑 / 例行任务轮次里按顺序重试；主对话的模型在输入框左下角的 pill 里切换。最多 5 条。"
     : "备选链属于执事，普通助手会话没有。到「全部设置 → 人设」里给某个执事配。";
   card.append(note);
   if (!cs.target) return card;
@@ -368,4 +270,4 @@ function csFallbackCard(providers) {
   return card;
 }
 
-export { csFallbackCard, csModelWho, csPrimaryCard, mountChainEditor, renderCsModelPage };
+export { csFallbackCard, mountChainEditor, renderCsModelPage };

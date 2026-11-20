@@ -96,6 +96,9 @@ const state = {
   maxSeq: 0,
   // 模型投影（批次五）：GET /agent/model 的最近一次结果，只做展示，不当缓存用
   modelCatalog: null,
+  // 新会话屏选的模型（2026-11-19 会话级模型切换）：还没有 conversationId 时先记这里，
+  // 第一条消息随建会话带上；不影响全局默认。
+  pendingModel: null,
   // 设置页供应商投影（批次五）：GET /agent/providers
   providers: [],
   // 搜索源投影（2026-11-12 多供应商）：GET /agent/search-provider

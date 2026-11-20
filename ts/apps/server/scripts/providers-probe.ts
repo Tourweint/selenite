@@ -212,12 +212,17 @@ interface ChatResult {
 	done: boolean;
 }
 
-async function chat(base: string, conversationId?: string): Promise<ChatResult> {
+async function chat(
+	base: string,
+	conversationId?: string,
+	model?: { providerId: string; modelId: string; thinking?: string },
+): Promise<ChatResult> {
 	const response = await fetch(`${base}/api/v1/agent/chat`, {
 		method: "POST",
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify({
 			...(conversationId ? { conversationId } : {}),
+			...(model ? { model } : {}),
 			messages: [{ role: "user", content: "在吗" }],
 		}),
 	});
@@ -431,14 +436,18 @@ try {
 	});
 	check(badShapeMeta.status === 400 && badShapeMeta.json.error === "bad_model_meta", "非对象 modelMeta 400", JSON.stringify(badShapeMeta.json));
 
-	// ── 3. 旧会话切同名模型（S1）────────────────────────────
-	console.log("\n· 3. A 上建的会话切到 B 的同名模型");
+	// ── 3. 全局切到 B 后，旧会话仍留在 A（2026-11-19 会话级模型）────
+	console.log("\n· 3. 全局切到 B 后，A 上建的会话仍留在 A");
 	const bBefore = upstreamB.received.length;
 	const aBefore = upstreamA.received.length;
 	const crossProvider = await chat(BASE, conv1);
 	check(crossProvider.status === 200 && crossProvider.done, "旧会话这一轮完成", crossProvider.events.join(","));
-	check(upstreamB.received.length === bBefore + 1, "下一轮打到了 B（不是 A）", `B ${upstreamB.received.length} / A ${upstreamA.received.length}`);
-	check(upstreamA.received.length === aBefore, "A 没有收到这一轮");
+	check(
+		upstreamA.received.length === aBefore + 1,
+		"下一轮仍打到 A（本会话模型不跟全局）",
+		`A ${aBefore} → ${upstreamA.received.length} / B ${upstreamB.received.length}`,
+	);
+	check(upstreamB.received.length === bBefore, "B 没有收到这一轮");
 
 	// ── 4. 改 B 的 baseUrl ────────────────────────────────
 	console.log("\n· 4. 改 B 的 baseUrl 到第三个上游");
@@ -552,6 +561,71 @@ try {
 		JSON.stringify(current),
 	);
 	await postJson("/api/v1/agent/model", { providerId: "bailian", modelId: MODEL });
+
+	// ── 8.5 会话级模型：全局只读一次，之后每条会话自己记 ──
+	console.log("\n· 8.5 会话级模型切换（主模型只读一次）");
+	const modelOf = async (chatId: string): Promise<{ providerId?: string; modelId?: string } | undefined> => {
+		const out = await getJson(`/api/v1/agent/model?chat=${encodeURIComponent(chatId)}`);
+		return out.json.current as { providerId?: string; modelId?: string } | undefined;
+	};
+	const sessionA = await chat(BASE);
+	check(sessionA.status === 200 && sessionA.done, "新会话 A 建好", sessionA.events.join(","));
+	const idA = sessionA.conversationId || "";
+	const aStart = await modelOf(idA);
+	check(
+		aStart?.providerId === "bailian" && aStart.modelId === MODEL,
+		"A 建会话时取全局默认",
+		JSON.stringify(aStart),
+	);
+	const switchA = await postJson(`/api/v1/agent/chat/${encodeURIComponent(idA)}/model`, {
+		providerId: "d",
+		modelId: MODEL,
+	});
+	check(
+		switchA.status === 200 && switchA.json.provider === "d",
+		"A 单独切到 D",
+		JSON.stringify(switchA.json),
+	);
+	const aAfter = await modelOf(idA);
+	check(
+		aAfter?.providerId === "d" && aAfter.modelId === MODEL,
+		"A 的当前模型 = D",
+		JSON.stringify(aAfter),
+	);
+	const globalAfter = (await getJson("/api/v1/agent/model")).json.current as
+		| { providerId?: string; modelId?: string }
+		| undefined;
+	check(
+		globalAfter?.providerId === "bailian" && globalAfter.modelId === MODEL,
+		"全局默认没被 A 带走",
+		JSON.stringify(globalAfter),
+	);
+	const sessionB = await chat(BASE);
+	const bStart = await modelOf(sessionB.conversationId || "");
+	check(
+		bStart?.providerId === "bailian" && bStart.modelId === MODEL,
+		"新会话 B 仍取全局默认",
+		JSON.stringify(bStart),
+	);
+	const sessionC = await chat(BASE, undefined, {
+		providerId: "d",
+		modelId: MODEL,
+		thinking: "off",
+	});
+	const cStart = await modelOf(sessionC.conversationId || "");
+	check(
+		cStart?.providerId === "d" && cStart.modelId === MODEL,
+		"新会话可随请求带模型（只影响这一条）",
+		JSON.stringify(cStart),
+	);
+	const globalFinal = (await getJson("/api/v1/agent/model")).json.current as
+		| { providerId?: string; modelId?: string }
+		| undefined;
+	check(
+		globalFinal?.providerId === "bailian" && globalFinal.modelId === MODEL,
+		"带模型建会话也不改全局",
+		JSON.stringify(globalFinal),
+	);
 
 	// ── 9. 播种矩阵 ───────────────────────────────────────
 	console.log("\n· 9. 播种矩阵");
@@ -723,9 +797,11 @@ try {
 	await waitForReady();
 	const rolledBack = await chat(BASE, oldId);
 	check(rolledBack.status === 200, "回滚开关下请求本身不崩", String(rolledBack.status));
+	// 2026-11-19 会话级模型切换：ensureConversationModel 的修复路径会按需注册缺失变体，
+	// 所以即使关掉预注册，旧会话也不会再报 not available（懒注册从"创建路径"扩到"修复路径"）。
 	check(
-		rolledBack.events.includes("error") || !rolledBack.text,
-		"MODEL_VARIANT_PRESEEDED=false 回到懒注册旧行为（旧会话模型不可用）",
+		rolledBack.done && !rolledBack.events.includes("error") && Boolean(rolledBack.text),
+		"MODEL_VARIANT_PRESEEDED=false：修复路径懒注册变体，旧会话仍可用",
 		rolledBack.events.join(","),
 	);
 } finally {

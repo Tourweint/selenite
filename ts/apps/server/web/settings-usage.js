@@ -7,7 +7,7 @@
  * app.js 文末，各模块顶层只做声明、常量与事件监听注册。
  */
 
-import { fetchModelCatalog, updateModelPill } from "./hover-tip.js";
+import { fetchModelCatalog, refreshModelPill } from "./hover-tip.js";
 import { attr, esc } from "./markdown.js";
 import { request } from "./net.js";
 import { loadProviders } from "./providers.js";
@@ -386,7 +386,8 @@ async function loadModelsInfo() {
     const catalog = await fetchModelCatalog();
     state.modelCatalog = catalog;
     renderDefaultModelRow(catalog);
-    updateModelPill();
+    // 2026-11-19：默认模型行读全局；pill 读当前会话，别把会话模型盖成全局。
+    void refreshModelPill();
   } catch {
     set("mdl-current", "读取失败");
     const hint = document.getElementById("mdl-hint");
