@@ -13,7 +13,7 @@ Agent、记忆、会话全在 `../ts/apps/server`（Node，`:39847`），这里�
 已经就位的：
 
 - 单实例（再启动一次会唤出已有窗口）
-- 托盘：显示窗口 / 重新连接 / 退出
+- 托盘：显示窗口 / 重新连接 / 退出并停止服务（2026-11-20：原「设置」项退役；窗口 X 仍只是隐藏，**退出会把 Node 服务一起停掉**）
 - **关窗 = 隐藏**，服务不停（手机还要连、提醒还要跑）
 - 服务没起来时给一页说明，而不是 WebView 的默认错误页
 - **原生弹出层（2026-11-19 批1）**：悬停提示与右键菜单族（`openMenuAt` / `openSecMenu`）
@@ -64,11 +64,13 @@ go build -ldflags="-H windowsgui -X main.version=$(git describe --tags --always)
 `-H windowsgui` 不能省：不加的话它是控制台程序，双击会先弹一个黑框
 （那正是"桌面上冒出个 node 进程"的来源）。加上之后是 GUI 子系统，双击直接出窗口。
 
-版本号注入到托盘 tooltip（`Selenite <version> — 服务状态`）；`go run .` / 手工
-`go build` 没有注入时是 `dev`。图标已由 `rsrc.syso` 嵌入，构建不重生成。
+版本号由 `build.ps1` 注入 `main.version`，启动时记一行日志（`Selenite <version>`，
+GUI 构建看不到；`go run .` / 手工 `go build` 没有注入时是 `dev`）。托盘悬停提示只显示
+产品名「Selenite」（2026-11-20 用户口径：状态由图标颜色表达，不再塞版本与服务状态）。
+图标已由 `rsrc.syso` 嵌入，构建不重生成。
 
 服务不用手动起：壳探不到 `/healthz` 会用隐藏进程把它拉起来，无控制台窗口。
-设置 → 服务 → 运行时那张卡的「开机自启」开关写 HKCU Run（由 MyGo 维护，任务管理器
+设置 → 本机 → 运行时那张卡的「开机自启」开关写 HKCU Run（由 MyGo 维护，任务管理器
 的「启动」页可关掉）；它只管壳，服务仍由壳拉起。
 
 服务不在默认端口时：
@@ -85,6 +87,7 @@ $env:LIFEDIARY_BASE_URL='http://127.0.0.1:9000'
 | `LIFEDIARY_SERVER_DIR` | 服务目录（默认按壳的兄弟目录找） |
 | `LIFEDIARY_SHELL_BINDINGS` | `off` = 整组 `Shell` 绑定不挂（页面退化成手输路径） |
 | `LIFEDIARY_SHELL_WATCH` | `off` = 关掉服务失联自动重拉守护 |
+| `LIFEDIARY_QUIT_STOP_SERVICE` | `off` = 托盘退出只关壳、不停 Node 服务（回到 2026-11-20 前的形态） |
 | `LIFEDIARY_NATIVE_POPOVERS` | `off` = 原生弹出层回滚开关：Capabilities 报 `nativePopups=false`，页面全量回 DOM 旧路（回滚不等于改代码） |
 | `LIFEDIARY_THEME` | 显式指定壳记住的主题（paper/white/indigo/black/celadon），调试取色用 |
 | `LIFEDIARY_THEME_FILE` | 主题记忆文件落点（测试用） |

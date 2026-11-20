@@ -319,7 +319,8 @@ func loadService(w *mygo.Window) {
 func pageURL(base string) string {
 	link := base + "/"
 
-	// 深链：直接开某一页（`LIFEDIARY_VIEW=settings`），以后托盘「设置」也走这里
+	// 深链：直接开某一页（`LIFEDIARY_VIEW=settings`）。
+	// 2026-11-20 起托盘不再有「设置」项（页面里就能进），这条深链只留给命令行/调试。
 	if view := strings.TrimSpace(os.Getenv("LIFEDIARY_VIEW")); view != "" {
 		link += "?view=" + url.QueryEscape(view)
 	}
@@ -425,7 +426,7 @@ func showWindow() {
 	// 壳的标题固定用产品名，不让页面改。
 	w.Page().OnPageTitleUpdated(func(e *mygo.TitleEvent) { e.PreventDefault() })
 	// 关窗 = 隐藏：服务还要给手机用，提醒也要照跑。
-	// 但退出流程（托盘「退出」→ App.Quit）必须先让窗口真正关闭，
+	// 但退出流程（托盘「退出并停止服务」→ App.Quit）必须先让窗口真正关闭，
 	// 否则这里 PreventDefault 会把整个退出取消掉。
 	w.OnClose(func(e *mygo.CloseEvent) {
 		if quitting {
@@ -558,11 +559,14 @@ func main() {
 	// 在 RequestSingleInstanceLock 之后再改名：锁路径沿用可执行文件名，
 	// 老版本进程还在时不会因为改名各起一个实例。显示名用产品名。
 	app.SetName("Selenite")
+	// 版本从托盘 tooltip 撤下后落在这里：GUI 构建看不到，`go run .` / 控制台起
+	// 时是排查"跑的是哪一版"的唯一落点。
+	log.Printf("Selenite %s", version)
 	app.OnSecondInstance(func([]string, string) { showWindow() })
 
-	// 退出先挂起，异步查在飞任务（见 tray-features.go 的 checkBeforeQuit）：
-	// 没有在飞单/服务没跑就直接放 quit，有在飞单才弹确认。真正决定退出时
-	// 再置 quitting=true（OnClose 关窗放行依赖它）。
+	// 退出先挂起，异步查在飞任务并停服务（见 tray-features.go 的 checkBeforeQuit）：
+	// 没有在飞单就先停 Node 服务再放 quit，有在飞单才弹确认（退出会中断它们）。
+	// 真正决定退出时再置 quitting=true（OnClose 关窗放行依赖它）。
 	app.OnBeforeQuit(func(e *mygo.QuitEvent) {
 		if quitting {
 			return // 已走完异步确认，放行这次退出
@@ -585,8 +589,10 @@ func main() {
 		// 要调试直接在浏览器打开 http://127.0.0.1:39847/ ，不需要窗口里的 DevTools 菜单。
 
 		if t, err := mygo.NewTray(mygo.TrayOptions{
-			Icon:    trayIcon(),
-			ToolTip: "Selenite " + version,
+			Icon: trayIcon(),
+			// 悬停只显示名字（2026-11-20 用户口径）：状态由图标颜色表达，
+			// 详情的服务状态在页面与设置里看。版本号改记启动日志。
+			ToolTip: "Selenite",
 			Menu: mygo.NewMenu([]*mygo.MenuItem{
 				{Label: "显示/隐藏", Click: func(*mygo.MenuItem, *mygo.Window) { toggleWindow() }},
 				{Label: "重新连接", Click: func(*mygo.MenuItem, *mygo.Window) {
@@ -604,11 +610,13 @@ func main() {
 						loadService(win)
 					}()
 				}},
-				{Label: "设置", Click: func(*mygo.MenuItem, *mygo.Window) { go openSettings() }},
 				mygo.Separator(),
+				// 「退出」的含义是**停服务 + 退壳**（2026-11-20）：
+				// 窗口 X 只隐藏、服务照跑（手机与提醒要用），两个一起收只能走这里。
+				// 停服务与在飞单确认在 OnBeforeQuit → checkBeforeQuit 里做。
 				// RoleQuit 的默认文案来自 MyGo 的本地化表，可能落到英文
 				// （Exit）。这里显式写中文，同时保留 Role 的退出语义。
-				{Label: "退出", Role: mygo.RoleQuit},
+				{Label: "退出并停止服务", Role: mygo.RoleQuit},
 			}),
 		}); err != nil {
 			// 托盘不可用不该阻止应用启动。

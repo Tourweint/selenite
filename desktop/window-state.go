@@ -159,7 +159,7 @@ func firstHideNotice(w *mygo.Window) {
 		Type:    mygo.MessageInfo,
 		Title:   "Selenite 仍在运行",
 		Message: "窗口已最小化到托盘，服务还在继续跑。",
-		Detail:  "提醒、手机连接、后台任务都不会停。从托盘图标可以重新打开或退出。",
+		Detail:  "提醒、手机连接、后台任务都不会停。从托盘图标可以重新打开；要连服务一起关，用托盘的「退出并停止服务」。",
 	})
 	markHideNoticeAcked()
 }

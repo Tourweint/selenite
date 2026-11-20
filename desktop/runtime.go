@@ -163,6 +163,24 @@ func pidOnPort(port int) int {
 	return 0
 }
 
+// isNodeProcess 判断该 PID 现在还是不是 node.exe。
+//
+// 只给"端口上没人、想回落到记忆里的旧 PID"这条路用：Windows 会回收 PID，
+// 服务自己崩掉后那个数字可能已经属于别的程序；对着它 taskkill /T 会误杀。
+// 用 tasklist 的 CSV 输出（第一列就是映像名，不受系统语言影响）做一次确认。
+// outputHidden 不能省：GUI 壳下裸 exec 会闪控制台窗口。
+func isNodeProcess(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	out, err := outputHidden(exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/FO", "CSV", "/NH"))
+	if err != nil {
+		return false
+	}
+	line := strings.TrimSpace(string(out))
+	return strings.HasPrefix(strings.ToLower(line), `"node.exe"`)
+}
+
 func (r *runtimeCtl) Status() RuntimeStatus {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -276,7 +294,14 @@ func (r *runtimeCtl) Stop() (RuntimeStatus, error) {
 
 	pid := pidOnPort(port)
 	if pid == 0 {
-		pid = r.pid
+		// 端口上没人时只认"还是 node"的旧 PID（2026-11-20 退出停服务时补）：
+		// 服务自己崩掉后 r.pid 会留在记忆里，而 Windows 会回收 PID——
+		// 隔一段时间直接 taskkill 这个数字，可能杀到无关进程。
+		if r.pid != 0 && isNodeProcess(r.pid) {
+			pid = r.pid
+		} else {
+			r.pid = 0
+		}
 	}
 	if pid == 0 {
 		r.pid = 0
@@ -286,6 +311,14 @@ func (r *runtimeCtl) Stop() (RuntimeStatus, error) {
 	// /T 不能省：tsx 是 loader 进程，它会再 fork 真正的服务进程；
 	// 只杀父进程会留下孤儿占着端口，下次启动直接 EADDRINUSE。
 	if err := runHidden(exec.Command("taskkill", "/PID", strconv.Itoa(pid), "/T", "/F")); err != nil {
+		// 查 PID 与 taskkill 之间进程自己退了：taskkill 会报"找不到"，
+		// 但端口已经腾空 = 目的达成。把它当成功，别让退出流程被一个
+		// 假失败拦下来（2026-11-20 退出停服务时补）。
+		if !listening(port) {
+			r.pid = 0
+			log.Printf("runtime: 服务已不在（PID %d 在停止前退出）", pid)
+			return r.statusLocked(), nil
+		}
 		r.stopped = false // 没停成，把闩还回去，别让用户以为停了
 		return r.statusLocked(), fmt.Errorf("停止失败（PID %d）: %w", pid, err)
 	}
