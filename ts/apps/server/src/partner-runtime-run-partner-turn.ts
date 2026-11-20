@@ -43,7 +43,6 @@ export interface PartnerIdentityPart {
 		| "partner_voice"
 		| "partner_values"
 		| "partner_scenario"
-		| "partner_owner_profile"
 		| "partner_skill_index"
 		| "partner_boundary";
 	title: string;
@@ -52,8 +51,11 @@ export interface PartnerIdentityPart {
 
 /**
  * 身份的可展示字段（2026-11-16 追加）：默认上下文页不再把 SOUL、说话方式、
- * 里子、处境、主人画像、技能索引、运行边界合成一个 `partner_identity` 大块。
+ * 里子、处境、技能索引、运行边界合成一个 `partner_identity` 大块。
  * 这里同时产出空字段（text=""），页面才能逐个显示 0 字槽位。
+ *
+ * 2026-11-19「关于我」：`partner_owner_profile`（memories/USER.md）不再进身份——
+ * 主人档案改为全局一份的 `user_profile` system 段；文件保留不删，只是不再注入。
  *
  * 真实 instructions 仍走 renderPartnerIdentity：只拼非空段，顺序不变。
  */
@@ -73,14 +75,8 @@ export function renderPartnerIdentityParts(
 		});
 	}
 
-	const userMd = store.readUserMd(partner.id);
-	parts.push({
-		key: "partner_owner_profile",
-		title: "执事身份 · 主人画像",
-		text: userMd && userMd.trim()
-			? ["# 主人画像（memories/USER.md）", userMd.trim()].join("\n\n")
-			: "",
-	});
+	// 2026-11-19：主人画像退役（全局「关于我」接管）。`memories/USER.md` 文件与
+	// `readUserMd()` 保留兼容，但不再进身份 instructions——同一个概念不能有两处真相。
 
 	const skills = partnerSkillsIndex(partner.id);
 	parts.push({
@@ -402,18 +398,47 @@ ${text}${quietEligible ? `\n\n${ROUTINE_QUIET_INSTRUCTION}` : ""}`
 
 		// 候选链重试（批次B B4）：上一轮 unanswered 且原因可切 → 按链换路由重跑。
 		// 每个候选最多跑一次；fallback 只改本轮，不暗改档案（下一轮仍从链头试）。
-		let chain = partnersStore().getModelChain(partnerId);
-		while (
-			chain.length > 0 &&
-			settled.record?.status === "unanswered" &&
-			pieces.join("").length === 0
-		) {
-			const verdict = await stepChain(chat, chain, settled.record.reason ?? "");
-			if (!verdict) break;
-			// stepChain 已 configure 成新路由：剔除用过的候选，重跑一轮
-			chain = chain.filter((item) => item !== verdict);
-			pieces.length = 0;
-			await runOnce();
+		// 2026-11-19：会话级模型切换后，configure 的模型默认会留下来；这里记下本会话原模型，
+		// 重试结束后恢复——否则一次兜底失败会把执事的主模型永久改成链里的候选。
+		const originalModel = await chat.conversation
+			.agent(CTX)
+			.then((agent) => agent.model ?? null)
+			.catch(() => null);
+		try {
+			let chain = partnersStore().getModelChain(partnerId);
+			while (
+				chain.length > 0 &&
+				settled.record?.status === "unanswered" &&
+				pieces.join("").length === 0
+			) {
+				const verdict = await stepChain(chat, chain, settled.record.reason ?? "");
+				if (!verdict) break;
+				// stepChain 已 configure 成新路由：剔除用过的候选，重跑一轮
+				chain = chain.filter((item) => item !== verdict);
+				pieces.length = 0;
+				await runOnce();
+			}
+		} finally {
+			if (originalModel) {
+				const current = await chat.conversation
+					.agent(CTX)
+					.then((agent) => agent.model ?? null)
+					.catch(() => null);
+				if (
+					current?.provider !== originalModel.provider ||
+					current?.modelId !== originalModel.modelId
+				) {
+					await chat.conversation
+						.configure({ model: originalModel }, CTX)
+						.catch((error: unknown) => {
+							console.warn(
+								`[model-chain] 恢复本会话原模型失败: ${
+									error instanceof Error ? error.message : String(error)
+								}`,
+							);
+						});
+				}
+			}
 		}
 
 		// 安静契约（2026-11-09 T2）：判定是确定性的，不调模型；标记从产出里剔除。

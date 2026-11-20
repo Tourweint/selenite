@@ -25,8 +25,9 @@ export { relayRunKey };
  * 执事间消息通道（2026-11-08 扫尾批 8d；方案 `2026-11-08-扫尾批8d方案（执事间消息通道）.md`）。
  *
  * 群聊解决"多执事看同一处"，本通道解决"A 有话单独跟 B 说"。送达**不建信箱表**：
- * 消息本体就是目标会话里的一条 user 输入（durable `submit` 持久化），目标忙就 followUp
- * 排队、空闲就触发一轮 —— 零新增存储（方案 §一.2）。
+ * 消息本体就是目标会话里的一条 user 输入（durable `submit` 持久化），目标忙就 steer
+ * 插进当前轮的下一个边界、空闲就触发一轮 —— 零新增存储（方案 §一.2；批5 起忙时从
+ * followUp 排队改为 steer 插话，`PARTNER_RELAY_STEER=false` 可回滚）。
  *
  * 防乒乓是**结构保证**，不是提示词保证（宿主确定性红线）：
  *   1. hop 恒为 1：递话触发的目标轮次里 `send_to_agent` 被 beforeTool 摘掉；
@@ -59,6 +60,23 @@ export function partnerRelayReceiptEnabled(env: NodeJS.ProcessEnv = process.env)
 	const raw = env.PARTNER_RELAY_RECEIPT?.trim().toLowerCase();
 	if (!raw) return true;
 	return raw !== "false" && raw !== "0" && raw !== "off";
+}
+
+/**
+ * 递话忙时投递方式开关（2026-11-19 批5）：执事之间递的话**一律 steer**（用户拍板
+ * "它们全是引导，排队没什么用"）。`PARTNER_RELAY_STEER=false` → 回改动前的
+ * `whenBusy:"followUp"`（排到目标本轮收尾之后），逐字节回滚。
+ * 读法照 partnerRelayReceiptEnabled：只有明确 false / 0 / off 才关，拼错值不会误关。
+ */
+export function partnerRelaySteerEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = env.PARTNER_RELAY_STEER?.trim().toLowerCase();
+	if (!raw) return true;
+	return raw !== "false" && raw !== "0" && raw !== "off";
+}
+
+/** 递话提交进目标会话时的 `whenBusy`（默认 steer；开关关 = followUp）。 */
+export function partnerRelayWhenBusy(env: NodeJS.ProcessEnv = process.env): "steer" | "followUp" {
+	return partnerRelaySteerEnabled(env) ? "steer" : "followUp";
 }
 
 /** 两态的名字就这两个：对方会话已收到（queued）/ 对方那一轮真的跑完了（settled）。 */

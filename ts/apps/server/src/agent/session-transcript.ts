@@ -26,6 +26,18 @@ import { isRelayEntryKind, relayDisplayText, relayFromOf } from "../partner-rela
 import { externalChatIds, openChat } from "./session-open.ts";
 import { chatStream } from "./session-stream.ts";
 
+/**
+ * 会话是否还在（2026-11-19 批5：后台任务唤醒的目标存在性检查）。
+ * 取得到 `conversation` 即算在；取不到（已删）→ false。**读失败不吞**：
+ * 调用方（唤醒 flush）把异常当"未知"重排，绝不把一次性读失败误判成 target_gone。
+ * 与 continueConversation 同一取会话口径，单独导出是因为恢复队列是**同步**读盘、
+ * 只能在 flush 时异步复查。
+ */
+export async function conversationExists(conversationId: number): Promise<boolean> {
+	const harness = await getHarness();
+	return (await harness.conversation(conversationId as never, CTX)) !== null;
+}
+
 export async function continueConversation(conversationId: number, text: string): Promise<void> {
 	try {
 		const harness = await getHarness();
@@ -155,6 +167,24 @@ export function relayAuthorOf(entry: EntryRecord): TranscriptAuthor | undefined 
  * 回答会被并进上一轮。打开后隐藏轮以 `hidden: true` + 空正文下发，`/messages` 端点
  * 永远不传，线上形状不变。
  */
+/**
+ * 一趟 assistant 里的思考正文（pi-ai 的块形状是 `{ type: "thinking", thinking }`）。
+ *
+ * 2026-11-19：历史回读一直只投影工具调用与正文，思考块在翻旧会话时整块消失——
+ * 现场有、回来没有，用户会以为思考被执行过程吞了。这里补成一步 `think`，
+ * 由前端渲染成和现场同一枚灰块。
+ */
+function thinkingText(blocks: unknown[]): string {
+	const parts: string[] = [];
+	for (const block of blocks) {
+		const piece = block as { type?: string; thinking?: string } | undefined;
+		if (!piece || piece.type !== "thinking" || typeof piece.thinking !== "string") continue;
+		const text = piece.thinking.trim();
+		if (text) parts.push(text);
+	}
+	return parts.join("\n");
+}
+
 export type FoldedTranscriptMessage = TranscriptMessage & { hidden?: boolean };
 
 export function foldTranscriptEntries(
@@ -253,6 +283,14 @@ export function foldTranscriptEntries(
 		// 就看不到这段——现场有、翻历史没有，会让人怀疑记录被裁过。
 		const parts = Array.isArray(message.content) ? message.content : [];
 		const calls = parts.filter((item) => item.type === "toolCall");
+		// 思考在动手之前：先落成一步「think」，回读时它排在工具块最前面。
+		const thinkText = thinkingText(parts);
+		if (thinkText) {
+			const think: TranscriptStep = { name: "think", ok: true };
+			const clipped = clampText(thinkText, STEP_OUTPUT_LIMIT);
+			if (clipped) think.output = clipped;
+			pending.push(think);
+		}
 		if (calls.length > 0) {
 			const spoken = contentText(
 				parts.filter((item) => item.type !== "toolCall"),

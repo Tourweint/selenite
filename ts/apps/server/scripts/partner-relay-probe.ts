@@ -347,7 +347,6 @@ async function startServer(extraEnv: Record<string, string>): Promise<ReturnType
 			PARTNER_HOMES_ROOT: join(phaseRoot, "partner-homes"),
 			ROUTINES_STATE_PATH: join(phaseRoot, "routines.json"),
 			AUTONOMY_STATE_PATH: join(phaseRoot, "autonomy-state.json"),
-			TOPICS_STATE_PATH: join(phaseRoot, "topics.json"),
 			CHANCELLOR_ENABLED: "false",
 			LLM_PROVIDER: "faux",
 			// 首次问候要真生成（faux 下会跑一轮模型），与本批无关且白耗一轮；关掉只建会话。

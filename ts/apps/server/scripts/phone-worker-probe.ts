@@ -155,7 +155,7 @@ interface TicketSnapshot {
   status: string;
   /** 每个 task 在 plan.json 里声明的 writes（2026-11-04 批次八：手机单必须恒空）。 */
   planWrites: string[][];
-  /** review.json 里每个 review 的 warnings（批次八：手机单要记「按汇报验收」）。 */
+  /** 2026-11-19 验收层删除：review.json 不再产生，这里保留空数组仅为快照形状稳定。 */
   reviewWarnings: string[][];
   reports: Array<{ dir: string; status: string | null; attention: unknown; raw: string }>;
   resultFiles: Array<{ path: string; text: string }>;
@@ -174,12 +174,7 @@ function snapshotTicket(id: string): TicketSnapshot {
   const planWrites = (plan.tasks ?? []).map((task) =>
     Array.isArray(task.writes) ? task.writes : [],
   );
-  const reviewFile = JSON.parse(readFileSync(join(dir, "review.json"), "utf8")) as {
-    reviews?: Array<{ warnings?: string[] }>;
-  };
-  const reviewWarnings = (reviewFile.reviews ?? []).map((review) =>
-    Array.isArray(review.warnings) ? review.warnings : [],
-  );
+  const reviewWarnings: string[][] = [];
   for (const [index, task] of (plan.tasks ?? []).entries()) {
     const taskDir = join(dir, `${String(index + 1).padStart(2, "0")}-${task.slug}`);
     let raw = "";
@@ -418,13 +413,8 @@ try {
         "手机单 plan.json writes 为空",
         JSON.stringify(snapshot.planWrites),
       );
-      check(
-        snapshot.reviewWarnings.some((warnings) =>
-          warnings.some((warning) => warning.includes("按汇报验收")),
-        ),
-        "review.json 记「按汇报验收」warning",
-        JSON.stringify(snapshot.reviewWarnings),
-      );
+      // 2026-11-19 验收层删除：不再有 review.json / 「按汇报验收」warning，
+      // 手机单的结果同样只由 REPORT.status 决定（下面直接断言整单 done）。
       check(snapshot.status === "done", "整单状态 done", snapshot.status);
       const report = snapshot.reports[0];
       check(report?.status === "ready", "REPORT 是 ready", report?.status ?? "缺失");
