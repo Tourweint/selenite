@@ -12,13 +12,14 @@
 import { guardProvider, type RegisteredInjection } from "./injection.ts";
 import {
 	clarifyContractProvider,
+	currentProjectLiveProvider,
 	currentProjectProvider,
 	personaProvider,
 	recoverNoteProvider,
 	skillSlashProvider,
 	skillsProvider,
-	topicsProvider,
 	turnLimitProvider,
+	userProfileProvider,
 	verificationIronLawProvider,
 } from "./lifecycle-injections.ts";
 import { memoryRecallProvider, projectIndexProvider, taskMemoryProvider } from "./assist.ts";
@@ -27,12 +28,14 @@ import { partnerContextInjectionProvider } from "./partner-context.ts";
 export const INJECTION_REGISTRY: readonly RegisteredInjection[] = [
 	// ── lifecycle：7 个 section + 4 处消息注入 ──────────────
 	{ source: "lifecycle", provider: personaProvider },
+	{ source: "lifecycle", provider: userProfileProvider },
 	{ source: "lifecycle", provider: verificationIronLawProvider },
 	{ source: "lifecycle", provider: clarifyContractProvider },
 	{ source: "lifecycle", provider: guardProvider },
 	{ source: "lifecycle", provider: currentProjectProvider },
 	{ source: "lifecycle", provider: skillsProvider },
-	{ source: "lifecycle", provider: topicsProvider },
+	// 2026-11-19 前缀锁定：动态一半走消息尾部（审计里能单独看到）。
+	{ source: "lifecycle", provider: currentProjectLiveProvider },
 	{ source: "lifecycle", provider: skillSlashProvider },
 	{ source: "lifecycle", provider: recoverNoteProvider },
 	{ source: "lifecycle", provider: turnLimitProvider },

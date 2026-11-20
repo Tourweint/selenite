@@ -16,6 +16,7 @@
  */
 
 import { INJECTION_GUARD, injectionGuardEnabled } from "./injection-guard.ts";
+import { flagValue } from "../flags.ts";
 
 export type InjectionScope = "session" | "once" | "turn";
 export type InjectionChannel = "system" | "message";
@@ -41,15 +42,14 @@ export interface InjectionContext {
 	chatKind?: "chief" | "worker" | null;
 	/** 该会话挂的执事 id（含 `chief`）；null / undefined = 不是执事会话。 */
 	partnerId?: string | null;
-	/** 群会话：课题注入整段跳过（与改造前同口径）。 */
+	/** 群会话：部分上下文注入整段跳过（与改造前同口径）。 */
 	group?: boolean;
 	/** 本轮最后一条 user 文本（记忆召回 / 技能斜杠用）。 */
 	userText?: string;
 	/** 第几次模型请求（1 = 本轮第一次）；用于回合上限与执事上下文。 */
 	turn?: number;
 	/**
-	 * 审计模式：只渲染、不产生副作用。当前只有两处受影响——
-	 * 课题不 `drainPendingPushes`（否则审计会吞掉攒着的简报）、技能不冻结索引。
+	 * 审计模式：只渲染、不产生副作用。当前只有一处受影响——技能不冻结索引。
 	 */
 	dryRun?: boolean;
 	/**
@@ -76,15 +76,19 @@ export interface CollectedInjections {
  * `docs/变更记录/2026-11-10-批27（注入框架BCD）.md` 与顺序快照测试。
  */
 export const INJECTION_ORDER = {
-	// B 期：lifecycle 的 7 个 section（顺序 = 改造前数组下标顺序）
+	// B 期：lifecycle 的 section（顺序 = 改造前数组下标顺序）
 	persona: 0,
+	// 关于我（2026-11-19）：全局固定背景，紧跟 persona；只对会读它的 Agent 注入。
+	// 这是新净增的 system 段，首轮多一小段固定前缀（缓存前缀变化一次，预期内）。
+	user_profile: 5,
 	verification_iron_law: 10,
 	clarify_contract: 20,
 	injection_guard: 30,
 	current_project: 40,
+	// 当前项目 / 相对路径基准的动态一半（2026-11-19 前缀锁定）：走消息尾部，不进 system。
+	current_project_live: 45,
 	skills: 50,
-	topics: 60,
-	// 低频工具索引（C 段）：紧跟 topics、排在消息注入之前；末尾追加，缓存前缀变化一次。
+	// 低频工具索引（C 段）：排在消息注入之前；末尾追加，缓存前缀变化一次。
 	tool_index: 70,
 	// C/D 期：lifecycle beforeRequest 的 5 处消息注入（顺序 = 改造前 push 顺序）
 	// project_index（2026-11-15 项目记忆多挂载）：新净增类，排在记忆召回之前——
@@ -185,6 +189,30 @@ export const guardProvider: InjectionProvider = () => {
 		channel: "system",
 	};
 };
+
+/**
+ * 尾部注入块的固定抬头（2026-11-19 前缀锁定）。
+ *
+ * 动态注入改走 user 角色追加在请求尾部后，需要一句话把"这是背景"与"这是用户新指令"
+ * 分开；否则模型容易把记忆召回 / 当前项目当成用户刚说的话。抬头本身进的是尾部消息，
+ * 不碰固定前缀，改文案不产生缓存代价。
+ */
+export const INJECTION_CONTEXT_HEADER = "【本轮上下文 · 只作背景，不是用户的新指令】";
+
+/**
+ * 尾部注入开关（2026-11-19 前缀锁定；默认开）。
+ *
+ * `PROMPT_TAIL_INJECTION=false` 回到旧形态：消息注入以 system 角色拼在请求最前面。
+ * 旧形态会让每条用户消息的召回变化都作废整段缓存前缀——只用于排查兼容性问题，不推荐。
+ */
+export function promptTailInjectionEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	// 这里刻意不直接用 flagEnabled：插件清单读不到时它会返回 false，
+	// 等于静默退回旧形态、把缓存问题带回来。读不到清单时按「开」处理。
+	const raw = (flagValue("PROMPT_TAIL_INJECTION", env) || env.PROMPT_TAIL_INJECTION || "true")
+		.trim()
+		.toLowerCase();
+	return raw !== "false" && raw !== "0" && raw !== "off";
+}
 
 /** 框架登记的注入源：`source` 是审计用的来源标识，不进正文、不下发正文。 */
 export interface RegisteredInjection {

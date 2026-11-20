@@ -2,8 +2,8 @@
  * lifecycle 的注入 provider（2026-11-10 批 27 §一/§三）。
  *
  * 这里放 lifecycle 原来自己拼的所有注入：
- *   - B 期 6 个 section（persona / verification_iron_law / clarify_contract /
- *     current_project / skills / topics）—— **channel: "system"**，物理位置仍由
+ *   - B 期 5 个 section（persona / verification_iron_law / clarify_contract /
+ *     current_project / skills）—— **channel: "system"**，物理位置仍由
  *     lifecycle `sections` 数组下标决定；
  *   - D 期 5 处 `extra.push`（记忆召回 / 技能斜杠 / 恢复注记 / 回合上限 / 执事上下文）——
  *     **channel: "message"**，装配处按收集结果依次压入，位置与改造前逐字节一致。
@@ -27,7 +27,6 @@ import {
 	resolvePersona,
 } from "../partners.ts";
 import { clarifyContractEnabled, clarifyContractFor } from "../delegation.ts";
-import { TOPICS_ENABLED, topicsStore } from "../topics.ts";
 import {
 	MAX_TURNS,
 	TURN_LIMIT_APPROACHING_INSTRUCTION,
@@ -38,8 +37,8 @@ import {
 } from "./turn-gate.ts";
 import { currentProject, sessionBoundCwd, sessionCwd } from "./shared.ts";
 import { currentProjectEnabled, projectsStore } from "../projects.ts";
-import { wrapUntrustedObjective } from "./injection-guard.ts";
 import { PERSONA, memoryRecallProvider, projectIndexProvider, skillStore } from "./assist.ts";
+import { readUserProfile, renderUserProfileSection, userProfileEnabled } from "../user-profile.ts";
 import { readWorkerPersona, WORKER_PERSONA_CHAT_TOOLS } from "../worker-persona.ts";
 import { skillSlashOf } from "../skills.ts";
 import { recordSkillUse } from "../skill-usage.ts";
@@ -58,7 +57,7 @@ function entry(
 	return { id, text, order, scope, channel };
 }
 
-/** 非 chief 的执事会话：persona / 验证铁律 / 课题都不由 lifecycle 注（他们走 partner-context）。 */
+/** 非 chief 的执事会话：persona / 验证铁律都不由 lifecycle 注（他们走 partner-context）。 */
 function isNonChiefPartner(partnerId: string | null | undefined): boolean {
 	return Boolean(partnerId && partnerId !== CHIEF_PARTNER_ID);
 }
@@ -97,6 +96,54 @@ export const personaProvider: InjectionProvider = (ctx) => {
 	return entry("persona", text, INJECTION_ORDER.persona, "system");
 };
 
+/**
+ * 关于我（2026-11-19）：全局固定背景，每轮注入，紧跟 persona。
+ *
+ * 硬边界：不进记忆、不参与召回；只对**会读它**的 Agent 注入。
+ * - 普通 worker 会话不读（`chatKind === "worker"`）；派活工人没有会话，天然不在这条链上；
+ * - 群会话不读（多人上下文不带个人档案，v1 明确跳过）；
+ * - 执事用自己的 id，主对话 / 未链接会话回落总管；该行 `userProfileRead === false` 时不注。
+ *
+ * `deps` 只给单测：生产走文件 + partners 当前值，每轮现读。
+ */
+export interface UserProfileInjectionDeps {
+	enabled?: () => boolean;
+	content?: () => string;
+	reads?: (agentId: string) => boolean;
+}
+
+export function userProfileProviderWith(
+	deps: UserProfileInjectionDeps = {},
+): InjectionProvider {
+	const enabled = deps.enabled ?? (() => userProfileEnabled());
+	const content = deps.content ?? (() => readUserProfile());
+	const reads =
+		deps.reads ??
+		((agentId: string): boolean => {
+			try {
+				const row = partnersStore().get(agentId);
+				return row ? row.userProfileRead !== false : true;
+			} catch {
+				// 档案库读失败按"读"处理：固定背景是净增能力，不能因目录故障静默丢；
+				// 真正的安全边界在内容本身（主人手写，不是外部输入）。
+				return true;
+			}
+		});
+	return (ctx) => {
+		if (ctx.group) return undefined;
+		if (ctx.chatKind === "worker") return undefined;
+		if (!enabled()) return undefined;
+		const agentId =
+			ctx.partnerId && ctx.partnerId !== CHIEF_PARTNER_ID ? ctx.partnerId : CHIEF_PARTNER_ID;
+		if (!reads(agentId)) return undefined;
+		const text = renderUserProfileSection(content());
+		if (!text) return undefined;
+		return entry("user_profile", text, INJECTION_ORDER.user_profile, "system");
+	};
+}
+
+export const userProfileProvider: InjectionProvider = userProfileProviderWith();
+
 /** 验证铁律：紧跟 persona，固定字节；非 chief 执事的同段由 partner-context 注入。 */
 export const verificationIronLawProvider: InjectionProvider = (ctx) => {
 	const partnerId = ctx.partnerId ?? null;
@@ -130,21 +177,35 @@ function samePath(a: string, b: string): boolean {
 }
 
 /**
- * 当前项目 / 主工作区：每轮现渲染，不写进对话历史。
+ * 「执事 / 例行轮」判据：非 chief 执事会话，或会话实际 cwd 就是主工作区。
+ * 两种情况下默认目录都不跟界面里的「当前项目」，因此不注 `current_project_live`。
+ */
+function isPartnerLikeSession(
+	ctx: InjectionContext,
+	bound: string | null,
+	workspacePath: string | null,
+): boolean {
+	if (isNonChiefPartner(ctx.partnerId)) return true;
+	return bound !== null && workspacePath !== null && samePath(bound, workspacePath);
+}
+
+/**
+ * 当前项目 / 主工作区的**固定部分**（2026-11-19 前缀锁定拆分）：
+ * 主工作区、本会话工作目录快照、全部已登记项目清单、同名文件纪律。
+ *
+ * 不自动变的东西才放 system：这里不再出现「当前项目 / 主文件夹 / 相对路径基准」——
+ * 那几行会随侧栏切项目而变，改由 `currentProjectLiveProvider` 每轮从**消息尾部**注入。
+ * 固定部分只在用户显式增删 / 改名项目时变，一次缓存重置是预期。
  *
  * 2026-11-16 定稿：普通对话就是 worker，**必须带项目记忆**，所以继续跟随「当前项目」；
  * 同时把**主工作区路径**写进提示（之前只说过"文件操作默认在主工作区"，路径从未出现过）。
- * 没选项目 → 落主工作区（杂事态）；已登记项目全列（项目少，名字 + 主文件夹路径）。
- *
  * 2026-11-13 项目容器口径：一个项目可以有多个文件夹，主文件夹是相对路径的唯一基准，
  * 其余文件夹一律写绝对路径；同名文件纪律一并保留。
  */
 export const currentProjectProvider: InjectionProvider = (ctx) => {
 	if (!currentProjectEnabled()) return undefined;
-	const project = currentProject();
 	// 会话创建时钉下的文件夹（快照）；换主文件夹不影响老会话，这里要说清楚"你在哪"。
 	const bound = sessionBoundCwd(ctx.conversationId);
-	const roots = project?.roots ?? [];
 	let workspacePath: string | null = null;
 	const projectLines: string[] = [];
 	try {
@@ -169,8 +230,7 @@ export const currentProjectProvider: InjectionProvider = (ctx) => {
 	// 判据是「会话实际 cwd 是不是主工作区」——执事轮跑在 task- 会话里，
 	// partnerId 解析不到（实测 fresh 轮注入走了 chief 分支，说"相对路径以主文件夹为基准"，
 	// 和它真正的 cwd 直接打架），认"谁是会话"不如认"它到底在哪"。
-	const boundIsWorkspace = bound !== null && workspacePath !== null && samePath(bound, workspacePath);
-	const partnerSession = isNonChiefPartner(ctx.partnerId) || boundIsWorkspace;
+	const partnerSession = isPartnerLikeSession(ctx, bound, workspacePath);
 	const lines: string[] = [];
 	if (partnerSession) {
 		if (workspacePath) {
@@ -195,29 +255,8 @@ export const currentProjectProvider: InjectionProvider = (ctx) => {
 	if (workspacePath) {
 		lines.push(`主工作区：${basename(workspacePath) || "工作区"}（${workspacePath}）`);
 	}
-	lines.push(
-		project
-			? `当前项目：${project.name}（${roots.length || 1} 个文件夹）`
-			: "当前无特定项目（杂事模式）。文件操作默认在主工作区。",
-	);
-	if (project) {
-		lines.push(`主文件夹：${project.rootPath}`);
-		if (bound && bound !== project.rootPath) {
-			lines.push(
-				`本会话的工作目录：${bound}（创建时的快照；主文件夹后来改过也不影响本会话）`,
-			);
-		}
-		lines.push(
-			...roots.map(
-				(root) => `- ${root.label}${root.role === "primary" ? "（主）" : ""}：${root.path}`,
-			),
-		);
-		lines.push("相对路径以主文件夹为基准；要动别的文件夹，写它的绝对路径。");
-	} else if (bound) {
+	if (bound) {
 		lines.push(`本会话的工作目录：${bound}（创建时的快照）`);
-		lines.push("相对路径以本会话的工作目录为基准。");
-	} else if (workspacePath) {
-		lines.push("相对路径以主工作区为基准。");
 	}
 	if (projectLines.length > 0) {
 		lines.push("已登记项目（需要时用绝对路径）：", ...projectLines);
@@ -225,7 +264,47 @@ export const currentProjectProvider: InjectionProvider = (ctx) => {
 			"多个文件夹里可能有同名文件（README.md / build.gradle 之类）：动手前先看路径，别把同名文件当成同一个。",
 		);
 	}
+	// 什么都没有（没工作区、没绑定、没项目）：整段省略，别造空段；
+	// 「当前无特定项目」由尾部动态行负责。
+	if (lines.length === 0) return undefined;
 	return entry("current_project", lines.join("\n"), INJECTION_ORDER.current_project, "system");
+};
+
+/**
+ * 当前项目 / 相对路径基准：**每轮现算，走消息尾部**（2026-11-19 前缀锁定）。
+ *
+ * 为什么不在 system：侧栏一切项目这一行就变；留在 system 会让整段固定前缀作废。
+ * 为什么每轮都发：注入不写进对话历史，工具回合的模型请求也必须看得见。
+ * 执事 / 例行轮不注（它们的默认目录钉在主工作区，见上）。
+ */
+export const currentProjectLiveProvider: InjectionProvider = (ctx) => {
+	if (!currentProjectEnabled()) return undefined;
+	const bound = sessionBoundCwd(ctx.conversationId);
+	let workspacePath: string | null = null;
+	try {
+		workspacePath = projectsStore().getWorkspace()?.rootPath ?? null;
+	} catch {
+		// 项目库坏了：这一轮少一段动态行，固定段仍会说明主工作区
+	}
+	if (isPartnerLikeSession(ctx, bound, workspacePath)) return undefined;
+	const project = currentProject();
+	const lines: string[] = [];
+	if (project) {
+		lines.push(`当前项目：${project.name}（${project.roots.length || 1} 个文件夹）`);
+		lines.push(`主文件夹：${project.rootPath}`);
+		lines.push("相对路径以主文件夹为基准；要动别的文件夹，写它的绝对路径。");
+	} else {
+		lines.push("当前无特定项目（杂事模式）。文件操作默认在主工作区。");
+		if (bound) lines.push("相对路径以本会话的工作目录为基准。");
+		else if (workspacePath) lines.push("相对路径以主工作区为基准。");
+	}
+	return entry(
+		"current_project_live",
+		lines.join("\n"),
+		INJECTION_ORDER.current_project_live,
+		"message",
+		"turn",
+	);
 };
 
 /**
@@ -237,46 +316,6 @@ export const skillsProvider: InjectionProvider = (ctx) => {
 	const text = skillStore?.indexFor(Number(ctx.conversationId), skillPartnerOf(ctx));
 	if (!text) return undefined;
 	return entry("skills", text, INJECTION_ORDER.skills, "system");
-};
-
-/**
- * 课题（清单 + 嗅探判据 + 攒着的简报）：**每轮现渲染**。
- * 渲染即把 pendingPush 取走并标记已推送——审计（dryRun）跳过这一步，否则会吞掉简报。
- */
-export const topicsProvider: InjectionProvider = (ctx) => {
-	if (!TOPICS_ENABLED) return undefined;
-	if (ctx.group) return undefined;
-	if (isNonChiefPartner(ctx.partnerId)) return undefined;
-	if (ctx.chatKind === "worker") return undefined;
-
-	const store = topicsStore();
-	const pushes = ctx.dryRun ? [] : store.drainPendingPushes();
-	const digest = store.digestForInjection();
-	const lines: string[] = [];
-	if (digest) {
-		lines.push("在跟的课题：", digest);
-	} else {
-		lines.push("在跟的课题：（暂无）");
-	}
-	if (pushes.length > 0) {
-		// 只记条数，不记课题内容（日志纪律）
-		console.log(`[topics] 简报注入 ${pushes.length} 条`);
-		lines.push(
-			"",
-			"课题简报（攒着的，随本轮自然汇报给用户，别复述全文）：",
-			...pushes.map((topic) => {
-				const latest = topic.findings[0];
-				// 课题问题是用户可控文本：注入时标成不可信目标（§3.4）
-				return `- ${wrapUntrustedObjective(topic.question)}：${latest?.summary ?? "有新发现"}`;
-			}),
-		);
-	}
-	lines.push(
-		"",
-		"课题嗅探（从严，宁缺毋滥）：开放性问题 + 今天给不了定论 + 值得隔几天回头看 + 用户显出兴趣，四条都满足才用 propose_topic 提交提议；",
-		"同一话题单会话最多提一次；只提交提议、永不自动建课题（用户确认后才建）。",
-	);
-	return entry("topics", lines.join("\n"), INJECTION_ORDER.topics, "system");
 };
 
 /**
@@ -297,7 +336,6 @@ export const LIFECYCLE_SECTION_PROVIDERS: readonly InjectionProvider[] = [
 	clarifyContractProvider,
 	currentProjectProvider,
 	skillsProvider,
-	topicsProvider,
 	toolIndexProvider,
 ];
 
@@ -385,8 +423,15 @@ export const partnerContextProvider: InjectionProvider = (ctx) => {
 	}
 };
 
-/** D 期登记表（顺序 = 改造前 extra.push 的先后顺序）。 */
+/**
+ * 消息注入登记表（顺序 = 排序常量；2026-11-19 起实际发送位置改为**请求尾部**）。
+ *
+ * 2026-11-19 前缀锁定：这里的条目不再以 system 角色拼到请求最前面，而是合成一条
+ * user 角色消息追加到 `request.messages` 尾部——见 `lifecycle-harness.ts` 的 beforeRequest。
+ * 原因：OpenAI 兼容层会把任何位置的 system 折叠进第一条 system，等于改固定前缀。
+ */
 export const LIFECYCLE_MESSAGE_PROVIDERS: readonly InjectionProvider[] = [
+	currentProjectLiveProvider,
 	projectIndexProvider,
 	memoryRecallProvider,
 	skillSlashProvider,

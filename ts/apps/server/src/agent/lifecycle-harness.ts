@@ -20,7 +20,7 @@ import type { GateBlockCategory } from "../gate-audit.ts";
 import { auditGateBlock } from "../gate-audit.ts";
 import { loopGuardEnabled, loopGuardFor, resetLoopGuard } from "../loop-guard.ts";
 import type { RelayDeliverResult, RelaySenderContext } from "../partner-relay.ts";
-import { RELAY_AUTONOMY_BLOCK_MESSAGE, RELAY_CALLER_BLOCK_MESSAGE, RELAY_CHIEF_BLOCK_MESSAGE, RELAY_GROUP_BLOCK_MESSAGE, RELAY_HOP_BLOCK_MESSAGE, RELAY_TOOL_NAME, beginRelayRun, claimRelayTarget, clearRelayTarget, currentRelayRunKey, emitRelayReceipt, isRelayRun, markRelayRun, markRelayTarget, partnerRelayEnabled, partnerRelayReceiptEnabled, relayEntryOf, relayOutcomeEntry, relaySettledText } from "../partner-relay.ts";
+import { RELAY_AUTONOMY_BLOCK_MESSAGE, RELAY_CALLER_BLOCK_MESSAGE, RELAY_CHIEF_BLOCK_MESSAGE, RELAY_GROUP_BLOCK_MESSAGE, RELAY_HOP_BLOCK_MESSAGE, RELAY_TOOL_NAME, beginRelayRun, claimRelayTarget, clearRelayTarget, currentRelayRunKey, emitRelayReceipt, isRelayRun, markRelayRun, markRelayTarget, partnerRelayEnabled, partnerRelayReceiptEnabled, partnerRelayWhenBusy, relayEntryOf, relayOutcomeEntry, relaySettledText } from "../partner-relay.ts";
 import { CHIEF_PARTNER_ID, COMPANIONS_ENABLED, partnersStore } from "../partners.ts";
 import { ensurePartnerSession } from "../partner-runtime.ts";
 import { pathGuardBlockReason } from "../path-guard.ts";
@@ -50,8 +50,6 @@ import { recordToolUse } from "../tool-usage.ts";
 import { recordTimelineEvent } from "../turn-timeline.ts";
 import { disabledToolsOfConversation } from "../tool-visibility.ts";
 import { createTools } from "../tools.ts";
-import { TopicTask } from "../topic-runtime.ts";
-import { TOPICS_ENABLED, topicsStore } from "../topics.ts";
 import { UNATTENDED_SKIP_MESSAGE, isUnattended, noteTurnToolError, noteUnattendedSkip, resolveUnattendedVerdict, unattendedDenyReason, unattendedPolicyEnabled } from "../unattended.ts";
 import { WORLD_STATE_TOOLS, confirmWorldStateEnabled, verifyWorldState, worldStateTarget } from "../world-state.ts";
 import { approvalArgsHash } from "./approval-key.ts";
@@ -59,12 +57,17 @@ import { CHANCELLOR_ENABLED, memoryEngine, scopeOf, skillStore } from "./assist.
 import { executorLine } from "../executor-config.ts";
 import { setChatKindsSource, setProjectBindingsSource, setProjectLabelResolver, setProjectStateResolver } from "./project-scope.ts";
 import { guardRelayDelivery } from "./injection-guard.ts";
-import { collectInjections, guardProvider } from "./injection.ts";
-import { LIFECYCLE_MESSAGE_PROVIDERS, clarifyContractProvider, currentProjectProvider, personaProvider, skillsProvider, toolIndexProvider, topicsProvider, verificationIronLawProvider } from "./lifecycle-injections.ts";
+import {
+	INJECTION_CONTEXT_HEADER,
+	collectInjections,
+	guardProvider,
+	promptTailInjectionEnabled,
+} from "./injection.ts";
+import { LIFECYCLE_MESSAGE_PROVIDERS, clarifyContractProvider, currentProjectProvider, personaProvider, skillsProvider, toolIndexProvider, userProfileProvider, verificationIronLawProvider } from "./lifecycle-injections.ts";
 import { BASH_TIMEOUT_S, approvalMode, policy, readOnlyBlockReason } from "./policy.ts";
 import { markRecoverResume } from "./recover-note.ts";
 import { recallSessionsEnabled, searchSessions } from "./session-search.ts";
-import { CTX, ChatKinds, ChatProjects, Chats, DB_PATH, emitPhase, emitTool, noteSessionCwd, sessionCwd, toolArgs, toolDiff, toolLabel, toolOutput } from "./shared.ts";
+import { CTX, ChatKinds, ChatProjects, Chats, DB_PATH, emitPhase, emitTool, noteSessionCwd, sessionCwd, sessionFilesOf, toolArgs, toolDiff, toolLabel, toolOutput } from "./shared.ts";
 import { APPROVAL_WAITING_MESSAGE, HARD_STOP_GRACE, LOOP_GUARD_BLOCK_MESSAGE, MAX_TURNS, aborting, limitHits, runTurns, toolsBlocked, waitForApproval } from "./turn-gate.ts";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { contentText } from "@earendil-works/pi-ai";
@@ -148,8 +151,6 @@ let opened: Harness | null = null;
 let closing: Promise<void> | null = null;
 
 export let lifediaryExt: Extension | null = null;
-
-export let researchExt: Extension | null = null;
 
 function discardHarness(dead: Harness, reason: string): void {
 	if (opened !== dead) return; // 别人已经换过了
@@ -324,7 +325,11 @@ async function deliverPartnerRelay(
 				{
 					type: "input",
 					content: guardedBody,
-					whenBusy: "followUp",
+					// 批5（2026-11-19）：递话一律 steer（默认），忙时插进目标当前轮的下一边界；
+					// `PARTNER_RELAY_STEER=false` 回改动前的 followUp 排队。
+					// 防乒乓不受影响：markRelayTarget 先于 submit，steer 落盘后的下一次
+					// beforeRequest 认领标记，工具在模型看到递话正文之前就被摘掉。
+					whenBusy: partnerRelayWhenBusy(),
 					...(entry ? { entry } : {}),
 				},
 				CTX,
@@ -439,6 +444,21 @@ export const LIFECYCLE_SECTIONS: readonly PromptSection[] = [
 			}).system[0]?.text;
 		},
 	},
+	// 关于我（2026-11-19）：全局固定背景，紧跟 persona；worker / 群会话由 provider 自己跳过。
+	// 正文每轮现读（文件），改完下一轮生效；每 Agent 开关在 partners.user_profile_read。
+	{
+		key: "user_profile",
+		render: async (input) => {
+			const conversationId = Number(input.conversationId);
+			const chatKind = await chatKindOfSection(input);
+			return collectInjections([userProfileProvider], {
+				conversationId,
+				partnerId: partnerOfSession(conversationId),
+				chatKind,
+				group: groupOfSession(conversationId),
+			}).system[0]?.text;
+		},
+	},
 	// 验证铁律（2026-11-10 批 12 §一.1）：紧跟 persona，固定字节。
 	{
 		key: "verification_iron_law",
@@ -490,20 +510,6 @@ export const LIFECYCLE_SECTIONS: readonly PromptSection[] = [
 			collectInjections([skillsProvider], { conversationId: input.conversationId })
 				.system[0]?.text,
 	},
-	// 课题（2026-11-07 §六）：每轮现渲染 + drainPendingPushes；只给总管主对话。
-	{
-		key: "topics",
-		render: async (input) => {
-			const conversationId = Number(input.conversationId);
-			const chatKind = await chatKindOfSection(input);
-			return collectInjections([topicsProvider], {
-				conversationId,
-				partnerId: partnerOfSession(conversationId),
-				group: groupOfSession(conversationId),
-				chatKind,
-			}).system[0]?.text;
-		},
-	},
 	// 低频工具索引（2026-11-16 C 段）：末尾追加，打掉一次缓存是预期；列的是"这一轮还能加载"的
 	// deferred（agent.deferred 已排除已加载的），所以 tool_search 加载后本段自然变短。
 	// 人设页取消勾选的也要剔掉：内核的 deferred 是「延迟 − 已 offer」，被 remove 的延迟工具
@@ -551,8 +557,6 @@ async function openHarness(): Promise<Harness> {
 		// 任务专线双写（2026-11-08 扫尾批 8g）：进度 / REPORT / out 留言同步一份
 		// 进 `task-<票号>` 会话。开关在 task-conversation 内部（TASK_AS_CONVERSATION）。
 		mirrorDelegation: taskConversationMirror,
-		// 课题（2026-11-07）：createTools 内按 TOPICS_ENABLED / 依赖缺失决定注不注册。
-		topics: topicsStore(),
 		search: searchModule,
 		// 执事间递话（2026-11-08 扫尾批 8d）：执事能力 + 通道开关**双闸**，
 		// 关任一个 → `send_to_agent` 不上架（模型侧 tool_unavailable = 本批的回滚形态）。
@@ -816,6 +820,8 @@ async function openHarness(): Promise<Harness> {
 							args: call.arguments,
 							workspaceRoots: workspaceRootsReal(),
 							cwd: sessionCwd(api.conversationId),
+							access: policy.access,
+							allowedFiles: sessionFilesOf(api.conversationId),
 						});
 						if (pathBlock) return blocked(pathBlock, "path", "path-guard");
 						// 防打转守卫（2026-11-05 批次A A1）：放在闸门之后——被拦的调用没执行，
@@ -907,6 +913,8 @@ async function openHarness(): Promise<Harness> {
 									args: call.arguments,
 									workspaceRoots: workspaceRootsReal(),
 									cwd: sessionCwd(api.conversationId),
+									access: policy.access,
+									allowedFiles: sessionFilesOf(api.conversationId),
 								});
 								if (recheckPath) return blocked(recheckPath, "path", "path-guard-recheck");
 								// 世界状态重验（批 19 §七）：批准后目标文件被改过 → 拒绝执行，让模型重新确认。
@@ -957,6 +965,8 @@ async function openHarness(): Promise<Harness> {
 									args: call.arguments,
 									workspaceRoots: workspaceRootsReal(),
 									cwd: sessionCwd(api.conversationId),
+									access: policy.access,
+									allowedFiles: sessionFilesOf(api.conversationId),
 								});
 								if (recheckPath) return blocked(recheckPath, "path", "path-guard-recheck");
 							} else {
@@ -1138,14 +1148,22 @@ async function openHarness(): Promise<Harness> {
 							resetLoopGuard(api.conversationId);
 						}
 
-						// 5 处消息注入（2026-11-10 批 27 §三）：记忆召回 / 技能斜杠 / 恢复注记 /
-						// 回合上限 / 执事轮上下文。框架负责排序与去重，装配处按收集结果**依次压入**，
-						// 位置与改造前一致（仍是本轮模型请求最前面的几条 system 消息）。
-						// 执事轮输入只在本轮第一次请求时算（used===1），provider 内照旧判定。
+						// 消息注入（2026-11-10 批 27 §三；2026-11-19 前缀锁定改造）：
+						// 记忆召回 / 技能斜杠 / 恢复注记 / 回合上限 / 执事上下文 / 当前项目的动态一半。
+						// 框架负责排序与去重；实际发送改成**一条 user 消息追加在请求尾部**——
+						// system 角色会被 OpenAI 兼容层折叠进第一条 system，等于改固定前缀、整段缓存作废。
+						// 尾部追加还能保住本轮已产生的 assistant / tool 历史缓存。
+						const kinds = await api.snapshot(ChatKinds, ctx).catch(() => null);
 						const collected = collectInjections(LIFECYCLE_MESSAGE_PROVIDERS, {
 							conversationId: api.conversationId,
 							turn: used,
 							userText,
+							partnerId: partnerOfSession(api.conversationId),
+							chatKind:
+								kinds?.byInternal?.[String(api.conversationId)] === "worker"
+									? "worker"
+									: "chief",
+							group: groupOfSession(api.conversationId),
 						});
 						// 设置 → 上下文只读这份"首轮实文"：记忆召回会回写使用计数，
 						// 读端点不能为了预览重跑，只能记真正发出去的那一轮。
@@ -1155,30 +1173,41 @@ async function openHarness(): Promise<Harness> {
 								collected.message.map((item) => ({ id: item.id, text: item.text })),
 							);
 						}
-						const extra = collected.message.map((item) => ({
-							role: "system" as const,
-							content: item.text,
-							timestamp: Date.now(),
-						}));
-
-						if (extra.length === 0) return undefined;
-						return { messages: [...extra, ...request.messages] };
+						if (collected.message.length === 0) return undefined;
+						// 回滚形态（PROMPT_TAIL_INJECTION=false）：旧行为——system 拼在请求最前面。
+						// 会整段作废前缀缓存；只留给兼容性排查，默认走尾部 user。
+						if (!promptTailInjectionEnabled()) {
+							return {
+								messages: [
+									...collected.message.map((item) => ({
+										role: "system" as const,
+										content: item.text,
+										timestamp: Date.now(),
+									})),
+									...request.messages,
+								],
+							};
+						}
+						const injected = [
+							INJECTION_CONTEXT_HEADER,
+							collected.message.map((item) => item.text).join("\n\n"),
+						].join("\n");
+						return {
+							messages: [
+								...request.messages,
+								{
+									role: "user" as const,
+									content: injected,
+									timestamp: Date.now(),
+								},
+							],
+						};
 					},
 				}),
 			],
-			tasks: [ReminderTask, RoutineTask, TopicTask],
+			tasks: [ReminderTask, RoutineTask],
 		})),
 	);
-
-	// 课题研究专线的最小扩展：摘掉 lifediaryExt（人格 / 技能 / 课题 section 全不要）后，
-	// 仍然要能拿到 web_search。TOPICS_ENABLED=false 时整块不装（一行回滚）。
-	if (TOPICS_ENABLED) {
-		researchExt = defineExtension({
-			name: "lifediary-research",
-			tools: lifediaryTools.filter((tool) => tool.name === "web_search"),
-		});
-		registry.install(researchExt);
-	}
 
 	// 可靠性旋钮（2026-11-04 批次一 A4）：stream / afterFailedRun 不设就不传。
 	// 2026-11-14：settings 从**快照**改成**访问器**——压缩设置改完要下一轮就生效，

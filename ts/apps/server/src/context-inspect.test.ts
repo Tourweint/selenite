@@ -117,7 +117,7 @@ test("执事纪律拆节：每节独立命名并可编辑；主人数据红线�
 	assert.equal(ownerData?.editable, undefined, "红线不标可编辑");
 });
 
-test("执事身份拆节：说话方式单独命名；SOUL / 边界等七节各自成行", () => {
+test("执事身份拆节：说话方式单独命名；SOUL / 边界等六节各自成行", () => {
 	const out = contextInspectViewOf(
 		viewOf([
 			{
@@ -128,7 +128,6 @@ test("执事身份拆节：说话方式单独命名；SOUL / 边界等七节各�
 					partner_voice: "",
 					partner_values: "",
 					partner_scenario: "",
-					partner_owner_profile: "主人画像",
 					partner_skill_index: "",
 					partner_boundary: "运行边界",
 				},
@@ -143,7 +142,6 @@ test("执事身份拆节：说话方式单独命名；SOUL / 边界等七节各�
 			["partner_voice", "执事人设 · 说话方式（口吻）"],
 			["partner_values", "执事人设 · 里子"],
 			["partner_scenario", "执事人设 · 处境"],
-			["partner_owner_profile", "执事身份 · 主人画像"],
 			["partner_skill_index", "执事身份 · 技能索引"],
 			["partner_boundary", "执事身份 · 运行边界"],
 		],
@@ -321,6 +319,7 @@ test("响应：记忆只取 memory_recall，其它注入列 id 与字数；无�
 	assert.deepEqual(recalled.memory.last?.others, [
 		{
 			id: "project_index",
+			label: "负责项目",
 			chars: "项目索引".length,
 			tokens: estimateTokens("项目索引"),
 			text: "项目索引",

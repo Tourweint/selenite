@@ -122,7 +122,7 @@ export interface ContextInspectPayload extends ContextInspectView {
 			chars: number;
 			tokens: number;
 			text: string;
-			others: { id: string; chars: number; tokens: number; text: string; truncated?: boolean }[];
+			others: { id: string; label: string; chars: number; tokens: number; text: string; truncated?: boolean }[];
 		} | null;
 	};
 	updatedAt: number;
@@ -134,15 +134,16 @@ const SECTION_META: Record<
 	{ label: string; stability: ContextSectionStability; editable?: boolean }
 > = {
 	persona: { label: "人设", stability: "fixed", editable: true },
+	// 关于我（2026-11-19）：全局固定背景，编辑入口在设置 → 关于我。
+	user_profile: { label: "关于我", stability: "fixed", editable: true },
 	verification_iron_law: { label: "验证铁律", stability: "fixed" },
 	clarify_contract: { label: "开工前问清", stability: "fixed" },
 	injection_guard: { label: "注入防线", stability: "fixed" },
-	current_project: { label: "当前项目", stability: "turn", editable: true },
+	current_project: { label: "当前项目（固定部分）", stability: "session", editable: true },
 	// 2026-11-17：此前这三个 key 没有中文名，页面直接显示英文裸 key。
 	delegate_executor: { label: "派活执行器", stability: "fixed" },
 	tool_index: { label: "低频工具索引", stability: "fixed" },
 	instructions: { label: "执事说明", stability: "fixed" },
-	topics: { label: "课题", stability: "turn", editable: true },
 	// 默认开销里的执事：身份是 instructions，岗位契约/纪律是 extra system message；
 	// 这里各给一个可读的名字，避免页面上出现裸 key。
 	partner_identity: { label: "执事身份", stability: "fixed" },
@@ -150,7 +151,8 @@ const SECTION_META: Record<
 	partner_voice: { label: "执事人设 · 说话方式（口吻）", stability: "fixed" },
 	partner_values: { label: "执事人设 · 里子", stability: "fixed" },
 	partner_scenario: { label: "执事人设 · 处境", stability: "fixed" },
-	partner_owner_profile: { label: "执事身份 · 主人画像", stability: "fixed" },
+	// `partner_owner_profile`（主人画像）2026-11-19 随「关于我」上线退役，映射一并删除：
+	// 不再有任何来源产出这个 key，留着只会是一行永远不命中的死条目。
 	partner_skill_index: { label: "执事身份 · 技能索引", stability: "fixed" },
 	partner_boundary: { label: "执事身份 · 运行边界", stability: "fixed" },
 	partner_context: { label: "执事上下文", stability: "fixed" },
@@ -181,6 +183,21 @@ const SECTION_META: Record<
 };
 
 const SKILL_SECTION_KEYS = new Set(["skills", "skill"]);
+
+/**
+ * 临时注入的显示名（2026-11-19 前缀锁定后这些都在消息尾部）。
+ * 没登记的新 id 仍原样显示，页面不至于把它藏掉。
+ */
+const MESSAGE_INJECTION_LABELS: Record<string, string> = {
+	memory_recall: "记忆召回",
+	project_index: "负责项目",
+	current_project_live: "当前项目（本轮）",
+	skill_slash: "技能调用",
+	recover_note: "恢复注记",
+	turn_limit: "回合上限",
+	turn_limit_approaching: "回合上限提醒",
+	partner_context: "执事上下文",
+};
 
 /** 每个会话只留最近一轮；超过这个数按 LRU 丢最旧的。 */
 const MAX_TRACKED_CONVERSATIONS = 64;
@@ -227,8 +244,12 @@ function countString(text: string): number {
 	return text.length;
 }
 
-function sectionView(key: string, text: string): ContextSectionView {
-	const meta = SECTION_META[key];
+/** section key 的显示名（请求详情 / 对比也用这一份，避免两处中文名漂移）。 */
+export function contextSectionLabel(key: string): string {
+	return SECTION_META[key]?.label ?? key;
+}
+
+function sectionView(key: string, text: string): ContextSectionView {	const meta = SECTION_META[key];
 	return {
 		key,
 		label: meta?.label ?? key,
@@ -396,13 +417,14 @@ export function contextInspectPayloadOf(input: {
 		.filter((item) => item.id !== "memory_recall")
 		.map((item) => {
 			const clipped = clipEntryText(item.text || "");
-			return {
-				id: item.id,
-				chars: countString(item.text || ""),
-				tokens: estimateTokens(item.text || ""),
-				text: clipped.text,
-				...(clipped.truncated ? { truncated: true } : {}),
-			};
+				return {
+					id: item.id,
+					label: MESSAGE_INJECTION_LABELS[item.id] ?? item.id,
+					chars: countString(item.text || ""),
+					tokens: estimateTokens(item.text || ""),
+					text: clipped.text,
+					...(clipped.truncated ? { truncated: true } : {}),
+				};
 		});
 
 	return {

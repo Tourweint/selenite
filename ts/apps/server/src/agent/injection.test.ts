@@ -4,7 +4,7 @@
  * 钉住：条目形状 / 排序稳定 / 同 id 去重（后者覆盖）/ 按 channel 分流 / 审计只回元数据；
  * 外加**硬标准**——每一处接管后内容与位置与改造前逐字节一致。
  *
- * 测试自己造临时目录（PARTNERS / TOPICS / PROJECTS / 技能 / 技能启停位），
+ * 测试自己造临时目录（PARTNERS / PROJECTS / 技能 / 技能启停位），
  * 不碰真实 `.data/`（AGENTS 的测试纪律）；env 必须在 import 之前设好——
  * assist.ts 的 memoryEngine / skillStore 是模块级单例。
  */
@@ -18,7 +18,6 @@ import type { InjectionContext, InjectionProvider } from "./injection.ts";
 const root = mkdtempSync(join(tmpdir(), "lifediary-injection-"));
 process.env.PARTNERS_DB_PATH = join(root, "partners.sqlite");
 process.env.PARTNER_HOMES_ROOT = join(root, "homes");
-process.env.TOPICS_STATE_PATH = join(root, "topics.json");
 process.env.PROJECTS_DB_PATH = join(root, "projects.sqlite");
 process.env.MEMORY_ENABLED = "false";
 process.env.AGENT_SKILLS_DIR = join(root, "skills");
@@ -51,13 +50,13 @@ const {
 const { INJECTION_REGISTRY } = await import("./injection-registry.ts");
 const {
 	clarifyContractProvider,
+	currentProjectLiveProvider,
 	currentProjectProvider,
 	personaProvider,
 	recoverNoteProvider,
 	skillSlashProvider,
 	skillsProvider,
 	toolIndexProvider,
-	topicsProvider,
 	turnLimitApproachingProvider,
 	turnLimitProvider,
 	verificationIronLawProvider,
@@ -72,7 +71,7 @@ const { CLARIFY_CONTRACT } = await import("../delegation.ts");
 const { markRecoverResume } = await import("./recover-note.ts");
 
 after(() => {
-	// 单例 PartnersStore / topicsStore 还握着句柄：Windows 上删不掉是正常的，忽略即可
+	// 单例 PartnersStore 还握着句柄：Windows 上删不掉是正常的，忽略即可
 	try {
 		rmSync(root, { recursive: true, force: true });
 	} catch {
@@ -181,11 +180,14 @@ test("B: clarify_contract —— 总管注、worker / 普通执事不注；开�
 	}
 });
 
-test("B: current_project —— 无项目时为固定句（与改造前逐字节一致）", () => {
-	assert.equal(
-		sysText(currentProjectProvider),
-		"当前无特定项目（杂事模式）。文件操作默认在主工作区。",
-	);
+test("B: current_project —— 固定部分与动态部分分家（2026-11-19 前缀锁定）", () => {
+	// 测试环境没有工作区 / 项目 / 会话快照：固定段整段省略，不造空段。
+	assert.equal(currentProjectProvider(BASE), undefined);
+	// 动态的「当前项目 / 相对路径基准」走消息尾部，每轮现算。
+	const live = collect(currentProjectLiveProvider, BASE).message[0];
+	assert.equal(live?.channel, "message");
+	assert.equal(live?.scope, "turn");
+	assert.equal(live?.text, "当前无特定项目（杂事模式）。文件操作默认在主工作区。");
 });
 
 test("B: skills —— live 走 indexFor（按会话冻结的同一份），dryRun 不冻结", () => {
@@ -206,15 +208,6 @@ test("B: SKILL_STATE=false 逃生门 —— 默认关着的技能也全进索引
 		if (old === undefined) delete process.env.SKILL_STATE;
 		else process.env.SKILL_STATE = old;
 	}
-});
-
-test("B: topics —— 无课题时为固定两段（清单 + 嗅探判据）", () => {
-	const text = sysText(topicsProvider, { chatKind: "chief", partnerId: null });
-	assert.match(text ?? "", /^在跟的课题：（暂无）$/m);
-	assert.ok((text ?? "").includes("\n\n课题嗅探（从严，宁缺毋滥）"), "清单与判据之间空一行");
-	assert.equal(topicsProvider({ ...BASE, group: true, chatKind: "chief" }), undefined);
-	assert.equal(topicsProvider({ ...BASE, partnerId: "p-1", chatKind: "chief" }), undefined);
-	assert.equal(topicsProvider({ ...BASE, chatKind: "worker" }), undefined);
 });
 
 test("B: tool_index —— 无可加载 deferred 整段省略；开关关也省略；有列表含名字与提示", () => {
@@ -247,6 +240,8 @@ test("B: section 顺序快照（位置 = 数组下标，改序打掉提示词缓
 		LIFECYCLE_SECTIONS.map((section) => section.key),
 		[
 			"persona",
+			// 2026-11-19：关于我（全局固定背景，紧跟 persona；worker / 群会话由 provider 跳过）。
+			"user_profile",
 			"verification_iron_law",
 			"clarify_contract",
 			"injection_guard",
@@ -254,7 +249,6 @@ test("B: section 顺序快照（位置 = 数组下标，改序打掉提示词缓
 			// 2026-11-16：派活执行器知情段（新单派给谁 / 模型 / 权限）。
 			"delegate_executor",
 			"skills",
-			"topics",
 			"tool_index",
 		],
 	);
@@ -278,7 +272,6 @@ test("B: section render 产出与 provider 逐字节一致（框架确实在驱�
 		sysText(currentProjectProvider, fakeInput as never),
 	);
 	assert.match((await render("skills")) ?? "", new RegExp(SKILL_NAME));
-	assert.match((await render("topics")) ?? "", /课题嗅探/);
 });
 
 // ── 硬标准：C/D 期消息注入 ─────────────────────────────
@@ -339,13 +332,16 @@ test("顺序快照：INJECTION_ORDER 是缓存前缀资产（改它 = 有意的�
 		.map(([key]) => key);
 	assert.deepEqual(ordered, [
 		"persona",
+		// 2026-11-19：关于我（order 5，紧跟 persona；新增 system 段 = 有意的契约变更）
+		"user_profile",
 		"verification_iron_law",
 		"clarify_contract",
 		"injection_guard",
 		"current_project",
+		// 2026-11-19 前缀锁定：当前项目的动态一半（走消息尾部）
+		"current_project_live",
 		"skills",
-		"topics",
-		// 2026-11-16 C 段：低频工具索引紧跟 topics、排在消息注入之前
+		// 2026-11-16 C 段：低频工具索引排在消息注入之前
 		"tool_index",
 		// 2026-11-15 项目记忆多挂载：负责项目索引排在记忆召回之前
 		// （先知道"负责哪几摊"，后面那批记忆行才有归属可对）

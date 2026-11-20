@@ -24,6 +24,44 @@ const STABILITY = {
 };
 const ENTRY_TAG = { toolCall: "调用", toolResult: "结果" };
 
+/**
+ * 请求行的骤降结论（2026-11-19）：
+ * 0% 命中大家都知道可能是缓存过期——真正要抓的是「命中率从 90% 掉到个位数，而且
+ * system 前缀同时变了」。这里把服务端算好的 flag 映射成一个点 + 悬停说明。
+ */
+const REQUEST_FLAG = {
+	prefix_change_drop: {
+		mark: "!",
+		cls: "is-alarm",
+		title: "命中率骤降且 system 前缀同时变了——重点看这条",
+	},
+	prefix_change: {
+		mark: "↑",
+		cls: "is-warn",
+		title: "system 前缀相对上一条变了（这次没骤降，可能缓存已经过期过）",
+	},
+	tools_change_drop: {
+		mark: "!",
+		cls: "is-warn",
+		title: "命中率骤降且工具面变了（tool_search 加载/移除过工具）",
+	},
+	tools_change: {
+		mark: "T",
+		cls: "is-warn",
+		title: "工具面相对上一条变了（加载/移除了工具）",
+	},
+	drop_unchanged: {
+		mark: "·",
+		cls: "is-dim",
+		title: "命中率骤降，但 system 与工具面都没变（大概率缓存过期/上游）",
+	},
+	compacted: {
+		mark: "C",
+		cls: "is-dim",
+		title: "上下文压缩/重置后的第一条，前缀必然重写",
+	},
+};
+
 /** 棋盘：32 列 × 12 行 = 384 格，每格 ≈0.26% 的请求。 */
 const WAFFLE_COLS = 32;
 const WAFFLE_ROWS = 12;
@@ -256,11 +294,37 @@ function heroMarkup() {
 }
 
 /**
+ * 「请求与缓存」卡骨架（2026-11-19）。
+ * 默认开销模式不显示；当前会话模式由 loadRequests 拉数据后再展开。
+ */
+function cacheMarkup() {
+	return `<div class="card ctx-cache" id="ctx-cache" hidden>
+    <div class="ctx-cache-head">
+      <div class="ctx-cache-copy">
+        <b>请求与缓存</b>
+        <span class="ctx-cache-sub" id="ctx-cache-sub">读取中…</span>
+      </div>
+      <div class="ctx-cache-rate"><b id="ctx-cache-rate">—</b><span>命中率</span></div>
+    </div>
+    <div class="ctx-cache-summary" id="ctx-cache-summary"></div>
+    <div class="ctx-cache-alarm" id="ctx-cache-alarm" hidden></div>
+    <div class="ctx-cache-list" id="ctx-cache-list"></div>
+    <div class="ctx-cache-pager" id="ctx-cache-pager" hidden>
+      <button class="ghost" type="button" data-ctx-page="prev">上一页</button>
+      <span class="ctx-cache-pages" id="ctx-cache-pages">第 1 / 1 页</span>
+      <button class="ghost" type="button" data-ctx-page="next">下一页</button>
+    </div>
+  </div>`;
+}
+
+/**
  * 页骨架。每次设置页重渲染都会重新进来，这里把旧请求代号 +1，
  * 让还没回来的 fetch 不再往新 DOM 里写。
  */
 function contextSettingsMarkup() {
 	contextSeq += 1;
+	// 重渲染后旧请求列表的返回也不能往新 DOM 里写。
+	requestsSeq += 1;
 	const choices = chatChoices();
 	const selected = selectedChatId(choices);
 	// 只有「当前会话」兜底、没有任何真实会话记录时直接进默认开销：
@@ -273,7 +337,7 @@ function contextSettingsMarkup() {
 	// 工具栏自带「当前会话 / 默认开销」两个模式，直接当这一页的入口。
 	return `<div id="ctx-content" data-mode="${contextMode}">
     <section class="set-sec">
-      ${toolbarMarkup(contextMode, choices, selected, roles, selectedRole)}${heroMarkup()}
+      ${toolbarMarkup(contextMode, choices, selected, roles, selectedRole)}${heroMarkup()}${cacheMarkup()}
     </section>
   </div>`;
 }
@@ -519,16 +583,20 @@ function buildGroups(data) {
 	if (!isDefault) {
 		const rows = [];
 		const last = data.memory.last;
-		if (data.memory.enabled && last) {
-			if (last.text) rows.push({ name: "记忆召回", tokens: last.tokens, text: last.text, stability: "turn" });
+		// 记忆关掉时，临时注入里仍可能有当前项目（2026-11-19 前缀锁定：
+		// 它不再是 system 段，只剩这一处可见），所以只把「记忆召回」那一行按开关过滤。
+		if (last) {
+			if (data.memory.enabled && last.text) {
+				rows.push({ name: "记忆召回", tokens: last.tokens, text: last.text, stability: "turn" });
+			}
 			for (const other of last.others || []) {
 				rows.push({
-					name: other.id,
+					name: other.label || other.id,
 					tokens: other.tokens,
 					text: other.text || "",
 					chars: other.chars,
 					truncated: other.truncated,
-					mono: true,
+					mono: false,
 				});
 			}
 		}
@@ -762,6 +830,15 @@ function openGroup(key, anchor) {
 
 let currentPartnerIdValue = "";
 
+/**
+ * 请求与缓存（2026-11-19）：列表按服务端分页，每页 100 条、最多 500 条。
+ * 只在这里保存「当前页」与最近一次返回；切会话 / 切模式都重新从第 1 页拉。
+ */
+let requestPage = 1;
+let requestsSeq = 0;
+let requestsData = null;
+let requestsChatId = "";
+
 function renderNote() {
 	const note = document.getElementById("ctx-note");
 	if (!note) return;
@@ -791,6 +868,11 @@ function renderContext(data) {
 	currentGroups = buildGroups(data);
 	const total = renderHero(data);
 	renderNote();
+	if (data.default) {
+		hideCachePanel();
+	} else if (data.conversationId) {
+		void loadRequests(1, data.conversationId);
+	}
 	if (total <= 0) return;
 }
 
@@ -818,6 +900,8 @@ function resetHero(message) {
 
 function setLoading() {
 	resetHero(contextMode === "default" ? "读取默认开销…" : "读取中…");
+	hideCachePanel();
+	requestsSeq += 1;
 }
 
 function showError(message) {
@@ -825,6 +909,308 @@ function showError(message) {
 	const chips = document.getElementById("ctx-chips");
 	if (chips) chips.innerHTML = `<span class="ctx-empty-inline">${esc(message)}</span>`;
 }
+
+// ── 请求与缓存（2026-11-19） ─────────────────────────────
+
+function pct(value) {
+	const number = Number(value);
+	if (!Number.isFinite(number) || number <= 0) return "0%";
+	return `${Math.round(number * 100)}%`;
+}
+
+function rateClass(value) {
+	const number = Number(value);
+	if (!Number.isFinite(number)) return "is-mid";
+	if (number >= 0.8) return "is-good";
+	if (number >= 0.5) return "is-mid";
+	return "is-bad";
+}
+
+function hideCachePanel() {
+	const card = document.getElementById("ctx-cache");
+	if (card) card.hidden = true;
+}
+
+function cacheError(message) {
+	const list = document.getElementById("ctx-cache-list");
+	if (list) list.innerHTML = `<div class="ctx-item-empty">${esc(message)}</div>`;
+	const summary = document.getElementById("ctx-cache-summary");
+	if (summary) summary.textContent = "";
+	const rate = document.getElementById("ctx-cache-rate");
+	if (rate) rate.textContent = "—";
+	const pager = document.getElementById("ctx-cache-pager");
+	if (pager) pager.hidden = true;
+}
+
+/** 一行请求：时间 / 模型 / prompt / 命中 / 写出 / 命中率；点开是详情。 */
+function requestRowMarkup(row) {
+	const model = String(row.model || "unknown").replace(/#.*$/, "");
+	const flag = REQUEST_FLAG[row.flag];
+	const flagMarkup = flag
+		? `<i class="ctx-req-flag ${flag.cls}" title="${esc(flag.title)}">${flag.mark}</i>`
+		: "";
+	return `<button class="ctx-req-row" type="button" data-ctx-req="${esc(String(row.entryId))}">
+    <span class="ctx-req-seq">#${fmtNum(row.seq)}</span>
+    <span class="ctx-req-at">${esc(fmtAt(row.at))}</span>
+    <span class="ctx-req-model" title="${esc(row.model || "")}">${esc(model)}</span>
+    <span class="ctx-req-num">${fmtTokens(row.promptTokens)}</span>
+    <span class="ctx-req-num">${fmtTokens(row.cacheReadTokens)}</span>
+    <span class="ctx-req-num">${row.cacheWriteTokens > 0 ? fmtTokens(row.cacheWriteTokens) : "—"}</span>
+    <span class="ctx-req-rate ${rateClass(row.hitRate)}">${pct(row.hitRate)}${flagMarkup}</span>
+  </button>`;
+}
+
+function renderRequests() {
+	const data = requestsData;
+	if (!data) return;
+	const card = document.getElementById("ctx-cache");
+	if (!card) return;
+	card.hidden = false;
+	const sub = document.getElementById("ctx-cache-sub");
+	if (sub) {
+		sub.textContent =
+			data.total > 0
+				? `${data.truncated ? `最近 ${data.max} 条里的 ` : ""}${fmtNum(data.total)} 次请求 · 第 ${data.page} / ${data.pages} 页`
+				: "还没有可统计的模型请求（聊一轮再来）";
+	}
+	const rate = document.getElementById("ctx-cache-rate");
+	if (rate) rate.textContent = data.total > 0 ? pct(data.summary.hitRate) : "—";
+	const summary = document.getElementById("ctx-cache-summary");
+	if (summary) {
+		const summaryData = data.summary || {};
+		const prefixChanges = Number(summaryData.prefixChanges || 0);
+		const drops = Number(summaryData.drops || 0);
+		const suspects = Number(summaryData.suspects || 0);
+		summary.innerHTML =
+			data.total > 0
+				? `<span>prompt ${fmtTokens(summaryData.promptTokens)} token</span>
+        <span>命中 ${fmtTokens(summaryData.cacheReadTokens)}</span>
+        <span>输出 ${fmtTokens(summaryData.outputTokens)}</span>
+        <span${suspects > 0 ? ' class="is-warn"' : ""}>前缀变化 ${fmtNum(prefixChanges)} 次</span>
+        <span${drops > 0 ? ' class="is-warn"' : ""}>骤降 ${fmtNum(drops)} 次</span>
+        <span>完全未命中 ${fmtNum(summaryData.fullMisses)} 次</span>`
+				: "";
+	}
+	const alarm = document.getElementById("ctx-cache-alarm");
+	if (alarm) {
+		const suspects = Number(data.summary?.suspects || 0);
+		const prefixChanges = Number(data.summary?.prefixChanges || 0);
+		if (data.total > 0 && suspects > 0) {
+			alarm.hidden = false;
+			alarm.className = "ctx-cache-alarm is-alarm";
+			alarm.textContent = `发现 ${fmtNum(
+				suspects,
+			)} 次「命中率骤降 + system 前缀变化」——固定前缀在运行中变了，点带 ! 的行看是哪个 section。`;
+		} else if (data.total > 0 && prefixChanges > 0) {
+			alarm.hidden = false;
+			alarm.className = "ctx-cache-alarm is-warn";
+			alarm.textContent = `有 ${fmtNum(
+				prefixChanges,
+			)} 次 system 前缀变化，但没有造成骤降（可能缓存已经过期过）。点带 ↑ 的行看是哪个 section。`;
+		} else {
+			alarm.hidden = true;
+			alarm.textContent = "";
+		}
+	}
+	const list = document.getElementById("ctx-cache-list");
+	if (list) {
+		if (!data.items.length) {
+			list.innerHTML = `<div class="ctx-item-empty">还没有请求记录。</div>`;
+		} else {
+			list.innerHTML = `<div class="ctx-req-head">
+          <span>#</span><span>时间</span><span>模型</span><span>prompt</span><span>命中</span><span>写出</span><span>命中率</span>
+        </div>${data.items.map(requestRowMarkup).join("")}`;
+		}
+	}
+	const pager = document.getElementById("ctx-cache-pager");
+	const pages = document.getElementById("ctx-cache-pages");
+	if (pager) pager.hidden = data.pages <= 1;
+	if (pages) pages.textContent = `第 ${data.page} / ${data.pages} 页`;
+	for (const button of document.querySelectorAll("[data-ctx-page]")) {
+		const delta = button.dataset.ctxPage === "prev" ? -1 : 1;
+		const target = data.page + delta;
+		button.disabled = target < 1 || target > data.pages;
+	}
+}
+
+async function loadRequests(page = 1, conversationId = "") {
+	const card = document.getElementById("ctx-cache");
+	if (!card) return;
+	if (contextMode !== "session") {
+		hideCachePanel();
+		return;
+	}
+	const select = document.getElementById("ctx-chat");
+	const selected = select instanceof HTMLSelectElement ? select.value : "";
+	const id = conversationId || selected;
+	if (!id) {
+		hideCachePanel();
+		return;
+	}
+	// 换会话时页码归零：不能拿上一条会话的第 5 页去请求新会话。
+	if (requestsChatId !== id) requestPage = 1;
+	requestsChatId = id;
+	const targetPage = Math.max(1, Number(page) || 1);
+	const seq = ++requestsSeq;
+	card.hidden = false;
+	const sub = document.getElementById("ctx-cache-sub");
+	if (sub) sub.textContent = "读取中…";
+	const list = document.getElementById("ctx-cache-list");
+	if (list) list.innerHTML = `<div class="ctx-item-empty">读取中…</div>`;
+	const pager = document.getElementById("ctx-cache-pager");
+	if (pager) pager.hidden = true;
+	try {
+		const response = await request(
+			`/api/v1/agent/chat/${encodeURIComponent(id)}/requests?page=${targetPage}&pageSize=100`,
+			{ cache: "no-store" },
+		);
+		if (seq !== requestsSeq) return;
+		if (response.status === 404) {
+			hideCachePanel();
+			return;
+		}
+		if (!response.ok) {
+			cacheError(`读取失败（HTTP ${response.status}）。`);
+			return;
+		}
+		const data = await response.json();
+		if (seq !== requestsSeq) return;
+		requestsData = data;
+		requestPage = data.page;
+		renderRequests();
+	} catch {
+		if (seq === requestsSeq) cacheError("服务暂时连不上。");
+	}
+}
+
+function compareMarkup(compare, sectionLabels) {
+	if (!compare) {
+		return `<div class="ctx-cache-compare">这是保留窗口里的第一条请求，没有可对比的上一条。</div>`;
+	}
+	const labelOf = (key) => sectionLabels.get(key) || key;
+	const changes = [];
+	if (compare.systemChanged) {
+		const parts = [];
+		if (compare.changedSections.length) parts.push(`变了 ${compare.changedSections.map(labelOf).join("、")}`);
+		if (compare.addedSections.length) parts.push(`新增 ${compare.addedSections.map(labelOf).join("、")}`);
+		if (compare.removedSections.length) parts.push(`移除 ${compare.removedSections.map(labelOf).join("、")}`);
+		if (compare.orderChanged) parts.push("段顺序变了");
+		changes.push(`system ${parts.join("；") || "正文变了"}`);
+	}
+	if (compare.toolsChanged) {
+		const added = compare.toolsAdded.length ? `+${compare.toolsAdded.join("、")}` : "";
+		const removed = compare.toolsRemoved.length ? `−${compare.toolsRemoved.join("、")}` : "";
+		changes.push(`工具面 ${[added, removed].filter(Boolean).join(" ") || "声明变了"}`);
+	}
+	if (!changes.length) {
+		return `<div class="ctx-cache-compare is-good">与上一条请求相比：固定前缀与工具面都没变。</div>`;
+	}
+	return `<div class="ctx-cache-compare is-warn">与上一条请求相比：${esc(
+		changes.join("；"),
+	)}${compare.at ? `（上一条 · ${esc(fmtAt(compare.at))}）` : ""}。</div>`;
+}
+
+/** 单条请求详情：与上一条的差异 + 固定前缀 + 当时已存档的消息。 */
+function requestDetailMarkup(data, seq) {
+	const row = data.request;
+	const labels = new Map((data.system.sections || []).map((section) => [section.key, section.label]));
+	const systemRows = (data.context.system.sections || []).map((section) => ({
+		name: section.label,
+		tokens: section.tokens,
+		text: section.empty ? "" : section.text,
+		stability: section.stability,
+	}));
+	const messages = data.context.entries || [];
+	const messageRows = messages.map((entry) => ({
+		name: entry.label,
+		tokens: entry.tokens,
+		text: entry.text,
+		chars: entry.chars,
+		truncated: entry.truncated,
+		seq: `#${entry.index + 1}`,
+		tag: ENTRY_TAG[entry.kind] || "",
+	}));
+	const systemTokens = (data.context.system.sections || []).reduce(
+		(sum, section) => sum + Number(section.tokens || 0),
+		0,
+	);
+	const messageTokens = messages.reduce((sum, entry) => sum + Number(entry.tokens || 0), 0);
+	const omitted = Number(data.context.entriesOmitted || 0);
+	const meta = `#${fmtNum(seq)} · ${esc(fmtAt(row.at))} · ${esc(
+		String(row.model || "unknown").replace(/#.*$/, ""),
+	)} · prompt ${fmtTokens(row.promptTokens)} token · 命中 ${pct(row.hitRate)}`;
+	return `<div class="ctx-req-detail-meta">${meta}</div>
+    ${compareMarkup(data.compare, labels)}
+    ${groupSectionMarkup(
+			{
+				label: "固定前缀",
+				count: `${(data.context.system.sections || []).length} 段 · 工具 ${fmtNum(data.system.tools)} 个`,
+				tokens: systemTokens,
+				rows: systemRows,
+			},
+			1,
+		)}
+    ${groupSectionMarkup(
+			{
+				label: "当时已存档的消息",
+				count: `${fmtNum(data.context.entriesTotal)} 条${omitted > 0 ? `（只列最后 ${messages.length} 条）` : ""}`,
+				tokens: messageTokens,
+				rows: messageRows,
+			},
+			2,
+		)}`;
+}
+
+async function openRequestDetail(entryId, anchor) {
+	const id = requestsChatId;
+	if (!id) return;
+	const row = (requestsData?.items || []).find((item) => String(item.entryId) === String(entryId));
+	openPopover(anchor, {
+		title: row ? `请求 #${row.seq}` : "请求详情",
+		color: 1,
+		meta: row ? `${fmtAt(row.at)} · ${fmtTokens(row.promptTokens)} token` : "读取中…",
+		body: `<div class="ctx-item-empty">读取这一轮上下文…</div>`,
+	});
+	try {
+		const response = await request(
+			`/api/v1/agent/chat/${encodeURIComponent(id)}/requests/${encodeURIComponent(entryId)}/context`,
+			{ cache: "no-store" },
+		);
+		if (!response.ok) {
+			openPopover(anchor, {
+				title: row ? `请求 #${row.seq}` : "请求详情",
+				color: 1,
+				meta: "读取失败",
+				body: `<div class="ctx-item-empty">读取失败（HTTP ${response.status}）。</div>`,
+			});
+			return;
+		}
+		const data = await response.json();
+		// 详情端点不知道列表窗口里的时序编号（seq），沿用点击那一行的——
+		// 同一行从列表点进来，编号才和列表一致。
+		const seq = row?.seq ?? data.request.seq;
+		openPopover(anchor, {
+			title: `请求 #${seq}`,
+			color: 1,
+			meta: `${esc(fmtAt(data.request.at))} · ${esc(String(data.request.model || "unknown").replace(/#.*$/, ""))}`,
+			body: requestDetailMarkup(data, seq),
+			footer: esc(data.note || ""),
+		});
+	} catch (error) {
+		// 别把渲染错误伪装成网络错误：控制台留一行，弹层里也写清是哪一类。
+		const detail = error instanceof Error ? error.message : String(error);
+		console.error("[ctx] 请求详情读取失败", error);
+		openPopover(anchor, {
+			title: row ? `请求 #${row.seq}` : "请求详情",
+			color: 1,
+			meta: "读取失败",
+			body: `<div class="ctx-item-empty">${
+				detail === "forbidden" ? "这个令牌没被接受。" : `服务暂时连不上（${esc(detail)}）。`
+			}</div>`,
+		});
+	}
+}
+
 
 async function loadContext() {
 	const seq = ++contextSeq;
@@ -888,6 +1274,10 @@ function setMode(mode) {
 	const scale = document.querySelector(".ctx-scale");
 	if (scale) scale.hidden = mode !== "session";
 	closePopover();
+	// 切模式 / 切会话时取消在途的请求列表：旧返回不能写进新 DOM。
+	requestsData = null;
+	requestsSeq += 1;
+	if (mode === "default") hideCachePanel();
 	void loadContext();
 }
 
@@ -947,6 +1337,22 @@ function wireClicks() {
 				closePopover();
 				if (currentData) renderHero(currentData);
 			}
+			return;
+		}
+		// 请求与缓存：翻页 / 点一行看当时上下文（2026-11-19）。
+		const pageButton = target.closest("[data-ctx-page]");
+		if (pageButton) {
+			const delta = pageButton.dataset.ctxPage === "prev" ? -1 : 1;
+			const targetPage = Math.max(1, requestPage + delta);
+			if (!(pageButton instanceof HTMLButtonElement) || !pageButton.disabled) {
+				void loadRequests(targetPage);
+			}
+			return;
+		}
+		const requestButton = target.closest("[data-ctx-req]");
+		if (requestButton) {
+			const entryId = requestButton.dataset.ctxReq || "";
+			if (entryId) void openRequestDetail(entryId, requestButton);
 			return;
 		}
 		const openButton = target.closest("[data-ctx-open]");

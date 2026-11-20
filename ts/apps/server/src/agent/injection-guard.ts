@@ -21,7 +21,7 @@ export function injectionGuardEnabled(): boolean {
 	return raw !== "false" && raw !== "0" && raw !== "off";
 }
 
-/** 用户可控的目标文本（课题问题 / 任务描述）注入提示词时的包裹标记。 */
+/** 用户可控的目标文本（任务描述 / 其它外部输入）注入提示词时的包裹标记。 */
 export function wrapUntrustedObjective(text: string): string {
 	return `<untrusted_objective>${text}</untrusted_objective>`;
 }
