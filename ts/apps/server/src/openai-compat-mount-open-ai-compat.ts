@@ -11,12 +11,18 @@ import { collectInjections } from "./agent/injection.ts";
 import { readLlmConfig } from "./provider.ts";
 import { TaskRenderError, renderTask, resolveTask, taskLabel, taskNames } from "./tasks.ts";
 import { classifyTurn, jevMode } from "./typesafe.ts";
-import { ChatMessage, ThinkingLevel } from "@lifediary/shared";
+import { ThinkingLevel } from "@lifediary/shared";
 import { Hono } from "hono";
 import { createHash, randomUUID } from "node:crypto";
 import { agentChat } from "./openai-compat-agent-chat.ts";
+import {
+	conversationSeedOf,
+	parseOpenAiMessages,
+	type OpenAiPlainMessage,
+} from "./openai-compat-content.ts";
 
-type PlainMessage = { role: ChatMessage["role"]; content: string };
+/** 兼容层内部的消息形状：`parts` 只在带图时出现（2026-11-16 图片输入）。 */
+type PlainMessage = OpenAiPlainMessage;
 
 interface OpenAiMessage {
 	role?: string;
@@ -44,22 +50,6 @@ interface OpenAiChatRequest {
 
 const UPSTREAM_ERROR_TEXT = "生成失败，请稍后重试";
 
-function textOf(content: unknown): string {
-	if (typeof content === "string") return content;
-	if (Array.isArray(content)) {
-		return content
-			.map((part) => {
-				if (typeof part === "string") return part;
-				if (part && typeof part === "object" && "text" in part) {
-					return String((part as { text?: unknown }).text ?? "");
-				}
-				return "";
-			})
-			.join("");
-	}
-	return "";
-}
-
 function conversationIdFor(
 	rawHeader: string | undefined,
 	messages: PlainMessage[],
@@ -72,8 +62,10 @@ function conversationIdFor(
 	if (options?.freshPrefixedWith) {
 		return `${options.freshPrefixedWith}${randomUUID()}`;
 	}
-	const firstUser = messages.find((message) => message.role === "user")?.content ?? "";
-	const digest = createHash("sha256").update(firstUser).digest("hex").slice(0, 32);
+	const firstUser = messages.find((message) => message.role === "user");
+	// 纯文本口径不变；纯图消息没有正文，用图片指纹当种子（否则所有纯图新会话共用一个 id）
+	const seed = firstUser ? conversationSeedOf(firstUser) : "";
+	const digest = createHash("sha256").update(seed).digest("hex").slice(0, 32);
 	return `oa-${digest}`;
 }
 
@@ -99,13 +91,22 @@ export function mountOpenAiCompat(app: Hono): void {
 			);
 		}
 
-		const messages: PlainMessage[] = body.messages
-			.filter((m) => m.role === "user" || m.role === "assistant" || m.role === "system")
-			.map((m) => ({
-				role: m.role as ChatMessage["role"],
-				content: textOf(m.content),
-			}))
-			.filter((m) => m.content.trim().length > 0);
+		// 图片输入（2026-11-16）：`image_url` 段转成内部 image parts；非法 / 超限 / 外部 URL
+		// 一律 400 带原因（改动前是静默丢弃）。纯文本的解析口径与旧 `textOf` 逐字一致。
+		const parsed = parseOpenAiMessages(body.messages);
+		if (!parsed.ok) {
+			return c.json(
+				{
+					error: {
+						code: parsed.code,
+						message: parsed.message,
+						type: "invalid_request_error",
+					},
+				},
+				400,
+			);
+		}
+		const messages: PlainMessage[] = parsed.messages;
 
 		if (messages.length === 0) {
 			return c.json(
@@ -121,10 +122,10 @@ export function mountOpenAiCompat(app: Hono): void {
 			);
 		}
 
-		// 分流点（三路，2026-10-30 起）：
+		// 分流点（两路，2026-10-31 直通已删除）：
 		// A. 带 `X-Task` → 任务通道：按任务名在**服务端**渲染模板，走 Agent 会话（建会话、落库、可回读）；
-		// B. 带非空 `system` → 直通上游（不建会话，老客户端/纯 OpenAI 端点仍走这条）；
-		// C. 都没有 → 通用聊天 Agent。
+		// B. 无 `X-Task` → 通用聊天 Agent；带 `system` 一律 400（不建会话、不静默降级）。
+		// 图片输入（2026-11-16）在两路之前统一解析，两路都拿得到 parts。
 		const rawTask = c.req.header("X-Task")?.trim().toLowerCase();
 		if (rawTask) {
 			const task = resolveTask(rawTask);
@@ -268,5 +269,5 @@ interface TaskContext {
 	prompt: string;
 }
 
-export { UPSTREAM_ERROR_TEXT, contentOfChunk, conversationIdFor, decideMode, levelFromHeader, observeRoute, textOf };
+export { UPSTREAM_ERROR_TEXT, contentOfChunk, conversationIdFor, decideMode, levelFromHeader, observeRoute };
 export type { OpenAiChatRequest, OpenAiMessage, PlainMessage, TaskContext };

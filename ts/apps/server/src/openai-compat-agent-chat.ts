@@ -79,6 +79,8 @@ import type { OpenAiChatRequest, PlainMessage, TaskContext } from "./openai-comp
 		// 任务会话的输入是那句固定指令（"请整理成稿"），不是整份 prompt ——
 		// 整份 prompt 在 instructions 里，写进 transcript 只会让回读变成一堵墙。
 		text: lastUser.content,
+		// 带图才给 parts（2026-11-16 兼容层图片输入）：纯文本仍提交字符串，老链路形状不变。
+		...(lastUser.parts && lastUser.parts.length > 0 ? { parts: lastUser.parts } : {}),
 	};
 
 	if (!task) observeRoute(conversationId, messages);
