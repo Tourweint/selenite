@@ -5,14 +5,17 @@
  * 散的。标题 / 压缩 / 裁判这些同样"短输入短输出"的活以后也需要能单独指定一个小模型。
  *
  * 这一层只回答一个问题：**某用途该用哪个模型**。
- *   - 用途枚举是固定的五种（`title` / `compact` / `vision` / `review` / `extract`）；
+ *   - 用途枚举是固定的七种（`title` / `compact` / `vision` / `review` / `extract` /
+ *     `advice` / `split`）；
  *   - 每个用途可以用 `AUX_MODEL_<USE>` pin 一个模型 id；
  *   - 没配 / 配的名字不在目录里 → 回落当前会话模型（行为与改动前一致）；
  *   - `AUX_LLM=false` → 全部回落当前模型（一行回滚）。
  *
- * 接线状态（2026-11-10 批 23b §三 / 批 28 §三）：
+ * 接线状态（2026-11-10 批 23b §三 / 批 28 §三 / 2026-11-21 复核）：
  *   - 已接：`extract`（`memory-extract.ts` 偏好抽取）、`review`（`routine-gate.ts` 例行条件判定
- *     + `memory-consolidate.ts` 的语义整理建议，后一处是批 23b 补的）；
+ *     + `memory-consolidate.ts` 的语义整理建议，后一处是批 23b 补的）、
+ *     `split`（2026-11-16 记忆原子化：`memory-split-smart.ts` 的智能拆分默认模型，
+ *     前端下拉所选模型优先）、`advice`（2026-11-10 批 30：技能分类建议）；
  *   - `compact`：内核 `Conversation.compact()` 只收 `instructions` + `Context`，压缩模型由当前
  *     会话模型与 compaction policy 决定，**无法指定单独的压缩模型**——批 26b 起配置照常能解析，
  *     `startChatCompaction` 会记一条"内核不支持指定压缩模型"日志，不静默失效；

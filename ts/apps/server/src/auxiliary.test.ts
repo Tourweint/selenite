@@ -53,7 +53,17 @@ test("pin 变量名按用途大写；没配 / 空白 → null", () => {
 	);
 	assert.equal(auxPinnedModelId("title", { AUX_MODEL_TITLE: "t" }), "t");
 	assert.equal(auxPinnedModelId("vision", { AUX_MODEL_VISION: "v" }), "v");
-	assert.deepEqual([...AUX_USES], ["title", "compact", "vision", "review", "extract", "advice"]);
+	// split（2026-11-16 记忆原子化）：memory-split-smart 的智能拆分默认模型，
+	// 属正常接线用途，不是「无调用点」。新增用途时这里与 AUX_USES 一起改。
+	assert.deepEqual([...AUX_USES], [
+		"title",
+		"compact",
+		"vision",
+		"review",
+		"extract",
+		"advice",
+		"split",
+	]);
 });
 
 test("没有当前模型 → null（不编一个路由）", () => {

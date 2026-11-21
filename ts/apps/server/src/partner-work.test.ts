@@ -67,7 +67,14 @@ const scopeB = scopeKey({ type: "partner", id: partnerB.id });
 after(() => {
 	closeWorkStore();
 	singleton.close();
-	rmSync(root, { recursive: true, force: true });
+	// Windows 上 sqlite 句柄释放有延迟，直接删临时目录会偶发 EPERM（全量套件下才现）。
+	// 删不掉不影响本文件任何断言的结论，重试几次后仍失败就留给系统清理，
+	// 不要用清理失败把一批已经通过的用例染红（同 approval-resume-memory.test.ts）。
+	try {
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+	} catch {
+		/* 临时目录，清理失败不影响结论 */
+	}
 });
 
 function settlement(over: Partial<WorkSettlementInput> = {}): WorkSettlementInput {

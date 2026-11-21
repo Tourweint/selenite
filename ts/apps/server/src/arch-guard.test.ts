@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 import type { MemoryScope } from "@lifediary/memory";
 import { WRITE_TOOLS } from "./approval-policy.ts";
 import type { SkillStore } from "./skills.ts";
-import { createTools, type ToolDeps } from "./tools.ts";
+// 只取类型：`import type` 会被擦除，不会在设 env 之前触发 tools.ts 的模块图加载。
+import type { ToolDeps } from "./tools.ts";
 
 /**
  * 架构守卫：把 AGENTS.md 的硬约束从「人肉审查」变成测试断言。
@@ -40,6 +41,11 @@ const READ_TOOLS = new Set([
 	// 2026-11-10 批 13 §三：中途播报只发一个 notice 帧，不写盘、不起进程；
 	// 它的边界是 beforeTool 的"只在执事轮 / 任务专线"范围闸，不在只读闸门。
 	"report_progress",
+	// 2026-11-21：两个默认在架的非写工具——respond_escalation 只经 steer 通道投一条答复 /
+	// 挂 ask_user 卡，tool_search 只查本地工具索引；都不写盘、不起进程、不派活。
+	// 闸门完整性断言要求「注册全集 ⊆ WRITE_TOOLS ∪ READ_TOOLS」，故按语义登记在这里。
+	"respond_escalation",
+	"tool_search",
 ]);
 /** 内核五件：pi-durable 的 CodingTools（read/write/edit/bash/powershell）。 */
 const KERNEL_TOOLS = new Set(["read", "write", "edit", "bash", "powershell"]);
@@ -109,6 +115,10 @@ process.env.AGENT_POLICY_PATH = fileURLToPath(
 );
 process.env.AGENT_BLOCKED_TOOLS = "ghost_blocked";
 process.env.LLM_PROVIDER = "faux";
+// tools.ts 的静态模块图经 task-conversation → … → agent.ts 可达 agent/policy.ts；
+// 静态 import 会在上面设 env 之前就把 policy 读成 full（2026-11-20 变更记录已登记）。
+// 这里改成设完 env 再动态加载，只读闸门断言才真的验的是 read-only。
+const { createTools } = await import("./tools.ts");
 const agentModule = import("./agent.ts");
 
 // ===== 1.1 闸门完整性 =====
@@ -212,7 +222,7 @@ test("依赖方向：memory 包不许反向依赖 server / 逃出包", () => {
 
 // ===== 1.3 只读闸门行为回归 =====
 
-test("只读闸门：WRITE_TOOLS 六件在只读档都被拦，READ_TOOLS 五件放行", async () => {
+test("只读闸门：WRITE_TOOLS 全量在只读档都被拦，READ_TOOLS 全量放行", async () => {
 	const { readOnlyBlockReason } = await agentModule;
 	for (const name of WRITE_TOOLS) {
 		assert.notEqual(readOnlyBlockReason(name), undefined, `${name} 在只读档应被拦`);
