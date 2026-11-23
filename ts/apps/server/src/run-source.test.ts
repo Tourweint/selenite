@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
 	delegationRunSource,
 	isTestRun,
+	priorityOfRunSource,
 	projectRunSource,
 	runSourceEnabled,
 } from "./run-source.ts";
@@ -41,4 +42,15 @@ test("详情投影：老数据 null 视为 human；开关关着不出现", () =>
 	assert.equal(projectRunSource(null, {}), "human");
 	assert.equal(projectRunSource("routine", {}), "routine");
 	assert.equal(projectRunSource(null, { RUN_SOURCE: "false" }), undefined);
+});
+
+test("准入优先级：human 0 > device 1 > routine 2 > script 3 > test 9；未知 5", () => {
+	// 2026-11-22 M1b：runSource 从「只做簿记」变成「还决定排队顺序」，但数值不落库。
+	assert.equal(priorityOfRunSource("human"), 0);
+	assert.equal(priorityOfRunSource("device"), 1);
+	assert.equal(priorityOfRunSource("routine"), 2);
+	assert.equal(priorityOfRunSource("routine_self"), 2);
+	assert.equal(priorityOfRunSource("script"), 3);
+	assert.equal(priorityOfRunSource("test"), 9);
+	assert.equal(priorityOfRunSource("unknown" as never), 5);
 });

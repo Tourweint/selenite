@@ -1,7 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
-import { CODEBUDDY_BIN, CODEBUDDY_MODEL, WORKER_TIMEOUT_MS, resolveProfile } from "../config.ts";
+import {
+	CODEBUDDY_BIN,
+	CODEBUDDY_MODEL,
+	WORKER_IDLE_TIMEOUT_MS,
+	WORKER_MAX_TIMEOUT_MS,
+	WORKER_TIMEOUT_MS,
+	resolveProfile,
+} from "../config.ts";
 import type { CodeBuddyResult, EmployeeCapabilities } from "../types.ts";
 import {
 	isCliSuccess,
@@ -125,7 +132,11 @@ export async function runCodeBuddy(
     args: [...launcher.prefixArgs, ...invocation.args],
     stdin: invocation.stdin,
     cwd: call.cwd,
+    // 旧的墙钟字段保留给还没迁移的调用方；给了 idleTimeoutMs 后它不参与判定。
     timeoutMs: call.timeoutMs,
+    // M2a：外部 CLI 改活动超时，长任务只要持续有输出就不会被 10 分钟墙钟误杀。
+    idleTimeoutMs: WORKER_IDLE_TIMEOUT_MS,
+    maxTimeoutMs: WORKER_MAX_TIMEOUT_MS,
     env: buildCodeBuddyEnv(),
     signal: call.signal,
   });

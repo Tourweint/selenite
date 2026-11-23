@@ -6,6 +6,7 @@ import { describe, test } from "node:test";
 import type { RelayDeviceView } from "@lifediary/shared";
 import {
 	queryBusyMap,
+	queryBusyMaps,
 	selectAutoDevice,
 	type BusyQueryClient,
 } from "./relay-auto.ts";
@@ -305,6 +306,46 @@ describe("queryBusyMap：容错", () => {
 		};
 		const result = await queryBusyMap(racing, [device("slow"), device("fast")], 20);
 		assert.deepEqual(result, { slow: 1, fast: 2 });
+	});
+
+	test("排队深度：有 queued 就带回来，没有按 0（老对端只回 active 也不报错）", async () => {
+		const client: BusyQueryClient = {
+			async invoke(dst) {
+				if (dst === "new") return { active: 1, queued: 4 };
+				return { active: 0 };
+			},
+		};
+		const { busyMap, queuedMap } = await queryBusyMaps(
+			client,
+			[device("new"), device("legacy")],
+			50,
+		);
+		assert.deepEqual(busyMap, { new: 1, legacy: 0 });
+		assert.deepEqual(queuedMap, { new: 4, legacy: 0 });
+	});
+
+	test("挑机：busy 相同时优先挑排队短的；没给 queuedMap 输出与旧版一致", () => {
+		const devices = [device("long-queue"), device("short-queue")];
+		const withQueue = selectAutoDevice({
+			devices,
+			selfDeviceId: "self",
+			busyMap: { "long-queue": 1, "short-queue": 1 },
+			queuedMap: { "long-queue": 9, "short-queue": 1 },
+			maxActivePerDevice: 3,
+			homeDeviceId: null,
+		});
+		assert.deepEqual(withQueue, { picked: "short-queue", busy: 1, pickedHome: false });
+
+		// 回归红线：没有 queuedMap 时 tie-break 仍按 lastSeenAt → id，与 v1 逐字一致。
+		const legacy = selectAutoDevice({
+			devices,
+			selfDeviceId: "self",
+			busyMap: { "long-queue": 1, "short-queue": 1 },
+			maxActivePerDevice: 3,
+			homeDeviceId: null,
+		});
+		assert.ok("picked" in legacy, "两台都未满载，必须挑出一台");
+		assert.equal(legacy.picked, "long-queue");
 	});
 });
 

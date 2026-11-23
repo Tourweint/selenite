@@ -7,6 +7,9 @@ import { assertPhoneConfigured, capabilitiesOf } from "./employee/index.ts";
 import { runManager, type ManagerOutcome } from "./employee/manager.ts";
 import { intake } from "./intake.ts";
 import { ensureManager, listManagers, readManagerMeta } from "./manager/registry.ts";
+import { acquireAdmission, type AdmissionLease } from "./admission.ts";
+import { acquireDomain, type LaneLease } from "./lane.ts";
+import { classifyRunFailure } from "./failure-class.ts";
 import { isPidAlive, releaseStaleLeases } from "./lease.ts";
 import { planTicket } from "./plan.ts";
 import {
@@ -188,6 +191,10 @@ export async function runChancellor(
       : undefined,
     // 计划附件（2026-11-09 §2）：宿主已校验；空数组不落键，旧 ticket 形状不变。
     Array.isArray(req.steps) && req.steps.length > 0 ? req.steps : undefined,
+    // 预分配单号（2026-11-22 前端直派任务）：宿主先建专线再落单。
+    typeof req.ticketId === "string" && req.ticketId.trim() !== ""
+      ? req.ticketId.trim()
+      : undefined,
   );
   // 进行中标记：进程被杀后靠它判断这张单断在哪一步；dry 单不派活、已终态的幂等命中也不记。
   if (!dry && !FINAL_TICKET_STATUSES.has(ticket.status)) {
@@ -205,8 +212,46 @@ export async function runChancellor(
     emit({ type, ticketId: ticket.id, ...extra });
   };
 
+  // 单号必须在第一个 await 之前同步发出：宿主 startDelegation 的 launch 靠同步段拿到
+  // ticketId（「立即受理」），否则 delegate 工具会先返回空单号。排队 / 拒绝都是之后的事。
+  emitFor("ticket", {
+    message: useManager ? "收单，交给分管领域" : "收单，开始拆单",
+  });
+
+  // ticket 准入闸（2026-11-22 M1b）：intake 之后、拆单之前。
+  // dry 不派活，也不该占名额；单号已经发出，排队 / 拒绝都能立刻回报宿主。
+  let admission: AdmissionLease | null = null;
+  if (!dry) {
+    admission = await acquireAdmission({
+      domain: useManager ? domain : "",
+      priority: req.priority ?? 5,
+      ...(signal ? { signal } : {}),
+      onWait: (info) =>
+        emitFor("ticket", { message: `排队中：前面 ${Math.max(0, info.position - 1)} 单` }),
+    });
+    if (!admission.granted) {
+      if (admission.reason === "queue_full") {
+        // 队列满是业务拒绝：明确失败，别让单子停在 received 里等一个不会来的槽。
+        ticket.stage = "failed";
+        store.setTicketStatus(ticket, "failed", "排队已满，稍后再试");
+        const line = "排队已满，稍后再试";
+        emitFor("finished", { message: line });
+        return { ticketId: ticket.id, status: "failed", line, tasks: [] };
+      }
+      // 排队中被取消：setTicketStatus 到终态会顺手清 inflight，不留僵尸在跑。
+      ticket.stage = "aborted";
+      store.setTicketStatus(ticket, "aborted", "已停止");
+      const line = renderAbortedLine(0);
+      emitFor("finished", { message: line });
+      return { ticketId: ticket.id, status: "aborted", line, tasks: [] };
+    }
+  }
+
+  try {
   if (useManager) {
-    return runManagerTicket(
+    // 必须 await：直接 return Promise 时 finally 会在 manager 还没跑完就执行，
+    // 准入名额提前放掉，同领域的下一张单会在 manager 进程还活着时挤进来。
+    return await runManagerTicket(
       ticket,
       store,
       requirement,
@@ -220,8 +265,6 @@ export async function runChancellor(
       ticket.originConversationId ?? undefined,
     );
   }
-
-  emitFor("ticket", { message: "收单，开始拆单" });
 
   const ticketDir = store.ticketDir(ticket.id);
 
@@ -343,6 +386,10 @@ export async function runChancellor(
     emitFor("finished", { message: line });
     return { ticketId: ticket.id, status: "failed", line, tasks: [] };
   }
+  } finally {
+    // 所有 return（含 manager 分支与 runRound 的 catch）都经过这里，名额不会漏还。
+    admission?.release();
+  }
 }
 
 
@@ -364,6 +411,9 @@ interface FinishRunsContext {
  */
 async function finishRuns(ctx: FinishRunsContext): Promise<TicketResult> {
   const { ticket, store, taskRows, runs, emitFor, signal } = ctx;
+  // 失败分类（2026-11-22 M3）：每个 run 都填一份，供任务中心 / 后续重试看。
+  // 成功执行是 unknown（"unknown" 兼作「没认出发败因」），不新增对外状态。
+  for (const run of runs) run.failureClass = classifyRunFailure(run);
   const aborted = signal?.aborted === true || runs.some((run) => run.aborted);
   const decision = aborted ? { kind: "aborted" as const } : decideOutcome(runs);
 
@@ -963,7 +1013,35 @@ async function resumeTicket(
   // 分档要在开跑前定：真续接还是重派，必须先算出来，重派时好如实回报（2026-11-08 8f）。
   const resumeDecision = decideResume(kind, readSessionId(path.join(ticketDir, row.dir)));
 
+  // 单号必须同步发出（同新单路径）：startDelegation 用「同步段有没有拿到 ticketId」
+  // 区分「续跑被拒」与「在排队」；先 await 准入会被误判成续跑被拒，进而改派新单。
   emitFor("ticket", { message: `续跑原单，回答 [${row.dir}] 的问题` });
+
+  // ticket 准入（2026-11-22 M1b）：续跑 / 重试也走同一入口，否则重启恢复能绕过所有上限。
+  // 领域沿用原单快照（续跑没有新请求的 domain）；排队中被取消时不占名额。
+  const admission = await acquireAdmission({
+    domain: ticket.options.domain ?? "",
+    priority: req.priority ?? 5,
+    ...(signal ? { signal } : {}),
+    onWait: (info) =>
+      emitFor("ticket", { message: `排队中：前面 ${Math.max(0, info.position - 1)} 单` }),
+  });
+  if (!admission.granted) {
+    if (admission.reason === "queue_full") {
+      ticket.stage = "failed";
+      store.setTicketStatus(ticket, "failed", "排队已满，稍后再试");
+      const line = "排队已满，稍后再试";
+      emitFor("finished", { message: line });
+      return { ticketId: ticket.id, status: "failed", line, tasks: [] };
+    }
+    ticket.stage = "aborted";
+    store.setTicketStatus(ticket, "aborted", "已停止");
+    const line = renderAbortedLine(0);
+    emitFor("finished", { message: line });
+    return { ticketId: ticket.id, status: "aborted", line, tasks: [] };
+  }
+
+  try {
   // 重派就是丢了上一段上下文：模型和人都得知道，不许静默（方案 §一.1）。
   if (resumeDecision.notice) emitFor("ticket", { message: resumeDecision.notice });
   store.setTicketStatus(ticket, "dispatching");
@@ -1063,6 +1141,10 @@ async function resumeTicket(
       resumeDecision.notice,
     );
   }
+  } finally {
+    // 续跑的所有出口（idle / 成功 / 失败 / 抛错）都要还名额。
+    admission.release();
+  }
 }
 
 /**
@@ -1115,7 +1197,10 @@ function runFromDisk(
 }
 
 function workerKindOf(kind: string | undefined): WorkerKind | null {
+  // 2026-11-22：池执行器也是宿主可点名的 worker；漏掉这一档会让 req.employee="pool"
+  // 静默回落 EMPLOYEE（实测：前端直派任务全跑成 native）。
   return kind === "native" ||
+    kind === "pool" ||
     kind === "mercenary" ||
     kind === "codebuddy" ||
     kind === "qoder-intl" ||
@@ -1153,6 +1238,8 @@ async function runManagerTicket(
   /** 来源宿主对话标识；只透传给子进程，子单据此继承（2026-11-05 跨仓契约）。 */
   originConversationId?: string,
 ): Promise<TicketResult> {
+  // 同领域串行的租约（M1a）：拿到后才允许起 manager；任何出口都释放。
+  let domainLease: LaneLease | null = null;
   try {
     if (dry) {
       const line = `⚠ 这单带的是分管领域「${domain}」，--dry 只能预览直接派工的拆单；去掉 --dry 再跑。`;
@@ -1163,6 +1250,21 @@ async function runManagerTicket(
     }
 
     if (signal?.aborted) {
+      ticket.stage = "aborted";
+      store.setTicketStatus(ticket, "aborted", "已停止");
+      const line = renderAbortedLine(0);
+      emitFor("finished", { message: line });
+      return { ticketId: ticket.id, status: "aborted", line, tasks: [] };
+    }
+
+    // 同领域串行（2026-11-22 M1a）：两个同领域单各起一个 manager 子进程会并发改写
+    // 同一份领域状态；串行化只影响同领域，不同领域照常并行。
+    domainLease = await acquireDomain(domain, {
+      signal,
+      onWait: (info) => emitFor("manager", { message: `同领域排队：${info.running}/${info.cap}` }),
+    });
+    if (!domainLease.granted) {
+      // 等领域时被取消：不占领域、不起 manager，按 aborted 收尾（signal 已是唯一事实）。
       ticket.stage = "aborted";
       store.setTicketStatus(ticket, "aborted", "已停止");
       const line = renderAbortedLine(0);
@@ -1249,6 +1351,9 @@ async function runManagerTicket(
     const line = renderErrorLine(ticket.id, message);
     emitFor("finished", { message: line });
     return { ticketId: ticket.id, status: "failed", line, tasks: [] };
+  } finally {
+    // 领域租约在 catch 之后释放：失败路径也要让同领域的下一单进来。
+    domainLease?.release();
   }
 }
 

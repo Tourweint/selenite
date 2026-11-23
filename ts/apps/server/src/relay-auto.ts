@@ -25,6 +25,12 @@ export interface AutoPickInput {
 	selfDeviceId: string;
 	/** 设备 id → 在跑单数；缺省按 0 算（离线/查失败的由 queryBusyMap 记 1） */
 	busyMap: Record<string, number>;
+	/**
+	 * 设备 id → 排队单数（2026-11-22 调度层 M4：队列深度参与挑机）。
+	 * 只做 tie-break：busy 相同时优先挑排队短的；缺省按 0 算。
+	 * 不做主排序——主排序仍是 busy（主机优先制不变），否则会改变已验证的产品口径。
+	 */
+	queuedMap?: Record<string, number>;
 	/** 单机在跑单数达到这个值即视为满载（来自 DEVICE_MAX_ACTIVE_PER_DEVICE，默认 3） */
 	maxActivePerDevice: number;
 	/**
@@ -46,6 +52,12 @@ export type AutoPickResult =
 /** 只认数值型忙碌度；NaN / 负数 / 非数字一律按 0（决策不能因为脏数据崩掉）。 */
 function busyOf(busyMap: Record<string, number>, deviceId: string): number {
 	const raw = busyMap[deviceId];
+	return typeof raw === "number" && Number.isFinite(raw) && raw >= 0 ? raw : 0;
+}
+
+/** 排队深度同 busyOf 的容错口径；没有 queuedMap（旧调用方）一律 0，输出与 v1 完全一致。 */
+function queuedOf(queuedMap: Record<string, number> | undefined, deviceId: string): number {
+	const raw = queuedMap?.[deviceId];
 	return typeof raw === "number" && Number.isFinite(raw) && raw >= 0 ? raw : 0;
 }
 
@@ -99,12 +111,15 @@ export function selectAutoDevice(input: AutoPickInput): AutoPickResult {
 			.map((device) => ({
 				device,
 				busy: busyOf(input.busyMap, device.id),
+				// 排队深度只参与 tie-break：busy 相同时优先挑排队短的（2026-11-22 M4）。
+				queued: queuedOf(input.queuedMap, device.id),
 				// lastSeenAt 缺失按 0：从未报到过的设备排在同 busy 的后面
 				lastSeen: device.lastSeenAt ?? 0,
 			}))
 			.sort(
 				(a, b) =>
 					a.busy - b.busy ||
+					a.queued - b.queued ||
 					b.lastSeen - a.lastSeen ||
 					// 字典序用码点比较（不用 localeCompare）：不随运行环境的语言设置变化
 					(a.device.id < b.device.id ? -1 : a.device.id > b.device.id ? 1 : 0),
@@ -145,29 +160,53 @@ export interface BusyQueryClient {
 }
 
 /**
- * 并发查每台候选的在跑单数。
+ * 并发查每台候选的在跑单数 + 排队深度（2026-11-22 M4）。
  *
- * **任何失败都记 1**（超时 / 错误帧 / 设备离线 / 回包形状不对）：宁可低估它的空闲度，
+ * **任何失败都记 busy=1**（超时 / 错误帧 / 设备离线 / 回包形状不对）：宁可低估它的空闲度，
  * 也不把活派给一台"问都问不应"的机器。查询之间互不阻塞，单台坏掉不影响其余结果。
+ *
+ * 排队深度是纯增量：老版本对端只回 `{active}`，这里按 0 处理，决策与改动前一致。
  */
+export async function queryBusyMaps(
+	client: BusyQueryClient,
+	devices: RelayDeviceView[],
+	timeoutMs: number = BUSY_QUERY_TIMEOUT_MS,
+): Promise<{ busyMap: Record<string, number>; queuedMap: Record<string, number> }> {
+	const entries = await Promise.all(
+		devices.map(async (device): Promise<[string, number, number]> => {
+			try {
+				const result = await client.invoke(device.id, DELEGATION_BUSY_CHANNEL, {}, timeoutMs);
+				const body = result as { active?: unknown; queued?: unknown } | null;
+				const active = body?.active;
+				const queued = body?.queued;
+				const busy =
+					typeof active === "number" && Number.isFinite(active) && active >= 0
+						? Math.floor(active)
+						: 1;
+				const pending =
+					typeof queued === "number" && Number.isFinite(queued) && queued >= 0
+						? Math.floor(queued)
+						: 0;
+				return [device.id, busy, pending];
+			} catch {
+				return [device.id, 1, 0];
+			}
+		}),
+	);
+	const busyMap: Record<string, number> = {};
+	const queuedMap: Record<string, number> = {};
+	for (const [id, busy, queued] of entries) {
+		busyMap[id] = busy;
+		queuedMap[id] = queued;
+	}
+	return { busyMap, queuedMap };
+}
+
+/** 只要 busyMap 的旧调用方（探针 / 单测）保留原签名与输出。 */
 export async function queryBusyMap(
 	client: BusyQueryClient,
 	devices: RelayDeviceView[],
 	timeoutMs: number = BUSY_QUERY_TIMEOUT_MS,
 ): Promise<Record<string, number>> {
-	const entries = await Promise.all(
-		devices.map(async (device): Promise<[string, number]> => {
-			try {
-				const result = await client.invoke(device.id, DELEGATION_BUSY_CHANNEL, {}, timeoutMs);
-				const active = (result as { active?: unknown } | null)?.active;
-				if (typeof active === "number" && Number.isFinite(active) && active >= 0) {
-					return [device.id, Math.floor(active)];
-				}
-				return [device.id, 1];
-			} catch {
-				return [device.id, 1];
-			}
-		}),
-	);
-	return Object.fromEntries(entries);
+	return (await queryBusyMaps(client, devices, timeoutMs)).busyMap;
 }

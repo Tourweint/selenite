@@ -297,7 +297,7 @@ test("resolveProfile：native 保留 model / modelRoute，空 model 不塞 profi
 	);
 });
 
-test("profileEnv：native 把模型路由翻成子进程 env；key 从宿主 env 现取", () => {
+test("profileEnv：native / pool 把模型路由翻成子进程 env；key 从宿主 env 现取", () => {
 	const prev = process.env.PROVIDER_KEY;
 	process.env.PROVIDER_KEY = "sk-test";
 	try {
@@ -312,6 +312,21 @@ test("profileEnv：native 把模型路由翻成子进程 env；key 从宿主 env
 			{
 				CHANCELLOR_LLM_MODEL: "work-model",
 				CHANCELLOR_LLM_BASE_URL: "https://provider.example/v1",
+				// 2026-11-22：池桥子单要按变量名从自己的 env 取 key，值仍不过 HTTP。
+				CHANCELLOR_LLM_KEY_ENV: "PROVIDER_KEY",
+				CHANCELLOR_LLM_API_KEY: "sk-test",
+			},
+		);
+		// pool 与 native 同一条继承（manager 子进程里的池子单）。
+		assert.deepEqual(
+			profileEnv("pool", {
+				model: "work-model",
+				modelRoute: { baseUrl: "https://provider.example/v1", keyEnv: "PROVIDER_KEY" },
+			}),
+			{
+				CHANCELLOR_LLM_MODEL: "work-model",
+				CHANCELLOR_LLM_BASE_URL: "https://provider.example/v1",
+				CHANCELLOR_LLM_KEY_ENV: "PROVIDER_KEY",
 				CHANCELLOR_LLM_API_KEY: "sk-test",
 			},
 		);

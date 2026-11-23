@@ -9,7 +9,6 @@ import {
 	appendDelegationProjectMemory,
 	DELEGATION_PROJECT_MEMORY_LIMIT,
 	DELEGATION_PROJECT_MEMORY_MAX_CHARS,
-	delegationProjectMemoryEnabled,
 	delegationProjectMemoryText,
 	renderDelegationProjectMemory,
 	type ProjectMemoryHit,
@@ -59,24 +58,10 @@ test("空正文条目跳过；非 fact kind 原样保留", () => {
 	assert.equal(text.split("\n").filter((line) => line.startsWith("- [")).length, 1);
 });
 
-test("开关：缺省开；false / 0 / off 关", () => {
-	assert.equal(delegationProjectMemoryEnabled({}), true);
-	assert.equal(delegationProjectMemoryEnabled({ DELEGATION_PROJECT_MEMORY: "" }), true);
-	assert.equal(delegationProjectMemoryEnabled({ DELEGATION_PROJECT_MEMORY: "false" }), false);
-	assert.equal(delegationProjectMemoryEnabled({ DELEGATION_PROJECT_MEMORY: "0" }), false);
-	assert.equal(delegationProjectMemoryEnabled({ DELEGATION_PROJECT_MEMORY: "off" }), false);
-});
 
-test("取数：无 engine / 无 project / 开关关 → 空串", () => {
+test("取数：无 engine / 无 project → 空串（开关 2026-11-21 退役，恒注入）", () => {
 	assert.equal(delegationProjectMemoryText(null, { id: "p", name: "atlas" }, "构建"), "");
 	assert.equal(delegationProjectMemoryText({} as never, null, "构建"), "");
-	const engine = { recall: () => [hit(1)] } as never;
-	assert.equal(
-		delegationProjectMemoryText(engine, { id: "p", name: "atlas" }, "构建", {
-			DELEGATION_PROJECT_MEMORY: "false",
-		}),
-		"",
-	);
 });
 
 test("取数：只查 project scope，命中后渲染", () => {

@@ -73,7 +73,7 @@ import {
 	DelegationReceipts,
 	requestFingerprint,
 } from "./delegation-receipts.ts";
-import { delegationRunSource, runSourceEnabled } from "./run-source.ts";
+import { delegationRunSource, priorityOfRunSource, runSourceEnabled } from "./run-source.ts";
 import { currentApprovalLevel, currentAuthority } from "./delegation-authority.ts";
 import { isRoutineTurn } from "./unattended.ts";
 import { pruneSessionMemory } from "./memory-prune.ts";
@@ -96,7 +96,6 @@ import { recordSkillUse } from "./skill-usage.ts";
 // 送达函数由装配层注入（本文件不持有 harness）。
 import { createSendToAgentTool, type PartnerRelayDeps } from "./partner-relay.ts";
 // 派活按单指定工作目录 / 权限档的回滚开关（2026-11-17）
-import { delegateWorkdirEnabled } from "./flags.ts";
 // agent 中途播报（2026-11-10 批 13 §三）：工具定义在 progress-report.ts，送达走 delegation 通道。
 import { createReportProgressTool } from "./progress-report.ts";
 import {
@@ -134,7 +133,7 @@ import type { SessionSearchHit } from "./agent/session-search.ts";
 // 工具返回统一契约（2026-11-10 批 16 §一；批 18 §五迁入只读四件）：
 // 已迁 = recall_sessions / ask_user / report_progress / recall / web_search / skill。
 import { encodeToolResult, err, ok, type ToolResult } from "./tool-result.ts";
-import { isDeferredTool, toolIndexEnabled } from "./tool-index.ts";
+import { isDeferredTool } from "./tool-index.ts";
 import { recordToolLoad } from "./tool-usage.ts";
 import { disabledToolsOfConversation } from "./tool-visibility.ts";
 
@@ -245,6 +244,12 @@ export interface ToolDeps {
 	scopeOf: (conversationId: number) => MemoryScope;
 	/** 技能库；为 null 时 skill 工具不上（技能目录不存在/为空，索引也不会渲染） */
 	skills?: SkillStore | null;
+	/**
+	 * 技能可见性归属（2026-11-21 普通助手技能独立）：
+	 * worker 会话返回保留键 `worker`；执事 / 主对话按原口径（执事 uuid / chief）。
+	 * 不传 = 旧行为（`effectivePartnerIdOfSession`），单测 / 探针零改动。
+	 */
+	skillOwnerOf?: (conversationId: number) => string | null | Promise<string | null>;
 	/**
 	 * 派活能力；为 false 时 delegate 工具不上。
 	 *
@@ -379,6 +384,32 @@ function envFlag(name: string, fallback: boolean): boolean {
 	const raw = process.env[name]?.trim().toLowerCase();
 	if (!raw) return fallback;
 	return raw !== "false" && raw !== "0";
+}
+
+/**
+ * 合并两路中止信号（2026-11-22 M0）：同步回滚路径里，取消这张单（票级 controller）
+ * 与用户中断本轮对话（聊天 abortSignal）任一发生都该停。空信号忽略；Node 支持
+ * `AbortSignal.any` 就用它，否则手写一个监听两路的 controller。
+ */
+function combineAbortSignals(
+	first?: AbortSignal,
+	second?: AbortSignal,
+): AbortSignal | undefined {
+	if (!first) return second;
+	if (!second || first === second) return first;
+	const anySignals = (AbortSignal as unknown as {
+		any?: (signals: AbortSignal[]) => AbortSignal;
+	}).any;
+	if (typeof anySignals === "function") return anySignals.call(AbortSignal, [first, second]);
+	const controller = new AbortController();
+	const onAbort = (): void => controller.abort();
+	if (first.aborted || second.aborted) {
+		controller.abort();
+	} else {
+		first.addEventListener("abort", onAbort, { once: true });
+		second.addEventListener("abort", onAbort, { once: true });
+	}
+	return controller.signal;
 }
 
 /**
@@ -1134,8 +1165,8 @@ export function createTools(deps: ToolDeps) {
 			// 登记表之外的路径直接拒绝建单——那是"目录越界"，不是能力限制。
 			let workDir: string | undefined;
 			const rawWorkDir = (args.workdir ?? "").trim();
-			const workdirOn = delegateWorkdirEnabled();
-			if (resumeTicketId === undefined && rawWorkDir && workdirOn) {
+			//（DELEGATE_WORKDIR 回滚开关 2026-11-21 退役，按单指定目录恒生效。）
+			if (resumeTicketId === undefined && rawWorkDir) {
 				const store = deps.projects ?? projectsStore();
 				const base = project?.rootPath ?? store.getWorkspace()?.rootPath;
 				const pick = resolveChatDir(rawWorkDir, store, base);
@@ -1166,6 +1197,12 @@ export function createTools(deps: ToolDeps) {
 						projectId: project?.id ?? "",
 					})
 				: "";
+			// 触发来源（批 15 §三）：回执簿记与 ticket 准入优先级共用同一次判定。
+			// 优先级是内部推导（2026-11-22 M1b），不给 delegate 工具加参数、不暴露给模型。
+			const runSource = delegationRunSource({
+				device: deviceWork,
+				routineTurn: isRoutineTurn(conversationId),
+			});
 			if (receipts && requestId) {
 				const begun = receipts.begin(requestId, fingerprint, {
 					explicit: Boolean(explicitRequestId),
@@ -1173,14 +1210,7 @@ export function createTools(deps: ToolDeps) {
 					// 授权依据（批 19 §六）：受理这一刻的审批档位 + 时间，只记录不判定。
 					authority: currentAuthority(),
 					// 触发来源（批 15 §三）：例行轮 / 设备 / 人；开关关着不写。
-					...(runSourceEnabled()
-						? {
-								runSource: delegationRunSource({
-									device: deviceWork,
-									routineTurn: isRoutineTurn(conversationId),
-								}),
-							}
-						: {}),
+					...(runSourceEnabled() ? { runSource } : {}),
 				});
 				if (begun.kind === "conflict") {
 					// 同一 requestId 但内容不同：不报冲突、不让模型换号重派，直接把原单交回。
@@ -1220,13 +1250,16 @@ export function createTools(deps: ToolDeps) {
 					conversationId,
 					domain,
 					requirement: delegationRequirement,
+					// ticket 准入优先级（2026-11-22 M1b）：按触发来源推导，不来自模型参数。
+					priority: priorityOfRunSource(runSource),
 					resumeTicketId,
 					project,
 					...(steps ? { steps } : {}),
 					...(requestId ? { requestId } : {}),
 					// 工作目录与权限档（2026-11-17）：只写进新单；续跑由 chancellor 沿用原单。
-					...(workdirOn && workDir ? { workDir } : {}),
-					...(workdirOn && args.permission ? { employeePermission: args.permission } : {}),
+					//（DELEGATE_WORKDIR 回滚开关 2026-11-21 退役，恒生效。）
+					...(workDir ? { workDir } : {}),
+					...(args.permission ? { employeePermission: args.permission } : {}),
 					// 执事在自己领域内直派（2026-11-07）：不带 managers 就是既有分管路径
 					...(requestFields.managers === false ? { managers: false as const } : {}),
 					// 派活留言（2026-11-07）：谁在什么身份下说的这句话，落进任务详情
@@ -1241,7 +1274,12 @@ export function createTools(deps: ToolDeps) {
 							{
 								...options,
 								// 后台执行不能挂本轮对话的 abortSignal：用户这一轮结束不该杀掉任务。
-								...(asyncMode ? {} : { signal: context.abortSignal }),
+								// M0（2026-11-22）：async 只挂每票的取消 controller（options.signal，
+								// 由 startDelegation 传入并注册）；同步回滚路径两路都挂，任一中断都停。
+								signal: combineAbortSignals(
+									options.signal,
+									asyncMode ? undefined : context.abortSignal,
+								),
 							},
 						),
 					emit: emitDelegation,
@@ -1534,17 +1572,17 @@ export function createTools(deps: ToolDeps) {
 				}),
 				execute: async (args, context) => {
 					// 2026-11-15 按人可见：执事会话用真实 uuid；主对话用 effective（= chief）。
+					// 2026-11-21：worker 会话由装配层给保留键 `worker`，普通助手有自己的技能勾选。
 					// 读不到就当无 partner（只走全局启停位），别让技能工具把整轮弄哑。
 					let partnerId: string | null = null;
-					if (COMPANIONS_ENABLED) {
-						try {
-							partnerId = effectivePartnerIdOfSession(
-								partnersStore(),
-								Number(context.conversationId),
-							);
-						} catch {
-							partnerId = null;
-						}
+					try {
+						partnerId = deps.skillOwnerOf
+							? await deps.skillOwnerOf(Number(context.conversationId))
+							: COMPANIONS_ENABLED
+								? effectivePartnerIdOfSession(partnersStore(), Number(context.conversationId))
+								: null;
+					} catch {
+						partnerId = null;
 					}
 					const manual = skills.manual(args.name, partnerId);
 					if (!manual) {
@@ -1621,8 +1659,8 @@ export function createTools(deps: ToolDeps) {
 	if (askUserEnabled()) tools.push(createAskUserTool());
 
 	// 决策上报答复（2026-11-19 批2）：总管 / 派活方执事对 worker 的 escalation 给结论。
-	// 上架双闸（CHANCELLOR_ENABLED + ESCALATION_CHAIN_ENABLED），关任一个整件不上架 =
-	// 回滚形态；按需池默认成员（tool-pool），初始不进请求、不打上游 prompt cache。
+	// 上架闸 = CHANCELLOR_ENABLED（ESCALATION_CHAIN_ENABLED 回滚开关 2026-11-21 退役）；
+	// 按需池默认成员（tool-pool），初始不进请求、不打上游 prompt cache。
 	if (respondEscalationAvailable()) tools.push(createRespondEscalationTool());
 
 	// agent 中途播报（2026-11-10 批 13 §三）：装配层显式传 progressReport 才上架
@@ -2177,7 +2215,7 @@ export function createTools(deps: ToolDeps) {
 	// 低频工具索引（2026-11-16 C 段）：默认开。末尾追加，既有工具的注册顺序一个不动
 	// （注册顺序是缓存前缀资产）。只有确实存在「会被标 deferred」的工具时才注册，
 	// 免得工具面本就没有低频工具时凭空多一个 tool_search。
-	if (toolIndexEnabled() && tools.some((tool) => isDeferredTool(tool.name))) {
+	if (tools.some((tool) => isDeferredTool(tool.name))) {
 		tools.push(
 			defineTool({
 				name: "tool_search",

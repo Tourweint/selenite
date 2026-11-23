@@ -1,6 +1,12 @@
 import path from "node:path";
 import process from "node:process";
-import { OPENCODE_BIN, WORKER_TIMEOUT_MS, resolveProfile } from "../config.ts";
+import {
+  OPENCODE_BIN,
+  WORKER_IDLE_TIMEOUT_MS,
+  WORKER_MAX_TIMEOUT_MS,
+  WORKER_TIMEOUT_MS,
+  resolveProfile,
+} from "../config.ts";
 import type {
   EmployeeCapabilities,
   EmployeePermission,
@@ -145,7 +151,11 @@ export async function runOpencode(call: OpencodeCall): Promise<ExternalCliResult
     args: [...launcher.prefixArgs, ...invocation.args],
     stdin: invocation.stdin,
     cwd: call.cwd,
+    // 旧的墙钟字段保留给还没迁移的调用方；给了 idleTimeoutMs 后它不参与判定。
     timeoutMs: call.timeoutMs,
+    // M2a：外部 CLI 改活动超时，长任务只要持续有输出就不会被 10 分钟墙钟误杀。
+    idleTimeoutMs: WORKER_IDLE_TIMEOUT_MS,
+    maxTimeoutMs: WORKER_MAX_TIMEOUT_MS,
     signal: call.signal,
     interpret: (stdout, exitCode) => {
       const reading = parseOpencodeStdout(stdout, exitCode);

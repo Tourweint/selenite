@@ -5,7 +5,7 @@
  */
 
 import { runChancellor } from "../../../packages/chancellor/src/index.ts";
-import { abortNativeWorker, forwardNativeWorkerMessage, WorkerNotRunningError } from "../../../packages/chancellor/src/employee/native.ts";
+import { abortNativeWorker } from "../../../packages/chancellor/src/employee/native.ts";
 import { listManagers } from "../../../packages/chancellor/src/manager/registry.ts";
 import { Store } from "../../../packages/chancellor/src/store.ts";
 import { Ticket } from "../../../packages/chancellor/src/types.ts";
@@ -16,13 +16,14 @@ import { DelegationReceipts, TERMINAL_TICKET_STATUS, requestFingerprint } from "
 import type { DelegationRuntime } from "./delegation.ts";
 import { chancellorWorkRoot, emitDelegation, startDelegation } from "./delegation.ts";
 import { ProjectRef } from "./projects.ts";
-import { taskConversationMirror } from "./task-conversation.ts";
+import { ensureTaskConversation, taskConversationMirror, taskTicketIdOfConversation } from "./task-conversation.ts";
 import { recordWorkSettlement } from "./work-record.ts";
 import fs from "node:fs";
 import { CANCEL_TERMINAL_STATUSES, RETRYABLE_STATUSES } from "./delegation-checks.ts";
 import type { TicketActionResult } from "./delegation-checks.ts";
 import { readTicketJson } from "./delegation-summary.ts";
 import { findTicket } from "./delegation-mount.ts";
+import { abortPoolTicket, abortTicket, sayWorker } from "./worker-control.ts";
 
 function internalConversationId(
 	ticket: Ticket,
@@ -70,13 +71,30 @@ function defaultRetryRuntime(store: DelegationReceipts): DelegationRuntime {
 		// 唤醒（2026-11-15 回信送达兜底 §B）：重试单跑完同样要走"完成即唤醒"——
 		// 以前这里只写汇报不唤醒，而且失败被静默吞掉，重试出来的结果执事永远不知道。
 		report: (conversationId, report) => {
-			void import("./agent.ts")
-				.then((module) => module.reportDelegationResult(conversationId, report))
-				.then(() =>
-					import("./delegation-wake.ts").then((wake) =>
-						wake.wakeOnDelegationReport(conversationId, report),
-					),
-				)
+			void ensureTaskConversation(report.ticketId)
+				.then((taskChat) => {
+					// 直派任务 / 任务详情回话：回写目标就是任务线程本身，结算已经由
+					// mirror 写进去了。再走一次“汇报 + 唤醒”只会让宿主投影模型跑一轮，
+					// 与“执行在池”的口径冲突（2026-11-22）。
+					if (taskChat && taskChat.internalId === conversationId) return;
+					// 重试 / 回话的 origin 可能是**另一张单**的任务线程（旧单线程复用）：
+					// 同样不跑投影模型，只把结论镜像进那条旧线程。
+					const originTaskTicket = taskTicketIdOfConversation(conversationId);
+					if (originTaskTicket) {
+						taskConversationMirror(originTaskTicket, {
+							kind: "report",
+							text: `【汇报】${report.text}`,
+						});
+						return;
+					}
+					return import("./agent.ts")
+						.then((module) => module.reportDelegationResult(conversationId, report))
+						.then(() =>
+							import("./delegation-wake.ts").then((wake) =>
+								wake.wakeOnDelegationReport(conversationId, report),
+							),
+						);
+				})
 				.catch((error) => {
 					// 原始错误只进服务端日志（可能带上游地址）。
 					console.warn(
@@ -116,17 +134,29 @@ export function cancelTicketAction(
 		}
 		store.cancelTicket(ticketId, internalConversationId(found.ticket, ticketId, store));
 		// 决策上报/续行（2026-11-19 批2）：worker 可能正挂起等上报答复 / 预算内续轮。
-		// 作废位在服务端的簿记库里，worker 自己查不到——推送一条终止帧（复用批1
-		// stdin 通道，不发明第二条），让它停止续行与等待、收完已受理的提交就退。
-		// 失败（不在跑 / 执行器不是本机 native）只记一行，不影响作废本身。
-		try {
-			abortNativeWorker(ticketId);
-			console.log(`[ticket] 作废终止帧已发 ticket=${ticketId.slice(0, 12)}`);
-		} catch (error) {
+		// 作废位在服务端的簿记库里，worker 自己查不到——停一次执行（M0 2026-11-22：
+		// 按票的 AbortController，signal 会经 supervisor.run / employee.run 停掉 pool /
+		// native / 外部 CLI），让它停止续行与等待、收完已受理的提交就退。
+		// 没有控制器（已结算 / 旧进程）只记一行，不影响作废本身。
+		// 旧进程里已在跑的 native 单没有票级控制器，补一次 stdin 终止帧——不能因为
+		// 升级到 M0 就让它比改动前还停不下来。
+		if (abortTicket(ticketId)) {
+			console.log(`[ticket] 作废终止信号已发 ticket=${ticketId.slice(0, 12)}`);
+		} else if (found.ticket.employee === "pool") {
+			// manager 子进程里建的子单：宿主没有票级控制器，但票在 supervisor 槽位表里。
+			abortPoolTicket(ticketId);
+		} else if (found.ticket.employee === "native" || found.ticket.employee === undefined) {
+			try {
+				abortNativeWorker(ticketId);
+				console.log(`[ticket] 作废终止帧已发（无票级控制器的 native 单）ticket=${ticketId.slice(0, 12)}`);
+			} catch {
+				console.log(
+					`[ticket] 没有可中止的控制器（可能已结算/旧进程）ticket=${ticketId.slice(0, 12)}`,
+				);
+			}
+		} else {
 			console.log(
-				`[ticket] 作废终止帧未发（worker 不在跑或非本机 native）ticket=${ticketId.slice(0, 12)}: ${
-					error instanceof Error ? error.message : String(error)
-				}`,
+				`[ticket] 没有可中止的控制器（可能已结算/旧进程）ticket=${ticketId.slice(0, 12)}`,
 			);
 		}
 		return { status: 200, body: { ok: true, status: "canceled" } };
@@ -232,8 +262,8 @@ export function projectHasInFlightTickets(workRoot: string, projectId: string): 
 /**
  * worker 插话转发（2026-11-19 插话统一 批1）。
  *
- * 把一条消息经 native 通道递给**正在跑**的 worker 子进程（`forwardNativeWorkerMessage`
- * → 子进程 stdin 一行 JSON → durable `conversation.submit`）。语义与会话侧 steer 一致：
+ * 把一条消息递给**正在跑**的 worker（M0 2026-11-22：按执行器分派——pool 走池的 `/say`，
+ * native 走子进程 stdin）。语义与会话侧 steer 一致：
  * mode=steer 插进当前轮（正文带 `[插话]` 标记行），followUp 排到本轮收尾之后。
  *
  * 发言权沿用任务专线口径：HTTP 端点（人/设备）与 `/tickets/:id/say` 同一道 API 鉴权，
@@ -289,21 +319,16 @@ export async function forwardWorkerMessageAction(
 		// 插话标记（2026-11-19 插话统一 批1）：只标 steer——模型据此知道这是半路引导；
 		// followUp 是"下一轮再说"，不加标记。
 		const text = input.mode === "steer" ? `[插话]\n${input.text}` : input.text;
-		try {
-			forwardNativeWorkerMessage(ticketIdFound, { mode: input.mode, text });
-		} catch (error) {
-			if (error instanceof WorkerNotRunningError) {
-				return {
-					status: 400,
-					body: {
-						ok: false,
-						error: "worker_not_running",
-						message:
-							"这张单的打手现在没在跑：只有正在跑的本机 native 打手才收得到插话（外部 CLI 打手没有注入口）",
-					},
-				};
-			}
-			throw error;
+		const delivered = await sayWorker(found.ticket.employee, ticketIdFound, text, input.mode);
+		if (!delivered.ok) {
+			return {
+				status: 400,
+				body: {
+					ok: false,
+					error: "worker_not_running",
+					message: delivered.message ?? "这张单的打手现在没在跑，收不到插话",
+				},
+			};
 		}
 		// 日志只记单号 / 字数 / 模式，不记正文（日志不含对话内容）。
 		console.log(

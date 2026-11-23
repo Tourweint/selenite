@@ -16,6 +16,7 @@ import { ChancellorEvent, ChancellorRequest, TicketResult } from "../../../packa
 import type { EmployeeProfile } from "../../../packages/chancellor/src/types.ts";
 import { TAKEOVER_HINT } from "./agent/turn-gate.ts";
 import type { DelegationSenderKind } from "./delegation-messages.ts";
+import type { ExecutorKind } from "./executor-config.ts";
 import { CHIEF_PARTNER_ID } from "./partners.ts";
 import { ProjectRef } from "./projects.ts";
 import { taskConversationExternalId } from "./task-conversation.ts";
@@ -132,7 +133,7 @@ export interface DelegationRuntime {
 	/** 真正跑 chancellor 的入口；测试可替换 */
 	run: (
 		request: ChancellorRequest,
-		options: { onEvent?: (event: ChancellorEvent) => void },
+		options: { onEvent?: (event: ChancellorEvent) => void; signal?: AbortSignal },
 	) => Promise<TicketResult>;
 	emit: (conversationId: number, event: DelegationEvent) => void;
 	/** 后台跑完后回灌会话；不传 = 不汇报 */
@@ -179,6 +180,22 @@ export interface DelegationKickoff {
 	/** 领域负责人；空串表示按 v0.3 直接派 worker（兼容旧行为） */
 	domain: string;
 	requirement: string;
+	/**
+	 * 预分配单号（2026-11-22 前端直派任务）：宿主先按这个号建任务专线，再落单。
+	 * 只对新派生效；不传 = chancellor 自己生成。
+	 */
+	ticketId?: string;
+	/**
+	 * 强制执行器（2026-11-22 前端直派任务固定 pool）：不传 = 设置里的默认。
+	 * 只对新派生效；续跑按原单快照走。
+	 */
+	executor?: { employee: ExecutorKind; profile: EmployeeProfile };
+	/**
+	 * ticket 准入优先级（2026-11-22 M1b）：0 最高，缺省 5。
+	 * 由 delegate 工具按触发来源推导（`priorityOfRunSource`）；不来自模型参数，
+	 * 也不落回执，只在派单时交给 chancellor 排队用。
+	 */
+	priority?: number;
 	/** 这张单落在哪个已登记项目里（2026-11-03 方案 §5.5）；续跑时沿用原单 */
 	project?: ProjectRef;
 	/** 有值 = 续跑这张单；没有 = 新派 */

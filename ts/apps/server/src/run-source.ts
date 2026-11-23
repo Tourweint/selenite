@@ -2,8 +2,12 @@
  * 触发来源（2026-11-10 批 15 §三，全景调研 #44）。
  *
  * 回答"这张单 / 这一轮是谁发起的"：人、例行轮、执事自建例行的首轮、HTTP 脚本、
- * 探针/测试、设备矩阵。只用于**旁路簿记**（回执列 + run 记录 + 详情投影），
+ * 探针/测试、设备矩阵。原本只用于**旁路簿记**（回执列 + run 记录 + 详情投影），
  * 不改变派单 / 例行 / 设备的任何语义。
+ *
+ * 2026-11-22 M1b 起多了一个用途：`priorityOfRunSource()` 把来源映射成 ticket 准入
+ * 优先级，决定同时排队时谁先跑。优先级只传给 chancellor，不落回执、不下发客户端；
+ * 簿记列与投影口径仍由下面的开关控制，和之前一致。
  *
  * 开关 `RUN_SOURCE` 默认开；`false`/`0`/`off` → 不写不返，行为回到改动前。
  * 老数据没有这一列 = null，投影时视为 `human`（见 delegation-api 的详情投影）。
@@ -12,6 +16,28 @@
  */
 
 export type RunSource = "human" | "routine" | "routine_self" | "script" | "test" | "device";
+
+/**
+ * 触发来源 → ticket 准入优先级（2026-11-22 调度层 M1b）：0 最高。
+ *
+ * 这是 **2026-11-22 起的语义变化**：runSource 以前只做簿记，现在还要决定
+ * 「同时排队的单谁先跑」。数值不写进回执、不下发客户端，只由宿主在派单时
+ * 传给 chancellor（`ChancellorRequest.priority`）。
+ * human(0) > device(1) > routine/routine_self(2) > script(3) > test(9)；
+ * 未知来源回落 5（与 ChancellorRequest.priority 的缺省一致）。
+ */
+const RUN_SOURCE_PRIORITY: Record<RunSource, number> = {
+	human: 0,
+	device: 1,
+	routine: 2,
+	routine_self: 2,
+	script: 3,
+	test: 9,
+};
+
+export function priorityOfRunSource(source: RunSource): number {
+	return RUN_SOURCE_PRIORITY[source] ?? 5;
+}
 
 /** 回滚开关：默认开；只有明确写 false / 0 / off 才关。 */
 export function runSourceEnabled(env: NodeJS.ProcessEnv = process.env): boolean {

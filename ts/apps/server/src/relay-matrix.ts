@@ -27,7 +27,9 @@ import { currentAuthority } from "./delegation-authority.ts";
 import { taskConversationMirror } from "./task-conversation.ts";
 import { projectsStore, resolveDelegationProject, type ProjectRef } from "./projects.ts";
 import { RelayInvokeError, type RelayClient } from "./relay-client.ts";
-import { autoCandidates, queryBusyMap, selectAutoDevice } from "./relay-auto.ts";
+import { autoCandidates, queryBusyMaps, selectAutoDevice } from "./relay-auto.ts";
+// 忙碌位附带排队深度（2026-11-22 M4）：纯增量，读不到就退回只报 active 的旧形状。
+import { admissionSnapshot } from "../../../packages/chancellor/src/admission.ts";
 import {
 	deviceAutoDispatchEnabled,
 	deviceMatrixEnabled,
@@ -220,11 +222,12 @@ export async function dispatchRemoteDelegation(
 		// 不为它单开一条通道：中继仍只当名册的持有者。
 		const homeDeviceId = client.devices.find((device) => device.isHome === true)?.id ?? null;
 		const candidates = autoCandidates(client.devices, selfDeviceId);
-		const busyMap = await queryBusyMap(client, candidates);
+		const { busyMap, queuedMap } = await queryBusyMaps(client, candidates);
 		const picked = selectAutoDevice({
 			devices: client.devices,
 			selfDeviceId,
 			busyMap,
+			queuedMap,
 			maxActivePerDevice: deviceMaxActivePerDevice(),
 			homeDeviceId,
 		});
@@ -500,9 +503,21 @@ export function createMatrixChannels(): MatrixChannels {
 			return { ticketId, conversationId: chat.externalId };
 		},
 
-		/** 忙碌位：读本机回执库，返回非终态（accepting/accepted）单数。 */
+		/**
+		 * 忙碌位：读本机回执库，返回非终态（accepting/accepted）单数。
+		 * 2026-11-22 M4 起多带一个 `queued`（本机准入闸的排队深度）：纯增量，
+		 * 老发起端只读 active，行为不变；新发起端用它做挑机 tie-break。
+		 */
 		async busy() {
-			return { active: receiptsOf().countActive() };
+			const active = receiptsOf().countActive();
+			let queued = 0;
+			try {
+				queued = admissionSnapshot().queued;
+			} catch {
+				// 观测值读不到不影响忙碌位本身：退回只报 active 的旧形状。
+				return { active };
+			}
+			return { active, queued };
 		},
 
 		/** 相位投影：回执（受理态）+ ticket.json（运行态）。 */

@@ -340,3 +340,75 @@ test("调度：同一路径并发写入 → 后来者等待文件，前序释放
 	rmSync(repo.root, { recursive: true, force: true });
 });
 
+test("调度：中止的票不合并半成品，worktree 保留", async () => {
+	const repo = gitRepo();
+	const data = temp("abort-data");
+	const root = temp("abort-runs");
+	const store = new Store(root);
+	const project: ProjectRef = {
+		id: "p4",
+		name: "demo",
+		rootPath: repo.root,
+		vcs: "git",
+		head: repo.head,
+		dataDir: data,
+	};
+	const ticket = makeTicket("T-abort", root, project);
+	store.saveTicket(ticket);
+	const tasks = [planned(1, "half", ["half.txt"])];
+	const rows = [
+		taskRow(
+			ticket.id,
+			join(store.ticketDir(ticket.id), taskDirName(1, "half")),
+			1,
+			"half",
+		),
+	];
+	for (const row of rows) store.saveTask(row);
+
+	const { runs } = await runScheduledTasks({
+		ticket,
+		store,
+		tasks,
+		rows,
+		project,
+		employeeKind: "mercenary",
+		emit: () => undefined,
+		isolation: "worktree",
+		maxParallel: 1,
+		runner: (async (
+			_runsTicket: Ticket,
+			task: PlannedTask,
+			seq: number,
+			ticketDir: string,
+			_signal: unknown,
+			_deps: unknown,
+			options: { workDir?: string },
+		) => {
+			const workDir = options.workDir ?? repo.root;
+			writeFileSync(join(workDir, "half.txt"), "half-done\n");
+			const run = makeRun(ticket, task, seq, ticketDir, workDir);
+			run.aborted = true;
+			return run;
+		}) as never,
+	});
+
+	assert.equal(runs.length, 1);
+	assert.equal(runs[0]?.aborted, true);
+	// 中止也要收集改动（负责人能看见半成品落在哪），但不许合并进项目目录。
+	assert.deepEqual(runs[0]?.changedPaths, ["half.txt"]);
+	assert.equal(
+		existsSync(join(repo.root, "half.txt")),
+		false,
+		"中止的票不得把半成品合并进项目",
+	);
+	assert.equal(
+		existsSync(join(data, "worktrees", ticket.id, taskDirName(1, "half"))),
+		true,
+		"中止的票必须保留 worktree 给负责人看现场",
+	);
+	rmSync(data, { recursive: true, force: true });
+	rmSync(root, { recursive: true, force: true });
+	rmSync(repo.root, { recursive: true, force: true });
+});
+

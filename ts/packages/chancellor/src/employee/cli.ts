@@ -53,7 +53,18 @@ export interface CliProcessCall {
   /** 非 null 时写入 stdin；argv 里不应重复提示。 */
   stdin: string | null;
   cwd: string;
+  /**
+   * 墙钟超时（旧口径）。给了 `idleTimeoutMs` 时不再使用：那边按"无输出"和
+   * "总时长"两个上限判，长任务只要持续有输出就不会被墙钟误杀（M2a，2026-11-22）。
+   */
   timeoutMs: number;
+  /**
+   * 活动超时（M2a）：stdout/stderr 任意 data 都算活动并重置空闲计时；
+   * <= 0 = 不限。给了它就切到活动口径。
+   */
+  idleTimeoutMs?: number;
+  /** 活动口径下的总时长上限；不传 / <= 0 = 不限（只认 idleTimeoutMs 存在时）。 */
+  maxTimeoutMs?: number;
   env?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
   /**
@@ -141,11 +152,37 @@ export function runCliProcess(call: CliProcessCall): Promise<CliProcessResult> {
     let aborted = false;
     let settled = false;
     let forceTimer: NodeJS.Timeout | null = null;
+    /** 旧口径的墙钟计时 / 活动口径的空闲计时（同一槽位，二选一） */
+    let primaryTimer: NodeJS.Timeout | null = null;
+    let maxTimer: NodeJS.Timeout | null = null;
+    /** 超时判定后用于错误信息：区分空闲超时与总时长超时 */
+    let timeoutLabel: string | null = null;
+    /**
+     * 超时口径（M2a，2026-11-22）：
+     * - 给了 idleTimeoutMs：活动超时，stdout/stderr 任意 data 重置空闲计时；
+     *   maxTimeoutMs 再压一个墙钟上限（不传 / <=0 = 不限）。
+     * - 没给：保持旧的 timeoutMs 墙钟，输出不续命（还没迁移的调用方口径不变）。
+     */
+    const activityMode = call.idleTimeoutMs !== undefined;
+
+    const clearRunTimers = (): void => {
+      if (primaryTimer !== null) {
+        clearTimeout(primaryTimer);
+        primaryTimer = null;
+      }
+      if (maxTimer !== null) {
+        clearTimeout(maxTimer);
+        maxTimer = null;
+      }
+    };
+
+    const timeoutText = (): string => timeoutLabel ?? `超时（${call.timeoutMs}ms）`;
 
     const finish = (result: CliProcessResult): void => {
       if (settled) return;
       settled = true;
       if (forceTimer) clearTimeout(forceTimer);
+      clearRunTimers();
       resolve(result);
     };
 
@@ -171,22 +208,54 @@ export function runCliProcess(call: CliProcessCall): Promise<CliProcessResult> {
       return;
     }
 
-    const timer = setTimeout(() => {
+    const onTimeout = (label: string): void => {
+      if (timedOut || aborted) return;
       timedOut = true;
+      timeoutLabel = label;
+      clearRunTimers();
       killTree(child);
       forceTimer = setTimeout(() => {
         finish(
           emptyResult({
             timedOut: true,
             stderrTail: tail(stderr, 8000),
-            error: `超时（${call.timeoutMs}ms）后进程未退出`,
+            error: `${label}后进程未退出`,
           }),
         );
       }, 5000);
-    }, call.timeoutMs);
+    };
+
+    // 有输出就顺延空闲计时；旧墙钟口径下输出不改变上限。
+    const bumpActivity = (): void => {
+      if (!activityMode || primaryTimer === null) return;
+      primaryTimer.refresh();
+    };
+
+    if (activityMode) {
+      const idleLimitMs = call.idleTimeoutMs ?? 0;
+      if (idleLimitMs > 0) {
+        primaryTimer = setTimeout(
+          () => onTimeout(`空闲超时（${idleLimitMs}ms 无输出）`),
+          idleLimitMs,
+        );
+      }
+      const maxLimitMs = call.maxTimeoutMs ?? 0;
+      if (maxLimitMs > 0) {
+        maxTimer = setTimeout(
+          () => onTimeout(`超时（${maxLimitMs}ms 总时长）`),
+          maxLimitMs,
+        );
+      }
+    } else {
+      primaryTimer = setTimeout(
+        () => onTimeout(`超时（${call.timeoutMs}ms）`),
+        call.timeoutMs,
+      );
+    }
 
     const onAbort = (): void => {
       aborted = true;
+      clearRunTimers();
       killTree(child);
       forceTimer = setTimeout(() => {
         finish(
@@ -208,13 +277,15 @@ export function runCliProcess(call: CliProcessCall): Promise<CliProcessResult> {
     child.stderr?.setEncoding("utf8");
     child.stdout?.on("data", (chunk: string) => {
       stdout += chunk;
+      bumpActivity();
     });
     child.stderr?.on("data", (chunk: string) => {
       stderr = tail(stderr + chunk, 8000);
+      bumpActivity();
     });
 
     child.on("error", (error) => {
-      clearTimeout(timer);
+      clearRunTimers();
       call.signal?.removeEventListener("abort", onAbort);
       finish(
         emptyResult({
@@ -225,7 +296,7 @@ export function runCliProcess(call: CliProcessCall): Promise<CliProcessResult> {
     });
 
     child.on("close", (code) => {
-      clearTimeout(timer);
+      clearRunTimers();
       call.signal?.removeEventListener("abort", onAbort);
 
       if (timedOut) {
@@ -234,7 +305,7 @@ export function runCliProcess(call: CliProcessCall): Promise<CliProcessResult> {
             timedOut: true,
             exitCode: code,
             stderrTail: stderr,
-            error: `超时（${call.timeoutMs}ms）被杀`,
+            error: `${timeoutText()}被杀`,
           }),
         );
         return;

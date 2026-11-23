@@ -52,19 +52,11 @@ const state = {
   ticketsLoading: false,
   // 取消/重试开关（扫尾批 1 A1）：来自 GET /tickets 的 cancelEnabled；关时不渲染按钮。
   ticketsCancelEnabled: false,
-  domainFilter: "",
-  projectFilter: "",
-  sort: "recent",
-  // 「已完结」折叠区是否展开：只记会话内存，刷新即回到收合态
-  tasksArchiveOpen: false,
-  // 「更早的直派」折叠组是否展开（L3）：同样只记会话内存，默认收起
-  tasksDirectOpen: false,
+  // 调度状态投影（2026-11-22 M2b）：GET /api/v1/scheduler 的原样数据；null = 还没拉过 / 端点不可用。
+  // 只用来显示「排队 N」；读不到就当 0，不挡任务中心。
+  scheduler: null,
   // 派活行内「子单 N」展开态：Set of 派活行（父单）id，同样只记会话内存
   tasksChildrenOpen: new Set(),
-  // 多副本组展开态（批 19 §五）：Set of groupId（= requestId），只记会话内存
-  tasksFanoutOpen: new Set(),
-  // 外部打手过滤（L3）：空 = 不过滤；等于某个 employee 时只留含该执行者的对话卡
-  tasksEmployeeFilter: "",
   // 运行时开关投影：null = 还没拉过；Map(key → flag 行)。只拉一次 GET /api/v1/agent/flags。
   flagsCache: null,
   // 副会话入口（2026-11-17 批2）：花名册首次加载时读 PARTNER_SIDE_SESSIONS 写这里；
@@ -72,10 +64,6 @@ const state = {
   sideSessionsEnabled: false,
   // 对话流逐字浮现（2026-11-13）：null = 开关还没回来，按默认开跑；false 走旧的整块渲染。
   chatRevealFlag: null,
-  // 任务中心重做开关（2026-11-13 批 1）：null = 还没问过；true/false = 已定。
-  tasksRedesignFlag: null,
-  // 对话历史分页开关（2026-11-13）：null = 还没问过；false 走旧的一次拉 200 条。
-  chatPagingFlag: null,
   // 历史翻页状态（2026-11-13 按天分组·上滑加载）：只对当前会话有效，切会话即重置。
   // started=false 时滚动监听不触发；cursor=null 且 hasMore=false 表示已经到最早。
   history: { started: false, cursor: null, hasMore: false, loading: false, pages: 0, top: null },
@@ -88,9 +76,6 @@ const state = {
   tasksHitterSettled: false,
   // 今日回顾当前看的那天（本地 YYYY-MM-DD）；空 = 还没进过页面
   reviewDay: "",
-  // 项目筛选的选项来自 GET /api/v1/projects；接口不在时用任务单里的项目名兜底
-  projects: [],
-  projectsFetchedAt: 0,
   // SSE 断点重放（2026-11-04 seq 方案）：当前会话已收到的最大事件序号。
   // 切会话/刷新即归零——那两种路径本来就走 /messages 全量回读，不需要补帧。
   maxSeq: 0,

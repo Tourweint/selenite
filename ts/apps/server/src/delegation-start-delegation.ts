@@ -18,6 +18,7 @@ import { WorkStatus } from "./work-record.ts";
 import { DelegationPhase } from "@lifediary/shared";
 import { buildManagerIdentity, formatMessageLine, formatProgressLine, formatReport, truncate } from "./delegation-delegation-kickoff.ts";
 import type { DelegationKickoff, DelegationReport, DelegationRuntime } from "./delegation-delegation-kickoff.ts";
+import { registerTicketAbort, unregisterTicketAbort } from "./worker-control.ts";
 
 export function startDelegation(
 	kick: DelegationKickoff,
@@ -35,6 +36,9 @@ export function startDelegation(
 	let done = 0;
 	let current = "";
 	let settled = false;
+	// M0 取消语义（2026-11-22 合并方案 §5.3）：每次派单一个控制器，只由"取消这张单"触发，
+	// 不跟聊天轮次结束挂钩；signal 经 runtime.run 传到 supervisor / employee.run。
+	const ticketAbort = new AbortController();
 
 	const projectName = kick.project?.name || kick.project?.id;
 	// 身份在派单开始时取一次快照，两次 launch（含续跑失败回退）共用同一个值：
@@ -71,7 +75,11 @@ export function startDelegation(
 	};
 
 	const translate = (event: ChancellorEvent): void => {
-		if (event.ticketId && !ticketId) ticketId = event.ticketId;
+		if (event.ticketId && !ticketId) {
+			ticketId = event.ticketId;
+			// 单号一出现就挂上控制器：取消端点按 ticketId 查得到它。
+			registerTicketAbort(ticketId, ticketAbort);
+		}
 		switch (event.type) {
 			case "ticket":
 				emitProgress("accepted", event.message ?? "已受理");
@@ -123,6 +131,9 @@ export function startDelegation(
 		if (settled) return;
 		settled = true;
 		ticketId = result.ticketId || ticketId;
+		// 结算即摘控制器（回退改派时原单号也摘，避免留下永远不会再用的入口）。
+		unregisterTicketAbort(ticketId, ticketAbort);
+		if (kick.resumeTicketId) unregisterTicketAbort(kick.resumeTicketId, ticketAbort);
 		// 终态结算（2026-11-08 刀二 E2）：真终态落一条 work 履历，settled 守卫保证一次。
 		//
 		// 放在作废位判断**之前**：取消 / 中止也要结算（终态=canceled / aborted）。
@@ -242,6 +253,9 @@ export function startDelegation(
 		settled = true;
 		// 续跑在派活前被拒时没有新单号；这时失败归属原单，不要发成「(未受理)」。
 		ticketId = ticketId || kick.resumeTicketId || fallbackTicketId;
+		// 结算即摘控制器（回退改派时原单号也摘）。
+		unregisterTicketAbort(ticketId, ticketAbort);
+		if (kick.resumeTicketId) unregisterTicketAbort(kick.resumeTicketId, ticketAbort);
 		const line = error instanceof Error ? error.message : String(error);
 		// 原始错误只进服务端日志：可能带上游地址甚至 key 片段。
 		runtime.log?.(`[delegate] 失败: ${line}`);
@@ -301,7 +315,8 @@ export function startDelegation(
 	const launch = (request: ChancellorRequest): { id: string; promise: Promise<TicketResult> } => {
 		// 2026-11-16 多 CLI：每次派单懒读执行器设置，新单带上 employee / profile。
 		// 续跑时 chancellor 按 ticket.employee 与原单快照走，这两个字段不会改派。
-		const executor = executorForDelegation();
+		// 2026-11-22 前端直派任务：kick.executor 固定 pool（只对新单生效）。
+		const executor = !request.resumeTicketId && kick.executor ? kick.executor : executorForDelegation();
 		// 2026-11-17：按单指定的权限档只覆盖**新单**；续跑沿用原单快照，不在这里改。
 		const profile: EmployeeProfile =
 			!request.resumeTicketId && kick.employeePermission
@@ -315,7 +330,7 @@ export function startDelegation(
 				employee: executor.employee,
 				employeeProfile: profile,
 			},
-			{ onEvent: translate },
+			{ onEvent: translate, signal: ticketAbort.signal },
 		);
 		// 这里必须同步读：run 的同步段已经把单号发出来了。
 		return { id: ticketId, promise };
@@ -389,12 +404,23 @@ export function startDelegation(
 	// 执事在自己领域内直派（2026-11-07）：managers:false 让 chancellor 不建分管宰相。
 	// 递归在参数层断掉，不需要改跨仓契约。
 	const managerSwitch = kick.managers === false ? { managers: false as const } : {};
+	// 续跑：run 的同步段未必先发事件，launch 前先用原单号挂上取消控制器。
+	if (kick.resumeTicketId) registerTicketAbort(kick.resumeTicketId, ticketAbort);
 	const first = launch(
 		kick.resumeTicketId
-			? { resumeTicketId: kick.resumeTicketId, answer: kick.requirement }
-			: {
-					requirement: kick.requirement,
-					...(kick.domain ? { domain: kick.domain } : {}),
+			? {
+					resumeTicketId: kick.resumeTicketId,
+					answer: kick.requirement,
+					// ticket 准入优先级（2026-11-22 M1b）：续跑也排队，不许绕过闸门。
+					...(kick.priority !== undefined ? { priority: kick.priority } : {}),
+				}
+				: {
+						requirement: kick.requirement,
+						// 预分配单号（2026-11-22 前端直派任务）：宿主先建专线再落单。
+						...(kick.ticketId ? { ticketId: kick.ticketId } : {}),
+						// 新单同理：优先级由宿主按触发来源推导，chancellor 只用来排队。
+						...(kick.priority !== undefined ? { priority: kick.priority } : {}),
+						...(kick.domain ? { domain: kick.domain } : {}),
 					...(managerIdentity ? { managerIdentity } : {}),
 					...managerSwitch,
 					...projectField,
@@ -409,6 +435,8 @@ export function startDelegation(
 					originConversationId: String(kick.conversationId),
 				},
 	);
+	// 双保险：事件通道之外再按 launch 同步返回的单号挂一次（同一张单，后者覆盖前者）。
+	if (first.id) registerTicketAbort(first.id, ticketAbort);
 	let accepted = first;
 	let fellBack = false;
 	let dispatched = true;
@@ -423,6 +451,8 @@ export function startDelegation(
 		} else {
 			accepted = launch({
 				requirement: kick.requirement,
+				// 回退重派也是一张新单：优先级照带（2026-11-22 M1b）。
+				...(kick.priority !== undefined ? { priority: kick.priority } : {}),
 				...(kick.domain ? { domain: kick.domain } : {}),
 				...(managerIdentity ? { managerIdentity } : {}),
 				...managerSwitch,
@@ -435,6 +465,12 @@ export function startDelegation(
 				originConversationId: String(kick.conversationId),
 			});
 		}
+	}
+
+	// resumeOnly 被拒：这次没有可跑的活，撤销 launch 前登记的控制器，
+	// 别给一张永远不会再跑的票留一个取消入口。
+	if (!dispatched && kick.resumeTicketId) {
+		unregisterTicketAbort(kick.resumeTicketId, ticketAbort);
 	}
 
 	// 派活留言（2026-11-07）：单号一确定就落一条"谁在什么时候说了什么"。

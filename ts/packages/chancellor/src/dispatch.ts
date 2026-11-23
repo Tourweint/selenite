@@ -140,8 +140,32 @@ export async function dispatchTask(
 ): Promise<TaskRun> {
   const dirName = taskDirName(seq, task.slug);
   const dir = path.join(ticketDir, dirName);
-  ensureDir(dir);
   const workDir = options.workDir;
+  const kind = options.employeeKind ?? EMPLOYEE;
+  // 取消发生在等车道槽位时：不建 TASK.md、不起雇员，直接回一张 aborted 的单。
+  // 车道闸门在 signal 中止时会返回 granted=false，不会占槽；这里把收尾做实。
+  if (signal?.aborted) {
+    return {
+      ticketId: ticket.id,
+      seq,
+      task,
+      dir,
+      dirName,
+      employee: kind,
+      exitCode: null,
+      timedOut: false,
+      aborted: true,
+      processOk: false,
+      processError: "已停止",
+      sessionId: null,
+      reportExists: false,
+      report: null,
+      reportError: "已停止",
+      stderrTail: "",
+      ...(workDir ? { workDir } : {}),
+    };
+  }
+  ensureDir(dir);
   const prompt = buildWorkerPrompt(
     task,
     dirName,
@@ -150,7 +174,6 @@ export async function dispatchTask(
   );
   writeText(path.join(dir, "TASK.md"), prompt);
 
-  const kind = options.employeeKind ?? EMPLOYEE;
   const employee = options.employeeFactory?.(kind) ?? createEmployee(kind);
   const resumeAnswer = options.resumeAnswer;
   // 会话号只从落盘读：进程重启后同一张单续跑仍拿得到（2026-11-08 8f）。
