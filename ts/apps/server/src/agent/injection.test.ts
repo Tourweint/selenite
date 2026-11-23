@@ -9,6 +9,7 @@
  * assist.ts 的 memoryEngine / skillStore 是模块级单例。
  */
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -33,9 +34,14 @@ mkdirSync(join(root, "skills"), { recursive: true });
 writeFileSync(join(root, "skills", `${SKILL_NAME}.md`), `${SKILL_SUMMARY}\n${SKILL_MANUAL}\n`, "utf8");
 // 逃生门测试用：默认关着的技能，SKILL_STATE=false 时应重新进索引
 writeFileSync(join(root, "skills", "hidden-skill.md"), "隐藏技能摘要\n隐藏技能正文\n", "utf8");
+// 2026-11-21 普通助手独立技能可见性：只给保留键 worker 开的技能
+writeFileSync(join(root, "skills", "worker-skill.md"), "普通助手独开摘要\n普通助手独开正文\n", "utf8");
 writeFileSync(
 	join(root, "skills-state.json"),
-	`${JSON.stringify({ enabled: { [SKILL_NAME]: true } })}\n`,
+	`${JSON.stringify({
+		enabled: { [SKILL_NAME]: true },
+		partners: { worker: { enabled: { "worker-skill": true } } },
+	})}\n`,
 	"utf8",
 );
 
@@ -210,23 +216,16 @@ test("B: SKILL_STATE=false 逃生门 —— 默认关着的技能也全进索引
 	}
 });
 
-test("B: tool_index —— 无可加载 deferred 整段省略；开关关也省略；有列表含名字与提示", () => {
+test("B: skills —— 普通助手（chatKind=worker）走独立命名空间，不吃别的角色的按人覆盖", () => {
+	const text = sysText(skillsProvider, { conversationId: 321, chatKind: "worker" });
+	assert.match(text ?? "", /worker-skill/, "worker 独开的技能进了普通助手索引");
+	assert.match(text ?? "", new RegExp(SKILL_NAME), "全局已开的照旧有");
+	const chief = sysText(skillsProvider, { conversationId: 322, chatKind: "chief" });
+	assert.doesNotMatch(chief ?? "", /worker-skill/, "别的角色索引不吃 worker 的独开");
+});
+
+test("B: tool_index —— 无可加载 deferred 整段省略；有列表含名字与提示（开关 2026-11-21 退役恒渲染）", () => {
 	assert.equal(toolIndexProvider({ ...BASE, deferred: [] }), undefined, "空列表不造空段");
-	const saved = process.env.AGENT_TOOL_INDEX;
-	process.env.AGENT_TOOL_INDEX = "false";
-	try {
-		assert.equal(
-			toolIndexProvider({
-				...BASE,
-				deferred: [{ name: "routine_manage", description: "自建常驻自主轮。" }],
-			}),
-			undefined,
-			"开关关一行回滚",
-		);
-	} finally {
-		if (saved === undefined) delete process.env.AGENT_TOOL_INDEX;
-		else process.env.AGENT_TOOL_INDEX = saved;
-	}
 	const text = sysText(toolIndexProvider, {
 		deferred: [{ name: "routine_manage", description: "自建常驻自主轮。" }],
 	});
@@ -246,6 +245,8 @@ test("B: section 顺序快照（位置 = 数组下标，改序打掉提示词缓
 			"clarify_contract",
 			"injection_guard",
 			"current_project",
+			// 2026-11-22 记忆外挂源批：一生库目录（固定前缀段；未配置 = 零字节）。
+			"persona_catalog",
 			// 2026-11-16：派活执行器知情段（新单派给谁 / 模型 / 权限）。
 			"delegate_executor",
 			"skills",
@@ -340,6 +341,8 @@ test("顺序快照：INJECTION_ORDER 是缓存前缀资产（改它 = 有意的�
 		"current_project",
 		// 2026-11-19 前缀锁定：当前项目的动态一半（走消息尾部）
 		"current_project_live",
+		// 2026-11-22 记忆外挂源批：一生库目录常驻段（order 46，skills 之前，进静态前缀）
+		"persona_catalog",
 		"skills",
 		// 2026-11-16 C 段：低频工具索引排在消息注入之前
 		"tool_index",
@@ -347,6 +350,8 @@ test("顺序快照：INJECTION_ORDER 是缓存前缀资产（改它 = 有意的�
 		// （先知道"负责哪几摊"，后面那批记忆行才有归属可对）
 		"project_index",
 		"memory_recall",
+		// 2026-11-22 记忆外挂源批：一生库轻召回（order 105，小库之后、技能斜杠之前）
+		"persona_recall_light",
 		"skill_slash",
 		"recover_note",
 		"turn_limit_approaching",
@@ -374,6 +379,121 @@ test("顺序快照：INJECTION_ORDER 是缓存前缀资产（改它 = 有意的�
 	]);
 	const values = Object.values(INJECTION_ORDER);
 	assert.equal(new Set(values).size, values.length, "order 不允许重值");
+});
+
+// ── 一生记忆库外挂注入（2026-11-22 记忆外挂源批 §六.3 后两项）────────────
+
+test("persona_catalog：配置了 + 成功拉过才注；群聊 / 非 chief 执事 / 未拉过不注", async () => {
+	const { personaCatalogProvider } = await import("./lifecycle-injections.ts");
+	const { refreshPersonaCatalogInjection, resetPersonaCatalogForTests } = await import(
+		"../persona-inject.ts"
+	);
+	resetPersonaCatalogForTests();
+	// 还没成功拉过目录：整段不注（不造空标题段）。
+	assert.equal(personaCatalogProvider(BASE), undefined, "没拉过目录不注");
+
+	// provider 读的是 process.env（生产契约，无注入口）：父闸两个键临时挂上，测完复原。
+	const savedAsk = process.env.PERSONA_MEMORY_ASK;
+	const savedPython = process.env.PERSONA_PYTHON;
+	process.env.PERSONA_MEMORY_ASK = join(root, "ask.py");
+	process.env.PERSONA_PYTHON = "py3";
+	const catalogEnv: NodeJS.ProcessEnv = {
+		...process.env,
+		AGENT_FLAGS_PATH: join(root, `persona-catalog-${process.pid}.json`),
+	};
+	delete catalogEnv.PERSONA_MEMORY_INJECT;
+	delete catalogEnv.PERSONA_MEMORY_ENABLED;
+	writeFileSync(catalogEnv.AGENT_FLAGS_PATH!, "{}\n", "utf8");
+	// 假 spawn：catalog 走 --catalog-only，stdout 喂两行边界文本（不真起 python）。
+	const catalogSpawn = ((command: string, args: string[]) => {
+		assert.ok(String(command), "python 命令非空");
+		assert.ok(args.includes("--catalog-only"), "目录走 --catalog-only 入口");
+		const child = new EventEmitter() as EventEmitter & { stdout: EventEmitter; stderr: EventEmitter; kill(): boolean };
+		child.stdout = new EventEmitter();
+		child.stderr = new EventEmitter();
+		child.kill = () => true;
+		queueMicrotask(() => {
+			child.stdout.emit("data", Buffer.from("库里 100 个事件 / 74 个月\n常提的人：a、b\n", "utf8"));
+			child.emit("close", 0);
+		});
+		return child as never;
+	}) as unknown as typeof import("node:child_process").spawn;
+	await refreshPersonaCatalogInjection({ env: catalogEnv, spawnFn: catalogSpawn });
+	try {
+		const item = personaCatalogProvider(BASE);
+		assert.ok(item && !Array.isArray(item), "配置齐 + 拉过 → 注入");
+		if (item && !Array.isArray(item)) {
+			assert.equal(item.id, "persona_catalog");
+			assert.equal(item.channel, "system");
+			assert.equal(item.scope, "session");
+			assert.match(item.text ?? "", /^以下是主人一生记忆库的边界/);
+		}
+		assert.equal(
+			personaCatalogProvider({ ...BASE, group: true }),
+			undefined,
+			"群聊不注（群聊不走个人记忆）",
+		);
+		assert.equal(
+			personaCatalogProvider({ ...BASE, partnerId: "p-1" }),
+			undefined,
+			"非 chief 执事不注（执事轮已有大量 partner_context，目录收益低）",
+		);
+		// 审计投影自动覆盖：登记表里走一遍，persona_catalog 要出现。
+		const rows = auditInjections(
+			INJECTION_REGISTRY.filter((row) => row.source === "lifecycle"),
+			{ conversationId: 1, chatKind: "chief", partnerId: null, dryRun: true },
+		);
+		assert.ok(
+			rows.some((row) => row.id === "persona_catalog"),
+			"审计投影覆盖新注入 id（无白名单要补）",
+		);
+	} finally {
+		resetPersonaCatalogForTests();
+		if (savedAsk === undefined) delete process.env.PERSONA_MEMORY_ASK;
+		else process.env.PERSONA_MEMORY_ASK = savedAsk;
+		if (savedPython === undefined) delete process.env.PERSONA_PYTHON;
+		else process.env.PERSONA_PYTHON = savedPython;
+		rmSync(catalogEnv.AGENT_FLAGS_PATH!, { force: true });
+	}
+});
+
+test("总闸 PERSONA_MEMORY_INJECT=false：catalog 段与轻召回两处净增消失", async () => {
+	const { personaCatalogProvider } = await import("./lifecycle-injections.ts");
+	const {
+		personaCatalogCachedText,
+		personaInjectGatesClosed,
+		refreshPersonaCatalogInjection,
+		resetPersonaCatalogForTests,
+	} = await import("../persona-inject.ts");
+	resetPersonaCatalogForTests();
+	const catalogEnv: NodeJS.ProcessEnv = {
+		...process.env,
+		AGENT_FLAGS_PATH: join(root, `persona-catalog-off-${process.pid}.json`),
+		PERSONA_MEMORY_ASK: join(root, "ask.py"),
+		PERSONA_MEMORY_INJECT: "false",
+	};
+	writeFileSync(catalogEnv.AGENT_FLAGS_PATH!, "{}\n", "utf8");
+	try {
+		assert.equal(personaInjectGatesClosed(catalogEnv), true, "总闸关 = 闸门判关");
+		await refreshPersonaCatalogInjection({ env: catalogEnv });
+		assert.equal(personaCatalogCachedText(), null, "总闸关时不拉目录");
+		assert.equal(personaCatalogProvider(BASE), undefined, "catalog 段消失");
+		// 审计走真实 process.env：本进程未配 PERSONA_MEMORY_ASK，父闸不过 = 不注册（同回滚口径）。
+		const rows = auditInjections(INJECTION_REGISTRY, {
+			conversationId: 1,
+			chatKind: "chief",
+			partnerId: null,
+			dryRun: true,
+		});
+		assert.ok(!rows.some((row) => row.id === "persona_catalog"), "审计清单里没有 catalog");
+		assert.ok(
+			!rows.some((row) => row.id === "persona_recall_light"),
+			"轻召回走 beforeRequest 拼条目，总闸关/父闸不过时整条不产生",
+		);
+	} finally {
+		resetPersonaCatalogForTests();
+		rmSync(catalogEnv.AGENT_FLAGS_PATH!, { force: true });
+	}
 });
 
 // ── 审计 ───────────────────────────────────────────────

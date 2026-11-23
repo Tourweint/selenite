@@ -10,7 +10,7 @@ import { approvalStore } from "../approvals.ts";
 import { ASK_USER_TOOL_NAME, ASK_USER_WAITING_MESSAGE, askUserEnabled, createAskUserPending } from "../ask-user.ts";
 import { autonomyEscalationBlockReason, autonomyRiskVerdict } from "../autonomy-risk.ts";
 import { isAutonomyTurn } from "../autonomy-state.ts";
-import { bashBackgroundEnabled, bgJobWakeEnabled, bgJobWakePayload, moveToBackground, replacedResult, timeoutSecondsFromResult } from "../bash-background.ts";
+import { bashBackgroundEnabled, bgJobWakePayload, moveToBackground, replacedResult, timeoutSecondsFromResult } from "../bash-background.ts";
 import { setApprovalLevelSource } from "../delegation-authority.ts";
 import { workerSteerEnabled } from "../delegation-gates.ts";
 import { wakeOnBgJobFinish, wakeOnDelegationReport } from "../delegation-wake.ts";
@@ -38,6 +38,7 @@ import { RoutineTask, routineEngine, routineSelfServiceEnabled } from "../routin
 import { runIdentityKey } from "../run-key.ts";
 import { searchModule } from "../search.ts";
 import { makeSkillAdviceSaver, skillAdviceEnabled, skillAdvicePath } from "../skill-advice.ts";
+import { WORKER_SKILL_OWNER, workerSkillScopeEnabled } from "../skill-state.ts";
 import {
 	makeReminderAdviceSaver,
 	reminderAdviceEnabled,
@@ -59,11 +60,12 @@ import { setChatKindsSource, setProjectBindingsSource, setProjectLabelResolver, 
 import { guardRelayDelivery } from "./injection-guard.ts";
 import {
 	INJECTION_CONTEXT_HEADER,
+	INJECTION_ORDER,
 	collectInjections,
 	guardProvider,
-	promptTailInjectionEnabled,
 } from "./injection.ts";
-import { LIFECYCLE_MESSAGE_PROVIDERS, clarifyContractProvider, currentProjectProvider, personaProvider, skillsProvider, toolIndexProvider, userProfileProvider, verificationIronLawProvider } from "./lifecycle-injections.ts";
+import { LIFECYCLE_MESSAGE_PROVIDERS, personaCatalogProvider, personaRecallLightTextFor, clarifyContractProvider, currentProjectProvider, personaProvider, skillsProvider, toolIndexProvider, userProfileProvider, verificationIronLawProvider } from "./lifecycle-injections.ts";
+import { startPersonaCatalogRefresh } from "../persona-inject.ts";
 import { BASH_TIMEOUT_S, approvalMode, policy, readOnlyBlockReason } from "./policy.ts";
 import { markRecoverResume } from "./recover-note.ts";
 import { recallSessionsEnabled, searchSessions } from "./session-search.ts";
@@ -497,6 +499,21 @@ export const LIFECYCLE_SECTIONS: readonly PromptSection[] = [
 			collectInjections([currentProjectProvider], { conversationId: input.conversationId })
 				.system[0]?.text,
 	},
+	// 一生记忆库的库目录常驻段（2026-11-22 记忆外挂源批）：渲染走 personaCatalogProvider
+	//（同步读 persona-inject 的预取缓存；异步刷新由 startPersonaCatalogRefresh 每 10 分钟拉）。
+	// 位置由本数组下标决定——排在 current_project 之后、delegate_executor 之前，
+	// 与 INJECTION_ORDER.persona_catalog=46 的框架内顺序一致（46 > 40，< skills 50）。
+	{
+		key: "persona_catalog",
+		render: (input) => {
+			const conversationId = Number(input.conversationId);
+			return collectInjections([personaCatalogProvider], {
+				conversationId,
+				partnerId: partnerOfSession(conversationId),
+				group: groupOfSession(conversationId),
+			}).system[0]?.text;
+		},
+	},
 	// 当前派活执行器（2026-11-16）：让总管/执事能回答“会派给谁、什么模型、什么权限”。
 	// 读 .data/executor.json；设置变了这一行跟着变，前缀缓存失效一次是用户主动改的预期。
 	{
@@ -544,6 +561,22 @@ async function openHarness(): Promise<Harness> {
 		memory: memoryEngine,
 		scopeOf,
 		skills: skillStore,
+		// 技能可见性归属（2026-11-21）：worker 会话走保留键 `worker`，不再回落 chief；
+		// 执事用真实 uuid，主对话 / 未链接旧会话仍是 chief。单测 / 探针不传 = 旧行为。
+		skillOwnerOf: async (conversationId) => {
+			if (!COMPANIONS_ENABLED) return null;
+			const linked = partnerOfSession(conversationId);
+			if (linked) return linked;
+			try {
+				const harness = await getHarness();
+				const kinds = await harness.snapshot(ChatKinds, CTX);
+				return kinds?.byInternal?.[String(conversationId)] === "worker" && workerSkillScopeEnabled()
+					? WORKER_SKILL_OWNER
+					: CHIEF_PARTNER_ID;
+			} catch {
+				return CHIEF_PARTNER_ID;
+			}
+		},
 		delegate: CHANCELLOR_ENABLED,
 		// 项目前置（2026-11-03 方案 §5.5）：派新活前先过登记表。
 		projects: projectsStore(),
@@ -1051,20 +1084,16 @@ async function openHarness(): Promise<Harness> {
 										// 批3（唤醒管道）：完成即唤醒——在写记录之外投一条 bgjob 信封，
 										// 唤醒轮落在发起会话所属执事的 canonical 主会话。信封只递原料
 										//（命令摘要 / 退出码 / 尾部 ≤400 字），说不说由执事自己定。
-										// 回滚：BG_JOB_WAKE_ENABLED=false → 只写记录（改动前行为）；
-										// WAKE_PIPELINE_V2=false → 信封在管道口被拦（delegation 照旧）。
-										if (bgJobWakeEnabled()) {
-											wakeOnBgJobFinish(
-												api.conversationId,
-												bgJobWakePayload(record, tail, record.status === "done" ? "done" : "failed"),
-											);
-										}
+										//（BG_JOB_WAKE_ENABLED / WAKE_PIPELINE_V2 回滚开关 2026-11-21 退役，恒投。）
+										wakeOnBgJobFinish(
+											api.conversationId,
+											bgJobWakePayload(record, tail, record.status === "done" ? "done" : "failed"),
+										);
 									},
 									// 批3：运行中输出变化检测（ZCode 式）。间隔 BG_JOB_WATCH_INTERVAL_S
 									// （默认 0=关，仅完成唤醒）；检测在 bash-background，投递走同一入口。
 									// 尾部摘要只进会话输入（唤醒轮提示词），服务端日志不落它。
 									onOutputChange: (record, logTail) => {
-										if (!bgJobWakeEnabled()) return;
 										wakeOnBgJobFinish(
 											api.conversationId,
 											bgJobWakePayload(record, logTail, "running"),
@@ -1154,7 +1183,7 @@ async function openHarness(): Promise<Harness> {
 						// system 角色会被 OpenAI 兼容层折叠进第一条 system，等于改固定前缀、整段缓存作废。
 						// 尾部追加还能保住本轮已产生的 assistant / tool 历史缓存。
 						const kinds = await api.snapshot(ChatKinds, ctx).catch(() => null);
-						const collected = collectInjections(LIFECYCLE_MESSAGE_PROVIDERS, {
+						const injectionCtx = {
 							conversationId: api.conversationId,
 							turn: used,
 							userText,
@@ -1164,7 +1193,22 @@ async function openHarness(): Promise<Harness> {
 									? "worker"
 									: "chief",
 							group: groupOfSession(api.conversationId),
-						});
+						} as const;
+						const collected = collectInjections(LIFECYCLE_MESSAGE_PROVIDERS, injectionCtx);
+						// 一生记忆库轻召回（2026-11-22 记忆外挂源批）：provider 契约是同步的，
+						// 而轻召回要 await ask.py（60s 节流 + 单飞都在中间件里），在框架收集后
+						// 以同一 ctx 拼条目再按 order 插回——排序口径与框架内一致（order 105）。
+						const personaLight = await personaRecallLightTextFor(injectionCtx).catch(() => undefined);
+						if (personaLight) {
+							collected.message.push({
+								id: "persona_recall_light",
+								text: personaLight,
+								order: INJECTION_ORDER.persona_recall_light,
+								scope: "turn",
+								channel: "message",
+							});
+							collected.message.sort((a, b) => a.order - b.order);
+						}
 						// 设置 → 上下文只读这份"首轮实文"：记忆召回会回写使用计数，
 						// 读端点不能为了预览重跑，只能记真正发出去的那一轮。
 						if (used === 1) {
@@ -1174,20 +1218,8 @@ async function openHarness(): Promise<Harness> {
 							);
 						}
 						if (collected.message.length === 0) return undefined;
-						// 回滚形态（PROMPT_TAIL_INJECTION=false）：旧行为——system 拼在请求最前面。
-						// 会整段作废前缀缓存；只留给兼容性排查，默认走尾部 user。
-						if (!promptTailInjectionEnabled()) {
-							return {
-								messages: [
-									...collected.message.map((item) => ({
-										role: "system" as const,
-										content: item.text,
-										timestamp: Date.now(),
-									})),
-									...request.messages,
-								],
-							};
-						}
+						// 动态注入恒走尾部 user（PROMPT_TAIL_INJECTION 回滚开关 2026-11-21 退役；
+						// 旧 system 前缀形态会整段作废缓存，已删）。
 						const injected = [
 							INJECTION_CONTEXT_HEADER,
 							collected.message.map((item) => item.text).join("\n\n"),
@@ -1256,6 +1288,9 @@ async function openHarness(): Promise<Harness> {
 	// 人随时回来批）；只有 blocking 回滚形态才把遗留 pending 置 timeout（fail-closed）。
 	// 必须早于 resume()——恢复重走 beforeTool 时会复用 callId 生成/覆盖审批记录。
 	approvalStore().load({ expireLeftover: approvalMode() === "blocking" });
+	// 一生记忆库的库目录（2026-11-22 记忆外挂源批）：启动拉一次 + 每 10 分钟刷新进缓存，
+	// persona_catalog section 的 render 只同步读缓存。总闸关 / 未配置 = 不起 python、零字节。
+	startPersonaCatalogRefresh();
 
 	// 上次进程没跑完的活（包括睡着的提醒）接着跑
 	harness.resume();

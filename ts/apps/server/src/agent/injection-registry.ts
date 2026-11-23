@@ -14,6 +14,7 @@ import {
 	clarifyContractProvider,
 	currentProjectLiveProvider,
 	currentProjectProvider,
+	personaCatalogProvider,
 	personaProvider,
 	recoverNoteProvider,
 	skillSlashProvider,
@@ -33,6 +34,9 @@ export const INJECTION_REGISTRY: readonly RegisteredInjection[] = [
 	{ source: "lifecycle", provider: clarifyContractProvider },
 	{ source: "lifecycle", provider: guardProvider },
 	{ source: "lifecycle", provider: currentProjectProvider },
+	// 一生记忆库目录（2026-11-22 记忆外挂源批）：system 段，紧跟 current_project。
+	// 未配置 / 总闸关时 provider 返回 undefined，审计里不出现（按 id 收集，不注册 = 零痕迹）。
+	{ source: "lifecycle", provider: personaCatalogProvider },
 	{ source: "lifecycle", provider: skillsProvider },
 	// 2026-11-19 前缀锁定：动态一半走消息尾部（审计里能单独看到）。
 	{ source: "lifecycle", provider: currentProjectLiveProvider },

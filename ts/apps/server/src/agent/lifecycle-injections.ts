@@ -13,6 +13,7 @@
  */
 
 import { basename } from "node:path";
+import type { spawn } from "node:child_process";
 import {
 	INJECTION_ORDER,
 	type InjectionContext,
@@ -41,11 +42,18 @@ import { PERSONA, memoryRecallProvider, projectIndexProvider, skillStore } from 
 import { readUserProfile, renderUserProfileSection, userProfileEnabled } from "../user-profile.ts";
 import { readWorkerPersona, WORKER_PERSONA_CHAT_TOOLS } from "../worker-persona.ts";
 import { skillSlashOf } from "../skills.ts";
+import { WORKER_SKILL_OWNER, workerSkillScopeEnabled } from "../skill-state.ts";
 import { recordSkillUse } from "../skill-usage.ts";
 import { buildPartnerTurnContext } from "./partner-context.ts";
 import { workSummaryFor } from "../work-record.ts";
 import { takeRecoverNote } from "./recover-note.ts";
-import { toolIndexEnabled, toolIndexText } from "../tool-index.ts";
+import { toolIndexText } from "../tool-index.ts";
+import {
+	personaCatalogCachedText,
+	personaInjectGatesClosed,
+	PERSONA_CATALOG_TITLE,
+	personaLightRecall,
+} from "../persona-inject.ts";
 
 function entry(
 	id: string,
@@ -63,11 +71,13 @@ function isNonChiefPartner(partnerId: string | null | undefined): boolean {
 }
 
 /**
- * 技能按人可见用的 partnerId（2026-11-15）。
- * 执事会话直接用 ctx.partnerId；主对话没有链接记录，回落 effectivePartnerIdOfSession（= chief）。
+ * 技能按人可见用的 partnerId（2026-11-15；2026-11-21 普通助手独立）。
+ * 执事会话直接用 ctx.partnerId；worker 会话走保留键 `worker`（不再回落 chief，
+ * 普通助手有自己的技能勾选）；主对话没有链接记录，回落 effectivePartnerIdOfSession（= chief）。
  * 读不到就按无 partner 处理（只走全局启停位）。
  */
 function skillPartnerOf(ctx: InjectionContext): string | null {
+	if (ctx.chatKind === "worker" && workerSkillScopeEnabled()) return WORKER_SKILL_OWNER;
 	if (ctx.partnerId) return ctx.partnerId;
 	if (!COMPANIONS_ENABLED) return null;
 	try {
@@ -320,13 +330,41 @@ export const skillsProvider: InjectionProvider = (ctx) => {
 
 /**
  * 低频工具索引（2026-11-16 C 段）：只列当前会话还能加载的 deferred（render 从 agent.deferred 取来）。
- * 开关关 / 一个都没有 → 整段省略（不造空段）。末尾追加，位置由 lifecycle sections 数组决定。
+ * 一个都没有 → 整段省略（不造空段）。末尾追加，位置由 lifecycle sections 数组决定。
+ *（AGENT_TOOL_INDEX 回滚开关 2026-11-21 退役，恒渲染。）
  */
 export const toolIndexProvider: InjectionProvider = (ctx) => {
-	if (!toolIndexEnabled()) return undefined;
 	const text = toolIndexText(ctx.deferred ?? []);
 	if (!text) return undefined;
 	return entry("tool_index", text, INJECTION_ORDER.tool_index, "system");
+};
+
+/**
+ * 一生记忆库的库目录常驻段（2026-11-22 记忆外挂源批，方案 §2.3）：
+ *
+ * 大库（persona-metric）只有 persona_recall 工具时，模型不"记得去查"就等于库不存在。
+ * 这段把 ask.py --catalog-only 的库边界（事件 / 人 / 月 / 高频对象统计，~4 行数百字）
+ * 裁到 ≤600 字进**静态前缀**——模型每轮都知道大库里有什么，才会主动点名查。
+ *
+ * 位置：紧跟 current_project(40)、在 skills(50) 之前（INJECTION_ORDER.persona_catalog=46）；
+ * 与 user_profile 同款：净增一段固定前缀，缓存前缀变化一次，预期内。
+ * 触发：总闸 `PERSONA_MEMORY_INJECT` + 父双闸（persona-inject.ts 统一判）；
+ * catalog 只进**总管 / 普通会话**——非 chief 执事轮已有大量 partner_context 注入，
+ * 再加目录段收益低；群聊同跳（群聊不走个人记忆）。取不到内容（未配置 / 失败 /
+ * 还没成功拉过）= 整段不注，零字节（目录是锦上添花段，失败不该留下空标题）。
+ */
+export const personaCatalogProvider: InjectionProvider = (ctx) => {
+	if (ctx.group) return undefined;
+	if (isNonChiefPartner(ctx.partnerId)) return undefined;
+	if (personaInjectGatesClosed()) return undefined;
+	const catalog = personaCatalogCachedText();
+	if (!catalog) return undefined;
+	return entry(
+		"persona_catalog",
+		`${PERSONA_CATALOG_TITLE}\n${catalog}`,
+		INJECTION_ORDER.persona_catalog,
+		"system",
+	);
 };
 
 /** B 期登记表（顺序 = lifecycle sections 数组下标顺序；section 物理位置不由它决定）。 */
@@ -335,6 +373,7 @@ export const LIFECYCLE_SECTION_PROVIDERS: readonly InjectionProvider[] = [
 	verificationIronLawProvider,
 	clarifyContractProvider,
 	currentProjectProvider,
+	personaCatalogProvider,
 	skillsProvider,
 	toolIndexProvider,
 ];
@@ -422,6 +461,38 @@ export const partnerContextProvider: InjectionProvider = (ctx) => {
 		return undefined;
 	}
 };
+
+/**
+ * 一生记忆库轻召回（2026-11-22 记忆外挂源批，方案 §2.2）：
+ *
+ * 大库命中行做**第二级**：小库 memory_recall 照旧第一级（16 条 / 2000 字），这里
+ * ≤3 条 / 800 字独立预算，紧跟其后（order 105）——先最近与偏好，再一生库的旧事。
+ * 分层不进打分池（两库条目不同构），分组标题【更早的记录】在这里拼（personaLightRecall
+ * 只回行数组，标题属于接线层——它告诉模型"这是背景不是话题"）。
+ *
+ * async provider：`collectInjections` 的 provider 契约允许返回 Promise 吗——不允许，
+ * provider 必须同步。所以本条不能直接进 LIFECYCLE_MESSAGE_PROVIDERS；它在
+ * lifecycle-harness 的 beforeRequest 里 await 后以既有 ctx 拼条目（见该文件消息注入处）。
+ * 群聊整段跳过（与 persona_recall 工具同口径）；执事会话照进（执事也该记得主人的旧事）。
+ */
+export const PERSONA_RECALL_LIGHT_HEADER =
+	"【更早的记录】（来自主人一生的记忆库，背景不是话题；查不到 ≠ 没有这回事）";
+
+export async function personaRecallLightTextFor(
+	ctx: InjectionContext,
+	deps: { spawnFn?: typeof spawn } = {},
+): Promise<string | undefined> {
+	if (ctx.group) return undefined;
+	if (personaInjectGatesClosed()) return undefined;
+	const text = ctx.userText ?? "";
+	if (!text.trim()) return undefined;
+	const lines = await personaLightRecall(text, {
+		conversationId: ctx.conversationId,
+		...(deps.spawnFn ? { spawnFn: deps.spawnFn } : {}),
+	});
+	if (lines.length === 0) return undefined;
+	return [PERSONA_RECALL_LIGHT_HEADER, ...lines].join("\n");
+}
 
 /**
  * 消息注入登记表（顺序 = 排序常量；2026-11-19 起实际发送位置改为**请求尾部**）。
