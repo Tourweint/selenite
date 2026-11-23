@@ -10,10 +10,8 @@
 				"CURRENT_PROJECT",
 				"AGENT_ASK_USER",
 				"AGENT_FILE_ATTACHMENTS",
-				"CHAT_DIR_PICK",
 				"CHAT_PROJECT_LABEL",
 				"AGENT_STEER_DEFAULT",
-				"SEARCH_MULTI_VENDOR",
 				"PROJECT_OUTSIDE_WORKSPACE",
 				"PROJECT_MERGE",
 				"PROJECT_ARCHIVE_CHATS",
@@ -29,15 +27,9 @@
 			"keys": [
 				"MEMORY_ENABLED",
 				"MEMORY_EXTRACT",
-				"MEMORY_EXTRACT_NOISE",
-				"MEMORY_CONSOLIDATE_JOB",
-				"MEMORY_PAGE_A",
 				"MEMORY_EXTERNAL",
 				"MEMORY_INJECT_DEDUPE",
 				"PARTNER_MEMORY_RECALL",
-				"PARTNER_PROJECT_MEMORY",
-				"PROJECT_MEMORY_GATE",
-				"PROJECT_MEMORY_ACTIVE_ONLY",
 				"AGENT_RECALL_SESSIONS",
 				"AGENT_SESSIONS_SEARCH",
 				"MEMORY_NIGHTLY_REVIEW",
@@ -55,6 +47,7 @@
 			"desc": "本机和外部记忆库之间的一进一出。往外送的那一项默认开（2026-11-16 拍板），不想要可关。",
 			"keys": [
 				"PERSONA_MEMORY_ENABLED",
+				"PERSONA_MEMORY_INJECT",
 				"PERSONA_EXPORT_ENABLED",
 				"PERSONA_WRITE_ENABLED"
 			]
@@ -66,16 +59,13 @@
 			"keys": [
 				"AUTONOMY_ENABLED",
 				"CHANCELLOR_ENABLED",
-				"DELEGATION_WAKE_ENABLED",
 				"SCHEDULED_TASK_MODEL_RUN",
 				"MINISTER_DISPATCH_AUTHORITY",
 				"ROUTINE_SELF_SERVICE",
 				"DEVICE_AUTO_DISPATCH",
 				"COMPANIONS_ENABLED",
 				"GROUPS_ENABLED",
-				"DELEGATION_PROJECT_MEMORY",
 				"PARTNER_SIDE_SESSIONS",
-				"PARTNER_SESSION_MANAGE",
 				"PARTNER_PERSONA_MODULES",
 				"PARTNER_CONTRACT",
 				"PARTNER_DISCIPLINE_EDIT",
@@ -83,12 +73,9 @@
 				"PARTNER_GREETING_ENABLED",
 				"DEVICE_MATRIX_ENABLED",
 				"COMPANION_HOME_ENABLED",
-				"DELEGATE_WORKDIR",
 				"EXECUTOR_MODEL_CACHE",
-				"ROUTINE_CONDITIONAL",
 				"AGENT_TOOL_POLICY",
 				"EXECUTOR_PROBE",
-				"CHANCELLOR_INTERNAL",
 				"AGENT_PROGRESS_REPORT"
 			]
 		},
@@ -110,7 +97,6 @@
 			"keys": [
 				"SKILLS_ADMIN",
 				"SKILLS_INDEX_CLIP",
-				"PARTNER_TEMPLATES",
 				"PARTNER_WORK_RECORD",
 				"SKILL_ADVICE",
 				"SKILL_USAGE",
@@ -122,10 +108,7 @@
 			"title": "任务与界面",
 			"desc": "任务中心、对话观感、历史翻页、永久删除与工具结果，都是「看起来 / 用起来」的开关。",
 			"keys": [
-				"TASKS_REDESIGN_ENABLED",
-				"SIDEBAR_TASK_GROUPS",
 				"CHAT_STREAM_REVEAL",
-				"CHAT_HISTORY_PAGING_ENABLED",
 				"CHAT_HARD_DELETE",
 				"TOOL_PROJECTION",
 				"TOOL_PROJECTION_WORKER",
@@ -133,11 +116,9 @@
 				"TOOL_USAGE",
 				"CHAT_CONTEXT_INSPECT",
 				"CHAT_CACHE_STATS",
-				"PROMPT_TAIL_INJECTION",
 				"CHAT_CONTEXT_LOOKUP",
+				"CHAT_HTML_CARDS",
 				"AGENT_APPEARANCE_WALLPAPER",
-				"AGENT_TOOL_INDEX",
-				"TASK_AS_CONVERSATION",
 				"EXPORT_BUNDLE",
 				"FILE_BROWSE"
 			]
@@ -265,51 +246,6 @@
 			]
 		},
 		{
-			"key": "MEMORY_PAGE_A",
-			"label": "记忆页新版",
-			"summary": "记忆页用大字概览 + 分组折叠；关 = 回到旧版长列表。默认开，改完刷新页面生效。",
-			"group": "memory",
-			"type": "boolean",
-			"values": [
-				"true",
-				"false"
-			],
-			"defaultValue": "true",
-			"hot": true
-		},
-		{
-			"key": "MEMORY_CONSOLIDATE_JOB",
-			"label": "整理放后台",
-			"summary": "点「整理」后放后台跑，切走再回来还能接上进度；关 = 页面同步等结果（旧行为）。默认开，即时生效。",
-			"group": "memory",
-			"type": "boolean",
-			"values": [
-				"true",
-				"false"
-			],
-			"defaultValue": "true",
-			"hot": true,
-			"requires": [
-				"MEMORY_ENABLED"
-			]
-		},
-		{
-			"key": "MEMORY_EXTRACT_NOISE",
-			"label": "记忆噪声过滤",
-			"summary": "审批续跑等系统话术、命令行和问句不再被写成「经历」。关 = 回到旧规则（每句 ≥6 字都记）。默认开，重启服务后生效。",
-			"group": "memory",
-			"type": "boolean",
-			"values": [
-				"true",
-				"false"
-			],
-			"defaultValue": "true",
-			"hot": false,
-			"requires": [
-				"MEMORY_ENABLED"
-			]
-		},
-		{
 			"key": "MEMORY_EXTERNAL",
 			"label": "外部记忆库入口",
 			"summary": "记忆页底部显示外部记忆库的库边界；关掉整块不显示。默认开，即时生效。",
@@ -337,6 +273,22 @@
 			],
 			"defaultValue": "true",
 			"hot": true
+		},
+		{
+			"key": "PERSONA_MEMORY_INJECT",
+			"label": "记忆自动带上（查）",
+			"summary": "每轮自动从一生记忆库带一点背景：固定一段「库的边界」目录 + 聊到旧事时消息尾部最多 3 条早年的记录。前置条件同上（PERSONA_MEMORY_ASK 配好才生效）。默认开；关掉就回到只有 persona_recall 工具、模型想起来才查的形态。",
+			"group": "persona",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true,
+			"requires": [
+				"PERSONA_MEMORY_ENABLED"
+			]
 		},
 		{
 			"key": "PERSONA_EXPORT_ENABLED",
@@ -484,22 +436,6 @@
 			"hot": false
 		},
 		{
-			"key": "DELEGATION_WAKE_ENABLED",
-			"label": "派活完成即唤醒",
-			"summary": "后台任务到终态后，把派活的会话自动叫起来跑一轮、接住结果并向你转述。关 = 只写汇报、不主动开口（改动前的旧行为）。默认开。",
-			"group": "autonomy",
-			"type": "boolean",
-			"values": [
-				"true",
-				"false"
-			],
-			"defaultValue": "true",
-			"hot": true,
-			"requires": [
-				"COMPANIONS_ENABLED"
-			]
-		},
-		{
 			"key": "SCHEDULED_TASK_MODEL_RUN",
 			"label": "定时主动轮跑模型",
 			"summary": "定时任务到点让目标执事真跑一轮模型、主动说一句，触发指令对你隐藏（看起来像它自己开口）。关 = 回到旧闹钟：到点只写一条写死的提醒消息、不调模型（改动前的旧行为）。默认开。",
@@ -574,32 +510,6 @@
 			"hot": false
 		},
 		{
-			"key": "TASKS_REDESIGN_ENABLED",
-			"label": "任务中心新版",
-			"summary": "任务中心用「等你回话 / 在跑 / 打手手风琴 / 今日回顾」的新版；关 = 回到旧三列看板。默认开，改完刷新页面生效。",
-			"group": "ui",
-			"type": "boolean",
-			"values": [
-				"true",
-				"false"
-			],
-			"defaultValue": "true",
-			"hot": true
-		},
-		{
-			"key": "SIDEBAR_TASK_GROUPS",
-			"label": "侧栏按创建者分组",
-			"summary": "侧栏对话按「我 / 各个打手」分开归类；关 = 回到旧版一整条平铺列表。默认开，改完刷新页面生效。",
-			"group": "ui",
-			"type": "boolean",
-			"values": [
-				"true",
-				"false"
-			],
-			"defaultValue": "true",
-			"hot": true
-		},
-		{
 			"key": "CHAT_HARD_DELETE",
 			"label": "永久删除",
 			"summary": "归档页里「永久删除」的总闸；关掉后预检和删除都返回 400，归档 / 恢复不受影响。默认开，即时生效。",
@@ -653,19 +563,6 @@
 			"requires": [
 				"ARCHIVE_AUTO_ENABLED"
 			]
-		},
-		{
-			"key": "CHAT_HISTORY_PAGING_ENABLED",
-			"label": "对话历史分页",
-			"summary": "打开会话先加载最近一页，往上滑再加载更早的（按天分组、带日期分隔）；关 = 一次拉最近 200 条。默认开，重新打开会话生效。",
-			"group": "ui",
-			"type": "boolean",
-			"values": [
-				"true",
-				"false"
-			],
-			"defaultValue": "true",
-			"hot": true
 		},
 		{
 			"key": "AGENT_COMPACT_ENABLED",
@@ -740,22 +637,6 @@
 			]
 		},
 		{
-			"key": "PARTNER_TEMPLATES",
-			"label": "执事招聘模板",
-			"summary": "招聘墙和新建执事弹窗里出现模板条，点一下按模板建人设。关 = 回到旧「新建执事」按钮。默认开，即时生效。",
-			"group": "skills",
-			"type": "boolean",
-			"values": [
-				"true",
-				"false"
-			],
-			"defaultValue": "true",
-			"hot": true,
-			"requires": [
-				"COMPANIONS_ENABLED"
-			]
-		},
-		{
 			"key": "SKILLS_INDEX_CLIP",
 			"label": "技能索引截断",
 			"summary": "技能索引每行只显示摘要前 120 字（省上下文，实测能省一半）；关 = 显示完整摘要。只影响索引，真调用时读到的仍是完整手册。默认开，只影响新开的会话。",
@@ -786,23 +667,6 @@
 			]
 		},
 		{
-			"key": "DELEGATION_PROJECT_MEMORY",
-			"label": "派活带项目记忆",
-			"summary": "派出去的工人（native 与外部 CLI）在任务书里带上单子所属项目的长期记忆（16 条 / 2000 字，经拆单器转述，不逐字保证）。只取项目记忆，不带 global / 执事记忆。默认开，即时生效。",
-			"group": "autonomy",
-			"scope": "core",
-			"type": "boolean",
-			"values": [
-				"true",
-				"false"
-			],
-			"defaultValue": "true",
-			"hot": true,
-			"requires": [
-				"CHANCELLOR_ENABLED"
-			]
-		},
-		{
 			"key": "PARTNER_SIDE_SESSIONS",
 			"label": "副会话（一人多聊）",
 			"summary": "每个执事/总管除了主对话，还能另开多条副会话：人设、记忆、项目照旧共用，但派活唤醒、定时提醒、人格结算仍然只落主对话。默认开，即时生效。",
@@ -819,38 +683,9 @@
 			]
 		},
 		{
-			"key": "PARTNER_SESSION_MANAGE",
-			"label": "分支会话管理",
-			"summary": "选择器里把分支副本缩进挂在母会话下面，并允许直接删除 side 副会话 / 总管分支副本（有子分支的先拦下）。关 = 回到平铺列表、没有删除按钮、删除端点 400。默认开，即时生效。",
-			"group": "autonomy",
-			"type": "boolean",
-			"values": [
-				"true",
-				"false"
-			],
-			"defaultValue": "true",
-			"hot": true,
-			"requires": [
-				"PARTNER_SIDE_SESSIONS"
-			]
-		},
-		{
 			"key": "AGENT_FILE_ATTACHMENTS",
 			"label": "文件附件",
 			"summary": "对话里除了图片还能发任意文件：上传落在服务端 .data/attachments，消息里带绝对路径，durable 只存路径。关 = 上传端点 404、前端不渲染「任意文件」入口。默认开，即时生效。",
-			"group": "chat",
-			"type": "boolean",
-			"values": [
-				"true",
-				"false"
-			],
-			"defaultValue": "true",
-			"hot": true
-		},
-		{
-			"key": "CHAT_DIR_PICK",
-			"label": "新建对话选目录",
-			"summary": "新建对话时可以直接选一个目录，不必先登记成项目；关 = dirPath 一律 400，回到只认当前项目主文件夹的旧口径。不传目录的请求与旧行为逐字节一致。默认开，即时生效。",
 			"group": "chat",
 			"type": "boolean",
 			"values": [
@@ -884,19 +719,6 @@
 				"false"
 			],
 			"offValue": "false",
-			"defaultValue": "true",
-			"hot": true
-		},
-		{
-			"key": "SEARCH_MULTI_VENDOR",
-			"label": "搜索多源回退",
-			"summary": "搜索按设置 → 模型 → 搜索 里配置的源有序回退（search.json + 旧 env key 兼容）；关 = 只认 DeepSeek 一条旧路，加的源不读不写、保存多源配置 400。默认开，即时生效。",
-			"group": "chat",
-			"type": "boolean",
-			"values": [
-				"true",
-				"false"
-			],
 			"defaultValue": "true",
 			"hot": true
 		},
@@ -944,45 +766,6 @@
 			],
 			"requires": [
 				"CURRENT_PROJECT"
-			],
-			"defaultValue": "true",
-			"hot": true
-		},
-		{
-			"key": "PARTNER_PROJECT_MEMORY",
-			"label": "负责项目（记忆跟人走）",
-			"summary": "总管/执事档案上挂「负责项目」，该人格的全部对话并进项目记忆键空间：召回并、remember 认项目名、投影出负责项目字段；关 = 全链路退回只有文件夹挂载的形态。默认开，即时生效。",
-			"group": "memory",
-			"type": "boolean",
-			"values": [
-				"true",
-				"false"
-			],
-			"defaultValue": "true",
-			"hot": true
-		},
-		{
-			"key": "PROJECT_MEMORY_GATE",
-			"label": "项目记忆聊到才注入",
-			"summary": "挂载项目（除会话绑定项目外）只有字面命中当前话题的条目才进召回候选——「聊到才注入」从打分巧合变成硬规则；关 = 挂载项目全权进池（跟人走方案当日的形态）。默认开，即时生效。",
-			"group": "memory",
-			"type": "boolean",
-			"values": [
-				"true",
-				"false"
-			],
-			"defaultValue": "true",
-			"hot": true
-		},
-		{
-			"key": "PROJECT_MEMORY_ACTIVE_ONLY",
-			"label": "归档项目退出召回",
-			"summary": "归档/删除的项目退出召回池、也不再接收新记忆；记忆本体一条不删（记忆页照旧能看），恢复归档自动回来；关 = 归档项目照旧召回、照旧接收。默认开，即时生效。",
-			"group": "memory",
-			"type": "boolean",
-			"values": [
-				"true",
-				"false"
 			],
 			"defaultValue": "true",
 			"hot": true
@@ -1233,22 +1016,6 @@
 			"hot": true
 		},
 		{
-			"key": "DELEGATE_WORKDIR",
-			"label": "派活指定目录与工具",
-			"summary": "派单可以带工作目录与工具权限：工人在指定目录干活、只拿勾选的工具；关 = 两个字段收下但不生效，回到只认当前项目的旧口径。默认开，即时生效。",
-			"group": "autonomy",
-			"type": "boolean",
-			"values": [
-				"true",
-				"false"
-			],
-			"requires": [
-				"CHANCELLOR_ENABLED"
-			],
-			"defaultValue": "true",
-			"hot": true
-		},
-		{
 			"key": "EXECUTOR_MODEL_CACHE",
 			"label": "执行器模型清单缓存",
 			"summary": "外接 CLI 的模型清单拉一次缓存 24 小时，补刀文件不缓存、改了立即生效；关 = 每次真拉（慢，几秒），但永远新鲜。默认开，即时生效。",
@@ -1260,22 +1027,6 @@
 			],
 			"requires": [
 				"CHANCELLOR_ENABLED"
-			],
-			"defaultValue": "true",
-			"hot": true
-		},
-		{
-			"key": "ROUTINE_CONDITIONAL",
-			"label": "例行条件触发器",
-			"summary": "例行任务支持条件触发器：模型声明「完成条件已达成」才算完；关 = 只按时间表跑的旧口径。默认开，即时生效。",
-			"group": "autonomy",
-			"type": "boolean",
-			"values": [
-				"true",
-				"false"
-			],
-			"requires": [
-				"AUTONOMY_ENABLED"
 			],
 			"defaultValue": "true",
 			"hot": true
@@ -1314,6 +1065,19 @@
 			"key": "CHAT_MAP_ENABLED",
 			"label": "会话画板",
 			"summary": "会话详情里的画板：一条会话的回合卡 + 分支车道，点卡看单条消息原文（只读投影）；关 = 端点 404、入口按钮不挂。默认开，即时生效。",
+			"group": "ui",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "CHAT_HTML_CARDS",
+			"label": "回复里的交互卡片",
+			"summary": "助手回复里 ```html 围栏的页面片段渲染成内联沙箱卡，能跑动画与交互；跑在无 same-origin 的 iframe 里，拿不到会话凭据。关 = 退回普通代码块（已挂出的卡刷新后消失）。默认开，下一轮生效。",
 			"group": "ui",
 			"type": "boolean",
 			"values": [
@@ -1363,19 +1127,6 @@
 			"hot": true
 		},
 		{
-			"key": "PROMPT_TAIL_INJECTION",
-			"label": "动态注入走尾部（缓存前缀）",
-			"summary": "记忆召回 / 当前项目 / 执事上下文等动态内容以 user 消息追加在请求尾部，固定前缀只在用户改配置时变，缓存命中最好；关 = 回到旧形态（system 拼在请求最前面，每条用户消息都会让整段前缀作废）。默认开，即时生效。",
-			"group": "ui",
-			"type": "boolean",
-			"values": [
-				"true",
-				"false"
-			],
-			"defaultValue": "true",
-			"hot": true
-		},
-		{
 			"key": "CHAT_CONTEXT_LOOKUP",
 			"label": "对话内回看",
 			"summary": "会话里可以回看某条消息前后的原文（默认前后各 5 条，一次最多 50）；关 = 端点 404。默认开，即时生效。",
@@ -1400,32 +1151,6 @@
 			],
 			"defaultValue": "true",
 			"hot": false
-		},
-		{
-			"key": "AGENT_TOOL_INDEX",
-			"label": "工具索引（工具池页）",
-			"summary": "按需工具池的总闸：开着才有 deferred 池、tool_search 与设置 → 工具 页；关 = 工具全量常驻注册、整页只读。工具注册在启动时冻结——改完重启服务生效。",
-			"group": "ui",
-			"type": "boolean",
-			"values": [
-				"true",
-				"false"
-			],
-			"defaultValue": "true",
-			"hot": false
-		},
-		{
-			"key": "TASK_AS_CONVERSATION",
-			"label": "任务即会话",
-			"summary": "后台任务专线落成会话（能续聊、进侧栏、按创建者分组）；关 = 整体旁路，回到旧任务卡形态。默认开，即时生效。",
-			"group": "ui",
-			"type": "boolean",
-			"values": [
-				"true",
-				"false"
-			],
-			"defaultValue": "true",
-			"hot": true
 		},
 		{
 			"key": "SKILL_ADVICE",
@@ -1597,30 +1322,6 @@
 			],
 			"defaultValue": "true",
 			"hot": true
-		},
-		{
-			"key": "CHANCELLOR_INTERNAL",
-			"label": "内部质检模型",
-			"summary": "拆单 / 验收 / 目标核对谁来判；开 = 核心模型，关 = 外部 CLI（qoder）。开用宿主当前模型做一次纯文本请求（缺省）；关是回滚旧形态。进程启动装配一次——改完重启服务后生效。",
-			"group": "autonomy",
-			"type": "enum",
-			"values": [
-				"core",
-				"qoder"
-			],
-			"choices": [
-				{
-					"value": "core",
-					"label": "核心模型"
-				},
-				{
-					"value": "qoder",
-					"label": "外部 CLI"
-				}
-			],
-			"offValue": "qoder",
-			"defaultValue": "core",
-			"hot": false
 		},
 		{
 			"key": "AGENT_PROGRESS_REPORT",

@@ -23,34 +23,6 @@ export function partnerDisciplineEditEnabled(): boolean {
 	return flagEnabled("PARTNER_DISCIPLINE_EDIT");
 }
 
-/**
- * 项目记忆跟人走（2026-11-15 项目记忆挂载跟人走方案）：总管 / 执事档案挂项目的记忆层。
- * `false` / `0` 全链路退回"只有文件夹挂载"的形态：投影不出字段、召回不并、remember 不认。
- * 文件夹挂载（ChatProjects → 打手会话）不在本开关内——那是上一批已落地的东西。
- */
-export function partnerProjectMemoryEnabled(): boolean {
-	return flagEnabled("PARTNER_PROJECT_MEMORY");
-}
-
-/**
- * 注入闸门（2026-11-15 项目记忆多挂载方案）：挂载项目（除会话绑定项目外）只有
- * 字面命中当前话题的条目才进候选——"聊到才注入"从打分巧合变成硬规则。
- * `false` / `0` = 挂载项目全权进池（跟人走方案当日的形态），一行回滚。
- */
-export function projectMemoryGateEnabled(): boolean {
-	return flagEnabled("PROJECT_MEMORY_GATE");
-}
-
-/**
- * 归档 / 删除项目退出召回库（2026-11-16 用户拍板）：归档 = 退场，删除 = 登记没了。
- * 两者的项目记忆都**留在库里**（记忆页照旧能看、能导出），但不再进召回池、也不再接收
- * 新记忆；恢复归档后自动回来。
- * `false` / `0` = 旧形态——归档项目照旧召回、照旧接收记忆，一行回滚。
- */
-export function projectMemoryActiveOnlyEnabled(): boolean {
-	return flagEnabled("PROJECT_MEMORY_ACTIVE_ONLY");
-}
-
 export const PARTNER_CONTRACT_SECTIONS = [
 	"职责范围",
 	"决策分级",

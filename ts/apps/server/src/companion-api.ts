@@ -19,7 +19,6 @@ import {
 	PARTNER_SLOT_LIMIT,
 	partnerContractEnabled,
 	partnerDisciplineEditEnabled,
-	partnerProjectMemoryEnabled,
 	partnersStore,
 	type PartnerRow,
 	type PartnerStatus,
@@ -73,7 +72,7 @@ import { externalChatIds, listChats, openChat } from "./agent.ts";
 import type { ResolvedChat } from "./agent.ts";
 import { chatIndexEntriesOf } from "./agent/session-index.ts";
 import { renameChat, readChatMeta } from "./agent/session-meta.ts";
-import { partnerSessionManageEnabled, sideSessionsEnabled } from "./partner-session-role.ts";
+import { sideSessionsEnabled } from "./partner-session-role.ts";
 import { deletePartnerSession } from "./agent/partner-session-delete.ts";
 import { CTX, ChatOrigins } from "./agent/shared.ts";
 import { createPartnerSideSession } from "./partner-runtime-run-partner-turn.ts";
@@ -180,7 +179,6 @@ function originDescendants(
 function decorateSessionBranchInfo<T extends { conversationId: string; role: string }>(
 	sessions: readonly T[],
 	origins: Record<string, SessionOriginView>,
-	manage: boolean,
 	archived: readonly string[] = [],
 ): Array<T & { origin?: SessionOriginView; deletable: boolean }> {
 	const archivedSet = new Set(archived);
@@ -192,8 +190,8 @@ function decorateSessionBranchInfo<T extends { conversationId: string; role: str
 	}
 	return sessions.map((session) => {
 		const origin = origins[session.conversationId];
+		// 分支会话管理开关 2026-11-21 退役：缩进与删除标记恒生效。
 		const deletable =
-			manage &&
 			session.role !== "canonical" &&
 			(session.role === "side" || Boolean(origin)) &&
 			!childCount.has(session.conversationId);
@@ -1000,8 +998,8 @@ export function mountCompanions(app: Hono): void {
 			tagline: refreshed.tagline,
 			// diary 同样已进 projection；单独回显一份，PATCH 后另一端不用再拉列表。
 			diary: refreshed.diary,
-			// projectIds 同上（开关关着时投影与回显都不带）。
-			...(partnerProjectMemoryEnabled() ? { projectIds: refreshed.projectIds } : {}),
+			// projectIds 同上（PARTNER_PROJECT_MEMORY 回滚开关 2026-11-21 退役，恒投影）。
+			projectIds: refreshed.projectIds,
 			...(soulVersion !== null ? { soulVersion } : {}),
 		});
 	});
@@ -1126,7 +1124,6 @@ export function mountCompanions(app: Hono): void {
 	 */
 	app.get("/api/v1/partners/:id/sessions", async (c) => {
 		if (!sideSessionsEnabled()) return c.json({ error: "side_sessions_disabled" }, 400);
-		const manage = partnerSessionManageEnabled();
 		const origins = await readChatOriginsSafe();
 		const archived = readChatMeta().archived;
 		const id = c.req.param("id");
@@ -1150,8 +1147,9 @@ export function mountCompanions(app: Hono): void {
 				ok: true,
 				partnerId: "chief",
 				kind: "chief",
-				sessionManage: manage,
-				sessions: decorateSessionBranchInfo(sessions, origins, manage, archived),
+				// 分支会话管理开关 2026-11-21 退役：sessionManage 恒 true（字段留给旧客户端）。
+				sessionManage: true,
+				sessions: decorateSessionBranchInfo(sessions, origins, archived),
 			});
 		}
 		const partner = store().get(id);
@@ -1188,8 +1186,9 @@ export function mountCompanions(app: Hono): void {
 			ok: true,
 			partnerId: id,
 			kind: "partner",
-			sessionManage: manage,
-			sessions: decorateSessionBranchInfo(sessions, origins, manage, archived),
+			// 分支会话管理开关 2026-11-21 退役：sessionManage 恒 true（字段留给旧客户端）。
+			sessionManage: true,
+			sessions: decorateSessionBranchInfo(sessions, origins, archived),
 		});
 	});
 
@@ -1590,8 +1589,8 @@ function projection(partner: { id: string; name: string; status: string; current
 		tagline: partner.tagline ?? null,
 		// 纯增量（2026-11-12 日记 v2）：是否日记执事；旧客户端忽略即可。
 		diary: partner.diary ?? false,
-		// 项目记忆挂载（2026-11-15 跟人走立项、同日多挂载方案扩化，纯增量）：开关关时整字段
-		// 不出现，前端按 `"projectIds" in partner` 判定显隐（同 contractOn 惯例）。
-		...(partnerProjectMemoryEnabled() ? { projectIds: partner.projectIds ?? [] } : {}),
+		// 项目记忆挂载（2026-11-15 跟人走立项、同日多挂载方案扩化，纯增量）。
+		//（PARTNER_PROJECT_MEMORY 回滚开关 2026-11-21 退役，字段恒投影。）
+		projectIds: partner.projectIds ?? [],
 	};
 }

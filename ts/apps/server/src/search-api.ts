@@ -10,7 +10,6 @@ import {
 	testSearchVendor,
 } from "./search.ts";
 import {
-	multiVendorSearchEnabled,
 	reorderSearchSources,
 	removeSearchSource,
 	searchSourceStates,
@@ -40,7 +39,7 @@ function providerState() {
 		keyEnv: sources[0]?.keyEnv ?? searchKeyEnv(),
 		hasKey: configured,
 		sources,
-		vendors: SEARCH_VENDORS.filter((vendor) => multiVendorSearchEnabled() || vendor.id === "deepseek").map((vendor) => {
+		vendors: SEARCH_VENDORS.map((vendor) => {
 			const selected = sources.some((source) => source.vendor === vendor.id);
 			return {
 				id: vendor.id,

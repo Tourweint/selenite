@@ -45,11 +45,6 @@ export function searchConfigPath(): string {
 	return process.env.SEARCH_CONFIG_PATH?.trim() || ".data/search.json";
 }
 
-/** 多源回滚开关：`false`/`0`/`off` = 只认 DeepSeek 一条旧路（search.json 里的其他源不读不写）。 */
-export function multiVendorSearchEnabled(): boolean {
-	return flagEnabled("SEARCH_MULTI_VENDOR");
-}
-
 function validBaseUrl(value: string): boolean {
 	try {
 		const url = new URL(value);
@@ -140,12 +135,10 @@ function sourcesFromEnv(): SearchSource[] {
 	return sources;
 }
 
-/** 生效的源清单：文件优先；没有文件才看 env。回滚开关关时只留 deepseek 一条。 */
+/** 生效的源清单：文件优先；没有文件才看 env。（多源回滚开关 2026-11-21 退役，源清单恒全量生效。） */
 export function effectiveSearchSources(): SearchSource[] {
 	const file = readDocument(false);
-	const sources = file.exists ? file.sources : sourcesFromEnv();
-	if (!multiVendorSearchEnabled()) return sources.filter((source) => source.vendor === "deepseek").slice(0, 1);
-	return sources;
+	return file.exists ? file.sources : sourcesFromEnv();
 }
 
 function keyOf(vendor: SearchVendor): string {
@@ -204,9 +197,6 @@ export function upsertSearchSource(
 	const vendor = searchVendorOf(vendorId);
 	if (!vendor) {
 		return { ok: false, status: 400, error: "unknown_vendor", message: "没有这个搜索源" };
-	}
-	if (!multiVendorSearchEnabled() && vendorId !== "deepseek") {
-		return { ok: false, status: 400, error: "multi_vendor_disabled", message: "SEARCH_MULTI_VENDOR=false：只启用 DeepSeek 搜索" };
 	}
 	if (baseUrl !== undefined && baseUrl !== "" && !validBaseUrl(baseUrl)) {
 		return { ok: false, status: 400, error: "bad_base_url", message: "地址要写完整的 http:// 或 https://" };
@@ -269,8 +259,6 @@ export function reorderSearchSources(vendorIds: string[]): SearchConfigOrderResu
 	if (!Array.isArray(vendorIds) || vendorIds.some((id) => typeof id !== "string")) {
 		return { ok: false, status: 400, error: "bad_request", message: "vendors 需要是字符串数组" };
 	}
-	// 回滚形态只有一条源，重排是空操作（不写文件，免得把别的源洗掉）。
-	if (!multiVendorSearchEnabled()) return { ok: true };
 	let file: { exists: boolean; sources: SearchSource[] };
 	try {
 		file = readDocument(true);

@@ -99,7 +99,6 @@ test("payload：目录含 deferred 配置、token 口径、restartPending", () =
 		env,
 		catalog: () => [tool("read", "读文件。"), tool("routine_manage", "管理例行规则。")],
 		summaryOf: (text: string) => text.replace(/。$/, ""),
-		indexEnabled: () => true,
 	};
 	writeDeferredToolNames(["routine_manage"], env);
 	noteAppliedDeferredNames(["routine_manage"]);
@@ -124,13 +123,11 @@ test("端点：GET 形状 + PUT 落盘 / 400 校验 / 开关关时拒写", async
 			parameters: { type: "object", properties: {} },
 			execute: async () => ({ output: "ok" }),
 		}) as unknown as ToolRegistration;
-	let enabled = true;
 	const app = new Hono();
 	mountToolPoolRoutes(app, {
 		env,
 		catalog: () => [tool("read"), tool("routine_manage"), tool("tool_search")],
 		summaryOf: (text) => text,
-		indexEnabled: () => enabled,
 	});
 	writeDeferredToolNames([], env);
 	noteAppliedDeferredNames([]);
@@ -163,11 +160,5 @@ test("端点：GET 形状 + PUT 落盘 / 400 校验 / 开关关时拒写", async
 	});
 	assert.equal(selfLock.status, 400);
 
-	enabled = false;
-	const off = await app.request("/api/v1/agent/tool-pool", {
-		method: "PUT",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({ deferred: [] }),
-	});
-	assert.equal(off.status, 400, "索引关了就不允许改池子");
+	//（"索引关了就不允许改池子"用例 2026-11-21 随 AGENT_TOOL_INDEX 退役删除，池子恒可改。）
 });

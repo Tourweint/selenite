@@ -10,13 +10,11 @@
  *
  * `tool_search` 的注册在 tools.ts 末尾（它自己不是 deferred）；内核收到
  * `control.addTools:[name]` 后把名字追加进会话 `modelTools.add`，下一轮起完整 schema 才进请求。
- *
- * 回滚：`AGENT_TOOL_INDEX=false/0/off` → 不打 deferred、不注册 tool_search、不渲染 tool_index，
- * 一行回到全量工具。
+ *（AGENT_TOOL_INDEX 回滚开关 2026-11-21 退役：按需池是唯一形态；想全量常驻就在
+ * 「设置 → 工具」把名单清空，走 tool-pool.json 的正当机制。）
  */
 
 import type { ToolRegistration } from "@earendil-works/pi-durable";
-import { flagEnabled } from "./flags.ts";
 import { toolSummaryOf } from "./partner-tools.ts";
 import {
 	DEFAULT_DEFERRED_TOOL_NAMES,
@@ -27,20 +25,12 @@ import {
 /** 代码默认名单（旧名保留：测试与文档在引用；实际生效值由 `tool-pool.json` 覆盖）。 */
 export const DEFERRED_TOOL_NAMES: ReadonlySet<string> = new Set(DEFAULT_DEFERRED_TOOL_NAMES);
 
-/** AGENT_TOOL_INDEX：false / 0 / off（大小写、空白不敏感）= 关；缺省 / 其它 = 开。 */
-export function toolIndexEnabled(
-	env: NodeJS.ProcessEnv = process.env,
-): boolean {
-	return flagEnabled("AGENT_TOOL_INDEX", env);
-}
-
-/** 名字在当前按需名单里、且开关开 → 这个工具应当以 deferred 形态注册 / 可被 tool_search 加载。 */
+/** 名字在当前按需名单里 → 这个工具应当以 deferred 形态注册 / 可被 tool_search 加载。 */
 export function isDeferredTool(
 	name: string,
-	enabled = toolIndexEnabled(),
 	env: NodeJS.ProcessEnv = process.env,
 ): boolean {
-	return enabled && readDeferredToolNames(env).includes(name);
+	return readDeferredToolNames(env).includes(name);
 }
 
 /**
@@ -51,10 +41,8 @@ export function isDeferredTool(
  */
 export function markDeferred<T extends ToolRegistration>(
 	tools: readonly T[],
-	enabled = toolIndexEnabled(),
 	env: NodeJS.ProcessEnv = process.env,
 ): T[] {
-	if (!enabled) return [...tools];
 	const names = readDeferredToolNames(env);
 	const set = new Set(names);
 	noteAppliedDeferredNames(names);

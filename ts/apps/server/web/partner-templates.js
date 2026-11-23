@@ -7,7 +7,7 @@
  * 分类尺子不是"会什么技能"，而是"你让他管什么"（技能是能力，职责是编制）。
  * 内容基线 = docs/员工模板-我的执事.md（2026-11-15 落的文案）+ 各形态变式。
  *
- * 回滚：flags `PARTNER_TEMPLATES=false` → 招聘墙回旧空态、新建弹窗无模板条。
+ * 回滚开关 PARTNER_TEMPLATES 2026-11-21 退役：招聘墙与模板条恒显示。
  * 总管不进模板墙：他是默认自带的贴身大总管，不是招聘来的。
  */
 
@@ -260,29 +260,6 @@ export const PARTNER_TEMPLATES = [
 		note: "",
 	},
 ];
-
-/* ── 回滚开关：flags 懒读 + 模块级缓存 ─────────────────────── */
-
-let tplFlagsCache = null;
-
-/** flags `PARTNER_TEMPLATES`（默认开）。读不到 flags 端点时按开处理（默认值语义）。 */
-export async function partnerTemplatesEnabled() {
-	if (tplFlagsCache !== null) return tplFlagsCache;
-	try {
-		const response = await request("/api/v1/agent/flags", { cache: "no-store" });
-		const data = await response.json().catch(() => ({}));
-		if (!response.ok || !Array.isArray(data.flags)) {
-			tplFlagsCache = true;
-			return true;
-		}
-		const found = data.flags.find((item) => item?.key === "PARTNER_TEMPLATES");
-		const value = found?.value ?? found?.defaultValue ?? "true";
-		tplFlagsCache = value !== "false" && value !== "0";
-	} catch {
-		tplFlagsCache = true;
-	}
-	return tplFlagsCache;
-}
 
 /* ── 建档链路：POST → PUT persona → PUT contract → PATCH 岗位开关 ── */
 

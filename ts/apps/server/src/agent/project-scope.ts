@@ -1,9 +1,5 @@
 import { scopeKey, type MemoryScope } from "@lifediary/memory";
-import {
-	CHIEF_PARTNER_ID,
-	partnerProjectMemoryEnabled,
-	projectMemoryActiveOnlyEnabled,
-} from "../partner-contract.ts";
+import { CHIEF_PARTNER_ID } from "../partner-contract.ts";
 import { partnersStore } from "../partners.ts";
 import type { PartnersStore } from "../partner-store.ts";
 
@@ -97,9 +93,8 @@ export function projectStateOf(projectId: string): ProjectState {
 	}
 }
 
-/** 记忆闸看到的状态：`PROJECT_MEMORY_ACTIVE_ONLY=false` 时一律 "active"（旧形态，一行回滚）。 */
+/** 记忆闸看到的状态（PROJECT_MEMORY_ACTIVE_ONLY 回滚开关 2026-11-21 退役）。 */
 export function projectMemoryStateOf(projectId: string): ProjectState {
-	if (!projectMemoryActiveOnlyEnabled()) return "active";
 	return projectStateOf(projectId);
 }
 
@@ -178,22 +173,18 @@ export function resolveProjectWriteTarget(
 
 /**
  * 每轮注入的项目 scope 组装（2026-11-15 多挂载，供 recallContext）：
- * 绑定项目全权进池；其余挂载项目走闸门（gated），闸门关时并回全权池
- * （PROJECT_MEMORY_GATE=false = 跟人走当日形态）。绑定与挂载重叠时去重
- * （绑定占位，不重复进池）。纯函数，单测直接喂。
+ * 绑定项目由调用方全权进池；这里只出**其余挂载项目**的键（一律走「聊到才注入」
+ * 硬闸——PROJECT_MEMORY_GATE 回滚开关 2026-11-21 退役）。绑定与挂载重叠时去重。
+ * 纯函数，单测直接喂。
  */
 export function composeProjectRecallScopes(
 	boundProjectId: string | null,
 	mountedProjectIds: readonly string[],
-	gateOn: boolean,
-): { fullKeys: string[]; gatedKeys: string[] } {
+): string[] {
 	const boundKey = boundProjectId ? scopeKey({ type: "project", id: boundProjectId }) : null;
-	const mountedKeys = [
+	return [
 		...new Set(mountedProjectIds.map((id) => scopeKey({ type: "project", id }))),
 	].filter((key) => key !== boundKey);
-	return gateOn
-		? { fullKeys: [], gatedKeys: mountedKeys }
-		: { fullKeys: mountedKeys, gatedKeys: [] };
 }
 
 /** lifecycle-harness 装配时接线；测试/未接线时项目 scope 一律为 null（与旧行为一致）。 */
@@ -286,7 +277,7 @@ export function personaProjectIdsOfSession(
  * 每轮注入同步用；查失败一律空数组，记忆永远不能把对话卡住。
  */
 export function personaProjectIdsOfConversation(conversationId: number): string[] {
-	if (!partnerProjectMemoryEnabled()) return [];
+	//（PARTNER_PROJECT_MEMORY 回滚开关 2026-11-21 退役：跟人走是唯一形态。）
 	try {
 		const now = Date.now();
 		if (!chatKindsCache || now - chatKindsCache.at > CHAT_KINDS_CACHE_TTL_MS) {
@@ -305,7 +296,6 @@ export function personaProjectIdsOfConversation(conversationId: number): string[
 export async function personaProjectIdsOfConversationAsync(
 	conversationId: number,
 ): Promise<string[]> {
-	if (!partnerProjectMemoryEnabled()) return [];
 	try {
 		const store = partnersStore();
 		const linked = store.partnerIdOfSession(conversationId);

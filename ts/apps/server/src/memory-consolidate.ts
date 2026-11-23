@@ -15,7 +15,7 @@
 
 /* 2026-11-14 按职责整段切到同目录的多个文件；本文件只做 re-export，保持原路径的导入方零改动。 */
 
-export { CONSOLIDATE_PROMPT, MAX_PROPOSALS, MAX_REVIEW_RECORDS, consolidateJobEnabled, consolidateLlmEnabled, memoryImportEnabled, parseProposalJson, renderReviewInput, reviewModelAvailable, validTargetScope } from "./memory-consolidate-parse-proposal-json.ts";
+export { CONSOLIDATE_PROMPT, MAX_PROPOSALS, MAX_REVIEW_RECORDS, consolidateLlmEnabled, memoryImportEnabled, parseProposalJson, renderReviewInput, reviewModelAvailable, validTargetScope } from "./memory-consolidate-parse-proposal-json.ts";
 export type { ConsolidateProposal, ProposalDraft, ProposalSide, ReviewGenerator, ReviewResult } from "./memory-consolidate-parse-proposal-json.ts";
 export { MAX_IMPORT_ITEMS, applyProposal, importMemory, pendingProposalCount, readPendingProposals, reviewScope } from "./memory-consolidate-review-scope.ts";
 export type { ApplyResult, ImportResult, ReviewJobHandle, ReviewState, StartReviewOptions } from "./memory-consolidate-review-scope.ts";

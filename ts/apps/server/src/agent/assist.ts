@@ -18,8 +18,6 @@ import { getSkillState, skillStateEnabled } from "../skill-state.ts";
 import { proactiveForTurn } from "../memory-proactive.ts";
 import { memoryInjectDedupeEnabled, memoryInjectLimit, memoryInjectMaxChars } from "../memory-inject.ts";
 import {
-	partnerProjectMemoryEnabled,
-	projectMemoryGateEnabled,
 } from "../partner-contract.ts";
 import { workerPersonaDefault } from "../worker-persona.ts";
 import {
@@ -254,12 +252,9 @@ export function recallContext(conversationId: number, text: string): string {
 		const boundProjectId =
 			project?.type === "project" && isRecallableProjectId(project.id) ? project.id : null;
 		const mounted = recallableProjectIds(personaProjectIdsOfConversation(conversationId));
-		// 项目 scope 组装收在纯函数里（可单测）：绑定全权进池，其余挂载走闸门。
-		const { fullKeys: mountedFullKeys, gatedKeys } = composeProjectRecallScopes(
-			boundProjectId,
-			mounted,
-			projectMemoryGateEnabled(),
-		);
+		// 项目 scope 组装收在纯函数里（可单测）：绑定全权进池，其余挂载一律走
+		// 「聊到才注入」硬闸（PROJECT_MEMORY_GATE 回滚开关 2026-11-21 退役）。
+		const gatedKeys = composeProjectRecallScopes(boundProjectId, mounted);
 		// 注入预算（2026-11-15 追加批）：原先是 memory 包硬编码的 8 条 / 1200 字，
 		// 偏好攒满 8 条后其余记忆（含项目记忆）一条进不来——默认放宽到 16 条 / 2000 字，
 		// MEMORY_INJECT_LIMIT / MEMORY_INJECT_MAX_CHARS 可调，显式设回 8/1200 即旧形态。
@@ -272,7 +267,6 @@ export function recallContext(conversationId: number, text: string): string {
 					...(boundProjectId
 						? [scopeKey({ type: "project", id: boundProjectId })]
 						: []),
-					...mountedFullKeys,
 					scopeKey({ type: "session", id: String(conversationId) }),
 				],
 				...(gatedKeys.length > 0 ? { gatedScopes: gatedKeys } : {}),
@@ -404,7 +398,6 @@ function memoryRecallOff(conversationId: number): boolean {
 export const projectIndexProvider: InjectionProvider = (ctx) => {
 	if (!flagEnabled("MEMORY_ENABLED")) return undefined;
 	if (ctx.group) return undefined;
-	if (!partnerProjectMemoryEnabled()) return undefined;
 	const mounted = recallableProjectIds(
 		personaProjectIdsOfConversation(Number(ctx.conversationId)),
 	);

@@ -28,17 +28,13 @@ const {
 	buildBgJobWakePrompt,
 	buildEnvelopeWakePrompt,
 	buildWakePrompt,
-	bgJobWakeSessionEnabled,
 	collectPending,
-	delegationWakeEnabled,
-	delegationWakeSessionEnabled,
 	flushDelegationWake,
 	resetDelegationWakeState,
 	restoreDelegationWakeQueue,
 	wakeOnAgentMessage,
 	wakeOnBgJobFinish,
 	wakeOnDelegationReport,
-	wakePipelineV2Enabled,
 } = await import("./delegation-wake.ts");
 
 type WakeDeps = Parameters<typeof wakeOnDelegationReport>[2];
@@ -100,7 +96,6 @@ function makeDeps(overrides: Partial<NonNullable<WakeDeps>> = {}): {
 	const calls: TurnCall[] = [];
 	const sessionCalls: SessionCall[] = [];
 	const deps: NonNullable<WakeDeps> = {
-		wakeEnabled: () => true,
 		companionsEnabled: () => true,
 		partnerIdOfSession: () => "partner-1",
 		// 批3：新来源的归属解析缺省同执事（既有 delegation 用例不触碰这两个 dep）
@@ -131,10 +126,6 @@ function report(ticketId: string, phase: DelegationReport["phase"] = "done"): De
 
 beforeEach(() => {
 	resetDelegationWakeState();
-	delete process.env.DELEGATION_WAKE_ENABLED;
-	delete process.env.WAKE_PIPELINE_V2;
-	delete process.env.BG_JOB_WAKE_SESSION;
-	delete process.env.DELEGATION_WAKE_SESSION;
 });
 
 test("buildWakePrompt：固定头逐字、单号截 6 位、多单合并", () => {
@@ -223,42 +214,20 @@ test("collectPending：取走即清空、同会话合并、跨会话互不串", 
 	assert.deepEqual(collectPending(store, 3), [], "没有 pending → 空数组");
 });
 
-test("delegationWakeEnabled：默认开，false / 0 / off 都关", () => {
-	const env: NodeJS.ProcessEnv = {};
-	assert.equal(delegationWakeEnabled(env), true, "不配 = 开");
-	env.DELEGATION_WAKE_ENABLED = "false";
-	assert.equal(delegationWakeEnabled(env), false);
-	env.DELEGATION_WAKE_ENABLED = " FALSE ";
-	assert.equal(delegationWakeEnabled(env), false, "大小写与空白不敏感");
-	env.DELEGATION_WAKE_ENABLED = "0";
-	assert.equal(delegationWakeEnabled(env), false, "0 也算关");
-	env.DELEGATION_WAKE_ENABLED = "off";
-	assert.equal(delegationWakeEnabled(env), false, "off 也算关");
-	env.DELEGATION_WAKE_ENABLED = "bogus";
-	assert.equal(delegationWakeEnabled(env), true, "拼错值不误关");
-});
-
-test("守卫链四关：任一不过都不排定时器、不跑唤醒轮", async () => {
-	// 第一关走真实 env 读法（其余三关注入替身，避免碰真实执事库）。
-	// "非 canonical" 在批5-C 起默认会唤醒会话自己；这里关掉会话唤醒，
-	// 证明它仍是 canonical 守卫的一关（会话路径单列测试覆盖）。
+test("守卫链：COMPANIONS 关 / partner 停用都不排定时器、不跑唤醒轮", async () => {
+	// 唤醒回滚开关 2026-11-21 退役（"开关关"一关没了）；
+	// "非 canonical" 在批5-C 起默认会唤醒会话自己，那是正向路径，由会话路径测试覆盖。
 	const cases: Array<{ name: string; overrides: Partial<NonNullable<WakeDeps>> }> = [
-		{ name: "开关关", overrides: { wakeEnabled: () => delegationWakeEnabled() } },
 		{ name: "COMPANIONS 关", overrides: { companionsEnabled: () => false } },
-		{ name: "非 canonical 主会话", overrides: { partnerIdOfSession: () => null } },
 		{ name: "partner 停用", overrides: { partnerStatus: () => "stopped" } },
 	];
 	for (const item of cases) {
-		// 只有第一关关 env；其余三关 env 保持开，才能证明是那一关挡下的
-		process.env.DELEGATION_WAKE_ENABLED = item.name === "开关关" ? "false" : "true";
-		if (item.name === "非 canonical 主会话") process.env.DELEGATION_WAKE_SESSION = "false";
 		const { deps, clock, calls, sessionCalls } = makeDeps(item.overrides);
 		wakeOnDelegationReport(7, report("t"), deps);
 		assert.equal(clock.size, 0, `${item.name}：不该排定时器`);
 		await flushDelegationWake(7, deps);
 		assert.equal(calls.length, 0, `${item.name}：不该跑唤醒轮`);
 		assert.equal(sessionCalls.length, 0, `${item.name}：不该跑会话路径`);
-		delete process.env.DELEGATION_WAKE_SESSION;
 	}
 });
 
@@ -424,19 +393,6 @@ function bgPayload(overrides: Partial<BgJobWakePayload> = {}): BgJobWakePayload 
 	};
 }
 
-test("wakePipelineV2Enabled：默认开，false / 0 / off 都关，拼错值不误关", () => {
-	const env: NodeJS.ProcessEnv = {};
-	assert.equal(wakePipelineV2Enabled(env), true, "不配 = 开");
-	env.WAKE_PIPELINE_V2 = "false";
-	assert.equal(wakePipelineV2Enabled(env), false);
-	env.WAKE_PIPELINE_V2 = "0";
-	assert.equal(wakePipelineV2Enabled(env), false);
-	env.WAKE_PIPELINE_V2 = "off";
-	assert.equal(wakePipelineV2Enabled(env), false);
-	env.WAKE_PIPELINE_V2 = "bogus";
-	assert.equal(wakePipelineV2Enabled(env), true, "拼错值不误关");
-});
-
 test("buildBgJobWakePrompt：固定头 + 终态行带退出码 + 尾部段；running 不带退出码、无尾部不渲染", () => {
 	const done = buildBgJobWakePrompt([
 		bgPayload({ jobId: "bg-abc-123456", commandSummary: "npm run build", tail: "built ok" }),
@@ -507,38 +463,6 @@ test("wakeOnBgJobFinish 守卫：停用 / 解析不出归属 / V2 关 → 都不
 		await flushDelegationWake(5, deps);
 		assert.equal(calls.length, 0);
 	}
-	// 解析不出归属 + BG_JOB_WAKE_SESSION=false：回批3 行为（普通 worker 对话不投）
-	{
-		process.env.BG_JOB_WAKE_SESSION = "false";
-		try {
-			const { deps, clock, calls, sessionCalls } = makeDeps({ partnerIdOfAnySession: () => null });
-			wakeOnBgJobFinish(5, bgPayload(), deps);
-			assert.equal(clock.size, 0);
-			await flushDelegationWake(5, deps);
-			assert.equal(calls.length, 0, "无主会话 + 会话唤醒关 → 不投");
-			assert.equal(sessionCalls.length, 0);
-		} finally {
-			delete process.env.BG_JOB_WAKE_SESSION;
-		}
-	}
-	// WAKE_PIPELINE_V2=false：回 delegation-only 路径（含无主会话也不投）
-	{
-		process.env.WAKE_PIPELINE_V2 = "false";
-		try {
-			const { deps, clock, calls } = makeDeps({ partnerIdOfAnySession: () => "partner-bg" });
-			wakeOnBgJobFinish(5, bgPayload(), deps);
-			assert.equal(clock.size, 0, "V2 关不排定时器");
-			await flushDelegationWake(5, deps);
-			assert.equal(calls.length, 0);
-			const unowned = makeDeps({ partnerIdOfAnySession: () => null });
-			wakeOnBgJobFinish(6, bgPayload(), unowned.deps);
-			assert.equal(unowned.clock.size, 0, "V2 关时无主会话也不排定时器");
-			await flushDelegationWake(6, unowned.deps);
-			assert.equal(unowned.sessionCalls.length, 0);
-		} finally {
-			delete process.env.WAKE_PIPELINE_V2;
-		}
-	}
 });
 
 // ── 批5（2026-11-19）：无主会话唤醒 + 落盘恢复 targetConversationId ──
@@ -574,33 +498,6 @@ test("wakeOnBgJobFinish：执事体系关着时无主会话路径照常（它不
 	assert.equal(calls.length, 0);
 	assert.equal(sessionCalls.length, 1);
 	assert.equal(sessionCalls[0]!.conversationId, 56);
-});
-
-test("bgJobWakeSessionEnabled：默认开，false / 0 / off 都关，拼错值不误关", () => {
-	const env: NodeJS.ProcessEnv = {};
-	assert.equal(bgJobWakeSessionEnabled(env), true, "不配 = 开");
-	env.BG_JOB_WAKE_SESSION = "false";
-	assert.equal(bgJobWakeSessionEnabled(env), false);
-	env.BG_JOB_WAKE_SESSION = "0";
-	assert.equal(bgJobWakeSessionEnabled(env), false);
-	env.BG_JOB_WAKE_SESSION = "off";
-	assert.equal(bgJobWakeSessionEnabled(env), false);
-	env.BG_JOB_WAKE_SESSION = "bogus";
-	assert.equal(bgJobWakeSessionEnabled(env), true, "拼错值不误关");
-});
-
-test("BG_JOB_WAKE_SESSION=false：无主会话回批3（不投、不排定时器、不续跑）", async () => {
-	process.env.BG_JOB_WAKE_SESSION = "false";
-	try {
-		const { deps, clock, calls, sessionCalls } = makeDeps({ partnerIdOfAnySession: () => null });
-		wakeOnBgJobFinish(66, bgPayload(), deps);
-		assert.equal(clock.size, 0, "不排防抖");
-		await flushDelegationWake(66, deps);
-		assert.equal(calls.length, 0);
-		assert.equal(sessionCalls.length, 0, "不续跑会话");
-	} finally {
-		delete process.env.BG_JOB_WAKE_SESSION;
-	}
 });
 
 test("队列落盘与启动恢复（批5）：会话信封带 targetConversationId，恢复后走会话路径", async () => {
@@ -731,19 +628,6 @@ test("会话路径的落盘条目目标与队列键不一致：不投（防脏�
 
 // ── 批5-C（2026-11-19）：无主会话派活唤醒 ──
 
-test("delegationWakeSessionEnabled：默认开，false / 0 / off 都关，拼错值不误关", () => {
-	const env: NodeJS.ProcessEnv = {};
-	assert.equal(delegationWakeSessionEnabled(env), true, "不配 = 开");
-	env.DELEGATION_WAKE_SESSION = "false";
-	assert.equal(delegationWakeSessionEnabled(env), false);
-	env.DELEGATION_WAKE_SESSION = "0";
-	assert.equal(delegationWakeSessionEnabled(env), false);
-	env.DELEGATION_WAKE_SESSION = "off";
-	assert.equal(delegationWakeSessionEnabled(env), false);
-	env.DELEGATION_WAKE_SESSION = "bogus";
-	assert.equal(delegationWakeSessionEnabled(env), true, "拼错值不误关");
-});
-
 test("wakeOnDelegationReport：无 canonical 归属 → 唤醒派活的会话自己（批5-C）", async () => {
 	const { deps, clock, calls, sessionCalls } = makeDeps({ partnerIdOfSession: () => null });
 	wakeOnDelegationReport(101, report("sess-del"), deps);
@@ -813,59 +697,6 @@ test("flush 回落：旧 partner 形态 delegation 信封在 canonical 消失后
 	assert.equal(sessionCalls[0]!.conversationId, 110);
 	assert.ok(sessionCalls[0]!.prompt.includes("旧信封汇报"));
 
-	// 开关关：同一形状不投（回现状）
-	writeLegacy(111, "legacy-off");
-	const off = makeDeps({ partnerIdOfSession: () => null });
-	process.env.DELEGATION_WAKE_SESSION = "false";
-	try {
-		assert.equal(restoreDelegationWakeQueue(off.deps), 1);
-		await off.clock.runAll();
-	} finally {
-		delete process.env.DELEGATION_WAKE_SESSION;
-	}
-	assert.equal(off.sessionCalls.length, 0, "开关关不回落");
-	assert.equal(off.calls.length, 0);
-});
-
-test("DELEGATION_WAKE_SESSION=false：无 canonical 会话派活后不投（入队与 flush 双查）", async () => {
-	// 入队时关：不排定时器
-	process.env.DELEGATION_WAKE_SESSION = "false";
-	try {
-		const off = makeDeps({ partnerIdOfSession: () => null });
-		wakeOnDelegationReport(102, report("t"), off.deps);
-		assert.equal(off.clock.size, 0, "入队即拦");
-		await flushDelegationWake(102, off.deps);
-		assert.equal(off.sessionCalls.length, 0);
-	} finally {
-		delete process.env.DELEGATION_WAKE_SESSION;
-	}
-	// 入队后切关：flush 重查，排队中的也不投
-	const flipped = makeDeps({ partnerIdOfSession: () => null });
-	wakeOnDelegationReport(103, report("flip"), flipped.deps);
-	assert.equal(flipped.clock.size, 1);
-	process.env.DELEGATION_WAKE_SESSION = "false";
-	try {
-		await flushDelegationWake(103, flipped.deps);
-	} finally {
-		delete process.env.DELEGATION_WAKE_SESSION;
-	}
-	assert.equal(flipped.sessionCalls.length, 0, "flush 重查后不投");
-});
-
-test("DELEGATION_WAKE_ENABLED=false 仍是总闸：无 canonical 的会话路径也不投", async () => {
-	process.env.DELEGATION_WAKE_ENABLED = "false";
-	try {
-		const { deps, clock, calls, sessionCalls } = makeDeps({
-			wakeEnabled: () => delegationWakeEnabled(),
-			partnerIdOfSession: () => null,
-		});
-		wakeOnDelegationReport(104, report("t"), deps);
-		assert.equal(clock.size, 0, "总闸关不排定时器");
-		await flushDelegationWake(104, deps);
-		assert.equal(calls.length + sessionCalls.length, 0);
-	} finally {
-		delete process.env.DELEGATION_WAKE_ENABLED;
-	}
 });
 
 test("队列落盘与启动恢复（批5-C）：delegation 会话信封带 targetConversationId，恢复后走会话路径", async () => {
@@ -991,19 +822,6 @@ test("wakeOnAgentMessage：按对端执事路由（入队键 = 对端 canonical 
 	);
 	assert.equal(none.clock.size, 0, "对端没有会话不投");
 
-	// V2 关：全部不投
-	process.env.WAKE_PIPELINE_V2 = "false";
-	try {
-		const off = makeDeps();
-		wakeOnAgentMessage(
-			"partner-b",
-			{ fromPartnerId: "a", fromName: "甲", fromDomain: null, text: "x" },
-			off.deps,
-		);
-		assert.equal(off.clock.size, 0, "V2 关不投");
-	} finally {
-		delete process.env.WAKE_PIPELINE_V2;
-	}
 });
 
 test("混批：delegation 与 bgjob 同会话合并一轮，prompt 既有汇报段也有任务段", async () => {

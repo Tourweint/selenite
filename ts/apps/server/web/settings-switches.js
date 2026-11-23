@@ -480,8 +480,6 @@ async function toggleFlag(key, value, sw, seg) {
     if (key === "CHAT_STREAM_REVEAL") state.chatRevealFlag = String(value) !== "false";
     // 自动归档拨杆同步进快照：下次进「会话」子页直接按它描，不再走一遍回填动画。
     if (key === "ARCHIVE_AUTO_ENABLED") archiveAutoSnapshot.enabled = String(value) === "true";
-    // 历史分页同理：下一次 openChat 立刻按新开关走（当前屏幕不重排，避免翻页中被打断）。
-    if (key === "CHAT_HISTORY_PAGING_ENABLED") state.chatPagingFlag = String(value) !== "false";
     if (state.flagsCache instanceof Map) {
       const row = state.flagsCache.get(key);
       state.flagsCache.set(key, {

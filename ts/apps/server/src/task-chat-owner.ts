@@ -11,7 +11,6 @@
  * Chats.byExternal 换成对外 id 再进来。
  */
 
-import { flagEnabled } from "./flags.ts";
 // 对外 id 解析收在纯函数模块（2026-11-17 一人多会话）：canonical / side / group 三种
 // partner- 前缀都归到真正的 partnerId；顺手修掉群会话被当成 `<id>-group-<gid>` 的旧 bug。
 import { parsePartnerExternalId } from "./partner-session-role.ts";
@@ -34,13 +33,4 @@ export function taskChatTitle(prompt: string): string {
 	const text = firstLine.replace(/\s+/g, " ").trim();
 	if (!text) return "（没有说明）";
 	return text.length > TASK_CHAT_TITLE_MAX ? `${text.slice(0, TASK_CHAT_TITLE_MAX)}…` : text;
-}
-
-/**
- * 侧栏分组回滚开关（`SIDEBAR_TASK_GROUPS`，缺省开）：与服务端其它 hot 开关同口径——
- * 每次现读 env，只有明确写 false / 0 才关，拼错值不会把能力误关。
- * false 时 `/agent/chats` 不下发 `tasks` 键（回滚形态）。
- */
-export function sidebarTaskGroupsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	return flagEnabled("SIDEBAR_TASK_GROUPS", env);
 }

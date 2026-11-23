@@ -18,11 +18,6 @@ export const ROUTINE_DONE_MARKER = "[[routine-done]]";
 
 export type RoutineOutcome = "success" | "quiet" | "skipped" | "failed" | "done";
 
-/** 回滚开关：默认开；只有明确写 false / 0 / off 才关。 */
-export function routineConditionalEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	return flagEnabled("ROUTINE_CONDITIONAL", env);
-}
-
 export interface RoutinePromptInput {
 	/** 规则原文（已按上限截断） */
 	prompt: string;
@@ -32,8 +27,6 @@ export interface RoutinePromptInput {
 	untilNote?: string;
 	/** 上次看到这里（游标）；只有产出被保留过才有值（批 21 §六） */
 	cursorAt?: string;
-	/** 开关形态：false 时两段上下文都不加（回到旧提示词） */
-	conditional: boolean;
 }
 
 /**
@@ -41,7 +34,7 @@ export interface RoutinePromptInput {
  * 顺序刻意固定：上一次的结局在前（模型先知道接着做什么），完成条件在后（最后才判停）。
  */
 export function buildRoutinePrompt(input: RoutinePromptInput): string {
-	if (!input.conditional) return input.prompt;
+	// 条件门控回滚开关 2026-11-21 退役：上次结局 / 游标 / 完成条件恒参与组装。
 	const blocks: string[] = [];
 	if (input.lastOutcome) blocks.push(`上一次的结果是 ${input.lastOutcome}。`);
 	if (input.cursorAt) {
@@ -123,9 +116,8 @@ export interface RoutineRunVerdictInput {
 	quiet: boolean;
 	/** 本轮无人值守跳过的工具数（>0 = outcome 记 skipped） */
 	skippedToolCount: number;
-	/** 模型是否声明完成条件达成（只在 conditional && until 存在时有意义） */
+	/** 模型是否声明完成条件达成（只在 until 存在时有意义） */
 	untilMet: boolean;
-	conditional: boolean;
 	/** 跑满多少次自动停 */
 	maxRuns?: number;
 	/** 本轮之前已完成的次数（不含本轮） */
@@ -151,13 +143,12 @@ export interface RoutineRunVerdict {
  */
 export function routineRunVerdict(input: RoutineRunVerdictInput): RoutineRunVerdict {
 	const maxed =
-		input.conditional &&
 		typeof input.maxRuns === "number" &&
 		input.maxRuns > 0 &&
 		input.completedRunsBefore + 1 >= input.maxRuns;
 
 	if (!input.ok) return { outcome: "failed", stop: maxed };
-	if (input.conditional && input.untilMet) return { outcome: "done", stop: true };
+	if (input.untilMet) return { outcome: "done", stop: true };
 	if (input.skippedToolCount > 0) {
 		return { outcome: "skipped", stop: maxed };
 	}

@@ -8,7 +8,6 @@ import {
 	DEFERRED_TOOL_NAMES,
 	isDeferredTool,
 	markDeferred,
-	toolIndexEnabled,
 	toolIndexText,
 } from "./tool-index.ts";
 
@@ -48,24 +47,15 @@ test("DEFERRED_TOOL_NAMES：固定名单（批4 起 9 个：+save_reminder_advic
 	]);
 });
 
-test("toolIndexEnabled：缺省开；false / 0 / off（大小写空白不敏感）关", () => {
-	assert.equal(toolIndexEnabled({}), true);
-	assert.equal(toolIndexEnabled({ AGENT_TOOL_INDEX: "1" }), true);
-	assert.equal(toolIndexEnabled({ AGENT_TOOL_INDEX: "FALSE" }), false);
-	assert.equal(toolIndexEnabled({ AGENT_TOOL_INDEX: "0" }), false);
-	assert.equal(toolIndexEnabled({ AGENT_TOOL_INDEX: " off " }), false);
-});
-
-test("isDeferredTool：名单内且开关开才为真（文件缺失 = 代码默认）", () => {
-	assert.equal(isDeferredTool("routine_manage", true, missing), true);
-	assert.equal(isDeferredTool("send_to_agent", true, missing), true);
-	assert.equal(isDeferredTool("read", true, missing), false);
-	assert.equal(isDeferredTool("routine_manage", false, missing), false);
+test("isDeferredTool：名单内才为真（文件缺失 = 代码默认；开关 2026-11-21 退役恒开）", () => {
+	assert.equal(isDeferredTool("routine_manage", missing), true);
+	assert.equal(isDeferredTool("send_to_agent", missing), true);
+	assert.equal(isDeferredTool("read", missing), false);
 });
 
 test("markDeferred：只给名单内工具加属性、不改原对象、保持顺序", () => {
 	const tools = [tool("read"), tool("routine_manage"), tool("write"), tool("send_to_agent")];
-	const marked = markDeferred(tools, true, missing);
+	const marked = markDeferred(tools, missing);
 	assert.deepEqual(
 		marked.map((item) => item.name),
 		["read", "routine_manage", "write", "send_to_agent"],
@@ -79,30 +69,19 @@ test("markDeferred：只给名单内工具加属性、不改原对象、保持�
 	assert.equal(tools[3]?.deferred, undefined);
 });
 
-test("markDeferred：关时一个都不加", () => {
-	const tools = [tool("routine_manage"), tool("read")];
-	const marked = markDeferred(tools, false, missing);
-	assert.deepEqual(
-		marked.map((item) => item.name),
-		["routine_manage", "read"],
-	);
-	assert.equal(marked[0]?.deferred, undefined);
-	assert.equal(marked[0], tools[0]);
-});
-
 test("markDeferred：配置文件覆盖默认名单（2026-11-17 全局工具池）", () => {
 	const custom = join(root, "custom.json");
 	writeFileSync(custom, JSON.stringify({ deferred: ["read", "web_search"] }), "utf8");
 	const env = { AGENT_TOOL_POOL_PATH: custom } as NodeJS.ProcessEnv;
 	const tools = [tool("read"), tool("routine_manage"), tool("web_search")];
-	const marked = markDeferred(tools, true, env);
+	const marked = markDeferred(tools, env);
 	assert.equal(marked[0]?.deferred, true, "配置里的 read 变成按需");
 	assert.equal(marked[1]?.deferred, undefined, "默认名单里的 routine_manage 不再按需");
 	assert.equal(marked[2]?.deferred, true);
 
 	const empty = join(root, "empty.json");
 	writeFileSync(empty, JSON.stringify({ deferred: [] }), "utf8");
-	const none = markDeferred(tools, true, { AGENT_TOOL_POOL_PATH: empty } as NodeJS.ProcessEnv);
+	const none = markDeferred(tools, { AGENT_TOOL_POOL_PATH: empty } as NodeJS.ProcessEnv);
 	assert.equal(none.every((item) => item.deferred === undefined), true, "空数组 = 全部常驻");
 });
 

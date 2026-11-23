@@ -2,9 +2,10 @@
  * 派活完成即唤醒探针（2026-11-10 批 29）。
  *
  * 真起服务 + 真 HTTP + faux 模型（真 durable 链路、假模型）：
- *   A. 默认开：从总管会话派一单 → 等终态 → 汇报写回 → **会话自动多一轮**唤醒，
- *      唤醒提示词里带该单号前 6 位；
- *   B. `DELEGATION_WAKE_ENABLED=false`：同场景 → 汇报仍写回，但没有唤醒轮。
+ *   从总管会话派一单 → 等终态 → 汇报写回 → **会话自动多一轮**唤醒，
+ *   唤醒提示词里带该单号前 6 位。
+ *   （B 相"回滚形态只写汇报"随 DELEGATION_WAKE_ENABLED 开关 2026-11-21 退役删除，
+ *   唤醒恒开，只剩这一相。）
  *
  * 为什么用 `LLM_FAUX_TOOL=delegate`：服务端 faux 只会"调工具不收尾"，把回合上限压到 1，
  * 一轮只派一单；chancellor 的 native worker 走自己的 faux 给出结论（本探针实测终态是
@@ -186,11 +187,9 @@ async function waitForWake(timeoutMs: number): Promise<string | null> {
 	return null;
 }
 
-async function runPhase(label: string, wakeEnabled: boolean): Promise<void> {
-	console.log(`\n· ${label}（DELEGATION_WAKE_ENABLED=${wakeEnabled ? "true(默认)" : "false"}）`);
-	const phase = await startServer(
-		wakeEnabled ? {} : { DELEGATION_WAKE_ENABLED: "false" },
-	);
+async function runPhase(label: string): Promise<void> {
+	console.log(`\n· ${label}`);
+	const phase = await startServer({});
 	try {
 		// 从总管会话派一单（partner-chief 走 ensurePartnerSession，链接表里有它 → 有资格唤醒）
 		const run = await api("POST", "/api/v1/partners/chief/run", {
@@ -211,27 +210,17 @@ async function runPhase(label: string, wakeEnabled: boolean): Promise<void> {
 		}
 		check(reported, "执行端汇报已写回总管会话", `ticket=${ticket.id}`);
 
-		if (wakeEnabled) {
-			const transcript = await waitForWake(45_000);
-			check(Boolean(transcript), "总管会话随后自动多了一轮（唤醒轮）");
-			check(
-				Boolean(transcript?.includes(`- 单 ${prefix}（`)),
-				"唤醒提示词提到该单号前 6 位",
-				`前缀=${prefix}`,
-			);
-			check(
-				Boolean(transcript?.includes("turnAuthority: autonomous")),
-				"唤醒轮带 autonomous 文本头",
-			);
-		} else {
-			// 防抖 2 秒 + 富余：确认这段时间里没有唤醒痕迹
-			await sleep(6_000);
-			const transcript = await readChiefTranscript();
-			check(
-				!transcript.includes("[Delegation wake context]"),
-				"开关关：汇报照写，但没有唤醒轮（改动前行为）",
-			);
-		}
+		const transcript = await waitForWake(45_000);
+		check(Boolean(transcript), "总管会话随后自动多了一轮（唤醒轮）");
+		check(
+			Boolean(transcript?.includes(`- 单 ${prefix}（`)),
+			"唤醒提示词提到该单号前 6 位",
+			`前缀=${prefix}`,
+		);
+		check(
+			Boolean(transcript?.includes("turnAuthority: autonomous")),
+			"唤醒轮带 autonomous 文本头",
+		);
 
 		check(
 			!phase.logs.join("").includes("Uncaught"),
@@ -243,8 +232,7 @@ async function runPhase(label: string, wakeEnabled: boolean): Promise<void> {
 }
 
 try {
-	await runPhase("A. 默认开：完成即唤醒", true);
-	await runPhase("B. 回滚：只写汇报不唤醒", false);
+	await runPhase("完成即唤醒（唤醒恒开，2026-11-21 回滚开关退役）");
 	console.log(
 		failures === 0
 			? "\n✓ 派活完成即唤醒探针全部通过"

@@ -10,17 +10,10 @@ import { flagEnabled } from "./flags.ts";
 /**
  * 副会话开关（插件页默认开、即时生效；env 同名变量兜底）。
  * 透传 `flagEnabled` 的父子门语义：`COMPANIONS_ENABLED` 关时本开关也视为关。
+ * （分支会话管理开关 PARTNER_SESSION_MANAGE 2026-11-21 退役，缩进与删除恒生效。）
  */
 export function sideSessionsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
 	return flagEnabled("PARTNER_SIDE_SESSIONS", env);
-}
-
-/**
- * 分支会话管理开关（2026-11-18）：选择器缩进 + 删除 side/分支副本。
- * 默认开；父闸 `PARTNER_SIDE_SESSIONS` 关时本开关也视为关（flagEnabled 的父子门）。
- */
-export function partnerSessionManageEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	return flagEnabled("PARTNER_SESSION_MANAGE", env);
 }
 
 export interface ParsedPartnerSessionId {

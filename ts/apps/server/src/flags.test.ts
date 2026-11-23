@@ -75,7 +75,6 @@ test("scope：系统核心 = 记忆 / 执事体系 / 宰相 / 自主轮 / 工具
 		"AUTONOMY_ENABLED",
 		"CHANCELLOR_ENABLED",
 		"COMPANIONS_ENABLED",
-		"DELEGATION_PROJECT_MEMORY",
 		"MEMORY_ENABLED",
 	].sort());
 	const env: NodeJS.ProcessEnv = { AGENT_FLAGS_PATH: join(root, "scope.json") };
@@ -84,7 +83,8 @@ test("scope：系统核心 = 记忆 / 执事体系 / 宰相 / 自主轮 / 工具
 	assert.equal(rows.get("COMPANIONS_ENABLED")?.scope, "core");
 	assert.equal(rows.get("AGENT_TOOL_POLICY")?.scope, "core", "工具权限限制是安全边界，标系统核心");
 	assert.equal(rows.get("TOOL_PROJECTION")?.scope, "plugin");
-	assert.equal(rows.get("PARTNER_TEMPLATES")?.scope, "plugin");
+	// PARTNER_TEMPLATES 2026-11-21 退役；普通插件样本换 SKILL_USAGE。
+	assert.equal(rows.get("SKILL_USAGE")?.scope, "plugin");
 });
 
 test("JSON 清单：API 返回名称 / 说明 / 分组 / 档位 / groups，前端不用再维护映射表", async () => {
@@ -122,8 +122,7 @@ test("JSON 清单：API 返回名称 / 说明 / 分组 / 档位 / groups，前�
 	assert.equal(extract?.offValue, "off");
 	const toolPolicy = data.flags.find((flag) => flag.key === "AGENT_TOOL_POLICY");
 	assert.equal(toolPolicy?.offValue, "full", "工具权限的关 = 完全访问（既有档位）");
-	const internal = data.flags.find((flag) => flag.key === "CHANCELLOR_INTERNAL");
-	assert.equal(internal?.offValue, "qoder", "内部质检的关 = 外部 CLI（既有档位）");
+	//（CHANCELLOR_INTERNAL 2026-11-21 退役：qoder 旧拆单形态删除，offValue 样本只剩 extraction / toolPolicy。）
 	const archiveDays = data.flags.find((flag) => flag.key === "ARCHIVE_AUTO_DAYS");
 	assert.equal(archiveDays?.surface, "settings", "专属卡不在插件页重复");
 	assert.deepEqual(

@@ -131,16 +131,6 @@ export interface BgJobWakePayload {
 export const BG_WAKE_TAIL_CHARS = 400;
 
 /**
- * 完成唤醒开关（回滚形态）：`BG_JOB_WAKE_ENABLED=false` → 回"只写记录不开轮"
- * （改动前行为）。只有明确 false / 0 / off 才关，拼错值不会误关（照
- * bashBackgroundEnabled 的读法，方向相反：这是"新能力默认开"的开关）。
- */
-export function bgJobWakeEnabled(env: Record<string, string | undefined> = process.env): boolean {
-	const raw = env.BG_JOB_WAKE_ENABLED?.trim().toLowerCase();
-	return !(raw === "false" || raw === "0" || raw === "off");
-}
-
-/**
  * 输出变化检测的间隔秒数：`BG_JOB_WATCH_INTERVAL_S`，**默认 0 = 关（仅完成唤醒）**。
  * 非法值（非整数 / 负数）一律回落 0，不猜。
  */

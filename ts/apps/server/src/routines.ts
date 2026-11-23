@@ -20,7 +20,6 @@ import {
 	extractRoutineDone,
 	planRoutineWatch,
 	releaseRoutineWatch,
-	routineConditionalEnabled,
 	routineConditionNotes,
 	routineRunVerdict,
 	routineTriggerGatesEnabled,
@@ -108,7 +107,6 @@ export interface RoutineRunRecord {
 	summary?: string;
 	/**
 	 * 结构化结局（2026-11-10 批 13 §四.2）：下一次触发带给模型，"接着上次往下做"。
-	 * `ROUTINE_CONDITIONAL=false` 时不写（新字段被忽略，行为回到改动前）。
 	 */
 	outcome?: RoutineOutcome;
 	/** 无人值守下跳过了步骤（2026-11-10 批 13 §二.2）；只记工具名枚举，不记正文 */
@@ -536,7 +534,7 @@ class RoutineEngine {
 			for (const [triggerIndex, trigger] of routine.triggers.entries()) {
 				if (trigger.type !== "event" || trigger.kind !== kind) continue;
 				// 结束时间已过（批 21 §三）：这个触发器不再被事件唤醒。
-				if (routineConditionalEnabled() && triggerEndedAt(trigger)) continue;
+				if (triggerEndedAt(trigger)) continue;
 				const match = trigger.match ?? {};
 				const matched = Object.entries(match).every(
 					([key, value]) => (fields[key] ?? "") === value,
@@ -594,7 +592,7 @@ class RoutineEngine {
 		let best: Date | null = null;
 		for (const trigger of routine.triggers) {
 			// 结束时间已过（批 21 §三）：这个触发器不再排下一次。
-			if (routineConditionalEnabled() && triggerEndedAt(trigger, from.getTime())) continue;
+			if (triggerEndedAt(trigger, from.getTime())) continue;
 			let candidate: Date | null = null;
 			if (trigger.type === "cron") {
 				candidate = nextCronFire(trigger.expr, from);
@@ -674,18 +672,14 @@ class RoutineEngine {
 			return;
 		}
 
-		// 条件门控开关（2026-11-10 批 13 §四.3）：关着时下面所有新字段一律不参与。
-		const conditional = routineConditionalEnabled();
-
 		// 前置条件（2026-11-10 批 21 §三）：触发前问一次模型"成立吗"。
 		// 失败 / 解析失败一律当不成立（fail-closed）；不成立就记 skipped、不建 run、不占额度。
-		if (conditional) {
-			for (const note of routineConditionNotes(routine.triggers)) {
-				const verdict = await evaluateRoutineCondition({ note, prompt: routine.prompt });
-				if (verdict !== "met") {
-					this.recordConditionSkip(routine, trigger, verdict === "unavailable");
-					return;
-				}
+		//（条件门控回滚开关 2026-11-21 退役，恒启用。）
+		for (const note of routineConditionNotes(routine.triggers)) {
+			const verdict = await evaluateRoutineCondition({ note, prompt: routine.prompt });
+			if (verdict !== "met") {
+				this.recordConditionSkip(routine, trigger, verdict === "unavailable");
+				return;
 			}
 		}
 
@@ -714,13 +708,12 @@ class RoutineEngine {
 
 		try {
 			// 条件门控（2026-11-10 批 13 §四）：上次结局 + 完成条件进提示词。
-			// 开关关着时 buildRoutinePrompt 原样返回规则正文（逐字节回到改动前）。
+			//（回滚开关 2026-11-21 退役，恒参与。）
 			const prompt = buildRoutinePrompt({
 				prompt: routine.prompt.slice(0, PROMPT_LIMIT),
-				lastOutcome: conditional ? this.lastOutcomeOf(routine.id) : undefined,
-				untilNote: conditional ? routine.until?.note : undefined,
-				cursorAt: conditional ? this.cursorOf(routine.id) : undefined,
-				conditional,
+				lastOutcome: this.lastOutcomeOf(routine.id),
+				untilNote: routine.until?.note,
+				cursorAt: this.cursorOf(routine.id),
 			});
 			// 人格活模块（2026-11-15 批2）：heart 开 + 盘点例行 → 提示词末尾加"你自己的记录"段。
 			// 不新造调度：还是这条例行规则、这次触发，只是产出格式多三段。
@@ -760,23 +753,18 @@ class RoutineEngine {
 				run.skipped = true;
 				run.skipReason = `unattended:${skipped.join(",")}`;
 			}
-			const doneMarker = conditional
-				? extractRoutineDone(replyText)
-				: { text: replyText, done: false };
+			const doneMarker = extractRoutineDone(replyText);
 			// ends.after 是 maxRuns 的别名（批 21 §三）：两者同时存在取更小的。
-			const maxRuns = conditional
-				? effectiveMaxRuns(routine.maxRuns, routine.triggers)
-				: routine.maxRuns;
+			const maxRuns = effectiveMaxRuns(routine.maxRuns, routine.triggers);
 			const verdict = routineRunVerdict({
 				ok: result.ok,
 				quiet: result.quiet === true,
 				skippedToolCount: skipped.length,
 				untilMet: doneMarker.done,
-				conditional,
 				...(maxRuns !== undefined ? { maxRuns } : {}),
 				completedRunsBefore: completedBefore,
 			});
-			if (conditional) run.outcome = verdict.outcome;
+			run.outcome = verdict.outcome;
 			// 工具报错的轮（批 21 §三"读失败不当无新"）：安静已被压制，这里把报错工具
 			// 记成枚举前缀，run 记录一眼看出"这轮为什么没算安静"。不记报错正文（日志纪律）。
 			const toolErrors = result.toolErrors ?? [];
@@ -825,7 +813,7 @@ class RoutineEngine {
 			run.endedAt = new Date().toISOString();
 			run.error = error instanceof Error ? error.message : String(error);
 			// 抛异常也是"上一次的结果"，不能让下一轮看不到失败。
-			if (conditional) run.outcome = "failed";
+			run.outcome = "failed";
 			finished.runs.push(run);
 			this.save();
 		}
@@ -866,7 +854,7 @@ class RoutineEngine {
 					summary: (run.text || run.error || "").replace(/\s+/g, " ").slice(0, 200),
 					// 手动试跑不判 until / 不占 maxRuns 的"自动停"语义，但结局照记，
 					// 下一次定时触发仍能看到"上一次的结果"。
-					...(routineConditionalEnabled() ? { outcome } : {}),
+					outcome,
 					...(runSource ? { runSource } : {}),
 					...(skipped.length > 0
 						? { skipped: true, skipReason: `unattended:${skipped.join(",")}` }

@@ -25,10 +25,6 @@ export function consolidateLlmEnabled(): boolean {
 	return !isOff(process.env.MEMORY_CONSOLIDATE_LLM);
 }
 
-export function consolidateJobEnabled(): boolean {
-	return flagEnabled("MEMORY_CONSOLIDATE_JOB");
-}
-
 export function memoryImportEnabled(): boolean {
 	return !isOff(process.env.MEMORY_IMPORT);
 }

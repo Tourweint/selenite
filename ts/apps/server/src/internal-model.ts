@@ -5,8 +5,8 @@
  * （`models.completeSimple`，不挂工具）。和 `partner-learning.ts` 的
  * `completeWithPartnerModel` 同一套写法，只是模型取全局运行时选择、不取执事候选链。
  *
- * 回滚：`CHANCELLOR_INTERNAL=qoder` → 不注入，chancellor 回到原来的 Qoder 调用。
- * 默认 `core`。faux 模式没有真实内部模型，会明确失败（不再静默借 Qoder）。
+ *（CHANCELLOR_INTERNAL 回滚开关 2026-11-21 退役：恒走核心模型，qoder 旧形态已删。
+ * faux 模式没有真实内部模型，会明确失败。）
  */
 
 import { contentText } from "@earendil-works/pi-ai";
@@ -14,27 +14,13 @@ import type { QoderCall } from "../../../packages/chancellor/src/dispatch.ts";
 import { setInternalAsk } from "../../../packages/chancellor/src/index.ts";
 import type { QoderResult } from "../../../packages/chancellor/src/types.ts";
 import { currentModels, isFaux, readLlmConfig } from "./provider.ts";
-import { flagValue } from "./flags.ts";
-
-export type InternalMode = "core" | "qoder";
 
 const SYSTEM_PROMPT =
 	"你是一个只输出所要求格式的内部文本模型。不要输出解释、前言或额外内容。";
 
-/** `CHANCELLOR_INTERNAL=core`（缺省）/ `qoder`（回滚）。 */
-export function chancellorInternalMode(
-	env: NodeJS.ProcessEnv = process.env,
-): InternalMode {
-	return flagValue("CHANCELLOR_INTERNAL", env) === "qoder" ? "qoder" : "core";
-}
-
-/** 进程启动一次：把核心调用注入 chancellor；qoder 模式注入 null（回到默认）。 */
-export function installInternalAsk(
-	env: NodeJS.ProcessEnv = process.env,
-): InternalMode {
-	const mode = chancellorInternalMode(env);
-	setInternalAsk(mode === "core" ? coreInternalAsk : null);
-	return mode;
+/** 进程启动一次：把核心调用注入 chancellor（回滚开关 2026-11-21 退役，恒注入）。 */
+export function installInternalAsk(): void {
+	setInternalAsk(coreInternalAsk);
 }
 
 export async function coreInternalAsk(call: QoderCall): Promise<QoderResult> {

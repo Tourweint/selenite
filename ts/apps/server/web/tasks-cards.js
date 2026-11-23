@@ -1,5 +1,5 @@
 /**
- * 一张卡=一条对话：聚合、排序、筛选、侧栏小卡
+ * 一张卡=一条对话：聚合与派活行（旧看板的筛选/侧栏小卡 2026-11-21 随开关退役删除）
  *
  * 2026-11-13 从 web/app.js（25,467 行单文件）按职责拆出；正文是原文搬运，未改写行为。
  * 原文件只有一个作用域、函数互调没有固定方向，拆开后模块之间必然互相 import（环）。
@@ -9,11 +9,8 @@
 
 import { el } from "./dom.js";
 import { attr, esc } from "./markdown.js";
-import { go } from "./route.js";
-import { sidebarGroupsActiveSync } from "./chats-groups.js";
 import { state } from "./state.js";
-import { renderSideListEmpty } from "./tasks-board.js";
-import { EMPLOYEE_LABEL, STATE_ICON, STATUS_ORDER, TASK_BADGE_STATUSES, relativeTime } from "./tasks-model.js";
+import { EMPLOYEE_LABEL, STATE_ICON } from "./tasks-model.js";
 
 /* ── 一张卡 = 一条对话（L3，2026-11-05） ───────────────────
  * 三层粒度：对话卡 → 派活行（父单）→ 子单。
@@ -64,11 +61,6 @@ function conversationLamp(tickets) {
   return lamp;
 }
 
-function lampHtml(lamp) {
-  const text = LAMP_TEXT[lamp];
-  if (!lamp || !text) return "";
-  return `<span class="tk-lamp" data-lamp="${attr(lamp)}"><i aria-hidden="true"></i>${esc(text)}</span>`;
-}
 
 /** 卡内全部单（父 + 子）：子单一般继承 conversationId，缺了也要算进聚合 */
 function conversationTickets(card) {
@@ -144,73 +136,10 @@ function groupByConversation(tickets) {
 }
 
 function sortTickets(list) {
-  const rows = [...list];
-  const byRecent = (a, b) =>
-    String(b.updated_at || "").localeCompare(String(a.updated_at || ""));
-  if (state.sort === "status") {
-    const rank = (ticket) => {
-      const index = STATUS_ORDER.indexOf(ticket.status);
-      return index < 0 ? STATUS_ORDER.length : index;
-    };
-    rows.sort((a, b) => (rank(a) === rank(b) ? byRecent(a, b) : rank(a) - rank(b)));
-  } else {
-    rows.sort(byRecent);
-  }
-  return rows;
-}
-
-/** 对话卡排序：卡头时间（recent）或灯优先级（status），与三列顺序同源 */
-function sortCards(cards) {
-  const rows = [...cards];
-  const byRecent = (a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || ""));
-  if (state.sort === "status") {
-    const rank = (card) => {
-      const index = LAMP_ORDER.indexOf(card.lamp);
-      return index < 0 ? LAMP_ORDER.length : index;
-    };
-    rows.sort((a, b) => (rank(a) === rank(b) ? byRecent(a, b) : rank(a) - rank(b)));
-  } else {
-    rows.sort(byRecent);
-  }
-  return rows;
-}
-
-/** 领域 / 项目 / 执行者筛选：卡内任一单命中就整卡留下（卡内行不裁，避免半张卡） */
-function cardMatchesFilters(card) {
-  const tickets = conversationTickets(card);
-  if (state.domainFilter) {
-    const hit =
-      state.domainFilter === "__none__"
-        ? tickets.some((ticket) => !ticket.domain)
-        : tickets.some((ticket) => ticket.domain === state.domainFilter);
-    if (!hit) return false;
-  }
-  if (
-    state.projectFilter &&
-    !tickets.some((ticket) => (ticket.project || "") === state.projectFilter)
-  ) {
-    return false;
-  }
-  if (
-    state.tasksEmployeeFilter &&
-    !tickets.some((ticket) => ticket.employee === state.tasksEmployeeFilter)
-  ) {
-    return false;
-  }
-  return true;
-}
-
-/** 直派单只吃领域/项目筛选：它们本来就没有对话可筛 */
-function directMatchesFilters(ticket) {
-  if (state.domainFilter) {
-    if (state.domainFilter === "__none__") {
-      if (ticket.domain) return false;
-    } else if (ticket.domain !== state.domainFilter) {
-      return false;
-    }
-  }
-  if (state.projectFilter && (ticket.project || "") !== state.projectFilter) return false;
-  return true;
+  // 排序下拉（recent / status）2026-11-21 随旧看板退役；直派行固定按最近更新排。
+  return [...list].sort((a, b) =>
+    String(b.updated_at || "").localeCompare(String(a.updated_at || "")),
+  );
 }
 
 /** 执行者名：空 → 「默认」，未知类型原样显示，别把新雇员藏起来 */
@@ -250,87 +179,8 @@ function hideTasksState() {
 }
 
 /**
- * 侧栏「任务中心」分区里的简版列表（2026-11-07 统一批）。
- *
- * 用户口径：任务中心也要能展开、展开后"长得像里面那个对话一样"。
- * 所以这里不复制整张看板，只列最近有活的对话卡（标题 + 聚合灯 + 时间），
- * 点一下进任务中心那张卡（#/tasks?ticket=… 或直接开看板）；
- * 完整三列/筛选/打手卡仍在任务中心页——侧栏是入口，不是第二块看板。
- */
-const SIDE_TASKS_LIMIT = 5;
-
-function renderTasksMini() {
-  const box = el.tasksMini;
-  if (!box) return;
-  // 分组形态（2026-11-15 侧栏按创建者分组）：任务行都进文件夹了，这里让位清空。
-  // 回滚开关关着时走下面的原版渲染。
-  if (sidebarGroupsActiveSync()) {
-    box.replaceChildren();
-    box.hidden = true;
-    return;
-  }
-  box.hidden = false;
-  const { cards, direct } = groupByConversation(state.tickets);
-  const alive = (ticket) => TASK_BADGE_STATUSES.has(ticket.status);
-  // 固定按最近更新排（不看任务中心的排序/筛选：侧栏要稳定，不该被页面上的筛选带走）
-  // 2026-11-07 四改：会话与任务合并成一个分区后，**同一个对话不能出现两行**——
-  // 已经在上面会话列表里出现的对话，这里跳过（它那一行本身就是入口，点进去也能看任务）。
-  const shown = new Set(
-    [...el.chats?.querySelectorAll(".chat") || []].map((row) => row.dataset.conv).filter(Boolean),
-  );
-  const activeCards = cards
-    .filter((card) => conversationTickets(card).some(alive))
-    .filter((card) => !shown.has(card.conversationId))
-    .sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")));
-  box.replaceChildren();
-
-  // 空态由整块（会话 + 任务）统一给，这里不再各说一句；
-  // 但统一空态本身由本函数的收尾来刷新——最后一张任务行消失时也要能补上那句话
-  // （2026-11-07 修：原先提前 return 跳过了收尾的 renderSideListEmpty，空态一直缺失）
-  if (!activeCards.length && !direct.some(alive)) {
-    renderSideListEmpty();
-    return;
-  }
-
-  for (const card of activeCards.slice(0, SIDE_TASKS_LIMIT)) {
-    const row = document.createElement("button");
-    row.type = "button";
-    row.className = "side-item task-row";
-    row.dataset.lamp = card.lamp;
-    const lamp = document.createElement("i");
-    lamp.className = "task-lamp";
-    lamp.dataset.lamp = card.lamp === "done" ? "run" : card.lamp;
-    const name = document.createElement("span");
-    name.className = "side-item-label";
-    name.textContent = card.title || "未命名对话";
-    const time = document.createElement("span");
-    time.className = "roster-idle";
-    time.textContent = relativeTime(card.updated_at);
-    row.append(lamp, name, time);
-    row.addEventListener("click", () => {
-      go("tasks");
-      const first = workRowsOf(card)[0];
-      if (first) location.hash = `#/tasks?ticket=${encodeURIComponent(first.id)}`;
-    });
-    box.append(row);
-  }
-
-  // 直派（没有来源对话的旧单）：只给一行计数，点进任务中心底部那组
-  const aliveDirect = direct.filter(alive).length;
-  if (aliveDirect) {
-    const row = document.createElement("button");
-    row.type = "button";
-    row.className = "side-item task-row";
-    row.innerHTML = `<span class="side-item-label">更早的直派</span><span class="roster-idle">${aliveDirect} 单</span>`;
-    row.addEventListener("click", () => go("tasks"));
-    box.append(row);
-  }
-  renderSideListEmpty();
-}
-
-/**
  * 合并后的统一空态（2026-11-07 四改）：会话行与任务行都没内容时，才在列表顶上
  * 放一句「还没有对话」。两处各写一句会同时冒出两条互相矛盾的提示。
  */
 
-export { LAMP_ORDER, LAMP_TEXT, SIDE_TASKS_LIMIT, cardMatchesFilters, childTicketsOf, conversationLamp, conversationTickets, directMatchesFilters, employeeName, groupByConversation, hideTasksState, lampHtml, renderTasksMini, showTasksState, sortCards, sortTickets, ticketConversationId, ticketLamp, ticketText, workRowsOf };
+export { LAMP_ORDER, LAMP_TEXT, childTicketsOf, conversationLamp, conversationTickets, employeeName, groupByConversation, hideTasksState, showTasksState, sortTickets, ticketConversationId, ticketLamp, ticketText, workRowsOf };

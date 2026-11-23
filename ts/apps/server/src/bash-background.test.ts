@@ -6,7 +6,6 @@ import { join } from "node:path";
 import {
 	BG_WAKE_TAIL_CHARS,
 	bashBackgroundEnabled,
-	bgJobWakeEnabled,
 	bgJobWatchIntervalSeconds,
 	bgJobWakePayload,
 	killBgJob,
@@ -261,14 +260,7 @@ test("索引裁剪：超限时只删最旧的已结束条目，在跑的与日�
 
 // ── 完成即唤醒 / 输出变化检测（2026-11-19 唤醒管道批3）────────────────────
 
-test("唤醒开关与间隔：BG_JOB_WAKE_ENABLED 默认开；间隔缺省 0（关）、非法回落 0", () => {
-	assert.equal(bgJobWakeEnabled({}), true, "不配 = 开（新能力默认开）");
-	assert.equal(bgJobWakeEnabled({ BG_JOB_WAKE_ENABLED: "false" }), false);
-	assert.equal(bgJobWakeEnabled({ BG_JOB_WAKE_ENABLED: "0" }), false);
-	assert.equal(bgJobWakeEnabled({ BG_JOB_WAKE_ENABLED: "off" }), false);
-	assert.equal(bgJobWakeEnabled({ BG_JOB_WAKE_ENABLED: "TRUE" }), true);
-	assert.equal(bgJobWakeEnabled({ BG_JOB_WAKE_ENABLED: "bogus" }), true, "拼错值不误关");
-
+test("唤醒间隔：缺省 0（关）、非法回落 0（BG_JOB_WAKE_ENABLED 回滚开关 2026-11-21 退役）", () => {
 	assert.equal(bgJobWatchIntervalSeconds({}), 0, "缺省 0 = 仅完成唤醒");
 	assert.equal(bgJobWatchIntervalSeconds({ BG_JOB_WATCH_INTERVAL_S: "0" }), 0);
 	assert.equal(bgJobWatchIntervalSeconds({ BG_JOB_WATCH_INTERVAL_S: "-3" }), 0, "负数回落 0");

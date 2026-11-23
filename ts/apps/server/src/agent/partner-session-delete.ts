@@ -14,7 +14,6 @@
  */
 
 import { partnersStore } from "../partners.ts";
-import { partnerSessionManageEnabled } from "../partner-session-role.ts";
 import {
 	closeHarnessForMaintenance,
 	getHarness,
@@ -174,10 +173,8 @@ export async function deletePartnerSession(
 	partnerId: string,
 	externalId: string,
 ): Promise<PartnerSessionDeleteResult | PartnerSessionDeleteFailure> {
-	if (!partnerSessionManageEnabled()) {
-		return fail(400, "partner_session_manage_disabled", "分支会话管理已关闭（PARTNER_SESSION_MANAGE=false）");
-	}
 	// 与归档页「永久删除」共用总闸（CHAT_HARD_DELETE）与 LLM 配置守卫。
+	//（分支会话管理开关 2026-11-21 退役，删除恒可用。）
 	const guard = deletionGuard();
 	if (guard) return guard;
 

@@ -3,7 +3,6 @@ import type { MemoryKind } from "@lifediary/memory";
 import { forgetMemory, memoryEngine, memoryOverview, supersedeMemory } from "./agent.ts";
 import {
 	applyProposal,
-	consolidateJobEnabled,
 	consolidateLlmEnabled,
 	dismissProposal,
 	importMemory,
@@ -134,7 +133,8 @@ export function mountMemoryApi(app: Hono, deps: MemoryApiDeps): void {
 			// 长记忆拆分能力位（2026-11-16）：前端据此决定渲不渲染「拆分记忆」。
 			canSplit: memorySplitEnabled(),
 			// 后台整理能力位（2026-11-13）：true = 前端可以用 ?background=1 并轮询 state。
-			consolidateJob: consolidateJobEnabled(),
+			//（MEMORY_CONSOLIDATE_JOB 回滚开关 2026-11-21 退役，恒 true。）
+		consolidateJob: true,
 		});
 	});
 
@@ -612,7 +612,8 @@ export function mountMemoryApi(app: Hono, deps: MemoryApiDeps): void {
 		}
 
 		const background =
-			consolidateJobEnabled() && (c.req.query("background") === "1" || c.req.query("background") === "true");
+			//（MEMORY_CONSOLIDATE_JOB 回滚开关 2026-11-21 退役，后台整理恒可用。）
+			c.req.query("background") === "1" || c.req.query("background") === "true";
 		const job = startReview(scope, {
 			...(deps.generate ? { generate: deps.generate } : {}),
 			// 本次整理同时跑一遍**确定性审计**（2026-11-10 批 17 §三）：只写 diff 文件，不删任何一条。

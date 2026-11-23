@@ -8,7 +8,7 @@
  *
  * 答复本身不经 HTTP：总管代答走 respond_escalation 工具，升级后的答复走
  * 既有 `POST /agent/approvals/:callId/answer`（approval-api 的 onAskAnswered 钩子）。
- * `ESCALATION_CHAIN_ENABLED=false` → 两个端点一律 400 escalation_disabled（回滚形态）。
+ *（ESCALATION_CHAIN_ENABLED 回滚开关 2026-11-21 退役，两个端点恒挂。）
  *
  * 刻意不做：上报的持久化列表（活跃集在 escalation.ts 的进程内存；历史读 SSE 事件）。
  */
@@ -16,7 +16,6 @@
 import type { Hono } from "hono";
 import {
 	escalateToUser,
-	escalationChainEnabled,
 	listActiveEscalations,
 	triggerChiefTurn,
 } from "./escalation.ts";
@@ -25,9 +24,6 @@ export { initEscalationRouting } from "./escalation.ts";
 
 export function mountEscalationApi(app: Hono): void {
 	app.get("/api/v1/agent/escalations", (c) => {
-		if (!escalationChainEnabled()) {
-			return c.json({ ok: false, error: "escalation_disabled" }, 400);
-		}
 		const raw = (c.req.query("conversationId") ?? "").trim();
 		const conversationId = /^\d+$/.test(raw) ? Number(raw) : undefined;
 		return c.json({
@@ -37,9 +33,6 @@ export function mountEscalationApi(app: Hono): void {
 	});
 
 	app.post("/api/v1/agent/escalations/:ticketId/route", async (c) => {
-		if (!escalationChainEnabled()) {
-			return c.json({ ok: false, error: "escalation_disabled" }, 400);
-		}
 		const ticketId = c.req.param("ticketId").trim();
 		if (!ticketId) return c.json({ ok: false, error: "bad_request" }, 400);
 		const body = (await c.req.json().catch(() => null)) as { action?: unknown } | null;

@@ -25,13 +25,6 @@ export const DELEGATION_PROJECT_MEMORY_LIMIT = 16;
 /** 整段（标题 + 条目 + 尾注）的字数上限（2026-11-16 用户拍板）。 */
 export const DELEGATION_PROJECT_MEMORY_MAX_CHARS = 2000;
 
-/** 开关：缺省开；`false`/`0`/`off` 回滚到零注入。 */
-export function delegationProjectMemoryEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	const value = env.DELEGATION_PROJECT_MEMORY?.trim().toLowerCase();
-	if (!value) return true;
-	return !["false", "0", "off"].includes(value);
-}
-
 export interface ProjectMemoryHit {
 	kind: string;
 	content: string;
@@ -80,9 +73,9 @@ export function delegationProjectMemoryText(
 	engine: MemoryEngine | null | undefined,
 	project: { id: string; name: string } | null | undefined,
 	query: string,
-	env: NodeJS.ProcessEnv = process.env,
 ): string {
-	if (!delegationProjectMemoryEnabled(env) || !engine || !project) return "";
+	//（DELEGATION_PROJECT_MEMORY 回滚开关 2026-11-21 退役，恒注入。）
+	if (!engine || !project) return "";
 	try {
 		const hits = engine.recall({
 			text: query,

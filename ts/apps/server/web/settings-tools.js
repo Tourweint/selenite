@@ -13,6 +13,7 @@
  * 行可点开看描述原文（列表里那行只放 80 字摘要）；「定义 / 用量 / 池」三列居中。
  */
 
+import { chevSvg } from "./icons.js";
 import { attr, esc } from "./markdown.js";
 import { request } from "./net.js";
 import { sectionMarkup } from "./settings-atoms.js";
@@ -21,7 +22,8 @@ const TOOL_POOL_PATH = "/api/v1/agent/tool-pool";
 
 const POOL_TIP =
   "常驻 = 每轮请求都带完整定义，占固定前缀；按需 = 初始不带，模型要用先 tool_search 搜出来。" +
-  "这份名单全局生效，人设页还能给某个人单独提升。保存后需重启服务生效。";
+  "这份名单全局生效；按人能不能用去「注入 → 人设 → 某人 → 能用的工具」。" +
+  "工具的名字、描述和参数是代码资产，这里不能改文案。保存后需重启服务生效。";
 
 /** 页面骨架：标题悬停讲口径 + 待重启提示 + 表格卡；标题右侧「恢复默认 / 保存」。 */
 function toolPoolMarkup() {
@@ -72,18 +74,14 @@ function syncDirty() {
   const changed =
     current.length !== state.initial.length ||
     current.some((name) => !state.initial.includes(name));
-  if (save) save.disabled = !changed || !state.enabled;
+  if (save) save.disabled = !changed;
   if (dirtyTag) dirtyTag.hidden = !changed;
-  if (restore) restore.disabled = !state.enabled;
 }
 
 /** 只重画表格（切换 / 恢复默认都走这条，不重新拉数据）。 */
 function drawToolPool() {
   const card = document.getElementById("tool-pool-card");
   if (!card) return;
-  if (!state.enabled) {
-    setPending("低频工具索引未启用（AGENT_TOOL_INDEX=false）：这份名单暂时不生效，改回默认也不会影响工具面。");
-  }
   if (!state.tools.length) {
     card.innerHTML = `<div class="use-empty"><div class="use-empty-title">没有可配置的工具</div><div class="use-empty-hint">服务端没回工具目录；工具面为空时没有可调的池子。</div></div>`;
     return;
@@ -102,7 +100,7 @@ function drawToolPool() {
       return `<tr class="tool-pool-row${open ? " is-open" : ""}" data-tool-row="${attr(tool.name)}" aria-expanded="${open ? "true" : "false"}">
         <td class="model">
           <div class="use-model-line">
-            <span class="tool-pool-caret" aria-hidden="true">›</span>
+            ${chevSvg("tool-pool-caret chev")}
             <span class="use-mono">${esc(tool.name)}</span>
           </div>
           <div class="tool-pool-sum">${esc(String(tool.summary || ""))}</div>

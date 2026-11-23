@@ -21,7 +21,6 @@ function clearSearchEnv() {
 	for (const vendor of SEARCH_VENDORS) delete process.env[vendor.keyEnv];
 	delete process.env.SEARXNG_URL;
 	delete process.env.SEARCH_BASE_URL;
-	delete process.env.SEARCH_MULTI_VENDOR;
 	rmSync(CONFIG_PATH, { force: true });
 }
 

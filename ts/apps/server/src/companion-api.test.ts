@@ -1350,23 +1350,7 @@ test("PATCH projectIds：挂多个 / 替换 / 清空 / 投影带字段；未知�
 	rmSync(ws, { recursive: true, force: true });
 });
 
-test("PARTNER_PROJECT_MEMORY=false：投影与回显整个字段不出现", async () => {
-	const partner = store.create("关开关执事");
-	const prev = process.env.PARTNER_PROJECT_MEMORY;
-	process.env.PARTNER_PROJECT_MEMORY = "false";
-	try {
-		const res = await app.request(`/api/v1/partners/${partner.id}`);
-		const body = (await res.json()) as { partner: Record<string, unknown> };
-		assert.ok(!("projectIds" in body.partner), "开关关：投影不带字段");
-		const patched = await patch(partner.id, { projectIds: [] });
-		assert.equal(patched.status, 200);
-		assert.ok(!("projectIds" in patched.body), "开关关：回显不带字段");
-		assert.deepEqual(store.get(partner.id)?.projectIds, []);
-	} finally {
-		if (prev === undefined) delete process.env.PARTNER_PROJECT_MEMORY;
-		else process.env.PARTNER_PROJECT_MEMORY = prev;
-	}
-});
+//（"开关关：投影与回显整个字段不出现"用例 2026-11-21 随 PARTNER_PROJECT_MEMORY 退役删除，projectIds 恒投影。）
 
 // ── 人设页工具勾选（2026-11-16 工具裁剪 B）──────────────────
 
@@ -1462,7 +1446,7 @@ test("PUT /partners/:id/tools：常驻名单回读 / 非按需 400 / 不带 prom
 		tools: Array<{ name: string; deferred: boolean; promoted: boolean }>;
 	};
 	const deferred = view.tools.filter((tool) => tool.deferred).map((tool) => tool.name);
-	if (deferred.length === 0) return; // 环境里没有按需工具（AGENT_TOOL_INDEX 关）就不测这条
+	if (deferred.length === 0) return; // 环境里没有按需工具就不测这条
 	const name = deferred[0]!;
 
 	const put = (body: unknown) =>

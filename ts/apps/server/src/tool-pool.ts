@@ -165,7 +165,7 @@ export interface ToolPoolTool {
 
 export interface ToolPoolPayload {
 	ok: true;
-	/** AGENT_TOOL_INDEX 是否开；关时整页只读。 */
+	/** 按需池总闸投影（AGENT_TOOL_INDEX 2026-11-21 退役，恒 true；字段留给旧客户端）。 */
 	enabled: boolean;
 	/** 文件里的配置值。 */
 	deferred: string[];
@@ -183,8 +183,6 @@ export interface ToolPoolDeps {
 	/** 模型可见工具目录（复用 modelToolCatalog，包含 deferred）。 */
 	catalog: () => readonly ToolRegistration[];
 	summaryOf: (description: string) => string;
-	/** AGENT_TOOL_INDEX 开关（注入避免 import 环）。 */
-	indexEnabled: () => boolean;
 }
 
 /** 组装 GET / PUT 的响应体。 */
@@ -211,7 +209,7 @@ export function toolPoolPayload(deps: ToolPoolDeps): ToolPoolPayload {
 	});
 	return {
 		ok: true,
-		enabled: deps.indexEnabled(),
+		enabled: true,
 		deferred: configured,
 		defaults: [...DEFAULT_DEFERRED_TOOL_NAMES],
 		applied: runtime,
@@ -227,12 +225,6 @@ export function mountToolPoolRoutes(app: Hono, deps: ToolPoolDeps): void {
 		return c.json(toolPoolPayload(deps));
 	});
 	app.put("/api/v1/agent/tool-pool", async (c) => {
-		if (!deps.indexEnabled()) {
-			return c.json(
-				{ error: "bad_request", message: "低频工具索引未启用（AGENT_TOOL_INDEX=false），工具池不可改" },
-				400,
-			);
-		}
 		const body = (await c.req.json().catch(() => null)) as { deferred?: unknown } | null;
 		const known = new Set(deps.catalog().map((tool) => tool.name));
 		const result = sanitizeDeferredList(body?.deferred, known);

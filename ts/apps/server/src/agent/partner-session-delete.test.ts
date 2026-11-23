@@ -237,19 +237,5 @@ test("busy 拒绝：400 conversation_busy", async () => {
   assert.equal(result.error, "conversation_busy");
 });
 
-test("开关关：400 partner_session_manage_disabled", async () => {
-  const partnerId = nextPartnerId();
-  const { externalId, internalId } = await createChat("worker");
-  linkSide(partnerId, externalId, internalId);
-  process.env.PARTNER_SESSION_MANAGE = "false";
-  try {
-    const result = await deletePartnerSession(partnerId, externalId);
-    assert.equal(result.ok, false);
-    if (result.ok) return;
-    assert.equal(result.status, 400);
-    assert.equal(result.error, "partner_session_manage_disabled");
-    assert.ok(await session.openChat(externalId), "开关关时不能删");
-  } finally {
-    process.env.PARTNER_SESSION_MANAGE = "true";
-  }
-});
+//（「开关关 → 400 partner_session_manage_disabled」用例 2026-11-21 随开关退役删除，
+//  删除端点现在只受 sideSessionsEnabled / CHAT_HARD_DELETE 总闸。）

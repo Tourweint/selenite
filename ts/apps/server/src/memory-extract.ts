@@ -52,16 +52,6 @@ export const NOOP_EXTRACTOR: Extractor = {
 	},
 };
 
-/**
- * `MEMORY_EXTRACT_NOISE`（2026-11-13，回滚开关）：默认开。
- *
- * 开 = 规则抽取过滤审批续跑等合成指令、命令句与问句（`MEMORY_EXTRACT=rule` 不受影响）；
- * 关 = 回到"用户每句 ≥6 字都记成 episode"的旧行为。
- */
-export function memoryExtractNoiseEnabled(): boolean {
-	return flagEnabled("MEMORY_EXTRACT_NOISE");
-}
-
 /** 单次偏好抽取的超时。记忆写入是后台动作，宁可丢一轮也不能挂着不结束。 */
 const PREFERENCE_TIMEOUT_MS = 20_000;
 
@@ -133,8 +123,9 @@ class LayeredExtractor implements Extractor {
 	private readonly judgment = new DialogueExtractor(generateOnce, {
 		experience: experienceExtractionEnabled(),
 	});
+	//（MEMORY_EXTRACT_NOISE 回滚开关 2026-11-21 退役，噪声过滤恒开。）
 	private readonly fallback = new HeuristicExtractor({
-		filterNoise: memoryExtractNoiseEnabled(),
+		filterNoise: true,
 	});
 
 	async extract(input: {
@@ -144,12 +135,10 @@ class LayeredExtractor implements Extractor {
 	}): Promise<MemoryCandidate[]> {
 		const started = Date.now();
 		// 合成指令（审批续跑 / 结构化提问回答等）既不该进规则记忆，也不该喂给偏好判断：
-		// 那几句里常带"不要…""继续…"，喂进去只会污染抽取。
-		const messages = memoryExtractNoiseEnabled()
-			? input.messages.filter(
-					(message) => message.role !== "user" || !isSyntheticUserText(message.content),
-				)
-			: input.messages;
+		// 那几句里常带"不要…""继续…"，喂进去只会污染抽取。（噪声过滤恒开，2026-11-21。）
+		const messages = input.messages.filter(
+			(message) => message.role !== "user" || !isSyntheticUserText(message.content),
+		);
 		const cleanInput = messages.length === input.messages.length ? input : { ...input, messages };
 		const [judged, episodes] = await Promise.all([
 			this.judgment.extract(cleanInput).catch(() => [] as MemoryCandidate[]),
@@ -186,7 +175,7 @@ export function preferenceExtractor(): Extractor | null {
 export function memoryFallbackExtractor(): Extractor | null {
 	const mode = memoryExtractMode();
 	if (mode === "off" || mode === "rule") return null;
-	return memoryExtractNoiseEnabled() ? new HeuristicExtractor({ filterNoise: true }) : null;
+	return new HeuristicExtractor({ filterNoise: true });
 }
 
 /** 供探针/测试：当前会不会真的发模型调用。 */

@@ -58,18 +58,6 @@ function chancellorWorkRootOf(): string {
 	return resolve(configured || join(process.cwd(), "runs"));
 }
 
-/**
- * 上报链总闸（批2 回滚开关之一）：false / 0 / off → 上报降级为现状 attention 直达人。
- * 读法照 delegation-gates.ts 的 WORKER_STEER_ENABLED（批1 先例：env 直读，
- * 只有明确写关才关，拼错值不会误关）；不进 plugins.json 清单——它是部署开关，
- * 不是用户行为开关（同 WAKE_PIPELINE_V2 的批3 口径）。
- */
-export function escalationChainEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	const raw = env.ESCALATION_CHAIN_ENABLED?.trim().toLowerCase();
-	if (!raw) return true;
-	return raw !== "false" && raw !== "0" && raw !== "off";
-}
-
 /** 每张单的上报上限；0 = 不限（不推荐，仅测试用）。非数字 / 负数回落默认 5。 */
 export function escalationMaxPerTask(env: NodeJS.ProcessEnv = process.env): number {
 	const raw = env.ESCALATION_MAX_PER_TASK?.trim();
@@ -272,12 +260,6 @@ export function onEscalationEvent(
 	conversationId: number,
 	deps: EscalationRoutingDeps = routingDeps,
 ): void {
-	if (!escalationChainEnabled()) {
-		// 回滚形态：宿主不路由。worker 侧工具本来就被引导走老通道；到这里的
-		// 属于开关刚翻转的窗口——拒给 worker 一句，别让它干等。
-		rejectToWorker(event.ticketId, "上报链已关闭", deps);
-		return;
-	}
 	if (activeByTicket.has(event.ticketId)) {
 		// 限流一：每张单同时 1 条活跃上报。worker 侧本就该拦（escalate 工具），这里兜底。
 		rejectToWorker(event.ticketId, "已有一条上报在等答复", deps);
@@ -523,9 +505,10 @@ export function triggerChiefTurn(
 	return { ok: true };
 }
 
-/** respond_escalation 工具与本模块之间的装配开关：chancellor 关了就没有上报链。 */
+/** respond_escalation 工具与本模块之间的装配开关：chancellor 关了就没有上报链。
+ *  （ESCALATION_CHAIN_ENABLED 回滚开关 2026-11-21 退役，上报链恒开。） */
 export function respondEscalationAvailable(): boolean {
-	return chancellorEnabled() && escalationChainEnabled();
+	return chancellorEnabled();
 }
 
 // ── respond_escalation 工具 ──────────────────────────────────

@@ -5,7 +5,6 @@ import {
 	buildChiefEscalationPrompt,
 	defaultEscalationDeps,
 	escalateToUser,
-	escalationChainEnabled,
 	escalationMaxPerTask,
 	initEscalationRouting,
 	onEscalationEvent,
@@ -69,9 +68,7 @@ function fakeDeps(overrides: Partial<EscalationRoutingDeps> = {}): EscalationRou
 	return { ...deps, calls } as never;
 }
 
-test("escalationChainEnabled / escalationMaxPerTask：缺省与回滚读法", () => {
-	assert.equal(escalationChainEnabled({}), true);
-	assert.equal(escalationChainEnabled({ ESCALATION_CHAIN_ENABLED: "false" }), false);
+test("escalationMaxPerTask：缺省与 env 读法（ESCALATION_CHAIN_ENABLED 回滚开关 2026-11-21 退役）", () => {
 	assert.equal(escalationMaxPerTask({}), 5);
 	assert.equal(escalationMaxPerTask({ ESCALATION_MAX_PER_TASK: "2" }), 2);
 	assert.equal(escalationMaxPerTask({ ESCALATION_MAX_PER_TASK: "0" }), 0);
@@ -100,18 +97,6 @@ test("路由：总管主对话（无执事链接）→ continueConversation 起�
 	assert.equal(calls.continueTurn[0].conversationId, 7);
 	assert.match(calls.continueTurn[0].text, /\[Escalation context\]/);
 	assert.match(calls.continueTurn[0].text, /respond_escalation/);
-});
-
-test("路由：回滚开关关 → 不注册不唤醒，拒因回投 worker", async () => {
-	resetEscalationState();
-	const { calls, ...deps } = fakeDeps();
-	onEscalationEvent(escalationEvent(), 42, { ...deps, companionsEnabled: () => true });
-	resetEscalationState();
-	// chainEnabled 直接读 env：路由判定也是同一把（onEscalationEvent 内调）。
-	// 这里注入 maxPerTask 无关；用 env 模拟翻转窗口不可行（读法是模块级函数），
-	// 拒收路径由"活跃重复"覆盖（下一测试），回滚形态由 escalationChainEnabled 的
-	// 读法单测覆盖（本文件第一条）。
-	assert.equal(escalationChainEnabled({ ESCALATION_CHAIN_ENABLED: "off" }), false);
 });
 
 test("限流一：每张单同时 1 条活跃上报 → 第二条被拒并回投 worker", async () => {

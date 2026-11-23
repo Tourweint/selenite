@@ -231,6 +231,9 @@ rmSync(PROJECTS_DB, { force: true });
 // seq 事件库也走探针路径，别污染真实 .data/chat-events.sqlite
 const SEQ_DB = ".data/probe-http-chat-events.sqlite";
 rmSync(SEQ_DB, { force: true });
+// 空按需名单（AGENT_TOOL_INDEX 回滚开关 2026-11-21 退役后，让工具全量常驻的正当机制）
+const POOL_EMPTY_PATH = ".data/probe-http-tool-pool.json";
+writeFileSync(POOL_EMPTY_PATH, JSON.stringify({ deferred: [] }), "utf8");
 
 // ── 当前项目 / 路径守卫用的假上游 ─────────────────────────
 // faux 发不出带参数的 write 调用（LLM_FAUX_TOOL 只会给空对象），所以这里起一个
@@ -2766,20 +2769,7 @@ try {
 		"标题来自需求原文首行",
 		String(taskEntry?.title),
 	);
-	// 复用 §14 的 putFlag（同一个大函数作用域，不能重名）
-	check((await putFlag("SIDEBAR_TASK_GROUPS", "false")).status === 200, "flags 端点可切回滚开关");
-	const rolledChats = (await (await fetch(`${BASE}/api/v1/agent/chats?limit=50`)).json()) as {
-		tasks?: unknown;
-	};
-	check(!("tasks" in rolledChats), "开关关 → chats 不下发 tasks 键");
-	check((await putFlag("SIDEBAR_TASK_GROUPS", "true")).status === 200, "恢复开关");
-	const restoredChats = (await (await fetch(`${BASE}/api/v1/agent/chats?limit=50`)).json()) as {
-		tasks?: Array<{ ticketId?: string }>;
-	};
-	check(
-		(restoredChats.tasks ?? []).some((task) => task.ticketId === "T-say"),
-		"开关恢复 → tasks 键回来",
-	);
+	//（回滚开关 SIDEBAR_TASK_GROUPS 的切换断言 2026-11-21 随开关退役删除，tasks 键恒下发。）
 
 	// ── 19. 忙时投递方式（2026-11-07 消息即引导）────────────────
 	// 契约层只验"字段被接受 + 语义没走偏"：faux 回答很快，这里不追真实插话时序
@@ -3391,9 +3381,9 @@ try {
 		PARTNER_GREETING_ENABLED: "false",
 		AGENT_SSE_SEQ_DB_PATH: SEQ_DB,
 		// 2026-11-16 C 段：routine_manage 在低频清单里（注册成 deferred，要先 tool_search 加载）。
-		// 这一节验的是「上架 / 回滚」语义，不是按需加载路径——关掉工具索引让它照旧常驻，
-		// 按需加载另有专门的探针（tool-index 单测 + 隔离实例 context-inspect 实测）。
-		AGENT_TOOL_INDEX: "false",
+		// 这一节验的是「上架 / 回滚」语义，不是按需加载路径——用空按需名单（正当机制，
+		// AGENT_TOOL_POOL_PATH 钉一份 {"deferred":[]}）让它照旧常驻；按需加载另有专门的探针。
+		AGENT_TOOL_POOL_PATH: POOL_EMPTY_PATH,
 		LLM_FAUX_TOOL: "routine_manage",
 		LLM_FAUX_ARGS: JSON.stringify({
 			action: "create",

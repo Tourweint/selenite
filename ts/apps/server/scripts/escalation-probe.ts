@@ -16,8 +16,9 @@
  *   6. 审计：谁答的（主人）在任务详情留言表里带署名可查；活跃上报答完即清。
  *
  * 拆单替身只放行第一单：上报唤醒的代答轮会再派一单，计划失败 = 不派 worker =
- * 不会再 escalation，链自然断开；DELEGATION_WAKE_ENABLED=false 关掉 needs_you
- * 汇报的旧唤醒（上报链走 WAKE_PIPELINE_V2 的 agent-message，不受它影响）。
+ * 不会再 escalation，链自然断开。（原用 DELEGATION_WAKE_ENABLED=false 隔离旧汇报
+ * 唤醒；该回滚开关 2026-11-21 退役，唤醒恒开——多出来的汇报唤醒轮同样走到"再派
+ * 一单被替身拒绝"，对断链断言无影响。）
  *
  * 用法：`pnpm --filter @lifediary/server escalation`
  */
@@ -92,9 +93,6 @@ async function startServer(): Promise<Phase> {
 				CHANCELLOR_LLM_PROVIDER: "faux",
 				CHANCELLOR_WORK_ROOT: join(root, "runs"),
 				DELEGATION_PROJECT_REQUIRED: "false",
-				// 旧汇报唤醒关掉（needs_you 报告不再起轮）；上报链走 WAKE_PIPELINE_V2
-				// 的 agent-message 信封，不受这个开关影响。
-				DELEGATION_WAKE_ENABLED: "false",
 				// worker 的 faux 上报脚本：escalate → waiting 的 REPORT → 等答复；
 				// 答复（steer）进来后写 ready 的 REPORT 收尾。
 				CHANCELLOR_FAUX_ESCALATE: "1",
