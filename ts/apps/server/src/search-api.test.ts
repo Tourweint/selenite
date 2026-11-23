@@ -29,7 +29,6 @@ function clearState() {
 	for (const vendor of SEARCH_VENDORS) delete process.env[vendor.keyEnv];
 	delete process.env.SEARXNG_URL;
 	delete process.env.PROVIDER_SECRETS;
-	delete process.env.SEARCH_MULTI_VENDOR;
 	rmSync(CONFIG_PATH, { force: true });
 	rmSync(KEYS_PATH, { force: true });
 }
@@ -163,25 +162,7 @@ test("search-provider：首次 PUT 保留 env 反推的其他源", async () => {
 	);
 });
 
-test("search-provider：SEARCH_MULTI_VENDOR=false 只留 DeepSeek", async () => {
-	process.env.SEARCH_MULTI_VENDOR = "false";
-	process.env.TAVILY_API_KEY = "t";
-	const server = app();
-	const get = await json(await server.request("/api/v1/agent/search-provider"));
-	assert.deepEqual(get.sources, [], "多源清单不读");
-	assert.deepEqual(
-		(get.vendors as Array<{ id: string }>).map((vendor) => vendor.id),
-		["deepseek"],
-	);
-	const put = await server.request("/api/v1/agent/search-provider", {
-		method: "PUT",
-		headers: { "content-type": "application/json" },
-		body: JSON.stringify({ vendor: "tavily", apiKey: "t" }),
-	});
-	assert.equal(put.status, 400);
-	assert.equal((await json(put)).error, "multi_vendor_disabled");
-});
-
+//（"SEARCH_MULTI_VENDOR=false 只留 DeepSeek" 用例 2026-11-21 随回滚开关退役删除。）
 test("search-provider：SearXNG 需要地址；测试未配置返回引导错误", async () => {
 	const server = app();
 	const missing = await server.request("/api/v1/agent/search-provider", {
