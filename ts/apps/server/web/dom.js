@@ -29,8 +29,6 @@ const el = {
   secProjectsName: document.getElementById("sec-projects-name"),
   secProjectsMore: document.getElementById("sec-projects-more"),
   projList: document.getElementById("proj-list"),
-  secTasksAll: document.getElementById("sec-tasks-all"),
-  tasksMini: document.getElementById("tasks-mini"),
   secGroupsMore: document.getElementById("sec-groups-more"),
   secGroupsAll: document.getElementById("sec-groups-all"),
   partnersBadge: document.getElementById("partners-badge"),
@@ -127,23 +125,12 @@ const el = {
   tasksBadge: document.getElementById("tasks-badge"),
   tasksBack: document.getElementById("tasks-back"),
   tasksRefresh: document.getElementById("tasks-refresh"),
-  tasksDomain: document.getElementById("tasks-domain"),
-  tasksProject: document.getElementById("tasks-project"),
-  tasksSort: document.getElementById("tasks-sort"),
-  tasksFilters: document.getElementById("tasks-filters"),
   tasksScroll: document.getElementById("tasks-scroll"),
   tasksState: document.getElementById("tasks-state"),
   tasksBody: document.getElementById("tasks-body"),
-  tasksStats: document.getElementById("tasks-stats"),
-  // 外部打手区（L3）：四张固定小卡，数据全部由 tickets 列表按 employee 现算
-  tasksHitters: document.getElementById("tasks-hitters"),
-  tasksBoard: document.getElementById("tasks-board"),
-  tasksArchive: document.getElementById("tasks-archive"),
-  // 「更早的直派」折叠组（L3）：没有 conversationId 的旧单走这里，不占三列
-  tasksDirect: document.getElementById("tasks-direct"),
-  // 任务中心重做 v1（2026-11-13 批 1）：新主视图 + 旧看板包装层（回滚用）
+  // 任务中心重做 v1（2026-11-13 批 1）：新主视图。旧三列看板 2026-11-21 随
+  // TASKS_REDESIGN_ENABLED 退役整体删除（旧 DOM / renderBoard / 回滚开关）。
   tasksRedesign: document.getElementById("tasks-redesign"),
-  tasksLegacy: document.getElementById("tasks-legacy"),
   tk2Needs: document.getElementById("tk2-needs"),
   tk2Run: document.getElementById("tk2-run"),
   tk2Hitters: document.getElementById("tk2-hitters"),

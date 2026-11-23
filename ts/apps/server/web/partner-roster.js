@@ -172,7 +172,7 @@ function renderRoster(partners, domainRows, box = el.partnerRoster) {
       event.preventDefault();
       const items = [
         { label: "打开对话", run: open },
-        { label: "人设档案", hint: "开对话并落到右侧的档案页", run: () => void openPartnerProfile(id, "records") },
+        { label: "人设档案", run: () => void openPartnerProfile(id, "records") },
       ];
       if (domain) {
         items.push(

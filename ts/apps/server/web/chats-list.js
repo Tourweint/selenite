@@ -8,12 +8,12 @@
  */
 
 import { openConversation, startNewChat } from "./chat-open.js";
-import { renderGroupedChats, refreshSidebarGroupsFlag, sidebarGroupsActiveSync } from "./chats-groups.js";
+import { renderGroupedChats } from "./chats-groups.js";
 import { el } from "./dom.js";
 import { request } from "./net.js";
 import { chiefDisplayName } from "./partners-status.js";
 import { currentRoute } from "./route.js";
-import { openMenuAt } from "./sec-menu.js";
+import { openMenuAt, openSecMenu } from "./sec-menu.js";
 import { state } from "./state.js";
 import { renderSideListEmpty } from "./tasks-board.js";
 import { inShell, toast } from "./ui-atoms.js";
@@ -30,9 +30,8 @@ async function loadChats() {
     const data = await response.json();
     state.chats = data.chats || [];
     state.archived = data.archived || 0;
-    // 2026-11-15 侧栏按创建者分组：任务专线会话清单（增量键，开关关着 / 老服务端没有）
+    // 2026-11-15 侧栏按创建者分组：任务专线会话清单（增量键；老服务端没有）
     state.taskChats = Array.isArray(data.tasks) ? data.tasks : [];
-    await refreshSidebarGroupsFlag();
     renderChats();
   } catch {
     /* 离线时保持旧列表 */
@@ -43,7 +42,7 @@ function chatLabel(chat) {
   return chat.title || chat.firstText || "（无标题）";
 }
 
-/** 最近会话的过滤与排序（展开态「对话」分区与轨道浮卡共用这一份口径）。
+/** 最近会话的过滤与排序（展开态「任务」分区〔2026-11-21 由「对话」改名〕与轨道浮卡共用这一份口径）。
     置顶的排前面（2026-11-04 批次一），段内保持原有顺序（旧→新）；标记走标题前缀，
     不另起分组栏。partner- 前缀（执事专线 / 群成员会话，2026-11-06 群组方案 §2.2）
     不进最近会话：执事的对话从花名册进，群从群组节进——这里漏过滤会把执事会话当
@@ -86,51 +85,33 @@ function buildChatRow(chat) {
   label.textContent = `${chat.pinned ? "★ " : ""}${chatLabel(chat)}`;
   row.append(label);
 
-  // 悬停才出现：置顶 / 重命名 / 归档。不做下拉菜单，三个图标够了。
+  // 行尾一颗 ⋯（2026-11-21，用户口径「三个小图标取消」）：悬停才出现的一颗点，
+  // 重命名 / 置顶 / 归档收进菜单，与分区头 ⋯ 同一套（openSecMenu，壳里走原生小窗）；
+  // 忙态在打开菜单时现算（建行快照会过时）。右键菜单不变（attachChatContextMenu）。
   const actions = document.createElement("span");
   actions.className = "chat-actions";
-
-  const pin = document.createElement("button");
-  pin.type = "button";
-  pin.className = "chat-act";
-  pin.textContent = "★";
-  pin.title = chat.pinned ? "取消置顶" : "置顶";
-  pin.addEventListener("click", async (event) => {
+  const more = document.createElement("button");
+  more.type = "button";
+  more.className = "chat-act chat-more";
+  more.setAttribute("aria-haspopup", "menu");
+  more.setAttribute("aria-expanded", "false");
+  more.setAttribute("aria-label", "会话动作");
+  more.innerHTML =
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="2" fill="currentColor"/><circle cx="12" cy="12" r="2" fill="currentColor"/><circle cx="19" cy="12" r="2" fill="currentColor"/></svg>';
+  more.addEventListener("click", (event) => {
+    // 不拦会把行点开：⋯ 的 click 会冒泡到「点行 = 进对话」
     event.stopPropagation();
-    await toggleChatPin(chat);
+    // 解释行退役（2026-11-21 用户口径「就重命名、置顶、归档三个就行」）：忙态用
+    // 灰置表达，不写提示行；确认条与 400 toast 还在，误触有兜底。
+    const archiveBusy = state.sending && chat.conversationId === state.conversationId;
+    openSecMenu(more, [
+      { label: "重命名", run: () => startRename(row, chat) },
+      { label: chat.pinned ? "取消置顶" : "置顶", run: () => void toggleChatPin(chat) },
+      { separator: true },
+      { label: "归档", disabled: archiveBusy, run: () => openChatArchiveConfirm(row, chat) },
+    ]);
   });
-
-  const rename = document.createElement("button");
-  rename.type = "button";
-  rename.className = "chat-act";
-  rename.textContent = "✎";
-  rename.title = "重命名";
-  rename.addEventListener("click", (event) => {
-    event.stopPropagation();
-    startRename(row, chat);
-  });
-
-  const archive = document.createElement("button");
-  archive.type = "button";
-  archive.className = "chat-act";
-  // 归档图标（Lucide archive）：✕ 会被读成删除，和「归档」语义相反（2026-11-12）
-  archive.innerHTML =
-    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg>';
-  // 防误触（2026-11-13 对齐 ZCode）：当前会话正在流式输出时图标禁用（title 说明）；
-  // 其余行的忙态界面不知道，由服务端 400 兜底（行内确认条确认后才 POST）。
-  // dataset.chatArchive 给 setSending 用：发送/停止切换时同步这一个按钮，不重渲染整列。
-  archive.dataset.chatArchive = chat.conversationId;
-  const archiveBusy = state.sending && chat.conversationId === state.conversationId;
-  archive.disabled = archiveBusy;
-  archive.title = archiveBusy ? "会话正在运行，请先停止再归档" : "归档（会话和记忆都还在）";
-  archive.setAttribute("aria-label", "归档会话");
-  archive.addEventListener("click", (event) => {
-    event.stopPropagation();
-    if (archive.disabled) return;
-    openChatArchiveConfirm(row, chat);
-  });
-
-  actions.append(rename, archive, pin);
+  actions.append(more);
   row.append(actions);
 
   // 点会话行 = 进这条对话。2026-11-07 修：以前只 openChat、不切路由，
@@ -144,7 +125,8 @@ function buildChatRow(chat) {
       void openConversation(chat.conversationId);
     }
   });
-  // 右键（2026-11-16）：三个悬停图标收进一张小菜单；实现与图标按钮同一份。
+  // 右键（2026-11-16）：行尾 ⋯ 与右键互为两个入口（2026-11-21 起 ⋯ 是主入口，
+  // 原三颗悬停图标退役）；实现与 ⋯ 菜单同一份 items 口径。
   // 收起轨道的会话浮卡也复用这一份（attachChatContextMenu）。
   attachChatContextMenu(row, chat);
   return row;
@@ -173,12 +155,8 @@ function attachChatContextMenu(row, chat, options = {}) {
         { label: "重命名", run: () => startRename(row, chat) },
         { label: chat.pinned ? "取消置顶" : "置顶", run: () => void toggleChatPin(chat) },
         { separator: true },
-        {
-          label: "归档",
-          hint: archiveBusy ? "会话正在运行，先停止再归档" : "会话和记忆都还在",
-          disabled: archiveBusy,
-          run: () => openChatArchiveConfirm(row, chat),
-        },
+        // 解释行退役（2026-11-21，与 ⋯ 菜单同一份口径）：忙态用灰置表达
+        { label: "归档", disabled: archiveBusy, run: () => openChatArchiveConfirm(row, chat) },
       );
     } else {
       items.push({ label: chat.pinned ? "取消置顶" : "置顶", run: () => void toggleChatPin(chat) });
@@ -191,23 +169,11 @@ function renderChats() {
   const ordered = recentChatsOrdered();
   const rows = ordered.slice(0, RECENTS_LIMIT).map(buildChatRow);
 
-  // 2026-11-15 侧栏按创建者分组：其他对话（普通对话）→ 总管 → 各执事，可收起。
-  // 回滚开关关着 / 服务端没带 tasks 键 / 一条任务都没有 → 原版平铺渲染，一行不差
-  //（没有任务可归时套一层「其他对话」文件夹只是噪音）。
-  if (sidebarGroupsActiveSync() && state.taskChats.length > 0) {
-    renderGroupedChats(rows);
-    renderSideListEmpty();
-    return;
-  }
-
-  el.chats.replaceChildren();
-  if (el.tasksMini) el.tasksMini.hidden = false;
-  // 空态（2026-11-07 四改）：会话与任务合并成一块后，空态也只说一句。
-  // 这里先不放占位，等任务行也渲染完，由 renderSideListEmpty() 统一判——
-  // 否则「没有会话」和「没有在跑的活」会同时出现两行。
-
-  // 只展示前 RECENTS_LIMIT 条；更多的在设置→会话里搜（#/settings/chats）。
-  for (const row of rows) el.chats.append(row);
+  // 2026-11-21 二次翻案（用户口径「咱们这个在其他区域里，那这个也没有啊」）：
+  // 「其他」组**常驻**——一条任务都没有也套文件夹，普通对话永远待在「其他」里，不再平铺。
+  // 旧口径"没有任务可归时套一层文件夹只是噪音"当日作废。服务端没带 tasks 键的老服务
+  // 也走这条路：分组照画，只是暂时没有总管 / 执事组（要服务重启下发 tasks 键才有）。
+  renderGroupedChats(rows);
   renderSideListEmpty();
 }
 

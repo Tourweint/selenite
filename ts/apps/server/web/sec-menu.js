@@ -26,12 +26,58 @@
  * 不收口的话"菜单开着按 Esc"会连页面一起退（设置页 ⋯ 菜单 2026-11-14 实测踩过）。
  */
 
-/** @typedef {{ label?: string, hint?: string, kbd?: string, disabled?: boolean, danger?: boolean, separator?: boolean, run?: () => void }} SecMenuItem */
+/** @typedef {{ label?: string, kbd?: string, disabled?: boolean, danger?: boolean, separator?: boolean, run?: () => void }} SecMenuItem */
 
 import { markNativePopupsBroken, nativePopupsReady } from "./ui-atoms.js";
 
 /** @type {null | { button: HTMLElement | null, menu: HTMLElement, onDown: (event: PointerEvent) => void, onScroll: () => void, onResize: () => void, onKey: (event: KeyboardEvent) => void }} */
 let openState = null;
+
+/* 原生菜单开着时，落在页面上的那一次外点击要吞掉（2026-11-22）。
+ *
+ * 壳在按下时已经先把菜单收起，但 WebView 子窗不是壳自己的窗口：WM_MOUSEACTIVATE
+ * 的「激活父窗并吃掉这一下」管不到它，click 仍会交给页面。于是同一个 ⋯ 的第二次
+ * 点击会「关掉又立刻打开」（用户看到的菜单卡片闪一下），点别处则会误触底下的行。
+ * 按下时记一笔、吞掉紧跟的 click，就回到 Windows 菜单「第一下只关、不选」的口径。
+ * 菜单自己选中的动作在原生小窗里完成，不会经过这里。 */
+let nativeMenusOpen = 0;
+let nativeDismissClick = false;
+let nativeDismissTimer = 0;
+// 只补 Windows：macOS 的弹出层本来就允许外点击继续落到下面（框架明确保持那个手感），
+// 而 Linux / Windows 的「按下只关菜单」在 WebView 子窗这半边丢了。
+const nativeMenuEatsPress = /Windows/i.test(navigator.userAgent);
+
+document.addEventListener(
+  "pointerdown",
+  () => {
+    if (!nativeMenuEatsPress) return;
+    if (!nativeMenusOpen) {
+      // 新的一次按下说明上一次已经结束；上一按要是拖拽没出 click，别吞掉这一次
+      nativeDismissClick = false;
+      clearTimeout(nativeDismissTimer);
+      return;
+    }
+    nativeDismissClick = true;
+    clearTimeout(nativeDismissTimer);
+    // 按下后拖走不会出 click；别把很久以后键盘触发的 click 也吞了
+    nativeDismissTimer = setTimeout(() => {
+      nativeDismissClick = false;
+    }, 1500);
+  },
+  true,
+);
+
+document.addEventListener(
+  "click",
+  (event) => {
+    if (!nativeDismissClick) return;
+    nativeDismissClick = false;
+    clearTimeout(nativeDismissTimer);
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  },
+  true,
+);
 
 /** 让壳画菜单（2026-11-19 批1，desktop/popovers.go）：true=壳接了。
  *  业务闭包不过桥：桥上只过显示字段，壳阻塞到用户选完、resolve 所选序号，
@@ -50,7 +96,6 @@ function shellShowMenu(anchor, placement, items, domFallback, onDone) {
     runs.push(typeof item.run === "function" ? item.run : null);
     return {
       label: item.label || "",
-      hint: item.hint || "",
       kbd: item.kbd || "",
       danger: item.danger === true,
       disabled: item.disabled === true,
@@ -59,6 +104,7 @@ function shellShowMenu(anchor, placement, items, domFallback, onDone) {
   try {
     const result = bridge.call.call(bridge, "Shell.ShowMenu", { anchor, placement, items: payload });
     if (result && typeof result.then === "function") {
+      nativeMenusOpen += 1;
       result
         .then((chosen) => {
           if (Number.isInteger(chosen) && chosen >= 0 && chosen < runs.length) runs[chosen]?.();
@@ -68,6 +114,9 @@ function shellShowMenu(anchor, placement, items, domFallback, onDone) {
           markNativePopupsBroken();
           onDone?.();
           domFallback?.();
+        })
+        .finally(() => {
+          nativeMenusOpen = Math.max(0, nativeMenusOpen - 1);
         });
     }
     return true;
@@ -124,7 +173,6 @@ function secMenuItem(item) {
   const button = document.createElement("button");
   button.type = "button";
   const classes = ["sec-menu-item"];
-  if (item.hint) classes.push("is-rich");
   if (item.danger) classes.push("is-danger");
   button.className = classes.join(" ");
   button.setAttribute("role", "menuitem");
@@ -133,12 +181,6 @@ function secMenuItem(item) {
   const label = document.createElement("span");
   label.className = "sec-menu-label";
   label.textContent = item.label || "";
-  if (item.hint) {
-    const hint = document.createElement("span");
-    hint.className = "sec-menu-hint";
-    hint.textContent = item.hint;
-    label.append(hint);
-  }
   button.append(label);
 
   if (item.kbd) {

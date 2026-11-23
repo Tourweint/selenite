@@ -1,49 +1,19 @@
 /**
- * 侧栏「对话」分区按创建者分文件夹（2026-11-15）。
+ * 侧栏「任务」分区（2026-11-21 由「对话」改名）按创建者分文件夹（2026-11-15）。
  *
  * 方案：docs/设计方案/2026-11-15-侧栏对话按创建者分组.md。
  * 数据：`GET /agent/chats` 增量 `tasks` 键（task-<票号> 专线会话，带 dispatchedBy）。
- * 结构：[其他对话]（用户自己的普通对话，原有行原样） → [总管] → 每个有任务的执事一 组；
+ * 结构：[其他]（用户自己的普通对话 + 自己派的单，2026-11-21 翻案） → [总管] → 每个有任务的执事一 组；
  * 组头可收起（localStorage 记忆），任务行点击直接打开任务专线会话。
- *
- * 回滚：flags `SIDEBAR_TASK_GROUPS=false` → chats-list 走旧版平铺渲染（renderChats 原文），
- * tasks-mini 恢复承担任务行（tasks-cards.renderTasksMini 用 sidebarGroupsActiveSync 判断让位）。
+ * 回滚开关 SIDEBAR_TASK_GROUPS 2026-11-21 退役，分组是唯一形态。
  */
 
 import { openConversation } from "./chat-open.js";
 import { el } from "./dom.js";
-import { request } from "./net.js";
+import { chevSvg } from "./icons.js";
 import { chiefDisplayName, partnerDisplayName } from "./partners-status.js";
 import { state } from "./state.js";
 import { TASK_STATUS, relativeTime } from "./tasks-model.js";
-
-/* ── 回滚开关：flags 懒读 + 模块级缓存（照 partner-templates 的口径） ── */
-
-let groupsFlagCache = null;
-
-/** flags `SIDEBAR_TASK_GROUPS`（默认开）。读不到 flags 端点时按开处理（默认值语义）。 */
-export async function refreshSidebarGroupsFlag() {
-	if (groupsFlagCache !== null) return groupsFlagCache;
-	try {
-		const response = await request("/api/v1/agent/flags", { cache: "no-store" });
-		const data = await response.json().catch(() => ({}));
-		if (!response.ok || !Array.isArray(data.flags)) {
-			groupsFlagCache = true;
-			return true;
-		}
-		const found = data.flags.find((item) => item?.key === "SIDEBAR_TASK_GROUPS");
-		const value = found?.value ?? found?.defaultValue ?? "true";
-		groupsFlagCache = value !== "false" && value !== "0";
-	} catch {
-		groupsFlagCache = true;
-	}
-	return groupsFlagCache;
-}
-
-/** 同步读取最近一次刷出来的开关值；loadChats 之前调用按开处理（默认值语义）。 */
-export function sidebarGroupsActiveSync() {
-	return groupsFlagCache !== false;
-}
 
 /* ── 折叠状态 ─────────────────────────────────────────── */
 
@@ -80,24 +50,31 @@ function folderSection(key, name, rows, closed, count) {
 	head.type = "button";
 	head.className = "chat-folder-head";
 	head.setAttribute("aria-expanded", closed ? "false" : "true");
-	head.innerHTML = `<svg class="chat-folder-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+	// 2026-11-21（箭头统一批）：指下/-90° → 全站指右/90° 口径（视觉终态不变，旋转在 style-27）
+	head.innerHTML = `${chevSvg("chat-folder-chevron chev")}
 		<span class="chat-folder-name"></span>
 		<span class="chat-folder-count">${count}</span>`;
 	head.querySelector(".chat-folder-name").textContent = name;
 	head.addEventListener("click", () => {
 		toggleFolder(key);
-		const body = wrap.querySelector(".chat-folder-body");
+		// 开合状态挂 wrap 的 .is-closed（2026-11-21 起）：组体走高度动画，不能再用
+		// body.hidden 直切（display:none 会把过渡杀掉）。
 		const nowClosed = folderClosed(key);
-		body.hidden = nowClosed;
+		wrap.classList.toggle("is-closed", nowClosed);
 		head.setAttribute("aria-expanded", nowClosed ? "false" : "true");
 	});
 	wrap.append(head);
 
+	// 组体两层结构与顶层分区（.side-sec-body > .side-sec-clip）同一套：
+	// .chat-folder-fold 是 grid 轨道层（1fr↔0fr 过渡），.chat-folder-body 兼裁切层。
+	const fold = document.createElement("div");
+	fold.className = "chat-folder-fold";
 	const body = document.createElement("div");
 	body.className = "chat-folder-body";
-	body.hidden = closed;
 	for (const row of rows) body.append(row);
-	wrap.append(body);
+	fold.append(body);
+	wrap.append(fold);
+	wrap.classList.toggle("is-closed", closed);
 	return wrap;
 }
 
@@ -122,9 +99,9 @@ function taskRow(task) {
 }
 
 /**
- * 分组渲染整个「对话」分区（el.chats）。
+ * 分组渲染整个「任务」分区（el.chats）。
  * rows = chats-list 按旧口径构建好的普通对话行（动作按钮 / 选中态都在那边）。
- * 顺序：其他对话 → 总管 → 执事（按名下最近任务排序）。空组不画。
+ * 顺序：其他 → 总管 → 执事（按名下最近任务排序）。空组不画。
  */
 export function renderGroupedChats(rows) {
 	const box = el.chats;
@@ -132,9 +109,27 @@ export function renderGroupedChats(rows) {
 	const closed = closedFolders();
 	const chatNodes = [...rows];
 
-	// 任务专线按创建者归组；服务端已按 lastAt 倒序，组内保序
+	// 任务专线按创建者归组；服务端已按 lastAt 倒序，组内保序。
+	// 2026-11-21 翻案（用户口径「被我创建的东西归为一类」）：普通对话里派出的单不再挂
+	// 总管名下——宿主是普通对话（worker 会话）→ 归「其他」组；宿主是总管会话或解析不到
+	// 宿主 → 仍归总管（契约 dispatchedBy 不变，细分只在前端做）：
+	// chief 宿主清单取自 state.chats（近 50 条活跃会话）；更早 / 已归档的总管会话宿主
+	// 认不出来，会误归「其他」——已知边界，不在前端猜更多。
+	const chiefHostIds = new Set(
+		state.chats
+			.filter((chat) => !String(chat.conversationId || "").startsWith("partner-"))
+			.filter((chat) => (chat.chatKind || "chief") === "chief")
+			.map((chat) => chat.conversationId),
+	);
 	const tasks = Array.isArray(state.taskChats) ? state.taskChats : [];
-	const chiefTasks = tasks.filter((task) => task.dispatchedBy === "chief");
+	const chiefTasks = [];
+	const ownTasks = [];
+	for (const task of tasks) {
+		if (task.dispatchedBy && task.dispatchedBy !== "chief") continue;
+		const host = task.hostConversationId;
+		if (host && !chiefHostIds.has(host)) ownTasks.push(task);
+		else chiefTasks.push(task);
+	}
 	const byPartner = new Map();
 	for (const task of tasks) {
 		if (task.dispatchedBy === "chief" || !task.dispatchedBy) continue;
@@ -146,17 +141,11 @@ export function renderGroupedChats(rows) {
 		return latest(b) - latest(a);
 	});
 
-	// 其他对话：一行都没有时整组不画（全部为空的空态交给 renderSideListEmpty 一句话）
-	if (chatNodes.length > 0) {
-		box.append(
-			folderSection(
-				"other",
-				"其他对话",
-				chatNodes,
-				folderClosed("other"),
-				chatNodes.length,
-			),
-		);
+	// 其他（用户自己的普通对话 + 自己派的单）：一行都没有时整组不画
+	//（全部为空的空态交给 renderSideListEmpty 一句话）
+	const otherRows = [...chatNodes, ...ownTasks.map(taskRow)];
+	if (otherRows.length > 0) {
+		box.append(folderSection("other", "其他", otherRows, folderClosed("other"), otherRows.length));
 	}
 	if (chiefTasks.length > 0) {
 		box.append(
@@ -180,11 +169,5 @@ export function renderGroupedChats(rows) {
 				partnerTasks.length,
 			),
 		);
-	}
-
-	// 旧 tasks-mini 让位：分组形态下任务行都在文件夹里了
-	if (el.tasksMini) {
-		el.tasksMini.replaceChildren();
-		el.tasksMini.hidden = true;
 	}
 }

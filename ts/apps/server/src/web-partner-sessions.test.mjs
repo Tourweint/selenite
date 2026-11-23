@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   buildSessionTree,
+  paginateSessionTree,
   parsePartnerExternalId,
   partnerIdOfConversation,
   partnerSessionLabel,
+  SESSION_PAGE_SIZE,
 } from "../web/partner-sessions.js";
 
 /**
@@ -74,4 +76,33 @@ test("buildSessionTree：副本挂到母会话下，母会话缺失 / 环都退�
   };
   walk(flat);
   assert.deepEqual(seen.sort(), ["a", "b", "s"]);
+});
+
+test("paginateSessionTree：10 行一页，子树不拆页，超页子树独占", () => {
+  const node = (id, children = []) => ({ session: { conversationId: id }, children });
+  const count = (pages) => pages.map((page) => page.map((n) => n.session.conversationId));
+
+  // 25 条平铺 → 10 / 10 / 5
+  const flat = Array.from({ length: 25 }, (_, i) => node(`s${i}`));
+  assert.deepEqual(count(paginateSessionTree(flat)), [
+    ["s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9"],
+    ["s10", "s11", "s12", "s13", "s14", "s15", "s16", "s17", "s18", "s19"],
+    ["s20", "s21", "s22", "s23", "s24"],
+  ]);
+
+  // 母会话带 12 个副本（13 行）：整棵子树独占第 1 页，后面的进第 2 页
+  const big = node("m", Array.from({ length: 12 }, (_, i) => node(`c${i}`)));
+  const after = [node("n1"), node("n2")];
+  const pages = paginateSessionTree([big, ...after]);
+  assert.equal(pages.length, 2);
+  assert.deepEqual(count(pages), [["m"], ["n1", "n2"]]);
+
+  // 恰好 10 行 → 一页；空树 → 无页
+  assert.equal(paginateSessionTree(Array.from({ length: 10 }, (_, i) => node(`e${i}`))).length, 1);
+  assert.deepEqual(paginateSessionTree([]), []);
+
+  // 自定义页大小也生效（钳到 ≥1）
+  assert.equal(paginateSessionTree(flat, 20).length, 2);
+  assert.equal(paginateSessionTree([node("x")], 0).length, 1);
+  assert.equal(SESSION_PAGE_SIZE, 10);
 });

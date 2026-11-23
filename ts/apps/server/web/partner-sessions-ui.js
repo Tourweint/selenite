@@ -11,7 +11,7 @@ import { request } from "./net.js";
 import { go } from "./route.js";
 import { state } from "./state.js";
 import { closeModal, modalOpen, openModal, toast } from "./ui-atoms.js";
-import { buildSessionTree, partnerSessionLabel } from "./partner-sessions.js";
+import { buildSessionTree, paginateSessionTree, partnerSessionLabel } from "./partner-sessions.js";
 
 const SIDE_SESSIONS_KEY = "PARTNER_SIDE_SESSIONS";
 
@@ -145,6 +145,12 @@ async function createSession(partnerId) {
 const TRASH_ICON =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg>';
 
+/** 翻页箭头（2026-11-21）：与全站 chevron 同两条 path 族；左右是固定方向，不走 aria-expanded 旋转。 */
+const PAGER_PREV_ICON =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>';
+const PAGER_NEXT_ICON =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>';
+
 /** 选择器行：当前会话精确按 conversationId 匹配（不靠前缀猜）。
  *  2026-11-18：包一层 .ps-item，垃圾桶是行的兄弟（button 不能套 button）；
  *  有 origin 的副本名前置「↳」，配合缩进表达"挂在母会话下面"。 */
@@ -252,15 +258,45 @@ function openMapConversation(conversationId) {
   void loadChats().catch(() => undefined);
 }
 
+/** 翻页条（2026-11-21）：位置固定在列表与「新建会话」之间；一页放得下就不出现。 */
+function renderPager(body, page, totalPages, onPageChange) {
+  const bar = document.createElement("div");
+  bar.className = "ps-pager";
+  const prev = document.createElement("button");
+  prev.type = "button";
+  prev.className = "ps-pager-btn";
+  prev.innerHTML = PAGER_PREV_ICON;
+  prev.setAttribute("aria-label", "上一页");
+  prev.disabled = page <= 0;
+  prev.addEventListener("click", () => onPageChange(page - 1));
+  const info = document.createElement("span");
+  info.className = "ps-pager-info";
+  info.textContent = `${page + 1} / ${totalPages}`;
+  const next = document.createElement("button");
+  next.type = "button";
+  next.className = "ps-pager-btn";
+  next.innerHTML = PAGER_NEXT_ICON;
+  next.setAttribute("aria-label", "下一页");
+  next.disabled = page >= totalPages - 1;
+  next.addEventListener("click", () => onPageChange(page + 1));
+  bar.append(prev, info, next);
+  body.append(bar);
+}
+
 function renderSessionRows(
   body,
   data,
   partnerId,
   isChief,
-  { onDelete = null, destination = "chat", onDestinationChange = null } = {},
+  {
+    onDelete = null,
+    destination = "chat",
+    onDestinationChange = null,
+    pager = { page: 0 },
+    onPageChange = null,
+  } = {},
 ) {
   const sessions = Array.isArray(data?.sessions) ? data.sessions : [];
-  const manage = Boolean(data?.sessionManage);
   renderDestinationControl(body, destination, onDestinationChange || (() => {}));
 
   const list = document.createElement("div");
@@ -290,39 +326,36 @@ function renderSessionRows(
     list.append(pending);
   };
 
-  if (!manage) {
-    // 回滚形态（PARTNER_SESSION_MANAGE=false）：与服务端旧列表逐行一致，不缩进、不带删除。
-    if (main) list.append(sessionRow(main, { main: true, onOpen, currentId }));
-    else appendPendingMain();
-    for (const session of sessions) {
-      if (main && session.conversationId === main.conversationId) continue;
-      list.append(sessionRow(session, { onOpen, currentId }));
-    }
-  } else {
-    if (!main) appendPendingMain();
-    // 二级缩进：副本按 origin.source 挂到母会话下面；母会话不在列表里就当顶层。
-    const appendTree = (nodes, container) => {
-      for (const node of nodes) {
-        const isMain = Boolean(main && node.session.conversationId === main.conversationId);
-        const item = sessionRow(node.session, {
-          main: isMain,
-          deletable: Boolean(node.session.deletable),
-          onDelete,
-          onOpen,
-          currentId,
-        });
-        container.append(item);
-        if (node.children.length > 0) {
-          const group = document.createElement("div");
-          group.className = "ps-children";
-          appendTree(node.children, group);
-          item.append(group);
-        }
+  // 分支会话管理（缩进 + 删除）恒生效：开关 2026-11-21 退役，平铺旧列表分支已删。
+  if (!main) appendPendingMain();
+  // 二级缩进：副本按 origin.source 挂到母会话下面；母会话不在列表里就当顶层。
+  // 翻页（2026-11-21）：10 行一页、子树不拆页；页码存弹层闭包里，删完刷新/切目标后原地钳住。
+  const pages = paginateSessionTree(buildSessionTree(sessions));
+  pager.page = Math.min(Math.max(0, pager.page), pages.length - 1);
+  const appendTree = (nodes, container) => {
+    for (const node of nodes) {
+      const isMain = Boolean(main && node.session.conversationId === main.conversationId);
+      const item = sessionRow(node.session, {
+        main: isMain,
+        deletable: Boolean(node.session.deletable),
+        onDelete,
+        onOpen,
+        currentId,
+      });
+      container.append(item);
+      if (node.children.length > 0) {
+        const group = document.createElement("div");
+        group.className = "ps-children";
+        appendTree(node.children, group);
+        item.append(group);
       }
-    };
-    appendTree(buildSessionTree(sessions), list);
-  }
+    }
+  };
+  appendTree(pages[pager.page] || [], list);
   body.append(list);
+  if (pages.length > 1 && typeof onPageChange === "function") {
+    renderPager(body, pager.page, pages.length, (next) => onPageChange(next));
+  }
 
   const create = document.createElement("button");
   create.type = "button";
@@ -438,6 +471,8 @@ function openPartnerSessions(partnerId, { target } = {}) {
     // 弹层内所有 await 都先判 generation + 弹层是否还开着：过期响应一律丢弃。
     const stale = () => gen !== pickerGeneration || !modalOpen();
     let current = null;
+    // 翻页页码（2026-11-21）：存弹层闭包，切「去对话/看地图」与删后刷新都不重置，越界由渲染钳住。
+    const pager = { page: 0 };
 
     const render = () => {
       if (!current) return;
@@ -448,6 +483,11 @@ function openPartnerSessions(partnerId, { target } = {}) {
           destination = next === "map" ? "map" : "chat";
           render();
           body.querySelector('.ps-mode-btn[aria-pressed="true"]')?.focus();
+        },
+        pager,
+        onPageChange: (next) => {
+          pager.page = next;
+          render();
         },
         onDelete: (session) => {
           renderDeleteConfirm(body, session, {

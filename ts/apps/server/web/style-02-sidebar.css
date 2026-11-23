@@ -197,6 +197,8 @@ html[data-sidebar="closed"] .side-rail {
 }
 .chat-act:hover { background: var(--card-high); color: var(--text); }
 .chat-act svg { width: 13px; height: 13px; }
+/* 行尾 ⋯（2026-11-21）：三颗悬停小图标收成一颗，尺寸对齐分区头 .sec-more 的 15px */
+.chat-more svg { width: 15px; height: 15px; }
 
 /* 一人多会话（2026-11-17 批2）：花名册 / 总管条目的「选择会话」小图标。
    与 .chat-act 同款 hover 才出现、键盘 focus-visible 可见；图标走 currentColor，四套主题通用。 */
@@ -222,8 +224,9 @@ html[data-sidebar="closed"] .side-rail {
 .roster-sessions svg,
 .chief-sessions svg { width: 13px; height: 13px; }
 
-/* 会话选择器弹层：一列会话行 + 底部新建按钮（沿用弹层的描边 / 主题令牌） */
-.ps-list { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 12px; max-height: 320px; overflow-y: auto; }
+/* 会话选择器弹层：一列会话行 + 翻页条 + 底部新建按钮（沿用弹层的描边 / 主题令牌）。
+   限高 460px = 每页 10 行（行高 40.4 + gap 6 → 10×40.4+9×6 ≈ 458），一页正好放满不出内滚。 */
+.ps-list { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 12px; max-height: 460px; overflow-y: auto; }
 .ps-row {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
   width: 100%; min-height: 38px; padding: 8px 12px;
@@ -238,6 +241,20 @@ html[data-sidebar="closed"] .side-rail {
 .ps-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ps-meta { flex: none; font-size: 11px; color: var(--text-3); }
 .ps-create { width: 100%; }
+
+/* 翻页条（2026-11-21）：10 行一页；两端到头置灰，页码是状态文案不算常驻解释。 */
+.ps-pager { display: flex; align-items: center; justify-content: center; gap: 10px; margin: -2px 0 12px; }
+.ps-pager-btn {
+  width: 26px; height: 26px;
+  display: grid; place-items: center;
+  border: 1px solid var(--outline); border-radius: var(--r-sm);
+  background: transparent; color: var(--text-2); cursor: pointer;
+  transition: background .12s ease, color .12s ease;
+}
+.ps-pager-btn:hover:not(:disabled) { background: var(--card-high); color: var(--text); }
+.ps-pager-btn:disabled { opacity: .4; cursor: default; }
+.ps-pager-btn svg { width: 14px; height: 14px; }
+.ps-pager-info { min-width: 40px; text-align: center; font-size: 11px; color: var(--text-3); }
 
 /* 打开到（2026-11-18）：同一个选择器可以落到对话或地图；当前档放前面接收 autoFocus。 */
 .ps-mode { display: flex; align-items: center; gap: 6px; margin: 0 0 10px; }
@@ -432,8 +449,8 @@ html[data-sidebar="closed"] .side-rail {
   letter-spacing: .01em;
 }
 .chat-folder-head:hover { background: var(--card); color: var(--text-2); }
-.chat-folder-chevron { width: 13px; height: 13px; flex: none; transition: transform .15s ease; }
-.chat-folder-head[aria-expanded="false"] .chat-folder-chevron { transform: rotate(-90deg); }
+/* 2026-11-21（箭头统一批）：旋转/过渡移到 style-27 的 .chev（收起指右、展开指下） */
+.chat-folder-chevron { width: 13px; height: 13px; flex: none; }
 .chat-folder-name {
   flex: 1; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -441,5 +458,34 @@ html[data-sidebar="closed"] .side-rail {
 }
 .chat-folder-count { flex: none; font-size: 11.5px; color: var(--text-3); font-variant-numeric: tabular-nums; }
 
-.chat-folder-body { display: flex; flex-direction: column; gap: 2px; }
-.chat-folder-body[hidden] { display: none; }
+/* 组体展开/收起走高度动画（2026-11-21）：照抄顶层分区 .side-sec-body 的 grid 1fr↔0fr 手感，
+   两层结构——.chat-folder-fold 只负责轨道过渡，.chat-folder-body 兼裁切层（overflow:hidden）。
+   展开 240ms 减速（内容落下来），收起 160ms 加速（手指离开后不该再等）；
+   收起的透明度归零压在 160ms 之后（内容全程可见地卷走，最后一帧才归零防 0 高残描边）——
+   中间帧教训与取舍见 style-03 的 .side-sec-inner 注释。开合状态载体 = .chat-folder.is-closed。
+   所有组（其他 / 总管 / 各执事）共用 folderSection 一套结构，动画天然全覆盖。 */
+.chat-folder-fold {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition: grid-template-rows var(--dur-slow) var(--ease-decelerate);
+}
+.chat-folder-body {
+  min-height: 0;
+  overflow: hidden;
+  display: flex; flex-direction: column; gap: 2px;
+  opacity: 1;
+  transition: opacity 180ms var(--ease-standard) 30ms;
+}
+.chat-folder.is-closed .chat-folder-fold {
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 160ms var(--ease-accelerate);
+}
+.chat-folder.is-closed .chat-folder-body {
+  opacity: 0;
+  transition: opacity 0s linear 160ms;
+}
+/* 系统开了"减少动态效果"就直切：与顶层分区的兜底同款。 */
+@media (prefers-reduced-motion: reduce) {
+  .chat-folder-fold,
+  .chat-folder-body { transition: none; }
+}

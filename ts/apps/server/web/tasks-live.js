@@ -11,14 +11,14 @@ import { openConversation } from "./chat-open.js";
 import { el } from "./dom.js";
 import { request } from "./net.js";
 import { loadRoster } from "./partners-status.js";
-import { openAddProjectModal, openCreateProjectModal, setModalHint } from "./project-modal.js";import { currentRoute, currentTicketId, go, tasksHash, writeTasksHash } from "./route.js";
+import { openAddProjectModal, openCreateProjectModal, setModalHint } from "./project-modal.js";import { currentRoute, currentTicketId, go, tasksHash } from "./route.js";
 import { openSecMenu } from "./sec-menu.js";
 import { state } from "./state.js";
-import { loadProjects, syncTasksBadge } from "./tasks-board.js";
+import { syncTasksBadge } from "./tasks-board.js";
 import { showTicketDetail } from "./tasks-detail.js";
 import { loadTickets } from "./tasks-kanban.js";
 import { BADGE_POLL_MS, PHASE_STATUS, TASKS_POLL_MS } from "./tasks-model.js";
-import { renderTasksView } from "./tasks-redesign.js";
+import { refreshSchedulerStatus, renderTasksView } from "./tasks-redesign.js";
 import { renderReview } from "./tasks-review.js";
 import { closeModal, openModal, toast } from "./ui-atoms.js";
 
@@ -157,6 +157,9 @@ function autoSyncTick() {
   if (route === "settings") return;
   // 正在对话且 SSE 在流：delegate / attention 会增量更新，不叠加请求
   if (state.sending && route === "chat") return;
+  // 调度状态（2026-11-22 M2b）：任务中心可见时跟同一拍拉；函数内 10s 节流 + hidden 不拉，
+  // 不另开定时器。排在最前是因为它和 tickets 的 4s / 20s 节流无关。
+  if (route === "tasks") void refreshSchedulerStatus();
   const gap = route === "tasks" || route === "review" ? TASKS_POLL_MS : BADGE_POLL_MS;
   if (state.ticketsFetchedAt && Date.now() - state.ticketsFetchedAt < gap) return;
   const pending = loadTickets({
@@ -175,31 +178,23 @@ function autoSyncTick() {
 }
 
 /* 侧栏分区头的入口（2026-11-07 统一批 / 2026-11-14 ⋯ 菜单）：
-   任务中心 —— 「打开任务中心 →」进看板；轨道按钮同。
+   任务中心 —— 原在「打开任务中心 →」链接（2026-11-21 链接退役，入口收进分区头 ⋯ 菜单，见 shell.js）。
    项目 —— ⋯ 里的两个入口：新建项目 / 添加已有项目
    （「管理项目 → 设置」行 2026-11-13 退役，管理走设置页侧栏）。
-   会话 —— ⋯ 已在上面的 applySections 段注册（新建 / 搜索）。 */
-el.secTasksAll?.addEventListener("click", () => go("tasks"));
+   会话 —— ⋯ 已在上面的 applySections 段注册（新建 / 搜索）。
+   旧 `el.secTasksAll` 接线随底部链接一并摘除（2026-11-21）。 */
 // 项目 ⋯（2026-11-14 由 ＋ 改）：两个入口——新建项目 / 添加已有项目。
-// 两个动作的区别写进菜单的 hint 行：一个会建目录，一个只登记已有目录。
+// 菜单只留动作本身（2026-11-22 用户口径：不要解释行）；两个动作的差别在各自弹窗里看。
 el.secProjectsMore?.addEventListener("click", () => {
   openSecMenu(el.secProjectsMore, [
-    {
-      label: "新建项目",
-      hint: "目录还不存在，确认后建目录并登记",
-      run: () => openCreateProjectModal(),
-    },
-    {
-      label: "添加项目",
-      hint: "目录已经在硬盘上，只登记不新建（任意位置）",
-      run: () => openAddProjectModal(),
-    },
+    { label: "新建项目", run: () => openCreateProjectModal() },
+    { label: "添加项目", run: () => openAddProjectModal() },
   ]);
 });
 
 /* 任务中心的固定入口与交互（只读，不提供改派/停止）。
-   轨道钮 2026-11-13 退役：轨道只镜像展开态分区，任务中心从展开态「对话」分区底部的
-   「打开任务中心 →」进（`#/tasks` 路由不变）。 */
+   轨道钮 2026-11-13 退役：轨道只镜像展开态分区，任务中心从分区头 ⋯ 菜单进
+   （原「对话」分区底部链接，2026-11-18 退役、2026-11-21 收进 ⋯；`#/tasks` 路由不变）。 */
 el.tasksBack.addEventListener("click", () => go("tasks"));
 el.tasksRefresh.addEventListener("click", () => {
   const ticketId = currentTicketId();
@@ -208,28 +203,14 @@ el.tasksRefresh.addEventListener("click", () => {
     return;
   }
   void loadTickets({ force: true });
-  void loadProjects({ force: true });
-});
-el.tasksDomain.addEventListener("change", () => {
-  state.domainFilter = el.tasksDomain.value;
-  writeTasksHash("");
-  renderTasksView();
-});
-el.tasksProject.addEventListener("change", () => {
-  state.projectFilter = el.tasksProject.value;
-  writeTasksHash("");
-  renderTasksView();
-});
-el.tasksSort.addEventListener("change", () => {
-  state.sort = el.tasksSort.value === "status" ? "status" : "recent";
-  writeTasksHash("");
-  renderTasksView();
+  // 手动刷新顺手把排队数也对齐（自动轮询会等到 10s，这里不该等）。
+  if (currentRoute() === "tasks") void refreshSchedulerStatus({ force: true });
 });
 /**
  * 任务中心的点击代理（L3）：看板、已完结区、直派折叠组都在 tasksBody 里，一处接管。
- * - .tk-conv-head / .tk-arch-conv（卡头、已完结简卡）→ 回原对话（复用搜索结果的跳转写法：先切路由，再 openChat）
+ * - .tk-conv-head → 回原对话（复用搜索结果的跳转写法：先切路由，再 openChat）
  * - .tk-children-toggle → 就地展开/收起那一行的子单，展开态记 state.tasksChildrenOpen
- * - .tk-row / .tk-arch-row → 打开该单详情
+ * - .tk-row → 打开该单详情
  * 子单行是 <a>，自己的 href 会导航；派活行是 div[role=button]，键盘行为在下面补。
  */
 el.tasksBody.addEventListener("click", (event) => {
@@ -246,7 +227,7 @@ el.tasksBody.addEventListener("click", (event) => {
     return;
   }
 
-  const head = event.target.closest(".tk-conv-head, .tk-arch-conv");
+  const head = event.target.closest(".tk-conv-head");
   if (head) {
     const conversationId = head.dataset.conv || "";
     if (conversationId) void openConversation(conversationId);
@@ -270,7 +251,7 @@ el.tasksBody.addEventListener("click", (event) => {
   // 子单行自己导航到子单详情，不能再落回派活行
   if (event.target.closest(".tk-child-row")) return;
 
-  const row = event.target.closest(".tk-row, .tk-arch-row");
+  const row = event.target.closest(".tk-row");
   if (!row || !row.dataset.ticket) return;
   location.hash = tasksHash({ ticket: row.dataset.ticket });
 });
@@ -281,15 +262,6 @@ el.tasksBody.addEventListener("keydown", (event) => {
   if (!row || event.target !== row || !row.dataset.ticket) return;
   event.preventDefault();
   location.hash = tasksHash({ ticket: row.dataset.ticket });
-});
-
-/** 外部打手小卡：点一下过滤主视图，再点一下取消（只改会话内存，不写 hash） */
-el.tasksHitters.addEventListener("click", (event) => {
-  const card = event.target.closest(".tk-hitter");
-  if (!card) return;
-  const employee = card.dataset.employee || "";
-  state.tasksEmployeeFilter = state.tasksEmployeeFilter === employee ? "" : employee;
-  renderTasksView();
 });
 
 export { applyTicketEvent, autoSyncTick, confirmCancelTicket, performTicketAction, scheduleTasksRender, scheduleTicketsSync, tasksRenderFrame, ticketsSyncTimer };

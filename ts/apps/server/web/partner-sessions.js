@@ -78,3 +78,36 @@ export function buildSessionTree(sessions) {
   }
   return tree;
 }
+
+/** 选择器每页行数（2026-11-21）：母会话 + 子副本一起数，10 行一页。 */
+export const SESSION_PAGE_SIZE = 10;
+
+/**
+ * 把会话树切成页（2026-11-21）：子树不拆——母会话在第几页，它的副本就跟着在第几页。
+ * 一页装到 SESSION_PAGE_SIZE 行为止；单棵子树超过一页时独占一页（页内照常滚）。
+ * 纯函数，无 DOM；页内保持原顺序，页数随数据变少时由调用方钳页码。
+ */
+export function paginateSessionTree(tree, pageSize = SESSION_PAGE_SIZE) {
+  const nodes = Array.isArray(tree) ? tree : [];
+  const size = Math.max(1, Math.floor(Number(pageSize) || SESSION_PAGE_SIZE));
+  const rowsOf = (node) => {
+    let count = 1;
+    for (const child of node.children || []) count += rowsOf(child);
+    return count;
+  };
+  const pages = [];
+  let current = [];
+  let used = 0;
+  for (const node of nodes) {
+    const rows = rowsOf(node);
+    if (current.length > 0 && used + rows > size) {
+      pages.push(current);
+      current = [];
+      used = 0;
+    }
+    current.push(node);
+    used += rows;
+  }
+  if (current.length > 0) pages.push(current);
+  return pages;
+}
