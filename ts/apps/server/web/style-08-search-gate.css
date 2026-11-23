@@ -325,7 +325,10 @@ mark {
 .conn-star svg { display: block; width: 100%; height: auto; }
 .conn-star svg text { font-family: inherit; }
 .relay-adv { margin-top: 4px; font-size: 12px; color: var(--text-3); }
-.relay-adv summary { cursor: pointer; }
+.relay-adv summary { cursor: pointer; display: flex; align-items: center; gap: 6px; }
+/* 2026-11-21（箭头统一批）：原来漏了自绘箭头，一直显示浏览器默认小三角；补 chevSvg，展开转 90°（style-27） */
+.relay-adv summary::-webkit-details-marker { display: none; }
+.relay-adv-chev { flex: none; width: 12px; height: 12px; color: var(--text-3); }
 .relay-adv .modal-field { margin-top: 10px; }
 .conn-howto {
   display: flex; flex-direction: column; gap: 8px;

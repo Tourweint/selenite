@@ -35,3 +35,5 @@
 @import url("./style-25-tools.css");
 /* 会话画板（2026-11-17）：只新增 .map-*，作用域限定在 html[data-route="map"] */
 @import url("./style-26-chat-map.css");
+/* 展开/收起箭头旋转行为唯一出处（2026-11-21 统一批）+ 原生 select 换皮。放最后 */
+@import url("./style-27-chevron.css");

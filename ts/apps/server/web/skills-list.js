@@ -7,6 +7,7 @@
  * app.js 文末，各模块顶层只做声明、常量与事件监听注册。
  */
 
+import { chevDownSvg } from "./icons.js";
 import { attr, esc } from "./markdown.js";
 import { request } from "./net.js";
 import { switchMarkup } from "./settings-atoms.js";
@@ -38,7 +39,7 @@ function renderSkillSelect(slot, { label, count = null, value, options, onPick }
   button.setAttribute("aria-expanded", "false");
   button.innerHTML = `<span class="sk-select-label">${esc(label)}</span>${
     count === null ? "" : `<span class="sk-select-count">${count}</span>`
-  }<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>`;
+  }${chevDownSvg("chev-ud")}`;
   const menu = document.createElement("div");
   menu.className = "sk-select-menu";
   menu.setAttribute("role", "menu");

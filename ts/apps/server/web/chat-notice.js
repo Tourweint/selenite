@@ -10,12 +10,12 @@
 import { loadOlderMessages, openConversation } from "./chat-open.js";
 import { send } from "./composer-send.js";
 import { el } from "./dom.js";
+import { chevSvg } from "./icons.js";
 import { request } from "./net.js";
 import { formatTokenCount } from "./providers.js";
 import { currentRoute } from "./route.js";
 import { state } from "./state.js";
 import { openModal, toast } from "./ui-atoms.js";
-import { TOOL_ICON_PATHS } from "./tool-meta.js";
 
 /* ── 文件变更汇总（2026-11-10 批 33，学 ZCode ConversationFileSummaryPanel）──
  * ZCode 的形状：折叠行「改了 N 个文件 +A -B」，点开逐文件列表（路径 + 每文件 +/-）。
@@ -74,9 +74,8 @@ function mountFileSummary(root, files) {
 
   const chevron = document.createElement("span");
   chevron.className = "fsum-chevron";
-  chevron.innerHTML =
-    `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ` +
-    `stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${TOOL_ICON_PATHS.chevron}</svg>`;
+  // 2026-11-21（箭头统一批）：内联 SVG → chevSvg，旋转行为归 style-27
+  chevron.innerHTML = chevSvg("chev");
 
   const title = document.createElement("span");
   title.className = "fsum-title";

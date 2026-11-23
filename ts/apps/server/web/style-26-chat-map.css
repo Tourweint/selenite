@@ -242,12 +242,9 @@ html[data-route="map"] .map-shell { display: flex; }
 .map-card:focus-within .map-tool { opacity: 1; }
 .map-tool:hover { background: var(--card-high); color: var(--accent); }
 .map-tool svg { width: 12px; height: 12px; }
-.map-tool.is-toggle {
-  opacity: 1;
-  color: var(--text-2);
-  font-weight: 600;
-  font-size: 14px;
-}
+/* 2026-11-21（箭头统一批）：+/− 文本钮 → 统一 chevron（收起指右/展开指下）；
+   收起/展开的旋转动画由 toggleCollapsed 里 WAAPI 补播（整图重画，transition 播不出来） */
+.map-tool.is-toggle { opacity: 1; color: var(--text-2); }
 .map-card-kind {
   flex: none;
   padding: 0 5px;

@@ -8,6 +8,7 @@
  */
 
 import { ago, connDeviceRows, connPhoneCount } from "./approval-pop.js";
+import { chevSvg } from "./icons.js";
 import { attr, esc } from "./markdown.js";
 import { request } from "./net.js";
 import { mountSegmented, syncSegmented } from "./settings-atoms.js";
@@ -511,7 +512,7 @@ function openAddPhoneModal(mode = "local") {
             <button class="modal-primary" type="button" id="phone-remote-refresh">换新码</button>
           </div>
           <details class="relay-adv">
-            <summary>手机连不上？改对外地址</summary>
+            <summary>${chevSvg("relay-adv-chev chev")}手机连不上？改对外地址</summary>
             <div class="modal-field">
               <span>手机要访问的中继地址</span>
               <input class="modal-input" id="phone-remote-url" spellcheck="false" autocomplete="off"

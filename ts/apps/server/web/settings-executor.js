@@ -18,6 +18,7 @@
  *   ③ 一个保存按钮：改完一次提交；下一次派活生效（续跑沿用原单快照）
  */
 
+import { chevDownSvg } from "./icons.js";
 import { esc, attr } from "./markdown.js";
 import { request } from "./net.js";
 import { mountSegmented, sectionMarkup, syncSegmented } from "./settings-atoms.js";
@@ -29,9 +30,9 @@ const PERMISSION_LABEL = {
   full: "全权",
 };
 
-// Lucide arrowDown（同 icons.js 的路径，这里内联一份避免拉整个图标表）
-const ARROW_SVG =
-  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>';
+// 2026-11-21（箭头统一批）：内联 arrowDown → icons.js 的 chevDownSvg（挂 .chev-ud，
+// 面板开合时由 aria-expanded 驱动翻 180°，行为在 style-27）
+const ARROW_SVG = chevDownSvg("chev-ud");
 
 let current = null;
 let dirty = false;
@@ -45,12 +46,13 @@ const pendingLists = new Set();
  */
 let nativeCatalog = null;
 let nativeCatalogPending = false;
-/** 当前打开的 { menu, kind }；面板挂在 body 下，关 = 藏起来。 */
+/** 当前打开的 { menu, kind, trigger, box }；面板挂在 body 下，关 = 藏起来。
+ *  trigger = 开它的按钮（aria-expanded 挂这上面）；box = 触发区域（点里面不算外点）。 */
 let openMenu = null;
 
 export function executorSectionMarkup() {
-  // 2026-11-18：四张导航卡已经写着「派活」，节标题改成这一页真正的对象「执行器」，
-  // 不再和 tab 名重复。
+  // 2026-11-18：左栏分区已经写着「派活」，节标题改成这一页真正的对象「执行器」，
+  // 不再和分区名重复（2026-11-21 起 Agent 分区只剩这一页，逻辑不变）。
   return sectionMarkup(
     "执行器",
     `<div class="card">
@@ -60,7 +62,16 @@ export function executorSectionMarkup() {
           <div class="row-hint" id="executor-hint" hidden>读取中…</div>
         </div>
         <div class="row-control">
-          <select class="set-input executor-select" id="executor-kind" aria-label="默认派给谁" disabled></select>
+          <div class="executor-kind-box" id="executor-kind-box">
+            <!-- 2026-11-21（箭头统一批）：原生 select（系统灰三角 + 原生菜单，和同页自绘
+                 模型面板两套语言、箭头也转不了）→ 自绘面板：按钮 + 挂 body 的 fixed 菜单，
+                 箭头开合翻 180°（行为在 style-27），面板定位与关闭手势跟模型清单共用 -->
+            <button class="set-input executor-select executor-kind-btn" id="executor-kind" type="button"
+                    aria-haspopup="listbox" aria-expanded="false" aria-label="默认派给谁" disabled>
+              <span id="executor-kind-label">读取中…</span>${chevDownSvg("chev-ud")}
+            </button>
+            <div class="executor-model-menu executor-kind-menu" id="executor-kind-menu" hidden></div>
+          </div>
         </div>
       </div>
     </div>
@@ -72,10 +83,16 @@ export function executorSectionMarkup() {
 
 export async function wireExecutorSettings() {
   const select = document.getElementById("executor-kind");
+  const kindLabel = document.getElementById("executor-kind-label");
   const profiles = document.getElementById("executor-profiles");
   const hint = document.getElementById("executor-hint");
   const save = document.getElementById("executor-save");
-  if (!select || !profiles || !hint || !save) return;
+  if (!select || !kindLabel || !profiles || !hint || !save) return;
+  // 上一次进页可能把默认派给谁的面板关在 body 下（closeModelMenu 只藏不回盒）：
+  // section 静态标记每次进页都重建一份新的，旧孤儿不清会顶着重名的 id 躺着
+  for (const orphan of document.querySelectorAll("body > #executor-kind-menu")) {
+    orphan.remove();
+  }
   // 每次进页现拉本机模型清单：供应商可能刚改过。
   nativeCatalog = null;
   nativeCatalogPending = false;
@@ -91,30 +108,26 @@ export async function wireExecutorSettings() {
     dirty = false;
     save.disabled = true;
     closeModelMenu();
-    // 上一次 paint 的面板可能还挂在 body 下（卡片被整体重画，孤儿要摘掉）
+    // 上一次 paint 的面板可能还挂在 body 下（卡片被整体重画，孤儿要摘掉）。
+    // 默认派给谁的面板是常驻节点（在 section 静态标记里），收回去而不是删掉。
     for (const stale of document.querySelectorAll("body > .executor-model-menu")) {
+      if (stale.id === "executor-kind-menu") continue;
       stale.remove();
+    }
+    const kindMenuEl = document.getElementById("executor-kind-menu");
+    const kindBoxEl = document.getElementById("executor-kind-box");
+    if (kindMenuEl && kindBoxEl && !kindBoxEl.contains(kindMenuEl)) {
+      kindMenuEl.hidden = true;
+      kindBoxEl.append(kindMenuEl);
     }
 
     const kinds = Array.isArray(data.kinds) ? data.kinds : [];
     const selectable = kinds.filter((kind) => kind.selectable);
-    select.replaceChildren();
-    for (const kind of selectable) {
-      const option = document.createElement("option");
-      option.value = kind.id;
-      option.textContent = kind.label;
-      select.append(option);
-    }
-    // phone / mcp 是部署形态：补一个禁用的当前项，别让下拉显示成空白。
-    if (!selectable.some((kind) => kind.id === data.employee)) {
-      const locked = kinds.find((kind) => kind.id === data.employee);
-      const option = document.createElement("option");
-      option.value = data.employee;
-      option.textContent = locked?.label || data.employee;
-      option.disabled = true;
-      select.prepend(option);
-    }
-    select.value = data.employee;
+    // 2026-11-21（箭头统一批）：原生 select → 自绘按钮。当前值落在按钮 dataset 与
+    // 文字上；phone / mcp 这类部署形态锁定时按钮禁用、文字照常显示当前项。
+    const employeeKind = kinds.find((kind) => kind.id === data.employee);
+    select.dataset.value = data.employee;
+    kindLabel.textContent = employeeKind?.label || data.employee;
     select.disabled = data.locked === true || data.enabled === false;
     save.disabled = true;
     setHint("");
@@ -237,14 +250,68 @@ export async function wireExecutorSettings() {
     }
   };
 
-  select.addEventListener("change", () => {
-    if (!current) return;
-    markDirty();
+  /* ── 默认派给谁：自绘面板（2026-11-21 箭头统一批）──
+     面板行 = kinds 逐个一项：selectable 的可点；phone / mcp 摆进来让用户看见当前项
+     但点不了（部署形态固定，跟旧 select 的 disabled option 同义）。 */
+  const renderKindMenu = () => {
+    const menu = document.getElementById("executor-kind-menu");
+    if (!menu || menu.hidden || !current) return;
+    menu.replaceChildren();
+    const kinds = Array.isArray(current.kinds) ? current.kinds : [];
+    for (const kind of kinds) {
+      const row = document.createElement("div");
+      row.className = "model-row";
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "model-item";
+      item.setAttribute("role", "option");
+      if (kind.id === current.employee) item.setAttribute("aria-checked", "true");
+      const name = document.createElement("span");
+      name.className = "model-name";
+      name.textContent = kind.label || kind.id;
+      item.append(name);
+      if (kind.selectable === true) {
+        item.addEventListener("click", () => {
+          select.dataset.value = kind.id;
+          kindLabel.textContent = kind.label || kind.id;
+          for (const other of menu.querySelectorAll(".model-item")) {
+            other.setAttribute("aria-checked", String(other === item));
+          }
+          markDirty();
+          closeModelMenu();
+        });
+      } else {
+        item.disabled = true;
+        item.title = "部署形态固定，界面不改";
+      }
+      row.append(item);
+      menu.append(row);
+    }
+  };
+
+  const openKindMenu = () => {
+    closeModelMenu();
+    const menu = document.getElementById("executor-kind-menu");
+    if (!menu || !current || select.disabled) return;
+    menu.hidden = false;
+    document.body.append(menu);
+    placeMenu(menu, select.getBoundingClientRect(), 240);
+    select.setAttribute("aria-expanded", "true");
+    openMenu = { menu, kind: "__kind__", trigger: select };
+    renderKindMenu();
+  };
+
+  select.addEventListener("click", () => {
+    if (openMenu?.kind === "__kind__") {
+      closeModelMenu();
+      return;
+    }
+    openKindMenu();
   });
 
   save.addEventListener("click", async () => {
     if (!current || dirty === false) return;
-    const payload = { employee: select.value, profiles: {} };
+    const payload = { employee: select.dataset.value || "", profiles: {} };
     for (const kind of current.kinds.filter((item) => item.selectable)) {
       // native 也存 model（2026-11-16 批1）；2026-11-19 起留空 = 跟随默认模型，
       // 选中清单里的模型时再带供应商 id（只给服务端解析 baseUrl/keyEnv 用）。
@@ -367,22 +434,30 @@ async function ensureList(kind) {
   }
 }
 
-function openModelMenu(kind) {
-  closeModelMenu();
-  const box = document.querySelector(`[data-model-box="${cssEscape(kind)}"]`);
-  const menu = document.querySelector(`[data-model-menu="${cssEscape(kind)}"]`);
-  if (!box || !menu) return;
-  menu.hidden = false;
-  document.body.append(menu);
-  const rect = box.getBoundingClientRect();
-  const width = Math.min(Math.max(rect.width, 340), window.innerWidth - 16);
+/** 把挂 body 的 fixed 面板贴到锚点正下方（放不下且上方够放就朝上开）。
+ *  2026-11-21 从 openModelMenu 抽出来：默认派给谁的自绘面板共用同一条路。 */
+function placeMenu(menu, rect, preferredWidth) {
+  const width = Math.min(Math.max(rect.width, preferredWidth), window.innerWidth - 16);
   menu.style.width = `${Math.round(width)}px`;
   menu.style.left = `${Math.max(8, Math.min(Math.round(rect.left), window.innerWidth - width - 8))}px`;
   // 下方放不下（面板 300 高 + 间距）且上方够放就朝上开；否则朝下，让视口自己裁
   const openUp = window.innerHeight - rect.bottom < 316 && rect.top > 316;
   menu.style.top = `${Math.round(openUp ? rect.top - 6 : rect.bottom + 6)}px`;
   menu.style.transform = openUp ? "translateY(-100%)" : "";
-  openMenu = { menu, kind };
+}
+
+function openModelMenu(kind) {
+  closeModelMenu();
+  const box = document.querySelector(`[data-model-box="${cssEscape(kind)}"]`);
+  const menu = document.querySelector(`[data-model-menu="${cssEscape(kind)}"]`);
+  if (!box || !menu) return;
+  const trigger = box.querySelector("[data-model-toggle]");
+  menu.hidden = false;
+  document.body.append(menu);
+  placeMenu(menu, box.getBoundingClientRect(), 340);
+  // 2026-11-21（箭头统一批）：开合状态落在触发钮的 aria-expanded 上，箭头跟着翻
+  trigger?.setAttribute("aria-expanded", "true");
+  openMenu = { menu, kind, trigger, box };
   renderModelMenu(kind);
   void ensureList(kind);
 }
@@ -390,6 +465,7 @@ function openModelMenu(kind) {
 function closeModelMenu() {
   if (!openMenu) return;
   openMenu.menu.hidden = true;
+  openMenu.trigger?.setAttribute("aria-expanded", "false");
   openMenu = null;
 }
 
@@ -569,7 +645,10 @@ document.addEventListener("pointerdown", (event) => {
   const target = event.target instanceof Element ? event.target : null;
   if (!target) return;
   if (openMenu.menu.contains(target)) return;
-  if (target.closest(`[data-model-box="${cssEscape(openMenu.kind)}"]`)) return;
+  // 触发区（模型输入框整块 / 默认派给谁的按钮）里按下不算外点：模型菜单在输入框
+  // 打字要当筛选词用，不能把手按下去就关；触发钮自己再点一下走各自 click 的开合
+  if (openMenu.box?.contains(target)) return;
+  if (openMenu.trigger?.contains(target)) return;
   closeModelMenu();
 });
 document.addEventListener(

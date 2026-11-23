@@ -9,6 +9,7 @@
 
 import { openConversation } from "./chat-open.js";
 import { el } from "./dom.js";
+import { chevSvg } from "./icons.js";
 import { esc } from "./markdown.js";
 import { request } from "./net.js";
 import { go } from "./route.js";
@@ -20,15 +21,8 @@ import { toast } from "./ui-atoms.js";
 
 async function showTicketDetail(ticketId) {
   hideTasksState();
-  // 详情页压住两张看板（新视图 / 旧看板），回来时由 renderTasksView 按开关决定显示哪张
+  // 详情页压住新视图，回来时由 renderTasksView 重画（旧看板 2026-11-21 已退役）
   el.tasksRedesign.hidden = true;
-  el.tasksLegacy.hidden = true;
-  el.tasksBoard.hidden = true;
-  el.tasksArchive.hidden = true;
-  el.tasksDirect.hidden = true;
-  el.tasksHitters.hidden = true;
-  el.tasksStats.hidden = true;
-  el.tasksFilters.hidden = true;
   el.tasksDetail.hidden = false;
   el.tasksBack.hidden = false;
   el.tasksTitleText.textContent = "任务单";
@@ -213,6 +207,7 @@ function renderTicketDetail(data, fallbackId) {
     steps.length > 0
       ? `<details class="td-steps">
           <summary>
+            ${chevSvg("td-step-chev chev")}
             <span class="td-step-label">现在到哪一步</span>
             <span class="td-step-now">第 ${stepIndex + 1}/${steps.length} 步：${esc(steps[stepIndex] || "")}</span>
           </summary>

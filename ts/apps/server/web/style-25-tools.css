@@ -15,12 +15,13 @@
 .tool-pool-row:hover .tool-pool-caret { color: var(--text-2); }
 /* 池胶囊的悬停也不铺底，只改字色——同一页里别再出现灰色小方块。 */
 .tool-pool-table .pf-tool-mode:hover { background: transparent; color: var(--accent); }
-.tool-pool-caret {
-  flex: none; display: inline-block; width: 11px;
-  color: var(--text-3); font-size: 12px; line-height: 1;
-  transition: transform var(--dur-fast) var(--ease-standard), color .15s ease;
+/* 2026-11-21（箭头统一批）：› 文字 → chevSvg。这里要颜色+transform 复合过渡，
+   比 style-27 的通用 .chev 多一项，故选择器加重一级压住通用规则，值取同一组口径 */
+.tool-pool-row .tool-pool-caret {
+  flex: none; width: 11px; height: 11px;
+  color: var(--text-3);
+  transition: transform .18s var(--ease-standard), color .15s ease;
 }
-.tool-pool-row.is-open .tool-pool-caret { transform: rotate(90deg); }
 /* 展开时主行不留分隔线，让"行 + 详情"看起来是一块 */
 .tool-pool-row.is-open td { border-bottom-color: transparent; }
 

@@ -1,0 +1,49 @@
+/*
+ * 全站展开/收起箭头的旋转行为唯一出处（2026-11-21 统一批）。
+ * 形状与颜色由各页自己的类管（icons.js 的 chevSvg/chevDownSvg 只出两条 path），
+ * 这里只管「什么时候转、转多少、多快」：
+ *   .chev     折叠/展开族 —— 收起指右，展开转 90° 指下；状态载体只认
+ *             [aria-expanded="true"] 和 details[open] 两个属性选择器
+ *   .chev-ud  下拉族       —— 收合指下，展开翻 180° 指上
+ * 各页不再自写 rotate/transition；唯一例外 tool-pool-caret（颜色+transform
+ * 复合 transition，本地写但取同一组值）。
+ */
+
+.chev,
+.chev-ud {
+  transition: transform 0.18s var(--ease-standard);
+}
+
+[aria-expanded="true"] .chev,
+details[open] .chev {
+  transform: rotate(90deg);
+}
+
+[aria-expanded="true"] .chev-ud {
+  transform: rotate(180deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chev,
+  .chev-ud {
+    transition: none;
+  }
+}
+
+/* ---- 原生 <select> 换皮（2026-11-21）：藏系统灰三角，换全站同款 chevron ----
+   原生下拉拿不到可靠的开合事件，这颗箭头不转；要动画得整套换自绘面板（另批）。
+   data-URI 里写不进 var()，取四主题 --text-3 的中间值 #82828c（白/靛/黑/青瓷都落得住）。 */
+select.set-input,
+select.modal-input,
+select.font-select,
+select.map-window,
+select.rm-filter-select,
+select.archive-select,
+select.ctx-select {
+  appearance: none;
+  padding-right: 28px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2382828c' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+  background-size: 14px;
+}

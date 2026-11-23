@@ -13,6 +13,7 @@
 import { branchErrorText } from "./branch.js";
 import { openConversation } from "./chat-open.js";
 import { loadChats } from "./chats-list.js";
+import { chevSvg } from "./icons.js";
 import { esc, renderMarkdown } from "./markdown.js";
 import { request } from "./net.js";
 import { openPartnerSessions } from "./partner-sessions-ui.js";
@@ -587,7 +588,7 @@ function createFoldCardEl(card) {
       </span>
       <span class="map-card-tools">
         <button class="map-tool is-toggle" type="button" data-act="expand"
-                data-tip="${label}" aria-label="${label}">+</button>
+                data-tip="${label}" aria-label="${label}">${chevSvg("map-tool-chev")}</button>
       </span>
     </div>
     <p class="map-card-text${loading ? " is-empty" : ""}">${body}</p>`;
@@ -627,7 +628,7 @@ function createCardEl(card) {
       ? `<button class="map-tool" type="button" data-act="branch" data-tip="从这里另开一支" aria-label="从这里另开一支">${BRANCH_ICON}</button>`
       : "",
     card.collapsible
-      ? `<button class="map-tool is-toggle" type="button" data-act="toggle" data-tip="${card.collapsed ? "展开这支" : "收起这支"}" aria-label="${card.collapsed ? "展开这支" : "收起这支"}">${card.collapsed ? "+" : "−"}</button>`
+      ? `<button class="map-tool is-toggle" type="button" data-act="toggle" aria-expanded="${card.collapsed ? "false" : "true"}" data-tip="${card.collapsed ? "展开这支" : "收起这支"}" aria-label="${card.collapsed ? "展开这支" : "收起这支"}">${chevSvg("map-tool-chev chev")}</button>`
       : "",
   ]
     .filter(Boolean)
@@ -1248,15 +1249,30 @@ function updateHeader() {
 
 /* ── 事件接线 / 路由入口 ─────────────────────────────── */
 
-/** 收起 / 展开一支副本（2026-11-18）：收起只留第一张问卡，后代整支不画。 */
+/** 收起 / 展开一支副本（2026-11-18）：收起只留第一张问卡，后代整支不画。
+ *  2026-11-21（箭头统一批）：+/− 换成统一 chevron。整图重画让 CSS transition 播不出来，
+ *  所以重画后用 WAAPI 给那颗箭头补播一次旋转（照 tool-chips 的 animateRow 思路）。 */
 function toggleCollapsed(nodeId) {
   const rootId = mapState.data?.rootId;
   if (!nodeId || nodeId === rootId) return;
-  if (mapState.collapsed.has(nodeId)) mapState.collapsed.delete(nodeId);
+  const opening = mapState.collapsed.has(nodeId);
+  if (opening) mapState.collapsed.delete(nodeId);
   else mapState.collapsed.add(nodeId);
   saveCollapsed();
   buildModel();
   renderMap();
+  const chev = viewport.querySelector(
+    `article[data-node-id="${nodeId}"] button[data-act="toggle"] svg`,
+  );
+  if (chev?.animate) {
+    chev.animate(
+      [
+        { transform: `rotate(${opening ? 0 : 90}deg)` },
+        { transform: `rotate(${opening ? 90 : 0}deg)` },
+      ],
+      { duration: 180, easing: "cubic-bezier(0.4, 0, 0.2, 1)" },
+    );
+  }
 }
 
 /**

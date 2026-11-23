@@ -30,4 +30,16 @@ const CS_ICONS = {
   idcard: '<rect x="2" y="4" width="20" height="16" rx="2"/><circle cx="8" cy="10" r="2"/><path d="M4 16c0-2 2-3 4-3s4 1 4 3"/><path d="M14 9h6"/><path d="M14 13h6"/>',
 };
 
-export { CS_ICONS };
+/**
+ * 全站统一展开箭头（2026-11-21 统一批）：形状收敛到两条 path，旋转行为唯一出处
+ * 在 style-27-chevron.css。cls 传「页面自己的布局类 + chev/chev-ud」，尺寸颜色
+ * 仍由页面类管，公共类只管什么时候转、转多少、多快。
+ * - chevSvg     折叠/展开族：指右（收起态），展开由 CSS 转 90° 指下
+ * - chevDownSvg 下拉族：指下（收合态），展开由 CSS 翻 180° 指上
+ */
+const CHEV_ATTRS =
+  'viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"';
+const chevSvg = (cls = "chev") => `<svg class="${cls}" ${CHEV_ATTRS}><path d="m9 18 6-6-6-6"/></svg>`;
+const chevDownSvg = (cls = "chev-ud") => `<svg class="${cls}" ${CHEV_ATTRS}><path d="m6 9 6 6 6-6"/></svg>`;
+
+export { CS_ICONS, chevSvg, chevDownSvg };

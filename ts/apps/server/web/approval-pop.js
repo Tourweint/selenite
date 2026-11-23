@@ -9,6 +9,7 @@
 
 import { approvalCards, approvalSourceLabel, parseAskUserPayload } from "./approval-card.js";
 import { openConversation } from "./chat-open.js";
+import { chevSvg } from "./icons.js";
 import { attr, esc } from "./markdown.js";
 import { request } from "./net.js";
 import { syncRosterBusy } from "./partners-status.js";
@@ -157,11 +158,19 @@ function approvalPopSummaryCard(items, firstTime) {
   card.innerHTML = `
     <div class="approval-pop-head">
       <span class="approval-pop-tool">${label}</span>
-      <span class="approval-pop-caret" aria-hidden="true">${approvalPopExpanded ? "▾" : "▸"}</span>
+      ${chevSvg("approval-pop-caret chev")}
     </div>`;
+  // 2026-11-21（箭头统一批）：展开/收起改原地切换——整卡重画会重建 DOM，transition
+  // 永远播不出来，箭头只能瞬间换字。这里只翻 aria 与列表 hidden，转 90° 的动画才落得下来。
   const toggle = () => {
     approvalPopExpanded = !approvalPopExpanded;
-    renderApprovalPopups();
+    card.setAttribute("aria-expanded", approvalPopExpanded ? "true" : "false");
+    card.setAttribute("title", approvalPopExpanded ? "收起列表" : "点开看是哪几个");
+    const list = card.parentElement?.querySelector(":scope > .approval-pop-list");
+    if (list) list.hidden = !approvalPopExpanded;
+    // 签名同步：下一轮 5s 轮询进来内容没变就不该再重画
+    const visible = approvalPopItems.filter(approvalPopVisible);
+    approvalPopSignature = `${approvalPopFingerprint(visible)}\u0003${approvalPopExpanded ? "1" : "0"}\u0003${approvalPopActiveCallId}`;
   };
   card.addEventListener("click", toggle);
   card.addEventListener("keydown", (event) => {
@@ -250,9 +259,12 @@ function renderApprovalPopups() {
       approvalPopShown.add(visible[0].callId);
       host.append(card);
     } else {
-      // 多件：只留一行计数，点开才是列表
+      // 多件：只留一行计数，点开才是列表。列表常驻 DOM（收起只翻 hidden）——
+      // 2026-11-21 起展开在原地切换，不再靠重画挂列表，箭头动画才播得出来。
       host.append(approvalPopSummaryCard(visible, previous.size === 0));
-      if (approvalPopExpanded) host.append(approvalPopListCard(visible));
+      const list = approvalPopListCard(visible);
+      list.hidden = !approvalPopExpanded;
+      host.append(list);
       for (const item of visible) approvalPopShown.add(item.callId);
     }
   }

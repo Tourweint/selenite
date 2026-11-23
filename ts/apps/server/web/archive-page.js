@@ -9,6 +9,7 @@
 
 import { openDeleteChatModal } from "./archive-delete.js";
 import { chatLabel, loadChats } from "./chats-list.js";
+import { chevSvg } from "./icons.js";
 import { attr, esc } from "./markdown.js";
 import { request } from "./net.js";
 import { projectCardMarkup, wireProjectActions } from "./settings-projects.js";
@@ -193,7 +194,7 @@ function archiveGroupMarkup(group) {
         <svg class="archive-group-folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
         <span class="archive-group-title" title="${attr(group.label)}">${esc(group.label)}</span>
         <span class="archive-group-count">${group.chats.length}</span>
-        <svg class="archive-group-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+        ${chevSvg("archive-group-caret chev")}
       </button>
       <button class="archive-group-restore" type="button" data-group-restore="${attr(group.key)}"
               title="全部取消归档" aria-label="把这组会话全部恢复到列表">${ARCHIVE_ICON_UNDO}</button>

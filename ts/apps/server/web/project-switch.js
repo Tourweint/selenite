@@ -431,6 +431,8 @@ function projActionButton(icon, label, tip, onClick) {
   svg.setAttribute("stroke-linejoin", "round");
   // 只写入本文件里的常量图元，不拼接任何用户数据
   svg.innerHTML = PROJECT_ICONS[icon] || "";
+  // caret 开的是文件夹清单浮卡（aria-expanded 已同步）：挂 .chev-ud，开合翻 180°（style-27）
+  if (icon === "caret") svg.classList.add("chev-ud");
   slot.append(svg);
   button.append(slot);
   button.addEventListener("click", (event) => {
