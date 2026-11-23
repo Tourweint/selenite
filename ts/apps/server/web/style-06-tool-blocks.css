@@ -67,7 +67,8 @@
 /* ── 工具灰块（2026-11-13 E1，替换旧「工作过程面板」）────────────
  * 一轮的结构：话 → 一组灰块 → 话 → 一组灰块。
  * 灰块只写 icon + 动词 + 目标；步数/耗时/命令/输出/diff 全在点击后的详情里。
- * 超过 8 个先收进「+N」，点开铺全部；详情面板限高 260px，内部滚动。 */
+ * 行首一枚「工作 N 步」折叠条管开合（2026-11-21）：跑动中常驻报数，
+ * 点开铺全部、再点收回去；详情面板限高 260px，内部滚动。 */
 
 .flow { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .msg.assistant .flow { min-width: 0; }
@@ -95,9 +96,26 @@
   overflow: hidden;
   transition: background-color .18s ease, border-color .18s ease, color .18s ease;
 }
-.tchips-wrap.is-live .tchip { animation: tchipIn .22s var(--ease-decelerate) both; }
-@keyframes tchipIn {
-  from { opacity: 0; transform: translateY(3px) scale(.98); }
+/* 入场动画（2026-11-21 用户拍板「生长」，对比页五版里动作感最强的一版）：
+   图标先弹到位，块体从图标处向右长出来（clip-path 揭开），文字随后浮现——
+   像这一步正在发生。时长 0.3s，仍在「单次不超过 360ms」的纪律内。
+   is-live 只挂在现场这一轮：历史回读不播，打开旧会话满屏块不齐动。
+   思考块在跑时图标位是转圈环（下方 spinner 规则更晚出现、同特异性取替）：
+   环从起跑就转、不播这颗弹入——运行中的样子不动（用户口径）。 */
+.tchips-wrap.is-live .tchip { animation: tchipGrowClip .3s var(--ease-decelerate) both; }
+.tchips-wrap.is-live .tchip .tchip-icon { animation: tchipGrowIcon .2s var(--ease-emphasized) both; }
+.tchips-wrap.is-live .tchip .tchip-verb { animation: tchipGrowText .22s var(--ease-decelerate) .12s both; }
+@keyframes tchipGrowClip {
+  from { clip-path: inset(0 100% 0 0 round 6px); }
+  to { clip-path: inset(0 0 0 0 round 6px); }
+}
+@keyframes tchipGrowIcon {
+  from { transform: scale(.4); opacity: 0; }
+  70% { transform: scale(1.18); }
+  to { transform: scale(1); opacity: 1; }
+}
+@keyframes tchipGrowText {
+  from { opacity: 0; transform: translateX(-3px); }
   to { opacity: 1; transform: none; }
 }
 .tchip:hover { background: var(--card-high); }
@@ -112,6 +130,13 @@
 .tchip-check { display: none; flex: none; width: 10px; height: 10px; color: var(--text-3); }
 .tchip-check svg { width: 10px; height: 10px; display: block; }
 .tchip[data-state="ok"] .tchip-check { display: inline-flex; }
+/* 完成的反馈（2026-11-21 随入场批带上，对比页四版共用）：勾号从现场轮 settle
+   那一刻弹出。历史回读的块生来就是 ok，不挂 is-live——不播，别让开旧会话满屏跳勾。 */
+.tchips-wrap.is-live .tchip[data-state="ok"] .tchip-check { animation: tchipCheckPop .18s var(--ease-emphasized) both; }
+@keyframes tchipCheckPop {
+  from { transform: scale(.4); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
 
 /* 运行中：整块 accent 化 + 底边 1.2s 扫光 */
 .tchip[data-state="run"] {
@@ -165,26 +190,19 @@
 @keyframes tchipSpin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) {
   .tchip[data-kind="think"][data-state="run"] .tchip-icon { animation: none; }
+  /* 入场 / 勾号落定 / 「涌出」展开一并关掉：块直接到位，内容一样不少（2026-11-21 两批） */
+  .tchips-wrap.is-live .tchip,
+  .tchips-wrap.is-live .tchip .tchip-icon,
+  .tchips-wrap.is-live .tchip .tchip-verb,
+  .tchips-wrap.is-live .tchip[data-state="ok"] .tchip-check,
+  .tchips.expand-in .tchip { animation: none; }
 }
 
-/* 「+N」：超出的块先收起来 */
-.tchips-more {
-  flex: none; height: 24px; padding: 0 10px;
-  display: inline-flex; align-items: center; justify-content: center;
-  border: 1px solid var(--chat-hairline); border-radius: 6px;
-  background: transparent; color: var(--text-3);
-  font-family: var(--font); font-size: 12px; line-height: 1.2;
-  cursor: pointer;
-  transition: background-color .15s ease, color .15s ease, border-color .15s ease;
-}
-.tchips-more:hover { background: var(--card-high); color: var(--text); }
-.tchips-more:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--accent-line); }
-
-/* 跑完的整组折叠条（2026-11-19）：一轮结束只留这一枚，块全收进正文之外。
-   和「+N」同一族（同高同字号同圆角），因为它俩在正文里是同一层信息：
-   "这里还有你看不见的调用"。
+/* 「工作 N 步」折叠条（2026-11-19 立行；2026-11-21 收口为唯一开合开关）：
+   行首常驻——跑动中报数，收尾后整组只剩它；点开铺全部、再点收回去，
+   行尾「收起」按钮与「+N」同批退役（同一处点按，鼠标不用挪）。
    收起态不染红（2026-11-19 用户口径）：失败留给展开后的块去标，
-   摊在正文里的这一枚只说明"有 N 次调用"。 */
+   摊在正文里的这一枚只说明"工作了几步"。 */
 .tchips-fold {
   display: inline-flex; align-items: center; justify-content: center; gap: 4px;
   height: 24px; padding: 0 10px;
@@ -202,7 +220,26 @@
 .tchips-fold:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--accent-line); }
 .tchips-fold svg { flex: none; width: 11px; height: 11px; }
 
-/* 收起 / 展开的高度过渡（2026-11-19）：行数会变（多行块 → 一行「思考 + N 个调用」），
+/* 「涌出」展开（2026-11-21 用户拍板，对比页 C 版——"发牌"）：
+   点「工作 N 步」那刻，整组块从折叠条的位置飞回自己这一格，按 --i 逐枚排队
+   （16ms 一枚、24 号封顶，长轮半秒内铺完）。位移由 tool-chips.js 在展开瞬间
+   实量进 --dx/--dy（每枚相对折叠条），换行与窗口变化都对得上；
+   收回快速合拢不倒带（离开比进入快）；展开途中新进的块排 0 号就地浮现。
+   级联：与入场规则同特异性、写在后面——展开以铺开为准；
+   display:none 复显会重启动画，图标/文字/勾号的入场重播一并压住。 */
+.tchips.expand-in .tchip {
+  animation: tchipFanOut .24s var(--ease-decelerate) both;
+  animation-delay: calc(var(--i, 0) * 16ms);
+}
+.tchips.expand-in .tchip .tchip-icon,
+.tchips.expand-in .tchip .tchip-verb { animation: none; }
+.tchips.expand-in .tchip[data-state="ok"] .tchip-check { animation: none; }
+@keyframes tchipFanOut {
+  from { opacity: 0; transform: translate(var(--dx, 0px), var(--dy, 0px)) scale(.55); }
+  to { opacity: 1; transform: none; }
+}
+
+/* 收起 / 展开的高度过渡（2026-11-19）：行数会变（多行块 → 一行「工作 N 步」），
    高度由 JS 量出真实值后用 WAAPI 过渡；这一层只负责在动画期间把溢出的内容裁住。 */
 .tchips-row { overflow: hidden; }
 
@@ -393,9 +430,11 @@
   flex: none; margin-left: auto;
   width: 18px; height: 18px;
   display: grid; place-content: center;
-  font-size: 12px; color: var(--text-3);
+  color: var(--text-3);
 }
+.approval-pop-caret svg { width: 13px; height: 13px; }
 .approval-pop-list { display: flex; flex-direction: column; gap: 6px; }
+.approval-pop-list[hidden] { display: none; }
 .approval-pop-item {
   display: flex; flex-direction: column; gap: 2px;
   width: 100%; padding: 8px 10px;

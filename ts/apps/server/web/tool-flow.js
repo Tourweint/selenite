@@ -10,7 +10,7 @@
  * 两个元素把一轮串起来：
  * - `.body`：每一段话一个正文段（streamView 绑一段，说完就换下一段）；
  * - `.tchips`：一组灰块（一次连续动手 = 一组），插在两段话之间。
- * 收尾后它们按真实顺序留在消息里，不再折成一行。
+ * 收尾后每组收进行首那枚「工作 N 步」折叠条（tool-chips.js）。
  */
 
 import { renderMarkdown } from "./markdown.js";
@@ -81,8 +81,9 @@ function createToolFlow(root, options = {}) {
      * 思考段（2026-11-17 用户口径：和工具同款灰块）。
      * 排在它真正发生的位置（通常是一组里最前面），图标 sparkles、动词「思考」；
      * 正文进详情（限高、内部滚动），主界面照样不写秒数。
-     * 返回句柄：`append(增量)` 追加正文，`finish()` 定格并补「用时」，
-     * `drop()` 撤掉这枚块（2026-11-20：发消息时先立的转圈占位，没等到思考正文就撤）。
+     * 返回句柄：`append(增量)` 追加正文，`finish()` 定格并补「用时」。
+     * 2026-11-21 翻案：没等到思考正文的也不再撤（drop 退役、仅留兜底）——
+     * 转圈消失会让人以为思考这一步被藏了（用户口径「思考过程也要显示出来」）。
      */
     think() {
       const id = `think:${stepCount}`;
@@ -160,7 +161,8 @@ function createToolFlow(root, options = {}) {
       };
     },
     finish() {
-      // 一轮真的结束：这条消息里的每一组都收起，只留各自的「N 个工具调用」。
+      // 一轮真的结束：这条消息里的每一组都收起，只留各自的「工作 N 步」。
+      // 用户手动摊开的组不强行收（2026-11-21），见 tool-chips.js 的 finish。
       for (const item of groups) item.finish({ collapse: true });
       group = null;
     },

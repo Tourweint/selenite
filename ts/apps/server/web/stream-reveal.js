@@ -419,6 +419,19 @@ function reconcileChildren(oldParent, newParent, context) {
       newIndex += 1;
       continue;
     }
+    // 交互卡（2026-11-21）：同 srcdoc 的卡原地保留——iframe 是挂载层（html-cards.js）
+    // 塞进去的，换成新树节点就是一次重载。内容变了（模型重写这一块）才走 replaceItem。
+    if (
+      oldItem.kind === "node" &&
+      newItem.kind === "node" &&
+      oldItem.node.matches?.(".html-card") &&
+      newItem.node.matches?.(".html-card") &&
+      oldItem.node.dataset.srcdoc === newItem.node.dataset.srcdoc
+    ) {
+      oldIndex += 1;
+      newIndex += 1;
+      continue;
+    }
     if (oldItem.kind === "run" && newItem.kind === "run") {
       reconcileRun(oldItem, newItem, context);
     } else if (oldItem.kind === "node" && newItem.kind === "node") {

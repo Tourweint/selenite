@@ -290,6 +290,13 @@ export function foldTranscriptEntries(
 			const clipped = clampText(thinkText, STEP_OUTPUT_LIMIT);
 			if (clipped) think.output = clipped;
 			pending.push(think);
+		} else if (!pending.some((step) => step.name === "think")) {
+			// 没吐思考正文的轮也留一步「思考」（2026-11-21 用户口径「思考过程也要显示出来」）：
+			// 现场的转圈占位不再撤掉（composer-send 同批翻掉 2026-11-20 的空块清理），
+			// 历史必须留给同一枚，否则重读一次现场就被擦掉。不写 output、不编 ms——
+			// 没留下的正文在详情里如实说「这段没留下正文」。整轮只补一条（后面再有没有
+			// 思考的轮不再重复），别把多轮工具的步数吹起来。
+			pending.push({ name: "think", ok: true });
 		}
 		if (calls.length > 0) {
 			const spoken = contentText(

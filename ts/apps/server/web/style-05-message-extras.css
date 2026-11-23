@@ -121,18 +121,54 @@
 .body a:hover { text-decoration: underline; }
 .body strong { font-weight: 600; }
 
-/* 表格（批次二）：GFM 管道表格；外层管横滚，防宽表撑破消息栏 */
-.table-wrap { overflow-x: auto; margin: 0 0 12px; }
+/* 表格（2026-11-21 C 卡片版，方案 docs/设计方案/2026-11-21-表格渲染与交互消息/）：
+   整表一张卡——hairline 外框 + 圆角 + 卡底；窄表随内容收、宽表卡内横滚
+   （overflow-x:auto 自带圆角裁切）。旧的全网格线退役。
+   短格 .nw 不折行、数字列右对齐：渲染器（markdown.js）按内容挂类。 */
+.table-wrap {
+  overflow-x: auto; margin: 0 0 12px;
+  border: 1px solid var(--chat-hairline);
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--card) 55%, var(--bg));
+  width: fit-content; max-width: 100%;
+}
 .body table {
   border-collapse: collapse;
   font-size: 13px; line-height: 1.55;
 }
 .body th, .body td {
-  border: 1px solid var(--divider);
-  padding: 6px 10px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--chat-hairline);
   text-align: left;
 }
-.body th { background: var(--card-high); font-weight: 600; color: var(--text); }
+.body th:first-child, .body td:first-child { padding-left: 16px; }
+.body th:last-child, .body td:last-child { padding-right: 16px; }
+.body th {
+  background: var(--card-high);
+  font-size: 12px; font-weight: 600; color: var(--text-2);
+  white-space: nowrap;
+}
+.body tbody tr:last-child td { border-bottom: 0; }
+.body tbody tr:hover td { background: var(--chat-inset); }
+.body td.nw { white-space: nowrap; }
+.body td.num { font-variant-numeric: tabular-nums; }
+
+/* 交互卡片（2026-11-21，形态 1 内联自适应）：助手回复里 ```html 围栏的
+   页面片段直勾勾渲染——无工具条无标题，只留一层圆角边界（用户拍板「定好边界」）。
+   占位符由 html-cards.js 挂 iframe；高度卡内脚本报上来（72% 视口上限，超出内部滚）；
+   宽度非气泡 = 整行，气泡模式 = 480px（见 style-21 的镜像规则）。 */
+.html-card {
+  margin: 0 0 12px;
+  border: 1px solid var(--chat-hairline);
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--card) 60%, var(--bg));
+  overflow: hidden;
+  width: 100%;
+}
+.html-card iframe {
+  display: block; width: 100%; height: 56px; min-height: 56px;
+  border: 0; background: transparent;
+}
 
 /* 上下文环形指示（2026-11-04 从顶栏搬进 composer 右下，对齐 cindy ContextCapacityRing；
    2026-11-11 挪到模型 pill 左侧；2026-11-13 用户拍板环边不再摆任何数字，
@@ -303,8 +339,7 @@
 }
 .fsum-head:hover { background: color-mix(in srgb, var(--card-high) 50%, transparent); }
 .fsum-chevron { flex: none; display: inline-flex; width: 13px; height: 13px; color: var(--text-3); }
-.fsum-chevron svg { width: 13px; height: 13px; transition: transform .18s ease; }
-.fsum[data-open="1"] .fsum-chevron svg { transform: rotate(90deg); }
+/* 2026-11-21（箭头统一批）：旋转/过渡在 style-27 的 .chev（head 上有 aria-expanded） */
 .fsum-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fsum-nums { flex: none; display: inline-flex; gap: 6px; font-style: normal; }
 .fsum-add, .fsum-del { font-style: normal; font-family: var(--mono); font-size: 11.5px; }

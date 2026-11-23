@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>表格渲染 × 交互消息 · 设计对比</title>
+<style>
+  /* ── 纸感 tokens（照抄 style-01 paper 主题）── */
+  :root {
+    --bg: #fdf9f2;
+    --surface-low: #f7f3eb;
+    --card: #f6f1e7;
+    --card-high: #ede9e0;
+    --text: #2e2b3a;
+    --text-2: #6e6b7e;
+    --text-3: #9a97a5;
+    --outline: #c8c5bc;
+    --divider: rgba(200, 197, 188, 0.55);
+    --accent: #3e4a8c;
+    --warn: #b07d2b;
+    --ok: #1f9d4d;
+    --error: #b3564d;
+    --chat-hairline: color-mix(in srgb, var(--text) 9%, transparent);
+    --chat-inset: color-mix(in srgb, var(--text) 4%, transparent);
+    --shadow-menu: 0 4px 16px rgba(46, 43, 58, 0.15);
+    --font: "Songti SC", "Noto Serif SC", "Source Han Serif SC", "STSong", "SimSun", "Microsoft YaHei", serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --r-md: 12px;
+  }
+  * { box-sizing: border-box; }
+  html { background: var(--bg); }
+  body {
+    margin: 0; padding: 48px 0 120px;
+    font: 14px/1.7 var(--font);
+    color: var(--text);
+  }
+  .page { max-width: 960px; margin: 0 auto; padding: 0 32px; }
+  header.top { margin-bottom: 44px; }
+  .kicker { font-size: 12px; letter-spacing: .14em; color: var(--text-3); margin-bottom: 10px; }
+  h1 { font-size: 26px; font-weight: 600; margin: 0 0 8px; }
+  .lede { color: var(--text-2); margin: 0; max-width: 62ch; }
+  .lede strong { color: var(--text); }
+
+  h2.sec {
+    font-size: 19px; font-weight: 600; margin: 64px 0 4px;
+    padding-top: 28px; border-top: 1px solid var(--divider);
+  }
+  .sec-note { color: var(--text-2); font-size: 13px; margin: 0 0 24px; }
+
+  /* ── 版块框架 ── */
+  .verdict {
+    display: flex; gap: 14px; align-items: baseline;
+    font-size: 13px; color: var(--text-2); margin: 6px 0 18px;
+  }
+  .verdict .tag {
+    flex: none; font-size: 12px; color: var(--accent);
+    border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+    border-radius: 999px; padding: 1px 10px;
+  }
+  .variant { margin: 0 0 44px; }
+  .variant-title {
+    display: flex; align-items: baseline; gap: 10px;
+    margin: 0 0 14px;
+  }
+  .variant-title .name { font-size: 16.5px; font-weight: 600; }
+  .variant-title .desc { font-size: 13px; color: var(--text-2); }
+  .demo {
+    background: var(--surface-low);
+    border: 1px solid var(--divider);
+    border-radius: var(--r-md);
+    padding: 20px 24px 8px;
+  }
+
+  /* 演示里模拟消息正文的环境（照 .msg.assistant .body） */
+  .body { font-size: 14.5px; line-height: 1.68; color: var(--text); min-width: 0; }
+  .body > :first-child { margin-top: 0; }
+  .body p { margin: 0 0 12px; }
+  .body strong { font-weight: 600; }
+  .body code {
+    font: 12.5px/1.4 var(--mono);
+    background: var(--chat-inset);
+    border-radius: 4px; padding: 1px 5px;
+  }
+  .cap { font-size: 12px; color: var(--text-3); margin: 2px 0 10px; }
+
+  /* ══ A 现状：全网格（照抄现行 CSS）══ */
+  .t-a { border-collapse: collapse; font-size: 13px; line-height: 1.55; width: max-content; max-width: 100%; }
+  .t-a th, .t-a td { border: 1px solid var(--divider); padding: 6px 10px; text-align: left; }
+  .t-a th { background: var(--card-high); font-weight: 600; color: var(--text); }
+  .twrap { overflow-x: auto; margin: 0 0 12px; }
+
+  /* 新版共同底座：短列不断行、数字右对齐、mono 值、hover */
+  .tbl { border-collapse: collapse; font-size: 13px; line-height: 1.55; width: max-content; max-width: 100%; }
+  .tbl th, .tbl td { padding: 7px 12px; text-align: left; }
+  .tbl .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .tbl .ctr { text-align: center; }
+  .tbl .nw { white-space: nowrap; }
+  .tbl .mono { font-family: var(--mono); font-size: 12px; }
+  .tbl th {
+    font-size: 12px; font-weight: 600; color: var(--text-2);
+    letter-spacing: .02em; white-space: nowrap;
+  }
+  .tbl tbody tr:hover td { background: var(--chat-inset); }
+
+  /* ══ B 书页（booktabs）══ */
+  .t-b { border-top: 2px solid var(--text); border-bottom: 1px solid var(--chat-hairline); }
+  .t-b thead th { border-bottom: 1.5px solid color-mix(in srgb, var(--text) 45%, transparent); color: var(--text); }
+  .t-b tbody td { border-bottom: 1px solid var(--chat-hairline); }
+  .t-b tbody tr:last-child td { border-bottom: 0; }
+
+  /* ══ C 卡片 ══ */
+  .c-card {
+    border: 1px solid var(--chat-hairline); border-radius: var(--r-md);
+    overflow: hidden; margin: 0 0 12px; background: color-mix(in srgb, var(--card) 55%, var(--bg));
+    width: max-content; max-width: 100%;
+  }
+  .c-card .tbl { margin: 0; }
+  .c-card thead th { background: var(--card-high); border-bottom: 1px solid var(--chat-hairline); }
+  .c-card tbody td { border-bottom: 1px solid var(--chat-hairline); }
+  .c-card tbody tr:last-child td { border-bottom: 0; }
+  .c-card th:first-child, .c-card td:first-child { padding-left: 16px; }
+  .c-card th:last-child, .c-card td:last-child { padding-right: 16px; }
+
+  /* ══ D 斑马 ══ */
+  .t-d thead th { background: var(--card-high); }
+  .t-d tbody tr:nth-child(even) td { background: var(--chat-inset); }
+  .t-d tbody td { border-bottom: 1px solid var(--chat-hairline); }
+  .t-d tbody tr:last-child td { border-bottom: 0; }
+  .t-d tbody tr:hover td { background: color-mix(in srgb, var(--text) 7%, transparent); }
+
+  /* ══ E 轻网格 ══ */
+  .t-e th, .t-e td { border: 1px solid var(--chat-hairline); }
+  .t-e { border-width: 0 0 0 0; }
+  .t-e tr > :first-child { border-left: 0; }
+  .t-e tr > :last-child { border-right: 0; }
+  .t-e thead tr > th { border-top: 0; }
+
+  /* 宽表首列钉住（可选增强，只给 C/D 演示） */
+  .pin-first .tbl th:first-child, .pin-first .tbl td:first-child {
+    position: sticky; left: 0;
+    background: var(--surface-low);
+  }
+  .pin-first.c-card th:first-child, .pin-first.c-card td:first-child { background: color-mix(in srgb, var(--card) 55%, var(--bg)); }
+  .pin-first.c-card thead th:first-child { background: var(--card-high); }
+  .pin-first.t-d tbody tr:nth-child(even) td:first-child { background: var(--surface-low); }
+
+  /* ══ 交互消息 ══ */
+  .mech { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin: 0 0 30px; }
+  .mech .step {
+    background: var(--surface-low); border: 1px solid var(--divider);
+    border-radius: 10px; padding: 12px 14px;
+  }
+  .mech .step b { display: block; font-size: 13px; margin-bottom: 4px; }
+  .mech .step span { font-size: 12px; color: var(--text-2); line-height: 1.55; display: block; }
+  .mech .step .no { color: var(--accent); font-family: var(--mono); font-size: 11px; }
+  .safe-line {
+    font-size: 12.5px; color: var(--text-2); background: var(--surface-low);
+    border: 1px dashed var(--outline); border-radius: 10px;
+    padding: 10px 14px; margin: 0 0 34px;
+  }
+  .safe-line code { font-family: var(--mono); font-size: 11.5px; color: var(--text); background: var(--chat-inset); border-radius: 4px; padding: 1px 5px; }
+
+  .forms { display: grid; grid-template-columns: 1fr; gap: 26px; }
+  .form-row { display: grid; grid-template-columns: 240px 1fr; gap: 22px; align-items: start; }
+  .form-desc h3 { font-size: 15px; margin: 2px 0 6px; }
+  .form-desc p { font-size: 13px; color: var(--text-2); margin: 0 0 6px; }
+  .form-desc .use { font-size: 12px; color: var(--text-3); }
+
+  /* 交互卡公共外壳（聊天内呈现） */
+  .art-card {
+    border: 1px solid var(--chat-hairline);
+    border-radius: var(--r-md);
+    background: color-mix(in srgb, var(--card) 60%, var(--bg));
+    overflow: hidden;
+    box-shadow: 0 1px 2px rgba(46,43,58,.05);
+  }
+  .art-head {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 10px 6px 12px;
+    border-bottom: 1px solid var(--chat-hairline);
+    background: var(--chat-inset);
+  }
+  .art-head .kind {
+    font: 11px/1 var(--mono); color: var(--text-3);
+    border: 1px solid var(--divider); border-radius: 4px; padding: 2px 6px;
+  }
+  .art-head .ttl { font-size: 12.5px; color: var(--text-2); flex: 1; }
+  .art-head button {
+    font: 12px/1 var(--font); color: var(--text-2); background: none;
+    border: 0; border-radius: 6px; padding: 4px 8px; cursor: pointer;
+  }
+  .art-head button:hover { background: color-mix(in srgb, var(--text) 8%, transparent); color: var(--text); }
+  .art-body iframe { display: block; width: 100%; border: 0; background: transparent; }
+  .art-body.fold { position: relative; }
+  .art-body.fold iframe { height: 200px !important; }
+  .art-body.fold::after {
+    content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 72px;
+    background: linear-gradient(transparent, color-mix(in srgb, var(--card) 60%, var(--bg)));
+    pointer-events: none;
+  }
+  .unfold-note { text-align: center; padding: 8px 0 9px; border-top: 1px solid var(--chat-hairline); }
+  .unfold-note button { font: 12.5px/1 var(--font); color: var(--accent); background: none; border: 0; cursor: pointer; padding: 4px 10px; }
+  .src-view { display: none; max-height: 260px; overflow: auto; margin: 0; padding: 12px 14px; background: var(--chat-inset); }
+  .src-view code { font: 11.5px/1.6 var(--mono); color: var(--text-2); white-space: pre; }
+
+  /* 拍板区 */
+  .ask { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .ask .q {
+    background: var(--surface-low); border: 1px solid var(--divider);
+    border-radius: var(--r-md); padding: 16px 18px;
+  }
+  .ask .q b { display: block; margin-bottom: 6px; font-size: 14px; }
+  .ask .q p { margin: 0; font-size: 13px; color: var(--text-2); }
+</style>
+</head>
+<body>
+<div class="page">
+
+<header class="top">
+  <div class="kicker">SELENITE · 设计对比 · 2026-11-21</div>
+  <h1>回复消息里的表格渲染 × 交互消息</h1>
+  <p class="lede">同一组数据放了五版表格样式；交互消息那一节有机制说明和三个<strong>真的能点、能跑动画</strong>的形态演示。基线问题：全网格线偏重、窄列断行难看（<code style="font-family:var(--mono);font-size:12px">42m</code> 断成两行）、表头没有层级。</p>
+</header>
+
+<!-- ══════════════════ 一、表格 ══════════════════ -->
+<h2 class="sec">一、表格 · 五版同屏</h2>
+<p class="sec-note">五版共用同一组数据与这些底层修正（不随版本变）：单横线分隔行 <code style="font-family:var(--mono);font-size:12px">:-:</code> 兼容（现状解析器不认，整表塌成段落——今天实测）；短单元格不再断行；数字与单号走等宽字体；数字列右对齐。</p>
+
+<!-- A 现状 -->
+<section class="variant">
+  <div class="variant-title"><span class="name">A · 现状</span><span class="desc">全网格线 + 表头浅底 —— 对照组，今天在真页面截过图</span></div>
+  <div class="demo">
+    <div class="body">
+      <p class="cap">窄表观感尚可，但格子线多、扫读吃力；</p>
+      <div class="twrap"><table class="t-a">
+        <thead><tr><th>分类</th><th class="num">条数</th><th class="ctr">变化</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td>经历</td><td class="num">128</td><td class="ctr">+6</td><td>新增本周出行与聚餐的记录</td></tr>
+          <tr><td>偏好</td><td class="num">46</td><td class="ctr">+2</td><td>夜里 23 点后不安排派活</td></tr>
+          <tr><td>项目</td><td class="num">376</td><td class="ctr">−3</td><td>合并了三条重复的部署记录</td></tr>
+        </tbody>
+      </table></div>
+      <p class="cap">宽表问题全暴露：nativ e、42 m、10:1 2、已归 档，全断在半截。</p>
+      <div class="twrap"><table class="t-a">
+        <thead><tr><th>任务单</th><th>项目</th><th>执行器</th><th>状态</th><th class="ctr">退出码</th><th>开始</th><th>结束</th><th>用时</th><th class="ctr">重试</th><th>报告</th></tr></thead>
+        <tbody>
+          <tr><td style="font-family:var(--mono);font-size:12px">t-20261121-0930-a1f2</td><td>lifediary-harness</td><td>native</td><td>已完成</td><td class="ctr">0</td><td>09:30</td><td>10:12</td><td>42m</td><td class="ctr">0</td><td>已归档</td></tr>
+          <tr><td style="font-family:var(--mono);font-size:12px">t-20261121-1015-c9d4</td><td>lifediary 手机端</td><td>claude</td><td>已完成</td><td class="ctr">0</td><td>10:15</td><td>11:03</td><td>48m</td><td class="ctr">1</td><td>已归档</td></tr>
+        </tbody>
+      </table></div>
+    </div>
+  </div>
+</section>
+
+<!-- B 书页 -->
+<section class="variant">
+  <div class="verdict"><span class="tag">推荐</span>跟宋体纸感最配：像书里的学术表格，线最少、层级靠粗细深浅，不靠底色。</div>
+  <div class="variant-title"><span class="name">B · 书页横线</span><span class="desc">无竖线；顶部一条粗线压阵，表头下中粗线，行间发丝线</span></div>
+  <div class="demo">
+    <div class="body">
+      <div class="twrap"><table class="tbl t-b">
+        <thead><tr><th>分类</th><th class="num">条数</th><th class="ctr">变化</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td>经历</td><td class="num">128</td><td class="ctr">+6</td><td>新增本周出行与聚餐的记录</td></tr>
+          <tr><td>偏好</td><td class="num">46</td><td class="ctr">+2</td><td>夜里 23 点后不安排派活</td></tr>
+          <tr><td>项目</td><td class="num">376</td><td class="ctr">−3</td><td>合并了三条重复的部署记录</td></tr>
+          <tr><td>关系</td><td class="num">31</td><td class="ctr">0</td><td>无变化</td></tr>
+        </tbody>
+      </table></div>
+      <div class="twrap"><table class="tbl t-b">
+        <thead><tr><th>任务单</th><th>项目</th><th class="nw">执行器</th><th>状态</th><th class="ctr nw">退出码</th><th class="nw">开始</th><th class="nw">结束</th><th class="nw">用时</th><th class="ctr nw">重试</th><th>报告</th></tr></thead>
+        <tbody>
+          <tr><td class="nw mono">t-20261121-0930-a1f2</td><td>lifediary-harness</td><td class="nw mono">native</td><td>已完成</td><td class="ctr num">0</td><td class="nw num">09:30</td><td class="nw num">10:12</td><td class="nw num">42m</td><td class="ctr num">0</td><td>已归档</td></tr>
+          <tr><td class="nw mono">t-20261121-1015-c9d4</td><td>lifediary 手机端</td><td class="nw mono">claude</td><td>已完成</td><td class="ctr num">0</td><td class="nw num">10:15</td><td class="nw num">11:03</td><td class="nw num">48m</td><td class="ctr num">1</td><td>已归档</td></tr>
+          <tr><td class="nw mono">t-20261121-1302-e77b</td><td>voicevault</td><td class="nw mono">codex</td><td>失败</td><td class="ctr num">2</td><td class="nw num">13:02</td><td class="nw num">13:20</td><td class="nw num">18m</td><td class="ctr num">2</td><td>待查看</td></tr>
+        </tbody>
+      </table></div>
+    </div>
+  </div>
+</section>
+
+<!-- C 卡片 -->
+<section class="variant">
+  <div class="variant-title"><span class="name">C · 圆角卡片</span><span class="desc">整表一张卡：hairline 外框、表头浅底、行间发丝线 —— Notion 一派</span></div>
+  <div class="demo">
+    <div class="body">
+      <div class="twrap"><div class="c-card"><table class="tbl">
+        <thead><tr><th>分类</th><th class="num">条数</th><th class="ctr">变化</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td>经历</td><td class="num">128</td><td class="ctr">+6</td><td>新增本周出行与聚餐的记录</td></tr>
+          <tr><td>偏好</td><td class="num">46</td><td class="ctr">+2</td><td>夜里 23 点后不安排派活</td></tr>
+          <tr><td>项目</td><td class="num">376</td><td class="ctr">−3</td><td>合并了三条重复的部署记录</td></tr>
+        </tbody>
+      </table></div></div>
+      <div class="twrap"><div class="c-card"><table class="tbl">
+        <thead><tr><th>任务单</th><th>项目</th><th class="nw">执行器</th><th>状态</th><th class="ctr nw">退出码</th><th class="nw">开始</th><th class="nw">结束</th><th class="nw">用时</th><th class="ctr nw">重试</th><th>报告</th></tr></thead>
+        <tbody>
+          <tr><td class="nw mono">t-20261121-0930-a1f2</td><td>lifediary-harness</td><td class="nw mono">native</td><td>已完成</td><td class="ctr num">0</td><td class="nw num">09:30</td><td class="nw num">10:12</td><td class="nw num">42m</td><td class="ctr num">0</td><td>已归档</td></tr>
+          <tr><td class="nw mono">t-20261121-1015-c9d4</td><td>lifediary 手机端</td><td class="nw mono">claude</td><td>已完成</td><td class="ctr num">0</td><td class="nw num">10:15</td><td class="nw num">11:03</td><td class="nw num">48m</td><td class="ctr num">1</td><td>已归档</td></tr>
+        </tbody>
+      </table></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- D 斑马 -->
+<section class="variant">
+  <div class="variant-title"><span class="name">D · 斑马纹</span><span class="desc">偶数行淡底 + 行线 —— 列多行多的密表不串行，扫读最快</span></div>
+  <div class="demo">
+    <div class="body">
+      <div class="twrap"><table class="tbl t-d">
+        <thead><tr><th>供应商</th><th>协议</th><th>当前模型</th><th>状态</th><th class="num">昨日调用</th><th class="num">平均延迟</th></tr></thead>
+        <tbody>
+          <tr><td>百炼</td><td class="mono">openai-completions</td><td class="mono">qwen-max</td><td>已连接</td><td class="num">214</td><td class="num">820ms</td></tr>
+          <tr><td>火山方舟</td><td class="mono">openai-completions</td><td class="mono">doubao-pro</td><td>已连接</td><td class="num">87</td><td class="num">460ms</td></tr>
+          <tr><td>DeepSeek</td><td class="mono">openai-completions</td><td class="mono">deepseek-chat</td><td>未配置</td><td class="num">0</td><td class="num">—</td></tr>
+          <tr><td>元宝</td><td class="mono">wsa</td><td>—</td><td>备用搜索源</td><td class="num">45</td><td class="num">1.2s</td></tr>
+        </tbody>
+      </table></div>
+      <div class="twrap"><table class="tbl t-d">
+        <thead><tr><th>任务单</th><th>项目</th><th class="nw">执行器</th><th>状态</th><th class="ctr nw">退出码</th><th class="nw">开始</th><th class="nw">结束</th><th class="nw">用时</th><th class="ctr nw">重试</th><th>报告</th></tr></thead>
+        <tbody>
+          <tr><td class="nw mono">t-20261121-0930-a1f2</td><td>lifediary-harness</td><td class="nw mono">native</td><td>已完成</td><td class="ctr num">0</td><td class="nw num">09:30</td><td class="nw num">10:12</td><td class="nw num">42m</td><td class="ctr num">0</td><td>已归档</td></tr>
+          <tr><td class="nw mono">t-20261121-1015-c9d4</td><td>lifediary 手机端</td><td class="nw mono">claude</td><td>已完成</td><td class="ctr num">0</td><td class="nw num">10:15</td><td class="nw num">11:03</td><td class="nw num">48m</td><td class="ctr num">1</td><td>已归档</td></tr>
+          <tr><td class="nw mono">t-20261121-1302-e77b</td><td>voicevault</td><td class="nw mono">codex</td><td>失败</td><td class="ctr num">2</td><td class="nw num">13:02</td><td class="nw num">13:20</td><td class="nw num">18m</td><td class="ctr num">2</td><td>待查看</td></tr>
+        </tbody>
+      </table></div>
+    </div>
+  </div>
+</section>
+
+<!-- E 轻网格 -->
+<section class="variant">
+  <div class="variant-title"><span class="name">E · 轻网格</span><span class="desc">保留网格习惯，但全部换发丝线、去外框 —— 相对现状的最小改动版</span></div>
+  <div class="demo">
+    <div class="body">
+      <div class="twrap"><table class="tbl t-e">
+        <thead><tr><th>供应商</th><th>协议</th><th>当前模型</th><th>状态</th><th class="num">昨日调用</th><th class="num">平均延迟</th></tr></thead>
+        <tbody>
+          <tr><td>百炼</td><td class="mono">openai-completions</td><td class="mono">qwen-max</td><td>已连接</td><td class="num">214</td><td class="num">820ms</td></tr>
+          <tr><td>火山方舟</td><td class="mono">openai-completions</td><td class="mono">doubao-pro</td><td>已连接</td><td class="num">87</td><td class="num">460ms</td></tr>
+          <tr><td>DeepSeek</td><td class="mono">openai-completions</td><td class="mono">deepseek-chat</td><td>未配置</td><td class="num">0</td><td class="num">—</td></tr>
+        </tbody>
+      </table></div>
+      <div class="twrap"><table class="tbl t-e">
+        <thead><tr><th>任务单</th><th>项目</th><th class="nw">执行器</th><th>状态</th><th class="ctr nw">退出码</th><th class="nw">开始</th><th class="nw">结束</th><th class="nw">用时</th><th class="ctr nw">重试</th><th>报告</th></tr></thead>
+        <tbody>
+          <tr><td class="nw mono">t-20261121-0930-a1f2</td><td>lifediary-harness</td><td class="nw mono">native</td><td>已完成</td><td class="ctr num">0</td><td class="nw num">09:30</td><td class="nw num">10:12</td><td class="nw num">42m</td><td class="ctr num">0</td><td>已归档</td></tr>
+          <tr><td class="nw mono">t-20261121-1302-e77b</td><td>voicevault</td><td class="nw mono">codex</td><td>失败</td><td class="ctr num">2</td><td class="nw num">13:02</td><td class="nw num">13:20</td><td class="nw num">18m</td><td class="ctr num">2</td><td>待查看</td></tr>
+        </tbody>
+      </table></div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════ 二、交互消息 ══════════════════ -->
+<h2 class="sec">二、交互消息 · Agent 回复里嵌可交互 / 动画的 HTML</h2>
+<p class="sec-note">名字可以叫「交互卡片」。模型写 <code style="font-family:var(--mono);font-size:12px">```html</code> 围栏，聊天里直接变成一张活的卡片。ZCode 同款机制已核实：沙箱 iframe，<code style="font-family:var(--mono);font-size:12px">allow-scripts</code> + <code style="font-family:var(--mono);font-size:12px">no-referrer</code>。</p>
+
+<div class="mech">
+  <div class="step"><b><span class="no">01</span> 触发</b><span>回复里出现 ```html 围栏即触发；只认助手消息，用户贴的 html 照旧当代码块</span></div>
+  <div class="step"><b><span class="no">02</span> 沙箱</b><span>iframe sandbox=allow-scripts、无 same-origin、no-referrer；拿不到 cookie 和父页</span></div>
+  <div class="step"><b><span class="no">03</span> 高度</b><span>卡内脚本量出内容高度报给父页，自适应到 480px 上限，超出内部滚动</span></div>
+  <div class="step"><b><span class="no">04</span> 流式</b><span>围栏没写完先显示普通代码块，写完闭合再升级成卡片，不闪半截白屏</span></div>
+  <div class="step"><b><span class="no">05</span> 回滚</b><span>CHAT_HTML_CARDS=false 一行退回普通代码块；手机端暂不渲染，显示代码</span></div>
+</div>
+<div class="safe-line">安全边界：模型产的 HTML 按<strong>不可信</strong>处理 —— 无 same-origin 拿不到存储与凭据，no-referrer 不回传来源；不拦截外链图片/字体（本地单人服务），表单提交默认关。纯前端改动，契约不动（消息还是 markdown 文本）。</div>
+
+<div class="forms">
+
+  <!-- 形态 1 -->
+  <div class="form-row">
+    <div class="form-desc">
+      <h3>形态 1 · 内联自适应卡</h3>
+      <p>高度按内容撑，动画和交互直接在消息流里活着。</p>
+      <p class="use">适合：小而活的图 —— 环形图、步骤演示、可点的小部件。</p>
+    </div>
+    <div class="art-card" id="card1">
+      <div class="art-head"><span class="kind">html</span><span class="ttl">今晚回顾 · 动态卡</span><button type="button" data-act="src">源码</button></div>
+      <div class="art-body">
+        <iframe sandbox="allow-scripts" referrerpolicy="no-referrer" title="交互卡演示 1" data-srcdoc="demo1"></iframe>
+      </div>
+      <pre class="src-view"><code></code></pre>
+    </div>
+  </div>
+
+  <!-- 形态 2 -->
+  <div class="form-row">
+    <div class="form-desc">
+      <h3>形态 2 · 预览 + 展开</h3>
+      <p>默认只给一段定高预览，底部渐隐，点「展开」看全部；不打断阅读节奏。</p>
+      <p class="use">适合：高的动画、长流程图 —— 知道有这东西就行，需要时再点开。</p>
+    </div>
+    <div class="art-card" id="card2">
+      <div class="art-head"><span class="kind">html</span><span class="ttl">一周节奏 · 动画长卡</span><button type="button" data-act="src">源码</button></div>
+      <div class="art-body fold">
+        <iframe sandbox="allow-scripts" referrerpolicy="no-referrer" title="交互卡演示 2" data-srcdoc="demo2"></iframe>
+      </div>
+      <div class="unfold-note"><button type="button" data-act="unfold">展开查看</button></div>
+      <pre class="src-view"><code></code></pre>
+    </div>
+  </div>
+
+  <!-- 形态 3 -->
+  <div class="form-row">
+    <div class="form-desc">
+      <h3>形态 3 · 预览 ⇄ 源码双态</h3>
+      <p>默认预览，头部的「源码」随时切回代码视图 —— 想抄走、想看怎么写的场景。</p>
+      <p class="use">三个形态可以叠加：形态 1/2 都带这颗「源码」按钮。</p>
+    </div>
+    <div class="art-card" id="card3">
+      <div class="art-head"><span class="kind">html</span><span class="ttl">倒计时小组件</span><button type="button" data-act="src">源码</button></div>
+      <div class="art-body">
+        <iframe sandbox="allow-scripts" referrerpolicy="no-referrer" title="交互卡演示 3" data-srcdoc="demo3"></iframe>
+      </div>
+      <pre class="src-view"><code></code></pre>
+    </div>
+  </div>
+
+</div>
+
+<!-- ══════════════════ 三、拍板 ══════════════════ -->
+<h2 class="sec">三、待你拍板</h2>
+<div class="ask">
+  <div class="q"><b>表格选哪版？</b><p>我推 B（书页横线）：跟宋体纸感最合拍，线最少。C/D 是另一种气质，E 是最小改动。也可以「B 为主、密表自动落 D」这种混搭。</p></div>
+  <div class="q"><b>交互卡默认哪种形态？</b><p>我推「内联自适应 + 480px 上限 + 源码按钮」，即形态 1⊕3；再给个设置开关「大卡先折叠」（形态 2 变成可选）。实现是纯前端，契约不动。</p></div>
+</div>
+
+</div>
+
+<script>
+/* ── demo HTML（写进 srcdoc 的真实交互内容）── */
+const demos = {
+  demo1: `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+    body{margin:0;font:13px/1.6 "Songti SC","SimSun",serif;color:#2e2b3a;background:#f6f1e7;padding:16px 18px;}
+    .row{display:flex;gap:18px;align-items:center;}
+    .ring{position:relative;width:84px;height:84px;flex:none;}
+    .ring svg{transform:rotate(-90deg);}
+    .ring b{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:15px;}
+    .items{flex:1;}
+    .item{display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px dashed rgba(46,43,58,.15);}
+    .item:last-child{border:0;}
+    .done{color:#1f9d4d;} .doing{color:#b07d2b;}
+    button{font:12px/1 inherit;color:#3e4a8c;background:none;border:1px solid rgba(62,74,140,.4);border-radius:8px;padding:5px 12px;cursor:pointer;margin-top:10px;}
+    button:hover{background:rgba(62,74,140,.08);}
+  </style></head><body>
+    <div class="row">
+      <div class="ring"><svg width="84" height="84"><circle cx="42" cy="42" r="34" fill="none" stroke="rgba(46,43,58,.12)" stroke-width="7"/><circle id="f" cx="42" cy="42" r="34" fill="none" stroke="#3e4a8c" stroke-width="7" stroke-linecap="round" stroke-dasharray="213.6" stroke-dashoffset="213.6"/></svg><b id="pct">0%</b></div>
+      <div class="items">
+        <div class="item"><span>记忆整理</span><span class="done">✓ 完成</span></div>
+        <div class="item"><span>供应商对账</span><span class="done">✓ 完成</span></div>
+        <div class="item"><span>周报草稿</span><span class="doing">进行中</span></div>
+      </div>
+    </div>
+    <button id="go">再跑一遍</button>
+    <script>
+      var f=document.getElementById('f'),pct=document.getElementById('pct'),go=document.getElementById('go');
+      function run(){var t0=null;function step(ts){if(!t0)t0=ts;var k=Math.min((ts-t0)/1200,1);
+        f.setAttribute('stroke-dashoffset',213.6*(1-k));pct.textContent=Math.round(k*100)+'%';
+        if(k<1)requestAnimationFrame(step);}requestAnimationFrame(step);}
+      go.addEventListener('click',run);run();
+      function report(){parent.postMessage({art:'demo1',h:document.documentElement.scrollHeight},'*');}
+      report();setTimeout(report,300);setTimeout(report,900);
+    <\/script>
+  </body></html>`,
+  demo2: `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+    body{margin:0;font:13px/1.6 "Songti SC","SimSun",serif;color:#2e2b3a;background:#f6f1e7;padding:16px 18px;}
+    h4{margin:0 0 12px;font-size:14px;}
+    .lane{display:flex;gap:8px;align-items:flex-end;height:120px;margin-bottom:14px;}
+    .bar{flex:1;background:rgba(62,74,140,.15);border-radius:6px 6px 0 0;position:relative;overflow:hidden;}
+    .bar i{position:absolute;left:0;right:0;bottom:0;background:#3e4a8c;border-radius:6px 6px 0 0;animation:up 1s ease-out forwards;transform-origin:bottom;}
+    @keyframes up{from{height:0}to{height:var(--h)}}
+    .bar span{position:absolute;bottom:-20px;left:0;right:0;text-align:center;font-size:11px;color:#9a97a5;}
+    .note{color:#6e6b7b;font-size:12px;border-top:1px solid rgba(46,43,58,.15);padding-top:10px;}
+  </style></head><body>
+    <h4>这一周的派活节奏</h4>
+    <div class="lane">
+      <div class="bar" style="height:100%"><i style="--h:64%"></i><span>一</span></div>
+      <div class="bar" style="height:100%"><i style="--h:38%;animation-delay:.1s"></i><span>二</span></div>
+      <div class="bar" style="height:100%"><i style="--h:82%;animation-delay:.2s"></i><span>三</span></div>
+      <div class="bar" style="height:100%"><i style="--h:55%;animation-delay:.3s"></i><span>四</span></div>
+      <div class="bar" style="height:100%"><i style="--h:91%;animation-delay:.4s"></i><span>五</span></div>
+      <div class="bar" style="height:100%"><i style="--h:22%;animation-delay:.5s"></i><span>六</span></div>
+      <div class="bar" style="height:100%"><i style="--h:8%;animation-delay:.6s"></i><span>日</span></div>
+    </div>
+    <div class="note">周五 14 单最多，其中 3 单是重试。柱子进场有依次升起的动画，往下滚才看得到底。</div>
+    <script>function report(){parent.postMessage({art:'demo2',h:document.documentElement.scrollHeight},'*');}report();setTimeout(report,300);setTimeout(report,900);<\/script>
+  </body></html>`,
+  demo3: `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+    body{margin:0;font:13px/1.6 "Songti SC","SimSun",serif;color:#2e2b3a;background:#f6f1e7;padding:16px 18px;text-align:center;}
+    .big{font-size:34px;font-family:ui-monospace,Menlo,Consolas,monospace;letter-spacing:.04em;margin:4px 0 10px;}
+    .lbl{font-size:12px;color:#9a97a5;}
+    button{font:13px/1 inherit;color:#fff;background:#3e4a8c;border:0;border-radius:999px;padding:8px 22px;cursor:pointer;}
+    button.ghost{color:#3e4a8c;background:none;border:1px solid rgba(62,74,140,.4);}
+  </style></head><body>
+    <div class="lbl">距离每晚整理</div>
+    <div class="big" id="clk">02:00:00</div>
+    <button id="s">暂停</button> <button class="ghost" id="r">重置</button>
+    <script>
+      var left=2*3600+0*60, tick=null;
+      var clk=document.getElementById('clk'),s=document.getElementById('s'),r=document.getElementById('r');
+      function fmt(n){var h=Math.floor(n/3600),m=Math.floor(n%3600/60),x=n%60;return (h<10?'0':'')+h+':'+(m<10?'0':'')+m+':'+(x<10?'0':'')+x;}
+      function draw(){clk.textContent=fmt(left);}
+      s.onclick=function(){if(tick){clearInterval(tick);tick=null;s.textContent='继续';}else{tick=setInterval(function(){left=Math.max(0,left-1);draw();},1000);s.textContent='暂停';}};
+      r.onclick=function(){left=7200;draw();};
+      draw();tick=setInterval(function(){left=Math.max(0,left-1);draw();},1000);s.textContent='暂停';
+      function report(){parent.postMessage({art:'demo3',h:document.documentElement.scrollHeight},'*');}report();
+    <\/script>
+  </body></html>`
+};
+
+document.querySelectorAll('iframe[data-srcdoc]').forEach((frame) => {
+  const html = demos[frame.dataset.srcdoc];
+  frame.dataset.art = frame.dataset.srcdoc;
+  frame.srcdoc = html;
+  const codeEl = frame.closest('.art-card').querySelector('.src-view code');
+  if (codeEl) codeEl.textContent = html;
+});
+
+/* 自适应高度：收 demo 的 postMessage（demo 会连报几次，防字体加载晚量） */
+const MAXH = 480;
+window.addEventListener('message', (event) => {
+  const d = event.data;
+  if (!d || !d.art || !d.h) return;
+  const frame = document.querySelector('iframe[data-art="' + d.art + '"]');
+  if (frame && frame.parentElement) frame.style.height = Math.min(d.h + 2, MAXH) + 'px';
+});
+
+/* 源码切换 */
+document.querySelectorAll('[data-act="src"]').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const card = btn.closest('.art-card');
+    const body = card.querySelector('.art-body');
+    const src = card.querySelector('.src-view');
+    const show = src.style.display !== 'block';
+    src.style.display = show ? 'block' : 'none';
+    body.style.display = show ? 'none' : '';
+    btn.textContent = show ? '预览' : '源码';
+  });
+});
+
+/* 展开 / 收起（形态 2） */
+const card2 = document.getElementById('card2');
+const unfoldBtn = card2.querySelector('[data-act="unfold"]');
+unfoldBtn.addEventListener('click', () => {
+  const body = card2.querySelector('.art-body');
+  const folded = body.classList.toggle('fold');
+  unfoldBtn.textContent = folded ? '展开查看' : '收起';
+});
+</script>
+</body>
+</html>

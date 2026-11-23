@@ -32,6 +32,10 @@
 /* 工具块（2026-11-17 起思考块也在这个容器里）跟着气泡的宽度走，左沿才对得齐；
    不跟就成了一条比气泡宽的黑边 */
 [data-answer-bubble="1"] .msg.assistant .tchips-wrap { max-width: var(--bubble-w, 80%); }
+/* 交互卡跟着气泡走（2026-11-21）：气泡里给 480px 定宽（≤ 最窄档 60% 气泡的内容宽，
+   % 宽在 fit-content 的气泡里是循环尺寸，不给定值会塌成 iframe 默认 300px）；
+   非气泡 = 整行宽，规则在 style-05 的 .html-card 本体。 */
+[data-answer-bubble="1"] .msg.assistant .html-card { width: 480px; max-width: 100%; }
 /* 脚注（复制 / 用时）贴着气泡内文字的左沿，而不是气泡外框的左沿 */
 [data-answer-bubble="1"] .msg.assistant .msg-foot { margin-left: 14px; }
 
@@ -207,9 +211,9 @@
 }
 .mem-a-chev {
   width: 14px; height: 14px; flex: none; color: var(--text-3);
-  transition: transform .18s var(--ease);
+  /* 旋转/过渡在 style-27（2026-11-21 统一批）：本地原来写的 var(--ease) 是不存在的
+     变量，整条 transition 一直是失效的——动画从来没播过，顺手修掉 */
 }
-.mem-a-group.open .mem-a-chev { transform: rotate(90deg); }
 .mem-a-gtitle { font-size: 13px; font-weight: 600; }
 /* 记忆组头的光标不跟 data-tip 变（2026-11-14 统一） */
 .mem-a-gcount {
@@ -241,8 +245,6 @@
   background: var(--surface-low);
   border-radius: var(--r-md) var(--r-md) 0 0;
 }
-.mem-a-work-chev { transition: transform .18s var(--ease); }
-.mem-a-work[open] .mem-a-work-chev { transform: rotate(90deg); }
 .mem-a-work-body { border-top: 1px solid var(--divider); }
 .mem-a-work-row {
   display: flex; align-items: flex-start; gap: 12px;
@@ -408,12 +410,10 @@
 }
 .mem-import-family-head::-webkit-details-marker { display: none; }
 .mem-import-family-head:hover { background: var(--surface); }
+/* 2026-11-21（箭头统一批）：::before 换字符 → chevSvg（类挂 svg 本体），展开转 90°（行为在 style-27） */
 .mem-import-family-chev {
-  flex: none; width: 12px; color: var(--text-3);
-  font-size: 13px; line-height: 1;
+  flex: none; width: 12px; height: 12px; color: var(--text-3);
 }
-.mem-import-family-chev::before { content: "▸"; }
-.mem-import-family[open] .mem-import-family-chev::before { content: "▾"; }
 .mem-import-family-name {
   flex: 0 1 auto; min-width: 0;
   color: var(--text); font-size: 13px; line-height: 1.35; font-weight: 500;
@@ -493,10 +493,11 @@
   list-style: none; cursor: pointer; user-select: none;
 }
 .mem-import-absent summary::-webkit-details-marker { display: none; }
-.mem-import-absent summary::before {
-  content: "▸"; display: inline-block; width: 12px; color: var(--text-3);
+/* 2026-11-21（箭头统一批）：同上，chevSvg 直挂 summary，类在 svg 本体 */
+.mem-import-absent-chev {
+  flex: none; width: 12px; height: 12px;
+  margin-right: 8px; color: var(--text-3);
 }
-.mem-import-absent[open] summary::before { content: "▾"; }
 .mem-import-foot {
   position: sticky; bottom: 0; z-index: 2;
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;

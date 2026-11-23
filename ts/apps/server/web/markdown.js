@@ -98,6 +98,20 @@ function syncDelegateHint(root, event) {
   }
 }
 
+/* ── 交互卡片（2026-11-21，方案见 docs/设计方案/2026-11-21-表格渲染与交互消息/）──
+ * 助手回复里闭合的 ```html 围栏渲染成内联沙箱卡（形态 1：无工具条，直勾勾渲染）。
+ * 这里只产出占位符（不产 iframe）：流式 reconciler 按「元素+属性一致」保节点，
+ * 挂载阶段加的任何属性都会让下一轮增量把卡换掉，所以挂载收在 web/html-cards.js。
+ * 只认闭合围栏：流式没写完先显示普通代码块，闭合后下一轮升级成卡，不闪半截。
+ * 回滚 CHAT_HTML_CARDS（app.js 读插件开关后调 setHtmlCardsEnabled）。 */
+let htmlCardsOn = true;
+const setHtmlCardsEnabled = (value) => {
+  htmlCardsOn = Boolean(value);
+};
+
+const htmlCardHtml = (code) =>
+  `<div class="html-card" data-srcdoc="${attr(code)}"></div>`;
+
 /* ── 代码块：轻量高亮 + 复制按钮 ────────────────────────────
  * 无依赖无构建：一条合并正则把 注释/字符串/数字/关键字/属性名 五类挑出来上色，
  * 规则都允许未闭合——流式中的半截字符串也能上色。不追求 IDE 准确度，
@@ -222,7 +236,9 @@ function codeBlockHtml(lang, code) {
 
 /* ── 表格（批次二）：GFM 管道表格，只做基本形态 ──────────────
    判定很保守：某行像行、且**下一行是纯分隔行**（全为 -/: 组成）才算表，
-   正文里带竖线的普通句子不会被误吞。单元格内容走 inline（支持加粗/行内码）。 */
+   正文里带竖线的普通句子不会被误吞。单元格内容走 inline（支持加粗/行内码）。
+   分隔行认单横线（2026-11-21）：GFM 的 `:-:` 也是合法分隔行，以前 `-{2,}`
+   把它拒了，整张表塌成段落——真实模型输出里见过。 */
 const splitTableRow = (line) =>
   line
     .trim()
@@ -233,26 +249,94 @@ const splitTableRow = (line) =>
 
 const isTableDelim = (line) => {
   const cells = splitTableRow(line);
-  return cells.length > 0 && cells.every((cell) => /^:?-{2,}:?$/.test(cell));
+  return cells.length > 0 && cells.every((cell) => /^:?-+:?$/.test(cell));
 };
 
 const isTableRow = (line) => line.includes("|") && splitTableRow(line).length >= 2;
 
-function tableHtml(header, aligns, rows) {
+/* 短格不折行（2026-11-21，C 卡片版配套）：`42m` 断成 `42 m` 的根因是窄列里
+   overflow-wrap:anywhere 逐字符断。≤8 字符的格直接 nowrap；更长的只有
+   「无空格且不含 CJK 的 token」（单号 / 路径 / URL，≤26 字符）也不折，
+   长中文说明照旧折行。 */
+const NW_MAX_SHORT = 8;
+const NW_MAX_TOKEN = 26;
+const NW_CJK = /[\u2e80-\u9fff\uf900-\ufaff]/;
+const nwOf = (cell) => {
+  const text = (cell ?? "").trim();
+  if (!text || text.includes("\n")) return "";
+  if (text.length <= NW_MAX_SHORT) return "nw";
+  if (!NW_CJK.test(text) && !/\s/.test(text) && text.length <= NW_MAX_TOKEN) return "nw";
+  return "";
+};
+
+/* 全数字列自动右对齐（2026-11-21）：条数 / 耗时 / 退出码这类列，模型没写
+   `---:` 对齐时也认得出来。整列都命中数字形态才算，说明列不受影响；
+   显式对齐优先（左对齐也算表态），自动档只补没表态的列。 */
+const NUM_CELL =
+  /^[—–-]$|^\s*[-+~≤≥]\s*\d[\d.,]*\s*(?:ms|s|m|h|min|秒|分|条|次|个|单|轮|人|行|列|%|px)?\s*$|^\d[\d.,]*\s*(?:ms|s|m|h|min|秒|分|条|次|个|单|轮|人|行|列|%|px)?\s*$/i;
+const numAlignsOf = (rows, width) => {
+  const aligns = [];
+  for (let i = 0; i < width; i += 1) {
+    let numeric = false;
+    for (const row of rows) {
+      const text = (row[i] ?? "").trim();
+      if (!text) continue;
+      if (!NUM_CELL.test(text)) {
+        numeric = false;
+        break;
+      }
+      numeric = true;
+    }
+    if (numeric) aligns.push(i);
+  }
+  return aligns;
+};
+
+/** explicit[i] = 分隔格带过冒号（模型对这列表过态）；不传 = 全按没表态算。 */
+function tableHtml(header, aligns, rows, explicit = []) {
   const alignOf = (i) => aligns[i] || "left";
-  const cellOf = (cell, i, tag) =>
-    `<${tag} style="text-align:${alignOf(i)}">${inline(cell ?? "")}</${tag}>`;
-  const head = header.map((cell, i) => cellOf(cell, i, "th")).join("");
+  const autoNums = new Set(numAlignsOf(rows, header.length));
+  const head = header
+    .map((cell, i) => {
+      const align = alignOf(i);
+      const style = align === "left" ? "" : ` style="text-align:${align}"`;
+      return `<th${style}>${inline(cell ?? "")}</th>`;
+    })
+    .join("");
   const body = rows
-    .map((row) => `<tr>${header.map((_, i) => cellOf(row[i], i, "td")).join("")}</tr>`)
+    .map(
+      (row) =>
+        `<tr>${header
+          .map((_, i) => {
+            const align = alignOf(i);
+            // 自动右对齐只补「没表态」的列：分隔格带冒号（:--- / ---: / :---:）都算表态，
+            // 显式 :---（左对齐）不许被自动档盖掉（2026-11-21 修）
+            const num = align === "left" && !explicit[i] && autoNums.has(i);
+            const cls = [nwOf(row[i]), num ? "num" : ""].filter(Boolean).join(" ");
+            const style = num
+              ? ' style="text-align:right"'
+              : align !== "left"
+                ? ` style="text-align:${align}"`
+                : "";
+            return `<td${cls ? ` class="${cls}"` : ""}${style}>${inline(row[i] ?? "")}</td>`;
+          })
+          .join("")}</tr>`,
+    )
     .join("");
   return `<div class="table-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
 }
 
 function renderMarkdown(source) {
   const blocks = [];
-  let text = source.replace(/```([^\n`]*)\n([\s\S]*?)(?:```|$)/g, (_match, lang, code) => {
-    blocks.push(codeBlockHtml(lang, code.replace(/\n+$/, "")));
+  let text = source.replace(/```([^\n`]*)\n([\s\S]*?)(?:```|$)/g, (match, lang, code) => {
+    const trimmed = code.replace(/\n+$/, "");
+    const key = (lang || "").trim().toLowerCase().split(/[\s{]/)[0];
+    // 闭合的 html 围栏 → 交互卡占位符；没闭合（流式在写）先走普通代码块
+    if (key === "html" && match.endsWith("```") && htmlCardsOn) {
+      blocks.push(htmlCardHtml(trimmed));
+    } else {
+      blocks.push(codeBlockHtml(lang, trimmed));
+    }
     return `\u0000${blocks.length - 1}\u0000`;
   });
 
@@ -314,9 +398,13 @@ function renderMarkdown(source) {
       flushParagraph();
       listFlush();
       const header = splitTableRow(line);
-      const aligns = splitTableRow(lines[index + 1]).map((cell) =>
-        /^:-+:$/.test(cell) ? "center" : /-+:$/.test(cell) ? "right" : "left",
-      );
+      // 对齐（2026-11-21 修）：`:---` 是 GFM 的左对齐，以前落在 /-+:$/ 里成了右对齐；
+      // 顺序=先中心（两头冒号）、再右（尾冒号）、剩下全算左。带冒号 = 模型表过态。
+      const specs = splitTableRow(lines[index + 1]).map((cell) => ({
+        align: /^:-+:$/.test(cell) ? "center" : /:$/.test(cell) ? "right" : "left",
+        explicit: cell.includes(":"),
+      }));
+      const aligns = specs.map((spec) => spec.align);
       index += 2;
       const rows = [];
       while (index < lines.length && isTableRow(lines[index])) {
@@ -324,7 +412,7 @@ function renderMarkdown(source) {
         index += 1;
       }
       index -= 1; // 外层 for 还会 +1，别跳过表后那行
-      out.push(tableHtml(header, aligns, rows));
+      out.push(tableHtml(header, aligns, rows, specs.map((spec) => spec.explicit)));
       continue;
     }
     // 列表分支（批 33 重写）：缩进感知 + 任务清单（- [ ] / - [x]）
@@ -394,4 +482,4 @@ function listItemHtml(content) {
   return inline(content);
 }
 
-export { DELEGATE_HINTS, ESCAPES, HL_ALIAS, HL_LANGS, HL_MAX_CODE, HL_NUMBER, attr, codeBlockHtml, delegateHintText, esc, hlBuild, inline, isTableDelim, isTableRow, listItemHtml, renderMarkdown, splitTableRow, syncDelegateHint, tableHtml };
+export { DELEGATE_HINTS, ESCAPES, HL_ALIAS, HL_LANGS, HL_MAX_CODE, HL_NUMBER, attr, codeBlockHtml, delegateHintText, esc, hlBuild, htmlCardHtml, inline, isTableDelim, isTableRow, listItemHtml, renderMarkdown, setHtmlCardsEnabled, splitTableRow, syncDelegateHint, tableHtml };
