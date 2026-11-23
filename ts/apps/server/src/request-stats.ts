@@ -120,6 +120,19 @@ export interface RequestSystemSnapshot {
 	tools: number;
 }
 
+/**
+ * 消息层面的前缀对比（2026-11-21）：按“非 system 消息逐条指纹”取最长公共前缀。
+ * 追加不改前缀、不背未命中的锅；replaced > 0 才是真的断了（正常只有压缩 / 改写会这样）。
+ */
+export interface RequestMessageDiff {
+	/** 与上一条逐条一致的消息条数（= 可缓存的消息前缀长度）。 */
+	shared: number;
+	/** 上一条有、这一条里被换掉的消息条数（>0 = 前缀在这里断了）。 */
+	replaced: number;
+	/** 这一条比上一条多出来的消息条数。 */
+	appended: number;
+}
+
 export interface RequestCompare {
 	entryId: number;
 	at: number;
@@ -131,6 +144,8 @@ export interface RequestCompare {
 	toolsChanged: boolean;
 	toolsAdded: string[];
 	toolsRemoved: string[];
+	/** 会话正文（非 system 消息）的前缀对比。 */
+	messages: RequestMessageDiff;
 }
 
 export interface RequestContextPayload {
@@ -515,7 +530,32 @@ interface SnapshotBundle {
 	sections: Map<string, string>;
 }
 
-function compareSystem(current: SnapshotBundle, previous: SnapshotBundle, previousRow: RequestStatRow): RequestCompare {
+/** 非 system 消息逐条指纹：system / 工具面的变化由 systemChanged / toolsChanged 单独报，这里只看会话正文。 */
+function messageFingerprints(view: ContextView): string[] {
+	return view.messages
+		.filter((message) => message.role !== "system")
+		.map((message) => sha1(JSON.stringify(message)));
+}
+
+function messageDiffOf(current: ContextView, previous: ContextView): RequestMessageDiff {
+	const currentHashes = messageFingerprints(current);
+	const previousHashes = messageFingerprints(previous);
+	let shared = 0;
+	const limit = Math.min(currentHashes.length, previousHashes.length);
+	while (shared < limit && currentHashes[shared] === previousHashes[shared]) shared += 1;
+	return {
+		shared,
+		replaced: previousHashes.length - shared,
+		appended: currentHashes.length - shared,
+	};
+}
+
+function compareSystem(
+	current: SnapshotBundle,
+	previous: SnapshotBundle,
+	previousRow: RequestStatRow,
+	messages: RequestMessageDiff,
+): RequestCompare {
 	const changedSections: string[] = [];
 	for (const [key, value] of current.sections) {
 		const old = previous.sections.get(key);
@@ -548,6 +588,7 @@ function compareSystem(current: SnapshotBundle, previous: SnapshotBundle, previo
 		toolsChanged,
 		toolsAdded: [...currentNames].filter((name) => !previousNames.has(name)),
 		toolsRemoved: [...previousNames].filter((name) => !currentNames.has(name)),
+		messages,
 	};
 }
 
@@ -595,6 +636,8 @@ export async function requestContextOf(
 				{ ...current, sections: currentSections },
 				{ ...systemSnapshotOf(previousView), sections: sectionMapOf(previousView) },
 				previousRow,
+				// 消息层对比（2026-11-21）：正文前缀是否逐条一致，追加 / 改写分开报。
+				messageDiffOf(view, previousView),
 			);
 		}
 	}

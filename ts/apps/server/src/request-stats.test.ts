@@ -298,3 +298,117 @@ test("骤降定位：压缩/重置后的第一条标 compacted，不报可疑", 
 	assert.equal(newest.flag, "compacted");
 	assert.equal(stats.summary.suspects, 0);
 });
+
+test("详情对比（消息层）：两条请求之间只是追加 → replaced 0 / appended N，0% 能归因上游", async () => {
+	const conversation = fakeConversation([
+		systemEntry(1, { persona: "人设 A" }),
+		userEntry(2, "第一轮"),
+		assistantEntry(3, { input: 10, output: 5, cacheRead: 90 }, 1000),
+		userEntry(4, "隔了一天再问一句"),
+		assistantEntry(5, { input: 100, output: 5, cacheRead: 0 }, 2000),
+	]);
+	const detail = await requestContextOf(conversation, CTX, "chat-1", 5);
+	assert.ok(detail?.compare);
+	assert.equal(detail.compare.systemChanged, false);
+	assert.equal(detail.compare.toolsChanged, false);
+	// 上一条的非 system 消息 = [用户, 助手回复]；这一条 = 那 2 条 + 新用户 + 新回复。
+	assert.deepEqual(detail.compare.messages, { shared: 2, replaced: 0, appended: 2 });
+});
+
+test("详情对比（消息层）：压缩重写正文 → replaced > 0（前缀必然断）", async () => {
+	const compaction: EntryRecord = {
+		id: 4,
+		conversationId: 1,
+		kind: "pi.compaction",
+		model: [],
+	} as unknown as EntryRecord;
+	const entries = [
+		systemEntry(1, { persona: "人设 A" }),
+		userEntry(2, "第一轮"),
+		assistantEntry(3, { input: 10, output: 5, cacheRead: 90 }, 1000),
+		compaction,
+		systemEntry(5, { persona: "人设 A" }),
+		userEntry(6, "压缩后"),
+		assistantEntry(7, { input: 100, output: 5, cacheRead: 0 }, 2000),
+	];
+	// durable 的压缩语义：compaction 之后上下文从 head 重来，压缩前的正文不再重放。
+	const viewAt = (at: number): ContextView => {
+		let visible = entries.filter((entry) => entry.id <= at);
+		const lastCompaction = [...visible].reverse().find((entry) => entry.kind === "pi.compaction");
+		if (lastCompaction) visible = visible.filter((entry) => entry.id > lastCompaction.id);
+		return {
+			head: undefined,
+			entries: visible,
+			contributions: [],
+			messages: visible.flatMap((entry) => entry.model ?? []),
+		} as ContextView;
+	};
+	const conversation = {
+		entries: async (
+			query: { maxEntryId?: number; minEntryId?: number; order?: "ascending" | "descending" },
+			limit: number,
+		) => {
+			let rows = entries.filter(
+				(entry) =>
+					(query.minEntryId === undefined || entry.id >= query.minEntryId) &&
+					(query.maxEntryId === undefined || entry.id <= query.maxEntryId),
+			);
+			if ((query.order ?? "descending") === "descending") rows = rows.reverse();
+			return { items: rows.slice(0, limit) };
+		},
+		context: async (_context: unknown, options?: { at?: number }) => viewAt(options?.at ?? Number.MAX_SAFE_INTEGER),
+	} as unknown as Conversation;
+	const detail = await requestContextOf(conversation, CTX, "chat-1", 7);
+	assert.ok(detail?.compare);
+	// 上一条（压缩前）正文 = [用户, 助手回复]；这一条（压缩后）= [用户「压缩后」, 助手回复]。
+	assert.deepEqual(detail.compare.messages, { shared: 0, replaced: 2, appended: 2 });
+});
+
+test("详情对比（消息层）：正文被改写 → replaced > 0（前缀在改写处断掉）", async () => {
+	const base = [
+		systemEntry(1, { persona: "人设 A" }),
+		userEntry(2, "第一轮"),
+		assistantEntry(3, { input: 10, output: 5, cacheRead: 90 }, 1000),
+		userEntry(4, "第二轮"),
+		assistantEntry(5, { input: 100, output: 5, cacheRead: 0 }, 2000),
+	];
+	// 模拟 durable 的 edits：entry 2 的正文在请求 3 之后被改掉，
+	// context(at) 重放时按“当时的正文”给——上一条看到旧文，这一条看到新文。
+	const conversation = {
+		entries: async (
+			query: { maxEntryId?: number; minEntryId?: number; order?: "ascending" | "descending" },
+			limit: number,
+		) => {
+			let rows = base.filter(
+				(entry) =>
+					(query.minEntryId === undefined || entry.id >= query.minEntryId) &&
+					(query.maxEntryId === undefined || entry.id <= query.maxEntryId),
+			);
+			if ((query.order ?? "descending") === "descending") rows = rows.reverse();
+			return { items: rows.slice(0, limit) };
+		},
+		context: async (_context: unknown, options?: { at?: number }) => {
+			const at = options?.at ?? Number.MAX_SAFE_INTEGER;
+			const visible = base
+				.filter((entry) => entry.id <= at)
+				.map((entry) =>
+					entry.id === 2 && at >= 4
+						? ({
+								...entry,
+								model: [{ role: "user", content: "第一轮（已改）", timestamp: 0 }],
+							} as EntryRecord)
+						: entry,
+				);
+			return {
+				head: undefined,
+				entries: visible,
+				contributions: [],
+				messages: visible.flatMap((entry) => entry.model ?? []),
+			} as ContextView;
+		},
+	} as unknown as Conversation;
+	const detail = await requestContextOf(conversation, CTX, "chat-1", 5);
+	assert.ok(detail?.compare);
+	// 旧文「第一轮」换成「第一轮（已改）」：第一条就对不上，旧 2 条被换掉、这一条 4 条全是新的。
+	assert.deepEqual(detail.compare.messages, { shared: 0, replaced: 2, appended: 4 });
+});
