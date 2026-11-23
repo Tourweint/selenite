@@ -109,11 +109,10 @@ import {
 import { pairPage } from "./pair-page.ts";
 import { mountPhoneWorker } from "./phone-worker.ts";
 import { mountProjects, projectsStore, resolveChatDir, seedDefaultWorkspace, type ChatDirPick } from "./projects.ts";
-import { chatDirPickEnabled, chatHistoryPagingEnabled, chatProjectLabelEnabled, flagEnabled, loadFlagOverrides, mountFlags } from "./flags.ts";
+import { chatProjectLabelEnabled, flagEnabled, loadFlagOverrides, mountFlags } from "./flags.ts";
 import { toolUsageEnabled, toolUsageRows } from "./tool-usage.ts";
 // 全局工具池（2026-11-17 设置→工具页）：目录与摘要复用 partner-tools，避免另抄一份。
 import { modelToolCatalog, toolSummaryOf } from "./partner-tools.ts";
-import { toolIndexEnabled } from "./tool-index.ts";
 import { mountToolPoolRoutes } from "./tool-pool.ts";
 // 一轮对话时间线（2026-11-17）：按 SSE 流 id 把工具/闸门/回合/token/收尾串成一条账。
 import {
@@ -234,10 +233,12 @@ import {
   readLlmConfig,
   removeProvider,
   runtimeModelInfo,
+  runtimeThinking,
   saveProvider,
   scheduleThinkingProbe,
   setProviderSecret,
   setRuntimeModel,
+  setRuntimeThinking,
   thinkingLevelsFor,
 } from "./provider.ts";
 import { injectProviderKeys } from "./provider-secrets.ts";
@@ -265,13 +266,13 @@ import {
   searchSessionsPage,
   sessionSearchApiEnabled,
 } from "./agent/session-search.ts";
-import { chancellorWorkRoot } from "./delegation.ts";
+import { chancellorWorkRoot, emitDelegation } from "./delegation.ts";
 import { DelegationReceipts } from "./delegation-receipts.ts";
 import { delegationMessages } from "./delegation-messages.ts";
 import { findTicket } from "./delegation-mount.ts";
 import { restoreDelegationWakeQueue, wakeOnDelegationReport } from "./delegation-wake.ts";
 import { listTaskChats } from "./task-chat-index.ts";
-import { sidebarTaskGroupsEnabled } from "./task-chat-owner.ts";
+import { appendTaskEvent, taskTicketIdOfConversation } from "./task-conversation.ts";
 import {
 	collectDeadLetters,
 	redeliverUndeliveredReports,
@@ -290,6 +291,18 @@ import { INJECTION_REGISTRY } from "./agent/injection-registry.ts";
 import { describeStreamError } from "./stream-error.ts";
 import { Store } from "../../../packages/chancellor/src/store.ts";
 import { listManagers } from "../../../packages/chancellor/src/manager/registry.ts";
+// 执行器池（2026-11-22 方案 §5.3/§5.4）：池进程由宿主 supervisor 起，client 推给 chancellor。
+// 依赖方向单向：chancellor 不 import 宿主，只收宿主注入的 PoolClient（同 workerPersona 先例）。
+import { setManagerPoolBridge, setPoolClient } from "../../../packages/chancellor/src/employee/pool.ts";
+import { startPoolBridge } from "./pool/bridge.ts";
+import { WorkerPoolSupervisor } from "./pool/supervisor.ts";
+// 控制面窄桥（2026-11-22 M0）：取消 / 插话 / 上报答复按执行器分派，池走 supervisor。
+import { setPoolControl } from "./worker-control.ts";
+// 调度状态只读投影（2026-11-22 M2b，方案 §5.5）：票据队列 / 车道 / 池快照拼一份给任务中心。
+// 闸门状态只向 chancellor 要（不在宿主重算容量），池状态只向 supervisor 要。
+import { admissionSnapshot } from "../../../packages/chancellor/src/admission.ts";
+import { laneCooldown, laneSnapshot } from "../../../packages/chancellor/src/lane.ts";
+import { collectSchedulerStatus, schedulerEnabledFromEnv } from "./scheduler-status.ts";
 
 // Node 20.12+ 自带 .env 加载；文件不存在时静默跳过，不让本地启动被环境文件卡住。
 try {
@@ -306,12 +319,10 @@ injectProviderKeys();
 // 必须放在路由挂载之前——挂载期的开关（执事/群组/技能管理）要吃到覆盖值。
 loadFlagOverrides();
 
-// 内部质检模型（2026-11-16）：默认核心 PI；`CHANCELLOR_INTERNAL=qoder` 回旧形态。
+// 内部质检模型（2026-11-16）：恒走核心 PI（回滚开关 2026-11-21 退役）。
 // 必须在任何派活之前注入，崩溃恢复的自动续跑也走同一份内部调用。
-const internalMode = installInternalAsk();
-console.log(
-  `[internal] 拆单/验收/目标核对：${internalMode === "core" ? "核心模型" : "Qoder CLI"}`,
-);
+installInternalAsk();
+console.log("[internal] 拆单：核心模型");
 
 // worker 人设派活注入（2026-11-16 批2）：普通助手那份人设，native 与外部 CLI 同吃。
 // `WORKER_PERSONA_DISPATCH=false` 回滚到无身份的纯 TASK.md。
@@ -326,6 +337,84 @@ const workerToolsDispatch = installWorkerToolsDispatch();
 console.log(
   `[worker-tools] native 工具面勾选：${workerToolsDispatch ? "开（spawn --tools）" : "关（WORKER_TOOLS_DISPATCH=false，全开）"}`,
 );
+
+// 执行器池（2026-11-22 执行器池方案 §5.3）：接线是**懒的**——构造 supervisor 不起进程，
+// 只有真的派第一票时 `run()` 才 `start()` 拉起池进程。其它执行器完全不受影响。
+// 入口不可用（典型：`node dist/index.js` 单文件产物里没有 `src/pool/pool-main.ts`）时**不注入**，
+// 让 `createEmployee("pool")` 回落到 native 并告警——不能把单子派进一个起不来的进程。
+const workerPool = new WorkerPoolSupervisor();
+if (workerPool.available()) {
+	setPoolClient(workerPool);
+	// 控制面同源接线：取消走每票 AbortController（signal 经 supervisor.run 触发 /abort），
+	// 插话 / 上报答复走 supervisor.say。与 PoolClient 一样只在可用时接。
+	setPoolControl(workerPool);
+	console.log("[worker-pool] 执行器池已接线（按需起进程；默认派活走 pool）");
+} else {
+	console.warn(
+		"[worker-pool] 池入口不存在（dist 产物不支持池）：本次不接线，派活回落 native；要池请用源码态启动（node --import tsx src/index.ts）",
+	);
+}
+
+// manager 池桥（2026-11-22「无论谁派活，底层 worker 都进池」）：manager 子进程是独立进程，
+// 拿不到进程内 `setPoolClient`，只能经 loopback HTTP 回到宿主 supervisor。
+// `POOL_MANAGER_BRIDGE=false` 回滚到改动前形态（manager 子单回落 native）。
+const managerBridgeEnabled = (() => {
+	const raw = (process.env.POOL_MANAGER_BRIDGE ?? "").trim().toLowerCase();
+	return raw !== "false" && raw !== "0" && raw !== "off";
+})();
+if (workerPool.available() && managerBridgeEnabled) {
+	const bridge = await startPoolBridge(workerPool, {
+		onEscalation: (ticketId, escalation) => {
+			// 子单是 manager 进程建的；宿主只按单号读回来源会话，把上报送回既有的
+			// escalate 路由（总管/执事代答 → 升级用户 → 答复回 worker）。
+			const found = findTicket(chancellorWorkRoot(), ticketId);
+			if (!found) return;
+			try {
+				const raw = found.ticket.originConversationId;
+				const conversationId =
+					raw !== null && raw !== undefined && /^\d+$/.test(String(raw).trim())
+						? Number(String(raw).trim())
+						: null;
+				if (conversationId === null) return;
+				const options = Array.isArray(escalation.options)
+					? escalation.options.filter((item): item is string => typeof item === "string")
+					: [];
+				const urgency =
+					escalation.urgency === "high" || escalation.urgency === "low"
+						? escalation.urgency
+						: "normal";
+				// 来源会话本身是任务线程：写进线程，不走向上汇报（否则宿主投影模型
+				// 会为它跑一轮，与“执行在池”冲突；2026-11-22 同一批口径）。
+				const originTaskTicket = taskTicketIdOfConversation(conversationId);
+				if (originTaskTicket) {
+					const question = String(escalation.question ?? "");
+					const context = String(escalation.context ?? "");
+					void appendTaskEvent(originTaskTicket, {
+						kind: "notice",
+						text: `【需要你】${question}${context ? `\n背景：${context}` : ""}`,
+					});
+					return;
+				}
+				emitDelegation(conversationId, {
+					type: "escalation",
+					ticketId,
+					domain: String(found.ticket.options?.domain ?? ""),
+					escalationId: String(escalation.escalationId ?? ""),
+					question: String(escalation.question ?? ""),
+					context: String(escalation.context ?? ""),
+					...(options.length > 0 ? { options } : {}),
+					urgency,
+				});
+			} finally {
+				found.store.close();
+			}
+		},
+	});
+	setManagerPoolBridge({ endpoint: bridge.endpoint, token: bridge.token });
+	console.log(`[worker-pool] manager 池桥已接线（仅本机回环）`);
+} else if (workerPool.available()) {
+	console.log("[worker-pool] manager 池桥已关闭（POOL_MANAGER_BRIDGE=false）：manager 子单仍回落 native");
+}
 
 const app = new Hono();
 
@@ -604,10 +693,24 @@ if (wallpaperEnabled()) mountAppearanceWallpaper(app);
 
 // 任务中心只读接口（2026-11-03 方案 §5.9）：领域列表 + 单 ticket 明细。
 mountDelegationApi(app);
+// 调度状态只读（2026-11-22 调度层 M2b，方案 §5.5）：任务中心拿「排队 N」。
+// 挂在 mountDelegationApi 之后 = 同一道 /api/v1/* 鉴权之内；只读、无副作用。
+// 三份快照各自兜错（读不到只让该段为空 / null），观测接口不能把任务中心带成 500。
+app.get("/api/v1/scheduler", (c) =>
+  c.json(
+    collectSchedulerStatus({
+      enabled: schedulerEnabledFromEnv(),
+      tickets: admissionSnapshot,
+      lanes: () =>
+        laneSnapshot().map((lane) => ({ ...lane, cooldownUntil: laneCooldown(lane.lane) })),
+      pool: () => (workerPool.available() ? workerPool.snapshot() : null),
+    }),
+  ),
+);
 
 // 决策上报链（2026-11-19 批2）：上报卡动作（总管代答 / 升级给用户）+ 活跃上报列表。
 // 挂 /api/v1/* 之下走同一道鉴权中间件（批1 教训：裸路径 = 无鉴权注入口）；
-// ESCALATION_CHAIN_ENABLED=false 时路由 400 escalation_disabled（回滚形态）。
+//（ESCALATION_CHAIN_ENABLED 回滚开关 2026-11-21 退役，上报路由恒挂。）
 mountEscalationApi(app);
 // 上报路由订阅（watchAllDelegationEvents）：注册 / 限流 / 唤醒总管。幂等，启动调一次。
 initEscalationRouting();
@@ -973,11 +1076,9 @@ app.get("/api/v1/agent/chats", async (c) => {
   const chats = await listChats(Number.isFinite(limit) ? limit : 50);
   // 2026-11-12 归档模块：`removed` → `archived`（计数）。手机端只读 `chats`，改名不断手机。
   // 2026-11-15 侧栏按创建者分组：增量 `tasks` 键带任务专线会话（手机 / 旧客户端忽略未知键）。
-  // 开关关着不下发——回滚形态双保险（前端回旧版平铺列表）。
+  // 回滚开关 SIDEBAR_TASK_GROUPS 2026-11-21 退役，tasks 键恒下发。
   const body: Record<string, unknown> = { chats, archived: chatMetaSummary().archived };
-  if (sidebarTaskGroupsEnabled()) {
-    body.tasks = await listTaskChats(Number.isFinite(limit) ? limit : 50);
-  }
+  body.tasks = await listTaskChats(Number.isFinite(limit) ? limit : 50);
   return c.json(body);
 });
 
@@ -1334,7 +1435,17 @@ app.get("/api/v1/agent/model", async (c) => {
   const catalog = modelCatalog();
   const sessionModel = chatSessionModelEnabled();
   const chatId = c.req.query("chat")?.trim();
-  if (!chatId) return c.json({ ...catalog, sessionModel });
+  if (!chatId) {
+    // 全局默认思考档（2026-11-21）：设置页默认模型卡与 composer 全局回退显示共用。
+    // 按当前全局模型的支持域 clamp 后下发，没设过 = off（与建档兜底同口径）。
+    const globalLevels = currentThinkingLevels();
+    return c.json({
+      ...catalog,
+      thinking: clampThinkingLevel(runtimeThinking() ?? "off", globalLevels),
+      thinkingLevels: globalLevels,
+      sessionModel,
+    });
+  }
   const chat = await openChat(chatId);
   if (!chat) return c.json({ error: "unknown_conversation" }, 404);
   // 回滚开关关掉时，带 chat 也只回全局投影；前端据此把 pill 切回全局模式。
@@ -1359,18 +1470,49 @@ app.get("/api/v1/agent/model", async (c) => {
  */
 app.post("/api/v1/agent/model", async (c) => {
   const body = (await c.req.json().catch(() => null)) as
-    | { model?: unknown; modelId?: unknown; providerId?: unknown }
+    | { model?: unknown; modelId?: unknown; providerId?: unknown; thinking?: unknown }
     | null;
   // 兼容旧形状 `{model}`：不区分供应商时按默认供应商解析
   const legacy = typeof body?.model === "string" ? body.model.trim() : "";
   const modelId = typeof body?.modelId === "string" ? body.modelId.trim() : legacy;
   const providerId = typeof body?.providerId === "string" ? body.providerId.trim() : undefined;
-  if (!modelId) return c.json({ error: "bad_request", message: "需要 modelId（或旧的 model）" }, 400);
+  // 全局默认思考档（2026-11-21）：只带 thinking = 只改档不换模型；带模型则换完再设档。
+  const wantsThinking = typeof body?.thinking === "string" && body.thinking.trim() !== "";
+  const level = wantsThinking ? parseThinkingLevel(body) : null;
+  if (wantsThinking && !level) {
+    return c.json(
+      { error: "bad_request", message: "thinking 只能是 off / low / medium / high（旧 mode 兼容 fast / deep）" },
+      400,
+    );
+  }
+  if (!modelId) {
+    if (wantsThinking) {
+      const result = setRuntimeThinking(level!);
+      if (!result.ok) {
+        const status = result.reason === "llm_not_configured" ? 503 : 400;
+        return c.json({ error: result.reason, message: result.message }, status);
+      }
+      console.log(`[model] 全局默认思考档 → ${result.thinking}`);
+      return c.json({
+        ok: true,
+        provider: result.provider,
+        model: result.model,
+        thinking: result.thinking,
+      });
+    }
+    return c.json({ error: "bad_request", message: "需要 modelId（或旧的 model）" }, 400);
+  }
 
   const result = setRuntimeModel({ modelId, ...(providerId ? { providerId } : {}) });
   if (!result.ok) {
     const status = result.reason === "llm_not_configured" ? 503 : 400;
     return c.json({ error: result.reason, message: result.message }, status);
+  }
+  // 换模型时带档：设完模型再设档（按新模型支持域 clamp，off 兜底）
+  let applied: string | undefined;
+  if (level) {
+    const thinkingResult = setRuntimeThinking(level);
+    applied = thinkingResult.ok ? thinkingResult.thinking : undefined;
   }
   // 模型 id / 供应商 id 不是对话内容，可以进日志
   console.log(`[model] 运行时切换 → ${result.provider}/${result.model}`);
@@ -1378,7 +1520,13 @@ app.post("/api/v1/agent/model", async (c) => {
   // 已声明 / faux / MODEL_PROBE_LEVELS=false 都在 provider.ts 内部直接挡掉。
   scheduleThinkingProbe(result.provider, result.model);
   // model / models 是旧字段（现有 web 与兼容层依赖），provider 是新增
-  return c.json({ ok: true, provider: result.provider, model: result.model, models: result.models });
+  return c.json({
+    ok: true,
+    provider: result.provider,
+    model: result.model,
+    models: result.models,
+    ...(applied ? { thinking: applied } : {}),
+  });
 });
 
 /** 设置页投影（接口文档 §2.10）：比 composer 多 baseUrl / keyEnv / isDefault，仍无密钥值 */
@@ -1522,7 +1670,8 @@ app.post("/api/v1/agent/chat", async (c) => {
   // 新建时直接选目录（2026-11-17）：只认新建分支；续话带目录一概拒——
   // cwd 是创建时的快照，中途换目录会让模型前后的相对路径指向两个地方。
   let chatDir: ChatDirPick | undefined;
-  if (request.dirPath && chatDirPickEnabled()) {
+  //（CHAT_DIR_PICK 回滚开关 2026-11-21 退役，dirPath 恒收。）
+  if (request.dirPath) {
     if (requestedId) {
       return c.json(
         { error: "bad_dir", message: "已有会话不能改工作目录；换目录请新建会话" },
@@ -1538,24 +1687,30 @@ app.post("/api/v1/agent/chat", async (c) => {
   }
   // 2026-11-19 会话级模型切换：新建会话可带一次模型选择；不传 = 服务端读全局默认。
   // 续话带 model 忽略（已有会话请走 POST /agent/chat/:id/model），不隐式改这条会话。
+  // 2026-11-21 思考档兜底链：请求显式档（composer 拨盘）> 屏选模型里的档
+  // > 全局默认思考档 > off。只带 thinking 没带 model 也按全局模型建档。
   let initialModel: { provider: string; modelId: string } | undefined;
-  if (!requestedId && request.model && !isFaux() && chatSessionModelEnabled()) {
-    const levels = thinkingLevelsFor(request.model.providerId, request.model.modelId);
-    const level = clampThinkingLevel(request.model.thinking ?? "off", levels);
-    try {
-      initialModel = chatModelRefFor(
-        request.model.providerId,
-        request.model.modelId,
-        level,
+  if (!requestedId && !isFaux() && chatSessionModelEnabled() && (request.model || request.thinking)) {
+    const config = readLlmConfig();
+    const providerId = request.model?.providerId ?? config?.model.provider;
+    const baseModelId = request.model?.modelId ?? config?.model.modelId;
+    if (providerId && baseModelId) {
+      const levels = thinkingLevelsFor(providerId, baseModelId);
+      const level = clampThinkingLevel(
+        request.thinking ?? request.model?.thinking ?? runtimeThinking() ?? "off",
+        levels,
       );
-    } catch (error) {
-      return c.json(
-        {
-          error: "bad_model",
-          message: error instanceof Error ? error.message : "模型不可用",
-        },
-        400,
-      );
+      try {
+        initialModel = chatModelRefFor(providerId, baseModelId, level);
+      } catch (error) {
+        return c.json(
+          {
+            error: "bad_model",
+            message: error instanceof Error ? error.message : "模型不可用",
+          },
+          400,
+        );
+      }
     }
   }
   let chat = await openChat(
@@ -2070,8 +2225,8 @@ app.post("/api/v1/agent/chat/:conversationId/branches", async (c) => {
  *
  * 分页（2026-11-13 方案「按天分组·上滑加载」）：可选 `page=1` / `before=<不透明游标>`，
  * 任一出现即走倒序游标分页 —— 服务端只读这一页 entry，响应多 `hasMore` / `nextBefore`。
- * **两个参数都不带时行为与改动前逐字一致**（手机端零改动）；`CHAT_HISTORY_PAGING_ENABLED=false`
- * 时即使带了也忽略，退回老形态。
+ * **两个参数都不带时行为与改动前逐字一致**（手机端零改动）。
+ *（CHAT_HISTORY_PAGING_ENABLED 回滚开关 2026-11-21 退役，分页恒生效。）
  */
 app.get("/api/v1/agent/chat/:conversationId/messages", async (c) => {
   if (!readLlmConfig()) return c.json({ messages: [] });
@@ -2080,9 +2235,7 @@ app.get("/api/v1/agent/chat/:conversationId/messages", async (c) => {
   if (!chat) return c.json({ error: "unknown_conversation" }, 404);
 
   const beforeRaw = c.req.query("before");
-  const paged =
-    chatHistoryPagingEnabled() &&
-    (c.req.query("page") === "1" || (beforeRaw ?? "") !== "");
+  const paged = c.req.query("page") === "1" || (beforeRaw ?? "") !== "";
 
   let messages: Awaited<ReturnType<typeof readTranscript>>;
   /** 分页模式才带；空对象 spread 后老响应形状不变 */
@@ -2405,7 +2558,6 @@ app.get("/api/v1/agent/tool-usage", (c) => {
 mountToolPoolRoutes(app, {
   catalog: () => modelToolCatalog(),
   summaryOf: toolSummaryOf,
-  indexEnabled: () => toolIndexEnabled(),
 });
 
 /**
