@@ -218,7 +218,14 @@ export class Store {
     return null;
   }
 
-  listTickets(limit = 20): TicketRow[] {    const rows = this.conn()
+  /**
+   * 索引行不等于一张单：runs/ 下的 ticket.json 才是事实源。
+   * 测试/手工清理只删目录、不删 sqlite 时，索引里会留下幽灵行——任务中心看得见、
+   * 点进去 404，还会被算进「在跑」。这里按文件过滤，并多取一段窗口，避免幽灵行
+   * 把 limit 名额吃光（2026-11-23）。
+   */
+  listTickets(limit = 20): TicketRow[] {
+    const rows = this.conn()
       .prepare(
         `SELECT t.id, t.prompt, t.status, t.created_at,
            (SELECT COUNT(*) FROM tasks x WHERE x.ticket_id = t.id) AS total,
@@ -231,8 +238,14 @@ export class Store {
          ORDER BY t.created_at DESC
          LIMIT ?`,
       )
-      .all(limit);
-    return rows as unknown as TicketRow[];
+      .all(Math.max(limit * 2, limit + 50)) as unknown as TicketRow[];
+    const live: TicketRow[] = [];
+    for (const row of rows) {
+      if (!fs.existsSync(path.join(this.ticketDir(row.id), "ticket.json"))) continue;
+      live.push(row);
+      if (live.length >= limit) break;
+    }
+    return live;
   }
 
   tasksOf(ticketId: string): Task[] {

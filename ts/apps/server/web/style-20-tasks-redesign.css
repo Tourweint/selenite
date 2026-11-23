@@ -6,14 +6,14 @@
  */
 /* ── 等你回话：大区 ─────────────────────────────────── */
 .tk2-needs {
-  padding: 14px 16px 12px;
+  padding: 12px 14px 10px;
   border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent);
   border-radius: var(--r-lg);
   background:
     linear-gradient(0deg, color-mix(in srgb, var(--warn) 6%, transparent), color-mix(in srgb, var(--warn) 6%, transparent)),
     var(--card);
 }
-.tk2-np-h { display: flex; align-items: center; gap: 9px; margin-bottom: 12px; }
+.tk2-np-h { display: flex; align-items: center; gap: 9px; margin-bottom: 10px; }
 .tk2-np-h h2 { margin: 0; font-size: 14.5px; font-weight: 600; color: var(--text); }
 .tk2-cnt {
   padding: 1px 8px;
@@ -26,17 +26,25 @@
 .tk2-needs-empty { margin: 2px 0; font-size: 12.5px; line-height: 1.6; color: var(--text-2); }
 
 .tk2-ngroup {
-  padding: 11px 13px 10px;
+  padding: 9px 12px 8px;
   border: 1px solid color-mix(in srgb, var(--warn) 26%, transparent);
   border-radius: var(--r-md);
   background: color-mix(in srgb, var(--warn) 4%, var(--card));
 }
-.tk2-ngroup + .tk2-ngroup { margin-top: 10px; }
+.tk2-ngroup + .tk2-ngroup { margin-top: 8px; }
 .tk2-ng-h {
   display: flex; align-items: center; gap: 10px;
-  padding-bottom: 9px; margin-bottom: 9px;
+  padding-bottom: 7px; margin-bottom: 7px;
   border-bottom: 1px dashed var(--divider);
 }
+/* 单条组（2026-11-23）：组头直接带引文，不再是「组头 + 气泡」两层 */
+.tk2-ng-h-solo {
+  align-items: flex-start; gap: 9px;
+  padding-bottom: 0; margin-bottom: 0;
+  border-bottom: none;
+}
+.tk2-ng-h-solo .tk2-msg-ava { margin-top: 1px; }
+.tk2-ng-h-solo .tk2-btn { margin-top: 1px; }
 .tk2-ng-bd { flex: 1; min-width: 0; }
 .tk2-ng-bd h3 {
   margin: 0;
@@ -45,6 +53,11 @@
 }
 .tk2-ng-bd p { margin: 1px 0 0; font-size: 11px; color: var(--text-3); }
 .tk2-ng-bd p b { color: var(--warn); font-weight: 600; }
+.tk2-ng-bd .tk2-ng-quote {
+  margin: 3px 0 0;
+  font-size: 12.5px; line-height: 1.55;
+  color: var(--text);
+}
 
 .tk2-ava {
   width: 30px; height: 30px; flex: none;
@@ -74,13 +87,13 @@
 /* 留言气泡：整块可点（回原对话），引文只放有据文本 */
 .tk2-msg {
   display: flex; gap: 10px;
-  padding: 10px 12px;
+  padding: 8px 10px;
   border: 1px solid var(--divider); border-radius: var(--r-md);
   background: var(--bg);
   cursor: pointer;
   transition: border-color .18s ease;
 }
-.tk2-msg + .tk2-msg { margin-top: 8px; }
+.tk2-msg + .tk2-msg { margin-top: 6px; }
 .tk2-msg:hover { border-color: var(--outline); }
 .tk2-msg:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 1px; }
 .tk2-msg-ava {
@@ -100,7 +113,7 @@
   border: 1px solid var(--divider); border-radius: 6px;
   font-size: 10px; color: var(--text-3);
 }
-.tk2-quote { margin: 0; font-size: 12.5px; line-height: 1.65; color: var(--text); }
+.tk2-quote { margin: 0; font-size: 12.5px; line-height: 1.55; color: var(--text); }
 .tk2-msg-tm { flex: none; margin-top: 2px; font-size: 10.5px; color: var(--text-3); }
 
 .tk2-more {
@@ -112,8 +125,7 @@
 }
 .tk2-more:hover { background: var(--card-high); color: var(--text-2); }
 .tk2-more:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 1px; }
-.tk2-more-caret { font-size: 10px; transition: transform .18s ease; }
-.tk2-more[aria-expanded="true"] .tk2-more-caret { transform: rotate(90deg); }
+.tk2-more-caret { width: 11px; height: 11px; flex: none; }
 .tk2-older[hidden] { display: none; }
 .tk2-older { opacity: .8; }
 
@@ -124,6 +136,8 @@
   font-size: 12.5px; font-weight: 600; color: var(--text-2);
 }
 .tk2-sec-cnt { font-size: 11.5px; font-weight: 400; color: var(--text-3); }
+/* 排队数（2026-11-22 M2b）：区块头右侧的小字，等宽让数字不随字体抖动 */
+.tk2-sec-queue { font-family: var(--mono); font-size: 10.5px; font-weight: 400; color: var(--text-3); }
 .tk2-sec-ln { flex: 1; height: 1px; background: var(--divider); opacity: .5; }
 .tk2-none { margin: 0; padding: 10px 2px; font-size: 12px; color: var(--text-3); }
 /* 「等你回话」按派活人分小节（2026-11-16）：总管 / 各执事各一块 */
@@ -208,9 +222,8 @@
   font-size: 11px; line-height: 17px; font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
-.tk2-caret { margin-left: auto; font-size: 10px; color: var(--text-3); transition: transform .18s ease; }
+.tk2-caret { margin-left: auto; width: 11px; height: 11px; flex: none; color: var(--text-3); }
 .tk2-hit-ct + .tk2-caret { margin-left: 0; }
-.tk2-hit.open .tk2-caret { transform: rotate(90deg); }
 .tk2-hit-b { padding: 4px 12px 8px; border-top: 1px dashed var(--divider); }
 .tk2-hit-b[hidden] { display: none; }
 .tk2-hit-row {
@@ -527,11 +540,8 @@ button.rv-row:focus-visible .rv-go { opacity: 1; color: var(--accent); transform
 }
 .archive-group-toggle:hover { background: var(--card); }
 .archive-group-folder { flex: none; width: 14px; height: 14px; color: var(--text-3); }
-.archive-group-caret {
-  flex: none; width: 12px; height: 12px; color: var(--text-3);
-  transition: transform .15s ease;
-}
-.archive-group-toggle[aria-expanded="true"] .archive-group-caret { transform: rotate(90deg); }
+/* 2026-11-21（箭头统一批）：旋转/过渡在 style-27 的 .chev */
+.archive-group-caret { flex: none; width: 12px; height: 12px; color: var(--text-3); }
 .archive-group-title {
   min-width: 0;
   font-size: 13px; font-weight: 500; color: var(--text);

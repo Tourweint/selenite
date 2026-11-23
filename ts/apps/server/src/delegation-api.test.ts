@@ -235,6 +235,28 @@ test("进度落盘：动作变化立刻写，纯心跳被节流且新进程能�
 	}
 });
 
+test("列表：明文已清理的索引行不再冒充任务（幽灵单）", async () => {
+	const root = temp("api-ghost");
+	try {
+		const workRoot = join(root, "runs");
+		const store = new Store(workRoot);
+		store.saveTicket(makeTicket("T-live", workRoot));
+		store.saveTicket(makeTicket("T-ghost", workRoot, { status: "needs_you" }));
+		store.close();
+		// 只删目录、留索引：等价于手工清理 runs/ 之后的现场。
+		rmSync(join(workRoot, "T-ghost"), { recursive: true, force: true });
+
+		const app = new Hono();
+		mountDelegationApi(app, { workRoot });
+		const list = await app.request("/api/v1/tickets");
+		assert.equal(list.status, 200);
+		const body = (await list.json()) as { tickets: Array<{ id: string }> };
+		assert.deepEqual(body.tickets.map((ticket) => ticket.id), ["T-live"]);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("只读接口：未知单号 404，路径穿越一律拒绝", async () => {
 	const root = temp("api-404");
 	try {
@@ -260,33 +282,8 @@ test("只读接口：未知单号 404，路径穿越一律拒绝", async () => {
 // 成功路径（建专线 + submit + 续跑）需要真模型/Harness，由 http 探针覆盖；
 // 这里只钉开关、入参与前置拒绝，全部在到达 `submitTaskReply` 之前返回。
 
-function withTaskConversation<T>(enabled: boolean, fn: () => Promise<T>): Promise<T> {
-	const previous = process.env.TASK_AS_CONVERSATION;
-	process.env.TASK_AS_CONVERSATION = enabled ? "true" : "false";
-	return fn().finally(() => {
-		if (previous === undefined) delete process.env.TASK_AS_CONVERSATION;
-		else process.env.TASK_AS_CONVERSATION = previous;
-	});
-}
 
-test("任务回话：回滚开关关着时端点 404", async () => {
-	const root = temp("api-say-off");
-	try {
-		const workRoot = join(root, "runs");
-		const app = new Hono();
-		await withTaskConversation(false, async () => {
-			mountDelegationApi(app, { workRoot });
-			const response = await app.request("/api/v1/tickets/T-x/say", {
-				method: "POST",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify({ text: "在吗" }),
-			});
-			assert.equal(response.status, 404, "TASK_AS_CONVERSATION=false → 404（未启用）");
-		});
-	} finally {
-		rmSync(root, { recursive: true, force: true });
-	}
-});
+//（"回滚开关关着时端点 404" 用例 2026-11-21 随 TASK_AS_CONVERSATION 退役删除，路由恒挂。）
 
 test("任务回话：缺 text / 未知单 / 终态 / 无来源会话都如实拒绝", async () => {
 	const root = temp("api-say-guard");
@@ -298,7 +295,7 @@ test("任务回话：缺 text / 未知单 / 终态 / 无来源会话都如实拒
 		store.close();
 
 		const app = new Hono();
-		await withTaskConversation(true, async () => {
+		await (async () => {  //（开关退役 2026-11-21：原来是 withTaskConversation(true, …) 的包壳）
 			mountDelegationApi(app, { workRoot });
 
 			const empty = await app.request("/api/v1/tickets/T-done/say", {
@@ -347,7 +344,7 @@ test("详情：启用时带回 taskConversationEnabled 与确定性专线 id", a
 		store.close();
 
 		const app = new Hono();
-		await withTaskConversation(true, async () => {
+		await (async () => {  //（开关退役 2026-11-21：原来是 withTaskConversation(true, …) 的包壳）
 			mountDelegationApi(app, { workRoot });
 			const response = await app.request("/api/v1/tickets/T-conv");
 			assert.equal(response.status, 200);

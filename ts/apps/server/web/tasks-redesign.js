@@ -9,12 +9,13 @@
 
 import { openConversation } from "./chat-open.js";
 import { el } from "./dom.js";
+import { chevSvg } from "./icons.js";
 import { attr, esc } from "./markdown.js";
 import { request } from "./net.js";
-import { currentRoute, go, tasksHash } from "./route.js";
+import { currentRoute, currentTicketId, go, tasksHash } from "./route.js";
 import { state } from "./state.js";
-import { conversationTickets, employeeName, groupByConversation, hideTasksState, ticketConversationId, workRowsOf } from "./tasks-cards.js";
-import { loadTickets, renderBoard } from "./tasks-kanban.js";
+import { conversationTickets, employeeName, groupByConversation, hideTasksState, ticketConversationId, ticketLamp, workRowsOf } from "./tasks-cards.js";
+import { loadTickets } from "./tasks-kanban.js";
 import { TASK_BADGE_STATUSES, TASK_HITTERS, TASK_STATUS, relativeTime } from "./tasks-model.js";
 import { daySubtitle, dayTitle, renderReview, reviewStatsOf, shiftDayKey, todayKey } from "./tasks-review.js";
 
@@ -22,7 +23,7 @@ import { daySubtitle, dayTitle, renderReview, reviewStatsOf, shiftDayKey, todayK
  * 版式 = 原型 09/10/12 拍板稿：等你回话大区 + 在跑小卡 + 打手手风琴 + 今日回顾卡。
  * 数据仍全从 GET /api/v1/tickets 派生（零新接口）；卡片点击一律 openConversation(id)，
  * v1 不带锚点（落在最新处，2026-11-13 拍板）。
- * 回滚：TASKS_REDESIGN_ENABLED=false → renderTasksView() 转去旧 renderBoard()。
+ * 旧三列看板 2026-11-21 随 TASKS_REDESIGN_ENABLED 退役整体删除，本视图成为唯一形态。
  *
  * 身份诚实（硬规矩）：v1 拿不到总管唤醒轮的原话（原文与时间戳都没进单子），
  * 所以卡面引文只取有据字段——任务说明 prompt 摘要，或单上已有的状态原因；
@@ -31,6 +32,7 @@ import { daySubtitle, dayTitle, renderReview, reviewStatsOf, shiftDayKey, todayK
 const TK2_NEEDS_SOFT_LIMIT = 3; // 超过 3 组收进「还有 N 条更早的」
 const TK2_BRIEF_MAX = 60; // 与 workRow 同款截断长度
 const TK2_QUOTE_MAX = 96; // 等你回话的引文比行内摘要多给一点上下文
+const SCHEDULER_POLL_MS = 10_000; // 调度状态最快 10s 拉一次（跟随 autoSyncTick 的 5s 心跳节流）
 
 /** 压空格 + 截断；空串原样返回，让调用方自己兜底文案 */
 function briefText(value, max) {
@@ -89,38 +91,56 @@ async function ensureFlag(key, fallback) {
   return flag ? (flag.effectiveValue ?? flag.value) !== "false" : fallback;
 }
 
-/** 任务中心回滚开关：null = 还没问过；只问一次，之后记在 state 里 */
-async function ensureTasksRedesignFlag() {
-  if (state.tasksRedesignFlag !== null) return state.tasksRedesignFlag;
-  // 端点不可用 / 没这个键 → 默认新视图（任务书口径：别把新界面误判成旧看板）
-  state.tasksRedesignFlag = await ensureFlag("TASKS_REDESIGN_ENABLED", true);
-  return state.tasksRedesignFlag;
+/* ── 调度状态（2026-11-22 M2b）─────────────────────────────
+ * GET /api/v1/scheduler 是宿主内部只读投影：ticket 准入队列 + 车道 + 池。
+ * 任务中心只消费 tickets.queued（「排队 N」）；端点不存在 / 断网 / 鉴权失败都静默，
+ * 观测数据不该把任务中心带成报错页。
+ * 轮询跟随 autoSyncTick（既有 5s 心跳，任务中心可见时才走到这里），函数内再做 10s 节流；
+ * 不新开全局定时器，也就没有离开页面后还在跑的定时器要清。 */
+
+let schedulerFetchedAt = 0;
+let schedulerLoading = false;
+
+/** 排队数口径：ticket 准入队列（跨单总闸）；没有数据 / 非数字都当 0。 */
+function queuedOfScheduler(status) {
+  const queued = status && status.tickets ? Number(status.tickets.queued) : 0;
+  return Number.isFinite(queued) && queued > 0 ? Math.floor(queued) : 0;
 }
 
-/** 对话历史分页回滚开关（2026-11-13）：false = 一次拉 200 条、无上滑加载、无日期分隔 */
-async function ensureChatPagingFlag() {
-  if (state.chatPagingFlag !== null) return state.chatPagingFlag;
-  state.chatPagingFlag = await ensureFlag("CHAT_HISTORY_PAGING_ENABLED", true);
-  return state.chatPagingFlag;
-}
-
-/** 视图分派：开关说 false 就整套退回旧看板（旧函数与旧 DOM 都还在） */
-function renderTasksView() {
-  if (state.tasksRedesignFlag === false) {
-    el.tasksRedesign.hidden = true;
-    el.tasksLegacy.hidden = false;
-    renderBoard();
-    return;
+/** 拉一次调度状态；queued 变了才重绘（排队数没变不动整页，避免每轮轮询闪一下）。 */
+async function refreshSchedulerStatus({ force = false } = {}) {
+  if (document.hidden) return; // 看不见就不拉（与 autoSyncTick 同口径）
+  if (schedulerLoading) return;
+  if (!force && schedulerFetchedAt && Date.now() - schedulerFetchedAt < SCHEDULER_POLL_MS) return;
+  schedulerLoading = true;
+  try {
+    const response = await request("/api/v1/scheduler", { cache: "no-store" });
+    if (!response.ok) return;
+    const data = await response.json().catch(() => null);
+    if (!data || data.ok !== true) return;
+    const before = queuedOfScheduler(state.scheduler);
+    state.scheduler = data;
+    schedulerFetchedAt = Date.now();
+    if (queuedOfScheduler(data) !== before && currentRoute() === "tasks" && !currentTicketId()) {
+      renderTasksView();
+    }
+  } catch {
+    // 静默：旧服务没有这个端点、断网、令牌被拒（request 自己会处理门）都不影响任务列表。
+  } finally {
+    schedulerLoading = false;
   }
-  el.tasksLegacy.hidden = true;
+}
+
+/** 视图入口：任务中心只有新视图（旧看板 2026-11-21 退役） */
+function renderTasksView() {
   el.tasksRedesign.hidden = false;
-  el.tasksFilters.hidden = true; // 新视图不放领域/项目/排序下拉
   renderTasksRedesign();
 }
 
-/** 还在流程里的单数（口径同侧栏徽标）：在跑小卡的计数与空态文案都用它 */
-function aliveTicketCount() {
-  return state.tickets.filter((ticket) => TASK_BADGE_STATUSES.has(ticket.status)).length;
+/** 「在跑」口径：只有灯是 run 的单才算——needs_you 在「等你回话」里，
+ *  不能再被数成「N 件事在跑」（否则下面明明写着「现在没有在跑的事」）。 */
+function runningTicketCount() {
+  return state.tickets.filter((ticket) => ticketLamp(ticket) === "run").length;
 }
 
 /**
@@ -236,14 +256,18 @@ function needsZoneHtml(groups, running) {
     }</p></section>`;
   }
   // 2026-11-16 任务中心分人：总管一块、各执事各一块；每个人的「更早的」独立折叠。
-  return `<section class="tk2-needs">${head}${personBuckets(groups)
-    .map(personZoneHtml)
+  // 只有一个人时不再重复一条「总管 1」小节头（2026-11-23 版式收口）。
+  const buckets = personBuckets(groups);
+  return `<section class="tk2-needs">${head}${buckets
+    .map((bucket) => personZoneHtml(bucket, { solo: buckets.length === 1 }))
     .join("")}</section>`;
 }
 
-function personZoneHtml(bucket) {
+function personZoneHtml(bucket, { solo = false } = {}) {
   const count = bucket.groups.reduce((sum, group) => sum + group.tickets.length, 0);
-  const head = `<div class="tk2-sec-h tk2-person-h">
+  const head = solo
+    ? ""
+    : `<div class="tk2-sec-h tk2-person-h">
       <span>${esc(bucket.name)}</span><span class="tk2-sec-cnt">${count}</span><span class="tk2-sec-ln"></span>
     </div>`;
   const first = bucket.groups.slice(0, TK2_NEEDS_SOFT_LIMIT);
@@ -253,7 +277,7 @@ function personZoneHtml(bucket) {
     ? `<button class="tk2-more" type="button" data-needs-more="${attr(bucket.key)}" aria-expanded="${
         open ? "true" : "false"
       }">
-        <span class="tk2-more-caret" aria-hidden="true">▸</span>还有 ${rest.length} 条更早的
+        ${chevSvg("tk2-more-caret chev")}还有 ${rest.length} 条更早的
       </button>
       <div class="tk2-older"${open ? "" : " hidden"}>${rest
         .map(needsGroupHtml)
@@ -268,6 +292,9 @@ function needsGroupHtml(group) {
   const action = group.conversationId
     ? `<button class="tk2-btn" type="button" data-open-conv="${attr(group.conversationId)}">去处理 →</button>`
     : `<button class="tk2-btn" type="button" data-ticket-open="${attr(group.tickets[0].id)}">看这张单 →</button>`;
+  // 只有一条留言时把组头和气泡压成一块（2026-11-23）：一张单套两层卡会多出
+  // 一百多像素，标题与引文却常常是同一句派活说明。
+  if (group.tickets.length === 1) return needsSoloGroupHtml(group, title, action);
   return `<section class="tk2-ngroup">
     <div class="tk2-ng-h">
       <span class="tk2-ava ${avatarTone(group.conversationId || title)}">${esc(firstChar(title, "总"))}</span>
@@ -280,6 +307,36 @@ function needsGroupHtml(group) {
       ${action}
     </div>
     ${group.tickets.map(needsBubbleHtml).join("")}
+  </section>`;
+}
+
+/** 单条组：派活人 / 等待时长 / 引文收进组头，不再套第二层「留言气泡」 */
+function needsSoloGroupHtml(group, title, action) {
+  const ticket = group.tickets[0];
+  const quote = needsQuoteOf(ticket);
+  const dispatcher = dispatcherOfTicket(ticket);
+  const fromHuman = quote.source === "prompt";
+  const avatar = fromHuman ? esc(firstChar(dispatcher.name, "谁")) : "系";
+  const who = fromHuman
+    ? `<b>${esc(dispatcher.name)}</b> · 派活说明`
+    : `<span class="tk2-sys-tag">系统代发</span>`;
+  const meta = `<b>${esc(waitedText(group.oldest))}</b> · ${group.tickets.length} 条${
+    group.project ? ` · ${esc(group.project)}` : ""
+  } · ${who}`;
+  // 直派单的标题就是 prompt 摘要（60 字），再放一条 96 字的引文只是重复。
+  const showQuote = quote.source !== "prompt" || Boolean(group.conversationId);
+  return `<section class="tk2-ngroup">
+    <div class="tk2-ng-h tk2-ng-h-solo">
+      <span class="tk2-msg-ava${fromHuman ? "" : " sys"}">${avatar}</span>
+      <div class="tk2-ng-bd">
+        <h3>${esc(title)}</h3>
+        <p class="tk2-ng-meta">${meta}</p>
+        ${showQuote ? `<p class="tk2-quote tk2-ng-quote">${
+          quote.source === "none" ? esc(quote.text) : `「${esc(quote.text)}」`
+        }</p>` : ""}
+      </div>
+      ${action}
+    </div>
   </section>`;
 }
 
@@ -324,7 +381,9 @@ function headlineTicketOf(card) {
 }
 
 function runBlockHtml(cards, running) {
-  const head = `<div class="tk2-sec-h"><span>在跑</span><span class="tk2-sec-cnt">${running}</span><span class="tk2-sec-ln"></span></div>`;
+  // 排队数（2026-11-22 M2b）：只显示 ticket 准入队列；0 时不出现，别让空态多一行噪音。
+  const queued = queuedOfScheduler(state.scheduler);
+  const head = `<div class="tk2-sec-h"><span>在跑</span><span class="tk2-sec-cnt">${running}</span><span class="tk2-sec-ln"></span>${queued > 0 ? `<span class="tk2-sec-queue">排队 ${queued}</span>` : ""}</div>`;
   if (!cards.length) return `${head}<p class="tk2-none">现在没有在跑的事。</p>`;
   const items = cards
     .map((card) => {
@@ -425,7 +484,7 @@ function hittersBlockHtml() {
         <span class="tk2-hit-nm">${esc(label)}</span>
         <span class="tk2-hit-st${count ? " busy" : ""}"><i aria-hidden="true"></i>${count ? `在跑 ${count}` : "空闲"}</span>
         ${count ? `<span class="tk2-hit-ct">${count}</span>` : ""}
-        <span class="tk2-caret" aria-hidden="true">▸</span>
+        ${chevSvg("tk2-caret chev")}
       </button>
       <div class="tk2-hit-b"${open ? "" : " hidden"}>${body}</div>
     </div>`;
@@ -456,21 +515,17 @@ function renderTasksRedesign() {
   const scrollTop = el.tasksScroll.scrollTop;
   hideTasksState();
   el.tasksDetail.hidden = true;
-  el.tasksHitters.hidden = true;
-  el.tasksStats.hidden = true;
-  el.tasksBoard.hidden = true;
-  el.tasksArchive.hidden = true;
-  el.tasksDirect.hidden = true;
-  el.tasksFilters.hidden = true;
   el.tasksBack.hidden = true;
   el.tasksTitleText.textContent = "任务中心";
 
   const { cards, direct } = groupByConversation(state.tickets);
   const groups = needsYouGroups(cards, direct);
-  const running = aliveTicketCount();
+  const running = runningTicketCount();
   const messages = groups.reduce((sum, group) => sum + group.tickets.length, 0);
+  // 排队数是可选尾巴（2026-11-22 M2b）：>0 才加，没排队时副行与旧版一字不差。
+  const queued = queuedOfScheduler(state.scheduler);
   el.tasksTitleSub.textContent = state.tickets.length
-    ? `${messages} 条等你回话 · ${running} 件事在跑`
+    ? `${messages} 条等你回话 · ${running} 件事在跑${queued > 0 ? ` · 排队 ${queued}` : ""}`
     : "";
 
   el.tk2Needs.innerHTML = needsZoneHtml(groups, running);
@@ -488,6 +543,22 @@ function renderTasksRedesign() {
  * - [data-needs-more] → 就地展开/收起「更早的」等你回话组
  * - [data-hitter]     → 打手手风琴展开/收起
  * 这四类都只是一次重绘（滚动位置在 renderTasksRedesign 里保住）。 */
+
+/** 重画会让 CSS transition 播不出来（元素是新建的）：重绘后给那颗箭头补播一次旋转
+ *  （2026-11-21 箭头统一批，照 chat-map toggleCollapsed 的 WAAPI 思路）。 */
+function spinTasksCaret(svgSelector, opening) {
+  const svg = document.querySelector(svgSelector);
+  svg?.animate?.(
+    [
+      { transform: `rotate(${opening ? 0 : 90}deg)` },
+      { transform: `rotate(${opening ? 90 : 0}deg)` },
+    ],
+    { duration: 180, easing: "cubic-bezier(0.4, 0, 0.2, 1)" },
+  );
+}
+/** attr() 的镜像：把值安全放进 querySelector 的属性字符串里。 */
+const qesc = (value) => String(value).replace(/["\\]/g, "\\$&");
+
 el.tasksRedesign?.addEventListener("click", (event) => {
   const conversation = event.target.closest("[data-open-conv]");
   if (conversation) {
@@ -504,18 +575,22 @@ el.tasksRedesign?.addEventListener("click", (event) => {
   const more = event.target.closest("[data-needs-more]");
   if (more) {
     const person = more.dataset.needsMore || "c:chief";
-    if (state.tasksNeedsOlderOpen.has(person)) state.tasksNeedsOlderOpen.delete(person);
-    else state.tasksNeedsOlderOpen.add(person);
+    const opening = !state.tasksNeedsOlderOpen.has(person);
+    if (opening) state.tasksNeedsOlderOpen.add(person);
+    else state.tasksNeedsOlderOpen.delete(person);
     renderTasksRedesign();
+    spinTasksCaret(`[data-needs-more="${qesc(person)}"] .tk2-more-caret`, opening);
     return;
   }
   const hitter = event.target.closest("[data-hitter]");
   if (hitter) {
     const id = hitter.dataset.hitter || "";
     if (!id) return;
-    if (state.tasksHitterOpen.has(id)) state.tasksHitterOpen.delete(id);
-    else state.tasksHitterOpen.add(id);
+    const opening = !state.tasksHitterOpen.has(id);
+    if (opening) state.tasksHitterOpen.add(id);
+    else state.tasksHitterOpen.delete(id);
     renderTasksRedesign();
+    spinTasksCaret(`[data-hitter="${qesc(id)}"] .tk2-caret`, opening);
   }
 });
 // div[role=button] 的键盘等价行为：Enter / 空格等同点一下（真按钮自带语义，跳过）
@@ -565,4 +640,4 @@ el.reviewBody?.addEventListener("keydown", (event) => {
   target.click();
 });
 
-export { HITTER_BADGE, TK2_BRIEF_MAX, TK2_NEEDS_SOFT_LIMIT, TK2_QUOTE_MAX, aliveTicketCount, avatarTone, briefText, cardTicketOf, ensureChatPagingFlag, ensureFlag, ensureTasksRedesignFlag, firstChar, headlineTicketOf, hitterBadge, hitterConversations, hitterTone, hittersBlockHtml, needsBubbleHtml, needsGroupHtml, needsQuoteOf, needsYouGroups, needsZoneHtml, recapCardHtml, renderTasksRedesign, renderTasksView, runBlockHtml, runningCards, waitedText };
+export { HITTER_BADGE, TK2_BRIEF_MAX, TK2_NEEDS_SOFT_LIMIT, TK2_QUOTE_MAX, avatarTone, briefText, cardTicketOf, ensureFlag, firstChar, headlineTicketOf, hitterBadge, hitterConversations, hitterTone, hittersBlockHtml, needsBubbleHtml, needsGroupHtml, needsQuoteOf, needsYouGroups, needsZoneHtml, recapCardHtml, refreshSchedulerStatus, renderTasksRedesign, renderTasksView, runBlockHtml, runningCards, runningTicketCount, waitedText };

@@ -42,15 +42,6 @@
 }
 .tasks-actions { display: flex; align-items: center; gap: 8px; flex: none; }
 .tasks-actions .ghost { flex: none; white-space: nowrap; }
-.tasks-filters { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.tasks-select {
-  height: 28px; padding: 0 8px;
-  border: 1px solid var(--outline); border-radius: var(--r-sm);
-  background: var(--surface); color: var(--text);
-  font-size: 12.5px; outline: none;
-  transition: background-color .18s ease, border-color .18s ease, color .18s ease;
-}
-.tasks-select:focus { border-color: var(--accent); }
 
 .tasks-scroll {
   overflow: auto; padding: 16px;
@@ -70,75 +61,9 @@
 .tasks-state .ghost { margin-top: 6px; }
 .tasks-state[data-kind="loading"] .tasks-state-icon { animation: breathe 1.6s ease-in-out infinite; }
 
-/* 顶部统计条：五个格子，窄了就横滚 */
-.tasks-stats {
-  display: flex; gap: 10px; margin-bottom: 14px;
-  overflow-x: auto;
-}
-.tk-stat {
-  flex: 1; min-width: 120px;
-  padding: 10px 12px;
-  border: 1px solid var(--card-border);
-  border-radius: var(--r-md);
-  background: var(--surface-low);
-  box-shadow: var(--card-glow);
-  transition: background-color .18s ease, border-color .18s ease;
-}
-.tk-stat-label { font-size: 11.5px; color: var(--text-3); }
-.tk-stat-value {
-  margin-top: 2px;
-  font-size: 20px; font-weight: 600; line-height: 1.2;
-  color: var(--text);
-  font-variant-numeric: tabular-nums;
-}
-.tk-stat[data-tone="ask"] .tk-stat-value { color: var(--c-tertiary); }
-.tk-stat[data-tone="fail"] .tk-stat-value { color: var(--c-error); }
-.tk-stat[data-tone="run"] .tk-stat-value { color: var(--accent); }
 
-/* 三列看板：主视图只留要管的；折叠区在网格外单独占一条（K1） */
-.tasks-board {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(232px, 1fr));
-  gap: 12px;
-  align-items: start;
-}
-.tk-col { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
-.tk-col-head { display: flex; align-items: center; gap: 8px; padding: 0 2px 2px; }
-.tk-col-head h2 { margin: 0; font-size: 12px; font-weight: 600; color: var(--text-2); letter-spacing: .02em; }
-.tk-col-count {
-  font-size: 11.5px; color: var(--text-3);
-  font-variant-numeric: tabular-nums;
-}
-.tk-col-empty {
-  padding: 12px;
-  border: 1px dashed var(--divider); border-radius: var(--r-md);
-  font-size: 12px; color: var(--text-3); text-align: center;
-}
 
-/* 主视图全空（含从没派过活）：居中说明，不摆三列空架子 */
-.tk-board-empty {
-  grid-column: 1 / -1;
-  display: flex; flex-direction: column; align-items: center; gap: 6px;
-  padding: 48px 16px 28px;
-  text-align: center;
-}
-.tk-board-empty h2 { margin: 0; font-size: 15px; font-weight: 600; color: var(--text-2); }
-.tk-board-empty p { margin: 0; font-size: 12.5px; line-height: 1.6; color: var(--text-3); }
-.tk-board-empty .ghost { margin-top: 4px; }
 
-/* 已完结折叠区（K1）：看板网格外的一整条，小字弱描边，和「要管的」卡片明显分开 */
-.tk-archive {
-  display: flex; flex-direction: column; gap: 4px;
-  margin-top: 12px;
-}
-.tk-archive-bar {
-  display: flex; align-items: center; gap: 8px;
-  width: 100%; padding: 7px 10px;
-  border: 1px solid var(--divider); border-radius: var(--r-md);
-  background: transparent;
-  color: var(--text-3);
-  font-size: 11.5px; line-height: 1.5; text-align: left;
-}
 button.tk-archive-bar {
   cursor: pointer;
   transition: background-color .18s ease, border-color .18s ease, color .18s ease;
@@ -148,183 +73,26 @@ button.tk-archive-bar:hover {
   background: color-mix(in srgb, var(--text) 3%, transparent);
 }
 button.tk-archive-bar:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 1px; }
-.tk-arch-caret {
-  margin-left: auto;
-  font-size: 10px; line-height: 1;
-  transition: transform .18s ease;
-}
-.tk-archive-bar[aria-expanded="true"] .tk-arch-caret { transform: rotate(90deg); }
 
-/* 已完结简卡：行式、弱化；hover 才回到正常对比度 */
-.tk-arch-list { display: flex; flex-direction: column; gap: 2px; }
-.tk-arch-row {
-  display: flex; align-items: center; gap: 10px;
-  width: 100%; padding: 6px 10px;
-  border: 1px solid transparent; border-radius: var(--r-sm);
-  background: transparent;
-  color: var(--text-3);
-  font-size: 12px; text-align: left;
-  opacity: .78;
-  transition: opacity .18s ease, background-color .18s ease, border-color .18s ease;
-}
-.tk-arch-row:hover {
-  opacity: 1; border-color: var(--divider);
-  background: color-mix(in srgb, var(--text) 3%, transparent);
-}
-.tk-arch-row:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 1px; }
-.tk-arch-id {
-  flex: none;
-  font-family: var(--mono); font-size: 10.5px; color: var(--text-3);
-}
-.tk-arch-prompt {
-  flex: 1 1 auto; min-width: 0;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.tk-arch-row .tk-chip { flex: none; }
-.tk-arch-time {
-  flex: none;
-  font-size: 10.5px; color: var(--text-3);
-  font-variant-numeric: tabular-nums;
-}
 
-/* 已完结简卡（L3）：对话卡样式 —— 标题 + N 次派活 + 灯 + 时间，点它回原对话 */
-.tk-arch-conv {
-  display: flex; align-items: center; gap: 10px;
-  width: 100%; padding: 6px 10px;
-  border: 1px solid transparent; border-radius: var(--r-sm);
-  background: transparent;
-  color: var(--text-3);
-  font-size: 12px; text-align: left;
-  opacity: .78;
-  transition: opacity .18s ease, background-color .18s ease, border-color .18s ease;
-}
-.tk-arch-conv:hover {
-  opacity: 1; border-color: var(--divider);
-  background: color-mix(in srgb, var(--text) 3%, transparent);
-}
-.tk-arch-conv:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 1px; }
-.tk-arch-title {
-  flex: 1 1 auto; min-width: 0;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  color: var(--text-2);
-}
-.tk-arch-count { flex: none; font-size: 10.5px; color: var(--text-3); }
-.tk-arch-conv .tk-lamp { flex: none; }
 
 /* ── 外部打手四卡（L3）────────────────────────────────────
  * 主视图上方一排小卡：执行者名 + 未完结单数 + 最新一单摘要 + 状态灯。
  * 点击 = 过滤主视图（data-active=1 时高亮），再点一次取消。 */
-.tk-hitters {
-  display: flex; gap: 10px; margin-bottom: 14px;
-  overflow-x: auto;
-}
-.tk-hitter {
-  flex: 1 1 0; min-width: 168px;
-  display: flex; flex-direction: column; gap: 3px;
-  padding: 9px 11px;
-  border: 1px solid var(--card-border); border-radius: var(--r-md);
-  background: var(--surface-low);
-  box-shadow: var(--card-glow);
-  color: var(--text);
-  text-align: left;
-  transition: background-color .18s ease, border-color .18s ease, transform .15s ease;
-}
-.tk-hitter:hover { transform: translateY(-1px); background: var(--card-high); }
-.tk-hitter:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 1px; }
-.tk-hitter[data-active="1"] {
-  border-color: color-mix(in srgb, var(--accent) 55%, var(--outline));
-  background: var(--accent-soft);
-}
-.tk-hitter-head { display: flex; align-items: center; gap: 6px; }
-.tk-hitter-name {
-  min-width: 0;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-size: 12px; font-weight: 600; color: var(--text-2);
-}
-.tk-hitter-count {
-  flex: none; margin-left: auto;
-  padding: 0 6px;
-  border-radius: var(--r-full);
-  background: var(--accent-soft); color: var(--accent);
-  font-size: 10.5px; line-height: 1.7;
-  font-variant-numeric: tabular-nums;
-}
-.tk-hitter-brief {
-  font-size: 11.5px; line-height: 1.5; color: var(--text-3);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.tk-hitter-idle { font-size: 11.5px; line-height: 1.5; color: var(--text-3); }
-.tk-hitter-foot { display: flex; align-items: center; gap: 8px; }
-.tk-hitter-time {
-  margin-left: auto;
-  font-size: 10.5px; color: var(--text-3);
-  font-variant-numeric: tabular-nums;
-}
 
 /* ── 聚合灯（L3）────────────────────────────────────────
  * 红「有单出错」/ 蓝「等你处理」/ 灰「执行中」；全 done 不渲染灯，只留时间。
  * 蓝色固定走 --c-primary（四套主题里都是靛蓝），不跟着强调色变，免得「等你」变金。 */
-.tk-lamp {
-  display: inline-flex; align-items: center; gap: 4px;
-  font-size: 10.5px; line-height: 1.6; white-space: nowrap;
-  color: var(--text-3);
-}
-.tk-lamp i {
-  width: 6px; height: 6px; flex: none;
-  border-radius: var(--r-full);
-  background: currentColor;
-}
-.tk-lamp[data-lamp="fail"] { color: var(--c-error); }
-.tk-lamp[data-lamp="ask"] { color: var(--c-primary); }
-.tk-lamp[data-lamp="run"] { color: var(--text-3); }
-.tk-lamp[data-lamp="done"] { color: var(--text-3); }
 
 /* ── 对话卡（L3）────────────────────────────────────────
  * 整卡不是按钮：只有卡头（回对话）和派活行（进详情）可点，子单按钮不会落在按钮里。 */
-.tk-card {
-  width: 100%;
-  border: 1px solid var(--card-border);
-  border-radius: var(--r-md);
-  background: var(--card);
-  color: var(--text);
-  box-shadow: var(--card-glow);
-  overflow: hidden;
-  transition: background-color .18s ease, border-color .18s ease;
-}
-/* 有单出错 / 等你处理：给一圈同色描边，扫一眼就能找到 */
-.tk-card[data-lamp="fail"] {
-  border-color: color-mix(in srgb, var(--c-error) 45%, var(--outline));
-}
-.tk-card[data-lamp="ask"] {
-  border-color: color-mix(in srgb, var(--c-primary) 42%, var(--outline));
-}
 
-.tk-conv-head {
-  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-  width: 100%; padding: 9px 11px;
-  border: 0; background: transparent;
-  color: var(--text); text-align: left;
-  transition: background-color .18s ease;
-}
-.tk-conv-head:hover { background: color-mix(in srgb, var(--text) 4%, transparent); }
-.tk-conv-head:focus-visible { outline: 2px solid var(--accent-line); outline-offset: -2px; }
-.tk-conv-title {
-  flex: 1 1 120px; min-width: 0;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-size: 12.5px; font-weight: 600; color: var(--text);
-}
-.tk-conv-badges { display: flex; align-items: center; gap: 4px; flex: none; }
 .tk-badge {
   padding: 0 6px;
   border: 1px solid var(--divider); border-radius: var(--r-full);
   color: var(--text-3);
   font-size: 10.5px; line-height: 1.7;
   white-space: nowrap;
-}
-.tk-conv-tail { display: flex; align-items: center; gap: 8px; flex: none; }
-.tk-conv-time {
-  font-size: 10.5px; color: var(--text-3);
-  font-variant-numeric: tabular-nums;
 }
 
 /* 派活行：一单一行；两层收拢 = 对话卡 → 派活行 → 子单 */
@@ -374,11 +142,8 @@ button.tk-archive-bar:focus-visible { outline: 2px solid var(--accent-line); out
 }
 .tk-children-toggle:hover { color: var(--text-2); }
 .tk-children-toggle:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 2px; border-radius: var(--r-sm); }
-.tk-child-caret {
-  font-size: 9px; line-height: 1;
-  transition: transform .18s ease;
-}
-.tk-children-toggle[aria-expanded="true"] .tk-child-caret { transform: rotate(90deg); }
+/* 2026-11-21（箭头统一批）：▸ 文字 → chevSvg，旋转/过渡在 style-27 的 .chev */
+.tk-child-caret { width: 10px; height: 10px; flex: none; }
 
 /* 子单行：单号 + 状态 + 相对时间，弱化到卡内的次级信息 */
 .tk-children { display: flex; flex-direction: column; gap: 1px; margin-top: 2px; }

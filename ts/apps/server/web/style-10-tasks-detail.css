@@ -89,8 +89,8 @@
   cursor: pointer; list-style: none;
 }
 .td-steps > summary::-webkit-details-marker { display: none; }
-.td-steps > summary::before { content: "▸"; color: var(--text-3); }
-.td-steps[open] > summary::before { content: "▾"; }
+/* 2026-11-21（箭头统一批）：▸/▾ 换字符 → 统一 chevSvg，展开转 90°（行为在 style-27） */
+.td-step-chev { flex: none; width: 12px; height: 12px; align-self: center; color: var(--text-3); }
 .td-step-label { color: var(--text-3); }
 .td-step-now { color: var(--text); }
 .td-step-round { color: var(--text-3); font-size: 11.5px; }
