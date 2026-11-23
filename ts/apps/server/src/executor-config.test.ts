@@ -174,12 +174,19 @@ test("native 显式模型优先于默认；providerId 决定路由", () => {
 });
 
 test("EXECUTOR_NATIVE_FOLLOW_DEFAULT=false：native 留空回到启动 env（旧行为）", () => {
+	// 2026-11-22：宿主默认执行器已切到 pool（方案 P5）。这里先钉住新默认，
+	// 再用 CHANCELLOR_EMPLOYEE=native 验回滚，最后验 native 的旧行为本身没变。
 	const env = {
 		EXECUTOR_CONFIG_PATH: tempPath(),
 		EXECUTOR_NATIVE_FOLLOW_DEFAULT: "false",
 	};
-	// 文件里没有 native 模型 → 不传递任何 model（worker 回落 CHANCELLOR_LLM_MODEL / LLM_MODEL）。
 	assert.deepEqual(executorForDelegation(env, {
+		currentModel: () => ({ provider: "bailian", modelId: "default-model" }),
+	}), { employee: "pool", profile: {} });
+
+	const rollback = { ...env, CHANCELLOR_EMPLOYEE: "native" };
+	// 文件里没有 native 模型 → 不传递任何 model（worker 回落 CHANCELLOR_LLM_MODEL / LLM_MODEL）。
+	assert.deepEqual(executorForDelegation(rollback, {
 		currentModel: () => ({ provider: "bailian", modelId: "default-model" }),
 	}), { employee: "native", profile: {} });
 
@@ -284,9 +291,13 @@ test("端点：GET 读当前值，PUT 写文件并返回新视图；非法值 40
 test("executorSummary / executorLine：派活的人和用户都能看到执行器/模型/权限", () => {
 	assert.equal(
 		executorSummary("native", { model: "cheap" }),
-		"本机内核（pi-durable，模型 cheap）",
+		"旧：每票一进程（模型 cheap）",
 	);
-	assert.equal(executorSummary("native", {}), "本机内核（pi-durable）");
+	assert.equal(executorSummary("native", {}), "旧：每票一进程（回滚用）");
+	assert.equal(
+		executorSummary("pool", { model: "cheap" }),
+		"底层 worker 运行时（模型 cheap）",
+	);
 	assert.equal(
 		executorSummary("claude-code", { model: "opus", permission: "full" }),
 		"Claude Code（模型 opus，权限 全权）",

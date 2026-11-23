@@ -5,12 +5,10 @@ import {
 	hasTaskBaseline,
 	renderTaskBaseline,
 	renderTaskConversationPrompt,
-	taskAsConversationEnabled,
 	taskConversationExternalId,
-	taskKeyedBaselineEnabled,
 } from "./task-conversation.ts";
 import { TASK_CONVERSATION_PREFIX } from "./agent/shared.ts";
-import { dispatchOwnerOf, sidebarTaskGroupsEnabled, taskChatTitle } from "./task-chat-owner.ts";
+import { dispatchOwnerOf, taskChatTitle } from "./task-chat-owner.ts";
 
 /**
  * 任务专线（2026-11-08 扫尾批 8g）的纯函数边界。
@@ -33,24 +31,6 @@ test("专线提示词：点名单号，且明确无工具 / 回话由系统转�
 	assert.match(prompt, /转给执行端/);
 });
 
-test("回滚开关：TASK_AS_CONVERSATION=false 时旁路", () => {
-	const previous = process.env.TASK_AS_CONVERSATION;
-	try {
-		delete process.env.TASK_AS_CONVERSATION;
-		assert.equal(taskAsConversationEnabled(), true, "缺省开");
-		for (const value of ["false", "FALSE", "0", "off", " off "]) {
-			process.env.TASK_AS_CONVERSATION = value;
-			assert.equal(taskAsConversationEnabled(), false, value);
-		}
-		for (const value of ["true", "1", "on", ""]) {
-			process.env.TASK_AS_CONVERSATION = value;
-			assert.equal(taskAsConversationEnabled(), true, value);
-		}
-	} finally {
-		if (previous === undefined) delete process.env.TASK_AS_CONVERSATION;
-		else process.env.TASK_AS_CONVERSATION = previous;
-	}
-});
 
 // ── 键控基线（2026-11-10 批 21 §四）──────────────────────
 
@@ -79,16 +59,7 @@ test("键控基线：只认起点标记（幂等，正文被改写也算在）",
 	assert.equal(hasTaskBaseline([]), false);
 });
 
-test("键控基线开关：默认开；false/0/off 才关", () => {
-	assert.equal(taskKeyedBaselineEnabled({}), true);
-	assert.equal(taskKeyedBaselineEnabled({ TASK_KEYED_BASELINE: "" }), true);
-	for (const value of ["false", "FALSE", "0", "off", " off "]) {
-		assert.equal(taskKeyedBaselineEnabled({ TASK_KEYED_BASELINE: value }), false, value);
-	}
-	for (const value of ["true", "1", "on"]) {
-		assert.equal(taskKeyedBaselineEnabled({ TASK_KEYED_BASELINE: value }), true, value);
-	}
-});
+//（键控基线回滚开关用例 2026-11-21 随 TASK_KEYED_BASELINE 退役删除，恒开。）
 
 // ── 侧栏任务行归属与标题（2026-11-15 侧栏对话按创建者分组）──────────
 
@@ -115,12 +86,4 @@ test("标题：需求首行压空格，空则占位，超 60 字截断加省略�
 	const long = taskChatTitle("甲".repeat(100));
 	assert.equal(long.length, 61, "60 字 + 省略号");
 	assert.ok(long.endsWith("…"));
-});
-
-test("侧栏分组开关：默认开，只有明确 false/0 才关（拼错值不误关）", () => {
-	assert.equal(sidebarTaskGroupsEnabled({}), true, "缺省开");
-	assert.equal(sidebarTaskGroupsEnabled({ SIDEBAR_TASK_GROUPS: "false" }), false);
-	assert.equal(sidebarTaskGroupsEnabled({ SIDEBAR_TASK_GROUPS: "0" }), false);
-	assert.equal(sidebarTaskGroupsEnabled({ SIDEBAR_TASK_GROUPS: "ture" }), true);
-	assert.equal(sidebarTaskGroupsEnabled({ SIDEBAR_TASK_GROUPS: "true" }), true);
 });

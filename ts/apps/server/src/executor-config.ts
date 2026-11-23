@@ -36,6 +36,7 @@ import { providerCatalog, readLlmConfig } from "./provider.ts";
 
 export const EXECUTOR_KINDS = [
   "native",
+  "pool",
   "codebuddy",
   "qoder-intl",
   "qoder-cn",
@@ -51,6 +52,7 @@ export type ExecutorKind = (typeof EXECUTOR_KINDS)[number];
 /** 界面能选的本地执行器；phone / mcp 是部署形态，只在 env 里切。 */
 export const SELECTABLE_EXECUTOR_KINDS = [
   "native",
+  "pool",
   "codebuddy",
   "qoder-intl",
   "qoder-cn",
@@ -79,15 +81,25 @@ export interface ExecutorKindInfo {
 
 export const EXECUTOR_KIND_INFO: ExecutorKindInfo[] = [
   {
-    id: "native",
-    label: "本机内核（pi-durable）",
+    id: "pool",
+    label: "底层 worker 运行时（独立进程）",
     selectable: true,
     permissions: null,
     modelHint: "留空跟随默认模型；例如 deepseek-v4.1-flash",
     note:
-      "不是外部 CLI；留空 = 本机派活工人跟随 设置 → 模型 的默认模型，" +
-      "选一个 = 工人单独用那个模型（可以更便宜 / 更快）。模型来自已连接供应商，" +
-      "跨供应商时按该供应商的 baseURL + key 走；权限由本机内核权限策略管。",
+      "新派出去的底层工人默认都在这里跑：一进程同时只跑一票，进程跨票复用，" +
+      "并发上限由池大小决定（WORKER_POOL_SIZE）。每个池进程自带 SQLite 与工具白名单，" +
+      "崩了只影响在跑的那一票。前端「新建任务」和总管/执事派活都走它。",
+  },
+  {
+    id: "native",
+    label: "旧：每票一进程（回滚用）",
+    selectable: true,
+    permissions: null,
+    modelHint: "留空跟随默认模型；例如 deepseek-v4.1-flash",
+    note:
+      "改动前的形态：每张单起一个 worker 子进程。只在池不可用或需要强制隔离时选；" +
+      "选它等于把新单从第二套运行时拉回旧进程。整体回滚也可以直接 CHANCELLOR_EMPLOYEE=native。",
   },
   {
     id: "codebuddy",
@@ -358,11 +370,19 @@ function resolveNativeWorkProfile(
 export function executorForDelegation(
   env: NodeJS.ProcessEnv = process.env,
   deps: ExecutorDispatchDeps = {},
+  /**
+   * 强制执行器（2026-11-22 前端直派任务固定 pool）：不传 = 设置里的默认。
+   * profile 仍从同一份设置里按这个 kind 取，避免“换执行器但丢了工人模型”。
+   */
+  kindOverride?: ExecutorKind,
 ): { employee: ExecutorKind; profile: EmployeeProfile } {
   const config = readExecutorConfig(env);
-  const raw = config.profiles[config.employee] ?? {};
+  const kind = kindOverride ?? config.employee;
+  const raw = config.profiles[kind] ?? {};
   const profile: EmployeeProfile = {};
-  if (config.employee === "native") {
+  // 池与 native 同档（2026-11-22）：都用本机内核、都吃「干活模型」与跨供应商 route。
+  // 差别只在容器（池进程 vs 每票子进程），profile 字段一模一样。
+  if (kind === "native" || kind === "pool") {
     const work = resolveNativeWorkProfile(raw, env, deps);
     if (work) {
       profile.model = work.model;
@@ -376,7 +396,7 @@ export function executorForDelegation(
     if (raw.model !== undefined) profile.model = raw.model;
     if (raw.permission !== undefined) profile.permission = raw.permission;
   }
-  return { employee: config.employee, profile };
+  return { employee: kind, profile };
 }
 
 /** 端点视图：配置 + 控件元数据 + 锁定原因。 */
@@ -453,6 +473,22 @@ export function executorLine(
       "换默认只影响新单；续跑沿用原单的工人。"
     );
   }
+  if (view.employee === "pool") {
+    const picked = (view.profiles.pool?.model ?? "").trim();
+    let modelText: string;
+    if (picked) {
+      modelText = `干活模型 ${picked}`;
+    } else if (executorNativeFollowsDefault(env)) {
+      const current = (deps.currentModel ?? currentRuntimeModel)();
+      modelText = current ? `干活模型跟随默认（${current.modelId}）` : "干活模型跟随默认";
+    } else {
+      modelText = "干活模型跟随启动 env";
+    }
+    return (
+      `派活默认交给：执行器池（${modelText}；权限由池内工具白名单管：read/write/edit/bash/escalate）。` +
+      "换默认只影响新单；续跑沿用原单的工人。"
+    );
+  }
   const profile = view.profiles[view.employee] ?? {};
   const model = profile.model?.trim() ? profile.model.trim() : "跟随该 CLI 自己的默认";
   const permission = executorPermissionText(view.employee, profile.permission);
@@ -470,8 +506,13 @@ export function executorSummary(
   const label = executorLabel(employee);
   if (employee === "native") {
     // 2026-11-19：干活模型随派单快照解析好了就如实说；没带（回滚模式）保持原文案。
+    // 2026-11-22：native 降级为回滚档，摘要里也如实说“旧”。
     const model = profile.model?.trim();
-    return model ? `本机内核（pi-durable，模型 ${model}）` : label;
+    return model ? `旧：每票一进程（模型 ${model}）` : label;
+  }
+  if (employee === "pool") {
+    const model = profile.model?.trim();
+    return model ? `底层 worker 运行时（模型 ${model}）` : label;
   }
   if (employee === "phone" || employee === "mcp") return label;
   const model = profile.model?.trim();
@@ -586,7 +627,12 @@ function normalizeConfig(
 
 function envEmployee(env: NodeJS.ProcessEnv): ExecutorKind {
   const raw = (env.CHANCELLOR_EMPLOYEE ?? "").trim().toLowerCase();
-  return isExecutorKind(raw) ? raw : "native";
+  if (isExecutorKind(raw)) return raw;
+  // 2026-11-22 切默认：宿主的派活默认走**执行器池**（独立进程串行复用，方案 P5）。
+  // 单独跑 chancellor CLI（不经宿主）时没有 PoolClient，chancellor 自己仍默认 native，
+  // 并且 `createEmployee("pool")` 有"未接线回落 native + 告警"的保险。
+  // 回滚：CHANCELLOR_EMPLOYEE=native（一行，不动代码）。
+  return "pool";
 }
 
 /** env 是缺省值；文件里显式写的（包括空串）优先。 */

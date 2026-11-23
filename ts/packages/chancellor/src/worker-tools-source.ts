@@ -30,12 +30,22 @@ export function setWorkerToolsSource(fn: WorkerToolsSource | null): void {
  * 返回 null = 宿主没装配 / 回滚开关关着 / 读取失败 → 全开。
  */
 export function workerAllowedTools(): readonly string[] | null {
-  if (!source) return null;
-  try {
-    return source();
-  } catch {
-    return null;
+  if (source) {
+    try {
+      return source();
+    } catch {
+      return null;
+    }
   }
+  // 分管宰相子进程里没有宿主注入的 source：宿主 spawn manager 时把同一份名单
+  // 写成 `CHANCELLOR_WORKER_TOOLS`（逗号分隔），子单据此过滤。空串 = 真的零工具，
+  // 没设这个变量 = 旧行为（全开）。
+  const raw = process.env.CHANCELLOR_WORKER_TOOLS;
+  if (raw === undefined) return null;
+  return raw
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 /**

@@ -280,14 +280,18 @@ function delegateDeps(run: unknown, projects: unknown = null) {
 }
 
 const DELEGATE_TEXT =
-	"已派发到 本机内核（pi-durable）：任务单 T-9。它在后台执行，完成后我会汇报；不要等，也不要重复派。";
+	"已派发到 旧：每票一进程（回滚用）：任务单 T-9。它在后台执行，完成后我会汇报；不要等，也不要重复派。";
 
 test("delegate：成功外层是 ok，message 带执行器，ticketId 在 data", async () => {
 	const previous = process.env.DELEGATION_PROJECT_REQUIRED;
 	const previousFollow = process.env.EXECUTOR_NATIVE_FOLLOW_DEFAULT;
+	const previousEmployee = process.env.CHANCELLOR_EMPLOYEE;
 	process.env.DELEGATION_PROJECT_REQUIRED = "false";
 	// 2026-11-19 模型分工：测试不依赖宿主机已连接的模型；回到旧的 env 缺省形态。
 	process.env.EXECUTOR_NATIVE_FOLLOW_DEFAULT = "false";
+	// 2026-11-22：宿主默认执行器已切 pool。这条测试钉的是"message 带执行器名"，
+	// 显式选 native 才稳定，否则断言随默认漂移。
+	process.env.CHANCELLOR_EMPLOYEE = "native";
 	try {
 		const tools = createTools(
 			delegateDeps(async (_request: unknown, options: { onEvent?: (event: unknown) => void }) => {
@@ -304,6 +308,8 @@ test("delegate：成功外层是 ok，message 带执行器，ticketId 在 data",
 		else process.env.DELEGATION_PROJECT_REQUIRED = previous;
 		if (previousFollow === undefined) delete process.env.EXECUTOR_NATIVE_FOLLOW_DEFAULT;
 		else process.env.EXECUTOR_NATIVE_FOLLOW_DEFAULT = previousFollow;
+		if (previousEmployee === undefined) delete process.env.CHANCELLOR_EMPLOYEE;
+		else process.env.CHANCELLOR_EMPLOYEE = previousEmployee;
 	}
 });
 

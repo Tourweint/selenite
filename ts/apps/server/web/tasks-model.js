@@ -94,7 +94,8 @@ const EMPLOYEE_LABEL = {
   opencode: "OpenCode",
   mcp: "MCP",
   phone: "手机",
-  native: "原生",
+  native: "原生（旧）",
+  pool: "池（独立进程）",
   manager: "总管",
 };
 

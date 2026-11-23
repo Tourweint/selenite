@@ -1,3 +1,5 @@
+import type { FailureClass } from "./failure-class.ts";
+
 export type TicketStatus =
   | "received"
   | "planning"
@@ -60,6 +62,7 @@ export interface WorkerEscalation {
  */
 export type EmployeeKind =
   | "native"
+  | "pool"
   | "mercenary"
   | "codebuddy"
   | "qoder-intl"
@@ -223,6 +226,11 @@ export interface Task {
   /** 老库迁移后可能是 null；新任务一定写。 */
   employee: EmployeeKind | null;
   updated_at: string;
+  /**
+   * 最近一次 attempt 的序号（2026-11-22 M3，只用于详情投影）。
+   * sqlite 不存这一列：投影时从任务目录的 attempt-<n>.json 读，老库没有 = 不出现。
+   */
+  attempt?: number;
 }
 
 export interface WorkerReport {
@@ -304,6 +312,16 @@ export interface TaskRun {
   changedPaths?: string[];
   /** 隔离/合并阶段判失败的原因；有值即视为 processOk=false。 */
   failure?: string | null;
+  /**
+   * 这是第几次尝试（2026-11-22 M3）：1 起；重试后是最后一轮实际跑的序号。
+   * 纯增量，老数据没有 = 当 1 次看。
+   */
+  attempt?: number;
+  /**
+   * 失败分类（2026-11-22 M3）。成功执行也填 unknown——"unknown" 同时兼作
+   * 「没认出发败因」，调用方不能拿它当失败去重试。
+   */
+  failureClass?: FailureClass;
 }
 
 /** 分管宰相这一轮的结论；落在 plan.json 的 manager 块里。 */
@@ -341,6 +359,11 @@ export interface PlanResult {
 export interface ChancellorRequest {
   /** 正常收单时必填；resume 时可以省略。 */
   requirement?: string;
+  /**
+   * 预分配单号（2026-11-22 前端直派任务）：宿主先按这个号建任务专线，再落单。
+   * 只对新单生效；形状不合法 / 目录已存在时 chancellor 回落自生成（不拒单）。
+   */
+  ticketId?: string;
   maxTasks?: number;
   dry?: boolean;
   workRoot?: string;
@@ -374,6 +397,12 @@ export interface ChancellorRequest {
    * 没有值时与改动前完全一致（兼容旧 ticket.json）。
    */
   originConversationId?: string;
+  /**
+   * 这张单在 ticket 准入队列里的优先级（2026-11-22 M1b）：0 最高，缺省 5。
+   * 由宿主按触发来源推导（human 0 / device 1 / routine 2 / script 3 / test 9），
+   * 不暴露给模型；chancellor 内部类型，不是 shared / 手机契约。纯增量，老调用方无感。
+   */
+  priority?: number;
   /**
    * 计划附件（2026-11-09 保证实现纵深 §2）：宿主校验后的可核对动作序列。
    * 原样落进 ticket.json.steps，并交给规划器；不传 = 旧行为。

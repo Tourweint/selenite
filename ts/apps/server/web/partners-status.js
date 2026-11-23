@@ -363,6 +363,9 @@ async function loadRoster() {
   if (
     currentRoute() === "chat" &&
     !state.conversationId.startsWith("partner-") &&
+    // 任务线程（2026-11-22）：服务端 chatKind 仍是 chief，但表头归任务自己，
+    // 由 chat-open 的 task- 分支写；这里再写一次会把「任务 · …」冲成「总管」。
+    !state.conversationId.startsWith("task-") &&
     (state.chatKind || "chief") === "chief"
   ) {
     el.title.textContent = chiefDisplayName();

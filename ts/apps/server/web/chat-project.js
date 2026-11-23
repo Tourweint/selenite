@@ -60,7 +60,13 @@ function titleOf(info, fixed) {
 
 function paint() {
 	if (!el.chatProjectPill) return;
-	if (!labelEnabled() || state.chatKind !== "worker") return hide();
+	if (
+		!labelEnabled() ||
+		state.chatKind !== "worker" ||
+		String(state.conversationId || "").startsWith("task-")
+	) {
+		return hide();
+	}
 	// 已落盘 = 创建时快照；未落盘 = 跟着左侧当前选择走
 	const fixed = Boolean(state.conversationId);
 	const info = fixed ? workdir : selectionOf();

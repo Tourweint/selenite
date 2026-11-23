@@ -4,7 +4,9 @@ import { fileURLToPath } from "node:url";
 import { MANAGER_TIMEOUT_MS, profileEnv } from "../config.ts";
 import type { ManagerInfo } from "../manager/registry.ts";
 import type { EmployeeProfile, ProjectRef, WorkerKind } from "../types.ts";
+import { effectiveWorkerTools, workerAllowedTools } from "../worker-tools-source.ts";
 import { killTree } from "./kill.ts";
+import { getManagerPoolBridge } from "./pool.ts";
 
 const WORKER_ENTRY = fileURLToPath(new URL("../worker-main.ts", import.meta.url));
 
@@ -121,7 +123,32 @@ export function runManager(task: ManagerTask, signal?: AbortSignal): Promise<Man
             ...process.env,
             // 分管子单在子进程里再派活；执行器与模型/权限只能靠 env 带过去。
             CHANCELLOR_EMPLOYEE: task.employee,
+            // ticket 准入（2026-11-22 M1b）：manager 的 child ticket 一次只跑一单。
+            // 必须显式写，不能靠继承——宿主进程自己的上限是 3。
+            CHANCELLOR_MAX_ACTIVE_TICKETS:
+              process.env.CHANCELLOR_MANAGER_MAX_ACTIVE_TICKETS?.trim() || "1",
             ...profileEnv(task.employee, task.employeeProfile),
+            // 2026-11-22 池桥：manager 子进程里的 `createEmployee("pool")` 没有宿主
+            // 注入口，只能按这两个 env 连回宿主。token 只进这一条子进程环境。
+            // 只在 manager 的工人档就是 pool 时注入：外部 CLI 打手的子进程不该拿到
+            // 宿主池桥的 token（最小权限；它也用不上）。
+            ...(() => {
+              const bridge = getManagerPoolBridge();
+              return task.employee === "pool" && bridge
+                ? {
+                    CHANCELLOR_POOL_ENDPOINT: bridge.endpoint,
+                    CHANCELLOR_POOL_TOKEN: bridge.token,
+                  }
+                : {};
+            })(),
+            // 2026-11-22 工具面：宿主勾选的 worker 工具（canonical 四件）带进子进程，
+            // 子单的 native / pool 执行器都按同一份名单过滤。没注入 = 不设（全开）。
+            ...(() => {
+              const allowed = workerAllowedTools();
+              return allowed === null
+                ? {}
+                : { CHANCELLOR_WORKER_TOOLS: effectiveWorkerTools(allowed).join(",") };
+            })(),
           },
         },
       );

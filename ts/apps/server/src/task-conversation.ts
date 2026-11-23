@@ -27,24 +27,8 @@ import type { EntryDraft } from "@earendil-works/pi-durable";
 import type { ResolvedChat } from "./agent.ts";
 import type { DelegationMirrorEntry } from "./delegation.ts";
 import { TASK_CONVERSATION_PREFIX } from "./agent/shared.ts";
-import { flagEnabled } from "./flags.ts";
 
 const CTX = BACKGROUND_CONTEXT;
-
-/** 回滚开关：缺省开；`false` / `0` / `off` 时整体旁路。 */
-export function taskAsConversationEnabled(): boolean {
-	return flagEnabled("TASK_AS_CONVERSATION");
-}
-
-/**
- * 键控基线开关（2026-11-10 批 21 §四）：默认开；`TASK_KEYED_BASELINE=false` 时
- * 既不写验收标准块、也不做压缩后的还原检查（回到批 20 的形态）。
- */
-export function taskKeyedBaselineEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	const raw = (env.TASK_KEYED_BASELINE ?? "").trim().toLowerCase();
-	if (!raw) return true;
-	return raw !== "false" && raw !== "0" && raw !== "off";
-}
 
 /** 对外会话 id：`task-` + 任务单号。确定性，重启后照样算得出来（回读靠 GET messages）。 */
 export function taskConversationExternalId(ticketId: string): string {
@@ -150,7 +134,6 @@ export async function ensureKeyedBaseline(
 	conversationId: number,
 	ticket: KeyedBaselineTicket,
 ): Promise<boolean> {
-	if (!taskAsConversationEnabled() || !taskKeyedBaselineEnabled()) return false;
 	const block = renderTaskBaseline(ticket);
 	if (!block) return false;
 	const chat = [...chats.values()].find((entry) => entry.internalId === conversationId);
@@ -178,7 +161,7 @@ export async function ensureKeyedBaseline(
  * 创建时（第一条系统事件）写一次，之后每次写消息前检查一次。
  */
 async function ensureBaselineOf(chat: ResolvedChat, ticketId: string): Promise<void> {
-	if (!taskKeyedBaselineEnabled() || !baselineProvider) return;
+	if (!baselineProvider) return;
 	let ticket: KeyedBaselineTicket | null = null;
 	try {
 		ticket = baselineProvider(ticketId);
@@ -188,6 +171,17 @@ async function ensureBaselineOf(chat: ResolvedChat, ticketId: string): Promise<v
 	}
 	if (!ticket) return;
 	await ensureKeyedBaseline(chat.internalId, ticket);
+}
+
+/**
+ * 内部会话 id → 它是不是一条任务专线；是就回票号（2026-11-22）。
+ * 用于“汇报回写目标本身就是任务线程”的判定：不跑投影模型，只写镜像。
+ */
+export function taskTicketIdOfConversation(conversationId: number): string | null {
+	for (const [ticketId, chat] of chats) {
+		if (chat.internalId === conversationId) return ticketId;
+	}
+	return null;
 }
 
 /** 并发 ensure 的合并位：双击 / 事件同时到达时不要建出两条会话。 */
@@ -222,7 +216,6 @@ function warnOnce(ticketId: string, reason: string): void {
  * 没配模型 / 存储打不开时返回 null，**不抛**：专线是旁路，不能把派活主链路拖下水。
  */
 export async function ensureTaskConversation(ticketId: string): Promise<ResolvedChat | null> {
-	if (!taskAsConversationEnabled()) return null;
 	const cached = chats.get(ticketId);
 	if (cached) return cached;
 	const pending = creating.get(ticketId);
@@ -260,8 +253,23 @@ export async function ensureTaskConversation(ticketId: string): Promise<Resolved
  * 也不会拉起 Harness（拉起来会 resume 真实任务，代价与风险都不该由一次只读详情承担）。
  */
 export function getTaskConversation(ticketId: string): { conversationId: string } | null {
-	if (!taskAsConversationEnabled()) return null;
 	return { conversationId: taskConversationExternalId(ticketId) };
+}
+
+/**
+ * 真用户条目的形状（2026-11-22 前端直派任务）。
+ *
+ * 为什么不用 `submit({type:"input"})`：那会触发专线的投影模型跑一轮——
+ * 对“新建任务”来说就是又复用了一次宿主进程，与“执行在池”口径冲突。
+ * 这里写的是主人**真实说出口**的那句话（调用点只接受已鉴权的用户输入），
+ * 不是把系统消息伪装成用户发言（那条纪律见 delegation-messages.ts 头注）。
+ */
+function buildUserEntry(text: string): EntryDraft {
+	const at = Date.now();
+	return {
+		kind: "pi.user",
+		model: [{ role: "user", content: text, timestamp: at }],
+	};
 }
 
 /** 与 `sayInChat` 同款 assistant 条目形状：带 model 才进上下文，也能被 GET messages 回读。 */
@@ -316,7 +324,6 @@ async function writeTaskEvent(ticketId: string, entry: DelegationMirrorEntry): P
  * ——派活主链路不能被旁路簿记拖住。
  */
 export function appendTaskEvent(ticketId: string, entry: DelegationMirrorEntry): Promise<void> {
-	if (!taskAsConversationEnabled()) return Promise.resolve();
 	const previous = queues.get(ticketId) ?? Promise.resolve();
 	// 前一条失败也必须接着写：用 then 的两个分支，队列永不断链。
 	const next = previous.then(
@@ -352,12 +359,13 @@ export function mirrorTaskNotice(conversationId: number, text: string): void {
 }
 
 /**
- * 把主人的回话写进专线（真用户输入，忙时 followUp）。
+ * 把主人真实说的一句话写进专线，**不触发投影模型**。
  *
- * 只负责"进会话"这一半；"送到执行端"那一半仍由调用方走 `startDelegation` 的
- * 续跑链路——两件事由同一次 POST 驱动，语义分开，失败也能各自说明。
+ * 写入的是 `pi.user` 条目（与 `submit` 落出来的形状同源），只是不提交输入、
+ * 不排队一轮生成。前端直派任务与任务详情回话共用这一条：线程是显示层，
+ * 执行在池；宿主侧不再为这句话跑一轮助手。
  */
-export async function submitTaskReply(
+export async function appendTaskUserMessage(
 	ticketId: string,
 	text: string,
 ): Promise<ResolvedChat | null> {
@@ -367,7 +375,7 @@ export async function submitTaskReply(
 	await ensureBaselineOf(chat, ticketId);
 	try {
 		await chat.conversation.submit(
-			{ type: "input", content: text, whenBusy: "followUp" },
+			{ type: "write", entry: buildUserEntry(text) },
 			CTX,
 		);
 		return chat;
@@ -380,4 +388,17 @@ export async function submitTaskReply(
 		);
 		return null;
 	}
+}
+
+/**
+ * 任务详情的“回话”入口：只负责"进会话"这一半；"送到执行端"那一半仍由调用方走
+ * `startDelegation` 的续跑链路——两件事由同一次 POST 驱动，语义分开，失败也能各自说明。
+ *
+ * 2026-11-22 起写 `pi.user` 而不是 `input`：不再触发专线投影模型的一轮生成。
+ */
+export async function submitTaskReply(
+	ticketId: string,
+	text: string,
+): Promise<ResolvedChat | null> {
+	return appendTaskUserMessage(ticketId, text);
 }

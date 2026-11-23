@@ -28,6 +28,7 @@ import { closeMenu, toggleSidebar } from "./shell.js";
 import { refreshSkillSuggest } from "./skill-picker.js";
 import { closeSkillSelects } from "./skills-list.js";
 import { state } from "./state.js";
+import { isTaskConversation } from "./task-thread.js";
 import { KEY_SEND } from "./theme.js";
 import { steerIntoTurn } from "./turn-reconcile.js";
 import { closeModal, closePopover, modalOpen, openModal, openPopover, popoverOpen, toast } from "./ui-atoms.js";
@@ -399,6 +400,11 @@ el.composer.addEventListener("submit", (event) => {
       if (steer || (await busyWhenSteerDefault())) await steerIntoTurn(text);
       else await followUp(text);
     })();
+    return;
+  }
+  // 任务线程先只收文字（2026-11-22）：附件不进池票面，也不伪造进专线。
+  if (isTaskConversation(state.conversationId) && (images.length || files.length)) {
+    toast("任务线程先只发文字");
     return;
   }
   el.input.value = "";

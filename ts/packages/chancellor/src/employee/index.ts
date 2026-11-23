@@ -19,6 +19,7 @@ import {
 } from "./qoder.ts";
 import { createNativeEmployee, NATIVE_CAPABILITIES } from "./native.ts";
 import { createPhoneEmployee, PHONE_CAPABILITIES, phoneTransport } from "./phone.ts";
+import { createPoolEmployee, poolAvailable, POOL_CAPABILITIES } from "./pool.ts";
 
 export type { EmployeeKind } from "../types.ts";
 
@@ -98,11 +99,24 @@ export function capabilitiesOf(kind: WorkerKind): EmployeeCapabilities {
   if (kind === "codex") return CODEX_CAPABILITIES;
   if (kind === "opencode") return OPENCODE_CAPABILITIES;
   if (kind === "qoder-intl" || kind === "qoder-cn") return QODER_CAPABILITIES;
+  if (kind === "pool") return POOL_CAPABILITIES;
   return NATIVE_CAPABILITIES;
 }
 
 /** 按配置挑一个 worker 雇员；三种实现产出同一个契约：干完有 REPORT.md。 */
 export function createEmployee(kind: WorkerKind): Employee {
+  if (kind === "pool") {
+    // 保险：单独跑 chancellor CLI（不经宿主）时没有注入 PoolClient。这时**回落 native 并告警**，
+    // 不让整单失败——默认档已经从 native 切到 pool（宿主侧 `executor-config.envEmployee`），
+    // 这条兜底保证"没有宿主"的场景仍然能干活。要强制隔离就显式 CHANCELLOR_EMPLOYEE=native。
+    if (!poolAvailable()) {
+      console.warn(
+        "[chancellor] 池执行器未接线（宿主没注入 PoolClient），本单回落 native；要显式选 native 请设 CHANCELLOR_EMPLOYEE=native",
+      );
+      return createNativeEmployee();
+    }
+    return createPoolEmployee();
+  }
   if (kind === "mcp") {
     assertMcpConfigured();
     return createMcpEmployee();
@@ -191,3 +205,14 @@ export {
   type PhoneTask,
   type PhoneTransport,
 } from "./phone.ts";
+export {
+  createPoolEmployee,
+  getManagerPoolBridge,
+  poolAvailable,
+  POOL_CAPABILITIES,
+  setManagerPoolBridge,
+  setPoolClient,
+  ticketIdOfTask,
+  type ManagerPoolBridge,
+  type PoolClient,
+} from "./pool.ts";

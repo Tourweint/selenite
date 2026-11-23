@@ -16,6 +16,7 @@ function readEmployee(): WorkerKind {
   const raw = process.env.CHANCELLOR_EMPLOYEE?.trim().toLowerCase();
   if (
     raw === "mercenary" ||
+    raw === "pool" ||
     raw === "codebuddy" ||
     raw === "qoder-intl" ||
     raw === "qoder-cn" ||
@@ -166,7 +167,7 @@ export function resolveProfile(
   if (kind === "mcp" || kind === "phone") return {};
   // native 只吃 model / modelRoute（2026-11-19 模型分工）：过去这里直接返回 {}，
   // 把 executor 设置里填的工人模型丢掉了；留空仍然不覆盖 worker 的 env 缺省。
-  if (kind === "native") {
+  if (kind === "native" || kind === "pool") {
     const model = profile?.model !== undefined ? profile.model.trim() : "";
     const out: EmployeeProfile = {};
     if (model) out.model = model;
@@ -208,11 +209,14 @@ export function profileEnv(
     if (profile.model !== undefined) env.CHANCELLOR_MODEL = profile.model;
   } else if (kind === "qoder-cn") {
     if (profile.model !== undefined) env.CHANCELLOR_QODER_CN_MODEL = profile.model;
-  } else if (kind === "native") {
-    // 2026-11-19 模型分工：分管宰相子进程里再派 native 子单，模型路由只能走 env 继承。
+  } else if (kind === "native" || kind === "pool") {
+    // 2026-11-19 模型分工：分管宰相子进程里再派 native / pool 子单，模型路由只能走 env 继承。
+    // 2026-11-22：pool 走同一条；另外记下 keyEnv 变量名，池桥把它原样带进 run 载荷，
+    // 密钥值仍由池进程从自己的 env 取（值不过 HTTP）。
     if (profile.model !== undefined) env.CHANCELLOR_LLM_MODEL = profile.model;
     if (profile.modelRoute) {
       env.CHANCELLOR_LLM_BASE_URL = profile.modelRoute.baseUrl;
+      env.CHANCELLOR_LLM_KEY_ENV = profile.modelRoute.keyEnv;
       const key = process.env[profile.modelRoute.keyEnv]?.trim();
       if (key) env.CHANCELLOR_LLM_API_KEY = key;
     }
@@ -234,6 +238,22 @@ export const PLAN_TIMEOUT_MS = readEnvInt("CHANCELLOR_PLAN_TIMEOUT_MS", 180_000)
 
 /** 单个 worker 超时，默认 10 分钟。 */
 export const WORKER_TIMEOUT_MS = readEnvInt("CHANCELLOR_WORKER_TIMEOUT_MS", 10 * 60_000);
+
+/**
+ * 外部 CLI 的单票超时（M2a，2026-11-22）：空闲 + 总时长两个上限，0 = 该项不限。
+ * 与 WORKER_TIMEOUT_MS 并存——后者仍是 native / 还没迁移调用方的墙钟口径，
+ * 不改它的值，避免这次改动顺带改变那些路径的语义。
+ */
+export const WORKER_IDLE_TIMEOUT_MS = readEnvIntUnlimited(
+  "CHANCELLOR_WORKER_IDLE_MS",
+  10 * 60_000,
+);
+
+/** 外部 CLI 单票总时长上限，默认 60 分钟；0 = 不限。 */
+export const WORKER_MAX_TIMEOUT_MS = readEnvIntUnlimited(
+  "CHANCELLOR_WORKER_MAX_MS",
+  60 * 60_000,
+);
 
 /**
  * 下游提示里注入「上游已验收落盘的产物路径清单」（2026-11-08 扫尾批 8e）。
@@ -328,4 +348,15 @@ function readPositiveInt(raw: string | undefined, fallback: number): number {
   if (!raw) return fallback;
   const value = Number(raw);
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+}
+
+/**
+ * 超时类 env：0 / 负数本身是"不限"的合法写法，不能像 readPositiveInt 那样回落默认值。
+ * 只有空值或非数字才回落默认。
+ */
+function readEnvIntUnlimited(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const value = Number(raw);
+  return Number.isFinite(value) ? Math.floor(value) : fallback;
 }

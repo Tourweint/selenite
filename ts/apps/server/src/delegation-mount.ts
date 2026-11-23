@@ -5,12 +5,12 @@
  */
 
 import { listManagers } from "../../../packages/chancellor/src/manager/registry.ts";
-import { Store } from "../../../packages/chancellor/src/store.ts";
+import { readJson, Store } from "../../../packages/chancellor/src/store.ts";
 import { Ticket } from "../../../packages/chancellor/src/types.ts";
 import { bashJobsDir, listBgJobs } from "./bash-background.ts";
 import { DelegationReceipts, TERMINAL_TICKET_STATUS } from "./delegation-receipts.ts";
 import { chancellorWorkRoot, startDelegation } from "./delegation.ts";
-import { appendTaskEvent, getTaskConversation, setTaskBaselineProvider, submitTaskReply, taskAsConversationEnabled } from "./task-conversation.ts";
+import { appendTaskEvent, ensureTaskConversation, getTaskConversation, setTaskBaselineProvider, submitTaskReply } from "./task-conversation.ts";
 import { Hono } from "hono";
 import fs from "node:fs";
 import path from "node:path";
@@ -21,6 +21,7 @@ import type { TicketLocation, TicketSummary } from "./delegation-jobs.ts";
 import { chiefNamesLoader, conversationIdOf, conversationTitlesLoader, externalChatIdsLoader, summarizeFanoutGroup, summarizeTickets } from "./delegation-summary.ts";
 import type { DelegationApiOptions } from "./delegation-summary.ts";
 import { cancelTicketAction, defaultRetryRuntime, forwardWorkerMessageAction, internalConversationId, retryTicketAction } from "./delegation-actions.ts";
+import { createDirectTask } from "./direct-task.ts";
 
 export function mountDelegationApi(app: Hono, opts: DelegationApiOptions = {}): void {
 	const workRootOf = (): string => path.resolve(opts.workRoot ?? chancellorWorkRoot());
@@ -75,6 +76,20 @@ export function mountDelegationApi(app: Hono, opts: DelegationApiOptions = {}): 
 			};
 		});
 		return c.json({ workRoot, domains: managers });
+	});
+
+	// 前端直派任务（2026-11-22）：新建任务不再先开宿主助手会话；直接建票 + 强制池。
+	// 回滚 `DIRECT_TASK_POOL=false` → 执行器跟随设置（见 direct-task.ts）。
+	app.post("/api/v1/agent/tasks", async (c) => {
+		const body = (await c.req.json().catch(() => null)) as
+			| { requirement?: unknown; project?: unknown }
+			| null;
+		const result = await createDirectTask({
+			requirement: typeof body?.requirement === "string" ? body.requirement : "",
+			projectRef: typeof body?.project === "string" ? body.project : undefined,
+		});
+		if (!result.ok) return c.json(result.body, result.status);
+		return c.json(result, 201);
 	});
 
 	app.get("/api/v1/tickets", async (c) => {
@@ -201,9 +216,10 @@ export function mountDelegationApi(app: Hono, opts: DelegationApiOptions = {}): 
 				// 后台任务摘要（批 23 §二）：开关关 / 窗口内没有时**不出现**（正文在 /bg-jobs/:id/log）。
 				...(bgJobs.length > 0 ? { bgJobs } : {}),
 				cancelEnabled: delegationCancelEnabled(),
-				// 任务专线（2026-11-08 扫尾批 8g）：启用开关 + 确定性会话 id（`task-<票号>`）。
+				// 任务专线（2026-11-08 扫尾批 8g）：确定性会话 id（`task-<票号>`）。
 				// 未建过时也会给 id；前端回读 GET messages 得到 404 就按"还没有记录"展示。
-				taskConversationEnabled: taskAsConversationEnabled(),
+				//（TASK_AS_CONVERSATION 回滚开关 2026-11-21 退役，恒 true，字段留给旧客户端。）
+				taskConversationEnabled: true,
 				taskConversationId: getTaskConversation(found.ticket.id)?.conversationId ?? null,
 				// 派活留言（2026-11-07）：谁在什么时候说了什么。老单没有记录 = 空数组。
 				messages: messagesOf(found.ticket.id),
@@ -213,7 +229,14 @@ export function mountDelegationApi(app: Hono, opts: DelegationApiOptions = {}): 
 				...(Array.isArray(found.ticket.steps) && found.ticket.steps.length > 0
 					? { steps: found.ticket.steps }
 					: {}),
-				tasks: found.store.tasksOf(found.ticket.id),
+				tasks: found.store.tasksOf(found.ticket.id).map((task) => {
+					// attempt 链（2026-11-22 M3）：sqlite 不存这一列，任务目录里的
+					// attempt-<n>.json 明文才是事实源；老单没有这些文件 = 不出现额外字段。
+					const last = lastAttemptOf(
+						path.join(found.store.ticketDir(found.ticket.id), task.dir),
+					);
+					return last === null ? task : { ...task, ...last };
+				}),
 				children: found.store.childrenOf(found.ticket.id).map((child) => ({
 					id: child.id,
 					status: child.status,
@@ -281,8 +304,8 @@ export function mountDelegationApi(app: Hono, opts: DelegationApiOptions = {}): 
 	// ── 任务回话（2026-11-08 扫尾批 8g）──────────────────────
 	// 一次 POST 驱动两件事：① 以用户条目写进 `task-<票号>` 专线（忙时 followUp）；
 	// ② 走既有续跑链路把这句话交给执行端（resumeOnly：被拒不改派新单）。
-	// 回滚开关关着时整条路由不挂 → 404（与 cancel/retry 同一口径）。
-	if (taskAsConversationEnabled()) {
+	//（TASK_AS_CONVERSATION 回滚开关 2026-11-21 退役，路由恒挂。）
+	{
 		app.post("/api/v1/tickets/:id/say", async (c) => {
 			const body = (await c.req.json().catch(() => null)) as { text?: unknown } | null;
 			const text = typeof body?.text === "string" ? body.text.trim() : "";
@@ -316,7 +339,13 @@ export function mountDelegationApi(app: Hono, opts: DelegationApiOptions = {}): 
 					);
 				}
 				// 续跑必须有宿主对话（事件与汇报回那里）；与 retry 同口径，字段不够如实 400。
-				const host = internalConversationId(found.ticket, ticketId, storeOf());
+				// 2026-11-22 前端直派任务：老单 / 直派单没有来源会话时，任务专线本身就是
+				// 它的宿主线程——先把它建出来（幂等），再以它为回写目标。
+				let host = internalConversationId(found.ticket, ticketId, storeOf());
+				if (host === null) {
+					const direct = await ensureTaskConversation(ticketId);
+					host = direct?.internalId ?? null;
+				}
 				if (host === null) {
 					return c.json(
 						{
@@ -427,6 +456,42 @@ function ticketStats(runsDir: string): { active: number; total: number } {
 	} finally {
 		store.close();
 	}
+}
+
+/**
+ * 任务目录里最近一次 attempt 的投影（2026-11-22 M3）。
+ *
+ * 只读 `attempt-<n>.json` 的 seq / attempt / class：`class` 是失败枚举，
+ * 成功执行写的是 unknown，这里不展示（成功的任务不该带失败类）。
+ * 文件缺失 / 坏了都不影响详情：返回 null，调用方原样给任务行。
+ */
+function lastAttemptOf(taskDir: string): { attempt: number; failureClass?: string } | null {
+	let names: string[];
+	try {
+		names = fs.readdirSync(taskDir);
+	} catch {
+		return null;
+	}
+	let best: { attempt: number; failureClass?: string } | null = null;
+	for (const name of names) {
+		const matched = /^attempt-(\d+)\.json$/.exec(name);
+		if (!matched) continue;
+		const fileAttempt = Number(matched[1]);
+		if (!Number.isFinite(fileAttempt)) continue;
+		if (best !== null && fileAttempt <= best.attempt) continue;
+		const record = readJson<{ attempt?: unknown; class?: unknown }>(
+			path.join(taskDir, name),
+		);
+		if (record === null) continue;
+		const attempt =
+			typeof record.attempt === "number" ? record.attempt : fileAttempt;
+		const cls = typeof record.class === "string" ? record.class : "";
+		best = {
+			attempt,
+			...(cls !== "" && cls !== "unknown" ? { failureClass: cls } : {}),
+		};
+	}
+	return best;
 }
 
 export { findTicket, readTicket, ticketStats };

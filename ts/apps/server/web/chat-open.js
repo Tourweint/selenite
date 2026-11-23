@@ -22,7 +22,6 @@ import { chiefDisplayName, partnerDisplayName, syncChatHeadAvatar, syncEmptyMark
 import { go, syncRailCurrent, syncSideRowsCurrent } from "./route.js";
 import { beginHomeSettle, cancelHomeSettle, endHomeSettle } from "./shell.js";
 import { state } from "./state.js";
-import { ensureChatPagingFlag } from "./tasks-redesign.js";
 import { toolFlowFromSteps } from "./tool-flow.js";
 import { loadPendingApprovals } from "./turn-reconcile.js";
 import { toast } from "./ui-atoms.js";
@@ -338,10 +337,9 @@ async function openChat(conversationId, { anchor = null, deep = false } = {}) {
   syncChatHeadAvatar();
 
   try {
-    // 分页开关（2026-11-13 按天分组·上滑加载）：开 = 只回读一页，往上滑再前插；
-    // 关 = 退回旧的一次 200 条（deep 搜索兜底始终走全量，只有这条路径付全量代价）。
-    const paging = await ensureChatPagingFlag();
-    const pageMode = paging && !deep;
+    // 分页（2026-11-13 按天分组·上滑加载）：只回读一页，往上滑再前插
+    //（回滚开关 2026-11-21 退役；deep 搜索兜底始终走全量，只有这条路径付全量代价）。
+    const pageMode = !deep;
     const response = await request(
       pageMode
         ? `/api/v1/agent/chat/${encodeURIComponent(conversationId)}/messages?page=1&limit=${CHAT_HISTORY_PAGE_SIZE}`
@@ -401,6 +399,13 @@ async function openChat(conversationId, { anchor = null, deep = false } = {}) {
         el.title.textContent = partnerDisplayName(partnerId);
       }
       syncTitleSessionAffordance(partnerId);
+    } else if (conversationId.startsWith("task-")) {
+      // 任务线程（2026-11-22）：它不是总管、也不是普通助手；标题只说这张单。
+      // chatKind 仍沿用服务端回读（任务会话通常没有 kind），只覆盖顶栏文字。
+      const known = state.chats.find((chat) => chat.conversationId === conversationId)?.title;
+      const first = messages.find((message) => message.role === "user");
+      el.title.textContent =
+        known || (first ? `任务 · ${String(first.text || "").slice(0, 30)}` : "任务");
     } else if (kind === "chief") {
       // 总管（2026-11-13 用户口径）：顶栏回答的是「我在跟谁说话」，答的是总管，
       // 不是「这条会话叫什么」——会话存过什么标题（例如「我的主对话」）不拿到这里来。

@@ -4,6 +4,7 @@ import process from "node:process";
 import { parseArgs } from "node:util";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import {
+  contentText,
   createModels,
   createProvider,
   envApiKeyAuth,
@@ -56,7 +57,8 @@ import {
   nextNoProgressStreak,
   planNextRound,
 } from "./worker-continue.ts";
-import type { ProjectRef } from "./types.ts";
+import { setInternalAsk } from "./internal.ts";
+import type { ProjectRef, QoderResult } from "./types.ts";
 
 /**
  * 原生工作的进程入口，两种角色：
@@ -583,6 +585,11 @@ async function runManagerMain(
   );
 
   const { models, model } = buildModels("manager");
+  // 2026-11-22：manager 进程里再派子单时，拆单用的是 `askInternal()`——host 进程
+  // 注入的核心模型在这里不存在，旧兜底会去 spawn Qoder CLI（本机未配 → 整个
+  // managed 路径拆单失败）。用 manager 自己刚建好的模型装一份内部 ask：
+  // 同一个上游、不挂工具、纯文本完成。
+  installManagerInternalAsk(models, model);
   const storage = await openNodeSqliteStorage(meta.db_path);
   let harness: Harness | null = null;
   try {
@@ -895,6 +902,102 @@ function isInside(parent: string, child: string): boolean {
   const resolved = path.resolve(parent, child);
   const rel = path.relative(parent, resolved);
   return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
+}
+
+/**
+ * manager 进程的内部模型（拆单用）。
+ *
+ * 宿主进程由 `installInternalAsk()` 注入核心模型；manager 是独立进程，拿不到
+ * 那份注入。以前没有注入时 `askInternal()` 回落到 Qoder CLI，而 Qoder 在
+ * 「只维护本机运行时」的部署里没有配置 → 所有 managed 子单拆单 ENOENT。
+ * 这里用 manager 自己的 `models` / `model` 做同一个纯文本完成。
+ */
+function installManagerInternalAsk(
+  models: Models,
+  model: { provider: string; modelId: string },
+): void {
+  setInternalAsk(async (call) => {
+    const target = models.getModel(model.provider, model.modelId);
+    if (!target) {
+      return internalFailure(`内部模型不在模型目录里：${model.provider}/${model.modelId}`);
+    }
+    const controller = new AbortController();
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, call.timeoutMs);
+    const onAbort = (): void => controller.abort();
+    call.signal?.addEventListener("abort", onAbort, { once: true });
+    try {
+      const response = await models.completeSimple(
+        target,
+        {
+          systemPrompt: "你是一个只输出所要求格式的内部文本模型。不要输出解释、前言或额外内容。",
+          messages: [{ role: "user", content: call.prompt, timestamp: Date.now() }],
+        },
+        {
+          signal: controller.signal,
+          maxTokens: call.label === "plan" ? 4000 : 1600,
+          temperature: 0,
+        },
+      );
+      if (response.stopReason === "aborted") {
+        return internalFailure(timedOut ? "内部模型超时" : "已停止", {
+          ...(timedOut ? { timedOut: true } : { aborted: true }),
+        });
+      }
+      if (response.stopReason === "error") {
+        log(
+          `[manager] 内部模型 ${call.label} 调用失败：${(response.errorMessage ?? "unknown").slice(0, 200)}`,
+        );
+        return internalFailure("内部模型调用失败（详见服务端日志）");
+      }
+      const text = contentText(response.content).trim();
+      if (text === "") return internalFailure("内部模型返回为空");
+      return {
+        ok: true,
+        result: text,
+        sessionId: null,
+        isError: false,
+        permissionDenials: 0,
+        exitCode: 0,
+        timedOut: false,
+        aborted: false,
+        stderrTail: "",
+        error: null,
+      };
+    } catch (error) {
+      log(
+        `[manager] 内部模型 ${call.label} 调用异常：${
+          error instanceof Error ? error.message.slice(0, 200) : "unknown"
+        }`,
+      );
+      return internalFailure(
+        timedOut ? "内部模型超时" : "内部模型调用失败（详见服务端日志）",
+        { ...(timedOut ? { timedOut: true } : {}) },
+      );
+    } finally {
+      clearTimeout(timer);
+      call.signal?.removeEventListener("abort", onAbort);
+    }
+  });
+}
+
+function internalFailure(error: string, patch: Partial<QoderResult> = {}): QoderResult {
+  return {
+    ok: false,
+    result: "",
+    sessionId: null,
+    isError: false,
+    permissionDenials: 0,
+    exitCode: null,
+    timedOut: false,
+    aborted: false,
+    stderrTail: "",
+    error,
+    ...patch,
+  };
 }
 
 function buildModels(role: Role): {
