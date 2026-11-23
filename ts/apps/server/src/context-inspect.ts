@@ -139,7 +139,18 @@ const SECTION_META: Record<
 	verification_iron_law: { label: "验证铁律", stability: "fixed" },
 	clarify_contract: { label: "开工前问清", stability: "fixed" },
 	injection_guard: { label: "注入防线", stability: "fixed" },
-	current_project: { label: "当前项目（固定部分）", stability: "session", editable: true },
+	// 派活工人（池）的 profile（2026-11-22 注入页预览）：与 pool/task-profile.ts 同源。
+	worker_rules: { label: "工人纪律", stability: "fixed" },
+	delivery_contract: { label: "交付契约", stability: "fixed" },
+	boundary: { label: "工作边界", stability: "fixed" },
+	task: { label: "任务与完成标准", stability: "session" },
+	project_memory: { label: "项目记忆", stability: "session" },
+	upstream: { label: "前置任务结果", stability: "session" },
+	// 2026-11-21：`current_project` 不再标 editable——它由会话所属项目派生，
+	// 不是一段可单独改写的正文；注入页只展示，改项目要去会话/项目设置。
+	current_project: { label: "当前项目（固定部分）", stability: "session" },
+	// 一生记忆库目录（2026-11-22 记忆外挂源批）：固定前缀段，内容来自库统计，不可单独编辑。
+	persona_catalog: { label: "一生库目录", stability: "fixed" },
 	// 2026-11-17：此前这三个 key 没有中文名，页面直接显示英文裸 key。
 	delegate_executor: { label: "派活执行器", stability: "fixed" },
 	tool_index: { label: "低频工具索引", stability: "fixed" },
@@ -147,7 +158,7 @@ const SECTION_META: Record<
 	// 默认开销里的执事：身份是 instructions，岗位契约/纪律是 extra system message；
 	// 这里各给一个可读的名字，避免页面上出现裸 key。
 	partner_identity: { label: "执事身份", stability: "fixed" },
-	partner_soul: { label: "执事身份 · SOUL", stability: "fixed" },
+	partner_soul: { label: "执事身份 · SOUL", stability: "fixed", editable: true },
 	partner_voice: { label: "执事人设 · 说话方式（口吻）", stability: "fixed" },
 	partner_values: { label: "执事人设 · 里子", stability: "fixed" },
 	partner_scenario: { label: "执事人设 · 处境", stability: "fixed" },
@@ -190,6 +201,8 @@ const SKILL_SECTION_KEYS = new Set(["skills", "skill"]);
  */
 const MESSAGE_INJECTION_LABELS: Record<string, string> = {
 	memory_recall: "记忆召回",
+	// 一生记忆库轻召回（2026-11-22 记忆外挂源批）：消息尾部的【更早的记录】组。
+	persona_recall_light: "一生库轻召回",
 	project_index: "负责项目",
 	current_project_live: "当前项目（本轮）",
 	skill_slash: "技能调用",

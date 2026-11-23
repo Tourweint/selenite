@@ -9,6 +9,7 @@
 
 import { loadDevices, refreshApprovalPopups } from "./approval-pop.js";
 import { loadArchivePage, renderArchiveChats } from "./archive-page.js";
+import { renderAssistantSurfaces } from "./assistant-surfaces.js";
 import { aboutMeMarkup, wireAboutMe } from "./settings-about-me.js";
 import { KEY_NOTIFY } from "./chat-notice.js";
 import { el } from "./dom.js";
@@ -21,17 +22,16 @@ import { openChiefChat } from "./partners-status.js";
 import { resize } from "./plus-menu.js";
 import { openAddProjectModal } from "./project-modal.js";
 import { showProviderTemplates } from "./providers.js";
-import { currentAgentTab, currentPartnerProfileId, currentRoute, currentSettingsPage, go } from "./route.js";
+import { currentInjectTab, currentPartnerProfileId, currentRoute, currentSettingsPage, go } from "./route.js";
 import { openAddSearchSourceModal } from "./search-sources.js";
 import { wireDragScroll } from "./scroll-x.js";
 import { mountSegmented, replayPageEnter, rowMarkup, sectionMarkup, switchMarkup, syncSegmented } from "./settings-atoms.js";
-import { ACCENTS, AGENT_TABS, agentTabsMarkup, renderSettingsNav } from "./settings-base.js";
+import { ACCENTS, INJECT_TABS, injectTabsMarkup, renderSettingsNav } from "./settings-base.js";
 import { compactionSectionMarkup, wireCompactionSection } from "./settings-compaction.js";
 import { contextSettingsMarkup, wireContextSettings } from "./settings-context.js";
 import { toolPoolMarkup, wireToolPool } from "./settings-tools.js";
 import { initRuntimeCard, loadRelayStatus, loadServiceInfo, openAddPhoneModal, openRelayLinkModal, paintConnStar, unlinkRelay } from "./settings-connection.js";
 import { executorSectionMarkup, wireExecutorSettings } from "./settings-executor.js";
-import { memorySettingsMarkupLegacy, wireMemorySettingsLegacy } from "./settings-memory.js";
 import { loadProjectsSettings } from "./settings-projects.js";
 import { loadPolicy, loadReminders, openScheduledTaskModal, renderDefaultModelRow } from "./settings-reminders.js";
 import { loadAutoArchiveSettings, loadFlagsSettings, saveAutoArchiveDays, toggleFlag } from "./settings-switches.js";
@@ -48,16 +48,63 @@ import { chooseDetailMode, getDetailMode } from "./tool-chips.js";
 let connPollTimer = 0;
 
 /**
- * Agent 分区顶部 tab 的接线（2026-11-17）。
- * 点击切到该 tab 保留的旧子路由；切页本身由 applyRoute → renderSettings 接手，
- * 所以这里不直接重画（同一 hash 再点也由 go 早退）。
+ * 注入分区顶部 tab 的接线（2026-11-21）。
+ * 六个 tab 各自保留原来的设置子路由（partners / tools / about-me / memory / skills / context），
+ * 点击只改 hash，渲染由 applyRoute → renderSettings 接手。
  */
-function wireAgentTabs() {
-  for (const button of el.settingsInner.querySelectorAll("[data-agent-tab]")) {
-    const tab = AGENT_TABS.find((item) => item.id === button.dataset.agentTab);
+function wireInjectTabs() {
+  for (const button of el.settingsInner.querySelectorAll("[data-inject-tab]")) {
+    const tab = INJECT_TABS.find((item) => item.id === button.dataset.injectTab);
     if (!tab) continue;
     button.addEventListener("click", () => go("settings", tab.route));
   }
+}
+
+/**
+ * 技能页骨架（2026-11-08 扫尾批 9-S；2026-11-21 从一级分区收进「注入 → 技能」）。
+ * 内容原样搬运，只把外层容器从独立分区换成注入 tab。
+ */
+function skillsSectionMarkup() {
+  return sectionMarkup(
+    "技能",
+    `<div class="sk-head">
+      <div class="row-main">
+        <div class="set-card-title" data-tip="技能 = 给 AI 的操作手册（第 1 行是索引摘要，其余是正文）。默认全关：开了才进 agent 的技能索引；对话里输入 /技能名 直接调用。开关对已在跑的会话不生效，下一个会话开始。">技能库</div>
+        <div class="sk-path" id="skill-path">读取中…</div>
+      </div>
+      <div class="sk-head-actions">
+        <button class="ghost" type="button" id="skill-advice-run" title="跳到总管对话并填好评估提示词：你看过点发送，总管逐条评估后把结果存回快照（用你当前选的模型，不换模型）">让 Agent 评估</button>
+        <button class="btn-primary" type="button" id="skill-add">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+          新建技能
+        </button>
+      </div>
+    </div>
+    <div class="sk-advice-banner" id="skill-advice-banner" hidden></div>
+    <div class="sk-toolbar" id="skill-toolbar">
+      <div class="sk-select" id="skill-filter" hidden></div>
+      <div class="sk-select" id="skill-sort"></div>
+      <span class="sk-toolbar-spacer"></span>
+      <button class="ghost sk-bulk" type="button" id="skill-bulk" title="批量开启 / 关闭全部技能（需要确认）">全部开启</button>
+    </div>
+    <div class="sk-list" id="skill-list">
+      <div class="set-hint">读取中…</div>
+    </div>`,
+  );
+}
+
+function wireSkillsPage() {
+  document.getElementById("skill-add")?.addEventListener("click", () => openCreateSkillChoiceModal());
+  document.getElementById("skill-bulk")?.addEventListener("click", () => openBulkSkillModal());
+  document
+    .getElementById("skill-advice-run")
+    ?.addEventListener("click", () => void runSkillAdvice());
+  // 建议按钮在 banner 里动态重建：监听挂在容器上，一次就够
+  document.getElementById("skill-advice-banner")?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-skill-apply]");
+    if (button) applySkillAdvice();
+  });
+  void loadSkills();
 }
 
 async function renderSettings() {
@@ -339,11 +386,15 @@ async function renderSettings() {
       ?.addEventListener("change", () => renderArchiveChats());
     void loadArchivePage();
   } else if (page === "agent") {
-    // Agent 合并分区（2026-11-17 用户口径）：人设 / 上下文 / 工具 / 派活 四页收成一个分区，
-    // 左栏只占一行，内容顶部用四分段 tab 切换。
-    // 四个旧子路由（partners / context / tools / executor）原样保留为各 tab 的地址：
-    // 老书签、抽屉「去编辑这个人」、上下文页里的人设跳转都不用改，tab 由 hash 认。
-    const tab = currentAgentTab();
+    // 派活（2026-11-21 用户口径）：人设 / 技能 / 上下文 / 工具都挪去「注入」后，
+    // 这一分区只剩一件事——派出打手、选默认工人与各 CLI 的模型/权限。
+    // 不再挂 tab 条（一项挂条是多余的）；旧子路由 #/settings/executor 由 SETTINGS_ALIASES 落回这里。
+    el.settingsInner.innerHTML = executorSectionMarkup();
+    void wireExecutorSettings();
+  } else if (page === "inject") {
+    // 注入分区（2026-11-21 用户口径）：先索引，再注入；人设 / 技能也收进来。
+    // 六个 tab 的顺序按上下文位置：人设 → 工具 → 关于我 → 索引 → 技能 → 上下文。
+    const tab = currentInjectTab();
     if (tab === "personas") {
       const profileId = currentPartnerProfileId();
       // 普通助手是全局一份人设，不是执事档案：不请求 /partners/worker。
@@ -358,11 +409,23 @@ async function renderSettings() {
         replayPageEnter();
         return;
       }
-      // 标题不再重复 tab 名的「人设」：四张导航卡已经说了这是哪一页，
+      // 标题不再重复 tab 名的「人设」：导航卡已经说了这是哪一页，
       // 这里只留内容自己的名字「总管与执事」+ 新建动作（2026-11-18）。
-      el.settingsInner.innerHTML = agentTabsMarkup(tab) + sectionMarkup(
+      el.settingsInner.innerHTML = injectTabsMarkup(tab) + sectionMarkup(
         `<span data-tip="一个执事一份档案：点进去改头像、写人设、定岗位、看能力与档案，一页到底。">总管与执事</span>`,
-        `<div class="pt-list" id="partner-list">
+        `<div class="card as-card" id="assistant-surfaces">
+          <div class="set-card-body">
+            <div class="set-card-head">
+              <div class="row-main">
+                <div class="set-card-title" data-tip="总管 / 执事 / 普通助手 / 派活工人（池）各自的人设与可用工具；能改的给入口，固定的如实标固定。">助手的人设与工具</div>
+              </div>
+            </div>
+            <div class="as-body">
+              <div class="as-loading set-hint">读取中…</div>
+            </div>
+          </div>
+        </div>
+        <div class="pt-list" id="partner-list">
           <div class="set-hint">读取中…</div>
         </div>`,
         "",
@@ -371,29 +434,47 @@ async function renderSettings() {
           新建执事
         </button>`,
       );
+      // 助手总览卡（2026-11-22）：只重画卡内 .as-body，标题与卡身留在页面里。
+      // 不 await、不让异常冒出来——端点 404 / 超时 / 数据坏掉时它自己藏卡，
+      // 下面的 partner-list 该读照读。
+      const surfacesCard = document.getElementById("assistant-surfaces");
+      const surfacesBody = surfacesCard?.querySelector(".as-body");
+      if (surfacesCard && surfacesBody) {
+        void renderAssistantSurfaces(surfacesBody)
+          .then((shown) => {
+            if (!shown) surfacesCard.hidden = true;
+          })
+          .catch(() => {
+            surfacesCard.hidden = true;
+          });
+      }
       document.getElementById("partner-add")?.addEventListener("click", () => openCreatePartnerModal());
       void loadPartners();
-    } else if (tab === "context") {
-      // 设置 → Agent → 上下文（2026-11-16）：只读当前会话的固定前缀；会变部分只报数量。
-      el.settingsInner.innerHTML = agentTabsMarkup(tab) + contextSettingsMarkup();
-      wireContextSettings();
     } else if (tab === "tools") {
-      // 设置 → Agent → 工具（2026-11-17）：全局工具池，统一决定每个工具是常驻还是按需。
+      // 工具池（2026-11-17）：全局决定每个工具是常驻还是按需。
       // 写的是 .data/tool-pool.json；deferred 是注册期属性，保存后需重启服务生效。
-      el.settingsInner.innerHTML = agentTabsMarkup(tab) + toolPoolMarkup();
+      el.settingsInner.innerHTML = injectTabsMarkup(tab) + toolPoolMarkup();
       wireToolPool();
+    } else if (tab === "about-me") {
+      // 关于我（2026-11-19）：全局一份主人档案 + 每 Agent 读取开关。
+      // 正文每轮现读，改完下一轮生效；上下文 tab 的 `user_profile` 段显示实际注入。
+      el.settingsInner.innerHTML = injectTabsMarkup(tab) + aboutMeMarkup();
+      void wireAboutMe();
+    } else if (tab === "memory") {
+      // 记忆页 A 版（2026-11-13 用户拍板）：现在是「注入 → 索引」。
+      el.settingsInner.innerHTML = injectTabsMarkup(tab) + memorySettingsMarkup();
+      void wireMemorySettings();
+    } else if (tab === "skills") {
+      // 技能页（2026-11-08）：给 AI 的操作手册；2026-11-21 从一级分区收进注入。
+      el.settingsInner.innerHTML = injectTabsMarkup(tab) + skillsSectionMarkup();
+      wireSkillsPage();
     } else {
-      // 派活（2026-11-16 多 CLI 打手适配）：选任务中心用哪个 CLI + 各 CLI 的模型/权限。
-      // 数据走 GET/PUT /api/v1/agent/executor；落 .data/executor.json，下一次派活生效。
-      el.settingsInner.innerHTML = agentTabsMarkup(tab) + executorSectionMarkup();
-      void wireExecutorSettings();
+      // 上下文（2026-11-16 起，2026-11-21 起可改可编辑段）：一条请求装了什么，
+      // 以及默认开销里每一段能不能就地改。工具池与记忆在隔壁 tab。
+      el.settingsInner.innerHTML = injectTabsMarkup(tab) + contextSettingsMarkup();
+      wireContextSettings();
     }
-    wireAgentTabs();
-  } else if (page === "about-me") {
-    // 关于我（2026-11-19）：全局一份主人档案 + 每 Agent 读取开关。
-    // 正文每轮现读，改完下一轮生效；上下文页的 `user_profile` 段显示实际注入。
-    el.settingsInner.innerHTML = aboutMeMarkup();
-    void wireAboutMe();
+    wireInjectTabs();
   } else if (page === "projects") {
     // 2026-11-12 重做：工作区根与项目目录平级（ZCode 多根语义），同一种行、路径可改；
     // 项目动作只有「改名 / 归档」（归档是软退场，归档页可恢复），不再有「移除/删除」说法。
@@ -638,6 +719,9 @@ async function renderSettings() {
           <div class="mdl-main">
             <div class="mdl-name" id="mdl-current">…</div>
             <div class="mdl-sub" id="mdl-hint">读取中…</div>
+            <!-- 全局默认思考档（2026-11-21）：新会话按这一档起步；分段按钮由
+                 renderDefaultModelRow 按当前模型的支持域画，没设过 = off。 -->
+            <div class="mdl-think" id="mdl-think" hidden></div>
           </div>
           <button class="ghost mdl-change" type="button" id="mdl-change" hidden>更换</button>
         </div>
@@ -696,51 +780,6 @@ async function renderSettings() {
       event.stopPropagation();
     });
     void loadModelsInfo();
-  } else if (page === "memory") {
-    // 2026-11-13 A 版：MEMORY_PAGE_A=false 整套退回旧页（旧 DOM / 旧逻辑都还在）。
-    const pageA = await ensureFlag("MEMORY_PAGE_A", true);
-    if (currentSettingsPage() !== "memory") return;
-    el.settingsInner.innerHTML = pageA ? memorySettingsMarkup() : memorySettingsMarkupLegacy();
-    if (pageA) void wireMemorySettings();
-    else void wireMemorySettingsLegacy();
-  } else if (page === "skills") {
-    el.settingsInner.innerHTML = `${sectionMarkup(
-      "技能",
-      `<div class="sk-head">
-        <div class="row-main">
-          <div class="set-card-title" data-tip="技能 = 给 AI 的操作手册（第 1 行是索引摘要，其余是正文）。默认全关：开了才进 agent 的技能索引；对话里输入 /技能名 直接调用。开关对已在跑的会话不生效，下一个会话开始。">技能库</div>
-          <div class="sk-path" id="skill-path">读取中…</div>
-        </div>
-        <div class="sk-head-actions">
-          <button class="ghost" type="button" id="skill-advice-run" title="跳到总管对话并填好评估提示词：你看过点发送，总管逐条评估后把结果存回快照（用你当前选的模型，不换模型）">让 Agent 评估</button>
-          <button class="btn-primary" type="button" id="skill-add">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
-            新建技能
-          </button>
-        </div>
-      </div>
-      <div class="sk-advice-banner" id="skill-advice-banner" hidden></div>
-      <div class="sk-toolbar" id="skill-toolbar">
-        <div class="sk-select" id="skill-filter" hidden></div>
-        <div class="sk-select" id="skill-sort"></div>
-        <span class="sk-toolbar-spacer"></span>
-        <button class="ghost sk-bulk" type="button" id="skill-bulk" title="批量开启 / 关闭全部技能（需要确认）">全部开启</button>
-      </div>
-      <div class="sk-list" id="skill-list">
-        <div class="set-hint">读取中…</div>
-      </div>`,
-    )}`;
-    document.getElementById("skill-add")?.addEventListener("click", () => openCreateSkillChoiceModal());
-    document.getElementById("skill-bulk")?.addEventListener("click", () => openBulkSkillModal());
-    document
-      .getElementById("skill-advice-run")
-      ?.addEventListener("click", () => void runSkillAdvice());
-    // 建议按钮在 banner 里动态重建：监听挂在容器上，一次就够
-    document.getElementById("skill-advice-banner")?.addEventListener("click", (event) => {
-      const button = event.target.closest("[data-skill-apply]");
-      if (button) applySkillAdvice();
-    });
-    void loadSkills();
   }
   // 刻意没有兜底 else：currentSettingsPage() 只会返回上面这些 id（未知 hash 落「外观」）。
   // 旧的「未知页显示关于」在 2026-11-18 关于并入「本机」后不再成立，留着反而骗人。

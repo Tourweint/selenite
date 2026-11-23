@@ -29,12 +29,14 @@ process.env.ROUTINES_STATE_PATH = join(root, "routines.json");
 process.env.AUTONOMY_STATE_PATH = join(root, "autonomy-state.json");
 process.env.AGENT_SKILLS_STATE_PATH = join(root, "skills-state.json");
 process.env.PARTNER_TOOLS_ENABLED = "true";
+process.env.WORKER_TOOLS_PATH = join(root, "worker-tools.json");
 
 const {
   DEFAULT_SECTION_KEYS,
   completeDefaultSections,
   contextDefaultPayload,
 } = await import("./context-defaults.ts");
+const { assistantSurfacesPayload } = await import("./assistant-surfaces.ts");
 const { partnersStore } = await import("./partners.ts");
 const { CHIEF_PARTNER_ID } = await import("./partner-contract.ts");
 
@@ -124,6 +126,55 @@ test("默认页含 tool_index 段，但 tools 不含 deferred 工具（2026-11-1
 	]) {
 		assert.ok(!names.includes(deferred), `${deferred} 不在初始默认工具面`);
 	}
+});
+
+test("dispatch-worker：池任务 profile 的九段 + 五件工具（2026-11-22）", async () => {
+  const payload = await contextDefaultPayload("dispatch-worker");
+  assert.ok(payload, "dispatch-worker 默认页可读");
+  assert.equal(payload!.role.kind, "dispatch");
+  assert.equal(payload!.role.label, "派活工人（池）");
+  const keys = payload!.system.sections.map((section) => section.key);
+  for (const key of [
+    "worker_rules",
+    "injection_guard",
+    "verification_iron_law",
+    "persona",
+    "task",
+    "project_memory",
+    "upstream",
+    "delivery_contract",
+    "boundary",
+  ]) {
+    assert.ok(keys.includes(key), `缺 ${key}`);
+  }
+  const persona = payload!.system.sections.find((section) => section.key === "persona");
+  assert.equal(persona?.editable, true, "人设段可编辑（共用的 worker-persona）");
+  assert.match(persona?.text ?? "", /^<persona>/);
+  assert.deepEqual(
+    payload!.tools.items.map((tool) => tool.name),
+    ["read", "write", "edit", "bash", "escalate"],
+  );
+  assert.equal(payload!.skills.count, 0, "池工人不读技能索引");
+});
+
+test("assistant-surfaces：总管 / 普通助手 / 派活工人（池）都有，池只给五件", () => {
+  const { surfaces } = assistantSurfacesPayload();
+  const byId = new Map(surfaces.map((surface) => [surface.id, surface]));
+  assert.ok(byId.get("chief"), "缺总管");
+  assert.ok(byId.get("worker"), "缺普通助手");
+  const dispatch = byId.get("dispatch-worker");
+  assert.ok(dispatch, "缺派活工人（池）");
+  assert.equal(dispatch!.kind, "dispatch");
+  assert.deepEqual(dispatch!.tools.names, ["read", "write", "edit", "bash", "escalate"]);
+  assert.equal(dispatch!.contextHash, "#/settings/context?role=dispatch-worker");
+  assert.deepEqual(dispatch!.fixed, [
+    "工人纪律",
+    "注入防线",
+    "验证铁律",
+    "交付契约",
+    "工作边界",
+  ]);
+  assert.ok(dispatch!.persona.editable, "池人设走共用的 worker-persona，可编辑");
 });
 
 test("PARTNER_TOOLS_ENABLED=false：默认页不过滤（回滚到所有人同一份工具面）", async () => {

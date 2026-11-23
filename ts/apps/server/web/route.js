@@ -16,7 +16,7 @@ import { partnerIdOfConversation } from "./partner-sessions.js";
 import { stopMemoryPolling } from "./memory-page.js";
 import { closeProjectMenu } from "./project-modal.js";
 import { closeRailCards } from "./rail-card.js";
-import { AGENT_TABS, SETTINGS_ALIASES, SETTINGS_SECTIONS } from "./settings-base.js";
+import { INJECT_TABS, SETTINGS_ALIASES, SETTINGS_SECTIONS } from "./settings-base.js";
 import { renderSettings } from "./settings-router.js";
 import { closeMenu } from "./shell.js";
 import { state } from "./state.js";
@@ -106,7 +106,7 @@ function syncSideRowsCurrent() {
   }
 }
 
-/** 任务页的查询参数（ticket / domain / project / sort），路由与筛选共用一份 */
+/** 任务页的查询参数（ticket），路由共用一份。筛选与排序 2026-11-21 随旧看板退役。 */
 function tasksParams() {
   const hash = location.hash.replace(/^#/, "");
   if (!hash.startsWith("/tasks")) return new URLSearchParams();
@@ -119,24 +119,14 @@ function currentTicketId() {
 }
 
 /**
- * 任务中心地址：筛选与排序写进 hash，刷新后还能记住。
- * 详情只多一个 ticket；看板时不带，避免把详情状态留在地址里。
+ * 任务中心地址：详情多一个 ticket；列表时不带，避免把详情状态留在地址里。
+ * （筛选与排序写 hash 的旧逻辑 2026-11-21 随旧看板退役。）
  */
 function tasksHash({ ticket = "" } = {}) {
   const query = new URLSearchParams();
   if (ticket) query.set("ticket", ticket);
-  if (state.domainFilter) query.set("domain", state.domainFilter);
-  if (state.projectFilter) query.set("project", state.projectFilter);
-  if (state.sort && state.sort !== "recent") query.set("sort", state.sort);
   const text = query.toString();
   return text ? `#/tasks?${text}` : "#/tasks";
-}
-
-/** 改筛选时用 replaceState：不往浏览器历史里塞一串筛选记录，也不触发 applyRoute */
-function writeTasksHash(ticket = currentTicketId()) {
-  const next = tasksHash({ ticket });
-  if (location.hash === next) return;
-  history.replaceState(null, "", `${location.pathname}${location.search}${next}`);
 }
 
 /** 设置子路由的第一段：#/settings/partners/chief → "partners"；空/未知就是空串。 */
@@ -144,31 +134,32 @@ function settingsRoutePart() {
   return location.hash.replace(/^#\/settings\/?/, "").split(/[?#]/)[0].split("/")[0];
 }
 
-/** Agent 合并分区（2026-11-17）：四个旧子路由 → 四个 tab。
-    注意只在**调用时**读 AGENT_TABS：route.js 与 settings-base.js 是循环引用，
-    模块顶层去 map 它会在另一条 import 顺序上撞 TDZ（见文件头）。 */
-function agentTabOfRoute(part) {
-  return AGENT_TABS.find((tab) => tab.route === part)?.id || "";
+/** 注入分区（2026-11-21）：六个旧子路由 → 六个 tab。只在调用时读 INJECT_TABS，
+    因为 route.js 与 settings-base.js 是循环引用，模块顶层 map 会撞 TDZ（见文件头）。 */
+function injectTabOfRoute(part) {
+  return INJECT_TABS.find((tab) => tab.route === part)?.id || "";
 }
 
 /**
- * 当前落在 Agent 分区的哪个 tab：人设 / 上下文 / 工具 / 派活。
- * 认四个旧子路由（tab 切换直接复用它们，老书签不用改）；其余情况落第一个 tab（人设）。
+ * 当前落在注入分区的哪个 tab：人设 / 工具 / 关于我 / 索引 / 技能 / 上下文。
+ * 认六条子路由（六页原来的地址）；其余情况落第一个 tab（人设）。
  */
-function currentAgentTab() {
-  return agentTabOfRoute(settingsRoutePart()) || AGENT_TABS[0].id;
+function currentInjectTab() {
+  return injectTabOfRoute(settingsRoutePart()) || INJECT_TABS[0].id;
 }
 
 /** 设置子页：#/settings/外观 → "appearance"；缺省落「外观」（同 cindy 的 ?tab=） */
 function currentSettingsPage() {
-  // 二级页也走同一条前缀：#/settings/partners/<id> 仍然算「人设」这个分区，
+  // 二级页也走同一条前缀：#/settings/partners/<id> 仍然算「人设」这个分区（现在归注入），
   // 具体是谁由 currentPartnerProfileId 再从地址里取（2026-11-14 C 版）。
   const part = settingsRoutePart();
   // 旧分区 id 走别名账（2026-11-18 合并后：archive→chats、service/about→connect；
-  // sessions、avatars 是更早的两层旧书签）。落对原来的去处，别掉回「外观」。
+  // 2026-11-21：avatars→inject、executor→agent）。落对原来的去处，别掉回「外观」。
   const alias = SETTINGS_ALIASES[part];
   if (alias) return alias;
-  if (agentTabOfRoute(part)) return "agent";
+  // 2026-11-21：人设 / 工具 / 关于我 / 记忆 / 技能 / 上下文 六条旧子路由都落「注入」分区，
+  // 具体 tab 由 currentInjectTab() 再从同一个 hash 认。
+  if (injectTabOfRoute(part)) return "inject";
   return SETTINGS_SECTIONS.some((section) => section.id === part) ? part : "appearance";
 }
 
@@ -239,13 +230,6 @@ function applyRoute() {
   if (route !== "group") stopGroupPulse();
   // 记忆页整理轮询只在该路由里跑：离开设置页就停（2026-11-13）
   if (route !== "settings") stopMemoryPolling();
-  // 群组侧栏的选中态只在群组路由里成立：离开群组页后「所有群聊」不该还亮着
-  // （2026-11-07 修：openGroupsView 只在进群组页时写 aria-current，回对话页就不再有
-  // 人复位它，实测高亮会一直挂在那里）。
-  el.secGroupsAll?.setAttribute(
-    "aria-current",
-    String(route === "group" && !groupRouteId()),
-  );
   el.toggleSidebar.hidden = route === "settings";
   el.openSettings.setAttribute("aria-current", String(route === "settings"));
   // 轨道 / 展开侧栏的「你在这里」（2026-11-13 选中态批）：黄色只表示当前所在；
@@ -279,4 +263,4 @@ function applyRoute() {
   }
 }
 
-export { applyRoute, currentAgentTab, currentPartnerLineId, currentPartnerProfileId, currentRailSection, currentRoute, currentSettingsPage, currentTicketId, go, groupRouteId, mapRouteId, noteRouteChange, setRouteGuard, syncRailCurrent, syncSideRowsCurrent, tasksHash, tasksParams, writeTasksHash };
+export { applyRoute, currentInjectTab, currentPartnerLineId, currentPartnerProfileId, currentRailSection, currentRoute, currentSettingsPage, currentTicketId, go, groupRouteId, mapRouteId, noteRouteChange, setRouteGuard, syncRailCurrent, syncSideRowsCurrent, tasksHash, tasksParams };

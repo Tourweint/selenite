@@ -26,7 +26,8 @@ import {
 import { buildPartnerTurnContext, splitContractSections } from "./agent/partner-context.ts";
 import { CHANCELLOR_ENABLED, PERSONA, memoryEngine, skillStore } from "./agent/assist.ts";
 import { executorLine } from "./executor-config.ts";
-import { readWorkerPersona } from "./worker-persona.ts";
+import { readWorkerPersona, WORKER_PERSONA_CHAT_TOOLS } from "./worker-persona.ts";
+import { WORKER_SKILL_OWNER, workerSkillScopeEnabled } from "./skill-state.ts";
 import {
   CHIEF_PARTNER_ID,
   COMPANIONS_ENABLED,
@@ -40,9 +41,12 @@ import {
   type ContextInspectPayload,
 } from "./context-inspect.ts";
 import { modelToolCatalog, partnerToolsEnabled } from "./partner-tools.ts";
-import { toolIndexEnabled, toolIndexText } from "./tool-index.ts";
+import { toolIndexText } from "./tool-index.ts";
+import { buildTaskProfileSections } from "./pool/task-profile.ts";
+import { poolToolCatalog } from "./pool/pool-tools.ts";
+import { workerToolsPayload } from "./worker-tools.ts";
 
-export type ContextDefaultKind = "chief" | "partner" | "worker";
+export type ContextDefaultKind = "chief" | "partner" | "worker" | "dispatch";
 
 export interface ContextDefaultRole {
   /** 前端选择值：chief / worker / partner:<id> */
@@ -95,6 +99,13 @@ export function contextDefaultRoles(): ContextDefaultRole[] {
     }
   }
   roles.push({ id: "worker", label: "普通 worker", kind: "worker", chatKind: "worker" });
+  // 第二套运行时（2026-11-22）：派活工人（池）的 profile 与普通会话不同，单列一档。
+  roles.push({
+    id: "dispatch-worker",
+    label: "派活工人（池）",
+    kind: "dispatch",
+    chatKind: "worker",
+  });
   return roles;
 }
 
@@ -213,13 +224,14 @@ function pushField(
   else pushRawField(sections, key, "");
 }
 
-/** 技能索引的“人”：主对话 / worker 在执事能力开启时落到总管，执事用自己的 id。 */
+/** 技能索引的“人”：普通助手用自己的命名空间（2026-11-21），执事用真实 id，主对话回落 chief。 */
 function skillPartnerOfRole(role: ContextDefaultRole): string | null {
   if (!COMPANIONS_ENABLED) return null;
   if (role.kind === "partner") {
     const partnerId = role.id.slice("partner:".length);
     return partnerId || null;
   }
+  if (role.kind === "worker" && workerSkillScopeEnabled()) return WORKER_SKILL_OWNER;
   return CHIEF_PARTNER_ID;
 }
 
@@ -284,8 +296,10 @@ function buildDefaultSections(
       sections,
       "persona",
       // 2026-11-16：默认开销页看到的是 worker 人设的当前值（每轮现读，同一份全局文件）。
+      // 2026-11-22：会话里实际多拼一句工具提示（WORKER_PERSONA_CHAT_TOOLS），基线页也要算进去，
+      // 否则默认开销比真实请求少一截、还让人以为句是"凭空多出来的"。
       role.kind === "worker"
-        ? readWorkerPersona()
+        ? readWorkerPersona() + WORKER_PERSONA_CHAT_TOOLS
         : resolvePersona(partnersStore, PERSONA),
     );
     pushField(sections, "verification_iron_law", providerText(verificationIronLawProvider, baseCtx));
@@ -307,7 +321,8 @@ function buildDefaultSections(
   // 低频工具索引（C 段）：算进默认基线，让默认开销页看到"新会话初始会读到什么"。
   // 工具面本身仍不含 deferred（defaultTools 过滤），这里只是把索引段的字节数记进来。
   // chief / partner / worker 工具面本来就一样，只有 disabledTools 勾选差异。
-  if (toolIndexEnabled()) {
+  //（AGENT_TOOL_INDEX 回滚开关 2026-11-21 退役，索引段恒渲染——名单空则整段省略。）
+  {
     const deferred = modelToolCatalog()
       .filter((tool) => tool.deferred === true && !disabled.has(tool.name))
       .map((tool) => ({ name: tool.name, description: tool.description }));
@@ -325,7 +340,9 @@ function buildDefaultSections(
  * 别让一个目录故障把整页打成 503。目的：默认开销页看到的就是这个人真实能看到的工具面。
  */
 function disabledToolsOfRole(role: ContextDefaultRole): Set<string> {
-  if (!partnerToolsEnabled() || role.kind === "worker") return new Set();
+  if (!partnerToolsEnabled() || role.kind === "worker" || role.kind === "dispatch") {
+    return new Set();
+  }
   try {
     const row =
       role.kind === "chief"
@@ -352,6 +369,68 @@ function defaultTools(disabled: ReadonlySet<string> = new Set()): ToolRegistrati
     tools.push(tool);
   }
   return tools;
+}
+
+/** 派活工人（池）预览用的占位文本：真实单子由拆单器写入，这里只显示段结构。 */
+const DISPATCH_PLACEHOLDER_TASK = "（任务要求：由拆单器写入）";
+const DISPATCH_PLACEHOLDER_DONE = "（完成标准：由拆单器写入）";
+
+/**
+ * 派活工人（池）的默认上下文（2026-11-22 注入页预览）。
+ *
+ * 与 `pool/task-profile.ts` 的 `buildTaskProfileSections` 同源：固定段顺序、人设段、
+ * 交付契约、工作边界都取真实实现；任务/项目记忆/前置任务用占位或 0 字槽位。
+ * 这样设置页看到的不是手抄的第二份清单，而是池进程真正会读到的那几段。
+ */
+function buildDispatchSections(): Array<{ key: string; text: string }> {
+  const persona = readWorkerPersona();
+  const taskSections = buildTaskProfileSections({
+    persona,
+    instruction: DISPATCH_PLACEHOLDER_TASK,
+    doneWhen: DISPATCH_PLACEHOLDER_DONE,
+    taskDir: "<任务目录>",
+    workDir: "<工作目录>",
+    writes: [],
+  });
+  const byKey = new Map<string, string>(
+    taskSections.map((section) => [section.key, section.text]),
+  );
+  // 固定顺序；project_memory / upstream 即使预览里没有内容也保留 0 字槽位，
+  // 用户才知道“这两段存在、只是这单没有”。
+  const order = [
+    "worker_rules",
+    "injection_guard",
+    "verification_iron_law",
+    "persona",
+    "task",
+    "project_memory",
+    "upstream",
+    "delivery_contract",
+    "boundary",
+  ];
+  return order
+    .filter((key) => byKey.has(key) || key === "project_memory" || key === "upstream")
+    .map((key) => {
+      // persona 只展示可编辑的正文；「## 你是谁」标题与冲突说明是固定的代码包装，
+      // 不塞进 text——否则用户在上下文页保存会把包装写回 worker-persona.md。
+      const raw = key === "persona" ? persona : (byKey.get(key) ?? "");
+      return { key, text: sectionText(key, raw) ?? "" };
+    });
+}
+
+/** 池工人实际可用的五件（按 worker-tools 当前勾选过滤；escalate 恒开）。 */
+function dispatchTools(): ToolRegistration[] {
+  try {
+    const payload = workerToolsPayload();
+    const allowed = new Set([
+      ...payload.granted,
+      ...(payload.escalate ? ["escalate"] : []),
+    ]);
+    return poolToolCatalog().filter((tool) => allowed.has(tool.name));
+  } catch {
+    // 读配置失败：显示完整五件，不把设置页打成 503。
+    return poolToolCatalog();
+  }
 }
 
 function defaultView(
@@ -387,10 +466,14 @@ export async function contextDefaultPayload(
   const role = roleOf(roleId, roles);
   if (!role) return null;
 
-  await getHarness();
+  const isDispatch = role.kind === "dispatch";
+  // 池工人预览不依赖宿主 Harness：段与工具都从池自己的 profile 取。
+  if (!isDispatch) await getHarness();
   const disabled = disabledToolsOfRole(role);
-  const tools = defaultTools(disabled);
-  const sections = completeDefaultSections(buildDefaultSections(role, disabled));
+  const tools = isDispatch ? dispatchTools() : defaultTools(disabled);
+  const sections = isDispatch
+    ? buildDispatchSections()
+    : completeDefaultSections(buildDefaultSections(role, disabled));
   const view = defaultView(sections, tools);
   const payload = contextInspectPayloadOf({
     conversationId: "",
@@ -398,7 +481,7 @@ export async function contextDefaultPayload(
     chatKind: role.chatKind,
     usage: null,
     view,
-    memoryEnabled: Boolean(memoryEngine),
+    memoryEnabled: isDispatch ? false : Boolean(memoryEngine),
     lastInjections: null,
   });
   return {

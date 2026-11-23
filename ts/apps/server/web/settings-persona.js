@@ -168,7 +168,7 @@ function renderCsPersonaPage() {
   body.append(soulCard);
 
   // 提醒沉淀入口（2026-11-19 批4）：低频动作，小按钮一行；流程与记忆页同一份
-  //（收集候选 → 确认弹窗 → 跳总管预填蒸馏）。采纳在设置 → 记忆页，这里不重复摆卡片。
+  //（收集候选 → 确认弹窗 → 跳总管预填蒸馏）。采纳在设置 → 注入 → 索引页，这里不重复摆卡片。
   const distillRow = document.createElement("div");
   distillRow.className = "cs-hint";
   distillRow.style.cssText = "display:flex;align-items:center;gap:12px;padding:2px 14px 0;";

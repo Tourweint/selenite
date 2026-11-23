@@ -286,12 +286,10 @@
 }
 .ctx-row-body { padding: 0 14px 12px; }
 .ctx-row-body[hidden] { display: none; }
-.ctx-row.is-open .ctx-chevron { transform: rotate(180deg); }
-
+/* 2026-11-21（箭头统一批）：180° 翻面 → 全站 90° 口径，旋转/过渡移到 style-27 的 .chev */
 .ctx-chevron {
   flex: 0 0 auto; width: 14px; height: 14px;
   color: var(--text-3);
-  transition: transform .18s var(--ease-standard);
 }
 
 .ctx-text {
@@ -331,6 +329,11 @@
 .ctx-badge.is-fixed { background: var(--surface-low); color: var(--text-3); }
 .ctx-badge.is-session { background: var(--c-secondary-container); color: var(--c-on-secondary-container); }
 .ctx-badge.is-turn { background: var(--accent-soft); color: var(--accent); }
+/* 2026-11-21：可编辑段给一个明确的入口徽标，和「固定 / 每轮」区分开。 */
+.ctx-badge.is-editable { background: var(--accent-soft); color: var(--accent); }
+
+/* 展开行底部的「改这一节」：不抢正文的视觉重量，靠右一枚文字按钮。 */
+.ctx-edit-row { display: flex; justify-content: flex-end; margin-top: 8px; }
 
 .ctx-note {
   padding: 11px 14px 12px;
@@ -423,6 +426,10 @@
 .ctx-req-rate.is-good { color: var(--c-success, #4c7a53); }
 .ctx-req-rate.is-mid { color: var(--c-warning, #a9782f); }
 .ctx-req-rate.is-bad { color: var(--c-danger, #b4553f); }
+/* 命中率列齐左（2026-11-21 用户口径）：骤降标志跟在数字后面，右对齐时会把 % 顶得参差；
+   数字齐左，prompt / 命中 / 写出三列数字仍齐右。 */
+.ctx-req-head span:nth-child(7),
+.ctx-req-rate { text-align: left; }
 .ctx-cache-pager {
   display: flex; align-items: center; justify-content: flex-end;
   gap: 8px; margin-top: 8px;

@@ -6,7 +6,7 @@
  * 端点：GET/PUT /api/v1/agent/user-profile、PUT /api/v1/agent/user-profile/agents/:id。
  *
  * 页面只做三件事：改正文、保存、切开关。上下文是否真的注入了，去
- * 设置 → Agent → 上下文 看 `user_profile` 段（默认开销与当前会话两处都会显示）。
+ * 设置 → 注入 → 上下文 看 `user_profile` 段（默认开销与当前会话两处都会显示）。
  */
 
 import { esc } from "./markdown.js";
@@ -70,7 +70,7 @@ export function aboutMeMarkup() {
     `<div class="card pf-panel">
       <div id="up-agents"><div class="set-hint">读取中…</div></div>
       <p class="pf-hint">开关下一轮生效。普通 worker 与派活工人固定不读。</p>
-      <p class="pf-hint"><a href="#/settings/context">去 设置 → Agent → 上下文 看实际注入</a></p>
+      <p class="pf-hint"><a href="#/settings/context">去 设置 → 注入 → 上下文 看实际注入</a></p>
     </div>`,
   )}`;
 }

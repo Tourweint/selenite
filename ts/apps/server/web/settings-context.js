@@ -7,15 +7,21 @@
  *   - 当前会话：只画已经进请求的东西；默认开销：把全部可注入字段（含 0）画进来，0 的行点开写「当前没有开销」。
  * 口径见 docs/设计方案/2026-11-17-上下文页重画（已注入视图）.md。
  *
- * 这一页**不提供编辑**：纪律 / 契约的编辑入口在执事档案页（#/settings/partners/<id>），
- * 这里只留一个跳过去的链接（2026-11-17 用户拍板：能改就全改，不如不在这里改）。
+ * 这一页 2026-11-21 起**可改**（用户口径：注入内容要能在一个页面里改）：
+ * 默认开销与当前会话里标了 `editable` 的段，展开后有「改这一节」；
+ * 保存直接写回源头（人设 / 关于我 / 岗位契约 / 当前目标 / 纪律），再刷新这一页。
+ * 代码固定段（验证铁律、注入防线、派活执行器…）没有编辑入口，只展示。
+ * 记忆与工具在「注入」分区的隔壁 tab：索引页管记忆，工具页管常驻/按需。
  */
 
+import { chevSvg } from "./icons.js";
 import { esc } from "./markdown.js";
 import { request } from "./net.js";
 import { parsePartnerExternalId } from "./partner-sessions.js";
 import { currentRoute } from "./route.js";
+import { openContextSectionEditor } from "./settings-context-edit.js";
 import { state } from "./state.js";
+import { toast } from "./ui-atoms.js";
 
 const STABILITY = {
 	fixed: { label: "固定", cls: "is-fixed" },
@@ -147,7 +153,48 @@ function selectedChatId(choices) {
 	return choices[0]?.conversationId || "";
 }
 
-/** 默认开销的角色：总管 → 活跃执事 → 普通 worker。服务端还会回一份完整 roles，用于校正这里的花名册。 */
+/** 深链 #/settings/context?role=... 认的角色名（执事另走 partner:<id>）。 */
+const DEEP_LINK_ROLES = new Set(["chief", "worker", "dispatch-worker"]);
+
+/**
+ * 深链 `#/settings/context?role=dispatch-worker` 里的 role（2026-11-22）。
+ * 只认 chief / worker / dispatch-worker / partner:<id>；别的值当成没写，回落总管，不弹错。
+ * 地址里没有 query 时返回空串——旧 hash 的页面行为保持逐字不变。
+ */
+function deepLinkRoleFromHash() {
+	const hash = location.hash.replace(/^#/, "");
+	if (!hash.startsWith("/settings/context")) return "";
+	const text = hash.split("?")[1] || "";
+	let raw = "";
+	try {
+		raw = new URLSearchParams(text).get("role") || "";
+	} catch {
+		raw = "";
+	}
+	const id = raw.trim();
+	if (!id) return "";
+	if (DEEP_LINK_ROLES.has(id)) return id;
+	const partnerId = /^partner:([A-Za-z0-9._-]+)$/.exec(id)?.[1] || "";
+	if (!partnerId) return "";
+	// 执事花名册已经读回来时顺手校验一次：不存在的执事也当没写，宁可看总管也不报 404。
+	const known = (state.partners || []).filter(
+		(partner) => partner && partner.id && partner.id !== "chief",
+	);
+	if (known.length && !known.some((partner) => partner.id === partnerId && partner.status === "active")) {
+		return "";
+	}
+	return `partner:${partnerId}`;
+}
+
+/** 深链点的角色还不在花名册里时先补一项（等 syncRoleOptions 拿服务端的 roles 校正）。 */
+function withDeepLinkRole(roles, roleId) {
+	if (!roleId || roles.some((role) => role.id === roleId)) return roles;
+	const partnerId = roleId.startsWith("partner:") ? roleId.slice("partner:".length) : "";
+	const label = partnerId ? partnerName(partnerId) || "执事" : "派活工人（池）";
+	return [...roles, { id: roleId, label }];
+}
+
+/** 默认开销的角色：总管 → 活跃执事 → 普通 worker → 派活工人（池）兜底。服务端还会回一份完整 roles，用于校正这里的花名册。 */
 function defaultRoleChoices() {
 	const roles = [{ id: "chief", label: "总管" }];
 	for (const partner of state.partners || []) {
@@ -155,6 +202,9 @@ function defaultRoleChoices() {
 		roles.push({ id: `partner:${partner.id}`, label: partner.name || "执事" });
 	}
 	roles.push({ id: "worker", label: "普通 worker" });
+	// 2026-11-22：深链 #/settings/context?role=dispatch-worker 要在服务端 roles 回来前就能选中，
+	// 先摆一个兜底项；真名册回来后由 syncRoleOptions 换掉。
+	roles.push({ id: "dispatch-worker", label: "派活工人（池）" });
 	return roles;
 }
 
@@ -200,8 +250,8 @@ function badgeMarkup(stability) {
 	return `<span class="ctx-badge ${meta.cls}">${meta.label}</span>`;
 }
 
-const CHEVRON =
-	'<svg class="ctx-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>';
+// 2026-11-21（箭头统一批）：指下/180° 翻面 → 全站口径指右/90°（旋转行为在 style-27 的 .chev）
+const CHEVRON = chevSvg("ctx-chevron chev");
 
 /** 一行 = 名字 + 徽标 + token；点开是原文，空行点开是「当前没有开销」。 */
 function rowMarkup(row) {
@@ -228,11 +278,17 @@ function rowMarkup(row) {
     <button class="ctx-row-head" type="button" data-ctx-row aria-expanded="false">
       ${seq}<span class="ctx-row-name${mono}">${esc(row.name)}</span>${tag}${
 				row.stability ? badgeMarkup(row.stability) : ""
-			}
+			}${row.editable ? '<span class="ctx-badge is-editable">可编辑</span>' : ""}
       <span class="ctx-row-tokens">${fmtTokens(row.tokens)} token</span>
       ${CHEVRON}
     </button>
-    <div class="ctx-row-body" hidden>${body}</div>
+    <div class="ctx-row-body" hidden>${body}${
+			row.editable && row.key
+				? `<div class="ctx-edit-row"><button class="ctx-link" type="button" data-ctx-edit="${esc(
+						row.key,
+					)}">改这一节</button></div>`
+				: ""
+		}</div>
   </div>`;
 }
 
@@ -331,9 +387,13 @@ function contextSettingsMarkup() {
 	// 用户不聊天也能看到总管基线，不必先点模式按钮。
 	const hasRealChats = (state.chats || []).some((chat) => chat && chat.conversationId);
 	contextMode = hasRealChats ? "session" : "default";
-	const roles = defaultRoleChoices();
-	const selectedRole = roles[0]?.id || "chief";
-	// 2026-11-18：四张导航卡已经写着「上下文」，节标题不再重复一遍；
+	// 2026-11-22：深链带了 role 就直接看这个角色的默认开销；没带时上面的旧口径逐字不变。
+	const deepLinkRole = deepLinkRoleFromHash();
+	if (deepLinkRole) contextMode = "default";
+	const roles = withDeepLinkRole(defaultRoleChoices(), deepLinkRole);
+	const selectedRole = deepLinkRole || roles[0]?.id || "chief";
+	// 2026-11-18：导航卡已经写着「上下文」，节标题不再重复一遍；
+	// 2026-11-21：注入分区有六张卡，上下文排最后（实际注入的账）。
 	// 工具栏自带「当前会话 / 默认开销」两个模式，直接当这一页的入口。
 	return `<div id="ctx-content" data-mode="${contextMode}">
     <section class="set-sec">
@@ -574,6 +634,25 @@ function renderHero(data) {
 	return total;
 }
 
+/**
+ * 哪些段真的能在这页改：服务端 `editable` 是字段级标记，还要看当前角色。
+ * 总管 / worker 的默认开销里会保留执事字段的 0 字槽位（岗位契约、纪律、目标…），
+ * 这些槽位对它们不适用，不能给「可编辑」徽标和按钮，否则点开只能报错。
+ */
+function canEditSection(section, data) {
+	if (!section.editable) return false;
+	// 2026-11-21：当前项目由会话所属项目派生，不是一段可单独改写的正文。
+	// 服务端已经不再标 editable；这里再兜一道，旧服务端也不会给出入口。
+	if (String(section.key || "") === "current_project") return false;
+	const partnerRole = data.default
+		? data.role?.kind === "partner"
+		: Boolean(currentPartnerIdValue) || data.chatKind === "partner";
+	// 执事没有通用 persona 段；它的身份由 partner_soul 承载，别在两行上重复开同一个编辑入口。
+	if (partnerRole && String(section.key || "") === "persona") return false;
+	if (!partnerRole && String(section.key || "").startsWith("partner_")) return false;
+	return true;
+}
+
 /** 分组列表：两个模式同一套，差别只在“哪些行在”和“0 怎么办”。 */
 function buildGroups(data) {
 	const isDefault = Boolean(data.default);
@@ -617,10 +696,14 @@ function buildGroups(data) {
 	for (const section of data.system.sections || []) {
 		if (!isDefault && Number(section.tokens) <= 0) continue;
 		systemRows.push({
+			key: section.key,
 			name: section.label,
 			tokens: section.tokens,
 			text: section.empty ? "" : section.text,
 			stability: section.stability,
+			// 2026-11-21：服务端标了 editable 的段才给「改这一节」；代码固定段不假装能改，
+			// 非执事角色里的执事字段 0 字槽位也不给入口。
+			editable: canEditSection(section, data),
 		});
 	}
 	if (systemRows.length) {
@@ -849,9 +932,9 @@ function renderNote() {
 		return;
 	}
 	note.hidden = false;
-	note.innerHTML = `这个执事的人设、纪律与岗位契约在档案页改：<button class="ctx-link" type="button" data-ctx-partner="${esc(
+	note.innerHTML = `标了「可编辑」的段展开后能直接改；人格模块、工具勾选与档案仍在 <button class="ctx-link" type="button" data-ctx-partner="${esc(
 		partnerId,
-	)}">去 ${esc(partnerName(partnerId) || "档案页")}</button>`;
+	)}">${esc(partnerName(partnerId) || "档案页")}</button>。`;
 }
 
 function renderContext(data) {
@@ -1083,7 +1166,31 @@ async function loadRequests(page = 1, conversationId = "") {
 	}
 }
 
-function compareMarkup(compare, sectionLabels) {
+/**
+ * 消息层结论（2026-11-21）：按服务端算好的 shared / replaced / appended 转成人话。
+ * 临时注入不在存档里，这里说的都是已存档的正文前缀。
+ */
+function messageVerdict(compare) {
+	const diff = compare.messages || null;
+	if (!diff) return { text: "", broke: false };
+	if (diff.replaced > 0) {
+		return {
+			text: `已存档消息从第 ${fmtNum(diff.shared + 1)} 条起与上一条不同（旧 ${fmtNum(diff.replaced)} 条被换掉${
+				diff.appended > 0 ? `、另追加 ${fmtNum(diff.appended)} 条` : ""
+			}）——可缓存前缀在这里断掉`,
+			broke: true,
+		};
+	}
+	if (diff.appended > 0) {
+		return {
+			text: `已存档消息与上一条逐条一致，往后只追加了 ${fmtNum(diff.appended)} 条（追加不改前缀）`,
+			broke: false,
+		};
+	}
+	return { text: "已存档消息与上一条完全一致", broke: false };
+}
+
+function compareMarkup(compare, sectionLabels, hitRate) {
 	if (!compare) {
 		return `<div class="ctx-cache-compare">这是保留窗口里的第一条请求，没有可对比的上一条。</div>`;
 	}
@@ -1102,12 +1209,21 @@ function compareMarkup(compare, sectionLabels) {
 		const removed = compare.toolsRemoved.length ? `−${compare.toolsRemoved.join("、")}` : "";
 		changes.push(`工具面 ${[added, removed].filter(Boolean).join(" ") || "声明变了"}`);
 	}
-	if (!changes.length) {
-		return `<div class="ctx-cache-compare is-good">与上一条请求相比：固定前缀与工具面都没变。</div>`;
+	const verdict = messageVerdict(compare);
+	const tail = compare.at ? `（上一条 · ${esc(fmtAt(compare.at))}）` : "";
+	if (!changes.length && !verdict.broke) {
+		// 0% 且前缀完全一致：把「锅在上游」写在脸上，不给“是不是我这边改了什么”留悬念。
+		const attribution =
+			Number(hitRate) < 0.05
+				? `这条命中率 ${pct(hitRate)}——可缓存前缀其实完全一致，没命中是上游把缓存丢了（过期 / 淘汰 / 上游不稳），不是这边改了前缀`
+				: "";
+		const body = [verdict.text, attribution].filter(Boolean).join("；");
+		return `<div class="ctx-cache-compare is-good">与上一条请求相比：固定前缀与工具面都没变${
+			body ? `；${esc(body)}` : ""
+		}${tail}。</div>`;
 	}
-	return `<div class="ctx-cache-compare is-warn">与上一条请求相比：${esc(
-		changes.join("；"),
-	)}${compare.at ? `（上一条 · ${esc(fmtAt(compare.at))}）` : ""}。</div>`;
+	const pieces = [...changes, verdict.text].filter(Boolean);
+	return `<div class="ctx-cache-compare is-warn">与上一条请求相比：${esc(pieces.join("；"))}${tail}。</div>`;
 }
 
 /** 单条请求详情：与上一条的差异 + 固定前缀 + 当时已存档的消息。 */
@@ -1140,7 +1256,7 @@ function requestDetailMarkup(data, seq) {
 		String(row.model || "unknown").replace(/#.*$/, ""),
 	)} · prompt ${fmtTokens(row.promptTokens)} token · 命中 ${pct(row.hitRate)}`;
 	return `<div class="ctx-req-detail-meta">${meta}</div>
-    ${compareMarkup(data.compare, labels)}
+    ${compareMarkup(data.compare, labels, row.hitRate)}
     ${groupSectionMarkup(
 			{
 				label: "固定前缀",
@@ -1310,6 +1426,55 @@ function focusGroup(key) {
 	}
 }
 
+/**
+ * 这一页当前在改谁：默认开销直接看选中的角色；当前会话从会话 id 认执事，
+ * 认不到再按 chatKind 落总管 / worker。
+ */
+function currentEditRole() {
+	const data = currentData;
+	if (!data) return null;
+	if (data.default) {
+		const roleId = String(data.role?.id || "chief");
+		return {
+			roleId,
+			partnerId: roleId.startsWith("partner:") ? roleId.slice("partner:".length) : "",
+		};
+	}
+	const chat = (state.chats || []).find((item) => item && item.conversationId === data.conversationId);
+	const partnerId =
+		partnerIdOfChat(chat) ||
+		partnerIdOfChat({ conversationId: data.conversationId }) ||
+		currentPartnerIdValue;
+	if (partnerId) return { roleId: `partner:${partnerId}`, partnerId };
+	return { roleId: data.chatKind === "worker" ? "worker" : "chief", partnerId: "" };
+}
+
+/** 展开行里的「改这一节」：找到这一段的原文与角色，打开对应源头的编辑弹层。 */
+function openEditorFor(key) {
+	if (!key) return;
+	const group = currentGroups.find((item) => (item.rows || []).some((row) => row.key === key));
+	const row = group?.rows.find((item) => item.key === key);
+	if (!row) return;
+	const role = currentEditRole();
+	if (!role) {
+		toast("先选一个会话或角色，再改这一节");
+		return;
+	}
+	closePopover();
+	void openContextSectionEditor(
+		{
+			key,
+			label: row.name,
+			text: String(row.text || ""),
+			roleId: role.roleId,
+			partnerId: role.partnerId,
+		},
+		() => {
+			void loadContext();
+		},
+	);
+}
+
 function wireClicks() {
 	const root = document.getElementById("ctx-content");
 	if (!root) return;
@@ -1319,6 +1484,12 @@ function wireClicks() {
 		const modeButton = target.closest("[data-ctx-mode]");
 		if (modeButton) {
 			setMode(modeButton.dataset.ctxMode);
+			return;
+		}
+		// 2026-11-21：可编辑段的「改这一节」——就地改源头，保存后刷新这一页。
+		const editButton = target.closest("[data-ctx-edit]");
+		if (editButton) {
+			openEditorFor(editButton.dataset.ctxEdit || "");
 			return;
 		}
 		const scaleButton = target.closest("[data-ctx-scale]");

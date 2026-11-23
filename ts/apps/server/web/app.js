@@ -36,6 +36,8 @@ import { syncEmptyMark } from "./partners-status.js";
 import "./tool-flow.js";
 import { mountCtxCard } from "./chat-notice.js";
 import "./markdown.js";
+import { initHtmlCards } from "./html-cards.js";
+import { setHtmlCardsEnabled } from "./markdown.js";
 import "./chat-open.js";
 import "./composer-send.js";
 import "./approval-card.js";
@@ -106,7 +108,7 @@ import { loadCapabilities } from "./plus-menu.js";
 import { refreshProjectPill } from "./project-modal.js";
 import { applyRoute, currentRoute, go } from "./route.js";
 import { wireSearchPage } from "./search-page.js";
-import { AGENT_TABS, SETTINGS_ALIASES, SETTINGS_SECTIONS } from "./settings-base.js";
+import { INJECT_TABS, SETTINGS_ALIASES, SETTINGS_SECTIONS } from "./settings-base.js";
 import { applySections, applySidebarA11y, syncGreeting, updateHomeMode } from "./shell.js";
 import { state } from "./state.js";
 import { loadTickets } from "./tasks-kanban.js";
@@ -152,11 +154,11 @@ void (async () => {
     if (deepView.startsWith("settings")) {
       if (currentRoute() !== "settings") {
         const sub = deepView.slice("settings".length).replace(/^\//, "");
-        // 旧深链（?view=settings/context 等）也要继续落对页：合并后的分区（Agent）与
-        // 别名账（archive/service/about…）都算已知，渲染时由 currentSettingsPage() 认回落点。
+        // 旧深链（?view=settings/context 等）也要继续落对页：注入分区与别名账
+        // （archive/service/about、avatars/executor…）都算已知，渲染时由 currentSettingsPage() 认回落点。
         const known =
           SETTINGS_SECTIONS.some((section) => section.id === sub) ||
-          AGENT_TABS.some((tab) => tab.route === sub) ||
+          INJECT_TABS.some((tab) => tab.route === sub) ||
           sub in SETTINGS_ALIASES;
         go("settings", known ? sub : undefined);
       }
@@ -176,6 +178,12 @@ void (async () => {
   void ensureFlag("CHAT_STREAM_REVEAL", true).then((value) => {
     state.chatRevealFlag = value;
   });
+  // 交互卡片开关（2026-11-21）：首屏拉一次；渲染期读的是模块内默认值，
+  // 开关晚到只影响之后的消息（回滚 CHAT_HTML_CARDS）。
+  void ensureFlag("CHAT_HTML_CARDS", true).then((value) => {
+    setHtmlCardsEnabled(value);
+  });
+  initHtmlCards(); // 占位符观察 + 报高监听，全局一份
   void loadCapabilities(); // 附件 / 编辑重发的开关投影（2026-11-08 4a）
   void loadRoster(); // E4：执事花名册首帧
   void initGroups(); // 群组（2026-11-06 批二）：可用性探测 + 侧栏节首帧

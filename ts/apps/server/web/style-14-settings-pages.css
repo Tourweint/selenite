@@ -407,7 +407,8 @@
   color: var(--c-error);
 }
 .proj-menu-kbd { margin-left: auto; font-size: 10.5px; color: var(--text-3); }
-.proj-menu-sep { height: 1px; margin: 4px -2px; background: var(--divider); }
+/* display:block 必须带（2026-11-21）：JS 建的是 <span>，行内不吃 height，同 .sec-menu-sep 的坑 */
+.proj-menu-sep { display: block; height: 1px; margin: 4px -2px; background: var(--divider); }
 /* 28px 小号 ghost：行内/卡内动作的标准尺寸（不再有 26px 那一档） */
 .ghost.is-mini { height: 28px; padding: 0 10px; font-size: 11.5px; border-radius: var(--r-md); }
 .proj-path-input.is-inline { flex: 1 1 auto; width: 100%; height: 28px; font-size: 11.5px; }
@@ -596,6 +597,19 @@
    行条目直接复用 model-menu 的 .model-row / .model-item（style-12）。 */
 .executor-profiles { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
 .executor-select { flex: 0 1 220px; width: 220px; }
+/* 默认派给谁：自绘按钮（2026-11-21 箭头统一批，替换原生 select）
+   34px 高的 set-input 底子 + 右侧 chev-ud（开合翻 180°，行为在 style-27） */
+.executor-kind-box { position: relative; display: flex; }
+.executor-kind-btn {
+  display: inline-flex; align-items: center; justify-content: space-between;
+  gap: 10px; padding: 0 10px 0 12px;
+  cursor: pointer;
+}
+.executor-kind-btn:disabled { cursor: default; }
+.executor-kind-btn .chev-ud { flex: none; width: 14px; height: 14px; color: var(--text-3); }
+.executor-kind-btn > span {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .executor-card .row-label { display: inline-flex; align-items: center; gap: 6px; }
 .executor-model-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .executor-model-box {
@@ -614,6 +628,8 @@
 }
 .executor-model-toggle:hover { background: var(--surface-low); color: var(--text); }
 .executor-model-toggle:disabled { opacity: .45; cursor: default; }
+/* 2026-11-21（箭头统一批）：svg 挂 .chev-ud，面板开合翻 180°（aria-expanded 在按钮上，
+   旋转规则在 style-27；rotate 只落在 svg 上，不碰按钮自己的 translateY 定位） */
 .executor-model-toggle svg { width: 14px; height: 14px; }
 .executor-model-menu {
   position: fixed; z-index: 60;
@@ -622,7 +638,10 @@
   border: 1px solid var(--composer-border);
   border-radius: 12px;
   box-shadow: var(--shadow-menu);
+  /* 进场只淡入不位移：朝上开的变体有内联 translateY(-100%)，keyframes 一碰 transform 就打架 */
+  animation: executor-menu-in .16s var(--ease-standard);
 }
+@keyframes executor-menu-in { from { opacity: 0; } }
 .executor-model-menu[hidden] { display: none; }
 .executor-model-note {
   padding: 7px 10px 5px;
@@ -647,6 +666,11 @@
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
   margin-bottom: 22px;
+}
+/* 2026-11-21：注入分区有六个 tab，宽屏三列两行，每张卡才装得下图标 + 名称 + 注脚；
+   窄屏仍走下面的两列规则（属性选择器优先级更高，必须限定 min-width）。 */
+@media (min-width: 801px) {
+  .set-tabs[data-count="6"] { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 .set-tab {
   display: flex; align-items: center; gap: 10px;
@@ -703,4 +727,51 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .set-tab, .set-tab-icon, .set-tab-label { transition: none; }
+}
+
+/* ── 注入 → 人设 · 助手的人设与工具卡（2026-11-22）──────────────
+   一张卡按档列行（总管 / 执事 / 普通助手 / 派活工人）：行首是「名字 + kind 小徽标」，
+   下面是人设预览、工具 chips、可调 / 固定标签、动作按钮。字号与间距跟设置页现有行一致
+   （11.5–13px、gap 5–8px），卡内衬交给 .set-card-body，只吃现有令牌，不新造色值。 */
+.as-card .set-card-body { gap: 10px; }
+.as-body { display: flex; flex-direction: column; gap: 8px; }
+.as-body[hidden] { display: none; }
+.as-row {
+  display: flex; flex-direction: column; gap: 6px;
+  min-width: 0; padding: 9px 10px;
+  border: 1px solid var(--divider); border-radius: var(--r-md);
+  background: var(--surface-low);
+}
+.as-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.as-name, .as-head .as-label {
+  min-width: 0; overflow-wrap: anywhere;
+  font-size: 13px; font-weight: 500; line-height: 1.4; color: var(--text);
+}
+/* 徽标本身复用 .pill-tag；行首左边不留边距（.pill-tag 默认 margin-left: 6px） */
+.as-kind { margin-left: 0; flex: none; }
+.as-persona {
+  margin: 0; font-size: 12px; line-height: 1.5; color: var(--text-2);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.as-chars { margin-left: 6px; font-size: 11px; color: var(--text-3); }
+.as-tools { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.as-chip {
+  display: inline-block; max-width: 100%; padding: 1px 6px;
+  border: 1px solid var(--divider); border-radius: var(--r-full);
+  background: var(--card); color: var(--text-3);
+  font-family: var(--mono); font-size: 10.5px; line-height: 1.5;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 工具名是标识符，走等宽；可调 / 固定是中文短语，走正文字体 */
+.as-adjustable .as-chip, .as-fixed { font-family: inherit; color: var(--text-2); }
+.as-more { color: var(--text-3); }
+.as-tags, .as-adjustable {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  font-size: 11.5px; line-height: 1.5; color: var(--text-3);
+}
+.as-tag-label { flex: none; color: var(--text-3); }
+.as-acts { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.as-act { height: 26px; padding: 0 9px; font-size: 12px; }
+@media (max-width: 640px) {
+  .as-act { height: 28px; }
 }

@@ -151,6 +151,26 @@ test("执事身份拆节：说话方式单独命名；SOUL / 边界等六节各�
 	assert.equal(voice?.chars, 0);
 });
 
+test("可编辑标记：SOUL 可改；当前项目由会话派生，不标可编辑", () => {
+	const out = contextInspectViewOf(
+		viewOf([
+			{
+				role: "system",
+				content: "",
+				sections: {
+					partner_soul: "我是阿岚",
+					current_project: "当前项目：lifediary",
+				},
+				timestamp: 0,
+			},
+		]),
+	);
+	const soul = out.system.sections.find((section) => section.key === "partner_soul");
+	assert.equal(soul?.editable, true, "2026-11-21 起执事 SOUL 可在注入页直接改");
+	const project = out.system.sections.find((section) => section.key === "current_project");
+	assert.equal(project?.editable, undefined, "当前项目不是可改写的正文");
+});
+
 test("空字段：text 为空也保留一行并标记 empty（默认页用来显示 0 字槽位）", () => {
 	const out = contextInspectViewOf(
 		viewOf([

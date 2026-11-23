@@ -53,27 +53,29 @@ const SETTINGS_SECTIONS = [
   },
   {
     /**
-     * Agent 合并分区（2026-11-17 用户口径）：人设 / 上下文 / 工具 / 派活 四页收成一个入口，
-     * 左栏只占一行，内容顶部用一条四分段 tab 切换。四页原来的 hash 各自保留
-     * （#/settings/partners、/context、/tools、/executor），老书签与跨页跳转不用改；
-     * 分区 → tab 的映射表在下面 AGENT_TABS，currentSettingsPage() 把四个旧 id 都认成 agent。
-     * Lucide bot：机器人头 = 「这个 Agent 本身」，比四个旧图标里任何一个都更像总入口。
+     * 派活（2026-11-21 用户口径）：人设 / 技能 / 上下文 / 工具都挪去「注入」后，
+     * Agent 分区只剩派活这一件事——派出打手、选默认工人与各 CLI 的模型/权限。
+     * 不再挂 tab 条（一项挂条是多余的）；旧子路由 #/settings/executor 仍可达。
+     * Lucide send：派出打手。
      */
     id: "agent",
-    label: "Agent",
-    desc: "人设、上下文、工具与派活：发出去的那条消息由谁、带什么、谁来干",
-    icon: '<path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/>',
+    label: "派活",
+    desc: "派出打手：默认派给谁、各 CLI 的模型与权限",
+    icon: '<path d="M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z"/><path d="m21.854 2.147-10.94 10.939"/>',
   },
   {
     /**
-     * 关于我（2026-11-19）：全局一份的主人档案，每轮作为 system 段注入给会读它的 Agent。
-     * 不是记忆（不参与召回）、不是人设（不改 SOUL）；编辑入口与「谁读」开关都在这一页。
+     * 注入（2026-11-21 用户口径）：「先索引，再注入」。
+     * 人设 = 它是谁，工具 = 能做什么，关于我 = 固定注入，索引 = 挑过的记忆，
+     * 技能 = 操作手册，上下文 = 实际注入的账。六页收成一个入口，六页原来的 hash
+     * 各自保留为 tab 地址（#/settings/partners、/tools、/about-me、/memory、/skills、/context），
+     * 老书签不空页。这一页还负责把「用户能改的注入内容」就地改掉，不再只是看。
      */
-    id: "about-me",
-    label: "关于我",
-    desc: "称呼、输入习惯、说话禁忌：全局一份，按 Agent 开关读取",
-    // Lucide user-round：一个人 = 主人自己的固定档案。
-    icon: '<circle cx="12" cy="8" r="5"/><path d="M20 21a8 8 0 0 0-16 0"/>',
+    id: "inject",
+    label: "注入",
+    desc: "先索引再注入：人设、工具、关于我、索引、技能与上下文，一页看清并改",
+    // Lucide arrow-down-to-line：内容往下灌进请求。
+    icon: '<path d="M12 17V3"/><path d="m6 11 6 6 6-6"/><path d="M19 21H5"/>',
   },
   {
     id: "projects",
@@ -122,47 +124,27 @@ const SETTINGS_SECTIONS = [
     // Lucide chart-column：一眼认出是统计，不用把「用量」读成才懂。
     icon: '<path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/>',
   },
-  {
-    id: "memory",
-    label: "记忆",
-    desc: "长期记忆：看过什么、记住什么",
-    // Lucide brain 0.468 完整八图元（2026-11-06）：只取左右两瓣会画成「（ ）」，
-    // 内部的沟回才是让它在 15px 下仍认得出是「脑」的部分。
-    icon: '<path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/><path d="M17.599 6.5a3 3 0 0 0 .399-1.375"/><path d="M6.003 5.125A3 3 0 0 0 6.401 6.5"/><path d="M3.477 10.896a4 4 0 0 1 .585-.396"/><path d="M19.938 10.5a4 4 0 0 1 .585.396"/><path d="M6 18a4 4 0 0 1-1.967-.516"/><path d="M19.967 17.484A4 4 0 0 1 18 18"/>',
-  },
-  // 2026-11-17：「人设」并入 Agent 分区（见上）；旧路由 #/settings/partners 仍可达，
-  // 由 currentSettingsPage() 别名到 agent、currentAgentTab() 认回「人设」这个 tab。
-  {
-    id: "skills",
-    label: "技能",
-    desc: "给 AI 的操作手册：可开关、可导入",
-    // 2026-11-08 扫尾批 9-S：技能 = 给 AI 的操作手册，用 book-open 比拼图更贴"手册"这件事
-    icon: '<path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/>',
-  },
+  // 2026-11-21：记忆 / 技能都并入「注入」分区（索引 / 技能 tab），不再单独占左栏。
 ];
 
 /**
- * Agent 分区里的四个 tab（2026-11-17 合并）。
+ * 注入分区里的六个 tab（2026-11-21 用户口径：先索引，再注入；人设 / 技能也收进来）。
  *
- * `id` 是 tab 标识（currentAgentTab() 的返回值），`route` 是它保留的**旧设置子路由**：
- * tab 切换就是切到那条旧 hash，这样老书签、抽屉里的「去编辑这个人」、上下文页里的人设链接
- * 全都不用改。顺序 = 左到右：先「是谁」，再「看到什么 / 能用什么」，最后「活派给谁」。
- * 第一个 tab 是人设，也是 #/settings/agent（不带子路由）的默认落点。
+ * 顺序按「它在上下文里的位置」排：人设先（system 第一段），工具第二（能力面最先被看到），
+ * 关于我第三（固定注入的主人档案），索引第四（挑过的记忆），技能第五（操作手册），
+ * 上下文最后（实际注入的账——它是结果，不是原料）。
+ *
+ * 六个 route 就是六页原来的 hash：`partners` / `tools` / `about-me` / `memory` / `skills` / `context`。
+ * 老书签、抽屉「去编辑这个人」、技能页入口零改动。
  */
-const AGENT_TABS = [
+const INJECT_TABS = [
   {
     id: "personas",
     label: "人设",
-    blurb: "是谁",
+    blurb: "它是谁",
     route: "partners",
-    icon: '<circle cx="12" cy="8" r="5"/><path d="M20 21a8 8 0 0 0-16 0"/>',
-  },
-  {
-    id: "context",
-    label: "上下文",
-    blurb: "看到什么",
-    route: "context",
-    icon: '<path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/>',
+    // Lucide bot：Agent 原来的图标，人设挪进来后仍代表「这个 Agent 本身」。
+    icon: '<path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/>',
   },
   {
     id: "tools",
@@ -172,40 +154,63 @@ const AGENT_TABS = [
     icon: '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
   },
   {
-    id: "executor",
-    label: "派活",
-    blurb: "谁去干",
-    route: "executor",
-    icon: '<path d="M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z"/><path d="m21.854 2.147-10.94 10.939"/>',
+    id: "about-me",
+    label: "关于我",
+    blurb: "固定注入",
+    route: "about-me",
+    icon: '<circle cx="12" cy="8" r="5"/><path d="M20 21a8 8 0 0 0-16 0"/>',
+  },
+  {
+    id: "memory",
+    label: "索引",
+    blurb: "挑有用的",
+    route: "memory",
+    // Lucide brain：记忆原来的图标，挪到 tab 上仍然一眼认出。
+    icon: '<path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/><path d="M17.599 6.5a3 3 0 0 0 .399-1.375"/><path d="M6.003 5.125A3 3 0 0 0 6.401 6.5"/><path d="M3.477 10.896a4 4 0 0 1 .585-.396"/><path d="M19.938 10.5a4 4 0 0 1 .585.396"/><path d="M6 18a4 4 0 0 1-1.967-.516"/><path d="M19.967 17.484A4 4 0 0 1 18 18"/>',
+  },
+  {
+    id: "skills",
+    label: "技能",
+    blurb: "操作手册",
+    route: "skills",
+    icon: '<path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/>',
+  },
+  {
+    id: "context",
+    label: "上下文",
+    blurb: "实际注入",
+    route: "context",
+    icon: '<path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/>',
   },
 ];
 
 /**
  * 旧分区 id → 现在的落点（合并后的别名账，currentSettingsPage() 与 app.js 深链共用一份）。
- * 2026-11-07 sessions→chats、avatars→agent；2026-11-18 归档并入会话、服务与关于并入本机。
+ * 2026-11-07 sessions→chats、avatars→agent；2026-11-18 归档并入会话、服务与关于并入本机；
+ * 2026-11-21 人设 / 技能并入注入，avatars 改落 inject；派活的旧子路由 executor 仍落 agent。
  * 别名只管「落到哪个分区」，具体 tab / 子页由各自的判断函数再从 hash 认。
  */
 const SETTINGS_ALIASES = {
   sessions: "chats",
-  avatars: "agent",
+  avatars: "inject",
   archive: "chats",
   service: "connect",
   about: "connect",
+  executor: "agent",
 };
 
 /**
- * 内容顶部的四分区导航（2026-11-18 改版）。
+ * 内容顶部的分区导航（2026-11-18 改版；2026-11-21 抽成通用）。
  *
- * 四张卡是「这个 Agent 的四个侧面」：是谁 / 看到什么 / 能做什么 / 谁去干。
- * 每张卡 = 图标 + 名称 + 一句两三个字的注脚；选中卡走强调色描边 + 图标底，
- * 不再是四个挤在一起的小文字按钮。点击仍由 wireAgentTabs() 接（走旧 hash 子路由）。
+ * 每张卡 = 图标 + 名称 + 一句两三个字的注脚；选中卡走强调色描边 + 图标底。
+ * `data-inject-tab` 由 wireInjectTabs() 认，点击走保留的 hash 子路由。
  */
-function agentTabsMarkup(activeTab) {
-  return `<div class="set-tabs" role="tablist" aria-label="Agent 分区">
-    ${AGENT_TABS.map(
+function tabsMarkup(tabs, activeTab, ariaLabel, kind) {
+  return `<div class="set-tabs" data-count="${tabs.length}" role="tablist" aria-label="${ariaLabel}">
+    ${tabs.map(
       (tab) =>
         `<button class="set-tab" type="button" role="tab"
-           data-agent-tab="${tab.id}" aria-selected="${tab.id === activeTab}">
+           data-${kind}-tab="${tab.id}" aria-selected="${tab.id === activeTab}">
            <span class="set-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${tab.icon}</svg></span>
            <span class="set-tab-text">
              <span class="set-tab-label">${tab.label}</span>
@@ -216,17 +221,23 @@ function agentTabsMarkup(activeTab) {
   </div>`;
 }
 
+function injectTabsMarkup(activeTab) {
+  return tabsMarkup(INJECT_TABS, activeTab, "注入分区", "inject");
+}
+
 /**
  * 左栏一级菜单的分组与顺序（2026-11-18 用户口径：把一级菜单的排序理一理）。
  *
- * 分组只决定**怎么读**，不决定权限或路由：三个标题把 11 项分成
+ * 分组只决定**怎么读**，不决定权限或路由：三个标题把 10 项分成
  * 「日常（每天碰的界面与工作流）/ Agent（这个 Agent 本身）/ 系统（计量、开关与这台机器）」。
  * 数组顺序 = 显示顺序；SETTINGS_SECTIONS 退成纯注册表（id / label / icon / desc）。
  * 新加分区忘了写进这里也不会消失：会落在末尾的「其他」组里（见 renderSettingsNav）。
  */
 const SETTINGS_GROUPS = [
   { label: "日常", ids: ["appearance", "chats", "projects", "reminders"] },
-  { label: "Agent", ids: ["agent", "about-me", "models", "skills", "memory"] },
+  // 2026-11-21 用户口径：注入排第二栏（Agent 组）第一个，后面是模型、派活；
+  // 技能按同日建议收进注入的 tab，不再占一级。
+  { label: "Agent", ids: ["inject", "models", "agent"] },
   { label: "系统", ids: ["usage", "plugins", "connect"] },
 ];
 
@@ -295,4 +306,4 @@ function markQuery(text, query) {
   return out + esc(raw.slice(from));
 }
 
-export { ACCENTS, AGENT_TABS, DEFAULT_CUSTOM_ACCENT, SETTINGS_ALIASES, SETTINGS_SECTIONS, agentTabsMarkup, markQuery, renderSettingsNav };
+export { ACCENTS, DEFAULT_CUSTOM_ACCENT, INJECT_TABS, SETTINGS_ALIASES, SETTINGS_SECTIONS, injectTabsMarkup, markQuery, renderSettingsNav };

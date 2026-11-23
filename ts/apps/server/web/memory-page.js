@@ -8,12 +8,13 @@
  */
 
 import { el } from "./dom.js";
+import { chevSvg } from "./icons.js";
 import { attr, esc } from "./markdown.js";
 import { applyMemoryProposalA, clearMemoryProposalCard, dismissMemoryProposalA, forgetMemoryItem, loadMemoryExternal, loadMemoryGroup, loadMemoryReviewState, memoryItemMarkupA, openMemoryConsolidateDialog, openMemorySplitDialog, supersedeMemoryItem } from "./memory-items.js";
 import { request } from "./net.js";
 // 提醒沉淀（2026-11-19 批4）：入口动作与建议卡（采纳/忽略）走同一个轻模块。
 import { runReminderDistill } from "./reminder-distill.js";
-import { currentSettingsPage } from "./route.js";
+import { currentInjectTab, currentSettingsPage } from "./route.js";
 import { sectionMarkup } from "./settings-atoms.js";
 import { MEMORY_KIND_LABEL, MEMORY_KIND_ORDER, MEMORY_KIND_TIPS } from "./settings-memory.js";
 import { closeModal, openModal, toast } from "./ui-atoms.js";
@@ -22,7 +23,7 @@ import { closeModal, openModal, toast } from "./ui-atoms.js";
  * 大字概览 + 分类计数片（唯一筛选）+ 搜索 + 分组折叠 + 可恢复的整理状态。
  * 2026-11-14：工作履历从对话设置档案卡搬进来，作为记忆分组下方的一条独立折叠；
  * 只对 partner scope 显示，不混进「N 条记忆」计数。
- * 旧版整套保持原样（*Legacy），`MEMORY_PAGE_A=false` 时回落。
+ * 旧版页 2026-11-21 随 MEMORY_PAGE_A 退役删除，本页成为唯一形态。
  * 整理：?background=1 立即 202，页面轮询 /consolidate/state；
  * 切页回来能看见"正在整理 / 上次建议 / 失败原因"，同一 scope 在跑时不会重复调模型。 */
 
@@ -60,7 +61,10 @@ let memoryBacktopHandler = null;
 function memoryPageAlive(gen) {
   return (
     memoryPageState.gen === gen &&
-    currentSettingsPage() === "memory" &&
+    // 2026-11-21：记忆并入「注入」分区，只有落在索引 tab 时才算这一页还活着；
+    // 切到关于我 / 上下文 / 工具要停掉整理轮询。
+    currentSettingsPage() === "inject" &&
+    currentInjectTab() === "memory" &&
     Boolean(document.getElementById("mem-a-groups"))
   );
 }
@@ -161,7 +165,11 @@ function memoryGroupHint(kind) {
 
 function memorySettingsMarkup() {
   return sectionMarkup(
-    "记忆",
+    // 2026-11-21：定位从「记忆」改成「记忆索引」——这一页不是全量注入，
+    // 是挑哪些值得长期记住；每轮只按相关度取几条进上下文（见「注入」分区）。
+    `<span data-tip="${attr(
+      "索引 = 从日常里挑出值得长期记住的，按人、按项目分开放；每轮只按相关度取几条注入上下文，不是全量带上。删除、标过时、整理都只影响这份索引。",
+    )}">记忆索引</span>`,
     `<div class="card mem-a-overview">
       <div class="mem-a-overview-main">
         <div class="mem-a-total"><b id="mem-a-total">—</b><span>条记忆</span></div>
@@ -204,7 +212,7 @@ function memorySettingsMarkup() {
     <div class="mem-a-groups" id="mem-a-groups"><div class="set-hint">读取中…</div></div>
     <details class="mem-a-work" id="mem-a-work" hidden>
       <summary class="mem-a-work-head">
-        <svg class="mem-a-chev mem-a-work-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+        ${chevSvg("mem-a-chev mem-a-work-chev chev")}
         <span class="mem-a-gtitle">工作履历</span>
         <span class="mem-a-gcount" id="mem-a-work-count">0</span>
         <span class="mem-a-ghint">派单结算 · 只读</span>
@@ -213,7 +221,7 @@ function memorySettingsMarkup() {
     </details>
     <details class="mem-a-work mem-a-docs" id="mem-a-docs" hidden>
       <summary class="mem-a-work-head">
-        <svg class="mem-a-chev mem-a-work-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+        ${chevSvg("mem-a-chev mem-a-work-chev chev")}
         <span class="mem-a-gtitle">原文档案</span>
         <span class="mem-a-gcount" id="mem-a-docs-count">0</span>
         <span class="mem-a-ghint">拆分后的原文 · 只读</span>
@@ -659,7 +667,7 @@ async function openMemoryImportDialog(gen) {
         : `<p class="set-hint mem-import-empty">这台机器上没检测到可导入的记忆。下面仍然把支持检测的 Agent 都列出来。</p>`;
       const restMarkup = rest.length
         ? `<details class="mem-import-absent" open>
-             <summary class="mem-import-sub">没检测到本地记忆（${rest.length}）</summary>
+             <summary class="mem-import-sub">${chevSvg("mem-import-absent-chev chev")}没检测到本地记忆（${rest.length}）</summary>
              <div class="mem-import-grid">${rest.map((source) => importSourceCard(source)).join("")}</div>
            </details>`
         : "";
@@ -736,7 +744,7 @@ function importSourceFamilyMarkup(group) {
   ].filter(Boolean).join(" · ");
   return `<details class="mem-import-family" data-family="${attr(group.key)}">
     <summary class="mem-import-family-head">
-      <span class="mem-import-family-chev" aria-hidden="true"></span>
+      ${chevSvg("mem-import-family-chev chev")}
       <span class="mem-import-family-name">${esc(group.name)}</span>
       <span class="mem-import-family-count">${total} 条</span>
       <span class="mem-import-family-scopes">${esc(scopeBits)}</span>
@@ -1255,7 +1263,7 @@ function renderMemoryGroups(gen) {
       const hint = memoryGroupHint(kind);
       return `<section class="mem-a-group ${group.open ? "open" : ""}" data-mem-group="${kind}">
         <button class="mem-a-ghead" type="button" aria-expanded="${group.open}">
-          <svg class="mem-a-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+          ${chevSvg("mem-a-chev chev")}
           <span class="mem-a-gtitle"${tip ? ` data-tip="${attr(tip)}"` : ""}>${label}</span>
           <span class="mem-a-gcount">${total}</span>
           ${hint ? `<span class="mem-a-ghint">${hint}</span>` : ""}
