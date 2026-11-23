@@ -89,6 +89,10 @@ func applyTrayState(s RuntimeState) {
 // 用户只能去任务管理器找 node。窗口 X 仍是"只隐藏"（手机与提醒要靠服务），
 // 两个一起收只有托盘这一条路。
 //
+// 2026-11-22 用户翻案：只剩「退出并停止服务」会把人锁死——想腾出手重编壳
+// （exe 被运行中的进程占着）又不愿意停服务时没有路。补回「只退出壳」：
+// 服务继续跑，任务不受影响，所以不弹在飞单确认，也不碰 runtime.Stop。
+//
 // OnBeforeQuit 先 PreventDefault 挂起退出，异步做两件事：
 //  1. 查 /api/v1/tickets：有在飞单就确认（退出会中断它们）；
 //  2. runtime.Stop() 停服务；停不掉时弹「重试 / 仍然退出 / 取消退出」，
@@ -102,6 +106,16 @@ func applyTrayState(s RuntimeState) {
 // quitting=true（OnClose 关窗放行依赖它）只在真正决定退出时才置，见
 // approveQuit；别把它丢回同步置位，否则异步这段就没机会跑。
 var quitChecking atomic.Bool
+
+// quitShellOnly 是托盘「只退出壳」：服务留着跑，所以没有在飞单可确认、
+// 也不用停服务。quitting 先置位，OnBeforeQuit 看到它直接放行（同一轮
+// 异步检查/停服务整个跳过）。Menu 的 Click 在主线程回调，RunOnMain 直接内联。
+func quitShellOnly() {
+	mygo.RunOnMain(func() {
+		quitting = true
+		mygo.App.Quit()
+	})
+}
 
 func quitStopsServiceEnabled() bool {
 	return !strings.EqualFold(strings.TrimSpace(os.Getenv("LIFEDIARY_QUIT_STOP_SERVICE")), "off")

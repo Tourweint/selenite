@@ -129,9 +129,9 @@ func TestMenuViewWindowless(t *testing.T) {
 	})
 	menuHover.Store(0)
 	ch := make(chan int, 1)
-	menuPickCh.Store(&ch)
+	menuNow.Store(&menuOpen{win: nil, pick: ch})
 	tt := ui.NewTester(menuView, 240, 160)
-	defer func() { menuSnap.Store(nil); menuPickCh.Store(nil) }()
+	defer func() { menuSnap.Store(nil); menuNow.Store(nil) }()
 	if !tt.HasText("全选") || !tt.HasText("Ctrl+A") || !tt.HasText("粘贴") {
 		t.Fatalf("菜单行没画全：%v", tt.Texts())
 	}
@@ -140,7 +140,7 @@ func TestMenuViewWindowless(t *testing.T) {
 	if menuHover.Load() != 2 {
 		t.Fatalf("键盘下移应跳过禁用项落到 2，得到 %d", menuHover.Load())
 	}
-	// Enter 选中：序号回给通道（menuWin 为 nil 时 menuPick 只发不关，测试里正合适）
+	// Enter 选中：序号回给通道（win 为 nil 时 menuPick 只发不藏，测试里正合适）
 	tt.Key(0, ui.KeyEnter)
 	select {
 	case idx := <-ch:
@@ -150,6 +150,72 @@ func TestMenuViewWindowless(t *testing.T) {
 	default:
 		t.Fatal("Enter 没有把所选序号回给通道")
 	}
+}
+
+// 鼠标点行选中（2026-11-22 修「侧栏 ⋯ 展开的小菜单点不了」）：menuView 一直只处理
+// 悬停高亮与键盘 Enter，行没接 Clicked——ctx 根修前 DOM 兜底菜单在底下替它接了点击，
+// 根修后兜底退场，原生菜单「只能看不能点」才露出来。
+func TestMenuViewMouseClickSelects(t *testing.T) {
+	t.Setenv("LIFEDIARY_THEME", "indigo")
+	menuSnap.Store(&menuState{
+		anchor:    mygo.Rectangle{},
+		placement: mygo.PlacementBottomStart,
+		items: []MenuItem{
+			{Label: "重命名"},
+			{Label: "置顶"},
+			{Separator: true},
+			{Label: "归档"},
+		},
+	})
+	menuHover.Store(0)
+	ch := make(chan int, 1)
+	menuNow.Store(&menuOpen{win: nil, pick: ch})
+	tt := ui.NewTester(menuView, 240, 200)
+	defer func() { menuSnap.Store(nil); menuNow.Store(nil) }()
+	tt.Frame()
+
+	// 点第三项（普通行）→ 序号 1；点分隔线不算。
+	if err := tt.Click("置顶"); err != nil {
+		t.Fatalf("点不到菜单行：%v", err)
+	}
+	tt.Frame()
+	select {
+	case idx := <-ch:
+		if idx != 1 {
+			t.Fatalf("鼠标点「置顶」应回 1，得到 %d", idx)
+		}
+	default:
+		t.Fatal("鼠标点击菜单行没有把序号回给通道")
+	}
+}
+
+// 收起状态机：CAS 只收自己还「在位」的那张——并发的下一次 ShowMenu 会复用同一张
+// 常驻窗、换上自己的新 waiter，旧调用迟到的收起不能误伤新的。
+func TestDismissMenuGuard(t *testing.T) {
+	old := &menuOpen{win: nil, pick: make(chan int, 1)}
+	menuNow.Store(old)
+	dismissMenu(old)
+	select {
+	case <-old.pick:
+	default:
+		t.Fatal("收起应给旧 waiter 回 -1")
+	}
+	if menuNow.Load() != nil {
+		t.Fatal("收起后应无当前菜单")
+	}
+	// 旧调用迟到的收起：当前已经换成新的，不得动它
+	fresh := &menuOpen{win: nil, pick: make(chan int, 1)}
+	menuNow.Store(fresh)
+	dismissMenu(old)
+	select {
+	case <-fresh.pick:
+		t.Fatal("旧调用的收起不该误伤新 waiter")
+	default:
+	}
+	if menuNow.Load() != fresh {
+		t.Fatal("当前菜单应仍是新的")
+	}
+	menuNow.Store(nil)
 }
 
 // tipView 无窗口真渲染：多行按 \n 拆开各画一行。

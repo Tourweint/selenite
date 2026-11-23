@@ -548,6 +548,11 @@ func pullBreakerDialog(base string) {
 }
 
 func main() {
+	// 菜单弹出层复现台（debug_flyout.go）：环境变量进调试流程，不起服务不建托盘。
+	if os.Getenv("LIFEDIARY_DEBUG_FLYOUT") == "1" {
+		dbgFlyout()
+		return
+	}
 	if !mygo.App.RequestSingleInstanceLock() {
 		return // 已经在跑，交给那一个
 	}
@@ -611,9 +616,11 @@ func main() {
 					}()
 				}},
 				mygo.Separator(),
-				// 「退出」的含义是**停服务 + 退壳**（2026-11-20）：
-				// 窗口 X 只隐藏、服务照跑（手机与提醒要用），两个一起收只能走这里。
-				// 停服务与在飞单确认在 OnBeforeQuit → checkBeforeQuit 里做。
+				// 两个退出（2026-11-22 用户翻案）：补回「只退出壳」——服务继续跑，
+				// 想重编壳（exe 被运行中的进程占着）时不用先停服务。
+				// 「退出并停止服务」仍是完整收尾（2026-11-20 口径不变：窗口 X 只隐藏，
+				// 壳与服务一起收走这条；停服务与在飞单确认见 checkBeforeQuit）。
+				{Label: "只退出壳（服务继续跑）", Click: func(*mygo.MenuItem, *mygo.Window) { quitShellOnly() }},
 				// RoleQuit 的默认文案来自 MyGo 的本地化表，可能落到英文
 				// （Exit）。这里显式写中文，同时保留 Role 的退出语义。
 				{Label: "退出并停止服务", Role: mygo.RoleQuit},
