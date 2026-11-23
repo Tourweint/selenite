@@ -1,4 +1,6 @@
 # 批3b 任务书：分支入口 + 来源行（CodeBuddy）
+> 状态：已执行（任务书，2026-11-17）。落地明细见 docs/变更记录/ 同期批次记录；实施以代码为准，冲突以长期文档（接口文档.md / 系统架构.md）为准。
+
 
 **给谁**：CodeBuddy（`--model deepseek-v4.1-flash`；hy4flash-free 额度已满到 2026-11-18）。
 **仓库**：`<repo>`。**不要 git add / commit / push。**

@@ -1,4 +1,6 @@
 # C 任务书：低频工具索引（deferred + tool_search）（CodeBuddy）
+> 状态：已执行（任务书，2026-11-16）。落地明细见 docs/变更记录/ 同期批次记录；实施以代码为准，冲突以长期文档（接口文档.md / 系统架构.md）为准。
+
 
 **给谁**：CodeBuddy（`--model hy4flash-free`）。
 **仓库**：`<repo>`。**不要提交 git**。
