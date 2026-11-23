@@ -557,31 +557,24 @@ test("项目记忆写入解析：指名 → 绑定 → 唯一挂载 → 报错�
 	);
 });
 
-test("每轮注入的项目 scope 组装：绑定全权、其余挂载走闸门、重叠去重", () => {
+test("每轮注入的项目 scope 组装：绑定全权、其余挂载一律走闸门、重叠去重", () => {
 	const a = "00000000-0000-4000-8000-0000000000b1";
 	const b = "00000000-0000-4000-8000-0000000000b2";
 
-	// 绑定 + 两个挂载（其一就是绑定）：绑定不重复、其余进 gated
-	const both = composeProjectRecallScopes(a, [a, b], true);
-	assert.deepEqual(both.fullKeys, [], "绑定进 scopes 主列，compose 不再返回它");
-	assert.deepEqual(both.gatedKeys, [`project:${b}`], "其余挂载进 gated，且与绑定去重");
+	// 绑定 + 两个挂载（其一就是绑定）：绑定不重复、其余挂载进 gated
+	//（PROJECT_MEMORY_GATE 回滚开关 2026-11-21 退役，gated 是唯一形态）
+	const both = composeProjectRecallScopes(a, [a, b]);
+	assert.deepEqual(both, [`project:${b}`], "其余挂载返回 gated，且与绑定去重");
 
-	// 闸门关（PROJECT_MEMORY_GATE=false）：挂载并回全权池 = 跟人走当日形态
-	// （绑定的 key 由 recallContext 主列另带，compose 只管挂载部分、与绑定去重）
-	const gateOff = composeProjectRecallScopes(a, [a, b], false);
-	assert.deepEqual(gateOff.fullKeys, [`project:${b}`], "闸门关 = 其余挂载全权进池（绑定主列另带）");
-	assert.deepEqual(gateOff.gatedKeys, []);
-
-	// 无绑定：挂载全走 gated
-	const unbound = composeProjectRecallScopes(null, [a, b], true);
-	assert.deepEqual(unbound.gatedKeys, [`project:${a}`, `project:${b}`]);
+	// 无绑定：挂载全返回
+	const unbound = composeProjectRecallScopes(null, [a, b]);
+	assert.deepEqual(unbound, [`project:${a}`, `project:${b}`]);
 	// 重复挂载 id：去重
-	const duped = composeProjectRecallScopes(null, [a, a], true);
-	assert.deepEqual(duped.gatedKeys, [`project:${a}`]);
-	// 零挂载：两边都空
-	const empty = composeProjectRecallScopes(a, [], true);
-	assert.deepEqual(empty.fullKeys, []);
-	assert.deepEqual(empty.gatedKeys, []);
+	const duped = composeProjectRecallScopes(null, [a, a]);
+	assert.deepEqual(duped, [`project:${a}`]);
+	// 零挂载：空
+	const empty = composeProjectRecallScopes(a, []);
+	assert.deepEqual(empty, []);
 });
 
 test("归档 / 删除的项目退出召回库：状态解析、id 过滤、降级口径", () => {
@@ -597,8 +590,6 @@ test("归档 / 删除的项目退出召回库：状态解析、id 过滤、降�
 	// 未接线 = 旧行为：一律按 active（记忆不能因为一次辅助读取失败就不召回）
 	assert.equal(projectStateOf(archived), "active");
 	assert.equal(isRecallableProjectId(archived), true);
-	const previousFlag = process.env.PROJECT_MEMORY_ACTIVE_ONLY;
-	process.env.PROJECT_MEMORY_ACTIVE_ONLY = "true";
 	try {
 		setProjectStateResolver((id) => states.get(id) ?? "active");
 		assert.equal(projectStateOf(live), "active");
@@ -608,11 +599,7 @@ test("归档 / 删除的项目退出召回库：状态解析、id 过滤、降�
 		assert.deepEqual(recallableProjectIds([live, archived, deleted]), [live]);
 		assert.equal(isRecallableProjectId(archived), false);
 		assert.equal(isRecallableProjectId(deleted), false);
-		// 回滚开关：PROJECT_MEMORY_ACTIVE_ONLY=false = 旧形态，归档项目照旧召回
-		process.env.PROJECT_MEMORY_ACTIVE_ONLY = "false";
-		assert.equal(isRecallableProjectId(archived), true);
-		assert.deepEqual(recallableProjectIds([live, archived, deleted]), [live, archived, deleted]);
-		process.env.PROJECT_MEMORY_ACTIVE_ONLY = "true";
+		//（PROJECT_MEMORY_ACTIVE_ONLY=false 旧形态用例 2026-11-21 随回滚开关退役删除。）
 		// 解析器抛错同样退回 active，不把对话卡住
 		setProjectStateResolver(() => {
 			throw new Error("boom");
@@ -620,8 +607,6 @@ test("归档 / 删除的项目退出召回库：状态解析、id 过滤、降�
 		assert.equal(projectStateOf(archived), "active");
 	} finally {
 		setProjectStateResolver(null);
-		if (previousFlag === undefined) delete process.env.PROJECT_MEMORY_ACTIVE_ONLY;
-		else process.env.PROJECT_MEMORY_ACTIVE_ONLY = previousFlag;
 	}
 });
 

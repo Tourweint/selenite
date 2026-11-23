@@ -12,12 +12,13 @@
  *        （接派单卡 2026-11-15 退役：领域这套没用起来；机制与 env 总闸不动，想找回走 PATCH）
  *   能力：mountChainEditor（备选链）+ routines 列表/新建 + skills 只读
  *
- * 刻意不做：不在这一页做删除执事（列表页才有）、不把记忆的增删搬来（设置 → 记忆是唯一真相）、
- * 不再显示这个人的履历 / 记忆（统一去设置 → 记忆看）。
+ * 刻意不做：不在这一页做删除执事（列表页才有）、不把记忆的增删搬来（设置 → 注入 → 索引是唯一真相）、
+ * 不再显示这个人的履历 / 记忆（统一去设置 → 注入 → 索引看）。
  */
 
 import { paintAvatar } from "./avatar.js";
 import { el } from "./dom.js";
+import { chevSvg } from "./icons.js";
 import { attr, esc } from "./markdown.js";
 import { request } from "./net.js";
 import { openSecMenu } from "./sec-menu.js";
@@ -1107,11 +1108,11 @@ function pfOpenInjectionViewer(partnerId, kind, onChanged) {
           <li>所以这里没有「原文」可看——同一句话不同时间，浮出来的记忆不一样。</li>
           <li>关掉这一项：这一位不再自动带记忆（项目记忆也不带）；他仍可以用 recall 工具主动查。</li>
           <li>想让某个项目的记忆进这个打分池，去上面「每轮固定注入 → 负责项目」挂上它。</li>
-          <li>想看具体记了些什么、改哪条，去「设置 → 记忆」。</li>
+          <li>想看具体记了些什么、改哪条，去「设置 → 注入 → 索引」。</li>
         </ul>
         <div class="modal-actions">
           <button class="ghost" type="button" data-modal-cancel>关闭</button>
-          <button class="modal-primary" type="button" id="pf-go-memory">去记忆页</button>
+          <button class="modal-primary" type="button" id="pf-go-memory">去索引页</button>
         </div>`;
       body.querySelector("[data-modal-cancel]")?.addEventListener("click", () => closeModal());
       body.querySelector("#pf-go-memory")?.addEventListener("click", () => {
@@ -1311,7 +1312,7 @@ function pfOpenChainModal(partnerId, detail, onChanged) {
  * routines 来自 /api/v1/routines?partnerId=，整理记忆来自 /api/v1/agent/memory/nightly 的 scopes。
  * 总管（chief）的记忆 scope 是 global，其余执事是 partner:<id>。
  *
- * 「技能」也分两层：全局技能库（设置 → 技能，所有会话共用）+ 他自带的技能
+ * 「技能」也分两层：全局技能库（设置 → 注入 → 技能，所有会话共用）+ 他自带的技能
  * （家目录 skills/*.md，只对他生效）。之前只数第二层，看起来像"没用全局技能"。
  */
 
@@ -1378,7 +1379,7 @@ async function pfOpenRoutinesModal(partnerId, onChanged) {
         <div class="pf-live-head"><span>他自己的定时任务</span><span class="pf-tag" id="pf-routine-count"></span></div>
         <div class="pt-routine-list" id="pf-routines"><p class="pf-hint">读取中…</p></div>
         <details class="pf-new">
-          <summary>新建定时任务</summary>
+          <summary>${chevSvg("pf-new-chev chev")}<span>新建定时任务</span></summary>
           ${ptRoutineFormMarkup()}
         </details>
       </div>`;
@@ -1594,7 +1595,7 @@ async function pfOpenSkillsModal(partnerId, onChanged) {
 
   const render = (body) => {
       body.innerHTML = `
-      <p class="modal-desc">技能分三层：<strong>全局已开</strong>所有人都有，这里锁死只读；<strong>全局未开</strong>可以只给这个人开，不影响别人；<strong>他自带的</strong>只对他生效。新建技能会先建到全局库（默认关），再给这个人打开。名字是索引，正文按需取。想让他自己写/改，点下面的对话按钮；全局技能正文去「设置 → 技能」改。</p>
+      <p class="modal-desc">技能分三层：<strong>全局已开</strong>所有人都有，这里锁死只读；<strong>全局未开</strong>可以只给这个人开，不影响别人；<strong>他自带的</strong>只对他生效。新建技能会先建到全局库（默认关），再给这个人打开。名字是索引，正文按需取。想让他自己写/改，点下面的对话按钮；全局技能正文去「设置 → 注入 → 技能」改。</p>
       <div class="pf-skill-tools">
         <button class="pf-mini" id="pf-skill-guide" type="button">让他自己写</button>
         <button class="pf-mini" id="pf-skill-new" type="button">手动新建全局技能</button>
@@ -1753,7 +1754,7 @@ async function pfOpenSkillsModal(partnerId, onChanged) {
       body.querySelector("#pf-skill-new")?.addEventListener("click", () => {
         openCreateSkillModal({
           existingHint:
-            "已有同名全局技能。改正文去「设置 → 技能」；只想让他按新流程做，用「让他自己写」。",
+            "已有同名全局技能。改正文去「设置 → 注入 → 技能」；只想让他按新流程做，用「让他自己写」。",
           onCreated: async (name) => {
             try {
               const response = await request(

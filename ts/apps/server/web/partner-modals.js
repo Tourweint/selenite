@@ -9,12 +9,13 @@
 
 import { paintAvatar, partnerDotClass } from "./avatar.js";
 import { addNotice } from "./chat-notice.js";
+import { chevSvg } from "./icons.js";
 import { attr, esc } from "./markdown.js";
 import { request } from "./net.js";
 import { ptSaveName, ptWireInstructionEditor } from "./partner-editor.js";
 import { PF_PERSONA_EDITORS, pfPersonaFieldMarkup, pfPersonaValue } from "./partner-profile.js";
 import { openRunPartnerModal, ptRenderRoutineList, ptRoutineFormMarkup, ptWireRoutineForm } from "./partner-routines.js";
-import { applyTemplateChain, PARTNER_TEMPLATES, partnerTemplatesEnabled, renderHireWall } from "./partner-templates.js";
+import { applyTemplateChain, PARTNER_TEMPLATES, renderHireWall } from "./partner-templates.js";
 import { loadRoster, syncChiefAvatar } from "./partners-status.js";
 import { openProjMenu } from "./settings-projects.js";
 import { clearModalHint, setModalHint } from "./project-modal.js";
@@ -120,11 +121,12 @@ function renderPartnerList(box, partners) {
 
   // 普通助手（2026-11-16）：全局一份人设，固定置顶，不是执事行——不进 hasButlers、
   // 没有 ⋯ / 暂停 / 状态徽章。点进去只改一份正文，所有 worker 下一轮生效。
+  // 2026-11-21：卡面不再挂解释句，共用范围留给标签；详情页本身说明一切。
   const workerCard = document.createElement("div");
   workerCard.className = "card pt-card";
   workerCard.setAttribute("role", "button");
   workerCard.tabIndex = 0;
-  workerCard.setAttribute("aria-label", "编辑普通助手的人设");
+  workerCard.setAttribute("aria-label", "打开普通助手设置");
   workerCard.innerHTML = `
     <span class="pt-avatar pt-card-avatar" data-worker-avatar aria-hidden="true"></span>
     <div class="pt-card-main">
@@ -132,7 +134,6 @@ function renderPartnerList(box, partners) {
         <span class="row-label pt-name">普通助手</span>
         <span class="pill-tag">全部 Worker 共用</span>
       </div>
-      <div class="pt-meta">所有普通助手会话共用这一份人设，改完下一轮生效</div>
     </div>`;
   paintAvatar(workerCard.querySelector("[data-worker-avatar]"), null, "普通助手");
   const openWorker = () => { location.hash = "#/settings/partners/worker"; };
@@ -155,7 +156,7 @@ function renderPartnerList(box, partners) {
     return;
   }
   // 招聘大厅（2026-11-15 执事招聘模板）：默认状态 = 只有总管、执事 0 个——正是新手
-  // "不知道该建什么"的时刻，在最顶上摆模板卡墙。flag 关 → 墙整个摘掉，回旧列表。
+  // "不知道该建什么"的时刻，在最顶上摆模板卡墙。（开关 2026-11-21 退役，墙恒显示。）
   let hireWall = null;
   const hasButlers = partners.some((partner) => partner.id !== "chief");
   if (!hasButlers) {
@@ -235,18 +236,10 @@ function renderPartnerList(box, partners) {
     });
   }
   if (hireWall) {
-    // flag 懒读：开 → 填墙；关 → 摘掉占位（回旧列表）。晚到时页面已切走就不管了。
-    void partnerTemplatesEnabled().then((on) => {
-      if (!hireWall.isConnected) return;
-      if (!on) {
-        hireWall.remove();
-        return;
-      }
-      renderHireWall(hireWall, (partnerId) => {
-        void loadPartners();
-        void loadRoster();
-        location.hash = `#/settings/partners/${encodeURIComponent(partnerId)}`;
-      });
+    renderHireWall(hireWall, (partnerId) => {
+      void loadPartners();
+      void loadRoster();
+      location.hash = `#/settings/partners/${encodeURIComponent(partnerId)}`;
     });
   }
 }
@@ -363,24 +356,24 @@ function openCreatePartnerModal() {
       </div>
       <p class="pf-group-title">详细设置（可选）</p>
       <details class="pf-new">
-        <summary>一句话身份</summary>
+        <summary>${chevSvg("pf-new-chev chev")}<span>一句话身份</span></summary>
         <textarea class="pt-ta" id="pt-new-identity" rows="2" spellcheck="false"
                   placeholder="例如：你是替我整理资料的安静助手"></textarea>
       </details>
       <details class="pf-new">
-        <summary>口吻</summary>
+        <summary>${chevSvg("pf-new-chev chev")}<span>口吻</span></summary>
         <div class="pf-edit-grid" id="pt-new-style"></div>
       </details>
       <details class="pf-new">
-        <summary>里子</summary>
+        <summary>${chevSvg("pf-new-chev chev")}<span>里子</span></summary>
         <div class="pf-edit-grid" id="pt-new-values"></div>
       </details>
       <details class="pf-new">
-        <summary>处境</summary>
+        <summary>${chevSvg("pf-new-chev chev")}<span>处境</span></summary>
         <div class="pf-edit-grid" id="pt-new-scenario"></div>
       </details>
       <details class="pf-new">
-        <summary>岗位契约</summary>
+        <summary>${chevSvg("pf-new-chev chev")}<span>岗位契约</span></summary>
         <textarea class="pf-contract" id="pt-new-contract" rows="6" spellcheck="false" aria-label="岗位契约"
                   placeholder="写清管什么、怎么定、怎么验收、向谁汇报（四节）"></textarea>
       </details>
@@ -408,11 +401,10 @@ function openCreatePartnerModal() {
       paintBlock("pt-new-values", "values", null);
       paintBlock("pt-new-scenario", "scenario", null);
 
-      // 模板条（flag 开才显示）。选中 = 名字/身份/口吻里子处境/契约全按模板预填，提交走四步链；
-      // 再点一次同一张卡 = 取消选择，回空白。
+      // 模板条。选中 = 名字/身份/口吻里子处境/契约全按模板预填，提交走四步链；
+      // 再点一次同一张卡 = 取消选择，回空白。（开关 2026-11-21 退役，条恒显示。）
       let selectedTpl = null;
       strip.hidden = false;
-      void partnerTemplatesEnabled().then((on) => { if (!on) strip.hidden = true; });
       strip.addEventListener("click", (event) => {
         const chip = event.target.closest("[data-pt-tpl]");
         if (!chip) return;

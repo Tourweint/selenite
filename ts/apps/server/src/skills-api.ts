@@ -19,7 +19,12 @@ import {
 	type ResolvedSkillsDir,
 	type SkillSource,
 } from "./skills.ts";
-import { getSkillState, skillStateEnabled } from "./skill-state.ts";
+import {
+	getSkillState,
+	skillStateEnabled,
+	WORKER_SKILL_OWNER,
+	workerSkillScopeEnabled,
+} from "./skill-state.ts";
 import { isCoreSkill } from "./core-skills.ts";
 import { isSkillStale, readSkillUsage, skillUsageEnabled } from "./skill-usage.ts";
 import {
@@ -353,9 +358,72 @@ export function mountSkills(app: Hono, deps: SkillsApiDeps = {}): void {
 		});
 	});
 
-	/** 批量启停（2026-11-09 用户口径：默认全关，界面上能一键全开/全关） */
-	app.put("/api/v1/agent/skills/enabled-all", async (c) => {
+	/**
+	 * 普通助手的技能可见性（2026-11-21）：与执事个人页同语义，归属键固定 `worker`。
+	 * - 全局已开 / core → 409 锁死（所有人都有，不能按人关）；
+	 * - 只写 `.data/skills-state.json` 的 `partners.worker` 覆盖层，不改技能文件；
+	 * - 技能不存在 → 404（防状态里堆无效名字）。
+	 * 读侧复用 `GET /api/v1/agent/skills?partnerId=worker`（同一套 partnerEnabled/partnerOverride）。
+	 */
+	app.put("/api/v1/agent/worker-skills/:name/enabled", async (c) => {
+		const name = c.req.param("name");
+		if (!SKILL_NAME.test(name)) {
+			return c.json({ error: "bad_request", message: "技能名不合法" }, 400);
+		}
 		const body = (await c.req.json().catch(() => null)) as { enabled?: unknown } | null;
+		if (typeof body?.enabled !== "boolean") {
+			return c.json({ error: "bad_request", message: "enabled 必须是布尔" }, 400);
+		}
+		if (!skillStateEnabled()) {
+			return c.json(
+				{ error: "locked", message: "技能过滤已关闭，所有人都有；不能再按人开关" },
+				409,
+			);
+		}
+		if (!workerSkillScopeEnabled()) {
+			return c.json(
+				{
+					error: "locked",
+					message: "普通助手技能独立选择已关闭（WORKER_SKILL_SCOPE=false）",
+				},
+				409,
+			);
+		}
+		const state = getSkillState();
+		if (isCoreSkill(name)) {
+			return c.json(
+				{ error: "locked", message: "系统内置技能，始终可用，不能按人开关" },
+				409,
+			);
+		}
+		if (state.isEnabled(name)) {
+			return c.json(
+				{ error: "locked", message: "全局已开启，所有人都有；普通助手不能单独关" },
+				409,
+			);
+		}
+		let exists = false;
+		for (const source of resolve().dirs) {
+			const found = findSkillInDir(source.dir, name);
+			if (found?.valid) {
+				exists = true;
+				break;
+			}
+		}
+		if (!exists) return c.json({ error: "not_found", message: `没有叫「${name}」的技能` }, 404);
+		state.setEnabledFor(WORKER_SKILL_OWNER, name, body.enabled);
+		c.header("cache-control", "no-store");
+		return c.json({
+			ok: true,
+			owner: WORKER_SKILL_OWNER,
+			name,
+			enabled: body.enabled,
+			note: "索引随下一个普通助手会话刷新；已在跑的会话里 skill 工具立即取不到（或恢复）这份手册",
+		});
+	});
+
+	/** 批量启停（2026-11-09 用户口径：默认全关，界面上能一键全开/全关） */
+	app.put("/api/v1/agent/skills/enabled-all", async (c) => {		const body = (await c.req.json().catch(() => null)) as { enabled?: unknown } | null;
 		if (typeof body?.enabled !== "boolean") {
 			return c.json({ error: "bad_request", message: "enabled 必须是布尔" }, 400);
 		}

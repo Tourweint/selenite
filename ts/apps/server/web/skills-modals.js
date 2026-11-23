@@ -146,7 +146,7 @@ async function openEditSkillModal(name, item = null) {
 /**
  * 新建技能（全局库）。
  * options.onCreated(name)：2026-11-15 个人页复用——建完自动只给当前执事打开。
- * options.existingHint：同名已存在时的提示（个人页指向「设置 → 技能 / 让他自己写」）。
+ * options.existingHint：同名已存在时的提示（个人页指向「设置 → 注入 → 技能 / 让他自己写」）。
  */
 function openCreateSkillModal(options = {}) {
   openModal(

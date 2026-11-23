@@ -24,6 +24,7 @@ import {
   effectiveWorkerTools,
   setWorkerToolsSource,
 } from "../../../packages/chancellor/src/worker-tools-source.ts";
+import { workerEscalateToolEnabled } from "../../../packages/chancellor/src/escalation-payload.ts";
 
 /** 给人看的目录（canonical 的中文名与边界；工具集本身以 chancellor 为准，server 不新增）。 */
 export const WORKER_TOOL_CATALOG: ReadonlyArray<{
@@ -95,6 +96,8 @@ export interface WorkerToolsPayload {
   /** 实际会下发给 native worker 的补集（canonical 序；空数组 = 真零工具）。 */
   granted: string[];
   dispatch: boolean;
+  /** 上报通道（escalate，2026-11-21）：不在四件勾选里，恒开（WORKER_ESCALATE_TOOL=false 才关）。 */
+  escalate: boolean;
 }
 
 export function workerToolsPayload(env: NodeJS.ProcessEnv = process.env): WorkerToolsPayload {
@@ -113,6 +116,7 @@ export function workerToolsPayload(env: NodeJS.ProcessEnv = process.env): Worker
     ),
     granted: [...granted],
     dispatch: workerToolsDispatchEnabled(env),
+    escalate: workerEscalateToolEnabled(env),
   };
 }
 

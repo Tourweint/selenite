@@ -47,6 +47,26 @@ interface SkillStateFile {
 
 let singleton: SkillState | null = null;
 
+/**
+ * 普通助手（worker）的技能可见性命名空间（2026-11-21）。
+ *
+ * 与执事共用同一个 `partners` 覆盖层，只是键固定写 `"worker"`——不是 partners 表里的档案，
+ * 也不会和执事 uuid / `chief` 撞键。worker 会话的技能可见性因此从"回落 chief"改成独立：
+ * 全局开 || worker 覆盖开。
+ */
+export const WORKER_SKILL_OWNER = "worker";
+
+/**
+ * 回滚开关（2026-11-21）：`WORKER_SKILL_SCOPE=false/0/off` → 普通助手会话回到旧的
+ * "技能可见性回落 chief" 形态，`PUT /agent/worker-skills/*` 一律 409。
+ * 缺省开；存储的 worker 覆盖位保留（重开后恢复）。
+ */
+export function workerSkillScopeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = (env.WORKER_SKILL_SCOPE ?? "").trim().toLowerCase();
+	if (!raw) return true;
+	return raw !== "false" && raw !== "0" && raw !== "off";
+}
+
 export function skillStatePath(env: NodeJS.ProcessEnv = process.env): string {
 	return resolve(env.AGENT_SKILLS_STATE_PATH?.trim() || ".data/skills-state.json");
 }

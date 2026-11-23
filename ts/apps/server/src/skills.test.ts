@@ -633,3 +633,58 @@ test("技能端点：core 始终可用（GET core/enabled/partnerEnabled），�
 	const delegate2 = (p2.items as Array<Record<string, unknown>>).find((item) => item.name === "delegate")!;
 	assert.equal(delegate2.partnerEnabled, true);
 });
+
+test("普通助手技能开关（2026-11-21）：只写 partners.worker 覆盖层，core / 全局已开 / 不存在各自拒", async () => {
+	const dir = freshDir("api-worker-skills");
+	writeFileSync(join(dir, "delegate.md"), "派活摘要\n派活正文");
+	writeFileSync(join(dir, "normal.md"), "普通摘要\n普通正文");
+	const app = apiApp(dir);
+	const putWorker = (name: string, enabled: boolean) =>
+		app.request(`/api/v1/agent/worker-skills/${name}/enabled`, {
+			method: "PUT",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ enabled }),
+		});
+
+	const on = await putWorker("normal", true);
+	assert.equal(on.status, 200);
+	assert.equal((await json(on)).owner, "worker");
+	const list = await json(await app.request("/api/v1/agent/skills?partnerId=worker"));
+	const normal = (list.items as Array<Record<string, unknown>>).find((item) => item.name === "normal")!;
+	assert.equal(normal.partnerEnabled, true, "worker 独开生效");
+	assert.equal(normal.partnerOverride, true);
+	let state = JSON.parse(readFileSync(process.env.AGENT_SKILLS_STATE_PATH!, "utf8"));
+	assert.equal(state.partners?.worker?.enabled?.normal, true, "落在 partners.worker 覆盖层");
+	assert.equal(state.enabled?.normal, undefined, "不动全局启停位");
+
+	// 再关掉：覆盖位删掉
+	assert.equal((await putWorker("normal", false)).status, 200);
+	state = JSON.parse(readFileSync(process.env.AGENT_SKILLS_STATE_PATH!, "utf8"));
+	assert.equal(state.partners?.worker, undefined, "关 = 从覆盖层拿掉");
+
+	// 全局已开 → 409（不能按人关）
+	await app.request("/api/v1/agent/skills/normal/enabled", {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ enabled: true }),
+	});
+	assert.equal((await putWorker("normal", false)).status, 409);
+	// core → 409；不存在 → 404
+	assert.equal((await putWorker("delegate", true)).status, 409);
+	assert.equal((await putWorker("no-such-skill", true)).status, 404);
+	// 名字不合法 → 400
+	assert.equal(
+		(await app.request("/api/v1/agent/worker-skills/Bad%20Name/enabled", {
+			method: "PUT",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ enabled: true }),
+		})).status,
+		400,
+	);
+	// 收尾：把全局 normal 关回去，别影响同一套里的后续用例
+	await app.request("/api/v1/agent/skills/normal/enabled", {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ enabled: false }),
+	});
+});
