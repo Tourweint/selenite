@@ -310,9 +310,13 @@ function syncGreeting(date = new Date()) {
 }
 
 const KEY_THINKING = "lifediary.thinking";
+// 拨盘是否被用户真碰过（2026-11-21）：没碰过时新会话不发顶层 thinking——
+// 让服务端全局默认档（设置里设的那档）说话，别让缺省 off 冒充用户的选择。
+const KEY_THINKING_TOUCHED = "lifediary.thinkingTouched";
 // 模型菜单记住「上次看的供应商」（只定位视图，不等于切模型；D2）
 const KEY_MODEL_PROVIDER = "lifediary.modelProvider";
-// 旧键迁移（2026-11-04 界面 v2）：fast→off、deep→high；迁完就删旧键
+// 旧键迁移（2026-11-04 界面 v2）：fast→off、deep→high；迁完就删旧键。
+// 旧档是用户显式选过的：迁移时同样记"碰过"，别把老用户的档丢给全局默认。
 const LEGACY_KEY_MODE = "lifediary.mode";
 const THINKING_LEVELS = ["off", "low", "medium", "high"];
 const THINKING_LABELS = { off: "关", low: "低", medium: "中", high: "高" };
@@ -323,6 +327,7 @@ const THINKING_LABELS = { off: "关", low: "低", medium: "中", high: "高" };
   if (!localStorage.getItem(KEY_THINKING)) {
     localStorage.setItem(KEY_THINKING, legacy === "deep" ? "high" : "off");
   }
+  localStorage.setItem(KEY_THINKING_TOUCHED, "1");
   localStorage.removeItem(LEGACY_KEY_MODE);
 })();
 
@@ -331,13 +336,20 @@ function currentThinking() {
   return THINKING_LEVELS.includes(value) ? value : "off";
 }
 
+/** 拨盘被用户碰过没有（2026-11-21）：没碰过 = 缺省 off 不冒充选择，新会话走全局默认档 */
+function thinkingTouched() {
+  return localStorage.getItem(KEY_THINKING_TOUCHED) === "1";
+}
+
 /** 菜单打开时把当前档标在底部常驻条上（2026-11-14：档位从模型行挪到菜单底栏，
- *  浏览别家供应商时也一直看得见；设置页 no-thinking 的弹层没有这条） */
+ *  浏览别家供应商时也一直看得见；设置页 no-thinking 的弹层没有这条）。
+ *  2026-11-21 分段按钮换成填充滑块：同步改为给滑块发 think-sync（/mode 被 clamp
+ *  改写实际档时，滑块跟回服务端说的那一档）。 */
 function syncThinkingSegments() {
   if (!el.modelMenu) return;
   const level = currentThinking();
-  for (const option of el.modelMenu.querySelectorAll(".think-foot .think-opt")) {
-    option.setAttribute("aria-pressed", String(option.dataset.level === level));
+  for (const slider of el.modelMenu.querySelectorAll(".think-foot .think-slider")) {
+    slider.dispatchEvent(new CustomEvent("think-sync", { detail: { level } }));
   }
 }
 
@@ -355,6 +367,7 @@ function clampThinking(level, levels) {
 async function setThinkingLevel(level) {
   if (!THINKING_LEVELS.includes(level)) return;
   localStorage.setItem(KEY_THINKING, level);
+  localStorage.setItem(KEY_THINKING_TOUCHED, "1");
   syncThinkingSegments();
   // 还没有会话就不用下发，第一轮 `start` 回来时补（同原 setMode 的语义）
   if (!state.conversationId) return;
@@ -420,13 +433,22 @@ for (const sec of SIDE_SECTIONS) {
   document.getElementById(`sec-${sec}-toggle`)?.addEventListener("click", () => toggleSection(sec));
 }
 
-/* 「对话」分区的 ⋯（2026-11-14）：原来这里固定一颗 ＋（新建），旁边还有一颗放大镜（搜索）。
-   现在两颗合成一张菜单——新建与搜索都是"对对话列表做的事"，没有理由各占一格。
-   新建语义与旧按钮完全一致：新开一条普通 worker 会话（Ctrl+K 走同一条路）。 */
+/* 「任务」分区（原「对话」，2026-11-21 改名）的 ⋯（2026-11-14）：原来这里固定一颗 ＋（新建），
+   旁边还有一颗放大镜（搜索）。现在合成一张菜单——新建与搜索都是"对对话列表做的事"，
+   没有理由各占一格。新建语义与旧按钮完全一致：新开一条普通 worker 会话（Ctrl+K 走同一条路）。
+   2026-11-21：「打开任务中心」从分区底部的文字链接收进这张菜单（底部链接退役）。
+   2026-11-22：菜单不再写解释行（用户口径「解释性文字不需要」）。 */
 el.secChatsMore?.addEventListener("click", () => {
   openSecMenu(el.secChatsMore, [
     {
-      label: "新建对话",
+      label: "新建任务",
+      run: () => {
+        // 动态 import：tasks-create 依赖弹窗 / 项目 / 会话打开，静态引会把侧栏拖进这张图。
+        void import("./tasks-create.js").then((module) => module.openCreateTaskModal());
+      },
+    },
+    {
+      label: "新建助手对话",
       kbd: "Ctrl+K",
       run: () => {
         go("chat");
@@ -434,6 +456,7 @@ el.secChatsMore?.addEventListener("click", () => {
       },
     },
     { label: "搜索旧对话", run: () => go("search") },
+    { label: "打开任务中心", run: () => go("tasks") },
   ]);
 });
 
@@ -467,4 +490,4 @@ for (const hint of document.querySelectorAll("[data-hint]")) {
   });
 }
 
-export { GREETING_SLOTS, KEY_MODEL_PROVIDER, KEY_RECENTS, KEY_THINKING, LEGACY_KEY_MODE, NARROW_SIDEBAR, SIDE_SECTIONS, THINKING_LABELS, THINKING_LEVELS, applySections, applySidebarA11y, beginHomeSettle, cancelHomeSettle, clampThinking, closeMenu, currentThinking, endHomeSettle, greetingLine, greetingSlot, measureHomeOffset, sectionClosed, setInert, setMenuOpen, setThinkingLevel, sidebarOpen, syncGreeting, syncThinkingSegments, toggleSection, toggleSidebar, updateHomeMode };
+export { GREETING_SLOTS, KEY_MODEL_PROVIDER, KEY_RECENTS, KEY_THINKING, LEGACY_KEY_MODE, NARROW_SIDEBAR, SIDE_SECTIONS, THINKING_LABELS, THINKING_LEVELS, applySections, applySidebarA11y, beginHomeSettle, cancelHomeSettle, clampThinking, closeMenu, currentThinking, endHomeSettle, greetingLine, greetingSlot, measureHomeOffset, sectionClosed, setInert, setMenuOpen, setThinkingLevel, sidebarOpen, syncGreeting, syncThinkingSegments, thinkingTouched, toggleSection, toggleSidebar, updateHomeMode };

@@ -8,7 +8,7 @@ import { auxPinnedModelId, auxiliaryEnabled } from "../auxiliary.ts";
 import { COMPANIONS_ENABLED, partnersStore } from "../partners.ts";
 import { projectsStore } from "../projects.ts";
 import type { ChatDirPick } from "../projects.ts";
-import { chatModelRef, chatModelRefFor, chatSessionModelEnabled, clampThinkingLevel, currentThinkingLevels, isFaux, levelFromModelId, modelAvailable, readLlmConfig, thinkingLevelsFor } from "../provider.ts";
+import { chatModelRef, chatModelRefFor, chatSessionModelEnabled, clampThinkingLevel, currentThinkingLevels, isFaux, levelFromModelId, modelAvailable, readLlmConfig, runtimeThinking, thinkingLevelsFor } from "../provider.ts";
 import { markTaskSession } from "../unattended.ts";
 import { getHarness, lifediaryExt, rememberLevel, stickyThinkingLevel } from "./lifecycle.ts";
 import { CTX, ChatKinds, ChatProjects, Chats, ResolvedChat, TASK_CONVERSATION_PREFIX } from "./shared.ts";
@@ -41,9 +41,12 @@ export async function sessionModelInfo(chat: ResolvedChat): Promise<SessionModel
 	if (!current) return null;
 	const modelId = current.modelId.split("#")[0] ?? current.modelId;
 	const levels = thinkingLevelsFor(current.provider, modelId);
+	// 显示与建档同一条链（2026-11-21）：全局默认档也进来，别让 pill 显示的档
+	// 和第一轮实际跑的档脱节。
 	const previous =
 		levelFromModelId(current.modelId) ??
 		stickyThinkingLevel(chat.internalId) ??
+		runtimeThinking() ??
 		"off";
 	return {
 		provider: current.provider,
@@ -234,10 +237,13 @@ async function ensureConversationModel(
 		.agent(CTX)
 		.then((agent) => agent.model ?? null)
 		.catch(() => null);
-	// 档位来源：引用里的后缀（含旧 `#think-on` = high）> 进程内粘性 > 默认 off
+	// 档位来源（2026-11-21 插入全局层）：引用里的后缀（含旧 `#think-on` = high）
+	// > 进程内粘性 > 全局默认思考档（设置里默认模型带的那一档，runtimeThinking）
+	// > 默认 off。新会话因此继承设置里的全局档；没设过才落 off。
 	const previous =
 		(current ? levelFromModelId(current.modelId) : null) ??
 		stickyThinkingLevel(internalId) ??
+		runtimeThinking() ??
 		"off";
 
 	if (!chatSessionModelEnabled()) {

@@ -17,7 +17,7 @@ import { attr, esc } from "./markdown.js";
 import { request } from "./net.js";
 import { openSecMenu } from "./sec-menu.js";
 import { mountSegmented, syncSegmented } from "./settings-atoms.js";
-import { KEY_MODEL_PROVIDER } from "./shell.js";
+import { KEY_MODEL_PROVIDER, THINKING_LABELS } from "./shell.js";
 import { state } from "./state.js";
 import { closeModal, closePopover, openModal, openPopover, popoverOpen, toast } from "./ui-atoms.js";
 
@@ -1531,6 +1531,7 @@ function renderDefaultModelRow(catalog) {
   const name = document.getElementById("mdl-current");
   const hint = document.getElementById("mdl-hint");
   const change = document.getElementById("mdl-change");
+  const think = document.getElementById("mdl-think");
   if (!name || !hint || !change) return;
   const current = catalog && catalog.current ? catalog.current : null;
   const providers = (catalog && catalog.providers ? catalog.providers : [])
@@ -1551,7 +1552,34 @@ function renderDefaultModelRow(catalog) {
     hint.textContent = sub;
   };
 
+  // 只改全局默认档、不换模型：服务端按当前模型支持域 clamp，回实际档后回填选中态
+  async function setGlobalThinking(target) {
+    if (!current) return;
+    try {
+      const response = await request("/api/v1/agent/model", {
+        method: "POST",
+        body: JSON.stringify({
+          modelId: current.modelId,
+          providerId: current.providerId,
+          thinking: target,
+        }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        toast(data.message || data.error || "没存成");
+        return;
+      }
+      const applied = typeof data.thinking === "string" ? data.thinking : target;
+      for (const option of think?.querySelectorAll(".think-opt") ?? []) {
+        option.setAttribute("aria-pressed", String(option.dataset.level === applied));
+      }
+    } catch (error) {
+      if (error.message !== "forbidden") toast(`没存成：${error.message}`);
+    }
+  }
+
   change.hidden = true;
+  if (think) think.hidden = true;
   if (!current) {
     paint("未配置", "配好 LLM_API_KEY 会播种一个默认供应商");
     return;
@@ -1561,6 +1589,34 @@ function renderDefaultModelRow(catalog) {
     return;
   }
   paint(current.modelId, `${providerName} · 切换后下一轮对话生效`);
+
+  // 全局默认思考档（2026-11-21 用户口径）：新会话按这一档起步，分段按当前模型的
+  // 支持域画（GET /model 现在带 thinking / thinkingLevels）。点一档 = 只改档不换模型；
+  // 服务端 clamp 后回实际档，按回值标选中（模型不支持时落低一档，off 兜底）。
+  const levels = Array.isArray(catalog?.thinkingLevels) ? catalog.thinkingLevels : [];
+  const level = typeof catalog?.thinking === "string" ? catalog.thinking : null;
+  if (think && levels.length && level) {
+    think.hidden = false;
+    const label = document.createElement("span");
+    label.className = "mdl-think-label";
+    label.textContent = "思考强度 · 新会话默认";
+    const seg = document.createElement("div");
+    seg.className = "think-seg";
+    seg.setAttribute("role", "group");
+    seg.setAttribute("aria-label", "全局默认思考档");
+    for (const item of levels) {
+      const option = document.createElement("button");
+      option.type = "button";
+      option.className = "think-opt";
+      option.dataset.level = item;
+      option.textContent = THINKING_LABELS[item] || item;
+      option.setAttribute("aria-pressed", String(item === level));
+      option.addEventListener("click", () => void setGlobalThinking(current, item));
+      seg.append(option);
+    }
+    think.replaceChildren(label, seg);
+  }
+
   if (total < 2) {
     hint.textContent = `${providerName} · 在下面多填几个模型就能换`;
     return;

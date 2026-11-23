@@ -18,7 +18,7 @@ process.env.MODEL_RUNTIME_OVERRIDE = "true";
 process.env.PROVIDERS_PATH = join(dir, "providers.json");
 process.env.MODEL_RUNTIME_PATH = join(dir, "runtime.json");
 
-const { modelCatalog, providerCatalog, removeProvider, saveProvider, setRuntimeModel } = await import(
+const { modelCatalog, providerCatalog, removeProvider, saveProvider, setRuntimeModel, setRuntimeThinking } = await import(
 	"./provider.ts"
 );
 const providersPath = process.env.PROVIDERS_PATH;
@@ -122,6 +122,12 @@ test("默认供应商不能删；非默认的可以", async () => {
 
 test("faux 下切模型返回 faux", () => {
 	const result = setRuntimeModel({ providerId: "alpha", modelId: "m1" });
+	assert.equal(result.ok, false);
+	if (!result.ok) assert.equal(result.reason, "faux");
+});
+
+test("faux 下设全局默认思考档同样返回 faux（与切模型同一道门，2026-11-21）", () => {
+	const result = setRuntimeThinking("high");
 	assert.equal(result.ok, false);
 	if (!result.ok) assert.equal(result.reason, "faux");
 });

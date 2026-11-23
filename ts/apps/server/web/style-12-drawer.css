@@ -500,5 +500,48 @@ select.cs-input:disabled { color: var(--text-3); cursor: default; }
   box-shadow: inset 0 0 0 1px var(--outline);
   font-weight: 500;
 }
+
+/* 填充滑块（2026-11-21 用户拍板 B 版，对比页三版挑的）：轨道等分到模型支持档上，
+   旋钮吸附——点轨道 / 拖旋钮都行。只在点按 / 键盘跳档时带过渡，拖动挂 .is-dragging
+   关过渡跟手；已选段 scaleX 填满（compositor 变换不碰布局，防"卡"），右侧大字报当前档。 */
+.think-slider {
+  flex: 1; min-width: 0;
+  display: flex; align-items: center; gap: 10px;
+  cursor: pointer; touch-action: none;
+  outline: none;
+}
+.think-slider:focus-visible .think-slider-knob { box-shadow: 0 0 0 4px var(--accent-soft); }
+.think-slider-track { position: relative; flex: 1; height: 24px; }
+.think-slider-rail {
+  position: absolute; left: 7px; right: 7px; top: 50%; height: 4px;
+  background: var(--surface-low);
+  border: 1px solid var(--composer-border);
+  border-radius: 2px;
+  transform: translateY(-50%);
+}
+.think-slider-fill {
+  position: absolute; left: 8px; right: 8px; top: 50%; height: 4px;
+  background: var(--accent);
+  border-radius: 2px;
+  transform: translateY(-50%) scaleX(0);
+  transform-origin: left center;
+  opacity: .82;
+}
+.think-slider.is-animating .think-slider-knob { transition: left .16s var(--ease-standard); }
+.think-slider.is-animating .think-slider-fill { transition: transform .16s var(--ease-standard); }
+.think-slider.is-dragging .think-slider-knob,
+.think-slider.is-dragging .think-slider-fill { transition: none; }
+.think-slider-knob {
+  position: absolute; top: 50%; left: 7px; width: 14px; height: 14px;
+  border-radius: 50%;
+  background: var(--bg);
+  border: 2px solid var(--accent);
+  transform: translate(-50%, -50%);
+  z-index: 1;
+}
+.think-slider-value {
+  flex: none; min-width: 18px; text-align: center;
+  font-size: 12.5px; font-weight: 600; color: var(--accent);
+}
 .model-menu-empty { padding: 10px; font-size: 12.5px; line-height: 1.5; color: var(--text-3); }
 

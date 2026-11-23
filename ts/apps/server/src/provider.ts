@@ -704,6 +704,9 @@ function ensureDocument(): void {
 let storedSignature: string | null = null;
 let storedLoaded = false;
 let storedSelection: PublicModelRef | null = null;
+// 全局默认思考档（2026-11-21）：跟运行时选择一起落 runtime.json。存"用户想要的档"，
+// 消费方（新会话建档 / 投影）各自按目标模型的支持域 clamp——模型不支持时不回写这里。
+let storedThinking: ThinkingLevel | null = null;
 
 /** 回滚开关：`MODEL_RUNTIME_OVERRIDE=false` = 关闭运行时切模型（接口拒绝 + 启动忽略选择） */
 export function modelOverrideEnabled(): boolean {
@@ -719,7 +722,14 @@ function readStoredSelection(): PublicModelRef | null {
 	storedSignature = signature;
 
 	try {
-		const parsed = JSON.parse(readFileSync(path, "utf8")) as { model?: unknown };
+		const parsed = JSON.parse(readFileSync(path, "utf8")) as { model?: unknown; thinking?: unknown };
+		// 思考档先于模型解析：文件里只有档没有模型（坏档）时档也保住，默认供应商接得住
+		if (typeof parsed.thinking === "string") {
+			const level = ThinkingLevelSchema.safeParse(parsed.thinking.trim().toLowerCase());
+			storedThinking = level.success ? level.data : null;
+		} else {
+			storedThinking = null;
+		}
 		const raw = parsed.model;
 		if (raw && typeof raw === "object") {
 			const ref = raw as { providerId?: unknown; modelId?: unknown };
@@ -765,6 +775,7 @@ function writeStoredSelection(ref: PublicModelRef): void {
 	try {
 		writeJsonAtomic(runtimeStatePath(), {
 			model: { providerId: ref.providerId, modelId: ref.modelId },
+			...(storedThinking ? { thinking: storedThinking } : {}),
 			at: new Date().toISOString(),
 		});
 		storedSelection = ref;
@@ -776,6 +787,56 @@ function writeStoredSelection(ref: PublicModelRef): void {
 			`[model] 选择写不进 ${runtimeStatePath()}: ${errorText(error)}`,
 		);
 	}
+}
+
+/** 全局默认思考档；null = 没设过（新会话建档落到 off） */
+export function runtimeThinking(): ThinkingLevel | null {
+	return modelOverrideEnabled() ? storedThinking : null;
+}
+
+/**
+ * 设全局默认思考档（2026-11-21 用户口径：设置里默认模型要能带档位，新会话好继承）。
+ * 按当前全局模型的支持域 clamp（off 兜底）；只改档不换模型，写同一份 runtime.json。
+ * 切模型时这里不动：档保持原值，消费方按新模型支持域再 clamp。
+ */
+export function setRuntimeThinking(level: ThinkingLevel): SetModelResult {
+	if (!modelOverrideEnabled()) {
+		return {
+			ok: false,
+			reason: "override_disabled",
+			message: "模型切换被 MODEL_RUNTIME_OVERRIDE=false 关闭",
+		};
+	}
+	if (isFaux()) {
+		return { ok: false, reason: "faux", message: "faux 是假模型，没有可切换的真实模型" };
+	}
+	ensureDocument();
+	if (!document) {
+		return {
+			ok: false,
+			reason: "llm_not_configured",
+			message: "未配置 LLM_API_KEY（mock 流），没有档位可设",
+		};
+	}
+	const selected = resolveSelection();
+	if (!selected) {
+		return { ok: false, reason: "llm_not_configured", message: "没有可用模型，没有档位可设" };
+	}
+	const applied = clampThinkingLevel(level, thinkingLevelsFor(selected.providerId, selected.modelId));
+	storedThinking = applied;
+	try {
+		writeJsonAtomic(runtimeStatePath(), {
+			model: { providerId: selected.providerId, modelId: selected.modelId },
+			thinking: applied,
+			at: new Date().toISOString(),
+		});
+		storedSignature = fileSignature(runtimeStatePath());
+		storedLoaded = true;
+	} catch (error) {
+		console.warn(`[model] 思考档写不进 ${runtimeStatePath()}: ${errorText(error)}`);
+	}
+	console.log(`[model] 全局默认思考档 → ${applied}`);
+	return { ok: true, model: selected.modelId, provider: selected.providerId, models: [], thinking: applied };
 }
 
 /**
@@ -1598,7 +1659,7 @@ export function runtimeModelInfo(): RuntimeModelInfo {
 }
 
 export type SetModelResult =
-	| { ok: true; model: string; provider: string; models: string[] }
+	| { ok: true; model: string; provider: string; models: string[]; thinking?: ThinkingLevel }
 	| {
 			ok: false;
 			reason:

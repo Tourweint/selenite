@@ -176,6 +176,13 @@ export const ChatRequestSchema = z.object({
 	 * 已有会话请走 `POST /agent/chat/:conversationId/model`，这里传了会被忽略。
 	 */
 	model: ChatModelSelectionSchema.optional(),
+	/**
+	 * 新会话的初始思考档（2026-11-21，纯增量）：只在不带 `conversationId` 时采用。
+	 * 优先级：这个字段（composer 思考拨盘）> `model.thinking` > 服务端全局默认思考档
+	 * （设置里默认模型带的档）> off。已有会话请走
+	 * `POST /agent/chat/:conversationId/mode`，这里传了会被忽略。
+	 */
+	thinking: ThinkingLevelSchema.optional(),
 });
 export type ChatRequest = z.infer<typeof ChatRequestSchema>;
 
@@ -1340,7 +1347,7 @@ export const PartnerProfileSchema = z.object({
 	 * uuid 数组 = 这个总管 / 执事负责哪些已登记项目（人设二级页勾选，projects.sqlite
 	 * 的项目 uuid，**挂载 = 可达性**：recall 全部可查、聊到的自动浮出、remember 可指名
 	 * 写入——不是"每轮整包搬进上下文"）。执事自己的 partner: 键空间照旧。
-	 * `PARTNER_PROJECT_MEMORY=false` 时投影整个字段不出现；旧客户端忽略未知字段即可。
+	 *（PARTNER_PROJECT_MEMORY 回滚开关 2026-11-21 退役，字段恒投影；旧客户端忽略未知字段即可。）
 	 * 演进注：上线首日是单值 `projectId`（uuid|null），同日改多数组——字段只活了半天、
 	 * 手机端未消费，直接换名不留旧字段。
 	 */

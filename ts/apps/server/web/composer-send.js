@@ -19,9 +19,10 @@ import { request } from "./net.js";
 import { parsePartnerExternalId } from "./partner-sessions.js";
 import { partnerDisplayName, syncChiefDot } from "./partners-status.js";
 import { resize } from "./plus-menu.js";
-import { currentThinking, setThinkingLevel } from "./shell.js";
+import { currentThinking, setThinkingLevel, thinkingTouched } from "./shell.js";
 import { state } from "./state.js";
 import { createStreamRevealer } from "./stream-reveal.js";
+import { isTaskConversation, sendTaskMessage } from "./task-thread.js";
 import { applyTicketEvent } from "./tasks-live.js";
 import { loadPendingApprovals, scheduleTurnReconcile } from "./turn-reconcile.js";
 import { noMotion } from "./ui-atoms.js";
@@ -56,18 +57,10 @@ function setSending(value) {
   el.send.setAttribute("aria-label", value ? "停止" : "发送");
   el.send.setAttribute("data-tip", value ? "停止（再点一次或按 Esc）" : "发送（Enter）");
   syncSendEnabled();
-  // 归档防误触（2026-11-13）：当前会话开跑/停下时同步侧栏归档图标的禁用态，
-  // 只动这一个按钮不重渲染整列（渲染时机在 renderChats，两边口径一致）。
-  if (state.conversationId) {
-    const archive = el.chats.querySelector(
-      `[data-chat-archive="${CSS.escape(state.conversationId)}"]`,
-    );
-    if (archive instanceof HTMLButtonElement) {
-      archive.disabled = value;
-      archive.setAttribute("data-tip", value ? "会话正在运行，请先停止再归档" : "归档（会话和记忆都还在）");
-      if (value) closeChatArchiveConfirm();
-    }
-  }
+  // 归档防误触（2026-11-13 立；2026-11-21 行尾三图标退役、入口收进 ⋯ 菜单）：
+  // 没有归档图标可同步了，忙态在打开 ⋯ 菜单时现算；这里只剩一件事——
+  // 当前会话开跑时收掉已开的行内归档确认条，免得确认条悬在跑动的会话行上。
+  if (value) closeChatArchiveConfirm();
   // 忙碌不再改变总管在线色（2026-11-06 C 批）：只重算一次，保持与服务状态一致
   syncChiefDot();
 }
@@ -174,6 +167,16 @@ async function followUp(text) {
 
 async function send(text, images = [], files = []) {
   if (state.sending) return;
+  // 任务线程（2026-11-22）：话直接送执行端（steer / 续跑），不跑宿主助手。
+  // 失败把原文放回输入框；成功由 task-thread 自己补用户气泡。
+  if (isTaskConversation(state.conversationId)) {
+    const ok = await sendTaskMessage(text);
+    if (!ok) {
+      el.input.value = text;
+      resize();
+    }
+    return;
+  }
   setSending(true);
   state.stopRequested = false;
   state.lastUserText = text; // 错误行的「重试」用（批次一）
@@ -267,10 +270,10 @@ async function send(text, images = [], files = []) {
   // 而是和工具同款的一枚灰块——位置就是它真正发生的地方，正文进详情面板，
   // 主界面只写「思考」，不写秒数（和工具块同一条规矩）。
   let think = null;
-  // 这枚思考块有没有收到过真思考正文（2026-11-20）：发消息时就先立一枚"转圈"的
-  // 思考块占住位置（连接上游也算在想）；如果一路只有连接、模型没吐思考正文，
-  // 进入正文 / 收尾时把它撤掉，别在历史里留一枚空的「思考」。
-  let thinkHasText = false;
+  // 发消息时就先立一枚"转圈"的思考块占住位置（连接上游也算在想）；真思考正文到了
+  // 就继承这一枚。2026-11-21 用户口径「思考过程也要显示出来」翻掉 2026-11-20 的
+  // 空块清理：没等到思考正文的不再撤掉——它就是这一轮的「思考」步，落定后详情里
+  // 如实写「这段没留下正文」（服务端 session-transcript 同批给历史补记这一步）。
 
   // 工具流：有工具才建（第一只工具动手时）。它把灰块插在 .flow 里，
   // 顺序就是"话 → 块 → 话"；主界面不写步数/耗时，细节点块看（tool-chips.js）。
@@ -323,15 +326,13 @@ async function send(text, images = [], files = []) {
   };
   /**
    * 思考定型：补上「用时」，正文留在详情里。
-   * 2026-11-20：没有真思考正文的那一枚直接撤掉——它只是连接期的转圈占位，
-   * 不能当成"思考过"留在历史里（思考关着时每轮都会多一枚空块）。
+   * 2026-11-21 翻掉 2026-11-20 的撤块：没吐思考正文的也落定成一枚空壳「思考」
+   * （详情如实说没留正文）——转圈消失会让人以为这一步被藏了。
    */
   const endThink = () => {
     if (!think) return;
-    if (thinkHasText) think.finish();
-    else think.drop();
+    think.finish();
     think = null;
-    thinkHasText = false;
   };
 
   let answer = "";
@@ -443,6 +444,11 @@ async function send(text, images = [], files = []) {
                     },
                   }
                 : {}),
+              // 2026-11-21 思考拨盘随新会话下发（顶层 thinking，优先于 model.thinking
+              // 与服务端全局默认档）：此前只在屏选模型时才带上，不选模型直接发就被
+              // 丢进服务端默认 off——用户口径「思考档位没有夺取到」。
+              // 拨盘没被碰过就不发（缺省 off 不冒充选择），让服务端全局默认档说话。
+              ...(thinkingTouched() ? { thinking: currentThinking() } : {}),
             }),
         // 有附件才用分段数组；纯文本仍发字符串（老形状，服务端 union 兼容）
         messages: [
@@ -534,9 +540,7 @@ async function send(text, images = [], files = []) {
             void loadChats();
           } else if (event.type === "thinking") {
             // 思考正文增量：进思考块（和工具同款灰块），详情里滚动看全文。
-            // 2026-11-20：真有思考正文才把这枚块留下；发消息时那枚只负责转圈。
             beginThink();
-            if (event.text) thinkHasText = true;
             think.append(event.text || "");
             if (state.stick) scrollToEnd();
           } else if (event.type === "notice") {

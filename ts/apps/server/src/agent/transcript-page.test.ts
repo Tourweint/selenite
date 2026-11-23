@@ -218,8 +218,12 @@ test("分页：工具轮整轮保留（step 不跨页丢）", async () => {
 		page.messages.map((message) => message.text),
 		["跑个命令", "跑完了"],
 	);
-	assert.equal(page.messages[1]!.steps?.[0]?.name, "bash");
-	assert.equal(page.messages[1]!.steps?.[0]?.ok, true);
+	// 2026-11-21 起没吐思考正文的轮补一步空壳 think（排在工具前）：分页保的是整轮不跨页丢。
+	assert.deepEqual(
+		page.messages[1]!.steps?.map((step) => step.name),
+		["think", "bash"],
+	);
+	assert.equal(page.messages[1]!.steps?.[1]?.ok, true);
 });
 
 test("消息时刻：assistant 带收尾时刻（at + durationMs），user 不带", async () => {

@@ -262,6 +262,11 @@ const EXPECTED: Record<string, unknown> = {
 					},
 				},
 			},
+			// 2026-11-21 新会话初始思考档（纯增量）：拨盘 > model.thinking > 全局默认档 > off
+			thinking: {
+				kind: "optional",
+				of: { kind: "enum", values: ["off", "low", "medium", "high"] },
+			},
 		},
 	},
 };
