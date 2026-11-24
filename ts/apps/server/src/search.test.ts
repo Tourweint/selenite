@@ -389,3 +389,59 @@ test("testSearchVendor：只测指定源，不按整条回退链跑", async () =
 		await stub.close();
 	}
 });
+
+// ── 整次调用总预算（2026-11-24 M1 工具超时策略）────────────────────────────
+
+test("search：整次预算跨源共享——第一源慢，第二源只剩剩余时间；超时返回稳定错误", async () => {
+	process.env.TAVILY_API_KEY = "tavily-key";
+	process.env.DEEPSEEK_SEARCH_API_KEY = "deepseek-key";
+	// 第一源 250ms 后回 429；第二源要 5s。总预算 500ms：第二源只该等 ~250ms 就被 abort。
+	const first = await startStub((_req, res) => {
+		setTimeout(() => {
+			res.statusCode = 429;
+			res.end("rate limited");
+		}, 250);
+	});
+	const second = await startStub((_req, res) => {
+		setTimeout(() => {
+			res.setHeader("Content-Type", "application/json");
+			res.end(JSON.stringify({ results: [] }));
+		}, 5_000);
+	});
+	writeConfig([
+		{ vendor: "tavily", baseUrl: first.url },
+		{ vendor: "deepseek", baseUrl: second.url },
+	]);
+	try {
+		const started = Date.now();
+		const result = await webSearch("x", 1, { timeoutMs: 500 });
+		const elapsed = Date.now() - started;
+		assert.equal(result.ok, false);
+		if (result.ok) return;
+		assert.equal(result.error, "timeout", "预算耗尽给稳定枚举，不冒充 upstream_error");
+		assert.match(result.message, /搜索超时/);
+		// 若第二源重新拿到 20s，这里会挂到测试超时；落在 2s 内证明只用剩余预算。
+		assert.ok(elapsed < 2_000, `总耗时 ${elapsed}ms 应接近 500ms 预算，而不是第二源自己的 5s`);
+		assert.ok(elapsed >= 400, `总耗时 ${elapsed}ms 不应早于预算`);
+	} finally {
+		await first.close();
+		await second.close();
+	}
+});
+
+test("search：不传预算时保持旧行为（每源 20s / 无整次预算），超时仍是 upstream_error", async () => {
+	process.env.DEEPSEEK_SEARCH_API_KEY = KEY;
+	const stub = await startStub((_req, res) => {
+		res.statusCode = 500;
+		res.end("boom");
+	});
+	process.env.SEARCH_BASE_URL = stub.url;
+	try {
+		const result = await webSearch("x", 1);
+		assert.equal(result.ok, false);
+		if (result.ok) return;
+		assert.equal(result.error, "upstream_error", "旧路径的失败枚举不变");
+	} finally {
+		await stub.close();
+	}
+});

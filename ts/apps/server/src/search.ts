@@ -63,6 +63,7 @@ async function askSource(
 	source: SearchSourceState,
 	query: string,
 	count: number,
+	remainingMs?: number,
 ): Promise<VendorCallResult> {
 	const key = process.env[source.keyEnv]?.trim() ?? "";
 	return callSearchVendor({
@@ -71,7 +72,13 @@ async function askSource(
 		key,
 		query,
 		count,
+		...(remainingMs === undefined ? {} : { timeoutMs: remainingMs }),
 	});
+}
+
+/** 整次调用预算（2026-11-24 M1）：policy.tools.web_search.timeoutMs；不传 = 旧的每源 20s。 */
+export interface WebSearchOptions {
+	timeoutMs?: number;
 }
 
 /**
@@ -79,8 +86,16 @@ async function askSource(
  *
  * 返回结构化结果而不是抛错：调用方（web_search 工具 / 研究回合）要把
  * "没配搜索" 这种可引导的状态原样交给模型，让模型去提示用户配置。
+ *
+ * 2026-11-24：`options.timeoutMs` = **整次调用**的总预算（墙钟）。每到一源先算剩余，
+ * 单源请求的 `AbortSignal` 取 `min(20s, 剩余)`；预算耗尽返回稳定 `timeout` 错误。
+ * 不传 = 与改动前逐字节同形（每源 20s、无总预算）。
  */
-export async function webSearch(query: string, count?: number): Promise<SearchResult> {
+export async function webSearch(
+	query: string,
+	count?: number,
+	options: WebSearchOptions = {},
+): Promise<SearchResult> {
 	const keyword = query.trim();
 	if (!keyword) {
 		return { ok: false, error: "bad_response", message: "query 不能为空" };
@@ -91,10 +106,25 @@ export async function webSearch(query: string, count?: number): Promise<SearchRe
 		return { ok: false, error: "search_not_configured", message: NOT_CONFIGURED_MESSAGE };
 	}
 
+	const budgetMs =
+		typeof options.timeoutMs === "number" && Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
+			? Math.round(options.timeoutMs)
+			: null;
+	const deadlineAt = budgetMs === null ? null : Date.now() + budgetMs;
+
 	let sawEmpty = false;
+	let timedOut = false;
 	let lastFailure: { ok: false; error: SearchErrorCode; message: string } | null = null;
 	for (const source of sources) {
-		const result = await askSource(source, keyword, limit);
+		let remainingMs: number | undefined;
+		if (deadlineAt !== null) {
+			remainingMs = deadlineAt - Date.now();
+			if (remainingMs <= 0) {
+				timedOut = true;
+				break;
+			}
+		}
+		const result = await askSource(source, keyword, limit, remainingMs);
 		if (result.ok) {
 			// 只记条数 / 字数 / 源 id，不记 query 原文与 URL（2026-11-07 日志纪律）。
 			console.log(`[search] vendor=${source.vendor} q=${keyword.length}字 hits=${result.hits.length}`);
@@ -102,8 +132,17 @@ export async function webSearch(query: string, count?: number): Promise<SearchRe
 			sawEmpty = true;
 			continue;
 		}
+		if (result.error === "timeout") timedOut = true;
 		lastFailure = result;
 		console.warn(`[search] vendor=${source.vendor} error=${result.error}`);
+	}
+	// 有一次真超时就不再把它当「合法空结果」：很可能只是没等够。
+	if (timedOut) {
+		return {
+			ok: false,
+			error: "timeout",
+			message: `搜索超时（${Math.round((budgetMs ?? 0) / 1000)}s）：没有拿到结果，可以换更短的关键词再试一次。`,
+		};
 	}
 	// 所有源都合法答了但都没命中：这不是错误，如实回空。
 	if (sawEmpty) return { ok: true, hits: [] };
@@ -137,7 +176,7 @@ export async function testSearchVendor(vendorId?: string): Promise<SearchResult>
 export interface SearchModule {
 	searchConfigured: () => boolean;
 	searchKeyEnv: () => string;
-	webSearch: (query: string, count?: number) => Promise<SearchResult>;
+	webSearch: (query: string, count?: number, options?: WebSearchOptions) => Promise<SearchResult>;
 }
 
 export const searchModule: SearchModule = {

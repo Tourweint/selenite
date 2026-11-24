@@ -17,7 +17,7 @@ export interface SearchHit {
 	summary: string;
 }
 
-export type SearchErrorCode = "upstream_error" | "bad_response";
+export type SearchErrorCode = "upstream_error" | "bad_response" | "timeout";
 
 export interface SearchVendor {
 	id: string;
@@ -132,6 +132,12 @@ export interface VendorCallInput {
 	key: string;
 	query: string;
 	count: number;
+	/**
+	 * 本次请求最多等多久（毫秒）。缺省 = 旧的每源 20s（`TIMEOUT_MS`）。
+	 * 编排层传「整次调用预算的剩余」时，超时映射为稳定的 `timeout` 错误；
+	 * 不传时保持旧口径（超时仍报 `upstream_error` /「搜索服务不可达」）。
+	 */
+	timeoutMs?: number;
 }
 
 export type VendorCallResult =
@@ -151,8 +157,13 @@ export async function callSearchVendor(input: VendorCallInput): Promise<VendorCa
 	const query = clipRunes(input.query.trim(), vendor.queryLimit);
 	if (!query) return { ok: false, error: "bad_response", message: "query 不能为空" };
 
+	// 单源上限恒为 20s；编排层给了整次预算时再取 min(预算剩余, 20s)。
+	const budgeted = input.timeoutMs !== undefined;
+	const timeoutMs = budgeted
+		? Math.max(1, Math.min(TIMEOUT_MS, Math.round(input.timeoutMs as number)))
+		: TIMEOUT_MS;
 	const request = buildRequest(vendor, baseUrl, key, query, count);
-	const fetched = await fetchJson(request.url, request.init);
+	const fetched = await fetchJson(request.url, request.init, timeoutMs, budgeted);
 	if (!fetched.ok) return fetched;
 
 	// 两家云厂商把错误放在 200 回包里：先判错误，再读结果
@@ -268,16 +279,25 @@ type FetchResult =
 	| { ok: true; data: unknown }
 	| { ok: false; error: SearchErrorCode; message: string };
 
-async function fetchJson(url: string, init: RequestInit): Promise<FetchResult> {
+async function fetchJson(
+	url: string,
+	init: RequestInit,
+	timeoutMs: number,
+	reportTimeout: boolean,
+): Promise<FetchResult> {
 	let response: Response;
 	try {
 		response = await fetch(url, {
 			...init,
 			// 不跟重定向：跨站跳转会把 key 带去别处（与 magpie 同口径）
 			redirect: "manual",
-			signal: AbortSignal.timeout(TIMEOUT_MS),
+			signal: AbortSignal.timeout(timeoutMs),
 		});
-	} catch {
+	} catch (error) {
+		// 只有「整次调用预算」路径才把超时报成 timeout（旧路径保持 upstream_error，行为不变）。
+		if (reportTimeout && isTimeoutError(error)) {
+			return { ok: false, error: "timeout", message: `搜索超时（${Math.round(timeoutMs / 1000)}s）` };
+		}
 		return { ok: false, error: "upstream_error", message: "搜索服务不可达" };
 	}
 	if (response.status >= 300 && response.status < 400) {
@@ -291,6 +311,12 @@ async function fetchJson(url: string, init: RequestInit): Promise<FetchResult> {
 		return { ok: false, error: "bad_response", message: "搜索服务返回格式异常" };
 	}
 	return { ok: true, data };
+}
+
+function isTimeoutError(error: unknown): boolean {
+	if (!(error instanceof Error)) return false;
+	// `AbortSignal.timeout`（Node 18+）抛 DOMException name=TimeoutError；少数运行时是 AbortError。
+	return error.name === "TimeoutError" || error.name === "AbortError";
 }
 
 function parseHits(vendorId: string, data: unknown): SearchHit[] | null {

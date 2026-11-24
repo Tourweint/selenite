@@ -330,8 +330,6 @@ const PROVIDER_ERROR_TEXT = {
   providers_disabled: "供应商配置被环境变量关掉了（PROVIDERS_CONFIG=false）。",
   provider_id_locked: "供应商 id 不能改；要换 id 请新建一个。",
   selected_model_missing: "这家供应商上还选着模型：先把「默认模型」切到别处，再改模型清单。",
-  provider_is_default: "这是默认供应商，不能删；先把默认模型切到别家。",
-  provider_in_use: "当前正用着这家供应商，先切到别家再删。",
   bad_key_env: "环境变量名只能是大写字母、数字、下划线，且不以数字开头（如 DASHSCOPE_API_KEY）。",
   bad_base_url: "Base URL 要写完整地址（http:// 或 https://），不带 /chat/completions。",
   bad_provider_name: "名称需要 1–80 个字符。",

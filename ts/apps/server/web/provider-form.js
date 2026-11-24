@@ -252,10 +252,10 @@ function fillProviderForm(host, provider, template) {
   const del = q("#pv-delete");
   if (del) {
     // 和保存 / 取消同一行（2026-11-13）：删除是这家供应商自己的动作，不再单独占一条危险区
+    // 默认 / 在用也照样能删（2026-11-23）：删掉后默认顺延到下一家，没有就落 mock
     del.hidden = !isEdit;
     del.disabled = false;
     del.title = "";
-    if (isEdit && provider.isDefault) del.title = "默认供应商不能删；先把默认模型切到别家";
   }
 
   applyProviderSecretMode(host);

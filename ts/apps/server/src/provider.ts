@@ -789,6 +789,31 @@ function writeStoredSelection(ref: PublicModelRef): void {
 	}
 }
 
+/**
+ * 供应商被删后清掉指向它的运行时选择（2026-11-23）。
+ *
+ * 留着是条死引用：`selectionValid()` 每次都得判一次；更隐蔽的是同 id 重建后
+ * 这份旧选择会重新生效，用户会看到"我没选它，模型自己回来了"。
+ * `thinking` 不动——档位跟模型走，模型没了也不该顺手清用户的全局档。
+ */
+function clearStoredSelectionIf(providerId: string): void {
+	if (!modelOverrideEnabled()) return;
+	const stored = readStoredSelection();
+	if (stored?.providerId !== providerId) return;
+	try {
+		writeJsonAtomic(runtimeStatePath(), {
+			...(storedThinking ? { thinking: storedThinking } : {}),
+			at: new Date().toISOString(),
+		});
+		storedSelection = null;
+		storedLoaded = true;
+		storedSignature = fileSignature(runtimeStatePath());
+	} catch (error) {
+		// 清不掉只影响"删掉后是否还记得旧选择"，不影响删除结果
+		console.warn(`[model] 清理 ${runtimeStatePath()} 的失效选择失败: ${errorText(error)}`);
+	}
+}
+
 /** 全局默认思考档；null = 没设过（新会话建档落到 off） */
 export function runtimeThinking(): ThinkingLevel | null {
 	return modelOverrideEnabled() ? storedThinking : null;
@@ -2079,15 +2104,21 @@ export function removeProvider(id: string): ProviderResult {
 	if (!entry) {
 		return { ok: false, status: 404, error: "unknown_provider", message: `没有这个供应商：${id}` };
 	}
-	if (document.defaultSelection?.providerId === id) {
-		return bad("provider_is_default", "这是默认供应商，不能删；要换默认请先改 defaultSelection");
-	}
-	const current = isFaux() ? null : resolveSelection();
-	if (current?.providerId === id) {
-		return bad("provider_in_use", "当前模型还选在这个供应商上；先切到别的供应商再删");
-	}
+	// 2026-11-23 用户拍板：默认 / 在用 / 最后一家都不拦——"没供应商也没关系"。
+	// 删的是默认那家就把默认顺延到下一家还有模型的（没有则 null）；后续由
+	// resolveSelection 的兜底链与 mock 流接住，不要求用户先绕一圈改默认。
 	const providers = document.providers.filter((provider) => provider.id !== id);
-	persistDocument({ ...document, providers });
+	const removedDefault = document.defaultSelection?.providerId === id;
+	const promoted = removedDefault
+		? providers.find((provider) => provider.models.length > 0)
+		: undefined;
+	const defaultSelection = !removedDefault
+		? document.defaultSelection
+		: promoted
+			? { providerId: promoted.id, modelId: promoted.models[0] }
+			: null;
+	persistDocument({ ...document, providers, defaultSelection });
+	clearStoredSelectionIf(id);
 	// 删除联动（2026-11-05 H2）：旧 keyEnv 与界面直填绑定名都试一遍。
 	// 清理失败只告警，不改删除结果——供应商已经删掉，残留条目最多是条无主密钥。
 	try {

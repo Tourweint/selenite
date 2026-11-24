@@ -104,7 +104,7 @@ test("编辑把默认模型移出清单 → 400，必须先切走", async () => 
 	if (!result.ok) assert.equal(result.error, "selected_model_missing");
 });
 
-test("默认供应商不能删；非默认的可以", async () => {
+test("删非默认供应商：允许，默认不动", async () => {
 	await saveProvider({
 		id: "beta",
 		name: "Beta",
@@ -112,12 +112,12 @@ test("默认供应商不能删；非默认的可以", async () => {
 		keyEnv: "BETA_KEY",
 		models: ["b1"],
 	});
-	const denied = removeProvider("alpha");
-	assert.equal(denied.ok, false);
-	if (!denied.ok) assert.equal(denied.error, "provider_is_default");
 	const removed = removeProvider("beta");
 	assert.equal(removed.ok, true);
-	assert.equal(providerCatalog().providers.length, 1);
+	const catalog = providerCatalog();
+	assert.equal(catalog.providers.length, 1);
+	assert.equal(catalog.providers[0]?.isDefault, true, "默认仍是 alpha");
+	assert.deepEqual(catalog.defaultSelection, { providerId: "alpha", modelId: "m1" });
 });
 
 test("faux 下切模型返回 faux", () => {
@@ -154,6 +154,35 @@ test("运行期坏文件保留上一份可用配置", () => {
 	const catalog = providerCatalog();
 	assert.equal(catalog.providers.length, 1);
 	assert.equal(catalog.providers[0]?.id, "alpha");
+});
+
+/**
+ * 2026-11-23 用户拍板：默认 / 在用 / 最后一家都不设删除保护。
+ * 删默认 → 默认顺延到下一家还有模型的；删到零 → providers 空、defaultSelection null
+ * （对话入口读 `readLlmConfig()` 得 null，自然走 mock 流；真 HTTP 由 providers-probe §9 验）。
+ */
+test("默认供应商可以删：默认顺延到下一家；删最后一家 = 零供应商", async () => {
+	const added = await saveProvider({
+		id: "beta",
+		name: "Beta",
+		baseUrl: "http://127.0.0.1:9/v1",
+		keyEnv: "BETA_KEY",
+		models: ["b1"],
+	});
+	assert.equal(added.ok, true);
+	const removedDefault = removeProvider("alpha");
+	assert.equal(removedDefault.ok, true, "默认供应商不再拦");
+	const catalog = providerCatalog();
+	assert.equal(catalog.providers.length, 1);
+	assert.equal(catalog.providers[0]?.id, "beta");
+	assert.equal(catalog.providers[0]?.isDefault, true, "默认顺延到还有模型的 beta");
+	assert.deepEqual(catalog.defaultSelection, { providerId: "beta", modelId: "b1" });
+
+	const removedLast = removeProvider("beta");
+	assert.equal(removedLast.ok, true, "最后一家也能删");
+	const empty = providerCatalog();
+	assert.equal(empty.providers.length, 0);
+	assert.equal(empty.defaultSelection, null);
 });
 
 /**

@@ -96,11 +96,6 @@ function wireProviderForm(host) {
   host.querySelector("#pv-delete")?.addEventListener("click", () => {
     const { provider } = currentProviderFormTarget();
     if (!provider) return;
-    // 禁用钮在浏览器里连 tooltip 都不一定弹得出来，把原因写在行内提示里更可靠
-    if (provider.isDefault) {
-      hint("默认供应商不能删；先把默认模型切到别家。");
-      return;
-    }
     confirmDeleteProvider(provider);
   });
 }
@@ -310,9 +305,22 @@ function providerFormValues(editingId) {
 
 /** 删除确认（复用 .modal，确认钮走 destructive 色；不用 window.confirm） */
 function confirmDeleteProvider(provider) {
+  // 删掉后会发生什么先说清（2026-11-23 起默认也能删）：默认顺延到下一家，一家不剩就落 mock
+  const withModels = (state.providers || []).filter(
+    (item) => Array.isArray(item.models) && item.models.length > 0,
+  );
+  // "最后一家"按还有模型的算：空清单供应商本来就供不了模型
+  const lastOne =
+    withModels.length <= 1 && Array.isArray(provider.models) && provider.models.length > 0;
+  const outcome = lastOne
+    ? "这是最后一家能用的供应商：删掉后没有可用模型，对话会走 mock 回显。"
+    : provider.isDefault
+      ? "删掉后默认模型会落到下一家还有模型的供应商。"
+      : "";
   openModal("删除供应商", (body) => {
     body.innerHTML = `
       <p class="modal-desc">删除「${esc(provider.name)}」之后不能撤销。</p>
+      ${outcome ? `<p class="modal-hint">${esc(outcome)}</p>` : ""}
       <p class="modal-hint" id="pv-del-hint"></p>
       <div class="modal-actions">
         <button class="ghost" type="button" data-modal-cancel>取消</button>
