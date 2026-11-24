@@ -22,7 +22,7 @@
  *     `data`，只有参数非法 / 越权 / 存储失败才走 `err`。
  *   - **已迁（只读）**：`recall_sessions` / `ask_user` / `report_progress` /
  *     `recall` / `web_search` / `skill`（批 18）。
- *   - **还没迁**：`remember` / `set_reminder` / `persona_recall` / `send_to_agent`。
+ *   - **还没迁**：`remember` / `set_reminder` / `send_to_agent`。
  *     其中 `work_*` / `partner_*` 的结果被回执与恢复链路解析，改形状要连读取方一起改。
  *   - **不在范围内**：`read` / `write` / `edit` / `bash` 是 durable 的 `CodingTools` 提供的，
  *     形状由上游决定，这里不改。

@@ -6,7 +6,7 @@
  *
  * 落点 `.data/tool-pool.json`：`{ "deferred": ["routine_manage", …] }`
  * （`AGENT_TOOL_POOL_PATH` 可覆盖）。**存按需例外名单**，与 worker-tools 的
- * `disabled` 同一套思路：文件缺失 / 坏 JSON = 回落到代码默认（当前 8 个），
+ * `disabled` 同一套思路：文件缺失 / 坏 JSON = 回落到代码默认（当前 9 个），
  * 以后新增工具默认常驻，不会因为名单没更新而悄悄消失。
  *
  * **生效边界（内核约束，2026-11-17 核对）**：`deferred` 是工具注册期属性，

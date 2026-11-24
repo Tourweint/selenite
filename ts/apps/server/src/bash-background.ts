@@ -39,6 +39,9 @@ export const BG_LOG_TAIL_LINES = 200;
 /** 任务 id 形状就是本模块自己生成的：只认这个形状，避免 `../` 之类拼进文件路径。 */
 const JOB_ID_RE = /^bg-[a-z0-9]+-[a-z0-9]+$/;
 
+/** 后台作业类别；v1 只有 shell（2026-11-24 generalize，给以后非 shell 作业留字段）。 */
+export type BgJobKind = "shell";
+
 export interface BgJobRecord {
 	id: string;
 	/** 命令摘要（空白压平、≤120 字）；完整命令只在 .log 里 */
@@ -47,6 +50,12 @@ export interface BgJobRecord {
 	endedAt?: string;
 	exitCode?: number | null;
 	status: "running" | "done" | "failed";
+	/** 作业类别；旧记录没有这个字段，读时缺省按 `shell`（2026-11-24）。 */
+	kind?: BgJobKind;
+	/** 发起它的工具名（bash / powershell）；`tool-policy` 转后台时写入。旧记录可空。 */
+	tool?: string;
+	/** 发起它的会话 id（列表过滤用）；旧记录可空。 */
+	conversationId?: number;
 }
 
 /** 开关：只有明确写 1 / true / on 才开（这是行为变化，默认必须不变）。 */
@@ -223,20 +232,33 @@ export interface BgJobView {
 	endedAt: string | null;
 	exitCode: number | null;
 	status: BgJobRecord["status"];
+	/** 旧记录没有 kind → `shell`（2026-11-24）。 */
+	kind: BgJobKind;
+	/** 旧记录没有 tool / conversationId → null（不编造）。 */
+	tool: string | null;
+	conversationId: number | null;
 }
 
-/** 列出索引里的任务（index 顺序 = 创建顺序）。坏文件/不存在都回空数组。 */
-export function listBgJobs(dir: string = bashJobsDir()): BgJobView[] {
-	return readIndex(indexPathOf(dir)).map((record) => ({
-		id: record.id,
-		commandSummary: record.commandSummary,
-		startedAt: record.startedAt,
-		endedAt: record.endedAt ?? null,
-		exitCode: typeof record.exitCode === "number" ? record.exitCode : null,
-		// 上一进程留下的 running 原样透出：本模块不替重启结算改账，
-		// 也绝不把"索引说在跑"当成"活进程还在"（kill 的归属另看内存表）。
-		status: record.status,
-	}));
+/**
+ * 列出索引里的任务（index 顺序 = 创建顺序）。坏文件/不存在都回空数组。
+ * 给了 `conversationId` 就只回该会话发起的任务（旧记录无该字段，不命中过滤）。
+ */
+export function listBgJobs(dir: string = bashJobsDir(), conversationId?: number): BgJobView[] {
+	return readIndex(indexPathOf(dir))
+		.filter((record) => conversationId === undefined || record.conversationId === conversationId)
+		.map((record) => ({
+			id: record.id,
+			commandSummary: record.commandSummary,
+			startedAt: record.startedAt,
+			endedAt: record.endedAt ?? null,
+			exitCode: typeof record.exitCode === "number" ? record.exitCode : null,
+			// 上一进程留下的 running 原样透出：本模块不替重启结算改账，
+			// 也绝不把"索引说在跑"当成"活进程还在"（kill 的归属另看内存表）。
+			status: record.status,
+			kind: record.kind ?? "shell",
+			tool: typeof record.tool === "string" && record.tool ? record.tool : null,
+			conversationId: typeof record.conversationId === "number" ? record.conversationId : null,
+		}));
 }
 
 export interface BgJobLog {
@@ -337,6 +359,12 @@ export interface MoveToBackgroundInput {
 	cwd: string;
 	/** 触发这次转后台的超时秒数（只用于文案） */
 	timeoutSeconds: number;
+	/** 发起它的工具名（bash / powershell）；旧调用不传 = 记录里留空。 */
+	tool?: string;
+	/** 作业类别；缺省 `shell`（2026-11-24）。 */
+	kind?: BgJobKind;
+	/** 发起它的会话 id（列表过滤用）；旧调用不传 = 记录里留空。 */
+	conversationId?: number;
 	/** 任务结束时的回调：拿到终态记录 + 日志尾部（由装配层回灌会话） */
 	onFinished?: (record: BgJobRecord, logTail: string) => void;
 	/**
@@ -377,6 +405,9 @@ export function moveToBackground(input: MoveToBackgroundInput): MovedJob {
 		commandSummary: summarizeCommand(input.command),
 		startedAt: new Date().toISOString(),
 		status: "running",
+		kind: input.kind ?? "shell",
+		...(input.tool ? { tool: input.tool } : {}),
+		...(input.conversationId !== undefined ? { conversationId: input.conversationId } : {}),
 	};
 	upsertRecord(index, record);
 
@@ -476,5 +507,29 @@ export function replacedResult(message: string): ReplacementResult {
 		// 不用 0 是因为 0 在程序语义里明确等于"成功"。
 		structuredOutput: { output: message, truncated: false, exitCode: -1 },
 		isError: false,
+	};
+}
+
+/**
+ * 工具结果替换（`onTimeout:"cancel"`）：结算为错误 + `canceled` 诊断，明确告诉模型
+ * **不要重试**（与 fail 的差别只在结算语义；进程在超时点已经死了）。
+ */
+export interface CanceledResult {
+	readonly output: { type: "text"; text: string }[];
+	readonly structuredOutput: { readonly output: string; readonly truncated: boolean; readonly exitCode: number };
+	readonly isError: true;
+	readonly diagnostics: readonly {
+		readonly severity: "error";
+		readonly code: "canceled";
+		readonly message: string;
+	}[];
+}
+
+export function canceledResult(message: string): CanceledResult {
+	return {
+		output: [{ type: "text", text: message }],
+		structuredOutput: { output: message, truncated: false, exitCode: -1 },
+		isError: true,
+		diagnostics: [{ severity: "error", code: "canceled", message }],
 	};
 }

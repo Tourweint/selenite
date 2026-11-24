@@ -216,27 +216,6 @@ export const TOOL_CAPABILITIES: Record<string, ToolCapability> = {
 		concurrentSafe: true,
 		notes: "自建常驻自主轮；与 partner_manage 同档，第一次要人点头。",
 	},
-	persona_recall: {
-		name: "persona_recall",
-		readOnly: false,
-		destructive: true,
-		sideEffectScope: "process",
-		riskLevel: "medium",
-		needsApproval: "never",
-		concurrentSafe: true,
-		notes: "经固定 ask.py 起 python 子进程查 persona 记忆库；命令拼死、argv 传参，只读查询但按硬约束进闸门，不进高危清单。",
-	},
-	persona_write: {
-		name: "persona_write",
-		readOnly: false,
-		destructive: true,
-		sideEffectScope: "external",
-		riskLevel: "high",
-		needsApproval: "critical",
-		concurrentSafe: true,
-		notes: "经固定 repair.py 起 python 子进程往主人一生库写 user_statement（主人明确让写才用）；每写必弹审批（critical），命令拼死、argv 传参，按硬约束进 WRITE_TOOLS + 高危清单。",
-	},
-
 	// ── 搜索 / 递话 ───────────────────────────────────────
 	web_search: {
 		name: "web_search",

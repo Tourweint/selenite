@@ -43,9 +43,6 @@ const EXPECTED_TOOLS = [
 	"routine_manage",
 	"web_search",
 	"send_to_agent",
-	"persona_recall",
-	// 2026-11-17 persona_write 批：写一生库（主人明确让写才用，critical 审批）
-	"persona_write",
 	"ask_user",
 	// 2026-11-19 批2 决策上报链：respond_escalation（按需池默认成员）
 	"respond_escalation",
@@ -67,10 +64,6 @@ function registeredToolNames(): string[] {
 			relay: { deliver: async () => ({ ok: false, error: "stub" }) },
 			routineSelfService: true,
 			scheduleRoutine: async () => undefined,
-			// persona 写入（2026-11-17 persona_write 批）：能力表登记了就得有注册覆盖，桩不落盘。
-			personaWrite: async () => ({ ok: true }),
-			// persona 检索（2026-11-09 批一）：条件注册，给个不落盘替身把全集覆盖进来。
-			personaAsk: async () => ({ ok: true, question: "stub" }),
 				skillAdviceSave: () => ({ ok: true, saved: 0, kept: 0 }),
 				// 提醒沉淀落盘（2026-11-19 批4）：条件注册，给个不落盘替身把全集覆盖进来。
 				reminderAdviceSave: () => ({ ok: true, saved: 0 }),

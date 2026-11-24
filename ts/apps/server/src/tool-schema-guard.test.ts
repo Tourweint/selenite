@@ -25,10 +25,6 @@ const REGISTERED_ORDER = [
 	"recall",
 	"set_reminder",
 	"recall_sessions",
-	"persona_recall",
-	// persona_write（2026-11-17 persona_write 批）：插在 persona_recall 之后；
-	// 前缀资产变动已在变更记录里交代（新工具注册本身就换前缀）。
-	"persona_write",
 	"skill",
 	"send_to_agent",
 	"delegate",
@@ -77,9 +73,6 @@ function fullTools() {
 		scopeOf: () => SCOPE,
 		skills: SKILLS,
 		recallSessions: async () => [],
-		personaAsk: async () => ({ ok: true, question: "stub" }),
-		// persona 写入（2026-11-17 persona_write 批）：条件注册，快照要覆盖它。
-		personaWrite: async () => ({ ok: true }),
 		relay: { deliver: async () => ({ ok: false, error: "stub" }) },
 		// 提醒沉淀落盘（2026-11-19 批4）：条件注册，给个不落盘替身把顺序快照覆盖进来。
 		reminderAdviceSave: () => ({ ok: true, saved: 0 }),
@@ -94,6 +87,18 @@ function fullTools() {
 test("工具注册顺序稳定（缓存前缀资产，顺序见测试文件头）", () => {
 	const actual = fullTools().map((tool) => tool.name);
 	assert.deepEqual(actual, REGISTERED_ORDER, CACHE_WARNING);
+});
+
+test("记忆工具面恒为 2 个（recall / remember）；旧 persona 工具不再出现", () => {
+	// 2026-11-24 旧形态退役：MEMORY_BANK 总闸删除后，任何装配形态都只挂这两把记忆工具。
+	const minimal = createTools({ memory: null, scopeOf: () => SCOPE }).map((tool) => tool.name);
+	assert.ok(minimal.includes("recall"), "基线必须有 recall");
+	assert.ok(minimal.includes("remember"), "基线必须有 remember");
+	assert.ok(!minimal.includes("persona_recall"), "persona_recall 已退役");
+	assert.ok(!minimal.includes("persona_write"), "persona_write 已退役");
+	const full = fullTools().map((tool) => tool.name);
+	assert.ok(!full.includes("persona_recall"), "全开装配也不得注册 persona_recall");
+	assert.ok(!full.includes("persona_write"), "全开装配也不得注册 persona_write");
 });
 
 test("快照没有重名（重名等于同一个工具被注册两次，前缀也会变）", () => {

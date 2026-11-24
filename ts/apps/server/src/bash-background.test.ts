@@ -8,6 +8,7 @@ import {
 	bashBackgroundEnabled,
 	bgJobWatchIntervalSeconds,
 	bgJobWakePayload,
+	canceledResult,
 	killBgJob,
 	listBgJobs,
 	moveToBackground,
@@ -122,6 +123,54 @@ test("工具结果替换：不回传 isError（否则模型会当成失败重跑
 	assert.match(replacement.output[0].text, /bg-x/);
 });
 
+test("取消结算：isError + canceled 诊断，明确不提示成功（2026-11-24 onTimeout=cancel）", () => {
+	const canceled = canceledResult("命令超过 60 秒，已按工具策略取消。不要重试同一条命令。");
+	assert.equal(canceled.isError, true, "cancel 是错误结算（不是成功）");
+	assert.equal(canceled.structuredOutput.exitCode, -1);
+	assert.equal(canceled.diagnostics[0]?.code, "canceled");
+	assert.equal(canceled.diagnostics[0]?.severity, "error");
+	assert.match(canceled.output[0].text, /不要重试/);
+});
+
+test("后台记录带 tool / kind / conversationId；列表支持按会话过滤（旧记录不命中）", async () => {
+	const dir = tempDir();
+	writeIndex(dir, [
+		{
+			id: "bg-old-555555",
+			commandSummary: "old",
+			startedAt: "2026-11-24T00:00:00.000Z",
+			status: "done",
+			exitCode: 0,
+		},
+	]);
+	const finished = new Promise<BgJobRecord>((resolve) => {
+		moveToBackground({
+			command: 'node -e "console.log(1)"',
+			cwd: process.cwd(),
+			timeoutSeconds: 1,
+			dir,
+			tool: "powershell",
+			kind: "shell",
+			conversationId: 42,
+			onFinished: resolve,
+		});
+	});
+	const record = await finished;
+	assert.equal(record.tool, "powershell");
+	assert.equal(record.kind, "shell");
+	assert.equal(record.conversationId, 42);
+
+	const all = listBgJobs(dir);
+	const fresh = all.find((job) => job.id === record.id)!;
+	assert.deepEqual(
+		{ tool: fresh.tool, kind: fresh.kind, conversationId: fresh.conversationId },
+		{ tool: "powershell", kind: "shell", conversationId: 42 },
+	);
+	const filtered = listBgJobs(dir, 42);
+	assert.deepEqual(filtered.map((job) => job.id), [record.id], "旧记录没有 conversationId，不命中过滤");
+	assert.deepEqual(listBgJobs(dir, 7), []);
+});
+
 // ── 管理面（2026-11-10 批 21 §二）────────────────────────────
 
 function writeIndex(dir: string, records: BgJobRecord[]): void {
@@ -150,6 +199,10 @@ test("列表：索引原样投影，缺省字段给 null（不编造退出码）
 		endedAt: "2026-11-10T01:01:00.000Z",
 		exitCode: 0,
 		status: "done",
+		// 2026-11-24：旧记录没有 kind / tool / conversationId——kind 缺省 shell，其余给 null。
+		kind: "shell",
+		tool: null,
+		conversationId: null,
 	});
 	assert.equal(jobs[1]!.endedAt, null);
 	assert.equal(jobs[1]!.exitCode, null);

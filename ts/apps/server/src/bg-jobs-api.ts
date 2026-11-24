@@ -8,6 +8,7 @@ import {
 	pruneBgIndex,
 	readBgJobLog,
 } from "./bash-background.ts";
+import { anyBackgroundToolPolicy } from "./tool-policy.ts";
 
 /**
  * bash 后台任务的管理面（2026-11-10 批 21 §二）。
@@ -16,19 +17,21 @@ import {
  * 里翻文件。这里补三个端点（列表 / 日志尾部 / kill），**纯增量**。
  *
  * 口径：
- *   - 开关沿用 `AGENT_BASH_BG_TIMEOUT`：关着时整组路由不挂（404 = 未启用）；
+ *   - 挂载条件（2026-11-24 放宽）：`AGENT_BASH_BG_TIMEOUT` 开 **或** 工具超时策略
+ *     （master `TOOL_TIMEOUT_POLICY` 开 + 任一工具解析为 `onTimeout:"background"`）；
+ *     都为假时整组路由不挂（404 = 未启用）；
  *   - 日志正文只在响应体里出现，服务端日志只记条数（与 bash 输出同待遇）；
  *   - kill 只认本进程起的、仍在跑的任务（`killBgJob` 的归属判断）。
  */
 export interface BgJobsApiOptions {
-	/** 开关读取（测试用；缺省读 env） */
+	/** 开关读取（测试用；缺省旧 env 开关或策略选了 background） */
 	enabled?: () => boolean;
 	/** 落点目录（测试用；缺省 `AGENT_BG_JOBS_DIR` / `.data/bg-jobs`） */
 	dir?: () => string;
 }
 
 export function mountBgJobs(app: Hono, options: BgJobsApiOptions = {}): void {
-	const enabled = options.enabled ?? (() => bashBackgroundEnabled());
+	const enabled = options.enabled ?? (() => bashBackgroundEnabled() || anyBackgroundToolPolicy());
 	if (!enabled()) return;
 	const dir = options.dir ?? (() => bashJobsDir());
 
@@ -44,7 +47,17 @@ export function mountBgJobs(app: Hono, options: BgJobsApiOptions = {}): void {
 
 	app.get("/api/v1/agent/bg-jobs", (c) => {
 		try {
-			return c.json({ ok: true, jobs: listBgJobs(dir()), limit: BG_INDEX_LIMIT });
+			// 可选 `?conversationId=` 过滤（2026-11-24）：旧记录没有该字段，不命中过滤。
+			const rawFilter = c.req.query("conversationId")?.trim();
+			let conversationId: number | undefined;
+			if (rawFilter) {
+				const parsed = Number(rawFilter);
+				if (!Number.isFinite(parsed)) {
+					return c.json({ ok: false, error: "bad_request", message: "conversationId 必须是数字" }, 400);
+				}
+				conversationId = parsed;
+			}
+			return c.json({ ok: true, jobs: listBgJobs(dir(), conversationId), limit: BG_INDEX_LIMIT });
 		} catch (error) {
 			console.warn(
 				`[bg-job] 列表读取失败: ${error instanceof Error ? error.message.slice(0, 120) : "unknown"}`,

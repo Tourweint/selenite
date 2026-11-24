@@ -42,17 +42,20 @@ import {
 	listManagers,
 	validateDomain,
 } from "../../../packages/chancellor/src/manager/registry.ts";
+import { MAX_TASKS_DEFAULT } from "../../../packages/chancellor/src/config.ts";
+import { validateTaskInput } from "../../../packages/chancellor/src/plan.ts";
 import {
 	WORK_REVIEW_GUIDANCE,
 	chancellorWorkRoot,
 	emitDelegation,
+	normalizeDelegationIsolation,
 	normalizeDelegationSteps,
 	startDelegation,
 	type DelegationMirrorEntry,
 	type DelegationReport,
 } from "./delegation.ts";
 // 证据裁判（2026-11-10 批 14）：验收 fail 时起 read-only 子会话，结论回传 chancellor 返工判定。
-// 派活注入项目记忆（2026-11-16）：系统内 native 与外部 CLI 都只读 TASK.md，
+// 派活注入项目记忆（2026-11-16）：本机池与外部 CLI 都只读 TASK.md，
 // 记忆只能随 requirement 送过去；只取单子所属项目的 scope。
 import {
 	appendDelegationProjectMemory,
@@ -112,6 +115,8 @@ import {
 	resolveDelegateRouting,
 	routingToRequestFields,
 } from "./delegate-routing.ts";
+// 领域派活入口（2026-11-23）：默认关 = 不暴露 domain、一律直派 worker；代码全保留。
+import { domainDispatchEnabled } from "./flags.ts";
 // 设备矩阵（2026-11-05 阶段二）：远程分支晚绑定取中继客户端。
 // relay-matrix → agent → tools 的环是运行期安全的（agent 绑定只在函数体内解引用）。
 import {
@@ -163,6 +168,8 @@ export interface PersonaRecallHit {
 	kind?: string;
 	source?: string;
 	why?: string;
+	/** 外接库的原始组名（组名不固定）；内置六组不填。 */
+	group?: string;
 }
 
 export interface PersonaRecallResult {
@@ -170,6 +177,8 @@ export interface PersonaRecallResult {
 	question: string;
 	qtype?: string;
 	groups?: Partial<Record<PersonaRecallGroup, PersonaRecallHit[]>>;
+	/** 外接库的扁平命中（anyGroups 模式总会给，空库 = []）。 */
+	hits?: PersonaRecallHit[];
 	unknown?: string;
 	coverage?: {
 		not_searched?: string[];
@@ -178,6 +187,32 @@ export interface PersonaRecallResult {
 		gap_months?: string[];
 	};
 	error?: string;
+	/** 超时标记（2026-11-24）：只有超时置 true；工具层只对它透传 error 原文。 */
+	timedOut?: boolean;
+	/**
+	 * 库不认 `--vector`（2026-11-24 命名统一）：persona-ask 已自动退回普通检索并成功。
+	 * 不是失败，只在日志里留痕；工具描述与返回结构不变。
+	 */
+	vectorUnsupported?: boolean;
+}
+
+/**
+ * 记忆库槽位的最小访问面（2026-11-23）。
+ *
+ * 结构同 lifecycle 注入的实现（memory-bank.ts）：active 决定这一次 `recall` / `remember`
+ * 走哪个库；ask / write 只在 external 时被调用。`writable()` 供 remember 在起进程前
+ * 先回「写入未开启」，不必真的调 repair.py。
+ */
+export interface MemoryBankAccess {
+	active(): "builtin" | "external";
+	ask(question: string, options?: { limit?: number }): Promise<PersonaRecallResult>;
+	write(input: {
+		body: string;
+		why: string;
+		about?: string;
+		tag?: string;
+	}): Promise<{ ok: boolean; line?: string; statementId?: string; error?: string }>;
+	writable(): boolean;
 }
 
 /**
@@ -315,25 +350,13 @@ export interface ToolDeps {
 	 */
 	recallSessions?: ((query: string, options: { days?: number; limit?: number }) => Promise<SessionSearchHit[]>) | null;
 	/**
-	 * persona-metric 记忆库检索（2026-11-09 persona 接入批一）：传了才注册 `persona_recall`。
-	 * 装配层按 `PERSONA_MEMORY_ASK`（配置=启用）与 `PERSONA_MEMORY_ENABLED`（false=显式关）
-	 * 双闸决定传不传——不传 = 工具不上架（模型侧 tool_unavailable，一行回滚）。
-	 * 实现由 lifecycle 注入，tools 不 import persona-ask.ts（避免单测依赖真实 python 路径）。
+	 * 记忆库槽位（2026-11-23 外部记忆库接入）：按槽位分发 recall / remember。
+	 * 装配层（lifecycle）恒注入；不传 = 内置引擎形态（单测 / 探针不需要真 python 路径）。
+	 *
+	 * 结构在 tools 这边声明（不 import memory-bank.ts）：单测 / 探针不需要真 python 路径
+	 * 也能构造替身。
 	 */
-	personaAsk?:
-		| ((question: string, options?: { limit?: number }) => Promise<PersonaRecallResult>)
-		| null;
-	/**
-	 * persona-metric 记忆库写入（2026-11-17 persona_write 批）：传了才注册 `persona_write`。
-	 * 装配层按 `PERSONA_WRITE_ENABLED`（默认关）与 repair.py 路径（PERSONA_REPAIR 或
-	 * PERSONA_MEMORY_ASK 同目录推导）双闸决定传不传。语义=主人**明确让写**才把他的原话
-	 * 记进大记忆库的 user_statement（自动提取的记忆不送）；审批走 capability critical。
-	 */
-	personaWrite?:
-		| ((
-				input: { body: string; why: string; about?: string; tag?: string },
-		  ) => Promise<{ ok: boolean; line?: string; statementId?: string; error?: string }>)
-		| null;
+	memoryBank?: MemoryBankAccess | null;
 	/**
 	 * 自建巡逻（2026-11-08 刀二 E4）：为 true 时 `routine_manage` 工具上架。
 	 * 装配层（lifecycle）按 `routineSelfServiceEnabled()` 传入；**不传 = 不上架**
@@ -479,7 +502,7 @@ function delegateJsonData(raw: string): Record<string, unknown> {
 	return { message: raw };
 }
 
-// ── persona_recall 渲染（2026-11-09 persona 接入批一）──────────────
+// ── 外接库检索结果的六组渲染（2026-11-09 persona 接入批一；recall 外部槽复用）──
 const PERSONA_GROUP_LABELS: Record<PersonaRecallGroup, string> = {
 	memory_day: "日记忆",
 	event: "事件",
@@ -525,6 +548,30 @@ export function renderPersonaAsk(result: PersonaRecallResult): string {
 	}
 
 	let out = blocks.length > 0 ? blocks.join("\n\n") : "个人记忆库里没有查到相关记录。";
+	if (result.unknown?.trim()) out += `\n\n注意：${result.unknown.trim()}`;
+	const gaps = [...(result.coverage?.gaps ?? []), ...(result.coverage?.gap_months ?? [])];
+	if (gaps.length > 0) {
+		out += `\n\n记忆库在这些时段没有记录：${[...new Set(gaps)].join("、")}`;
+	}
+	return out;
+}
+
+/**
+ * 外接库的扁平命中渲染（2026-11-23）：组名不固定，直接用 `hit.group` 做标签；
+ * 其余预算 / unknown / coverage 口径与 `renderPersonaAsk` 一致。
+ */
+export function renderExternalBankAsk(result: PersonaRecallResult): string {
+	const hits = result.hits ?? [];
+	const lines = hits.map((hit) => {
+		const group = hit.group?.trim();
+		const when = hit.date?.trim();
+		const title = hit.title?.trim();
+		const body = hit.text?.trim();
+		const detail = [title, body ? clipPersonaText(body) : ""].filter(Boolean).join("：");
+		const head = [when, detail || "（无摘要）"].filter(Boolean).join("｜");
+		return `- ${group ? `[${group}] ` : ""}${head}（${hit.id}）`;
+	});
+	let out = lines.length > 0 ? lines.join("\n") : "当前外部记忆库里没有查到相关记录。";
 	if (result.unknown?.trim()) out += `\n\n注意：${result.unknown.trim()}`;
 	const gaps = [...(result.coverage?.gaps ?? []), ...(result.coverage?.gap_months ?? [])];
 	if (gaps.length > 0) {
@@ -606,6 +653,58 @@ export function createTools(deps: ToolDeps) {
 			),
 		}),
 		execute: async (args, api) => {
+			// 记忆库槽位（2026-11-23）：外部模式 = 起 repair.py 写外部库，**不写内置引擎**。
+			// 工具名 / schema / 注册位置都不变；只换后面的库。
+			const bank = deps.memoryBank;
+			if (bank && bank.active() === "external") {
+				if (partnersStore().isGroupSession(api.conversationId)) {
+					return textToolResult(
+						err(
+							"group_session",
+							"群聊里的内容不进个人记忆；需要记住的事请主人在私聊里说。",
+							"在私聊里重新说一遍要记的事。",
+						),
+					);
+				}
+				if (!bank.writable()) {
+					// PERSONA_WRITE_ENABLED=false / 只读库：明确回「写入未开启」，**不 spawn**。
+					return textToolResult(
+						err(
+							"memory_write_disabled",
+							"外部记忆库的写入未开启（PERSONA_WRITE_ENABLED=false，或这个库没有 repair.py）。",
+							"让主人在 设置 → 一生记忆库（写）里打开写入。",
+						),
+					);
+				}
+				const content = args.content.trim();
+				let result: { ok: boolean; line?: string; statementId?: string; error?: string };
+				try {
+					// 外部库只收原话：kind / scope / project / importance / expiresInDays / taught
+					// 在本批都不生效（remember 没有 about / tag 参数，也不传）。
+					result = await bank.write({ body: content, why: "用户让记住" });
+				} catch {
+					result = { ok: false };
+				}
+				// 只记字数 / 状态，不记 body 原文（日志纪律）。
+				console.log(`[remember] bank=external body=${[...content].length}字 ok=${result.ok}`);
+				if (!result.ok) {
+					return textToolResult(
+						err(
+							"memory_write_failed",
+							result.error ?? "外部记忆库写入没成功（原因已记日志）。",
+							"把失败原因转告主人；不要编造「已经写入」。不要改写到本地记忆里。",
+						),
+					);
+				}
+				return textToolResult(
+					ok({
+						message:
+							`已记住：${content}` +
+							(result.statementId ? `（留痕 id：${result.statementId}）` : "") +
+							"\n（外部记忆库只收原话；kind/scope 等参数未生效）",
+					}),
+				);
+			}
 			const engine = requireMemory();
 			// 群会话不进个人记忆（2026-11-06 群组方案 §2.2）：群里听到的事写进执事私人记忆
 			// 就是串台。模型侧明说原因，别让它对着一个会失败的接口反复重试。
@@ -690,6 +789,70 @@ export function createTools(deps: ToolDeps) {
 			limit: Type.Optional(Type.Number({ description: "最多返回几条，默认 5" })),
 		}),
 		execute: async (args, api) => {
+			// 记忆库槽位（2026-11-23）：外部模式 = 经 ask.py 查外接库，输出仍走
+			// `renderPersonaAsk()`，形状仍是 `{count, message}`（schema 不变）。
+			// 外部失败明确报错，**不回落内置库**（两库条目不同构，悄悄换库比报错更糟）。
+			const bank = deps.memoryBank;
+			if (bank && bank.active() === "external") {
+				if (partnersStore().isGroupSession(api.conversationId)) {
+					return textToolResult(
+						err(
+							"group_session",
+							"群聊不走个人记忆；答案以群里的聊天记录为准。",
+							"按群里的聊天记录回答，不要当这里是私聊。",
+						),
+					);
+				}
+				const limit = Math.max(1, Math.min(20, Math.floor(args.limit ?? 5)));
+				let result: PersonaRecallResult;
+				try {
+					result = await bank.ask(args.query, { limit });
+				} catch {
+					// 注入实现理论上不抛，这里兜一层：检索失败绝不打断裂对话轮。
+					result = { ok: false, question: args.query };
+				}
+				const flat = result.hits;
+				const hits = flat
+					? flat.length
+					: result.groups
+						? Object.values(result.groups).reduce((sum, group) => sum + (group?.length ?? 0), 0)
+						: 0;
+				// 只记字数 / 状态 / 条数，不记 query 原文与正文（日志纪律）。
+				// vectorUnsupported = 库不认 --vector、已退回普通检索（不是失败，2026-11-24）。
+				console.log(
+					`[recall] bank=external q=${args.query.length}字 ok=${result.ok} hits=${hits}${result.vectorUnsupported === true ? " vectorUnsupported=true" : ""}`,
+				);
+				if (!result.ok) {
+					const disabled = /已关闭/.test(result.error ?? "");
+					// 超时是可行动信息（2026-11-24）：只对它透传 error 原文，其余失败仍走通用文案。
+					if (result.timedOut === true) {
+						return textToolResult(
+							err(
+								"memory_unavailable",
+								result.error ?? "persona 检索超时",
+								"告诉主人这次查得太慢、没查完；可以换更短的关键词再试一次，别连续重试同一个查询。",
+							),
+						);
+					}
+					return textToolResult(
+						err(
+							"memory_unavailable",
+							disabled
+								? "外部记忆库已关闭（PERSONA_MEMORY_ENABLED=false）。"
+								: "外部记忆库暂时查不了（原因已记日志），你可以说说想确认什么，我换个方式找。",
+							disabled
+								? "让主人到 设置 → 一生记忆库（查）里重新打开。"
+								: "稍后重试，或让主人检查外部记忆库脚本；不要当这里没有这回事。",
+						),
+					);
+				}
+				return textToolResult(
+					ok({
+						count: hits,
+						message: flat ? renderExternalBankAsk(result) : renderPersonaAsk(result),
+					}),
+				);
+			}
 			const engine = requireMemory();
 			// 群会话不参与记忆引擎（群组方案 §2.2，v1 最简形态）：群聊查记忆也跳过
 			if (partnersStore().isGroupSession(api.conversationId)) {
@@ -930,6 +1093,9 @@ export function createTools(deps: ToolDeps) {
 	// 派活（2026-11-02）：主 agent 的"手"。它自己不动手，把活交给外面的工人，
 	// 只拿回一句话。工具的 description 里"不适合"那半句比"适合"更重要——
 	// 写宽了，主 agent 会把一次 read 就能答的事也派出去，每次都起 worker，比不用还贵。
+	// 领域派活入口（2026-11-23）：读一次决定工具面（schema 随 harness 装载冻结）；
+	// 执行层每次懒读，旧调用 / 旧会话带的 domain 也一律忽略。
+	const domainDispatch = domainDispatchEnabled();
 	const domainList = (): string => {
 		try {
 			const domains = listManagers(chancellorWorkRoot())
@@ -947,15 +1113,18 @@ export function createTools(deps: ToolDeps) {
 			// 领域名规则与清单只在 domain 参数、resume 怎么填只在 requirement 参数、
 			// steps 规则只在 steps 参数；描述只留「何时用、怎么调」+ 指路句
 			//（delegate 是 core 技能，始终可取）。
-			"把一件需要多步动手的活派给外面的工人（领域负责人/执行者）。" +
+			// 2026-11-23：领域派活入口默认关，关闭时描述不提「领域负责人」。
+			"把一件需要多步动手的活派给外面的工人" +
+			(domainDispatch ? "（领域负责人/执行者）。" : "（执行者）。") +
 			"适合：改多个文件、跑命令、查证之后再动手、在手机上操作 App；" +
 			"不适合：闲聊、一次 read 就能答的事、需要边做边问对方的事。" +
 			"**派出去立即返回任务单号、后台汇报，不要等结果、不要重复派**；告诉用户「已派发，完成后会汇报」。" +
 			"**新活必须带 `project`**（已登记项目名或 id；手机/设备活豁免）；" +
 			"没有可用项目会返回 needs_project 和项目清单——先问用户、用 `propose_project` 提交、等确认再派。" +
 			"上一轮的活卡住、或用户刚回答了你问的问题，用 `resume: true` 接原单跑，**不要重新派**。" +
+			"多张单并行改同一项目时用 `isolation:\"worktree\"` 隔离副本；只读查证 / 单张小改可用 `isolation:\"direct\"`；不填 = auto（跟随全局默认）。" +
 			"**注意**：写文件用相对路径；手机工人碰不到你电脑上的文件，交回来的是一句话。" +
-			'**第一次派活前先调 skill({name:"delegate"}) 读完整手册**：任务书四段 / steps / resume / 四行回报 / 裁决纪律。',
+			'**第一次派活前先调 skill({name:"delegate"}) 读完整手册**：任务书四段 / tasks / resume / 四行回报 / 裁决纪律。',
 		parameters: Type.Object({
 			requirement: Type.String({
 				description:
@@ -972,14 +1141,20 @@ export function createTools(deps: ToolDeps) {
 						"不知道有哪些项目时，先不带，工具会返回 needs_project 和项目清单。",
 				}),
 			),
-			domain: Type.Optional(
-				Type.String({
-					description:
-						"领域负责人的领域名，**必须是小写 ASCII**（小写字母、数字、连字符，如 `frontend` / `desktop-shell`）。" +
-						`当前已有领域：${domainList()}。` +
-						"填了就把活交给该领域负责人；不填则直接派 worker（兼容旧行为）。",
-				}),
-			),
+			// 领域派活入口（2026-11-23）：关闭时 domain 不进 schema（模型看不到参数；
+			// 旧会话 / 旧调用硬传的也会在执行层被忽略）；打开才恢复领域负责人路径。
+			...(domainDispatch
+				? {
+						domain: Type.Optional(
+							Type.String({
+								description:
+									"领域负责人的领域名，**必须是小写 ASCII**（小写字母、数字、连字符，如 `frontend` / `desktop-shell`）。" +
+									`当前已有领域：${domainList()}。` +
+									"填了就把活交给该领域负责人；不填则直接派 worker（兼容旧行为）。",
+							}),
+						),
+					}
+				: {}),
 			targetDevice: Type.Optional(
 				Type.String({
 					description:
@@ -1012,6 +1187,28 @@ export function createTools(deps: ToolDeps) {
 						"验收项会在任务详情里单独列出，不要和动作混在一句里。",
 				}),
 			),
+			tasks: Type.Optional(
+				Type.Array(
+					Type.Object({
+						title: Type.String({ description: "任务标题，一句话" }),
+						slug: Type.String({ description: "小写字母/数字/连字符，如 write-hello" }),
+						instruction: Type.String({ description: "这个任务具体要做什么" }),
+						done_when: Type.String({ description: "可机械验证的完成标准" }),
+						dependsOn: Type.Optional(
+							Type.Array(Type.Number(), {
+								description: "依赖的前置 seq（1 起，只能依赖更小的 seq）",
+							}),
+						),
+						writes: Type.Array(Type.String(), {
+							description: "这个任务会写的项目内相对路径；只读任务给空数组 []",
+						}),
+					}),
+					{
+						description:
+							"多步活直接给出任务列表（1-5 个）；不传 = 整单一个任务。写同一个文件的任务必须串成依赖。格式与规则见 skill(delegate)。",
+					},
+				),
+			),
 			workdir: Type.Optional(
 				Type.String({
 					description:
@@ -1023,9 +1220,20 @@ export function createTools(deps: ToolDeps) {
 			permission: Type.Optional(
 				Type.Union([Type.Literal("read"), Type.Literal("edit"), Type.Literal("full")], {
 					description:
-						"这张单的工具权限档：read=只读、edit=可改文件、full=可跑任意命令。只对 Claude / Codex / OpenCode 执行器生效；" +
+						"这张单的工具权限档：read=只读、edit=可改文件、full=可跑任意命令。只对 Claude / Codex / OpenCode / 豆包 / CodeBuddy / Qoder 执行器生效（豆包没有只读档，read 只是不额外放权）；" +
 						"不填 = 跟随设置里「派活」的默认档。续跑不生效。",
 				}),
+			),
+			isolation: Type.Optional(
+				Type.Union(
+					[Type.Literal("auto"), Type.Literal("worktree"), Type.Literal("direct")],
+					{
+						description:
+							"这张单的隔离方式：auto=跟随全局默认（CHANCELLOR_TASK_ISOLATION，且只有 git 项目才开 worktree）；" +
+							"worktree=这张单强制在副本里改（非 git 项目回落 direct，并在结果里如实说明）；direct=直接在项目目录干。" +
+							"多张单并行改同一项目建议 worktree；只读查证 / 单张小改可用 direct。不填 = auto。续跑不生效（沿用原单快照）。",
+					},
+				),
 			),
 		}),
 		execute: async (args, api, context) => {
@@ -1038,7 +1246,28 @@ export function createTools(deps: ToolDeps) {
 				return textToolResult(ok({ error: "invalid_steps", message: stepsCheck.message }));
 			}
 			const steps = stepsCheck.steps;
-			const requestedDomain = (args.domain ?? "").trim();
+			if (args.tasks !== undefined) {
+				try {
+					validateTaskInput(args.tasks, MAX_TASKS_DEFAULT);
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					return textToolResult(ok({ error: "invalid_tasks", message }));
+				}
+			}
+			// 按单隔离（2026-11-23）：非法值明确拒绝，不静默改成 direct / worktree。
+			const isolationCheck = normalizeDelegationIsolation(args.isolation);
+			if (!isolationCheck.ok) {
+				return textToolResult(
+					ok({ error: "invalid_isolation", message: isolationCheck.message }),
+				);
+			}
+			const isolation = isolationCheck.isolation;
+			// 领域派活入口（2026-11-23，执行层懒读）：关闭时旧调用 / 旧会话带的 domain
+			// 强制按空串处理，一律走「无领域直派 worker」；打开才参与路由。
+			// domain 参数是条件进 schema 的，静态类型拿不到它（可能为空），这里按旧调用形状读。
+			const domainDispatchNow = domainDispatchEnabled();
+			const legacyDomain = (args as { domain?: string }).domain;
+			const requestedDomain = domainDispatchNow ? (legacyDomain ?? "").trim() : "";
 			// 派活路由（2026-11-07）：执事在自己领域内直派，不再绕回分管宰相；
 			// 跨领域明确拒绝，不静默改道。总管 / 主人会话维持原语义。
 			const routing = resolveDelegateRouting(
@@ -1052,6 +1281,10 @@ export function createTools(deps: ToolDeps) {
 				return textToolResult(err("delegate_rejected", routing.reason));
 			}
 			const requestFields = routingToRequestFields(routing);
+			// 关闭领域派活入口时显式不起分管宰相：请求不带 domain，并带 managers:false。
+			// 执事的「在自己领域内直派」仍由 resolveDelegateRouting 给出（D4 执事路由不动），
+			// 它本来就带 managers:false，这里只补总管 / 主人会话那一路。
+			if (!domainDispatchNow) requestFields.managers = false;
 			const domain = requestFields.domain;
 			// 远程分支（2026-11-05 阶段二）：点名另一台电脑执行。
 			// 本机的项目前置不参与（project 语义归目标机）；离线直接失败不排队。
@@ -1177,10 +1410,16 @@ export function createTools(deps: ToolDeps) {
 			// 派活注入项目记忆（2026-11-16）：只拼进交给 chancellor 的 requirement，
 			// **不参与上面的幂等指纹**——同一请求不能因为记忆更新而变成"内容不同"。
 			// 记忆库读不出来 / 开关关着 → 空串，requirement 原样。
-			const delegationRequirement = appendDelegationProjectMemory(
-				args.requirement,
-				delegationProjectMemoryText(deps.memory, project, args.requirement),
-			);
+			const projectMemory = delegationProjectMemoryText(deps.memory, project, args.requirement);
+			const delegationRequirement = appendDelegationProjectMemory(args.requirement, projectMemory);
+			// 总管直给 tasks 时拆单器不再分发 requirement，项目记忆必须显式拼进每个 task。
+			const tasksForDispatch =
+				args.tasks !== undefined && projectMemory !== ""
+					? args.tasks.map((task) => ({
+							...task,
+							instruction: `${task.instruction}\n\n${projectMemory}`,
+						}))
+					: args.tasks;
 
 			// 幂等回执（方案 §5.1）：新派先落回执再入队；续跑不建新单，
 			// 只补一行 `resume:<原单id>:<次数>` 的会话映射（见下方受理之后那段）。
@@ -1255,11 +1494,14 @@ export function createTools(deps: ToolDeps) {
 					resumeTicketId,
 					project,
 					...(steps ? { steps } : {}),
+					...(tasksForDispatch !== undefined ? { tasks: tasksForDispatch } : {}),
 					...(requestId ? { requestId } : {}),
 					// 工作目录与权限档（2026-11-17）：只写进新单；续跑由 chancellor 沿用原单。
 					//（DELEGATE_WORKDIR 回滚开关 2026-11-21 退役，恒生效。）
 					...(workDir ? { workDir } : {}),
 					...(args.permission ? { employeePermission: args.permission } : {}),
+					// 按单隔离（2026-11-23）：auto 也带上，由 startDelegation 决定不写快照。
+					...(isolation ? { isolation } : {}),
 					// 执事在自己领域内直派（2026-11-07）：不带 managers 就是既有分管路径
 					...(requestFields.managers === false ? { managers: false as const } : {}),
 					// 派活留言（2026-11-07）：谁在什么身份下说的这句话，落进任务详情
@@ -1447,111 +1689,6 @@ export function createTools(deps: ToolDeps) {
 									return `- ${when}｜${hit.title || "（无标题）"}（${hit.conversationId}）\n  …${hit.snippet}…`;
 								})
 								.join("\n"),
-						}),
-					);
-				},
-			}),
-		);
-	}
-
-	// persona-metric 记忆库检索（2026-11-09 persona 接入批一）：条件注册，不进基线。
-	// 回滚：lifecycle 不传 deps.personaAsk（PERSONA_MEMORY_ASK 未配置 / ENABLED=false）
-	// → 这里整块不执行。它起 python 子进程，按硬约束字面进了 WRITE_TOOLS（不进高危清单）。
-	if (deps.personaAsk) {
-		const personaAsk = deps.personaAsk;
-		tools.push(
-			defineTool({
-				name: "persona_recall",
-				description:
-					"在**主人的个人记忆库**（跨越很多年的原始记录与分析）里检索证据条目，每条带出处 id。" +
-					"适用：本地记忆想不起来 / 查很久以前（如去年、2024 年）的事 / 主人要求给原文出处。" +
-					"**查不到 ≠ 没有这回事**：返回里有『不确定』说明时照转述，不要编。" +
-					"与 recall 分工：recall 查最近与偏好，persona_recall 查一生；先 recall 再 persona_recall。",
-				parameters: Type.Object({
-					query: Type.String({ description: "要查什么，用关键词或一句话" }),
-					limit: Type.Optional(
-						Type.Number({ description: "每组最多返回几条，默认 5", minimum: 1, maximum: 20 }),
-					),
-				}),
-				execute: async (args, api) => {
-					// 与 recall 同款：群聊不走个人记忆。
-					if (partnersStore().isGroupSession(api.conversationId)) {
-						return textToolResult(
-							err(
-								"group_session",
-								"群聊不走个人记忆；答案以群里的聊天记录为准。",
-								"按群里的聊天记录回答，不要当这里是私聊。",
-							),
-						);
-					}
-					const limit = Math.max(1, Math.min(20, Math.floor(args.limit ?? 5)));
-					let result: PersonaRecallResult;
-					try {
-						result = await personaAsk(args.query, { limit });
-					} catch {
-						// 注入实现理论上不抛，这里兜一层：检索失败绝不打断裂对话轮。
-						result = { ok: false, question: args.query };
-					}
-					const hits = result.groups
-						? Object.values(result.groups).reduce((sum, group) => sum + (group?.length ?? 0), 0)
-						: 0;
-					// 只记字数 / 状态 / 条数，不记 query 原文与正文（日志纪律）。
-					console.log(`[persona_recall] q=${args.query.length}字 ok=${result.ok} hits=${hits}`);
-					if (!result.ok) {
-						return textToolResult(
-							err(
-								"persona_unavailable",
-								"个人记忆库暂时查不了（原因已记日志），你可以说说想确认什么，我换个方式找。",
-								"稍后重试，或先用 recall 查本地记忆。",
-							),
-						);
-					}
-					return textToolResult(ok({ message: renderPersonaAsk(result) }));
-				},
-			}),
-		);
-	}
-
-	// persona-metric 记忆库写入（2026-11-17 persona_write 批）：条件注册，不进基线。
-	// 双闸：PERSONA_WRITE_ENABLED（默认关）+ repair.py 路径可用；审批由 capability
-	// `needsApproval:"critical"` 承担——每次写都弹审批，主人点确认才落字（「明确让写了才写」）。
-	// 回滚：lifecycle 不传 deps.personaWrite → 这里整块不执行。
-	if (deps.personaWrite) {
-		const personaWrite = deps.personaWrite;
-		tools.push(
-			defineTool({
-				name: "persona_write",
-				description:
-					"把主人**明确要求写进个人记忆库**的一条事实（通常是纠正：库里的旧记录错了，主人给出对的版本）" +
-					"送进一生记忆库，作为最高优先的「用户亲口确认」，检索时压过库里的模型推断。" +
-					"三条铁律：①只在主人明确说「记进 / 写进 / 纠正记忆库」时才用，平时的记忆走 remember，" +
-					"**绝不**把自动提取的内容往这里送；②body 一字不动存原话；③每次写入都会弹审批，主人点了才落字。",
-				parameters: Type.Object({
-					body: Type.String({ description: "主人的原话，一字不改（例如：「住院的是我姥姥，不是我妈」）" }),
-					why: Type.String({ description: "为什么写这条（比如「主人纠正库里记错的主体」），会进改动留痕账" }),
-					about: Type.Optional(
-						Type.String({ description: "这件事发生在什么时候（YYYY-MM 或 YYYY-MM-DD），不知道就不传" }),
-					),
-					tag: Type.Optional(Type.String({ description: "小标签，比如「时间修正」「错认主体」" })),
-				}),
-				execute: async (args) => {
-					const result = await personaWrite(args);
-					// 只记状态与字数，不记 body 原文（日志纪律）。
-					console.log(
-						`[persona_write] body=${[...args.body].length}字 ok=${result.ok}`,
-					);
-					if (!result.ok) {
-						return textToolResult(
-							err(
-								"persona_write_failed",
-								result.error ?? "记忆库写入没成功（原因已记日志）。",
-								"把失败原因转告主人；不要编造「已经写入」。可以稍后重试。",
-							),
-						);
-					}
-					return textToolResult(
-						ok({
-							message: `已写进记忆库${result.statementId ? `（留痕 id：${result.statementId}）` : ""}。检索时会以「用户亲口确认」的身份压过库里的旧推断。`,
 						}),
 					);
 				},
@@ -1750,7 +1887,10 @@ export function createTools(deps: ToolDeps) {
 				name: "partner_manage",
 				description:
 					"总管管理执事：create 建一个、stop 停一个、list 列出全部、set_dispatch 切某个执事的派发权（是否作为分管负责人接单，默认关）。" +
-					"只有总管 / 主对话能用。建好后用 delegate(domain=<domain>) 或直接按名字把活派给它。",
+					"只有总管 / 主对话能用。" +
+					(domainDispatch
+						? "建好后用 delegate(domain=<domain>) 或直接按名字把活派给它。"
+						: "建好后直接用 delegate 把活派给它（领域派活入口已停用，不需要 domain 参数）。"),
 				parameters: Type.Object({
 					action: Type.Unsafe<"create" | "stop" | "list" | "set_dispatch">({
 						type: "string",
@@ -1804,10 +1944,16 @@ export function createTools(deps: ToolDeps) {
 						}
 						// 领域只是标签（2026-11-07）：留空也要说清"照样能派活"，
 						// 否则模型会以为建了个残缺的执事。
+						// 2026-11-23：领域派活入口关闭时不再提 delegate(domain=…)，改为直接派给它。
+						if (result.value.domain) {
+							return writeToolResult(
+								domainDispatch
+									? `执事 ${result.value.name} 已就位（领域标签：${result.value.domain}）。之后 delegate(domain=${result.value.domain}) 或直接按名字派都行。`
+									: `执事 ${result.value.name} 已就位（领域标签：${result.value.domain}）。之后直接用 delegate 派给它就行。`,
+							);
+						}
 						return writeToolResult(
-							result.value.domain
-								? `执事 ${result.value.name} 已就位（领域标签：${result.value.domain}）。之后 delegate(domain=${result.value.domain}) 或直接按名字派都行。`
-								: `执事 ${result.value.name} 已就位（没有领域标签，不影响派活）。之后用 delegate 派给它就行。`,
+							`执事 ${result.value.name} 已就位（没有领域标签，不影响派活）。之后用 delegate 派给它就行。`,
 						);
 					}
 					if (args.action === "stop") {
@@ -1867,8 +2013,17 @@ export function createTools(deps: ToolDeps) {
 						}
 						const result = setMinisterDispatchAuthority(dispatchId, args.enabled, ctx);
 						if (!result.ok) return textToolResult(err("not_found", result.error));
+						// 领域派活入口关闭时，派发权只在开关打开后才接回分管路径；
+						// 回话不能说成「delegate(domain=…) 会以它的名义派分管」。
+						const dispatchText = domainDispatch
+							? args.enabled
+								? "打开：之后 delegate(domain=…) 会以它的名义派分管"
+								: "关闭：之后 delegate(domain=…) 不再经过它，等同无分管领域"
+							: args.enabled
+								? "打开：领域派活入口目前关闭，派活仍走直派 worker；开关打开后才恢复分管"
+								: "关闭：领域派活入口目前关闭，派活本来就不经过它";
 						return writeToolResult(
-							`执事 ${result.value.name}（domain=${result.value.domain}）的派发权已${args.enabled ? "打开：之后 delegate(domain=…) 会以它的名义派分管" : "关闭：之后 delegate(domain=…) 不再经过它，等同无分管领域"}。`,
+							`执事 ${result.value.name}（domain=${result.value.domain}）的派发权已${dispatchText}。`,
 						);
 					}
 					return textToolResult(

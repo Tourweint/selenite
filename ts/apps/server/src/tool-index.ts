@@ -3,7 +3,7 @@
  *
  * 机制完全交给内核，这里只做三件事：
  *   1. 一份按需名单 —— 哪些工具注册时打 `deferred: true`（初始不进请求）。
- *      名单住 `tool-pool.ts`：代码默认 8 个，用户可在「设置 → 工具」覆盖
+ *      名单住 `tool-pool.ts`：代码默认 9 个，用户可在「设置 → 工具」覆盖
  *      （`.data/tool-pool.json`，**重启后生效**：deferred 是注册期属性）；
  *   2. `markDeferred()` —— 在 createTools 之后给名单内工具补属性，浅拷贝、不改原对象、不动顺序；
  *   3. `toolIndexText()` —— 把"当前可加载的 deferred"投影成一段 prompt 文本。

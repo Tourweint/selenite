@@ -280,7 +280,7 @@ function delegateDeps(run: unknown, projects: unknown = null) {
 }
 
 const DELEGATE_TEXT =
-	"已派发到 旧：每票一进程（回滚用）：任务单 T-9。它在后台执行，完成后我会汇报；不要等，也不要重复派。";
+	"已派发到 底层 worker 运行时（独立进程）：任务单 T-9。它在后台执行，完成后我会汇报；不要等，也不要重复派。";
 
 test("delegate：成功外层是 ok，message 带执行器，ticketId 在 data", async () => {
 	const previous = process.env.DELEGATION_PROJECT_REQUIRED;
@@ -289,9 +289,9 @@ test("delegate：成功外层是 ok，message 带执行器，ticketId 在 data",
 	process.env.DELEGATION_PROJECT_REQUIRED = "false";
 	// 2026-11-19 模型分工：测试不依赖宿主机已连接的模型；回到旧的 env 缺省形态。
 	process.env.EXECUTOR_NATIVE_FOLLOW_DEFAULT = "false";
-	// 2026-11-22：宿主默认执行器已切 pool。这条测试钉的是"message 带执行器名"，
-	// 显式选 native 才稳定，否则断言随默认漂移。
-	process.env.CHANCELLOR_EMPLOYEE = "native";
+	// 2026-11-22 宿主默认执行器已切 pool；2026-11-23 native 退役后本机只剩 pool。
+	// 这条测试钉的是"message 带执行器名"，显式选 pool 才稳定。
+	process.env.CHANCELLOR_EMPLOYEE = "pool";
 	try {
 		const tools = createTools(
 			delegateDeps(async (_request: unknown, options: { onEvent?: (event: unknown) => void }) => {
@@ -406,17 +406,6 @@ test("set_reminder：成功包成 ok + message；非法参数走 err 带 hint，
 	);
 	assert.equal(past.ok, false);
 	assert.equal(past.error?.code, "time_in_past");
-});
-
-test("persona_recall：检索失败走 err + hint", async () => {
-	const tools = createTools({
-		...(deps({}) as unknown as Record<string, unknown>),
-		personaAsk: async () => ({ ok: false as const, question: "q" }),
-	} as never);
-	const fail = await runToolWithApi(toolNamed(tools, "persona_recall"), { query: "去年" }, { conversationId: 7 });
-	assert.equal(fail.ok, false);
-	assert.equal(fail.error?.code, "persona_unavailable");
-	assert.ok(fail.error?.hint?.includes("recall"));
 });
 
 test("send_to_agent：校验失败走 err 稳定枚举", async () => {
