@@ -53,7 +53,7 @@ export function writeUserProfile(text: string, env: NodeJS.ProcessEnv = process.
 	}
 	const bytes = Buffer.byteLength(content, "utf8");
 	if (bytes > USER_PROFILE_LIMIT) {
-		throw new Error(`「关于我」超过 ${USER_PROFILE_LIMIT} 字节上限（当前 ${bytes}）`);
+		throw new Error(`「偏好」超过 ${USER_PROFILE_LIMIT} 字节上限（当前 ${bytes}）`);
 	}
 	mkdirSync(dirname(path), { recursive: true });
 	const tmp = `${path}.${process.pid}.tmp`;
@@ -158,7 +158,7 @@ export function mountUserProfileRoutes(app: Hono): void {
 		}
 		if (!userProfileEnabled()) {
 			return c.json(
-				{ error: "bad_request", message: "「关于我」已关闭（USER_PROFILE_ENABLED=false）" },
+				{ error: "bad_request", message: "「偏好」已关闭（USER_PROFILE_ENABLED=false）" },
 				400,
 			);
 		}
@@ -178,7 +178,7 @@ export function mountUserProfileRoutes(app: Hono): void {
 		const id = c.req.param("id");
 		if (id === "worker") {
 			return c.json(
-				{ error: "bad_request", message: "普通 worker 不读「关于我」，没有开关" },
+				{ error: "bad_request", message: "普通 worker 不读「偏好」，没有开关" },
 				400,
 			);
 		}
@@ -188,7 +188,7 @@ export function mountUserProfileRoutes(app: Hono): void {
 		}
 		if (!userProfileEnabled()) {
 			return c.json(
-				{ error: "bad_request", message: "「关于我」已关闭（USER_PROFILE_ENABLED=false）" },
+				{ error: "bad_request", message: "「偏好」已关闭（USER_PROFILE_ENABLED=false）" },
 				400,
 			);
 		}

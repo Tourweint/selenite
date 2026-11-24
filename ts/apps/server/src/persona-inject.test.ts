@@ -1,30 +1,68 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import type { spawn } from "node:child_process";
 import {
 	personaCatalogTrim,
 	personaInjectGatesClosed,
 	personaLightRecall,
-	resetPersonaCatalogForTests,
 	resetPersonaLightRecallForTests,
 } from "./persona-inject.ts";
-import { askPersonaAvailable } from "./persona-ask.ts";
+import { memoryLightTimeoutMs, resetToolPolicyCacheForTests } from "./tool-policy.ts";
 
 /**
  * 一生记忆库外挂注入（2026-11-22 记忆外挂源批）单测——方案 §六.3 前五项：
  * 前置过滤（不 spawn）/ 相关性门槛 / echo 抑制 / 限额截断 / 节流 + 总闸。
  *
  * 不真起 python：askPersona 的 stdout 由假 spawn 喂（与 persona-ask.test.ts 同款骨架）。
- * env 用独立对象 + AGENT_FLAGS_PATH 指到不存在的文件（flags 的 plugin 存储按"纯 env 夹具"
- * 语义回落 env 值），不碰真实 .data；节流账本每测清空。
+ * env 用独立对象 + MEMORY_BANK_PATH 指向临时槽位配置（2026-11-24 起读闸只看当前槽位）；
+ * AGENT_FLAGS_PATH 指到不存在的文件（flags 的 plugin 存储按"纯 env 夹具"语义回落 env 值），
+ * 不碰真实 .data；节流账本每测清空。
  */
+
+const BANK_ROOT = mkdtempSync(join(tmpdir(), "lifediary-persona-inject-bank-"));
+const BANK_ASK = join(BANK_ROOT, "ask.py");
+writeFileSync(BANK_ASK, "# fake ask\n", "utf8");
+const BANK_CONFIG = join(BANK_ROOT, "memory-bank.json");
+mkdirSync(join(BANK_ROOT, "analysis"), { recursive: true });
+writeFileSync(
+	BANK_CONFIG,
+	`${JSON.stringify({
+		v: 1,
+		active: "external",
+		external: {
+			id: "bank_inject",
+			name: "注入测试库",
+			root: BANK_ROOT,
+			ask: "ask.py",
+			repair: "",
+			python: "",
+			origin: "user",
+			addedAt: "2026-11-24T00:00:00+08:00",
+			vector: false,
+		},
+		timeouts: { lightMs: 8000, askMs: 15000 },
+	})}\n`,
+	"utf8",
+);
 
 const CONFIGURED_ENV: NodeJS.ProcessEnv = {
 	AGENT_FLAGS_PATH: `lifediary-persona-inject-test-${process.pid}-missing.json`,
-	PERSONA_MEMORY_ASK: "D:\\persona-metric\\analysis\\ask.py",
+	MEMORY_BANK_PATH: BANK_CONFIG,
+	PERSONA_MEMORY_ASK: BANK_ASK,
 	PERSONA_PYTHON: "py3",
 };
+
+/** 内置槽位配置：active=builtin（读闸必须不过）。 */
+const BUILTIN_BANK_CONFIG = join(BANK_ROOT, "memory-bank-builtin.json");
+writeFileSync(
+	BUILTIN_BANK_CONFIG,
+	`${JSON.stringify({ v: 1, active: "builtin", external: null, timeouts: { lightMs: 8000, askMs: 15000 } })}\n`,
+	"utf8",
+);
 
 /** 假 spawn：起一个 EventEmitter 假 child，微任务里喂 stdout 再 close 0（与 persona-ask.test.ts 同款骨架）。 */
 function spawnJson(payload: string | null): typeof spawn {
@@ -53,6 +91,34 @@ function askJson(groups: Record<string, unknown>): string {
 	return JSON.stringify({ ok: true, question: "q", groups });
 }
 
+/** 记录 argv、且子进程永不 close 的假 spawn：用于超时 / 参数断言（超时由 askPersona kill）。 */
+function holdingSpawn(): {
+	spawnFn: typeof spawn;
+	calls: string[][];
+	killed: () => boolean;
+} {
+	const calls: string[][] = [];
+	let killed = false;
+	const spawnFn = ((command: string, args: string[], options: Record<string, unknown>) => {
+		void command;
+		void options;
+		calls.push(args);
+		const child = new EventEmitter() as EventEmitter & {
+			stdout: EventEmitter;
+			stderr: EventEmitter;
+			kill(): boolean;
+		};
+		child.stdout = new EventEmitter();
+		child.stderr = new EventEmitter();
+		child.kill = () => {
+			killed = true;
+			return true;
+		};
+		return child as unknown as ReturnType<typeof import("node:child_process").spawn>;
+	}) as unknown as typeof spawn;
+	return { spawnFn, calls, killed: () => killed };
+}
+
 test("前置过滤：短文本 / 纯符号 / 空格凑数不 spawn，返回空", async () => {
 	resetPersonaLightRecallForTests();
 	const spawned = spawnJson(askJson({}));
@@ -77,22 +143,32 @@ test("前置过滤：短文本 / 纯符号 / 空格凑数不 spawn，返回空",
 	assert.deepEqual(lines3, []);
 });
 
-test("总闸 / 父闸关闭：返回空且不 spawn；默认（未设 env）开", async () => {
+test("总闸 / 读闸关闭：返回空且不 spawn；槽位 external 且未设总闸 = 开", async () => {
 	resetPersonaLightRecallForTests();
-	assert.equal(personaInjectGatesClosed(CONFIGURED_ENV), false, "配置齐 + 未设总闸 = 开");
+	assert.equal(personaInjectGatesClosed(CONFIGURED_ENV), false, "槽位 external + 未设总闸 = 开");
 	assert.equal(
 		personaInjectGatesClosed({ ...CONFIGURED_ENV, PERSONA_MEMORY_INJECT: "false" }),
 		true,
 		"总闸 false 关",
 	);
-	assert.equal(personaInjectGatesClosed({}), true, "ASK 未配置 = 父闸不过");
+	assert.equal(
+		personaInjectGatesClosed({
+			MEMORY_BANK_PATH: join(BANK_ROOT, `no-bank-${process.pid}.json`),
+			AGENT_FLAGS_PATH: CONFIGURED_ENV.AGENT_FLAGS_PATH,
+		}),
+		true,
+		"没有槽位配置 = 读闸不过",
+	);
 	assert.equal(
 		personaInjectGatesClosed({ ...CONFIGURED_ENV, PERSONA_MEMORY_ENABLED: "false" }),
 		true,
-		"ENABLED=false = 父闸不过",
+		"ENABLED=false = 读闸不过",
 	);
-	// flagEnabled 对未登记的键返回 false（默认值来源在 plugins.json 登记，运行期生效）：
-	// 测试 env 没有 AGENT_PLUGINS_PATH 指向真实清单时按未登记处理，这里只钉闸门逻辑本身。
+	assert.equal(
+		personaInjectGatesClosed({ ...CONFIGURED_ENV, MEMORY_BANK_PATH: BUILTIN_BANK_CONFIG }),
+		true,
+		"内置槽位不接大库 = 读闸不过",
+	);
 	const spawned = spawnJson(askJson({}));
 	const envOff = { ...CONFIGURED_ENV, PERSONA_MEMORY_INJECT: "false" };
 	const lines = await personaLightRecall("毕设答辩那阵子怎么样了", {
@@ -109,7 +185,6 @@ test("总闸 / 父闸关闭：返回空且不 spawn；默认（未设 env）开"
 		spawnFn: spawnJson(askJson({})),
 	});
 	assert.deepEqual(linesOn, [], "空组返回空行");
-	assert.ok(askPersonaAvailable(CONFIGURED_ENV), "父闸判据经 persona-ask 原函数复用");
 });
 
 test("相关性门槛：关键词命中的闲聊条目被拦，直接相关 / 其它 why 放行", async () => {
@@ -287,8 +362,68 @@ test("失败降级：ask.py 非零退出 / 非 JSON → 空数组，不抛", asy
 	assert.deepEqual(bad, []);
 });
 
+test("两档超时：轻召回 spawn 的 argv 永不含 --vector；timeoutMs 生效时静默空并 kill", async () => {
+	resetPersonaLightRecallForTests();
+	const capture = holdingSpawn();
+	const lines = await personaLightRecall("毕设答辩那阵子怎么样了", {
+		conversationId: 21,
+		env: CONFIGURED_ENV,
+		spawnFn: capture.spawnFn,
+		timeoutMs: 5,
+	});
+	assert.deepEqual(lines, [], "超时静默返回空（不抛、不注）");
+	assert.equal(capture.calls.length, 1);
+	const args = capture.calls[0]!;
+	assert.ok(!args.includes("--vector"), "轻召回永远不传 --vector");
+	assert.equal(args.at(-1), "2", "argv 末尾仍是 --limit 2，没有追加任何开关");
+	assert.equal(capture.killed(), true, "超时要 kill 子进程");
+});
+
+test("memoryLight 接线：总开关开时 policy 预算传给轻召回 spawn；关 = 旧 lightMs", async () => {
+	resetPersonaLightRecallForTests();
+	resetToolPolicyCacheForTests();
+	const policyDir = mkdtempSync(join(tmpdir(), "lifediary-persona-inject-policy-"));
+	const policyPath = join(policyDir, "tool-policy.json");
+	writeFileSync(
+		policyPath,
+		`${JSON.stringify({ v: 1, tools: {}, groups: {}, injections: { memoryLight: { timeoutMs: 500 } } })}\n`,
+		"utf8",
+	);
+	const env: NodeJS.ProcessEnv = {
+		...CONFIGURED_ENV,
+		TOOL_POLICY_PATH: policyPath,
+		TOOL_TIMEOUT_POLICY: "true",
+	};
+	// 生效值：policy 500 覆盖 legacy lightMs 8000（6000 的语义相同，这里用 500 = 下限，测试只等 0.5s）。
+	assert.equal(memoryLightTimeoutMs(8_000, env), 500, "policy 覆盖 legacy lightMs");
+	const capture = holdingSpawn();
+	const startedAt = Date.now();
+	const lines = await personaLightRecall("毕设答辩那阵子怎么样了", {
+		conversationId: 22,
+		env,
+		spawnFn: capture.spawnFn,
+		timeoutMs: memoryLightTimeoutMs(8_000, env),
+	});
+	const elapsed = Date.now() - startedAt;
+	assert.deepEqual(lines, [], "超时按策略预算静默返回空");
+	assert.equal(capture.killed(), true, "到 policy 预算就 kill 子进程");
+	assert.ok(elapsed >= 450, `应约 500ms 超时（实际 ${elapsed}ms）`);
+	assert.ok(elapsed < 2_000, `不应回落到 legacy 8000ms（实际 ${elapsed}ms）`);
+
+	// 总开关关：同一份 policy 文件也不读，仍用 legacy lightMs。
+	const offEnv: NodeJS.ProcessEnv = { ...CONFIGURED_ENV, TOOL_POLICY_PATH: policyPath };
+	assert.equal(memoryLightTimeoutMs(8_000, offEnv), 8_000, "master 关 = 旧 lightMs（逐字节旧行为）");
+	// 总开关开但 policy 没有该条目：回落 legacy。
+	const emptyPath = join(policyDir, "tool-policy-empty.json");
+	writeFileSync(emptyPath, `${JSON.stringify({ v: 1, tools: {}, groups: {}, injections: {} })}\n`, "utf8");
+	assert.equal(
+		memoryLightTimeoutMs(8_000, { ...CONFIGURED_ENV, TOOL_POLICY_PATH: emptyPath, TOOL_TIMEOUT_POLICY: "true" }),
+		8_000,
+		"policy 无条目 → 回落 lightMs",
+	);
+});
+
 test("catalog 裁剪：超预算砍空月行，再超硬截断带省略号", () => {
-	resetPersonaCatalogForTests();
 	const ok = ["库里 100 个事件", "常提的人：a、b", "高频对象：x"];
 	assert.equal(personaCatalogTrim(ok), ok.join("\n"), "不超预算原样");
 	const withGaps = [...ok, "空月 6 个：2021-01、2021-02、2021-03、2021-04、2021-05、2021-06"];

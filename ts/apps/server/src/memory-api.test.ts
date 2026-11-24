@@ -29,6 +29,10 @@ process.env.ROUTINES_STATE_PATH = join(root, "routines.json");
 process.env.AUTONOMY_STATE_PATH = join(root, "autonomy-state.json");
 process.env.LLM_PROVIDER = "faux";
 process.env.MEMORY_ENABLED = "true";
+// 记忆库槽位配置（2026-11-24 旧形态退役后 /external 读当前槽位）：隔离到临时文件，
+// 不读开发机 `.data/memory-bank.json`。
+process.env.MEMORY_BANK_PATH = join(root, "memory-bank.json");
+process.env.PERSONA_MEMORY_ASK = "";
 // 端点测试不关心抽取档位；锁定 rule 以免将来默认值变化时这里莫名多打一次模型
 process.env.MEMORY_EXTRACT = "rule";
 process.env.CHANCELLOR_ENABLED = "false";
@@ -445,7 +449,7 @@ test("整理后台任务：202 单飞、state 可恢复、dismiss 持久化", as
 	assert.equal(pendingProposalCount(scopeKey), 0);
 });
 
-test("外接记忆库状态：未配置不 spawn，ready=false", async () => {
+test("外接记忆库状态：槽位不是 external 时不 spawn，configured/ready 均为 false", async () => {
 	const previousAsk = process.env.PERSONA_MEMORY_ASK;
 	const previousEnabled = process.env.PERSONA_MEMORY_ENABLED;
 	delete process.env.PERSONA_MEMORY_ASK;

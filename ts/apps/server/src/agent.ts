@@ -16,6 +16,7 @@ export { TURN_LIMIT_MESSAGE } from "./agent/turn-gate.ts";
 export {
 	memoryEngine,
 	preferenceScopeOf,
+	refreshSkillStore,
 	seedChiefPartner,
 	skillStore,
 	taskMemoryBlock,

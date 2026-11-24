@@ -26,8 +26,7 @@ import {
 import { buildPartnerTurnContext, splitContractSections } from "./agent/partner-context.ts";
 import { CHANCELLOR_ENABLED, PERSONA, memoryEngine, skillStore } from "./agent/assist.ts";
 import { executorLine } from "./executor-config.ts";
-import { readWorkerPersona, WORKER_PERSONA_CHAT_TOOLS } from "./worker-persona.ts";
-import { WORKER_SKILL_OWNER, workerSkillScopeEnabled } from "./skill-state.ts";
+import { readWorkerPersona } from "./worker-persona.ts";
 import {
   CHIEF_PARTNER_ID,
   COMPANIONS_ENABLED,
@@ -49,7 +48,7 @@ import { workerToolsPayload } from "./worker-tools.ts";
 export type ContextDefaultKind = "chief" | "partner" | "worker" | "dispatch";
 
 export interface ContextDefaultRole {
-  /** 前端选择值：chief / worker / partner:<id> */
+  /** 前端选择值：chief / dispatch-worker / partner:<id> */
   id: string;
   label: string;
   kind: ContextDefaultKind;
@@ -74,7 +73,10 @@ const BASE_ROLES: ContextDefaultRole[] = [
   { id: "chief", label: "总管", kind: "chief", chatKind: "chief" },
 ];
 
-/** 角色目录：总管 → 活跃执事 → 普通 worker。读不到执事库时至少保留总管 / worker。 */
+/**
+ * 角色目录：总管 → 活跃执事 → 派活工人（池）。读不到执事库时至少保留总管 / dispatch-worker。
+ * 「普通 worker」档 2026-11-24 退役（普通助手会话 2026-11-23 已退役，默认开销不再提供这一档）。
+ */
 export function contextDefaultRoles(): ContextDefaultRole[] {
   const roles: ContextDefaultRole[] = [...BASE_ROLES];
   if (COMPANIONS_ENABLED) {
@@ -98,7 +100,6 @@ export function contextDefaultRoles(): ContextDefaultRole[] {
       // 执事库读不出来：默认页仍要可用，不能因为一个目录读失败就整页 503。
     }
   }
-  roles.push({ id: "worker", label: "普通 worker", kind: "worker", chatKind: "worker" });
   // 第二套运行时（2026-11-22）：派活工人（池）的 profile 与普通会话不同，单列一档。
   roles.push({
     id: "dispatch-worker",
@@ -116,7 +117,7 @@ function roleOf(roleId: string | undefined, roles: ContextDefaultRole[]): Contex
 
 /**
  * 默认开销的完整字段清单（2026-11-16 再修）：用户要在「默认开销」里调试上下文，
- * 不管当前角色是总管 / 执事 / worker，所有已知固定字段都列出来；角色不适用的
+ * 不管当前角色是总管 / 执事，所有已知固定字段都列出来；角色不适用的
  * 字段显示 0 字槽位，而不是整行消失。会变字段（在办 / 印象 / 心情 / 心里话 /
  * 履历）不在这里，仍由「会变的部分」另块提示。
  *
@@ -125,7 +126,7 @@ function roleOf(roleId: string | undefined, roles: ContextDefaultRole[]): Contex
  */
 export const DEFAULT_SECTION_KEYS = [
   "persona",
-  // 关于我（2026-11-19）：全局固定背景，紧跟 persona；worker / 群会话为 0 字槽位。
+  // 关于我（2026-11-19）：全局固定背景，紧跟 persona；不读 / 空内容为 0 字槽位。
   "user_profile",
   "verification_iron_law",
   "clarify_contract",
@@ -224,14 +225,13 @@ function pushField(
   else pushRawField(sections, key, "");
 }
 
-/** 技能索引的“人”：普通助手用自己的命名空间（2026-11-21），执事用真实 id，主对话回落 chief。 */
+/** 技能索引的“人”：执事用真实 id，主对话（含总管）回落 chief。 */
 function skillPartnerOfRole(role: ContextDefaultRole): string | null {
   if (!COMPANIONS_ENABLED) return null;
   if (role.kind === "partner") {
     const partnerId = role.id.slice("partner:".length);
     return partnerId || null;
   }
-  if (role.kind === "worker" && workerSkillScopeEnabled()) return WORKER_SKILL_OWNER;
   return CHIEF_PARTNER_ID;
 }
 
@@ -246,7 +246,7 @@ function buildDefaultSections(
     partnerId,
     // InjectionContext 的 chatKind 只有 chief / worker；执事身份走 partner 分支，
     // 这里给 chief 不会影响只用于 guard / current_project 的调用。
-    chatKind: role.kind === "worker" ? ("worker" as const) : ("chief" as const),
+    chatKind: "chief" as const,
     group: false,
     dryRun: true,
   };
@@ -292,25 +292,15 @@ function buildDefaultSections(
     pushRawField(sections, "partner_learning", turn.learning);
     pushRawField(sections, "partner_proactivity", turn.proactivity);
   } else {
-    pushField(
-      sections,
-      "persona",
-      // 2026-11-16：默认开销页看到的是 worker 人设的当前值（每轮现读，同一份全局文件）。
-      // 2026-11-22：会话里实际多拼一句工具提示（WORKER_PERSONA_CHAT_TOOLS），基线页也要算进去，
-      // 否则默认开销比真实请求少一截、还让人以为句是"凭空多出来的"。
-      role.kind === "worker"
-        ? readWorkerPersona() + WORKER_PERSONA_CHAT_TOOLS
-        : resolvePersona(partnersStore, PERSONA),
-    );
+    pushField(sections, "persona", resolvePersona(partnersStore, PERSONA));
     pushField(sections, "verification_iron_law", providerText(verificationIronLawProvider, baseCtx));
-    // 开工前问清只给总管；worker 没有这个字段，不造 0 字槽位（避免把“不适用”误读成“空”）。
+    // 开工前问清只给总管；执事没有这个字段，不造 0 字槽位（避免把“不适用”误读成“空”）。
     if (role.kind === "chief") {
       pushField(sections, "clarify_contract", providerText(clarifyContractProvider, baseCtx));
     }
   }
 
-  // 关于我（2026-11-19）：与真实装配走同一个 provider；执事看自己的开关，总管回落 chief，
-  // worker 由 provider 直接跳过（这里仍保留 0 字槽位，页面能看见"这个角色不读"）。
+  // 关于我（2026-11-19）：与真实装配走同一个 provider；执事看自己的开关，总管回落 chief。
   pushField(sections, "user_profile", providerText(userProfileProvider, baseCtx));
 
   pushField(sections, "injection_guard", providerText(guardProvider, baseCtx));
@@ -320,7 +310,7 @@ function buildDefaultSections(
 
   // 低频工具索引（C 段）：算进默认基线，让默认开销页看到"新会话初始会读到什么"。
   // 工具面本身仍不含 deferred（defaultTools 过滤），这里只是把索引段的字节数记进来。
-  // chief / partner / worker 工具面本来就一样，只有 disabledTools 勾选差异。
+  // chief / partner 工具面本来就一样，只有 disabledTools 勾选差异。
   //（AGENT_TOOL_INDEX 回滚开关 2026-11-21 退役，索引段恒渲染——名单空则整段省略。）
   {
     const deferred = modelToolCatalog()
@@ -336,11 +326,11 @@ function buildDefaultSections(
 
 /**
  * 默认页的工具面按这个角色对应的人设勾选过滤（2026-11-16 工具裁剪 B）：
- * chief → 总管行、partner → 该执事行、worker → 不过滤。开关关 / 读执事库失败 → 不过滤，
+ * chief → 总管行、partner → 该执事行；派活工人（池）不过滤。开关关 / 读执事库失败 → 不过滤，
  * 别让一个目录故障把整页打成 503。目的：默认开销页看到的就是这个人真实能看到的工具面。
  */
 function disabledToolsOfRole(role: ContextDefaultRole): Set<string> {
-  if (!partnerToolsEnabled() || role.kind === "worker" || role.kind === "dispatch") {
+  if (!partnerToolsEnabled() || role.kind === "dispatch") {
     return new Set();
   }
   try {

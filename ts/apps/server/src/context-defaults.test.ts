@@ -36,7 +36,6 @@ const {
   completeDefaultSections,
   contextDefaultPayload,
 } = await import("./context-defaults.ts");
-const { assistantSurfacesPayload } = await import("./assistant-surfaces.ts");
 const { partnersStore } = await import("./partners.ts");
 const { CHIEF_PARTNER_ID } = await import("./partner-contract.ts");
 
@@ -79,11 +78,21 @@ test("skills 是单独块：不占字段位，但保留在系统段末尾", () =
 	assert.equal(sections.length, DEFAULT_SECTION_KEYS.length + 1);
 });
 
-test("工具面按 role 的 disabledTools 过滤：partner / chief 少一项，worker 不受影响", async () => {
+test("普通 worker 档已从默认开销目录移除（2026-11-24）", async () => {
+	const payload = await contextDefaultPayload("chief");
+	assert.ok(payload, "总管默认页可读");
+	assert.ok(
+		!(payload!.roles ?? []).some((role) => role.id === "worker"),
+		"角色目录不再列出普通 worker",
+	);
+	assert.equal(await contextDefaultPayload("worker"), null, "worker 角色不再可读（路由 404）");
+});
+
+test("工具面按 role 的 disabledTools 过滤：partner / chief 少一项", async () => {
 	const store = partnersStore();
 	const partner = store.create("默认页工具执事");
 
-	const baseline = await contextDefaultPayload("worker");
+	const baseline = await contextDefaultPayload("chief");
 	const total = baseline?.tools.count ?? 0;
 	assert.ok(total > 0, "真实 extension 已装：默认工具面非空");
 	assert.ok(
@@ -99,19 +108,19 @@ test("工具面按 role 的 disabledTools 过滤：partner / chief 少一项，w
 		"被取消的 read 不出现在执事默认页",
 	);
 
-	const worker = await contextDefaultPayload("worker");
-	assert.equal(worker?.tools.count, total, "worker 不过滤");
-
 	store.ensureChief("你是总管");
 	store.setDisabledTools(CHIEF_PARTNER_ID, ["read"]);
 	const chief = await contextDefaultPayload("chief");
 	assert.equal(chief?.tools.count, total - 1, "总管默认页同样按总管行过滤");
 	assert.ok(!(chief?.tools.items ?? []).some((tool) => tool.name === "read"));
+
+	// 后面的用例还要拿总管当干净基线：这里把总管行的取消名单还原。
+	store.setDisabledTools(CHIEF_PARTNER_ID, []);
 });
 
 test("默认页含 tool_index 段，但 tools 不含 deferred 工具（2026-11-16 C 段）", async () => {
-	const payload = await contextDefaultPayload("worker");
-	assert.ok(payload, "worker 默认页可读");
+	const payload = await contextDefaultPayload("chief");
+	assert.ok(payload, "总管默认页可读");
 	const section = payload!.system.sections.find((item) => item.key === "tool_index");
 	assert.ok(section, "默认页出现 tool_index 段");
 	assert.match(section!.text, /^<tool_index>/);
@@ -157,25 +166,6 @@ test("dispatch-worker：池任务 profile 的九段 + 五件工具（2026-11-22�
   assert.equal(payload!.skills.count, 0, "池工人不读技能索引");
 });
 
-test("assistant-surfaces：总管 / 普通助手 / 派活工人（池）都有，池只给五件", () => {
-  const { surfaces } = assistantSurfacesPayload();
-  const byId = new Map(surfaces.map((surface) => [surface.id, surface]));
-  assert.ok(byId.get("chief"), "缺总管");
-  assert.ok(byId.get("worker"), "缺普通助手");
-  const dispatch = byId.get("dispatch-worker");
-  assert.ok(dispatch, "缺派活工人（池）");
-  assert.equal(dispatch!.kind, "dispatch");
-  assert.deepEqual(dispatch!.tools.names, ["read", "write", "edit", "bash", "escalate"]);
-  assert.equal(dispatch!.contextHash, "#/settings/context?role=dispatch-worker");
-  assert.deepEqual(dispatch!.fixed, [
-    "工人纪律",
-    "注入防线",
-    "验证铁律",
-    "交付契约",
-    "工作边界",
-  ]);
-  assert.ok(dispatch!.persona.editable, "池人设走共用的 worker-persona，可编辑");
-});
 
 test("PARTNER_TOOLS_ENABLED=false：默认页不过滤（回滚到所有人同一份工具面）", async () => {
 	const store = partnersStore();
@@ -184,7 +174,7 @@ test("PARTNER_TOOLS_ENABLED=false：默认页不过滤（回滚到所有人同�
 	const prev = process.env.PARTNER_TOOLS_ENABLED;
 	process.env.PARTNER_TOOLS_ENABLED = "false";
 	try {
-		const baseline = await contextDefaultPayload("worker");
+		const baseline = await contextDefaultPayload("chief");
 		const filtered = await contextDefaultPayload(`partner:${partner.id}`);
 		assert.equal(filtered?.tools.count, baseline?.tools.count, "开关关：不过滤");
 		assert.ok((filtered?.tools.items ?? []).some((tool) => tool.name === "read"));

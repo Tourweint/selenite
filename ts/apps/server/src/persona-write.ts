@@ -58,6 +58,14 @@ export interface PersonaWriteDeps {
 	env?: NodeJS.ProcessEnv;
 	spawnFn?: typeof spawn;
 	timeoutMs?: number;
+	/**
+	 * 通用写入口命令（2026-11-23 多语言入口）：`["python", "<abs>/repair.py"]` /
+	 * `["node", "<abs>/repair.js"]` / `["<abs>/repair"]`。传了就不再依赖
+	 * `PERSONA_REPAIR` / `PERSONA_PYTHON`（外接库槽位走这里）。
+	 */
+	command?: string[];
+	/** 写入口命令的工作目录（多语言入口的相对 import 用）。 */
+	cwd?: string;
 }
 
 /**
@@ -111,7 +119,8 @@ export function personaWrite(
 	deps: PersonaWriteDeps = {},
 ): Promise<PersonaWriteResult> {
 	const env = deps.env ?? process.env;
-	if (!writePersonaAvailable(env) || !personaWriteEnabled(env)) {
+	const command = deps.command && deps.command.length > 0 ? deps.command : null;
+	if (!personaWriteEnabled(env) || (!command && !writePersonaAvailable(env))) {
 		return Promise.resolve({
 			ok: false,
 			error: "persona 记忆库写入未启用（PERSONA_WRITE_ENABLED=false 或 repair.py 路径不可用）",
@@ -121,14 +130,15 @@ export function personaWrite(
 	const problem = validatePersonaWriteInput(input);
 	if (problem) return Promise.resolve({ ok: false, error: problem });
 
-	const script = repairScriptPath(env);
-	const python = env.PERSONA_PYTHON?.trim() || "python";
+	const script = command ? "" : repairScriptPath(env);
+	const python = command ? "" : env.PERSONA_PYTHON?.trim() || "python";
+	const commandPrefix = command ?? [python, script];
 	const timeoutMs = deps.timeoutMs ?? PERSONA_WRITE_TIMEOUT_MS;
 	const spawnFn = deps.spawnFn ?? spawn;
 	const startedAt = Date.now();
 
-	// argv 拼死：python + 固定脚本 + statement 子命令，模型自由度只有三条文本字段。
-	const argv = [script, "statement", input.body.trim()];
+	// argv 拼死：运行器 + 固定脚本 + statement 子命令，模型自由度只有三条文本字段。
+	const argv = ["statement", input.body.trim()];
 	if (input.about?.trim()) argv.push("--about", input.about.trim());
 	if (input.tag?.trim()) argv.push("--tag", input.tag.trim());
 	argv.push("--why", input.why.trim());
@@ -148,7 +158,8 @@ export function personaWrite(
 		};
 
 		try {
-			child = spawnFn(python, argv, {
+			child = spawnFn(commandPrefix[0], [...commandPrefix.slice(1), ...argv], {
+				...(deps.cwd ? { cwd: deps.cwd } : {}),
 				windowsHide: true,
 				stdio: ["ignore", "pipe", "pipe"],
 			});

@@ -1,4 +1,4 @@
-import type { Hono } from "hono";
+import type { Context, Hono } from "hono";
 import type { MemoryKind } from "@lifediary/memory";
 import { forgetMemory, memoryEngine, memoryOverview, supersedeMemory } from "./agent.ts";
 import {
@@ -19,7 +19,18 @@ import { applySplitPlan, buildSplitPlan, memorySplitEnabled } from "./memory-spl
 import { applySmartSplit, MAX_SMART_SPLIT_RECORDS, resolveSplitModel, runSmartSplit, type SmartSplitRecord } from "./memory-split-smart.ts";
 import { CHIEF_PARTNER_ID, COMPANIONS_ENABLED, partnersStore } from "./partners.ts";
 import { projectsStore } from "./projects.ts";
-import { askPersonaAvailable, askPersonaCatalog, personaAskEnabled } from "./persona-ask.ts";
+import { PERSONA_GROUP_ORDER, type PersonaGroup } from "./persona-ask.ts";
+import {
+	activeBank,
+	bankAsk,
+	bankCatalog,
+	deleteExternalBank,
+	memoryBankState,
+	probeBank,
+	setActiveBank,
+	setExternalBank,
+	setMemoryBankTimeouts,
+} from "./memory-bank.ts";
 import { flagEnabled } from "./flags.ts";
 import { memoryScopeMoveEnabled, moveScopeChecked } from "./memory-scope-move.ts";
 
@@ -375,6 +386,188 @@ export function mountMemoryApi(app: Hono, deps: MemoryApiDeps): void {
 		return c.json({ ok: true, document });
 	});
 
+	// ── 记忆库槽位（2026-11-23 外部记忆库接入）──────────────────
+	//
+	// 索引页顶部切换「原生（本机） / 外部接入」。工具名不变：recall 读当前库、
+	// remember 写当前库；外部库只经 ask.py / repair.py 两个子进程，不碰外部数据库。
+	// 2026-11-24 旧形态退役：`MEMORY_BANK` 总闸已删，这一组端点恒在；记忆本身关掉
+	// （MEMORY_ENABLED=false）时仍整组 404。
+	// 静态段一律排在 `DELETE /memory/:id` 之前（Hono 按注册顺序匹配）。
+	const bankGuard = (c: Context): Response | null => {
+		if (!enabled()) {
+			return c.json({ error: "memory_disabled", message: "记忆未启用（MEMORY_ENABLED=false）" }, 404);
+		}
+		return null;
+	};
+
+	app.get("/api/v1/agent/memory/bank", (c) => {
+		const refused = bankGuard(c);
+		if (refused) return refused;
+		return c.json({ ok: true, ...memoryBankState() });
+	});
+
+	// PUT /bank：局部更新（2026-11-24）。body 可只给 active、只给 timeouts，或两者都给；
+	// 缺省字段一律不动（老客户端 {active} 形状继续有效）。timeouts 只认两个数字字段：
+	// 类型不对 400；越界由 memory-bank 的 clamp 收进 500..30000 / 1000..120000。
+	app.put("/api/v1/agent/memory/bank", async (c) => {
+		const refused = bankGuard(c);
+		if (refused) return refused;
+		const body = (await c.req.json().catch(() => null)) as
+			| { active?: unknown; timeouts?: unknown }
+			| null;
+		const rawActive = body?.active;
+		const rawTimeouts = body?.timeouts;
+		const hasActive = rawActive !== undefined && rawActive !== null;
+		const hasTimeouts = rawTimeouts !== undefined && rawTimeouts !== null;
+		if (!hasActive && !hasTimeouts) {
+			return c.json({ error: "bad_request", message: "需要 active 或 timeouts" }, 400);
+		}
+		let active: string | null = null;
+		if (hasActive) {
+			active = typeof rawActive === "string" ? rawActive.trim() : "";
+			if (active !== "builtin" && active !== "external") {
+				return c.json({ error: "bad_active", message: "active 只能是 builtin 或 external" }, 400);
+			}
+		}
+		let timeoutsInput: { lightMs?: number; askMs?: number } | null = null;
+		if (hasTimeouts) {
+			if (typeof rawTimeouts !== "object" || Array.isArray(rawTimeouts)) {
+				return c.json({ error: "bad_request", message: "timeouts 必须是 {lightMs?, askMs?}" }, 400);
+			}
+			const row = rawTimeouts as Record<string, unknown>;
+			const next: { lightMs?: number; askMs?: number } = {};
+			for (const key of ["lightMs", "askMs"] as const) {
+				if (row[key] === undefined) continue;
+				if (typeof row[key] !== "number" || !Number.isFinite(row[key])) {
+					return c.json(
+						{ error: "bad_request", message: "timeouts.lightMs / askMs 必须是数字（毫秒）" },
+						400,
+					);
+				}
+				next[key] = row[key] as number;
+			}
+			timeoutsInput = next;
+		}
+		if (active) {
+			const result = setActiveBank(active as "builtin" | "external");
+			if (!result.ok) {
+				return c.json({ error: result.error, message: result.message }, (result.status ?? 400) as 400 | 404);
+			}
+		}
+		if (timeoutsInput) {
+			const result = setMemoryBankTimeouts(timeoutsInput);
+			if (!result.ok) {
+				return c.json({ error: result.error, message: result.message }, (result.status ?? 400) as 400 | 404);
+			}
+		}
+		const state = memoryBankState();
+		return c.json({ ok: true, active: state.active, timeouts: state.timeouts, bank: state });
+	});
+
+	// 探测目录（识别 ask.py / repair.py + 跑一次 --catalog-only），**不落盘**。
+	app.post("/api/v1/agent/memory/bank/probe", async (c) => {
+		const refused = bankGuard(c);
+		if (refused) return refused;
+		const body = (await c.req.json().catch(() => null)) as { root?: unknown } | null;
+		const root = typeof body?.root === "string" ? body.root.trim() : "";
+		if (!root) return c.json({ error: "bad_request", message: "需要 root（外部库根目录绝对路径）" }, 400);
+		const probe = await probeBank(root);
+		return c.json(probe);
+	});
+
+	// 接入 / 更换外接库：探测通过才保存，**不自动切换**。
+	app.put("/api/v1/agent/memory/bank/external", async (c) => {
+		const refused = bankGuard(c);
+		if (refused) return refused;
+		const body = (await c.req.json().catch(() => null)) as
+			| { root?: unknown; name?: unknown; vector?: unknown }
+			| null;
+		const root = typeof body?.root === "string" ? body.root.trim() : "";
+		if (!root) return c.json({ error: "bad_request", message: "需要 root（外部库根目录绝对路径）" }, 400);
+		if (body && body.vector !== undefined && typeof body.vector !== "boolean") {
+			return c.json({ error: "bad_request", message: "vector 只能是 true 或 false" }, 400);
+		}
+		const name = typeof body?.name === "string" ? body.name.trim() : "";
+		const vector = typeof body?.vector === "boolean" ? body.vector : undefined;
+		const result = await setExternalBank({
+			root,
+			...(name ? { name } : {}),
+			...(vector !== undefined ? { vector } : {}),
+		});
+		if (!result.ok) {
+			return c.json(
+				{ error: result.error ?? "probe_failed", message: result.message ?? "探测未通过", probe: result.probe },
+				(result.status ?? 400) as 400 | 404,
+			);
+		}
+		return c.json({ ok: true, external: result.external, probe: result.probe, bank: memoryBankState() });
+	});
+
+	app.delete("/api/v1/agent/memory/bank/external", (c) => {
+		const refused = bankGuard(c);
+		if (refused) return refused;
+		const result = deleteExternalBank();
+		if (!result.ok) return c.json({ error: result.error ?? "not_found", message: result.message }, 404);
+		return c.json({ ok: true, deleted: result.deleted, active: result.active, bank: memoryBankState() });
+	});
+
+	// 当前外接库的库边界原文（10 分钟缓存；builtin → 400）。
+	app.get("/api/v1/agent/memory/bank/catalog", async (c) => {
+		const refused = bankGuard(c);
+		if (refused) return refused;
+		if (activeBank() !== "external") {
+			return c.json({ error: "bank_builtin", message: "当前用的是原生记忆库，没有外部库目录" }, 400);
+		}
+		const catalog = await bankCatalog();
+		if (!catalog.ok) {
+			return c.json(
+				{ error: "catalog_failed", message: catalog.error ?? "外部库目录读取失败" },
+				502,
+			);
+		}
+		return c.json({ ok: true, lines: catalog.lines });
+	});
+
+	// 页面搜索：扁平 hits + coverage / unknown（builtin → 400）。
+	app.post("/api/v1/agent/memory/bank/search", async (c) => {
+		const refused = bankGuard(c);
+		if (refused) return refused;
+		if (activeBank() !== "external") {
+			return c.json({ error: "bank_builtin", message: "当前用的是原生记忆库，搜索请直接在记忆列表里找" }, 400);
+		}
+		const body = (await c.req.json().catch(() => null)) as { query?: unknown; limit?: unknown } | null;
+		const query = typeof body?.query === "string" ? body.query.trim() : "";
+		if (!query) return c.json({ error: "bad_request", message: "需要 query" }, 400);
+		const rawLimit = Number(body?.limit ?? 5);
+		const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(20, Math.floor(rawLimit))) : 5;
+		const result = await bankAsk(query, { limit });
+		if (!result.ok) {
+			return c.json(
+				{
+					error: "memory_unavailable",
+					message: /已关闭/.test(result.error ?? "")
+						? "外部记忆库已关闭（PERSONA_MEMORY_ENABLED=false）"
+						: "外部记忆库暂时查不了（原因已记日志）",
+				},
+				502,
+			);
+		}
+		const hits = result.hits
+			? result.hits
+			: PERSONA_GROUP_ORDER.flatMap((group: PersonaGroup) =>
+					(result.groups?.[group] ?? []).map((hit) => ({ group, ...hit })),
+				);
+		return c.json({
+			ok: true,
+			query,
+			count: hits.length,
+			hits,
+			...(result.qtype ? { qtype: result.qtype } : {}),
+			...(result.unknown ? { unknown: result.unknown } : {}),
+			...(result.coverage ? { coverage: result.coverage } : {}),
+		});
+	});
+
 	app.delete("/api/v1/agent/memory/:id", (c) => {
 		const id = c.req.param("id").trim();
 		if (!enabled()) {
@@ -564,27 +757,27 @@ export function mountMemoryApi(app: Hono, deps: MemoryApiDeps): void {
 	});
 
 	// ── 外接记忆库 · 库边界（2026-11-13 A 版页脚）──────────────
-	// 只读：`ask.py --catalog-only`，不碰 persona.db、不调模型。未配置不 spawn。
+	// 只读：`ask.py --catalog-only`，不碰 persona.db、不调模型。未接入不 spawn。
+	// 2026-11-24 旧形态退役：数据源从 `PERSONA_MEMORY_ASK` 改成**当前槽位**（URL 与响应
+	// 字段不动）——槽位不是 external 时如实回 configured:false，不再看 env 路径。
 	app.get("/api/v1/agent/memory/external", async (c) => {
 		if (!enabled()) {
 			return c.json({ error: "memory_disabled", message: "记忆未启用（MEMORY_ENABLED=false）" }, 404);
 		}
 		if (!memoryExternalEnabled()) return c.json({ error: "not_found" }, 404);
 
-		const configured = askPersonaAvailable();
-		const askEnabled = personaAskEnabled();
 		const provider = { id: "persona", name: "一生记忆库" } as const;
-		if (!configured || !askEnabled) {
+		if (activeBank() !== "external") {
 			return c.json({
 				ok: true,
-				configured,
+				configured: false,
 				ready: false,
 				provider,
-				reason: configured ? "disabled" : "not_configured",
+				reason: "not_configured",
 			});
 		}
 
-		const catalog = await askPersonaCatalog();
+		const catalog = await bankCatalog();
 		return c.json({
 			ok: true,
 			configured: true,

@@ -5,12 +5,12 @@
  */
 
 import type { ApprovalVerdict } from "../approval-policy.ts";
-import { approvalTimeoutSeconds, denialReason, needsApproval } from "../approval-policy.ts";
+import { approvalTimeoutSeconds, denialReason, externalRememberApproval, needsApproval } from "../approval-policy.ts";
 import { approvalStore } from "../approvals.ts";
 import { ASK_USER_TOOL_NAME, ASK_USER_WAITING_MESSAGE, askUserEnabled, createAskUserPending } from "../ask-user.ts";
 import { autonomyEscalationBlockReason, autonomyRiskVerdict } from "../autonomy-risk.ts";
 import { isAutonomyTurn } from "../autonomy-state.ts";
-import { bashBackgroundEnabled, bgJobWakePayload, moveToBackground, replacedResult, timeoutSecondsFromResult } from "../bash-background.ts";
+import { bgJobWakePayload, canceledResult, moveToBackground, replacedResult, timeoutSecondsFromResult } from "../bash-background.ts";
 import { setApprovalLevelSource } from "../delegation-authority.ts";
 import { workerSteerEnabled } from "../delegation-gates.ts";
 import { wakeOnBgJobFinish, wakeOnDelegationReport } from "../delegation-wake.ts";
@@ -24,8 +24,18 @@ import { RELAY_AUTONOMY_BLOCK_MESSAGE, RELAY_CALLER_BLOCK_MESSAGE, RELAY_CHIEF_B
 import { CHIEF_PARTNER_ID, COMPANIONS_ENABLED, partnersStore } from "../partners.ts";
 import { ensurePartnerSession } from "../partner-runtime.ts";
 import { pathGuardBlockReason } from "../path-guard.ts";
-import { askPersona, askPersonaAvailable, personaAskEnabled } from "../persona-ask.ts";
-import { personaWrite, personaWriteEnabled, writePersonaAvailable } from "../persona-write.ts";
+// 记忆库槽位（2026-11-23 外部记忆库接入；2026-11-24 旧形态退役）：recall / remember 恒按槽位分发。
+import {
+	activeBank,
+	bankAsk,
+	bankSpawnEnv,
+	bankAskCommand,
+	bankTimeouts,
+	bankWritable,
+	bankWrite,
+	isExternalBankActive,
+	startBankCatalogRefresh,
+} from "../memory-bank.ts";
 import { PROGRESS_TOOL_NAME, progressReportAllowed, progressReportEnabled } from "../progress-report.ts";
 import { projectsStore, workspaceRootsReal } from "../projects.ts";
 import { currentModels, contextWindowsByRef, readLlmConfig } from "../provider.ts";
@@ -64,9 +74,9 @@ import {
 	collectInjections,
 	guardProvider,
 } from "./injection.ts";
-import { LIFECYCLE_MESSAGE_PROVIDERS, personaCatalogProvider, personaRecallLightTextFor, clarifyContractProvider, currentProjectProvider, personaProvider, skillsProvider, toolIndexProvider, userProfileProvider, verificationIronLawProvider } from "./lifecycle-injections.ts";
-import { startPersonaCatalogRefresh } from "../persona-inject.ts";
-import { BASH_TIMEOUT_S, approvalMode, policy, readOnlyBlockReason } from "./policy.ts";
+import { externalBankCatalogProvider, lifecycleMessageProviders, personaRecallLightTextFor, clarifyContractProvider, currentProjectProvider, personaProvider, skillsProvider, toolIndexProvider, userProfileProvider, verificationIronLawProvider } from "./lifecycle-injections.ts";
+import { BASH_TIMEOUT_S, EXTERNAL_REMEMBER_CAPABILITY, approvalMode, externalRememberBlockReason, policy, readOnlyBlockReason } from "./policy.ts";
+import { memoryLightTimeoutMs, resolveToolPolicy, shellTimeoutDecision, shellTimeoutInjectionSeconds } from "../tool-policy.ts";
 import { markRecoverResume } from "./recover-note.ts";
 import { recallSessionsEnabled, searchSessions } from "./session-search.ts";
 import { CTX, ChatKinds, ChatProjects, Chats, DB_PATH, emitPhase, emitTool, noteSessionCwd, sessionCwd, sessionFilesOf, toolArgs, toolDiff, toolLabel, toolOutput } from "./shared.ts";
@@ -499,15 +509,17 @@ export const LIFECYCLE_SECTIONS: readonly PromptSection[] = [
 			collectInjections([currentProjectProvider], { conversationId: input.conversationId })
 				.system[0]?.text,
 	},
-	// 一生记忆库的库目录常驻段（2026-11-22 记忆外挂源批）：渲染走 personaCatalogProvider
-	//（同步读 persona-inject 的预取缓存；异步刷新由 startPersonaCatalogRefresh 每 10 分钟拉）。
+	// 一生记忆库的库目录常驻段（2026-11-22 记忆外挂源批）：渲染走外接库的目录 provider
+	//（同步读 memory-bank 的预取缓存；异步刷新由 startBankCatalogRefresh 每 10 分钟拉）。
 	// 位置由本数组下标决定——排在 current_project 之后、delegate_executor 之前，
 	// 与 INJECTION_ORDER.persona_catalog=46 的框架内顺序一致（46 > 40，< skills 50）。
 	{
 		key: "persona_catalog",
 		render: (input) => {
 			const conversationId = Number(input.conversationId);
-			return collectInjections([personaCatalogProvider], {
+			// 2026-11-24 旧形态退役：目录只有外接库一个来源；内置槽位整段不注（契约 §1.3）。
+			if (!isExternalBankActive()) return undefined;
+			return collectInjections([externalBankCatalogProvider], {
 				conversationId,
 				partnerId: partnerOfSession(conversationId),
 				group: groupOfSession(conversationId),
@@ -590,7 +602,22 @@ async function openHarness(): Promise<Harness> {
 		// 任务专线双写（2026-11-08 扫尾批 8g）：进度 / REPORT / out 留言同步一份
 		// 进 `task-<票号>` 会话。开关在 task-conversation 内部（TASK_AS_CONVERSATION）。
 		mirrorDelegation: taskConversationMirror,
-		search: searchModule,
+		// web_search 的整次调用预算（2026-11-24 M1）：每次调用现读策略。
+		// 总开关关 → 不传第三参 = 与今天逐字节相同（每源 20s，没有整次预算）。
+		search: {
+			...searchModule,
+			webSearch: (query: string, count?: number) => {
+				const resolved = resolveToolPolicy(process.env);
+				const timeoutMs = resolved.enabled
+					? (resolved.tools.web_search?.effective.timeoutMs ?? undefined)
+					: undefined;
+				return searchModule.webSearch(
+					query,
+					count,
+					timeoutMs === null || timeoutMs === undefined ? undefined : { timeoutMs },
+				);
+			},
+		},
 		// 执事间递话（2026-11-08 扫尾批 8d）：执事能力 + 通道开关**双闸**，
 		// 关任一个 → `send_to_agent` 不上架（模型侧 tool_unavailable = 本批的回滚形态）。
 		// worker 插话通道（2026-11-19 插话统一 批1）：WORKER_STEER_ENABLED=false 时
@@ -651,21 +678,15 @@ async function openHarness(): Promise<Harness> {
 			? (query, options) =>
 					getHarness().then((harness) => searchSessions(harness, query, options))
 			: null,
-		// persona-metric 记忆库检索（2026-11-09 persona 接入批一，方案 D-甲/D-乙/D-己）：
-		// `PERSONA_MEMORY_ASK` 配置 = 启用（默认未配置 = 工具不上架）；`PERSONA_MEMORY_ENABLED=false`
-		// = 显式关。双闸都过才注入，`persona_recall` 才注册（模型侧 tool_unavailable，一行回滚）。
-		// 本批只走按需工具，不进 recallContext / buildContext 的每轮注入链。
-		personaAsk:
-			personaAskEnabled() && askPersonaAvailable()
-				? (question, options) => askPersona(question, options)
-				: null,
-		// persona 写入（2026-11-17 persona_write 批）：主人明确让写才往大记忆库落字。
-		// 双闸：PERSONA_WRITE_ENABLED（默认关）+ repair.py 路径（PERSONA_REPAIR 或 ask.py 同目录）。
-		// 审批由 capability critical 承担（每写必弹审批）；不传 = persona_write 不上架，一行回滚。
-		personaWrite:
-			personaWriteEnabled() && writePersonaAvailable()
-				? (input) => personaWrite(input)
-				: null,
+		// 记忆库槽位（2026-11-23 外部记忆库接入；2026-11-24 旧形态退役）：恒注入，
+		// recall / remember 按槽位分发（工具名不变）。外部库起进程/不回落的口径由
+		// beforeTool 的外部 remember 闸门与 memory-bank 的 bank* 承担。
+		memoryBank: {
+			active: () => activeBank(),
+			ask: (question, options) => bankAsk(question, options),
+			write: (input) => bankWrite(input),
+			writable: () => bankWritable(),
+		},
 	});
 	// 低频工具索引（C 段）：只在清单内工具上补 deferred，浅拷贝、不改原对象、不动注册顺序。
 	// tool_search 是 createTools 末尾追加的，名字不在清单里，原样通过。
@@ -768,12 +789,20 @@ async function openHarness(): Promise<Harness> {
 								"turn-limit",
 							);
 						}
+						// 外部记忆库槽位（2026-11-23）：remember 从「只写可清理的小库」变成
+						// 「起进程写外部库」，整条闸门按写工具对待。计算提前到无人值守判定之前，
+						// 这样 unattended 的 allow/skip 也按外部 remember 的写工具能力面判。
+						// 内置模式 externalRemember=false，判定与改动前逐字节一致。
+						const externalRemember = call.name === "remember" && activeBank() === "external";
 						// 无人值守（2026-11-10 批 13 §一/§二）：**先于一切审批判定**。
 						// 三态收口——allow / skip / deny；绝不落 pending 等人（人在睡觉）。
 						// 开关默认 false：关着时这一整块不执行，行为与改动前逐字节一致。
 						let unattendedAllow = false;
 						if (unattendedPolicyEnabled() && isUnattended(api.conversationId)) {
-							const verdict = resolveUnattendedVerdict(call.name, capabilityOf(call.name));
+							const verdict = resolveUnattendedVerdict(
+								call.name,
+								externalRemember ? EXTERNAL_REMEMBER_CAPABILITY : capabilityOf(call.name),
+							);
 							if (verdict === "deny") {
 								return blocked(unattendedDenyReason(call.name), "policy", "unattended");
 							}
@@ -826,19 +855,36 @@ async function openHarness(): Promise<Harness> {
 							const relayBlock = relayToolBlockReason(api.conversationId);
 							if (relayBlock) return blocked(relayBlock, "relay", "relay");
 						}
+						// 外部 remember 在只读档必须拦（文案说明换档 / 切回原生）；
+						// externalRemember 已在无人值守判定前算好。
 						// 只读 / 在工作区内修改两档要判命令文本（2026-11-14）：查看类命令放行，
 						// 其余照旧拦。上下文缺一不可——拿不到命令就退回"一律拦"。
-						const readOnly = readOnlyBlockReason(call.name, {
+						let readOnly = readOnlyBlockReason(call.name, {
 							args: call.arguments,
 							workspaceRoots: workspaceRootsReal(),
 							cwd: sessionCwd(api.conversationId),
 						});
+						if (!readOnly && externalRemember) {
+							readOnly = externalRememberBlockReason(policy.access);
+						}
 						// 自主轮高危审批（批次C C2）：例行轮（autonomyTurns 事实源）里
 						// RISK_TOOLS 一律强制 ask——普通轮行为完全不变（D6 口径不动）。
 						const risk = autonomyRiskVerdict(call.name, autonomous);
-						let verdict: ApprovalVerdict = risk.forceAsk && !unattendedAllow
-							? ({ kind: "ask" } as const)
-							: needsApproval(policy, call.name, readOnly);
+						let verdict: ApprovalVerdict;
+						if (externalRemember) {
+							// 按 critical 档（契约 §1.4）：ask-all / ask-critical 都弹审批；
+							// approval=none 是用户显式选择，不弹。只读档的 block 仍最优先。
+							verdict = readOnly
+								? ({ kind: "block", reason: readOnly } as const)
+								: externalRememberApproval(policy.approvalLevel) === "ask"
+									? ({ kind: "ask" } as const)
+									: ({ kind: "allow" } as const);
+						} else {
+							verdict =
+								risk.forceAsk && !unattendedAllow
+									? ({ kind: "ask" } as const)
+									: needsApproval(policy, call.name, readOnly);
+						}
 						// 无人值守 allow：执行但不再问。显式 block（黑名单 / 只读档）仍然优先——
 						// 那是用户写死的边界，不是"要不要人点头"。
 						if (unattendedAllow && verdict.kind !== "block") verdict = { kind: "allow" };
@@ -869,13 +915,23 @@ async function openHarness(): Promise<Harness> {
 								return blocked(LOOP_GUARD_BLOCK_MESSAGE, "loop-guard", "loop-guard");
 							}
 						}
-						// bash 默认超时（2026-11-04 批次一 A4）：只补模型没传的 timeout。
+						// bash / powershell 默认超时（2026-11-04 批次一 A4；2026-11-24 M2 接策略）：
+						// 只补模型没传的 timeout（policy 的 timeoutMs 是默认注入值，不是硬上限）。
+						// - 总开关关：逐字节保持今天的行为——只判 bash，值取模块常量 BASH_TIMEOUT_S。
+						// - 总开关开：tools > groups > legacy(AGENT_BASH_TIMEOUT_S) > default；
+						//   powershell 也注入（今天它没有默认值，长命令永远走不到超时分支）。
 						// 内核会拿返回的 arguments 重新校验（types.d.ts 的 ToolHooks.beforeTool）；
 						// `timeout=0` 绝不能注入 —— 内核 validateTimeout 对 <=0 直接抛错。
 						let injected: { timeout?: number } | undefined;
-						if (call.name === "bash" && BASH_TIMEOUT_S > 0) {
+						if (call.name === "bash" || call.name === "powershell") {
 							const a = call.arguments as { timeout?: number };
-							if (a.timeout === undefined) injected = { ...a, timeout: BASH_TIMEOUT_S };
+							if (a.timeout === undefined) {
+								// legacy 传模块常量：总开关开时 `AGENT_BASH_TIMEOUT_S` 兜底仍是启动时的值（§3.4）。
+								const timeoutSeconds = shellTimeoutInjectionSeconds(call.name, process.env, {
+									bash: BASH_TIMEOUT_S > 0 ? BASH_TIMEOUT_S * 1000 : null,
+								});
+								if (timeoutSeconds > 0) injected = { ...a, timeout: timeoutSeconds };
+							}
 						}
 						// 只读白名单（2026-11-09 任务书 T3 §2，默认关）：只降噪，不放宽封锁。
 						// 位置刻意在 block / pathBlock / loop-guard 之后：那些判定已经把该拦的拦了，
@@ -895,7 +951,9 @@ async function openHarness(): Promise<Harness> {
 						//     async 形态回拒绝性答复、本轮照常收尾，答复后由服务端 followUp 续跑。
 						// 本会话记住过的工具直接放行（进程内，重启失效）。
 						// 自主轮禁"记住"绕过（批次C C2）：例行轮的每次写/派都必须真人答复。
-						if (verdict.kind === "ask" && (autonomous || !approvalStore().isRemembered(api.conversationId, call.name))) {
+						// 外部记忆库的 remember 是「每写必弹」：不复用内置 remember 的「本会话记住该工具」
+						// 一次性放行——同一个名字在内置模式下不弹审批，不能让它顺手把外部写也放掉。
+						if (verdict.kind === "ask" && (autonomous || externalRemember || !approvalStore().isRemembered(api.conversationId, call.name))) {
 							const mode = approvalMode();
 							const timeoutS = approvalTimeoutSeconds(process.env);
 							// 指纹拿**原始 arguments** 算（不能拿截断后的 args 摘要，否则长参数永远对不上）
@@ -1060,52 +1118,77 @@ async function openHarness(): Promise<Harness> {
 								);
 							}
 						}
-						// bash 超时转后台（2026-11-09 任务书 T3 §3，默认关）：超时 ≠ 失败。
-						// 只认内核固定文案（`Command timed out after N seconds`），然后由服务端
-						// 自己 spawn 同一条命令继续跑；工具结果换成"已转到后台"这一句。
-						// 先决定再发工具帧——否则 UI 先看到一个失败帧、模型却收到"已转到后台"。
+						// shell 超时结算（2026-11-09 任务书 T3 §3；2026-11-24 M2 由策略驱动）：
+						// 只认内核固定文案（`Command timed out after N seconds`），然后按 onTimeout 结算：
+						//   - background：服务端自己 spawn 同一条命令继续跑；工具结果换成「已转到后台」；
+						//   - cancel：换成「已按策略取消」错误 + canceled 诊断（明确不要重试）；
+						//   - fail：原样透出内核超时错误（今天的行为）。
+						// 总开关关：`shellTimeoutDecision` 逐字节保持旧路径——只认 `AGENT_BASH_BG_TIMEOUT`。
+						// 先决定再发工具帧——否则 UI 先看到一个失败帧、模型却收到「已转到后台」。
+						const shellTool = call.name === "bash" || call.name === "powershell";
+						const decision = shellTool
+							? shellTimeoutDecision(call.name as "bash" | "powershell", process.env)
+							: null;
+						const timeoutS = shellTool ? timeoutSecondsFromResult(result) : null;
+						const command = (call.arguments as { command?: unknown }).command;
+						const timeoutCommand =
+							timeoutS !== null && typeof command === "string" && command.trim() ? command : null;
 						let backgrounded: ReturnType<typeof replacedResult> | undefined;
-						if (bashBackgroundEnabled() && (call.name === "bash" || call.name === "powershell")) {
-							const timeoutS = timeoutSecondsFromResult(result);
-							const command = (call.arguments as { command?: unknown }).command;
-							if (timeoutS !== null && typeof command === "string" && command.trim()) {
+						let canceled: ReturnType<typeof canceledResult> | undefined;
+						if (decision !== null && timeoutCommand !== null && timeoutS !== null) {
+							if (decision.action === "background") {
 								const moved = moveToBackground({
-									command,
+									command: timeoutCommand,
 									cwd: sessionCwd(api.conversationId),
 									timeoutSeconds: timeoutS,
-									onFinished: (record, logTail) => {
-										const tail = logTail.trim();
-										// 既有行为（批3 前）：只写记录不开轮。
-										void sayInConversation(
-											api.conversationId,
-											`后台任务 ${record.id} 已结束（退出码 ${record.exitCode ?? "未知"}）。` +
-												(tail ? `\n最后一段输出：\n${tail}` : ""),
-										).catch(() => undefined);
-										// 批3（唤醒管道）：完成即唤醒——在写记录之外投一条 bgjob 信封，
-										// 唤醒轮落在发起会话所属执事的 canonical 主会话。信封只递原料
-										//（命令摘要 / 退出码 / 尾部 ≤400 字），说不说由执事自己定。
-										//（BG_JOB_WAKE_ENABLED / WAKE_PIPELINE_V2 回滚开关 2026-11-21 退役，恒投。）
-										wakeOnBgJobFinish(
-											api.conversationId,
-											bgJobWakePayload(record, tail, record.status === "done" ? "done" : "failed"),
-										);
-									},
-									// 批3：运行中输出变化检测（ZCode 式）。间隔 BG_JOB_WATCH_INTERVAL_S
-									// （默认 0=关，仅完成唤醒）；检测在 bash-background，投递走同一入口。
-									// 尾部摘要只进会话输入（唤醒轮提示词），服务端日志不落它。
-									onOutputChange: (record, logTail) => {
-										wakeOnBgJobFinish(
-											api.conversationId,
-											bgJobWakePayload(record, logTail, "running"),
-										);
-									},
+									// 2026-11-24：记录带发起工具与会话，列表可按会话过滤。
+									tool: call.name,
+									kind: "shell",
+									conversationId: api.conversationId,
+									// notify:false = 只留 index / log，不写会话、不唤醒（方案 §5.1）。
+									// 旧路径 `shellTimeoutDecision` 恒给 true，行为与改动前一致。
+									...(decision.notify
+										? {
+												onFinished: (record, logTail) => {
+													const tail = logTail.trim();
+													// 既有行为（批3 前）：只写记录不开轮。
+													void sayInConversation(
+														api.conversationId,
+														`后台任务 ${record.id} 已结束（退出码 ${record.exitCode ?? "未知"}）。` +
+															(tail ? `\n最后一段输出：\n${tail}` : ""),
+													).catch(() => undefined);
+													// 批3（唤醒管道）：完成即唤醒——在写记录之外投一条 bgjob 信封，
+													// 唤醒轮落在发起会话所属执事的 canonical 主会话。信封只递原料
+													//（命令摘要 / 退出码 / 尾部 ≤400 字），说不说由执事自己定。
+													wakeOnBgJobFinish(
+														api.conversationId,
+														bgJobWakePayload(record, tail, record.status === "done" ? "done" : "failed"),
+													);
+												},
+												// 批3：运行中输出变化检测（ZCode 式）。间隔 BG_JOB_WATCH_INTERVAL_S
+												// （默认 0=关，仅完成唤醒）；检测在 bash-background，投递走同一入口。
+												onOutputChange: (record, logTail) => {
+													wakeOnBgJobFinish(
+														api.conversationId,
+														bgJobWakePayload(record, logTail, "running"),
+													);
+												},
+											}
+										: {}),
 								});
 								backgrounded = replacedResult(moved.message);
+							} else if (decision.action === "cancel") {
+								canceled = canceledResult(
+									`命令超过 ${timeoutS} 秒，已按工具策略取消。不要重试同一条命令；需要继续就换个方式（更短、拆步）。`,
+								);
 							}
 						}
 						// 路径类报错补事实（2026-11-17）：只给 cwd / 主工作区，不改路径、不改成败
-						const hinted = backgrounded === undefined ? pathFailureHint(call, result, api.conversationId) : undefined;
-						const finalResult = backgrounded ?? hinted ?? result;
+						const hinted =
+							backgrounded === undefined && canceled === undefined
+								? pathFailureHint(call, result, api.conversationId)
+								: undefined;
+						const finalResult = backgrounded ?? canceled ?? hinted ?? result;
 						emitPhase(api.conversationId, "thinking");
 						emitTool(api.conversationId, {
 							name: call.name,
@@ -1128,7 +1211,7 @@ async function openHarness(): Promise<Harness> {
 								ok: finalResult.isError !== true,
 							});
 						}
-						return backgrounded ?? hinted;
+						return backgrounded ?? canceled ?? hinted;
 					},
 				}),
 				// 每次请求前：注入记忆 + 数这是本轮的第几个工具回合
@@ -1194,11 +1277,32 @@ async function openHarness(): Promise<Harness> {
 									: "chief",
 							group: groupOfSession(api.conversationId),
 						} as const;
-						const collected = collectInjections(LIFECYCLE_MESSAGE_PROVIDERS, injectionCtx);
+						const bankExternal = isExternalBankActive();
+						const collected = collectInjections(
+							// 外部槽位跳过内置 memoryRecallProvider（个人记忆由 bank 的轻召回承担）。
+							lifecycleMessageProviders({ skipInternalMemory: bankExternal }),
+							injectionCtx,
+						);
 						// 一生记忆库轻召回（2026-11-22 记忆外挂源批）：provider 契约是同步的，
 						// 而轻召回要 await ask.py（60s 节流 + 单飞都在中间件里），在框架收集后
 						// 以同一 ctx 拼条目再按 order 插回——排序口径与框架内一致（order 105）。
-						const personaLight = await personaRecallLightTextFor(injectionCtx).catch(() => undefined);
+						// 2026-11-24 旧形态退役：只在外部槽位跑（内置槽位不接大库，契约 §1.3）。
+						let personaLight: string | undefined;
+						if (bankExternal) {
+							const bankEnv = bankSpawnEnv();
+							const bankCommand = bankAskCommand();
+							personaLight =
+								bankEnv && bankCommand
+									? await personaRecallLightTextFor(injectionCtx, {
+											env: bankEnv,
+											command: bankCommand.command,
+											cwd: bankCommand.cwd,
+											// 两档超时（2026-11-24）：轻召回用配置里的 lightMs（默认 8s）；
+											// 总开关开时由 policy 的 injections.memoryLight.timeoutMs 覆盖（M1 消费点）。
+											timeoutMs: memoryLightTimeoutMs(bankTimeouts().lightMs),
+										}).catch(() => undefined)
+									: undefined;
+						}
 						if (personaLight) {
 							collected.message.push({
 								id: "persona_recall_light",
@@ -1289,8 +1393,9 @@ async function openHarness(): Promise<Harness> {
 	// 必须早于 resume()——恢复重走 beforeTool 时会复用 callId 生成/覆盖审批记录。
 	approvalStore().load({ expireLeftover: approvalMode() === "blocking" });
 	// 一生记忆库的库目录（2026-11-22 记忆外挂源批）：启动拉一次 + 每 10 分钟刷新进缓存，
-	// persona_catalog section 的 render 只同步读缓存。总闸关 / 未配置 = 不起 python、零字节。
-	startPersonaCatalogRefresh();
+	// persona_catalog section 的 render 只同步读缓存。槽位不是 external / 总闸关 = 不 spawn、零字节。
+	// 2026-11-24 旧形态退役：env 路径的目录刷新已删，恒走当前槽位。
+	startBankCatalogRefresh();
 
 	// 上次进程没跑完的活（包括睡着的提醒）接着跑
 	harness.resume();

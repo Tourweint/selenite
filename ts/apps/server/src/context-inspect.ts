@@ -134,8 +134,8 @@ const SECTION_META: Record<
 	{ label: string; stability: ContextSectionStability; editable?: boolean }
 > = {
 	persona: { label: "人设", stability: "fixed", editable: true },
-	// 关于我（2026-11-19）：全局固定背景，编辑入口在设置 → 关于我。
-	user_profile: { label: "关于我", stability: "fixed", editable: true },
+	// 偏好（2026-11-19 上线时叫「关于我」，2026-11-23 改名）：全局固定背景，编辑入口在设置 → 注入 → 偏好。
+	user_profile: { label: "偏好", stability: "fixed", editable: true },
 	verification_iron_law: { label: "验证铁律", stability: "fixed" },
 	clarify_contract: { label: "开工前问清", stability: "fixed" },
 	injection_guard: { label: "注入防线", stability: "fixed" },

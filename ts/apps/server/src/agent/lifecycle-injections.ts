@@ -49,11 +49,13 @@ import { workSummaryFor } from "../work-record.ts";
 import { takeRecoverNote } from "./recover-note.ts";
 import { toolIndexText } from "../tool-index.ts";
 import {
-	personaCatalogCachedText,
 	personaInjectGatesClosed,
-	PERSONA_CATALOG_TITLE,
+	EXTERNAL_BANK_CATALOG_TITLE,
 	personaLightRecall,
 } from "../persona-inject.ts";
+import {
+	bankCatalogCachedText,
+} from "../memory-bank.ts";
 
 function entry(
 	id: string,
@@ -340,28 +342,21 @@ export const toolIndexProvider: InjectionProvider = (ctx) => {
 };
 
 /**
- * 一生记忆库的库目录常驻段（2026-11-22 记忆外挂源批，方案 §2.3）：
+ * 外接记忆库的库目录常驻段（2026-11-23 外部记忆库接入；2026-11-24 旧形态退役后唯一目录来源）。
  *
- * 大库（persona-metric）只有 persona_recall 工具时，模型不"记得去查"就等于库不存在。
- * 这段把 ask.py --catalog-only 的库边界（事件 / 人 / 月 / 高频对象统计，~4 行数百字）
- * 裁到 ≤600 字进**静态前缀**——模型每轮都知道大库里有什么，才会主动点名查。
- *
- * 位置：紧跟 current_project(40)、在 skills(50) 之前（INJECTION_ORDER.persona_catalog=46）；
- * 与 user_profile 同款：净增一段固定前缀，缓存前缀变化一次，预期内。
- * 触发：总闸 `PERSONA_MEMORY_INJECT` + 父双闸（persona-inject.ts 统一判）；
- * catalog 只进**总管 / 普通会话**——非 chief 执事轮已有大量 partner_context 注入，
- * 再加目录段收益低；群聊同跳（群聊不走个人记忆）。取不到内容（未配置 / 失败 /
- * 还没成功拉过）= 整段不注，零字节（目录是锦上添花段，失败不该留下空标题）。
+ * 只在当前槽位 = external 时注入；文本来自 memory-bank 的 `bankCatalogCachedText()`
+ * （10 分钟刷新；失败保留旧文本，取不到 = 整段不注）。内置槽位不注目录（契约 §1.3）。
  */
-export const personaCatalogProvider: InjectionProvider = (ctx) => {
+export const externalBankCatalogProvider: InjectionProvider = (ctx) => {
 	if (ctx.group) return undefined;
 	if (isNonChiefPartner(ctx.partnerId)) return undefined;
+	// 总闸 / 读闸任一关：整段消失（PERSONA_MEMORY_INJECT × 当前槽位 external × 读入口）。
 	if (personaInjectGatesClosed()) return undefined;
-	const catalog = personaCatalogCachedText();
+	const catalog = bankCatalogCachedText();
 	if (!catalog) return undefined;
 	return entry(
 		"persona_catalog",
-		`${PERSONA_CATALOG_TITLE}\n${catalog}`,
+		`${EXTERNAL_BANK_CATALOG_TITLE}\n${catalog}`,
 		INJECTION_ORDER.persona_catalog,
 		"system",
 	);
@@ -373,7 +368,7 @@ export const LIFECYCLE_SECTION_PROVIDERS: readonly InjectionProvider[] = [
 	verificationIronLawProvider,
 	clarifyContractProvider,
 	currentProjectProvider,
-	personaCatalogProvider,
+	externalBankCatalogProvider,
 	skillsProvider,
 	toolIndexProvider,
 ];
@@ -473,21 +468,36 @@ export const partnerContextProvider: InjectionProvider = (ctx) => {
  * async provider：`collectInjections` 的 provider 契约允许返回 Promise 吗——不允许，
  * provider 必须同步。所以本条不能直接进 LIFECYCLE_MESSAGE_PROVIDERS；它在
  * lifecycle-harness 的 beforeRequest 里 await 后以既有 ctx 拼条目（见该文件消息注入处）。
- * 群聊整段跳过（与 persona_recall 工具同口径）；执事会话照进（执事也该记得主人的旧事）。
+ * 群聊整段跳过（与 recall 的外部槽同口径）；执事会话照进（执事也该记得主人的旧事）。
  */
 export const PERSONA_RECALL_LIGHT_HEADER =
 	"【更早的记录】（来自主人一生的记忆库，背景不是话题；查不到 ≠ 没有这回事）";
 
 export async function personaRecallLightTextFor(
 	ctx: InjectionContext,
-	deps: { spawnFn?: typeof spawn } = {},
+	deps: {
+		spawnFn?: typeof spawn;
+		env?: NodeJS.ProcessEnv;
+		command?: string[];
+		cwd?: string;
+		/** 轻召回超时（2026-11-24）：外部槽位传 memory-bank 的 timeouts.lightMs；缺省 8s。 */
+		timeoutMs?: number;
+	} = {},
 ): Promise<string | undefined> {
 	if (ctx.group) return undefined;
-	if (personaInjectGatesClosed()) return undefined;
+	// 2026-11-23：外部记忆库槽位用合成 env（bankSpawnEnv）把 ASK / ENABLED / INJECT 钉成
+	// 当前 bank 的值；不传 env 时与今天逐字节一致。
+	if (deps.env ? personaInjectGatesClosed(deps.env) : personaInjectGatesClosed()) return undefined;
 	const text = ctx.userText ?? "";
 	if (!text.trim()) return undefined;
 	const lines = await personaLightRecall(text, {
 		conversationId: ctx.conversationId,
+		env: deps.env ?? process.env,
+		// 传合成 env = 当前外接库：组名不固定，按扁平 hits 处理。
+		anyGroups: Boolean(deps.env),
+		...(deps.command ? { command: deps.command } : {}),
+		...(deps.cwd ? { cwd: deps.cwd } : {}),
+		...(deps.timeoutMs !== undefined ? { timeoutMs: deps.timeoutMs } : {}),
 		...(deps.spawnFn ? { spawnFn: deps.spawnFn } : {}),
 	});
 	if (lines.length === 0) return undefined;
@@ -511,3 +521,17 @@ export const LIFECYCLE_MESSAGE_PROVIDERS: readonly InjectionProvider[] = [
 	turnLimitProvider,
 	partnerContextProvider,
 ];
+
+/**
+ * 当前轮该跑的消息注入登记表（2026-11-23 记忆库槽位）。
+ *
+ * `skipInternalMemory=true`（外部记忆库槽位）：跳过内置 `memoryRecallProvider`——
+ * 个人记忆已由当前 bank 的轻召回（ask.py）承担，两套一起注就是双份。
+ * `projectIndexProvider` / `taskMemoryProvider` 不属于个人记忆库，一律不动。
+ */
+export function lifecycleMessageProviders(options: {
+	skipInternalMemory?: boolean;
+} = {}): readonly InjectionProvider[] {
+	if (!options.skipInternalMemory) return LIFECYCLE_MESSAGE_PROVIDERS;
+	return LIFECYCLE_MESSAGE_PROVIDERS.filter((provider) => provider !== memoryRecallProvider);
+}

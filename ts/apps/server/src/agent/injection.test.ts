@@ -381,31 +381,50 @@ test("顺序快照：INJECTION_ORDER 是缓存前缀资产（改它 = 有意的�
 	assert.equal(new Set(values).size, values.length, "order 不允许重值");
 });
 
-// ── 一生记忆库外挂注入（2026-11-22 记忆外挂源批 §六.3 后两项）────────────
+// ── 一生记忆库外挂注入（2026-11-22 记忆外挂源批；2026-11-24 改读槽位）────────────
 
-test("persona_catalog：配置了 + 成功拉过才注；群聊 / 非 chief 执事 / 未拉过不注", async () => {
-	const { personaCatalogProvider } = await import("./lifecycle-injections.ts");
-	const { refreshPersonaCatalogInjection, resetPersonaCatalogForTests } = await import(
-		"../persona-inject.ts"
+/** 外接库槽位夹具：真目录 + 真 ask.py（读闸判入口存在）+ active=external 配置。 */
+function externalBankFixture(): { configPath: string; env: NodeJS.ProcessEnv } {
+	const bankRoot = join(root, "bank");
+	mkdirSync(bankRoot, { recursive: true });
+	const askPath = join(bankRoot, "ask.py");
+	writeFileSync(askPath, "# fake ask\n", "utf8");
+	const configPath = join(root, "memory-bank.json");
+	writeFileSync(
+		configPath,
+		`${JSON.stringify({
+			v: 1,
+			active: "external",
+			external: {
+				id: "bank_probe",
+				name: "探针库",
+				root: bankRoot,
+				ask: "ask.py",
+				repair: "",
+				python: "",
+				origin: "user",
+				addedAt: "2026-11-24T00:00:00+08:00",
+				vector: false,
+			},
+			timeouts: { lightMs: 8000, askMs: 15000 },
+		})}\n`,
+		"utf8",
 	);
-	resetPersonaCatalogForTests();
-	// 还没成功拉过目录：整段不注（不造空标题段）。
-	assert.equal(personaCatalogProvider(BASE), undefined, "没拉过目录不注");
-
-	// provider 读的是 process.env（生产契约，无注入口）：父闸两个键临时挂上，测完复原。
-	const savedAsk = process.env.PERSONA_MEMORY_ASK;
-	const savedPython = process.env.PERSONA_PYTHON;
-	process.env.PERSONA_MEMORY_ASK = join(root, "ask.py");
-	process.env.PERSONA_PYTHON = "py3";
-	const catalogEnv: NodeJS.ProcessEnv = {
-		...process.env,
-		AGENT_FLAGS_PATH: join(root, `persona-catalog-${process.pid}.json`),
+	return {
+		configPath,
+		env: {
+			...process.env,
+			MEMORY_BANK_PATH: configPath,
+			PERSONA_MEMORY_ASK: askPath,
+			PERSONA_PYTHON: "py3",
+			AGENT_FLAGS_PATH: join(root, `persona-catalog-${process.pid}.json`),
+		},
 	};
-	delete catalogEnv.PERSONA_MEMORY_INJECT;
-	delete catalogEnv.PERSONA_MEMORY_ENABLED;
-	writeFileSync(catalogEnv.AGENT_FLAGS_PATH!, "{}\n", "utf8");
-	// 假 spawn：catalog 走 --catalog-only，stdout 喂两行边界文本（不真起 python）。
-	const catalogSpawn = ((command: string, args: string[]) => {
+}
+
+/** 假 spawn：catalog 走 --catalog-only，stdout 喂两行边界文本（不真起 python）。 */
+function catalogSpawn(): typeof import("node:child_process").spawn {
+	return ((command: string, args: string[]) => {
 		assert.ok(String(command), "python 命令非空");
 		assert.ok(args.includes("--catalog-only"), "目录走 --catalog-only 入口");
 		const child = new EventEmitter() as EventEmitter & { stdout: EventEmitter; stderr: EventEmitter; kill(): boolean };
@@ -418,23 +437,38 @@ test("persona_catalog：配置了 + 成功拉过才注；群聊 / 非 chief 执�
 		});
 		return child as never;
 	}) as unknown as typeof import("node:child_process").spawn;
-	await refreshPersonaCatalogInjection({ env: catalogEnv, spawnFn: catalogSpawn });
+}
+
+test("persona_catalog：槽位 external + 成功拉过才注；群聊 / 非 chief 执事 / 未拉过不注", async () => {
+	const { externalBankCatalogProvider } = await import("./lifecycle-injections.ts");
+	const { bankCatalogCachedText, refreshBankCatalogInjection, resetMemoryBankCacheForTests } = await import("../memory-bank.ts");
+	const fixture = externalBankFixture();
+	writeFileSync(fixture.env.AGENT_FLAGS_PATH!, "{}\n", "utf8");
+	const savedBankPath = process.env.MEMORY_BANK_PATH;
+	process.env.MEMORY_BANK_PATH = fixture.configPath;
+	resetMemoryBankCacheForTests();
 	try {
-		const item = personaCatalogProvider(BASE);
-		assert.ok(item && !Array.isArray(item), "配置齐 + 拉过 → 注入");
+		// 还没成功拉过目录：整段不注（不造空标题段）。
+		assert.equal(externalBankCatalogProvider(BASE), undefined, "没拉过目录不注");
+
+		await refreshBankCatalogInjection(fixture.env, { spawnFn: catalogSpawn() });
+		assert.ok(bankCatalogCachedText(), "拉取成功进缓存");
+
+		const item = externalBankCatalogProvider(BASE);
+		assert.ok(item && !Array.isArray(item), "槽位 external + 拉过 → 注入");
 		if (item && !Array.isArray(item)) {
 			assert.equal(item.id, "persona_catalog");
 			assert.equal(item.channel, "system");
 			assert.equal(item.scope, "session");
-			assert.match(item.text ?? "", /^以下是主人一生记忆库的边界/);
+			assert.match(item.text ?? "", /^以下是当前外部记忆库的边界/);
 		}
 		assert.equal(
-			personaCatalogProvider({ ...BASE, group: true }),
+			externalBankCatalogProvider({ ...BASE, group: true }),
 			undefined,
 			"群聊不注（群聊不走个人记忆）",
 		);
 		assert.equal(
-			personaCatalogProvider({ ...BASE, partnerId: "p-1" }),
+			externalBankCatalogProvider({ ...BASE, partnerId: "p-1" }),
 			undefined,
 			"非 chief 执事不注（执事轮已有大量 partner_context，目录收益低）",
 		);
@@ -448,37 +482,31 @@ test("persona_catalog：配置了 + 成功拉过才注；群聊 / 非 chief 执�
 			"审计投影覆盖新注入 id（无白名单要补）",
 		);
 	} finally {
-		resetPersonaCatalogForTests();
-		if (savedAsk === undefined) delete process.env.PERSONA_MEMORY_ASK;
-		else process.env.PERSONA_MEMORY_ASK = savedAsk;
-		if (savedPython === undefined) delete process.env.PERSONA_PYTHON;
-		else process.env.PERSONA_PYTHON = savedPython;
-		rmSync(catalogEnv.AGENT_FLAGS_PATH!, { force: true });
+		resetMemoryBankCacheForTests();
+		if (savedBankPath === undefined) delete process.env.MEMORY_BANK_PATH;
+		else process.env.MEMORY_BANK_PATH = savedBankPath;
+		rmSync(fixture.env.AGENT_FLAGS_PATH!, { force: true });
 	}
 });
 
 test("总闸 PERSONA_MEMORY_INJECT=false：catalog 段与轻召回两处净增消失", async () => {
-	const { personaCatalogProvider } = await import("./lifecycle-injections.ts");
-	const {
-		personaCatalogCachedText,
-		personaInjectGatesClosed,
-		refreshPersonaCatalogInjection,
-		resetPersonaCatalogForTests,
-	} = await import("../persona-inject.ts");
-	resetPersonaCatalogForTests();
-	const catalogEnv: NodeJS.ProcessEnv = {
-		...process.env,
-		AGENT_FLAGS_PATH: join(root, `persona-catalog-off-${process.pid}.json`),
-		PERSONA_MEMORY_ASK: join(root, "ask.py"),
-		PERSONA_MEMORY_INJECT: "false",
-	};
-	writeFileSync(catalogEnv.AGENT_FLAGS_PATH!, "{}\n", "utf8");
+	const { externalBankCatalogProvider } = await import("./lifecycle-injections.ts");
+	const { bankCatalogCachedText, refreshBankCatalogInjection, resetMemoryBankCacheForTests } = await import("../memory-bank.ts");
+	const { personaInjectGatesClosed } = await import("../persona-inject.ts");
+	const fixture = externalBankFixture();
+	writeFileSync(fixture.env.AGENT_FLAGS_PATH!, "{}\n", "utf8");
+	const savedBankPath = process.env.MEMORY_BANK_PATH;
+	const savedInject = process.env.PERSONA_MEMORY_INJECT;
+	process.env.MEMORY_BANK_PATH = fixture.configPath;
+	process.env.PERSONA_MEMORY_INJECT = "false";
+	resetMemoryBankCacheForTests();
 	try {
-		assert.equal(personaInjectGatesClosed(catalogEnv), true, "总闸关 = 闸门判关");
-		await refreshPersonaCatalogInjection({ env: catalogEnv });
-		assert.equal(personaCatalogCachedText(), null, "总闸关时不拉目录");
-		assert.equal(personaCatalogProvider(BASE), undefined, "catalog 段消失");
-		// 审计走真实 process.env：本进程未配 PERSONA_MEMORY_ASK，父闸不过 = 不注册（同回滚口径）。
+		const offEnv: NodeJS.ProcessEnv = { ...fixture.env, PERSONA_MEMORY_INJECT: "false" };
+		assert.equal(personaInjectGatesClosed(offEnv), true, "总闸关 = 闸门判关");
+		await refreshBankCatalogInjection(offEnv);
+		assert.equal(bankCatalogCachedText(), null, "总闸关时不拉目录");
+		assert.equal(externalBankCatalogProvider(BASE), undefined, "catalog 段消失");
+		// 审计走真实 process.env：总闸关 → catalog provider 返回 undefined。
 		const rows = auditInjections(INJECTION_REGISTRY, {
 			conversationId: 1,
 			chatKind: "chief",
@@ -488,11 +516,15 @@ test("总闸 PERSONA_MEMORY_INJECT=false：catalog 段与轻召回两处净增�
 		assert.ok(!rows.some((row) => row.id === "persona_catalog"), "审计清单里没有 catalog");
 		assert.ok(
 			!rows.some((row) => row.id === "persona_recall_light"),
-			"轻召回走 beforeRequest 拼条目，总闸关/父闸不过时整条不产生",
+			"轻召回走 beforeRequest 拼条目，总闸关时整条不产生",
 		);
 	} finally {
-		resetPersonaCatalogForTests();
-		rmSync(catalogEnv.AGENT_FLAGS_PATH!, { force: true });
+		resetMemoryBankCacheForTests();
+		if (savedBankPath === undefined) delete process.env.MEMORY_BANK_PATH;
+		else process.env.MEMORY_BANK_PATH = savedBankPath;
+		if (savedInject === undefined) delete process.env.PERSONA_MEMORY_INJECT;
+		else process.env.PERSONA_MEMORY_INJECT = savedInject;
+		rmSync(fixture.env.AGENT_FLAGS_PATH!, { force: true });
 	}
 });
 

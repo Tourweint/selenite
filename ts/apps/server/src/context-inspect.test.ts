@@ -293,6 +293,76 @@ test("上下文已用：input + cacheRead + cacheWrite（命中缓存不低报�
 	assert.equal(out.used, 5320);
 });
 
+test("上下文已用：零用量的播报条目（lifediary.say）不遮住上一次真实用量", async () => {
+	// 场景（2026-11-24 用户报「上下文环时有时无」）：派活上报 / 执事问候 / 任务专线
+	// 回写都以 pi.assistant 落地、usage 全 0；它们不是模型请求，不能当成最后一次测量。
+	const view = {
+		messages: [],
+		entries: [
+			{
+				kind: "pi.assistant",
+				model: [{ api: "openai-completions", usage: { input: 120, cacheRead: 5000, cacheWrite: 200 } }],
+			},
+			{
+				kind: "pi.assistant",
+				model: [
+					{
+						api: "lifediary.say",
+						usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
+					},
+				],
+			},
+			{ kind: "pi.user", model: [{ role: "user", content: "接住这条上报" }] },
+		],
+	} as unknown as ContextView;
+	const conversation = {
+		context: async () => view,
+		agent: async () => null,
+	} as unknown as Conversation;
+	const out = await contextUsageOf(conversation, view);
+	assert.equal(out.used, 5320, "回落到上一条真实请求的 input + cacheRead + cacheWrite");
+});
+
+test("上下文已用：一次真实用量都没有时 used=null，但窗口照样给（前端画空环）", async () => {
+	// 用 env-only 目录钉住窗口来源：没有测量值不等于没有窗口。前端据此画空环 +
+	// 「尚未统计」，不再因为 used=null 整块隐藏（2026-11-24 用户口径：每次都固定显示）。
+	const saved = {
+		PROVIDERS_CONFIG: process.env.PROVIDERS_CONFIG,
+		LLM_PROVIDER: process.env.LLM_PROVIDER,
+		LLM_API_KEY: process.env.LLM_API_KEY,
+		LLM_MODEL: process.env.LLM_MODEL,
+	};
+	process.env.PROVIDERS_CONFIG = "false";
+	delete process.env.LLM_PROVIDER;
+	process.env.LLM_API_KEY = "test-key";
+	process.env.LLM_MODEL = "test-model";
+	try {
+		const view = {
+			messages: [],
+			entries: [
+				{
+					kind: "pi.assistant",
+					model: [{ api: "lifediary.say", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
+				},
+			],
+		} as unknown as ContextView;
+		const conversation = {
+			context: async () => view,
+			agent: async () => null,
+		} as unknown as Conversation;
+		const out = await contextUsageOf(conversation, view);
+		assert.equal(out.used, null);
+		assert.equal(typeof out.window, "number");
+		assert.ok((out.window ?? 0) > 0, "窗口来自全局默认模型");
+		assert.ok(Array.isArray(out.breakdown));
+	} finally {
+		for (const [key, value] of Object.entries(saved)) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	}
+});
+
 test("响应：记忆只取 memory_recall，其它注入列 id 与字数；无记录为 null", () => {
 	const base = {
 		conversationId: "uuid",

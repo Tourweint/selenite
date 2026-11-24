@@ -83,7 +83,7 @@ export interface TranscriptMessage {
 	images?: { mimeType: string; data: string }[];
 	/** 用户消息带的文件（2026-11-13 附件走路径）：只有路径，没有内容 */
 	files?: { path: string; name: string; mimeType?: string; bytes?: number }[];
-	/** 这一轮的工作步骤（2026-11-07）；没有工具调用就不带 */
+	/** 这一轮的工作步骤（2026-11-07）；有工具调用或思考就带（2026-11-21 起裸回答轮也带一条 think） */
 	steps?: TranscriptStep[];
 	/** 那一轮从提问到收尾的墙钟时长（毫秒） */
 	workMs?: number;
@@ -486,14 +486,18 @@ function lastTurnUsageOf(view: ContextView): LocalTurnUsage | null {
 			| { usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number } }
 			| undefined;
 		const usage = message?.usage;
-		if (usage) {
-			return {
-				input: usage.input ?? 0,
-				output: usage.output ?? 0,
-				cacheRead: usage.cacheRead ?? 0,
-				cacheWrite: usage.cacheWrite ?? 0,
-			};
-		}
+		if (!usage) continue;
+		// 播报条目（`lifediary.say`：派活上报 / 执事问候 / 任务专线回写）也写成
+		// `pi.assistant`，usage 全 0，但它不是一次模型请求。当成"最后一次用量"
+		// 会让上下文环在每条上报落地后退回 0 并整块消失（2026-11-24 用户报的
+		// "时有时无"）；继续往前找最近一次真实测量。
+		if ((usage.input ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0) <= 0) continue;
+		return {
+			input: usage.input ?? 0,
+			output: usage.output ?? 0,
+			cacheRead: usage.cacheRead ?? 0,
+			cacheWrite: usage.cacheWrite ?? 0,
+		};
 	}
 	return null;
 }
@@ -530,7 +534,6 @@ export async function contextUsageOf(
 	// OpenAI 系 = prompt_tokens - cached - write；Anthropic 的 input_tokens 也不含 cache。
 	// 只取 input 会在命中缓存时严重低报，全命中时甚至变成 0（ring 直接消失）。
 	const used = usage ? usage.input + usage.cacheRead + usage.cacheWrite : 0;
-	if (!usage || used <= 0) return { used: null, window: null, breakdown: [] };
 	const windowOf = (provider: string | undefined, modelId: string | undefined): number | null => {
 		if (!provider || !modelId) return null;
 		try {
@@ -549,7 +552,11 @@ export async function contextUsageOf(
 	const window =
 		windowOf(agent?.model?.provider, agent?.model?.modelId) ??
 		windowOf(config?.model.provider, config?.model.modelId);
-	return { used, window, breakdown: currentView ? contextBreakdownOf(currentView) : [] };
+	const breakdown = currentView ? contextBreakdownOf(currentView) : [];
+	// 还没有真实测量（新会话 / 上游没回 usage）也把窗口带上：前端据此画一个空环，
+	// 而不是整块消失（2026-11-24 用户口径：上下文环每次固定显示）。
+	if (!usage || used <= 0) return { used: null, window, breakdown };
+	return { used, window, breakdown };
 }
 
 export interface UsageSummary {

@@ -17,6 +17,7 @@ import { isCoreSkill } from "../core-skills.ts";
 import { getSkillState, skillStateEnabled } from "../skill-state.ts";
 import { proactiveForTurn } from "../memory-proactive.ts";
 import { memoryInjectDedupeEnabled, memoryInjectLimit, memoryInjectMaxChars } from "../memory-inject.ts";
+import { isExternalBankActive } from "../memory-bank.ts";
 import {
 } from "../partner-contract.ts";
 import { workerPersonaDefault } from "../worker-persona.ts";
@@ -127,53 +128,81 @@ export const memoryEngine: MemoryEngine | null = (() => {
 
 // ── 技能 ─────────────────────────────────────────────────
 /**
- * 技能读取链（2026-11-08 批 10-A）：`resolveSkillsDir().dirs` 已经是完整的合并链——
- * AGENT_SKILLS_DIR 显式 / 用户目录（首访自动建）→ `%USERPROFILE%\.agents\skills`（只读）
- * → 应用目录兜底。主目录排第一，用户目录为空时内置手册仍然可见；同名先到先得。
+ * 技能读取链（2026-11-08 批 10-A；2026-11-23 多位置）：`resolveSkillsDir().dirs` 已经是
+ * 完整的合并链——AGENT_SKILLS_DIR 显式 / 用户目录（首访自动建）→ 自加位置 → `.agents\skills`
+ * （只读）→ 应用目录兜底。主目录排第一，同名先到先得。
  */
-const resolvedSkills = resolveSkillsDir();
-const SKILLS_DIRS: string[] = resolvedSkills.dirs.map((source) => source.dir);
+const skillDirsForStore = (): string[] => {
+	const dirs = resolveSkillsDir().dirs.map((source) => source.dir);
+	// 主对话（总管）技能（批次D D1）：总管技能目录优先、全局技能兜底，同名时总管覆盖全局。
+	// CHIEF_PARTNER=false 时只留全局目录 = 改动前。
+	return chiefPartnerEnabled() ? [chiefSkillsDir(), ...dirs] : dirs;
+};
 
-// 技能启停位（2026-11-09 用户拍板：默认全关，界面上开）。SKILL_STATE=false 逃生门 = 回到全进索引。
-// 注意 getSkillState() 在闭包里懒取（别在模块顶层解构）——首次调用发生在请求期，.env 已就绪。
-const skillVisible = (name: string): boolean =>
-	!skillStateEnabled() || getSkillState().isEnabled(name);
+function buildSkillStore(): SkillStore | null {
+	// 技能启停位（2026-11-09 用户拍板：默认全关，界面上开）。SKILL_STATE=false 逃生门 = 回到全进索引。
+	// 注意 getSkillState() 在闭包里懒取（别在模块顶层解构）——首次调用发生在请求期，.env 已就绪。
+	const skillVisible = (name: string): boolean =>
+		!skillStateEnabled() || getSkillState().isEnabled(name);
 
-// 2026-11-15 按人可见：全局开 || 该人覆盖开。SKILL_STATE=false 逃生门仍 = 全进索引。
-const skillVisibleFor = (partnerId: string, name: string): boolean =>
-	!skillStateEnabled() || getSkillState().isEnabledFor(partnerId, name);
+	// 2026-11-15 按人可见：全局开 || 该人覆盖开。SKILL_STATE=false 逃生门仍 = 全进索引。
+	const skillVisibleFor = (partnerId: string, name: string): boolean =>
+		!skillStateEnabled() || getSkillState().isEnabledFor(partnerId, name);
 
-export const skillStore: SkillStore | null = (() => {
-	// 主对话（总管）技能（批次D D1）：总管技能目录优先、全局 skills/ 兜底，同名时总管覆盖全局
-	// （createSkillStore 对目录数组按先到先得合并）。CHIEF_PARTNER=false 时只留全局目录 = 改动前。
+	const dirs = resolveSkillsDir().dirs.map((source) => source.dir);
+	const build = (list: string[]): SkillStore | null =>
+		createSkillStore(list, {
+			visible: skillVisible,
+			visibleFor: skillVisibleFor,
+			isCore: isCoreSkill,
+			// 索引摘要截断（2026-11-15 上下文预算批）：传函数 = 每次首渲染现读 env，
+			// 界面「行为开关」改完，新开的会话立即按新值渲染（老会话按冻结口径不变）。
+			indexSummaryChars: skillsIndexSummaryChars,
+		});
+
+	// 主对话（总管）技能（批次D D1）：总管技能目录优先、全局技能兜底，同名时总管覆盖全局。
+	// CHIEF_PARTNER=false 时只留全局目录 = 改动前。
 	if (chiefPartnerEnabled()) {
 		try {
-			return createSkillStore([chiefSkillsDir(), ...SKILLS_DIRS], {
-				visible: skillVisible,
-				visibleFor: skillVisibleFor,
-				isCore: isCoreSkill,
-				// 索引摘要截断（2026-11-15 上下文预算批）：传函数 = 每次首渲染现读 env，
-				// 界面「行为开关」改完，新开的会话立即按新值渲染（老会话按冻结口径不变）。
-				indexSummaryChars: skillsIndexSummaryChars,
-			});
+			return build([chiefSkillsDir(), ...dirs]);
 		} catch (error) {
 			const detail = error instanceof Error ? error.message : String(error);
 			console.warn(`总管技能目录加载失败，回落全局技能: ${detail}`);
 		}
 	}
 	try {
-		return createSkillStore(SKILLS_DIRS, {
-			visible: skillVisible,
-			visibleFor: skillVisibleFor,
-			isCore: isCoreSkill,
-			indexSummaryChars: skillsIndexSummaryChars,
-		});
+		return build(dirs);
 	} catch (error) {
 		const detail = error instanceof Error ? error.message : String(error);
 		console.warn(`技能目录加载失败，本次无技能可用: ${detail}`);
 		return null;
 	}
-})();
+}
+
+/**
+ * 稳定壳（2026-11-23）：技能库位置 / 技能文件增删后，执行器里持有的引用不能失效。
+ * 方法全部转给当前 store；store 为空时按「没有技能」返回（不抛）。
+ */
+let activeSkillStore: SkillStore | null = buildSkillStore();
+export const skillStore: SkillStore = {
+	names: (partnerId) => activeSkillStore?.names(partnerId) ?? [],
+	manual: (name, partnerId) => activeSkillStore?.manual(name, partnerId),
+	indexFor: (conversationId, partnerId) => activeSkillStore?.indexFor(conversationId, partnerId),
+	previewIndex: (partnerId) => activeSkillStore?.previewIndex?.(partnerId),
+};
+
+/**
+ * 位置 / 技能文件变了之后重扫（2026-11-23，管理端点写成功后调）。
+ * 有 store 就就地 `reload`：**已开会话的索引仍按冻结快照**，新会话按新链渲染；
+ * 启动时一个技能都没有（store=null）才新建，此时本来也没有会话冻结过索引。
+ */
+export function refreshSkillStore(): void {
+	if (activeSkillStore?.reload) {
+		activeSkillStore.reload(skillDirsForStore());
+		return;
+	}
+	activeSkillStore ??= buildSkillStore();
+}
 
 /**
  * 总管播种（服务启动时调一次）。CHIEF_PARTNER=false / 执事能力关闭时 ensureChiefPartner 内部旁路。
@@ -394,6 +423,9 @@ function memoryRecallOff(conversationId: number): boolean {
  * 先知道"自己负责哪几摊"，才会在该查的时候去 recall、该记的时候指名写。
  * 一行几十个字，杂事聊天零负担。全名解析不出（项目库没接线 / 项目刚删）就不注。
  * 归档 / 删除的项目不列（2026-11-16）：归档=退场，记忆不进召回池，索引里也不该出现。
+ *
+ * 2026-11-24：external 记忆库槽位下 `recallContext` 整条不跑——"自动想起"与
+ * `remember` 的 project 参数都不成立；文案按实际行为写（查用 recall，不承诺自动注入）。
  */
 export const projectIndexProvider: InjectionProvider = (ctx) => {
 	if (!flagEnabled("MEMORY_ENABLED")) return undefined;
@@ -406,16 +438,22 @@ export const projectIndexProvider: InjectionProvider = (ctx) => {
 		.map((id) => projectNameOf(id))
 		.filter((name): name is string => Boolean(name));
 	if (names.length === 0) return undefined;
+	const external = isExternalBankActive();
+	const lines = [`你负责的项目：${names.join("、")}。`];
+	if (external) {
+		lines.push(
+			"项目记忆不会自动带进上下文；要查项目口径就用 recall（当前接的是外部记忆库，按关键词查）。",
+		);
+	} else {
+		lines.push("聊到哪个项目，相关的项目记忆会自动想起；拿不准就用 recall 主动查。");
+		// 多挂载才需要指名：单挂载时 remember scope=project 自动落到唯一那个。
+		if (mounted.length > 1) {
+			lines.push("要记某个项目的口径（怎么构建 / 部署、踩过的坑），用 remember 的 project 参数指名写。");
+		}
+	}
 	return {
 		id: "project_index",
-		text: [
-			`你负责的项目：${names.join("、")}。`,
-			"聊到哪个项目，相关的项目记忆会自动想起；拿不准就用 recall 主动查。",
-			// 多挂载才需要指名：单挂载时 remember scope=project 自动落到唯一那个。
-			...(mounted.length > 1
-				? ["要记某个项目的口径（怎么构建 / 部署、踩过的坑），用 remember 的 project 参数指名写。"]
-				: []),
-		].join("\n"),
+		text: lines.join("\n"),
 		order: INJECTION_ORDER.project_index,
 		scope: "turn",
 		channel: "message",

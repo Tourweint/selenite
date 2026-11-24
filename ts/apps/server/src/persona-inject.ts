@@ -2,27 +2,31 @@ import type { spawn } from "node:child_process";
 import { flagEnabled } from "./flags.ts";
 import {
 	askPersona,
-	askPersonaAvailable,
-	askPersonaCatalog,
-	personaAskEnabled,
 	PERSONA_GROUP_ORDER,
+	PERSONA_LIGHT_TIMEOUT_MS,
 	type PersonaGroup,
 	type PersonaHit,
 } from "./persona-ask.ts";
+// 读闸的唯一判据（2026-11-24）。循环 import：memory-bank 也 import 本模块的
+// clearPersonaLightRecall / personaCatalogTrim / personaInjectGatesClosed；两边都只在
+// 函数体内引用（函数声明提升），模块初始化期不取值，ESM 循环安全。
+import { bankReadable } from "./memory-bank.ts";
 
 /**
  * 一生记忆库外挂注入（2026-11-22 记忆外挂源批，方案 §2.2 / §2.3）。
  *
- * 背景：大库（persona-metric）此前只有 persona_recall 工具——赌模型每轮"记得去查"，
+ * 背景：大库（persona-metric）此前只有按需工具——赌模型每轮"记得去查"，
  * 忘一次大库就等于不存在。本模块把大库接进每轮自动召回，但**大库条目不进小库打分池**
  * （两库条目不同构，分层配额比统一打分干净）：
  *   - 轻召回 `personaLightRecall`：每轮消息尾部 ≤3 条 / 800 字，独立于 memory 召回的
  *     16 条 / 2000 字预算，分组标题由接线处（lifecycle-injections）拼；
- *   - 库目录 `refreshPersonaCatalogInjection` + `personaCatalogCachedText`：
- *     ask.py --catalog-only 的库边界裁到 ≤600 字，system 段常驻。
+ *   - 库目录 `personaCatalogTrim`：给 memory-bank 的目录缓存做 ≤600 字裁剪。
  *
  * 只读契约（D-甲 / D-丙）不破：唯一入口仍是 ask.py 子进程（经 persona-ask.ts 的
- * askPersona / askPersonaCatalog），本模块绝不直接碰 persona.db。
+ * askPersona），本模块绝不直接碰 persona.db。
+ *
+ * 2026-11-24 旧形态退役：轻召回只在**外接库槽位**跑（env 路径已删）；工具面恒为
+ * recall / remember，闸门由 memory-bank 的 `bankReadable()` 统一判。
  *
  * 放 server 不放 memory 包：spawn python 是 server 的装配事，依赖方向单向
  * `shared ← memory ← server`，memory 包不 import persona-ask。
@@ -31,16 +35,13 @@ import {
  */
 
 /**
- * 总闸 + 父闸一起判（2026-11-22 记忆外挂源批）：任一不过，轻召回与目录都整段消失。
- *
- * 总闸 `PERSONA_MEMORY_INJECT` 默认开——ASK 已配置即有库，注入是它的自然延伸；
- * `false` 一行回到"只有 persona_recall 工具"的今日形态。父闸 = `PERSONA_MEMORY_ASK`
- * 已配置 + `PERSONA_MEMORY_ENABLED` 未显式关（与 persona_recall 工具注册双闸同口径）。
+ * 总闸 + 读闸一起判（2026-11-22 记忆外挂源批；2026-11-24 改读槽位）：
+ * 任一不过，轻召回整段消失。判据 = `PERSONA_MEMORY_INJECT` × `PERSONA_MEMORY_ENABLED`
+ * × 当前槽位 external × 读入口存在（后三者由 memory-bank 的 `bankReadable()` 统一判）。
  */
 export function personaInjectGatesClosed(env: NodeJS.ProcessEnv = process.env): boolean {
 	if (!flagEnabled("PERSONA_MEMORY_INJECT", env)) return true;
-	if (!askPersonaAvailable(env) || !personaAskEnabled(env)) return true;
-	return false;
+	return !bankReadable(env);
 }
 
 // ── 轻召回（personaLightRecall，方案 §2.2）──────────────────
@@ -62,6 +63,8 @@ const LIGHT_LAST_MAX = 256;
 
 const lightLast = new Map<string, { at: number; lines: string[] }>();
 const lightInflight = new Map<string, Promise<string[]>>();
+/** 槽位切换代次（2026-11-23）：清账本后，旧库的在飞结果不许再写回缓存。 */
+let lightGeneration = 0;
 
 function rememberLight(key: string, at: number, lines: string[]): void {
 	lightLast.set(key, { at, lines });
@@ -72,10 +75,16 @@ function rememberLight(key: string, at: number, lines: string[]): void {
 	}
 }
 
-/** 测试用：清空轻召回节流账本（单测之间互不串味）。 */
-export function resetPersonaLightRecallForTests(): void {
+/** 清空轻召回节流账本（2026-11-23 记忆库槽位切换后调：别拿上一个库的行缓存 60 秒）。 */
+export function clearPersonaLightRecall(): void {
+	lightGeneration += 1;
 	lightLast.clear();
 	lightInflight.clear();
+}
+
+/** 测试用：清空轻召回节流账本（单测之间互不串味）。 */
+export function resetPersonaLightRecallForTests(): void {
+	clearPersonaLightRecall();
 }
 
 /** 字符二元组集合（与 memory 包 recall.ts 的 bigrams 同口径；那边是内部函数不导出，就地实现）。 */
@@ -128,15 +137,17 @@ function hasInformativeMatch(body: string, query: string): boolean {
  * 形状不动），但这类条目的 why 固定带「用户亲口确认」，用它判别与 conf=user 一一对应。
  * 正文取 text，缺了回落 title（entity / tension 的正文在 title 里）；两者皆空不渲染。
  */
-function renderHitLine(hit: PersonaHit, group: PersonaGroup): string | null {
+function renderHitLine(hit: PersonaHit, group: string): string | null {
 	const body = (hit.text ?? hit.title ?? "").replace(/\s+/g, " ").trim();
 	if (!body) return null;
 	const suffix =
 		group === "fact" && (hit.why ?? "").includes("用户亲口确认")
 			? "用户亲口确认"
 			: hit.source
-				? `${group} · ${hit.source}`
-				: group;
+				? group
+					? `${group} · ${hit.source}`
+					: hit.source
+				: group || "记忆";
 	const date = hit.date ? `${hit.date} ` : "";
 	const prefix = `- ${date}`;
 	const suffixLen = `（${suffix}）`.length;
@@ -155,6 +166,19 @@ export interface PersonaLightRecallOptions {
 	spawnFn?: typeof spawn;
 	/** 测试 / 探针注入 env（生产走 process.env）。 */
 	env?: NodeJS.ProcessEnv;
+	/**
+	 * 外接库模式（2026-11-23）：组名不固定，按扁平 hits 处理；
+	 * 内置 persona 路径不传，保持六组口径。
+	 */
+	anyGroups?: boolean;
+	/** 多语言入口的启动命令（外接库槽位传；内置 env 路径不传）。 */
+	command?: string[];
+	cwd?: string;
+	/**
+	 * 轻召回自己的超时预算（2026-11-24 两档超时）：缺省 = `PERSONA_LIGHT_TIMEOUT_MS`（8s）。
+	 * 外接库槽位由 memory-bank 的 `timeouts.lightMs` 注入；**永远不传 vector**（轻召回不走向量检索）。
+	 */
+	timeoutMs?: number;
 	/** 时间源（测试注入口）。 */
 	now?: () => number;
 }
@@ -187,24 +211,46 @@ export async function personaLightRecall(
 	if (pending) return pending;
 
 	const startedAt = now();
-	const task = askPersona(text, { limit: LIGHT_ASK_LIMIT }, { env, spawnFn: options.spawnFn })
+	const generation = lightGeneration;
+	const task = askPersona(
+		text,
+		{ limit: LIGHT_ASK_LIMIT, anyGroups: options.anyGroups === true },
+		{
+			env,
+			...(options.command ? { command: options.command } : {}),
+			...(options.cwd ? { cwd: options.cwd } : {}),
+			// 两档超时（2026-11-24）：轻召回默认 8s；外接库槽位由调用方传配置里的 lightMs。
+			// 这里刻意不传 vector——每轮注入不走向量检索。
+			timeoutMs: options.timeoutMs ?? PERSONA_LIGHT_TIMEOUT_MS,
+			spawnFn: options.spawnFn,
+		},
+	)
 		.then((result) => {
-			const lines = result.ok ? pickLightLines(result.groups ?? {}, text) : [];
-			rememberLight(key, now(), lines);
-			const groupCount = result.groups ? Object.keys(result.groups).length : 0;
-			// 只记字数 / 状态 / 组数 / 条数 / 耗时，不记 query 原文与正文（硬约束）。
+			const lines = result.ok
+				? result.hits
+					? pickLightLinesFromHits(result.hits, text)
+					: pickLightLines(result.groups ?? {}, text)
+				: [];
+			// 库已经换了（clearPersonaLightRecall 加了一代）：旧结果不许写回新库的账本。
+			if (generation === lightGeneration) rememberLight(key, now(), lines);
+			const itemCount = result.hits
+				? result.hits.length
+				: result.groups
+					? Object.keys(result.groups).length
+					: 0;
+			// 只记字数 / 状态 / 条数 / 耗时，不记 query 原文与正文（硬约束）。
 			console.log(
-				`[persona-light] q=${text.length}字 ok=${result.ok} groups=${groupCount} lines=${lines.length} ${now() - startedAt}ms`,
+				`[persona-light] q=${text.length}字 ok=${result.ok} items=${itemCount} lines=${lines.length} ${now() - startedAt}ms`,
 			);
 			return lines;
 		})
 		.catch(() => {
 			// askPersona 理论上不抛，兜一层：检索失败也按 60s 记账，别每轮都去撞坏掉的 python。
-			rememberLight(key, now(), []);
+			if (generation === lightGeneration) rememberLight(key, now(), []);
 			return [] as string[];
 		})
 		.finally(() => {
-			lightInflight.delete(key);
+			if (lightInflight.get(key) === task) lightInflight.delete(key);
 		});
 	lightInflight.set(key, task);
 	return task;
@@ -212,7 +258,8 @@ export async function personaLightRecall(
 
 interface FlatHit {
 	hit: PersonaHit;
-	group: PersonaGroup;
+	/** 六组模式是 PersonaGroup；外接库模式是原始组名（可能为空）。 */
+	group: string;
 	body: string;
 }
 
@@ -227,8 +274,6 @@ function pickLightLines(
 	groups: Partial<Record<PersonaGroup, PersonaHit[]>>,
 	query: string,
 ): string[] {
-	const q = query.replace(/\s+/g, " ").trim();
-	const qGrams = bigrams(q);
 	const flat: FlatHit[] = [];
 	for (const group of PERSONA_GROUP_ORDER) {
 		for (const hit of groups[group] ?? []) {
@@ -237,7 +282,23 @@ function pickLightLines(
 			flat.push({ hit, group, body });
 		}
 	}
+	return pickLightLinesFromFlat(flat, query);
+}
 
+/** 外接库的扁平命中（2026-11-23）：组名不固定，直接用 `hit.group` 做行尾标注。 */
+function pickLightLinesFromHits(hits: PersonaHit[], query: string): string[] {
+	const flat: FlatHit[] = [];
+	for (const hit of hits) {
+		const body = (hit.text ?? hit.title ?? "").replace(/\s+/g, " ").trim();
+		if (!body) continue;
+		flat.push({ hit, group: hit.group ?? "", body });
+	}
+	return pickLightLinesFromFlat(flat, query);
+}
+
+function pickLightLinesFromFlat(flat: FlatHit[], query: string): string[] {
+	const q = query.replace(/\s+/g, " ").trim();
+	const qGrams = bigrams(q);
 	const kept: string[] = [];
 	let used = 0;
 	for (const item of flat) {
@@ -262,10 +323,11 @@ function pickLightLines(
 	return kept;
 }
 
-// ── 库目录常驻段（persona_catalog 注入，方案 §2.3）──────────
+// ── 库目录裁剪（persona_catalog 注入，方案 §2.3）──────────
 
-export const PERSONA_CATALOG_TITLE =
-	"以下是主人一生记忆库的边界（可用 persona_recall 工具查询，查不到 ≠ 没有）：";
+/** 外接库槽位的目录标题（2026-11-23；2026-11-24 后是唯一目录来源）：工具名是 `recall`。 */
+export const EXTERNAL_BANK_CATALOG_TITLE =
+	"以下是当前外部记忆库的边界（可用 recall 工具查询，查不到 ≠ 没有）：";
 
 /** 目录段预算：system 段常驻，超长会把固定前缀撑肥；空月行先砍（对模型信息密度最低）。 */
 const PERSONA_CATALOG_MAX_CHARS = 600;
@@ -284,72 +346,4 @@ export function personaCatalogTrim(
 	const text = join(withoutGaps);
 	if (text.length <= maxChars) return text;
 	return `${text.slice(0, maxChars - 1)}…`;
-}
-
-/** 最近一次成功拉取并裁剪好的目录文本（provider 的同步取数口；null = 整段不注，零字节）。 */
-let catalogInjectionCache: string | null = null;
-/** 拉取失败后的冷却：ask.py 的 10 分钟缓存只缓存成功，失败每次 render 都会重 spawn——
- *  60s 内不再试，别让一个坏掉的库把每个模型请求都拖慢 0.8s。 */
-const CATALOG_FAILURE_COOLDOWN_MS = 60_000;
-let catalogFailedAt = 0;
-
-/** 注入 provider 的同步取数口；没成功拉取过 = null。 */
-export function personaCatalogCachedText(): string | null {
-	return catalogInjectionCache;
-}
-
-/**
- * 拉一次目录并落裁剪缓存（persona_catalog section 的 render 调；成功结果 10 分钟内是
- * askPersonaCatalog 内部缓存直读）。总闸关 / 未配置 / 失败：不动缓存、不抛——
- * 失败时保留上一份成功文本（前缀抖动比旧 10 分钟更伤缓存），没有上一份 = 整段不注。
- */
-export async function refreshPersonaCatalogInjection(
-	deps: { env?: NodeJS.ProcessEnv; spawnFn?: typeof spawn } = {},
-): Promise<void> {
-	const env = deps.env ?? process.env;
-	if (personaInjectGatesClosed(env)) return;
-	if (Date.now() - catalogFailedAt < CATALOG_FAILURE_COOLDOWN_MS) return;
-	try {
-		const result = await askPersonaCatalog(deps);
-		if (!result.ok || result.lines.length === 0) {
-			catalogFailedAt = Date.now();
-			return;
-		}
-		catalogInjectionCache = personaCatalogTrim(result.lines);
-		catalogFailedAt = 0;
-	} catch {
-		// 不抛：目录失败不该让 section render 挂掉（askPersonaCatalog 理论上也不抛）
-		catalogFailedAt = Date.now();
-	}
-}
-
-/** 测试用：清目录缓存与失败冷却（单测之间互不串味）。 */
-export function resetPersonaCatalogForTests(): void {
-	catalogInjectionCache = null;
-	catalogFailedAt = 0;
-}
-
-/**
- * 目录定期刷新（2026-11-22 记忆外挂源批）：section 的 render 是同步契约，
- * catalog 又要 spawn python，取数只能异步预取进缓存，render 同步读。
- *
- * 启动先拉一次（harness open 后），此后每 10 分钟一次——与 askPersonaCatalog 的
- * 成功缓存窗口一致，多数 tick 是缓存直读，不会再起 python。定时器 unref：
- * 不挂进程退出；关停时 unref 之外还要 clearInterval（stopPersonaCatalogTimer）。
- */
-const PERSONA_CATALOG_REFRESH_MS = 10 * 60_000;
-let catalogTimer: ReturnType<typeof setInterval> | null = null;
-
-export function startPersonaCatalogRefresh(): void {
-	if (catalogTimer) return;
-	void refreshPersonaCatalogInjection();
-	catalogTimer = setInterval(() => void refreshPersonaCatalogInjection(), PERSONA_CATALOG_REFRESH_MS);
-	catalogTimer.unref?.();
-}
-
-export function stopPersonaCatalogTimer(): void {
-	if (catalogTimer) {
-		clearInterval(catalogTimer);
-		catalogTimer = null;
-	}
 }
