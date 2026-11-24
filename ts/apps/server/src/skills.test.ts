@@ -19,24 +19,31 @@ import {
  * 技能（2026-11-08 扫尾批 9-S；批 10-A 加标准用户目录与两种文件形态）单测。
  *
  * 三段：
- *   1. 目录解析优先级：env 显式 → 用户目录（自动建）→ `~/.agents/skills`（只读）→ 应用目录兜底；
- *   2. 加载器：扁平 `<名>.md` + 目录 `<名>/SKILL.md`，同名先到先得、坏文件占名不顶替；
- *   3. 端点 CRUD 与边界：名字白名单、64KB 上限、两行结构、越界（含符号链接）拒绝、只读来源不可写删。
+ *   1. 目录解析优先级：env 显式 → 用户目录（自动建）→ 自加位置（2026-11-23）→ `~/.agents/skills`（只读）→ 应用目录兜底；
+ *   2. 加载器：扁平 `<名>.md` + 目录 `<名>/SKILL.md`，同名先到先得、坏文件占名不顶替、目录变了就地重扫；
+ *   3. 端点 CRUD 与边界：名字白名单、64KB 上限、两行结构、越界（含符号链接）拒绝、只读来源不可写删、
+ *      自加位置的增删登记与按位置读写（2026-11-23）。
  *
  * 全部落在系统临时目录，跑完即删；不碰真实 `.data` 与用户主目录。
  */
 
 let root = "";
 let previousStatePath: string | undefined;
+let previousDirsPath: string | undefined;
 test.before(() => {
 	root = mkdtempSync(join(tmpdir(), "lifediary-skills-"));
 	// 启停位单例在第一次 mountSkills 时按这个 env 解析；指到临时目录，测试不碰真实 .data。
 	previousStatePath = process.env.AGENT_SKILLS_STATE_PATH;
 	process.env.AGENT_SKILLS_STATE_PATH = join(root, "skills-state.json");
+	// 自加位置登记表同理：绝不让单测读到开发机真实 `.data/skills-dirs.json`
+	previousDirsPath = process.env.AGENT_SKILLS_DIRS_PATH;
+	process.env.AGENT_SKILLS_DIRS_PATH = join(root, "skills-dirs.json");
 });
 test.after(() => {
 	if (previousStatePath === undefined) delete process.env.AGENT_SKILLS_STATE_PATH;
 	else process.env.AGENT_SKILLS_STATE_PATH = previousStatePath;
+	if (previousDirsPath === undefined) delete process.env.AGENT_SKILLS_DIRS_PATH;
+	else process.env.AGENT_SKILLS_DIRS_PATH = previousDirsPath;
 	if (root) rmSync(root, { recursive: true, force: true });
 });
 
@@ -54,6 +61,7 @@ test("resolveSkillsDir：AGENT_SKILLS_DIR 显式最高优先，且不替用户�
 		env: { AGENT_SKILLS_DIR: envDir, USERPROFILE: home },
 		home,
 		appDir,
+		customDirs: [],
 	});
 	assert.equal(result.dir, envDir);
 	assert.equal(result.origin, "env");
@@ -74,7 +82,7 @@ test("resolveSkillsDir：AGENT_SKILLS_DIR 显式最高优先，且不替用户�
 
 test("resolveSkillsDir：无显式配置时落用户目录，并首次访问自动建目录", () => {
 	const home = join(root, "home-user");
-	const result = resolveSkillsDir({ env: {}, home });
+	const result = resolveSkillsDir({ env: {}, home, customDirs: [] });
 	assert.equal(result.origin, "user");
 	assert.equal(result.dir, join(home, ".lifediary", "skills"));
 	assert.equal(existsSync(result.dir), true, "用户目录应被自动创建");
@@ -91,7 +99,7 @@ test("resolveSkillsDir：用户目录建不出来时回落应用目录，且链�
 	const blocker = join(root, "home-blocked");
 	writeFileSync(blocker, "not a directory");
 	const appDir = join(root, "app-skills");
-	const result = resolveSkillsDir({ env: {}, home: blocker, appDir });
+	const result = resolveSkillsDir({ env: {}, home: blocker, appDir, customDirs: [] });
 	assert.equal(result.origin, "app");
 	assert.equal(result.dir, appDir);
 	assert.equal(result.dirs[0]?.dir, appDir, "主目录排第一");
@@ -687,4 +695,308 @@ test("普通助手技能开关（2026-11-21）：只写 partners.worker 覆盖�
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify({ enabled: false }),
 	});
+});
+
+/* ── 多位置（2026-11-23）────────────────────────────────── */
+
+test("resolveSkillsDir：自加位置排主目录之后、.agents 之前；带 label / removable；不存在如实标", () => {
+	const home = join(root, "home-custom-chain");
+	const main = join(root, "custom-chain-main");
+	const first = freshDir("custom-chain-a");
+	const second = freshDir("custom-chain-b");
+	const missing = join(root, "custom-chain-missing");
+	const appDir = join(root, "custom-chain-app");
+	const result = resolveSkillsDir({
+		env: { AGENT_SKILLS_DIR: main, USERPROFILE: home },
+		home,
+		appDir,
+		// 末尾重复一个：同一路径只留一次；顺序 = 登记顺序
+		customDirs: [
+			{ path: first, label: "团队手册" },
+			{ path: missing },
+			{ path: second },
+			{ path: first },
+		],
+	});
+	assert.deepEqual(
+		result.dirs.map((source) => [source.origin, source.writable]),
+		[
+			["env", true],
+			["custom", true],
+			["custom", true],
+			["custom", true],
+			["agents", false],
+			["app", false],
+		],
+		"链 = 主目录 → 自加（登记顺序）→ .agents → 应用目录",
+	);
+	const custom = result.dirs.filter((source) => source.origin === "custom");
+	assert.equal(custom[0]?.label, "团队手册");
+	assert.equal(custom[0]?.removable, true, "自加位置可移除登记");
+	assert.equal(custom[1]?.exists, false, "目录不存在时保留在链里并如实标 exists=false");
+	assert.equal(custom[2]?.dir, second);
+	assert.equal(result.dir, main, "主目录仍是默认写目标");
+});
+
+test("createSkillStore.reload：新位置就地重扫；已冻结的会话索引不改写", () => {
+	const dirA = freshDir("reload-a");
+	const dirB = freshDir("reload-b");
+	writeFileSync(join(dirA, "alpha.md"), "A 摘要\nA 正文");
+	const store = createSkillStore(dirA);
+	assert.ok(store);
+	const frozen = store.indexFor(1) ?? "";
+	assert.match(frozen, /alpha：A 摘要/);
+
+	// 新加一个位置：模拟管理端点写完后 refreshSkillStore 的就地重扫
+	writeFileSync(join(dirB, "beta.md"), "B 摘要\nB 正文");
+	store.reload?.([dirA, dirB]);
+	assert.ok(store.names().includes("beta"), "新位置里的技能立即能被 skill 工具取到");
+	assert.equal(store.indexFor(1), frozen, "已开会话保持冻结，不中途追加 system");
+	assert.match(store.indexFor(2) ?? "", /beta：B 摘要/, "新会话按新链渲染");
+
+	// 先到先得：同名时前一个位置赢
+	writeFileSync(join(dirA, "beta.md"), "A 同名摘要\nA 同名正文");
+	store.reload?.([dirA, dirB]);
+	assert.equal(store.manual("beta"), "A 同名正文");
+});
+
+/** 真读登记表（env 指临时目录）的 app：位置端点需要 resolve 反映刚写进去的 dirs。 */
+function liveApp(main: string, onChange?: () => void, appDir = join(root, "live-app-empty")) {
+	const env = {
+		...process.env,
+		AGENT_SKILLS_DIR: main,
+		USERPROFILE: root,
+		AGENT_SKILLS_DIRS_PATH: process.env.AGENT_SKILLS_DIRS_PATH,
+	};
+	const app = new Hono();
+	mountSkills(app, {
+		enabled: true,
+		onChange,
+		resolve: () => resolveSkillsDir({ env, home: root, appDir }),
+	});
+	return app;
+}
+
+const postDir = (app: Hono, body: Record<string, unknown>) =>
+	app.request("/api/v1/agent/skill-dirs", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify(body),
+	});
+
+test("技能位置端点：登记 → 按位置写入 / 读取 → 移除登记（磁盘文件不动）", async () => {
+	const main = freshDir("dirs-main");
+	const custom = freshDir("dirs-custom");
+	let changes = 0;
+	const app = liveApp(main, () => {
+		changes += 1;
+	});
+
+	// 校验：相对路径 / 不存在 / 盘符根（不合法的一律 400，不落登记表）
+	assert.equal((await postDir(app, { path: "skills" })).status, 400, "必须绝对路径");
+	assert.equal((await postDir(app, { path: join(root, "no-such-dir") })).status, 400, "目录必须已存在");
+	// 存在的普通目录可以登记；用完即移除，别让这条留在登记表里影响后面的用例
+	const throwaway = freshDir("dirs-throwaway");
+	assert.equal((await postDir(app, { path: throwaway })).status, 200);
+	await app.request(`/api/v1/agent/skill-dirs?path=${encodeURIComponent(throwaway)}`, { method: "DELETE" });
+
+	const added = await postDir(app, { path: custom, label: "团队手册" });
+	assert.equal(added.status, 200);
+	const addedBody = await json(added);
+	assert.equal(addedBody.path, custom);
+	assert.equal(addedBody.label, "团队手册");
+
+	// 重复登记 → 400
+	assert.equal((await postDir(app, { path: custom })).status, 400, "同一目录不能登记两次");
+	// 主目录也不能再登记一次
+	assert.equal((await postDir(app, { path: main })).status, 400);
+
+	const list = await json(await app.request("/api/v1/agent/skills"));
+	assert.equal(list.extraDirs, true);
+	const dirs = list.dirs as { dir: string; origin: string; label?: string; removable: boolean }[];
+	const customRow = dirs.find((row) => row.dir === custom)!;
+	assert.equal(customRow.origin, "custom");
+	assert.equal(customRow.label, "团队手册");
+	assert.equal(customRow.removable, true);
+
+	// 写到自加位置（带 dir）：文件落在那，不是主目录
+	const written = await app.request("/api/v1/agent/skills/team-note", {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ content: "团队摘要\n团队正文", dir: custom }),
+	});
+	assert.equal(written.status, 200);
+	assert.equal((await json(written)).dir, custom);
+	assert.equal(readFileSync(join(custom, "team-note.md"), "utf8"), "团队摘要\n团队正文");
+	assert.equal(existsSync(join(main, "team-note.md")), false, "不该同时落主目录");
+
+	// 列表 item 带回实际来源目录；按位置读取能读到那一份
+	const after = await json(await app.request("/api/v1/agent/skills"));
+	const item = (after.items as { name: string; dir: string }[]).find((row) => row.name === "team-note")!;
+	assert.equal(item.dir, custom);
+	const one = await json(
+		await app.request(`/api/v1/agent/skills/team-note?dir=${encodeURIComponent(custom)}`),
+	);
+	assert.equal(one.content, "团队摘要\n团队正文");
+	assert.equal(one.dir, custom);
+
+	// 只读来源不能写（应用目录即使存在也 writable=false）
+	const appDir = join(root, "live-app-empty");
+	assert.equal(
+		(await app.request("/api/v1/agent/skills/team-note", {
+			method: "PUT",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ content: "改\n正文", dir: appDir }),
+		})).status,
+		400,
+	);
+	// 不在链里的目录同样拒
+	assert.equal(
+		(await app.request("/api/v1/agent/skills/team-note", {
+			method: "PUT",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ content: "改\n正文", dir: join(root, "not-in-chain") }),
+		})).status,
+		400,
+	);
+
+	// 移除登记：只删一行，磁盘上的技能文件还在
+	const removed = await app.request(
+		`/api/v1/agent/skill-dirs?path=${encodeURIComponent(custom)}`,
+		{ method: "DELETE" },
+	);
+	assert.equal(removed.status, 200);
+	assert.equal(existsSync(join(custom, "team-note.md")), true, "移除位置不删磁盘文件");
+	assert.ok(changes >= 4, "登记 / 写 / 移除位置都会触发技能库重扫");
+	const noCustom = await json(await app.request("/api/v1/agent/skills"));
+	assert.equal((noCustom.dirs as { dir: string }[]).some((row) => row.dir === custom), false);
+	// 再移除一次 → 404（只读来源 / 不在登记表一律不认）
+	assert.equal(
+		(await app.request(`/api/v1/agent/skill-dirs?path=${encodeURIComponent(custom)}`, { method: "DELETE" })).status,
+		404,
+	);
+});
+
+test("技能位置端点：SKILLS_EXTRA_DIRS=false 时端点 404、读取链忽略自加位置", async () => {
+	const main = freshDir("dirs-off-main");
+	const custom = freshDir("dirs-off-custom");
+	const previous = process.env.SKILLS_EXTRA_DIRS;
+	process.env.SKILLS_EXTRA_DIRS = "false";
+	try {
+		const app = liveApp(main);
+		assert.equal((await postDir(app, { path: custom })).status, 404);
+		const list = await json(await app.request("/api/v1/agent/skills"));
+		assert.equal(list.extraDirs, false);
+		assert.equal((list.dirs as { origin: string }[]).some((row) => row.origin === "custom"), false);
+	} finally {
+		if (previous === undefined) delete process.env.SKILLS_EXTRA_DIRS;
+		else process.env.SKILLS_EXTRA_DIRS = previous;
+	}
+});
+
+test("技能位置：只读来源（.agents / 内置）带 dir 写删一律 400，文件不动", async () => {
+	const main = freshDir("dirs-ro-main");
+	const agents = freshDir("dirs-ro-agents");
+	const appDir = freshDir("dirs-ro-app");
+	mkdirSync(join(agents, "agent-skill"));
+	writeFileSync(join(agents, "agent-skill", "SKILL.md"), "---\ndescription: 只读\n---\n正文");
+	const app = apiApp(
+		resolved(main, [
+			{ dir: agents, origin: "agents", writable: false },
+			{ dir: appDir, origin: "app", writable: false },
+		]),
+	);
+	const writeAgents = await app.request("/api/v1/agent/skills/agent-skill", {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ content: "改\n正文", dir: agents }),
+	});
+	assert.equal(writeAgents.status, 400);
+	const delAgents = await app.request(
+		`/api/v1/agent/skills/agent-skill?dir=${encodeURIComponent(agents)}`,
+		{ method: "DELETE" },
+	);
+	assert.equal(delAgents.status, 400);
+	assert.ok(existsSync(join(agents, "agent-skill", "SKILL.md")), "只读来源的文件一个不动");
+	const readAgents = await json(
+		await app.request(`/api/v1/agent/skills/agent-skill?dir=${encodeURIComponent(agents)}`),
+	);
+	assert.equal(readAgents.origin, "agents");
+});
+
+test("resolveSkillsDir：排除名单跳过自加位置 / .agents / 内置目录；主目录不受影响", () => {
+	const home = join(root, "home-excluded");
+	const main = join(root, "excluded-main");
+	const appDir = join(root, "excluded-app");
+	const custom = freshDir("excluded-custom");
+	const result = resolveSkillsDir({
+		env: { AGENT_SKILLS_DIR: main, USERPROFILE: home },
+		home,
+		appDir,
+		customDirs: [{ path: custom }],
+		// 主目录虽然写进了名单（正常接口不会这么做），也必须留在链里
+		excludedDirs: [custom, join(home, ".agents", "skills"), appDir, main],
+	});
+	assert.deepEqual(result.dirs.map((source) => source.origin), ["env"], "排除后只剩主目录");
+	assert.equal(result.dir, main, "主目录仍是默认写目标");
+});
+
+test("技能位置端点：内置来源可移除（不再读取），主目录 400；重新添加同路径即恢复", async () => {
+	const main = freshDir("rm-main");
+	const appDir = freshDir("rm-app");
+	writeFileSync(join(appDir, "builtin-note.md"), "内置摘要\n内置正文");
+	const agents = join(root, ".agents", "skills");
+	mkdirSync(agents, { recursive: true });
+	writeFileSync(join(agents, "agents-note.md"), "agents 摘要\nagents 正文");
+	const app = liveApp(main, undefined, appDir);
+
+	const list = await json(await app.request("/api/v1/agent/skills"));
+	const rows = list.dirs as { dir: string; origin: string; removable: boolean }[];
+	const rowOf = (origin: string) => rows.find((entry) => entry.origin === origin);
+	assert.equal(rowOf("env")?.removable, false, "主目录不提供移除");
+	assert.equal(rowOf("agents")?.removable, true, ".agents 可移除");
+	assert.equal(rowOf("app")?.removable, true, "内置目录可移除");
+
+	// 主目录即使请求也不让移除（新建技能的落点）
+	assert.equal(
+		(await app.request(`/api/v1/agent/skill-dirs?path=${encodeURIComponent(main)}`, { method: "DELETE" })).status,
+		400,
+	);
+
+	// 移除 .agents：记排除名单，文件不动，位置行与技能同时消失
+	const delAgents = await app.request(
+		`/api/v1/agent/skill-dirs?path=${encodeURIComponent(agents)}`,
+		{ method: "DELETE" },
+	);
+	assert.equal(delAgents.status, 200);
+	assert.equal((await json(delAgents)).removed, "excluded");
+	assert.ok(existsSync(join(agents, "agents-note.md")), "移除来源不删磁盘文件");
+	const afterAgents = await json(await app.request("/api/v1/agent/skills"));
+	assert.equal((afterAgents.dirs as { origin: string }[]).some((entry) => entry.origin === "agents"), false);
+	assert.equal((afterAgents.items as { name: string }[]).some((item) => item.name === "agents-note"), false);
+
+	// 再移除一次 → 404（已经不在读取链里）
+	assert.equal(
+		(await app.request(`/api/v1/agent/skill-dirs?path=${encodeURIComponent(agents)}`, { method: "DELETE" })).status,
+		404,
+	);
+
+	// 内置目录同样能移除
+	assert.equal(
+		(await app.request(`/api/v1/agent/skill-dirs?path=${encodeURIComponent(appDir)}`, { method: "DELETE" })).status,
+		200,
+	);
+	const afterApp = await json(await app.request("/api/v1/agent/skills"));
+	assert.equal((afterApp.dirs as { origin: string }[]).some((entry) => entry.origin === "app"), false);
+	assert.equal((afterApp.items as { name: string }[]).some((item) => item.name === "builtin-note"), false);
+
+	// 重新添加同一路径即恢复：解排除，以自加位置身份回到链里（可写）
+	assert.equal((await postDir(app, { path: agents })).status, 200);
+	const restored = await json(await app.request("/api/v1/agent/skills"));
+	const back = (restored.dirs as { dir: string; origin: string }[]).find((entry) => entry.dir === agents);
+	assert.equal(back?.origin, "custom");
+	assert.equal((restored.items as { name: string }[]).some((item) => item.name === "agents-note"), true);
+
+	// 收尾：清掉本用例写的登记 / 排除名单，别影响后续用例
+	rmSync(String(process.env.AGENT_SKILLS_DIRS_PATH), { force: true });
 });

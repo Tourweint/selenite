@@ -86,6 +86,8 @@ function baseEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
 		AUTONOMY_ENABLED: "false",
 		AGENT_TOOL_POLICY: "full",
 		AGENT_SKILLS_DIR: "",
+		// 自加位置登记表（2026-11-23）：指到临时目录，探针不会读 / 写开发机真实的 .data
+		AGENT_SKILLS_DIRS_PATH: join(ROOT, "skills-dirs.json"),
 		SKILLS_ADMIN: "",
 		NODE_OPTIONS: "",
 		...extra,
@@ -415,6 +417,138 @@ try {
 	});
 	check((await apiJson("/api/v1/agent/skills/advice")).status === 404, "SKILL_ADVICE=false → advice 404");
 	check((await apiJson("/api/v1/agent/skills")).status === 200, "技能列表不受影响");
+	await stopServer();
+
+	// ── G. 多位置（2026-11-23）──────────────────────────────────
+	console.log("\nG. 技能库多位置（自加目录 + 按位置读写）");
+	const extraDir = join(ROOT, "extra-skills");
+	mkdirSync(extraDir, { recursive: true });
+	// .agents 来源也备一份：G 段验证「移除内置来源」
+	const homeAgents = join(HOME, ".agents", "skills");
+	mkdirSync(homeAgents, { recursive: true });
+	writeFileSync(join(homeAgents, "probe-agents.md"), "探针 agents 摘要\n探针 agents 正文");
+	await startServer({ USERPROFILE: HOME, HOME });
+
+	const addBad = await apiJson("/api/v1/agent/skill-dirs", {
+		method: "POST",
+		body: JSON.stringify({ path: "relative-skills" }),
+	});
+	check(addBad.status === 400, "相对路径 → 400", `HTTP ${addBad.status}`);
+	const addMissing = await apiJson("/api/v1/agent/skill-dirs", {
+		method: "POST",
+		body: JSON.stringify({ path: join(ROOT, "no-such-skills") }),
+	});
+	check(addMissing.status === 400, "目录不存在 → 400", `HTTP ${addMissing.status}`);
+
+	const addOk = await apiJson("/api/v1/agent/skill-dirs", {
+		method: "POST",
+		body: JSON.stringify({ path: extraDir, label: "探针自加" }),
+	});
+	check(addOk.status === 200 && addOk.body.label === "探针自加", "登记自加位置 200", JSON.stringify(addOk.body));
+
+	const dirsList = await apiJson("/api/v1/agent/skills");
+	const dirRows = (dirsList.body.dirs ?? []) as { dir: string; origin: string; label?: string; removable: boolean }[];
+	const customRow = dirRows.find((row) => row.dir === extraDir);
+	check(dirsList.body.extraDirs === true, "extraDirs=true");
+	check(
+		customRow?.origin === "custom" && customRow?.label === "探针自加" && customRow?.removable === true,
+		"列表带出 origin=custom / label / removable",
+		JSON.stringify(customRow),
+	);
+	check(
+		dirRows.map((row) => row.origin).join(",") === "user,custom,agents,app",
+		"读取链 = user → custom → agents → app",
+		dirRows.map((row) => row.origin).join(","),
+	);
+
+	const extraContent = "自加位置的技能\n正文也在这里。";
+	const extraPut = await apiJson("/api/v1/agent/skills/extra-note", {
+		method: "PUT",
+		body: JSON.stringify({ content: extraContent, dir: extraDir }),
+	});
+	check(extraPut.status === 200 && extraPut.body.dir === extraDir, "PUT 带 dir → 落在自加位置", JSON.stringify(extraPut.body));
+	check(readFileSync(join(extraDir, "extra-note.md"), "utf8") === extraContent, "自加位置文件已落盘");
+	check(!existsSync(join(HOME, ".lifediary", "skills", "extra-note.md")), "没有同时落主目录");
+
+	const extraRead = await apiJson(`/api/v1/agent/skills/extra-note?dir=${encodeURIComponent(extraDir)}`);
+	check(extraRead.status === 200 && extraRead.body.content === extraContent, "GET 带 dir 读到那一份");
+
+	const roPut = await apiJson("/api/v1/agent/skills/extra-note", {
+		method: "PUT",
+		body: JSON.stringify({ content: "改\n正文", dir: join(ROOT, "not-in-chain") }),
+	});
+	check(roPut.status === 400, "不在链里的目录当写目标 → 400", `HTTP ${roPut.status}`);
+
+	const drop = await apiJson(`/api/v1/agent/skill-dirs?path=${encodeURIComponent(extraDir)}`, {
+		method: "DELETE",
+	});
+	check(drop.status === 200, "移除位置 200", `HTTP ${drop.status}`);
+	check(existsSync(join(extraDir, "extra-note.md")), "移除位置不删磁盘文件");
+	const afterDrop = await apiJson("/api/v1/agent/skills");
+	check(
+		((afterDrop.body.dirs ?? []) as { origin: string }[]).every((row) => row.origin !== "custom"),
+		"移除后读取链回到 user → agents → app",
+	);
+	// G2. 内置来源可移除：.agents 记排除名单；主目录不可移除；重新添加同路径即恢复
+	const chainRows = (afterDrop.body.dirs ?? []) as { dir: string; origin: string; removable: boolean }[];
+	check(
+		chainRows.find((row) => row.origin === "agents")?.removable === true,
+		".agents 行可移除",
+		JSON.stringify(chainRows.find((row) => row.origin === "agents")),
+	);
+	check(
+		chainRows.find((row) => row.origin === "user")?.removable === false,
+		"主目录行不提供移除",
+	);
+	const dropMain = await apiJson(
+		`/api/v1/agent/skill-dirs?path=${encodeURIComponent(join(HOME, ".lifediary", "skills"))}`,
+		{ method: "DELETE" },
+	);
+	check(dropMain.status === 400, "移除主目录 → 400", `HTTP ${dropMain.status}`);
+	const dropAgents = await apiJson(`/api/v1/agent/skill-dirs?path=${encodeURIComponent(homeAgents)}`, {
+		method: "DELETE",
+	});
+	check(
+		dropAgents.status === 200 && dropAgents.body.removed === "excluded",
+		".agents 移除 → 记排除名单",
+		JSON.stringify(dropAgents.body),
+	);
+	check(existsSync(join(homeAgents, "probe-agents.md")), "移除来源不删磁盘文件");
+	const afterAgents = await apiJson("/api/v1/agent/skills");
+	check(
+		((afterAgents.body.dirs ?? []) as { origin: string }[]).every((row) => row.origin !== "agents"),
+		"移除后 .agents 不再在链里",
+	);
+	check(
+		!((afterAgents.body.items ?? []) as { name: string }[]).some((item) => item.name === "probe-agents"),
+		"移除后 .agents 的技能不再出现",
+	);
+	const restore = await apiJson("/api/v1/agent/skill-dirs", {
+		method: "POST",
+		body: JSON.stringify({ path: homeAgents }),
+	});
+	check(restore.status === 200, "重新添加同一路径 → 200", `HTTP ${restore.status}`);
+	const restoredList = await apiJson("/api/v1/agent/skills");
+	const restoredRow = ((restoredList.body.dirs ?? []) as { dir: string; origin: string }[]).find(
+		(row) => row.dir === homeAgents,
+	);
+	check(restoredRow?.origin === "custom", "恢复后以自加位置身份回到链里", JSON.stringify(restoredRow));
+	check(
+		((restoredList.body.items ?? []) as { name: string }[]).some((item) => item.name === "probe-agents"),
+		"恢复后技能重新可见",
+	);
+	await apiJson(`/api/v1/agent/skill-dirs?path=${encodeURIComponent(homeAgents)}`, { method: "DELETE" });
+	await stopServer();
+
+	await startServer({ USERPROFILE: HOME, HOME, SKILLS_EXTRA_DIRS: "false" });
+	check(
+		(await apiJson("/api/v1/agent/skill-dirs", {
+			method: "POST",
+			body: JSON.stringify({ path: extraDir }),
+		})).status === 404,
+		"SKILLS_EXTRA_DIRS=false → 登记端点 404",
+	);
+	check((await apiJson("/api/v1/agent/skills")).body.extraDirs === false, "extraDirs=false");
 	await stopServer();
 } finally {
 	server?.kill();

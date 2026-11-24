@@ -9,7 +9,7 @@ import {
 	statSync,
 	writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, parse, resolve as resolvePath } from "node:path";
 import { insideOrEqual, realTargetOf } from "./path-guard.ts";
 import { flagEnabled } from "./flags.ts";
 import {
@@ -19,6 +19,15 @@ import {
 	type ResolvedSkillsDir,
 	type SkillSource,
 } from "./skills.ts";
+import {
+	addCustomSkillDir,
+	excludeSkillDir,
+	extraSkillDirsEnabled,
+	readCustomSkillDirs,
+	removeCustomSkillDir,
+	skillDirKey,
+	SKILL_DIRS_MAX,
+} from "./skills-dirs.ts";
 import {
 	getSkillState,
 	skillStateEnabled,
@@ -41,24 +50,29 @@ import {
 } from "./skill-advice.ts";
 
 /**
- * 技能管理端点（2026-11-08 扫尾批 9-S；2026-11-08 批 10-A 改多来源只读展示）。
+ * 技能管理端点（2026-11-08 扫尾批 9-S；2026-11-08 批 10-A 改多来源只读展示；
+ * 2026-11-23 多位置：自加目录 + 可选写入目标）。
  *
  * 动作都是"人对自己的技能库"的操作：
- *   GET    /api/v1/agent/skills        列表（全部来源；名字 + 摘要 + 大小 + 更新时间 + 来源）
- *   GET    /api/v1/agent/skills/:name  读一条（.md / SKILL.md 全文；任意来源都可读）
- *   PUT    /api/v1/agent/skills/:name  写一条（只在**主目录**；不存在即新建）
- *   DELETE /api/v1/agent/skills/:name  删一条（**只删主目录**；删除即停用，没有启停位）
+ *   GET    /api/v1/agent/skills        列表（全部来源；名字 + 摘要 + 大小 + 更新时间 + 来源 + 所在目录）
+ *   GET    /api/v1/agent/skills/:name  读一条（.md / SKILL.md 全文；任意来源都可读，可带 ?dir=）
+ *   PUT    /api/v1/agent/skills/:name  写一条（默认主目录；带 dir 时写该可写来源，不存在即新建）
+ *   DELETE /api/v1/agent/skills/:name  删一条（默认主目录；带 dir 时删该可写来源；删除即停用）
+ *   POST   /api/v1/agent/skill-dirs    登记一个自加位置（{path,label?}；不碰磁盘文件）
+ *   DELETE /api/v1/agent/skill-dirs    移除一个位置（?path=）：自加位置删登记，
+ *                                      `.agents` / 内置目录记进排除名单；磁盘文件都不动
  *
  * 口径照本项目其它管理端点：
  *   - 鉴权失败 403 空体（auth 中间件统一处理，这里不碰）；
  *   - 技能名不合法 / 正文超限 / 路径越界 / 只读来源 → 400 带说明；
  *   - 找不到 → 404 `not_found`；
- *   - `SKILLS_ADMIN=false` → 整组路由不挂（404 = 未启用）。
+ *   - `SKILLS_ADMIN=false` → 整组路由不挂（404 = 未启用）；
+ *   - `SKILLS_EXTRA_DIRS=false` → 只关自加位置这一层（读取链忽略 + `/skill-dirs` 404）。
  *
- * **写操作锁死在 `resolveSkillsDir()` 的主目录内**：名字白名单挡穿越，realpath 复核
- * （复用 path-guard 的 `realTargetOf` / `insideOrEqual`）挡"目录内符号链接指向外面"。
+ * **写操作锁死在可写来源内**（默认主目录，或显式选中的自加位置）：名字白名单挡穿越，
+ * realpath 复核（复用 path-guard 的 `realTargetOf` / `insideOrEqual`）挡"目录内符号链接指向外面"。
  * `~/.agents/skills` 是别的工具的家：**可读、不可写/删**（连影子副本都不落主目录——
- * 那样用户会以为自己改的是那一份）。应用目录的内置手册仍允许在用户目录写同名技能覆盖，
+ * 那样用户会以为自己改的是那一份）。应用目录的内置手册仍允许在主目录写同名技能覆盖，
  * 这是 9-S 就有的合并语义（先到先得）。
  *
  * 为什么不做启停位：技能是目录里的文件，删除即停；多一个"禁用"状态就多一份与磁盘不一致的状态。
@@ -78,6 +92,15 @@ export const SKILL_SLOT_LIMIT = 64 * 1024;
  */
 const SKILL_NAME = /^[a-z0-9][a-z0-9-_]{0,63}$/;
 
+/** 位置来源的中文说明（错误提示与界面共用一份口径） */
+const SKILL_ORIGIN_TEXT: Record<string, string> = {
+	env: "AGENT_SKILLS_DIR",
+	user: "主目录",
+	custom: "自加位置",
+	agents: ".agents/skills",
+	app: "内置目录",
+};
+
 /** 回滚开关：false/0/off = 端点不挂（设置页显示未启用），一行退回"只能手工放文件" */
 export function skillsAdminEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
 	return flagEnabled("SKILLS_ADMIN", env);
@@ -88,6 +111,47 @@ export interface SkillsApiDeps {
 	resolve?: () => ResolvedSkillsDir;
 	/** 覆盖回滚开关（单测）；不传 = skillsAdminEnabled() */
 	enabled?: boolean;
+	/**
+	 * 技能文件 / 位置变动后的回调（2026-11-23）：装配层传 `refreshSkillStore`，
+	 * 让运行中的技能库就地重扫。不传 = 老行为（下一个会话仍会重新解析链，但旧 store 不动）。
+	 */
+	onChange?: () => void;
+}
+
+/** 同一个目录（Windows 大小写不敏感） */
+function sameDir(a: string, b: string): boolean {
+	return skillDirKey(a) === skillDirKey(b);
+}
+
+/** 按路径找读取链里的来源；`writableOnly` 时只认可写来源（主目录 / 自加位置）。 */
+function sourceForDir(
+	resolved: ResolvedSkillsDir,
+	dir: string,
+	writableOnly: boolean,
+): SkillSource | null {
+	for (const source of resolved.dirs) {
+		if (!sameDir(source.dir, dir)) continue;
+		if (writableOnly && !source.writable) return null;
+		return source;
+	}
+	return null;
+}
+
+/** 写 / 删的目标目录：不带 dir = 主目录（旧行为）；带 dir = 必须是可写来源。 */
+function targetDirOf(
+	resolved: ResolvedSkillsDir,
+	requested: string,
+): { ok: true; dir: string } | { ok: false; message: string } {
+	const dir = requested.trim();
+	if (!dir) return { ok: true, dir: resolved.dir };
+	const source = sourceForDir(resolved, dir, true);
+	if (!source) {
+		return {
+			ok: false,
+			message: "这个位置不能写：只有主目录和自加位置能新建 / 改 / 删技能",
+		};
+	}
+	return { ok: true, dir: source.dir };
 }
 
 type SkillPath =
@@ -169,6 +233,7 @@ export function mountSkills(app: Hono, deps: SkillsApiDeps = {}): void {
 	const skillState = getSkillState();
 	const adviceOn = skillAdviceEnabled();
 	const advicePath = () => skillAdvicePath();
+	const notifyChange = () => deps.onChange?.();
 
 	/** 管理面口径的技能名清单（先到先得 + 白名单 + 越界复核；与列表端点同一条规则） */
 	const adminSkillNames = (): string[] => {
@@ -233,6 +298,8 @@ export function mountSkills(app: Hono, deps: SkillsApiDeps = {}): void {
 			size: number;
 			updatedAt: string;
 			origin: string;
+			/** 2026-11-23 多位置：这条技能实际来自哪个目录（前端按它分位置 / 带回写目标） */
+			dir: string;
 			writable: boolean;
 			form: "flat" | "dir";
 			/** 2026-11-16 工具裁剪 A：代码内置技能，始终可用、没有启停位。 */
@@ -274,6 +341,7 @@ export function mountSkills(app: Hono, deps: SkillsApiDeps = {}): void {
 						writable: source.writable,
 						form: entry.form,
 						core,
+						dir: source.dir,
 						// 启停位（2026-11-09）：默认全关，界面上逐条/批量开。
 						// core 没有启停位，一律给 true（即使启停位里没有 / 全关）。
 						enabled: core || (stateOn ? skillState.isEnabled(entry.name) : true),
@@ -308,13 +376,128 @@ export function mountSkills(app: Hono, deps: SkillsApiDeps = {}): void {
 			ok: true,
 			dir: resolved.dir,
 			origin: resolved.origin,
+			// 多位置能力是否开着（2026-11-23）：关着时界面不画「添加位置」入口
+			extraDirs: extraSkillDirsEnabled(),
 			dirs: resolved.dirs.map((source) => ({
 				dir: source.dir,
 				origin: source.origin,
 				writable: source.writable,
 				exists: source.exists,
+				removable: source.removable === true,
+				...(source.label ? { label: source.label } : {}),
 			})),
 			items,
+		});
+	});
+
+	/* ── 自加技能库位置（2026-11-23；2026-11-24 扩到内置来源）────────
+	 * 只登记目录：绝对路径、必须已存在且是目录、不与现有来源重复、最多 SKILL_DIRS_MAX 个。
+	 * 不替用户建目录（打错一个字母不该在磁盘上生成空目录）；不删磁盘文件。
+	 * DELETE 的范围：自加位置 = 删登记；`.agents` / 内置目录 = 记进排除名单（读取链跳过）；
+	 * 主目录（新建技能的落点）不可移除。重新添加同一路径即恢复。
+	 * `SKILLS_EXTRA_DIRS=false/0/off` → 这两个端点 404（读取链也忽略自加位置与排除名单）。 */
+	app.post("/api/v1/agent/skill-dirs", async (c) => {
+		if (!extraSkillDirsEnabled()) {
+			return c.json({ error: "not_found", message: "多位置未启用（SKILLS_EXTRA_DIRS=false）" }, 404);
+		}
+		const body = (await c.req.json().catch(() => null)) as { path?: unknown; label?: unknown } | null;
+		const raw = typeof body?.path === "string" ? body.path.trim() : "";
+		if (!raw) return c.json({ error: "bad_request", message: "需要 path（目录绝对路径）" }, 400);
+		if (!isAbsolute(raw)) {
+			return c.json({ error: "bad_request", message: "填绝对路径（例如 D:\\skills）" }, 400);
+		}
+		const absolute = resolvePath(raw);
+		if (absolute === parse(absolute).root) {
+			return c.json({ error: "bad_request", message: "不能把盘符根目录加成技能库位置" }, 400);
+		}
+		let isDir = false;
+		try {
+			isDir = statSync(absolute).isDirectory();
+		} catch {
+			/* 不存在 */
+		}
+		if (!isDir) {
+			return c.json(
+				{ error: "bad_request", message: `这个目录不存在（先在资源管理器里建好）：${absolute}` },
+				400,
+			);
+		}
+		if (body?.label !== undefined && typeof body.label !== "string") {
+			return c.json({ error: "bad_request", message: "label 必须是字符串" }, 400);
+		}
+		const label = typeof body?.label === "string" ? body.label.trim().slice(0, 40) : "";
+		const resolved = resolve();
+		const dup = resolved.dirs.find((source) => sameDir(source.dir, absolute));
+		if (dup) {
+			return c.json(
+				{ error: "bad_request", message: `这个目录已经在技能库里了（${SKILL_ORIGIN_TEXT[dup.origin] ?? dup.origin}）` },
+				400,
+			);
+		}
+		const current = readCustomSkillDirs();
+		if (current.length >= SKILL_DIRS_MAX) {
+			return c.json(
+				{ error: "bad_request", message: `最多加 ${SKILL_DIRS_MAX} 个位置，先移除不用的` },
+				400,
+			);
+		}
+		try {
+			addCustomSkillDir(absolute, label);
+		} catch (error) {
+			const detail = error instanceof Error ? error.message : String(error);
+			console.error(`[skills] 登记位置失败: ${detail}`);
+			return c.json({ error: "internal_error", message: "写入失败，详见服务端日志" }, 500);
+		}
+		notifyChange();
+		console.log(`[skills] 新增位置 ${absolute}`);
+		return c.json({ ok: true, path: absolute, ...(label ? { label } : {}) });
+	});
+
+	app.delete("/api/v1/agent/skill-dirs", (c) => {
+		if (!extraSkillDirsEnabled()) {
+			return c.json({ error: "not_found", message: "多位置未启用（SKILLS_EXTRA_DIRS=false）" }, 404);
+		}
+		const raw = c.req.query("path")?.trim() ?? "";
+		if (!raw) return c.json({ error: "bad_request", message: "需要 ?path=目录路径" }, 400);
+		if (!isAbsolute(raw)) {
+			return c.json({ error: "bad_request", message: "只能移除登记表里的绝对路径" }, 400);
+		}
+		const absolute = resolvePath(raw);
+		const resolved = resolve();
+		const source = resolved.dirs.find((entry) => sameDir(entry.dir, absolute));
+		if (!source) {
+			return c.json(
+				{ error: "not_found", message: "这个位置不在技能库里（已经移除，或不属于当前读取链）" },
+				404,
+			);
+		}
+		// 主目录 = 新建技能的落点：不在这一页提供移除（2026-11-24 用户拍板）
+		if (sameDir(source.dir, resolved.dir)) {
+			return c.json({ error: "bad_request", message: "主目录不能移除：新建技能默认写在这里" }, 400);
+		}
+		const kind = source.origin;
+		let removed = false;
+		try {
+			// 自加位置删登记；`.agents` / 内置目录记排除名单
+			removed = kind === "custom" ? removeCustomSkillDir(absolute) : excludeSkillDir(absolute);
+		} catch (error) {
+			const detail = error instanceof Error ? error.message : String(error);
+			console.error(`[skills] 移除位置失败: ${detail}`);
+			return c.json({ error: "internal_error", message: "写入失败，详见服务端日志" }, 500);
+		}
+		if (!removed) {
+			return c.json({ error: "not_found", message: "这个位置不在技能库里（已经移除过了）" }, 404);
+		}
+		notifyChange();
+		console.log(`[skills] 移除位置 ${absolute}（${kind === "custom" ? "删登记" : "不再读取"}）`);
+		return c.json({
+			ok: true,
+			path: absolute,
+			removed: kind === "custom" ? "unregistered" : "excluded",
+			note:
+				kind === "custom"
+					? "只删了登记，磁盘上的目录和文件没动"
+					: "以后不再从这个目录读取技能；磁盘上的目录和文件没动",
 		});
 	});
 
@@ -534,8 +717,18 @@ export function mountSkills(app: Hono, deps: SkillsApiDeps = {}): void {
 			);
 		}
 		const resolved = resolve();
-		// 读取链先到先得：第一个"占了这个名字"的来源就是它，格式不对也一样（与加载器一致）
-		for (const source of resolved.dirs) {
+		// 指定位置（2026-11-23）：只在这个来源里找，找不到就 404（不回落别的来源，
+		// 否则「改的是哪个文件」又变成猜的）。不带 = 读取链先到先得。
+		const requested = c.req.query("dir")?.trim() ?? "";
+		let sources = resolved.dirs;
+		if (requested) {
+			const source = sourceForDir(resolved, requested, false);
+			if (!source) {
+				return c.json({ error: "bad_request", message: "这个目录不在技能库里" }, 400);
+			}
+			sources = [source];
+		}
+		for (const source of sources) {
 			const found = findSkillInDir(source.dir, name);
 			if (!found) continue;
 			// 符号链接指向目录外：与写侧同一口径，一律 400，不读、不端出去
@@ -551,6 +744,7 @@ export function mountSkills(app: Hono, deps: SkillsApiDeps = {}): void {
 					name,
 					content: readFileSync(found.path, "utf8"),
 					origin: source.origin,
+					dir: source.dir,
 					writable: source.writable,
 					form: found.form,
 				});
@@ -563,15 +757,20 @@ export function mountSkills(app: Hono, deps: SkillsApiDeps = {}): void {
 
 	app.put("/api/v1/agent/skills/:name", async (c) => {
 		const name = c.req.param("name");
-		const body = (await c.req.json().catch(() => null)) as { content?: unknown } | null;
+		const body = (await c.req.json().catch(() => null)) as { content?: unknown; dir?: unknown } | null;
 		if (typeof body?.content !== "string") {
 			return c.json({ error: "bad_request", message: "需要 content（技能全文）" }, 400);
 		}
 		const problem = contentProblem(body.content);
 		if (problem) return c.json({ error: "bad_request", message: problem }, 400);
+		if (body?.dir !== undefined && typeof body.dir !== "string") {
+			return c.json({ error: "bad_request", message: "dir 必须是字符串" }, 400);
+		}
 
 		const resolved = resolve();
-		const dir = resolved.dir;
+		const target = targetDirOf(resolved, typeof body?.dir === "string" ? body.dir : "");
+		if (!target.ok) return c.json({ error: "bad_request", message: target.message }, 400);
+		const dir = target.dir;
 		try {
 			mkdirSync(dir, { recursive: true });
 		} catch {
@@ -580,8 +779,9 @@ export function mountSkills(app: Hono, deps: SkillsApiDeps = {}): void {
 		const checked = skillPathOf(dir, name);
 		if (!checked.ok) return c.json({ error: "bad_request", message: checked.message }, 400);
 
-		// 主目录里还没有这份技能、但只读用户目录里有 → 明确拒绝（不写影子副本）
-		if (!existsSync(checked.path)) {
+		// 默认写主目录时：主目录里还没有这份技能、但只读用户目录里有 → 明确拒绝（不写影子副本）。
+		// 显式选了自加位置就照写——那个位置本来就是"我要多放一份"的意图。
+		if (!existsSync(checked.path) && sameDir(dir, resolved.dir)) {
 			const readOnly = readOnlyMatchOf(resolved.dirs, name);
 			if (readOnly) {
 				return c.json(
@@ -603,28 +803,34 @@ export function mountSkills(app: Hono, deps: SkillsApiDeps = {}): void {
 			return c.json({ error: "internal_error", message: "写入失败，详见服务端日志" }, 500);
 		}
 		// 只记名字与是否新建：技能正文不进日志
-		console.log(`[skills] ${created ? "新建" : "更新"} ${name}`);
-		return c.json({ ok: true, name, created });
+		console.log(`[skills] ${created ? "新建" : "更新"} ${name}（${dir}）`);
+		notifyChange();
+		return c.json({ ok: true, name, created, dir });
 	});
 
 	app.delete("/api/v1/agent/skills/:name", (c) => {
 		const name = c.req.param("name");
 		const resolved = resolve();
-		const dir = resolved.dir;
+		const target = targetDirOf(resolved, c.req.query("dir")?.trim() ?? "");
+		if (!target.ok) return c.json({ error: "bad_request", message: target.message }, 400);
+		const dir = target.dir;
 		const checked = skillPathOf(dir, name);
 		if (!checked.ok) return c.json({ error: "bad_request", message: checked.message }, 400);
 		if (!existsSync(checked.path)) {
-			const readOnly = readOnlyMatchOf(resolved.dirs, name);
-			if (readOnly) {
-				return c.json(
-					{
-						error: "bad_request",
-						message: `这个技能来自只读用户技能目录（${readOnly.dir}），不能在这里删；要删请在原目录里删`,
-					},
-					400,
-				);
+			// 默认主目录没这份时，再明确告诉你它来自只读目录（选了自加位置就只认那个位置）
+			if (sameDir(dir, resolved.dir)) {
+				const readOnly = readOnlyMatchOf(resolved.dirs, name);
+				if (readOnly) {
+					return c.json(
+						{
+							error: "bad_request",
+							message: `这个技能来自只读用户技能目录（${readOnly.dir}），不能在这里删；要删请在原目录里删`,
+						},
+						400,
+					);
+				}
 			}
-			return c.json({ error: "not_found", message: "没有这个技能" }, 404);
+			return c.json({ error: "not_found", message: "这个位置里没有这个技能" }, 404);
 		}
 		try {
 			rmSync(checked.path);
@@ -633,7 +839,8 @@ export function mountSkills(app: Hono, deps: SkillsApiDeps = {}): void {
 			console.error(`[skills] 删 ${name} 失败: ${detail}`);
 			return c.json({ error: "internal_error", message: "删除失败，详见服务端日志" }, 500);
 		}
-		console.log(`[skills] 删除 ${name}`);
-		return c.json({ ok: true, name });
+		console.log(`[skills] 删除 ${name}（${dir}）`);
+		notifyChange();
+		return c.json({ ok: true, name, dir });
 	});
 }

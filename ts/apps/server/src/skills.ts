@@ -3,16 +3,24 @@ import { homedir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { flagEnabled } from "./flags.ts";
+import {
+	extraSkillDirsEnabled,
+	readCustomSkillDirs,
+	readExcludedSkillDirs,
+	type CustomSkillDir,
+} from "./skills-dirs.ts";
 
 /**
  * 技能库（2026-10-31，App 方案《Agent 化与上下文分层》步骤 2，D4/D5）。
  *
  * 技能 = 一份**流程类手册**（怎么引导一场会议回顾、怎么引导一次回忆），不是事实、不是人格。
- * 存放（2026-11-08 批 10-A 起为**多目录合并链**，先到先得）：
+ * 存放（2026-11-08 批 10-A 起为**多目录合并链**，先到先得；2026-11-23 加自加位置）：
  *   1. `AGENT_SKILLS_DIR` 显式（部署自选；管理端点也写这里）；
  *   2. 用户目录 `%USERPROFILE%\.lifediary\skills`（管理界面写这里，首访自动 mkdir）；
- *   3. 标准用户技能目录 `%USERPROFILE%\.agents\skills`（跨工具共享，**只读**）；
- *   4. 应用目录 `apps/server/skills/`（内置手册兜底）。
+ *   3. **自加位置**：界面「注入 → 技能 → 位置」里登记的目录（`.data/skills-dirs.json`，
+ *      按登记顺序排，可写、可移除登记）；
+ *   4. 标准用户技能目录 `%USERPROFILE%\.agents\skills`（跨工具共享，**只读**）；
+ *   5. 应用目录 `apps/server/skills/`（内置手册兜底）。
  *
  * 两种文件形态都认：
  *   - 扁平 `<名>.md`：第 1 行 = 索引摘要，其余 = 完整手册（本仓库原生形态）；
@@ -47,6 +55,13 @@ export interface SkillStore {
 	 * 旧测试里的最小 SkillStore 可以不带这个方法；生产 store 一定有。
 	 */
 	previewIndex?(partnerId?: string | null): string | undefined;
+	/**
+	 * 目录清单变了之后就地重扫（2026-11-23 多位置）。
+	 * 只换「有哪些技能」，**不动 frozen**：已开会话的索引仍按首轮快照，
+	 * 新会话按新链渲染（D5 按会话冻结的既有口径）。
+	 * 旧测试的最小 SkillStore 可以不带这个方法；生产 store 一定有。
+	 */
+	reload?(dirs: string[]): void;
 }
 
 /**
@@ -57,27 +72,36 @@ export interface SkillStore {
  */
 export const APP_SKILLS_DIR = fileURLToPath(new URL("../skills", import.meta.url));
 
-export type SkillsDirOrigin = "env" | "user" | "agents" | "app";
+export type SkillsDirOrigin = "env" | "user" | "custom" | "agents" | "app";
 
 export interface SkillSource {
 	/** 目录绝对（或部署给的）路径 */
 	dir: string;
-	/** env = AGENT_SKILLS_DIR 显式；user = 用户目录；agents = `~/.agents/skills`；app = 应用目录兜底 */
+	/** env = AGENT_SKILLS_DIR 显式；user = 用户目录；custom = 自加位置；
+	 *  agents = `~/.agents/skills`；app = 应用目录兜底 */
 	origin: SkillsDirOrigin;
 	/**
 	 * 管理端点能否在这个目录里写/删。
-	 * 只有主目录为 true；`~/.agents/skills` 是别的工具的家，只读；应用目录是内置手册，只读。
+	 * 主目录与自加位置为 true；`~/.agents/skills` 是别的工具的家，只读；应用目录是内置手册，只读。
 	 */
 	writable: boolean;
 	/** 目录当前是否存在（不存在时加载器跳过，管理列表也如实标出来） */
 	exists: boolean;
+	/** 自加位置的显示名（origin=custom 才有） */
+	label?: string;
+	/**
+	 * 界面上能否从读取链里移除（2026-11-23 自加位置；2026-11-24 扩到 `.agents` / 内置目录）。
+	 * 主目录（`env` / `user`，以及"用户目录建不出来"时的 `app` 主位）永远不可移除——
+	 * 它是新建技能的落点。移除只改登记 / 排除名单，不删磁盘文件。
+	 */
+	removable?: boolean;
 }
 
 export interface ResolvedSkillsDir {
-	/** 主目录（管理端点写目标）；读取链里的第一个 */
+	/** 主目录（不带 `dir` 时的默认写目标）；读取链里的第一个 */
 	dir: string;
-	/** 主目录来源（`agents` 永远不会是主目录） */
-	origin: Exclude<SkillsDirOrigin, "agents">;
+	/** 主目录来源（`agents` / `custom` 永远不会是主目录） */
+	origin: Exclude<SkillsDirOrigin, "agents" | "custom">;
 	/** 完整读取链，按优先级从高到低排列 */
 	dirs: SkillSource[];
 }
@@ -88,6 +112,16 @@ export interface ResolveSkillsDirOptions {
 	home?: string;
 	/** 覆盖应用目录（单测用）；不传 = APP_SKILLS_DIR */
 	appDir?: string;
+	/**
+	 * 覆盖自加位置清单（单测用）：传了就**不读** `.data/skills-dirs.json`，
+	 * 单测 / 探针不会被开发机真实登记表串味。不传 = 按 `AGENT_SKILLS_DIRS_PATH` 读。
+	 */
+	customDirs?: CustomSkillDir[];
+	/**
+	 * 覆盖排除名单（单测用）：与 `customDirs` 一样，传了就不读登记表。
+	 * 只有 `customDirs` 也传了才生效（不传 customDirs 时一并按文件读）。
+	 */
+	excludedDirs?: string[];
 }
 
 function userHomeOf(env: NodeJS.ProcessEnv): string {
@@ -101,28 +135,42 @@ function pathKey(dir: string): string {
 }
 
 /**
- * 技能读取链解析（2026-11-08 批 10-A，上位计划 §一；取代 9-S 的单目录版本）。
+ * 技能读取链解析（2026-11-08 批 10-A，上位计划 §一；取代 9-S 的单目录版本；
+ * 2026-11-23 多位置：中间插入「自加位置」；2026-11-24：`.agents` / 内置目录可移除）。
  *
  * 优先级（**先到先得**，同名技能只有第一个来源生效）：
  *   1. `AGENT_SKILLS_DIR` 显式指定（部署自选目录，不替用户建）——显式时它取代主目录槽位，
  *      不再额外创建 `.lifediary\skills`；
  *   2. 用户目录 `%USERPROFILE%\.lifediary\skills`——**不存在则首次访问自动 mkdir**，
  *      这样设置页打开就能立刻增删，不用先手工建目录；
- *   3. 标准用户技能目录 `%USERPROFILE%\.agents\skills`（跨工具共享，只读；不存在就跳过）；
- *   4. 应用目录 `apps/server/skills/` 兜底（内置手册）。
+ *   3. 自加位置 `.data/skills-dirs.json` 里登记的目录（按登记顺序；可写、可移除登记；
+ *      目录不存在时保留在链里并标 `exists=false`，界面如实显示）；
+ *   4. 标准用户技能目录 `%USERPROFILE%\.agents\skills`（跨工具共享，只读；不存在就跳过）；
+ *   5. 应用目录 `apps/server/skills/` 兜底（内置手册）。
  *
- * 主目录 = 管理端点（GET/PUT/DELETE）的写目标：有显式 env 就是 env 目录，否则用户目录，
+ * 排除名单（2026-11-24）：`.data/skills-dirs.json` 的 `excluded` 里记了路径的来源
+ * （自加位置 / `.agents` / 内置目录）不进链——界面上的「移除」就是这个。主目录不进排除名单。
+ *
+ * 主目录 = 不带 `dir` 时的默认写目标：有显式 env 就是 env 目录，否则用户目录，
  * 用户目录建不出来才回落应用目录（沿用 9-S 的兜底）。`dirs` 是**读取链**：主目录永远第一，
- * 后面跟着 .agents 与应用目录（同一路径只留一次）。
+ * 后面跟着自加位置、.agents 与应用目录（同一路径只留一次）。
  */
 export function resolveSkillsDir(options: ResolveSkillsDirOptions = {}): ResolvedSkillsDir {
 	const env = options.env ?? process.env;
 	const appDir = options.appDir ?? APP_SKILLS_DIR;
 	const home = options.home?.trim() || userHomeOf(env);
 	const agentsDir = join(home, ".agents", "skills");
+	const extraOn = extraSkillDirsEnabled(env);
+	const customDirs =
+		options.customDirs ?? (extraOn ? readCustomSkillDirs(env) : []);
+	const excludedDirs =
+		options.customDirs !== undefined
+			? (options.excludedDirs ?? [])
+			: (extraOn ? readExcludedSkillDirs(env) : []);
+	const excluded = new Set(excludedDirs.map(pathKey));
 
 	const explicit = env.AGENT_SKILLS_DIR?.trim();
-	let main: { dir: string; origin: Exclude<SkillsDirOrigin, "agents"> };
+	let main: { dir: string; origin: Exclude<SkillsDirOrigin, "agents" | "custom"> };
 	if (explicit) {
 		main = { dir: explicit, origin: "env" };
 	} else {
@@ -139,15 +187,32 @@ export function resolveSkillsDir(options: ResolveSkillsDirOptions = {}): Resolve
 
 	const dirs: SkillSource[] = [];
 	const seen = new Set<string>();
-	const push = (dir: string, origin: SkillsDirOrigin, writable: boolean) => {
+	const push = (
+		dir: string,
+		origin: SkillsDirOrigin,
+		writable: boolean,
+		extra: { label?: string; removable?: boolean } = {},
+	) => {
 		const key = pathKey(dir);
 		if (seen.has(key)) return;
 		seen.add(key);
-		dirs.push({ dir, origin, writable, exists: existsSync(dir) });
+		dirs.push({
+			dir,
+			origin,
+			writable,
+			exists: existsSync(dir),
+			...(extra.label ? { label: extra.label } : {}),
+			...(extra.removable ? { removable: true } : {}),
+		});
 	};
 	push(main.dir, main.origin, true);
-	push(agentsDir, "agents", false);
-	push(appDir, "app", false);
+	for (const entry of customDirs) {
+		// 排除名单赢过登记（手改文件把两者都写进去时，界面上的「移除」说了算）
+		if (excluded.has(pathKey(entry.path))) continue;
+		push(entry.path, "custom", true, { label: entry.label, removable: true });
+	}
+	if (!excluded.has(pathKey(agentsDir))) push(agentsDir, "agents", false, { removable: true });
+	if (!excluded.has(pathKey(appDir))) push(appDir, "app", false, { removable: true });
 
 	return { dir: main.dir, origin: main.origin, dirs };
 }
@@ -425,20 +490,26 @@ export function createSkillStore(
 	const canSee = (name: string, partnerId?: string | null): boolean =>
 		isCore(name) || (partnerId && visibleFor ? visibleFor(partnerId, name) : visible(name));
 
-	const skills = new Map<string, { summary: string; manual: string }>();
-	const claimed = new Set<string>();
-	for (const dir of dirs) {
-		for (const entry of scanSkillDir(dir)) {
-			if (claimed.has(entry.name)) continue; // 先到的目录优先
-			claimed.add(entry.name);
-			if (!entry.valid) {
-				console.warn(`[skills] 跳过格式不对的技能文件: ${entry.path}`);
-				continue;
+	let skills = new Map<string, { summary: string; manual: string }>();
+	/** 重扫目录：先到先得合并。目录变 / 技能文件增删后由 `reload` 调（2026-11-23）。 */
+	const scanInto = (dirs: string[]): number => {
+		const next = new Map<string, { summary: string; manual: string }>();
+		const claimed = new Set<string>();
+		for (const dir of dirs) {
+			for (const entry of scanSkillDir(dir)) {
+				if (claimed.has(entry.name)) continue; // 先到的目录优先
+				claimed.add(entry.name);
+				if (!entry.valid) {
+					console.warn(`[skills] 跳过格式不对的技能文件: ${entry.path}`);
+					continue;
+				}
+				next.set(entry.name, { summary: entry.summary, manual: entry.manual });
 			}
-			skills.set(entry.name, { summary: entry.summary, manual: entry.manual });
 		}
-	}
-	if (skills.size === 0) return null;
+		skills = next;
+		return next.size;
+	};
+	if (scanInto(dirs) === 0) return null;
 
 	const frozen = new Map<string, string | undefined>();
 	const frozenKey = (conversationId: number, partnerId?: string | null) =>
@@ -464,9 +535,11 @@ export function createSkillStore(
 	};
 
 	// 名字只记前 40 个：`.agents/skills` 可能有上百条，整串打出来日志没法看
-	const names = [...skills.keys()];
-	const preview = names.slice(0, 40).join("、") + (names.length > 40 ? `、…（共 ${names.length} 条）` : "");
-	console.log(`[skills] 已加载 ${skills.size} 条技能：${preview}`);
+	const previewOf = (): string => {
+		const names = [...skills.keys()];
+		return names.slice(0, 40).join("、") + (names.length > 40 ? `、…（共 ${names.length} 条）` : "");
+	};
+	console.log(`[skills] 已加载 ${skills.size} 条技能：${previewOf()}`);
 	return {
 		names: (partnerId) => [...skills.keys()].filter((name) => canSee(name, partnerId)),
 		manual: (name, partnerId) => (canSee(name, partnerId) ? skills.get(name)?.manual : undefined),
@@ -479,6 +552,11 @@ export function createSkillStore(
 		previewIndex(partnerId) {
 			// 只渲染，不写 frozen：设置页预览不能污染真实会话的首轮快照。
 			return renderIndex(partnerId);
+		},
+		reload(dirs) {
+			// 只换「有哪些技能」；frozen 原样保留 = 已开会话的 system 前缀不被打掉（D5）。
+			const size = scanInto(dirs);
+			console.log(`[skills] 目录变化，重新加载 ${size} 条技能：${previewOf()}`);
 		},
 	};
 }
