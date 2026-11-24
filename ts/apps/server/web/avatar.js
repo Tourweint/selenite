@@ -23,18 +23,24 @@ function avatarText(name) {
   return String(name || "?").trim().slice(0, 1) || "?";
 }
 
-/** 把头像写进容器（button / span）：有图用 img，没图用首字 */
+/** 把头像写进容器（button / span）：有图用 img，没图用首字。
+ *  2026-11-24：同图不重画——重绘花名册 / 切会话都会再调一次，data URL 重建
+ *  <img> 要重新解码，视觉上就是头像闪一下。src 没变就直接留用现有节点。 */
 function paintAvatar(host, avatar, name) {
   if (!host) return;
+  const text = avatarText(name);
   if (avatar) {
-    const img = document.createElement("img");
-    img.alt = "";
-    img.decoding = "async";
-    img.setAttribute("aria-hidden", "true");
-    img.src = avatar; // 属性赋值，不拼 HTML
-    host.replaceChildren(img);
+    const img = host.querySelector("img");
+    if (img && img.getAttribute("src") === avatar) return;
+    const next = document.createElement("img");
+    next.alt = "";
+    next.decoding = "async";
+    next.setAttribute("aria-hidden", "true");
+    next.src = avatar; // 属性赋值，不拼 HTML
+    host.replaceChildren(next);
   } else {
-    host.textContent = avatarText(name);
+    if (!host.querySelector("img") && host.textContent === text) return;
+    host.textContent = text;
   }
 }
 

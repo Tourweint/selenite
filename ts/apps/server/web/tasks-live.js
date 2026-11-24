@@ -10,7 +10,7 @@
 import { openConversation } from "./chat-open.js";
 import { el } from "./dom.js";
 import { request } from "./net.js";
-import { loadRoster } from "./partners-status.js";
+import { refreshRosterDomains } from "./partner-roster.js";
 import { openAddProjectModal, openCreateProjectModal, setModalHint } from "./project-modal.js";import { currentRoute, currentTicketId, go, tasksHash } from "./route.js";
 import { openSecMenu } from "./sec-menu.js";
 import { state } from "./state.js";
@@ -173,8 +173,10 @@ function autoSyncTick() {
       if (currentRoute() === "review") renderReview();
     });
   }
-  // E4：花名册的 activeTickets 来自 domains（派生自任务单），低频一并刷新
-  void loadRoster();
+  // E4：花名册的 activeTickets 来自 domains（派生自任务单），低频一并刷新。
+  // 2026-11-24：只刷数字（/domains），不重拉带头像 base64 的整份 /partners——
+  // 否则每拍轮询都会让侧栏头像重新加载。
+  void refreshRosterDomains();
 }
 
 /* 侧栏分区头的入口（2026-11-07 统一批 / 2026-11-14 ⋯ 菜单）：

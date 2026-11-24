@@ -1,7 +1,8 @@
 /**
  * 记忆页 A 版：骨架、分组、摘要
  *
- * 2026-11-13 从 web/app.js（25,467 行单文件）按职责拆出；正文是原文搬运，未改写行为。
+ * 2026-11-23：顶部新增「记忆库」卡（原生 / 外部接入两态，切换只换后面的库）。
+ * 其余仍是 2026-11-13 从 web/app.js（25,467 行单文件）按职责拆出的原文搬运。
  * 原文件只有一个作用域、函数互调没有固定方向，拆开后模块之间必然互相 import（环）。
  * ESM 允许循环引用，前提是模块顶层求值时不向别的模块取值；本层把启动代码全放在入口
  * app.js 文末，各模块顶层只做声明、常量与事件监听注册。
@@ -10,14 +11,14 @@
 import { el } from "./dom.js";
 import { chevSvg } from "./icons.js";
 import { attr, esc } from "./markdown.js";
-import { applyMemoryProposalA, clearMemoryProposalCard, dismissMemoryProposalA, forgetMemoryItem, loadMemoryExternal, loadMemoryGroup, loadMemoryReviewState, memoryItemMarkupA, openMemoryConsolidateDialog, openMemorySplitDialog, supersedeMemoryItem } from "./memory-items.js";
+import { applyMemoryProposalA, clearMemoryProposalCard, dismissMemoryProposalA, forgetMemoryItem, loadMemoryGroup, loadMemoryReviewState, memoryItemMarkupA, openMemoryConsolidateDialog, openMemorySplitDialog, supersedeMemoryItem } from "./memory-items.js";
 import { request } from "./net.js";
 // 提醒沉淀（2026-11-19 批4）：入口动作与建议卡（采纳/忽略）走同一个轻模块。
 import { runReminderDistill } from "./reminder-distill.js";
 import { currentInjectTab, currentSettingsPage } from "./route.js";
 import { sectionMarkup } from "./settings-atoms.js";
 import { MEMORY_KIND_LABEL, MEMORY_KIND_ORDER, MEMORY_KIND_TIPS } from "./settings-memory.js";
-import { closeModal, openModal, toast } from "./ui-atoms.js";
+import { closeModal, inShell, openConfirm, openModal, selectDirectory, toast } from "./ui-atoms.js";
 
 /* ── 记忆页 A 版（2026-11-13）──────────────────────────────
  * 大字概览 + 分类计数片（唯一筛选）+ 搜索 + 分组折叠 + 可恢复的整理状态。
@@ -52,6 +53,23 @@ const memoryPageState = {
   /** 原文档案列表（拆分后可看，不参与召回） */
   docs: null,
   externalLines: [],
+  /** 记忆库槽位（2026-11-23 外部记忆库接入）：GET /bank 的规范化结果；null = 未启用/读不到。 */
+  bank: null,
+  /** "unknown"（还没问） / "enabled"（槽位卡已读回） / "error"（读不到，卡上给重试）。 */
+  bankMode: "unknown",
+  bankError: "",
+  /** 接入表单：是否展开 / 输入框里上次的值 / 上一次检测结果。 */
+  bankFormOpen: false,
+  bankPath: "",
+  /** 接入表单里「支持向量检索」勾选（2026-11-24）：保存时写 external.vector。 */
+  bankVector: false,
+  bankProbe: null,
+  /** 外部库边界原文（GET /bank/catalog，服务端缓存 10 分钟）。 */
+  bankCatalog: { loading: false, loaded: false, lines: [], error: "" },
+  /** 外部库页面搜索（POST /bank/search）。 */
+  bankSearch: { query: "", running: false, hits: [], note: "", error: "" },
+  /** 切换库后重渲染索引页的回调（settings-router 注入；缺省时就地刷新）。 */
+  rerender: null,
   pollTimer: 0,
 };
 
@@ -170,7 +188,13 @@ function memorySettingsMarkup() {
     `<span data-tip="${attr(
       "索引 = 从日常里挑出值得长期记住的，按人、按项目分开放；每轮只按相关度取几条注入上下文，不是全量带上。删除、标过时、整理都只影响这份索引。",
     )}">记忆索引</span>`,
-    `<div class="card mem-a-overview">
+    // 记忆库卡（2026-11-23 外部记忆库接入）：默认 hidden，等 GET /bank 回话后渲染；
+    // 2026-11-24 旧形态退役后槽位卡恒在（读不到状态时卡上给错误行 + 重试）。
+    // 2026-11-23 收口：卡内分两块——上块「切哪个库」，下块「当前库内容」（外部态才有）。
+    `<div class="card mem-bank" id="mem-bank" hidden>
+      <div class="mem-bank-body" id="mem-bank-body"></div>
+    </div>
+    <div class="card mem-a-overview">
       <div class="mem-a-overview-main">
         <div class="mem-a-total"><b id="mem-a-total">—</b><span>条记忆</span></div>
         <div class="mem-a-chips" id="mem-a-chips"></div>
@@ -239,7 +263,7 @@ function memorySettingsMarkup() {
       aria-label="回到顶部" data-tip="回到顶部">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m18 15-6-6-6 6"/><path d="M12 19V9"/></svg>
     </button>`,
-    "",
+    `id="mem-a-page"`,
     `<div class="mem-a-head-actions">
       <button class="ghost mem-act" type="button" id="mem-distill" hidden
         data-tip="沉淀提醒 = 代码先从最近 30 天收集你反复说过的话（0 token），跳总管蒸馏成教诲建议；你回这里逐条采纳才写进偏好（永不删）。">沉淀提醒</button>
@@ -254,7 +278,7 @@ function memorySettingsMarkup() {
   );
 }
 
-async function wireMemorySettings() {
+async function wireMemorySettings({ rerender = null } = {}) {
   const gen = ++memoryPageState.gen;
   stopMemoryPolling();
   stopMemoryBacktop();
@@ -269,6 +293,16 @@ async function wireMemorySettings() {
   memoryPageState.people = null;
   memoryPageState.batch = null;
   memoryPageState.externalLines = [];
+  memoryPageState.rerender = typeof rerender === "function" ? rerender : null;
+  memoryPageState.bank = null;
+  memoryPageState.bankMode = "unknown";
+  memoryPageState.bankError = "";
+  memoryPageState.bankFormOpen = false;
+  memoryPageState.bankPath = "";
+  memoryPageState.bankVector = false;
+  memoryPageState.bankProbe = null;
+  memoryPageState.bankCatalog = { loading: false, loaded: false, lines: [], error: "" };
+  memoryPageState.bankSearch = { query: "", running: false, hits: [], note: "", error: "" };
 
   document.getElementById("mem-a-people")?.addEventListener("click", (event) => {
     const button = event.target.closest?.("[data-mem-scope]");
@@ -425,15 +459,896 @@ async function wireMemorySettings() {
     });
   });
 
-  await Promise.all([
+  // 记忆库卡：卡体每次整块重建，监听挂在稳定的 #mem-bank 上（2026-11-23）。
+  const bankCard = document.getElementById("mem-bank");
+  bankCard?.addEventListener("click", (event) => {
+    const button = event.target.closest?.("[data-bank-action]");
+    if (!button) return;
+    void handleBankAction(button.getAttribute("data-bank-action") || "", button, gen);
+  });
+  bankCard?.addEventListener("input", (event) => {
+    const target = event.target;
+    if (target?.id === "mem-bank-path") memoryPageState.bankPath = target.value;
+    else if (target?.id === "mem-bank-q") memoryPageState.bankSearch.query = target.value;
+    else if (target?.id === "mem-bank-vector") memoryPageState.bankVector = target.checked === true;
+  });
+  bankCard?.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    const target = event.target;
+    if (target?.id === "mem-bank-q") {
+      event.preventDefault();
+      void searchMemoryBank(gen);
+    } else if (target?.id === "mem-bank-path") {
+      event.preventDefault();
+      void probeMemoryBank(gen);
+    }
+  });
+
+  // 先问槽位（2026-11-23）：GET /bank 回话后才知道当前挂哪个库；读不到就按内置态继续。
+  const bank = await loadMemoryBank(gen);
+  if (!memoryPageAlive(gen)) return;
+  if (memoryPageState.bankMode === "enabled" && bank?.active === "external") {
+    // 外部态：内置库专属模块由 CSS 整块隐藏，这里只拉库边界；搜索按需发。
+    await loadMemoryBankCatalog(gen);
+    return;
+  }
+  // 内置态（含读状态失败）：内置模块照常；槽位卡恒在，旧页脚不再渲染。
+  await Promise.all(builtinMemoryJobs(gen));
+}
+
+/* ── 记忆库卡（2026-11-23 外部记忆库接入）────────────────────
+ * 设置 → 注入 → 索引页顶部：原生（本机）/ 外部接入 两态。
+ * 切换只换槽位（PUT /bank {active}），工具名不变：recall（读）/ remember（写）。
+ * 接入只认目录里的 ask.py（读）/ repair.py（写）；路径由服务端推导校验，页面不传文件。
+ * 端点口径见 docs/设计方案/2026-11-23-外部记忆库接入任务书（一读一写·槽位与前端）.md §1.2。
+ * 2026-11-24 旧形态退役：槽位卡是记忆库的唯一入口（旧页脚不再渲染）。 */
+
+function memoryBankStatusMeta(status) {
+	switch (String(status || "")) {
+		case "ok":
+			return { dot: "ok", text: "可用" };
+		case "missing_ask":
+			return { dot: "error", text: "缺读入口" };
+		case "missing_repair":
+			return { dot: "warn", text: "只读" };
+		case "error":
+			return { dot: "error", text: "检测报错" };
+		default:
+			return { dot: "idle", text: "未检测" };
+	}
+}
+
+function memoryBankLink(action, label, extra = "") {
+	return `<button class="mem-bank-link ${extra}" type="button" data-bank-action="${action}">${label}</button>`;
+}
+
+function memoryBankLinks(items) {
+	return items.length ? `<div class="mem-bank-links">${items.join("")}</div>` : "";
+}
+
+function bankButton(action, label, options = {}) {
+	const { primary = false, disabled = false } = options;
+	return `<button class="${primary ? "btn-primary" : "ghost"}" type="button" data-bank-action="${action}"${
+		disabled ? " disabled" : ""
+	}>${label}</button>`;
+}
+
+function splitCatalogText(text) {
+  return String(text || "")
+    .split(/\r?\n/)
+    .filter((line) => line.trim() !== "");
+}
+
+/** catalog 可能是纯文本 / {lines|text} / {catalog:{lines|text}} / {catalog:"…"}，一律摊平成行。 */
+function bankCatalogLines(payload) {
+  if (!payload) return [];
+  if (typeof payload === "string") return splitCatalogText(payload);
+  const raw = payload.catalog ?? payload.lines ?? payload.text;
+  if (Array.isArray(raw)) return raw.map((line) => String(line)).filter((line) => line.trim() !== "");
+  if (raw && typeof raw === "object") {
+    if (Array.isArray(raw.lines)) {
+      return raw.lines.map((line) => String(line)).filter((line) => line.trim() !== "");
+    }
+    if (typeof raw.text === "string") return splitCatalogText(raw.text);
+    return [];
+  }
+  if (typeof raw === "string") return splitCatalogText(raw);
+  return [];
+}
+
+/** GET /bank 的规范化：认 enabled / active / external{vector,status,capabilities}，其余字段忽略。
+ *  2026-11-24：`timeouts` 不再归一化——记忆页已无任何展示 / 编辑消费者（编辑入口迁到
+ *  插件 → 工具与命令）；端点仍下发 `timeouts`，那是服务端兼容读（M5 清理），前端不读。 */
+function normalizeBankPayload(raw) {
+  const data = raw && typeof raw === "object" ? raw : {};
+  const nested = [data.external, data.bank].find(
+    (item) => item && typeof item === "object" && !Array.isArray(item),
+  ) || null;
+  const caps =
+    nested?.capabilities && typeof nested.capabilities === "object"
+      ? nested.capabilities
+      : data.capabilities && typeof data.capabilities === "object"
+        ? data.capabilities
+        : null;
+  const external = nested
+    ? {
+        id: String(nested.id || ""),
+        name: String(nested.name || "外部记忆库"),
+        root: String(nested.root || ""),
+        ask: String(nested.ask || ""),
+        repair: String(nested.repair || ""),
+        // 2026-11-24：向量检索能力由库声明；只认真正的 true。
+        vector: nested.vector === true,
+        status: String(nested.status || data.status || ""),
+        capabilities: {
+          read: caps ? caps.read !== false : true,
+          write: caps ? caps.write === true : Boolean(nested.repair),
+          catalog: caps ? caps.catalog === true : true,
+        },
+      }
+    : null;
+  return {
+    enabled: data.enabled !== false,
+    active: external && data.active === "external" ? "external" : "builtin",
+    external,
+    tools: data.tools && typeof data.tools === "object" ? data.tools : null,
+  };
+}
+
+/** POST /bank/probe 的规范化：缺 ok 时按 ask.py / 状态字段推断（只读库也算检测通过）。 */
+function normalizeBankProbe(raw, root) {
+  const data = raw && typeof raw === "object" ? raw : {};
+  const nested = [data.external, data.bank, data.result].find(
+    (item) => item && typeof item === "object" && !Array.isArray(item),
+  );
+  const source = nested || data;
+  const status = String(source.status || data.status || "");
+  const ask = String(source.ask || data.ask || "");
+  const repair = String(source.repair || data.repair || "");
+  const failed = data.ok === false || status === "missing_ask" || status === "error";
+  const ok =
+    !failed &&
+    (data.ok === true || status === "ok" || status === "missing_repair" || Boolean(ask) || Boolean(source.id));
+  const fromData = bankCatalogLines(data);
+  const catalog = fromData.length ? fromData : bankCatalogLines(source);
+  return {
+    status: ok ? "ok" : "error",
+    ok,
+    root,
+    name: String(source.name || data.name || ""),
+    ask,
+    repair,
+    bankStatus: status,
+    read: ok,
+    write: ok && status !== "missing_repair" && Boolean(repair),
+    catalog,
+    error: ok
+      ? ""
+      : String(
+          data.message ||
+            data.error ||
+            (status === "missing_ask" ? "这个目录里找不到读入口" : "检测没通过"),
+        ),
+  };
+}
+
+/** 搜索命中：优先扁平 hits；给了 groups 就按组摊平（组名带进展示）。 */
+function bankSearchHits(data) {
+  const out = [];
+  const push = (item, group) => {
+    if (!item || typeof item !== "object") return;
+    const text = String(item.text || item.title || "");
+    if (!text && !item.id) return;
+    out.push({
+      id: String(item.id || ""),
+      date: String(item.date || ""),
+      group: String(item.group || item.groupName || group || ""),
+      text,
+      why: String(item.why || ""),
+    });
+  };
+  const flat = [data?.hits, data?.results, data?.items].find((list) => Array.isArray(list));
+  if (flat) {
+    for (const item of flat) push(item, "");
+    return out.slice(0, 50);
+  }
+  if (data?.groups && typeof data.groups === "object") {
+    for (const [group, list] of Object.entries(data.groups)) {
+      if (!Array.isArray(list)) continue;
+      for (const item of list) push(item, group);
+    }
+  }
+  return out.slice(0, 50);
+}
+
+function memoryBankActiveExternal(bank) {
+  return Boolean(bank?.external) && bank?.active === "external";
+}
+
+function memoryBankSegMarkup(bank) {
+	const activeExternal = memoryBankActiveExternal(bank);
+	return `<div class="mem-bank-head">
+    <div class="mem-bank-title" data-tip="切换只换后面的库；recall / remember 的工具名与描述不变。">记忆库</div>
+    <div class="mem-bank-head-right">
+      <div class="mem-bank-seg" role="radiogroup" aria-label="用哪个记忆库">
+        <button class="mem-bank-seg-btn ${activeExternal ? "" : "is-on"}" type="button" role="radio"
+          aria-checked="${activeExternal ? "false" : "true"}" data-bank-action="seg" data-bank-value="builtin">原生</button>
+        <button class="mem-bank-seg-btn ${activeExternal ? "is-on" : ""}" type="button" role="radio"
+          aria-checked="${activeExternal ? "true" : "false"}" data-bank-action="seg" data-bank-value="external">外部</button>
+      </div>
+      <span class="mem-bank-sep" aria-hidden="true"></span>
+      ${memoryBankLink("manual", "操作手册")}
+    </div>
+  </div>`;
+}
+
+function memoryBankStatusLine({ dot, name, hint = "", tip = "", root = "", actions = "", idle = false }) {
+	return `<div class="mem-bank-line${idle ? " is-idle" : ""}">
+    <span class="status-dot ${dot}" aria-hidden="true"></span>
+    <div class="mem-bank-line-main">
+      <div class="mem-bank-line-title">
+        <span class="mem-bank-name">${esc(name)}</span>
+        ${hint ? `<span class="mem-bank-hint"${tip ? ` data-tip="${attr(tip)}"` : ""}>${esc(hint)}</span>` : ""}
+      </div>
+      ${root ? `<div class="mem-bank-path" title="${attr(root)}">${esc(root)}</div>` : ""}
+    </div>
+    ${actions}
+  </div>`;
+}
+
+function memoryBankExternalLine(external, active) {
+	const meta = memoryBankStatusMeta(external.status);
+	const readOn = external.capabilities.read !== false;
+	const writeOn = external.capabilities.write === true;
+	const hint = !active
+		? "未启用"
+		: external.status === "missing_ask"
+			? "缺读入口"
+			: external.status === "error"
+				? "检测报错"
+				: !readOn
+					? "读已关闭"
+					: writeOn
+						? "可用"
+						: "只读";
+	// 向量检索是库声明的能力（2026-11-24）：勾了就标在状态后面，省得点开表单才看见。
+	const vectorHint = active && external.vector === true ? " · 向量检索" : "";
+	return memoryBankStatusLine({
+		dot: active ? meta.dot : "idle",
+		name: external.name,
+		hint: `${hint}${vectorHint}`,
+		tip: active && readOn && !writeOn ? "这个库没有写入口：remember 不能写。" : "",
+		root: external.root,
+		idle: !active,
+		actions: memoryBankLinks([
+			memoryBankLink("form", "更换目录"),
+			memoryBankLink("remove", "移除", "is-danger"),
+		]),
+	});
+}
+
+function memoryBankStateMarkup(bank) {
+	const external = bank?.external;
+	if (memoryBankActiveExternal(bank)) return memoryBankExternalLine(external, true);
+	// 原生是当前库时只给一行；外部库已接入但没启用 = 第二行灰态，切不切由上方「外部」段决定。
+	const builtin = memoryBankStatusLine({
+		dot: "ok",
+		name: "内置库（本机）",
+		actions: external ? "" : memoryBankLinks([memoryBankLink("form", "接入外部库")]),
+	});
+	return [builtin, external ? memoryBankExternalLine(external, false) : ""].filter(Boolean).join("");
+}
+
+function memoryBankProbeMarkup(probe) {
+	if (!probe) return "";
+	if (probe.status === "loading") {
+		return `<div class="mem-bank-result"><span class="set-hint">检测中…</span></div>`;
+	}
+	if (probe.status === "error") {
+		return `<div class="mem-bank-result is-error">
+      <div class="set-hint is-error">检测没通过：${esc(probe.error || "未知原因")}</div>
+    </div>`;
+	}
+	return `<div class="mem-bank-result">
+    <div class="mem-bank-result-title">检测通过</div>
+    <div class="mem-bank-result-meta">读入口 ✓${probe.write ? " · 写入口 ✓" : " · 只读（没有写入口）"}</div>
+    ${
+			probe.catalog.length
+				? `<details class="mem-bank-result-details"><summary>边界预览</summary><pre class="mem-bank-result-catalog">${esc(
+						probe.catalog.join("\n"),
+					)}</pre></details>`
+				: ""
+		}
+  </div>`;
+}
+
+function memoryBankFormMarkup() {
+	const probe = memoryPageState.bankProbe;
+	const probing = probe?.status === "loading";
+	const ready = probe?.ok === true;
+	const actions = ready
+		? [
+				bankButton("add", "接入", { primary: true }),
+				bankButton("probe", "重新检测"),
+				bankButton("form-cancel", "取消"),
+			]
+		: [
+				bankButton("probe", probing ? "检测中…" : "检测", { primary: true, disabled: probing }),
+				bankButton("form-cancel", "取消"),
+			];
+	return `<div class="mem-bank-form">
+    <div class="mem-bank-form-row">
+      <input class="set-input mem-bank-input" id="mem-bank-path" type="text" spellcheck="false"
+        placeholder="外部记忆库目录（绝对路径）"
+        value="${attr(memoryPageState.bankPath)}" aria-label="外部记忆库目录">
+      ${bankButton("pick", "选择目录")}
+    </div>
+    <div class="mem-bank-form-row">
+      <label class="mem-bank-check">
+        <input type="checkbox" id="mem-bank-vector"${memoryPageState.bankVector ? " checked" : ""}>
+        <span>支持向量检索（这个库理解 --vector）</span>
+      </label>
+      <span class="mem-bank-form-note">检索密钥由记忆库自己保管，Lifediary 不存。</span>
+    </div>
+    <div class="mem-bank-form-foot">
+      <span class="mem-bank-form-note">两个入口文件：ask（读，必填）+ repair（写，可选）。</span>
+      <span class="mem-bank-form-actions">${actions.join("")}</span>
+    </div>
+    ${memoryBankProbeMarkup(probe)}
+  </div>`;
+}
+
+function memoryBankCatalogMarkup() {
+	const catalog = memoryPageState.bankCatalog;
+	if (catalog.error) return `<div class="set-hint is-error">${esc(catalog.error)}</div>`;
+	if (!catalog.loaded) return `<div class="set-hint">${catalog.loading ? "读取中…" : "展开后加载…"}</div>`;
+	if (!catalog.lines.length) return `<div class="set-hint">这个库还没提供边界说明。</div>`;
+	return `<pre class="mem-bank-catalog-text">${esc(catalog.lines.join("\n"))}</pre>`;
+}
+
+function memoryBankResultsMarkup() {
+	const state = memoryPageState.bankSearch;
+	if (state.running) return `<div class="set-hint">搜索中…</div>`;
+	if (state.error) return `<div class="set-hint is-error">${esc(state.error)}</div>`;
+	if (!state.query) return "";
+	if (!state.hits.length) return `<div class="set-hint">这个库里没有查到相关记录。</div>`;
+	const hits = state.hits
+		.map(
+			(hit) => `<div class="mem-bank-hit">
+        <div class="mem-bank-hit-meta">${esc(hit.date || "—")}${hit.group ? ` · ${esc(hit.group)}` : ""}</div>
+        <div class="mem-bank-hit-text">${esc(hit.text || "（这条没有正文）")}</div>
+        ${hit.why ? `<div class="mem-bank-hit-why">${esc(hit.why)}</div>` : ""}
+      </div>`,
+		)
+		.join("");
+	return `${hits}${state.note ? `<div class="set-hint mem-bank-hit-note">${esc(state.note)}</div>` : ""}`;
+}
+
+function memoryBankToolsMarkup() {
+	return `<div class="mem-bank-content">
+    <details class="mem-bank-catalog">
+      <summary class="mem-bank-catalog-head">
+        ${chevSvg("mem-bank-chev chev")}
+        <span>库边界</span>
+      </summary>
+      <div class="mem-bank-catalog-body" id="mem-bank-catalog-body">${memoryBankCatalogMarkup()}</div>
+    </details>
+    <div class="mem-bank-search">
+      <div class="mem-bank-search-row">
+        <input class="set-input mem-bank-search-input" id="mem-bank-q" type="search" spellcheck="false"
+          placeholder="搜这个库" aria-label="搜索外部记忆库"
+          value="${attr(memoryPageState.bankSearch.query)}">
+        <button class="btn-primary" type="button" data-bank-action="search">搜索</button>
+      </div>
+      <div class="mem-bank-results" id="mem-bank-results">${memoryBankResultsMarkup()}</div>
+    </div>
+  </div>`;
+}
+
+// 操作手册（2026-11-23 收口，同日扩多语言入口）：入口文件不限语言，按扩展名选运行器。
+const BANK_MANUAL_TEXT = `外部记忆库接入 · 两个入口文件
+
+目录里放两个入口文件（名字固定，扩展名决定怎么跑）：
+1) 读入口 ask（必填）
+   接收：<问题> --json --limit N [--vector]
+   输出 JSON：{"groups":{"<组名>":[{"id":"...","date":"...","text":"...","why":"..."}]},"unknown":"查不到 ≠ 没有"}
+   另需支持：--catalog-only → stdout 纯文本，≤20 行（库的边界）
+2) 写入口 repair（可选）
+   接收：statement <原话> --why <原因>
+   写进你的一张表；同一 body 幂等；没有写入口 = 只读库
+
+运行器按扩展名自动选：
+  .py → python（PERSONA_PYTHON）  .js/.mjs/.cjs → node
+  .sh → bash   .ps1 → powershell   其他/无扩展名 → 直接执行该文件
+
+· --vector 只在接入时勾了「支持向量检索」才会附在末尾；不认识就别勾（Python argparse 会直接退出码 2；
+  勾了但库不认，Lifediary 会自动去掉它重试一次普通检索并留痕）。
+· 检索密钥（如 embedding 的 API key）由库自己保管，Lifediary 不读不存不传。
+· 表结构归你；建议定时内化；这张表要进读入口的召回。
+· 工具名不变：recall 读、remember 写；切换只换后面的库。
+· 工作目录 = 库根目录，入口里用相对路径没问题。`;
+
+function openBankManual() {
+	openModal("外部记忆库 · 操作手册", (body) => {
+		body.innerHTML = `<div class="mem-bank-manual">
+      <pre class="mem-bank-manual-code">${esc(BANK_MANUAL_TEXT)}</pre>
+      <div class="modal-actions">
+        <button class="ghost" type="button" data-manual-copy>复制</button>
+        <button class="modal-primary" type="button" data-modal-ok>关闭</button>
+      </div>
+    </div>`;
+		const copy = body.querySelector("[data-manual-copy]");
+		copy?.addEventListener("click", async () => {
+			try {
+				await navigator.clipboard.writeText(BANK_MANUAL_TEXT);
+				toast("操作手册已复制");
+				copy.textContent = "已复制";
+				setTimeout(() => {
+					copy.textContent = "复制";
+				}, 1200);
+			} catch {
+				toast("复制失败，手动选文本吧");
+			}
+		});
+		body.querySelector("[data-modal-ok]")?.addEventListener("click", closeModal);
+	});
+}
+
+function renderMemoryBank() {
+	const card = document.getElementById("mem-bank");
+	const body = document.getElementById("mem-bank-body");
+	if (!card || !body) return;
+	if (memoryPageState.bankMode === "error") {
+		card.hidden = false;
+		body.innerHTML = `<div class="mem-bank-line">
+      <span class="status-dot error" aria-hidden="true"></span>
+      <div class="mem-bank-line-main">
+        <div class="mem-bank-line-title"><span class="mem-bank-name">记忆库状态读不到</span></div>
+        <div class="mem-bank-path">${esc(memoryPageState.bankError || "服务端没回话")}</div>
+      </div>
+      ${memoryBankLinks([memoryBankLink("retry", "重试")])}
+    </div>`;
+		return;
+	}
+	const bank = memoryPageState.bank;
+	if (!bank) {
+		card.hidden = true;
+		body.replaceChildren();
+		return;
+	}
+	const activeExternal = memoryBankActiveExternal(bank);
+	card.hidden = false;
+	body.innerHTML = [
+		memoryBankSegMarkup(bank),
+		memoryBankStateMarkup(bank),
+		memoryPageState.bankFormOpen ? memoryBankFormMarkup() : "",
+		activeExternal ? memoryBankToolsMarkup() : "",
+	]
+		.filter(Boolean)
+		.join("");
+}
+
+function renderMemoryBankCatalog() {
+  const box = document.getElementById("mem-bank-catalog-body");
+  if (!box) return;
+  box.innerHTML = memoryBankCatalogMarkup();
+}
+
+function renderMemoryBankSearch() {
+  const box = document.getElementById("mem-bank-results");
+  if (!box) return;
+  box.innerHTML = memoryBankResultsMarkup();
+  const input = document.getElementById("mem-bank-q");
+  if (input && input.value !== memoryPageState.bankSearch.query) {
+    input.value = memoryPageState.bankSearch.query;
+  }
+}
+
+/** 外部态：隐藏内置库专属模块（概览 / 人物 / 分组 / 履历 / 档案 / 整理 / 导入 / 拆分…）。
+ *  切回原生由整页重渲染恢复（类不会残留）。 */
+function applyMemoryBankMode(external) {
+  document.getElementById("mem-a-page")?.classList.toggle("mem-bank-ext", Boolean(external));
+}
+
+/** 槽位卡恒在：旧页脚（.mem-a-external）不再渲染，避免两套入口；端点与 MEMORY_EXTERNAL 开关保留。 */
+function hideLegacyMemoryFooter() {
+  const footer = document.getElementById("mem-a-external");
+  if (footer) footer.hidden = true;
+}
+
+function builtinMemoryJobs(gen) {
+  return [
     loadMemoryPeople(gen),
     loadMemorySummary(gen),
     loadMemoryWork(gen),
     loadMemoryDocuments(gen),
     loadMemoryReviewState(gen),
-    loadMemoryExternal(gen),
     loadMemoryReminderAdvice(gen),
-  ]);
+  ];
+}
+
+/** GET /bank：槽位端点恒在（2026-11-24 旧总闸退役）；读失败 = 卡上给一行可读错误 +
+ *  重试，不挡内置模块。 */
+async function loadMemoryBank(gen) {
+  const card = document.getElementById("mem-bank");
+  if (!card) return null;
+  try {
+    const response = await request("/api/v1/agent/memory/bank", { cache: "no-store" });
+    if (!memoryPageAlive(gen)) return null;
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(String(data.message || data.error || `HTTP ${response.status}`));
+    }
+    const bank = normalizeBankPayload(data);
+    memoryPageState.bank = bank;
+    memoryPageState.bankMode = "enabled";
+    memoryPageState.bankError = "";
+    hideLegacyMemoryFooter();
+    renderMemoryBank();
+    applyMemoryBankMode(memoryBankActiveExternal(bank));
+    return bank;
+  } catch (error) {
+    if (!memoryPageAlive(gen) || error.message === "forbidden") return null;
+    memoryPageState.bankMode = "error";
+    memoryPageState.bank = null;
+    memoryPageState.bankError = `读不到记忆库状态：${error.message}`;
+    hideLegacyMemoryFooter();
+    renderMemoryBank();
+    applyMemoryBankMode(false);
+    return null;
+  }
+}
+
+/** GET /bank/catalog：纯文本或 JSON（{lines} / {catalog:{lines}}）都吃下。 */
+async function loadMemoryBankCatalog(gen) {
+  const catalog = memoryPageState.bankCatalog;
+  if (catalog.loading) return;
+  catalog.loading = true;
+  renderMemoryBankCatalog();
+  try {
+    const response = await request("/api/v1/agent/memory/bank/catalog", { cache: "no-store" });
+    if (!memoryPageAlive(gen)) return;
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      catalog.error = String(data.message || data.error || `库边界读不到：HTTP ${response.status}`);
+    } else {
+      const text = await response.text();
+      let parsed = text;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        parsed = text; // 纯文本
+      }
+      catalog.lines = bankCatalogLines(parsed);
+      catalog.error = "";
+    }
+    catalog.loaded = true;
+  } catch (error) {
+    if (!memoryPageAlive(gen) || error.message === "forbidden") return;
+    catalog.error = `库边界读不到：${error.message}`;
+    catalog.loaded = true;
+  } finally {
+    catalog.loading = false;
+    if (memoryPageAlive(gen)) renderMemoryBankCatalog();
+  }
+}
+
+function readBankPathInput() {
+  const input = document.getElementById("mem-bank-path");
+  const value = String(input?.value ?? memoryPageState.bankPath ?? "").trim();
+  memoryPageState.bankPath = value;
+  return value;
+}
+
+async function pickBankDirectory() {
+  if (!inShell()) {
+    toast("浏览器里没有目录选择器，直接填绝对路径");
+    document.getElementById("mem-bank-path")?.focus();
+    return;
+  }
+  const path = await selectDirectory();
+  if (!path) return; // 用户取消
+  memoryPageState.bankPath = path;
+  const input = document.getElementById("mem-bank-path");
+  if (input) input.value = path;
+}
+
+/** POST /bank/probe：只识别 + 跑一次 --catalog-only，不落盘。 */
+async function probeMemoryBank(gen, button) {
+  if (!memoryPageAlive(gen)) return;
+  const root = readBankPathInput();
+  if (!root) {
+    toast("先选或填一个外部记忆库目录");
+    document.getElementById("mem-bank-path")?.focus();
+    return;
+  }
+  if (button) {
+    button.disabled = true;
+    button.textContent = "检测中…";
+  }
+  memoryPageState.bankProbe = { status: "loading", root };
+  renderMemoryBank();
+  try {
+    const response = await request("/api/v1/agent/memory/bank/probe", {
+      method: "POST",
+      body: JSON.stringify({ root }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!memoryPageAlive(gen)) return;
+    if (!response.ok) {
+      memoryPageState.bankProbe = {
+        status: "error",
+        root,
+        error: String(data.message || data.error || `检测失败：HTTP ${response.status}`),
+      };
+    } else {
+      memoryPageState.bankProbe = normalizeBankProbe(data, root);
+    }
+    renderMemoryBank();
+  } catch (error) {
+    if (error.message === "forbidden" || !memoryPageAlive(gen)) return;
+    memoryPageState.bankProbe = { status: "error", root, error: `检测失败：${error.message}` };
+    renderMemoryBank();
+  }
+}
+
+/** PUT /bank/external：探测通过才保存；成功后**不自动切换**，由用户点「切换到此库」。 */
+async function saveBankExternal(gen, button) {
+  if (!memoryPageAlive(gen)) return;
+  const root = readBankPathInput();
+  if (!root) {
+    toast("先选或填一个外部记忆库目录");
+    document.getElementById("mem-bank-path")?.focus();
+    return;
+  }
+  const wasActive = memoryBankActiveExternal(memoryPageState.bank);
+  const vectorInput = document.getElementById("mem-bank-vector");
+  const vector = vectorInput ? vectorInput.checked === true : memoryPageState.bankVector === true;
+  memoryPageState.bankVector = vector;
+  if (button) {
+    button.disabled = true;
+    button.textContent = "接入中…";
+  }
+  try {
+    const response = await request("/api/v1/agent/memory/bank/external", {
+      method: "PUT",
+      body: JSON.stringify({ root, vector }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!memoryPageAlive(gen)) return;
+    if (!response.ok) {
+      const message = String(data.message || data.error || `接入失败：HTTP ${response.status}`);
+      memoryPageState.bankProbe = { ...(memoryPageState.bankProbe || {}), status: "error", root, error: message };
+      renderMemoryBank();
+      toast(message);
+      return;
+    }
+    memoryPageState.bankFormOpen = false;
+    memoryPageState.bankProbe = null;
+    memoryPageState.bankPath = "";
+    memoryPageState.bankVector = false;
+    // 换了库：边界原文与搜索结果都属于旧库，全部作废。
+    memoryPageState.bankCatalog = { loading: false, loaded: false, lines: [], error: "" };
+    memoryPageState.bankSearch = { query: "", running: false, hits: [], note: "", error: "" };
+    toast(wasActive ? "已更新外部记忆库目录" : "已接入外部记忆库；点上方「外部」启用");
+    await loadMemoryBank(gen);
+    if (memoryPageAlive(gen) && memoryBankActiveExternal(memoryPageState.bank)) {
+      void loadMemoryBankCatalog(gen);
+    }
+  } catch (error) {
+    if (error.message === "forbidden" || !memoryPageAlive(gen)) return;
+    const message = `接入失败：${error.message}`;
+    memoryPageState.bankProbe = { ...(memoryPageState.bankProbe || {}), status: "error", root, error: message };
+    renderMemoryBank();
+    toast(message);
+  }
+}
+
+/** PUT /bank {active}：成功就重渲染索引页（复用 wireMemorySettings 路径），不整页刷新。 */
+async function switchMemoryBank(active, gen) {
+  if (!memoryPageAlive(gen)) return;
+  if (memoryPageState.bank?.active === active) return;
+  try {
+    const response = await request("/api/v1/agent/memory/bank", {
+      method: "PUT",
+      body: JSON.stringify({ active }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!memoryPageAlive(gen)) return;
+    if (!response.ok) {
+      toast(String(data.message || data.error || `切换失败：HTTP ${response.status}`));
+      return;
+    }
+    const readonly =
+      active === "external" && memoryPageState.bank?.external?.capabilities?.write !== true;
+    toast(
+      active === "external"
+        ? readonly
+          ? "已切到外部记忆库（只读）：recall 读它，remember 不能写"
+          : "已切到外部记忆库：recall / remember 现在用它"
+        : "已切回内置库",
+    );
+    rerenderMemoryPage();
+  } catch (error) {
+    if (error.message === "forbidden") return;
+    toast(`切换失败：${error.message}`);
+  }
+}
+
+/** DELETE /bank/external：只删配置，不碰库目录；当前是 external 时服务端先切回 builtin。 */
+async function removeBankExternal(gen) {
+  if (!memoryPageAlive(gen)) return;
+  const external = memoryPageState.bank?.external;
+  if (!external) return;
+  const wasActive = memoryBankActiveExternal(memoryPageState.bank);
+  const ok = await openConfirm({
+    title: "移除外接记忆库",
+    message: `移除「${external.name}」的接入？`,
+    detail: wasActive
+      ? "当前正在用它；移除后会先切回内置库。库目录和里面的文件都不会动。"
+      : "只删掉这份接入配置；库目录和里面的文件都不会动。",
+    confirmText: "移除",
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    const response = await request("/api/v1/agent/memory/bank/external", { method: "DELETE" });
+    const data = await response.json().catch(() => ({}));
+    if (!memoryPageAlive(gen)) return;
+    if (!response.ok) {
+      toast(String(data.message || data.error || `移除失败：HTTP ${response.status}`));
+      return;
+    }
+    toast("已移除外接记忆库");
+    memoryPageState.bankCatalog = { loading: false, loaded: false, lines: [], error: "" };
+    memoryPageState.bankSearch = { query: "", running: false, hits: [], note: "", error: "" };
+    if (wasActive) rerenderMemoryPage();
+    else await loadMemoryBank(gen);
+  } catch (error) {
+    if (error.message === "forbidden") return;
+    toast(`移除失败：${error.message}`);
+  }
+}
+
+/** POST /bank/search：页面搜索只展示 ask.py 返回的片段（不提供 get / 全文回读）。 */
+async function searchMemoryBank(gen, button) {
+  if (!memoryPageAlive(gen)) return;
+  const input = document.getElementById("mem-bank-q");
+  const query = String(input?.value ?? memoryPageState.bankSearch.query ?? "").trim();
+  if (!query) {
+    input?.focus();
+    return;
+  }
+  if (memoryPageState.bankSearch.running) return;
+  const state = memoryPageState.bankSearch;
+  state.query = query;
+  state.running = true;
+  state.error = "";
+  state.hits = [];
+  state.note = "";
+  if (button) {
+    button.disabled = true;
+    button.textContent = "搜索中…";
+  }
+  renderMemoryBankSearch();
+  try {
+    const response = await request("/api/v1/agent/memory/bank/search", {
+      method: "POST",
+      body: JSON.stringify({ query, limit: 20 }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!memoryPageAlive(gen)) return;
+    if (!response.ok) {
+      state.error = String(data.message || data.error || `搜索失败：HTTP ${response.status}`);
+    } else {
+      state.hits = bankSearchHits(data);
+      state.note = String(data.unknown || "");
+    }
+  } catch (error) {
+    if (error.message === "forbidden") return;
+    state.error = `搜索失败：${error.message}`;
+  } finally {
+    state.running = false;
+    if (memoryPageAlive(gen)) {
+      renderMemoryBankSearch();
+      const searchButton = document.querySelector('#mem-bank [data-bank-action="search"]');
+      if (searchButton) {
+        searchButton.disabled = false;
+        searchButton.textContent = "搜索";
+      }
+    }
+  }
+}
+
+/** 卡上所有动作的入口（监听挂在 #mem-bank 上，卡体重建不掉线）。 */
+async function handleBankAction(action, button, gen) {
+  switch (action) {
+    case "seg": {
+      const next = button.getAttribute("data-bank-value") === "external" ? "external" : "builtin";
+      if (next === "external" && !memoryPageState.bank?.external) {
+        memoryPageState.bankFormOpen = true;
+        memoryPageState.bankProbe = null;
+        memoryPageState.bankVector = false;
+        renderMemoryBank();
+        toast("先选一个目录接入外部记忆库");
+        document.getElementById("mem-bank-path")?.focus();
+        return;
+      }
+      await switchMemoryBank(next, gen);
+      return;
+    }
+    case "form": {
+      const external = memoryPageState.bank?.external;
+      memoryPageState.bankFormOpen = true;
+      memoryPageState.bankProbe = null;
+      if (!memoryPageState.bankPath && external?.root) memoryPageState.bankPath = external.root;
+      memoryPageState.bankVector = external?.vector === true;
+      renderMemoryBank();
+      document.getElementById("mem-bank-path")?.focus();
+      return;
+    }
+    case "form-cancel":
+      memoryPageState.bankFormOpen = false;
+      memoryPageState.bankProbe = null;
+      renderMemoryBank();
+      return;
+    case "manual":
+      openBankManual();
+      return;
+    case "pick":
+      await pickBankDirectory();
+      return;
+    case "probe":
+      await probeMemoryBank(gen, button);
+      return;
+    case "add":
+      await saveBankExternal(gen, button);
+      return;
+    case "switch":
+      await switchMemoryBank(
+        button.getAttribute("data-bank-value") === "external" ? "external" : "builtin",
+        gen,
+      );
+      return;
+    case "remove":
+      await removeBankExternal(gen);
+      return;
+    case "search":
+      await searchMemoryBank(gen, button);
+      return;
+    case "retry":
+      button.disabled = true;
+      await refreshMemoryView(gen);
+      return;
+    default:
+      return;
+  }
+}
+
+/** 没有路由重渲染回调时的就地刷新：重问槽位，按当前态拉对应数据。 */
+async function refreshMemoryView(gen) {
+  const bank = await loadMemoryBank(gen);
+  if (!memoryPageAlive(gen)) return;
+  if (memoryPageState.bankMode === "enabled" && bank?.active === "external") {
+    await loadMemoryBankCatalog(gen);
+    return;
+  }
+  await Promise.all(builtinMemoryJobs(gen));
+}
+
+/** 切库后重渲染索引页：优先走 settings-router 注入的 renderSettings（重建卡与模块），
+ *  没有回调时就地刷新（不重建 DOM）。 */
+function rerenderMemoryPage() {
+  const rerender = memoryPageState.rerender;
+  if (typeof rerender === "function") {
+    try {
+      rerender();
+      return;
+    } catch {
+      // 掉到就地刷新
+    }
+  }
+  void refreshMemoryView(memoryPageState.gen);
 }
 
 /* ── 提醒沉淀（2026-11-19 批4）──────────────────────────────

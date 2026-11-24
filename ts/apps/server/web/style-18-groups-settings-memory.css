@@ -175,9 +175,56 @@
 /* 技能（2026-11-08 扫尾批 9-S；2026-11-13 用户拍板 A+C 版）
    一行 2–3 张等宽定高卡：名字回到正文最亮一档，摘要最多两行，建议 = 6px 色点 + 四个字；
    底部只留「用过几次 · 多久前」+ 开关 / 删除图标。时间、大小、来源与全文点开弹窗看。 */
-.sk-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+/* 技能页标题行（2026-11-23）：标题在左，动作按钮由 sectionMarkup 的 action 槽放在右侧；
+   .sk-count 只剩刷新失败提示（正常态隐藏）。页内各块之间的竖向间距交给 .set-sec 的 gap，
+   这里不再各自压一遍外边距。 */
 .sk-head-actions { display: flex; align-items: center; gap: 8px; flex: none; }
-.sk-path { margin-top: 2px; color: var(--text-3); font-family: var(--mono); font-size: 11px; overflow-wrap: anywhere; }
+.set-sec-title .sk-count { margin-left: 9px; }
+.sk-count { font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sk-count.is-error { color: var(--c-tertiary); }
+
+/* 技能库位置（2026-11-23）：一行一个来源，左列固定宽（来源名）、路径吃掉剩余宽度，
+   右侧定宽（个数 / 异常 / 移除）——换多少行都对齐，不再是一段会折行的长路径。 */
+.sk-loc-card {
+  margin: 0;
+  border: 1px solid var(--outline); border-radius: var(--r-md);
+  background: var(--surface); overflow: hidden;
+}
+.sk-loc-head { display: flex; align-items: center; gap: 8px; min-height: 34px; padding: 0 12px; }
+.sk-loc-title { font-size: 12px; font-weight: 500; color: var(--text-2); }
+.sk-loc-spacer { flex: 1; }
+.sk-loc-add { height: 24px; padding: 0 10px; font-size: 12px; }
+.sk-loc-rows { border-top: 1px solid var(--divider); }
+.sk-loc-row { display: flex; align-items: center; gap: 10px; min-height: 32px; padding: 5px 12px; }
+.sk-loc-row + .sk-loc-row { border-top: 1px solid var(--divider); }
+.sk-loc-kind {
+  flex: 0 0 auto; width: 68px; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 11px; color: var(--text-2);
+}
+.sk-loc-path {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--mono); font-size: 11px; color: var(--text-3);
+}
+.sk-loc-path.is-missing { color: var(--c-tertiary); }
+.sk-loc-count {
+  flex: none; width: 44px; text-align: right;
+  font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums;
+}
+.sk-loc-state {
+  flex: none; width: 62px; display: inline-flex; align-items: center; justify-content: flex-end; gap: 5px;
+  font-size: 11px; color: var(--text-3); white-space: nowrap;
+}
+.sk-loc-state::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; opacity: 0.6; }
+.sk-loc-state.is-missing { color: var(--c-tertiary); }
+.sk-loc-remove {
+  flex: none; width: 38px; padding: 0; border: 0; background: none;
+  font-family: inherit; font-size: 11px; color: var(--text-3); text-align: right; cursor: pointer;
+}
+.sk-loc-remove:hover { color: var(--text); }
+.sk-loc-remove.is-empty { visibility: hidden; }
+.sk-where { color: var(--text-2); }
 .sk-list { display: flex; flex-direction: column; }
 .sk-empty { padding: 20px; }
 /* 定高是刻意的：卡片墙一行三四张时，行高随摘要长短跳动会很难扫；截断的两行摘要
@@ -221,8 +268,8 @@
   font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums;
 }
 .sk-sep { margin: 0 3px; }
-/* 只读 / 久未使用只在 meta 里点一句，不再做成胶囊：卡片上只留一个视觉重点（名字） */
-.sk-ro { color: var(--text-3); }
+/* 只读 / 久未使用只在 meta 里点一句，不再做成胶囊：卡片上只留一个视觉重点（名字）。
+   2026-11-23：「只读」小字退役，来源与只读只在 hover 的 title 里说。 */
 .sk-stale { color: color-mix(in srgb, var(--c-tertiary) 78%, var(--text)); }
 .sk-item-actions { flex: none; display: flex; align-items: center; gap: 2px; }
 /* 内置技能（core）：没有启停位，小字只读标记代替开关（2026-11-16 工具裁剪 A） */
@@ -241,7 +288,7 @@
 
 /* 工具条（2026-11-13 二轮）：分类 / 排序两个下拉 + 一个批量开关。
    原来这里是一排 chips + 全开/全关/一键采纳四个按钮，按钮比卡片还抢眼。 */
-.sk-toolbar { display: flex; align-items: center; gap: 8px; margin: 0 0 16px; }
+.sk-toolbar { display: flex; align-items: center; gap: 8px; margin: 0; }
 .sk-toolbar-spacer { flex: 1; }
 .sk-select { position: relative; }
 .sk-select-btn {
@@ -280,7 +327,7 @@
 /* Agent 建议横幅（替代原来的「一键采纳」按钮）：只在还有没开的建议条目时出现 */
 .sk-advice-banner {
   display: flex; align-items: center; gap: 9px;
-  margin: 0 0 14px; padding: 8px 12px;
+  margin: 0; padding: 8px 12px;
   border: 1px solid var(--accent-line); border-radius: var(--r-md);
   background: var(--accent-soft); color: var(--text-2);
   font-size: 12px; line-height: 1.5;

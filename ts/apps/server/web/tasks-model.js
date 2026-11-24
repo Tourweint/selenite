@@ -92,6 +92,7 @@ const EMPLOYEE_LABEL = {
   "claude-code": "Claude Code",
   codex: "Codex",
   opencode: "OpenCode",
+  doubao: "豆包 CLI",
   mcp: "MCP",
   phone: "手机",
   native: "原生（旧）",
@@ -99,7 +100,7 @@ const EMPLOYEE_LABEL = {
   manager: "总管",
 };
 
-/** 外部打手区固定卡（2026-11-16 补三档 CLI）：id 就是 ticket.employee 的字面值 */
+/** 外部打手区固定卡（2026-11-16 补三档 CLI；2026-11-23 加豆包）：id 就是 ticket.employee 的字面值 */
 const TASK_HITTERS = [
   { id: "codebuddy", label: "CodeBuddy" },
   { id: "qoder-intl", label: "Qoder 国际" },
@@ -107,6 +108,7 @@ const TASK_HITTERS = [
   { id: "claude-code", label: "Claude Code" },
   { id: "codex", label: "Codex" },
   { id: "opencode", label: "OpenCode" },
+  { id: "doubao", label: "豆包 CLI" },
   { id: "phone", label: "手机" },
 ];
 

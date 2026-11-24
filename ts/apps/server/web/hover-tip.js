@@ -12,6 +12,7 @@ import { request } from "./net.js";
 import { formatTokenCount } from "./providers.js";
 import { KEY_MODEL_PROVIDER, KEY_THINKING, THINKING_LABELS, THINKING_LEVELS, clampThinking, currentThinking, setThinkingLevel } from "./shell.js";
 import { state } from "./state.js";
+import { createThinkingSlider } from "./thinking-slider.js";
 import { closePopover, markNativePopupsBroken, nativePopupsReady, openPopover, popoverOpen, toast } from "./ui-atoms.js";
 
 /* ── 全局悬停提示（2026-11-08，原「收起轨道 tooltip」泛化）──────────
@@ -545,15 +546,14 @@ function findCatalogModel(catalog, current) {
 }
 
 /** 菜单底部的常驻档位条；只有「能调」的模型才出现（单档 / 无档不摆假控件）。
- *  2026-11-21 用户拍板 B·填充滑轨（对比页三版挑的）翻掉分段按钮：轨道等分到该模型
- *  的支持档上，旋钮吸附——点轨道 / 拖旋钮都行；拖动过程只画不发包，松手才提交。
+ *  2026-11-21 用户拍板 B·填充滑轨（对比页三版挑的）翻掉分段按钮，滑块本体抽到
+ *  thinking-slider.js（2026-11-23 设置页默认模型卡复用同一件）；
  *  换模型重开菜单时 levels 跟着重画（只支持两档的自动退化成双态）。 */
 function thinkingFoot(catalog, menu) {
   if (!menu || menu.dataset.noThinking === "1") return null;
   const model = findCatalogModel(catalog, catalog.current);
   const levels = model && Array.isArray(model.thinkingLevels) ? model.thinkingLevels : [];
   if (levels.length < 2) return null;
-  const level = currentThinking();
 
   const foot = document.createElement("div");
   foot.className = "think-foot";
@@ -568,94 +568,12 @@ function thinkingFoot(catalog, menu) {
     "只作用于当前会话：关 = 直接答；低 / 中 / 高 = 让模型多想几步。改完下一轮生效。",
   );
 
-  const slider = document.createElement("div");
-  slider.className = "think-slider";
-  slider.setAttribute("role", "slider");
-  slider.setAttribute("aria-label", "思考强度");
-  slider.setAttribute("aria-valuemin", "0");
-  slider.setAttribute("aria-valuemax", String(levels.length - 1));
-  slider.tabIndex = 0;
-
-  const track = document.createElement("div");
-  track.className = "think-slider-track";
-  const rail = document.createElement("div");
-  rail.className = "think-slider-rail";
-  const fill = document.createElement("div");
-  fill.className = "think-slider-fill";
-  const knob = document.createElement("div");
-  knob.className = "think-slider-knob";
-  track.append(rail, fill, knob);
-
-  const value = document.createElement("span");
-  value.className = "think-slider-value";
-
-  let index = Math.max(0, levels.indexOf(level));
-  const place = (animate) => {
-    const ratio = levels.length > 1 ? index / (levels.length - 1) : 0;
-    slider.classList.toggle("is-animating", animate !== false);
-    const pos = `calc(7px + (100% - 14px) * ${ratio})`;
-    knob.style.left = pos;
-    // 已选段用 scaleX 填满（compositor 变换，不碰布局——用户担心的"卡"就防这里）；
-    // 整条 transform 内联（含 translateY 居中），别把 CSS 里的位移顶掉
-    fill.style.transform = `translateY(-50%) scaleX(${levels.length > 1 ? ratio : 0})`;
-    value.textContent = THINKING_LABELS[levels[index]] || levels[index];
-    slider.setAttribute("aria-valuenow", String(index));
-    slider.setAttribute("aria-valuetext", value.textContent);
-    slider.dataset.level = levels[index];
-  };
-  const commit = () => {
-    void chooseCurrentThinking(levels[index]);
-  };
-
-  // 点轨道 / 拖旋钮：pointerdown 起就地取最近档（关掉过渡跟手），pointerup 提交
-  const pickAt = (clientX) => {
-    const rect = track.getBoundingClientRect();
-    if (!rect.width) return;
-    const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
-    index = Math.round(ratio * (levels.length - 1));
-    place(false);
-  };
-  track.addEventListener("pointerdown", (event) => {
-    event.preventDefault();
-    track.setPointerCapture?.(event.pointerId);
-    slider.classList.add("is-dragging");
-    pickAt(event.clientX);
-    const move = (ev) => pickAt(ev.clientX);
-    const up = () => {
-      slider.classList.remove("is-dragging");
-      track.removeEventListener("pointermove", move);
-      track.removeEventListener("pointerup", up);
-      track.removeEventListener("pointercancel", up);
-      commit();
-    };
-    track.addEventListener("pointermove", move);
-    track.addEventListener("pointerup", up);
-    track.addEventListener("pointercancel", up);
+  const { slider } = createThinkingSlider({
+    levels,
+    level: currentThinking(),
+    ariaLabel: "思考强度",
+    onCommit: (next) => void chooseCurrentThinking(next),
   });
-  slider.addEventListener("keydown", (event) => {
-    const delta =
-      event.key === "ArrowRight" || event.key === "ArrowUp"
-        ? 1
-        : event.key === "ArrowLeft" || event.key === "ArrowDown"
-          ? -1
-          : 0;
-    if (!delta) return;
-    event.preventDefault();
-    index = Math.min(levels.length - 1, Math.max(0, index + delta));
-    place();
-    commit();
-  });
-  // 拨盘被 /mode 的 clamp 改写时（shell.js 同步）跟回实际档
-  slider.addEventListener("think-sync", (event) => {
-    const next = levels.indexOf(event.detail?.level);
-    if (next >= 0 && next !== index) {
-      index = next;
-      place();
-    }
-  });
-
-  place(false);
-  slider.append(track, value);
   foot.append(label, slider);
   return foot;
 }

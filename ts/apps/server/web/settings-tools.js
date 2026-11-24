@@ -1,5 +1,5 @@
 /**
- * 设置 → 工具（2026-11-17 全局工具池）
+ * 设置 → 工具（2026-11-17 全局工具池；2026-11-23 双栏泳池版式）
  *
  * 一页管所有模型可见工具：常驻（每轮带完整定义）还是按需（初始不进请求，
  * 模型要用先 tool_search 搜出来）。存 `.data/tool-pool.json` 的按需名单。
@@ -9,32 +9,37 @@
  *
  * 按人覆盖仍在「人设 → 某人 → 能用的工具」：勾选 = 能不能用，按需/常驻胶囊 = 提升。
  *
- * 2026-11-17 版式调整（用户反馈）：解释性文字收进标题/表头的悬停，不再常驻；
- * 行可点开看描述原文（列表里那行只放 80 字摘要）；「定义 / 用量 / 池」三列居中。
+ * 2026-11-23 版式（用户拍板「双栏泳池」）：左常驻右按需，栏头直接报个数与 token；
+ * 卡片可点开看说明原文与参数。池归属是这一页的第一信息，不再是一枚行尾小胶囊。
  */
 
 import { chevSvg } from "./icons.js";
 import { attr, esc } from "./markdown.js";
 import { request } from "./net.js";
 import { sectionMarkup } from "./settings-atoms.js";
+// 2026-11-24 M4：异常处理只做只读回显 + 打开插件页同一个弹层，不在这页做第二套保存逻辑。
+import { loadToolPolicy, openToolPolicyModal, toolPolicyConfigurable, toolPolicyLine } from "./settings-tool-policy.js";
 
 const TOOL_POOL_PATH = "/api/v1/agent/tool-pool";
+
+/** 唯一不能进按需池的工具：它是加载按需工具的唯一入口，服务端也会 400。 */
+const LOCKED_TOOL = "tool_search";
 
 const POOL_TIP =
   "常驻 = 每轮请求都带完整定义，占固定前缀；按需 = 初始不带，模型要用先 tool_search 搜出来。" +
   "这份名单全局生效；按人能不能用去「注入 → 人设 → 某人 → 能用的工具」。" +
   "工具的名字、描述和参数是代码资产，这里不能改文案。保存后需重启服务生效。";
 
-/** 页面骨架：标题悬停讲口径 + 待重启提示 + 表格卡；标题右侧「恢复默认 / 保存」。 */
+/** 页面骨架：标题悬停讲口径 + 待重启提示 + 双栏泳池；标题右侧「恢复默认 / 保存」。 */
 function toolPoolMarkup() {
   return sectionMarkup(
     `<span data-tip="${attr(POOL_TIP)}">工具池</span>`,
     `<p class="set-hint" id="tool-pool-pending" hidden></p>
-     <div class="card use-detail" id="tool-pool-card"><div class="use-loading">读取中…</div></div>`,
+     <div class="tool-pool-board" id="tool-pool-card"><div class="use-loading">读取中…</div></div>`,
     "",
     `<span class="tool-pool-actions">
        <span class="use-foot" id="tool-pool-dirty" hidden>有改动</span>
-       <button class="ghost" type="button" id="tool-pool-defaults" disabled data-tip="恢复成代码默认的 8 个按需工具">恢复默认</button>
+       <button class="ghost" type="button" id="tool-pool-defaults" data-tip="恢复成代码默认的 9 个按需工具">恢复默认</button>
        <button class="btn-primary" type="button" id="tool-pool-save" disabled data-tip="按需是注册期属性：保存后重启服务才生效">保存</button>
      </span>`,
   );
@@ -42,8 +47,8 @@ function toolPoolMarkup() {
 
 /**
  * 页内状态。`configured` = 正在编辑的按需名单；`initial` = 打开时（或上次保存后）的名单，
- * 用来算"有没有改动"。服务端返回的 payload 只在 apply 时整体落进 state，画表只读 state。
- * `open` = 展开了哪几行（重画后保持展开状态）。
+ * 用来算"有没有改动"。服务端返回的 payload 只在 apply 时整体落进 state，画板只读 state。
+ * `open` = 展开了哪几张卡（重画后保持展开状态）。
  */
 const state = {
   configured: new Set(),
@@ -75,10 +80,137 @@ function syncDirty() {
     current.length !== state.initial.length ||
     current.some((name) => !state.initial.includes(name));
   if (save) save.disabled = !changed;
+  // 恢复默认一直可用（2026-11-23 修）：旧版把 disabled 写死在标签上，按钮从没点得动过。
+  if (restore) restore.disabled = !state.enabled;
   if (dirtyTag) dirtyTag.hidden = !changed;
 }
 
-/** 只重画表格（切换 / 恢复默认都走这条，不重新拉数据）。 */
+/* ── 索引段 token 估算（页头那一行小字）──────────────────
+ * 与服务端 tool-index.ts 的文本、token-estimate.ts 的口径同一份：
+ * CJK 1 token/字，其它 1 token/4 字符。工具摘要直接用 payload 里的 summary
+ * （服务端就是 toolSummaryOf(description) 的结果）。这里只做展示，不改任何注入。 */
+const INDEX_TITLE =
+  '按需工具（初始不加载）：要用下面某个工具时，先调 tool_search({name:"工具名"}) 取完整定义，下一轮起它才可用。';
+const INDEX_TAIL = "先调 tool_search({name}) 取完整定义，下一轮起它才可用。";
+const CJK_CHAR =
+  /[\u3000-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]/;
+
+function estimateTokens(text) {
+  let cjk = 0;
+  let other = 0;
+  for (const char of String(text)) {
+    if (CJK_CHAR.test(char)) cjk += 1;
+    else other += 1;
+  }
+  return Math.ceil(cjk + other / 4);
+}
+
+function indexTokensOf(items) {
+  if (!items.length) return 0;
+  return estimateTokens(
+    [
+      INDEX_TITLE,
+      ...items.map((tool) => `- ${tool.name}：${String(tool.summary || "")}`),
+      INDEX_TAIL,
+    ].join("\n"),
+  );
+}
+
+function usageText(tool) {
+  const usage = state.usage.get(tool.name);
+  if (!usage) return "—";
+  const count = Number(usage.count) || 0;
+  const loads = Number(usage.loads) || 0;
+  if (!count && !loads) return "没用过";
+  return [count ? `用过 ${count} 次` : "", loads ? `搜出 ${loads} 次` : ""]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+/** 一张工具卡：名字当主角，池状态由所在栏 + 底部动作表达；点开看说明原文与参数。 */
+function cardHtml(tool, deferred) {
+  const open = state.open.has(tool.name);
+  const locked = tool.name === LOCKED_TOOL;
+  const name = String(tool.name || "");
+  const tokens = Number(tool.tokens) || 0;
+  const summaryText = String(tool.summary || "（没有摘要）");
+  // 原文保留全文，只去掉 Markdown 强调 / 行内码符号（同摘要的清洗口径，别在页面上露出 **）
+  const full = String(tool.description || tool.summary || "").replace(/\*\*|__|`/g, "");
+  const params = JSON.stringify(tool.parameters ?? {}, null, 2);
+  const policyLine = toolPolicyLine(name);
+  const policyBlock = policyLine
+    ? `<div class="tool-pool-detail-block tool-pool-policy">
+          <div class="tool-pool-detail-label">异常处理</div>
+          <div class="tool-pool-policy-row">
+            <span class="tool-pool-policy-text" data-tool-policy-line="${attr(name)}">${esc(policyLine)}</span>
+            <button class="ghost is-mini" type="button" data-tool-policy-open="${attr(name)}">${
+              toolPolicyConfigurable(name) ? "调整" : "说明"
+            }</button>
+          </div>
+        </div>`
+    : "";
+  const moveLabel = deferred ? "← 移到常驻" : "移到按需 →";
+  const moveTip = deferred
+    ? "移到常驻：每轮请求都带完整定义"
+    : "移到按需：初始不进请求，模型要用先 tool_search 搜出来";
+  const move = locked
+    ? `<span class="tool-pool-lock" title="tool_search 是加载按需工具的唯一入口，不能进按需池">加载入口</span>`
+    : `<button class="tool-pool-move" type="button" data-pool-for="${attr(name)}" data-on="${deferred ? "1" : "0"}" title="${attr(moveTip)}"${state.enabled ? "" : " disabled"}>${moveLabel}</button>`;
+  return `<article class="tool-pool-card${open ? " is-open" : ""}" data-tool-card="${attr(name)}">
+    <button class="tool-pool-open" type="button" data-tool-open="${attr(name)}" aria-expanded="${open ? "true" : "false"}" title="点开看说明原文与参数">
+      <span class="tool-pool-top">
+        ${chevSvg("tool-pool-caret chev")}
+        <span class="tool-pool-name">${esc(name)}</span>
+        <span class="tool-pool-card-cost" title="完整定义约 ${tokens} token">${tokens} token</span>
+      </span>
+      <span class="tool-pool-summary" title="${attr(summaryText)}">${esc(summaryText)}</span>
+    </button>
+    <div class="tool-pool-foot">
+      <span class="tool-pool-usage">${esc(usageText(tool))}</span>
+      ${move}
+    </div>
+    <div class="tool-pool-detail"${open ? "" : " hidden"}>
+      <div class="tool-pool-detail-inner">
+        ${policyBlock}
+        <div class="tool-pool-detail-block">
+          <div class="tool-pool-detail-label">说明原文</div>
+          <div class="tool-pool-desc">${esc(full)}</div>
+        </div>
+        <div class="tool-pool-detail-block">
+          <div class="tool-pool-detail-label">参数（JSON Schema）</div>
+          <pre class="tool-pool-params">${esc(params)}</pre>
+        </div>
+      </div>
+    </div>
+  </article>`;
+}
+
+/** 一栏（常驻 / 按需）：栏头报个数与 token；空栏也保留，页面骨架不跳。 */
+function columnHtml(items, deferred) {
+  const on = !deferred;
+  const tokens = on
+    ? items.reduce((sum, tool) => sum + (Number(tool.tokens) || 0), 0)
+    : indexTokensOf(items);
+  const cost = on
+    ? `${tokens.toLocaleString("zh-CN")} token / 轮`
+    : items.length
+      ? `工具索引 ${tokens.toLocaleString("zh-CN")} token`
+      : "空";
+  const empty = on ? "没有常驻工具，所有工具都要先搜一次。" : "没有按需工具，工具面全部常驻。";
+  return `<section class="tool-pool-col" data-pool="${on ? "on" : "off"}">
+    <div class="tool-pool-head">
+      <span class="tool-pool-dot is-${on ? "on" : "off"}"></span>
+      <span class="tool-pool-title">${on ? "常驻池" : "按需池"}</span>
+      <span class="tool-pool-count">${items.length}</span>
+      <span class="tool-pool-cost">${cost}</span>
+    </div>
+    <div class="tool-pool-cards">${
+      items.length ? items.map((tool) => cardHtml(tool, deferred)).join("") : `<div class="tool-pool-empty">${empty}</div>`
+    }</div>
+  </section>`;
+}
+
+/** 只重画泳池（切池 / 恢复默认都走这条，不重新拉数据）。 */
 function drawToolPool() {
   const card = document.getElementById("tool-pool-card");
   if (!card) return;
@@ -86,60 +218,9 @@ function drawToolPool() {
     card.innerHTML = `<div class="use-empty"><div class="use-empty-title">没有可配置的工具</div><div class="use-empty-hint">服务端没回工具目录；工具面为空时没有可调的池子。</div></div>`;
     return;
   }
-  const rows = state.tools
-    .map((tool) => {
-      const usage = state.usage.get(tool.name);
-      const usageText = usage
-        ? `用过 ${Number(usage.count) || 0}${usage.loads ? ` · 搜出 ${usage.loads}` : ""}`
-        : "—";
-      const deferred = state.configured.has(tool.name);
-      const open = state.open.has(tool.name);
-      // 原文保留全文，只去掉 Markdown 强调 / 行内码符号（同摘要的清洗口径，别在页面上露出 **）
-      const full = String(tool.description || tool.summary || "").replace(/\*\*|__|`/g, "");
-      const params = JSON.stringify(tool.parameters ?? {}, null, 2);
-      return `<tr class="tool-pool-row${open ? " is-open" : ""}" data-tool-row="${attr(tool.name)}" aria-expanded="${open ? "true" : "false"}">
-        <td class="model">
-          <div class="use-model-line">
-            ${chevSvg("tool-pool-caret chev")}
-            <span class="use-mono">${esc(tool.name)}</span>
-          </div>
-          <div class="tool-pool-sum">${esc(String(tool.summary || ""))}</div>
-        </td>
-        <td class="tool-pool-col">${Number(tool.tokens) || 0} token</td>
-        <td class="tool-pool-col">${esc(usageText)}</td>
-        <td class="tool-pool-col">
-          <button class="pf-tool-mode" type="button" data-pool-for="${attr(tool.name)}" data-on="${deferred ? "1" : "0"}"${state.enabled ? "" : " disabled"}>${deferred ? "按需" : "常驻"}</button>
-        </td>
-      </tr>
-      <tr class="tool-pool-detail" data-detail-for="${attr(tool.name)}"${open ? "" : " hidden"}>
-        <td colspan="4">
-          <div class="tool-pool-detail-inner">
-            <div class="tool-pool-detail-block">
-              <div class="tool-pool-detail-label">说明原文</div>
-              <div class="tool-pool-desc">${esc(full)}</div>
-            </div>
-            <div class="tool-pool-detail-block">
-              <div class="tool-pool-detail-label">参数（JSON Schema）</div>
-              <pre class="tool-pool-params">${esc(params)}</pre>
-            </div>
-          </div>
-        </td>
-      </tr>`;
-    })
-    .join("");
-  card.innerHTML = `
-    <div class="use-table-wrap">
-      <table class="use-table tool-pool-table">
-        <thead><tr>
-          <th scope="col">工具</th>
-          <th scope="col" class="tool-pool-col" data-tip="工具名 + 描述 + 参数的精简 JSON 估算（口径同设置→上下文）">定义</th>
-          <th scope="col" class="tool-pool-col" data-tip="模型真实执行完的次数 · 被 tool_search 搜出来的次数">用量</th>
-          <th scope="col" class="tool-pool-col" data-tip="${attr(POOL_TIP)}">池</th>
-        </tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
-    </div>
-    <div class="use-foot">共 ${state.tools.length} 个工具，按需 ${state.configured.size} 个。点一行看完整定义（说明 + 参数）。</div>`;
+  const on = state.tools.filter((tool) => !state.configured.has(tool.name));
+  const off = state.tools.filter((tool) => state.configured.has(tool.name));
+  card.innerHTML = `${columnHtml(on, false)}${columnHtml(off, true)}`;
   syncDirty();
 }
 
@@ -184,7 +265,12 @@ async function loadToolPool() {
   if (!card) return;
   card.innerHTML = `<div class="use-loading">读取中…</div>`;
   try {
-    const [payload, usage] = await Promise.all([fetchToolPool(), fetchToolUsage()]);
+    const [payload, usage] = await Promise.all([
+      fetchToolPool(),
+      fetchToolUsage(),
+      // 异常处理是旁路：端点 404（总开关关）或读失败都只让那一行不出现，不挡工具池本体。
+      loadToolPolicy({ fresh: true }).catch(() => null),
+    ]);
     state.usage = usage;
     applyPayload(payload);
     setPending(pendingTextOf(payload));
@@ -198,15 +284,14 @@ async function loadToolPool() {
 
 /**
  * 展开 / 收起的过渡（2026-11-18 用户口径：不要求流式，渐显 + 高度撑开就够）。
- * 动的是详情行里的 `.tool-pool-detail-inner`，不是 `<tr>`：表格行本身不能可靠地做
- * 高度过渡。动画只走一遍、**不写内联终态**——结束时自然回落到 CSS 的真实高度与透明度，
+ * 动的是卡内 `.tool-pool-detail-inner`，不是卡片本身：收起时动画跑完再把整块藏掉。
+ * 动画只走一遍、**不写内联终态**——结束时自然回落到 CSS 的真实高度与透明度，
  * 不必依赖 onfinish 清理，动画对象被取消也不会留下「高度 0、内容看不见」的坏状态。
- * 收起才需要 onfinish 把整行藏掉；万一它没跑到（页面被挂起），留下的也只是完整内容。
  * 连点先取消上一段，不叠动画。
  */
 const detailAnimations = new WeakMap();
 
-function setRowOpen(detail, open) {
+function setCardOpen(detail, open) {
   const inner = detail.querySelector(".tool-pool-detail-inner");
   if (!inner) {
     detail.hidden = !open;
@@ -214,7 +299,7 @@ function setRowOpen(detail, open) {
   }
   const previous = detailAnimations.get(inner);
   if (previous) previous.cancel();
-  // 先让行可见（收起动画要从有高度开始量）
+  // 先让块可见（收起动画要从有高度开始量）
   if (open) detail.hidden = false;
 
   const reduce = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -237,25 +322,24 @@ function setRowOpen(detail, open) {
   );
   detailAnimations.set(inner, animation);
   animation.onfinish = () => {
-    // 先藏行再取消动画：同一任务内完成，中间不会有一次「高度回到完整值」的绘制
+    // 先藏块再取消动画：同一任务内完成，中间不会有一次「高度回到完整值」的绘制
     if (!open) detail.hidden = true;
     animation.cancel();
     detailAnimations.delete(inner);
   };
 }
 
-/** 展开 / 收起一行：只动这一行 + 它的详情行，不重画整表。 */
-function toggleRow(card, row) {
-  const name = row.dataset.toolRow;
+/** 展开 / 收起一张卡：只动这张卡，不重画整个泳池。 */
+function toggleCard(card) {
+  const name = card.getAttribute("data-tool-card");
   if (!name) return;
-  const detail = row.nextElementSibling;
-  if (!detail || detail.dataset.detailFor !== name) return;
   const open = !state.open.has(name);
   if (open) state.open.add(name);
   else state.open.delete(name);
-  row.classList.toggle("is-open", open);
-  row.setAttribute("aria-expanded", open ? "true" : "false");
-  setRowOpen(detail, open);
+  card.classList.toggle("is-open", open);
+  card.querySelector("[data-tool-open]")?.setAttribute("aria-expanded", open ? "true" : "false");
+  const detail = card.querySelector(".tool-pool-detail");
+  if (detail) setCardOpen(detail, open);
 }
 
 function wireToolPool() {
@@ -266,22 +350,30 @@ function wireToolPool() {
 
   card.addEventListener("click", (event) => {
     const target = event.target instanceof Element ? event.target : null;
-    const chip = target?.closest(".pf-tool-mode");
-    // 池胶囊优先：点它只切池，不展开行。
-    if (chip && card.contains(chip)) {
-      const name = chip.dataset.poolFor;
+    // 异常处理「调整」：打开插件页同一个弹层，保存逻辑只有一份（2026-11-24 M4）。
+    const policyOpen = target?.closest("[data-tool-policy-open]");
+    if (policyOpen && card.contains(policyOpen)) {
+      event.stopPropagation();
+      void openToolPolicyModal(policyOpen.getAttribute("data-tool-policy-open") || "");
+      return;
+    }
+    // 池动作优先：点它只切池，不展开卡。
+    const move = target?.closest("[data-pool-for]");
+    if (move && card.contains(move)) {
+      const name = move.getAttribute("data-pool-for");
       if (!name) return;
       if (state.configured.has(name)) state.configured.delete(name);
       else state.configured.add(name);
-      // 只改这一枚胶囊，不整表重画（避免打断滚动位置）。
-      const deferred = state.configured.has(name);
-      chip.dataset.on = deferred ? "1" : "0";
-      chip.textContent = deferred ? "按需" : "常驻";
-      syncDirty();
+      // 换栏后不保持展开：卡换了一栏，展开态跟着内容走反而更难找。
+      state.open.delete(name);
+      drawToolPool();
+      // 整板重画后把焦点送回这张卡的池动作上，键盘连续操作不会掉回页面顶部。
+      card.querySelector(`[data-tool-card="${name}"] [data-pool-for="${name}"]`)?.focus();
       return;
     }
-    const row = target?.closest("tr[data-tool-row]");
-    if (row && card.contains(row)) toggleRow(card, row);
+    const open = target?.closest("[data-tool-open]");
+    const article = open?.closest("[data-tool-card]");
+    if (open && article && card.contains(article)) toggleCard(article);
   });
 
   restore?.addEventListener("click", () => {

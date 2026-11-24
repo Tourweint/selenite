@@ -382,13 +382,12 @@ el.groupAtBtn?.addEventListener("click", () => {
   updateGroupAtPop();
 });
 // 群组轨道钮的点击改挂悬停卡开关（见轨道悬停浮卡段，2026-11-13）——
-// 原「点一下直接进群组列表页」退役，进列表的入口留在卡的「所有群聊 →」与展开态分区。
+// 原「点一下直接进群组列表页」退役，进列表的入口留在卡的「所有群聊 →」与展开态分区的 ⋯ 菜单。
 // 分组头的折叠由上面 SIDE_SECTIONS 那个循环统一注册；**这里不要再绑一次**——
 // 同一元素上两个 toggleSection 会互相抵消（点一下收起、紧接着又展开），
 // 表现成"群组点了没反应、也没有动画"（2026-11-07 实测踩到）。
-// 进整页的入口都挂在分区体内的链接行 / 群行上。
-// 群组 ⋯（2026-11-14 由 ＋ 改）：菜单只有「新建群组」，点开先进群组页再建，
-// 与旧按钮同一路径；群组未启用时整颗按钮 disabled（见 groups-base 的可用性同步）。
+// 群组 ⋯（2026-11-14 由 ＋ 改）：建群 + 进全部群聊（2026-11-23 由分区底部链接行收进来）。
+// 建群仍先落到群组页再建，与原路径一致；群组未启用时整颗按钮 disabled（见 groups-base 的可用性同步）。
 el.secGroupsMore?.addEventListener("click", () => {
   openSecMenu(el.secGroupsMore, [
     {
@@ -398,11 +397,8 @@ el.secGroupsMore?.addEventListener("click", () => {
         void openCreateGroupModal();
       },
     },
+    { label: "所有群聊", run: () => go("groups") },
   ]);
 });
-/* 「所有群聊」：分区底部那一行（2026-11-07 用户口径「放在群组展开之后的底下，
-   不要放在返回之后」）。它只负责去列表态；群会话里点它同样落到 #/groups，
-   不必先按顶栏返回键再找入口。 */
-el.secGroupsAll?.addEventListener("click", () => go("groups"));
 
 export { confirmDeleteGroup, fetchPartnerOptions, patchGroup, renderGroupSettingsMembers, renderGroupSettingsReply };

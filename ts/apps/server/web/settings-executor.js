@@ -14,7 +14,8 @@
  *
  * 页面结构：
  *   ① 默认派给谁（下拉；phone/mcp 锁定只读）
- *   ② 每个可选 CLI 一张卡：模型输入 + 清单下拉 + 权限三档（该 CLI 不支持权限就写"固定"）
+ *   ② 每个可选 CLI 一张卡：模型输入 + 清单下拉 + 权限档（按该 CLI 实际支持的档位画；
+ *     2026-11-23 起用服务端 `permissionOptions`，没有该字段回落旧的 `permissions`）
  *   ③ 一个保存按钮：改完一次提交；下一次派活生效（续跑沿用原单快照）
  */
 
@@ -44,8 +45,8 @@ const pendingLists = new Set();
  * 本机内核的干活模型清单（2026-11-19 模型分工）：来自服务端已连接供应商目录，
  * 不是 CLI 探测。`entries` = [{ providerId, providerName, modelId, hasKey }]。
  */
-let nativeCatalog = null;
-let nativeCatalogPending = false;
+let poolCatalog = null;
+let poolCatalogPending = false;
 /** 当前打开的 { menu, kind, trigger, box }；面板挂在 body 下，关 = 藏起来。
  *  trigger = 开它的按钮（aria-expanded 挂这上面）；box = 触发区域（点里面不算外点）。 */
 let openMenu = null;
@@ -94,8 +95,8 @@ export async function wireExecutorSettings() {
     orphan.remove();
   }
   // 每次进页现拉本机模型清单：供应商可能刚改过。
-  nativeCatalog = null;
-  nativeCatalogPending = false;
+  poolCatalog = null;
+  poolCatalogPending = false;
 
   /** 行内小字只放状态与报错；解释一律进 data-tip。 */
   const setHint = (text) => {
@@ -144,10 +145,10 @@ export async function wireExecutorSettings() {
     profiles.innerHTML = selectable
       .map((kind) => profileCard(kind, data.profiles?.[kind.id] || {}, kind.id === data.employee))
       .join("");
-    // native 的供应商 id 挂在 input 上（2026-11-19）；保存时原样带回，回显时用来对勾。
+    // 本机池的供应商 id 挂在 input 上（2026-11-19）；保存时原样带回，回显时用来对勾。
     for (const input of profiles.querySelectorAll("[data-model]")) {
       const kind = input.dataset.model || "";
-      if (kind === "native") input.dataset.providerId = data.profiles?.[kind]?.providerId || "";
+      if (kind === "pool") input.dataset.providerId = data.profiles?.[kind]?.providerId || "";
     }
     for (const seg of profiles.querySelectorAll(".segmented")) mountSegmented(seg);
     for (const seg of profiles.querySelectorAll("[data-perm]")) {
@@ -164,7 +165,7 @@ export async function wireExecutorSettings() {
     for (const input of profiles.querySelectorAll("[data-model]")) {
       input.addEventListener("input", () => {
         // 手打模型名 = 供应商不再确定；从清单点选时会在 dispatch 之后补回 providerId。
-        if (input.dataset.model === "native") delete input.dataset.providerId;
+        if (input.dataset.model === "pool") delete input.dataset.providerId;
         markDirty();
         // 面板开着时把输入当筛选词用
         if (openMenu?.kind === input.dataset.model) renderModelMenu(input.dataset.model);
@@ -313,14 +314,21 @@ export async function wireExecutorSettings() {
     if (!current || dirty === false) return;
     const payload = { employee: select.dataset.value || "", profiles: {} };
     for (const kind of current.kinds.filter((item) => item.selectable)) {
-      // native 也存 model（2026-11-16 批1）；2026-11-19 起留空 = 跟随默认模型，
+      // 本机池也存 model（2026-11-16 批1）；2026-11-19 起留空 = 跟随默认模型，
       // 选中清单里的模型时再带供应商 id（只给服务端解析 baseUrl/keyEnv 用）。
       const input = document.querySelector(`[data-model="${cssEscape(kind.id)}"]`);
       const seg = document.querySelector(`[data-perm="${cssEscape(kind.id)}"]`);
       const profile = { model: input?.value ?? "" };
-      if (kind.id === "native") profile.providerId = input?.dataset.providerId || "";
+      if (kind.id === "pool") profile.providerId = input?.dataset.providerId || "";
       const checked = seg?.querySelector('button[aria-checked="true"]');
-      if (checked?.dataset.value) profile.permission = checked.dataset.value;
+      if (checked?.dataset.value) {
+        profile.permission = checked.dataset.value;
+      } else {
+        // 老配置的值不在当前档位里（如豆包 read / OpenCode edit）：界面不画它，
+        // 保存时原样带回，避免「只改了模型」却把权限静默改成 env 缺省（2026-11-23）。
+        const previous = current.profiles?.[kind.id]?.permission;
+        if (previous) profile.permission = previous;
+      }
       payload.profiles[kind.id] = profile;
     }
     save.disabled = true;
@@ -356,10 +364,10 @@ export async function wireExecutorSettings() {
 
 /* ---- 模型清单下拉（面板挂 body，fixed 定位绕开 .card 的 overflow 裁切） ---- */
 
-/** 本机内核的清单来自已连接供应商目录（`GET /agent/model`），不 spawn CLI。 */
-async function ensureNativeCatalog() {
-  if (nativeCatalog || nativeCatalogPending) return;
-  nativeCatalogPending = true;
+/** 本机池的清单来自已连接供应商目录（`GET /agent/model`），不 spawn CLI。 */
+async function ensurePoolCatalog() {
+  if (poolCatalog || poolCatalogPending) return;
+  poolCatalogPending = true;
   try {
     const response = await request("/api/v1/agent/model", { cache: "no-store" });
     if (!response.ok) throw new Error(String(response.status));
@@ -379,13 +387,13 @@ async function ensureNativeCatalog() {
         });
       }
     }
-    nativeCatalog = {
+    poolCatalog = {
       entries,
       current: body.current || null,
       message: entries.length ? "" : "还没有已连接的模型：先到设置 → 模型里配供应商",
     };
   } catch (error) {
-    nativeCatalog = {
+    poolCatalog = {
       entries: [],
       current: null,
       message:
@@ -394,15 +402,15 @@ async function ensureNativeCatalog() {
           : "取清单失败，稍后再试",
     };
   } finally {
-    nativeCatalogPending = false;
-    if (openMenu?.kind === "native") renderModelMenu("native");
+    poolCatalogPending = false;
+    if (openMenu?.kind === "pool") renderModelMenu("pool");
   }
 }
 
 /** 拉清单（空 model = 只列清单，不真调模型）；同一 kind 并发去重。 */
 async function ensureList(kind) {
-  if (kind === "native") {
-    void ensureNativeCatalog();
+  if (kind === "pool") {
+    void ensurePoolCatalog();
     return;
   }
   if (modelLists.has(kind) || pendingLists.has(kind)) return;
@@ -472,8 +480,8 @@ function closeModelMenu() {
 function renderModelMenu(kind) {
   const menu = document.querySelector(`[data-model-menu="${cssEscape(kind)}"]`);
   if (!menu || menu.hidden) return;
-  if (kind === "native") {
-    renderNativeModelMenu(menu);
+  if (kind === "pool") {
+    renderPoolModelMenu(menu);
     return;
   }
   const input = document.querySelector(`[data-model="${cssEscape(kind)}"]`);
@@ -531,21 +539,21 @@ function renderModelMenu(kind) {
 }
 
 /**
- * 本机内核的模型清单（2026-11-19 模型分工）：
+ * 本机池的模型清单（2026-11-19 模型分工）：
  * 第一行「跟随默认模型」= 留空；其余行来自已连接供应商，点选后把 providerId 记到 input 上。
  */
-function renderNativeModelMenu(menu) {
-  const input = document.querySelector('[data-model="native"]');
+function renderPoolModelMenu(menu) {
+  const input = document.querySelector('[data-model="pool"]');
   menu.replaceChildren();
   const note = document.createElement("div");
   note.className = "executor-model-note";
-  if (!nativeCatalog) {
+  if (!poolCatalog) {
     note.textContent = "取清单中…";
     menu.append(note);
     return;
   }
   const filter = (input?.value ?? "").trim().toLowerCase();
-  const entries = nativeCatalog.entries.filter((entry) => {
+  const entries = poolCatalog.entries.filter((entry) => {
     if (!filter) return true;
     return (
       entry.modelId.toLowerCase().includes(filter) ||
@@ -554,10 +562,10 @@ function renderNativeModelMenu(menu) {
   });
   const shown = entries.slice(0, 800);
   note.textContent = filter
-    ? `匹配 ${entries.length} / ${nativeCatalog.entries.length} 个`
-    : nativeCatalog.entries.length
-      ? `共 ${nativeCatalog.entries.length} 个已连接模型`
-      : nativeCatalog.message || "还没有已连接的模型";
+    ? `匹配 ${entries.length} / ${poolCatalog.entries.length} 个`
+    : poolCatalog.entries.length
+      ? `共 ${poolCatalog.entries.length} 个已连接模型`
+      : poolCatalog.message || "还没有已连接的模型";
   menu.append(note);
 
   if (!filter) {
@@ -574,7 +582,7 @@ function renderNativeModelMenu(menu) {
     name.textContent = "跟随默认模型";
     const meta = document.createElement("span");
     meta.className = "model-meta";
-    meta.textContent = nativeCatalog.current?.modelId || "设置 → 模型";
+    meta.textContent = poolCatalog.current?.modelId || "设置 → 模型";
     button.append(name, meta);
     button.addEventListener("click", () => {
       if (input) {
@@ -588,7 +596,7 @@ function renderNativeModelMenu(menu) {
     menu.append(follow);
   }
 
-  if (nativeCatalog.entries.length > 0 && entries.length === 0) {
+  if (poolCatalog.entries.length > 0 && entries.length === 0) {
     menu.append(menuNote("没有匹配的模型名"));
     return;
   }
@@ -674,19 +682,28 @@ window.addEventListener(
 );
 
 function profileCard(kind, profile, isCurrent) {
-  const permissions = Array.isArray(kind.permissions) ? kind.permissions : null;
-  const permissionRow = permissions
+  // 2026-11-23 按厂商收口：优先用服务端给的 permissionOptions（value 仍是内部三值，
+  // label 是该 CLI 自己的档名）；没有该字段时回落旧的 permissions 三段，行为不变。
+  const options =
+    Array.isArray(kind.permissionOptions) && kind.permissionOptions.length > 0
+      ? kind.permissionOptions
+      : Array.isArray(kind.permissions)
+        ? kind.permissions.map((value) => ({ value, label: PERMISSION_LABEL[value] || value }))
+        : null;
+  const permissionRow = options
     ? `<div class="divider"></div>
        <div class="row">
          <div class="row-main">
-           <div class="row-label" data-tip="只读不改文件；可改能写项目；全权连命令都不问。">权限</div>
+           <div class="row-label" data-tip="按该 CLI 实际支持的档位选择；不同 CLI 的档名与含义不同。">权限</div>
          </div>
          <div class="row-control">
            <div class="segmented slide" role="radiogroup" data-perm="${attr(kind.id)}" aria-label="${attr(kind.label)} 权限">
-             ${permissions
+             ${options
                .map(
-                 (value) =>
-                   `<button type="button" data-value="${attr(value)}" aria-checked="${profile.permission === value}">${esc(PERMISSION_LABEL[value] || value)}</button>`,
+                 (option) =>
+                   `<button type="button" data-value="${attr(option.value)}"${
+                     option.hint ? ` data-tip="${attr(`${option.label}：${option.hint}`)}"` : ""
+                   } aria-checked="${profile.permission === option.value}">${esc(option.label)}</button>`,
                )
                .join("")}
            </div>
@@ -696,21 +713,21 @@ function profileCard(kind, profile, isCurrent) {
        <div class="row">
          <div class="row-main">
            <div class="row-label" data-tip="${attr(
-             kind.id === "native"
-               ? "权限由本机内核权限策略管（设置 → 权限）。"
+             kind.id === "pool"
+               ? "权限由池内工具白名单管：read / write / edit / bash / escalate。"
                : kind.note || "",
            )}">权限</div>
          </div>
          <div class="row-control"><span class="set-hint">${esc(
-           kind.id === "native" ? "本机策略管" : "固定全权",
+           kind.id === "pool" ? "池白名单管" : "固定全权",
          )}</span></div>
        </div>`;
 
   // 卡片标题的解释（额度 / 边界 / 留空语义）全收进 data-tip，不常驻。
-  // native 的留空语义由服务端 kind.note 给（2026-11-19 模型分工），别在两端各写一份。
+  // 本机池的留空语义由服务端 kind.note 给（2026-11-19 模型分工），别在两端各写一份。
   const labelTips = [];
   if (kind.note) labelTips.push(kind.note);
-  if (kind.id !== "native") labelTips.push("模型留空 = 跟随该 CLI 自己的配置。");
+  if (kind.id !== "pool") labelTips.push("模型留空 = 跟随该 CLI 自己的配置。");
 
   return `<div class="card executor-card" data-executor-card="${attr(kind.id)}">
     <div class="row">
@@ -719,7 +736,7 @@ function profileCard(kind, profile, isCurrent) {
       </div>
       <div class="row-control">
         ${
-          kind.id === "native"
+          kind.id === "pool"
             ? `<div class="executor-model-row">
                  <div class="executor-model-box" data-model-box="${attr(kind.id)}">
                    <input class="set-input executor-model" data-model="${attr(kind.id)}"
@@ -728,7 +745,7 @@ function profileCard(kind, profile, isCurrent) {
                           aria-label="${attr(kind.label)} 的模型"
                           autocomplete="off" spellcheck="false" />
                    <button class="executor-model-toggle" type="button" data-model-toggle="${attr(kind.id)}"
-                           aria-label="展开本机内核的模型清单"
+                           aria-label="展开本机执行器池的模型清单"
                            data-tip="从已连接的供应商里选干活模型；第一行「跟随默认模型」= 跟设置 → 模型的默认。在输入框打字可筛选">${ARROW_SVG}</button>
                    <div class="executor-model-menu" data-model-menu="${attr(kind.id)}" hidden></div>
                  </div>
@@ -752,7 +769,7 @@ function profileCard(kind, profile, isCurrent) {
       </div>
     </div>
     ${
-      kind.id === "native"
+      kind.id === "pool"
         ? ""
         : `<div class="set-hint executor-probe-status" data-probe-status="${attr(kind.id)}" hidden></div>`
     }

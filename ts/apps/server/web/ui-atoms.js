@@ -153,7 +153,9 @@ function openModal(title, build, { className = "", onClose = null, closeOnMask =
   // 强制一帧，连续打开/关闭时 100ms 动画才会重放
   void el.modal.offsetWidth;
   el.modal.classList.add("is-open");
-  const first = el.modalBody.querySelector("input, textarea, select, button");
+  // 首个控件不认被自绘下拉藏起来的原 select（2026-11-23）：它不可聚焦，
+  // 焦点会直接落空；排除后命中紧跟着的触发钮。
+  const first = el.modalBody.querySelector("input, textarea, select:not(.sel-src), button");
   if (first instanceof HTMLElement) {
     first.focus();
     if (first instanceof HTMLInputElement) first.select();

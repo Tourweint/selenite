@@ -8,7 +8,7 @@
  */
 
 import { paintAvatar, partnerDotClass } from "./avatar.js";
-import { openConversation, startNewChat } from "./chat-open.js";
+import { openConversation } from "./chat-open.js";
 import { RECENTS_LIMIT, attachChatContextMenu, chatLabel, loadChats, recentChatsOrdered } from "./chats-list.js";
 import { el } from "./dom.js";
 import { groups, renderGroupRows } from "./groups-base.js";
@@ -293,10 +293,10 @@ function renderRailChatsCard() {
     list.append(row);
   }
   menu.append(railCardFoot([
-    ["新建对话", () => {
+    ["新建任务", () => {
       closeRailCards();
-      go("chat");
-      startNewChat("worker");
+      // 普通助手（worker）2026-11-23 退役：新建只剩派给池的任务票。
+      void import("./tasks-create.js").then((module) => module.openCreateTaskModal());
     }],
     ["搜索旧对话", () => {
       closeRailCards();

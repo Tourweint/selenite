@@ -163,7 +163,10 @@ html[data-sidebar="closed"] .side-rail {
 
 .chat {
   display: flex; align-items: center; gap: 4px;
-  width: 100%; padding: 8px 6px 8px 12px;
+  /* 2026-11-23：右侧 6 → 12px。行是胶囊（r-full，36px 高等于两端各 18px 圆弧），
+     ⋯ 原来贴在 6px 的边里、半个身子落在圆弧收窄的区间，行底一亮就像「没收住三个点」。
+     留 12px 后 ⋯ 整个落在胶囊的直边段，悬停块从标题一路盖到三个点，读起来是一整条。 */
+  width: 100%; padding: 8px 12px;
   /* 2026-11-17：会话行原来 r-md（12px 圆角），与执事/群组/项目行的 r-full 胶囊
      选中框形状不一致（用户指出"对话一个方框、执事一个胶囊"）。侧栏可点行统一胶囊，
      选中底纹与内描边本来就和 .side-item[aria-current] 一样，只差这个圆角。 */
@@ -194,35 +197,20 @@ html[data-sidebar="closed"] .side-rail {
   border: 0; border-radius: var(--r-sm);
   background: transparent; color: var(--text-3);
   font-size: 11.5px; line-height: 1;
+  cursor: pointer;
 }
-.chat-act:hover { background: var(--card-high); color: var(--text); }
+/* 2026-11-23 用户口径「整条一块」：⋯ 不再画自己的底。
+   以前 .chat-act:hover 给一层 card-high，行进到行尾就多出一块浮起来的小方块，
+   把同一条悬停块切成两截（截图核对：卡在胶囊圆弧里的那截尤其明显）。
+   现在整条只有行底一层，⋯ 只把图标提亮——row hover → text-2，指到点上 → text。 */
+.chat:hover .chat-act,
+.chat:focus-within .chat-act { color: var(--text-2); }
+.chat:hover .chat-act:hover { background: transparent; color: var(--text); }
+/* 去掉底之后键盘不能丢位置：focus-visible 走内描边，和胶囊同形 */
+.chat-act:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; color: var(--text); }
 .chat-act svg { width: 13px; height: 13px; }
 /* 行尾 ⋯（2026-11-21）：三颗悬停小图标收成一颗，尺寸对齐分区头 .sec-more 的 15px */
 .chat-more svg { width: 15px; height: 15px; }
-
-/* 一人多会话（2026-11-17 批2）：花名册 / 总管条目的「选择会话」小图标。
-   与 .chat-act 同款 hover 才出现、键盘 focus-visible 可见；图标走 currentColor，四套主题通用。 */
-.roster-sessions,
-.chief-sessions {
-  flex: none; width: 20px; height: 20px; padding: 0;
-  display: grid; place-content: center;
-  border: 0; border-radius: var(--r-sm);
-  background: transparent; color: var(--text-3);
-  visibility: hidden; opacity: 0;
-  transition: opacity .12s ease, visibility .12s ease;
-}
-.roster-row:hover .roster-sessions,
-.roster-row:focus-within .roster-sessions,
-.chief-entry:hover .chief-sessions,
-.chief-entry:focus-within .chief-sessions {
-  visibility: visible; opacity: 1;
-}
-.roster-sessions:hover,
-.chief-sessions:hover { background: var(--card-high); color: var(--text); }
-.roster-sessions:focus-visible,
-.chief-sessions:focus-visible { visibility: visible; opacity: 1; outline: 2px solid var(--accent); }
-.roster-sessions svg,
-.chief-sessions svg { width: 13px; height: 13px; }
 
 /* 会话选择器弹层：一列会话行 + 翻页条 + 底部新建按钮（沿用弹层的描边 / 主题令牌）。
    限高 460px = 每页 10 行（行高 40.4 + gap 6 → 10×40.4+9×6 ≈ 458），一页正好放满不出内滚。 */
@@ -423,13 +411,12 @@ html[data-sidebar="closed"] .side-rail {
 .avatar-edit:hover { filter: brightness(1.06); box-shadow: 0 0 0 2px var(--accent-line); }
 .avatar-edit:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-/* 总管固定条目：头像 + 名字 + pill；状态点固定在最右。永在最上 */
+/* 总管固定条目：头像 + 名字；状态点固定在最右。永在最上（行名旁的「总管」胶囊 2026-11-23 退役） */
 .chief-entry { gap: 8px; cursor: pointer; }
 .chief-entry .roster-name { font-weight: 500; }
-.chief-entry .pill-tag { margin-left: auto; }
-/* E5：无 domain 的活跃单计数（不可点）；.side-count 默认 margin-left:auto，
-   这里要贴着 pill 右侧，不能再抢一份自动外边距。 */
-.chief-count { margin-left: 0; flex: none; }
+/* E5：无 domain 的活跃单计数（不可点）。总管行没有 pill 可贴了，计数回到行尾，
+   用 .side-count 自带的 margin-left:auto 抵住右边。 */
+.chief-count { margin-left: auto; flex: none; }
 /* 状态点在行尾；绿色取 --ok（四套主题都是明确绿），本批不改状态来源 */
 .chief-entry .status-dot { margin-left: 2px; }
 

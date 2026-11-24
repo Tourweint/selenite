@@ -5,10 +5,10 @@
  * 原区间 L686–L1062。@import 顺序即层叠顺序，改样式只改对应分部。
  */
 /* ── 侧栏分区（2026-11-07 四改定稿 / 2026-11-14 行尾改 ⋯）──────────
-   一块分区 = 两行网格：[整行折叠按钮] [⋯] + [分区体]。
+   一块分区 = 两行：[分区头整行（含行尾 ⋯）] + [分区体]。
    用户口径：「箭头别要了，点击这个框相当于收起或展开，在右边留个加号」。
-   所以分区头本身就是按钮（图标 + 名称 + 计数），hover 给一层底；
-   折叠状态不靠箭头，靠「展开时有内容、收起时只剩这一行」直接可见。 */
+   所以分区头本身就是按钮（图标 + 名称 + 计数），折叠状态不靠箭头，
+   靠「展开时有内容、收起时只剩这一行」直接可见。 */
 .side-sec {
   flex: none;
   display: grid;
@@ -18,7 +18,31 @@
   padding-top: 4px;
   border-top: 1px solid var(--divider);
 }
+
+/*
+ * 2026-11-23 用户口径「鼠标放在任务上，淡淡变亮的背景不会包括右边那三个点」。
+ *
+ * 原来分区头是两格网格：头按钮一格（1fr），⋯ 一格（auto）。头一 hover，底只铺到 ⋯ 左边
+ * 就断成一条直角边；⋯ 自己不 hover 时落在裸侧栏上，指到点上又冒出它自己的一层 card-high
+ * ——就是用户说的「浮起来的小方块」。
+ *
+ * 现在把「头 + ⋯」包进这一层（占满整行），底铺在整条上：鼠标在名字上还是在三个点上，
+ * 都是同一条块；⋯ 只提亮，不落底。头按钮仍是独立的折叠按钮（点它 = 开合），
+   ⋯ 仍是独立的菜单按钮（点它 = 弹菜单），两者只是共享同一行底。
+ */
+.side-sec-top {
+  grid-column: 1 / -1;
+  display: flex; align-items: center;
+  border-radius: var(--r-md);
+}
+/* 悬停整条：头或 ⋯ 任意一半都点亮同一条；禁用的分区（群组）照旧不给底 */
+.side-sec-top:has(> .side-sec-head:hover:not(:disabled)),
+.side-sec-top:has(> .sec-more:hover:not(:disabled)) { background: var(--card); }
+.side-sec-top:has(> .side-sec-head:hover:not(:disabled)) .sec-ico,
+.side-sec-top:has(> .sec-more:hover:not(:disabled)) .sec-ico { color: var(--text-2); }
+
 .side-sec-head {
+  flex: 1 1 auto;
   min-width: 0;
   display: flex; align-items: center; gap: 7px;
   height: 36px; padding: 0 6px 0 8px;
@@ -28,14 +52,12 @@
   text-align: left;
   cursor: pointer;
 }
-.side-sec-head:hover:not(:disabled) { background: var(--card); }
 .side-sec-head:disabled { opacity: .5; cursor: default; }
 /* 分区图标：20px，与导航行 22px 图标同一视觉重量 */
 .sec-ico {
   flex: none; width: 20px; height: 20px;
   color: var(--text-3);
 }
-.side-sec-head:hover .sec-ico { color: var(--text-2); }
 .sec-name {
   flex: none;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -46,7 +68,8 @@
    用户口径：「右边现在全是加号，改成三个小点点，点开就能选择新建还是搜索，
    统一放在右边，留三个小点点即可」。
    原来是每区一颗 ＋（对话还多一颗放大镜），一列四颗同形按钮比名字更抢眼；
-   现在一颗 ⋯ 收住这一区全部动作，颜色压到 text-3，只在 hover / 菜单开着时提亮。 */
+   现在一颗 ⋯ 收住这一区全部动作，颜色压到 text-2，只在 hover / 菜单开着时提亮。
+   2026-11-23：不再画自己的一层底（见上一条「一行一块」），只换颜色。 */
 .sec-more {
   flex: none;
   width: 24px; height: 24px; margin-right: 4px; padding: 0;
@@ -56,8 +79,9 @@
   cursor: pointer;
 }
 .sec-more svg { width: 15px; height: 15px; }
-.sec-more:hover:not(:disabled),
-.sec-more[aria-expanded="true"] { background: var(--card-high); color: var(--accent); }
+.side-sec-top:hover .sec-more:not(:disabled) { color: var(--text); }
+.side-sec-top .sec-more[aria-expanded="true"] { color: var(--accent); }
+.side-sec-top .sec-more:hover:not(:disabled) { background: transparent; color: var(--accent); }
 .sec-more:disabled { opacity: .35; cursor: default; }
 /* 分区体：独占第二行，展开/收起走高度动画（2026-11-07 五改）。
  *
@@ -164,9 +188,6 @@
   font-size: 13px; text-align: left; cursor: pointer;
 }
 .sec-foot-link:hover { background: var(--card); color: var(--accent); }
-/* 「所有群聊」在列表态高亮（2026-11-07）：同一行在别的分区是"去整页看"的跳转，
-   这里也是；但用户从群里退出来时要能看出自己正站在这片列表上。 */
-.sec-foot-link[aria-current="true"] { background: var(--accent-soft); color: var(--accent); }
 
 /* 任务中心分区里的简版对话行：聚合灯 + 标题 + 时间 */
 .task-row { gap: 7px; }

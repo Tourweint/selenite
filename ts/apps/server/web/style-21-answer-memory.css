@@ -623,3 +623,341 @@
   color: var(--text-3); font-size: 11px; line-height: 1.45;
   overflow-wrap: anywhere;
 }
+
+/* ── 记忆库卡（2026-11-23 外部记忆库接入）────────────────────
+   设置 → 注入 → 索引页顶部：原生（本机）/ 外部接入 两态。
+   只新增 .mem-bank-*；外部态隐藏内置库专属模块用 #mem-a-page.mem-bank-ext，
+   切回原生由整页重渲染恢复（类不会残留）。
+   口径：docs/设计方案/2026-11-23-外部记忆库接入任务书（一读一写·槽位与前端）.md §三 */
+.mem-bank {
+  display: flex; flex-direction: column; gap: 12px;
+  padding: 16px 18px;
+}
+.mem-bank[hidden] { display: none; }
+.mem-bank-body { display: flex; flex-direction: column; gap: 12px; }
+.mem-bank-body:empty { display: none; }
+
+.mem-bank-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.mem-bank-title {
+  font-size: 13.5px; font-weight: 600; color: var(--text);
+}
+.mem-bank-seg {
+  display: inline-flex; gap: 2px; padding: 2px; margin-left: auto;
+  border-radius: var(--r-full); background: var(--surface-low);
+}
+.mem-bank-seg-btn {
+  padding: 5px 12px; border: 0; border-radius: var(--r-full);
+  background: transparent; color: var(--text-2);
+  font: inherit; font-size: 12px; line-height: 1.4; cursor: pointer;
+}
+.mem-bank-seg-btn:hover { color: var(--text); }
+.mem-bank-seg-btn.is-on {
+  background: var(--card); color: var(--text);
+  box-shadow: 0 1px 2px rgb(0 0 0 / .06);
+}
+
+.mem-bank-row { display: flex; align-items: flex-start; gap: 10px; }
+.mem-bank-row + .mem-bank-row {
+  padding-top: 10px; border-top: 1px dashed var(--divider);
+}
+.mem-bank-row .status-dot { margin-top: 6px; }
+.mem-bank-row .status-dot.error { background: var(--c-error); }
+.mem-bank-row.is-idle .mem-bank-name { font-weight: 500; }
+.mem-bank-row.is-idle .mem-bank-sub { color: var(--text-3); }
+.mem-bank-retry { flex: none; }
+.mem-bank-main { min-width: 0; flex: 1 1 auto; display: flex; flex-direction: column; gap: 3px; }
+.mem-bank-name {
+  display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+  font-size: 13px; font-weight: 600; color: var(--text);
+}
+.mem-bank-sub {
+  font-size: 11.8px; line-height: 1.5; color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+.mem-bank-path { font-family: var(--mono); font-size: 11.5px; color: var(--text-3); }
+.mem-bank-meta {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  margin-top: 1px; font-size: 11.5px; color: var(--text-3);
+}
+.mem-bank-badge {
+  padding: 0 6px; border: 1px solid transparent; border-radius: var(--r-full);
+  font-size: 10.5px; line-height: 1.7; white-space: nowrap;
+}
+.mem-bank-badge.is-on {
+  background: var(--accent-soft); border-color: var(--accent-line); color: var(--text);
+}
+.mem-bank-badge.is-off { background: var(--surface-low); color: var(--text-3); }
+.mem-bank-warn {
+  margin-top: 4px; padding: 6px 9px;
+  border-radius: var(--r-sm); background: var(--surface-low);
+  color: var(--warn); font-size: 11.5px; line-height: 1.5;
+}
+
+.mem-bank-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.mem-bank-actions .ghost,
+.mem-bank-actions .btn-primary { height: 30px; }
+
+.mem-bank-form {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 11px 12px; border-radius: var(--r-md); background: var(--surface-low);
+}
+.mem-bank-form-head { font-size: 12.5px; font-weight: 500; color: var(--text); }
+.mem-bank-form-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.mem-bank-form-row .set-input { flex: 1 1 260px; height: 32px; }
+.mem-bank-form-row .ghost { height: 32px; }
+.mem-bank-form-note { font-size: 11.5px; line-height: 1.5; color: var(--text-3); }
+.mem-bank-form-note b { color: var(--text-2); font-weight: 600; }
+.mem-bank-form-actions { display: flex; align-items: center; gap: 8px; }
+.mem-bank-form-actions .ghost,
+.mem-bank-form-actions .btn-primary { height: 30px; }
+
+.mem-bank-result {
+  padding: 8px 10px; border-radius: var(--r-sm);
+  border: 1px solid var(--divider); background: var(--card);
+  font-size: 11.8px; line-height: 1.55; color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+.mem-bank-result.is-error {
+  border-color: color-mix(in srgb, var(--c-error) 35%, transparent);
+}
+.mem-bank-result-title { color: var(--text); font-weight: 500; }
+.mem-bank-result-meta { margin-top: 2px; color: var(--text-2); }
+.mem-bank-result-catalog {
+  margin: 7px 0 0; padding: 7px 9px; max-height: 180px; overflow: auto;
+  border-radius: var(--r-sm); background: var(--surface-low);
+  color: var(--text-2); font-family: var(--mono); font-size: 11px; line-height: 1.55;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+
+.mem-bank-catalog {
+  border-radius: var(--r-md); background: var(--surface-low); overflow: hidden;
+}
+.mem-bank-catalog-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 12px; list-style: none; cursor: pointer;
+  font-size: 12.5px; color: var(--text);
+}
+.mem-bank-catalog-head::-webkit-details-marker { display: none; }
+.mem-bank-chev { width: 12px; height: 12px; flex: none; color: var(--text-3); }
+.mem-bank-catalog-hint { margin-left: auto; font-size: 11px; color: var(--text-3); }
+.mem-bank-catalog-body { padding: 0 12px 11px; }
+.mem-bank-catalog-text {
+  margin: 0; padding: 8px 10px; max-height: 240px; overflow: auto;
+  border-radius: var(--r-sm); background: var(--card);
+  color: var(--text-2); font-family: var(--mono); font-size: 11.5px; line-height: 1.6;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+
+.mem-bank-search { display: flex; flex-direction: column; gap: 8px; }
+.mem-bank-search-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.mem-bank-search-row .set-input { flex: 1 1 260px; height: 32px; }
+.mem-bank-search-row .btn-primary { height: 32px; }
+.mem-bank-results { display: flex; flex-direction: column; overflow: hidden; border-radius: var(--r-md); }
+.mem-bank-hit { padding: 8px 11px; background: var(--surface-low); }
+.mem-bank-hit + .mem-bank-hit { margin-top: 1px; }
+.mem-bank-hit-meta {
+  font-size: 10.8px; color: var(--text-3); font-variant-numeric: tabular-nums;
+}
+.mem-bank-hit-text {
+  margin-top: 2px; font-size: 12.5px; line-height: 1.55; color: var(--text);
+  overflow-wrap: anywhere;
+}
+.mem-bank-hit-why {
+  margin-top: 2px; font-size: 11px; line-height: 1.5; color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+.mem-bank-hit-note { margin-top: 6px; }
+
+.mem-bank-note {
+  padding-top: 10px; border-top: 1px solid var(--divider);
+  font-size: 11.5px; line-height: 1.55; color: var(--text-3);
+}
+.mem-bank-note b { color: var(--text-2); font-weight: 600; }
+
+/* 外部态：内置库专属模块整块隐藏（概览 / 分类片 / 人物 / 提醒 / 分组 /
+   工作履历 / 原文档案 / 沉淀提醒 / 迁移 / 导入 / 整理 / 拆分都在这些块里）。 */
+#mem-a-page.mem-bank-ext .mem-a-overview,
+#mem-a-page.mem-bank-ext .mem-a-people,
+#mem-a-page.mem-bank-ext .mem-a-run,
+#mem-a-page.mem-bank-ext #mem-a-props-card,
+#mem-a-page.mem-bank-ext #mem-a-remcard,
+#mem-a-page.mem-bank-ext .mem-a-toolbar,
+#mem-a-page.mem-bank-ext .mem-a-groups,
+#mem-a-page.mem-bank-ext #mem-a-work,
+#mem-a-page.mem-bank-ext #mem-a-docs,
+#mem-a-page.mem-bank-ext .mem-a-external,
+#mem-a-page.mem-bank-ext .mem-a-head-actions { display: none; }
+
+@media (max-width: 560px) {
+  .mem-bank-seg { margin-left: 0; }
+  .mem-bank-form-row .set-input,
+  .mem-bank-search-row .set-input { flex-basis: 100%; }
+}
+
+/* ── 记忆库卡收口（2026-11-23 晚）────────────────────────────
+   用户口径：上块只放「切哪个库」，下块才是「当前库内容」；按钮收成文字链，
+   解释性文字减到最少；操作手册进弹层（带复制）。这里覆盖上面的初版样式。 */
+.mem-bank { padding: 14px 16px; }
+.mem-bank-body { gap: 10px; }
+
+.mem-bank-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; flex-wrap: wrap;
+}
+.mem-bank-head-right {
+  display: flex; align-items: center; gap: 8px; margin-left: auto; flex-wrap: wrap;
+}
+.mem-bank-sep { width: 1px; height: 14px; flex: none; background: var(--divider); }
+.mem-bank-title { font-size: 13.5px; font-weight: 600; color: var(--text); }
+
+.mem-bank-link {
+  padding: 0; border: 0; background: none;
+  color: var(--text-2); font: inherit; font-size: 12px; line-height: 1.4;
+  cursor: pointer; white-space: nowrap;
+}
+.mem-bank-link:hover { color: var(--text); text-decoration: underline; }
+.mem-bank-link.is-accent { color: var(--accent); }
+.mem-bank-link.is-danger { color: var(--c-error); }
+
+.mem-bank-seg {
+  display: inline-flex; gap: 2px; padding: 2px;
+  border-radius: var(--r-full); background: var(--surface-low);
+}
+.mem-bank-seg-btn {
+  padding: 4px 11px; border: 0; border-radius: var(--r-full);
+  background: transparent; color: var(--text-2);
+  font: inherit; font-size: 12px; line-height: 1.4; cursor: pointer;
+}
+.mem-bank-seg-btn:hover { color: var(--text); }
+.mem-bank-seg-btn.is-on {
+  background: var(--accent-soft); color: var(--text); font-weight: 600;
+  box-shadow: inset 0 0 0 1px var(--accent-line);
+}
+
+.mem-bank-line { display: flex; align-items: flex-start; gap: 8px; }
+.mem-bank-line + .mem-bank-line {
+  padding-top: 8px; border-top: 1px dashed var(--divider);
+}
+.mem-bank-line .status-dot { margin-top: 4px; flex: none; }
+.mem-bank-line .status-dot.error { background: var(--c-error); }
+.mem-bank-line-main {
+  min-width: 0; flex: 1 1 auto;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.mem-bank-line-title {
+  display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+}
+.mem-bank-name { font-size: 12.8px; font-weight: 600; color: var(--text); }
+.mem-bank-line.is-idle .mem-bank-name { font-weight: 500; color: var(--text-2); }
+.mem-bank-hint {
+  font-size: 11.5px; line-height: 1.4; color: var(--text-3); white-space: nowrap;
+}
+.mem-bank-path {
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--mono); font-size: 11px; color: var(--text-3);
+}
+.mem-bank-links {
+  display: flex; align-items: center; gap: 10px; flex: none;
+  justify-content: flex-end; flex-wrap: wrap;
+}
+.mem-bank-links .mem-bank-link { font-size: 11.5px; }
+
+.mem-bank-form {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 10px; border-radius: var(--r-md); background: var(--surface-low);
+}
+.mem-bank-form-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.mem-bank-form-row .set-input { flex: 1 1 260px; height: 32px; }
+.mem-bank-form-row .ghost { height: 32px; }
+.mem-bank-form-foot {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}
+.mem-bank-form-note { font-size: 11.5px; line-height: 1.5; color: var(--text-3); }
+.mem-bank-form-actions {
+  display: flex; align-items: center; gap: 8px; margin-left: auto; flex-wrap: wrap;
+}
+.mem-bank-form-actions .ghost,
+.mem-bank-form-actions .btn-primary { height: 30px; }
+
+.mem-bank-check {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-size: 12px; line-height: 1.4; color: var(--text-2); cursor: pointer;
+}
+.mem-bank-check input { width: 14px; height: 14px; margin: 0; accent-color: var(--accent); flex: none; }
+
+.mem-bank-result {
+  padding: 8px 10px; border-radius: var(--r-sm);
+  border: 1px solid var(--divider); background: var(--card);
+  font-size: 11.8px; line-height: 1.55; color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+.mem-bank-result.is-error {
+  border-color: color-mix(in srgb, var(--c-error) 35%, transparent);
+}
+.mem-bank-result-title { color: var(--text); font-weight: 500; }
+.mem-bank-result-meta { margin-top: 2px; color: var(--text-2); }
+.mem-bank-result-details { margin-top: 5px; }
+.mem-bank-result-details summary {
+  font-size: 11.5px; color: var(--text-2); cursor: pointer;
+}
+.mem-bank-result-catalog {
+  margin: 6px 0 0; padding: 7px 9px; max-height: 160px; overflow: auto;
+  border-radius: var(--r-sm); background: var(--surface-low);
+  color: var(--text-2); font-family: var(--mono); font-size: 11px; line-height: 1.55;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+
+.mem-bank-content {
+  display: flex; flex-direction: column; gap: 10px;
+  padding-top: 10px; border-top: 1px solid var(--divider);
+}
+.mem-bank-catalog { border-radius: var(--r-md); background: var(--surface-low); overflow: hidden; }
+.mem-bank-catalog-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 11px; list-style: none; cursor: pointer;
+  font-size: 12.5px; color: var(--text);
+}
+.mem-bank-catalog-head::-webkit-details-marker { display: none; }
+.mem-bank-chev { width: 12px; height: 12px; flex: none; color: var(--text-3); }
+.mem-bank-catalog-body { padding: 0 11px 10px; }
+.mem-bank-catalog-text {
+  margin: 0; padding: 8px 10px; max-height: 240px; overflow: auto;
+  border-radius: var(--r-sm); background: var(--card);
+  color: var(--text-2); font-family: var(--mono); font-size: 11.5px; line-height: 1.6;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+
+.mem-bank-search { display: flex; flex-direction: column; gap: 8px; }
+.mem-bank-search-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.mem-bank-search-row .set-input { flex: 1 1 260px; height: 32px; }
+.mem-bank-search-row .btn-primary { height: 32px; }
+.mem-bank-results { display: flex; flex-direction: column; overflow: hidden; border-radius: var(--r-md); }
+.mem-bank-hit { padding: 8px 11px; background: var(--surface-low); }
+.mem-bank-hit + .mem-bank-hit { margin-top: 1px; }
+.mem-bank-hit-meta {
+  font-size: 10.8px; color: var(--text-3); font-variant-numeric: tabular-nums;
+}
+.mem-bank-hit-text {
+  margin-top: 2px; font-size: 12.5px; line-height: 1.55; color: var(--text);
+  overflow-wrap: anywhere;
+}
+.mem-bank-hit-why {
+  margin-top: 2px; font-size: 11px; line-height: 1.5; color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+.mem-bank-hit-note { margin-top: 6px; }
+
+.mem-bank-manual-code {
+  margin: 0; padding: 12px 14px; max-height: 58vh; overflow: auto;
+  border-radius: var(--r-md); background: var(--surface-low);
+  color: var(--text-2); font-family: var(--mono); font-size: 11.8px; line-height: 1.65;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+
+@media (max-width: 560px) {
+  .mem-bank-head { align-items: flex-start; }
+  .mem-bank-head-right { width: 100%; margin-left: 0; justify-content: space-between; }
+  .mem-bank-form-row .set-input,
+  .mem-bank-search-row .set-input { flex-basis: 100%; }
+  .mem-bank-links { flex-basis: 100%; justify-content: flex-end; }
+}

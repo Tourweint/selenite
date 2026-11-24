@@ -6,7 +6,7 @@
  */
 
 import { loadChats } from "./chats-list.js";
-import { openChat, startNewChat, syncTitleSessionAffordance } from "./chat-open.js";
+import { openChat, startNewChat } from "./chat-open.js";
 import { request } from "./net.js";
 import { go } from "./route.js";
 import { state } from "./state.js";
@@ -56,13 +56,12 @@ async function ensureSideSessionsFlag() {
   return typeof raw === "string" && raw !== "false" && raw !== "0" && raw !== "off";
 }
 
-/** 服务端说插件关了：收弹层、给提示、把界面上所有入口按钮就地撤掉。 */
+/** 服务端说插件关了：收弹层、给提示；入口已收进右键菜单（2026-11-23），
+    此后打开的菜单不再挂「选择会话」。 */
 function onSideSessionsDisabled() {
   closeModal();
   toast("副会话插件已关闭（设置 → 插件）");
   state.sideSessionsEnabled = false;
-  document.querySelectorAll(".roster-sessions, .chief-sessions").forEach((btn) => btn.remove());
-  syncTitleSessionAffordance("");
 }
 
 /** 相对时间：只给「N 分钟前 / N 小时前 / N 天前」，够选择器次要信息用。 */
@@ -448,9 +447,9 @@ function openAfterDeleted(partnerId, isChief, data, deletedId) {
   else startNewChat("chief");
 }
 
-/** 入口：花名册 / 总管条目 / 对话顶栏 / 地图顶栏共用。
+/** 入口：侧栏花名册右键 / 总管条目右键 / 地图顶栏「切换」共用。
  *  `target` 决定选择一条已有会话后落到哪：`chat` 或 `map`；不传时跟随当前页面——
- *  在地图页点任何执事的「选择会话」默认就是「看地图」，在对话页默认「去对话」。 */
+ *  在地图页默认「看地图」，在对话页默认「去对话」。 */
 function openPartnerSessions(partnerId, { target } = {}) {
   if (!partnerId) return;
   const gen = ++pickerGeneration;

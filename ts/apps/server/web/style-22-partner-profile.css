@@ -424,14 +424,12 @@
 
 /* ── 统一保存条（2026-11-16）：人格模块 / 高级开关改为草稿，点这里才落库 ──
    贴在视口底部，滚动时一直看得见；没有改动时整条隐藏（与 identity 的 pf-foot 同口径）。
-   有未保存改动要离开页面时，route.js 的守卫会先弹三选一。 */
+   有未保存改动要离开页面时，route.js 的守卫会先弹三选一。
+   2026-11-23：第二行是草稿影响（会重建前缀 / 只追加尾部 / 不进提示词）。 */
 .pf-savebar {
   position: sticky;
   bottom: 14px;
   z-index: 6;
-  display: flex;
-  align-items: center;
-  gap: 8px;
   margin: 6px 0 10px;
   padding: 9px 14px;
   border: 1px solid var(--divider);
@@ -440,5 +438,57 @@
   box-shadow: 0 8px 24px rgb(0 0 0 / 10%);
 }
 .pf-savebar[hidden] { display: none; }
+.pf-savebar-row { display: flex; align-items: center; gap: 8px; }
 .pf-savebar .pf-state { margin-right: auto; }
 .pf-savebar .ghost, .pf-savebar .btn-primary { height: 30px; }
+.pf-impact {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  margin: 7px 0 0;
+  padding-top: 7px;
+  border-top: 1px dashed var(--divider);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+.pf-impact[hidden] { display: none; }
+.pf-impact-tag {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  height: 17px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--card);
+  color: var(--text-3);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+.pf-impact.is-prefix .pf-impact-tag {
+  background: var(--accent-container);
+  color: var(--on-accent-container);
+}
+.pf-impact-text { min-width: 0; }
+.pf-impact-table {
+  display: grid;
+  gap: 6px;
+  margin: 10px 0 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--divider);
+  border-radius: var(--r-md, 12px);
+  background: var(--card-high);
+}
+.pf-impact-row {
+  display: grid;
+  grid-template-columns: 96px 1fr;
+  gap: 8px;
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+.pf-impact-row > span { color: var(--text-3); }
+.pf-impact-row.is-prefix > span { color: var(--accent); }
+.pf-impact-row > b { font-weight: 400; }
+.pf-impact-note { margin: 2px 0 0; font-size: 11px; line-height: 1.5; color: var(--text-3); }

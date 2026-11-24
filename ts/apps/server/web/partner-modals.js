@@ -119,24 +119,22 @@ async function loadPartners() {
 function renderPartnerList(box, partners) {
   box.replaceChildren();
 
-  // 普通助手（2026-11-16）：全局一份人设，固定置顶，不是执事行——不进 hasButlers、
-  // 没有 ⋯ / 暂停 / 状态徽章。点进去只改一份正文，所有 worker 下一轮生效。
-  // 2026-11-21：卡面不再挂解释句，共用范围留给标签；详情页本身说明一切。
+  // 派活工人（池）（2026-11-23）：普通助手（worker 会话）退役后，置顶这张卡就是本机工人的配置入口。
+  // 全局一份人设 / 工具 / 模型，不是执事行——不进 hasButlers、没有 ⋯ / 暂停 / 状态徽章。
   const workerCard = document.createElement("div");
   workerCard.className = "card pt-card";
   workerCard.setAttribute("role", "button");
   workerCard.tabIndex = 0;
-  workerCard.setAttribute("aria-label", "打开普通助手设置");
+  workerCard.setAttribute("aria-label", "打开派活工人（池）设置");
   workerCard.innerHTML = `
     <span class="pt-avatar pt-card-avatar" data-worker-avatar aria-hidden="true"></span>
     <div class="pt-card-main">
       <div class="pt-card-name-row">
-        <span class="row-label pt-name">普通助手</span>
-        <span class="pill-tag">全部 Worker 共用</span>
+        <span class="row-label pt-name">派活工人（池）</span>
       </div>
     </div>`;
-  paintAvatar(workerCard.querySelector("[data-worker-avatar]"), null, "普通助手");
-  const openWorker = () => { location.hash = "#/settings/partners/worker"; };
+  paintAvatar(workerCard.querySelector("[data-worker-avatar]"), null, "池");
+  const openWorker = () => { location.hash = "#/settings/partners/pool"; };
   workerCard.addEventListener("click", openWorker);
   workerCard.addEventListener("keydown", (event) => {
     if (event.target !== workerCard) return;

@@ -9,7 +9,6 @@
 
 import { loadDevices, refreshApprovalPopups } from "./approval-pop.js";
 import { loadArchivePage, renderArchiveChats } from "./archive-page.js";
-import { renderAssistantSurfaces } from "./assistant-surfaces.js";
 import { aboutMeMarkup, wireAboutMe } from "./settings-about-me.js";
 import { KEY_NOTIFY } from "./chat-notice.js";
 import { el } from "./dom.js";
@@ -17,7 +16,7 @@ import { openExportModal } from "./export-data.js";
 import { memorySettingsMarkup, stopMemoryPolling, wireMemorySettings } from "./memory-page.js";
 import { loadPartners, openCreatePartnerModal } from "./partner-modals.js";
 import { renderPartnerProfilePage } from "./partner-profile.js";
-import { renderWorkerProfilePage } from "./worker-profile.js";
+import { renderPoolWorkerPage } from "./pool-worker.js";
 import { openChiefChat } from "./partners-status.js";
 import { resize } from "./plus-menu.js";
 import { openAddProjectModal } from "./project-modal.js";
@@ -34,7 +33,7 @@ import { initRuntimeCard, loadRelayStatus, loadServiceInfo, openAddPhoneModal, o
 import { executorSectionMarkup, wireExecutorSettings } from "./settings-executor.js";
 import { loadProjectsSettings } from "./settings-projects.js";
 import { loadPolicy, loadReminders, openScheduledTaskModal, renderDefaultModelRow } from "./settings-reminders.js";
-import { loadAutoArchiveSettings, loadFlagsSettings, saveAutoArchiveDays, toggleFlag } from "./settings-switches.js";
+import { loadAutoArchiveSettings, loadFlagsSettings, resetFlagBaseline, saveAutoArchiveDays, toggleFlag } from "./settings-switches.js";
 import { loadModelsInfo, loadUsagePage } from "./settings-usage.js";
 import { openBulkSkillModal, openCreateSkillChoiceModal } from "./skills-actions.js";
 import { applySkillAdvice, loadSkills, runSkillAdvice } from "./skills-settings.js";
@@ -65,21 +64,11 @@ function wireInjectTabs() {
  * 内容原样搬运，只把外层容器从独立分区换成注入 tab。
  */
 function skillsSectionMarkup() {
+  // 2026-11-23：标题行收成一行（标题在左、「让 Agent 评估 / 新建技能」在右），
+  // 不再「技能」一级 + 「技能库」二级两个标题上下叠着；计数与说明句同日退役（上下两区自己数得出来）。
   return sectionMarkup(
-    "技能",
-    `<div class="sk-head">
-      <div class="row-main">
-        <div class="set-card-title" data-tip="技能 = 给 AI 的操作手册（第 1 行是索引摘要，其余是正文）。默认全关：开了才进 agent 的技能索引；对话里输入 /技能名 直接调用。开关对已在跑的会话不生效，下一个会话开始。">技能库</div>
-        <div class="sk-path" id="skill-path">读取中…</div>
-      </div>
-      <div class="sk-head-actions">
-        <button class="ghost" type="button" id="skill-advice-run" title="跳到总管对话并填好评估提示词：你看过点发送，总管逐条评估后把结果存回快照（用你当前选的模型，不换模型）">让 Agent 评估</button>
-        <button class="btn-primary" type="button" id="skill-add">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
-          新建技能
-        </button>
-      </div>
-    </div>
+    `<span data-tip="技能 = 给 AI 的操作手册（第 1 行是索引摘要，其余是正文）。默认全关：开了才进 agent 的技能索引；对话里输入 /技能名 直接调用。开关对已在跑的会话不生效，下一个会话开始。">技能库</span><span class="sk-count" id="skill-count" hidden></span>`,
+    `<div class="sk-loc-card" id="skill-locations" hidden></div>
     <div class="sk-advice-banner" id="skill-advice-banner" hidden></div>
     <div class="sk-toolbar" id="skill-toolbar">
       <div class="sk-select" id="skill-filter" hidden></div>
@@ -89,6 +78,14 @@ function skillsSectionMarkup() {
     </div>
     <div class="sk-list" id="skill-list">
       <div class="set-hint">读取中…</div>
+    </div>`,
+    "",
+    `<div class="sk-head-actions">
+      <button class="ghost" type="button" id="skill-advice-run" title="跳到总管对话并填好评估提示词：你看过点发送，总管逐条评估后把结果存回快照（用你当前选的模型，不换模型）">让 Agent 评估</button>
+      <button class="btn-primary" type="button" id="skill-add">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+        新建技能
+      </button>
     </div>`,
   );
 }
@@ -393,13 +390,21 @@ async function renderSettings() {
     void wireExecutorSettings();
   } else if (page === "inject") {
     // 注入分区（2026-11-21 用户口径）：先索引，再注入；人设 / 技能也收进来。
-    // 六个 tab 的顺序按上下文位置：人设 → 工具 → 关于我 → 索引 → 技能 → 上下文。
+    // 六个 tab 的顺序按上下文位置：人设 → 工具 → 偏好（原「关于我」）→ 索引 → 技能 → 上下文。
     const tab = currentInjectTab();
     if (tab === "personas") {
       const profileId = currentPartnerProfileId();
-      // 普通助手是全局一份人设，不是执事档案：不请求 /partners/worker。
-      if (profileId === "worker") {
-        void renderWorkerProfilePage();
+      // 池工人配置页（2026-11-23）：普通助手（worker 会话）退役，本机唯一的工人配置就是池。
+      // 旧地址 #/settings/partners/worker 改写到新地址，不弹错、不留死链。
+      if (profileId === "pool" || profileId === "worker") {
+        if (profileId === "worker") {
+          try {
+            history.replaceState(null, "", "#/settings/partners/pool");
+          } catch {
+            /* 地址改不动也照常渲染，页面本身不依赖 id */
+          }
+        }
+        void renderPoolWorkerPage();
         replayPageEnter();
         return;
       }
@@ -411,21 +416,11 @@ async function renderSettings() {
       }
       // 标题不再重复 tab 名的「人设」：导航卡已经说了这是哪一页，
       // 这里只留内容自己的名字「总管与执事」+ 新建动作（2026-11-18）。
+      // 只留一份列表：总管 / 执事 / 普通助手都在 partner-list 里（2026-11-23 用户口径：
+      // 顶部那张「助手的人设与工具」总览卡多余，撤掉）。
       el.settingsInner.innerHTML = injectTabsMarkup(tab) + sectionMarkup(
         `<span data-tip="一个执事一份档案：点进去改头像、写人设、定岗位、看能力与档案，一页到底。">总管与执事</span>`,
-        `<div class="card as-card" id="assistant-surfaces">
-          <div class="set-card-body">
-            <div class="set-card-head">
-              <div class="row-main">
-                <div class="set-card-title" data-tip="总管 / 执事 / 普通助手 / 派活工人（池）各自的人设与可用工具；能改的给入口，固定的如实标固定。">助手的人设与工具</div>
-              </div>
-            </div>
-            <div class="as-body">
-              <div class="as-loading set-hint">读取中…</div>
-            </div>
-          </div>
-        </div>
-        <div class="pt-list" id="partner-list">
+        `<div class="pt-list" id="partner-list">
           <div class="set-hint">读取中…</div>
         </div>`,
         "",
@@ -434,20 +429,6 @@ async function renderSettings() {
           新建执事
         </button>`,
       );
-      // 助手总览卡（2026-11-22）：只重画卡内 .as-body，标题与卡身留在页面里。
-      // 不 await、不让异常冒出来——端点 404 / 超时 / 数据坏掉时它自己藏卡，
-      // 下面的 partner-list 该读照读。
-      const surfacesCard = document.getElementById("assistant-surfaces");
-      const surfacesBody = surfacesCard?.querySelector(".as-body");
-      if (surfacesCard && surfacesBody) {
-        void renderAssistantSurfaces(surfacesBody)
-          .then((shown) => {
-            if (!shown) surfacesCard.hidden = true;
-          })
-          .catch(() => {
-            surfacesCard.hidden = true;
-          });
-      }
       document.getElementById("partner-add")?.addEventListener("click", () => openCreatePartnerModal());
       void loadPartners();
     } else if (tab === "tools") {
@@ -456,14 +437,16 @@ async function renderSettings() {
       el.settingsInner.innerHTML = injectTabsMarkup(tab) + toolPoolMarkup();
       wireToolPool();
     } else if (tab === "about-me") {
-      // 关于我（2026-11-19）：全局一份主人档案 + 每 Agent 读取开关。
+      // 偏好（2026-11-19 上线时叫「关于我」）：全局一份长期背景 + 每 Agent 读取开关。
       // 正文每轮现读，改完下一轮生效；上下文 tab 的 `user_profile` 段显示实际注入。
       el.settingsInner.innerHTML = injectTabsMarkup(tab) + aboutMeMarkup();
       void wireAboutMe();
     } else if (tab === "memory") {
       // 记忆页 A 版（2026-11-13 用户拍板）：现在是「注入 → 索引」。
+      // 2026-11-23：记忆库卡切换槽位后要重渲染这一页（重建卡 + 内置模块显隐），
+      // 把 renderSettings 当回调交给 wireMemorySettings；不整页刷新。
       el.settingsInner.innerHTML = injectTabsMarkup(tab) + memorySettingsMarkup();
-      void wireMemorySettings();
+      void wireMemorySettings({ rerender: () => { void renderSettings(); } });
     } else if (tab === "skills") {
       // 技能页（2026-11-08）：给 AI 的操作手册；2026-11-21 从一级分区收进注入。
       el.settingsInner.innerHTML = injectTabsMarkup(tab) + skillsSectionMarkup();
@@ -673,6 +656,8 @@ async function renderSettings() {
       "插件",
       `<div id="flags-card"><p class="set-hint">读取中…</p></div>`,
     );
+    // 每次进页都重建「已改」基线：徽标只表示本次进页后动过，刷新 / 重启 / 再进来就回到干净状态。
+    resetFlagBaseline();
     void loadFlagsSettings();
   } else if (page === "usage") {
     // 用量页（2026-11-13 从服务页拆出）：累计 / 按模型 / 明细 三张卡，一份数据三个视角。
@@ -712,17 +697,20 @@ async function renderSettings() {
     el.settingsInner.innerHTML = `${sectionMarkup(
       "默认模型",
       // 2026-11-12 M1：从「一行标签 + 原生下拉」升成一张当前模型卡。
+      // 2026-11-24：按方案 E 改单行横向——模型名 · 供应商 / 思考强度 / 更换同一条中线，
+      // 删掉「切换后下一轮对话生效」「新会话默认」两处常驻文案（用户口径：没用）。
       // 换模型是临时动作，收进「更换」弹层（复用对话 pill 的 model-menu）；
       // 弹层放在卡外面一层，因为 .card 有 overflow:hidden 会把浮层裁掉。
       `<div class="mdl-wrap">
         <div class="card mdl-card">
-          <div class="mdl-main">
+          <div class="mdl-model">
             <div class="mdl-name" id="mdl-current">…</div>
-            <div class="mdl-sub" id="mdl-hint">读取中…</div>
-            <!-- 全局默认思考档（2026-11-21）：新会话按这一档起步；分段按钮由
-                 renderDefaultModelRow 按当前模型的支持域画，没设过 = off。 -->
-            <div class="mdl-think" id="mdl-think" hidden></div>
+            <div class="mdl-prov" id="mdl-hint">读取中…</div>
           </div>
+          <!-- 全局默认思考档（2026-11-21）：新会话按这一档起步；滑块由
+               renderDefaultModelRow 按当前模型的支持域画，没设过 = off。
+               2026-11-24 从名字下方挪到行的中段（方案 E）。 -->
+          <div class="mdl-think" id="mdl-think" hidden></div>
           <button class="ghost mdl-change" type="button" id="mdl-change" hidden>更换</button>
         </div>
         <div class="model-menu composer-pop mdl-menu" id="mdl-menu" role="menu" hidden></div>

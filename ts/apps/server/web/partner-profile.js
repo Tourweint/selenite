@@ -11,6 +11,8 @@
  *   岗位：PUT /partners/:id/contract（版本化）+ PATCH currentGoal / tool_projection / diary
  *        （接派单卡 2026-11-15 退役：领域这套没用起来；机制与 env 总闸不动，想找回走 PATCH）
  *   能力：mountChainEditor（备选链）+ routines 列表/新建 + skills 只读
+ *   偏好读取（2026-11-23 从「注入 → 偏好」搬来）：GET /agent/user-profile 取总闸与本人状态，
+ *        PUT /agent/user-profile/agents/:id 即时落库（不进页面草稿）；正文仍在注入 → 偏好改。
  *
  * 刻意不做：不在这一页做删除执事（列表页才有）、不把记忆的增删搬来（设置 → 注入 → 索引是唯一真相）、
  * 不再显示这个人的履历 / 记忆（统一去设置 → 注入 → 索引看）。
@@ -397,11 +399,18 @@ function pfMarkup(partnerId, partner, detail) {
     </section>
 
     <!-- 统一保存条（2026-11-16）：人格模块 / 高级开关只改草稿，点这里才落库；
-         离开页面前还有未保存改动会弹「保存并退出 / 不保存退出 / 取消」，避免误触后忘掉。 -->
+         离开页面前还有未保存改动会弹「保存并退出 / 不保存退出 / 取消」，避免误触后忘掉。
+         2026-11-23：多一行草稿影响提示——哪些改动会重建固定前缀、哪些只追加尾部。 -->
     <div class="pf-savebar" id="pf-savebar" hidden>
-      <div class="pf-state" id="pf-savebar-state"><i aria-hidden="true"></i><span>没有改动</span></div>
-      <button class="ghost" type="button" id="pf-savebar-reset" disabled>撤销</button>
-      <button class="btn-primary" type="button" id="pf-savebar-save" disabled>保存</button>
+      <div class="pf-savebar-row">
+        <div class="pf-state" id="pf-savebar-state"><i aria-hidden="true"></i><span>没有改动</span></div>
+        <button class="ghost" type="button" id="pf-savebar-reset" disabled>撤销</button>
+        <button class="btn-primary" type="button" id="pf-savebar-save" disabled>保存</button>
+      </div>
+      <p class="pf-impact" id="pf-savebar-impact" hidden>
+        <span class="pf-impact-tag" id="pf-savebar-impact-tag"></span>
+        <span class="pf-impact-text" id="pf-savebar-impact-text"></span>
+      </p>
     </div>
   </div>`;
 }
@@ -485,10 +494,11 @@ function pfWireIdentity(root, partnerId, partner, detail, onDirty) {
   });
   soulArea.addEventListener("input", () => {
     draft.soul = soulArea.value;
-    // 待保存时先说清代价：只有总管人设进 system 固定前缀。
+    // 待保存时先说清代价：人设正文在固定前缀里（总管是 system 的 persona 段，
+    // 执事是专线 instructions 的执事说明）。
     setHint(
-      partnerId === "chief" && draft.soul !== base.soul
-        ? "保存后下一轮起用；总管人设在固定前缀里，本会话下一次请求会重建一次。换风格/立场建议开新会话：旧回答还在历史里。"
+      draft.soul !== base.soul
+        ? "保存后下一轮起用；人设正文在固定前缀（系统提示词）里，下一次请求会重建一次。换风格/立场建议开新会话：旧回答还在历史里。"
         : "",
     );
     refresh();
@@ -552,11 +562,11 @@ function pfWireIdentity(root, partnerId, partner, detail, onDirty) {
       }
       syncChiefAvatar();
       void loadRoster();
-      // 快照退役（2026-11-15）：保存成功后给一次「回到上一版」，不展示版本号
-      // 只有总管的人设进 system 固定前缀；执事 SOUL 走每轮尾部消息，不改前缀（别误报缓存）。
+      // 快照退役（2026-11-15）：保存成功后给一次「回到上一版」，不展示版本号。
+      // 人设正文在两种身份里都属于固定前缀（总管 persona 段 / 执事 instructions），别误报"只追加"。
       setHint(
-        payload.soul !== undefined && partnerId === "chief"
-          ? "已保存，下一轮起用。总管人设在固定前缀里，本会话下次请求会重建一次（缓存掉一截属正常）。"
+        payload.soul !== undefined
+          ? "已保存，下一轮起用。人设正文在固定前缀里，本会话下次请求会重建一次（缓存掉一截属正常）。"
           : "已保存，下一轮起用。",
       );
       showRollbackOffer(hint, partnerId, (restored) => {
@@ -585,6 +595,7 @@ function pfWireIdentity(root, partnerId, partner, detail, onDirty) {
   return {
     isDirty: () => dirtyCount() > 0,
     dirtyCount,
+    dirtyKeys: () => Object.keys(base).filter((key) => draft[key] !== base[key]),
     save: saveNow,
     reset: resetDraft,
   };
@@ -2460,6 +2471,25 @@ async function pfLoadPluginFlags() {
 	return rows;
 }
 
+/**
+ * 偏好读取开关（2026-11-23 用户口径：开关从「注入 → 偏好」搬进每个人的人设页）。
+ * 读一次 `/agent/user-profile` 拿「总闸 + 这一位读不读」；读不到返回 null，这一张卡就不画。
+ * 正文仍在「设置 → 注入 → 偏好」改，这里只切这一位的读取。
+ */
+async function pfLoadUserProfileRead(partnerId) {
+	try {
+		const response = await request("/api/v1/agent/user-profile", { cache: "no-store" });
+		if (!response.ok) return null;
+		const data = await response.json().catch(() => null);
+		if (!data) return null;
+		const agents = Array.isArray(data.agents) ? data.agents : [];
+		const row = agents.find((agent) => agent.id === partnerId);
+		return { enabled: data.enabled !== false, read: row ? row.read !== false : true };
+	} catch {
+		return null;
+	}
+}
+
 async function pfWirePersona(root, partnerId, partner, detail, onDraftChange) {
   const section = root.querySelector("#pf-persona");
   const presetBox = root.querySelector("#pf-persona-presets");
@@ -2501,7 +2531,11 @@ async function pfWirePersona(root, partnerId, partner, detail, onDraftChange) {
   const notify = () => onDraftChange?.();
   // 跨层父子门（2026-11-16）：人设页的子开关不在 FLAG_DEFS 里，只能读插件页返回的
   // effectiveValue / lockedBy，再决定控件锁不锁。读不到就按旧行为（不锁），不挡页面。
-  const pluginFlags = await pfLoadPluginFlags();
+  // 插件锁态与偏好读取并行拉：两个都是页面骨架之外的小请求，别串成两跳。
+  const [pluginFlags, prefState] = await Promise.all([
+    pfLoadPluginFlags(),
+    pfLoadUserProfileRead(partnerId),
+  ]);
   const PF_PARENT_LABELS = {
     MEMORY_ENABLED: "记忆总闸",
     PARTNER_MEMORY_RECALL: "记忆召回（总闸）",
@@ -2845,6 +2879,90 @@ async function pfWirePersona(root, partnerId, partner, detail, onDraftChange) {
     },
   };
 
+  /* ── 偏好（2026-11-23）──
+     放在「每轮固定注入」里的一张开关卡：只切这一位读不读主人写的偏好，正文在
+     设置 → 注入 → 偏好 改。落 partners.user_profile_read，点一下立刻 PUT，
+     不进页面草稿、不受底部保存条管。 */
+  const paintPrefCard = () => {
+    const old = injectedBox.querySelector("[data-pf-up-read]");
+    if (!old) return;
+    old.replaceWith(preferenceCard());
+  };
+
+  const flipPref = async () => {
+    if (!prefState) return;
+    if (!prefState.enabled) {
+      toast("「偏好」总闸关着（USER_PROFILE_ENABLED=false）");
+      return;
+    }
+    if (prefState.busy) return;
+    const next = !prefState.read;
+    prefState.busy = true;
+    prefState.read = next;
+    paintPrefCard();
+    try {
+      const response = await request(
+        `/api/v1/agent/user-profile/agents/${encodeURIComponent(partnerId)}`,
+        { method: "PUT", body: JSON.stringify({ read: next }) },
+      );
+      const data = await response.json().catch(() => null);
+      if (!response.ok || !data) throw new Error(data?.message || "保存失败");
+      const row = Array.isArray(data.agents)
+        ? data.agents.find((agent) => agent.id === partnerId)
+        : null;
+      prefState.read = row ? row.read !== false : next;
+      prefState.enabled = data.enabled !== false;
+      toast(next ? "已设为读取偏好" : "已设为不读偏好");
+    } catch (error) {
+      prefState.read = !next;
+      toast(error instanceof Error ? error.message : String(error));
+    } finally {
+      prefState.busy = false;
+      if (pfRouteId() === partnerId) paintPrefCard();
+    }
+  };
+
+  const preferenceCard = () => {
+    const card = document.createElement("div");
+    card.className = "pf-mod-card is-clickable";
+    card.dataset.pfUpRead = "1";
+    const label = document.createElement("div");
+    label.className = "pf-mod-label";
+    const name = document.createElement("span");
+    name.className = "pf-mod-name";
+    name.dataset.tip =
+      "把你写的偏好（称呼、输入习惯、说话禁忌）每轮当固定背景带给他。关掉只是这一位不读，别的内容不受影响；正文在 设置 → 注入 → 偏好 改。";
+    name.textContent = "偏好";
+    label.append(name);
+    const sum = document.createElement("span");
+    sum.className = "pf-mod-sum";
+    sum.textContent = !prefState.enabled
+      ? "总闸关着"
+      : prefState.busy
+        ? "保存中…"
+        : prefState.read === true
+          ? "开 · 固定注入"
+          : "关";
+    label.append(sum);
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "switch";
+    toggle.setAttribute("role", "switch");
+    toggle.setAttribute("aria-label", "读偏好");
+    toggle.setAttribute("aria-checked", String(prefState.enabled && prefState.read === true));
+    if (!prefState.enabled || prefState.busy) {
+      toggle.disabled = true;
+      toggle.setAttribute("aria-disabled", "true");
+    }
+    toggle.innerHTML = `<span class="switch-thumb" aria-hidden="true"></span>`;
+    card.classList.toggle("is-off", !prefState.enabled || prefState.read !== true);
+    card.append(label, toggle);
+    card.addEventListener("click", () => {
+      void flipPref();
+    });
+    return card;
+  };
+
   const paint = () => {
     // 预设条（persona 读到了才画）
     presetBox.replaceChildren();
@@ -2900,9 +3018,11 @@ async function pfWirePersona(root, partnerId, partner, detail, onDraftChange) {
     groupTitle("能力");
     cardsBox.append(plainCard(PLAIN_DEFS.chain), plainCard(PLAIN_DEFS.routines), plainCard(PLAIN_DEFS.skills));
 
-    // 每轮固定注入（100% 每句都带）：纪律 / 在办 / 履历（看原文）+ 负责项目（管挂载）。
-    // 项目放这里讲清两件事：挂载 → 每轮带一行项目索引；项目记忆 → 进下面召回池打分。
+    // 每轮固定注入（100% 每句都带）：偏好（读不读主人写的长期背景）+ 纪律 / 在办 / 履历
+    // （看原文）+ 负责项目（管挂载）。项目放这里讲清两件事：挂载 → 每轮带一行项目索引；
+    // 项目记忆 → 进下面召回池打分。
     injectedBox.replaceChildren();
+    if (prefState) injectedBox.append(preferenceCard());
     for (const def of VIEW_DEFS) injectedBox.append(viewCard(def));
     if ("projectIds" in partner) injectedBox.append(plainCard(PLAIN_DEFS.project));
 
@@ -3237,6 +3357,30 @@ async function pfWirePersona(root, partnerId, partner, detail, onDraftChange) {
   return {
     isDirty: () => dirtyCount() > 0,
     dirtyCount,
+    /** 草稿影响分类用：模块 / 子开关 / 高级行各返回一条，静态模块带「有没有内容」。 */
+    dirtyParts: () => {
+      const parts = [];
+      if (!persona || !baseline) return parts;
+      for (const id of MODULE_IDS) {
+        if (!moduleDirty(id)) continue;
+        const contentKey = PF_PERSONA_MODULES.find((module) => module.id === id)?.editable;
+        parts.push({
+          kind: "module",
+          id,
+          hasContent: contentKey ? pfStaticSummary(contentKey, persona.contents) !== "没填" : false,
+        });
+      }
+      for (const key of SWITCH_IDS) {
+        if (switchDirty(key)) parts.push({ kind: "switch", id: key });
+      }
+      if ((partner.toolProjection ?? null) !== baselinePartner.toolProjection) {
+        parts.push({ kind: "row", id: "projection" });
+      }
+      if ((partner.diary === true) !== baselinePartner.diary) {
+        parts.push({ kind: "row", id: "diary" });
+      }
+      return parts;
+    },
     save: savePage,
     discard: discardPage,
   };
@@ -3490,6 +3634,112 @@ async function pfWireTools(root, partnerId) {
 
 /* ── 页面装配 ─────────────────────────────────────────────── */
 
+/* ── 草稿影响分类（2026-11-23）────────────────────────────────
+   底部保存条与「还没保存」弹层共用。判据以代码为准：
+   - 重建固定前缀（system 提示词 + 工具定义）：
+     总管 SOUL → lifecycle persona 段；执事 SOUL / 口吻 / 里子 / 处境 →
+     专线 instructions（partner-runtime-run-partner-turn.ts 的 renderPartnerIdentity）；
+   - 只追加到本轮尾部：契约 / 目标 / 纪律 / 在办 / 履历 / 活模块 / 学习 / 主动性
+     （partner_context）、记忆召回（memory_recall）——全部走 message 注入；
+   - 不进提示词：名字 / 头像 / 结果整理 / 日记执事 / 人设库 / 挂念。
+   工具勾选、偏好读取是点了立即保存的另一条路，不在草稿里，因此不在这张表内。 */
+const PF_IMPACT_SWITCH_LABELS = {
+  moodAffectTone: "心情影响口吻",
+  nudgeEnabled: "挂念",
+  memoryRecallEnabled: "记忆召回",
+};
+const PF_IMPACT_ROW_LABELS = {
+  projection: "结果整理",
+  diary: "日记执事",
+};
+const PF_IMPACT_PREFIX_MODULES = new Set(["expression", "values", "scenario"]);
+const PF_IMPACT_IDENTITY_LABELS = {
+  soul: "人设正文",
+  name: "名字",
+  avatar: "头像",
+};
+
+function pfImpactBrief(items, max = 2) {
+  if (items.length <= max) return items.join("、");
+  return `${items.slice(0, max).join("、")}等 ${items.length} 项`;
+}
+
+/** 把控制器的脏字段翻译成三组：会重建前缀 / 只追加尾部 / 不进提示词。 */
+function pfDraftImpact(partnerId, identityCtl, personaCtl) {
+  const prefix = [];
+  const append = [];
+  const none = [];
+  const isChief = partnerId === "chief";
+
+  for (const key of identityCtl?.dirtyKeys?.() ?? []) {
+    if (key === "soul") prefix.push(PF_IMPACT_IDENTITY_LABELS[key]);
+    else none.push(PF_IMPACT_IDENTITY_LABELS[key] || key);
+  }
+
+  for (const item of personaCtl?.dirtyParts?.() ?? []) {
+    if (item.kind === "module") {
+      const name = PF_PERSONA_MODULES.find((module) => module.id === item.id)?.name || item.id;
+      if (PF_IMPACT_PREFIX_MODULES.has(item.id) && !isChief && item.hasContent) {
+        prefix.push(`${name}开关`);
+      } else if (PF_IMPACT_PREFIX_MODULES.has(item.id) && !isChief) {
+        none.push(`${name}开关（内容为空）`);
+      } else if (isChief || item.id === "profiles") {
+        none.push(name);
+      } else {
+        append.push(name);
+      }
+      continue;
+    }
+    if (item.kind === "switch") {
+      const label = PF_IMPACT_SWITCH_LABELS[item.id] || item.id;
+      if (item.id === "nudgeEnabled" || isChief) none.push(label);
+      else append.push(label);
+      continue;
+    }
+    if (item.kind === "row") none.push(PF_IMPACT_ROW_LABELS[item.id] || item.id);
+  }
+  return { prefix, append, none };
+}
+
+function pfImpactTip(impact, partnerId) {
+  const lines = [];
+  if (impact.prefix.length) lines.push(`会重建固定前缀：${impact.prefix.join("、")}`);
+  if (impact.append.length) lines.push(`只追加到本轮尾部：${impact.append.join("、")}`);
+  if (impact.none.length) {
+    // 总管的模块在主对话里不注入（静态人格只在群聊里读）；别把「不进提示词」说得太满。
+    const label = partnerId === "chief" ? "主对话不进" : "不进提示词";
+    lines.push(`${label}：${impact.none.join("、")}`);
+  }
+  if (!lines.length) return "";
+  lines.push("前缀 = 系统提示词 + 工具定义；重建后下一次请求从头算一次缓存。");
+  return lines.join("\n");
+}
+
+/** 离开弹层里的影响表：只列这次草稿真正涉及的组，不铺全量清单。 */
+function pfImpactRowsMarkup(impact, partnerId) {
+  const rows = [];
+  if (impact.prefix.length) {
+    rows.push(
+      `<p class="pf-impact-row is-prefix"><span>会重建固定前缀</span><b>${esc(impact.prefix.join("、"))}</b></p>`,
+    );
+  }
+  if (impact.append.length) {
+    rows.push(
+      `<p class="pf-impact-row"><span>只追加本轮尾部</span><b>${esc(impact.append.join("、"))}</b></p>`,
+    );
+  }
+  if (impact.none.length) {
+    const label = partnerId === "chief" ? "主对话不进" : "不进提示词";
+    rows.push(
+      `<p class="pf-impact-row"><span>${label}</span><b>${esc(impact.none.join("、"))}</b></p>`,
+    );
+  }
+  if (!rows.length) return "";
+  return `<div class="pf-impact-table">${rows.join("")}
+    <p class="pf-impact-note">前缀 = 系统提示词 + 工具定义；重建后下一次请求从头算一次缓存，追加只影响本轮尾部。</p>
+  </div>`;
+}
+
 /**
  * 离开页面时的三选一（2026-11-16 用户口径：「还没保存，是否保存并退出？」）。
  *
@@ -3498,7 +3748,7 @@ async function pfWireTools(root, partnerId) {
  * - 不保存退出：丢掉草稿后放行；
  * - 保存并退出：保存成功才放行；失败留在弹层里，给一句原因。
  */
-function pfPromptLeave({ partnerId, dirtyCount, save, discard }) {
+function pfPromptLeave({ partnerId, dirtyCount, impact, save, discard }) {
   if (pfLeavePromptOpen) return;
   pfLeavePromptOpen = true;
   const ownHash = pfHash(partnerId);
@@ -3508,6 +3758,7 @@ function pfPromptLeave({ partnerId, dirtyCount, save, discard }) {
     (body) => {
       body.innerHTML = `
         <p class="modal-desc">这个页面还有 ${dirtyCount} 处改动没保存。是否保存并退出？</p>
+        ${pfImpactRowsMarkup(impact, partnerId)}
         <p class="modal-hint" id="pf-leave-hint"></p>
         <div class="modal-actions">
           <button class="ghost" type="button" data-leave-cancel>取消</button>
@@ -3618,6 +3869,9 @@ async function renderPartnerProfilePage(partnerId) {
   const barState = root.querySelector("#pf-savebar-state");
   const barSave = root.querySelector("#pf-savebar-save");
   const barReset = root.querySelector("#pf-savebar-reset");
+  const barImpact = root.querySelector("#pf-savebar-impact");
+  const barImpactTag = root.querySelector("#pf-savebar-impact-tag");
+  const barImpactText = root.querySelector("#pf-savebar-impact-text");
   const pageDirty = () => (identityCtl?.dirtyCount() ?? 0) + (personaCtl?.dirtyCount() ?? 0);
   const anyDirty = () => pageDirty() > 0;
   const refreshBar = () => {
@@ -3629,6 +3883,34 @@ async function renderPartnerProfilePage(partnerId) {
     barState?.classList.toggle("is-dirty", count > 0);
     const label = barState?.querySelector("span");
     if (label) label.textContent = count ? `${count} 处改动未保存` : "没有改动";
+    if (barImpact && barImpactTag && barImpactText) {
+      const impact = pfDraftImpact(partnerId, identityCtl, personaCtl);
+      const hasPrefix = impact.prefix.length > 0;
+      const hasAppend = impact.append.length > 0;
+      barImpact.hidden = count === 0;
+      barImpact.classList.toggle("is-prefix", hasPrefix);
+      barImpact.dataset.tip = count ? pfImpactTip(impact, partnerId) : "";
+      if (!count) {
+        barImpactTag.textContent = "";
+        barImpactText.textContent = "";
+      } else if (hasPrefix) {
+        const rest = impact.append.length + impact.none.length;
+        barImpactTag.textContent = "会重建前缀";
+        barImpactText.textContent = rest
+          ? `${pfImpactBrief(impact.prefix)} · 其余 ${rest} 项不动前缀`
+          : pfImpactBrief(impact.prefix);
+      } else if (hasAppend) {
+        barImpactTag.textContent = "只追加尾部";
+        barImpactText.textContent = `${pfImpactBrief(impact.append)} · 不动固定前缀${
+          impact.none.length
+            ? `（另 ${impact.none.length} 项${partnerId === "chief" ? "不进主对话" : "不进提示词"}）`
+            : ""
+        }`;
+      } else {
+        barImpactTag.textContent = partnerId === "chief" ? "不影响主对话" : "不进提示词";
+        barImpactText.textContent = pfImpactBrief(impact.none) || "这次保存不改上下文";
+      }
+    }
   };
   const saveDraft = async () => {
     if (savingAll) return false;
@@ -3675,6 +3957,7 @@ async function renderPartnerProfilePage(partnerId) {
     void pfPromptLeave({
       partnerId,
       dirtyCount: pageDirty(),
+      impact: pfDraftImpact(partnerId, identityCtl, personaCtl),
       save: saveDraft,
       discard: discardDraft,
     });

@@ -8,7 +8,6 @@
  */
 
 import { addBrowserFiles, addImageFiles, captureScreenshot, clearPendingAttachments, closeLightbox, pickFiles } from "./attachments.js";
-import { startNewChat } from "./chat-open.js";
 // 会话画板（2026-11-17）：能力投影决定顶栏入口挂不挂；这里只做一次同步
 import { syncChatMapEntry } from "./chat-map.js";
 // 工作归属标签（2026-11-18）：能力投影关着时收起输入框左下角的只读标签
@@ -497,8 +496,8 @@ document.addEventListener("keydown", (event) => {
   }
   if (event.key.toLowerCase() === "k") {
     event.preventDefault();
-    go("chat");
-    startNewChat("worker");
+    // 普通助手（worker）2026-11-23 退役：Ctrl+K 从「新建助手对话」改成「新建任务」（派给池）。
+    void openNewTask();
   } else if (event.key === ",") {
     event.preventDefault();
     go("settings");
@@ -537,9 +536,14 @@ el.send.addEventListener("click", (event) => {
 });
 
 el.newChat?.addEventListener("click", () => {
-  go("chat");
-  startNewChat("worker");
+  void openNewTask();
 });
+
+/** 「新建」唯一语义（2026-11-23）：建一张派给池的票；普通助手会话不再生产。 */
+async function openNewTask() {
+  const module = await import("./tasks-create.js");
+  module.openCreateTaskModal();
+}
 
 // 代码块复制（批次一）：事件挂在 thread 上，消息增删不用重挂；
 // 读 pre 的 innerText，流式中也能复制到当前最新的文本

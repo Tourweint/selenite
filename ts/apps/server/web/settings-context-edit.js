@@ -139,7 +139,7 @@ function resolveTarget({ key, text, roleId, partnerId }) {
 	if (key === "user_profile") {
 		return {
 			kind: "user-profile",
-			title: "关于我",
+			title: "偏好",
 			note: "全局一份；会读它的 Agent（总管 + 开了开关的执事）下一轮生效。",
 			value: unwrapTag(text, "user_profile"),
 		};

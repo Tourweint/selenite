@@ -30,7 +30,6 @@ const el = {
   secProjectsMore: document.getElementById("sec-projects-more"),
   projList: document.getElementById("proj-list"),
   secGroupsMore: document.getElementById("sec-groups-more"),
-  secGroupsAll: document.getElementById("sec-groups-all"),
   partnersBadge: document.getElementById("partners-badge"),
   secPartnersMore: document.getElementById("sec-partners-more"),
   partnerRoster: document.getElementById("partner-roster"),

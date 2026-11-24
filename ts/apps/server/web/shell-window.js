@@ -7,7 +7,6 @@
  * app.js 文末，各模块顶层只做声明、常量与事件监听注册。
  */
 
-import { startNewChat } from "./chat-open.js";
 import { el } from "./dom.js";
 import { go } from "./route.js";
 import { closeMenu, setMenuOpen } from "./shell.js";
@@ -84,8 +83,8 @@ el.menuPop.addEventListener("click", (event) => {
   if (item.dataset.action === "settings") {
     go("settings");
   } else if (item.dataset.action === "new") {
-    go("chat");
-    startNewChat("worker");
+    // 普通助手（worker）2026-11-23 退役：托盘/窗口菜单的「新建」= 建一张派给池的任务票。
+    void import("./tasks-create.js").then((module) => module.openCreateTaskModal());
   }
 });
 document.addEventListener("click", (event) => {

@@ -17,7 +17,6 @@ import { refreshModelPill } from "./hover-tip.js";
 import { dayKeyOfAt, dayLabelOf } from "./groups-thread.js";
 import { request } from "./net.js";
 import { partnerSessionLabel, parsePartnerExternalId } from "./partner-sessions.js";
-import { openPartnerSessions } from "./partner-sessions-ui.js";
 import { chiefDisplayName, partnerDisplayName, syncChatHeadAvatar, syncEmptyMark } from "./partners-status.js";
 import { go, syncRailCurrent, syncSideRowsCurrent } from "./route.js";
 import { beginHomeSettle, cancelHomeSettle, endHomeSettle } from "./shell.js";
@@ -54,38 +53,6 @@ function renderBranchOrigin(origin) {
     }
   };
 }
-
-/* ── 会话选择器入口（2026-11-17 批2）─────────────────────
- * 顶栏标题只在执事 canonical / side 会话可点；worker / chief 行为不变。
- * 当前会话用 state.conversationId 精确解析，不靠前缀 slice。 */
-function syncTitleSessionAffordance(partnerId) {
-  const show = Boolean(partnerId && state.sideSessionsEnabled);
-  el.title.classList.toggle("is-session-picker", show);
-  if (show) {
-    el.title.title = "选择会话";
-    el.title.tabIndex = 0;
-    el.title.setAttribute("role", "button");
-  } else {
-    el.title.removeAttribute("title");
-    el.title.removeAttribute("tabindex");
-    el.title.removeAttribute("role");
-  }
-}
-
-function openCurrentSessionPicker() {
-  if (!state.sideSessionsEnabled) return;
-  const parsed = parsePartnerExternalId(state.conversationId);
-  if (parsed && (parsed.role === "canonical" || parsed.role === "side")) {
-    openPartnerSessions(parsed.partnerId);
-  }
-}
-el.title?.addEventListener("click", openCurrentSessionPicker);
-el.title?.addEventListener("keydown", (event) => {
-  if (event.key === "Enter" || event.key === " ") {
-    event.preventDefault();
-    openCurrentSessionPicker();
-  }
-});
 
 /* ── 打开会话 ─────────────────────────────────────────── */
 
@@ -398,7 +365,6 @@ async function openChat(conversationId, { anchor = null, deep = false } = {}) {
         // canonical：表头仍只显示人设名（现状不变）
         el.title.textContent = partnerDisplayName(partnerId);
       }
-      syncTitleSessionAffordance(partnerId);
     } else if (conversationId.startsWith("task-")) {
       // 任务线程（2026-11-22）：它不是总管、也不是普通助手；标题只说这张单。
       // chatKind 仍沿用服务端回读（任务会话通常没有 kind），只覆盖顶栏文字。
@@ -419,7 +385,6 @@ async function openChat(conversationId, { anchor = null, deep = false } = {}) {
       const first = messages.find((message) => message.role === "user");
       el.title.textContent = known || (first ? first.text.slice(0, 40) : "对话");
     }
-    if (!partnerId) syncTitleSessionAffordance("");
     el.title.dataset.chatKind = kind;
     // 起首图标等 chatKind 回读之后才画（空态那一段 clearThread 里先重置成水晶，见 syncEmptyMark）
     syncEmptyMark();
@@ -462,8 +427,10 @@ async function openChat(conversationId, { anchor = null, deep = false } = {}) {
   }
 }
 
-function startNewChat(kind = "worker") {
+function startNewChat(kind = "chief") {
   state.navToken += 1;
+  // 普通助手（worker）2026-11-23 退役：新建入口不会再传 worker（缺省即总管）；
+  // 只有「原会话没了、按原身份重开」这条兜底还允许沿用 worker（历史会话继续可用）。
   state.chatKind = kind === "chief" ? "chief" : "worker";
   state.conversationId = "";
   // 新会话屏的模型选择是本地 pending，回到新会话就清掉；pill 回到全局默认。
@@ -479,7 +446,6 @@ function startNewChat(kind = "worker") {
   // 新建会话不等任何在途 openChat 的载入锁：清完线程立刻按空态结算（抬回中间）
   cancelHomeSettle();
   el.title.textContent = state.chatKind === "chief" ? chiefDisplayName() : "普通对话";
-  syncTitleSessionAffordance("");
   el.title.dataset.chatKind = state.chatKind;
   // 新建 / 换身份时 state 已经定好，可以直接画起首图标
   syncEmptyMark();
@@ -492,4 +458,4 @@ function startNewChat(kind = "worker") {
   el.input.focus();
 }
 
-export { CHAT_HISTORY_PAGE_SIZE, clearHistoryTop, jumpToAnchor, loadOlderMessages, openChat, openConversation, prependHistoryMessages, renderHistoryMessages, renderHistoryTop, renderTranscriptMessage, startNewChat, syncTitleSessionAffordance };
+export { CHAT_HISTORY_PAGE_SIZE, clearHistoryTop, jumpToAnchor, loadOlderMessages, openChat, openConversation, prependHistoryMessages, renderHistoryMessages, renderHistoryTop, renderTranscriptMessage, startNewChat };

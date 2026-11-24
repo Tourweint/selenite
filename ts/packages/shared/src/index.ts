@@ -363,7 +363,8 @@ export const TranscriptMessageSchema = z.object({
   files: z.array(TranscriptFileSchema).optional(),
   /**
    * 这条回答之前那一轮的工作步骤（2026-11-07，纯增量，老客户端忽略）。
-   * 只挂在 assistant 上；一轮里没有工具调用就不带这个字段。
+   * 只挂在 assistant 上；有工具调用或思考就带。2026-11-21 起裸回答轮也带一条
+   * `think`（没留下思考正文的同样补一步），"没有工具调用就没有 steps"已不成立。
    */
   steps: z.array(TranscriptStepSchema).optional(),
   /** 那一轮从提问到收尾的墙钟时长（毫秒）；有 steps 才可能有 */

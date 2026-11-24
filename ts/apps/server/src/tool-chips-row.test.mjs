@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { planRowChips } from "../web/tool-chips.js";
+import { nextRevealCount, planRowChips } from "../web/tool-chips.js";
 
 /**
  * 灰块"最多一行"的排布口径（2026-11-19）。
@@ -55,4 +55,34 @@ test("极窄容器：一枚都排不下时也只留行首计数条", () => {
   const widths = [300, 300];
   const plan = planRowChips({ widths, containerWidth: 200, gap, moreWidth: 40 });
   assert.deepEqual(plan, { keep: 0, folded: true });
+});
+
+/**
+ * 分页展开的下一档枚数（2026-11-24，每页固定 30）。
+ *
+ * 口径：0 → 第一页 30；之后每次 +30；到顶停在总数；收起再展开也从 0 重新算。
+ * 「+N」上显示的是**剩余总数**，不是本页大小。
+ */
+test("分页：从 0 开始铺第一页 30 枚", () => {
+  assert.equal(nextRevealCount(0, 120), 30);
+});
+
+test("分页：每次点「+N」再加 30，不越过剩余总数", () => {
+  assert.equal(nextRevealCount(30, 120), 60);
+  assert.equal(nextRevealCount(90, 120), 120);
+});
+
+test("分页：已经到顶就不再增加", () => {
+  assert.equal(nextRevealCount(120, 120), 120);
+  assert.equal(nextRevealCount(140, 120), 120);
+});
+
+test("分页：总数不足一页时一次铺完", () => {
+  assert.equal(nextRevealCount(0, 12), 12);
+  assert.equal(nextRevealCount(0, 0), 0);
+});
+
+test("分页：page 可传（单测用），非正数按 1 兜底防死循环", () => {
+  assert.equal(nextRevealCount(10, 100, 50), 60);
+  assert.equal(nextRevealCount(10, 100, -5), 11);
 });

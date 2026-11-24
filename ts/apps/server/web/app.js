@@ -34,6 +34,7 @@ import "./avatar.js";
 import "./partner-roster.js";
 import { syncEmptyMark } from "./partners-status.js";
 import "./tool-flow.js";
+import { setChipPagingEnabled } from "./tool-chips.js";
 import { mountCtxCard } from "./chat-notice.js";
 import "./markdown.js";
 import { initHtmlCards } from "./html-cards.js";
@@ -96,7 +97,7 @@ import "./chat-map.js";
 
 // 启动代码用到、来自各模块的绑定
 import { refreshApprovalPopups, startApprovalPopWatch } from "./approval-pop.js";
-import { openChat, startNewChat } from "./chat-open.js";
+import { openChat } from "./chat-open.js";
 import { loadChats } from "./chats-list.js";
 import { el } from "./dom.js";
 import { initGroups } from "./groups-base.js";
@@ -107,6 +108,7 @@ import { chiefDisplayName, loadRoster, syncChiefDot } from "./partners-status.js
 import { loadCapabilities } from "./plus-menu.js";
 import { refreshProjectPill } from "./project-modal.js";
 import { applyRoute, currentRoute, go } from "./route.js";
+import { initSelectMenus } from "./select-menu.js";
 import { wireSearchPage } from "./search-page.js";
 import { INJECT_TABS, SETTINGS_ALIASES, SETTINGS_SECTIONS } from "./settings-base.js";
 import { applySections, applySidebarA11y, syncGreeting, updateHomeMode } from "./shell.js";
@@ -163,8 +165,10 @@ void (async () => {
         go("settings", known ? sub : undefined);
       }
     } else {
+      // 普通助手（worker）2026-11-23 退役：`?view=new` 曾经是「开一个新对话」，
+      // 现在只剩一种新建——建一张派给池的任务票（弹窗与侧栏 ⋯ / Ctrl+K 同一份）。
       go("chat");
-      startNewChat("worker");
+      void import("./tasks-create.js").then((module) => module.openCreateTaskModal());
     }
     // 用掉就清掉，否则以后每次刷新都被它拽回同一个地方
     const clean = new URL(location.href);
@@ -178,12 +182,31 @@ void (async () => {
   void ensureFlag("CHAT_STREAM_REVEAL", true).then((value) => {
     state.chatRevealFlag = value;
   });
+  // 布局调试（2026-11-24）：盒树探针恒定挂上（只读、不渲染，agent 量测随时可用）；
+  // 描边由插件中心「布局调试描边」控制，开着才加 class，刷新页面生效。
+  void import("./dev-inspect.js").then((module) => {
+    module.initDevInspect();
+  });
+  void ensureFlag("DEV_LAYOUT_INSPECT", false).then((enabled) => {
+    if (enabled) document.documentElement.classList.add("dev-box");
+  });
+  // 工具块分页展开（2026-11-24）：首屏拉一次；模块内默认开，关掉回到旧形态
+  // （展开就是全部、跑动行没有「+N」）。排版时读模块变量，下一次交互生效。
+  void ensureFlag("TOOL_CHIP_PAGING", true).then((value) => {
+    state.toolChipPagingFlag = value;
+    setChipPagingEnabled(value);
+  });
   // 交互卡片开关（2026-11-21）：首屏拉一次；渲染期读的是模块内默认值，
   // 开关晚到只影响之后的消息（回滚 CHAT_HTML_CARDS）。
   void ensureFlag("CHAT_HTML_CARDS", true).then((value) => {
     setHtmlCardsEnabled(value);
   });
   initHtmlCards(); // 占位符观察 + 报高监听，全局一份
+  // 统一下拉（2026-11-23 样式统一批）：原生 select 渐进增强成自绘面板，选中态 C 版。
+  // 等开关回来再启动，关闭时（UI_SELECT_MENU=false）页面就是原生下拉，不做先绘后撤。
+  void ensureFlag("UI_SELECT_MENU", true).then((enabled) => {
+    if (enabled) initSelectMenus();
+  });
   void loadCapabilities(); // 附件 / 编辑重发的开关投影（2026-11-08 4a）
   void loadRoster(); // E4：执事花名册首帧
   void initGroups(); // 群组（2026-11-06 批二）：可用性探测 + 侧栏节首帧

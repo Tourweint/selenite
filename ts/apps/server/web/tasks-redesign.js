@@ -406,7 +406,7 @@ function runBlockHtml(cards, running) {
   return `${head}<section class="tk2-minis">${items}</section>`;
 }
 
-/** 打手徽章：四项固定（TASK_HITTERS 不改成动态，那是另一个立项） */
+/** 打手徽章：跟 TASK_HITTERS 一样是固定表（不改成动态，那是另一个立项） */
 const HITTER_BADGE = {
   codebuddy: ["CB", "cb"],
   "qoder-intl": ["QI", "qi"],
@@ -414,6 +414,7 @@ const HITTER_BADGE = {
   "claude-code": ["CC", "cb"],
   codex: ["CX", "qi"],
   opencode: ["OC", "qc"],
+  doubao: ["DB", "cb"],
   phone: ["手", "mg"],
 };
 

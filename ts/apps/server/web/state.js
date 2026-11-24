@@ -13,9 +13,9 @@ import { readToken } from "./net.js";
 const state = {
   token: readToken(),
   conversationId: localStorage.getItem(KEY_CONV) || "",
-  /* 会话种类（2026-11-06 C 批）：chief|worker|partner。没有落盘会话时，首屏就是一个
-     普通 worker 空会话；有落盘会话时先空着，等 /messages 回读再认（不靠 id 猜）。 */
-  chatKind: localStorage.getItem(KEY_CONV) ? "" : "worker",
+  /* 会话种类（2026-11-06 C 批）：chief|worker|partner。2026-11-23 起普通助手（worker）退役：
+     新建一律不再产生 worker 会话，首屏空态按总管算；历史 worker 会话仍可按回读的 chatKind 打开。 */
+  chatKind: localStorage.getItem(KEY_CONV) ? "" : "chief",
   // 服务连通（/healthz）与总管档案状态：两者共同决定绿色在线点，sending 不再参与
   serviceOk: false,
   chiefStatus: "active",
@@ -60,10 +60,13 @@ const state = {
   // 运行时开关投影：null = 还没拉过；Map(key → flag 行)。只拉一次 GET /api/v1/agent/flags。
   flagsCache: null,
   // 副会话入口（2026-11-17 批2）：花名册首次加载时读 PARTNER_SIDE_SESSIONS 写这里；
-  // 缺省 false（读取失败 / 字段缺失按关处理），true 才渲染「选择会话」按钮。
+  // 缺省 false（读取失败 / 字段缺失按关处理），true 才在侧栏右键菜单里挂「选择会话」。
   sideSessionsEnabled: false,
   // 对话流逐字浮现（2026-11-13）：null = 开关还没回来，按默认开跑；false 走旧的整块渲染。
   chatRevealFlag: null,
+  // 工具块分页展开（2026-11-24）：null = 开关还没回来，按默认开跑；
+  // false 走旧形态（展开就是全部、跑动行没有「+N」）。
+  toolChipPagingFlag: null,
   // 历史翻页状态（2026-11-13 按天分组·上滑加载）：只对当前会话有效，切会话即重置。
   // started=false 时滚动监听不触发；cursor=null 且 hasMore=false 表示已经到最早。
   history: { started: false, cursor: null, hasMore: false, loading: false, pages: 0, top: null },

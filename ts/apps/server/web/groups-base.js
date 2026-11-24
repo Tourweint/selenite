@@ -64,18 +64,15 @@ function applyGroupsAvailability() {
   // 侧栏「群组」分区（2026-11-07 统一批）：折叠头 + 行尾 ⋯（2026-11-14 由 ＋ 改）是两个独立按钮，
   // 旧的一体式 #side-group 已从 HTML 移除（折叠箭头随四改一并退役）。
   // 入口一起跟可用性走：轨道圆钮（悬停/点开悬停卡，2026-11-13）/ 分区名（进群组页）/
-  // 行尾 ⋯（菜单里建群）/ 分区底部的「所有群聊」。
-  // 2026-11-14 用户口径：分区头、⋯、底部文字入口都不再挂浮签——文字已经自解释。
-  for (const button of [el.secGroupsToggle, el.secGroupsMore, el.secGroupsAll]) {
+  // 行尾 ⋯（菜单里建群、进所有群聊，2026-11-23 由底部链接行收进来）。
+  // 2026-11-14 用户口径：分区头、⋯ 不再挂浮签——文字已经自解释。
+  for (const button of [el.secGroupsToggle, el.secGroupsMore]) {
     if (!button) continue;
     button.disabled = !on;
   }
   if (el.railGroups) el.railGroups.disabled = !on;
   if (el.groupList) el.groupList.hidden = !on;
   if (el.groupCreate) el.groupCreate.hidden = !on;
-  // 「所有群聊」这一行跟整节可用性走：群组没启用时它和折叠头一起灰掉，
-  // 不留一条点进去必然空页的入口。
-  if (el.secGroupsAll) el.secGroupsAll.hidden = !on;
 }
 
 /** 群成员头像：成员投影自带 avatar 就用它（2026-11-08 批三），老服务端回落到花名册缓存 */

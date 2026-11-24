@@ -37,3 +37,7 @@
 @import url("./style-26-chat-map.css");
 /* 展开/收起箭头旋转行为唯一出处（2026-11-21 统一批）+ 原生 select 换皮。放最后 */
 @import url("./style-27-chevron.css");
+/* 自绘下拉（2026-11-23 样式统一批，C 版）：面板 + 按钮共通，放最后盖旧 select 皮肤 */
+@import url("./style-28-select.css");
+/* 布局调试描边（2026-11-24 开发工具）：只在 html.dev-box 下生效，默认无视觉。 */
+@import url("./style-29-dev-inspect.css");

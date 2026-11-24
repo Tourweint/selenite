@@ -154,12 +154,12 @@ function selectedChatId(choices) {
 }
 
 /** 深链 #/settings/context?role=... 认的角色名（执事另走 partner:<id>）。 */
-const DEEP_LINK_ROLES = new Set(["chief", "worker", "dispatch-worker"]);
+const DEEP_LINK_ROLES = new Set(["chief", "dispatch-worker"]);
 
 /**
  * 深链 `#/settings/context?role=dispatch-worker` 里的 role（2026-11-22）。
- * 只认 chief / worker / dispatch-worker / partner:<id>；别的值当成没写，回落总管，不弹错。
- * 地址里没有 query 时返回空串——旧 hash 的页面行为保持逐字不变。
+ * 只认 chief / dispatch-worker / partner:<id>；别的值（含 2026-11-24 退役的 worker）
+ * 当成没写，回落总管，不弹错。地址里没有 query 时返回空串——旧 hash 的页面行为保持逐字不变。
  */
 function deepLinkRoleFromHash() {
 	const hash = location.hash.replace(/^#/, "");
@@ -194,14 +194,13 @@ function withDeepLinkRole(roles, roleId) {
 	return [...roles, { id: roleId, label }];
 }
 
-/** 默认开销的角色：总管 → 活跃执事 → 普通 worker → 派活工人（池）兜底。服务端还会回一份完整 roles，用于校正这里的花名册。 */
+/** 默认开销的角色：总管 → 活跃执事 → 派活工人（池）兜底。服务端还会回一份完整 roles，用于校正这里的花名册。 */
 function defaultRoleChoices() {
 	const roles = [{ id: "chief", label: "总管" }];
 	for (const partner of state.partners || []) {
 		if (!partner || partner.status !== "active" || partner.id === "chief") continue;
 		roles.push({ id: `partner:${partner.id}`, label: partner.name || "执事" });
 	}
-	roles.push({ id: "worker", label: "普通 worker" });
 	// 2026-11-22：深链 #/settings/context?role=dispatch-worker 要在服务端 roles 回来前就能选中，
 	// 先摆一个兜底项；真名册回来后由 syncRoleOptions 换掉。
 	roles.push({ id: "dispatch-worker", label: "派活工人（池）" });
@@ -307,17 +306,19 @@ function toolbarMarkup(mode, choices, selected, roles, role) {
 				})
 				.join("")
 		: `<option value="">还没有会话</option>`;
+	// 2026-11-23（用户口径）：两个开关靠在一起放，别再一左一右夹着会话框；
+	// 会话框收窄到 200px，工具栏整条留在左边，右边不再被拉开一段空。
 	return `<div class="ctx-toolbar">
     <div class="ctx-mode" role="radiogroup" aria-label="上下文视图">
       <button type="button" data-ctx-mode="session" aria-checked="${mode === "session"}">当前会话</button>
       <button type="button" data-ctx-mode="default" aria-checked="${mode === "default"}">默认开销</button>
     </div>
-    <select class="set-input ctx-select" id="ctx-chat" ${mode === "session" && choices.length ? "" : "hidden"} ${choices.length ? "" : "disabled"} aria-label="选择要查看上下文的会话">${options}</select>
-    <select class="set-input ctx-select" id="ctx-role" ${mode === "default" ? "" : "hidden"} aria-label="选择要查看默认开销的角色">${roleOptionMarkup(roles, role)}</select>
     <div class="ctx-mode ctx-scale" role="radiogroup" aria-label="棋盘的基准" ${mode === "session" ? "" : "hidden"}>
       <button type="button" data-ctx-scale="composition" aria-checked="${waffleScale === "composition"}" title="每格 = 请求里的一份，看到的是组成占比">占比</button>
       <button type="button" data-ctx-scale="window" aria-checked="${waffleScale === "window"}" title="每格 = 上下文窗口的一份，空着的就是没用到的">窗口</button>
     </div>
+    <select class="set-input ctx-select" id="ctx-chat" ${mode === "session" && choices.length ? "" : "hidden"} ${choices.length ? "" : "disabled"} aria-label="选择要查看上下文的会话">${options}</select>
+    <select class="set-input ctx-select" id="ctx-role" ${mode === "default" ? "" : "hidden"} aria-label="选择要查看默认开销的角色">${roleOptionMarkup(roles, role)}</select>
     <button class="ghost ctx-refresh" type="button" id="ctx-refresh">刷新</button>
   </div>`;
 }
@@ -350,20 +351,17 @@ function heroMarkup() {
 }
 
 /**
- * 「请求与缓存」卡骨架（2026-11-19）。
+ * 「请求」卡骨架（2026-11-19；2026-11-23 按用户口径收口）。
  * 默认开销模式不显示；当前会话模式由 loadRequests 拉数据后再展开。
+ * 2026-11-23：不再挂「请求与缓存」标题与红光提示条——卡头只剩一行账
+ * （多少次请求第几页 + 前缀变化 / 骤降 / 完全未命中）与右侧命中率。
  */
 function cacheMarkup() {
 	return `<div class="card ctx-cache" id="ctx-cache" hidden>
     <div class="ctx-cache-head">
-      <div class="ctx-cache-copy">
-        <b>请求与缓存</b>
-        <span class="ctx-cache-sub" id="ctx-cache-sub">读取中…</span>
-      </div>
+      <div class="ctx-cache-meta" id="ctx-cache-sub">读取中…</div>
       <div class="ctx-cache-rate"><b id="ctx-cache-rate">—</b><span>命中率</span></div>
     </div>
-    <div class="ctx-cache-summary" id="ctx-cache-summary"></div>
-    <div class="ctx-cache-alarm" id="ctx-cache-alarm" hidden></div>
     <div class="ctx-cache-list" id="ctx-cache-list"></div>
     <div class="ctx-cache-pager" id="ctx-cache-pager" hidden>
       <button class="ghost" type="button" data-ctx-page="prev">上一页</button>
@@ -402,7 +400,11 @@ function contextSettingsMarkup() {
   </div>`;
 }
 
-/** 当前会话的分段：六块都算进总量（这才是这一条请求的真实体积）。 */
+/**
+ * 当前会话的分段：五块都算进总量（这才是这一条请求的真实体积）。
+ * 2026-11-23（用户口径）：工具结果并回「对话与工具」——它本来就属于会话正文，
+ * 不再单独当一块（否则图例上有一个点进去什么都没有的段）。
+ */
 function sessionParts(data) {
 	const last = data.memory.last;
 	const injectTokens =
@@ -415,10 +417,12 @@ function sessionParts(data) {
 		{ key: "inject", label: "临时注入", tokens: injectTokens },
 		{
 			key: "conversation",
-			label: "对话",
-			tokens: Number(data.changing?.messages?.tokens || 0) + Number(data.changing?.toolCalls?.tokens || 0),
+			label: "对话与工具",
+			tokens:
+				Number(data.changing?.messages?.tokens || 0) +
+				Number(data.changing?.toolCalls?.tokens || 0) +
+				Number(data.changing?.toolResults?.tokens || 0),
 		},
-		{ key: "toolResults", label: "工具结果", tokens: Number(data.changing?.toolResults?.tokens || 0) },
 	];
 }
 
@@ -550,6 +554,7 @@ function renderChips(parts, total, windowInfo) {
 			)}</span></div>`,
 		);
 	}
+	// 「全部」：一张卡片里按组铺开，方便先扫一遍再点开某一行。
 	if (total > 0) {
 		box.insertAdjacentHTML(
 			"beforeend",
@@ -578,7 +583,7 @@ function renderHero(data) {
 					? ` · 记忆 ${data.memory.last.items} 条`
 					: ""
 				: " · 记忆未启用";
-		const conversationText = isDefault ? "" : ` · 对话 ${(data.entries || []).length} 条`;
+		const conversationText = isDefault ? "" : ` · 对话与工具 ${(data.entries || []).length} 条`;
 		sub.textContent =
 			total > 0
 				? isDefault
@@ -790,15 +795,22 @@ function buildGroups(data) {
 	return groups;
 }
 
-/** 浮层里的一组：组头 + 行。 */
-function groupSectionMarkup(group, color) {
-	return `<div class="ctx-pop-group">
+/** 浮层里的一组：组头 + 行；「全部」打开时默认收起，只列组头，想看的点「展开」。 */
+function groupSectionMarkup(group, color, { foldable = false, folded = false } = {}) {
+	const isFolded = foldable && folded;
+	const foldButton = foldable
+		? `<button class="ctx-pop-fold" type="button" data-ctx-group-fold aria-expanded="${
+				isFolded ? "false" : "true"
+			}">${isFolded ? "展开" : "收起"}</button>`
+		: "";
+	return `<div class="ctx-pop-group${isFolded ? " is-folded" : ""}">
     <div class="ctx-pop-group-head">
       <span class="ctx-dot" style="background:var(--ctx-g${((color - 1) % 6) + 1})"></span>
       <b>${esc(group.label)}</b>
       <span class="ctx-pop-group-num">${esc(group.count)} · ${fmtTokens(group.tokens)} token</span>
+      ${foldButton}
     </div>
-    <div class="ctx-group-body">${group.rows.map(rowMarkup).join("")}</div>
+    <div class="ctx-group-body"${isFolded ? " hidden" : ""}>${group.rows.map(rowMarkup).join("")}</div>
   </div>`;
 }
 
@@ -821,21 +833,35 @@ function ensurePopover() {
 			closePopover();
 			return;
 		}
-		const rowHead = target.closest("[data-ctx-row]");
-		if (rowHead) toggleRow(rowHead);
+		const groupFold = target.closest("[data-ctx-group-fold]");
+		if (groupFold) {
+			togglePopGroupFold(groupFold);
+			return;
+		}
 	});
 	return pop;
 }
 
 /**
+ * 浮层当前是不是正开着同一个主题（2026-11-24）：
+ * 同一个格子 / 标签 / 请求行再点一次就当收起——和点浮层外面一样，不用先挪开手。
+ */
+function popoverShowing(key) {
+	const pop = document.getElementById("ctx-pop");
+	return Boolean(pop && !pop.hidden && pop.classList.contains("is-open") && key && pop.dataset.popKey === key);
+}
+
+/**
  * 从格子 / 标签下面浮起一张卡片：先量尺寸再定位，默认贴在触发点下方，
  * 下面没地方就翻到上方；transform-origin 落在触发点上，缩放看起来是从那块长出来的。
+ * `key` 记这次浮的是哪个主题，供 popoverShowing 判断“再点一次收起”。
  */
-function openPopover(anchor, { title, color, meta, body, footer = "" }) {
+function openPopover(anchor, { key = "", title, color, meta, body, footer = "" }) {
 	const pop = ensurePopover();
 	const host = document.getElementById("ctx-content");
 	if (!pop || !host || !anchor) return;
 	clearTimeout(popTimer);
+	pop.dataset.popKey = key;
 	pop.innerHTML = `<div class="ctx-pop-head">
       <span class="ctx-dot" style="background:var(--ctx-g${((Number(color) - 1) % 6) + 1})"></span>
       <b>${esc(title)}</b>
@@ -877,13 +903,49 @@ function closePopover() {
 	}, 170);
 }
 
+/**
+ * 「全部内容」里按组收起：组头（系统提示词 + 数量 + token）留着，下面的
+ * 人设 / 验证铁律 / 开工前请问整段消失。再点「展开」还原。
+ */
+function togglePopGroupFold(button) {
+	const group = button.closest(".ctx-pop-group");
+	if (!group) return;
+	const body = group.querySelector(".ctx-group-body");
+	if (!body) return;
+	const open = button.getAttribute("aria-expanded") !== "true";
+	button.setAttribute("aria-expanded", String(open));
+	button.textContent = open ? "收起" : "展开";
+	body.hidden = !open;
+	group.classList.toggle("is-folded", !open);
+	// 展开后卡片一下子变高，可能掉出屏幕底；往上提回来，别让下半截点不到。
+	if (open) {
+		const pop = group.closest("#ctx-pop");
+		if (!pop) return;
+		const overflow = pop.getBoundingClientRect().bottom - (window.innerHeight - 10);
+		if (overflow > 0) {
+			const top = Math.max(10, parseFloat(pop.style.top || "0") - overflow);
+			pop.style.top = `${Math.round(top)}px`;
+		}
+	}
+}
+
 function openGroup(key, anchor) {
+	if (popoverShowing(key)) {
+		closePopover();
+		return;
+	}
 	if (key === "__all") {
 		const total = currentParts.reduce((sum, part) => sum + part.tokens, 0);
 		const body = currentGroups
-			.map((group) => groupSectionMarkup(group, currentParts.findIndex((part) => part.key === group.key) + 1))
+			.map((group) =>
+				groupSectionMarkup(group, currentParts.findIndex((part) => part.key === group.key) + 1, {
+					foldable: true,
+					folded: true,
+				}),
+			)
 			.join("");
 		openPopover(anchor, {
+			key,
 			title: "全部内容",
 			color: 1,
 			meta: `${currentGroups.length} 组 · ${fmtTokens(total)} token`,
@@ -901,6 +963,7 @@ function openGroup(key, anchor) {
 	// 组名 + 数量 + token；0 token 的组用 it 自己的说明（如预算）代替“0 token”，避免“预算 · 0 token · 预算…”。
 	const meta = tokens === 0 && part?.note ? part.note : `${group?.count ? `${esc(group.count)} · ` : ""}${fmtTokens(tokens)} token`;
 	openPopover(anchor, {
+		key,
 		title: group?.label || part?.label || key,
 		color: index + 1,
 		meta,
@@ -932,7 +995,7 @@ function renderNote() {
 		return;
 	}
 	note.hidden = false;
-	note.innerHTML = `标了「可编辑」的段展开后能直接改；人格模块、工具勾选与档案仍在 <button class="ctx-link" type="button" data-ctx-partner="${esc(
+	note.innerHTML = `标了「可编辑」的段能直接改；人格模块、工具勾选与档案仍在 <button class="ctx-link" type="button" data-ctx-partner="${esc(
 		partnerId,
 	)}">${esc(partnerName(partnerId) || "档案页")}</button>。`;
 }
@@ -1017,28 +1080,31 @@ function hideCachePanel() {
 function cacheError(message) {
 	const list = document.getElementById("ctx-cache-list");
 	if (list) list.innerHTML = `<div class="ctx-item-empty">${esc(message)}</div>`;
-	const summary = document.getElementById("ctx-cache-summary");
-	if (summary) summary.textContent = "";
+	const sub = document.getElementById("ctx-cache-sub");
+	if (sub) sub.textContent = "读取失败";
 	const rate = document.getElementById("ctx-cache-rate");
 	if (rate) rate.textContent = "—";
 	const pager = document.getElementById("ctx-cache-pager");
 	if (pager) pager.hidden = true;
 }
 
-/** 一行请求：时间 / 模型 / prompt / 命中 / 写出 / 命中率；点开是详情。 */
+/** 一行请求：时间 / 模型 / prompt / 命中 / 未命中 / 输出 / 命中率；点开是详情。 */
 function requestRowMarkup(row) {
 	const model = String(row.model || "unknown").replace(/#.*$/, "");
 	const flag = REQUEST_FLAG[row.flag];
 	const flagMarkup = flag
 		? `<i class="ctx-req-flag ${flag.cls}" title="${esc(flag.title)}">${flag.mark}</i>`
 		: "";
+	// 未命中 = prompt − 命中（即 input + cacheWrite），保证「命中 + 未命中 = prompt」。
+	const missTokens = Math.max(0, Number(row.promptTokens || 0) - Number(row.cacheReadTokens || 0));
 	return `<button class="ctx-req-row" type="button" data-ctx-req="${esc(String(row.entryId))}">
     <span class="ctx-req-seq">#${fmtNum(row.seq)}</span>
     <span class="ctx-req-at">${esc(fmtAt(row.at))}</span>
     <span class="ctx-req-model" title="${esc(row.model || "")}">${esc(model)}</span>
     <span class="ctx-req-num">${fmtTokens(row.promptTokens)}</span>
     <span class="ctx-req-num">${fmtTokens(row.cacheReadTokens)}</span>
-    <span class="ctx-req-num">${row.cacheWriteTokens > 0 ? fmtTokens(row.cacheWriteTokens) : "—"}</span>
+    <span class="ctx-req-num">${fmtTokens(missTokens)}</span>
+    <span class="ctx-req-num">${fmtTokens(row.outputTokens)}</span>
     <span class="ctx-req-rate ${rateClass(row.hitRate)}">${pct(row.hitRate)}${flagMarkup}</span>
   </button>`;
 }
@@ -1051,57 +1117,32 @@ function renderRequests() {
 	card.hidden = false;
 	const sub = document.getElementById("ctx-cache-sub");
 	if (sub) {
-		sub.textContent =
-			data.total > 0
-				? `${data.truncated ? `最近 ${data.max} 条里的 ` : ""}${fmtNum(data.total)} 次请求 · 第 ${data.page} / ${data.pages} 页`
-				: "还没有可统计的模型请求（聊一轮再来）";
+		if (data.total > 0) {
+			const summaryData = data.summary || {};
+			const prefixChanges = Number(summaryData.prefixChanges || 0);
+			const drops = Number(summaryData.drops || 0);
+			const fullMisses = Number(summaryData.fullMisses || 0);
+			const units = [
+				`${data.truncated ? `最近 ${fmtNum(data.max)} 条里的 ` : ""}${fmtNum(data.total)} 次请求`,
+				`第 ${data.page} / ${data.pages} 页`,
+				`<span${prefixChanges > 0 ? ' class="is-warn"' : ""}>前缀变化 ${fmtNum(prefixChanges)} 次</span>`,
+				`<span${drops > 0 ? ' class="is-warn"' : ""}>骤降 ${fmtNum(drops)} 次</span>`,
+				`完全未命中 ${fmtNum(fullMisses)} 次`,
+			];
+			sub.innerHTML = units.join('<span class="ctx-cache-sep">·</span>');
+		} else {
+			sub.textContent = "还没有可统计的模型请求（聊一轮再来）";
+		}
 	}
 	const rate = document.getElementById("ctx-cache-rate");
 	if (rate) rate.textContent = data.total > 0 ? pct(data.summary.hitRate) : "—";
-	const summary = document.getElementById("ctx-cache-summary");
-	if (summary) {
-		const summaryData = data.summary || {};
-		const prefixChanges = Number(summaryData.prefixChanges || 0);
-		const drops = Number(summaryData.drops || 0);
-		const suspects = Number(summaryData.suspects || 0);
-		summary.innerHTML =
-			data.total > 0
-				? `<span>prompt ${fmtTokens(summaryData.promptTokens)} token</span>
-        <span>命中 ${fmtTokens(summaryData.cacheReadTokens)}</span>
-        <span>输出 ${fmtTokens(summaryData.outputTokens)}</span>
-        <span${suspects > 0 ? ' class="is-warn"' : ""}>前缀变化 ${fmtNum(prefixChanges)} 次</span>
-        <span${drops > 0 ? ' class="is-warn"' : ""}>骤降 ${fmtNum(drops)} 次</span>
-        <span>完全未命中 ${fmtNum(summaryData.fullMisses)} 次</span>`
-				: "";
-	}
-	const alarm = document.getElementById("ctx-cache-alarm");
-	if (alarm) {
-		const suspects = Number(data.summary?.suspects || 0);
-		const prefixChanges = Number(data.summary?.prefixChanges || 0);
-		if (data.total > 0 && suspects > 0) {
-			alarm.hidden = false;
-			alarm.className = "ctx-cache-alarm is-alarm";
-			alarm.textContent = `发现 ${fmtNum(
-				suspects,
-			)} 次「命中率骤降 + system 前缀变化」——固定前缀在运行中变了，点带 ! 的行看是哪个 section。`;
-		} else if (data.total > 0 && prefixChanges > 0) {
-			alarm.hidden = false;
-			alarm.className = "ctx-cache-alarm is-warn";
-			alarm.textContent = `有 ${fmtNum(
-				prefixChanges,
-			)} 次 system 前缀变化，但没有造成骤降（可能缓存已经过期过）。点带 ↑ 的行看是哪个 section。`;
-		} else {
-			alarm.hidden = true;
-			alarm.textContent = "";
-		}
-	}
 	const list = document.getElementById("ctx-cache-list");
 	if (list) {
 		if (!data.items.length) {
 			list.innerHTML = `<div class="ctx-item-empty">还没有请求记录。</div>`;
 		} else {
 			list.innerHTML = `<div class="ctx-req-head">
-          <span>#</span><span>时间</span><span>模型</span><span>prompt</span><span>命中</span><span>写出</span><span>命中率</span>
+          <span>#</span><span>时间</span><span>模型</span><span title="完整 prompt = 命中 + 未命中">prompt</span><span title="缓存命中读取的 token">命中</span><span title="prompt 里没被缓存命中的部分">未命中</span><span title="模型输出的 token">输出</span><span>命中率</span>
         </div>${data.items.map(requestRowMarkup).join("")}`;
 		}
 	}
@@ -1280,8 +1321,14 @@ function requestDetailMarkup(data, seq) {
 async function openRequestDetail(entryId, anchor) {
 	const id = requestsChatId;
 	if (!id) return;
+	const popKey = `req:${entryId}`;
+	if (popoverShowing(popKey)) {
+		closePopover();
+		return;
+	}
 	const row = (requestsData?.items || []).find((item) => String(item.entryId) === String(entryId));
 	openPopover(anchor, {
+		key: popKey,
 		title: row ? `请求 #${row.seq}` : "请求详情",
 		color: 1,
 		meta: row ? `${fmtAt(row.at)} · ${fmtTokens(row.promptTokens)} token` : "读取中…",
@@ -1293,19 +1340,26 @@ async function openRequestDetail(entryId, anchor) {
 			{ cache: "no-store" },
 		);
 		if (!response.ok) {
-			openPopover(anchor, {
-				title: row ? `请求 #${row.seq}` : "请求详情",
-				color: 1,
-				meta: "读取失败",
-				body: `<div class="ctx-item-empty">读取失败（HTTP ${response.status}）。</div>`,
-			});
+			// 读取期间用户可能已经点同一行收起、点了别的行或切了会话：
+			// 旧响应不许把浮层重新弹出来，也不许覆盖新主题。
+			if (popoverShowing(popKey)) {
+				openPopover(anchor, {
+					key: popKey,
+					title: row ? `请求 #${row.seq}` : "请求详情",
+					color: 1,
+					meta: "读取失败",
+					body: `<div class="ctx-item-empty">读取失败（HTTP ${response.status}）。</div>`,
+				});
+			}
 			return;
 		}
 		const data = await response.json();
+		if (!popoverShowing(popKey)) return;
 		// 详情端点不知道列表窗口里的时序编号（seq），沿用点击那一行的——
 		// 同一行从列表点进来，编号才和列表一致。
 		const seq = row?.seq ?? data.request.seq;
 		openPopover(anchor, {
+			key: popKey,
 			title: `请求 #${seq}`,
 			color: 1,
 			meta: `${esc(fmtAt(data.request.at))} · ${esc(String(data.request.model || "unknown").replace(/#.*$/, ""))}`,
@@ -1316,7 +1370,9 @@ async function openRequestDetail(entryId, anchor) {
 		// 别把渲染错误伪装成网络错误：控制台留一行，弹层里也写清是哪一类。
 		const detail = error instanceof Error ? error.message : String(error);
 		console.error("[ctx] 请求详情读取失败", error);
+		if (!popoverShowing(popKey)) return;
 		openPopover(anchor, {
+			key: popKey,
 			title: row ? `请求 #${row.seq}` : "请求详情",
 			color: 1,
 			meta: "读取失败",
@@ -1486,6 +1542,12 @@ function wireClicks() {
 			setMode(modeButton.dataset.ctxMode);
 			return;
 		}
+		// 页面上铺开的行与浮层里的行共用一套收展（2026-11-23 起正文段也在页面上）。
+		const rowHead = target.closest("[data-ctx-row]");
+		if (rowHead) {
+			toggleRow(rowHead);
+			return;
+		}
 		// 2026-11-21：可编辑段的「改这一节」——就地改源头，保存后刷新这一页。
 		const editButton = target.closest("[data-ctx-edit]");
 		if (editButton) {
@@ -1584,7 +1646,9 @@ function wireClicks() {
 			const target = event.target instanceof Element ? event.target : null;
 			if (!target) return;
 			if (pop.contains(target)) return;
-			if (target.closest(".ctx-cell") || target.closest("[data-ctx-open]")) return;
+			if (target.closest(".ctx-cell") || target.closest("[data-ctx-open]") || target.closest("[data-ctx-req]")) {
+				return;
+			}
 			closePopover();
 		});
 		window.addEventListener("resize", closePopover);

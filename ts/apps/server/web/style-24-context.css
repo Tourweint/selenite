@@ -16,10 +16,11 @@
   --ctx-g6: color-mix(in srgb, var(--c-secondary) 50%, var(--surface));
 }
 
-/* ── 标题行：视图切换 + 会话/角色选择 + 刷新 ─────────── */
+/* ── 标题行：两个开关并排 + 会话/角色选择 + 刷新（2026-11-23 收口）──
+   开关不再一左一右夹着下拉：整条工具栏左对齐，会话框固定 200px，右边不再被拉开。 */
 .ctx-toolbar {
   display: flex; align-items: center; gap: 8px; min-width: 0;
-  flex-wrap: wrap;
+  flex-wrap: wrap; justify-content: flex-start;
   margin-bottom: 10px;
 }
 .ctx-mode {
@@ -41,8 +42,8 @@
   box-shadow: 0 1px 2px rgba(0, 0, 0, .10), inset 0 0 0 1px var(--card-border);
 }
 .ctx-select {
-  flex: 1 1 240px; width: auto; min-width: 172px; max-width: 320px; height: 32px;
-  padding: 0 10px;
+  flex: 0 0 auto; width: 200px; min-width: 0; max-width: 200px; height: 32px;
+  padding: 0 12px;
   border-radius: var(--r-full);
   font-size: 12.5px;
   text-overflow: ellipsis;
@@ -226,6 +227,16 @@
 }
 .ctx-pop-close:hover { background: var(--surface-low); color: var(--text); }
 
+/* 「全部内容」里组头右侧的「收起 / 展开」：收起只留组头，组里的行全不看。 */
+.ctx-pop-fold {
+  flex: 0 0 auto;
+  border: 0; background: transparent;
+  padding: 2px 7px; border-radius: var(--r-full);
+  font-size: 11.5px; color: var(--text-3); cursor: pointer;
+  transition: background-color .15s var(--ease-standard), color .15s var(--ease-standard);
+}
+.ctx-pop-fold:hover { background: var(--surface-low); color: var(--text); }
+
 .ctx-pop-body {
   padding: 4px 0 8px;
   overflow-y: auto;
@@ -242,6 +253,7 @@
   font-size: 11px; color: var(--text-3);
   font-variant-numeric: tabular-nums;
 }
+.ctx-pop-group.is-folded .ctx-pop-group-head { padding-bottom: 12px; }
 
 /* ── 一行：名字 + 序号/标签 + token；点开是原文 ─────── */
 .ctx-group-body { padding-bottom: 4px; }
@@ -365,37 +377,38 @@
   .ctx-cell.is-focus { transform: none; }
 }
 
-/* ── 请求与缓存（2026-11-19） ─────────────────────────────
+/* ── 请求（2026-11-19；2026-11-23 收口） ─────────────────
  * 一页 = 最近 500 条模型请求里的 100 条；一行一次请求，点开是当时上下文。
+ * 卡头只留一行账：多少次请求第几页 + 前缀变化 / 骤降 / 完全未命中，右侧命中率。
  * 命中率用三档颜色：≥80% 绿、≥50% 黄、其余红——只用设计系统里已有的语义色。
  */
-.ctx-cache { margin-top: 12px; padding: 16px 18px 14px; }
+.ctx-cache { margin-top: 12px; padding: 14px 18px; }
 .ctx-cache-head {
-  display: flex; align-items: flex-start; justify-content: space-between;
+  display: flex; align-items: center; justify-content: space-between;
   gap: 16px; flex-wrap: wrap;
-  margin-bottom: 10px;
+  margin-bottom: 8px;
 }
-.ctx-cache-copy { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
-.ctx-cache-copy b { font-size: 14px; font-weight: 600; }
-.ctx-cache-sub { font-size: 12px; color: var(--text-3); }
-.ctx-cache-rate {
-  display: flex; align-items: baseline; gap: 6px;
-  font-variant-numeric: tabular-nums;
-}
-.ctx-cache-rate b { font-size: 24px; line-height: 1.1; font-weight: 600; letter-spacing: -.02em; }
-.ctx-cache-rate span { font-size: 11.5px; color: var(--text-3); }
-.ctx-cache-summary {
-  display: flex; flex-wrap: wrap; gap: 14px;
-  margin-bottom: 10px;
+.ctx-cache-meta {
+  flex: 0 1 auto;
+  display: flex; flex-wrap: wrap; align-items: baseline;
+  gap: 7px; min-width: 0;
   font-size: 12px; color: var(--text-3);
   font-variant-numeric: tabular-nums;
 }
-.ctx-cache-summary .is-warn { color: var(--c-danger, #b4553f); }
+.ctx-cache-meta .is-warn { color: var(--c-warning, #a9782f); }
+.ctx-cache-sep { color: var(--text-3); }
+.ctx-cache-rate {
+  display: flex; align-items: baseline; gap: 6px;
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+.ctx-cache-rate b { font-size: 22px; line-height: 1.1; font-weight: 600; letter-spacing: -.02em; }
+.ctx-cache-rate span { font-size: 11.5px; color: var(--text-3); }
 .ctx-cache-list { display: flex; flex-direction: column; }
 .ctx-req-head,
 .ctx-req-row {
   display: grid;
-  grid-template-columns: 44px 82px minmax(0, 1fr) 70px 70px 58px 54px;
+  grid-template-columns: 44px 82px minmax(0, 1fr) 66px 66px 66px 58px 54px;
   align-items: center; gap: 8px;
   padding: 0 8px;
   min-height: 30px;
@@ -427,8 +440,8 @@
 .ctx-req-rate.is-mid { color: var(--c-warning, #a9782f); }
 .ctx-req-rate.is-bad { color: var(--c-danger, #b4553f); }
 /* 命中率列齐左（2026-11-21 用户口径）：骤降标志跟在数字后面，右对齐时会把 % 顶得参差；
-   数字齐左，prompt / 命中 / 写出三列数字仍齐右。 */
-.ctx-req-head span:nth-child(7),
+   数字齐左，prompt / 命中 / 未命中 / 输出四列数字仍齐右。 */
+.ctx-req-head span:nth-child(8),
 .ctx-req-rate { text-align: left; }
 .ctx-cache-pager {
   display: flex; align-items: center; justify-content: flex-end;
@@ -454,13 +467,13 @@
 .ctx-cache-compare.is-warn { color: var(--c-warning, #8a5a1f); background: color-mix(in srgb, var(--c-warning, #a9782f) 12%, var(--surface)); }
 
 @media (max-width: 640px) {
-  /* 窄屏把模型列藏掉（时间 + 数字仍然够看），避免七列挤成一行碎字。 */
+  /* 窄屏把模型列和输出列藏掉（时间 + prompt / 命中 / 未命中 / 命中率仍然够看），避免八列挤成一行碎字。 */
   .ctx-req-head,
-  .ctx-req-row { grid-template-columns: 38px 74px minmax(0, 1fr) 62px 46px; }
+  .ctx-req-row { grid-template-columns: 38px 74px minmax(0, 1fr) 58px 58px 54px; }
   .ctx-req-head span:nth-child(3),
-  .ctx-req-head span:nth-child(6),
+  .ctx-req-head span:nth-child(7),
   .ctx-req-model,
-  .ctx-req-row > span:nth-child(6) { display: none; }
+  .ctx-req-row > span:nth-child(7) { display: none; }
 }
 
 /* 请求行的骤降标记（2026-11-19）：! = 骤降且前缀变了；↑ = 前缀变了；· = 骤降但前缀没变 */
@@ -476,17 +489,3 @@
 .ctx-req-flag.is-alarm { color: var(--c-danger, #b4553f); }
 .ctx-req-flag.is-warn { color: var(--c-warning, #a9782f); }
 .ctx-req-flag.is-dim { color: var(--text-3); font-weight: 500; }
-
-.ctx-cache-alarm {
-  margin: 0 0 10px; padding: 8px 10px;
-  border-radius: 8px;
-  font-size: 12px; line-height: 1.55;
-}
-.ctx-cache-alarm.is-alarm {
-  color: var(--c-danger, #b4553f);
-  background: color-mix(in srgb, var(--c-danger, #b4553f) 12%, var(--surface));
-}
-.ctx-cache-alarm.is-warn {
-  color: var(--c-warning, #8a5a1f);
-  background: color-mix(in srgb, var(--c-warning, #a9782f) 12%, var(--surface));
-}

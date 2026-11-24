@@ -1,0 +1,14 @@
+/* 布局调试描边（2026-11-24）：只在 html.dev-box 下生效，由插件中心
+   「布局调试描边」（DEV_LAYOUT_INSPECT）开关控制，默认不画任何东西。
+   用 outline 不用 border：不占布局、不改任何尺寸，关掉即完全恢复。
+   offset -1px 让线画在盒内侧，相邻盒子的线不会叠成 2px。
+   只描元素、不描 ::before/::after：这层伪元素多半是图标 / 箭头 / 圆点，
+   一起描会在内容上叠一堆小方框，反而看不清真正的容器。 */
+html.dev-box * {
+  outline: 1px solid rgba(255, 90, 90, 0.45);
+  outline-offset: -1px;
+}
+html.dev-box *:hover {
+  outline: 2px solid rgba(60, 160, 255, 0.9);
+  outline-offset: -2px;
+}

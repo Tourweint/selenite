@@ -1,0 +1,103 @@
+/*
+ * 自绘下拉（2026-11-23 样式统一批，用户从三版里定稿 C：浅底行 + 右侧主题色对勾）
+ *
+ * 触发器不另起一套皮肤：按钮原样复制原 <select> 的 class，高度 / 边框 / 字号 /
+ * flex 与 grid 槽位仍由 .set-input / .modal-input / .font-select 等页面自己的类管，
+ * 这里只补按钮共通的三件事——内部排版、chevron 留位、面板本身。
+ * 面板挂 body 下、fixed 定位：卡片与弹窗都是 overflow 裁剪，absolute 会被切。
+ * 行为（开合 / 键位 / 选中）在 select-menu.js；关 UI_SELECT_MENU 即整段不生效。
+ */
+
+select.sel-src { display: none !important; }
+
+.sel-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  padding-right: 26px;
+  text-align: left;
+  /* 只借字体家族：字号 / 字重 / 行高仍由页面自己的类定（`.sel-btn` 在最后加载，
+     写 `font: inherit` 会把它们的 font-size 一起盖掉）。 */
+  font-family: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+.sel-btn:disabled { cursor: default; }
+/* 作者样式里的 display 会盖掉 UA 的 [hidden]：原 select 被代码 hidden 时按钮也得跟着藏 */
+.sel-btn[hidden] { display: none; }
+.sel-face {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sel-caret {
+  position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+  display: flex; color: var(--text-3); pointer-events: none;
+}
+.sel-caret svg { width: 14px; height: 14px; }
+
+/* 纵向字段里的 set-input：`.set-input` 的 `flex: 1 1 220px` 在 column 容器里是高度基准，
+   原生的「关系温度 / 心情」下拉因此一直撑成 220px 高。按钮接过后顺手复位（与
+   `.modal-field > .modal-input` 同一条规则，2026-11-23 自绘下拉批实测发现）。 */
+.modal-field > .set-input { flex: 0 0 auto; }
+
+/* 极小的下拉（画板顶栏「最近 N 轮」）不跟着吃 26px 内边距 */
+.map-window.sel-btn { padding-right: 18px; }
+.map-window .sel-caret { right: 2px; }
+.map-window .sel-caret svg { width: 12px; height: 12px; }
+
+/* 记忆拆分弹窗里的模型下拉：原样式挂在 `.mem-split-model-row select` 标签选择器上，
+   按钮接不到，这里补同款（含给 chevron 留的右内边距）。 */
+.mem-split-model-row .sel-btn {
+  flex: 1 1 auto; min-width: 0; min-height: 28px;
+  padding: 4px 26px 4px 8px;
+  border: 1px solid var(--divider); border-radius: var(--r-sm);
+  background: var(--card); color: var(--text);
+  font-size: 12px;
+}
+
+/* ── 面板 ── */
+.sel-menu {
+  position: fixed; z-index: 58;
+  box-sizing: border-box;
+  padding: 6px;
+  max-height: min(340px, 60vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--card);
+  border: 1px solid var(--composer-border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-menu);
+  animation: sel-menu-in .14s var(--ease-standard);
+}
+@keyframes sel-menu-in { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .sel-menu { animation: none; }
+}
+.sel-group {
+  padding: 7px 10px 3px;
+  font-size: 10.5px; line-height: 1.4; color: var(--text-3);
+}
+.sel-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  color: var(--text); font-size: 12.5px; line-height: 1.45;
+  cursor: pointer;
+}
+.sel-item:hover, .sel-item.is-active { background: var(--surface-low); }
+.sel-name {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sel-check { flex: none; width: 14px; height: 14px; color: var(--accent); visibility: hidden; }
+/* 选中行放最后：悬停/键盘高亮不能盖掉它的浅底 */
+.sel-item[aria-selected="true"] { background: var(--accent-soft); }
+.sel-item[aria-selected="true"] .sel-name { color: var(--on-accent-container); font-weight: 500; }
+.sel-item[aria-selected="true"] .sel-check { visibility: visible; }
+.sel-item[aria-disabled="true"] { opacity: .45; cursor: default; }
+.sel-item[aria-disabled="true"]:hover { background: transparent; }
+.sel-item[aria-disabled="true"][aria-selected="true"] { background: var(--accent-soft); }
+.sel-empty { padding: 8px 10px; font-size: 12px; color: var(--text-3); }

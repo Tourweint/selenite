@@ -253,7 +253,9 @@
 @media (prefers-reduced-motion: reduce) {
   .composer-pop.pop-open,
   .composer-pop.pop-closing { animation: none; }
-  .think-seg { animation: none; }
+  .mdl-think { animation: none; }
+  .think-slider.is-animating .think-slider-knob,
+  .think-slider.is-animating .think-slider-fill { transition: none; }
 }
 
 .model-menu {
@@ -266,31 +268,47 @@
   width: min(320px, 88vw); max-height: 320px; overflow: auto;
 }
 
-/* 设置 → 模型 · 默认模型卡（2026-11-12 M1）
+/* 设置 → 模型 · 默认模型卡（2026-11-12 M1；2026-11-24 按方案 E 改单行横向）
    卡片自身 overflow:hidden（全局 .card），所以「更换」弹层挂在外层 .mdl-wrap 上；
-   .composer-pop 默认是"在触发点上方"（给底部 composer 用的），这里改成向下展开。 */
+   .composer-pop 默认是"在触发点上方"（给底部 composer 用的），这里改成向下展开。
+   卡内一条水平带：左「模型名 · 供应商」、中「思考强度」、右「更换」，只有一条中线。 */
 .mdl-wrap { position: relative; }
 .mdl-card {
-  /* .card 的默认方向是 column（分组卡里装行），这里要横排：左边模型名、右边「更换」 */
+  /* .card 默认 column（分组卡里装行），这里横排；56px 与设置页行卡同高。
+     2026-11-24 去掉「切换后下一轮对话生效」「新会话默认」两处常驻文案后，
+     三个元素用 space-between 摊开，不再各自成行。 */
   flex-direction: row;
-  display: flex; align-items: center; gap: 16px;
-  padding: 16px 18px;
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 26px;
+  padding: 0 18px; height: 56px;
 }
-.mdl-main { flex: 1; min-width: 0; }
+.mdl-model { flex: 0 1 auto; min-width: 0; display: flex; align-items: baseline; gap: 10px; }
 .mdl-name {
+  flex: 0 1 auto; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-size: 18px; font-weight: 600; line-height: 1.25; color: var(--text);
 }
-.mdl-sub {
-  margin-top: 4px;
+/* 供应商名跟在模型名后面（同一行、底对齐）；空串时连分隔点一起收起
+   （settings-usage.js 读取失败会把 hint 清空）。 */
+.mdl-prov {
+  flex: 0 1 auto; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-size: 12px; color: var(--text-2);
 }
-/* 全局默认思考档分段（2026-11-21）：设置页默认模型卡里的一行，新会话按这档起步。
-   分段壳复用模型菜单底栏的 .think-seg/.think-opt（同一族控件，两种摆位）。 */
+.mdl-prov::before { content: "·"; margin-right: 8px; color: var(--text-3); }
+.mdl-prov:empty { display: none; }
+/* 全局默认思考档（2026-11-21）：设置页默认模型卡里的中段，新会话按这档起步。
+   2026-11-23 分段按钮换成与模型菜单底栏同一件填充滑块（thinking-slider.js）：出现时
+   轻落 2px 淡入，60ms 后起、与弹层 220ms 同拍收；换档只动滑块，不重建这一行。
+   2026-11-24 从名字下方挪到同一行；固定 330px，窄窗时先收它和模型名。 */
 .mdl-think {
+  flex: 0 1 330px; min-width: 200px;
   display: flex; align-items: center; gap: 10px;
-  margin-top: 10px;
+  animation: thinkingRowIn 160ms cubic-bezier(.3, .9, .25, 1) 60ms backwards;
+}
+@keyframes thinkingRowIn {
+  from { opacity: 0; transform: translateY(-2px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 .mdl-think[hidden] { display: none; }
 .mdl-think-label {
@@ -300,9 +318,22 @@
 }
 .mdl-change { flex: none; }
 .mdl-menu {
+  /* .model-menu 已把弹层锚到 wrap 右缘；这里再收 18px 到「更换」按钮的右缘
+     （2026-11-24，按钮现在在卡右端）。 */
+  right: 18px;
   top: calc(100% + 8px); bottom: auto;
   width: min(340px, 92vw);
-  transform-origin: 50% 0;
+  transform-origin: 100% 0;
+}
+
+/* 设置页内容列在窄窗放不下一整行：名字和「更换」留第一行，思考强度独占第二行。
+   阈值按内容列反推（视口 - 232 侧栏 - 48 内边距 ≈ 828px 时刚好卡住），
+   断点放本节定义之后，防被上面的 flex 简写顶掉。 */
+@media (max-width: 1120px) {
+  .mdl-card { height: auto; flex-wrap: wrap; padding: 12px 18px; row-gap: 10px; }
+  .mdl-model { flex: 1 1 0; order: 1; }
+  .mdl-change { order: 2; }
+  .mdl-think { flex: 1 1 100%; order: 3; min-width: 0; }
 }
 
 /* 窄屏断点必须排在本节定义之后：同权重时后者赢，放前面会被上面的
@@ -312,5 +343,6 @@
 @media (max-width: 560px) {
   .composer-wrap { position: static; }
   .model-menu { width: min(320px, 100%); }
+  .mdl-menu { right: 0; }
 }
 

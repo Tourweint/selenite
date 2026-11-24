@@ -432,7 +432,8 @@ async function send(text, images = [], files = []) {
         ...(state.conversationId
           ? { conversationId: state.conversationId }
           : {
-              chatKind: state.chatKind === "chief" ? "chief" : "worker",
+              // 普通助手（worker）2026-11-23 退役：空态第一条消息只建总管会话，不再生产 worker 会话。
+              chatKind: "chief",
               // 2026-11-19 会话级模型切换：新会话屏选的模型只带这一次；
               // 不传 = 服务端读全局默认。已有会话走 POST /agent/chat/:id/model。
               ...(state.pendingModel
@@ -519,6 +520,9 @@ async function send(text, images = [], files = []) {
             state.conversationId = event.conversationId;
             streamConv = event.conversationId;
             localStorage.setItem(KEY_CONV, event.conversationId);
+            // 上下文环常显（2026-11-24）：新会话第一轮期间也先把窗口画出来
+            // （服务端回 used=null 时画空环，卡里写「尚未统计」）。
+            void syncCtxMeter();
             // 会话已落盘：把这一刻的项目/工作区冻结成只读标签（2026-11-18）
             if (wasNew) {
               freezeChatProjectLabel();

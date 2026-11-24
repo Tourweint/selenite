@@ -228,6 +228,12 @@ function buildSkillCard(item, view) {
   // 只读来源（~/.agents/skills）只展示不给删：那是别的工具的家，改删请去原目录（2026-11-08 批 10-A）
   const readOnly = item.writable === false;
   const originLabel = readOnly ? SKILL_ORIGIN_LABEL[item.origin] || String(item.origin || "") : "";
+  // 自加位置（2026-11-23）：卡片上标一句它来自哪个位置，悬停能看全路径。
+  // 主目录 / 只读来源不加标——来源与只读只在 hover 里说，卡片上不再挂「只读」小字（2026-11-23）。
+  const where =
+    item.origin === "custom"
+      ? (skillAdvice.dirs || []).find((source) => source.dir === item.dir)
+      : null;
   // 用量（2026-11-10 批 18 §四；2026-11-13 A+C 版）：卡片只留「用过几次 · 多久前」，
   // 秒级更新时间与文件大小移进点开的弹窗。SKILL_USAGE 关着时端点整组不回这三个字段 → 这段自然空掉。
   const usage = Number.isFinite(item.usageCount) ? Number(item.usageCount) : null;
@@ -247,17 +253,16 @@ function buildSkillCard(item, view) {
   }
   // 更新时间、文件大小、来源、全文都点开弹窗看——列表不再一人一行摊开日志。
   const summaryText = String(item.summary || "（第 1 行是空摘要，不会进索引）");
-  // 只读标记的 hover 分两种：内置手册可"另存一份改"，.agents 只能去原目录
-  const readOnlyTip =
-    item.origin === "app"
-      ? "内置手册（只读来源）：点开可编辑，保存会在你的技能目录里建一份同名副本"
-      : `来自${originLabel}（只读来源），改 / 删请去原目录`;
   const metaBits = [];
+  if (where) {
+    metaBits.push(
+      `<span class="sk-where" title="来自技能库位置：${attr(where.dir)}">${esc(where.label || "自加位置")}</span>`,
+    );
+  }
   if (usage !== null) {
     metaBits.push(`<span>${usage > 0 ? `用过 ${usage} 次` : "没用过"}</span>`);
     if (usage > 0 && lastUsed) metaBits.push(`<span>${esc(lastUsed)}</span>`);
   }
-  if (readOnly) metaBits.push(`<span class="sk-ro" title="${attr(readOnlyTip)}">只读</span>`);
   if (item.stale === true) {
     metaBits.push(
       `<span class="sk-stale" title="按最近一次使用时间算，已经 90 天没被取用过；只标记，不删不移">90 天未用</span>`,
@@ -266,6 +271,7 @@ function buildSkillCard(item, view) {
   const metaHtml = metaBits.join('<span class="sk-sep">·</span>');
   // hover 补全卡片上撤掉的细节（更新到什么时候、多大、从哪来）
   const metaTip = [
+    where ? `来自位置 ${where.label || "自加位置"}（${where.dir}）` : "",
     `更新于 ${skillWhenText(item.updatedAt)}`,
     skillSizeText(item.size),
     usage === null ? "" : usage > 0 ? `用过 ${usage} 次${lastUsed ? `，上次 ${lastUsed}` : ""}` : "没用过",
@@ -308,7 +314,9 @@ function buildSkillCard(item, view) {
     });
   }
   const remove = card.querySelector("[data-skill-delete]");
-  if (remove) remove.addEventListener("click", () => openDeleteSkillModal(name));
+  if (remove) {
+    remove.addEventListener("click", () => openDeleteSkillModal(name, String(item.dir || "")));
+  }
   return card;
 }
 
@@ -356,10 +364,12 @@ function renderSkillList(box, items) {
 }
 
 /** 读一条技能正文；失败返回 null（已经 toast 过，调用方直接收工）。
- *  2026-11-13 起把 form / origin / writable 一并带回来：弹窗按形态分两种渲染（见下）。 */
-async function readSkill(name) {
+ *  2026-11-13 起把 form / origin / writable 一并带回来：弹窗按形态分两种渲染（见下）。
+ *  2026-11-23 多位置：带 `dir` 时只读那个位置里的那一份（同名散在几个位置时不猜）。 */
+async function readSkill(name, dir = "") {
   try {
-    const response = await request(`/api/v1/agent/skills/${encodeURIComponent(name)}`, {
+    const query = dir ? `?dir=${encodeURIComponent(dir)}` : "";
+    const response = await request(`/api/v1/agent/skills/${encodeURIComponent(name)}${query}`, {
       cache: "no-store",
     });
     const data = await response.json().catch(() => ({}));
@@ -371,6 +381,7 @@ async function readSkill(name) {
       content: String(data.content ?? ""),
       form: data.form === "dir" ? "dir" : "flat",
       origin: String(data.origin || ""),
+      dir: String(data.dir || ""),
       writable: data.writable === true,
     };
   } catch (error) {

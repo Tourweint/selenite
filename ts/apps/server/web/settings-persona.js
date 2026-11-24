@@ -44,7 +44,7 @@ function renderCsPersonaPage() {
     const note = document.createElement("p");
     note.className = "cs-note";
     note.textContent =
-      "这条是普通助手会话，所有人设共用一个普通助手：到「全部设置 → 人设 → 普通助手」可以改。";
+      "普通助手会话已退役（2026-11-23）：这条历史会话照旧可读；工人人设统一到「全部设置 → 注入 → 人设 → 派活工人（池）」改。";
     body.append(note);
     return;
   }

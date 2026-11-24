@@ -500,6 +500,9 @@
   font-size: 11.5px; font-weight: 400; color: var(--text-3);
   font-variant-numeric: tabular-nums;
 }
+/* 插件页搜索（2026-11-24）：复用记忆页的 .mem-a-search 胶囊，只加一条摆放宽度 */
+.flag-search { max-width: 420px; margin: 0 2px 14px; }
+.flag-search-empty { padding: 0 2px 14px; }
 
 .flag-section + .flag-section { margin-top: 22px; }
 .flag-group-head { display: flex; align-items: center; gap: 8px; margin: 0 2px 9px; }
@@ -589,6 +592,93 @@
 .flag-detail-control .segmented { flex: 1 1 auto; }
 .flag-detail-control .segmented button { flex: 1 1 0; padding: 0 8px; white-space: nowrap; }
 .flag-detail-note { margin: 0; font-size: 11.5px; line-height: 1.6; color: var(--text-3); }
+
+/* 工具异常处理浮层里的内嵌快捷面板（2026-11-24）：与插件页共用数据与弹层，只换一行紧凑版式 */
+.flag-detail-tool-policy:empty { display: none; }
+.tool-policy-inline { display: flex; flex-direction: column; border-top: 1px solid var(--divider); }
+.tool-policy-inline-row {
+  display: flex; align-items: baseline; gap: 10px;
+  width: 100%; padding: 8px 0; border: 0; border-bottom: 1px solid var(--divider);
+  background: none; font: inherit; color: inherit; text-align: left; cursor: pointer;
+}
+.tool-policy-inline-row:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 2px; }
+.tool-policy-inline-row:hover .tool-policy-inline-name { color: var(--accent); }
+.tool-policy-inline-name {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--mono); font-size: 12px; color: var(--text);
+  transition: color .16s ease;
+}
+.tool-policy-inline-row.is-injection .tool-policy-inline-name { font-family: inherit; }
+.tool-policy-inline-summary {
+  flex: none; font-size: 11.5px; color: var(--text-2); font-variant-numeric: tabular-nums;
+}
+.tool-policy-inline-more { flex: none; font-size: 11.5px; color: var(--text-3); white-space: nowrap; }
+
+/* 「工具与命令」组（2026-11-24 M4 工具异常处理）：插件页里唯一不是开关的一组卡片。
+   复用 .flag-section / .flag-grid / .card 的节律；说明卡 + 可配工具卡 + 锁定卡。
+   卡面只给「900s · 转后台」和锁定原因，编辑全在同一个弹层（settings-tool-policy.js）。 */
+.tool-policy-note {
+  justify-content: center; gap: 5px; padding: 13px 15px; min-height: 64px;
+}
+.tool-policy-note-title { font-size: 13px; font-weight: 500; color: var(--text); }
+.tool-policy-note-text { font-size: 12px; line-height: 1.55; color: var(--text-2); }
+.tool-policy-note-text.is-error { color: var(--c-error); }
+
+.tool-policy-item { padding: 0; }
+.tool-policy-item-main,
+.tool-policy-item-body {
+  display: flex; flex-direction: column; gap: 5px;
+  width: 100%; min-height: 64px; padding: 12px 15px;
+  border: 0; border-radius: inherit; background: none;
+  font: inherit; color: inherit; text-align: left;
+}
+.tool-policy-item-main { cursor: pointer; }
+.tool-policy-item-main:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 3px; }
+.tool-policy-item-main:hover .tool-policy-name { color: var(--accent); }
+.tool-policy-head { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.tool-policy-head .flag-tag { flex: none; align-self: center; }
+.tool-policy-name {
+  flex: none; font-family: var(--mono); font-size: 12.5px; color: var(--text);
+  transition: color .16s ease;
+}
+.tool-policy-label {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 11px; color: var(--text-3);
+}
+.tool-policy-summary {
+  margin-left: auto; flex: none;
+  font-size: 11.5px; color: var(--text-2); font-variant-numeric: tabular-nums;
+}
+.tool-policy-more { flex: none; font-size: 14px; line-height: 1; color: var(--text-3); }
+.tool-policy-reason {
+  font-size: 11.5px; line-height: 1.55; color: var(--text-3); overflow-wrap: anywhere;
+}
+/* 锁定卡压一档底色：它只是解释，不是可点开的入口；未启用占位卡同理 */
+.tool-policy-item.is-locked,
+.tool-policy-item.is-off { background: var(--surface-low); border-color: var(--divider); }
+/* 注入卡（每轮记忆轻召回）/ 占位卡：中文 label 当标题，不套等宽字体；长 label 自己截断 */
+.tool-policy-item.is-injection .tool-policy-name,
+.tool-policy-item.is-off .tool-policy-name {
+  flex: 1 1 auto; min-width: 0; font-family: inherit;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 占位卡点开 → 目标开关卡闪一下（只指路，不改值） */
+.flag-item.is-flash-hit { box-shadow: 0 0 0 2px var(--accent-line); }
+
+/* 异常处理弹层：三字段 + 一句后果说明；两个页面共用 */
+.tool-policy-form { display: flex; flex-direction: column; gap: 14px; }
+.tool-policy-field { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.tool-policy-field-label { flex: none; font-size: 13px; color: var(--text); }
+.tool-policy-field-control { display: inline-flex; align-items: center; gap: 6px; }
+.tool-policy-seconds { width: 104px; text-align: right; font-variant-numeric: tabular-nums; }
+.tool-policy-unit { font-size: 12px; color: var(--text-3); }
+.tool-policy-effect {
+  margin: 0; font-size: 12px; line-height: 1.65; color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+.tool-policy-meta { margin: 0; font-size: 11.5px; line-height: 1.6; color: var(--text-3); }
+.tool-policy-lockbox { display: flex; flex-direction: column; gap: 8px; }
 
 /* 派活页（2026-11-16 多 CLI 打手适配；同日二改）：
    卡面只留名字 + 控件 + 状态行，解释全收进标签的 data-tip（全局 hover-tip 小黑块）。
@@ -729,49 +819,9 @@
   .set-tab, .set-tab-icon, .set-tab-label { transition: none; }
 }
 
-/* ── 注入 → 人设 · 助手的人设与工具卡（2026-11-22）──────────────
-   一张卡按档列行（总管 / 执事 / 普通助手 / 派活工人）：行首是「名字 + kind 小徽标」，
-   下面是人设预览、工具 chips、可调 / 固定标签、动作按钮。字号与间距跟设置页现有行一致
-   （11.5–13px、gap 5–8px），卡内衬交给 .set-card-body，只吃现有令牌，不新造色值。 */
-.as-card .set-card-body { gap: 10px; }
-.as-body { display: flex; flex-direction: column; gap: 8px; }
-.as-body[hidden] { display: none; }
-.as-row {
-  display: flex; flex-direction: column; gap: 6px;
-  min-width: 0; padding: 9px 10px;
-  border: 1px solid var(--divider); border-radius: var(--r-md);
-  background: var(--surface-low);
-}
-.as-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
-.as-name, .as-head .as-label {
-  min-width: 0; overflow-wrap: anywhere;
-  font-size: 13px; font-weight: 500; line-height: 1.4; color: var(--text);
-}
-/* 徽标本身复用 .pill-tag；行首左边不留边距（.pill-tag 默认 margin-left: 6px） */
-.as-kind { margin-left: 0; flex: none; }
-.as-persona {
-  margin: 0; font-size: 12px; line-height: 1.5; color: var(--text-2);
-  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
-}
-.as-chars { margin-left: 6px; font-size: 11px; color: var(--text-3); }
-.as-tools { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
-.as-chip {
-  display: inline-block; max-width: 100%; padding: 1px 6px;
-  border: 1px solid var(--divider); border-radius: var(--r-full);
-  background: var(--card); color: var(--text-3);
-  font-family: var(--mono); font-size: 10.5px; line-height: 1.5;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-/* 工具名是标识符，走等宽；可调 / 固定是中文短语，走正文字体 */
-.as-adjustable .as-chip, .as-fixed { font-family: inherit; color: var(--text-2); }
-.as-more { color: var(--text-3); }
-.as-tags, .as-adjustable {
-  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-  font-size: 11.5px; line-height: 1.5; color: var(--text-3);
-}
-.as-tag-label { flex: none; color: var(--text-3); }
-.as-acts { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.as-act { height: 26px; padding: 0 9px; font-size: 12px; }
-@media (max-width: 640px) {
-  .as-act { height: 28px; }
-}
+/* ── 注入 → 偏好（2026-11-23）─────────────────────────────
+   原「关于我」页：用户口径「上下间距太大」。
+   卡片自带 16/18/14 内边距；这一页只留一张正文卡，收到 12/16/10 即可。
+   「谁读」不在这一页：2026-11-23 搬进每个人自己的人设页（每轮固定注入里的「偏好」卡）。 */
+.up-page { display: flex; flex-direction: column; }
+.up-page .pf-panel { padding: 12px 16px 10px; gap: 8px; }

@@ -13,8 +13,12 @@
 import { attr, esc } from "./markdown.js";
 import { request } from "./net.js";
 import { mountSegmented, setSwitchChecked, switchMarkup, syncSegmented } from "./settings-atoms.js";
+// 2026-11-24 M4：工具异常处理是独立模块（拉 /tool-policy、画卡片与弹层）；本文件只留挂载点，
+// 外加总开关拨动后的即时刷新（不整页重画 flags）和浮层里的内嵌快捷面板。
+import { refreshToolPolicySection, renderInlinePolicyPanel, renderToolPolicySection } from "./settings-tool-policy.js";
 import { state } from "./state.js";
 import { closeModal, openModal, toast } from "./ui-atoms.js";
+import { setChipPagingEnabled } from "./tool-chips.js";
 
 /* ── 高级开关（2026-11-09）：服务端 env 行为开关搬进界面 ──────────
  * 清单 / 中文名 / 简介 / 分组 / 档位：服务端 `src/plugins.json`（2026-11-16 改从 JSON 读）；
@@ -28,6 +32,9 @@ import { closeModal, openModal, toast } from "./ui-atoms.js";
 async function loadFlagsSettings() {
   const card = document.getElementById("flags-card");
   if (!card) return;
+  // 从别的页重新进插件页时清掉上一次的搜索串（不跨页面保留）；
+  // 同一页内父开关回读时旧搜索框还在，查询与筛选结果保持不动。
+  if (!card.querySelector("#flags-search")) flagQuery = "";
   try {
     const response = await request("/api/v1/agent/flags", { cache: "no-store" });
     if (!response.ok) throw new Error(String(response.status));
@@ -74,6 +81,14 @@ function flagOnChoices(flag) {
 function flagIsOff(flag, value) {
   const off = flagOffValue(flag);
   return off === null ? isOffValue(value) : String(value) === String(off);
+}
+
+/** 本次打开插件页时的值基线（2026-11-24 用户口径）：「已改」只表示"这次打开页面后动过它"，
+ *  刷新 / 重进页面 / 重启服务后基线重建，徽标自然消失。存下来的值照旧保留；
+ *  「默认」仍是 plugins.json 里第一次安装时的出厂值，不随重启变化。 */
+const flagBaseline = new Map();
+function resetFlagBaseline() {
+  flagBaseline.clear();
 }
 
 /** 开关从「关」拨回「开」时回到哪一档：记住本次页面里最后选过的开档，
@@ -128,7 +143,9 @@ function flagParentLabel(key) {
 /** 卡片徽标只标「例外」：默认关、待重启、已改、随总闸关闭。默认开是多数派，页首已写总数。
  *  「待重启」只在 hot:false 的改动还没被进程装载时出现（服务端 pendingRestart）；重启后自动消失，
  *  不再像旧版那样对所有 hot:false 开关常驻「需重启」——那个字与"这次是否生效"无关。
- *  「已改」看当前值是否真的和默认不同，不看文件里有没有历史覆盖行（覆盖行可能只是测试留下的）。 */
+ *  「已改」只跟本次打开页面时读到的值比：它表示"这次进来动过它"，不是"它跟出厂默认不同"。
+ *  后者刷新 / 重启后还在就变成永久标签（2026-11-24 用户口径：每次刷新重启都要回到没改过的样子）；
+ *  与出厂默认的差异在详情弹层的「当前 / 默认」两行里看。 */
 function flagTags(flag) {
   const tags = [];
   const locked = Boolean(flag.lockedBy);
@@ -142,8 +159,30 @@ function flagTags(flag) {
   if (flag.defaultValue === "false") tags.push(`<span class="flag-tag">默认${esc(flagValueText(flag, flag.defaultValue))}</span>`);
   if (flag.pendingRestart) tags.push('<span class="flag-tag warn">待重启</span>');
   if (locked) tags.push(`<span class="flag-tag warn" data-tip="「${attr(flag.lockedByLabel || flagParentLabel(flag.lockedBy))}」关闭时，这项显示关、拨不动；它自己的存储值保留，总闸重开后恢复。">随总闸关闭</span>`);
-  else if (flag.value !== flag.defaultValue) tags.push('<span class="flag-tag accent">已改</span>');
+  else if (flagBaseline.has(flag.key) && String(flag.value) !== flagBaseline.get(flag.key)) tags.push('<span class="flag-tag accent">已改</span>');
   return tags.length ? `<span class="flag-tags">${tags.join("")}</span>` : "";
+}
+
+/** 拨完开关就地更新这张卡（以及打开着的同键弹层）的徽标：值已写进 state.flagsCache，
+ *  不整页重画，卡片墙的滚动位置不动。 */
+function paintFlagTags(key) {
+  const flag = flagByKey(key);
+  if (!flag) return;
+  for (const main of document.querySelectorAll(`[data-flag-detail="${key}"]`)) {
+    const head = main.querySelector(".flag-item-head");
+    if (!head) continue;
+    head.querySelector(".flag-tags")?.remove();
+    const tags = flagTags(flag);
+    if (tags) head.querySelector(".flag-item-name")?.insertAdjacentHTML("afterend", tags);
+  }
+  // 弹层按 data-flag-current 认键，避免把别的开关的徽标盖到当前弹层上。
+  const detail = document.querySelector(`[data-flag-current="${key}"]`)?.closest(".flag-detail");
+  if (!detail) return;
+  const box = detail.querySelector(".flag-detail-tags");
+  const tags = flagTags(flag);
+  if (!tags) box?.remove();
+  else if (box) box.innerHTML = tags;
+  else detail.querySelector(".flag-detail-summary")?.insertAdjacentHTML("beforebegin", `<div class="flag-detail-tags">${tags}</div>`);
 }
 
 /** 卡面简介：取 summary 的第一句。放不下两行就整句不显示（见 hideClippedBriefs），
@@ -308,11 +347,15 @@ function openFlagDetail(flag) {
         ${rows.map(([name, value], index) => `<div class="flag-detail-row"><span class="flag-detail-label">${esc(name)}</span><span class="flag-detail-value"${index === 0 && !alwaysOn ? ` data-flag-current="${attr(flag.key)}"` : ""}>${esc(value)}</span></div>`).join("")}
       </div>
       ${alwaysOn ? "" : `<div class="flag-detail-control"><span class="flag-detail-label">${esc(controlLabel)}</span>${flagControlMarkup(flag)}</div>`}
+      ${flag.key === "TOOL_TIMEOUT_POLICY" ? `<div class="flag-detail-tool-policy" data-tool-policy-inline></div>` : ""}
       ${note ? `<p class="flag-detail-note">${esc(note)}</p>` : ""}
     </div>
     <div class="modal-actions"><button class="ghost" type="button" data-flag-close>关闭</button></div>`;
     body.querySelector("[data-flag-close]")?.addEventListener("click", closeModal);
     if (!alwaysOn) wireFlagControls(body);
+    // 工具异常处理：浮层里直接列出可调工具（同一个弹层入口；master 关时是一行提示）。
+    const inlinePolicy = body.querySelector("[data-tool-policy-inline]");
+    if (inlinePolicy) void renderInlinePolicyPanel(inlinePolicy);
   });
   // 档位弹层里第一个获得焦点的分段按钮会被焦点环画成"像已选中"；锁态下禁用的拨杆也接不住焦点。
   // 有多个开档的分段弹层、以及这两种情况，把初始焦点放到关闭，让当前值的唯一视觉标记仍是控件本身。
@@ -382,6 +425,50 @@ function applyFlagControlValue(key, value) {
   rememberOnChoice(key, value, flag);
 }
 
+/* ── 插件页搜索（2026-11-24）：输入即筛选，不持久化 ──────────
+ * 匹配范围：flag 的标题 / 简介 / key / 所属组名（大小写不敏感，中文直接子串）。
+ * 「工具与命令」组（settings-tool-policy.js 异步画）也参与：整组 textContent 现算，
+ * 命中就整组显示（组标题一起），不命中整组连标题一起藏——与其它组同一套规则。
+ * 查询串放模块里：flags 重画（父开关回读）后搜索框与筛选结果不丢。 */
+let flagQuery = "";
+/** key → 小写检索串；每次 renderFlagRows 重建。 */
+let flagSearchIndex = new Map();
+
+function flagSearchHaystack(flag, groupTitle) {
+  return [flag.label, flag.summary, flag.key, groupTitle]
+    .filter((part) => typeof part === "string" && part)
+    .join(" ")
+    .toLowerCase();
+}
+
+function applyFlagFilter(card) {
+  const query = flagQuery.trim().toLowerCase();
+  let matchedSections = 0;
+  for (const section of card.querySelectorAll("section.flag-section")) {
+    if (section.classList.contains("tool-policy-section")) {
+      // 工具组是异步插入的，不能用静态索引：现读整组可见文字（组标题 / 说明卡 /
+      // 工具卡名与摘要 / 锁定原因都算）。命中 = 整组显示，否则整组含标题一起藏。
+      const hit = !query || (section.textContent || "").toLowerCase().includes(query);
+      section.hidden = !hit;
+      if (hit) matchedSections += 1;
+      continue;
+    }
+    let sectionShown = 0;
+    for (const item of section.querySelectorAll(".flag-item")) {
+      const key = item.querySelector("[data-flag-detail]")?.getAttribute("data-flag-detail") || "";
+      const hit = !query || (flagSearchIndex.get(key) || "").includes(query);
+      item.hidden = !hit;
+      if (hit) sectionShown += 1;
+    }
+    // 组内一张都不剩，组标题也不留；查询为空时所有组恢复。
+    section.hidden = sectionShown === 0;
+    if (sectionShown > 0) matchedSections += 1;
+  }
+  // 所有组（含工具组）都无命中才显示空态。
+  const empty = card.querySelector("[data-flags-empty]");
+  if (empty) empty.hidden = matchedSections > 0;
+}
+
 function renderFlagRows(card, flags, groups) {
   card.replaceChildren();
   if (!flags.length) {
@@ -396,6 +483,11 @@ function renderFlagRows(card, flags, groups) {
       .map((flag) => [flag.key, flag]),
   );
   const visible = flags.filter((flag) => flag.surface !== "settings");
+  // 本次进页的值基线只在第一次成功渲染时记一次：父开关拨动触发的整页回读不能重置基线，
+  // 否则刚拨的那张卡会立刻被当成"没改过"，「已改」闪一下就没。
+  if (!flagBaseline.size) {
+    for (const flag of visible) flagBaseline.set(flag.key, String(flag.value ?? ""));
+  }
   const byKey = new Map(visible.map((flag) => [flag.key, flag]));
   // 点卡时按 key 找完整行：服务端开关走 state.flagsCache，常开卡只有这份静态表。
   flagDetailByKey = new Map([
@@ -406,16 +498,39 @@ function renderFlagRows(card, flags, groups) {
   const defaultOff = visible.filter((flag) => flag.defaultValue === "false").length;
   const currentOff = visible.filter((flag) => (flag.effectiveValue ?? flag.value) === "false").length;
   const lockedCount = visible.filter((flag) => flag.lockedBy).length;
-  // 页首只留一行计数，不铺解释性长文：这一页是干什么的，名字和卡片简介已经说清了。
+  // 页首：搜索框 + 一行计数（2026-11-24）。搜索只过滤开关卡、输入即筛选，
+  // 查询串不持久化；「工具与命令」由独立模块异步画，插好后会再跑一次同一套过滤。
   card.insertAdjacentHTML(
     "beforeend",
-    `<div class="flag-intro">
+    `<div class="flag-search">
+      <label class="mem-a-search">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+        <input id="flags-search" type="search" spellcheck="false"
+          placeholder="搜索插件 / 开关（名字、说明、key、分组）" aria-label="搜索插件与开关"
+          value="${attr(flagQuery)}" />
+      </label>
+    </div>
+    <div class="flag-intro">
       <span class="flag-intro-count">${visible.length} 个开关 · ${visible.length - defaultOff} 默认开 / ${defaultOff} 默认关 · 当前 ${visible.length - currentOff} 开 / ${currentOff} 关${lockedCount ? ` · ${lockedCount} 个随总闸关闭` : ""}</span>
-    </div>`,
+    </div>
+    <div class="set-hint flag-search-empty" data-flags-empty hidden>没有匹配的插件</div>`,
   );
   // 工具活动从卡尾一句话改成「始终开启」分组里的一张卡（2026-11-18 用户口径）：
   // 它不是可配置项，但确实是一个能力，值得有自己的位置和说明；不参与上面的开关计数。
   const groupDefs = Array.isArray(groups) ? groups : [];
+  // 搜索索引：名字 / 简介 / key / 组名。没归组的按「其他」，清单缺 groups 时按「插件」。
+  const groupTitleByKey = new Map();
+  for (const group of groupDefs) {
+    for (const key of Array.isArray(group.keys) ? group.keys : []) groupTitleByKey.set(key, group.title);
+  }
+  const fallbackGroupTitle = groupDefs.length ? "其他" : "插件";
+  flagSearchIndex = new Map();
+  for (const flag of visible) {
+    flagSearchIndex.set(flag.key, flagSearchHaystack(flag, groupTitleByKey.get(flag.key) || fallbackGroupTitle));
+  }
+  for (const flag of ALWAYS_ON_PLUGINS) {
+    flagSearchIndex.set(flag.key, flagSearchHaystack(flag, "始终开启"));
+  }
   const paintGroup = (title, desc, items) => {
     const section = document.createElement("section");
     section.className = "flag-section";
@@ -455,6 +570,19 @@ function renderFlagRows(card, flags, groups) {
     });
   }
   watchBriefClipping(card);
+  // 搜索：输入即筛选；flags 重画后按模块里的查询串恢复（不持久化、不动加载 / 保存）。
+  const flagsSearch = card.querySelector("#flags-search");
+  flagsSearch?.addEventListener("input", () => {
+    flagQuery = flagsSearch.value;
+    applyFlagFilter(card);
+  });
+  applyFlagFilter(card);
+  // 工具异常处理（2026-11-24）：独立模块自己查位置，插在「始终开启」之前；
+  // 端点 404（总开关关）时整组不出现，旧界面原样。逻辑不在本文件里长。
+  // 该组是异步插入的：插好 / 没插成都重跑一次过滤，让它在当前搜索词下按同一套规则显示。
+  void renderToolPolicySection(card).then(() => {
+    if (card.isConnected) applyFlagFilter(card);
+  });
 }
 
 async function toggleFlag(key, value, sw, seg) {
@@ -478,6 +606,24 @@ async function toggleFlag(key, value, sw, seg) {
     applyFlagControlValue(key, String(value));
     // 对话框的逐字浮现开关下一轮要立刻看到变化，不能等刷新：同步内存投影 + 缓存行。
     if (key === "CHAT_STREAM_REVEAL") state.chatRevealFlag = String(value) !== "false";
+    // 工具块分页（2026-11-24）：关 = 回到展开全部、无「+N」的旧形态；排版时读模块变量，
+    // 下一次交互 / 下一帧生效（已铺开的组不强行重排）。
+    if (key === "TOOL_CHIP_PAGING") {
+      state.toolChipPagingFlag = String(value) !== "false";
+      setChipPagingEnabled(state.toolChipPagingFlag);
+    }
+    // 工具与命令（2026-11-24 M4 体验项）：总开关一动，工具组即时出现 / 消失。
+    // 只重画这一组，不整页重画 flags——卡片墙的滚动位置与其它开关的显隐都不动。
+    // 画完 / 摘完再跑一次搜索过滤，让新出现的组也按当前查询词显示。
+    if (key === "TOOL_TIMEOUT_POLICY") {
+      void refreshToolPolicySection({ enabled: !isOffValue(value) }).then(() => {
+        const flagsCard = document.getElementById("flags-card");
+        if (flagsCard) applyFlagFilter(flagsCard);
+      });
+      // 浮层里拨的：内嵌面板原地换成工具列表 / 「先打开开关」提示（同一个弹层入口）。
+      const inlinePolicy = document.querySelector("[data-tool-policy-inline]");
+      if (inlinePolicy instanceof HTMLElement) void renderInlinePolicyPanel(inlinePolicy);
+    }
     // 自动归档拨杆同步进快照：下次进「会话」子页直接按它描，不再走一遍回填动画。
     if (key === "ARCHIVE_AUTO_ENABLED") archiveAutoSnapshot.enabled = String(value) === "true";
     if (state.flagsCache instanceof Map) {
@@ -494,6 +640,8 @@ async function toggleFlag(key, value, sw, seg) {
       );
       if (hasChildren && document.getElementById("flags-card")) void loadFlagsSettings();
     }
+    // 「已改」是本次进页后才有的状态：缓存行更新完就地重画徽标，不用刷新整页。
+    paintFlagTags(key);
     toast(data.hot ? "已保存，即时生效" : "已保存，重启服务后生效");
   } catch (error) {
     if (error.message !== "forbidden") toast(`没存成：${error.message}`);
@@ -632,4 +780,4 @@ async function saveAutoArchiveDays(input) {
   }
 }
 
-export { AUTO_ARCHIVE_DEFAULTS, archiveAutoTip, loadAutoArchiveSettings, loadFlagsSettings, renderFlagRows, saveAutoArchiveDays, syncArchiveAutoTip, toggleFlag };
+export { AUTO_ARCHIVE_DEFAULTS, archiveAutoTip, loadAutoArchiveSettings, loadFlagsSettings, renderFlagRows, resetFlagBaseline, saveAutoArchiveDays, syncArchiveAutoTip, toggleFlag };

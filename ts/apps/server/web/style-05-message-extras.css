@@ -191,6 +191,8 @@
 .ctx-ring[hidden] { display: none; }
 .ctx-ring svg { width: 16px; height: 16px; flex: none; }
 .ctx-track { fill: none; stroke: var(--divider); stroke-width: 2.2; }
+/* 尚未统计（2026-11-24）：空环常显，虚线轨道区分「没测过」与「用量 0%」。 */
+.ctx-ring.unmeasured .ctx-track { stroke-dasharray: 2.4 2.4; }
 .ctx-fill {
   fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round;
   /* 12 点起顺时针：圆默认从 3 点起笔，整体转 -90° */

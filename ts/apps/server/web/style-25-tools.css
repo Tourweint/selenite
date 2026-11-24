@@ -1,33 +1,113 @@
-/* 设置 → 工具（2026-11-17 全局工具池；同日版式调整）
-   - 三列（定义 / 用量 / 池）居中；
-   - 行可点开看说明原文：小箭头 + 缩进引用块；
-   - 页面解释性文字收进标题/表头的 data-tip，页面上只留待重启状态。 */
-.tool-pool-sum { margin-top: 3px; font-size: 11px; line-height: 1.5; color: var(--text-3); }
+/*
+ * 设置 → 工具（2026-11-17 全局工具池；2026-11-23 双栏泳池版式）
+ *
+ * 用户口径：池归属是这一页的第一信息。左常驻、右按需，栏头直接报个数与 token；
+ * 卡片可点开看说明原文与参数。解释性文字收进标题/按钮的 data-tip。
+ * 颜色只吃 token（四套主题 + 十个强调色都能落住）。
+ */
+
 .tool-pool-actions { display: flex; align-items: center; gap: 8px; }
 .set-sec-head > .tool-pool-actions { margin-block: -6px; }
 
-.tool-pool-table th.tool-pool-col,
-.tool-pool-table td.tool-pool-col { text-align: center; white-space: nowrap; font-variant-numeric: tabular-nums; }
+/* 两栏：栏头跟着页面滚（设置页是壁纸上的半透明纸，sticky 会压出一条不透明的色带） */
+.tool-pool-board {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+.tool-pool-col { min-width: 0; }
+.tool-pool-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 2px 9px; margin-bottom: 2px;
+  border-bottom: 1px solid var(--divider);
+}
+.tool-pool-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.tool-pool-dot.is-on { background: var(--accent); }
+.tool-pool-dot.is-off { background: transparent; border: 1.5px dashed var(--text-3); }
+.tool-pool-title { font-size: 13px; font-weight: 600; color: var(--text); }
+.tool-pool-count {
+  min-width: 20px; height: 18px; padding: 0 6px; border-radius: 999px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--card-high); color: var(--text-2);
+  font-size: 10.5px; font-variant-numeric: tabular-nums;
+}
+.tool-pool-cost {
+  margin-left: auto; flex: none;
+  font-size: 10.5px; color: var(--text-2); font-variant-numeric: tabular-nums;
+}
 
-.tool-pool-row { cursor: pointer; }
-/* 悬停不铺灰底（2026-11-18 用户口径）：只提亮工具名和箭头，别给整行盖一块灰色方框。 */
-.tool-pool-row:hover .use-mono { color: var(--text); }
-.tool-pool-row:hover .tool-pool-caret { color: var(--text-2); }
-/* 池胶囊的悬停也不铺底，只改字色——同一页里别再出现灰色小方块。 */
-.tool-pool-table .pf-tool-mode:hover { background: transparent; color: var(--accent); }
-/* 2026-11-21（箭头统一批）：› 文字 → chevSvg。这里要颜色+transform 复合过渡，
-   比 style-27 的通用 .chev 多一项，故选择器加重一级压住通用规则，值取同一组口径 */
-.tool-pool-row .tool-pool-caret {
+/* ── 卡片 ── */
+.tool-pool-cards { display: flex; flex-direction: column; gap: 8px; padding-top: 10px; }
+.tool-pool-card {
+  padding: 10px 12px 9px;
+  border: 1px solid transparent; border-radius: var(--r-md);
+  background: var(--card);
+  transition: background-color .15s ease, border-color .15s ease;
+}
+.tool-pool-card:hover { background: var(--card-high); border-color: var(--divider); }
+.tool-pool-card.is-open { background: var(--card-high); border-color: var(--divider); }
+/* 按需池的卡压一档底色 + 一条细描边：离开请求的那一池，看起来就该轻一点 */
+.tool-pool-col[data-pool="off"] .tool-pool-card {
+  background: var(--surface-low); border-color: var(--divider);
+}
+.tool-pool-col[data-pool="off"] .tool-pool-card:hover,
+.tool-pool-col[data-pool="off"] .tool-pool-card.is-open { background: var(--card); }
+
+.tool-pool-open {
+  display: block; width: 100%; padding: 0;
+  border: 0; background: none; color: inherit;
+  text-align: left; cursor: pointer;
+}
+.tool-pool-open:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--r-sm); }
+.tool-pool-top { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.tool-pool-caret {
   flex: none; width: 11px; height: 11px;
   color: var(--text-3);
   transition: transform .18s var(--ease-standard), color .15s ease;
 }
-/* 展开时主行不留分隔线，让"行 + 详情"看起来是一块 */
-.tool-pool-row.is-open td { border-bottom-color: transparent; }
+.tool-pool-card:hover .tool-pool-caret { color: var(--text-2); }
+.tool-pool-name {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--mono); font-size: 12.5px; color: var(--text);
+}
+.tool-pool-col[data-pool="off"] .tool-pool-name { color: var(--text-2); }
+.tool-pool-card-cost {
+  margin-left: auto; flex: none;
+  font-family: var(--mono); font-size: 10.5px; color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.tool-pool-summary {
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  min-height: 34px; margin-top: 3px;
+  font-size: 11.5px; line-height: 1.5; color: var(--text-3);
+}
 
-/* 详情的上下留白放在内层：外层 td 贴零，撑开/收起的动画量到的就是含留白的整块 */
-.tool-pool-detail td { padding-top: 0; padding-bottom: 0; }
-.tool-pool-detail-inner { overflow: hidden; padding-bottom: 14px; }
+.tool-pool-foot { display: flex; align-items: center; gap: 8px; min-height: 24px; }
+.tool-pool-usage {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums;
+}
+.tool-pool-move {
+  margin-left: auto; flex: none; height: 24px; padding: 0 8px;
+  border: 0; border-radius: var(--r-sm); background: none;
+  font-family: inherit; font-size: 11.5px; color: var(--text-2);
+  opacity: .72; white-space: nowrap;
+  transition: background-color .15s ease, color .15s ease, opacity .15s ease;
+}
+.tool-pool-card:hover .tool-pool-move { opacity: 1; }
+.tool-pool-move:hover { background: var(--accent-soft); color: var(--accent); }
+.tool-pool-move:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.tool-pool-move:disabled { opacity: .4; cursor: default; background: none; color: var(--text-2); }
+/* tool_search 的固定位置：它是加载按需工具的唯一入口，不给移动动作 */
+.tool-pool-lock {
+  margin-left: auto; flex: none; height: 24px; padding: 0 8px;
+  display: inline-flex; align-items: center;
+  font-size: 11.5px; color: var(--text-3); white-space: nowrap;
+}
+
+/* ── 展开详情：外层贴零，撑开/收起动画量内层（含留白的整块） ── */
+.tool-pool-detail-inner { overflow: hidden; padding: 8px 0 2px; }
 .tool-pool-detail-block + .tool-pool-detail-block { margin-top: 10px; }
 .tool-pool-detail-label {
   margin-bottom: 4px; font-size: 10.5px; color: var(--text-3); letter-spacing: .08em;
@@ -45,4 +125,23 @@
   background: var(--surface-low); border-radius: 0 var(--r-sm) var(--r-sm) 0;
   font-family: var(--mono); font-size: 11px; line-height: 1.6; color: var(--text-2);
   white-space: pre; overflow-wrap: normal;
+}
+
+/* 异常处理只读回显（2026-11-24 M4）：一行文本 +「调整 / 说明」打开插件页同一个弹层 */
+.tool-pool-policy-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.tool-pool-policy-text {
+  min-width: 0; font-size: 11.5px; color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+.tool-pool-policy-row .ghost { margin-left: auto; flex: none; }
+
+.tool-pool-empty { padding: 14px 4px; font-size: 11.5px; color: var(--text-3); }
+
+/* 窄窗：两栏收成一栏，常驻在上、按需在下 */
+@media (max-width: 900px) {
+  .tool-pool-board { grid-template-columns: minmax(0, 1fr); gap: 14px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tool-pool-card, .tool-pool-caret, .tool-pool-move { transition: none; }
 }

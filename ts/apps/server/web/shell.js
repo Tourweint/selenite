@@ -7,7 +7,6 @@
  * app.js 文末，各模块顶层只做声明、常量与事件监听注册。
  */
 
-import { startNewChat } from "./chat-open.js";
 import { el } from "./dom.js";
 import { hideHoverTip } from "./hover-tip.js";
 import { request } from "./net.js";
@@ -434,25 +433,19 @@ for (const sec of SIDE_SECTIONS) {
 }
 
 /* 「任务」分区（原「对话」，2026-11-21 改名）的 ⋯（2026-11-14）：原来这里固定一颗 ＋（新建），
-   旁边还有一颗放大镜（搜索）。现在合成一张菜单——新建与搜索都是"对对话列表做的事"，
-   没有理由各占一格。新建语义与旧按钮完全一致：新开一条普通 worker 会话（Ctrl+K 走同一条路）。
+   旁边还有一颗放大镜（搜索）。现在合成一张菜单——新建与搜索都是"对任务列表做的事"，
+   没有理由各占一格。
    2026-11-21：「打开任务中心」从分区底部的文字链接收进这张菜单（底部链接退役）。
-   2026-11-22：菜单不再写解释行（用户口径「解释性文字不需要」）。 */
+   2026-11-22：菜单不再写解释行（用户口径「解释性文字不需要」）。
+   2026-11-23：普通助手（worker 会话）退役——「新建助手对话」撤掉，新建只剩「新建任务」（派给池）。 */
 el.secChatsMore?.addEventListener("click", () => {
   openSecMenu(el.secChatsMore, [
     {
       label: "新建任务",
+      kbd: "Ctrl+K",
       run: () => {
         // 动态 import：tasks-create 依赖弹窗 / 项目 / 会话打开，静态引会把侧栏拖进这张图。
         void import("./tasks-create.js").then((module) => module.openCreateTaskModal());
-      },
-    },
-    {
-      label: "新建助手对话",
-      kbd: "Ctrl+K",
-      run: () => {
-        go("chat");
-        startNewChat("worker");
       },
     },
     { label: "搜索旧对话", run: () => go("search") },

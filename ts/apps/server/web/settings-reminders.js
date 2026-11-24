@@ -17,8 +17,9 @@ import { attr, esc } from "./markdown.js";
 import { request } from "./net.js";
 import { openSecMenu } from "./sec-menu.js";
 import { mountSegmented, syncSegmented } from "./settings-atoms.js";
-import { KEY_MODEL_PROVIDER, THINKING_LABELS } from "./shell.js";
+import { KEY_MODEL_PROVIDER } from "./shell.js";
 import { state } from "./state.js";
+import { createThinkingSlider } from "./thinking-slider.js";
 import { closeModal, closePopover, openModal, openPopover, popoverOpen, toast } from "./ui-atoms.js";
 
 
@@ -1519,9 +1520,11 @@ async function loadPolicy() {
 /**
  * 默认模型卡（2026-11-12 M1；原 2026-11-04 批次五的一行下拉退役）。
  *
- * 数据源不变：GET /agent/model（接口文档 §2.8）。两行结构：
- * - `mdl-current` 模型名（放大，页面第一眼）；
- * - `mdl-hint`  供应商 + 生效时机。
+ * 数据源不变：GET /agent/model（接口文档 §2.8）。2026-11-24 按方案 E 改成单行：
+ * - `mdl-current` 模型名（18px）；
+ * - `mdl-hint`  供应商名，跟在模型名后面同一行（底对齐；不再恒定“切换后生效”）；
+ * - `mdl-think` 思考强度滑块（行中段）；
+ * - 右侧「更换」。
  * 可切时右侧出「更换」，弹层复用对话 pill 的 model-menu（供应商分段 + 模型行），
  * 弹层里选完由 modelchange 收回并重填本卡；不可切（faux / 只有一个模型）不出按钮。
  * 2026-11-05 G1 热修：models 自思考档位起是对象行 {id, thinkingLevels}（兼容裸字符串），
@@ -1552,69 +1555,67 @@ function renderDefaultModelRow(catalog) {
     hint.textContent = sub;
   };
 
-  // 只改全局默认档、不换模型：服务端按当前模型支持域 clamp，回实际档后回填选中态
-  async function setGlobalThinking(target) {
-    if (!current) return;
-    try {
-      const response = await request("/api/v1/agent/model", {
-        method: "POST",
-        body: JSON.stringify({
-          modelId: current.modelId,
-          providerId: current.providerId,
-          thinking: target,
-        }),
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        toast(data.message || data.error || "没存成");
-        return;
-      }
-      const applied = typeof data.thinking === "string" ? data.thinking : target;
-      for (const option of think?.querySelectorAll(".think-opt") ?? []) {
-        option.setAttribute("aria-pressed", String(option.dataset.level === applied));
-      }
-    } catch (error) {
-      if (error.message !== "forbidden") toast(`没存成：${error.message}`);
-    }
-  }
-
   change.hidden = true;
   if (think) think.hidden = true;
   if (!current) {
-    paint("未配置", "配好 LLM_API_KEY 会播种一个默认供应商");
+    // 2026-11-23 起「零供应商」是可停的合法状态（也能把它删空）：不能再只劝去配 Key
+    paint("未配置", "还没有可用模型：在下方添加供应商；没有时对话走 mock 回显");
     return;
   }
   if (current.providerId === "faux") {
     paint("faux", "假模型（链路验证用），没有可切的真实模型");
     return;
   }
-  paint(current.modelId, `${providerName} · 切换后下一轮对话生效`);
+  paint(current.modelId, providerName);
 
-  // 全局默认思考档（2026-11-21 用户口径）：新会话按这一档起步，分段按当前模型的
-  // 支持域画（GET /model 现在带 thinking / thinkingLevels）。点一档 = 只改档不换模型；
-  // 服务端 clamp 后回实际档，按回值标选中（模型不支持时落低一档，off 兜底）。
+  // 全局默认思考档（2026-11-21 用户口径）：新会话按这一档起步，按当前模型的
+  // 支持域画（GET /model 带 thinking / thinkingLevels）。2026-11-23 用户拍板：从分段
+  // 按钮换成与模型菜单底栏同一件填充滑块（thinking-slider.js），点/拖/方向键都带滑动动画。
   const levels = Array.isArray(catalog?.thinkingLevels) ? catalog.thinkingLevels : [];
   const level = typeof catalog?.thinking === "string" ? catalog.thinking : null;
+  let selected = level;
+  let sliderApi = null;
+
+  // 只改全局默认档、不换模型：服务端按当前模型支持域 clamp，回实际档后滑块跟回去。
+  // 请求只带 thinking（服务端「只改档」分支），不顺手把模型再设一遍。
+  async function setGlobalThinking(target) {
+    try {
+      const response = await request("/api/v1/agent/model", {
+        method: "POST",
+        body: JSON.stringify({ thinking: target }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        toast(data.message || data.error || "没存成");
+        if (selected) sliderApi?.setLevel(selected);
+        return;
+      }
+      const applied = typeof data.thinking === "string" ? data.thinking : target;
+      selected = applied;
+      // 模型不支持时服务端落低一档（off 兜底）：滑块带过渡跟回实际档
+      sliderApi?.setLevel(applied);
+    } catch (error) {
+      if (error.message !== "forbidden") toast(`没存成：${error.message}`);
+      if (selected) sliderApi?.setLevel(selected);
+    }
+  }
+
   if (think && levels.length && level) {
     think.hidden = false;
     const label = document.createElement("span");
     label.className = "mdl-think-label";
-    label.textContent = "思考强度 · 新会话默认";
-    const seg = document.createElement("div");
-    seg.className = "think-seg";
-    seg.setAttribute("role", "group");
-    seg.setAttribute("aria-label", "全局默认思考档");
-    for (const item of levels) {
-      const option = document.createElement("button");
-      option.type = "button";
-      option.className = "think-opt";
-      option.dataset.level = item;
-      option.textContent = THINKING_LABELS[item] || item;
-      option.setAttribute("aria-pressed", String(item === level));
-      option.addEventListener("click", () => void setGlobalThinking(current, item));
-      seg.append(option);
-    }
-    think.replaceChildren(label, seg);
+    label.textContent = "思考强度";
+    label.setAttribute(
+      "data-tip",
+      "全局默认：新建的会话按这一档起步，正在进行的会话不受影响。",
+    );
+    sliderApi = createThinkingSlider({
+      levels,
+      level,
+      ariaLabel: "全局默认思考强度",
+      onCommit: (next) => void setGlobalThinking(next),
+    });
+    think.replaceChildren(label, sliderApi.slider);
   }
 
   if (total < 2) {

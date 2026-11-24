@@ -221,7 +221,6 @@
            aria-label="总管">
         <span class="pt-avatar" id="chief-avatar" aria-hidden="true">总</span>
         <span class="roster-name">总管</span>
-        <span class="pill-tag">总管</span>
         <span class="side-count chief-count" id="chief-count" hidden></span>
       </div>
 
@@ -232,16 +231,18 @@
 
       <!-- 执事（上移到总管之后） -->
       <section class="side-sec is-open" id="sec-partners" data-sec="partners">
-        <button class="side-sec-head" id="sec-partners-toggle" type="button" aria-expanded="true"
-                aria-controls="sec-partners-body">
-          <svg class="sec-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-          <span class="sec-name">执事</span>
-          <span class="side-count sec-count" id="partners-badge" hidden></span>
-        </button>
-        <button class="sec-more" id="sec-partners-more" type="button"
-                aria-haspopup="menu" aria-expanded="false" aria-label="执事动作">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="2" fill="currentColor"/><circle cx="12" cy="12" r="2" fill="currentColor"/><circle cx="19" cy="12" r="2" fill="currentColor"/></svg>
-        </button>
+        <div class="side-sec-top">
+          <button class="side-sec-head" id="sec-partners-toggle" type="button" aria-expanded="true"
+                  aria-controls="sec-partners-body">
+            <svg class="sec-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+            <span class="sec-name">执事</span>
+            <span class="side-count sec-count" id="partners-badge" hidden></span>
+          </button>
+          <button class="sec-more" id="sec-partners-more" type="button"
+                  aria-haspopup="menu" aria-expanded="false" aria-label="执事动作">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="2" fill="currentColor"/><circle cx="12" cy="12" r="2" fill="currentColor"/><circle cx="19" cy="12" r="2" fill="currentColor"/></svg>
+          </button>
+        </div>
         <div class="side-sec-body" id="sec-partners-body">
           <div class="side-sec-clip">
             <div class="side-sec-inner">
@@ -259,17 +260,19 @@
            2026-11-21 分区改名「任务」+ 换清单图标（用户口径：侧栏这一列实质就是活计）；
            底部「打开任务中心 →」链接退役，入口收进分区头 ⋯ 菜单。 -->
       <section class="side-sec is-open" id="sec-chats" data-sec="chats">
-        <button class="side-sec-head" id="sec-chats-toggle" type="button" aria-expanded="true"
-                aria-controls="sec-chats-body">
-          <svg class="sec-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></svg>
-          <span class="sec-name">任务</span>
-          <span class="side-count sec-count" id="tasks-badge" hidden></span>
-        </button>
-        <!-- 分区动作一颗 ⋯（2026-11-14 由放大镜 + ＋ 合并；2026-11-21 加「打开任务中心」）。 -->
-        <button class="sec-more" id="sec-chats-more" type="button"
-                aria-haspopup="menu" aria-expanded="false" aria-label="任务动作">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="2" fill="currentColor"/><circle cx="12" cy="12" r="2" fill="currentColor"/><circle cx="19" cy="12" r="2" fill="currentColor"/></svg>
-        </button>
+        <div class="side-sec-top">
+          <button class="side-sec-head" id="sec-chats-toggle" type="button" aria-expanded="true"
+                  aria-controls="sec-chats-body">
+            <svg class="sec-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></svg>
+            <span class="sec-name">任务</span>
+            <span class="side-count sec-count" id="tasks-badge" hidden></span>
+          </button>
+          <!-- 分区动作一颗 ⋯（2026-11-14 由放大镜 + ＋ 合并；2026-11-21 加「打开任务中心」）。 -->
+          <button class="sec-more" id="sec-chats-more" type="button"
+                  aria-haspopup="menu" aria-expanded="false" aria-label="任务动作">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="2" fill="currentColor"/><circle cx="12" cy="12" r="2" fill="currentColor"/><circle cx="19" cy="12" r="2" fill="currentColor"/></svg>
+          </button>
+        </div>
         <div class="side-sec-body" id="sec-chats-body">
           <div class="side-sec-clip">
             <div class="side-sec-inner">
@@ -281,15 +284,17 @@
 
       <!-- 项目：行尾 ⋯ 给两个入口（新建项目 / 添加已有项目）。 -->
       <section class="side-sec is-open" id="sec-projects" data-sec="projects">
-        <button class="side-sec-head" id="sec-projects-toggle" type="button" aria-expanded="true"
-                aria-controls="sec-projects-body">
-          <svg class="sec-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
-          <span class="sec-name" id="sec-projects-name">项目</span>
-        </button>
-        <button class="sec-more" id="sec-projects-more" type="button"
-                aria-haspopup="menu" aria-expanded="false" aria-label="项目动作">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="2" fill="currentColor"/><circle cx="12" cy="12" r="2" fill="currentColor"/><circle cx="19" cy="12" r="2" fill="currentColor"/></svg>
-        </button>
+        <div class="side-sec-top">
+          <button class="side-sec-head" id="sec-projects-toggle" type="button" aria-expanded="true"
+                  aria-controls="sec-projects-body">
+            <svg class="sec-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+            <span class="sec-name" id="sec-projects-name">项目</span>
+          </button>
+          <button class="sec-more" id="sec-projects-more" type="button"
+                  aria-haspopup="menu" aria-expanded="false" aria-label="项目动作">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="2" fill="currentColor"/><circle cx="12" cy="12" r="2" fill="currentColor"/><circle cx="19" cy="12" r="2" fill="currentColor"/></svg>
+          </button>
+        </div>
         <div class="side-sec-body" id="sec-projects-body">
           <div class="side-sec-clip">
             <div class="side-sec-inner">
@@ -300,23 +305,21 @@
       </section>
 
       <section class="side-sec is-open" id="sec-groups" data-sec="groups">
-        <button class="side-sec-head" id="sec-groups-toggle" type="button" aria-expanded="true"
-                aria-controls="sec-groups-body" disabled>
-          <svg class="sec-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/><path d="M8 12h.01"/><path d="M12 12h.01"/><path d="M16 12h.01"/></svg>
-          <span class="sec-name">群组</span>
-        </button>
-        <button class="sec-more" id="sec-groups-more" type="button"
-                aria-haspopup="menu" aria-expanded="false" aria-label="群组动作" disabled>
-          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="2" fill="currentColor"/><circle cx="12" cy="12" r="2" fill="currentColor"/><circle cx="19" cy="12" r="2" fill="currentColor"/></svg>
-        </button>
+        <div class="side-sec-top">
+          <button class="side-sec-head" id="sec-groups-toggle" type="button" aria-expanded="true"
+                  aria-controls="sec-groups-body" disabled>
+            <svg class="sec-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/><path d="M8 12h.01"/><path d="M12 12h.01"/><path d="M16 12h.01"/></svg>
+            <span class="sec-name">群组</span>
+          </button>
+          <button class="sec-more" id="sec-groups-more" type="button"
+                  aria-haspopup="menu" aria-expanded="false" aria-label="群组动作" disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="2" fill="currentColor"/><circle cx="12" cy="12" r="2" fill="currentColor"/><circle cx="19" cy="12" r="2" fill="currentColor"/></svg>
+          </button>
+        </div>
         <div class="side-sec-body" id="sec-groups-body">
           <div class="side-sec-clip">
             <div class="side-sec-inner">
               <div class="roster" id="group-list" aria-label="群组列表"></div>
-              <!-- 所有群聊（2026-11-07）：与任务中心/项目管理同一条「分区底部去整页看」的链接行。
-                   以前只有群会话顶栏的返回键能到群列表，用户口径是「别放在返回之后」——
-                   展开着群组就能直接进列表，群会话里也不必先返回再找。 -->
-              <button class="sec-foot-link" id="sec-groups-all" type="button">所有群聊 <span aria-hidden="true">→</span></button>
               </div>
           </div>
         </div>

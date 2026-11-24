@@ -12,17 +12,41 @@ import { scrollToEnd } from "./chat-notice.js";
 import { openChat } from "./chat-open.js";
 import { hideEmpty } from "./chat-thread.js";
 import { el } from "./dom.js";
-import { CS_ICONS } from "./icons.js";
 import { request } from "./net.js";
 import { openCreatePartnerModal } from "./partner-modals.js";
 import { openPartnerSessions } from "./partner-sessions-ui.js";
-import { loadRoster, paintBusyChip, partnerBusyOf, partnerDisplayName, rosterDomain } from "./partners-status.js";
+import { loadRoster, paintBusyChip, partnerBusyOf, partnerDisplayName, rosterDomain, syncRosterBusy } from "./partners-status.js";
 import { currentPartnerLineId, currentRoute, go } from "./route.js";
 import { openSecMenu, openMenuAt } from "./sec-menu.js";
-import { cs, csSvg, drawerOpen, openDrawerAt, refreshCsDetail, renderCsPage } from "./settings-drawer.js";
+import { cs, drawerOpen, openDrawerAt, refreshCsDetail, renderCsPage } from "./settings-drawer.js";
 import { updateHomeMode } from "./shell.js";
 import { state } from "./state.js";
 import { inShell, toast } from "./ui-atoms.js";
+
+/** 领域 → 在办单数：整份重绘与轮询就地更新共用一份口径 */
+function activeMapOf(domainRows) {
+  const activeByDomain = new Map();
+  for (const row of domainRows) {
+    const key = String(row.domain || "").trim();
+    if (key) activeByDomain.set(key, Number(row.activeTickets) || 0);
+  }
+  return activeByDomain;
+}
+
+/** 「N 单」按钮：可点进任务中心按领域筛选；没有在办单就整枚不占位 */
+function rosterCountButton(domain, active) {
+  if (!(active > 0)) return null;
+  const count = document.createElement("button");
+  count.type = "button";
+  count.className = "side-count roster-count";
+  count.textContent = `${active} 单`;
+  count.title = `看「${domain}」的任务单`;
+  count.addEventListener("click", (event) => {
+    event.stopPropagation();
+    location.hash = `#/tasks?domain=${encodeURIComponent(domain)}`;
+  });
+  return count;
+}
 
 /** 花名册渲染：box 缺省 = 展开侧栏的花名册；收起轨道的悬停卡传自己的容器
  *  （2026-11-13）——同一份行渲染（头像/领域/派发权/在办单/忙因），行为也一致。 */
@@ -30,11 +54,7 @@ function renderRoster(partners, domainRows, box = el.partnerRoster) {
   if (!box) return;
   box.replaceChildren();
 
-  const activeByDomain = new Map();
-  for (const row of domainRows) {
-    const key = String(row.domain || "").trim();
-    if (key) activeByDomain.set(key, Number(row.activeTickets) || 0);
-  }
+  const activeByDomain = activeMapOf(domainRows);
   // 忙因胶囊在待办快照变化时用同一份数据就地重算（syncRosterBusy），不重绘整份花名册
   rosterDomain.active = activeByDomain;
 
@@ -117,19 +137,9 @@ function renderRoster(partners, domainRows, box = el.partnerRoster) {
       row.append(dispatch);
     }
 
-    if (active > 0) {
-      // 数字可点 → 任务中心按 domain 筛选（.side-count 与任务中心徽章同款）
-      const count = document.createElement("button");
-      count.type = "button";
-      count.className = "side-count roster-count";
-      count.textContent = `${active} 单`;
-      count.title = `看「${domain}」的任务单`;
-      count.addEventListener("click", (event) => {
-        event.stopPropagation();
-        location.hash = `#/tasks?domain=${encodeURIComponent(domain)}`;
-      });
-      row.append(count);
-    }
+    // 数字可点 → 任务中心按 domain 筛选（.side-count 与任务中心徽章同款）
+    const count = rosterCountButton(domain, active);
+    if (count) row.append(count);
 
     // 忙因胶囊（批 18 §二）：忙时才占位，空闲不画（七原则⑥）。
     // 2026-11-13 用户口径：状态点、「空闲」、员工档案小图标一律不摆——
@@ -140,24 +150,8 @@ function renderRoster(partners, domainRows, box = el.partnerRoster) {
     paintBusyChip(busyChip, busy);
     row.append(busyChip);
 
-    // 副会话选择器入口（2026-11-17 批2）：插件关时不渲染；点击不触发行本身的 openPartnerChat。
-    if (state.sideSessionsEnabled) {
-      const sessionsBtn = document.createElement("button");
-      sessionsBtn.type = "button";
-      sessionsBtn.className = "roster-sessions";
-      sessionsBtn.setAttribute("aria-label", "选择会话");
-      sessionsBtn.title = "选择会话";
-      sessionsBtn.append(csSvg(CS_ICONS.layers));
-      sessionsBtn.addEventListener("click", (event) => {
-        event.stopPropagation();
-        event.preventDefault();
-        openPartnerSessions(id);
-      });
-      // 回车落在按钮上时也别冒泡到行的 keydown（否则会连带打开 canonical）
-      sessionsBtn.addEventListener("keydown", (event) => event.stopPropagation());
-      row.append(sessionsBtn);
-    }
-
+    // 副会话选择器入口（2026-11-23）：行尾小图标退役，收进右键菜单；
+    // 插件关时菜单项也不出现（与旧按钮同一口径）。
     const open = () => void openPartnerChat(id);
     row.addEventListener("click", open);
     row.addEventListener("keydown", (event) => {
@@ -166,14 +160,17 @@ function renderRoster(partners, domainRows, box = el.partnerRoster) {
         open();
       }
     });
-    // 右键（2026-11-16）：开对话 / 档案页 / 看这个领域的任务单。
+    // 右键（2026-11-16）：开对话 / 选择会话 / 档案页 / 看这个领域的任务单。
     row.addEventListener("contextmenu", (event) => {
       if (!inShell()) return;
       event.preventDefault();
       const items = [
         { label: "打开对话", run: open },
-        { label: "人设档案", run: () => void openPartnerProfile(id, "records") },
       ];
+      if (state.sideSessionsEnabled) {
+        items.push({ label: "选择会话", run: () => void openPartnerSessions(id) });
+      }
+      items.push({ label: "人设档案", run: () => void openPartnerProfile(id, "records") });
       if (domain) {
         items.push(
           { separator: true },
@@ -189,6 +186,51 @@ function renderRoster(partners, domainRows, box = el.partnerRoster) {
     });
     box.append(row);
   }
+}
+
+/** 待派数字就地改：行不重建，头像 img 不动（不再重新解码） */
+function syncRosterCounts() {
+  for (const row of document.querySelectorAll("#partner-roster [data-partner-id]")) {
+    const partner = state.partners.find((item) => item.id === row.dataset.partnerId);
+    if (!partner) continue;
+    const domain = String(partner.domain || "").trim();
+    const active = domain ? rosterDomain.active.get(domain) || 0 : 0;
+    const existing = row.querySelector(".roster-count");
+    const next = rosterCountButton(domain, active);
+    if (!next) {
+      existing?.remove();
+      continue;
+    }
+    if (existing) {
+      existing.textContent = next.textContent;
+      existing.title = next.title;
+      continue;
+    }
+    const busyNode = row.querySelector(".roster-busy");
+    if (busyNode) busyNode.before(next);
+    else row.append(next);
+  }
+}
+
+/**
+ * 轮询刷新在办单数（2026-11-24）：只走轻量 /api/v1/domains。
+ * /api/v1/partners 的每条记录都内联头像 base64，轮询为几个数字反复拉整份花名册
+ * 会让人看见头像反复加载。这个函数只更新数字与忙因胶囊，不重绘行、不重解头像；
+ * 花名册本身仍在启动 / 改执事 / 改头像时由 loadRoster 重读。
+ */
+async function refreshRosterDomains() {
+  let domains = null;
+  try {
+    const response = await request("/api/v1/domains", { cache: "no-store" });
+    if (response.ok) domains = (await response.json().catch(() => ({}))).domains || [];
+  } catch {
+    return;
+  }
+  if (!Array.isArray(domains)) return;
+  rosterDomain.rows = domains;
+  rosterDomain.active = activeMapOf(domains);
+  syncRosterCounts();
+  syncRosterBusy();
 }
 
 /**
@@ -475,4 +517,4 @@ el.secPartnersMore?.addEventListener("click", () => {
   ]);
 });
 
-export { addPartnerOpenError, openConfirmedPartnerCanonical, openPartnerChat, openPartnerProfile, ownsChatResult, partnerConversationExists, partnerConversationId, partnerExistsAfter404, renderRoster, showPartnerOpenFailure, showPartnerOpenFailureCard };
+export { addPartnerOpenError, openConfirmedPartnerCanonical, openPartnerChat, openPartnerProfile, ownsChatResult, partnerConversationExists, partnerConversationId, partnerExistsAfter404, refreshRosterDomains, renderRoster, showPartnerOpenFailure, showPartnerOpenFailureCard };

@@ -9,16 +9,17 @@
 
 import { approvalPopItems, approvalPopKnown } from "./approval-pop.js";
 import { paintAvatar, partnerDotClass } from "./avatar.js";
-import { openChat, startNewChat, syncTitleSessionAffordance } from "./chat-open.js";
+import { openChat, startNewChat } from "./chat-open.js";
 import { el } from "./dom.js";
-import { CS_ICONS } from "./icons.js";
 import { request } from "./net.js";
 import { renderRoster } from "./partner-roster.js";
 import { partnerIdOfConversation, parsePartnerExternalId } from "./partner-sessions.js";
 import { ensureSideSessionsFlag, openPartnerSessions } from "./partner-sessions-ui.js";
 import { currentRoute, go } from "./route.js";
-import { csResolveTarget, csSvg } from "./settings-drawer.js";
+import { openMenuAt } from "./sec-menu.js";
+import { csResolveTarget } from "./settings-drawer.js";
 import { state } from "./state.js";
+import { inShell } from "./ui-atoms.js";
 
 /* ── 忙因胶囊（2026-11-10 批 18 §二）────────────────────────
  * 优先级：等审批 > 跑任务 > 等回答 > 空闲。
@@ -134,29 +135,6 @@ function syncChiefAvatar() {
   syncChiefDot();
 }
 
-/** 总管条目的「选择会话」按钮（2026-11-17 批2）：插件关时整枚不挂，开时点它不开主会话。 */
-function syncChiefSessionsButton() {
-  if (!el.chiefEntry) return;
-  let btn = el.chiefEntry.querySelector(".chief-sessions");
-  if (!state.sideSessionsEnabled) {
-    if (btn) btn.remove();
-    return;
-  }
-  if (btn) return;
-  btn = document.createElement("button");
-  btn.type = "button";
-  btn.className = "chief-sessions";
-  btn.setAttribute("aria-label", "选择会话");
-  btn.title = "选择会话";
-  btn.append(csSvg(CS_ICONS.layers));
-  btn.addEventListener("click", (event) => {
-    event.stopPropagation();
-    event.preventDefault();
-    openPartnerSessions("chief");
-  });
-  btn.addEventListener("keydown", (event) => event.stopPropagation());
-  el.chiefEntry.append(btn);
-}
 
 /** 总管在界面上的名字（用户可能给人设改过名，缺省「总管」） */
 function chiefDisplayName() {
@@ -257,14 +235,12 @@ function syncChatHeadAvatar() {
   if (!partner) {
     host.hidden = true;
     host.replaceChildren();
-    host.removeAttribute("title");
     delete host.dataset.partnerId;
     return;
   }
-  const name = partnerDisplayName(target);
-  paintAvatar(host, partner.avatar || null, name);
+  // 2026-11-24：只画脸，不挂 title——名字就在旁边，原生悬停提示多余且会粘住。
+  paintAvatar(host, partner.avatar || null, partnerDisplayName(target));
   host.hidden = false;
-  host.title = name;
   host.dataset.partnerId = target;
 }
 
@@ -293,6 +269,8 @@ function openChiefChat() {
   else startNewChat("chief");
 }
 
+// 2026-11-13：总管头像不是编辑入口——侧栏只负责「打开会话」，
+// 改头像 / 改名字去右侧对话设置的人设页或设置→执事。
 el.chiefEntry.addEventListener("click", openChiefChat);
 el.chiefEntry.addEventListener("keydown", (event) => {
   if (event.key === "Enter" || event.key === " ") {
@@ -301,8 +279,17 @@ el.chiefEntry.addEventListener("keydown", (event) => {
   }
 });
 
-// 2026-11-13：总管头像不再是编辑入口——侧栏只负责「打开会话」，
-// 改头像 / 改名字去右侧对话设置的人设页或设置→执事（用户报「侧栏里能改，跟设置里重复」）。
+// 右键（2026-11-23）：总管行原本没有右键菜单。行尾「选择会话」小图标退役后，
+// 选择器入口收到这里；插件关时只留「打开对话」。
+el.chiefEntry.addEventListener("contextmenu", (event) => {
+  if (!inShell()) return;
+  event.preventDefault();
+  const items = [{ label: "打开对话", run: () => openChiefChat() }];
+  if (state.sideSessionsEnabled) {
+    items.push({ label: "选择会话", run: () => void openPartnerSessions("chief") });
+  }
+  openMenuAt(event.clientX, event.clientY, items, chiefDisplayName());
+});
 
 /* 执事花名册：GET /api/v1/partners（过滤 chief + archived）
    + GET /api/v1/domains（domain → activeTickets）。两个端点各自容错，
@@ -312,13 +299,6 @@ async function loadRoster() {
   if (!box) return;
   // 副会话入口开关：花名册首次加载取一次（缓存进 state.flagsCache），失败按关处理。
   state.sideSessionsEnabled = await ensureSideSessionsFlag();
-  // 开关晚到：openChat 可能先于花名册跑完，这里补一次顶栏可点态。
-  const identityNow = parsePartnerExternalId(state.conversationId);
-  syncTitleSessionAffordance(
-    identityNow && (identityNow.role === "canonical" || identityNow.role === "side")
-      ? identityNow.partnerId
-      : "",
-  );
   let partners = null;
   let domains = [];
   try {
@@ -342,7 +322,6 @@ async function loadRoster() {
     Array.isArray(domains) ? domains : [],
   );
   syncChiefAvatar();
-  syncChiefSessionsButton();
   syncPartnerDots();
   // 名册晚于会话加载时，把执事表头补成名字（canonical 与 side 都要）：
   // side 的首帧可能先用占位「执事」拼了「执事 · 标题」，这里用标题尾巴重建。
@@ -357,7 +336,6 @@ async function loadRoster() {
       const tail = known || el.title.textContent.split(" · ").slice(1).join(" · ") || "新会话";
       el.title.textContent = `${partnerDisplayName(identity.partnerId)} · ${tail}`;
     }
-    syncTitleSessionAffordance(identity.partnerId);
   }
   // 总管的名字也可能在人设里改过：总管会话的表头跟着名册一起刷新（2026-11-13）
   if (
@@ -380,4 +358,4 @@ async function loadRoster() {
    拆成多模块后 loadRoster 与 renderRoster 分别写一个字段，故收进对象。 */
 const rosterDomain = { active: new Map(), rows: [] };
 
-export { chiefDisplayName, chatIdentityFace, chatIdentityName, loadRoster, openChiefChat, paintBusyChip, partnerBusyOf, partnerDisplayName, partnerPendingCounts, rosterDomain, syncChatHeadAvatar, syncChiefAvatar, syncChiefDot, syncChiefSessionsButton, syncEmptyMark, syncPartnerDots, syncRosterBusy, WORKER_DISPLAY_NAME };
+export { chiefDisplayName, chatIdentityFace, chatIdentityName, loadRoster, openChiefChat, paintBusyChip, partnerBusyOf, partnerDisplayName, partnerPendingCounts, rosterDomain, syncChatHeadAvatar, syncChiefAvatar, syncChiefDot, syncEmptyMark, syncPartnerDots, syncRosterBusy, WORKER_DISPLAY_NAME };

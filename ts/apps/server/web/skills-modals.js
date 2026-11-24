@@ -7,17 +7,28 @@
  * app.js 文末，各模块顶层只做声明、常量与事件监听注册。
  */
 
-import { esc } from "./markdown.js";
+import { attr, esc } from "./markdown.js";
 import { request } from "./net.js";
 import { clearModalHint, setModalHint } from "./project-modal.js";
 import { readSkill, splitSkillContent, summaryInputValue } from "./skills-list.js";
-import { SKILL_NAME_RE, SKILL_NEXT_TURN_HINT, SKILL_ORIGIN_LABEL, loadSkills, skillLastUsedText, skillSizeText, skillWhenText } from "./skills-settings.js";
+import { SKILL_NAME_RE, SKILL_NEXT_TURN_HINT, SKILL_ORIGIN_LABEL, loadSkills, skillAdvice, skillLastUsedText, skillSizeText, skillWhenText } from "./skills-settings.js";
 import { closeModal, openModal, toast } from "./ui-atoms.js";
 
+/**
+ * 位置在弹窗里的短名：自加位置优先用用户填的显示名（「团队手册」），
+ * 没填才退回来源名（主目录 / 自加位置 / 内置目录）。整行路径只放在详情行里。
+ */
+function skillDirLabel(dir, origin) {
+  const source = (skillAdvice?.dirs || []).find((entry) => entry && entry.dir === dir);
+  if (source?.label) return String(source.label);
+  return SKILL_ORIGIN_LABEL[origin] || "主目录";
+}
+
 async function openEditSkillModal(name, item = null) {
-  const skill = await readSkill(name);
+  const sourceDir = String(item?.dir || "");
+  const skill = await readSkill(name, sourceDir);
   if (skill === null) return;
-  const originLabel = SKILL_ORIGIN_LABEL[skill.origin] || skill.origin || "";
+  const originLabel = skillDirLabel(skill.dir || sourceDir, skill.origin);
   const editable = skill.form === "flat" && skill.origin !== "agents";
   const parts = splitSkillContent(skill.content);
   // 目录形态的正文是整份 SKILL.md（含 frontmatter），摘要只能信列表里的解析结果
@@ -26,7 +37,7 @@ async function openEditSkillModal(name, item = null) {
   const note = editable
     ? `摘要就是技能索引里露出的那一行（一句话）；正文从下一行开始，保存时自动接在摘要后面。${
         skill.writable
-          ? ""
+          ? `保存写进这个位置：${esc(originLabel)}。`
           : `这是内置手册：保存会在你的技能目录里建一份同名副本（以后用副本）。`
       }保存即写文件；${SKILL_NEXT_TURN_HINT}`
     : skill.form === "dir"
@@ -43,6 +54,7 @@ async function openEditSkillModal(name, item = null) {
       detailBits.push(used > 0 ? `用过 ${used} 次${ago ? `（上次 ${ago}）` : ""}` : "没用过");
     }
     detailBits.push(`来自 ${originLabel}${skill.writable ? "" : "（只读）"}`);
+    if (skill.dir) detailBits.push(`位置 ${skill.dir}`);
   }
   const detailMeta = detailBits.join(" · ");
   openModal(
@@ -120,7 +132,11 @@ async function openEditSkillModal(name, item = null) {
         try {
           const response = await request(`/api/v1/agent/skills/${encodeURIComponent(name)}`, {
             method: "PUT",
-            body: JSON.stringify({ content: `${nextSummary}\n${area.value}` }),
+            body: JSON.stringify({
+              content: `${nextSummary}\n${area.value}`,
+              // 只读来源（内置手册）不带 dir：落到主目录建副本，这是 9-S 的合并语义
+              ...(skill.writable && skill.dir ? { dir: skill.dir } : {}),
+            }),
           });
           const data = await response.json().catch(() => ({}));
           if (!response.ok) {
@@ -149,6 +165,19 @@ async function openEditSkillModal(name, item = null) {
  * options.existingHint：同名已存在时的提示（个人页指向「设置 → 注入 → 技能 / 让他自己写」）。
  */
 function openCreateSkillModal(options = {}) {
+  // 位置选择（2026-11-23）：只有一个可写位置时不画下拉（默认就写那里，别多一个控件）；
+  // 有多个才让选，默认主目录——老习惯（不选位置）保持不变。
+  const writableDirs = (skillAdvice.dirs || []).filter((source) => source.writable === true);
+  const dirOf = (source) => source.label || SKILL_ORIGIN_LABEL[source.origin] || "主目录";
+  const defaultDir = writableDirs.some((source) => source.dir === skillAdvice.dir)
+    ? skillAdvice.dir
+    : String(writableDirs[0]?.dir || "");
+  const dirOptions = writableDirs
+    .map(
+      (source) =>
+        `<option value="${attr(source.dir)}"${source.dir === defaultDir ? " selected" : ""}>${esc(dirOf(source))} — ${esc(source.dir)}</option>`,
+    )
+    .join("");
   openModal(
     "新建技能",
     (body) => {
@@ -159,6 +188,14 @@ function openCreateSkillModal(options = {}) {
           <input class="modal-input is-mono" id="sk-new-name" type="text" maxlength="64"
                  spellcheck="false" placeholder="例如 daily-brief" />
         </div>
+        ${
+          writableDirs.length > 1
+            ? `<div class="modal-field">
+          <span>保存到</span>
+          <select class="modal-input" id="sk-new-dir">${dirOptions}</select>
+        </div>`
+            : ""
+        }
         <div class="modal-field">
           <span>一句话摘要（第 1 行）</span>
           <input class="modal-input" id="sk-new-summary" type="text"
@@ -175,6 +212,7 @@ function openCreateSkillModal(options = {}) {
           <button class="modal-primary" id="sk-new-go" type="button">新建</button>
         </div>`;
       const nameInput = body.querySelector("#sk-new-name");
+      const dirSelect = body.querySelector("#sk-new-dir");
       const summaryInput = body.querySelector("#sk-new-summary");
       const area = body.querySelector("#sk-new-content");
       const hint = body.querySelector("#sk-new-hint");
@@ -203,20 +241,40 @@ function openCreateSkillModal(options = {}) {
         go.disabled = true;
         setModalHint(hint, "创建中…", false);
         try {
+          const targetDir = String(dirSelect?.value || "");
           // 先探一下同名：新建不该悄悄覆盖已有技能（要改请从列表点开）
-          const exists = await request(`/api/v1/agent/skills/${encodeURIComponent(name)}`, {
-            cache: "no-store",
-          });
-          if (exists.ok) {
+          const samePlace = await request(
+            `/api/v1/agent/skills/${encodeURIComponent(name)}${targetDir ? `?dir=${encodeURIComponent(targetDir)}` : ""}`,
+            { cache: "no-store" },
+          );
+          if (samePlace.ok) {
             setModalHint(
               hint,
-              options.existingHint || "已有同名技能；要改它请关掉这里、从列表点开编辑。",
+              options.existingHint || "这个位置里已有同名技能；要改它请关掉这里、从列表点开编辑。",
             );
             return;
           }
+          // 写到自加位置时再多看一眼读取链：别处已有同名 → 先到先得会用那一份，这一条会白写
+          if (targetDir && targetDir !== skillAdvice.dir) {
+            const elsewhere = await request(`/api/v1/agent/skills/${encodeURIComponent(name)}`, {
+              cache: "no-store",
+            });
+            if (elsewhere.ok) {
+              const info = await elsewhere.json().catch(() => ({}));
+              setModalHint(
+                hint,
+                options.existingHint ||
+                  `技能库里已有同名技能（在 ${info.dir || "另一个位置"}）：先到先得会用那一份，这一条会被盖住。换个名字，或先删掉那一条。`,
+              );
+              return;
+            }
+          }
           const response = await request(`/api/v1/agent/skills/${encodeURIComponent(name)}`, {
             method: "PUT",
-            body: JSON.stringify({ content: `${summary}\n${area.value}` }),
+            body: JSON.stringify({
+              content: `${summary}\n${area.value}`,
+              ...(targetDir ? { dir: targetDir } : {}),
+            }),
           });
           const data = await response.json().catch(() => ({}));
           if (!response.ok) {
@@ -254,10 +312,11 @@ function openCreateSkillModal(options = {}) {
   );
 }
 
-function openDeleteSkillModal(name) {
+function openDeleteSkillModal(name, dir = "") {
   openModal("删除技能", (body) => {
     body.innerHTML = `
       <p class="modal-desc">删除 <b>${esc(name)}</b> 后，这份手册不再加载。${SKILL_NEXT_TURN_HINT}</p>
+      ${dir ? `<p class="sk-detail-meta">位置：${esc(dir)}（只删这一份）</p>` : ""}
       <p class="modal-hint" id="sk-del-hint"></p>
       <div class="modal-actions">
         <button class="ghost" type="button" data-modal-cancel>先留着</button>
@@ -271,9 +330,10 @@ function openDeleteSkillModal(name) {
       go.disabled = true;
       setModalHint(hint, "删除中…", false);
       try {
-        const response = await request(`/api/v1/agent/skills/${encodeURIComponent(name)}`, {
-          method: "DELETE",
-        });
+        const response = await request(
+          `/api/v1/agent/skills/${encodeURIComponent(name)}${dir ? `?dir=${encodeURIComponent(dir)}` : ""}`,
+          { method: "DELETE" },
+        );
         const data = await response.json().catch(() => ({}));
         if (!response.ok) {
           setModalHint(hint, data.message || `没删掉：HTTP ${response.status}`);

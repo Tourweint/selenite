@@ -14,17 +14,20 @@ import { openChiefChat } from "./partners-status.js";
 import { resize } from "./plus-menu.js";
 import { setModalHint } from "./project-modal.js";
 import { renderSkillList } from "./skills-list.js";
+import { renderSkillLocations } from "./skills-locations.js";
 import { closeModal, openModal, toast } from "./ui-atoms.js";
 
 /* ── 技能设置（2026-11-08 扫尾批 9-S）──────────────
  * 技能 = 给 AI 的操作手册（`skills/<name>.md`，第 1 行 = 索引用摘要）。
- * 目录解析在服务端（`resolveSkillsDir`）：AGENT_SKILLS_DIR → 用户目录 → 应用目录兜底。
- * 这里只说"人对文件做了什么"：列表 / 点开编辑 / 新建 / 删除。
+ * 目录解析在服务端（`resolveSkillsDir`）：AGENT_SKILLS_DIR / 用户目录 → 自加位置（2026-11-23）
+ * → `.agents/skills`（只读）→ 应用目录兜底。
+ * 这里只说"人对文件做了什么"：列表 / 点开编辑 / 新建 / 删除 / 管理位置。
  * 刻意不做启停位：删除即停；增删只影响下一个会话（D5 既有取舍，文案如实写）。 */
 
 const SKILL_ORIGIN_LABEL = {
   env: "AGENT_SKILLS_DIR",
-  user: "用户目录",
+  user: "主目录",
+  custom: "自加位置",
   agents: ".agents/skills",
   app: "内置目录",
 };
@@ -53,8 +56,17 @@ const SKILL_ADVICE_FILTERS = [
   { key: "none", label: "未评估" },
 ];
 
-/** 会话级状态：当前建议快照 + 筛选/排序位 + 最近一次列表（供批量确认与重渲染） */
-const skillAdvice = { view: null, filter: "all", sort: "default", items: [], dir: "" };
+/** 会话级状态：当前建议快照 + 筛选/排序位 + 最近一次列表（供批量确认与重渲染）
+ *  dirs / extraDirs：技能库位置（2026-11-23），新建 / 编辑时选写目标就靠它。 */
+const skillAdvice = {
+  view: null,
+  filter: "all",
+  sort: "default",
+  items: [],
+  dir: "",
+  dirs: [],
+  extraDirs: true,
+};
 
 /** 上一次成功读到的技能列表：设置页来回切时先用它渲染，后台再拉最新。
  *  只放进程内，不落 localStorage：技能会在磁盘上被别人改，缓存不该跨重启变成真相。 */
@@ -65,6 +77,8 @@ function skillPageSignature(data, advice) {
     return JSON.stringify([
       String(data?.dir || ""),
       String(data?.origin || ""),
+      data?.extraDirs !== false,
+      Array.isArray(data?.dirs) ? data.dirs : [],
       Array.isArray(data?.items) ? data.items : [],
       advice || null,
     ]);
@@ -73,18 +87,23 @@ function skillPageSignature(data, advice) {
   }
 }
 
-function applySkillPageMeta(data, path) {
-  if (path) {
-    const origin = SKILL_ORIGIN_LABEL[data.origin] || data.origin || "";
-    path.textContent = `位置：${data.dir || "—"}${origin ? `（${origin}）` : ""}`;
-  }
+/** 页头位置卡（2026-11-23 多位置）：数据每次刷新都重画；计数位只留刷新失败提示（正常态不报数） */
+function applySkillPageMeta(data, locations, countEl) {
   skillAdvice.dir = String(data.dir || "");
+  skillAdvice.dirs = Array.isArray(data.dirs) ? data.dirs : [];
+  skillAdvice.extraDirs = data.extraDirs !== false;
+  if (countEl) {
+    countEl.textContent = "";
+    countEl.hidden = true;
+    countEl.classList.remove("is-error");
+  }
+  renderSkillLocations(locations, data, { reload: loadSkills });
 }
 
 /** 有缓存就先画：页面不再从「读取中…」开始闪一下；数据回来只在真变了才重画。 */
-function paintSkillCache(box, path) {
+function paintSkillCache(box, locations, countEl) {
   if (!box || !skillCache.data) return false;
-  applySkillPageMeta(skillCache.data, path);
+  applySkillPageMeta(skillCache.data, locations, countEl);
   skillAdvice.view = skillCache.advice;
   renderSkillList(box, skillCache.data.items);
   return true;
@@ -259,10 +278,11 @@ function skillLastUsedText(iso) {
 
 async function loadSkills() {
   const box = document.getElementById("skill-list");
-  const path = document.getElementById("skill-path");
+  const locations = document.getElementById("skill-locations");
+  const countEl = document.getElementById("skill-count");
   const add = document.getElementById("skill-add");
   if (!box) return;
-  const hadCache = paintSkillCache(box, path);
+  const hadCache = paintSkillCache(box, locations, countEl);
   try {
     // 建议快照与列表并行取；404（SKILL_ADVICE=false）= 功能整体不出现
     const [response, adviceView] = await Promise.all([
@@ -274,7 +294,15 @@ async function loadSkills() {
       skillCache.data = null;
       skillCache.advice = null;
       skillCache.signature = "";
-      if (path) path.textContent = "";
+      if (countEl) {
+        countEl.textContent = "";
+        countEl.hidden = true;
+        countEl.classList.remove("is-error");
+      }
+      if (locations) {
+        locations.hidden = true;
+        locations.replaceChildren();
+      }
       if (add) add.hidden = true;
       const toolbar = document.getElementById("skill-toolbar");
       if (toolbar) toolbar.hidden = true;
@@ -288,10 +316,12 @@ async function loadSkills() {
       dir: String(data.dir || ""),
       origin: data.origin,
       items: Array.isArray(data.items) ? data.items : [],
+      dirs: Array.isArray(data.dirs) ? data.dirs : [],
+      extraDirs: data.extraDirs !== false,
     };
     const signature = skillPageSignature(next, adviceView);
     const changed = !hadCache || signature !== skillCache.signature;
-    applySkillPageMeta(next, path);
+    applySkillPageMeta(next, locations, countEl);
     skillCache.data = next;
     skillCache.advice = adviceView;
     skillCache.signature = signature;
@@ -301,10 +331,11 @@ async function loadSkills() {
   } catch (error) {
     if (error.message === "forbidden") return;
     if (hadCache) {
-      // 后台刷新失败先留着旧内容，只把位置行改成失败提示；总比整页变成错误块好
-      if (path && skillCache.data) {
-        const origin = SKILL_ORIGIN_LABEL[skillCache.data.origin] || skillCache.data.origin || "";
-        path.textContent = `位置：${skillCache.data.dir || "—"}${origin ? `（${origin}）` : ""} · 刷新失败：${error.message}`;
+      // 后台刷新失败先留着旧内容，只把计数行改成失败提示；总比整页变成错误块好
+      if (countEl && skillCache.data) {
+        countEl.textContent = `刷新失败：${error.message}`;
+        countEl.hidden = false;
+        countEl.classList.add("is-error");
       }
       return;
     }

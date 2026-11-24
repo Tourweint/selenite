@@ -390,13 +390,18 @@ function renderCtxCard(payload) {
   if (!ctxCard || !payload) return;
   const used = payload.used;
   const windowSize = payload.window;
-  const pct = payload.pct ?? ctxPct(used, windowSize);
+  // measured=false = 这条会话还没有真实模型用量（新会话 / 只有播报条目）。
+  // 环照画（空环），卡里如实写「尚未统计」，不编一个 0%。
+  const measured = payload.measured !== false && typeof used === "number" && used > 0;
+  const pct = measured ? (payload.pct ?? ctxPct(used, windowSize)) : 0;
   const breakdown = (payload.breakdown || []).filter((item) => item && item.chars > 0);
   const totalChars = breakdown.reduce((sum, item) => sum + item.chars, 0);
   const shares = totalChars > 0 ? ctxShares(breakdown, totalChars) : [];
 
   const usage = ctxCard.querySelector(".ctx-card-usage");
-  usage.textContent = `${formatTokenCount(used)} / ${formatTokenCount(windowSize)}（${pct}%）`;
+  usage.textContent = measured
+    ? `${formatTokenCount(used)} / ${formatTokenCount(windowSize)}（${pct}%）`
+    : `尚未统计 / ${formatTokenCount(windowSize)}`;
   ctxCard.querySelector(".ctx-bar-fill").style.width = `${Math.max(pct, pct > 0 ? 1.5 : 0)}%`;
 
   const fill = ctxCard.querySelector(".ctx-bar-fill");
@@ -531,7 +536,15 @@ function mountCtxCard() {
   window.addEventListener("scroll", placeCtxCard, true);
 }
 
-async function syncCtxMeter(stillCurrent = () => true) {
+/**
+ * 拉取这个会话的上下文占用并画环（2026-11-24 常显口径）。
+ *
+ * - 只要服务端给得出窗口（window）就画：还没有真实用量（新会话 / 只有 `lifediary.say`
+ *   播报）时画空环，卡里写「尚未统计」，不再整块消失。
+ * - 读取失败不撤已有画面：同一会话的旧数值留着；换会话后第一拉失败才真隐藏。
+ * - 网络抖动重试一次（700ms），服务端 404/500 由下方分支处理，不进重试。
+ */
+async function syncCtxMeter(stillCurrent = () => true, retries = 1) {
   const convId = state.conversationId;
   if (!stillCurrent()) return;
   if (!convId || currentRoute() !== "chat") {
@@ -548,26 +561,48 @@ async function syncCtxMeter(stillCurrent = () => true) {
     const data = await response.json();
     // 请求期间切了会话 / 路由：旧游标不许画到新会话上
     if (!stillCurrent() || state.conversationId !== convId) return;
-    if (!data.used || !data.window) {
+    const windowSize = typeof data.window === "number" && data.window > 0 ? data.window : 0;
+    if (!windowSize) {
+      // 窗口本身读不到（mock / 未配置 / 模型目录缺失）：没有占比可画，维持旧口径整块隐藏。
       el.ctxRing.hidden = true;
       ctxPayload = null;
       closeCtxCard(true);
       return;
     }
-    const pct = Math.min(100, Math.max(0, Math.round((data.used / data.window) * 100)));
+    const measured = typeof data.used === "number" && data.used > 0;
+    const pct = measured
+      ? Math.min(100, Math.max(0, Math.round((data.used / windowSize) * 100)))
+      : 0;
     el.ctxFill.style.strokeDasharray = `${CTX_C}`;
     el.ctxFill.style.strokeDashoffset = `${CTX_C * (1 - pct / 100)}`;
     // 环边不摆数字（2026-11-13 拍板）；2026-11-14 起悬停不再用一句话浮签，
     // 改为「上下文容量」卡片（占比 + 构成 + 进度条，对齐 ZCode）：数字、构成都在卡里。
-    ctxPayload = { ...data, conv: convId, pct };
-    el.ctxRing.setAttribute("aria-label", `上下文已用 ${formatTokenCount(data.used)} / ${formatTokenCount(data.window)}`);
+    ctxPayload = { ...data, used: measured ? data.used : null, window: windowSize, conv: convId, pct, measured };
+    el.ctxRing.setAttribute(
+      "aria-label",
+      measured
+        ? `上下文已用 ${formatTokenCount(data.used)} / ${formatTokenCount(windowSize)}`
+        : `上下文尚未统计（窗口 ${formatTokenCount(windowSize)}）`,
+    );
     if (ctxCard && !ctxCard.hidden) renderCtxCard(ctxPayload);
     // 阈值：<70% 中性灰；70–90% 警示；>90% 错误
-    el.ctxRing.classList.toggle("warn", pct >= 70 && pct <= 90);
-    el.ctxRing.classList.toggle("danger", pct > 90);
+    el.ctxRing.classList.toggle("warn", measured && pct >= 70 && pct <= 90);
+    el.ctxRing.classList.toggle("danger", measured && pct > 90);
+    el.ctxRing.classList.toggle("unmeasured", !measured);
     el.ctxRing.dataset.conv = convId;
     el.ctxRing.hidden = false;
   } catch {
+    if (!stillCurrent() || state.conversationId !== convId) return;
+    if (retries > 0) {
+      setTimeout(() => {
+        if (state.conversationId === convId && currentRoute() === "chat") {
+          void syncCtxMeter(stillCurrent, retries - 1);
+        }
+      }, 700);
+      return;
+    }
+    // 同一会话已经有画好的环：一次读失败不动它，免得看起来"时有时无"。
+    if (el.ctxRing.dataset.conv === convId) return;
     el.ctxRing.hidden = true;
     ctxPayload = null;
     closeCtxCard(true);
