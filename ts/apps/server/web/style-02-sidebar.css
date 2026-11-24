@@ -38,6 +38,12 @@ html[data-sidebar="closed"] .sidebar {
   padding: 14px 10px 10px;
   transition: opacity 220ms cubic-bezier(.165, .84, .44, 1) 80ms;
 }
+/* 图标飞行开着时内容晚一点进场（2026-11-25）：图标在飞（sidebar-morph.js），
+   文字先淡入会和飞过的图标打架；200ms 时图标已基本落到各自分区头，文字再补上。
+   200 + 160 = 360ms，与 .sidebar 的展开时长同一拍，总时长没变。属性由飞行模块置位。 */
+html[data-sidebar-flight="on"] .sidebar-inner {
+  transition: opacity 160ms cubic-bezier(.165, .84, .44, 1) 200ms;
+}
 html[data-sidebar="closed"] .sidebar-inner {
   opacity: 0;
   pointer-events: none;
@@ -66,6 +72,27 @@ html[data-sidebar="closed"] .side-rail {
   transition: opacity 200ms cubic-bezier(0, 0, .2, 1) 120ms;
 }
 
+/* 图标飞行（2026-11-25，逻辑在 sidebar-morph.js）：
+   宽度动画期间轨道层是唯一可见的图标层——锁成收起宽度（否则 align-items:center 会跟着
+   列宽右移）、强制可见、压在内层之上（底栏 z-index:2 会盖住飞过的齿轮）；内层对应图标
+   先藏住占位，落定后同一帧交换。 */
+.sidebar.is-icon-flight .side-rail {
+  right: auto;
+  width: var(--rail);
+  z-index: 3;
+  opacity: 1;
+  pointer-events: none;
+  transition: none;
+}
+.sidebar.is-icon-flight .side-rail .rail-sep { opacity: 0; }
+.sidebar.is-icon-flight .rail-btn { background: transparent !important; }
+.sidebar.is-icon-flight .sidebar-inner .is-flight-hidden { opacity: 0 !important; }
+/* 展开落定：轨道层钉死在不可见，避免恢复普通过渡时在轨道槽位留下一批淡出的重影。 */
+.sidebar.is-icon-flight-end .side-rail {
+  opacity: 0 !important;
+  transition: none !important;
+}
+
 /* 侧栏悬停浮出（peek）2026-11-08 做过、当天退役（用户拍板）：扫过左上角就弹面板压内容，
    且"悬停预览/点击固定"两套逻辑叠着难受。回到点按钮展开/收起的单一形态。 */
 
@@ -90,7 +117,7 @@ html[data-sidebar="closed"] .side-rail {
 }
 .rail-btn:disabled { opacity: .38; cursor: default; }
 /* 22px 短分隔线：用 divider token，浅色主题的 card-border 是透明的 */
-.rail-sep { flex: none; width: 22px; height: 1px; margin: 2px 0; background: var(--divider); }
+.rail-sep { flex: none; width: 22px; height: 1px; margin: 2px 0; background: var(--divider); transition: opacity 140ms ease; }
 .rail-flex { flex: 1; }
 /* 收起态底栏（2026-11-08 用户口径）：状态点退役（「一收起就多一颗点，看着别扭」），
    只留齿轮；服务在线/离线信息挪进齿轮的 data-tip（setStatus 动态更新）。 */

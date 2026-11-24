@@ -16,6 +16,7 @@ import { closeProjectMenu } from "./project-modal.js";
 import { closeRailCards } from "./rail-card.js";
 import { go } from "./route.js";
 import { closeSecMenu, openSecMenu } from "./sec-menu.js";
+import { animateSidebarIcons } from "./sidebar-morph.js";
 import { state } from "./state.js";
 
 /* ── 侧栏折叠 / 首页态 / 思考强度 ─────────────────────── */
@@ -36,6 +37,8 @@ function toggleSidebar() {
   localStorage.setItem("lifediary.sidebar", next);
   el.toggleSidebar.setAttribute("aria-expanded", String(next === "open"));
   applySidebarA11y();
+  // 收起/展开时图标不换元素（2026-11-25，见 sidebar-morph.js）
+  animateSidebarIcons(next === "open");
 }
 
 /* 隐藏的那一层不能是 Tab 焦点（2026-11-06 C 批）：
