@@ -76,7 +76,7 @@ docs/                    基线文档 / 设计方案 / 变更记录
 | [mygo](https://github.com/egoist/mygo) | Go 桌面壳框架 |
 | [MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk) | chancellor 的 MCP 工具通道 |
 
-外雇工人可以是现成的 CLI：Claude Code、Codex、OpenCode、Qoder、CodeBuddy 等（在 `ts/packages/chancellor/src/employee/`）。
+外雇工人可以是现成的 CLI：Claude Code、Codex、OpenCode、Qoder、CodeBuddy、豆包 等（在 `ts/packages/chancellor/src/employee/`）。
 
 ## 文档
 
