@@ -98,8 +98,6 @@ const TOOL_GROUP_OF: Record<string, string> = {
 	remember: "记忆",
 	recall: "记忆",
 	recall_sessions: "记忆",
-	persona_recall: "记忆",
-	persona_write: "记忆",
 	// 派活与任务
 	delegate: "派活与任务",
 	propose_project: "派活与任务",

@@ -15,6 +15,7 @@ const BASE = `http://127.0.0.1:${PORT}`;
 const DIR = join(import.meta.dirname, "..");
 const DB = join(DIR, ".data/chain-probe-agent.sqlite");
 const MEMORY_DB = join(DIR, ".data/chain-probe-memory.db");
+const POOL_DB = join(DIR, ".data/chain-probe-worker-pool");
 
 const apiKey = (process.env.LLM_API_KEY ?? process.env.DASHSCOPE_API_KEY ?? "").trim();
 if (!apiKey) {
@@ -43,7 +44,9 @@ function startServer(): ChildProcess {
 			NODE_OPTIONS: "",
 			CHANCELLOR_ENABLED: "true",
 			AUTONOMY_ENABLED: "false", // 探针显式关（默认已于 2026-11-13 翻成开）
-			CHANCELLOR_EMPLOYEE: process.env.CHANCELLOR_EMPLOYEE?.trim() || "native",
+			CHANCELLOR_EMPLOYEE: process.env.CHANCELLOR_EMPLOYEE?.trim() || "pool",
+			// 池进程隔离到探针自己的目录（2026-11-23）：别和真实服务的 .data/worker-pool 抢库。
+			WORKER_POOL_DB_DIR: POOL_DB,
 			// 这个探针只验「主 agent 会不会派、 chancellor 能不能干完」；
 			// 项目前置由 src/projects.test.ts 单独覆盖，这里不铺工作区。
 			DELEGATION_PROJECT_REQUIRED: "false",
@@ -72,6 +75,7 @@ async function waitForReady(): Promise<void> {
 
 rmSync(DB, { force: true });
 rmSync(MEMORY_DB, { force: true });
+rmSync(POOL_DB, { recursive: true, force: true });
 const server = startServer();
 
 // 默认这个任务要读 6 份设计方案、提炼、再写一份文件——不是一条命令能答的，

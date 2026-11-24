@@ -1,7 +1,7 @@
 /**
  * 派活时注入项目记忆（2026-11-16）。
  *
- * 背景：派出去的 worker（chancellor 的 `native` 与 codebuddy / qoder / claude-code /
+ * 背景：派出去的 worker（chancellor 的本机池 `pool` 与 codebuddy / qoder / claude-code /
  * codex / opencode）读的是同一份 TASK.md，**两边都没有 harness 的记忆引擎**——
  * 所以只能在这份文本里把项目记忆送过去。这是唯一一个"一个方法覆盖两边"的位置。
  *

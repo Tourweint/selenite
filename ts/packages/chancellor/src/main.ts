@@ -161,13 +161,13 @@ async function cmdDoctor(rest: string[]): Promise<number> {
   if (MCP_URL === "" || MCP_TOKEN === "") {
     if (EMPLOYEE === "mcp") {
       process.stderr.write(
-        "✗ CHANCELLOR_EMPLOYEE=mcp 缺少 CHANCELLOR_MCP_URL/CHANCELLOR_MCP_TOKEN；不会静默退回原生雇员\n",
+        "✗ CHANCELLOR_EMPLOYEE=mcp 缺少 CHANCELLOR_MCP_URL/CHANCELLOR_MCP_TOKEN；不会静默退回缺省执行器\n",
       );
       return EXIT_FAIL;
     }
     process.stdout.write(
-      "MCP：未配置（不影响 native / mercenary / qoder-intl / qoder-cn / codebuddy / " +
-        "claude-code / codex / opencode；后三档需各自登录，doctor 不主动探测）\n",
+      "MCP：未配置（不影响 pool / mercenary / qoder-intl / qoder-cn / codebuddy / " +
+        "doubao / claude-code / codex / opencode；外部 CLI 需各自登录，doctor 不主动探测）\n",
     );
     return EXIT_OK;
   }
@@ -517,7 +517,7 @@ function normalizeStatus(raw: string): string {
   return raw === "blocked" ? "needs_you" : raw;
 }
 
-/** 老数据没有 employee；同一单混用多种雇员时显示 native+mercenary。 */
+/** 老数据没有 employee；同一单混用多种雇员时显示 pool+mercenary。 */
 function formatEmployee(raw: string | null | undefined): string {
   if (!raw) return "-";
   const names = raw
@@ -556,13 +556,15 @@ function printUsage(): void {
   CHANCELLOR_QODER_CN_MODEL  Qoder CN 的模型（默认同上）
   CHANCELLOR_CODEBUDDY_BIN   CodeBuddy 可执行文件路径（默认取自 PATH）
   CHANCELLOR_CODEBUDDY_MODEL 传给 CodeBuddy 的模型（默认 deepseek-v4.1-flash）
+  CHANCELLOR_DOUBAO_BIN      豆包 CLI 可执行文件路径（默认取自 PATH）
+  CHANCELLOR_DOUBAO_MODEL    豆包模型 id（默认 person-deepseek-v4-1-flash-261017）
   CHANCELLOR_RUNS_DIR        runs 目录（默认 ./runs）
-  CHANCELLOR_EMPLOYEE        native / mercenary / qoder-intl / qoder-cn / codebuddy / mcp
+  CHANCELLOR_EMPLOYEE        pool / mercenary / qoder-intl / qoder-cn / codebuddy / doubao / mcp
   CHANCELLOR_MCP_URL         MCP 服务器地址（如 http://127.0.0.1:8765/mcp）
   CHANCELLOR_MCP_TOKEN       MCP Bearer 令牌
   CHANCELLOR_MCP_TOOL        指定任务提交工具（Mika 为 mika_run_task）；不给时只有单工具才自动挑
   CHANCELLOR_MCP_TASK_BUDGET_MS  一个 Mika 任务最多等多久（默认 10 分钟）
-  CHANCELLOR_PLAN_TIMEOUT_MS / CHANCELLOR_WORKER_TIMEOUT_MS
+  CHANCELLOR_WORKER_TIMEOUT_MS
   MANAGER_CONTEXT_WINDOW         负责人上下文窗口（默认 131072）
   MANAGER_CONTEXT_ROTATE_RATIO   到窗口这个比例自动换段/压缩（默认 0.60）
   DELEGATION_RESUME_POLICY       崩溃恢复：auto-before-merge（默认）/ always-ask / never

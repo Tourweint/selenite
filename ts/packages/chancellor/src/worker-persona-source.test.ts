@@ -1,11 +1,9 @@
 /**
  * worker 人设注入单测（2026-11-16 通用 worker 配置统一 批1+批2）。
- * 钉住：TASK.md「你是谁」段的三态（注入 / 未注入 / 来源抛错）
- * 与 native 子进程的模型 env 覆盖（留空不覆盖）。
+ * 钉住：TASK.md「你是谁」段的三态（注入 / 未注入 / 来源抛错）。
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { childEnvWithModel } from "./employee/native.ts";
 import { setWorkerPersonaSource } from "./worker-persona-source.ts";
 import { buildWorkerPrompt } from "./worker-prompt.ts";
 import type { PlannedTask } from "./types.ts";
@@ -58,52 +56,42 @@ test("来源抛错 / 空串：不出段、不抛（绝不阻塞派活）", () =>
   }
 });
 
-test("childEnvWithModel：settings.model 非空覆盖 CHANCELLOR_LLM_MODEL；留空/未传不覆盖", () => {
-  const base = { LLM_MODEL: "base-model", OTHER: "1" };
-  assert.deepEqual(childEnvWithModel({ model: "fast-model" }, base), {
-    LLM_MODEL: "base-model",
-    OTHER: "1",
-    CHANCELLOR_LLM_MODEL: "fast-model",
-  });
-  assert.equal(childEnvWithModel({ model: "  " }, base), base, "空白串 = 不覆盖");
-  assert.equal(childEnvWithModel(undefined, base), base);
-  assert.equal(childEnvWithModel({}, base), base);
+test("项目其他文件夹（隔离形态）：TASK.md 列出真实目录并放行三处写入", () => {
+  const prompt = buildWorkerPrompt(
+    planned(),
+    "01-write-notes",
+    [],
+    { workDir: "/tmp/copy", taskDir: "/tmp/task" },
+    [{ label: "手机端", path: "/tmp/phone", role: "extra" }],
+  );
+  assert.ok(prompt.includes("## 项目的其他文件夹"));
+  assert.ok(prompt.includes("不在隔离副本里"));
+  assert.ok(prompt.includes("- 手机端：/tmp/phone"));
+  assert.ok(prompt.includes("只在三处写文件"));
+  assert.ok(prompt.includes("项目副本 `/tmp/copy`"));
+  assert.ok(prompt.includes("任务目录 `/tmp/task`"));
 });
 
-test("childEnvWithModel：模型路由带 baseUrl + key（2026-11-19 模型分工）", () => {
-  const base = { LLM_MODEL: "base-model", PROVIDER_KEY: "sk-test", OTHER: "1" };
-  assert.deepEqual(
-    childEnvWithModel(
-      {
-        model: "work-model",
-        modelRoute: { baseUrl: "https://provider.example/v1", keyEnv: "PROVIDER_KEY" },
-      },
-      base,
-    ),
-    {
-      LLM_MODEL: "base-model",
-      PROVIDER_KEY: "sk-test",
-      OTHER: "1",
-      CHANCELLOR_LLM_MODEL: "work-model",
-      CHANCELLOR_LLM_BASE_URL: "https://provider.example/v1",
-      CHANCELLOR_LLM_API_KEY: "sk-test",
-    },
+test("项目文件夹（非隔离形态含 primary）：列全部根，边界写项目文件夹", () => {
+  const prompt = buildWorkerPrompt(
+    planned(),
+    "01-write-notes",
+    [],
+    { workDir: "/repo", taskDir: "/tmp/task" },
+    [
+      { label: "主仓", path: "/repo", role: "primary" },
+      { label: "手机端", path: "/repo-phone", role: "extra" },
+    ],
   );
-  // keyEnv 没有值：只带地址，不伪造 key（worker-main 自己回落 LLM_API_KEY）。
-  assert.deepEqual(
-    childEnvWithModel(
-      {
-        model: "work-model",
-        modelRoute: { baseUrl: "https://provider.example/v1", keyEnv: "MISSING_KEY" },
-      },
-      base,
-    ),
-    {
-      LLM_MODEL: "base-model",
-      PROVIDER_KEY: "sk-test",
-      OTHER: "1",
-      CHANCELLOR_LLM_MODEL: "work-model",
-      CHANCELLOR_LLM_BASE_URL: "https://provider.example/v1",
-    },
-  );
+  assert.ok(prompt.includes("## 项目的文件夹"));
+  assert.ok(prompt.includes("- 主仓：/repo"));
+  assert.ok(prompt.includes("- 手机端：/repo-phone"));
+  assert.ok(prompt.includes("只在项目的文件夹（上面列出的路径）"));
+  assert.ok(!prompt.includes("只在三处写文件"));
+});
+
+test("没有 roots：TASK.md 不出现项目文件夹段，边界仍是两处", () => {
+  const prompt = buildWorkerPrompt(planned(), "01-x", [], { workDir: "/tmp/copy", taskDir: "/tmp/task" });
+  assert.ok(!prompt.includes("## 项目的"));
+  assert.ok(prompt.includes("只在两处写文件"));
 });

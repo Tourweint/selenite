@@ -1,6 +1,7 @@
 import { Hono, type Context } from "hono";
 import { streamSSE, type SSEStreamingApi } from "hono/streaming";
 import type { QueuedRun, RunQueue, TicketEvent } from "./run-queue.ts";
+import { parsePoolRoots } from "./run-queue.ts";
 
 /**
  * 池进程的 HTTP 面（设计文档 §5.2 IPC 契约；P2 骨架）。
@@ -210,6 +211,17 @@ function parseRun(
 	if (tools !== undefined && (!Array.isArray(tools) || tools.some((item) => typeof item !== "string"))) {
 		return { ok: false, message: "tools 必须是字符串数组" };
 	}
+	const writes = raw.writes;
+	if (
+		writes !== undefined &&
+		(!Array.isArray(writes) ||
+			writes.length > 200 ||
+			writes.some((item) => typeof item !== "string"))
+	) {
+		return { ok: false, message: "writes 必须是字符串数组（最多 200 条）" };
+	}
+	const roots = parsePoolRoots(raw.roots);
+	if (!roots.ok) return { ok: false, message: roots.message };
 	// 供应商 route：只收 baseUrl + keyEnv 两个字符串。**密钥值不走这条路**——
 	// keyEnv 是变量名，池进程从自己的 env 里取。
 	let modelRoute: { baseUrl: string; keyEnv: string } | undefined;
@@ -249,6 +261,8 @@ function parseRun(
 			...(typeof raw.model === "string" ? { model: raw.model } : {}),
 			...(modelRoute ? { modelRoute } : {}),
 			...(Array.isArray(tools) ? { tools: tools as string[] } : {}),
+			...(Array.isArray(writes) ? { writes: writes as string[] } : {}),
+			...(roots.roots ? { roots: roots.roots } : {}),
 		},
 	};
 }

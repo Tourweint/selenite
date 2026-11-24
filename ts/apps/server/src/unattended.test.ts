@@ -79,7 +79,6 @@ test("三态：纯读 allow / 花钱与要批准 skip / 扩权 deny", () => {
 		"delegate",
 		"propose_project",
 		"partner_skill_write",
-		"persona_recall",
 		"ask_user",
 		"set_reminder",
 	]) {

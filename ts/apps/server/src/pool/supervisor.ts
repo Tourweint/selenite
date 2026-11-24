@@ -145,13 +145,22 @@ function envTimeoutNumber(name: string, fallback: number): number {
 	return Number.isFinite(value) ? value : fallback;
 }
 
+/**
+ * 池大小 env：`WORKER_POOL_SIZE` 优先，旧名 `SUPERVISOR_POOL_SIZE` 仍兼容，都没有用 fallback。
+ */
+function envPoolSize(fallback: number): number {
+	const primary = process.env.WORKER_POOL_SIZE;
+	const legacy = process.env.SUPERVISOR_POOL_SIZE;
+	const raw = primary !== undefined && primary.trim() !== "" ? primary : legacy;
+	if (raw === undefined || raw.trim() === "") return fallback;
+	const value = Number(raw);
+	return Number.isFinite(value) && value >= 1 ? Math.floor(value) : fallback;
+}
+
 function resolveConfig(overrides?: Partial<SupervisorConfig>): SupervisorConfig {
 	const base = DEFAULT_SUPERVISOR_CONFIG;
 	return {
-		poolSize: Math.max(
-			1,
-			Math.floor(overrides?.poolSize ?? envNumber("SUPERVISOR_POOL_SIZE", base.poolSize)),
-		),
+		poolSize: Math.max(1, Math.floor(overrides?.poolSize ?? envPoolSize(base.poolSize))),
 		recycleTickets: Math.max(
 			1,
 			Math.floor(overrides?.recycleTickets ?? envNumber("SUPERVISOR_RECYCLE_TICKETS", base.recycleTickets)),
@@ -239,6 +248,8 @@ function toRunBody(run: QueuedRun): Record<string, unknown> {
 	if (run.model !== undefined) body.model = run.model;
 	if (run.modelRoute !== undefined) body.modelRoute = run.modelRoute;
 	if (run.tools !== undefined) body.tools = run.tools;
+	if (run.writes !== undefined) body.writes = run.writes;
+	if (run.roots !== undefined) body.roots = run.roots;
 	return body;
 }
 
@@ -283,7 +294,12 @@ export class WorkerPoolSupervisor implements PoolClient {
 		this.config = resolveConfig(options.config);
 		this.token = randomUUID();
 		this.entryPath = options.entryPath ?? defaultEntryPath();
-		this.dbDir = path.resolve(process.cwd(), options.dbDir ?? ".data/worker-pool");		this.logPath = path.resolve(process.cwd(), options.logPath ?? ".data/worker-pool.jsonl");
+		this.dbDir = path.resolve(
+			process.cwd(),
+			// 探针 / 多实例隔离用（2026-11-23）：默认仍是 .data/worker-pool。
+			options.dbDir ?? process.env.WORKER_POOL_DB_DIR?.trim() ?? ".data/worker-pool",
+		);
+		this.logPath = path.resolve(process.cwd(), options.logPath ?? ".data/worker-pool.jsonl");
 		this.spawnFn = options.spawn ?? ((_index, env) => defaultSpawn(this.entryPath, env));
 		this.fetchFn = options.fetchFn ?? fetch;
 		this.now = options.now ?? Date.now;
@@ -295,8 +311,9 @@ export class WorkerPoolSupervisor implements PoolClient {
 
 	/**
 	 * 这个部署能不能跑池：池进程入口是**源码 `.ts`**（用 `node --import tsx` 起），
-	 * 所以 `dist` 单文件产物里跑不了。入口不存在 = 不能跑，宿主据此**不注入 PoolClient**，
-	 * `createEmployee("pool")` 会回落 native 并告警（不把单子派进一个起不来的进程）。
+	 * 所以 `dist` 单文件产物里跑不了。入口不存在 = 不能跑，宿主据此**不注入 PoolClient**；
+	 * 2026-11-23 native 退役后，这一态下单票会如实报「池执行器未接线」
+	 * （不把单子派进一个起不来的进程）。
 	 */
 	available(): boolean {
 		return existsSync(this.entryPath);

@@ -195,6 +195,8 @@ test("写集匹配：目录通配覆盖子文件，未声明路径不覆盖", ()
 	assert.equal(coveredByAny(["src/a.ts"], "src/a.ts"), true);
 	assert.equal(coveredByAny(["src/a.ts"], "src/b.ts"), false);
 	assert.equal(coveredByAny([], "anything"), false);
+	assert.equal(coveredByAny(["**"], "any/path/file.ts"), true);
+	assert.equal(coveredByAny(["**"], "docs/a.md"), true);
 });
 
 test("调度：依赖感知并行 + 租约等待 + 越权写入判失败", async () => {

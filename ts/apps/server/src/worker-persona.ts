@@ -10,7 +10,7 @@
  *
  * 2026-11-16 通用 worker 配置统一 批2：人设拆成两层——
  * - **人设正文**（`workerPersonaDefault()`，文件里存的就是它）：身份与作风，
- *   worker 会话与派活的 native / 外部 CLI **同吃**（派活侧经 chancellor 注入口
+ *   worker 会话与派活的本机池 / 外部 CLI **同吃**（派活侧经 chancellor 注入口
  *   进 TASK.md「你是谁」段，`WORKER_PERSONA_DISPATCH=false` 回滚）；
  * - **会话工具提示**（`WORKER_PERSONA_CHAT_TOOLS`）：remember / recall / set_reminder
  *   只有 worker 会话有这些工具，派活工人没有，所以不进文件、只在会话注入时拼接。

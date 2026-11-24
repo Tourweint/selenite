@@ -10,7 +10,7 @@ import type { Employee, EmployeeOutcome, EmployeeTask } from "./index.ts";
  *
  * chancellor 不许 import 宿主：宿主在启动时通过 `setPoolClient()` 把 supervisor 注入进来
  * （同 `setWorkerPersonaSource` / `setInternalAsk` 先例）。没注入 = 这一档不可用，
- * `createEmployee("pool")` 会抛一句人话，而不是静默退回 native。
+ * `run()` 返回结构化失败（2026-11-23 起不再静默退回已退役的 native）。
  */
 
 export interface PoolClientRunResult {
@@ -41,6 +41,13 @@ export interface PoolClient {
        * 不传 = 池默认五件全开（旧行为）。
        */
       tools?: string[];
+      /** 本任务声明的可写路径（项目内相对路径）；不传 = 池按只读渲染边界。 */
+      writes?: string[];
+      /**
+       * 项目其他文件夹（2026-11-24）：主文件夹之外的根，共享读写真实目录。
+       * 隔离形态下不含 primary（primary 以 workDir 副本呈现）。
+       */
+      projectRoots?: { label: string; path: string; role: "primary" | "extra" }[];
     },
     onEvent: (event: PoolClientEvent) => void,
     signal?: AbortSignal,
@@ -111,7 +118,7 @@ function routeFromEnv(): { baseUrl: string; keyEnv: string } | undefined {
   return baseUrl && keyEnv ? { baseUrl, keyEnv } : undefined;
 }
 
-/** `<runsRoot>/<ticketId>/<NN>-<slug>` 布局 → 单号（与 native.ts 的 ticketIdOfTask 同口径）。 */
+/** `<runsRoot>/<ticketId>/<NN>-<slug>` 布局 → 单号（任务目录的固定布局）。 */
 export function ticketIdOfTask(task: EmployeeTask): string {
   return path.basename(path.dirname(path.resolve(task.dir))) || "";
 }
@@ -158,6 +165,16 @@ export function createPoolEmployee(): Employee {
             ...(model ? { model } : {}),
             ...(route ? { modelRoute: route } : {}),
             ...(tools ? { tools } : {}),
+            ...(task.writes ? { writes: [...task.writes] } : {}),
+            ...(task.projectRoots?.length
+              ? {
+                  projectRoots: task.projectRoots.map((root) => ({
+                    label: root.label,
+                    path: root.path,
+                    role: root.role,
+                  })),
+                }
+              : {}),
           },
           (event) => {
             if (event.type !== "escalation") return;

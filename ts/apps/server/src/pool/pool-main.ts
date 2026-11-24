@@ -10,14 +10,14 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { serve } from "@hono/node-server";
 
-import { RunQueue, type QueuedRun, type RunHandle, type RunResult, type TicketEvent } from "./run-queue.ts";
+import { RunQueue, type PoolProjectRoot, type QueuedRun, type RunHandle, type RunResult, type TicketEvent } from "./run-queue.ts";
 import { createPoolServer } from "./pool-server.ts";
-import { buildPoolRegistry } from "./pool-tools.ts";
+import { buildPoolRegistry, poolBoundaryDirs } from "./pool-tools.ts";
 import { buildTaskProfile } from "./task-profile.ts";
 import { bashTimeoutSeconds, poolEscalationWaitMs, poolHarnessSettings } from "./pool-settings.ts";
 import { createPoolModels, configurePoolModel, poolFauxResponseFactory } from "./pool-models.ts";
 import { readWorkerPersona } from "../worker-persona.ts";
-// 续行预算 / 无进展保险丝 / REPORT 状态解析：与 native worker 共用同一套纯函数
+// 续行预算 / 无进展保险丝 / REPORT 状态解析：与 worker-main 共用同一套纯函数
 // （`worker-continue.ts` 是 chancellor 的零 IO 模块，宿主 import 它不破依赖方向）。
 import {
 	NO_PROGRESS_FUSE,
@@ -50,6 +50,8 @@ interface CurrentTicket {
 	ticketId: string;
 	dir: string;
 	workDir: string;
+	/** 项目文件夹（2026-11-24）：额外根共享读写真实目录；缺省 = 旧行为。 */
+	roots: PoolProjectRoot[];
 	emit: (event: TicketEvent) => void;
 	/** escalate 被调用时打个标记：主循环据此进入"等答复"，不接续轮。 */
 	noteEscalation: () => void;
@@ -74,7 +76,8 @@ async function main(): Promise<void> {
 	let currentContextWindow = 131_072;
 
 	const registry = buildPoolRegistry({
-		currentDirs: () => (current ? [current.dir, current.workDir] : []),
+		currentDirs: () =>
+			current ? poolBoundaryDirs(current.dir, current.workDir, current.roots) : [],
 		bashTimeoutSeconds: bashTimeoutSeconds(process.env),
 		submitEscalation: (input) => {
 			if (!current) return { ok: false, message: "当前没有在跑的票" };
@@ -82,7 +85,7 @@ async function main(): Promise<void> {
 				type: "escalation",
 				escalation: { ...input, escalationId: randomUUID() },
 			});
-			// 主循环看到这个标记就停在"等答复"，不自动接续轮（与 native worker 同语义）。
+			// 主循环看到这个标记就停在"等答复"，不自动接续轮（与 worker-main 同语义）。
 			current.noteEscalation();
 			return { ok: true };
 		},
@@ -112,13 +115,14 @@ async function main(): Promise<void> {
 
 	const runTicket = async (run: QueuedRun, handle: RunHandle): Promise<RunResult> => {
 		// 上报等待：escalate 之后这一票不接续轮，等答复（say）到了再继续。
-		// 与 native worker 的 stdin 等待同语义，只是通道换成 HTTP/SSE。
+		// 与旧 stdin 等待通道同语义，只是通道换成 HTTP/SSE。
 		let escalationPending = false;
 		let wakeEscalation: (() => void) | null = null;
 		current = {
 			ticketId: run.ticketId,
 			dir: run.dir,
 			workDir: run.workDir,
+			roots: run.roots ?? [],
 			emit: handle.emit,
 			noteEscalation: () => {
 				escalationPending = true;
@@ -147,6 +151,8 @@ async function main(): Promise<void> {
 				instruction: run.instruction,
 				doneWhen: run.doneWhen,
 				...(run.upstream ? { upstream: run.upstream } : {}),
+				...(run.writes ? { writes: run.writes } : {}),
+				...(run.roots?.length ? { roots: run.roots } : {}),
 				taskDir: run.dir,
 				workDir: run.workDir,
 			});
@@ -214,7 +220,7 @@ async function main(): Promise<void> {
 
 			await first;
 
-			// ── 续行主循环（与 native worker 同口径，2026-11-22 P6）─────────
+			// ── 续行主循环（与 worker-main 同口径，2026-11-22 P6）─────────
 			// 上报等待中：不接续轮；答复（say）或 abort 唤醒后再判断。
 			// 2026-11-23 M4：等待有上限（默认 10 分钟）。超时把 REPORT 改 blocked 后正常退场，
 			// 槽位让给下一票；人回来在任务线程回话走宿主既有 resume 链路续跑。

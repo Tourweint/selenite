@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -14,8 +14,12 @@ import {
 } from "../../../packages/chancellor/src/employee/external.ts";
 import {
 	buildQoderInvocation,
+	createQoderEmployee,
+	qoderPermissionMode,
 	resolveQoderBinary,
+	type QoderCall,
 } from "../../../packages/chancellor/src/employee/qoder.ts";
+import { profileEnv, resolveProfile } from "../../../packages/chancellor/src/config.ts";
 
 function call(prompt: string, tools: "none" | "all" = "all") {
 	return {
@@ -27,7 +31,12 @@ function call(prompt: string, tools: "none" | "all" = "all") {
 	};
 }
 
-test("Qoder 写任务：bypass_permissions + json + 模型 + 40 轮上限", () => {
+function permissionModeOf(args: string[]): string | undefined {
+	const index = args.indexOf("--permission-mode");
+	return index >= 0 ? args[index + 1] : undefined;
+}
+
+test("Qoder 写任务（不传权限档）：bypass_permissions + json + 模型 + 40 轮上限", () => {
 	const invocation = buildQoderInvocation(call("写个文件"), "DeepSeek-Flash");
 	assert.equal(invocation.stdin, null);
 	assert.deepEqual(invocation.args, [
@@ -44,6 +53,55 @@ test("Qoder 写任务：bypass_permissions + json + 模型 + 40 轮上限", () =
 		"--max-turns",
 		"40",
 	]);
+});
+
+test("Qoder 权限三档 → 原生 --permission-mode（2026-11-23 实测映射）", () => {
+	assert.equal(qoderPermissionMode("read"), "dont_ask");
+	assert.equal(qoderPermissionMode("edit"), "accept_edits");
+	assert.equal(qoderPermissionMode("full"), "bypass_permissions");
+	for (const permission of ["read", "edit", "full"] as const) {
+		const invocation = buildQoderInvocation(
+			{ ...call("干活"), permission },
+			"DeepSeek-Flash",
+		);
+		assert.equal(
+			permissionModeOf(invocation.args),
+			qoderPermissionMode(permission),
+			`${permission} 档要落到自己的原生档名`,
+		);
+	}
+});
+
+test("Qoder 纯问答固定 dont_ask，不吃权限档（tools:none）", () => {
+	for (const permission of ["read", "edit", "full"] as const) {
+		const invocation = buildQoderInvocation(
+			{ ...call("这是什么", "none"), permission },
+			"DeepSeek-Flash",
+		);
+		assert.equal(permissionModeOf(invocation.args), "dont_ask");
+	}
+});
+
+test("resolveProfile / profileEnv：Qoder 国际与国内都带权限档", () => {
+	assert.equal(resolveProfile("qoder-intl", { permission: "read" }).permission, "read");
+	assert.equal(resolveProfile("mercenary", { permission: "edit" }).permission, "edit");
+	assert.equal(resolveProfile("qoder-cn", { permission: "full" }).permission, "full");
+	// 没给权限档 = env 缺省 full（旧配置行为不变）。
+	assert.equal(resolveProfile("qoder-intl", {}).permission, "full");
+	assert.equal(resolveProfile("qoder-cn", {}).permission, "full");
+
+	assert.deepEqual(
+		profileEnv("qoder-intl", { model: "m", permission: "edit" }),
+		{ CHANCELLOR_MODEL: "m", CHANCELLOR_QODER_PERMISSION: "edit" },
+	);
+	assert.deepEqual(
+		profileEnv("mercenary", { permission: "read" }),
+		{ CHANCELLOR_QODER_PERMISSION: "read" },
+	);
+	assert.deepEqual(
+		profileEnv("qoder-cn", { model: "m", permission: "read" }),
+		{ CHANCELLOR_QODER_CN_MODEL: "m", CHANCELLOR_QODER_CN_PERMISSION: "read" },
+	);
 });
 
 test("Qoder 纯问答：dont_ask + 空 tools + 6 轮上限", () => {
@@ -64,6 +122,44 @@ test("Qoder 纯问答：dont_ask + 空 tools + 6 轮上限", () => {
 		"--max-turns",
 		"6",
 	]);
+});
+
+test("Qoder employee：settings 下传权限档；旧配置没权限档 = full", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "qoder-employee-"));
+	writeFileSync(join(dir, "TASK.md"), "TASK-BODY");
+	writeFileSync(join(dir, "REPORT.md"), "DONE");
+	const calls: QoderCall[] = [];
+	const employee = createQoderEmployee("qoder-intl", async (call) => {
+		calls.push(call);
+		return {
+			ok: true,
+			result: "ok",
+			sessionId: "s-1",
+			isError: false,
+			permissionDenials: 0,
+			exitCode: 0,
+			timedOut: false,
+			aborted: false,
+			stderrTail: "",
+			error: null,
+		};
+	});
+	try {
+		const base = {
+			instruction: "do it",
+			doneWhen: "REPORT.md",
+			upstream: "",
+			dir,
+		};
+		await employee.run({ ...base, settings: { permission: "read" as const } });
+		assert.equal(calls[0].permission, "read");
+		assert.equal(calls[0].tools, "all");
+
+		await employee.run(base);
+		assert.equal(calls[1].permission, "full");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
 });
 
 test("Qoder 长提示走 stdin", () => {

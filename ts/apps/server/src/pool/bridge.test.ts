@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import { test } from "node:test";
 
 import { startPoolBridge, type BridgePoolClient } from "./bridge.ts";
@@ -11,6 +12,8 @@ function runOf(ticketId: string): QueuedRun {
 		workDir: `C:\\tmp\\${ticketId}`,
 		instruction: "干一件小事",
 		doneWhen: "写完 REPORT.md",
+		writes: ["src/a.ts"],
+		roots: [{ label: "手机端", path: path.resolve("tmp", `${ticketId}-phone`), role: "extra" }],
 	};
 }
 
@@ -29,8 +32,10 @@ async function readEvents(response: Response): Promise<TicketEvent[]> {
 
 test("池桥：鉴权、收票、SSE 回放与 settled", async () => {
 	const events: string[] = [];
+	const seen: QueuedRun[] = [];
 	const client: BridgePoolClient = {
-		async run(_run, onEvent) {
+		async run(run, onEvent) {
+			seen.push(run);
 			onEvent({ type: "progress", message: "开工" });
 			onEvent({
 				type: "escalation",
@@ -72,6 +77,10 @@ test("池桥：鉴权、收票、SSE 回放与 settled", async () => {
 			body: JSON.stringify(runOf("t-1")),
 		});
 		assert.equal(posted.status, 202);
+		assert.deepEqual(seen[0]?.writes, ["src/a.ts"]);
+		assert.deepEqual(seen[0]?.roots, [
+			{ label: "手机端", path: path.resolve("tmp", "t-1-phone"), role: "extra" },
+		]);
 
 		const stream = await fetch(`${bridge.endpoint}/run/t-1/events`, {
 			headers: { authorization: `Bearer ${bridge.token}` },
@@ -139,6 +148,15 @@ test("池桥：重复票 409；缺字段 400", async () => {
 			body: JSON.stringify({ ticketId: "t-3" }),
 		});
 		assert.equal(bad.status, 400);
+		const badRoots = await fetch(`${bridge.endpoint}/run`, {
+			method: "POST",
+			headers,
+			body: JSON.stringify({
+				...runOf("t-4"),
+				roots: [{ label: "x", path: "relative/dir", role: "extra" }],
+			}),
+		});
+		assert.equal(badRoots.status, 400);
 	} finally {
 		await bridge.close();
 	}

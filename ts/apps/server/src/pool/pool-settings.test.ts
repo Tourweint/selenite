@@ -64,6 +64,14 @@ test("POOL_MAX_TURNS 常量存在且等于缺省；poolMaxTurns 按 env 算", ()
 	assert.equal(poolMaxTurns({ AGENT_MAX_TURNS: "-1" }), 100, "<0 回落 100");
 	// 0 是合法取值 = "不限回合"，与宿主 turn-gate.ts 同语义
 	assert.equal(poolMaxTurns({ AGENT_MAX_TURNS: "0" }), 0);
+	// 2026-11-23：池单独一条覆盖；不设仍沿用 AGENT_MAX_TURNS（探针压宿主 faux 不影响池）。
+	assert.equal(poolMaxTurns({ WORKER_POOL_MAX_TURNS: "100", AGENT_MAX_TURNS: "1" }), 100);
+	assert.equal(poolMaxTurns({ WORKER_POOL_MAX_TURNS: "7" }), 7);
+	assert.equal(
+		poolMaxTurns({ WORKER_POOL_MAX_TURNS: "abc", AGENT_MAX_TURNS: "1" }),
+		100,
+		"池的覆盖值非法也回落 100，不偷偷用宿主的 1",
+	);
 });
 
 test("bashTimeoutSeconds 与宿主 reliability.ts 同判据", () => {

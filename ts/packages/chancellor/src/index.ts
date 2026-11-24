@@ -3,15 +3,17 @@ import path from "node:path";
 import process from "node:process";
 import { assertMcpConfigured, DELEGATION_RESUME_POLICY, EMPLOYEE, MAX_TASKS_DEFAULT, resolveProfile } from "./config.ts";
 import { decideResume, parseWorkerReport, readSessionId, taskDirName } from "./dispatch.ts";
-import { assertPhoneConfigured, capabilitiesOf } from "./employee/index.ts";
+import { assertPhoneConfigured } from "./employee/index.ts";
+import { formatStatsLine, mergeToolStats, stepLineOf } from "./employee/steps.ts";
+import type { CliStepEvent, ToolStats } from "./employee/steps.ts";
 import { runManager, type ManagerOutcome } from "./employee/manager.ts";
 import { intake } from "./intake.ts";
 import { ensureManager, listManagers, readManagerMeta } from "./manager/registry.ts";
 import { acquireAdmission, type AdmissionLease } from "./admission.ts";
 import { acquireDomain, type LaneLease } from "./lane.ts";
-import { classifyRunFailure } from "./failure-class.ts";
+import { classifyRunFailure, failureIsRetryable } from "./failure-class.ts";
 import { isPidAlive, releaseStaleLeases } from "./lease.ts";
-import { planTicket } from "./plan.ts";
+import { resolveRequestTasks } from "./plan.ts";
 import {
   renderAbortedLine,
   renderAttentionLine,
@@ -44,7 +46,9 @@ import type {
   PlannedTask,
   PlannedTaskInfo,
   ProjectRef,
+  ProjectRootRef,
   Task,
+  TaskIsolation,
   TaskRun,
   TaskStatus,
   Ticket,
@@ -179,6 +183,10 @@ export async function runChancellor(
       ...(typeof req.workDir === "string" && req.workDir.trim() !== ""
         ? { workDir: req.workDir.trim() }
         : {}),
+      // 按单隔离（2026-11-23）：auto / 不传不落键，跟随全局 CHANCELLOR_TASK_ISOLATION。
+      ...(ticketIsolationOf(req.isolation)
+        ? { isolation: ticketIsolationOf(req.isolation) }
+        : {}),
     },
     useManager ? "manager" : employee,
     idempotencyKey || undefined,
@@ -271,14 +279,34 @@ export async function runChancellor(
   /** 一轮 = 拆单 → 执行 → 收口（2026-11-19 起没有验收 / 返工）。 */
   const runRound = async (roundRequirement: string): Promise<TicketResult> => {
     store.setTicketStatus(ticket, "planning");
-    // 修复轮的 prompt 只给规划器看；ticket.prompt 保留原始要求（详情不换正文）。
-    const planResult = await planTicket(
-      roundRequirement === ticket.prompt ? ticket : { ...ticket, prompt: roundRequirement },
+    // 2026-11-23 调度简化：不再有拆单器。调用方（总管 / 领域经理）直接给 tasks；
+    // 没给（前端直派 / 手机 / 远端设备）退化成整单一个任务。修复轮不再重拆。
+    const resolved = resolveRequestTasks({
+      raw: req.tasks,
       maxTasks,
-      signal,
-      capabilitiesOf(employee),
+      requirement: roundRequirement,
+      ...(ticket.steps ? { steps: ticket.steps } : {}),
       employee,
-    );
+    });
+    const planResult = resolved.ok
+      ? {
+          ok: true as const,
+          tasks: resolved.tasks,
+          droppedDeps: resolved.droppedDeps,
+          attempts: [],
+          error: null,
+          raw: "",
+          source: resolved.source,
+        }
+      : {
+          ok: false as const,
+          tasks: [],
+          droppedDeps: [],
+          attempts: [],
+          error: resolved.error,
+          raw: "",
+          source: "dispatcher" as const,
+        };
     writeJson(path.join(ticketDir, "plan.json"), {
       ticket: ticket.id,
       employee,
@@ -287,6 +315,7 @@ export async function runChancellor(
       droppedDeps: planResult.droppedDeps,
       error: planResult.error,
       attempts: planResult.attempts,
+      source: planResult.source,
       created_at: new Date().toISOString(),
     });
 
@@ -351,6 +380,8 @@ export async function runChancellor(
       signal,
       employeeKind: employee,
       ...(storedProfile ? { employeeProfile: storedProfile } : {}),
+      // 按单隔离（2026-11-23）：建单快照优先；缺省 = scheduler 里的全局缺省。
+      ...(ticket.options.isolation ? { isolation: ticket.options.isolation } : {}),
       emit: (event) => emit({ ...event, ticketId: ticket.id }),
       // 决策上报（2026-11-19 批2）：worker 跑动中的 escalation 原样包成事件推给宿主；
       // 路由 / 限流 / 答复都在宿主侧，chancellor 只透传。
@@ -359,6 +390,16 @@ export async function runChancellor(
           type: "escalation",
           ticketId: ticket.id,
           escalation,
+        }),
+      // 流式步骤（2026-11-23）：只进任务事件 / 任务中心，不拼进任何模型上下文。
+      onStep: (seq, slug, step: CliStepEvent) =>
+        emit({
+          type: "step",
+          ticketId: ticket.id,
+          seq,
+          slug,
+          message: stepLineOf(step),
+          step,
         }),
     });
 
@@ -436,6 +477,25 @@ async function finishRuns(ctx: FinishRunsContext): Promise<TicketResult> {
     };
   });
   const ticketAttention = resultTasks.find((item) => item.attention)?.attention;
+  // 终止回执（2026-11-23）：把失败/中止的结构化信息交给派活人，不再只有一句话。
+  const timedOut = runs.some((run) => run.timedOut);
+  const failedRun = runs.find((run) => classifyRun(run) === "failed") ??
+    runs.find((run) => run.failureClass && run.failureClass !== "unknown");
+  const failureClass = failedRun?.failureClass ?? "unknown";
+  const failure = aborted
+    ? {
+        class: "aborted",
+        retryable: false,
+        canceled: true,
+        ...(timedOut ? { timedOut: true } : {}),
+      }
+    : failedRun
+      ? {
+          class: failureClass,
+          retryable: failureIsRetryable(failureClass),
+          ...(timedOut ? { timedOut: true } : {}),
+        }
+      : undefined;
 
   if (decision.kind === "aborted") {
     ticket.stage = "aborted";
@@ -448,6 +508,7 @@ async function finishRuns(ctx: FinishRunsContext): Promise<TicketResult> {
       line,
       tasks: resultTasks,
       ...(ticketAttention ? { attention: ticketAttention } : {}),
+      ...(failure ? { failure } : {}),
     };
   }
 
@@ -490,6 +551,20 @@ async function finishRuns(ctx: FinishRunsContext): Promise<TicketResult> {
     error = null;
   }
 
+  // 过程统计（2026-11-23 流式事件 D1）：结果回写最多加一行，例如
+  // 「（过程：读了 3 个文件、跑了 1 条命令、改了 2 个文件；1 次失败）」。
+  // 只统计工具事件，不含任何结果全文；没采集到事件就不加。
+  if (status !== "idle") {
+    const statsLine = formatStatsLine(
+      mergeToolStats(
+        runs
+          .map((run) => run.toolStats)
+          .filter((stats): stats is ToolStats => stats !== undefined),
+      ),
+    );
+    if (statsLine) line = `${line}${statsLine}`;
+  }
+
   ticket.stage = stage;
   store.setTicketStatus(ticket, status, error);
   emitFor("finished", { message: line });
@@ -499,6 +574,7 @@ async function finishRuns(ctx: FinishRunsContext): Promise<TicketResult> {
     line,
     tasks: resultTasks,
     ...(ticketAttention ? { attention: ticketAttention } : {}),
+    ...(failure ? { failure } : {}),
   };
 }
 
@@ -897,6 +973,8 @@ async function autoResumeTicket(
       project: ticket.options.project,
       employeeKind: kind,
       ...(profile ? { employeeProfile: profile } : {}),
+      // 崩溃恢复沿用原单快照（2026-11-23）：不跟当前全局缺省走。
+      ...(ticket.options.isolation ? { isolation: ticket.options.isolation } : {}),
       // 自动续跑没有宿主连接，但进度仍要落盘：重启后的看板才知道它跑到哪。
       emit: (event) => {
         store.saveTicketProgress(ticket, progressOfEvent(event));
@@ -1065,6 +1143,8 @@ async function resumeTicket(
       signal,
       employeeKind: kind,
       ...(profile ? { employeeProfile: profile } : {}),
+      // 续跑沿用原单的隔离快照（2026-11-23）：worktree 单接着用副本，direct 单不再起。
+      ...(ticket.options.isolation ? { isolation: ticket.options.isolation } : {}),
       completedRuns: runs,
       resumeAnswer: answer,
       // 续跑的单也要能上报（批2）：同一张单的宿主连接还在。
@@ -1073,6 +1153,16 @@ async function resumeTicket(
           type: "escalation",
           ticketId: ticket.id,
           escalation,
+        }),
+      // 续跑也要能看到过程（2026-11-23 流式事件）。
+      onStep: (seq, slug, step: CliStepEvent) =>
+        emit({
+          type: "step",
+          ticketId: ticket.id,
+          seq,
+          slug,
+          message: stepLineOf(step),
+          step,
         }),
       ...(previousInflight?.worktrees.find((item) => item.seq === row.seq)
         ? {
@@ -1197,10 +1287,12 @@ function runFromDisk(
 }
 
 function workerKindOf(kind: string | undefined): WorkerKind | null {
+  // 2026-11-23：native（每票一个裸子进程）退役；历史 ticket.json 里的值映射到 pool，
+  // 避免老单恢复时被当前 CHANCELLOR_EMPLOYEE（可能已是外部 CLI）带走。
+  if (kind === "native") return "pool";
   // 2026-11-22：池执行器也是宿主可点名的 worker；漏掉这一档会让 req.employee="pool"
   // 静默回落 EMPLOYEE（实测：前端直派任务全跑成 native）。
-  return kind === "native" ||
-    kind === "pool" ||
+  return kind === "pool" ||
     kind === "mercenary" ||
     kind === "codebuddy" ||
     kind === "qoder-intl" ||
@@ -1208,6 +1300,7 @@ function workerKindOf(kind: string | undefined): WorkerKind | null {
     kind === "claude-code" ||
     kind === "codex" ||
     kind === "opencode" ||
+    kind === "doubao" ||
     kind === "mcp" ||
     kind === "phone"
     ? kind
@@ -1455,12 +1548,18 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, rounded));
 }
 
+/** 按单隔离只认落到快照的两个值；auto / 非法值一律当没传（走全局缺省）。 */
+function ticketIsolationOf(raw: unknown): TaskIsolation | undefined {
+  return raw === "worktree" || raw === "direct" ? raw : undefined;
+}
+
 /** 总管下发的项目只收敛形状：id/rootPath 缺一不可，其余字段能省就省。 */
 function normalizeProject(raw: ProjectRef | undefined): ProjectRef | undefined {
   if (raw === null || typeof raw !== "object") return undefined;
   const id = typeof raw.id === "string" ? raw.id.trim() : "";
   const rootPath = typeof raw.rootPath === "string" ? raw.rootPath.trim() : "";
   if (!id || !rootPath) return undefined;
+  const roots = normalizeProjectRoots(raw.roots);
   return {
     id,
     name: typeof raw.name === "string" ? raw.name.trim() : "",
@@ -1472,5 +1571,33 @@ function normalizeProject(raw: ProjectRef | undefined): ProjectRef | undefined {
     ...(typeof raw.dataDir === "string" && raw.dataDir.trim() !== ""
       ? { dataDir: raw.dataDir.trim() }
       : {}),
+    ...(roots ? { roots } : {}),
   };
+}
+
+/**
+ * 项目文件夹列表的收敛（2026-11-24）：只收绝对路径；label 缺省用目录名；role 只认两值。
+ * 服务端已经校验过，这里只是防旧客户端 / 手写 ticket 塞进垃圾字段。
+ */
+function normalizeProjectRoots(raw: unknown): ProjectRootRef[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const roots: ProjectRootRef[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const row = item as Record<string, unknown>;
+    const rootPath = typeof row.path === "string" ? row.path.trim() : "";
+    if (!rootPath || !path.isAbsolute(rootPath)) continue;
+    const id = typeof row.id === "string" && row.id.trim() ? row.id.trim() : undefined;
+    const label =
+      typeof row.label === "string" && row.label.trim()
+        ? row.label.trim()
+        : path.basename(rootPath);
+    roots.push({
+      ...(id ? { id } : {}),
+      label,
+      path: rootPath,
+      role: row.role === "primary" ? "primary" : "extra",
+    });
+  }
+  return roots.length > 0 ? roots : undefined;
 }

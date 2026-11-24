@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
 
 import type { QueuedRun, TicketEvent } from "./run-queue.ts";
+import { parsePoolRoots } from "./run-queue.ts";
 
 /**
  * 宿主池桥（2026-11-22「底层工人统一进池」）：把宿主 supervisor 包成一个
@@ -333,6 +334,17 @@ function parseRun(body: unknown): { ok: true; run: QueuedRun } | { ok: false; me
   if (tools !== undefined && (!Array.isArray(tools) || tools.some((item) => typeof item !== "string"))) {
     return { ok: false, message: "tools 必须是字符串数组" };
   }
+  const writes = raw.writes;
+  if (
+    writes !== undefined &&
+    (!Array.isArray(writes) ||
+      writes.length > 200 ||
+      writes.some((item) => typeof item !== "string"))
+  ) {
+    return { ok: false, message: "writes 必须是字符串数组（最多 200 条）" };
+  }
+  const roots = parsePoolRoots(raw.roots);
+  if (!roots.ok) return { ok: false, message: roots.message };
   let modelRoute: { baseUrl: string; keyEnv: string } | undefined;
   if (raw.modelRoute !== undefined) {
     const route = raw.modelRoute;
@@ -362,6 +374,8 @@ function parseRun(body: unknown): { ok: true; run: QueuedRun } | { ok: false; me
       ...(typeof raw.model === "string" ? { model: raw.model } : {}),
       ...(modelRoute ? { modelRoute } : {}),
       ...(Array.isArray(tools) ? { tools: tools as string[] } : {}),
+      ...(Array.isArray(writes) ? { writes: writes as string[] } : {}),
+      ...(roots.roots ? { roots: roots.roots } : {}),
     },
   };
 }

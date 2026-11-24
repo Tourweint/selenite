@@ -22,6 +22,8 @@ export function normalizeProjectPath(raw: string): string | null {
  * 支持精确路径与目录通配（`docs/**` 覆盖 `docs/a.md`，但不覆盖 `docs` 本身）。
  */
 export function writeCovers(declared: string, changed: string): boolean {
+  // `**` 是“整项目”（2026-11-23 无计划单兜底用），租约按字面量 `"**"` 建锁，两个 `**` 任务之间会串行。
+  if (declared === "**") return true;
   if (declared === changed) return true;
   if (declared.endsWith("/**")) {
     const prefix = declared.slice(0, -3).replace(/\/+$/, "");

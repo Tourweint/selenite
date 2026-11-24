@@ -11,9 +11,9 @@
  *   4. 改 B 的 baseUrl → 同进程下一轮即新地址；
  *   5. 改 B 的 keyEnv → 下一轮 Authorization 变新值（请求前一刻读 env）；
  *   6. hasKey:false 的供应商：投影正确；选中后请求报正常错误事件、服务不崩；
- *   7. 删除保护与旧会话回退：默认 / 当前选中 400；删非默认后消失；旧会话回退默认供应商；
- *   8. 旧 `{model}` 与旧 runtime.json 裸 id 都落默认供应商；
- *   9. 播种矩阵：env → 文件；重启改 env → 文件为准；删文件 → env 为准；PROVIDERS_CONFIG=false → env 为准；
+ *   7. 删除不拦「在用」；旧会话引用被删供应商 → 回退默认供应商；
+ *   8. 旧 `{model}` 与旧 runtime.json 裸 id 都落默认供应商；默认供应商也能删（默认顺延）；
+ *   9. 播种矩阵：env → 文件；重启改 env → 文件为准；删文件 → env 为准；删到零供应商 → mock；PROVIDERS_CONFIG=false → env 为准；
  *  10. faux：CRUD 可用、POST /model 400、不播种、不污染真实 .data。
  * 另断言：派生变体 id 不漏到上游 body.model。
  *
@@ -510,15 +510,18 @@ try {
 	const alive = await fetch(`${BASE}/healthz`);
 	check(alive.ok, "服务还活着");
 
-	// ── 7. 删除保护与旧会话回退 ────────────────────────────
-	console.log("\n· 7. 删除保护 / 删非默认 / 旧会话回退");
-	const delDefault = await deletePath("/api/v1/agent/providers/bailian");
-	check(delDefault.status === 400 && delDefault.json.error === "provider_is_default", "默认供应商不能删", JSON.stringify(delDefault.json));
+	// ── 7. 删除不再拦「在用」；旧会话回退 ──────────────────
+	console.log("\n· 7. 删除在用供应商 / 旧会话回退");
+	// §6 刚把全局模型选到 C：2026-11-23 起直接删，不再要求先切走
 	const delCurrent = await deletePath("/api/v1/agent/providers/c");
-	check(delCurrent.status === 400 && delCurrent.json.error === "provider_in_use", "当前选中的供应商不能删", JSON.stringify(delCurrent.json));
-	await postJson("/api/v1/agent/model", { providerId: "bailian", modelId: MODEL });
-	const delC = await deletePath("/api/v1/agent/providers/c");
-	check(delC.status === 200, "删掉非默认 / 非当前供应商", String(delC.status));
+	check(delCurrent.status === 200, "当前选中的供应商也能删", String(delCurrent.status));
+	const afterDelCurrent = await getJson("/api/v1/agent/model");
+	const currentAfterDel = afterDelCurrent.json.current as { providerId?: string; modelId?: string } | undefined;
+	check(
+		currentAfterDel?.providerId === "bailian" && currentAfterDel.modelId === MODEL,
+		"当前模型回落到默认供应商 A",
+		JSON.stringify(currentAfterDel),
+	);
 	const afterDel = await getJson("/api/v1/agent/providers");
 	const idsAfterDel = ((afterDel.json.providers ?? []) as { id: string }[]).map((item) => item.id);
 	check(!idsAfterDel.includes("c"), "供应商列表里已消失", idsAfterDel.join("、"));
@@ -627,6 +630,48 @@ try {
 		JSON.stringify(globalFinal),
 	);
 
+	// ── 8.6 默认供应商也能删（2026-11-23）───────────────────
+	console.log("\n· 8.6 默认供应商可删：默认顺延到下一家还有模型的");
+	const beforeDefaultDel = await getJson("/api/v1/agent/providers");
+	const defaultRow = ((beforeDefaultDel.json.providers ?? []) as { id: string; isDefault?: boolean }[]).find(
+		(item) => item.isDefault,
+	);
+	check(defaultRow?.id === "bailian", "删除前默认是 A", JSON.stringify(defaultRow));
+	const delDefault = await deletePath("/api/v1/agent/providers/bailian");
+	check(delDefault.status === 200, "默认供应商也能删", JSON.stringify(delDefault.json));
+	const afterDefaultDel = await getJson("/api/v1/agent/providers");
+	const selection = afterDefaultDel.json.defaultSelection as { providerId?: string; modelId?: string } | null;
+	check(
+		selection?.providerId === "d" && selection.modelId === MODEL,
+		"默认顺延到下一家还有模型的 D（跳过空清单的 E）",
+		JSON.stringify(selection),
+	);
+	const promotedRow = ((afterDefaultDel.json.providers ?? []) as { id: string; isDefault?: boolean }[]).find(
+		(item) => item.isDefault,
+	);
+	check(promotedRow?.id === "d", "D 变成默认", JSON.stringify(promotedRow));
+	const afterDefaultModel = await getJson("/api/v1/agent/model");
+	const currentAfterDefault = afterDefaultModel.json.current as
+		| { providerId?: string; modelId?: string }
+		| undefined;
+	check(
+		currentAfterDefault?.providerId === "d" && currentAfterDefault.modelId === MODEL,
+		"当前模型跟着落到 D",
+		JSON.stringify(currentAfterDefault),
+	);
+	const cBeforePromoted = upstreamC.received.length;
+	const promotedChat = await chat(BASE);
+	// 同 §7：排除后台思考档探活噪音，只看真正的对话请求
+	const promotedChats = upstreamC.received
+		.slice(cBeforePromoted)
+		.filter((item) => Array.isArray(item.body.tools));
+	check(promotedChat.status === 200 && promotedChat.done, "删默认后新会话这一轮完成", promotedChat.events.join(","));
+	check(
+		promotedChats.length === 1,
+		"新会话打到 D 的地址（C 上游）",
+		`C ${cBeforePromoted} → ${upstreamC.received.length}`,
+	);
+
 	// ── 9. 播种矩阵 ───────────────────────────────────────
 	console.log("\n· 9. 播种矩阵");
 	const fileBeforeRestart = readFileSync(PROVIDERS, "utf8");
@@ -646,6 +691,54 @@ try {
 	const healthEnvWins = (await (await fetch(`${BASE}/healthz`)).json()) as { model?: string };
 	check(healthEnvWins.model === "env-other", "删文件 → env 为准（并重新播种）", String(healthEnvWins.model));
 	check(existsSync(PROVIDERS), "删掉后重新播种出文件");
+
+	// 2026-11-23：删到最后一家 = 零供应商是合法状态（对话走 mock），重启不会按 env 复活
+	console.log("\n· 9b. 删到零供应商：mock 回显，重启不复活");
+	const onlyCatalog = await getJson("/api/v1/agent/providers");
+	const onlyProviders = (onlyCatalog.json.providers ?? []) as { id: string }[];
+	check(
+		onlyProviders.length === 1 && onlyProviders[0]?.id === "bailian",
+		"重新播种后只有一家",
+		JSON.stringify(onlyProviders),
+	);
+	const delLast = await deletePath("/api/v1/agent/providers/bailian");
+	check(delLast.status === 200, "最后一家供应商也能删", JSON.stringify(delLast.json));
+	const emptyCatalog = await getJson("/api/v1/agent/providers");
+	const emptyProviders = (emptyCatalog.json.providers ?? []) as { id: string }[];
+	check(emptyProviders.length === 0, "供应商列表为空");
+	check(
+		emptyCatalog.json.defaultSelection === null,
+		"没有默认选择",
+		JSON.stringify(emptyCatalog.json.defaultSelection),
+	);
+	const emptyModel = await getJson("/api/v1/agent/model");
+	check(emptyModel.json.current === null, "composer 没有当前模型", JSON.stringify(emptyModel.json.current));
+	const emptyHealth = (await (await fetch(`${BASE}/healthz`)).json()) as { llm?: string; model?: string };
+	check(
+		emptyHealth.llm === "mock" && emptyHealth.model === null,
+		"健康检查降级为 mock",
+		JSON.stringify(emptyHealth),
+	);
+	const emptyChat = await chat(BASE);
+	check(
+		emptyChat.status === 200 && emptyChat.text.includes("mock"),
+		"对话走 mock 回显",
+		emptyChat.text.slice(0, 40),
+	);
+	// 文件还在（空清单）→ 重启不该按 env 重新播种
+	server.kill();
+	await sleep(700);
+	server = startServer({ LLM_MODEL: "env-other" });
+	await waitForReady();
+	const afterRestartCatalog = await getJson("/api/v1/agent/providers");
+	const afterRestartProviders = (afterRestartCatalog.json.providers ?? []) as { id: string }[];
+	check(
+		afterRestartProviders.length === 0,
+		"重启后仍是零供应商（不按 env 复活）",
+		JSON.stringify(afterRestartCatalog.json.providers),
+	);
+	const afterRestartHealth = (await (await fetch(`${BASE}/healthz`)).json()) as { llm?: string };
+	check(afterRestartHealth.llm === "mock", "重启后仍是 mock", String(afterRestartHealth.llm));
 
 	server.kill();
 	await sleep(700);
@@ -735,9 +828,9 @@ try {
 	const fauxSwitch = await postJson("/api/v1/agent/model", { providerId: "x", modelId: "m1" }, FAUX_BASE);
 	check(fauxSwitch.status === 400 && fauxSwitch.json.error === "faux", "faux 下切模型 400", JSON.stringify(fauxSwitch.json));
 	const delFauxDefault = await fetch(`${FAUX_BASE}/api/v1/agent/providers/x`, { method: "DELETE" });
-	check(delFauxDefault.status === 400, "faux 下默认供应商仍不能删", String(delFauxDefault.status));
+	check(delFauxDefault.status === 200, "faux 下默认供应商也能删", String(delFauxDefault.status));
 	const delFauxY = await fetch(`${FAUX_BASE}/api/v1/agent/providers/y`, { method: "DELETE" });
-	check(delFauxY.status === 200, "faux 下删非默认供应商", String(delFauxY.status));
+	check(delFauxY.status === 200, "faux 下删非默认供应商（删到零）", String(delFauxY.status));
 
 	const realAfter = existsSync(REAL_PROVIDERS)
 		? `${statSync(REAL_PROVIDERS).mtimeMs}:${statSync(REAL_PROVIDERS).size}`

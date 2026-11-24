@@ -64,6 +64,8 @@ test("requires 图：父键都存在且不成环（含多父 / 嵌套）", () =>
 	assert.deepEqual(byKey.get("MEMORY_INJECT_DEDUPE")?.requires, ["MEMORY_ENABLED", "PARTNER_MEMORY_RECALL"]);
 	assert.deepEqual(byKey.get("ARCHIVE_AUTO_DAYS")?.requires, ["ARCHIVE_AUTO_ENABLED"]);
 	assert.deepEqual(byKey.get("AGENT_COMPACT_TRIGGER_PERCENT")?.requires, ["AGENT_COMPACT_ENABLED"]);
+	// 领域派活入口（2026-11-23）：派活总闸关着时这层没有意义，挂 CHANCELLOR_ENABLED。
+	assert.deepEqual(byKey.get("CHANCELLOR_DOMAIN_DISPATCH")?.requires, ["CHANCELLOR_ENABLED"]);
 });
 
 test("scope：系统核心 = 记忆 / 执事体系 / 宰相 / 自主轮 / 工具权限，其余默认普通插件", () => {
@@ -73,6 +75,8 @@ test("scope：系统核心 = 记忆 / 执事体系 / 宰相 / 自主轮 / 工具
 	assert.deepEqual(coreKeys, [
 		"AGENT_TOOL_POLICY",
 		"AUTONOMY_ENABLED",
+		"CHANCELLOR_CLI_STREAM_EVENTS",
+		"CHANCELLOR_DOMAIN_DISPATCH",
 		"CHANCELLOR_ENABLED",
 		"COMPANIONS_ENABLED",
 		"MEMORY_ENABLED",
@@ -275,7 +279,7 @@ test("API：GET 列表带 hot/defaultValue，PUT 校验取值，AGENT_FLAGS_UI=f
 	const list = await app.request("/api/v1/agent/flags");
 	assert.equal(list.status, 200);
 	const data = (await list.json()) as {
-		flags: { key: string; hot: boolean; defaultValue: string; scope: string }[];
+		flags: { key: string; hot: boolean; defaultValue: string; scope: string; group?: string }[];
 	};
 	assert.ok(data.flags.length >= FLAG_DEFS.length);
 	const autonomy = data.flags.find((flag) => flag.key === "AUTONOMY_ENABLED");
@@ -286,15 +290,24 @@ test("API：GET 列表带 hot/defaultValue，PUT 校验取值，AGENT_FLAGS_UI=f
 	assert.equal(companions?.scope, "core");
 	// persona 记忆库接入（2026-11-09）：两个消费处都懒读 env，热生效；导出默认开（2026-11-16 翻案）。
 	const personaMemory = data.flags.find((flag) => flag.key === "PERSONA_MEMORY_ENABLED");
-	assert.equal(personaMemory?.hot, true, "persona_recall 的关闸每次调用前懒读，热生效");
+	assert.equal(personaMemory?.hot, true, "轻召回 / 库目录的关闸每次调用前懒读，热生效");
 	assert.equal(personaMemory?.defaultValue, "true");
 	const personaExport = data.flags.find((flag) => flag.key === "PERSONA_EXPORT_ENABLED");
 	assert.equal(personaExport?.hot, true, "导出开关每轮 settled 懒读，热生效");
 	assert.equal(personaExport?.defaultValue, "true", "2026-11-16 翻案：对话归档默认开，插件页可关");
+	// 领域派活入口（2026-11-23）：默认关；执行层懒读（参数面随 harness 装载刷新）。
+	const domainDispatch = data.flags.find((flag) => flag.key === "CHANCELLOR_DOMAIN_DISPATCH");
+	assert.equal(domainDispatch?.defaultValue, "false", "默认关：领域派活入口关闭，代码保留");
+	assert.equal(domainDispatch?.hot, true);
 	// 对话逐字浮现（2026-11-13）：web 开新消息时懒读，默认开；关掉退回旧整块渲染。
 	const streamReveal = data.flags.find((flag) => flag.key === "CHAT_STREAM_REVEAL");
 	assert.equal(streamReveal?.hot, true);
 	assert.equal(streamReveal?.defaultValue, "true");
+	// 统一下拉（2026-11-23）：刷新页面生效（回滚 = 退回原生 select），默认开。
+	const selectMenu = data.flags.find((flag) => flag.key === "UI_SELECT_MENU");
+	assert.equal(selectMenu?.hot, true);
+	assert.equal(selectMenu?.defaultValue, "true");
+	assert.equal(selectMenu?.group, "ui");
 
 	const put = await app.request("/api/v1/agent/flags/CHANCELLOR_ENABLED", {
 		method: "PUT",

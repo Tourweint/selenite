@@ -18,6 +18,13 @@ import { VERIFICATION_IRON_LAW } from "../agent/turn-gate.ts";
 /** 任务会话的硬白名单：定义层只给这五件，`beforeTool` 再拦一次。 */
 export const POOL_TOOL_NAMES = ["read", "write", "edit", "bash", "escalate"] as const;
 
+/** 项目文件夹（2026-11-24）：结构对齐 chancellor / 池 run payload 的 roots。 */
+export interface TaskProjectRoot {
+	label: string;
+	path: string;
+	role: "primary" | "extra";
+}
+
 export interface TaskProfileInput {
 	/** 人设正文，调用方从 `.data/worker-persona.md` 读好传进来 */
 	persona: string;
@@ -35,6 +42,11 @@ export interface TaskProfileInput {
 	workDir: string;
 	/** 本任务声明的可写路径（相对 workDir） */
 	writes?: readonly string[];
+	/**
+	 * 项目文件夹（2026-11-24）：主文件夹之外的根共享读写真实目录。
+	 * 隔离形态下不含 primary；非隔离形态含全部 roots。缺省 = 旧形态。
+	 */
+	roots?: readonly TaskProjectRoot[];
 }
 
 /**
@@ -48,7 +60,7 @@ export interface TaskProfileInput {
 const WORKER_RULES = `你是 chancellor 的工人。你只做一件被交代的事。
 
 ## 你必须遵守
-1. 只在给你的任务目录与项目工作目录里工作。不要读写这两个目录之外的任何文件。
+1. 只在给你的任务目录、工作目录和项目文件夹里工作（精确路径见「工作边界」）。不要读写这些位置之外的任何文件。
 2. 需要人拍板/回答时用 escalate 工具上报，不要自己猜；上报后本轮收尾，等答复回来再继续。`;
 
 /** 交付契约（§5.6：来源=代码、不可改）。与验证铁律不重叠：这里管 REPORT 怎么写。 */
@@ -69,13 +81,35 @@ const DELIVERY_CONTRACT = `## 交付契约（硬性要求）
 /** 写入边界（§5.6：安全边界，不可改）。真正的强制在 `pool-tools.ts` 的路径守卫。 */
 function boundarySection(input: TaskProfileInput): string {
 	const writes = input.writes ?? [];
-	return [
+	const roots = input.roots ?? [];
+	// 隔离形态下发的是"主文件夹之外的根"；非隔离形态含 primary。
+	const extrasOnly = roots.length > 0 && !roots.some((root) => root.role === "primary");
+	const lines = [
 		"## 工作边界",
 		`- 任务目录：${input.taskDir}`,
 		`- 工作目录：${input.workDir}`,
-		"- 只能在上述两个目录里读写文件；不要碰这两个目录之外的任何路径。",
-		`- 只写本任务声明的路径：${writes.length === 0 ? "（本任务为只读，不要写项目）" : writes.join("、")}`,
-	].join("\n");
+	];
+	if (roots.length > 0) {
+		lines.push(
+			extrasOnly
+				? "- 项目其他文件夹（直接读写真实目录；不在任务副本里）："
+				: "- 项目文件夹（可直接读写）：",
+			...roots.map((root) => {
+				const label = root.label || (root.role === "primary" ? "主文件夹" : "文件夹");
+				return `  - ${label}：${root.path}`;
+			}),
+			"- 只能在上述目录里读写文件；不要碰这些目录之外的任何路径。",
+			"- 项目文件夹的改动不在任务副本里，调度器不合并、不收集；在 REPORT.md 的 summary 里写明动了哪些文件。",
+		);
+	} else {
+		lines.push("- 只能在上述两个目录里读写文件；不要碰这两个目录之外的任何路径。");
+	}
+	lines.push(
+		roots.length > 0
+			? `- 只写本任务声明的路径（相对工作目录；项目其他文件夹按任务要求写）：${writes.length === 0 ? "（本任务为只读，不要写项目）" : writes.includes("**") ? "项目内任意路径（**）" : writes.join("、")}`
+			: `- 只写本任务声明的路径：${writes.length === 0 ? "（本任务为只读，不要写项目）" : writes.includes("**") ? "项目内任意路径（**）" : writes.join("、")}`,
+	);
+	return lines.join("\n");
 }
 
 /** 段的稳定 key，顺序即拼装顺序（见下）。 */

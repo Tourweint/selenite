@@ -47,11 +47,12 @@ export interface EscalationInput {
 
 export interface PoolToolDeps {
 	/**
-	 * 当前票的两个边界目录（`[taskDir, workDir]`）。
+	 * 当前票的边界目录（`[taskDir, workDir, ...项目文件夹]`）。
 	 *
 	 * 必须是**每票现取**的函数，不能传快照：池进程跨票串行复用、registry 只建一次
 	 * （设计文档 §4.3），闭包进快照 = 第二票继续用第一票的目录边界 = 第二票能写第一票的 worktree。
 	 * 空闲（没有当前票）时返回空数组——`pathBlockReason` 对空目录列表一律 block，正是想要的。
+	 * 2026-11-24：项目文件夹（主文件夹之外的根）共享读写真实目录，也在这里放行。
 	 */
 	currentDirs: () => readonly string[];
 	/** bash 默认超时秒数（`pool-settings.ts` 的 `bashTimeoutSeconds`）；<=0 = 不注入 */
@@ -78,6 +79,18 @@ export const POOL_ALLOWED_TOOLS: ReadonlySet<string> = new Set<string>(POOL_TOOL
 
 /** 只有这三件带 `path` 参数需要落到磁盘上，才需要边界判定。 */
 const PATH_TOOLS: ReadonlySet<string> = new Set(["read", "write", "edit"]);
+
+/**
+ * 一票的边界目录（2026-11-24）：任务目录 + 工作目录 + 项目文件夹，按首次出现去重。
+ * 抽成纯函数给单测直接断言"roots 真的进了边界"；装配层（pool-main）每票现取。
+ */
+export function poolBoundaryDirs(
+	taskDir: string,
+	workDir: string,
+	roots: readonly { path: string }[] = [],
+): string[] {
+	return [...new Set([taskDir, workDir, ...roots.map((root) => root.path)])];
+}
 
 /**
  * 路径边界判定（纯函数）：`path` 解析后必须落在 `dirs` 之一内部。

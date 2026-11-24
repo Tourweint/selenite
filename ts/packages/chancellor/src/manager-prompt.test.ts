@@ -55,3 +55,23 @@ test("identity 与 project 同时存在：两节互不覆盖，顺序稳定", ()
   assert.ok(prompt.includes("## 这张单的项目"));
   assert.ok(prompt.includes("## 你是谁\n\n阿岚\n\n一句话 SOUL。"));
 });
+
+test("project.roots：经理提示词列出项目的全部文件夹（2026-11-24）", () => {
+  const prompt = buildManagerPrompt(meta(), {
+    id: "p-1",
+    name: "宿主",
+    rootPath: "D:/repo",
+    roots: [
+      { label: "主仓", path: "D:/repo", role: "primary" },
+      { label: "手机端", path: "D:/projects/lifediary", role: "extra" },
+    ],
+  });
+  assert.ok(prompt.includes("- 项目文件夹（派给工人的活可以用绝对路径进入这些目录）："));
+  assert.ok(prompt.includes("  - 主仓：D:/repo"));
+  assert.ok(prompt.includes("  - 手机端：D:/projects/lifediary"));
+});
+
+test("project.roots 缺省：不出现项目文件夹清单（旧形态）", () => {
+  const prompt = buildManagerPrompt(meta(), { id: "p-1", name: "宿主", rootPath: "D:/repo" });
+  assert.ok(!prompt.includes("项目文件夹（派给工人的活"));
+});

@@ -1,4 +1,4 @@
-派活：任务书四段 / steps / resume / 四行回报 / 裁决纪律的完整手册
+派活：任务书四段 / tasks 拆单 / resume / 四行回报 / 裁决纪律的完整手册
 
 第一次派活前读这一份；工具描述只讲何时用、怎么调。工具描述负责告诉你「什么时候派、怎么填参数」，这一份负责告诉你「派出去了之后整套流程怎么走」。
 
@@ -7,14 +7,38 @@
 系统提示里有一行「当前派活执行器」；`delegate` 的返回也会带上「已派发到 X（模型 Y，权限 Z）」。
 派完之后可以照实转述给用户。续跑沿用原单执行器，不会因为设置里换了默认而改派。
 
+## 隔离（isolation）
+
+`delegate` 的 `isolation` 管这张单在哪儿动手：
+
+- 不填 / `auto`：跟随全局默认（`CHANCELLOR_TASK_ISOLATION`），且只有 git 项目才会开 worktree。
+- `worktree`：这张单强制在副本里改，按租约合并；非 git 项目会回落 direct，并在结果里如实说明。**多张单并行改同一个项目时用它**。
+- `direct`：直接在项目目录里干，不起副本；只读查证 / 单张小改可以用。
+
+续跑不生效，沿用原单的快照。worktree 只隔离文件改动，不防危险命令（权限档仍按 `permission` 管）。
+
+## 权限（permission）
+
+`delegate` 的 `permission` 管这张单能做什么：
+
+- `read`：只读。写文件的工具会被拒（Qoder `dont_ask` / CodeBuddy `dontAsk` / Claude `plan`）。
+- `edit`：能写文件，但跑命令被拒（Qoder `accept_edits` / CodeBuddy `acceptEdits` 实测都如此）。
+- `full`：写文件 + 跑命令都放行。
+- 不填 = 跟随设置里「派活」的默认档；续跑沿用原单快照，`permission` 不生效。
+
+只对 Claude / Codex / OpenCode / 豆包 / CodeBuddy / Qoder 国际 / Qoder 国内生效；
+本机池的权限由池内工具白名单管（read/write/edit/bash/escalate）。
+
 ## 任务书四段（requirement）
 
 **任务书按四段写**：目标 / 怎么算好 / 可自主范围 / 必须请示。
 你若带「岗位契约」，后两段直接按契约的「决策分级」「验收标准」填写；没有契约就按常理写清边界。
 
-## 多步活写 steps
-
-**多步活要写 `steps`**：一件事如果有 ≥3 个动作、或者要跨文件改，就用 steps 列出可核对的动作序列（≤12 条，每条一句话说清做什么、怎么算做到）；一句话就能说完的小活不写。
+## 多步活直接给 tasks
+**拆单是你的活**：一件事如果有 ≥3 个动作、或者要跨文件改，就在 `delegate` 里直接给 `tasks`（1-5 个）。一个 task 只做一件事。
+每个 task 必填：`title` / `slug`（小写字母、数字、连字符）/ `instruction` / `done_when`（可机械验证）/ `writes`（这个 task 会写的项目内相对路径；只读给 []）。
+可选：`dependsOn`（整数 seq 数组，只能依赖更小的 seq；写同一个文件的任务必须串成依赖）。
+一句话的小活可以不给 `tasks`，系统会把它当成一个整单任务；`steps` 字段保留，但只用于任务详情展示，不再驱动拆单。
 
 ## 工人回报「需要你」怎么办
 

@@ -102,6 +102,28 @@ export function startDelegation(
 				// 租约没拿到：任务没启动，不算完成；把等待对象带给前端。
 				emitProgress("running", event.message ?? current, event.waitingOn);
 				break;
+			// 外部 CLI 的一步（2026-11-23 流式事件）：只更新任务中心的「最近动作」。
+			// **不 mirror 进专线会话**——过程事件不许变成任何模型可见的上下文消息；
+			// 直接 emit 复用既有 delegate 契约，不新增对外事件类型。
+			case "step": {
+				if (runtime.isCanceled?.(event.ticketId)) break;
+				const stepLine = (event.message ?? "").trim();
+				if (stepLine === "") break;
+				current = stepLine;
+				runtime.emit(kick.conversationId, {
+					type: "delegate",
+					ticketId: event.ticketId,
+					domain: kick.domain,
+					phase: "running",
+					done,
+					total,
+					current: stepLine,
+					lastAction: stepLine,
+					lastHeartbeat: new Date().toISOString(),
+					...(projectName ? { project: projectName } : {}),
+				});
+				break;
+			}
 			// worker 决策上报（2026-11-19 批2）：原样发到派活方会话出上报卡；
 			// 路由（唤醒总管 / 升级用户 / 限流）由 escalation.ts 的全局订阅接手，
 			// 这里只管"事件到会话"这一跳。
@@ -206,7 +228,16 @@ export function startDelegation(
 		};
 		// 双写（8g）：REPORT 落 assistant 条目，语义 = 执行端向主人汇报。
 		// 用完整的那句 result.line（留言表同源），不是 80 字截断的 report.text。
-		runtime.mirror?.(ticketId, { kind: "report", text: `【汇报】${result.line || report.text}` });
+		// 终止回执（2026-11-23）：失败 / 中止的结构化原因附在汇报尾部，直派任务线程也看得到。
+		const failureText = result.failure
+			? `（终止：${result.failure.class}，${result.failure.retryable ? "可重试" : "不可重试"}${
+					result.failure.timedOut ? "，超时" : ""
+				}${result.failure.canceled ? "，已中止" : ""}）`
+			: "";
+		runtime.mirror?.(ticketId, {
+			kind: "report",
+			text: `【汇报】${result.line || report.text}${failureText}`,
+		});
 		runtime.emit(kick.conversationId, {
 			type: "delegate",
 			ticketId,
@@ -427,8 +458,14 @@ export function startDelegation(
 					...idempotency,
 					// 计划附件（2026-11-09 §2）：只有新派带；续跑沿用原单，不覆盖。
 					...(kick.steps && kick.steps.length > 0 ? { steps: kick.steps } : {}),
+					...(kick.tasks !== undefined ? { tasks: kick.tasks } : {}),
 					// 工作目录（2026-11-17）：只有新派带；续跑沿用原单快照。
 					...(kick.workDir ? { workDir: kick.workDir } : {}),
+					// 按单隔离（2026-11-23）：auto / 不传都不写快照，交给 chancellor 的全局缺省；
+					// 只有 worktree / direct 才落进 ticket.options。
+					...(kick.isolation && kick.isolation !== "auto"
+						? { isolation: kick.isolation }
+						: {}),
 					// 质检方式（2026-11-19 批2）：只有新派带；续跑沿用现状（内部请求）。
 					// 来源对话只透传（2026-11-05 跨仓契约）：chancellor 落 ticket.json，
 					// 子单从父单继承；这里给内部会话 id 的字符串形式，接口层再换对外 uuid。
@@ -459,8 +496,13 @@ export function startDelegation(
 				...projectField,
 				...idempotency,
 				...(kick.steps && kick.steps.length > 0 ? { steps: kick.steps } : {}),
+				...(kick.tasks !== undefined ? { tasks: kick.tasks } : {}),
 				// 回退重派也是一张新单：工作目录照传。
 				...(kick.workDir ? { workDir: kick.workDir } : {}),
+				// 回退重派也是一张新单：按单隔离照传（auto 仍不写快照）。
+				...(kick.isolation && kick.isolation !== "auto"
+					? { isolation: kick.isolation }
+					: {}),
 				// 质检方式（批2）：回退重派同为新单，照带。
 				originConversationId: String(kick.conversationId),
 			});

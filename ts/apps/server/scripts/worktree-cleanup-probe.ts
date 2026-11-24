@@ -8,7 +8,8 @@
  *   3. 崩溃 —— 子进程在任务中途被杀 → worktree + inflight.json 留着；
  *      下次启动恢复：未合并且 resumeCount=0 → 自动续跑，复用副本，成功后删掉。
  *
- * worker 用 native + LLM_PROVIDER=faux，不碰真模型；拆单（Qoder）刻意跳过，
+ * worker 标签用 pool + 替身 runner（不真起 worker），LLM_PROVIDER=faux，不碰真模型；
+ * 拆单（Qoder）刻意跳过，
  * 直接喂 plan —— 本项验的是调度层的副本生命周期，不是拆单。
  *
  *   pnpm --filter @lifediary/server worktree
@@ -22,6 +23,7 @@ import { recoverDelegations } from "../../../packages/chancellor/src/index.ts";
 import { startInflight, readInflight, inflightPath } from "../../../packages/chancellor/src/inflight.ts";
 import { taskDirName } from "../../../packages/chancellor/src/dispatch.ts";
 import { runScheduledTasks } from "../../../packages/chancellor/src/scheduler.ts";
+import { setPoolClient } from "../../../packages/chancellor/src/employee/pool.ts";
 import { Store } from "../../../packages/chancellor/src/store.ts";
 import type { PlannedTask, ProjectRef, Task, Ticket, TaskRun } from "../../../packages/chancellor/src/types.ts";
 
@@ -71,7 +73,7 @@ function makeTicket(id: string, workRoot: string, project: ProjectRef): Ticket {
 		created_at: now,
 		updated_at: now,
 		options: { dry: false, maxTasks: 1, workRoot, project },
-		employee: "native",
+		employee: "pool",
 	};
 }
 
@@ -94,7 +96,7 @@ function rowOf(ticket: Ticket, task: PlannedTask, seq: number): Task {
 		title: task.title,
 		dir: taskDirName(seq, task.slug),
 		status: "pending",
-		employee: "native",
+		employee: "pool",
 		updated_at: new Date().toISOString(),
 	};
 }
@@ -109,6 +111,44 @@ async function hold(ticket: Ticket, task: PlannedTask, _seq: number, _dir: strin
 	process.stdout.write("READY\n");
 	await new Promise(() => {});
 	throw new Error("unreachable");
+}
+
+/**
+ * 替身池客户端（2026-11-23）：本探针验的是 worktree 生命周期，不是 worker 本体。
+ * native 退役后 standalone 进程里没有真池，这里按老 faux env 模拟两条路：
+ * - `CHANCELLOR_FAUX_ARTIFACT` 合法 JSON → 写进 run.workDir，返回成功；
+ *   不是合法 JSON → 返回失败（第 2 步要的「worker 失败」）。
+ * - `CHANCELLOR_FAUX_REPORT` 原样写进 run.dir/REPORT.md（步骤 1 的 blocked 结论）。
+ */
+function installFakePool(): void {
+	setPoolClient({
+		async run(run) {
+			let artifact: { path?: unknown; content?: unknown };
+			try {
+				artifact = JSON.parse(process.env.CHANCELLOR_FAUX_ARTIFACT ?? "") as {
+					path?: unknown;
+					content?: unknown;
+				};
+			} catch {
+				return { ok: false, reason: "faux_artifact_invalid" };
+			}
+			if (typeof artifact.path !== "string" || typeof artifact.content !== "string") {
+				return { ok: false, reason: "faux_artifact_invalid" };
+			}
+			const workDir = run.workDir || run.dir;
+			mkdirSync(workDir, { recursive: true });
+			writeFileSync(join(workDir, artifact.path), artifact.content);
+			const report = process.env.CHANCELLOR_FAUX_REPORT?.trim();
+			if (report) writeFileSync(join(run.dir, "REPORT.md"), `\`\`\`json\n${report}\n\`\`\`\n`);
+			return { ok: true, reason: "done" };
+		},
+		async say() {
+			return { ok: true };
+		},
+		async abort() {
+			return { ok: true };
+		},
+	});
 }
 
 async function crashHost(): Promise<void> {
@@ -136,7 +176,7 @@ async function crashHost(): Promise<void> {
 		tasks,
 		rows: tasks.map((task, index) => rowOf(ticket, task, index + 1)),
 		project,
-		employeeKind: "native",
+		employeeKind: "pool",
 		emit: () => {},
 		isolation: "worktree",
 		runner: hold as never,
@@ -144,6 +184,7 @@ async function crashHost(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+	installFakePool();
 	const TEMP = mkdtempSync(join(tmpdir(), "lifediary-worktree-"));
 	const env = { ...process.env };
 	const PROJECT = join(TEMP, "repo");
@@ -183,7 +224,7 @@ async function main(): Promise<void> {
 		tasks: tasks1,
 		rows: rows1,
 		project,
-		employeeKind: "native",
+		employeeKind: "pool",
 		emit: () => {},
 		isolation: "worktree",
 	});
@@ -207,7 +248,7 @@ async function main(): Promise<void> {
 		tasks: tasks2,
 		rows: rows2,
 		project,
-		employeeKind: "native",
+		employeeKind: "pool",
 		emit: () => {},
 		isolation: "worktree",
 	});
@@ -223,7 +264,7 @@ async function main(): Promise<void> {
 		tasks: tasks2,
 		rows: [rowOf(ticket2, task2, 1)],
 		project,
-		employeeKind: "native",
+		employeeKind: "pool",
 		emit: () => {},
 		isolation: "worktree",
 	});

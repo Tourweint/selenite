@@ -209,3 +209,41 @@ export function readOnlyBlockReason(name: string, context?: ViewCommandContext):
 	if (policy.blocked.includes(name)) return `工具 ${name} 已被禁用`;
 	return accessBlockReason(policy.access, name, context);
 }
+
+/**
+ * 外部记忆库模式下 `remember` 的只读档拦截（2026-11-23 外部记忆库接入）。
+ *
+ * 内置 remember 只写小库，是 READ 类、只读档放行；外部模式它变成「起进程写外部库」，
+ * 必须按写工具对待（2026-11-24 退役 persona_write 后，它自己是唯一的写入口）。
+ * 文案要告诉人怎么回退：换档。
+ *
+ * 纯函数（档位判据与 `accessBlockReason` 同口径：只读档拦、其余放行），
+ * 闸门测试直接断言，不用起 harness。
+ */
+export function externalRememberBlockReason(
+	access: ToolAccess,
+	context?: ViewCommandContext,
+): string | undefined {
+	// 与写工具同档（persona_write 已退役，这里直接按 read-only 判；no-shell / full 放行）。
+	void context;
+	if (access !== "read-only") return undefined;
+	return "当前是「只读」模式：外部记忆库的 remember 会起进程写外部库，已被拦下。要写就换档（设置 → 权限）。";
+}
+
+/**
+ * 外部记忆库模式下 `remember` 的能力面（2026-11-24 旧形态退役后）。
+ *
+ * `remember` 平时是只读内部状态；外部槽位下它起进程写外部库，无人值守判定必须按
+ * 「destructive + critical」处理。它**不是**一个独立工具，刻意不登记进
+ * `TOOL_CAPABILITIES`（否则双向等值断言会把它当成真实的写工具）。
+ */
+export const EXTERNAL_REMEMBER_CAPABILITY = {
+	name: "remember",
+	readOnly: false,
+	destructive: true,
+	sideEffectScope: "external",
+	riskLevel: "high",
+	needsApproval: "critical",
+	concurrentSafe: true,
+	notes: "外部记忆库槽位下的 remember：起子进程写外部库，按写工具 / 每写必弹对待。",
+} as const;

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import type { EmployeeKind } from "../../../packages/chancellor/src/types.ts";
 import {
 	abortTicket,
 	registerTicketAbort,
@@ -63,9 +64,28 @@ test("sayWorker：外部 CLI 没有注入口", async () => {
 	}
 });
 
-test("sayWorker：native 不在跑时返回 worker_not_running", async () => {
-	// 没有起过 native 子进程 → forwardNativeWorkerMessage 抛 WorkerNotRunningError。
-	const result = await sayWorker("native", "T-native-not-running", "插一句", "steer");
-	assert.equal(result.ok, false);
-	assert.match(result.message ?? "", /worker_not_running/);
+test("sayWorker：历史 native 单 / 无 employee 字段的老单并入 pool", async () => {
+	const calls: string[] = [];
+	setPoolControl({
+		abort: async () => ({ ok: true }),
+		say: async (ticketId) => {
+			calls.push(ticketId);
+			return { ok: true };
+		},
+	});
+	try {
+		// 2026-11-23：native 已退役；持久化数据里仍可能是这个值（类型外），按 pool 送。
+		const legacyNative = "native" as unknown as EmployeeKind;
+		assert.deepEqual(
+			await sayWorker(legacyNative, "T-native-legacy", "插一句", "steer"),
+			{ ok: true },
+		);
+		assert.deepEqual(
+			await sayWorker(undefined, "T-old-ticket", "插一句", "steer"),
+			{ ok: true },
+		);
+		assert.deepEqual(calls, ["T-native-legacy", "T-old-ticket"]);
+	} finally {
+		setPoolControl(null);
+	}
 });

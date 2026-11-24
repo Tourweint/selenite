@@ -8,7 +8,7 @@
  *   唤醒恒开，只剩这一相。）
  *
  * 为什么用 `LLM_FAUX_TOOL=delegate`：服务端 faux 只会"调工具不收尾"，把回合上限压到 1，
- * 一轮只派一单；chancellor 的 native worker 走自己的 faux 给出结论（本探针实测终态是
+ * 一轮只派一单；chancellor 的本机池 worker 走自己的 faux 给出结论（本探针实测终态是
  * `needs_you`——同属会写汇报的终态，正好覆盖"需要主人拿主意"那条），不依赖外网、不碰真实 key。
  *
  * 用法：`pnpm --filter @lifediary/server delegate-wake`
@@ -82,9 +82,14 @@ async function startServer(extra: Record<string, string>): Promise<Phase> {
 				COMPANIONS_ENABLED: "true",
 				CHIEF_PARTNER: "true",
 				CHANCELLOR_ENABLED: "true",
-				CHANCELLOR_EMPLOYEE: "native",
+				CHANCELLOR_EMPLOYEE: "pool",
 				CHANCELLOR_LLM_PROVIDER: "faux",
 				CHANCELLOR_WORK_ROOT: join(root, "runs"),
+				// 池进程隔离到临时目录（2026-11-23）；本探针只跑一单，1 个池进程够。
+				WORKER_POOL_DB_DIR: join(root, "worker-pool"),
+				SUPERVISOR_POOL_SIZE: "1",
+				// AGENT_MAX_TURNS=1 是压宿主 faux 的；池单独放开（2026-11-23）。
+				WORKER_POOL_MAX_TURNS: "100",
 				DELEGATION_PROJECT_REQUIRED: "false",
 				NODE_OPTIONS: "",
 				...extra,

@@ -43,6 +43,7 @@ import {
   pinChat,
   preferenceScopeOf,
   readTranscript,
+  refreshSkillStore,
   rememberLevel,
   reminderTaskById,
   renameChat,
@@ -115,6 +116,8 @@ import { toolUsageEnabled, toolUsageRows } from "./tool-usage.ts";
 // 全局工具池（2026-11-17 设置→工具页）：目录与摘要复用 partner-tools，避免另抄一份。
 import { modelToolCatalog, toolSummaryOf } from "./partner-tools.ts";
 import { mountToolPoolRoutes } from "./tool-pool.ts";
+// 工具超时策略（2026-11-24 M0）：GET/PUT /api/v1/agent/tool-policy；TOOL_TIMEOUT_POLICY 关时 handler 回 404。
+import { mountToolPolicyRoutes } from "./tool-policy-api.ts";
 // 一轮对话时间线（2026-11-17）：按 SSE 流 id 把工具/闸门/回合/token/收尾串成一条账。
 import {
 	beginTurn,
@@ -325,24 +328,25 @@ loadFlagOverrides();
 installInternalAsk();
 console.log("[internal] 拆单：核心模型");
 
-// worker 人设派活注入（2026-11-16 批2）：普通助手那份人设，native 与外部 CLI 同吃。
+// worker 人设派活注入（2026-11-16 批2）：普通助手那份人设，本机池与外部 CLI 同吃。
 // `WORKER_PERSONA_DISPATCH=false` 回滚到无身份的纯 TASK.md。
 const workerPersonaDispatch = installWorkerPersonaDispatch();
 console.log(
   `[worker-persona] 派活注入人设：${workerPersonaDispatch ? "开（TASK.md「你是谁」段）" : "关（WORKER_PERSONA_DISPATCH=false）"}`,
 );
 
-// native worker 工具面（2026-11-17 批4）：普通助手页勾选的取消名单补集，spawn 换成 --tools。
+// worker 工具面（2026-11-17 批4）：普通助手页勾选的取消名单补集，池按 `run.tools` 下发。
 // 外部 CLI 不吃这层（用自己的工具）；`WORKER_TOOLS_DISPATCH=false` 回滚全开。
 const workerToolsDispatch = installWorkerToolsDispatch();
 console.log(
-  `[worker-tools] native 工具面勾选：${workerToolsDispatch ? "开（spawn --tools）" : "关（WORKER_TOOLS_DISPATCH=false，全开）"}`,
+  `[worker-tools] worker 工具面勾选：${workerToolsDispatch ? "开（池按 run.tools 下发）" : "关（WORKER_TOOLS_DISPATCH=false，全开）"}`,
 );
 
 // 执行器池（2026-11-22 执行器池方案 §5.3）：接线是**懒的**——构造 supervisor 不起进程，
 // 只有真的派第一票时 `run()` 才 `start()` 拉起池进程。其它执行器完全不受影响。
-// 入口不可用（典型：`node dist/index.js` 单文件产物里没有 `src/pool/pool-main.ts`）时**不注入**，
-// 让 `createEmployee("pool")` 回落到 native 并告警——不能把单子派进一个起不来的进程。
+// 入口不可用（典型：`node dist/index.js` 单文件产物里没有 `src/pool/pool-main.ts`）时**不注入**：
+// 2026-11-23 native 退役后本机只剩池，这一态下单票会如实报“池执行器未接线”，
+// 不再把单子派进第二套运行时。
 const workerPool = new WorkerPoolSupervisor();
 if (workerPool.available()) {
 	setPoolClient(workerPool);
@@ -352,18 +356,15 @@ if (workerPool.available()) {
 	console.log("[worker-pool] 执行器池已接线（按需起进程；默认派活走 pool）");
 } else {
 	console.warn(
-		"[worker-pool] 池入口不存在（dist 产物不支持池）：本次不接线，派活回落 native；要池请用源码态启动（node --import tsx src/index.ts）",
+		"[worker-pool] 池入口不存在（dist 单文件产物不支持池）：本机派活不可用；要池请用源码态启动（node --import tsx src/index.ts）",
 	);
 }
 
 // manager 池桥（2026-11-22「无论谁派活，底层 worker 都进池」）：manager 子进程是独立进程，
 // 拿不到进程内 `setPoolClient`，只能经 loopback HTTP 回到宿主 supervisor。
-// `POOL_MANAGER_BRIDGE=false` 回滚到改动前形态（manager 子单回落 native）。
-const managerBridgeEnabled = (() => {
-	const raw = (process.env.POOL_MANAGER_BRIDGE ?? "").trim().toLowerCase();
-	return raw !== "false" && raw !== "0" && raw !== "off";
-})();
-if (workerPool.available() && managerBridgeEnabled) {
+// 2026-11-23：native 退役后这是 manager 子单唯一的本机执行路径，`POOL_MANAGER_BRIDGE`
+// 开关随之退役（关掉它 = manager 子单必失败，不是可用的回滚形态）。
+if (workerPool.available()) {
 	const bridge = await startPoolBridge(workerPool, {
 		onEscalation: (ticketId, escalation) => {
 			// 子单是 manager 进程建的；宿主只按单号读回来源会话，把上报送回既有的
@@ -413,8 +414,6 @@ if (workerPool.available() && managerBridgeEnabled) {
 	});
 	setManagerPoolBridge({ endpoint: bridge.endpoint, token: bridge.token });
 	console.log(`[worker-pool] manager 池桥已接线（仅本机回环）`);
-} else if (workerPool.available()) {
-	console.log("[worker-pool] manager 池桥已关闭（POOL_MANAGER_BRIDGE=false）：manager 子单仍回落 native");
 }
 
 const app = new Hono();
@@ -747,9 +746,10 @@ mountFlags(app, {
 // 2026-11-16：enabled 改成活读函数——运行期关掉记忆总闸后 /memory/* 立即 404；
 // 启动时关着、运行期再打开仍受 memoryEngine=null 限制（要重启才真正上架）。
 mountMemoryApi(app, { enabled: () => memoryEngine !== null && flagEnabled("MEMORY_ENABLED") });
-// 技能管理（2026-11-08 扫尾批 9-S）：目录解析 = AGENT_SKILLS_DIR → 用户目录 → 应用目录兜底。
-// 技能增删只影响下一个会话（D5 既有取舍），UI 文案已如实说明。
-mountSkills(app);
+// 技能管理（2026-11-08 扫尾批 9-S）：目录解析 = AGENT_SKILLS_DIR → 用户目录 → 自加位置（2026-11-23）
+// → `.agents/skills`（只读）→ 应用目录兜底。技能增删只影响下一个会话（D5 既有取舍），UI 文案已如实说明；
+// 位置 / 文件变了就地重扫（refreshSkillStore），已开会话的索引仍按冻结快照。
+mountSkills(app, { onChange: refreshSkillStore });
 
 // 提醒沉淀（2026-11-19 批4）：候选收集（0 token）+ 建议快照 / 采纳。
 // 挂 /api/v1/* 之下走同一道鉴权中间件；REMINDER_DISTILL_ENABLED=false 两组都 404。
@@ -1592,7 +1592,7 @@ app.put("/api/v1/agent/providers/:id/secret", async (c) => {
   return c.json({ ok: true, keyEnv: result.keyEnv });
 });
 
-/** 删除供应商：默认 / 当前选中的一律 400（接口文档 §2.10 的不变量） */
+/** 删除供应商：默认 / 在用 / 最后一家都可删（2026-11-23）；删默认后默认顺延到下一家（接口文档 §2.10） */
 app.delete("/api/v1/agent/providers/:id", (c) => {
   const result = removeProvider(c.req.param("id"));
   if (!result.ok) return c.json({ error: result.error, message: result.message }, result.status);
@@ -1671,10 +1671,15 @@ app.post("/api/v1/agent/chat", async (c) => {
   // 会话 id 只能由服务端发出去：不带 = 新建，带了就必须是发过的那个。
   // durable 内部用的是自增整数，对外仍然映射成 uuid —— 整数猜得到，uuid 猜不到。
   const requestedId = request.conversationId;
-  // 新建 worker 的回滚开关（2026-11-06 B2）：只拦新建；已落盘的 worker 保持原身份。
+  // 普通助手会话（2026-11-06 B2 回滚开关；2026-11-23 起默认关 = 产品退役）：
+  // 只拦**新建**；已经落盘的 worker 保持原身份、照旧可读可续。前端已无任何新建入口，
+  // 这道闸只兜外部客户端 / 旧深链，临时恢复把它开成 true 即可。
   if (!requestedId && request.chatKind === "worker" && !workerChatEnabled()) {
     return c.json(
-      { error: "worker_chat_disabled", message: "普通助手会话当前已关闭（WORKER_CHAT_ENABLED=false）" },
+      {
+        error: "worker_chat_disabled",
+        message: "普通助手会话已退役；新活请走「新建任务」（派给池）。要临时恢复旧入口，把 WORKER_CHAT_ENABLED 开成 true。",
+      },
       400,
     );
   }
@@ -2571,6 +2576,11 @@ mountToolPoolRoutes(app, {
   summaryOf: toolSummaryOf,
 });
 
+// 工具超时策略（2026-11-24 M0–M2，方案 2026-11-24-工具异常处理与超时转后台 §3.5）：
+// 总开关 TOOL_TIMEOUT_POLICY 关 → 两个端点 404；开关是 hot 的，handler 现读。
+// 旧记忆库两档（memory-bank.json timeouts）作为 legacy 层只读不改，新界面只写 tool-policy.json。
+mountToolPolicyRoutes(app);
+
 /**
  * 一轮对话的时间线（2026-11-17）：按 SSE 流 id（`turnId`，即 /chat 的 start/done.id）
  * 把该轮的工具调用 / 闸门拦截 / 模型回合 / token 用量 / 收尾聚合成一条时间线。
@@ -2846,7 +2856,7 @@ app.get("/api/v1/agent/chat/:conversationId/requests/:entryId/context", async (c
 /**
  * 设置 → 上下文 · 默认开销（2026-11-16 续）。
  *
- * 不创建会话、不读聊天记录：按角色（总管 / 每个活跃执事 / 普通 worker）显式装配
+ * 不创建会话、不读聊天记录：按角色（总管 / 每个活跃执事 / 派活工人（池））显式装配
  * “全新会话会读到的固定前缀”。工具取真实 extension；技能走预览索引不冻结；
  * 记忆只回预算，不回召回正文。
  * 回滚同上：`CHAT_CONTEXT_INSPECT=false` → 404。
@@ -2871,7 +2881,7 @@ mountWorkerPersonaRoutes(app);
 // 关于我 GET/PUT（2026-11-19）：全局一份 + 每 Agent 读取开关；鉴权同上。
 mountUserProfileRoutes(app);
 
-// native worker 工具面 GET/PUT（2026-11-17 批4）：普通助手页勾选，仅本机工人。
+// 本机 worker 工具面 GET/PUT（2026-11-17 批4）：普通助手页勾选，池按 run.tools 下发。
 mountWorkerToolsRoutes(app);
 
 /** 内容级跨会话搜索（批次二）：逐会话 LIKE，q 最少 2 字符（见接口文档 §2.5） */

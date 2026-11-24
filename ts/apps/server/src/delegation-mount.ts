@@ -273,7 +273,7 @@ export function mountDelegationApi(app: Hono, opts: DelegationApiOptions = {}): 
 	}
 
 	// ── worker 插话通道（2026-11-19 插话统一 批1）────────────
-	// 人的插话入口：把一条消息经 native 通道转给**正在跑**的 worker 子进程。
+	// 人的插话入口：把一条消息经池控制面转给**正在跑**的 worker。
 	// mode 默认 steer（插进当前轮）；回滚 WORKER_STEER_ENABLED=false → 端点 400
 	// （通道下架但路由保留——404 是"没有这个功能"，400 是"功能被关了"，两者分开）。
 	// 外部 CLI 打手没有注入口，命中时 400 worker_not_running（边界如实写）。

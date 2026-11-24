@@ -36,7 +36,7 @@ export interface SupervisorConfig {
 }
 
 export const DEFAULT_SUPERVISOR_CONFIG: SupervisorConfig = {
-	poolSize: 4,
+	poolSize: 8,
 	recycleTickets: 20,
 	rssLimitMb: 1500,
 	backoffBaseMs: 1000,

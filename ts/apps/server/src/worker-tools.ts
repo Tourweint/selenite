@@ -1,5 +1,5 @@
 /**
- * native worker 工具面配置（2026-11-17 通用 worker 配置统一 批4）。
+ * 本机 worker 工具面配置（2026-11-17 通用 worker 配置统一 批4）。
  *
  * 用户在「普通助手」页勾选本机工人能用哪几件工具；落点 `.data/worker-tools.json`
  * （`{disabled: string[]}` 取消名单，路径可用 WORKER_TOOLS_PATH 覆盖）。
@@ -93,7 +93,7 @@ export interface WorkerToolsPayload {
   disabled: string[];
   /** 每件工具当前是否可用（canonical 全集 × 取消名单）。 */
   enabled: Record<string, boolean>;
-  /** 实际会下发给 native worker 的补集（canonical 序；空数组 = 真零工具）。 */
+  /** 实际会下发给本机池的补集（canonical 序；空数组 = 真零工具）。 */
   granted: string[];
   dispatch: boolean;
   /** 上报通道（escalate，2026-11-21）：不在四件勾选里，恒开（WORKER_ESCALATE_TOOL=false 才关）。 */

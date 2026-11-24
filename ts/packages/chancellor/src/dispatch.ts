@@ -1,12 +1,18 @@
 import fs from "node:fs";
 import path from "node:path";
-import { EMPLOYEE, externalResumeEnabled } from "./config.ts";
+import { EMPLOYEE, cliStreamEventsEnabled, externalResumeEnabled } from "./config.ts";
 import {
   capabilitiesOf,
   createEmployee,
   resumeEmployee,
   type Employee,
 } from "./employee/index.ts";
+import {
+  appendStep,
+  STEPS_FILE,
+  summarizeSteps,
+  type CliStepEvent,
+} from "./employee/steps.ts";
 import { ensureDir, readJson, writeJson, writeText } from "./store.ts";
 import { buildWorkerPrompt, renderUpstream } from "./worker-prompt.ts";
 import type {
@@ -14,6 +20,7 @@ import type {
   DependencyReport,
   EmployeeProfile,
   PlannedTask,
+  ProjectRootRef,
   TaskRun,
   Ticket,
   WorkerAttention,
@@ -45,12 +52,26 @@ export interface DispatchOptions {
   /** 隔离执行的项目副本 / 项目根；不传就是老行为（task 目录即工作目录）。 */
   workDir?: string;
   /**
-   * worker 跑动中的决策上报回调（2026-11-19 批2）。只对 native worker 生效
-   * （stderr 结构行）；不传 = 旧行为。chancellor 不解读内容，只透传给雇员。
+   * 项目全部文件夹（2026-11-24）：主文件夹之外的额外根，直接读写真实目录，
+   * 不进 worktree / 不合并。隔离形态下不含 primary（primary 以 workDir 副本呈现）。
+   * 不传 = 旧行为（只知道 workDir）。
+   */
+  projectRoots?: readonly ProjectRootRef[];
+  /**
+   * worker 跑动中的决策上报回调（2026-11-19 批2）。只对本机池生效
+   * （SSE escalation 事件）；外部 CLI 没有这条通道。不传 = 旧行为。
+   * chancellor 不解读内容，只透传给雇员。
    */
   onEscalation?: (escalation: WorkerEscalation) => void;
   /** 测试注入：给假雇员；默认按 kind 建真雇员。 */
   employeeFactory?: (kind: WorkerKind) => Employee;
+  /**
+   * 外部 CLI 的步骤回调（2026-11-23 流式事件）：每采集到一步调一次，
+   * 由 scheduler 包成 `step` 事件推给任务中心。不传 = 只落 steps.jsonl。
+   */
+  onStep?: (seq: number, slug: string, step: CliStepEvent) => void;
+  /** 测试注入：是否采集步骤；缺省读 CHANCELLOR_CLI_STREAM_EVENTS。 */
+  streamEvents?: boolean;
 }
 
 /**
@@ -93,6 +114,7 @@ const EXTERNAL_CLI_KINDS = new Set<WorkerKind>([
   "claude-code",
   "codex",
   "opencode",
+  "doubao",
 ]);
 
 export function isExternalCli(kind: WorkerKind): boolean {
@@ -166,11 +188,24 @@ export async function dispatchTask(
     };
   }
   ensureDir(dir);
+  // 步骤文件与本次尝试同生命周期：重试 / 续跑开头先清掉上一轮的，避免把旧步骤当新过程。
+  const stepsFile = path.join(dir, STEPS_FILE);
+  fs.rmSync(stepsFile, { force: true });
+  const captureSteps = options.streamEvents ?? cliStreamEventsEnabled();
+  const steps: CliStepEvent[] = [];
+  const stepSink = captureSteps
+    ? (step: CliStepEvent): void => {
+        steps.push(step);
+        appendStep(stepsFile, step);
+        options.onStep?.(seq, task.slug, step);
+      }
+    : undefined;
   const prompt = buildWorkerPrompt(
     task,
     dirName,
     deps,
     workDir ? { workDir, taskDir: dir } : undefined,
+    options.projectRoots,
   );
   writeText(path.join(dir, "TASK.md"), prompt);
 
@@ -184,17 +219,21 @@ export async function dispatchTask(
     instruction: task.instruction,
     doneWhen: task.done_when,
     upstream: deps.length === 0 ? "" : renderUpstream(deps),
+    writes: task.writes,
     dir,
     ...(workDir ? { workDir } : {}),
+    ...(options.projectRoots?.length ? { projectRoots: [...options.projectRoots] } : {}),
     // 只有分档判成真续接才把会话号交给雇员；重派时故意不传，避免假续接。
     ...(resumeDecision?.mode === "session" && storedSessionId
       ? { sessionId: storedSessionId }
       : {}),
     // 模型 / 权限：建单快照或当前派单参数；没有就不传，雇员回落到 env 缺省。
     ...(options.employeeProfile ? { settings: options.employeeProfile } : {}),
-    // 决策上报（2026-11-19 批2）：native worker 跑动中的上报经 stderr 结构行回到这里，
+    // 决策上报（2026-11-19 批2）：池 worker 跑动中的上报经 SSE 事件回到这里，
     // 再沿 onEscalation 上送；续跑（resume）同样带上。
     ...(options.onEscalation ? { onEscalation: options.onEscalation } : {}),
+    // 流式步骤（2026-11-23）：只有四档外部 CLI 会调用；不传 = 旧行为。
+    ...(stepSink ? { onStep: stepSink } : {}),
   };
   const response =
     resumeAnswer === undefined
@@ -218,6 +257,7 @@ export async function dispatchTask(
   const parsed: ParsedReport = reportExists
     ? parseWorkerReport(reportRaw)
     : { report: null, error: "REPORT.md 缺失" };
+  const toolStats = summarizeSteps(steps);
 
   return {
     ticketId: ticket.id,
@@ -239,6 +279,7 @@ export async function dispatchTask(
     reportError: parsed.error,
     stderrTail: response.stderrTail,
     ...(workDir ? { workDir } : {}),
+    ...(toolStats.total > 0 || toolStats.failed > 0 ? { toolStats } : {}),
   };
 }
 

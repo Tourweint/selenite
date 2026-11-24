@@ -6,14 +6,17 @@ import type {
   EmployeeProfile,
   PlannedTask,
   ProjectRef,
+  ProjectRootRef,
   Task,
+  TaskIsolation,
   TaskRun,
   Ticket,
   WorkerKind,
 } from "./types.ts";
 import type { WorkerEscalation } from "./escalation-payload.ts";
+import type { CliStepEvent } from "./employee/steps.ts";
 import { dispatchTask, taskDirName, type DispatchOptions } from "./dispatch.ts";
-import { MAX_PARALLEL_TASKS, TASK_ISOLATION } from "./config.ts";
+import { MAX_PARALLEL_TASKS, TASK_ISOLATION, projectRootsDispatchEnabled } from "./config.ts";
 import {
   classifyRunFailure,
   cooldownUntil,
@@ -81,6 +84,8 @@ export interface ScheduleOptions {
    * 由 chancellor 入口层统一发射 escalation 事件；不传 = 旧行为。
    */
   onEscalation?: (escalation: WorkerEscalation) => void;
+  /** 外部 CLI 的步骤事件（2026-11-23 流式事件）：原样递到 dispatch。 */
+  onStep?: (seq: number, slug: string, step: CliStepEvent) => void;
   /**
    * 任务卡在执行器车道上时的回调（2026-11-22 M1a）：车道的 onWait 只叫一次。
    * 调度路径用它发 task-waiting 让任务中心看得见排队；续跑单不传 = 静默等。
@@ -92,7 +97,8 @@ export interface ScheduleOptions {
   onlySeqs?: number[];
   /** 测试注入；默认真的派活。 */
   runner?: TaskRunner;
-  isolation?: "worktree" | "direct";
+  /** 单张任务也吃按单隔离（2026-11-23）：续跑按原单快照传进来；不传 = 全局缺省。 */
+  isolation?: TaskIsolation;
   maxParallel?: number;
   /**
    * 失败自动重试（2026-11-22 M3）。默认开；`CHANCELLOR_RETRY_ENABLED=false`
@@ -184,6 +190,7 @@ export async function runScheduledTasks(options: ScheduleOptions): Promise<Sched
             ...(employeeProfile ? { employeeProfile } : {}),
             runner,
             ...(options.onEscalation ? { onEscalation: options.onEscalation } : {}),
+            ...(options.onStep ? { onStep: options.onStep } : {}),
             onTaskWaiting: (waitSeq, waitSlug, reason) => {
               // 车道排队复用 task-waiting：契约里 waitingOn 本来就是「在等什么」，
               // 不新增对外状态（方案 §七）。
@@ -291,6 +298,8 @@ interface ExecuteOptions {
   runner: TaskRunner;
   /** worker 跑动中的决策上报（批2）；经 dispatchExtra 原样递给雇员。 */
   onEscalation?: (escalation: WorkerEscalation) => void;
+  /** 外部 CLI 步骤（2026-11-23）；经 dispatchExtra 原样递给雇员。 */
+  onStep?: (seq: number, slug: string, step: CliStepEvent) => void;
   /** 卡在执行器车道时的回调（M1a）；不传 = 静默等（续跑单）。 */
   onTaskWaiting?: (seq: number, slug: string | undefined, reason: string) => void;
   gitIsolated: boolean;
@@ -319,8 +328,12 @@ export async function runSingleTask(options: {
   resumeAnswer?: string;
   /** worker 跑动中的决策上报（批2）：续跑的单也要能上报。 */
   onEscalation?: (escalation: WorkerEscalation) => void;
+  /** 外部 CLI 步骤（2026-11-23）：续跑的单也要能看到过程。 */
+  onStep?: (seq: number, slug: string, step: CliStepEvent) => void;
   /** 崩溃恢复：接着用上次保留下来的副本。 */
   resumeWorktreePath?: string;
+  /** 续跑沿用原单的隔离快照（2026-11-23）；不传 = 全局 `CHANCELLOR_TASK_ISOLATION`。 */
+  isolation?: TaskIsolation;
 }): Promise<TaskExecutorResult> {
   const ticketDir = options.store.ticketDir(options.ticket.id);
   return executeTask(
@@ -335,7 +348,10 @@ export async function runSingleTask(options: {
       ...(options.employeeProfile ? { employeeProfile: options.employeeProfile } : {}),
       runner: dispatchTask,
       ...(options.onEscalation ? { onEscalation: options.onEscalation } : {}),
-      gitIsolated: TASK_ISOLATION === "worktree" && isGitProject(options.project),
+      ...(options.onStep ? { onStep: options.onStep } : {}),
+      gitIsolated:
+        (options.isolation ?? TASK_ISOLATION) === "worktree" &&
+        isGitProject(options.project),
       ...(options.resumeWorktreePath
         ? { resumeWorktreePath: options.resumeWorktreePath }
         : {}),
@@ -470,6 +486,7 @@ async function executeAttempt(
         .map((item) => normalizeProjectPath(item))
         .filter((item): item is string => Boolean(item))
     : [];
+  const projectRoots = taskProjectRoots(project, options.gitIsolated);
   let lease: LeaseManager | null = null;
   let worktree: TaskWorktree | null = null;
   let queueMs = 0;
@@ -487,7 +504,9 @@ async function executeAttempt(
     const run = await runner(ticket, task, seq, ticketDir, signal, deps, {
       ...options.dispatchExtra,
       employeeKind,
+      ...(projectRoots ? { projectRoots } : {}),
       ...(options.onEscalation ? { onEscalation: options.onEscalation } : {}),
+      ...(options.onStep ? { onStep: options.onStep } : {}),
       ...(options.employeeProfile ? { employeeProfile: options.employeeProfile } : {}),
     });
     return { result: { run }, executed: false, durationMs: 0, queueMs, worktreeMs };
@@ -544,7 +563,9 @@ async function executeAttempt(
     const run = await runner(ticket, task, seq, ticketDir, signal, deps, {
       ...options.dispatchExtra,
       employeeKind,
+      ...(projectRoots ? { projectRoots } : {}),
       ...(options.onEscalation ? { onEscalation: options.onEscalation } : {}),
+      ...(options.onStep ? { onStep: options.onStep } : {}),
       ...(options.employeeProfile ? { employeeProfile: options.employeeProfile } : {}),
       ...(workDir ? { workDir } : {}),
     });
@@ -599,6 +620,27 @@ async function executeAttempt(
  * 取车道槽位；车道在额度冷却时等它到期（不消耗 attempt，任务中心显示冷却到几点），
  * 其余情况与 M1a 一致：容量满就排队。取消立即返回 not-granted，交给 dispatch 收尾。
  */
+/**
+ * 本次任务可访问的项目文件夹（2026-11-24 派活按项目下发）。
+ *
+ * - 主文件夹走 worktree / 合并 / 租约，隔离形态下工人看到的是 `workDir` 副本，
+ *   **真实主文件夹不下发**（否则绕过副本直写项目）；
+ * - 非隔离形态下发全部 roots（`workDir` 可能只是其中一个子目录）；
+ * - 其他文件夹始终是共享读写：不进 worktree、不合并、不租约。
+ * - 回滚开关关掉 / 项目没有 roots → undefined（回到"只给主文件夹"）。
+ */
+export function taskProjectRoots(
+  project: ProjectRef | undefined,
+  isolated: boolean,
+): ProjectRootRef[] | undefined {
+  if (!project?.roots?.length) return undefined;
+  if (!projectRootsDispatchEnabled()) return undefined;
+  const roots = isolated
+    ? project.roots.filter((root) => root.role !== "primary")
+    : project.roots;
+  return roots.length > 0 ? roots.map((root) => ({ ...root })) : undefined;
+}
+
 async function acquireLaneForTask(options: ExecuteOptions): Promise<LaneLease> {
   const { seq, task, signal, employeeKind } = options;
   while (true) {

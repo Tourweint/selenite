@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -13,11 +13,26 @@ import {
 	parseCodexStdout,
 } from "../../../packages/chancellor/src/employee/codex.ts";
 import {
+	buildDoubaoInvocation,
+	createDoubaoEmployee,
+	doubaoPermissionMode,
+	interpretDoubao,
+	parseDoubaoStdout,
+	type DoubaoCall,
+} from "../../../packages/chancellor/src/employee/doubao.ts";
+import {
 	buildOpencodeInvocation,
 	parseOpencodeStdout,
 } from "../../../packages/chancellor/src/employee/opencode.ts";
-import { resolveCliLauncher } from "../../../packages/chancellor/src/employee/cli.ts";
+import {
+	resolveCliLauncher,
+	runCliProcess,
+} from "../../../packages/chancellor/src/employee/cli.ts";
 import { profileEnv, resolveProfile } from "../../../packages/chancellor/src/config.ts";
+import {
+	DOUBAO_MODEL,
+	DOUBAO_PERMISSION,
+} from "../../../packages/chancellor/src/config.ts";
 
 /* ── Claude Code ─────────────────────────────────────────── */
 
@@ -136,6 +151,68 @@ test("Codex：长提示用 - 从 stdin 读", () => {
 	assert.ok(invocation.args.includes("read-only"));
 });
 
+test("Codex：turn.completed 之后的元数据 error 不推翻成功（2026-11-23 实测形状）", () => {
+	// 本机 0.163.0 + magpie 网关正常成功的真实 stdout（service tier 提示 + 完整回合）。
+	const metadata = JSON.stringify({
+		type: "item.completed",
+		item: {
+			id: "item_0",
+			type: "error",
+			message:
+				"Configured service tier `priority` is not advertised as supported for model `auto/glm-5.3-flash` and will be omitted from requests.",
+		},
+	});
+	const parsed = parseCodexStdout(
+		[
+			JSON.stringify({ type: "thread.started", thread_id: "th-9" }),
+			metadata,
+			JSON.stringify({ type: "turn.started" }),
+			JSON.stringify({
+				type: "item.completed",
+				item: { type: "agent_message", text: "BLUE-OTTER-42" },
+			}),
+			JSON.stringify({ type: "turn.completed", usage: {} }),
+		].join("\n"),
+		0,
+	);
+	assert.equal(parsed.ok, true);
+	assert.equal(parsed.text, "BLUE-OTTER-42");
+	assert.equal(parsed.error, null);
+
+	// 只有 error 事件、没有 turn.completed：软错误仍要判失败。
+	const noTurn = parseCodexStdout(
+		[
+			JSON.stringify({ type: "thread.started", thread_id: "th-9" }),
+			metadata,
+		].join("\n"),
+		0,
+	);
+	assert.equal(noTurn.ok, false);
+	assert.match(noTurn.error ?? "", /service tier/);
+});
+
+test("Codex：致命 error 即使有 turn.completed 也判失败（模型不存在）", () => {
+	const fatal = JSON.stringify({
+		type: "error",
+		message:
+			'unexpected status 404 Not Found: magpie no longer serves "group/auto-model-does-not-exist-xyz"',
+	});
+	const parsed = parseCodexStdout(
+		[
+			JSON.stringify({ type: "thread.started", thread_id: "th-1" }),
+			fatal,
+			JSON.stringify({
+				type: "item.completed",
+				item: { type: "agent_message", text: "按理说不该有结论" },
+			}),
+			JSON.stringify({ type: "turn.completed", usage: {} }),
+		].join("\n"),
+		0,
+	);
+	assert.equal(parsed.ok, false);
+	assert.match(parsed.error ?? "", /no longer serves/);
+});
+
 test("Codex：thread.started 拿会话号，turn.failed 判失败，退出码非 0 判失败", () => {
 	const ok = parseCodexStdout(
 		[
@@ -249,6 +326,173 @@ test("OpenCode：退出码 0 但带 error 事件必须判失败（实测踩过�
 	});
 });
 
+/* ── 豆包 CLI（2026-11-23）────────────────────────────────── */
+
+test("豆包：-C 必须在首个参数；短提示进 argv，read 档退到 ask_risky", () => {
+	const invocation = buildDoubaoInvocation(
+		"只回答 OK",
+		"D:/work",
+		"person-deepseek-v4-1-flash-261017",
+		"read",
+	);
+	assert.equal(invocation.stdin, null);
+	assert.deepEqual(invocation.args, [
+		"-C",
+		"D:/work",
+		"--model",
+		"person-deepseek-v4-1-flash-261017",
+		"--permission-mode",
+		"ask_risky",
+		"-p",
+		"只回答 OK",
+		"--output-format",
+		"json",
+	]);
+	assert.equal(doubaoPermissionMode("edit"), "always_allow");
+	assert.equal(doubaoPermissionMode("full"), "always_allow");
+});
+
+test("豆包：长提示走 -p - + stdin；resume 带会话号；模型留空不传 --model", () => {
+	const longPrompt = "x".repeat(8001);
+	const invocation = buildDoubaoInvocation(
+		longPrompt,
+		"D:/work",
+		"",
+		"full",
+		"session-1",
+	);
+	assert.equal(invocation.stdin, longPrompt);
+	assert.ok(!invocation.args.includes(longPrompt));
+	assert.equal(invocation.args[0], "-C");
+	assert.ok(invocation.args.includes("-p"));
+	assert.equal(invocation.args[invocation.args.indexOf("-p") + 1], "-");
+	const resumeAt = invocation.args.indexOf("--resume");
+	assert.ok(resumeAt > 0);
+	assert.equal(invocation.args[resumeAt + 1], "session-1");
+	assert.ok(!invocation.args.includes("--model"));
+	// 续跑参数必须在 -p 之前。
+	assert.ok(resumeAt < invocation.args.indexOf("-p"));
+});
+
+test("豆包：正文在 result.content；is_error / 空结果 / 无 result 行都判失败", () => {
+	const ok = parseDoubaoStdout(
+		JSON.stringify({
+			type: "result",
+			subtype: "success",
+			is_error: false,
+			session_id: "d-1",
+			result: { type: "text", content: "收到" },
+			tool_calls: [],
+		}),
+	);
+	assert.deepEqual(ok, {
+		result: "收到",
+		sessionId: "d-1",
+		isError: false,
+		found: true,
+		error: null,
+		toolCalls: [],
+		toolCallsTruncated: false,
+	});
+	assert.equal(interpretDoubao(JSON.stringify({ type: "result", result: { type: "text", content: "收到" } }), 0).ok, true);
+
+	const failed = parseDoubaoStdout(
+		JSON.stringify({
+			type: "result",
+			subtype: "error",
+			is_error: true,
+			session_id: "d-2",
+			result: { type: "text", content: "" },
+		}),
+	);
+	assert.equal(failed.isError, true);
+	assert.equal(
+		interpretDoubao(JSON.stringify({ type: "result", is_error: true, result: { type: "text", content: "x" } }), 0).ok,
+		false,
+	);
+	assert.equal(
+		interpretDoubao(JSON.stringify({ type: "result", result: { type: "text", content: "" } }), 0).ok,
+		false,
+	);
+	assert.equal(interpretDoubao("internal_error: 无法启动主任务", 1).ok, false);
+});
+
+test("runCliProcess：stdoutFile 走文件，不接管道也能拿到结果", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "doubao-file-"));
+	const file = join(dir, "stdout.json");
+	const payload = JSON.stringify({
+		type: "result",
+		subtype: "success",
+		is_error: false,
+		session_id: "d-file",
+		result: { type: "text", content: "收到" },
+	});
+	const result = await runCliProcess({
+		label: "doubao-test",
+		command: process.execPath,
+		args: ["-e", `process.stdout.write(${JSON.stringify(payload)})`],
+		stdin: null,
+		cwd: dir,
+		timeoutMs: 10_000,
+		stdoutFile: file,
+		interpret: interpretDoubao,
+	});
+	try {
+		assert.equal(result.ok, true);
+		assert.equal(result.result, "收到");
+		assert.equal(result.sessionId, "d-file");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("豆包 employee：产物只认任务目录 REPORT.md；settings 下传模型与权限；resume 带会话号", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "doubao-employee-"));
+	writeFileSync(join(dir, "TASK.md"), "TASK-BODY");
+	writeFileSync(join(dir, "REPORT.md"), "DONE");
+	const calls: DoubaoCall[] = [];
+	const employee = createDoubaoEmployee(async (call) => {
+		calls.push(call);
+		return {
+			ok: true,
+			result: "ok",
+			sessionId: "s-9",
+			isError: false,
+			permissionDenials: 0,
+			exitCode: 0,
+			timedOut: false,
+			aborted: false,
+			stderrTail: "",
+			error: null,
+		};
+	});
+	try {
+		const task = {
+			instruction: "do it",
+			doneWhen: "REPORT.md",
+			upstream: "",
+			dir,
+			settings: {
+				model: "person-deepseek-v4-pro-ga-260813",
+				permission: "read" as const,
+			},
+		};
+		const outcome = await employee.run(task);
+		assert.equal(outcome.reportRaw, "DONE");
+		assert.equal(outcome.sessionId, "s-9");
+		assert.equal(calls[0].prompt, "TASK-BODY");
+		assert.equal(calls[0].model, "person-deepseek-v4-pro-ga-260813");
+		assert.equal(calls[0].permission, "read");
+		assert.equal(calls[0].cwd, dir);
+
+		await employee.resume?.({ ...task, sessionId: "s-9" }, "同意");
+		assert.equal(calls[1].resumeSessionId, "s-9");
+		assert.equal(calls[1].prompt, "用户回复：同意");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
 /* ── npm shim 启动 ───────────────────────────────────────── */
 
 test("shim：.cmd 指向 .exe 时直接起 exe；指向 .js 时用 node 起", () => {
@@ -280,16 +524,35 @@ test("shim：.cmd 指向 .exe 时直接起 exe；指向 .js 时用 node 起", ()
 	assert.deepEqual(nodeLauncher.prefixArgs, [js]);
 });
 
-/* ── native 模型（2026-11-19 模型分工）────────────────────── */
+/* ── 本机池模型（2026-11-19 模型分工；2026-11-23 native 退役后只剩 pool）──── */
 
-test("resolveProfile：native 保留 model / modelRoute，空 model 不塞 profile", () => {
+test("豆包：默认模型是 DeepSeek V4.1 Flash；profileEnv 带模型与权限", () => {
+	// 默认档钉在 DeepSeek V4.1 Flash（用户口径：模型用 DeepSeek 就行）。
+	assert.equal(DOUBAO_MODEL, "person-deepseek-v4-1-flash-261017");
+	assert.deepEqual(resolveProfile("doubao", {}), {
+		model: DOUBAO_MODEL,
+		permission: DOUBAO_PERMISSION,
+	});
+	assert.deepEqual(
+		profileEnv("doubao", {
+			model: "person-deepseek-v4-pro-ga-260813",
+			permission: "read",
+		}),
+		{
+			CHANCELLOR_DOUBAO_MODEL: "person-deepseek-v4-pro-ga-260813",
+			CHANCELLOR_DOUBAO_PERMISSION: "read",
+		},
+	);
+});
+
+test("resolveProfile：本机池保留 model / modelRoute，空 model 不塞 profile", () => {
 	const route = { baseUrl: "https://provider.example/v1", keyEnv: "PROVIDER_KEY" };
 	assert.deepEqual(
-		resolveProfile("native", { model: " work-model ", modelRoute: route }),
+		resolveProfile("pool", { model: " work-model ", modelRoute: route }),
 		{ model: "work-model", modelRoute: route },
 	);
-	assert.deepEqual(resolveProfile("native", { model: "" }), {});
-	assert.deepEqual(resolveProfile("native", { modelRoute: route }), {});
+	assert.deepEqual(resolveProfile("pool", { model: "" }), {});
+	assert.deepEqual(resolveProfile("pool", { modelRoute: route }), {});
 	// 外部 CLI 的语义不变：显式模型 + 权限原样合并。
 	assert.deepEqual(
 		resolveProfile("claude-code", { model: "opus", permission: "read" }),
@@ -297,12 +560,12 @@ test("resolveProfile：native 保留 model / modelRoute，空 model 不塞 profi
 	);
 });
 
-test("profileEnv：native / pool 把模型路由翻成子进程 env；key 从宿主 env 现取", () => {
+test("profileEnv：本机池把模型路由翻成子进程 env；key 从宿主 env 现取", () => {
 	const prev = process.env.PROVIDER_KEY;
 	process.env.PROVIDER_KEY = "sk-test";
 	try {
 		assert.deepEqual(
-			profileEnv("native", {
+			profileEnv("pool", {
 				model: "work-model",
 				modelRoute: {
 					baseUrl: "https://provider.example/v1",
@@ -313,19 +576,6 @@ test("profileEnv：native / pool 把模型路由翻成子进程 env；key 从宿
 				CHANCELLOR_LLM_MODEL: "work-model",
 				CHANCELLOR_LLM_BASE_URL: "https://provider.example/v1",
 				// 2026-11-22：池桥子单要按变量名从自己的 env 取 key，值仍不过 HTTP。
-				CHANCELLOR_LLM_KEY_ENV: "PROVIDER_KEY",
-				CHANCELLOR_LLM_API_KEY: "sk-test",
-			},
-		);
-		// pool 与 native 同一条继承（manager 子进程里的池子单）。
-		assert.deepEqual(
-			profileEnv("pool", {
-				model: "work-model",
-				modelRoute: { baseUrl: "https://provider.example/v1", keyEnv: "PROVIDER_KEY" },
-			}),
-			{
-				CHANCELLOR_LLM_MODEL: "work-model",
-				CHANCELLOR_LLM_BASE_URL: "https://provider.example/v1",
 				CHANCELLOR_LLM_KEY_ENV: "PROVIDER_KEY",
 				CHANCELLOR_LLM_API_KEY: "sk-test",
 			},

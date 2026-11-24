@@ -14,11 +14,20 @@ export function buildManagerPrompt(
   project?: ProjectRef,
   identity?: { name: string; soul: string },
 ): string {
+  const rootLines = (project?.roots ?? []).map((root) => {
+    const label = root.label || (root.role === "primary" ? "主文件夹" : "文件夹");
+    return `  - ${label}：${root.path}`;
+  });
+  const rootsBlock =
+    rootLines.length > 0
+      ? `- 项目文件夹（派给工人的活可以用绝对路径进入这些目录）：\n${rootLines.join("\n")}`
+      : "";
   const projectBlock = project
     ? `
 ## 这张单的项目
 - 项目：${project.name || "(未命名)"}（${project.id}）
 - 根目录：${project.rootPath}
+${rootsBlock}
 - 这张单和它派出去的工人都落在这个项目里；不要再建新的项目根目录。
 - 你现在的工作目录仍然是 \`${meta.work_dir}\`（任务数据）。隔离执行与租约落地前，不要直接往项目根里写文件。
 `
@@ -43,8 +52,15 @@ ${identitySection}## 你的工具
   工作目录：${meta.work_dir}
   只在这个目录里读写；bash 也优先在这里运行。
 - \`delegate\`：把需要多步、多个文件或独立验收的活交给工人。
-  它只有 \`requirement\` 一个参数；它会自己拆单、派工人、验收，返回一行结论。
+  它收 \`requirement\` + \`tasks\`。**拆单是你的活**：多步活先自己拆成 1-5 个 task，再交给它；工人按 tasks 执行，它返回一行结论。
   \`delegate\` 不能指定领域，也不会再建分管宰相——递归在参数层就断了。
+
+## 拆 tasks（多步活必做）
+- 每个 task 四个必填：title / slug / instruction / done_when；slug 只用小写字母、数字、连字符。
+- writes 必填：这个 task 会写/删的项目内相对路径（相对项目根，用 / 分隔）；只读任务给 []。绝对路径和 .. 无效。
+- 写同一个文件的任务必须串成依赖，或者合并成一个 task；没有依赖关系的 task 可能并行。
+- dependsOn 是整数 seq 数组，只能依赖更小的 seq（不能依赖自己或后面的）。
+- 一个 task 只做一件事；一句话的小活可以只给 1 个 task，或者不给 tasks（整单一个任务）。
 
 ## 怎么干
 1. 一句话能答、一步能改的，自己做。

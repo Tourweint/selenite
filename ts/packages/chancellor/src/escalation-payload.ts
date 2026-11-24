@@ -1,20 +1,20 @@
 /**
- * worker 决策上报的线协议（2026-11-19 批2：worker→总管→用户上报链）。
+ * worker 决策上报的协议（2026-11-19 批2：worker→总管→用户上报链）。
  *
- * 通道复用（"别发明第二条"）：native worker 的 stderr 本来就是宿主在收的实时流
- * （employee/native.ts 逐块 tail），escalation 走同一条路——worker-main 把一条
- * `[escalate] {json}` 结构行写上 stderr，native.ts 逐行解析后经
- * `EmployeeTask.onEscalation` 回调沿既有事件链送回宿主。答复仍走批1 的 stdin
- * 插话通道（`forwardNativeWorkerMessage`），一个进程一对管道两个方向。
+ * 形状与序列化只定义一次：
+ * - 历史上的 native 子进程用 stderr 结构行（`[escalate] {json}`）把上报送回宿主；
+ *   该执行器已于 2026-11-23 退役，线协议保留给仍读它的工具 / 老代码；
+ * - 现在本机池把上报作为 SSE `escalation` 事件送回宿主（2026-11-22），
+ *   经 `EmployeeTask.onEscalation` 沿既有事件链分发。
  *
  * 这里放三样东西：
  * - `WorkerEscalation` 形状（escalate 工具参数 + 线上载荷同构）；
  * - `escalationLine` / `parseEscalationLine`：一行序列化与解析（纯函数，单测直喂）；
- * - 两个 env 读数（`WORKER_ESCALATE_TOOL` / `WORKER_TURN_BUDGET`），worker-main 与
- *   宿主侧都要读，放这里避免两边各抄一份读法。
+ * - 两个 env 读数（`WORKER_ESCALATE_TOOL` / `WORKER_TURN_BUDGET`），池与宿主侧
+ *   都要读，放这里避免两边各抄一份读法。
  *
- * 外部 CLI 执行器没有这条 stderr 协议（它们的 stderr 语义各异），escalation 只对
- * 本机 native worker 生效——边界如实写，不做模拟（AGENTS.md：未测量的不冒充已知）。
+ * 外部 CLI 执行器没有这条通道（它们的 stderr / 输出语义各异）——边界如实写，
+ * 不做模拟（AGENTS.md：未测量的不冒充已知）。
  */
 
 import process from "node:process";

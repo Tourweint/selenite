@@ -1,4 +1,5 @@
 import type { FailureClass } from "./failure-class.ts";
+import type { CliStepEvent, ToolStats } from "./employee/steps.ts";
 
 export type TicketStatus =
   | "received"
@@ -57,11 +58,13 @@ export interface WorkerEscalation {
 }
 
 /**
- * 干活的是谁：原生 pi-durable 实例、外部 CLI（qoder / CodeBuddy / Claude Code /
- * Codex / OpenCode）、MCP 服务器、手机，或分管宰相。
+ * 干活的是谁：本机执行器池（pi-durable 常驻进程）、外部 CLI（qoder / CodeBuddy /
+ * Claude Code / Codex / OpenCode / 豆包）、MCP 服务器、手机，或分管宰相。
+ *
+ * 2026-11-23 起旧的「每票一个裸子进程」（native）退役；历史 ticket.json 里的
+ * `employee:"native"` 由 `workerKindOf()` 映射到 pool。
  */
 export type EmployeeKind =
-  | "native"
   | "pool"
   | "mercenary"
   | "codebuddy"
@@ -70,6 +73,7 @@ export type EmployeeKind =
   | "claude-code"
   | "codex"
   | "opencode"
+  | "doubao"
   | "mcp"
   | "phone"
   | "manager";
@@ -81,17 +85,17 @@ export type WorkerKind = Exclude<EmployeeKind, "manager">;
 export type EmployeePermission = "read" | "edit" | "full";
 
 /**
- * 一次派单的雇员参数（2026-11-16 多 CLI 适配；2026-11-19 加 native 模型路由）。
+ * 一次派单的雇员参数（2026-11-16 多 CLI 适配；2026-11-19 加本机模型路由）。
  * 模型留空 = 不传参数，跟随 CLI 自己的配置；权限缺省 = full。
- * CodeBuddy / Qoder 只读 model，权限固定全权。
+ * 2026-11-23 起 CodeBuddy / Qoder 也吃 permission（映射到各自 `--permission-mode`）。
  */
 export interface EmployeeProfile {
   model?: string;
   permission?: EmployeePermission;
   /**
-   * 本机 native 工人的模型路由（2026-11-19 模型分工）：
+   * 本机池工人的模型路由（2026-11-19 模型分工）：
    * 从宿主已连接供应商解析出的 baseUrl + key 环境变量名；外部 CLI 不读。
-   * `keyEnv` 只是变量名，密钥值仍只在宿主 env 里，spawn 子进程时取。
+   * `keyEnv` 只是变量名，密钥值仍只在宿主 env 里，池进程按名自取。
    */
   modelRoute?: { baseUrl: string; keyEnv: string };
 }
@@ -145,6 +149,15 @@ export interface DependencyReport {
   artifactPaths: string[];
 }
 
+/** 项目里的一个文件夹（2026-11-24 派活按项目下发）。 */
+export interface ProjectRootRef {
+  id?: string;
+  label: string;
+  /** realpath 归一后的绝对路径。 */
+  path: string;
+  role: "primary" | "extra";
+}
+
 /** 已登记项目的最小引用；由总管（harness）校验并下发，chancellor 只记录与透传。 */
 export interface ProjectRef {
   id: string;
@@ -156,7 +169,19 @@ export interface ProjectRef {
   head?: string | null;
   /** 总管给这个项目留的数据目录（租约、worktree）；chancellor 只往里写。 */
   dataDir?: string;
+  /**
+   * 项目全部文件夹（2026-11-24）：主文件夹仍走 worktree / 合并，其他文件夹共享读写真实目录。
+   * 旧调用方不传 = 只有 rootPath，行为不变。
+   */
+  roots?: ProjectRootRef[];
 }
+
+/**
+ * 按单隔离（2026-11-23）：worktree = 改在副本里、按租约合并；
+ * direct = 直接写项目目录。缺省 = 跟随 `CHANCELLOR_TASK_ISOLATION`。
+ * 内部只存这两个值；宿主传 "auto" 等于不写快照。
+ */
+export type TaskIsolation = "worktree" | "direct";
 
 export interface TicketOptions {
   dry: boolean;
@@ -176,6 +201,11 @@ export interface TicketOptions {
    * 不传 = 项目主文件夹；gitIsolated 走 worktree 时本字段不生效。
    */
   workDir?: string;
+  /**
+   * 按单隔离快照（2026-11-23）：worktree / direct 才落键；
+   * 缺省 = 跟随 `CHANCELLOR_TASK_ISOLATION`（续跑 / 崩溃恢复按快照走）。
+   */
+  isolation?: TaskIsolation;
 }
 
 export interface Ticket {
@@ -289,6 +319,9 @@ export interface ExternalCliResult {
   error: string | null;
 }
 
+/** 豆包 CLI 的结果（2026-11-23）：字段与外部 CLI 同一套；豆包没有 permission_denials，按 0 记。 */
+export type DoubaoResult = ExternalCliResult;
+
 export interface TaskRun {
   ticketId: string;
   seq: number;
@@ -322,6 +355,11 @@ export interface TaskRun {
    * 「没认出发败因」，调用方不能拿它当失败去重试。
    */
   failureClass?: FailureClass;
+  /**
+   * 外部 CLI 的步骤统计（2026-11-23 流式事件）：只有采集到事件才出现。
+   * 用于结果回写时补一行统计；不参与任何成败判定。
+   */
+  toolStats?: ToolStats;
 }
 
 /** 分管宰相这一轮的结论；落在 plan.json 的 manager 块里。 */
@@ -408,6 +446,8 @@ export interface ChancellorRequest {
    * 原样落进 ticket.json.steps，并交给规划器；不传 = 旧行为。
    */
   steps?: string[];
+  /** 总管/领域经理直接拆好的任务（2026-11-23）；不传 = 整单一个任务。 */
+  tasks?: unknown;
   /**
    * 用哪个 worker 雇员（2026-11-16 多 CLI 适配）。不传 = 全局 `CHANCELLOR_EMPLOYEE`。
    * 只影响新单；续跑按 ticket.employee 原样走。
@@ -423,6 +463,12 @@ export interface ChancellorRequest {
    * 只影响新单；不传 = 项目主文件夹；gitIsolated 时仍以 worktree 为准。
    */
   workDir?: string;
+  /**
+   * 按单隔离（2026-11-23）：worktree = 这张单强制隔离（非 git 项目回落 direct）；
+   * direct = 直接在项目目录干；auto / 不传 = 跟随 `CHANCELLOR_TASK_ISOLATION`。
+   * 只有 worktree / direct 落进 ticket.options 快照；续跑 / 崩溃恢复按快照走。
+   */
+  isolation?: TaskIsolation | "auto";
 }
 
 export type ChancellorEventType =
@@ -432,6 +478,8 @@ export type ChancellorEventType =
   | "task-start"
   | "task-done"
   | "task-waiting"
+  /** 外部 CLI 的一步（2026-11-23 流式事件）：只给任务中心看，不进模型上下文。 */
+  | "step"
   | "finished"
   /** worker 跑动中的决策上报（2026-11-19 批2）：escalation 专用类型。 */
   | "escalation";
@@ -448,6 +496,8 @@ export interface ChancellorEvent {
   waitingOn?: string;
   /** 只有 escalation 事件带：上报的原始载荷（2026-11-19 批2，宿主照搬进对外事件）。 */
   escalation?: WorkerEscalation;
+  /** 只有 step 事件带：统一的 CLI 步骤（2026-11-23）。 */
+  step?: CliStepEvent;
 }
 
 export interface ChancellorTaskResult {
@@ -469,6 +519,14 @@ export interface PlannedTaskInfo {
   dependsOn: number[];
 }
 
+export interface TicketFailure {
+  /** FailureClass 的字符串形式；types 不反向 import failure-class，避免循环。 */
+  class: string;
+  retryable: boolean;
+  canceled?: boolean;
+  timedOut?: boolean;
+}
+
 export interface TicketResult {
   ticketId: string;
   status: TicketOutcomeStatus;
@@ -476,6 +534,8 @@ export interface TicketResult {
   tasks: ChancellorTaskResult[];
   /** 整单第一个还没人回答的问题；没有就是 undefined。宿主据此出卡片。 */
   attention?: WorkerAttention;
+  /** 终止回执（2026-11-23）：失败/中止的结构化信息，宿主转给派活人。 */
+  failure?: TicketFailure;
   /** 只有 --dry 时有值：拆出但尚未执行的任务。 */
   plannedTasks?: PlannedTaskInfo[];
 }

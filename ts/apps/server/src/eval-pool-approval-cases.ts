@@ -191,9 +191,11 @@ const UNATTENDED_CASES: EvalCase<UnattendedEvalInput>[] = [
 		expected: "deny",
 	},
 	{
-		id: "unattended-persona-recall-skip",
+		// 2026-11-24 旧形态退役：persona_recall 案例随工具删除；holdout 补一个
+		// 「写盘 / 起进程 → skip」的等价边界（partner_skill_write 写执事技能文件）。
+		id: "unattended-partner-skill-write-skip",
 		pool: "holdout",
-		input: { tool: "persona_recall" },
+		input: { tool: "partner_skill_write" },
 		expected: "skip",
 	},
 ];

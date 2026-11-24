@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { test } from "node:test";
 import { ToolTask, type ToolHookCall } from "@earendil-works/pi-durable";
-import { buildPoolRegistry, POOL_ALLOWED_TOOLS, pathBlockReason, poolToolCatalog, type PoolToolDeps } from "./pool-tools.ts";
+import { buildPoolRegistry, POOL_ALLOWED_TOOLS, pathBlockReason, poolBoundaryDirs, poolToolCatalog, type PoolToolDeps } from "./pool-tools.ts";
 import { POOL_TOOL_NAMES } from "./task-profile.ts";
 
 /**
@@ -65,6 +65,21 @@ test("bash 与 escalate 不参与路径判定", () => {
 	assert.equal(pathBlockReason("bash", { command: "cat ../../../etc/passwd" }, DIRS), undefined);
 	assert.equal(pathBlockReason("bash", { path: path.resolve("..", "x") }, DIRS), undefined);
 	assert.equal(pathBlockReason("escalate", { question: "选 A 还是 B" }, DIRS), undefined);
+});
+
+test("项目其他文件夹进边界（2026-11-24）：额外根可读写，界外仍拦", () => {
+	const extra = path.resolve("pool-test-root", "repo-phone");
+	const dirs = poolBoundaryDirs(TASK_DIR, WORK_DIR, [{ path: extra }]);
+	assert.deepEqual(dirs, [TASK_DIR, WORK_DIR, extra]);
+	assert.equal(pathBlockReason("write", { path: path.join(extra, "app.kt") }, dirs), undefined);
+	assert.equal(pathBlockReason("edit", { path: path.join(extra, "build.gradle") }, dirs), undefined);
+	const outside = path.resolve("pool-test-root", "other-user", "secret.txt");
+	assert.ok(pathBlockReason("write", { path: outside }, dirs), "额外根之外仍必须拦");
+});
+
+test("边界目录去重：roots 与 workDir 重合不重复", () => {
+	const dirs = poolBoundaryDirs(TASK_DIR, WORK_DIR, [{ path: WORK_DIR }, { path: WORK_DIR }]);
+	assert.deepEqual(dirs, [TASK_DIR, WORK_DIR]);
 });
 
 test("没有 path 参数 / path 不是字符串：放行，交给内核 schema 校验", () => {

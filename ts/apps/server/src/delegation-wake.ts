@@ -445,6 +445,15 @@ export function buildWakePrompt(reports: DelegationReport[]): string {
 		if (report.resume) {
 			out += `\n  续接：子单 ${report.resume.id}，子会话 ${report.resume.conversationId} 仍在，已知进展：${report.resume.partialReport}`;
 		}
+		// 终止回执（2026-11-23）：失败 / 中止的结构化原因，派活人据此决定重试还是换路。
+		if (report.failure) {
+			const flags = [
+				report.failure.retryable ? "可重试" : "不可重试",
+				report.failure.timedOut ? "超时" : "",
+				report.failure.canceled ? "已中止" : "",
+			].filter(Boolean).join("，");
+			out += `\n  终止：${report.failure.class}（${flags}）`;
+		}
 		return out;
 	});
 	return [header, ...lines].join("\n");

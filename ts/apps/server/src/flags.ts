@@ -351,6 +351,15 @@ export function chatProjectLabelEnabled(env: NodeJS.ProcessEnv = process.env): b
 	return flagEnabled("CHAT_PROJECT_LABEL", env);
 }
 
+/**
+ * 领域派活入口（2026-11-23 关闭领域派活入口·代码保留）。
+ * 默认关：`delegate` 不暴露 `domain`，旧调用 / 旧会话带的 `domain` 也在执行层忽略，
+ * 一律无领域直派 worker；开：恢复领域负责人（分管宰相）路径。manager 模块一行没删。
+ */
+export function domainDispatchEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	return flagEnabled("CHANCELLOR_DOMAIN_DISPATCH", env);
+}
+
 export function flagsPath(env: NodeJS.ProcessEnv = process.env): string {
 	return resolve(env.AGENT_FLAGS_PATH?.trim() || ".data/agent-flags.json");
 }

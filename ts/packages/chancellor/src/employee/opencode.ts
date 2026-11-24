@@ -19,6 +19,7 @@ import {
   runCliProcess,
   STDIN_PROMPT_THRESHOLD,
 } from "./cli.ts";
+import { compact, makeStep, toolDetail, type CliStepEvent } from "./steps.ts";
 import type { Employee, EmployeeOutcome, EmployeeTask } from "./index.ts";
 import { buildResumePrompt, readTaskPrompt } from "./task-prompt.ts";
 
@@ -52,6 +53,8 @@ export interface OpencodeCall {
   label: string;
   resumeSessionId?: string | null;
   signal?: AbortSignal;
+  /** 流式事件（2026-11-23）：给回调时逐行映射 tool_use / error。 */
+  onStep?: (step: CliStepEvent) => void;
 }
 
 export interface OpencodeInvocation {
@@ -136,6 +139,66 @@ export function parseOpencodeStdout(
   return { ok: true, sessionId, text, error: null };
 }
 
+/**
+ * 把 OpenCode `--format json` 的一行映射成统一事件（2026-11-23 实测形状）：
+ * `{"type":"tool_use","part":{"type":"tool","tool":"read","state":{"status":"completed",
+ *   "input":{"path":...},"output":"..."}}}`。
+ * 只在工具落定（completed / error）时记一次；text / step_finish 不产生事件。
+ */
+export function parseOpencodeStepLine(
+  line: string,
+  seen: Set<string> = new Set(),
+): CliStepEvent[] {
+  const event = parseJsonObject(line);
+  if (!event) return [];
+  if (event.type === "error") {
+    return [
+      makeStep({
+        type: "status",
+        name: "opencode",
+        detail: compact(errorMessageOf(event) ?? "opencode 报错", 80),
+        failed: true,
+      }),
+    ];
+  }
+  if (event.type !== "tool_use") return [];
+  const part = isRecord(event.part) ? event.part : null;
+  if (!part || part.type !== "tool") return [];
+  const state = isRecord(part.state) ? part.state : null;
+  const status = typeof state?.status === "string" ? state.status : "";
+  if (status !== "completed" && status !== "error") return [];
+  const id = typeof part.id === "string" ? part.id : "";
+  if (id !== "") {
+    if (seen.has(id)) return [];
+    seen.add(id);
+  }
+  const tool = typeof part.tool === "string" ? part.tool : "tool";
+  const input = state?.input;
+  const failed = status === "error";
+  const detail = failed
+    ? compact(state?.error ?? part.title ?? "工具失败", 100)
+    : toolDetail(tool, input);
+  return [
+    makeStep({
+      type: "tool",
+      name: tool,
+      detail,
+      ...(failed ? { failed: true } : {}),
+    }),
+  ];
+}
+
+function parseJsonObject(line: string): Record<string, unknown> | null {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("{")) return null;
+  try {
+    const value: unknown = JSON.parse(trimmed);
+    return isRecord(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 /** 调一次 OpenCode；进程级超时与 abort 都走统一底座。 */
 export async function runOpencode(call: OpencodeCall): Promise<ExternalCliResult> {
   let launcher;
@@ -145,6 +208,8 @@ export async function runOpencode(call: OpencodeCall): Promise<ExternalCliResult
     return emptyCliResult({ error: messageOf(error) });
   }
   const invocation = buildOpencodeInvocation(call);
+  const onStep = call.onStep;
+  const seenTools = new Set<string>();
   return runCliProcess({
     label: "opencode",
     command: launcher.command,
@@ -157,6 +222,13 @@ export async function runOpencode(call: OpencodeCall): Promise<ExternalCliResult
     idleTimeoutMs: WORKER_IDLE_TIMEOUT_MS,
     maxTimeoutMs: WORKER_MAX_TIMEOUT_MS,
     signal: call.signal,
+    ...(onStep
+      ? {
+          onLine: (line: string) => {
+            for (const step of parseOpencodeStepLine(line, seenTools)) onStep(step);
+          },
+        }
+      : {}),
     interpret: (stdout, exitCode) => {
       const reading = parseOpencodeStdout(stdout, exitCode);
       return {
@@ -188,6 +260,7 @@ export function createOpencodeEmployee(
       timeoutMs: WORKER_TIMEOUT_MS,
       label: path.basename(task.dir),
       ...(sessionId ? { resumeSessionId: sessionId } : {}),
+      ...(task.onStep ? { onStep: task.onStep } : {}),
       signal,
     });
     return {

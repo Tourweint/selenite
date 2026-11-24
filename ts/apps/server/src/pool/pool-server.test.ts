@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import { test } from "node:test";
 import type { Hono } from "hono";
 import { RunQueue, type QueuedRun, type RunHandle, type RunResult } from "./run-queue.ts";
@@ -115,13 +116,22 @@ test("token 为空串 = 不校验（单测 / 本机调试形态）", async () =>
 
 test("正确 token + 完整 body：200 accepted 并真的开跑", async () => {
 	const { server, queue, runs } = setup();
-	const res = await postRun(server.app, runBody({ upstream: "上一票的结论", model: "p/m", tools: ["read"] }));
+	const res = await postRun(
+		server.app,
+		runBody({
+			upstream: "上一票的结论",
+			model: "p/m",
+			tools: ["read"],
+			writes: ["src/a.ts", "docs/**"],
+		}),
+	);
 	assert.equal(res.status, 200);
 	assert.deepEqual(await res.json(), { accepted: true, ticketId: "t1" });
 	assert.equal(queue.snapshot().activeTicket, "t1");
 	assert.equal(runs.length, 1);
 	assert.deepEqual(runs[0]!.run.upstream, "上一票的结论");
 	assert.deepEqual(runs[0]!.run.tools, ["read"]);
+	assert.deepEqual(runs[0]!.run.writes, ["src/a.ts", "docs/**"]);
 	const health = (await (await server.app.request("/health")).json()) as Record<string, unknown>;
 	assert.equal(health.activeTicket, "t1");
 });
@@ -138,6 +148,40 @@ test("缺必填字段（没 doneWhen）：400 bad_request，且不排队", async
 	assert.ok(String(json.message).includes("doneWhen"));
 	assert.equal(runs.length, 0);
 	assert.deepEqual(queue.snapshot().queued, []);
+});
+
+test("writes 不是字符串数组：400 bad_request，且不排队", async () => {
+	const { server, queue, runs } = setup();
+	const res = await postRun(server.app, runBody({ writes: [1] }));
+	assert.equal(res.status, 400);
+	const json = (await res.json()) as Record<string, unknown>;
+	assert.ok(String(json.message).includes("writes"));
+	assert.equal(queue.snapshot().activeTicket, null);
+	assert.equal(runs.length, 0);
+});
+
+test("roots：绝对路径进队列；相对路径 / 非法 role 一律 400", async () => {
+	const { server, queue, runs } = setup();
+	const extra = path.resolve("tmp", "repo-phone");
+	const ok = await postRun(
+		server.app,
+		runBody({ roots: [{ label: "手机端", path: extra, role: "extra" }] }),
+	);
+	assert.equal(ok.status, 200);
+	assert.deepEqual(runs[0]!.run.roots, [{ label: "手机端", path: extra, role: "extra" }]);
+
+	const relative = await postRun(
+		server.app,
+		runBody({ ticketId: "t2", roots: [{ label: "x", path: "relative/dir", role: "extra" }] }),
+	);
+	assert.equal(relative.status, 400);
+
+	const badRole = await postRun(
+		server.app,
+		runBody({ ticketId: "t3", roots: [{ label: "x", path: extra, role: "other" }] }),
+	);
+	assert.equal(badRole.status, 400);
+	assert.equal(queue.snapshot().queued.length, 0);
 });
 
 test("body 不是 JSON 对象 / 必填字段是空串：400", async () => {

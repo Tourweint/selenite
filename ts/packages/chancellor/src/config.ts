@@ -6,9 +6,10 @@ import type {
 } from "./types.ts";
 
 /**
- * 用哪种雇员干活：native（pi-durable 独立进程）、mercenary（qoder CLI）、
+ * 用哪种雇员干活：pool（本机执行器池，pi-durable 常驻进程）、mercenary（qoder CLI）、
  * codebuddy（CodeBuddy CLI）、claude-code / codex / opencode（2026-11-16 多 CLI 适配）、
- * mcp（外部 MCP 服务器，比如 Mika）或 phone（手机主动轮询）。默认 native。
+ * doubao（豆包 CLI）、mcp（外部 MCP 服务器，比如 Mika）或 phone（手机主动轮询）。
+ * 默认 pool；旧的 native（每票一个裸子进程）已于 2026-11-23 退役。
  */
 export const EMPLOYEE: WorkerKind = readEmployee();
 
@@ -23,12 +24,16 @@ function readEmployee(): WorkerKind {
     raw === "claude-code" ||
     raw === "codex" ||
     raw === "opencode" ||
+    raw === "doubao" ||
     raw === "mcp" ||
     raw === "phone"
   ) {
     return raw;
   }
-  return "native";
+  if (raw === "native") {
+    console.warn("[chancellor] CHANCELLOR_EMPLOYEE=native 已退役，按 pool 处理");
+  }
+  return "pool";
 }
 
 /** MCP 服务器地址；与 TOKEN 一起才算装好。 */
@@ -51,6 +56,18 @@ export const PHONE_TASK_BUDGET_MS = readPositiveInt(
   process.env.CHANCELLOR_PHONE_TASK_BUDGET_MS,
   10 * 60 * 1000,
 );
+
+/**
+ * 派活是否把项目的全部文件夹下发给工人（2026-11-24）。
+ *
+ * 默认开；`DELEGATION_PROJECT_ROOTS=0/false/off` 回到"只给主文件夹"的旧形态。
+ * 开关只决定**下发 / 边界**，不改项目登记与 worktree 语义：主文件夹始终是唯一的
+ * worktree / 合并 / 租约单位，其他文件夹始终是共享读写。
+ */
+export function projectRootsDispatchEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = env.DELEGATION_PROJECT_ROOTS?.trim().toLowerCase();
+  return !(raw === "0" || raw === "false" || raw === "off");
+}
 
 /** 缺配置时必须报错，绝不静默退回原生——否则人会以为活派到手机上了。 */
 export function assertMcpConfigured(): void {
@@ -91,6 +108,20 @@ export const QODER_CN_MODEL =
   process.env.CHANCELLOR_QODER_CN_MODEL?.trim() || MODEL;
 
 /**
+ * Qoder 国际版 / 国内版权限档（2026-11-23）：`read`→`dont_ask`、
+ * `edit`→`accept_edits`、`full`→`bypass_permissions`；纯问答路径仍固定 `dont_ask`。
+ */
+export const QODER_PERMISSION = readPermission(
+  process.env.CHANCELLOR_QODER_PERMISSION,
+  "full",
+);
+
+export const QODER_CN_PERMISSION = readPermission(
+  process.env.CHANCELLOR_QODER_CN_PERMISSION,
+  "full",
+);
+
+/**
  * CodeBuddy 可执行文件。装在 PATH 里，也可用 CHANCELLOR_CODEBUDDY_BIN 覆盖。
  */
 export const CODEBUDDY_BIN =
@@ -102,6 +133,15 @@ export const CODEBUDDY_BIN =
  */
 export const CODEBUDDY_MODEL =
   process.env.CHANCELLOR_CODEBUDDY_MODEL?.trim() || "deepseek-v4.1-flash";
+
+/**
+ * CodeBuddy 权限档（2026-11-23）：`read`→`dontAsk`、`edit`→`acceptEdits`、
+ * `full`→`bypassPermissions`（`-p` 的预授权按实测不再固定带 `-y`，见变更记录）。
+ */
+export const CODEBUDDY_PERMISSION = readPermission(
+  process.env.CHANCELLOR_CODEBUDDY_PERMISSION,
+  "full",
+);
 
 /**
  * Claude Code（2026-11-16 多 CLI 适配）。装在 PATH 里，也可用 CHANCELLOR_CLAUDE_BIN 覆盖。
@@ -141,8 +181,31 @@ export const OPENCODE_PERMISSION = readPermission(
 );
 
 /**
+ * 豆包 CLI（2026-11-23）。`doubao` 是 npm 全局 shim（PATH 直达），
+ * 也可用 CHANCELLOR_DOUBAO_BIN 覆盖。
+ *
+ * 默认模型钉 DeepSeek V4.1 Flash：它本来就是豆包账号的默认档（`model list` 里
+ * `is_default: true`），钉住是为了换机器也能复现同一份配置。模型 id 必须带
+ * `person-` 前缀，不能用显示名。
+ *
+ * 权限只有 ask_always / ask_risky / always_allow 三档，没有只读沙箱；
+ * read 档映射到 ask_risky，普通文件写入仍会执行（2026-11-23 实测）。
+ */
+export const DOUBAO_BIN =
+  process.env.CHANCELLOR_DOUBAO_BIN?.trim() || "doubao";
+
+export const DOUBAO_MODEL =
+  process.env.CHANCELLOR_DOUBAO_MODEL?.trim() ||
+  "person-deepseek-v4-1-flash-261017";
+
+export const DOUBAO_PERMISSION = readPermission(
+  process.env.CHANCELLOR_DOUBAO_PERMISSION,
+  "full",
+);
+
+/**
  * 某档雇员的 env 缺省 profile；派单没带 profile 时用它。
- * CodeBuddy / Qoder 的权限固定全权（适配器内部写死），这里只给 model。
+ * 本批（2026-11-23）起 CodeBuddy / Qoder 的权限档也吃 env 缺省，不再写死全权。
  */
 export function defaultProfileFor(kind: WorkerKind): EmployeeProfile {
   if (kind === "claude-code") {
@@ -152,9 +215,18 @@ export function defaultProfileFor(kind: WorkerKind): EmployeeProfile {
   if (kind === "opencode") {
     return { model: OPENCODE_MODEL, permission: OPENCODE_PERMISSION };
   }
-  if (kind === "codebuddy") return { model: CODEBUDDY_MODEL };
-  if (kind === "qoder-intl" || kind === "mercenary") return { model: MODEL };
-  if (kind === "qoder-cn") return { model: QODER_CN_MODEL };
+  if (kind === "codebuddy") {
+    return { model: CODEBUDDY_MODEL, permission: CODEBUDDY_PERMISSION };
+  }
+  if (kind === "doubao") {
+    return { model: DOUBAO_MODEL, permission: DOUBAO_PERMISSION };
+  }
+  if (kind === "qoder-intl" || kind === "mercenary") {
+    return { model: MODEL, permission: QODER_PERMISSION };
+  }
+  if (kind === "qoder-cn") {
+    return { model: QODER_CN_MODEL, permission: QODER_CN_PERMISSION };
+  }
   return {};
 }
 
@@ -165,9 +237,9 @@ export function resolveProfile(
 ): EmployeeProfile {
   // mcp / phone 是部署形态，不吃 profile：别把空 model / 固定权限塞进 ticket 快照。
   if (kind === "mcp" || kind === "phone") return {};
-  // native 只吃 model / modelRoute（2026-11-19 模型分工）：过去这里直接返回 {}，
-  // 把 executor 设置里填的工人模型丢掉了；留空仍然不覆盖 worker 的 env 缺省。
-  if (kind === "native" || kind === "pool") {
+  // 本机池只吃 model / modelRoute（2026-11-19 模型分工）：过去这里直接返回 {}，
+  // 把 executor 设置里填的工人模型丢掉了；留空仍然不覆盖池进程的 env 缺省。
+  if (kind === "pool") {
     const model = profile?.model !== undefined ? profile.model.trim() : "";
     const out: EmployeeProfile = {};
     if (model) out.model = model;
@@ -177,8 +249,18 @@ export function resolveProfile(
   const fallback = defaultProfileFor(kind);
   const model =
     profile?.model !== undefined ? profile.model.trim() : fallback.model ?? "";
-  // 权限档只对这三档生效；CodeBuddy / Qoder 非交互固定全权，不记权限。
-  if (kind === "claude-code" || kind === "codex" || kind === "opencode") {
+  // 权限档生效的档（2026-11-23 起含 CodeBuddy / Qoder 国际 / Qoder 国内）；
+  // pool / phone / mcp 不吃权限。
+  if (
+    kind === "claude-code" ||
+    kind === "codex" ||
+    kind === "opencode" ||
+    kind === "doubao" ||
+    kind === "codebuddy" ||
+    kind === "qoder-intl" ||
+    kind === "mercenary" ||
+    kind === "qoder-cn"
+  ) {
     return { model, permission: profile?.permission ?? fallback.permission ?? "full" };
   }
   return { model };
@@ -205,12 +287,18 @@ export function profileEnv(
     if (profile.permission) env.CHANCELLOR_OPENCODE_PERMISSION = profile.permission;
   } else if (kind === "codebuddy") {
     if (profile.model !== undefined) env.CHANCELLOR_CODEBUDDY_MODEL = profile.model;
+    if (profile.permission) env.CHANCELLOR_CODEBUDDY_PERMISSION = profile.permission;
+  } else if (kind === "doubao") {
+    if (profile.model !== undefined) env.CHANCELLOR_DOUBAO_MODEL = profile.model;
+    if (profile.permission) env.CHANCELLOR_DOUBAO_PERMISSION = profile.permission;
   } else if (kind === "qoder-intl" || kind === "mercenary") {
     if (profile.model !== undefined) env.CHANCELLOR_MODEL = profile.model;
+    if (profile.permission) env.CHANCELLOR_QODER_PERMISSION = profile.permission;
   } else if (kind === "qoder-cn") {
     if (profile.model !== undefined) env.CHANCELLOR_QODER_CN_MODEL = profile.model;
-  } else if (kind === "native" || kind === "pool") {
-    // 2026-11-19 模型分工：分管宰相子进程里再派 native / pool 子单，模型路由只能走 env 继承。
+    if (profile.permission) env.CHANCELLOR_QODER_CN_PERMISSION = profile.permission;
+  } else if (kind === "pool") {
+    // 2026-11-19 模型分工：分管宰相子进程里再派池子单，模型路由只能走 env 继承。
     // 2026-11-22：pool 走同一条；另外记下 keyEnv 变量名，池桥把它原样带进 run 载荷，
     // 密钥值仍由池进程从自己的 env 取（值不过 HTTP）。
     if (profile.model !== undefined) env.CHANCELLOR_LLM_MODEL = profile.model;
@@ -233,16 +321,12 @@ function readPermission(
   return fallback;
 }
 
-/** 拆单超时。 */
-export const PLAN_TIMEOUT_MS = readEnvInt("CHANCELLOR_PLAN_TIMEOUT_MS", 180_000);
-
 /** 单个 worker 超时，默认 10 分钟。 */
 export const WORKER_TIMEOUT_MS = readEnvInt("CHANCELLOR_WORKER_TIMEOUT_MS", 10 * 60_000);
 
 /**
  * 外部 CLI 的单票超时（M2a，2026-11-22）：空闲 + 总时长两个上限，0 = 该项不限。
- * 与 WORKER_TIMEOUT_MS 并存——后者仍是 native / 还没迁移调用方的墙钟口径，
- * 不改它的值，避免这次改动顺带改变那些路径的语义。
+ * 本机池走 supervisor 自己的 idle / max 口径，不用这两个值。
  */
 export const WORKER_IDLE_TIMEOUT_MS = readEnvIntUnlimited(
   "CHANCELLOR_WORKER_IDLE_MS",
@@ -271,6 +355,15 @@ export function upstreamArtifactsEnabled(): boolean {
  */
 export function externalResumeEnabled(): boolean {
   return readBool(process.env.CHANCELLOR_RESUME_EXTERNAL, true);
+}
+
+/**
+ * 外部 CLI 流式事件（2026-11-23）：默认开；`CHANCELLOR_CLI_STREAM_EVENTS=false/0/off`
+ * 关闭所有 CLI 的事件采集、steps.jsonl 与 UI 步骤，回到「只有最终结果」的形态。
+ * 每次调用都读 env：界面开关（plugins.json 登记、scope=core）写回 env 后即时生效。
+ */
+export function cliStreamEventsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return readBool(env.CHANCELLOR_CLI_STREAM_EVENTS, true);
 }
 
 /** 分管宰相一轮的超时；它可能要派多轮 worker，默认 30 分钟。 */

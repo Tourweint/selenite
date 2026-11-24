@@ -35,7 +35,12 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { buildManagerPrompt } from "./manager-prompt.ts";
 import { readManagerMeta, saveManagerMeta, type ManagerMeta } from "./manager/registry.ts";
-import { MANAGER_CONTEXT_ROTATE_RATIO, MANAGER_CONTEXT_WINDOW } from "./config.ts";
+import {
+  MANAGER_CONTEXT_ROTATE_RATIO,
+  MANAGER_CONTEXT_WINDOW,
+  MAX_TASKS_DEFAULT,
+} from "./config.ts";
+import { validateTaskInput } from "./plan.ts";
 import { readText, writeText } from "./store.ts";
 import { WORKER_TOOL_NAMES, effectiveWorkerTools } from "./worker-tools-source.ts";
 import {
@@ -110,6 +115,8 @@ const { values } = parseArgs({
     "project-root": { type: "string" },
     "project-head": { type: "string" },
     "project-data-dir": { type: "string" },
+    // 项目全部文件夹（2026-11-24）：manager 子进程里再派活要靠它把额外根带下去。
+    "project-roots": { type: "string" },
     "work-dir": { type: "string" },
     "parent-ticket-id": { type: "string" },
     // 宿主注入的宰相身份（批次D D2）；只在 manager 角色用，worker 角色不认这两个参数。
@@ -206,7 +213,31 @@ function readProjectArgs(): ProjectRef | undefined {
   }
   const head = values["project-head"]?.trim() || null;
   const dataDir = values["project-data-dir"]?.trim() || undefined;
-  return { id, name, rootPath, head, ...(dataDir ? { dataDir } : {}) };
+  const roots = parseProjectRootsArg(values["project-roots"]);
+  return { id, name, rootPath, head, ...(dataDir ? { dataDir } : {}), ...(roots ? { roots } : {}) };
+}
+
+/** `--project-roots` 是宿主 spawn 时塞的 JSON；坏值忽略（子单退回只给主文件夹，不炸经理）。 */
+function parseProjectRootsArg(raw: string | undefined): ProjectRef["roots"] | undefined {
+  const text = raw?.trim() ?? "";
+  if (!text) return undefined;
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    if (!Array.isArray(parsed)) return undefined;
+    const roots = parsed.flatMap((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+      const row = item as Record<string, unknown>;
+      const rootPath = typeof row.path === "string" ? row.path.trim() : "";
+      if (!rootPath || !path.isAbsolute(rootPath)) return [];
+      if (row.role !== "primary" && row.role !== "extra") return [];
+      const label =
+        typeof row.label === "string" && row.label.trim() ? row.label.trim() : path.basename(rootPath);
+      return [{ label, path: rootPath, role: row.role as "primary" | "extra" }];
+    });
+    return roots.length > 0 ? roots : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function printTools(registry: ReturnType<typeof createRegistry>): void {
@@ -240,9 +271,8 @@ async function runWorkerMain(
   const systemPrompt = `${WORKER_RULES}\n\n---\n\n${taskText}`;
   // 决策上报（2026-11-19 批2）：`WORKER_ESCALATE_TOOL=false` → 工具不注册（回滚形态）。
   const escalateOn = workerEscalateToolEnabled();
-  // 任务单号从目录布局还原（与 employee/native.ts 的 ticketIdOfTask 同一布局）：
-  // `<runsRoot>/<ticketId>/<NN>-<slug>`。还原不出（手工目录里直接跑）= 上报只发不路由，
-  // 宿主侧解析不到单号会丢弃——如实打一行日志。
+  // 任务单号从目录布局还原：`<runsRoot>/<ticketId>/<NN>-<slug>`。
+  // 还原不出（手工目录里直接跑）= 上报只发不路由，宿主侧解析不到单号会丢弃——如实打一行日志。
   const ticketId = path.basename(path.dirname(path.resolve(taskDir))) || "";
   if (escalateOn && !ticketId) {
     log("[worker] 上报工具已开但目录布局还原不出单号，上报仍会发出（宿主可能不路由）");
@@ -273,8 +303,8 @@ async function runWorkerMain(
     const normalized = normalizeEscalationInput(args);
     if (!normalized.ok) return { ok: false, message: normalized.message };
     escalationState.pending = normalized.value;
-    // 线协议（escalation-payload.ts）：一条 `[escalate] {json}` 结构行写上 stderr，
-    // 宿主（employee/native.ts）逐行解析后沿既有事件链送回派活方会话。
+    // 线协议（escalation-payload.ts）：一条 `[escalate] {json}` 结构行写上 stderr。
+    // 这是 worker 角色的旧通道；native 执行器退役后，池走自己的 SSE 上报。
     process.stderr.write(`${escalationLine(normalized.value)}\n`);
     return { ok: true };
   };
@@ -589,6 +619,8 @@ async function runManagerMain(
   // 注入的核心模型在这里不存在，旧兜底会去 spawn Qoder CLI（本机未配 → 整个
   // managed 路径拆单失败）。用 manager 自己刚建好的模型装一份内部 ask：
   // 同一个上游、不挂工具、纯文本完成。
+  // 2026-11-23 拆单器退役后 `askInternal()` 暂无消费者；注入缝保留，等后续清理
+  // 时再删（删它要同时动 host 的 internal-model 装配）。
   installManagerInternalAsk(models, model);
   const storage = await openNodeSqliteStorage(meta.db_path);
   let harness: Harness | null = null;
@@ -855,17 +887,48 @@ function buildDelegateTool(
   return defineTool({
     name: "delegate",
     description:
-      "把一个多步任务交给 chancellor 的工人集群：它会自己拆单、派活、验收，返回一行结论。只有 requirement 一个参数；不能指定领域，也不会再创建分管宰相。",
+      "把一个多步任务交给 chancellor 的工人集群：**你自己先拆好 tasks**，工人按 tasks 执行并验收，返回一行结论。不能指定领域，也不会再创建分管宰相。",
     parameters: Type.Object({
       requirement: Type.String({
         description: "要办的事，一句话说清目标和完成标准",
       }),
+      tasks: Type.Optional(
+        Type.Array(
+          Type.Object({
+            title: Type.String({ description: "任务标题，一句话" }),
+            slug: Type.String({ description: "小写字母/数字/连字符，如 write-hello" }),
+            instruction: Type.String({ description: "这个任务具体要做什么" }),
+            done_when: Type.String({ description: "可机械验证的完成标准" }),
+            dependsOn: Type.Optional(
+              Type.Array(Type.Number(), {
+                description: "依赖的前置 seq（1 起，只能依赖更小的 seq）",
+              }),
+            ),
+            writes: Type.Array(Type.String(), {
+              description: "这个任务会写的项目内相对路径；只读任务给空数组 []",
+            }),
+          }),
+          {
+            description:
+              "多步活直接给出任务列表（1-5 个）；不传 = 整单一个任务。写同一个文件的任务必须串成依赖。",
+          },
+        ),
+      ),
     }),
     async execute(args, _api, context) {
+      if (args.tasks !== undefined) {
+        try {
+          validateTaskInput(args.tasks, MAX_TASKS_DEFAULT);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          return { output: [{ type: "text" as const, text: `blocked：tasks 不合法：${message}` }] };
+        }
+      }
       const { runChancellor } = await import("./index.ts");
       const result = await runChancellor(
         {
           requirement: args.requirement,
+          ...(args.tasks !== undefined ? { tasks: args.tasks } : {}),
           managers: false,
           workRoot: meta.runs_dir,
           // 子任务沿用本单的项目，不再另找落点。

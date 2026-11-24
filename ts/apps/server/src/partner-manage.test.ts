@@ -256,7 +256,8 @@ test("契约：成功外层是 ok + data.message，文案逐字不变", async ()
 		assert.deepEqual(Object.keys(created), ["ok", "data"], "成功只有 ok + data");
 		assert.equal(
 			created.data.message,
-			"执事 阿岚 已就位（领域标签：finance）。之后 delegate(domain=finance) 或直接按名字派都行。",
+			// 2026-11-23 领域派活入口默认关闭：就位文案不再提 delegate(domain=…)。
+			"执事 阿岚 已就位（领域标签：finance）。之后直接用 delegate 派给它就行。",
 		);
 
 		// list 也是成功：空态 / 有内容都走 ok，不当错误

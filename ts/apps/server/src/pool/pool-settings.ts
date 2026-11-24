@@ -46,14 +46,22 @@ export function poolEscalationWaitMs(env: Env = process.env): number {
 const MIN_RESERVE_TOKENS = 1024;
 
 /**
- * 单轮工具回合上限（`AGENT_MAX_TURNS`，默认 100；非法或 <0 回落 100，取整）。
+ * 单轮工具回合上限（`WORKER_POOL_MAX_TURNS` > `AGENT_MAX_TURNS`，默认 100；
+ * 非法或 <0 回落 100，取整）。
+ *
+ * 宿主与池共用一份 env 时，`AGENT_MAX_TURNS` 原本是给宿主模型循环压轮次用的
+ * （很多探针会把它压到 1）；池进程继承同一份 env 就会跟着被压，干活干一半被拦。
+ * 2026-11-23 起给池单独一条覆盖：不设 = 沿用 `AGENT_MAX_TURNS`（旧口径），
+ * 探针 / 部署可以只调池的回合上限。
  *
  * 这是宿主 `turn-gate.ts` **自己实现**的机制：内核 1.4.0 没有 `maxTurns`，
- * 所以这里只导出读数，由 `beforeRequest` / `beforeTool` 的 hook 数回合用，
+ * 所以这里只导出读数，由 `beforeTool` 的 hook 数回合用，
  * 不许塞进 `Harness.open` 的 agent 配置（塞了会被无声忽略）。
  */
 export function poolMaxTurns(env: Env = process.env): number {
-	const raw = Number(env.AGENT_MAX_TURNS ?? POOL_MAX_TURNS_DEFAULT);
+	const raw = Number(
+		env.WORKER_POOL_MAX_TURNS ?? env.AGENT_MAX_TURNS ?? POOL_MAX_TURNS_DEFAULT,
+	);
 	if (!Number.isFinite(raw) || raw < 0) return POOL_MAX_TURNS_DEFAULT;
 	return Math.floor(raw);
 }

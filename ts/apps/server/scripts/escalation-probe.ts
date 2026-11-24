@@ -1,11 +1,11 @@
 /**
  * 决策上报链端到端探针（2026-11-19 批2：worker→总管→用户上报链）。
  *
- * 真起服务 + 真 HTTP + faux 模型（真 durable 链路、真 native worker 子进程）：
+ * 真起服务 + 真 HTTP + faux 模型（真 durable 链路、真本机池 worker 进程）：
  *
  *   1. 总管会话派一单（faux 调 delegate）→ chancellor 拆单（探针替身放行第一单）
- *      → native worker 真起 → worker 的 faux 脚本调 `escalate` 上报；
- *   2. 上报沿 stderr 结构行 → chancellor 事件 → 宿主路由（escalation.ts）：
+ *      → 池 worker 真起 → worker 的 faux 脚本调 `escalate` 上报；
+ *   2. 上报沿池 SSE `escalation` 事件 → chancellor 事件 → 宿主路由（escalation.ts）：
  *      活跃登记 + 唤醒总管 canonical 会话（批3 agent-message 信封，[Escalation
  *      wake context] 提示词）；
  *   3. 派活方会话收到上报卡数据：GET /agent/escalations 活跃列表可查；
@@ -89,15 +89,19 @@ async function startServer(): Promise<Phase> {
 				COMPANIONS_ENABLED: "true",
 				CHIEF_PARTNER: "true",
 				CHANCELLOR_ENABLED: "true",
-				CHANCELLOR_EMPLOYEE: "native",
+				CHANCELLOR_EMPLOYEE: "pool",
 				CHANCELLOR_LLM_PROVIDER: "faux",
 				CHANCELLOR_WORK_ROOT: join(root, "runs"),
+				// 池进程隔离到临时目录，别碰真实 .data/worker-pool（2026-11-23）。
+				WORKER_POOL_DB_DIR: join(root, "worker-pool"),
+				SUPERVISOR_POOL_SIZE: "1",
+				// AGENT_MAX_TURNS=1 是压宿主 faux 的；池单独放开，否则上报脚本第二步写
+				// REPORT 会被 "工具调用已达上限（1 次）" 拦掉（2026-11-23 实测）。
+				WORKER_POOL_MAX_TURNS: "100",
 				DELEGATION_PROJECT_REQUIRED: "false",
-				// worker 的 faux 上报脚本：escalate → waiting 的 REPORT → 等答复；
+				// 池 worker 的 faux 上报脚本：escalate → waiting 的 REPORT → 等答复；
 				// 答复（steer）进来后写 ready 的 REPORT 收尾。
-				CHANCELLOR_FAUX_ESCALATE: "1",
-				CHANCELLOR_FAUX_ESCALATE_QUESTION: "目录结构选 A 还是 B？",
-				CHANCELLOR_FAUX_ESCALATE_CONTEXT: "两种都可行，需要拍板后才能继续。",
+				WORKER_POOL_FAUX_MODE: "escalate",
 				NODE_OPTIONS: "",
 			},
 			stdio: ["ignore", "pipe", "pipe"],
@@ -188,7 +192,7 @@ async function poll(
 async function run(): Promise<void> {
 	const phase = await startServer();
 	try {
-		// 1. 总管派单（faux delegate → 拆单替身放行 → native worker 真起）
+		// 1. 总管派单（faux delegate → 拆单替身放行 → 本机池 worker 真起）
 		const run = await api("POST", "/api/v1/partners/chief/run", {
 			text: "派出去办一件事，完了汇报。",
 		});

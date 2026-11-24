@@ -72,7 +72,7 @@ export type DelegationEvent =
 	/**
 	 * worker 决策上报（2026-11-19 批2：worker→总管→用户上报链）。
 	 *
-	 * native worker 跑动中调 `escalate` 上报一个要拍板的事，chancellor 原样透传上来。
+	 * 本机池 worker 跑动中调 `escalate` 上报一个要拍板的事，chancellor 原样透传上来。
 	 * 借本通道送到**派活方会话**出上报卡；路由（唤醒总管 / 升级用户 / 限流）在
 	 * escalation.ts。与 attention 的分工：那个是 worker 退场后从 REPORT 读出的终态
 	 * 问题，这个是跑动中的实时上报，worker 不退场、等插话答复继续跑。
@@ -116,6 +116,16 @@ export interface DelegationReport {
 		partialReport: string;
 	};
 	/**
+	 * 终止回执（2026-11-23）：失败 / 中止的结构化信息，只进唤醒提示词与任务线程，
+	 * 不进汇报正文、不改旧客户端字段。
+	 */
+	failure?: {
+		class: string;
+		retryable: boolean;
+		canceled?: boolean;
+		timedOut?: boolean;
+	};
+	/**
 	 * 送达记账行 id（2026-11-15 回信送达兜底，方案 §A）：settle 落 in 留言时的
 	 * delegation_messages 自增 id。reportDelegationResult 写回成功销 1、会话已
 	 * 不存在销 2、写回异常留 0（启动补送兜底）。缺省 = 这份汇报没有待送达行
@@ -127,6 +137,26 @@ export interface DelegationReport {
 export interface DelegationMirrorEntry {
 	kind: "notice" | "report" | "message";
 	text: string;
+}
+
+/**
+ * 按单隔离（2026-11-23）：auto = 跟随全局 `CHANCELLOR_TASK_ISOLATION`（且只在
+ * git 项目上开 worktree）；worktree / direct 只对新单生效，续跑沿用原单快照。
+ */
+export type DelegationIsolation = "auto" | "worktree" | "direct";
+
+/**
+ * 参数值校验：非法值明确拒绝，不静默改成 direct / worktree。
+ * 返回的 `isolation` 缺省 = 没传或 auto，调用方据此决定写不写 ticket 快照。
+ */
+export function normalizeDelegationIsolation(
+	raw: unknown,
+): { ok: true; isolation?: DelegationIsolation } | { ok: false; message: string } {
+	if (raw === undefined || raw === null || raw === "") return { ok: true };
+	if (raw === "auto" || raw === "worktree" || raw === "direct") {
+		return { ok: true, isolation: raw };
+	}
+	return { ok: false, message: "isolation 必须是 auto / worktree / direct" };
 }
 
 export interface DelegationRuntime {
@@ -221,6 +251,8 @@ export interface DelegationKickoff {
 	 * 已由 `normalizeDelegationSteps` 校验；缺省 = 旧行为（不落字段、不进提示词）。
 	 */
 	steps?: string[];
+	/** 总管/领域经理直接拆好的任务（2026-11-23）；不传 = 整单一个任务。由 chancellor 校验。 */
+	tasks?: unknown;
 	/**
 	 * 这张单在哪个目录里干活（2026-11-17）。绝对路径，已由 delegate 工具校验
 	 * （存在 + 是目录 + 落在已登记根内）。只对新派生效；续跑沿用原单快照。
@@ -231,6 +263,12 @@ export interface DelegationKickoff {
 	 * 与 `employee` / `model` 一样落进 ticket 快照；不传 = 跟随全局默认。
 	 */
 	employeePermission?: EmployeeProfile["permission"];
+	/**
+	 * 按单隔离（2026-11-23）：auto / 不传 = 跟随全局 `CHANCELLOR_TASK_ISOLATION`；
+	 * worktree = 这张单强制隔离；direct = 直接在项目目录干。只对新单生效，
+	 * 续跑沿用原单快照。
+	 */
+	isolation?: DelegationIsolation;
 	/**
 	 * 只续跑、不许改派（2026-11-08 扫尾批 8g 任务回话）。
 	 *
@@ -459,6 +497,7 @@ export function formatReport(
 			? { productDirs: result.tasks.map((task) => task.dir).filter(Boolean).slice(0, 3) }
 			: {}),
 		...(resume ? { resume } : {}),
+		...(result.failure ? { failure: result.failure } : {}),
 	};
 }
 

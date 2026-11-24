@@ -1,17 +1,21 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import {
 	buildCodeBuddyEnv,
 	buildCodeBuddyInvocation,
+	codeBuddyPermissionMode,
+	createCodeBuddyEmployee,
 	isCodeBuddySuccess,
 	parseCodeBuddyStdout,
 	parseShimNodeEntry,
 	resolveCodeBuddyLauncher,
 	STDIN_PROMPT_THRESHOLD,
+	type CodeBuddyCall,
 } from "../../../packages/chancellor/src/employee/codebuddy.ts";
+import { profileEnv, resolveProfile } from "../../../packages/chancellor/src/config.ts";
 
 /** 与真实 `--output-format json` 同形：数组，最后一项 type=result。 */
 function realShape(patch: Record<string, unknown> = {}): string {
@@ -30,7 +34,7 @@ function realShape(patch: Record<string, unknown> = {}): string {
 	]);
 }
 
-test("短提示进 argv：必带 -y 与 --model 全拼", () => {
+test("短提示进 argv：--permission-mode 全权 + --model 全拼，不再固定带 -y", () => {
 	const invocation = buildCodeBuddyInvocation("只回答两个字：收到", "deepseek-v4.1-flash");
 	assert.equal(invocation.stdin, null);
 	assert.deepEqual(invocation.args, [
@@ -38,10 +42,83 @@ test("短提示进 argv：必带 -y 与 --model 全拼", () => {
 		"只回答两个字：收到",
 		"--output-format",
 		"json",
-		"-y",
+		"--permission-mode",
+		"bypassPermissions",
 		"--model",
 		"deepseek-v4.1-flash",
 	]);
+	assert.equal(invocation.args.includes("-y"), false);
+});
+
+test("权限三档 → 原生 --permission-mode（2026-11-23 实测映射）", () => {
+	assert.equal(codeBuddyPermissionMode("read"), "dontAsk");
+	assert.equal(codeBuddyPermissionMode("edit"), "acceptEdits");
+	assert.equal(codeBuddyPermissionMode("full"), "bypassPermissions");
+	for (const permission of ["read", "edit", "full"] as const) {
+		const invocation = buildCodeBuddyInvocation(
+			"干活",
+			"deepseek-v4.1-flash",
+			null,
+			permission,
+		);
+		const index = invocation.args.indexOf("--permission-mode");
+		assert.equal(invocation.args[index + 1], codeBuddyPermissionMode(permission));
+		// -y 实测不改变档位效果，任何档都不再带。
+		assert.equal(invocation.args.includes("-y"), false);
+	}
+});
+
+test("resolveProfile / profileEnv：CodeBuddy 带权限档", () => {
+	assert.equal(resolveProfile("codebuddy", { permission: "read" }).permission, "read");
+	assert.equal(resolveProfile("codebuddy", {}).permission, "full");
+	assert.deepEqual(
+		profileEnv("codebuddy", { model: "deepseek-v4.1-flash", permission: "edit" }),
+		{
+			CHANCELLOR_CODEBUDDY_MODEL: "deepseek-v4.1-flash",
+			CHANCELLOR_CODEBUDDY_PERMISSION: "edit",
+		},
+	);
+});
+
+test("CodeBuddy employee：settings 下传权限档；旧配置没权限档 = full", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "codebuddy-employee-"));
+	writeFileSync(join(dir, "TASK.md"), "TASK-BODY");
+	writeFileSync(join(dir, "REPORT.md"), "DONE");
+	const calls: CodeBuddyCall[] = [];
+	const employee = createCodeBuddyEmployee(async (call) => {
+		calls.push(call);
+		return {
+			ok: true,
+			result: "ok",
+			sessionId: "s-1",
+			isError: false,
+			permissionDenials: 0,
+			exitCode: 0,
+			timedOut: false,
+			aborted: false,
+			stderrTail: "",
+			error: null,
+		};
+	});
+	try {
+		const base = {
+			instruction: "do it",
+			doneWhen: "REPORT.md",
+			upstream: "",
+			dir,
+		};
+		await employee.run({
+			...base,
+			settings: { model: "deepseek-v4.1-flash", permission: "read" as const },
+		});
+		assert.equal(calls[0].permission, "read");
+		assert.equal(calls[0].model, "deepseek-v4.1-flash");
+
+		await employee.run(base);
+		assert.equal(calls[1].permission, "full");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
 });
 
 test("长提示走 stdin，argv 里不重复提示", () => {
@@ -55,7 +132,8 @@ test("长提示走 stdin，argv 里不重复提示", () => {
 		"-p",
 		"--output-format",
 		"json",
-		"-y",
+		"--permission-mode",
+		"bypassPermissions",
 		"--model",
 		"deepseek-v4.1-flash",
 	]);

@@ -1,6 +1,6 @@
 import { upstreamArtifactsEnabled } from "./config.ts";
 import { workerPersonaText } from "./worker-persona-source.ts";
-import type { DependencyReport, PlannedTask } from "./types.ts";
+import type { DependencyReport, PlannedTask, ProjectRootRef } from "./types.ts";
 
 /** 产物清单最多列这么多条，超出只给总数，别把下游提示撑爆。 */
 const UPSTREAM_ARTIFACT_LIMIT = 20;
@@ -47,14 +47,38 @@ export interface WorkerLayout {
   taskDir: string;
 }
 
+/**
+ * 项目文件夹段（2026-11-24）：派活按项目，不只按文件夹。
+ *
+ * 列表里是否含 `role=primary` 决定文案：隔离形态下发的是主文件夹之外的根
+ * （primary 已以 workDir 副本呈现）；非隔离形态下发全部根。
+ * 空数组 = 不出段，旧形态逐字节不变。
+ */
+function renderProjectRootsSection(roots: readonly ProjectRootRef[], isolated: boolean): string {
+  if (roots.length === 0) return "";
+  const lines = roots.map((root) => {
+    const label = root.label || (root.role === "primary" ? "主文件夹" : "文件夹");
+    return `- ${label}：${root.path}`;
+  });
+  const hasPrimary = roots.some((root) => root.role === "primary");
+  const lead =
+    isolated && !hasPrimary
+      ? "## 项目的其他文件夹\n这些文件夹与主文件夹平级，**不在隔离副本里**：读写直接作用在真实目录上，改动不会被调度器合并、也不进 changedPaths；请在 REPORT 的 summary 里写明动了哪些文件。跨文件夹访问用绝对路径。"
+      : "## 项目的文件夹\n这个项目包含以下文件夹（当前工作目录可能只是其中一个子目录；这些目录的改动不在任务副本里，调度器不合并、不收集，请在 REPORT 的 summary 里写明动了哪些文件）；跨文件夹访问用绝对路径。";
+  return `\n${lead}\n\n${lines.join("\n")}\n`;
+}
+
 /** 生成写入 task 目录的 TASK.md，同时也是传给 worker 的 prompt。 */
 export function buildWorkerPrompt(
   task: PlannedTask,
   dirName: string,
   deps: DependencyReport[] = [],
   layout?: WorkerLayout,
+  /** 项目其他文件夹（2026-11-24）：共享读写真实目录，不进副本。 */
+  projectRoots: readonly ProjectRootRef[] = [],
 ): string {
   const isolated = layout !== undefined;
+  const rootsSection = renderProjectRootsSection(projectRoots, isolated);
   const whereSection = isolated
     ? `当前工作目录（cwd）是项目副本：\`${layout.workDir}\`。
 对项目的读写都直接作用在这个 cwd 上，路径按项目根相对路径写；调度器会把改动合并回项目。
@@ -66,9 +90,25 @@ export function buildWorkerPrompt(
   const artifactRule = isolated
     ? `5. \`artifacts\` 使用**相对任务目录 \`${layout.taskDir}\`** 的路径，只列出你额外写到任务目录的交付物；对项目的代码改动不要列进 artifacts（调度器用 git diff 收口）。`
     : "5. `artifacts` 使用**相对当前目录**的路径，只列出你实际创建或修改的文件；没有产物就给空数组。";
-  const boundaryRule = isolated
-    ? `10. 只在两处写文件：项目副本 \`${layout.workDir}\` 与任务目录 \`${layout.taskDir}\`。不要碰项目副本之外的文件、不要写上级目录。只写本任务声明的路径：${task.writes.length === 0 ? "（本任务为只读，不要写项目）" : task.writes.join("、")}。`
-    : "10. 不要写当前目录之外的文件（包括上级目录、绝对路径、其他 task 目录）。";
+  const writesText =
+    task.writes.length === 0
+      ? "（本任务为只读，不要写项目）"
+      : task.writes.includes("**")
+        ? "项目内任意路径（**）"
+        : task.writes.join("、");
+  const writesClause =
+    projectRoots.length > 0
+      ? `只写本任务声明的路径（相对主文件夹；项目其他文件夹按任务要求写）：${writesText}`
+      : `只写本任务声明的路径：${writesText}`;
+  const rootsHavePrimary = projectRoots.some((root) => root.role === "primary");
+  const boundaryRule =
+    projectRoots.length > 0
+      ? rootsHavePrimary
+        ? `10. 只在项目的文件夹（上面列出的路径）与任务目录 \`${layout?.taskDir ?? "当前目录"}\` 里写文件。不要写这些位置之外的文件（包括上级目录、其他 task 目录）。${writesClause}。`
+        : `10. 只在三处写文件：项目副本 \`${layout?.workDir ?? "工作目录"}\`、上面列出的项目其他文件夹（真实目录）、任务目录 \`${layout?.taskDir ?? "任务目录"}\`。不要碰这三处之外的文件、不要写上级目录。${writesClause}。`
+      : isolated
+        ? `10. 只在两处写文件：项目副本 \`${layout.workDir}\` 与任务目录 \`${layout.taskDir}\`。不要碰项目副本之外的文件、不要写上级目录。${writesClause}。`
+        : "10. 不要写当前目录之外的文件（包括上级目录、绝对路径、其他 task 目录）。";
   const depSection =
     deps.length === 0
       ? ""
@@ -93,7 +133,7 @@ ${persona}
 
   return `# TASK ${dirName}
 
-你是 chancellor 派出的独立 worker。${whereSection}
+你是 chancellor 派出的独立 worker。${whereSection}${rootsSection}
 你没有任何可以询问的人，必须自己把活干完，或者明确报告卡住。
 ${personaSection}
 ## 任务

@@ -6,7 +6,7 @@
  *
  *   A 建会话 → POST /relay/matrix/delegate 点名 B
  *   → B 受理（锚点会话「远端单 …」+ 回执先落）→ A 轮询 status
- *   → 终态（有无 key 皆可：无 key 时 native 雇员失败，也是终态）
+ *   → 终态（有无 key 皆可：无 key 时池 worker 失败，也是终态）
  *   → 汇报写回 A 的发起会话
  *   → 离线目标 fail-fast：502 device_offline；未开矩阵：404
  *   → auto 挑机（自动分发 v1）：挑最闲
@@ -69,7 +69,9 @@ function harnessEnv(
 		DEVICE_MAX_ACTIVE_PER_DEVICE: "50",
 		CURRENT_PROJECT: "",
 		CHANCELLOR_ENABLED: "true",
-		CHANCELLOR_EMPLOYEE: process.env.CHANCELLOR_EMPLOYEE?.trim() || "native",
+		CHANCELLOR_EMPLOYEE: process.env.CHANCELLOR_EMPLOYEE?.trim() || "pool",
+		// 三台探针实例各用各的池库，别互相抢槽 / 抢 sqlite（2026-11-23）。
+		WORKER_POOL_DB_DIR: join(TMP, `${tag}-worker-pool`),
 		DELEGATION_PROJECT_REQUIRED: "false",
 		RELAY_ENABLED: "1",
 		DEVICE_MATRIX_ENABLED: "1",

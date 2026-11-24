@@ -198,6 +198,30 @@ test("buildWakePrompt：失败单带续接行（批次二），成功单不加",
 	assert.ok(!noResume.includes("续接："), "成功单不出现续接行");
 });
 
+test("buildWakePrompt：失败单带终止回执（失败类型 / 可重试 / 超时 / 中止）", () => {
+	const prompt = buildWakePrompt([
+		{
+			ticketId: "3f2a91ff-ffff-4fff-8fff-ffffffffffff",
+			domain: "前端",
+			phase: "failed",
+			text: "执行器崩了",
+			failure: { class: "crashed", retryable: true, timedOut: false },
+		},
+		{
+			ticketId: "8c04d2aa-ffff-4fff-8fff-ffffffffffff",
+			domain: "后端",
+			phase: "aborted",
+			text: "已停止",
+			failure: { class: "aborted", retryable: false, canceled: true, timedOut: true },
+		},
+	]);
+	assert.ok(prompt.includes("\n  终止：crashed（可重试）"), "失败单带类型与可重试");
+	assert.ok(
+		prompt.includes("\n  终止：aborted（不可重试，超时，已中止）"),
+		"中止单带不可重试 / 超时 / 已中止",
+	);
+});
+
 test("collectPending：取走即清空、同会话合并、跨会话互不串", () => {
 	const store = new Map<number, DelegationReport[]>([
 		[1, [report("a"), report("b")]],

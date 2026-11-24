@@ -108,3 +108,35 @@ test("只读任务（writes 为空）：边界段照实写「本任务为只读�
 	const { systemPrompt } = buildTaskProfile({ ...BASE, writes: [] });
 	assert.ok(systemPrompt.includes("- 只写本任务声明的路径：（本任务为只读，不要写项目）"));
 });
+
+test("项目其他文件夹（隔离形态：只下发 extra）：列出真实目录并写进边界", () => {
+	const { systemPrompt } = buildTaskProfile({
+		...BASE,
+		roots: [{ label: "手机端", path: "D:/projects/lifediary", role: "extra" }],
+	});
+	assert.ok(systemPrompt.includes("- 项目其他文件夹（直接读写真实目录；不在任务副本里）："));
+	assert.ok(systemPrompt.includes("  - 手机端：D:/projects/lifediary"));
+	assert.ok(systemPrompt.includes("- 只能在上述目录里读写文件"));
+	assert.ok(!systemPrompt.includes("- 只能在上述两个目录里读写文件"));
+});
+
+test("项目文件夹（非隔离形态：含 primary）：边界写项目文件夹而不是副本", () => {
+	const { systemPrompt } = buildTaskProfile({
+		...BASE,
+		roots: [
+			{ label: "主仓", path: "D:/repo", role: "primary" },
+			{ label: "手机端", path: "D:/projects/lifediary", role: "extra" },
+		],
+	});
+	assert.ok(systemPrompt.includes("- 项目文件夹（可直接读写）："));
+	assert.ok(systemPrompt.includes("  - 主仓：D:/repo"));
+	assert.ok(systemPrompt.includes("  - 手机端：D:/projects/lifediary"));
+	assert.ok(!systemPrompt.includes("项目其他文件夹（直接读写真实目录"));
+});
+
+test("没有 roots：边界段保持旧文案（逐字节不回退）", () => {
+	const { systemPrompt } = buildTaskProfile(BASE);
+	assert.ok(systemPrompt.includes("- 只能在上述两个目录里读写文件"));
+	assert.ok(!systemPrompt.includes("项目其他文件夹"));
+	assert.ok(!systemPrompt.includes("项目文件夹（可直接读写）"));
+});

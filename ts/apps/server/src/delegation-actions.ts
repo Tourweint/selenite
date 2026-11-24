@@ -5,7 +5,6 @@
  */
 
 import { runChancellor } from "../../../packages/chancellor/src/index.ts";
-import { abortNativeWorker } from "../../../packages/chancellor/src/employee/native.ts";
 import { listManagers } from "../../../packages/chancellor/src/manager/registry.ts";
 import { Store } from "../../../packages/chancellor/src/store.ts";
 import { Ticket } from "../../../packages/chancellor/src/types.ts";
@@ -136,24 +135,19 @@ export function cancelTicketAction(
 		// 决策上报/续行（2026-11-19 批2）：worker 可能正挂起等上报答复 / 预算内续轮。
 		// 作废位在服务端的簿记库里，worker 自己查不到——停一次执行（M0 2026-11-22：
 		// 按票的 AbortController，signal 会经 supervisor.run / employee.run 停掉 pool /
-		// native / 外部 CLI），让它停止续行与等待、收完已受理的提交就退。
+		// 外部 CLI），让它停止续行与等待、收完已受理的提交就退。
 		// 没有控制器（已结算 / 旧进程）只记一行，不影响作废本身。
-		// 旧进程里已在跑的 native 单没有票级控制器，补一次 stdin 终止帧——不能因为
-		// 升级到 M0 就让它比改动前还停不下来。
+		// 2026-11-23：native 退役；历史 native 单 / 没有 employee 字段的老单也按池取消，
+		// manager 子进程里建的子单在 supervisor 槽位表里，能收到 /run/:id/abort。
+		const employeeKind: string | undefined = found.ticket.employee;
 		if (abortTicket(ticketId)) {
 			console.log(`[ticket] 作废终止信号已发 ticket=${ticketId.slice(0, 12)}`);
-		} else if (found.ticket.employee === "pool") {
-			// manager 子进程里建的子单：宿主没有票级控制器，但票在 supervisor 槽位表里。
+		} else if (
+			employeeKind === "pool" ||
+			employeeKind === "native" ||
+			employeeKind === undefined
+		) {
 			abortPoolTicket(ticketId);
-		} else if (found.ticket.employee === "native" || found.ticket.employee === undefined) {
-			try {
-				abortNativeWorker(ticketId);
-				console.log(`[ticket] 作废终止帧已发（无票级控制器的 native 单）ticket=${ticketId.slice(0, 12)}`);
-			} catch {
-				console.log(
-					`[ticket] 没有可中止的控制器（可能已结算/旧进程）ticket=${ticketId.slice(0, 12)}`,
-				);
-			}
 		} else {
 			console.log(
 				`[ticket] 没有可中止的控制器（可能已结算/旧进程）ticket=${ticketId.slice(0, 12)}`,
@@ -262,8 +256,8 @@ export function projectHasInFlightTickets(workRoot: string, projectId: string): 
 /**
  * worker 插话转发（2026-11-19 插话统一 批1）。
  *
- * 把一条消息递给**正在跑**的 worker（M0 2026-11-22：按执行器分派——pool 走池的 `/say`，
- * native 走子进程 stdin）。语义与会话侧 steer 一致：
+ * 把一条消息递给**正在跑**的 worker（M0 2026-11-22：按执行器分派——pool 走池的 `/say`；
+ * 历史 native 单已并入 pool）。语义与会话侧 steer 一致：
  * mode=steer 插进当前轮（正文带 `[插话]` 标记行），followUp 排到本轮收尾之后。
  *
  * 发言权沿用任务专线口径：HTTP 端点（人/设备）与 `/tickets/:id/say` 同一道 API 鉴权，

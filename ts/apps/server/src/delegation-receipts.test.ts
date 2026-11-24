@@ -124,8 +124,11 @@ test("delegate 工具：非法领域名直接回可用领域清单，不建单",
 	const receipts = new DelegationReceipts(join(root, "delegations.sqlite"));
 	const previousRequired = process.env.DELEGATION_PROJECT_REQUIRED;
 	const previousRoot = process.env.CHANCELLOR_WORK_ROOT;
+	// 领域派活入口（2026-11-23）默认关；这条测的是打开时的领域名校验，显式开回来。
+	const previousDomainDispatch = process.env.CHANCELLOR_DOMAIN_DISPATCH;
 	process.env.DELEGATION_PROJECT_REQUIRED = "false";
 	process.env.CHANCELLOR_WORK_ROOT = join(root, "runs");
+	process.env.CHANCELLOR_DOMAIN_DISPATCH = "true";
 	let calls = 0;
 	try {
 		const tools = createTools({
@@ -155,6 +158,99 @@ test("delegate 工具：非法领域名直接回可用领域清单，不建单",
 		else process.env.DELEGATION_PROJECT_REQUIRED = previousRequired;
 		if (previousRoot === undefined) delete process.env.CHANCELLOR_WORK_ROOT;
 		else process.env.CHANCELLOR_WORK_ROOT = previousRoot;
+		if (previousDomainDispatch === undefined) delete process.env.CHANCELLOR_DOMAIN_DISPATCH;
+		else process.env.CHANCELLOR_DOMAIN_DISPATCH = previousDomainDispatch;
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("领域派活入口默认关闭（2026-11-23）：不暴露 domain，旧调用带的也忽略", async () => {
+	const { createTools } = await import("./tools.ts");
+	const root = tempRoot();
+	const receipts = new DelegationReceipts(join(root, "delegations.sqlite"));
+	const previousRequired = process.env.DELEGATION_PROJECT_REQUIRED;
+	const previousRoot = process.env.CHANCELLOR_WORK_ROOT;
+	const previousDomainDispatch = process.env.CHANCELLOR_DOMAIN_DISPATCH;
+	process.env.DELEGATION_PROJECT_REQUIRED = "false";
+	process.env.CHANCELLOR_WORK_ROOT = join(root, "runs");
+	delete process.env.CHANCELLOR_DOMAIN_DISPATCH;
+	let seen: { domain?: string; managers?: false; requirement: string } | undefined;
+	try {
+		const tools = createTools({
+			memory: null,
+			scopeOf: (id) => ({ type: "session", id: String(id) }) as never,
+			projects: null,
+			receipts,
+			delegateRun: (async (
+				request: { requirement: string; domain?: string; managers?: false },
+				options: { onEvent?: (event: never) => void },
+			) => {
+				seen = request;
+				options.onEvent?.({ type: "ticket", ticketId: "T-off", message: "已受理" } as never);
+				return { ticketId: "T-off", status: "done", line: "完成", tasks: [] };
+			}) as never,
+		});
+		const delegate = tools.find((tool) => tool.name === "delegate");
+		assert.ok(delegate);
+		const properties =
+			(delegate.parameters as { properties?: Record<string, unknown> }).properties ?? {};
+		assert.equal("domain" in properties, false, "关闭时 domain 不进参数表");
+		assert.equal(delegate.description.includes("领域负责人"), false, "关闭时描述不提领域负责人");
+		const result = await delegate.execute(
+			// 旧调用 / 旧会话可能硬带 domain：执行层必须忽略，按无领域直派 worker。
+			{ requirement: "把按钮改蓝", domain: "frontend", requestId: "req-domain-off" } as never,
+			{ conversationId: 7103 } as never,
+			{} as never,
+		);
+		const text = textOf(result);
+		assert.match(text, /T-off/);
+		assert.doesNotMatch(text, /领域：/, "派活结果不再带领域标注");
+		assert.ok(seen, "应真派出去");
+		assert.equal(seen?.domain, undefined, "chancellor 请求不带 domain");
+		assert.equal(seen?.managers, false, "显式 managers:false，不起分管宰相");
+	} finally {
+		receipts.close();
+		if (previousRequired === undefined) delete process.env.DELEGATION_PROJECT_REQUIRED;
+		else process.env.DELEGATION_PROJECT_REQUIRED = previousRequired;
+		if (previousRoot === undefined) delete process.env.CHANCELLOR_WORK_ROOT;
+		else process.env.CHANCELLOR_WORK_ROOT = previousRoot;
+		if (previousDomainDispatch === undefined) delete process.env.CHANCELLOR_DOMAIN_DISPATCH;
+		else process.env.CHANCELLOR_DOMAIN_DISPATCH = previousDomainDispatch;
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("领域派活入口打开：domain 参数与领域负责人描述回到工具面", async () => {
+	const { createTools } = await import("./tools.ts");
+	const root = tempRoot();
+	mkdirSync(join(root, "managers", "frontend"), { recursive: true });
+	const previousRoot = process.env.CHANCELLOR_WORK_ROOT;
+	const previousDomainDispatch = process.env.CHANCELLOR_DOMAIN_DISPATCH;
+	process.env.CHANCELLOR_WORK_ROOT = join(root, "runs");
+	process.env.CHANCELLOR_DOMAIN_DISPATCH = "true";
+	try {
+		const tools = createTools({
+			memory: null,
+			scopeOf: (id) => ({ type: "session", id: String(id) }) as never,
+			projects: null,
+		});
+		const delegate = tools.find((tool) => tool.name === "delegate");
+		assert.ok(delegate);
+		const parameters = delegate.parameters as {
+			properties?: Record<string, unknown>;
+		};
+		assert.equal("domain" in (parameters.properties ?? {}), true, "打开时 domain 回到参数表");
+		assert.equal(delegate.description.includes("领域负责人"), true, "打开时描述恢复领域负责人");
+		assert.match(
+			JSON.stringify(parameters.properties?.domain ?? {}),
+			/当前已有领域：frontend/,
+			"参数说明里的领域清单照常列出",
+		);
+	} finally {
+		if (previousRoot === undefined) delete process.env.CHANCELLOR_WORK_ROOT;
+		else process.env.CHANCELLOR_WORK_ROOT = previousRoot;
+		if (previousDomainDispatch === undefined) delete process.env.CHANCELLOR_DOMAIN_DISPATCH;
+		else process.env.CHANCELLOR_DOMAIN_DISPATCH = previousDomainDispatch;
 		rmSync(root, { recursive: true, force: true });
 	}
 });

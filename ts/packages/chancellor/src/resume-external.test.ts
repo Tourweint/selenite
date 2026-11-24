@@ -236,8 +236,8 @@ test("codebuddy 开闸后分到 session 档；缺号按重派并给对应文案"
   // 其他档位不受影响：能力字段仍是唯一判据。
   assert.equal(RESUME_NOTICE_UNSUPPORTED, "该执行者不支持续跑，已重派新单，上一段上下文不延续");
 
-  // 原生 / MCP / 手机有自己的 resume 语义，不属于外部 CLI 分档，也不该被塞提示。
-  assert.deepEqual(decideResume("native", "sess-anything"), { mode: "employee", notice: null });
+  // 本机池 / MCP / 手机有自己的 resume 语义，不属于外部 CLI 分档，也不该被塞提示。
+  assert.deepEqual(decideResume("pool", "sess-anything"), { mode: "employee", notice: null });
   assert.deepEqual(decideResume("phone", null), { mode: "employee", notice: null });
 });
 

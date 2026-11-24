@@ -183,6 +183,14 @@ export function retryDecision(
   }
 }
 
+/**
+ * 这一类失败是否值得再跑（终止回执用，2026-11-23）。
+ * 复用 retryDecision 的默认口径，避免回执与调度层判断两套标准。
+ */
+export function failureIsRetryable(cls: FailureClass): boolean {
+  return retryDecision(cls, 1).retry;
+}
+
 const UNIT_MS: Record<string, number> = {
   d: 86_400_000,
   day: 86_400_000,

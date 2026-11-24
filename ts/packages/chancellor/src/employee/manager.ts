@@ -100,6 +100,11 @@ export function runManager(task: ManagerTask, signal?: AbortSignal): Promise<Man
                 ...(task.project.dataDir
                   ? ["--project-data-dir", task.project.dataDir]
                   : []),
+                // 项目全部文件夹（2026-11-24）：manager 子进程再派活时只凭这份 project，
+                // 不传的话子单会退回"只给主文件夹"。
+                ...(task.project.roots?.length
+                  ? ["--project-roots", JSON.stringify(task.project.roots)]
+                  : []),
               ]
             : []),
           ...(task.parentTicketId

@@ -40,6 +40,7 @@ import {
 	CODEBUDDY_BIN,
 	CODEBUDDY_MODEL,
 	CODEX_BIN,
+	DOUBAO_BIN,
 	MODEL,
 	OPENCODE_BIN,
 	QODER_BIN,
@@ -59,6 +60,10 @@ import {
 	type CodeBuddyCall,
 	runCodeBuddy,
 } from "../../../packages/chancellor/src/employee/codebuddy.ts";
+import {
+	type DoubaoCall,
+	runDoubao,
+} from "../../../packages/chancellor/src/employee/doubao.ts";
 import {
 	type OpencodeCall,
 	runOpencode,
@@ -252,11 +257,11 @@ function maybeCacheList(
 }
 
 async function listModels(employee: SelectableExecutorKind): Promise<ProbeResult> {
-	if (employee === "native") {
+	if (employee === "pool") {
 		return {
 			ok: true,
 			models: [],
-			message: "本机内核不在这里探测；干活模型在派活设置里选，留空跟随默认模型。",
+			message: "本机执行器池不在这里探测；干活模型在派活设置里选，留空跟随默认模型。",
 		};
 	}
 	if (employee === "opencode") {
@@ -279,6 +284,31 @@ async function listModels(employee: SelectableExecutorKind): Promise<ProbeResult
 				models.length > 0
 					? `已取到 ${models.length} 个 OpenCode 模型；选一个再点检测可验证可用性。`
 					: "OpenCode 没有返回模型清单。",
+		};
+	}
+	if (employee === "doubao") {
+		// 豆包的 stdout 不能接管道（Windows 重叠句柄），清单也走文件再读。
+		const captured = await captureToFile(
+			DOUBAO_BIN,
+			["model", "list", "--output-format", "json"],
+			"豆包",
+			30_000,
+		);
+		if (!captured.ok) {
+			return {
+				ok: false,
+				models: [],
+				message: "取不到豆包模型清单：CLI 未安装、未登录或路径不对。",
+			};
+		}
+		const models = parseDoubaoModelList(captured.text);
+		return {
+			ok: models.length > 0,
+			models,
+			message:
+				models.length > 0
+					? `已取到 ${models.length} 个豆包模型（id 带 person- 前缀）；选一个再点检测可验证可用性。`
+					: "豆包没有返回模型清单。",
 		};
 	}
 	if (employee === "codebuddy") {
@@ -504,7 +534,15 @@ async function probeModel(
 			result = await runCodeBuddy({
 				...call,
 				model,
+				// 检测只问一句话，不需要写权限（2026-11-23 权限档接入后钉 read）。
+				permission: "read",
 			} satisfies CodeBuddyCall);
+		} else if (employee === "doubao") {
+			result = await runDoubao({
+				...call,
+				model,
+				permission: "read",
+			} satisfies DoubaoCall);
 		} else if (employee === "qoder-intl" || employee === "qoder-cn") {
 			const qoderCall: QoderCall = {
 				...call,
@@ -520,7 +558,13 @@ async function probeModel(
 		}
 		return classify(employee, result);
 	} finally {
-		rmSync(dir, { recursive: true, force: true });
+		// Windows 上子进程刚退出时目录可能仍被占用（豆包实测 EPERM）；
+		// 清理失败不能把检测结果盖成 500，临时目录留给系统清。
+		try {
+			rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+		} catch {
+			// 忽略清理失败。
+		}
 	}
 }
 
@@ -656,4 +700,115 @@ function capture(
 		child.on("error", () => finish(false));
 		child.on("close", (code) => finish(code === 0));
 	});
+}
+
+/**
+ * 同 capture，但 stdout 落临时文件（2026-11-23 豆包）。
+ * 豆包 CLI 在 Windows 上把 stdout 接到匿名管道会报 `internal_error: 无法启动主任务`
+ * （重叠句柄不支持复制），只能先写文件再读。
+ */
+function captureToFile(
+	command: string,
+	args: string[],
+	label: string,
+	timeoutMs: number,
+): Promise<{ ok: boolean; text: string }> {
+	return new Promise((resolve) => {
+		let launcher: { command: string; prefixArgs: string[] };
+		try {
+			launcher = resolveCliLauncher(command, process.env, label);
+		} catch {
+			resolve({ ok: false, text: "" });
+			return;
+		}
+		const cwd = tmpdir();
+		const dir = mkdtempSync(join(cwd, "doubao-list-"));
+		const stdoutFile = join(dir, "stdout.json");
+		let fd: number | null = null;
+		let child;
+		try {
+			fd = openSync(stdoutFile, "w");
+			child = spawn(launcher.command, [...launcher.prefixArgs, ...args], {
+				cwd,
+				env: { ...process.env, PWD: cwd },
+				windowsHide: true,
+				stdio: ["ignore", fd, "ignore"],
+			});
+			closeSync(fd);
+			fd = null;
+		} catch {
+			if (fd !== null) {
+				try {
+					closeSync(fd);
+				} catch {
+					// 关不掉也不影响失败返回。
+				}
+			}
+			cleanupDir(dir);
+			resolve({ ok: false, text: "" });
+			return;
+		}
+		let settled = false;
+		const finish = (ok: boolean): void => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			let text = "";
+			try {
+				text = readFileSync(stdoutFile, "utf8");
+			} catch {
+				text = "";
+			}
+			cleanupDir(dir);
+			resolve({ ok, text });
+		};
+		const timer = setTimeout(() => {
+			child.kill();
+			finish(false);
+		}, timeoutMs);
+		child.on("error", () => finish(false));
+		child.on("close", (code) => finish(code === 0));
+	});
+}
+
+/** 临时目录清理：Windows 上刚退出的子进程可能还占着目录，失败不冒泡。 */
+function cleanupDir(dir: string): void {
+	try {
+		rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+	} catch {
+		// 留给系统清理。
+	}
+}
+
+/** 豆包 `model list --output-format json` → 模型 id 列表（result.models[].id）。 */function parseDoubaoModelList(text: string): string[] {
+	for (const line of text.split(/\r?\n/)) {
+		const trimmed = line.trim();
+		if (!trimmed.startsWith("{")) continue;
+		try {
+			const value: unknown = JSON.parse(trimmed);
+			if (value === null || typeof value !== "object" || Array.isArray(value)) {
+				continue;
+			}
+			const result = (value as Record<string, unknown>).result;
+			if (result === null || typeof result !== "object" || Array.isArray(result)) {
+				continue;
+			}
+			const models = (result as Record<string, unknown>).models;
+			if (!Array.isArray(models)) continue;
+			const ids = models
+				.map((model) =>
+					model !== null && typeof model === "object" && !Array.isArray(model)
+						? (model as Record<string, unknown>).id
+						: null,
+				)
+				.filter(
+					(id): id is string => typeof id === "string" && id.trim() !== "",
+				)
+				.map((id) => id.trim());
+			return [...new Set(ids)].sort((a, b) => a.localeCompare(b));
+		} catch {
+			// 非 JSON 行跳过。
+		}
+	}
+	return [];
 }

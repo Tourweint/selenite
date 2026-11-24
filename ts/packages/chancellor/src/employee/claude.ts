@@ -22,6 +22,7 @@ import {
   STDIN_PROMPT_THRESHOLD,
   type ParsedCliStdout,
 } from "./cli.ts";
+import { makeStep, toolDetail, type CliStepEvent } from "./steps.ts";
 import type { Employee, EmployeeOutcome, EmployeeTask } from "./index.ts";
 import { buildResumePrompt, readTaskPrompt } from "./task-prompt.ts";
 
@@ -54,6 +55,8 @@ export interface ClaudeCall {
   /** 非空时带 `--resume <sessionId>`，接上上次会话。 */
   resumeSessionId?: string | null;
   signal?: AbortSignal;
+  /** 流式事件（2026-11-23）：给回调时输出改 stream-json 并逐行映射。 */
+  onStep?: (step: CliStepEvent) => void;
 }
 
 export interface ClaudeInvocation {
@@ -65,10 +68,13 @@ export interface ClaudeInvocation {
 /** 纯函数：参数与 stdin 的决定，便于单测。 */
 export function buildClaudeInvocation(call: ClaudeCall): ClaudeInvocation {
   const longPrompt = call.prompt.length > STDIN_PROMPT_THRESHOLD;
+  const streamEvents = Boolean(call.onStep);
   const args = ["-p"];
   if (!longPrompt) args.push(call.prompt);
   if (call.resumeSessionId) args.push("--resume", call.resumeSessionId);
-  args.push("--output-format", "json");
+  // 2026-11-23 实测：stream-json 必须和 --verbose 一起用；不开口子时保持单结果 json。
+  args.push("--output-format", streamEvents ? "stream-json" : "json");
+  if (streamEvents) args.push("--verbose");
   if (call.permission === "full") {
     args.push("--dangerously-skip-permissions");
   } else {
@@ -83,6 +89,68 @@ export function buildClaudeInvocation(call: ClaudeCall): ClaudeInvocation {
 
 export function parseClaudeStdout(stdout: string): ParsedCliStdout {
   return parseCliStdout(stdout, "claude-code");
+}
+
+/**
+ * 把 Claude `--output-format stream-json` 的一行映射成统一事件（2026-11-23 实测形状）：
+ * - `assistant.message.content[]` 里的 `tool_use` → tool 事件（name + 参数摘要）；
+ * - `user.message.content[]` 里的 `tool_result.is_error=true` → 失败状态；
+ * - thinking / text / result 一律不产生事件（不把过程塞进上下文）。
+ * `toolNames` 跨行保存 tool_use_id → 工具名，供失败状态点名。
+ */
+export function parseClaudeStepLine(
+  line: string,
+  toolNames: Map<string, string> = new Map(),
+): CliStepEvent[] {
+  const event = parseJsonObject(line);
+  if (!event) return [];
+  const message = isRecord(event.message) ? event.message : null;
+  const content = Array.isArray(message?.content) ? message.content : [];
+  const steps: CliStepEvent[] = [];
+  if (event.type === "assistant") {
+    for (const item of content) {
+      if (!isRecord(item) || item.type !== "tool_use" || typeof item.name !== "string") {
+        continue;
+      }
+      if (typeof item.id === "string") toolNames.set(item.id, item.name);
+      steps.push(
+        makeStep({
+          type: "tool",
+          name: item.name,
+          detail: toolDetail(item.name, item.input),
+        }),
+      );
+    }
+    return steps;
+  }
+  if (event.type === "user") {
+    for (const item of content) {
+      if (!isRecord(item) || item.type !== "tool_result" || item.is_error !== true) {
+        continue;
+      }
+      const name =
+        typeof item.tool_use_id === "string"
+          ? toolNames.get(item.tool_use_id) ?? "工具"
+          : "工具";
+      steps.push(makeStep({ type: "status", name, detail: "工具失败", failed: true }));
+    }
+  }
+  return steps;
+}
+
+function parseJsonObject(line: string): Record<string, unknown> | null {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("{")) return null;
+  try {
+    const value: unknown = JSON.parse(trimmed);
+    return isRecord(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 /**
@@ -111,6 +179,8 @@ export async function runClaude(call: ClaudeCall): Promise<ExternalCliResult> {
     return emptyCliResult({ error: messageOf(error) });
   }
   const invocation = buildClaudeInvocation(call);
+  const toolNames = new Map<string, string>();
+  const onStep = call.onStep;
   return runCliProcess({
     label: "claude-code",
     command: launcher.command,
@@ -123,6 +193,13 @@ export async function runClaude(call: ClaudeCall): Promise<ExternalCliResult> {
     idleTimeoutMs: WORKER_IDLE_TIMEOUT_MS,
     maxTimeoutMs: WORKER_MAX_TIMEOUT_MS,
     signal: call.signal,
+    ...(onStep
+      ? {
+          onLine: (line: string) => {
+            for (const step of parseClaudeStepLine(line, toolNames)) onStep(step);
+          },
+        }
+      : {}),
     interpret: (stdout, exitCode) => {
       const parsed = parseClaudeStdout(stdout);
       const ok = isClaudeSuccess(exitCode, parsed);
@@ -155,6 +232,7 @@ export function createClaudeEmployee(
       timeoutMs: WORKER_TIMEOUT_MS,
       label: path.basename(task.dir),
       ...(sessionId ? { resumeSessionId: sessionId } : {}),
+      ...(task.onStep ? { onStep: task.onStep } : {}),
       signal,
     });
     return {

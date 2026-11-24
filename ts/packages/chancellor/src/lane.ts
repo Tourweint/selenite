@@ -152,12 +152,12 @@ export class FifoGate {
 
 /** 外部 CLI 的默认容量（方案 §5.2）；其它执行器回落到单票并行上限。 */
 const DEFAULT_LANE_CAPS: Record<string, number> = {
-  "claude-code": 2,
-  codex: 2,
-  opencode: 1,
-  "qoder-intl": 1,
-  "qoder-cn": 1,
-  codebuddy: 1,
+  "claude-code": 4,
+  codex: 4,
+  opencode: 2,
+  "qoder-intl": 2,
+  "qoder-cn": 2,
+  codebuddy: 2,
   phone: 1,
   mcp: 1,
 };
@@ -207,7 +207,11 @@ function parseLaneCaps(raw: string | undefined): Map<string, number> {
 function laneCapOf(lane: string): number {
   const override = parseLaneCaps(process.env.CHANCELLOR_LANE_CAPS).get(lane);
   if (override !== undefined) return override;
-  if (lane === "native") return envPositiveInt(process.env.SUPERVISOR_POOL_SIZE, 4);
+  // native/pool 共用车道，容量 = 池大小；WORKER_POOL_SIZE 优先，旧名 SUPERVISOR_POOL_SIZE 仍兼容。
+  if (lane === "native") {
+    const rawPool = process.env.WORKER_POOL_SIZE ?? process.env.SUPERVISOR_POOL_SIZE;
+    return envPositiveInt(rawPool, 8);
+  }
   return DEFAULT_LANE_CAPS[lane] ?? MAX_PARALLEL_TASKS;
 }
 

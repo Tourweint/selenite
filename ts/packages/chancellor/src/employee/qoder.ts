@@ -10,7 +10,11 @@ import {
 	WORKER_TIMEOUT_MS,
 	resolveProfile,
 } from "../config.ts";
-import type { EmployeeCapabilities, QoderResult } from "../types.ts";
+import type {
+  EmployeeCapabilities,
+  EmployeePermission,
+  QoderResult,
+} from "../types.ts";
 import {
 	runCliProcess,
 	STDIN_PROMPT_THRESHOLD,
@@ -44,6 +48,11 @@ export interface QoderCall {
   cwd: string;
   /** "none" 时传 --tools ""，纯问答；"all" 时工具全开（worker 要写文件）。 */
   tools: "none" | "all";
+  /**
+   * 权限档（2026-11-23）：与 tools 解耦。不给 = full（旧行为）；
+   * 纯问答（tools:"none"）仍固定 `dont_ask`，不吃这个字段。
+   */
+  permission?: EmployeePermission;
   timeoutMs: number;
   label: string;
   /** 非空时带 `-r <session_id>`，接上上次会话（2026-11-08 扫尾批 8f）。 */
@@ -91,6 +100,17 @@ export function resolveQoderBinary(configured: string): string {
   return best?.file ?? configured;
 }
 
+/**
+ * 内部三档 → Qoder 原生 `--permission-mode`（2026-11-23 真机实测，见变更记录）：
+ * `read`→`dont_ask`（写文件 / 跑命令都被拒）、`edit`→`accept_edits`（能写文件，
+ * 命令仍被拦）、`full`→`bypass_permissions`（写文件 + 跑命令都通）。
+ */
+export function qoderPermissionMode(permission: EmployeePermission): string {
+  if (permission === "read") return "dont_ask";
+  if (permission === "edit") return "accept_edits";
+  return "bypass_permissions";
+}
+
 export function buildQoderInvocation(
   call: QoderCall,
   model: string,
@@ -104,8 +124,8 @@ export function buildQoderInvocation(
     "-w",
     call.cwd,
     "--permission-mode",
-    // 纯问答不需要写权限；只有 worker 要写产物，用 bypass_permissions。
-    call.tools === "all" ? "bypass_permissions" : "dont_ask",
+    // 纯问答不需要写权限，固定 dont_ask；worker 按派单权限档走（2026-11-23）。
+    call.tools === "none" ? "dont_ask" : qoderPermissionMode(call.permission ?? "full"),
     "-o",
     "json",
   );
@@ -193,13 +213,16 @@ export function createQoderEmployee(
     sessionId: string | null,
     signal?: AbortSignal,
   ): Promise<EmployeeOutcome> => {
+    const profile = resolveProfile(kind, task.settings);
     const response = await run({
       prompt,
       cwd: task.workDir ?? task.dir,
       tools: "all",
       timeoutMs: WORKER_TIMEOUT_MS,
       label: path.basename(task.dir),
-      model: resolveProfile(kind, task.settings).model,
+      model: profile.model,
+      // 旧配置没有 permission = full，行为与 2026-11-23 之前一致。
+      permission: profile.permission ?? "full",
       ...(sessionId ? { resumeSessionId: sessionId } : {}),
       signal,
     });

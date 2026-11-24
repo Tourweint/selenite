@@ -9,7 +9,11 @@ import {
 	WORKER_TIMEOUT_MS,
 	resolveProfile,
 } from "../config.ts";
-import type { CodeBuddyResult, EmployeeCapabilities } from "../types.ts";
+import type {
+  CodeBuddyResult,
+  EmployeeCapabilities,
+  EmployeePermission,
+} from "../types.ts";
 import {
 	isCliSuccess,
 	parseCliStdout,
@@ -25,10 +29,14 @@ import { buildResumePrompt, readTaskPrompt } from "./task-prompt.ts";
  * CodeBuddy 非交互调用（2026-11-03，方案 §5.6）。
  *
  * 实测口径（不许凭文档想当然）：
- * - `-p` 必须带 `-y`，否则需要授权的操作被阻止；
+ * - `--permission-mode` 按实测映射：`read`→`dontAsk`、`edit`→`acceptEdits`、
+ *   `full`→`bypassPermissions`（2026-11-23 矩阵，见变更记录）；
+ * - `-y` 不再固定带：2026-11-23 实测 `-y` 不改变 `--permission-mode` 的效果
+ *   （`dontAsk` / `plan` 下加了 `-y` 仍拒写），档位由 `--permission-mode` 决定；
  * - 模型只能用 `--model` 全拼，`-m` 在 npm shim 下报 unknown option；
  * - `--output-format json` 输出的是**一个 JSON 数组**，最后一项 `type=result`；
  * - 成败不能只看 `is_error`：`permission_denials` 非空也等于没干成；
+ *   实测 `dontAsk` / `plan` 的拒绝**不进** `permission_denials`，只体现在正文里；
  * - 从 WorkBuddy 会话继承 `CODEBUDDY_*` / `WORKBUDDY_*` 会把 CLI 认成宿主，永久挂起。
  */
 export const CODEBUDDY_CAPABILITIES: EmployeeCapabilities = {
@@ -44,6 +52,8 @@ export interface CodeBuddyCall {
   cwd: string;
   timeoutMs: number;
   label: string;
+  /** 权限档（2026-11-23）：不给 = full，与旧行为一致。 */
+  permission?: EmployeePermission;
   /** 非空时带 `-r <sessionId>`，接上上次会话（2026-11-08 扫尾批 8f2）。 */
   resumeSessionId?: string | null;
   /** 模型（2026-11-16 多 CLI 设置）：不给 = 用 env 缺省。 */
@@ -65,11 +75,26 @@ export interface CodeBuddyInvocation {
 export { STDIN_PROMPT_THRESHOLD };
 export type ParsedCodeBuddyStdout = ParsedCliStdout;
 
+/**
+ * 内部三档 → CodeBuddy 原生档名（2026-11-23 真机实测，见变更记录）：
+ * - `read`→`dontAsk`：写文件 / 跑命令都被拒；`plan` 也拒但会写自己的计划文件，故选 `dontAsk`；
+ * - `edit`→`acceptEdits`：能写文件，`Bash` 被拒（实测与 Qoder `accept_edits` 同形）；
+ * - `full`→`bypassPermissions`：写文件 + 跑命令都通。
+ */
+export function codeBuddyPermissionMode(
+  permission: EmployeePermission,
+): string {
+  if (permission === "read") return "dontAsk";
+  if (permission === "edit") return "acceptEdits";
+  return "bypassPermissions";
+}
+
 /** 纯函数：参数与 stdin 的决定，便于单测。 */
 export function buildCodeBuddyInvocation(
   prompt: string,
   model: string = CODEBUDDY_MODEL,
   resumeSessionId?: string | null,
+  permission: EmployeePermission = "full",
 ): CodeBuddyInvocation {
   const longPrompt = prompt.length > STDIN_PROMPT_THRESHOLD;
   const args = ["-p"];
@@ -77,7 +102,15 @@ export function buildCodeBuddyInvocation(
   // 续接参数和 -p 同一层。真机验过两种顺序都接得上（`-p -r <id> <提示>` 与
   // `-p <提示> -r <id>`），这里钉成与 qoder 一致的样子：提示在前、-r 紧跟会话号。
   if (resumeSessionId) args.push("-r", resumeSessionId);
-  args.push("--output-format", "json", "-y", "--model", model);
+  // 权限档走厂商原生参数（2026-11-23）；`-y` 实测不改变档位效果，不再固定带。
+  args.push(
+    "--output-format",
+    "json",
+    "--permission-mode",
+    codeBuddyPermissionMode(permission),
+    "--model",
+    model,
+  );
   return { args, stdin: longPrompt ? prompt : null };
 }
 
@@ -125,6 +158,7 @@ export async function runCodeBuddy(
     call.prompt,
     call.model?.trim() || CODEBUDDY_MODEL,
     call.resumeSessionId,
+    call.permission ?? "full",
   );
   const result = await runCliProcess({
     label: "codebuddy",
@@ -157,12 +191,15 @@ export function createCodeBuddyEmployee(
     sessionId: string | null,
     signal?: AbortSignal,
   ): Promise<EmployeeOutcome> => {
+    const profile = resolveProfile("codebuddy", task.settings);
     const response = await run({
       prompt,
       cwd: task.workDir ?? task.dir,
       timeoutMs: WORKER_TIMEOUT_MS,
       label: path.basename(task.dir),
-      model: resolveProfile("codebuddy", task.settings).model,
+      model: profile.model,
+      // 旧配置没有 permission = full，行为与 2026-11-23 之前一致。
+      permission: profile.permission ?? "full",
       ...(sessionId ? { resumeSessionId: sessionId } : {}),
       signal,
     });

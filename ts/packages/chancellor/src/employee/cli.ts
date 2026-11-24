@@ -68,10 +68,22 @@ export interface CliProcessCall {
   env?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
   /**
+   * stdout 改写到文件（2026-11-23 豆包）：豆包 CLI 在 Windows 上把 stdout 接到匿名管道，
+   * 起内部 worker 时复制重叠句柄失败，稳定报 `internal_error: 无法启动主任务`。
+   * 传了就用打开的文件 fd 当 stdio[1]，子进程退出后读回文本；不传保持原来的 pipe。
+   */
+  stdoutFile?: string;
+  /**
    * 自定义输出判定（2026-11-16）：Codex / OpenCode 是 JSONL 事件流，
    * 没有 `type=result`；不给时按 CodeBuddy / Qoder / Claude 的同一套口径。
    */
   interpret?: (stdout: string, exitCode: number | null) => CliInterpretation;
+  /**
+   * 逐行回调（2026-11-23 外部 CLI 流式事件）：每读到完整一行调用一次，
+   * 适配器在回调里把本档 JSONL 映射成统一事件。不改变 stdout 的原有累积 / 判定口径。
+   * 落文件模式（豆包）没有实时管道，进程退出读完文件后按行补发一次。
+   */
+  onLine?: (line: string) => void;
 }
 
 /** `interpret` 的返回值：够 `EmployeeOutcome` 用，不重复解析文本。 */
@@ -151,6 +163,32 @@ export function runCliProcess(call: CliProcessCall): Promise<CliProcessResult> {
     let timedOut = false;
     let aborted = false;
     let settled = false;
+    /** 逐行回调的半行缓冲；只在给了 onLine 时使用。 */
+    let lineBuffer = "";
+    const feedLine = (line: string): void => {
+      if (!call.onLine) return;
+      try {
+        call.onLine(line);
+      } catch {
+        // 事件映射是旁路：一行解析炸了也不能影响 CLI 的退出码 / 结论判定。
+      }
+    };
+    const feedChunk = (chunk: string): void => {
+      if (!call.onLine) return;
+      lineBuffer += chunk;
+      let index = lineBuffer.indexOf("\n");
+      while (index >= 0) {
+        feedLine(lineBuffer.slice(0, index));
+        lineBuffer = lineBuffer.slice(index + 1);
+        index = lineBuffer.indexOf("\n");
+      }
+    };
+    const flushLines = (): void => {
+      if (!call.onLine) return;
+      const rest = lineBuffer;
+      lineBuffer = "";
+      if (rest.trim() !== "") feedLine(rest);
+    };
     let forceTimer: NodeJS.Timeout | null = null;
     /** 旧口径的墙钟计时 / 活动口径的空闲计时（同一槽位，二选一） */
     let primaryTimer: NodeJS.Timeout | null = null;
@@ -187,19 +225,38 @@ export function runCliProcess(call: CliProcessCall): Promise<CliProcessResult> {
     };
 
     let child;
+    let stdoutFd: number | null = null;
     try {
       // Windows 上 Git Bash / MSYS 会给子进程留一个 PWD；OpenCode 2.1.1 按它认工作目录，
       // 不认 spawn 的 cwd（2026-11-16 冒烟实测：产物写进宿主目录）。统一对齐到 call.cwd。
       const env: NodeJS.ProcessEnv = { ...(call.env ?? process.env) };
       if (call.cwd) env.PWD = call.cwd;
+      if (call.stdoutFile) stdoutFd = fs.openSync(call.stdoutFile, "w");
       child = spawn(call.command, call.args, {
         cwd: call.cwd,
         // 走 stdin 时必须是 pipe；走 argv 时 ignore，否则子进程可能等标准输入。
-        stdio: [call.stdin === null ? "ignore" : "pipe", "pipe", "pipe"],
+        // 豆包要文件 stdout（见 CliProcessCall.stdoutFile），其余 CLI 仍是 pipe。
+        stdio: [
+          call.stdin === null ? "ignore" : "pipe",
+          stdoutFd === null ? "pipe" : stdoutFd,
+          "pipe",
+        ],
         windowsHide: true,
         env,
       });
+      // fd 已经复制进子进程；父进程立即关掉自己的副本，Windows 上不关会占着文件。
+      if (stdoutFd !== null) {
+        fs.closeSync(stdoutFd);
+        stdoutFd = null;
+      }
     } catch (error) {
+      if (stdoutFd !== null) {
+        try {
+          fs.closeSync(stdoutFd);
+        } catch {
+          // 关不掉也不影响错误返回。
+        }
+      }
       finish(
         emptyResult({
           error: `起 ${call.label} 子进程失败：${messageOf(error)}`,
@@ -277,6 +334,7 @@ export function runCliProcess(call: CliProcessCall): Promise<CliProcessResult> {
     child.stderr?.setEncoding("utf8");
     child.stdout?.on("data", (chunk: string) => {
       stdout += chunk;
+      feedChunk(chunk);
       bumpActivity();
     });
     child.stderr?.on("data", (chunk: string) => {
@@ -298,6 +356,17 @@ export function runCliProcess(call: CliProcessCall): Promise<CliProcessResult> {
     child.on("close", (code) => {
       clearRunTimers();
       call.signal?.removeEventListener("abort", onAbort);
+      // stdout 落文件的路径：进程关完再读，避免读到写了一半的内容。
+      if (call.stdoutFile) {
+        try {
+          stdout = fs.readFileSync(call.stdoutFile, "utf8");
+        } catch {
+          stdout = "";
+        }
+        // 落文件模式没有实时管道：退出后按行补发一次，事件语义与管道模式一致。
+        feedChunk(stdout);
+      }
+      flushLines();
 
       if (timedOut) {
         finish(

@@ -55,6 +55,8 @@ function startServer(extraEnv: NodeJS.ProcessEnv = {}): ChildProcess {
 			CURRENT_PROJECT: "",
 			// 工作归属标签（2026-11-18）：§14.7 要断言 chatWorkdir，别被开发机 env 关掉
 			CHAT_PROJECT_LABEL: "",
+			// 普通助手会话（2026-11-23 产品退役后默认关）：探针要覆盖归档 / 工作归属链路，所以隔离 env 里显式打开
+			WORKER_CHAT_ENABLED: "true",
 			// 播种会写 providers.json；探针必须隔离，别碰真实 .data
 			PROVIDERS_PATH: ".data/probe-http-providers.json",
 			// 执事库 / 家目录隔离：§18 会播种一个带 domain 的执事，绝不能碰真实 .data/partners.sqlite
@@ -1050,11 +1052,23 @@ try {
 
 	// ── 12. 上下文占用与内容搜索（批次二）──
 	console.log("\n· 12. 上下文占用与内容搜索");
+	// 2026-11-24 回归：/say 这类播报条目（usage 全 0 的 pi.assistant）落在末尾时，
+	// 上下文占用必须仍回上一次真实请求的用量，不能退回 0 / null（环消失的根因）。
+	const saidBeforeCtx = await fetch(`${BASE}/api/v1/agent/chat/${externalId}/say`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ text: "上下文环回归：这条播报不带用量" }),
+	});
+	check(saidBeforeCtx.status === 201, "上下文环回归：播报写入成功", String(saidBeforeCtx.status));
 	// faux 也给 usage（前面日志口径），所以 used 应该是真实测量值
 	const ctxResponse = await fetch(`${BASE}/api/v1/agent/chat/${externalId}/context`);
 	check(ctxResponse.status === 200, "context 端点可用", String(ctxResponse.status));
 	const ctx = (await ctxResponse.json()) as { used: number | null; window: number | null };
-	check(typeof ctx.used === "number" && ctx.used > 0, "used 来自最后一次请求的 usage", JSON.stringify(ctx));
+	check(
+		typeof ctx.used === "number" && ctx.used > 0,
+		"used 来自最后一次真实请求的 usage（播报条目不遮）",
+		JSON.stringify(ctx),
+	);
 	check(
 		typeof ctx.window === "number" && ctx.window > 0,
 		"window 来自模型目录",
@@ -4543,7 +4557,7 @@ try {
 	});
 	check(upTooLong.status === 400, "PUT：超过 8192 字节 → 400", String(upTooLong.status));
 
-	// 上下文默认页（总管）应带上这一段；worker 角色保留 0 字槽位。
+	// 上下文默认页（总管）应带上这一段；普通 worker 档已于 2026-11-24 退役。
 	const upChiefCtx = (await (
 		await fetch(`${BASE}/api/v1/agent/context-defaults?role=chief`)
 	).json()) as { system?: { sections?: Array<{ key?: string; chars?: number; empty?: boolean }> } };
@@ -4553,14 +4567,11 @@ try {
 		"默认开销（总管）：user_profile 段有内容",
 		`chars=${upChiefSection?.chars ?? 0}`,
 	);
-	const upWorkerCtx = (await (
-		await fetch(`${BASE}/api/v1/agent/context-defaults?role=worker`)
-	).json()) as { system?: { sections?: Array<{ key?: string; chars?: number; empty?: boolean }> } };
-	const upWorkerSection = (upWorkerCtx.system?.sections ?? []).find((item) => item.key === "user_profile");
+	const upWorkerRole = await fetch(`${BASE}/api/v1/agent/context-defaults?role=worker`);
 	check(
-		upWorkerSection?.empty === true && (upWorkerSection?.chars ?? -1) === 0,
-		"默认开销（worker）：user_profile 是 0 字槽位",
-		`chars=${upWorkerSection?.chars ?? -1}`,
+		upWorkerRole.status === 404,
+		"默认开销：worker 角色已退役 → 404",
+		String(upWorkerRole.status),
 	);
 
 	// 真轮次：主对话（chief）的注入表里应有 user_profile，且排在 persona 之后。

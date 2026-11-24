@@ -321,7 +321,7 @@ test("设备 worker 判别：明确 targetDevice / phone 雇员 / 本机 / auto 
 	assert.equal(isDeviceWorkerDelegation({ targetDevice: "auto" }, {}), false, "auto 落回本机不算设备活");
 	assert.equal(isDeviceWorkerDelegation({}, { CHANCELLOR_EMPLOYEE: "phone" }), true, "phone 雇员 = 设备活");
 	assert.equal(isDeviceWorkerDelegation({}, { CHANCELLOR_EMPLOYEE: "codebuddy" }), false, "本机 codebuddy 不是设备活");
-	assert.equal(isDeviceWorkerDelegation({}, {}), false, "默认 native 不是设备活");
+	assert.equal(isDeviceWorkerDelegation({}, {}), false, "默认本机池不是设备活");
 });
 
 /**

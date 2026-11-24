@@ -606,7 +606,7 @@ export interface PartnerRelayDeps {
 	) => Promise<RelayDeliverResult>;
 	/**
 	 * worker 插话通道（2026-11-19 插话统一 批1）：传了才给 `send_to_agent` 加
-	 * `mode` 参数与单号目标——target 写单号（ticketId）时经 native 通道转发给
+	 * `mode` 参数与单号目标——target 写单号（ticketId）时经池控制面转发给
 	 * 正在跑的打手。不传 = 工具保持改动前的逐字节形态（回滚：WORKER_STEER_ENABLED
 	 * =false 时不注入）。返回的 `error` / `message` 原样进工具回执。
 	 */
@@ -641,7 +641,7 @@ export function createSendToAgentTool(deps: PartnerRelayDeps): ToolRegistration 
 			? "给另一位执事递一条话（只送到对方的会话里，主人看不到原文）。" +
 				"适合：把自己查到的事交给对口的执事、跟对方对一下口径。" +
 				"target 写执事的名字或领域；重名时用「名字·领域」。" +
-				"要给正在跑的本机打手（native worker）半路补话，target 写它的单号（ticketId，如 t-20261119-143052-ab12），mode=steer 插进它当前这一轮（默认）、followUp 排到它本轮收尾之后；没在跑的打手收不到。" +
+				"要给正在跑的本机打手（执行器池里的 worker）半路补话，target 写它的单号（ticketId，如 t-20261119-143052-ab12），mode=steer 插进它当前这一轮（默认）、followUp 排到它本轮收尾之后；没在跑的打手收不到。" +
 				"一次只说一件事、一条话别拆成好几条（每轮最多 3 条）；" +
 				"收到别人递来的话那一轮不能再往外递。"
 			: "给另一位执事递一条话（只送到对方的会话里，主人看不到原文）。" +

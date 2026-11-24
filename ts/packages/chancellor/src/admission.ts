@@ -4,10 +4,10 @@ import process from "node:process";
  * ticket 准入闸 + 优先级（2026-11-22 调度层合并方案 M1b）。
  *
  * 背景：M1a 的 `lane.ts` 只管「同一执行器最多几个子进程」和「同领域 manager 串行」，
- * 但 ticket 一旦收单就立刻拆单（planTicket 是模型调用）。一次连派 30 单，
- * 30 次拆单模型调用会同时打出去——跨 ticket 没有总闸。这里补的是进 planning 之前的准入：
+ * 但收单后没有跨 ticket 的总闸。2026-11-23 拆单器退役后收单不再调模型，准入仍然限制
+ * 「同时活跃的票」，避免一次连派 N 单把执行器 / 池 / 供应商一起打爆。
  *
- *   intake → 单号已出 → 申请 admission → 拿到才 planning
+ *   intake → 单号已出 → 申请 admission → 拿到才进入规划 / 执行
  *                                     └─ 拿不到：排队（按 runSource 优先级）或明确失败
  *
  * 设计约束（与 lane.ts 同风格，但**不 import 它的私有函数**）：
@@ -19,7 +19,7 @@ import process from "node:process";
  *
  * 与 lane.ts 的口径对照（两边必须一致，但各自读 env，避免 chancellor 内部互相依赖）：
  * - 开关解析：false / 0 / no / off 才关，其它（含空串）都算开。
- * - `CHANCELLOR_MAX_ACTIVE_PER_DOMAIN`：默认 1；0 / 负数 = 不限。
+ * - `CHANCELLOR_MAX_ACTIVE_PER_DOMAIN`：默认 4；0 / 负数 = 不限。
  */
 
 /** 准入租约；release 必须幂等（取消 / 异常 / finally 都可能重复走到）。 */
@@ -76,8 +76,8 @@ interface Waiter {
   onAbort?: () => void;
 }
 
-const DEFAULT_MAX_ACTIVE = 3;
-const DEFAULT_MAX_ACTIVE_PER_DOMAIN = 1;
+const DEFAULT_MAX_ACTIVE = 8;
+const DEFAULT_MAX_ACTIVE_PER_DOMAIN = 4;
 const DEFAULT_QUEUE_MAX = 64;
 const DEFAULT_PRIORITY = 5;
 
@@ -277,8 +277,8 @@ function gateFromEnv(): TicketAdmissionGate {
 /**
  * 每次取用现读 env：测试会在同一进程里改上限 / 开关，缓存不如就地重算。
  * 三个变量与方案 §5.2 对齐：
- * - CHANCELLOR_MAX_ACTIVE_TICKETS 默认 3（0 / 负数 = 不限）
- * - CHANCELLOR_MAX_ACTIVE_PER_DOMAIN 默认 1（0 / 负数 = 不限）
+ * - CHANCELLOR_MAX_ACTIVE_TICKETS 默认 8（0 / 负数 = 不限）
+ * - CHANCELLOR_MAX_ACTIVE_PER_DOMAIN 默认 4（0 / 负数 = 不限）
  * - CHANCELLOR_QUEUE_MAX 默认 64（0 = 不排队）
  */
 function limitsFromEnv(): AdmissionLimits {

@@ -153,40 +153,15 @@ test("拒绝续跑指令同样带反馈（async 路径）", () => {
 	);
 });
 
-// ── persona_recall（2026-11-09 persona 接入批一）────────────
-test("persona_recall：进 WRITE_TOOLS；ask-all 问、none 放行、不进高危清单", () => {
-	assert.ok(WRITE_TOOLS.has("persona_recall"), "起 python 子进程的工具必须进闸门");
-	assert.ok(
-		!(DEFAULT_CRITICAL_TOOLS as readonly string[]).includes("persona_recall"),
-		"命令拼死、只有 query 文本，不该按高危打断用户",
-	);
-	assert.deepEqual(verdict("ask-all", "persona_recall"), { kind: "ask" });
-	assert.deepEqual(verdict("ask-critical", "persona_recall"), { kind: "allow" });
-	assert.deepEqual(verdict("none", "persona_recall"), { kind: "allow" });
-});
-
-test("persona_recall：read-only 档被拦下", () => {
-	// 断言纯函数 `accessBlockReason`，不看进程级 `policy.access`：那个值在模块加载时读 env
-	// 与本机 `.data/policy.json`，和别的测试文件同进程跑时会串味（2026-11-14 修）。
-	assert.notEqual(accessBlockReason("read-only", "persona_recall"), undefined, "只读档应拦 persona_recall");
-	assert.equal(accessBlockReason("full", "persona_recall"), undefined, "完全访问档不拦");
-});
-
-// ── persona_write（2026-11-17 persona_write 批）────────────
-test("persona_write：进 WRITE_TOOLS + 高危清单；ask-critical 档每次写都弹审批", () => {
-	assert.ok(WRITE_TOOLS.has("persona_write"), "起 python 子进程的工具必须进闸门");
-	assert.ok(
-		(DEFAULT_CRITICAL_TOOLS as readonly string[]).includes("persona_write"),
-		"往主人一生库落字 = 高危：每次写都要主人点头（「明确让写了才写」的技术 enforcement）",
-	);
-	assert.deepEqual(verdict("ask-all", "persona_write"), { kind: "ask" });
-	assert.deepEqual(verdict("ask-critical", "persona_write"), { kind: "ask" });
-	assert.deepEqual(verdict("none", "persona_write"), { kind: "allow" }, "none 档是用户自己选的全不问，尊重");
-});
-
-test("persona_write：read-only 档被拦下", () => {
-	assert.notEqual(accessBlockReason("read-only", "persona_write"), undefined, "只读档应拦 persona_write");
-	assert.equal(accessBlockReason("full", "persona_write"), undefined, "完全访问档不拦");
+// ── persona_recall / persona_write 已退役（2026-11-24）────────────
+test("persona_recall / persona_write：已退役，不在闸门与高危清单里", () => {
+	// 2026-11-24 旧形态退役：工具面收敛为恒 2 个（recall / remember），两个 persona 工具
+	// 不再注册，也不该留在 WRITE_TOOLS / 高危清单里（外部 remember 的写入口径另由
+	// externalRememberBlockReason / externalRememberApproval 承担，见 memory-bank-gate.test.ts）。
+	assert.ok(!WRITE_TOOLS.has("persona_recall"));
+	assert.ok(!WRITE_TOOLS.has("persona_write"));
+	assert.ok(!(DEFAULT_CRITICAL_TOOLS as readonly string[]).includes("persona_write"));
+	assert.equal(accessBlockReason("read-only", "persona_write"), undefined, "已退役工具不再走只读闸门");
 });
 
 // ── 查看命令进权限档（2026-11-14）────────────────────────────

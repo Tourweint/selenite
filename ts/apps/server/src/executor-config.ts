@@ -11,16 +11,18 @@
  * 建单时把 employee / profile 交给 chancellor，续跑按原单快照走——换默认只影响新单。
  *
  * 模型分工（2026-11-19）：规划 / 对话仍用 `readLlmConfig()` 的默认模型；
- * 本机内核（native）派活工人单独一条"干活模型"，留空 = 跟随默认
- * （`EXECUTOR_NATIVE_FOLLOW_DEFAULT=false` 回滚到启动 env），非空 = 单独模型。
- * 显式模型按 `providerId`（或模型 id）解析到已连接供应商，带 `modelRoute` 给 worker；
- * 这样跨供应商不再只吃启动 env 的百炼。
+ * 本机执行器池（pool）的派活工人单独一条"干活模型"，留空 = 跟随默认
+ * （`EXECUTOR_NATIVE_FOLLOW_DEFAULT=false` 回滚到启动 env，变量名沿用旧称），
+ * 非空 = 单独模型。显式模型按 `providerId`（或模型 id）解析到已连接供应商，
+ * 带 `modelRoute` 给池进程；这样跨供应商不再只吃启动 env 的百炼。
+ *
+ * 2026-11-23：旧的 native（每票一个 worker 子进程）退役，本机只有 pool 一档。
  *
  * 刻意不做：
  * - 不在这里探测 CLI 登录状态 / 版本（会拖慢设置页；失败由任务中心的汇报如实显示）；
  * - 外部 CLI 的模型清单不进页自动拉：probe 端点（executor-probe.ts）只在用户点箭头 /
  *   点检测时跑；模型是自由文本，留空 = 跟随该 CLI 自己的配置。
- *   native 的清单来自已连接供应商目录，同样不 spawn CLI。
+ *   pool 的清单来自已连接供应商目录，同样不 spawn CLI。
  *
  * 界面措辞（2026-11-16 用户口径）：不叫「执行器」——它就是一个普通工人，
  * 界面与系统提示统一说「默认派给谁 / 派活默认交给」。
@@ -35,7 +37,6 @@ import type {
 import { providerCatalog, readLlmConfig } from "./provider.ts";
 
 export const EXECUTOR_KINDS = [
-  "native",
   "pool",
   "codebuddy",
   "qoder-intl",
@@ -43,6 +44,7 @@ export const EXECUTOR_KINDS = [
   "claude-code",
   "codex",
   "opencode",
+  "doubao",
   "phone",
   "mcp",
 ] as const;
@@ -51,7 +53,6 @@ export type ExecutorKind = (typeof EXECUTOR_KINDS)[number];
 
 /** 界面能选的本地执行器；phone / mcp 是部署形态，只在 env 里切。 */
 export const SELECTABLE_EXECUTOR_KINDS = [
-  "native",
   "pool",
   "codebuddy",
   "qoder-intl",
@@ -59,6 +60,7 @@ export const SELECTABLE_EXECUTOR_KINDS = [
   "claude-code",
   "codex",
   "opencode",
+  "doubao",
 ] as const;
 
 export type SelectableExecutorKind = (typeof SELECTABLE_EXECUTOR_KINDS)[number];
@@ -74,6 +76,12 @@ export interface ExecutorKindInfo {
   selectable: boolean;
   /** null = 权限档固定，不画控件。 */
   permissions: EmployeePermission[] | null;
+  /**
+   * 界面上实际可选的权限档（2026-11-23 按厂商收口）：`value` 仍是内部三值，
+   * `label` / `hint` 是该 CLI 自己的档名与含义。缺省 = 前端回落 `permissions`。
+   * 内部契约与执行映射不变：豆包历史配置里的 read 仍按 ask_risky 执行。
+   */
+  permissionOptions?: { value: EmployeePermission; label: string; hint?: string }[];
   modelHint: string;
   /** 卡片上的边界说明（Claude 额度等）。 */
   note?: string;
@@ -92,44 +100,61 @@ export const EXECUTOR_KIND_INFO: ExecutorKindInfo[] = [
       "崩了只影响在跑的那一票。前端「新建任务」和总管/执事派活都走它。",
   },
   {
-    id: "native",
-    label: "旧：每票一进程（回滚用）",
-    selectable: true,
-    permissions: null,
-    modelHint: "留空跟随默认模型；例如 deepseek-v4.1-flash",
-    note:
-      "改动前的形态：每张单起一个 worker 子进程。只在池不可用或需要强制隔离时选；" +
-      "选它等于把新单从第二套运行时拉回旧进程。整体回滚也可以直接 CHANCELLOR_EMPLOYEE=native。",
-  },
-  {
     id: "codebuddy",
     label: "CodeBuddy",
     selectable: true,
-    permissions: null,
+    permissions: ["read", "edit", "full"],
+    permissionOptions: [
+      { value: "read", label: "只读", hint: "dontAsk：写文件 / 跑命令都被拒" },
+      { value: "edit", label: "可改", hint: "acceptEdits：能写文件，跑命令被拒" },
+      { value: "full", label: "全权", hint: "bypassPermissions：写文件与命令都放行" },
+    ],
     modelHint: "例如 deepseek-v4.1-flash",
-    note: "非交互模式固定全权（-y），权限档不生效。",
+    note:
+      "权限档走 --permission-mode（2026-11-23 真机实测）；不再固定带 -y（-y 不改变档位效果）。" +
+      "dontAsk / plan 的拒绝不进 permission_denials，只体现在正文里，裁决时别只看失败标记。",
   },
   {
     id: "qoder-intl",
     label: "Qoder 国际",
     selectable: true,
-    permissions: null,
+    permissions: ["read", "edit", "full"],
+    permissionOptions: [
+      { value: "read", label: "只读", hint: "dont_ask：写文件 / 跑命令都被拒" },
+      { value: "edit", label: "可改", hint: "accept_edits：能写文件，命令被拦" },
+      { value: "full", label: "全权", hint: "bypass_permissions：写文件与命令都放行" },
+    ],
     modelHint: "例如 DeepSeek-Flash",
-    note: "非交互模式固定全权（bypass_permissions），权限档不生效。",
+    note:
+      "权限档走 --permission-mode（2026-11-23 真机实测）；纯问答路径仍固定 dont_ask。" +
+      "accept_edits 下命令被拦时 permission_denials 可能为空，裁决时别只看失败标记。",
   },
   {
     id: "qoder-cn",
     label: "Qoder 国内",
     selectable: true,
-    permissions: null,
+    permissions: ["read", "edit", "full"],
+    permissionOptions: [
+      { value: "read", label: "只读", hint: "dont_ask：写文件 / 跑命令都被拒" },
+      { value: "edit", label: "可改", hint: "accept_edits：能写文件，命令被拦" },
+      { value: "full", label: "全权", hint: "bypass_permissions：写文件与命令都放行" },
+    ],
     modelHint: "例如 DeepSeek-Flash",
-    note: "登录态与国际版独立；权限固定全权。",
+    note:
+      "登录态与国际版独立；权限档与国际版同一套 --permission-mode" +
+      "（2026-11-23 三档都实测过写文件 / 跑命令）。" +
+      "accept_edits 下命令被拦时 permission_denials 可能为空，裁决时别只看失败标记。",
   },
   {
     id: "claude-code",
     label: "Claude Code",
     selectable: true,
     permissions: ["read", "edit", "full"],
+    permissionOptions: [
+      { value: "read", label: "只读", hint: "plan 模式：不改文件" },
+      { value: "edit", label: "可改", hint: "acceptEdits：写项目不问" },
+      { value: "full", label: "全权", hint: "dangerously-skip：命令也不问" },
+    ],
     modelHint: "留空跟随 ~/.claude/settings.json；可填 fable / opus / sonnet / haiku 或全名",
     note:
       "订阅登录下 claude -p 按约 1.8–2.9 倍额度计（entrypoint sdk-cli）；API Key 计费不受影响。" +
@@ -140,6 +165,11 @@ export const EXECUTOR_KIND_INFO: ExecutorKindInfo[] = [
     label: "Codex CLI",
     selectable: true,
     permissions: ["read", "edit", "full"],
+    permissionOptions: [
+      { value: "read", label: "只读", hint: "read-only：不改文件" },
+      { value: "edit", label: "可改", hint: "workspace-write：可写工作区" },
+      { value: "full", label: "全权", hint: "danger-full-access：全部放行" },
+    ],
     modelHint: "留空跟随 ~/.codex/config.toml；例如 gpt-5.1-codex",
   },
   {
@@ -147,8 +177,30 @@ export const EXECUTOR_KIND_INFO: ExecutorKindInfo[] = [
     label: "OpenCode",
     selectable: true,
     permissions: ["read", "edit", "full"],
+    // 2026-11-23：edit / full 都走 --auto，界面上不再画第三段（历史 edit 值仍可执行）。
+    permissionOptions: [
+      { value: "read", label: "只读", hint: "--agent plan：不改文件" },
+      { value: "full", label: "全权", hint: "--auto：写文件与命令都不问" },
+    ],
     modelHint: "provider/model，例如 alibaba-cn/deepseek-v4.1-flash",
     note: "权限档：只读 = plan agent；可改 / 全权都用 --auto（OpenCode 不区分这两档）。",
+  },
+  {
+    id: "doubao",
+    label: "豆包 CLI",
+    selectable: true,
+    permissions: ["read", "edit", "full"],
+    // 2026-11-23：豆包没有只读档（历史 read 配置按 ask_risky 执行），界面不提供「只读」。
+    permissionOptions: [
+      { value: "edit", label: "风险确认", hint: "ask_risky：写文件 / 跑命令前先问" },
+      { value: "full", label: "全部允许", hint: "always_allow：不再询问" },
+    ],
+    modelHint:
+      "模型 id，例如 person-deepseek-v4-1-flash-261017（默认 DeepSeek V4.1 Flash）",
+    note:
+      "豆包没有只读档（历史配置里的 read 按 ask_risky 执行），普通文件写入仍会执行。" +
+      "stdout 走临时文件落盘（Windows 管道会报 internal_error）；" +
+      "模型 id 必须带 person- 前缀，不能用显示名。",
   },
   {
     id: "phone",
@@ -169,9 +221,9 @@ export const EXECUTOR_KIND_INFO: ExecutorKindInfo[] = [
 ];
 
 /**
- * 执行器 profile 的界面/文件形状：chancellor 的 EmployeeProfile + 仅 native 用的
- * 供应商 id（2026-11-19 模型分工）。`providerId` 只用来把干活模型解析到 baseUrl/keyEnv，
- * 不会作为密钥或进程参数下发。
+ * 执行器 profile 的界面/文件形状：chancellor 的 EmployeeProfile + 本机池用的
+ * 供应商 id（2026-11-19 模型分工；2026-11-23 从 native 平移到 pool）。
+ * `providerId` 只用来把干活模型解析到 baseUrl/keyEnv，不会作为密钥或进程参数下发。
  */
 export interface ExecutorProfile extends EmployeeProfile {
   providerId?: string;
@@ -194,7 +246,7 @@ export interface ExecutorView {
   path: string;
 }
 
-/** 派单时解析 native 干活模型的外部依赖（单测注入，生产走 provider.ts）。 */
+/** 派单时解析本机池干活模型的外部依赖（单测注入，生产走 provider.ts）。 */
 export interface ExecutorDispatchDeps {
   /** 当前运行时主选；缺省读 `.data/runtime.json`。 */
   currentModel?: () => { provider: string; modelId: string } | null;
@@ -282,8 +334,9 @@ export function writeExecutorConfig(
 }
 
 /**
- * 回滚开关（2026-11-19 模型分工）：false/0/off = native 模型框留空时回到旧行为
- * （不覆盖 worker 的启动 env）；默认开 = 留空跟随运行时默认模型。
+ * 回滚开关（2026-11-19 模型分工）：false/0/off = 池的模型框留空时回到旧行为
+ * （不覆盖池进程的启动 env）；默认开 = 留空跟随运行时默认模型。
+ * 变量名沿用 `EXECUTOR_NATIVE_FOLLOW_DEFAULT`（旧执行器叫 native），不改名以免破坏已有 .env。
  */
 export function executorNativeFollowsDefault(
   env: NodeJS.ProcessEnv = process.env,
@@ -296,7 +349,7 @@ export function executorNativeFollowsDefault(
 function currentRuntimeModel(): { provider: string; modelId: string } | null {
   try {
     const model = readLlmConfig()?.model ?? null;
-    // faux 是假模型，native worker 自己也会走 faux；不要把它写进建单快照当"干活模型"。
+    // faux 是假模型，池进程自己也会走 faux；不要把它写进建单快照当"干活模型"。
     if (!model || model.provider === "faux") return null;
     return model;
   } catch {
@@ -337,11 +390,11 @@ function providerRouteFor(
 }
 
 /**
- * native 的干活模型解析（2026-11-19 模型分工）：
+ * 本机池的干活模型解析（2026-11-19 模型分工；2026-11-23 从 native 平移）：
  * 显式 model > 运行时默认（开关开）> 不覆盖（开关关 / 无可选模型）。
- * 返回值 null = 不覆盖 worker 的启动 env。
+ * 返回值 null = 不覆盖池进程的启动 env。
  */
-function resolveNativeWorkProfile(
+function resolvePoolWorkProfile(
   raw: ExecutorProfile,
   env: NodeJS.ProcessEnv,
   deps: ExecutorDispatchDeps,
@@ -362,7 +415,7 @@ function resolveNativeWorkProfile(
 /**
  * 派单要用的执行器与参数；新单把它放进 ChancellorRequest。
  *
- * native（2026-11-19 模型分工）：
+ * 本机池（2026-11-19 模型分工）：
  * - 显式模型 = 干活模型（可跨供应商，带 modelRoute）；
  * - 留空 = 跟随设置 → 模型的默认模型（`EXECUTOR_NATIVE_FOLLOW_DEFAULT=false` 回滚到旧 env 行为）；
  * - 外部 CLI 语义不变：显式 model / permission 原样带上，留空跟随各自 CLI 配置。
@@ -380,15 +433,13 @@ export function executorForDelegation(
   const kind = kindOverride ?? config.employee;
   const raw = config.profiles[kind] ?? {};
   const profile: EmployeeProfile = {};
-  // 池与 native 同档（2026-11-22）：都用本机内核、都吃「干活模型」与跨供应商 route。
-  // 差别只在容器（池进程 vs 每票子进程），profile 字段一模一样。
-  if (kind === "native" || kind === "pool") {
-    const work = resolveNativeWorkProfile(raw, env, deps);
+  if (kind === "pool") {
+    const work = resolvePoolWorkProfile(raw, env, deps);
     if (work) {
       profile.model = work.model;
       if (work.route) profile.modelRoute = work.route;
     } else if (raw.model !== undefined) {
-      // 回滚模式：保留显式空串，语义回到“worker 不覆盖启动 env”。
+      // 回滚模式：保留显式空串，语义回到“池进程不覆盖启动 env”。
       profile.model = raw.model;
     }
   } else {
@@ -455,24 +506,6 @@ export function executorLine(
       "换默认只影响新单；续跑沿用原单的工人。"
     );
   }
-  if (view.employee === "native") {
-    const picked = (view.profiles.native?.model ?? "").trim();
-    let modelText: string;
-    if (picked) {
-      modelText = `干活模型 ${picked}`;
-    } else if (executorNativeFollowsDefault(env)) {
-      const current = (deps.currentModel ?? currentRuntimeModel)();
-      modelText = current
-        ? `干活模型跟随默认（${current.modelId}）`
-        : "干活模型跟随默认";
-    } else {
-      modelText = "干活模型跟随启动 env";
-    }
-    return (
-      `派活默认交给：本机内核（${modelText}；权限由本机内核权限策略管）。` +
-      "换默认只影响新单；续跑沿用原单的工人。"
-    );
-  }
   if (view.employee === "pool") {
     const picked = (view.profiles.pool?.model ?? "").trim();
     let modelText: string;
@@ -504,12 +537,6 @@ export function executorSummary(
   profile: EmployeeProfile,
 ): string {
   const label = executorLabel(employee);
-  if (employee === "native") {
-    // 2026-11-19：干活模型随派单快照解析好了就如实说；没带（回滚模式）保持原文案。
-    // 2026-11-22：native 降级为回滚档，摘要里也如实说“旧”。
-    const model = profile.model?.trim();
-    return model ? `旧：每票一进程（模型 ${model}）` : label;
-  }
   if (employee === "pool") {
     const model = profile.model?.trim();
     return model ? `底层 worker 运行时（模型 ${model}）` : label;
@@ -560,7 +587,7 @@ export function parseExecutorInput(
           message: `profiles.${kind}.permission 必须是 read / edit / full`,
         };
       }
-      // 2026-11-19 模型分工：只有 native 用 providerId（供应商 id，不是密钥）。
+      // 2026-11-19 模型分工：只有本机池用 providerId（供应商 id，不是密钥）。
       if (raw.providerId !== undefined) {
         if (typeof raw.providerId !== "string") {
           return { ok: false, message: `profiles.${kind}.providerId 必须是字符串` };
@@ -595,17 +622,29 @@ function normalizeConfig(
 ): ExecutorConfig {
   const source = isRecord(raw) ? raw : {};
   const envKind = envEmployee(env);
+  const sourceEmployee =
+    typeof source.employee === "string" ? source.employee.trim().toLowerCase() : "";
+  // 2026-11-23：旧配置里的 employee:"native" 映射到 pool；不能让它掉到 envKind，
+  // 否则用户把默认切到外部 CLI 后，老配置会被静默改成外部 CLI。
   const employee =
-    typeof source.employee === "string" && isExecutorKind(source.employee)
-      ? source.employee
-      : envKind;
+    sourceEmployee === "native"
+      ? "pool"
+      : isExecutorKind(sourceEmployee)
+        ? sourceEmployee
+        : envKind;
   const rawProfiles = isRecord(source.profiles) ? source.profiles : {};
+  // 旧文件里可能只有 profiles.native：把它当作 pool 的缺省，避免用户设置凭空消失。
+  const legacyNativeProfile = isRecord(rawProfiles.native) ? rawProfiles.native : null;
 
   const profiles: Partial<Record<ExecutorKind, ExecutorProfile>> = {};
   for (const kind of EXECUTOR_KINDS) {
     if (kind === "phone" || kind === "mcp") continue;
     const fallback = envProfile(kind, env);
-    const rawProfile = isRecord(rawProfiles[kind]) ? rawProfiles[kind] : {};
+    const rawProfile = isRecord(rawProfiles[kind])
+      ? rawProfiles[kind]
+      : kind === "pool" && legacyNativeProfile !== null
+        ? legacyNativeProfile
+        : {};
     const model = hasOwn(rawProfile, "model")
       ? normalizeModel(rawProfile.model)
       : fallback.model;
@@ -615,8 +654,8 @@ function normalizeConfig(
     const profile: ExecutorProfile = {};
     if (model !== undefined) profile.model = model;
     if (permission !== undefined) profile.permission = permission;
-    // 2026-11-19 模型分工：native 的供应商 id 只在这里保留；其它档忽略。
-    if (kind === "native" && hasOwn(rawProfile, "providerId")) {
+    // 2026-11-19 模型分工：本机池的供应商 id 只在这里保留；其它档忽略。
+    if (kind === "pool" && hasOwn(rawProfile, "providerId")) {
       const providerId = normalizeProviderId(rawProfile.providerId);
       if (providerId) profile.providerId = providerId;
     }
@@ -625,13 +664,22 @@ function normalizeConfig(
   return { employee, profiles };
 }
 
+/** 历史 env 值只告警一次，别在每次派单 / 设置页轮询里刷屏。 */
+let warnedLegacyNative = false;
+
 function envEmployee(env: NodeJS.ProcessEnv): ExecutorKind {
   const raw = (env.CHANCELLOR_EMPLOYEE ?? "").trim().toLowerCase();
+  if (raw === "native") {
+    if (!warnedLegacyNative) {
+      warnedLegacyNative = true;
+      console.warn("[executor] CHANCELLOR_EMPLOYEE=native 已退役（2026-11-23），按 pool 处理");
+    }
+    return "pool";
+  }
   if (isExecutorKind(raw)) return raw;
   // 2026-11-22 切默认：宿主的派活默认走**执行器池**（独立进程串行复用，方案 P5）。
-  // 单独跑 chancellor CLI（不经宿主）时没有 PoolClient，chancellor 自己仍默认 native，
-  // 并且 `createEmployee("pool")` 有"未接线回落 native + 告警"的保险。
-  // 回滚：CHANCELLOR_EMPLOYEE=native（一行，不动代码）。
+  // 2026-11-23：native 退役后本机只剩 pool；池未接线时单票返回结构化失败，
+  // 不再回落第二套运行时。
   return "pool";
 }
 
@@ -661,10 +709,22 @@ function envProfile(kind: ExecutorKind, env: NodeJS.ProcessEnv): EmployeeProfile
   if (kind === "codebuddy") {
     return {
       model: (env.CHANCELLOR_CODEBUDDY_MODEL ?? "").trim() || "deepseek-v4.1-flash",
+      permission: readPermission(env.CHANCELLOR_CODEBUDDY_PERMISSION, "full"),
+    };
+  }
+  if (kind === "doubao") {
+    return {
+      model:
+        (env.CHANCELLOR_DOUBAO_MODEL ?? "").trim() ||
+        "person-deepseek-v4-1-flash-261017",
+      permission: readPermission(env.CHANCELLOR_DOUBAO_PERMISSION, "full"),
     };
   }
   if (kind === "qoder-intl") {
-    return { model: (env.CHANCELLOR_MODEL ?? "").trim() || "DeepSeek-Flash" };
+    return {
+      model: (env.CHANCELLOR_MODEL ?? "").trim() || "DeepSeek-Flash",
+      permission: readPermission(env.CHANCELLOR_QODER_PERMISSION, "full"),
+    };
   }
   if (kind === "qoder-cn") {
     return {
@@ -672,6 +732,7 @@ function envProfile(kind: ExecutorKind, env: NodeJS.ProcessEnv): EmployeeProfile
         (env.CHANCELLOR_QODER_CN_MODEL ?? "").trim() ||
         (env.CHANCELLOR_MODEL ?? "").trim() ||
         "DeepSeek-Flash",
+      permission: readPermission(env.CHANCELLOR_QODER_CN_PERMISSION, "full"),
     };
   }
   return {};
@@ -681,7 +742,7 @@ function normalizeModel(raw: unknown): string | undefined {
   return typeof raw === "string" ? raw.trim().slice(0, 200) : undefined;
 }
 
-/** native 的供应商 id（2026-11-19）：只保留形状，不校验是否存在（供应商被删也不能炸配置）。 */
+/** 本机池的供应商 id（2026-11-19）：只保留形状，不校验是否存在（供应商被删也不能炸配置）。 */
 function normalizeProviderId(raw: unknown): string | undefined {
   return typeof raw === "string" ? raw.trim().slice(0, 100) || undefined : undefined;
 }

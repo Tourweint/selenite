@@ -61,7 +61,7 @@ test("取消：中止注册过的票级控制器，并正常返回 canceled", ()
 
 test("取消：没有控制器（已结算 / 旧进程）也照常返回 canceled", () => {
 	const workRoot = join(root, "runs-cancel-legacy");
-	const ticket = makeTicket("T-cancel-2", "native");
+	const ticket = makeTicket("T-cancel-2", "pool");
 	writeTicket(workRoot, ticket);
 	const receipts = new DelegationReceipts(join(root, "receipts-cancel-legacy.sqlite"));
 	try {

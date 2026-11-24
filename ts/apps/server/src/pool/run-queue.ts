@@ -1,4 +1,48 @@
+import { basename, isAbsolute } from "node:path";
 import type { EscalationInput } from "./pool-tools.ts";
+
+/** 池的一票要用的项目文件夹（2026-11-24）：结构对齐 chancellor 的 ProjectRootRef。 */
+export interface PoolProjectRoot {
+	label: string;
+	path: string;
+	role: "primary" | "extra";
+}
+
+/** 一票最多认这么多文件夹：项目登记侧本来就不会很多，这里是防手写 body 塞爆。 */
+const MAX_PROJECT_ROOTS = 32;
+
+/**
+ * `/run` body 里的 `roots` 收敛（bridge 与 pool-server 共用）：
+ * 只收绝对路径 + 两档 role；label 缺省用目录名。缺省 / 空数组 = 旧行为。
+ */
+export function parsePoolRoots(
+	raw: unknown,
+): { ok: true; roots?: PoolProjectRoot[] } | { ok: false; message: string } {
+	if (raw === undefined) return { ok: true };
+	if (!Array.isArray(raw) || raw.length > MAX_PROJECT_ROOTS) {
+		return { ok: false, message: `roots 必须是数组（最多 ${MAX_PROJECT_ROOTS} 条）` };
+	}
+	const roots: PoolProjectRoot[] = [];
+	for (const item of raw) {
+		if (!item || typeof item !== "object" || Array.isArray(item)) {
+			return { ok: false, message: "roots 每项必须是对象" };
+		}
+		const row = item as Record<string, unknown>;
+		const rootPath = typeof row.path === "string" ? row.path.trim() : "";
+		if (!rootPath || !isAbsolute(rootPath)) {
+			return { ok: false, message: "roots[].path 必须是绝对路径" };
+		}
+		if (row.label !== undefined && typeof row.label !== "string") {
+			return { ok: false, message: "roots[].label 必须是字符串" };
+		}
+		if (row.role !== "primary" && row.role !== "extra") {
+			return { ok: false, message: "roots[].role 必须是 primary 或 extra" };
+		}
+		const label = typeof row.label === "string" && row.label.trim() ? row.label.trim() : basename(rootPath);
+		roots.push({ label, path: rootPath, role: row.role });
+	}
+	return { ok: true, ...(roots.length > 0 ? { roots } : {}) };
+}
 
 /**
  * 池进程的长度 1 队列（设计文档 §4.3「隔离单位 = 活跃会话」、§5.2 IPC 契约）。
@@ -32,6 +76,13 @@ export interface QueuedRun {
 	 */
 	modelRoute?: { baseUrl: string; keyEnv: string };
 	tools?: string[];
+	/** 本任务声明的可写路径（项目内相对路径）；不传 = 池按只读渲染边界。 */
+	writes?: string[];
+	/**
+	 * 项目文件夹（2026-11-24）：主文件夹之外的根共享读写真实目录，不进 worktree。
+	 * 隔离形态下不含 primary；非隔离形态含全部 roots。缺省 = 旧行为（只知道 workDir）。
+	 */
+	roots?: PoolProjectRoot[];
 }
 
 /** runner 拿到的一票的运行时把手。 */

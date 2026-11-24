@@ -16,6 +16,7 @@ import { taskDirName } from "../../../packages/chancellor/src/dispatch.ts";
 import { Store } from "../../../packages/chancellor/src/store.ts";
 import type {
 	PlannedTask,
+	ProjectRef,
 	Task,
 	TaskRun,
 	Ticket,
@@ -317,6 +318,79 @@ test("usage_limit 带几小时 reset：不在进程内等，直接失败并冷�
 		const until = laneCooldown("mercenary");
 		assert.ok(until !== null, "额度失败必须冷却整条车道");
 		assert.ok(until > Date.now() + 2 * 3_600_000, "冷却截止应接近 resetAt");
+	} finally {
+		store.close();
+		restoreEnv(saved);
+		resetSchedulingForTest();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("按单隔离：worktree 在非 git 项目回落 direct（串行、不报错）", async () => {
+	const saved = saveEnv([
+		"CHANCELLOR_SCHEDULER",
+		"CHANCELLOR_RETRY_ENABLED",
+		"CHANCELLOR_LANE_CAPS",
+	]);
+	const root = temp("isolation-fallback");
+	const store = new Store(root);
+	try {
+		delete process.env.CHANCELLOR_SCHEDULER;
+		delete process.env.CHANCELLOR_RETRY_ENABLED;
+		delete process.env.CHANCELLOR_LANE_CAPS;
+		resetSchedulingForTest();
+
+		const ticket = makeTicket("T-iso-fallback", root);
+		store.saveTicket(ticket);
+		const tasks = [planned(1, "one"), planned(2, "two")];
+		const rows = tasks.map((task, index) => taskRow(ticket.id, index + 1, task.slug));
+		for (const row of rows) store.saveTask(row);
+		// 没有 vcs / 没有基线提交：isGitProject=false，worktree 请求应回落 direct。
+		const project: ProjectRef = {
+			id: "p-plain",
+			name: "plain",
+			rootPath: root,
+			vcs: "none",
+		};
+
+		let active = 0;
+		let maxActive = 0;
+		const { runs } = await runScheduledTasks({
+			ticket,
+			store,
+			tasks,
+			rows,
+			project,
+			employeeKind: "mercenary",
+			emit: () => undefined,
+			isolation: "worktree",
+			maxParallel: 2,
+			runner: (async (
+				runTicket: Ticket,
+				task: PlannedTask,
+				seq: number,
+				ticketDir: string,
+			) => {
+				active += 1;
+				maxActive = Math.max(maxActive, active);
+				try {
+					await new Promise((resolve) => setTimeout(resolve, 40));
+					const dir = join(ticketDir, taskDirName(seq, task.slug));
+					mkdirSync(dir, { recursive: true });
+					writeFileSync(
+						join(dir, "REPORT.md"),
+						'```json\n{"status":"ready","summary":"完成","artifacts":[]}\n```\n',
+					);
+					return makeRun(runTicket, task, seq, ticketDir);
+				} finally {
+					active -= 1;
+				}
+			}) as never,
+		});
+
+		assert.equal(maxActive, 1, "非 git 项目没有副本可并行，必须回落 direct 串行");
+		assert.equal(runs.length, 2);
+		assert.ok(runs.every((run) => run.processOk), "回落 direct 不该把单判失败");
 	} finally {
 		store.close();
 		restoreEnv(saved);
