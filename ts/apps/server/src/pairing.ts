@@ -19,6 +19,8 @@ import { dirname } from "node:path";
 const CODE_TTL_SECONDS = Number(process.env.PAIR_CODE_TTL_SECONDS ?? 300);
 const MAX_CODE_ATTEMPTS = 5;
 const MAX_DEVICES = 32;
+/** 客户端 hardwareId 的长度上限（2026-11-24 C-10）：超了当"没带"，不当错误。 */
+const MAX_HARDWARE_ID_LENGTH = 128;
 /** 「来过、没登记」的凭据留多久、留几枚（2026-11-14 五次打磨） */
 const UNCLAIMED_TTL_MS = 7 * 86_400_000;
 const UNCLAIMED_MAX = 5;
@@ -67,6 +69,13 @@ interface StoredDevice {
 	fingerprint?: string;
 	/** 键被换过（文件里的 tokenHash 与指纹对不上）：该设备的凭据一律 fail-closed。 */
 	keyChangedAt?: number;
+	/**
+	 * 硬件归并键（2026-11-24 C-10）：客户端 `hardwareId` 的**二次** sha256。
+	 * 只作内部归并键——不进 `listDevices()` 投影、不进日志、不当下发字段；
+	 * 同一 hash 的未撤销记录在配对时复用原 id（旧令牌因 tokenHash 被覆盖自然 403）。
+	 * 老记录没有这一位 = 从没带过 hardwareId，不参与归并。
+	 */
+	hardwareHash?: string;
 	createdAt: number;
 	lastSeenAt?: number;
 	revokedAt?: number;
@@ -148,6 +157,41 @@ export function pairAdoptEnabled(env: NodeJS.ProcessEnv = process.env): boolean 
 	const raw = (env.PAIR_ADOPT ?? "").trim().toLowerCase();
 	if (!raw) return true;
 	return raw !== "false" && raw !== "0" && raw !== "off";
+}
+
+/**
+ * 硬件归并开关（2026-11-24 C-10）：默认开。
+ * `DEVICE_HARDWARE_MERGE=false` → **完全忽略**请求里的 `hardwareId`，逐字回到改动前的行为
+ * （同一台手机重配又堆一条记录）。一行 env 回滚，不必改代码。
+ */
+export function deviceHardwareMergeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = (env.DEVICE_HARDWARE_MERGE ?? "").trim().toLowerCase();
+	if (!raw) return true;
+	return raw !== "false" && raw !== "0" && raw !== "off";
+}
+
+/**
+ * 请求里的 `hardwareId` → 服务端只存的二次 hash（2026-11-24 C-10）。
+ *
+ * 非字符串 / 空 / 超过 128 字符一律当"没带"（**不当错误**）：这是纯增量字段，
+ * 老客户端缺字段、新客户端读不到系统 id 时都应该逐字走旧行为。
+ */
+export function hardwareHashOf(hardwareId: unknown): string | undefined {
+	if (typeof hardwareId !== "string") return undefined;
+	const trimmed = hardwareId.trim();
+	if (!trimmed || trimmed.length > MAX_HARDWARE_ID_LENGTH) return undefined;
+	return sha256(trimmed);
+}
+
+/**
+ * 两个配对路由共用的一步：开关 + 形状一起判。
+ * 返回 undefined = 本次按旧行为（每次新建一条记录）。
+ */
+export function hardwareHashForRequest(
+	hardwareId: unknown,
+	env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+	return deviceHardwareMergeEnabled(env) ? hardwareHashOf(hardwareId) : undefined;
 }
 
 /**
@@ -293,22 +337,46 @@ export class PairingStore {
 	/**
 	 * 发设备凭据（单段 redeem / 两段式 confirm 共用）：生成令牌、登记设备、把码标记为已用。
 	 * 抽出来是为了两段式与单段逐字节共用同一套设备语义（指纹 / 上限 / 落盘），不改 `redeem` 行为。
+	 *
+	 * `hardwareHash`（2026-11-24 C-10）：同一 hash 的**未撤销**记录存在时**复用其 id**——
+	 * 覆盖 tokenHash（旧令牌因此自然 403）、刷新名字 / 最近在线、重算指纹、清 `keyChangedAt`。
+	 * 已撤销的记录**不复活**（撤销是明确作废意图，重配按新建）；`hardwareHash` 缺省 = 旧行为。
 	 */
-	private issueDevice(deviceName: string, now: number): RedeemResult {
+	private issueDevice(deviceName: string, now: number, hardwareHash?: string): RedeemResult {
 		const deviceToken = randomBytes(32).toString("base64url");
 		const tokenHash = sha256(deviceToken);
-		const id = randomBytes(8).toString("hex");
-		const device: StoredDevice = {
-			id,
-			name: deviceName.trim().slice(0, 40) || "手机",
-			tokenHash,
-			createdAt: now,
-			...(deviceFingerprintEnabled() ? { fingerprint: deviceFingerprint(id, tokenHash) } : {}),
-		};
+		const name = deviceName.trim().slice(0, 40) || "手机";
+		const withFingerprint = deviceFingerprintEnabled();
+		const reusable = hardwareHash
+			? this.store.devices.find((item) => !item.revokedAt && item.hardwareHash === hardwareHash)
+			: undefined;
+		let device: StoredDevice;
+		if (reusable) {
+			// 复用：id 不变，主机位 / 设备描述 / 审计引用都挂在 id 上，不用迁移。
+			reusable.tokenHash = tokenHash;
+			reusable.name = name;
+			reusable.lastSeenAt = now;
+			// 重配对 = 主人持码重新认领，上一轮的"键被换过"标记不该继续锁死新令牌。
+			delete reusable.keyChangedAt;
+			// 指纹随令牌走：开着就重算；关着就把旧值删掉——留着会在下次开启时被判成"键被换过"。
+			if (withFingerprint) reusable.fingerprint = deviceFingerprint(reusable.id, tokenHash);
+			else delete reusable.fingerprint;
+			device = reusable;
+		} else {
+			const id = randomBytes(8).toString("hex");
+			device = {
+				id,
+				name,
+				tokenHash,
+				createdAt: now,
+				...(hardwareHash ? { hardwareHash } : {}),
+				...(withFingerprint ? { fingerprint: deviceFingerprint(id, tokenHash) } : {}),
+			};
+		}
 		const current = this.store.code;
 		if (current) current.usedAt = now;
-		// 设备上限：踢掉最久没用过的那台（防无限堆积）
-		this.store.devices = [...this.store.devices, device]
+		// 设备上限：踢掉最久没用过的那台（防无限堆积）。复用时先摘掉旧位置再重新排，避免重复一条。
+		this.store.devices = [...this.store.devices.filter((item) => item !== device), device]
 			.filter((item) => !item.revokedAt)
 			.sort((a, b) => (b.lastSeenAt ?? b.createdAt) - (a.lastSeenAt ?? a.createdAt))
 			.slice(0, MAX_DEVICES);
@@ -316,12 +384,17 @@ export class PairingStore {
 		return {
 			deviceToken,
 			deviceId: device.id,
-			...(device.fingerprint ? { fingerprint: device.fingerprint } : {}),
+			...(withFingerprint && device.fingerprint ? { fingerprint: device.fingerprint } : {}),
 		};
 	}
 
 	/** 用码换设备凭据（单段 / 回滚通道）。失败会累计尝试次数（撞上限即作废这枚码）。 */
-	redeem(code: string, deviceName: string, now = Date.now()): RedeemResult | RedeemError {
+	redeem(
+		code: string,
+		deviceName: string,
+		now = Date.now(),
+		hardwareHash?: string,
+	): RedeemResult | RedeemError {
 		const current = this.store.code;
 		if (!current) return "unknown_code";
 		if (current.usedAt) return "code_used";
@@ -338,7 +411,7 @@ export class PairingStore {
 			return current.attempts >= MAX_CODE_ATTEMPTS ? "too_many_attempts" : "unknown_code";
 		}
 
-		return this.issueDevice(deviceName, now);
+		return this.issueDevice(deviceName, now, hardwareHash);
 	}
 
 	/**
@@ -354,6 +427,7 @@ export class PairingStore {
 		confirmToken: string,
 		deviceName: string,
 		now = Date.now(),
+		hardwareHash?: string,
 	): RedeemResult | ConfirmError {
 		const current = this.store.code;
 		// 不是两段式码（普通 issueCode 出的）→ 不走这里，按"没有待确认的码"处理。
@@ -376,7 +450,7 @@ export class PairingStore {
 			return supplied ? "bad_confirm" : "confirm_required";
 		}
 
-		return this.issueDevice(deviceName, now);
+		return this.issueDevice(deviceName, now, hardwareHash);
 	}
 
 	/** 设备凭据是否有效（每次请求都会走一次；命中即刷新 lastSeenAt，但最多每分钟落一次盘）
@@ -432,10 +506,10 @@ export class PairingStore {
 		return null;
 	}
 
-	/** 对外设备清单：始终不含 tokenHash；开关关着时连指纹 / 键变更位也不出现（回滚）。 */
-	listDevices(): Array<Omit<StoredDevice, "tokenHash">> {
+	/** 对外设备清单：始终不含 tokenHash 与 hardwareHash（后者只是内部归并键）；开关关着时连指纹 / 键变更位也不出现（回滚）。 */
+	listDevices(): Array<Omit<StoredDevice, "tokenHash" | "hardwareHash">> {
 		const withFingerprint = deviceFingerprintEnabled();
-		return this.store.devices.map(({ tokenHash: _hidden, ...rest }) => {
+		return this.store.devices.map(({ tokenHash: _hidden, hardwareHash: _hardware, ...rest }) => {
 			if (withFingerprint) return rest;
 			const { fingerprint: _fingerprint, keyChangedAt: _keyChanged, ...legacy } = rest;
 			return legacy;

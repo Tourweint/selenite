@@ -23,6 +23,39 @@ export const STORE_PATH =
 /** 设备描述上限（2026-11-05 主机优先制方案 §1.3）。 */
 export const MAX_DESCRIPTION_LENGTH = 200;
 
+/** 客户端 hardwareId 的长度上限（2026-11-24 C-10）：超了当"没带"，不当错误。 */
+export const MAX_HARDWARE_ID_LENGTH = 128;
+
+/**
+ * 硬件归并开关（2026-11-24 C-10）：默认开。
+ * 中继进程**自己的** env（与 harness 的配对库各自独立，两份库不合并）；
+ * `DEVICE_HARDWARE_MERGE=false` → 完全忽略请求里的 `hardwareId`，逐字回到旧行为。
+ */
+export function deviceHardwareMergeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = (env.DEVICE_HARDWARE_MERGE ?? "").trim().toLowerCase();
+	if (!raw) return true;
+	return raw !== "false" && raw !== "0" && raw !== "off";
+}
+
+/**
+ * 请求里的 `hardwareId` → 中继只存的二次 hash（2026-11-24 C-10）。
+ * 非字符串 / 空 / 超过 128 字符一律当"没带"：这是纯增量字段，老客户端缺字段 = 旧行为。
+ */
+export function hardwareHashOf(hardwareId: unknown): string | undefined {
+	if (typeof hardwareId !== "string") return undefined;
+	const trimmed = hardwareId.trim();
+	if (!trimmed || trimmed.length > MAX_HARDWARE_ID_LENGTH) return undefined;
+	return sha256(trimmed);
+}
+
+/** 开关 + 形状一起判（两条兑换路由共用）。undefined = 本次按旧行为（每次新建一条）。 */
+export function hardwareHashForRequest(
+	hardwareId: unknown,
+	env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+	return deviceHardwareMergeEnabled(env) ? hardwareHashOf(hardwareId) : undefined;
+}
+
 export interface StoredDevice {
 	id: string;
 	name: string;
@@ -33,6 +66,12 @@ export interface StoredDevice {
 	capabilities: string[];
 	lastSeenAt?: number;
 	revokedAt?: number;
+	/**
+	 * 硬件归并键（2026-11-24 C-10）：客户端 `hardwareId` 的**二次** sha256。
+	 * 只作内部归并键——不进 `listDevices()` 投影（`RelayDeviceView` 没这个字段）、不进日志；
+	 * 同一 hash 的未撤销记录在加入/兑换时复用原 id（主机位 / 描述 / 路由引用都挂在 id 上）。
+	 */
+	hardwareHash?: string;
 	/**
 	 * 设备描述（≤200 字，如"存储机"）。**只给人看**，
 	 * 自动挑机决策器不读它（2026-11-05 主机优先制方案 §1.3）。
@@ -199,24 +238,47 @@ export class RelayStore {
 	 * 签发一台新设备（2026-11-11 批R 从 `redeem` 抽出）：配对码兑换与扫码加入
 	 * 共用同一套令牌生成 / 名字截断 / 设备上限淘汰逻辑，两条路不发散。
 	 * 明文 deviceToken 只在这里返回一次，落盘的是 sha256。
+	 *
+	 * `hardwareHash`（2026-11-24 C-10）：同一 hash 的**未撤销**记录存在时**复用原 id**——
+	 * 覆盖 tokenHash（旧令牌因此自然失效）、刷新名字 / 平台 / 能力位 / 最近上线。
+	 * id 不变，任务主机位（`homeDeviceId`）、设备描述、伙伴归属（`actors[].homeDeviceId`）
+	 * 都还指着这条记录，不用迁移。已撤销的记录**不复活**；缺省 = 旧行为（每次新建）。
 	 */
 	createDevice(
 		deviceName: string,
 		platform: string,
 		capabilities: string[],
 		now = Date.now(),
+		hardwareHash?: string,
 	): RedeemSuccess {
 		const deviceToken = randomBytes(32).toString("base64url");
-		const device: StoredDevice = {
-			id: randomBytes(8).toString("hex"),
-			name: deviceName.trim().slice(0, 40) || "未命名设备",
-			platform: platform.trim().slice(0, 20) || "unknown",
-			tokenHash: sha256(deviceToken),
-			createdAt: now,
-			capabilities: capabilities.slice(0, 16),
-		};
-		// 设备上限：踢掉最久没上线的（防无限堆积），与 harness pairing 同口径
-		this.data.devices = [...this.data.devices, device]
+		const tokenHash = sha256(deviceToken);
+		const name = deviceName.trim().slice(0, 40) || "未命名设备";
+		const cleanPlatform = platform.trim().slice(0, 20) || "unknown";
+		const reusable = hardwareHash
+			? this.data.devices.find((item) => !item.revokedAt && item.hardwareHash === hardwareHash)
+			: undefined;
+		let device: StoredDevice;
+		if (reusable) {
+			reusable.tokenHash = tokenHash;
+			reusable.name = name;
+			reusable.platform = cleanPlatform;
+			reusable.capabilities = capabilities.slice(0, 16);
+			reusable.lastSeenAt = now;
+			device = reusable;
+		} else {
+			device = {
+				id: randomBytes(8).toString("hex"),
+				name,
+				platform: cleanPlatform,
+				tokenHash,
+				createdAt: now,
+				capabilities: capabilities.slice(0, 16),
+				...(hardwareHash ? { hardwareHash } : {}),
+			};
+		}
+		// 设备上限：踢掉最久没上线的（防无限堆积），与 harness pairing 同口径。复用时先摘旧位置再排。
+		this.data.devices = [...this.data.devices.filter((item) => item !== device), device]
 			.filter((item) => !item.revokedAt)
 			.sort((a, b) => (b.lastSeenAt ?? b.createdAt) - (a.lastSeenAt ?? a.createdAt))
 			.slice(0, MAX_DEVICES);
@@ -231,6 +293,7 @@ export class RelayStore {
 		platform: string,
 		capabilities: string[],
 		now = Date.now(),
+		hardwareHash?: string,
 	): RedeemSuccess | RedeemError {
 		const current = this.data.code;
 		if (!current) return "unknown_code";
@@ -246,7 +309,7 @@ export class RelayStore {
 
 		current.usedAt = now;
 		// createDevice 内落盘，usedAt 同一次写盘持久化（不再单独 save）
-		return this.createDevice(deviceName, platform, capabilities, now);
+		return this.createDevice(deviceName, platform, capabilities, now, hardwareHash);
 	}
 
 	/** 设备令牌 → deviceId（连接鉴权每次都走；lastSeenAt 最多每分钟落一次盘）。 */

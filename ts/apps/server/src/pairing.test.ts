@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { PairingStore, deviceFingerprint, pairTwoStepEnabled } from "./pairing.ts";
+import { PairingStore, deviceFingerprint, hardwareHashForRequest, pairTwoStepEnabled } from "./pairing.ts";
 import type { RedeemResult } from "./pairing.ts";
 
 /**
@@ -308,6 +308,223 @@ test("连接方式：撤销的设备不再记方式（凭据已经失效）", ()
 		const device = store.listDevices().find((item) => item.id === redeemed.deviceId);
 		assert.equal(device?.lastTransport, undefined, "被撤销的设备不该再被记成「连过」");
 	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+// ── 硬件归并（2026-11-24 C-10）────────────────────────────────────
+//
+// 同一台手机重复扫码不再堆同名记录：客户端带 hardwareId，服务端只存它的二次 hash，
+// 命中未撤销记录就复用 id（旧令牌因 tokenHash 被覆盖自然 403）。缺字段 / 开关关 = 旧行为。
+const HARDWARE_A = createHash("sha256").update("android-id-a|com.lifediary").digest("hex");
+const HARDWARE_B = createHash("sha256").update("android-id-b|com.lifediary").digest("hex");
+
+function redeemWith(
+	store: PairingStore,
+	hardwareId: string | undefined,
+	name = "Pixel 6a",
+): RedeemResult {
+	const redeemed = store.redeem(store.issueCode().code, name, Date.now(), hardwareHashForRequest(hardwareId));
+	assert.notEqual(typeof redeemed, "string", "配对应当成功");
+	return redeemed as RedeemResult;
+}
+
+test("同 hardwareId 两次配对 → 名册 1 条、deviceId 不变、旧令牌 403、名字刷新", () => {
+	const dir = tempDir("hw-merge");
+	const file = join(dir, "pairing.json");
+	try {
+		const store = new PairingStore(file);
+		const first = redeemWith(store, HARDWARE_A, "Pixel 6a");
+		const second = redeemWith(store, HARDWARE_A, "Pixel 6a（新）");
+
+		assert.equal(second.deviceId, first.deviceId, "复用原 id（主机位 / 描述挂在 id 上）");
+		assert.equal(store.listDevices().length, 1, "同一台手机只留一条记录");
+		assert.equal(store.verifyDeviceToken(first.deviceToken), false, "旧令牌因 tokenHash 被覆盖自然失效");
+		assert.equal(store.verifyDeviceToken(second.deviceToken), true);
+
+		const stored = readStore(file).devices;
+		assert.equal(stored.length, 1);
+		assert.equal(stored[0]?.name, "Pixel 6a（新）", "名字随最近一次配对刷新");
+		// 指纹重算：能由落盘的 id + tokenHash 复算（复用时不能沿用旧指纹）
+		assert.equal(stored[0]?.fingerprint, deviceFingerprint(stored[0]!.id, stored[0]!.tokenHash));
+
+		// 隐私边界：明文 hardwareId 不落盘，二次 hash 只在内部存储、不进对外投影。
+		const raw = readFileSync(file, "utf8");
+		assert.equal(raw.includes(HARDWARE_A), false, "明文 hardwareId 不落盘");
+		assert.equal(raw.includes(hardwareHashForRequest(HARDWARE_A)!), true, "落盘的是二次 hash");
+		const listed = store.listDevices()[0] as Record<string, unknown>;
+		assert.equal("hardwareHash" in listed, false, "对外投影不带硬件哈希");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("不同 hardwareId 不合并；不带字段保持旧行为（每次新建）", () => {
+	const dir = tempDir("hw-distinct");
+	const file = join(dir, "pairing.json");
+	try {
+		const store = new PairingStore(file);
+		const a = redeemWith(store, HARDWARE_A);
+		const b = redeemWith(store, HARDWARE_B);
+		assert.notEqual(b.deviceId, a.deviceId);
+		assert.equal(store.listDevices().length, 2, "两台不同手机必须各留一条");
+
+		// 老客户端（完全不带 hardwareId）：逐字旧行为 —— 两次配对 = 两条记录。
+		const legacyFile = join(dir, "legacy.json");
+		const legacy = new PairingStore(legacyFile);
+		const l1 = redeemWith(legacy, undefined);
+		const l2 = redeemWith(legacy, undefined);
+		assert.notEqual(l2.deviceId, l1.deviceId);
+		assert.equal(legacy.listDevices().length, 2);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("形状不对的 hardwareId（非字符串 / 空 / 超长）当没带：不报错、不合并", () => {
+	const dir = tempDir("hw-shape");
+	const file = join(dir, "pairing.json");
+	try {
+		assert.equal(hardwareHashForRequest(undefined), undefined);
+		assert.equal(hardwareHashForRequest(""), undefined);
+		assert.equal(hardwareHashForRequest(123), undefined);
+		assert.equal(hardwareHashForRequest("x".repeat(129)), undefined, "超 128 字符忽略");
+		assert.equal(hardwareHashForRequest(` ${HARDWARE_A} `), hardwareHashForRequest(HARDWARE_A), "两侧空白容忍");
+
+		const store = new PairingStore(file);
+		const first = store.redeem(store.issueCode().code, "手机", Date.now(), hardwareHashForRequest(123));
+		const second = store.redeem(store.issueCode().code, "手机", Date.now(), hardwareHashForRequest("y".repeat(200)));
+		assert.notEqual(typeof first, "string");
+		assert.notEqual(typeof second, "string");
+		assert.equal(store.listDevices().length, 2, "忽略字段即旧行为");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("已撤销的记录不复活：撤销后同 hardwareId 重配走新建（新 id）", () => {
+	const dir = tempDir("hw-revoked");
+	const file = join(dir, "pairing.json");
+	try {
+		const store = new PairingStore(file);
+		const first = redeemWith(store, HARDWARE_A);
+		assert.equal(store.revokeDevice(first.deviceId), true);
+
+		const again = redeemWith(store, HARDWARE_A);
+		assert.notEqual(again.deviceId, first.deviceId, "撤销是明确作废意图，不复用");
+		assert.equal(store.verifyDeviceToken(again.deviceToken), true);
+		assert.equal(store.verifyDeviceToken(first.deviceToken), false);
+		assert.equal(store.listDevices().length, 1, "名册投影只剩新的那条");
+		// 既有行为：配对时的设备上限过滤会把已撤销记录清出文件（不是本卡改的），所以文件里也只剩新那条。
+		assert.equal(readStore(file).devices.length, 1);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("复用时清 keyChangedAt：被标记 fail-closed 的设备重配对后新令牌可用", () => {
+	const dir = tempDir("hw-key-changed");
+	const file = join(dir, "pairing.json");
+	try {
+		const store = new PairingStore(file);
+		const first = redeemWith(store, HARDWARE_A);
+
+		// 模拟文件被改（tokenHash 与指纹对不上）→ 服务重启时标记 keyChangedAt
+		const tampered = readStore(file);
+		tampered.devices[0]!.tokenHash = createHash("sha256").update("另一把钥匙").digest("hex");
+		writeFileSync(file, JSON.stringify(tampered, null, 2), "utf8");
+
+		const reloaded = new PairingStore(file);
+		assert.equal(typeof reloaded.listDevices()[0]?.keyChangedAt, "number");
+		assert.equal(reloaded.verifyDeviceToken(first.deviceToken), false);
+
+		const again = redeemWith(reloaded, HARDWARE_A);
+		assert.equal(again.deviceId, first.deviceId, "重配对复用同一 id");
+		assert.equal(reloaded.listDevices()[0]?.keyChangedAt, undefined, "重配对 = 重新认领，清掉旧标记");
+		assert.equal(reloaded.verifyDeviceToken(again.deviceToken), true);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("两段式 confirm 同样归并：begin/confirm 各两次、同 hardwareId → 1 条且 id 不变", () => {
+	const dir = tempDir("hw-two-step");
+	const file = join(dir, "pairing.json");
+	try {
+		const store = new PairingStore(file);
+		const first = store.begin();
+		const firstResult = store.confirm(
+			first.code,
+			first.confirmToken,
+			"Pixel 6a",
+			Date.now(),
+			hardwareHashForRequest(HARDWARE_A),
+		);
+		assert.notEqual(typeof firstResult, "string");
+
+		const second = store.begin();
+		const secondResult = store.confirm(
+			second.code,
+			second.confirmToken,
+			"Pixel 6a",
+			Date.now(),
+			hardwareHashForRequest(HARDWARE_A),
+		);
+		assert.notEqual(typeof secondResult, "string");
+		assert.equal((secondResult as RedeemResult).deviceId, (firstResult as RedeemResult).deviceId);
+		assert.equal(store.listDevices().length, 1);
+		assert.equal(store.verifyDeviceToken((firstResult as RedeemResult).deviceToken), false);
+		assert.equal(store.verifyDeviceToken((secondResult as RedeemResult).deviceToken), true);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("开关 DEVICE_HARDWARE_MERGE=false：完全忽略 hardwareId（逐字旧行为）", () => {
+	assert.equal(hardwareHashForRequest(HARDWARE_A, {}), hardwareHashForRequest(HARDWARE_A));
+	for (const off of ["false", "0", "off", "FALSE"]) {
+		assert.equal(hardwareHashForRequest(HARDWARE_A, { DEVICE_HARDWARE_MERGE: off }), undefined, `${off} 关`);
+	}
+
+	const dir = tempDir("hw-switch-off");
+	const file = join(dir, "pairing.json");
+	try {
+		const store = new PairingStore(file);
+		// 路由算出来的 hash 是 undefined → 与改动前完全一致：两次配对两条记录。
+		const first = store.redeem(store.issueCode().code, "手机", Date.now(), hardwareHashForRequest(HARDWARE_A, { DEVICE_HARDWARE_MERGE: "false" }));
+		const second = store.redeem(store.issueCode().code, "手机", Date.now(), hardwareHashForRequest(HARDWARE_A, { DEVICE_HARDWARE_MERGE: "false" }));
+		assert.notEqual(typeof first, "string");
+		assert.notEqual(typeof second, "string");
+		assert.equal(store.listDevices().length, 2);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("指纹开关关着时复用：不返回指纹、清掉旧指纹（下次开启不误判键变更）", () => {
+	const dir = tempDir("hw-fingerprint-off-reuse");
+	const file = join(dir, "pairing.json");
+	const saved = process.env.PAIR_DEVICE_FINGERPRINT;
+	try {
+		const store = new PairingStore(file);
+		const first = redeemWith(store, HARDWARE_A);
+		assert.match(first.fingerprint ?? "", /^[0-9A-F]{4}-/);
+
+		process.env.PAIR_DEVICE_FINGERPRINT = "false";
+		const second = redeemWith(store, HARDWARE_A);
+		assert.equal(second.deviceId, first.deviceId);
+		assert.equal(second.fingerprint, undefined, "开关关着不下发指纹");
+
+		// 关掉期间复用的旧值必须清掉：再开启时 sealFingerprints 只会补算（补算 = 迁移，不判键变更）。
+		delete process.env.PAIR_DEVICE_FINGERPRINT;
+		const reloaded = new PairingStore(file);
+		const device = reloaded.listDevices()[0];
+		assert.equal(typeof device?.fingerprint, "string");
+		assert.equal(device?.keyChangedAt, undefined, "不能把重配对误判成键被换过");
+		assert.equal(reloaded.verifyDeviceToken(second.deviceToken), true);
+	} finally {
+		if (saved === undefined) delete process.env.PAIR_DEVICE_FINGERPRINT;
+		else process.env.PAIR_DEVICE_FINGERPRINT = saved;
 		rmSync(dir, { recursive: true, force: true });
 	}
 });

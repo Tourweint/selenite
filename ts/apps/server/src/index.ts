@@ -101,6 +101,7 @@ import { mountOpenAiCompat } from "./openai-compat.ts";
 import {
   PairingStore,
   buildPairUrl,
+  hardwareHashForRequest,
   hashToken,
   pairAdoptEnabled,
   pairTwoStepEnabled,
@@ -973,12 +974,19 @@ app.post("/api/v1/pair/redeem", async (c) => {
   if (redeemRateLimited(ip)) return c.json({ error: "too_many_attempts" }, 429);
 
   const body = (await c.req.json().catch(() => null)) as
-    | { code?: string; deviceName?: string }
+    | { code?: string; deviceName?: string; hardwareId?: unknown }
     | null;
   const code = body?.code?.trim();
   if (!code) return c.json({ error: "bad_request" }, 400);
 
-  const result = pairing.redeem(code, body?.deviceName?.trim() || "手机");
+  // 2026-11-24 C-10：可选 hardwareId（客户端算好的硬件哈希）→ 服务端只存二次 hash 做归并键。
+  // 缺字段 / 形状不对 / 开关 DEVICE_HARDWARE_MERGE=false → undefined，逐字走旧行为。
+  const result = pairing.redeem(
+    code,
+    body?.deviceName?.trim() || "手机",
+    Date.now(),
+    hardwareHashForRequest(body?.hardwareId),
+  );
   if (typeof result === "string") {
     const status =
       result === "unknown_code"
@@ -1029,15 +1037,18 @@ app.post("/api/v1/pairing/confirm", async (c) => {
   if (redeemRateLimited(ip)) return c.json({ error: "too_many_attempts" }, 429);
 
   const body = (await c.req.json().catch(() => null)) as
-    | { code?: string; confirmToken?: string; deviceName?: string }
+    | { code?: string; confirmToken?: string; deviceName?: string; hardwareId?: unknown }
     | null;
   const code = body?.code?.trim();
   if (!code) return c.json({ error: "bad_request" }, 400);
 
+  // 2026-11-24 C-10：与单段 redeem 同一口径（可选 hardwareId → 只存二次 hash 做归并键）。
   const result = pairing.confirm(
     code,
     body?.confirmToken?.trim() ?? "",
     body?.deviceName?.trim() || "手机",
+    Date.now(),
+    hardwareHashForRequest(body?.hardwareId),
   );
   if (typeof result === "string") {
     const status =

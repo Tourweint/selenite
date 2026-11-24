@@ -46,8 +46,17 @@ export class RelayPairing {
 	/**
 	 * 验码并签发设备。成功返回明文 deviceToken（只此一次）。
 	 * 码不存在 / 过期 / 已用过 → null（对外同一口径）。
+	 *
+	 * `hardwareHash`（2026-11-24 C-10）：同一台手机重复扫码时传给 `createDevice` 复用原 id；
+	 * 缺省 = 旧行为（每次新建一条）。
 	 */
-	redeem(joinCode: string, deviceName: string, platform: string, now = Date.now()): JoinSuccess | null {
+	redeem(
+		joinCode: string,
+		deviceName: string,
+		platform: string,
+		now = Date.now(),
+		hardwareHash?: string,
+	): JoinSuccess | null {
 		const live = this.store.readJoinCodes(now);
 		const hash = sha256(joinCode.trim());
 		const index = live.findIndex((item) => hashEquals(item.hash, hash));
@@ -55,6 +64,6 @@ export class RelayPairing {
 		// 先删码再签发：一次性语义不依赖后续步骤是否成功（失败也不留可重放的码）。
 		live.splice(index, 1);
 		this.store.writeJoinCodes(live);
-		return this.store.createDevice(deviceName, platform, [], now);
+		return this.store.createDevice(deviceName, platform, [], now, hardwareHash);
 	}
 }

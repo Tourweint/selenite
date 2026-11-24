@@ -9,7 +9,7 @@ import { RELAY_PROTOCOL_VERSION, RelayJoinRequestSchema } from "@lifediary/share
 import { WebSocketServer, type WebSocket } from "ws";
 import { RelayHub } from "./hub.ts";
 import { RelayPairing } from "./pairing.ts";
-import { MAX_DEVICES, MAX_DESCRIPTION_LENGTH, RelayStore, type RedeemError } from "./store.ts";
+import { MAX_DEVICES, MAX_DESCRIPTION_LENGTH, RelayStore, hardwareHashForRequest, type RedeemError } from "./store.ts";
 
 /**
  * 中继服务装配（2026-11-05 多端同步方案块0）：HTTP(S) 同端口承载
@@ -203,6 +203,9 @@ export function createRelayApp(store: RelayStore, hub: RelayHub): Hono {
 			parsed.data.joinCode,
 			parsed.data.deviceName,
 			parsed.data.platform ?? "unknown",
+			Date.now(),
+			// 2026-11-24 C-10：可选 hardwareId → 只存二次 hash 做归并键；缺字段/形状不对/开关关 = 旧行为。
+			hardwareHashForRequest(parsed.data.hardwareId),
 		);
 		if (!issued) return c.body(null, 403);
 		return c.json({ ...issued, protocolVersion: RELAY_PROTOCOL_VERSION });
@@ -229,7 +232,13 @@ export function createRelayApp(store: RelayStore, hub: RelayHub): Hono {
 			entry.count += 1;
 		}
 
-		let body: { code?: unknown; deviceName?: unknown; platform?: unknown; capabilities?: unknown };
+		let body: {
+			code?: unknown;
+			deviceName?: unknown;
+			platform?: unknown;
+			capabilities?: unknown;
+			hardwareId?: unknown;
+		};
 		try {
 			body = (await c.req.json()) as typeof body;
 		} catch {
@@ -243,7 +252,15 @@ export function createRelayApp(store: RelayStore, hub: RelayHub): Hono {
 			? body.capabilities.filter((item): item is string => typeof item === "string").slice(0, 16)
 			: [];
 
-		const outcome = store.redeem(code, deviceName, platform, capabilities);
+		const outcome = store.redeem(
+			code,
+			deviceName,
+			platform,
+			capabilities,
+			Date.now(),
+			// 2026-11-24 C-10：与 /api/relay/join 同一口径（可选 hardwareId → 二次 hash）。
+			hardwareHashForRequest(body.hardwareId),
+		);
 		if (typeof outcome === "string") {
 			const status: Record<RedeemError, 404 | 409 | 410 | 429> = {
 				unknown_code: 404,

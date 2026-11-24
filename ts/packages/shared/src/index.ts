@@ -950,6 +950,12 @@ export const RelayJoinRequestSchema = z.object({
 	joinCode: z.string().min(1).max(128),
 	deviceName: z.string().min(1).max(40),
 	platform: z.string().max(20).optional(),
+	/**
+	 * 设备硬件标识（2026-11-24 C-10，纯增量、可选）：客户端用系统 id + 包名算好的 sha256。
+	 * 中继只存它的二次 hash 做归并键（同一台手机重复加入复用原 deviceId），
+	 * **不当鉴权依据**；缺字段 = 旧行为（每次新建一条）。
+	 */
+	hardwareId: z.string().max(128).optional(),
 });
 export type RelayJoinRequest = z.infer<typeof RelayJoinRequestSchema>;
 

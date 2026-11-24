@@ -4,7 +4,10 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { RelayStore } from "./store.ts";
+import { RelayHub } from "./hub.ts";
+import { RelayPairing } from "./pairing.ts";
+import { createRelayApp } from "./server.ts";
+import { RelayStore, hardwareHashForRequest } from "./store.ts";
 
 function freshStore(): RelayStore {
 	return new RelayStore(join(mkdtempSync(join(tmpdir(), "relay-store-")), `${randomUUID()}.json`));
@@ -162,5 +165,177 @@ describe("RelayStore 任务主机位与描述（2026-11-05 主机优先制）", 
 		assert.equal(store.homeDeviceId(), null);
 		// 撤销设备本身也不在名册投影里了
 		assert.equal(store.listDevices().length, 0);
+	});
+});
+
+// ── 硬件归并（2026-11-24 C-10）────────────────────────────────────
+//
+// 同一台手机重复扫码加入中继不再堆记录：中继只存 hardwareId 的二次 hash，
+// 命中未撤销记录就复用 id（主机位 / 描述 / 伙伴归属都挂在 id 上，不用迁移）。
+const HARDWARE_A = "a".repeat(64);
+const HARDWARE_B = "b".repeat(64);
+
+function redeemWith(
+	store: RelayStore,
+	hardwareId: string | undefined,
+	name = "Pixel 6a",
+	platform = "android",
+): { deviceId: string; deviceToken: string } {
+	const { code } = store.issueCode();
+	const outcome = store.redeem(code, name, platform, ["matrix"], Date.now(), hardwareHashForRequest(hardwareId));
+	assert.ok(typeof outcome === "object");
+	return outcome;
+}
+
+describe("RelayStore 硬件归并（2026-11-24 C-10）", () => {
+	it("同 hardwareId 重复加入 → 名册 1 条、id 不变、主机位/描述不断、旧令牌失效", () => {
+		const store = freshStore();
+		const first = redeemWith(store, HARDWARE_A);
+		store.setHomeDevice(first.deviceId);
+		store.setDescription(first.deviceId, "存储机");
+
+		const second = redeemWith(store, HARDWARE_A, "Pixel 6a（新）");
+
+		assert.equal(second.deviceId, first.deviceId, "复用原 id");
+		assert.equal(store.listDevices().length, 1);
+		assert.equal(store.homeDeviceId(), first.deviceId, "主机位引用不断");
+		assert.equal(store.listDevices()[0]?.description, "存储机", "设备描述不丢");
+		assert.equal(store.listDevices()[0]?.name, "Pixel 6a（新）", "名字随最近一次加入刷新");
+		assert.equal(store.verifyDeviceToken(first.deviceToken), null, "旧令牌被覆盖后自然失效");
+		assert.equal(store.verifyDeviceToken(second.deviceToken), first.deviceId);
+	});
+
+	it("不同 hardwareId 不合并；不带字段保持旧行为（每次新建）", () => {
+		const store = freshStore();
+		const a = redeemWith(store, HARDWARE_A);
+		const b = redeemWith(store, HARDWARE_B);
+		assert.notEqual(b.deviceId, a.deviceId);
+		assert.equal(store.listDevices().length, 2);
+
+		const legacyFirst = redeemWith(store, undefined);
+		const legacySecond = redeemWith(store, undefined);
+		assert.notEqual(legacySecond.deviceId, legacyFirst.deviceId);
+		assert.equal(store.listDevices().length, 4, "老客户端两次加入仍是两条（叠加前两条）");
+	});
+
+	it("已撤销的记录不复活：撤销后同 hardwareId 再加入走新建", () => {
+		const store = freshStore();
+		const first = redeemWith(store, HARDWARE_A);
+		store.revokeDevice(first.deviceId);
+		const again = redeemWith(store, HARDWARE_A);
+		assert.notEqual(again.deviceId, first.deviceId);
+		assert.equal(store.verifyDeviceToken(again.deviceToken), again.deviceId);
+		assert.equal(store.listDevices().length, 1, "名册只留未撤销那条");
+	});
+
+	it("名册投影不带硬件哈希（RelayDeviceView 形状不变）", () => {
+		const store = freshStore();
+		redeemWith(store, HARDWARE_A);
+		const view = store.listDevices()[0] as unknown as Record<string, unknown>;
+		assert.equal("hardwareHash" in view, false);
+		assert.equal("tokenHash" in view, false);
+	});
+
+	it("开关 / 形状：DEVICE_HARDWARE_MERGE=false 或字段形状不对 → 当没带", () => {
+		assert.equal(hardwareHashForRequest(HARDWARE_A, {}), hardwareHashForRequest(HARDWARE_A));
+		assert.equal(hardwareHashForRequest(HARDWARE_A, { DEVICE_HARDWARE_MERGE: "false" }), undefined);
+		assert.equal(hardwareHashForRequest(HARDWARE_A, { DEVICE_HARDWARE_MERGE: "0" }), undefined);
+		assert.equal(hardwareHashForRequest(HARDWARE_A, { DEVICE_HARDWARE_MERGE: "off" }), undefined);
+		assert.equal(hardwareHashForRequest(undefined), undefined);
+		assert.equal(hardwareHashForRequest(42), undefined);
+		assert.equal(hardwareHashForRequest("x".repeat(129)), undefined);
+	});
+});
+
+describe("中继 HTTP 面：hardwareId 端到端（2026-11-24 C-10）", () => {
+	function freshApp(): { app: ReturnType<typeof createRelayApp>; store: RelayStore } {
+		const store = freshStore();
+		return { app: createRelayApp(store, new RelayHub(store, () => {})), store };
+	}
+
+	async function postJson(
+		app: ReturnType<typeof createRelayApp>,
+		path: string,
+		body: Record<string, unknown>,
+	): Promise<{ status: number; text: string }> {
+		const response = await app.request(path, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(body),
+		});
+		return { status: response.status, text: await response.text() };
+	}
+
+	it("POST /api/relay/join：同 hardwareId 两次 → 名册 1 条、deviceId 相同、响应不含明文/哈希", async () => {
+		const { app, store } = freshApp();
+		const pairing = new RelayPairing(store);
+
+		const firstCode = pairing.issue().joinCode;
+		const first = await postJson(app, "/api/relay/join", {
+			joinCode: firstCode,
+			deviceName: "Pixel 6a",
+			platform: "android",
+			hardwareId: HARDWARE_A,
+		});
+		assert.equal(first.status, 200);
+		assert.equal(first.text.includes(HARDWARE_A), false, "响应不回显明文 hardwareId");
+
+		const secondCode = pairing.issue().joinCode;
+		const second = await postJson(app, "/api/relay/join", {
+			joinCode: secondCode,
+			deviceName: "Pixel 6a",
+			platform: "android",
+			hardwareId: HARDWARE_A,
+		});
+		assert.equal(second.status, 200);
+
+		const firstBody = JSON.parse(first.text) as { deviceId: string; deviceToken: string };
+		const secondBody = JSON.parse(second.text) as { deviceId: string; deviceToken: string };
+		assert.equal(secondBody.deviceId, firstBody.deviceId);
+		assert.equal(store.listDevices().length, 1);
+		assert.equal(store.verifyDeviceToken(firstBody.deviceToken), null, "第一次的令牌应已失效");
+		assert.equal(store.verifyDeviceToken(secondBody.deviceToken), firstBody.deviceId);
+	});
+
+	it("POST /api/relay/join：不带 hardwareId 两次 → 两条（旧行为）", async () => {
+		const { app, store } = freshApp();
+		const pairing = new RelayPairing(store);
+		for (const name of ["老客户端一", "老客户端二"]) {
+			const response = await postJson(app, "/api/relay/join", {
+				joinCode: pairing.issue().joinCode,
+				deviceName: name,
+				platform: "android",
+			});
+			assert.equal(response.status, 200);
+		}
+		assert.equal(store.listDevices().length, 2);
+	});
+
+	it("POST /api/relay/pair/redeem：同 hardwareId 两次 → 一条；主机位保持不变", async () => {
+		const { app, store } = freshApp();
+		const firstCode = store.issueCode().code;
+		const first = await postJson(app, "/api/relay/pair/redeem", {
+			code: firstCode,
+			deviceName: "Pixel 6a",
+			platform: "android",
+			capabilities: ["matrix"],
+			hardwareId: HARDWARE_A,
+		});
+		assert.equal(first.status, 200);
+		const firstId = (JSON.parse(first.text) as { deviceId: string }).deviceId;
+		store.setHomeDevice(firstId);
+
+		const secondCode = store.issueCode().code;
+		const second = await postJson(app, "/api/relay/pair/redeem", {
+			code: secondCode,
+			deviceName: "Pixel 6a",
+			platform: "android",
+			capabilities: ["matrix"],
+			hardwareId: HARDWARE_A,
+		});
+		assert.equal(second.status, 200);
+		assert.equal((JSON.parse(second.text) as { deviceId: string }).deviceId, firstId);
+		assert.equal(store.listDevices().length, 1);
+		assert.equal(store.homeDeviceId(), firstId);
 	});
 });
