@@ -551,6 +551,273 @@ export function setFlag(
 	return { ok: true, hot: def.hot };
 }
 
+/* ────────────────────────────────────────────────────────────────────────────
+ * 前置连开 / 父项连带关（2026-11-25）
+ *
+ * 问题：父子门是非破坏性的（父关 → 子只读、存储值保留），所以界面点「开」一个被锁住的
+ * 子项时，用户实际上要先把整条祖先链逐个打开；而关父项时，下游一片子项会静默失效。
+ * 这一层只做「离线拼图 + 按拼图写值」，不改既有 PUT 语义：
+ *  - GET  .../:key/enable-plan  只读：算出缺哪些祖先、写什么值、会顺带复活谁。
+ *  - POST .../:key/enable       按同一套推演在服务端重算，再按拓扑序逐键 setFlag。
+ *  - GET  .../:key/disable-plan 只读：算关值 + 会被连带关掉的后代。
+ *  - POST .../:key/disable      写关值（只动父，子项存储值一个字不动）。
+ *
+ * 回滚门：`FLAG_CASCADE_ENABLE=false|0|off` → 四条端点整组不挂（404），回到原来的一键 PUT。
+ *
+ * 与旧 PUT 的差异（故意保留旧行为，不改一个字节）：未知键在 PUT 走 setFlag 的 404 分支、
+ * 响应体是 `{error:"bad_request"}`；这四条新端点统一 `{error:"flag_not_found"}`。
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/** 级联层开关：缺省开；false / 0 / off 算关（与父子门同一份判据）。 */
+export function flagCascadeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = (env.FLAG_CASCADE_ENABLE ?? "").trim().toLowerCase();
+	return !(raw === "false" || raw === "0" || raw === "off");
+}
+
+interface CascadeNode {
+	key: string;
+	label: string;
+	/** 计划写入值；null = 需要用户挑一档 */
+	value: string | null;
+	hot: boolean;
+	/** true = 自身存储值就是关值，必须写；false = 只是被父锁着，父开了它自己就恢复 */
+	willWrite: boolean;
+}
+
+interface CascadeNeed {
+	key: string;
+	label: string;
+	choices: FlagChoice[];
+}
+
+interface CascadeRevive {
+	key: string;
+	label: string;
+	value: string;
+	hot: boolean;
+	/** 恒 false：复活是父开了之后自己恢复，本轮不写它自己的值（与 missing 的 willWrite 区分）。 */
+	willWrite: false;
+}
+
+/** 开关的「关」是哪一档：显式 offValue 优先；否则 values 里 true / false 齐全的布尔键按 false 算；
+ *  其余（纯枚举 / 数值）没有关档 → null（不可连带关，也不可被计划打开）。 */
+function offValueOf(def: FlagDef): string | null {
+	if (def.offValue !== undefined) return def.offValue;
+	if (def.values.includes("true") && def.values.includes("false")) return "false";
+	return null;
+}
+
+/** 某个存储值是不是这个开关的关值。offValue 不一定在 false/0/off 之列
+ *  （AGENT_TOOL_POLICY 的关是 full），所以按各自清单判，不能只看 flagIsOff。 */
+function isOffValueOf(def: FlagDef, value: string): boolean {
+	const off = offValueOf(def);
+	if (off !== null && value === off) return true;
+	return flagIsOff(value);
+}
+
+/** 当前「真的关着」：存储值本身就是这个开关的关值，或被任一父锁住（effective 已是 false）。
+ *  级联层的「现在关不关」统一走这里，不要再各处手写 `flagIsOff(effectiveFlagValue(...))`——
+ *  那种写法对 `offValue="full"` 这类键（AGENT_TOOL_POLICY）会把「关」认成「开」。 */
+function isEffectivelyOff(def: FlagDef, env: NodeJS.ProcessEnv = process.env): boolean {
+	return isOffValueOf(def, effectiveFlagValue(def.key, env));
+}
+
+/** 控件形态：清单写了 type 就用它；没写时按 values 推断（与 listFlags 的口径一致）。 */
+function flagKindOf(def: FlagDef): FlagType {
+	if (def.type) return def.type;
+	return def.values.length === 2 && def.values.includes("true") && def.values.includes("false")
+		? "boolean"
+		: "enum";
+}
+
+/** 打开这个键时要写什么值：布尔键一律 true；枚举 / 数值键优先保留自己的存储值，
+ *  存储值本身是关的才回落到默认值；默认值也是关的（或没有可写值）→ null，交给用户选。 */
+function plannedValueOf(def: FlagDef, stored: string): string | null {
+	if (flagKindOf(def) === "boolean" && flagValueAllowed(def, "true")) return "true";
+	if (!isOffValueOf(def, stored)) return stored;
+	const fallback = def.defaultValue;
+	if (fallback !== "" && !isOffValueOf(def, fallback) && flagValueAllowed(def, fallback)) return fallback;
+	return null;
+}
+
+/** 档位列表：清单里的 choices 优先，values 里没写中文名的补一条 value=label 的兜底项。 */
+function cascadeChoices(def: FlagDef): FlagChoice[] {
+	const declared = def.choices ?? [];
+	const covered = new Set(declared.map((choice) => choice.value));
+	const out: FlagChoice[] = [...declared];
+	for (const value of def.values) if (!covered.has(value)) out.push({ value, label: value });
+	return out;
+}
+
+/** 祖先链的拓扑序（最深祖先在前、父在子前），不含 key 自身。图已在装载时校验无环。 */
+function collectAncestorKeys(key: string): string[] {
+	const ordered: string[] = [];
+	const visited = new Set<string>();
+	const walk = (current: string): void => {
+		const def = FLAG_BY_KEY.get(current);
+		if (!def) return;
+		for (const req of def.requires ?? []) walk(req);
+		if (current === key || visited.has(current)) return;
+		visited.add(current);
+		ordered.push(current);
+	};
+	walk(key);
+	return ordered;
+}
+
+/** 某键的 requires 闭包里是否含 target（用来找「父项连带关」的后代）。 */
+function requiresClosureContains(key: string, target: string): boolean {
+	const visited = new Set<string>();
+	const walk = (current: string): boolean => {
+		const def = FLAG_BY_KEY.get(current);
+		if (!def || visited.has(current)) return false;
+		visited.add(current);
+		for (const req of def.requires ?? []) {
+			if (req === target) return true;
+			if (walk(req)) return true;
+		}
+		return false;
+	};
+	return walk(key);
+}
+
+/** 打开 key 时要补开哪些祖先：只收当前 effective 为关的（含被更上层锁住的）。
+ *  willWrite 只看自己的存储值——被父锁住但自己本来开着的，父一开就恢复，不用写。 */
+function collectMissing(key: string, env: NodeJS.ProcessEnv): CascadeNode[] {
+	const out: CascadeNode[] = [];
+	for (const ancestor of collectAncestorKeys(key)) {
+		const def = FLAG_BY_KEY.get(ancestor);
+		if (!def) continue;
+		if (!isEffectivelyOff(def, env)) continue;
+		const stored = storedFlagValue(def, env);
+		out.push({
+			key: ancestor,
+			label: flagLabel(ancestor),
+			value: plannedValueOf(def, stored),
+			hot: def.hot,
+			willWrite: isOffValueOf(def, stored),
+		});
+	}
+	return out;
+}
+
+/** 「计划写完」之后，候选是否真的会生效开。
+ *  所有父都按**写后状态**递归推演：planKeys 内按计划值，planKeys 外按存储值 + 它自己的父
+ *  （存储值是开、只是被更上层锁住的中间父，父一开就跟着恢复，它的孩子也会恢复）。
+ *  stack 只表示「当前这条递归路径」，返回前必须删掉：DAG 里多个父共享同一个祖先，
+ *  上一支残留的标记会把下一支的共享祖先误判成关。 */
+function simulateOn(
+	candidate: string,
+	planKeys: Set<string>,
+	env: NodeJS.ProcessEnv,
+	stack = new Set<string>(),
+): boolean {
+	const def = FLAG_BY_KEY.get(candidate);
+	if (!def) return false;
+	if (stack.has(candidate)) return false; // 图已校验无环，这层只是兜底
+	stack.add(candidate);
+	const stored = storedFlagValue(def, env);
+	const selfOn = planKeys.has(candidate)
+		? (() => {
+				const planned = plannedValueOf(def, stored);
+				return planned === null || !isOffValueOf(def, planned); // 待用户选值 → 按会在
+			})()
+		: !isOffValueOf(def, stored);
+	if (!selfOn) {
+		stack.delete(candidate);
+		return false;
+	}
+	for (const req of def.requires ?? []) {
+		if (!simulateOn(req, planKeys, env, stack)) {
+			stack.delete(candidate);
+			return false;
+		}
+	}
+	stack.delete(candidate); // 关键：回溯，DAG 共享祖先不能被上一支污染
+	return true;
+}
+
+/** 计划写完后会「顺带复活」的开关：现在 effective 关、自己存储值不是关、
+ *  且按计划写完组合后能开；排除计划内的键与目标自身。按 FLAG_DEFS 顺序。 */
+function collectRevive(
+	excludeKey: string,
+	planKeys: Set<string>,
+	env: NodeJS.ProcessEnv,
+): CascadeRevive[] {
+	const out: CascadeRevive[] = [];
+	for (const def of FLAG_DEFS) {
+		if (def.key === excludeKey || planKeys.has(def.key)) continue;
+		const stored = storedFlagValue(def, env);
+		if (isOffValueOf(def, stored)) continue;
+		if (!isEffectivelyOff(def, env)) continue;
+		if (!simulateOn(def.key, planKeys, env)) continue;
+		out.push({
+			key: def.key,
+			label: flagLabel(def.key),
+			value: plannedValueOf(def, stored) ?? stored,
+			hot: def.hot,
+			willWrite: false,
+		});
+	}
+	return out;
+}
+
+/** 关 key 会连带失效的后代：requires 闭包含 key、当前 effective 为开。
+ *  已被别的父关掉的不算（它们现在就是关的，本来就不在受影响范围里）。 */
+function collectAffected(key: string, env: NodeJS.ProcessEnv): { key: string; label: string }[] {
+	const out: { key: string; label: string }[] = [];
+	for (const def of FLAG_DEFS) {
+		if (def.key === key) continue;
+		if (!requiresClosureContains(def.key, key)) continue;
+		if (isEffectivelyOff(def, env)) continue;
+		out.push({ key: def.key, label: flagLabel(def.key) });
+	}
+	return out;
+}
+
+/** 离线拼图：只读，不写任何值。POST 也重新调它，不信任客户端拿着的旧 plan。 */
+function deriveEnablePlan(
+	key: string,
+	env: NodeJS.ProcessEnv = process.env,
+): {
+	key: string;
+	label: string;
+	missing: CascadeNode[];
+	revive: CascadeRevive[];
+	needsValue: CascadeNeed[];
+	target: CascadeNode;
+} {
+	refreshManifest(env);
+	const def = FLAG_BY_KEY.get(key);
+	const stored = def ? storedFlagValue(def, env) : "";
+	const missing = collectMissing(key, env);
+	const needsValue: CascadeNeed[] = [];
+	for (const node of missing) {
+		if (!node.willWrite || node.value !== null) continue;
+		const nodeDef = FLAG_BY_KEY.get(node.key);
+		if (nodeDef) needsValue.push({ key: node.key, label: node.label, choices: cascadeChoices(nodeDef) });
+	}
+	const target: CascadeNode = {
+		key,
+		label: flagLabel(key),
+		value: def ? plannedValueOf(def, stored) : null,
+		hot: def?.hot ?? false,
+		willWrite: def ? isOffValueOf(def, stored) : false,
+	};
+	if (def && target.willWrite && target.value === null) {
+		needsValue.push({ key, label: target.label, choices: cascadeChoices(def) });
+	}
+	const planKeys = new Set<string>([...missing.map((node) => node.key), key]);
+	return {
+		key,
+		label: target.label,
+		missing,
+		revive: collectRevive(key, planKeys, env),
+		needsValue,
+		target,
+	};
+}
+
 export function mountFlags(
 	app: Hono,
 	deps: {
@@ -575,5 +842,159 @@ export function mountFlags(
 		}
 		deps.onChange?.(key, body.value);
 		return c.json({ ok: true, key, value: body.value, hot: result.hot });
+	});
+
+	// 级联层（前置连开 / 父项连带关）：门关着就整组不挂，前端继续用上面的 PUT。
+	if (!flagCascadeEnabled()) return;
+
+	app.get("/api/v1/agent/flags/:key/enable-plan", (c) => {
+		const key = c.req.param("key");
+		refreshManifest();
+		if (!FLAG_BY_KEY.has(key)) return c.json({ error: "flag_not_found" }, 404);
+		return c.json(deriveEnablePlan(key));
+	});
+
+	app.post("/api/v1/agent/flags/:key/enable", async (c) => {
+		const key = c.req.param("key");
+		const body = (await c.req.json().catch(() => null)) as {
+			confirm?: unknown;
+			values?: unknown;
+		} | null;
+		if (body?.confirm !== true) return c.json({ error: "needs_confirm" }, 400);
+		refreshManifest();
+		if (!FLAG_BY_KEY.has(key)) return c.json({ error: "flag_not_found" }, 404);
+
+		// 不信任客户端手里的旧 plan：每次按当前状态重算。
+		const plan = deriveEnablePlan(key);
+		const rawValues =
+			body.values && typeof body.values === "object" && !Array.isArray(body.values)
+				? (body.values as Record<string, unknown>)
+				: {};
+		const resolved = new Map<string, string>();
+		const unresolved: CascadeNeed[] = [];
+		for (const need of plan.needsValue) {
+			const raw = rawValues[need.key];
+			const needDef = FLAG_BY_KEY.get(need.key);
+			// 取值必须合法，且必须真的能把它打开（挑「关」档等于没开）。
+			if (
+				typeof raw !== "string" ||
+				!needDef ||
+				!flagValueAllowed(needDef, raw) ||
+				isOffValueOf(needDef, raw)
+			) {
+				unresolved.push(need);
+				continue;
+			}
+			resolved.set(need.key, raw);
+		}
+		if (unresolved.length > 0) return c.json({ error: "needs_value", keys: unresolved }, 400);
+
+		// 写入清单：missing 按拓扑序在前，target 最后；只写 willWrite 的键。
+		const writes: { key: string; value: string }[] = [];
+		for (const node of plan.missing) {
+			if (!node.willWrite) continue;
+			const value = resolved.get(node.key) ?? node.value;
+			if (value === null) {
+				const nodeDef = FLAG_BY_KEY.get(node.key);
+				unresolved.push({
+					key: node.key,
+					label: node.label,
+					choices: nodeDef ? cascadeChoices(nodeDef) : [],
+				});
+				continue;
+			}
+			writes.push({ key: node.key, value });
+		}
+		if (plan.target.willWrite) {
+			const value = resolved.get(key) ?? plan.target.value;
+			if (value === null) {
+				const targetDef = FLAG_BY_KEY.get(key);
+				unresolved.push({
+					key,
+					label: plan.target.label,
+					choices: targetDef ? cascadeChoices(targetDef) : [],
+				});
+			} else {
+				writes.push({ key, value });
+			}
+		}
+		if (unresolved.length > 0) return c.json({ error: "needs_value", keys: unresolved }, 400);
+
+		if (writes.length === 0) {
+			return c.json({ ok: true, changed: [], revived: [], alreadyOn: true });
+		}
+
+		// 复活判定要「写前关、写后开」两侧：先按写前状态取候选（写后状态由计划推演保证会开）。
+		const planKeys = new Set<string>([...plan.missing.map((node) => node.key), key]);
+		const preCandidates = collectRevive(key, planKeys, process.env);
+
+		const changed: { key: string; value: string; hot: boolean }[] = [];
+		for (const write of writes) {
+			const result = setFlag(write.key, write.value);
+			if (!result.ok) {
+				// 中途失败：如实报出已成功写入的前缀，不假装整体成功。
+				return c.json({ error: "partial", changed }, 500);
+			}
+			changed.push({ key: write.key, value: write.value, hot: result.hot });
+			deps.onChange?.(write.key, write.value);
+		}
+		const changedKeys = new Set(changed.map((item) => item.key));
+		const revived = preCandidates
+			.filter((candidate) => !changedKeys.has(candidate.key))
+			.filter((candidate) => {
+				const candidateDef = FLAG_BY_KEY.get(candidate.key);
+				return candidateDef ? !isEffectivelyOff(candidateDef, process.env) : false;
+			})
+			.map((candidate) => ({
+				key: candidate.key,
+				value: candidate.value,
+				hot: candidate.hot,
+				willWrite: candidate.willWrite,
+			}));
+		return c.json({ ok: true, changed, revived });
+	});
+
+	app.get("/api/v1/agent/flags/:key/disable-plan", (c) => {
+		const key = c.req.param("key");
+		refreshManifest();
+		const def = FLAG_BY_KEY.get(key);
+		if (!def) return c.json({ error: "flag_not_found" }, 404);
+		const offValue = offValueOf(def);
+		if (offValue === null) {
+			// 没有「关」这一档（纯枚举 / 数值）：200 而不是 400，前端好渲染成「不可关」。
+			return c.json({ key, label: flagLabel(key), disableable: false, affected: [] });
+		}
+		return c.json({
+			key,
+			label: flagLabel(key),
+			disableable: true,
+			offValue,
+			affected: collectAffected(key, process.env),
+		});
+	});
+
+	app.post("/api/v1/agent/flags/:key/disable", async (c) => {
+		const key = c.req.param("key");
+		const body = (await c.req.json().catch(() => null)) as { confirm?: unknown } | null;
+		if (body?.confirm !== true) return c.json({ error: "needs_confirm" }, 400);
+		refreshManifest();
+		const def = FLAG_BY_KEY.get(key);
+		if (!def) return c.json({ error: "flag_not_found" }, 404);
+		const offValue = offValueOf(def);
+		if (offValue === null) return c.json({ error: "flag_not_disableable" }, 400);
+		// 已经被父锁着（或本来就是关的）：不再写值，子项也无所谓连带。
+		// 判据按各自清单的关档算：AGENT_TOOL_POLICY 存储 "full"（界面显示关）也算关，不能重写同一个值。
+		if (isEffectivelyOff(def, process.env)) {
+			return c.json({ ok: true, changed: [], affected: [], alreadyOff: true });
+		}
+		const affected = collectAffected(key, process.env);
+		const result = setFlag(key, offValue);
+		if (!result.ok) return c.json({ error: "partial", changed: [] }, 500);
+		deps.onChange?.(key, offValue);
+		return c.json({
+			ok: true,
+			changed: [{ key, value: offValue, hot: result.hot }],
+			affected,
+		});
 	});
 }

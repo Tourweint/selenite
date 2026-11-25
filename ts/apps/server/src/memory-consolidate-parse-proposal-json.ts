@@ -26,7 +26,7 @@ export function consolidateLlmEnabled(): boolean {
 }
 
 export function memoryImportEnabled(): boolean {
-	return !isOff(process.env.MEMORY_IMPORT);
+	return flagEnabled("MEMORY_IMPORT");
 }
 
 function isOff(raw: string | undefined): boolean {

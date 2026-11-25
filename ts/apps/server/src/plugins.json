@@ -36,6 +36,7 @@
 				"MEMORY_NIGHTLY_SPLIT",
 				"MEMORY_PROACTIVE",
 				"MEMORY_SPLIT",
+				"MEMORY_IMPORT",
 				"MEMORY_IMPORT_SOURCES",
 				"AGENT_VERIFIED_ANSWER",
 				"REMINDER_DISTILL_ENABLED"
@@ -335,7 +336,8 @@
 			"defaultValue": "true",
 			"hot": true,
 			"requires": [
-				"COMPANIONS_ENABLED"
+				"COMPANIONS_ENABLED",
+				"CHANCELLOR_ENABLED"
 			]
 		},
 		{
@@ -349,7 +351,10 @@
 				"false"
 			],
 			"defaultValue": "true",
-			"hot": true
+			"hot": true,
+			"requires": [
+				"CHANCELLOR_ENABLED"
+			]
 		},
 		{
 			"key": "PARTNER_WORK_RECORD",
@@ -876,7 +881,8 @@
 				"false"
 			],
 			"requires": [
-				"MEMORY_NIGHTLY_REVIEW"
+				"MEMORY_NIGHTLY_REVIEW",
+				"MEMORY_SPLIT"
 			],
 			"defaultValue": "true",
 			"hot": true
@@ -1035,6 +1041,38 @@
 			],
 			"defaultValue": "true",
 			"hot": true
+		},
+		{
+			"key": "GOAL_MODE",
+			"label": "目标模式",
+			"summary": "给执事设目标后可以「开始推进」：每轮收尾结算，没完成就自动续跑一轮；有轮数上限，连续几轮没动手自动暂停。默认关；关 = 目标只是一行文字，每轮带进对话而已。",
+			"group": "autonomy",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"requires": [
+				"COMPANIONS_ENABLED"
+			],
+			"defaultValue": "false",
+			"hot": true,
+			"scope": "core"
+		},
+		{
+			"key": "GOAL_MAX_ROUNDS",
+			"label": "目标续跑轮数",
+			"summary": "一个目标最多结算多少轮（1–200），默认 10；只对之后新建的目标生效。",
+			"group": "autonomy",
+			"type": "number",
+			"values": [],
+			"defaultValue": "10",
+			"min": 1,
+			"max": 200,
+			"hot": true,
+			"requires": [
+				"GOAL_MODE"
+			]
 		},
 		{
 			"key": "DEVICE_MATRIX_ENABLED",
@@ -1203,7 +1241,10 @@
 				"false"
 			],
 			"defaultValue": "true",
-			"hot": true
+			"hot": true,
+			"requires": [
+				"CHAT_CONTEXT_INSPECT"
+			]
 		},
 		{
 			"key": "CHAT_CONTEXT_LOOKUP",
@@ -1242,7 +1283,10 @@
 				"false"
 			],
 			"defaultValue": "true",
-			"hot": false
+			"hot": false,
+			"requires": [
+				"SKILLS_ADMIN"
+			]
 		},
 		{
 			"key": "SKILL_USAGE",
@@ -1320,7 +1364,8 @@
 				"false"
 			],
 			"requires": [
-				"MEMORY_ENABLED"
+				"MEMORY_ENABLED",
+				"PARTNER_MEMORY_RECALL"
 			],
 			"defaultValue": "false",
 			"hot": true
@@ -1329,6 +1374,22 @@
 			"key": "MEMORY_SPLIT",
 			"label": "长记忆拆分",
 			"summary": "记忆页「拆分」按钮：把长条记忆按句 / 按描述拆成原子短条，原文完整保留（预览后应用）。关 = 拆分端点 404。前置：记忆总闸。默认开，即时生效。",
+			"group": "memory",
+			"type": "boolean",
+			"values": [
+				"true",
+				"false"
+			],
+			"requires": [
+				"MEMORY_ENABLED"
+			],
+			"defaultValue": "true",
+			"hot": true
+		},
+		{
+			"key": "MEMORY_IMPORT",
+			"label": "记忆导入总闸",
+			"summary": "记忆导入的总开关：关 = 手工导入与来源导入端点全部 404。前置：记忆总闸。默认开，即时生效。",
 			"group": "memory",
 			"type": "boolean",
 			"values": [
@@ -1352,7 +1413,8 @@
 				"false"
 			],
 			"requires": [
-				"MEMORY_ENABLED"
+				"MEMORY_ENABLED",
+				"MEMORY_IMPORT"
 			],
 			"defaultValue": "true",
 			"hot": true
@@ -1368,7 +1430,8 @@
 				"false"
 			],
 			"requires": [
-				"MEMORY_ENABLED"
+				"MEMORY_ENABLED",
+				"AGENT_ASK_USER"
 			],
 			"defaultValue": "true",
 			"hot": true

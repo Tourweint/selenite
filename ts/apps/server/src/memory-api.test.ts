@@ -37,6 +37,8 @@ process.env.PERSONA_MEMORY_ASK = "";
 process.env.MEMORY_EXTRACT = "rule";
 process.env.CHANCELLOR_ENABLED = "false";
 process.env.COMPANIONS_ENABLED = "false";
+// 开关覆盖文件同样隔离：别读开发机真实 .data/agent-flags.json（2026-11-25）
+process.env.AGENT_FLAGS_PATH = join(root, "agent-flags.json");
 
 const { Hono } = await import("hono");
 const { mountMemoryApi } = await import("./memory-api.ts");

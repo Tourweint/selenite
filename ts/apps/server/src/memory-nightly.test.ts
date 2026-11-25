@@ -19,6 +19,8 @@ process.env.MEMORY_EXTRACT = "rule";
 process.env.COMPANIONS_ENABLED = "false";
 process.env.MEMORY_NIGHTLY_REVIEW = "false";
 process.env.MEMORY_CONSOLIDATE_DIFF_PATH = join(root, "memory-consolidate-diff.json");
+// 开关覆盖文件隔离：别读开发机真实 .data/agent-flags.json（2026-11-25）
+process.env.AGENT_FLAGS_PATH = join(root, "agent-flags.json");
 
 const { memoryNightlyEnabled, memoryNightlyAt, memoryNightlySplitEnabled, nextNightlyAt, runMemoryNightlyReview } = await import(
 	"./memory-nightly.ts"
@@ -36,12 +38,22 @@ test("开关：MEMORY_NIGHTLY_REVIEW=false 视为关闭", () => {
 
 test("每晚拆分开关：默认开，false/0/off 关", () => {
 	delete process.env.MEMORY_NIGHTLY_SPLIT;
-	assert.equal(memoryNightlySplitEnabled(), true);
-	for (const value of ["false", "0", "off"]) {
-		process.env.MEMORY_NIGHTLY_SPLIT = value;
-		assert.equal(memoryNightlySplitEnabled(), false, value);
+	// 2026-11-25 补真实父闸：MEMORY_NIGHTLY_SPLIT 现在 requires 每晚整理 + 拆分能力。
+	// 本文件顶部把 review 置成 false（为了测「关掉不跑」），这里显式打开两个父，
+	// 否则子项被父锁成 false，测的就不是它自己的默认值了。
+	process.env.MEMORY_NIGHTLY_REVIEW = "true";
+	process.env.MEMORY_SPLIT = "true";
+	try {
+		assert.equal(memoryNightlySplitEnabled(), true);
+		for (const value of ["false", "0", "off"]) {
+			process.env.MEMORY_NIGHTLY_SPLIT = value;
+			assert.equal(memoryNightlySplitEnabled(), false, value);
+		}
+	} finally {
+		delete process.env.MEMORY_NIGHTLY_SPLIT;
+		delete process.env.MEMORY_SPLIT;
+		process.env.MEMORY_NIGHTLY_REVIEW = "false";
 	}
-	delete process.env.MEMORY_NIGHTLY_SPLIT;
 });
 
 test("时点：MEMORY_NIGHTLY_AT 非法值回落到 03:30", () => {
