@@ -30,19 +30,20 @@ import { closeModal, inShell, openConfirm, openModal, selectDirectory, toast } f
 
 const MEMORY_A_PAGE_SIZE = 20;
 // 所有分组默认收起（2026-11-15 用户拍板，原 preference/intention 默认展开）：
-// 页面只留分组头与计数，展开才按需拉正文；搜索命中时仍会展开（见 memoryGroupOf）。
+// 页面只留分组头与计数，展开才按需拉正文。
 const MEMORY_A_DEFAULT_OPEN = new Set();
 
 const memoryPageState = {
   gen: 0,
   scope: "global",
+  /** 搜索已下线（2026-11-25）：恒为空串；memory-items.js 的竞态守卫还在读它，字段留着。 */
   q: "",
   kind: "",
   counts: { all: 0, byKind: {}, superseded: 0 },
   total: 0,
   groups: new Map(),
   status: null,
-  /** 一排人：{ scope, label, count, kind }；null = 还没读回来。 */
+  /** 范围清单：{ scope, label, count, kind }；null = 还没读回来。 */
   people: null,
   /** "全部整理"的聚合状态：{ running, total, done, label, proposals, errors }。 */
   batch: null,
@@ -162,7 +163,7 @@ function memoryGroupOf(kind, total = 0) {
       loaded: false,
       loading: false,
       error: "",
-      open: MEMORY_A_DEFAULT_OPEN.has(kind) || Boolean(memoryPageState.q),
+      open: MEMORY_A_DEFAULT_OPEN.has(kind),
     };
     memoryPageState.groups.set(kind, group);
   }
@@ -173,14 +174,6 @@ function memoryGroupOf(kind, total = 0) {
 /** 外部导入区的来源分节（2026-11-15 当天撤回）：导入条目按 kind 落进普通分组，
  *  条目右上角照常带来源标（memorySourceLabel 把 import:* 标成「导入」），不再单开一区。 */
 
-function memoryGroupHint(kind) {
-  // 偏好不再标「每轮都会想起」：它只是召回时排在前面成段（engine.ts buildContext），
-  // 不进当轮候选集时一样不会带（2026-11-16 用户纠正后摘掉这句解释）。
-  if (kind === "intention") return "未兑现的，优先想起";
-  // 「日常经过 · 默认收起」2026-11-15 摘掉：所有分组都默认收起了，这句成了废话
-  return "";
-}
-
 function memorySettingsMarkup() {
   return sectionMarkup(
     // 2026-11-21：定位从「记忆」改成「记忆索引」——这一页不是全量注入，
@@ -188,93 +181,104 @@ function memorySettingsMarkup() {
     `<span data-tip="${attr(
       "索引 = 从日常里挑出值得长期记住的，按人、按项目分开放；每轮只按相关度取几条注入上下文，不是全量带上。删除、标过时、整理都只影响这份索引。",
     )}">记忆索引</span>`,
-    // 记忆库卡（2026-11-23 外部记忆库接入）：默认 hidden，等 GET /bank 回话后渲染；
-    // 2026-11-24 旧形态退役后槽位卡恒在（读不到状态时卡上给错误行 + 重试）。
-    // 2026-11-23 收口：卡内分两块——上块「切哪个库」，下块「当前库内容」（外部态才有）。
-    `<div class="card mem-bank" id="mem-bank" hidden>
-      <div class="mem-bank-body" id="mem-bank-body"></div>
-    </div>
-    <div class="card mem-a-overview">
-      <div class="mem-a-overview-main">
-        <div class="mem-a-total"><b id="mem-a-total">—</b><span>条记忆</span></div>
-        <div class="mem-a-chips" id="mem-a-chips"></div>
+    // 2026-11-25 A 版左右布局（用户拍板）：左栏选「谁 / 看什么 / 干什么」，右栏全是内容。
+    // 只搬位置，id 与 data-* 一个不动；页头右侧的动作区清空，五个操作只存在于左栏工作台里。
+    // 同批下线搜索框，以及分组头、两张建议卡上的解释性小字（可见文案，提示仍在 data-tip 里）。
+    `<div class="mem-a-layout">
+      <aside class="mem-a-rail">
+        <div class="card mem-bank" id="mem-bank" hidden>
+          <div class="mem-bank-body" id="mem-bank-body"></div>
+        </div>
+        <section class="mem-a-rail-block">
+          <div class="mem-a-rail-head"><span>范围</span></div>
+          <div class="mem-a-people" id="mem-a-people" role="tablist" aria-label="选择记忆范围"></div>
+        </section>
+        <section class="mem-a-rail-block">
+          <div class="mem-a-rail-head"><span>类型</span></div>
+          <div class="mem-a-chips" id="mem-a-chips"></div>
+        </section>
+        <details class="mem-a-workbench">
+          <summary class="mem-a-wb-head">
+            ${chevSvg("mem-a-chev mem-a-wb-chev chev")}
+            <span class="mem-a-gtitle">工作台</span>
+          </summary>
+          <div class="mem-a-wb-body">
+            <div class="mem-a-head-actions">
+              <button class="ghost mem-act" type="button" id="mem-distill" hidden
+                data-tip="沉淀提醒 = 代码先从最近 30 天收集你反复说过的话（0 token），跳总管蒸馏成教诲建议；你回这里逐条采纳才写进偏好（永不删）。">沉淀提醒</button>
+              <button class="ghost mem-act" type="button" id="mem-migrate" hidden
+                data-tip="迁移 = 把这个范围的记忆整体搬到另一个项目或「我的记忆」。只搬家，不去重、不调模型；搬迁后原范围就空了。">迁移</button>
+              <button class="ghost mem-act" type="button" id="mem-import" hidden>导入</button>
+              <button class="ghost mem-act" type="button" id="mem-consolidate" hidden
+                data-tip="整理 = 让辅助模型回看最近的记忆，找出重复、过时、说法不一致的条目。&#10;&#10;它只给建议：你逐条点「应用」才会把旧的那条标成过时；不会自动删，也没有「全部应用」。&#10;&#10;这一步会调用一次辅助模型（单独请求，不占当前对话上下文），会消耗 token。">整理</button>
+              <button class="btn-primary mem-a-split" type="button" id="mem-split" hidden
+                data-tip="拆分记忆 = 把一条超过 200 字、记了很多事的长记忆，拆成几条短原子；完整原文会存进「原文档案」，不删任何东西。&#10;&#10;纯代码拆分，不调用模型、不消耗 token；按文件摘要或正文句子机械切分。">拆分记忆</button>
+            </div>
+            <details class="mem-a-work mem-a-docs" id="mem-a-docs" hidden>
+              <summary class="mem-a-work-head">
+                ${chevSvg("mem-a-chev mem-a-work-chev chev")}
+                <span class="mem-a-gtitle">原文档案</span>
+                <span class="mem-a-gcount" id="mem-a-docs-count">0</span>
+              </summary>
+              <div class="mem-a-work-body" id="mem-a-docs-list"></div>
+            </details>
+          </div>
+        </details>
+      </aside>
+      <div class="mem-a-main">
+        <div class="card mem-a-overview">
+          <div class="mem-a-overview-main">
+            <div class="mem-a-total"><b id="mem-a-total">—</b><span>条记忆</span></div>
+          </div>
+          <div class="mem-a-overview-side">
+            <div class="mem-a-status" id="mem-a-status">读取中…</div>
+            <div class="mem-a-audit" id="mem-a-audit" hidden></div>
+          </div>
+        </div>
+        <div class="mem-a-run" id="mem-a-run" hidden>
+          <span class="mem-a-spinner" aria-hidden="true"></span>
+          <span id="mem-a-run-text">正在整理…</span>
+          <span class="mem-a-elapsed" id="mem-a-elapsed"></span>
+        </div>
+        <div class="card mem-a-props" id="mem-a-props-card" hidden>
+          <div class="mem-a-props-head">
+            <span class="mem-a-props-title" data-tip="整理 = 让模型回看最近的记忆，找出重复、过时、说法不一致的条目。它只给建议：你逐条点「应用」才会把旧的那条标成过时；不会自动改，也没有「全部应用」。">整理建议</span>
+            <span class="mem-a-count" id="mem-a-prop-count"></span>
+          </div>
+          <div class="mem-a-props-list" id="mem-a-props"></div>
+        </div>
+        <div class="card mem-a-props" id="mem-a-remcard" hidden>
+          <div class="mem-a-props-head">
+            <span class="mem-a-props-title" data-tip="沉淀建议 = 总管把你反复说的提醒蒸馏出来的教诲候选。点「采纳」才写进偏好（永不删）；「忽略」只是从清单划掉，不写库。">沉淀建议</span>
+            <span class="mem-a-count" id="mem-a-rem-count"></span>
+          </div>
+          <div class="mem-a-props-list" id="mem-a-rem-list"></div>
+        </div>
+        <div class="mem-a-groups" id="mem-a-groups"><div class="set-hint">读取中…</div></div>
+        <details class="mem-a-work" id="mem-a-work" hidden>
+          <summary class="mem-a-work-head">
+            ${chevSvg("mem-a-chev mem-a-work-chev chev")}
+            <span class="mem-a-gtitle">工作履历</span>
+            <span class="mem-a-gcount" id="mem-a-work-count">0</span>
+          </summary>
+          <div class="mem-a-work-body" id="mem-a-work-list"></div>
+        </details>
+        <div class="mem-a-external" id="mem-a-external" hidden>
+          <div class="mem-a-external-main">
+            <div class="mem-a-external-title">一生记忆库</div>
+            <div class="mem-a-external-line" id="mem-a-external-line"></div>
+          </div>
+          <button class="ghost mem-act" type="button" id="mem-a-ext-open" hidden>查看</button>
+        </div>
       </div>
-      <div class="mem-a-overview-side">
-        <div class="mem-a-status" id="mem-a-status">读取中…</div>
-        <div class="mem-a-audit" id="mem-a-audit" hidden></div>
-      </div>
-    </div>
-    <div class="mem-a-people" id="mem-a-people" role="tablist" aria-label="选择记忆范围"></div>
-    <div class="mem-a-run" id="mem-a-run" hidden>
-      <span class="mem-a-spinner" aria-hidden="true"></span>
-      <span id="mem-a-run-text">正在整理…</span>
-      <span class="mem-a-elapsed" id="mem-a-elapsed"></span>
-    </div>
-    <div class="card mem-a-props" id="mem-a-props-card" hidden>
-      <div class="mem-a-props-head">
-        <span class="mem-a-props-title" data-tip="整理 = 让模型回看最近的记忆，找出重复、过时、说法不一致的条目。它只给建议：你逐条点「应用」才会把旧的那条标成过时；不会自动改，也没有「全部应用」。">整理建议</span>
-        <span class="mem-a-count" id="mem-a-prop-count"></span>
-        <span class="mem-a-prop-note" id="mem-a-prop-note"></span>
-      </div>
-      <div class="mem-a-props-list" id="mem-a-props"></div>
-    </div>
-    <div class="card mem-a-props" id="mem-a-remcard" hidden>
-      <div class="mem-a-props-head">
-        <span class="mem-a-props-title" data-tip="沉淀建议 = 总管把你反复说的提醒蒸馏出来的教诲候选。点「采纳」才写进偏好（永不删）；「忽略」只是从清单划掉，不写库。">沉淀建议</span>
-        <span class="mem-a-count" id="mem-a-rem-count"></span>
-        <span class="mem-a-prop-note">总管蒸馏 · 你逐条采纳</span>
-      </div>
-      <div class="mem-a-props-list" id="mem-a-rem-list"></div>
-    </div>
-    <div class="mem-a-toolbar">
-      <label class="mem-a-search">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
-        <input id="mem-a-search" type="search" spellcheck="false"
-               placeholder="搜记忆内容，比如「猫」「汇报」「跑步」" aria-label="搜索记忆" />
-      </label>
-    </div>
-    <div class="mem-a-groups" id="mem-a-groups"><div class="set-hint">读取中…</div></div>
-    <details class="mem-a-work" id="mem-a-work" hidden>
-      <summary class="mem-a-work-head">
-        ${chevSvg("mem-a-chev mem-a-work-chev chev")}
-        <span class="mem-a-gtitle">工作履历</span>
-        <span class="mem-a-gcount" id="mem-a-work-count">0</span>
-        <span class="mem-a-ghint">派单结算 · 只读</span>
-      </summary>
-      <div class="mem-a-work-body" id="mem-a-work-list"></div>
-    </details>
-    <details class="mem-a-work mem-a-docs" id="mem-a-docs" hidden>
-      <summary class="mem-a-work-head">
-        ${chevSvg("mem-a-chev mem-a-work-chev chev")}
-        <span class="mem-a-gtitle">原文档案</span>
-        <span class="mem-a-gcount" id="mem-a-docs-count">0</span>
-        <span class="mem-a-ghint">拆分后的原文 · 只读</span>
-      </summary>
-      <div class="mem-a-work-body" id="mem-a-docs-list"></div>
-    </details>
-    <div class="mem-a-external" id="mem-a-external" hidden>
-      <div class="mem-a-external-main">
-        <div class="mem-a-external-title">一生记忆库</div>
-        <div class="mem-a-external-line" id="mem-a-external-line"></div>
-      </div>
-      <button class="ghost mem-act" type="button" id="mem-a-ext-open" hidden>查看</button>
     </div>
     <button class="mem-a-backtop" type="button" id="mem-a-backtop" hidden
       aria-label="回到顶部" data-tip="回到顶部">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m18 15-6-6-6 6"/><path d="M12 19V9"/></svg>
     </button>`,
     `id="mem-a-page"`,
-    `<div class="mem-a-head-actions">
-      <button class="ghost mem-act" type="button" id="mem-distill" hidden
-        data-tip="沉淀提醒 = 代码先从最近 30 天收集你反复说过的话（0 token），跳总管蒸馏成教诲建议；你回这里逐条采纳才写进偏好（永不删）。">沉淀提醒</button>
-      <button class="ghost mem-act" type="button" id="mem-migrate" hidden
-        data-tip="迁移 = 把这个范围的记忆整体搬到另一个项目或「我的记忆」。只搬家，不去重、不调模型；搬迁后原范围就空了。">迁移</button>
-      <button class="ghost mem-act" type="button" id="mem-import" hidden>导入</button>
-      <button class="ghost mem-act" type="button" id="mem-consolidate" hidden
-        data-tip="整理 = 让辅助模型回看最近的记忆，找出重复、过时、说法不一致的条目。&#10;&#10;它只给建议：你逐条点「应用」才会把旧的那条标成过时；不会自动删，也没有「全部应用」。&#10;&#10;这一步会调用一次辅助模型（单独请求，不占当前对话上下文），会消耗 token。">整理</button>
-      <button class="btn-primary mem-a-split" type="button" id="mem-split" hidden
-        data-tip="拆分记忆 = 把一条超过 200 字、记了很多事的长记忆，拆成几条短原子；完整原文会存进「原文档案」，不删任何东西。&#10;&#10;纯代码拆分，不调用模型、不消耗 token；按文件摘要或正文句子机械切分。">拆分记忆</button>
-    </div>`,
+    // 2026-11-25：页头右侧动作区清空（五个操作搬进左栏工作台）。
+    "",
   );
 }
 
@@ -284,7 +288,6 @@ async function wireMemorySettings({ rerender = null } = {}) {
   stopMemoryBacktop();
   wireMemoryBacktop(gen);
   memoryPageState.scope = "global";
-  memoryPageState.q = "";
   memoryPageState.kind = "";
   memoryPageState.counts = { all: 0, byKind: {}, superseded: 0 };
   memoryPageState.total = 0;
@@ -316,6 +319,8 @@ async function wireMemorySettings({ rerender = null } = {}) {
 
   // 范围 tabs 溢出横滚（2026-11-15 项目记忆之后一排能到 20 个）：滚动条刻意隐藏（A 版口径），
   // 所以把滚轮直转成横滚、并支持按住拖拽滑动；拖过 6px 就吃掉落点 click，防止拖完误触 tab。
+  // 2026-11-25 起这份清单在左栏竖排：横向溢出不成立（max 恒为 0，滚轮分支直接 return），
+  // 监听原样保留——竖排时它等价于空转，不必再挂第二套。
   const peopleBox = document.getElementById("mem-a-people");
   if (peopleBox) {
     peopleBox.addEventListener("wheel", (event) => {
@@ -349,17 +354,6 @@ async function wireMemorySettings({ rerender = null } = {}) {
       window.addEventListener("pointerup", onUp);
     });
   }
-
-  const search = document.getElementById("mem-a-search");
-  let searchTimer = 0;
-  search?.addEventListener("input", () => {
-    clearTimeout(searchTimer);
-    searchTimer = setTimeout(() => {
-      memoryPageState.q = search.value.trim();
-      memoryPageState.groups.clear();
-      void loadMemorySummary(gen);
-    }, 250);
-  });
 
   document.getElementById("mem-import")?.addEventListener("click", () => void openMemoryImportDialog(gen));
   document.getElementById("mem-migrate")?.addEventListener("click", () => {
@@ -1522,7 +1516,7 @@ async function openMemoryMigrateDialog(gen) {
         closeModal();
         toast(`已迁移 ${Number(data.records) || 0} 条记忆`);
         if (memoryPageAlive(gen)) {
-          // 源已空：先刷新「一排人」的计数（孤儿 tab 可能因此消失），再切到目标范围看结果
+          // 源已空：先刷新「范围清单」的计数（孤儿 tab 可能因此消失），再切到目标范围看结果
           await loadMemoryPeople(gen);
           if (!memoryPageAlive(gen)) return;
           if (to !== memoryPageState.scope) switchMemoryScope(to, gen);
@@ -1803,7 +1797,7 @@ function wireImportDialogActions(body, gen) {
 }
 
 
-/** 一排人：一次请求拿全（我的 + 各在职执事 + 条数）。读不到就只剩"我的记忆"。 */
+/** 范围清单：一次请求拿全（我的 + 各在职执事 + 条数）。读不到就只剩"我的记忆"。 */
 async function loadMemoryPeople(gen) {
   const box = document.getElementById("mem-a-people");
   if (!box) return;
@@ -1844,7 +1838,7 @@ function renderMemoryPeople() {
   if (!box) return;
   const people = memoryPageState.people;
   if (!people || people.length === 0) {
-    box.innerHTML = `<button class="mem-a-person on" type="button" data-mem-scope="global" role="tab" aria-selected="true">我的记忆</button>`;
+    box.innerHTML = `<button class="mem-a-person on" type="button" data-mem-scope="global" role="tab" aria-selected="true"><span class="mem-a-person-name">我的记忆</span></button>`;
     return;
   }
   box.innerHTML = people
@@ -1860,7 +1854,7 @@ function renderMemoryPeople() {
               : "";
       return `<button class="mem-a-person ${on ? "on" : ""}" type="button"
         data-mem-scope="${attr(person.scope)}" role="tab" aria-selected="${on}">
-        ${esc(person.label)}${badge}<b>${person.count}</b>
+        <span class="mem-a-person-name">${esc(person.label)}</span>${badge}<b>${person.count}</b>
       </button>`;
     })
     .join("");
@@ -1877,7 +1871,7 @@ async function scopeCount(scope) {
   return Number(counts.all ?? data.total) || 0;
 }
 
-/** 旧服务端兼容：用 /partners + 逐 scope 计数拼出同一份"一排人"。 */
+/** 旧服务端兼容：用 /partners + 逐 scope 计数拼出同一份"范围清单"。 */
 async function loadMemoryPeopleFallback(gen) {
   const rows = [{ scope: "global", label: "我的记忆", count: 0, kind: "mine" }];
   try {
@@ -1909,14 +1903,11 @@ async function loadMemoryPeopleFallback(gen) {
 function switchMemoryScope(scope, gen) {
   if (!scope || scope === memoryPageState.scope) return;
   memoryPageState.scope = scope;
-  memoryPageState.q = "";
   memoryPageState.kind = "";
   memoryPageState.groups.clear();
   memoryPageState.status = null;
   // 单人视图不背"全部整理"的旧汇总；正在跑时上面已经拦住，不会走到这里
   if (memoryPageState.batch && !memoryPageState.batch.running) memoryPageState.batch = null;
-  const search = document.getElementById("mem-a-search");
-  if (search) search.value = "";
   clearMemoryProposalCard();
   renderMemoryPeople();
   renderMemoryChips();
@@ -1931,14 +1922,12 @@ async function loadMemorySummary(gen) {
   const chipsEl = document.getElementById("mem-a-chips");
   if (!totalEl || !chipsEl) return;
   const scope = memoryPageState.scope;
-  const q = memoryPageState.q;
-  const query = q ? `&q=${encodeURIComponent(q)}` : "";
   try {
     const response = await request(
-      `/api/v1/agent/memory?scope=${encodeURIComponent(scope)}&limit=0&excludeKinds=work${query}`,
+      `/api/v1/agent/memory?scope=${encodeURIComponent(scope)}&limit=0&excludeKinds=work`,
       { cache: "no-store" },
     );
-    if (!memoryPageAlive(gen) || memoryPageState.scope !== scope || memoryPageState.q !== q) return;
+    if (!memoryPageAlive(gen) || memoryPageState.scope !== scope) return;
     if (response.status === 404) {
       totalEl.textContent = "—";
       chipsEl.replaceChildren();
@@ -1962,19 +1951,16 @@ async function loadMemorySummary(gen) {
     memoryPageState.canSplit = data.canSplit === true;
     memoryPageState.consolidateJob = data.consolidateJob === true;
     totalEl.textContent = String(memoryPageState.counts.all);
-    // 搜索时计数是过滤后的，不能拿它覆盖"这个人一共有多少条"
-    if (!q) {
-      const person = memoryPageState.people?.find((item) => item.scope === scope);
-      if (person) {
-        person.count = memoryPageState.counts.all;
-        renderMemoryPeople();
-      }
+    const person = memoryPageState.people?.find((item) => item.scope === scope);
+    if (person) {
+      person.count = memoryPageState.counts.all;
+      renderMemoryPeople();
     }
     updateMemoryControls();
     renderMemoryChips();
     renderMemoryGroups(gen);
   } catch (error) {
-    if (!memoryPageAlive(gen) || memoryPageState.scope !== scope || memoryPageState.q !== q) return;
+    if (!memoryPageAlive(gen) || memoryPageState.scope !== scope) return;
     if (error.message === "forbidden") return;
     totalEl.textContent = "—";
     chipsEl.replaceChildren();
@@ -2163,9 +2149,7 @@ function renderMemoryGroups(gen) {
     ? [memoryPageState.kind]
     : MEMORY_KIND_ORDER.filter((kind) => kind !== "work" && (Number(counts[kind]) || 0) > 0);
   if (kinds.length === 0) {
-    box.innerHTML = memoryPageState.q
-      ? `<div class="set-hint">没有匹配「${esc(memoryPageState.q)}」的记忆。</div>`
-      : `<div class="set-hint">还没有记忆。聊几次之后，偏好会自动出现在这里；也可以直接对助手说「记住：……」。</div>`;
+    box.innerHTML = `<div class="set-hint">还没有记忆。聊几次之后，偏好会自动出现在这里；也可以直接对助手说「记住：……」。</div>`;
     return;
   }
   box.innerHTML = kinds
@@ -2175,13 +2159,11 @@ function renderMemoryGroups(gen) {
       if (memoryPageState.kind === kind) group.open = true;
       const label = esc(MEMORY_KIND_LABEL[kind] || kind);
       const tip = MEMORY_KIND_TIPS[kind] || "";
-      const hint = memoryGroupHint(kind);
       return `<section class="mem-a-group ${group.open ? "open" : ""}" data-mem-group="${kind}">
         <button class="mem-a-ghead" type="button" aria-expanded="${group.open}">
           ${chevSvg("mem-a-chev chev")}
           <span class="mem-a-gtitle"${tip ? ` data-tip="${attr(tip)}"` : ""}>${label}</span>
           <span class="mem-a-gcount">${total}</span>
-          ${hint ? `<span class="mem-a-ghint">${hint}</span>` : ""}
         </button>
         <div class="mem-a-gbody"${group.open ? "" : " hidden"}>${memoryGroupBodyMarkup(group, kind)}</div>
       </section>`;
@@ -2211,4 +2193,4 @@ function renderMemoryGroupBody(kind) {
   body.innerHTML = memoryGroupBodyMarkup(memoryGroupOf(kind), kind);
 }
 
-export { MEMORY_A_DEFAULT_OPEN, MEMORY_A_PAGE_SIZE, loadMemoryDocuments, loadMemoryPeople, loadMemorySummary, memoryElapsedSeconds, memoryGroupBodyMarkup, memoryGroupHint, memoryGroupOf, memoryPageAlive, memoryPageState, memorySettingsMarkup, memoryShortDate, memorySourceLabel, memoryStatusTime, openMemoryImportDialog, renderMemoryChips, renderMemoryGroupBody, renderMemoryGroups, renderMemoryPeople, startMemoryPolling, stopMemoryPolling, switchMemoryScope, updateMemoryControls, wireMemorySettings };
+export { MEMORY_A_DEFAULT_OPEN, MEMORY_A_PAGE_SIZE, loadMemoryDocuments, loadMemoryPeople, loadMemorySummary, memoryElapsedSeconds, memoryGroupBodyMarkup, memoryGroupOf, memoryPageAlive, memoryPageState, memorySettingsMarkup, memoryShortDate, memorySourceLabel, memoryStatusTime, openMemoryImportDialog, renderMemoryChips, renderMemoryGroupBody, renderMemoryGroups, renderMemoryPeople, startMemoryPolling, stopMemoryPolling, switchMemoryScope, updateMemoryControls, wireMemorySettings };
