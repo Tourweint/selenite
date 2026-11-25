@@ -273,6 +273,9 @@
 /* 收起 / 展开的高度过渡（2026-11-19）：行数会变（多行块 → 一行「工作 N 步」），
    高度由 JS 量出真实值后用 WAAPI 过渡；这一层只负责在动画期间把溢出的内容裁住。 */
 .tchips-row { overflow: hidden; }
+/* 发牌期间不裁（2026-11-25）：后几组的牌要从折叠条飞回自己那一格，途中越过
+   上面的正文——裁着就只看得见落地那一下。JS 在最后一枚落定后摘掉这个类。 */
+.tchips-row.is-dealing { overflow: visible; }
 
 /* 内联详情：在灰块下面原地展开 */
 .tchips-inline { display: block; min-width: 0; }

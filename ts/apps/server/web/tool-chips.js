@@ -79,6 +79,13 @@ function dealDuration(count) {
   return 240 + Math.min(Math.max(count - 1, 0), 24) * 16 + 60;
 }
 
+/** 系统开了「减少动态效果」：高度过渡与发牌都不播（CSS 侧同样有关掉规则）。 */
+function reduceMotion() {
+  return typeof window !== "undefined" && typeof window.matchMedia === "function"
+    ? window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    : false;
+}
+
 /** 设置 → 外观 → 工具详情 的选择落在这个键上（纯前端，同字体/主题做法） */
 const KEY_TOOL_DETAIL = "lifediary.toolDetail";
 let detailMode = "inline";
@@ -322,8 +329,13 @@ export function createTurnWork() {
     syncFold() {
       turn.master?.syncFold(turn.expanded);
     },
-    prepareOpen(rect, source) {
-      for (const group of groups) group.prepareOpen(group === source ? rect : null);
+    /**
+     * 展开前的一步：每一组都按这次点击的锚点准备「发牌」，排队号整轮连号
+     * （2026-11-25 用户口径：后几组也要发牌，不许闪出来）。
+     */
+    prepareOpen(rect) {
+      let offset = 0;
+      for (const group of groups) offset = group.prepareOpen(rect, offset);
     },
   };
   return turn;
@@ -369,6 +381,9 @@ export function createToolChips(host, options = {}) {
   // 收起再展开从第一页重新开始；展开后新到的块一律压进「+N」，不自动铺开——
   // revealed 是每组自己的（分页按组翻），开合状态在 turn 上共享。
   let revealed = 0;
+  // 这次展开里本组最后一枚的排队号（整轮连号，2026-11-25）与发牌收尾计时器。
+  let dealMaxIndex = 0;
+  let dealTimer = 0;
   // 点开那一刻的屏幕坐标：必须在改布局之前量，改了以后折叠条/「+N」已经挪位。
   let openAnchorRect = null;
   // 发牌期间钉在旧位置的「+N」克隆；真身留在新位置占位但不显示。
@@ -391,8 +406,8 @@ export function createToolChips(host, options = {}) {
       const rect = freezePager();
       turn.collapsed = false;
       turn.expanded = true;
-      turn.prepareOpen(rect, api);
-      if (rect) pagerGhostTimer = setTimeout(() => releasePager(), dealDuration(revealed));
+      turn.prepareOpen(rect);
+      if (rect) pagerGhostTimer = setTimeout(() => releasePager(), dealDuration(dealMaxIndex + 1));
       turn.relayout();
       return;
     }
@@ -613,12 +628,59 @@ export function createToolChips(host, options = {}) {
     else delete fold.dataset.running;
   };
 
+  /** 发牌结束（或中途收起）：恢复裁剪，别让合拢动画也被"不裁"漏出去。 */
+  const endDeal = () => {
+    if (dealTimer) {
+      clearTimeout(dealTimer);
+      dealTimer = 0;
+    }
+    row.classList.remove("is-dealing");
+  };
+
+  /**
+   * 发牌期间先让行不裁（.is-dealing），发完再合上裁剪：
+   * 后几组的牌要从折叠条飞回自己那一格，途中会越过上面的正文——裁着就只看得见
+   * 落地那一下，等于没发。时长按本组最后一枚的排队号算，晚落的牌不会被切掉半边。
+   */
+  const startDeal = () => {
+    if (reduceMotion()) return;
+    endDeal();
+    row.classList.add("is-dealing");
+    dealTimer = setTimeout(() => {
+      dealTimer = 0;
+      row.classList.remove("is-dealing");
+    }, dealDuration(dealMaxIndex + 1));
+  };
+
+  /**
+   * 「涌出」铺开：点开那一刻这一页块从点击处飞回自己这一格
+   * （位移实量进 --dx/--dy，排队号在 prepareOpen 里按整轮顺序写好）。
+   * 2026-11-25 用户口径：一轮的牌按顺序发完——以前只有首组有锚点，
+   * 后几组直接铺开、闪出来；现在每组都从同一个锚点飞出去。
+   */
+  const playDeal = () => {
+    const anchor = openAnchorRect;
+    if (!anchor) return;
+    openAnchorRect = null;
+    line.classList.remove("expand-in");
+    void line.offsetWidth; // 重置动画：再开再播
+    for (const chip of chips.slice(0, Math.min(revealed, chips.length))) {
+      const rect = chip.getBoundingClientRect();
+      chip.style.setProperty("--dx", `${anchor.left - rect.left}px`);
+      chip.style.setProperty("--dy", `${anchor.top - rect.top}px`);
+    }
+    startDeal();
+    line.classList.add("expand-in");
+  };
+
   /** 收起/展开时给整条块行做高度过渡；行数会变，只能量真实高度（max-height 猜不准）。 */
   const animateRow = (mutate) => {
     const from = row.getBoundingClientRect().height;
     mutate();
     const to = row.getBoundingClientRect().height;
-    if (!from || Math.abs(to - from) < 1) return;
+    // from=0 也是真的变化：非首组收起时整条 wrap 是 hidden，展开那一下得从 0 长出来，
+    // 否则后几组连同下面的正文一起闪出来（2026-11-25 用户口径）。
+    if (Math.abs(to - from) < 1 || reduceMotion()) return;
     row.animate(
       [{ height: `${from}px` }, { height: `${to}px` }],
       { duration: 240, easing: "cubic-bezier(0, 0, .2, 1)" },
@@ -679,6 +741,7 @@ export function createToolChips(host, options = {}) {
       // 整轮所有组一起藏——不是只藏到"一行报数"。
       if (turn.collapsed) {
         cleanupPagerGhost();
+        endDeal();
         for (const chip of chips) {
           chip.hidden = true;
           // 清掉分页时写在块上的发牌动画，下次展开才能重新播。
@@ -709,17 +772,7 @@ export function createToolChips(host, options = {}) {
           pagerCount = 0;
           fold.hidden = !isMaster;
           syncFold(true);
-          if (opening && isMaster && openAnchorRect) {
-            line.classList.remove("expand-in");
-            void line.offsetWidth; // 重置动画：再开再播
-            for (const chip of chips) {
-              const rect = chip.getBoundingClientRect();
-              chip.style.setProperty("--dx", `${openAnchorRect.left - rect.left}px`);
-              chip.style.setProperty("--dy", `${openAnchorRect.top - rect.top}px`);
-            }
-            openAnchorRect = null;
-            line.classList.add("expand-in");
-          }
+          if (opening) playDeal();
           return;
         }
         // revealed 还是 0 说明开关是这一帧才打开的（之前走的是全铺旧形态）：
@@ -732,23 +785,9 @@ export function createToolChips(host, options = {}) {
         setPagerCount(remaining);
         fold.hidden = !isMaster;
         syncFold(true);
-        // 「涌出」铺开：点开那一刻这一页块从点击处飞回自己这一格
-        //（位移实量进 --dx/--dy，排队号 --i 在 push 时已写好）。
+        // 「涌出」铺开：点开那一刻这一页块从点击处飞回自己这一格。
         // 只在从收起态打开这一刻播一次；已摊开的组里新进的块不跟着重播。
-        // 一轮只有首组有锚点（折叠条的位置）；其余组直接铺开，由高度过渡接手。
-        if (opening && isMaster && openAnchorRect) {
-          line.classList.remove("expand-in");
-          void line.offsetWidth; // 重置动画：再开再播
-          // 坐标在点开那一刻就量好了（openAnchorRect）：布局一改，折叠条/「+N」就挪位了。
-          const anchor = openAnchorRect;
-          openAnchorRect = null;
-          for (const chip of chips.slice(0, revealed)) {
-            const rect = chip.getBoundingClientRect();
-            chip.style.setProperty("--dx", `${anchor.left - rect.left}px`);
-            chip.style.setProperty("--dy", `${anchor.top - rect.top}px`);
-          }
-          line.classList.add("expand-in");
-        }
+        if (opening) playDeal();
         return;
       }
       // 跑动中的默认形态（2026-11-21 用户口径：每次思考过程都看得到干到第几步，
@@ -897,10 +936,22 @@ export function createToolChips(host, options = {}) {
     hasRunning: () => chips.some((chip) => chip.dataset.state === "run"),
     queueLayout,
     syncFold,
-    /** 展开前的一次性准备：分页回到第一页；有锚点就记下来（「涌出」从那里发起）。 */
-    prepareOpen(rect = null) {
+    /**
+     * 展开前的一次性准备：分页回到第一页；记下锚点（「涌出」从那里发起）；
+     * 把这一页的排队号写成**整轮连号**（`startIndex` 是前面几组已经发掉的枚数），
+     * 这样后几组的牌接着首组一枚枚发，不会同时涌出来。返回下一组的起始号。
+     */
+    prepareOpen(rect = null, startIndex = 0) {
       revealed = chipPagingEnabled ? nextRevealCount(0, chips.length) : chips.length;
       if (rect) openAnchorRect = rect;
+      const shown = Math.min(revealed, chips.length);
+      dealMaxIndex = 0;
+      for (let index = 0; index < shown; index += 1) {
+        const order = Math.min(startIndex + index, 24);
+        chips[index].style.setProperty("--i", String(order));
+        if (order > dealMaxIndex) dealMaxIndex = order;
+      }
+      return startIndex + shown;
     },
     closeDetail,
     seal,
@@ -1048,7 +1099,7 @@ export function createToolChips(host, options = {}) {
       const rect = fold.getBoundingClientRect();
       turn.collapsed = false;
       turn.expanded = true;
-      turn.prepareOpen(rect, api);
+      turn.prepareOpen(rect);
     } else {
       turn.closeDetails();
       turn.collapsed = true;
