@@ -54,8 +54,10 @@ import {
 import { workSummaryFor } from "./work-record.ts";
 import { findSkillInDir, resolveSkillsDir } from "./skills.ts";
 import { getSkillState, skillStateEnabled } from "./skill-state.ts";
-import { runPartnerTurn, openPartnerConversation } from "./partner-runtime.ts";
+import { runPartnerTurn, openPartnerConversation, partnerGreetingEnabled } from "./partner-runtime.ts";
 import { routineEngine } from "./routines.ts";
+// 目标模式（2026-11-25，默认关 GOAL_MODE）：状态行与用户动作的业务都在 goal-mode.ts，端点只做形状映射。
+import { applyGoalAction, goalModeEnabled, goalView, onGoalTextChanged } from "./goal-mode.ts";
 // triggers 校验上移到 routine-manage.ts：HTTP 端点与 routine_manage 工具共用一份。
 import { validateTriggers } from "./routine-manage.ts";
 import { validateModelChain, type ModelChainItem } from "./model-chain.ts";
@@ -74,7 +76,8 @@ import { chatIndexEntriesOf } from "./agent/session-index.ts";
 import { renameChat, readChatMeta } from "./agent/session-meta.ts";
 import { sideSessionsEnabled } from "./partner-session-role.ts";
 import { deletePartnerSession } from "./agent/partner-session-delete.ts";
-import { CTX, ChatOrigins } from "./agent/shared.ts";
+import { CTX, ChatOrigins, Chats } from "./agent/shared.ts";
+import { chatContextInspectEnabled } from "./context-inspect.ts";
 import { createPartnerSideSession } from "./partner-runtime-run-partner-turn.ts";
 import {
 	modelToolCatalog,
@@ -500,6 +503,8 @@ export function mountCompanions(app: Hono): void {
 			// 当前目标（2026-11-08 刀二 E4）：纯增量、不版本化、现取现用。
 			// **列表端点形状不变**（手机端只读列表，字段经 shared 暴露在刀三）。
 			currentGoal: partner.currentGoal,
+			// 目标状态（2026-11-25 目标模式）：开关关时整个字段不出现；有文本没推过 = null。列表端点不带。
+			...(goalModeEnabled() ? { goal: goalView(store().goals.get(partner.id)) } : {}),
 		});
 	});
 
@@ -972,6 +977,9 @@ export function mountCompanions(app: Hono): void {
 		// 当前目标（刀二 E4）：一条 UPDATE，不碰身份版本。省略就完全不写。
 		if (currentGoal !== undefined) {
 			refreshed = store().setCurrentGoal(id, currentGoal) ?? refreshed;
+			// 目标状态行（2026-11-25 目标模式）：新设正文 = 建一行 paused/not_started 或清零连击；
+			// 清除 = 状态行已在上一步同一事务里删掉。开关关 = 不建行。
+			onGoalTextChanged(id, refreshed.currentGoal ?? null);
 		}
 
 		// 口头禅（2026-11-12）：一条 UPDATE，不碰身份版本。省略就完全不写。
@@ -994,6 +1002,8 @@ export function mountCompanions(app: Hono): void {
 			partner: projection(refreshed),
 			// currentGoal 纯增量回显（不进列表投影）：PATCH 后能直接读回设成什么 / 是否清除。
 			currentGoal: refreshed.currentGoal,
+			// 目标状态（2026-11-25 目标模式）：与详情同一个形状；开关关时整个字段不出现。
+			...(goalModeEnabled() ? { goal: goalView(store().goals.get(id)) } : {}),
 			// tagline 已进 projection（列表与详情都带），这里回显一份，形状与 currentGoal 对齐。
 			tagline: refreshed.tagline,
 			// diary 同样已进 projection；单独回显一份，PATCH 后另一端不用再拉列表。
@@ -1002,6 +1012,28 @@ export function mountCompanions(app: Hono): void {
 			projectIds: refreshed.projectIds,
 			...(soulVersion !== null ? { soulVersion } : {}),
 		});
+	});
+
+	/**
+	 * 目标动作（2026-11-25 目标模式，`GOAL_MODE` 默认关）：start / pause / resume / clear / reopen。
+	 * 开关关 = 404（"功能不在"，与执事能力未启用同一个语义）。
+	 * 业务拒绝一律 400 带说明、状态一行不动（鉴权在 /api/v1 那一层，失败 403 空体）。
+	 */
+	app.post("/api/v1/partners/:id/goal", async (c) => {
+		if (!goalModeEnabled()) return c.json({ ok: false, error: "not_found" }, 404);
+		const id = c.req.param("id");
+		if (!store().get(id)) return c.json({ ok: false, error: "not_found" }, 404);
+		const body = (await c.req.json().catch(() => null)) as
+			| { action?: unknown; maxRounds?: unknown; tokenBudget?: unknown }
+			| null;
+		const result = applyGoalAction(id, {
+			action: body?.action,
+			maxRounds: body?.maxRounds,
+			tokenBudget: body?.tokenBudget,
+		});
+		if (!result.ok) return c.json({ error: "bad_request", message: result.message }, 400);
+		// 与详情 / PATCH 同一个六字段投影：不带 partnerId 与 updatedAt（后者兼作续跑任务的 token）
+		return c.json({ ok: true, goal: goalView(result.goal) });
 	});
 
 	app.post("/api/v1/partners/:id/soul/rollback", (c) => {
@@ -1112,6 +1144,47 @@ export function mountCompanions(app: Hono): void {
 				);
 		}
 		return c.json({ ok: false, error: "greeting_failed" }, 503);
+	});
+
+	/**
+	 * 开场问候那次请求在哪条隐藏会话里（2026-11-24）。
+	 *
+	 * 问候生成跑在 `task-greeting-<canonical内部id>-<attempt>`：
+	 * 侧栏与设置 → 上下文的会话下拉都不列 `task-`，所以那次请求（含系统提示词）
+	 * 在界面上本来无处可看。这里只回「那次请求的会话 id」，正文走已有的
+	 * context-inspect / requests 只读链路，不复制第二份记录。
+	 *
+	 * 无 canonical 会话 / 没生成过 → `conversationId: null`；同一 attempt 重试会复用同一会话，
+	 * 多 attempt 取最大（最后一次生成的那条）。只读：不建会话、不动 doc、不触发模型。
+	 * 回滚：`CHAT_CONTEXT_INSPECT=false` → 404（与上下文页同一行）。
+	 */
+	app.get("/api/v1/partners/:id/greeting", async (c) => {
+		if (!chatContextInspectEnabled()) return c.json({ error: "not_found" }, 404);
+		const id = c.req.param("id");
+		if (!partnersStore().get(id)) return c.json({ ok: false, error: "not_found" }, 404);
+
+		let conversationId: string | null = null;
+		const internalId = partnersStore().sessionIdOfPartner(id);
+		if (internalId !== null) {
+			const harness = await getHarness();
+			const byExternal = (await harness.snapshot(Chats, CTX))?.byExternal ?? {};
+			const prefix = `task-greeting-${internalId}-`;
+			let latest = 0;
+			for (const [key, internal] of Object.entries(byExternal)) {
+				if (!key.startsWith(prefix)) continue;
+				const attempt = Number(key.slice(prefix.length));
+				if (!Number.isInteger(attempt) || attempt <= latest) continue;
+				// 映射还在、会话行已被删（维护手术 / 回收残留）：跳过，别把死会话指给界面。
+				const chat = await harness
+					.conversation(Number(internal) as never, CTX)
+					.catch(() => null);
+				if (!chat) continue;
+				latest = attempt;
+				conversationId = key;
+			}
+		}
+		c.header("cache-control", "no-store");
+		return c.json({ ok: true, enabled: partnerGreetingEnabled(), conversationId });
 	});
 
 	/**

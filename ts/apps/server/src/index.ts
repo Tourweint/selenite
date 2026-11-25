@@ -111,7 +111,14 @@ import {
 import { pairPage } from "./pair-page.ts";
 import { mountPhoneWorker } from "./phone-worker.ts";
 import { mountProjects, projectsStore, resolveChatDir, seedDefaultWorkspace, type ChatDirPick } from "./projects.ts";
-import { chatProjectLabelEnabled, flagEnabled, loadFlagOverrides, mountFlags } from "./flags.ts";
+import {
+  chatProjectLabelEnabled,
+  flagCascadeEnabled,
+  flagEnabled,
+  flagsUiEnabled,
+  loadFlagOverrides,
+  mountFlags,
+} from "./flags.ts";
 import { toolUsageEnabled, toolUsageRows } from "./tool-usage.ts";
 // 全局工具池（2026-11-17 设置→工具页）：目录与摘要复用 partner-tools，避免另抄一份。
 import { modelToolCatalog, toolSummaryOf } from "./partner-tools.ts";
@@ -181,6 +188,8 @@ import { alignPartnerSideSession } from "./partner-runtime-run-partner-turn.ts";
 import { nextReminderAt, setReminderDeliverer } from "./reminder.ts";
 import { installScheduledRunHandler } from "./scheduled-run-handler.ts";
 import { routineEngine } from "./routines.ts";
+// 目标模式（2026-11-25，默认关 GOAL_MODE）：装配 sink、首页主对话轮末结算、Stop 即暂停。
+import { installGoalMode, pauseGoalOnStop, settleGoalForChat } from "./goal-mode.ts";
 import { watchAllEvents } from "./agent.ts";
 import { autonomyMode, autonomyObserver, observeCount24h } from "./autonomy.ts";
 import { mountApprovalApi } from "./approval-api.ts";
@@ -1249,6 +1258,15 @@ app.post("/api/v1/agent/policy", async (c) => {
   });
 });
 
+/**
+ * 前端声明式显隐注册表的总闸（2026-11-25）：`PLUGIN_SURFACE_HIDE=false|0|off` 算关，缺省开。
+ * 关着时前端不再按 `/agent/flags` 的 effectiveValue 收面（回到「关了照旧显示、点了才 404」）。
+ */
+function pluginSurfacesEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = (env.PLUGIN_SURFACE_HIDE ?? "").trim().toLowerCase();
+  return !(raw === "false" || raw === "0" || raw === "off");
+}
+
 /** policy 投影：档位 + 标签 + 能力开关（只读投影，不写 .data/policy.json）。 */
 function policyProjection() {
   return {
@@ -1262,6 +1280,11 @@ function policyProjection() {
     chatBranch: chatBranchEnabled(),
     // 会话工作归属标签（2026-11-18）：前端据此决定输入框左下角要不要显示只读项目/工作区。
     chatProjectLabel: chatProjectLabelEnabled(),
+    // 前置连开 / 父项连带关的总闸（2026-11-25）：前端据此决定画不画「打开这些前置」/「确认关闭」。
+    // AGENT_FLAGS_UI=false 时插件页整组不挂，这两个门也不该报 true（契约字段不能撒谎）。
+    flagCascade: flagsUiEnabled() && flagCascadeEnabled(),
+    // 界面显隐注册表总闸（2026-11-25）：前端据此决定收不收面。
+    pluginSurfaces: flagsUiEnabled() && pluginSurfacesEnabled(),
   };
 }
 
@@ -1818,6 +1841,10 @@ app.post("/api/v1/agent/chat", async (c) => {
     let streamEnd: FinishReason = "stop";
     // chatStream 在收尾时吐的内部用量事件，挂到 done.usage 上（2026-11-04 批次一）
     let turnUsage: TurnUsage | undefined;
+    // 目标模式（2026-11-25）轮末结算要的两个数：回复原文（看末行标记）与工具调用数。
+    // 开关关着时 settleGoalForChat 第一行就返回，这两个变量只是白累计，不影响输出。
+    const replyPieces: string[] = [];
+    let toolStarts = 0;
 
     await send({ type: "start", id, conversationId: chat.externalId });
 
@@ -1854,6 +1881,7 @@ app.post("/api/v1/agent/chat", async (c) => {
           streamEnd = "aborted";
           break;
         }
+        if (event.type === "tool" && event.status === "start") toolStarts += 1;
         if (
           event.type === "progress" ||
           event.type === "tool" ||
@@ -1876,6 +1904,7 @@ app.post("/api/v1/agent/chat", async (c) => {
         }
         if (event.type === "delta") {
           chars += event.text.length;
+          replyPieces.push(event.text);
           await send({ type: "delta", text: event.text });
           continue;
         }
@@ -1943,6 +1972,16 @@ app.post("/api/v1/agent/chat", async (c) => {
       ms: Date.now() - startedAt,
       chars,
     });
+
+    // 目标模式（2026-11-25）：这一轮真跑完了（stop）才结算；出错 / 被打断的那一轮不结算，
+    // 等下一次轮末。不 await——结算与排续跑不该拖住这条流的收尾。
+    if (streamEnd === "stop") {
+      void settleGoalForChat(chat, {
+        replyText: replyPieces.join(""),
+        toolCalls: toolStarts,
+        ...(turnUsage ? { usage: turnUsage } : {}),
+      });
+    }
     // 只记行数/字数/耗时 —— 日志里绝不出现对话内容。
     console.log(
       `[chat ${id}] stream=${streamEnd} chars=${chars} ms=${Date.now() - startedAt}`,
@@ -2492,6 +2531,8 @@ app.post("/api/v1/agent/chat/:conversationId/stop", async (c) => {
   const chat = await openChat(c.req.param("conversationId"));
   if (!chat) return c.json({ error: "unknown_conversation" }, 404);
 
+  // 目标模式（2026-11-25）：Stop 是人的明确意图，目标在推进就先暂停（reason=stopped），再停这一轮。
+  await pauseGoalOnStop(chat);
   await stopChat(chat);
   return c.json({ ok: true, conversationId: chat.externalId });
 });
@@ -3745,6 +3786,8 @@ serve({ fetch: app.fetch, port }, (info) => {
     });
   // 唤醒队列恢复（2026-11-15 送达兜底 §C）：读回上一次进程没送完的唤醒队列并重排。
   restoreWakeQueue();
+  // 目标模式（2026-11-25）：把轮末结算接进 runPartnerTurn。开关关着时 sink 第一行就返回。
+  installGoalMode();
   // 例行任务引擎（2026-11-05 批次B B3）：接全局事件口 + 结算遗留 running。
   // phase/tool 的全局口在 agent.ts，这里喂给引擎；delegation 口引擎自己订。
   if (COMPANIONS_ENABLED) {

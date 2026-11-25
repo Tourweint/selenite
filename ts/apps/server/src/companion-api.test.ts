@@ -1191,6 +1191,54 @@ test("GET /partners/:id/injection-preview：纪律跟随开关；在办 / 履历
 	assert.equal(missing.status, 404);
 });
 
+test("GET /partners/:id/greeting：定位开场问候的隐藏生成会话（取最大 attempt）", async () => {
+	const partner = store.create("问候执事");
+	const base = `/api/v1/partners/${partner.id}/greeting`;
+
+	// 还没建 canonical / 没生成过 → 只回形状与开关，不炸
+	const noneRes = await app.request(base);
+	assert.equal(noneRes.status, 200);
+	const none = (await noneRes.json()) as {
+		ok: boolean;
+		enabled: boolean;
+		conversationId: string | null;
+	};
+	assert.equal(none.ok, true);
+	assert.equal(none.enabled, true);
+	assert.equal(none.conversationId, null);
+
+	// 建 canonical + 两条问候生成会话（attempt 1 / 2）→ 端点取最大 attempt
+	const { openOrCreateChat } = await import("./agent.ts");
+	const { partnerCanonicalExternalId } = await import("./partner-runtime.ts");
+	const canonical = await openOrCreateChat(partnerCanonicalExternalId(partner.id));
+	store.linkSession({
+		partnerId: partner.id,
+		role: "canonical",
+		routeKey: "canonical",
+		sessionId: canonical.internalId,
+	});
+	await openOrCreateChat(`task-greeting-${canonical.internalId}-1`);
+	const latest = await openOrCreateChat(`task-greeting-${canonical.internalId}-2`);
+
+	// 陈旧映射（映射还在、会话行早没了）不能被当成最新一次
+	const { getHarness } = await import("./agent/lifecycle.ts");
+	const { Chats, CTX } = await import("./agent/shared.ts");
+	const harness = await getHarness();
+	await harness.commit(async (tx) => {
+		const chats = await tx.doc(Chats);
+		chats.byExternal[`task-greeting-${canonical.internalId}-9`] = 999_999;
+	}, CTX);
+
+	const foundRes = await app.request(base);
+	assert.equal(foundRes.status, 200);
+	const found = (await foundRes.json()) as { ok: boolean; conversationId: string | null };
+	assert.equal(found.ok, true);
+	assert.equal(found.conversationId, latest.externalId);
+
+	// 未知执事 → 404
+	assert.equal((await app.request("/api/v1/partners/no-such/greeting")).status, 404);
+});
+
 test("纪律覆盖端点：GET 默认 / PUT 覆盖 / 空节删除 / 红线拒绝 / DELETE 恢复", async () => {
 	const partner = store.create("纪律执事");
 	const base = `/api/v1/partners/${partner.id}/discipline`;

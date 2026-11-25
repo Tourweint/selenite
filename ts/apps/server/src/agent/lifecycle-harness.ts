@@ -45,6 +45,7 @@ import { noteRequestInjections } from "../context-inspect.ts";
 import { buildHarnessSettings, reliabilitySummary } from "../reliability.ts";
 import { ReminderTask } from "../reminder.ts";
 import { RoutineTask, routineEngine, routineSelfServiceEnabled } from "../routines.ts";
+import { GoalContinueTask } from "../goal-mode.ts";
 import { runIdentityKey } from "../run-key.ts";
 import { searchModule } from "../search.ts";
 import { makeSkillAdviceSaver, skillAdviceEnabled, skillAdvicePath } from "../skill-advice.ts";
@@ -1341,7 +1342,9 @@ async function openHarness(): Promise<Harness> {
 					},
 				}),
 			],
-			tasks: [ReminderTask, RoutineTask],
+			// 目标模式（2026-11-25）：续跑任务必须进这张表——不在表里的任务建得出来但"缺定义"，
+			// 排上了也不会醒（goal-mode-probe 实证）。
+			tasks: [ReminderTask, RoutineTask, GoalContinueTask],
 		})),
 	);
 

@@ -20,6 +20,7 @@ import { personaRefreshNeeded, personaSignature, renderPersonaFieldBlocks } from
 import { ROUTINE_QUIET_INSTRUCTION, assessRoutineOutputGuarded, routineQuietEnabled } from "./routine-quiet.ts";
 import { SCHEDULED_RUN_HEADER } from "./scheduled-run-context.ts";
 import { clearTurnToolErrors, clearUnattendedSkips, markRoutineTurn, takeTurnToolErrors, takeUnattendedSkips, unmarkRoutineTurn } from "./unattended.ts";
+import { stripGoalMarkers, type GoalUsage } from "./goal-settlement.ts";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { SettledSubmissionRecord } from "@earendil-works/pi-durable";
 import { randomUUID } from "node:crypto";
@@ -27,6 +28,28 @@ import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 const CTX = BACKGROUND_CONTEXT;
+
+/**
+ * 目标模式轮末结算的注入口（2026-11-25，默认关 `GOAL_MODE`）。
+ *
+ * goal-mode.ts 装配时把 settleGoalTurn 注进来；这里**不直接 import goal-mode**——
+ * 它反过来 import 本文件的 runPartnerTurn，两头静态引用成环。
+ * 没注入 / 开关关着 = 返回 false，下面的收尾一个字节都不动。
+ */
+export type GoalTurnSignal = {
+	partnerId: string;
+	conversationId: number;
+	/** 模型这一轮的回复原文（含末行标记） */
+	replyText: string;
+	toolCalls: number;
+	/** 这一轮是不是系统发起的续跑轮 */
+	isContinuation: boolean;
+	usage?: GoalUsage;
+};
+let goalTurnSink: ((signal: GoalTurnSignal) => Promise<boolean>) | null = null;
+export function setGoalTurnSink(sink: (signal: GoalTurnSignal) => Promise<boolean>): void {
+	goalTurnSink = sink;
+}
 
 export function partnerCanonicalExternalId(partnerId: string): string {
 	return `partner-${partnerId}`;
@@ -310,6 +333,11 @@ export interface PartnerTurnOptions {
 	 * （派活唤醒轮必有内容：接住汇报就是产出）。
 	 */
 	quiet?: boolean;
+	/**
+	 * 这一轮是目标模式的续跑轮（2026-11-25）：只有续跑轮的"零工具调用"才计入空转连击。
+	 * 提示词由调用方（goal-mode.ts）拼好放在 text 里，这里不另加。
+	 */
+	goalContinuation?: boolean;
 }
 
 export interface PartnerTurnResult {
@@ -330,6 +358,12 @@ export interface PartnerTurnResult {
 	skipped?: string[];
 	/** 失败原因（执事不存在 / 未启用 / 模型未配置等），大白话给调用方 */
 	error?: string;
+	/**
+	 * 本轮工具调用次数与用量（2026-11-25 目标模式）。只在目标模式开着时带：
+	 * 开关关 = 返回值形状与之前逐字节一致。
+	 */
+	toolCalls?: number;
+	usage?: GoalUsage;
 }
 
 export async function runPartnerTurn(
@@ -367,6 +401,34 @@ ${text}${quietEligible ? `\n\n${ROUTINE_QUIET_INSTRUCTION}` : ""}`
 		: text;
 
 	const pieces: string[] = [];
+	// 目标模式（2026-11-25）：工具调用数与用量从流里累计（候选链重试每次重置）。
+	const goalContinuation = opts.goalContinuation === true;
+	let toolCalls = 0;
+	let turnUsage: GoalUsage | undefined;
+	/**
+	 * 轮末收尾：先给目标结算（没注入 / 开关关 = false，原样返回）；
+	 * 目标模式开着时把工具数 / 用量带进返回值，并把末行标记从正文里剔掉。
+	 */
+	const finish = async (result: PartnerTurnResult, replyText: string): Promise<PartnerTurnResult> => {
+		const goalOn = goalTurnSink
+			? await goalTurnSink({
+					partnerId,
+					conversationId: chat.internalId,
+					replyText,
+					toolCalls,
+					isContinuation: goalContinuation,
+					...(turnUsage ? { usage: turnUsage } : {}),
+				})
+			: false;
+		return goalOn
+			? {
+					...result,
+					text: stripGoalMarkers(result.text),
+					toolCalls,
+					...(turnUsage ? { usage: turnUsage } : {}),
+				}
+			: result;
+	};
 	/** 本轮是否真的产出了模型正文（unanswered 的说明不算，别把错误当"安静"） */
 	let sawDelta = false;
 	// 无人值守标记（2026-11-10 批 13 §一）：例行轮不必依赖 AUTONOMY_ENABLED——
@@ -380,6 +442,8 @@ ${text}${quietEligible ? `\n\n${ROUTINE_QUIET_INSTRUCTION}` : ""}`
 		// 结算记录拿来看 unanswered 的 reason（候选链要不要切就看它）
 		const settled: { record: SettledSubmissionRecord | null } = { record: null };
 		const runOnce = async (): Promise<void> => {
+			toolCalls = 0;
+			turnUsage = undefined;
 			for await (const event of chatStream({
 				conversation: chat.conversation,
 				text: body,
@@ -392,6 +456,8 @@ ${text}${quietEligible ? `\n\n${ROUTINE_QUIET_INSTRUCTION}` : ""}`
 					pieces.push(event.text);
 					sawDelta = true;
 				} else if (event.type === "unanswered") pieces.push(event.message);
+				else if (event.type === "tool" && event.status === "start") toolCalls += 1;
+				else if (event.type === "usage") turnUsage = event.usage;
 			}
 		};
 		await runOnce();
@@ -465,16 +531,19 @@ ${text}${quietEligible ? `\n\n${ROUTINE_QUIET_INSTRUCTION}` : ""}`
 					`[routine] 兜底消息没写进去: ${error instanceof Error ? error.message : String(error)}`,
 				);
 			}
-			return { ok: true, text: note, skipped, toolErrors };
+			return await finish({ ok: true, text: note, skipped, toolErrors }, "");
 		}
-		return verdict.quiet
-			? { ok: true, text: verdict.text, quiet: true, skipped }
-			: {
-					ok: true,
-					text: verdict.text,
-					skipped,
-					...(toolErrors.length > 0 ? { toolErrors } : {}),
-				};
+		return await finish(
+			verdict.quiet
+				? { ok: true, text: verdict.text, quiet: true, skipped }
+				: {
+						ok: true,
+						text: verdict.text,
+						skipped,
+						...(toolErrors.length > 0 ? { toolErrors } : {}),
+					},
+			joined,
+		);
 	} catch (error) {
 		const detail = error instanceof Error ? error.message : String(error);
 		return {

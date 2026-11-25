@@ -18,10 +18,13 @@ import { DatabaseSync } from "node:sqlite";
 import { CHIEF_PARTNER_ID, CHIEF_PARTNER_NAME, DEFAULT_DB_PATH, DEFAULT_HOMES_ROOT, PARTNER_SLOT_LIMIT, partnerContractEnabled, partnerContractTemplate } from "./partner-contract.ts";
 import type { GroupMessageRow, GroupRow, ModelChainItemLike, PartnerRow, PartnerSessionLinkRow, PartnerStatus, RoutineDef, RoutineTrigger } from "./partner-types.ts";
 import { defaultSoul, toGroup, toGroupMessage, toLink, toPartner, toProjectIds, toRoutine } from "./partner-rows.ts";
+import { PartnerGoalStore } from "./partner-goal-store.ts";
 
 export class PartnersStore {
 	private readonly db: DatabaseSync;
 	readonly homesRoot: string;
+	/** 目标状态行（2026-11-25 目标模式）：一个执事最多一行；开关关时只是不读不写，表保留。 */
+	readonly goals: PartnerGoalStore;
 
 	constructor(
 		path: string = process.env.PARTNERS_DB_PATH?.trim() || DEFAULT_DB_PATH,
@@ -123,8 +126,22 @@ export class PartnersStore {
 				round_id    TEXT
 			);
 			CREATE INDEX IF NOT EXISTS idx_group_messages_group_seq ON group_messages (group_id, seq);
+			-- 目标模式（2026-11-25）：一个执事最多一行，只有状态；正文在 partners.current_goal。
+			-- updated_at 兼作续跑任务的 token（见 partner-goal-store.ts）。
+			CREATE TABLE IF NOT EXISTS partner_goals (
+				partner_id          TEXT PRIMARY KEY,
+				status              TEXT NOT NULL,
+				reason              TEXT NOT NULL,
+				rounds_used         INTEGER NOT NULL DEFAULT 0,
+				max_rounds          INTEGER NOT NULL,
+				token_budget        INTEGER,
+				tokens_used         INTEGER NOT NULL DEFAULT 0,
+				no_progress_streak  INTEGER NOT NULL DEFAULT 0,
+				updated_at          TEXT NOT NULL
+			);
 		`);
 		this.migrate();
+		this.goals = new PartnerGoalStore(this.db);
 	}
 
 	/** 旧库补列（批次D D2）：沿用 delegation-receipts.ts 的 PRAGMA + ALTER TABLE 惯例。 */
@@ -416,9 +433,18 @@ export class PartnersStore {
 	 */
 	setCurrentGoal(id: string, goal: string | null): PartnerRow | null {
 		if (!this.get(id)) return null;
-		this.db
-			.prepare("UPDATE partners SET current_goal = ?, updated_at = ? WHERE id = ?")
-			.run(goal, new Date().toISOString(), id);
+		// 清除目标（2026-11-25 目标模式）：正文与状态行同一个事务删掉，不留"有状态没正文"的半截。
+		this.db.exec("BEGIN");
+		try {
+			this.db
+				.prepare("UPDATE partners SET current_goal = ?, updated_at = ? WHERE id = ?")
+				.run(goal, new Date().toISOString(), id);
+			if (goal === null) this.goals.delete(id);
+			this.db.exec("COMMIT");
+		} catch (error) {
+			this.db.exec("ROLLBACK");
+			throw error;
+		}
 		return this.get(id);
 	}
 
