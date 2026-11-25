@@ -13,6 +13,7 @@ import { chevSvg } from "./icons.js";
 import { attr, esc } from "./markdown.js";
 import { request } from "./net.js";
 import { projectCardMarkup, wireProjectActions } from "./settings-projects.js";
+import { flagOn } from "./surfaces.js";
 import { toast } from "./ui-atoms.js";
 
 
@@ -233,14 +234,18 @@ function archiveChatRowMarkup(chat) {
   const meta = [turns ? `${turns} 轮` : "", stamp ? `${stampLabel} ${stamp}` : ""]
     .filter(Boolean)
     .join(" · ");
+  // 永久删除（2026-11-25）：CHAT_HARD_DELETE 关着时不渲染这颗垃圾桶；恢复按钮不受影响——回去的路必须留。
+  const deleteButton = flagOn("CHAT_HARD_DELETE")
+    ? `<button class="archive-act is-danger" type="button" data-archive-delete="${id}"
+              title="永久删除（不可恢复）" aria-label="永久删除会话">${ARCHIVE_ICON_TRASH}</button>`
+    : "";
   return `<div class="archive-row">
     <div class="archive-row-main">
       <div class="archive-row-title" title="${attr(title)}">${esc(title)}</div>
       <div class="archive-row-meta">${esc(meta)}</div>
     </div>
     <div class="archive-row-actions">
-      <button class="archive-act is-danger" type="button" data-archive-delete="${id}"
-              title="永久删除（不可恢复）" aria-label="永久删除会话">${ARCHIVE_ICON_TRASH}</button>
+      ${deleteButton}
       <button class="btn-primary is-quiet" type="button" data-archive-restore="${id}"
               title="恢复到列表">恢复</button>
     </div>

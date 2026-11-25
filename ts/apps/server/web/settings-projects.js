@@ -15,6 +15,7 @@ import { request } from "./net.js";
 import { refreshProjectPill, setModalHint } from "./project-modal.js";
 import { isResearchProject, toggleResearchProject } from "./research-tag.js";
 import { currentSettingsPage } from "./route.js";
+import { flagOn } from "./surfaces.js";
 import { closeModal, inShell, openModal, selectDirectory, toast } from "./ui-atoms.js";
 
 
@@ -365,7 +366,8 @@ function wireProjectActions(box) {
             action: "research",
           },
           { label: "重命名项目", action: "rename", separator: true },
-          { label: "合并到另一个项目", action: "merge" },
+          // 合并（2026-11-25）：PROJECT_MERGE 关着时这一项不进菜单（后端不接，摆出来只会点了报错）
+          ...(flagOn("PROJECT_MERGE") ? [{ label: "合并到另一个项目", action: "merge" }] : []),
           { label: "归档项目", action: "archive", danger: true },
         ],
         (action) => {
@@ -642,8 +644,11 @@ async function doProjectAction(id, action) {
  *  磁盘、历史任务、历史会话都不动；这个项目下新建的会话会一起归档。 */
 function confirmArchiveProject(id, name) {
   openModal("归档项目", (body) => {
+    // 「新建的会话会一起归档」只在 PROJECT_ARCHIVE_CHATS 开着时成立（2026-11-25）；
+    // 关着时删掉这半句，别写一句后端不会做的事。
+    const chatsNote = flagOn("PROJECT_ARCHIVE_CHATS") ? "这个项目下新建的会话会一起归档；" : "";
     body.innerHTML = `
-      <p class="modal-desc">归档「${esc(name)}」后，它会从项目列表和派活选择里收起。<b>磁盘上的目录和文件不动</b>；历史任务和会话都还在。这个项目下新建的会话会一起归档；更早的会话没有项目归属，仍留在列表里。之后可以在「归档」里恢复项目，会话要单独恢复。</p>
+      <p class="modal-desc">归档「${esc(name)}」后，它会从项目列表和派活选择里收起。<b>磁盘上的目录和文件不动</b>；历史任务和会话都还在。${chatsNote}更早的会话没有项目归属，仍留在列表里。之后可以在「归档」里恢复项目，会话要单独恢复。</p>
       <p class="modal-hint" id="proj-archive-hint"></p>
       <div class="modal-actions">
         <button class="ghost" type="button" data-modal-cancel>取消</button>

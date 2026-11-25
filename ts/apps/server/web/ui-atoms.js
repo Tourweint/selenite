@@ -17,14 +17,15 @@ import { currentRoute } from "./route.js";
  * 每次打开现拉：配置可能刚在设置页改过，也可能是另一台设备改的；不要缓存。 */
 
 let toastTimer = 0;
-function toast(text) {
+/** `ms` 可选：等模型这类要几秒的动作可以留久一点（默认 3.8s，保持旧调用方行为）。 */
+function toast(text, ms = 3800) {
   if (!el.toast) return;
   el.toast.textContent = text;
   el.toast.hidden = false;
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => {
     if (el.toast) el.toast.hidden = true;
-  }, 3800);
+  }, Math.max(0, Number(ms) || 3800));
 }
 
 /* ── composer 弹出层（2026-11-04，抄 cindy morph-popover）────────
@@ -313,13 +314,19 @@ function inShell() {
 let nativePopupsReadyFlag = false;
 let nativePopupsBroken = false;
 let nativePopupsCache = null;
+// 原生截图（2026-11-25）：同一次探测顺带读 nativeScreenshot；失败不粘性关，
+// 页面每次调用出错自己回退 getDisplayMedia。
+let nativeScreenshotReadyFlag = false;
 
 function shellNativePopups() {
   if (!inShell() || typeof window.mygo?.call !== "function") return Promise.resolve(false);
   if (!nativePopupsCache) {
     nativePopupsCache = window.mygo.call
       .call(window.mygo, "Shell.Capabilities")
-      .then((caps) => Boolean(caps && caps.nativePopups))
+      .then((caps) => {
+        nativeScreenshotReadyFlag = Boolean(caps && caps.nativeScreenshot);
+        return Boolean(caps && caps.nativePopups);
+      })
       .catch(() => false);
   }
   return nativePopupsCache;
@@ -338,6 +345,11 @@ function markNativePopupsBroken() {
 shellNativePopups().then((ok) => {
   nativePopupsReadyFlag = ok;
 });
+
+/** 壳的原生截图工具（Shell.CaptureSnapshot）可用：浏览器 / 老壳 / 开关关都是 false。 */
+function nativeScreenshotReady() {
+  return nativeScreenshotReadyFlag;
+}
 
 /** Shell.SelectDirectory 的返回值兼容：字符串 / {path} / JSON 字符串都能吃下 */
 function shellPathValue(value) {
@@ -377,4 +389,4 @@ async function selectDirectory() {
   }
 }
 
-export { MODAL_MS, POP_MS, closeModal, closePopover, inShell, markNativePopupsBroken, modalOnClose, modalOpen, modalReturnFocus, modalTimer, nativePopupsReady, noMotion, openConfirm, openModal, openPopover, popTimers, popoverOpen, selectDirectory, shellPathValue, showAlert, toast, toastTimer };
+export { MODAL_MS, POP_MS, closeModal, closePopover, inShell, markNativePopupsBroken, modalOnClose, modalOpen, modalReturnFocus, modalTimer, nativePopupsReady, nativeScreenshotReady, noMotion, openConfirm, openModal, openPopover, popTimers, popoverOpen, selectDirectory, shellPathValue, showAlert, toast, toastTimer };

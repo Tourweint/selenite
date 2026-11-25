@@ -11,12 +11,19 @@
  */
 
 import { attr, esc } from "./markdown.js";
+import {
+  pluginSettingsButtonMarkup,
+  pluginSettingsPanelMarkup,
+  pluginSettingsRegistered,
+  wirePluginSettings,
+} from "./plugin-settings.js";
 import { request } from "./net.js";
 import { mountSegmented, setSwitchChecked, switchMarkup, syncSegmented } from "./settings-atoms.js";
 // 2026-11-24 M4：工具异常处理是独立模块（拉 /tool-policy、画卡片与弹层）；本文件只留挂载点，
 // 外加总开关拨动后的即时刷新（不整页重画 flags）和浮层里的内嵌快捷面板。
 import { refreshToolPolicySection, renderInlinePolicyPanel, renderToolPolicySection } from "./settings-tool-policy.js";
 import { state } from "./state.js";
+import { applySurfaces } from "./surfaces.js";
 import { closeModal, openModal, toast } from "./ui-atoms.js";
 import { setChipPagingEnabled } from "./tool-chips.js";
 
@@ -44,6 +51,9 @@ async function loadFlagsSettings() {
       Array.isArray(data.flags) ? data.flags : [],
       Array.isArray(data.groups) ? data.groups : [],
     );
+    // 界面显隐注册表（2026-11-25）：renderFlagRows 刚把整份行写进 state.flagsCache，
+    // 这里就着同一份缓存把注册表重铺一次（不再发第二次请求）。
+    applySurfaces();
   } catch (error) {
     if (error.message === "forbidden") return;
     card.innerHTML = `<div class="card flag-empty"><p class="set-hint">读不到开关：${esc(String(error.message))}</p></div>`;
@@ -125,6 +135,25 @@ function flagByKey(key) {
   return flagDetailByKey.get(key) || null;
 }
 
+/* ── 级联层在不在（B1a 四端点，2026-11-25）──────────
+ * enable-plan / enable / disable-plan / disable 整组由 FLAG_CASCADE_ENABLE 控制，门关着是 404，
+ * 界面继续走原来那条 PUT。这里只缓存 Bool：null = 还没探测；policy 拉不到按在（true）处理，
+ * 端点 404 再把它钉成 false。缓存只作用于本次页面，不跨会话。 */
+let cascadeAvailable = null;
+
+async function ensureCascadeAvailable() {
+  if (cascadeAvailable !== null) return cascadeAvailable;
+  try {
+    const response = await request("/api/v1/agent/policy", { cache: "no-store" });
+    const data = response.ok ? await response.json().catch(() => ({})) : {};
+    cascadeAvailable = data.flagCascade !== false;
+  } catch {
+    // 拉不到（离线 / 令牌被拒）就按「在」处理，真不在时端点自己会 404。
+    cascadeAvailable = true;
+  }
+  return cascadeAvailable;
+}
+
 /** 把值翻成人话：布尔只有开 / 关，多档用服务端清单里的 choices。 */
 function flagValueText(flag, value) {
   const choices = Array.isArray(flag?.choices) ? flag.choices : [];
@@ -140,15 +169,15 @@ function flagParentLabel(key) {
   return row?.label || key;
 }
 
-/** 卡片徽标只标「例外」：默认关、待重启、已改、随总闸关闭。默认开是多数派，页首已写总数。
+/** 徽标只标「例外」：系统核心、待重启、已改。状态（开 / 关 / 被父关 / 常开）另有一枚，见 flagStatusMarkup；
+ *  默认开 / 默认关写在卡面元信息行里，不再另挂徽标（2026-11-25 卡片 v2）。
  *  「待重启」只在 hot:false 的改动还没被进程装载时出现（服务端 pendingRestart）；重启后自动消失，
  *  不再像旧版那样对所有 hot:false 开关常驻「需重启」——那个字与"这次是否生效"无关。
  *  「已改」只跟本次打开页面时读到的值比：它表示"这次进来动过它"，不是"它跟出厂默认不同"。
  *  后者刷新 / 重启后还在就变成永久标签（2026-11-24 用户口径：每次刷新重启都要回到没改过的样子）；
- *  与出厂默认的差异在详情弹层的「当前 / 默认」两行里看。 */
+ *  与出厂默认的差异在元信息行的「默认」与详情弹层里看。 */
 function flagTags(flag) {
   const tags = [];
-  const locked = Boolean(flag.lockedBy);
   // 2026-11-16 用户拍板「一套展示、两层存储」：core 仍可拨，但明确标成系统核心，
   // 不跟普通插件混成一类；加载逻辑不拆，仍是同一份 GET /agent/flags。
   if (flag.scope === "core") {
@@ -156,40 +185,196 @@ function flagTags(flag) {
       '<span class="flag-tag core" data-tip="系统核心：服务端环境配置是缺省；这里改的值会保存，重启后仍保持。">系统核心</span>',
     );
   }
-  if (flag.defaultValue === "false") tags.push(`<span class="flag-tag">默认${esc(flagValueText(flag, flag.defaultValue))}</span>`);
   if (flag.pendingRestart) tags.push('<span class="flag-tag warn">待重启</span>');
-  if (locked) tags.push(`<span class="flag-tag warn" data-tip="「${attr(flag.lockedByLabel || flagParentLabel(flag.lockedBy))}」关闭时，这项显示关、拨不动；它自己的存储值保留，总闸重开后恢复。">随总闸关闭</span>`);
-  else if (flagBaseline.has(flag.key) && String(flag.value) !== flagBaseline.get(flag.key)) tags.push('<span class="flag-tag accent">已改</span>');
-  return tags.length ? `<span class="flag-tags">${tags.join("")}</span>` : "";
+  if (!flag.lockedBy && flagBaseline.has(flag.key) && String(flag.value) !== flagBaseline.get(flag.key)) tags.push('<span class="flag-tag accent">已改</span>');
+  return tags.join("");
 }
 
-/** 拨完开关就地更新这张卡（以及打开着的同键弹层）的徽标：值已写进 state.flagsCache，
+const FLAG_LOCK_TIP = "「{name}」关闭时，这项显示关、拨不动；它自己的存储值保留，总闸重开后恢复。";
+
+/** 数字型开关（如目标续跑轮数）：服务端 type === "number" 且没有档位表。它没有「开 / 关」，
+ *  值是一个整数；别让它落进布尔兜底（2026-11-25 返工：之前徽标按「不是关」显示开、拨杆按 !== "true" 显示关）。 */
+function isNumberFlag(flag) {
+  return String(flag?.type || "") === "number" && !(Array.isArray(flag?.choices) && flag.choices.length);
+}
+
+/** 状态徽标（2026-11-25 卡片 v2）：开 / 关 / 被父关 / 常开。锁态看服务端 lockedBy，不自己推。
+ *  数字型没有开关态，徽标写「数字」。 */
+function flagStatusMarkup(flag) {
+  if (flag.alwaysOn) return '<span class="flag-tag is-status always">常开</span>';
+  if (flag.lockedBy) {
+    const name = flag.lockedByLabel || flagParentLabel(flag.lockedBy);
+    return `<span class="flag-tag is-status locked" data-tip="${attr(FLAG_LOCK_TIP.replace("{name}", name))}">被父关</span>`;
+  }
+  if (isNumberFlag(flag)) return '<span class="flag-tag is-status number">数字</span>';
+  return flagIsOff(flag, String(flag.effectiveValue ?? flag.value ?? ""))
+    ? '<span class="flag-tag is-status off">关</span>'
+    : '<span class="flag-tag is-status on">开</span>';
+}
+
+/** 状态 + 例外徽标，包在一个固定容器里（data-flag-badges）：拨完开关只换容器内容，不动头部结构。 */
+function flagBadges(flag) {
+  const inner = flagStatusMarkup(flag) + flagTags(flag);
+  return `<span class="flag-tags${inner ? "" : " is-empty"}" data-flag-badges="${attr(flag.key)}">${inner}</span>`;
+}
+
+/** 拨完开关就地更新这张卡（以及打开着的同键弹层）的徽标与「当前」值：值已写进 state.flagsCache，
  *  不整页重画，卡片墙的滚动位置不动。 */
 function paintFlagTags(key) {
   const flag = flagByKey(key);
   if (!flag) return;
-  for (const main of document.querySelectorAll(`[data-flag-detail="${key}"]`)) {
-    const head = main.querySelector(".flag-item-head");
-    if (!head) continue;
-    head.querySelector(".flag-tags")?.remove();
-    const tags = flagTags(flag);
-    if (tags) head.querySelector(".flag-item-name")?.insertAdjacentHTML("afterend", tags);
+  for (const box of document.querySelectorAll(`[data-flag-badges="${key}"]`)) {
+    box.innerHTML = flagStatusMarkup(flag) + flagTags(flag);
+    box.classList.remove("is-empty");
   }
-  // 弹层按 data-flag-current 认键，避免把别的开关的徽标盖到当前弹层上。
-  const detail = document.querySelector(`[data-flag-current="${key}"]`)?.closest(".flag-detail");
-  if (!detail) return;
-  const box = detail.querySelector(".flag-detail-tags");
-  const tags = flagTags(flag);
-  if (!tags) box?.remove();
-  else if (box) box.innerHTML = tags;
-  else detail.querySelector(".flag-detail-summary")?.insertAdjacentHTML("beforebegin", `<div class="flag-detail-tags">${tags}</div>`);
+  for (const node of document.querySelectorAll(`[data-flag-current="${key}"]`)) {
+    node.textContent = flagCurrentText(flag);
+  }
+  // 卡面元信息行里的「当前」「存储」跟着改（后面的「无依赖 / 无额外设置」灰字不动）。
+  for (const node of document.querySelectorAll(`[data-flag-meta-text="${key}"]`)) {
+    node.textContent = flagMetaText(flag);
+  }
 }
 
-/** 卡面简介：取 summary 的第一句。放不下两行就整句不显示（见 hideClippedBriefs），
- *  完整说明一律在点开的弹层里，卡面不再挂长悬停提示。 */
-function flagBrief(summary) {
-  const first = String(summary || "").split("。")[0].trim();
-  return first;
+/** 类型：数字型 / 多档（清单给了 choices）/ 布尔。以服务端 type + choices 为准。 */
+function flagTypeText(flag) {
+  if (String(flag.type || "") === "number") return "数字";
+  return Array.isArray(flag.choices) && flag.choices.length ? "档位" : "布尔";
+}
+
+/** 「当前」值的人话。被父关时显示关档的名字（多档的关档标签可能是「关」以外的字），不露 "false"。 */
+function flagCurrentText(flag) {
+  if (flag.alwaysOn) return "常开";
+  if (flag.lockedBy) return flagOffChoice(flag)?.label || "关";
+  if (isNumberFlag(flag)) {
+    // 数字不走布尔口径：显示数值本身；没设过就显示默认值。
+    return String(flag.effectiveValue ?? flag.value ?? "") || String(flag.defaultValue ?? "") || "未设";
+  }
+  return flagValueText(flag, String(flag.effectiveValue ?? flag.value ?? ""));
+}
+
+/** 存储那一格：面板写过（agent-flags.json 覆盖）/ 来自环境变量 / 出厂默认。
+ *  只用接口现有字段推：overridden = 覆盖文件里有这个键；没覆盖但值 ≠ 默认 = env 里配了。 */
+function flagStorageText(flag) {
+  if (flag.overridden) return "面板覆盖";
+  if (String(flag.value ?? "") !== String(flag.defaultValue ?? "")) return "env";
+  return "默认";
+}
+
+/** 卡面元信息（2026-11-25 卡片 v2，压成一行、放不下自然折行）：
+ *  类型 · 当前 X · 默认 Y · 生效：即时/重启后 · 存储；无依赖 / 无额外设置接在这一行末尾（灰字）。 */
+function flagMetaText(flag) {
+  const parts = [
+    flagTypeText(flag),
+    `当前 ${flagCurrentText(flag)}${flag.lockedBy ? `（被 ${flag.lockedByLabel || flagParentLabel(flag.lockedBy)} 关）` : ""}`,
+    `默认 ${flag.alwaysOn ? "常开" : flagValueText(flag, flag.defaultValue)}`,
+    `生效：${flag.alwaysOn ? "始终" : flag.hot ? "即时" : "重启后"}`,
+    `存储：${flagStorageText(flag)}`,
+  ];
+  return parts.join(" · ");
+}
+
+/* ── 依赖 chips（2026-11-25 卡片 v2）──────────────────────────
+ * 「前置」= 自己的 requires；「被依赖」= requires 里带自己的那些插件（renderFlagRows 现算）。
+ * 名字与开 / 关从 state.flagsCache 取；不认识的 key 原样显示 key、不能点。
+ * 圆点三态：开（--ok）/ 关（灰）/ 被锁（--warn）；锁住自己的那个父插件整枚 chip 用警示色。 */
+const FLAG_CHIP_STATE_TEXT = { on: "开", off: "关", locked: "被锁", unknown: "?" };
+
+function flagChipState(key) {
+  const row = flagByKey(key);
+  if (!row) return "unknown";
+  if (row.lockedBy) return "locked";
+  return flagIsOff(row, String(row.effectiveValue ?? row.value ?? "")) ? "off" : "on";
+}
+
+function flagChipMarkup(key, kind, locker) {
+  const row = flagByKey(key);
+  const chipState = flagChipState(key);
+  const name = row?.label || key;
+  const onPage = Boolean(row) && row.surface !== "settings" && !row.alwaysOn;
+  const classes = `flag-chip is-${chipState} ${kind === "child" ? "is-child" : "is-parent"}${locker ? " is-locker" : ""}`;
+  const body = `<i class="flag-chip-dot" aria-hidden="true"></i>${esc(name)}<span class="flag-chip-state">${FLAG_CHIP_STATE_TEXT[chipState]}</span>`;
+  if (!onPage) return `<span class="${classes} is-static">${body}</span>`;
+  return `<button type="button" class="${classes}" data-flag-jump="${attr(key)}" title="点到这张卡">${body}</button>`;
+}
+
+function flagDepsMarkup(flag, children) {
+  if (flag.alwaysOn) return "";
+  const parents = Array.isArray(flag.requires) ? flag.requires : [];
+  const groups = [];
+  if (parents.length) {
+    groups.push(
+      `<span class="flag-deps-group"><span class="flag-deps-label">前置</span>${parents.map((key) => flagChipMarkup(key, "parent", key === flag.lockedBy)).join("")}</span>`,
+    );
+  }
+  if (children.length) {
+    groups.push(
+      `<span class="flag-deps-group"><span class="flag-deps-label">被依赖</span>${children.map((key) => flagChipMarkup(key, "child", false)).join("")}</span>`,
+    );
+  }
+  return groups.length ? `<div class="flag-deps">${groups.join("")}</div>` : "";
+}
+
+/** 点 chip：滚到对应卡并闪一下边。目标被搜索过滤掉时先清空搜索再滚（不清就滚不到一张看不见的卡）。 */
+function jumpToFlag(key) {
+  const card = document.getElementById("flags-card");
+  if (!card) return;
+  const target = card.querySelector(`[data-flag-detail="${key}"]`)?.closest(".flag-item");
+  if (!target) return;
+  const section = target.closest("section.flag-section");
+  if (target.hidden || section?.hidden) {
+    flagQuery = "";
+    const search = card.querySelector("#flags-search");
+    if (search) search.value = "";
+    applyFlagFilter(card);
+  }
+  target.scrollIntoView?.({ block: "center", behavior: "smooth" });
+  target.classList.add("is-flash-hit");
+  window.setTimeout(() => {
+    if (target.isConnected) target.classList.remove("is-flash-hit");
+  }, 1800);
+}
+
+function wireFlagChips(card) {
+  if (card.dataset.flagJumpWired === "1") return;
+  card.dataset.flagJumpWired = "1";
+  card.addEventListener("click", (event) => {
+    const chip = event.target instanceof Element ? event.target.closest("[data-flag-jump]") : null;
+    if (chip && card.contains(chip)) jumpToFlag(chip.dataset.flagJump || "");
+  });
+}
+
+/** 一张卡（2026-11-25 卡片 v2，V2 布局）：头部（名 + KEY + 组 + 状态徽标）+ 完整说明 + 元信息一行
+ *  + 依赖 chips + 卡尾控件 / 「设置」按钮；卡体可点开详情弹层。
+ *  说明不再截断、卡片不定高；同排卡片顶部对齐（.flag-grid 的 align-items:start），不强制等高。 */
+function flagCardMarkup(flag, groupTitle, children) {
+  const label = flag.label || flag.key;
+  const locked = Boolean(flag.lockedBy);
+  const alwaysOn = Boolean(flag.alwaysOn);
+  // 卡内设置（2026-11-25）：登记在 plugin-settings.js 的插件才有「设置」按钮，放在卡尾最左。
+  const settingsButton = alwaysOn ? "" : pluginSettingsButtonMarkup(flag.key);
+  const notes = [];
+  // 常开卡没有开关、也没有依赖图节点：两句话都不写。
+  if (!alwaysOn) {
+    if (!flag.requires?.length && !children.length) notes.push("无依赖");
+    if (!pluginSettingsRegistered(flag.key)) notes.push("无额外设置");
+  }
+  return `<div class="card flag-item${locked ? " is-locked" : ""}${flag.scope === "core" ? " is-core" : ""}${alwaysOn ? " is-always" : ""}${settingsButton ? " has-settings" : ""}">
+    <button class="flag-item-main" type="button" data-flag-detail="${attr(flag.key)}" aria-haspopup="dialog" aria-label="查看「${attr(label)}」说明">
+      <span class="flag-item-head">
+        <span class="flag-item-name">${esc(label)}</span>
+        <span class="flag-item-key">${esc(flag.key)}</span>
+        <span class="flag-item-group">${esc(groupTitle)}</span>
+        ${flagBadges(flag)}
+        <span class="flag-item-more" aria-hidden="true">›</span>
+      </span>
+      <span class="flag-item-brief">${esc(flag.summary || "")}</span>
+      <span class="flag-item-meta" data-flag-meta="${attr(flag.key)}"><span data-flag-meta-text="${attr(flag.key)}">${esc(flagMetaText(flag))}</span>${notes.map((note) => `<span class="flag-meta-note">${esc(note)}</span>`).join("")}</span>
+    </button>
+    ${flagDepsMarkup(flag, children)}
+    <div class="flag-item-foot">${settingsButton}${alwaysOn ? '<span class="flag-always">常开 · 无开关</span>' : flagControlMarkup(flag)}</div>
+    ${settingsButton ? pluginSettingsPanelMarkup(flag.key) : ""}
+  </div>`;
 }
 
 /** 一张卡的控件（2026-11-18 四版）：开关固定在右下角，档位往左放。
@@ -197,10 +382,25 @@ function flagBrief(summary) {
  *  - 多档且清单给了 offValue = 档位（开态选项）在左 + 拨杆在右；
  *  - 多档只有一档开态（内部质检）= 当前档位文字在左 + 拨杆在右；
  *  - 旧清单没有 offValue 的多档（不该再有）= 退回纯分段选择器，不造开关。 */
+/** 数字型控件：一个数字输入框 + 灰字默认值。回车或失焦提交（change 事件），留空 = 回到默认。
+ *  上下界：接口现在不下发 min / max（listFlags 的返回里没有），所以 min 取 1、max 取 999999；
+ *  哪天接口带了这两个字段，这里自动用上，不用再改。真正的上下界由服务端校验，越界时它的报错原样弹 toast。
+ *  被父关时显示它自己存的值（接口这时 effectiveValue 是 "false"），禁用。 */
+function numberControlMarkup(flag, locked) {
+  const label = flag.label || flag.key;
+  const shown = String((locked ? flag.value : flag.effectiveValue) ?? flag.value ?? "") || String(flag.defaultValue ?? "");
+  return `<div class="flag-number-control">
+    <input type="number" class="set-input flag-number-input" step="1" min="${Number(flag.min ?? 1)}" max="${Number(flag.max ?? 999999)}" inputmode="numeric"
+      value="${attr(shown)}" data-flag-number="${attr(flag.key)}" aria-label="${attr(label)}"${locked ? " disabled" : ""} />
+    <span class="flag-number-default">默认 ${esc(flagValueText(flag, flag.defaultValue))}</span>
+  </div>`;
+}
+
 function flagControlMarkup(flag) {
   const label = flag.label || flag.key;
   const effective = String(flag.effectiveValue ?? flag.value ?? "");
   const choices = Array.isArray(flag.choices) ? flag.choices : [];
+  if (isNumberFlag(flag)) return numberControlMarkup(flag, Boolean(flag.lockedBy));
   if (flag.lockedBy) {
     return switchMarkup(false, {
       label,
@@ -233,67 +433,7 @@ function flagControlMarkup(flag) {
   });
 }
 
-/** 一张卡（2026-11-18 三版）：名字 + 徽标 + 能完整放下的简介 + 控件；卡体可点开详情弹层。
- *  长说明不再挂 data-tip（悬停黑块放不下完整解释），改为点卡看全文 + 元信息 + 同一套控件。 */
-function flagCardMarkup(flag) {
-  const label = flag.label || flag.key;
-  const locked = Boolean(flag.lockedBy);
-  const alwaysOn = Boolean(flag.alwaysOn);
-  const tags = alwaysOn
-    ? '<span class="flag-tags"><span class="flag-tag">常开</span></span>'
-    : flagTags(flag);
-  return `<div class="card flag-item${locked ? " is-locked" : ""}${flag.scope === "core" ? " is-core" : ""}${alwaysOn ? " is-always" : ""}">
-    <button class="flag-item-main" type="button" data-flag-detail="${attr(flag.key)}" aria-haspopup="dialog" aria-label="查看「${attr(label)}」说明">
-      <span class="flag-item-head">
-        <span class="flag-item-name">${esc(label)}</span>
-        ${tags}
-        <span class="flag-item-more" aria-hidden="true">›</span>
-      </span>
-      <span class="flag-item-brief">${esc(flagBrief(flag.summary))}</span>
-    </button>
-    <div class="flag-item-foot">${alwaysOn ? '<span class="flag-always">常开 · 无开关</span>' : flagControlMarkup(flag)}</div>
-  </div>`;
-}
-
-/** 「显示不全就不要显示」：简介按最终宽度量一次，超过两行就整句藏起来（详情在弹层里）。
- *  clamp 状态下 scrollHeight 不可靠，所以用同宽、去掉 clamp 的克隆量全文高度。
- *  窗口变宽 / 变窄后卡片列宽会变，用 ResizeObserver 重新量；藏起来用 class 而不是删除节点，
- *  否则宽回来时找不回原文。 */
-let briefObserver = null;
-function hideClippedBriefs(root) {
-  for (const node of root.querySelectorAll(".flag-item-brief")) {
-    const text = node.textContent.trim();
-    const wasClipped = node.classList.contains("is-clipped");
-    if (wasClipped) node.classList.remove("is-clipped");
-    if (!text) {
-      node.classList.add("is-clipped");
-      continue;
-    }
-    const width = node.clientWidth;
-    if (!width) continue;
-    const probe = node.cloneNode(true);
-    // 克隆必须把 min-height 也归零：原样式留了 39px 的占位高度，不归零时单行文字也会量成 39，
-    // 被误判成"两行放不下"整句删光（2026-11-18 实测）。
-    probe.style.cssText = `position:absolute;left:-9999px;top:0;visibility:hidden;pointer-events:none;display:block;width:${width}px;height:auto;min-height:0;overflow:visible;-webkit-line-clamp:unset;line-clamp:unset;`;
-    node.parentElement.appendChild(probe);
-    const fullHeight = probe.scrollHeight;
-    probe.remove();
-    const lineHeight = parseFloat(getComputedStyle(node).lineHeight) || 18;
-    // 两行以内完整显示；超一个字都不留（卡面只负责让你认出是哪张卡，解释在弹层里）。
-    node.classList.toggle("is-clipped", fullHeight > lineHeight * 2 + 1);
-  }
-}
-
-function watchBriefClipping(root) {
-  hideClippedBriefs(root);
-  if (typeof ResizeObserver !== "undefined") {
-    briefObserver?.disconnect();
-    briefObserver = new ResizeObserver(() => hideClippedBriefs(root));
-    briefObserver.observe(root);
-  }
-}
-
-/** 点卡弹层：全文 + 当前 / 默认 / 生效方式 / 总闸 + 同一套控件。
+/** 点卡弹层：全文 + 状态徽标 + 当前 / 默认 / 生效方式 / 前置 / 被依赖 + 同一套控件。
  *  纯档位插件（没有关档）在这里写明「没有单独开关、由谁控制」，不硬造一个假开关。 */
 function openFlagDetail(flag) {
   const alwaysOn = Boolean(flag.alwaysOn);
@@ -303,15 +443,20 @@ function openFlagDetail(flag) {
   const offChoice = flagOffChoice(flag);
   const onChoices = flagOnChoices(flag);
   const modeOnly = !alwaysOn && choices.length > 0 && !offChoice;
-  const effective = String(flag.effectiveValue ?? flag.value ?? "");
   const parents = Array.isArray(flag.requires) ? flag.requires : [];
   const parentText = parents.map((key) => flagParentLabel(key)).join("、");
+  // 被依赖：插件页上 requires 带自己的那些卡（会话页的 6 项不上插件页，不列）。
+  const childText = flagChildrenKeys(flag.key)
+    .map((key) => flagParentLabel(key))
+    .join("、");
   const rows = [
-    ["当前", alwaysOn ? "常开" : flagValueText(flag, effective)],
+    ["当前", flagCurrentText(flag)],
     ["默认", alwaysOn ? "常开" : flagValueText(flag, flag.defaultValue)],
     ["生效", alwaysOn ? "始终生效" : flag.hot ? "改完即时生效" : "重启服务后生效"],
+    ["存储", alwaysOn ? "不存储" : { 面板覆盖: "面板改过（agent-flags.json）", env: "环境变量", 默认: "出厂默认" }[flagStorageText(flag)]],
   ];
-  if (!alwaysOn && parents.length) rows.push(["总闸", parentText]);
+  if (!alwaysOn && parents.length) rows.push(["前置", parentText]);
+  if (!alwaysOn && childText) rows.push(["被依赖", childText]);
   let note = "";
   if (locked) {
     note = `当前由「${flag.lockedByLabel || flagParentLabel(flag.lockedBy)}」关闭：显示关、拨不动；它自己的存储值保留，总闸重开后恢复。`;
@@ -336,7 +481,7 @@ function openFlagDetail(flag) {
           : "开关 / 档位"
         : "档位"
       : "开关";
-  const detailTags = alwaysOn ? '<span class="flag-tag">常开</span>' : flagTags(flag);
+  const detailTags = flagBadges(flag);
   let modalBody = null;
   openModal(label, (body) => {
     modalBody = body;
@@ -350,8 +495,19 @@ function openFlagDetail(flag) {
       ${flag.key === "TOOL_TIMEOUT_POLICY" ? `<div class="flag-detail-tool-policy" data-tool-policy-inline></div>` : ""}
       ${note ? `<p class="flag-detail-note">${esc(note)}</p>` : ""}
     </div>
-    <div class="modal-actions"><button class="ghost" type="button" data-flag-close>关闭</button></div>`;
+    <div class="modal-actions">${
+      locked && cascadeAvailable !== false
+        ? '<button class="btn-primary" type="button" data-flag-enable-plan>打开这些前置</button>'
+        : ""
+    }<button class="ghost" type="button" data-flag-close>关闭</button></div>`;
     body.querySelector("[data-flag-close]")?.addEventListener("click", closeModal);
+    body.querySelector("[data-flag-enable-plan]")?.addEventListener("click", () => void openEnablePlan(flag.key));
+    // 还没探测过级联层：先按「在」把按钮画出来，policy 回话说关就当场摘掉。
+    if (locked && cascadeAvailable === null) {
+      void ensureCascadeAvailable().then((ok) => {
+        if (!ok) body.querySelector("[data-flag-enable-plan]")?.remove();
+      });
+    }
     if (!alwaysOn) wireFlagControls(body);
     // 工具异常处理：浮层里直接列出可调工具（同一个弹层入口；master 关时是一行提示）。
     const inlinePolicy = body.querySelector("[data-tool-policy-inline]");
@@ -362,6 +518,123 @@ function openFlagDetail(flag) {
   if ((modeOnly || locked || onChoices.length > 1) && modalBody) {
     modalBody.querySelector("[data-flag-close]")?.focus();
   }
+}
+
+/** 这次会写几项：missing 里真要写值的 + 目标自身（目标自己是关的也得写开）。 */
+function planWriteCount(plan) {
+  const missing = Array.isArray(plan?.missing) ? plan.missing : [];
+  return missing.filter((node) => node.willWrite).length + (plan?.target?.willWrite ? 1 : 0);
+}
+
+/** 前置那一行右半边：写不写值 + 要不要重启。 */
+function planNeedNote(node) {
+  const parts = [node.willWrite ? "将写值" : "只解锁，不改值"];
+  if (node.hot === false) parts.push("重启后生效");
+  return parts.join(" · ");
+}
+
+/** 待选档位的 <select>：默认落在第一个「不是关」的档（关档选了等于没开）。 */
+function planChoicesMarkup(need) {
+  const choices = Array.isArray(need?.choices) ? need.choices : [];
+  const flag = flagByKey(need.key);
+  const off = flag ? flagOffValue(flag) : null;
+  const usable = choices.filter((choice) => (off === null ? !isOffValue(choice.value) : String(choice.value) !== String(off)));
+  const pick = usable[0] || choices[0];
+  return choices
+    .map((choice) => `<option value="${attr(choice.value)}"${choice === pick ? " selected" : ""}>${esc(choice.label)}</option>`)
+    .join("");
+}
+
+/** 锁态卡「打开这些前置」：先读计划，再在弹层里列清单 + 选档位，确认后一次写齐。
+ *  openModal 只有一层（后开的直接换掉前一层），所以确认成功关一次就够了。 */
+async function openEnablePlan(key) {
+  if ((await ensureCascadeAvailable()) === false) return;
+  let plan = null;
+  try {
+    const response = await request(`/api/v1/agent/flags/${encodeURIComponent(key)}/enable-plan`, { cache: "no-store" });
+    if (response.status === 404) {
+      cascadeAvailable = false;
+      document.querySelector("[data-flag-enable-plan]")?.remove();
+      toast("前置连开未启用");
+      return;
+    }
+    if (!response.ok) {
+      toast(`读不到前置：HTTP ${response.status}`);
+      return;
+    }
+    plan = await response.json().catch(() => null);
+  } catch (error) {
+    if (error.message !== "forbidden") toast(`读不到前置：${error.message}`);
+    return;
+  }
+  if (!plan || typeof plan !== "object") {
+    toast("读不到前置");
+    return;
+  }
+  const missing = Array.isArray(plan.missing) ? plan.missing : [];
+  const revive = Array.isArray(plan.revive) ? plan.revive : [];
+  const needsValue = Array.isArray(plan.needsValue) ? plan.needsValue : [];
+  const writeCount = planWriteCount(plan);
+  if (!missing.length && !revive.length && !needsValue.length && !plan.target?.willWrite) {
+    toast("没有要打开的项");
+    return;
+  }
+  const confirmText = `打开 ${writeCount} 项${revive.length ? `，其中 ${revive.length} 项会连带恢复` : ""}`;
+  openModal("打开前置", (body) => {
+    body.innerHTML = `
+      <div class="flag-detail">
+        ${missing.length ? `<p class="modal-desc">需要打开</p>
+        <div class="flag-detail-meta">${missing.map((node) => `<div class="flag-detail-row"><span class="flag-detail-label">${esc(node.label)}</span><span class="flag-detail-value">${esc(planNeedNote(node))}</span></div>`).join("")}</div>` : ""}
+        ${revive.length ? `<p class="modal-desc">会一起恢复</p>
+        <div class="flag-detail-meta">${revive.map((node) => `<div class="flag-detail-row"><span class="flag-detail-label">${esc(node.label)}</span><span class="flag-detail-value">${esc(flagValueText(flagByKey(node.key), node.value))}</span></div>`).join("")}</div>` : ""}
+        ${needsValue.length ? `<p class="modal-desc">需要选档位</p>
+        <div class="flag-detail-meta">${needsValue.map((need) => `<div class="flag-detail-row"><span class="flag-detail-label">${esc(need.label)}</span><select class="modal-input" aria-label="${attr(need.label)}档位" data-plan-value="${attr(need.key)}">${planChoicesMarkup(need)}</select></div>`).join("")}</div>` : ""}
+      </div>
+      <div class="modal-actions">
+        <button class="ghost" type="button" data-plan-cancel>取消</button>
+        <button class="modal-primary" type="button" data-plan-confirm>${esc(confirmText)}</button>
+      </div>`;
+    body.querySelector("[data-plan-cancel]")?.addEventListener("click", closeModal);
+    const confirmBtn = body.querySelector("[data-plan-confirm]");
+    confirmBtn?.addEventListener("click", async () => {
+      const values = {};
+      for (const select of body.querySelectorAll("[data-plan-value]")) {
+        if (select instanceof HTMLSelectElement) values[select.dataset.planValue] = select.value;
+      }
+      confirmBtn.disabled = true;
+      try {
+        const response = await request(`/api/v1/agent/flags/${encodeURIComponent(key)}/enable`, {
+          method: "POST",
+          body: JSON.stringify({ confirm: true, values }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (response.status === 400 && data.error === "needs_value") {
+          toast("还有档位没选");
+          return;
+        }
+        if (response.status === 500 || data.error === "partial") {
+          closeModal();
+          await loadFlagsSettings();
+          applySurfaces();
+          toast(`写入中断，已保存 ${Array.isArray(data.changed) ? data.changed.length : 0} 项`);
+          return;
+        }
+        if (!response.ok) {
+          toast(data.message || `没打开：HTTP ${response.status}`);
+          return;
+        }
+        closeModal();
+        await loadFlagsSettings();
+        applySurfaces();
+        const openedCount = Array.isArray(data.changed) ? data.changed.length : writeCount;
+        toast(data.alreadyOn || !openedCount ? "这些已经是开的" : `已打开 ${openedCount} 项`);
+      } catch (error) {
+        if (error.message !== "forbidden") toast(`没打开：${error.message}`);
+      } finally {
+        confirmBtn.disabled = false;
+      }
+    });
+  });
 }
 
 /** 卡面 / 弹层共用的事件：拨杆、档位按钮；data-wired 防重复挂（父开关回读会整页重画）。 */
@@ -377,10 +650,10 @@ function wireFlagControls(root) {
       // 带关档的多档插件：开关只负责开 / 关，开时回到上次选过的档。
       if (offChoice) {
         const next = sw.getAttribute("aria-checked") === "true" ? offChoice.value : onChoiceValue(key, flag);
-        void toggleFlag(key, next, sw, null);
+        void changeFlag(key, next, sw, null);
         return;
       }
-      void toggleFlag(key, sw.getAttribute("aria-checked") !== "true", sw);
+      void changeFlag(key, sw.getAttribute("aria-checked") !== "true", sw);
     });
   }
   for (const seg of root.querySelectorAll("[data-flag-select]")) {
@@ -389,11 +662,58 @@ function wireFlagControls(root) {
       button.dataset.wired = "1";
       button.addEventListener("click", () => {
         if (button.disabled || button.getAttribute("aria-checked") === "true") return;
-        void toggleFlag(seg.dataset.flagSelect, button.dataset.value, null, seg);
+        void changeFlag(seg.dataset.flagSelect, button.dataset.value, null, seg);
       });
     }
     mountSegmented(seg);
   }
+  // 数字型（2026-11-25 返工）：change（回车 / 失焦 / 步进钮）提交；回车只是把焦点移走，真正提交仍走 change。
+  for (const input of root.querySelectorAll("[data-flag-number]")) {
+    if (input.dataset.wired === "1") continue;
+    input.dataset.wired = "1";
+    input.addEventListener("change", () => commitFlagNumber(input));
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        input.blur();
+      }
+    });
+  }
+}
+
+/** 提交数字型开关。非整数就地拦下（不提交）并把输入框回填成当前值；留空 = 回到默认（PUT 空串，服务端口径）。
+ *  越界这里只知道接口给的上下界（现在是 1–999999），真正的范围由服务端判：它回 400 时 toast 里是它给的说明，
+ *  toggleFlag 的收尾会把输入框回填成当前值。数字没有「关」的语义，所以直接走 toggleFlag，不进连带关闭那套。 */
+function commitFlagNumber(input) {
+  if (input.disabled) return;
+  const key = input.dataset.flagNumber;
+  const flag = flagByKey(key);
+  const row = state.flagsCache instanceof Map ? state.flagsCache.get(key) : null;
+  if (!flag || !row) return;
+  const current = String(row.effectiveValue ?? row.value ?? "") || String(row.defaultValue ?? "");
+  // type=number 的框里打进非数字时浏览器会把 value 清成空串，并置 badInput——那不是「留空回到默认」。
+  if (input.validity?.badInput) {
+    toast("请填一个整数");
+    input.value = current;
+    return;
+  }
+  const raw = String(input.value ?? "").trim();
+  if (raw === String(input.dataset.saved ?? current)) return;
+  if (raw === "") {
+    input.dataset.saved = "";
+    void toggleFlag(key, "", input, null);
+    return;
+  }
+  const parsed = Number(raw);
+  const min = Number(flag.min ?? 1);
+  const max = flag.max === undefined || flag.max === null ? null : Number(flag.max);
+  if (!Number.isInteger(parsed) || parsed < min || (max !== null && parsed > max)) {
+    toast(max !== null ? `请填 ${min}–${max} 的整数` : `请填不小于 ${min} 的整数`);
+    input.value = current;
+    return;
+  }
+  input.dataset.saved = String(parsed);
+  void toggleFlag(key, String(parsed), input, null);
 }
 
 /** 把同一个键的所有控件（卡面 + 打开着的弹层）同步到同一个值。
@@ -422,11 +742,19 @@ function applyFlagControlValue(key, value) {
   for (const node of document.querySelectorAll(`[data-flag-mode-current="${key}"]`)) {
     node.textContent = flag ? flagValueText(flag, String(value)) : String(value);
   }
+  // 数字输入框跟着同一个值走（父开关回读、提交失败后的回填）。正在输入的那一个不动，别把人打的字冲掉。
+  for (const input of document.querySelectorAll(`[data-flag-number="${key}"]`)) {
+    // 被父关时 value 位置的 effectiveValue 是 "false"，数字框要显示它自己存的那个数。
+    const shown = String(flag?.lockedBy ? flag.value : value ?? "") || String(flag?.defaultValue ?? "");
+    if (input !== document.activeElement) input.value = shown;
+    input.dataset.saved = shown;
+  }
   rememberOnChoice(key, value, flag);
 }
 
-/* ── 插件页搜索（2026-11-24）：输入即筛选，不持久化 ──────────
- * 匹配范围：flag 的标题 / 简介 / key / 所属组名（大小写不敏感，中文直接子串）。
+/* ── 插件页搜索（2026-11-24；2026-11-25 改显式 haystack）──────────
+ * 输入即筛选，不持久化。每张卡的检索串 = 名字 / key / 说明 / 组名 / 父 key 与父名 / 子 key 与子名，
+ * 渲染时一次算好（flagSearchIndex）；卡内设置面板里的链接文字、控件文字都不在里面。
  * 「工具与命令」组（settings-tool-policy.js 异步画）也参与：整组 textContent 现算，
  * 命中就整组显示（组标题一起），不命中整组连标题一起藏——与其它组同一套规则。
  * 查询串放模块里：flags 重画（父开关回读）后搜索框与筛选结果不丢。 */
@@ -434,8 +762,18 @@ let flagQuery = "";
 /** key → 小写检索串；每次 renderFlagRows 重建。 */
 let flagSearchIndex = new Map();
 
+/** 谁依赖这个 key（只算上插件页的卡；会话页那 6 项没有卡可跳，不算）。 */
+function flagChildrenKeys(key) {
+  if (!(state.flagsCache instanceof Map)) return [];
+  return [...state.flagsCache.values()]
+    .filter((row) => row && row.surface !== "settings" && Array.isArray(row.requires) && row.requires.includes(key))
+    .map((row) => row.key);
+}
+
 function flagSearchHaystack(flag, groupTitle) {
-  return [flag.label, flag.summary, flag.key, groupTitle]
+  const parents = Array.isArray(flag.requires) ? flag.requires : [];
+  const related = [...parents, ...flagChildrenKeys(flag.key)].map((key) => `${key} ${flagParentLabel(key)}`);
+  return [flag.label, flag.key, flag.summary, groupTitle, ...related]
     .filter((part) => typeof part === "string" && part)
     .join(" ")
     .toLowerCase();
@@ -489,14 +827,25 @@ function renderFlagRows(card, flags, groups) {
     for (const flag of visible) flagBaseline.set(flag.key, String(flag.value ?? ""));
   }
   const byKey = new Map(visible.map((flag) => [flag.key, flag]));
+  // 反向依赖（2026-11-25 卡片 v2）：key → 依赖它的那些插件，按清单顺序；只算上插件页的卡。
+  const childrenByKey = new Map();
+  for (const row of visible) {
+    for (const parent of Array.isArray(row.requires) ? row.requires : []) {
+      if (!childrenByKey.has(parent)) childrenByKey.set(parent, []);
+      childrenByKey.get(parent).push(row.key);
+    }
+  }
   // 点卡时按 key 找完整行：服务端开关走 state.flagsCache，常开卡只有这份静态表。
   flagDetailByKey = new Map([
     ...visible.map((flag) => [flag.key, flag]),
     ...ALWAYS_ON_PLUGINS.map((flag) => [flag.key, flag]),
   ]);
   for (const flag of visible) rememberOnChoice(flag.key, flag.effectiveValue ?? flag.value, flag);
-  const defaultOff = visible.filter((flag) => flag.defaultValue === "false").length;
-  const currentOff = visible.filter((flag) => (flag.effectiveValue ?? flag.value) === "false").length;
+  // 数字型（如目标续跑轮数）没有开 / 关：不进「N 个开关」和两处开 / 关计数，单列一句（2026-11-25 返工）。
+  const numeric = visible.filter((flag) => isNumberFlag(flag));
+  const counted = visible.filter((flag) => !isNumberFlag(flag));
+  const defaultOff = counted.filter((flag) => flag.defaultValue === "false").length;
+  const currentOff = counted.filter((flag) => (flag.effectiveValue ?? flag.value) === "false").length;
   const lockedCount = visible.filter((flag) => flag.lockedBy).length;
   // 页首：搜索框 + 一行计数（2026-11-24）。搜索只过滤开关卡、输入即筛选，
   // 查询串不持久化；「工具与命令」由独立模块异步画，插好后会再跑一次同一套过滤。
@@ -506,19 +855,19 @@ function renderFlagRows(card, flags, groups) {
       <label class="mem-a-search">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
         <input id="flags-search" type="search" spellcheck="false"
-          placeholder="搜索插件 / 开关（名字、说明、key、分组）" aria-label="搜索插件与开关"
+          placeholder="搜索插件 / 开关（名字、说明、key、分组、前置与子插件）" aria-label="搜索插件与开关"
           value="${attr(flagQuery)}" />
       </label>
     </div>
     <div class="flag-intro">
-      <span class="flag-intro-count">${visible.length} 个开关 · ${visible.length - defaultOff} 默认开 / ${defaultOff} 默认关 · 当前 ${visible.length - currentOff} 开 / ${currentOff} 关${lockedCount ? ` · ${lockedCount} 个随总闸关闭` : ""}</span>
+      <span class="flag-intro-count">${counted.length} 个开关${numeric.length ? ` · 另有 ${numeric.length} 项是数字` : ""} · ${counted.length - defaultOff} 默认开 / ${defaultOff} 默认关 · 当前 ${counted.length - currentOff} 开 / ${currentOff} 关${lockedCount ? ` · ${lockedCount} 个随总闸关闭` : ""}</span>
     </div>
     <div class="set-hint flag-search-empty" data-flags-empty hidden>没有匹配的插件</div>`,
   );
   // 工具活动从卡尾一句话改成「始终开启」分组里的一张卡（2026-11-18 用户口径）：
   // 它不是可配置项，但确实是一个能力，值得有自己的位置和说明；不参与上面的开关计数。
   const groupDefs = Array.isArray(groups) ? groups : [];
-  // 搜索索引：名字 / 简介 / key / 组名。没归组的按「其他」，清单缺 groups 时按「插件」。
+  // 搜索索引（显式 haystack）：名字 / key / 说明 / 组名 / 父与子的 key 和名字。没归组的按「其他」，清单缺 groups 时按「插件」。
   const groupTitleByKey = new Map();
   for (const group of groupDefs) {
     for (const key of Array.isArray(group.keys) ? group.keys : []) groupTitleByKey.set(key, group.title);
@@ -540,7 +889,7 @@ function renderFlagRows(card, flags, groups) {
       </div>
       <div class="flag-grid"></div>`;
     const grid = section.querySelector(".flag-grid");
-    for (const flag of items) grid.insertAdjacentHTML("beforeend", flagCardMarkup(flag));
+    for (const flag of items) grid.insertAdjacentHTML("beforeend", flagCardMarkup(flag, title, childrenByKey.get(flag.key) || []));
     card.append(section);
   };
   if (!groupDefs.length) {
@@ -563,13 +912,16 @@ function renderFlagRows(card, flags, groups) {
     `<div class="flag-foot">带「系统核心」的开关由服务端环境配置兜底，其余是普通功能插件；密钥 / 路径 / 令牌类 env 刻意不上面板——那些是部署配置，不是日常开关，要改请走 .env。</div>`,
   );
   wireFlagControls(card);
+  // 卡内设置（2026-11-25）：事件委托挂在容器上，只挂一次；展开 / 收起都在 plugin-settings.js。
+  wirePluginSettings(card);
   for (const main of card.querySelectorAll("[data-flag-detail]")) {
     main.addEventListener("click", () => {
       const flag = flagByKey(main.dataset.flagDetail);
       if (flag) openFlagDetail(flag);
     });
   }
-  watchBriefClipping(card);
+  // 依赖 chips：事件委托同样只挂一次；点一下滚到对应卡并闪边。
+  wireFlagChips(card);
   // 搜索：输入即筛选；flags 重画后按模块里的查询串恢复（不持久化、不动加载 / 保存）。
   const flagsSearch = card.querySelector("#flags-search");
   flagsSearch?.addEventListener("input", () => {
@@ -640,9 +992,16 @@ async function toggleFlag(key, value, sw, seg) {
       );
       if (hasChildren && document.getElementById("flags-card")) void loadFlagsSettings();
     }
+    // 界面显隐注册表（2026-11-25）：新值已同步进 state.flagsCache，按它把声明式显隐重铺一遍——
+    // 被关掉的那个入口当场收起来，不用等重进页面；缓存在这里可能还不存在（没进过插件页），
+    // 那种情况 flagOn 全按开，相当于什么都不动。
+    applySurfaces();
     // 「已改」是本次进页后才有的状态：缓存行更新完就地重画徽标，不用刷新整页。
     paintFlagTags(key);
     toast(data.hot ? "已保存，即时生效" : "已保存，重启服务后生效");
+    // 数字型「留空回到默认」：本地缓存里只知道存的是空串，真值（默认值还是 env 里的值、还算不算面板覆盖）
+    // 只有服务端知道，所以回读一次整页，别拿猜的值描卡。
+    if (String(value) === "" && isNumberFlag(flagByKey(key))) void loadFlagsSettings();
   } catch (error) {
     if (error.message !== "forbidden") toast(`没存成：${error.message}`);
   } finally {
@@ -651,6 +1010,99 @@ async function toggleFlag(key, value, sw, seg) {
     const row = state.flagsCache instanceof Map ? state.flagsCache.get(key) : null;
     if (row) applyFlagControlValue(key, String(row.effectiveValue ?? row.value ?? ""));
   }
+}
+
+/* ── 父项连带关（B1a disable-plan / disable）──────────
+ * 只有「这次是关」「有子项挂在这个键上」「级联层在」三件事同时成立才先看影响面；
+ * 开、无子项、非关一律原样走 toggleFlag（这一层不碰 PUT 本身）。 */
+async function changeFlag(key, value, sw, seg) {
+  const flag = flagByKey(key);
+  const turningOff = flagIsOff(flag, value);
+  const hasChildren =
+    state.flagsCache instanceof Map &&
+    [...state.flagsCache.values()].some((item) => Array.isArray(item.requires) && item.requires.includes(key));
+  if (!turningOff || !hasChildren) {
+    void toggleFlag(key, value, sw, seg);
+    return;
+  }
+  if ((await ensureCascadeAvailable()) === false) {
+    void toggleFlag(key, value, sw, seg);
+    return;
+  }
+  let plan = null;
+  try {
+    const response = await request(`/api/v1/agent/flags/${encodeURIComponent(key)}/disable-plan`, { cache: "no-store" });
+    if (response.status === 404) {
+      void toggleFlag(key, value, sw, seg);
+      return;
+    }
+    if (!response.ok) {
+      toast(`读不到影响面：HTTP ${response.status}`);
+      return;
+    }
+    plan = await response.json().catch(() => null);
+  } catch (error) {
+    // 计划读不到就不动它：宁可没关，也不要静默连带关掉一串。
+    if (error.message !== "forbidden") toast(`读不到影响面：${error.message}`);
+    return;
+  }
+  if (!plan || typeof plan !== "object") {
+    void toggleFlag(key, value, sw, seg);
+    return;
+  }
+  if (plan.disableable === false) {
+    toast("这一档没有『关』");
+    return;
+  }
+  const affected = Array.isArray(plan.affected) ? plan.affected : [];
+  if (!affected.length) {
+    void toggleFlag(key, value, sw, seg);
+    return;
+  }
+  const label = plan.label || flag?.label || key;
+  const count = affected.length + 1;
+  openModal(`关闭「${label}」`, (body) => {
+    body.innerHTML = `
+      <div class="flag-detail">
+        <p class="modal-desc">这些会显示为关，存储值保留。</p>
+        <div class="flag-detail-meta">${affected.map((item) => `<div class="flag-detail-row"><span class="flag-detail-label">${esc(item.label)}</span></div>`).join("")}</div>
+      </div>
+      <div class="modal-actions">
+        <button class="ghost" type="button" data-plan-cancel>取消</button>
+        <button class="modal-primary" type="button" data-plan-confirm>关闭 ${count} 项</button>
+      </div>`;
+    body.querySelector("[data-plan-cancel]")?.addEventListener("click", closeModal);
+    const confirmBtn = body.querySelector("[data-plan-confirm]");
+    confirmBtn?.addEventListener("click", async () => {
+      confirmBtn.disabled = true;
+      try {
+        const response = await request(`/api/v1/agent/flags/${encodeURIComponent(key)}/disable`, {
+          method: "POST",
+          body: JSON.stringify({ confirm: true }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (response.status === 500 || data.error === "partial") {
+          closeModal();
+          await loadFlagsSettings();
+          applySurfaces();
+          toast(`写入中断，已保存 ${Array.isArray(data.changed) ? data.changed.length : 0} 项`);
+          return;
+        }
+        if (!response.ok) {
+          toast(data.message || `没关成：HTTP ${response.status}`);
+          return;
+        }
+        closeModal();
+        await loadFlagsSettings();
+        applySurfaces();
+        toast(data.alreadyOff ? "这一项已经是关的" : `已关闭 ${count} 项`);
+      } catch (error) {
+        if (error.message !== "forbidden") toast(`没关成：${error.message}`);
+      } finally {
+        confirmBtn.disabled = false;
+      }
+    });
+  });
 }
 
 /* ── 自动归档设置区（2026-11-13 对齐 ZCode §3）──────────

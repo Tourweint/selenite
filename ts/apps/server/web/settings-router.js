@@ -13,6 +13,7 @@ import { aboutMeMarkup, wireAboutMe } from "./settings-about-me.js";
 import { KEY_NOTIFY } from "./chat-notice.js";
 import { el } from "./dom.js";
 import { openExportModal } from "./export-data.js";
+import { esc } from "./markdown.js";
 import { memorySettingsMarkup, stopMemoryPolling, wireMemorySettings } from "./memory-page.js";
 import { loadPartners, openCreatePartnerModal } from "./partner-modals.js";
 import { renderPartnerProfilePage } from "./partner-profile.js";
@@ -23,7 +24,6 @@ import { openAddProjectModal } from "./project-modal.js";
 import { showProviderTemplates } from "./providers.js";
 import { currentInjectTab, currentPartnerProfileId, currentRoute, currentSettingsPage, go } from "./route.js";
 import { openAddSearchSourceModal } from "./search-sources.js";
-import { wireDragScroll } from "./scroll-x.js";
 import { mountSegmented, replayPageEnter, rowMarkup, sectionMarkup, switchMarkup, syncSegmented } from "./settings-atoms.js";
 import { ACCENTS, INJECT_TABS, injectTabsMarkup, renderSettingsNav } from "./settings-base.js";
 import { compactionSectionMarkup, wireCompactionSection } from "./settings-compaction.js";
@@ -38,6 +38,7 @@ import { loadModelsInfo, loadUsagePage } from "./settings-usage.js";
 import { openBulkSkillModal, openCreateSkillChoiceModal } from "./skills-actions.js";
 import { applySkillAdvice, loadSkills, runSkillAdvice } from "./skills-settings.js";
 import { state } from "./state.js";
+import { flagOn, loadSurfaceFlags, refreshSurfaces } from "./surfaces.js";
 import { ensureFlag } from "./tasks-redesign.js";
 import { KEY_ACCENT, KEY_ACCENT_CUSTOM, KEY_SEND, THEMES, currentThemeChoice, openFontModal, setAccent, setThemeChoice, storedAccent } from "./theme.js";
 import { closePopover, toast } from "./ui-atoms.js";
@@ -45,6 +46,24 @@ import { chooseDetailMode, getDetailMode } from "./tool-chips.js";
 
 /** 连接页的中继状态轮询（2026-11-14）：10s 一次，离开这一页就不刷。 */
 let connPollTimer = 0;
+
+/**
+ * 插件关闭时的深链空态（2026-11-25）：整页 / 整 tab 不可用时不留白屏，
+ * 只说三件事——这块叫什么、为什么空、去哪开。文案由调用方给，本函数只管套壳。
+ */
+function surfaceEmptyMarkup(title, body) {
+  return `<div class="surface-empty">
+    <div class="surface-empty-title">${esc(title)}</div>
+    <div class="surface-empty-body">${esc(body)}</div>
+    <a class="btn-primary surface-empty-go" href="#/settings/plugins">去插件中心</a>
+  </div>`;
+}
+
+/** 渲染前读一次开关（缓存已有就不发请求；读不到按开，见 surfaces.js 的 flagOn）。 */
+async function pageFlagOn(key) {
+  await loadSurfaceFlags();
+  return flagOn(key);
+}
 
 /**
  * 注入分区顶部 tab 的接线（2026-11-21）。
@@ -122,75 +141,95 @@ async function renderSettings() {
         ? (localStorage.getItem(KEY_ACCENT_CUSTOM) || "").toUpperCase()
         : ACCENTS.find((item) => item.id === accent)?.name || ACCENTS[0].name;
     const customHex = localStorage.getItem(KEY_ACCENT_CUSTOM) || "#3e4a8c";
-    el.settingsInner.innerHTML = sectionMarkup(
-      "外观",
-      `<div class="card">
-        <div class="row">
-          <div class="row-main">
-            <div class="row-label" title="四套成品配色，各带一套浅/深；点哪套就固定下来（不再跟随系统）">主题</div>
+    // 2026-11-25 重排（分组单列）：原来一张「外观」大卡拆成五节——主题 / 颜色 / 文字 / 对话外观 / 工具展示。
+    // 早先三处各写各的：壁纸节和回答节各自往页里"插"，工具详情那一行留在卡里，
+    // 结果对话行为（工具详情）被排在字体后面、壁纸前面。现在每类设置一个固定的节。
+    // 「对话外观」里两个槽位由 appearance-wallpaper.js / bubble-mode.js 各自渲染进槽位，不再自己找位置。
+    el.settingsInner.innerHTML = `
+      ${sectionMarkup(
+        `<span data-tip="六套成品配色（四浅两深），点哪套就固定下来（不再跟随系统）">主题</span>`,
+        `<div class="card">
+          <div class="theme-cards" role="radiogroup" aria-label="主题">
+            ${THEMES.map(
+              (item) =>
+                `<button class="theme-card" type="button" role="radio"
+                   data-theme-choice="${item.id}" aria-checked="${choice === item.id}"
+                   title="${item.name}" aria-label="${item.name}"
+                   style="--tc-bg:${item.bg};--tc-side:${item.side};--tc-card:${item.card};--tc-card-high:${item.cardHigh};--tc-outline:${item.outline};--tc-divider:${item.divider};--tc-text:${item.text};--tc-text3:${item.text3};--tc-accent:${item.accent}">
+                   <span class="theme-pv" aria-hidden="true">
+                     <span class="theme-pv-side"><i></i><i></i><i></i></span>
+                     <span class="theme-pv-main"><i class="pv-a"></i><i class="pv-b"></i></span>
+                     <span class="theme-pv-dot"></span>
+                   </span>
+                   <span class="theme-cap"><b>${item.name}</b><em>${item.tag}</em></span>
+                   <span class="theme-card-check" aria-hidden="true">✓</span>
+                 </button>`,
+            ).join("")}
           </div>
-        </div>
-        <div class="theme-cards" role="radiogroup" aria-label="主题">
-          ${THEMES.map(
-            (item) =>
-              `<button class="theme-card" type="button" role="radio"
-                 data-theme-choice="${item.id}" aria-checked="${choice === item.id}"
-                 title="${item.name}" aria-label="${item.name}"
-                 style="--tc-bg:${item.bg};--tc-side:${item.side};--tc-card:${item.card};--tc-card-high:${item.cardHigh};--tc-outline:${item.outline};--tc-divider:${item.divider};--tc-text:${item.text};--tc-text3:${item.text3};--tc-accent:${item.accent}">
-                 <span class="theme-pv" aria-hidden="true">
-                   <span class="theme-pv-side"><i></i><i></i><i></i></span>
-                   <span class="theme-pv-main"><i class="pv-a"></i><i class="pv-b"></i></span>
-                   <span class="theme-pv-dot"></span>
-                 </span>
-                 <span class="theme-cap"><b>${item.name}</b><em>${item.tag}</em></span>
-                 <span class="theme-card-check" aria-hidden="true">✓</span>
-               </button>`,
-          ).join("")}
-        </div>
-        <div class="divider"></div>
-        ${rowMarkup(
-          "主题色",
-          "十档预设 + 自定义取色；只给链接、运行中、选中态上色，界面底色仍归主题管",
-          `<div class="accent-row">
-             <div class="swatches" role="radiogroup" aria-label="主题色">
-               ${ACCENTS.map(
-                 (item) =>
-                   `<button class="swatch" type="button" data-accent-choice="${item.id}"
-                      style="background:${item.chip}" title="${item.name}" aria-label="${item.name}"
-                      aria-checked="${accent === item.id}"></button>`,
-               ).join("")}
-               <button class="swatch swatch-pick" type="button" data-accent-pick
-                       title="自定义取色" aria-label="自定义取色"
-                       aria-checked="${accent === "custom"}"><i style="background:${customHex}"></i></button>
-               <input type="color" class="accent-picker" data-accent-color value="${customHex}" aria-label="自定义主题色" />
-             </div>
-             <span class="accent-name" data-accent-name>${accentName}</span>
-           </div>`,
-        )}
-        <div class="divider"></div>
-        ${rowMarkup(
-          "字体",
-          "全站默认 + 聊天 / 设置 / 其他界面分别覆盖；字号按区域缩放，改完即时生效。",
-          `<button class="ghost" type="button" id="font-open">修改</button>`,
-        )}
-        <div class="divider"></div>
-        ${rowMarkup(
-          "工具详情",
-          "点对话里的工具小块时，细节在原地展开还是在旁边弹小窗",
-          `<div class="segmented slide" role="radiogroup" aria-label="工具详情">
-             <button type="button" data-tool-detail="inline" aria-checked="${getDetailMode() === "inline"}">原地展开</button>
-             <button type="button" data-tool-detail="popover" aria-checked="${getDetailMode() === "popover"}">附近小窗</button>
-           </div>`,
-        )}
-      </div>`,
-    );
+        </div>`,
+      )}
+      ${sectionMarkup(
+        "颜色",
+        `<div class="card">
+          ${rowMarkup(
+            "主题色",
+            "十档预设 + 自定义取色；只给链接、运行中、选中态上色，界面底色仍归主题管",
+            `<div class="accent-row">
+               <div class="swatches" role="radiogroup" aria-label="主题色">
+                 ${ACCENTS.map(
+                   (item) =>
+                     `<button class="swatch" type="button" data-accent-choice="${item.id}"
+                        style="background:${item.chip}" title="${item.name}" aria-label="${item.name}"
+                        aria-checked="${accent === item.id}"></button>`,
+                 ).join("")}
+                 <button class="swatch swatch-pick" type="button" data-accent-pick
+                         title="自定义取色" aria-label="自定义取色"
+                         aria-checked="${accent === "custom"}"><i style="background:${customHex}"></i></button>
+                 <input type="color" class="accent-picker" data-accent-color value="${customHex}" aria-label="自定义主题色" />
+               </div>
+               <span class="accent-name" data-accent-name>${accentName}</span>
+             </div>`,
+          )}
+        </div>`,
+      )}
+      ${sectionMarkup(
+        "文字",
+        `<div class="card">
+          ${rowMarkup(
+            "字体",
+            "",
+            `<button class="ghost" type="button" id="font-open">修改</button>`,
+          )}
+        </div>`,
+      )}
+      ${sectionMarkup(
+        "对话外观",
+        // 壁纸槽默认藏着：壁纸功能关着（端点 404）或模块没挂上时，卡里不留空槽和多余的分隔线，
+        // 回答那两行照常显示。appearance-wallpaper.js 挂上时才把槽和中间那根线一起放出来。
+        `<div class="card" data-conversation-card>
+           <div data-wallpaper-slot hidden></div>
+           <div class="divider" data-conversation-divider hidden></div>
+           <div data-bubble-slot></div>
+         </div>`,
+      )}
+      ${sectionMarkup(
+        "工具展示",
+        `<div class="card">
+          ${rowMarkup(
+            "工具详情",
+            "点对话里的工具小块时，细节在原地展开还是在旁边弹小窗",
+            `<div class="segmented slide" role="radiogroup" aria-label="工具详情">
+               <button type="button" data-tool-detail="inline" aria-checked="${getDetailMode() === "inline"}">原地展开</button>
+               <button type="button" data-tool-detail="popover" aria-checked="${getDetailMode() === "popover"}">附近小窗</button>
+             </div>`,
+          )}
+        </div>`,
+      )}`;
 
     // 主题色板：点击即切 + 持久化，无需确认；当前项由 syncThemeControls 描边
     for (const button of el.settingsInner.querySelectorAll("[data-theme-choice]")) {
       button.addEventListener("click", () => setThemeChoice(button.dataset.themeChoice));
     }
-    // 五张主题卡一排横滚（2026-11-15）：窄了没有条子，滚轮/按住拖拽补位
-    wireDragScroll(el.settingsInner.querySelector(".theme-cards"));
     for (const button of el.settingsInner.querySelectorAll("[data-accent-choice]")) {
       button.addEventListener("click", () => {
         setAccent(button.dataset.accentChoice);
@@ -386,6 +425,16 @@ async function renderSettings() {
     // 派活（2026-11-21 用户口径）：人设 / 技能 / 上下文 / 工具都挪去「注入」后，
     // 这一分区只剩一件事——派出打手、选默认工人与各 CLI 的模型/权限。
     // 不再挂 tab 条（一项挂条是多余的）；旧子路由 #/settings/executor 由 SETTINGS_ALIASES 落回这里。
+    // 2026-11-25：CHANCELLOR_ENABLED 关着时整页只剩空态（深链不能白屏）。
+    if (!(await pageFlagOn("CHANCELLOR_ENABLED"))) {
+      el.settingsInner.innerHTML = surfaceEmptyMarkup(
+        "派活链路未启用",
+        "派不出去，只剩基础工具；已派出的任务照旧跑完。",
+      );
+      replayPageEnter();
+      void refreshSurfaces();
+      return;
+    }
     el.settingsInner.innerHTML = executorSectionMarkup();
     void wireExecutorSettings();
   } else if (page === "inject") {
@@ -406,6 +455,19 @@ async function renderSettings() {
         }
         void renderPoolWorkerPage();
         replayPageEnter();
+        return;
+      }
+      // 2026-11-25：COMPANIONS_ENABLED 关着时没有执事列表与执事对话；
+      // 池工人配置（profileId === "pool"）已在上面早退，不受这个开关影响。
+      const companionsOn = await pageFlagOn("COMPANIONS_ENABLED");
+      if (!companionsOn) {
+        el.settingsInner.innerHTML = injectTabsMarkup(tab) + surfaceEmptyMarkup(
+          "执事未启用",
+          "没有执事列表与执事对话；总管对话仍可用。",
+        );
+        wireInjectTabs();
+        replayPageEnter();
+        void refreshSurfaces();
         return;
       }
       // 二级页（#/settings/partners/<id>）是钻进某个人的档案：自带返回键，不挂 tab 条。
@@ -445,17 +507,31 @@ async function renderSettings() {
       // 记忆页 A 版（2026-11-13 用户拍板）：现在是「注入 → 索引」。
       // 2026-11-23：记忆库卡切换槽位后要重渲染这一页（重建卡 + 内置模块显隐），
       // 把 renderSettings 当回调交给 wireMemorySettings；不整页刷新。
-      el.settingsInner.innerHTML = injectTabsMarkup(tab) + memorySettingsMarkup();
-      void wireMemorySettings({ rerender: () => { void renderSettings(); } });
+      // 2026-11-25：MEMORY_ENABLED 关着时只读空态，不接轮询。
+      const memoryOn = await pageFlagOn("MEMORY_ENABLED");
+      el.settingsInner.innerHTML = injectTabsMarkup(tab) + (memoryOn
+        ? memorySettingsMarkup()
+        : surfaceEmptyMarkup("记忆未启用", "关闭时不会自动记、也不会自动带；已有记忆保留，重新打开即恢复。"));
+      if (memoryOn) {
+        void wireMemorySettings({ rerender: () => { void renderSettings(); } });
+      }
     } else if (tab === "skills") {
       // 技能页（2026-11-08）：给 AI 的操作手册；2026-11-21 从一级分区收进注入。
-      el.settingsInner.innerHTML = injectTabsMarkup(tab) + skillsSectionMarkup();
-      wireSkillsPage();
+      // 2026-11-25：SKILLS_ADMIN 关着时只是不能增删改，技能本身照常在用。
+      const skillsOn = await pageFlagOn("SKILLS_ADMIN");
+      el.settingsInner.innerHTML = injectTabsMarkup(tab) + (skillsOn
+        ? skillsSectionMarkup()
+        : surfaceEmptyMarkup("技能管理未启用", "技能仍在用；这里只是不能增删改。"));
+      if (skillsOn) wireSkillsPage();
     } else {
       // 上下文（2026-11-16 起，2026-11-21 起可改可编辑段）：一条请求装了什么，
       // 以及默认开销里每一段能不能就地改。工具池与记忆在隔壁 tab。
-      el.settingsInner.innerHTML = injectTabsMarkup(tab) + contextSettingsMarkup();
-      wireContextSettings();
+      // 2026-11-25：CHAT_CONTEXT_INSPECT 关着时看不到这一轮实际装了什么。
+      const contextOn = await pageFlagOn("CHAT_CONTEXT_INSPECT");
+      el.settingsInner.innerHTML = injectTabsMarkup(tab) + (contextOn
+        ? contextSettingsMarkup()
+        : surfaceEmptyMarkup("注入视图未启用", "看不了这一轮实际装了什么。"));
+      if (contextOn) wireContextSettings();
     }
     wireInjectTabs();
   } else if (page === "projects") {
@@ -487,6 +563,16 @@ async function renderSettings() {
     // 定时任务页（2026-11-17 重做）：一张清单、一个编辑器、一套友好触发词。
     // 手动新建统一走 /agent/reminders（可见/隐藏只是显示方式，手机本地闹钟继续有效）；
     // Agent 建的高级例行规则也在同一张清单里，内容可改、高级触发只读。
+    // 2026-11-25：AUTONOMY_ENABLED 关着时到点不会自跑，整页只留空态。
+    if (!(await pageFlagOn("AUTONOMY_ENABLED"))) {
+      el.settingsInner.innerHTML = surfaceEmptyMarkup(
+        "自主轮未启用",
+        "到点不再自跑；已有定时任务保留，重新打开即恢复。",
+      );
+      replayPageEnter();
+      void refreshSurfaces();
+      return;
+    }
     el.settingsInner.innerHTML = `
       <h2 class="set-sec-title">定时任务</h2>
       <section class="set-sec">
@@ -773,6 +859,10 @@ async function renderSettings() {
   // 旧的「未知页显示关于」在 2026-11-18 关于并入「本机」后不再成立，留着反而骗人。
 
   replayPageEnter();
+  // 界面显隐注册表（2026-11-25）：每次渲染完、所有分支之后统一铺一遍。
+  // 放在这里是因为各页的入口是现画的（技能「让 Agent 评估」、会话页「导出…」都只在对应页存在），
+  // 注册表的选择器在新 DOM 上才找得到；缓存已有就不发请求。
+  void refreshSurfaces();
 }
 
 export { renderSettings };

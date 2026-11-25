@@ -492,8 +492,8 @@
 
 
 /* 插件页（原「行为开关」，2026-11-16 从服务页拆出）：照插件中心的卡片墙排。
-   2026-11-18 三版：卡面只留「名字 + 徽标 + 放得下的简介 + 控件」，卡体可点开详情弹层；
-   完整说明 / 元信息 / 同一套控件都在弹层里，卡面不再挂长 data-tip。
+   2026-11-25 卡片 v2（V2）：卡面 = 头部（名 + KEY + 组 + 状态徽标）+ 完整说明 + 元信息一行
+   + 依赖 chips + 卡尾控件 / 「设置」；卡不定高、说明不截断，详情弹层保留。
    页面不再套一层大卡，卡片直接铺在设置页背景上——嵌套卡片会糊成一片。 */
 .flag-intro { padding: 0 2px 14px; }
 .flag-intro-count {
@@ -510,27 +510,37 @@
 .flag-group-count { font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
 .flag-group-head::after { content: ""; flex: 1; height: 1px; background: var(--divider); }
 
-.flag-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(245px, 1fr)); gap: 10px; }
-.flag-item { display: flex; flex-direction: column; gap: 7px; height: 132px; padding: 13px 15px; }
-/* 卡体是按钮：整块可点开详情；控件在 foot，不包在按钮里（避免嵌套交互元素）。 */
+/* 列宽（2026-11-25 卡片 v2）：最小 380px。内容列内宽 992px（.set-page 1000 − 左右各 4）→ 两列；
+   三列要 1160px、两列要 770px，所以窗口窄到内容列不足 770px 时自动折成一列。
+   align-items:start：卡按内容自然高，同排顶部对齐，不为了等高把矮卡拉高。 */
+.flag-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 10px; align-items: start; }
+.flag-item { display: flex; flex-direction: column; gap: 8px; padding: 14px 15px 13px; }
+/* 卡体是按钮：整块可点开详情；控件与依赖 chips 在按钮外（避免嵌套交互元素）。 */
 .flag-item-main {
   flex: 1 1 auto; min-height: 0; width: 100%;
-  display: flex; flex-direction: column; gap: 7px;
+  display: flex; flex-direction: column; gap: 8px;
   padding: 0; border: 0; border-radius: 7px; background: none;
   font: inherit; color: inherit; text-align: left;
   cursor: pointer;
 }
 .flag-item-main:hover .flag-item-name { color: var(--accent); }
 .flag-item-main:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 3px; }
-.flag-item-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+/* 头部一行：名字 · KEY · 组名 · 徽标 · ›；窄卡放不下时整体折到下一行，不截字。 */
+.flag-item-head { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; min-width: 0; }
 .flag-item-name {
-  flex: 1 1 auto; min-width: 0;
+  flex: 0 1 auto; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-size: 13px; font-weight: 500; color: var(--text);
   transition: color .16s ease;
 }
-.flag-item-more { flex: none; font-size: 14px; line-height: 1; color: var(--text-3); }
+.flag-item-key {
+  flex: none; max-width: 100%;
+  font-family: var(--mono); font-size: 10.5px; color: var(--text-3); overflow-wrap: anywhere;
+}
+.flag-item-group { flex: none; font-size: 10.5px; color: var(--text-3); }
+.flag-item-more { flex: none; margin-left: auto; font-size: 14px; line-height: 1; color: var(--text-3); }
 .flag-tags { flex: none; display: inline-flex; align-items: center; gap: 4px; margin-left: 0; }
+.flag-tags.is-empty { display: none; }
 .flag-tag {
   display: inline-flex; align-items: center; height: 17px; padding: 0 5px;
   border-radius: 5px; background: var(--surface-low);
@@ -540,14 +550,47 @@
 .flag-tag.warn { color: var(--warn); }
 .flag-tag.accent { color: var(--accent); }
 .flag-tag.core { color: var(--text-2); background: transparent; box-shadow: inset 0 0 0 1px var(--divider); }
+/* 状态徽标：开（正色）/ 关（灰）/ 被父关（警示色）/ 常开（强调色）。
+   描边不填底：默认主题里 .flag-tag 的底色与卡片同色，不描边会和前面的组名连成一句话（2026-11-25 实测）。 */
+.flag-tag.is-status { background: transparent; box-shadow: inset 0 0 0 1px var(--divider); }
+.flag-tag.is-status.on { color: var(--ok); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ok) 38%, transparent); }
+.flag-tag.is-status.locked { color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, transparent); }
+.flag-tag.is-status.number { color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent-line); }
+.flag-tag.is-status.always { color: var(--accent); }
 .flag-item-brief {
-  flex: 1 1 auto; min-height: 39px;
-  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2;
-  overflow: hidden;
-  font-size: 12px; line-height: 1.55; color: var(--text-2); overflow-wrap: anywhere;
+  flex: 0 0 auto;
+  font-size: 12px; line-height: 1.6; color: var(--text-2); overflow-wrap: anywhere;
 }
-/* 两行放不下就整句不显示（量宽在 settings-switches.js 的 hideClippedBriefs）。 */
-.flag-item-brief.is-clipped { display: none; }
+/* 元信息一行：类型 · 当前 · 默认 · 生效 · 存储；「无依赖 / 无额外设置」灰字接在末尾。窄卡自然折行，不定高。 */
+.flag-item-meta {
+  flex: none;
+  font-size: 11.5px; line-height: 1.55; color: var(--text-2); font-variant-numeric: tabular-nums; overflow-wrap: anywhere;
+}
+.flag-meta-note { margin-left: 7px; color: var(--text-3); }
+.flag-meta-note::before { content: "· "; }
+/* 依赖 chips（2026-11-25）：「前置」实底、「被依赖」透明；圆点三态，锁住自己的那枚父 chip 用警示色。 */
+.flag-deps { flex: none; display: flex; flex-wrap: wrap; gap: 5px 12px; }
+.flag-deps-group { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 5px; min-width: 0; }
+.flag-deps-label { font-size: 11px; color: var(--text-3); }
+.flag-chip {
+  display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 8px;
+  border: 1px solid var(--divider); border-radius: 6px; background: var(--surface-low);
+  font: inherit; font-size: 11px; color: var(--text-2);
+  transition: color .16s ease, border-color .16s ease;
+}
+button.flag-chip { cursor: pointer; }
+.flag-chip.is-child { background: transparent; }
+.flag-chip.is-static { cursor: default; }
+button.flag-chip:hover { color: var(--accent); border-color: var(--accent-line); }
+.flag-chip:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 2px; }
+.flag-chip-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
+.flag-chip.is-off { color: var(--text-3); border-style: dashed; }
+.flag-chip.is-off .flag-chip-dot { background: var(--text-3); }
+.flag-chip.is-locked .flag-chip-dot { background: var(--warn); }
+.flag-chip.is-unknown .flag-chip-dot { background: transparent; box-shadow: inset 0 0 0 1px var(--text-3); }
+.flag-chip-state { font-size: 10.5px; color: var(--text-3); }
+.flag-chip.is-locker { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
+.flag-chip.is-locker .flag-chip-state { color: var(--warn); }
 .flag-item-foot {
   flex: none; display: flex; align-items: center; justify-content: flex-end;
   gap: 8px; min-height: 22px;
@@ -566,8 +609,65 @@
 .flag-item-foot .segmented { flex: 1 1 auto; }
 .flag-item-foot .segmented button { flex: 1 1 0; padding: 0 6px; white-space: nowrap; }
 .flag-always { font-size: 11px; color: var(--text-3); }
+/* 数字型控件（2026-11-25 返工）：卡尾靠右一个数字框 + 灰字默认值；回车 / 失焦提交，留空回到默认。 */
+.flag-number-control { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; }
+.flag-number-input {
+  flex: none; width: 92px; height: 26px; padding: 0 8px;
+  text-align: right; font-size: 12.5px; font-variant-numeric: tabular-nums;
+}
+.flag-number-default { flex: none; font-size: 11px; color: var(--text-3); }
 .flag-foot { margin-top: 18px; padding: 0 2px; font-size: 11.5px; line-height: 1.55; color: var(--text-3); }
 .flag-empty { padding: 14px 16px; }
+
+/* 插件卡内设置（2026-11-25）：卡尾左侧一个「设置」，点开在卡内长出小面板，不新开模态。
+   登记表在 plugin-settings.js；只有登记了的卡才画按钮（.has-settings）。
+   面板用 grid-template-rows 0fr → 1fr 长高；收起后 visibility 藏掉，链接 / 输入不进 Tab 序。 */
+.flag-settings-toggle {
+  flex: none; margin-right: auto;
+  height: 22px; padding: 0 8px;
+  border: 1px solid var(--divider); border-radius: 6px; background: none;
+  font: inherit; font-size: 11.5px; line-height: 1; color: var(--text-3);
+  cursor: pointer;
+  transition: color .16s ease, border-color .16s ease;
+}
+.flag-settings-toggle:hover,
+.flag-settings-toggle[aria-expanded="true"] { color: var(--accent); border-color: var(--accent-line); }
+.flag-settings-toggle:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 2px; }
+
+.flag-settings { flex: none; display: grid; grid-template-rows: 0fr; transition: grid-template-rows .2s ease; }
+.flag-item.is-settings-open .flag-settings { grid-template-rows: 1fr; }
+.flag-settings-inner { min-height: 0; overflow: hidden; visibility: hidden; transition: visibility 0s linear .2s; }
+.flag-item.is-settings-open .flag-settings-inner { visibility: visible; transition-delay: 0s; }
+.flag-settings-body {
+  display: flex; flex-direction: column; gap: 8px;
+  margin-top: 7px; padding-top: 9px; border-top: 1px solid var(--divider);
+}
+.flag-settings-hint { margin: 0; font-size: 11.5px; line-height: 1.6; color: var(--text-3); overflow-wrap: anywhere; }
+.flag-settings-slot:empty { display: none; }
+.flag-settings-slot > .set-hint { margin: 0; }
+.flag-settings-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  font-size: 12px; color: var(--text-2);
+}
+.flag-settings-name { flex: none; }
+.flag-settings-value { flex: 1 1 auto; min-width: 0; text-align: right; color: var(--text); overflow-wrap: anywhere; }
+.flag-settings-select { width: 124px; }
+.flag-settings-time { width: 118px; }
+/* 两条滑杆沿用外观页的 .wall-slider-row / .wall-range；卡里左右不留 16px，贴齐卡内边距 */
+.flag-settings .wall-slider-row { margin-top: 0; padding: 0 2px 3px 0; }
+.flag-settings .wall-slider-name { width: 44px; }
+.flag-settings-links { display: flex; flex-wrap: wrap; gap: 6px; }
+.flag-settings-link {
+  display: inline-flex; align-items: center; height: 24px; padding: 0 9px;
+  border: 1px solid var(--divider); border-radius: 6px;
+  font-size: 11.5px; line-height: 1; color: var(--accent); text-decoration: none;
+  transition: border-color .16s ease, background .16s ease;
+}
+.flag-settings-link:hover { border-color: var(--accent-line); background: var(--surface-low); }
+.flag-settings-link:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) {
+  .flag-settings, .flag-settings-inner, .flag-settings-toggle, .flag-settings-link { transition: none; }
+}
 
 /* 插件详情弹层（2026-11-18）：全文 + 当前 / 默认 / 生效 / 总闸 + 同一套控件。
    卡面放不下的解释全在这里，不再靠悬停黑块承载长文。 */
@@ -825,3 +925,11 @@
    「谁读」不在这一页：2026-11-23 搬进每个人自己的人设页（每轮固定注入里的「偏好」卡）。 */
 .up-page { display: flex; flex-direction: column; }
 .up-page .pf-panel { padding: 12px 16px 10px; gap: 8px; }
+
+/* ── 深链空态（2026-11-25）─────────────────────────────────
+   插件关掉后深链进来不留白屏：标题说这块叫什么、正文说为什么空、
+   一颗「去插件中心」的按钮说去哪开。样式只吃现有 token，不做装饰。 */
+.surface-empty { display:flex; flex-direction:column; align-items:flex-start; gap:10px; padding:28px 4px; }
+.surface-empty-title { font-size:15px; font-weight:600; color:var(--text); }
+.surface-empty-body { font-size:12.5px; line-height:1.7; color:var(--text-2); }
+.surface-empty-go { text-decoration:none; }

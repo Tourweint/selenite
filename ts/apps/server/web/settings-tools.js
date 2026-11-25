@@ -19,6 +19,8 @@ import { request } from "./net.js";
 import { sectionMarkup } from "./settings-atoms.js";
 // 2026-11-24 M4：异常处理只做只读回显 + 打开插件页同一个弹层，不在这页做第二套保存逻辑。
 import { loadToolPolicy, openToolPolicyModal, toolPolicyConfigurable, toolPolicyLine } from "./settings-tool-policy.js";
+// 2026-11-25 界面显隐注册表：用量列是渲染期才知道的（注册表抓不到动态产物），这里自己按开关判。
+import { flagOn, loadSurfaceFlags } from "./surfaces.js";
 
 const TOOL_POOL_PATH = "/api/v1/agent/tool-pool";
 
@@ -153,6 +155,8 @@ function cardHtml(tool, deferred) {
   const moveTip = deferred
     ? "移到常驻：每轮请求都带完整定义"
     : "移到按需：初始不进请求，模型要用先 tool_search 搜出来";
+  // 用量列（2026-11-25）：TOOL_USAGE 关着时整列不渲染（服务端同时 404，见 index.ts 同一行回滚）。
+  const usageRow = flagOn("TOOL_USAGE") ? `<span class="tool-pool-usage">${esc(usageText(tool))}</span>` : "";
   const move = locked
     ? `<span class="tool-pool-lock" title="tool_search 是加载按需工具的唯一入口，不能进按需池">加载入口</span>`
     : `<button class="tool-pool-move" type="button" data-pool-for="${attr(name)}" data-on="${deferred ? "1" : "0"}" title="${attr(moveTip)}"${state.enabled ? "" : " disabled"}>${moveLabel}</button>`;
@@ -166,7 +170,7 @@ function cardHtml(tool, deferred) {
       <span class="tool-pool-summary" title="${attr(summaryText)}">${esc(summaryText)}</span>
     </button>
     <div class="tool-pool-foot">
-      <span class="tool-pool-usage">${esc(usageText(tool))}</span>
+      ${usageRow}
       ${move}
     </div>
     <div class="tool-pool-detail"${open ? "" : " hidden"}>
@@ -246,6 +250,9 @@ async function fetchToolPool() {
 
 /** 用量是旁路：读不到就当没有，绝不挡页面。 */
 async function fetchToolUsage() {
+  // TOOL_USAGE 关着：端点会 404、用量列也不渲染，这里连请求都不发（2026-11-25 同一条回滚）。
+  // 读不到开关时 flagOn 按「开」，行为与之前一致。
+  if (!flagOn("TOOL_USAGE")) return new Map();
   try {
     const response = await request("/api/v1/agent/tool-usage", { cache: "no-store" });
     if (!response.ok) return new Map();
@@ -265,6 +272,9 @@ async function loadToolPool() {
   if (!card) return;
   card.innerHTML = `<div class="use-loading">读取中…</div>`;
   try {
+    // 先把 flags 拿到（缓存已有就不发请求）：用量列的显隐与「要不要请求 /tool-usage」
+    // 都在第一帧就按真实开关判，避免先画出一列再撤掉。
+    await loadSurfaceFlags();
     const [payload, usage] = await Promise.all([
       fetchToolPool(),
       fetchToolUsage(),

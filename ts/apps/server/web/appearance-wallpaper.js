@@ -4,7 +4,8 @@
  * 设置 → 外观 → 壁纸：一张图铺在主区那张纸上，配「可见度 / 模糊」两条滑杆。
  * 样式在 style-23-appearance.css，按 [data-wallpaper="paper|custom"] 生效；本模块负责三件事：
  *   1. 启动时把 localStorage 的选择写到 <html>（index.html 内联脚本已先写过一遍，防首帧闪）；
- *   2. 在「外观」页挂一节「壁纸」（三选一 + 两条滑杆）；
+ *   2. 在「外观」页「对话外观」那一节里渲染壁纸子块（五格 + 两条滑杆）——
+ *      2026-11-25 起不再自己建 <section>、也不再自己找位置插，渲染进 settings-router.js 留的槽位；
  *   3. 选图走 POST /api/v1/appearance/wallpaper，图存服务端 .data/appearance，
  *      这里只记 etag —— URL 带 ?v=etag，换图即换缓存。
  *
@@ -16,7 +17,6 @@
  */
 
 import { authHeaders } from "./net.js";
-import { wireDragScroll } from "./scroll-x.js";
 import { toast } from "./ui-atoms.js";
 
 const KEY = "lifediary.wallpaper";
@@ -312,12 +312,17 @@ const BUILT_IN = [
   { id: "cloud", cls: "is-cloud", name: "云纹", hint: "墨晕" },
 ];
 
+/**
+ * 「对话外观」卡里的壁纸子块：标签行 + 五格 + 两条滑杆 + 隐藏的选图框。
+ * 不带 <section> / 节标题 / .card——那三样由 settings-router.js 的「对话外观」节出，
+ * 这里只管自己的内容（2026-11-25 重排前是自建一整节再往页里插）。
+ * 选图框放在子块开头：末尾要留给最后一条滑杆，`.wall-slider-row:last-child` 靠它给卡片底部留白。
+ */
 function sectionHtml(state) {
   const checked = (kind) => (state.source === kind ? "true" : "false");
   const disabled = state.source === "none" ? "disabled" : "";
-  return `<section class="set-sec" data-wallpaper-sec>
-  <h2 class="set-sec-title">壁纸</h2>
-  <div class="card">
+  return `<div data-wallpaper-sec>
+  <input type="file" accept="image/png,image/jpeg,image/webp" hidden data-wall-file />
     <div class="row">
       <div class="row-main">
         <div class="row-label" data-tip="铺在主区那张纸上；气泡、卡片、输入框保持不透明，只有空隙透出来。自定义图支持 PNG / JPEG / WebP，单张 ≤20 MB，存在本机换成新的会覆盖旧的">壁纸</div>
@@ -355,9 +360,7 @@ function sectionHtml(state) {
              aria-label="壁纸模糊" data-wall-blur ${disabled} />
       <span class="wall-range-val" data-wall-blur-val>${state.blur} px</span>
     </div>
-  </div>
-  <input type="file" accept="image/png,image/jpeg,image/webp" hidden data-wall-file />
-</section>`;
+</div>`;
 }
 
 /** 三个格子之外的「换一张 / 裁剪 / 移除」：服务端存着图就出现（2026-11-14 用户：
@@ -493,8 +496,10 @@ async function syncWithServer(section) {
   try {
     const response = await fetch("/api/v1/appearance/wallpaper/meta", { cache: "no-store" });
     if (response.status === 404) {
-      // 端点没挂（AGENT_APPEARANCE_WALLPAPER=0）：这一整节不该存在
-      section?.remove();
+      // 端点没挂（AGENT_APPEARANCE_WALLPAPER=0）：这个子块不该存在。
+      // 收掉的是槽位里的内容和它后面那根分隔线，不是往 #settings-inner 里删节点——
+      // 删 host 的直接子节点会再触发本模块的 MutationObserver，等于自己把自己重挂一遍。
+      collapseSlot();
       delete document.documentElement.dataset.wallpaper;
       return;
     }
@@ -521,14 +526,34 @@ async function syncWithServer(section) {
   }
 }
 
-/** 挂一节进「外观」页（只认标记，切页重渲染会重挂）。 */
+/** 「对话外观」卡里留给壁纸的槽位 + 它后面那根分隔线（外观页独有）。 */
+function slotParts() {
+  const slot = document.getElementById("settings-inner")?.querySelector("[data-wallpaper-slot]");
+  return {
+    slot,
+    divider: slot?.parentElement?.querySelector("[data-conversation-divider]") ?? null,
+  };
+}
+
+/** 壁纸功能关着：清空槽位、把槽和它后面那根线一起藏起来（回答那两行照常显示）。 */
+function collapseSlot() {
+  const { slot, divider } = slotParts();
+  if (!slot) return;
+  slot.replaceChildren();
+  slot.hidden = true;
+  if (divider) divider.hidden = true;
+}
+
+/** 渲染进「对话外观」节的壁纸槽位。每次切页重渲染（槽位是新的空槽）都会重挂，所以只认槽位、不重复挂。 */
 function mountSection() {
   const host = document.getElementById("settings-inner");
   if (!host) return;
-  if (!host.querySelector("#font-open")) return;
-  if (host.querySelector("[data-wallpaper-sec]")) {
+  // 页面标记就是这个槽位（只有外观页的「对话外观」卡里有）；不认文案，也不借用 #font-open
+  const { slot, divider } = slotParts();
+  if (!slot) return;
+  if (slot.querySelector("[data-wallpaper-sec]")) {
     // 已经挂着；切页回来时刷一次标签状态就够了
-    paintSection(host.querySelector("[data-wallpaper-sec]"), readState());
+    paintSection(slot.querySelector("[data-wallpaper-sec]"), readState());
     return;
   }
 
@@ -536,12 +561,10 @@ function mountSection() {
   const holder = document.createElement("div");
   holder.innerHTML = sectionHtml(state);
   const section = holder.firstElementChild;
-  // 位置上挨着「外观」卡之后、回答气泡之前
-  const appearanceSec = host.querySelector(".set-sec");
-  const bubbleSec = host.querySelector("[data-bubble-sec]");
-  if (bubbleSec) bubbleSec.before(section);
-  else if (appearanceSec) appearanceSec.after(section);
-  else host.append(section);
+  slot.replaceChildren(section);
+  slot.hidden = false;
+  // 壁纸在上、回答在下：中间那根线跟着壁纸一起出现
+  if (divider) divider.hidden = false;
 
   wireSection(section);
   paintSection(section, state);
@@ -549,8 +572,6 @@ function mountSection() {
 }
 
 function wireSection(section) {
-  // 五格壁纸与主题卡同一套横滚手势（2026-11-15）：滚轮/按住拖拽，窄屏也不折行
-  wireDragScroll(section.querySelector(".wallpapers"));
   for (const tile of section.querySelectorAll("[data-wall]")) {
     tile.addEventListener("click", () => {
       const kind = tile.dataset.wall;
@@ -621,9 +642,15 @@ void mainAspect();
 mountSection();
 const host = document.getElementById("settings-inner");
 if (host) {
-  // 与 bubble-mode 同一条纪律：只盯 childList，别盯 subtree（聊天流式每帧都在改 DOM）
+  // 与 bubble-mode 同一条纪律：只盯 childList，别盯 subtree（聊天流式每帧都在改 DOM）。
+  // 槽位是 settings-router.js 每次渲染现画的空槽，所以切回外观页 = 一次重挂。
   const observer = new MutationObserver(() => mountSection());
   observer.observe(host, { childList: true });
 }
 
-export { applyState as applyWallpaperState, readState as readWallpaperState };
+export {
+  applyState as applyWallpaperState,
+  readState as readWallpaperState,
+  // 2026-11-25 插件卡内设置：可见度 / 模糊两条滑杆要落同一份 localStorage，不再各写一遍 normalize。
+  saveState as saveWallpaperState,
+};

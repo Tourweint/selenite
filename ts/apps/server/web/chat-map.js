@@ -43,6 +43,8 @@ const COLLAPSE_KEY = "lifediary.chatmap.collapsed.v1";
 const WINDOW_KEY = "lifediary.chatmap.window.v1";
 const WINDOW_OPTIONS = [5, 10, 15, 20, 30];
 const DEFAULT_WINDOW = 10;
+/** 给插件卡内设置用的同一份档位（别名，避免外面再抄一遍数字）。 */
+const CHAT_MAP_WINDOW_OPTIONS = WINDOW_OPTIONS;
 
 /* ── 元素 ────────────────────────────────────────────── */
 
@@ -1384,14 +1386,25 @@ refreshBtn?.addEventListener("click", () => {
   if (id) void loadMap(id);
 });
 
+/** 当前窗口档（插件卡内设置读这一处，不自己去翻 localStorage）。 */
+function getChatMapWindow() {
+  return mapState.window;
+}
+
 // 窗口下拉（2026-11-19）：默认只画最近 N 轮；改完重拉地图（展开状态跟着重来）。
-windowSelect?.addEventListener("change", () => {
-  const next = Number.parseInt(windowSelect.value, 10);
+// 2026-11-25 插件卡内设置：同一条路抽成 setChatMapWindow，顶栏下拉与插件卡共用，不留两份。
+function setChatMapWindow(raw) {
+  const next = Number.parseInt(raw, 10);
   const value = WINDOW_OPTIONS.includes(next) ? next : DEFAULT_WINDOW;
   mapState.window = value;
   saveWindowSetting(value);
   const id = mapState.routeId || mapRouteId();
   if (id) void loadMap(id);
+  return value;
+}
+
+windowSelect?.addEventListener("change", () => {
+  setChatMapWindow(windowSelect.value);
 });
 
 // 首帧就按能力投影收起入口（loadCapabilities 回来后会再调一次）
@@ -1402,4 +1415,12 @@ syncChatMapEntry();
 window.addEventListener("hashchange", syncChatMapRoute);
 if (mapRouteId()) setTimeout(syncChatMapRoute, 0);
 
-export { mapRouteId, openChatMap, syncChatMapEntry, syncChatMapRoute };
+export {
+  CHAT_MAP_WINDOW_OPTIONS,
+  getChatMapWindow,
+  mapRouteId,
+  openChatMap,
+  setChatMapWindow,
+  syncChatMapEntry,
+  syncChatMapRoute,
+};

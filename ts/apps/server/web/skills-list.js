@@ -14,6 +14,7 @@ import { switchMarkup } from "./settings-atoms.js";
 import { toggleSkillEnabled } from "./skills-actions.js";
 import { openDeleteSkillModal, openEditSkillModal } from "./skills-modals.js";
 import { SKILL_ADVICE_BUCKET_LABEL, SKILL_ADVICE_FILTERS, SKILL_ADVICE_FREQ_LABEL, SKILL_FREQ_RANK, SKILL_ORIGIN_LABEL, SKILL_SORT_OPTIONS, skillAdvice, skillAdvicePlan, skillLastUsedText, skillSizeText, skillWhenText } from "./skills-settings.js";
+import { flagOn } from "./surfaces.js";
 import { toast } from "./ui-atoms.js";
 
 /* ── 分类 / 排序 / 批量（2026-11-13 二轮：按钮收敛成两个下拉 + 一个批量钮）──
@@ -269,6 +270,11 @@ function buildSkillCard(item, view) {
     );
   }
   const metaHtml = metaBits.join('<span class="sk-sep">·</span>');
+  // 逐条启停（2026-11-25）：SKILL_STATE 关着时开关仍显示当前状态，但点不动。
+  // 内置（core）那条分支不受影响，下面仍走只读「内置」标记。
+  const switchAttrs = flagOn("SKILL_STATE")
+    ? `data-skill-switch="${attr(name)}"`
+    : `data-skill-switch="${attr(name)}" disabled aria-disabled="true" title="技能启停已关闭（设置 → 插件）"`;
   // hover 补全卡片上撤掉的细节（更新到什么时候、多大、从哪来）
   const metaTip = [
     where ? `来自位置 ${where.label || "自加位置"}（${where.dir}）` : "",
@@ -295,7 +301,7 @@ function buildSkillCard(item, view) {
         ${
           core
             ? `<span class="sk-core" data-tip="系统内置技能，始终可用">内置</span>`
-            : switchMarkup(item.enabled === true, { label: `开关 ${name}`, attrs: `data-skill-switch="${attr(name)}"` })
+            : switchMarkup(item.enabled === true, { label: `开关 ${name}`, attrs: switchAttrs })
         }
         ${
           readOnly

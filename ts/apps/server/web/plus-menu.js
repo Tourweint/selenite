@@ -16,6 +16,8 @@ import { syncEditEntry } from "./chat-thread.js";
 import { busyWhenSteerDefault, followUp, send, syncSendEnabled } from "./composer-send.js";
 import { el } from "./dom.js";
 import { closeGroupSettingsDrawer, groupSettingsOpen } from "./groups-settings.js";
+// 目标模式（2026-11-25）：目标弹层里的状态行与动作按钮；服务端 GOAL_MODE 关着时整段不出
+import { goalActionFor, goalStatusText, postGoalAction } from "./goal-status.js";
 import { closeModelMenu } from "./hover-tip.js";
 import { esc } from "./markdown.js";
 import { request } from "./net.js";
@@ -30,10 +32,10 @@ import { state } from "./state.js";
 import { isTaskConversation } from "./task-thread.js";
 import { KEY_SEND } from "./theme.js";
 import { steerIntoTurn } from "./turn-reconcile.js";
-import { closeModal, closePopover, modalOpen, openModal, openPopover, popoverOpen, toast } from "./ui-atoms.js";
+import { closeModal, closePopover, modalOpen, nativeScreenshotReady, openModal, openPopover, popoverOpen, toast } from "./ui-atoms.js";
 
 /* ── 加号菜单（2026-11-13，抄 ZCode/cindy 的 composer「+」）────────────
-   菜单项按能力现渲染：截图只在 getDisplayMedia 存在时出现；「新建目标」只在有执事身份
+   菜单项按能力现渲染：截图只在壳的原生截图可用、或 getDisplayMedia 存在时出现；「新建目标」只在有执事身份
    （总管 / 执事会话）时出现，普通助手会话没有目标位。菜单向上弹，复用 composer-pop 动效。 */
 
 const PLUS_ICONS = {
@@ -66,12 +68,16 @@ function renderPlusMenu() {
       void pickFiles();
     }, "支持图片和常见文档；也可以把文件直接拖进输入框"),
   );
-  if (navigator.mediaDevices?.getDisplayMedia) {
+  // 截图（2026-11-25）：壳的原生截图工具可用、或浏览器有 getDisplayMedia，二者之一就显示
+  const nativeShot = nativeScreenshotReady();
+  if (nativeShot || navigator.mediaDevices?.getDisplayMedia) {
     menu.append(
       plusMenuItem(PLUS_ICONS.monitor, "截图", () => {
         closePlusMenu();
         void captureScreenshot();
-      }, "选一块屏幕区域截图；截完自动附到这条消息"),
+      }, nativeShot
+        ? "拖动框选，或单击选中整个窗口；Esc 取消；截完自动附到这条消息"
+        : "选一块屏幕区域截图；截完自动附到这条消息"),
     );
   }
   if (csResolveTarget()) {
@@ -82,7 +88,7 @@ function renderPlusMenu() {
       plusMenuItem(PLUS_ICONS.target, "新建目标", () => {
         closePlusMenu();
         void openGoalDialog();
-      }, "在项目里新建一个目标；后续派活、进度和结果都记在它下面"),
+      }, "给这位总管 / 执事设一个这一阵要奔的目标；之后每轮对话都会带上"),
     );
   }
 }
@@ -112,6 +118,8 @@ async function openGoalDialog() {
     return;
   }
   let current = "";
+  // 目标状态（2026-11-25 目标模式）：服务端 GOAL_MODE 关着时详情不带 goal 字段，一直是 null
+  let goalState = null;
   try {
     const response = await request(`/api/v1/partners/${encodeURIComponent(target)}`, {
       cache: "no-store",
@@ -119,6 +127,7 @@ async function openGoalDialog() {
     if (response.ok) {
       const data = await response.json().catch(() => ({}));
       current = String(data.currentGoal || "");
+      goalState = data.goal ?? null;
     }
   } catch {
     // 读不到就按空目标打开；保存仍走同一个 PATCH
@@ -137,10 +146,12 @@ async function openGoalDialog() {
                   style="height:auto;min-height:96px;padding:10px;line-height:1.6;resize:vertical"
                   placeholder="例：这个月把日记 v2 的提醒链路跑通，先不碰其他需求。"></textarea>
       </div>
+      <p class="modal-hint" id="goal-status" hidden></p>
       <p class="modal-hint" id="goal-hint"></p>
       <div class="modal-actions">
         <button class="ghost" type="button" data-modal-cancel>取消</button>
         <button class="ghost" type="button" id="goal-clear">清除目标</button>
+        <button class="ghost" type="button" id="goal-action" hidden></button>
         <button class="modal-primary" type="button" id="goal-save">保存</button>
       </div>`;
 
@@ -148,6 +159,35 @@ async function openGoalDialog() {
     const hint = body.querySelector("#goal-hint");
     const save = body.querySelector("#goal-save");
     const clear = body.querySelector("#goal-clear");
+    // 目标模式（2026-11-25）：有状态才出状态行；按钮按状态换文案（开始 / 暂停 / 继续 / 撤销完成）。
+    const statusLine = body.querySelector("#goal-status");
+    const action = body.querySelector("#goal-action");
+    const renderGoalState = () => {
+      const next = goalState ? goalActionFor(goalState) : null;
+      statusLine.hidden = !goalState;
+      statusLine.textContent = goalState ? goalStatusText(goalState) : "";
+      action.hidden = !next;
+      action.textContent = next ? next.label : "";
+    };
+    renderGoalState();
+    action.addEventListener("click", async () => {
+      const next = goalState ? goalActionFor(goalState) : null;
+      if (!next || action.disabled) return;
+      action.disabled = true;
+      hint.classList.remove("is-error");
+      hint.textContent = "处理中…";
+      try {
+        goalState = await postGoalAction(target, next);
+        renderGoalState();
+        hint.textContent = "";
+        toast(next.toast);
+      } catch (error) {
+        if (error.message === "forbidden") return;
+        setModalHint(hint, `没做成：${error.message}`);
+      } finally {
+        action.disabled = false;
+      }
+    });
     input.value = current || draft;
     body.querySelector("[data-modal-cancel]")?.addEventListener("click", closeModal);
 
@@ -258,6 +298,8 @@ async function loadCapabilities() {
     state.capabilities.chatMap = data.chatMap !== false;
     // 工作归属标签（2026-11-18）：缺字段按开处理
     state.capabilities.chatProjectLabel = data.chatProjectLabel !== false;
+    // 分支按钮（2026-11-25）：同一条能力投影，缺字段按开处理
+    state.capabilities.chatBranch = data.chatBranch !== false;
   } catch {
     return;
   }
@@ -270,6 +312,11 @@ async function loadCapabilities() {
     else el.composerFile.setAttribute("accept", "image/*");
   }
   if (!state.capabilities.attachments) clearPendingAttachments();
+  // 已经渲染出来的分支按钮跟着投影走一次（关着就收起，别留一个点了没用的图标）；
+  // 之后新消息由 chat-thread.js 的 canBranchHere() 自己判，这里不再跟。
+  for (const button of document.querySelectorAll(".branch-btn")) {
+    button.hidden = !state.capabilities.chatBranch;
+  }
   syncEditEntry();
 }
 

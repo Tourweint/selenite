@@ -113,6 +113,7 @@ import { wireSearchPage } from "./search-page.js";
 import { INJECT_TABS, SETTINGS_ALIASES, SETTINGS_SECTIONS } from "./settings-base.js";
 import { applySections, applySidebarA11y, syncGreeting, updateHomeMode } from "./shell.js";
 import { state } from "./state.js";
+import { refreshSurfaces } from "./surfaces.js";
 import { loadTickets } from "./tasks-kanban.js";
 import { autoSyncTick } from "./tasks-live.js";
 import { ensureFlag } from "./tasks-redesign.js";
@@ -208,6 +209,9 @@ void (async () => {
     if (enabled) initSelectMenus();
   });
   void loadCapabilities(); // 附件 / 编辑重发的开关投影（2026-11-08 4a）
+  // 界面显隐注册表（2026-11-25）：首屏拉一次 flags，把注册表里的元素按开关铺上显隐。
+  // 读不到按开（见 surfaces.js），不会因为一次抖动把侧栏藏空。
+  void refreshSurfaces();
   void loadRoster(); // E4：执事花名册首帧
   void initGroups(); // 群组（2026-11-06 批二）：可用性探测 + 侧栏节首帧
   void refreshModelPill();
