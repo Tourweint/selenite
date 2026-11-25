@@ -4,7 +4,8 @@ package main
 启动页：服务还没起来的那几秒，窗口里画什么（2026-11-14）。
 
 两副脸，跟主题走（用户拍板）：
-  - 浅色主题（paper / white）→ 「冷光」：首页题头那枚水晶，呼吸 + 一道冷光扫过晶面。
+  - 浅色主题（devin / white / celadon / antigravity）→ 「冷光」：首页题头那枚水晶，呼吸 + 一道冷光扫过晶面。
+    浅色脸的配色固定是默认主题 devin 燕麦（不按主题取色）。
   - 深色主题（indigo / black）→ 「夜航」：深靛底、光环、一小段弧绕石头转。
 
 三条纪律：
@@ -188,11 +189,13 @@ const dayPage = `<!doctype html>
 <style>
 :root {
   color-scheme: light;
-  --bg: #fdf9f2;
-  --backdrop: #f1ebe0;
-  --text: #2e2b3a;
-  --text-2: #6e6b7e;
-  --text-3: #9a97a5;
+  /* 浅色脸的配色 = 业务页默认主题 devin 燕麦（2026-11-25 换掉 paper 米黄）：
+     启动页要和业务页第一帧同色，改默认主题时这里跟着换。 */
+  --bg: #faf6ee;
+  --backdrop: #f0e9dc;
+  --text: #2c2520;
+  --text-2: #635b52;
+  --text-3: #948c80;
   --primary: #3e4a8c;
   --gem: url("{{CRYSTAL}}");
   --serif: "Songti SC", "Noto Serif SC", "Source Han Serif SC", "STSong", "SimSun", "Microsoft YaHei", serif;
@@ -293,7 +296,7 @@ body {
 .rule {
   position: relative; margin-top: 24px;
   width: clamp(160px, 22vw, 230px); height: 1px;
-  background: rgba(46, 43, 58, .18); overflow: hidden;
+  background: rgba(44, 37, 32, .18); overflow: hidden;
 }
 .rule i {
   position: absolute; top: 0; left: 0; height: 1px; width: 36%;
@@ -548,9 +551,9 @@ const offlineTmpl = `<!doctype html>
 <title>Selenite</title>
 <style>
 :root {
-  --bg: #fdf9f2; --backdrop: #f1ebe0;
-  --text: #2e2b3a; --text-2: #6e6b7e; --text-3: #9a97a5;
-  --card: #f6f1e7; --line: rgba(46, 43, 58, .14);
+  --bg: #faf6ee; --backdrop: #f0e9dc;
+  --text: #2c2520; --text-2: #635b52; --text-3: #948c80;
+  --card: #f3ede2; --line: rgba(44, 37, 32, .14);
   --primary: #3e4a8c;
   color-scheme: light;
 }

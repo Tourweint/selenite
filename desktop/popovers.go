@@ -88,9 +88,11 @@ type MenuRequest struct {
 	Items     []MenuItem  `json:"items"`
 }
 
-// ShellCapabilities 页面探测壳能力的返回。
+// ShellCapabilities 页面探测壳能力的返回。nativeScreenshot 是原生截图工具
+// （snapshot.go，2026-11-25）的可用性：开关开 + 这个平台有实现。
 type ShellCapabilities struct {
-	NativePopups bool `json:"nativePopups"`
+	NativePopups     bool `json:"nativePopups"`
+	NativeScreenshot bool `json:"nativeScreenshot"`
 }
 
 // nativePopoversEnabled 是本批的回滚开关：=off 时 Capabilities 报 false，
@@ -103,7 +105,7 @@ func nativePopoversEnabled() bool {
 
 // Capabilities 页面启动时探一次并缓存；普通浏览器没有 window.mygo，根本调不到这里。
 func (Shell) Capabilities() ShellCapabilities {
-	return ShellCapabilities{NativePopups: nativePopoversEnabled()}
+	return ShellCapabilities{NativePopups: nativePopoversEnabled(), NativeScreenshot: nativeSnapshotAvailable()}
 }
 
 // ── 悬停提示（对应 web 的 .hover-tip 小黑签）────────────────
@@ -422,7 +424,7 @@ var prewarmItems = []MenuItem{
 	{Label: "粘贴"},
 }
 
-// menuView 在主线程画菜单：五套主题色板、行 hover/键盘高亮、方向键 + Enter。
+// menuView 在主线程画菜单：六套主题色板（认不出的落 devin 兜底）、行 hover/键盘高亮、方向键 + Enter。
 // 背景同样画在 c.Root() 上（理由同 tipView：Column 不填满窗口时会露系统底板）。
 func menuView(c *ui.Context) {
 	snap := menuSnap.Load()
@@ -629,16 +631,27 @@ func popoverPalette(theme string) popoverColors {
 			divider:     ui.RGBA(30, 42, 37, 0.12),
 			border:      ui.RGBA(30, 42, 37, 0.16),
 		}
-	default: // paper（也是认不出主题时的兜底）
+	case themeAntigravity:
 		return popoverColors{
-			bg:          ui.Hex("#fdf9f2"),
-			hover:       ui.Hex("#f7f3eb"),
-			hoverDanger: ui.Hex("#f1e5dd"),
-			text:        ui.Hex("#2e2b3a"),
-			text3:       ui.Hex("#9a97a5"),
+			bg:          ui.Hex("#faf9f5"),
+			hover:       ui.Hex("#f3f1ea"),
+			hoverDanger: ui.Hex("#ede3dc"),
+			text:        ui.Hex("#2c2a27"),
+			text3:       ui.Hex("#918d84"),
 			danger:      ui.Hex("#b3564d"),
-			divider:     ui.RGBA(200, 197, 188, 0.55),
-			border:      ui.RGBA(46, 43, 58, 0.14),
+			divider:     ui.RGBA(44, 42, 39, 0.12),
+			border:      ui.RGBA(44, 42, 39, 0.14),
+		}
+	default: // devin 燕麦（也是认不出主题时的兜底）
+		return popoverColors{
+			bg:          ui.Hex("#faf6ee"),
+			hover:       ui.Hex("#f3ede2"),
+			hoverDanger: ui.Hex("#eddfd5"),
+			text:        ui.Hex("#2c2520"),
+			text3:       ui.Hex("#948c80"),
+			danger:      ui.Hex("#b3564d"),
+			divider:     ui.RGBA(44, 37, 32, 0.12),
+			border:      ui.RGBA(44, 37, 32, 0.14),
 		}
 	}
 }

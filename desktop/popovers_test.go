@@ -85,24 +85,42 @@ func TestMenuHighlightNavigation(t *testing.T) {
 	}
 }
 
-// 五套主题的色板都得齐全：任何一项是零值色（黑透明），菜单就会画出看不见的行。
-// 这是给「往 tokens.css 加第六套主题却忘了壳这边」的人留的哨兵。
+// 六套主题的色板都得齐全：任何一项是零值色（黑透明），菜单就会画出看不见的行。
+// 这是给「往 tokens.css 加第七套主题却忘了壳这边」的人留的哨兵。
+// 名单与 theme.go 的常量逐个对上：再加主题时这里和 themeKnown 必须一起动。
 func TestPopoverPalettesComplete(t *testing.T) {
-	for _, name := range []string{themePaper, themeWhite, themeIndigo, themeBlack, themeCeladon} {
+	for _, name := range []string{
+		themeWhite, themeIndigo, themeBlack, themeCeladon,
+		themeDevin, themeAntigravity,
+	} {
 		pal := popoverPalette(name)
 		for fieldName, c := range map[string]ui.Color{
 			"bg": pal.bg, "hover": pal.hover, "hoverDanger": pal.hoverDanger,
 			"text": pal.text, "text3": pal.text3, "danger": pal.danger, "divider": pal.divider,
+			"border": pal.border,
 		} {
 			if c.A == 0 {
 				t.Fatalf("%s 主题的 %s 是零值色", name, fieldName)
 			}
 		}
 	}
-	// 认不出的主题落 paper 兜底，不该 panic 也不该是零值色。
-	pal := popoverPalette("mystery")
-	if pal.bg.A == 0 {
-		t.Fatal("兜底色板不应是零值色")
+	// 每套都得认得：认不出的落 devin 兜底，色板就和 devin 一模一样——
+	// 名单里谁漏配了 case，这一条会把它揪出来（devin 自己就是兜底，除外）。
+	devin := popoverPalette(themeDevin)
+	for _, name := range []string{themeWhite, themeIndigo, themeBlack, themeCeladon, themeAntigravity} {
+		if popoverPalette(name) == devin {
+			t.Fatalf("%s 的色板与 devin 兜底完全相同，疑似漏了 case", name)
+		}
+	}
+	// 认不出或已删的主题（paper / codex）落 devin 兜底，不该 panic 也不该是零值色。
+	for _, name := range []string{"mystery", "paper", "codex"} {
+		pal := popoverPalette(name)
+		if pal.bg.A == 0 {
+			t.Fatalf("%s 的兜底色板不应是零值色", name)
+		}
+		if pal != devin {
+			t.Fatalf("认不出的主题 %q 应落 devin 兜底，实际 %+v", name, pal)
+		}
 	}
 }
 

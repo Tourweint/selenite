@@ -92,7 +92,8 @@ $env:LIFEDIARY_BASE_URL='http://127.0.0.1:9000'
 | `LIFEDIARY_SHELL_WATCH` | `off` = 关掉服务失联自动重拉守护 |
 | `LIFEDIARY_QUIT_STOP_SERVICE` | `off` = 托盘退出只关壳、不停 Node 服务（回到 2026-11-20 前的形态） |
 | `LIFEDIARY_NATIVE_POPOVERS` | `off` = 原生弹出层回滚开关：Capabilities 报 `nativePopups=false`，页面全量回 DOM 旧路（回滚不等于改代码） |
-| `LIFEDIARY_THEME` | 显式指定壳记住的主题（paper/white/indigo/black/celadon），调试取色用 |
+| `LIFEDIARY_NATIVE_SNAPSHOT` | `off` / `false` / `0` = 原生截图回滚开关（2026-11-25）：Capabilities 报 `nativeScreenshot=false`，页面退回 `getDisplayMedia` |
+| `LIFEDIARY_THEME` | 显式指定壳记住的主题（white/celadon/devin/antigravity/indigo/black，六套同外观页；认不出的落 devin），调试取色用 |
 | `LIFEDIARY_THEME_FILE` | 主题记忆文件落点（测试用） |
 
 ## 已验证

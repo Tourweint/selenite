@@ -11,6 +11,9 @@ package main
 设 SPLASH_DUMP_DIR 时顺手把渲染结果写出去，配 Edge headless 截图用：
     $env:SPLASH_DUMP_DIR = "...\design\splash\rendered"
     go test -count=1 -run TestSplashPages .
+
+浅色脸的底色 2026-11-25 起是 devin 燕麦 #faf6ee（业务页默认主题，此前 paper 米黄 #fdf9f2）；
+下面浅色各例钉的就是这个值。
 */
 
 import (
@@ -30,15 +33,15 @@ func TestSplashPages(t *testing.T) {
 	}{
 		{
 			name:  "浅色·冷光",
-			theme: "paper",
-			want:  []string{"#fdf9f2", "SELENITE", "data:image/png;base64,", "window.splash", "探测 <b>"},
-			deny:  []string{"{{", "#12141d"},
+			theme: "devin",
+			want:  []string{"#faf6ee", "SELENITE", "data:image/png;base64,", "window.splash", "探测 <b>"},
+			deny:  []string{"{{", "#12141d", "#fdf9f2"},
 		},
 		{
 			name:  "深色·夜航",
 			theme: "indigo",
 			want:  []string{"#12141d", "ring r1", "data:image/png;base64,", "window.splash"},
-			deny:  []string{"{{", "background: #fdf9f2"},
+			deny:  []string{"{{", "background: #faf6ee"},
 		},
 		{
 			name:  "纯黑也算深色",
@@ -46,9 +49,9 @@ func TestSplashPages(t *testing.T) {
 			want:  []string{"#12141d", "ring r1"},
 		},
 		{
-			name:  "纯白也算浅色",
+			name:  "暖白也算浅色",
 			theme: "white",
-			want:  []string{"#fdf9f2", "SELENITE"},
+			want:  []string{"#faf6ee", "SELENITE"},
 		},
 	}
 
@@ -72,7 +75,7 @@ func TestSplashPages(t *testing.T) {
 	// 连不上那张：同一套标题栏，靠 data-face 换配色；错误文本要按原样出现（已转义）。
 	t.Run("连不上", func(t *testing.T) {
 		for _, face := range []string{"day", "night"} {
-			theme := "paper"
+			theme := "devin"
 			if face == "night" {
 				theme = "indigo"
 			}
@@ -92,7 +95,7 @@ func TestSplashPages(t *testing.T) {
 
 	// 写盘给截图用，不设就不写。
 	if dir := os.Getenv("SPLASH_DUMP_DIR"); dir != "" {
-		for _, th := range []string{"paper", "indigo"} {
+		for _, th := range []string{"devin", "indigo"} {
 			t.Setenv("LIFEDIARY_THEME", th)
 			if err := os.WriteFile(filepath.Join(dir, th+".html"), []byte(connectingPage("http://127.0.0.1:39847")), 0o644); err != nil {
 				t.Fatal(err)
