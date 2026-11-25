@@ -126,11 +126,43 @@ function chatLabel(chat) {
 	return chat?.title || "会话";
 }
 
+/** 深链 `#/settings/context?chat=<外部id>&label=<显示名>`（2026-11-24）。
+ * 只服务「一条不列在会话清单里、但按 id 读得到」的会话（开场问候的隐藏生成会话）；
+ * 没带 chat 时逐字保持旧行为。 */
+let deepLinkChat = null;
+
+function deepLinkChatFromHash() {
+	const hash = location.hash.replace(/^#/, "");
+	if (!hash.startsWith("/settings/context")) return null;
+	const text = hash.split("?")[1] || "";
+	let chat = "";
+	let label = "";
+	try {
+		const params = new URLSearchParams(text);
+		chat = (params.get("chat") || "").trim();
+		label = (params.get("label") || "").trim();
+	} catch {
+		return null;
+	}
+	if (!chat) return null;
+	return { conversationId: chat, title: label || "系统请求" };
+}
+
 function chatChoices() {
 	const rows = (state.chats || [])
 		.filter((chat) => chat && chat.conversationId)
 		.slice()
 		.sort((left, right) => (right.lastAt || 0) - (left.lastAt || 0));
+	// 2026-11-24：深链 `?chat=` 指定一条不在会话清单里的会话（如开场问候的隐藏生成会话
+	// `task-greeting-…`）。只给这一次渲染合成一个选项，不并入 state.chats、不列其它 task- 会话。
+	if (deepLinkChat && !rows.some((chat) => chat.conversationId === deepLinkChat.conversationId)) {
+		rows.unshift({
+			conversationId: deepLinkChat.conversationId,
+			title: deepLinkChat.title,
+			chatKind: "hidden",
+			lastAt: 0,
+		});
+	}
 	// 2026-11-17：只有一条真实会话都没有时才用兜底的「当前会话」。
 	// 有真实会话时不把它插进列表：当前打开的可能是一条还没落库的空会话，
 	// 选中它只会得到「当前没有开销」，看不出这一页有什么用。
@@ -147,6 +179,9 @@ function chatChoices() {
 }
 
 function selectedChatId(choices) {
+	if (deepLinkChat && choices.some((chat) => chat.conversationId === deepLinkChat.conversationId)) {
+		return deepLinkChat.conversationId;
+	}
 	if (state.conversationId && choices.some((chat) => chat.conversationId === state.conversationId)) {
 		return state.conversationId;
 	}
@@ -379,15 +414,19 @@ function contextSettingsMarkup() {
 	contextSeq += 1;
 	// 重渲染后旧请求列表的返回也不能往新 DOM 里写。
 	requestsSeq += 1;
+	deepLinkChat = deepLinkChatFromHash();
 	const choices = chatChoices();
 	const selected = selectedChatId(choices);
 	// 只有「当前会话」兜底、没有任何真实会话记录时直接进默认开销：
 	// 用户不聊天也能看到总管基线，不必先点模式按钮。
-	const hasRealChats = (state.chats || []).some((chat) => chat && chat.conversationId);
+	const hasRealChats =
+		(state.chats || []).some((chat) => chat && chat.conversationId) || Boolean(deepLinkChat);
 	contextMode = hasRealChats ? "session" : "default";
 	// 2026-11-22：深链带了 role 就直接看这个角色的默认开销；没带时上面的旧口径逐字不变。
 	const deepLinkRole = deepLinkRoleFromHash();
 	if (deepLinkRole) contextMode = "default";
+	// 2026-11-24：chat 深链优先于 role（它指定的是具体会话，不是角色基线）。
+	if (deepLinkChat) contextMode = "session";
 	const roles = withDeepLinkRole(defaultRoleChoices(), deepLinkRole);
 	const selectedRole = deepLinkRole || roles[0]?.id || "chief";
 	// 2026-11-18：导航卡已经写着「上下文」，节标题不再重复一遍；
@@ -985,13 +1024,29 @@ let requestsSeq = 0;
 let requestsData = null;
 let requestsChatId = "";
 
+/** 一次性系统请求的会话（目前只有开场问候）：页面顶部给一句口径提示。 */
+function oneShotHintOf(conversationId) {
+	const id = String(conversationId || "");
+	if (id.startsWith("task-greeting-")) return "开场问候";
+	return "";
+}
+
 function renderNote() {
 	const note = document.getElementById("ctx-note");
 	if (!note) return;
 	const partnerId = currentPartnerIdValue;
 	if (!partnerId) {
-		note.hidden = true;
-		note.innerHTML = "";
+		const oneShot = oneShotHintOf(currentData?.conversationId);
+		if (!oneShot) {
+			note.hidden = true;
+			note.innerHTML = "";
+			return;
+		}
+		note.hidden = false;
+		// 冷前缀是一条请求的事，不是「缓存掉了」：这条会话每次生成只跑这一条，命中率 0 属预期。
+		note.innerHTML = `这是一次性系统请求（${esc(
+			oneShot,
+		)}）：服务端替助手发起的一次，类似定时任务到点让它自己跑一轮，不是每轮注入、也不是你说了什么。这里的第一条请求前缀从没被缓存过——命中率 0 / 慢一点都属于预期，整条请求只跑这一次。`;
 		return;
 	}
 	note.hidden = false;

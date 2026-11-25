@@ -13,7 +13,7 @@ import { el } from "./dom.js";
 import { request } from "./net.js";
 import { shellCall } from "./settings-connection.js";
 import { state } from "./state.js";
-import { toast } from "./ui-atoms.js";
+import { nativeScreenshotReady, toast } from "./ui-atoms.js";
 
 /* ── 附件（2026-11-08 扫尾批 4a 图片；2026-11-13 附件走路径）────────
    规则只有一条：**只有粘贴的截图内联，其余附件全部只带路径**。
@@ -238,8 +238,38 @@ async function pickFiles() {
   el.composerFile?.click();
 }
 
-/** 加号 →「截图」：抓一帧屏幕，内联进待发条（不可用的环境不渲染这一项） */
+/** 加号 →「截图」（2026-11-25 起先试壳的原生截图工具）
+ *
+ * 壳能力 nativeScreenshot 开 → Shell.CaptureSnapshot（拖动框选 / 单击吸附整个窗口，
+ * desktop/snapshot.go）。其余三种情况走原来的 getDisplayMedia：浏览器（没有 window.mygo）、
+ * 老壳（没有这个方法，Capabilities 也探不到）、回滚开关关（LIFEDIARY_NATIVE_SNAPSHOT=off）。
+ * 用户在遮罩里按 Esc / 右键 = 取消：到此为止，什么都不产出，也不再去弹系统共享选择器；
+ * 只有壳调用出错（或没返回图片）才 toast 后回退。 */
 async function captureScreenshot() {
+  if (nativeScreenshotReady()) {
+    try {
+      const shot = await shellCall("CaptureSnapshot");
+      if (shot?.canceled) return;
+      if (typeof shot?.data === "string" && shot.data) {
+        if (state.pendingImages.length >= MAX_PENDING_IMAGES) {
+          toast(`一条消息最多 ${MAX_PENDING_IMAGES} 张图片`);
+          return;
+        }
+        state.pendingImages.push({ mimeType: shot.mimeType || "image/png", data: shot.data });
+        renderPendingAttachments();
+        syncSendEnabled();
+        return;
+      }
+      toast("原生截图没有返回图片，改用系统共享选择器");
+    } catch (error) {
+      toast(`原生截图出错：${error?.message || error}，改用系统共享选择器`);
+    }
+  }
+  await captureScreenShare();
+}
+
+/** 原来那条截图路（浏览器 / 老壳 / 开关关）：系统共享选择器选一块屏幕，抓一帧 */
+async function captureScreenShare() {
   if (!navigator.mediaDevices?.getDisplayMedia) {
     toast("这个窗口不支持截屏，可以直接粘贴图片");
     return;

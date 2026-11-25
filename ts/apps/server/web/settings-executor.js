@@ -762,7 +762,7 @@ function profileCard(kind, profile, isCurrent) {
                            data-tip="拉取该 CLI 的完整模型清单（清单命令不耗模型额度）；在输入框打字可筛选">${ARROW_SVG}</button>
                    <div class="executor-model-menu" data-model-menu="${attr(kind.id)}" hidden></div>
                  </div>
-                 <button class="ghost executor-probe" type="button" data-probe="${attr(kind.id)}"
+                 <button class="ghost executor-probe executor-probe-btn" type="button" data-probe="${attr(kind.id)}"
                          data-tip="填了模型就真调一次该 CLI 验证可用性（很小的请求，可能耗一点额度）；留空只拉清单">检测</button>
                </div>`
         }

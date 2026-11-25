@@ -284,13 +284,14 @@
   gap: 26px;
   padding: 0 18px; height: 56px;
 }
-.mdl-model { flex: 0 1 auto; min-width: 0; display: flex; align-items: baseline; gap: 10px; }
+.mdl-model { flex: 0 1 auto; min-width: 0; display: flex; align-items: center; gap: 10px; }
 .mdl-name {
   flex: 0 1 auto; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-size: 18px; font-weight: 600; line-height: 1.25; color: var(--text);
 }
-/* 供应商名跟在模型名后面（同一行、底对齐）；空串时连分隔点一起收起
+/* 供应商名跟在模型名后面（同一行、垂直居中——2026-11-25 用户口径：不要底对齐，
+   要和左边的英文模型名同心）；空串时连分隔点一起收起
    （settings-usage.js 读取失败会把 hint 清空）。 */
 .mdl-prov {
   flex: 0 1 auto; min-width: 0;

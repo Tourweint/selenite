@@ -1,5 +1,5 @@
 /*
- * 色板与四套主题（:root 变量 / white / indigo / black / accent）
+ * 色板与六套主题（:root 变量 = devin / white / celadon / antigravity / indigo / black / accent）
  *
  * 2026-11-13 从 web/style.css（7,373 行单文件）按分区切出；正文是原文搬运，未改一条规则。
  * 原区间 L1–L366。@import 顺序即层叠顺序，改样式只改对应分部。
@@ -10,22 +10,27 @@
  * 2026-11-05 起四套：paper（奶白纸 + 靛蓝墨，= :root）/ white（纯白）/
  * indigo（靛蓝夜，石墨蓝黑改进版）/ black（纯黑 OLED）。
  *
+ * 2026-11-25 收口成六套（4 浅 + 2 深）：:root 换成 devin（燕麦，推文里三款 Agent Desktop
+ * 配色之一），paper（米黄）与 codex（奶油）删除；存着旧值的用户由 index.html 的防闪脚本迁到 devin。
+ * 手机端 Theme.kt 没跟这一步，桌面端默认不再与手机端同色。
+ * 见 docs/变更记录/2026-11-25-主题收口（保留燕麦，删米黄与奶油）.md。
+ *
  * 形状同样照手机端：8 / 12 / 16 / 24 四档，按钮和分组卡都是 16 的 squircle，
  * 不是胶囊（2026-10-21 手机端明确要求「按钮和设置页那个方框一样」）。
  */
 
 :root {
-  /* ── Paper：奶白纸 ── */
-  --bg: #fdf9f2;
-  --surface: #fdf9f2;
-  --surface-low: #f7f3eb;
-  --card: #f6f1e7;
-  --card-high: #ede9e0;
-  --text: #2e2b3a;
-  --text-2: #6e6b7e;
-  --text-3: #9a97a5;
-  --outline: #c8c5bc;
-  --divider: rgba(200, 197, 188, 0.55);
+  /* ── Devin：燕麦（2026-11-25 起的默认主题；= :root，没有单独的 html[data-theme] 块） ── */
+  --bg: #faf6ee;
+  --surface: #faf6ee;
+  --surface-low: #f3ede2;
+  --card: #f3ede2;
+  --card-high: #eae2d3;
+  --text: #2c2520;
+  --text-2: #635b52;
+  --text-3: #948c80;
+  --outline: #d6ccba;
+  --divider: rgba(44, 37, 32, 0.12);
 
   --c-primary: #3e4a8c;
   --c-on-primary: #ffffff;
@@ -44,29 +49,29 @@
   /* 代码高亮的五类 token（2026-11-04 批次一）：取自家色板，不引配色库 */
   --code-k: #3e4a8c;
   --code-s: #8a6d3b;
-  --code-c: #9a947f;
+  --code-c: #948c80;
   --code-n: #a4761f;
   --code-a: #5b6b9e;
 
-  --card-border: transparent;
+  --card-border: rgba(44, 37, 32, 0.08);
   --card-glow: none;
-  --shadow: 0 1px 2px rgba(46, 43, 58, 0.04);
+  --shadow: 0 1px 2px rgba(44, 37, 32, 0.05);
   /* 浮层阴影 / 警示色（2026-11-04 composer 对齐 cindy）：菜单与上下文环用 */
-  --shadow-menu: 0 4px 16px rgba(46, 43, 58, 0.15);
+  --shadow-menu: 0 4px 16px rgba(44, 37, 32, 0.12);
   --warn: #b07d2b;
   /* 成功 / 在线一类的正色（2026-11-05 四主题）：别处不再硬编码绿值 */
   --ok: #1f9d4d;
   /* composer 工具行 pill 的 hover/展开底色：浅色在卡底上压一层墨，不是另一块卡 */
-  --composer-pill-bg: rgba(46, 43, 58, 0.06);
-  /* 输入卡与浮层的描边（2026-11-04 界面 v2）：--card-border 浅色是透明的，
-     拿它当边框等于没线；这一档是「看得见但不抢」的中性线 */
-  --composer-border: rgba(46, 43, 58, 0.14);
+  --composer-pill-bg: rgba(44, 37, 32, 0.05);
+  /* 输入卡与浮层的描边（2026-11-04 界面 v2）：--card-border 在浅色下很淡
+     （暖白是透明、燕麦 8% 墨），拿它当输入卡的边等于没线；这一档是「看得见但不抢」的中性线 */
+  --composer-border: rgba(44, 37, 32, 0.14);
   /* 首页居中偏移：JS 按实测卡高写入（高度/2 - 12），JS 失效时回退这个常量 */
   --composer-home-offset: 64px;
 
   /* 浮层背景：主区铺满窗口后只在左上角的 16px 圆角处露出这一档底色 */
-  --backdrop: #f1ebe0;
-  --composer-shadow: 0 10px 28px rgba(46, 43, 58, 0.10);
+  --backdrop: #f0e9dc;
+  --composer-shadow: 0 10px 28px rgba(44, 37, 32, 0.10);
 
   --r-sm: 8px;
   --r-md: 12px;
@@ -137,11 +142,12 @@
 }
 
 /*
- * ── 四套主题（2026-11-05 定稿）────────────────────────────
- * :root 就是 paper（米黄纸，沿用 2026-10 的一版，值不动）；
- * white / indigo / black 只覆盖同名 token，布局与形状 token 留在 :root。
- * 纪律：:root 里的每个主题 token，下面三套都必须有值，缺一个就是暗色下漏色。
- * 迁移口径：旧 "dark" → "indigo"，旧 "light" / 缺省 → "paper"（见 index.html 与 app.js）。
+ * ── 主题覆盖块（2026-11-05 定稿四套，2026-11-25 收口成六套）──────────
+ * :root 就是 devin（燕麦，默认）；white / celadon / antigravity / indigo / black
+ * 各有一个块，只覆盖同名 token，布局与形状 token 留在 :root。
+ * 纪律：:root 里的每个主题 token，下面每套都必须有值，缺一个就是该主题下漏色。
+ * 迁移口径：旧 "dark" → "indigo"，其余（旧 "light" / 缺省 / 已删的 paper、codex）→ "devin"
+ * （见 index.html 防闪脚本与 theme.js）。
  */
 
 /* ── White：暖白（2026-11-08 柔化：纯白太刺眼，降为微暖灰白；手机端 Theme.kt 未跟随） ── */
@@ -311,7 +317,7 @@ html[data-theme="black"] {
 }
 
 /* ── Celadon：青瓷（2026-11-14 增第五套：淡青瓷纸 + 墨绿字，冷调低饱和） ──
-   与 paper 同一族"浅底纸"，但底子是绿的、字压得更深；强调色仍用靛蓝，
+   与默认那套浅底纸同一族，但底子是绿的、字压得更深；强调色仍用靛蓝，
    所以换到这套只是"换了张纸"，不换整套系统的颜色语言。 */
 html[data-theme="celadon"] {
   --bg: #f1f5f1;
@@ -360,6 +366,70 @@ html[data-theme="celadon"] {
   --modal-mask: rgba(20, 28, 24, 0.6);
 
   /* 对话区中性面：浅底同样用墨色压层 */
+  --chat-bubble: color-mix(in srgb, var(--text) 5%, transparent);
+  --chat-hairline: color-mix(in srgb, var(--text) 9%, transparent);
+  --chat-inset: color-mix(in srgb, var(--text) 4%, transparent);
+
+  color-scheme: light;
+}
+
+/*
+ * ── 暖色纸（2026-11-25）：来源是一条推文里三款 Agent Desktop 的配色（背景 / 文字 / 强调色）。
+ * 这里只搬"纸"：底色、字色、描边、阴影全套覆盖；--c-primary 家族 / --c-secondary /
+ * --c-tertiary / --c-error / --warn / --ok 与 :root 逐值相同——强调色归 data-accent 那
+ * 一套机制管，主题不替用户切强调色。各套自己的强调色只出现在外观页的缩略卡上
+ * （theme.js 的 THEMES[].accent），页面里不生效。
+ * 同日收口：三套里只留 devin（燕麦），它升成默认、就是上面的 :root，所以下面没有它的块；
+ * codex（奶油）与 paper（米黄）删除。推文只给了背景 / 文字 / 强调色，其余档位是配平值，
+ * 见 docs/变更记录/2026-11-25-新增三套暖色主题.md 与 2026-11-25-主题收口（保留燕麦，删米黄与奶油）.md。
+ */
+
+/* ── Antigravity：陶白（推文：背景 #FAF9F5 / 文字 #2C2A27 / 强调 #D97757） ── */
+html[data-theme="antigravity"] {
+  --bg: #faf9f5;
+  --surface: #faf9f5;
+  --surface-low: #f3f1ea;
+  --card: #f3f1ea;
+  --card-high: #eae8df;
+  --text: #2c2a27;
+  --text-2: #615e58;
+  --text-3: #918d84;
+  --outline: #d5d1c6;
+  --divider: rgba(44, 42, 39, 0.12);
+
+  --c-primary: #3e4a8c;
+  --c-on-primary: #ffffff;
+  --c-primary-container: #f0ede5;
+  --c-on-primary-container: #1e1b4b;
+  --c-secondary: #b89b6e;
+  --c-on-secondary: #ffffff;
+  --c-secondary-container: #f5edd9;
+  --c-on-secondary-container: #4a3b1e;
+  --c-tertiary: #e0a84a;
+  --c-on-tertiary: #ffffff;
+  --c-tertiary-container: #fceecb;
+  --c-on-tertiary-container: #5c4210;
+  --c-error: #b3564d;
+
+  --code-k: #3e4a8c;
+  --code-s: #8a6d3b;
+  --code-c: #918d84;
+  --code-n: #a4761f;
+  --code-a: #5b6b9e;
+
+  --card-border: rgba(44, 42, 39, 0.08);
+  --card-glow: none;
+  --shadow: 0 1px 2px rgba(44, 42, 39, 0.05);
+  --shadow-menu: 0 4px 16px rgba(44, 42, 39, 0.12);
+  --warn: #b07d2b;
+  --ok: #1f9d4d;
+  --composer-pill-bg: rgba(44, 42, 39, 0.05);
+  --composer-border: rgba(44, 42, 39, 0.14);
+
+  --backdrop: #f2f0e8;
+  --composer-shadow: 0 10px 28px rgba(44, 42, 39, 0.10);
+  --modal-mask: rgba(0, 0, 0, 0.6);
+
   --chat-bubble: color-mix(in srgb, var(--text) 5%, transparent);
   --chat-hairline: color-mix(in srgb, var(--text) 9%, transparent);
   --chat-inset: color-mix(in srgb, var(--text) 4%, transparent);

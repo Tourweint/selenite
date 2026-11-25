@@ -20,6 +20,8 @@
 
 import { paintAvatar } from "./avatar.js";
 import { el } from "./dom.js";
+// 目标模式（2026-11-25）：当前目标弹层里的状态行与动作按钮；服务端 GOAL_MODE 关着时整段不出
+import { goalActionFor, goalStatusShort, goalStatusText, postGoalAction } from "./goal-status.js";
 import { chevSvg } from "./icons.js";
 import { attr, esc } from "./markdown.js";
 import { request } from "./net.js";
@@ -365,6 +367,18 @@ function pfMarkup(partnerId, partner, detail) {
       </div>
     </section>
 
+    <!-- ①·六·一 一次性请求（2026-11-24）：跑一次就结束，不属于每轮注入。
+         开场问候生成在隐藏会话 task-greeting-… 里（侧栏与上下文页都不列），
+         这里只放入口：看那次请求发出去的原文与用量（跳到设置 → 注入 → 上下文）。 -->
+    <section class="pf-sec" id="pf-oneshot">
+      <div class="pf-sec-head">
+        <h2 class="pf-sec-title" data-tip="跑一次就结束，不属于每轮注入。点卡看那次请求的系统提示词、消息与用量。">一次性请求</h2>
+      </div>
+      <div class="card pf-panel">
+        <div class="pf-mod-cards" id="pf-oneshot-cards"></div>
+      </div>
+    </section>
+
     <!-- ①·六·二 按相关度召回（2026-11-15 打磨二轮）：记忆四类 + 挂载项目的记忆。
          不是恒定注入——同一句话不同时间浮出来的不一样；点卡说明机制与开关。 -->
     <section class="pf-sec" id="pf-recall">
@@ -698,16 +712,20 @@ function pfOpenContractEditor(partnerId, detail, onChanged) {
 }
 
 /** 当前目标编辑弹层（2026-11-15 打磨：与岗位契约同一弹层结构——大框 + 撤销/保存 + 关闭）。 */
-function pfOpenGoalEditor(partnerId, current, onChanged) {
+function pfOpenGoalEditor(partnerId, current, onChanged, goal) {
   openModal("当前目标", (body) => {
     const original = String(current ?? "");
+    // 目标状态（2026-11-25 目标模式）：开关关着时是 null，状态行与按钮都不出
+    let goalState = goal ?? null;
     body.innerHTML = `
       <p class="modal-desc">这一阵在奔什么。留空 = 清除；写了他每轮都记得。</p>
       <textarea class="pf-contract" id="pf-goal" maxlength="1000" spellcheck="false"
                 placeholder="本季度要奔的事">${esc(original)}</textarea>
+      <p class="modal-hint" id="pf-goal-status" hidden></p>
       <p class="modal-hint" id="pf-goal-hint"></p>
       <div class="modal-actions">
         <button class="ghost" type="button" data-modal-cancel>关闭</button>
+        <button class="ghost" type="button" id="pf-goal-action" hidden></button>
         <button class="ghost" type="button" id="pf-goal-reset" disabled>撤销</button>
         <button class="modal-primary" type="button" id="pf-goal-save" disabled>保存</button>
       </div>`;
@@ -716,6 +734,34 @@ function pfOpenGoalEditor(partnerId, current, onChanged) {
     const reset = body.querySelector("#pf-goal-reset");
     const hint = body.querySelector("#pf-goal-hint");
     body.querySelector("[data-modal-cancel]")?.addEventListener("click", () => closeModal());
+    // 目标模式（2026-11-25）：有状态才出状态行；按钮按状态换文案（开始 / 暂停 / 继续 / 撤销完成）。
+    const statusLine = body.querySelector("#pf-goal-status");
+    const action = body.querySelector("#pf-goal-action");
+    const renderGoalState = () => {
+      const next = goalState ? goalActionFor(goalState) : null;
+      statusLine.hidden = !goalState;
+      statusLine.textContent = goalState ? goalStatusText(goalState) : "";
+      action.hidden = !next;
+      action.textContent = next ? next.label : "";
+    };
+    renderGoalState();
+    action.addEventListener("click", async () => {
+      const next = goalState ? goalActionFor(goalState) : null;
+      if (!next || action.disabled) return;
+      action.disabled = true;
+      setModalHint(hint, "处理中…", false);
+      try {
+        goalState = await postGoalAction(partnerId, next);
+        renderGoalState();
+        setModalHint(hint, "", false);
+        toast(next.toast);
+        if (typeof onChanged === "function") onChanged(original);
+      } catch (error) {
+        if (error.message !== "forbidden") setModalHint(hint, `没做成：${error.message}`, true);
+      } finally {
+        action.disabled = false;
+      }
+    });
     let saving = false;
     const refresh = () => {
       const dirty = input.value !== original;
@@ -742,6 +788,9 @@ function pfOpenGoalEditor(partnerId, current, onChanged) {
         setModalHint(hint, input.value.trim() ? "已保存，下次对话起生效。" : "已清除目标。", false);
         toast("当前目标已更新");
         saving = false;
+        // 目标模式（2026-11-25）：PATCH 回显最新状态（清除目标后 = null，状态行随之收起）
+        goalState = data.goal ?? null;
+        renderGoalState();
         if (typeof onChanged === "function") onChanged(data.partner?.currentGoal ?? input.value);
       } catch (error) {
         if (error.message !== "forbidden") setModalHint(hint, `没存成：${error.message}`, true);
@@ -1133,6 +1182,12 @@ function pfOpenInjectionViewer(partnerId, kind, onChanged) {
     });
     return;
   }
+  // 开场问候（2026-11-24）：跑在隐藏会话里的一次性请求，不属于每轮注入；
+  // 弹层只负责解释 + 指路，请求原文走上下文页（按会话 id 深链）。
+  if (kind === "greeting") {
+    pfOpenGreetingRecord(partnerId);
+    return;
+  }
   const def = PF_VIEW_FIELDS[kind];
   if (!def) return;
   openModal(
@@ -1170,6 +1225,69 @@ function pfOpenInjectionViewer(partnerId, kind, onChanged) {
     },
     { className: "modal-wide" },
   );
+}
+
+/**
+ * 开场问候弹层（2026-11-24）：不画第二份请求正文，只解释 + 指路。
+ *
+ * 问候跑在隐藏会话 `task-greeting-…` 里；侧栏与上下文页的会话下拉都不列 `task-`，
+ * 所以从人设页给一个入口。请求的系统提示词 / 消息 / 用量由上下文页按 id 读——
+ * 深链 `#/settings/context?chat=&label=`，与普通会话同一条只读链路。
+ */
+function pfOpenGreetingRecord(partnerId) {
+  openModal("一次性请求 · 开场问候", (body) => {
+    body.innerHTML = `
+      <p class="modal-desc">这不在每轮注入里：新建执事后第一次打开专线时，服务端会另起一条隐藏会话，用「人设正文 + 问候要求」跑一次模型，再把结果写回正式会话。这次请求不在侧栏，也不在上下文页的会话列表里；这里给你它的入口。</p>
+      <p class="modal-desc">它像定时任务到点让助手自己跑一轮：服务端替助手发起，不是你说了什么。首条请求的前缀从没被缓存过（和正式会话的缓存互不影响），第一次打开会多等一会儿；整条请求只跑这一次。</p>
+      <p class="pf-hint" id="pf-greeting-hint">读取中…</p>
+      <div class="modal-actions">
+        <button class="ghost" type="button" data-modal-cancel>关闭</button>
+        <button class="modal-primary" type="button" id="pf-greeting-open" hidden>在上下文页看这次请求</button>
+      </div>`;
+    const hint = body.querySelector("#pf-greeting-hint");
+    const open = body.querySelector("#pf-greeting-open");
+    body.querySelector("[data-modal-cancel]")?.addEventListener("click", () => closeModal());
+    open?.addEventListener("click", () => {
+      const chat = open.dataset.chat || "";
+      if (!chat) return;
+      closeModal();
+      location.hash = `#/settings/context?chat=${encodeURIComponent(chat)}&label=${encodeURIComponent("开场问候")}`;
+    });
+    void (async () => {
+      try {
+        const response = await request(
+          `/api/v1/partners/${encodeURIComponent(partnerId)}/greeting`,
+          { cache: "no-store" },
+        );
+        const data = await response.json().catch(() => ({}));
+        if (!body.isConnected) return; // 用户已经关掉弹层
+        if (response.status === 404) {
+          hint.textContent = "上下文检查当前关着（CHAT_CONTEXT_INSPECT=false），这次请求的原文看不到。";
+          return;
+        }
+        if (!response.ok || !data.ok) {
+          throw new Error(data.message || data.error || `HTTP ${response.status}`);
+        }
+        if (data.conversationId) {
+          hint.textContent = data.enabled
+            ? "已经生成过：那次请求在一个隐藏会话里，点下面的按钮看它的固定前缀、消息与用量。"
+            : "问候开关当前关着（PARTNER_GREETING_ENABLED=false），不会再生成；已经生成过的这一次仍可查看。";
+          if (open) {
+            open.dataset.chat = data.conversationId;
+            open.hidden = false;
+          }
+          return;
+        }
+        hint.textContent = data.enabled
+          ? "还没生成过开场问候。新执事的问候在第一次打开专线时生成；如果已经打开过仍没有，可能是当时生成失败。"
+          : "问候开关当前关着（PARTNER_GREETING_ENABLED=false），不会生成开场问候。";
+      } catch (error) {
+        if (!body.isConnected) return;
+        hint.textContent =
+          error.message === "forbidden" ? "这个令牌没被接受。" : `读不到：${error.message}`;
+      }
+    })();
+  }, { className: "modal-wide" });
 }
 
 /** 负责项目弹层（2026-11-15 多挂载：单选下拉改勾选清单；PARTNER_PROJECT_MEMORY 关时卡片不渲染）。 */
@@ -2495,10 +2613,11 @@ async function pfWirePersona(root, partnerId, partner, detail, onDraftChange) {
   const presetBox = root.querySelector("#pf-persona-presets");
   const cardsBox = root.querySelector("#pf-persona-cards");
   const injectedBox = root.querySelector("#pf-injected-cards");
+  const oneshotBox = root.querySelector("#pf-oneshot-cards");
   const recallBox = root.querySelector("#pf-recall-cards");
   const advancedBox = root.querySelector("#pf-advanced-cards");
   const hint = root.querySelector("#pf-persona-hint");
-  if (!section || !presetBox || !cardsBox || !hint || !injectedBox || !recallBox || !advancedBox) return;
+  if (!section || !presetBox || !cardsBox || !hint || !injectedBox || !oneshotBox || !recallBox || !advancedBox) return;
 
   /** 端点形状与 shared 的 PartnerPersonaView 一致；这里只留界面要用的三样。
    *  persona = null 时（还没读到 / 总开关关）只画岗位动作卡与能力卡（2026-11-15 并入口径）。 */
@@ -2584,7 +2703,9 @@ async function pfWirePersona(root, partnerId, partner, detail, onDraftChange) {
     }
     if (module.id === "goal") {
       const goal = String(detail.currentGoal ?? "").trim();
-      return goal ? [...goal].slice(0, 14).join("") + (goal.length > 14 ? "…" : "") : "没设";
+      const text = goal ? [...goal].slice(0, 14).join("") + (goal.length > 14 ? "…" : "") : "没设";
+      // 目标模式（2026-11-25）：开关关着时详情不带 goal，摘要与之前一字不差
+      return detail.goal ? `${text} · ${goalStatusShort(detail.goal)}` : text;
     }
     return pfModuleStatus(module, persona);
   };
@@ -2750,6 +2871,15 @@ async function pfWirePersona(root, partnerId, partner, detail, onDraftChange) {
       summary: () => "",
     },
   ];
+
+  // 一次性请求（2026-11-24）：开场问候只在第一次打开专线时跑一次，跑在隐藏会话
+  // `task-greeting-…` 里，不属于每轮注入。卡只做入口，请求原文在上下文页的深链里看。
+  const GREETING_DEF = {
+    id: "greeting",
+    name: "开场问候",
+    tip: "新建执事后第一次打开专线时生成一次，跑在隐藏会话里，不属于每轮注入。首条请求是冷前缀（没有缓存可命中），第一次打开会等它写完；只跑这一次。点开看那次请求的系统提示词、消息与用量入口。",
+    summary: () => "第一次打开专线时",
+  };
 
   // 按相关度召回（2026-11-15 打磨二轮）：记忆四类 + 挂载项目的记忆。先打分再决定进不进，
   // 所以这里没有"原文"可预览——点卡是机制说明 + 去记忆页。开关 = 关掉这一位自动带记忆。
@@ -3026,6 +3156,10 @@ async function pfWirePersona(root, partnerId, partner, detail, onDraftChange) {
     for (const def of VIEW_DEFS) injectedBox.append(viewCard(def));
     if ("projectIds" in partner) injectedBox.append(plainCard(PLAIN_DEFS.project));
 
+    // 一次性请求（2026-11-24）：开场问候那次请求的入口（隐藏会话，不列在会话清单里）
+    oneshotBox.replaceChildren();
+    oneshotBox.append(viewCard(GREETING_DEF));
+
     // 按相关度召回（打分后才进）：记忆四类 + 挂载项目的记忆
     recallBox.replaceChildren();
     for (const def of RECALL_DEFS) recallBox.append(viewCard({ ...def, recall: true }));
@@ -3046,7 +3180,7 @@ async function pfWirePersona(root, partnerId, partner, detail, onDraftChange) {
     if (module.id === "goal") {
       pfOpenGoalEditor(partnerId, detail.currentGoal ?? "", () => {
         paint();
-      });
+      }, detail.goal ?? null);
       return;
     }
     if (!persona) return;

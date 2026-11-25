@@ -14,21 +14,21 @@
 /* ── 主题：四张缩略界面卡 ─────────────────────────────── */
 
 .theme-cards {
-  /* 2026-11-15 与壁纸格统一成同一套布局：一排 5 张、窄了不折行改横向滚。
-     flex 基宽 160：宽屏 grow 摊满一行（= 原 grid 的 5 等分，卡 ~180），
-     窄屏 shrink 0 兜住基宽出横滚（滚轮/拖拽见 scroll-x.js）。
-     旧口径（≤1020 折 3 列、≤760 折 2 列）整体退役——两排卡曾经一边折行一边不折，
-     用户点名不一致（"都是 5 个呀"）。 */
-  display: flex;
+  /* 2026-11-25 改回网格、每行 3 张（折列数的断点在本文件末尾）。
+     11-15 的「一排横滚」在六套主题下放不下：每张最小 160、六张要 1010，
+     1280 窗口的内容区只有 756，外溢 296px（满宽 1000 仍外溢 52）；
+     而全站不画滚动条（style-11），溢出的那两张除了滚轮 / 拖拽之外没有任何提示。
+     minmax(0, 1fr)：卡片平分一行、跟着容器收缩，不再出横滚，scroll-x 的手势一并撤掉。 */
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
-  overflow-x: auto;
-  /* 上下都放开：上离"主题"那行、下离分割线各留出空隙 */
-  margin: 12px 16px 18px;
+  /* 卡片里只有这一排：四边留白取 16，与 .row 的左右内缩对齐 */
+  margin: 16px;
 }
 
 .theme-card {
   position: relative;
-  flex: 1 0 160px;
+  min-width: 0;
   display: block;
   padding: 6px;
   border: 1px solid var(--tc-outline);
@@ -224,16 +224,17 @@ html[data-wallpaper="cloud"] .main::before {
 }
 
 .wallpapers {
-  /* 与主题卡同一套单行横滚（2026-11-15）：五格等宽，窄屏不再折单列（旧 ≤560 折 1 列退役） */
-  display: flex;
+  /* 2026-11-25 改网格、五格平分一行（折列数的断点在本文件末尾）。
+     11-15 的单行横滚在 1280 窗口下五格（要 840）外溢 126px，第五格「自定义…」只露出一条边。 */
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 10px;
-  overflow-x: auto;
   /* 与 .row 同一套左右内缩：五格与滑杆都不许贴到卡片边框上 */
   margin: 12px 16px 4px;
 }
 
 .wall-choice {
-  flex: 1 0 160px;
+  min-width: 0;
   display: block;
   padding: 0;
   overflow: hidden;
@@ -310,7 +311,7 @@ html[data-wallpaper="cloud"] .main::before {
   border: 1px solid var(--divider);
   border-radius: 5px;
   object-fit: cover;
-  /* 横滚排里的图不吃原生拖拽：按住拖动是滚排子的手势（scroll-x.js） */
+  /* 图不吃原生拖拽：按住拖动曾是横滚排的手势（scroll-x.js，2026-11-25 起不出横滚），留着不碍事 */
   -webkit-user-drag: none;
 }
 .wall-empty {
@@ -464,5 +465,13 @@ html[data-wallpaper="cloud"] .main::before {
 }
 .crop-actions .btn-primary { height: 30px; padding: 0 14px; font-size: 12px; }
 
-/* 窄窗口折行的三档媒体查询整段退役（2026-11-15）：主题卡与壁纸格统一单行横滚，
-   溢出走 scroll-x.js 的滚轮/拖拽，不再按窗宽折列数。 */
+/* 窄窗口折列（2026-11-25）：主题卡与壁纸格回到网格，按窗口宽折列数，不再出横向滚动。
+   >1120 主题三列 / 壁纸五列；≤1120 主题两列 / 壁纸 3 + 2。
+   没有更窄的单列档：设置路由下应用侧栏不显示，壳的最小窗口宽是 720，这时内容区仍有 692
+   （2026-11-25 无头浏览器实测 720 / 800 / 900 / 1000 / 1120 / 1280 / 1440 七档，内容区 608–1000），
+   再折单列只会让每张卡 658 宽、六张叠到页高 2050。
+   11-15「统一单行横滚、不折列」的口径到此退役（六套主题后横滚放不下）。 */
+@media (max-width: 1120px) {
+  .theme-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .wallpapers { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}

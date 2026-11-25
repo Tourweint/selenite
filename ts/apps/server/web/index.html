@@ -8,14 +8,16 @@
 <link rel="stylesheet" href="/assets/style.css" />
 <script>
   // 在样式表应用之前定主题，避免深色用户看到一帧白闪。
-  // 五套：paper（米黄）/ white（暖白）/ celadon（青瓷）/ indigo（靛蓝夜）/ black（炭黑）。
-  // 旧值迁移：dark → indigo，light / system / 缺失 → paper（2026-11-05 定稿）。
+  // 六套：white（暖白）/ celadon（青瓷）/ devin（燕麦）/ antigravity（陶白）/
+  // indigo（靛蓝夜）/ black（炭黑）。前四套浅色、后两套深色；devin 为默认（2026-11-25，
+  // 同日删掉了 paper 米黄与 codex 奶油，存着这两个旧值的也迁到 devin）。
+  // 旧值迁移：dark → indigo，其余（light / system / 缺失 / 已删主题）→ devin。
   (function () {
-    var themes = ["paper", "white", "celadon", "indigo", "black"];
+    var themes = ["white", "celadon", "devin", "antigravity", "indigo", "black"];
     var stored = localStorage.getItem("lifediary.theme");
     var theme = themes.indexOf(stored) >= 0
       ? stored
-      : (stored === "dark" ? "indigo" : "paper");
+      : (stored === "dark" ? "indigo" : "devin");
     if (stored !== theme) localStorage.setItem("lifediary.theme", theme);
     document.documentElement.dataset.theme = theme;
     // 顺手把主题回写给壳（2026-11-14）：启动页要在业务页起来之前就铺对色，

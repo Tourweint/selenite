@@ -4,13 +4,13 @@
  * 设置 → 外观 → 回答：把助手的每一段话包成气泡，并给一个宽度滑杆。
  * 样式全在 style.css 里，按 [data-answer-bubble="1"] 生效；本模块只负责三件事：
  *   1. 启动时把 localStorage 的选择写到 <html>（index.html 里的内联脚本已先写过一遍，防首帧闪）；
- *   2. 在「外观」页挂一节「回答」（开关 + 宽度）；
+ *   2. 在「外观」页「对话外观」那一节里渲染回答子块（开关 + 宽度）——
+ *      2026-11-25 起不再自己建 <section>、也不再追加到页尾，渲染进 settings-router.js 留的槽位；
  *   3. 改完即时生效并落 localStorage，只走前端，不进服务端开关、不动契约。
  *
  * 为什么单独成模块：2026-11-13 另一个会话正在改 web/app.js（附件走路径、导出升级），
- * 这段先不插进去。等那边收工，把 mountSection 里的一节搬进 renderSettings 的
- * appearance 分支、删掉本文件与 index.html 的那行 script 即可——行内结构
- * 用的就是 app.js 那套 .card / .row / .divider / .switch，搬过去不用改样式。
+ * 这段先不插进去。行内结构用的就是 app.js 那套 .card / .row / .divider / .switch，
+ * 槽位外面的节标题和卡片由 settings-router.js 出。
  *
  * 两条边界（2026-11-13 定）：
  * - 气泡只包 .body；工具灰块 .tchips-wrap 是 .flow 的兄弟节点，留在气泡外；
@@ -64,10 +64,9 @@ function syncFill(range) {
   range.style.setProperty("--bubble-p", `${Math.min(100, Math.max(0, pct))}%`);
 }
 
+/** 「对话外观」卡里的回答子块：开关 + 分隔线 + 宽度。不带 <section> / 节标题 / .card（那三样由 settings-router.js 出）。 */
 function sectionHtml(state) {
-  return `<section class="set-sec" data-bubble-sec>
-  <h2 class="set-sec-title">回答</h2>
-  <div class="card">
+  return `<div data-bubble-sec>
     <div class="row">
       <div class="row-main">
         <div class="row-label" title="把助手的每段话包成气泡；工具调用留在气泡外，不跟着变">气泡</div>
@@ -89,23 +88,23 @@ function sectionHtml(state) {
         <span class="bubble-range-val" data-bubble-val>${state.width}%</span>
       </div>
     </div>
-  </div>
-</section>`;
+</div>`;
 }
 
-/** 挂一节进「外观」页。每次切页重渲染都会重挂，所以只认标记、不重复挂。 */
+/** 渲染进「对话外观」节的回答槽位。每次切页重渲染（槽位是新的空槽）都会重挂，所以只认槽位、不重复挂。 */
 function mountSection() {
   const host = document.getElementById("settings-inner");
   if (!host) return;
-  // 只有「外观」页有字体入口；别的页不挂
-  if (!host.querySelector("#font-open")) return;
-  if (host.querySelector("[data-bubble-sec]")) return;
+  // 页面标记就是这个槽位（只有外观页的「对话外观」卡里有）；别的页没有，不挂
+  const slot = host.querySelector("[data-bubble-slot]");
+  if (!slot) return;
+  if (slot.querySelector("[data-bubble-sec]")) return;
 
   const state = readState();
   const holder = document.createElement("div");
   holder.innerHTML = sectionHtml(state);
   const section = holder.firstElementChild;
-  host.append(section);
+  slot.replaceChildren(section);
 
   const sw = section.querySelector("[data-bubble-switch]");
   const range = section.querySelector("[data-bubble-range]");

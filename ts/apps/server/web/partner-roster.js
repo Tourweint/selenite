@@ -249,9 +249,31 @@ async function refreshRosterDomains() {
  * 两种都报「执事不存在」是谎报。用 GET /api/v1/partners/:id 复核一次：
  *  200 = 服务旧 → 说清楚要重启服务，可重试；404 = 真没了 → 刷花名册让这行消失。
  */
+/**
+ * 第一次打开时的等待提示（2026-11-24）。
+ *
+ * `/open` 在有问候要生成时是同步等模型写完的（一次请求）；这段时间页面没有别的反馈，
+ * 看起来像卡住。只在「还没生成过问候」时留一条长一点的提示，已生成 / 开关关着都不打扰。
+ * 提示失败（旧服务没有这个端点 / 上下文检查关着）不影响打开本身。
+ */
+async function hintFirstGreetingWait(partnerId) {
+  try {
+    const response = await request(`/api/v1/partners/${encodeURIComponent(partnerId)}/greeting`, {
+      cache: "no-store",
+    });
+    if (!response.ok) return;
+    const data = await response.json().catch(() => ({}));
+    if (!data?.ok || data.enabled === false || data.conversationId) return;
+    toast("第一次打开会先写一句开场问候（一次模型请求，稍等几秒）", 15000);
+  } catch {
+    /* 只是提示，不挡打开 */
+  }
+}
+
 async function openPartnerChat(partnerId) {
   if (!partnerId || state.partnerOpening.has(partnerId)) return;
   state.partnerOpening.add(partnerId);
+  void hintFirstGreetingWait(partnerId);
   const token = ++state.navToken;
   const startHash = location.hash;
   const startGen = state.routeGen;
