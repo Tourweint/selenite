@@ -25,6 +25,7 @@ import { stripScheduledRunHeader } from "../scheduled-run-context.ts";import { c
 import { isRelayEntryKind, relayDisplayText, relayFromOf } from "../partner-relay.ts";
 import { externalChatIds, openChat } from "./session-open.ts";
 import { chatStream } from "./session-stream.ts";
+import { ASK_ANSWER_PREFIX, stripAskUserAnswerInstruction } from "./turn-gate.ts";
 
 /**
  * 会话是否还在（2026-11-19 批5：后台任务唤醒的目标存在性检查）。
@@ -187,6 +188,23 @@ function thinkingText(blocks: unknown[]): string {
 
 export type FoldedTranscriptMessage = TranscriptMessage & { hidden?: boolean };
 
+/**
+ * ask_user 步骤里存的是校验后的问题 JSON；回读只取问题本身。
+ *
+ * 提问回合**不一定有 assistant 正文**（工具被 block 后本轮就收尾），所以问题平时只活在
+ * 灰块的参数里；答案一落盘，那一轮的步骤又要被丢掉。这里在**读到答案时**把问题补回
+ * 答案之前——只在已答复时补，悬着的提问仍由卡片显示，避免刷新后问题出现两次（2026-11-25）。
+ */
+function askedQuestionText(args?: string): string {
+	if (!args) return "";
+	try {
+		const value = JSON.parse(args) as { question?: unknown };
+		return typeof value.question === "string" ? value.question.trim() : "";
+	} catch {
+		return "";
+	}
+}
+
 export function foldTranscriptEntries(
 	externalId: string,
 	entries: readonly EntryRecord[],
@@ -201,6 +219,8 @@ export function foldTranscriptEntries(
 	/** 助手条目里模型侧看到的正文；entries 的类型是 Message 联合，取用前要收窄 */
 	/** 本轮提问的时间（算 workMs 用）；没有 user 开头就留 undefined */
 	let turnStartAt: number | undefined;
+	/** 已发出、还没补成正文的提问（读到答案时插回它该在的位置） */
+	let pendingQuestion: { text: string; at: number; index: number } | null = null;
 
 	for (const entry of entries) {
 		// 2026-11-15：递话条目同样是一轮的开头（它触发一轮 run），只是作者不是主人。
@@ -224,8 +244,19 @@ export function foldTranscriptEntries(
 			// 只留用户写的那段指令；隐藏触发整条不 push（见下）。
 			const text = isRelay
 				? relayDisplayText(manifest.text)
-				: stripScheduledRunHeader(manifest.text.trim());
+				: stripAskUserAnswerInstruction(stripScheduledRunHeader(manifest.text.trim()));
 			const at = typeof message.timestamp === "number" ? message.timestamp : 0;
+			// 读到答复时才把问题补回答案之前（按发出时机插回原位）；悬着的提问不补，卡片会显示。
+			if (pendingQuestion) {
+				if (!isRelay && raw.startsWith(ASK_ANSWER_PREFIX)) {
+					messages.splice(Math.min(pendingQuestion.index, messages.length), 0, {
+						role: "assistant",
+						text: pendingQuestion.text,
+						at: pendingQuestion.at,
+					});
+				}
+				pendingQuestion = null;
+			}
 			// 2026-11-08 4a：纯图消息没有文本，也要下发（老逻辑会把它整条丢掉）
 			const parts = Array.isArray(message.content) ? message.content : [];
 			const images = parts
@@ -316,6 +347,12 @@ export function foldTranscriptEntries(
 				if (args) step.args = args;
 				pending.push(step);
 				byCallId.set(call.id, { step, settled: false });
+				// ask_user 的问题会随本轮步骤一起被后一条 user 消息清掉：先记下来，
+				// 读到答复时再插回原位（悬着的提问不补——卡片已经在显示它）。
+				if (call.name === "ask_user" && args) {
+					const question = askedQuestionText(args);
+					if (question) pendingQuestion = { text: question, at, index: messages.length };
+				}
 			}
 			continue;
 		}

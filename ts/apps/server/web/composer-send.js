@@ -11,6 +11,7 @@ import { renderApprovalCard } from "./approval-card.js";
 import { freezeChatProjectLabel } from "./chat-project.js";
 import { addError, addNotice, attachUsage, fileChangeCollector, hideChatError, maybeNotify, mountFileSummary, scrollToEnd, syncCtxMeter } from "./chat-notice.js";
 import { addMessage, stampMessageClock, syncEditEntry } from "./chat-thread.js";
+import { stopRunningWatch, watchRunningTurn } from "./chat-open.js";
 import { closeChatArchiveConfirm, loadChats, renderChats } from "./chats-list.js";
 import { KEY_CONV, el } from "./dom.js";
 import { renderMarkdown, syncDelegateHint } from "./markdown.js";
@@ -167,6 +168,8 @@ async function followUp(text) {
 
 async function send(text, images = [], files = []) {
   if (state.sending) return;
+  // 本地这一轮马上有自己的流：停掉"后台还在跑"的自动重读，免得它插进来重建屏幕
+  stopRunningWatch();
   // 任务线程（2026-11-22）：话直接送执行端（steer / 续跑），不跑宿主助手。
   // 失败把原文放回输入框；成功由 task-thread 自己补用户气泡。
   if (isTaskConversation(state.conversationId)) {
@@ -209,6 +212,9 @@ async function send(text, images = [], files = []) {
   // 刚发出的这条就是最后一句话：编辑入口跟上去（messageId 在点的时候再补）
   syncEditEntry();
   const turn = addMessage("assistant", "", Date.now(), [], { fresh: true });
+  // 跑动中不挂消息脚注（2026-11-25 用户口径）：复制/分支按钮只在回答收尾后
+  // hover 才出现——还没答完就让人复制，复制到的只是半截。
+  turn.root.classList.add("is-streaming");
   // 这一轮的结构是"话 → 灰块 → 话 → 灰块"（E1 方案，2026-11-13）：
   // turn.root 下先插一个 .flow 容器，每一段话是一个 .body，连续动一次手是一组 .tchips。
   // 段与段之间顺序就是真实发生顺序，收尾也不再折成一行。
@@ -360,19 +366,19 @@ async function send(text, images = [], files = []) {
   // 不试图自动补——那是全量回读 openChat 的事。正常收尾（见过 done）不补。
   let sawDone = false;
   const replayMissing = async () => {
-    if (sawDone || !state.conversationId || !state.maxSeq) return;
+    if (sawDone || !state.conversationId || !state.maxSeq) return false;
     try {
       const response = await request(
         `/api/v1/agent/chat/${encodeURIComponent(state.conversationId)}/messages?sinceSeq=${state.maxSeq}`,
         { cache: "no-store" },
       );
-      if (!response.ok) return;
+      if (!response.ok) return false;
       const data = await response.json();
       const events = data.events || [];
-      if (!events.length) return;
+      if (!events.length) return false;
       if (typeof data.fromSeq === "number" && data.fromSeq > state.maxSeq + 1) {
         addError("有事件已经超出补帧窗口，这条会话建议刷新页面重建。", { retryable: false });
-        return;
+        return false;
       }
       for (const replayed of events) {
         const event = replayed.event || replayed;
@@ -414,8 +420,10 @@ async function send(text, images = [], files = []) {
           applyTicketEvent(event);
         }
       }
+      return true;
     } catch {
       // 补帧失败就失败：主链路的错误行已经报过了，这里不再叠一条。
+      return false;
     }
   };
 
@@ -705,6 +713,23 @@ async function send(text, images = [], files = []) {
     }
     caret?.remove();
     paint();
+    // 流断着结束（done 没等到，fetch 也没抛错）：以前这里静默结束，用户只看到
+    // 半截回答、不知道断过。现在带 seq 自动补一次缺帧，并明说这件事（2026-11-25）。
+    if (!sawDone) {
+      const recovered = await replayMissing();
+      if (answer.trim() || noReplyExplained) {
+        addNotice(
+          recovered
+            ? "连接中断过，断线期间的事件已自动补上；回答正文可能不完整。"
+            : "连接中断，已尝试自动重连；这条回答可能不完整。",
+        );
+      }
+      // 服务端可能还在跑（断开 ≠ 取消）：交给后台轮次监视，跑完自动重读，
+      // 别让用户对着半截回答以为活停了（2026-11-25）。
+      if (!state.stopRequested && state.conversationId) {
+        watchRunningTurn(state.conversationId);
+      }
+    }
     if (!answer.trim() && !noReplyExplained) {
       addError("模型没有返回内容。", { retryable: true });
     }
@@ -712,10 +737,21 @@ async function send(text, images = [], files = []) {
     if (error.message !== "forbidden") {
       addError(`连接中断：${error.message}`, { retryable: true });
       // 流是断着结束的：done 没等到，可能缺帧。带 seq 去补一次（2026-11-04 seq 方案）。
-      await replayMissing();
+      const recovered = await replayMissing();
+      addNotice(
+        recovered
+          ? "连接中断过，断线期间的事件已自动补上；回答正文可能不完整。"
+          : "连接中断，已尝试自动重连；这条回答可能不完整。",
+      );
+      // 同正常断流：服务端还在跑就等它收尾，完成自动重读。
+      if (!state.stopRequested && state.conversationId) {
+        watchRunningTurn(state.conversationId);
+      }
     }
   } finally {
     setSending(false);
+    // 回答收尾：脚注（复制 / 分支 / 时刻）从这一刻起才允许出现。
+    turn.root.classList.remove("is-streaming");
     caret?.remove();
     endThink();
     if (state.stopRequested) {

@@ -280,7 +280,7 @@ function delegateDeps(run: unknown, projects: unknown = null) {
 }
 
 const DELEGATE_TEXT =
-	"已派发到 底层 worker 运行时（独立进程）：任务单 T-9。它在后台执行，完成后我会汇报；不要等，也不要重复派。";
+	"派活成功：已派发到 底层 worker 运行时（独立进程）；任务单 T-9。它在后台执行，完成后我会汇报；不要等，也不要重复派。";
 
 test("delegate：成功外层是 ok，message 带执行器，ticketId 在 data", async () => {
 	const previous = process.env.DELEGATION_PROJECT_REQUIRED;
@@ -330,6 +330,29 @@ test("delegate：needs_project 仍在 data（不是 error），候选清单不�
 		assert.deepEqual(out.data.projects, []);
 		assert.match(out.data.message, /项目/);
 		assert.equal(called, 0, "没有项目不能起 worker");
+	} finally {
+		if (previous === undefined) delete process.env.DELEGATION_PROJECT_REQUIRED;
+		else process.env.DELEGATION_PROJECT_REQUIRED = previous;
+	}
+});
+
+test("delegate：没派成（needs_project）在工具层标 isError，聊天不再画成成功", async () => {
+	const previous = process.env.DELEGATION_PROJECT_REQUIRED;
+	process.env.DELEGATION_PROJECT_REQUIRED = "true";
+	try {
+		const tools = createTools(
+			delegateDeps(async () => {
+				throw new Error("不该跑到执行");
+			}),
+		);
+		const result = (await toolNamed(tools, "delegate").execute(
+			{ requirement: "写一个文件" } as never,
+			{ conversationId: 7 } as never,
+			{} as never,
+		)) as { isError?: boolean };
+		// JSON 仍是业务分支形状（供模型拿 projects），但工具层必须标失败：
+		// 聊天灰块 / 同类失败连击都读这个字段（2026-11-25 用户口径）。
+		assert.equal(result.isError, true);
 	} finally {
 		if (previous === undefined) delete process.env.DELEGATION_PROJECT_REQUIRED;
 		else process.env.DELEGATION_PROJECT_REQUIRED = previous;

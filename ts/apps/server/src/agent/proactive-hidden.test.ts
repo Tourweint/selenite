@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { PROACTIVE_HIDDEN_MARKER } from "@lifediary/shared";
 import { foldTranscriptEntries } from "./session-transcript.ts";
+import { askUserAnsweredInstruction } from "./turn-gate.ts";
 
 /**
  * 定时主动轮（2026-11-17）：带专用标记的触发指令对用户隐藏，
@@ -122,4 +123,81 @@ test("标记必须独立成行：夹在正文中间不算隐藏", () => {
 	]);
 	assert.equal(messages.length, 1);
 	assert.equal(messages[0]!.role, "user");
+});
+
+function askUserCallEntry(id: number, at: number, question: string): FakeEntry {
+	return {
+		id,
+		kind: "pi.assistant",
+		model: [
+			{
+				role: "assistant",
+				content: [
+					{
+						type: "toolCall",
+						id: "call-ask",
+						name: "ask_user",
+						arguments: { question, options: ["app.ts", "main.ts"], recommended: 0 },
+					},
+				],
+				timestamp: at,
+			},
+		],
+	};
+}
+
+test("答复提问的续跑指令：回读只显示答案本身（2026-11-25）", () => {
+	const t = 1_700_000_000_000;
+	const messages = fold([
+		userEntry(1, "我该先改哪个", t),
+		askUserCallEntry(2, t + 100, "先改哪个文件？"),
+		// 真实形态：block 之后模型还会补一句说明，问题只活在工具参数里
+		assistantEntry(3, "等你定一下规格就开。", t + 150),
+		userEntry(4, askUserAnsweredInstruction("app.ts"), t + 200),
+		assistantEntry(5, "好，我先改 app.ts。", t + 300),
+	]);
+	assert.deepEqual(
+		messages.map((message) => [message.role, message.text]),
+		[
+			["user", "我该先改哪个"],
+			// 提问回合没有正文：回读把问题补成一条助手消息，答案才有上文
+			["assistant", "先改哪个文件？"],
+			["assistant", "等你定一下规格就开。"],
+			["user", "app.ts"],
+			["assistant", "好，我先改 app.ts。"],
+		],
+	);
+});
+
+test("答复提问但提问后没有正文：问题仍补在答案前面（2026-11-25）", () => {
+	const t = 1_700_000_000_000;
+	const messages = fold([
+		userEntry(1, "我该先改哪个", t),
+		askUserCallEntry(2, t + 100, "先改哪个文件？"),
+		userEntry(3, askUserAnsweredInstruction("app.ts"), t + 200),
+	]);
+	assert.deepEqual(
+		messages.map((message) => [message.role, message.text]),
+		[
+			["user", "我该先改哪个"],
+			["assistant", "先改哪个文件？"],
+			["user", "app.ts"],
+		],
+	);
+});
+
+test("提问还悬着时刷新：不补问题正文（卡片会显示，避免出现两次）", () => {
+	const t = 1_700_000_000_000;
+	const messages = fold([
+		userEntry(1, "我该先改哪个", t),
+		askUserCallEntry(2, t + 100, "先改哪个文件？"),
+		assistantEntry(3, "等你定一下规格就开。", t + 150),
+	]);
+	assert.deepEqual(
+		messages.map((message) => [message.role, message.text]),
+		[
+			["user", "我该先改哪个"],
+			["assistant", "等你定一下规格就开。"],
+		],
+	);
 });

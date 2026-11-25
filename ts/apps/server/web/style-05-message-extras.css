@@ -350,6 +350,8 @@
 .fsum-files {
   display: none; flex-direction: column;
   border-top: 1px solid var(--card-border);
+  /* 展开 / 收起的高度动画（chat-notice.js animateFsumFiles）：高度收到 0 时把内容剪掉 */
+  overflow: hidden;
 }
 .fsum[data-open="1"] .fsum-files { display: flex; }
 .fsum-file {

@@ -47,3 +47,28 @@ select.ctx-select {
   background-position: right 9px center;
   background-size: 14px;
 }
+
+/* 原生 <details> 展开/收起的高度动画（2026-11-25）。
+ * Chrome 131+ 支持 ::details-content 与 interpolate-size；不支持的浏览器整段不生效，
+ * 保持原生瞬开，不会有副作用。过渡时长/曲线用 style-01-tokens 的 token。 */
+@supports (interpolate-size: allow-keywords) {
+  details {
+    interpolate-size: allow-keywords;
+  }
+  details::details-content {
+    block-size: 0;
+    overflow: hidden;
+    transition:
+      block-size var(--dur-base) var(--ease-decelerate),
+      content-visibility var(--dur-base) allow-discrete;
+  }
+  details[open]::details-content {
+    block-size: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  details::details-content {
+    transition: none;
+  }
+}

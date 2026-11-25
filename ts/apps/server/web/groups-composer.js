@@ -12,6 +12,7 @@ import { el } from "./dom.js";
 import { groupMemberAvatar, groups, renderGroupPulse, renderGroupSidebar } from "./groups-base.js";
 import { appendGroupDayDivider, appendGroupMessageToThread, formatGroupTime, groupDayOf, groupMetaOf, insertGroupMention, renderGroupTimeline } from "./groups-thread.js";
 import { request } from "./net.js";
+import { popAnimateIn, popAnimateOut } from "./pop-anim.js";
 import { toast } from "./ui-atoms.js";
 
 
@@ -238,9 +239,22 @@ async function stopGroupRoundWeb() {
 
 const groupAt = { open: false, items: [], index: 0, from: -1 };
 
+/* 进出场动画（2026-11-25）：收起跑 140ms 才 hidden=true，这期间 hidden 还是 false，
+ * 不能拿它当"开没开"的判据（逻辑态用 groupAt.open + groupAtShown，代际号防旧回调晚到）。 */
+let seq = 0;
+let groupAtShown = false;
+
 function closeGroupAtPop() {
   groupAt.open = false;
-  if (el.groupAtpop) el.groupAtpop.hidden = true;
+  const node = el.groupAtpop;
+  // 已经关着、或收起动画正在跑：别起第二遍（每次按键都会进 updateGroupAtPop，重启动画会一直关不掉）
+  if (!node || node.hidden || !groupAtShown) return;
+  groupAtShown = false;
+  const mine = ++seq;
+  popAnimateOut(node).then(() => {
+    if (mine !== seq) return; // 已被重新打开，别藏
+    node.hidden = true;
+  });
 }
 
 function updateGroupAtPop() {
@@ -293,7 +307,14 @@ function updateGroupAtPop() {
       return row;
     }),
   );
-  el.groupAtpop.hidden = false;
+  // 入场（2026-11-25，pop-anim.js）：只在「隐藏 → 显示」那一下播；已经开着时只换候选，
+  // 输入每个字符都播一遍会让候选条一直在闪。
+  seq += 1; // 让还在跑的关闭回调失效
+  if (!groupAtShown) {
+    groupAtShown = true;
+    el.groupAtpop.hidden = false;
+    popAnimateIn(el.groupAtpop);
+  }
 }
 
 function pickGroupAt(index) {

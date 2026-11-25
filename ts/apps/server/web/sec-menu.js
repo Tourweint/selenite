@@ -28,6 +28,7 @@
 
 /** @typedef {{ label?: string, kbd?: string, disabled?: boolean, danger?: boolean, separator?: boolean, run?: () => void }} SecMenuItem */
 
+import { popAnimateIn, popAnimateOut } from "./pop-anim.js";
 import { markNativePopupsBroken, nativePopupsReady } from "./ui-atoms.js";
 
 /** @type {null | { button: HTMLElement | null, menu: HTMLElement, onDown: (event: PointerEvent) => void, onScroll: () => void, onResize: () => void, onKey: (event: KeyboardEvent) => void }} */
@@ -128,16 +129,19 @@ function shellShowMenu(anchor, placement, items, domFallback, onDone) {
 function closeSecMenu() {
   if (!openState) return;
   const { button, menu, onDown, onScroll, onResize, onKey } = openState;
+  // 先置空再收起：动画要跑 140ms，这期间再点一下不能把同一张菜单关第二遍
+  openState = null;
   // 先记焦点：menu.remove() 之后 activeElement 会掉回 body，键盘用户就丢了落点
   const hadFocus = menu.contains(document.activeElement);
-  menu.remove();
   if (button) button.setAttribute("aria-expanded", "false");
   document.removeEventListener("pointerdown", onDown, true);
   window.removeEventListener("scroll", onScroll, true);
   window.removeEventListener("resize", onResize);
   window.removeEventListener("keydown", onKey, true);
-  openState = null;
   if (hadFocus && button?.isConnected) button.focus({ preventScroll: true });
+  if (!menu.isConnected) return;
+  // 收起走 WAAPI（2026-11-25）：拔节点一步到位看不出收起，动画完再 remove
+  popAnimateOut(menu).then(() => menu.remove());
 }
 
 /** 右缘对齐按钮，放不下翻到上方；都夹在视口里（左右 8px、顶部不低于 8px）。 */
@@ -297,6 +301,8 @@ function openSecMenu(button, items) {
   placeSecMenu(menu, button);
   button.setAttribute("aria-expanded", "true");
   wireMenu(menu, button);
+  // 定位已落定再入场（2026-11-25）：只动 opacity/transform，不碰 fixed 的 left/top
+  popAnimateIn(menu);
 
   // 键盘用户直接落到第一项；鼠标点开也顺手聚焦，Esc 之后回到 ⋯ 上
   const first = menu.querySelector("button:not(:disabled)");

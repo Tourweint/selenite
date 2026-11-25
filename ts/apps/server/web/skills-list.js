@@ -10,6 +10,7 @@
 import { chevDownSvg } from "./icons.js";
 import { attr, esc } from "./markdown.js";
 import { request } from "./net.js";
+import { popAnimateIn, popAnimateOut } from "./pop-anim.js";
 import { switchMarkup } from "./settings-atoms.js";
 import { toggleSkillEnabled } from "./skills-actions.js";
 import { openDeleteSkillModal, openEditSkillModal } from "./skills-modals.js";
@@ -23,11 +24,45 @@ import { toast } from "./ui-atoms.js";
  * 没有建议快照时分类整块不出现、排序里也不出现「Agent 建议」。
  * 列表分两区：已开启在上、未开启在下；筛选与排序各自作用于两个区内部。 */
 
+/* 进出场动画的代际号（2026-11-25）：收起要跑 140ms 才 hidden=true，这期间用户又点开时，
+ * 旧回调晚到会把新开的面板藏掉，所以回调里要跟代际号对一遍。
+ * **每张菜单各记一份**：分类 / 排序是并排两个下拉，常常一张还在收起、另一张就被点开；
+ * 共用一个模块级计数器会互相作废——先关的那张回调被作废后永远 hidden 不掉，
+ * 留下一个透明但仍吃点击的浮层。 */
+const skillSelectGens = new WeakMap();
+
+function bumpSkillSelectGen(menu) {
+  const next = (skillSelectGens.get(menu) || 0) + 1;
+  skillSelectGens.set(menu, next);
+  return next;
+}
+
 function closeSkillSelects() {
   for (const menu of document.querySelectorAll(".sk-select-menu:not([hidden])")) {
-    menu.hidden = true;
     menu.closest(".sk-select")?.querySelector(".sk-select-btn")?.setAttribute("aria-expanded", "false");
+    // 已经在收起中就别再起一遍：外点击监听每次点击都会进来，重启动画会把 140ms 往后推
+    if (menu.dataset.popClosing === "1") continue;
+    menu.dataset.popClosing = "1";
+    const mine = bumpSkillSelectGen(menu);
+    popAnimateOut(menu).then(() => {
+      const seq = skillSelectGens.get(menu) || 0;
+      if (mine !== seq) return; // 已被重新打开，别藏
+      delete menu.dataset.popClosing;
+      menu.hidden = true;
+    });
   }
+}
+
+/** 打开某张分类/排序菜单：只在「隐藏 → 显示」那一下播入场，已经开着就不重播 */
+function openSkillSelect(menu, button) {
+  bumpSkillSelectGen(menu); // 让这张菜单还在跑的关闭回调失效
+  const reopening = menu.dataset.popClosing === "1";
+  delete menu.dataset.popClosing;
+  if (!menu.hidden && !reopening) return; // 真开着才不重播；收起中途允许被拉回来
+  menu.hidden = false;
+  button.setAttribute("aria-expanded", "true");
+  // 定位（CSS 绝对定位锚 .sk-select）由布局决定，hidden=false 之后量得到，入场只动 opacity/transform
+  popAnimateIn(menu);
 }
 
 /** 一个紧凑下拉：按钮 + 贴下方的单选菜单（筛选/排序共用；视觉同 .gmenu 一档） */
@@ -62,11 +97,10 @@ function renderSkillSelect(slot, { label, count = null, value, options, onPick }
   }
   button.addEventListener("click", (event) => {
     event.stopPropagation();
-    const open = menu.hidden;
+    const open = menu.hidden || menu.dataset.popClosing === "1";
     closeSkillSelects();
     if (!open) return;
-    menu.hidden = false;
-    button.setAttribute("aria-expanded", "true");
+    openSkillSelect(menu, button);
     menu.querySelector('[aria-checked="true"]')?.focus();
   });
   slot.append(button, menu);

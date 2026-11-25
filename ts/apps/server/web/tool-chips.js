@@ -23,6 +23,12 @@
  * 点「+N」时先把「+N」克隆钉在旧位置，发完牌再滑到新位置（否则牌会从"水下"往上飞）。
  * 回滚开关 `TOOL_CHIP_PAGING=false`：展开就是全部、跑动行没有「+N」，即 2026-11-24 之前的形态。
  *
+ * 一轮一份状态（2026-11-25 用户口径）：一轮里"说一句 / 动一次手"会切成几组灰块，
+ * 以前每组各报各的步数，同一轮会出现「工作 1 步」「工作 7 步」两枚折叠条。现在
+ * 计数、开合、收尾归整轮一份（见 createTurnWork）：只有第一组承载折叠条，文案报
+ * 整轮总数；收起时整轮所有组一起藏（跑动中也收得起来），展开时各组在原位置铺开。
+ * 收起会顺手关掉展开的详情卡；跑动中收起来时折叠条自己带扫光，别让"还在跑"消失。
+ *
  * 判定方式换过一次：以前数**块数**（MAX_VISIBLE=8），但块宽是随内容变的，
  * 写死个数跟真实排布对不上——8 枚短块能挤两行、5 枚长块第一行就满了。
  * 现在量**真实宽度**：加起来塞得进容器就摆全部，塞不进就退到一行成立为止。
@@ -125,28 +131,44 @@ function el(tag, className, text) {
  * @param {number} [input.gap] 块间距，取 CSS 的 columnGap
  * @param {number} [input.moreWidth] 行首固定占位（折叠条）连一个 gap 的宽；分页开着时
  *        再加上行尾「+N」一格（2026-11-21 固定枚数「+N」退役，2026-11-24 分页回归）
- * @param {number[]} [input.pinned] 运行中的块下标：不能被收走
- * @returns {{keep:number, folded:boolean}} keep=显示前几枚；folded=是否收了尾巴
+ * @param {number[]} [input.pinned] 运行中的块下标：优先保留，但不能把一行挤成两行
+ * @returns {{keep:number, folded:boolean, pinnedShown:number[]}} keep=显示前几枚；
+ *          folded=是否收了尾巴；pinnedShown=这次真正留在一行里的运行块下标
+ *          （装不下的旧运行块也要让位——"最多一行"优先于"每一枚运行块都露脸"）
  */
 export function planRowChips({ widths, containerWidth, gap = 5, moreWidth = 0, pinned = [] }) {
   const n = widths.length;
-  if (!n) return { keep: 0, folded: false };
+  if (!n) return { keep: 0, folded: false, pinnedShown: [] };
   const all = widths.reduce((sum, width) => sum + width, 0) + gap * (n - 1);
   // 容器还没量出来（未挂载 / 宽度 0）：先按"不收起"处理，等 ResizeObserver 再来一次。
-  if (!containerWidth || all <= containerWidth + 0.5) return { keep: n, folded: false };
+  if (!containerWidth || all <= containerWidth + 0.5) return { keep: n, folded: false, pinnedShown: [] };
+
+  // 运行中的块优先保留，但只留装得下的（2026-11-25 用户口径「最多一行」）：
+  // 最新的排前面，先保"现在在干嘛"；旧运行块让位进行尾「+N」，绝不折到第二行。
+  const pinnedOrder = [...new Set(pinned)].sort((a, b) => b - a);
 
   // 放不下：先把行首折叠条的位置让出来，再一枚枚往前退，退到一行成立为止。
   for (let keep = n - 1; keep >= 0; keep -= 1) {
-    const shown = widths.slice(0, keep);
-    for (const index of pinned) {
-      if (index >= keep && index < n) shown.push(widths[index]);
+    let total = moreWidth + gap * keep;
+    for (let index = 0; index < keep; index += 1) total += widths[index];
+    if (total > containerWidth + 0.5) continue;
+    const pinnedShown = [];
+    for (const index of pinnedOrder) {
+      if (index < keep) continue;
+      const add = widths[index] + gap;
+      if (total + add > containerWidth + 0.5) continue;
+      total += add;
+      pinnedShown.push(index);
     }
-    if (!shown.length) continue;
-    const total = shown.reduce((sum, width) => sum + width, 0) + moreWidth + gap * shown.length;
-    if (total <= containerWidth + 0.5) return { keep, folded: true };
+    // 最新一枚运行块必须露脸（"现在在干嘛"）：这一档装不下它就再往前退，
+    // 拿更少的普通块换它；实在窄到装不下才作罢（只留折叠条）。
+    const newest = pinnedOrder[0];
+    const newestVisible = newest === undefined || newest < keep || pinnedShown.includes(newest);
+    if (!newestVisible) continue;
+    if (keep > 0 || pinnedShown.length > 0) return { keep, folded: true, pinnedShown };
   }
-  // 窄到连一枚都放不下：只留行首计数条，运行中的那枚照旧显示（宁可两行也不藏掉"现在在干嘛"）。
-  return { keep: 0, folded: true };
+  // 窄到连一枚都放不下：只留行首计数条，运行中的那枚也不硬塞（宁可少露脸，不折行）。
+  return { keep: 0, folded: true, pinnedShown: [] };
 }
 
 /** 取容器当前的块间距（CSS 里写的是 5px；量出来更稳，主题若改这里跟着走）。 */
@@ -265,19 +287,65 @@ export function buildDetailCard(spec, { onClose } = {}) {
 }
 
 /**
+ * 一轮的共享工作状态（2026-11-25 用户口径：一轮只留一枚「工作 N 步」）。
+ *
+ * 一条回答里可能有多组灰块（说一句、动一次手、再说、再动）。以前每组各持一份
+ * 开合状态、各报各的步数，同一轮会同时出现「工作 1 步」「工作 7 步」。现在
+ * 计数 / 收起 / 展开 / 收尾都归整轮一份：
+ * - 第一组（master）承载唯一的折叠条，文案报整轮总步数；
+ * - 其余组不画折叠条，只保留自己的块行与「+N」；
+ * - 收起时所有组一起藏（跑动中也收得起来），展开时各组在原位置铺开。
+ */
+export function createTurnWork() {
+  const groups = new Set();
+  const turn = {
+    groups,
+    master: null,
+    collapsed: false,
+    expanded: false,
+    finished: false,
+    total() {
+      let total = 0;
+      for (const group of groups) total += group.chipCount();
+      return total;
+    },
+    running() {
+      for (const group of groups) if (group.hasRunning()) return true;
+      return false;
+    },
+    relayout() {
+      for (const group of groups) group.queueLayout();
+    },
+    closeDetails() {
+      for (const group of groups) group.closeDetail();
+    },
+    syncFold() {
+      turn.master?.syncFold(turn.expanded);
+    },
+    prepareOpen(rect, source) {
+      for (const group of groups) group.prepareOpen(group === source ? rect : null);
+    },
+  };
+  return turn;
+}
+
+/**
  * 一条消息里的工具块容器。
  *
  * 调用方：`push(spec)` 一次工具开始，`settle(id, patch)` 工具结束，
- * `reset()` 中间话折走后清空（下一段重新开始）。
+ * `seal()` 一段话结束（下一组另起），`finish()` 整轮收尾。
+ * `options.turn` 是整轮共享状态（tool-flow 建一份传给同轮的所有组）。
  */
 export function createToolChips(host, options = {}) {
+  const turn = options.turn || createTurnWork();
+  const isMaster = !turn.master;
   const wrap = el("div", "tchips-wrap");
   // 只有现场这一轮播新块入场；历史回读几十枚块不该在打开会话时一起动。
   if (options.live) wrap.classList.add("is-live");
   const line = el("div", "tchips");
-  // 折叠条 = 这一组唯一的开合开关（2026-11-21 用户口径：鼠标只点一处）。
-  // 行首常驻：跑动中报数「工作 N 步」，点开铺第一页、再点收回去；
-  // 收尾后整组只剩它。位置从头到尾不动，不设行尾「收起」按钮。
+  // 折叠条 = 整轮唯一的开合开关（2026-11-21 用户口径：鼠标只点一处；
+  // 2026-11-25 起一轮一份，只有第一组画它）。行首常驻：跑动中报数「工作 N 步」，
+  // 点开铺第一页、再点收回去；收尾后整轮只剩它。位置从头到尾不动。
   // 行尾「+N」只负责翻页（2026-11-24 分页回归），不承担开合。
   // 箭头走全站统一的 chevSvg（icons.js），旋转行为在 style-27-chevron.css。
   const fold = el("button", "tchips-fold");
@@ -297,16 +365,10 @@ export function createToolChips(host, options = {}) {
 
   const chips = [];
   const specs = new Map();
-  let expanded = false;
-  // 整组收起（跑完的默认形态）：只留一枚折叠条，块全部不进正文。
-  let collapsed = false;
-  // 这组是否已经收尾过：决定把摊开的组收回时，是回到折叠条还是回到一行报数。
-  let finished = false;
   // 分页展开（2026-11-24）：展开态一次只铺 CHIP_PAGE 枚，行尾留一枚「+N」。
   // 收起再展开从第一页重新开始；展开后新到的块一律压进「+N」，不自动铺开——
+  // revealed 是每组自己的（分页按组翻），开合状态在 turn 上共享。
   let revealed = 0;
-  // 这一页是从哪一枚块点开的（折叠条或「+N」），「涌出」从它那里发起。
-  let openAnchor = null;
   // 点开那一刻的屏幕坐标：必须在改布局之前量，改了以后折叠条/「+N」已经挪位。
   let openAnchorRect = null;
   // 发牌期间钉在旧位置的「+N」克隆；真身留在新位置占位但不显示。
@@ -323,17 +385,15 @@ export function createToolChips(host, options = {}) {
   pager.addEventListener("click", (event) => {
     event.stopPropagation();
     if (!chipPagingEnabled) return;
-    if (!expanded) {
+    if (!turn.expanded) {
       // 跑动中那一行点的「+N」：不直接全铺，先进展开态的第一页。
       // 「+N」先钉在旧位置，发完牌再挪到第一页末尾——否则先挪位、牌从水下往上飞。
       const rect = freezePager();
-      openAnchor = pager;
-      openAnchorRect = rect;
-      expanded = true;
-      collapsed = false;
-      revealed = nextRevealCount(0, chips.length);
+      turn.collapsed = false;
+      turn.expanded = true;
+      turn.prepareOpen(rect, api);
       if (rect) pagerGhostTimer = setTimeout(() => releasePager(), dealDuration(revealed));
-      queueLayout();
+      turn.relayout();
       return;
     }
     revealMore();
@@ -534,16 +594,23 @@ export function createToolChips(host, options = {}) {
    * style-27 的旋转）——它既是计数条也是开关，一个字都不用变。
    * 2026-11-24：分页展开后文案照旧报**总步数**，不是当前铺开的枚数；
    * 余下几枚由行尾「+N」自己报。
+   * 2026-11-25：总步数 = **整轮所有组**之和（一轮只留这一枚折叠条）；
+   * 收起时若还有块在跑，折叠条自己带扫光（style-06 的 [data-running]），
+   * 别让"还在跑"随着块一起被收没。
    * 2026-11-24：不再挂 title——原生提示会悬在计数条上不消失、挡住下面的步骤；
    * 开合语义由 aria-expanded 与 aria-label 承担。
    */
   const syncFold = (isExpanded) => {
-    foldText.textContent = `工作 ${chips.length} 步`;
+    if (!isMaster) return;
+    const total = turn.total();
+    foldText.textContent = `工作 ${total} 步`;
     fold.setAttribute("aria-expanded", isExpanded ? "true" : "false");
     fold.setAttribute(
       "aria-label",
-      isExpanded ? `收起这 ${chips.length} 步` : `展开这一轮的 ${chips.length} 步`,
+      isExpanded ? `收起这一轮的 ${total} 步` : `展开这一轮的 ${total} 步`,
     );
+    if (turn.running()) fold.dataset.running = "1";
+    else delete fold.dataset.running;
   };
 
   /** 收起/展开时给整条块行做高度过渡；行数会变，只能量真实高度（max-height 猜不准）。 */
@@ -579,26 +646,38 @@ export function createToolChips(host, options = {}) {
   };
 
   const layoutRow = () => {
+    const total = turn.total();
     if (!chips.length) {
-      fold.hidden = true;
       pager.hidden = true;
       pagerCount = 0;
+      // 第一组即使自己没块，只要整轮还有别的组，就继续承载那一枚折叠条。
+      if (isMaster && total > 0) {
+        wrap.hidden = false;
+        fold.hidden = false;
+        syncFold(turn.expanded);
+      } else {
+        fold.hidden = true;
+        wrap.hidden = true;
+      }
       wasCollapsed = false;
       wasExpanded = false;
       return;
     }
-    const changed = collapsed !== wasCollapsed || expanded !== wasExpanded;
+    const changed = turn.collapsed !== wasCollapsed || turn.expanded !== wasExpanded;
     // 从收起态打开的这一刻（「涌出」要在这时实量位移、重播排队动画）。
-    const opening = expanded && !wasExpanded;
-    wasCollapsed = collapsed;
-    wasExpanded = expanded;
+    const opening = turn.expanded && !wasExpanded;
+    wasCollapsed = turn.collapsed;
+    wasExpanded = turn.expanded;
 
     const apply = () => {
-      // 整组收起（收尾后的默认形态）：正文里只剩一枚「工作 N 步」。
+      wrap.hidden = false;
+      // 整轮收起（收尾后的默认形态）：正文里只剩一枚「工作 N 步」。
       // 思考和执行一起收（2026-11-19 用户口径）：它们是一件事的两半，
       // 单把思考留在外面反而把"想一下做一下"的节奏拆成了两处；
       // 点开就是逐段的真实顺序。
-      if (collapsed) {
+      // 2026-11-25：跑动中也允许收起（用户口径「需要能把它合上」），
+      // 整轮所有组一起藏——不是只藏到"一行报数"。
+      if (turn.collapsed) {
         cleanupPagerGhost();
         for (const chip of chips) {
           chip.hidden = true;
@@ -608,30 +687,37 @@ export function createToolChips(host, options = {}) {
         line.classList.remove("expand-in");
         pager.hidden = true;
         pagerCount = 0;
-        fold.hidden = false;
-        syncFold(false);
+        if (isMaster) {
+          wrap.hidden = false;
+          fold.hidden = false;
+          syncFold(false);
+        } else {
+          fold.hidden = true;
+          // 非首组收起时不占位置：整轮只留首组那一枚折叠条。
+          wrap.hidden = true;
+        }
         return;
       }
       // 展开态不再一次铺全部：只铺前 revealed 枚，余下的数进行尾「+N」。
-      // 折叠条留在行首当标题，再点它收回去。
-      if (expanded) {
+      // 折叠条留在首组行首当标题，再点它收回去。
+      if (turn.expanded) {
         // 分页关掉（TOOL_CHIP_PAGING=false）：回到旧形态——展开就是全部，没有「+N」。
         if (!chipPagingEnabled) {
           cleanupPagerGhost();
           for (const chip of chips) chip.hidden = false;
           pager.hidden = true;
           pagerCount = 0;
-          fold.hidden = false;
+          fold.hidden = !isMaster;
           syncFold(true);
-          if (opening) {
+          if (opening && isMaster && openAnchorRect) {
             line.classList.remove("expand-in");
             void line.offsetWidth; // 重置动画：再开再播
-            const foldRect = fold.getBoundingClientRect();
             for (const chip of chips) {
               const rect = chip.getBoundingClientRect();
-              chip.style.setProperty("--dx", `${foldRect.left - rect.left}px`);
-              chip.style.setProperty("--dy", `${foldRect.top - rect.top}px`);
+              chip.style.setProperty("--dx", `${openAnchorRect.left - rect.left}px`);
+              chip.style.setProperty("--dy", `${openAnchorRect.top - rect.top}px`);
             }
+            openAnchorRect = null;
             line.classList.add("expand-in");
           }
           return;
@@ -644,17 +730,17 @@ export function createToolChips(host, options = {}) {
         });
         const remaining = chips.length - revealed;
         setPagerCount(remaining);
-        fold.hidden = false;
+        fold.hidden = !isMaster;
         syncFold(true);
         // 「涌出」铺开：点开那一刻这一页块从点击处飞回自己这一格
         //（位移实量进 --dx/--dy，排队号 --i 在 push 时已写好）。
         // 只在从收起态打开这一刻播一次；已摊开的组里新进的块不跟着重播。
-        if (opening) {
+        // 一轮只有首组有锚点（折叠条的位置）；其余组直接铺开，由高度过渡接手。
+        if (opening && isMaster && openAnchorRect) {
           line.classList.remove("expand-in");
           void line.offsetWidth; // 重置动画：再开再播
           // 坐标在点开那一刻就量好了（openAnchorRect）：布局一改，折叠条/「+N」就挪位了。
-          const anchor = openAnchorRect || (openAnchor || fold).getBoundingClientRect();
-          openAnchor = null;
+          const anchor = openAnchorRect;
           openAnchorRect = null;
           for (const chip of chips.slice(0, revealed)) {
             const rect = chip.getBoundingClientRect();
@@ -667,23 +753,24 @@ export function createToolChips(host, options = {}) {
       }
       // 跑动中的默认形态（2026-11-21 用户口径：每次思考过程都看得到干到第几步，
       // 一枚块也算一步——单步轮同样有「工作 1 步」，不给它藏起来）：
-      // 折叠条常驻行首报数，块最多一行——装不下的收着，行尾「+N」说还剩几枚。
+      // 折叠条常驻行首报数（首组），块最多一行——装不下的收着，行尾「+N」说还剩几枚。
       const width = line.clientWidth;
       // 还没挂到页面上（历史回读先建后插）：让 ResizeObserver 的首次回调来接。
       if (!width) {
         for (const chip of chips) chip.hidden = false;
         pager.hidden = true;
         pagerCount = 0;
-        fold.hidden = false;
+        fold.hidden = !isMaster;
         syncFold(false);
         return;
       }
       for (const chip of chips) chip.hidden = false;
-      fold.hidden = false;
+      fold.hidden = !isMaster;
       syncFold(false);
       // 折叠条占掉行首一段宽：连同它与首块之间的一个 gap 一起让出来。
+      // 非首组没有折叠条，不必让位。
       const gap = gapOf(line);
-      const foldReserved = fold.getBoundingClientRect().width + gap;
+      const foldReserved = isMaster ? fold.getBoundingClientRect().width + gap : 0;
       // 分页关掉（TOOL_CHIP_PAGING=false）：旧形态只给折叠条让位，不摆「+N」。
       if (!chipPagingEnabled) {
         pager.hidden = true;
@@ -691,12 +778,12 @@ export function createToolChips(host, options = {}) {
         const widths = chips.map((chip) => chip.getBoundingClientRect().width);
         const pinned = [];
         chips.forEach((chip, index) => {
-          // 运行中的那块永远可见：它是"现在在干嘛"，不能被收起来。
+          // 运行中的块优先保留（它是"现在在干嘛"），但装不下就让位，绝不折成两行。
           if (chip.dataset.state === "run") pinned.push(index);
         });
         const plan = planRowChips({ widths, containerWidth: width, gap, moreWidth: foldReserved, pinned });
         chips.forEach((chip, index) => {
-          chip.hidden = plan.folded && index >= plan.keep && !pinned.includes(index);
+          chip.hidden = plan.folded && index >= plan.keep && !plan.pinnedShown.includes(index);
         });
         return;
       }
@@ -707,7 +794,7 @@ export function createToolChips(host, options = {}) {
       const widths = chips.map((chip) => chip.getBoundingClientRect().width);
       const pinned = [];
       chips.forEach((chip, index) => {
-        // 运行中的那块永远可见：它是"现在在干嘛"，不能被收起来。
+        // 运行中的块优先保留（它是"现在在干嘛"），但装不下就让位，绝不折成两行。
         if (chip.dataset.state === "run") pinned.push(index);
       });
       const plan = planRowChips({
@@ -719,7 +806,7 @@ export function createToolChips(host, options = {}) {
       });
       let hiddenCount = 0;
       chips.forEach((chip, index) => {
-        chip.hidden = plan.folded && index >= plan.keep && !pinned.includes(index);
+        chip.hidden = plan.folded && index >= plan.keep && !plan.pinnedShown.includes(index);
         if (chip.hidden) hiddenCount += 1;
       });
       if (hiddenCount > 0) {
@@ -740,7 +827,7 @@ export function createToolChips(host, options = {}) {
    * 已经铺着的旧块不重播。
    */
   const revealMore = () => {
-    if (!expanded || !chipPagingEnabled) return;
+    if (!turn.expanded || !chipPagingEnabled) return;
     const from = revealed;
     const next = nextRevealCount(revealed, chips.length);
     if (next <= from) return;
@@ -783,31 +870,40 @@ export function createToolChips(host, options = {}) {
     resizeObserver.observe(line);
   }
 
-  fold.addEventListener("click", (event) => {
-    event.stopPropagation();
-    // 行首这枚既是「工作 N 步」的计数条，也是唯一的展开/收起开关
-    // （2026-11-21 用户口径：鼠标只点一处）。收回去两档：已经收尾的组
-    // 收回折叠条；还在跑的回到一行报数。不给第三种中间态。
-    cleanupPagerGhost();
-    if (expanded) {
-      expanded = false;
-      if (finished && chips.length > 0) collapsed = true;
-    } else {
-      expanded = true;
-      collapsed = false;
-      // 分页开：每次从收起 / 一行报数重新点开都从第一页开始；不依赖下一帧，
-      // 连点收起再展开也不会沿用上一页的位置。分页关：走旧形态（展开就是全部）。
-      if (chipPagingEnabled) {
-        revealed = nextRevealCount(0, chips.length);
-        openAnchor = fold;
-        openAnchorRect = fold.getBoundingClientRect();
+  /**
+   * 段封口（2026-11-25）：这段话说完、下一组工具要动手时，把这组里还在跑的块
+   * 标成失败（不能画成成功），但**不动整轮的开合状态**——下一组马上接着干，
+   * 进度得看得见。整轮收尾走 finish()。
+   */
+  const seal = () => {
+    for (const chip of chips) {
+      // 派活是后台长任务：可能跨过这一组、跨过这一轮，不能因为封组就判失败；
+      // 它的终态由 delegate 事件 / handoff 决定。
+      if (chip.dataset.state === "run" && !String(chip.__spec?.id || "").startsWith("delegate:")) {
+        chip.__spec.state = "err";
+        chip.dataset.state = "err";
+        chip.__refresh?.();
       }
     }
+    turn.syncFold();
     queueLayout();
-  });
+  };
 
-  return {
+  const api = {
     root: wrap,
+    /** 本组块数（整轮总数由 turn.total() 汇总） */
+    chipCount: () => chips.length,
+    /** 本组是否还有运行中的块（折叠条的扫光看整轮） */
+    hasRunning: () => chips.some((chip) => chip.dataset.state === "run"),
+    queueLayout,
+    syncFold,
+    /** 展开前的一次性准备：分页回到第一页；有锚点就记下来（「涌出」从那里发起）。 */
+    prepareOpen(rect = null) {
+      revealed = chipPagingEnabled ? nextRevealCount(0, chips.length) : chips.length;
+      if (rect) openAnchorRect = rect;
+    },
+    closeDetail,
+    seal,
     /** 工具开始：加一枚运行中的灰块。 */
     push(spec) {
       // 上一次撤空了这组（见 remove）：再用时把容器放回来。
@@ -824,6 +920,7 @@ export function createToolChips(host, options = {}) {
       chip.__setState = (state) => {
         record.state = state;
         chip.dataset.state = state;
+        turn.syncFold();
         queueLayout();
       };
       chip.__setDetail = (patch) => Object.assign(record, patch);
@@ -856,8 +953,10 @@ export function createToolChips(host, options = {}) {
       chips.push(chip);
       // 排队号给「涌出」展开用：点开那刻按 --i 逐枚延迟（16ms 一枚，24 号封顶，
       // 长轮也在半秒内铺完）。已摊开的组里新进的块排 0 号——就地浮现，进度不等动画。
-      chip.style.setProperty("--i", String(expanded ? 0 : Math.min(chips.length - 1, 24)));
+      chip.style.setProperty("--i", String(turn.expanded ? 0 : Math.min(chips.length - 1, 24)));
       specs.set(record.id || String(chips.length), record);
+      // 计数条报整轮总步数：别的组新进块也要让首组那枚跟着涨。
+      turn.syncFold();
       queueLayout();
       return chip;
     },
@@ -881,7 +980,7 @@ export function createToolChips(host, options = {}) {
       chip.remove();
       chips.splice(index, 1);
       specs.delete(chip.__spec?.id || id);
-      if (!chips.length) wrap.hidden = true;
+      turn.syncFold();
       queueLayout();
     },
     /** 工具结束：定状态、补结果。`patch` 可带 output / diff / diffSummary / duration / state。 */
@@ -893,7 +992,8 @@ export function createToolChips(host, options = {}) {
       // 详情的状态文案读 spec.state：补回去，别让块上画着"失败"、面板里还写"运行中"。
       chip.__spec.state = chip.dataset.state;
       chip.__refresh?.();
-      // 不再是"运行中"了，pinned 名单就变了：这一行该收几枚得重算。
+      // 不再是"运行中"了，pinned 名单与折叠条的扫光都要变：重算。
+      turn.syncFold();
       queueLayout();
     },
     /** 中间话折走后清空：下一段重新开始排块。 */
@@ -911,43 +1011,53 @@ export function createToolChips(host, options = {}) {
       fold.setAttribute("aria-expanded", "false");
       line.classList.remove("expand-in"); // 新组重新开始，别带上上一组的铺开态
       inlineHost.replaceChildren();
-      expanded = false;
-      collapsed = false;
-      finished = false;
       revealed = 0;
-      openAnchor = null;
       openAnchorRect = null;
       wasCollapsed = false;
       wasExpanded = false;
+      turn.relayout();
     },
     /**
      * 一轮收尾：还开着的详情关掉；没等到结果的运行块标失败（不能画成成功）。
      *
-     * `collapse` 默认 true（2026-11-19）：整轮跑完后整组收成一枚折叠条。
-     * 段间切组传 false——那会儿下一枚工具马上就要动手，进度得看得见。
+     * `collapse` 默认 true（2026-11-19）：整轮跑完后整轮收成一枚折叠条。
+     * 2026-11-25 起一轮一份：任何一个组调都作用于整轮（tool-flow 只调一次）。
      */
     finish(options = {}) {
       const collapse = options.collapse !== false;
-      closeDetail();
-      for (const chip of chips) {
-        // 派活是后台长任务：可能跨过这一组、跨过这一轮，不能因为封组就判失败；
-        // 它的终态由 delegate 事件 / handoff 决定。
-        if (chip.dataset.state === "run" && !String(chip.__spec?.id || "").startsWith("delegate:")) {
-          chip.__spec.state = "err";
-          chip.dataset.state = "err";
-        }
-      }
-      finished = true;
-      // 用户手动摊开的组不强行收（2026-11-21 用户口径「工作 N 步不要隐藏」）：
+      turn.closeDetails();
+      for (const group of turn.groups) group.seal();
+      turn.finished = true;
+      // 用户手动摊开的整轮不强行收（2026-11-21 用户口径「工作 N 步不要隐藏」）：
       // 他正看着的过程，收尾时保持原样，想合上自己再点一下折叠条。
-      // 没动过的整组折回折叠条——2026-11-21 起 1 枚也算一步（「工作 1 步」），
-      // 单步轮跟 21 步轮同一形态，不给它藏起来（用户口径「思考过程也要显示出来」）。
-      if (!expanded) {
-        collapsed = collapse && chips.length > 0;
-        if (collapsed) syncFold(false);
-      }
-      queueLayout();
+      // 没动过的整轮折回折叠条——1 枚也算一步（「工作 1 步」），不给它藏起来。
+      if (!turn.expanded) turn.collapsed = collapse && turn.total() > 0;
+      turn.relayout();
+      turn.syncFold();
     },
-    closeDetail,
   };
+
+  fold.addEventListener("click", (event) => {
+    event.stopPropagation();
+    cleanupPagerGhost();
+    // 行首这枚既是「工作 N 步」的计数条，也是整轮唯一的开合开关
+    // （2026-11-21 用户口径：鼠标只点一处）。2026-11-25 用户口径：
+    // 只要块还露在外面（含跑动中的一行报数），点它就整轮收起；
+    // 已经收起的，点它铺开第一页。收起时顺手关掉展开的详情卡。
+    if (turn.collapsed) {
+      const rect = fold.getBoundingClientRect();
+      turn.collapsed = false;
+      turn.expanded = true;
+      turn.prepareOpen(rect, api);
+    } else {
+      turn.closeDetails();
+      turn.collapsed = true;
+      turn.expanded = false;
+    }
+    turn.relayout();
+  });
+
+  turn.groups.add(api);
+  if (isMaster) turn.master = api;
+  return api;
 }

@@ -7,10 +7,14 @@
  * app.js 文末，各模块顶层只做声明、常量与事件监听注册。
  */
 
+import { scrollToEnd } from "./chat-notice.js";
+import { addMessage } from "./chat-thread.js";
+import { el } from "./dom.js";
 import { groups } from "./groups-base.js";
 import { request } from "./net.js";
 import { parsePartnerExternalId } from "./partner-sessions.js";
 import { state } from "./state.js";
+import { toast } from "./ui-atoms.js";
 
 /* ── 审批卡片（批次二 A1）：写类工具要人确认 ─────────────
    按 callId 去重：SSE 与"刷新补挂"两条路都可能把它画一次。
@@ -84,87 +88,219 @@ function parseAskUserPayload(raw) {
   }
 }
 
+/** 选项字母：A / B / C（2026-11-25 提问卡重做，照 ZCode 的选项列表） */
+function askOptionLetter(index) {
+  return String.fromCharCode(65 + index);
+}
+
+function currentChatIs(conversationId) {
+  return Boolean(conversationId) && String(state.conversationId) === String(conversationId);
+}
+
+/**
+ * 答复后的「正在继续」占位：服务端在 /answer 里已经起了新的一轮，
+ * 但那一轮的事件没有客户端挂着流，只能在它落盘后整页回读（2026-11-25）。
+ */
+function appendContinueNote() {
+  if (!el.thread) return null;
+  const wrap = document.createElement("div");
+  wrap.className = "msg notice";
+  const body = document.createElement("div");
+  body.className = "body";
+  body.textContent = "已答复，正在继续…";
+  wrap.append(body);
+  el.thread.append(wrap);
+  scrollToEnd();
+  return wrap;
+}
+
+const ASK_CONTINUE_POLL_MS = 2_000;
+const ASK_CONTINUE_SLOW_MS = 5_000;
+const ASK_CONTINUE_TIMEOUT_MS = 5 * 60_000;
+/** 同一会话只留最新一条观察（连续答两问时旧的让位） */
+const answerWatchSeq = new Map();
+
+/**
+ * 等续跑那一轮：轮询 transcript，见到答复之后开始的 assistant 消息就整页回读。
+ *
+ * 为什么不能只回读一次：续跑轮可能跑几分钟（工具调用不进 transcript，最后一刻才有正文），
+ * 回读早了只会拿到旧历史。手机上同一条链路是延迟 6 秒回读一次，桌面这里跟到落盘为止。
+ */
+async function watchAnsweredTurn(conversationId, sinceAt, note) {
+  const seq = (answerWatchSeq.get(conversationId) || 0) + 1;
+  answerWatchSeq.set(conversationId, seq);
+  const startedAt = Date.now();
+  let gap = ASK_CONTINUE_POLL_MS;
+  while (Date.now() - startedAt < ASK_CONTINUE_TIMEOUT_MS) {
+    await new Promise((resolve) => setTimeout(resolve, gap));
+    gap = ASK_CONTINUE_SLOW_MS;
+    if (answerWatchSeq.get(conversationId) !== seq) return;
+    if (!currentChatIs(conversationId)) return;
+    // 用户自己正在发/正在流：这一拍不回读（整页重建会把现场那一轮冲掉），等它收尾再看
+    if (state.sending) continue;
+    let messages = [];
+    try {
+      const response = await request(
+        `/api/v1/agent/chat/${encodeURIComponent(conversationId)}/messages?page=1&limit=20`,
+        { cache: "no-store" },
+      );
+      if (!response.ok) continue;
+      const data = await response.json();
+      messages = Array.isArray(data.messages) ? data.messages : [];
+    } catch {
+      continue;
+    }
+    // 续跑轮一定在答复之后开始：assistant 的 at 是"这次请求开始"的时刻。
+    const landed = messages.some(
+      (message) =>
+        message.role === "assistant" && Number(message.at || message.endedAt || 0) >= sinceAt,
+    );
+    if (!landed) continue;
+    note?.remove();
+    const { openConversation } = await import("./chat-open.js");
+    await openConversation(conversationId);
+    return;
+  }
+  const body = note?.querySelector(".body");
+  if (body) body.textContent = "还没有新的回复；可以刷新页面看看。";
+}
+
+/**
+ * 答复之后的统一收尾（2026-11-25）：
+ * 卡片从对话里消失 → 答案当场落成一条用户消息 → 跟住服务端起的续跑轮。
+ * 对话流卡片与右下角浮窗共用这一条路（两处各写一遍必然分叉）。
+ */
+function settleAnsweredQuestion(callId, answer, conversationId, question = "") {
+  const entry = approvalCards.get(callId);
+  const card = entry?.root ?? null;
+  if (entry) approvalCards.delete(callId);
+  if (!currentChatIs(conversationId)) {
+    card?.remove();
+    return;
+  }
+  // 卡片走了，问题不能跟着消失：先落成一条助手正文。
+  // 卡片原来就在提问那一轮的前面——插回原位，现场与回读的顺序才一致（问 → 说明 → 答）。
+  if (question) {
+    if (card?.isConnected) {
+      const holder = document.createDocumentFragment();
+      addMessage("assistant", question, Date.now() - 1, [], { parent: holder });
+      card.before(holder);
+    } else {
+      addMessage("assistant", question, Date.now() - 1, []);
+    }
+  }
+  card?.remove();
+  addMessage("user", answer, Date.now(), [], { fresh: true });
+  const note = appendContinueNote();
+  void watchAnsweredTurn(conversationId, Date.now(), note);
+}
+
 /**
  * 提问卡（2026-11-09 §3）：模型有事问人，不执行任何工具。
  * 答复走 POST /agent/approvals/:callId/answer（不是 approve/reject）；
- * 点选项 = 直接答复该选项原文，也可以在输入框里自己写。
+ * 点选项 = 直接答复该选项原文，也可以在最后一行自己写。
+ *
+ * 2026-11-25 重做：去掉左侧强调色竖条；选项竖排成 A/B/C，建议项挂小徽章；
+ * 答复成功后整张卡从对话里移除，只留答案与续跑的回复。
  */
 function renderAskUserCard(card, event) {
   const payload = parseAskUserPayload(event.args);
-  const title = document.createElement("p");
-  title.className = "attention-text";
-  title.textContent = "有个问题等你回答";
-  card.append(title);
+  card.classList.add("ask");
 
+  const head = document.createElement("div");
+  head.className = "ask-head";
+  const eyebrow = document.createElement("span");
+  eyebrow.className = "ask-eyebrow";
+  eyebrow.textContent = "有个问题等你回答";
+  head.append(eyebrow);
   const source = approvalSourceLabel(event.conversationId);
   if (source) {
-    const from = document.createElement("p");
-    from.className = "approval-source";
-    from.textContent = `来自 ${source}`;
-    card.append(from);
+    const from = document.createElement("span");
+    from.className = "ask-source";
+    from.textContent = source;
+    head.append(from);
   }
+  card.append(head);
 
   const question = document.createElement("p");
-  question.className = "attention-text";
+  question.className = "ask-question";
   question.textContent = payload.question || "（问题正文缺失）";
   card.append(question);
 
-  const status = document.createElement("div");
-  status.className = "approval-meta";
-  status.textContent = "等待处理";
-  card.append(status);
-
-  const actions = document.createElement("div");
-  actions.className = "approval-actions";
-  const input = document.createElement("textarea");
-  input.className = "cs-textarea";
-  input.rows = 2;
-  input.placeholder = "直接回答…";
-  const send = document.createElement("button");
-  send.type = "button";
-  send.className = "primary";
-  send.textContent = "回答";
-  actions.append(input, send);
-  card.append(actions);
+  const options = document.createElement("div");
+  options.className = "ask-options";
+  card.append(options);
 
   const optionButtons = [];
-  if (payload.options.length) {
-    const options = document.createElement("div");
-    options.className = "approval-actions";
-    payload.options.forEach((text, index) => {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "ghost";
-      button.textContent =
-        index === payload.recommended ? `${text}（建议）` : text;
-      button.addEventListener("click", () => void answer(text));
-      options.append(button);
-      optionButtons.push(button);
-    });
-    card.append(options);
-  }
-
   const answer = async (text) => {
-    if (!text.trim()) return;
+    const value = String(text || "").trim();
+    if (!value) return;
     for (const button of optionButtons) button.disabled = true;
     send.disabled = true;
     input.disabled = true;
     try {
       const response = await request(
         `/api/v1/agent/approvals/${encodeURIComponent(event.callId)}/answer`,
-        { method: "POST", body: JSON.stringify({ answer: text }) },
+        { method: "POST", body: JSON.stringify({ answer: value }) },
       );
       if (!response.ok) throw new Error(String(response.status));
-      status.textContent = "已回答";
-      approvalCards.delete(event.callId);
-      card.classList.add("resolved");
+      settleAnsweredQuestion(event.callId, value, event.conversationId, payload.question);
     } catch {
-      status.textContent = "答复失败，请重试";
+      toast("答复失败，请重试");
       for (const button of optionButtons) button.disabled = false;
       send.disabled = false;
       input.disabled = false;
     }
   };
+
+  payload.options.forEach((text, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "ask-option";
+    const letter = document.createElement("span");
+    letter.className = "ask-letter";
+    letter.textContent = `${askOptionLetter(index)}.`;
+    const body = document.createElement("span");
+    body.className = "ask-opt-text";
+    body.textContent = text;
+    button.append(letter, body);
+    if (index === payload.recommended) {
+      const badge = document.createElement("span");
+      badge.className = "ask-badge";
+      badge.textContent = "建议";
+      button.append(badge);
+    }
+    button.addEventListener("click", () => void answer(text));
+    options.append(button);
+    optionButtons.push(button);
+  });
+
+  // 自己写：接在选项后面一行，字母接着排（ZCode 的末行输入）
+  const custom = document.createElement("div");
+  custom.className = "ask-option ask-custom";
+  const customLetter = document.createElement("span");
+  customLetter.className = "ask-letter";
+  customLetter.textContent = `${askOptionLetter(payload.options.length)}.`;
+  const input = document.createElement("textarea");
+  input.className = "ask-input";
+  input.rows = 1;
+  input.placeholder = "或者自己写…";
+  const send = document.createElement("button");
+  send.type = "button";
+  send.className = "ask-send";
+  send.textContent = "回答";
+  const grow = () => {
+    input.style.height = "auto";
+    input.style.height = `${Math.min(input.scrollHeight, 96)}px`;
+  };
+  input.addEventListener("input", grow);
+  input.addEventListener("keydown", (event2) => {
+    if (event2.key !== "Enter" || event2.shiftKey) return;
+    event2.preventDefault();
+    void answer(input.value);
+  });
+  custom.append(customLetter, input, send);
+  options.append(custom);
   send.addEventListener("click", () => void answer(input.value));
 
   approvalCards.set(event.callId, { root: card, timer: null });
@@ -327,4 +463,4 @@ function renderApprovalCard(event) {
   return card;
 }
 
-export { approvalCards, approvalPartnerName, approvalSourceLabel, groupProjectionById, parseAskUserPayload, parseGroupMemberConversation, renderApprovalCard, renderAskUserCard };
+export { approvalCards, approvalPartnerName, approvalSourceLabel, askOptionLetter, groupProjectionById, parseAskUserPayload, parseGroupMemberConversation, renderApprovalCard, renderAskUserCard, settleAnsweredQuestion };

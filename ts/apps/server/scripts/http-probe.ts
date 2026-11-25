@@ -1558,8 +1558,12 @@ try {
 		`${answerResponse.status} ${answerBody.status}`,
 	);
 	check(
-		await waitForText(askConversationId, "主人回答了你刚才的问题"),
-		"答复作为 followUp 交回模型",
+		await waitForText(askConversationId, "src/app.ts"),
+		"答复作为 followUp 交回模型（回读只留答案本身，合成外壳已剥离）",
+	);
+	check(
+		await waitForText(askConversationId, "先改哪个文件？"),
+		"提问回合没有正文：回读把问题补成一条助手消息",
 	);
 	gateAskUserArgs = null;
 	check((await setApprovalLevel("none")).status === 200, "恢复审批档 none");

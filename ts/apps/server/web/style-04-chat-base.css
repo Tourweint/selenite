@@ -98,7 +98,7 @@
 .chat-backbottom {
   position: absolute; z-index: 3;
   left: 50%; transform: translateX(-50%);
-  bottom: calc(var(--composer-h, 86px) + 14px + 14px);
+  bottom: calc(var(--composer-h, 82px) + 14px + 14px);
   width: 38px; height: 38px; padding: 0;
   display: flex; align-items: center; justify-content: center;
   border: 1px solid var(--outline); border-radius: var(--r-full);
@@ -117,7 +117,7 @@
 .thread {
   max-width: var(--thread);
   margin: 0 auto;
-  /* 底部让位 = 输入卡实测高度（JS 写进 --composer-h，缺省 86 = 卡 min-height）
+  /* 底部让位 = 输入卡实测高度（JS 写进 --composer-h，缺省 82 = 卡 min-height，2026-11-25 由 86 下调）
      + 卡底距 + 尾缝。输入栏长高（2026-11-11 学 ZCode）/错误卡/附件行出现时由
      ResizeObserver 同步，最后一条消息永远不被压在卡下。原来写死 108px，只够一行高的卡。
 
@@ -125,7 +125,7 @@
      离底 14px，扣完净空只剩 8px —— 一条消息的底边几乎是蹭在卡沿上。现在把卡底那
      14px 显式算进来，尾缝取 44px（≈ 一条消息框的高度），净空才是看得到的 44px。
      首页态不走这条：`.main[data-home="1"] .thread` 自己整条覆写 padding-bottom。 */
-  padding: 26px 22px calc(var(--composer-h, 86px) + 14px + 44px);
+  padding: 26px 22px calc(var(--composer-h, 82px) + 14px + 44px);
   display: flex; flex-direction: column; gap: 18px;
 }
 
@@ -367,6 +367,12 @@
 .msg-foot .copy-btn.is-done { color: var(--ok); }
 .msg-foot .copy-btn.is-failed { color: var(--c-error); }
 
+/* 跑动中的回答不挂脚注（2026-11-25 用户口径）：还没答完就让人复制，复制到的是
+   半截回答；分支也分不出完整内容。收尾后 composer-send 摘掉 .is-streaming，
+   复制/分支/时刻才按原来的 hover 规则出现。代码块里的「复制」同理。 */
+.msg.assistant.is-streaming .msg-foot { display: none; }
+.msg.assistant.is-streaming .code-copy { display: none; }
+
 .msg-usage { line-height: 20px; }
 
 /* 消息时刻（2026-11-17 晚）：只在回答脚注里，紧挨复制图标，hover 才出现。
@@ -395,3 +401,32 @@
 
 .msg.assistant .body { font-size: 14.5px; line-height: 1.68; color: var(--text); }
 
+
+/* 连接横幅（2026-11-25）：断网 / 服务失联时全站可见的一句话，恢复后再报一声。
+   固定顶部居中，压过正文但在 toast（60）与门（10）之间；样式贴现有 pill 皮。 */
+.conn-banner {
+  position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
+  z-index: 58;
+  display: inline-flex; align-items: center; gap: 8px;
+  max-width: min(560px, calc(100vw - 24px));
+  padding: 7px 14px;
+  border: 1px solid var(--chat-hairline); border-radius: var(--r-full);
+  background: var(--surface); color: var(--text);
+  font-family: var(--font); font-size: 12.5px; line-height: 1.3;
+  box-shadow: var(--shadow-menu);
+}
+.conn-banner[hidden] { display: none; }
+.conn-banner-dot {
+  flex: none; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--text-3);
+}
+.conn-banner[data-kind="down"] .conn-banner-dot,
+.conn-banner[data-kind="retry"] .conn-banner-dot {
+  background: var(--c-error);
+  animation: connPulse 1.1s ease-in-out infinite;
+}
+.conn-banner[data-kind="ok"] .conn-banner-dot { background: var(--ok); }
+@keyframes connPulse { 50% { opacity: .28; } }
+@media (prefers-reduced-motion: reduce) {
+  .conn-banner .conn-banner-dot { animation: none; }
+}

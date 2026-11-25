@@ -250,6 +250,68 @@ function stampMessageClock(root, at = Date.now()) {
   return setMessageClock(clock, at);
 }
 
+/* 来信正文展开 / 收起（2026-11-25）：折叠态靠 .letter-body.is-collapsed 的
+ * max-height:1.65em 直切，没有过渡。这里走 WAAPI 只动 max-height 与必要的 inline overflow，
+ * 结束后清掉 inline 回 CSS 原样；is-collapsed 仍管业务判定，动画不改变它。
+ * 不收 opacity：折叠态留着首行，淡出再淡入会让那行闪一下。
+ * letterGens 按节点各记代际：一页可以同时有多封来信，模块级单计数器会让先展开的那封
+ * 被后来的打断；收起动画晚到也不能把已经重新展开的正文收回去。 */
+const letterGens = new WeakMap();
+
+/** 折叠态那一行的高度：CSS 写的是 max-height:1.65em，em 按本元素字号解析，
+ *  所以像素等价是 fontSize × 1.65（不是 lineHeight × 1.65——那会到约 1.65 行，
+ *  动画收完再加 class 时还会往上跳一截）。 */
+function collapsedLineHeight(body) {
+  const fontSize = parseFloat(getComputedStyle(body).fontSize);
+  return Math.round((Number.isFinite(fontSize) && fontSize > 0 ? fontSize : 13.5) * 1.65);
+}
+
+function animateLetterBody(body, open) {
+  if (!body) return;
+  body.getAnimations().forEach((animation) => animation.cancel());
+  const mine = (letterGens.get(body) || 0) + 1;
+  letterGens.set(body, mine);
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (open) {
+    body.classList.remove("is-collapsed");
+    if (reduce) {
+      body.style.maxHeight = "";
+      body.style.overflow = "";
+      return;
+    }
+    const collapsed = collapsedLineHeight(body);
+    const height = body.scrollHeight;
+    body.style.overflow = "hidden";
+    const animation = body.animate(
+      [{ maxHeight: `${collapsed}px` }, { maxHeight: `${height}px` }],
+      { duration: 200, easing: "cubic-bezier(0,0,.2,1)" },
+    );
+    animation.finished.catch(() => {}).then(() => {
+      if (mine !== letterGens.get(body)) return;
+      body.style.maxHeight = "";
+      body.style.overflow = "";
+    });
+    return;
+  }
+  if (reduce) {
+    body.classList.add("is-collapsed");
+    return;
+  }
+  const collapsed = collapsedLineHeight(body);
+  const height = body.scrollHeight; // 展开态 max-height 是 none / auto，量内容高度
+  body.style.overflow = "hidden";
+  const animation = body.animate(
+    [{ maxHeight: `${height}px` }, { maxHeight: `${collapsed}px` }],
+    { duration: 160, easing: "cubic-bezier(.4,0,1,1)", fill: "forwards" },
+  );
+  animation.finished.catch(() => {}).then(() => {
+    if (mine !== letterGens.get(body)) return;
+    body.classList.add("is-collapsed");
+    body.style.maxHeight = "";
+    body.style.overflow = "";
+  });
+}
+
 /* ── 来信（2026-11-15 作者标记方案 §3.3）──────────────────
    同事递来的话不是"我说的话"：不占右侧气泡，收成左侧一张卡——抬头写清是谁发来的
    （名字 · 领域），正文默认只露首行，点开看全文。与 cindy 的 botLetter 同一套口径：
@@ -291,15 +353,19 @@ function mountLetter(root, body, author, at) {
     toggle.type = "button";
     toggle.className = "letter-toggle";
     toggle.textContent = "展开全文";
+    // 展开态由闭包自己记：收起动画期间 is-collapsed 还没加上，拿 class 判会把
+    // 连点两下读成“再收起一次”。
+    let expanded = false;
     const setOpen = (open) => {
-      body.classList.toggle("is-collapsed", !open);
+      expanded = open;
+      animateLetterBody(body, open);
       toggle.textContent = open ? "收起" : "展开全文";
     };
     toggle.addEventListener("click", (event) => {
       event.stopPropagation();
-      setOpen(body.classList.contains("is-collapsed"));
+      setOpen(!expanded);
     });
-    card.addEventListener("click", () => setOpen(body.classList.contains("is-collapsed")));
+    card.addEventListener("click", () => setOpen(!expanded));
     card.append(toggle);
   }
   root.append(card);

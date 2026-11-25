@@ -14,7 +14,7 @@
  */
 
 import { renderMarkdown } from "./markdown.js";
-import { createToolChips } from "./tool-chips.js";
+import { createToolChips, createTurnWork } from "./tool-chips.js";
 import { TOOL_ICON_PATHS, shortDuration, toolKindOf } from "./tool-meta.js";
 
 /** 工具图标的内联 SVG（灰块和详情标题共用一套） */
@@ -52,11 +52,13 @@ function createToolFlow(root, options = {}) {
   let group = null; // 当前这组灰块（createToolChips 的实例）
   // 这轮出现过的所有组：收尾时要一起收（中间被 breakGroup 切走的组也得塌下去）。
   const groups = [];
+  // 一轮一份开合/计数状态（2026-11-25）：组再多也只留一枚「工作 N 步」。
+  const turn = createTurnWork();
   let stepCount = 0;
 
   const ensureGroup = () => {
     if (!group) {
-      group = createToolChips(root, { live });
+      group = createToolChips(root, { live, turn });
       groups.push(group);
     }
     return group;
@@ -129,8 +131,8 @@ function createToolFlow(root, options = {}) {
     },
     /** 一段话结束（工具要动手了）：这组灰块封口，下一段话接在它们后面。 */
     breakGroup() {
-      // 不收起：下一枚工具马上就要动手，进度得留在正文里。
-      group?.finish({ collapse: false });
+      // 不收起整轮：下一枚工具马上就要动手，进度得留在正文里；只封这一组。
+      group?.seal();
       group = null;
     },
     /** 派活这类后台长任务：也是一枚块，标签随进度帧更新。 */
@@ -161,9 +163,9 @@ function createToolFlow(root, options = {}) {
       };
     },
     finish() {
-      // 一轮真的结束：这条消息里的每一组都收起，只留各自的「工作 N 步」。
-      // 用户手动摊开的组不强行收（2026-11-21），见 tool-chips.js 的 finish。
-      for (const item of groups) item.finish({ collapse: true });
+      // 一轮真的结束：整轮所有组收成一枚「工作 N 步」（2026-11-25 合并口径）。
+      // 用户手动摊开的整轮不强行收（2026-11-21），见 tool-chips.js 的 finish。
+      groups[0]?.finish({ collapse: true });
       group = null;
     },
     get count() {
@@ -187,11 +189,13 @@ function toolFlowFromSteps(root, steps) {
 
   // 每组工具一块自己的 .tchips：中间夹了「说」就另起一组，顺序才是真实的
   // "话 → 块 → 话 → 块"。只用一个实例会把第二组块也塞回第一组里。
+  // 开合/计数仍归整轮一份（2026-11-25）：回读也只见一枚「工作 N 步」。
+  const turn = createTurnWork();
   let chips = null;
   const groups = [];
   const segment = (text) => {
     if (chips) {
-      chips.finish({ collapse: false });
+      chips.seal();
       chips = null;
     }
     const seg = document.createElement("div");
@@ -206,7 +210,7 @@ function toolFlowFromSteps(root, steps) {
       continue;
     }
     if (!chips) {
-      chips = createToolChips(flow, { live: false });
+      chips = createToolChips(flow, { live: false, turn });
       groups.push(chips);
     }
     // 回读里的思考步（2026-11-19）：和现场同一枚「思考」块，
@@ -227,8 +231,8 @@ function toolFlowFromSteps(root, steps) {
       ...(isThink ? { kind: "think" } : {}),
     });
   }
-  // 回读的每一轮都已经是"跑完"的状态：所有组收起，别让旧会话一打开满屏块。
-  for (const item of groups) item.finish({ collapse: true });
+  // 回读的每一轮都已经是"跑完"的状态：整轮收起，别让旧会话一打开满屏块。
+  groups[0]?.finish({ collapse: true });
   // 最终回答那段 body 移到 flow 末尾，保持"话在块后"的顺序
   if (body) flow.append(body);
   return flow;

@@ -492,30 +492,32 @@
 
 
 /* 插件页（原「行为开关」，2026-11-16 从服务页拆出）：照插件中心的卡片墙排。
-   2026-11-25 卡片 v2（V2）：卡面 = 头部（名 + KEY + 组 + 状态徽标）+ 完整说明 + 元信息一行
-   + 依赖 chips + 卡尾控件 / 「设置」；卡不定高、说明不截断，详情弹层保留。
-   页面不再套一层大卡，卡片直接铺在设置页背景上——嵌套卡片会糊成一片。 */
-.flag-intro { padding: 0 2px 14px; }
+   2026-11-25 晚卡片 v2.1：卡面只留名字 + 状态徽标（靠右）+ 说明全文 + 卡尾控件；
+   KEY / 分组 / 类型·当前·默认·生效·存储 / 前置与被依赖明细全部收进详情弹层（点卡就开）。
+   页面不再套一层大卡，卡片直接铺在设置页背景上——嵌套卡片会糊成一片。
+   搜索、计数、组标题、卡片、页脚统一贴同一条左缘（2026-11-25 晚去掉各自的 2px 内缩）。 */
+.flag-intro { padding: 0 0 14px; }
 .flag-intro-count {
   font-size: 11.5px; font-weight: 400; color: var(--text-3);
   font-variant-numeric: tabular-nums;
 }
 /* 插件页搜索（2026-11-24）：复用记忆页的 .mem-a-search 胶囊，只加一条摆放宽度 */
-.flag-search { max-width: 420px; margin: 0 2px 14px; }
-.flag-search-empty { padding: 0 2px 14px; }
+.flag-search { max-width: 420px; margin: 0 0 14px; }
+.flag-search-empty { padding: 0 0 14px; }
 
 .flag-section + .flag-section { margin-top: 22px; }
-.flag-group-head { display: flex; align-items: center; gap: 8px; margin: 0 2px 9px; }
+.flag-group-head { display: flex; align-items: center; gap: 8px; margin: 0 0 9px; }
 .flag-group-title { font-size: 12px; font-weight: 500; color: var(--text-2); }
 .flag-group-count { font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
 .flag-group-head::after { content: ""; flex: 1; height: 1px; background: var(--divider); }
 
-/* 列宽（2026-11-25 卡片 v2）：最小 380px。内容列内宽 992px（.set-page 1000 − 左右各 4）→ 两列；
+/* 列宽（2026-11-25 晚卡片 v2.1）：最小 380px。内容列内宽 992px（.set-page 1000 − 左右各 4）→ 两列；
    三列要 1160px、两列要 770px，所以窗口窄到内容列不足 770px 时自动折成一列。
-   align-items:start：卡按内容自然高，同排顶部对齐，不为了等高把矮卡拉高。 */
-.flag-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 10px; align-items: start; }
-.flag-item { display: flex; flex-direction: column; gap: 8px; padding: 14px 15px 13px; }
-/* 卡体是按钮：整块可点开详情；控件与依赖 chips 在按钮外（避免嵌套交互元素）。 */
+   align-items:stretch + 卡 height:100%：同排卡一律等高，卡尾控件贴同一底线；
+   .flag-item-main 吃满剩余高度、卡尾 margin-top:auto，说明长短只影响卡内留白，不影响卡尾位置。 */
+.flag-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 10px; align-items: stretch; }
+.flag-item { display: flex; flex-direction: column; gap: 8px; height: 100%; padding: 14px 15px 13px; }
+/* 卡体是按钮：整块可点开详情；控件与「设置」在按钮外（避免嵌套交互元素）。 */
 .flag-item-main {
   flex: 1 1 auto; min-height: 0; width: 100%;
   display: flex; flex-direction: column; gap: 8px;
@@ -525,21 +527,17 @@
 }
 .flag-item-main:hover .flag-item-name { color: var(--accent); }
 .flag-item-main:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 3px; }
-/* 头部一行：名字 · KEY · 组名 · 徽标 · ›；窄卡放不下时整体折到下一行，不截字。 */
-.flag-item-head { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; min-width: 0; }
+/* 头部一行：名字吃满左半边、徽标整组靠右（状态永远在最右）、› 收尾。
+   名字放不下就省略，不把徽标挤到第二行——同排卡的状态徽标因此能对齐。 */
+.flag-item-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .flag-item-name {
-  flex: 0 1 auto; min-width: 0;
+  flex: 1 1 auto; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-size: 13px; font-weight: 500; color: var(--text);
   transition: color .16s ease;
 }
-.flag-item-key {
-  flex: none; max-width: 100%;
-  font-family: var(--mono); font-size: 10.5px; color: var(--text-3); overflow-wrap: anywhere;
-}
-.flag-item-group { flex: none; font-size: 10.5px; color: var(--text-3); }
-.flag-item-more { flex: none; margin-left: auto; font-size: 14px; line-height: 1; color: var(--text-3); }
-.flag-tags { flex: none; display: inline-flex; align-items: center; gap: 4px; margin-left: 0; }
+.flag-item-more { flex: none; margin-left: 0; font-size: 14px; line-height: 1; color: var(--text-3); }
+.flag-tags { flex: none; display: inline-flex; align-items: center; gap: 4px; margin-left: auto; }
 .flag-tags.is-empty { display: none; }
 .flag-tag {
   display: inline-flex; align-items: center; height: 17px; padding: 0 5px;
@@ -561,17 +559,14 @@
   flex: 0 0 auto;
   font-size: 12px; line-height: 1.6; color: var(--text-2); overflow-wrap: anywhere;
 }
-/* 元信息一行：类型 · 当前 · 默认 · 生效 · 存储；「无依赖 / 无额外设置」灰字接在末尾。窄卡自然折行，不定高。 */
-.flag-item-meta {
-  flex: none;
-  font-size: 11.5px; line-height: 1.55; color: var(--text-2); font-variant-numeric: tabular-nums; overflow-wrap: anywhere;
+/* 依赖 chips（2026-11-25 晚）：只在详情弹层里出现——卡面不铺会换行的依赖明细。
+   「前置」实底、「被依赖」透明；圆点三态，锁住自己的那枚父 chip 用警示色。 */
+.flag-detail-deps {
+  display: flex; flex-direction: column; gap: 8px;
+  padding-top: 10px; border-top: 1px solid var(--divider);
 }
-.flag-meta-note { margin-left: 7px; color: var(--text-3); }
-.flag-meta-note::before { content: "· "; }
-/* 依赖 chips（2026-11-25）：「前置」实底、「被依赖」透明；圆点三态，锁住自己的那枚父 chip 用警示色。 */
-.flag-deps { flex: none; display: flex; flex-wrap: wrap; gap: 5px 12px; }
 .flag-deps-group { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 5px; min-width: 0; }
-.flag-deps-label { font-size: 11px; color: var(--text-3); }
+.flag-deps-label { flex: none; width: 44px; font-size: 11px; color: var(--text-3); }
 .flag-chip {
   display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 8px;
   border: 1px solid var(--divider); border-radius: 6px; background: var(--surface-low);
@@ -593,7 +588,13 @@ button.flag-chip:hover { color: var(--accent); border-color: var(--accent-line);
 .flag-chip.is-locker .flag-chip-state { color: var(--warn); }
 .flag-item-foot {
   flex: none; display: flex; align-items: center; justify-content: flex-end;
-  gap: 8px; min-height: 22px;
+  gap: 8px; min-height: 22px; margin-top: auto;
+}
+/* 卡尾的「被 N 项依赖」（2026-11-25 晚）：只给有子插件的卡，一行灰字，不换行。
+   明细（谁依赖它、各自开没开）在详情弹层的 chips 里。 */
+.flag-dep-count {
+  flex: none; font-size: 11px; color: var(--text-3);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
 }
 /* 多档插件：开关固定在右下角，档位往左放（2026-11-18 用户口径）。 */
 .flag-mode-control { display: flex; align-items: center; gap: 8px; width: 100%; }
@@ -616,7 +617,7 @@ button.flag-chip:hover { color: var(--accent); border-color: var(--accent-line);
   text-align: right; font-size: 12.5px; font-variant-numeric: tabular-nums;
 }
 .flag-number-default { flex: none; font-size: 11px; color: var(--text-3); }
-.flag-foot { margin-top: 18px; padding: 0 2px; font-size: 11.5px; line-height: 1.55; color: var(--text-3); }
+.flag-foot { margin-top: 18px; padding: 0; font-size: 11.5px; line-height: 1.55; color: var(--text-3); }
 .flag-empty { padding: 14px 16px; }
 
 /* 插件卡内设置（2026-11-25）：卡尾左侧一个「设置」，点开在卡内长出小面板，不新开模态。

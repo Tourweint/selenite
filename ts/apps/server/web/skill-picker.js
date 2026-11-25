@@ -10,6 +10,7 @@
 import { el } from "./dom.js";
 import { esc } from "./markdown.js";
 import { request } from "./net.js";
+import { popAnimateIn, popAnimateOut } from "./pop-anim.js";
 
 /* ── 技能斜杠选择器（2026-11-09 用户口径：对话输入「/」出技能单，回车/点击补全）──
  * 只列**开着**的技能（全关时输入 / 不弹单，打字不受任何干扰）。
@@ -17,12 +18,20 @@ import { request } from "./net.js";
 
 const skillSuggest = { el: null, items: [], index: 0, cacheAt: 0 };
 
+/* 进出场动画（2026-11-25）：收起跑 140ms 才把 display 置 none，
+ * 这段窗口里 display 还是 "block"，不能拿它当"开没开"的判据——否则键盘监听会继续
+ * 截 Enter（刚按 Esc 收掉，紧接着的 Enter 会把旧候选补进去）。逻辑态单独记。 */
+let seq = 0;
+let skillSuggestShown = false;
+
 function skillSuggestNode() {
   if (!skillSuggest.el) {
     const node = document.createElement("div");
     node.id = "skill-suggest";
     node.setAttribute("role", "listbox");
     node.setAttribute("aria-label", "技能补全");
+    // 建出来就先藏住：空壳（min-width 300px）在屏上闪一下比没有更难看
+    node.style.display = "none";
     document.body.append(node);
     skillSuggest.el = node;
   }
@@ -89,6 +98,12 @@ async function refreshSkillSuggest() {
   if (top < 8) top = rect.bottom + 6;
   node.style.left = `${Math.round(Math.max(8, rect.left))}px`;
   node.style.top = `${Math.round(top)}px`;
+  // 入场（2026-11-25）：只有「隐藏 → 显示」那一下播；已经显示时只换候选内容，
+  // 不然输入每个字符都放一遍 160ms 动画，整张单子一直在抖。
+  seq += 1; // 让还在跑的关闭回调失效
+  if (skillSuggestShown) return;
+  skillSuggestShown = true;
+  popAnimateIn(node);
 }
 
 function paintSkillSuggest() {
@@ -112,7 +127,17 @@ function applySkillSuggest(name) {
 
 function closeSkillSuggest() {
   skillSuggest.index = 0;
-  if (skillSuggest.el) skillSuggest.el.style.display = "none";
+  const node = skillSuggest.el;
+  // 从未显示过（只是建了个空壳）或已经关掉：直接按死，不跑动画
+  if (!node || node.style.display === "none") return;
+  // 逻辑态已关但 display 还是 block = 收起动画正在跑，别起第二遍
+  if (!skillSuggestShown) return;
+  skillSuggestShown = false;
+  const mine = ++seq;
+  popAnimateOut(node).then(() => {
+    if (mine !== seq) return; // 已被重新打开，别藏
+    node.style.display = "none";
+  });
 }
 
 // 挂在 document 捕获段：抢在 composer 的 Enter 发送之前处理补全键
@@ -120,7 +145,7 @@ document.addEventListener(
   "keydown",
   (event) => {
     const node = skillSuggest.el;
-    if (!node || node.style.display !== "block" || !node.firstElementChild) return;
+    if (!node || !skillSuggestShown || !node.firstElementChild) return;
     if (event.target !== el.input) return;
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();

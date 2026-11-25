@@ -214,12 +214,26 @@ export function approvalApprovedInstruction(tool: string, args: string): string 
 	);
 }
 
-/** 用户答复了 ask_user 的问题后自动提交的 followUp（2026-11-09 §3.1） */
+/**
+ * 用户答复了 ask_user 的问题后自动提交的 followUp（2026-11-09 §3.1）。
+ *
+ * 外壳（前缀 + 尾句）只给模型看；回读展示只留答案本身（2026-11-25）——
+ * 否则会话里会多出一条「主人回答了你刚才的问题：…按这个回答继续…」的合成用户消息。
+ */
+export const ASK_ANSWER_PREFIX = "主人回答了你刚才的问题：\n";
+export const ASK_ANSWER_SUFFIX = "\n按这个回答继续；不要再问同一个问题，也不要原样重问。";
+
 export function askUserAnsweredInstruction(answer: string): string {
-	return (
-		`主人回答了你刚才的问题：\n${answer}\n` +
-		"按这个回答继续；不要再问同一个问题，也不要原样重问。"
-	);
+	return `${ASK_ANSWER_PREFIX}${answer}${ASK_ANSWER_SUFFIX}`;
+}
+
+/** 回读展示 / 搜索索引用：剥掉答复续跑的合成外壳；不是这条指令原样返回。 */
+export function stripAskUserAnswerInstruction(text: string): string {
+	if (!text.startsWith(ASK_ANSWER_PREFIX)) return text;
+	const body = text.endsWith(ASK_ANSWER_SUFFIX)
+		? text.slice(ASK_ANSWER_PREFIX.length, -ASK_ANSWER_SUFFIX.length)
+		: text.slice(ASK_ANSWER_PREFIX.length);
+	return body || text;
 }
 
 /**

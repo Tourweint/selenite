@@ -12,6 +12,7 @@ import { loadArchivePage } from "./archive-page.js";
 import { loadChats } from "./chats-list.js";
 import { attr, esc } from "./markdown.js";
 import { request } from "./net.js";
+import { popAnimateIn, popAnimateOut } from "./pop-anim.js";
 import { refreshProjectPill, setModalHint } from "./project-modal.js";
 import { isResearchProject, toggleResearchProject } from "./research-tag.js";
 import { currentSettingsPage } from "./route.js";
@@ -256,12 +257,14 @@ function closeProjMenu() {
   const open = projMenuState;
   if (!open) return;
   projMenuState = null;
-  open.node.remove();
   open.anchor.setAttribute("aria-expanded", "false");
   document.removeEventListener("pointerdown", open.onDown, true);
   window.removeEventListener("keydown", open.onKey, true);
   window.removeEventListener("scroll", closeProjMenu, true);
   window.removeEventListener("resize", closeProjMenu);
+  if (!open.node.isConnected) return;
+  // 收起动画跑完再拔节点（2026-11-25，pop-anim.js）
+  popAnimateOut(open.node).then(() => open.node.remove());
 }
 
 /** items: [{ label, action, danger?, separator?, kbd? }] */
@@ -307,6 +310,8 @@ function openProjMenu(anchor, items, onPick) {
   menu.style.left = `${Math.round(left)}px`;
   menu.style.top = `${Math.round(top)}px`;
   anchor.setAttribute("aria-expanded", "true");
+  // 入场（2026-11-25）：append + 定位都完成后再跑，动画只动 opacity/transform
+  popAnimateIn(menu);
   const onDown = (event) => {
     if (!menu.contains(event.target) && event.target !== anchor) closeProjMenu();
   };

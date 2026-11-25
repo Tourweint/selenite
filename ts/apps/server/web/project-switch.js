@@ -11,6 +11,7 @@ import { loadChats } from "./chats-list.js";
 import { syncChatProjectPill } from "./chat-project.js";
 import { el } from "./dom.js";
 import { request } from "./net.js";
+import { popAnimateIn, popAnimateOut } from "./pop-anim.js";
 import { openFileBrowser } from "./project-browser.js";
 import { baseNameOf, closeProjectMenu, openAddWorkspaceModal, refreshProjectPill } from "./project-modal.js";
 import { isResearchProject, researchTagNode, toggleResearchProject } from "./research-tag.js";
@@ -250,13 +251,15 @@ function closeProjectFlyout() {
   const open = projectFlyoutState;
   if (!open) return;
   projectFlyoutState = null;
-  open.node.remove();
   open.row.classList.remove("is-open");
   open.caret.setAttribute("aria-expanded", "false");
   document.removeEventListener("pointerdown", open.onDown, true);
   document.removeEventListener("keydown", open.onKey, true);
   window.removeEventListener("scroll", closeProjectFlyout, true);
   window.removeEventListener("resize", closeProjectFlyout);
+  if (!open.node.isConnected) return;
+  // 收起动画跑完再拔节点（2026-11-25，pop-anim.js）
+  popAnimateOut(open.node).then(() => open.node.remove());
 }
 
 function toggleProjectFlyout(row, caret, node) {
@@ -272,6 +275,8 @@ function toggleProjectFlyout(row, caret, node) {
   node.style.width = `${Math.round(Math.max(300, rect.width))}px`;
   row.classList.add("is-open");
   caret.setAttribute("aria-expanded", "true");
+  // 入场（2026-11-25）：append + 定位都完成后再跑，动画只动 opacity/transform
+  popAnimateIn(node);
   const onDown = (event) => {
     if (!node.contains(event.target)) closeProjectFlyout();
   };

@@ -477,6 +477,24 @@ function delegateResult(message: string, extra: Record<string, unknown> = {}) {
 }
 
 /**
+ * 派活没成（业务上没受理）的工具结果（2026-11-25 用户口径：成功还是失败要看得见）。
+ *
+ * JSON 形状照旧——模型要的 `projects` / `ticketId` 都还在 `data` 里；只在外层加
+ * `isError: true`。聊天里的灰块据此画成失败（不再把"没派出去"画成一个绿勾），
+ * 同类失败连击也按工具失败记账。真正受理成功的分支走 delegateResult，不加这个标记。
+ */
+function delegateFailedResult<T>(result: ToolResult<T>) {
+	return { ...textToolResult(result), isError: true };
+}
+
+/** `needs_project` 的失败回话：候选项目清单原样保留，只在 message 开头说清"没派成"。 */
+function delegateNeedsProject(gateText: string) {
+	const data = delegateJsonData(gateText);
+	const message = typeof data.message === "string" ? data.message : gateText;
+	return delegateFailedResult(ok({ ...data, message: `派活失败：${message}` }));
+}
+
+/**
  * 写类工具的统一成功形状（2026-11-10 批 25 §一）：只包外层，`message` 逐字不变。
  * 与 `delegateResult` 同构；分开命名只是让调用点读得出"这是哪一类工具"。
  */
@@ -1118,7 +1136,9 @@ export function createTools(deps: ToolDeps) {
 			(domainDispatch ? "（领域负责人/执行者）。" : "（执行者）。") +
 			"适合：改多个文件、跑命令、查证之后再动手、在手机上操作 App；" +
 			"不适合：闲聊、一次 read 就能答的事、需要边做边问对方的事。" +
-			"**派出去立即返回任务单号、后台汇报，不要等结果、不要重复派**；告诉用户「已派发，完成后会汇报」。" +
+			"**派出去立即返回任务单号、后台汇报，不要等结果、不要重复派**；" +
+			"**先看工具结果的第一句**：写「派活成功」才是发出去了，可以告诉用户「已派发，完成后会汇报」；" +
+			"写「派活失败」/「派活已提交」就照实告诉用户没派成（或还在受理）与下一步，不要嘴上说已派出。" +
 			"**新活必须带 `project`**（已登记项目名或 id；手机/设备活豁免）；" +
 			"没有可用项目会返回 needs_project 和项目清单——先问用户、用 `propose_project` 提交、等确认再派。" +
 			"上一轮的活卡住、或用户刚回答了你问的问题，用 `resume: true` 接原单跑，**不要重新派**。" +
@@ -1243,7 +1263,9 @@ export function createTools(deps: ToolDeps) {
 			// 计划附件（2026-11-09 §2.1）：先校验，超限不建单、不发送任何副作用。
 			const stepsCheck = normalizeDelegationSteps(args.steps);
 			if (!stepsCheck.ok) {
-				return textToolResult(ok({ error: "invalid_steps", message: stepsCheck.message }));
+				return delegateFailedResult(
+					ok({ error: "invalid_steps", message: `派活失败：${stepsCheck.message}` }),
+				);
 			}
 			const steps = stepsCheck.steps;
 			if (args.tasks !== undefined) {
@@ -1251,14 +1273,14 @@ export function createTools(deps: ToolDeps) {
 					validateTaskInput(args.tasks, MAX_TASKS_DEFAULT);
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);
-					return textToolResult(ok({ error: "invalid_tasks", message }));
+					return delegateFailedResult(ok({ error: "invalid_tasks", message: `派活失败：${message}` }));
 				}
 			}
 			// 按单隔离（2026-11-23）：非法值明确拒绝，不静默改成 direct / worktree。
 			const isolationCheck = normalizeDelegationIsolation(args.isolation);
 			if (!isolationCheck.ok) {
-				return textToolResult(
-					ok({ error: "invalid_isolation", message: isolationCheck.message }),
+				return delegateFailedResult(
+					ok({ error: "invalid_isolation", message: `派活失败：${isolationCheck.message}` }),
 				);
 			}
 			const isolation = isolationCheck.isolation;
@@ -1278,7 +1300,7 @@ export function createTools(deps: ToolDeps) {
 				requestedDomain,
 			);
 			if (routing.kind === "rejected") {
-				return textToolResult(err("delegate_rejected", routing.reason));
+				return delegateFailedResult(err("delegate_rejected", `派活失败：${routing.reason}`));
 			}
 			const requestFields = routingToRequestFields(routing);
 			// 关闭领域派活入口时显式不起分管宰相：请求不带 domain，并带 managers:false。
@@ -1294,24 +1316,24 @@ export function createTools(deps: ToolDeps) {
 			if (targetDevice) {
 				// "auto" 是第三态：开关关着就按非法参数拒绝，不让它悄悄降级成本机
 				if (targetDevice === "auto" && !deviceAutoDispatchEnabled()) {
-					return textToolResult(
-						err("auto_disabled", "自动挑机未开启（DEVICE_AUTO_DISPATCH）"),
+					return delegateFailedResult(
+						err("auto_disabled", "派活失败：自动挑机未开启（DEVICE_AUTO_DISPATCH）"),
 					);
 				}
 				const client = currentRelayClient();
 				if (!deviceMatrixEnabled() || !client) {
-					return textToolResult(
+					return delegateFailedResult(
 						err(
 							"device_matrix_unavailable",
-							"设备矩阵未开启（DEVICE_MATRIX_ENABLED=off 或中继未连接），targetDevice 不可用。",
+							"派活失败：设备矩阵未开启（DEVICE_MATRIX_ENABLED=off 或中继未连接），targetDevice 不可用。",
 						),
 					);
 				}
 				if (args.resume === true) {
-					return textToolResult(
+					return delegateFailedResult(
 						err(
 							"remote_resume_unsupported",
-							"远端单的续跑（resume）暂不支持：请直接重派一张新单到该设备。",
+							"派活失败：远端单的续跑（resume）暂不支持，请直接重派一张新单到该设备。",
 						),
 					);
 				}
@@ -1334,7 +1356,7 @@ export function createTools(deps: ToolDeps) {
 							result.deviceDescription ?? "",
 						].filter(Boolean);
 						return delegateResult(
-							`已交由设备「${result.deviceName}」${tags.length > 0 ? `（${tags.join("，")}）` : ""}执行（远端请求 ${result.requestId.slice(0, 8)}）。` +
+							`派活成功：已交由设备「${result.deviceName}」${tags.length > 0 ? `（${tags.join("，")}）` : ""}执行（远端请求 ${result.requestId.slice(0, 8)}）。` +
 								"它在后台跑，完成后我会把汇报写进本会话。不要重复派、不要轮询。",
 							{
 								deviceName: result.deviceName,
@@ -1346,7 +1368,7 @@ export function createTools(deps: ToolDeps) {
 				} catch (error) {
 					const code = error instanceof RelayInvokeError ? error.code : "internal";
 					const message = error instanceof Error ? error.message.slice(0, 200) : "派发失败";
-					return textToolResult(err(code, message));
+					return delegateFailedResult(err(code, `派活失败：${message}`));
 				}
 			}
 			// 非法领域名（尤其是中文）直接回可用清单，不建单、不让模型猜。
@@ -1354,8 +1376,11 @@ export function createTools(deps: ToolDeps) {
 				try {
 					validateDomain(domain, chancellorWorkRoot());
 				} catch (error) {
-					return textToolResult(
-						err("invalid_domain", error instanceof Error ? error.message : String(error)),
+					return delegateFailedResult(
+						err(
+							"invalid_domain",
+							`派活失败：${error instanceof Error ? error.message : String(error)}`,
+						),
 					);
 				}
 			}
@@ -1380,12 +1405,13 @@ export function createTools(deps: ToolDeps) {
 			if (projectRequired && !deviceWork) {
 				if (args.project?.trim()) {
 					const gate = resolveDelegationProject(args.project, deps.projects ?? null);
-					// needs_project 是业务分支：项目清单原样进 data，不塞进 error。
-					if (!gate.ok) return textToolResult(ok(delegateJsonData(gate.text)));
+					// needs_project 是"没派成"：项目清单仍进 data（模型要用来问用户），
+					// 但工具结果标 isError，界面不再画成成功。
+					if (!gate.ok) return delegateNeedsProject(gate.text);
 					project = gate.project;
 				} else if (resumeTicketId === undefined) {
 					const gate = resolveDelegationProject(undefined, deps.projects ?? null);
-					if (!gate.ok) return textToolResult(ok(delegateJsonData(gate.text)));
+					if (!gate.ok) return delegateNeedsProject(gate.text);
 					project = gate.project;
 				} else {
 					// 老会话重启后可能记不住项目；续跑本身不需要新项目。
@@ -1403,7 +1429,11 @@ export function createTools(deps: ToolDeps) {
 				const store = deps.projects ?? projectsStore();
 				const base = project?.rootPath ?? store.getWorkspace()?.rootPath;
 				const pick = resolveChatDir(rawWorkDir, store, base);
-				if (!pick.ok) return textToolResult(ok({ error: "bad_workdir", message: pick.message }));
+				if (!pick.ok) {
+					return delegateFailedResult(
+						ok({ error: "bad_workdir", message: `派活失败：${pick.message}` }),
+					);
+				}
 				workDir = pick.pick.path;
 			}
 
@@ -1456,19 +1486,20 @@ export function createTools(deps: ToolDeps) {
 					const existing = begun.receipt?.ticketId ?? "";
 					if (existing) lastTicketByConversation.set(conversationId, existing);
 					return delegateResult(
-						`该请求号已受理过，返回原单${existing ? ` ${existing}` : "（原单还在受理中）"}，没有重复派。` +
+						`派活成功（沿用原单）：该请求号已受理过，返回原单${existing ? ` ${existing}` : "（原单还在受理中）"}，没有重复派。` +
 							"后台跑完会汇报。",
 						existing ? { ticketId: existing } : {},
 					);
 				}
 				if (begun.kind === "uncertain") {
 					// 结果未知是**业务分支**：ticketId 必须留在 data 里，模型要先用它确认，不能重派。
-					return textToolResult(
+					// 对外仍按"没确认成功"处理（isError），别在界面上画成派成功。
+					return delegateFailedResult(
 						ok({
 							error: "uncertain",
 							ticketId: begun.receipt?.ticketId ?? "",
 							message:
-								"这张单在受理时中断过，结果未知。先确认它是否已经在跑，不要盲目重派。",
+								"派活未确认：这张单在受理时中断过，结果未知。先确认它是否已经在跑，不要盲目重派。",
 						}),
 					);
 				}
@@ -1476,7 +1507,7 @@ export function createTools(deps: ToolDeps) {
 					const existing = begun.receipt?.ticketId ?? "";
 					if (existing) lastTicketByConversation.set(conversationId, existing);
 					return delegateResult(
-						`这次派活已经受理过，沿用原任务单 ${existing || "(受理中)"}，没有重复派。` +
+						`派活成功（沿用原单）：这次派活已经受理过，沿用原任务单 ${existing || "(受理中)"}，没有重复派。` +
 							"后台跑完会汇报。",
 						existing ? { ticketId: existing } : {},
 					);
@@ -1583,21 +1614,30 @@ export function createTools(deps: ToolDeps) {
 					lastTicketByConversation.set(conversationId, result.ticketId);
 					const line = result.line || "派出去的活没有返回结论。";
 					const ticket = result.ticketId ? { ticketId: result.ticketId } : {};
+					// 同步路径等到了终态：成功 / 失败说在明面上（2026-11-25 用户口径）。
+					const head =
+						result.status === "done"
+							? "派活成功："
+							: result.status === "failed" || result.status === "aborted"
+								? "派活失败："
+								: `派活未完成（${result.status}）：`;
 					if (noTicket) {
 						return delegateResult(
-							`${fallbackNotice}${line}\n（没有可续的单，已按新活派）`,
+							`${head}${fallbackNotice}${line}\n（没有可续的单，已按新活派）`,
 							ticket,
 						);
 					}
 					if (resumeTicketId) {
 						return delegateResult(
-							`${fallbackNotice}${line}\n（已把用户的回答交回原单，它在接着做。）`,
+							`${head}${fallbackNotice}${line}\n（已把用户的回答交回原单，它在接着做。）`,
 							ticket,
 						);
 					}
-					return delegateResult(fallbackNotice + line, ticket);
+					return delegateResult(head + fallbackNotice + line, ticket);
 				} catch {
-					return textToolResult(err("delegate_failed", `${fallbackNotice}派单失败，请稍后再试。`));
+					return delegateFailedResult(
+						err("delegate_failed", `${fallbackNotice}派活失败：派单失败，请稍后再试。`),
+					);
 				}
 			}
 
@@ -1606,9 +1646,11 @@ export function createTools(deps: ToolDeps) {
 			const executorText = executor
 				? executorSummary(executor.employee, executor.profile)
 				: "";
+			// 还没拿到单号 ≠ 已受理：如实说"已提交、受理中"，不冒充成功。
+			const ticketText = ticketId ? `任务单 ${ticketId}` : "任务单还在受理中（还没拿到单号）";
 			if (noTicket) {
 				return delegateResult(
-					`${fallbackNotice}已按新活派：任务单 ${ticketId || "(受理中)"}` +
+					`${ticketId ? "派活成功" : "派活已提交"}（没有可续的单，已按新活派）：${fallbackNotice}${ticketText}` +
 						`${domain ? `（领域：${domain}）` : ""}${executorText ? `；交给 ${executorText}` : ""}。` +
 						"它在后台执行，完成后我会汇报。",
 					{ ...ticket, ...domainField },
@@ -1616,13 +1658,14 @@ export function createTools(deps: ToolDeps) {
 			}
 			if (resumeTicketId) {
 				return delegateResult(
-					`${fallbackNotice}已把回答交回原单 ${ticketId}（续跑沿用原单的工人），它继续在后台跑，完成后我会汇报。`,
+					`续跑成功：${fallbackNotice}已把回答交回原单 ${ticketId}（续跑沿用原单的工人），它继续在后台跑，完成后我会汇报。`,
 					ticket,
 				);
 			}
 			return delegateResult(
-				`${fallbackNotice}${executorText ? `已派发到 ${executorText}` : "已受理"}：` +
-					`任务单 ${ticketId || "(受理中)"}${domain ? `（领域：${domain}）` : ""}。` +
+				`${ticketId ? "派活成功" : "派活已提交"}：${fallbackNotice}` +
+					`${executorText ? `已派发到 ${executorText}` : "已受理"}；${ticketText}` +
+					`${domain ? `（领域：${domain}）` : ""}。` +
 					"它在后台执行，完成后我会汇报；不要等，也不要重复派。",
 				{ ...ticket, ...domainField },
 			);

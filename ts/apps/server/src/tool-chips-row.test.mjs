@@ -20,7 +20,7 @@ test("一行装得下：不收起，全部显示", () => {
   const widths = [100, 100, 100, 100, 100];
   const plan = planRowChips({ widths, containerWidth: 520, gap });
   // 500 + 4×5 = 520，正好压线
-  assert.deepEqual(plan, { keep: 5, folded: false });
+  assert.deepEqual(plan, { keep: 5, folded: false, pinnedShown: [] });
 });
 
 test("差一点点就放不下：收起到刚好一行，并把行首折叠条的宽度算进去", () => {
@@ -40,21 +40,40 @@ test("运行中的块不能被收走，宁可让前面的块先让位", () => {
   assert.equal(plan.folded, true);
   // 前 2 枚 + 末尾那枚运行中的 + 折叠条 = 200 + 100 + 15 + 40 = 355 ≤ 420
   assert.equal(plan.keep, 2);
+  assert.deepEqual(plan.pinnedShown, [4]);
+});
+
+test("多个运行中的块放不下时只留最新的，绝不折成第二行", () => {
+  const widths = [100, 100, 100, 100, 100];
+  // 折叠条 40；keep=0 时只放得下一枚运行块（100 + 5 + 40 = 145 ≤ 160）
+  const plan = planRowChips({ widths, containerWidth: 160, gap, moreWidth: 40, pinned: [2, 4] });
+  assert.equal(plan.folded, true);
+  assert.equal(plan.keep, 0);
+  // 最新的 4 优先；2 让位（否则 145 + 105 = 250 > 160，会跨行）
+  assert.deepEqual(plan.pinnedShown, [4]);
 });
 
 test("容器宽度还没量出来：先全摊着，等 ResizeObserver 再来一次", () => {
   const widths = [100, 100, 100];
-  assert.deepEqual(planRowChips({ widths, containerWidth: 0, gap }), { keep: 3, folded: false });
+  assert.deepEqual(planRowChips({ widths, containerWidth: 0, gap }), {
+    keep: 3,
+    folded: false,
+    pinnedShown: [],
+  });
 });
 
 test("一枚块都没有：不需要按钮，也不假装折叠", () => {
-  assert.deepEqual(planRowChips({ widths: [], containerWidth: 300, gap }), { keep: 0, folded: false });
+  assert.deepEqual(planRowChips({ widths: [], containerWidth: 300, gap }), {
+    keep: 0,
+    folded: false,
+    pinnedShown: [],
+  });
 });
 
 test("极窄容器：一枚都排不下时也只留行首计数条", () => {
   const widths = [300, 300];
   const plan = planRowChips({ widths, containerWidth: 200, gap, moreWidth: 40 });
-  assert.deepEqual(plan, { keep: 0, folded: true });
+  assert.deepEqual(plan, { keep: 0, folded: true, pinnedShown: [] });
 });
 
 /**

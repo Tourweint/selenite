@@ -7,7 +7,7 @@
  * app.js 文末，各模块顶层只做声明、常量与事件监听注册。
  */
 
-import { approvalCards, approvalSourceLabel, parseAskUserPayload } from "./approval-card.js";
+import { approvalCards, approvalSourceLabel, askOptionLetter, parseAskUserPayload, settleAnsweredQuestion } from "./approval-card.js";
 import { openConversation } from "./chat-open.js";
 import { chevSvg } from "./icons.js";
 import { attr, esc } from "./markdown.js";
@@ -323,40 +323,48 @@ function approvalPopupCard(item) {
   return card;
 }
 
-/** 提问的浮窗卡（2026-11-09 §3）：选项即答复，也可以自己写。 */
+/** 提问的浮窗卡（2026-11-09 §3）：选项即答复，也可以自己写；选项与对话流卡片同一套 A/B/C。 */
 function askUserPopupCard(card, item, source) {
   const payload = parseAskUserPayload(item.args);
+  const rows = payload.options
+    .map((text, index) => {
+      const badge =
+        index === payload.recommended ? '<span class="ask-badge">建议</span>' : "";
+      return `<button class="ask-option" type="button" data-answer="${index}">
+        <span class="ask-letter">${askOptionLetter(index)}.</span>
+        <span class="ask-opt-text">${esc(text)}</span>${badge}
+      </button>`;
+    })
+    .join("");
   card.innerHTML = `
     <div class="approval-pop-head">
       <span class="approval-pop-tool">有个问题等你回答</span>
       <button class="approval-pop-close" type="button" title="忽略" aria-label="忽略">${APPROVAL_POP_X}</button>
     </div>
     <div class="approval-pop-source">${esc(source)}</div>
-    <div class="approval-pop-question">${esc(payload.question || "（问题正文缺失）")}</div>
-    ${
-      payload.options.length
-        ? `<div class="approval-actions">${payload.options
-            .map((text, index) => {
-              const label = index === payload.recommended ? `${text}（建议）` : text;
-              return `<button class="ghost" type="button" data-answer="${index}">${esc(label)}</button>`;
-            })
-            .join("")}</div>`
-        : ""
-    }
-    <div class="approval-feedback">
-      <textarea class="cs-textarea" rows="2" placeholder="直接回答…"></textarea>
-      <button class="ghost" type="button" data-answer-send="1">回答</button>
+    <div class="ask-question">${esc(payload.question || "（问题正文缺失）")}</div>
+    <div class="ask-options">
+      ${rows}
+      <div class="ask-option ask-custom">
+        <span class="ask-letter">${askOptionLetter(payload.options.length)}.</span>
+        <textarea class="ask-input" rows="1" placeholder="或者自己写…"></textarea>
+        <button class="ask-send" type="button" data-answer-send="1">回答</button>
+      </div>
     </div>`;
   card.querySelectorAll("[data-answer]").forEach((button, index) => {
     button.addEventListener("click", () =>
-      void answerGlobalQuestion(item.callId, payload.options[index] || ""),
+      void answerGlobalQuestion(item.callId, payload.options[index] || "", item.conversationId),
     );
   });
-  card.querySelector("[data-answer-send]")?.addEventListener("click", () => {
-    const input = card.querySelector(".approval-feedback textarea");
-    void answerGlobalQuestion(item.callId, input ? input.value : "");
+  const input = card.querySelector(".ask-input");
+  const submit = () => void answerGlobalQuestion(item.callId, input ? input.value : "", item.conversationId);
+  card.querySelector("[data-answer-send]")?.addEventListener("click", submit);
+  input?.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" || event.shiftKey) return;
+    event.preventDefault();
+    submit();
   });
-  bindApprovalPopDraft(card.querySelector(".approval-feedback textarea"), item.callId);
+  bindApprovalPopDraft(input, item.callId);
   card.querySelector(".approval-pop-close")?.addEventListener("click", () => {
     approvalPopDismissed.add(item.callId);
     approvalPopDrafts.delete(item.callId);
@@ -455,7 +463,7 @@ async function decideGlobalApproval(callId, decision, feedback = "") {
 }
 
 /** ask_user 的答复（2026-11-09 §3）：浮窗与对话流卡片共用这一条路 */
-async function answerGlobalQuestion(callId, text) {
+async function answerGlobalQuestion(callId, text, conversationId = "") {
   const answer = String(text || "").trim();
   if (!answer) return;
   try {
@@ -469,12 +477,14 @@ async function answerGlobalQuestion(callId, text) {
       return;
     }
     toast("已回答");
-    const entry = approvalCards.get(callId);
-    if (entry) {
-      entry.root.classList.add("resolved");
-      for (const button of entry.root.querySelectorAll("button")) button.disabled = true;
-      approvalCards.delete(callId);
-    }
+    // 卡片消失 + 问题与答案落成对话正文 + 跟住续跑轮（对话流卡片与浮窗同一套收尾）
+    const item = approvalPopItems.find((entry) => entry.callId === callId);
+    settleAnsweredQuestion(
+      callId,
+      answer,
+      conversationId || item?.conversationId || "",
+      item ? parseAskUserPayload(item.args).question : "",
+    );
     approvalPopItems = approvalPopItems.filter((item) => item.callId !== callId);
     approvalPopDrafts.delete(callId);
     renderApprovalPopups();

@@ -8,7 +8,7 @@
  */
 
 import { formatBranchOrigin } from "./branch.js";
-import { addError, attachUsage, collectFileChangesFromSteps, mountFileSummary, scrollToEnd, syncCtxMeter } from "./chat-notice.js";
+import { addError, addNotice, attachUsage, collectFileChangesFromSteps, mountFileSummary, scrollToEnd, syncCtxMeter } from "./chat-notice.js";
 import { clearChatProject, setChatWorkdir, syncChatProjectPill } from "./chat-project.js";
 import { addMessage, clearThread, syncEditEntry } from "./chat-thread.js";
 import { renderChats } from "./chats-list.js";
@@ -18,6 +18,7 @@ import { dayKeyOfAt, dayLabelOf } from "./groups-thread.js";
 import { request } from "./net.js";
 import { partnerSessionLabel, parsePartnerExternalId } from "./partner-sessions.js";
 import { chiefDisplayName, partnerDisplayName, syncChatHeadAvatar, syncEmptyMark } from "./partners-status.js";
+import { resize } from "./plus-menu.js";
 import { go, syncRailCurrent, syncSideRowsCurrent } from "./route.js";
 import { beginHomeSettle, cancelHomeSettle, endHomeSettle } from "./shell.js";
 import { state } from "./state.js";
@@ -274,7 +275,65 @@ async function loadOlderMessages() {
   }
 }
 
+/* ── 后台还在跑的轮次（2026-11-25）────────────────────────
+ * 刷新页面 / 切回会话时，这一轮可能还在服务端跑完（流断了不等于活停了）。
+ * 客户端只看得到已落盘的半截历史，屏幕上像卡住。服务端 /messages 现在带 running：
+ * 在跑就挂一条说明、每 2 秒问一次；跑完自动重读这条会话，把完整回答接上。
+ * 只在当前离线时轮询：本地还有流在画（state.sending）就交给那条流，不抢屏幕。 */
+const RUNNING_POLL_MS = 2000;
+let runningWatch = null;
+
+function stopRunningWatch() {
+  if (!runningWatch) return;
+  clearInterval(runningWatch.timer);
+  runningWatch = null;
+}
+
+function watchRunningTurn(conversationId) {
+  stopRunningWatch();
+  const watch = { conversationId, timer: 0, tries: 0 };
+  runningWatch = watch;
+  watch.timer = setInterval(async () => {
+    if (runningWatch !== watch) return;
+    if (state.conversationId !== conversationId) {
+      stopRunningWatch();
+      return;
+    }
+    // 本地正在流式画这一轮：由它负责收尾，不要和自动重读抢屏幕
+    if (state.sending) return;
+    watch.tries += 1;
+    // 20 分钟还没收尾（服务端卡死 / 单子被外部中止）：停止轮询，别无限打服务
+    if (watch.tries > (20 * 60 * 1000) / RUNNING_POLL_MS) {
+      stopRunningWatch();
+      return;
+    }
+    try {
+      const response = await request(
+        `/api/v1/agent/chat/${encodeURIComponent(conversationId)}/messages?limit=1`,
+        { cache: "no-store" },
+      );
+      if (runningWatch !== watch || !response.ok) return;
+      const data = await response.json();
+      if (runningWatch !== watch || data.running) return;
+      stopRunningWatch();
+      if (state.conversationId !== conversationId) return;
+      // 收尾标记与最终条目落盘之间有一小段缝：等一下再重建，别读到最后一条还是提问。
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      // 等这 400ms 里用户又发了一轮 / 切走了：不要再抢屏幕
+      if (runningWatch !== watch || state.sending || state.conversationId !== conversationId) return;
+      const reopened = await openChat(conversationId);
+      // 重读期间又开了一轮（openChat 自己挂上新监视）/ 读取失败：不冒称"跑完了"
+      if (state.conversationId === conversationId && !runningWatch && reopened?.status === "ok") {
+        addNotice("这一轮跑完了，内容已刷新。");
+      }
+    } catch {
+      /* 网络抖动：下一拍再试 */
+    }
+  }, RUNNING_POLL_MS);
+}
+
 async function openChat(conversationId, { anchor = null, deep = false } = {}) {
+  stopRunningWatch();
   const token = ++state.navToken; // 作废还在飞的 open / 上一次 openChat
   const owner = () => token === state.navToken && state.conversationId === conversationId;
   state.conversationId = conversationId;
@@ -295,6 +354,10 @@ async function openChat(conversationId, { anchor = null, deep = false } = {}) {
   // 载入期锁住首页态判定（2026-11-19）：清线程后先保持贴底，历史画完再结算。
   // 不加锁的话，线程一空就会被判成首页态，输入框先抬到中间、再随历史落回底部。
   beginHomeSettle(token);
+  // 输入框高度跟着会话重算（2026-11-25 用户报「切进会话空框还是首页那么高」）：
+  // 首页档的实测高度是内联 height，切到对话态后 min-height 变小但内联值还留着，
+  // 空框会一直顶着首页那一档，直到第一次打字。data-home 已由 beginHomeSettle 置 0。
+  resize();
   clearThread();
   // 来源行在 thread 之外，切会话先收起；拿到回读数据后按 origin 再摆。
   renderBranchOrigin(null);
@@ -404,6 +467,12 @@ async function openChat(conversationId, { anchor = null, deep = false } = {}) {
     // 刷新页面 / 切回会话时，可能还有一条挂着等答复的审批
     await loadPendingApprovals(conversationId);
     if (!owner()) return { token, conversationId, status: "stale" };
+    // 这一轮还在服务端跑（2026-11-25）：说明白 + 等它收尾自动重读，
+    // 别让半截历史看起来像"卡住了"。
+    if (data.running) {
+      addNotice("这一轮还在后台跑，完成后会自动刷新。");
+      watchRunningTurn(conversationId);
+    }
     return { token, conversationId, status: "ok", applied: true, chatKind: kind };
   } catch (error) {
     // 旧请求的失败不许挂到别人屏幕上
@@ -429,6 +498,8 @@ async function openChat(conversationId, { anchor = null, deep = false } = {}) {
 
 function startNewChat(kind = "chief") {
   state.navToken += 1;
+  // 新会话不归上一条会话的后台轮次管：停掉那边的自动重读
+  stopRunningWatch();
   // 普通助手（worker）2026-11-23 退役：新建入口不会再传 worker（缺省即总管）；
   // 只有「原会话没了、按原身份重开」这条兜底还允许沿用 worker（历史会话继续可用）。
   state.chatKind = kind === "chief" ? "chief" : "worker";
@@ -458,4 +529,4 @@ function startNewChat(kind = "chief") {
   el.input.focus();
 }
 
-export { CHAT_HISTORY_PAGE_SIZE, clearHistoryTop, jumpToAnchor, loadOlderMessages, openChat, openConversation, prependHistoryMessages, renderHistoryMessages, renderHistoryTop, renderTranscriptMessage, startNewChat };
+export { CHAT_HISTORY_PAGE_SIZE, clearHistoryTop, jumpToAnchor, loadOlderMessages, openChat, openConversation, prependHistoryMessages, renderHistoryMessages, renderHistoryTop, renderTranscriptMessage, startNewChat, stopRunningWatch, watchRunningTurn };

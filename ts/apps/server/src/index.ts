@@ -2332,6 +2332,9 @@ app.get("/api/v1/agent/chat/:conversationId/messages", async (c) => {
   // 开关关着 = 不下发（回滚到旧响应形状）；总管 / 执事 / 任务专线不带。
   const chatWorkdir =
     chatKind === "worker" && chatProjectLabelEnabled() ? await chatWorkdirOf(chat) : null;
+  // 这一轮是否还在后台跑（2026-11-25，纯增量）：刷新页面 / 切回会话时，前端据此
+  // 显示「还在跑，完成后自动刷新」并轮询；否则客户端只看得到半截历史，像是卡住了。
+  const running = await conversationIsBusy(chat.conversation).catch(() => false);
 
   const sinceRaw = c.req.query("sinceSeq");
   const eventStore = chatEventStoreOf();
@@ -2340,6 +2343,7 @@ app.get("/api/v1/agent/chat/:conversationId/messages", async (c) => {
       conversationId: chat.externalId,
       messages,
       chatKind,
+      running,
       ...pageFields,
       ...(origin ? { origin } : {}),
       ...(chatWorkdir ? { chatWorkdir } : {}),
@@ -2354,6 +2358,7 @@ app.get("/api/v1/agent/chat/:conversationId/messages", async (c) => {
     conversationId: chat.externalId,
     messages,
     chatKind,
+    running,
     ...pageFields,
     ...(origin ? { origin } : {}),
     ...(chatWorkdir ? { chatWorkdir } : {}),

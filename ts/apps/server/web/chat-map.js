@@ -1266,6 +1266,17 @@ function toggleCollapsed(nodeId) {
   const chev = viewport.querySelector(
     `article[data-node-id="${nodeId}"] button[data-act="toggle"] svg`,
   );
+  // CSS 的全局 reduced-motion 兜底管不到 WAAPI（2026-11-25 补判）：真值时不建动画，
+  // 直接落最终态——chevron 的转角由 CSS 按 aria-expanded 给出，DOM/class 结果与原来一致。
+  if (
+    typeof matchMedia === "function" &&
+    matchMedia("(prefers-reduced-motion: reduce)").matches
+  ) {
+    chev
+      ?.closest("button")
+      ?.setAttribute("aria-expanded", opening ? "true" : "false");
+    return;
+  }
   if (chev?.animate) {
     chev.animate(
       [

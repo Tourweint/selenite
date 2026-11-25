@@ -12,6 +12,7 @@ import { send } from "./composer-send.js";
 import { el } from "./dom.js";
 import { chevSvg } from "./icons.js";
 import { request } from "./net.js";
+import { popAnimateIn, popAnimateOut } from "./pop-anim.js";
 import { formatTokenCount } from "./providers.js";
 import { currentRoute } from "./route.js";
 import { state } from "./state.js";
@@ -59,6 +60,60 @@ function fileChangeCollector() {
   };
 }
 
+/* 文件清单展开 / 收起（2026-11-25）：清单显隐靠 .fsum[data-open="1"] .fsum-files{display:flex}
+ * 直切，没有过渡。改走 WAAPI：展开先把 dataset.open 置 1 让 display:flex 生效再量高度，
+ * 收起要等动画跑到 0 才把 dataset.open 归 0；只动 height / opacity 与 inline overflow，
+ * 结束后清掉回 CSS 原样。fsumGens 按 .fsum 节点各记代际——每条消息一张卡，
+ * 模块级单计数器会让同页另一张卡的 .then 互相打断；收起动画晚到也不能把已重新展开的清单藏掉。 */
+const fsumGens = new WeakMap();
+
+function animateFsumFiles(box, list, open) {
+  if (!box || !list) return;
+  list.getAnimations().forEach((animation) => animation.cancel());
+  const mine = (fsumGens.get(box) || 0) + 1;
+  fsumGens.set(box, mine);
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (open) {
+    box.dataset.open = "1";
+    if (reduce) {
+      list.style.height = "";
+      list.style.overflow = "";
+      list.style.opacity = "";
+      return;
+    }
+    const height = list.scrollHeight;
+    list.style.overflow = "hidden";
+    const animation = list.animate(
+      [{ height: "0px", opacity: "0" }, { height: `${height}px`, opacity: "1" }],
+      { duration: 200, easing: "cubic-bezier(0,0,.2,1)" },
+    );
+    animation.finished.catch(() => {}).then(() => {
+      if (mine !== fsumGens.get(box)) return;
+      list.style.height = "";
+      list.style.overflow = "";
+      list.style.opacity = "";
+    });
+    return;
+  }
+  if (reduce) {
+    box.dataset.open = "0";
+    return;
+  }
+  const height = list.scrollHeight;
+  list.style.overflow = "hidden";
+  const animation = list.animate(
+    [{ height: `${height}px`, opacity: "1" }, { height: "0px", opacity: "0" }],
+    { duration: 160, easing: "cubic-bezier(.4,0,1,1)", fill: "forwards" },
+  );
+  animation.finished.catch(() => {}).then(() => {
+    if (mine !== fsumGens.get(box)) return;
+    box.dataset.open = "0";
+    list.style.height = "";
+    list.style.overflow = "";
+    list.style.opacity = "";
+  });
+}
+
 /**
  * 「改了 N 个文件」汇总卡：挂在正文下方、灰块之后。
  * 历史回读从 steps 收集（collectFileChangesFromSteps），形状与现场一致。
@@ -101,11 +156,6 @@ function mountFileSummary(root, files) {
   head.className = "fsum-head";
   head.setAttribute("aria-expanded", "false");
   head.append(chevron, title, nums);
-  head.addEventListener("click", () => {
-    const open = box.dataset.open !== "1";
-    box.dataset.open = open ? "1" : "0";
-    head.setAttribute("aria-expanded", String(open));
-  });
 
   const list = document.createElement("div");
   list.className = "fsum-files";
@@ -131,6 +181,14 @@ function mountFileSummary(root, files) {
     }
     list.append(row);
   }
+
+  head.addEventListener("click", () => {
+    // 意图以 aria-expanded 为准：收起动画跑完才把 dataset.open 归 0，那段时间里
+    // dataset 还是 "1"，拿它判会把"再点一次展开"读成"继续收起"。
+    const open = head.getAttribute("aria-expanded") !== "true";
+    head.setAttribute("aria-expanded", String(open));
+    animateFsumFiles(box, list, open);
+  });
 
   box.append(head, list);
   root.append(box);
@@ -367,6 +425,10 @@ let ctxPayload = null;
 let ctxCard = null;
 let ctxPinned = false;
 let ctxHideTimer = 0;
+/* 进出场动画（2026-11-25）：收起跑 140ms 才 hidden=true，这期间 hidden 还是 false。
+ * 逻辑开合单记一份，代际号防"关到一半又被 hover 打开、旧回调晚到把新开的卡藏掉"。 */
+let seq = 0;
+let ctxCardShown = false;
 
 function ctxPct(used, windowSize) {
   return Math.min(100, Math.max(0, Math.round((used / windowSize) * 100)));
@@ -487,10 +549,17 @@ function openCtxCard(pin = false) {
   ensureCtxCard();
   cancelCtxClose();
   renderCtxCard(ctxPayload);
-  ctxCard.hidden = false;
-  el.ctxRing.setAttribute("aria-expanded", "true");
-  // 显示之后才量得到高度，位置随即校正
+  seq += 1; // 让还在跑的关闭回调失效
+  const fresh = !ctxCardShown;
+  if (fresh) {
+    ctxCardShown = true;
+    ctxCard.hidden = false;
+    el.ctxRing.setAttribute("aria-expanded", "true");
+  }
+  // 显示之后才量得到高度，位置随即校正（已经开着时内容可能变了，照样重新对齐）
   placeCtxCard();
+  // 入场只在「隐藏 → 显示」那一下播；hover 反复进出时已经开着就别重播
+  if (fresh) popAnimateIn(ctxCard);
   if (pin) ctxPinned = true;
 }
 
@@ -498,9 +567,15 @@ function closeCtxCard(force = false) {
   if (ctxPinned && !force) return;
   cancelCtxClose();
   ctxPinned = false;
-  if (!ctxCard) return;
-  ctxCard.hidden = true;
+  // 已经关着 / 收起动画正在跑：别起第二遍（pointerleave + blur + 外点击会连着进来）
+  if (!ctxCard || !ctxCardShown) return;
+  ctxCardShown = false;
   el.ctxRing.setAttribute("aria-expanded", "false");
+  const mine = ++seq;
+  popAnimateOut(ctxCard).then(() => {
+    if (mine !== seq) return; // 已被重新打开，别藏
+    ctxCard.hidden = true;
+  });
 }
 
 function toggleCtxCard() {

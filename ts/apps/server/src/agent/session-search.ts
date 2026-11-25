@@ -4,6 +4,7 @@ import type { Conversation } from "@earendil-works/pi-durable";
 import { redactSecrets } from "@lifediary/memory";
 import { PROACTIVE_HIDDEN_MARKER } from "@lifediary/shared";
 import { CTX, Chats } from "./shared.ts";
+import { stripAskUserAnswerInstruction } from "./turn-gate.ts";
 import { stripScheduledRunHeader } from "../scheduled-run-context.ts";
 import { flagEnabled } from "../flags.ts";
 
@@ -329,8 +330,12 @@ export async function readTranscriptSources(reader: SessionReader): Promise<Tran
 			) {
 				continue;
 			}
-			// 可见的定时轮只索引用户写的那段指令，不把模型侧技术头带进搜索结果。
-			const text = entry.kind === "pi.user" ? stripScheduledRunHeader(raw) : raw;
+			// 可见的定时轮只索引用户写的那段指令，不把模型侧技术头带进搜索结果；
+			// 答复提问的续跑指令同理，只索引答案本身（2026-11-25）。
+			const text =
+				entry.kind === "pi.user"
+					? stripAskUserAnswerInstruction(stripScheduledRunHeader(raw))
+					: raw;
 			if (!text) continue;
 			const at = typeof message.timestamp === "number" ? message.timestamp : 0;
 			lines.push({ role: entry.kind === "pi.user" ? "user" : "assistant", text, at });

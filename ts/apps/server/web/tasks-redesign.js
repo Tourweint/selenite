@@ -380,30 +380,50 @@ function headlineTicketOf(card) {
   return rows.find((ticket) => ticket.status !== "done" && ticket.status !== "canceled") || rows[0] || null;
 }
 
-function runBlockHtml(cards, running) {
+function runBlockHtml(cards, running, direct = []) {
   // 排队数（2026-11-22 M2b）：只显示 ticket 准入队列；0 时不出现，别让空态多一行噪音。
   const queued = queuedOfScheduler(state.scheduler);
   const head = `<div class="tk2-sec-h"><span>在跑</span><span class="tk2-sec-cnt">${running}</span><span class="tk2-sec-ln"></span>${queued > 0 ? `<span class="tk2-sec-queue">排队 ${queued}</span>` : ""}</div>`;
-  if (!cards.length) return `${head}<p class="tk2-none">现在没有在跑的事。</p>`;
-  const items = cards
-    .map((card) => {
-      const ticket = headlineTicketOf(card);
-      const [label] = (ticket && TASK_STATUS[ticket.status]) || ["执行中", "run"];
-      const lamp = card.lamp === "fail" ? "fail" : "run";
-      // 2026-11-16 任务中心分人：小卡带「项目 · 派活人」，窄屏由 CSS 省略号收尾。
-      const meta = [label, projectOfTicket(ticket), dispatcherOfTicket(ticket).name]
-        .filter(Boolean)
-        .join(" · ");
-      return `<button class="tk2-mini" type="button" data-lamp="${lamp}" data-open-conv="${attr(card.conversationId)}" title="回到这条对话">
-        <span class="tk2-ava sm ${avatarTone(card.conversationId)}">${esc(firstChar(card.title, "对"))}</span>
-        <span class="tk2-mini-bd">
-          <span class="tk2-mini-title">${esc(card.title || "未命名对话")}</span>
-          <span class="tk2-mini-sub"><i aria-hidden="true"></i><span class="tk2-mini-meta">${esc(meta)} · ${esc(relativeTime(card.updated_at))}</span></span>
-        </span>
-      </button>`;
-    })
-    .join("");
-  return `${head}<section class="tk2-minis">${items}</section>`;
+  // 没有来源对话的在跑 / 出错单（2026-11-25）：以前只渲染有 conversationId 的对话卡，
+  // 这批单在「在跑」区完全看不到（SSE 刚派出去、会话映射还没补齐时最容易撞上）。
+  // 直接给一张小卡，点开走单详情（#/tasks?ticket=）。
+  const directLive = direct.filter((ticket) => {
+    const lamp = ticketLamp(ticket);
+    return lamp === "run" || lamp === "fail";
+  });
+  if (!cards.length && !directLive.length) return `${head}<p class="tk2-none">现在没有在跑的事。</p>`;
+  const conversationItems = cards.map((card) => {
+    const ticket = headlineTicketOf(card);
+    const [label] = (ticket && TASK_STATUS[ticket.status]) || ["执行中", "run"];
+    const lamp = card.lamp === "fail" ? "fail" : "run";
+    // 2026-11-16 任务中心分人：小卡带「项目 · 派活人」，窄屏由 CSS 省略号收尾。
+    const meta = [label, projectOfTicket(ticket), dispatcherOfTicket(ticket).name]
+      .filter(Boolean)
+      .join(" · ");
+    return `<button class="tk2-mini" type="button" data-lamp="${lamp}" data-open-conv="${attr(card.conversationId)}" title="回到这条对话">
+      <span class="tk2-ava sm ${avatarTone(card.conversationId)}">${esc(firstChar(card.title, "对"))}</span>
+      <span class="tk2-mini-bd">
+        <span class="tk2-mini-title">${esc(card.title || "未命名对话")}</span>
+        <span class="tk2-mini-sub"><i aria-hidden="true"></i><span class="tk2-mini-meta">${esc(meta)} · ${esc(relativeTime(card.updated_at))}</span></span>
+      </span>
+    </button>`;
+  });
+  const directItems = directLive.map((ticket) => {
+    const [label] = TASK_STATUS[ticket.status] || ["执行中", "run"];
+    const lamp = ticketLamp(ticket) === "fail" ? "fail" : "run";
+    const meta = [label, projectOfTicket(ticket), dispatcherOfTicket(ticket).name]
+      .filter(Boolean)
+      .join(" · ");
+    const title = briefText(ticket.prompt, 40) || "直接派出的单";
+    return `<button class="tk2-mini" type="button" data-lamp="${lamp}" data-ticket-open="${attr(ticket.id)}" title="这张单没有来源对话，点开看单">
+      <span class="tk2-ava sm ${avatarTone(ticket.id)}">${esc(firstChar(title, "单"))}</span>
+      <span class="tk2-mini-bd">
+        <span class="tk2-mini-title">${esc(title)}</span>
+        <span class="tk2-mini-sub"><i aria-hidden="true"></i><span class="tk2-mini-meta">${esc(meta)} · ${esc(relativeTime(ticket.updated_at))}</span></span>
+      </span>
+    </button>`;
+  });
+  return `${head}<section class="tk2-minis">${conversationItems.join("")}${directItems.join("")}</section>`;
 }
 
 /** 打手徽章：跟 TASK_HITTERS 一样是固定表（不改成动态，那是另一个立项） */
@@ -530,11 +550,13 @@ function renderTasksRedesign() {
     : "";
 
   el.tk2Needs.innerHTML = needsZoneHtml(groups, running);
-  el.tk2Run.innerHTML = runBlockHtml(runningCards(cards), running);
+  el.tk2Run.innerHTML = runBlockHtml(runningCards(cards), running, direct);
   el.tk2Hitters.innerHTML = hittersBlockHtml();
   el.tk2Recap.innerHTML = recapCardHtml();
 
   el.tasksScroll.scrollTop = scrollTop;
+  // 四块都是新节点：上一次点击登记的入场在这一帧补播（没有登记就什么都不做）
+  playPendingReveal();
 }
 
 /* ── 任务中心重做 v1 的交互（2026-11-13 批 1）────────────────
@@ -557,6 +579,46 @@ function spinTasksCaret(svgSelector, opening) {
     { duration: 180, easing: "cubic-bezier(0.4, 0, 0.2, 1)" },
   );
 }
+
+/* ── 两个分组的开合入场（2026-11-25）────────────────────────
+ * 「今天派活」的 .tk2-hit-b（:490）与「更早」的 .tk2-older（:282）都不是
+ * 「节点常驻、点击只切 hidden」：点击只改 state，紧接着 renderTasksRedesign()
+ * 把 el.tk2Needs / el.tk2Hitters 的 innerHTML 整块换掉（:532-534），旧节点当场消失。
+ * 所以高度动画没有对象可播，收起也不可能「播完再 hidden」——只能给新渲染出来的
+ * 组容器补一次性入场（判定为 B 路）。
+ *
+ * 一次性：选择器在点击处登记，由重绘后的本次调用消费掉；autoSyncTick 之类
+ * 反复重绘时 pendingReveal 是空的，不会每次刷新都抖一下。
+ * 落点不透明度取容器自身的静态值（.tk2-older 是 .8，.tk2-hit-b 是 1）——
+ * 动画结束不留 inline 值，显形时不会从 1 跳到 .8。 */
+const TK2_REVEAL_MS = 160;
+const noMotion = matchMedia("(prefers-reduced-motion: reduce)");
+let pendingReveal = ""; // 重绘后要补入场的容器选择器；空串 = 本次重绘不播
+
+/** 点击处登记：这次重绘之后，把展开出来的容器淡入落下一次 */
+function revealNext(selector) {
+  pendingReveal = selector;
+}
+
+/** 重绘末尾调用：消费登记并播一次入场；reduce 时状态已经对了，直接不播 */
+function playPendingReveal() {
+  const selector = pendingReveal;
+  pendingReveal = "";
+  if (!selector || noMotion.matches) return;
+  const target = el.tasksRedesign?.querySelector(selector);
+  if (!target || target.hidden) return;
+  target.getAnimations().forEach((animation) => animation.cancel());
+  target
+    .animate(
+      [
+        { opacity: 0, transform: "translateY(-4px)" },
+        { opacity: getComputedStyle(target).opacity, transform: "translateY(0)" },
+      ],
+      { duration: TK2_REVEAL_MS, easing: "cubic-bezier(0,0,.2,1)", fill: "backwards" },
+    )
+    .finished.catch(() => {}); // 半途被下一次重绘拔掉节点时别抛未处理 rejection
+}
+
 /** attr() 的镜像：把值安全放进 querySelector 的属性字符串里。 */
 const qesc = (value) => String(value).replace(/["\\]/g, "\\$&");
 
@@ -579,6 +641,8 @@ el.tasksRedesign?.addEventListener("click", (event) => {
     const opening = !state.tasksNeedsOlderOpen.has(person);
     if (opening) state.tasksNeedsOlderOpen.add(person);
     else state.tasksNeedsOlderOpen.delete(person);
+    // 只有展开才有新内容入场；收起是整块重绘后直接不见（B 路不做收起动画）
+    if (opening) revealNext(`[data-needs-more="${qesc(person)}"] + .tk2-older`);
     renderTasksRedesign();
     spinTasksCaret(`[data-needs-more="${qesc(person)}"] .tk2-more-caret`, opening);
     return;
@@ -590,6 +654,7 @@ el.tasksRedesign?.addEventListener("click", (event) => {
     const opening = !state.tasksHitterOpen.has(id);
     if (opening) state.tasksHitterOpen.add(id);
     else state.tasksHitterOpen.delete(id);
+    if (opening) revealNext(`[data-hitter="${qesc(id)}"] + .tk2-hit-b`);
     renderTasksRedesign();
     spinTasksCaret(`[data-hitter="${qesc(id)}"] .tk2-caret`, opening);
   }

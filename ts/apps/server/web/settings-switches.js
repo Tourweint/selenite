@@ -14,7 +14,6 @@ import { attr, esc } from "./markdown.js";
 import {
   pluginSettingsButtonMarkup,
   pluginSettingsPanelMarkup,
-  pluginSettingsRegistered,
   wirePluginSettings,
 } from "./plugin-settings.js";
 import { request } from "./net.js";
@@ -170,12 +169,12 @@ function flagParentLabel(key) {
 }
 
 /** 徽标只标「例外」：系统核心、待重启、已改。状态（开 / 关 / 被父关 / 常开）另有一枚，见 flagStatusMarkup；
- *  默认开 / 默认关写在卡面元信息行里，不再另挂徽标（2026-11-25 卡片 v2）。
+ *  默认值不在卡面另挂徽标，详情弹层里有「默认」一行（2026-11-25 晚卡片 v2.1：卡面不铺元信息文字）。
  *  「待重启」只在 hot:false 的改动还没被进程装载时出现（服务端 pendingRestart）；重启后自动消失，
  *  不再像旧版那样对所有 hot:false 开关常驻「需重启」——那个字与"这次是否生效"无关。
  *  「已改」只跟本次打开页面时读到的值比：它表示"这次进来动过它"，不是"它跟出厂默认不同"。
  *  后者刷新 / 重启后还在就变成永久标签（2026-11-24 用户口径：每次刷新重启都要回到没改过的样子）；
- *  与出厂默认的差异在元信息行的「默认」与详情弹层里看。 */
+ *  与出厂默认的差异在详情弹层里看。 */
 function flagTags(flag) {
   const tags = [];
   // 2026-11-16 用户拍板「一套展示、两层存储」：core 仍可拨，但明确标成系统核心，
@@ -212,9 +211,10 @@ function flagStatusMarkup(flag) {
     : '<span class="flag-tag is-status on">开</span>';
 }
 
-/** 状态 + 例外徽标，包在一个固定容器里（data-flag-badges）：拨完开关只换容器内容，不动头部结构。 */
+/** 状态 + 例外徽标，包在一个固定容器里（data-flag-badges）：拨完开关只换容器内容，不动头部结构。
+ *  例外徽标在前、状态在最后（2026-11-25 晚）：整组靠右，状态徽标永远贴着卡片右缘，不随例外徽标数量左右跑。 */
 function flagBadges(flag) {
-  const inner = flagStatusMarkup(flag) + flagTags(flag);
+  const inner = flagTags(flag) + flagStatusMarkup(flag);
   return `<span class="flag-tags${inner ? "" : " is-empty"}" data-flag-badges="${attr(flag.key)}">${inner}</span>`;
 }
 
@@ -224,22 +224,12 @@ function paintFlagTags(key) {
   const flag = flagByKey(key);
   if (!flag) return;
   for (const box of document.querySelectorAll(`[data-flag-badges="${key}"]`)) {
-    box.innerHTML = flagStatusMarkup(flag) + flagTags(flag);
+    box.innerHTML = flagTags(flag) + flagStatusMarkup(flag);
     box.classList.remove("is-empty");
   }
   for (const node of document.querySelectorAll(`[data-flag-current="${key}"]`)) {
     node.textContent = flagCurrentText(flag);
   }
-  // 卡面元信息行里的「当前」「存储」跟着改（后面的「无依赖 / 无额外设置」灰字不动）。
-  for (const node of document.querySelectorAll(`[data-flag-meta-text="${key}"]`)) {
-    node.textContent = flagMetaText(flag);
-  }
-}
-
-/** 类型：数字型 / 多档（清单给了 choices）/ 布尔。以服务端 type + choices 为准。 */
-function flagTypeText(flag) {
-  if (String(flag.type || "") === "number") return "数字";
-  return Array.isArray(flag.choices) && flag.choices.length ? "档位" : "布尔";
 }
 
 /** 「当前」值的人话。被父关时显示关档的名字（多档的关档标签可能是「关」以外的字），不露 "false"。 */
@@ -261,20 +251,19 @@ function flagStorageText(flag) {
   return "默认";
 }
 
-/** 卡面元信息（2026-11-25 卡片 v2，压成一行、放不下自然折行）：
- *  类型 · 当前 X · 默认 Y · 生效：即时/重启后 · 存储；无依赖 / 无额外设置接在这一行末尾（灰字）。 */
-function flagMetaText(flag) {
-  const parts = [
-    flagTypeText(flag),
-    `当前 ${flagCurrentText(flag)}${flag.lockedBy ? `（被 ${flag.lockedByLabel || flagParentLabel(flag.lockedBy)} 关）` : ""}`,
-    `默认 ${flag.alwaysOn ? "常开" : flagValueText(flag, flag.defaultValue)}`,
-    `生效：${flag.alwaysOn ? "始终" : flag.hot ? "即时" : "重启后"}`,
-    `存储：${flagStorageText(flag)}`,
-  ];
-  return parts.join(" · ");
+/* ── 依赖（2026-11-25 晚卡片 v2.1）────────────────────────────
+ * 卡面不再铺 chips：前置 / 被依赖的明细、每项开没开，全部收进详情弹层（点卡就开）。
+ * 卡面只留两件能一眼用上的事：
+ * - 状态徽标「被父关」= 有前置没开（服务端 lockedBy，不自己推）；
+ * - 有子插件的卡在卡尾写「被 N 项依赖」——关它之前值得知道会连带多少。
+ * 这样 12 个子项的总闸也不会把卡撑成一面墙，所有卡等高后卡尾自然对齐。 */
+function flagChildrenNote(children) {
+  if (!Array.isArray(children) || !children.length) return "";
+  const names = children.map((key) => flagParentLabel(key)).join("、");
+  return `<span class="flag-dep-count" data-tip="${attr(names)}">被 ${children.length} 项依赖</span>`;
 }
 
-/* ── 依赖 chips（2026-11-25 卡片 v2）──────────────────────────
+/* ── 依赖 chips（2026-11-25 卡片 v2.1，只在详情弹层用）────────────
  * 「前置」= 自己的 requires；「被依赖」= requires 里带自己的那些插件（renderFlagRows 现算）。
  * 名字与开 / 关从 state.flagsCache 取；不认识的 key 原样显示 key、不能点。
  * 圆点三态：开（--ok）/ 关（灰）/ 被锁（--warn）；锁住自己的那个父插件整枚 chip 用警示色。 */
@@ -298,7 +287,8 @@ function flagChipMarkup(key, kind, locker) {
   return `<button type="button" class="${classes}" data-flag-jump="${attr(key)}" title="点到这张卡">${body}</button>`;
 }
 
-function flagDepsMarkup(flag, children) {
+/** 详情弹层里的依赖明细（2026-11-25 晚从卡面收进来）：前置 / 被依赖都按 chip 列，点一下关弹层滚到那张卡。 */
+function flagDetailDepsMarkup(flag, children) {
   if (flag.alwaysOn) return "";
   const parents = Array.isArray(flag.requires) ? flag.requires : [];
   const groups = [];
@@ -312,7 +302,7 @@ function flagDepsMarkup(flag, children) {
       `<span class="flag-deps-group"><span class="flag-deps-label">被依赖</span>${children.map((key) => flagChipMarkup(key, "child", false)).join("")}</span>`,
     );
   }
-  return groups.length ? `<div class="flag-deps">${groups.join("")}</div>` : "";
+  return groups.length ? `<div class="flag-detail-deps">${groups.join("")}</div>` : "";
 }
 
 /** 点 chip：滚到对应卡并闪一下边。目标被搜索过滤掉时先清空搜索再滚（不清就滚不到一张看不见的卡）。 */
@@ -335,44 +325,25 @@ function jumpToFlag(key) {
   }, 1800);
 }
 
-function wireFlagChips(card) {
-  if (card.dataset.flagJumpWired === "1") return;
-  card.dataset.flagJumpWired = "1";
-  card.addEventListener("click", (event) => {
-    const chip = event.target instanceof Element ? event.target.closest("[data-flag-jump]") : null;
-    if (chip && card.contains(chip)) jumpToFlag(chip.dataset.flagJump || "");
-  });
-}
-
-/** 一张卡（2026-11-25 卡片 v2，V2 布局）：头部（名 + KEY + 组 + 状态徽标）+ 完整说明 + 元信息一行
- *  + 依赖 chips + 卡尾控件 / 「设置」按钮；卡体可点开详情弹层。
- *  说明不再截断、卡片不定高；同排卡片顶部对齐（.flag-grid 的 align-items:start），不强制等高。 */
-function flagCardMarkup(flag, groupTitle, children) {
+/** 一张卡（2026-11-25 晚卡片 v2.1）：头部（名 + 状态徽标，靠右）+ 说明全文 + 卡尾（设置 / 被依赖计数 / 控件）。
+ *  KEY、分组、类型 / 当前 / 默认 / 生效 / 存储、前置与被依赖明细都不在卡面——全在点卡打开的详情弹层里。
+ *  同排卡等高、卡尾贴底（.flag-grid 的 align-items:stretch），卡面不铺会换行的文字，卡尾控件自然对齐。 */
+function flagCardMarkup(flag, children) {
   const label = flag.label || flag.key;
   const locked = Boolean(flag.lockedBy);
   const alwaysOn = Boolean(flag.alwaysOn);
   // 卡内设置（2026-11-25）：登记在 plugin-settings.js 的插件才有「设置」按钮，放在卡尾最左。
   const settingsButton = alwaysOn ? "" : pluginSettingsButtonMarkup(flag.key);
-  const notes = [];
-  // 常开卡没有开关、也没有依赖图节点：两句话都不写。
-  if (!alwaysOn) {
-    if (!flag.requires?.length && !children.length) notes.push("无依赖");
-    if (!pluginSettingsRegistered(flag.key)) notes.push("无额外设置");
-  }
   return `<div class="card flag-item${locked ? " is-locked" : ""}${flag.scope === "core" ? " is-core" : ""}${alwaysOn ? " is-always" : ""}${settingsButton ? " has-settings" : ""}">
     <button class="flag-item-main" type="button" data-flag-detail="${attr(flag.key)}" aria-haspopup="dialog" aria-label="查看「${attr(label)}」说明">
       <span class="flag-item-head">
         <span class="flag-item-name">${esc(label)}</span>
-        <span class="flag-item-key">${esc(flag.key)}</span>
-        <span class="flag-item-group">${esc(groupTitle)}</span>
         ${flagBadges(flag)}
         <span class="flag-item-more" aria-hidden="true">›</span>
       </span>
       <span class="flag-item-brief">${esc(flag.summary || "")}</span>
-      <span class="flag-item-meta" data-flag-meta="${attr(flag.key)}"><span data-flag-meta-text="${attr(flag.key)}">${esc(flagMetaText(flag))}</span>${notes.map((note) => `<span class="flag-meta-note">${esc(note)}</span>`).join("")}</span>
     </button>
-    ${flagDepsMarkup(flag, children)}
-    <div class="flag-item-foot">${settingsButton}${alwaysOn ? '<span class="flag-always">常开 · 无开关</span>' : flagControlMarkup(flag)}</div>
+    <div class="flag-item-foot">${settingsButton}${alwaysOn ? '<span class="flag-always">常开 · 无开关</span>' : `${flagChildrenNote(children)}${flagControlMarkup(flag)}`}</div>
     ${settingsButton ? pluginSettingsPanelMarkup(flag.key) : ""}
   </div>`;
 }
@@ -433,8 +404,8 @@ function flagControlMarkup(flag) {
   });
 }
 
-/** 点卡弹层：全文 + 状态徽标 + 当前 / 默认 / 生效方式 / 前置 / 被依赖 + 同一套控件。
- *  纯档位插件（没有关档）在这里写明「没有单独开关、由谁控制」，不硬造一个假开关。 */
+/** 点卡弹层：全文 + 状态徽标 + 当前 / 默认 / 生效方式 / 存储 / 前置与被依赖（chips） + 同一套控件。
+ *  卡面上不展示的 KEY 与依赖明细都在这里；纯档位插件（没有关档）写明「没有单独开关、由谁控制」，不硬造假开关。 */
 function openFlagDetail(flag) {
   const alwaysOn = Boolean(flag.alwaysOn);
   const locked = Boolean(flag.lockedBy);
@@ -446,17 +417,15 @@ function openFlagDetail(flag) {
   const parents = Array.isArray(flag.requires) ? flag.requires : [];
   const parentText = parents.map((key) => flagParentLabel(key)).join("、");
   // 被依赖：插件页上 requires 带自己的那些卡（会话页的 6 项不上插件页，不列）。
-  const childText = flagChildrenKeys(flag.key)
-    .map((key) => flagParentLabel(key))
-    .join("、");
+  const childKeys = flagChildrenKeys(flag.key);
   const rows = [
     ["当前", flagCurrentText(flag)],
     ["默认", alwaysOn ? "常开" : flagValueText(flag, flag.defaultValue)],
     ["生效", alwaysOn ? "始终生效" : flag.hot ? "改完即时生效" : "重启服务后生效"],
     ["存储", alwaysOn ? "不存储" : { 面板覆盖: "面板改过（agent-flags.json）", env: "环境变量", 默认: "出厂默认" }[flagStorageText(flag)]],
   ];
-  if (!alwaysOn && parents.length) rows.push(["前置", parentText]);
-  if (!alwaysOn && childText) rows.push(["被依赖", childText]);
+  if (!alwaysOn) rows.push(["标识", flag.key]);
+  const depsBlock = flagDetailDepsMarkup(flag, childKeys);
   let note = "";
   if (locked) {
     note = `当前由「${flag.lockedByLabel || flagParentLabel(flag.lockedBy)}」关闭：显示关、拨不动；它自己的存储值保留，总闸重开后恢复。`;
@@ -491,6 +460,7 @@ function openFlagDetail(flag) {
       <div class="flag-detail-meta">
         ${rows.map(([name, value], index) => `<div class="flag-detail-row"><span class="flag-detail-label">${esc(name)}</span><span class="flag-detail-value"${index === 0 && !alwaysOn ? ` data-flag-current="${attr(flag.key)}"` : ""}>${esc(value)}</span></div>`).join("")}
       </div>
+      ${depsBlock}
       ${alwaysOn ? "" : `<div class="flag-detail-control"><span class="flag-detail-label">${esc(controlLabel)}</span>${flagControlMarkup(flag)}</div>`}
       ${flag.key === "TOOL_TIMEOUT_POLICY" ? `<div class="flag-detail-tool-policy" data-tool-policy-inline></div>` : ""}
       ${note ? `<p class="flag-detail-note">${esc(note)}</p>` : ""}
@@ -502,6 +472,14 @@ function openFlagDetail(flag) {
     }<button class="ghost" type="button" data-flag-close>关闭</button></div>`;
     body.querySelector("[data-flag-close]")?.addEventListener("click", closeModal);
     body.querySelector("[data-flag-enable-plan]")?.addEventListener("click", () => void openEnablePlan(flag.key));
+    // 依赖 chips（2026-11-25 晚）：点一下先关弹层，再滚到那张卡并闪边。
+    for (const chip of body.querySelectorAll("[data-flag-jump]")) {
+      chip.addEventListener("click", () => {
+        const targetKey = chip.dataset.flagJump || "";
+        closeModal();
+        window.setTimeout(() => jumpToFlag(targetKey), 0);
+      });
+    }
     // 还没探测过级联层：先按「在」把按钮画出来，policy 回话说关就当场摘掉。
     if (locked && cascadeAvailable === null) {
       void ensureCascadeAvailable().then((ok) => {
@@ -889,7 +867,7 @@ function renderFlagRows(card, flags, groups) {
       </div>
       <div class="flag-grid"></div>`;
     const grid = section.querySelector(".flag-grid");
-    for (const flag of items) grid.insertAdjacentHTML("beforeend", flagCardMarkup(flag, title, childrenByKey.get(flag.key) || []));
+    for (const flag of items) grid.insertAdjacentHTML("beforeend", flagCardMarkup(flag, childrenByKey.get(flag.key) || []));
     card.append(section);
   };
   if (!groupDefs.length) {
@@ -920,8 +898,6 @@ function renderFlagRows(card, flags, groups) {
       if (flag) openFlagDetail(flag);
     });
   }
-  // 依赖 chips：事件委托同样只挂一次；点一下滚到对应卡并闪边。
-  wireFlagChips(card);
   // 搜索：输入即筛选；flags 重画后按模块里的查询串恢复（不持久化、不动加载 / 保存）。
   const flagsSearch = card.querySelector("#flags-search");
   flagsSearch?.addEventListener("input", () => {

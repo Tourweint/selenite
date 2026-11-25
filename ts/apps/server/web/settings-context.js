@@ -942,9 +942,78 @@ function closePopover() {
 	}, 170);
 }
 
+/* ── 折叠正文的高度动画（2026-11-25）──────────────────────
+ * 全局 [hidden]{display:none!important}（style-01-tokens:556）会杀掉 CSS transition，
+ * 所以行的展开 / 收起走 WAAPI：只动 height / opacity 与必要的 inline overflow，
+ * 结束后清掉 inline 回 CSS 原样；.is-open / .is-folded 仍管底色与箭头，业务判定不经过动画。
+ * ctxFoldGens 按节点各记代际：同一页可以同时开多个行（上下文行、浮层里的分组），
+ * 模块级单计数器会让先展开的那个 .then 被后来的节点打断、留下清不掉的 inline height；
+ * 收起动画晚到也不能把已经重新展开的正文藏回去。 */
+const ctxFoldGens = new WeakMap();
+
+function animateCtxFold(body, open, onOpened) {
+	if (!body) return;
+	body.getAnimations().forEach((animation) => animation.cancel());
+	const mine = (ctxFoldGens.get(body) || 0) + 1;
+	ctxFoldGens.set(body, mine);
+	const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+	if (open) {
+		body.hidden = false;
+		if (reduce) {
+			body.style.height = "";
+			body.style.overflow = "";
+			body.style.opacity = "";
+			onOpened?.();
+			return;
+		}
+		const height = body.scrollHeight;
+		body.style.overflow = "hidden";
+		const animation = body.animate(
+			[{ height: "0px", opacity: "0" }, { height: `${height}px`, opacity: "1" }],
+			{ duration: 200, easing: "cubic-bezier(0,0,.2,1)" },
+		);
+		animation.finished.catch(() => {}).then(() => {
+			if (mine !== ctxFoldGens.get(body)) return;
+			body.style.height = "";
+			body.style.overflow = "";
+			body.style.opacity = "";
+			onOpened?.();
+		});
+		return;
+	}
+	if (reduce) {
+		body.hidden = true;
+		return;
+	}
+	const height = body.scrollHeight;
+	body.style.overflow = "hidden";
+	const animation = body.animate(
+		[{ height: `${height}px`, opacity: "1" }, { height: "0px", opacity: "0" }],
+		{ duration: 160, easing: "cubic-bezier(.4,0,1,1)", fill: "forwards" },
+	);
+	animation.finished.catch(() => {}).then(() => {
+		if (mine !== ctxFoldGens.get(body)) return;
+		body.hidden = true;
+		body.style.height = "";
+		body.style.overflow = "";
+		body.style.opacity = "";
+	});
+}
+
+/** 展开分组后卡片变高，可能掉出屏幕底：按浮层底边把 top 往上提回视口里。 */
+function liftContextPopover(group) {
+	const pop = group.closest("#ctx-pop");
+	if (!pop) return;
+	const overflow = pop.getBoundingClientRect().bottom - (window.innerHeight - 10);
+	if (overflow <= 0) return;
+	const top = Math.max(10, parseFloat(pop.style.top || "0") - overflow);
+	pop.style.top = `${Math.round(top)}px`;
+}
+
 /**
  * 「全部内容」里按组收起：组头（系统提示词 + 数量 + token）留着，下面的
  * 人设 / 验证铁律 / 开工前请问整段消失。再点「展开」还原。
+ * 高度是动画长的：提浮层得等动画跑完再量，中途量到的是半高，提不够。
  */
 function togglePopGroupFold(button) {
 	const group = button.closest(".ctx-pop-group");
@@ -954,18 +1023,8 @@ function togglePopGroupFold(button) {
 	const open = button.getAttribute("aria-expanded") !== "true";
 	button.setAttribute("aria-expanded", String(open));
 	button.textContent = open ? "收起" : "展开";
-	body.hidden = !open;
 	group.classList.toggle("is-folded", !open);
-	// 展开后卡片一下子变高，可能掉出屏幕底；往上提回来，别让下半截点不到。
-	if (open) {
-		const pop = group.closest("#ctx-pop");
-		if (!pop) return;
-		const overflow = pop.getBoundingClientRect().bottom - (window.innerHeight - 10);
-		if (overflow > 0) {
-			const top = Math.max(10, parseFloat(pop.style.top || "0") - overflow);
-			pop.style.top = `${Math.round(top)}px`;
-		}
-	}
+	animateCtxFold(body, open, open ? () => liftContextPopover(group) : null);
 }
 
 function openGroup(key, anchor) {
@@ -1514,8 +1573,8 @@ function toggleRow(button) {
 	if (!row || !body) return;
 	const open = button.getAttribute("aria-expanded") !== "true";
 	button.setAttribute("aria-expanded", String(open));
-	body.hidden = !open;
 	row.classList.toggle("is-open", open);
+	animateCtxFold(body, open);
 }
 
 /** 悬停某组：格子与标签一起亮，其它的压暗——比单纯一个图例更容易看出“这块属于谁”。 */

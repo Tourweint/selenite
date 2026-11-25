@@ -201,12 +201,15 @@
 }
 
 /* 「工作 N 步」折叠条（2026-11-19 立行；2026-11-21 收口为唯一开合开关）：
-   行首常驻——跑动中报数，收尾后整组只剩它；点开铺第一页、再点收回去。
+   行首常驻——跑动中报数，收尾后整轮只剩它；点开铺第一页、再点收回去。
+   2026-11-25 起一轮只有一枚（多组灰块合并计数，见 tool-chips.js），
+   跑动中也能收起，收起时用 [data-running] 自己表示"还在跑"。
    2026-11-21 同批退役的是行尾「收起」按钮与**固定枚数**的「+N」；2026-11-24 起
    「+N」以分页形式回归（每次 30 步，只管翻页、不管开合），同一处点按的规矩不变。
    收起态不染红（2026-11-19 用户口径）：失败留给展开后的块去标，
    摊在正文里的这一枚只说明"工作了几步"。 */
 .tchips-fold {
+  position: relative;
   display: inline-flex; align-items: center; justify-content: center; gap: 4px;
   height: 24px; padding: 0 10px;
   /* 按内容自适应的话，右边空出来的那点 padding 会被看成"字没在中间"；
@@ -216,12 +219,33 @@
   background: transparent; color: var(--text-3);
   font-family: var(--font); font-size: 12px; line-height: 1.2;
   cursor: pointer;
+  overflow: hidden;
   transition: background-color .15s ease, color .15s ease, border-color .15s ease;
 }
 .tchips-fold:hover { background: var(--card-high); color: var(--text); }
 /* 焦点用内阴影：块行被 .tchips-row 裁着，outline 画在框外会被切掉 */
 .tchips-fold:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--accent-line); }
 .tchips-fold svg { flex: none; width: 11px; height: 11px; }
+
+/* 收起时还有块在跑（2026-11-25 用户口径）：折叠条自己承担"正在运行"——
+   整块 accent 化 + 底边扫光，和跑动中的灰块同一套语言。否则块一收起来，
+   界面上就看不出它还在干活了。 */
+.tchips-fold[data-running="1"] {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.tchips-fold[data-running="1"]:hover { background: var(--accent-soft); }
+.tchips-fold[data-running="1"]::after {
+  content: "";
+  position: absolute; left: 0; bottom: 0; width: 34%; height: 1.5px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  opacity: .9; transform: translateX(-100%);
+  animation: tchipSweep 1.2s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .tchips-fold[data-running="1"]::after { animation: none; }
+}
 
 /* 行尾「+N」（2026-11-24 分页回归）：复用 .tchip 的皮，只多一条数字等宽——
    9→10、99→100 时块宽不跳（JS 也按这个前提量占位宽）。 */
@@ -391,10 +415,76 @@
 .approval-feedback { display: flex; flex-direction: column; gap: 6px; }
 .approval-feedback[hidden] { display: none; }
 .approval-feedback .cs-textarea { font-size: 12.5px; }
-.approval-pop-question {
-  font-size: 13px; line-height: 1.55; color: var(--text);
-  white-space: pre-wrap; overflow-wrap: anywhere;
+/* ── 提问卡（2026-11-25 重做）────────────────────────────────
+   它不是"警报"，是一段对话：不带左侧强调色竖条，选项竖排 A/B/C，
+   自己写答案接在最后一行。答复成功后整张卡从对话里移除（approval-card.js）。 */
+.attention.ask {
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid var(--card-border);
+  border-left: 1px solid var(--card-border);
+  border-radius: var(--r-lg);
+  background: var(--surface);
 }
+.ask-head { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.ask-eyebrow { flex: none; font-size: 12px; color: var(--text-3); }
+.ask-source {
+  min-width: 0; margin-left: auto;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 12px; color: var(--text-3);
+}
+.ask-question {
+  margin: 0;
+  font-size: 14.5px; line-height: 1.6; font-weight: 500;
+  color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.ask-options { display: flex; flex-direction: column; gap: 2px; }
+.ask-option {
+  display: flex; align-items: flex-start; gap: 10px;
+  width: 100%; padding: 7px 9px;
+  border: 0; border-radius: var(--r-md);
+  background: transparent; color: var(--text);
+  font-size: 13.5px; line-height: 1.5; text-align: left;
+  cursor: pointer; transition: background .15s ease;
+}
+.ask-option:hover { background: var(--card-high); }
+.ask-option:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 1px; }
+.ask-option[disabled] { opacity: .6; cursor: default; }
+.ask-letter {
+  flex: none; width: 20px; padding-top: 1px;
+  font-family: var(--mono); font-size: 12px; font-weight: 500;
+  color: var(--text-3);
+}
+.ask-opt-text { flex: 1; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ask-badge {
+  flex: none; align-self: center;
+  padding: 1px 6px;
+  border: 1px solid var(--outline); border-radius: var(--r-full);
+  background: transparent; color: var(--text-2);
+  font-size: 10.5px; line-height: 1.6;
+}
+.ask-option.ask-custom { cursor: text; }
+.ask-option.ask-custom:hover { background: transparent; }
+.ask-input {
+  flex: 1; min-width: 0; min-height: 20px; max-height: 96px;
+  padding: 0; border: 0; background: transparent;
+  color: var(--text); font: inherit; line-height: 1.5;
+  resize: none; outline: none; overflow-y: auto;
+}
+.ask-input::placeholder { color: var(--text-3); }
+.ask-send {
+  flex: none; align-self: center;
+  height: 26px; padding: 0 10px;
+  border: 1px solid var(--outline); border-radius: var(--r-sm);
+  background: transparent; color: var(--text);
+  font-size: 12px; cursor: pointer;
+  transition: background .15s ease, opacity .15s ease;
+}
+.ask-send:hover { background: var(--card-high); }
+.ask-send:disabled { opacity: .5; cursor: default; }
+/* 浮窗只有 320 宽：同一套内容收一档字号与内边距 */
+.approval-pop .ask-question { font-size: 13.5px; }
+.approval-pop .ask-option { padding: 6px 8px; font-size: 13px; }
 
 /* ── 审批浮窗（2026-11-08）：右下角常驻，人在别的会话/页面也弹 ──
    压过侧栏与抽屉（z0/40），低于模态（z60）；宽度 320 与模型菜单同档。 */

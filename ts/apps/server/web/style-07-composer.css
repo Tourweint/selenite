@@ -22,9 +22,11 @@
   width: min(920px, calc(100% - 32px));
   /* 2026-11-04 容器卡（对齐 cindy ComposerCard）：边框/卡底在容器上，textarea 透明无框；
      底部工具行左：附件；右：模型 / 上下文环 / 发送（思考强度在模型菜单里）。 */
-  display: flex; flex-direction: column; gap: 6px;
-  min-height: 86px; max-height: 300px;
-  padding: 11px 11px 6px;
+  display: flex; flex-direction: column; gap: 5px;
+  /* 2026-11-25 用户报「空输入框太高」→ 首版收过头（74，用户「窄得过头」）→ 回调到 82：
+     原 89 / 74 / 82，取中间偏小；长高逻辑不变（textarea 到 200px 后内部滚动）。 */
+  min-height: 82px; max-height: 300px;
+  padding: 10px 11px 5px;
   background: var(--card);
   border: 1px solid var(--composer-border);
   border-radius: var(--r-lg);
@@ -56,7 +58,8 @@ html[data-wallpaper] .main[data-home]::after { content: none; }
 
 /*
  * 首页态：顶栏让位给全局 chrome，页面中心是「问候 + 大输入框」。
- * 输入框比对话里高一档（文本 84px，加底部工具行整卡约 144px），是首页唯一的主操作。
+ * 输入框比对话里高一档（文本 72px，加底部工具行整卡约 124px），是首页唯一的主操作。
+ * 2026-11-25 用户报「空态太高」：84 → 64 收过头，用户判「窄得过头」，回调到 72。
  */
 .main[data-home="1"] .top { display: none; }
 
@@ -69,7 +72,7 @@ html[data-wallpaper] .main[data-home]::after { content: none; }
   border-radius: var(--r-xl);
 }
 .main[data-home="1"] .composer textarea {
-  min-height: 84px;
+  min-height: 72px;
   font-size: 16px;
 }
 
@@ -95,14 +98,15 @@ html[data-wallpaper] .main[data-home]::after { content: none; }
    上内边距就取同一个 8 —— 字块四边留白一致，左上角弧与卡片外弧同心。
    第一版按「输入区正中」放到 54px，比原来贴顶多了 30px，用户判为「太靠下」，已撤回。
    textarea 不再被 flex 拉满：拉满时文字永远从盒顶起排，盒里多高都空在字下面；
-   盒子只包住自己这一行（8 上 + 一行 + 8 左右），首页那档高度由 min-height 84 守住。 */
+   盒子只包住自己这一行（7 上 + 一行 + 8 左右），首页那档高度由 min-height 72 守住。 */
 .composer textarea {
   flex: 0 0 auto;
-  min-height: 32px; max-height: 200px;
+  min-height: 30px; max-height: 200px;
   /* 左右各进 8px：文字/占位符与左下 + 图标列对齐（11 + 8 = 19px），
      也别贴着卡片圆角内侧起字（2026-11-04 用户反馈）；上与左右同值 = 同心。
-     下边不留：多行时最后一行到工具行的 6px 间距由 gap 给。 */
-  padding: 8px 8px 0;
+     下边不留：多行时最后一行到工具行的 5px 间距由 gap 给。
+     上内边距 2026-11-25 先由 8 收到 6（用户判收过头），回调到 7。 */
+  padding: 7px 8px 0;
   background: transparent;
   border: 0;
   border-radius: 0;
@@ -119,7 +123,7 @@ html[data-wallpaper] .main[data-home]::after { content: none; }
 
 .composer-foot {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
-  min-height: 32px;
+  min-height: 30px;
 }
 
 /* 右组：模型 + 上下文环 + 发送（D2：模型 pill 从左侧挪到发送边上）。

@@ -77,6 +77,56 @@ const memoryPageState = {
 /** 记忆页「回到顶部」按钮的 scroll 监听；随记忆页装卸（离开设置页/重进时摘掉）。 */
 let memoryBacktopHandler = null;
 
+/* 分组正文展开/收起的高度动画（2026-11-25）。
+ * 全局 [hidden]{display:none!important} 会直接杀掉 CSS transition，所以这里走 WAAPI：
+ * 只动 height / opacity / inline overflow，结束后清掉回 CSS 原样；.open class 仍管组头底色与箭头。
+ * memGroupGens 是代际守卫，按 body 节点各记一份（同页可同时展开多个分组，
+ * 模块级单计数器会让先展开的那个 .then 被后来的分组打断，留下清不掉的 inline height）：
+ * 收起动画还没跑完又被点开时，旧动画的 .then 不能再把正文藏回去。 */
+const memGroupGens = new WeakMap();
+
+function bumpMemGroupGen(body) {
+  const next = (memGroupGens.get(body) || 0) + 1;
+  memGroupGens.set(body, next);
+  return next;
+}
+
+function animateMemGroup(body, open) {
+  if (!body) return;
+  body.getAnimations().forEach((a) => a.cancel());
+  const mine = bumpMemGroupGen(body);
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (open) {
+    body.hidden = false;
+    if (reduce) { body.style.height = ""; body.style.overflow = ""; return; }
+    const height = body.scrollHeight;
+    body.style.overflow = "hidden";
+    const animation = body.animate(
+      [{ height: "0px", opacity: "0" }, { height: `${height}px`, opacity: "1" }],
+      { duration: 200, easing: "cubic-bezier(0,0,.2,1)" },
+    );
+    animation.finished.catch(() => {}).then(() => {
+      if (mine !== (memGroupGens.get(body) || 0)) return;
+      body.style.height = "";
+      body.style.overflow = "";
+    });
+  } else {
+    if (reduce) { body.hidden = true; return; }
+    const height = body.scrollHeight;
+    body.style.overflow = "hidden";
+    const animation = body.animate(
+      [{ height: `${height}px`, opacity: "1" }, { height: "0px", opacity: "0" }],
+      { duration: 160, easing: "cubic-bezier(.4,0,1,1)", fill: "forwards" },
+    );
+    animation.finished.catch(() => {}).then(() => {
+      if (mine !== (memGroupGens.get(body) || 0)) return;
+      body.hidden = true;
+      body.style.height = "";
+      body.style.overflow = "";
+    });
+  }
+}
+
 function memoryPageAlive(gen) {
   return (
     memoryPageState.gen === gen &&
@@ -392,8 +442,7 @@ async function wireMemorySettings({ rerender = null } = {}) {
       const section = head.closest(".mem-a-group");
       section?.classList.toggle("open", group.open);
       const body = section?.querySelector(".mem-a-gbody");
-      if (group.open) body?.removeAttribute("hidden");
-      else body?.setAttribute("hidden", "true");
+      animateMemGroup(body, section?.classList.contains("open") === true);
       head.setAttribute("aria-expanded", String(group.open));
       if (group.open && !group.loaded) void loadMemoryGroup(kind, gen);
       return;

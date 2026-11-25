@@ -245,12 +245,6 @@ const PLUGIN_SETTINGS = {
   GOAL_MAX_ROUNDS: { hint: "与目标模式一起，在人设页设。", links: [GO_PARTNERS] },
 };
 
-/** 这个插件有没有登记设置（不看回滚开关）。settings-switches.js 用它决定卡上写不写「无额外设置」：
- *  回滚关掉时登记过的卡既没有按钮、也不该被写成「没有设置」。 */
-function pluginSettingsRegistered(key) {
-  return Boolean(PLUGIN_SETTINGS[key]);
-}
-
 function entryOf(key) {
   return inlineSettingsEnabled() ? PLUGIN_SETTINGS[key] || null : null;
 }
@@ -351,4 +345,4 @@ function wirePluginSettings(root) {
   });
 }
 
-export { inlineSettingsEnabled, pluginSettingsButtonMarkup, pluginSettingsPanelMarkup, pluginSettingsRegistered, wirePluginSettings };
+export { inlineSettingsEnabled, pluginSettingsButtonMarkup, pluginSettingsPanelMarkup, wirePluginSettings };

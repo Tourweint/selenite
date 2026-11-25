@@ -11,6 +11,7 @@ import { paintAvatar } from "./avatar.js";
 import { el } from "./dom.js";
 import { groupMemberAvatar, groups } from "./groups-base.js";
 import { clearGroupAtHint, resizeGroupInput, scrollGroupThread, updateGroupSendState } from "./groups-composer.js";
+import { popAnimateIn, popAnimateOut } from "./pop-anim.js";
 import { state } from "./state.js";
 import { toast } from "./ui-atoms.js";
 
@@ -293,10 +294,14 @@ function insertGroupMention(member) {
 const groupMemberMenu = { node: null, anchor: null };
 
 function closeGroupMemberMenu() {
-  if (!groupMemberMenu.node) return;
-  groupMemberMenu.node.remove();
+  const node = groupMemberMenu.node;
+  if (!node) return;
+  // 先置空：动画跑 140ms，这期间再点一下不能把同一张菜单关第二遍
   groupMemberMenu.node = null;
   groupMemberMenu.anchor = null;
+  if (!node.isConnected) return;
+  // 收起动画跑完再拔节点（2026-11-25，pop-anim.js）
+  popAnimateOut(node).then(() => node.remove());
 }
 
 function openGroupMemberMenu(event, member, isDuty) {
@@ -366,6 +371,8 @@ function openGroupMemberMenu(event, member, isDuty) {
   if (top + rect.height > window.innerHeight - 8) top = Math.max(8, event.clientY - rect.height);
   menu.style.left = `${Math.round(left)}px`;
   menu.style.top = `${Math.round(top)}px`;
+  // 入场（2026-11-25）：append + 贴光标定位都完成后再跑
+  popAnimateIn(menu);
   groupMemberMenu.node = menu;
   groupMemberMenu.anchor = event.currentTarget;
   menu.querySelector(".gmenu-item")?.focus();

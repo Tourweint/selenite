@@ -296,7 +296,7 @@
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
-.ctx-row-body { padding: 0 14px 12px; }
+.ctx-row-body { padding: 0 14px 12px; overflow: hidden; }
 .ctx-row-body[hidden] { display: none; }
 /* 2026-11-21（箭头统一批）：180° 翻面 → 全站 90° 口径，旋转/过渡移到 style-27 的 .chev */
 .ctx-chevron {
