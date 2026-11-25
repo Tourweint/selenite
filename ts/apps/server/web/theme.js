@@ -12,7 +12,7 @@ import { esc } from "./markdown.js";
 import { ACCENTS } from "./settings-base.js";
 import { closeModal, openModal } from "./ui-atoms.js";
 
-/* ── 主题（2026-11-05：四套色板） ─────────────────────── */
+/* ── 主题（2026-11-05 四套；2026-11-25 收口成六套：4 浅 + 2 深，默认 devin） ───── */
 
 const KEY_THEME = "lifediary.theme";
 const KEY_ACCENT = "lifediary.accent";
@@ -27,14 +27,10 @@ const DARK_THEME_IDS = ["indigo", "black"];
    2026-11-14 外观页改 A 版（缩略界面卡）：每套多带 tag（名字右边那一个字）和
    缩略图要用的几档色（侧栏底 / 卡 / 描边 / 分隔 / 正文 / 弱字）。
    缩略图里的强调点是该主题自带的那一档，不跟当前选的主题色走 —— 它是"这套主题长什么样"，
-   不是"你现在选了哪个强调色"。 */
+   不是"你现在选了哪个强调色"。
+   2026-11-25 收口：删 paper（米黄）与 codex（奶油），默认落 devin（燕麦）；
+   devin 在 style-01-tokens.css 里就是 :root，没有单独的块，但卡片仍要这里的预览色。 */
 const THEMES = [
-  {
-    id: "paper", name: "米黄", tag: "纸",
-    bg: "#fdf9f2", side: "#f7f3eb", card: "#f6f1e7", cardHigh: "#ede9e0",
-    outline: "#c8c5bc", divider: "rgba(200,197,188,.55)", text: "#2e2b3a", text3: "#9a97a5",
-    accent: "#3e4a8c",
-  },
   {
     id: "white", name: "暖白", tag: "素",
     bg: "#fafaf8", side: "#f3f3f0", card: "#f4f4f1", cardHigh: "#ededea",
@@ -46,6 +42,21 @@ const THEMES = [
     bg: "#f1f5f1", side: "#e8eee8", card: "#ebf1ea", cardHigh: "#e0e7df",
     outline: "#c2cec3", divider: "rgba(30,42,37,.12)", text: "#1e2a25", text3: "#8b9a90",
     accent: "#3e4a8c",
+  },
+  /* 2026-11-25 暖色纸（来源见 style-01-tokens.css）：accent 只是缩略图上那个点，
+     取各款原配的强调色；页面实际强调色仍由「主题色」那一档决定，
+     这两套的 --c-* 与 :root 同值。 */
+  {
+    id: "devin", name: "燕麦", tag: "麦",
+    bg: "#faf6ee", side: "#f3ede2", card: "#f3ede2", cardHigh: "#eae2d3",
+    outline: "#d6ccba", divider: "rgba(44,37,32,.12)", text: "#2c2520", text3: "#948c80",
+    accent: "#1e8294",
+  },
+  {
+    id: "antigravity", name: "陶白", tag: "陶",
+    bg: "#faf9f5", side: "#f3f1ea", card: "#f3f1ea", cardHigh: "#eae8df",
+    outline: "#d5d1c6", divider: "rgba(44,42,39,.12)", text: "#2c2a27", text3: "#918d84",
+    accent: "#d97757",
   },
   {
     id: "indigo", name: "靛蓝夜", tag: "夜",
@@ -62,17 +73,18 @@ const THEMES = [
 ];
 const THEME_IDS = THEMES.map((item) => item.id);
 
-/** 旧值迁移：dark → indigo；light / system / 缺失 → paper（迁移后就地写回） */
+/** 旧值迁移（迁移后就地写回）：dark → indigo；其余一律 → devin——
+ *  含 light / system / 缺失，以及 2026-11-25 删掉的 paper / codex。 */
 function currentThemeChoice() {
   const stored = localStorage.getItem(KEY_THEME);
   if (THEME_IDS.includes(stored)) return stored;
-  const migrated = stored === "dark" ? "indigo" : "paper";
+  const migrated = stored === "dark" ? "indigo" : "devin";
   localStorage.setItem(KEY_THEME, migrated);
   return migrated;
 }
 
 function applyTheme(choice) {
-  document.documentElement.dataset.theme = THEME_IDS.includes(choice) ? choice : "paper";
+  document.documentElement.dataset.theme = THEME_IDS.includes(choice) ? choice : "devin";
 }
 
 /** 把当前主题回写给壳（2026-11-14）：下次开窗时启动页要按它铺纸或铺夜。
@@ -88,7 +100,7 @@ function tellShellTheme(theme) {
 }
 
 function setThemeChoice(choice) {
-  const theme = THEME_IDS.includes(choice) ? choice : "paper";
+  const theme = THEME_IDS.includes(choice) ? choice : "devin";
   localStorage.setItem(KEY_THEME, theme);
   applyTheme(theme);
   tellShellTheme(theme);
@@ -184,9 +196,25 @@ const FONT_FAMILIES = {
     label: "宋体",
     stack: '"Songti SC", "Noto Serif SC", "Source Han Serif SC", "STSong", "SimSun", "Microsoft YaHei", serif',
   },
+  kaiti: {
+    label: "楷体",
+    stack: '"Kaiti SC", "STKaiti", "KaiTi", "楷体", serif',
+  },
+  fangsong: {
+    label: "仿宋",
+    stack: '"FangSong", "STFangsong", "仿宋", serif',
+  },
   dengxian: {
     label: "等线",
     stack: '"DengXian", "等线", "Microsoft YaHei", sans-serif',
+  },
+  yahei: {
+    label: "雅黑",
+    stack: '"Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif',
+  },
+  heiti: {
+    label: "黑体",
+    stack: '"SimHei", "Heiti SC", "STHeiti", "黑体", sans-serif',
   },
   sans: {
     label: "无衬线",
@@ -308,9 +336,8 @@ function openFontModal() {
       body.innerHTML = `
         <div class="font-form">
           <div class="font-row font-row-base">
-            <div class="font-row-name"><span>全站默认</span><small>没单独设置的区域跟随这里</small></div>
+            <div class="font-row-name"><span>全站默认</span></div>
             <select class="font-select" data-font-base aria-label="全站字体">${fontOptions(settings.base, false)}</select>
-            <span class="font-row-note">字号按区域调</span>
           </div>
           <div class="font-divider"></div>
           <div class="font-row font-row-head" aria-hidden="true">
@@ -318,7 +345,7 @@ function openFontModal() {
           </div>
           ${FONT_SCOPES.map(
             (scope) => `<div class="font-row">
-              <div class="font-row-name"><span>${esc(scope.label)}</span><small>${esc(scope.hint)}</small></div>
+              <div class="font-row-name"><span>${esc(scope.label)}</span></div>
               <select class="font-select" data-font-scope="${scope.id}" data-font-kind="font"
                       aria-label="${esc(scope.label)}字体">${fontOptions(settings[scope.id].font, true)}</select>
               <select class="font-select" data-font-scope="${scope.id}" data-font-kind="size"
@@ -326,7 +353,6 @@ function openFontModal() {
             </div>`,
           ).join("")}
         </div>
-        <p class="font-note">字号会把该区域的文字、间距和控件一起缩放；不选就跟随全站。</p>
         <div class="modal-actions font-actions">
           <button class="ghost" type="button" id="font-reset">恢复默认</button>
           <span class="font-saved" id="font-saved"></span>

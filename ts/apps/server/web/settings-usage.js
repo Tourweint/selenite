@@ -79,29 +79,6 @@ function bindUsageRange() {
   });
 }
 
-/** 区间起点/终点文案：MM-DD（本地）；终点 = 起点 + days - 1 个自然日 */
-function fmtUsageDay(at) {
-  const date = new Date(at);
-  return `${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-}
-
-function fmtUsageWindowEnd(since, days) {
-  const date = new Date(since);
-  date.setDate(date.getDate() + Math.max(0, days - 1));
-  return fmtUsageDay(date.getTime());
-}
-
-function usageRangeFoot(range, data) {
-  if (range === "all") {
-    return "来源：本机用量账本（pi.usage），按模型累计，不折算金额。";
-  }
-  const days = range === "7d" ? 7 : 30;
-  const span = data.since
-    ? `${fmtUsageDay(data.since)} 至 ${fmtUsageWindowEnd(data.since, days)}`
-    : `近 ${days} 天`;
-  return `${USE_RANGE_LABEL[range]} · ${span} · ${data.activeDays ?? 0} 天有用量。来源：每条回复自带的用量记录，按完成时间归日；删掉会话，那部分用量也会跟着消失。`;
-}
-
 function fmtTokens(value) {
   return Number(value || 0).toLocaleString("zh-CN");
 }
@@ -216,7 +193,6 @@ function renderUsagePage(data) {
   const families = groupUsageFamilies(models);
   const familyIndex = new Map(families.map((family, index) => [family.base, index]));
   const rate = cacheHitRate(sum.input, sum.cacheRead, sum.cacheWrite);
-  const hasMock = families.some((family) => family.mock);
   const days = range === "7d" ? 7 : range === "30d" ? 30 : 0;
   const totalTip =
     range === "all"
@@ -235,10 +211,7 @@ function renderUsagePage(data) {
       ${cell("缓存读", fmtTokens(sum.cacheRead))}
       ${cell("缓存写", fmtTokens(sum.cacheWrite))}
       ${cell("缓存命中", rate === null ? "—" : `${(rate * 100).toFixed(1)}%`, "缓存读 ÷（输入 + 缓存读 + 缓存写）")}
-    </div>
-    <div class="use-foot">${usageRangeFoot(range, Array.isArray(data) ? {} : data || {})}${
-      hasMock ? " faux 是模拟模型（没配真上游时的假回答），那部分不是真实消耗。" : ""
-    }</div>`;
+    </div>`;
 
   // 占比条：前 4 名各占一段，长尾并成「其他」——条太碎就不成图了。
   const slots = families.slice(0, USE_BAR_SLOTS);
@@ -283,10 +256,7 @@ function renderUsagePage(data) {
     .join("");
   modelsHost.innerHTML = `
     <div class="use-bar" role="img" aria-label="按模型占比">${barSegments}</div>
-    <div class="use-legend">${legendRows}</div>
-    <div class="use-foot">${
-      range === "all" ? "" : `${USE_RANGE_LABEL[range]} · `
-    }同一模型的 think 档位并成一行；分档看下面的明细。</div>`;
+    <div class="use-legend">${legendRows}</div>`;
   // 悬停图例行 → 压暗其它段，看清这一行在条上占多宽（指针离开就恢复）
   const bar = modelsHost.querySelector(".use-bar");
   modelsHost.querySelectorAll(".use-row").forEach((row) => {
@@ -337,10 +307,7 @@ function renderUsagePage(data) {
         </tr></thead>
         <tbody>${tableRows}</tbody>
       </table>
-    </div>
-    <div class="use-foot">${
-      range === "all" ? "" : `${USE_RANGE_LABEL[range]} · `
-    }共 ${sorted.length} 个模型档位；缓存命中率按每一档单独算，不是整表平均。</div>`;
+    </div>`;
 }
 
 /** 连点区间时只让最后一次响应落地（后发的请求可能先回来） */
