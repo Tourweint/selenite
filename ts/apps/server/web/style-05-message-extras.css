@@ -177,11 +177,19 @@
    颜色走 currentColor，阈值只换 class。 */
 .ctx-ring {
   display: inline-flex; align-items: center;
+  position: relative;
   height: 24px;
   color: var(--text-3);
   cursor: pointer;
   border-radius: var(--r-sm);
   transition: color .18s ease;
+}
+/* 命中区外扩（2026-11-25 用户报悬停闪烁）：可见环只有 16px 宽，手稍微一歪
+   指针就离开元素、收起计时开跑，卡跟着淡出再弹回。外扩只影响命中，不占布局。 */
+.ctx-ring::before {
+  content: "";
+  position: absolute;
+  inset: -6px -5px;
 }
 .ctx-ring:focus-visible {
   outline: 2px solid var(--accent-line);
@@ -219,6 +227,19 @@
   -webkit-user-select: none;
   user-select: none;
 }
+/* 环与卡之间那 10px 视觉缝是命中死区（2026-11-25 用户报悬停闪烁）：
+   指针从环移向卡时会先离开环、再"迟到"进卡，慢一点卡就在指针下淡出。
+   这里补一条透明桥接层把那 10px 吃进卡里——缝看得见，但不再掉出悬停区。
+   贴哪条边由 chat-notice.js 的 placeCtxCard 写的 data-side 决定（默认向上弹）。 */
+.ctx-card::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 11px;
+}
+.ctx-card[data-side="above"]::before { bottom: -11px; }
+.ctx-card[data-side="below"]::before { top: -11px; }
 .ctx-card-head { display: flex; align-items: baseline; gap: 12px; }
 .ctx-card-title { font-size: 13px; font-weight: 600; letter-spacing: .01em; }
 .ctx-card-usage {

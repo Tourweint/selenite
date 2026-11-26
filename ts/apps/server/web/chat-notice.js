@@ -505,8 +505,15 @@ function placeCtxCard() {
   let left = ring.left + ring.width / 2 - box.width / 2;
   left = Math.min(Math.max(8, left), window.innerWidth - box.width - 8);
   let top = ring.top - box.height - gap;
+  // 卡在哪一侧决定透明桥接层贴哪条边（见 CSS 的 .ctx-card::before）：
+  // 默认向上弹，桥接在卡的下缘；翻到下方时桥接改贴上缘。
+  let side = "above";
   // 上面放不下就翻到下面；两端都越界时贴住上边
-  if (top < 8) top = Math.min(ring.bottom + gap, window.innerHeight - box.height - 8);
+  if (top < 8) {
+    top = Math.min(ring.bottom + gap, window.innerHeight - box.height - 8);
+    side = "below";
+  }
+  ctxCard.dataset.side = side;
   ctxCard.style.left = `${Math.round(left)}px`;
   ctxCard.style.top = `${Math.round(top)}px`;
 }
@@ -526,7 +533,10 @@ function ensureCtxCard() {
     <div class="ctx-bar" aria-hidden="true"><div class="ctx-bar-fill"></div></div>
     <ul class="ctx-legend"></ul>`;
   document.body.append(ctxCard);
-  ctxCard.addEventListener("pointerenter", cancelCtxClose);
+  // 指针移进卡里要「救回」而不是只清计时器：卡收起动画已经开跑、或收起计时
+  // 已到点时才进卡（人手慢一点就会这样），只清计时器不管用——卡会在指针下面
+  // 淡出消失，再回环上又弹出来，看起来就是闪烁（2026-11-25 用户报）。
+  ctxCard.addEventListener("pointerenter", keepCtxCardOpen);
   ctxCard.addEventListener("pointerleave", scheduleCtxClose);
   return ctxCard;
 }
@@ -538,10 +548,18 @@ function cancelCtxClose() {
   }
 }
 
+/** 指针落回「环 / 卡」这块悬停区：取消收起计时；已经在收起就重新打开。 */
+function keepCtxCardOpen() {
+  cancelCtxClose();
+  if (!ctxCardShown) openCtxCard(false);
+}
+
 function scheduleCtxClose() {
   if (ctxPinned) return;
   cancelCtxClose();
-  ctxHideTimer = setTimeout(() => closeCtxCard(), 140);
+  // 200ms 宽限：环只有 16px 宽，指针蹭出边界一点、或从环移向卡时都还在
+  // 「想继续看」的意图里，别一到 140ms 就起收起动画。
+  ctxHideTimer = setTimeout(() => closeCtxCard(), 200);
 }
 
 function openCtxCard(pin = false) {
