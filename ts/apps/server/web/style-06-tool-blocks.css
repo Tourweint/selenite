@@ -269,13 +269,35 @@
   from { opacity: 0; transform: translate(var(--dx, 0px), var(--dy, 0px)) scale(.55); }
   to { opacity: 1; transform: none; }
 }
+/* 「收牌」收起（2026-11-25 用户口径）：收起时展开的牌按发牌的**反序**飞回折叠条，
+   最后落定再真正藏起来——不再整行瞬切。排队号 --ci 由 JS 在收起那刻按整轮逆序写
+   （最后发出去的先收，24 号封顶），--dx/--dy 同样实量（每枚指向折叠条）。
+   收完由 settleCollapse 摘类，别跟下一次发牌打架。 */
+.tchips.collapse-out .tchip {
+  animation: tchipFanIn .22s var(--ease-decelerate) both;
+  animation-delay: calc(var(--ci, 0) * 16ms);
+}
+.tchips.collapse-out .tchip .tchip-icon,
+.tchips.collapse-out .tchip .tchip-verb,
+.tchips.collapse-out .tchip[data-state="ok"] .tchip-check { animation: none; }
+@keyframes tchipFanIn {
+  from { opacity: 1; transform: none; }
+  to { opacity: 0; transform: translate(var(--dx, 0px), var(--dy, 0px)) scale(.55); }
+}
+/* 上面这条发牌规则写在文件开头的 reduced-motion 块**后面**，同特异性会把那里的
+   `animation: none` 盖掉——减少动态效果时其实一直在播（2026-11-25 修）。 */
+@media (prefers-reduced-motion: reduce) {
+  .tchips.expand-in .tchip,
+  .tchips.collapse-out .tchip { animation: none; }
+}
 
 /* 收起 / 展开的高度过渡（2026-11-19）：行数会变（多行块 → 一行「工作 N 步」），
    高度由 JS 量出真实值后用 WAAPI 过渡；这一层只负责在动画期间把溢出的内容裁住。 */
 .tchips-row { overflow: hidden; }
-/* 发牌期间不裁（2026-11-25）：后几组的牌要从折叠条飞回自己那一格，途中越过
-   上面的正文——裁着就只看得见落地那一下。JS 在最后一枚落定后摘掉这个类。 */
-.tchips-row.is-dealing { overflow: visible; }
+/* 发牌 / 收牌期间不裁（2026-11-25）：牌要从折叠条飞回（或飞向）自己那一格，
+   途中越过上面的正文——裁着就只看得见落地那一下。JS 落定后摘掉这个类。 */
+.tchips-row.is-dealing,
+.tchips-row.is-collapsing { overflow: visible; }
 
 /* 内联详情：在灰块下面原地展开 */
 .tchips-inline { display: block; min-width: 0; }

@@ -337,6 +337,27 @@ export function createTurnWork() {
       let offset = 0;
       for (const group of groups) offset = group.prepareOpen(rect, offset);
     },
+    /**
+     * 收起前的一步：记下折叠条的位置（收牌都飞回这里），并给当前露着的块
+     * 按整轮顺序写逆序排队号 `--ci`——最后发出去的先收，一路卷回折叠条
+     * （2026-11-25 用户口径：收起也按发牌的收牌）。
+     */
+    collapseRect: null,
+    everShown: false,
+    prepareCollapse(rect) {
+      turn.collapseRect = rect || null;
+      const all = [];
+      for (const group of groups) all.push(...group.shownChips());
+      let maxCi = 0;
+      all.forEach((chip, index) => {
+        const order = Math.min(Math.max(all.length - 1 - index, 0), 24);
+        chip.style.setProperty("--ci", String(order));
+        if (order > maxCi) maxCi = order;
+      });
+      // 整轮同一个收行时刻（用户口径：收牌走到 80–90% 就开始，别等完全落定才冷场）。
+      // 缓动是 decelerate，85% 时牌已经基本贴回折叠条、近乎全透明，重叠看不出来。
+      turn.collapseDelay = all.length ? Math.round((maxCi * 16 + 220) * 0.85) : 0;
+    },
   };
   return turn;
 }
@@ -384,6 +405,14 @@ export function createToolChips(host, options = {}) {
   // 这次展开里本组最后一枚的排队号（整轮连号，2026-11-25）与发牌收尾计时器。
   let dealMaxIndex = 0;
   let dealTimer = 0;
+  // 收牌（收起）的落定计时器：牌飞完再把块真正藏起来。
+  let collapseTimer = 0;
+  // 收牌/收行进行中：这期间任何重排都不许把块藏掉，否则行高过渡被掐掉、正文瞬移。
+  let collapsing = false;
+  // 上一次行高过渡：收合/展开连点时先取消旧的，否则量到的"目标高度"是旧动画的中间值。
+  let rowAnim = null;
+  // 收牌时同时把这一组占的间隙/外边距收掉（见 collapseAway），落定时再交还。
+  let wrapAnim = null;
   // 点开那一刻的屏幕坐标：必须在改布局之前量，改了以后折叠条/「+N」已经挪位。
   let openAnchorRect = null;
   // 发牌期间钉在旧位置的「+N」克隆；真身留在新位置占位但不显示。
@@ -673,15 +702,136 @@ export function createToolChips(host, options = {}) {
     line.classList.add("expand-in");
   };
 
+  /** 收起时清掉收牌计时器与动画类（展开接管时也调，别让旧的隐藏/类跟过去）。 */
+  const stopCollapse = () => {
+    if (collapseTimer) {
+      clearTimeout(collapseTimer);
+      collapseTimer = 0;
+    }
+    line.classList.remove("collapse-out");
+    row.classList.remove("is-collapsing");
+    collapsing = false;
+    wrapAnim?.cancel();
+    wrapAnim = null;
+  };
+
+  /** 收牌落定：牌都飞回去了，再把块真正藏起来，行高交还自然值。 */
+  const settleCollapse = () => {
+    collapseTimer = 0;
+    if (!turn.collapsed) return; // 途中被展开接管：保持现状
+    line.classList.remove("collapse-out");
+    row.classList.remove("is-collapsing");
+    for (const chip of chips) {
+      chip.hidden = true;
+      chip.style.removeProperty("animation");
+    }
+    if (!isMaster) wrap.hidden = true;
+    collapsing = false;
+    rowAnim?.cancel();
+    rowAnim = null;
+    wrapAnim?.cancel();
+    wrapAnim = null;
+  };
+
+  /**
+   * 「收牌」（2026-11-25 用户口径）：收起时展开的牌按发牌的反序飞回折叠条，
+   * **飞完再收行**（collapseAway）——两段分开，正文不会先挪上来跟牌叠在一起。
+   * 排队号 `--ci` 在收起那刻由 turn.prepareCollapse 按整轮逆序写好；
+   * 牌要越过正文，行先不裁（.is-collapsing）。
+   */
+  const playCollapse = () => {
+    const anchor = turn.collapseRect;
+    const shown = chips.filter((chip) => !chip.hidden);
+    // 上一次发牌/翻页可能还在飞：先清掉类与 inline 动画，按布局位置重新量。
+    line.classList.remove("expand-in");
+    for (const chip of chips) chip.style.removeProperty("animation");
+    if (!anchor || !shown.length) {
+      collapseAway();
+      return;
+    }
+    void line.offsetWidth;
+    for (const chip of shown) {
+      const rect = chip.getBoundingClientRect();
+      chip.style.setProperty("--dx", `${anchor.left - rect.left}px`);
+      chip.style.setProperty("--dy", `${anchor.top - rect.top}px`);
+    }
+    row.classList.add("is-collapsing");
+    line.classList.add("collapse-out");
+    collapsing = true;
+    if (collapseTimer) clearTimeout(collapseTimer);
+    // 整轮同一时刻收行（turn.collapseDelay）：最后一枚落地前布局不动；
+    // 各组不再各收各的，否则前面的牌还在飞、下面正文就先挪了。
+    const delay = Number.isFinite(turn.collapseDelay)
+      ? turn.collapseDelay
+      : 220 + 24 * 16 + 40;
+    collapseTimer = setTimeout(collapseAway, delay);
+  };
+
+  /**
+   * 收牌落定（阶段二）：牌都飞回去了，先把块藏掉，再把行高与间隙平滑收完。
+   * 两段是用户口径（2026-11-25）：先收牌、再让主对话回来——同时跑的话正文会
+   * 先挪到位置，跟还在飞的牌叠在一起。
+   *
+   * 非首组还要把「藏起来之后会一起消失的那点空间」一起收掉：flex 的 gap 与
+   * wrap 的下外边距只在 display:none 那一刻才消失，光做行高的话正文会在
+   * 落定时再跳 12px（实测）。所以同步把 margin-bottom 收到 -(margin-top + gap)。
+   */
+  const collapseAway = () => {
+    collapseTimer = 0;
+    if (!turn.collapsed) return; // 途中被展开接管：保持现状
+    collapsing = true;
+    line.classList.remove("collapse-out");
+    row.classList.remove("is-collapsing");
+    // 先量还挂着牌时的高度，再藏（藏完自然高度就变了）。
+    const from = row.getBoundingClientRect().height;
+    for (const chip of chips) {
+      chip.hidden = true;
+      chip.style.removeProperty("animation");
+    }
+    if (!isMaster) {
+      const parent = wrap.parentElement;
+      const parentStyle = parent ? getComputedStyle(parent) : null;
+      const gap = parentStyle
+        ? parseFloat(parentStyle.rowGap || parentStyle.gap || "0") || 0
+        : 0;
+      const style = getComputedStyle(wrap);
+      const marginTop = parseFloat(style.marginTop) || 0;
+      const marginBottom = parseFloat(style.marginBottom) || 0;
+      // 只有一个孩子时没有相邻间隙可省，隐藏只省下外边距。
+      const savedGap = parent && parent.children.length > 1 ? gap : 0;
+      const bottomTarget = -(marginTop + savedGap);
+      wrapAnim?.cancel();
+      wrapAnim = null;
+      if (Math.abs(bottomTarget - marginBottom) >= 0.5) {
+        wrapAnim = wrap.animate(
+          [{ marginBottom: `${marginBottom}px` }, { marginBottom: `${bottomTarget}px` }],
+          { duration: 240, easing: "cubic-bezier(0, 0, .2, 1)", fill: "forwards" },
+        );
+      }
+    }
+    const to = isMaster ? fold.getBoundingClientRect().height : 0;
+    rowAnim?.cancel();
+    rowAnim = null;
+    if (Math.abs(to - from) >= 1) {
+      rowAnim = row.animate(
+        [{ height: `${from}px` }, { height: `${to}px` }],
+        { duration: 240, easing: "cubic-bezier(0, 0, .2, 1)", fill: "forwards" },
+      );
+    }
+    collapseTimer = setTimeout(settleCollapse, 300);
+  };
+
   /** 收起/展开时给整条块行做高度过渡；行数会变，只能量真实高度（max-height 猜不准）。 */
   const animateRow = (mutate) => {
     const from = row.getBoundingClientRect().height;
+    rowAnim?.cancel();
+    rowAnim = null;
     mutate();
     const to = row.getBoundingClientRect().height;
     // from=0 也是真的变化：非首组收起时整条 wrap 是 hidden，展开那一下得从 0 长出来，
     // 否则后几组连同下面的正文一起闪出来（2026-11-25 用户口径）。
     if (Math.abs(to - from) < 1 || reduceMotion()) return;
-    row.animate(
+    rowAnim = row.animate(
       [{ height: `${from}px` }, { height: `${to}px` }],
       { duration: 240, easing: "cubic-bezier(0, 0, .2, 1)" },
     );
@@ -728,11 +878,14 @@ export function createToolChips(host, options = {}) {
     const changed = turn.collapsed !== wasCollapsed || turn.expanded !== wasExpanded;
     // 从收起态打开的这一刻（「涌出」要在这时实量位移、重播排队动画）。
     const opening = turn.expanded && !wasExpanded;
+    // 从露着块收起：收牌只在这时播（历史回读从没露过块，直接收，打开旧会话不闪）。
+    const closing = turn.collapsed && !wasCollapsed && turn.everShown && !reduceMotion();
     wasCollapsed = turn.collapsed;
     wasExpanded = turn.expanded;
 
     const apply = () => {
       wrap.hidden = false;
+      if (!turn.collapsed) turn.everShown = true;
       // 整轮收起（收尾后的默认形态）：正文里只剩一枚「工作 N 步」。
       // 思考和执行一起收（2026-11-19 用户口径）：它们是一件事的两半，
       // 单把思考留在外面反而把"想一下做一下"的节奏拆成了两处；
@@ -742,11 +895,6 @@ export function createToolChips(host, options = {}) {
       if (turn.collapsed) {
         cleanupPagerGhost();
         endDeal();
-        for (const chip of chips) {
-          chip.hidden = true;
-          // 清掉分页时写在块上的发牌动画，下次展开才能重新播。
-          chip.style.removeProperty("animation");
-        }
         line.classList.remove("expand-in");
         pager.hidden = true;
         pagerCount = 0;
@@ -757,13 +905,29 @@ export function createToolChips(host, options = {}) {
         } else {
           fold.hidden = true;
           // 非首组收起时不占位置：整轮只留首组那一枚折叠条。
-          wrap.hidden = true;
+          // 收牌期间先留着（牌还在飞），收完（collapseAway）再藏。
         }
+        if (closing) {
+          // 收起也发牌：牌按逆序飞回折叠条，飞完再藏（2026-11-25 用户口径）。
+          playCollapse();
+          return;
+        }
+        // 收牌/收行进行中：这期间的重排（块一藏 line 尺寸就变，ResizeObserver 会
+        // 再来一次）不许抢先藏，否则行高过渡直接被掐掉、正文瞬移。等 settleCollapse。
+        if (collapsing) return;
+        for (const chip of chips) {
+          chip.hidden = true;
+          // 清掉分页时写在块上的发牌动画，下次展开才能重新播。
+          chip.style.removeProperty("animation");
+        }
+        if (!isMaster) wrap.hidden = true;
         return;
       }
       // 展开态不再一次铺全部：只铺前 revealed 枚，余下的数进行尾「+N」。
       // 折叠条留在首组行首当标题，再点它收回去。
       if (turn.expanded) {
+        // 收牌途中又点开：先停掉收牌，剩下的交给下面的发牌。
+        stopCollapse();
         // 分页关掉（TOOL_CHIP_PAGING=false）：回到旧形态——展开就是全部，没有「+N」。
         if (!chipPagingEnabled) {
           cleanupPagerGhost();
@@ -856,6 +1020,8 @@ export function createToolChips(host, options = {}) {
       }
     };
 
+    // 收起时布局先不动（牌在飞），行高由 collapseAway 在收牌结束后再收——
+    // 这里走普通排版即可：块还挂着，animateRow 量不到高度变化会自然跳过。
     if (changed) animateRow(apply);
     else apply();
   };
@@ -932,6 +1098,8 @@ export function createToolChips(host, options = {}) {
     root: wrap,
     /** 本组块数（整轮总数由 turn.total() 汇总） */
     chipCount: () => chips.length,
+    /** 当前露在外面的块（收牌按它们逆序飞回折叠条，2026-11-25）。 */
+    shownChips: () => chips.filter((chip) => !chip.hidden),
     /** 本组是否还有运行中的块（折叠条的扫光看整轮） */
     hasRunning: () => chips.some((chip) => chip.dataset.state === "run"),
     queueLayout,
@@ -1082,7 +1250,12 @@ export function createToolChips(host, options = {}) {
       // 用户手动摊开的整轮不强行收（2026-11-21 用户口径「工作 N 步不要隐藏」）：
       // 他正看着的过程，收尾时保持原样，想合上自己再点一下折叠条。
       // 没动过的整轮折回折叠条——1 枚也算一步（「工作 1 步」），不给它藏起来。
-      if (!turn.expanded) turn.collapsed = collapse && turn.total() > 0;
+      if (!turn.expanded) {
+        const shouldCollapse = collapse && turn.total() > 0;
+        // 收尾自动收起也走收牌：锚点是折叠条的位置（首组才调 finish）。
+        if (shouldCollapse && isMaster) turn.prepareCollapse(fold.getBoundingClientRect());
+        turn.collapsed = shouldCollapse;
+      }
       turn.relayout();
       turn.syncFold();
     },
@@ -1102,6 +1275,8 @@ export function createToolChips(host, options = {}) {
       turn.prepareOpen(rect);
     } else {
       turn.closeDetails();
+      // 收牌锚点：点下去那一刻折叠条在哪，牌就飞回哪（展开态下它在首组行首不动）。
+      turn.prepareCollapse(fold.getBoundingClientRect());
       turn.collapsed = true;
       turn.expanded = false;
     }
