@@ -19,6 +19,7 @@ import {
 	recoverNoteProvider,
 	skillSlashProvider,
 	skillsProvider,
+	toolIndexProvider,
 	turnLimitProvider,
 	userProfileProvider,
 	verificationIronLawProvider,
@@ -41,6 +42,8 @@ export const INJECTION_REGISTRY: readonly RegisteredInjection[] = [
 	{ source: "lifecycle", provider: skillsProvider },
 	// 2026-11-19 前缀锁定：动态一半走消息尾部（审计里能单独看到）。
 	{ source: "lifecycle", provider: currentProjectLiveProvider },
+	// 低频工具索引（2026-11-25 移出 system）：消息尾部注入；无可加载 deferred 时不出现。
+	{ source: "lifecycle", provider: toolIndexProvider },
 	{ source: "lifecycle", provider: skillSlashProvider },
 	{ source: "lifecycle", provider: recoverNoteProvider },
 	{ source: "lifecycle", provider: turnLimitProvider },

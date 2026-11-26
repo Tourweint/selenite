@@ -3,15 +3,16 @@
  *
  * 机制完全交给内核，这里只做三件事：
  *   1. 一份按需名单 —— 哪些工具注册时打 `deferred: true`（初始不进请求）。
- *      名单住 `tool-pool.ts`：代码默认 9 个，用户可在「设置 → 工具」覆盖
- *      （`.data/tool-pool.json`，**重启后生效**：deferred 是注册期属性）；
+ *      名单住 `tool-pool.ts`：**2026-11-25 起代码默认 `[]` = 全部常驻**，按需池是
+ *      显式 opt-in；用户可在「设置 → 工具」开启（`.data/tool-pool.json`，
+ *      **重启后生效**：deferred 是注册期属性）；
  *   2. `markDeferred()` —— 在 createTools 之后给名单内工具补属性，浅拷贝、不改原对象、不动顺序；
  *   3. `toolIndexText()` —— 把"当前可加载的 deferred"投影成一段 prompt 文本。
+ *      2026-11-25 起这段走**请求尾部 user 注入**（`channel:"message"`），不再进 system 前缀。
  *
- * `tool_search` 的注册在 tools.ts 末尾（它自己不是 deferred）；内核收到
- * `control.addTools:[name]` 后把名字追加进会话 `modelTools.add`，下一轮起完整 schema 才进请求。
- *（AGENT_TOOL_INDEX 回滚开关 2026-11-21 退役：按需池是唯一形态；想全量常驻就在
- * 「设置 → 工具」把名单清空，走 tool-pool.json 的正当机制。）
+ * `tool_search` 的注册在 tools.ts 末尾、且只在名单非空时注册（它自己不是 deferred）；
+ * 内核收到 `control.addTools:[name]` 后把名字追加进会话 `modelTools.add`，下一轮起完整 schema
+ * 才进请求。回滚旧按需池 = 在 `.data/tool-pool.json` 写回 9 个名字（见 `tool-pool.ts` 头注释）。
  */
 
 import type { ToolRegistration } from "@earendil-works/pi-durable";

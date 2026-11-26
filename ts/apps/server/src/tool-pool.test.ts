@@ -32,7 +32,8 @@ test.after(() => {
 	rmSync(root, { recursive: true, force: true });
 });
 
-test("缺文件 / 坏 JSON / deferred 不是数组 → 回落代码默认名单", () => {
+test("缺文件 / 坏 JSON / deferred 不是数组 → 回落代码默认名单（2026-11-25 起为空 = 全部常驻）", () => {
+	assert.deepEqual([...DEFAULT_DEFERRED_TOOL_NAMES], [], "代码默认全部常驻");
 	assert.deepEqual(readDeferredToolNames(env), [...DEFAULT_DEFERRED_TOOL_NAMES]);
 	writeFileSync(path, "not json", "utf8");
 	assert.deepEqual(readDeferredToolNames(env), [...DEFAULT_DEFERRED_TOOL_NAMES]);

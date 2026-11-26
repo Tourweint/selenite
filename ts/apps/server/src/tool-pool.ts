@@ -1,13 +1,21 @@
 /**
- * 全局工具池（2026-11-17 设置 → 工具页）。
+ * 全局工具池（2026-11-17 设置 → 工具页；2026-11-25 默认全部常驻）。
  *
  * 决定"哪些工具进按需池（deferred）"：按需 = 初始请求里没有它，系统提示只给
  * `tool_index` 一句话，模型要用先调 `tool_search`；其余一律常驻（每轮带完整定义）。
  *
+ * **默认全部常驻（2026-11-25）**：按需池退为**显式 opt-in**。原因是会话中途加载
+ * 工具会让整条前缀（含已攒下的历史）作废，长会话里一次加载的代价远大于固定前缀
+ * 省下的约 2.6k token（调查与决策见 `docs/设计方案/2026-11-25-命中率下降与缓存前缀.md`）。
+ * 想恢复旧的 9 个按需工具，在 `.data/tool-pool.json` 写
+ * `{"deferred":["routine_manage","partner_manage","group_manage","save_skill_advice",
+ * "partner_skill_write","propose_project","send_to_agent","respond_escalation",
+ * "save_reminder_advice"]}`（重启生效）。
+ *
  * 落点 `.data/tool-pool.json`：`{ "deferred": ["routine_manage", …] }`
  * （`AGENT_TOOL_POOL_PATH` 可覆盖）。**存按需例外名单**，与 worker-tools 的
- * `disabled` 同一套思路：文件缺失 / 坏 JSON = 回落到代码默认（当前 9 个），
- * 以后新增工具默认常驻，不会因为名单没更新而悄悄消失。
+ * `disabled` 同一套思路：文件缺失 / 坏 JSON = 回落到代码默认（当前 `[]` = 全部常驻），
+ * 新增工具默认常驻，不会因为名单没更新而悄悄消失。
  *
  * **生效边界（内核约束，2026-11-17 核对）**：`deferred` 是工具注册期属性，
  * 只在 `openHarness()` 里 `markDeferred()` 时打上；改这个文件**必须重开 Harness
@@ -23,21 +31,16 @@ import type { Hono } from "hono";
 import type { ToolRegistration } from "@earendil-works/pi-durable";
 import { estimateTokens } from "./token-estimate.ts";
 
-/** 代码默认的按需名单（2026-11-16 C 段用户拍板的 8 个；批2 追加 respond_escalation；
- *  批4 追加 save_reminder_advice）。文件缺失时用它。 */
-export const DEFAULT_DEFERRED_TOOL_NAMES: readonly string[] = [
-	"routine_manage",
-	"partner_manage",
-	"group_manage",
-	"save_skill_advice",
-	"partner_skill_write",
-	"propose_project",
-	"send_to_agent",
-	// 决策上报答复（2026-11-19 批2）：只在唤醒轮用得上，初始不进请求、不打缓存前缀。
-	"respond_escalation",
-	// 提醒沉淀落盘（2026-11-19 批4）：只有入口发起蒸馏那轮用得上，初始不进请求。
-	"save_reminder_advice",
-];
+/**
+ * 代码默认的按需名单：**空 = 全部常驻**（2026-11-25 起）。
+ *
+ * 旧默认（2026-11-16 C 段 → 2026-11-19 批4 收口的 9 个，仅供回滚参考）：
+ * `routine_manage` / `partner_manage` / `group_manage` / `save_skill_advice` /
+ * `partner_skill_write` / `propose_project` / `send_to_agent` / `respond_escalation` /
+ * `save_reminder_advice`。
+ * 文件缺失 / 坏 JSON 时用本值。
+ */
+export const DEFAULT_DEFERRED_TOOL_NAMES: readonly string[] = [];
 
 /** `tool_search` 是加载按需工具的唯一入口：把它自己放进按需池 = 所有按需工具永久不可达。 */
 export const TOOL_SEARCH_NAME = "tool_search";

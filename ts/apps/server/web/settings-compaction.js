@@ -80,6 +80,101 @@ function syncCompactUnits(root, mode) {
   }
 }
 
+/** 十进制 K/M（网关自报 1,000,000 就是 1M）；token 输入框那一侧的 K 直接用用户填的数 */
+function humanScale(value) {
+  if (!Number.isFinite(value) || value <= 0) return "";
+  if (value >= 1_000_000) {
+    const millions = Number((value / 1_000_000).toFixed(1));
+    return `${millions}M`;
+  }
+  if (value >= 1000) return `${Math.round(value / 1000)}K`;
+  return String(Math.round(value));
+}
+
+/**
+ * 当前默认模型的窗口。只取一次：失败 / faux / 找不到都按「窗口未知」处理，
+ * 不阻塞页面（先按未知渲染，解析完再补一次刷新）。
+ */
+let knownWindow = null;
+let windowResolved = false;
+let modelWindowPromise;
+
+function ensureModelWindow() {
+  if (!modelWindowPromise) {
+    modelWindowPromise = (async () => {
+      try {
+        const response = await request("/api/v1/agent/model", { cache: "no-store" });
+        if (!response.ok) return null;
+        const data = await response.json().catch(() => ({}));
+        const current = data?.current;
+        if (!current?.providerId || !current?.modelId || current.providerId === "faux") return null;
+        const provider = (Array.isArray(data.providers) ? data.providers : []).find(
+          (item) => item?.id === current.providerId,
+        );
+        const model = (Array.isArray(provider?.models) ? provider.models : []).find(
+          (item) => item?.id === current.modelId,
+        );
+        const contextWindow = Number(model?.contextWindow);
+        return Number.isFinite(contextWindow) && contextWindow > 0 ? contextWindow : null;
+      } catch {
+        return null;
+      }
+    })();
+  }
+  return modelWindowPromise;
+}
+
+/** 五个状态压成一句，挂到「K token」/「% 窗口」的悬停提示上 */
+function effectiveText({ enabled, mode, percent, tokenK, window: windowSize }) {
+  if (!enabled) return "自动压缩已关：两档都不生效";
+  const tokenText = tokenK ? `${tokenK}K` : "";
+  if (mode === "tokens") {
+    const other = `｜另一档 ${percent}% 未生效`;
+    if (!tokenText) return `按 token 未设触发点，回落内核默认${other}`;
+    const windowNote = windowSize ? `（窗口 ${humanScale(windowSize)}）` : "";
+    return `当前生效：按 token 到 ${tokenText} 压一次${windowNote}${other}`;
+  }
+  const other = tokenText ? `｜另一档 ${tokenText} 未生效` : "｜另一档未设";
+  if (windowSize) {
+    const trigger = Math.round((windowSize * percent) / 100);
+    return `当前生效：窗口 ${humanScale(windowSize)} × ${percent}% = ${humanScale(trigger)} 触发${other}`;
+  }
+  return `按百分比 ${percent}%（窗口未知）${other}`;
+}
+
+/** 从 DOM 现读活值，把同一句写到两个单位文字的 data-tip（隐藏档也写，切过去即可悬停） */
+function refreshCompactTips(box = document.querySelector("[data-compact-sec]")) {
+  if (!box) return;
+  const enabled =
+    box.querySelector("[data-compact-enabled]")?.getAttribute("aria-checked") === "true";
+  const activeMode = box.querySelector('[data-compact-mode] button[aria-checked="true"]');
+  const mode = activeMode?.dataset.value === "token" ? "tokens" : "percent";
+  const percentRaw = Number(box.querySelector("#compact-percent")?.value);
+  const percent =
+    Number.isFinite(percentRaw) && percentRaw > 0
+      ? Math.min(95, Math.max(5, Math.round(percentRaw)))
+      : COMPACT_DEFAULT_PERCENT;
+  const tokenRaw = Number(box.querySelector("#compact-trigger-k")?.value);
+  const tokenK = Number.isFinite(tokenRaw) && tokenRaw >= 1 ? Math.round(tokenRaw) : null;
+  const text = effectiveText({ enabled, mode, percent, tokenK, window: knownWindow });
+  for (const suffix of box.querySelectorAll(".compact-suffix")) {
+    suffix.setAttribute("data-tip", text);
+  }
+}
+
+/** 窗口只在进页时取一次；取值回来时补刷一次，之后各次回填直接复用 */
+function refreshWithWindow(box) {
+  if (windowResolved) {
+    refreshCompactTips(box);
+    return;
+  }
+  void ensureModelWindow().then((size) => {
+    knownWindow = size;
+    windowResolved = true;
+    refreshCompactTips();
+  });
+}
+
 async function loadCompactionSettings(root = document) {
   const box = root.querySelector("[data-compact-sec]");
   if (!box) return;
@@ -134,6 +229,7 @@ async function loadCompactionSettings(root = document) {
     triggerEl.value = values[COMPACT_KEYS.triggerK] || "";
     triggerEl.defaultValue = triggerEl.value;
   }
+  refreshWithWindow(box);
 }
 
 /** 数值写盘：空值 = 删掉覆盖、回落默认（服务端 `setFlag` 对数值型开关认空串） */
@@ -143,6 +239,7 @@ async function saveCompactNumber(input, key, { min, max }) {
   if (!raw) {
     input.value = "";
     input.defaultValue = "";
+    refreshCompactTips();
     try {
       const response = await request(`/api/v1/agent/flags/${encodeURIComponent(key)}`, {
         method: "PUT",
@@ -153,6 +250,7 @@ async function saveCompactNumber(input, key, { min, max }) {
         toast(data.message || `没存成：HTTP ${response.status}`);
         input.value = previous;
         input.defaultValue = previous;
+        refreshCompactTips();
         return;
       }
       toast("已恢复默认，下一轮生效");
@@ -160,6 +258,7 @@ async function saveCompactNumber(input, key, { min, max }) {
       if (error.message !== "forbidden") toast(`没存成：${error.message}`);
       input.value = previous;
       input.defaultValue = previous;
+      refreshCompactTips();
     }
     return;
   }
@@ -168,6 +267,7 @@ async function saveCompactNumber(input, key, { min, max }) {
   if (max !== undefined) value = Math.min(max, value);
   value = Math.max(min, value);
   input.value = String(value);
+  refreshCompactTips();
   try {
     const response = await request(`/api/v1/agent/flags/${encodeURIComponent(key)}`, {
       method: "PUT",
@@ -177,6 +277,7 @@ async function saveCompactNumber(input, key, { min, max }) {
     if (!response.ok) {
       toast(data.message || `没存成：HTTP ${response.status}`);
       input.value = previous;
+      refreshCompactTips();
       return;
     }
     input.defaultValue = String(value);
@@ -184,6 +285,7 @@ async function saveCompactNumber(input, key, { min, max }) {
   } catch (error) {
     if (error.message !== "forbidden") toast(`没存成：${error.message}`);
     input.value = previous;
+    refreshCompactTips();
   }
 }
 
@@ -209,6 +311,7 @@ function wireCompactionSection(root = document) {
       await loadCompactionSettings(document);
     } catch (error) {
       switchEl.setAttribute("aria-checked", String(!next));
+      refreshCompactTips(box);
       if (error.message !== "forbidden") toast(`没存成：${error.message}`);
     }
   });
@@ -224,6 +327,7 @@ function wireCompactionSection(root = document) {
         }
         syncSegmented(modeEl);
         syncCompactUnits(box, value === "token" ? "tokens" : "percent");
+        refreshCompactTips(box);
         try {
           // 按钮的 data-value 是给人看的（token），存进服务端的是枚举（tokens）
           const stored = value === "token" ? "tokens" : "percent";
@@ -244,12 +348,14 @@ function wireCompactionSection(root = document) {
 
   const percentEl = box.querySelector("#compact-percent");
   if (percentEl instanceof HTMLInputElement) {
+    percentEl.addEventListener("input", () => refreshCompactTips(box));
     percentEl.addEventListener("change", () =>
       void saveCompactNumber(percentEl, COMPACT_KEYS.percent, { min: 5, max: 95 }),
     );
   }
   const triggerEl = box.querySelector("#compact-trigger-k");
   if (triggerEl instanceof HTMLInputElement) {
+    triggerEl.addEventListener("input", () => refreshCompactTips(box));
     triggerEl.addEventListener("change", () =>
       void saveCompactNumber(triggerEl, COMPACT_KEYS.triggerK, { min: 1 }),
     );

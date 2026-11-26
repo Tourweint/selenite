@@ -121,15 +121,21 @@ export interface RequestSystemSnapshot {
 }
 
 /**
- * 消息层面的前缀对比（2026-11-21）：按“非 system 消息逐条指纹”取最长公共前缀。
+ * 消息层面的前缀对比（2026-11-21；2026-11-25 改口径）。
+ *
+ * 对比的是两条请求各自**发出去之前**的 prompt 前缀（`at: 请求 entry 的前一条`），
+ * 不包含上一条请求自己的回答，也不含内核给未完成工具调用补的
+ * `Tool result unavailable: history ends before this call completed.` 占位。
+ * 这样「工具调用 → 下一请求带工具结果」只算追加，不会误报 replaced。
+ *
  * 追加不改前缀、不背未命中的锅；replaced > 0 才是真的断了（正常只有压缩 / 改写会这样）。
  */
 export interface RequestMessageDiff {
 	/** 与上一条逐条一致的消息条数（= 可缓存的消息前缀长度）。 */
 	shared: number;
-	/** 上一条有、这一条里被换掉的消息条数（>0 = 前缀在这里断了）。 */
+	/** 上一条 prompt 里有、这一条 prompt 里被换掉的消息条数（>0 = 前缀在这里断了）。 */
 	replaced: number;
-	/** 这一条比上一条多出来的消息条数。 */
+	/** 这一条 prompt 比上一条 prompt 多出来的消息条数。 */
 	appended: number;
 }
 
@@ -491,6 +497,25 @@ function systemSnapshotOf(view: ContextView): {
 	};
 }
 
+/**
+ * `entryId` 之前最后一条可见 entry 的 id；没有则 null（2026-11-25）。
+ * 用来取"请求发出去之前"的 prompt 视图：`context({at: entryId})` 会把请求自己的回答也算进去。
+ */
+async function previousEntryIdOf(
+	conversation: Conversation,
+	context: ReadContext,
+	entryId: number,
+): Promise<number | null> {
+	if (entryId <= 1) return null;
+	const page = await conversation.entries(
+		{ maxEntryId: (entryId - 1) as EntryId, order: "descending" },
+		1,
+		undefined,
+		context,
+	);
+	return page.items[0]?.id ?? null;
+}
+
 /** 找 `entryId` 之前最近的一条模型请求（含当前这条之前的 assistant）。 */
 async function previousRequestOf(
 	conversation: Conversation,
@@ -631,13 +656,28 @@ export async function requestContextOf(
 		const previousView = await conversation
 			.context(context, { at: previousRow.entryId as EntryId })
 			.catch(() => null);
-		if (previousView) {
+		// 消息层对比（2026-11-25 改口径）：对比两条请求各自**发出去之前**的 prompt 视图，
+		// 排除上一条请求自己的回答与未完成工具调用的占位，避免 replaced 假阳性。
+		// 展示用的 context / system 仍是 `context({at: entryId})`（上面的 view），不受影响。
+		const currentBeforeId = await previousEntryIdOf(conversation, context, entryId);
+		const previousBeforeId = await previousEntryIdOf(conversation, context, previousRow.entryId);
+		const promptViewAt = async (at: number | null): Promise<ContextView | null> =>
+			at === null
+				? null
+				: conversation.context(context, { at: at as EntryId }).catch(() => null);
+		// 拿不到 beforeId（或视图重放失败）退回原视图：宁可多一点噪音，也不让详情空掉。
+		const currentPromptView = (await promptViewAt(currentBeforeId)) ?? view;
+		const previousPromptView = previousView
+			? ((await promptViewAt(previousBeforeId)) ?? previousView)
+			: null;
+		if (previousView && previousPromptView) {
 			compare = compareSystem(
 				{ ...current, sections: currentSections },
+				// system 指纹仍比"上一条请求自己的视图"：末尾补写的 pi.system 补丁算那一条的
+				// 真实前缀，不能被 beforeId 截掉；只有消息层改用 prompt 视图（2026-11-25）。
 				{ ...systemSnapshotOf(previousView), sections: sectionMapOf(previousView) },
 				previousRow,
-				// 消息层对比（2026-11-21）：正文前缀是否逐条一致，追加 / 改写分开报。
-				messageDiffOf(view, previousView),
+				messageDiffOf(currentPromptView, previousPromptView),
 			);
 		}
 	}

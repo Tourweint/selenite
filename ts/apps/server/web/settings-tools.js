@@ -41,7 +41,7 @@ function toolPoolMarkup() {
     "",
     `<span class="tool-pool-actions">
        <span class="use-foot" id="tool-pool-dirty" hidden>有改动</span>
-       <button class="ghost" type="button" id="tool-pool-defaults" data-tip="恢复成代码默认的 9 个按需工具">恢复默认</button>
+       <button class="ghost" type="button" id="tool-pool-defaults" data-tip="恢复成代码默认的按需名单（当前默认全部常驻）">恢复默认</button>
        <button class="btn-primary" type="button" id="tool-pool-save" disabled data-tip="按需是注册期属性：保存后重启服务才生效">保存</button>
      </span>`,
   );

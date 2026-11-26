@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import type { MemoryScope } from "@lifediary/memory";
 import type { SkillStore } from "./skills.ts";
@@ -59,6 +62,14 @@ const CACHE_WARNING =
 process.env.AGENT_ASK_USER = "true";
 process.env.COMPANIONS_ENABLED = "true";
 process.env.GROUPS_ENABLED = "true";
+
+// 2026-11-25 起按需池默认空、tool_search 不注册；本快照要覆盖 tool_search 的注册位，
+// 用临时 tool-pool.json 显式开启一个按需工具（不碰真实 .data/）。
+const poolRoot = mkdtempSync(join(tmpdir(), "lifediary-schema-guard-"));
+const poolPath = join(poolRoot, "tool-pool.json");
+writeFileSync(poolPath, JSON.stringify({ deferred: ["routine_manage"] }), "utf8");
+process.env.AGENT_TOOL_POOL_PATH = poolPath;
+test.after(() => rmSync(poolRoot, { recursive: true, force: true }));
 
 const { createTools } = await import("./tools.ts");
 

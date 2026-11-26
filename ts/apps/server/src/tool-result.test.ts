@@ -49,7 +49,8 @@ test("encodeToolResult：同输入逐字节相同，且能原样解回来", () =
 
 /**
  * 迁移后的三个只读工具（2026-11-10 批 18 §五）：`recall` / `web_search` / `skill`
- * 的外层必须是 `ToolResult`，人读的 `message` 逐字不变。
+ * 的外层必须是 `ToolResult`，人读的 `message` 逐字不变（`web_search` 的命中结果
+ * 2026-11-25 起只回结构化 `hits`，空结果仍回 `message`）。
  * 这里断言"包对了 + 文案没动"，工具自身的业务规则仍由各自模块负责。
  */
 
@@ -131,12 +132,13 @@ test("recall：没有命中仍是 ok（count 0），不是错误", async () => {
 	assert.deepEqual(out, { ok: true, data: { count: 0, message: "没有找到相关记忆。" } });
 });
 
-test("web_search：命中/空结果都包 ok，message 是同一份人读正文", async () => {
+test("web_search：命中包 ok + 结构化 hits（2026-11-25 起不再重复 message）", async () => {
 	const tools = createTools(deps({ recall: () => [] }));
 	const hit = await runTool(toolNamed(tools, "web_search"), { query: "茶" });
 	assert.equal(hit.ok, true);
 	assert.equal(hit.data.count, 1);
-	assert.equal(hit.data.message, "标题 — https://example.com/a\n摘要");
+	assert.deepEqual(hit.data.hits, [{ title: "标题", url: "https://example.com/a", summary: "摘要" }]);
+	assert.equal("message" in hit.data, false);
 
 	const empty = await runTool(toolNamed(tools, "web_search"), { query: "空的" });
 	assert.deepEqual(empty, { ok: true, data: { count: 0, message: "没有找到相关结果。" } });

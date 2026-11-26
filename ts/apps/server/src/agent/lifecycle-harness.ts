@@ -75,10 +75,11 @@ import {
 	collectInjections,
 	guardProvider,
 } from "./injection.ts";
-import { externalBankCatalogProvider, lifecycleMessageProviders, personaRecallLightTextFor, clarifyContractProvider, currentProjectProvider, personaProvider, skillsProvider, toolIndexProvider, userProfileProvider, verificationIronLawProvider } from "./lifecycle-injections.ts";
+import { externalBankCatalogProvider, lifecycleMessageProviders, personaRecallLightTextFor, clarifyContractProvider, currentProjectProvider, personaProvider, skillsProvider, userProfileProvider, verificationIronLawProvider } from "./lifecycle-injections.ts";
 import { BASH_TIMEOUT_S, EXTERNAL_REMEMBER_CAPABILITY, approvalMode, externalRememberBlockReason, policy, readOnlyBlockReason } from "./policy.ts";
 import { memoryLightTimeoutMs, resolveToolPolicy, shellTimeoutDecision, shellTimeoutInjectionSeconds } from "../tool-policy.ts";
 import { markRecoverResume } from "./recover-note.ts";
+import { replayThinkingEnabled, stripReplayedThinking } from "./reasoning-replay.ts";
 import { recallSessionsEnabled, searchSessions } from "./session-search.ts";
 import { CTX, ChatKinds, ChatProjects, Chats, DB_PATH, emitPhase, emitTool, noteSessionCwd, sessionCwd, sessionFilesOf, toolArgs, toolDiff, toolLabel, toolOutput } from "./shared.ts";
 import { APPROVAL_WAITING_MESSAGE, HARD_STOP_GRACE, LOOP_GUARD_BLOCK_MESSAGE, MAX_TURNS, aborting, limitHits, runTurns, toolsBlocked, waitForApproval } from "./turn-gate.ts";
@@ -88,8 +89,8 @@ import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { setProjectionDeps, wrapShellTool } from "../tool-projection.ts";
-import type { Extension, PromptSection, ToolExecutionResult, ToolHookCall } from "@earendil-works/pi-durable";
-import { GenerationTask, Harness, LiveDoc, ToolTask, createRegistry, defineExtension, hook } from "@earendil-works/pi-durable";
+import type { AgentState, Extension, PromptSection, ToolExecutionResult, ToolHookCall } from "@earendil-works/pi-durable";
+import { AgentDoc, GenerationTask, Harness, LiveDoc, ToolTask, createRegistry, defineExtension, hook } from "@earendil-works/pi-durable";
 import { mkdirSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { reportDelegationResult, sayInChat, sayInConversation, switchThinkingOnTool } from "./lifecycle-thinking.ts";
@@ -540,25 +541,38 @@ export const LIFECYCLE_SECTIONS: readonly PromptSection[] = [
 			collectInjections([skillsProvider], { conversationId: input.conversationId })
 				.system[0]?.text,
 	},
-	// 低频工具索引（2026-11-16 C 段）：末尾追加，打掉一次缓存是预期；列的是"这一轮还能加载"的
-	// deferred（agent.deferred 已排除已加载的），所以 tool_search 加载后本段自然变短。
-	// 人设页取消勾选的也要剔掉：内核的 deferred 是「延迟 − 已 offer」，被 remove 的延迟工具
-	// 仍留在 deferred 里，光靠 modelTools.remove 管不到这段清单。
-	{
-		key: "tool_index",
-		render: async (input) => {
-			const conversationId = Number(input.conversationId);
-			const chatKind = await chatKindOfSection(input);
-			const disabled = disabledToolsOfConversation(conversationId, chatKind);
-			return collectInjections([toolIndexProvider], {
-				conversationId: input.conversationId,
-				deferred: (input.agent?.deferred ?? [])
-					.filter((tool) => !disabled.has(tool.name))
-					.map((tool) => ({ name: tool.name, description: tool.description })),
-			}).system[0]?.text;
-		},
-	},
+	// 低频工具索引（2026-11-16 C 段）2026-11-25 起不再进 system：它随工具加载变短，
+	// 留在固定前缀里等于每次加载都改前缀。改由 beforeRequest 走尾部消息注入（见下方消息注入）。
 ];
+
+/**
+ * AgentState.tools 的启用过滤（2026-11-25）：未设置 = 全启用；数组 = 白名单；`{ remove }` = 黑名单。
+ * 与内核 `resolveAgent` 的 `filterTools` 同口径，只为在 hook 里还原 `agent.deferred`。
+ */
+function enabledByAgentTools(state: Readonly<AgentState> | undefined): (name: string) => boolean {
+	const tools = state?.tools;
+	if (Array.isArray(tools)) {
+		const allowed = new Set(tools.map(String));
+		return (name) => allowed.has(name);
+	}
+	const removed = new Set((tools?.remove ?? []).map(String));
+	return (name) => !removed.has(name);
+}
+
+/**
+ * 已经 offer 给模型的工具名（2026-11-25）：`modelTools` 为数组 = 恰好这些；对象 = `add − remove`；
+ * 未设置 = 空。延迟候选全是 deferred，非 deferred 的工具不在候选里，这里只需覆盖加载 / 提升的名单。
+ */
+function offeredByAgentModelTools(state: Readonly<AgentState> | undefined): Set<string> {
+	const modelTools = state?.modelTools;
+	if (Array.isArray(modelTools)) return new Set(modelTools.map(String));
+	const removed = new Set((modelTools?.remove ?? []).map(String));
+	const offered = new Set<string>();
+	for (const name of modelTools?.add ?? []) {
+		if (!removed.has(String(name))) offered.add(String(name));
+	}
+	return offered;
+}
 
 async function openHarness(): Promise<Harness> {
 	const config = readLlmConfig();
@@ -692,6 +706,12 @@ async function openHarness(): Promise<Harness> {
 	// 低频工具索引（C 段）：只在清单内工具上补 deferred，浅拷贝、不改原对象、不动注册顺序。
 	// tool_search 是 createTools 末尾追加的，名字不在清单里，原样通过。
 	const lifediaryTools = markDeferred(raw);
+	// 低频工具索引（2026-11-25 移出 system）：beforeRequest 用的延迟候选。
+	// hook API 拿不到 resolved `agent.deferred`，这里用注册期属性（markDeferred 打上的 deferred）
+	// 与 AgentDoc 的 tools / modelTools 现算同一份口径；名单为空时就是空数组、索引段不出现。
+	const deferredCandidates = [...(CodingTools.tools ?? []), ...lifediaryTools].filter(
+		(tool) => tool.deferred === true && (tool.callers === undefined || tool.callers.includes("model")),
+	);
 	// 会话归属项目（2026-11-15 项目记忆方案）：给 project-scope 注入快照源（零依赖小模块，
 	// assist/lifecycle-harness 都不反向 carry 它——环与测试加载面的坑见该文件头注释）。
 	// getHarness() 惰性取：接线时 harness 还没 open，真正调用时已就绪。
@@ -1218,7 +1238,14 @@ async function openHarness(): Promise<Harness> {
 				// 每次请求前：注入记忆 + 数这是本轮的第几个工具回合
 				hook(GenerationTask, {
 					beforeRequest: async (request, api, ctx) => {
-						const lastUser = [...request.messages].reverse().find((m) => m.role === "user");
+						// 历史 assistant 的 thinking 默认不回放（2026-11-25 上下文瘦身）：
+						// 适配层会把 thinking block 原样发成上游 `reasoning_content`，实测最后
+						// 约 29k token 全是重复思考。只改这一次请求的视图，durable entry 不动。
+						// `CHAT_REPLAY_THINKING=true` 回到旧形态。
+						const outgoing = replayThinkingEnabled()
+							? { messages: [...request.messages], changed: false }
+							: stripReplayedThinking(request.messages);
+						const lastUser = [...outgoing.messages].reverse().find((m) => m.role === "user");
 						const userText = lastUser ? contentText(lastUser.content) : "";
 
 						// 一次模型请求 = 一个工具回合。run 一换，预算就重新算。
@@ -1267,16 +1294,35 @@ async function openHarness(): Promise<Harness> {
 						// system 角色会被 OpenAI 兼容层折叠进第一条 system，等于改固定前缀、整段缓存作废。
 						// 尾部追加还能保住本轮已产生的 assistant / tool 历史缓存。
 						const kinds = await api.snapshot(ChatKinds, ctx).catch(() => null);
+						const chatKind: "chief" | "worker" =
+							kinds?.byInternal?.[String(api.conversationId)] === "worker" ? "worker" : "chief";
+						// 低频工具索引（2026-11-25 移出 system）：只列"这一轮还能加载"的 deferred，
+						// 再剔掉人设页取消勾选的（内核 deferred 是「延迟 − 已 offer」，取消勾选仍留在里面）。
+						// hook 拿不到 resolved agent：从 AgentDoc 的 tools / modelTools 还原"已启用、未 offer"，
+						// 口径与内核 resolveAgent 的 deferred 一致。读失败按空数组：少一段索引，不影响对话。
+						let deferred: Array<{ name: string; description: string }> = [];
+						try {
+							const state = await api.snapshot(AgentDoc, api.conversationId, ctx);
+							const enabled = enabledByAgentTools(state);
+							const offered = offeredByAgentModelTools(state);
+							const disabled = disabledToolsOfConversation(Number(api.conversationId), chatKind);
+							deferred = deferredCandidates
+								.filter(
+									(tool) =>
+										enabled(tool.name) && !offered.has(tool.name) && !disabled.has(tool.name),
+								)
+								.map((tool) => ({ name: tool.name, description: tool.description }));
+						} catch {
+							deferred = [];
+						}
 						const injectionCtx = {
 							conversationId: api.conversationId,
 							turn: used,
 							userText,
 							partnerId: partnerOfSession(api.conversationId),
-							chatKind:
-								kinds?.byInternal?.[String(api.conversationId)] === "worker"
-									? "worker"
-									: "chief",
+							chatKind,
 							group: groupOfSession(api.conversationId),
+							deferred,
 						} as const;
 						const bankExternal = isExternalBankActive();
 						const collected = collectInjections(
@@ -1322,7 +1368,9 @@ async function openHarness(): Promise<Harness> {
 								collected.message.map((item) => ({ id: item.id, text: item.text })),
 							);
 						}
-						if (collected.message.length === 0) return undefined;
+						if (collected.message.length === 0) {
+							return outgoing.changed ? { messages: outgoing.messages } : undefined;
+						}
 						// 动态注入恒走尾部 user（PROMPT_TAIL_INJECTION 回滚开关 2026-11-21 退役；
 						// 旧 system 前缀形态会整段作废缓存，已删）。
 						const injected = [
@@ -1331,7 +1379,7 @@ async function openHarness(): Promise<Harness> {
 						].join("\n");
 						return {
 							messages: [
-								...request.messages,
+								...outgoing.messages,
 								{
 									role: "user" as const,
 									content: injected,

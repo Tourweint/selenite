@@ -331,14 +331,19 @@ export const skillsProvider: InjectionProvider = (ctx) => {
 };
 
 /**
- * 低频工具索引（2026-11-16 C 段）：只列当前会话还能加载的 deferred（render 从 agent.deferred 取来）。
- * 一个都没有 → 整段省略（不造空段）。末尾追加，位置由 lifecycle sections 数组决定。
- *（AGENT_TOOL_INDEX 回滚开关 2026-11-21 退役，恒渲染。）
+ * 低频工具索引（2026-11-16 C 段；2026-11-25 移出 system）。
+ *
+ * 只列当前会话还能加载的 deferred（装配处从 agent.deferred 取来）。
+ * 一个都没有 → 整段省略（不造空段）。
+ *
+ * **2026-11-25 起走消息尾部**：加载工具会让这段变短，但工具面本身也变了；
+ * 留在 system 里等于每加载一次就改固定前缀。移到尾部后它只影响本轮追加。
+ *（AGENT_TOOL_INDEX 回滚开关 2026-11-21 退役，名单非空时恒渲染。）
  */
 export const toolIndexProvider: InjectionProvider = (ctx) => {
 	const text = toolIndexText(ctx.deferred ?? []);
 	if (!text) return undefined;
-	return entry("tool_index", text, INJECTION_ORDER.tool_index, "system");
+	return entry("tool_index", text, INJECTION_ORDER.tool_index, "message", "turn");
 };
 
 /**
@@ -370,7 +375,6 @@ export const LIFECYCLE_SECTION_PROVIDERS: readonly InjectionProvider[] = [
 	currentProjectProvider,
 	externalBankCatalogProvider,
 	skillsProvider,
-	toolIndexProvider,
 ];
 
 // ── D 期：5 处 extra.push（channel: "message"）────────────────
@@ -513,6 +517,8 @@ export async function personaRecallLightTextFor(
  */
 export const LIFECYCLE_MESSAGE_PROVIDERS: readonly InjectionProvider[] = [
 	currentProjectLiveProvider,
+	// 低频工具索引（2026-11-25）：order 70，排在消息注入之前、project_index 之前。
+	toolIndexProvider,
 	projectIndexProvider,
 	memoryRecallProvider,
 	skillSlashProvider,

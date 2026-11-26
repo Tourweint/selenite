@@ -39,8 +39,7 @@ import {
   contextInspectPayloadOf,
   type ContextInspectPayload,
 } from "./context-inspect.ts";
-import { modelToolCatalog, partnerToolsEnabled } from "./partner-tools.ts";
-import { toolIndexText } from "./tool-index.ts";
+import { partnerToolsEnabled } from "./partner-tools.ts";
 import { buildTaskProfileSections } from "./pool/task-profile.ts";
 import { poolToolCatalog } from "./pool/pool-tools.ts";
 import { workerToolsPayload } from "./worker-tools.ts";
@@ -155,8 +154,6 @@ export const DEFAULT_SECTION_KEYS = [
   "current_project",
   // 2026-11-16 多 CLI：当前派活执行器（新单派给谁 / 模型 / 权限）。
   "delegate_executor",
-  // 2026-11-16 C 段：低频工具索引段，排在末尾（缓存前缀变化一次）。
-  "tool_index",
 ] as const;
 
 /**
@@ -308,17 +305,8 @@ function buildDefaultSections(
   // 当前派活执行器（2026-11-16）：与 live 系统提示同一行；默认开销页也要能看见。
   pushSection(sections, "delegate_executor", CHANCELLOR_ENABLED ? executorLine() : null);
 
-  // 低频工具索引（C 段）：算进默认基线，让默认开销页看到"新会话初始会读到什么"。
-  // 工具面本身仍不含 deferred（defaultTools 过滤），这里只是把索引段的字节数记进来。
-  // chief / partner 工具面本来就一样，只有 disabledTools 勾选差异。
-  //（AGENT_TOOL_INDEX 回滚开关 2026-11-21 退役，索引段恒渲染——名单空则整段省略。）
-  {
-    const deferred = modelToolCatalog()
-      .filter((tool) => tool.deferred === true && !disabled.has(tool.name))
-      .map((tool) => ({ name: tool.name, description: tool.description }));
-    pushSection(sections, "tool_index", toolIndexText(deferred));
-  }
-
+  // 低频工具索引（2026-11-16 C 段）2026-11-25 起不在 system：默认名单为空 = 全部常驻，
+  // 索引段只会在显式 opt-in 的按需池里出现，且走请求尾部消息注入——默认开销页不列它。
   const skills = skillStore?.previewIndex?.(skillPartnerOfRole(role)) ?? null;
   pushSection(sections, "skills", skills);
   return sections;

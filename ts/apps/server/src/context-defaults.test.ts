@@ -30,6 +30,8 @@ process.env.AUTONOMY_STATE_PATH = join(root, "autonomy-state.json");
 process.env.AGENT_SKILLS_STATE_PATH = join(root, "skills-state.json");
 process.env.PARTNER_TOOLS_ENABLED = "true";
 process.env.WORKER_TOOLS_PATH = join(root, "worker-tools.json");
+// 2026-11-25 按需池默认空：把池配置也挪到临时目录，断言"默认全部常驻"时不受 .data/tool-pool.json 影响。
+process.env.AGENT_TOOL_POOL_PATH = join(root, "tool-pool.json");
 
 const {
   DEFAULT_SECTION_KEYS,
@@ -52,12 +54,16 @@ after(() => {
  * 默认开销的完整字段清单（2026-11-16）：
  * 不管总管 / 执事 / worker，页面都按同一份清单显示；不适用字段保留 0 字槽位。
  */
-test("完整清单：固定 29 个字段（含 2026-11-16 C 段的 tool_index），缺的补空；已有内容原位保留", () => {
+test("完整清单：固定 28 个字段（2026-11-25 移除 tool_index 段），缺的补空；已有内容原位保留", () => {
 	const sections = completeDefaultSections([
 		{ key: "persona", text: "总管人设" },
 		{ key: "partner_voice", text: "" },
 	]);
-	assert.equal(DEFAULT_SECTION_KEYS.length, 29, "2026-11-20 课题退役：删掉 topics 一段（旧断言 30）");
+	assert.equal(
+		DEFAULT_SECTION_KEYS.length,
+		28,
+		"2026-11-25 按需工具默认常驻：tool_index 改走尾部注入，system 段清单再减一（旧断言 29）",
+	);
 	assert.deepEqual(
 		sections.map((section) => section.key),
 		[...DEFAULT_SECTION_KEYS],
@@ -118,22 +124,19 @@ test("工具面按 role 的 disabledTools 过滤：partner / chief 少一项", a
 	store.setDisabledTools(CHIEF_PARTNER_ID, []);
 });
 
-test("默认页含 tool_index 段，但 tools 不含 deferred 工具（2026-11-16 C 段）", async () => {
+test("默认全部常驻：没有 tool_index 段、没有 tool_search，旧按需工具都在初始工具面（2026-11-25）", async () => {
 	const payload = await contextDefaultPayload("chief");
 	assert.ok(payload, "总管默认页可读");
-	const section = payload!.system.sections.find((item) => item.key === "tool_index");
-	assert.ok(section, "默认页出现 tool_index 段");
-	assert.match(section!.text, /^<tool_index>/);
-	assert.match(section!.text, /按需工具（初始不加载）/);
+	assert.ok(
+		!payload!.system.sections.some((item) => item.key === "tool_index"),
+		"system 段里不再有 tool_index（改走尾部消息注入）",
+	);
 
 	const names = payload!.tools.items.map((item) => item.name);
-	for (const deferred of [
-		"routine_manage",
-		"partner_manage",
-		"group_manage",
-		"send_to_agent",
-	]) {
-		assert.ok(!names.includes(deferred), `${deferred} 不在初始默认工具面`);
+	assert.ok(!names.includes("tool_search"), "没有按需工具就不注册 tool_search");
+	// 旧默认按需池里的四件在本装配环境里一定注册，默认全常驻后应直接出现在初始工具面。
+	for (const resident of ["routine_manage", "partner_manage", "group_manage", "send_to_agent"]) {
+		assert.ok(names.includes(resident), `${resident} 默认常驻，应在初始工具面`);
 	}
 });
 

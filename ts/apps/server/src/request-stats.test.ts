@@ -7,7 +7,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ContextView, Conversation, EntryRecord } from "@earendil-works/pi-durable";
+import type { ContextView, Conversation, EntryId, EntryRecord } from "@earendil-works/pi-durable";
 import {
 	CACHE_STATS_MAX_REQUESTS,
 	recentRequestsOf,
@@ -85,6 +85,129 @@ function systemToolsEntry(
 		kind: "pi.system",
 		model: [{ role: "system", content: "", toolsAdded: tools, timestamp: 0 }],
 	} as unknown as EntryRecord;
+}
+
+const MISSING_RESULT_TEXT = "Tool result unavailable: history ends before this call completed.";
+
+function assistantToolCallEntry(
+	id: number,
+	usage: { input: number; output: number; cacheRead: number },
+	at: number,
+): EntryRecord {
+	return {
+		id,
+		conversationId: 1,
+		kind: "pi.assistant",
+		model: [
+			{
+				role: "assistant",
+				content: [{ type: "toolCall", id: `call-${id}`, name: "recall", arguments: {} }],
+				usage: { ...usage, cacheWrite: 0 },
+				stopReason: "toolUse",
+				model: "auto/test-model",
+				provider: "auto",
+				timestamp: at,
+			},
+		],
+	} as unknown as EntryRecord;
+}
+
+function toolResultForCall(id: number, toolCallId: string): EntryRecord {
+	return {
+		id,
+		conversationId: 1,
+		kind: "pi.tool-result",
+		model: [
+			{
+				role: "toolResult",
+				toolCallId,
+				toolName: "recall",
+				content: [{ type: "text", text: "ok" }],
+				timestamp: 0,
+			},
+		],
+	} as unknown as EntryRecord;
+}
+
+/**
+ * 模拟内核 `orderToolResults`：assistant 的每个 toolCall 若在可见范围内没有匹配的
+ * toolResult，就补一条 isError 占位（与 pi-durable 同一句文案）。这是"旧口径"产生
+ * replaced 假阳性的根源——`context({at: 上一条请求})` 会把占位算进前缀。
+ */
+function toolCallChainConversation(entries: EntryRecord[]): Conversation {
+	const sorted = [...entries].sort((a, b) => a.id - b.id);
+	const viewAt = (at: number): ContextView => {
+		const visible = sorted.filter((entry) => entry.id <= at);
+		const messages: Array<Record<string, unknown>> = [];
+		for (let index = 0; index < visible.length; index += 1) {
+			const message = visible[index].model?.[0] as Record<string, unknown> | undefined;
+			if (!message) continue;
+			if (message.role === "toolResult") continue; // 工具结果由 assistant 后按调用顺序插回
+			messages.push(message);
+			if (message.role !== "assistant") continue;
+			const calls = (
+				(message.content as Array<{ type: string; id: string; name?: string }> | undefined) ?? []
+			).filter((block) => block.type === "toolCall");
+			if (calls.length === 0) continue;
+			const results = new Map<string, Record<string, unknown>>();
+			for (let next = index + 1; next < visible.length; next += 1) {
+				const candidate = visible[next].model?.[0] as Record<string, unknown> | undefined;
+				if (candidate?.role === "assistant") break;
+				if (
+					candidate?.role === "toolResult" &&
+					typeof candidate.toolCallId === "string" &&
+					!results.has(candidate.toolCallId)
+				) {
+					results.set(candidate.toolCallId, candidate);
+				}
+			}
+			for (const call of calls) {
+				messages.push(
+					results.get(call.id) ?? {
+						role: "toolResult",
+						toolCallId: call.id,
+						toolName: call.name ?? "tool",
+						content: [{ type: "text", text: MISSING_RESULT_TEXT }],
+						isError: true,
+						details: { reason: "missing_result" },
+						timestamp: message.timestamp,
+					},
+				);
+			}
+		}
+		return { head: undefined, entries: visible, contributions: [], messages } as unknown as ContextView;
+	};
+	return {
+		entries: async (
+			query: { maxEntryId?: number; minEntryId?: number; order?: "ascending" | "descending" },
+			limit: number,
+		) => {
+			let rows = sorted.filter(
+				(entry) =>
+					(query.minEntryId === undefined || entry.id >= query.minEntryId) &&
+					(query.maxEntryId === undefined || entry.id <= query.maxEntryId),
+			);
+			if ((query.order ?? "descending") === "descending") rows = rows.reverse();
+			return { items: rows.slice(0, limit) };
+		},
+		context: async (_context: unknown, options?: { at?: number }) =>
+			viewAt(options?.at ?? Number.MAX_SAFE_INTEGER),
+	} as unknown as Conversation;
+}
+
+/** 复刻生产 messageDiffOf 的逐条前缀算法，用来在测试里证明"旧口径"确实会误报。 */
+function promptDiffOf(previous: ContextView, current: ContextView): {
+	shared: number;
+	replaced: number;
+	appended: number;
+} {
+	const fingerprints = (view: ContextView): string[] =>
+		view.messages.filter((message) => message.role !== "system").map((message) => JSON.stringify(message));
+	const before = fingerprints(previous);
+	const after = fingerprints(current);
+	let shared = 0;
+	while (shared < Math.min(before.length, after.length) && before[shared] === after[shared]) shared += 1;
+	return { shared, replaced: before.length - shared, appended: after.length - shared };
 }
 
 function fakeConversation(entries: EntryRecord[]): Conversation {
@@ -311,8 +434,10 @@ test("详情对比（消息层）：两条请求之间只是追加 → replaced 
 	assert.ok(detail?.compare);
 	assert.equal(detail.compare.systemChanged, false);
 	assert.equal(detail.compare.toolsChanged, false);
-	// 上一条的非 system 消息 = [用户, 助手回复]；这一条 = 那 2 条 + 新用户 + 新回复。
-	assert.deepEqual(detail.compare.messages, { shared: 2, replaced: 0, appended: 2 });
+	// 2026-11-25 口径：对比两条请求各自发出前的 prompt。
+	// 上一条 prompt = [用户]；这一条 prompt = [用户, 上一条回答, 新用户]。
+	// 上一条请求自己的回答不在它的 prompt 里，所以只算这一条追加的 2 条。
+	assert.deepEqual(detail.compare.messages, { shared: 1, replaced: 0, appended: 2 });
 });
 
 test("详情对比（消息层）：压缩重写正文 → replaced > 0（前缀必然断）", async () => {
@@ -360,8 +485,8 @@ test("详情对比（消息层）：压缩重写正文 → replaced > 0（前缀
 	} as unknown as Conversation;
 	const detail = await requestContextOf(conversation, CTX, "chat-1", 7);
 	assert.ok(detail?.compare);
-	// 上一条（压缩前）正文 = [用户, 助手回复]；这一条（压缩后）= [用户「压缩后」, 助手回复]。
-	assert.deepEqual(detail.compare.messages, { shared: 0, replaced: 2, appended: 2 });
+	// 压缩前 prompt = [用户]；压缩后 prompt = [用户「压缩后」]：旧前缀被换掉。
+	assert.deepEqual(detail.compare.messages, { shared: 0, replaced: 1, appended: 1 });
 });
 
 test("详情对比（消息层）：正文被改写 → replaced > 0（前缀在改写处断掉）", async () => {
@@ -409,6 +534,33 @@ test("详情对比（消息层）：正文被改写 → replaced > 0（前缀在
 	} as unknown as Conversation;
 	const detail = await requestContextOf(conversation, CTX, "chat-1", 5);
 	assert.ok(detail?.compare);
-	// 旧文「第一轮」换成「第一轮（已改）」：第一条就对不上，旧 2 条被换掉、这一条 4 条全是新的。
-	assert.deepEqual(detail.compare.messages, { shared: 0, replaced: 2, appended: 4 });
+	// 旧 prompt = [旧「第一轮」]；新 prompt = [新「第一轮（已改）」, 助手回复, 新用户]。
+	// 第一条就对不上：旧 1 条被换掉，新的 3 条都算追加。
+	assert.deepEqual(detail.compare.messages, { shared: 0, replaced: 1, appended: 3 });
+});
+
+test("详情对比（消息层）：工具调用 → 下一请求带结果，只算追加（2026-11-25 修 replaced 假阳性）", async () => {
+	const conversation = toolCallChainConversation([
+		systemEntry(1, { persona: "人设 A" }),
+		userEntry(2, "第一轮"),
+		assistantToolCallEntry(3, { input: 10, output: 5, cacheRead: 90 }, 1000),
+		toolResultForCall(4, "call-3"),
+		assistantEntry(5, { input: 100, output: 5, cacheRead: 0 }, 2000),
+	]);
+
+	// 旧口径（直接对比两条请求 entry 自己的 context 视图）：上一条请求后的
+	// 「未完成工具调用占位」被真实工具结果替换，replaced 假阳性。
+	const previousView = await conversation.context(CTX, { at: 3 as EntryId });
+	const currentView = await conversation.context(CTX, { at: 5 as EntryId });
+	assert.deepEqual(
+		promptDiffOf(previousView, currentView),
+		{ shared: 2, replaced: 1, appended: 2 },
+		"旧口径把占位算进前缀，工具结果一来就误报 replaced",
+	);
+
+	// 新口径：对比两条请求各自发出去之前的 prompt；上一条的回答与占位都不算前缀。
+	// 上一条 prompt = [用户]；这一条 prompt = [用户, 工具调用, 工具结果]。
+	const detail = await requestContextOf(conversation, CTX, "chat-1", 5);
+	assert.ok(detail?.compare);
+	assert.deepEqual(detail.compare.messages, { shared: 1, replaced: 0, appended: 2 });
 });

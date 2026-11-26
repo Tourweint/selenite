@@ -55,6 +55,8 @@ const {
 } = await import("./injection.ts");
 const { INJECTION_REGISTRY } = await import("./injection-registry.ts");
 const {
+	LIFECYCLE_MESSAGE_PROVIDERS,
+	LIFECYCLE_SECTION_PROVIDERS,
 	clarifyContractProvider,
 	currentProjectLiveProvider,
 	currentProjectProvider,
@@ -224,14 +226,32 @@ test("B: skills —— 普通助手（chatKind=worker）走独立命名空间，
 	assert.doesNotMatch(chief ?? "", /worker-skill/, "别的角色索引不吃 worker 的独开");
 });
 
-test("B: tool_index —— 无可加载 deferred 整段省略；有列表含名字与提示（开关 2026-11-21 退役恒渲染）", () => {
-	assert.equal(toolIndexProvider({ ...BASE, deferred: [] }), undefined, "空列表不造空段");
-	const text = sysText(toolIndexProvider, {
+test("B: tool_index —— 无可加载 deferred 整段省略；有列表走消息尾部注入（2026-11-25 移出 system）", () => {
+	assert.deepEqual(
+		collect(toolIndexProvider, { deferred: [] }),
+		{ system: [], message: [] },
+		"空列表不造空段",
+	);
+	const out = collect(toolIndexProvider, {
 		deferred: [{ name: "routine_manage", description: "自建常驻自主轮。" }],
 	});
-	assert.match(text ?? "", /^按需工具（初始不加载）：/);
-	assert.match(text ?? "", /- routine_manage：自建常驻自主轮/);
-	assert.match(text ?? "", /tool_search\(\{name\}\)/);
+	assert.deepEqual(out.system, [], "不再进 system 前缀");
+	const item = out.message[0];
+	assert.ok(item);
+	assert.equal(item?.id, "tool_index");
+	assert.equal(item?.channel, "message");
+	assert.equal(item?.scope, "turn");
+	assert.match(item?.text ?? "", /^按需工具（初始不加载）：/);
+	assert.match(item?.text ?? "", /- routine_manage：自建常驻自主轮/);
+	assert.match(item?.text ?? "", /tool_search\(\{name\}\)/);
+});
+
+test("tool_index 登记在消息注入表、不在 system 段表（2026-11-25）", () => {
+	assert.ok(LIFECYCLE_MESSAGE_PROVIDERS.includes(toolIndexProvider), "消息注入表含 tool_index");
+	assert.ok(
+		!LIFECYCLE_SECTION_PROVIDERS.includes(toolIndexProvider),
+		"system 段表不含 tool_index（留在 system 会因加载工具而改前缀）",
+	);
 });
 
 test("B: section 顺序快照（位置 = 数组下标，改序打掉提示词缓存）", () => {
@@ -250,7 +270,7 @@ test("B: section 顺序快照（位置 = 数组下标，改序打掉提示词缓
 			// 2026-11-16：派活执行器知情段（新单派给谁 / 模型 / 权限）。
 			"delegate_executor",
 			"skills",
-			"tool_index",
+			// 2026-11-25：tool_index 移出 system（改走尾部消息注入），system 段清单少一段。
 		],
 	);
 });

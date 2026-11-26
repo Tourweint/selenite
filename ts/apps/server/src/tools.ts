@@ -131,7 +131,7 @@ import type { SkillStore } from "./skills.ts";
 import type { SkillAdviceSaveResult } from "./skill-advice.ts";
 import { SAVE_REMINDER_ADVICE_DESCRIPTION, type ReminderAdviceSaveResult } from "./reminder-advice.ts";
 // 搜索工具（2026-11-07 建；2026-11-20 与课题开关解耦）：从 deps 注入，测试可替换、缺失不注册。
-import type { SearchModule } from "./search.ts";
+import type { SearchHit, SearchModule } from "./search.ts";
 // 会话考古（2026-11-09 T4 §4）：检索实现留在 agent/session-search.ts（只依赖 shared），
 // 这里只收注入函数，避免 tools.ts 反向 import session.ts 绕成环。
 import type { SessionSearchHit } from "./agent/session-search.ts";
@@ -596,6 +596,23 @@ export function renderExternalBankAsk(result: PersonaRecallResult): string {
 		out += `\n\n记忆库在这些时段没有记录：${[...new Set(gaps)].join("、")}`;
 	}
 	return out;
+}
+
+/**
+ * `web_search` 结果总量上限（2026-11-25 上下文瘦身）：按 `hits` 序列化后的字符数算。
+ *
+ * 实测单次搜索 39,349 字符、`message` 又把命中抄一遍（19,484）——两处都在烧上下文。
+ * 这里只裁条数：超上限时从排名最后的命中开始丢，至少保留 1 条；每条 title / url / summary
+ * 的结构与内容都不动。32K 是「宁大勿小」的估算（CJK 最多 1 token/字）。
+ */
+export const WEB_SEARCH_MAX_RESULT_CHARS = 32_000;
+
+export function shapeWebSearchHits(hits: readonly SearchHit[]): SearchHit[] {
+	const kept = [...hits];
+	while (kept.length > 1 && JSON.stringify(kept).length > WEB_SEARCH_MAX_RESULT_CHARS) {
+		kept.pop();
+	}
+	return kept;
 }
 
 export function createTools(deps: ToolDeps) {
@@ -2360,15 +2377,10 @@ export function createTools(deps: ToolDeps) {
 					if (result.hits.length === 0) {
 						return textToolResult(ok({ count: 0, message: "没有找到相关结果。" }));
 					}
-					return textToolResult(
-						ok({
-							count: result.hits.length,
-							hits: result.hits,
-							message: result.hits
-								.map((hit) => `${hit.title || "（无标题）"} — ${hit.url}\n${hit.summary}`)
-								.join("\n\n"),
-						}),
-					);
+					// 正常命中只回结构化的 hits（2026-11-25 起不再拼重复的 message）；
+					// count 取裁剪后的条数，与 hits.length 始终一致。
+					const hits = shapeWebSearchHits(result.hits);
+					return textToolResult(ok({ count: hits.length, hits }));
 				},
 			}),
 		);

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { MemoryScope } from "@lifediary/memory";
@@ -115,6 +116,13 @@ process.env.AGENT_POLICY_PATH = fileURLToPath(
 );
 process.env.AGENT_BLOCKED_TOOLS = "ghost_blocked";
 process.env.LLM_PROVIDER = "faux";
+// 2026-11-25：按需池默认空 → tool_search 不注册；本测试的"注册全集"要覆盖它，
+// 用临时 tool-pool.json 显式开启一个按需工具（不碰真实 .data/）。
+const poolRoot = mkdtempSync(join(tmpdir(), "lifediary-arch-guard-"));
+const poolPath = join(poolRoot, "tool-pool.json");
+writeFileSync(poolPath, JSON.stringify({ deferred: ["routine_manage"] }), "utf8");
+process.env.AGENT_TOOL_POOL_PATH = poolPath;
+test.after(() => rmSync(poolRoot, { recursive: true, force: true }));
 // tools.ts 的静态模块图经 task-conversation → … → agent.ts 可达 agent/policy.ts；
 // 静态 import 会在上面设 env 之前就把 policy 读成 full（2026-11-20 变更记录已登记）。
 // 这里改成设完 env 再动态加载，只读闸门断言才真的验的是 read-only。

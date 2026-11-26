@@ -52,8 +52,9 @@ export interface InjectionContext {
 	 */
 	dryRun?: boolean;
 	/**
-	 * 当前会话可加载的 deferred 工具（agent.deferred：已启用、还没被 tool_search 加载），
-	 * 由 tool_index section 的 render 从 `input.agent.deferred` 现取后放进 ctx，provider 只拼文本。
+	 * 当前会话可加载的 deferred 工具（已启用、还没被 tool_search 加载）。
+	 * 2026-11-25：GenerationTask 的 HookApi 没有 tool 运行时的 `agent()`，由 beforeRequest
+	 * 从 AgentDoc 快照（tools / modelTools）现算后放进 ctx，provider 只拼文本。
 	 */
 	deferred?: readonly { name: string; description: string }[];
 }
@@ -91,7 +92,7 @@ export const INJECTION_ORDER = {
 	// 当前项目 / 相对路径基准的动态一半（2026-11-19 前缀锁定）：走消息尾部，不进 system。
 	current_project_live: 45,
 	skills: 50,
-	// 低频工具索引（C 段）：排在消息注入之前；末尾追加，缓存前缀变化一次。
+	// 低频工具索引（C 段；2026-11-25 移出 system）：排在其它消息注入之前，随本轮尾部追加。
 	tool_index: 70,
 	// C/D 期：lifecycle beforeRequest 的 5 处消息注入（顺序 = 改造前 push 顺序）
 	// project_index（2026-11-15 项目记忆多挂载）：新净增类，排在记忆召回之前——

@@ -31,31 +31,33 @@ function tool(name: string): ToolRegistration {
 	} as unknown as ToolRegistration;
 }
 
-test("DEFERRED_TOOL_NAMES：固定名单（批4 起 9 个：+save_reminder_advice）", () => {
-	assert.deepEqual([...DEFERRED_TOOL_NAMES].sort(), [
-		"group_manage",
-		"partner_manage",
-		"partner_skill_write",
-		"propose_project",
-		// 2026-11-19 批2 决策上报链：只在唤醒轮用得上，默认按需。
-		"respond_escalation",
-		"routine_manage",
-		// 2026-11-19 批4 提醒沉淀：只有入口发起蒸馏那轮用得上，默认按需。
-		"save_reminder_advice",
-		"save_skill_advice",
-		"send_to_agent",
-	]);
+test("DEFERRED_TOOL_NAMES：2026-11-25 起代码默认为空 = 全部常驻", () => {
+	assert.deepEqual([...DEFERRED_TOOL_NAMES], []);
 });
 
-test("isDeferredTool：名单内才为真（文件缺失 = 代码默认；开关 2026-11-21 退役恒开）", () => {
-	assert.equal(isDeferredTool("routine_manage", missing), true);
-	assert.equal(isDeferredTool("send_to_agent", missing), true);
+test("isDeferredTool：默认全常驻；显式按需池才为真", () => {
+	assert.equal(isDeferredTool("routine_manage", missing), false);
+	assert.equal(isDeferredTool("send_to_agent", missing), false);
 	assert.equal(isDeferredTool("read", missing), false);
+
+	const optIn = join(root, "opt-in.json");
+	writeFileSync(optIn, JSON.stringify({ deferred: ["routine_manage", "send_to_agent"] }), "utf8");
+	const env = { AGENT_TOOL_POOL_PATH: optIn } as NodeJS.ProcessEnv;
+	assert.equal(isDeferredTool("routine_manage", env), true);
+	assert.equal(isDeferredTool("send_to_agent", env), true);
+	assert.equal(isDeferredTool("read", env), false);
 });
 
-test("markDeferred：只给名单内工具加属性、不改原对象、保持顺序", () => {
+test("markDeferred：默认名单为空 → 全部原样；显式按需池才浅拷贝加属性", () => {
 	const tools = [tool("read"), tool("routine_manage"), tool("write"), tool("send_to_agent")];
-	const marked = markDeferred(tools, missing);
+	const untouched = markDeferred(tools, missing);
+	assert.equal(untouched.every((item) => item.deferred === undefined), true, "默认全常驻");
+	assert.equal(untouched[1], tools[1], "不产生浅拷贝");
+
+	const optIn = join(root, "opt-in-mark.json");
+	writeFileSync(optIn, JSON.stringify({ deferred: ["routine_manage", "send_to_agent"] }), "utf8");
+	const env = { AGENT_TOOL_POOL_PATH: optIn } as NodeJS.ProcessEnv;
+	const marked = markDeferred(tools, env);
 	assert.deepEqual(
 		marked.map((item) => item.name),
 		["read", "routine_manage", "write", "send_to_agent"],
@@ -69,14 +71,14 @@ test("markDeferred：只给名单内工具加属性、不改原对象、保持�
 	assert.equal(tools[3]?.deferred, undefined);
 });
 
-test("markDeferred：配置文件覆盖默认名单（2026-11-17 全局工具池）", () => {
+test("markDeferred：配置文件显式覆盖按需名单（2026-11-17 全局工具池）", () => {
 	const custom = join(root, "custom.json");
 	writeFileSync(custom, JSON.stringify({ deferred: ["read", "web_search"] }), "utf8");
 	const env = { AGENT_TOOL_POOL_PATH: custom } as NodeJS.ProcessEnv;
 	const tools = [tool("read"), tool("routine_manage"), tool("web_search")];
 	const marked = markDeferred(tools, env);
 	assert.equal(marked[0]?.deferred, true, "配置里的 read 变成按需");
-	assert.equal(marked[1]?.deferred, undefined, "默认名单里的 routine_manage 不再按需");
+	assert.equal(marked[1]?.deferred, undefined, "没在配置里的 routine_manage 常驻");
 	assert.equal(marked[2]?.deferred, true);
 
 	const empty = join(root, "empty.json");
